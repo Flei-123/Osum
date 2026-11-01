@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import opkpfad  # noqa: E402  -- A-025
-OPK = opkpfad.pfad()
+OPK = opkpfad.path_2()
 
 
 def load_opk():
@@ -66,10 +66,10 @@ def main():
     m = load_opk()
     sk = open(sys.argv[1], "rb").read()
     pk = m.ed25519_public(sk)
-    for pfad in sys.argv[2:]:
-        roh = open(pfad, "rb").read()
+    for path_2 in sys.argv[2:]:
+        roh = open(path_2, "rb").read()
         sig = m.ed25519_sign(sk, roh)
-        with open(pfad + ".sig", "wb") as f:
+        with open(path_2 + ".sig", "wb") as f:
             f.write(sig)
         own = m.ed25519_verify(pk, roh, sig)
         changed = foreign(pk, roh, sig)
@@ -77,7 +77,7 @@ def main():
             raise SystemExit("signpak: die eigene Signatur wird nicht "
                              "anerkannt (eigen=%s fremd=%s)" % (own, changed))
         print("   signiert  %-40s %d Oktette, %s..."
-              % (os.path.basename(pfad), len(roh), sig.hex()[:16]))
+              % (os.path.basename(path_2), len(roh), sig.hex()[:16]))
     return 0
 
 

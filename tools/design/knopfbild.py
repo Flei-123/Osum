@@ -7,19 +7,19 @@ D = 10 * SK
 ZOOM = 20
 
 
-def png(pfad, w, h, px):
+def png(path_2, w, h, px):
     raw = b''.join(b'\x00' + bytes(px[y * w * 3:(y + 1) * w * 3])
                    for y in range(h))
     def chunk(t, d):
         c = struct.pack('>I', len(d)) + t + d
         return c + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
-    open(pfad, 'wb').write(
+    open(path_2, 'wb').write(
         b'\x89PNG\r\n\x1a\n'
         + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
         + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
 
-def leer(n):
+def empty_3(n):
     return [0] * (n * n * 3)
 
 
@@ -79,11 +79,11 @@ def deckung_vektor():
     return f
 
 
-def paint(pfad, felder, titel):
+def paint(path_2, felder, title_2):
     n = len(felder)
-    breite = n * (D + 2) * ZOOM
+    width_2 = n * (D + 2) * ZOOM
     height_2 = (D + 2) * ZOOM
-    px = [255] * (breite * height_2 * 3)
+    px = [255] * (width_2 * height_2 * 3)
     for fi, f in enumerate(felder):
         ox = fi * (D + 2) * ZOOM + ZOOM
         for y in range(D):
@@ -103,10 +103,10 @@ def paint(pfad, felder, titel):
                             rr, gg, bb = r, g, b
                         X = ox + x * ZOOM + dx
                         Y = ZOOM + y * ZOOM + dy
-                        i = (Y * breite + X) * 3
+                        i = (Y * width_2 + X) * 3
                         px[i], px[i + 1], px[i + 2] = rr, gg, bb
-    png(pfad, breite, height_2, px)
-    print("  %-46s %s" % (titel, pfad))
+    png(path_2, width_2, height_2, px)
+    print("  %-46s %s" % (title_2, path_2))
 
 
 if __name__ == '__main__':

@@ -28,7 +28,7 @@ import re
 import sys
 
 
-def lies(p):
+def read_2(p):
     with open(p, "rb") as f:
         return f.read().decode("latin1")
 
@@ -41,7 +41,7 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    txt = lies(sys.argv[1])
+    txt = read_2(sys.argv[1])
     error = 0
 
     print("== THE GROOVE AS THE CONTROL CENTER REPORTS IT ==")

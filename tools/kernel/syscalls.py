@@ -6,13 +6,13 @@ import subprocess
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(os.path.dirname(HIER))
+ROOT = os.path.dirname(os.path.dirname(HIER))
 
 def _finde(name):
-    for stamm, verz, names_2 in os.walk(os.path.join(WURZEL, "kernel")):
+    for stamm, verz, names_2 in os.walk(os.path.join(ROOT, "kernel")):
         verz[:] = [d for d in verz if d not in ("user", "app")]
         if name in names_2:
-            return os.path.relpath(os.path.join(stamm, name), WURZEL)
+            return os.path.relpath(os.path.join(stamm, name), ROOT)
     return os.path.join("kernel", name)
 
 
@@ -29,13 +29,13 @@ MUSTER = re.compile(
     re.M)
 
 
-def lies(pfad):
-    with open(pfad, "rb") as f:
+def lies(path_2):
+    with open(path_2, "rb") as f:
         roh = f.read().decode("latin1")
     aus = {}
     for m in MUSTER.finditer(roh):
-        zeile = roh.count("\n", 0, m.start()) + 1
-        aus[m.group(1)] = (int(m.group(2)), zeile)
+        line = roh.count("\n", 0, m.start()) + 1
+        aus[m.group(1)] = (int(m.group(2)), line)
     return aus
 
 
@@ -43,10 +43,10 @@ def without_exceptions(tab):
     return {n: v for n, v in tab.items() if n not in NO_NUMBER}
 
 
-def check_2(wurzel):
+def check_2(root):
     error = []
-    kp = os.path.join(wurzel, KERN)
-    lp = os.path.join(wurzel, LIBC)
+    kp = os.path.join(root, KERN)
+    lp = os.path.join(root, LIBC)
     for p in (kp, lp):
         if not os.path.exists(p):
             error.append("Datei fehlt: %s" % p)
@@ -55,7 +55,7 @@ def check_2(wurzel):
     kern = lies(kp)
     libc = lies(lp)
 
-    for name, tab, datei in (("kernel", kern, KERN), ("libc", libc, LIBC)):
+    for name, tab, file_2 in (("kernel", kern, KERN), ("libc", libc, LIBC)):
         echt = without_exceptions(tab)
         nach_num = {}
         for n, (v, z) in echt.items():
@@ -65,7 +65,7 @@ def check_2(wurzel):
             if len(wer) > 1:
                 error.append(
                     "%s: die Nummer %d ist %d mal vergeben -- %s"
-                    % (datei, v, len(wer),
+                    % (file_2, v, len(wer),
                        ", ".join("%s (Zeile %d)" % (n, z) for n, z in wer)))
 
     for n in sorted(set(without_exceptions(kern)) & set(without_exceptions(libc))):
@@ -89,19 +89,19 @@ def belegt(kern, libc):
     return z
 
 
-def zweige_belegt(wurzel):
+def zweige_belegt(root):
     aus = {}
     try:
         zweige = subprocess.run(
-            ["git", "-C", wurzel, "branch", "--format=%(refname:short)"],
+            ["git", "-C", root, "branch", "--format=%(refname:short)"],
             capture_output=True, text=True, check=True).stdout.split()
     except Exception as e:
         return None, "git nicht erreichbar: %s" % e
     for b in zweige:
-        for datei in (KERN, LIBC):
+        for file_2 in (KERN, LIBC):
             try:
                 roh = subprocess.run(
-                    ["git", "-C", wurzel, "show", "%s:%s" % (b, datei)],
+                    ["git", "-C", root, "show", "%s:%s" % (b, file_2)],
                     capture_output=True, check=True).stdout.decode("latin1")
             except Exception:
                 continue
@@ -114,10 +114,10 @@ def zweige_belegt(wurzel):
 
 def main():
     args = sys.argv[1:]
-    wurzel = WURZEL
+    root = ROOT
 
     if args and args[0] == "--zweige":
-        tab, err = zweige_belegt(wurzel)
+        tab, err = zweige_belegt(root)
         if err:
             print(err)
             return 2
@@ -142,7 +142,7 @@ def main():
             print("  %d..%d (%d Nummern)" % (a, b, b - a + 1))
         return 0
 
-    error, kern, libc = check_2(wurzel)
+    error, kern, libc = check_2(root)
 
     if args and args[0] == "--frei":
         von = int(args[1]) if len(args) > 1 else 1000

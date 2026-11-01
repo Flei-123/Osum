@@ -5,15 +5,15 @@ import os
 import re
 import sys
 
-WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-KERN = os.path.join(WURZEL, "kernel")
-SCHICHTDATEI = os.path.join(WURZEL, "tools", "struktur", "schichten.txt")
+ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(ROOT_2, "kernel")
+SCHICHTDATEI = os.path.join(ROOT_2, "tools", "struktur", "schichten.txt")
 
 IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][A-Za-z0-9_.]*)[ \t]*(?://.*)?$")
 
 
-def lies(pfad):
-    with open(pfad, "rb") as f:
+def read_2(path_2):
+    with open(path_2, "rb") as f:
         return f.read().decode("utf-8", "replace")
 
 
@@ -24,11 +24,11 @@ def sammle():
         for n in sorted(names):
             if not n.endswith(".fi"):
                 continue
-            pfad = os.path.join(stamm, n)
-            rel = os.path.relpath(pfad, WURZEL)
+            path_2 = os.path.join(stamm, n)
+            rel = os.path.relpath(path_2, ROOT_2)
             name = n[:-3]
-            src = lies(pfad)
-            zeilen = src.count("\n") + (0 if src.endswith("\n") or not src else 1)
+            src = read_2(path_2)
+            lines_2 = src.count("\n") + (0 if src.endswith("\n") or not src else 1)
             ziele = []
             for z in src.splitlines():
                 m = IMPORT_RE.match(z)
@@ -40,23 +40,23 @@ def sammle():
             module[name] = {
                 "pfad": rel,
                 "ordner": os.path.relpath(stamm, KERN).replace(os.sep, "/"),
-                "zeilen": zeilen,
+                "zeilen": lines_2,
                 "importe": sorted(set(ziele)),
             }
     return module, kollisionen
 
 
-def tarjan(knoten, kanten):
+def tarjan(node, edges_2):
     index = {}
     tief = {}
     aufstapel = set()
     stack = []
     ergebnis = []
     counter = [0]
-    for start in knoten:
+    for start in node:
         if start in index:
             continue
-        arbeit = [(start, iter(kanten.get(start, ())))]
+        arbeit = [(start, iter(edges_2.get(start, ())))]
         index[start] = tief[start] = counter[0]
         counter[0] += 1
         stack.append(start)
@@ -65,14 +65,14 @@ def tarjan(knoten, kanten):
             k, it = arbeit[-1]
             progress = False
             for n in it:
-                if n not in knoten:
+                if n not in node:
                     continue
                 if n not in index:
                     index[n] = tief[n] = counter[0]
                     counter[0] += 1
                     stack.append(n)
                     aufstapel.add(n)
-                    arbeit.append((n, iter(kanten.get(n, ()))))
+                    arbeit.append((n, iter(edges_2.get(n, ()))))
                     progress = True
                     break
                 if n in aufstapel:
@@ -96,12 +96,12 @@ def tarjan(knoten, kanten):
     return sorted(ergebnis, key=lambda c: (-len(c), c[0]))
 
 
-def lies_schichten():
+def read_schichten():
     if not os.path.exists(SCHICHTDATEI):
         return {}, {}
     zuord = {}
     rang = {}
-    for z in lies(SCHICHTDATEI).splitlines():
+    for z in read_2(SCHICHTDATEI).splitlines():
         z = z.strip()
         if not z:
             continue
@@ -118,8 +118,8 @@ def lies_schichten():
     return zuord, rang
 
 
-def pruefe_regel(module, zuord, rang):
-    halten = 0
+def check_rule(module, zuord, rang):
+    hold = 0
     brueche = []
     for name, ang in sorted(module.items()):
         vs = zuord.get(name)
@@ -134,28 +134,28 @@ def pruefe_regel(module, zuord, rang):
             if rv is None or rz is None:
                 continue
             if rz <= rv:
-                halten += 1
+                hold += 1
             else:
                 brueche.append((name, vs, target, zs))
-    return halten, brueche
+    return hold, brueche
 
 
 def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
     module, kollisionen = sammle()
-    kanten = {k: v["importe"] for k, v in module.items()}
+    edges_2 = {k: v["importe"] for k, v in module.items()}
     ein = {k: 0 for k in module}
-    for k, zs in kanten.items():
+    for k, zs in edges_2.items():
         for z in zs:
             if z in ein:
                 ein[z] += 1
-    zyklen = tarjan(set(module), kanten)
-    zuord, rang = lies_schichten()
-    halten, brueche = pruefe_regel(module, zuord, rang)
+    zyklen = tarjan(set(module), edges_2)
+    zuord, rang = read_schichten()
+    hold, brueche = check_rule(module, zuord, rang)
 
     if modus == "--json":
         print(json.dumps({
-            "module": module, "zyklen": zyklen, "halten": halten,
+            "module": module, "zyklen": zyklen, "halten": hold,
             "brueche": brueche, "kollisionen": kollisionen,
             "eingang": ein,
         }, indent=1, sort_keys=True))
@@ -165,7 +165,7 @@ def main():
         if not zuord:
             print("KEINE Schichtzuordnung (tools/struktur/schichten.txt) -- nichts geprueft")
             return 1
-        print("Schichtregel: %d Kanten halten, %d brechen" % (halten, len(brueche)))
+        print("Schichtregel: %d Kanten halten, %d brechen" % (hold, len(brueche)))
         for v, vs, z, zs in brueche:
             print("  BRUCH %s (%s) -> %s (%s)" % (v, vs, z, zs))
         return 1 if brueche else 0
@@ -173,7 +173,7 @@ def main():
     gesamt = sum(m["zeilen"] for m in module.values())
     print("== ERHEBUNG kernel/ ==")
     print("Dateien: %d, Zeilen: %d, Kanten: %d"
-          % (len(module), gesamt, sum(len(v) for v in kanten.values())))
+          % (len(module), gesamt, sum(len(v) for v in edges_2.values())))
     if kollisionen:
         print("NAMENSKOLLISIONEN: %s" % kollisionen)
     print()
@@ -194,7 +194,7 @@ def main():
     print()
     if zuord:
         print("-- Schichtregel --")
-        print("  halten: %d, brechen: %d" % (halten, len(brueche)))
+        print("  halten: %d, brechen: %d" % (hold, len(brueche)))
         for v, vs, z, zs in brueche[:40]:
             print("    BRUCH %s (%s) -> %s (%s)" % (v, vs, z, zs))
     else:

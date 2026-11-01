@@ -10,7 +10,7 @@ REPO = os.environ.get("ORIENTOS_REPO",
 REF = os.environ.get("ORIENTOS_REF", "main")
 
 
-def pfad():
+def path_2():
     if os.environ.get("OPK"):
         return os.environ["OPK"]
     if os.path.isfile(ALT):
@@ -40,5 +40,5 @@ def pfad():
 
 
 if __name__ == "__main__":
-    print(pfad())
+    print(path_2())
     sys.exit(0)

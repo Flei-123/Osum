@@ -4,8 +4,8 @@ import re, sys
 
 SOURCE = 'kernel/user/h264tab.fi'
 
-def felder(pfad):
-    s = open(pfad, encoding='utf-8').read()
+def felder(path_2):
+    s = open(path_2, encoding='utf-8').read()
     out = {}
     for m in re.finditer(r'static mut (\w+): \[u64; (\d+)\] = \[(.*?)\]',
                          s, re.S):

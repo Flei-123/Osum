@@ -76,7 +76,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import opkpfad
-OPK = opkpfad.pfad()
+OPK = opkpfad.path_2()
 SCRYPT_N = 1 << 15
 SCRYPT_R = 8
 SCRYPT_P = 1
@@ -219,11 +219,11 @@ def wechseln(bund, mit_fallback=False):
     return 0
 
 
-def signieren(bund, datei, aus, wer):
+def signieren(bund, file_2, aus, wer):
     d = load_2(bund)
     m = opkmod()
     sk = secret_get(d, wer)
-    roh = open(datei, "rb").read()
+    roh = open(file_2, "rb").read()
     sig = m.ed25519_sign(sk, roh)
     pk = m.ed25519_public(sk)
     if not m.ed25519_verify(pk, roh, sig):
@@ -231,7 +231,7 @@ def signieren(bund, datei, aus, wer):
     with open(aus, "wb") as f:
         f.write(sig)
     print("   signiert  %s  (%d Oktett) mit %s %s..."
-          % (os.path.basename(datei), len(roh), wer, pk.hex()[:12]))
+          % (os.path.basename(file_2), len(roh), wer, pk.hex()[:12]))
     return 0
 
 
@@ -278,12 +278,12 @@ def main():
             aus = rest[rest.index("-o") + 1]
         return oeffentlich(bund, wer, aus)
     if was == "signieren":
-        datei = rest[0]
+        file_2 = rest[0]
         aus = rest[rest.index("-o") + 1]
         wer = "haupt"
         if "--wer" in rest:
             wer = rest[rest.index("--wer") + 1]
-        return signieren(bund, datei, aus, wer)
+        return signieren(bund, file_2, aus, wer)
     print(__doc__)
     return 2
 

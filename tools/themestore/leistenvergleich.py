@@ -69,31 +69,31 @@ def main(argv):
         elif a.startswith("--zoom="):
             zoom = int(a.split("=", 1)[1])
         else:
-            datei, _, text = a.partition("=")
-            paare.append((datei, text))
+            file_2, _, text = a.partition("=")
+            paare.append((file_2, text))
     try:
         font = ImageFont.truetype(FONT, 14)
     except OSError:
         font = ImageFont.load_default()
-    breite = (x1 - x0) * zoom
-    zeile = hoehe * zoom
+    width_2 = (x1 - x0) * zoom
+    line_3 = hoehe * zoom
     header = 20
-    aus = Image.new("RGB", (breite, (header + zeile + 8) * len(paare) + 4),
+    aus = Image.new("RGB", (width_2, (header + line_3 + 8) * len(paare) + 4),
                     (255, 255, 255))
     mal = ImageDraw.Draw(aus)
     y = 4
-    for datei, text in paare:
-        im = Image.open(datei).convert("RGB")
+    for file_2, text in paare:
+        im = Image.open(file_2).convert("RGB")
         w, h = im.size
         var, farben = var_von(im, hoehe, vx0, vx1)
         streifen = im.crop((x0, h - hoehe, min(x1, w), h))
-        streifen = streifen.resize((breite, zeile), Image.NEAREST)
+        streifen = streifen.resize((width_2, line_3), Image.NEAREST)
         mal.text((2, y), "%s   --   var %d, %d Farben" % (text, var, farben),
                  fill=(16, 16, 16), font=font)
         aus.paste(streifen, (0, y + header))
-        mal.rectangle([0, y + header, breite - 1, y + header + zeile - 1],
+        mal.rectangle([0, y + header, width_2 - 1, y + header + line_3 - 1],
                       outline=(160, 160, 168))
-        y = y + header + zeile + 8
+        y = y + header + line_3 + 8
     aus.save(target)
     print("leistenvergleich: %s %dx%d aus %d Aufnahmen"
           % (target, aus.size[0], aus.size[1], len(paare)))

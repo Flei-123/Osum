@@ -46,8 +46,8 @@ def names(n):
     for i in range(n):
         folder = FOLDER[i % len(FOLDER)]
         bottom = (i // len(FOLDER)) % 2 == 1
-        pfad = "/data/%s%s" % (folder, "/tief" if bottom else "")
-        aus.append((pfad, "datei%04d.txt" % i))
+        path_2 = "/data/%s%s" % (folder, "/tief" if bottom else "")
+        aus.append((path_2, "datei%04d.txt" % i))
     return aus
 
 
@@ -58,28 +58,28 @@ def main(argv):
     arbeit = argv[1]
     n = int(argv[2]) if len(argv) > 2 else 4000
     os.makedirs(arbeit, exist_ok=True)
-    liste = names(n)
+    list_ = names(n)
 
     zeilen = ["--inodes=4096", "/data/"]
     seen = set()
-    for pfad, _ in liste:
-        parts_2 = pfad.strip("/").split("/")
+    for path_2, _ in list_:
+        parts_2 = path_2.strip("/").split("/")
         for k in range(1, len(parts_2) + 1):
             p = "/" + "/".join(parts_2[:k]) + "/"
             if p not in seen:
                 seen.add(p)
                 if p != "/data/":
                     zeilen.append(p)
-    for pfad, name in liste:
-        zeilen.append("%s/%s=" % (pfad, name))
+    for path_2, name in list_:
+        zeilen.append("%s/%s=" % (path_2, name))
     with open(os.path.join(arbeit, "angaben"), "w") as f:
         f.write("\n".join(zeilen) + "\n")
 
     with open(os.path.join(arbeit, "namen"), "w") as f:
-        for pfad, name in liste:
-            f.write("%s/%s\n" % (pfad, name))
+        for path_2, name in list_:
+            f.write("%s/%s\n" % (path_2, name))
 
-    all_ = [name for _, name in liste]
+    all_ = [name for _, name in list_]
     all_ += [p.strip("/").split("/")[-1] for p in sorted(seen)]
     all_ += ["data"]
     with open(os.path.join(arbeit, "erwartet"), "w") as f:

@@ -89,7 +89,7 @@ def pubkey(seed: bytes) -> bytes:
                                         serialization.PublicFormat.Raw)
 
 
-def strip_debug(pfad: str) -> bytes:
+def strip_debug(path_2: str) -> bytes:
     """Die Fehlersuchabschnitte weg.
 
     Sie sind nicht SHF_ALLOC und wuerden vom Lader ohnehin uebergangen --
@@ -97,8 +97,8 @@ def strip_debug(pfad: str) -> bytes:
     KiB 3,6 MiB. Was der Kern nicht braucht, gehoert nicht in eine Datei,
     die er von der Platte liest.
     """
-    tmp = pfad + ".stripped"
-    r = subprocess.run(["objcopy", "--strip-debug", pfad, tmp],
+    tmp = path_2 + ".stripped"
+    r = subprocess.run(["objcopy", "--strip-debug", path_2, tmp],
                        capture_output=True)
     if r.returncode != 0:
         sys.exit("mkomod: objcopy: " + r.stderr.decode()[:200])
@@ -131,7 +131,7 @@ def text_bereich(elf: bytes):
     sys.exit("mkomod: kein .text in der Objektdatei")
 
 
-def funktion_in_text(elf: bytes, endung: str):
+def func_in_text(elf: bytes, endung: str):
     """(Wert, Groesse) der Funktion, deren Name auf `endung` endet, oder None."""
     shoff = struct.unpack_from("<Q", elf, 0x28)[0]
     shent = struct.unpack_from("<H", elf, 0x3A)[0]
@@ -161,7 +161,7 @@ def funktion_in_text(elf: bytes, endung: str):
     return None
 
 
-def bauen(argv):
+def build_2(argv):
     ein = argv[0]
     aus = argv[1]
     name = "unbenannt"
@@ -202,10 +202,10 @@ def bauen(argv):
     nutz = bytearray(strip_debug(ein))
 
     if text_rot > 0:
-        off, laenge = text_bereich(bytes(nutz))
-        begin = off + laenge // 2
-        target = (funktion_in_text(bytes(nutz), "ps2m__init_inner")
-                or funktion_in_text(bytes(nutz), "ps2m__init"))
+        off, len_ = text_bereich(bytes(nutz))
+        begin = off + len_ // 2
+        target = (func_in_text(bytes(nutz), "ps2m__init_inner")
+                or func_in_text(bytes(nutz), "ps2m__init"))
         if target is not None:
             fwert, fgroesse = target
             begin = off + fwert + (min(16, max(fgroesse // 2, 1)) if fgroesse else 16)
@@ -236,16 +236,16 @@ def bauen(argv):
     if kennung_broken:
         header[0] = 0x58
 
-    daten = bytes(header) + nb + bytes(sig)
-    open(aus, "wb").write(daten)
+    data_2 = bytes(header) + nb + bytes(sig)
+    open(aus, "wb").write(data_2)
     print("%s (%d Oktette: Kopf %d, Nutzlast %d, Signatur %d), abi=%d, "
           "name=%s, sha256=%s"
-          % (aus, len(daten), HDR, len(nb), SIGLEN, abi, name,
-             hashlib.sha256(daten).hexdigest()[:16]))
+          % (aus, len(data_2), HDR, len(nb), SIGLEN, abi, name,
+             hashlib.sha256(data_2).hexdigest()[:16]))
     return 0
 
 
-def zeigen(argv):
+def show(argv):
     d = open(argv[0], "rb").read()
     if len(d) < HDR + SIGLEN:
         sys.exit("zu kurz")
@@ -276,9 +276,9 @@ def main(argv):
         print(__doc__)
         return 1
     if argv[1] == "bauen":
-        return bauen(argv[2:])
+        return build_2(argv[2:])
     if argv[1] == "zeigen":
-        return zeigen(argv[2:])
+        return show(argv[2:])
     print(__doc__)
     return 1
 

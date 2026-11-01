@@ -58,7 +58,7 @@ def keys_for(text):
     return aus
 
 
-def key_lines(pfad):
+def key_lines(path_2):
     """Wie viele `key: `-Zeilen der Kern schon gemeldet hat.
 
     RUNDE ROTABSCHNITTE. `kernel/drv/hid/kbd.fi` meldet GENAU EINE Zeile
@@ -67,7 +67,7 @@ def key_lines(pfad):
     Ereignis laesst sich warten, statt auf die Uhr zu sehen.
     """
     try:
-        with open(pfad, 'rb') as f:
+        with open(path_2, 'rb') as f:
             return f.read().count(b'key: ')
     except OSError:
         return 0
@@ -134,7 +134,7 @@ def main():
             except OSError:
                 pass
             s.sendall(("screendump %s\n" % target).encode())
-            letzte = -1
+            last = -1
             ruhig = 0
             bis2 = time.time() + 20
             while time.time() < bis2:
@@ -143,13 +143,13 @@ def main():
                     now = os.path.getsize(target)
                 except OSError:
                     continue
-                if now == letzte and now > 0:
+                if now == last and now > 0:
                     ruhig += 1
                     if ruhig >= 3:
                         break
                 else:
                     ruhig = 0
-                    letzte = now
+                    last = now
             try:
                 s.recv(65536)
             except OSError:
@@ -159,16 +159,16 @@ def main():
             time.sleep(float(k[6:]))
             continue
         if k == 'ruhe':
-            letzte = -1
+            last = -1
             while True:
                 time.sleep(0.4)
                 try:
                     now = os.path.getsize(wait)
                 except OSError:
                     break
-                if now == letzte:
+                if now == last:
                     break
-                letzte = now
+                last = now
             continue
         if k.startswith('nowait:'):
             s.sendall(("sendkey %s\n" % k[7:]).encode())

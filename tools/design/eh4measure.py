@@ -22,7 +22,7 @@ def serial(d):
     return open(p, "rb").read().decode("latin1", "replace")
 
 
-def letzte(t, muster):
+def last_3(t, muster):
     m = None
     for m in re.finditer(muster, t):
         pass
@@ -71,8 +71,8 @@ def kasten_der_tinte(im, cx, cy, r, tol=40):
     return (x0 + min(xs), y0 + min(ys), x0 + max(xs), y0 + max(ys)), bg, n
 
 
-def lupe(quelle, target, box, factor=6):
-    im = Image.open(quelle).convert("RGB")
+def lupe(source_2, target, box, factor=6):
+    im = Image.open(source_2).convert("RGB")
     x0, y0, x1, y1 = box
     x0 = max(0, x0)
     y0 = max(0, y0)
@@ -115,7 +115,7 @@ def part_taskbar(out, name, uisc):
     if not t:
         print("  no serial output -- the run did not run")
         return
-    m = letzte(t, r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+    m = last_3(t, r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
     if not m:
         print("  the bar reported no geometry")
         return
@@ -139,23 +139,23 @@ def part_taskbar(out, name, uisc):
     for i in sorted(seen):
         app, w, gem, button = seen[i]
         pro = gem * 100 // button if button else 0
-        marke = "ok" if 55 <= pro <= 75 else "VERLETZT"
+        brand_2 = "ok" if 55 <= pro <= 75 else "VERLETZT"
         print("    btn %d %-14s Datei %d, gemalt %d, Knopf %d"
               "  ->  %d%% der Knopfhoehe  %s"
-              % (i, app, w, gem, button, pro, marke))
+              % (i, app, w, gem, button, pro, brand_2))
     felder = {}
     for m in re.finditer(r"taskbar: btn i=(\d+) id=\d+ x=(-?\d+) y=(-?\d+)"
                          r" w=(\d+) h=(\d+)", t):
         felder[int(m.group(1))] = tuple(int(m.group(i)) for i in (2, 3, 4, 5))
-    bild = os.path.join(bd, "01-schreibtisch.png")
-    if felder and os.path.exists(bild):
-        args = [sys.executable, os.path.join(HIER, "ausrichtung.py"), bild,
+    image_2 = os.path.join(bd, "01-schreibtisch.png")
+    if felder and os.path.exists(image_2):
+        args = [sys.executable, os.path.join(HIER, "ausrichtung.py"), image_2,
                 "--nur-messen", "--rand-unten", str(4 * uisc)]
         for i in sorted(felder):
             x, y, w, h = felder[i]
             args.append("--feld")
             args.append("%d,%d,%d,%d:btn%d" % (bx + x, by + y, w, h, i))
-        m2 = letzte(t, r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+        m2 = last_3(t, r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         if m2:
             args.append("--feld")
             args.append("%d,%d,%s,%s:start"
@@ -173,11 +173,11 @@ def part_taskbar(out, name, uisc):
         fl = flaechenfarben(im, 3)
         toene = " ".join("#%02x%02x%02x(%.0f%%)" % (c[0], c[1], c[2], pz)
                          for (c, pz) in fl)
-        marke = ""
+        brand_2 = ""
         if name.startswith("dunkel") and b > 8:
-            marke = "  VERLETZT: nicht neutral"
+            brand_2 = "  VERLETZT: nicht neutral"
         print("    %-22s B-R %+5.1f   %s%s"
-              % (os.path.basename(p), b, toene, marke))
+              % (os.path.basename(p), b, toene, brand_2))
 
 
 def part_menu(out):
@@ -193,9 +193,9 @@ def part_menu(out):
         if not os.path.exists(p):
             print("  fehlt: %s" % os.path.basename(p))
             return
-    grund = pfade[0]
+    reason_2 = pfade[0]
     for i, p in enumerate(pfade):
-        r = unterschied(grund, p)
+        r = unterschied(reason_2, p)
         if r is None:
             print("  %s: andere Groesse" % seq[i])
             continue

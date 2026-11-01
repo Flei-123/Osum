@@ -11,7 +11,7 @@ MAL = [
     "rring", "drop_shadow", "shadow_edge", "divider", "text_at",
     "draw_glyph",
 ]
-MESS = [
+MEASURE = [
     "text_w", "text_h", "ascent_of", "glyph_w", "mono_cell", "fit",
     "px_ui", "px_mono", "icon_small", "icon_menu", "icon_taskbar",
     "icon_large", "surf_w", "surf_rows", "screen_w", "screen_h",
@@ -26,21 +26,21 @@ RE_CALL = re.compile(r"\bwlibc\.([a-z_0-9]+)\s*\(")
 RE_COMMENT = re.compile(r"^\s*//")
 
 
-def zeilen(pfad):
-    with open(pfad, "rb") as f:
+def zeilen(path_2):
+    with open(path_2, "rb") as f:
         roh = f.read().decode("latin1")
     return roh.split("\n")
 
 
-def scan(pfad):
+def scan(path_2):
     mal = []
-    for nr, z in enumerate(zeilen(pfad), 1):
+    for nr, z in enumerate(zeilen(path_2), 1):
         if RE_COMMENT.match(z):
             continue
         code = z.split("//")[0]
         for m in RE_CALL.finditer(code):
             fn = m.group(1)
-            if fn in MESS or fn not in MAL:
+            if fn in MEASURE or fn not in MAL:
                 continue
             mal.append((nr, fn, z.strip()[:100]))
     return mal
@@ -61,9 +61,9 @@ RE_NUM = re.compile(r"\b(0x[0-9a-fA-F]{6,8}|\d{5,8})\b")
 RE_MASKE = re.compile(r"[&|^]\s*(0x[0-9a-fA-F]+|\d+)\s*$")
 
 
-def farben(pfad):
+def farben(path_2):
     treffer = []
-    for nr, z in enumerate(zeilen(pfad), 1):
+    for nr, z in enumerate(zeilen(path_2), 1):
         if RE_COMMENT.match(z):
             continue
         code = z.split("//")[0]
@@ -84,12 +84,12 @@ def main():
     hier = os.path.normpath(hier)
     ergebnis = {"dateien": {}, "summe": 0, "pruefstand": 0, "farben": 0}
     wide = []
-    for pfad in sorted(glob.glob(os.path.join(hier, "*.fi"))):
-        name = os.path.basename(pfad)
+    for path_2 in sorted(glob.glob(os.path.join(hier, "*.fi"))):
+        name = os.path.basename(path_2)
         if name in KERN:
             continue
-        mal = scan(pfad)
-        f = farben(pfad)
+        mal = scan(path_2)
+        f = farben(path_2)
         if not mal and not f:
             continue
         ist_check = name in PRUEFSTAND

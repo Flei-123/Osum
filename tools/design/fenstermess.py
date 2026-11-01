@@ -5,13 +5,13 @@ import re
 import sys
 
 
-def lies(pfad):
-    with open(pfad, "rb") as f:
+def read_2(path_2):
+    with open(path_2, "rb") as f:
         return f.read().decode("utf-8", "replace")
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     i = 2
     tok = []
     while len(tok) < 3:
@@ -30,8 +30,8 @@ def ppm(pfad):
     return tok[0], tok[1], d[i:]
 
 
-def band(pfad, height_2, von_bottom):
-    w, h, px = ppm(pfad)
+def band(path_2, height_2, von_bottom):
+    w, h, px = ppm(path_2)
     s = {}
     for y in range(h - von_bottom, h, 2):
         for x in range(0, w, 4):
@@ -50,7 +50,7 @@ def main():
     folder = sys.argv[1]
     SW = int(sys.argv[2])
     SH = int(sys.argv[3])
-    t = lies(os.path.join(folder, "serial.txt"))
+    t = read_2(os.path.join(folder, "serial.txt"))
 
     pass_ = []
     fail = []
@@ -119,15 +119,15 @@ def main():
         return t_
 
     if bloecke:
-        letzte = max(bloecke, key=tiefe)
-        lay_t, id_t = taskbar_ebene(letzte)
+        last_3 = max(bloecke, key=tiefe)
+        lay_t, id_t = taskbar_ebene(last_3)
         if lay_t is None:
             print("   the bar cannot be recognised in the window list")
         else:
             print("   Leiste: id=%d Ebene=%d" % (id_t, lay_t))
             edge = ty if ty is not None else SH - 80
             unten = [(i_, id_, x, y, w, h, lay, fl, z)
-                     for (i_, id_, x, y, w, h, lay, fl, z) in letzte
+                     for (i_, id_, x, y, w, h, lay, fl, z) in last_3
                      if id_ != id_t and lay == 1
                      and i64(y) + h > edge]
             if unten:

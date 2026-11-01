@@ -14,16 +14,16 @@ P4 = load_2('pred4.json')
 aus = []
 def z(s=''): aus.append(s)
 
-def feld(name, values, typ='u64', je=16, kommentar=None):
+def field(name, values, typ='u64', je=16, kommentar=None):
     z('// %s' % kommentar if kommentar else '')
     z('static mut %s: [%s; %d] = [' % (name, typ, len(values)))
-    zeile = '   '
+    line_2 = '   '
     for i, v in enumerate(values):
         chunk = ' %d,' % v if i < len(values)-1 else ' %d]' % v
-        if len(zeile) + len(chunk) > 76:
-            z(zeile); zeile = '   '
-        zeile += chunk
-    z(zeile)
+        if len(line_2) + len(chunk) > 76:
+            z(line_2); line_2 = '   '
+        line_2 += chunk
+    z(line_2)
     z()
 
 z('// SPDX-License-Identifier: GPL-2.0-only')
@@ -58,45 +58,45 @@ ct_len=[]; ct_bits=[]
 for k in range(4):
     ct_len += T['coeff_token_len'][k]
     ct_bits += T['coeff_token_bits'][k]
-feld('CT_LEN', ct_len, kommentar=
+field('CT_LEN', ct_len, kommentar=
      'coeff_token, Tafel 9-5: vier nC-Klassen (0-1, 2-3, 4-7, >=8) zu je\n'
      '// 68 Eintraegen, Index (klasse*17 + totalCoeff)*4 + trailingOnes.\n'
      '// Laenge 0 heisst: diese Verbindung gibt es nicht.')
-feld('CT_BITS', ct_bits)
-feld('CDC_LEN', T['chroma_dc_coeff_token_len'], kommentar=
+field('CT_BITS', ct_bits)
+field('CDC_LEN', T['chroma_dc_coeff_token_len'], kommentar=
      'coeff_token fuer den Chroma-DC-Block (4:2:0, maxCoeff 4).')
-feld('CDC_BITS', T['chroma_dc_coeff_token_bits'])
+field('CDC_BITS', T['chroma_dc_coeff_token_bits'])
 
 tz_len=[]; tz_bits=[]
 for i in range(15):
     r=T['total_zeros_len'][i]; b=T['total_zeros_bits'][i]
     tz_len += r+[0]*(16-len(r)); tz_bits += b+[0]*(16-len(b))
-feld('TZ_LEN', tz_len, kommentar=
+field('TZ_LEN', tz_len, kommentar=
      'total_zeros, Tafel 9-7/9-8: 15 Zeilen (tzVlcIndex 1..15) zu 16,\n'
      '// mit Nullen aufgefuellt. Index (tzVlcIndex-1)*16 + total_zeros.')
-feld('TZ_BITS', tz_bits)
+field('TZ_BITS', tz_bits)
 tzc_len=[]; tzc_bits=[]
 for i in range(3):
     r=DB and T['chroma_dc_total_zeros_len'][i]; b=T['chroma_dc_total_zeros_bits'][i]
     tzc_len += r+[0]*(4-len(r)); tzc_bits += b+[0]*(4-len(b))
-feld('TZC_LEN', tzc_len, kommentar='total_zeros fuer den Chroma-DC-Block, Tafel 9-9(a).')
-feld('TZC_BITS', tzc_bits)
+field('TZC_LEN', tzc_len, kommentar='total_zeros fuer den Chroma-DC-Block, Tafel 9-9(a).')
+field('TZC_BITS', tzc_bits)
 
 run_len=[]; run_bits=[]
 for i in range(7):
     r=T['run_len'][i]; b=T['run_bits'][i]
     run_len += r+[0]*(16-len(r)); run_bits += b+[0]*(16-len(b))
-feld('RUN_LEN', run_len, kommentar=
+field('RUN_LEN', run_len, kommentar=
      'run_before, Tafel 9-10: 7 Zeilen (zerosLeft 1..6 und >6) zu 16.')
-feld('RUN_BITS', run_bits)
+field('RUN_BITS', run_bits)
 
-feld('ALPHA', DB['alpha'], kommentar=
+field('ALPHA', DB['alpha'], kommentar=
      'alpha, Tafel 8-16. 52*3 lang: der Index ist qp+Versatz+52, damit\n'
      '// ein negativer Versatz nicht unter null greift.')
-feld('BETA', DB['beta'], kommentar='beta, Tafel 8-16, ebenso verschoben.')
+field('BETA', DB['beta'], kommentar='beta, Tafel 8-16, ebenso verschoben.')
 tc0=[]
 for row in DB['tc0']: tc0 += row
-feld('TC0', tc0, kommentar=
+field('TC0', tc0, kommentar=
      'tc0, Tafel 8-17: je Index vier Werte (bS 0..3), Index ia*4+bS.')
 
 w=[0]*(9*16); g=[0]*(9*16*4); idx=[0]*(9*16*4)
@@ -107,26 +107,26 @@ for ms, rows in P4.items():
         for k,(gg,ii) in enumerate(row[1:]):
             g[(m*16+i)*4+k]=gg
             idx[(m*16+i)*4+k]=ii
-feld('PRED4W', w, kommentar=
+field('PRED4W', w, kommentar=
      'Die acht gerichteten Intra-4x4-Modi als GEWICHTSTAFEL (Modus 2,\n'
      '// DC, rechnet der Code selbst). PRED4W[m*16+i] ist die Summe der\n'
      '// Gewichte des Punktes i im Modus m -- immer eine Zweierpotenz,\n'
      '// also der Rundungsteiler. Null heisst: diesen Modus gibt es hier\n'
      '// nicht (Modus 2).')
-feld('PRED4G', g, kommentar=
+field('PRED4G', g, kommentar=
      'Bis zu vier Gewichte je Punkt, Index (m*16+i)*4+k.')
-feld('PRED4I', idx, kommentar=
+field('PRED4I', idx, kommentar=
      'Der Nachbar zum Gewicht: 0..3 = links oben->unten, 4 = Ecke,\n'
      '// 5..8 = oben, 9..12 = rechts oben.')
 
-feld('ZIGZAG', [0,1,4,8,5,2,3,6,9,12,13,10,7,11,14,15], kommentar=
+field('ZIGZAG', [0,1,4,8,5,2,3,6,9,12,13,10,7,11,14,15], kommentar=
      'Der Zickzack eines 4x4-Blocks, Tafel 8-13.')
 vm=[]
 for row in [[10,16,13],[11,18,14],[13,20,16],[14,23,18],[16,25,20],[18,29,23]]:
     vm+=row
-feld('VMAT', vm, kommentar=
+field('VMAT', vm, kommentar=
      'normAdjust, Tafel 8-15: je qP%6 drei Werte (Positionsklassen).')
-feld('QPC', [29,30,31,32,32,33,34,34,35,35,36,36,37,37,37,38,38,38,39,39,39,39],
+field('QPC', [29,30,31,32,32,33,34,34,35,35,36,36,37,37,37,38,38,38,39,39,39,39],
      kommentar='qPc aus qPy fuer qPy >= 30, Tafel 8-15.')
 
 def av_log2(x): return x.bit_length()-1 if x>0 else 0
@@ -144,14 +144,14 @@ for sl in range(7):
             LV.append(prefix+100); LN.append(prefix+1)
         else:
             LV.append(108); LN.append(8)
-feld('LEVTAB_V', LV, typ='i64' if False else 'u64', kommentar=
+field('LEVTAB_V', LV, typ='i64' if False else 'u64', kommentar=
      'Die Wertetafel des CAVLC-Lesers, genau wie FFmpeg sie baut\n'
      '// (init_cavlc_level_tab): je suffixLength 0..6 eine Zeile zu 256\n'
      '// Eintraegen ueber die naechsten 8 Bits. Ein Wert >= 100 heisst\n'
      '// "langer Weg", die Zahl ist dann 100+level_prefix. Sonst ist es\n'
      '// der fertige Wert -- als Zweierkomplement in 64 Bit, weil Firn\n'
      '// hier u64 fuehrt; der Leser rechnet ihn zurueck.')
-feld('LEVTAB_N', LN, kommentar='Wieviele Bits der Eintrag verbraucht.')
+field('LEVTAB_N', LN, kommentar='Wieviele Bits der Eintrag verbraucht.')
 
 text = [l for l in '\n'.join(aus).split('\n') if not l.lstrip().startswith('//')]
 squeezed = []

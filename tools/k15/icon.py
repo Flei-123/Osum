@@ -61,10 +61,10 @@ ROLLEN = {
 }
 
 
-def lies(pfad):
+def read_2(path_2):
     palette = {}
     zeilen = []
-    for roh in open(pfad, encoding="ascii").read().splitlines():
+    for roh in open(path_2, encoding="ascii").read().splitlines():
         if roh.startswith("#"):
             part = roh[1:].strip()
             if "=" in part:
@@ -93,12 +93,12 @@ def lies(pfad):
             continue
         zeilen.append(roh)
     if not zeilen:
-        raise SystemExit("symbol: %s hat keine Zeile Bild" % pfad)
-    breite = len(zeilen[0])
+        raise SystemExit("symbol: %s hat keine Zeile Bild" % path_2)
+    width_2 = len(zeilen[0])
     for i, z in enumerate(zeilen):
-        if len(z) != breite:
+        if len(z) != width_2:
             raise SystemExit("symbol: Zeile %d ist %d Zeichen breit, die "
-                             "erste %d" % (i + 1, len(z), breite))
+                             "erste %d" % (i + 1, len(z), width_2))
     for z in zeilen:
         for c in z:
             if c not in palette:
@@ -106,8 +106,8 @@ def lies(pfad):
     return palette, zeilen
 
 
-def baue(pfad):
-    palette, zeilen = lies(pfad)
+def build_2(path_2):
+    palette, zeilen = read_2(path_2)
     h = len(zeilen)
     w = len(zeilen[0])
     aus = bytearray(b"OSYM")
@@ -125,17 +125,17 @@ def baue(pfad):
     return bytes(aus)
 
 
-def zurueck(pfad):
+def back_2(path_2):
     """Das Bild wieder als Farben lesen -- die zweite Umsetzung, gegen die
     der Testlaeufer den Schirm haelt. Sie liest die DATEI, nicht die
     Zeichnung, und rechnet deshalb wirklich nach, was ausgeliefert wurde.
     """
-    d = open(pfad, "rb").read()
+    d = open(path_2, "rb").read()
     if len(d) < 12 or d[:4] != b"OSYM":
-        raise SystemExit("symbol: %s faengt nicht mit OSYM an" % pfad)
+        raise SystemExit("symbol: %s faengt nicht mit OSYM an" % path_2)
     w, h = struct.unpack_from("<II", d, 4)
     if len(d) < 12 + w * h * 4:
-        raise SystemExit("symbol: %s ist zu kurz fuer %dx%d" % (pfad, w, h))
+        raise SystemExit("symbol: %s ist zu kurz fuer %dx%d" % (path_2, w, h))
     aus = []
     for y in range(h):
         reihe = []
@@ -164,8 +164,8 @@ def main(argv):
         print("symbol: the image does not carry the octets of %s (with the row images)" % argv[3])
         return 1
     if len(argv) >= 4 and argv[1] == "--pruefe":
-        w, h, bild = zurueck(argv[2])
-        palette, zeilen = lies(argv[3])
+        w, h, image_2 = back_2(argv[2])
+        palette, zeilen = read_2(argv[3])
         if h != len(zeilen) or w != len(zeilen[0]):
             print("symbol: %dx%d in the image, %dx%d in the drawing"
                   % (w, h, len(zeilen[0]), len(zeilen)))
@@ -173,7 +173,7 @@ def main(argv):
         wrong = 0
         for y in range(h):
             for x in range(w):
-                if bild[y][x] != palette[zeilen[y][x]]:
+                if image_2[y][x] != palette[zeilen[y][x]]:
                     wrong += 1
         if wrong:
             print("symbol: %d of %d pixels different" % (wrong, w * h))
@@ -183,7 +183,7 @@ def main(argv):
     if len(argv) != 3:
         print(__doc__)
         return 2
-    d = baue(argv[1])
+    d = build_2(argv[1])
     with open(argv[2], "wb") as f:
         f.write(d)
     print("symbol: %s  %d Oktette" % (argv[2], len(d)))

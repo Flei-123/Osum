@@ -44,9 +44,9 @@ def main(argv):
     if len(argv) < 2:
         print(__doc__)
         return 2
-    pfad = argv[1]
+    path_2 = argv[1]
     only_check = "--pruefen" in argv
-    zeilen = open(pfad, encoding="utf-8").read().split("\n")
+    zeilen = open(path_2, encoding="utf-8").read().split("\n")
     aus = []
     geaendert = 0
     zu_lang = []
@@ -69,12 +69,12 @@ def main(argv):
         geaendert += 1
     for nr, ist, will, lit in zu_lang:
         print("%s:%d: %d octets, but [u8; %d] -- too long: %s"
-              % (pfad, nr, ist, will, lit), file=sys.stderr)
+              % (path_2, nr, ist, will, lit), file=sys.stderr)
     if zu_lang:
         return 1
     if geaendert and not only_check:
-        open(pfad, "w", encoding="utf-8").write("\n".join(aus))
-    print("%s: %d Literale aufgefuellt" % (pfad, geaendert))
+        open(path_2, "w", encoding="utf-8").write("\n".join(aus))
+    print("%s: %d Literale aufgefuellt" % (path_2, geaendert))
     return 0
 
 

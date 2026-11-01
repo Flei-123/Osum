@@ -37,10 +37,10 @@ _values = load()
 PRODUKT = _values["PRODUKT"]
 KERN = _values["KERN"]
 HERSTELLER = _values["HERSTELLER"]
-KURZ = _values["KURZ"]
+SHORT = _values["KURZ"]
 WEB = _values["WEB"]
 FEED = _values["FEED"]
-DATEI = _values["DATEI"]
+FILE = _values["DATEI"]
 
 if __name__ == "__main__":
     for name in sys.argv[1:] or ("PRODUKT",):

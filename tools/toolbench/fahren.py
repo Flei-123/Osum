@@ -52,33 +52,33 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 
 
 class Monitor:
-    def __init__(self, pfad, frist=20.0):
+    def __init__(self, path_2, deadline=20.0):
         self.s = None
-        bis = time.time() + frist
+        bis = time.time() + deadline
         while time.time() < bis:
             try:
                 s = socket.socket(socket.AF_UNIX)
                 s.settimeout(5.0)
-                s.connect(pfad)
+                s.connect(path_2)
                 self.s = s
                 break
             except OSError:
                 time.sleep(0.1)
         if self.s is None:
-            raise SystemExit("fahren: kein Monitor an %s" % pfad)
+            raise SystemExit("fahren: kein Monitor an %s" % path_2)
         time.sleep(0.3)
-        self.leeren()
+        self.clear()
 
-    def leeren(self):
+    def clear(self):
         try:
             self.s.recv(65536)
         except OSError:
             pass
 
-    def cmd(self, zeile, pause=0.10):
-        self.s.sendall((zeile + "\n").encode())
+    def cmd(self, line, pause=0.10):
+        self.s.sendall((line + "\n").encode())
         time.sleep(pause)
-        self.leeren()
+        self.clear()
 
     def cursor(self, x, y):
         for _ in range(12):
@@ -110,26 +110,26 @@ class Monitor:
             self.cmd("sendkey %s" % keys.get(ch, ch), 0.15)
         time.sleep(0.6)
 
-    def foto(self, target, frist=25.0):
+    def photo(self, target, deadline=25.0):
         if os.path.exists(target):
             os.unlink(target)
         self.cmd("screendump %s" % target, 0.2)
-        letzte = -1
+        last = -1
         ruhig = 0
-        bis = time.time() + frist
+        bis = time.time() + deadline
         while time.time() < bis:
             time.sleep(0.15)
             try:
                 now = os.path.getsize(target)
             except OSError:
                 continue
-            if now == letzte and now > 0:
+            if now == last and now > 0:
                 ruhig += 1
                 if ruhig >= 3:
                     return now
             else:
                 ruhig = 0
-            letzte = now
+            last = now
         return 0
 
 
@@ -141,8 +141,8 @@ def target_einmal(serial, worte):
     return r.stdout.strip(), ""
 
 
-def target_get(serial, worte, frist=12.0):
-    bis = time.time() + frist
+def target_get(serial, worte, deadline=12.0):
+    bis = time.time() + deadline
     while True:
         p, error = target_einmal(serial, worte)
         if p is not None or time.time() >= bis:
@@ -159,8 +159,8 @@ def zaehle(serial, muster):
     return len(re.findall(muster, t, re.M))
 
 
-def wait_auf(serial, muster, count, frist):
-    bis = time.time() + frist
+def wait_auf(serial, muster, count, deadline):
+    bis = time.time() + deadline
     while time.time() < bis:
         if zaehle(serial, muster) >= count:
             return True
@@ -215,7 +215,7 @@ def main(argv):
             time.sleep(0.5)
             print("plan: taste %s" % parts[1])
         elif was == "foto":
-            n = m.foto(os.path.join(out, parts[1] + ".ppm"))
+            n = m.photo(os.path.join(out, parts[1] + ".ppm"))
             print("plan: foto %s (%d Oktette)" % (parts[1], n))
         else:
             print("plan: unbekannter Schritt '%s'" % was)

@@ -90,20 +90,20 @@ def band(path, x, y, w, h, minpx):
         for i in range(w):
             o = base + i * 3
             cnt[(px[o], px[o + 1], px[o + 2])] += 1
-    grund, gn = cnt.most_common(1)[0]
+    reason_2, gn = cnt.most_common(1)[0]
     best, bn, br = None, 0, 0.0
     for c, n in cnt.items():
-        if n < minpx or c == grund:
+        if n < minpx or c == reason_2:
             continue
-        r = ratio(c, grund)
+        r = ratio(c, reason_2)
         if r > br:
             best, bn, br = c, n, r
     if best is None:
         print("contrast: NO TEXT found -- background #%02x%02x%02x "
-              "auf %d von %d Bildpunkten" % (grund + (gn, w * h)))
+              "auf %d von %d Bildpunkten" % (reason_2 + (gn, w * h)))
         return 1
     print("kontrast: schrift #%02x%02x%02x (%d px)  grund #%02x%02x%02x "
-          "(%d px)  ratio %.2f" % (best + (bn,) + grund + (gn, br)))
+          "(%d px)  ratio %.2f" % (best + (bn,) + reason_2 + (gn, br)))
     return 0
 
 

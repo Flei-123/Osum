@@ -114,14 +114,14 @@ def reply_build(ask, txid, qende, name, qtyp, broken_case=False,
     return bytes(header) + bytes(q[12:]) + rd
 
 
-def bedienen(sock, daten, herkunft):
-    if len(daten) < 12:
+def bedienen(sock, data, herkunft):
+    if len(data) < 12:
         return
-    txid = struct.unpack(">H", daten[0:2])[0]
-    name, ende = name_read(daten, 12)
-    if name is None or ende + 4 > len(daten):
+    txid = struct.unpack(">H", data[0:2])[0]
+    name, ende = name_read(data, 12)
+    if name is None or ende + 4 > len(data):
         return
-    qtyp = struct.unpack(">H", daten[ende:ende + 2])[0]
+    qtyp = struct.unpack(">H", data[ende:ende + 2])[0]
     qende = ende + 4
     COUNTER["fragen"] += 1
     kn = name.decode("ascii", "replace").lower()
@@ -133,11 +133,11 @@ def bedienen(sock, daten, herkunft):
             if BOESE == "alle":
                 art = ["txid", "port", "case"][i % 3]
             if art == "txid":
-                p = reply_build(daten, txid, qende, name, qtyp,
+                p = reply_build(data, txid, qende, name, qtyp,
                                   txid_wrong=True)
                 sock.sendto(p, herkunft)
             elif art == "case":
-                p = reply_build(daten, txid, qende, name, qtyp,
+                p = reply_build(data, txid, qende, name, qtyp,
                                   broken_case=True)
                 sock.sendto(p, herkunft)
             elif art == "port":
@@ -145,7 +145,7 @@ def bedienen(sock, daten, herkunft):
                 echt = EINTRAEGE.get(kn)
                 if echt:
                     EINTRAEGE[kn] = "6.6.6.6"
-                p = reply_build(daten, txid, qende, name, qtyp)
+                p = reply_build(data, txid, qende, name, qtyp)
                 EINTRAEGE.update(wrong)
                 s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s2.bind(("", 0))
@@ -154,7 +154,7 @@ def bedienen(sock, daten, herkunft):
             COUNTER["koeder"] += 1
         time.sleep(0.01)
 
-    p = reply_build(daten, txid, qende, name, qtyp, tc=(kn in TC),
+    p = reply_build(data, txid, qende, name, qtyp, tc=(kn in TC),
                       small=(BOESE == "klein"))
     sock.sendto(p, herkunft)
     COUNTER["antworten"] += 1

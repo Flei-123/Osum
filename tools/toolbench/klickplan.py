@@ -51,16 +51,16 @@ DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
                  r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
 
 
-def lies(pfad):
-    return open(pfad, "rb").read().decode("latin1").splitlines()
+def read_2(path_2):
+    return open(path_2, "rb").read().decode("latin1").splitlines()
 
 
-def fenster(zeilen, welches=0):
+def window(lines, welches=0):
     """Das Fenster des Aufgabenverwalters: das GROESSTE, das gemeldet
     wurde -- der Dialog ist 340 breit, das Hauptfenster 752. Bei
     `welches=1` das KLEINSTE, also der Dialog."""
     ws = {}
-    for z in zeilen:
+    for z in lines:
         m = WIN.search(z)
         if m:
             ws[m.group(1)] = tuple(int(v) for v in m.groups()[1:])
@@ -70,41 +70,41 @@ def fenster(zeilen, welches=0):
     return v[0] if welches else v[-1]
 
 
-def last_block(zeilen):
+def last_block(lines):
     """Der letzte VOLLSTAENDIGE Block. Ein halb geschriebener Block am
     Ende des Mitschnitts (die Maschine wurde mittendrin abgeraeumt)
     haette Zeilen ohne Kopf."""
     ab = 0
-    for i, z in enumerate(zeilen):
+    for i, z in enumerate(lines):
         if "taskmgr: sortiert " in z:
             ab = i
-    zeilen = zeilen[ab:]
+    lines = lines[ab:]
     anf = None
     ende = None
-    for i, z in enumerate(zeilen):
+    for i, z in enumerate(lines):
         if z.startswith("taskmgr: blockende "):
             ende = i
     if ende is None:
-        return zeilen
+        return lines
     for i in range(ende, -1, -1):
-        if zeilen[i].startswith("taskmgr: block "):
+        if lines[i].startswith("taskmgr: block "):
             anf = i
             break
-    return zeilen[anf:ende + 1] if anf is not None else zeilen
+    return lines[anf:ende + 1] if anf is not None else lines
 
 
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    zeilen = lies(argv[1])
+    lines = read_2(argv[1])
     was = argv[2]
     if was in ("diskbtn", "diskrow", "disknav"):
         pat = {"diskbtn": r"disks: btn verb=(\S+) cx=(\d+) cy=(\d+)",
                "diskrow": r"disks: row p=(\d+) cx=(\d+) cy=(\d+)",
                "disknav": r"disks: navrow n=(\d+) cx=(\d+) cy=(\d+)"}[was]
         hit = None
-        for z in zeilen:
+        for z in lines:
             m = re.search(pat, z)
             if m and m.group(1) == argv[3]:
                 hit = m
@@ -117,12 +117,12 @@ def main(argv):
         cx = 0
         cy = 0
     else:
-        x, y, w, h, cx, cy = fenster(zeilen)
+        x, y, w, h, cx, cy = window(lines)
 
     if was == "qsfeld":
         g = None
         f = None
-        for z in zeilen:
+        for z in lines:
             m = TBGEOM.search(z)
             if m:
                 g = m
@@ -140,7 +140,7 @@ def main(argv):
         t = argv[3]
         o = None
         k = None
-        for z in zeilen:
+        for z in lines:
             m = QSOPEN.search(z)
             if m:
                 o = m
@@ -159,7 +159,7 @@ def main(argv):
 
     if was in ("qszeile1", "qszeile2"):
         o = None
-        for z in zeilen:
+        for z in lines:
             m = QSOPEN.search(z)
             if m:
                 o = m
@@ -174,7 +174,7 @@ def main(argv):
 
     if was == "ja":
         d = None
-        for z in zeilen:
+        for z in lines:
             m = DLGOK.search(z)
             if m:
                 d = m
@@ -186,7 +186,7 @@ def main(argv):
 
     if was == "suche":
         r = None
-        for z in zeilen:
+        for z in lines:
             m = RECT.search(z)
             if m and m.group(1) == "7":
                 r = m
@@ -199,7 +199,7 @@ def main(argv):
 
     if was == "navpage":
         r = None
-        for z in zeilen:
+        for z in lines:
             m = NAV.search(z)
             if m and r is None:
                 r = m
@@ -213,7 +213,7 @@ def main(argv):
     if was == "restile":
         want = str(20 + int(argv[3]))
         r = None
-        for z in zeilen:
+        for z in lines:
             m = RECT.search(z)
             if m and m.group(1) == want:
                 r = m
@@ -226,7 +226,7 @@ def main(argv):
 
     if was == "ctxbox":
         c = None
-        for z in zeilen:
+        for z in lines:
             m = CTXRECT.search(z)
             if m:
                 c = m
@@ -238,7 +238,7 @@ def main(argv):
 
     if was == "ctxzeile":
         c = None
-        for z in zeilen:
+        for z in lines:
             m = CTXRECT.search(z)
             if m:
                 c = m
@@ -252,7 +252,7 @@ def main(argv):
 
     if was == "knopf":
         r = None
-        for z in zeilen:
+        for z in lines:
             m = RECT.search(z)
             if m and m.group(2) == "2":
                 r = m
@@ -266,14 +266,14 @@ def main(argv):
     if was == "spalte":
         c = argv[3]
         s = None
-        for z in zeilen:
+        for z in lines:
             m = COLUMN.search(z)
             if m and m.group(1) == c:
                 s = m
         if s is None:
             raise SystemExit("klickplan: Spalte %s nicht gemeldet" % c)
         t = None
-        for z in zeilen:
+        for z in lines:
             m = TAB.search(z)
             if m:
                 t = m
@@ -284,7 +284,7 @@ def main(argv):
 
     if was in ("zeile", "pid", "pidvon"):
         target = argv[3]
-        block = last_block(zeilen)
+        block = last_block(lines)
         treffer = None
         for z in block:
             m = LINE.search(z)
@@ -300,7 +300,7 @@ def main(argv):
             print(treffer.group(2))
             return 0
         t = None
-        for z in zeilen:
+        for z in lines:
             m = TAB.search(z)
             if m:
                 t = m

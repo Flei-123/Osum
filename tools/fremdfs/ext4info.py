@@ -25,8 +25,8 @@ import sys
 
 
 class Ext4:
-    def __init__(self, pfad):
-        self.f = open(pfad, 'rb')
+    def __init__(self, path):
+        self.f = open(path, 'rb')
         self.f.seek(1024)
         sb = self.f.read(1024)
         if struct.unpack_from('<H', sb, 0x38)[0] != 0xEF53:
@@ -75,26 +75,26 @@ class Ext4:
         inode = self.inode(ino)
         return self._count(inode[0x28:0x28 + 60])
 
-    def _count(self, knoten):
-        magie, eintraege, _, tiefe, _ = struct.unpack_from('<HHHHI', knoten, 0)
+    def _count(self, node):
+        magie, eintraege, _, tiefe, _ = struct.unpack_from('<HHHHI', node, 0)
         if magie != 0xF30A:
             return 0
         if tiefe == 0:
             return eintraege
-        summe = 0
+        sum_ = 0
         for i in range(eintraege):
             e = 12 + i * 12
-            lo = struct.unpack_from('<I', knoten, e + 4)[0]
-            hi = struct.unpack_from('<H', knoten, e + 8)[0]
-            summe += self._count(self.block(lo | (hi << 32)))
-        return summe
+            lo = struct.unpack_from('<I', node, e + 4)[0]
+            hi = struct.unpack_from('<H', node, e + 8)[0]
+            sum_ += self._count(self.block(lo | (hi << 32)))
+        return sum_
 
-    def find(self, pfad):
+    def find(self, path):
         """Inodenummer zu einem Pfad. Nur so viel Verzeichnislogik wie
         noetig -- lineare Eintraege reichen, htree-Verzeichnisse haben
         dieselben linearen Bloecke darunter."""
         ino = 2
-        for part in [t for t in pfad.split('/') if t]:
+        for part in [t for t in path.split('/') if t]:
             ino = self._entry(ino, part)
             if ino is None:
                 return None
@@ -107,34 +107,34 @@ class Ext4:
             return []
         return list(self._blatt(inode[0x28:0x28 + 60]))
 
-    def _blatt(self, knoten):
-        magie, eintraege, _, tiefe, _ = struct.unpack_from('<HHHHI', knoten, 0)
+    def _blatt(self, node):
+        magie, eintraege, _, tiefe, _ = struct.unpack_from('<HHHHI', node, 0)
         if magie != 0xF30A:
             return
         for i in range(eintraege):
             e = 12 + i * 12
             if tiefe == 0:
-                laenge = struct.unpack_from('<H', knoten, e + 4)[0]
-                lo = struct.unpack_from('<I', knoten, e + 8)[0]
-                hi = struct.unpack_from('<H', knoten, e + 6)[0]
+                len_ = struct.unpack_from('<H', node, e + 4)[0]
+                lo = struct.unpack_from('<I', node, e + 8)[0]
+                hi = struct.unpack_from('<H', node, e + 6)[0]
                 start = lo | (hi << 32)
-                for k in range(laenge & 0x7FFF):
+                for k in range(len_ & 0x7FFF):
                     yield start + k
             else:
-                lo = struct.unpack_from('<I', knoten, e + 4)[0]
-                hi = struct.unpack_from('<H', knoten, e + 8)[0]
+                lo = struct.unpack_from('<I', node, e + 4)[0]
+                hi = struct.unpack_from('<H', node, e + 8)[0]
                 yield from self._blatt(self.block(lo | (hi << 32)))
 
     def _entry(self, dir_ino, name):
         target = name.encode()
         for b in self._bloecke_von(dir_ino):
-            daten = self.block(b)
+            data = self.block(b)
             off = 0
-            while off < len(daten) - 8:
-                ino, rec, nlen, _ = struct.unpack_from('<IHBB', daten, off)
+            while off < len(data) - 8:
+                ino, rec, nlen, _ = struct.unpack_from('<IHBB', data, off)
                 if rec < 8:
                     break
-                if ino and daten[off + 8:off + 8 + nlen] == target:
+                if ino and data[off + 8:off + 8 + nlen] == target:
                     return ino
                 off += rec
         return None
@@ -159,10 +159,10 @@ def main():
         print(f'zustand {fs.state}')
         print(f'64bit {1 if fs.inkompat & 0x80 else 0}')
         return
-    pfad = sys.argv[3]
-    ino = fs.find(pfad)
+    path = sys.argv[3]
+    ino = fs.find(path)
     if ino is None:
-        raise SystemExit(f'ext4info: {pfad} nicht gefunden')
+        raise SystemExit(f'ext4info: {path} nicht gefunden')
     if was == 'tiefe':
         print(fs.extent_tiefe(ino))
     elif was == 'extents':

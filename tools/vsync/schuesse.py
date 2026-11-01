@@ -28,21 +28,21 @@ import sys
 import time
 
 
-def verbinden(pfad, frist=15.0):
-    bis = time.time() + frist
+def verbinden(path_2, deadline=15.0):
+    bis = time.time() + deadline
     while time.time() < bis:
         try:
             s = socket.socket(socket.AF_UNIX)
             s.settimeout(5.0)
-            s.connect(pfad)
+            s.connect(path_2)
             return s
         except OSError:
             time.sleep(0.1)
     return None
 
 
-def say(s, zeile):
-    s.sendall((zeile + "\n").encode())
+def say(s, line):
+    s.sendall((line + "\n").encode())
     try:
         s.recv(65536)
     except OSError:
@@ -90,15 +90,15 @@ def main():
     gut = 0
     for i in range(geschossen):
         target = os.path.join(folder, "s%03d.ppm" % i)
-        letzte = -1
+        last = -1
         for _ in range(50):
             try:
                 now = os.path.getsize(target)
             except OSError:
                 now = -1
-            if now > 0 and now == letzte:
+            if now > 0 and now == last:
                 break
-            letzte = now
+            last = now
             time.sleep(0.02)
         try:
             with open(target, "rb") as f:

@@ -64,10 +64,10 @@ import sys
 import threading
 import time
 
-WURZEL = "."
+ROOT_2 = "."
 NORANGE = False
 ABBRUCH = {}
-KURZ = {}
+SHORT = {}
 LOG = None
 EINMAL = False
 GETAN = threading.Event()
@@ -75,13 +75,13 @@ COUNTER = {"anfragen": 0, "oktette": 0}
 
 
 def protokoll(*w):
-    zeile = " ".join(str(x) for x in w)
+    line_3 = " ".join(str(x) for x in w)
     if LOG:
         with open(LOG, "a") as f:
-            f.write(zeile + "\n")
+            f.write(line_3 + "\n")
             f.flush()
     else:
-        sys.stderr.write(zeile + "\n")
+        sys.stderr.write(line_3 + "\n")
         sys.stderr.flush()
 
 
@@ -117,23 +117,23 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self, only_header=False):
         COUNTER["anfragen"] += 1
-        pfad = self.path.split("?")[0]
-        name = os.path.basename(pfad)
-        datei = os.path.join(WURZEL, name)
-        rel = pfad.lstrip("/")
+        path_2 = self.path.split("?")[0]
+        name = os.path.basename(path_2)
+        file_2 = os.path.join(ROOT_2, name)
+        rel = path_2.lstrip("/")
         if rel and ".." not in rel.split("/"):
-            tief = os.path.join(WURZEL, rel)
+            tief = os.path.join(ROOT_2, rel)
             if os.path.isfile(tief):
-                datei = tief
+                file_2 = tief
                 name = rel
-        if not name or not os.path.isfile(datei):
-            protokoll("404", pfad)
+        if not name or not os.path.isfile(file_2):
+            protokoll("404", path_2)
             self.send_response(404)
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
-        gesamt = os.path.getsize(datei)
+        gesamt = os.path.getsize(file_2)
         von = 0
         part = False
         r = None if NORANGE else self.headers.get("Range")
@@ -150,11 +150,11 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-        laenge = gesamt - von
+        len_ = gesamt - von
         limit = ABBRUCH.get(name, ABBRUCH.get(os.path.basename(name)))
         self.send_response(206 if part else 200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(laenge))
+        self.send_header("Content-Length", str(len_))
         if part:
             self.send_header("Content-Range",
                              "bytes %d-%d/%d" % (von, gesamt - 1, gesamt))
@@ -164,15 +164,15 @@ class Hand(http.server.BaseHTTPRequestHandler):
             return
 
         geschrieben = 0
-        kgrenze = KURZ.get(name, KURZ.get(os.path.basename(name)))
-        with open(datei, "rb") as f:
+        kgrenze = SHORT.get(name, SHORT.get(os.path.basename(name)))
+        with open(file_2, "rb") as f:
             f.seek(von)
-            while geschrieben < laenge:
+            while geschrieben < len_:
                 pos_2 = von + geschrieben
                 if kgrenze is not None and pos_2 >= kgrenze:
                     protokoll("KURZ", name, "bei", pos_2,
                               "nach", geschrieben,
-                              "von", laenge, "angekuendigt")
+                              "von", len_, "angekuendigt")
                     COUNTER["oktette"] += geschrieben
                     if EINMAL:
                         GETAN.set()
@@ -180,7 +180,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                 if limit is not None and pos_2 >= limit:
                     protokoll("ABBRUCH", name, "bei", pos_2,
                               "nach", geschrieben,
-                              "von", laenge, "angekuendigt")
+                              "von", len_, "angekuendigt")
                     COUNTER["oktette"] += geschrieben
                     self._hart_zu()
                     if EINMAL:
@@ -191,7 +191,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     chunk = min(chunk, limit - pos_2)
                 if kgrenze is not None:
                     chunk = min(chunk, kgrenze - pos_2)
-                chunk = min(chunk, laenge - geschrieben)
+                chunk = min(chunk, len_ - geschrieben)
                 b = f.read(chunk)
                 if not b:
                     break
@@ -209,7 +209,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    global WURZEL, LOG, EINMAL, NORANGE
+    global ROOT_2, LOG, EINMAL, NORANGE
     port = 8443
     cert = key = None
     pid = None
@@ -218,7 +218,7 @@ def main():
         a = sys.argv[i]
         if a == "--wurzel" and i + 1 < len(sys.argv):
             i += 1
-            WURZEL = sys.argv[i]
+            ROOT_2 = sys.argv[i]
         elif a == "--cert" and i + 1 < len(sys.argv):
             i += 1
             cert = sys.argv[i]
@@ -241,7 +241,7 @@ def main():
         elif a == "--kurz" and i + 1 < len(sys.argv):
             i += 1
             n, _, o = sys.argv[i].partition(":")
-            KURZ[n] = int(o)
+            SHORT[n] = int(o)
         elif a == "--norange":
             NORANGE = True
         elif a == "--einmal":
@@ -264,7 +264,7 @@ def main():
         with open(pid, "w") as f:
             f.write(str(os.getpid()))
     protokoll("START port=%d wurzel=%s abbruch=%s kurz=%s"
-              % (port, WURZEL, ABBRUCH or "-", KURZ or "-"))
+              % (port, ROOT_2, ABBRUCH or "-", SHORT or "-"))
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     try:

@@ -26,13 +26,13 @@ def main():
         print(__doc__)
         return 2
     sock, target = sys.argv[1], sys.argv[2]
-    frist = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
+    deadline_2 = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 
     if os.path.exists(target):
         os.unlink(target)
 
     s = None
-    bis = time.time() + frist
+    bis = time.time() + deadline_2
     while time.time() < bis:
         try:
             s = socket.socket(socket.AF_UNIX)
@@ -54,23 +54,23 @@ def main():
             pass
         s.sendall(("screendump %s\n" % target).encode())
 
-        letzte = -1
+        last_3 = -1
         ruhig = 0
-        bis = time.time() + frist
+        bis = time.time() + deadline_2
         while time.time() < bis:
             time.sleep(0.15)
             try:
                 now = os.path.getsize(target)
             except OSError:
                 continue
-            if now == letzte and now > 0:
+            if now == last_3 and now > 0:
                 ruhig += 1
                 if ruhig >= 3:
                     print("%d Oktette" % now)
                     return 0
             else:
                 ruhig = 0
-                letzte = now
+                last_3 = now
         print("the screenshot was not finished")
         return 1
     finally:

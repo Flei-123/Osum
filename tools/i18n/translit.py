@@ -185,18 +185,18 @@ STAEMME = [
 STAEMME = [s for s in STAEMME if s[0] != "Umschrift-x"]
 _ORD = sorted(STAEMME, key=lambda s: len(s[0]), reverse=True)
 _RE = re.compile("|".join(re.escape(s[0]) for s in _ORD))
-_ERSATZ = dict(STAEMME)
+_FALLBACK = dict(STAEMME)
 
 _ZITAT = re.compile(r'"[^"]*"')
 
 
-def finde(text, zitate_zaehlen=True):
-    if not zitate_zaehlen:
+def finde(text, zitate_count=True):
+    if not zitate_count:
         text = _ZITAT.sub(lambda m: " " * len(m.group(0)), text)
     aus = []
     for m in _RE.finditer(text):
         s = m.group(0)
-        aus.append((s, _ERSATZ[s]))
+        aus.append((s, _FALLBACK[s]))
     return aus
 
 
@@ -230,17 +230,17 @@ def main(argv):
     umlaute = 0
     geprueft = 0
 
-    for pfad in sorted(glob.glob(os.path.join(wurzel, "locale/de/*"))):
-        rel = os.path.relpath(pfad, wurzel)
-        for nr, zeile in enumerate(
-                open(pfad, encoding="utf-8").read().split("\n"), 1):
-            umlaute += sum(1 for c in zeile if c in "äöüÄÖÜß")
-            ist_komm = zeile.lstrip().startswith("#")
+    for path_2 in sorted(glob.glob(os.path.join(wurzel, "locale/de/*"))):
+        rel = os.path.relpath(path_2, wurzel)
+        for nr, line_3 in enumerate(
+                open(path_2, encoding="utf-8").read().split("\n"), 1):
+            umlaute += sum(1 for c in line_3 if c in "äöüÄÖÜß")
+            ist_komm = line_3.lstrip().startswith("#")
             if ist_komm:
-                treffer = finde(zeile, zitate_zaehlen=False)
-            elif "=" in zeile:
+                treffer = finde(line_3, zitate_count=False)
+            elif "=" in line_3:
                 geprueft += 1
-                k, v = zeile.split("=", 1)
+                k, v = line_3.split("=", 1)
                 k, v = k.strip(), v.strip()
                 if len(k.encode()) >= g["KEYW"]:
                     eng.append("%s:%d  Schluessel %d Oktette >= KEYW %d  %s"
@@ -253,26 +253,26 @@ def main(argv):
                 continue
             for stamm, ersatz in treffer:
                 error.append("%s:%d  %-14s -> %-14s | %s"
-                              % (rel, nr, stamm, ersatz, zeile.strip()[:56]))
-        if len(open(pfad, "rb").read()) >= g["FILE_MAX"]:
+                              % (rel, nr, stamm, ersatz, line_3.strip()[:56]))
+        if len(open(path_2, "rb").read()) >= g["FILE_MAX"]:
             eng.append("%s  %d Oktette >= FILE_MAX %d"
-                       % (rel, os.path.getsize(pfad), g["FILE_MAX"]))
+                       % (rel, os.path.getsize(path_2), g["FILE_MAX"]))
 
     for d in sorted(glob.glob(os.path.join(wurzel, "assets/apps/*.osp"))):
-        pfad = os.path.join(d, "INFO")
-        if not os.path.exists(pfad):
+        path_2 = os.path.join(d, "INFO")
+        if not os.path.exists(path_2):
             continue
-        rel = os.path.relpath(pfad, wurzel)
-        roh = open(pfad, "rb").read()
+        rel = os.path.relpath(path_2, wurzel)
+        roh = open(path_2, "rb").read()
         if len(roh) > g["INFO_READ"]:
             eng.append("%s  %d Oktette > die %d, die appdir liest -- der "
                        "Rest der Datei ist fuer das System nicht da"
                        % (rel, len(roh), g["INFO_READ"]))
-        for nr, zeile in enumerate(roh.decode("utf-8").split("\n"), 1):
-            umlaute += sum(1 for c in zeile if c in "äöüÄÖÜß")
-            if zeile.startswith("keys="):
+        for nr, line_3 in enumerate(roh.decode("utf-8").split("\n"), 1):
+            umlaute += sum(1 for c in line_3 if c in "äöüÄÖÜß")
+            if line_3.startswith("keys="):
                 woerter = [w.strip() for w in
-                           zeile.split("=", 1)[1].split(",")]
+                           line_3.split("=", 1)[1].split(",")]
                 for w in woerter:
                     if not w:
                         continue
@@ -289,12 +289,12 @@ def main(argv):
                             "-- die Umlautform gehoert DANEBEN, nicht "
                             "statt dessen" % (rel, nr, w, soll))
                 continue
-            if not zeile.startswith(("name=", "info=")):
+            if not line_3.startswith(("name=", "info=")):
                 continue
             geprueft += 1
-            for stamm, ersatz in finde(zeile.split("=", 1)[1]):
+            for stamm, ersatz in finde(line_3.split("=", 1)[1]):
                 error.append("%s:%d  %-14s -> %-14s | %s"
-                              % (rel, nr, stamm, ersatz, zeile.strip()[:56]))
+                              % (rel, nr, stamm, ersatz, line_3.strip()[:56]))
 
     print("translit: geprueft=%d umschrift=%d eng=%d umlaute=%d"
           % (geprueft, len(error), len(eng), umlaute))

@@ -127,21 +127,21 @@ def main():
 
     print()
     print("WIDTH AND VALUE -- this is where the error was")
-    for fn, konst, breite, value, beleg in ZUGRIFFE:
+    for fn, konst, width, value, beleg in ZUGRIFFE:
         zs = unsere_zugriffe(our, fn, konst)
         if not zs:
             print("   %-14s %-14s no access found (function "
                   "umbenannt?)" % (fn, konst))
             continue
         for b, w in zs:
-            gut = (b == breite)
+            gut = (b == width)
             wv = ok_.get(w, w) if w is not None else None
             if value is not None and w is not None:
                 gut = gut and (wv == value)
             if not gut:
                 error.append("%s: %s wird mit %d Bit / Wert %s "
                               "geschrieben, Linux: %d Bit / %s"
-                              % (fn, konst, b, wv, breite, value))
+                              % (fn, konst, b, wv, width, value))
             print("   %-14s %-14s %2d Bit  Wert %-8s %s"
                   % (fn, konst, b, ("--" if wv is None else wv),
                      "ok" if gut else "WIDERSPRUCH"))
@@ -151,9 +151,9 @@ def main():
     print("DELIBERATELY OPEN (not an error, but unchecked)")
     for name, text in OPEN.items():
         print("   %s = %s" % (name, ok_.get(name)))
-        for zeile in re.findall(r".{1,64}(?:\s|$)", text):
-            if zeile.strip():
-                print("        " + zeile.strip())
+        for line_2 in re.findall(r".{1,64}(?:\s|$)", text):
+            if line_2.strip():
+                print("        " + line_2.strip())
 
     print()
     if error:

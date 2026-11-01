@@ -109,8 +109,8 @@ def akku(rest, voll, rate, zustand):
     if rate in (0, 0xFFFFFFFF):
         m = 0
     else:
-        menge = (voll - rest) if (zustand & 2) else rest
-        m = 0 if menge <= 0 and (zustand & 2) else (menge * 60) // rate
+        set_ = (voll - rest) if (zustand & 2) else rest
+        m = 0 if set_ <= 0 and (zustand & 2) else (set_ * 60) // rate
     return p, m
 
 

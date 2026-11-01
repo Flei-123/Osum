@@ -28,7 +28,7 @@ def main():
         if a.startswith("--prefix="):
             prefix = a[len("--prefix="):].rstrip("/")
     os.makedirs(out_dir, exist_ok=True)
-    dirs, files, links = [], [], []
+    dirs, files, left = [], [], []
     stats = {"file": 0, "dir": 0, "link": 0, "hard": 0, "skip": 0, "bytes": 0}
     with tarfile.open(tarball, "r:*") as tf:
         members = tf.getmembers()
@@ -58,13 +58,13 @@ def main():
                 stats["file"] += 1
                 files.append((name, host, src.mode & 0o7777))
             elif m.issym():
-                links.append((name, m.linkname))
+                left.append((name, m.linkname))
                 stats["link"] += 1
             else:
                 stats["skip"] += 1
     dirs.sort(key=lambda d: (d[0].count("/"), d[0]))
     files.sort(key=lambda d: d[0])
-    links.sort(key=lambda d: d[0])
+    left.sort(key=lambda d: d[0])
     with open(spec_out, "w") as o:
         if prefix:
             o.write(prefix + "/\n")
@@ -72,7 +72,7 @@ def main():
             o.write("%s%s/@%o\n" % (prefix, name, mode or 0o755))
         for name, host, mode in files:
             o.write("%s%s=%s@%o\n" % (prefix, name, host, mode or 0o644))
-        for name, tgt in links:
+        for name, tgt in left:
             o.write("%s%s->%s\n" % (prefix, name, tgt))
     print("mkspec: %(file)d files (%(bytes)d bytes), %(dir)d dirs, %(link)d symlinks, %(hard)d hardlinks, %(skip)d skipped" % stats)
     return 0

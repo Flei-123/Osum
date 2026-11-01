@@ -59,7 +59,7 @@ def foreign(sp):
     return "Block 2 unter dem Namen von Block 1 ausgeliefert"
 
 
-def gross(sp):
+def big(sp):
     idx = load(sp, "INDEX").split(b"\n")
     aus = []
     getan = False
@@ -103,7 +103,7 @@ if __name__ == "__main__":
     elif was == "fremd":
         print(foreign(sp))
     elif was == "gross":
-        print(gross(sp))
+        print(big(sp))
     elif was == "wurzelluege":
         print(wurzelluege(sp))
     elif was == "halbe":

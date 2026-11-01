@@ -45,41 +45,41 @@ import struct
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(os.path.dirname(HIER))
-sys.path.insert(0, os.path.join(WURZEL, "tools", "ttf"))
+ROOT_2 = os.path.dirname(os.path.dirname(HIER))
+sys.path.insert(0, os.path.join(ROOT_2, "tools", "ttf"))
 
 import subset as schnitt  # noqa: E402  -- the path has to be set first
 
 
-VORGABE_MAP = os.path.join(WURZEL, "assets", "icons", "icons.map")
-VORGABE_OUT = os.path.join(WURZEL, "assets", "osum-icons.ttf")
-VORGABE_IDS = os.path.join(WURZEL, "lib", "icons.fi")
-VORGABE_LIST = os.path.join(WURZEL, "assets", "icons", "icons.list")
+VORGABE_MAP = os.path.join(ROOT_2, "assets", "icons", "icons.map")
+VORGABE_OUT = os.path.join(ROOT_2, "assets", "osum-icons.ttf")
+VORGABE_IDS = os.path.join(ROOT_2, "lib", "icons.fi")
+VORGABE_LIST = os.path.join(ROOT_2, "assets", "icons", "icons.list")
 VORGABE_SRC = "/root/icon-src/lucide/font/lucide.ttf"
 VORGABE_INFO = "/root/icon-src/lucide/font/info.json"
 
 
 
-class Eintrag:
-    def __init__(self, name, cp, quelle):
+class Entry_2:
+    def __init__(self, name, cp, source_2):
         self.name = name
         self.cp = cp
-        self.quelle = quelle
+        self.source_2 = source_2
         self.alias_von = None
 
 
-def map_lesen(pfad):
+def map_read(path_2):
     """-> (list of Eintrag in file order, dict name -> Eintrag)."""
-    liste = []
+    list_ = []
     nach_name = {}
-    for nr, roh in enumerate(open(pfad, encoding="ascii").read().splitlines(),
+    for nr, roh in enumerate(open(path_2, encoding="ascii").read().splitlines(),
                              1):
-        zeile = roh.split("#", 1)[0].strip()
-        if not zeile:
+        line_3 = roh.split("#", 1)[0].strip()
+        if not line_3:
             continue
-        if "=" not in zeile:
+        if "=" not in line_3:
             raise SystemExit("icons.map:%d: no '=' in '%s'" % (nr, roh))
-        name, _, rest = zeile.partition("=")
+        name, _, rest = line_3.partition("=")
         name = name.strip()
         parts = rest.split()
         if len(parts) != 2:
@@ -93,7 +93,7 @@ def map_lesen(pfad):
             if target is None:
                 raise SystemExit(
                     "icons.map:%d: alias to unknown name '%s'" % (nr, parts[1]))
-            e = Eintrag(name, target.cp, None)
+            e = Entry_2(name, target.cp, None)
             e.alias_von = target.name
         else:
             try:
@@ -106,64 +106,64 @@ def map_lesen(pfad):
                 raise SystemExit(
                     "icons.map:%d: %04X is outside the private use area "
                     "E000..F8FF" % (nr, cp))
-            e = Eintrag(name, cp, parts[1])
-        liste.append(e)
+            e = Entry_2(name, cp, parts[1])
+        list_.append(e)
         nach_name[name] = e
     seen = {}
-    for e in liste:
+    for e in list_:
         if e.alias_von is None:
             if e.cp in seen:
                 raise SystemExit(
                     "icons.map: %04X is used by both '%s' and '%s'"
                     % (e.cp, seen[e.cp], e.name))
             seen[e.cp] = e.name
-    return liste, nach_name
+    return list_, nach_name
 
 
 
-def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
+def bauen(map_path, src_path, info_path_2, out_path_2, ids_path, list_path,
           leise=False):
-    liste, _ = map_lesen(map_pfad)
-    echte = [e for e in liste if e.alias_von is None]
+    list_, _ = map_read(map_path)
+    echte = [e for e in list_ if e.alias_von is None]
 
-    info = json.load(open(info_pfad, encoding="utf-8"))
-    v = schnitt.Vorlage(src_pfad)
+    info = json.load(open(info_path_2, encoding="utf-8"))
+    v = schnitt.Vorlage(src_path)
     voll = v.cmap()
 
     char = {}
     fehlend = []
     for e in echte:
-        satz = info.get(e.quelle)
+        satz = info.get(e.source_2)
         if satz is None:
-            fehlend.append((e.name, e.quelle))
+            fehlend.append((e.name, e.source_2))
             continue
         qcp = int(satz["encodedCode"].lstrip("\\"), 16)
         gid = voll.get(qcp)
         if not gid:
-            fehlend.append((e.name, e.quelle))
+            fehlend.append((e.name, e.source_2))
             continue
         char[e.cp] = gid
     if fehlend:
-        for name, quelle in fehlend:
+        for name, source_2 in fehlend:
             print("build: %s -- no glyph '%s' in the source font"
-                  % (name, quelle), file=sys.stderr)
+                  % (name, source_2), file=sys.stderr)
         raise SystemExit(1)
 
     behalten = [0]
     for gid in char.values():
         if gid not in behalten:
             behalten.append(gid)
-    offen = list(behalten)
+    open_ = list(behalten)
     zusammengesetzt = 0
-    while offen:
-        g = offen.pop()
+    while open_:
+        g = open_.pop()
         parts = schnitt.komponenten(v.glyph_bytes(g))
         if parts:
             zusammengesetzt += 1
         for k in parts:
             if k not in behalten:
                 behalten.append(k)
-                offen.append(k)
+                open_.append(k)
     behalten.sort()
     karte = {alt: new for new, alt in enumerate(behalten)}
 
@@ -173,7 +173,7 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
         offset.append(len(glyf))
         roh = v.glyph_bytes(alt)
         if roh and schnitt.s16(roh, 0) < 0:
-            roh = schnitt.komponenten_neu(roh, karte)
+            roh = schnitt.komponenten_new(roh, karte)
         glyf += schnitt.pad4(roh)
     offset.append(len(glyf))
     lang = offset[-1] > 0x1FFFE
@@ -219,37 +219,37 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     koerper = b""
     for m in marken:
         d = tabellen[m]
-        verz += struct.pack(">4sIII", m.encode("latin1"), schnitt.summe(d),
+        verz += struct.pack(">4sIII", m.encode("latin1"), schnitt.sum_(d),
                             pos, len(d))
         koerper += schnitt.pad4(d)
         pos += len(schnitt.pad4(d))
-    datei = bytearray(header + verz + koerper)
-    check = (0xB1B0AFBA - schnitt.summe(bytes(datei))) & 0xFFFFFFFF
+    file_2 = bytearray(header + verz + koerper)
+    check = (0xB1B0AFBA - schnitt.sum_(bytes(file_2))) & 0xFFFFFFFF
     for i, m in enumerate(marken):
         if m == "head":
-            hoff = schnitt.u32(datei, 12 + 16 * i + 8)
-            struct.pack_into(">I", datei, hoff + 8, check)
+            hoff = schnitt.u32(file_2, 12 + 16 * i + 8)
+            struct.pack_into(">I", file_2, hoff + 8, check)
 
-    os.makedirs(os.path.dirname(out_pfad), exist_ok=True)
-    open(out_pfad, "wb").write(bytes(datei))
+    os.makedirs(os.path.dirname(out_path_2), exist_ok=True)
+    open(out_path_2, "wb").write(bytes(file_2))
 
-    quelle_gross = os.path.getsize(src_pfad)
+    source_big = os.path.getsize(src_path)
     if not leise:
         print("%s: %d names (%d glyphs, %d aliases), %d octets"
-              % (os.path.relpath(out_pfad, WURZEL), len(liste), len(echte),
-                 len(liste) - len(echte), len(datei)))
+              % (os.path.relpath(out_path_2, ROOT_2), len(list_), len(echte),
+                 len(list_) - len(echte), len(file_2)))
         print("   source %s: %d glyphs, %d octets"
-              % (os.path.relpath(src_pfad, "/root"), v.numglyphs,
-                 quelle_gross))
+              % (os.path.relpath(src_path, "/root"), v.numglyphs,
+                 source_big))
         print("   cut to %.2f %% of the source, %d composite glyphs, "
               "upm=%d asc=%d desc=%d"
-              % (100.0 * len(datei) / quelle_gross, zusammengesetzt, v.upm,
+              % (100.0 * len(file_2) / source_big, zusammengesetzt, v.upm,
                  v.ascent, v.descent))
         print("   tables: %s" % ", ".join(marken))
 
-    ids_schreiben(ids_pfad, liste, echte, len(datei), quelle_gross, v)
-    list_schreiben(list_pfad, liste)
-    return len(datei), quelle_gross, len(echte), len(liste)
+    ids_write(ids_path, list_, echte, len(file_2), source_big, v)
+    list_write(list_path, list_)
+    return len(file_2), source_big, len(echte), len(list_)
 
 
 
@@ -261,7 +261,7 @@ def firn_name(name):
     return short.replace(".", "_").replace("-", "_").upper()
 
 
-def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
+def ids_write(path_2, list_, echte, big_2, source_big, v):
     z = []
     z.append("// SPDX-License-Identifier: GPL-2.0-only")
     z.append("// lib/icons.fi -- GENERATED by tools/icons/build.py "
@@ -288,9 +288,9 @@ def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
              "See docs/ICONS.md.")
     z.append("//")
     z.append("//   names      %d (%d glyphs, %d aliases)"
-             % (len(liste), len(echte), len(liste) - len(echte)))
+             % (len(list_), len(echte), len(list_) - len(echte)))
     z.append("//   font       %d octets, cut from %d"
-             % (gross, quelle_gross))
+             % (big_2, source_big))
     z.append("//   upm        %d, ascent %d, descent %d"
              % (v.upm, v.ascent, v.descent))
     z.append("")
@@ -298,7 +298,7 @@ def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
     z.append("")
     z.append("export {")
     z.append("    COUNT, FIRST, LAST, UPM,")
-    names = [firn_name(e.name) for e in liste]
+    names = [firn_name(e.name) for e in list_]
     for i in range(0, len(names), 4):
         z.append("    " + ", ".join(names[i:i + 4]) + ",")
     z.append("    is_icon, index_of, at_index")
@@ -310,13 +310,13 @@ def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
              "uses these")
     z.append("// instead of a number it typed in itself.")
     z.append("const COUNT: u64 = %d" % len(echte))
-    cps = sorted(e.cp for e in liste)
+    cps = sorted(e.cp for e in list_)
     z.append("const FIRST: u64 = 0x%04X" % cps[0])
     z.append("const LAST: u64 = 0x%04X" % cps[-1])
     z.append("const UPM: u64 = %d" % v.upm)
     z.append("")
     block = None
-    for e in liste:
+    for e in list_:
         b = e.name.split(".")[1] if e.name.count(".") >= 2 else "general"
         if b != block:
             block = b
@@ -327,7 +327,7 @@ def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
                      % (firn_name(e.name), e.cp, firn_name(e.alias_von)))
         else:
             z.append("const %-24s: u64 = 0x%04X // %s"
-                     % (firn_name(e.name), e.cp, e.quelle))
+                     % (firn_name(e.name), e.cp, e.source_2))
     z.append("")
     z.append("// The position of an icon in the list, 0..COUNT-1, or "
              "COUNT if the")
@@ -371,30 +371,30 @@ def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
     z.append("    return c >= FIRST && c <= LAST")
     z.append("}")
     z.append("")
-    os.makedirs(os.path.dirname(pfad), exist_ok=True)
-    open(pfad, "w", encoding="ascii").write("\n".join(z))
+    os.makedirs(os.path.dirname(path_2), exist_ok=True)
+    open(path_2, "w", encoding="ascii").write("\n".join(z))
 
 
-def list_schreiben(pfad, liste):
+def list_write(path_2, list_):
     """name<TAB>codepoint<TAB>source-or-alias -- for the test runners."""
     z = ["# GENERATED by tools/icons/build.py -- name, code point, origin"]
-    for e in liste:
+    for e in list_:
         z.append("%s\t%04X\t%s"
                  % (e.name, e.cp,
-                    e.quelle if e.alias_von is None
+                    e.source_2 if e.alias_von is None
                     else "alias:" + e.alias_von))
-    open(pfad, "w", encoding="ascii").write("\n".join(z) + "\n")
+    open(path_2, "w", encoding="ascii").write("\n".join(z) + "\n")
 
 
 def main(argv):
-    map_pfad, src, info = VORGABE_MAP, VORGABE_SRC, VORGABE_INFO
+    map_path, src, info = VORGABE_MAP, VORGABE_SRC, VORGABE_INFO
     out, ids, lst = VORGABE_OUT, VORGABE_IDS, VORGABE_LIST
     leise = False
     i = 1
     while i < len(argv):
         a = argv[i]
         if a == "--map":
-            map_pfad = argv[i + 1]; i += 2
+            map_path = argv[i + 1]; i += 2
         elif a == "--source":
             src = argv[i + 1]; i += 2
         elif a == "--info":
@@ -415,7 +415,7 @@ def main(argv):
               "       Unpack lucide-static there, or pass --source." % src,
               file=sys.stderr)
         return 1
-    bauen(map_pfad, src, info, out, ids, lst, leise)
+    bauen(map_path, src, info, out, ids, lst, leise)
     return 0
 
 

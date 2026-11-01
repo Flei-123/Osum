@@ -73,10 +73,10 @@ HEX = '0123456789abcdefABCDEF'
 UNI = re.compile(r'\\u\{([0-9a-fA-F]+)\}') 
 
 
-def ketten(pfad):
+def ketten(path_2):
     aus = {}
     fn = '<datei>'
-    for nr, z in enumerate(open(pfad, encoding='utf-8').read().split('\n'),
+    for nr, z in enumerate(open(path_2, encoding='utf-8').read().split('\n'),
                            1):
         m = FN.match(z)
         if m:
@@ -96,10 +96,10 @@ def all_ketten(wurzel):
         for fn in sorted(fns):
             if not fn.endswith('.fi'):
                 continue
-            pfad = os.path.join(dp, fn)
-            rel = os.path.relpath(pfad, wurzel).replace(os.sep, '/')
+            path_2 = os.path.join(dp, fn)
+            rel = os.path.relpath(path_2, wurzel).replace(os.sep, '/')
             for nr, z in enumerate(
-                    open(pfad, encoding='utf-8').read().split('\n'), 1):
+                    open(path_2, encoding='utf-8').read().split('\n'), 1):
                 if z.lstrip().startswith('//'):
                     continue
                 d = DEKL.match(z.split('//')[0])
@@ -111,25 +111,25 @@ def main(argv):
     wurzel = os.environ.get('OSUM_ROOT', '.')
     schief = []
     geprueft = 0
-    for datei, names, breite, wozu in COLUMNS:
-        pfad = os.path.join(wurzel, datei)
-        if not os.path.exists(pfad):
-            schief.append('%s fehlt' % datei)
+    for file_2, names, width_2, wozu in COLUMNS:
+        path_2 = os.path.join(wurzel, file_2)
+        if not os.path.exists(path_2):
+            schief.append('%s fehlt' % file_2)
             continue
-        k = ketten(pfad)
+        k = ketten(path_2)
         for schl in names:
             n = schl[1]
             if schl not in k:
                 schief.append('%s: die Kette %s in fn %s gibt es nicht mehr'
-                              % (datei, n, schl[0]))
+                              % (file_2, n, schl[0]))
                 continue
             nr, N, roh = k[schl]
             t = inhalt(roh)
             geprueft += 1
-            if len(t) != breite:
+            if len(t) != width_2:
                 schief.append(
                     '%s:%d  %s = %r -- %d Zeichen, die Spalte ist %d '
-                    '(%s)' % (datei, nr, n, t, len(t), breite, wozu))
+                    '(%s)' % (file_2, nr, n, t, len(t), width_2, wozu))
     print('spalten: %d Beschriftungen in %d Spalten, %d schief'
           % (geprueft, len(COLUMNS), len(schief)))
     for z in schief:

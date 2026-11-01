@@ -117,7 +117,7 @@ def aufgehellt(px, w, h, soll):
 BEFUND = {"fehler": 0, "vertauscht": 0}
 
 
-def check_color(bild, r, g, bl, n, ramp):
+def check_color(image_2, r, g, bl, n, ramp):
     best, bd = None, 10 ** 9
     for nm, (sr, sg, sb) in ramp.items():
         d = abs(r - sr) + abs(g - sg) + abs(bl - sb)
@@ -129,7 +129,7 @@ def check_color(bild, r, g, bl, n, ramp):
         if (r, g, bl) == (qb, qg, qr) and qr != qb:
             rot = qn
             break
-    short = bild.split("/")[-1]
+    short = image_2.split("/")[-1]
     if rot:
         print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  = {rot} MIT VERTAUSCHTEM R UND B")

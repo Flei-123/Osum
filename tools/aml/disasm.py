@@ -682,7 +682,7 @@ def main(argv):
         return 1
     mode = argv[1]
     if mode == "deckung":
-        liste = argv[2]
+        list_ = argv[2]
         paths = argv[3:]
     else:
         paths = argv[2:]
@@ -707,19 +707,19 @@ def main(argv):
                 print("%-40s %-16s %s" % (full, kind, extra))
     elif mode == "deckung":
         koennen = set()
-        for line in open(liste):
+        for line in open(list_):
             line = line.split("#")[0].strip()
             if not line:
                 continue
             koennen.add(int(line, 16) if not line.startswith("0x")
                         else int(line, 16))
         da = set(count)
-        fehlt = sorted(da - koennen)
+        missing = sorted(da - koennen)
         print("occurring in the table: %d different opcodes" % len(da))
         print("davon unterstuetzt:        %d" % len(da & koennen))
         print("Abdeckung:                 %d%%"
               % (100 * len(da & koennen) // max(1, len(da))))
-        for op in fehlt:
+        for op in missing:
             print("  FEHLT %-34s %6d mal" % (op_text(op), count[op]))
     if errors:
         print("FEHLER beim Lesen:", file=sys.stderr)

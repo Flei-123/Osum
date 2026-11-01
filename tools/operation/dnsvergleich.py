@@ -69,7 +69,7 @@ def dig(name, typ, server):
         if "status:" in z:
             status = z.split("status:")[1].split(",")[0].strip()
             break
-    menge = set()
+    set_ = set()
     im_abschnitt = False
     for z in r.stdout.splitlines():
         if z.startswith(";; ANSWER SECTION"):
@@ -80,8 +80,8 @@ def dig(name, typ, server):
                 break
             f = z.split()
             if len(f) >= 5 and f[3] == typ:
-                menge.add(norm(f[4]))
-    return status, menge
+                set_.add(norm(f[4]))
+    return status, set_
 
 
 def norm(a):
@@ -115,32 +115,32 @@ def main():
 
     gut = 0
     rot = 0
-    zeilen = []
+    lines = []
     for name, typ, warum in LIST:
         t0 = time.time()
         h = host(prog, name, typ, server)
         ms = int((time.time() - t0) * 1000)
-        status, menge = dig(name, typ, server)
+        status, set_ = dig(name, typ, server)
         if status == "NXDOMAIN":
             ok = (h == "NXDOMAIN")
             erwartet = "NXDOMAIN"
-        elif not menge:
+        elif not set_:
             ok = h in ("NODATA", "(leer)")
             erwartet = "NODATA"
         else:
-            ok = norm(h) in menge
+            ok = norm(h) in set_
             if not ok:
                 _, m2 = dig(name, typ, server)
-                menge |= m2
-                ok = norm(h) in menge
-            erwartet = " ".join(sorted(menge)[:3])
-            if len(menge) > 3:
-                erwartet += " (+%d)" % (len(menge) - 3)
+                set_ |= m2
+                ok = norm(h) in set_
+            erwartet = " ".join(sorted(set_)[:3])
+            if len(set_) > 3:
+                erwartet += " (+%d)" % (len(set_) - 3)
         if ok:
             gut += 1
         else:
             rot += 1
-        zeilen.append({"name": name, "typ": typ, "warum": warum,
+        lines.append({"name": name, "typ": typ, "warum": warum,
                        "host": h, "dig": erwartet, "ok": ok, "ms": ms})
         print("  %-5s %-40s %-6s host=%-22s dig=%s"
               % ("OK" if ok else "FAIL", name, typ, h, erwartet))
@@ -149,7 +149,7 @@ def main():
           % (gut, rot, server))
     with open("/tmp/dnsvergleich.json", "w") as f:
         json.dump({"gut": gut, "rot": rot, "server": server,
-                   "zeilen": zeilen}, f, indent=1)
+                   "zeilen": lines}, f, indent=1)
     return 1 if rot else 0
 
 

@@ -51,8 +51,8 @@ BS = mkfs.BS
 class Roh:
     """Ein Abbild, roh, blockweise -- ohne es in den Speicher zu ziehen."""
 
-    def __init__(self, pfad):
-        self.f = open(pfad, "r+b")
+    def __init__(self, path_2):
+        self.f = open(path_2, "r+b")
         self.sb = self.blk(0)
 
     def blk(self, n):
@@ -108,8 +108,8 @@ FAELLE = ["kennung", "inodes", "bloecke", "bereiche", "zeigerkreis",
           "leerkarte", "muell", "jmuell"]
 
 
-def mach(fall, grund, target):
-    shutil.copyfile(grund, target)
+def mach(fall, reason_2, target):
+    shutil.copyfile(reason_2, target)
     r = Roh(target)
     if fall == "kennung":
         r.s(mkfs.SB["MAGIC"], 0xDEADBEEFDEADBEEF)
@@ -128,14 +128,14 @@ def mach(fall, grund, target):
         r.inode_set(2, mkfs.I_INDIRECT, b)
         r.inode_set(2, mkfs.I_SIZE, 1 << 20)
     elif fall == "verzkreis":
-        bild = _image(target)
-        binino = bild.finde("/bin")
-        bild.f.close()
+        image_2 = _image(target)
+        binino = image_2.finde("/bin")
+        image_2.f.close()
         _dir_add(r, binino, "hoch", 1)
     elif fall == "selbstverz":
-        bild = _image(target)
-        binino = bild.finde("/bin")
-        bild.f.close()
+        image_2 = _image(target)
+        binino = image_2.finde("/bin")
+        image_2.f.close()
         _dir_add(r, binino, "ich", binino)
     elif fall == "doppelt":
         b = r.inode_get(2, mkfs.I_DIRECT)
@@ -143,9 +143,9 @@ def mach(fall, grund, target):
     elif fall == "wildzeiger":
         r.inode_set(2, mkfs.I_DIRECT, r.g(mkfs.SB["BLOCKS"]) + 1000)
     elif fall == "totlink":
-        bild = _image(target)
-        binino = bild.finde("/bin")
-        bild.f.close()
+        image_2 = _image(target)
+        binino = image_2.finde("/bin")
+        image_2.f.close()
         _dir_add(r, binino, "nirgends", r.g(mkfs.SB["INODES"]) - 1)
     elif fall == "leerkarte":
         bmb = r.g(mkfs.SB["BMBLOCKS"]) or 1
@@ -170,10 +170,10 @@ def mach(fall, grund, target):
     return target
 
 
-def _image(pfad):
+def _image(path_2):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import check
-    return check.Bild(pfad)
+    return check.Image_(path_2)
 
 
 def _frei(r):
@@ -230,12 +230,12 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    grund, aus = argv[1], argv[2]
+    reason_2, aus = argv[1], argv[2]
     faelle = argv[3:] or FAELLE
     os.makedirs(aus, exist_ok=True)
     for f in faelle:
         z = os.path.join(aus, "kaputt-%s.img" % f)
-        mach(f, grund, z)
+        mach(f, reason_2, z)
         print("kaputt: %s" % z)
     return 0
 

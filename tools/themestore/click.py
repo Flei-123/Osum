@@ -32,7 +32,7 @@ def go(x, y):
     return out
 
 
-def drag(punkte):
+def drag(points_2):
     """RUNDE GLAS: ZIEHEN IST NICHT KLICKEN.
 
     Ein Klick ist Knopf runter und sofort wieder hoch an derselben
@@ -48,10 +48,10 @@ def drag(punkte):
     genau die vielen kleinen sind der Fall, in dem eine vergessene
     Neumischung als Schliere stehen bleibt.
     """
-    x0, y0 = punkte[0]
+    x0, y0 = points_2[0]
     out = go(x0, y0)
     out += ["warte 1", "mouse_button 1", "warte 1"]
-    for (x1, y1) in punkte[1:]:
+    for (x1, y1) in points_2[1:]:
         dx, dy = x1 - x0, y1 - y0
         schritte = max(abs(dx), abs(dy), 1)
         schritte = min(max((schritte + 39) // 40, 1), 40)

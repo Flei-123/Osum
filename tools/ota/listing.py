@@ -58,7 +58,7 @@ import plattform as PLT   # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import opkpfad
-OPK = opkpfad.pfad()
+OPK = opkpfad.path_2()
 
 
 def load_opk():
@@ -93,7 +93,7 @@ def foreign_prueft(pk, msg, sig):
         return None
 
 
-def meta_aus_opk(pfad):
+def meta_aus_opk(path_2):
     """name und fassung aus dem Kopf einer .opk-Datei.
 
     Der Kopf ist `OPKG0001`, dann zwei Laengen zu acht Oktetten und der
@@ -101,20 +101,20 @@ def meta_aus_opk(pfad):
     Das ist dasselbe Format, das `kernel/user/opk.fi` liest -- hier wird
     es nur gelesen, nirgends ein zweites geschrieben.
     """
-    with open(pfad, "rb") as f:
+    with open(path_2, "rb") as f:
         header = f.read(64)
         if header[:8] != b"OPKG0001":
-            raise SystemExit("verzeichnis: %s ist not an OPKG file" % pfad)
+            raise SystemExit("verzeichnis: %s ist not an OPKG file" % path_2)
         ml = int.from_bytes(header[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
     name = fassung = None
-    for zeile in meta.split("\n"):
-        if zeile.startswith("name="):
-            name = zeile[5:].strip()
-        elif zeile.startswith("fassung="):
-            fassung = zeile[8:].strip()
+    for line_3 in meta.split("\n"):
+        if line_3.startswith("name="):
+            name = line_3[5:].strip()
+        elif line_3.startswith("fassung="):
+            fassung = line_3[8:].strip()
     if not name:
-        raise SystemExit("verzeichnis: %s hat keinen Namen" % pfad)
+        raise SystemExit("verzeichnis: %s hat keinen Namen" % path_2)
     return name, fassung or "0"
 
 
@@ -122,7 +122,7 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    quelle = sys.argv[1]
+    source_2 = sys.argv[1]
     fassung = None
     schluessel = None
     kaputt = None
@@ -145,13 +145,13 @@ def main():
         print(__doc__)
         return 2
 
-    dateien = sorted(f for f in os.listdir(quelle) if f.endswith(".opk"))
+    dateien = sorted(f for f in os.listdir(source_2) if f.endswith(".opk"))
     if not dateien:
-        raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % quelle)
+        raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % source_2)
 
     zeilen = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t0"]
     for d in dateien:
-        p = os.path.join(quelle, d)
+        p = os.path.join(source_2, d)
         roh = open(p, "rb").read()
         h = hashlib.sha256(roh).hexdigest()
         if kaputt == d:
@@ -174,9 +174,9 @@ def main():
         raise SystemExit("verzeichnis: eine FREMDE Umsetzung erkennt die "
                          "Signatur nicht an")
 
-    with open(os.path.join(quelle, "VERZEICHNIS"), "wb") as f:
+    with open(os.path.join(source_2, "VERZEICHNIS"), "wb") as f:
         f.write(roh)
-    with open(os.path.join(quelle, "VERZEICHNIS.sig"), "wb") as f:
+    with open(os.path.join(source_2, "VERZEICHNIS.sig"), "wb") as f:
         f.write(sig)
     print("   VERZEICHNIS  fassung %d, %d Paket(e), %d Oktette, sig %s...%s"
           % (fassung, len(dateien), len(roh), sig.hex()[:12],

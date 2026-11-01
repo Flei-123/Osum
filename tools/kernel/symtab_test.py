@@ -5,11 +5,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import symtab
 
 elf = sys.argv[1]
-lns = symtab.zeilen(elf)
+lns = symtab.lines(elf)
 files = {}
 ents = []
-for adr, datei, nr in lns:
-    f = files.setdefault(datei, len(files))
+for adr, file_2, nr in lns:
+    f = files.setdefault(file_2, len(files))
     ents.append((adr & 0xFFFFFFFF, (min(f, 0xFFF) << 20) | min(nr, 0xFFFFF)))
 idx, st = symtab.pack_lines(ents)
 n = len(ents)

@@ -25,8 +25,8 @@ FALLBACK = [
 ]
 
 
-def ziehen(quelle):
-    lines = open(quelle).read().split('\n')
+def ziehen(source):
+    lines = open(source).read().split('\n')
     start = next(i for i, l in enumerate(lines) if l.startswith('const E_OK'))
     end = next(i for i, l in enumerate(lines) if l.startswith('fn wasi_rufen'))
     txt = '\n'.join(lines[start:end])

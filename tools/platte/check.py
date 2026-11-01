@@ -21,8 +21,8 @@ def main(low, serial, full):
         print("size mismatch", a.size, b.size)
         return 1
     roh = open(serial, "rb").read().decode("latin1")
-    marke = "settings: rect name=waa "
-    schnitt = roh.rfind(marke)
+    brand_2 = "settings: rect name=waa "
+    schnitt = roh.rfind(brand_2)
     tail = roh[schnitt:] if schnitt >= 0 else roh
     f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
@@ -31,12 +31,12 @@ def main(low, serial, full):
         print("disk NO caption in the recording")
         return 1
     win = Counter(int(m.group(1)) for m in zeilen).most_common(1)[0][0]
-    letzte = {}
+    last_3 = {}
     for m in zeilen:
         if int(m.group(1)) == win and m.group(10).strip():
-            letzte[(m.group(2), m.group(10))] = m
+            last_3[(m.group(2), m.group(10))] = m
     labels = halo = halo_same = ground = ground_diff = corner = corner_diff = 0
-    for m in letzte.values():
+    for m in last_3.values():
         x0 = int(m.group(8)) + int(m.group(3))
         y0 = int(m.group(9)) + int(m.group(4)) - asc
         x1 = min(x0 + int(m.group(7)), b.size[0])

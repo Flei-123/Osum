@@ -101,11 +101,11 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    bild = sys.argv[1]
+    image = sys.argv[1]
     args = sys.argv[2:]
-    p = read_ppm(bild)
+    p = read_ppm(image)
     if p is None:
-        print("kein P6-PPM: %s" % bild)
+        print("kein P6-PPM: %s" % image)
         return 1
     w, h, px = p
     if "--png" in args:

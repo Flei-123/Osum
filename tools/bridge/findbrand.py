@@ -3,10 +3,10 @@
 import sys
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("keine P6-Datei: " + pfad)
+        raise SystemExit("keine P6-Datei: " + path_2)
     felder = []
     at = 2
     while len(felder) < 3:
@@ -31,10 +31,10 @@ def main():
     if (w, h) != (w2, h2):
         print("MASSE VERSCHIEDEN")
         return 1
-    zeile = w * 3
+    line = w * 3
 
     verschieden = [y for y in range(h)
-                   if a[y * zeile:(y + 1) * zeile] != b[y * zeile:(y + 1) * zeile]]
+                   if a[y * line:(y + 1) * line] != b[y * line:(y + 1) * line]]
     if not verschieden:
         print("NO LINE DIFFERENT -- the brand is nowhere")
         return 1
@@ -52,12 +52,12 @@ def main():
     up = max(e - s + 1 for s, e in baender)
     print("highest band: %d lines (one text line is 16)" % up)
 
-    def bright(bild, von, bis):
+    def bright(image, von, bis):
         n = 0
         for y in range(von, bis + 1):
-            o = y * zeile
-            for i in range(o, o + zeile, 3):
-                if bild[i] > 96 or bild[i + 1] > 96 or bild[i + 2] > 96:
+            o = y * line
+            for i in range(o, o + line, 3):
+                if image[i] > 96 or image[i + 1] > 96 or image[i + 2] > 96:
                     n += 1
         return n
 

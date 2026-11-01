@@ -23,14 +23,14 @@ def read(img, path):
     ino = img.finde(path)
     if not ino:
         return None
-    return img.lies(ino, 0, img.ig(ino, mkfs.I_SIZE))
+    return img.read_2(ino, 0, img.ig(ino, mkfs.I_SIZE))
 
 
 def main(argv):
     if len(argv) < 4:
         print(__doc__)
         return 2
-    img = check.Bild(argv[2])
+    img = check.Image_(argv[2])
     if not img.magic:
         print("not an OFS image")
         return 1

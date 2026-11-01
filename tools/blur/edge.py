@@ -2,14 +2,14 @@
 import sys
 from PIL import Image
 
-def zeile(px, y, x0, x1):
-    gross = small = 0
+def line(px, y, x0, x1):
+    big = small = 0
     for x in range(x0, x1 - 1):
         a = px[x, y]; b = px[x + 1, y]
         d = abs(a[0]-b[0]) + abs(a[1]-b[1]) + abs(a[2]-b[2])
-        if d > 60: gross += 1
+        if d > 60: big += 1
         elif d >= 4: small += 1
-    return gross, small
+    return big, small
 
 def main():
     im = Image.open(sys.argv[1]).convert('RGB')
@@ -27,7 +27,7 @@ def main():
         (600, "blanker Grund daneben",420,  725),
     ]
     for y, was, x0, x1 in proben:
-        g, k = zeile(px, y, x0, x1)
+        g, k = line(px, y, x0, x1)
         print(f"{y:>6}  {was:<28} {g:>13} {k:>19}")
 
 main()

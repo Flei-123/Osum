@@ -20,21 +20,21 @@ def elf_maschine(oktette):
     return em
 
 
-def maschinen_im_archive(daten):
+def maschinen_im_archive(data_2):
     aus = set()
     i = 0
     try:
-        while i < len(daten):
-            typ = chr(daten[i])
+        while i < len(data_2):
+            typ = chr(data_2[i])
             i += 1
-            _modus, nl = struct.unpack_from("<HH", daten, i)
+            _modus, nl = struct.unpack_from("<HH", data_2, i)
             i += 4 + nl
-            (n,) = struct.unpack_from("<Q", daten, i)
+            (n,) = struct.unpack_from("<Q", data_2, i)
             i += 8
-            if typ not in "fd" or n > len(daten) - i:
+            if typ not in "fd" or n > len(data_2) - i:
                 return set()
             if typ == "f":
-                em = elf_maschine(daten[i:i + 20])
+                em = elf_maschine(data_2[i:i + 20])
                 if em is not None:
                     aus.add(em)
             i += n
@@ -58,14 +58,14 @@ def aus_meta(meta):
 
 
 def plattform_von_roh(roh, name="?"):
-    meta, daten = parts_2(roh)
+    meta, data_2 = parts_2(roh)
     p = aus_meta(meta)
     if p is not None:
         if p not in WOERTER:
             raise SystemExit("plattform: %s nennt %r -- bekannt sind %s"
                              % (name, p, ", ".join(WOERTER)))
         return p
-    ems = maschinen_im_archive(daten)
+    ems = maschinen_im_archive(data_2)
     if not ems:
         return "osum-any"
     woerter = sorted(set(ELF_MASCHINE.get(e, "elf-%d" % e) for e in ems))
@@ -81,9 +81,9 @@ def plattform_von_roh(roh, name="?"):
     return "osum-" + woerter[0]
 
 
-def plattform_von_opk(pfad):
-    with open(pfad, "rb") as f:
-        return plattform_von_roh(f.read(), pfad)
+def plattform_von_opk(path_2):
+    with open(path_2, "rb") as f:
+        return plattform_von_roh(f.read(), path_2)
 
 
 if __name__ == "__main__":

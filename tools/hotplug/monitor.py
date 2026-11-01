@@ -60,24 +60,24 @@ SHIFT = {
 
 
 class Mon:
-    def __init__(self, pfad):
+    def __init__(self, path_2):
         self.s = None
         bis = time.time() + 20.0
         while time.time() < bis:
             try:
                 s = socket.socket(socket.AF_UNIX)
                 s.settimeout(5.0)
-                s.connect(pfad)
+                s.connect(path_2)
                 self.s = s
                 break
             except OSError:
                 time.sleep(0.1)
         if self.s is None:
-            raise SystemExit("kein Monitor an %s" % pfad)
+            raise SystemExit("kein Monitor an %s" % path_2)
         time.sleep(0.3)
-        self.leeren()
+        self.clear()
 
-    def leeren(self):
+    def clear(self):
         self.s.settimeout(0.4)
         try:
             while True:
@@ -89,7 +89,7 @@ class Mon:
     def tu(self, cmd_2):
         self.s.sendall((cmd_2 + "\n").encode())
         time.sleep(0.12)
-        self.leeren()
+        self.clear()
 
 
 def keys_for(char):
@@ -104,13 +104,13 @@ def keys_for(char):
     return []
 
 
-def wait_auf(datei, muster, limit=60.0):
+def wait_auf(file, muster, limit=60.0):
     """Bis <muster> in der seriellen Datei steht. Rueckgabe: hat es geklappt."""
     bis = time.time() + limit
     muster_b = muster.encode()
     while time.time() < bis:
         try:
-            with open(datei, "rb") as f:
+            with open(file, "rb") as f:
                 if muster_b in f.read():
                     return True
         except OSError:
@@ -128,18 +128,18 @@ def main():
     n_ok = 0
     n_bad = 0
     with open(drehbuch) as f:
-        zeilen = f.read().splitlines()
-    for roh in zeilen:
+        lines = f.read().splitlines()
+    for roh in lines:
         z = roh.strip()
         if not z or z.startswith("#"):
             continue
         parts = z.split()
         cmd = parts[0]
         if cmd == "stecke":
-            ident, datei = parts[1], parts[2]
-            m.tu("drive_add 0 id=%s,if=none,file=%s,format=raw" % (ident, datei))
+            ident, file = parts[1], parts[2]
+            m.tu("drive_add 0 id=%s,if=none,file=%s,format=raw" % (ident, file))
             m.tu("device_add usb-storage,id=dev%s,drive=%s" % (ident, ident))
-            print("   stecke %s (%s)" % (ident, datei))
+            print("   stecke %s (%s)" % (ident, file))
         elif cmd == "ziehe":
             ident = parts[1]
             m.tu("device_del dev%s" % ident)
@@ -158,15 +158,15 @@ def main():
             target = parts[1]
             m.tu("screendump %s" % target)
             bis = time.time() + 20.0
-            letzte = -1
+            last = -1
             while time.time() < bis:
                 try:
                     now = os.path.getsize(target)
                 except OSError:
                     now = -1
-                if now > 0 and now == letzte:
+                if now > 0 and now == last:
                     break
-                letzte = now
+                last = now
                 time.sleep(0.25)
             print("   foto %s (%s Oktette)"
                   % (target, os.path.getsize(target) if os.path.exists(target) else "keine"))

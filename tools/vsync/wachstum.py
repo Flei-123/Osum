@@ -40,8 +40,8 @@ AREA = (0xE8, 0xEE, 0xF7)
 NAH = 40
 
 
-def ppm_read(pfad):
-    with open(pfad, "rb") as f:
+def ppm_read(path_2):
+    with open(path_2, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):
         raise ValueError("kein P6-PPM")
@@ -70,8 +70,8 @@ def nahe(px, target):
             and abs(px[2] - target[2]) <= NAH)
 
 
-def count(pfad):
-    w, h, dat = ppm_read(pfad)
+def count(path_2):
+    w, h, dat = ppm_read(path_2)
     area = 0
     gemischt = 0
     for k in range(0, len(dat) - 2, 3):
@@ -90,15 +90,15 @@ def main():
         return 2
     values = []
     gmax = 0
-    for pfad in sys.argv[1:]:
+    for path_2 in sys.argv[1:]:
         try:
-            f, g = count(pfad)
+            f, g = count(path_2)
         except (OSError, ValueError) as e:
-            print("%s FEHLER %s" % (pfad, e))
+            print("%s FEHLER %s" % (path_2, e))
             return 2
         values.append(f)
         gmax = max(gmax, g)
-        print("%s flaeche=%d gemischt=%d" % (pfad.split("/")[-1], f, g))
+        print("%s flaeche=%d gemischt=%d" % (path_2.split("/")[-1], f, g))
     if not values:
         return 2
     mitinhalt = [v for v in values if v > 0]

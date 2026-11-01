@@ -71,9 +71,9 @@ def ask(lines):
     return out
 
 
-def bloecke(pfad):
+def bloecke(path_2):
     """Die 4096-Oktett-Bloecke einer Datei, aufgefuellt wie sync es tut."""
-    d = open(pfad, "rb").read()
+    d = open(path_2, "rb").read()
     aus = []
     i = 0
     while i < len(d):
@@ -83,9 +83,9 @@ def bloecke(pfad):
     return aus
 
 
-def index_names(speicher):
+def index_names(mem):
     names = set()
-    p = os.path.join(speicher, "INDEX")
+    p = os.path.join(mem, "INDEX")
     if not os.path.exists(p):
         return names
     for z in open(p, "rb").read().split(b"\n"):
@@ -98,7 +98,7 @@ def main():
     if len(sys.argv) < 6:
         print(__doc__)
         return 2
-    speicher, tree, passphrase, N, r = sys.argv[1:6]
+    mem, tree, passphrase, N, r = sys.argv[1:6]
     N, r = int(N), int(r)
     habe, habe_nicht, modus = [], [], None
     for a in sys.argv[6:]:
@@ -109,29 +109,29 @@ def main():
         elif modus is not None:
             modus.append(a)
 
-    marke = b"GEHEIMNIS-4711"
+    brand = b"GEHEIMNIS-4711"
     all_ = b""
     dateien = []
-    for f in sorted(os.listdir(speicher)):
-        p = os.path.join(speicher, f)
+    for f in sorted(os.listdir(mem)):
+        p = os.path.join(mem, f)
         if os.path.isfile(p):
             dateien.append(f)
             all_ += open(p, "rb").read()
     print("  the memory: %s, %d octets together"
           % (", ".join(dateien), len(all_)))
-    eq("(b) der Klartext steht NICHT im Speicher", marke in all_, False)
+    eq("(b) der Klartext steht NICHT im Speicher", brand in all_, False)
     eq("(b) und auch nicht als Dateiname",
-           any(marke.decode() in f for f in dateien), False)
+           any(brand.decode() in f for f in dateien), False)
     imbaum = False
-    for wurzel, _, fs in os.walk(tree):
+    for root, _, fs in os.walk(tree):
         for f in fs:
-            if marke in open(os.path.join(wurzel, f), "rb").read():
+            if brand in open(os.path.join(root, f), "rb").read():
                 imbaum = True
     eq("(b) GEGENPROBE: im Klartextbaum steht sie sehr wohl", imbaum, True)
-    names = index_names(speicher)
+    names = index_names(mem)
     eq("(b) der Index hat Namen", len(names) > 0, True)
 
-    header = os.path.join(speicher, "KOPF")
+    header = os.path.join(mem, "KOPF")
     felder = {}
     if os.path.exists(header):
         for z in open(header, "rb").read().split(b"\n"):
@@ -201,7 +201,7 @@ def main():
 
     n_bloecke = len(names)
     groessen = set()
-    idx = os.path.join(speicher, "INDEX")
+    idx = os.path.join(mem, "INDEX")
     if os.path.exists(idx):
         for z in open(idx, "rb").read().split(b"\n"):
             t2 = z.split(b"\t")

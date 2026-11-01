@@ -41,8 +41,8 @@ import sys
 from PIL import Image
 
 
-def nums(pfad):
-    im = Image.open(pfad)
+def nums(path_2):
+    im = Image.open(path_2)
     art = im.format.lower()
     voll = True
     if art == "jpeg":
@@ -59,21 +59,21 @@ def nums(pfad):
             sr += r
             sg += g
             sb += b
-    punkte = []
+    points = []
     for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1),
                  (w // 2, h // 2)):
         r, g, b, _a = px[x, y]
-        punkte.append((x, y, (r << 16) | (g << 8) | b))
+        points.append((x, y, (r << 16) | (g << 8) | b))
     if art == "jpeg":
         art = "jpeg"
-    return dict(art=art, w=w, h=h, sr=sr, sg=sg, sb=sb, punkte=punkte,
+    return dict(art=art, w=w, h=h, sr=sr, sg=sg, sb=sb, points=points,
                 voll=voll)
 
 
 def gast(text, name):
     """Die drei Zeilen, die `viewer -i` fuer EINE Datei gedruckt hat."""
-    marke = "viewer: datei " + name
-    at = text.find(marke)
+    brand = "viewer: datei " + name
+    at = text.find(brand)
     if at < 0:
         return None
     part = text[at:at + 1200]
@@ -86,7 +86,7 @@ def gast(text, name):
         return None
     return dict(art=m.group(1), w=int(m.group(2)), h=int(m.group(3)),
                 sr=int(s.group(1)), sg=int(s.group(2)), sb=int(s.group(3)),
-                punkte=[(int(a), int(b), int(c, 16)) for a, b, c in p[:5]])
+                points=[(int(a), int(b), int(c, 16)) for a, b, c in p[:5]])
 
 
 def kanaele(v):
@@ -141,9 +141,9 @@ def main(argv):
     text = open(argv[2], "rb").read().decode("latin1")
     gut = 0
     bad_2 = 0
-    for pfad in argv[3:]:
-        name = pfad.split("/")[-1]
-        w = nums(pfad)
+    for path_2 in argv[3:]:
+        name = path_2.split("/")[-1]
+        w = nums(path_2)
         g = gast(text, name)
         if g is None:
             print("  FAIL  %-16s the guest said nothing" % name)

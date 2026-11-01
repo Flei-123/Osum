@@ -7,8 +7,8 @@ import sys
 import time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(os.path.dirname(HIER))
-sys.path.insert(0, os.path.join(WURZEL, "pruef"))
+ROOT = os.path.dirname(os.path.dirname(HIER))
+sys.path.insert(0, os.path.join(ROOT, "pruef"))
 from klick import Maschine  # noqa: E402
 
 ARB = sys.argv[1]
@@ -30,7 +30,7 @@ def say(*a):
     befund.append(t)
 
 
-def lies():
+def read_2():
     try:
         return open(SER, "rb").read().decode("utf-8", "replace")
     except OSError:
@@ -40,7 +40,7 @@ def lies():
 def wait_auf(muster, limit=120.0, was=""):
     t0 = time.time()
     while time.time() - t0 < limit:
-        if re.search(muster, lies()):
+        if re.search(muster, read_2()):
             say("gesehen: %s (%.0fs)" % (was or muster, time.time() - t0))
             return True
         if p.poll() is not None:
@@ -80,10 +80,10 @@ try:
 
     m = Maschine(SOCK, WIDE, UP)
     m.verbinde()
-    m.foto(os.path.join(ARB, "10-ohne.ppm"))
+    m.photo(os.path.join(ARB, "10-ohne.ppm"))
     say("Image 1: the bar without stick")
 
-    vor = len(re.findall(r"explorer: orte n=(\d+) traeger=(\d+)", lies()))
+    vor = len(re.findall(r"explorer: orte n=(\d+) traeger=(\d+)", read_2()))
 
     m.say("drive_add 0 id=stk,if=none,file=%s,format=raw"
           % os.path.join(ARB, "stick.img"))
@@ -95,7 +95,7 @@ try:
     got = False
     t0 = time.time()
     while time.time() - t0 < 60:
-        tr = re.findall(r"explorer: orte n=\d+ traeger=(\d+)", lies())
+        tr = re.findall(r"explorer: orte n=\d+ traeger=(\d+)", read_2())
         if tr and int(tr[-1]) >= 1:
             got = True
             break
@@ -103,10 +103,10 @@ try:
     say("Stick in the bar WITHOUT action: %s (carrier=%s)"
         % ("JA" if got else "NEIN", tr[-1] if tr else "?"))
     time.sleep(3)
-    m.foto(os.path.join(ARB, "20-steckt.ppm"))
+    m.photo(os.path.join(ARB, "20-steckt.ppm"))
     say("Image 2: the stick is in the bar")
 
-    txt = lies()
+    txt = read_2()
     wins = re.findall(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)
     if not wins:
         say("no file manager window in the report")
@@ -140,19 +140,19 @@ try:
         "[Fenster %d,%d + Rechteck %s,%s %sx%s]"
         % (cx, cy, wx, wy, rx, ry, rw, rh))
 
-    liste = None
+    list_ = None
     oid = re.findall(r"explorer: orteliste id=(\d+)", txt)
     if oid:
         for r in rects:
             if r[0] == oid[-1]:
-                liste = r
-    zeilen = re.findall(r"explorer: ortzeile i=(\d+) y=(-?\d+) h=(\d+)", txt)
-    if liste is None or not zeilen:
+                list_ = r
+    lines = re.findall(r"explorer: ortzeile i=(\d+) y=(-?\d+) h=(\d+)", txt)
+    if list_ is None or not lines:
         say("Place list or carrier line not reported "
-            "(liste=%s zeilen=%d)" % (liste is not None, len(zeilen)))
+            "(liste=%s zeilen=%d)" % (list_ is not None, len(lines)))
         raise SystemExit(1)
-    lx, ly, lw = int(liste[2]), int(liste[3]), int(liste[4])
-    zi, zy, zh = (int(v) for v in zeilen[-1])
+    lx, ly, lw = int(list_[2]), int(list_[3]), int(list_[4])
+    zi, zy, zh = (int(v) for v in lines[-1])
     zx = wx + lx + lw // 2
     zyy = wy + ly + zy + zh // 2
     say("Traegerzeile i=%d auswaehlen bei GEMELDETEN (%d,%d)" % (zi, zx, zyy))
@@ -164,7 +164,7 @@ try:
     if not wait_auf(r"explorer: eject", 30, "der Knopf hat gefeuert"):
         pass
     time.sleep(3)
-    m.foto(os.path.join(ARB, "30-ausgeworfen.ppm"))
+    m.photo(os.path.join(ARB, "30-ausgeworfen.ppm"))
     say("Image 3: after clicking the eject button")
     rc = 0
 finally:

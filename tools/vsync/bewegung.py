@@ -25,13 +25,13 @@ import sys
 import time
 
 
-def verbinden(pfad, frist=15.0):
-    bis = time.time() + frist
+def verbinden(path_2, deadline=15.0):
+    bis = time.time() + deadline
     while time.time() < bis:
         try:
             s = socket.socket(socket.AF_UNIX)
             s.settimeout(5.0)
-            s.connect(pfad)
+            s.connect(path_2)
             return s
         except OSError:
             time.sleep(0.1)
@@ -43,7 +43,7 @@ def main():
         print(__doc__)
         return 2
     sock, folder, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
-    abstand = float(sys.argv[4]) if len(sys.argv) > 4 else 0.03
+    spacing = float(sys.argv[4]) if len(sys.argv) > 4 else 0.03
     os.makedirs(folder, exist_ok=True)
 
     s = verbinden(sock)
@@ -65,20 +65,20 @@ def main():
             s.recv(65536)
         except OSError:
             pass
-        time.sleep(abstand)
+        time.sleep(spacing)
 
     gut = 0
     for i in range(n):
         target = os.path.join(folder, "b%03d.ppm" % i)
-        letzte = -1
+        last = -1
         for _ in range(50):
             try:
                 now = os.path.getsize(target)
             except OSError:
                 now = -1
-            if now > 0 and now == letzte:
+            if now > 0 and now == last:
                 break
-            letzte = now
+            last = now
             time.sleep(0.02)
         try:
             with open(target, "rb") as f:

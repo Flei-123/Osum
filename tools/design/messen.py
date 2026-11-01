@@ -55,10 +55,10 @@ import re
 import sys
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("kein P6-PPM: %s" % pfad)
+        raise SystemExit("kein P6-PPM: %s" % path_2)
     f = []
     at = 2
     while len(f) < 3:
@@ -76,9 +76,9 @@ def ppm(pfad):
     return f[0], f[1], d[at:]
 
 
-class Bild:
-    def __init__(self, pfad):
-        self.w, self.h, self.d = ppm(pfad)
+class Image_:
+    def __init__(self, path_2):
+        self.w, self.h, self.d = ppm(path_2)
 
     def px(self, x, y):
         if x < 0 or y < 0 or x >= self.w or y >= self.h:
@@ -111,18 +111,18 @@ RE_SHAPE = re.compile(
 FASSBAR = {2, 3, 4, 5, 6, 7, 9}
 
 
-def lies(pfad):
-    with open(pfad, "rb") as f:
+def read_2(path_2):
+    with open(path_2, "rb") as f:
         return f.read().decode("latin1")
 
 
 def sammle(serial):
-    t = lies(serial)
+    t = read_2(serial)
     rechtecke = []
     for m in RE_RECT.finditer(t):
-        quelle = m.group(1)
+        source_2 = m.group(1)
         art = int(m.group(3)) if m.group(3) else -1
-        rechtecke.append((quelle, art, int(m.group(5)), int(m.group(6)),
+        rechtecke.append((source_2, art, int(m.group(5)), int(m.group(6)),
                           int(m.group(7)), int(m.group(8))))
     for m in RE_TBF.finditer(t):
         was = m.group(1).split()[0]
@@ -152,21 +152,21 @@ def raster(rechtecke, n=4):
     """Wie viele gemeldete Laengen liegen auf dem n-Raster?"""
     gut = ges = 0
     schuldige = {}
-    for quelle, _art, x, y, w, h in rechtecke:
+    for source_2, _art, x, y, w, h in rechtecke:
         for value, name in ((x, "x"), (y, "y"), (w, "w"), (h, "h")):
             ges += 1
             if value % n == 0:
                 gut += 1
             else:
-                schuldige[quelle] = schuldige.get(quelle, 0) + 1
+                schuldige[source_2] = schuldige.get(source_2, 0) + 1
     return gut, ges, schuldige
 
 
 def klickflaechen(rechtecke, mindest=32):
     zu_small = []
-    for quelle, art, _x, _y, w, h in rechtecke:
+    for source_2, art, _x, _y, w, h in rechtecke:
         if art in FASSBAR and h > 0 and h < mindest:
-            zu_small.append((quelle, art, w, h))
+            zu_small.append((source_2, art, w, h))
     return zu_small
 
 
@@ -229,13 +229,13 @@ def schatten(b, x, y, w, h, tiefe=8):
     unten = []
     ref = []
     for i in range(1, tiefe + 1):
-        zeile = []
+        line_3 = []
         for xx in range(x + w // 4, x + 3 * w // 4, 4):
             p = b.px(xx, y + h + i - 1)
             if p:
-                zeile.append(bright(p))
-        if zeile:
-            unten.append(sum(zeile) // len(zeile))
+                line_3.append(bright(p))
+        if line_3:
+            unten.append(sum(line_3) // len(line_3))
     for xx in range(x + w // 4, x + 3 * w // 4, 4):
         p = b.px(xx, y + h + tiefe + 12)
         if p:
@@ -264,10 +264,10 @@ def entdoppeln(texte):
     return list(d.values())
 
 
-def text_check(b, texte, fenster=None):
+def text_check(b, texte, window_2=None):
     """Leere Beschriftung, abgeschnitten, ueberlappend -- die drei
     Fragen aus tools/themestore/shotcheck.py."""
-    leer = ab = 0
+    empty_3 = ab = 0
     belegt = {}
     ueber = 0
     for tx in texte:
@@ -278,7 +278,7 @@ def text_check(b, texte, fenster=None):
         w = max(tx["tw"], 1)
         bg = ((tx["bg"] >> 16) & 255, (tx["bg"] >> 8) & 255, tx["bg"] & 255)
         tinte = 0
-        letzte = 0
+        last_3 = 0
         for yy in range(y0, y0 + 16):
             for xx in range(x0, x0 + w):
                 p = b.px(xx, yy)
@@ -287,16 +287,16 @@ def text_check(b, texte, fenster=None):
                 if max(abs(p[k] - bg[k]) for k in range(3)) > 24:
                     tinte += 1
                     if xx >= x0 + w - 1:
-                        letzte += 1
+                        last_3 += 1
                     k = (xx, yy)
                     if k in belegt:
                         ueber += 1
                     belegt[k] = 1
         if tinte == 0:
-            leer += 1
-        if letzte > 0:
+            empty_3 += 1
+        if last_3 > 0:
             ab += 1
-    return leer, ab, ueber
+    return empty_3, ab, ueber
 
 
 def hauptfarben(b):
@@ -352,13 +352,13 @@ def main():
 
     bilder = sorted(glob.glob(os.path.join(d, "*.ppm")))
     erg["bilder"] = {}
-    for pfad in bilder:
-        name = os.path.basename(pfad)[:-4]
-        b = Bild(pfad)
+    for path_2 in bilder:
+        name = os.path.basename(path_2)[:-4]
+        b = Image_(path_2)
         e = {}
         n, stark = hauptfarben(b)
         e["farben"], e["farben_stark"] = n, stark
-        own = pfad[:-4] + ".serial"
+        own = path_2[:-4] + ".serial"
         g2 = geom
         if os.path.exists(own):
             g2 = sammle(own)[4]
@@ -366,7 +366,7 @@ def main():
             m = None
             for m in re.finditer(
                     r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)",
-                    lies(own) if os.path.exists(own) else ""):
+                    read_2(own) if os.path.exists(own) else ""):
                 pass
             if m:
                 g2 = dict(g2)
@@ -393,13 +393,13 @@ def main():
             _r2, t2, _f2, _z2, _g2, _s2 = sammle(own)
         else:
             t2 = texte
-        leer, ab, ueber = text_check(b, entdoppeln(t2))
-        e["text_leer"], e["text_ab"], e["text_ueber"] = leer, ab, ueber
+        empty_3, ab, ueber = text_check(b, entdoppeln(t2))
+        e["text_leer"], e["text_ab"], e["text_ueber"] = empty_3, ab, ueber
         erg["bilder"][name] = e
         print("   %-20s farben=%-5d tragend=%-3d eckfarben=%-4s "
               "schatten=%-16s leer=%d ab=%d ueber=%d"
               % (name, n, stark, e.get("eckfarben", "-"),
-                 str(e.get("schatten", "-"))[:16], leer, ab, ueber))
+                 str(e.get("schatten", "-"))[:16], empty_3, ab, ueber))
 
     if "--json" in sys.argv:
         j = sys.argv[sys.argv.index("--json") + 1]

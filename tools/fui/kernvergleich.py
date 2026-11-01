@@ -83,7 +83,7 @@ def wm_alt_restore(d, sb, sk):
 def wm_alt_min(d, sb):
     return {(x, d // 2 + t) for x in range(d) for t in range(sb)}
 
-def zeig(p, d, name):
+def show(p, d, name):
     print(f"      {name}:")
     for y in range(d):
         print("      " + "".join("#" if (x, y) in p else "." for x in range(d)))
@@ -130,9 +130,9 @@ def main():
             d, sb = 10 * sk, sk
             print()
             print(f"--- Schliessen, uisc={sk} (d={d}, sb={sb}) ---")
-            zeig(fui_close(d, sb), d, "fui.core / Kern NEU")
+            show(fui_close(d, sb), d, "fui.core / Kern NEU")
             if fui_close(d, sb) != wm_alt_close(d, sb):
-                zeig(wm_alt_close(d, sb), d, "wm.fi ALT")
+                show(wm_alt_close(d, sb), d, "wm.fi ALT")
     return 0
 
 if __name__ == "__main__":

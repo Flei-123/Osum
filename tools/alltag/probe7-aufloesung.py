@@ -40,10 +40,10 @@ def resolve(path, rules):
                 out += head + ["    }"] + other
             elif rule == "union":
                 have = set(idents(head))
-                neu = [x for x in idents(other) if x not in have]
+                new = [x for x in idents(other) if x not in have]
                 out += head
-                if neu:
-                    out.append("    " + ", ".join(neu) + ",")
+                if new:
+                    out.append("    " + ", ".join(new) + ",")
             elif rule == "keysdel":
                 out += ["    KEY_SDEL,"] + head
             elif rule == "buildsh":

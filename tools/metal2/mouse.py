@@ -48,13 +48,13 @@ import sys
 import time
 
 
-def verbinden(pfad, frist=30.0):
-    bis = time.time() + frist
+def verbinden(path_2, deadline=30.0):
+    bis = time.time() + deadline
     while time.time() < bis:
         try:
             s = socket.socket(socket.AF_UNIX)
             s.settimeout(5.0)
-            s.connect(pfad)
+            s.connect(path_2)
             return s
         except OSError:
             time.sleep(0.1)
@@ -74,10 +74,10 @@ class Qmp:
             d["arguments"] = args
         self.s.sendall((json.dumps(d) + "\n").encode())
         while True:
-            zeile = self.f.readline()
-            if not zeile:
+            line = self.f.readline()
+            if not line:
                 raise RuntimeError("QMP: Verbindung weg")
-            reply = json.loads(zeile)
+            reply = json.loads(line)
             if "event" in reply:
                 continue
             return reply
@@ -92,7 +92,7 @@ class Qmp:
             return
         self.cmd("input-send-event", events=ev)
 
-    def taste(self, down, name):
+    def key_2(self, down, name):
         self.cmd("input-send-event", events=[
             {"type": "btn", "data": {"down": down, "button": name}}])
 
@@ -137,9 +137,9 @@ def main():
     W = int(opt["breite"])
     H = int(opt["hoehe"])
     klick_ms = int(opt["klick_ms"])
-    feld = None
+    field = None
     if opt["klickfeld"]:
-        feld = tuple(int(x) for x in opt["klickfeld"].split(","))
+        field = tuple(int(x) for x in opt["klickfeld"].split(","))
 
     s = verbinden(sock)
     if s is None:
@@ -187,21 +187,21 @@ def main():
             py += dy
             sent += 1
         if klick_bottom and t - klick_seit >= 0.040:
-            q.taste(False, "left")
+            q.key_2(False, "left")
             klick_bottom = False
         if not klick_bottom and t >= naechster_klick:
             in_ = True
-            if feld is not None:
-                in_ = feld[0] <= px < feld[2] and feld[1] <= py < feld[3]
+            if field is not None:
+                in_ = field[0] <= px < field[2] and field[1] <= py < field[3]
             if in_:
-                q.taste(True, "left")
+                q.key_2(True, "left")
                 klick_bottom = True
                 klick_seit = t
                 klicks += 1
                 naechster_klick = t + klick_ms / 1000.0
     if klick_bottom:
         time.sleep(0.05)
-        q.taste(False, "left")
+        q.key_2(False, "left")
     dur = time.perf_counter() - t0
     rate = sent / dur if dur > 0 else 0
 

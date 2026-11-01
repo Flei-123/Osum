@@ -23,12 +23,12 @@ def laeufer():
     return sorted(set(names))
 
 
-def umstellen(pfad: Path, pruefen: bool):
-    rel = str(pfad.relative_to(ROOT))
+def umstellen(path_2: Path, pruefen: bool):
+    rel = str(path_2.relative_to(ROOT))
     if rel in LOCK:
         return 0, f"uebersprungen ({LOCK[rel]})"
 
-    zeilen = pfad.read_text(errors="replace").splitlines(keepends=True)
+    zeilen = path_2.read_text(errors="replace").splitlines(keepends=True)
     treffer = 0
     for i, z in enumerate(zeilen):
         if "qemu-system-x86_64" not in z:
@@ -52,7 +52,7 @@ def umstellen(pfad: Path, pruefen: bool):
             return -1, "FEHLER: kein 'cd \"$(dirname \"$0\")/../..\"' gefunden"
 
     if not pruefen:
-        pfad.write_text("".join(zeilen))
+        path_2.write_text("".join(zeilen))
     return treffer, "ok"
 
 

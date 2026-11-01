@@ -32,11 +32,11 @@ BIG = 6
 AIR = 6
 
 
-def bild(name, farben):
-    palette, zeilen = symmod.lies(iconmod.zeichnung(name))
+def image_2(name, farben):
+    palette, zeilen = symmod.read_2(iconmod.zeichnung(name))
     h = len(zeilen)
     w = len(zeilen[0])
-    punkte = []
+    points_2 = []
     for z in zeilen:
         reihe = []
         for c in z:
@@ -47,8 +47,8 @@ def bild(name, farben):
                 reihe.append(farben[ROLLE_NAME[v[1]]])
             else:
                 reihe.append(v)
-        punkte.append(reihe)
-    return w, h, punkte
+        points_2.append(reihe)
+    return w, h, points_2
 
 
 def main(argv):
@@ -66,16 +66,16 @@ def main(argv):
         farben = iconmod.SCHEMEN[schema]
         eins = []
         for n in names:
-            eins.append(bild(n, farben))
-        breite = AIR + sum(max(w, w * BIG) + AIR for w, _, _ in eins)
+            eins.append(image_2(n, farben))
+        width_2 = AIR + sum(max(w, w * BIG) + AIR for w, _, _ in eins)
         height_2 = AIR + 16 + AIR + 16 * BIG + AIR
-        im = Image.new("RGB", (breite, height_2),
+        im = Image.new("RGB", (width_2, height_2),
                        tuple(((farben["panel"] >> s) & 255) for s in (16, 8, 0)))
         x = AIR
-        for w, h, punkte in eins:
+        for w, h, points_2 in eins:
             for r in range(h):
                 for c in range(w):
-                    v = punkte[r][c]
+                    v = points_2[r][c]
                     if v is None:
                         continue
                     rgb = ((v >> 16) & 255, (v >> 8) & 255, v & 255)
@@ -87,16 +87,16 @@ def main(argv):
                                         rgb)
             x += max(w, w * BIG) + AIR
         bloecke.append(im)
-    breite = max(b.width for b in bloecke)
+    width_2 = max(b.width for b in bloecke)
     height_2 = sum(b.height for b in bloecke)
-    blatt = Image.new("RGB", (breite, height_2), (0, 0, 0))
+    blatt = Image.new("RGB", (width_2, height_2), (0, 0, 0))
     y = 0
     for b in bloecke:
         blatt.paste(b, (0, y))
         y += b.height
     blatt.save(argv[1])
     print("sheet: %s  %dx%d, %d characters, light and dark"
-          % (argv[1], breite, height_2, len(names)))
+          % (argv[1], width_2, height_2, len(names)))
     return 0
 
 

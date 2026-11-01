@@ -91,7 +91,7 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    bild, ser = argv[1], argv[2]
+    image_2, ser = argv[1], argv[2]
     asc = 12
     slop = 0
     for a in argv[3:]:
@@ -99,7 +99,7 @@ def main(argv):
             asc = int(a.split("=")[1])
         elif a.startswith("--slop="):
             slop = int(a.split("=")[1])
-    W, H, px = ppm(bild)
+    W, H, px = ppm(image_2)
     wins = {}
     texte = []
     epoche = {}
@@ -136,27 +136,27 @@ def main(argv):
     seen = 0
     kaesten = {}
     taskbar = wins.get("Taskleiste", (0, 0, W, H))
-    letzte = {}
+    last_3 = {}
     for n_, m in enumerate(texte):
         k = (m.group(1), m.group(2), m.group(9), m.group(10),
              m.group(4), m.group(5))
-        letzte[k] = (n_, m)
+        last_3[k] = (n_, m)
     def leistenschluessel(m):
         mk = brand_von.get(id(m), "")
         if mk and mk != "button":
             return mk
         return "button:" + m.group(11)
     jung = {}
-    for k, (n_, m) in letzte.items():
+    for k, (n_, m) in last_3.items():
         if m.group(1) == "taskbar":
             lk = leistenschluessel(m)
             if lk not in jung or jung[lk] < n_:
                 jung[lk] = n_
-    letzte = {k: m for k, (n_, m) in letzte.items()
+    last_3 = {k: m for k, (n_, m) in last_3.items()
               if m.group(1) != "taskbar" or jung[leistenschluessel(m)] == n_}
-    for m in letzte.values():
-        quelle = m.group(1)
-        wid = m.group(2) or quelle
+    for m in last_3.values():
+        source_2 = m.group(1)
+        wid = m.group(2) or source_2
         x, base = int(m.group(4)), int(m.group(5))
         fg = int(m.group(6))
         tw = int(m.group(8) or 0)
@@ -167,7 +167,7 @@ def main(argv):
         if m.group(9) is not None:
             ox, oy = int(m.group(9)), int(m.group(10))
             ww, wh = W - ox, H - oy
-        elif quelle == "taskbar":
+        elif source_2 == "taskbar":
             ox, oy, ww, wh = taskbar
         else:
             ox, oy, ww, wh = 0, 0, W, H

@@ -4,7 +4,7 @@ import os
 import re
 import sys
 
-WURZEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 
 BUFFER = re.compile(
     r"state\s*\+\s*kstate\.("
@@ -33,8 +33,8 @@ MITWISSEN = {
 }
 
 
-def funktionen(pfad):
-    roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
+def funktionen(path_2):
+    roh = open(path_2, "rb").read().decode("utf-8", "surrogateescape")
     aus = {}
     name = None
     leib = []
@@ -65,20 +65,20 @@ def main(argv):
             nur = argv[i + 1]
 
     gesperrt = []
-    offen = []
+    open_ = []
     mitwissen = []
-    for wurzel, _, dateien in os.walk(os.path.join(WURZEL, "kernel")):
+    for root, _, dateien in os.walk(os.path.join(ROOT, "kernel")):
         for d in sorted(dateien):
             if not d.endswith(".fi"):
                 continue
             if nur and d != nur:
                 continue
-            pfad = os.path.join(wurzel, d)
-            short = os.path.relpath(pfad, WURZEL)
-            roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
+            path_2 = os.path.join(root, d)
+            short = os.path.relpath(path_2, ROOT)
+            roh = open(path_2, "rb").read().decode("utf-8", "surrogateescape")
             zweite = [(z, page, buffer2(z))
                       for z, page in BASISZUGRIFF.findall(roh)]
-            for fn, leib in sorted(funktionen(pfad).items()):
+            for fn, leib in sorted(funktionen(path_2).items()):
                 text = "\n".join(leib)
                 treffer = BUFFER.findall(text)
                 for zugriff, page, muster in zweite:
@@ -95,7 +95,7 @@ def main(argv):
                 if LOCK.search(text) or d in RUHIG:
                     gesperrt.append(entry)
                 else:
-                    offen.append(entry)
+                    open_.append(entry)
 
     if liste:
         print("== LOCKED: the buffer is used under a lock ==")
@@ -103,7 +103,7 @@ def main(argv):
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
         print("== OPEN: no lock word in the body ==")
-        for k, f, p in offen:
+        for k, f, p in open_:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
     if liste and mitwissen:
@@ -112,9 +112,9 @@ def main(argv):
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
             print("      %s" % MITWISSEN[(k, f)])
         print()
-    dat_open = sorted(set(k for k, _, _ in offen))
+    dat_open = sorted(set(k for k, _, _ in open_))
     print("einkern gesperrt=%d offen=%d mitwissen=%d dateien=%s"
-          % (len(gesperrt), len(offen), len(mitwissen),
+          % (len(gesperrt), len(open_), len(mitwissen),
              ",".join(dat_open) or "-"))
     return 0
 

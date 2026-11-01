@@ -30,7 +30,7 @@ def main():
     a = ap.parse_args()
 
     try:
-        w = wave.open(a.datei)
+        w = wave.open(a.file)
     except Exception as e:                       # noqa: BLE001
         print("fehler=1 grund=%s" % e)
         return 1
@@ -39,11 +39,11 @@ def main():
     n = w.getnframes()
     d = array.array("h")
     d.frombytes(w.readframes(n))
-    links = list(d[0::nch]) if nch else []
+    left = list(d[0::nch]) if nch else []
     print("rate=%d kanaele=%d frames=%d" % (fr, nch, n))
     if a.rate and fr != a.rate:
         print("ratefehler=1")
-    nz = [i for i, v in enumerate(links) if v != 0]
+    nz = [i for i, v in enumerate(left) if v != 0]
     if not nz:
         print("nutz=0 gaps=0 still=0 luecke_rest=0 max=0 min=0 rms=0 peak_hz=0 p1=0 p2=0")
         return 0
@@ -55,7 +55,7 @@ def main():
         if hi <= lo:
             print("fensterfehler=1")
             return 1
-    seg = links[lo:hi + 1]
+    seg = left[lo:hi + 1]
     print("nutz=%d ab=%d" % (len(seg), lo))
 
     luecken = []

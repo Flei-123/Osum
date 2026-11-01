@@ -15,8 +15,8 @@ Ausgabe: eine Zahl.
 import sys
 
 
-def load(pfad):
-    d = open(pfad, "rb").read()
+def load(path_2):
+    d = open(path_2, "rb").read()
     parts_2 = []
     i = 0
     while len(parts_2) < 4:

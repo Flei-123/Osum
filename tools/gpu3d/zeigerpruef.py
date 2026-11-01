@@ -43,8 +43,8 @@ MIN_DUNKEL = 20
 MIN_BRIGHT = 10
 
 
-def load(pfad):
-    d = open(pfad, "rb").read()
+def load(path):
+    d = open(path, "rb").read()
     i = 0
     f = []
     while len(f) < 4:
@@ -61,7 +61,7 @@ def load(pfad):
         i = j
     i += 1
     if f[0] != b"P6":
-        raise ValueError("%s ist kein P6-PPM" % pfad)
+        raise ValueError("%s ist kein P6-PPM" % path)
     w, h = int(f[1]), int(f[2])
     return w, h, d[i:i + w * h * 3]
 
@@ -112,7 +112,7 @@ def main():
         print("      differs than just it.")
         return 1
 
-    def punkte(buf):
+    def points(buf):
         aus = []
         for y in range(y0, y1 + 1):
             for x in range(x0, x1 + 1):
@@ -120,8 +120,8 @@ def main():
                 aus.append(tuple(buf[o:o + 3]))
         return aus
 
-    psw = punkte(sw)
-    phw = punkte(hw)
+    psw = points(sw)
+    phw = points(hw)
 
     dunkel = sum(1 for p in psw if sum(p) < 120)
     bright = sum(1 for p in psw if sum(p) > 600)

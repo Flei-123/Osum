@@ -3,7 +3,7 @@
 import os, re, sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wm"))
-import zeiger2
+import cursor2
 
 out, log, ser_path = sys.argv[1], sys.argv[2], sys.argv[3]
 scale = int(sys.argv[4]) if len(sys.argv) > 4 else 1
@@ -22,7 +22,7 @@ def ppm(path):
 
 G = 24.0
 def ref(idx, g):
-    name, hot, pts = zeiger2.FORMEN[idx]
+    name, hot, pts = cursor2.FORMEN[idx]
     P = np.array(pts)
     ys, xs = np.mgrid[0:g, 0:g]
     cx = (xs + 0.5) * G / g
@@ -53,7 +53,7 @@ def ref(idx, g):
 
 def classify(img, hx, hy, g, base=None, slack=3):
     best, bs, scores = -1, -9.0, []
-    for idx in range(len(zeiger2.FORMEN)):
+    for idx in range(len(cursor2.FORMEN)):
         core, rim, ox, oy, near, inside, dist = ref(idx, g)
         sc = -9.0
         if base is not None:
@@ -113,12 +113,12 @@ for (ph, where, want), (w2, x, y) in zip(TARGETS, spots):
     best, sc = classify(img, x, y, g, base)
     seen[ph] = best
     ok(best == want, "%s at %s (%d,%d): shape %s, expected %s  [score %.2f vs best other %.2f]"
-       % (ph, where, x, y, zeiger2.NAMEN[best] if best >= 0 else "?", zeiger2.NAMEN[want],
+       % (ph, where, x, y, cursor2.NAMES_2[best] if best >= 0 else "?", cursor2.NAMES_2[want],
           sc[want], max(v for i, v in enumerate(sc) if i != want)))
 ok(len(spots) >= 7, "drive log names %d spots" % len(spots))
 ser = open(ser_path, "rb").read().decode("latin1")
 forms = [int(m.group(1)) for m in re.finditer(r"wm: form=(\d+) x=", ser)]
-ok(bool(forms) and max(forms) < len(zeiger2.FORMEN), "serial: %d shape changes, all < %d" % (len(forms), len(zeiger2.FORMEN)))
+ok(bool(forms) and max(forms) < len(cursor2.FORMEN), "serial: %d shape changes, all < %d" % (len(forms), len(cursor2.FORMEN)))
 for want in (0, 1, 3, 4, 5):
-    ok(want in forms, "serial: shape %s was announced" % zeiger2.NAMEN[want])
+    ok(want in forms, "serial: shape %s was announced" % cursor2.NAMES_2[want])
 sys.exit(fails)

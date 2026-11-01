@@ -3,10 +3,10 @@
 import sys
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("keine P6-Datei: " + pfad)
+        raise SystemExit("keine P6-Datei: " + path_2)
     felder = []
     at = 2
     while len(felder) < 3:
@@ -39,9 +39,9 @@ def main():
         return 1
     print("the image from inside is COMPLETE: %d octets" % len(ib))
 
-    zeile = iw * 3
+    line = iw * 3
     verschieden = [y for y in range(ih)
-                   if ib[y * zeile:(y + 1) * zeile] != ab[y * zeile:(y + 1) * zeile]]
+                   if ib[y * line:(y + 1) * line] != ab[y * line:(y + 1) * line]]
     vs = set(verschieden)
     eq = ih - len(verschieden)
     print("lines equal: %d of %d" % (eq, ih))
@@ -51,9 +51,9 @@ def main():
     for y in range(ih):
         if y in vs:
             continue
-        o = y * zeile
-        if ib[o:o + zeile] != ab[o:o + zeile]:
-            for i in range(o, o + zeile):
+        o = y * line
+        if ib[o:o + line] != ab[o:o + line]:
+            for i in range(o, o + line):
                 if ib[i] != ab[i]:
                     changed += 1
     print("deviating octets in the same lines: %d" % changed)

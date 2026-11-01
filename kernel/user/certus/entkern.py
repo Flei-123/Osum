@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys, os, re
 
-def lies(p):
+def read_2(p):
     return open(p, encoding='utf-8', errors='surrogateescape').read()
 
 def write_2(p, s):
@@ -151,23 +151,23 @@ def main():
     bau = sys.argv[1]
     for name, fn in (('libc/kcall.fi', kcall), ('wlibc.fi', wlibc)):
         p = os.path.join(bau, name)
-        write_2(p, fn(lies(p)))
+        write_2(p, fn(read_2(p)))
         print('entkernt', name)
     for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):
         p = os.path.join(bau, name)
         if os.path.exists(p):
-            write_2(p, schlicht(lies(p), name))
+            write_2(p, schlicht(read_2(p), name))
     done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi')
     for f in sorted(os.listdir(bau)):
         p = os.path.join(bau, f)
         if f.endswith('.fi') and f not in done and not os.path.islink(p) and os.path.isfile(p) \
                 and f not in ('certus_main.fi',):
-            write_2(p, schlicht(lies(p), f))
+            write_2(p, schlicht(read_2(p), f))
     d = os.path.join(bau, 'libc')
     for f in sorted(os.listdir(d)):
         if f.endswith('.fi') and f != 'kcall.fi':
             p = os.path.join(d, f)
-            write_2(p, schlicht(lies(p)))
+            write_2(p, schlicht(read_2(p)))
     print('fertig')
 
 

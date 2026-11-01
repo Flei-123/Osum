@@ -85,29 +85,29 @@ def eq(gast: float, wirt: float) -> bool:
 
 
 def skript(target: str) -> int:
-    zeilen = ["# von tools/alltag/rechner.py erzeugt"]
+    lines_2 = ["# von tools/alltag/rechner.py erzeugt"]
     for i, a in enumerate(ausdruecke()):
-        zeilen.append("echo AUSDRUCK-%d" % i)
-        zeilen.append("calc -e %s" % a)
-    zeilen.append("echo AUSDRUECKE-FERTIG")
-    open(target, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
+        lines_2.append("echo AUSDRUCK-%d" % i)
+        lines_2.append("calc -e %s" % a)
+    lines_2.append("echo AUSDRUECKE-FERTIG")
+    open(target, "w", encoding="utf-8").write("\n".join(lines_2) + "\n")
     print("%d Ausdruecke nach %s" % (len(ausdruecke()), target))
     return 0
 
 
 def pruefen(serial: str) -> int:
     text = open(serial, "rb").read().decode("utf-8", "replace")
-    zeilen = text.split("\n")
+    lines_2 = text.split("\n")
     aus = ausdruecke()
     gut = 0
     bad_2 = 0
     for i, a in enumerate(aus):
-        marke = "AUSDRUCK-%d" % i
+        brand = "AUSDRUCK-%d" % i
         reply = None
-        for k, z in enumerate(zeilen):
-            if z.strip() == marke:
-                for j in range(k + 1, min(k + 12, len(zeilen))):
-                    s = zeilen[j].strip()
+        for k, z in enumerate(lines_2):
+            if z.strip() == brand:
+                for j in range(k + 1, min(k + 12, len(lines_2))):
+                    s = lines_2[j].strip()
                     if not s or s.startswith("elf:") or s.startswith("osum$"):
                         continue
                     reply = s

@@ -29,10 +29,10 @@ sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import icon as symmod  # noqa: E402
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("kein P6-PPM: %s" % pfad)
+        raise SystemExit("kein P6-PPM: %s" % path_2)
     felder = []
     at = 2
     while len(felder) < 3:
@@ -59,12 +59,12 @@ def main(argv):
         int(argv[4]), int(argv[5]), argv[6]
     tol = int(argv[7]) if len(argv) > 7 else 0
     w, h, roh = ppm(screen)
-    sw, sh, bild = symmod.zurueck(sym)
+    sw, sh, image_2 = symmod.back_2(sym)
     deckend = 0
     wrong = 0
     for r in range(min(bh, sh)):
         for c in range(min(bw, sw)):
-            soll = bild[r][c]
+            soll = image_2[r][c]
             if soll is None:
                 continue
             deckend += 1

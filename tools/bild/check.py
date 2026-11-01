@@ -55,28 +55,28 @@ FAELLE = [
 
 MITTEL_LIBJPEG = 6.0
 MAX_LIBJPEG = 40
-GROESSE_FAKTOR = 1.35
+SIZE_FACTOR = 1.35
 
 
-def punkte(im):
+def points_2(im):
     return list(im.convert("RGB").getdata())
 
 
-def abstand(a, b):
+def spacing_2(a, b):
     """Groesster und mittlerer Abstand je Bildpunkt (ueber die drei
     Kanaele das Maximum)."""
     worst = 0
-    summe = 0
+    sum_ = 0
     nz = 0
     for x, y in zip(a, b):
         d = max(abs(x[0] - y[0]), abs(x[1] - y[1]), abs(x[2] - y[2]))
         if d:
             nz += 1
-        summe += d
+        sum_ += d
         if d > worst:
             worst = d
     n = max(1, len(a))
-    return worst, summe / n, nz, n
+    return worst, sum_ / n, nz, n
 
 
 def main(argv):
@@ -85,9 +85,9 @@ def main(argv):
         return 2
     quelldir, holdir = argv[1], argv[2]
     bad = 0
-    for name, quelle, art, q in FAELLE:
+    for name, source_2, art, q in FAELLE:
         hp = os.path.join(holdir, name)
-        qp = os.path.join(quelldir, quelle)
+        qp = os.path.join(quelldir, source_2)
         if not os.path.exists(hp) or os.path.getsize(hp) == 0:
             print("FAIL  %-12s the file did not come from the image" % name)
             bad += 1
@@ -112,8 +112,8 @@ def main(argv):
                   % (name, fmt, art))
             bad += 1
             continue
-        pm, po = punkte(mein), punkte(orig)
-        worst, mittel, nz, n = abstand(pm, po)
+        pm, po = points_2(mein), points_2(orig)
+        worst, mittel, nz, n = spacing_2(pm, po)
         if art == "png":
             if worst == 0:
                 print("OK    %-12s %dx%d PNG verlustfrei, Abweichung 0 "
@@ -127,9 +127,9 @@ def main(argv):
             continue
         b = io.BytesIO()
         orig.convert("RGB").save(b, "JPEG", quality=q, subsampling=0)
-        libp = punkte(Image.open(io.BytesIO(b.getvalue())))
-        lw, lm, _lnz, _ln = abstand(libp, po)
-        vw, vm, _vnz, _vn = abstand(pm, libp)
+        libp = points_2(Image.open(io.BytesIO(b.getvalue())))
+        lw, lm, _lnz, _ln = spacing_2(libp, po)
+        vw, vm, _vnz, _vn = spacing_2(pm, libp)
         libgr = len(b.getvalue())
         meingr = os.path.getsize(hp)
         schlimm = []
@@ -139,7 +139,7 @@ def main(argv):
         if vw > MAX_LIBJPEG:
             schlimm.append("groesster Abstand zu libjpeg %d > %d"
                            % (vw, MAX_LIBJPEG))
-        if meingr > libgr * GROESSE_FAKTOR:
+        if meingr > libgr * SIZE_FACTOR:
             schlimm.append("Datei %d gegen %d Oktette (Faktor %.2f)"
                            % (meingr, libgr, meingr / max(1, libgr)))
         header = ("%-12s %dx%d JPEG q%d: gegen das Original maxdiff=%d "

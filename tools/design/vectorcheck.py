@@ -30,7 +30,7 @@ def rdiv(a, b):
 class Path:
     def __init__(self):
         self.pts = []
-        self.kanten = []
+        self.edges_2 = []
         self.start = 0
 
     def nach(self, x, y):
@@ -71,7 +71,7 @@ class Path:
     def _k(self, a, b):
         if a[1] == b[1]:
             return
-        self.kanten.append((a[0], a[1], b[0], b[1]))
+        self.edges_2.append((a[0], a[1], b[0], b[1]))
 
 
 def rechteck(p, x, y, w, h):
@@ -109,10 +109,10 @@ def ellipse(p, cx, cy, rx, ry):
 
 
 def rastern(p, rule=0):
-    if not p.kanten:
+    if not p.edges_2:
         return None
-    xs = [k[0] for k in p.kanten] + [k[2] for k in p.kanten]
-    ys = [k[1] for k in p.kanten] + [k[3] for k in p.kanten]
+    xs = [k[0] for k in p.edges_2] + [k[2] for k in p.edges_2]
+    ys = [k[1] for k in p.edges_2] + [k[3] for k in p.edges_2]
     bx0, bx1 = min(xs) >> 6, (max(xs) + 63) >> 6
     by0, by1 = min(ys) >> 6, (max(ys) + 63) >> 6
     w, h = bx1 - bx0, by1 - by0
@@ -124,7 +124,7 @@ def rastern(p, rule=0):
         for sub in range(4):
             ysamp = py * 64 + 8 + sub * 16
             cross = []
-            for (ax, ay, bx, by) in p.kanten:
+            for (ax, ay, bx, by) in p.edges_2:
                 lo, hi, d = (ay, by, 1) if ay < by else (by, ay, -1)
                 if lo <= ysamp < hi:
                     x = ax + rdiv((bx - ax) * (ysamp - ay), by - ay)

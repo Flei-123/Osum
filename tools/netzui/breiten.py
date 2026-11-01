@@ -14,50 +14,50 @@ VALUES = {
     "ms": "1234 ms",
 }
 
-def breite(s):
+def width(s):
     return round(len(s) * PPC)
 
-def lies(pfad):
+def read(path):
     aus = {}
-    with open(pfad, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for z in f:
             m = re.match(r"^(settings\.net\.[a-z.]+) = (.*)$", z.rstrip("\n"))
             if m:
                 aus[m.group(1)] = m.group(2)
     return aus
 
-def check(pfad):
-    k = lies(pfad)
-    fehlt = [n for n in ("heading", "linkspeed", "down", "up", "total",
+def check(path):
+    k = read(path)
+    missing = [n for n in ("heading", "linkspeed", "down", "up", "total",
                          "rtt", "unknown", "connected", "disconnected",
                          "noaddr", "noroute", "rttnone", "rttwait", "note")
              if "settings.net." + n not in k]
-    if fehlt:
-        print("  FEHLENDE SCHLUESSEL: %s" % ", ".join(fehlt))
+    if missing:
+        print("  FEHLENDE SCHLUESSEL: %s" % ", ".join(missing))
         return 1
 
     def g(n):
         return k["settings.net." + n]
 
-    zeilen = []
+    lines = []
     for z in ("connected", "disconnected", "noaddr", "noroute"):
-        zeilen.append(("Zustand/" + z, g("heading") + g(z), LEFT))
-    zeilen.append(("Verbindungsrate/unbekannt",
+        lines.append(("Zustand/" + z, g("heading") + g(z), LEFT))
+    lines.append(("Verbindungsrate/unbekannt",
                    g("linkspeed") + g("unknown"), LEFT))
-    zeilen.append(("Verbindungsrate/Zahl",
+    lines.append(("Verbindungsrate/Zahl",
                    g("linkspeed") + VALUES["mbit"], LEFT))
-    zeilen.append(("Empfang", g("down") + VALUES["rate"], LEFT))
-    zeilen.append(("Senden", g("up") + VALUES["rate"], LEFT))
-    zeilen.append(("Gesamt",
+    lines.append(("Empfang", g("down") + VALUES["rate"], LEFT))
+    lines.append(("Senden", g("up") + VALUES["rate"], LEFT))
+    lines.append(("Gesamt",
                    g("total") + VALUES["menge"] + " / " + VALUES["menge"], LEFT))
     for z in ("rttnone", "rttwait"):
-        zeilen.append(("Antwortzeit/" + z, g("rtt") + g(z), LEFT))
-    zeilen.append(("Antwortzeit/Zahl", g("rtt") + VALUES["ms"], LEFT))
-    zeilen.append(("Fussnote", g("note"), RIGHT))
+        lines.append(("Antwortzeit/" + z, g("rtt") + g(z), LEFT))
+    lines.append(("Antwortzeit/Zahl", g("rtt") + VALUES["ms"], LEFT))
+    lines.append(("Fussnote", g("note"), RIGHT))
 
     bad = 0
-    for name, text, limit in zeilen:
-        w = breite(text)
+    for name, text, limit in lines:
+        w = width(text)
         state = "ok      "
         if w > limit:
             state = "ZU BREIT"

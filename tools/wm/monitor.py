@@ -36,7 +36,7 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    sock, datei = sys.argv[1], sys.argv[2]
+    sock, file = sys.argv[1], sys.argv[2]
     pause = float(sys.argv[3]) if len(sys.argv) > 3 else 0.10
 
     s = None
@@ -60,14 +60,14 @@ def main():
             s.recv(65536)
         except OSError:
             pass
-        for zeile in open(datei):
-            zeile = zeile.strip()
-            if not zeile or zeile.startswith("#"):
+        for line in open(file):
+            line = line.strip()
+            if not line or line.startswith("#"):
                 continue
-            if zeile.startswith("warte"):
-                time.sleep(float(zeile.split()[1]))
+            if line.startswith("warte"):
+                time.sleep(float(line.split()[1]))
                 continue
-            s.sendall((zeile + "\n").encode())
+            s.sendall((line + "\n").encode())
             n += 1
             time.sleep(pause)
             try:

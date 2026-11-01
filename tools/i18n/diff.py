@@ -3,10 +3,10 @@
 import sys
 
 
-def lies(pfad):
-    d = open(pfad, "rb").read()
+def read_2(path_2):
+    d = open(path_2, "rb").read()
     if d[:2] != b"P6":
-        raise SystemExit("%s ist kein P6-PPM" % pfad)
+        raise SystemExit("%s ist kein P6-PPM" % path_2)
     felder = []
     i = 2
     while len(felder) < 3:
@@ -30,8 +30,8 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    aw, ah, a = lies(sys.argv[1])
-    bw, bh, b = lies(sys.argv[2])
+    aw, ah, a = read_2(sys.argv[1])
+    bw, bh, b = read_2(sys.argv[2])
     if (aw, ah) != (bw, bh):
         print("verschiedene Groessen: %dx%d gegen %dx%d" % (aw, ah, bw, bh))
         return 1
@@ -42,9 +42,9 @@ def main():
     n = 0
     ganz = 0
     for y in range(y0, min(y0 + h, ah)):
-        zeile = y * aw * 3
+        line_3 = y * aw * 3
         for x in range(x0, min(x0 + w, aw)):
-            o = zeile + x * 3
+            o = line_3 + x * 3
             ganz += 1
             if a[o:o + 3] != b[o:o + 3]:
                 n += 1

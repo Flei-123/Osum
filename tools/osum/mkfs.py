@@ -338,7 +338,7 @@ class Fs:
             n += (BS // 8) ** 3 + (BS // 8) ** 4
         return n * BS
 
-    def stufe(self, block, k, grow):
+    def level_2(self, block, k, grow):
         b = self.g64(block * BS + k * 8)
         if b or not grow:
             return b
@@ -354,13 +354,13 @@ class Fs:
             l1 = self.block_alloc()
             self.iset(ino, I_TINDIRECT, l1)
         per = BS // 8
-        l2 = self.stufe(l1, t // (per * per), grow)
+        l2 = self.level_2(l1, t // (per * per), grow)
         if not l2:
             return 0
-        l3 = self.stufe(l2, (t // per) % per, grow)
+        l3 = self.level_2(l2, (t // per) % per, grow)
         if not l3:
             return 0
-        return self.stufe(l3, t % per, grow)
+        return self.level_2(l3, t % per, grow)
 
     def quad_block(self, ino, q, grow):
         l1 = self.iget(ino, I_QINDIRECT)
@@ -370,16 +370,16 @@ class Fs:
             l1 = self.block_alloc()
             self.iset(ino, I_QINDIRECT, l1)
         per = BS // 8
-        l2 = self.stufe(l1, q // per ** 3, grow)
+        l2 = self.level_2(l1, q // per ** 3, grow)
         if not l2:
             return 0
-        l3 = self.stufe(l2, (q // per ** 2) % per, grow)
+        l3 = self.level_2(l2, (q // per ** 2) % per, grow)
         if not l3:
             return 0
-        l4 = self.stufe(l3, (q // per) % per, grow)
+        l4 = self.level_2(l3, (q // per) % per, grow)
         if not l4:
             return 0
-        return self.stufe(l4, q % per, grow)
+        return self.level_2(l4, q % per, grow)
 
     def single_block(self, ino, k, grow):
         ib = self.iget(ino, I_INDIRECT)
@@ -856,8 +856,8 @@ def main(argv):
             if len(parts) > 2 and parts[2] != "":
                 gid = int(parts[2])
         if "->" in spec:
-            pfad, _, target_2 = spec.partition("->")
-            fs.symlink(pfad, target_2)
+            path_2, _, target_2 = spec.partition("->")
+            fs.symlink(path_2, target_2)
             continue
         if spec.endswith("/"):
             fs.mkdir(spec[:-1], 0o755 if mode is None else mode, uid, gid)

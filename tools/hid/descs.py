@@ -487,11 +487,11 @@ BERICHTE = [
 
 
 
-def i2c_res(adr, hz=400000, quelle=b"\\_SB.PCI0.I2C1\0"):
+def i2c_res(adr, hz=400000, source_2=b"\\_SB.PCI0.I2C1\0"):
     header = bytes([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01])
     tdl = (6).to_bytes(2, "little")
     rest = header + tdl + hz.to_bytes(4, "little") \
-        + adr.to_bytes(2, "little") + quelle
+        + adr.to_bytes(2, "little") + source_2
     return bytes([0x8E]) + len(rest).to_bytes(2, "little") + rest
 
 
@@ -507,7 +507,7 @@ def acpi_table(adressen, sig=b"DSDT"):
     koerper += bytes([0x8E, 0x00, 0x00, 0xFF])
     koerper += i2c_res(adressen[0])
     koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])
-    koerper += i2c_res(adressen[1], quelle=b"\\_SB.PCI0.I2C0\0")
+    koerper += i2c_res(adressen[1], source_2=b"\\_SB.PCI0.I2C0\0")
     koerper += i2c_res(adressen[0])
     header = bytearray(36)
     header[0:4] = sig
@@ -1018,16 +1018,16 @@ def field_lines():
     return out
 
 
-def nr_von(marke):
+def nr_von(brand_2):
     """Die Nummer des Berichts mit dieser Bemerkung.  tools/hid/run.sh
     holt sie SO und schreibt sie nicht hin -- als in dieser Runde zwei
     Berichte fuer die Super-Taste dazukamen, verschoben sich alle
     folgenden Nummern, und drei Zusagen fielen, obwohl am Kernel nichts
     falsch war."""
     for i, (_, _, k) in enumerate(BERICHTE):
-        if k == marke:
+        if k == brand_2:
             return i
-    raise SystemExit("kein Bericht mit der Bemerkung %r" % marke)
+    raise SystemExit("kein Bericht mit der Bemerkung %r" % brand_2)
 
 
 def main():

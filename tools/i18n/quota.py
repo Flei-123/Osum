@@ -7,11 +7,11 @@ VALW = 192
 KEYW = 48
 
 
-def lies(pfad):
+def read_2(path_2):
     aus = {}
     error = []
-    for nr, zeile in enumerate(open(pfad, encoding="utf-8"), 1):
-        z = zeile.rstrip("\n")
+    for nr, line_3 in enumerate(open(path_2, encoding="utf-8"), 1):
+        z = line_3.rstrip("\n")
         if not z.strip() or z.lstrip().startswith("#"):
             continue
         if "=" not in z:
@@ -27,7 +27,7 @@ def lies(pfad):
 
 def main():
     wurzel = sys.argv[1] if len(sys.argv) > 1 else "locale"
-    en, error_en = lies(os.path.join(wurzel, "en", "messages"))
+    en, error_en = read_2(os.path.join(wurzel, "en", "messages"))
     if not en:
         print("no source language under %s/en/messages" % wurzel)
         return 1
@@ -39,16 +39,16 @@ def main():
         p = os.path.join(wurzel, code, "messages")
         if not os.path.exists(p):
             continue
-        de, error = lies(p)
-        fehlt = [k for k in en if k not in de]
+        de, error = read_2(p)
+        missing_2 = [k for k in en if k not in de]
         zuviel = [k for k in de if k not in en]
         eq = [k for k in de if k in en and de[k] == en[k]]
-        deckung = (len(en) - len(fehlt)) * 100 // len(en)
+        deckung = (len(en) - len(missing_2)) * 100 // len(en)
         zeilen.append("%s: %d von %d Schluesseln = %d%% abgedeckt, "
                       "%d fehlen, %d unbekannt, %d gleich wie Englisch"
-                      % (code, len(en) - len(fehlt), len(en), deckung,
-                         len(fehlt), len(zuviel), len(eq)))
-        for k in fehlt:
+                      % (code, len(en) - len(missing_2), len(en), deckung,
+                         len(missing_2), len(zuviel), len(eq)))
+        for k in missing_2:
             zeilen.append("    fehlt in %s: %s" % (code, k))
         for k in zuviel:
             zeilen.append("    UNBEKANNT in %s: %s" % (code, k))

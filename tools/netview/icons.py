@@ -50,11 +50,11 @@ import os
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(HIER)
-sys.path.insert(0, os.path.join(WURZEL, "k15"))
+ROOT_2 = os.path.dirname(HIER)
+sys.path.insert(0, os.path.join(ROOT_2, "k15"))
 import icon as symmod  # noqa: E402
 
-SOURCE = os.path.join(WURZEL, "..", "assets", "netview")
+SOURCE = os.path.join(ROOT_2, "..", "assets", "netview")
 
 ZUSTAENDE = ["state-nocarrier", "state-noip", "state-noroute", "state-online"]
 MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
@@ -73,9 +73,9 @@ FILE_NAME = {"ink": "fg", "dim": "dim", "accent": "accent",
               "warn": "focus", "panel": "panel"}
 
 
-def schema_read(pfad):
+def schema_read(path_2):
     values = {}
-    for roh in open(pfad, encoding="ascii"):
+    for roh in open(path_2, encoding="ascii"):
         roh = roh.strip()
         if not roh or roh.startswith("#") or "=" not in roh:
             continue
@@ -84,7 +84,7 @@ def schema_read(pfad):
     aus = {}
     for rolle, key_2 in FILE_NAME.items():
         if key_2 not in values:
-            raise SystemExit("icons: %s hat kein %s=" % (pfad, key_2))
+            raise SystemExit("icons: %s hat kein %s=" % (path_2, key_2))
         aus[rolle] = values[key_2]
     return aus
 
@@ -123,13 +123,13 @@ def zeichnung(name):
     return os.path.join(SOURCE, name + ".txt")
 
 
-def lies(name):
-    return symmod.lies(zeichnung(name))
+def read_2(name):
+    return symmod.read_2(zeichnung(name))
 
 
 def schattenriss(name):
     """Jede Farbe zu einer: WAS wird eingefaerbt, egal womit."""
-    palette, zeilen = lies(name)
+    palette, zeilen = read_2(name)
     aus = set()
     for y, z in enumerate(zeilen):
         for x, c in enumerate(z):
@@ -141,7 +141,7 @@ def schattenriss(name):
 def bitreihen(name):
     """Das Zeichen als Reihen von Bits, hoechstwertiges Bit links, plus je
     Bildpunkt die Rollennummer. Fuer den Kern, der keine Datei liest."""
-    palette, zeilen = lies(name)
+    palette, zeilen = read_2(name)
     w = len(zeilen[0])
     reihen = []
     for z in zeilen:
@@ -306,7 +306,7 @@ def bauen(target):
     os.makedirs(target, exist_ok=True)
     n = 0
     for name in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
-        d = symmod.baue(zeichnung(name))
+        d = symmod.build_2(zeichnung(name))
         with open(os.path.join(target, name), "wb") as f:
             f.write(d)
         n += 1
@@ -330,7 +330,7 @@ def main(argv):
         return 0
     if len(argv) >= 2 and argv[1] == "pruefe":
         error = check_gestaltung()
-        kdatei = os.path.join(WURZEL, "..", "kernel", "net", "netmark.fi")
+        kdatei = os.path.join(ROOT_2, "..", "kernel", "net", "netmark.fi")
         if "--kern" in argv:
             kdatei = argv[argv.index("--kern") + 1]
         soll = kernquelle()

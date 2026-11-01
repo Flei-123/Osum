@@ -109,8 +109,8 @@ def stellen(wurzel):
     return aus
 
 
-def bearbeite(pfad, zeilennummern, schreibe):
-    with open(pfad, encoding="utf-8") as f:
+def bearbeite(path_2, zeilennummern, schreibe):
+    with open(path_2, encoding="utf-8") as f:
         zeilen = f.read().split("\n")
     geaendert = 0
     bericht = []
@@ -146,7 +146,7 @@ def bearbeite(pfad, zeilennummern, schreibe):
             geaendert += 1
             bericht.append((nr, alt.strip(), new.strip()))
     if geaendert and schreibe:
-        with open(pfad, "w", encoding="utf-8") as f:
+        with open(path_2, "w", encoding="utf-8") as f:
             f.write("\n".join(zeilen))
     return geaendert, bericht
 
@@ -160,14 +160,14 @@ def main(argv):
         karte = {d: n for d, n in karte.items()
                  if any(d.endswith(z) or z in d for z in target)}
     ges = 0
-    for datei in sorted(karte):
-        pfad = os.path.join(wurzel, datei)
-        if not os.path.exists(pfad):
+    for file_2 in sorted(karte):
+        path_2 = os.path.join(wurzel, file_2)
+        if not os.path.exists(path_2):
             continue
-        n, bericht = bearbeite(pfad, karte[datei], schreibe)
+        n, bericht = bearbeite(path_2, karte[file_2], schreibe)
         if n:
             ges += n
-            print("%s  %d Zeilen" % (datei, n))
+            print("%s  %d Zeilen" % (file_2, n))
             for nr, a, b in bericht:
                 print("   %5d - %s" % (nr, a[:96]))
                 print("         + %s" % b[:96])

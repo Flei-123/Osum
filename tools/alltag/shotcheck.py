@@ -95,9 +95,9 @@ WINRE = re.compile(
 FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
 
-def parse(path, marke="settings: rect name=waa "):
+def parse(path, brand="settings: rect name=waa "):
     body = open(path, "rb").read().decode("latin1")
-    cut = body.rfind(marke)
+    cut = body.rfind(brand)
     tail = body[cut:] if cut >= 0 else body
     out = []
     for raw in tail.splitlines():
@@ -162,11 +162,11 @@ def main(argv):
         print(__doc__)
         return 2
     pic = Pic(argv[1])
-    marke = "settings: rect name=waa "
+    brand = "settings: rect name=waa "
     for a in argv[3:]:
         if a.startswith("--cut="):
-            marke = a[6:]
-    texts, wins, font = parse(argv[2], marke)
+            brand = a[6:]
+    texts, wins, font = parse(argv[2], brand)
     ox = oy = 0
     forced = False
     ww, wh = pic.w, pic.h

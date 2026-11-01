@@ -72,8 +72,8 @@ def symbole(elf):
     if aus.returncode != 0:
         raise SystemExit("nm ist fehlgeschlagen: " + aus.stderr.strip())
     roh = []
-    for zeile in aus.stdout.splitlines():
-        parts = zeile.split()
+    for line in aus.stdout.splitlines():
+        parts = line.split()
         if len(parts) != 3:
             continue
         adr, art, name = parts
@@ -104,7 +104,7 @@ def lesbar(name):
     return name.replace("__", ".")
 
 
-def zeilen(elf):
+def lines(elf):
     """Adresse -> (Datei, Zeile), aus `.debug_line`.
 
     `readelf --debug-dump=decodedline` wickelt den Zustandsautomaten
@@ -118,8 +118,8 @@ def zeilen(elf):
     if aus.returncode != 0:
         return []
     roh = []
-    for zeile in aus.stdout.splitlines():
-        parts = zeile.split()
+    for line in aus.stdout.splitlines():
+        parts = line.split()
         if len(parts) < 3 or not parts[2].startswith("0x"):
             continue
         try:
@@ -130,13 +130,13 @@ def zeilen(elf):
         roh.append((adr, parts[0], nr))
     roh.sort()
     raus = []
-    for adr, datei, nr in roh:
+    for adr, file_2, nr in roh:
         if raus and raus[-1][0] == adr:
-            raus[-1] = (adr, datei, nr)
+            raus[-1] = (adr, file_2, nr)
             continue
-        if raus and raus[-1][1] == datei and raus[-1][2] == nr:
+        if raus and raus[-1][1] == file_2 and raus[-1][2] == nr:
             continue
-        raus.append((adr, datei, nr))
+        raus.append((adr, file_2, nr))
     return raus
 
 
@@ -255,11 +255,11 @@ def blob(syms, lns):
     dateien = []
     dvers = {}
     zeil_roh = []
-    for adr, datei, nr in lns:
-        if datei not in dvers:
-            dvers[datei] = len(dateien)
-            dateien.append(datei)
-        f = dvers[datei]
+    for adr, file_2, nr in lns:
+        if file_2 not in dvers:
+            dvers[file_2] = len(dateien)
+            dateien.append(file_2)
+        f = dvers[file_2]
         if nr > 0xFFFFF:
             nr = 0xFFFFF
         if f > 0xFFF:
@@ -315,19 +315,19 @@ def ausrichten(n):
     return (n + 7) & ~7
 
 
-def write_s(pfad, daten, syms, lns):
-    with open(pfad, "w") as f:
+def write_s(path_2, data, syms, lns):
+    with open(path_2, "w") as f:
         f.write("/* SPDX-License-Identifier: GPL-2.0-only */\n")
         f.write("/* ERZEUGT von tools/kernel/symtab.py -- NICHT VON HAND"
                 " AENDERN.\n")
         f.write("   %d Symbole, %d Zeileneintraege, %d Oktette. */\n"
-                % (len(syms), len(lns), len(daten)))
+                % (len(syms), len(lns), len(data)))
         f.write("    .section .rodata\n")
         f.write("    .align 8\n")
         f.write("    .globl osym_tab\n")
         f.write("osym_tab:\n")
-        for i in range(0, len(daten), 32):
-            chunk = daten[i:i + 32]
+        for i in range(0, len(data), 32):
+            chunk = data[i:i + 32]
             f.write("    .byte " + ",".join(str(x) for x in chunk) + "\n")
 
 
@@ -340,11 +340,11 @@ def main():
     if not syms:
         sys.stderr.write("symtab: nm hat kein einziges Textsymbol geliefert\n")
         return 1
-    lns = zeilen(elf)
-    daten = blob(syms, lns)
-    write_s(aus, daten, syms, lns)
+    lns = lines(elf)
+    data = blob(syms, lns)
+    write_s(aus, data, syms, lns)
     sys.stderr.write("symtab: %d Symbole, %d Zeilen, %d Oktette\n"
-                     % (len(syms), len(lns), len(daten)))
+                     % (len(syms), len(lns), len(data)))
     return 0
 
 

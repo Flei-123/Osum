@@ -73,7 +73,7 @@ SAETZE = {
 VORGABE = "latin"
 
 
-def bereiche_lesen(text):
+def bereiche_read(text):
     """"20-7E,A0-FF" -> [(0x20, 0x7E), (0xA0, 0xFF)].  Auch "FFFD" allein."""
     aus = []
     for chunk in text.split(","):
@@ -102,16 +102,16 @@ def u32(d, o):
 
 
 class Vorlage:
-    def __init__(self, pfad):
-        self.d = open(pfad, "rb").read()
+    def __init__(self, path_2):
+        self.d = open(path_2, "rb").read()
         if self.d[:4] not in (b"\x00\x01\x00\x00", b"true"):
-            raise SystemExit("schnitt: %s ist keine TrueType-Datei" % pfad)
+            raise SystemExit("schnitt: %s ist keine TrueType-Datei" % path_2)
         n = u16(self.d, 4)
         self.tab = {}
         for i in range(n):
-            marke, _, off, laenge = struct.unpack_from(">4sIII", self.d,
+            brand_2, _, off, len_ = struct.unpack_from(">4sIII", self.d,
                                                        12 + 16 * i)
-            self.tab[marke.decode("latin1")] = (off, laenge)
+            self.tab[brand_2.decode("latin1")] = (off, len_)
         for m in ("head", "hhea", "maxp", "hmtx", "cmap", "loca", "glyf"):
             if m not in self.tab:
                 raise SystemExit("schnitt: Tabelle '%s' fehlt" % m)
@@ -257,7 +257,7 @@ def komponenten(roh):
     return aus
 
 
-def komponenten_neu(roh, karte):
+def komponenten_new(roh, karte):
     """Dieselbe Glyphe, aber mit umnummerierten Bestandteilen."""
     aus = bytearray(roh)
     p = 10
@@ -282,7 +282,7 @@ def pad4(b):
     return b + b"\x00" * ((4 - len(b) % 4) % 4)
 
 
-def summe(b):
+def sum_(b):
     b = pad4(b)
     s = 0
     for i in range(0, len(b), 4):
@@ -323,11 +323,11 @@ def cmap4(paare):
     return struct.pack(">HHHHI", 0, 1, 3, 1, 12) + under
 
 
-def kern0_bauen(paare):
+def kern0_build(paare):
     if not paare:
         return None
-    liste = sorted(paare)
-    n = len(liste)
+    list_ = sorted(paare)
+    n = len(list_)
     suchbereich = 6
     while suchbereich * 2 <= n * 6:
         suchbereich *= 2
@@ -338,7 +338,7 @@ def kern0_bauen(paare):
         v //= 2
     koerper = struct.pack(">HHHH", n, suchbereich, entry,
                           n * 6 - suchbereich)
-    for li, re in liste:
+    for li, re in list_:
         koerper += struct.pack(">HHh", li, re, paare[(li, re)])
     under = struct.pack(">HHH", 0, 14 + len(koerper), 0x0001) + koerper
     return struct.pack(">HH", 0, 1) + under
@@ -348,7 +348,7 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    quelle, target = argv[1], argv[2]
+    source_2, target = argv[1], argv[2]
     rest = argv[3:]
     if rest and rest[0] == "--set":
         if rest[1] not in SAETZE:
@@ -356,7 +356,7 @@ def main(argv):
                              % (rest[1], ", ".join(sorted(SAETZE))))
         bereiche = SAETZE[rest[1]]
     elif rest and rest[0] == "--ranges":
-        bereiche = bereiche_lesen(rest[1])
+        bereiche = bereiche_read(rest[1])
     elif rest:
         erst = int(rest[0], 0)
         letzt = int(rest[1], 0) if len(rest) > 1 else 0x7E
@@ -364,7 +364,7 @@ def main(argv):
     else:
         bereiche = SAETZE[VORGABE]
 
-    v = Vorlage(quelle)
+    v = Vorlage(source_2)
     voll = v.cmap()
 
     behalten = [0]
@@ -377,13 +377,13 @@ def main(argv):
             char[c] = g
             if g not in behalten:
                 behalten.append(g)
-    offen = list(behalten)
-    while offen:
-        g = offen.pop()
+    open_ = list(behalten)
+    while open_:
+        g = open_.pop()
         for k in komponenten(v.glyph_bytes(g)):
             if k not in behalten:
                 behalten.append(k)
-                offen.append(k)
+                open_.append(k)
     behalten.sort()
     karte = {alt: new for new, alt in enumerate(behalten)}
 
@@ -393,7 +393,7 @@ def main(argv):
         offset.append(len(glyf))
         roh = v.glyph_bytes(alt)
         if roh and s16(roh, 0) < 0:
-            roh = komponenten_neu(roh, karte)
+            roh = komponenten_new(roh, karte)
         glyf += pad4(roh)
     offset.append(len(glyf))
     lang = offset[-1] > 0x1FFFE
@@ -423,7 +423,7 @@ def main(argv):
     }
     kp = {(karte[a], karte[b]): w for (a, b), w in v.kern0().items()
           if a in karte and b in karte}
-    k = kern0_bauen(kp)
+    k = kern0_build(kp)
     if k:
         tabellen["kern"] = k
 
@@ -444,21 +444,21 @@ def main(argv):
     koerper = b""
     for m in marken:
         d = tabellen[m]
-        verz += struct.pack(">4sIII", m.encode("latin1"), summe(d), pos,
+        verz += struct.pack(">4sIII", m.encode("latin1"), sum_(d), pos,
                             len(d))
         koerper += pad4(d)
         pos += len(pad4(d))
-    datei = bytearray(header + verz + koerper)
-    check = (0xB1B0AFBA - summe(bytes(datei))) & 0xFFFFFFFF
+    file_2 = bytearray(header + verz + koerper)
+    check = (0xB1B0AFBA - sum_(bytes(file_2))) & 0xFFFFFFFF
     for i, m in enumerate(marken):
         if m == "head":
-            hoff = u32(datei, 12 + 16 * i + 8)
-            struct.pack_into(">I", datei, hoff + 8, check)
+            hoff = u32(file_2, 12 + 16 * i + 8)
+            struct.pack_into(">I", file_2, hoff + 8, check)
 
-    open(target, "wb").write(bytes(datei))
+    open(target, "wb").write(bytes(file_2))
     print("%s: %d Glyphen, %d Zeichen, %d Oktette (%s), upm=%d, "
           "asc=%d desc=%d gap=%d, kern=%d Paare"
-          % (target, len(behalten), len(char), len(datei),
+          % (target, len(behalten), len(char), len(file_2),
              ", ".join(marken), v.upm, v.ascent, v.descent, v.gap, len(kp)))
     return 0
 

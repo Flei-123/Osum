@@ -262,12 +262,12 @@ def blocktyp(m, bt):
 
 
 class Block:
-    def __init__(self, art, tiefe, stack_ein, res, marke):
+    def __init__(self, art, tiefe, stack_ein, res, brand):
         self.art = art
         self.tiefe = tiefe
         self.stack_ein = stack_ein
         self.res = res
-        self.marke = marke
+        self.brand = brand
         self.hat_else = False
         self.loop = (art == 'loop')
         self.turm_brand = None
@@ -341,10 +341,10 @@ def _ueberlesen(l, op):
 TURM_KENNUNG = 1000000
 
 
-def _in_dispatch_body(stack, marke):
+def _in_dispatch_body(stack, brand):
     for x in reversed(stack):
         if x.art == 'turm':
-            return x.turm_brand == marke
+            return x.turm_brand == brand
         if x.art == 'loop' or (x.art == 'block' and x.loop):
             return False
     return False
@@ -489,7 +489,7 @@ class Erzeuger:
         l = Leser(code)
         sp = 0
         stack = [Block('func', 0, 0, res, 0)]
-        self.marke = 0
+        self.brand = 0
         tiefe = 1
         unerreichbar = False
 
@@ -540,9 +540,9 @@ class Erzeuger:
                 bt = l.sleb()
                 bpar, bres = blocktyp(m, bt)
                 sp -= len(bpar)
-                self.marke += 1
+                self.brand += 1
                 b = Block({0x02: 'block', 0x03: 'loop', 0x04: 'if'}[op],
-                          tiefe, sp, bres, self.marke)
+                          tiefe, sp, bres, self.brand)
                 b.loop = (op == 0x03)
                 if op == 0x04:
                     sp -= 1
@@ -742,7 +742,7 @@ class Erzeuger:
             return sp + 1, False
 
         if 0x28 <= op <= 0x3E:
-            return self.speicher(l, op, sp, tiefe)
+            return self.mem(l, op, sp, tiefe)
         if op == 0x3F:
             l.u8()
             E('%s = mem_seiten' % self.sv(sp))
@@ -814,7 +814,7 @@ class Erzeuger:
             tiefe -= 1
             self.e(tiefe - 1, '}')
 
-    def speicher(self, l, op, sp, tiefe):
+    def mem(self, l, op, sp, tiefe):
         E = lambda s: self.e(tiefe - 1, s)
         l.uleb()
         off = l.uleb()
@@ -834,9 +834,9 @@ class Erzeuger:
             0x3C: 'mem_st8', 0x3D: 'mem_st16', 0x3E: 'mem_st32',
         }
         if op in LAD:
-            fn, breite = LAD[op]
+            fn, width = LAD[op]
             adr = self.sv(sp - 1)
-            if breite == 32:
+            if width == 32:
                 E('%s = %s(%s +%% %d) & 4294967295'
                   % (self.sv(sp - 1), fn, adr, off))
             else:
@@ -1005,17 +1005,17 @@ class Erzeuger:
         self.br_benutzt = True
         self.im_turm = True
         self.turm_faelle = count_2
-        marke = self.marke + 1
-        self.marke += 1
+        brand = self.brand + 1
+        self.brand += 1
         E = lambda t, x: self.e(t, x)
         E(tiefe - 1, '// %d Bloecke am Stueck -> Verteiler (TIEFE.md)' % count_2)
-        E(tiefe - 1, 'var fall%d: u64 = 0' % marke)
+        E(tiefe - 1, 'var fall%d: u64 = 0' % brand)
         E(tiefe - 1, 'while true {')
-        E(tiefe, 'if fall%d == 0 {' % marke)
+        E(tiefe, 'if fall%d == 0 {' % brand)
         for k in range(count_2):
-            b = Block('turm', tiefe + k, sp, [], marke)
+            b = Block('turm', tiefe + k, sp, [], brand)
             b.loop = False
-            b.turm_brand = marke
+            b.turm_brand = brand
             b.turm_fall = count_2 - k
             b.turm_loop = bool(arten[k]) if arten else False
             stack.append(b)

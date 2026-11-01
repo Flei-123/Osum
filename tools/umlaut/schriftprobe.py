@@ -25,11 +25,11 @@ def tabellen(roh):
     return aus
 
 
-def cmap(pfad):
-    roh = open(pfad, 'rb').read()
+def cmap(path_2):
+    roh = open(path_2, 'rb').read()
     t = tabellen(roh)
     if 'cmap' not in t:
-        raise SystemExit('%s: keine cmap' % pfad)
+        raise SystemExit('%s: keine cmap' % path_2)
     base = t['cmap'][0]
     count = struct.unpack('>H', roh[base + 2:base + 4])[0]
     aus = set()
@@ -78,9 +78,9 @@ def cmap(pfad):
 
 def sichtbarer_text(wurzel):
     aus = []
-    for pfad in sorted(glob.glob(os.path.join(wurzel, 'locale/de/*'))):
-        rel = os.path.relpath(pfad, wurzel)
-        for nr, z in enumerate(open(pfad, encoding='utf-8').read().split('\n'),
+    for path_2 in sorted(glob.glob(os.path.join(wurzel, 'locale/de/*'))):
+        rel = os.path.relpath(path_2, wurzel)
+        for nr, z in enumerate(open(path_2, encoding='utf-8').read().split('\n'),
                                1):
             if z.lstrip().startswith('#') or '=' not in z:
                 continue
@@ -130,11 +130,11 @@ def main(argv):
         for c in t:
             if ord(c) > 127:
                 gebraucht.setdefault(c, herkunft)
-    fehlt = []
+    missing_2 = []
     for c, herkunft in sorted(gebraucht.items()):
         for s in SCHRIFTEN:
             if ord(c) not in decken[s]:
-                fehlt.append('%s U+%04X %r fehlt in %s (z. B. %s)'
+                missing_2.append('%s U+%04X %r fehlt in %s (z. B. %s)'
                              % (herkunft, ord(c), c, s, herkunft))
     print('font probe: %d text spots, %d different characters over '
           'ASCII, %s' % (len(text), len(gebraucht),
@@ -143,9 +143,9 @@ def main(argv):
                                   for s in SCHRIFTEN)))
     print('schriftprobe: benutzt werden %s'
           % ' '.join(sorted(gebraucht)))
-    for z in fehlt:
+    for z in missing_2:
         print('    FEHLT  ' + z)
-    return 1 if fehlt else 0
+    return 1 if missing_2 else 0
 
 
 if __name__ == '__main__':

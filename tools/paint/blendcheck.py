@@ -4,7 +4,7 @@ import os
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.normpath(os.path.join(HIER, "..", ".."))
+ROOT_2 = os.path.normpath(os.path.join(HIER, "..", ".."))
 
 
 def exakt(dst, src, a):
@@ -77,13 +77,13 @@ QUELLEN = [
 
 
 def quellen_check():
-    fehlt = []
-    for datei, nadel in QUELLEN:
-        p = os.path.join(WURZEL, datei)
+    missing_2 = []
+    for file_2, nadel in QUELLEN:
+        p = os.path.join(ROOT_2, file_2)
         try:
             fh = open(p, "rb")
         except OSError:
-            fehlt.append("%s fehlt" % datei)
+            missing_2.append("%s fehlt" % file_2)
             continue
         text = fh.read().decode("utf-8", "replace")
         fh.close()
@@ -93,8 +93,8 @@ def quellen_check():
                 with open(os.path.join(moddir, mod), "rb") as mh:
                     text += mh.read().decode("utf-8", "replace")
         if nadel not in text:
-            fehlt.append("%s: %r steht nicht darin" % (datei, nadel))
-    return fehlt
+            missing_2.append("%s: %r steht nicht darin" % (file_2, nadel))
+    return missing_2
 
 
 def main():
@@ -108,11 +108,11 @@ def main():
     print("PAINT-BLEND: %d Tripel (a, src, dst)%s"
           % (gesamt, "  [--schnell: jedes 7. a]" if schnell else ""))
     for name, _ in FASSUNGEN:
-        mx, summe, wrong, n = erg[name]
+        mx, sum_, wrong, n = erg[name]
         print("   %s  max=%d  mittel=%.6f  falsch=%d (%.3f%%)"
-              % (name, mx, summe / float(n), wrong, 100.0 * wrong / n))
+              % (name, mx, sum_ / float(n), wrong, 100.0 * wrong / n))
 
-    mx, summe, wrong, n = erg[FASSUNGEN[0][0]]
+    mx, sum_, wrong, n = erg[FASSUNGEN[0][0]]
     if mx == 1 and wrong > n * 4 // 10:
         print("  OK    truncation: error 1 on %.2f%% of all triples"
               % (100.0 * wrong / n))
@@ -123,7 +123,7 @@ def main():
         error += 1
 
     for name in ("(num+127)/255 (Python)  ", "(t+(t>>8))>>8 verworfen "):
-        mx, summe, wrong, n = erg[name]
+        mx, sum_, wrong, n = erg[name]
         if mx == 0 and wrong == 0:
             print("  OK    %s is exact on all %d triples" % (name, n))
             zusagen += 1
@@ -157,13 +157,13 @@ def main():
         error += 1
 
     if "--quellen" in sys.argv:
-        fehlt = quellen_check()
-        if not fehlt:
+        missing_2 = quellen_check()
+        if not missing_2:
             print("  OK    all %d occurrences carry the same rounding"
                   % len(QUELLEN))
             zusagen += 1
         else:
-            for z in fehlt:
+            for z in missing_2:
                 print("  FAIL  %s" % z)
             error += 1
 

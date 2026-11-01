@@ -21,13 +21,13 @@ def main():
         print(__doc__)
         return 2
     sock, target = sys.argv[1], sys.argv[2]
-    frist = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
+    deadline = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
     geraet = sys.argv[4] if len(sys.argv) > 4 else ""
 
     if os.path.exists(target):
         os.unlink(target)
     s = None
-    bis = time.time() + frist
+    bis = time.time() + deadline
     while time.time() < bis:
         try:
             s = socket.socket(socket.AF_UNIX)
@@ -49,16 +49,16 @@ def main():
     if geraet:
         cmd += " %s" % geraet
     s.sendall((cmd + "\n").encode())
-    letzte = -1
-    bis = time.time() + frist
+    last = -1
+    bis = time.time() + deadline
     while time.time() < bis:
         try:
             g = os.path.getsize(target)
         except OSError:
             g = -1
-        if g > 0 and g == letzte:
+        if g > 0 and g == last:
             break
-        letzte = g
+        last = g
         time.sleep(0.2)
     try:
         s.close()

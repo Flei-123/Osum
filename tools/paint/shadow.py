@@ -4,11 +4,11 @@ import os
 import sys
 
 
-def ppm_read(pfad):
-    with open(pfad, "rb") as fh:
+def ppm_read(path_2):
+    with open(path_2, "rb") as fh:
         d = fh.read()
     if not d.startswith(b"P6"):
-        raise SystemExit("%s ist kein P6-PPM" % pfad)
+        raise SystemExit("%s ist kein P6-PPM" % path_2)
     felder = []
     i = 2
     while len(felder) < 3:
@@ -28,11 +28,11 @@ def ppm_read(pfad):
     return w, h, d[i:i + w * h * 3]
 
 
-def punkt(bild, w, h, x, y):
+def punkt(image_2, w, h, x, y):
     if x < 0 or y < 0 or x >= w or y >= h:
         return None
     o = (y * w + x) * 3
-    return (bild[o], bild[o + 1], bild[o + 2])
+    return (image_2[o], image_2[o + 1], image_2[o + 2])
 
 
 def bright(p):
@@ -103,7 +103,7 @@ def schatten(argv):
     return 1 if error else 0
 
 
-def ecke(argv):
+def corner_2(argv):
     """Die Ecke, gegen den Lauf mit der eckigen."""
     without, mit = argv[0], argv[1]
     x, y = int(argv[2]), int(argv[3])
@@ -122,15 +122,15 @@ def ecke(argv):
         hineinrechnet.
         """
         frame = punkt(b, w, h, x + r + 2, y + r + 2)
-        grund = punkt(b, w, h, x - 3, y - 3)
+        reason_2 = punkt(b, w, h, x - 3, y - 3)
         n = 0
         for dy in range(r):
             for dx in range(r):
                 p = punkt(b, w, h, x + dx, y + dy)
-                if p is None or p == frame or p == grund:
+                if p is None or p == frame or p == reason_2:
                     continue
                 n += 1
-        return n, frame, grund
+        return n, frame, reason_2
 
     na, ra, ga = gemischt(A, wa, ha)
     nb, rb, gb = gemischt(B, wb, hb)
@@ -201,7 +201,7 @@ def main():
     if was == "schatten":
         return schatten(rest)
     if was == "ecke":
-        return ecke(rest)
+        return corner_2(rest)
     if was == "vergleich":
         return vergleich(rest)
     print("unbekannt: %s" % was)

@@ -53,8 +53,8 @@ def b64u(b):
 def jwt(payload):
     header = b64u(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
     body = b64u(json.dumps(payload).encode())
-    daten = (header + "." + body).encode()
-    sig = b64u(hmac.new(SECRET, daten, hashlib.sha256).digest())
+    data = (header + "." + body).encode()
+    sig = b64u(hmac.new(SECRET, data, hashlib.sha256).digest())
     return header + "." + body + "." + sig
 
 
@@ -68,9 +68,9 @@ def jwt_read(tok):
 
 
 def protokoll(entry):
-    pfad = os.path.join(state["verzeichnis"], "protokoll.jsonl")
+    path_2 = os.path.join(state["verzeichnis"], "protokoll.jsonl")
     with state["sperre"]:
-        with open(pfad, "a", encoding="utf-8") as f:
+        with open(path_2, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
 
@@ -177,10 +177,10 @@ class Griff(BaseHTTPRequestHandler):
     def bremse(self, kennung):
         now = time.time()
         with state["sperre"]:
-            liste = [t for t in state["fehlversuche"].get(kennung, [])
+            list_ = [t for t in state["fehlversuche"].get(kennung, [])
                      if now - t < 60]
-            state["fehlversuche"][kennung] = liste
-            return len(liste) >= 10
+            state["fehlversuche"][kennung] = list_
+            return len(list_) >= 10
 
     def fehlschlag(self, kennung):
         with state["sperre"]:

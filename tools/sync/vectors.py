@@ -217,10 +217,10 @@ def t_code():
                ask(["rcdec %s" % hx(broken.encode())])[0], "FAIL")
     k = os.urandom(32)
     code = bytes.fromhex(ask(["rcenc %s" % hx(k)])[0]).decode()
-    stellen = [j for j in range(65) if code[j] != "-"]
-    eq("55 bedeutsame Stellen", len(stellen), 55)
+    ask_3 = [j for j in range(65) if code[j] != "-"]
+    eq("55 bedeutsame Stellen", len(ask_3), 55)
     ask_2, erwartet = [], 0
-    for i in stellen:
+    for i in ask_3:
         for b in "0123456789ABCDEFGHJKMNPQRSTVWXYZ":
             if b == code[i]:
                 continue

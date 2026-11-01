@@ -3,12 +3,12 @@
 import os
 import sys
 
-WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-KERN = os.path.join(WURZEL, "kernel")
-SOLLDATEI = os.path.join(WURZEL, "tools", "struktur", "filing.txt")
+ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(ROOT_2, "kernel")
+SOLLDATEI = os.path.join(ROOT_2, "tools", "struktur", "filing.txt")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from erhebung import lies  # noqa: E402
+from erhebung import read_2  # noqa: E402
 import shell  # noqa: E402
 
 
@@ -16,7 +16,7 @@ def read_soll():
     soll = {}
     if not os.path.exists(SOLLDATEI):
         return soll
-    for z in lies(SOLLDATEI).splitlines():
+    for z in read_2(SOLLDATEI).splitlines():
         z = z.strip()
         if not z or z.startswith("#"):
             continue
@@ -27,8 +27,8 @@ def read_soll():
 
 
 def ist_clipboard():
-    kern = huelle.huelle(os.path.join(KERN, "kmain.fi"))
-    kern |= huelle.huelle(os.path.join(KERN, "uprog.fi"))
+    kern = envelope.envelope(os.path.join(KERN, "kmain.fi"))
+    kern |= envelope.envelope(os.path.join(KERN, "uprog.fi"))
     ist = {}
     for rel in kern:
         d = os.path.dirname(rel)
@@ -55,7 +55,7 @@ def vergleiche():
     for m, d in flach.items():
         if m in soll and m not in ist:
             ist[m] = d
-    fits, wrong, without_soll, fehlt = [], [], [], []
+    fits, wrong, without_soll, missing_2 = [], [], [], []
     for m, d in sorted(ist.items()):
         s = soll.get(m)
         if s is None:
@@ -66,13 +66,13 @@ def vergleiche():
             wrong.append((m, d, s))
     for m in sorted(soll):
         if m not in ist and m not in flach:
-            fehlt.append(m)
-    return fits, wrong, without_soll, soll, ist, fehlt
+            missing_2.append(m)
+    return fits, wrong, without_soll, soll, ist, missing_2
 
 
 def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
-    fits, wrong, without_soll, soll, ist, fehlt = vergleiche()
+    fits, wrong, without_soll, soll, ist, missing_2 = vergleiche()
 
     if modus == "--fehlend":
         for m, d in without_soll:
@@ -90,14 +90,14 @@ def main():
             return 1
         print("filing: %d files in the right place, %d in the wrong one, "
               "%d ohne Soll, %d vermisst"
-              % (len(fits), len(wrong), len(without_soll), len(fehlt)))
+              % (len(fits), len(wrong), len(without_soll), len(missing_2)))
         for m, d, s in wrong:
             print("  WRONG  %s is in '%s', soll nach '%s'" % (m, d, s))
         for m, d in without_soll:
             print("  NO TARGET  %s (is in '%s')" % (m, d))
-        for m in fehlt:
+        for m in missing_2:
             print("  MISSING  %s is in the target, but is nowhere" % m)
-        return 1 if (wrong or without_soll or fehlt) else 0
+        return 1 if (wrong or without_soll or missing_2) else 0
 
     print("== ABLAGE ==")
     print("Soll-Eintraege: %d, Kerndateien: %d" % (len(soll), len(ist)))

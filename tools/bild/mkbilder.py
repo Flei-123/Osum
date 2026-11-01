@@ -41,7 +41,7 @@ import sys
 from PIL import Image, ImageDraw
 
 
-def foto(w, h, seed=7):
+def photo(w, h, seed=7):
     """Was einem Dekodierer wehtut: harte Kanten, weiche Verlaeufe,
     gesaettigte Farben."""
     im = Image.new("RGB", (w, h))
@@ -142,14 +142,14 @@ def main():
     im.save(p("g-87a.gif"), version="GIF87a")
     say("g-87a.gif", "24x16, GIF87a")
 
-    foto(48, 36).save(p("b-probe.png"))
+    photo(48, 36).save(p("b-probe.png"))
     say("b-probe.png", "48x36 RGB")
-    foto(40, 30).save(p("b-probe.bmp"))
+    photo(40, 30).save(p("b-probe.bmp"))
     say("b-probe.bmp", "40x30 BMP 24 Bit")
     bunt_palette(32, 24, 128).convert("RGB").save(p("b-pal.png"))
     say("b-pal.png", "32x24 aus Farbtafel")
 
-    foto(64, 48).save(p("b-voll.jpg"), quality=92, subsampling=0)
+    photo(64, 48).save(p("b-voll.jpg"), quality=92, subsampling=0)
     say("b-voll.jpg", "64x48 4:4:4")
 
     with open(p("liste.txt"), "w") as f:

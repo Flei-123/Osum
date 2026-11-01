@@ -5,7 +5,7 @@ import sys
 
 G = 24.0
 
-NAMEN = ["pfeil", "text", "hand", "breite", "hoehe",
+NAMES = ["pfeil", "text", "hand", "breite", "hoehe",
          "diag1", "diag2", "kreuz", "warten", "verboten", "kopie", "ziel"]
 
 
@@ -153,7 +153,7 @@ def in_(pts, x, y):
 
 def male(pts, size=24):
     S = 3
-    zeilen = []
+    lines = []
     for r in range(size):
         z = ""
         for c in range(size):
@@ -172,20 +172,20 @@ def male(pts, size=24):
                 z = z + "."
             else:
                 z = z + " "
-        zeilen.append(z)
-    return zeilen
+        lines.append(z)
+    return lines
 
 
 def board():
     header = []
-    daten = []
+    data = []
     for (name, hot, pts) in FORMEN:
-        header.append((len(daten), len(pts),
+        header.append((len(data), len(pts),
                      int(round(hot[0] * 4)), int(round(hot[1] * 4))))
         for (x, y) in pts:
-            daten.append(int(round(x * 4)))
-            daten.append(int(round(y * 4)))
-    return header, daten
+            data.append(int(round(x * 4)))
+            data.append(int(round(y * 4)))
+    return header, data
 
 
 def esc(bs):
@@ -193,8 +193,8 @@ def esc(bs):
 
 
 def bauen(target):
-    header, daten = board()
-    for b in daten:
+    header, data = board()
+    for b in data:
         assert 0 <= b <= 255, b
     kb = []
     for (off, n, hx, hy) in header:
@@ -205,12 +205,12 @@ def bauen(target):
     s = open(template, encoding="utf-8").read()
     s = s.replace("@@KOPF@@", esc(kb))
     s = s.replace("@@KOPFN@@", str(len(kb)))
-    s = s.replace("@@PUNKTE@@", esc(daten))
-    s = s.replace("@@PUNKTEN@@", str(len(daten)))
+    s = s.replace("@@PUNKTE@@", esc(data))
+    s = s.replace("@@PUNKTEN@@", str(len(data)))
     s = s.replace("@@FORMEN@@", str(len(FORMEN)))
     open(target, "w", encoding="utf-8").write(s)
     print("%s geschrieben: %d Formen, %d Ecken, %d Oktette Tafel"
-          % (target, len(FORMEN), len(daten) // 2, len(kb) + len(daten)))
+          % (target, len(FORMEN), len(data) // 2, len(kb) + len(data)))
 
 
 def main():

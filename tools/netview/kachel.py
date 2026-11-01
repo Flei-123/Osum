@@ -56,10 +56,10 @@ bei 2 sieht man 28): 12 mal Vervielfachung lassen die Ecken aus.
 import sys
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("kein P6-PPM: %s" % pfad)
+        raise SystemExit("kein P6-PPM: %s" % path_2)
     felder = []
     at = 2
     while len(felder) < 3:
@@ -78,7 +78,7 @@ def ppm(pfad):
     return w, h, d[at:]
 
 
-def check(w, h, pixel, kacheln, oben, rand=2):
+def check(w, h, pixel, kacheln, top_2, rand=2):
     """kacheln: Liste (tx, ty, tw, th). Gibt (fehler, meldungen)."""
     error = []
     meld = []
@@ -118,7 +118,7 @@ def check(w, h, pixel, kacheln, oben, rand=2):
 
         bloecke = []
         anf = None
-        for y, n_in in [(y, k) for (y, k) in zeilen if y >= ty + oben]:
+        for y, n_in in [(y, k) for (y, k) in zeilen if y >= ty + top_2]:
             if n_in > 0 and anf is None:
                 anf = y
             elif n_in == 0 and anf is not None:
@@ -144,7 +144,7 @@ def check(w, h, pixel, kacheln, oben, rand=2):
 def main(argv):
     if len(argv) >= 5 and argv[2] == "--rects":
         screen = argv[1]
-        oben = int(argv[3])
+        top_2 = int(argv[3])
         rand = int(argv[4])
         rects = [tuple(int(v) for v in a.split(",")) for a in argv[5:]]
         w, h, roh = ppm(screen)
@@ -155,7 +155,7 @@ def main(argv):
             at = (y * w + x) * 3
             return (roh[at], roh[at + 1], roh[at + 2])
 
-        error, meld = check(w, h, pixel, rects, oben, rand)
+        error, meld = check(w, h, pixel, rects, top_2, rand)
         for m in meld:
             print(m)
         if error:
@@ -167,7 +167,7 @@ def main(argv):
     if len(argv) < 12:
         print(__doc__)
         return 2
-    (screen, px, py, pw, ph, pad, tw, th, gap, n, oben) = (
+    (screen, px, py, pw, ph, pad, tw, th, gap, n, top_2) = (
         argv[1], *[int(v) for v in argv[2:12]])
     w, h, roh = ppm(screen)
 
@@ -186,7 +186,7 @@ def main(argv):
         tx = px + pad + (t % 2) * (tw + gap)
         ty = py + pad + (t // 2) * (th + gap)
         kacheln.append((tx, ty, tw, th))
-    error, meld = check(w, h, pixel, kacheln, oben)
+    error, meld = check(w, h, pixel, kacheln, top_2)
     for m in meld:
         print(m)
     if error:

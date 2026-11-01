@@ -20,7 +20,7 @@ class Befund:
         self.error.append(s)
 
 
-def kopf_lesen(f, lba, b: Befund, name):
+def header_read(f, lba, b: Befund, name):
     f.seek(lba * BS)
     h = f.read(BS)
     if len(h) < 92:
@@ -89,11 +89,11 @@ def main():
     if len(sys.argv) < 2:
         print("usage: tafelpruef.py <platte.img> [--json]", file=sys.stderr)
         return 2
-    pfad = sys.argv[1]
+    path = sys.argv[1]
     als_json = "--json" in sys.argv
     b = Befund()
 
-    with open(pfad, "rb") as f:
+    with open(path, "rb") as f:
         f.seek(0, 2)
         size = f.tell()
         sekt = size // BS
@@ -106,8 +106,8 @@ def main():
         if 0xEE not in typen:
             b.bad("protective MBR: no entry of type 0xEE")
 
-        prim = kopf_lesen(f, 1, b, "primaer")
-        sich = kopf_lesen(f, sekt - 1, b, "sicherung")
+        prim = header_read(f, 1, b, "primaer")
+        sich = header_read(f, sekt - 1, b, "sicherung")
 
         parts = []
         if prim:
@@ -138,10 +138,10 @@ def main():
             "partitionen": b.parts,
         }, indent=2))
     else:
-        print(f"== {pfad}  ({sekt} Sektoren)")
+        print(f"== {path}  ({sekt} Sektoren)")
         if b.header:
             k = b.header
-            print(f"   benutzbar {k['first']}..{k['letzte']}, Tafel bei {k['board']}, "
+            print(f"   benutzbar {k['first']}..{k['last']}, Tafel bei {k['board']}, "
                   f"{k['count']} Eintraege zu {k['esize']}")
         for p in b.parts:
             gr = (p["ende"] - p["start"] + 1) * BS // (1024 * 1024)

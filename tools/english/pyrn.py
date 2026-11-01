@@ -152,7 +152,8 @@ def protected_files(files, names):
             src, toks = tokens(os.path.join(ROOT, f))
         except Exception:
             continue
-        dyn = any(t.type == tokenize.NAME and t.string in ("exec", "eval", "compile", "__dict__", "importlib", "__import__") for t in toks) or any(t.type == tokenize.OP and t.string == "**" and toks[k - 1].string in ("(", ",", "{") for k, t in enumerate(toks) if k)
+        dyn = any(t.type == tokenize.NAME and t.string in ("exec", "eval", "__dict__", "importlib", "__import__") for t in toks)
+        dynkw = any(t.type == tokenize.OP and t.string == "**" and toks[k - 1].string in ("(", ",") for k, t in enumerate(toks) if k)
         for i, t in enumerate(toks):
             if t.type != tokenize.STRING:
                 continue
@@ -170,7 +171,8 @@ def protected_files(files, names):
                 elif not isf and (("%(" + n + ")") in body or ("{" + n + "}") in body or ("{" + n + ":") in body or ("{" + n + "!") in body):
                     prot.add(n)
                 elif body.strip() == n or n in body.split():
-                    if dyn or (near & DYN_CALLS):
+                    nxt = toks[i + 1].string if i + 1 < len(toks) else ""
+                    if dyn or (near & DYN_CALLS) or (dynkw and nxt == ":"):
                         prot.add(n)
     return prot
 
@@ -267,6 +269,46 @@ def foreign_modules(files):
     return out
 
 
+def import_edges(files):
+    stems = {}
+    for f in files:
+        stems.setdefault(os.path.splitext(os.path.basename(f))[0], set()).add(os.path.dirname(f))
+    pat = re.compile(r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_]*)\s+import|import\s+([A-Za-z_][A-Za-z0-9_, ]*))", re.M)
+    edges = []
+    for f in files:
+        try:
+            src = open(os.path.join(ROOT, f), encoding="utf-8").read()
+        except Exception:
+            continue
+        d = os.path.dirname(f)
+        for m in pat.finditer(src):
+            mods = [m.group(1)] if m.group(1) else [x.strip().split(" ")[0] for x in m.group(2).split(",")]
+            for mod in mods:
+                for dd in stems.get(mod, ()):
+                    if dd != d:
+                        edges.append((d, dd))
+    return edges
+
+
+def groups(files):
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for f in files:
+        find(os.path.dirname(f))
+    for a, b in import_edges(files):
+        parent[find(a)] = find(b)
+    out = {}
+    for f in files:
+        out.setdefault(find(os.path.dirname(f)), []).append(f)
+    return out
+
+
 def plan(files):
     by_dir = {}
     for f in files:
@@ -305,9 +347,8 @@ def main():
     only = [a for a in sys.argv[1:] if not a.startswith("--")]
     files = tracked_py()
     by_dir, shared_names = plan(files)
-    if os.environ.get("PYRN_GLOBAL"):
-        by_dir = {"": files}
-        shared_names = set()
+    by_dir = groups(files)
+    shared_names = set()
     for k, v in EXTRA_SEG.items():
         SEG.setdefault(k, v)
         count.GERMAN.add(k)
@@ -315,7 +356,7 @@ def main():
     bad = 0
     allmap = {}
     for d, fl in sorted(by_dir.items()):
-        if only and not any(d == o or d.startswith(o.rstrip("/") + "/") for o in only):
+        if only and not any(any(x == o or x.startswith(o.rstrip("/") + "/") for x in [os.path.dirname(g) for g in fl]) for o in only):
             continue
         fl = [f for f in fl if os.path.exists(os.path.join(ROOT, f))]
         names, strings, alltok = scan(fl)

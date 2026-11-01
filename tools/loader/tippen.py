@@ -29,7 +29,7 @@ KEYS = {
 }
 
 
-def taste(c):
+def key(c):
     if c in KEYS:
         return KEYS[c]
     if ("a" <= c <= "z") or ("0" <= c <= "9"):
@@ -55,14 +55,14 @@ def main(argv):
         else:
             text.append(a)
         i += 1
-    zeilen = []
+    lines = []
     for satz in text:
         for c in satz:
-            zeilen.append("sendkey " + taste(c))
+            lines.append("sendkey " + key(c))
         if input_:
-            zeilen.append("sendkey ret")
-        zeilen.append("warte %g" % warte)
-    print("\n".join(zeilen))
+            lines.append("sendkey ret")
+        lines.append("warte %g" % warte)
+    print("\n".join(lines))
     return 0
 
 

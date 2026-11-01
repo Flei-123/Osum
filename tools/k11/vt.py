@@ -26,10 +26,10 @@ import sys
 
 
 class Screen:
-    def __init__(self, zeilen=24, columns=80):
-        self.h = zeilen
+    def __init__(self, lines=24, columns=80):
+        self.h = lines
         self.w = columns
-        self.zellen = [[' '] * columns for _ in range(zeilen)]
+        self.zellen = [[' '] * columns for _ in range(lines)]
         self.x = 0
         self.y = 0
         self.state = 0
@@ -153,7 +153,7 @@ class Screen:
                     self.state = 0
                     self.steuer(o)
 
-    def zeilen(self):
+    def lines(self):
         return [''.join(z).rstrip() for z in self.zellen]
 
 
@@ -161,8 +161,8 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    daten = open(sys.argv[1], 'rb').read()
-    zeilen, columns = 24, 80
+    data = open(sys.argv[1], 'rb').read()
+    lines, columns = 24, 80
     ab = None
     rest = sys.argv[2:]
     i = 0
@@ -171,16 +171,16 @@ def main():
             ab = rest[i + 1].encode()
             i += 2
         else:
-            zeilen = int(rest[i])
+            lines = int(rest[i])
             columns = int(rest[i + 1])
             i += 2
     if ab is not None:
-        k = daten.rfind(ab)
+        k = data.rfind(ab)
         if k >= 0:
-            daten = daten[k + len(ab):]
-    s = Screen(zeilen, columns)
-    s.fuettern(daten)
-    for z in s.zeilen():
+            data = data[k + len(ab):]
+    s = Screen(lines, columns)
+    s.fuettern(data)
+    for z in s.lines():
         print(z)
     return 0
 

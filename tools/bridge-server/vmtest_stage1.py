@@ -51,7 +51,7 @@ def wait(cond, t, step=2):
     return None
 
 before = warum().get("sitzungen_seit_status", 0)
-shutil.copy("/root/dellw/bw/%s-usb.img" % brand.DATEI, W + "/stick.img")
+shutil.copy("/root/dellw/bw/%s-usb.img" % brand.FILE, W + "/stick.img")
 for f in ("ser.txt", "mon.sock", "vars.fd"):
     try: os.remove(W + "/" + f)
     except OSError: pass

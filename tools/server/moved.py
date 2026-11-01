@@ -78,12 +78,12 @@ def funktionen(text):
             name = m.group(1)
             tiefe = 0
             j = i
-            offen = False
+            open_ = False
             while j < len(code):
                 tiefe += code[j].count("{") - code[j].count("}")
                 if "{" in code[j]:
-                    offen = True
-                if offen and tiefe <= 0:
+                    open_ = True
+                if open_ and tiefe <= 0:
                     break
                 j += 1
             aus[name] = "\n".join(lines[i:j + 1])
@@ -157,9 +157,9 @@ def main():
             print("      (%d functions exist only AFTER the move"
                   " entstanden und gehoeren nicht dazu)" % spaeter)
         for name, warum in abweichend:
-            grund = SEITHER_WEITERENTWICKELT.get(name)
-            if grund:
-                print("      %s: %s -- ERLAUBT: %s" % (name, warum, grund))
+            reason = SEITHER_WEITERENTWICKELT.get(name)
+            if reason:
+                print("      %s: %s -- ERLAUBT: %s" % (name, warum, reason))
                 continue
             print("      %s: %s" % (name, warum))
             bad += 1

@@ -124,9 +124,9 @@ def laeufer(wurzel):
 def check(wurzel):
     alle = saetze(wurzel)
     plan = {}
-    for datei, nr, satz in alle:
+    for file_2, nr, satz in alle:
         for p in phrasen(satz):
-            plan.setdefault(p, (datei, nr, satz))
+            plan.setdefault(p, (file_2, nr, satz))
     funde = []
     n_l = 0
     for p, rel in laeufer(wurzel):

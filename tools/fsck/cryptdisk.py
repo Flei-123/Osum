@@ -34,7 +34,7 @@ def build(src, dst, passphrase, t, m, p):
     hdr[base + gegen.S_SALT:base + gegen.S_SALT + gegen.SALT_LEN] = salt
     hdr[base + gegen.S_WRAPPED:base + gegen.S_WRAPPED + gegen.KEY_LEN] = wrapped
     hdr[base + gegen.S_MAC:base + gegen.S_MAC + 32] = mac
-    hdr[gegen.H_SUM:gegen.H_SUM + 32] = gegen.kopf_sum(bytes(hdr))
+    hdr[gegen.H_SUM:gegen.H_SUM + 32] = gegen.header_sum(bytes(hdr))
     with open(dst, "wb") as f:
         f.write(bytes(hdr))
         for i in range(sectors):

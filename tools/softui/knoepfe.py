@@ -100,19 +100,19 @@ def main(argv):
             grid.append([at(gx + i, gy + j) for i in range(10)])
         felder.append((gx, gy, grid))
 
-    def dunkel(c, grund):
-        return (abs(c[0] - grund[0]) + abs(c[1] - grund[1])
-                + abs(c[2] - grund[2])) > 90
+    def dunkel(c, reason_2):
+        return (abs(c[0] - reason_2[0]) + abs(c[1] - reason_2[1])
+                + abs(c[2] - reason_2[2])) > 90
 
     bad = 0
     cnt = Counter()
     for row in felder[0][2]:
         for c in row:
             cnt[c] += 1
-    grund = cnt.most_common(1)[0][0]
+    reason_2 = cnt.most_common(1)[0][0]
 
     g = felder[0][2]
-    zeilen = [sum(1 for c in row if dunkel(c, grund)) for row in g]
+    zeilen = [sum(1 for c in row if dunkel(c, reason_2)) for row in g]
     voll = [i for i, n in enumerate(zeilen) if n >= 9]
     empty = [i for i, n in enumerate(zeilen) if n == 0]
     if len(voll) == 1 and len(empty) == 9:
@@ -122,12 +122,12 @@ def main(argv):
         bad += 1
 
     g = felder[1][2]
-    rand = (sum(1 for c in g[0] if dunkel(c, grund))
-            + sum(1 for c in g[9] if dunkel(c, grund))
-            + sum(1 for j in range(1, 9) if dunkel(g[j][0], grund))
-            + sum(1 for j in range(1, 9) if dunkel(g[j][9], grund)))
+    rand = (sum(1 for c in g[0] if dunkel(c, reason_2))
+            + sum(1 for c in g[9] if dunkel(c, reason_2))
+            + sum(1 for j in range(1, 9) if dunkel(g[j][0], reason_2))
+            + sum(1 for j in range(1, 9) if dunkel(g[j][9], reason_2)))
     mitte = sum(1 for j in range(1, 9) for i in range(1, 9)
-                if dunkel(g[j][i], grund))
+                if dunkel(g[j][i], reason_2))
     if rand >= 32 and mitte == 0:
         print("max: square ok  (edge %d of 36, interior %d)" % (rand, mitte))
     else:

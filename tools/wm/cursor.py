@@ -61,14 +61,14 @@ def firn(values):
     return aus + "\\x00"
 
 
-def lies(pfad):
-    q = open(pfad, encoding="utf-8", errors="replace").read()
+def read_2(path_2):
+    q = open(path_2, encoding="utf-8", errors="replace").read()
     raus = {}
     for name in ("umriss", "innen"):
         m = re.search(r'var %s: \[u8; \d+\] = b"((?:\\x[0-9a-fA-F]{2})+)"'
                       % name, q)
         if not m:
-            print("  CASE  %s is not in %s" % (name, pfad))
+            print("  CASE  %s is not in %s" % (name, path_2))
             return None
         okt = [int(t, 16) for t in re.findall(r'\\x([0-9a-fA-F]{2})',
                                               m.group(1))]
@@ -93,14 +93,14 @@ def gitter(um, inn):
     return sil, body
 
 
-def bild(sil, body):
-    zeilen = []
+def image(sil, body):
+    lines = []
     for y in range(H):
         r = ""
         for x in range(W):
             r += "#" if body[y][x] else ("." if sil[y][x] else " ")
-        zeilen.append("  %2d |%s|" % (y, r))
-    return zeilen
+        lines.append("  %2d |%s|" % (y, r))
+    return lines
 
 
 def bloecke(reihe):
@@ -181,18 +181,18 @@ def main():
         sil = silhouette()
         body = erodiert(sil)
         um, inn = masken(sil, body)
-        for z in bild(sil, body):
+        for z in image(sil, body):
             print(z)
         print('umriss = b"%s"' % firn(um))
         print('innen  = b"%s"' % firn(inn))
         return 0
-    pfad = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm/wmcursor.fi"
-    m = lies(pfad)
+    path_2 = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm/wmcursor.fi"
+    m = read_2(path_2)
     if m is None:
         return 1
     sil, body = gitter(m["umriss"], m["innen"])
     print("  THE POINTER AS IT IS PAINTED (# fill, . edge):")
-    for z in bild(sil, body):
+    for z in image(sil, body):
         print(z)
     error = check(sil, body)
     for f in error:

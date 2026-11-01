@@ -73,25 +73,25 @@ QUELLEN = ["kernel"]
 EXCEPTIONS = ["kernel/user/i18nt.fi"]
 
 
-def literale(zeile):
+def literale(line_3):
     aus = []
     i = 0
-    n = len(zeile)
+    n = len(line_3)
     while i < n:
-        c = zeile[i]
-        if c == "/" and i + 1 < n and zeile[i + 1] == "/":
+        c = line_3[i]
+        if c == "/" and i + 1 < n and line_3[i + 1] == "/":
             break
         if c == '"':
             j = i + 1
             buf = []
             while j < n:
-                if zeile[j] == "\\" and j + 1 < n:
-                    buf.append(zeile[j:j + 2])
+                if line_3[j] == "\\" and j + 1 < n:
+                    buf.append(line_3[j:j + 2])
                     j += 2
                     continue
-                if zeile[j] == '"':
+                if line_3[j] == '"':
                     break
-                buf.append(zeile[j])
+                buf.append(line_3[j])
                 j += 1
             aus.append("".join(buf))
             i = j + 1
@@ -120,30 +120,30 @@ def erlaubt(text):
 def list_check(wurzel):
     if len(sys.argv) > 1:
         return
-    fehlt = [r for r in OBERFLAECHE
+    missing_2 = [r for r in OBERFLAECHE
              if not os.path.isfile(os.path.join(wurzel, r))]
-    if fehlt:
-        for r in fehlt:
+    if missing_2:
+        for r in missing_2:
             print("scan: EXECUTED, BUT NOT THERE: %s" % r)
         raise SystemExit(2)
 
 
-def check(pfad, streng):
+def check(path_2, streng):
     treffer = []
     try:
-        roh = open(pfad, "rb").read().decode("utf-8", "replace")
+        roh = open(path_2, "rb").read().decode("utf-8", "replace")
     except OSError:
-        print("scan: EXECUTED, BUT NOT THERE: %s" % pfad)
+        print("scan: EXECUTED, BUT NOT THERE: %s" % path_2)
         raise SystemExit(2)
-    for nr, zeile in enumerate(roh.split("\n"), 1):
-        for lit in literale(zeile):
+    for nr, line_3 in enumerate(roh.split("\n"), 1):
+        for lit in literale(line_3):
             if erlaubt(lit):
                 continue
             klar = lit.replace("\\0", "").replace("\\n", " ") \
                       .replace("\\t", " ")
             for w in WOERTER:
                 if w in klar:
-                    treffer.append((pfad, nr, w, klar.strip()))
+                    treffer.append((path_2, nr, w, klar.strip()))
                     break
             else:
                 if not streng:
@@ -151,7 +151,7 @@ def check(pfad, streng):
                 m = FALLBACK.search(klar)
                 if m and m.group(0).lower() not in FALLBACK_OK \
                         and len(klar.strip()) > 6:
-                    treffer.append((pfad, nr, m.group(0), klar.strip()))
+                    treffer.append((path_2, nr, m.group(0), klar.strip()))
     return treffer
 
 
@@ -176,13 +176,13 @@ def main():
                     surface += check(p, True)
                 else:
                     rest += check(p, False)
-    for pfad, nr, word, text in surface:
-        print("%s:%d: '%s' in \"%s\"" % (pfad, nr, word, text[:70]))
+    for path_2, nr, word, text in surface:
+        print("%s:%d: '%s' in \"%s\"" % (path_2, nr, word, text[:70]))
     print("gefunden: %d" % len(surface))
     print("not in the catalog, but counted (own windows and"
           " uebersetzt): %d" % len(rest))
-    for pfad, nr, word, text in rest:
-        print("    %s:%d: '%s'" % (pfad, nr, word))
+    for path_2, nr, word, text in rest:
+        print("    %s:%d: '%s'" % (path_2, nr, word))
     return 1 if surface else 0
 
 

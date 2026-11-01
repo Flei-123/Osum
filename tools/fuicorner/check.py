@@ -28,7 +28,7 @@ def new8(px, py, cx, cy, r):
 
 rows = [tuple(int(v) for v in l.split()) for l in open(sys.argv[1]) if l.strip()]
 n = len(rows)
-vs_ecke = sum(1 for r, x, y, a, b in rows if a != b)
+vs_corner = sum(1 for r, x, y, a, b in rows if a != b)
 vs_new8 = sum(1 for r, x, y, a, b in rows if a != new8(x, y, r, r, r))
 vs_old4 = sum(1 for r, x, y, a, b in rows if a != old4(x, y, r, r, r))
-print("rows=%d vs_ecke=%d vs_ref8=%d vs_ref4=%d" % (n, vs_ecke, vs_new8, vs_old4))
+print("rows=%d vs_ecke=%d vs_ref8=%d vs_ref4=%d" % (n, vs_corner, vs_new8, vs_old4))

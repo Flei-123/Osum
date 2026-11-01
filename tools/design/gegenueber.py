@@ -15,7 +15,7 @@ import sys
 
 from PIL import Image, ImageDraw
 
-NAMEN = [
+NAMES_2 = [
     ("01-schreibtisch", "Schreibtisch"),
     ("07-taskleiste", "Taskleiste"),
     ("02-startmenue", "Startmenue"),
@@ -36,7 +36,7 @@ def load_2(d, name):
     return None
 
 
-def paar(a, b, titel, target):
+def paar(a, b, title_2, target):
     if a is None or b is None:
         return False
     w = a.size[0] + b.size[0] + 3 * RAND
@@ -45,8 +45,8 @@ def paar(a, b, titel, target):
     d = ImageDraw.Draw(im)
     im.paste(a, (RAND, RAND + HEADER))
     im.paste(b, (2 * RAND + a.size[0], RAND + HEADER))
-    d.text((RAND, 8), "%s -- VORHER (classic)" % titel, fill=(244, 244, 245))
-    d.text((2 * RAND + a.size[0], 8), "%s -- NACHHER (osum)" % titel,
+    d.text((RAND, 8), "%s -- VORHER (classic)" % title_2, fill=(244, 244, 245))
+    d.text((2 * RAND + a.size[0], 8), "%s -- NACHHER (osum)" % title_2,
            fill=(134, 239, 172))
     im.save(target)
     return True
@@ -59,9 +59,9 @@ def main():
     v, n, z = sys.argv[1:4]
     os.makedirs(z, exist_ok=True)
     gemacht = 0
-    for name, titel in NAMEN:
+    for name, title_2 in NAMES_2:
         a, b = load_2(v, name), load_2(n, name)
-        if paar(a, b, titel, os.path.join(z, "gg-%s.png" % name)):
+        if paar(a, b, title_2, os.path.join(z, "gg-%s.png" % name)):
             print("gegenueber %s" % name)
             gemacht += 1
     print("%d Paare" % gemacht)

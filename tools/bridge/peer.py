@@ -29,7 +29,7 @@ class Wire:
             raise EOFError("die Gegenseite ist weg")
         self.puf += d
 
-    def zeile(self):
+    def line(self):
         while b"\n" not in self.puf:
             self.fuellen()
         i = self.puf.index(b"\n")
@@ -45,13 +45,13 @@ class Wire:
         return d
 
     def nachricht(self):
-        z = self.zeile()
+        z = self.line()
         f = z.split(" ")
-        laenge = 0
+        len_ = 0
         if f and f[-1].isdigit():
-            laenge = int(f[-1])
+            len_ = int(f[-1])
             f = f[:-1]
-        return f, self.oktette(laenge)
+        return f, self.oktette(len_)
 
     def sende(self, felder, nutz=b""):
         header = " ".join(felder) + " " + str(len(nutz)) + "\n"
@@ -103,11 +103,11 @@ def main():
 
     auftraege = []
     if a.auftraege and os.path.exists(a.auftraege):
-        for zeile in open(a.auftraege):
-            zeile = zeile.rstrip("\n")
-            if not zeile or zeile.startswith("#"):
+        for line in open(a.auftraege):
+            line = line.rstrip("\n")
+            if not line or line.startswith("#"):
                 continue
-            parts = zeile.split("|")
+            parts = line.split("|")
             while len(parts) < 3:
                 parts.append("")
             auftraege.append((parts[0], parts[1], parts[2]))

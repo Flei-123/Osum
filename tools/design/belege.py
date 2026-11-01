@@ -43,11 +43,11 @@ def anteil(px, color_2):
     return 100.0 * n / (len(px) // 3)
 
 
-def window_aus_serial(pfad):
-    if not os.path.exists(pfad):
+def window_aus_serial(path_2):
+    if not os.path.exists(path_2):
         return []
     try:
-        t = open(pfad, "rb").read().decode("utf-8", "replace")
+        t = open(path_2, "rb").read().decode("utf-8", "replace")
     except OSError:
         return []
     return sorted(set(re.findall(r"^(\w+): ready", t, re.M)))

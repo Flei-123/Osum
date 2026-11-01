@@ -68,22 +68,22 @@ TIME_JE_KEY = 12.0
 TIME_READY = 40.0
 
 
-def zeilen(pfad):
+def zeilen(path_2):
     """Wie viele `key: `-Zeilen stehen schon in der seriellen Ausgabe."""
     try:
-        with open(pfad, "rb") as f:
+        with open(path_2, "rb") as f:
             return f.read().count(b"key: ")
     except OSError:
         return 0
 
 
-def wait_auf(pfad, text, limit):
+def wait_auf(path_2, text, limit):
     """Warten, bis TEXT in der seriellen Ausgabe steht."""
     roh = text.encode()
     ende = time.time() + limit
     while time.time() < ende:
         try:
-            with open(pfad, "rb") as f:
+            with open(path_2, "rb") as f:
                 if roh in f.read():
                     return True
         except OSError:
@@ -127,9 +127,9 @@ def main(argv):
     time.sleep(vorlauf)
 
     fehlend = []
-    for nr, taste in enumerate(keys_2, 1):
+    for nr, key_3 in enumerate(keys_2, 1):
         vorher = zeilen(seriell)
-        s.sendall(("sendkey %s\n" % taste).encode())
+        s.sendall(("sendkey %s\n" % key_3).encode())
         begin = time.time()
         ende = begin + zeit
         angekommen = False
@@ -141,11 +141,11 @@ def main(argv):
         dur = time.time() - begin
         if angekommen:
             print("keys: %2d/%d  %-10s arrived after %.2fs"
-                  % (nr, len(keys_2), taste, dur))
+                  % (nr, len(keys_2), key_3, dur))
         else:
             print("keys: %2d/%d  %-10s NOT arrived (waited %.1fs)"
-                  % (nr, len(keys_2), taste, dur))
-            fehlend.append(taste)
+                  % (nr, len(keys_2), key_3, dur))
+            fehlend.append(key_3)
     s.close()
 
     if fehlend:

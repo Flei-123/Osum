@@ -139,7 +139,7 @@ WINRE = re.compile(
 
 FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
-KURZ = re.compile(r" nq=(\d+) nv=(\d+)")
+SHORT = re.compile(r" nq=(\d+) nv=(\d+)")
 
 BARTEXT = re.compile(
     r"taskbar: text (\w+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
@@ -154,7 +154,7 @@ BUTTON = re.compile(
     r"wlib: knopf x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+) ax=(\d+) ay=(\d+)")
 
 
-def kanten(pic, x, y, w, h, r, tol=8, stufe=12, anteil=60):
+def edges_2(pic, x, y, w, h, r, tol=8, level_2=12, anteil=60):
     """Wie viele der vier Kanten eines Knopfes im Bild wirklich da sind.
 
     Drei Bildpunkte je Stelle: AUF der Kante, zwei davor (draussen) und
@@ -190,7 +190,7 @@ def kanten(pic, x, y, w, h, r, tol=8, stufe=12, anteil=60):
             n += 1
             line_2 = (max(abs(a[i] - b[i]) for i in range(3)) >= tol
                      and max(abs(a[i] - c[i]) for i in range(3)) >= tol)
-            if line_2 or max(abs(c[i] - b[i]) for i in range(3)) >= stufe:
+            if line_2 or max(abs(c[i] - b[i]) for i in range(3)) >= level_2:
                 d += 1
         if n > 0 and d * 100 >= n * anteil:
             gefunden += 1
@@ -223,15 +223,15 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
     Kantenglaettung eines Buchstabens reicht so weit); alles darueber
     ist ein Ueberstand und wird gezaehlt.
     """
-    letzte = {}
+    last_3 = {}
     for m in BUTTON.finditer(tail):
         v = tuple(int(g) for g in m.groups())
-        letzte[(v[5], v[6])] = v
+        last_3[(v[5], v[6])] = v
     bad = []
     gemessen = 0
     without = 0
     over_2 = 0
-    for (x, y, w, h, r, ax, ay) in letzte.values():
+    for (x, y, w, h, r, ax, ay) in last_3.values():
         if w < 8 or h < 8:
             continue
         if ax < ox or ay < oy or ax + w > ox + ww or ay + h > oy + wh:
@@ -242,7 +242,7 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
                 and ax < bar["x"] + bar["w"] and ax + w > bar["x"]):
             continue
         gemessen += 1
-        k = kanten(pic, ax, ay, w, h, r)
+        k = edges_2(pic, ax, ay, w, h, r)
         if k == 0:
             without += 1
             bad.append("BUTTON at %d,%d %dx%d r=%d has not a single "
@@ -299,12 +299,12 @@ def parse_bar(path):
             list(rechtecke.values()))
 
 
-def parse(path, marke="settings: rect name=waa "):
+def parse(path, brand_2="settings: rect name=waa "):
     body = open(path, "rb").read().decode("latin1")
-    cut = body.rfind(marke)
+    cut = body.rfind(brand_2)
     while cut > 0 and not any(TEXT.search(z)
                               for z in body[cut:].splitlines()):
-        vor = body.rfind(marke, 0, cut)
+        vor = body.rfind(brand_2, 0, cut)
         if vor < 0:
             break
         cut = vor
@@ -314,7 +314,7 @@ def parse(path, marke="settings: rect name=waa "):
         m = TEXT.search(raw)
         if not m:
             continue
-        k = KURZ.search(raw)
+        k = SHORT.search(raw)
         axm = re.search(r" ax=(-?\d+) ay=(-?\d+)", raw)
         out.append(dict(ax=int(axm.group(1)) if axm else None,
                         ay=int(axm.group(2)) if axm else None,
@@ -373,7 +373,7 @@ def inkbox(pic, x0, y0, x1, y1, bg, tol):
     return (lo_x, lo_y, hi_x, hi_y, len(pts), pts)
 
 
-def grund(pic, x0, y0, x1, y1):
+def reason_2(pic, x0, y0, x1, y1):
     """Die haeufigste Farbe eines Ausschnitts -- der gemessene Grund.
 
     Fuer ein Fenster ist der Grund die Farbe, die das Programm gemeldet
@@ -420,7 +420,7 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
         y0 = oy + t["base"] - asc
         y1 = oy + t["base"] + desc
         x1 = min(x + t["tw"], ox + ww)
-        bg = grund(pic, x, y0, x1, y1)
+        bg = reason_2(pic, x, y0, x1, y1)
         if bg is None:
             continue
         box = inkbox(pic, x, y0, x1, y1, bg, 10)
@@ -463,7 +463,7 @@ def taskbar_messen(pic, serial, asc, desc):
         y0 = bar["y"] + t["base"] - asc
         y1 = bar["y"] + t["base"] + desc
         x1 = x + t["tw"]
-        bg = grund(pic, x, y0, min(x1, bar["x"] + bar["w"]), y1)
+        bg = reason_2(pic, x, y0, min(x1, bar["x"] + bar["w"]), y1)
         if bg is None:
             bg = rgb(t["bg"])
         box = inkbox(pic, x, y0, min(x1, bar["x"] + bar["w"]), y1, bg, 10)
@@ -522,11 +522,11 @@ def main(argv):
         print(__doc__)
         return 2
     pic = Pic(argv[1])
-    marke = "settings: rect name=waa "
+    brand_2 = "settings: rect name=waa "
     for a in argv[3:]:
         if a.startswith("--cut="):
-            marke = a[6:]
-    texts, wins, font = parse(argv[2], marke)
+            brand_2 = a[6:]
+    texts, wins, font = parse(argv[2], brand_2)
     ox = oy = 0
     forced = False
     ww, wh = pic.w, pic.h
@@ -644,7 +644,7 @@ def main(argv):
     line_2, lbad = linien_probe(pic, texts, ox, oy, ww, asc, desc)
     bad.extend(lbad)
     roh = open(argv[2], "rb").read().decode("latin1")
-    schnitt = roh.rfind(marke)
+    schnitt = roh.rfind(brand_2)
     kn, kohne, kueber, kbad = knoepfe_messen(
         pic, roh[schnitt:] if schnitt >= 0 else roh, ox, oy, ww, wh, bar,
         texts)

@@ -7,8 +7,8 @@ from PIL import Image
 GROESSEN = [16, 24, 32, 48, 64]
 
 
-def load(pfad, n):
-    im = Image.open(pfad).convert("RGBA")
+def load(path_2, n):
+    im = Image.open(path_2).convert("RGBA")
     if im.size != (n, n):
         im = im.resize((n, n), Image.LANCZOS)
     return im
@@ -24,7 +24,7 @@ def worte(im):
 
 
 def main():
-    quelle = sys.argv[1] if len(sys.argv) > 1 else "assets/marke"
+    source = sys.argv[1] if len(sys.argv) > 1 else "assets/marke"
     target = sys.argv[2] if len(sys.argv) > 2 else "kernel/user/brand_start.fi"
     t = []
     t.append("// SPDX-License-Identifier: GPL-2.0-only\n")
@@ -40,19 +40,19 @@ def main():
     t.append("profile kernel\n\n")
     t.append("export { breit, punkt }\n\n")
     for n in GROESSEN:
-        im = load("%s/start-%d.png" % (quelle, n), n)
+        im = load("%s/start-%d.png" % (source, n), n)
         w = worte(im)
         t.append("static mut b%d: [u64; %d] = [\n" % (n, len(w)))
-        zeile = "    "
+        line = "    "
         for i, v in enumerate(w):
             s = "%d as u64" % v
             if i + 1 < len(w):
                 s += ","
-            if len(zeile) + len(s) > 72:
-                t.append(zeile + "\n")
-                zeile = "    "
-            zeile += s + " "
-        t.append(zeile.rstrip() + "\n]\n\n")
+            if len(line) + len(s) > 72:
+                t.append(line + "\n")
+                line = "    "
+            line += s + " "
+        t.append(line.rstrip() + "\n]\n\n")
     t.append("// Welche Groesse fuer eine gewuenschte Kantenlaenge\n")
     t.append("// genommen wird: die groesste, die noch hineinpasst. Ein Ring\n")
     t.append("// von einem Bildpunkt Staerke vertraegt keine Interpolation.\n")

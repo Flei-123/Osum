@@ -32,12 +32,12 @@ import re
 import sys
 
 
-def rechtecke(pfad, marke):
+def rechtecke(path_2, brand_2):
     pat = re.compile(
         r"^%s: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
-        % re.escape(marke))
+        % re.escape(brand_2))
     aus = []
-    with open(pfad, "rb") as f:
+    with open(path_2, "rb") as f:
         for roh in f:
             z = roh.decode("latin-1").strip()
             m = pat.match(z)
@@ -50,11 +50,11 @@ def main():
     if len(sys.argv) < 5:
         print(__doc__)
         return 2
-    pfad, marke = sys.argv[1], sys.argv[2]
+    path_2, brand_2 = sys.argv[1], sys.argv[2]
     bw, bh = int(sys.argv[3]), int(sys.argv[4])
     mind = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     vertical = [int(v) for v in sys.argv[6].split(",")] if len(sys.argv) > 6 else []
-    r = rechtecke(pfad, marke)
+    r = rechtecke(path_2, brand_2)
     error = []
     if len(r) < mind:
         error.append("only %d rectangles reported, %d expected"
@@ -81,10 +81,10 @@ def main():
         if i >= 50 or i in vertical:
             continue
         columns.setdefault(x, []).append((i, y))
-    for x, liste in columns.items():
-        if len(liste) < 2:
+    for x, list_ in columns.items():
+        if len(list_) < 2:
             continue
-        nach_id = [y for (i, y) in sorted(liste)]
+        nach_id = [y for (i, y) in sorted(list_)]
         if nach_id != sorted(nach_id):
             error.append("at x=%d the order is upside down: %s"
                           % (x, nach_id))

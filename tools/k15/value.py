@@ -26,11 +26,11 @@ def main():
     if len(sys.argv) < 4:
         print(__doc__)
         return 2
-    pfad, begin, key_2 = sys.argv[1], sys.argv[2], sys.argv[3]
+    path_2, begin, key_2 = sys.argv[1], sys.argv[2], sys.argv[3]
     alsrgb = len(sys.argv) > 4 and sys.argv[4] == "rgb"
     pat = re.compile(r"(?:^|\s)%s=(-?\d+)" % re.escape(key_2))
     treffer = None
-    with open(pfad, "rb") as f:
+    with open(path_2, "rb") as f:
         for roh in f:
             z = roh.decode("latin-1").rstrip("\n")
             if not z.startswith(begin):

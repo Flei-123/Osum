@@ -49,8 +49,8 @@ def names(n):
     for i in range(n):
         folder = FOLDER[i % len(FOLDER)]
         bottom = (i // len(FOLDER)) % 2 == 1
-        pfad = "/data/%s%s" % (folder, "/tief" if bottom else "")
-        aus.append((pfad, "datei%04d.txt" % i))
+        path_2 = "/data/%s%s" % (folder, "/tief" if bottom else "")
+        aus.append((path_2, "datei%04d.txt" % i))
     return aus
 
 
@@ -68,9 +68,9 @@ def groessen(n, budget):
         roh.append(value)
         if value > 64:
             value = value * 88 // 100
-    summe = sum(roh)
+    sum_ = sum(roh)
     for k, i in enumerate(kand):
-        aus[i] = max(1, roh[k] * budget // summe)
+        aus[i] = max(1, roh[k] * budget // sum_)
     return aus
 
 
@@ -84,13 +84,13 @@ def main(argv):
     inhalt = os.path.join(arbeit, "inhalt")
     os.makedirs(inhalt, exist_ok=True)
 
-    liste = names(n)
+    list_ = names(n)
     sz = groessen(n, budget)
 
     zeilen = ["--inodes=4096", "/data/"]
     seen = set()
-    for pfad, _ in liste:
-        parts = pfad.strip("/").split("/")
+    for path_2, _ in list_:
+        parts = path_2.strip("/").split("/")
         for k in range(1, len(parts) + 1):
             p = "/" + "/".join(parts[:k]) + "/"
             if p not in seen:
@@ -98,14 +98,14 @@ def main(argv):
                 if p != "/data/":
                     zeilen.append(p)
 
-    for i, (pfad, name) in enumerate(liste):
+    for i, (path_2, name) in enumerate(list_):
         if sz[i] > 0:
             wirt = os.path.join(inhalt, "f%05d" % i)
             with open(wirt, "wb") as f:
                 f.write(bytes([65 + (i % 26)]) * sz[i])
-            zeilen.append("%s/%s=%s" % (pfad, name, wirt))
+            zeilen.append("%s/%s=%s" % (path_2, name, wirt))
         else:
-            zeilen.append("%s/%s=" % (pfad, name))
+            zeilen.append("%s/%s=" % (path_2, name))
 
     with open(os.path.join(arbeit, "angaben"), "w") as f:
         f.write("\n".join(zeilen) + "\n")
@@ -126,8 +126,8 @@ def main(argv):
             kb[d] = kb.get(d, 0) + (o + 1023) // 1024
             dat[d] = dat.get(d, 0) + 1
 
-    for i, (pfad, _name) in enumerate(liste):
-        add_2(pfad, sz[i])
+    for i, (path_2, _name) in enumerate(list_):
+        add_2(path_2, sz[i])
     for d in sorted(seen):
         dd = d if len(d) == 1 else d.rstrip("/")
         okt.setdefault(dd, 0)

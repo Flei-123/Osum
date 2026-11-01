@@ -38,11 +38,11 @@ def main():
             aus += [os.path.join(stamm, n) for n in names_2 if n.endswith(".fi")]
         return sorted(aus)
 
-    for pfad in _all(kdir):
-        quelle = open(pfad, "r", encoding="utf-8", errors="replace").read()
+    for path_2 in _all(kdir):
+        source_2 = open(path_2, "r", encoding="utf-8", errors="replace").read()
         for name, w in re.findall(
-                r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', quelle):
-            worte.setdefault(w, []).append("%s:%s" % (os.path.basename(pfad),
+                r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', source_2):
+            worte.setdefault(w, []).append("%s:%s" % (os.path.basename(path_2),
                                                       name))
     bad = 0
     gefunden = set()

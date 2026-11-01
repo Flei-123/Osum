@@ -3,14 +3,14 @@
 import os
 import sys
 
-WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-KERN = os.path.join(WURZEL, "kernel")
+ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(ROOT_2, "kernel")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from erhebung import IMPORT_RE, lies  # noqa: E402
+from erhebung import IMPORT_RE, read_2  # noqa: E402
 
 
-def huelle(wurzeldatei):
+def envelope(wurzeldatei):
     basis = os.path.dirname(wurzeldatei)
     seen = set()
     stack_2 = [wurzeldatei]
@@ -21,7 +21,7 @@ def huelle(wurzeldatei):
             continue
         seen.add(rp)
         own_2 = os.path.dirname(p)
-        for z in lies(p).splitlines():
+        for z in read_2(p).splitlines():
             m = IMPORT_RE.match(z)
             if not m:
                 continue
@@ -35,8 +35,8 @@ def huelle(wurzeldatei):
 
 
 def main():
-    kern = huelle(os.path.join(KERN, "kmain.fi"))
-    uprog = huelle(os.path.join(KERN, "uprog.fi"))
+    kern = envelope(os.path.join(KERN, "kmain.fi"))
+    uprog = envelope(os.path.join(KERN, "uprog.fi"))
     all_ = set()
     for stamm, _, names_2 in os.walk(KERN):
         for n in names_2:
@@ -45,21 +45,21 @@ def main():
     aussen = all_ - kern - uprog
 
     if len(sys.argv) > 2 and sys.argv[1] == "--liste":
-        menge = {"kern": kern, "uprog": uprog, "aussen": aussen}[sys.argv[2]]
-        for p in sorted(menge):
+        set_ = {"kern": kern, "uprog": uprog, "aussen": aussen}[sys.argv[2]]
+        for p in sorted(set_):
             print(p)
         return 0
 
-    def zeilen(menge):
+    def lines_2(set_):
         s = 0
-        for p in menge:
-            s += lies(os.path.join(KERN, p)).count("\n")
+        for p in set_:
+            s += read_2(os.path.join(KERN, p)).count("\n")
         return s
 
-    print("files under kernel/ total    : %3d  (%d lines)" % (len(all_), zeilen(all_)))
-    print("  KERN  (ab kmain.fi)        : %3d  (%d Zeilen)" % (len(kern), zeilen(kern)))
-    print("  UPROG (ab uprog.fi)        : %3d  (%d Zeilen)" % (len(uprog), zeilen(uprog)))
-    print("  OUTSIDE (not in the image) : %3d  (%d lines)" % (len(aussen), zeilen(aussen)))
+    print("files under kernel/ total    : %3d  (%d lines)" % (len(all_), lines_2(all_)))
+    print("  KERN  (ab kmain.fi)        : %3d  (%d Zeilen)" % (len(kern), lines_2(kern)))
+    print("  UPROG (ab uprog.fi)        : %3d  (%d Zeilen)" % (len(uprog), lines_2(uprog)))
+    print("  OUTSIDE (not in the image) : %3d  (%d lines)" % (len(aussen), lines_2(aussen)))
     print()
     print("OUTSIDE by folder:")
     nach = {}

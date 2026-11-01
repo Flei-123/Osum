@@ -56,16 +56,16 @@ if __name__ == '__main__':
     print()
     print("  Kachel        hell  dunkel   Diff")
     for ky in range(KY):
-        zeile = []
+        line_3 = []
         for kx in range(KX):
             x0, x1 = kx * wh // KX, (kx + 1) * wh // KX
             y0, y1 = ky * hh // KY, (ky + 1) * hh // KY
             a = brightness(ph, wh, x0, y0, x1, y1, 5)
             b = brightness(pd, wd, x0, y0, x1, y1, 5)
-            zeile.append(b - a)
+            line_3.append(b - a)
             if a > 60 and b > a - 20:
                 stehen.append((kx, ky, a, b))
-        print("   y%d  " % ky + " ".join("%+6.0f" % v for v in zeile))
+        print("   y%d  " % ky + " ".join("%+6.0f" % v for v in line_3))
 
     print()
     if stehen:

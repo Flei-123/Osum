@@ -270,11 +270,11 @@ class FlachErzeuger:
             sp2, unerr = erz.cmd(l, op, sp, self.stack_fallback(), 1)
         finally:
             erz.e = alt_e
-        grund = None
+        reason = None
         for tiefe, s in gesammelt:
-            if grund is None:
-                grund = tiefe
-            self.z('    ' * max(0, tiefe - grund) + s)
+            if reason is None:
+                reason = tiefe
+            self.z('    ' * max(0, tiefe - reason) + s)
         return sp2, unerr
 
     def stack_fallback(self):
@@ -286,15 +286,15 @@ class FlachErzeuger:
         o.append(' while true {')
         o.append('  match fall {')
         for nr in sorted(self.stuecke):
-            zeilen = self.stuecke[nr]
-            if nr != 0 and not zeilen and nr not in self.gebraucht:
+            lines_2 = self.stuecke[nr]
+            if nr != 0 and not lines_2 and nr not in self.gebraucht:
                 continue
             o.append('   %d => {' % nr)
-            for z in zeilen:
+            for z in lines_2:
                 o.append('    ' + z)
-            if not zeilen or not (zeilen[-1].startswith('continue')
-                                  or zeilen[-1].startswith('return')
-                                  or zeilen[-1].lstrip().startswith('return')):
+            if not lines_2 or not (lines_2[-1].startswith('continue')
+                                  or lines_2[-1].startswith('return')
+                                  or lines_2[-1].lstrip().startswith('return')):
                 o.append('    break')
             o.append('   }')
         o.append('   _ => {')

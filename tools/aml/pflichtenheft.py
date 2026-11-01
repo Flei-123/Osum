@@ -7,16 +7,16 @@ import subprocess
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(os.path.dirname(HIER))
+ROOT = os.path.dirname(os.path.dirname(HIER))
 sys.path.insert(0, HIER)
 
 
-def kannliste(pfad=None):
-    pfad = pfad or os.path.join(WURZEL, "kernel", "aml.fi")
-    s = open(pfad, encoding="utf-8", errors="replace").read()
+def kannliste(path_2=None):
+    path_2 = path_2 or os.path.join(ROOT, "kernel", "aml.fi")
+    s = open(path_2, encoding="utf-8", errors="replace").read()
     m = re.search(r"fn report_can\(state: u64\) \{(.*?)\n\}", s, re.S)
     if not m:
-        raise SystemExit("report_can nicht in %s gefunden" % pfad)
+        raise SystemExit("report_can nicht in %s gefunden" % path_2)
     body = m.group(1)
     can = set()
     for v in re.findall(r"ops\[\d+\] = (0x[0-9A-Fa-f]+) as u8", body):
@@ -82,16 +82,16 @@ def main(argv):
         names, count, errors, _m = disasm.parse_tables([t])
         if not count:
             continue
-        fehlt = sorted(set(count) - can)
+        missing = sorted(set(count) - can)
         for op, n in count.items():
             gesamt[op] = gesamt.get(op, 0) + n
-        schlimm |= set(fehlt)
+        schlimm |= set(missing)
         short = os.path.basename(t)
         deck = 100 * len(set(count) & can) // max(1, len(count))
         print("%-22s %3d verschiedene Opcodes, Abdeckung %3d%%%s"
               % (short, len(count), deck,
-                 "" if not fehlt else "   FEHLT: " +
-                 ", ".join(disasm.op_text(o) for o in fehlt)))
+                 "" if not missing else "   FEHLT: " +
+                 ", ".join(disasm.op_text(o) for o in missing)))
         wichtig = [n for n, k, e in names
                    if n.split(".")[-1] in
                    ("_LID", "_BST", "_BIF", "_BIX", "_PSR", "_STA", "_PRW")

@@ -27,14 +27,14 @@ import sys
 import zlib
 
 
-def ppm_read(pfad):
+def ppm_read(path_2):
     """P6 lesen. Der Kopf darf Kommentare enthalten, und die Felder
     duerfen durch beliebigen Zwischenraum getrennt sein -- so steht es
     in der Beschreibung des Formats, und QEMU haelt sich daran."""
-    with open(pfad, "rb") as f:
+    with open(path_2, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):
-        raise SystemExit("ppm2png: kein P6-PPM: %s" % pfad)
+        raise SystemExit("ppm2png: kein P6-PPM: %s" % path_2)
     at = 2
     felder = []
     while len(felder) < 3:
@@ -52,11 +52,11 @@ def ppm_read(pfad):
     b, h, up = felder
     if up != 255:
         raise SystemExit("ppm2png: nur 8 Bit je Kanal, nicht %d" % up)
-    daten = roh[at:at + b * h * 3]
-    if len(daten) < b * h * 3:
+    data_2 = roh[at:at + b * h * 3]
+    if len(data_2) < b * h * 3:
         raise SystemExit("ppm2png: %d Oktette zu wenig"
-                         % (b * h * 3 - len(daten)))
-    return b, h, daten
+                         % (b * h * 3 - len(data_2)))
+    return b, h, data_2
 
 
 def chunk(art, nutz):
@@ -68,12 +68,12 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    b, h, daten = ppm_read(argv[1])
+    b, h, data_2 = ppm_read(argv[1])
 
     zeilen = bytearray()
     schritt = b * 3
     for y in range(h):
-        z = daten[y * schritt:(y + 1) * schritt]
+        z = data_2[y * schritt:(y + 1) * schritt]
         zeilen.append(1)
         zeilen += z[:3]
         vorher = memoryview(z)[:-3]

@@ -62,10 +62,10 @@ sys.path.insert(0, os.path.join(HIER, "..", "ttf"))
 import raster  # noqa: E402
 
 
-def ppm_read(pfad):
-    roh = open(pfad, "rb").read()
+def ppm_read(path_2):
+    roh = open(path_2, "rb").read()
     if not roh.startswith(b"P6"):
-        raise ValueError("kein P6-PPM: %s" % pfad)
+        raise ValueError("kein P6-PPM: %s" % path_2)
     felder = []
     i = 2
     while len(felder) < 3:
@@ -86,13 +86,13 @@ def ppm_read(pfad):
     return d.reshape(h, w, 3).astype(np.int16)
 
 
-def punkte(text, ttf, px, deckung):
+def points_2(text, ttf, px, deckung):
     """(dx, dy, tinte?) -- dy ist relativ zur Grundlinie."""
     if ttf.startswith("fui:"):
         import fuiraster
-        s = fuiraster.Schrift(ttf[4:], px)
+        s = fuiraster.Font_2(ttf[4:], px)
     else:
-        s = raster.Schrift(ttf, px)
+        s = raster.Font_2(ttf, px)
     voll = []
     rand = []
     for (c, x26) in s.stellen(text):
@@ -104,7 +104,7 @@ def punkte(text, ttf, px, deckung):
             for k in range(g.w):
                 a = g.punkt(k, r)
                 dx = gx + g.links + k
-                dy = 0 - g.oben + r
+                dy = 0 - g.top_2 + r
                 if a >= deckung:
                     voll.append((dx, dy))
                 elif a == 0:
@@ -112,8 +112,8 @@ def punkte(text, ttf, px, deckung):
     return voll, rand, s
 
 
-def search(bild, voll, rand, tol):
-    h, w, _ = bild.shape
+def search(image_2, voll, rand, tol):
+    h, w, _ = image_2.shape
     xs = [p[0] for p in voll] + [p[0] for p in rand]
     ys = [p[1] for p in voll] + [p[1] for p in rand]
     x0, x1 = min(xs), max(xs)
@@ -128,7 +128,7 @@ def search(bild, voll, rand, tol):
     def area(dx, dy):
         ax = dx - x0
         ay = dy - y0
-        return bild[ay:ay + ny, ax:ax + nx, :]
+        return image_2[ay:ay + ny, ax:ax + nx, :]
 
     first = area(voll[0][0], voll[0][1])
     treffer = np.zeros((ny, nx), dtype=np.int32)
@@ -170,12 +170,12 @@ def main(argv):
             mind = float(argv[i + 1])
         if a == "--deckung":
             deckung = int(argv[i + 1])
-    bild = ppm_read(ppm)
-    voll, rand, _ = punkte(text, ttf, px, deckung)
+    image_2 = ppm_read(ppm)
+    voll, rand, _ = points_2(text, ttf, px, deckung)
     if not voll:
         print("die Zeile '%s' hat keinen einzigen vollgedeckten Punkt" % text)
         return 2
-    e = search(bild, voll, rand, tol)
+    e = search(image_2, voll, rand, tol)
     if e is None:
         print("the line is larger than the image")
         return 2

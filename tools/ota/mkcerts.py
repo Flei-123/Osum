@@ -82,8 +82,8 @@ def make_srv(cak, cac, cn, ip):
     return k, c
 
 
-def write_2(pfad, obj, privat=False):
-    with open(pfad, "wb") as f:
+def write_2(path_2, obj, privat=False):
+    with open(path_2, "wb") as f:
         if privat:
             f.write(obj.private_bytes(
                 serialization.Encoding.PEM,

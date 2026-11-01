@@ -19,19 +19,19 @@ WINZ = re.compile(
 
 def frei_bis(roh, title, y0, y1, x0):
     own = None
-    fenster = []
+    window_2 = []
     for m in WINZ.finditer(roh):
         e = dict(z=int(m.group(1)), hidden=m.group(3) != b"0",
                  deco=m.group(4) == b"1", x=int(m.group(5)),
                  y=int(m.group(6)), w=int(m.group(7)), h=int(m.group(8)),
                  t=m.group(9).decode("utf-8", "replace"))
-        fenster.append(e)
+        window_2.append(e)
         if e["t"] == title and not e["hidden"]:
             own = e
     if own is None:
         return None
     limit = None
-    for e in fenster:
+    for e in window_2:
         if e["hidden"] or e["z"] <= own["z"] or e is own:
             continue
         ex0 = e["x"] - (BORDER if e["deco"] else 0)
@@ -47,7 +47,7 @@ def frei_bis(roh, title, y0, y1, x0):
     return limit
 
 
-def fenster(roh, title):
+def window_2(roh, title):
     treffer = None
     for m in WIN.finditer(roh):
         if m.group(7).decode("utf-8", "replace") == title:
@@ -129,7 +129,7 @@ def grundfarben(ppm, x0, y0, x1, y1):
     return vg, hg
 
 
-def term_check(serial, ppm, text, zeile, column, tol, char):
+def term_check(serial, ppm, text, line_3, column, tol, char):
     roh = open(serial, "rb").read()
     g = gitter(roh)
     if g is None:
@@ -138,23 +138,23 @@ def term_check(serial, ppm, text, zeile, column, tol, char):
         return 1
     x0, y0, cw, chh, asc, px = g
     ax = x0 + column * cw
-    ay = y0 + zeile * chh + asc
+    ay = y0 + line_3 * chh + asc
     farben = grundfarben(ppm, ax, ay - asc, ax + len(text) * cw, ay + 4)
     if farben is None:
         print("umlaut: [%s] line %d cannot be found in the image"
-              % (char, zeile))
+              % (char, line_3))
         return 1
     vg, hg = farben
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py", "tgrid", ppm,
          "assets/osum-mono.ttf", str(px), str(x0), str(y0),
-         str(cw), str(chh), str(zeile), str(column)]
+         str(cw), str(chh), str(line_3), str(column)]
         + [str(v) for v in vg] + [str(v) for v in hg] + [text, tol],
         capture_output=True, text=True)
     header = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
     print("umlaut: [%s] termgitter zeile=%d spalte=%d x=%d y=%d "
           "fg=%02x%02x%02x bg=%02x%02x%02x tol=%s -- %s"
-          % (char, zeile, column, ax, ay, vg[0], vg[1], vg[2],
+          % (char, line_3, column, ax, ay, vg[0], vg[1], vg[2],
              hg[0], hg[1], hg[2], tol, header))
     for z in r.stdout.strip().split("\n")[1:]:
         print("        " + z)
@@ -177,8 +177,8 @@ def main(argv):
         if not char:
             print("umlaut: %r traegt gar keinen Umlaut" % text)
             return 2
-        zeile, column = (int(v) for v in argv[2].split("=", 1)[1].split(","))
-        return term_check(argv[0], argv[1], text, zeile, column,
+        line_3, column = (int(v) for v in argv[2].split("=", 1)[1].split(","))
+        return term_check(argv[0], argv[1], text, line_3, column,
                             argv[4] if len(argv) > 4 else "0", char)
     serial, ppm, title, text = argv[0], argv[1], argv[2], argv[3]
     tol = argv[4] if len(argv) > 4 else "0"
@@ -188,7 +188,7 @@ def main(argv):
         return 2
     roh = open(serial, "rb").read()
 
-    w = fenster(roh, title)
+    w = window_2(roh, title)
     if w is None:
         print("umlaut: [%s] no visible window '%s'" % (char, title))
         return 1
@@ -209,13 +209,13 @@ def main(argv):
 
     sys.path.insert(0, os.path.join("tools", "ttf"))
     import raster
-    font = raster.Schrift("assets/osum-sans.ttf", px)
+    font = raster.Font_2("assets/osum-sans.ttf", px)
     stellen = list(font.stellen(text))
-    breite = ((stellen[-1][1] >> 6) if stellen else 0) + 12
-    if tx + breite > ww:
+    width_2 = ((stellen[-1][1] >> 6) if stellen else 0) + 12
+    if tx + width_2 > ww:
         print("umlaut: [%s] '%s' laeuft von x=%d bis %d aus einem Fenster "
               "heraus, das %d breit ist -- nicht messbar"
-              % (char, text[:30], tx, tx + breite, ww))
+              % (char, text[:30], tx, tx + width_2, ww))
         return 1
 
     up = 20

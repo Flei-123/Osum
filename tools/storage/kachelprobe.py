@@ -38,8 +38,8 @@ VERSAETZE = [(x, y) for x in (40, 41, 42, 43) for y in
              (40, 42, 60, 61, 62, 63, 64, 65, 66)]
 
 
-def ppm(pfad):
-    with open(pfad, "rb") as f:
+def ppm(path_2):
+    with open(path_2, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):
         raise SystemExit("kachelprobe: kein P6-PPM")

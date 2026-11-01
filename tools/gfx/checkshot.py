@@ -403,11 +403,11 @@ class _InkChooser:
     def __init__(self, raster):
         self.r = raster
 
-    def Schrift(self, path, px):
+    def Font_2(self, path, px):
         if path.startswith("fui:"):
             import fuiraster
-            return fuiraster.Schrift(path[4:], px)
-        return self.r.Schrift(path, px)
+            return fuiraster.Font_2(path[4:], px)
+        return self.r.Font_2(path, px)
 
 
 def blend(old, new, a):
@@ -442,7 +442,7 @@ def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
                 if a == 0:
                     continue
                 px = gx + g.links + k
-                py = gy - g.oben + r
+                py = gy - g.top_2 + r
                 if lo is not None and (px < lo or px >= hi):
                     continue
                 set_count += 1
@@ -465,7 +465,7 @@ def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
                 if lo is not None:
                     if gx + g.links + k < lo or gx + g.links + k >= hi:
                         continue
-                actual = image.pixel(gx + g.links + k, gy - g.oben + r)
+                actual = image.pixel(gx + g.links + k, gy - g.top_2 + r)
                 if actual is not None and actual != bg:
                     ink_in_image += 1
         if set_count > 0 and ink_in_image == 0:
@@ -479,7 +479,7 @@ def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
 def cmd_tchain(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Schrift(a[1], int(a[2]))
+    face = raster.Font_2(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     fg = (int(a[5]), int(a[6]), int(a[7]))
     bg = (int(a[8]), int(a[9]), int(a[10]))
@@ -499,7 +499,7 @@ def cmd_tchain(a):
                 if d == 0:
                     continue
                 px = gx + g.links + k
-                py = gy - g.oben + r
+                py = gy - g.top_2 + r
                 expected[(px, py)] = blend(expected.get((px, py), bg), fg, d)
 
     char = 0
@@ -520,7 +520,7 @@ def cmd_tchain(a):
                 if g.punkt(k, r) == 0:
                     continue
                 px = gx + g.links + k
-                py = gy - g.oben + r
+                py = gy - g.top_2 + r
                 if ymax is not None and py >= ymax:
                     continue
                 set_count += 1
@@ -556,7 +556,7 @@ def cmd_tchain(a):
 
 def cmd_tright(a):
     raster = _load_raster()
-    face = raster.Schrift(a[1], int(a[2]))
+    face = raster.Font_2(a[1], int(a[2]))
     text = a[11]
     width = face.laufweite(text) >> 6
     last = None
@@ -579,7 +579,7 @@ def cmd_tright(a):
 def cmd_ttext(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Schrift(a[1], int(a[2]))
+    face = raster.Font_2(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     fg = (int(a[5]), int(a[6]), int(a[7]))
     bg = (int(a[8]), int(a[9]), int(a[10]))
@@ -605,7 +605,7 @@ def cmd_ttext(a):
 def cmd_tink(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Schrift(a[1], int(a[2]))
+    face = raster.Font_2(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     fg = (int(a[5]), int(a[6]), int(a[7]))
     bg = (int(a[8]), int(a[9]), int(a[10]))
@@ -639,7 +639,7 @@ def cmd_tink(a):
                 gy = y + ddy
                 hits = 0
                 for (k, r) in points:
-                    actual = image.pixel(gx + g.links + k, gy - g.oben + r)
+                    actual = image.pixel(gx + g.links + k, gy - g.top_2 + r)
                     if actual is None:
                         continue
                     if sum(abs(actual[j] - bg[j]) for j in range(3)) >= 90:
@@ -658,13 +658,13 @@ def cmd_tink(a):
         for r in range(g.h):
             for k in range(g.w):
                 if g.punkt(k, r) >= 40:
-                    explained.add((gx + g.links + k, gy - g.oben + r))
+                    explained.add((gx + g.links + k, gy - g.top_2 + r))
         left = gx + g.links
         if x0 is None or left < x0:
             x0 = left
         if x1 is None or left + g.w > x1:
             x1 = left + g.w
-        top = gy - g.oben
+        top = gy - g.top_2
         if y0 is None or top < y0:
             y0 = top
         if y1 is None or top + g.h > y1:
@@ -700,7 +700,7 @@ def cmd_tink(a):
 def cmd_tgrid(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Schrift(a[1], int(a[2]))
+    face = raster.Font_2(a[1], int(a[2]))
     x0, y0 = int(a[3]), int(a[4])
     cell_w, cell_h = int(a[5]), int(a[6])
     row, column = int(a[7]), int(a[8])

@@ -36,7 +36,7 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    pfad, log = sys.argv[1], sys.argv[2]
+    path_2, log = sys.argv[1], sys.argv[2]
     schritte = []
     args = sys.argv[3:]
     i = 0
@@ -52,13 +52,13 @@ def main():
     for _ in range(200):
         try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.connect(pfad)
+            s.connect(path_2)
             break
         except OSError:
             s = None
             time.sleep(0.05)
     if s is None:
-        print("console: the line %s does not come" % pfad)
+        print("console: the line %s does not come" % path_2)
         return 1
     s.settimeout(0.2)
 
@@ -108,11 +108,11 @@ def main():
                 print("   AUSGEBLIEBEN: %s" % value)
                 break
         elif art == "--sende":
-            zeile = value.replace("\\n", "\n").replace("\\t", "\t")
-            zeile = zeile.replace("\\003", "\003").replace("\\004", "\004")
-            zeile = zeile.replace("\\025", "\025").replace("\\010", "\010")
-            zeile = zeile.replace("\\033", "\033")
-            for ch in zeile.encode():
+            line = value.replace("\\n", "\n").replace("\\t", "\t")
+            line = line.replace("\\003", "\003").replace("\\004", "\004")
+            line = line.replace("\\025", "\025").replace("\\010", "\010")
+            line = line.replace("\\033", "\033")
+            for ch in line.encode():
                 s.send(bytes([ch]))
                 time.sleep(0.002)
         elif art == "--roh":

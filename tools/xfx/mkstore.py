@@ -88,7 +88,7 @@ def main():
     args = parser.parse_args()
     args.xfx_elf = os.path.abspath(args.xfx_elf)
     args.user_js = os.path.abspath(args.user_js)
-    opk = opkpfad.pfad()
+    opk = opkpfad.path_2()
     os.makedirs(args.out, exist_ok=True)
     work = tempfile.mkdtemp(prefix="mkstore.")
     try:

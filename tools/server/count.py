@@ -40,9 +40,9 @@ MUSTER = re.compile(
 
 def without_kommentare(text):
     aus = []
-    for zeile in text.split("\n"):
-        i = zeile.find("//")
-        aus.append(zeile[:i] if i >= 0 else zeile)
+    for line in text.split("\n"):
+        i = line.find("//")
+        aus.append(line[:i] if i >= 0 else line)
     return "\n".join(aus)
 
 
@@ -57,28 +57,28 @@ def without_importe(text):
     kommt.  Gezaehlt werden soll der ZUGRIFF.
     """
     aus = []
-    for zeile in text.split("\n"):
-        if re.match(r"\s*import\s", zeile):
+    for line in text.split("\n"):
+        if re.match(r"\s*import\s", line):
             aus.append("")
         else:
-            aus.append(zeile)
+            aus.append(line)
     return "\n".join(aus)
 
 
-def zaehle(wurzel):
+def zaehle(root):
     je_file = collections.Counter()
     names = collections.Counter()
-    for pfad, _, dateien in os.walk(wurzel):
+    for path_2, _, dateien in os.walk(root):
         for d in sorted(dateien):
             if not d.endswith(".fi") or d in OWN:
                 continue
-            p = os.path.join(pfad, d)
+            p = os.path.join(path_2, d)
             with open(p, "rb") as f:
                 roh = f.read().decode("utf8", "replace")
             foreign = set(re.findall(r"^\s*import\s+(?!(?:gfx|ui|drv)\.)[A-Za-z0-9_.]+\.([A-Za-z0-9_]+)", roh, re.M))
             treffer = [t for t in MUSTER.findall(without_importe(without_kommentare(roh))) if t[0] not in foreign]
             if treffer:
-                je_file[os.path.relpath(p, wurzel)] = len(treffer)
+                je_file[os.path.relpath(p, root)] = len(treffer)
                 for a, b in treffer:
                     names[a + "." + b] += 1
     return je_file, names
@@ -88,11 +88,11 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    wurzel = sys.argv[1]
-    if not os.path.isdir(wurzel):
+    root = sys.argv[1]
+    if not os.path.isdir(root):
         print(-1)
         return 1
-    je_file, names = zaehle(wurzel)
+    je_file, names = zaehle(root)
     if "--je-datei" in sys.argv:
         for k, v in je_file.most_common():
             print("  %-26s %d" % (k, v))

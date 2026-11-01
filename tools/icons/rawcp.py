@@ -51,13 +51,13 @@ DEC = re.compile(r"(?<![\w.])(\d{5})(?![\w.])")
 
 def belegte(wurzel):
     """The code points icons.map has given away -> {value: name}."""
-    pfad = os.path.join(wurzel, "assets", "icons", "icons.map")
+    path_2 = os.path.join(wurzel, "assets", "icons", "icons.map")
     aus = {}
-    for roh in open(pfad, encoding="ascii").read().splitlines():
-        zeile = roh.split("#", 1)[0].strip()
-        if "=" not in zeile:
+    for roh in open(path_2, encoding="ascii").read().splitlines():
+        line_3 = roh.split("#", 1)[0].strip()
+        if "=" not in line_3:
             continue
-        name, _, rest = zeile.partition("=")
+        name, _, rest = line_3.partition("=")
         parts = rest.split()
         if len(parts) == 2 and parts[0] != "alias":
             aus[int(parts[0], 16)] = name.strip()
@@ -144,8 +144,8 @@ def treffer(text, erlaubt_values):
         for m in muster.finditer(text):
             v = int(m.group(1), basis)
             if v in erlaubt_values:
-                zeile = text.count("\n", 0, m.start()) + 1
-                aus.append((zeile, art, v))
+                line_3 = text.count("\n", 0, m.start()) + 1
+                aus.append((line_3, art, v))
     return sorted(aus)
 
 
@@ -172,10 +172,10 @@ def main(argv):
         rel = os.path.relpath(voll, wurzel)
         text = without_kommentare(
             open(voll, encoding="utf-8", errors="replace").read())
-        for zeile, art, value in treffer(text, karte):
+        for line_3, art, value in treffer(text, karte):
             n += 1
             print("rawcp: %s:%d: raw code point (%s) U+%04X -- write %s"
-                  % (rel, zeile, art, value, karte[value]))
+                  % (rel, line_3, art, value, karte[value]))
 
     print("rawcp: %d raw code points in %d files of drawing code, "
           "%d code points given away"

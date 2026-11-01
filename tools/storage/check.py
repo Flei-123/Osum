@@ -32,21 +32,21 @@ PROBE = re.compile(
     r"du: probe pfad=(\S+)\s+idx=(\d+)\s+lauf=(\d+)\s+idxkb=(\d+)\s+"
     r"laufkb=(\d+)\s+ok=(\d+)")
 FERTIG = re.compile(r"du: probe done checked=(\d+)\s+falsch=(\d+)")
-MESS = re.compile(r"du: (index|durchlauf) \[(\S+)\] okt=(\d+) kb=(\d+)")
+MEASURE = re.compile(r"du: (index|durchlauf) \[(\S+)\] okt=(\d+) kb=(\d+)")
 
 
-def soll_lesen(pfad):
+def soll_read(path_2):
     aus = {}
-    with open(pfad) as f:
-        for zeile in f:
-            t = zeile.split()
+    with open(path_2) as f:
+        for line_3 in f:
+            t = line_3.split()
             if len(t) >= 3:
                 aus[t[0]] = (int(t[1]), int(t[2]))
     return aus
 
 
-def text(pfad):
-    with open(pfad, "rb") as f:
+def text(path_2):
+    with open(path_2, "rb") as f:
         return f.read().decode("latin-1")
 
 
@@ -54,23 +54,23 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    soll = soll_lesen(argv[1])
+    soll = soll_read(argv[1])
     roh = "\n".join(text(p) for p in argv[2:])
 
     geprueft = 0
-    falsch = 0
+    wrong_2 = 0
     without_soll = 0
     dritt = 0
     zeilen = []
 
     for m in PROBE.finditer(roh):
-        pfad, idx, run, ikb, lkb, ok = m.group(1), int(m.group(2)), \
+        path_2, idx, run, ikb, lkb, ok = m.group(1), int(m.group(2)), \
             int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6))
         geprueft += 1
         gut = idx == run and ikb == lkb and ok == 1
-        s = soll.get(pfad)
+        s = soll.get(path_2)
         anmerkung = ""
-        if pfad == "/":
+        if path_2 == "/":
             anmerkung = "(Wurzel: nur Index gegen Durchlauf, s. Kopf)"
             without_soll += 1
         elif s is None:
@@ -82,9 +82,9 @@ def main(argv):
                 gut = False
                 anmerkung = "WIRT SAGT okt=%d kb=%d" % s
         if not gut:
-            falsch += 1
+            wrong_2 += 1
         zeilen.append("  %-24s idx=%-8d lauf=%-8d kb=%-6d %s %s"
-                      % (pfad, idx, run, ikb, "OK " if gut else "FALSCH",
+                      % (path_2, idx, run, ikb, "OK " if gut else "FALSCH",
                          anmerkung))
 
     print("check: %d directories from the guest, of which %d also against the "
@@ -96,11 +96,11 @@ def main(argv):
         g, f = int(m.group(1)), int(m.group(2))
         print("check: the guest says checked=%d wrong=%d" % (g, f))
         if f != 0:
-            falsch += f
+            wrong_2 += f
         if g != geprueft:
             print("check: NOTE -- the guest counts %d probes, here "
                   "kommen %d an" % (g, geprueft))
-            falsch += 1
+            wrong_2 += 1
 
     if geprueft == 0:
         print("check: NOT A SINGLE PROBE in the output -- the run is "
@@ -110,8 +110,8 @@ def main(argv):
         print("check: no probe against the host -- the expected values fit "
               "zu keinem Pfad")
         return 1
-    if falsch:
-        print("pruefen: %d FALSCH" % falsch)
+    if wrong_2:
+        print("pruefen: %d FALSCH" % wrong_2)
         return 1
     print("check: all %d directories identical octet for octet "
           "(Index = Durchlauf = Wirt)" % geprueft)

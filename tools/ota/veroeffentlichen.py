@@ -110,22 +110,22 @@ sys.path.insert(0, HIER)
 import plattform as PLT   # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import opkpfad
-OPK = opkpfad.pfad()
+OPK = opkpfad.path_2()
 BUND_PY = os.path.join(HIER, "schluesselbund.py")
 
 
-def sha256d(pfad):
+def sha256d(path_2):
     h = hashlib.sha256()
-    with open(pfad, "rb") as f:
+    with open(path_2, "rb") as f:
         for b in iter(lambda: f.read(1 << 16), b""):
             h.update(b)
     return h.hexdigest()
 
 
-def signieren(bund, datei, aus, wer="haupt"):
+def signieren(bund, file_2, aus, wer="haupt"):
     if os.path.lexists(aus):
         os.remove(aus)
-    r = subprocess.run([sys.executable, BUND_PY, bund, "signieren", datei,
+    r = subprocess.run([sys.executable, BUND_PY, bund, "signieren", file_2,
                         "-o", aus, "--wer", wer],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -139,12 +139,12 @@ def bund_read(bund):
         return json.load(f)
 
 
-def meta_aus_opk(pfad):
-    with open(pfad, "rb") as f:
+def meta_aus_opk(path_2):
+    with open(path_2, "rb") as f:
         header = f.read(64)
         if header[:8] != b"OPKG0001":
             raise SystemExit("veroeffentlichen: %s ist not an OPKG file"
-                             % pfad)
+                             % path_2)
         ml = int.from_bytes(header[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
     name = fassung = None
@@ -154,7 +154,7 @@ def meta_aus_opk(pfad):
         elif z.startswith("fassung="):
             fassung = z[8:].strip()
     if not name:
-        raise SystemExit("veroeffentlichen: %s hat keinen Namen" % pfad)
+        raise SystemExit("veroeffentlichen: %s hat keinen Namen" % path_2)
     return name, fassung or "0"
 
 
@@ -197,11 +197,11 @@ def gesperrt_read(aus):
     return sorted(set(out))
 
 
-def gesperrt_write(aus, liste):
+def gesperrt_write(aus, list_):
     with open(os.path.join(aus, "gesperrt.txt"), "w") as f:
         f.write("# withdrawn versions. A device does NOT install them\n")
         f.write("# any more, even if it was offline for a long time.\n")
-        for n in sorted(set(liste)):
+        for n in sorted(set(list_)):
             f.write("%d\n" % n)
 
 
@@ -212,19 +212,19 @@ def dir_text(fassung, gen, kette, gesperrt, pakete):
         z.append("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
     for g in gesperrt:
         z.append("gesperrt\t%d" % g)
-    for name, pf, h, n, datei, plattform in pakete:
+    for name, pf, h, n, file_2, plattform in pakete:
         z.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
-                 % (name, pf, h, n, datei, plattform))
+                 % (name, pf, h, n, file_2, plattform))
     return ("\n".join(z) + "\n").encode("ascii")
 
 
-def verknuepfen(quelle, target_2):
+def verknuepfen(source_2, target_2):
     if os.path.exists(target_2):
         os.remove(target_2)
     try:
-        os.link(quelle, target_2)
+        os.link(source_2, target_2)
     except OSError:
-        shutil.copy2(quelle, target_2)
+        shutil.copy2(source_2, target_2)
 
 
 def current_set(aus, register, gesperrt):
@@ -367,7 +367,7 @@ def main():
     aus = sys.argv[1]
     stand = bund = notiz = None
     sperren = []
-    zurueck = None
+    back_2 = None
     nurzeigen = False
     feste = None
     signierer = "haupt"
@@ -392,7 +392,7 @@ def main():
             feste = int(sys.argv[i])
         elif a == "--zuruecknehmen":
             i += 1
-            zurueck = int(sys.argv[i])
+            back_2 = int(sys.argv[i])
         elif a == "--signierer":
             i += 1
             signierer = sys.argv[i]
@@ -407,8 +407,8 @@ def main():
     os.makedirs(aus, exist_ok=True)
     if nurzeigen:
         return zeigen(aus)
-    if zurueck is not None:
-        return zuruecknehmen(aus, zurueck)
+    if back_2 is not None:
+        return zuruecknehmen(aus, back_2)
     if not stand or not bund:
         print(__doc__)
         return 2

@@ -97,10 +97,10 @@ class Ttf:
         n = u16(roh, 4)
         self.tab = {}
         for i in range(n):
-            marke = roh[12 + 16 * i:16 + 16 * i].decode("latin1")
+            brand_2 = roh[12 + 16 * i:16 + 16 * i].decode("latin1")
             off = u32(roh, 12 + 16 * i + 8)
-            laenge = u32(roh, 12 + 16 * i + 12)
-            self.tab[marke] = (off, laenge)
+            len_ = u32(roh, 12 + 16 * i + 12)
+            self.tab[brand_2] = (off, len_)
         head = self.tab["head"][0]
         self.upm = u16(roh, head + 18)
         self.locfmt = s16(roh, head + 50)
@@ -286,11 +286,11 @@ def scale_of(px, upm):
     return (px << 16) // upm
 
 
-def flatten(punkte, scale):
+def flatten(points_2, scale):
     """Ein Umriss in 26.6 als Folge gerader Stuecke."""
-    if not punkte:
+    if not points_2:
         return []
-    p = [(f26(x, scale), f26(y, scale), an) for (x, y, an) in punkte]
+    p = [(f26(x, scale), f26(y, scale), an) for (x, y, an) in points_2]
     start = None
     for i, (x, y, an) in enumerate(p):
         if an:
@@ -345,9 +345,9 @@ def quad(x0, y0, cx, cy, x1, y1):
 
 
 class Glyphe:
-    def __init__(self, w, h, links, oben, adv26, deckung):
+    def __init__(self, w, h, links, top_2, adv26, deckung):
         self.w, self.h = w, h
-        self.links, self.oben = links, oben
+        self.links, self.top_2 = links, top_2
         self.adv26 = adv26
         self.a = deckung
 
@@ -378,22 +378,22 @@ def raster(f, gid, px, tinte=None):
 def raster_kern(f, gid, px):
     """Eine Glyphe rastern.  Das Ergebnis ist DIE Zusage dieser Runde."""
     scale = scale_of(px, f.upm)
-    kanten = []
+    edges_2 = []
     for k in f.contours(gid):
-        punkte = flatten(k, scale)
-        for i in range(len(punkte)):
-            ax, ay = punkte[i]
-            bx, by = punkte[(i + 1) % len(punkte)]
+        points_2 = flatten(k, scale)
+        for i in range(len(points_2)):
+            ax, ay = points_2[i]
+            bx, by = points_2[(i + 1) % len(points_2)]
             if ay != by:
-                kanten.append((ax, ay, bx, by))
+                edges_2.append((ax, ay, bx, by))
     adv26 = f26(f.advance(gid), scale)
-    if not kanten:
+    if not edges_2:
         return Glyphe(0, 0, 0, 0, adv26, bytearray())
 
-    minx = min(min(k[0], k[2]) for k in kanten)
-    maxx = max(max(k[0], k[2]) for k in kanten)
-    miny = min(min(k[1], k[3]) for k in kanten)
-    maxy = max(max(k[1], k[3]) for k in kanten)
+    minx = min(min(k[0], k[2]) for k in edges_2)
+    maxx = max(max(k[0], k[2]) for k in edges_2)
+    miny = min(min(k[1], k[3]) for k in edges_2)
+    maxy = max(max(k[1], k[3]) for k in edges_2)
     bx0 = minx >> 6
     bx1 = (maxx + 63) >> 6
     by0 = miny >> 6
@@ -409,7 +409,7 @@ def raster_kern(f, gid, px):
         for sub in range(4):
             ys = py * 64 + 8 + sub * 16
             schnitte = []
-            for (ax, ay, bx, by) in kanten:
+            for (ax, ay, bx, by) in edges_2:
                 lo, hi = (ay, by) if ay < by else (by, ay)
                 if ys < lo or ys >= hi:
                     continue
@@ -434,34 +434,34 @@ def raster_kern(f, gid, px):
                         j1 = bx1 * 4
                     for j in range(j0, j1):
                         cov[(j >> 2) - bx0] += 1
-        zeile = (by1 - 1 - py) * w
+        line_3 = (by1 - 1 - py) * w
         for i in range(w):
             c = cov[i]
             if c > 16:
                 c = 16
-            a[zeile + i] = (c * 255 + 8) // 16
+            a[line_3 + i] = (c * 255 + 8) // 16
     return Glyphe(w, h, bx0, by1, adv26, a)
 
 
-class Schrift:
+class Font_2:
     """Ein geladener Zeichensatz samt Glyphenspeicher."""
 
-    def __init__(self, pfad, px, tinte=None):
-        if pfad.startswith("kern:"):
-            pfad, tinte = pfad[5:], "kern"
-        elif pfad.startswith("fui:"):
-            pfad, tinte = pfad[4:], "fui"
-        self.f = Ttf(open(pfad, "rb").read())
+    def __init__(self, path_2, px, tinte=None):
+        if path_2.startswith("kern:"):
+            path_2, tinte = path_2[5:], "kern"
+        elif path_2.startswith("fui:"):
+            path_2, tinte = path_2[4:], "fui"
+        self.f = Ttf(open(path_2, "rb").read())
         self.px = px
         self.tinte = tinte
         self.scale = scale_of(px, self.f.upm)
-        self.speicher = {}
+        self.mem_2 = {}
 
     def glyphe(self, c):
-        if c in self.speicher:
-            return self.speicher[c]
+        if c in self.mem_2:
+            return self.mem_2[c]
         g = raster(self.f, self.f.glyph_of(c), self.px, self.tinte)
-        self.speicher[c] = g
+        self.mem_2[c] = g
         return g
 
     def aufsteiger(self):
@@ -504,7 +504,7 @@ class Schrift:
 
 
 
-def summe(g):
+def sum_(g):
     """FNV-1a ueber die rohen Deckungswerte -- dieselbe Zeile wie
     `kmain.glyph_sum`."""
     acc = 2166136261
@@ -514,7 +514,7 @@ def summe(g):
     return acc
 
 
-def vergleich(pfad_ttf, mitschnitt):
+def vergleich(path_ttf, mitschnitt):
     """DIE ZUSAGE DIESER RUNDE UEBER DEN RASTERER.
 
     Der Kernel gibt auf das Wort `ttfdump` hin einige Glyphen als Text
@@ -542,22 +542,22 @@ def vergleich(pfad_ttf, mitschnitt):
     for (c, px, w, h, left, top, adv, sm, zeilen) in faelle:
         c, px = int(c), int(px)
         if px not in schriften:
-            schriften[px] = Schrift(pfad_ttf, px)
+            schriften[px] = Font_2(path_ttf, px)
         g = schriften[px].glyphe(c)
         name = "'%c' (0x%02x)" % (c if 32 <= c < 127 else 63, c)
         geprueft += 1
         tinte += g.gesetzt()
-        if (g.w, g.h, g.links, g.oben, g.adv26) != (int(w), int(h),
+        if (g.w, g.h, g.links, g.top_2, g.adv26) != (int(w), int(h),
                                                     int(left), int(top),
                                                     int(adv)):
             bad.append("%s Masse: Kern %sx%s l=%s t=%s a=%s, "
                             "Wirt %dx%d l=%d t=%d a=%d"
                             % (name, w, h, left, top, adv, g.w, g.h,
-                               g.links, g.oben, g.adv26))
+                               g.links, g.top_2, g.adv26))
             continue
-        if summe(g) != int(sm):
+        if sum_(g) != int(sm):
             bad.append("%s Pruefsumme: Kern %s, Wirt %d"
-                            % (name, sm, summe(g)))
+                            % (name, sm, sum_(g)))
             continue
         soll = [ "".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]
                          for x in range(g.w)) for y in range(g.h) ]
@@ -584,29 +584,29 @@ def main(argv):
                  f.kern_paare, ",".join(sorted(f.tab))))
         return 0
     if cmd == "glyphe":
-        s = Schrift(argv[2], int(argv[3]))
+        s = Font_2(argv[2], int(argv[3]))
         g = s.glyphe(ord(argv[4]))
         print("%dx%d left=%d top=%d adv=%d/64 set=%d"
-              % (g.w, g.h, g.links, g.oben, g.adv26, g.gesetzt()))
+              % (g.w, g.h, g.links, g.top_2, g.adv26, g.gesetzt()))
         stufen = " .:-=+*#%@"
         for y in range(g.h):
             print("".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]
                           for x in range(g.w)))
         return 0
     if cmd == "summe":
-        s = Schrift(argv[2], int(argv[3]))
+        s = Font_2(argv[2], int(argv[3]))
         g = s.glyphe(ord(argv[4]))
-        print(summe(g))
+        print(sum_(g))
         return 0
     if cmd == "vergleich":
         return vergleich(argv[2], argv[3])
     if cmd == "breite":
-        s = Schrift(argv[2], int(argv[3]))
+        s = Font_2(argv[2], int(argv[3]))
         print("%d/64 = %d Bildpunkte" % (s.laufweite(argv[4]),
                                          s.laufweite(argv[4]) >> 6))
         return 0
     if cmd == "zeile":
-        s = Schrift(argv[2], int(argv[3]))
+        s = Font_2(argv[2], int(argv[3]))
         for (c, x) in s.stellen(argv[4]):
             print("%c bei %d/64" % (c, x))
         return 0

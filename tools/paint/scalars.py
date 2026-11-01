@@ -5,7 +5,7 @@ import re
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.normpath(os.path.join(HIER, "..", ".."))
+ROOT_2 = os.path.normpath(os.path.join(HIER, "..", ".."))
 
 CONST = re.compile(
     r"^const\s+(S_[A-Z0-9_]+)\s*:\s*u64\s*=\s*(0x[0-9A-Fa-f]+)\s*(//.*)?$")
@@ -19,16 +19,16 @@ LEN_AUS = {
 }
 
 
-def laengen(pfad):
-    with open(pfad, "rb") as fh:
+def laengen(path_2):
+    with open(path_2, "rb") as fh:
         text = fh.read().decode("utf-8", "replace")
     konst = {}
     for m in NUM.finditer(text):
         konst[m.group(1)] = int(m.group(2), 0)
     aus = []
-    datei = os.path.basename(pfad)
-    for nr, zeile in enumerate(text.splitlines(), 1):
-        m = CONST.match(zeile.strip())
+    file_2 = os.path.basename(path_2)
+    for nr, line_3 in enumerate(text.splitlines(), 1):
+        m = CONST.match(line_3.strip())
         if not m:
             continue
         name = m.group(1)
@@ -43,7 +43,7 @@ def laengen(pfad):
             n = int(w.group(1)) * 8
         elif o:
             n = int(o.group(1))
-        key_2 = (datei, name)
+        key_2 = (file_2, name)
         if key_2 in LEN_AUS:
             k = LEN_AUS[key_2]
             if k in konst:
@@ -52,8 +52,8 @@ def laengen(pfad):
     return aus
 
 
-def check(pfad):
-    eintraege = laengen(pfad)
+def check(path_2):
+    eintraege = laengen(path_2)
     treffer = []
     for i in range(len(eintraege)):
         an, aw, al, az = eintraege[i]
@@ -67,7 +67,7 @@ def check(pfad):
 def main():
     dateien = sys.argv[1:]
     if not dateien:
-        kdir = os.path.join(WURZEL, "kernel")
+        kdir = os.path.join(ROOT_2, "kernel")
         dateien = sorted(os.path.join(kdir, f)
                          for f in os.listdir(kdir) if f.endswith(".fi"))
     gesamt = 0
@@ -75,7 +75,7 @@ def main():
     for p in dateien:
         eintraege, treffer = check(p)
         gesamt += len(eintraege)
-        rel = os.path.relpath(p, WURZEL)
+        rel = os.path.relpath(p, ROOT_2)
         for (an, aw, al, az, bn, bw, bl, bz) in treffer:
             bad += 1
             print("  FAIL  %s: %s (0x%X, %d octets, line %d) and "

@@ -60,19 +60,19 @@ def rastern(pfade, size_2, vb, ss=4):
     vx,vy,vw,vh = vb
     acc=[[None]*(W) for _ in range(H)]
     for konturen, color in pfade:
-        kanten=[]
+        edges=[]
         for k in konturen:
             pts=[((px-vx)*W/vw, (py-vy)*H/vh) for px,py in k]
             for a in range(len(pts)-1):
                 x0,y0=pts[a]; x1,y1=pts[a+1]
-                if y0!=y1: kanten.append((x0,y0,x1,y1))
-        if not kanten: continue
+                if y0!=y1: edges.append((x0,y0,x1,y1))
+        if not edges: continue
         for py in range(H):
             deck=[0]*W
             for sub in range(ss):
                 yy=py+(sub+0.5)/ss
                 xs=[]
-                for x0,y0,x1,y1 in kanten:
+                for x0,y0,x1,y1 in edges:
                     if (y0<=yy<y1) or (y1<=yy<y0):
                         t=(yy-y0)/(y1-y0)
                         xs.append((x0+t*(x1-x0), 1 if y1>y0 else -1))

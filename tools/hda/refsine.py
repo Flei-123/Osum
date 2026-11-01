@@ -78,22 +78,22 @@ def main():
     got = array.array("h")
     got.frombytes(w.readframes(w.getnframes()))
     nch = w.getnchannels()
-    links = list(got[0::nch])
+    left = list(got[0::nch])
     ref = array.array("h")
     ref.frombytes(d)
     refl = list(ref[0::2])
-    nz = [i for i, v in enumerate(links) if v != 0]
+    nz = [i for i, v in enumerate(left) if v != 0]
     if not nz:
         print("ungleich=999999 verglichen=0 grund=leer")
         return
     lo = nz[0]
     if lo > 0:
         lo = lo - 1
-    n = min(len(refl), len(links) - lo)
+    n = min(len(refl), len(left) - lo)
     bad = 0
     maxd = 0
     for i in range(n):
-        dd = abs(links[lo + i] - refl[i])
+        dd = abs(left[lo + i] - refl[i])
         if dd != 0:
             bad += 1
             if dd > maxd:

@@ -120,7 +120,7 @@ def wandfarben(im, hoehe, x0, x1):
     return [f for f, _ in c.most_common(2)]
 
 
-def kontrast(a, b):
+def contrast_2(a, b):
     def lin(v):
         v = v / 255.0
         return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
@@ -145,10 +145,10 @@ FENSTERTEXT = re.compile(
     r" tw=(\d+) ax=(\d+) ay=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
 
 
-def fenster(bild, serial, marke="settings: rect name=waa "):
-    im = Image.open(bild).convert("RGB")
+def window_2(image_2, serial, brand_2="settings: rect name=waa "):
+    im = Image.open(image_2).convert("RGB")
     roh = open(serial, "rb").read().decode("latin1")
-    schnitt = roh.rfind(marke)
+    schnitt = roh.rfind(brand_2)
     tail_2 = roh[schnitt:] if schnitt >= 0 else roh
     f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
@@ -162,15 +162,15 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
         return 1
     zaehl = Counter(int(m.group(1)) for m in zeilen)
     win = zaehl.most_common(1)[0][0]
-    letzte = {}
+    last_3 = {}
     for m in zeilen:
         if int(m.group(1)) != win or not m.group(10).strip():
             continue
-        letzte[(m.group(2), m.group(10))] = m
+        last_3[(m.group(2), m.group(10))] = m
     bad_2 = None
     n = 0
     aus = []
-    for m in letzte.values():
+    for m in last_3.values():
         fg = hex2rgb("%06x" % int(m.group(5)))
         x0 = int(m.group(8)) + int(m.group(3))
         y0 = int(m.group(9)) + int(m.group(4)) - asc
@@ -178,19 +178,19 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
         y1 = min(int(m.group(9)) + int(m.group(4)) + desc, im.size[1])
         if x0 >= x1 or y0 >= y1 or x0 < 0 or y0 < 0:
             continue
-        punkte = {}
+        points_2 = {}
         for y in range(y0, y1):
             for x in range(x0, x1):
-                punkte[(x, y)] = im.getpixel((x, y))
-        tinte = set(p for p, c in punkte.items()
+                points_2[(x, y)] = im.getpixel((x, y))
+        tinte = set(p for p, c in points_2.items()
                     if max(abs(c[i] - fg[i]) for i in range(3)) <= 60)
-        grund = [c for p, c in punkte.items()
+        reason_2 = [c for p, c in points_2.items()
                  if not any((p[0] + dx, p[1] + dy) in tinte
                             for dx in range(-2, 3) for dy in range(-2, 3))]
-        if not grund:
+        if not reason_2:
             continue
-        c = Counter(grund)
-        ges = len(grund)
+        c = Counter(reason_2)
+        ges = len(reason_2)
         haeufig = c.most_common(1)[0][0]
         dv = [haeufig[i] - fg[i] for i in range(3)]
         ll = sum(v * v for v in dv)
@@ -207,8 +207,8 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
                 if k * 100 >= ges and not auf_line(f0)]
         if not kand:
             kand = [c.most_common(1)[0]]
-        kand.sort(key=lambda fk: kontrast(fg, fk[0]))
-        k = kontrast(fg, kand[0][0])
+        kand.sort(key=lambda fk: contrast_2(fg, fk[0]))
+        k = contrast_2(fg, kand[0][0])
         n += 1
         aus.append((k, m.group(10)[:28], kand[0][0]))
         if bad_2 is None or k < bad_2[0]:
@@ -223,8 +223,8 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
     return 0
 
 
-def reiter(bild, serial):
-    im = Image.open(bild).convert("RGB")
+def tab_2(image_2, serial):
+    im = Image.open(image_2).convert("RGB")
     roh = open(serial, "rb").read().decode("latin1")
     tabs = re.findall(r"wlib: tab i=\d+ x=\d+ y=\d+ w=(\d+) h=(\d+)"
                       r" ax=(\d+) ay=(\d+)", roh)
@@ -237,17 +237,17 @@ def reiter(bild, serial):
     y1 = max(int(t[3]) + int(t[1]) for t in tabs)
     x1 = min(x1, im.size[0])
     y1 = min(y1, im.size[1])
-    kanten = 0
-    punkte = 0
+    edges_2 = 0
+    points_2 = 0
     for y in range(y0, y1):
         for x in range(x0, x1 - 1):
             a = im.getpixel((x, y))
             b = im.getpixel((x + 1, y))
-            punkte += 1
+            points_2 += 1
             if max(abs(a[i] - b[i]) for i in range(3)) > 24:
-                kanten += 1
+                edges_2 += 1
     print("reiter band=%d,%d,%d,%d kanten=%d punkte=%d"
-          % (x0, y0, x1, y1, kanten, punkte))
+          % (x0, y0, x1, y1, edges_2, points_2))
     return 0
 
 
@@ -270,10 +270,10 @@ def main(argv):
         opt["x1"] = 1 << 30
 
     if cmd == "fenster":
-        return fenster(rest[0], rest[1])
+        return window_2(rest[0], rest[1])
 
     if cmd == "reiter":
-        return reiter(rest[0], rest[1])
+        return tab_2(rest[0], rest[1])
 
     if cmd == "diff":
         a = Image.open(rest[0]).convert("RGB")
@@ -392,7 +392,7 @@ def main(argv):
 
     if cmd == "kachel":
         x, y, w, h, r = (int(v) for v in rest[1:6])
-        grund = im.getpixel((x - 6, y + h // 2))
+        reason_2 = im.getpixel((x - 6, y + h // 2))
 
         def nah(a, b, tol=12):
             return max(abs(a[i] - b[i]) for i in range(3)) <= tol
@@ -400,7 +400,7 @@ def main(argv):
         mitte = y + h // 2
         links = right = -1
         for i in range(-4, w + 5):
-            if not nah(im.getpixel((x + i, mitte)), grund):
+            if not nah(im.getpixel((x + i, mitte)), reason_2):
                 if links < 0:
                     links = x + i
                 right = x + i
@@ -422,13 +422,13 @@ def main(argv):
             d = min(j, h - 1 - j)
             e = ein(d) if 0 < j < h - 1 else 0
             for i in range(e):
-                if not nah(im.getpixel((x + i, y + j)), grund):
+                if not nah(im.getpixel((x + i, y + j)), reason_2):
                     foreign += 1
-                if not nah(im.getpixel((x + w - 1 - i, y + j)), grund):
+                if not nah(im.getpixel((x + w - 1 - i, y + j)), reason_2):
                     foreign += 1
             if j < r:
                 s = 0
-                while s < r + 8 and nah(im.getpixel((x + s, y + j)), grund):
+                while s < r + 8 and nah(im.getpixel((x + s, y + j)), reason_2):
                     s += 1
                 starts.append(s)
         tiefe = (max(starts) - min(starts)) if starts else 0
@@ -448,7 +448,7 @@ def main(argv):
     if cmd == "kontrast" and opt.get("_felder"):
         vor = hex2rgb(rest[1])
         bad_2 = None
-        zeile = []
+        line_3 = []
         for (a, b, cc, d, ffg) in opt["_felder"]:
             fg = ffg if ffg else vor
 
@@ -477,10 +477,10 @@ def main(argv):
                     and not auf_line(f)]
             if not kand:
                 kand = [(haeufig, cnt[haeufig])]
-            kand.sort(key=lambda fn: kontrast(fg, fn[0]))
+            kand.sort(key=lambda fn: contrast_2(fg, fn[0]))
             g, anz = kand[0]
-            k = kontrast(fg, g)
-            zeile.append("x%d=%d" % (a, int(k * 100)))
+            k = contrast_2(fg, g)
+            line_3.append("x%d=%d" % (a, int(k * 100)))
             if bad_2 is None or k < bad_2[0]:
                 bad_2 = (k, g, anz, ges, fg, len(kand))
         k, g, anz, ges, fg, nk = bad_2
@@ -488,7 +488,7 @@ def main(argv):
               "kandidaten=%d felder=%d %s"
               % (int(k * 100), g[0], g[1], g[2], 100 * anz // max(ges, 1),
                  fg[0], fg[1], fg[2], nk, len(opt["_felder"]),
-                 " ".join(zeile)))
+                 " ".join(line_3)))
         return 0
 
     if cmd == "kontrast":
@@ -515,15 +515,15 @@ def main(argv):
                 and not auf_line(f)]
         if not kand:
             kand = [c.most_common(1)[0]]
-        kand.sort(key=lambda fn: kontrast(fg, fn[0]))
-        grund, anz = kand[0]
+        kand.sort(key=lambda fn: contrast_2(fg, fn[0]))
+        reason_2, anz = kand[0]
         best = kand[-1][0]
-        k = kontrast(fg, grund)
+        k = contrast_2(fg, reason_2)
         print("kontrast %d grund=%02x%02x%02x anteil=%d fg=%02x%02x%02x "
               "kandidaten=%d bester=%d x0=%d x1=%d n=%d"
-              % (int(k * 100), grund[0], grund[1], grund[2],
+              % (int(k * 100), reason_2[0], reason_2[1], reason_2[2],
                  100 * anz // ges, fg[0], fg[1], fg[2], len(kand),
-                 int(kontrast(fg, best) * 100), opt["x0"],
+                 int(contrast_2(fg, best) * 100), opt["x0"],
                  min(opt["x1"], im.size[0]), len(px)))
         return 0
 

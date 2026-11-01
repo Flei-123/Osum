@@ -60,7 +60,7 @@ def read_ppm(path):
     return w, h, d[at:]
 
 
-class Bild:
+class Image_:
     def __init__(self, path):
         self.w, self.h, self.px = read_ppm(path)
 
@@ -75,7 +75,7 @@ def main(argv):
     if len(argv) < 4:
         print(__doc__)
         return 2
-    bild = Bild(argv[1])
+    image = Image_(argv[1])
     txt = open(argv[2], "rb").read().decode("latin1").splitlines()
     wx, wy = (int(v) for v in argv[3].split(","))
 
@@ -106,7 +106,7 @@ def main(argv):
     farben = set()
     for y in range(gy + 2, gy + gh - 2, 3):
         for x in range(gx + 2, gx + gw - 2, 7):
-            c = bild.at(cx + x, cy + y)
+            c = image.at(cx + x, cy + y)
             if c:
                 farben.add(c)
     print("Flaeche %dx%d an (%d,%d): %d verschiedene Farben"
@@ -118,12 +118,12 @@ def main(argv):
     counter = {}
     for y in range(gy + 2, gy + gh - 2):
         for x in range(gx + 2, gx + gw - 2, 3):
-            c = bild.at(cx + x, cy + y)
+            c = image.at(cx + x, cy + y)
             if c:
                 counter[c] = counter.get(c, 0) + 1
-    grund = max(counter, key=counter.get)
+    reason = max(counter, key=counter.get)
     print("Grundfarbe %s (%d von %d Punkten)"
-          % (grund, counter[grund], sum(counter.values())))
+          % (reason, counter[reason], sum(counter.values())))
 
     if not values_2:
         print("no gcpu values (did the program run without `melde`?)")
@@ -137,8 +137,8 @@ def main(argv):
             py_ = gy + 1 + innen - min(v, 1000) * innen // 1000
             for dy in (-1, 0, 1, 2):
                 for dx in (0, 1):
-                    c = bild.at(cx + px_ + dx, cy + py_ + dy)
-                    if c and c != grund:
+                    c = image.at(cx + px_ + dx, cy + py_ + dy)
+                    if c and c != reason:
                         hit += 1
                         break
                 else:

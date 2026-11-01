@@ -35,10 +35,10 @@ sys.path.insert(0, HIER)
 import icons as iconmod  # noqa: E402
 
 
-def ppm(pfad):
-    d = open(pfad, "rb").read()
+def ppm(path_2):
+    d = open(path_2, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("kein P6-PPM: %s" % pfad)
+        raise SystemExit("kein P6-PPM: %s" % path_2)
     felder = []
     at = 2
     while len(felder) < 3:
@@ -68,12 +68,12 @@ def main(argv):
                                        argv[4], argv[5])
     nicht = "--nicht" in argv
     farben = iconmod.schema_read(schema)
-    palette, zeilen = symmod.lies(zeichnung)
+    palette, zeilen = symmod.read_2(zeichnung)
     w, h, roh = ppm(screen)
     deckend = 0
     wrong = 0
-    for r, zeile in enumerate(zeilen):
-        for c, char in enumerate(zeile):
+    for r, line_3 in enumerate(zeilen):
+        for c, char in enumerate(line_3):
             soll = palette[char]
             if soll is None:
                 continue

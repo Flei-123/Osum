@@ -28,14 +28,14 @@ def inhalt_von(roh):
     return s
 
 
-PFAD = re.compile(r'(?<![A-Za-z0-9_])/[A-Za-z0-9_./+-]+')
+PATH = re.compile(r'(?<![A-Za-z0-9_])/[A-Za-z0-9_./+-]+')
 
 
 FLAGGE = re.compile(r'(?<![A-Za-z0-9_-])--[a-z][a-z0-9-]*')
 
 
-def ohne_pfade(t):
-    t = PFAD.sub(lambda m: ' ' * len(m.group(0)), t)
+def without_pfade(t):
+    t = PATH.sub(lambda m: ' ' * len(m.group(0)), t)
     return FLAGGE.sub(lambda m: ' ' * len(m.group(0)), t)
 
 
@@ -63,11 +63,11 @@ def quelldateien(wurzel):
 
 def funde(wurzel):
     aus = []
-    for pfad in sorted(quelldateien(wurzel)):
-        rel = os.path.relpath(pfad, wurzel).replace(os.sep, '/')
-        txt = open(pfad, encoding='utf-8').read()
+    for path_2 in sorted(quelldateien(wurzel)):
+        rel = os.path.relpath(path_2, wurzel).replace(os.sep, '/')
+        txt = open(path_2, encoding='utf-8').read()
         zeilen = txt.split('\n')
-        fenster = ('import wlib' in txt) or ('import wlibc' in txt)
+        window_2 = ('import wlib' in txt) or ('import wlibc' in txt)
         kern = not rel.startswith('kernel/user/')
         for nr, z in enumerate(zeilen, 1):
             if z.lstrip().startswith('//'):
@@ -81,18 +81,18 @@ def funde(wurzel):
             else:
                 for m in STR.finditer(code):
                     paare.append(('-', 0, m.group(0)[1:-1], False))
-            for name, breite, roh, fest in paare:
+            for name, width_2, roh, fest in paare:
                 inhalt = inhalt_von(roh)
-                if not translit.finde(ohne_pfade(inhalt)):
+                if not translit.finde(without_pfade(inhalt)):
                     continue
-                kl = klasse(name, inhalt, zeilen, nr, code, fenster, kern,
+                kl = klasse(name, inhalt, zeilen, nr, code, window_2, kern,
                             fest)
-                draht = DRAHT.search(z) is not None
-                if draht:
+                wire_2 = WIRE.search(z) is not None
+                if wire_2:
                     kl = 'MARKE'
-                aus.append(dict(datei=rel, zeile=nr, klasse=kl, name=name,
-                                draht=draht,
-                                breite=breite, inhalt=inhalt, roh=roh,
+                aus.append(dict(file_2=rel, line_3=nr, klasse=kl, name=name,
+                                wire_2=wire_2,
+                                width_2=width_2, inhalt=inhalt, roh=roh,
                                 stamm=[s for s, _ in
                                        translit.finde(inhalt)],
                                 ersatz=[e for _, e in
@@ -100,7 +100,7 @@ def funde(wurzel):
     return aus
 
 
-DRAHT = re.compile(r'//\s*DRAHT\b')
+WIRE = re.compile(r'//\s*DRAHT\b')
 FNKOPF = re.compile(r'^(?:pub\s+)?fn\s')
 
 
@@ -136,7 +136,7 @@ def stellen(zeilen, name, ausser, fest):
     return aus
 
 
-def klasse(name, inhalt, zeilen, nr, code, fenster, kern, fest):
+def klasse(name, inhalt, zeilen, nr, code, window_2, kern, fest):
     if sieht_aus_wie_name(inhalt):
         return 'MARKE'
     benutzt = stellen(zeilen, name, nr, fest) if name != '-' else [code]
@@ -149,9 +149,9 @@ def klasse(name, inhalt, zeilen, nr, code, fenster, kern, fest):
             r'(?:sag|sagn|kv|kvs|kvt|say_line|h_claim|emit|say|say_kt|say_kv)\s*\(\s*\(?\s*&%s\s*\['
             % re.escape(name))
         feld = any(wieerst.search(z) for z in benutzt)
-    if fenster or kern or feld:
+    if window_2 or kern or feld:
         if not benutzt:
-            return 'MITSCHNITT' if (fenster or kern) else 'SICHTBAR'
+            return 'MITSCHNITT' if (window_2 or kern) else 'SICHTBAR'
         for z in benutzt:
             if not TRACE.search(z):
                 return 'SICHTBAR'
@@ -165,8 +165,8 @@ def marken(wurzel):
     for r in funde(wurzel):
         if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('draht'):
             continue
-        pfad = os.path.join(wurzel, r['datei'])
-        txt = open(pfad, encoding='utf-8').read()
+        path_2 = os.path.join(wurzel, r['datei'])
+        txt = open(path_2, encoding='utf-8').read()
         zeilen = txt.split('\n')
         fest = re.match(r'^\s*(?:static|const)\b',
                         zeilen[r['zeile'] - 1]) is not None

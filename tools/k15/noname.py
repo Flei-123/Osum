@@ -62,18 +62,18 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    pfad, name = sys.argv[1], sys.argv[2]
-    roh = open(pfad, encoding="utf-8", errors="replace").read()
+    path_2, name = sys.argv[1], sys.argv[2]
+    roh = open(path_2, encoding="utf-8", errors="replace").read()
     code = without_anmerkungen(roh)
     if name in code:
-        for nr, zeile in enumerate(code.split("\n"), 1):
-            if name in zeile:
+        for nr, line_3 in enumerate(code.split("\n"), 1):
+            if name in line_3:
                 print("%s:%d: '%s' is in the code: %s"
-                      % (pfad, nr, name, zeile.strip()[:80]))
+                      % (path_2, nr, name, line_3.strip()[:80]))
                 return 1
     inkomm = name in roh and name not in code
     print("'%s' is not in the code of %s%s"
-          % (name, pfad, " (but in a remark)" if inkomm else ""))
+          % (name, path_2, " (but in a remark)" if inkomm else ""))
     return 0
 
 

@@ -61,22 +61,22 @@ def oktette(roh: str) -> bytes:
     return bytes(out)
 
 
-def datei(pfad: str) -> int:
-    alt = open(pfad, "r", encoding="utf-8").read()
+def file(path_2: str) -> int:
+    alt = open(path_2, "r", encoding="utf-8").read()
     aus = []
     n = 0
-    for zeile in alt.split("\n"):
-        m = LINE.match(zeile)
+    for line_2 in alt.split("\n"):
+        m = LINE.match(line_2)
         if not m:
-            aus.append(zeile)
+            aus.append(line_2)
             continue
         text = m.group("text")
-        laenge = len(oktette(text)) + 1
-        aus.append('%s%d%s"%s\\0"%s' % (m.group("kopf"), laenge,
+        len_ = len(oktette(text)) + 1
+        aus.append('%s%d%s"%s\\0"%s' % (m.group("kopf"), len_,
                                         m.group("mitte"), text,
                                         m.group("rest")))
         n += 1
-    open(pfad, "w", encoding="utf-8").write("\n".join(aus))
+    open(path_2, "w", encoding="utf-8").write("\n".join(aus))
     return n
 
 
@@ -85,7 +85,7 @@ def main() -> int:
         print(__doc__)
         return 2
     for p in sys.argv[1:]:
-        print("pad.py: %s: %d Textkonstanten nachgerechnet" % (p, datei(p)))
+        print("pad.py: %s: %d Textkonstanten nachgerechnet" % (p, file(p)))
     return 0
 
 

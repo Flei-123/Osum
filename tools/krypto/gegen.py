@@ -64,7 +64,7 @@ S_SALT, S_WRAPPED, S_MAC = 0x10, 0x30, 0x70
 SALT_LEN, KEY_LEN, WRAP_LEN = 32, 64, 96
 
 
-def fehlt():
+def missing():
     """Sagt, WAS fehlt -- nicht einfach 'geht nicht'."""
     was = []
     if argon2ll is None:
@@ -81,24 +81,24 @@ def kdf(pw, salt, t, m, p, n=WRAP_LEN):
         parallelism=p, hash_len=n, type=argon2ll.Type.ID, version=19)
 
 
-def xts(key, tweak, daten, ent):
+def xts(key, tweak, data_2, ent):
     c = Cipher(algorithms.AES(key), modes.XTS(tweak))
     k = c.decryptor() if ent else c.encryptor()
-    return k.update(daten) + k.finalize()
+    return k.update(data_2) + k.finalize()
 
 
 def tweak_of(lba):
     return struct.pack("<Q", lba) + b"\0" * 8
 
 
-def kopf_sum(hdr):
+def header_sum(hdr):
     """SHA-256 ueber den Kopf, das Summenfeld als Nullen gerechnet."""
     b = bytearray(hdr[:HDR_SECTORS * SECTOR])
     b[H_SUM:H_SUM + 32] = b"\0" * 32
     return hashlib.sha256(bytes(b)).digest()
 
 
-def kopf_lesen(hdr):
+def header_read(hdr):
     """Den Kopfsatz zerlegen. Gibt ein dict oder wirft."""
     if hdr[:len(MAGIC)] != MAGIC:
         raise ValueError("keine OSUMCRYPT-Kennung")
@@ -110,7 +110,7 @@ def kopf_lesen(hdr):
         "first": struct.unpack_from("<Q", hdr, H_FIRST)[0],
         "count": struct.unpack_from("<Q", hdr, H_COUNT)[0],
     }
-    k["sum_ok"] = kopf_sum(hdr) == hdr[H_SUM:H_SUM + 32]
+    k["sum_ok"] = header_sum(hdr) == hdr[H_SUM:H_SUM + 32]
     k["slots"] = []
     for i in range(SLOTS):
         s = hdr[SLOT_BASE + i * SLOT_SIZE:SLOT_BASE + (i + 1) * SLOT_SIZE]
@@ -127,7 +127,7 @@ def kopf_lesen(hdr):
     return k
 
 
-def platz_auf(sl, pw):
+def space_auf(sl, pw):
     """Einen Schluesselplatz mit fremdem Werkzeug aufmachen."""
     if not sl["used"]:
         return None
@@ -139,18 +139,18 @@ def platz_auf(sl, pw):
 
 
 def hauptschluessel(hdr, pw):
-    k = kopf_lesen(hdr)
+    k = header_read(hdr)
     for sl in k["slots"]:
-        mk = platz_auf(sl, pw)
+        mk = space_auf(sl, pw)
         if mk is not None:
             return k, mk, sl["i"]
     return k, None, -1
 
 
 
-def cmd_lies(pfad, pw):
+def cmd_read(path_2, pw):
     """Was Osum geschrieben hat, mit fremdem Werkzeug aufmachen."""
-    d = open(pfad, "rb").read()
+    d = open(path_2, "rb").read()
     hdr = d[:HDR_SECTORS * SECTOR]
     k, mk, wo = hauptschluessel(hdr, pw)
     print("kopf: kennung=1 fassung=%d chiffre=%d kdf=%d sektor=%d"
@@ -174,7 +174,7 @@ def cmd_lies(pfad, pw):
 
 
 
-def cmd_schreib(pfad, pw, t=1, m=64, p=1, bloecke=8192):
+def cmd_write(path_2, pw, t=1, m=64, p=1, bloecke=8192):
     """EINEN TRAEGER ANLEGEN, DEN NUR DIESES PROGRAMM GESCHRIEBEN HAT.
 
     Das ist die schaerfere Richtung der Gegenprobe: Osum muss einen
@@ -206,18 +206,18 @@ def cmd_schreib(pfad, pw, t=1, m=64, p=1, bloecke=8192):
     hdr[sl + S_SALT:sl + S_SALT + SALT_LEN] = salt
     hdr[sl + S_WRAPPED:sl + S_WRAPPED + KEY_LEN] = wrapped
     hdr[sl + S_MAC:sl + S_MAC + 32] = mac
-    hdr[H_SUM:H_SUM + 32] = kopf_sum(bytes(hdr))
+    hdr[H_SUM:H_SUM + 32] = header_sum(bytes(hdr))
 
-    with open(pfad, "wb") as f:
+    with open(path_2, "wb") as f:
         f.write(bytes(hdr))
         f.truncate(bloecke * SECTOR)
-    print("schrieb: %s bloecke=%d t=%d m=%d p=%d" % (pfad, bloecke, t, m, p))
+    print("schrieb: %s bloecke=%d t=%d m=%d p=%d" % (path_2, bloecke, t, m, p))
     print("schluessel: %s" % mk.hex())
     return 0
 
 
 
-def cmd_roh(pfad):
+def cmd_roh(path_2):
     """Das Rohgeraet ansehen: steht dort irgendetwas Erkennbares?
 
     Gemessen wird dreierlei, und die Unterscheidung ist wichtig:
@@ -228,9 +228,9 @@ def cmd_roh(pfad):
     import collections
     import math
     import re
-    d = open(pfad, "rb").read()
-    daten = d[HDR_SECTORS * SECTOR:]
-    n = len(daten) // SECTOR
+    d = open(path_2, "rb").read()
+    data_2 = d[HDR_SECTORS * SECTOR:]
+    n = len(data_2) // SECTOR
 
     sig = {
         b"OSUM-OFS": "OFS-Superblock",
@@ -241,12 +241,12 @@ def cmd_roh(pfad):
     }
     print("roh: sektoren=%d" % n)
     for pat, name in sig.items():
-        print("roh: sig %s = %d" % (name, daten.count(pat)))
+        print("roh: sig %s = %d" % (name, data_2.count(pat)))
 
     empty = 0
     ents = []
     for i in range(n):
-        s = daten[i * SECTOR:(i + 1) * SECTOR]
+        s = data_2[i * SECTOR:(i + 1) * SECTOR]
         if s == b"\0" * SECTOR:
             empty += 1
             continue
@@ -258,7 +258,7 @@ def cmd_roh(pfad):
         print("raw: entropy_min=%.3f mean=%.3f below7=%d"
               % (min(ents), sum(ents) / len(ents),
                  sum(1 for e in ents if e < 7.0)))
-    lang = [r for r in re.findall(rb"[ -~]{16,}", daten)]
+    lang = [r for r in re.findall(rb"[ -~]{16,}", data_2)]
     print("roh: textfolgen16=%d" % len(lang))
     return 0
 
@@ -269,8 +269,8 @@ def cmd_vektoren(orakel):
 
     Gibt eine Zeile je Gruppe: "<name> <gut>/<gesamt>".
     """
-    def frag(zeilen):
-        r = subprocess.run([orakel], input="\n".join(zeilen) + "\n",
+    def frag(lines):
+        r = subprocess.run([orakel], input="\n".join(lines) + "\n",
                            capture_output=True, text=True, timeout=1800)
         return r.stdout.strip().split("\n")
 
@@ -424,11 +424,11 @@ def _ofs_leser(blk):
                         out.append(p)
         return sz, out
 
-    def datei(n):
+    def file(n):
         sz, bl = ptrs(inode(n))
         return b"".join(blk(b) for b in bl)[:sz]
 
-    def wurzel():
+    def root():
         sz, bl = ptrs(inode(1))
         raw = b"".join(blk(b) for b in bl)[:sz]
         out = []
@@ -442,11 +442,11 @@ def _ofs_leser(blk):
                 out.append((n, nm))
         return out
 
-    return wurzel, datei
+    return root, file
 
 
-def cmd_baum(pfad, pw):
-    d = open(pfad, "rb").read()
+def cmd_tree(path_2, pw):
+    d = open(path_2, "rb").read()
     k, mk, wo = hauptschluessel(d[:HDR_SECTORS * SECTOR], pw)
     if mk is None:
         print("baum: auf=0")
@@ -457,9 +457,9 @@ def cmd_baum(pfad, pw):
         return xts(mk, tweak_of(i),
                    d[(erst + i) * SECTOR:(erst + i + 1) * SECTOR], True)
 
-    wurzel, datei = _ofs_leser(blk)
+    root, file = _ofs_leser(blk)
     laengen = [100, 700, 5000, 40000]
-    eintraege = sorted(wurzel(), key=lambda x: x[1])
+    eintraege = sorted(root(), key=lambda x: x[1])
     print("tree: up=1 slot=%d files=%d" % (wo, len(eintraege)))
     gut = 0
     for n, nm in eintraege:
@@ -471,7 +471,7 @@ def cmd_baum(pfad, pw):
         ln = laengen[i]
         soll = hashlib.sha256(
             bytes(((i * 37 + q * 7 + 3) & 255) for q in range(ln))).hexdigest()
-        ist = hashlib.sha256(datei(n)).hexdigest()
+        ist = hashlib.sha256(file(n)).hexdigest()
         if soll == ist:
             gut += 1
         print("baum: sha %s = %s %s" % (nm, ist, "OK" if soll == ist else
@@ -484,22 +484,22 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    was = fehlt()
+    was = missing()
     if was:
         print("gegen.py: missing: %s" % ", ".join(was))
         return 3
     b = sys.argv[1]
     if b == "lies":
-        return cmd_lies(sys.argv[2], sys.argv[3].encode())
+        return cmd_read(sys.argv[2], sys.argv[3].encode())
     if b == "schreib":
         a = sys.argv[4:]
-        return cmd_schreib(sys.argv[2], sys.argv[3].encode(),
+        return cmd_write(sys.argv[2], sys.argv[3].encode(),
                            int(a[0]) if len(a) > 0 else 1,
                            int(a[1]) if len(a) > 1 else 64,
                            int(a[2]) if len(a) > 2 else 1,
                            int(a[3]) if len(a) > 3 else 8192)
     if b == "baum":
-        return cmd_baum(sys.argv[2], sys.argv[3].encode())
+        return cmd_tree(sys.argv[2], sys.argv[3].encode())
     if b == "roh":
         return cmd_roh(sys.argv[2])
     if b == "vektoren":

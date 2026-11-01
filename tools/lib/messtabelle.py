@@ -11,25 +11,25 @@ BILANZ = re.compile(r'^(ALLE (\d+) ABSCHNITTE BESTANDEN, (\d+) Zusagen'
                     r'|(\d+) Abschnitte bestanden, (\d+) FEHLGESCHLAGEN \((\d+) Zusagen\))')
 
 
-def lies(pfad):
+def read_2(path_2):
     """-> {name: {ms, accel, titel, ok, zusagen}}, gesamt_s, bilanz"""
     ab = {}
-    titel = None
-    offen = {"titel": None, "fehler": False, "zusagen": None}
+    title_2 = None
+    open_ = {"titel": None, "fehler": False, "zusagen": None}
     gesamt = None
     bilanz = None
-    for zeile in open(pfad, errors="replace"):
-        z = zeile.rstrip("\n")
+    for line_3 in open(path_2, errors="replace"):
+        z = line_3.rstrip("\n")
         m = HEADER.match(z)
         if m:
-            offen = {"titel": m.group(1), "fehler": False, "zusagen": None}
+            open_ = {"titel": m.group(1), "fehler": False, "zusagen": None}
             continue
         m = ZUS.match(z)
         if m:
-            offen["zusagen"] = int(m.group(2))
+            open_["zusagen"] = int(m.group(2))
             continue
         if FAIL.match(z):
-            offen["fehler"] = True
+            open_["fehler"] = True
             continue
         m = TIME.match(z)
         if m:
@@ -37,9 +37,9 @@ def lies(pfad):
             ab[name] = {
                 "ms": s * 1000 + ms,
                 "accel": accel or "tcg-fest",
-                "titel": offen["titel"] or name,
-                "ok": not offen["fehler"],
-                "zusagen": offen["zusagen"],
+                "titel": open_["titel"] or name,
+                "ok": not open_["fehler"],
+                "zusagen": open_["zusagen"],
             }
             continue
         m = re.match(r'^SEKUNDEN=(\d+)$|^RC=(\d+) SEKUNDEN=(\d+)$', z)
@@ -51,9 +51,9 @@ def lies(pfad):
     return ab, gesamt, bilanz
 
 
-def short(titel, name):
+def short(title_2, name):
     """Die Abschnittsnummer und ein paar Worte."""
-    m = re.match(r'^(\d+)\.\s*(.{0,42})', titel)
+    m = re.match(r'^(\d+)\.\s*(.{0,42})', title_2)
     if not m:
         return name
     return f"{m.group(1):>2}. {m.group(2).strip()}"
@@ -63,8 +63,8 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    a, a_s, a_b = lies(sys.argv[1])
-    b, b_s, b_b = lies(sys.argv[2])
+    a, a_s, a_b = read_2(sys.argv[1])
+    b, b_s, b_b = read_2(sys.argv[2])
 
     names = list(a.keys()) + [n for n in b if n not in a]
 
@@ -94,8 +94,8 @@ def main():
             acc = f" ({e['accel']})" if e["accel"] not in ("kvm", "tcg", "?") else ""
             return f"{mark}, {z}{acc}"
 
-        titel = short((ea or eb)["titel"], n)
-        print(f"| {titel} (`{n}`) | {ta} | {tb} | {fak} | {erg(ea)} | {erg(eb)} |")
+        title_2 = short((ea or eb)["titel"], n)
+        print(f"| {title_2} (`{n}`) | {ta} | {tb} | {fak} | {erg(ea)} | {erg(eb)} |")
         if ea and eb and ea["ok"] and not eb["ok"]:
             rot.append(n)
 
