@@ -84,7 +84,7 @@ grep -q 'IR_XUSB2PR: u64 = 0xD0' kernel/drv/usb/xhci.fi \
     && grep -q 'IR_USB2PRM: u64 = 0xD4' kernel/drv/usb/xhci.fi \
     && ok "XUSB2PR 0xD0 / USB2PRM 0xD4 as in Linux pci-quirks.c" \
     || bad "the routing registers are not the ones Linux uses"
-grep -q '(serial.in8(STATUS_PORT) as u64 & 0x21) != 0x01' kernel/drv/hid/kbd.fi \
+grep -q '(st & 0x21) != 0x01' kernel/drv/hid/kbd.fi \
     && ok "kbd.irq reads 0x60 only with a full output buffer (no ghost byte)" \
     || bad "kbd.irq does not check the 8042 status"
 grep -q 'EYE ' lib/icons.fi && grep -q 'EYE_OFF' lib/icons.fi \
@@ -369,20 +369,33 @@ if [ -z "$POW" ] && [ -n "$NET" ]; then
 fi
 UHR=$(rect_of 1 1)
 info "clock: $UHR"; info "network: $NET"; info "power: $POW"
-if [ -n "$UHR" ] && [ "$(fld "$NET" x)" -gt 900 ] 2>/dev/null && [ "$(fld "$POW" y)" -gt 650 ] 2>/dev/null && [ "$(fld "$POW" y)" -lt 712 ] 2>/dev/null; then
-    ok "clock, network and power sit in the bottom right corner (above the taskbar strip)"
+if [ -n "$UHR" ] && [ "$(fld "$NET" x)" -gt 900 ] 2>/dev/null && [ "$(fld "$POW" y)" -gt 650 ] 2>/dev/null && [ "$(fld "$POW" y)" -lt 764 ] 2>/dev/null; then
+    ok "clock, network and power sit in the bottom right corner (32 px edge margin)"
 else
     bad "the quick access is not in the bottom right corner"
 fi
+rect_count() { grep -aoE "glogin: rect id=$1 kind=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | wc -l; }
+rect_after() {
+    local k=0 id=$1 before=$2
+    while [ $k -lt 40 ]; do
+        [ "$(rect_count "$id")" -gt "$before" ] && break
+        sleep 0.2; k=$((k + 1))
+    done
+    grep -aoE "glogin: rect id=$id kind=[0-9]+ x=[0-9]+ y=[0-9]+ w=[0-9]+ h=[0-9]+" "$D/serial.txt" | tail -1
+}
+RC=$(rect_count 12)
 zeig $(( $(fld "$NET" x) + 16 )) $(( $(fld "$NET" y) + 16 )); klick
 seen 'glogin: schnell=1' && ok "a click on the network icon opens the network text" \
     || bad "'glogin: schnell=1' missing"
 mon "screendump $D/netz.ppm" "sleep 1"; png "$D/netz.ppm" "$BEL/netz.png"
+POW=$(rect_after 12 "$RC")
+RC=$(rect_count 12)
 zeig $(( $(fld "$POW" x) + 16 )) $(( $(fld "$POW" y) + 16 )); klick
 seen 'glogin: schnell=2' && ok "a click on the power icon offers 'Herunterfahren' and 'Neu starten'" \
     || bad "'glogin: schnell=2' missing"
 mon "screendump $D/strom.ppm" "sleep 1"; png "$D/strom.ppm" "$BEL/strom.png"
-klick
+POW=$(rect_after 12 "$RC")
+zeig $(( $(fld "$POW" x) + 16 )) $(( $(fld "$POW" y) + 16 )); klick
 seen 'glogin: schnell=0' && ok "a second click closes it again (nothing is switched off)" \
     || bad "'glogin: schnell=0' missing"
 grep -aq 'glogin: energie' "$D/serial.txt" && bad "GEGENPROBE: the power icon alone switched something" \

@@ -915,13 +915,13 @@ while read -r nm kx ky kw kh; do
     [ -n "${nm:-}" ] || continue
     KARTN=$((KARTN+1))
     L0=$(python3 tools/themestore/glascheck.py linien \
-         "$SHOTS/glas-radius-0.png" "$kx" "$ky" "$kw" "$kh" 2>&1 | tail -1)
+         "$SHOTS/glas-radius-0.png" "$kx" "$((ky-4))" "$kw" "$((kh+8))" 2>&1 | tail -1)
     L24=$(python3 tools/themestore/glascheck.py linien \
-          "$SHOTS/glas-radius-24.png" "$kx" "$ky" "$kw" "$kh" 2>&1 | tail -1)
+          "$SHOTS/glas-radius-24.png" "$kx" "$((ky-4))" "$kw" "$((kh+8))" 2>&1 | tail -1)
     echo "        $nm  Radius 0: $L0   Radius 24: $L24"
     N0=$(printf '%s' "$L0" | grep -oE 'linien=[0-9]+' | cut -d= -f2)
     N24=$(printf '%s' "$L24" | grep -oE 'linien=[0-9]+' | cut -d= -f2)
-    num "in der Karte $nm stehen waagerechte Linien" "${N0:-0}" ge 1
+    num "in der Karte $nm stehen waagerechte Linien" "${N0:-0}" ge 2
     same "und bei Radius 24 sind es in $nm genauso viele (keine doppelte Kante)" \
         "${N0:-x}" "${N24:-y}"
 done <<EOF
@@ -1428,12 +1428,12 @@ num "und genau eine entscheidet, wie deckend ein Punkt ist" "$GM" eq 1
 #
 PM0=$(grep -aoE '^const PLATE_MARK: u64 = 0x[0-9A-Fa-f]+' kernel/ui/wm/wmglass.fi \
       | grep -oE '0x[0-9A-Fa-f]+')
-PM3=$(grep -aoE '^const PLATTE: u64 = 0x[0-9A-Fa-f]+' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
+PM3=$(grep -aoE '^const PLATE: u64 = 0x[0-9A-Fa-f]+' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi) \
       | grep -oE '0x[0-9A-Fa-f]+')
 same "die Marke der Textplatte ist in Ring 0 und Ring 3 dieselbe Zahl" \
     "${PM0:-0}" "${PM3:-1}"
 num "und genau eine Stelle in Ring 3 setzt sie" \
-    "$(grep -ac '^fn platte(' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))" eq 1
+    "$(grep -ac '^fn plate(' <(bash tools/structure/catprog.sh kernel/user/wlibc.fi))" eq 1
 num "und genau eine in Ring 0 loest sie auf" \
     "$({ grep -ac '== (PLATE_MARK >> 24)' kernel/ui/wm/wmglass.fi || true; })" eq 1
 #
@@ -1491,7 +1491,7 @@ same "der Selbsttest der Mischung und des Weichzeichners laeuft durch" \
 
 bash tools/themestore/build.sh "$TMPD/ruhe" extra='einst' tbalpha=70 blur=0 \
     wallpaper=hell uitrace=yes keep=yes > "$TMPD/ruhe.log" 2>&1
-bash tools/themestore/build.sh "$TMPD/zug" extra='einst' tbalpha=70 blur=0 \
+bash tools/themestore/build.sh "$TMPD/zug" extra='einst wighalt=60' tbalpha=70 blur=0 \
     wallpaper=hell uitrace=yes keep=yes click="400,10>400,600>400,10" \
     > "$TMPD/zug.log" 2>&1
 ZD=$(python3 tools/themestore/glascheck.py diff "$TMPD/zug/desktop.png" \
