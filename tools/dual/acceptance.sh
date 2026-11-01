@@ -31,9 +31,9 @@ bash tools/dual/fremdplatte.sh "$OUT/platte.img" 512 | sed 's/^/   /'
 [ -f "$OUT/platte.img" ] || { echo "the disk was not built" >&2; exit 1; }
 
 VOR_ESP=$(esp_summe   "$OUT/platte.img")
-VOR_DAT=$(daten_summe "$OUT/platte.img")
+BEFORE_DAT=$(daten_summe "$OUT/platte.img")
 echo "   VORHER  esp   $VOR_ESP"
-echo "   BEFORE  data $VOR_DAT"
+echo "   BEFORE  data $BEFORE_DAT"
 
 sgdisk -p "$OUT/platte.img" > "$OUT/gpt-vorher.txt" 2>&1
 grep -qE '^ +1 +2048' "$OUT/gpt-vorher.txt" && ok "the foreign disk carries an ESP" \
@@ -85,14 +85,14 @@ grep -qa 'installer: done' "$OUT/ser.txt" \
 titel "3. DIE FREMDEN PARTITIONEN -- BYTEWEISE UNVERAENDERT?"
 # ==================================================================
 NACH_ESP=$(esp_summe   "$OUT/platte.img")
-NACH_DAT=$(daten_summe "$OUT/platte.img")
+AFTER_DAT=$(daten_summe "$OUT/platte.img")
 echo "   NACHHER esp   $NACH_ESP"
-echo "   AFTER   data $NACH_DAT"
+echo "   AFTER   data $AFTER_DAT"
 
-if [ "$VOR_DAT" = "$NACH_DAT" ]; then
+if [ "$BEFORE_DAT" = "$AFTER_DAT" ]; then
     ok "THE FOREIGN DATA PARTITION IS UNCHANGED BYTE FOR BYTE"
 else
-    bad "the foreign data partition was changed -- ${VOR_DAT:0:16}… -> ${NACH_DAT:0:16}…"
+    bad "the foreign data partition was changed -- ${BEFORE_DAT:0:16}… -> ${AFTER_DAT:0:16}…"
 fi
 
 if [ "$VOR_ESP" = "$NACH_ESP" ]; then

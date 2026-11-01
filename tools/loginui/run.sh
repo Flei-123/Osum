@@ -316,7 +316,7 @@ for t in tab tab tab tab tab tab; do
     KETTE="$KETTE$r "
 done
 WANT="16 $BTNID $OTHID $(fld "$NET0" id) $(fld "$POW0" id) $PWID "
-[ "$KETTE" = "$WANT" ] && ok "Tab chain in the picture: $KETTE(Auge, Anmelden, Anderer Benutzer, Netzwerk, Ein/Aus, Kennwort)" \
+[ "$KETTE" = "$WANT" ] && ok "Tab chain in the picture: $KETTE(eye, sign in, other user, network, power, password)" \
     || bad "Tab chain in the picture '$KETTE', expected '$WANT'"
 # 3. THE EYE, with the MOUSE (1: the mouse works on the login screen)
 EX=$(eyerect)

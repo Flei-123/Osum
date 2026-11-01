@@ -24,7 +24,7 @@ PCT=$(python3 -c "print('%.1f' % (100.0*$DIFF/$S_MIT))")
 note "Abbild mit Tunnel  $S_MIT Oktette"
 note "Abbild ohne Tunnel $S_OHNE Oktette"
 [ "$DIFF" -gt 0 ] \
-    && ok "the tunnel costs $DIFF octets of image ($PCT %) -- and --ohne-tunnel removes them entirely" \
+    && ok "the tunnel costs $DIFF octets of image ($PCT %) -- and the no-tunnel switch removes them entirely" \
     || bad "the image without tunnel is not smaller ($DIFF)"
 
 LANG_D="$TMPD/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

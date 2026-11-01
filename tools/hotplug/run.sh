@@ -78,7 +78,7 @@ python3 tools/osum/mkfs.py build "$ARB/root.img" "$BLOCKS" \
     && ok "the root disk is ready: $(tail -1 "$ARB/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$ARB/mkfs.log" | head -5; }
 
-stick_bauen() { # <datei> <name> <inhalt>
+stick_bauen() { # <file_name> <name> <content>
     local img=$1 name=$2 text=$3
     rm -f "$img" "$img.part"
     dd if=/dev/zero of="$img" bs=1M count=48 status=none
@@ -251,18 +251,18 @@ hat_nicht "$S" "panic" "kein Absturz am zweiten Stick"
 hat_nicht "$S" "EXCEPTION" "keine Ausnahme bei zwei Sticks"
 
 OFF=$((2048*512))
-zwei_pruef() { # <abbild> <datei> <inhalt> <wie>
-    local img=$1 datei=$2 inhalt=$3 wie=$4
-    if mdir -i "$img@@$OFF" "::$datei" > "$ARB/mdir-$wie.txt" 2>&1; then
-        mtype -i "$img@@$OFF" "::$datei" > "$ARB/inh-$wie.txt" 2>/dev/null
-        if grep -qa "$inhalt" "$ARB/inh-$wie.txt"; then
-            ok "THE HOST finds $datei on $wie, content complete ($inhalt)"
+zwei_pruef() { # <abbild> <file_name> <content> <how>
+    local img=$1 file_name=$2 content=$3 how=$4
+    if mdir -i "$img@@$OFF" "::$file_name" > "$ARB/mdir-$how.txt" 2>&1; then
+        mtype -i "$img@@$OFF" "::$file_name" > "$ARB/inh-$how.txt" 2>/dev/null
+        if grep -qa "$content" "$ARB/inh-$how.txt"; then
+            ok "THE HOST finds $file_name on $how, content complete ($content)"
         else
-            bad "$datei is on $wie, but the content is wrong: $(head -c 80 "$ARB/inh-$wie.txt")"
+            bad "$file_name is on $how, but the content is wrong: $(head -c 80 "$ARB/inh-$how.txt")"
         fi
     else
-        bad "THE HOST does NOT find $datei on $wie"
-        sed 's/^/        /' "$ARB/mdir-$wie.txt" | head -3
+        bad "THE HOST does NOT find $file_name on $how"
+        sed 's/^/        /' "$ARB/mdir-$how.txt" | head -3
     fi
 }
 zwei_pruef "$ARB/stick1.img" a.txt eins-auf-usb0 stick1

@@ -77,22 +77,22 @@ platte() {
 }
 
 gruen() { # NAME BESCHREIBUNG
-    local name=$1 was=$2 log="$TMPD/$1.txt"
+    local name=$1 what=$2 log="$TMPD/$1.txt"
     if [ "$RC" -eq 21 ]; then
-        ok "$was: Beendigungscode 21"
+        ok "$what: Beendigungscode 21"
     else
-        bad "$was: Beendigungscode $RC statt 21"
+        bad "$what: Beendigungscode $RC statt 21"
     fi
     if grep -qa '^kernel: done' "$log"; then
-        ok "$was: bis \"kernel: done\" gekommen"
+        ok "$what: bis \"kernel: done\" gekommen"
     else
-        bad "$was: \"kernel: done\" fehlt"
+        bad "$what: \"kernel: done\" fehlt"
         grep -a -A6 'EXCEPTION' "$log" | head -8 | sed 's/^/          /'
     fi
     if grep -qa 'EXCEPTION' "$log"; then
-        bad "$was: an exception in the run -- $(grep -a -m1 'EXCEPTION' "$log")"
+        bad "$what: an exception in the run -- $(grep -a -m1 'EXCEPTION' "$log")"
     else
-        ok "$was: keine einzige Ausnahme"
+        ok "$what: keine einzige Ausnahme"
     fi
 }
 
@@ -103,15 +103,15 @@ feld() {
 }
 
 zahl() { # BESCHREIBUNG IST OP SOLL
-    local was=$1 ist=${2:-} op=$3 soll=$4
-    if [ -z "$ist" ]; then
-        bad "$was: nichts gemessen (erwartet $op $soll)"
+    local what=$1 actual=${2:-} op=$3 expected=$4
+    if [ -z "$actual" ]; then
+        bad "$what: nichts gemessen (erwartet $op $expected)"
         return
     fi
-    if [ "$ist" "-$op" "$soll" ] 2>/dev/null; then
-        ok "$was: $ist"
+    if [ "$actual" "-$op" "$expected" ] 2>/dev/null; then
+        ok "$what: $actual"
     else
-        bad "$was: $ist, expected $op $soll"
+        bad "$what: $actual, expected $op $expected"
     fi
 }
 
@@ -200,10 +200,10 @@ zahl "4.2 Sektor 4096 traegt 512 mal das Muster 0x5A" "$n5a" eq 512
 
 mismatch=0
 for i in 0 1 2 3 4 5 6 7; do
-    soll=$(( ( i*17 + i*512 ) & 255 ))
-    ist=$(dd if="$TMPD/a.img" bs=512 skip=$((5000+i)) count=1 2>/dev/null \
+    expected=$(( ( i*17 + i*512 ) & 255 ))
+    actual=$(dd if="$TMPD/a.img" bs=512 skip=$((5000+i)) count=1 2>/dev/null \
           | od -An -v -t u1 -N1 | tr -d ' ')
-    [ "${ist:-x}" = "$soll" ] || mismatch=$((mismatch+1))
+    [ "${actual:-x}" = "$expected" ] || mismatch=$((mismatch+1))
 done
 zahl "4.3 alle acht Sektoren ab 5000 tragen ihr EIGENES Muster" "$mismatch" eq 0
 

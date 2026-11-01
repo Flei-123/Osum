@@ -298,9 +298,9 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     su=$(soll 'umlaut-äöü.txt')
     iu=$(shawert "$D" '/mnt/umlaut-äöü.txt')
     if [ -n "$su" ] && [ "$su" = "$iu" ]; then
-        ok "[$name] umlaut-äöü.txt: the name with umlauts is found AND read"
+        ok "[$name] the file with umlauts in its name is found AND read"
     else
-        bad "[$name] umlaut-äöü.txt: SHA-256 differs or the name is not found"
+        bad "[$name] umlaut file: SHA-256 differs or the name is not found"
         printf '        Wirt: %s\n        Osum: %s\n' "$su" "$iu"
     fi
 
@@ -421,7 +421,7 @@ hat "$TMPD/schmutz.txt" "ext4: WARNUNG unsauber ausgehaengt" \
 # ------------------------------------------------- 7b. DIE ABSCHALTBARKEIT
 #
 
-echo "== 7b. switchability (--ohne-ext4 / --ohne-ntfs) =="
+echo "== 7b. switchability (no-ext4 / no-ntfs switches) =="
 
 baue_variante() { # name optionen...
     local name=$1; shift
@@ -444,19 +444,19 @@ num "das Abbild ohne NTFS ist gebaut" "${gr_on:-0}" gt 1000000
 num "das Abbild ohne beide ist gebaut" "${gr_ob:-0}" gt 1000000
 
 if [ "${gr_oe:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
-    ok "--ohne-ext4 saves $(( gr_voll - gr_oe )) octets ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
+    ok "the no-ext4 switch saves $(( gr_voll - gr_oe )) octets ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
 else
-    bad "--ohne-ext4 does NOT make the image smaller"
+    bad "the no-ext4 switch does NOT make the image smaller"
 fi
 if [ "${gr_on:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
-    ok "--ohne-ntfs saves $(( gr_voll - gr_on )) octets ($(( (gr_voll - gr_on) / 1024 )) KiB)"
+    ok "the no-ntfs switch saves $(( gr_voll - gr_on )) octets ($(( (gr_voll - gr_on) / 1024 )) KiB)"
 else
-    bad "--ohne-ntfs does NOT make the image smaller"
+    bad "the no-ntfs switch does NOT make the image smaller"
 fi
 if [ "${gr_ob:-0}" -lt "${gr_oe:-0}" ] && [ "${gr_ob:-0}" -lt "${gr_on:-0}" ] 2>/dev/null; then
-    ok "--ohne-fremdfs saves $(( gr_voll - gr_ob )) octets ($(( (gr_voll - gr_ob) / 1024 )) KiB), more than either alone"
+    ok "the no-foreignfs switch saves $(( gr_voll - gr_ob )) octets ($(( (gr_voll - gr_ob) / 1024 )) KiB), more than either alone"
 else
-    bad "--ohne-fremdfs saves no more than the single switches"
+    bad "the no-foreignfs switch saves no more than the single switches"
 fi
 printf 'voll %s\nohne-ext4 %s\nohne-ntfs %s\nohne-beide %s\n' \
     "$gr_voll" "$gr_oe" "$gr_on" "$gr_ob" > "$TMPD/groessen.txt"
@@ -488,31 +488,31 @@ lauf_mit() { # name kernel zweite kommandozeile
 if [ "${gr_ob:-0}" -gt 1000000 ]; then
     rc=$(lauf_mit ohne-e4 "$TMPD/v-ohne-beide.mb" "$TMPD/ext4-part.img" \
         "osum nokbd vfs script=fremdfs ext4 /dev/hdb1 /mnt")
-    num "[ohne-beide] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
+    num "[without-both] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
     sagt "$TMPD/ohne-e4.txt" mount 0 \
-        "[ohne-beide] ein ext4 wird ABGELEHNT (Dateisystem nicht unterstuetzt)"
+        "[without-both] ein ext4 wird ABGELEHNT (Dateisystem nicht unterstuetzt)"
     if grep -qa '^ext4: ' "$TMPD/ohne-e4.txt"; then
-        bad "[ohne-beide] the ext4 driver reports in -- it is still in the image"
+        bad "[without-both] the ext4 driver reports in -- it is still in the image"
     else
-        ok "[ohne-beide] the ext4 driver reports with no line"
+        ok "[without-both] the ext4 driver reports with no line"
     fi
 
     rc=$(lauf_mit ohne-nt "$TMPD/v-ohne-beide.mb" "$TMPD/ntfs-part.img" \
         "osum nokbd vfs script=fremdfs ntfs /dev/hdb1 /mnt")
-    num "[ohne-beide] derselbe Lauf mit NTFS beendet sich selbst" "$rc" eq 21
+    num "[without-both] derselbe Lauf mit NTFS beendet sich selbst" "$rc" eq 21
     sagt "$TMPD/ohne-nt.txt" mount 0 \
-        "[ohne-beide] ein NTFS wird ABGELEHNT"
+        "[without-both] ein NTFS wird ABGELEHNT"
     if grep -qa '^ntfs: ' "$TMPD/ohne-nt.txt"; then
-        bad "[ohne-beide] the NTFS driver reports in -- it is still in the image"
+        bad "[without-both] the NTFS driver reports in -- it is still in the image"
     else
-        ok "[ohne-beide] the NTFS driver reports with no line"
+        ok "[without-both] the NTFS driver reports with no line"
     fi
 
     rc=$(lauf_mit ohne-ofs "$TMPD/v-ohne-beide.mb" "" \
         "osum nokbd vfs script=ls /bin;echo fertig-ohne")
-    num "[ohne-beide] das System kommt ohne die zwei Treiber hoch" "$rc" eq 21
+    num "[without-both] das System kommt ohne die zwei Treiber hoch" "$rc" eq 21
     hat "$TMPD/ohne-ofs.txt" "fertig-ohne" \
-        "[ohne-beide] und arbeitet auf der eigenen Platte unveraendert weiter"
+        "[without-both] und arbeitet auf der eigenen Platte unveraendert weiter"
 
     rc=$(lauf_mit nur-ntfs "$TMPD/v-ohne-ext4.mb" "$TMPD/ntfs-part.img" \
         "osum nokbd vfs script=fremdfs ntfs /dev/hdb1 /mnt")

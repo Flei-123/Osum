@@ -62,11 +62,11 @@ if [ -n "$BASE" ]; then
     git diff --numstat "$BASE"..dynlader -- kernel/ 2>/dev/null \
         | awk '{printf "   %-22s +%s -%s Zeilen\n", $3, $1, $2}'
     ZU=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' | wc -l)
-    KOM=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
+    COMMENT_N=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
           | sed 's/^+//' | grep -cE '^\s*//')
-    LEER=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
+    EMPTY_N=$(git diff "$BASE"..dynlader -- kernel/ldr/elf.fi | grep '^+' | grep -v '^+++' \
           | sed 's/^+//' | grep -cE '^\s*$')
-    echo "   of which comment: $KOM, empty: $LEER, real CODE: $((ZU - KOM - LEER))"
+    echo "   of which comment: $COMMENT_N, empty: $EMPTY_N, real CODE: $((ZU - COMMENT_N - EMPTY_N))"
 fi
 echo "   Not one line of foreign code in the kernel. No adopted ld.so,"
 echo "   no copied relocation code -- the foreign loader is"

@@ -192,11 +192,11 @@ hat "$S" 'explorer: ready' "der Dateimanager ist hochgekommen"
 echo "== 5. the mandatory items on the serial line =="
 
 hat "$S" 'explorer: zeit mtime=[0-9]+' "Punkt 5: die Zeiten werden gelesen"
-mit=$(letzte "$S" 'explorer: zeit mtime=[0-9]+ mit=[0-9]+')
-von=$(grep -aoE 'explorer: zeit [^ ]+ mit=[0-9]+ von=[0-9]+' "$S" | tail -1 \
-      | grep -oE 'von=[0-9]+' | grep -oE '[0-9]+')
-if [ "${mit:-0}" -gt 0 ] 2>/dev/null; then
-    ok "item 5: $mit of ${von:-?} entries carry a REAL time"
+with_n=$(letzte "$S" 'explorer: zeit mtime=[0-9]+ with_n=[0-9]+')
+total_n=$(grep -aoE 'explorer: zeit [^ ]+ with_n=[0-9]+ total_n=[0-9]+' "$S" | tail -1 \
+      | grep -oE 'total_n=[0-9]+' | grep -oE '[0-9]+')
+if [ "${with_n:-0}" -gt 0 ] 2>/dev/null; then
+    ok "item 5: $with_n of ${total_n:-?} entries carry a REAL time"
 else
     bad "item 5: no entry has a time -- the column still shows '--'"
 fi

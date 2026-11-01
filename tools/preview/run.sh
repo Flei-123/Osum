@@ -50,7 +50,7 @@ assert (b["role"], b["x"], b["y"], b["w"], b["h"], b["act"]) == ("button", 8, 20
 assert "selected" in by["Eins"]["flags"] and by["Eins"]["role"] == "tab"
 assert by["Passwort"]["role"] == "password" and "protected" in by["Passwort"]["flags"]
 EOF
-$AX $FX --window Mehrfenster --json | grep -q '"Zurück!"' && bad "window 700 shows nodes of window 701" || ok "windows are kept apart (Mehrfenster has no Zurück!)"
+$AX $FX --window Mehrfenster --json | grep -q '"Zurück!"' && bad "window 700 shows nodes of window 701" || ok "windows are kept apart (multi-window has no back button)"
 $AX $FX --window Zweit --json | grep -q '"Zurück!"' && ok "second window has its own tree" || bad "Zweit tree missing"
 
 echo "== 2. render + pixel check =="
@@ -59,7 +59,7 @@ $AX $FX --window Szenenbaum -o "$T/a.png" > /dev/null && ok "PNG written" || bad
 [ "$(px "$T/a.png" 250 140)" = "255,255,255" ] && ok "entry field fill where the tree puts the entry" || bad "entry field missing"
 [ "$(ink "$T/a.png" 8 120 304 36)" -gt 20 ] && ok "entry shows its text (dark pixels > 20)" || bad "entry text missing"
 [ "$(px "$T/a.png" 30 79)" = "0,95,184" ] && ok "selected tab Eins carries the accent bar" || bad "accent bar missing: $(px "$T/a.png" 30 79)"
-[ "$(px "$T/a.png" 90 79)" != "0,95,184" ] && ok "unselected tab Zwei has none" || bad "Zwei has the accent bar"
+[ "$(px "$T/a.png" 90 79)" != "0,95,184" ] && ok "unselected second tab has none" || bad "the second tab has the accent bar"
 $AX $FX --window Szenenbaum --dark -o "$T/d.png" > /dev/null && [ "$(px "$T/d.png" 160 220)" = "55,55,55" ] && ok "dark theme switches the colours" || bad "dark theme"
 
 echo "== 3. counter-proofs =="

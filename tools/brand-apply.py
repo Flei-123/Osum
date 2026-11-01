@@ -54,10 +54,10 @@ def set_brand(path, values):
 
 def set_version(path, slug, commit):
     s = read(path)
-    pattern = re.compile(r'(static mut s_fassung: \[u8; (\d+)\] = )"[^"]*"')
+    pattern = re.compile(r'(static mut s_version: \[u8; (\d+)\] = )"[^"]*"')
     m = pattern.search(s)
     if not m:
-        sys.exit("kernel/lib/version.fi: s_fassung not found")
+        sys.exit("kernel/lib/version.fi: s_version not found")
     n = int(m.group(2))
     text = "%s %s" % (slug, commit)
     if len(text) > n - 1:

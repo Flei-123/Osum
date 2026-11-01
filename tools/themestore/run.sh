@@ -1372,23 +1372,23 @@ for pair in "dblur:dunkel mit Milchglas 12" "dunkel2:zweites dunkles Muster"; do
 done
 for d in dunkel dblur dunkel2; do
     AL=$(grep -a 'wm: glas alpha_soll=' "$TMPD/$d/serial.txt" | tail -1)
-    SOLL=$(printf '%s' "$AL" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
-    IST=$(printf '%s' "$AL" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
+    EXPECTED=$(printf '%s' "$AL" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)
+    ACTUAL=$(printf '%s' "$AL" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)
     VZ=$(python3 tools/themestore/glascheck.py var "$TMPD/$d/desktop.png")
     FAB=$(printf '%s' "$VZ" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
     VAR=$(printf '%s' "$VZ" | grep -oE '^var [0-9]+' | cut -d' ' -f2)
-    echo "        $d: expected=${SOLL:-?} actual=${IST:-?} $VZ"
+    echo "        $d: expected=${EXPECTED:-?} actual=${ACTUAL:-?} $VZ"
     same "$d: der Lauf meldet die Reglerstellung, die er bekommen hat" \
-        "40" "${SOLL:-}"
+        "40" "${EXPECTED:-}"
     #
     if [ "${VAR:-0}" -gt 100 ] 2>/dev/null; then
         ok "$d: the image shows through under the bar (var $VAR, $FAB reasons)"
     else
         num "$d: die Leiste ist praktisch deckend, also ist die Anhebung gemeldet" \
-            "${IST:-0}" gt "${SOLL:-100}"
+            "${ACTUAL:-0}" gt "${EXPECTED:-100}"
     fi
     num "$d: und sie ist nie kleiner als die Reglerstellung" \
-        "${IST:-0}" ge "${SOLL:-100}"
+        "${ACTUAL:-0}" ge "${EXPECTED:-100}"
 done
 bash tools/themestore/build.sh "$TMPD/dunkelsett" extra='einst' tbalpha=40 \
     blur=0 wallpaper=dunkel uitrace=yes keep=yes > "$TMPD/dunkelsett.log" 2>&1

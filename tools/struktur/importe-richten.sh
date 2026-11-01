@@ -21,22 +21,22 @@ while IFS= read -r f; do
     [[ ${#TREFFER[@]} -eq 0 ]] && continue
     DIRTY=0
     for z in "${TREFFER[@]}"; do
-        pfad=$(echo "$z" | sed -E 's|^[ \t]*import[ \t]+||; s|[ \t]*//.*$||; s|[ \t]*$||')
-        modul=${pfad##*.}
+        path=$(echo "$z" | sed -E 's|^[ \t]*import[ \t]+||; s|[ \t]*//.*$||; s|[ \t]*$||')
+        modul=${path##*.}
         [[ -v ORT[$modul] ]] || continue
-        soll="${ORT[$modul]}$modul"
-        [[ $pfad == "$soll" ]] && continue
+        expected="${ORT[$modul]}$modul"
+        [[ $path == "$expected" ]] && continue
         eigen=$(dirname "${f#kernel/}")
         [[ $eigen == "." ]] && eigen="" || eigen="${eigen//\//.}."
-        [[ $pfad == "$modul" && ${ORT[$modul]} == "$eigen" ]] && continue
-        if [[ $pfad == *.* ]]; then
-            praefix=${pfad%.*}
+        [[ $path == "$modul" && ${ORT[$modul]} == "$eigen" ]] && continue
+        if [[ $path == *.* ]]; then
+            praefix=${path%.*}
             [[ -d "kernel/${praefix//./\/}" ]] || continue
         fi
         if [[ $TROCKEN == 1 ]]; then
-            echo "  $f: $pfad -> $soll"
+            echo "  $f: $path -> $expected"
         else
-            sed -i -E "s|^([ \t]*)import[ \t]+${pfad//./\\.}([ \t]*)(//.*)?\$|\1import $soll\2\3|" "$f"
+            sed -i -E "s|^([ \t]*)import[ \t]+${path//./\\.}([ \t]*)(//.*)?\$|\1import $expected\2\3|" "$f"
         fi
         ZEILEN=$((ZEILEN + 1))
         DIRTY=1

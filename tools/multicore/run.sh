@@ -20,11 +20,11 @@ pass=0
 fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-zahl() { # name wert op soll
-    local name=$1 wert=$2 op=$3 soll=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl gefunden (wollte $op $soll)"; return; fi
-    if [ "$wert" -"$op" "$soll" ] 2>/dev/null; then ok "$name: $wert"
-    else bad "$name: $wert, wanted $op $soll"; fi
+zahl() { # name value op soll
+    local name=$1 value=$2 op=$3 soll=$4
+    if [ -z "$value" ]; then bad "$name: no number found (wanted $op $soll)"; return; fi
+    if [ "$value" -"$op" "$soll" ] 2>/dev/null; then ok "$name: $value"
+    else bad "$name: $value, wanted $op $soll"; fi
 }
 
 echo "== 1. the numbers that must be equal on both sides =="
@@ -177,7 +177,7 @@ w_exc()  { grep -ac '^\*\*\* EXCEPTION\|^absturz:  0' "$1"; }
 w_pid0() { grep -ac '^desk: start .* pid=0' "$1"; }
 
 echo
-echo "== 5. four cores, ring 3 on all (r3alle) =="
+echo "== 5. four cores, ring 3 on all =="
 lauf a4 4 r3alle
 L=$TMPD/a4.txt
 zahl "R3W (Kerne ohne eigene GS-Basis)" "$(w_r3w $L)" eq 0

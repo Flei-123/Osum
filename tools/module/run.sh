@@ -42,9 +42,9 @@ else
     bad "ps2m.consume is missing in the ordinary image"
 fi
 if [ "$(grep -c 'ps2m__consume' "$TMPD/nm-modul.txt")" -gt 0 ]; then
-    bad "ps2m.consume is still in the image with --ohne-ps2m"
+    bad "ps2m.consume is still in the image with the no-ps2m switch"
 else
-    ok "ps2m.consume is NOT in the image with --ohne-ps2m (no dead branch, no line)"
+    ok "ps2m.consume is NOT in the image with the no-ps2m switch (no dead branch, no line)"
 fi
 
 bash tools/module/build.sh "$TMPD/ps2maus.omod" --name ps2maus --abi 1 \
@@ -165,7 +165,7 @@ has "$TMPD/l-leer.txt" "modul: ende" "der Kern lebt und kommt bis ans Ende des A
 echo "== 4. with the module it is there, and it really moves =="
 has "$TMPD/l-gut.txt" "module: before init=0 present=0" "vor dem Laden: kein Zeigegeraet"
 has "$TMPD/l-gut.txt" "modul: laden=ok" "das Modul wird angenommen"
-has "$TMPD/l-gut.txt" "ps2maus: eingetragen 37" "modul_init lief IM KERN und trug 37 Adressen ein"
+has "$TMPD/l-gut.txt" "ps2maus: eingetragen 37" "module_init lief IM KERN und trug 37 Adressen ein"
 has "$TMPD/l-gut.txt" "module: after init=1 present=1" "NACH dem Laden: dasselbe mouse_init sagt ja"
 num "sigok" "$(zwert "$TMPD/l-gut.txt" 'sigok=[0-9]+')" eq 1
 num "ELF-Abschnitte" "$(zwert "$TMPD/l-gut.txt" 'secs=[0-9]+')" ge 8
@@ -173,7 +173,7 @@ num "aufgeloeste Relokationen" "$(zwert "$TMPD/l-gut.txt" 'rel=[0-9]+')" ge 500
 num "Namen, die aus dem KERN kamen" "$(zwert "$TMPD/l-gut.txt" 'ext=[0-9]+')" ge 6
 num "Rahmen fuer das Abbild" "$(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+')" ge 1
 num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'plaetze=[0-9]+')" eq 37
-num "Rueckgabe von modul_init" "$(zwert "$TMPD/l-gut.txt" 'initrc=[0-9]+')" eq 0
+num "Rueckgabe von module_init" "$(zwert "$TMPD/l-gut.txt" 'initrc=[0-9]+')" eq 0
 num "Geraetekennung vom 8042" "$(nwert "$TMPD/l-gut.txt" 'id=[0-9]+')" eq 3
 PKT=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
 num "PS/2-Pakete, nachdem der Monitor die Maus bewegt hat" "$PKT" ge 3
@@ -182,7 +182,7 @@ num "gezaehlte Bewegungen" "$MOV" ge 3
 
 # --------------------------------------------------- 5. Entladen
 echo "== 5. unloaded, and the frames come back =="
-has "$TMPD/l-gut.txt" "ps2maus: entladen" "modul_exit lief"
+has "$TMPD/l-gut.txt" "ps2maus: entladen" "module_exit lief"
 has "$TMPD/l-gut.txt" "modul: entladen=1 present=0" "nach dem Entladen: wieder kein Zeigegeraet"
 FREI=$(grep -a 'modul: frei=' "$TMPD/l-gut.txt" | head -1)
 A=$(echo "$FREI" | grep -oE 'frei=[0-9]+' | grep -oE '[0-9]+')
@@ -204,7 +204,7 @@ pruefe_abweisung() { # name grund
     if [ "$RC" != 21 ]; then bad "$n: rc=$RC instead of 21 -- the kernel did not survive it"; return; fi
     has "$TMPD/l-$n.txt" "modul: laden=$g" "$n -> Grund '$g'"
     has "$TMPD/l-$n.txt" "module: after init=0 present=0" "$n: kein Geraet danach"
-    hasnot "$TMPD/l-$n.txt" "ps2maus: eingetragen" "$n: modul_init ist NICHT gelaufen"
+    hasnot "$TMPD/l-$n.txt" "ps2maus: eingetragen" "$n: module_init ist NICHT gelaufen"
 }
 pruefe_abweisung abi   fassung
 pruefe_abweisung sig   signatur
@@ -333,7 +333,7 @@ for f in drin:gesperrt dreh:sperrliste zahl:sperrliste; do
     if [ "$RC" != 21 ]; then bad "sp-$n: rc=$RC statt 21"; continue; fi
     has "$TMPD/l-sp-$n.txt" "modul: laden=$g" "die Sperrliste: $n -> Grund '$g'"
     has "$TMPD/l-sp-$n.txt" "module: after init=0 present=0" "sp-$n: kein Geraet danach"
-    hasnot "$TMPD/l-sp-$n.txt" "ps2maus: eingetragen" "sp-$n: modul_init ist NICHT gelaufen"
+    hasnot "$TMPD/l-sp-$n.txt" "ps2maus: eingetragen" "sp-$n: module_init ist NICHT gelaufen"
 done
 num "drin: die Signatur des Moduls war gueltig" "$(zwert "$TMPD/l-sp-drin.txt" 'sigok=[0-9]+')" eq 1
 num "drin: die Liste hatte 2 Eintraege" "$(zwert "$TMPD/l-sp-drin.txt" 'sperre=[0-9]+')" eq 2

@@ -97,15 +97,15 @@ for n in P_PWR:45 P_PWRIDLE:46 P_PWRLOAD:47; do
     gleich "die Ring-3-Programmnummer $nm" "$soll_v" "${v:-fehlt}"
 done
 
-fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
+foreign=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
               -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' -e '^kernel/user/taskbar/' \
               -e '^kernel/user/qs.fi' -e '^kernel/user/modeapply.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
 #
-if [ -z "$fremd" ]; then
+if [ -z "$foreign" ]; then
     ok "no CALL NUMBER from 1750..1799 lies outside the files of this round"
 else
-    bad "call numbers from 1750..1799 also appear in: $(echo $fremd | tr '\n' ' ')"
+    bad "call numbers from 1750..1799 also appear in: $(echo $foreign | tr '\n' ' ')"
 fi
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/sys/sys.fi | wc -l | tr -d ' ')
 gleich "in kernel/sys/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"

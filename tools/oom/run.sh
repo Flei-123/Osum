@@ -70,12 +70,12 @@ has "$F" 'hog: fail=' "der Fresser bekam eine ehrliche Absage"
 has "$F" 'hog: ende' "und hat sie ueberlebt, statt zu haengen"
 num "nooom: niemand wurde beendet" "$(zahl "$F" 'speicherdruck: kills=')" eq 0
 
-VOR=$(zahl "$F" 'speicherdruck: frei=')
-NACH=$(zahl "$F" 'speicherdruck: nach=')
-if [ -n "$VOR" ] && [ "$VOR" = "$NACH" ]; then
-    ok "every frame is back: $VOR before, $NACH after"
+BEFORE=$(zahl "$F" 'speicherdruck: frei=')
+AFTER=$(zahl "$F" 'speicherdruck: nach=')
+if [ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ]; then
+    ok "every frame is back: $BEFORE before, $AFTER after"
 else
-    bad "frames lost: $VOR before, $NACH after"
+    bad "frames lost: $BEFORE before, $AFTER after"
 fi
 
 echo
@@ -84,12 +84,12 @@ run ohne 128 "memhog nooom noreserve"
 G="$TMPD/ohne.txt"
 num "Gegenprobe noreserve: die Reserve ist leer" \
     "$(zahl "$G" 'speicherdruck: res=')" eq 0
-MIT=$(grep -a -m1 '^hog: fail=' "$F" | grep -oaE '[0-9]+')
-OHNE=$(grep -a -m1 '^hog: fail=' "$G" | grep -oaE '[0-9]+')
-if [ -n "$MIT" ] && [ -n "$OHNE" ] && [ "$OHNE" -gt "$MIT" ]; then
-    ok "without the reserve it keeps eating: $OHNE instead of $MIT KiB"
+WITH=$(grep -a -m1 '^hog: fail=' "$F" | grep -oaE '[0-9]+')
+WITHOUT=$(grep -a -m1 '^hog: fail=' "$G" | grep -oaE '[0-9]+')
+if [ -n "$WITH" ] && [ -n "$WITHOUT" ] && [ "$WITHOUT" -gt "$WITH" ]; then
+    ok "without the reserve it keeps eating: $WITHOUT instead of $WITH KiB"
 else
-    bad "the reserve makes no difference: $MIT with, $OHNE without"
+    bad "the reserve makes no difference: $WITH with, $WITHOUT without"
 fi
 
 run oom 128 memhog; RC=$?
@@ -106,11 +106,11 @@ num "vorher synchronisiert" "$(zahl "$O" 'speicherdruck: syncs=')" ge 1
 has "$O" 'SIGKIL -- killed' "das Opfer stirbt am gewoehnlichen SIGKILL"
 num "und sein Code ist 137 (128 + 9)" "$(zahl "$O" 'speicherdruck: code=')" eq 137
 hasnot "$O" 'hog: ende' "der Getroffene rechnet NICHT weiter"
-VOR=$(zahl "$O" 'speicherdruck: frei=')
-NACH=$(zahl "$O" 'speicherdruck: nach=')
-[ -n "$VOR" ] && [ "$VOR" = "$NACH" ] \
-    && ok "even after the kill every frame is back: $VOR" \
-    || bad "frames are missing after the kill: $VOR before, $NACH after"
+BEFORE=$(zahl "$O" 'speicherdruck: frei=')
+AFTER=$(zahl "$O" 'speicherdruck: nach=')
+[ -n "$BEFORE" ] && [ "$BEFORE" = "$AFTER" ] \
+    && ok "even after the kill every frame is back: $BEFORE" \
+    || bad "frames are missing after the kill: $BEFORE before, $AFTER after"
 
 echo
 echo "== 4. die harten Faelle =="
@@ -120,12 +120,12 @@ D="$TMPD/drei.txt"
 has "$D" 'speicherdruck: lebt=1' "drei Fresser gleichzeitig: das System lebt"
 num "drei Fresser: mindestens einer beendet" \
     "$(zahl "$D" 'speicherdruck: kills=')" ge 1
-VOR3=$(zahl "$D" 'speicherdruck: frei=')
-NACH3=$(zahl "$D" 'speicherdruck: nach=')
-if [ "$VOR3" = "$NACH3" ]; then
-    ok "three hogs: every frame is back ($VOR3)"
+BEFORE3=$(zahl "$D" 'speicherdruck: frei=')
+AFTER3=$(zahl "$D" 'speicherdruck: nach=')
+if [ "$BEFORE3" = "$AFTER3" ]; then
+    ok "three hogs: every frame is back ($BEFORE3)"
 else
-    bad "three hogs: frames lost -- $VOR3 before, $NACH3 after"
+    bad "three hogs: frames lost -- $BEFORE3 before, $AFTER3 after"
 fi
 has "$D" 'kernel: done' "der Kern arbeitet nach dem Notfall weiter"
 

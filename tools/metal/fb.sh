@@ -6,7 +6,7 @@ cd "$(dirname "$0")/../.."
 AUS=${1:-}
 pass=0
 fail=0
-OHNE=0
+WITHOUT=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 hin() { printf '  --    %s\n' "$1"; }
@@ -33,7 +33,7 @@ pruefe() { # $1 = Protokoll, $2 = Name des Falles, $3 = erwartete Breite (oder "
     if [ -z "$z" ]; then
         if grep -qa 'fb=NONE' "$f"; then
             hin "$name: KEIN Rahmenpuffer -- der Kern sagt es (fb=KEINER) und laeuft weiter"
-            OHNE=$((OHNE+1))
+            WITHOUT=$((WITHOUT+1))
             return 0
         fi
         bad "$name: no fb line in the report"
@@ -114,6 +114,6 @@ if [ -n "$AUS" ]; then
 fi
 
 echo
-echo "FB: $pass passed, $fail failed, $OHNE cards without Bochs extension"
+echo "FB: $pass passed, $fail failed, $WITHOUT cards without Bochs extension"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

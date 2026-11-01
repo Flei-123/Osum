@@ -214,14 +214,14 @@ hat_nicht "$TMPD/zyk.txt" 'panic' "kein Ausnahmefehler im Zyklenlauf"
 hat "$TMPD/zyk.txt" 'susp: == zyklus 1' "Zyklus 1 laeuft"
 hat "$TMPD/zyk.txt" 'susp: == zyklus 2' "Zyklus 2 laeuft -- er findet, was der erste versteckt"
 
-GLEICH=$(grep -ac '^susp: gleich$' "$TMPD/zyk.txt")
+SAME_N=$(grep -ac '^susp: gleich$' "$TMPD/zyk.txt")
 UNGL=$(grep -ac 'susp: UNGLEICH' "$TMPD/zyk.txt")
 RGL=$(grep -ac 'susp: rahmen gleich' "$TMPD/zyk.txt")
 RVER=$(grep -ac 'susp: RAHMEN VERLOREN' "$TMPD/zyk.txt")
-if [ "$GLEICH" -ge 2 ]; then
-    ok "the state is identical after BOTH cycles ($GLEICH von 2)"
+if [ "$SAME_N" -ge 2 ]; then
+    ok "the state is identical after BOTH cycles ($SAME_N von 2)"
 else
-    bad "the state is identical in only $GLEICH of 2 cycles"
+    bad "the state is identical in only $SAME_N of 2 cycles"
 fi
 if [ "$UNGL" -eq 0 ]; then
     ok "no cycle reports a changed state"
@@ -628,12 +628,12 @@ echo "== 13. two awake cycles with different states =="
 wzyklus wz2 "wach schlaf" 400
 W2B="$TMPD/wz2-b.txt"
 hat_nicht "$W2B" 'panic' "kein Ausnahmefehler im zweiten Zyklus"
-W2VOR=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*vorher=\([0-9]*\).*/\1/p')
-W2NACH=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*nachher=\([0-9]*\).*/\1/p')
+W2BEFORE=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*vorher=\([0-9]*\).*/\1/p')
+W2AFTER=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*nachher=\([0-9]*\).*/\1/p')
 W2SUM=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.*summe=\([0-9]*\).*/\1/p')
 W2SOLL=$(grep -a 'wach: weiter ' "$W2B" | sed -n '1s/.* soll=\([0-9]*\).*/\1/p')
-if [ -n "$W2NACH" ] && [ -n "$W2VOR" ] && [ "$W2NACH" -gt "$W2VOR" ]; then
-    ok "the counter rises in the second cycle too ($W2VOR -> $W2NACH)"
+if [ -n "$W2AFTER" ] && [ -n "$W2BEFORE" ] && [ "$W2AFTER" -gt "$W2BEFORE" ]; then
+    ok "the counter rises in the second cycle too ($W2BEFORE -> $W2AFTER)"
 else
     bad "the counter does not rise in the second cycle"
 fi

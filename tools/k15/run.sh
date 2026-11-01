@@ -705,7 +705,7 @@ else
 fi
 python3 tools/osum/mkfs.py list "$TMPD/live-files.img" > "$TMPD/files.ls" 2>&1
 if grep -qE '/data/neu' "$TMPD/files.ls"; then
-    bad "/data/neu is also in the image WITHOUT the operation -- the assertion says nothing"
+    bad "the new-data file is also in the image WITHOUT the operation -- the assertion says nothing"
 else
     ok "in the image without the operation it is NOT there (the counter-proof)"
 fi

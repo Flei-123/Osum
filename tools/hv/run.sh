@@ -25,12 +25,12 @@ feld() { # datei schluessel
 }
 
 num() { # name ist op soll
-    local name=$1 ist=$2 op=$3 soll=$4
+    local name=$1 actual=$2 op=$3 expected=$4
     case "$op" in
-        eq) [ "${ist:-x}" = "$soll" ] && ok "$name ($ist)" \
-                || bad "$name: $ist statt $soll" ;;
-        gt) [ "${ist:-0}" -gt "$soll" ] 2>/dev/null && ok "$name ($ist)" \
-                || bad "$name: $ist ist nicht > $soll" ;;
+        eq) [ "${actual:-x}" = "$expected" ] && ok "$name ($actual)" \
+                || bad "$name: $actual statt $expected" ;;
+        gt) [ "${actual:-0}" -gt "$expected" ] 2>/dev/null && ok "$name ($actual)" \
+                || bad "$name: $actual ist nicht > $expected" ;;
     esac
 }
 

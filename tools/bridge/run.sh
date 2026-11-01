@@ -332,14 +332,14 @@ gegenstelle_aus
 draht_zu
 G="$TMPD/g2.log"; F="$TMPD/r2.txt"
 status_von() { grep -a "^ANTWORT $1 " "$G" | head -1 | awk '{print $4}'; }
-grund_von()  { cat "$G.$1.bin" 2>/dev/null; }
+reason_of()  { cat "$G.$1.bin" 2>/dev/null; }
 
 pruefe_nein() { # <nr> <art> <stichwort>
     if [ "$(status_von "$1")" = nein ]; then
         if grep -qaF "$3" "$G.$1.bin" 2>/dev/null; then
-            ok "$2: rejected, and the reason says why ($(grund_von "$1" | head -c 60))"
+            ok "$2: rejected, and the reason says why ($(reason_of "$1" | head -c 60))"
         else
-            bad "$2: rejected, but without '$3': $(grund_von "$1")"
+            bad "$2: rejected, but without '$3': $(reason_of "$1")"
         fi
     else
         bad "$2: NICHT abgelehnt (Status '$(status_von "$1")')"

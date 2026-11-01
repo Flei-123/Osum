@@ -180,15 +180,15 @@ for s in $SCHEMES; do
         else
             bad "$s/$m Kontrast: $(diff "$TMPD/conos-$s-$m.txt" "$TMPD/conpy-$s-$m.txt" | head -3 | tr '\n' ' ')"
         fi
-        durch=$(awk '$7 == 0' "$TMPD/con-$s-$m.txt" | wc -l)
-        schlecht=$(awk '$7 == 0 {printf "%s auf %s (%.2f) ", $1, $2, $6/100}' \
+        passed_n=$(awk '$7 == 0' "$TMPD/con-$s-$m.txt" | wc -l)
+        bad_n=$(awk '$7 == 0 {printf "%s auf %s (%.2f) ", $1, $2, $6/100}' \
             "$TMPD/con-$s-$m.txt")
-        if [ "$durch" -eq 0 ]; then
+        if [ "$passed_n" -eq 0 ]; then
             kl=$(awk '$3 == "normal" {if (min == "" || $6 < min) min = $6} END {print min}' \
                 "$TMPD/con-$s-$m.txt")
             ok "$s/$m: jede Paarung erfuellt WCAG, schlechteste $kl"
         else
-            bad "$s/$m: $durch pairs below the threshold -- $schlecht"
+            bad "$s/$m: $passed_n pairs below the threshold -- $bad_n"
         fi
     done
 done

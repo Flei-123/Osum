@@ -18,9 +18,9 @@ STAND=tools/look/shot.sh
 # ------------------------------------------------------------------
 # DIE BEGRUENDETEN UNTERSCHIEDE.
 #
-NUR_ABBILD="jarvis ssl beispiel"
+ONLY_IMAGE="jarvis ssl beispiel"
 
-NUR_STAND="icons"
+ONLY_RIG="icons"
 
 fehler=0
 
@@ -35,7 +35,7 @@ fehlt=""
 for d in $a_etc; do
     if ! echo "$s_etc" | grep -qx "$d"; then
         ist_ausnahme=0
-        for e in $NUR_ABBILD; do [ "$d" = "$e" ] && ist_ausnahme=1; done
+        for e in $ONLY_IMAGE; do [ "$d" = "$e" ] && ist_ausnahme=1; done
         if [ $ist_ausnahme = 0 ]; then
             fehlt+="  /etc/$d -- im Abbild, NICHT im Pruefstand"$'\n'
             fehler=$((fehler + 1))
@@ -45,7 +45,7 @@ done
 if [ -n "$fehlt" ]; then
     printf '%s' "$fehlt"
 else
-    echo "  equal (except the $(echo $NUR_ABBILD | wc -w) justified exceptions)"
+    echo "  equal (except the $(echo $ONLY_IMAGE | wc -w) justified exceptions)"
 fi
 
 quellen_von() {
@@ -63,7 +63,7 @@ for q in $a_q; do
     if ! echo "$s_q" | grep -qx "$q"; then
         base=$(basename "$q")
         ist_ausnahme=0
-        for e in $NUR_ABBILD $NUR_STAND; do
+        for e in $ONLY_IMAGE $ONLY_RIG; do
             case "$q" in *"$e"*) ist_ausnahme=1 ;; esac
         done
         if [ $ist_ausnahme = 0 ]; then
@@ -140,8 +140,8 @@ if [ $fehler -gt 0 ]; then
     echo "shows a replacement glyph, and that looks intentional."
     echo
     echo "Remedy: add the file to tools/look/shot.sh, or -- if"
-    echo "it is rightly missing there -- with a JUSTIFICATION in NUR_ABBILD or"
-    echo "NUR_STAND in this script."
+    echo "it is rightly missing there -- with a JUSTIFICATION in ONLY_IMAGE or"
+    echo "ONLY_RIG in this script."
     exit 1
 fi
 echo "BESTUECKUNG PASSED."

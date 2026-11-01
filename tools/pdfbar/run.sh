@@ -94,7 +94,7 @@ win c none
 SCN="$OUT/w-c/serial.txt"; rects "$SCN" > "$OUT/c.rects"
 nc=$(awk '$2==4' "$OUT/c.rects" | wc -l)
 [ "$nc" = 2 ] && ok "path field + search field (2 text fields)" || bad "$nc text fields without a document (expected 2)"
-grep -aq 'wlib: text .*t=Öffnen' "$SCN" && ok "the Öffnen button is there" || bad "no Öffnen button"
+grep -aq 'wlib: text .*t=Öffnen' "$SCN" && ok "the open button is there" || bad "no open button"
 
 echo "== 6. Ctrl+F, type, Enter =="
 win d search 'mon=sleep 1' 'mon=sendkey ctrl-f' 'mon=sleep 1' 'mon=sendkey w' 'mon=sendkey a' 'mon=sendkey s' 'mon=sendkey s' 'mon=sendkey e' 'mon=sendkey r' 'mon=sendkey ret' 'mon=sleep 3'

@@ -316,7 +316,7 @@ klar E-rueck > "$TMPD/E-rueck.log"
 if grep -qa 'ROLLBACK' "$TMPD/E-rueck.log"; then
     ok "(e) THE ROLLBACK is detected (counter 9, store offers 1)"
 else
-    bad "(e) DER RUECKSCHRITT is NOT detected -- ein Server kann alte Daten unterschieben"
+    bad "(e) THE ROLLBACK is NOT detected -- a server can slip in old data"
     grep -a 'sync:\|generation' "$TMPD/E-rueck.log" | head -4 | sed 's/^/        /'
 fi
 rm -rf "$TMPD/kontoR2"; cp -r "$TMPD/kontoA" "$TMPD/kontoR2"

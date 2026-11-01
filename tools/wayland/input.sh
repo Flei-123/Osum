@@ -388,7 +388,7 @@ keys z semicolon shift-1
 since B ${M[B]} | grep -aE "^wlin\[B\]: (mods|key) " > "$TMPD/dekeys.txt"
 syms=$(python3 tools/wayland/keycheck.py de < "$TMPD/dekeys.txt")
 note "$syms"
-[ "$syms" = "syms: y odiaeresis exclam" ] && ok "z -> y, ; -> ö (UTF-8 over two octets), Shift+1 -> ! on the German layout" \
+[ "$syms" = "syms: y odiaeresis exclam" ] && ok "z -> y, ; -> o-umlaut (UTF-8 over two octets), Shift+1 -> ! on the German layout" \
     || bad "German keysyms: '$syms', expected 'y odiaeresis exclam'"
 keys ctrl-alt-l
 

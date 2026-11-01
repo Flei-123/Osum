@@ -58,7 +58,7 @@ F=$(foc "$OUT/g2/serial.txt" | tr -s ' ' | sed 's/^0 //')
 # "say again"), then once per Tab
 echo "        focus order: $F"
 case "$F" in
-    "7 7 16 8 9 11 12 7 "*|"7 16 8 9 11 12 7 "*) ok "Tab chain: Kennwort, Auge, Anmelden, Anderer Benutzer, Netzwerk, Ein/Aus, Kennwort";;
+    "7 7 16 8 9 11 12 7 "*|"7 16 8 9 11 12 7 "*) ok "Tab chain: password, eye, sign in, other user, network, power, password";;
     *) bad "Tab chain: '$F'";;
 esac
 
