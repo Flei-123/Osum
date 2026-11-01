@@ -162,7 +162,7 @@ cnt() { "$OUT/pdfsearch" "$OUT/c/search.pdf" "$1" 100 | awk '{split($3,a,"="); s
 [ "$(cnt trennung)" = 1 ] && ok "'trennung' is found across a hyphen at a line end (Tren-/nung)" || bad "trennung: $(cnt trennung)"
 [ "$(cnt "zeilen und einem")" = 1 ] && ok "a phrase across a line break is found (multi-line phrase)" || bad "multi-line phrase count: $(cnt "zeilen und einem")"
 [ "$(cnt "größe")" = 1 ] && ok "umlauts and sharp s: a umlaut word found (UTF-8 query, ToUnicode text)" || bad "umlaut word count: $(cnt "größe")"
-[ "$(cnt ÜBUNG)" = 1 ] && ok "an upper-case umlaut query finds the lower-case text" || bad "upper-case query count: $(cnt ÜBUNG)"
+[ "$(cnt "$(printf '\303\234BUNG')")" = 1 ] && ok "an upper-case umlaut query finds the lower-case text" || bad "upper-case query count: $(cnt "$(printf '\303\234BUNG')")"
 [ "$(cnt office)" = 1 ] && [ "$(cnt difficult)" = 1 ] && [ "$(cnt first)" = 1 ] && ok "ligatures: 'office', 'difficult', 'first' are found although the file has ﬁ/ﬃ glyphs" || bad "ligatures: $(cnt office) $(cnt difficult) $(cnt first)"
 [ "$(cnt zzzzqq)" = 0 ] && ok "a word that is not there: 0 matches" || bad "zzzzqq: $(cnt zzzzqq)"
 [ "$(cnt "")" = 0 ] && ok "an empty query matches nothing" || bad "empty query: $(cnt "")"

@@ -30,7 +30,7 @@ num() { # name ist op soll
         eq) [ "${actual:-x}" = "$expected" ] && ok "$name ($actual)" \
                 || bad "$name: $actual statt $expected" ;;
         gt) [ "${actual:-0}" -gt "$expected" ] 2>/dev/null && ok "$name ($actual)" \
-                || bad "$name: $actual ist nicht > $expected" ;;
+                || bad "$name: $actual is not > $expected" ;;
     esac
 }
 
