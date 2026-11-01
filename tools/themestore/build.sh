@@ -370,6 +370,7 @@ if [ -n "$script" ]; then
     APPEND="osum nokbd nosched noproc nofs script=$script"
     WAITFOR='^kernel: done'
 else
+    case "$extra" in *wighalt=*) ;; *) [ -n "$clicks" ] && extra="$extra wighalt=60" ;; esac
     APPEND="gfx wm wig wigicons desk wmhold wiglong nokbd nosched noproc nofs $extra"
     WAITFOR='^wm: hold'
 fi
