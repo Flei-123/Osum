@@ -410,7 +410,7 @@ done
 python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1 \
     && ok "die Speicherkarte von kdata ist ueberschneidungsfrei" \
     || { bad "die Speicherkarte hat Kollisionen"; sed 's/^/        /' "$TMPD/map.txt"; }
-grep -q '0 Kollisionen' "$TMPD/map.txt" && ok "$(tail -1 "$TMPD/map.txt")" || true
+grep -q '0 collisions' "$TMPD/map.txt" && ok "$(tail -1 "$TMPD/map.txt")" || true
 
 echo
 echo "HDA: $pass bestanden, $fail gefallen"

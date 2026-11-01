@@ -100,7 +100,7 @@ done
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
               -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' -e '^kernel/user/taskbar/' \
-              -e '^kernel/user/qs.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
+              -e '^kernel/user/qs.fi' -e '^kernel/user/modeapply.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
 #
 if [ -z "$fremd" ]; then
     ok "keine AUFRUFNUMMER aus 1750..1799 steht ausserhalb der Dateien dieser Runde"
@@ -130,7 +130,7 @@ else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
-hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
+hat "$TMPD/karte.txt" "0 collisions" "keine zwei Bereiche ueberschneiden sich"
 
 for r in IA32_PERF_CTL:0x199 IA32_MISC_ENABLE:0x1A0 IA32_THERM_STATUS:0x19C \
          IA32_TEMPERATURE_TARGET:0x1A2 IA32_HWP_REQUEST:0x774 \

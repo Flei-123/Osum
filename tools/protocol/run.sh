@@ -109,7 +109,7 @@ un=$(grep -aoE 'const SYS_KRACH: u64 = [0-9]+' kernel/user/ulib.fi | grep -oE '[
     || bad "SYS_KRACH: Kern=$kn ulib=$un"
 
 python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1
-has "$TMPD/map.txt" "0 Kollisionen" "die Speicherkarte von kdata bleibt kollisionsfrei"
+has "$TMPD/map.txt" "0 collisions" "die Speicherkarte von kdata bleibt kollisionsfrei"
 KDS=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/lib/kstate.fi | head -1)
 grep -q "$KDS" "$TMPD/map.txt" \
     && ok "kdata ist $KDS gross (der Ring braucht 64 KiB am Stueck)" \

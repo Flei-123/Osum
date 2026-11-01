@@ -74,7 +74,7 @@ KERN="$TMPD/k.mb"
 MM=$(python3 tools/kernel/memmap.py 2>&1 | tail -1)
 note "$MM"
 case "$MM" in
-    *" 0 Kollisionen") ok "tools/kernel/memmap.py: keine Ueberschneidung in kdata" ;;
+    *" 0 collisions") ok "tools/kernel/memmap.py: keine Ueberschneidung in kdata" ;;
     *) bad "memmap.py meldet Kollisionen" ;;
 esac
 #

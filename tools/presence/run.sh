@@ -203,7 +203,7 @@ echo "== 9. kdata und die Schirmbilder =="
 # =====================================================================
 MM=$(python3 tools/kernel/memmap.py 2>&1 | tail -1)
 note "$MM"
-KOL=$(printf '%s' "$MM" | sed 's/.*, \([0-9]*\) Kollisionen.*/\1/')
+KOL=$(printf '%s' "$MM" | sed 's/.*, \([0-9]*\) collisions.*/\1/')
 is "Kollisionen in kdata" "${KOL:-x}" "0"
 
 mkdir -p docs/shots/praesenz

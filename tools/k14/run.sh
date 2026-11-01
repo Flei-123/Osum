@@ -100,7 +100,7 @@ else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
-hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
+hat "$TMPD/karte.txt" "0 collisions" "keine zwei Bereiche ueberschneiden sich"
 for r in K14_OFF FAT_OFF PROCFS_OFF; do
     v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))

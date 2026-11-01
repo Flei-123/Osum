@@ -100,7 +100,7 @@ UT=$((16#${UTHEX:-0}))
 num ".utext traegt den Ring-3-Code (Oktette)" "$UT" ge 4096
 
 if python3 tools/kernel/memmap.py > "$TMPD/map.txt" 2>&1; then
-    ok "die Speicherkarte von kdata geht auf: $(sed -n 's/.*, \([0-9]*\) Kollisionen/\1/p' "$TMPD/map.txt") Kollisionen"
+    ok "die Speicherkarte von kdata geht auf: $(sed -n 's/.*, \([0-9]*\) collisions/\1/p' "$TMPD/map.txt") Kollisionen"
 else
     bad "tools/kernel/memmap.py meldet eine Kollision"; sed 's/^/        /' "$TMPD/map.txt" | head -6
 fi

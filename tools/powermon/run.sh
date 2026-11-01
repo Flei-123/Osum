@@ -168,7 +168,7 @@ else
     bad "tools/kernel/memmap.py reports collisions"
     sed 's/^/        /' "$TMPD/map.txt" | head -8
 fi
-has "$TMPD/map.txt" "0 Kollisionen" "no two areas of kdata overlap"
+has "$TMPD/map.txt" "0 collisions" "no two areas of kdata overlap"
 
 # This round starts at 0x5C000 and not at the first free page, because
 # NETMON and DISPLAY are taking 0x5A000..0x5C000 on their own branches at

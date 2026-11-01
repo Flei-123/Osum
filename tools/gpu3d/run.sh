@@ -18,7 +18,7 @@ PAKETE=${GPU3D_PAKETE:-2000}
 
 echo "== 1. der Kern und die Speicherkarte =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1; then
-    if grep -q "0 Kollisionen" "$TMPD/map.txt"; then
+    if grep -q "0 collisions" "$TMPD/map.txt"; then
         ok "Speicherkarte: $(tail -1 "$TMPD/map.txt")"
     else
         bad "Speicherkarte meldet Kollisionen"; tail -3 "$TMPD/map.txt"

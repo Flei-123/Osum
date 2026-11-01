@@ -293,7 +293,7 @@ fi
 echo "== 10. the control for the whole round: without 'tile' wie vorher =="
 lauf "$K0" "gfx wm wmhold $GRUND" "$TMPD/o.txt" "$DISK"
 ws=$(zahl "$TMPD/o.txt" 'wm: .*selftest [0-9]+')
-wsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/ui/wm.fi)" \
+wsoll=$(grep -aoE 'return [0-9]+' <<< "$(sed -n '/fn selftest_max/,/^}/p' kernel/ui/wm/vtest.fi)" \
     | head -1 | grep -oE '[0-9]+')
 num "die Zusagen des Fensterservers ueber sich selbst, unveraendert" "$ws" eq "${wsoll:-17}"
 has "$TMPD/o.txt" "wm: 800x600" "der Server kennt die Flaeche wie vorher"

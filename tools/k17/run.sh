@@ -121,7 +121,7 @@ else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
 fi
-hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
+hat "$TMPD/karte.txt" "0 collisions" "keine zwei Bereiche ueberschneiden sich"
 k17off=$(grep -aE '^const K17_OFF: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
 k17max=$(grep -aE '^const K17_MAX: u64 = 0x[0-9A-Fa-f]+' "$K_KSTATE" | grep -oE '0x[0-9A-Fa-f]+')
 gleich "der Vorrat dieser Runde faengt bei 0x50000 an" "0x50000" "$k17off"
