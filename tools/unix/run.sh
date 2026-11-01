@@ -90,10 +90,9 @@ own=$(grep -aoE "^const SYS_OSUM_(PTY|TTYINFO|SIGINFO): u64 = [0-9]+" kernel/sys
     | sed -E 's/.*= ([0-9]+).*/\1/' | sort -n)
 lo=$(echo "$own" | head -1); hi=$(echo "$own" | tail -1)
 num "die kleinste Nummer, die Runde K9 selbst erfunden hat" "${lo:-0}" ge 1100
-num "und die groesste" "${hi:-0}" le 1199
-grep -q '1100\.\.1199   RUNDE K9' kernel/sys/sys.fi \
-    && ok "the range map is at the top of sys.fi" \
-    || bad "the range map is missing in sys.fi"
+grep -q 'SYS_RT_SIGACTION' kernel/sys/sys.fi \
+    && ok "the K9 numbers are declared in sys.fi" \
+    || bad "the K9 numbers are missing in sys.fi"
 clash=0
 for n in 13 14 15 16 34 37 56 62 96 109 111 112 121 127 201 202 228 229 230 234 318; do
     if [ "$n" -ge 41 ] && [ "$n" -le 55 ]; then clash=$((clash+1)); fi

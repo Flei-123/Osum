@@ -204,7 +204,7 @@ lauf_platte "$K0" "osum $QUIET script=absturz;exit" \
     "$TMPD/nachher.txt" "$TMPD/disk.img"
 has "$TMPD/nachher.txt" "absturz: ein Bericht vom letzten Start liegt vor" \
     "(c) der Kern findet die Marke des letzten Laufs wieder"
-has "$TMPD/nachher.txt" "EIN BERICHT VOM LETZTEN START" \
+has "$TMPD/nachher.txt" "A REPORT FROM THE LAST START" \
     "(c) /bin/absturz meldet ihn dem Benutzer"
 has "$TMPD/nachher.txt" "ABSTURZBERICHT" "(c) der Bericht selbst wird angezeigt"
 has "$TMPD/nachher.txt" "-- rueckspur" "(c) der Bericht enthaelt die Rueckverfolgung"
@@ -239,14 +239,14 @@ echo "== 5b. K-011: the report survives the warm restart in memory =="
 #
 lauf_platte "$K0" "osum $QUIET logall krach script=krach kernfs;exit" \
     "$TMPD/kalt1.txt" "$TMPD/disk.img"
-has "$TMPD/kalt1.txt" "Bestellung, art 2" "K-011: die Panik mit gehaltener Sperre hat stattgefunden"
+has "$TMPD/kalt1.txt" "on request, kind 2" "K-011: die Panik mit gehaltener Sperre hat stattgefunden"
 has "$TMPD/kalt1.txt" "absturz: filesystem locked, no report" \
     "K-011: der Riegel verbietet die Platte (so soll es sein)"
 lauf_platte "$K0" "osum $QUIET logall script=absturz;exit" \
     "$TMPD/kalt2.txt" "$TMPD/disk.img"
 n=$(grep -ac 'aus dem speicher gerettet' "$TMPD/kalt2.txt")
 num "GEGENPROBE kalt: nach einem Kaltstart wird nichts gerettet" "${n:-0}" eq 0
-n=$(grep -ac 'Bestellung, art 2' "$TMPD/kalt2.txt")
+n=$(grep -ac 'on request, kind 2' "$TMPD/kalt2.txt")
 num "GEGENPROBE kalt: kein Bericht der art-2-Panik auf der Platte" "${n:-0}" eq 0
 
 wsock="$TMPD/warm.sock"
@@ -287,7 +287,7 @@ grep -qaE 'absturz: bericht +/var/crash/[0-9]+\.txt +geschrieben' "$TMPD/warm2.t
     && ok "K-011 warm: and stores it as a file under /var/crash" \
     || bad "K-011 warm: the rescued report was not stored"
 has "$TMPD/warm2.txt" "ABSTURZBERICHT (KERN)" "K-011 warm: /bin/absturz zeigt ihn als Kernbericht"
-has "$TMPD/warm2.txt" "Bestellung, art 2" "K-011 warm: und es ist der Bericht DIESER Panik (art 2 im Protokollteil)"
+has "$TMPD/warm2.txt" "on request, kind 2" "K-011 warm: und es ist der Bericht DIESER Panik (art 2 im Protokollteil)"
 
 echo "== 6. (b) der Panik-Bildschirm, wirklich gelesen =="
 sock="$TMPD/mon.sock"

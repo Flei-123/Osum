@@ -150,7 +150,7 @@ if shot E0 shape=modern scheme=day mode=light keep=yes shadow=on extra='nostart 
     else
         bad "no two shadows measured"
     fi
-    grep -q 'titel: kein akzent' "$TMPD/E.txt" \
+    grep -q 'title: no accent' "$TMPD/E.txt" \
         && ok "and no title bar carries the accent" \
         || bad "a title bar is still accent-coloured"
 fi

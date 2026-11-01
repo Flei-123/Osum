@@ -177,4 +177,12 @@ feld('LEVTAB_V', LV, typ='i64' if False else 'u64', kommentar=
      '// hier u64 fuehrt; der Leser rechnet ihn zurueck.')
 feld('LEVTAB_N', LN, kommentar='Wieviele Bits der Eintrag verbraucht.')
 
-sys.stdout.write('\n'.join(aus) + '\n')
+text = [l for l in '\n'.join(aus).split('\n') if not l.lstrip().startswith('//')]
+squeezed = []
+for line in text:
+    if line == '' and squeezed and squeezed[-1] == '':
+        continue
+    squeezed.append(line)
+while squeezed and squeezed[-1] == '':
+    squeezed.pop()
+sys.stdout.write('\n'.join(squeezed) + '\n')

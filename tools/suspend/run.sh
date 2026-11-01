@@ -553,7 +553,7 @@ else
     bad "the restart brought back no tasks"
     grep -a 'wach: zurueck' "$WB" | sed 's/^/        /' | head -2
 fi
-WBACK=$(grep -a 'wach: zurueck' "$WB" | sed -n '1s/.*tasks=\([0-9]*\).*/\1/p')
+WBACK=$(grep -a 'wach: zurueck' "$WB" | sed -n '1s/.*aufgaben=\([0-9]*\).*/\1/p')
 WKST=$(grep -a 'wach: zurueck' "$WB" | sed -n '1s/.*kstapel=\([0-9]*\).*/\1/p')
 if [ -n "$WBACK" ] && [ "$WBACK" -ge 3 ]; then
     ok "PUNKT 1: $WBACK task entries are back in the table"
@@ -670,7 +670,7 @@ else
     bad "'nowach' hat den Wiederanlauf nicht abgeschaltet"
     grep -a 'wach: zurueck' "$WNB" | sed 's/^/        /' | head -2
 fi
-if grep -a 'wach: zurueck' "$WNB" | grep -aq 'tasks=0'; then
+if grep -a 'wach: zurueck' "$WNB" | grep -aq 'aufgaben=0'; then
     ok "and NO task enters the run list"
 else
     bad "trotz 'nowach' kamen tasks"

@@ -163,7 +163,7 @@ GV="$TMPD/kernel-gv"; mkdir -p "$GV"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GV/" \; )
 sed -i 's/^const VEC_MOUSE: u64 = 46/const VEC_MOUSE: u64 = 44/' "$GV/arch/x86_64/trap.fi"
 gv=$(python3 tools/kernel/memmap.py "$GV" 2>&1)
-if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'Vektor 44 haben zwei Namen'; then
+if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'vector 44 has two names'; then
     ok "with VEC_MOUSE back at 44 the checker finds the collision with VEC_NVME"
 else
     bad "the vector checker does NOT find this round's bug: $gv"

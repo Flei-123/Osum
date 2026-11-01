@@ -324,7 +324,7 @@ else bad "with noperm not even counting happens anymore"; fi
 rc=$(run_case nosuid "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nosuid nokbd nosched noproc nofs noring3 script=sh /t/rechte.sh")
 G="$TMPD/nosuid.txt"
-has "$G" "su: kein Eintrag in shadow" \
+has "$G" "su: no shadow entry for" \
     "GEGENPROBE nosuid: ohne das setuid-Bit kommt su nicht an /etc/shadow"
 is "und der Zaehler bleibt bei null" "$(val "$G" 'suidexec=[0-9]+')" "0"
 

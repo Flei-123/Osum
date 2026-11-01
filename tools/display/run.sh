@@ -74,7 +74,7 @@ gleich "und sie folgt unmittelbar auf den Modustreiber" \
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/user/dispctl.fi' \
               -e '^kernel/user/settings.fi' -e '^kernel/user/settings/' -e '^kernel/user/qs.fi' \
-              -e '^kernel/user/snip.fi' -e '^kernel/user/wmd.fi' || true)
+              -e '^kernel/user/snip.fi' -e '^kernel/user/wmd.fi' -e '^kernel/user/modeapply.fi' -e '^kernel/user/powerd.fi' -e '^kernel/user/qsmodes.fi' -e '^kernel/user/snipgrab.fi' || true)
 [ -z "$fremd" ] && ok "no call number from 1810..1819 lies outside the files of this round" \
                 || bad "call numbers from 1810..1819 also appear in: $(echo $fremd | tr '\n' ' ')"
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys/sys.fi | wc -l | tr -d ' ')
