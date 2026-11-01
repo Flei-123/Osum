@@ -1,0 +1,2026 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import gfx.gfx
+import lib.kstate
+import sched.sched
+import sched.proc
+import arch.cpu
+import fs.fs
+import fs.statsane
+import fs.statxconv
+import ldr.elf
+import lib.errno
+import fs.file
+import fs.evfd
+import ipc.uio
+import fs.nidx
+import fs.ftype
+import sched.time
+import net.netview
+import fs.unixsock
+import ipc.perm
+import ipc.appfs
+import sched.ctr
+import fs.vfs
+import fs.mnt
+import fs.vfsops
+import block.part
+import block.blk
+import fs.syncall
+import sys.sysconst
+import sys.sysuser
+import sys.sysfd
+
+export {
+    at_enter1, do_access, do_chdir, do_chmod, do_chown, do_chroot, do_diskup, do_fallocate, do_fchdir, do_fchmod, do_fchown, do_flist, do_fopen, do_freg, do_fstat, do_ftype, do_getcwd, do_getdents, do_jrnl, do_link, do_lstat, do_memfd, do_mkdir_mode, do_mntstat, do_mount, do_readlink, do_rename, do_rmdir, do_scan, do_stat, do_statfs, do_statx, do_symlink, do_sync, do_unlink, do_utimensat, do_vfs_mount, do_vfs_umount, ev_in_any, ev_in_path, ev_in_rename, ev_open_create, lc_at
+}
+
+const UTIME_NOW: u64 = 1073741823 // (1 << 30) - 1
+const UTIME_OMIT: u64 = 1073741822 // (1 << 30) - 2
+
+const MS_USED: u64 = 0
+const MS_TYPE: u64 = 1
+const MS_DEV: u64 = 2
+const MS_FIRST: u64 = 3
+const MS_BLOCKS: u64 = 4
+const MS_FLAGS: u64 = 5
+const MS_OPENS: u64 = 6
+const MS_COUNT: u64 = 7
+const MS_PATHLEN: u64 = 8
+const MS_PATHCH: u64 = 100
+
+const MNT_RDONLY: u64 = 1
+
+// The file kinds of `struct stat`, as Linux writes them.
+const S_IFDIR: u64 = 16384 // 0o40000
+const S_IFREG: u64 = 32768 // 0o100000
+const S_IFCHR: u64 = 8192 // 0o20000
+const S_IFBLK: u64 = 24576 // 0o60000
+const S_IFIFO: u64 = 4096 // 0o10000
+const S_IFLNK: u64 = 40960 // 0o120000
+
+const DT_DIR: u64 = 4
+const DT_REG: u64 = 8
+const DT_LNK: u64 = 10
+
+// `struct stat` of x86-64 Linux is 144 octets; `struct linux_dirent64`
+// has 19 octets in front of the name.
+const STAT_BYTES: u64 = 144
+const DIRENT_HEAD: u64 = 19
+
+const ST_DEV: u64 = 0
+const ST_INO: u64 = 8
+const ST_NLINK: u64 = 16
+const ST_MODE: u64 = 24 // 32 bit
+const ST_UID: u64 = 28 // 32 bit
+const ST_GID: u64 = 32 // 32 bit
+const ST_RDEV: u64 = 40
+const ST_SIZE: u64 = 48
+const ST_BLKSIZE: u64 = 56
+const ST_BLOCKS: u64 = 64
+const ST_ATIME: u64 = 72
+const ST_MTIME: u64 = 88
+const ST_CTIME: u64 = 104
+
+const NB_ENT: u64 = 3072
+const NB_FSTYPE: u64 = 3584
+
+fn do_unlink(state: u64, me: u64, name: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk_w(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return sysuser.neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                    == vfsops.N_DIR {
+                    return sysuser.neg(errno.E_ISDIR)
+                }
+                let r: u64 = vfs.v_unlink(state, m, buf)
+                if r != 0 {
+                    return sysuser.neg(r)
+                }
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) == fs.T_DIR {
+        return sysuser.neg(errno.E_ISDIR)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    if !fs.unlink_path(state, buf) {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    return 0
+}
+
+// ================================================== RUNDE ALLTAG: rmdir
+fn do_rmdir(state: u64, me: u64, name: u64) -> u64 {
+    let buf: u64 = state + kstate.NAME_OFF
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk_w(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return sysuser.neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                    != vfsops.N_DIR {
+                    return sysuser.neg(errno.E_NOTDIR)
+                }
+                let r: u64 = vfs.v_unlink(state, m, buf)
+                if r != 0 {
+                    return sysuser.neg(r)
+                }
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_DIR {
+        return sysuser.neg(errno.E_NOTDIR)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    if !fs.unlink_path(state, buf) {
+        return sysuser.neg(errno.E_NOTEMPTY)
+    }
+    return 0
+}
+
+fn dir_create_mode(mode: u64) -> u64 {
+    if (mode & 4095) == 0 {
+        return 511
+    }
+    return mode & 4095
+}
+
+fn do_mkdir_mode(state: u64, me: u64, name: u64, mode: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk_w(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                if vfs.node_for(state, m, buf) != 0 {
+                    return sysuser.neg(errno.E_EXIST)
+                }
+                if !vfs.can(state, m, vfsops.OP_CREATE) {
+                    if vfs.rdonly(state, m) {
+                        return sysuser.neg(errno.E_ROFS)
+                    }
+                    return sysuser.neg(errno.E_PERM)
+                }
+                let created: u64 = vfs.v_create(state, m, buf,
+                    vfsops.N_DIR)
+                if created == 0 {
+                    return sysuser.neg(errno.E_NOSPC)
+                }
+                sysfd.vfs_on_create(state, me, m, created, dir_create_mode(mode))
+                return 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if fs.path(state, buf) != 0 {
+        return sysuser.neg(errno.E_EXIST)
+    }
+    let dir: u64 = fs.parent_ino(state, buf)
+    if dir != 0 {
+        if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    let made: u64 = fs.create_path(state, buf, fs.T_DIR)
+    if made == 0 {
+        if dir == 0 {
+            return sysuser.neg(errno.E_NOENT) // mkdir -p / git rely on ENOENT for a missing parent
+        }
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    perm.on_create(state, me, made, dir_create_mode(mode))
+    return 0
+}
+
+// ------------------------------------------------------------- stat
+
+// `struct stat` as x86-64 Linux lays it out, filled in the data area and
+// copied over in one go.
+fn fill_stat(state: u64, ino: u64) -> bool {
+    let s: u64 = sysuser.blockb(state) + 2048
+    var i: u64 = 0
+    while i < STAT_BYTES {
+        kstate.set8(s + i, 0 as u8)
+        i = i + 1
+    }
+    let kind: u64 = fs.inode_type(state, ino)
+    var mode: u64 = S_IFREG | fs.inode_mode(state, ino)
+    if kind == fs.T_DIR {
+        mode = S_IFDIR | fs.inode_mode(state, ino)
+    }
+    if kind == fs.T_LINK {
+        mode = S_IFLNK | 511
+    }
+    let size: u64 = fs.inode_size(state, ino)
+    let uid: u64 = fs.inode_uid(state, ino)
+    let gid: u64 = fs.inode_gid(state, ino)
+    statsane.check(state, ino, uid, gid, size)
+    __mmio_write64((s + ST_DEV) as *mut u64, 1)
+    __mmio_write64((s + ST_INO) as *mut u64, ino)
+    __mmio_write64((s + ST_NLINK) as *mut u64, 1)
+    __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
+    __mmio_write32((s + ST_UID) as *mut u32, statsane.id32(state, uid) as u32)
+    __mmio_write32((s + ST_GID) as *mut u32, statsane.id32(state, gid) as u32)
+    __mmio_write64((s + ST_RDEV) as *mut u64, 0)
+    __mmio_write64((s + ST_SIZE) as *mut u64, size)
+    __mmio_write64((s + ST_BLKSIZE) as *mut u64, 512)
+    __mmio_write64((s + ST_BLOCKS) as *mut u64, statsane.blocks512(state, size))
+    __mmio_write64((s + ST_MTIME) as *mut u64, fs.inode_mtime(state, ino))
+    __mmio_write64((s + ST_CTIME) as *mut u64, fs.inode_ctime(state, ino))
+    __mmio_write64((s + ST_ATIME) as *mut u64, fs.inode_atime(state, ino))
+    return true
+}
+
+fn stat_out(state: u64, me: u64, out: u64) -> u64 {
+    if !sysuser.copy_out(state, me, out, sysuser.blockb(state) + 2048,
+        STAT_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+fn fill_vstat(state: u64, m: u64, node: u64) -> bool {
+    let s: u64 = sysuser.blockb(state) + 2048
+    var i: u64 = 0
+    while i < STAT_BYTES {
+        kstate.set8(s + i, 0 as u8)
+        i = i + 1
+    }
+    let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+    let size: u64 = vfs.v_attr(state, m, node, vfsops.A_SIZE)
+    var mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
+    if art == vfsops.N_DIR {
+        mode = mode | S_IFDIR
+    } else if art == vfsops.N_CHR {
+        mode = mode | S_IFCHR
+    } else if art == vfsops.N_BLK {
+        mode = mode | S_IFBLK
+    } else if art == vfsops.N_LNK {
+        mode = mode | S_IFLNK
+    } else {
+        mode = mode | S_IFREG
+    }
+    let bs: u64 = vfs.v_attr(state, m, node, vfsops.A_BLKSIZE)
+    __mmio_write64((s + ST_DEV) as *mut u64, m + 1)
+    __mmio_write64((s + ST_INO) as *mut u64, node)
+    __mmio_write64((s + ST_NLINK) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_NLINK))
+    __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
+    __mmio_write64((s + ST_RDEV) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_RDEV))
+    __mmio_write64((s + ST_SIZE) as *mut u64, size)
+    __mmio_write64((s + ST_BLKSIZE) as *mut u64, bs)
+    if bs != 0 {
+        __mmio_write64((s + ST_BLOCKS) as *mut u64, statsane.blocks512(state, size))
+    }
+    __mmio_write64((s + ST_MTIME) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_MTIME))
+    __mmio_write64((s + ST_CTIME) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_CTIME))
+    __mmio_write64((s + ST_ATIME) as *mut u64,
+        vfs.v_attr(state, m, node, vfsops.A_ATIME))
+    return true
+}
+
+fn do_stat(state: u64, me: u64, name: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, STAT_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return sysuser.neg(errno.E_NOENT)
+                }
+                fill_vstat(state, m, node)
+                return stat_out(state, me, out)
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    fill_stat(state, ino)
+    return stat_out(state, me, out)
+}
+
+// ======================================================== RUNDE OFS3
+fn do_lstat(state: u64, me: u64, name: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, STAT_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let node: u64 = vfs.node_for(state, m, buf)
+                if node == 0 {
+                    return sysuser.neg(errno.E_NOENT)
+                }
+                fill_vstat(state, m, node)
+                return stat_out(state, me, out)
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path_nofollow(state, buf)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    fill_stat(state, ino)
+    return stat_out(state, me, out)
+}
+
+fn do_symlink(state: u64, me: u64, target: u64, wo: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let zbuf: u64 = sysuser.nameb(state) + 1024
+    let zn: u64 = sysuser.fetch_name(state, me, target, zbuf, sysconst.MAX_NAME)
+    if errno.is_error(zn) {
+        return zn
+    }
+    if zn == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, wo, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if len == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !sysfd.dir_allowed(state, me, buf, 0) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if fs.path_nofollow(state, buf) != 0 {
+        return sysuser.neg(errno.E_EXIST)
+    }
+    let ino: u64 = fs.symlink_path(state, zbuf, buf)
+    if ino == 0 {
+        if fs.version(state) < fs.OFS_V3 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    perm.on_create(state, me, ino, 511)
+    return 0
+}
+
+fn do_readlink(state: u64, me: u64, name: u64, out: u64,
+    size: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if size == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, out, size) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                let vnode: u64 = vfs.node_for(state, m, buf)
+                if vnode == 0 {
+                    return sysuser.neg(errno.E_NOENT)
+                }
+                if vfs.v_attr(state, m, vnode, vfsops.A_TYPE)
+                    != vfsops.N_LNK {
+                    return sysuser.neg(errno.E_INVAL)
+                }
+                var vn: u64 = vfs.v_attr(state, m, vnode, vfsops.A_SIZE)
+                if vn > sysconst.MAX_NAME {
+                    vn = sysconst.MAX_NAME
+                }
+                if vn > size {
+                    vn = size
+                }
+                let vziel: u64 = sysuser.nameb(state) + 1024
+                let got: u64 = vfs.v_read(state, m, vnode, 0, vziel, vn)
+                if !sysuser.copy_out(state, me, out, vziel, got) {
+                    return sysuser.neg(errno.E_FAULT)
+                }
+                return got
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let ino: u64 = fs.path_nofollow(state, buf)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_LINK {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let target: u64 = sysuser.nameb(state) + 1024
+    var n: u64 = fs.readlink_at(state, ino, target, sysconst.MAX_NAME)
+    if n > size {
+        n = size
+    }
+    if !sysuser.copy_out(state, me, out, target, n) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return n
+}
+
+fn do_utimensat(state: u64, me: u64, fd: u64, name: u64, zeiten: u64,
+    flaggen: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    var ino: u64 = 0
+    if name == 0 {
+        // r820: futimens(fd, times) = utimensat(fd, NULL, times, 0)
+        let ofd: u64 = sysuser.of_of(state, me, fd)
+        if ofd >= file.MAX_OPEN {
+            return sysuser.neg(errno.E_BADF)
+        }
+        let kd: u64 = file.open_kind(state, ofd)
+        if kd != file.K_FILE && kd != file.K_DIR {
+            return sysuser.neg(errno.E_PERM) // pipes, consoles and virtual files carry no times
+        }
+        ino = file.open_ino(state, ofd)
+        if ino == 0 {
+            return sysuser.neg(errno.E_BADF)
+        }
+    } else {
+        let buf: u64 = sysuser.nameb(state)
+        let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+        if errno.is_error(len) {
+            return len
+        }
+        if !perm.walk_w(state, me, buf) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+        ino = fs.path(state, buf)
+        if ino == 0 {
+            return sysuser.neg(errno.E_NOENT)
+        }
+    }
+    if !perm.may(state, me, ino, perm.R_WRITE) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let nun: u64 = time.now_sec(state)
+    var a: u64 = nun
+    var m: u64 = nun
+    if zeiten != 0 {
+        if !proc.user_ok(state, me, zeiten, 32) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let as_: u64 = sysuser.user_word(state, me, zeiten)
+        let an: u64 = sysuser.user_word(state, me, zeiten + 8)
+        let ms: u64 = sysuser.user_word(state, me, zeiten + 16)
+        let mn: u64 = sysuser.user_word(state, me, zeiten + 24)
+        if an == UTIME_OMIT {
+            a = 0
+        } else if an != UTIME_NOW {
+            a = as_
+        }
+        if mn == UTIME_OMIT {
+            m = 0
+        } else if mn != UTIME_NOW {
+            m = ms
+        }
+    }
+    if !fs.set_times(state, ino, 0, m, a) {
+        if fs.version(state) < fs.OFS_V3 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        return sysuser.neg(errno.E_IO)
+    }
+    return 0
+}
+
+fn do_fstat(state: u64, me: u64, fd: u64, out: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, out, STAT_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_FILE || kind == file.K_DIR {
+        fill_stat(state, file.open_ino(state, of))
+        return stat_out(state, me, out)
+    }
+    // ROUNDE K14.
+    if kind == file.K_VFILE || kind == file.K_VDIR {
+        fill_vstat(state, file.open_mnt(state, of),
+            file.open_ino(state, of))
+        return stat_out(state, me, out)
+    }
+    // A pipe and the console have no inode. They still have a KIND, and a
+    // program that asks what it is holding gets an answer.
+    let s: u64 = sysuser.blockb(state) + 2048
+    var i: u64 = 0
+    while i < STAT_BYTES {
+        kstate.set8(s + i, 0 as u8)
+        i = i + 1
+    }
+    var mode: u64 = S_IFCHR | 438 // 0o666
+    if kind == file.K_PIPER || kind == file.K_PIPEW {
+        mode = S_IFIFO | 438
+    }
+    if kind == file.K_SHM {
+        // memfd / /dev/shm object: a regular file whose size is the ftruncate() size
+        mode = S_IFREG | 438
+        __mmio_write64((s + ST_SIZE) as *mut u64, unixsock.shm_size(state, file.open_ino(state, of)))
+    }
+    __mmio_write32((s + ST_MODE) as *mut u32, mode as u32)
+    __mmio_write64((s + ST_NLINK) as *mut u64, 1)
+    __mmio_write64((s + ST_BLKSIZE) as *mut u64, 512)
+    if kind == file.K_FB {
+        __mmio_write64((s + ST_SIZE) as *mut u64, gfx.fb_bytes(state))
+        __mmio_write64((s + ST_BLKSIZE) as *mut u64, gfx.fb_pitch(state))
+    }
+    return stat_out(state, me, out)
+}
+
+// --------------------------------------------------------- getdents64
+
+// `struct linux_dirent64`:
+//
+//     +0  d_ino (8)   +8 d_off (8)   +16 d_reclen (2)   +18 d_type (1)
+//     +19 the name, ended by a zero
+fn do_getdents_vfs(state: u64, me: u64, of: u64, out: u64,
+    size: u64) -> u64 {
+    let m: u64 = file.open_mnt(state, of)
+    let dir: u64 = file.open_ino(state, of)
+    let named: u64 = sysuser.nameb(state) + NB_ENT
+    let build: u64 = sysuser.blockb(state) + 2048
+    var written: u64 = 0
+    var pos: u64 = file.open_off(state, of)
+    var going: bool = true
+    while going {
+        let node: u64 = vfs.v_readdir(state, m, dir, pos, named)
+        if node == 0 {
+            going = false
+        } else {
+            var n: u64 = 0
+            while kstate.get8(named + n) != 0 {
+                n = n + 1
+            }
+            let reclen: u64 = (DIRENT_HEAD + n + 1 + 7) & 0xFFFFFFFFFFFFFFF8
+            if written + reclen > size {
+                if written == 0 {
+                    return sysuser.neg(errno.E_INVAL)
+                }
+                going = false
+            } else {
+                var z: u64 = 0
+                while z < reclen {
+                    kstate.set8(build + z, 0 as u8)
+                    z = z + 1
+                }
+                __mmio_write64(build as *mut u64, node)
+                __mmio_write64((build + 8) as *mut u64, pos + 1)
+                __mmio_write16((build + 16) as *mut u16, reclen as u16)
+                var kind: u64 = DT_REG
+                let vart: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+                if vart == vfsops.N_DIR {
+                    kind = DT_DIR
+                } else if vart == vfsops.N_LNK {
+                    kind = DT_LNK
+                }
+                kstate.set8(build + 18, kind as u8)
+                var k: u64 = 0
+                while k < n {
+                    kstate.set8(build + DIRENT_HEAD + k,
+                        kstate.get8(named + k) as u8)
+                    k = k + 1
+                }
+                if !sysuser.copy_out(state, me, out + written, build, reclen) {
+                    return sysuser.neg(errno.E_FAULT)
+                }
+                written = written + reclen
+                pos = pos + 1
+                file.open_set_off(state, of, pos)
+            }
+        }
+    }
+    return written
+}
+
+fn do_getdents(state: u64, me: u64, fd: u64, out: u64, size: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) == file.K_VDIR {
+        if !proc.user_ok(state, me, out, size) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return do_getdents_vfs(state, me, of, out, size)
+    }
+    if file.open_kind(state, of) != file.K_DIR {
+        return sysuser.neg(errno.E_NOTDIR)
+    }
+    if !proc.user_ok(state, me, out, size) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let dir: u64 = file.open_ino(state, of)
+    let named: u64 = sysuser.nameb(state) + NB_ENT
+    let build: u64 = sysuser.blockb(state) + 2048
+    var written: u64 = 0
+    var pos: u64 = file.open_off(state, of)
+    var going: bool = true
+    let plaetze: u64 = fs.slot_count(state, dir)
+    while going {
+        if pos >= plaetze {
+            going = false
+        } else {
+        let ino: u64 = fs.entry_slot(state, dir, pos, named, NB_FSTYPE - NB_ENT)
+        if ino == 0 {
+            pos = pos + 1
+            file.open_set_off(state, of, pos)
+        } else {
+            // What the file system writes is its own directory entry: the
+            // inode number in the first eight octets, the name in the
+            // 24 behind them (`fs.DIRENT`, `fs.NAME_LEN`).
+            let text: u64 = named + 8
+            var n: u64 = 0
+            while kstate.get8(text + n) != 0 {
+                n = n + 1
+            }
+            let reclen: u64 = (DIRENT_HEAD + n + 1 + 7) & 0xFFFFFFFFFFFFFFF8
+            if written + reclen > size {
+                if written == 0 {
+                    return sysuser.neg(errno.E_INVAL)
+                }
+                going = false
+            } else {
+                var z: u64 = 0
+                while z < reclen {
+                    kstate.set8(build + z, 0 as u8)
+                    z = z + 1
+                }
+                __mmio_write64(build as *mut u64, ino)
+                __mmio_write64((build + 8) as *mut u64, pos + 1)
+                __mmio_write16((build + 16) as *mut u16, reclen as u16)
+                var kind: u64 = DT_REG
+                let art: u64 = fs.inode_type(state, ino)
+                if art == fs.T_DIR {
+                    kind = DT_DIR
+                } else if art == fs.T_LINK {
+                    kind = DT_LNK
+                }
+                kstate.set8(build + 18, kind as u8)
+                var k: u64 = 0
+                while k < n {
+                    kstate.set8(build + DIRENT_HEAD + k,
+                        kstate.get8(text + k) as u8)
+                    k = k + 1
+                }
+                if !sysuser.copy_out(state, me, out + written, build, reclen) {
+                    return sysuser.neg(errno.E_FAULT)
+                }
+                written = written + reclen
+                pos = pos + 1
+                file.open_set_off(state, of, pos)
+            }
+        }
+        }
+    }
+    return written
+}
+
+// ==================================================== RUNDE K14
+
+fn name_is(state: u64, p: u64, lit: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(p + i) != 0 && kstate.get8(lit + i) != 0 {
+        if kstate.get8(p + i) != kstate.get8(lit + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return kstate.get8(p + i) == kstate.get8(lit + i)
+}
+
+fn fstype_of(state: u64, p: u64) -> u64 {
+    var a: [u8; 4] = "ofs "
+    var b: [u8; 5] = "proc "
+    var c: [u8; 6] = "devfs "
+    var d: [u8; 5] = "vfat "
+    var e: [u8; 6] = "fat32 "
+    var f: [u8; 5] = "ext4 "
+    var g: [u8; 5] = "ntfs "
+    var h: [u8; 5] = "ext2 "
+    var i: [u8; 5] = "ext3 "
+    var j: [u8; 6] = "exfat "
+    if name_is(state, p, (&a[0]) as u64) {
+        return vfsops.FS_OFS
+    }
+    if name_is(state, p, (&b[0]) as u64) {
+        return vfsops.FS_PROC
+    }
+    if name_is(state, p, (&c[0]) as u64) {
+        return vfsops.FS_DEV
+    }
+    if name_is(state, p, (&d[0]) as u64) || name_is(state, p, (&e[0]) as u64) {
+        return vfsops.FS_FAT
+    }
+    if name_is(state, p, (&f[0]) as u64) || name_is(state, p, (&h[0]) as u64)
+        || name_is(state, p, (&i[0]) as u64) {
+        return vfsops.FS_EXT4
+    }
+    if name_is(state, p, (&g[0]) as u64) {
+        return vfsops.FS_NTFS
+    }
+    if name_is(state, p, (&j[0]) as u64) {
+        return vfsops.FS_EXFAT
+    }
+    return vfsops.FS_NONE
+}
+
+fn source_dev(state: u64, p: u64, out_part: u64) -> u64 {
+    var n_hda: [u8; 9] = "/dev/hda "
+    var n_hdb: [u8; 9] = "/dev/hdb "
+    var n_ram: [u8; 10] = "/dev/ram0 "
+    var n_nvme: [u8; 11] = "/dev/nvme0 "
+    var n_usb: [u8; 9] = "/dev/usb "
+    var n_sda: [u8; 9] = "/dev/sda "
+    var base: [u8; 32] = [0 as u8; 32]
+    var n: u64 = 0
+    while kstate.get8(p + n) != 0 && n < 31 {
+        base[n as usize] = kstate.get8(p + n) as u8
+        n = n + 1
+    }
+    base[n as usize] = 0 as u8
+    __mmio_write64(out_part as *mut u64, 0)
+    if name_is(state, (&base[0]) as u64, (&n_ram[0]) as u64) {
+        return blk.DEV_RAM
+    }
+    if name_is(state, (&base[0]) as u64, (&n_nvme[0]) as u64) {
+        return blk.DEV_NVME
+    }
+    if n > 1 {
+        let last: u64 = base[(n - 1) as usize] as u64
+        if last >= 49 && last <= 57 {
+            __mmio_write64(out_part as *mut u64, last - 48)
+            base[(n - 1) as usize] = 0 as u8
+        }
+    }
+    if name_is(state, (&base[0]) as u64, (&n_hda[0]) as u64) {
+        return blk.DEV_ATA
+    }
+    if name_is(state, (&base[0]) as u64, (&n_hdb[0]) as u64) {
+        return blk.DEV_ATA1
+    }
+    if name_is(state, (&base[0]) as u64, (&n_usb[0]) as u64) {
+        return blk.DEV_USB
+    }
+    // The AHCI disk (/dev/sda, /dev/sda1 = its first partition). Same
+    // naming rule as hdb/hdb1; the controller is brought up on demand.
+    if name_is(state, (&base[0]) as u64, (&n_sda[0]) as u64) {
+        if !blk.ahci_ready(state) {
+            return 99
+        }
+        return blk.DEV_AHCI
+    }
+    return 99
+}
+
+fn do_vfs_mount(state: u64, me: u64, src: u64, target: u64, kind: u64,
+    flags: u64) -> u64 {
+    if !vfs.ready(state) {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if (flags & 0xFFFFFFFFFFFFFFFE) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let sbuf: u64 = sysuser.nameb(state) + 1024
+    let tbuf: u64 = sysuser.nameb(state)
+    let kbuf: u64 = sysuser.nameb(state) + NB_FSTYPE
+    if errno.is_error(sysuser.fetch_name(state, me, src, sbuf, 64)) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let tl: u64 = sysuser.fetch_path(state, me, target, tbuf, sysconst.MAX_NAME)
+    if errno.is_error(tl) {
+        return tl
+    }
+    if errno.is_error(sysuser.fetch_name(state, me, kind, kbuf, 32)) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let ft: u64 = fstype_of(state, kbuf)
+    if ft == vfsops.FS_NONE {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    var mflags: u64 = 0
+    if (flags & MNT_RDONLY) != 0 {
+        mflags = mnt.F_RDONLY
+    }
+    var dev: u64 = 0
+    var first: u64 = 0
+    var count: u64 = 0
+    if ft == vfsops.FS_FAT || ft == vfsops.FS_OFS
+        || ft == vfsops.FS_EXT4 || ft == vfsops.FS_NTFS
+        || ft == vfsops.FS_EXFAT {
+        var pnum: u64 = 0
+        dev = source_dev(state, sbuf, (&pnum) as u64)
+        if dev == 99 {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        if pnum == 0 {
+            first = 0
+            count = blk.blocks_on(state, dev)
+        } else {
+            if part.scan(state, dev) == 0 {
+                return sysuser.neg(errno.E_NODEV)
+            }
+            var found: u64 = part.MAX_PARTS
+            var i: u64 = 0
+            var seen: u64 = 0
+            while i < part.MAX_PARTS {
+                if part.index_of(state, i) != 0 {
+                    if part.dev_of(state, i) == dev {
+                        seen = seen + 1
+                        if seen == pnum {
+                            found = i
+                            i = part.MAX_PARTS
+                        }
+                    }
+                }
+                if i < part.MAX_PARTS {
+                    i = i + 1
+                }
+            }
+            if found >= part.MAX_PARTS {
+                return sysuser.neg(errno.E_NODEV)
+            }
+            first = part.start(state, found)
+            count = part.blocks(state, found)
+        }
+    }
+    let m: u64 = vfs.mount_at(state, ft, dev, first, count, tbuf, mflags)
+    if m >= vfs.MAX_MNT {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    return 0
+}
+
+fn do_vfs_umount(state: u64, me: u64, target: u64) -> u64 {
+    if !vfs.ready(state) {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let tbuf: u64 = sysuser.nameb(state)
+    let tl: u64 = sysuser.fetch_path(state, me, target, tbuf, sysconst.MAX_NAME)
+    if errno.is_error(tl) {
+        return tl
+    }
+    let r: u64 = vfs.umount_path(state, tbuf)
+    if r != 0 {
+        return sysuser.neg(r)
+    }
+    return 0
+}
+
+fn do_link(state: u64, me: u64, from: u64, to: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let a: u64 = sysuser.nameb(state)
+    let b: u64 = sysuser.nameb(state) + 1024
+    let la: u64 = sysuser.fetch_path(state, me, from, a, sysconst.MAX_NAME)
+    if errno.is_error(la) {
+        return la
+    }
+    uio.next_base(state, me) // r821: the second path may belong to another directory descriptor
+    let lb: u64 = sysuser.fetch_path(state, me, to, b, sysconst.MAX_NAME)
+    if errno.is_error(lb) {
+        return lb
+    }
+    if vfs.ready(state) {
+        let ma: u64 = vfs.mount_for(state, a)
+        let mb: u64 = vfs.mount_for(state, b)
+        if ma != mb {
+            return sysuser.neg(errno.E_XDEV)
+        }
+        if ma != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if fs.path(state, b) != 0 {
+        return sysuser.neg(errno.E_EXIST)
+    }
+    let dir: u64 = fs.parent_ino(state, b)
+    if dir == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if !perm.may(state, me, dir, perm.R_WRITE | perm.R_EXEC) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let r: u64 = fs.link_path(state, a, b)
+    if r != 0 {
+        return sysuser.neg(r)
+    }
+    return 0
+}
+
+fn do_sync(state: u64, me: u64) -> u64 {
+    if !syncall.sync_all(state) {
+        return sysuser.neg(errno.E_IO)
+    }
+    return 0
+}
+
+fn do_rename(state: u64, me: u64, from: u64, to: u64) -> u64 {
+    let a: u64 = sysuser.nameb(state)
+    let b: u64 = sysuser.nameb(state) + 1024
+    let la: u64 = sysuser.fetch_path(state, me, from, a, sysconst.MAX_NAME)
+    if errno.is_error(la) {
+        return la
+    }
+    uio.next_base(state, me) // r821: the second path may belong to another directory descriptor
+    let lb: u64 = sysuser.fetch_path(state, me, to, b, sysconst.MAX_NAME)
+    if errno.is_error(lb) {
+        return lb
+    }
+    // ==================================== RUNDE MULTIUSER: DAS TOR
+    if !perm.walk_w(state, me, a) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if !perm.walk_w(state, me, b) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let ma: u64 = vfs.mount_for(state, a)
+        let mb: u64 = vfs.mount_for(state, b)
+        if ma >= vfs.MAX_MNT || mb >= vfs.MAX_MNT {
+            return sysuser.neg(errno.E_NOENT)
+        }
+        if ma != 0 || mb != 0 || vfs.all_mode(state) {
+            let rv: u64 = vfs.v_rename(state, ma, a, mb, b)
+            if rv != 0 {
+                return sysuser.neg(rv)
+            }
+            return 0
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let odir: u64 = fs.parent_ino(state, a)
+    let ndir: u64 = fs.parent_ino(state, b)
+    if odir == 0 || ndir == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if !perm.may(state, me, odir, perm.R_WRITE | perm.R_EXEC) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if !perm.may(state, me, ndir, perm.R_WRITE | perm.R_EXEC) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let r: u64 = fs.rename_path(state, a, b)
+    if r != 0 {
+        return sysuser.neg(r)
+    }
+    return 0
+}
+
+fn do_mntstat(state: u64, index: u64, field: u64) -> u64 {
+    if field == MS_COUNT {
+        return mnt.count(state)
+    }
+    if index >= vfs.MAX_MNT {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if field == MS_USED {
+        if mnt.used(state, index) {
+            return 1
+        }
+        return 0
+    }
+    if !mnt.used(state, index) {
+        return 0
+    }
+    if field == MS_TYPE {
+        return mnt.fstype(state, index)
+    }
+    if field == MS_DEV {
+        return mnt.dev(state, index)
+    }
+    if field == MS_FIRST {
+        return mnt.first(state, index)
+    }
+    if field == MS_BLOCKS {
+        return mnt.blocks(state, index)
+    }
+    if field == MS_FLAGS {
+        return mnt.flags(state, index)
+    }
+    if field == MS_OPENS {
+        return mnt.opens(state, index)
+    }
+    if field == MS_PATHLEN {
+        return mnt.path_len(state, index)
+    }
+    if field >= MS_PATHCH {
+        let i: u64 = field - MS_PATHCH
+        if i >= mnt.path_len(state, index) {
+            return 0
+        }
+        return kstate.get8(mnt.path_at(state, index) + i)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_mount(state: u64, op: u64) -> u64 {
+    if op == 0 {
+        return kstate.get(state, kstate.FS_READY)
+    }
+    if op == 1 {
+        if fs.mount(state) {
+            return 1
+        }
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if op == 2 {
+        kstate.set(state, kstate.FS_READY, 0)
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ftype(state: u64, me: u64, path: u64, out: u64, len: u64) -> u64 {
+    let name: u64 = sysuser.nameb(state)
+    let n: u64 = sysuser.fetch_path(state, me, path, name, sysconst.MAX_NAME)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if kstate.get(state, kstate.FS_READY) != 0 {
+    if !perm.walk(state, me, name) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+        if fs.path(state, name) == 0 {
+            return sysuser.neg(errno.E_NOENT)
+        }
+    }
+    let art: u64 = ftype.classify(state, name)
+    if art == ftype.T_NONE {
+        return sysuser.neg(errno.E_NOEXEC)
+    }
+    if out != 0 {
+        var k: u64 = len
+        if k > kstate.FT_SLOT {
+            k = kstate.FT_SLOT
+        }
+        if !sysuser.copy_out(state, me, out, ftype.record_for(state, art), k) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    return art
+}
+
+fn do_flist(state: u64, me: u64, nr: u64, out: u64, len: u64) -> u64 {
+    if nr >= kstate.FT_SLOTS {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if kstate.get(state, ftype.slot_off(nr) + ftype.R_USED) == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if out != 0 {
+        var k: u64 = len
+        if k > kstate.FT_SLOT {
+            k = kstate.FT_SLOT
+        }
+        if !sysuser.copy_out(state, me, out, ftype.table_at(state, nr), k) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    return nr
+}
+
+fn do_freg(state: u64, me: u64, satz: u64, len: u64) -> u64 {
+    if len != kstate.FT_SLOT {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let buf: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, buf, satz, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let i: u64 = ftype.register_from(state, buf)
+    if i >= kstate.FT_SLOTS {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    return i
+}
+
+fn do_fopen(state: u64, me: u64, path: u64, argv: u64, argc: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if argc > proc.MAX_ARGS {
+        return sysuser.neg(errno.E_2BIG)
+    }
+    let name: u64 = sysuser.nameb(state)
+    let n: u64 = sysuser.fetch_path(state, me, path, name, sysconst.MAX_NAME)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if !perm.walk(state, me, name) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if fs.path(state, name) == 0 {
+        ftype.refuse(state)
+        return sysuser.neg(errno.E_NOENT)
+    }
+    let art: u64 = ftype.classify(state, name)
+    if art == ftype.T_NONE {
+        ftype.refuse(state)
+        return sysuser.neg(errno.E_NOEXEC)
+    }
+    let wirkung: u64 = ftype.action_of(state, art)
+    let abuf: u64 = cpu.earg_buf(state)
+    var at: u64 = 0
+    var anz: u64 = 0
+    var start: u64 = name
+    if wirkung == ftype.A_EXEC {
+        at = at + sysuser.kcopy_word(abuf + at, name, sysconst.MAX_NAME + 1)
+        anz = 1
+    } else {
+        if wirkung != ftype.A_OPEN {
+            ftype.refuse(state)
+            return sysuser.neg(errno.E_NOEXEC)
+        }
+        let prog: u64 = ftype.prog_of(state, art)
+        if prog == 0 {
+            ftype.refuse(state)
+            return sysuser.neg(errno.E_NOEXEC)
+        }
+        start = prog
+        at = at + sysuser.kcopy_word(abuf + at, prog, ftype.PROG_MAX)
+        at = at + sysuser.kcopy_word(abuf + at, name, sysconst.MAX_NAME + 1)
+        anz = 2
+    }
+    var k: u64 = 0
+    while k < argc {
+        if !proc.user_ok(state, me, argv + k * 8, 8) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let m: u64 = sysuser.fetch_name(state, me,
+            sysuser.user_word(state, me, argv + k * 8), abuf + at, sysconst.MAX_NAME)
+        if errno.is_error(m) {
+            return m
+        }
+        at = at + m + 1
+        anz = anz + 1
+        k = k + 1
+    }
+    if anz > proc.MAX_ARGS {
+        return sysuser.neg(errno.E_2BIG)
+    }
+    let t: u64 = elf.spawn(state, start, abuf, anz, 2)
+    if t == 0 {
+        let why: u64 = kstate.get(state, kstate.ELF_ERR)
+        elf.say_reason(why)
+        ftype.refuse(state)
+        return sysuser.neg(elf.errno_of(why))
+    }
+    ftype.opened(state)
+    netview.inherit(state, me, t)
+    ctr.inherit(state, me, t)
+    return sched.tget(state, t, sched.T_PID)
+}
+
+// `chdir(path)` -- Linux's number 80, and Linux's meaning. What is stored
+// is the path with `.` and `..` folded away, because `getcwd` prints this
+// string back and `/bin/../bin` is not a name anybody wants to read.
+fn do_chdir(state: u64, me: u64, name: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino != 0 {
+        if !perm.may(state, me, ino, perm.R_EXEC) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    return uio.chdir_to(state, me, buf)
+}
+
+// r820: `fchdir(fd)`. The directory descriptor remembers its path (`dirpath_remember`, jail prefix cut); `uio.resolve` puts the
+// jail root in front again, then the same checks as `chdir` run.
+fn do_fchdir(state: u64, me: u64, fd: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    let fr: u64 = at_dir_frame(state, me, fd)
+    if errno.is_error(fr) {
+        return fr
+    }
+    let buf: u64 = sysuser.nameb(state)
+    var n: u64 = 0
+    while n < uio.PATH_MAX && kstate.get8(fr + n) != 0 {
+        kstate.set8(buf + n, kstate.get8(fr + n) as u8)
+        n = n + 1
+    }
+    kstate.set8(buf + n, 0 as u8)
+    let len: u64 = uio.resolve(state, me, buf, n)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino != 0 {
+        if !perm.may(state, me, ino, perm.R_EXEC) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    return uio.chdir_to(state, me, buf)
+}
+
+// `getcwd(buf, size)`. ROUND K4 ANSWERED "/" HERE and wrote in its own
+// comment that this was the gap: there was no working directory to
+// report. There is one now. Linux returns the length INCLUDING the zero,
+// and so does this.
+fn do_getcwd(state: u64, me: u64, out: u64, size: u64) -> u64 {
+    let n: u64 = uio.cwd_len(state, me)
+    if size <= n {
+        return sysuser.neg(errno.E_RANGE)
+    }
+    if !proc.user_ok(state, me, out, n + 1) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var i: u64 = 0
+    while i < n {
+        if !sysuser.poke(state, me, out + i, uio.cwd_at(state, me, i)) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        i = i + 1
+    }
+    if !sysuser.poke(state, me, out + n, 0) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return n + 1
+}
+
+fn owns(state: u64, me: u64, ino: u64) -> bool {
+    if perm.is_root(state, me) {
+        return true
+    }
+    return perm.euid(state, me) == fs.inode_uid(state, ino)
+}
+
+fn chmod_ino(state: u64, me: u64, ino: u64, mode: u64) -> u64 {
+    if !owns(state, me, ino) {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        if !kstate.mode_on(state, kstate.M_NOPERM) {
+            return sysuser.neg(errno.E_PERM)
+        }
+    }
+    if !fs.set_mode(state, ino, mode) {
+        return sysuser.neg(errno.E_ROFS)
+    }
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHMODS, 1)
+    return 0
+}
+
+fn chown_ino(state: u64, me: u64, ino: u64, uid: u64, gid: u64) -> u64 {
+    let root: bool = perm.is_root(state, me)
+    if uid != (0 -% 1) && !root {
+        kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+        if !kstate.mode_on(state, kstate.M_NOPERM) {
+            return sysuser.neg(errno.E_PERM)
+        }
+    }
+    if gid != (0 -% 1) && !root {
+        if !owns(state, me, ino) || gid != perm.egid(state, me) {
+            kstate.add(state, kstate.K13_OFF + kstate.U_DENIED, 1)
+            if !kstate.mode_on(state, kstate.M_NOPERM) {
+                return sysuser.neg(errno.E_PERM)
+            }
+        }
+    }
+    if !fs.set_owner(state, ino, uid, gid) {
+        return sysuser.neg(errno.E_ROFS)
+    }
+    if !root {
+        let m: u64 = fs.inode_mode(state, ino)
+        if (m & (fs.S_ISUID | fs.S_ISGID)) != 0 {
+            fs.set_mode(state, ino, m & (~(fs.S_ISUID | fs.S_ISGID)))
+        }
+    }
+    kstate.add(state, kstate.K13_OFF + kstate.U_CHOWNS, 1)
+    return 0
+}
+
+fn do_chmod(state: u64, me: u64, name: u64, mode: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = sysuser.ino_of_path(state, me, name)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chmod_ino(state, me, ino, mode)
+}
+
+fn do_chown(state: u64, me: u64, name: u64, uid: u64, gid: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = sysuser.ino_of_path(state, me, name)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chown_ino(state, me, ino, uid, gid)
+}
+
+fn do_fchmod(state: u64, me: u64, fd: u64, mode: u64) -> u64 {
+    let ino: u64 = sysuser.ino_of_fd(state, me, fd)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chmod_ino(state, me, ino, mode)
+}
+
+fn do_fchown(state: u64, me: u64, fd: u64, uid: u64, gid: u64) -> u64 {
+    let ino: u64 = sysuser.ino_of_fd(state, me, fd)
+    if errno.is_error(ino) {
+        return ino
+    }
+    return chown_ino(state, me, ino, uid, gid)
+}
+
+fn do_access(state: u64, me: u64, name: u64, want: u64) -> u64 {
+    let ino: u64 = sysuser.ino_of_path(state, me, name)
+    if errno.is_error(ino) {
+        return ino
+    }
+    if want == 0 {
+        return 0
+    }
+    if perm.may_real(state, me, ino, want & 7) {
+        return 0
+    }
+    return sysuser.neg(errno.E_ACCES)
+}
+
+// -------------------------------------------------- das Herunterfahren
+
+fn do_diskup(state: u64, me: u64) -> u64 {
+    // Any user: the installer of a signed-in person (uid != 0) opens the disks
+    // the same way (device nodes are not checked by perm.may), and the bring-up
+    // runs once per boot, so there is nothing to gain by calling it again.
+    var n: u64 = 0
+    if blk.ahci_up(state) {
+        n = n + blk.blocks_on(state, blk.DEV_AHCI)
+    }
+    if blk.nvme_up(state) {
+        n = n + blk.blocks_on(state, blk.DEV_NVME)
+    }
+    return n
+}
+
+const SCAN_MAX: u64 = 63 // (BLOCK_MAX - 64) / nidx.REC
+
+fn do_scan(state: u64, me: u64, curp: u64, dst: u64, max: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    var n: u64 = max
+    if n == 0 {
+        return 0
+    }
+    if n > SCAN_MAX {
+        n = SCAN_MAX
+    }
+    if !proc.user_ok(state, me, curp, 8) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if !proc.user_ok(state, me, dst, n * nidx.REC) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    //   panic: integer overflow casting 'u64 as u32'
+    //   at kernel/user/nidx.fi:408
+    let fl: u64 = fs.enter(state)
+    let cur: u64 = sysuser.satzpuffer(state)
+    let buf: u64 = cur + 64
+    if !sysuser.copy_in(state, me, cur, curp, 8) {
+        fs.leave(state, fl)
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let got: u64 = fs.scan(state, cur, buf, n)
+    if !sysuser.copy_out(state, me, curp, cur, 8) {
+        fs.leave(state, fl)
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if got != 0 {
+        if !sysuser.copy_out(state, me, dst, buf, got * nidx.REC) {
+            fs.leave(state, fl)
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    fs.leave(state, fl)
+    return got
+}
+
+fn do_jrnl(state: u64, me: u64, from: u64, dst: u64, max: u64) -> u64 {
+    var n: u64 = max
+    if n == 0 {
+        return 0
+    }
+    if n > nidx.MAXJ {
+        n = nidx.MAXJ
+    }
+    if !proc.user_ok(state, me, dst, n * nidx.REC) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if n * nidx.REC > kstate.BLOCK_MAX {
+        n = kstate.BLOCK_MAX / nidx.REC
+    }
+    let fl: u64 = fs.enter(state)
+    let buf: u64 = sysuser.satzpuffer(state)
+    let got: u64 = nidx.take(state, from, buf, n)
+    if got != 0 {
+        if !sysuser.copy_out(state, me, dst, buf, got * nidx.REC) {
+            fs.leave(state, fl)
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    fs.leave(state, fl)
+    return got
+}
+// COMPOSITOR S3: an OrientOS flag. The object is ONE run of frames, so the window server can compose from what the client paints into it
+const MFD_FRAMES: u64 = 0x40000000
+
+// ---------------------------------------------------------- fallocate()
+fn do_fallocate(state: u64, me: u64, fd: u64, mode: u64, off: u64,
+    len: u64) -> u64 {
+    if mode != 0 {
+        return sysuser.neg(errno.E_OPNOTSUPP)
+    }
+    if len == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if off > 0xFFFFFFFF || len > 0xFFFFFFFF {
+        return sysuser.neg(errno.E_FBIG)
+    }
+    // ROUND UNTERBAU: on a plain file the size only GROWS (never shrinks), as posix_fallocate does. The blocks are not reserved:
+    // the file has a hole there and a full disk is found out when the hole is written (documented in docs/RUNDE-UNTERBAU-FIREFOX.md).
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
+        if fs.inode_size(state, file.open_ino(state, of)) >= off + len {
+            return 0
+        }
+    }
+    return sysfd.do_ftruncate(state, me, fd, off + len)
+}
+
+// ------------------------------------------------------- memfd_create()
+
+fn do_memfd(state: u64, me: u64, name: u64, flags: u64) -> u64 {
+    if name != 0 && !proc.user_ok(state, me, name, 1) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var i: u64 = unixsock.USHM_MAX
+    if (flags & MFD_FRAMES) != 0 {
+        i = unixsock.shm_new_contig(state)
+    } else {
+        i = unixsock.shm_new_any(state)
+    }
+    if i >= unixsock.USHM_MAX {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_SHM, i, sysconst.O_RDWR)
+    if of >= file.MAX_OPEN {
+        unixsock.shm_free(state, i)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.shm_free(state, i)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+// chroot(2) (W-MG3), built on the container jail (`ctr`): the root of a jail is a STRING put in front of every absolute path
+// (`uio.jailed`), so the calling task simply moves into a container slot whose root is the folded path. Same root = same slot.
+// A nested chroot gets a new slot whose root is longer (the path already carries the old root), so it can only go deeper.
+// The cwd becomes "/" (Linux keeps it; every user of chroot calls chdir("/") next, and a cwd outside the root must not survive).
+fn do_chroot(state: u64, me: u64, name: u64) -> u64 {
+    if !appfs.free_ok(state, me) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    if fs.inode_type(state, ino) != fs.T_DIR {
+        return sysuser.neg(errno.E_NOTDIR)
+    }
+    // fold `.`/`..` so that no `..` can sit inside the stored root, then drop trailing slashes
+    var n: u64 = len
+    if n == 0 || kstate.get8(buf) != 47 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    n = ctr.fold(buf, n)
+    while n > 1 && kstate.get8(buf + n - 1) == 47 {
+        n = n - 1
+        kstate.set8(buf + n, 0 as u8)
+    }
+    if n <= 1 {
+        return 0 // chroot("/") of a host task: nothing to do
+    }
+    if n >= ctr.ROOT_MAX - 1 {
+        return sysuser.neg(errno.E_NAMETOOLONG)
+    }
+    let old: u64 = ctr.ctr_of(state, me)
+    var i: u64 = ctr.find_root(state, buf)
+    if i == 0 {
+        i = ctr.alloc(state)
+        if i == 0 {
+            return sysuser.neg(errno.E_NOSPC)
+        }
+        if !ctr.root_set(state, i, buf) {
+            ctr.free_slot(state, i)
+            return sysuser.neg(errno.E_INVAL)
+        }
+        var nm: [u8; 8] = "chroot\0\0"
+        ctr.name_set(state, i, (&nm[0]) as u64)
+        if old != 0 {
+            ctr.netview_set(state, i, ctr.netview_of(state, old))
+        }
+    }
+    ctr.set_ctr(state, me, i)
+    ctr.set_state(state, i, ctr.C_RUN)
+    // cwd = the new root: `chdir_to` stores the path relative to the (now active) jail root, i.e. "/"
+    return uio.chdir_to(state, me, buf)
+}
+
+// statfs/fstatfs (struct statfs, 120 octets): the numbers of the root file system (OFS). The path/descriptor is only checked; every
+// mount of this kernel except /proc, /dev answers with the root numbers. f_files/f_ffree stay 0 (not counted), f_type is the OFS tag.
+fn do_statfs(state: u64, me: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, 120) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var k: u64 = 0
+    while k < 15 {
+        let _z: bool = sysuser.put64(state, me, out + k * 8, 0)
+        k = k + 1
+    }
+    let total: u64 = fs.total_blocks(state)
+    let free: u64 = fs.free_blocks(state)
+    let _t: bool = sysuser.put64(state, me, out, 0x3353464F)
+    let _bs: bool = sysuser.put64(state, me, out + 8, 4096)
+    let _b: bool = sysuser.put64(state, me, out + 16, total)
+    let _f: bool = sysuser.put64(state, me, out + 24, free)
+    let _a: bool = sysuser.put64(state, me, out + 32, free)
+    let _nl: bool = sysuser.put64(state, me, out + 64, fs.NAME_LEN - 1)
+    let _fr: bool = sysuser.put64(state, me, out + 72, 4096)
+    return 0
+}
+const IN_MOVED_FROM: u64 = 0x40
+const IN_MOVED_TO: u64 = 0x80
+
+// Is any inotify instance open? (The hooks cost nothing else when nobody watches.)
+fn ev_in_any(state: u64) -> bool {
+    var i: u64 = 0
+    while i < file.MAX_OPEN {
+        if file.open_kind(state, i) == file.K_INOTIFY {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Tell every inotify instance that watches the PARENT directory of `buf` (absolute path in kernel memory, `len` octets) about event `ev`.
+fn ev_in_fire(state: u64, buf: u64, len: u64, ev: u64, cookie: u64) {
+    var s: u64 = len
+    while s > 0 {
+        if rd8_ev(buf + s - 1) == 47 {
+            break
+        }
+        s = s - 1
+    }
+    if s == 0 || s >= len {
+        return
+    }
+    var dlen: u64 = s - 1
+    if dlen == 0 {
+        dlen = 1
+    }
+    let name: u64 = buf + s
+    let nlen: u64 = len - s
+    var o: u64 = 0
+    while o < file.MAX_OPEN {
+        if file.open_kind(state, o) == file.K_INOTIFY {
+            let fr: u64 = file.open_off(state, o)
+            var i: u64 = 0
+            while i < evfd.IN_WMAX {
+                let mask: u64 = evfd.in_match(fr, i, buf, dlen)
+                if mask != 0 && (mask & ev & 0xFFF) != 0 {
+                    evfd.in_push(state, fr, evfd.in_wd_of(fr, i), ev, cookie, name, nlen)
+                }
+                i = i + 1
+            }
+        }
+        o = o + 1
+    }
+}
+
+fn rd8_ev(a: u64) -> u64 {
+    return kstate.get8(a)
+}
+
+// The path the user pointer names, as the file system call just saw it.
+fn ev_in_path(state: u64, me: u64, addr: u64, ev: u64, cookie: u64) {
+    if !ev_in_any(state) {
+        return
+    }
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, addr, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return
+    }
+    ev_in_fire(state, buf, len, ev, cookie)
+}
+
+fn ev_in_rename(state: u64, me: u64, from: u64, to: u64) {
+    if !ev_in_any(state) {
+        return
+    }
+    let cookie: u64 = sched.poll_seq(state) + 1
+    uio.next_base(state, me) // r821: do_rename left the second base current; back to the first for the source
+    ev_in_path(state, me, from, IN_MOVED_FROM, cookie)
+    uio.next_base(state, me)
+    ev_in_path(state, me, to, IN_MOVED_TO, cookie)
+}
+
+fn ev_path_exists(state: u64, buf: u64) -> bool {
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                return vfs.node_for(state, m, buf) != 0
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return true
+    }
+    return fs.path(state, buf) != 0
+}
+
+// open(path, O_CREAT ...): IN_CREATE only when the file was not there before.
+fn ev_open_create(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    var existed: bool = true
+    if !errno.is_error(len) && len != 0 {
+        existed = ev_path_exists(state, buf)
+    }
+    let r: u64 = sysfd.do_open_mode(state, me, name, flags, mode)
+    if !existed && !errno.is_error(r) {
+        ev_in_path(state, me, name, sysconst.IN_CREATE, 0)
+    }
+    return sysfd.cx_result(state, me, r, flags)
+}
+const LC_MKDIRAT: u64 = 258
+const LC_NEWFSTATAT: u64 = 262
+const LC_UNLINKAT: u64 = 263
+const LC_RENAMEAT: u64 = 264
+const LC_LINKAT: u64 = 265
+const LC_SYMLINKAT: u64 = 266
+const LC_AT_FDCWD32: u64 = 0xFFFFFF9C // -100 as an int (a caller may or may not sign-extend it to 64 bit)
+const LC_AT_SYMLINK_NOFOLLOW: u64 = 0x100
+const LC_AT_REMOVEDIR: u64 = 0x200
+const LC_AT_EMPTY_PATH: u64 = 0x1000
+
+fn do_statx(state: u64, me: u64, dirfd: u64, path: u64, flags: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, statxconv.STATX_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let r: u64 = lc_at(state, me, LC_NEWFSTATAT, dirfd, path, out, flags, 0)
+    if r != 0 {
+        return r
+    }
+    let dst: u64 = sysuser.blockb(state) + 3072
+    statxconv.convert(sysuser.blockb(state) + 2048, dst)
+    if !sysuser.copy_out(state, me, out, dst, statxconv.STATX_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// r807: directory descriptors. An *at call whose path is relative and whose dirfd is a real descriptor is resolved against the
+// path that the directory descriptor remembered at open time (`dirpath_remember`); `uio.resolve` reads it from the task slot
+// (`uio.set_atbase`). The base is set before the worker function runs and cleared after it.
+const AT_REL_NONE: u64 = 0 // absolute path (or a pointer the callee will reject): the directory argument is not used
+const AT_REL_CWD: u64 = 1 // relative to AT_FDCWD
+const AT_REL_DIR: u64 = 2 // relative to a real directory descriptor
+
+fn at_class(state: u64, me: u64, dirfd: u64, path: u64) -> u64 {
+    if !proc.user_ok(state, me, path, 1) {
+        return AT_REL_NONE
+    }
+    if sysuser.peek(state, me, path) == 47 {
+        return AT_REL_NONE
+    }
+    if (dirfd & 0xFFFFFFFF) == LC_AT_FDCWD32 {
+        return AT_REL_CWD
+    }
+    return AT_REL_DIR
+}
+
+// The frame with the path of a directory descriptor, or a negative errno.
+fn at_dir_frame(state: u64, me: u64, dirfd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, dirfd & 0xFFFFFFFF)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let k: u64 = file.open_kind(state, of)
+    if k != file.K_DIR && k != file.K_VDIR {
+        return sysuser.neg(errno.E_NOTDIR)
+    }
+    let fr: u64 = file.open_x1(state, of)
+    if fr == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    return fr
+}
+
+fn at_enter1(state: u64, me: u64, dirfd: u64, path: u64) -> u64 {
+    if at_class(state, me, dirfd, path) != AT_REL_DIR {
+        return 0
+    }
+    let fr: u64 = at_dir_frame(state, me, dirfd)
+    if errno.is_error(fr) {
+        return fr
+    }
+    uio.set_atbase(state, me, fr)
+    return 0
+}
+
+fn at_same_path(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while i < uio.PATH_MAX {
+        let x: u64 = kstate.get8(a + i)
+        if x != kstate.get8(b + i) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Two paths with a directory argument each (renameat, linkat). r821: the two directories may differ (a real descriptor next to
+// the cwd, or two different descriptors). The worker function takes its first path from the first base and calls
+// `uio.next_base` before the second fetch (`do_link`, `do_rename`, `ev_in_rename`).
+fn at_enter2(state: u64, me: u64, d1: u64, p1: u64, d2: u64, p2: u64) -> u64 {
+    let c1: u64 = at_class(state, me, d1, p1)
+    let c2: u64 = at_class(state, me, d2, p2)
+    if c1 != AT_REL_DIR && c2 != AT_REL_DIR {
+        return 0
+    }
+    var f1: u64 = 0
+    var f2: u64 = 0
+    if c1 == AT_REL_DIR {
+        f1 = at_dir_frame(state, me, d1)
+        if errno.is_error(f1) {
+            return f1
+        }
+    }
+    if c2 == AT_REL_DIR {
+        f2 = at_dir_frame(state, me, d2)
+        if errno.is_error(f2) {
+            return f2
+        }
+    }
+    uio.set_atbase(state, me, f1)
+    if f1 != f2 && !(f1 != 0 && f2 != 0 && at_same_path(f1, f2)) {
+        if f2 == 0 {
+            uio.set_atbase2(state, me, 1)
+        } else {
+            uio.set_atbase2(state, me, f2)
+        }
+    }
+    return 0
+}
+
+fn lc_at(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    var en: u64 = 0
+    if number == LC_SYMLINKAT {
+        en = at_enter1(state, me, a1, a2)
+    } else if number == LC_RENAMEAT || number == sysconst.LC_RENAMEAT2 || number == LC_LINKAT {
+        en = at_enter2(state, me, a0, a1, a2, a3)
+    } else if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 && proc.user_ok(state, me, a1, 1)
+        && sysuser.peek(state, me, a1) == 0 {
+        en = 0 // fstat(dirfd) itself: no base
+    } else {
+        en = at_enter1(state, me, a0, a1)
+    }
+    if errno.is_error(en) {
+        return en
+    }
+    let r: u64 = lc_at_inner(state, me, number, a0, a1, a2, a3, a4)
+    uio.set_atbase(state, me, 0)
+    return r
+}
+
+fn lc_at_inner(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    if number == LC_SYMLINKAT {
+        // symlinkat(target, newdirfd, linkpath)
+        return do_symlink(state, me, a0, a2)
+    }
+    if number == LC_RENAMEAT || number == sysconst.LC_RENAMEAT2 || number == LC_LINKAT {
+        // (olddirfd, oldpath, newdirfd, newpath [, flags])
+        if number == LC_LINKAT {
+            return do_link(state, me, a1, a3)
+        }
+        if number == sysconst.LC_RENAMEAT2 && a4 != 0 {
+            return sysuser.neg(errno.E_INVAL) // RENAME_NOREPLACE / EXCHANGE / WHITEOUT are not supported
+        }
+        let r: u64 = do_rename(state, me, a1, a3)
+        if r == 0 {
+            ev_in_rename(state, me, a1, a3)
+        }
+        return r
+    }
+    // the rest: (dirfd, path, ...)
+    if number == LC_NEWFSTATAT && (a3 & LC_AT_EMPTY_PATH) != 0 {
+        if proc.user_ok(state, me, a1, 1) && sysuser.peek(state, me, a1) == 0 {
+            return do_fstat(state, me, a0, a2)
+        }
+    }
+    if number == sysconst.LC_OPENAT {
+        if (a2 & 64) != 0 && ev_in_any(state) {
+            return ev_open_create(state, me, a1, a2, a3)
+        }
+        return sysfd.cx_result(state, me, sysfd.do_open_mode(state, me, a1, a2, a3), a2)
+    }
+    if number == LC_MKDIRAT {
+        let r: u64 = do_mkdir_mode(state, me, a1, a2)
+        if r == 0 {
+            ev_in_path(state, me, a1, sysconst.IN_CREATE | sysconst.IN_ISDIR, 0)
+        }
+        return r
+    }
+    if number == LC_NEWFSTATAT {
+        if (a3 & LC_AT_SYMLINK_NOFOLLOW) != 0 {
+            return do_lstat(state, me, a1, a2)
+        }
+        return do_stat(state, me, a1, a2)
+    }
+    if number == LC_UNLINKAT {
+        if (a2 & LC_AT_REMOVEDIR) != 0 {
+            let rr: u64 = do_rmdir(state, me, a1)
+            if rr == 0 {
+                ev_in_path(state, me, a1, sysconst.IN_DELETE | sysconst.IN_ISDIR, 0)
+            }
+            return rr
+        }
+        let ur: u64 = do_unlink(state, me, a1)
+        if ur == 0 {
+            ev_in_path(state, me, a1, sysconst.IN_DELETE, 0)
+        }
+        return ur
+    }
+    if number == sysconst.LC_READLINKAT {
+        return do_readlink(state, me, a1, a2, a3)
+    }
+    return sysuser.neg(errno.E_NOSYS)
+}

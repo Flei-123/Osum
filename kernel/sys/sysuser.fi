@@ -1,0 +1,400 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.sched
+import sched.proc
+import arch.cpu
+import fs.fs
+import lib.errno
+import fs.file
+import ipc.uio
+import arch.x86_64.guard
+import fs.unixsock
+import ipc.perm
+import sys.sysconst
+
+export {
+    blockb, copy_in, copy_out, fetch_name, fetch_path, fget, fset, get16, get32, get64u, get_user64, ino_of_fd, ino_of_path, kcopy_word, nameb, neg, of_of, peek, poke, put16, put32, put64, put_half, put_word32, satzpuffer, user_half, user_word, user_word32
+}
+
+fn blockb(state: u64) -> u64 {
+    let cur: u64 = sched.current(state)
+    if sched.tget(state, cur, sched.T_KIND) != sched.K_USER {
+        return state + kstate.BLOCK_OFF
+    }
+    var k: u64 = sched.hier(state)
+    if k >= kstate.MAX_CPUS {
+        return state + kstate.BLOCK_OFF
+    }
+    return state + kstate.BLOCKK_OFF + k * 4096
+}
+fn nameb(state: u64) -> u64 {
+    var k: u64 = cpu.here(state)
+    if k >= kstate.MAX_CPUS {
+        k = 0
+    }
+    return state + kstate.NAMEK_OFF + k * 4096
+}
+
+fn neg(e: u64) -> u64 {
+    return errno.neg(e)
+}
+
+fn fget(frame: u64, off: u64) -> u64 {
+    return __mmio_read64((frame + off) as *mut u64)
+}
+
+fn fset(frame: u64, off: u64, v: u64) {
+    __mmio_write64((frame + off) as *mut u64, v)
+}
+
+// --------------------------------------------------------- reading in
+
+// One octet out of the address space of the process. The kernel does not
+// switch to it -- it walks the tables and reads the frame through the
+// identity mapping.
+fn peek(state: u64, me: u64, addr: u64) -> u64 {
+    let mmfl: u64 = unixsock.mm_lock(state)
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        unixsock.mm_unlock(state, mmfl)
+        return 0
+    }
+    // ROUND K10: the SMAP window. The frame is reached through the
+    // identity mapping, and for the pages of `.utext` that mapping
+    // carries the user bit -- with CR4.SMAP a read of it out of ring 0
+    // is a #PF unless AC is set. `guard.stac` is a no-op when the bit is
+    // off, so this costs a compare on a machine without SMAP.
+    guard.stac(state)
+    let v: u64 = kstate.get8(phys)
+    guard.clac(state)
+    unixsock.mm_unlock(state, mmfl)
+    return v
+}
+
+fn poke(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    let mmfl: u64 = unixsock.mm_lock(state)
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        unixsock.mm_unlock(state, mmfl)
+        return false
+    }
+    guard.stac(state)
+    kstate.set8(phys, v as u8)
+    guard.clac(state)
+    unixsock.mm_unlock(state, mmfl)
+    return true
+}
+
+// Out of the kernel into ring 3, and the other way round. Page by page:
+// `translate` is a walk of four tables, and doing it per octet is what
+// made round 62's `read` the slowest thing in the system.
+fn copy_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    if !proc.user_ok(state, me, dst, len) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        // r721: translate + copy of ONE page under the MM lock (see `unixsock.mm_lock`): `munmap` on another core cannot free the frame in between
+        let mmfl: u64 = unixsock.mm_lock(state)
+        let phys: u64 = proc.translate(state, me, dst + n)
+        if phys == 0 {
+            unixsock.mm_unlock(state, mmfl)
+            return false
+        }
+        var room: u64 = 4096 - ((dst + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        var k: u64 = 0
+        guard.stac(state)
+        // LA-9: whole words while source and destination are 8-aligned
+        if (((phys + k) | (src + n + k)) & 7) == 0 {
+            while k + 8 <= room {
+                __mmio_write64((phys + k) as *mut u64, __mmio_read64((src + n + k) as *mut u64))
+                k = k + 8
+            }
+        }
+        while k < room {
+            kstate.set8(phys + k, kstate.get8(src + n + k) as u8)
+            k = k + 1
+        }
+        guard.clac(state)
+        unixsock.mm_unlock(state, mmfl)
+        n = n + room
+    }
+    return true
+}
+
+fn copy_in(state: u64, me: u64, dst: u64, src: u64, len: u64) -> bool {
+    if !proc.user_ok(state, me, src, len) {
+        return false
+    }
+    var n: u64 = 0
+    while n < len {
+        let mmfl: u64 = unixsock.mm_lock(state)
+        let phys: u64 = proc.translate(state, me, src + n)
+        if phys == 0 {
+            unixsock.mm_unlock(state, mmfl)
+            return false
+        }
+        var room: u64 = 4096 - ((src + n) & 4095)
+        if room > len - n {
+            room = len - n
+        }
+        var k: u64 = 0
+        guard.stac(state)
+        while k < room {
+            kstate.set8(dst + n + k, kstate.get8(phys + k) as u8)
+            k = k + 1
+        }
+        guard.clac(state)
+        unixsock.mm_unlock(state, mmfl)
+        n = n + room
+    }
+    return true
+}
+
+// A name out of ring 3 into the kernel's own buffer. Returns the length,
+// or an error. Nothing is read that the process does not own.
+fn fetch_name(state: u64, me: u64, addr: u64, dst: u64, max: u64) -> u64 {
+    if addr == 0 {
+        return neg(errno.E_FAULT)
+    }
+    if !proc.user_ok(state, me, addr, 1) {
+        return neg(errno.E_FAULT)
+    }
+    var n: u64 = 0
+    while n < max {
+        if !proc.user_ok(state, me, addr + n, 1) {
+            return neg(errno.E_FAULT)
+        }
+        let c: u64 = peek(state, me, addr + n)
+        kstate.set8(dst + n, c as u8)
+        if c == 0 {
+            return n
+        }
+        n = n + 1
+    }
+    return neg(errno.E_NAMETOOLONG)
+}
+
+// Eight octets out of the caller's memory, one at a time. A pointer of
+// ring 3 may straddle a page boundary, and `peek` is the only reader that
+// checks every page it touches.
+fn user_word(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+// ------------------------------------------------------- the descriptors
+
+// The open file behind a descriptor, or MAX_OPEN. Everything below goes
+// through this one function -- there is no second place that decides what
+// a number in a register means.
+fn of_of(state: u64, me: u64, fd: u64) -> u64 {
+    return file.fd_of(state, me, fd)
+}
+
+fn put32(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    var i: u64 = 0
+    while i < 4 {
+        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn get32(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 4 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn get16(state: u64, me: u64, addr: u64) -> u64 {
+    return peek(state, me, addr) | (peek(state, me, addr + 1) << 8)
+}
+
+fn put16(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    if !poke(state, me, addr, v & 255) {
+        return false
+    }
+    return poke(state, me, addr + 1, (v >> 8) & 255)
+}
+
+fn get_user64(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}
+
+fn user_half(state: u64, me: u64, addr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return 0
+    }
+    guard.stac(state)
+    let v: u64 = (kstate.get8(phys) as u64)
+        | ((kstate.get8(phys + 1) as u64) << 8)
+    guard.clac(state)
+    return v
+}
+
+fn put_half(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    if !poke(state, me, addr, v & 255) {
+        return false
+    }
+    return poke(state, me, addr + 1, (v >> 8) & 255)
+}
+
+fn put_word32(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    var i: u64 = 0
+    while i < 4 {
+        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn put64(state: u64, me: u64, addr: u64, v: u64) -> bool {
+    var i: u64 = 0
+    while i < 8 {
+        if !poke(state, me, addr + i, (v >> (i * 8)) & 255) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// `futex` lives in sched/futex.fi (real wait queue, r714).
+
+fn user_word32(state: u64, me: u64, addr: u64) -> u64 {
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return 0
+    }
+    guard.stac(state)
+    let v: u64 = (kstate.get8(phys) as u64)
+        | ((kstate.get8(phys + 1) as u64) << 8)
+        | ((kstate.get8(phys + 2) as u64) << 16)
+        | ((kstate.get8(phys + 3) as u64) << 24)
+    guard.clac(state)
+    return v
+}
+
+// ============================================================ Runde K16
+
+fn kcopy_word(dst: u64, src: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while i < max {
+        let c: u64 = kstate.get8(src + i)
+        kstate.set8(dst + i, c as u8)
+        if c == 0 {
+            return i + 1
+        }
+        i = i + 1
+    }
+    kstate.set8(dst + max - 1, 0 as u8)
+    return max
+}
+
+// ============================================================ round K6
+//
+// A USERLAND, ON TOP OF THE POSIX LAYER OF ROUND K4. The two rounds were
+// written at the same time and against different kernels, and this is
+// where the difference was settled:
+//
+//   * ROUND K6'S DESCRIPTORS ARE GONE. It carried three standard
+//      descriptors of its own with a position each, plus a `dup2` and a
+//      `seek` for them, because the kernel of round K1 had no table of
+//      open files. Round K4 built one, with reference counts and
+//      sixteen descriptors per process (`kernel/file.fi`), and
+//      `dup2` is 33 and `lseek` is 8 -- Linux's numbers, the ones every
+//      program of this system already uses. K6's 40 and 41 were dropped
+//      rather than kept as a second door onto the same thing.
+//   * WHAT IS LEFT IS WHAT ROUND K4 DOES NOT HAVE: a working directory
+//      that can be PRINTED (`sched.T_CWD` is an inode; `pwd` needs a
+//      path), and three questions about the machine that `ps`, `df`,
+//      `date` and `uname` may not answer by reading a kernel variable.
+//
+// The state is in `kernel/uio.fi`, one slot of 128 octets per task.
+
+// A name out of ring 3 that is meant to be a PATH. The difference to
+// `fetch_name` is one line and it is the whole of the working directory:
+// a name that does not start with a slash is completed with it before the
+// file system sees it. `exec` uses this for the program and `fetch_name`
+// for the arguments -- an argument is not a path.
+fn fetch_path(state: u64, me: u64, addr: u64, dst: u64, max: u64) -> u64 {
+    let n: u64 = fetch_name(state, me, addr, dst, max)
+    if errno.is_error(n) {
+        return n
+    }
+    return uio.resolve(state, me, dst, n)
+}
+
+fn ino_of_path(state: u64, me: u64, name: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return neg(errno.E_NOSYS)
+    }
+    let buf: u64 = nameb(state)
+    let len: u64 = fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if !perm.walk(state, me, buf) {
+        return neg(errno.E_ACCES)
+    }
+    let ino: u64 = fs.path(state, buf)
+    if ino == 0 {
+        return neg(errno.E_NOENT)
+    }
+    return ino
+}
+
+fn ino_of_fd(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return neg(errno.E_BADF)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind != file.K_FILE && kind != file.K_DIR {
+        return neg(errno.E_INVAL)
+    }
+    return file.open_ino(state, of)
+}
+
+fn satzpuffer(state: u64) -> u64 {
+    var k: u64 = cpu.here(state)
+    if k >= kstate.MAX_CPUS {
+        k = 0
+    }
+    return state + kstate.SCANB_OFF + k * kstate.BLOCK_MAX
+}
+
+fn get64u(state: u64, me: u64, addr: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    while i < 8 {
+        v = v | (peek(state, me, addr + i) << (i * 8))
+        i = i + 1
+    }
+    return v
+}

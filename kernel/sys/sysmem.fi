@@ -1,0 +1,1354 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import serial
+import gfx.gfx
+import lib.kstate
+import mm.mem
+import sched.sched
+import sched.proc
+import fs.fs
+import lib.errno
+import fs.file
+import arch.x86_64.guard
+import sched.signal
+import fs.unixsock
+import sys.sysconst
+import sys.sysuser
+import sys.sysfd
+import sys.sysfile
+
+export {
+    big_bottom, brk_of, clear_child_tid, do_brk, do_madvise, do_map, do_mprotect, do_mremap, do_unmap, file_shm_flush_maps, map_bottom, mem_owner, reap_dead_threads, res_clear, vm_oom_after
+}
+
+const PROT_READ: u64 = 1
+const PROT_WRITE: u64 = 2
+const PROT_EXEC: u64 = 4
+const MAP_PRIVATE: u64 = 2
+const MAP_FIXED: u64 = 16
+
+// ------------------------------------------------------------- memory
+
+// The private region of a process (`proc.fi`):
+//
+//   0x40000000  the data page
+//   0x40001000  eight stack pages, the top one holds argc/argv
+//   0x40020000  the BREAK grows upwards from here
+//   0x400F0000  MMAP grows downwards from here
+//   0x40100000  the image
+const BRK_BASE: u64 = 0x40080000
+const MMAP_TOP: u64 = 0x400F0000
+
+// THREAD GROUP MEMORY MARKS (r701/w-foot3): break, mmap bottom and big
+// bottom describe ONE address space, so all threads of a group (clone with
+// CLONE_THREAD, T_TGID = leader pid) read and write the LEADER's marks.
+// Copying them at clone time made two threads hand out the same
+// addresses (map_page saw "page there" -> ENOMEM, foot font threads).
+// Falls back to the own slot when the leader is gone.
+fn mem_owner(state: u64, me: u64) -> u64 {
+    let g: u64 = sched.tget(state, me, sched.T_TGID)
+    if g == 0 || g == sched.tget(state, me, sched.T_PID) {
+        return me
+    }
+    let l: u64 = sched.find_pid(state, g)
+    if l >= kstate.MAX_TASKS {
+        return me
+    }
+    return l
+}
+
+fn brk_of(state: u64, me: u64) -> u64 {
+    let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_BRK)
+    if b == 0 {
+        return BRK_BASE
+    }
+    return b
+}
+
+fn map_bottom(state: u64, me: u64) -> u64 {
+    let m: u64 = sched.tget(state, mem_owner(state, me), sched.T_MMAP)
+    if m == 0 {
+        return MMAP_TOP
+    }
+    return m
+}
+
+fn do_brk(state: u64, me: u64, want: u64) -> u64 {
+    let cur: u64 = brk_of(state, me)
+    if want == 0 {
+        return cur
+    }
+    if want < BRK_BASE {
+        return cur
+    }
+    if want > map_bottom(state, me) {
+        return cur
+    }
+    var p: u64 = sysfd.page_up(cur)
+    if want > cur {
+        while p < want {
+            if proc.page_free(state, me, p) {
+                if proc.map_page_zero(state, me, p, true, false) == 0 {
+                    oom_handle(state)
+                    if p > cur {
+                        sched.tset(state, mem_owner(state, me), sched.T_BRK, p)
+                        return p
+                    }
+                    return cur
+                }
+                kstate.add(state, kstate.MAPS, 1)
+            }
+            p = p + sysconst.PAGE
+        }
+    } else {
+        var q: u64 = sysfd.page_up(want)
+        while q < p {
+            proc.page_drop(state, me, q)
+            q = q + sysconst.PAGE
+        }
+    }
+    sched.tset(state, mem_owner(state, me), sched.T_BRK, want)
+    return want
+}
+
+// ============================================ RUNDE K16: DIE GROSSE ARENA
+fn big_bottom(state: u64, me: u64) -> u64 {
+    let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_BIG)
+    if b == 0 {
+        return proc.BIG_TOP
+    }
+    return b
+}
+
+// The big region is used up: reuse what munmap freed there (see `hole`).
+// After the address-space lock is released: run the out-of-memory handler if a locked path asked for it.
+fn vm_oom_after(state: u64) {
+    if unixsock.vm_oom_take(state) {
+        let _o: u64 = oom_handle(state)
+    }
+}
+
+fn big_hole(state: u64, me: u64, top: u64, pages: u64, prot: u64) -> u64 {
+    let h: u64 = hole(state, me, top, proc.BIG_TOP, pages)
+    if h != 0 && map_run(state, me, h, pages, prot) {
+        return h
+    }
+    return sysuser.neg(errno.E_NOMEM)
+}
+
+fn lazy_bottom(state: u64, me: u64) -> u64 {
+    let b: u64 = sched.tget(state, mem_owner(state, me), sched.T_LAZY)
+    if b == 0 {
+        return proc.LAZY_ATOP
+    }
+    return b
+}
+
+fn lazy_undo(state: u64, me: u64, base: u64, upto: u64) {
+    var k: u64 = 0
+    while k < upto {
+        let _d: bool = proc.page_drop(state, me, base + k * sysconst.PAGE)
+        k = k + 1
+    }
+}
+
+fn lazy_run_f(state: u64, me: u64, base: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> bool {
+    let rd: bool = (prot & PROT_READ) != 0
+    let wr: bool = (prot & PROT_WRITE) != 0
+    let ex: bool = (prot & PROT_EXEC) != 0
+    var k: u64 = 0
+    while k < pages {
+        var ok: bool = false
+        if fk != 0 {
+            ok = proc.lazy_mark_file(state, me, base + k * sysconst.PAGE, rd, wr, ex, fk - 1, fpg + k)
+        } else {
+            ok = proc.lazy_mark(state, me, base + k * sysconst.PAGE, rd, wr, ex)
+        }
+        if !ok {
+            lazy_undo(state, me, base, k)
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn lazy_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
+    return lazy_run_f(state, me, base, pages, prot, 0, 0)
+}
+
+fn lazy_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
+    return lazy_alloc_f(state, me, pages, prot, 0, 0)
+}
+
+fn lazy_alloc_f(state: u64, me: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> u64 {
+    let top: u64 = lazy_bottom(state, me)
+    if pages * sysconst.PAGE <= top - proc.LAZY_BASE {
+        let base: u64 = top - pages * sysconst.PAGE
+        if lazy_run_f(state, me, base, pages, prot, fk, fpg) {
+            sched.tset(state, mem_owner(state, me), sched.T_LAZY, base)
+            return base
+        }
+    }
+    let h: u64 = proc.lazy_find(state, me, pages)
+    if h == 0 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    if !lazy_run_f(state, me, h, pages, prot, fk, fpg) {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    return h
+}
+
+fn big_map(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOBIG) {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    let top: u64 = big_bottom(state, me)
+    if pages * sysconst.PAGE > top - proc.BIG_FLOOR {
+        return big_hole(state, me, top, pages, prot)
+    }
+    let base: u64 = top - pages * sysconst.PAGE
+    if base < proc.BIG_FLOOR {
+        return big_hole(state, me, top, pages, prot)
+    }
+    var p: u64 = base
+    while p < top {
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+            if unixsock.vm_held(state, me) {
+                // the address-space lock is held: the handler can sleep (disk sync), so the caller runs it after the unlock
+                unixsock.vm_oom_note(state)
+            } else {
+                oom_handle(state)
+            }
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        p = p + sysconst.PAGE
+    }
+    sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
+    return base
+}
+
+// Anonymous memory only: a mapping backed by a FILE needs the page cache
+// this system does not have, and pretending otherwise would be the kind of
+// half-truth that costs a day later. MAP_ANONYMOUS missing is -ENODEV, and
+// docs/ROUNDK4.md says so.
+// The name is `do_map` and not `do_mmap` on purpose: section 2 of
+// `tools/kernel/run.sh` proves that no host libc is linked into the kernel
+// by looking for the names `malloc`, `printf`, `memcpy` and `mmap` in the
+// symbol table. A kernel function that carried one of those names would
+// make that proof worthless.
+fn do_map(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64,
+    fd: u64, off: u64) -> u64 {
+    if len == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if (flags & sysconst.MAP_ANONYMOUS) == 0 {
+        // RUNDE UNTERBAU: a mapping of a REGULAR FILE (dlopen of a shared object, a mapped data file). The other descriptors that
+        // can be mapped (frame buffer, shared memory objects) keep their way.
+        let of: u64 = sysuser.of_of(state, me, fd)
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_FILE {
+            return map_file(state, me, addr, len, prot, flags, fd, off)
+        }
+        return map_fd(state, me, fd, len, prot, off)
+    }
+    // With MAP_ANONYMOUS Linux ignores the descriptor as well.
+    if off != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    return map_anon(state, me, addr, len, prot, flags)
+}
+
+// RUNDE UNTERBAU: anonymous memory with the rights that were asked for. Until this round every anonymous mapping was read-write
+// whatever `prot` said (PROT_NONE guard pages were readable); the pages come out RW and zeroed from `map_alloc` and are cut down
+// afterwards when `prot` is anything but plain read-write.
+fn map_anon(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64) -> u64 {
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    // TOCTOU audit K-02: a length near 2^64 rounds to 0 pages (page_up wraps); a zero-page mapping is no mapping
+    if pages == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    // RUNDE LIMITS3: a big PROT_NONE | MAP_NORESERVE mapping is a RESERVATION (JS engines, allocators): address space only, no frame.
+    if prot == 0 && (flags & MAP_FIXED) == 0 && len >= RES_MIN && len <= RES_MAX {
+        if pages <= LAZY_RESERVE_PAGES {
+            let lr: u64 = lazy_alloc(state, me, pages, prot)
+            if lr < 0xFFFFFFFFFFFFF000 {
+                return lr
+            }
+        }
+        return res_add(state, mem_owner(state, me), sysfd.page_up(len))
+    }
+    if (flags & MAP_FIXED) == 0 && pages >= LAZY_MIN_PAGES && !kstate.mode_on(state, kstate.M_NOLAZY) {
+        let lz: u64 = lazy_alloc(state, me, pages, prot)
+        if lz < 0xFFFFFFFFFFFFF000 {
+            return lz
+        }
+    }
+    var base: u64 = 0
+    if (flags & MAP_FIXED) != 0 {
+        base = map_fixed(state, me, addr, pages, prot)
+    } else {
+        base = map_alloc(state, me, pages, prot)
+        if base >= 0xFFFFFFFFFFFFF000 {
+            let lf: u64 = lazy_alloc(state, me, pages, prot)
+            if lf < 0xFFFFFFFFFFFFF000 {
+                return lf
+            }
+        }
+    }
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    if (prot & 3) != 3 {
+        let r: u64 = set_range_prot(state, me, base, pages, prot)
+        if r != 0 {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+    }
+    return base
+}
+
+// The rights of a range of mapped pages; 0 = done. One flush at the end.
+fn set_range_prot(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> u64 {
+    var k: u64 = 0
+    while k < pages {
+        let r: u64 = proc.page_protect(state, me, base + k * sysconst.PAGE, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+        if r != 0 {
+            proc.tlb_flush_if_current(state, me)
+            return r
+        }
+        k = k + 1
+    }
+    proc.tlb_flush_if_current(state, me)
+    return 0
+}
+
+// MAP_FIXED: the pages go exactly to `addr`, whatever was mapped there is replaced (and zero). Only inside the two windows that
+// `mmap` hands out of and only ABOVE their bump marks -- the pages below a mark are the allocator's to give, a fixed mapping there
+// would meet the next ordinary `mmap`.
+fn map_fixed(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
+    return map_fixed_f(state, me, addr, pages, prot, 0, 0)
+}
+
+fn map_fixed_f(state: u64, me: u64, addr: u64, pages: u64, prot: u64, fk: u64, fpg: u64) -> u64 {
+    if (addr & (sysconst.PAGE - 1)) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if pages == 0 || pages > 0x100000 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let end: u64 = addr + pages * sysconst.PAGE
+    let in_alt: bool = addr >= map_bottom(state, me) && end <= MMAP_TOP
+    let in_big: bool = addr >= big_bottom(state, me) && end <= proc.BIG_TOP
+    let in_lazy: bool = addr >= proc.LAZY_BASE && end <= proc.LAZY_TOP
+    if !in_alt && !in_big && !in_lazy {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    if addr >= RES_BASE && !res_covers(state, mem_owner(state, me), addr, pages * sysconst.PAGE) {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    file_shm_flush_maps(state, me, addr, pages * sysconst.PAGE, true)
+    let _released: bool = unixsock.map_release(state, me, addr, pages * sysconst.PAGE)
+    var p: u64 = addr
+    while p < end {
+        let _d: bool = proc.page_drop(state, me, p)
+        if in_lazy {
+            var marked: bool = false
+            if fk != 0 {
+                marked = proc.lazy_mark_file(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0, fk - 1, fpg + (p - addr) / sysconst.PAGE)
+            } else {
+                marked = proc.lazy_mark(state, me, p, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0)
+            }
+            if !marked {
+                return sysuser.neg(errno.E_NOMEM)
+            }
+        } else if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        p = p + sysconst.PAGE
+    }
+    return addr
+}
+
+// ---------------------------------------------------------------- LCSH: mmap(MAP_SHARED + PROT_WRITE) of a regular file
+//
+// There is no page cache, so the "page cache" of a shared file mapping is a shared page object (the K_SHM machinery of memfd/Wayland):
+// ONE object per (file, first file page), the frames belong to the object, every mapper gets the same frames -> a store of one process is
+// seen by the others at once. The pages are filled from the file when the object is made (what is beyond the end of the file is zero).
+// They are written BACK to the file by msync, by munmap and by the end of the process (only the pages that differ from the file, and
+// never beyond the file size). NOT done (documented in docs/LINUX-COMPAT-OPEN.md #5): a write(2) to the file after the mapping is made is
+// not seen by the mapping (and a changed mapped page overwrites it at the next write-back); no MAP_FIXED; at most 256 pages (1 MiB) per
+// mapping; two mappings of one file that start at different offsets and overlap are two objects (not coherent with each other); the
+// pages are written back only at msync/munmap/exit, not by a timer; a mapping that a fork child inherited is written back by the parent.
+const FSHM_MAX_PAGES: u64 = 256
+
+// Pages [from, to) of object `i` get the bytes of the file (page `first_pg + p`); the frames are zero already, a short read leaves the rest zero.
+fn file_shm_fill(state: u64, i: u64, ino: u64, first_pg: u64, from: u64, to: u64) -> bool {
+    let bounce: u64 = sysuser.blockb(state)
+    var p: u64 = from
+    while p < to {
+        let frame: u64 = unixsock.shm_frame(state, i, p)
+        if frame == 0 {
+            return false
+        }
+        var n: u64 = fs.read_at(state, ino, (first_pg + p) * sysconst.PAGE, bounce, sysconst.PAGE)
+        if n > sysconst.PAGE {
+            n = 0
+        }
+        var o: u64 = 0
+        while o + 8 <= n {
+            *((frame + o) as *mut u64) = *((bounce + o) as *mut u64)
+            o = o + 8
+        }
+        while o < n {
+            *((frame + o) as *mut u8) = *((bounce + o) as *mut u8)
+            o = o + 1
+        }
+        p = p + 1
+    }
+    return true
+}
+
+// Write the pages of file object `i` back to the file: only those that differ from what the file holds, clipped to the file size.
+fn file_shm_flush(state: u64, i: u64) {
+    let key: u64 = unixsock.shm_file_key(state, i)
+    if key == 0 {
+        return
+    }
+    let ino: u64 = (key & 0xFFFFFFFF) - 1
+    let first_pg: u64 = key >> 32
+    let pages: u64 = unixsock.shm_pages(state, i)
+    let bounce: u64 = sysuser.blockb(state)
+    var p: u64 = 0
+    while p < pages {
+        let fo: u64 = (first_pg + p) * sysconst.PAGE
+        let size: u64 = fs.inode_size(state, ino)
+        if fo >= size {
+            return
+        }
+        var n: u64 = size - fo
+        if n > sysconst.PAGE {
+            n = sysconst.PAGE
+        }
+        let frame: u64 = unixsock.shm_frame(state, i, p)
+        if frame != 0 {
+            let got: u64 = fs.read_at(state, ino, fo, bounce, n)
+            var same: bool = got == n
+            var o: u64 = 0
+            while same && o < n {
+                if *((frame + o) as *mut u8) != *((bounce + o) as *mut u8) {
+                    same = false
+                }
+                o = o + 1
+            }
+            if !same {
+                o = 0
+                while o + 8 <= n {
+                    *((bounce + o) as *mut u64) = *((frame + o) as *mut u64)
+                    o = o + 8
+                }
+                while o < n {
+                    *((bounce + o) as *mut u8) = *((frame + o) as *mut u8)
+                    o = o + 1
+                }
+                let _w: u64 = fs.write_at(state, ino, fo, bounce, n)
+            }
+        }
+        p = p + 1
+    }
+}
+
+// msync / munmap / exit: write back every file object that a mapping record of this task overlaps with [addr, addr + len)
+// (len == 0xFFFFFFFFFFFFFFFF = all of the task's records, for the end of the process). `exact` = munmap: only the record that starts at addr.
+fn file_shm_flush_maps(state: u64, me: u64, addr: u64, len: u64, exact: bool) {
+    var k: u64 = 0
+    while k < unixsock.UMAP_MAX {
+        let base: u64 = unixsock.map_rec_base(state, k)
+        if base != 0 {
+            let w: u64 = unixsock.map_rec_word(state, k)
+            let pages: u64 = (w >> 32) & unixsock.UM_PAGES_MASK
+            var hit: bool = false
+            if (w & 0xFFFF) == me {
+                if len == 0xFFFFFFFFFFFFFFFF {
+                    hit = true
+                } else if exact {
+                    hit = (base == addr) && (pages * sysconst.PAGE <= len)
+                } else {
+                    hit = (base < addr + len) && (addr < base + pages * sysconst.PAGE)
+                }
+            }
+            if hit {
+                file_shm_flush(state, (w >> 16) & 0xFFFF)
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn map_file_shared(state: u64, me: u64, len: u64, flags: u64, fd: u64, off: u64, prot: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN || !sysfd.readable(state, of) || !sysfd.writable(state, of) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if (flags & MAP_FIXED) != 0 || len > FSHM_MAX_PAGES * sysconst.PAGE || off >= 0x7FFFFFFF000 {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let ino: u64 = file.open_ino(state, of)
+    if ino >= 0xFFFFFFFE {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let first_pg: u64 = off / sysconst.PAGE
+    let npages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    var i: u64 = unixsock.shm_file_find(state, ino, first_pg)
+    var made: bool = false
+    if i >= unixsock.USHM_MAX {
+        i = unixsock.shm_new(state)
+        if i >= unixsock.USHM_PAGED {
+            if i < unixsock.USHM_MAX {
+                unixsock.shm_free(state, i)
+            }
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        made = true
+    }
+    let have: u64 = unixsock.shm_pages(state, i)
+    if npages > have {
+        let g: u64 = unixsock.shm_grow(state, i, npages)
+        // the pages that exist now are filled in any case: a zero page inside the file that stays unfilled would be written over it later
+        let ok: bool = file_shm_fill(state, i, ino, first_pg, have, unixsock.shm_pages(state, i))
+        if g != 0 || !ok {
+            if made {
+                unixsock.shm_unref(state, i)
+            }
+            return sysuser.neg(errno.E_NOMEM)
+        }
+    }
+    if !unixsock.shm_wmap_take(state, i) {
+        if made {
+            unixsock.shm_unref(state, i)
+        }
+        return sysuser.neg(errno.E_PERM)
+    }
+    let r: u64 = map_shm_obj(state, me, i, true, len, prot)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        unixsock.shm_wmap_drop(state, i)
+    }
+    if made {
+        if r < 0xFFFFFFFFFFFFF000 {
+            unixsock.shm_file_mark(state, i, ino, first_pg)
+        }
+        // the reference of the creation goes: from here on only the mappings hold the object
+        unixsock.shm_unref(state, i)
+    }
+    return r
+}
+
+const FLAZY_MIN_PAGES: u64 = 16
+
+// Demand-paged private file mapping: the pages are lazy entries that carry (inode, file page); the first touch reads the file page
+// into a frame of its own (proc.lazy_file_fault). 0 = not applicable (small, not a plain file, outside the lazy window): the eager path runs.
+fn map_file_lazy(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, of: u64, off: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOLAZY) || file.open_kind(state, of) != file.K_FILE {
+        return 0
+    }
+    let ino: u64 = file.open_ino(state, of)
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    let fpg: u64 = off / sysconst.PAGE
+    if ino >= proc.LAZYF_MAX || pages < FLAZY_MIN_PAGES || fpg + pages >= proc.LAZYF_MAX {
+        return 0
+    }
+    if (flags & MAP_FIXED) != 0 {
+        if (addr & (sysconst.PAGE - 1)) != 0 || addr < proc.LAZY_BASE || addr + pages * sysconst.PAGE > proc.LAZY_TOP {
+            return 0
+        }
+        let r: u64 = map_fixed_f(state, me, addr, pages, prot, ino + 1, fpg)
+        if r >= 0xFFFFFFFFFFFFF000 {
+            return 0
+        }
+        return r
+    }
+    let r: u64 = lazy_alloc_f(state, me, pages, prot, ino + 1, fpg)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        return 0
+    }
+    return r
+}
+
+// RUNDE UNTERBAU: mmap of a regular file. There is no page cache and no demand paging in this kernel, so the pages are made now
+// (zeroed) and filled with a read of the file -- what is beyond the end of the file stays zero. MAP_PRIVATE is exact (a copy the process
+// may change). MAP_SHARED is a snapshot only: it is allowed read-only, and refused (-ENODEV, the old answer for "no file mapping") when
+// it asks for write access, because a write would never reach the file or another process -- a half-truth is worse than the refusal.
+fn map_file(state: u64, me: u64, addr: u64, len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+    if (off & (sysconst.PAGE - 1)) != 0 || (off >> 63) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if (flags & MAP_SHARED) != 0 && (flags & MAP_PRIVATE) == 0 && (prot & PROT_WRITE) != 0 {
+        return map_file_shared(state, me, len, flags, fd, off, prot)
+    }
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN || !sysfd.readable(state, of) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let lz: u64 = map_file_lazy(state, me, addr, len, prot, flags, of, off)
+    if lz != 0 {
+        return lz
+    }
+    var rw: u64 = PROT_READ | PROT_WRITE
+    if (prot & PROT_EXEC) != 0 {
+        rw = rw | PROT_EXEC
+    }
+    let base: u64 = map_anon(state, me, addr, len, rw, flags | sysconst.MAP_ANONYMOUS)
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    let saved_off: u64 = file.open_off(state, of)
+    file.open_set_off(state, of, off)
+    var done: u64 = 0
+    while done < len {
+        var chunk: u64 = len - done
+        if chunk > 65536 {
+            chunk = 65536
+        }
+        let r: u64 = sysfd.do_read(state, me, fd, base + done, chunk)
+        if r >= 0xFFFFFFFFFFFFF000 {
+            file.open_set_off(state, of, saved_off)
+            let _u: u64 = do_unmap(state, me, base, len)
+            return r
+        }
+        if r == 0 {
+            done = len
+        } else {
+            done = done + r
+        }
+    }
+    file.open_set_off(state, of, saved_off)
+    if (prot & 3) != 3 {
+        let rr: u64 = set_range_prot(state, me, base, sysfd.page_up(len) / sysconst.PAGE, prot)
+        if rr != 0 {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+    }
+    return base
+}
+
+// The ordinary allocation: the next free pages below the bump marks (see `do_map` before this round, which this is).
+fn map_alloc(state: u64, me: u64, pages: u64, prot: u64) -> u64 {
+    let top: u64 = map_bottom(state, me)
+    if pages * sysconst.PAGE > top {
+        return big_map(state, me, pages, prot)
+    }
+    let base: u64 = top - pages * sysconst.PAGE
+    if base < sysfd.page_up(brk_of(state, me)) + sysconst.PAGE {
+        // The bump region is used up. Before going to the big region, take
+        // a hole that munmap left behind (see `hole`).
+        let h: u64 = hole(state, me, top, MMAP_TOP, pages)
+        if h != 0 {
+            if !map_run(state, me, h, pages, prot) {
+                return sysuser.neg(errno.E_NOMEM)
+            }
+            return h
+        }
+        return big_map(state, me, pages, prot)
+    }
+    var p: u64 = base
+    while p < top {
+        if proc.map_page_zero(state, me, p, true, (prot & PROT_EXEC) != 0) == 0 {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        p = p + sysconst.PAGE
+    }
+    sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
+    return base
+}
+
+// 27.09.2026: mmap handed out addresses by moving a bottom mark down and
+// never looked back -- munmap gave the FRAMES back, but not the addresses.
+// A process that allocates and frees for a long time (jarvisd: a TLS
+// session and a root store per bridge request) walked through the whole
+// region; after ~120 requests in the VM every mmap failed, reading the root
+// file failed ("no root store"), and the helper was gone for good -- the
+// Dell's "clock runs, mouse moves, but offline". Only asked once the bump
+// region is exhausted, so the normal path costs nothing.
+fn hole(state: u64, me: u64, lo: u64, hi: u64, pages: u64) -> u64 {
+    var run: u64 = 0
+    var p: u64 = lo
+    while p < hi {
+        if proc.translate(state, me, p) == 0 {
+            run = run + 1
+            if run == pages {
+                return p - (pages - 1) * sysconst.PAGE
+            }
+        } else {
+            run = 0
+        }
+        p = p + sysconst.PAGE
+    }
+    return 0
+}
+
+fn map_run(state: u64, me: u64, base: u64, pages: u64, prot: u64) -> bool {
+    var i: u64 = 0
+    while i < pages {
+        if proc.map_page_zero(state, me, base + i * sysconst.PAGE, true,
+            (prot & PROT_EXEC) != 0) == 0 {
+            return false
+        }
+        kstate.add(state, kstate.MAPS, 1)
+        i = i + 1
+    }
+    return true
+}
+
+// K-07: a writable mapping of a memfd takes a count on the object first (refused with -EPERM once F_SEAL_WRITE is set); the count is
+// given back by `munmap` / exit (`unixsock.map_release*`, record flag UM_WRITE) or here when the mapping fails.
+fn map_shm(state: u64, me: u64, of: u64, len: u64, prot: u64,
+    off: u64) -> u64 {
+    if (prot & PROT_WRITE) == 0 || file.open_kind(state, of) != file.K_SHM {
+        return map_shm_do(state, me, of, len, prot, off)
+    }
+    let i: u64 = file.open_ino(state, of)
+    if !unixsock.shm_wmap_take(state, i) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let r: u64 = map_shm_do(state, me, of, len, prot, off)
+    if r >= 0xFFFFFFFFFFFFF000 {
+        unixsock.shm_wmap_drop(state, i)
+    }
+    return r
+}
+
+fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
+    off: u64) -> u64 {
+    if off != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    return map_shm_obj(state, me, file.open_ino(state, of), sysfd.writable(state, of), len, prot)
+}
+
+// The mapping of shared object `i` (a memfd, or since LCSH the shared pages of a file); `wok` = the caller may write the object.
+fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u64 {
+    if unixsock.shm_used(state, i) == 0 {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    if pages == 0 || pages > unixsock.shm_max_pages(state, i) {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    // COMPOSITOR S3: a read-only object (the window table page) is never mapped writable
+    if (prot & PROT_WRITE) != 0 && ((unixsock.shm_flags(state, i) & unixsock.SMF_RO) != 0 || !wok) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    // ... and the table of mappings must have room, so that the reference of this mapping can be given back
+    if !unixsock.map_room(state) {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    if unixsock.shm_grow(state, i, pages) != 0 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    let writing: bool = (prot & PROT_WRITE) != 0
+    let top: u64 = map_bottom(state, me)
+    var base: u64 = 0
+    var is_big: bool = false
+    // WP-DEMAND: an object with a sparse part is mapped in its own arena (above the main stack): only the pages that exist are mapped,
+    // the rest is filled by the page-fault handler at the first touch (`unixsock.shm_fault`), so a 512 MiB memfd costs address space only.
+    let lazy: bool = unixsock.shm_lazy(state, i)
+    if lazy {
+        base = unixsock.map_arena_find(state, me, pages, proc.SHM_ARENA_BASE, proc.SHM_ARENA_TOP)
+        if base == 0 {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+    } else if pages * sysconst.PAGE <= top
+        && top - pages * sysconst.PAGE >= sysfd.page_up(brk_of(state, me)) + sysconst.PAGE {
+        base = top - pages * sysconst.PAGE
+    } else {
+        if kstate.mode_on(state, kstate.M_NOBIG) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        let btop: u64 = big_bottom(state, me)
+        if pages * sysconst.PAGE > btop - proc.BIG_FLOOR {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        base = btop - pages * sysconst.PAGE
+        if base < proc.BIG_FLOOR {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        is_big = true
+    }
+    var p: u64 = 0
+    while p < pages {
+        let frame: u64 = unixsock.shm_frame(state, i, p)
+        if frame == 0 && !lazy {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        if frame != 0 {
+            if !proc.map_frame(state, me, base + p * sysconst.PAGE, frame,
+                writing) {
+                return sysuser.neg(errno.E_NOMEM)
+            }
+            kstate.add(state, kstate.MAPS, 1)
+        }
+        p = p + 1
+    }
+    unixsock.shm_ref(state, i)
+    var note_flags: u64 = 0
+    if lazy {
+        note_flags = unixsock.UM_LAZY
+    }
+    if writing {
+        note_flags = note_flags | unixsock.UM_WRITE
+    }
+    let _noted: bool = unixsock.map_note(state, me, i, base, pages, note_flags)
+    if lazy {
+        // the arena has no bump mark
+    } else if is_big {
+        sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
+    } else {
+        sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
+    }
+    return base
+}
+
+fn map_fd(state: u64, me: u64, fd: u64, len: u64, prot: u64,
+    off: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if file.open_kind(state, of) == file.K_SHM {
+        return map_shm(state, me, of, len, prot, off)
+    }
+    if file.open_kind(state, of) != file.K_FB {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if off != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !gfx.fb_ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if len > gfx.fb_bytes(state) {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let writing: bool = (prot & PROT_WRITE) != 0
+    if writing {
+        if !sysfd.writable(state, of) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    if !sysfd.readable(state, of) {
+        if !writing {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    if !proc.map_huge(state, me, gfx.fb_user_base(), gfx.fb_block(state), writing) {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    kstate.add(state, kstate.MAPS, 1)
+    return gfx.fb_user_base() + gfx.fb_offset(state)
+}
+
+// ------------------------------------------------------------ RUNDE LIMITS3: PROT_NONE reservations
+const RES_BASE: u64 = 0x200000000
+const RES_TOP: u64 = 0x700000000000
+const RES_MIN: u64 = 0x4000000 // 64 MiB: smaller ones stay ordinary (eager) mappings
+const RES_MAX: u64 = 0x400000000
+const RES_SLOTS: u64 = 14
+const LAZY_MIN_PAGES: u64 = 256
+const LAZY_RESERVE_PAGES: u64 = 524288
+
+fn res_start(state: u64, owner: u64, k: u64) -> u64 {
+    return sched.tget(state, owner, sched.T_RESV + k * 16)
+}
+
+fn res_len(state: u64, owner: u64, k: u64) -> u64 {
+    return sched.tget(state, owner, sched.T_RESV + k * 16 + 8)
+}
+
+fn res_set(state: u64, owner: u64, k: u64, start: u64, len: u64) {
+    sched.tset(state, owner, sched.T_RESV + k * 16, start)
+    sched.tset(state, owner, sched.T_RESV + k * 16 + 8, len)
+}
+
+fn res_clear(state: u64, owner: u64) {
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        res_set(state, owner, k, 0, 0)
+        k = k + 1
+    }
+    sched.tset(state, owner, sched.T_RESNEXT, 0)
+    sched.tset(state, owner, sched.T_LAZY, 0)
+}
+
+fn res_add(state: u64, owner: u64, len: u64) -> u64 {
+    var next: u64 = sched.tget(state, owner, sched.T_RESNEXT)
+    if next < RES_BASE {
+        next = RES_BASE
+    }
+    if next + len > RES_TOP {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    // merge with the range that ends exactly here
+    var free_slot: u64 = RES_SLOTS
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        let l: u64 = res_len(state, owner, k)
+        if l == 0 {
+            if free_slot == RES_SLOTS {
+                free_slot = k
+            }
+        } else {
+            if res_start(state, owner, k) + l == next {
+                res_set(state, owner, k, res_start(state, owner, k), l + len)
+                sched.tset(state, owner, sched.T_RESNEXT, next + len)
+                return next
+            }
+        }
+        k = k + 1
+    }
+    if free_slot == RES_SLOTS {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    res_set(state, owner, free_slot, next, len)
+    sched.tset(state, owner, sched.T_RESNEXT, next + len)
+    return next
+}
+
+fn res_covers(state: u64, owner: u64, addr: u64, len: u64) -> bool {
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        let l: u64 = res_len(state, owner, k)
+        let s: u64 = res_start(state, owner, k)
+        if l != 0 && addr >= s && addr + len <= s + l {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+// munmap inside the reservation area: the part that lies in a range is cut out; what is in no range is ignored (Linux: success).
+fn res_remove(state: u64, owner: u64, addr: u64, len: u64) -> u64 {
+    let end: u64 = addr + len
+    var k: u64 = 0
+    while k < RES_SLOTS {
+        let l: u64 = res_len(state, owner, k)
+        let s: u64 = res_start(state, owner, k)
+        if l != 0 && addr < s + l && end > s {
+            var cut_lo: u64 = s
+            if addr > s {
+                cut_lo = addr
+            }
+            var cut_hi: u64 = s + l
+            if end < s + l {
+                cut_hi = end
+            }
+            if cut_lo == s && cut_hi == s + l {
+                res_set(state, owner, k, 0, 0)
+            } else {
+                if cut_lo == s {
+                    res_set(state, owner, k, cut_hi, s + l - cut_hi)
+                } else {
+                    if cut_hi == s + l {
+                        res_set(state, owner, k, s, cut_lo - s)
+                    } else {
+                        // middle: needs a free slot for the upper part
+                        var f: u64 = RES_SLOTS
+                        var j: u64 = 0
+                        while j < RES_SLOTS {
+                            if res_len(state, owner, j) == 0 {
+                                f = j
+                                j = RES_SLOTS
+                            } else {
+                                j = j + 1
+                            }
+                        }
+                        if f == RES_SLOTS {
+                            return sysuser.neg(errno.E_NOMEM)
+                        }
+                        res_set(state, owner, k, s, cut_lo - s)
+                        res_set(state, owner, f, cut_hi, s + l - cut_hi)
+                    }
+                }
+            }
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+// The pages go back, the bump pointer does not. A hole in the middle of a
+// bump allocator is a free list, and that is the libc's business, not the
+// kernel's -- written down as a gap in docs/ROUNDK4.md.
+fn do_unmap(state: u64, me: u64, addr: u64, len: u64) -> u64 {
+    if (addr & (sysconst.PAGE - 1)) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if len == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if addr >= RES_BASE {
+        let rl: u64 = sysfd.page_up(len)
+        proc.range_drop(state, me, addr, addr + rl)
+        let owner: u64 = mem_owner(state, me)
+        let rr: u64 = res_remove(state, owner, addr, rl)
+        if addr + rl == sched.tget(state, owner, sched.T_RESNEXT) {
+            sched.tset(state, owner, sched.T_RESNEXT, addr)
+        }
+        return rr
+    }
+    let in_alt: bool = addr >= map_bottom(state, me) && addr < MMAP_TOP
+    let in_big: bool = addr >= big_bottom(state, me) && addr < proc.BIG_TOP
+    let in_arena: bool = addr >= proc.SHM_ARENA_BASE && addr < proc.SHM_ARENA_TOP
+    let in_lazy: bool = addr >= proc.LAZY_BASE && addr < proc.LAZY_TOP
+    if !in_alt && !in_big && !in_arena && !in_lazy {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    // COMPOSITOR S3: a mapping of a shared object gives its reference back (LCSH: a file mapping writes back first)
+    file_shm_flush_maps(state, me, addr, sysfd.page_up(len), true)
+    let _released: bool = unixsock.map_release(state, me, addr, sysfd.page_up(len))
+    var p: u64 = addr
+    let end: u64 = addr + sysfd.page_up(len)
+    while p < end {
+        if p < MMAP_TOP || p < proc.BIG_TOP || (p >= proc.SHM_ARENA_BASE && p < proc.SHM_ARENA_TOP) || (p >= proc.LAZY_BASE && p < proc.LAZY_TOP) {
+            proc.page_drop(state, me, p)
+        }
+        p = p + sysconst.PAGE
+    }
+    if in_lazy && addr == lazy_bottom(state, me) {
+        var nb: u64 = end
+        if nb >= proc.LAZY_ATOP {
+            nb = 0
+        }
+        sched.tset(state, mem_owner(state, me), sched.T_LAZY, nb)
+    }
+    return 0
+}
+
+// THE ONE THAT WAS MISSING. `fork` gives the child everything the parent
+// has: a copy of every mapped page, the same open files, the same
+// registers -- and a zero in rax, which is the only thing the two of them
+// see differently.
+fn clear_child_tid(state: u64, me: u64) {
+    let addr: u64 = sched.tget(state, me, sched.T_FUTEX)
+    if addr == 0 {
+        return
+    }
+    sched.tset(state, me, sched.T_FUTEX, 0)
+    let phys: u64 = proc.translate(state, me, addr)
+    if phys == 0 {
+        return
+    }
+    guard.stac(state)
+    kstate.set8(phys, 0)
+    kstate.set8(phys + 1, 0)
+    kstate.set8(phys + 2, 0)
+    kstate.set8(phys + 3, 0)
+    guard.clac(state)
+}
+
+fn res_protect(state: u64, me: u64, addr: u64, pages: u64, prot: u64) -> u64 {
+    var k: u64 = 0
+    while k < pages {
+        let a: u64 = addr + k * sysconst.PAGE
+        if proc.page_mapped(state, me, a) {
+            let r: u64 = set_range_prot(state, me, a, 1, prot)
+            if r == 2 {
+                return sysuser.neg(errno.E_ACCES)
+            }
+            if r != 0 {
+                return sysuser.neg(errno.E_NOMEM)
+            }
+        } else if prot != 0 {
+            if !proc.lazy_mark(state, me, a, (prot & PROT_READ) != 0, (prot & PROT_WRITE) != 0, (prot & PROT_EXEC) != 0) {
+                return sysuser.neg(errno.E_NOMEM)
+            }
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn do_mprotect(state: u64, me: u64, addr: u64, len: u64, prot: u64) -> u64 {
+    if (addr & 4095) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if len == 0 {
+        return 0
+    }
+    if (prot & (~7)) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if addr >= RES_BASE {
+        // a reservation has no pages: it stays PROT_NONE, committing part of it (RW) is not supported
+        if !res_covers(state, mem_owner(state, me), addr, sysfd.page_up(len)) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        return res_protect(state, me, addr, sysfd.page_up(len) / sysconst.PAGE, prot)
+    }
+    if len > 0x400000000 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    var k: u64 = 0
+    while k < pages {
+        if !proc.page_mapped(state, me, addr + k * sysconst.PAGE) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        k = k + 1
+    }
+    let r: u64 = set_range_prot(state, me, addr, pages, prot)
+    if r == 2 {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if r != 0 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    return 0
+}
+
+// ==================================================== RUNDE SPEICHERDRUCK
+fn oom_pick(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var best: u64 = 0
+    var best_pages: u64 = 0
+    var found: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let st: u64 = sched.tget(state, i, sched.T_STATE)
+        let kind: u64 = sched.tget(state, i, sched.T_KIND)
+        let pid: u64 = sched.tget(state, i, sched.T_PID)
+        let safe: u64 = sched.tget(state, i, sched.T_OOMSAFE)
+        var ok: u64 = 1
+        if st == sched.S_FREE || st == sched.S_ZOMBIE {
+            ok = 0
+        }
+        if kind != sched.K_USER {
+            ok = 0
+        }
+        if pid <= 1 {
+            ok = 0
+        }
+        if safe != 0 {
+            ok = 0
+        }
+        if ok == 1 {
+            let pg: u64 = sched.tget(state, i, sched.T_UPAGES)
+            if found == 0 || pg > best_pages {
+                best = i
+                best_pages = pg
+                found = 1
+            }
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        return 0 -% 1
+    }
+    return best
+}
+
+fn oom_handle(state: u64) -> u64 {
+    if kstate.mode_on(state, kstate.M_NOOOM) {
+        return 0
+    }
+    if mem.frames_free(state) > kstate.get(state, kstate.RESERVE_FRAMES) {
+        return 0
+    }
+    let victim: u64 = oom_pick(state)
+    if victim == 0 -% 1 {
+        return 0
+    }
+
+    sysfile.do_sync(state, victim)
+    kstate.set(state, kstate.OOM_SYNCS,
+        kstate.get(state, kstate.OOM_SYNCS) + 1)
+
+    // 3. SAGEN, WAS PASSIERT.
+    var s_oom: [u8; 11] = "oom: kill \0"
+    var s_pid: [u8; 5] = "pid=\0"
+    var s_pg: [u8; 9] = "  pages=\0"
+    var s_free: [u8; 8] = "  frei=\0"
+    let pid: u64 = sched.tget(state, victim, sched.T_PID)
+    let pages: u64 = sched.tget(state, victim, sched.T_UPAGES)
+    serial.puts((&s_oom[0]) as u64)
+    serial.puts((&s_pid[0]) as u64)
+    serial.dec(pid)
+    serial.puts((&s_pg[0]) as u64)
+    serial.dec(pages)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+
+    kstate.set(state, kstate.OOM_KILLS,
+        kstate.get(state, kstate.OOM_KILLS) + 1)
+    kstate.set(state, kstate.OOM_VICTIM, pid)
+
+    let _k: bool = signal.send_task(state, victim, signal.SIGKILL)
+    return 1
+}
+
+const MAP_SHARED: u64 = 1
+
+// Corpses of non-leader threads of the caller's thread group are reaped (descriptors closed, slot given back). Returns how many.
+fn reap_dead_threads(state: u64, me: u64) -> u64 {
+    var g: u64 = sched.tget(state, me, sched.T_TGID)
+    if g == 0 {
+        g = sched.tget(state, me, sched.T_PID)
+    }
+    var n: u64 = 0
+    var i: u64 = 1
+    while i < kstate.MAX_TASKS {
+        if i != me && sched.tget(state, i, sched.T_STATE) == sched.S_ZOMBIE {
+            let tg: u64 = sched.tget(state, i, sched.T_TGID)
+            if tg == g && sched.tget(state, i, sched.T_PID) != g {
+                proc.reap(state, i)
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+// madvise: DONTNEED zeroes private pages (what a program relies on to get fresh memory back from a region it keeps); the other known advice
+// values are hints and are accepted; an unknown value is -EINVAL; a page that is not mapped is -ENOMEM.
+fn do_madvise(state: u64, me: u64, addr: u64, len: u64, advice: u64) -> u64 {
+    if (addr & 4095) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let known: bool = advice <= 4 || advice == 8 || (advice >= 9 && advice <= 19)
+    if !known {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if len == 0 {
+        return 0
+    }
+    if len > 0x400000000 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    let pages: u64 = sysfd.page_up(len) / sysconst.PAGE
+    var k: u64 = 0
+    while k < pages {
+        if !proc.page_mapped(state, me, addr + k * sysconst.PAGE) {
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        k = k + 1
+    }
+    if advice == 4 {
+        k = 0
+        while k < pages {
+            let _z: bool = proc.page_zero(state, me, addr + k * sysconst.PAGE)
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// Rights bits of proc.page_rights (2 read, 4 write, 8 execute) as PROT_* bits.
+fn rights_prot(rights: u64) -> u64 {
+    var prot: u64 = 0
+    if (rights & 2) != 0 {
+        prot = PROT_READ
+    }
+    if (rights & 4) != 0 {
+        prot = prot | PROT_WRITE
+    }
+    if (rights & 8) != 0 {
+        prot = prot | PROT_EXEC
+    }
+    return prot
+}
+
+// mremap growth of a mapping in the lazy arena: first in place (the pages behind the mapping are free), else, with MREMAP_MAYMOVE, a
+// new lazy run; only pages that were touched are copied, the rest stays demand-zero.
+fn mremap_lazy_grow(state: u64, me: u64, old_addr: u64, oldp: u64, newp: u64, rights: u64, may_move: bool) -> u64 {
+    let prot: u64 = rights_prot(rights)
+    let old_end: u64 = old_addr + oldp * sysconst.PAGE
+    let extra: u64 = newp - oldp
+    var free_after: bool = old_end + extra * sysconst.PAGE <= proc.LAZY_ATOP
+    var k: u64 = 0
+    while free_after && k < extra {
+        if proc.page_mapped(state, me, old_end + k * sysconst.PAGE) {
+            free_after = false
+        }
+        k = k + 1
+    }
+    if free_after {
+        if lazy_run(state, me, old_end, extra, prot) {
+            return old_addr
+        }
+    }
+    if !may_move {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    let base: u64 = lazy_alloc(state, me, newp, PROT_READ | PROT_WRITE)
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    k = 0
+    while k < oldp {
+        let _c: bool = proc.page_copy(state, me, old_addr + k * sysconst.PAGE, base + k * sysconst.PAGE)
+        k = k + 1
+    }
+    if (prot & 3) != 3 {
+        let _r: u64 = set_range_prot(state, me, base, newp, prot)
+    }
+    let _d: u64 = do_unmap(state, me, old_addr, oldp * sysconst.PAGE)
+    return base
+}
+
+// mremap: shrinking unmaps the tail; growing needs a new place (MREMAP_MAYMOVE): a new mapping is made, the pages are copied and the old
+// ones are given back. The rights of the first page carry over. MREMAP_FIXED / DONTUNMAP and growing in place are not supported (-EINVAL / -ENOMEM).
+fn do_mremap(state: u64, me: u64, old_addr: u64, old_len: u64, new_len: u64, flags: u64) -> u64 {
+    if (old_addr & 4095) != 0 || old_len == 0 || new_len == 0 || (flags & 6) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let oldp: u64 = sysfd.page_up(old_len) / sysconst.PAGE
+    let newp: u64 = sysfd.page_up(new_len) / sysconst.PAGE
+    var k: u64 = 0
+    var virtual_only: bool = false
+    while k < oldp {
+        if !proc.page_mapped(state, me, old_addr + k * sysconst.PAGE) {
+            if !proc.stack_zone_has(state, me, old_addr + k * sysconst.PAGE) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            virtual_only = true
+        }
+        k = k + 1
+    }
+    if newp == oldp {
+        return old_addr
+    }
+    if virtual_only {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    if newp < oldp {
+        let _u: u64 = do_unmap(state, me, old_addr + newp * sysconst.PAGE, (oldp - newp) * sysconst.PAGE)
+        return old_addr
+    }
+    let rights: u64 = proc.page_rights(state, me, old_addr)
+    if old_addr >= proc.LAZY_BASE && old_addr + oldp * sysconst.PAGE <= proc.LAZY_ATOP {
+        return mremap_lazy_grow(state, me, old_addr, oldp, newp, rights, (flags & 1) != 0)
+    }
+    if (flags & 1) == 0 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    let base: u64 = map_alloc(state, me, newp, PROT_READ | PROT_WRITE)
+    if base >= 0xFFFFFFFFFFFFF000 {
+        return base
+    }
+    k = 0
+    while k < oldp {
+        let _c: bool = proc.page_copy(state, me, old_addr + k * sysconst.PAGE, base + k * sysconst.PAGE)
+        k = k + 1
+    }
+    let prot: u64 = rights_prot(rights)
+    if (prot & 3) != 3 {
+        let _r: u64 = set_range_prot(state, me, base, newp, prot)
+    }
+    let _d: u64 = do_unmap(state, me, old_addr, oldp * sysconst.PAGE)
+    return base
+}

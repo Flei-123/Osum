@@ -1,0 +1,2217 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import gfx.gfx
+import lib.kstate
+import mm.mem
+import sched.sched
+import sched.proc
+import fs.fs
+import lib.errno
+import fs.file
+import fs.evfd
+import ipc.uio
+import ipc.handle
+import sched.signal
+import drv.con.tty
+import net.inet
+import net.netlink
+import net.netview
+import fs.unixsock
+import ipc.perm
+import ipc.appfs
+import sched.ctr
+import fs.vfs
+import fs.mnt
+import fs.vfsops
+import fs.devfs
+import block.blk
+import fs.ext4
+import fs.ntfs
+import fs.exfat
+import sys.sysconst
+import sys.sysuser
+import sys.systerm
+
+export {
+    cx_bit, cx_close_marked, cx_copy, cx_pair, cx_put, cx_result, dir_allowed, do_close, do_dup, do_dup2, do_dup_min, do_fsync, do_ftruncate, do_lseek, do_open_mode, do_pio, do_pipe, do_pipe_flags, do_pvec, do_read, do_recvfrom, do_sendto, do_writev, ev_kind, file_io_loop, fsync_of, nl_name_out, nl_recv_of, nl_run, nl_wait, open_named, page_up, read_of, readable, sa_in, sa_out, sa_un, sock_deadline, sock_gave_up, sock_of, vfs_on_create, wl_recv, wl_send, writable, write_of
+}
+
+const SA_BYTES: u64 = 16
+const SENDTO_ROUNDS: u64 = 300
+
+// ------------------------------------------------------------ the flags
+
+const O_WRONLY: u64 = 1
+const O_CREAT: u64 = 64 // 0o100
+const O_EXCL: u64 = 128 // 0o200
+const O_TRUNC: u64 = 512 // 0o1000
+const O_DIRECTORY: u64 = 65536 // 0o200000
+
+fn writable(state: u64, of: u64) -> bool {
+    let f: u64 = file.open_flags(state, of)
+    if (f & 3) == O_WRONLY {
+        return true
+    }
+    return (f & 3) == sysconst.O_RDWR
+}
+
+fn readable(state: u64, of: u64) -> bool {
+    return (file.open_flags(state, of) & 3) != O_WRONLY
+}
+
+// ------------------------------------------------------------- write
+
+fn do_write(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
+    var len: u64 = want
+    if len > sysconst.MAX_IO {
+        len = sysconst.MAX_IO
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let of: u64 = file.fd_check(state, me, fd, handle.R_WRITE)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    return write_of(state, me, of, buf, len)
+}
+
+fn shm_io(state: u64, me: u64, of: u64, buf: u64, len: u64, wr: bool) -> u64 {
+    let i: u64 = file.open_ino(state, of)
+    let size: u64 = unixsock.shm_size(state, i)
+    if wr && (unixsock.shm_seals(state, i) & 24) != 0 {
+        return sysuser.neg(errno.E_PERM) // F_SEAL_WRITE | F_SEAL_FUTURE_WRITE
+    }
+    var off: u64 = file.open_off(state, of)
+    if off >= size {
+        if wr && len != 0 {
+            return sysuser.neg(errno.E_NOSPC)
+        }
+        return 0
+    }
+    var want: u64 = len
+    if want > size - off {
+        want = size - off
+    }
+    var done: u64 = 0
+    while done < want {
+        let pg: u64 = off / 4096
+        let po: u64 = off & 4095
+        var chunk: u64 = 4096 - po
+        if chunk > want - done {
+            chunk = want - done
+        }
+        let fr: u64 = unixsock.shm_frame_demand(state, i, pg)
+        if fr == 0 {
+            if done != 0 {
+                file.open_set_off(state, of, off)
+                return done
+            }
+            return sysuser.neg(errno.E_NOMEM)
+        }
+        let bounce: u64 = sysuser.blockb(state)
+        if wr {
+            if !sysuser.copy_in(state, me, bounce, buf + done, chunk) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            var k: u64 = 0
+            while k < chunk {
+                kstate.set8(fr + po + k, kstate.get8(bounce + k) as u8)
+                k = k + 1
+            }
+        } else {
+            var k: u64 = 0
+            while k < chunk {
+                kstate.set8(bounce + k, kstate.get8(fr + po + k) as u8)
+                k = k + 1
+            }
+            if !sysuser.copy_out(state, me, buf + done, bounce, chunk) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+        }
+        done = done + chunk
+        off = off + chunk
+    }
+    file.open_set_off(state, of, off)
+    return done
+}
+
+fn write_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_SHM {
+        return shm_io(state, me, of, buf, len, true)
+    }
+    if ev_kind(kind) {
+        return ev_write(state, me, of, buf, len)
+    }
+    if kind == file.K_CONOUT {
+        return systerm.conout(state, me, systerm.tty_of(state, me), buf, len)
+    }
+    if kind == file.K_TTY {
+        return systerm.conout(state, me, file.open_ino(state, of), buf, len)
+    }
+    if kind == file.K_PIPEW {
+        return pipe_write(state, me, of, buf, len)
+    }
+    if kind == file.K_FB {
+        return fb_write(state, me, of, buf, len)
+    }
+    if kind == file.K_SOCK {
+        return sock_write(state, me, of, buf, len)
+    }
+    // RUNDE UNTERBAU: `write` on a local socket (it was -EBADF: only sendmsg worked, so a program that talks to its peer with plain
+    // read/write -- most IPC code -- got nothing).
+    if kind == file.K_USOCK {
+        return usock_rw(state, me, of, buf, len, true)
+    }
+    if kind == file.K_NETLINK {
+        return nl_send_of(state, me, of, buf, len)
+    }
+    if kind == file.K_VFILE {
+        return vfs_write(state, me, of, buf, len)
+    }
+    if kind == file.K_VDIR {
+        return sysuser.neg(errno.E_ISDIR)
+    }
+    if kind != file.K_FILE {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !writable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    // Through the data area: the file system never sees an address of a
+    // process.
+    let bounce: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bounce, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let ino: u64 = file.open_ino(state, of)
+    var off: u64 = file.open_off(state, of)
+    if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
+        off = fs.inode_size(state, ino)
+    }
+    let n: u64 = fs.write_at(state, ino, off, bounce, len)
+    if n == 0 {
+        if len != 0 {
+            return sysuser.neg(errno.E_NOSPC)
+        }
+    }
+    io_count(state, me, sched.T_DISKW, n)
+    file.open_set_off(state, of, off + n)
+    return n
+}
+
+// -------------------------------------------------------------- read
+
+// LA-9: a regular file is read in up to MAX_FREAD per call, in MAX_IO steps inside the call (one trap instead of 16)
+const MAX_FREAD: u64 = 65536
+
+fn do_read(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
+    var len: u64 = want
+    if len > MAX_FREAD {
+        len = MAX_FREAD
+    }
+    if len > sysconst.MAX_IO {
+        if !proc.user_ok(state, me, buf, len) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let of2: u64 = file.fd_check(state, me, fd, handle.R_READ)
+        if of2 >= file.MAX_OPEN {
+            return sysuser.neg(errno.E_BADF)
+        }
+        if file.open_kind(state, of2) != file.K_FILE {
+            return do_read_one(state, me, fd, buf, sysconst.MAX_IO)
+        }
+        var got: u64 = 0
+        while got < len {
+            var step: u64 = len - got
+            if step > sysconst.MAX_IO {
+                step = sysconst.MAX_IO
+            }
+            let r: u64 = read_of(state, me, of2, buf + got, step)
+            if r >= 0xFFFFFFFFFFFFF000 {
+                if got == 0 {
+                    return r
+                }
+                return got
+            }
+            got = got + r
+            if r < step {
+                return got
+            }
+        }
+        return got
+    }
+    return do_read_one(state, me, fd, buf, len)
+}
+
+fn do_read_one(state: u64, me: u64, fd: u64, buf: u64, want: u64) -> u64 {
+    var len: u64 = want
+    if len > sysconst.MAX_IO {
+        len = sysconst.MAX_IO
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let of: u64 = file.fd_check(state, me, fd, handle.R_READ)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    return read_of(state, me, of, buf, len)
+}
+
+fn read_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_SHM {
+        return shm_io(state, me, of, buf, len, false)
+    }
+    if ev_kind(kind) {
+        return ev_read(state, me, of, buf, len)
+    }
+    if kind == file.K_CONIN {
+        return systerm.console_read(state, me, buf, len)
+    }
+    if kind == file.K_TTY {
+        return systerm.tty_read(state, me, file.open_ino(state, of), buf, len)
+    }
+    if kind == file.K_PIPER {
+        return pipe_read(state, me, of, buf, len)
+    }
+    if kind == file.K_FB {
+        return fb_read(state, me, of, buf, len)
+    }
+    if kind == file.K_SOCK {
+        return sock_read(state, me, of, buf, len)
+    }
+    if kind == file.K_USOCK {
+        return usock_rw(state, me, of, buf, len, false)
+    }
+    if kind == file.K_NETLINK {
+        return nl_recv_of(state, me, of, buf, len, 0, 0, 0)
+    }
+    if kind == file.K_DIR || kind == file.K_VDIR {
+        return sysuser.neg(errno.E_ISDIR)
+    }
+    // ROUNDE K14.
+    if kind == file.K_VFILE {
+        return vfs_read(state, me, of, buf, len)
+    }
+    if kind != file.K_FILE {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !readable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let bounce: u64 = sysuser.blockb(state)
+    let ino: u64 = file.open_ino(state, of)
+    let off: u64 = file.open_off(state, of)
+    let n: u64 = fs.read_at(state, ino, off, bounce, len)
+    if !sysuser.copy_out(state, me, buf, bounce, n) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    io_count(state, me, sched.T_DISKR, n)
+    file.open_set_off(state, of, off + n)
+    return n
+}
+
+// -------------------------------------------------------------- pipes
+
+// A reader waits for as long as somebody could still write. When the last
+// writer is gone, an empty pipe is the END of the input -- 0, not an
+// error, and that is what makes `cat` in a pipeline stop.
+fn pipe_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let p: u64 = file.open_ino(state, of)
+    // r1215: wait on the poll wake sequence instead of "one tick": a writer (pipe_write) and the closing of a pipe end both
+    // call sched.poll_kick, so the reader runs right after the data arrives, not at the next 10 ms tick. The sequence is read
+    // BEFORE the look (no lost wake-up, see sched.poll_sleep). Same bound as before: BLOCK_ROUNDS ticks in total.
+    let deadline: u64 = kstate.get(state, kstate.TICKS) + sysconst.BLOCK_ROUNDS
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if file.pipe_bytes(state, p) != 0 {
+            break
+        }
+        if file.pipe_writers(state, p) == 0 {
+            return 0
+        }
+        // RUNDE UNTERBAU: O_NONBLOCK (pipe2, fcntl F_SETFL) -- an empty pipe with a writer is -EAGAIN at once, not after the wait
+        if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if kstate.get(state, kstate.TICKS) >= deadline {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        sched.poll_sleep(state, seen, deadline)
+    }
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        if n >= len {
+            going = false
+        } else {
+            let c: u64 = file.pipe_get(state, p)
+            if c > 255 {
+                going = false
+            } else {
+                if !sysuser.poke(state, me, buf + n, c) {
+                    return sysuser.neg(errno.E_FAULT)
+                }
+                n = n + 1
+            }
+        }
+    }
+    if n != 0 {
+        sched.poll_kick(state)
+    }
+    return n
+}
+
+// A writer into a pipe nobody reads gets -EPIPE. On a full pipe it waits;
+// what it could place before that is a SHORT write, which is what the
+// interface has always allowed.
+fn pipe_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let p: u64 = file.open_ino(state, of)
+    var n: u64 = 0
+    var waited: u64 = 0
+    var going: bool = true
+    while going {
+        if n >= len {
+            going = false
+        } else {
+            if file.pipe_readers(state, p) == 0 {
+                if n > 0 {
+                    return n
+                }
+                return sysuser.neg(errno.E_PIPE)
+            }
+            if file.pipe_room(state, p) == 0 {
+                if waited >= sysconst.BLOCK_ROUNDS || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+                    going = false
+                } else {
+                    waited = waited + 1
+                    sched.sleep_ticks(state, 1)
+                }
+            } else {
+                if !file.pipe_put(state, p, sysuser.peek(state, me, buf + n)) {
+                    going = false
+                } else {
+                    n = n + 1
+                }
+            }
+        }
+    }
+    if n != 0 {
+        sched.poll_kick(state)
+    }
+    if n == 0 {
+        if len != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+    }
+    return n
+}
+
+fn do_pipe(state: u64, me: u64, out: u64) -> u64 {
+    return do_pipe_flags(state, me, out, 0)
+}
+
+fn do_pipe_flags(state: u64, me: u64, out: u64, flags: u64) -> u64 {
+    if !proc.user_ok(state, me, out, 8) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let p: u64 = file.pipe_new(state)
+    if p >= file.MAX_PIPES {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let rd: u64 = file.open_alloc(state, file.K_PIPER, p, 0)
+    if rd >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let wr: u64 = file.open_alloc(state, file.K_PIPEW, p, O_WRONLY)
+    if wr >= file.MAX_OPEN {
+        unref_of(state, rd)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd0: u64 = file.fd_alloc(state, me, 0)
+    if fd0 >= file.MAX_FD {
+        unref_of(state, rd)
+        unref_of(state, wr)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd0, rd)
+    let fd1: u64 = file.fd_alloc(state, me, 0)
+    if fd1 >= file.MAX_FD {
+        file.fd_free(state, me, fd0)
+        unref_of(state, rd)
+        unref_of(state, wr)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd1, wr)
+    if (flags & UB_O_CLOEXEC) != 0 {
+        cx_put(state, me, fd0, true)
+        cx_put(state, me, fd1, true)
+    }
+    if (flags & sysconst.UB_O_NONBLOCK) != 0 {
+        file.open_set_flags(state, rd, file.open_flags(state, rd) | sysconst.UB_O_NONBLOCK)
+        file.open_set_flags(state, wr, file.open_flags(state, wr) | sysconst.UB_O_NONBLOCK)
+    }
+    // Two `int`s, four octets each -- the shape Linux writes.
+    if !sysuser.put32(state, me, out, fd0) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if !sysuser.put32(state, me, out + 4, fd1) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// ------------------------------------------------------------ the files
+
+// `open(path, flags, mode)`. The flags are Linux's: O_CREAT is 0o100, not
+// a boolean second argument the way round 62 had it.
+// ------------------------------------------------- ROUNDE K7: /dev/fb
+
+fn is_devfb(state: u64, buf: u64, len: u64) -> bool {
+    var name: [u8; 8] = "/dev/fb\0"
+    if len != 7 {
+        return false
+    }
+    var i: u64 = 0
+    while i < 7 {
+        if kstate.get8(buf + i) != (name[i as usize] as u64) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// open("/proc/self/fd/N") of a memfd: Linux re-opens the same object (Firefox makes its read-only IPC shared memory this way:
+// memfd_create, open(/proc/self/fd/N, O_RDONLY), map). Returns the object index, or USHM_MAX when the path is anything else.
+fn procfd_shm(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+    var pre: [u8; 16] = "/proc/self/fd/\0\0"
+    if len < 15 || len > 24 {
+        return unixsock.USHM_MAX
+    }
+    var i: u64 = 0
+    while i < 14 {
+        if kstate.get8(buf + i) != (pre[i as usize] as u64) {
+            return unixsock.USHM_MAX
+        }
+        i = i + 1
+    }
+    var n: u64 = 0
+    while i < len {
+        let c: u64 = kstate.get8(buf + i)
+        if c < 48 || c > 57 {
+            return unixsock.USHM_MAX
+        }
+        n = n * 10 + (c - 48)
+        i = i + 1
+    }
+    let of: u64 = sysuser.of_of(state, me, n)
+    if of >= file.MAX_OPEN || file.open_kind(state, of) != file.K_SHM {
+        return unixsock.USHM_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+fn open_devfb(state: u64, me: u64, flags: u64) -> u64 {
+    if !gfx.fb_ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if (flags & O_DIRECTORY) != 0 {
+        return sysuser.neg(errno.E_NOTDIR)
+    }
+    let of: u64 = file.open_alloc(state, file.K_FB, 0, flags)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+fn fb_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !writable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !gfx.fb_ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let off: u64 = file.open_off(state, of)
+    if off >= gfx.fb_bytes(state) {
+        return 0
+    }
+    var n: u64 = len
+    if n > sysconst.MAX_IO {
+        n = sysconst.MAX_IO
+    }
+    let bounce: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bounce, buf, n) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let k: u64 = gfx.fb_write_bytes(state, off, bounce, n)
+    file.open_set_off(state, of, off + k)
+    return k
+}
+
+fn fb_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !readable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !gfx.fb_ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let off: u64 = file.open_off(state, of)
+    let bounce: u64 = sysuser.blockb(state)
+    let k: u64 = gfx.fb_read_bytes(state, off, bounce, len)
+    if !sysuser.copy_out(state, me, buf, bounce, k) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    file.open_set_off(state, of, off + k)
+    return k
+}
+
+fn want_of(flags: u64) -> u64 {
+    var want: u64 = perm.R_READ
+    if (flags & 3) == 1 {
+        want = perm.R_WRITE
+    }
+    if (flags & 3) == 2 {
+        want = perm.R_READ | perm.R_WRITE
+    }
+    if (flags & O_TRUNC) != 0 {
+        want = want | perm.R_WRITE
+    }
+    return want
+}
+
+fn dir_allowed(state: u64, me: u64, path: u64, ino: u64) -> bool {
+    if ino == fs.root(state) {
+        return true
+    }
+    let dir: u64 = fs.parent_ino(state, path)
+    if dir == 0 {
+        return true
+    }
+    var dwant: u64 = perm.R_EXEC
+    if ino == 0 {
+        dwant = perm.R_EXEC | perm.R_WRITE
+    }
+    return perm.may(state, me, dir, dwant)
+}
+
+fn mnt_gone(state: u64, m: u64) -> bool {
+    if m >= vfs.MAX_MNT || !mnt.used(state, m) {
+        return false
+    }
+    let dev: u64 = mnt.dev(state, m)
+    if !blk.removable(dev) {
+        return false
+    }
+    return !blk.present_on(state, dev)
+}
+
+fn vfs_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !readable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let node: u64 = file.open_ino(state, of)
+    let off: u64 = file.open_off(state, of)
+    let bounce: u64 = sysuser.blockb(state)
+    var want: u64 = len
+    if want > kstate.BLOCK_MAX {
+        want = kstate.BLOCK_MAX
+    }
+    let n: u64 = vfs.v_read(state, m, node, off, bounce, want)
+    if !sysuser.copy_out(state, me, buf, bounce, n) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    io_count(state, me, sched.T_DISKR, n)
+    file.open_set_off(state, of, off + n)
+    return n
+}
+
+fn vfs_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if !writable(state, of) {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let m: u64 = file.open_mnt(state, of)
+    if mnt_gone(state, m) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let node: u64 = file.open_ino(state, of)
+    var off: u64 = file.open_off(state, of)
+    if (file.open_flags(state, of) & sysconst.O_APPEND) != 0 {
+        off = vfs.v_attr(state, m, node, vfsops.A_SIZE)
+    }
+    let bounce: u64 = sysuser.blockb(state)
+    var want: u64 = len
+    if want > kstate.BLOCK_MAX {
+        want = kstate.BLOCK_MAX
+    }
+    if !sysuser.copy_in(state, me, bounce, buf, want) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let n: u64 = vfs.v_write(state, m, node, off, bounce, want)
+    if errno.is_error(n) {
+        return n
+    }
+    if n == 0 && want != 0 {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    io_count(state, me, sched.T_DISKW, n)
+    file.open_set_off(state, of, off + n)
+    return n
+}
+
+fn vfs_may(state: u64, me: u64, m: u64, node: u64, want: u64) -> bool {
+    kstate.add(state, kstate.MU_OFF + kstate.MU_NODECHK, 1)
+    let mode: u64 = vfs.v_attr(state, m, node, vfsops.A_MODE)
+    let owner: u64 = vfs.v_attr(state, m, node, vfsops.A_UID)
+    let group: u64 = vfs.v_attr(state, m, node, vfsops.A_GID)
+    let ist_dir: bool = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+        == vfsops.N_DIR
+    return perm.may_attr(state, me, mode, owner, group, want,
+        perm.euid(state, me), perm.egid(state, me), ist_dir)
+}
+
+fn vfs_on_create(state: u64, me: u64, m: u64, node: u64, mode: u64) {
+    if node == 0 {
+        return
+    }
+    if vfs.type_of(state, m) != vfsops.FS_OFS {
+        return
+    }
+    perm.on_create(state, me, node, mode)
+}
+
+// open("/dev/shm/NAME"): a descriptor on the named paged shm object (like memfd, but the object outlives it by the name's reference)
+fn open_devshm(state: u64, me: u64, i: u64, flags: u64) -> u64 {
+    unixsock.shm_ref(state, i)
+    let of: u64 = file.open_alloc(state, file.K_SHM, i, flags)
+    if of >= file.MAX_OPEN {
+        unixsock.shm_unref(state, i)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    if (flags & O_TRUNC) != 0 && (flags & 3) != 0 {
+        do_ftruncate(state, me, fd, 0)
+    }
+    return fd
+}
+
+fn open_vfs(state: u64, me: u64, m: u64, path: u64, flags: u64) -> u64 {
+    if mnt_gone(state, m) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    var node: u64 = vfs.node_for(state, m, path)
+    if node == 0 {
+        if (flags & O_CREAT) == 0 {
+            return sysuser.neg(errno.E_NOENT)
+        }
+        if !vfs.can(state, m, vfsops.OP_CREATE) {
+            if vfs.rdonly(state, m) {
+                return sysuser.neg(errno.E_ROFS)
+            }
+            return sysuser.neg(errno.E_PERM)
+        }
+        node = vfs.v_create(state, m, path, vfsops.N_FILE)
+        if node == 0 {
+            if vfs.type_of(state, m) == vfsops.FS_DEV && !devfs.full_path_in_shm(path) {
+                return sysuser.neg(errno.E_PERM)
+            }
+            return sysuser.neg(errno.E_NOSPC)
+        }
+        vfs_on_create(state, me, m, node, 438)
+    } else {
+        if (flags & O_CREAT) != 0 && (flags & O_EXCL) != 0 {
+            return sysuser.neg(errno.E_EXIST)
+        }
+    }
+    // ==================================== RUNDE MULTIUSER: DAS TOR
+    if !vfs_may(state, me, m, node, want_of(flags)) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    let art: u64 = vfs.v_attr(state, m, node, vfsops.A_TYPE)
+    if vfs.type_of(state, m) == vfsops.FS_DEV {
+        if devfs.is_fb(node) {
+            return open_devfb(state, me, flags)
+        }
+        if devfs.is_tty(node) {
+            return open_devtty(state, me, flags)
+        }
+        // ROUND FOOT-1 (PTY ABI): /dev/ptmx = a new pair, the master; /dev/pts/N = the slave of pair N
+        if devfs.is_ptmx(node) {
+            return systerm.open_ptmx(state, me, flags)
+        }
+        if devfs.pts_slot(node) < tty.MAX_TTY {
+            return systerm.open_pts(state, me, devfs.pts_slot(node), flags)
+        }
+        if devfs.shm_slot(node) < unixsock.USHM_PAGED {
+            return open_devshm(state, me, devfs.shm_slot(node), flags)
+        }
+    }
+    var kind: u64 = file.K_VFILE
+    if art == vfsops.N_DIR {
+        if (flags & 3) != 0 {
+            return sysuser.neg(errno.E_ISDIR)
+        }
+        kind = file.K_VDIR
+    } else {
+        if (flags & O_DIRECTORY) != 0 {
+            return sysuser.neg(errno.E_NOTDIR)
+        }
+        if (flags & O_TRUNC) != 0 {
+            let r: u64 = vfs.v_trunc(state, m, node)
+            if r != 0 {
+                return sysuser.neg(r)
+            }
+        }
+    }
+    let of: u64 = file.open_alloc(state, kind, node, flags)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    file.open_set_mnt(state, of, m)
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    if kind == file.K_VDIR {
+        dirpath_remember(state, me, of, path)
+    }
+    mnt.open_inc(state, m)
+    let ot: u64 = vfs.type_of(state, m)
+    if ot == vfsops.FS_EXT4 {
+        ext4.node_hold(state, node)
+    }
+    if ot == vfsops.FS_NTFS {
+        ntfs.node_hold(state, node)
+    }
+    if ot == vfsops.FS_EXFAT {
+        exfat.node_hold(state, node)
+    }
+    return fd
+}
+
+fn open_devtty(state: u64, me: u64, flags: u64) -> u64 {
+    let t: u64 = systerm.tty_of(state, me)
+    if !tty.valid(state, t) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let of: u64 = file.open_alloc(state, file.K_TTY, t, flags)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+fn do_open(state: u64, me: u64, name: u64, flags: u64) -> u64 {
+    return do_open_mode(state, me, name, flags, 0)
+}
+
+fn do_open_mode(state: u64, me: u64, name: u64, flags: u64, mode: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let len: u64 = sysuser.fetch_path(state, me, name, buf, sysconst.MAX_NAME)
+    if errno.is_error(len) {
+        return len
+    }
+    if len == 0 {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    return open_named(state, me, buf, len, flags, mode)
+}
+
+fn create_mode(mode: u64) -> u64 {
+    if (mode & 4095) == 0 {
+        return 438
+    }
+    return mode & 4095
+}
+
+fn open_named(state: u64, me: u64, buf: u64, len: u64, flags: u64, mode: u64) -> u64 {
+    if is_devfb(state, buf, len) {
+        return open_devfb(state, me, flags)
+    }
+    let psh: u64 = procfd_shm(state, me, buf, len)
+    if psh < unixsock.USHM_MAX {
+        return open_devshm(state, me, psh, flags)
+    }
+    if !perm.walk(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if ((flags & 3) != 0 || (flags & O_CREAT) != 0 || (flags & O_TRUNC) != 0) && !appfs.write_ok(state, me, buf) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if vfs.ready(state) {
+        let m: u64 = vfs.mount_for(state, buf)
+        if m < vfs.MAX_MNT {
+            if m != 0 || vfs.all_mode(state) {
+                return open_vfs(state, me, m, buf, flags)
+            }
+        }
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    // ================================================== RUNDE K13
+    var ino: u64 = fs.path(state, buf)
+    if !dir_allowed(state, me, buf, ino) {
+        return sysuser.neg(errno.E_ACCES)
+    }
+    if ino == 0 {
+        if (flags & O_CREAT) == 0 {
+            return sysuser.neg(errno.E_NOENT)
+        }
+        ino = fs.create_path(state, buf, fs.T_FILE)
+        if ino == 0 {
+            // parent directory missing: ENOENT, not ENOSPC (git: open objects/xx/tmp, expect ENOENT, mkdir, retry)
+            if fs.parent_ino(state, buf) == 0 {
+                return sysuser.neg(errno.E_NOENT)
+            }
+            return sysuser.neg(errno.E_NOSPC)
+        }
+        perm.on_create(state, me, ino, create_mode(mode))
+    } else {
+        if (flags & O_CREAT) != 0 {
+            if (flags & O_EXCL) != 0 {
+                return sysuser.neg(errno.E_EXIST)
+            }
+        }
+        if !perm.may(state, me, ino, want_of(flags)) {
+            return sysuser.neg(errno.E_ACCES)
+        }
+    }
+    var kind: u64 = file.K_FILE
+    if fs.inode_type(state, ino) == fs.T_DIR {
+        if (flags & 3) != 0 {
+            return sysuser.neg(errno.E_ISDIR)
+        }
+        kind = file.K_DIR
+    } else {
+        if (flags & O_DIRECTORY) != 0 {
+            return sysuser.neg(errno.E_NOTDIR)
+        }
+        if (flags & O_TRUNC) != 0 {
+            fs.file_truncate(state, ino)
+        }
+    }
+    let of: u64 = file.open_alloc(state, kind, ino, flags)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        unref_of(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    if kind == file.K_DIR {
+        dirpath_remember(state, me, of, buf)
+    }
+    fs.touch_atime(state, ino)
+    return fd
+}
+
+fn do_close(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    file.fd_free(state, me, fd)
+    unref_of(state, of)
+    return 0
+}
+
+fn do_dup(state: u64, me: u64, fd: u64) -> u64 {
+    return do_dup_min(state, me, fd, 0)
+}
+
+// r727: `fcntl(F_DUPFD, min)` hands out the lowest free descriptor >= min (EINVAL when min is out of range).
+fn do_dup_min(state: u64, me: u64, fd: u64, min: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if min >= file.MAX_FD {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let to: u64 = file.fd_alloc(state, me, min)
+    if to >= file.MAX_FD {
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.open_ref(state, of)
+    file.fd_set(state, me, to, of)
+    return to
+}
+
+// `dup2(from, to)` -- what a shell does between `fork` and `execve` when
+// it points the output of a program somewhere else. The two descriptors
+// are ONE open file afterwards, with one position, which is the whole
+// reason the open file table of round K4 exists.
+fn do_dup2(state: u64, me: u64, from: u64, to: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, from)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if to >= file.MAX_FD {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if from == to {
+        return to
+    }
+    let old: u64 = sysuser.of_of(state, me, to)
+    if old < file.MAX_OPEN {
+        file.fd_free(state, me, to)
+        unref_of(state, old)
+    }
+    file.open_ref(state, of)
+    file.fd_set(state, me, to, of)
+    return to
+}
+
+fn do_lseek(state: u64, me: u64, fd: u64, off: u64, whence: u64) -> u64 {
+    let of: u64 = file.fd_check(state, me, fd, handle.R_SEEK)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_PIPER || kind == file.K_PIPEW {
+        return sysuser.neg(errno.E_SPIPE)
+    }
+    if kind == file.K_CONIN || kind == file.K_CONOUT {
+        return sysuser.neg(errno.E_SPIPE)
+    }
+    var base: u64 = 0
+    if whence == sysconst.SEEK_CUR {
+        base = file.open_off(state, of)
+    } else {
+        if whence == sysconst.SEEK_END {
+            if kind == file.K_FB {
+                base = gfx.fb_bytes(state)
+            } else if kind == file.K_VFILE || kind == file.K_VDIR {
+                base = vfs.v_attr(state, file.open_mnt(state, of),
+                    file.open_ino(state, of), vfsops.A_SIZE)
+            } else {
+                base = fs.inode_size(state, file.open_ino(state, of))
+            }
+        } else {
+            if whence != sysconst.SEEK_SET {
+                return sysuser.neg(errno.E_INVAL)
+            }
+        }
+    }
+    // `off` is an i64 in a u64 register: a negative one is a big number,
+    // and adding it is the wraparound `+%` says out loud. What must not
+    // happen is a position that ends up before the start of the file.
+    let pos: u64 = base +% off
+    if (pos >> 63) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if (off >> 63) != 0 {
+        if pos > base {
+            return sysuser.neg(errno.E_INVAL)
+        }
+    }
+    file.open_set_off(state, of, pos)
+    return pos
+}
+
+fn page_up(v: u64) -> u64 {
+    // wrapping add: a length near 2^64 must not reach the checked `+` (kernel panic from ring 3); it rounds to 0 and the callers reject 0 pages
+    return (v +% (sysconst.PAGE - 1)) & 0xFFFFFFFFFFFFF000
+}
+
+fn do_pio(state: u64, me: u64, fd: u64, buf: u64, len: u64, off: u64,
+    writing: bool) -> u64 {
+    if (off >> 63) != 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var recht: u64 = handle.R_READ
+    if writing {
+        recht = handle.R_WRITE
+    }
+    let of: u64 = file.fd_check(state, me, fd, recht)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_PIPER || kind == file.K_PIPEW {
+        return sysuser.neg(errno.E_SPIPE)
+    }
+    if kind == file.K_CONIN || kind == file.K_CONOUT {
+        return sysuser.neg(errno.E_SPIPE)
+    }
+    let saved_off: u64 = file.open_off(state, of)
+    file.open_set_off(state, of, off)
+    var r: u64 = 0
+    if writing {
+        r = do_write(state, me, fd, buf, len)
+    } else {
+        r = do_read(state, me, fd, buf, len)
+        // ROUND UNTERBAU: one do_read gives at most one block-sized chunk; a regular file answers a bigger
+        // pread() in full (POSIX allows a short read, but SQLite, mmap-less loaders and tar rely on the full one).
+        if kind == file.K_FILE && (r >> 63) == 0 && r != 0 && r < len {
+            var done: u64 = r
+            var more: bool = true
+            while more && done < len {
+                let r2: u64 = do_read(state, me, fd, buf + done, len - done)
+                if (r2 >> 63) != 0 || r2 == 0 {
+                    more = false
+                } else {
+                    done = done + r2
+                }
+            }
+            r = done
+        }
+    }
+    file.open_set_off(state, of, saved_off)
+    return r
+}
+
+fn do_writev(state: u64, me: u64, fd: u64, iov: u64, n: u64, writing: bool) -> u64 {
+    if n > 1024 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if n == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, iov, n * 16) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let base: u64 = sysuser.get_user64(state, me, iov + i * 16)
+        let len: u64 = sysuser.get_user64(state, me, iov + i * 16 + 8)
+        if len != 0 {
+            var r: u64 = 0
+            if writing {
+                r = do_write(state, me, fd, base, len)
+            } else {
+                r = do_read(state, me, fd, base, len)
+            }
+            if (r >> 63) != 0 {
+                if total == 0 {
+                    return r
+                }
+                return total
+            }
+            total = total + r
+            if r < len {
+                return total
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn do_pvec(state: u64, me: u64, fd: u64, iov: u64, n: u64, off: u64, writing: bool) -> u64 {
+    if n > 1024 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if n == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, iov, n * 16) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        let base: u64 = sysuser.get_user64(state, me, iov + i * 16)
+        let len: u64 = sysuser.get_user64(state, me, iov + i * 16 + 8)
+        if len != 0 {
+            let r: u64 = do_pio(state, me, fd, base, len, off + total, writing)
+            if (r >> 63) != 0 {
+                if total == 0 {
+                    return r
+                }
+                return total
+            }
+            total = total + r
+            if r < len {
+                return total
+            }
+        }
+        i = i + 1
+    }
+    return total
+}
+
+fn io_count(state: u64, me: u64, field: u64, n: u64) {
+    if n == 0 || (n >> 63) != 0 {
+        return
+    }
+    sched.tset(state, me, field, sched.tget(state, me, field) + n)
+}
+
+// ------------------------------------------------------------- fsync
+fn fsync_of(state: u64, of: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_PIPER || kind == file.K_PIPEW {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == file.K_SOCK {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !blk.flush(state) {
+        return sysuser.neg(errno.E_IO)
+    }
+    return 0
+}
+
+fn do_fsync(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    return fsync_of(state, of)
+}
+
+// =====================================================================
+// ROUND K8 -- THE SOCKETS
+// =====================================================================
+//
+// Everything below keeps the three rules at the top of this file. The
+// numbers are Linux's; nothing is answered silently (a domain that is
+// not AF_INET gives -EAFNOSUPPORT, a descriptor that is not a socket
+// gives -ENOTSOCK's nearest relative -EBADF, a pointer that is not the
+// caller's gives -EFAULT, checked BEFORE it is followed); and the
+// kernel never holds a pointer of ring 3 -- every buffer travels
+// through the data area.
+//
+// A socket lives in TWO tables at once and that is on purpose:
+//
+//   the OPEN FILE TABLE of round K4  -- kind `file.K_SOCK`, and the
+//       number of the socket in `OF_INO`. This is what makes `read`,
+//       `write`, `close`, `dup2` and `fork` work on it without any of
+//       them learning what a socket is.
+//   the SOCKET TABLE of `inet.fi`    -- the kind (TCP/UDP/ICMP), the
+//       handle in the stack of round K3, the bound port.
+//
+// The reference count of the first decides when the second is torn
+// down: `unref_of` closes the connection only when the LAST descriptor
+// pointing at it goes away. A `fork`ed child that closes its copy must
+// not take the parent's connection with it.
+
+// The socket behind a descriptor, or `inet.SOCK_MAX`.
+fn sock_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return inet.SOCK_MAX
+    }
+    if file.open_kind(state, of) != file.K_SOCK {
+        return inet.SOCK_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+// One reference less on an open file, and the connection behind it torn
+// down when that was the last one. Everything in this file that drops a
+// descriptor goes through here.
+fn unref_of(state: u64, of: u64) {
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_USOCK {
+        if file.open_refs(state, of) <= 1 {
+            unixsock.sock_free(state, file.open_ino(state, of))
+            sched.poll_kick(state)
+        }
+    }
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
+        if file.open_refs(state, of) <= 1 {
+            unixsock.shm_unref(state, file.open_ino(state, of))
+        }
+    }
+    if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
+        if file.open_refs(state, of) <= 1 {
+            netview.release(state, file.open_ino(state, of))
+            inet.sock_close(state, file.open_ino(state, of))
+        }
+    }
+    file.open_unref(state, of)
+}
+
+// ------------------------------------------------------ sockaddr_in
+
+// Reads sixteen octets out of ring 3 and takes the address and the port
+// out of them. The port and the address are BIG ENDIAN on the wire and
+// in this structure; the family is not.
+fn sa_in(state: u64, me: u64, addr: u64, len: u64, ipp: *mut u64,
+    portp: *mut u64) -> u64 {
+    *ipp = 0
+    *portp = 0
+    if addr == 0 || len < SA_BYTES {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var sa: u64 = inet.saddr(state)
+    if sa == 0 {
+        sa = netview.sa_scratch(state)
+    }
+    if !sysuser.copy_in(state, me, sa, addr, SA_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let family: u64 = kstate.get8(sa) | (kstate.get8(sa + 1) << 8)
+    if family != sysconst.AF_INET {
+        return sysuser.neg(errno.E_AFNOSUPPORT)
+    }
+    *portp = (kstate.get8(sa + 2) << 8) | kstate.get8(sa + 3)
+    *ipp = (kstate.get8(sa + 4) << 24) | (kstate.get8(sa + 5) << 16)
+        | (kstate.get8(sa + 6) << 8) | kstate.get8(sa + 7)
+    return 0
+}
+
+// And the other direction, with the `socklen_t*` the caller handed in:
+// it is read AND written, exactly as `accept(2)` describes it.
+fn sa_out(state: u64, me: u64, addr: u64, lenp: u64, a: u64,
+    port: u64) -> u64 {
+    if addr == 0 {
+        return 0
+    }
+    var room: u64 = SA_BYTES
+    if lenp != 0 {
+        if !proc.user_ok(state, me, lenp, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        room = 0
+        var k: u64 = 0
+        while k < 4 {
+            room = room | (sysuser.peek(state, me, lenp + k) << (k * 8))
+            k = k + 1
+        }
+    }
+    var sa: u64 = inet.saddr(state)
+    if sa == 0 {
+        sa = netview.sa_scratch(state)
+    }
+    sa = sa + 64
+    var i: u64 = 0
+    while i < SA_BYTES {
+        kstate.set8(sa + i, 0 as u8)
+        i = i + 1
+    }
+    kstate.set8(sa, (sysconst.AF_INET & 0xFF) as u8)
+    kstate.set8(sa + 1, ((sysconst.AF_INET >> 8) & 0xFF) as u8)
+    kstate.set8(sa + 2, ((port >> 8) & 0xFF) as u8)
+    kstate.set8(sa + 3, (port & 0xFF) as u8)
+    kstate.set8(sa + 4, ((a >> 24) & 0xFF) as u8)
+    kstate.set8(sa + 5, ((a >> 16) & 0xFF) as u8)
+    kstate.set8(sa + 6, ((a >> 8) & 0xFF) as u8)
+    kstate.set8(sa + 7, (a & 0xFF) as u8)
+    var n: u64 = SA_BYTES
+    if room < n {
+        n = room
+    }
+    if n > 0 {
+        if !sysuser.copy_out(state, me, addr, sa, n) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    if lenp != 0 {
+        var k: u64 = 0
+        while k < 4 {
+            if !sysuser.poke(state, me, lenp + k, (SA_BYTES >> (k * 8)) & 0xFF) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            k = k + 1
+        }
+    }
+    return 0
+}
+
+// `send` and `recv` are these two with a null address -- that is what
+// glibc does on x86-64, and copying it is what makes a Linux program
+// work here without a translation table.
+fn do_sendto(state: u64, me: u64, fd: u64, buf: u64, want: u64,
+    addr: u64, alen: u64) -> u64 {
+    // RUNDE EVENTS: send() on a local socket (socketpair, AF_UNIX) is a write
+    let uof: u64 = sysuser.of_of(state, me, fd)
+    if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
+        if addr != 0 {
+            return usock_sendto(state, me, uof, buf, want, addr, alen)
+        }
+        return write_of(state, me, uof, buf, want)
+    }
+    if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_NETLINK {
+        return nl_send_of(state, me, uof, buf, want)
+    }
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var len: u64 = want
+    if len > sysconst.MAX_IO {
+        len = sysconst.MAX_IO
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    if addr != 0 {
+        let r: u64 = sa_in(state, me, addr, alen, &a, &port)
+        if errno.is_error(r) {
+            return r
+        }
+    }
+    // ====================================================== RUNDE NETVIEW
+    var fake: bool = netview.is_fake(state, si)
+    if !fake && addr != 0 {
+        let dc: u64 = netview.decide(state, me, a, port)
+        if dc == netview.D_DENY {
+            return sysuser.neg(errno.E_NETUNREACH)
+        }
+        if dc == netview.D_FAKE {
+            netview.open_fake(state, si, inet.sock_kind(state, si), a, port)
+            fake = true
+        }
+    }
+    if fake {
+        var peek: u64 = len
+        if peek > netview.PEEK_MAX {
+            peek = netview.PEEK_MAX
+        }
+        if peek > 0 {
+            if !sysuser.copy_in(state, me, netview.peek_buf(state), buf, peek) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+        }
+        return netview.sendto_fake(state, si, netview.peek_buf(state),
+            len, a, port)
+    }
+    let bounce: u64 = inet.bounce(state)
+    if !sysuser.copy_in(state, me, bounce, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return sock_io(state, si, bounce, len, a, port, true)
+}
+
+fn do_recvfrom(state: u64, me: u64, fd: u64, buf: u64, want: u64,
+    addr: u64, lenp: u64) -> u64 {
+    // RUNDE EVENTS: recv() on a local socket (socketpair, AF_UNIX) is a read
+    let uof: u64 = sysuser.of_of(state, me, fd)
+    if uof < file.MAX_OPEN && file.open_kind(state, uof) == file.K_USOCK {
+        return read_of(state, me, uof, buf, want)
+    }
+    let si: u64 = sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var len: u64 = want
+    if len > sysconst.MAX_IO {
+        len = sysconst.MAX_IO
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    // ====================================================== RUNDE NETVIEW
+    if netview.is_fake(state, si) {
+        var fa: u64 = 0
+        var fp: u64 = 0
+        var fl: u64 = len
+        if fl > netview.PEEK_MAX {
+            fl = netview.PEEK_MAX
+        }
+        let got: u64 = netview.recvfrom_fake(state, si,
+            netview.peek_buf(state), fl, &fa, &fp)
+        if errno.is_error(got) {
+            return got
+        }
+        if got > 0 {
+            if !sysuser.copy_out(state, me, buf, netview.peek_buf(state), got) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+        }
+        if addr != 0 {
+            let fw: u64 = sa_out(state, me, addr, lenp, fa, fp)
+            if errno.is_error(fw) {
+                return fw
+            }
+        }
+        return got
+    }
+    let bounce: u64 = inet.bounce(state)
+    var a: u64 = 0
+    var port: u64 = 0
+    var waited: u64 = 0
+    let nb: bool = inet.sock_nonblock(state, si)
+    let rdl: u64 = sock_deadline(state, si, false)
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        n = inet.sock_recvfrom(state, si, bounce, len, &a, &port)
+        if !errno.is_error(n) {
+            going = false
+        } else if n != sysuser.neg(errno.E_AGAIN) {
+            return n
+        } else if nb || sock_gave_up(state, rdl, waited) {
+            return sysuser.neg(errno.E_AGAIN)
+        } else {
+            waited = waited + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    if n > 0 {
+        if !sysuser.copy_out(state, me, buf, bounce, n) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    if addr != 0 {
+        let w: u64 = sa_out(state, me, addr, lenp, a, port)
+        if errno.is_error(w) {
+            return w
+        }
+    }
+    return n
+}
+
+// The waiting half of `send`, shared with `write` on a socket. A socket
+// whose send window is full is not an error; it is a reason to come back
+// in a moment -- and a `write` that returns a SHORT count is what the
+// interface has always allowed.
+fn sock_io(state: u64, si: u64, bounce: u64, len: u64, a: u64, port: u64,
+    to: bool) -> u64 {
+    var waited: u64 = 0
+    let nb: bool = inet.sock_nonblock(state, si)
+    let sdl: u64 = sock_deadline(state, si, true)
+    while !sock_gave_up(state, sdl, waited) {
+        if to && sdl == 0 && waited >= SENDTO_ROUNDS {
+            return sysuser.neg(errno.E_HOSTUNREACH)
+        }
+        var n: u64 = 0
+        if to {
+            n = inet.sock_sendto(state, si, bounce, len, a, port)
+        } else {
+            n = inet.sock_send(state, si, bounce, len)
+        }
+        if !errno.is_error(n) {
+            return n
+        }
+        if n != sysuser.neg(errno.E_AGAIN) {
+            return n
+        }
+        if nb {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return sysuser.neg(errno.E_AGAIN)
+}
+
+// `read` and `write` on a socket descriptor. The same two functions the
+// calls above use, minus the address -- so a program can point `stdout`
+// at a connection with `dup2` and never call a socket function again.
+fn sock_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    return do_recvfrom(state, me, fd_back(state, me, of), buf, len, 0, 0)
+}
+
+fn sock_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    return do_sendto(state, me, fd_back(state, me, of), buf, len, 0, 0)
+}
+
+// `read_of`/`write_of` were split off a descriptor for the native ABI of
+// the capability round, so they carry an OPEN FILE and not a number. The
+// socket calls want the number back; the table is sixteen entries and
+// the search is a loop over them.
+fn fd_back(state: u64, me: u64, of: u64) -> u64 {
+    var fd: u64 = 0
+    while fd < file.MAX_FD {
+        if sysuser.of_of(state, me, fd) == of {
+            return fd
+        }
+        fd = fd + 1
+    }
+    return file.MAX_FD
+}
+
+// The tick at which a blocking call on socket `si` must give up, or 0 when
+// no timeout is set (then the old NET_ROUNDS bound applies). Like `poll`,
+// the running tick counts as one: the wait lies between `timeout` and
+// `timeout + 10 ms`, never below it.
+fn sock_deadline(state: u64, si: u64, snd: bool) -> u64 {
+    let t: u64 = inet.sock_tmo(state, si, snd)
+    if t == 0 {
+        return 0
+    }
+    return kstate.get(state, kstate.TICKS) + t + 1
+}
+
+// True when a waiting loop has to stop: the user timeout passed, or --
+// without one -- the old NET_ROUNDS bound.
+fn sock_gave_up(state: u64, deadline: u64, waited: u64) -> bool {
+    if deadline != 0 {
+        return kstate.get(state, kstate.TICKS) >= deadline
+    }
+    return waited >= sysconst.NET_ROUNDS
+}
+const F_SEAL_SHRINK: u64 = 2
+const F_SEAL_GROW: u64 = 4
+
+// r721: the bounce buffer WL_SCRATCH is ONE page for the whole machine; two cores in sendmsg/recvmsg/read/write on sockets used it at the
+// same time and mixed their octets. The pair (copy in + send) / (receive + copy out) now runs under `unixsock.scratch_lock`.
+// A failed copy comes back as -EFAULT (the marker value); everything else is what `send_bytes` / `recv_bytes` said.
+fn wl_send(state: u64, me: u64, si: u64, src: u64, n: u64, dg: bool) -> u64 {
+    let fl: u64 = unixsock.scratch_lock(state)
+    var r: u64 = sysuser.neg(errno.E_FAULT)
+    if sysuser.copy_in(state, me, state + sysconst.WL_SCRATCH, src, n) {
+        if dg {
+            r = unixsock.send_dgram(state, si, sysconst.WL_SCRATCH, n)
+        } else {
+            r = unixsock.send_bytes(state, si, sysconst.WL_SCRATCH, n)
+        }
+    }
+    unixsock.scratch_unlock(state, fl)
+    return r
+}
+
+fn wl_recv(state: u64, me: u64, si: u64, dst: u64, n: u64, dg: bool) -> u64 {
+    let fl: u64 = unixsock.scratch_lock(state)
+    var r: u64 = 0
+    if dg {
+        r = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, n)
+    } else {
+        r = unixsock.recv_bytes(state, si, sysconst.WL_SCRATCH, n)
+    }
+    if !errno.is_error(r) && r != 0 && !sysuser.copy_out(state, me, dst, state + sysconst.WL_SCRATCH, r) {
+        r = sysuser.neg(errno.E_FAULT)
+    }
+    unixsock.scratch_unlock(state, fl)
+    return r
+}
+
+//   struct sockaddr_un { u16 family; char sun_path[108]; }
+fn sa_un(state: u64, me: u64, addr: u64, len: u64, lenp: *mut u64) -> u64 {
+    *lenp = 0
+    if addr == 0 || len < 3 || len > 2 + unixsock.USUN_MAX {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !sysuser.copy_in(state, me, state + sysconst.WL_PATH, addr, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let family: u64 = kstate.get8(state + sysconst.WL_PATH)
+        | (kstate.get8(state + sysconst.WL_PATH + 1) << 8)
+    if family != sysconst.AF_UNIX {
+        return sysuser.neg(errno.E_AFNOSUPPORT)
+    }
+    if kstate.get8(state + sysconst.WL_PATH + 2) == 0 {
+        *lenp = len - 2
+        return 0
+    }
+    let raum: u64 = len - 2
+    var n: u64 = 0
+    while n < raum && n < unixsock.USUN_MAX
+        && kstate.get8(state + sysconst.WL_PATH + 2 + n) != 0 {
+        n = n + 1
+    }
+    if n == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    *lenp = n
+    return 0
+}
+
+// ---------------------------------------------------------- ftruncate()
+fn do_ftruncate(state: u64, me: u64, fd: u64, size: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if file.open_kind(state, of) == file.K_FILE {
+        // ROUND UNTERBAU: a plain file of the root file system: any size (growth = hole, shrink = zeroed tail)
+        if (file.open_flags(state, of) & 3) == 0 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if size > 0xFFFFFFFF {
+            return sysuser.neg(errno.E_FBIG)
+        }
+        if !fs.set_size(state, file.open_ino(state, of), size) {
+            return sysuser.neg(errno.E_IO)
+        }
+        return 0
+    }
+    if file.open_kind(state, of) != file.K_SHM {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let i: u64 = file.open_ino(state, of)
+    if unixsock.shm_used(state, i) == 0 {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let alt: u64 = unixsock.shm_size(state, i)
+    let seals: u64 = unixsock.shm_seals(state, i)
+    if size < alt && (seals & F_SEAL_SHRINK) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if size > alt && (seals & F_SEAL_GROW) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let pages: u64 = page_up(size) / sysconst.PAGE
+    if pages > unixsock.shm_max_pages(state, i) {
+        return sysuser.neg(errno.E_FBIG)
+    }
+    if unixsock.shm_grow(state, i, pages) != 0 {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    unixsock.shm_set_size(state, i, size)
+    return 0
+}
+const UB_O_CLOEXEC: u64 = 524288
+
+// FD_CLOEXEC bits: one per descriptor, in word 24 of the task's entry of the TCPU table (the word nobody uses; file.fd_free clears the bit).
+// K-08 (TOCTOU audit): 512 bits per task (kstate.CX_OFF), 8 words of 64 descriptors; it used to be ONE word, so descriptors >= 64 lost the flag.
+fn cx_word(task: u64, w: u64) -> u64 {
+    return kstate.CX_OFF + task * kstate.CX_BYTES + w * 8
+}
+
+fn cx_bit(state: u64, task0: u64, fd: u64) -> u64 {
+    if fd >= file.MAX_FD || task0 >= kstate.MAX_TASKS {
+        return 0
+    }
+    let task: u64 = file.owner(state, task0)
+    return (kstate.get(state, cx_word(task, fd >> 6)) >> (fd & 63)) & 1
+}
+
+fn cx_copy(state: u64, from0: u64, to0: u64) {
+    let from: u64 = file.owner(state, from0)
+    let to: u64 = file.owner(state, to0)
+    var w: u64 = 0
+    while w < 8 {
+        kstate.set(state, cx_word(to, w), kstate.get(state, cx_word(from, w)))
+        w = w + 1
+    }
+}
+
+fn cx_clear(state: u64, task0: u64) {
+    let task: u64 = file.owner(state, task0)
+    var w: u64 = 0
+    while w < 8 {
+        kstate.set(state, cx_word(task, w), 0)
+        w = w + 1
+    }
+}
+
+fn cx_put(state: u64, task0: u64, fd: u64, on: bool) {
+    if fd >= file.MAX_FD || task0 >= kstate.MAX_TASKS {
+        return
+    }
+    let task: u64 = file.owner(state, task0)
+    let a: u64 = cx_word(task, fd >> 6)
+    let m: u64 = kstate.get(state, a)
+    if on {
+        kstate.set(state, a, m | (1 << (fd & 63)))
+    } else {
+        kstate.set(state, a, m & (0xFFFFFFFFFFFFFFFF -% (1 << (fd & 63))))
+    }
+}
+
+// `r` is the descriptor a call returned (or an error); with O_CLOEXEC / SOCK_CLOEXEC in `flags` it gets the flag. Returns `r`.
+fn cx_result(state: u64, me: u64, r: u64, flags: u64) -> u64 {
+    if !errno.is_error(r) && (flags & UB_O_CLOEXEC) != 0 {
+        cx_put(state, me, r, true)
+    }
+    return r
+}
+
+// execve: the marked descriptors close.
+fn cx_close_marked(state: u64, me: u64) {
+    var fd: u64 = 0
+    while fd < file.MAX_FD {
+        if cx_bit(state, me, fd) != 0 {
+            let of: u64 = sysuser.of_of(state, me, fd)
+            if of < file.MAX_OPEN {
+                file.fd_free(state, me, fd)
+                unref_of(state, of)
+            }
+        }
+        fd = fd + 1
+    }
+    cx_clear(state, me)
+}
+
+// RUNDE UNTERBAU: A READ OR WRITE ON A REGULAR FILE IS NOT CUT AT 4096 OCTETS. `read`/`write` moved one block (MAX_IO) per call and
+// answered the rest with a short count; POSIX allows a short count on a regular file only at its end, and a program that reads a file
+// "all at once" (`read(fd, buf, st_size)` -- the way config files, fonts and the dynamic loader's headers are read) took the 4096 for the file.
+// For a regular file the call now repeats until the request is done or a block comes back short. Pipes, sockets and terminals keep their
+// short counts (that is their contract).
+// r728: a write() larger than one block is ONE write-behind scope: the 4 KiB steps below share the sector table, so the ATA
+// commands carry long runs instead of one block each. The data is on the drive when the call returns.
+fn file_io_loop(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    if writing && len > sysconst.MAX_IO {
+        blk.wb_begin(state)
+        let r: u64 = file_io_loop_steps(state, me, fd, buf, len, writing)
+        if !blk.wb_end(state) {
+            return sysuser.neg(errno.E_IO)
+        }
+        return r
+    }
+    return file_io_loop_steps(state, me, fd, buf, len, writing)
+}
+
+fn file_io_loop_steps(state: u64, me: u64, fd: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    var first: u64 = 0
+    if writing {
+        first = do_write(state, me, fd, buf, len)
+    } else {
+        first = do_read(state, me, fd, buf, len)
+    }
+    if len <= sysconst.MAX_IO || first != sysconst.MAX_IO {
+        return first
+    }
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN || file.open_kind(state, of) != file.K_FILE {
+        return first
+    }
+    var done: u64 = first
+    while done < len {
+        var chunk: u64 = len - done
+        if chunk > sysconst.MAX_IO {
+            chunk = sysconst.MAX_IO
+        }
+        var r: u64 = 0
+        if writing {
+            r = do_write(state, me, fd, buf + done, chunk)
+        } else {
+            r = do_read(state, me, fd, buf + done, chunk)
+        }
+        if errno.is_error(r) {
+            return done
+        }
+        done = done + r
+        if r < chunk {
+            return done
+        }
+    }
+    return done
+}
+
+// r731: sendto(fd, buf, len, 0, &sockaddr_un, alen) on a datagram socket: the frame goes into the ring of the socket bound under that path.
+// A stream socket ignores the address (Linux does too once connected).
+fn usock_sendto(state: u64, me: u64, of: u64, buf: u64, len: u64, addr: u64, alen: u64) -> u64 {
+    let si: u64 = file.open_ino(state, of)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if unixsock.sock_kind(state, si) != unixsock.UK_DGRAM {
+        return write_of(state, me, of, buf, len)
+    }
+    if len > sysconst.MSG_MAX {
+        return sysuser.neg(errno.E_MSGSIZE)
+    }
+    if !proc.user_ok(state, me, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var plen: u64 = 0
+    let sfl: u64 = unixsock.scratch_lock(state)
+    let r: u64 = sa_un(state, me, addr, alen, &plen)
+    if errno.is_error(r) {
+        unixsock.scratch_unlock(state, sfl)
+        return r
+    }
+    let dst: u64 = unixsock.find_dgram(state, sysconst.WL_PATH + 2, plen)
+    if dst >= unixsock.USOCK_MAX {
+        unixsock.scratch_unlock(state, sfl)
+        return sysuser.neg(errno.E_CONNREFUSED)
+    }
+    if !sysuser.copy_in(state, me, state + sysconst.WL_SCRATCH, buf, len) {
+        unixsock.scratch_unlock(state, sfl)
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let w: u64 = unixsock.send_dgram_to(state, dst, sysconst.WL_SCRATCH, len)
+    unixsock.scratch_unlock(state, sfl)
+    if errno.is_error(w) {
+        return sysuser.neg(w)
+    }
+    sched.poll_kick(state)
+    return w
+}
+
+// read/write on a local (AF_UNIX) socket: the same ring as sendmsg/recvmsg, one buffer, no descriptors. O_NONBLOCK on the open file means
+// MSG_DONTWAIT. A closed peer reads as end of file (0) and writes -EPIPE.
+fn usock_rw(state: u64, me: u64, of: u64, buf: u64, len: u64, writing: bool) -> u64 {
+    let si: u64 = file.open_ino(state, of)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let nonblock: bool = (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0
+    let dg: bool = unixsock.sock_kind(state, si) == unixsock.UK_DGRAM
+    var n: u64 = len
+    if n > sysconst.MSG_MAX {
+        if dg && writing {
+            return sysuser.neg(errno.E_MSGSIZE)
+        }
+        n = sysconst.MSG_MAX
+    }
+    if !proc.user_ok(state, me, buf, n) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if writing {
+        if unixsock.peer_gone(state, si) {
+            return sysuser.neg(errno.E_PIPE)
+        }
+        var waitw: u64 = 0
+        var free: u64 = unixsock.room(state, unixsock.sock_peer(state, si))
+        if dg {
+            // a datagram goes in whole: wait until the frame (4 length bytes + payload) fits, never cut it
+            if n + 5 >= unixsock.RING_CAP - 64 {
+                return sysuser.neg(errno.E_MSGSIZE)
+            }
+            free = unixsock.dgram_room(state, unixsock.sock_peer(state, si))
+        }
+        while free == 0 || (dg && free < n) {
+            if nonblock {
+                return sysuser.neg(errno.E_AGAIN)
+            }
+            if waitw >= sysconst.NET_ROUNDS || unixsock.peer_gone(state, si) {
+                return sysuser.neg(errno.E_AGAIN)
+            }
+            waitw = waitw + 1
+            sched.sleep_ticks(state, 1)
+            free = unixsock.room(state, unixsock.sock_peer(state, si))
+            if dg {
+                free = unixsock.dgram_room(state, unixsock.sock_peer(state, si))
+            }
+        }
+        if n > free {
+            n = free
+        }
+        let w: u64 = wl_send(state, me, si, buf, n, dg)
+        if w == sysuser.neg(errno.E_FAULT) {
+            return w
+        }
+        if errno.is_error(w) {
+            return sysuser.neg(w)
+        }
+        sched.poll_kick(state)
+        return w
+    }
+    var waited: u64 = 0
+    while unixsock.waiting(state, si) == 0 {
+        if unixsock.peer_gone(state, si) {
+            return 0
+        }
+        if nonblock || waited >= sysconst.NET_ROUNDS {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    let r: u64 = wl_recv(state, me, si, buf, n, dg)
+    if r == sysuser.neg(errno.E_FAULT) {
+        return r
+    }
+    if errno.is_error(r) {
+        return sysuser.neg(r)
+    }
+    return r
+}
+
+// a successful socketpair with SOCK_CLOEXEC marks both descriptors (they were just written to `sv`)
+fn cx_pair(state: u64, me: u64, r: u64, sv: u64, kind: u64) -> u64 {
+    if r == 0 && (kind & UB_O_CLOEXEC) != 0 {
+        let _a: u64 = cx_result(state, me, sysuser.user_word32(state, me, sv), UB_O_CLOEXEC)
+        let _b: u64 = cx_result(state, me, sysuser.user_word32(state, me, sv + 4), UB_O_CLOEXEC)
+    }
+    return r
+}
+const EV_SFD_SIZE: u64 = 128
+
+fn ev_kind(kind: u64) -> bool {
+    return kind >= file.K_EVENT && kind <= file.K_INOTIFY
+}
+
+// ---------------------------------------------------------------- read / write
+
+// Try once. 0 = nothing there yet (caller waits), else the octets read, or an errno.
+fn ev_take(state: u64, me: u64, of: u64, kind: u64, buf: u64, len: u64) -> u64 {
+    if kind == file.K_EVENT {
+        let v: u64 = evfd.efd_take(state, of)
+        if v == 0 {
+            return 0
+        }
+        if !sysuser.put64(state, me, buf, v) {
+            let _r: u64 = evfd.efd_add(state, of, v)
+            return sysuser.neg(errno.E_FAULT)
+        }
+        sched.poll_kick(state)
+        return 8
+    }
+    if kind == file.K_TIMER {
+        let v: u64 = evfd.tfd_take(state, of, kstate.get(state, kstate.TICKS))
+        if v == 0 {
+            return 0
+        }
+        if !sysuser.put64(state, me, buf, v) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 8
+    }
+    if kind == file.K_SIGFD {
+        var cnt: u64 = len / EV_SFD_SIZE
+        if cnt > 8 {
+            cnt = 8
+        }
+        let kb: u64 = sysuser.blockb(state)
+        var n: u64 = 0
+        while n < cnt {
+            let sig: u64 = evfd.sfd_take(state, me, of)
+            if sig == 0 {
+                cnt = n
+            } else {
+                evfd.sfd_fill(kb + n * EV_SFD_SIZE, sig)
+                n = n + 1
+            }
+        }
+        if n == 0 {
+            return 0
+        }
+        if !sysuser.copy_out(state, me, buf, kb, n * EV_SFD_SIZE) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return n * EV_SFD_SIZE
+    }
+    // inotify: whole events only
+    let fr: u64 = file.open_off(state, of)
+    let first: u64 = evfd.in_pop_size(fr)
+    if first == 0 {
+        return 0
+    }
+    if len < first {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let kb: u64 = sysuser.blockb(state)
+    var total: u64 = 0
+    var going: bool = true
+    while going {
+        let sz: u64 = evfd.in_pop_size(fr)
+        if sz == 0 || total + sz > len || total + sz > 2048 {
+            going = false
+        } else {
+            let _n: u64 = evfd.in_pop(fr, kb + total)
+            total = total + sz
+        }
+    }
+    if !sysuser.copy_out(state, me, buf, kb, total) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return total
+}
+
+fn ev_read(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    let kind: u64 = file.open_kind(state, of)
+    if kind == file.K_EPOLL {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var need: u64 = 8
+    if kind == file.K_SIGFD {
+        need = EV_SFD_SIZE
+    }
+    if kind == file.K_INOTIFY {
+        need = 16
+    }
+    if len < need {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, buf, need) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        let r: u64 = ev_take(state, me, of, kind, buf, len)
+        if r != 0 {
+            return r
+        }
+        if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        var wake: u64 = sched.POLL_FOREVER
+        if kind == file.K_TIMER {
+            let nx: u64 = evfd.tfd_next(state, of, kstate.get(state, kstate.TICKS))
+            if nx != 0 {
+                wake = nx
+            }
+        }
+        sched.poll_sleep(state, seen, wake)
+    }
+    return sysuser.neg(errno.E_AGAIN)
+}
+
+// Only an eventfd takes a write: it adds to the counter, and waits (or EAGAIN) while the sum would overflow.
+fn ev_write(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if file.open_kind(state, of) != file.K_EVENT || len < 8 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, buf, 8) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let v: u64 = sysuser.user_word(state, me, buf)
+    if v == 0xFFFFFFFFFFFFFFFF {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    while true {
+        let seen: u64 = sched.poll_seq(state)
+        if evfd.efd_add(state, of, v) == 0 {
+            return 8
+        }
+        if (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        sched.poll_sleep(state, seen, sched.POLL_FOREVER)
+    }
+    return sysuser.neg(errno.E_AGAIN)
+}
+
+// Hand the kernel copy of a request to the answering code. `ret` is what the call returns on success.
+fn nl_run(state: u64, of: u64, kb: u64, total: u64) -> u64 {
+    let r: u64 = netlink.nl_request(state, file.open_off(state, of), kb, total)
+    if r != 0 {
+        return sysuser.neg(r)
+    }
+    sched.poll_kick(state)
+    return total
+}
+
+fn nl_send_of(state: u64, me: u64, of: u64, buf: u64, len: u64) -> u64 {
+    if len == 0 {
+        return 0
+    }
+    if len > 4096 {
+        return sysuser.neg(errno.E_MSGSIZE)
+    }
+    let bo: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bo, buf, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return nl_run(state, of, bo, len)
+}
+
+// Wait until a datagram is there (0), or the errno to give back.
+fn nl_wait(state: u64, me: u64, of: u64, flags: u64) -> u64 {
+    let fr: u64 = file.open_off(state, of)
+    var waited: u64 = 0
+    while !netlink.nl_pending(fr) {
+        if (flags & sysconst.MSG_DONTWAIT) != 0 || (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        if waited >= sysconst.NET_ROUNDS {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return 0
+}
+
+// The sockaddr_nl of the kernel (pid 0, no groups) into the caller's memory, cut to `room` octets.
+fn nl_name_out(state: u64, me: u64, addr: u64, room: u64, pid: u64) -> bool {
+    let bo: u64 = sysuser.blockb(state)
+    var i: u64 = 0
+    while i < sysconst.NL_SA_BYTES {
+        kstate.set8(bo + i, 0 as u8)
+        i = i + 1
+    }
+    kstate.set8(bo, netlink.AF_NETLINK as u8)
+    kstate.set8(bo + 4, (pid & 0xFF) as u8)
+    kstate.set8(bo + 5, ((pid >> 8) & 0xFF) as u8)
+    kstate.set8(bo + 6, ((pid >> 16) & 0xFF) as u8)
+    kstate.set8(bo + 7, ((pid >> 24) & 0xFF) as u8)
+    var n: u64 = sysconst.NL_SA_BYTES
+    if room < n {
+        n = room
+    }
+    if n == 0 {
+        return true
+    }
+    return sysuser.copy_out(state, me, addr, bo, n)
+}
+
+// recv / recvfrom / read: one datagram per call; what does not fit is dropped (MSG_TRUNC says the full length), MSG_PEEK leaves it there.
+fn nl_recv_of(state: u64, me: u64, of: u64, buf: u64, want: u64, flags: u64, addr: u64, lenp: u64) -> u64 {
+    let w: u64 = nl_wait(state, me, of, flags)
+    if w != 0 {
+        return w
+    }
+    let fr: u64 = file.open_off(state, of)
+    let rl: u64 = netlink.nl_head_len(fr)
+    var n: u64 = rl
+    if want < n {
+        n = want
+    }
+    if n > 0 {
+        if !sysuser.copy_out(state, me, buf, netlink.nl_head_ptr(fr), n) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    if addr != 0 {
+        var room: u64 = sysconst.NL_SA_BYTES
+        if lenp != 0 {
+            if !proc.user_ok(state, me, lenp, 4) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            room = sysuser.get32(state, me, lenp)
+        }
+        if !nl_name_out(state, me, addr, room, 0) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        if lenp != 0 {
+            if !sysuser.put32(state, me, lenp, sysconst.NL_SA_BYTES) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+        }
+    }
+    if (flags & sysconst.NL_MSG_PEEK) == 0 {
+        netlink.nl_pop(fr)
+    }
+    if (flags & sysconst.NL_MSG_TRUNC) != 0 {
+        return rl
+    }
+    return n
+}
+
+// A directory descriptor remembers the absolute path it was opened with (in a frame of its own, address in OF_X1; freed by
+// `file.open_teardown`). Inside a chroot / container the jail prefix is cut off, like for the working directory.
+fn dirpath_remember(state: u64, me: u64, of: u64, path: u64) {
+    let fr: u64 = mem.frame_alloc(state)
+    if fr == 0 {
+        return
+    }
+    var skip: u64 = ctr.prefix_len(state, me, path)
+    var n: u64 = 0
+    while n < uio.PATH_MAX && kstate.get8(path + skip + n) != 0 {
+        kstate.set8(fr + n, kstate.get8(path + skip + n) as u8)
+        n = n + 1
+    }
+    if n == 0 {
+        kstate.set8(fr, 47 as u8)
+        n = 1
+    }
+    kstate.set8(fr + n, 0 as u8)
+    file.open_set_x1(state, of, fr)
+}

@@ -1,0 +1,706 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import serial
+import gfx.gfx
+import drv.con.sercon
+import lib.kstate
+import sched.sched
+import sched.proc
+import arch.cpu
+import lib.errno
+import fs.file
+import sched.signal
+import drv.con.tty
+import net.inet
+import fs.unixsock
+import sys.sysconst
+import sys.sysuser
+
+export {
+    conout, console_read, do_ioctl, do_openpty, do_termnew, open_ptmx, open_pts, pty_master_gone, tty_of, tty_read
+}
+
+//     er: treffetaskmgr: start bww=7=i5=3 n2ame= [bTerhmin=al5] ...
+fn conout(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    // The terminal window of this tty was closed: swallow the output
+    // instead of drawing into whatever window took over the slot.
+    if term_gone(state, t) {
+        return len
+    }
+    let z: u64 = serial.line_at(cpu.here(state))
+    let bounce: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bounce, buf, len) {
+        serial.line_clear(z)
+        return sysuser.neg(errno.E_FAULT)
+    }
+    serial.defer_on()
+    let r: u64 = tty.write_out(state, t, bounce, len)
+    serial.defer_off()
+    serial.line_clear(z)
+    return r
+}
+
+// ROUND K9 PUT A TERMINAL BETWEEN THE CONSOLE AND THE PROCESS.
+
+fn tty_of(state: u64, me: u64) -> u64 {
+    let t: u64 = sched.tget(state, me, sched.T_TTY)
+    if t == 0 {
+        return tty.console()
+    }
+    return t - 1
+}
+
+fn script_feed(state: u64, t: u64) -> u64 {
+    var pos: u64 = kstate.get(state, kstate.CONSOLE_POS)
+    let end: u64 = kstate.get(state, kstate.CONSOLE_LEN)
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        if pos >= end {
+            going = false
+        } else {
+            let c: u64 = kstate.get8(state + kstate.CONSOLE_OFF + pos)
+            pos = pos + 1
+            n = n + 1
+            tty.push(state, t, c)
+            if c == 10 {
+                going = false
+            }
+        }
+    }
+    kstate.set(state, kstate.CONSOLE_POS, pos)
+    return n
+}
+
+fn tty_drain(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    var n: u64 = 0
+    var going: bool = true
+    while going {
+        if n >= len {
+            going = false
+        } else {
+            let c: u64 = tty.take(state, t)
+            if c == 256 {
+                going = false
+            } else {
+                if !sysuser.poke(state, me, buf + n, c) {
+                    return sysuser.neg(errno.E_FAULT)
+                }
+                n = n + 1
+                if c == 10 {
+                    going = false
+                }
+            }
+        }
+    }
+    return n
+}
+
+const KEY_IDLE: u64 = 400
+
+fn foreground_ok(state: u64, me: u64, t: u64) -> bool {
+    if tty.kind_of(state, t) == tty.K_PTY_SLAVE && sched.tget(state, me, sched.T_TTY) != t + 1 {
+        return true
+    }
+    let grp: u64 = tty.pgrp(state, t)
+    if grp == 0 {
+        return true
+    }
+    if sched.tget(state, me, sched.T_PGID) == grp {
+        return true
+    }
+    signal.send_task(state, me, signal.SIGTTIN)
+    return false
+}
+
+fn console_read(state: u64, me: u64, buf: u64, len: u64) -> u64 {
+    return tty_read(state, me, tty_of(state, me), buf, len)
+}
+
+fn tty_read(state: u64, me: u64, t: u64, buf: u64, len: u64) -> u64 {
+    if !tty.valid(state, t) {
+        return sysuser.neg(errno.E_NOTTY)
+    }
+    // Window closed = end of input; the shell leaves with "bye".
+    if term_gone(state, t) {
+        return 0
+    }
+    if !foreground_ok(state, me, t) {
+        return sysuser.neg(errno.E_INTR)
+    }
+    if tty.kind_of(state, t) == tty.K_PTY_MASTER {
+        let p: u64 = tty.peer_of(state, t)
+        var n: u64 = 0
+        var rounds: u64 = 0
+        while n == 0 && rounds < sysconst.BLOCK_ROUNDS {
+            while n < len && tty.out_waiting(state, p) != 0 {
+                let c: u64 = tty.out_take(state, p)
+                if c == 256 {
+                    n = n
+                } else {
+                    if !sysuser.poke(state, me, buf + n, c) {
+                        return sysuser.neg(errno.E_FAULT)
+                    }
+                    n = n + 1
+                }
+            }
+            if n != 0 {
+                return n
+            }
+            if signal.interrupted(state, me) {
+                return sysuser.neg(errno.E_INTR)
+            }
+            sched.sleep_ticks(state, 1)
+            rounds = rounds + 1
+        }
+        return n
+    }
+    if tty.waiting(state, t) == 0 && t == tty.console() {
+        script_feed(state, t)
+    }
+    var n: u64 = tty_drain(state, me, t, buf, len)
+    if n != 0 {
+        return n
+    }
+    if pty_master_gone(state, t) {
+        return 0
+    }
+    if t == tty.console() && kstate.mode_on(state, kstate.M_NOKBD) {
+        return 0
+    }
+    let endlos: bool = (sercon.active(state) && t == tty.console())
+        || (kstate.mode_on(state, kstate.M_WMDAUER) && t == tty.console())
+        || term_win_of(t) != 0
+    var idle: u64 = 0
+    while idle < KEY_IDLE {
+        if signal.interrupted(state, me) {
+            return sysuser.neg(errno.E_INTR)
+        }
+        sercon.poll(state)
+        if tty.waiting(state, t) != 0 {
+            return tty_drain(state, me, t, buf, len)
+        }
+        if term_gone(state, t) {
+            return 0
+        }
+        sched.sleep_ticks(state, 1)
+        if !endlos {
+            idle = idle + 1
+        }
+    }
+    return 0
+}
+
+// ----------------------------------------------- ROUND K9: die Terminals
+
+fn do_ioctl(state: u64, me: u64, fd: u64, req_raw: u64, arg: u64) -> u64 {
+    // the request is a 32-bit number: libc passes TIOCGPTN (0x80045430) as a negative int, sign-extended in the register
+    let req: u64 = req_raw & 0xFFFFFFFF
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    // FIONBIO (0x5421): int on/off -> O_NONBLOCK on the open file. Python's settimeout() and many C libraries use it instead of fcntl;
+    // without it sockets answered -ENOTTY (python create_connection: "[Errno 25] Not a tty").
+    if req == 0x5421 {
+        if arg == 0 || !proc.user_ok(state, me, arg, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let nb: u64 = sysuser.blockb(state)
+        if !sysuser.copy_in(state, me, nb, arg, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        var on: u64 = 0
+        var k: u64 = 0
+        while k < 4 {
+            if (kstate.get8(nb + k) as u64) != 0 {
+                on = 1
+            }
+            k = k + 1
+        }
+        if on != 0 {
+            file.open_set_flags(state, of, file.open_flags(state, of) | sysconst.UB_O_NONBLOCK)
+        } else {
+            file.open_set_flags(state, of, file.open_flags(state, of) & (~sysconst.UB_O_NONBLOCK))
+        }
+        return 0
+    }
+    if req == 0x541B && (file.open_kind(state, of) == file.K_USOCK || file.open_kind(state, of) == file.K_PIPER) {
+        let fk: u64 = file.open_kind(state, of)
+        var avail: u64 = 0
+        if fk == file.K_USOCK {
+            let fus: u64 = file.open_ino(state, of)
+            if unixsock.sock_kind(state, fus) == unixsock.UK_DGRAM {
+                avail = unixsock.dgram_len(state, fus)
+            } else {
+                avail = unixsock.waiting(state, fus)
+            }
+        } else {
+            avail = file.pipe_bytes(state, file.open_ino(state, of))
+        }
+        if arg == 0 || !proc.user_ok(state, me, arg, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let ab: u64 = sysuser.blockb(state)
+        kstate.set8(ab, (avail & 0xFF) as u8)
+        kstate.set8(ab + 1, ((avail >> 8) & 0xFF) as u8)
+        kstate.set8(ab + 2, ((avail >> 16) & 0xFF) as u8)
+        kstate.set8(ab + 3, ((avail >> 24) & 0xFF) as u8)
+        if !sysuser.copy_out(state, me, arg, ab, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    // ROUND STONES2: SIOCGIF* on a socket (busybox ifconfig): the one interface "eth0"
+    // (musl's if_nametoindex asks on an AF_UNIX socket, so a local socket and a netlink socket answer too)
+    if req >= 0x8910 && req <= 0x8950 && (file.open_kind(state, of) == file.K_SOCK || file.open_kind(state, of) == file.K_USOCK
+        || file.open_kind(state, of) == file.K_NETLINK) {
+        return do_ifioctl(state, me, req, arg)
+    }
+    let kind: u64 = file.open_kind(state, of)
+    var t: u64 = tty.MAX_TTY
+    if kind == file.K_CONIN || kind == file.K_CONOUT {
+        t = tty_of(state, me)
+    }
+    if kind == file.K_TTY {
+        t = file.open_ino(state, of)
+    }
+    // ROUND FOOT-1 (PTY ABI): requests that act on the CALLING TASK, not on the tty's data
+    if t < tty.MAX_TTY && req == tty.TIOCSCTTY {
+        // the caller must be a session leader (setsid first); the slave becomes its controlling terminal
+        if sched.tget(state, me, sched.T_SID) != sched.tget(state, me, sched.T_PID) {
+            return sysuser.neg(errno.E_PERM)
+        }
+        sched.tset(state, me, sched.T_TTY, t + 1)
+        tty.claim(state, t, sched.tget(state, me, sched.T_PGID))
+        return 0
+    }
+    if t < tty.MAX_TTY && req == tty.TIOCNOTTY {
+        sched.tset(state, me, sched.T_TTY, 0)
+        return 0
+    }
+    if t < tty.MAX_TTY && req == tty.TIOCGSID {
+        if arg == 0 || !proc.user_ok(state, me, arg, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let sb: u64 = sysuser.blockb(state)
+        kstate.set8(sb, (sched.tget(state, me, sched.T_SID) & 0xFF) as u8)
+        kstate.set8(sb + 1, ((sched.tget(state, me, sched.T_SID) >> 8) & 0xFF) as u8)
+        kstate.set8(sb + 2, ((sched.tget(state, me, sched.T_SID) >> 16) & 0xFF) as u8)
+        kstate.set8(sb + 3, ((sched.tget(state, me, sched.T_SID) >> 24) & 0xFF) as u8)
+        if !sysuser.copy_out(state, me, arg, sb, 4) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    if t >= tty.MAX_TTY {
+        return sysuser.neg(errno.E_NOTTY)
+    }
+    let bounce: u64 = sysuser.blockb(state)
+    var size: u64 = 36
+    if req == tty.TIOCGWINSZ || req == tty.TIOCSWINSZ {
+        size = 8
+    }
+    if req == tty.TIOCGPGRP || req == tty.TIOCSPGRP || req == tty.TIOCGPTN || req == tty.TIOCSPTLCK || req == tty.TIOCGPTLCK {
+        size = 4
+    }
+    if arg == 0 || !proc.user_ok(state, me, arg, size) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if !sysuser.copy_in(state, me, bounce, arg, size) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let r: u64 = tty.do_ioctl(state, t, req, bounce)
+    if errno.is_error(r) {
+        return r
+    }
+    if !sysuser.copy_out(state, me, arg, bounce, size) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// ==================================================================
+// EXTRA TERMINAL WINDOWS (Dell 9020, 27.09.2026)
+// ==================================================================
+//
+// Until now there was exactly one terminal: the kernel's console
+// window. `/bin/term` calls SYS_OSUM_TERMNEW, which takes a free tty
+// slot (console-like line discipline, window sink), opens a new
+// terminal window bound to it and makes it the CALLER's controlling
+// terminal. Its fds 0/1/2 are console descriptors that resolve through
+// `tty_of`, so nothing else has to change: `term` then execs /bin/sh
+// and every child inherits the tty (T_TTY is copied on fork/spawn).
+//
+// Closing the window: reads return 0 (the shell ends with "bye"),
+// writes are swallowed, and the slot goes back once no task uses it.
+static mut TERM_WIN: [u64; 24] = [0 as u64; 24] // window + 1 per tty slot (tty.MAX_TTY)
+
+fn term_win_of(t: u64) -> u64 {
+    if t >= tty.MAX_TTY {
+        return 0
+    }
+    return TERM_WIN[t as usize]
+}
+
+fn term_gone(state: u64, t: u64) -> bool {
+    let w: u64 = term_win_of(t)
+    if w == 0 {
+        return false
+    }
+    return !gfx.term_alive(state, w - 1, t)
+}
+
+// Does a task still have tty slot `t` as its controlling terminal?
+fn tty_task_uses(state: u64, t: u64) -> bool {
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+            && sched.tget(state, i, sched.T_STATE) != sched.S_ZOMBIE
+            && sched.tget(state, i, sched.T_TTY) == t + 1 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn pty_master_gone(state: u64, t: u64) -> bool {
+    if tty.kind_of(state, t) != tty.K_PTY_SLAVE {
+        return false
+    }
+    let m: u64 = tty.peer_of(state, t)
+    return m < tty.MAX_TTY && !tty_file_uses(state, m)
+}
+
+// Does an open file entry still point at tty slot `t`?
+fn tty_file_uses(state: u64, t: u64) -> bool {
+    var i: u64 = 0
+    while i < file.MAX_OPEN {
+        if file.open_used(state, i) && file.open_kind(state, i) == file.K_TTY
+            && file.open_ino(state, i) == t {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// r528: give back pty pairs (ssh sessions, openpty) once no open file and no task refers to either half. Before, a pair
+// was never freed and eight openpty calls (or a few ssh logins) used up the whole tty table for the terminal windows too.
+//
+// A pair is only freed when it was seen unused by TWO passes in a row: `do_openpty` allocates the pair first and binds the
+// open files a moment later, and a reap on another CPU must not take the fresh pair away in between.
+static mut PTY_SEEN: [u64; 24] = [0 as u64; 24]
+
+fn pty_reap(state: u64) {
+    var t: u64 = 1
+    while t < tty.MAX_TTY {
+        if tty.valid(state, t) && tty.kind_of(state, t) == tty.K_PTY_SLAVE {
+            let m: u64 = tty.peer_of(state, t)
+            if m < tty.MAX_TTY
+                && !tty_file_uses(state, t) && !tty_file_uses(state, m)
+                && !tty_task_uses(state, t) && !tty_task_uses(state, m) {
+                if PTY_SEEN[t as usize] == 0 {
+                    PTY_SEEN[t as usize] = 1
+                } else {
+                    PTY_SEEN[t as usize] = 0
+                    tty.release_pair(state, t)
+                }
+            } else {
+                PTY_SEEN[t as usize] = 0
+            }
+        } else {
+            PTY_SEEN[t as usize] = 0
+        }
+        t = t + 1
+    }
+}
+
+// Give back the slots of closed windows nobody uses any more.
+fn term_reap(state: u64) {
+    var t: u64 = 1
+    while t < tty.MAX_TTY {
+        if term_gone(state, t) {
+            if !tty_task_uses(state, t) {
+                TERM_WIN[t as usize] = 0
+                tty.release(state, t)
+            }
+        }
+        t = t + 1
+    }
+    pty_reap(state)
+}
+
+fn do_termnew(state: u64, me: u64) -> u64 {
+    // r5xx: no window server (headless boot) is told apart from "no free tty slot": /bin/term falls back to the console only
+    // in the first case, and says so in the second (before, both ended in a silent second shell on the console).
+    if !gfx.wm_ready(state) {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    term_reap(state)
+    var t: u64 = tty.alloc_log(state)
+    if t >= tty.MAX_TTY {
+        // second pass: a pty freed only after two sightings
+        term_reap(state)
+        t = tty.alloc_log(state)
+    }
+    if t >= tty.MAX_TTY {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    tty.set_sink(state, t, tty.SINK_WINDOW)
+    let w: u64 = gfx.term_new(state, t)
+    if w == 0xFFFFFFFF {
+        tty.release(state, t)
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    tty.set_window(state, t, w)
+    TERM_WIN[t as usize] = w + 1
+    sched.tset(state, me, sched.T_TTY, t + 1)
+    return w
+}
+
+// ROUND FOOT-1 (PTY ABI): open("/dev/ptmx") -- the Linux way to a pty. One call makes a NEW pair and returns the MASTER; the slave
+// is opened later by name (/dev/pts/N, N from TIOCGPTN). The pair is the same one `openpty` makes, so the reaper frees it the same way.
+fn open_ptmx(state: u64, me: u64, flags: u64) -> u64 {
+    pty_reap(state)
+    var sl: u64 = tty.alloc_pair(state)
+    if sl >= tty.MAX_TTY {
+        pty_reap(state)
+        sl = tty.alloc_pair(state)
+    }
+    if sl >= tty.MAX_TTY {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let m: u64 = tty.peer_of(state, sl)
+    let ofm: u64 = file.open_alloc(state, file.K_TTY, m, flags)
+    if ofm >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fdm: u64 = file.fd_alloc(state, me, 0)
+    if fdm >= file.MAX_FD {
+        file.open_unref(state, ofm)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fdm, ofm)
+    kstate.add(state, kstate.OPENS, 1)
+    return fdm
+}
+
+// open("/dev/pts/N"): the slave half of pair N, if that pair is still there.
+fn open_pts(state: u64, me: u64, slot: u64, flags: u64) -> u64 {
+    if !tty.valid(state, slot) || tty.kind_of(state, slot) != tty.K_PTY_SLAVE {
+        return sysuser.neg(errno.E_NOENT)
+    }
+    let of: u64 = file.open_alloc(state, file.K_TTY, slot, flags)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    kstate.add(state, kstate.OPENS, 1)
+    return fd
+}
+
+fn do_openpty(state: u64, me: u64, out: u64) -> u64 {
+    if !proc.user_ok(state, me, out, 8) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    pty_reap(state)
+    var sl: u64 = tty.alloc_pair(state)
+    if sl >= tty.MAX_TTY {
+        pty_reap(state)
+        sl = tty.alloc_pair(state)
+    }
+    if sl >= tty.MAX_TTY {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let m: u64 = tty.peer_of(state, sl)
+    let ofm: u64 = file.open_alloc(state, file.K_TTY, m, sysconst.O_RDWR)
+    if ofm >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let ofs: u64 = file.open_alloc(state, file.K_TTY, sl, sysconst.O_RDWR)
+    if ofs >= file.MAX_OPEN {
+        file.open_unref(state, ofm)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fdm: u64 = file.fd_alloc(state, me, 0)
+    if fdm >= file.MAX_FD {
+        file.open_unref(state, ofm)
+        file.open_unref(state, ofs)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fdm, ofm)
+    let fds: u64 = file.fd_alloc(state, me, 0)
+    if fds >= file.MAX_FD {
+        file.fd_free(state, me, fdm)
+        file.open_unref(state, ofm)
+        file.open_unref(state, ofs)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fds, ofs)
+    kstate.add(state, kstate.OPENS, 2)
+    if !sysuser.put32(state, me, out, fdm) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if !sysuser.put32(state, me, out + 4, fds) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// SIOCGIFCONF: struct ifconf { int ifc_len; char *ifc_buf } -> one ifreq (40 bytes) for "eth0" with its address.
+// With ifc_buf == 0 only the needed length is returned. `bo` holds the first 40 bytes of the user struct.
+fn do_ifconf(state: u64, me: u64, arg: u64, bo: u64) -> u64 {
+    if !inet.ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    var room: u64 = 0
+    var buf: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        room = room | ((kstate.get8(bo + k) as u64) << (k * 8))
+        k = k + 1
+    }
+    k = 0
+    while k < 8 {
+        buf = buf | ((kstate.get8(bo + 8 + k) as u64) << (k * 8))
+        k = k + 1
+    }
+    if buf != 0 && room >= 40 {
+        var i: u64 = 0
+        while i < 40 {
+            kstate.set8(bo + 16 + i, 0 as u8)
+            i = i + 1
+        }
+        // the entry is built after the struct (bo + 16): name, then sockaddr_in
+        kstate.set8(bo + 16, 101 as u8)
+        kstate.set8(bo + 17, 116 as u8)
+        kstate.set8(bo + 18, 104 as u8)
+        kstate.set8(bo + 19, 48 as u8)
+        let a: u64 = inet.ip(state)
+        kstate.set8(bo + 32, (sysconst.AF_INET & 0xFF) as u8)
+        kstate.set8(bo + 36, ((a >> 24) & 0xFF) as u8)
+        kstate.set8(bo + 37, ((a >> 16) & 0xFF) as u8)
+        kstate.set8(bo + 38, ((a >> 8) & 0xFF) as u8)
+        kstate.set8(bo + 39, (a & 0xFF) as u8)
+        if !proc.user_ok(state, me, buf, 40) || !sysuser.copy_out(state, me, buf, bo + 16, 40) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    } else if buf != 0 {
+        room = 0
+        if !sysuser.put32(state, me, arg, 0) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    if !sysuser.put32(state, me, arg, 40) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// ROUND STONES2: SIOCGIFFLAGS/ADDR/BRDADDR/NETMASK/HWADDR/MTU/METRIC for the
+// one interface this kernel has, "eth0" (struct ifreq: 16 name bytes + a
+// 24 byte union). Anything else is -ENOTTY as before; an unknown interface
+// is -ENODEV. Nothing is invented: flags/address/mask come from the stack.
+fn do_ifioctl(state: u64, me: u64, req: u64, arg: u64) -> u64 {
+    if arg == 0 || !proc.user_ok(state, me, arg, 40) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let bo: u64 = sysuser.blockb(state)
+    if !sysuser.copy_in(state, me, bo, arg, 40) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if req == 0x8912 {
+        return do_ifconf(state, me, arg, bo)
+    }
+    // ROUND NETLINK (r696): SIOCGIFNAME (index -> name), the call `ip` uses to name an interface it only has the index of.
+    if req == 0x8910 {
+        if kstate.get8(bo + 16) != 1 || kstate.get8(bo + 17) != 0 || kstate.get8(bo + 18) != 0 || kstate.get8(bo + 19) != 0
+            || !inet.ready(state) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        var z: u64 = 0
+        while z < 16 {
+            kstate.set8(bo + z, 0 as u8)
+            z = z + 1
+        }
+        kstate.set8(bo, 101 as u8)
+        kstate.set8(bo + 1, 116 as u8)
+        kstate.set8(bo + 2, 104 as u8)
+        kstate.set8(bo + 3, 48 as u8)
+        if !sysuser.copy_out(state, me, arg, bo, 40) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    if (kstate.get8(bo) as u64) != 101 || (kstate.get8(bo + 1) as u64) != 116
+        || (kstate.get8(bo + 2) as u64) != 104 || (kstate.get8(bo + 3) as u64) != 48
+        || (kstate.get8(bo + 4) as u64) != 0 || !inet.ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    var i: u64 = 16
+    while i < 40 {
+        kstate.set8(bo + i, 0 as u8)
+        i = i + 1
+    }
+    var v: u64 = 0
+    var is_addr: bool = false
+    if req == 0x8913 {
+        // IFF_UP | IFF_BROADCAST | IFF_MULTICAST, and IFF_RUNNING only with a carrier
+        v = 0x1003
+        if inet.carrier(state) {
+            v = v | 0x40
+        }
+        kstate.set8(bo + 16, (v & 0xFF) as u8)
+        kstate.set8(bo + 17, ((v >> 8) & 0xFF) as u8)
+    } else if req == 0x8915 || req == 0x891b || req == 0x8919 {
+        is_addr = true
+        v = inet.ip(state)
+        if req == 0x891b {
+            v = inet.mask(state)
+        }
+        if req == 0x8919 {
+            v = inet.ip(state) | ((~inet.mask(state)) & 0xFFFFFFFF)
+        }
+        kstate.set8(bo + 16, (sysconst.AF_INET & 0xFF) as u8)
+        kstate.set8(bo + 20, ((v >> 24) & 0xFF) as u8)
+        kstate.set8(bo + 21, ((v >> 16) & 0xFF) as u8)
+        kstate.set8(bo + 22, ((v >> 8) & 0xFF) as u8)
+        kstate.set8(bo + 23, (v & 0xFF) as u8)
+    } else if req == 0x8927 {
+        kstate.set8(bo + 16, 1 as u8)
+        var m: u64 = 0
+        while m < 6 {
+            kstate.set8(bo + 18 + m, (inet.mac_at(state, m) & 0xFF) as u8)
+            m = m + 1
+        }
+    } else if req == 0x8921 {
+        kstate.set8(bo + 16, 0xDC as u8)
+        kstate.set8(bo + 17, 0x05 as u8)
+    } else if req == 0x8933 {
+        // SIOCGIFINDEX: the same index the netlink dump gives eth0
+        kstate.set8(bo + 16, 1 as u8)
+    } else if req == 0x8942 {
+        // SIOCGIFTXQLEN: 1000, as the netlink dump says
+        kstate.set8(bo + 16, 0xE8 as u8)
+        kstate.set8(bo + 17, 0x03 as u8)
+    } else if req == 0x891d {
+        kstate.set8(bo + 16, 0 as u8)
+    } else {
+        return sysuser.neg(errno.E_NOTTY)
+    }
+    if is_addr && v == 0 && req == 0x8915 {
+        return sysuser.neg(errno.E_ADDRNOTAVAIL)
+    }
+    if !sysuser.copy_out(state, me, arg, bo, 40) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}

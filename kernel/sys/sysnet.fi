@@ -1,0 +1,2535 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.sched
+import sched.proc
+import lib.errno
+import fs.file
+import ipc.uio
+import net.inet
+import net.netlink
+import net.netview
+import fs.unixsock
+import net.netmon
+import net.ebpf
+import net.ebpfver
+import net.ebpfmap
+import net.ebpfhook
+import ipc.share
+import net.wg
+import ipc.perm
+import sched.ctr
+import sys.sysconst
+import sys.sysuser
+import sys.sysfd
+import sys.sysmem
+import sys.sysevent
+
+export {
+    do_accept, do_bind, do_connect, do_getsockopt, do_listen, do_recvmsg, do_sendmsg, do_setsockopt, do_shutdown, do_socket, do_socketpair, do_sockname, kill_allowed, net_call, shm_of, sock_close_all
+}
+
+const SOCK_STREAM: u64 = 1
+const SOCK_SEQPACKET: u64 = 5
+const SOCK_CLOEXEC: u64 = 524288 // 0o2000000
+const IPPROTO_ICMP: u64 = 1
+const IPPROTO_TCP: u64 = 6
+const IPPROTO_UDP: u64 = 17
+const SYS_OSUM_NETSET: u64 = 1301 // (ip, maske, gateway) -> 0
+
+const NG_READY: u64 = 0
+const NG_IP: u64 = 1
+const NG_MASK: u64 = 2
+const NG_GW: u64 = 3
+const NG_MAC0: u64 = 4
+const NG_MAC1: u64 = 5
+const NG_IN: u64 = 6
+const NG_OUT: u64 = 7
+
+const NG_STATE: u64 = 8
+
+//     22 NETZ  K3 BDF 0900 L 1 ABL 0 IP 169.254.10.1
+const NG_DHCPST: u64 = 9
+const NG_DHCPTRY: u64 = 12
+
+const NG_LINK: u64 = 13
+const NG_SPEED: u64 = 14
+const NG_CARDTX: u64 = 15
+const NG_CARDRX: u64 = 16
+// ROUND DELL2: THE CHIP'S OWN COUNTERS, a1 = which (see
+// `e1000.hwstat_on`). The two counters above are what the DRIVER
+// handed over; these are what the MAC says went onto and came off the
+// wire -- the only way to tell "sent but nobody answered" from "never
+// left the chip" on a machine without a serial line.
+const NG_HW: u64 = 17
+const SYS_OSUM_DHCPST: u64 = 1302
+
+// ====================================================== RUNDE NETVIEW
+const SYS_OSUM_NETVGET: u64 = 1310
+const SYS_OSUM_NETVSET: u64 = 1311
+const SYS_OSUM_NETVALLOW: u64 = 1312
+
+const NV_MODE: u64 = 0 // 0 real, 1 filtered, 2 faked, 3 none
+const NV_ALLOWN: u64 = 1
+const NV_ALLOW: u64 = 2
+const NV_DROPPED: u64 = 8
+const NV_OPENED: u64 = 9
+const NV_DENIED: u64 = 10
+const NV_REPLIES: u64 = 11
+const NV_PID: u64 = 12
+const NV_FALLBACK: u64 = 13 // 0 off, 1 when-offline, 2 always
+const NV_FBVIEW: u64 = 14
+const NV_LINK: u64 = 15
+
+const SYS_OSUM_NETVFB: u64 = 1313
+
+const SYS_OSUM_CTRGET: u64 = 1330
+const SYS_OSUM_CTRSET: u64 = 1331
+const SYS_OSUM_CTRNEW: u64 = 1332
+
+const CG_MINE: u64 = 0
+const CG_STATE: u64 = 1 // C_FREE/C_SET/C_RUN/C_DEAD
+const CG_MEMLIM: u64 = 2
+const CG_MEMUSE: u64 = 3
+const CG_MEMPEAK: u64 = 4
+const CG_MEMDENY: u64 = 5
+const CG_CPUSH: u64 = 6
+const CG_CPUTICK: u64 = 7
+const CG_PROCS: u64 = 8
+const CG_PROCLIM: u64 = 9
+const CG_COUNT: u64 = 10
+const CG_CREATED: u64 = 11
+const CG_DESTROYED: u64 = 12
+const CG_ESCAPES: u64 = 13
+const CG_ROOTLEN: u64 = 14
+const CG_NAMEC: u64 = 15
+const CG_ROOTC: u64 = 16
+const CG_NETV: u64 = 17
+const CG_MAXC: u64 = 18
+
+const CS_MEMLIM: u64 = 0
+const CS_CPUSH: u64 = 1
+const CS_PROCLIM: u64 = 2
+const CS_NETV: u64 = 3
+const CS_STATE: u64 = 4
+const CS_ROOT: u64 = 5
+
+// ======================================================= ROUND NETMON
+//
+// WHO USED HOW MUCH. One number per call, the way `PSTAT` has answered
+// about the task table since round K6 -- no buffer, no pointer into the
+// kernel, nothing a program could be handed and misread.
+//
+//   NETMON(kind, index, field) -> number
+//
+//     kind 0  the scalars of the whole machine (index ignored)
+//     kind 1  a task: the six counters, its pid, whether it is alive
+//     kind 2  a socket: the live connection list `netstat` prints
+//     kind 3  one octet of the program name of a task
+//
+// READING IS ALLOWED FOR ANYBODY, exactly as with NETVGET and for the
+// same reason: a machine that will not tell the person which of their
+// own programs is using the line is not protecting anybody.
+const SYS_OSUM_NETMON: u64 = 1320
+
+// kind 0 -- the machine.
+const NM_ON: u64 = 0 // 1 = the counters are running
+const NM_LOOKUPS: u64 = 1 // frames classified
+const NM_HITS: u64 = 2 // frames placed on a process
+const NM_MISSES: u64 = 3 // frames that went to the system bucket
+const NM_SYSTX: u64 = 4 // octets of those, outbound
+const NM_SYSRX: u64 = 5 // and inbound
+const NM_TICKS: u64 = 6 // the tick counter, for rates
+const NM_HZ: u64 = 7 // ticks per second
+const NM_CARDTX: u64 = 8 // what the CARD counted, out
+const NM_CARDRX: u64 = 9 // and in
+const NM_NTASK: u64 = 10 // how many task slots there are
+const NM_NSOCK: u64 = 11 // and socket slots
+const NM_NPROG: u64 = 12 // and program slots
+
+// kind 1 -- a task. 0..5 are `netmon.T_*` in that order.
+const NT_PID: u64 = 6
+const NT_ALIVE: u64 = 7
+const NT_VIEW: u64 = 8 // the netview mode of round NETVIEW
+const NT_STATE: u64 = 9
+
+// kind 2 -- a socket. 0..11 are `netmon.S_*` in that order.
+const NS_TCPSTATE: u64 = 12
+const NS_AGE: u64 = 13 // ticks since the slot was taken
+
+// kind 4 -- a PROGRAM. 0..5 are the same six counters, summed over every
+// task that ever ran that program in this boot. This is the row the
+// person actually reads: `wget` used this much, whether or not the wget
+// that used it is still running.
+const NP_USED: u64 = 6
+
+// AND THE ONE CALL OF THIS ROUND THAT CHANGES SOMETHING.
+//
+//   NETMONROLL(program, field) -> what has been used since the last roll
+//
+// It hands out the difference and moves the watermark in the same
+// breath, so that `/bin/netstat -w` can add it to today's line in
+// `/var/net/usage` and nothing is counted twice or lost. ROOT ONLY, and
+// that is not decoration: a program that could roll its own counters
+// could empty them, and the history would then say it used nothing.
+const SYS_OSUM_NETMONROLL: u64 = 1321
+const SYS_OSUM_EBPFATTACH: u64 = 1406
+const SYS_OSUM_EBPFMAP: u64 = 1407
+const SYS_OSUM_EBPFSTAT: u64 = 1408
+
+// ============================================ ROUND NETMON, PART TWO
+//
+//   SHARE(what, index) -> number
+//
+// Everything the sharing of `kernel/share.fi` will tell a program:
+// whether it is on, what the shared side's address and pool are, and
+// one row per connected device. Reading is allowed for anybody, for the
+// same reason as everywhere else in this round -- the person has a
+// right to know which devices are hanging off their machine.
+//
+// SWITCHING IT ON AND OFF IS ROOT ONLY (`SH_SET`). Anything else and
+// any process could hand this machine's connection to the room.
+const SYS_OSUM_SHARE: u64 = 1322
+
+const SH_ON: u64 = 0 // 1 = the connection is being handed on
+const SH_SET: u64 = 1 // (index = 0 or 1) switch it -- euid 0
+const SH_IP: u64 = 2 // this machine's address on the shared side
+const SH_MASK: u64 = 3
+const SH_P0: u64 = 4 // the first address handed out
+const SH_P1: u64 = 5 // and the last
+const SH_NCLIENT: u64 = 6 // how many devices are known
+const SH_CLIENT: u64 = 7 // (index) 1 = that slot is in use
+const SH_CMAC: u64 = 8 // its hardware address, six octets in one word
+const SH_CIP: u64 = 9 // and the address it was given
+const SH_CIN: u64 = 10 // octets it sent
+const SH_COUT: u64 = 11 // and octets it received
+const SH_NAT: u64 = 12 // records in the NAT table right now
+const SH_STAT: u64 = 13 // (index) one of `share.S_*`
+const SH_UPLINK: u64 = 14
+const SH_SHARED: u64 = 15
+
+fn wg_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if number == SYS_OSUM_WGGET {
+        return do_wgget(state, me, a0, a1, a2)
+    }
+    return do_wgset(state, me, a0, a1, a2)
+}
+
+fn do_wgget(state: u64, me: u64, field: u64, ptr: u64, len: u64) -> u64 {
+    if field == WG_READY {
+        if wg.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    if !wg.ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if field == WG_UP {
+        if wg.up(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == WG_PEERS {
+        return wg.peers(state)
+    }
+    if field == WG_HANDSHAKES {
+        return wg.handshakes(state)
+    }
+    if field == WG_KILLED {
+        return wg.killed_octets(state)
+    }
+    if field == WG_KILLARMED {
+        if wg.kill_armed(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == WG_PORT {
+        return wg.port(state)
+    }
+    if field == WG_ERR {
+        return wg.last_error(state)
+    }
+    if field == WG_STAT {
+        return wg.stat(state, ptr)
+    }
+    if field == WG_ESTAB {
+        if wg.established(state, ptr) {
+            return 1
+        }
+        return 0
+    }
+    if field == WG_PUBLIC {
+        if len < 32 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        var key: [u8; 32] = [0 as u8; 32]
+        if !wg.public_key(state, (&key[0]) as u64) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        if !sysuser.copy_out(state, me, ptr, (&key[0]) as u64, 32) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 32
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_wgset(state: u64, me: u64, field: u64, ptr: u64, n: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if field == WS_INIT {
+        if !wg.init(state) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        return 0
+    }
+    if !wg.ready(state) && field != WS_CLEAR {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if field == WS_CLEAR {
+        wg.clear(state)
+        return 0
+    }
+    if field == WS_PRIVATE || field == WS_PEER {
+        var key: [u8; 32] = [0 as u8; 32]
+        if !sysuser.copy_in(state, me, (&key[0]) as u64, ptr, 32) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        if field == WS_PRIVATE {
+            if !wg.set_private(state, (&key[0]) as u64) {
+                return sysuser.neg(errno.E_INVAL)
+            }
+            return 0
+        }
+        let idx: i64 = wg.add_peer(state, (&key[0]) as u64)
+        if idx < 0 {
+            return sysuser.neg(errno.E_NOSPC)
+        }
+        return idx as u64
+    }
+    if field == WS_PSK {
+        var arg: [u64; 1] = [0 as u64; 1]
+        var key: [u8; 32] = [0 as u8; 32]
+        if !sysuser.copy_in(state, me, (&arg[0]) as u64, ptr, 8) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        if !sysuser.copy_in(state, me, (&key[0]) as u64, ptr + 8, 32) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        if !wg.psk(state, arg[0], (&key[0]) as u64) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if n > 9 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var a: [u64; 9] = [0 as u64; 9]
+    if n > 0 {
+        if !sysuser.copy_in(state, me, (&a[0]) as u64, ptr, n * 8) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    if field == WS_ALLOW {
+        if n < 3 || !wg.allow(state, a[0], a[1], a[2]) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_ENDPOINT {
+        if n < 3 || !wg.endpoint(state, a[0], a[1], a[2]) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_KEEPALIVE {
+        if n < 2 || !wg.keepalive(state, a[0], a[1]) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_ADDR {
+        if n < 3 || !wg.set_addr(state, a[0], a[1], a[2]) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_UP {
+        if n < 1 || !wg.set_up(state, a[0]) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == WS_KILL {
+        if n < 1 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        wg.arm_kill(state, a[0])
+        return 0
+    }
+    if field == WS_AWG {
+        if n < 9 || !wg.awg(state, a[0], a[1], a[2], a[3], a[4], a[5],
+            a[6], a[7], a[8]) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+const SYS_OSUM_WGGET: u64 = 1950
+
+// wgget
+const WG_READY: u64 = 0
+const WG_UP: u64 = 1
+const WG_PEERS: u64 = 2
+const WG_HANDSHAKES: u64 = 3
+const WG_KILLED: u64 = 4
+const WG_KILLARMED: u64 = 5
+const WG_PORT: u64 = 6
+const WG_ERR: u64 = 7
+const WG_PUBLIC: u64 = 8
+const WG_STAT: u64 = 9
+const WG_ESTAB: u64 = 10
+
+const WS_INIT: u64 = 0 // -
+const WS_CLEAR: u64 = 1 // -
+const WS_PRIVATE: u64 = 2
+const WS_PEER: u64 = 3
+const WS_ALLOW: u64 = 4
+const WS_ENDPOINT: u64 = 5 // i, ip, port
+const WS_PSK: u64 = 6
+const WS_KEEPALIVE: u64 = 7
+const WS_ADDR: u64 = 8
+const WS_UP: u64 = 9
+const WS_KILL: u64 = 10
+const WS_AWG: u64 = 11 // jc,jmin,jmax,s1,s2,h1,h2,h3,h4
+
+// The end of a process. Every socket it still holds and nobody else
+// does is closed in an orderly way -- the FIN travels, and the state
+// machine of round K3 walks through TIME_WAIT on its own afterwards.
+fn sock_close_all(state: u64, me: u64, last_use: bool) {
+    // COMPOSITOR S3: the end of a task gives back the references of its mappings of shared objects (before, they stayed for good)
+    sysmem.file_shm_flush_maps(state, me, 0, 0xFFFFFFFFFFFFFFFF, false)
+    let _maps: u64 = unixsock.map_release_all(state, me)
+    if !last_use {
+        return
+    }
+    var fd: u64 = 0
+    while fd < file.MAX_FD {
+        let of: u64 = sysuser.of_of(state, me, fd)
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SOCK {
+            if file.open_refs(state, of) <= 1 {
+                netview.release(state, file.open_ino(state, of))
+                inet.sock_close(state, file.open_ino(state, of))
+            }
+        }
+        if of < file.MAX_OPEN
+            && file.open_kind(state, of) == file.K_USOCK {
+            if file.open_refs(state, of) <= 1 {
+                unixsock.sock_free(state, file.open_ino(state, of))
+                sched.poll_kick(state)
+            }
+        }
+        if of < file.MAX_OPEN && file.open_kind(state, of) == file.K_SHM {
+            if file.open_refs(state, of) <= 1 {
+                unixsock.shm_unref(state, file.open_ino(state, of))
+            }
+        }
+        fd = fd + 1
+    }
+}
+
+// -------------------------------------------------------- the calls
+
+fn do_socket(state: u64, me: u64, domain: u64, kind: u64,
+    protocol: u64) -> u64 {
+    if domain == sysconst.AF_UNIX {
+        return do_usocket(state, me, kind, protocol)
+    }
+    // ROUND NETLINK (r696): AF_NETLINK needs no card either.
+    if domain == netlink.AF_NETLINK {
+        return sysevent.do_nlsocket(state, me, kind, protocol)
+    }
+    if !inet.ready(state) && netview.view_of(state, me) == netview.V_REAL {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if domain != sysconst.AF_INET {
+        return sysuser.neg(errno.E_AFNOSUPPORT)
+    }
+    let flags: u64 = kind & (sysconst.SOCK_NONBLOCK | SOCK_CLOEXEC)
+    let base: u64 = kind & 0xFF
+    var k: u64 = inet.SK_FREE
+    if base == SOCK_STREAM {
+        if protocol != 0 && protocol != IPPROTO_TCP {
+            return sysuser.neg(errno.E_PROTONOSUPPORT)
+        }
+        k = inet.SK_TCP
+    } else if base == sysconst.SOCK_DGRAM {
+        // The ping socket Linux has had since 3.0. A `ping` that needs
+        // no raw socket and no privilege is the reason it exists there,
+        // and the reason it exists here.
+        if protocol == IPPROTO_ICMP {
+            k = inet.SK_ICMP
+        } else if protocol == 0 || protocol == IPPROTO_UDP {
+            k = inet.SK_UDP
+        } else {
+            return sysuser.neg(errno.E_PROTONOSUPPORT)
+        }
+    } else {
+        return sysuser.neg(errno.E_PROTONOSUPPORT)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        return sysuser.neg(errno.E_MFILE)
+    }
+    let si: u64 = inet.sock_new(state, k)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    netview.reset(state, si)
+    // ROUND NETMON: WHOSE SOCKET THIS IS. Written down here, in the one
+    // moment the asking task and the running task are the same task. A
+    // frame that arrives four milliseconds later arrives while somebody
+    // else holds the processor, and asking the scheduler THEN would put
+    // the octets on the wrong program.
+    netmon.sock_open(state, si, me, sched.tget(state, me, sched.T_PID), k)
+    if (flags & sysconst.SOCK_NONBLOCK) != 0 {
+        inet.sock_set_nonblock(state, si)
+    }
+    let of: u64 = file.open_alloc(state, file.K_SOCK, si, sysconst.O_RDWR)
+    if of >= file.MAX_OPEN {
+        inet.sock_close(state, si)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+fn do_bind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let nlof: u64 = sysevent.nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return sysevent.nl_bind(state, me, nlof, addr, len)
+    }
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_ubind(state, me, fd, addr, len)
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    let r: u64 = sysfd.sa_in(state, me, addr, len, &a, &port)
+    if errno.is_error(r) {
+        return r
+    }
+    if netview.view_of(state, me) != netview.V_REAL {
+        return 0
+    }
+    // An address that is neither 0.0.0.0 nor the one this machine has is
+    // one nobody would ever answer for.
+    if a != 0 && a != inet.ip(state) {
+        return sysuser.neg(errno.E_ADDRNOTAVAIL)
+    }
+    return inet.sock_bind(state, si, port)
+}
+
+fn do_listen(state: u64, me: u64, fd: u64, backlog: u64) -> u64 {
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_ulisten(state, me, fd)
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if netview.view_of(state, me) != netview.V_REAL {
+        return 0
+    }
+    return inet.sock_listen(state, si, backlog)
+}
+
+// Waits, unless the descriptor was asked for in non-blocking mode. The
+// waiting is `sleep_ticks`, so the network task goes on moving frames
+// the whole time -- that is the whole reason it is a task.
+fn do_accept(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
+    flags: u64) -> u64 {
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_uaccept(state, me, fd, flags)
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if netview.view_of(state, me) != netview.V_REAL {
+        return sysuser.neg(errno.E_AGAIN)
+    }
+    let nb: bool = inet.sock_nonblock(state, si) || (flags & sysconst.SOCK_NONBLOCK) != 0
+    var waited: u64 = 0
+    let adl: u64 = sysfd.sock_deadline(state, si, false)
+    var got: u64 = inet.SOCK_MAX
+    while got >= inet.SOCK_MAX {
+        let c: u64 = inet.sock_accept(state, si)
+        if !errno.is_error(c) && c < inet.SOCK_MAX {
+            got = c
+        } else if nb {
+            return sysuser.neg(errno.E_AGAIN)
+        } else if sysfd.sock_gave_up(state, adl, waited) {
+            return sysuser.neg(errno.E_AGAIN)
+        } else {
+            waited = waited + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    let nfd: u64 = file.fd_alloc(state, me, 0)
+    if nfd >= file.MAX_FD {
+        inet.sock_close(state, got)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_SOCK, got, sysconst.O_RDWR)
+    if of >= file.MAX_OPEN {
+        inet.sock_close(state, got)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    file.fd_set(state, me, nfd, of)
+    // ROUND NETMON: the accepted connection belongs to whoever accepted
+    // it, not to whoever is listening -- with `fork` after `accept`
+    // those are two different processes.
+    netmon.sock_open(state, got, me, sched.tget(state, me, sched.T_PID),
+        netmon.K_TCP)
+    var pip: u64 = 0
+    var pport: u64 = 0
+    inet.sock_peer(state, got, &pip, &pport)
+    let w: u64 = sysfd.sa_out(state, me, addr, lenp, pip, pport)
+    if errno.is_error(w) {
+        return w
+    }
+    return nfd
+}
+
+// A blocking `connect` comes back when the handshake is done, an error
+// when it was refused, and -ETIMEDOUT when nobody ever answered. State 4
+// is ESTABLISHED and 0 is CLOSED in the numbering of `net.tcp`.
+fn do_connect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    if usock_of(state, me, fd) < unixsock.USOCK_MAX {
+        return do_uconnect(state, me, fd, addr, len)
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    let r: u64 = sysfd.sa_in(state, me, addr, len, &a, &port)
+    if errno.is_error(r) {
+        return r
+    }
+    // ============================================== RUNDE NETVIEW: DIE TUER
+    let d: u64 = netview.decide(state, me, a, port)
+    if d == netview.D_DENY {
+        return sysuser.neg(errno.E_NETUNREACH)
+    }
+    if d == netview.D_FAKE {
+        return netview.open_fake(state, si, inet.sock_kind(state, si),
+            a, port)
+    }
+    let c: u64 = inet.sock_connect(state, si, a, port)
+    if errno.is_error(c) {
+        return c
+    }
+    if inet.sock_kind(state, si) != inet.SK_TCP {
+        return 0
+    }
+    if inet.sock_nonblock(state, si) {
+        return sysuser.neg(errno.E_INPROGRESS)
+    }
+    var waited: u64 = 0
+    while waited < sysconst.NET_ROUNDS {
+        let st: u64 = inet.sock_state(state, si)
+        if st == 4 {
+            return 0
+        }
+        let e: u64 = inet.sock_error(state, si)
+        if e != 0 {
+            return sysuser.neg(e)
+        }
+        if st == 0 && waited > 20 {
+            return sysuser.neg(errno.E_CONNREFUSED)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return sysuser.neg(errno.E_TIMEDOUT)
+}
+
+fn do_shutdown(state: u64, me: u64, fd: u64, how: u64) -> u64 {
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if netview.is_fake(state, si) {
+        return 0
+    }
+    return inet.sock_shutdown(state, si, how)
+}
+
+fn usock_sockname(state: u64, me: u64, si: u64, addr: u64, lenp: u64,
+    peer: bool) -> u64 {
+    var target: u64 = si
+    if peer {
+        target = unixsock.sock_peer(state, si)
+        if target >= unixsock.USOCK_MAX
+            || unixsock.sock_state(state, si) != unixsock.S_CONNECTED {
+            return sysuser.neg(errno.E_NOTCONN)
+        }
+    }
+    let nmi: u64 = unixsock.name_of(state, target)
+    let nlen: u64 = unixsock.name_len(state, nmi)
+    var total: u64 = 2 + nlen
+    if nlen > 0 && unixsock.name_byte(state, nmi, 0) != 0 {
+        total = total + 1
+    }
+    if addr == 0 {
+        return 0
+    }
+    if lenp == 0 || !proc.user_ok(state, me, lenp, 4) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        room = room | (sysuser.peek(state, me, lenp + k) << (k * 8))
+        k = k + 1
+    }
+    var n: u64 = total
+    if room < n {
+        n = room
+    }
+    var o: u64 = 0
+    while o < n {
+        var b: u64 = 0
+        if o == 0 {
+            b = sysconst.AF_UNIX & 0xFF
+        } else if o >= 2 && o - 2 < nlen {
+            b = unixsock.name_byte(state, nmi, o - 2)
+        }
+        if !sysuser.poke(state, me, addr + o, b) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        o = o + 1
+    }
+    k = 0
+    while k < 4 {
+        if !sysuser.poke(state, me, lenp + k, (total >> (k * 8)) & 0xFF) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn do_sockname(state: u64, me: u64, fd: u64, addr: u64, lenp: u64,
+    peer: bool) -> u64 {
+    let nlof: u64 = sysevent.nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return sysevent.nl_sockname(state, me, nlof, addr, lenp, peer)
+    }
+    let usi: u64 = usock_of(state, me, fd)
+    if usi < unixsock.USOCK_MAX {
+        return usock_sockname(state, me, usi, addr, lenp, peer)
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var a: u64 = 0
+    var port: u64 = 0
+    var r: u64 = 0
+    if netview.is_fake(state, si) {
+        if peer {
+            netview.peer_of(state, si, &a, &port)
+        } else {
+            a = netview.FAKE_IP
+            port = 0
+        }
+        return sysfd.sa_out(state, me, addr, lenp, a, port)
+    }
+    if peer {
+        r = inet.sock_peer(state, si, &a, &port)
+    } else {
+        r = inet.sock_local(state, si, &a, &port)
+    }
+    if errno.is_error(r) {
+        return r
+    }
+    return sysfd.sa_out(state, me, addr, lenp, a, port)
+}
+
+// Options: SO_KEEPALIVE and TCP_KEEPIDLE/KEEPINTVL/KEEPCNT are acted on
+// (N-006, see below and tcp.fi). Every other option is taken and none is
+// acted on -- and that is said here rather than answered with
+// -ENOPROTOOPT, which would make `curl` and `nc` give up for no reason.
+//
+// ROUND FV-W24: ALSO ACTED ON NOW: SO_RCVTIMEO and SO_SNDTIMEO
+// (SOL_SOCKET 20 and 21, and the 64-bit "_NEW" names 66 and 67, which take
+// the same `struct timeval` here). The value is kept in ticks in the flags
+// word of the socket (`inet.sock_set_tmo`) and read by the waiting loops of
+// recv, accept and send (`sock_deadline`). Until this round the option was
+// taken and thrown away, so a "timed" read blocked until data came (up to
+// NET_ROUNDS = 30 s) and every program that relied on the timeout stalled.
+fn do_setsockopt(state: u64, me: u64, fd: u64, level: u64,
+    name: u64, val: u64, optlen: u64) -> u64 {
+    if sysevent.nl_of(state, me, fd) < file.MAX_OPEN {
+        return 0
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    if si >= inet.SOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if level == 1 && (name == 20 || name == 21 || name == 66 || name == 67) {
+        if optlen < 16 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if !proc.user_ok(state, me, val, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        var sec: u64 = 0
+        var usec: u64 = 0
+        var k: u64 = 0
+        while k < 8 {
+            sec = sec | (sysuser.peek(state, me, val + k) << (k * 8))
+            usec = usec | (sysuser.peek(state, me, val + 8 + k) << (k * 8))
+            k = k + 1
+        }
+        // a negative or out-of-range value is -EINVAL, as on Linux
+        if sec >= 0x8000000000000000 || usec >= 1000000 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        var ticks: u64 = inet.TMO_MASK
+        if sec < 100000 {
+            // rounded UP: a timeout never fires earlier than asked
+            ticks = (sec * 1000000 + usec + 9999) / 10000
+        }
+        inet.sock_set_tmo(state, si, name == 21 || name == 67, ticks)
+        return 0
+    }
+    // N-006: SO_KEEPALIVE (SOL_SOCKET 9) and TCP_KEEPIDLE / TCP_KEEPINTVL /
+    // TCP_KEEPCNT (IPPROTO_TCP 4 / 5 / 6) are acted on; every other option
+    // stays accepted and ignored, as above.
+    var which: u64 = 99
+    if level == 1 && name == 9 {
+        which = inet.KA_ON
+    }
+    if level == 6 && name >= 4 && name <= 6 {
+        which = name - 3
+        if inet.sock_kind(state, si) != inet.SK_TCP {
+            return sysuser.neg(errno.E_NOPROTOOPT)
+        }
+    }
+    if which == 99 {
+        return 0
+    }
+    if optlen < 4 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, val, 4) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var v: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        v = v | (sysuser.peek(state, me, val + k) << (k * 8))
+        k = k + 1
+    }
+    // the value is an int: a negative one is out of range, as on Linux
+    if which == inet.KA_IDLE || which == inet.KA_INTVL {
+        if v < 1 || v > 32767 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+    }
+    if which == inet.KA_CNT {
+        if v < 1 || v > 127 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+    }
+    return inet.sock_ka_set(state, si, which, v)
+}
+
+// ROUND STONES2: getsockopt(2). curl asks SO_ERROR after every non-blocking
+// connect (poll says writable, SO_ERROR says whether it worked); without the
+// call the answer was -ENOSYS and curl reported "could not connect". Values
+// are the ones of a plain Linux socket: nothing is buffered beyond the
+// defaults, no keep-alive, no linger. An option this kernel does not know is
+// -ENOPROTOOPT, never a made-up value.
+fn do_getsockopt(state: u64, me: u64, fd: u64, level: u64, name: u64,
+    val: u64, lenp: u64) -> u64 {
+    let nlof: u64 = sysevent.nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return sysevent.nl_getsockopt(state, me, level, name, val, lenp)
+    }
+    let si: u64 = sysfd.sock_of(state, me, fd)
+    let ui: u64 = usock_of(state, me, fd)
+    if si >= inet.SOCK_MAX && ui >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, lenp, 4) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    var k: u64 = 0
+    while k < 4 {
+        room = room | (sysuser.peek(state, me, lenp + k) << (k * 8))
+        k = k + 1
+    }
+    if room < 4 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    // ROUND FV-W24: SO_RCVTIMEO / SO_SNDTIMEO read back as a `struct timeval`
+    // (the stored ticks, 10 ms each).
+    if level == 1 && (name == 20 || name == 21 || name == 66 || name == 67) && si < inet.SOCK_MAX {
+        if room < 16 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        let tk: u64 = inet.sock_tmo(state, si, name == 21 || name == 67)
+        let us: u64 = tk * 10000
+        if !sysuser.put64(state, me, val, us / 1000000) || !sysuser.put64(state, me, val + 8, us % 1000000) || !sysuser.put32(state, me, lenp, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return 0
+    }
+    var v: u64 = 0
+    var known: bool = false
+    if level == 1 {
+        // SOL_SOCKET: 2 REUSEADDR, 3 TYPE, 4 ERROR, 7 SNDBUF, 8 RCVBUF, 9 KEEPALIVE, 30 ACCEPTCONN
+        if name == 2 || name == 30 {
+            known = true
+        }
+        if name == 9 {
+            known = true
+            if si < inet.SOCK_MAX {
+                v = inet.sock_ka_get(state, si, inet.KA_ON)
+            }
+        }
+        if name == 3 {
+            known = true
+            v = 1
+            if si < inet.SOCK_MAX && inet.sock_kind(state, si) == inet.SK_UDP {
+                v = 2
+            }
+        }
+        if name == 4 {
+            known = true
+            if si < inet.SOCK_MAX {
+                v = inet.sock_error(state, si)
+            }
+        }
+        if name == 7 || name == 8 {
+            known = true
+            v = 65536
+        }
+    }
+    if level == 6 && name == 1 {
+        // IPPROTO_TCP, TCP_NODELAY
+        known = true
+    }
+    if level == 6 && name >= 4 && name <= 6 && si < inet.SOCK_MAX
+        && inet.sock_kind(state, si) == inet.SK_TCP {
+        // N-006: TCP_KEEPIDLE (4), TCP_KEEPINTVL (5), TCP_KEEPCNT (6)
+        known = true
+        v = inet.sock_ka_get(state, si, name - 3)
+    }
+    if !known {
+        return sysuser.neg(errno.E_NOPROTOOPT)
+    }
+    if !sysuser.put32(state, me, val, v) || !sysuser.put32(state, me, lenp, 4) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}
+
+// ======================================================= RUNDE NETVIEW
+fn task_of_pid(state: u64, me: u64, pid: u64) -> u64 {
+    if pid == 0 {
+        return me
+    }
+    return sched.find_pid(state, pid)
+}
+
+fn do_netvget(state: u64, me: u64, pid: u64, what: u64) -> u64 {
+    if what == NV_DROPPED {
+        return netview.dropped(state)
+    }
+    if what == NV_OPENED {
+        return netview.opened(state)
+    }
+    if what == NV_DENIED {
+        return netview.denials(state)
+    }
+    if what == NV_REPLIES {
+        return netview.replies(state)
+    }
+    if what == NV_FALLBACK {
+        return netview.fallback(state)
+    }
+    if what == NV_FBVIEW {
+        return netview.fallback_view(state)
+    }
+    if what == NV_LINK {
+        return netview.link_state(state)
+    }
+    let t: u64 = task_of_pid(state, me, pid)
+    if t == 0 || t >= kstate.MAX_TASKS {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if what == NV_MODE {
+        return netview.view_of(state, t)
+    }
+    if what == NV_ALLOWN {
+        return netview.allow_count(state, t)
+    }
+    if what == NV_PID {
+        return sched.tget(state, t, sched.T_PID)
+    }
+    if what >= NV_ALLOW && what < NV_ALLOW + sched.NETOK_MAX {
+        return netview.allow_at(state, t, what - NV_ALLOW)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_netvset(state: u64, me: u64, pid: u64, want: u64) -> u64 {
+    let t: u64 = task_of_pid(state, me, pid)
+    if t == 0 || t >= kstate.MAX_TASKS {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    let v: u64 = want & 0xFF
+    if !netview.may_set(state, me, t, v) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if (want & 0x100) != 0 {
+        netview.allow_clear(state, t)
+    }
+    netview.set_view(state, t, v)
+    return 0
+}
+
+fn do_netvallow(state: u64, me: u64, pid: u64, addr: u64,
+    pp: u64) -> u64 {
+    let t: u64 = task_of_pid(state, me, pid)
+    if t == 0 || t >= kstate.MAX_TASKS {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if sched.tget(state, t, sched.T_STATE) == sched.S_FREE {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if !netview.may_set(state, me, t, netview.view_of(state, t)) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if addr == 0 && pp == 0 {
+        netview.allow_clear(state, t)
+        return 0
+    }
+    if !netview.allow_add(state, t, addr, (pp >> 16) & 0xFFFF,
+        pp & 0xFF) {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    return 0
+}
+
+fn ctr_admin(state: u64, me: u64) -> bool {
+    if ctr.ctr_of(state, me) != ctr.HOST {
+        return false
+    }
+    return sched.tget(state, me, sched.T_EUID) == 0
+}
+
+fn do_ctrget(state: u64, me: u64, field: u64, nr: u64, c: u64) -> u64 {
+    if field == CG_MINE {
+        return ctr.ctr_of(state, me)
+    }
+    if field == CG_COUNT {
+        return ctr.count(state)
+    }
+    if field == CG_CREATED {
+        return ctr.created(state)
+    }
+    if field == CG_DESTROYED {
+        return ctr.destroyed(state)
+    }
+    if field == CG_ESCAPES {
+        return ctr.escapes(state)
+    }
+    if field == CG_MAXC {
+        return ctr.MAX_CTR
+    }
+    var i: u64 = nr
+    if i == 0 {
+        i = ctr.ctr_of(state, me)
+    }
+    if i == 0 || i >= ctr.MAX_CTR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let mein: u64 = ctr.ctr_of(state, me)
+    if mein != ctr.HOST && mein != i {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if field == CG_STATE {
+        return ctr.state_of(state, i)
+    }
+    if field == CG_MEMLIM {
+        return ctr.mem_limit(state, i)
+    }
+    if field == CG_MEMUSE {
+        return ctr.mem_used(state, i)
+    }
+    if field == CG_MEMPEAK {
+        return ctr.mem_peak(state, i)
+    }
+    if field == CG_MEMDENY {
+        return ctr.mem_denials(state, i)
+    }
+    if field == CG_CPUSH {
+        return ctr.cpu_share(state, i)
+    }
+    if field == CG_CPUTICK {
+        return ctr.cpu_ticks(state, i)
+    }
+    if field == CG_PROCS {
+        return ctr.procs_of(state, i)
+    }
+    if field == CG_PROCLIM {
+        return ctr.procs_limit(state, i)
+    }
+    if field == CG_ROOTLEN {
+        return ctr.root_len(state, i)
+    }
+    if field == CG_NETV {
+        return ctr.netview_of(state, i)
+    }
+    if field == CG_NAMEC {
+        return ctr.name_at(state, i, c)
+    }
+    if field == CG_ROOTC {
+        return ctr.root_at(state, i, c)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ctrnew(state: u64, me: u64, name: u64, len: u64) -> u64 {
+    if !ctr_admin(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let i: u64 = ctr.alloc(state)
+    if i == 0 {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    if name != 0 {
+        let buf: u64 = sysuser.nameb(state)
+        let n: u64 = sysuser.fetch_name(state, me, name, buf, ctr.NAME_MAX)
+        if !errno.is_error(n) {
+            ctr.name_set(state, i, buf)
+        }
+    }
+    return i
+}
+
+fn do_ctrset(state: u64, me: u64, nr: u64, field: u64, value: u64) -> u64 {
+    if !ctr_admin(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if nr == 0 || nr >= ctr.MAX_CTR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !ctr.exists(state, nr) {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if field == CS_MEMLIM {
+        if !ctr.may_limit(state, nr, value) {
+            ctr.note_escape(state)
+            return sysuser.neg(errno.E_PERM)
+        }
+        ctr.mem_limit_set(state, nr, value)
+        return 0
+    }
+    if field == CS_CPUSH {
+        if !ctr.cpu_share_set(state, nr, value) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == CS_PROCLIM {
+        ctr.procs_limit_set(state, nr, value)
+        return 0
+    }
+    if field == CS_NETV {
+        if value > netview.V_LAST {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        ctr.netview_set(state, nr, value)
+        return 0
+    }
+    if field == CS_STATE {
+        if value > ctr.C_DEAD {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if value == ctr.C_FREE {
+            if ctr.procs_of(state, nr) != 0 {
+                return sysuser.neg(errno.E_BUSY)
+            }
+            ctr.free_slot(state, nr)
+            return 0
+        }
+        ctr.set_state(state, nr, value)
+        return 0
+    }
+    if field == CS_ROOT {
+        let buf: u64 = sysuser.nameb(state)
+        let n: u64 = sysuser.fetch_name(state, me, value, buf, ctr.ROOT_MAX)
+        if errno.is_error(n) {
+            return n
+        }
+        if !ctr.may_reroot(state, nr, buf) {
+            ctr.note_escape(state)
+            return sysuser.neg(errno.E_PERM)
+        }
+        if !ctr.root_set(state, nr, buf) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ctrenter(state: u64, me: u64, nr: u64) -> u64 {
+    if !ctr_admin(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if nr == 0 || nr >= ctr.MAX_CTR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !ctr.alive(state, nr) {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if ctr.root_len(state, nr) == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let lim: u64 = ctr.procs_limit(state, nr)
+    if lim != 0 {
+        if ctr.procs_of(state, nr) >= lim {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+    }
+    ctr.set_ctr(state, me, nr)
+    ctr.set_state(state, nr, ctr.C_RUN)
+    let v: u64 = ctr.netview_of(state, nr)
+    if v != 0 {
+        netview.set_view(state, me, v)
+    }
+    uio.reset(state, me)
+    return 0
+}
+
+fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if want > netview.FB_LAST {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    netview.fallback_set(state, want)
+    return 0
+}
+
+// ======================================================= ROUND NETMON
+//
+// One number out of the accounting. Everything it can answer is a
+// counter or a field of a record that already exists; this function
+// invents nothing and rounds nothing.
+fn do_netmon(state: u64, me: u64, kind: u64, index: u64,
+    field: u64) -> u64 {
+    if kind == 0 {
+        if field == NM_ON {
+            if netmon.on(state) {
+                return 1
+            }
+            return 0
+        }
+        if field == NM_LOOKUPS {
+            return netmon.lookups(state)
+        }
+        if field == NM_HITS {
+            return netmon.hits(state)
+        }
+        if field == NM_MISSES {
+            return netmon.misses(state)
+        }
+        if field == NM_SYSTX {
+            return netmon.sys_octets(state, 0)
+        }
+        if field == NM_SYSRX {
+            return netmon.sys_octets(state, 1)
+        }
+        if field == NM_TICKS {
+            return kstate.get(state, kstate.TICKS)
+        }
+        if field == NM_HZ {
+            return 100
+        }
+        if field == NM_CARDTX {
+            return inet.card_octets(state, 0)
+        }
+        if field == NM_CARDRX {
+            return inet.card_octets(state, 1)
+        }
+        if field == NM_NTASK {
+            return kstate.MAX_TASKS
+        }
+        if field == NM_NSOCK {
+            return netmon.NSOCK
+        }
+        if field == NM_NPROG {
+            return netmon.NPROG
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == 1 {
+        if index >= kstate.MAX_TASKS {
+            return sysuser.neg(errno.E_SRCH)
+        }
+        if field < netmon.T_FIELDS {
+            return netmon.tget(state, index, field)
+        }
+        if field == NT_PID {
+            return sched.tget(state, index, sched.T_PID)
+        }
+        if field == NT_ALIVE {
+            let st: u64 = sched.tget(state, index, sched.T_STATE)
+            if st == sched.S_FREE || st == sched.S_ZOMBIE {
+                return 0
+            }
+            return 1
+        }
+        if field == NT_VIEW {
+            return netview.view_of(state, index)
+        }
+        if field == NT_STATE {
+            return sched.tget(state, index, sched.T_STATE)
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == 2 {
+        if index >= netmon.NSOCK {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if field < netmon.S_FIELDS {
+            return netmon.sget(state, index, field)
+        }
+        if field == NS_TCPSTATE {
+            if netmon.sget(state, index, netmon.S_USE) == 0 {
+                return 0
+            }
+            return inet.sock_state(state, index)
+        }
+        if field == NS_AGE {
+            if netmon.sget(state, index, netmon.S_USE) == 0 {
+                return 0
+            }
+            return kstate.get(state, kstate.TICKS)
+                - netmon.sget(state, index, netmon.S_T0)
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == 3 {
+        if index >= kstate.MAX_TASKS {
+            return sysuser.neg(errno.E_SRCH)
+        }
+        return netmon.name_at(state, index, field)
+    }
+    if kind == 4 {
+        if index >= netmon.NPROG {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if field < netmon.T_FIELDS {
+            return netmon.pget(state, index, field)
+        }
+        if field == NP_USED {
+            return netmon.prog_used(state, index)
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == 5 {
+        if index >= netmon.NPROG {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return netmon.prog_name_at(state, index, field)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+// ROUND NETMON PART TWO: one number about the sharing.
+fn do_share(state: u64, me: u64, what: u64, index: u64) -> u64 {
+    if what == SH_SET {
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        // SWITCHED ON MEANS SWITCHED ON, not brought up: the card is
+        // claimed once at boot (`netsvc.stage`) because claiming a PCI
+        // device out of a system call would mean a driver coming up
+        // while the network task is already turning the crank on it.
+        // What this does is open and close the gate.
+        if index != 0 && !share.on(state) {
+            if share.uplink(state) == share.shared(state) {
+                return sysuser.neg(errno.E_NODEV)
+            }
+        }
+        var v: u64 = 0
+        if index != 0 {
+            v = 1
+        }
+        share.set_on(state, v)
+        return 0
+    }
+    if what == SH_ON {
+        if share.on(state) {
+            return 1
+        }
+        return 0
+    }
+    if what == SH_IP {
+        return share.my_ip(state)
+    }
+    if what == SH_MASK {
+        return share.mask(state)
+    }
+    if what == SH_P0 {
+        return share.pool_first(state)
+    }
+    if what == SH_P1 {
+        return share.pool_last(state)
+    }
+    if what == SH_NCLIENT {
+        return share.CLIENT_MAX
+    }
+    if what == SH_UPLINK {
+        return share.uplink(state)
+    }
+    if what == SH_SHARED {
+        return share.shared(state)
+    }
+    if what == SH_NAT {
+        return share.nat_live(state)
+    }
+    if what == SH_STAT {
+        return share.stat(state, index)
+    }
+    if index >= share.CLIENT_MAX {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if what == SH_CLIENT {
+        if share.client_at(state, index, share.C_USE) != 0 {
+            return 1
+        }
+        return 0
+    }
+    if what == SH_CMAC {
+        return share.client_at(state, index, share.C_MAC)
+    }
+    if what == SH_CIP {
+        return share.client_at(state, index, share.C_IP)
+    }
+    if what == SH_CIN {
+        return share.client_at(state, index, share.C_IN)
+    }
+    if what == SH_COUT {
+        return share.client_at(state, index, share.C_OUT)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+// ================================================== RUNDE O-EBPF
+fn do_ebpf_load(state: u64, me: u64, slot: u64, uptr: u64,
+    len: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if slot >= ebpf.PROG_MAX {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if len == 0 || len > ebpf.MAX_INSN {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !sysuser.copy_in(state, me, ebpf.prog_at(state, slot), uptr, len * 8) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return ebpfhook.load(state, slot, ebpfhook.K_XDP, len)
+}
+
+// `do_ebpf_attach(was, kind, slot)`:
+//   was 0 = anhaengen, 1 = aushaengen, 2 = entladen
+fn do_ebpf_attach(state: u64, me: u64, was: u64, kind: u64,
+    slot: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if was == 0 {
+        if ebpfhook.attach(state, kind, slot) {
+            return 0
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if was == 1 {
+        if ebpfhook.detach(state, kind) {
+            return 0
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if was == 2 {
+        if ebpfhook.unload(state, slot) {
+            return 0
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ebpf_map(state: u64, me: u64, was: u64, a: u64, b: u64) -> u64 {
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if was == 0 {
+        let r: u64 = ebpfmap.create(state, a, b)
+        if r >= ebpfmap.NMAPS {
+            return sysuser.neg(errno.E_NOSPC)
+        }
+        return r
+    }
+    if was == 1 {
+        var found: u64 = 0
+        return ebpfmap.lookup_value(state, a, b, &found)
+    }
+    if was == 2 {
+        return ebpfmap.update(state, a, b,
+            kstate.get(state, kstate.EBPFHOOK_OFF + 0x0E00))
+    }
+    if was == 3 {
+        return ebpfmap.delete(state, a, b)
+    }
+    if was == 4 {
+        return ebpfmap.entries_of(state, a)
+    }
+    if was == 5 {
+        return ebpfmap.value_at(state, a, b)
+    }
+    if was == 6 {
+        return ebpfmap.key_at(state, a, b)
+    }
+    if was == 7 {
+        return ebpfmap.slot_used(state, a, b)
+    }
+    if was == 8 {
+        return ebpfmap.kind_of(state, a)
+    }
+    if was == 9 {
+        kstate.set(state, kstate.EBPFHOOK_OFF + 0x0E00, a)
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ebpf_stat(state: u64, me: u64, field: u64) -> u64 {
+    if field == 0 {
+        if ebpfhook.on(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == 1 {
+        return ebpfhook.seen(state)
+    }
+    if field == 2 {
+        return ebpfhook.drops(state)
+    }
+    if field == 3 {
+        return ebpfhook.passes(state)
+    }
+    if field == 4 {
+        return ebpfhook.aborts(state)
+    }
+    if field == 5 {
+        return ebpfhook.loaded(state)
+    }
+    if field == 6 {
+        return ebpf.runs_made(state)
+    }
+    if field == 7 {
+        return ebpf.calls_made(state)
+    }
+    if field == 8 {
+        return ebpf.last_err(state)
+    }
+    if field == 9 {
+        return ebpf.ticks_used(state)
+    }
+    if field == 10 {
+        return ebpfver.why_line(state)
+    }
+    if field == 11 {
+        return ebpfver.checked(state)
+    }
+    if field == 12 {
+        return ebpf.PROG_MAX
+    }
+    if field == 13 {
+        return ebpfmap.NMAPS
+    }
+    if field == 14 {
+        return ebpf.MAX_INSN
+    }
+    if field == 15 {
+        return ebpf.MAX_TICKS
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ebpf_prog(state: u64, me: u64, slot: u64, field: u64) -> u64 {
+    if slot >= ebpf.PROG_MAX {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if field == 0 {
+        return ebpfhook.attached(state, ebpfhook.K_XDP)
+    }
+    if field == 1 {
+        return ebpfhook.attached(state, ebpfhook.K_SOCK)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    // ======================================================= RUNDE O-EBPF
+    if number == sysconst.SYS_OSUM_EBPFLOAD {
+        return do_ebpf_load(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EBPFATTACH {
+        return do_ebpf_attach(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EBPFMAP {
+        return do_ebpf_map(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_EBPFSTAT {
+        return do_ebpf_stat(state, me, a0)
+    }
+    if number == sysconst.SYS_OSUM_EBPFPROG {
+        return do_ebpf_prog(state, me, a0, a1)
+    }
+    // ======================================================= ROUND NETMON
+    if number == SYS_OSUM_NETMON {
+        return do_netmon(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_SHARE {
+        return do_share(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_NETMONROLL {
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        if a0 >= netmon.NPROG || a1 >= netmon.T_FIELDS {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return netmon.roll(state, a0, a1)
+    }
+    // ================================================= RUNDE O-CONTAINER
+    if number == SYS_OSUM_CTRGET {
+        return do_ctrget(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_CTRSET {
+        return do_ctrset(state, me, a0, a1, a2)
+    }
+    if number == SYS_OSUM_CTRNEW {
+        return do_ctrnew(state, me, a0, a1)
+    }
+    if number == sysconst.SYS_OSUM_CTRENTER {
+        return do_ctrenter(state, me, a0)
+    }
+    // ====================================================== RUNDE NETVIEW
+    if number == SYS_OSUM_NETVFB {
+        return do_netvfb(state, me, a0)
+    }
+    if number == SYS_OSUM_NETVGET {
+        return do_netvget(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_NETVSET {
+        return do_netvset(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_NETVALLOW {
+        return do_netvallow(state, me, a0, a1, a2)
+    }
+    if number == sysconst.SYS_OSUM_NETGET {
+        let v: u64 = netview.view_of(state, me)
+        if v == netview.V_NONE {
+            if a0 == NG_READY {
+                return 0
+            }
+            if a0 == NG_STATE {
+                return netview.NS_NOCARRIER
+            }
+            return errno.neg(errno.E_NODEV)
+        }
+        if v == netview.V_FAKED {
+            if a0 == NG_READY {
+                return 1
+            }
+            if a0 == NG_IP {
+                return netview.FAKE_IP
+            }
+            if a0 == NG_MASK {
+                return netview.FAKE_MASK
+            }
+            if a0 == NG_GW {
+                return netview.FAKE_GW
+            }
+            if a0 == NG_MAC0 {
+                return netview.FAKE_MAC0
+            }
+            if a0 == NG_MAC1 {
+                return netview.FAKE_MAC1
+            }
+            if a0 == NG_IN || a0 == NG_OUT {
+                return 0
+            }
+            if a0 == NG_STATE {
+                return netview.NS_ONLINE
+            }
+            if a0 == NG_LINK {
+                return 1
+            }
+            if a0 == NG_SPEED {
+                return 0
+            }
+            if a0 == NG_CARDTX || a0 == NG_CARDRX {
+                return 0
+            }
+            return errno.neg(errno.E_INVAL)
+        }
+        if a0 == NG_READY {
+            if inet.ready(state) {
+                return 1
+            }
+            return 0
+        }
+        if a0 == NG_STATE {
+            return netview.link_state(state)
+        }
+        if a0 == NG_LINK {
+            if inet.carrier(state) {
+                return 1
+            }
+            return 0
+        }
+        if a0 == NG_HW {
+            return inet.hwstat(state, a1)
+        }
+        if a0 == NG_SPEED {
+            return inet.link_speed(state)
+        }
+        if !inet.ready(state) {
+            return errno.neg(errno.E_NODEV)
+        }
+        if a0 == NG_IP {
+            return inet.ip(state)
+        }
+        if a0 == NG_MASK {
+            return inet.mask(state)
+        }
+        if a0 == NG_GW {
+            return inet.gw(state)
+        }
+        if a0 == NG_MAC0 {
+            return (inet.mac_at(state, 0) << 24) | (inet.mac_at(state, 1) << 16)
+                | (inet.mac_at(state, 2) << 8) | inet.mac_at(state, 3)
+        }
+        if a0 == NG_MAC1 {
+            return (inet.mac_at(state, 4) << 8) | inet.mac_at(state, 5)
+        }
+        if a0 == NG_IN {
+            return inet.frames_in(state)
+        }
+        if a0 == NG_OUT {
+            return inet.frames_out(state)
+        }
+        if a0 == NG_CARDTX {
+            return inet.card_octets(state, 0)
+        }
+        if a0 == NG_CARDRX {
+            return inet.card_octets(state, 1)
+        }
+        if a0 >= NG_DHCPST && a0 <= NG_DHCPTRY {
+            return inet.dhcp_get(a0 - NG_DHCPST)
+        }
+        return errno.neg(errno.E_INVAL)
+    }
+    if number == SYS_OSUM_DHCPST {
+        if !perm.is_root(state, me) {
+            return errno.neg(errno.E_PERM)
+        }
+        if a0 > 6 {
+            return errno.neg(errno.E_INVAL)
+        }
+        inet.dhcp_set(a0, a1)
+        return 0
+    }
+    if number != SYS_OSUM_NETSET {
+        return sysuser.neg(errno.E_NOSYS)
+    }
+    if !perm.is_root(state, me) {
+        return errno.neg(errno.E_PERM)
+    }
+    if !inet.ready(state) {
+        return errno.neg(errno.E_NODEV)
+    }
+    if a0 == 0 {
+        if a1 != 0 || (a2 & 0xFFFFFFFF) != 0 {
+            return errno.neg(errno.E_INVAL)
+        }
+        if !inet.readdr(state, 0, 0, 0, 0, 0, 0) {
+            return errno.neg(errno.E_IO)
+        }
+        return 0
+    }
+    var praefix: u64 = 0
+    var bit: u64 = 32
+    var seen_zero: bool = false
+    while bit > 0 {
+        bit = bit - 1
+        if ((a1 >> bit) & 1) != 0 {
+            if seen_zero {
+                return errno.neg(errno.E_INVAL)
+            }
+            praefix = praefix + 1
+        } else {
+            seen_zero = true
+        }
+    }
+    if !inet.readdr(state, (a0 >> 24) & 255, (a0 >> 16) & 255,
+        (a0 >> 8) & 255, a0 & 255, praefix, a2 & 0xFFFFFFFF) {
+        return errno.neg(errno.E_IO)
+    }
+    return 0
+}
+
+// ============================================================ RUNDE K13
+
+fn kill_allowed(state: u64, me: u64, pid: u64) -> bool {
+    if perm.is_root(state, me) {
+        return true
+    }
+    if pid == 0 || (pid >> 63) != 0 {
+        return true // Gruppen: `signal.do_kill` filtert selbst
+    }
+    let t: u64 = sched.find_pid(state, pid)
+    if t >= kstate.MAX_TASKS {
+        return true
+    }
+    return perm.may_signal(state, me, t)
+}
+const SCM_RIGHTS: u64 = 1
+const MSG_CMSG_CLOEXEC: u64 = 1073741824
+
+// ---------------------------------------------------------- die Weichen
+
+fn usock_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return unixsock.USOCK_MAX
+    }
+    if file.open_kind(state, of) != file.K_USOCK {
+        return unixsock.USOCK_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+fn shm_of(state: u64, me: u64, fd: u64) -> u64 {
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return unixsock.USHM_MAX
+    }
+    if file.open_kind(state, of) != file.K_SHM {
+        return unixsock.USHM_MAX
+    }
+    return file.open_ino(state, of)
+}
+
+// ------------------------------------------------------------- socket()
+
+fn do_usocket(state: u64, me: u64, kind: u64, protocol: u64) -> u64 {
+    let base: u64 = kind & 0xFF
+    // r731: SOCK_DGRAM on AF_UNIX (bind/sendto/connect by path); everything else is refused honestly
+    if base != SOCK_STREAM && base != sysconst.SOCK_DGRAM {
+        return sysuser.neg(errno.E_PROTONOSUPPORT)
+    }
+    if protocol != 0 {
+        return sysuser.neg(errno.E_PROTONOSUPPORT)
+    }
+    var ukind: u64 = unixsock.UK_STREAM
+    if base == sysconst.SOCK_DGRAM {
+        ukind = unixsock.UK_DGRAM
+    }
+    let si: u64 = unixsock.sock_new(state, ukind)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let of: u64 = file.open_alloc(state, file.K_USOCK, si, sysconst.O_RDWR)
+    if of >= file.MAX_OPEN {
+        unixsock.sock_free(state, si)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fd: u64 = file.fd_alloc(state, me, 0)
+    if fd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.sock_free(state, si)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fd, of)
+    return fd
+}
+
+// --------------------------------------------------- bind/listen/connect
+
+fn do_ubind(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var plen: u64 = 0
+    let pfl: u64 = unixsock.scratch_lock(state)
+    let r: u64 = sysfd.sa_un(state, me, addr, len, &plen)
+    if errno.is_error(r) {
+        unixsock.scratch_unlock(state, pfl)
+        return r
+    }
+    var b: u64 = 0
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        b = unixsock.bind_dgram(state, si, sysconst.WL_PATH + 2, plen)
+    } else {
+        b = unixsock.bind_path(state, si, sysconst.WL_PATH + 2, plen)
+    }
+    unixsock.scratch_unlock(state, pfl)
+    if b != 0 {
+        return sysuser.neg(b)
+    }
+    return 0
+}
+
+fn do_ulisten(state: u64, me: u64, fd: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let r: u64 = unixsock.listen_on(state, si)
+    if r != 0 {
+        return sysuser.neg(r)
+    }
+    return 0
+}
+
+fn do_uconnect(state: u64, me: u64, fd: u64, addr: u64, len: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    var plen: u64 = 0
+    let pfl: u64 = unixsock.scratch_lock(state)
+    let r: u64 = sysfd.sa_un(state, me, addr, len, &plen)
+    if errno.is_error(r) {
+        unixsock.scratch_unlock(state, pfl)
+        return r
+    }
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        // r731: a datagram connect() just picks the default destination
+        let dst: u64 = unixsock.find_dgram(state, sysconst.WL_PATH + 2, plen)
+        if dst >= unixsock.USOCK_MAX {
+            unixsock.scratch_unlock(state, pfl)
+            return sysuser.neg(errno.E_CONNREFUSED)
+        }
+        unixsock.connect_dgram(state, si, dst)
+        unixsock.scratch_unlock(state, pfl)
+        return 0
+    }
+    let lst: u64 = unixsock.find_listener(state, sysconst.WL_PATH + 2, plen)
+    unixsock.scratch_unlock(state, pfl)
+    if lst >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_CONNREFUSED)
+    }
+    let c: u64 = unixsock.connect_to(state, si, lst)
+    if c != 0 {
+        return sysuser.neg(c)
+    }
+    sched.poll_kick(state)
+    var waited: u64 = 0
+    while waited < sysconst.NET_ROUNDS {
+        if unixsock.sock_state(state, si) == unixsock.S_CONNECTED {
+            return 0
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return sysuser.neg(errno.E_AGAIN)
+}
+
+fn do_uaccept(state: u64, me: u64, fd: u64, flags: u64) -> u64 {
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let nb: bool = (flags & sysconst.SOCK_NONBLOCK) != 0
+    var waited: u64 = 0
+    var got: u64 = unixsock.USOCK_MAX
+    while got >= unixsock.USOCK_MAX {
+        got = unixsock.accept_from(state, si)
+        if got >= unixsock.USOCK_MAX {
+            if nb {
+                return sysuser.neg(errno.E_AGAIN)
+            }
+            if waited >= sysconst.NET_ROUNDS {
+                return sysuser.neg(errno.E_AGAIN)
+            }
+            waited = waited + 1
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    let of: u64 = file.open_alloc(state, file.K_USOCK, got, sysconst.O_RDWR)
+    if of >= file.MAX_OPEN {
+        unixsock.sock_free(state, got)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let nfd: u64 = file.fd_alloc(state, me, 0)
+    if nfd >= file.MAX_FD {
+        file.open_unref(state, of)
+        unixsock.sock_free(state, got)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, nfd, of)
+    return nfd
+}
+const MH_CONTROL: u64 = 32
+
+fn do_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    let nlof: u64 = sysevent.nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return sysevent.nl_sendmsg(state, me, nlof, mh)
+    }
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, mh, sysconst.MH_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if unixsock.peer_gone(state, si) {
+        return sysuser.neg(errno.E_PIPE)
+    }
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        return sendmsg_frame(state, me, fd, si, mh, flags)
+    }
+    let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
+    let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
+    let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
+    var passed: u64 = 0
+    if ctl != 0 && ctllen >= 16 {
+        if !proc.user_ok(state, me, ctl, ctllen) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let clen: u64 = sysuser.get64u(state, me, ctl)
+        let level: u64 = sysuser.get32(state, me, ctl + 8)
+        let ctype: u64 = sysuser.get32(state, me, ctl + 12)
+        if level == sysconst.SOL_SOCKET && ctype == SCM_RIGHTS && clen >= 16
+            && clen <= ctllen {
+            let nfds: u64 = (clen - 16) / 4
+            if nfds > unixsock.FDQ_MAX {
+                return sysuser.neg(errno.E_INVAL)
+            }
+            // All-or-nothing: validate every descriptor and wait for queue room BEFORE pushing the first
+            // (a half-pushed message retried by the caller would duplicate descriptors).
+            var chk: u64 = 0
+            while chk < nfds {
+                if sysuser.of_of(state, me, sysuser.get32(state, me, ctl + 16 + chk * 4)) >= file.MAX_OPEN {
+                    return sysuser.neg(errno.E_BADF)
+                }
+                chk = chk + 1
+            }
+            var qwait: u64 = 0
+            while unixsock.fd_room(state, si) < nfds {
+                if unixsock.peer_gone(state, si) {
+                    return sysuser.neg(errno.E_PIPE)
+                }
+                if (flags & sysconst.MSG_DONTWAIT) != 0 || qwait >= sysconst.NET_ROUNDS {
+                    return sysuser.neg(errno.E_AGAIN)
+                }
+                qwait = qwait + 1
+                sched.sleep_ticks(state, 1)
+            }
+            var k: u64 = 0
+            while k < nfds {
+                let sfd: u64 = sysuser.get32(state, me, ctl + 16 + k * 4)
+                let sof: u64 = sysuser.of_of(state, me, sfd)
+                let pr: u64 = unixsock.push_fd(state, si, sof)
+                if pr != 0 {
+                    return sysuser.neg(pr)
+                }
+                passed = passed + 1
+                k = k + 1
+            }
+        }
+    }
+    var sent: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let base: u64 = sysuser.get64u(state, me, iov + v * 16)
+        let blen: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
+        var off: u64 = 0
+        while off < blen {
+            var chunk: u64 = blen - off
+            if chunk > sysconst.MSG_MAX {
+                chunk = sysconst.MSG_MAX
+            }
+            let free: u64 = unixsock.room(state,
+                unixsock.sock_peer(state, si))
+            if free == 0 {
+                if (flags & sysconst.MSG_DONTWAIT) != 0 {
+                    if sent != 0 {
+                        return sent
+                    }
+                    return sysuser.neg(errno.E_AGAIN)
+                }
+                sched.sleep_ticks(state, 1)
+            } else {
+                if chunk > free {
+                    chunk = free
+                }
+                let w: u64 = sysfd.wl_send(state, me, si, base + off, chunk, false)
+                if w == sysuser.neg(errno.E_FAULT) {
+                    return w
+                }
+                if errno.is_error(w) {
+                    return sysuser.neg(w)
+                }
+                sent = sent + w
+                off = off + w
+                sched.poll_kick(state)
+            }
+        }
+        v = v + 1
+    }
+    return sent
+}
+
+const FRAME_MAX: u64 = 3600
+const MSG_TRUNC_FLAG: u64 = 32
+const MSG_CTRUNC_FLAG: u64 = 8
+
+fn frame_nonblock(state: u64, me: u64, fd: u64, flags: u64) -> bool {
+    if (flags & sysconst.MSG_DONTWAIT) != 0 {
+        return true
+    }
+    let of: u64 = sysuser.of_of(state, me, fd)
+    if of >= file.MAX_OPEN {
+        return false
+    }
+    return (file.open_flags(state, of) & sysconst.UB_O_NONBLOCK) != 0
+}
+
+fn sendmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> u64 {
+    let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
+    let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
+    if iovlen > 1024 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var total: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        total = total + sysuser.get64u(state, me, iov + v * 16 + 8)
+        if total > FRAME_MAX {
+            return sysuser.neg(errno.E_MSGSIZE)
+        }
+        v = v + 1
+    }
+    let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
+    var nfds: u64 = 0
+    if ctl != 0 && ctllen >= 16 {
+        if !proc.user_ok(state, me, ctl, ctllen) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let clen: u64 = sysuser.get64u(state, me, ctl)
+        if sysuser.get32(state, me, ctl + 8) == sysconst.SOL_SOCKET && sysuser.get32(state, me, ctl + 12) == SCM_RIGHTS && clen >= 16 && clen <= ctllen {
+            nfds = (clen - 16) / 4
+            if nfds > unixsock.FDQ_MAX {
+                return sysuser.neg(errno.E_INVAL)
+            }
+            var chk: u64 = 0
+            while chk < nfds {
+                if sysuser.of_of(state, me, sysuser.get32(state, me, ctl + 16 + chk * 4)) >= file.MAX_OPEN {
+                    return sysuser.neg(errno.E_BADF)
+                }
+                chk = chk + 1
+            }
+        }
+    }
+    let nonblock: bool = frame_nonblock(state, me, fd, flags)
+    var waits: u64 = 0
+    while true {
+        if unixsock.peer_gone(state, si) {
+            return sysuser.neg(errno.E_PIPE)
+        }
+        if unixsock.dgram_room(state, unixsock.sock_peer(state, si)) >= total && unixsock.fd_room(state, si) >= nfds {
+            let fl: u64 = unixsock.scratch_lock(state)
+            var ok: bool = true
+            var off: u64 = 0
+            v = 0
+            while v < iovlen && ok {
+                let blen: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
+                if !sysuser.copy_in(state, me, state + sysconst.WL_SCRATCH + off, sysuser.get64u(state, me, iov + v * 16), blen) {
+                    ok = false
+                }
+                off = off + blen
+                v = v + 1
+            }
+            if !ok {
+                unixsock.scratch_unlock(state, fl)
+                return sysuser.neg(errno.E_FAULT)
+            }
+            var k: u64 = 0
+            while k < nfds {
+                unixsock.push_fd(state, si, sysuser.of_of(state, me, sysuser.get32(state, me, ctl + 16 + k * 4)))
+                k = k + 1
+            }
+            let w: u64 = unixsock.send_dgram(state, si, sysconst.WL_SCRATCH, total)
+            unixsock.scratch_unlock(state, fl)
+            if errno.is_error(w) {
+                return sysuser.neg(w)
+            }
+            sched.poll_kick(state)
+            return w
+        }
+        if nonblock || waits >= sysconst.NET_ROUNDS {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        waits = waits + 1
+        sched.sleep_ticks(state, 1)
+    }
+    return 0
+}
+
+fn recvmsg_frame(state: u64, me: u64, fd: u64, si: u64, mh: u64, flags: u64) -> u64 {
+    let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
+    let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
+    if iovlen > 1024 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let nonblock: bool = frame_nonblock(state, me, fd, flags)
+    var waited: u64 = 0
+    while unixsock.waiting(state, si) < unixsock.DGRAM_HDR {
+        if unixsock.peer_gone(state, si) {
+            return 0
+        }
+        if nonblock || waited >= sysconst.NET_ROUNDS {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    var cap: u64 = 0
+    var v: u64 = 0
+    while v < iovlen {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        cap = cap + sysuser.get64u(state, me, iov + v * 16 + 8)
+        v = v + 1
+    }
+    if cap > FRAME_MAX {
+        cap = FRAME_MAX
+    }
+    let mlen: u64 = unixsock.dgram_len(state, si)
+    let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
+    if ctl != 0 && ctllen != 0 && !proc.user_ok(state, me, ctl, ctllen) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var room: u64 = 0
+    if ctl != 0 && ctllen >= 20 {
+        room = (ctllen - 16) / 4
+    }
+    var rflags: u64 = 0
+    var n: u64 = 0
+    while unixsock.fd_at_head(state, si) {
+        let sof: u64 = unixsock.pop_fd(state, si)
+        if sof >= file.MAX_OPEN {
+            break
+        }
+        var kept: bool = false
+        if n < room {
+            let nfd: u64 = file.fd_alloc(state, me, 0)
+            if nfd < file.MAX_FD {
+                file.fd_set(state, me, nfd, sof)
+                if (flags & MSG_CMSG_CLOEXEC) != 0 {
+                    sysfd.cx_put(state, me, nfd, true)
+                }
+                if sysuser.put32(state, me, ctl + 16 + n * 4, nfd) {
+                    n = n + 1
+                    kept = true
+                }
+            }
+        }
+        if !kept {
+            file.open_unref(state, sof)
+            rflags = rflags | MSG_CTRUNC_FLAG
+        }
+    }
+    var ctlout: u64 = 0
+    if n != 0 {
+        ctlout = 16 + n * 4
+        if !sysuser.put64(state, me, ctl, ctlout) || !sysuser.put32(state, me, ctl + 8, sysconst.SOL_SOCKET) || !sysuser.put32(state, me, ctl + 12, SCM_RIGHTS) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+    }
+    if !sysuser.put64(state, me, mh + sysconst.MH_CONTROLLEN, ctlout) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if mlen > cap {
+        rflags = rflags | MSG_TRUNC_FLAG
+    }
+    if !sysuser.put32(state, me, mh + sysconst.MH_FLAGS, rflags) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let fl: u64 = unixsock.scratch_lock(state)
+    let got: u64 = unixsock.recv_dgram(state, si, sysconst.WL_SCRATCH, cap)
+    var ok: bool = true
+    var off: u64 = 0
+    v = 0
+    while v < iovlen && off < got && ok {
+        var chunk: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
+        if chunk > got - off {
+            chunk = got - off
+        }
+        if !sysuser.copy_out(state, me, sysuser.get64u(state, me, iov + v * 16), state + sysconst.WL_SCRATCH + off, chunk) {
+            ok = false
+        }
+        off = off + chunk
+        v = v + 1
+    }
+    unixsock.scratch_unlock(state, fl)
+    if !ok {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return got
+}
+
+fn do_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    let nlof: u64 = sysevent.nl_of(state, me, fd)
+    if nlof < file.MAX_OPEN {
+        return sysevent.nl_recvmsg(state, me, nlof, mh, flags)
+    }
+    let si: u64 = usock_of(state, me, fd)
+    if si >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if !proc.user_ok(state, me, mh, sysconst.MH_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if unixsock.sock_kind(state, si) == unixsock.UK_DGRAM {
+        return recvmsg_frame(state, me, fd, si, mh, flags)
+    }
+    let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
+    let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
+    var waited: u64 = 0
+    while unixsock.waiting(state, si) == 0 {
+        if unixsock.peer_gone(state, si) {
+            return 0
+        }
+        if (flags & sysconst.MSG_DONTWAIT) != 0 {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        if waited >= sysconst.NET_ROUNDS {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+        waited = waited + 1
+        sched.sleep_ticks(state, 1)
+    }
+    var ctlout: u64 = 0
+    let ctl: u64 = sysuser.get64u(state, me, mh + MH_CONTROL)
+    let ctllen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_CONTROLLEN)
+    if ctl != 0 && ctllen >= 20 && unixsock.fd_waiting(state, si) != 0 {
+        if !proc.user_ok(state, me, ctl, ctllen) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        var room: u64 = (ctllen - 16) / 4
+        if room > unixsock.FDQ_MAX {
+            room = unixsock.FDQ_MAX
+        }
+        var n: u64 = 0
+        while n < room && unixsock.fd_waiting(state, si) != 0 {
+            let sof: u64 = unixsock.pop_fd(state, si)
+            if sof >= file.MAX_OPEN {
+                n = room
+            } else {
+                let nfd: u64 = file.fd_alloc(state, me, 0)
+                if nfd >= file.MAX_FD {
+                    file.open_unref(state, sof)
+                    n = room
+                } else {
+                    file.fd_set(state, me, nfd, sof)
+                    if (flags & MSG_CMSG_CLOEXEC) != 0 {
+                        sysfd.cx_put(state, me, nfd, true)
+                    }
+                    if !sysuser.put32(state, me, ctl + 16 + n * 4, nfd) {
+                        return sysuser.neg(errno.E_FAULT)
+                    }
+                    n = n + 1
+                }
+            }
+        }
+        if n != 0 {
+            ctlout = 16 + n * 4
+            if !sysuser.put64(state, me, ctl, ctlout) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            if !sysuser.put32(state, me, ctl + 8, sysconst.SOL_SOCKET) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+            if !sysuser.put32(state, me, ctl + 12, SCM_RIGHTS) {
+                return sysuser.neg(errno.E_FAULT)
+            }
+        }
+    }
+    if !sysuser.put64(state, me, mh + sysconst.MH_CONTROLLEN, ctlout) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    // MSG_CTRUNC (8): descriptors are still queued because the control buffer was too small.
+    var rflags: u64 = 0
+    if ctl != 0 && unixsock.fd_waiting(state, si) != 0 {
+        rflags = 8
+    }
+    if !sysuser.put32(state, me, mh + sysconst.MH_FLAGS, rflags) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var got: u64 = 0
+    var v: u64 = 0
+    while v < iovlen && unixsock.waiting(state, si) != 0 {
+        if !proc.user_ok(state, me, iov + v * 16, 16) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        let base: u64 = sysuser.get64u(state, me, iov + v * 16)
+        let blen: u64 = sysuser.get64u(state, me, iov + v * 16 + 8)
+        var off: u64 = 0
+        while off < blen && unixsock.waiting(state, si) != 0 {
+            var chunk: u64 = blen - off
+            if chunk > sysconst.MSG_MAX {
+                chunk = sysconst.MSG_MAX
+            }
+            let r: u64 = sysfd.wl_recv(state, me, si, base + off, chunk, false)
+            if r == sysuser.neg(errno.E_FAULT) {
+                return r
+            }
+            if errno.is_error(r) {
+                return sysuser.neg(r)
+            }
+            if r == 0 {
+                off = blen
+            } else {
+                got = got + r
+                off = off + r
+            }
+        }
+        v = v + 1
+    }
+    return got
+}
+
+// socketpair(AF_UNIX, SOCK_STREAM): two connected local sockets. (SOCK_DGRAM does not exist for local sockets in this kernel.)
+fn do_socketpair(state: u64, me: u64, domain: u64, kind: u64, protocol: u64, sv: u64) -> u64 {
+    if domain != sysconst.AF_UNIX {
+        return sysuser.neg(errno.E_AFNOSUPPORT)
+    }
+    if ((kind & 0xFF) != SOCK_STREAM && (kind & 0xFF) != sysconst.SOCK_DGRAM && (kind & 0xFF) != SOCK_SEQPACKET) || protocol != 0 {
+        return sysuser.neg(errno.E_PROTONOSUPPORT)
+    }
+    if !proc.user_ok(state, me, sv, 8) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var uk: u64 = unixsock.UK_STREAM
+    if (kind & 0xFF) == sysconst.SOCK_DGRAM || (kind & 0xFF) == SOCK_SEQPACKET {
+        uk = unixsock.UK_DGRAM
+    }
+    let a: u64 = unixsock.sock_new(state, uk)
+    if a >= unixsock.USOCK_MAX {
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let b: u64 = unixsock.sock_new(state, uk)
+    if b >= unixsock.USOCK_MAX {
+        unixsock.sock_free(state, a)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let c: u64 = unixsock.connect_pair(state, a, b)
+    if c != 0 {
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return sysuser.neg(c)
+    }
+    let oa: u64 = file.open_alloc(state, file.K_USOCK, a, sysconst.O_RDWR)
+    if oa >= file.MAX_OPEN {
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let ob: u64 = file.open_alloc(state, file.K_USOCK, b, sysconst.O_RDWR)
+    if ob >= file.MAX_OPEN {
+        file.open_unref(state, oa)
+        unixsock.sock_free(state, b)
+        return sysuser.neg(errno.E_NFILE)
+    }
+    let fa: u64 = file.fd_alloc(state, me, 0)
+    if fa >= file.MAX_FD {
+        file.open_unref(state, oa)
+        file.open_unref(state, ob)
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fa, oa)
+    let fb: u64 = file.fd_alloc(state, me, 0)
+    if fb >= file.MAX_FD {
+        file.fd_free(state, me, fa)
+        file.open_unref(state, oa)
+        file.open_unref(state, ob)
+        unixsock.sock_free(state, a)
+        unixsock.sock_free(state, b)
+        return sysuser.neg(errno.E_MFILE)
+    }
+    file.fd_set(state, me, fb, ob)
+    if (kind & sysconst.SOCK_NONBLOCK) != 0 {
+        file.open_set_flags(state, oa, file.open_flags(state, oa) | sysconst.UB_O_NONBLOCK)
+        file.open_set_flags(state, ob, file.open_flags(state, ob) | sysconst.UB_O_NONBLOCK)
+    }
+    if !sysuser.put32(state, me, sv, fa) || !sysuser.put32(state, me, sv + 4, fb) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return 0
+}

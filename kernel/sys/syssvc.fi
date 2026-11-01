@@ -1,0 +1,1645 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import gfx.gfx
+import lib.kstate
+import sched.sched
+import sched.proc
+import arch.cpu
+import fs.fsgrow
+import drv.hid.kbd
+import lib.errno
+import fs.file
+import ipc.uio
+import ipc.cap
+import ipc.handle
+import arch.x86_64.hv
+import pwr.pmon
+import sched.time
+import bus.pcidbg
+import drv.net.iwl_dbg
+import net.wlan_reload
+import net.wlan_knobs
+import ipc.perm
+import sched.origin
+import apprights.policy
+import klog
+import diag.crash
+import pwr.pwr
+import pwr.batt
+import acpi.acpiev
+import usb.usb
+import block.wechsel
+import drv.snd.codecstat
+import sys.sysconst
+import sys.sysuser
+import sys.sysfile
+import sys.sysproc
+
+export {
+    codec_call, do_cpustat, do_dbg, do_hotkey, do_klog, do_krach, do_origin, do_pmon, do_session_lock, handle_call, is_k13, kbd_call, late_call, pwr_call, usb_call, vm_call, wechsel_call
+}
+
+const SYS_VM_RUN: u64 = 1501
+const SYS_VM_STAT: u64 = 1502
+const SYS_VM_KILL: u64 = 1503
+const HND_VERSION: u64 = 2200
+const HND_FDH: u64 = 2201
+const HND_RIGHTS: u64 = 2202
+const HND_BEGIN: u64 = 2203
+const HND_OBJECT: u64 = 2204
+const HND_CANCEL: u64 = 2205 // (token) -> 0
+const HND_END: u64 = 2206
+const HND_STATE: u64 = 2207
+const HND_DUP: u64 = 2208
+const HND_PASS: u64 = 2209
+const HND_COUNT: u64 = 2210
+const HND_OBJINFO: u64 = 2211
+const HND_MAXNR: u64 = 2211
+const OG_GET: u64 = 0
+const OG_SET: u64 = 1
+const OG_RGET: u64 = 3
+const OG_RSET: u64 = 2
+// W-APPRIGHTS AR-2: the CEILING of an app = what its manifest (`perm=`) declares it may ever get.
+//   ORIGIN(5, name, 0)     -> ceiling mask, or policy.CEIL_NONE (4096) when none is registered (anyone may read)
+//   ORIGIN(4, name, mask)  -> 0; register the ceiling (lowering it also clamps the grants). ONLY an unlabelled caller.
+//   ORIGIN(2, ...) above a registered ceiling -> -EPERM
+const OG_CSET: u64 = 4
+const OG_CGET: u64 = 5
+const HK_SEQ_Q: u64 = 0
+const HK_KEY_Q: u64 = 1
+const HK_NS_Q: u64 = 2
+const HK_DOWN_Q: u64 = 3
+
+// ---------------------------------------------------------- RUNDE K13
+const SYS_ACCESS: u64 = 21
+const SYS_CHMOD: u64 = 90
+const SYS_FCHMOD: u64 = 91
+const SYS_CHOWN: u64 = 92
+const SYS_FCHOWN: u64 = 93
+const SYS_LCHOWN: u64 = 94
+const SYS_UMASK: u64 = 95
+const SYS_GETUID: u64 = 102
+const SYS_GETGID: u64 = 104
+const SYS_SETUID: u64 = 105
+const SYS_SETGID: u64 = 106
+const SYS_GETEUID: u64 = 107
+const SYS_GETEGID: u64 = 108
+const SYS_SETREUID: u64 = 113
+const SYS_SETREGID: u64 = 114
+const SYS_SETRESUID: u64 = 117
+const SYS_GETRESUID: u64 = 118
+const SYS_SETRESGID: u64 = 119
+const SYS_GETRESGID: u64 = 120
+const SYS_REBOOT: u64 = 169
+const SYS_FCHOWNAT: u64 = 260
+const SYS_FCHMODAT: u64 = 268
+const SYS_FACCESSAT: u64 = 269
+const SYS_SENDFILE: u64 = 40
+const SYS_MEMBARRIER: u64 = 324
+const SYS_FACCESSAT2: u64 = 439
+
+const SYS_OSUM_USERINFO: u64 = 1600
+// Bring the SATA (AHCI) disk up on demand: 0 = nothing found, else the size in blocks.
+// Any user; called by the installer when it opens, so /dev/sda exists on
+// every boot entry without the `sata` word (r343).
+const SYS_OSUM_DISKUP: u64 = 1601
+
+// ============================================= RUNDE MULTIUSER
+const SYS_GETGROUPS: u64 = 115
+const SYS_SETGROUPS: u64 = 116
+const SYS_OSUM_MUSTAT: u64 = 1200
+
+const SYS_OSUM_USBSTAT: u64 = 1701
+const SYS_OSUM_USBPULL: u64 = 1702
+const WX_COUNT: u64 = 0
+const WX_DEV: u64 = 1
+const WX_MNT: u64 = 2
+const WX_BLOCKS: u64 = 3
+const WX_PATHCH: u64 = 4
+const WX_EJECT: u64 = 5
+const WX_EVENTS: u64 = 6
+const WX_KOMMT: u64 = 7
+const WX_GEHT: u64 = 8
+const WX_AUS: u64 = 9
+const SYS_OSUM_PWRSET: u64 = 1751
+const KB_GET: u64 = 0
+const KB_SET: u64 = 1
+const KB_COUNT: u64 = 2
+const KB_SWITCH: u64 = 3
+
+const KL_SEQ: u64 = 0
+const KL_FIRST: u64 = 1
+const KL_LOST: u64 = 2
+const KL_FILT: u64 = 3
+const KL_MIN: u64 = 4
+const KL_SER: u64 = 5
+const KL_NENT: u64 = 6
+const KL_LINE: u64 = 10
+const KL_SETMIN: u64 = 20
+const KL_SETSER: u64 = 21
+const KL_WRITE: u64 = 22
+const KL_CRASH: u64 = 30
+
+const CS_COUNT: u64 = 0
+const CS_ONLINE: u64 = 1
+const CS_UP: u64 = 2
+const CS_APICID: u64 = 3
+const CS_TICKS: u64 = 4
+const CS_IDLE: u64 = 5
+const CS_SWITCHES: u64 = 6
+const CS_PICKS: u64 = 7
+const CS_CURPID: u64 = 8
+const CS_CYC: u64 = 9
+const CS_IDLECYC: u64 = 10
+
+// kind 1, above the six counters of `pmon.PT_*`.
+const PT_PID: u64 = 6
+const PT_ALIVE: u64 = 7 // 1 = the slot still holds a live task
+const PT_KIND: u64 = 8 // `sched.K_*` -- which of them is the idle task
+const PT_STATE: u64 = 9 // `sched.S_*`
+const PT_SCHEDTICKS: u64 = 10 // what the SCHEDULER counted, unfiltered
+
+// kind 5, what may be set.
+const PS_ROLLDAY: u64 = 0 // move the day mark, after the file was written
+const PS_RESET: u64 = 1 // throw the split away, keep the measured floor
+const PS_EVERY: u64 = 2 // ticks between two samples
+const PS_ONOFF: u64 = 3 // switch the accounting off and on again
+
+const PG_READY: u64 = 0
+const PG_PROFILE: u64 = 1
+const PG_CAPS: u64 = 2
+const PG_RATIOS: u64 = 3
+const PG_RATIOSRC: u64 = 4
+const PG_PERFCTL: u64 = 5
+const PG_PERFBACK: u64 = 6
+const PG_HWPREQ: u64 = 7
+const PG_HWPBACK: u64 = 8
+const PG_MISC: u64 = 9
+const PG_MISCBACK: u64 = 10
+const PG_MISCORIG: u64 = 11
+const PG_CSTATE: u64 = 12
+const PG_MWAITS: u64 = 13
+const PG_HLTS: u64 = 14
+const PG_IDLERUNS: u64 = 15
+const PG_TEMP: u64 = 16
+const PG_TEMPOK: u64 = 17
+const PG_TJMAX: u64 = 18
+const PG_THROTTLES: u64 = 19
+const PG_THROTTLED: u64 = 20
+const PG_APPLIES: u64 = 21
+const PG_SWITCHES: u64 = 22
+const PG_MWAITHINT: u64 = 23
+const PG_BATPRESENT: u64 = 24
+const PG_BATPERCENT: u64 = 25
+const PG_BATMINUTES: u64 = 26
+const PG_BATSTATE: u64 = 27
+const PG_BATRATE: u64 = 28
+const PG_BATREMAIN: u64 = 29
+const PG_BATFULL: u64 = 30
+const PG_BATDESIGN: u64 = 31
+const PG_BATVOLT: u64 = 32
+const PG_ACOK: u64 = 33
+const PG_AC: u64 = 34
+const PG_BATWHY: u64 = 35
+const PG_TABLES: u64 = 36
+const PG_TZRAW: u64 = 37
+const PG_BRIGHT: u64 = 38
+const PG_BLANKED: u64 = 39
+const PG_BLANKS: u64 = 40
+const PG_BATWARN: u64 = 41
+const PG_BATLOW: u64 = 42
+const PG_BATUNIT: u64 = 43
+const PG_LIMIT: u64 = 44
+const PG_EVREADY: u64 = 45
+const PG_EVWHY: u64 = 46
+const PG_LIDOK: u64 = 47
+const PG_LID: u64 = 48
+const PG_EVENTS: u64 = 49
+const PG_EVWAKE: u64 = 50
+const PG_EVGPE: u64 = 51
+const PG_EVSCI: u64 = 52
+const PG_EVCHANGE: u64 = 53
+const PG_BTN: u64 = 54
+// L-007: PG_BLANKAFTER is the seconds of idle time until the screen goes dark (0 = never), PS_BLANKAFTER sets
+// it. /bin/powerd writes it per power source (battery / mains) from /etc/power.conf.
+const PG_BLANKAFTER: u64 = 55
+const PG_BATVALID: u64 = 56
+const PG_COUNT: u64 = 57
+
+const PS_PROFILE: u64 = 0
+const PS_BRIGHT: u64 = 1
+const PS_BLANK: u64 = 2
+const PS_BLANKAFTER: u64 = 3
+// L-005..L-007 gate only: lid | pct<<8 | state<<16 | mains<<24 into the fake laptop (needs `evfake`)
+const PS_INJECT: u64 = 4
+const CDC_FRAME: u64 = 0
+const CDC_REJECT: u64 = 1
+const CDC_SEEN: u64 = 2
+const CDC_GET: u64 = 3
+const CDC_RESET: u64 = 4
+const CDG_FRAMES: u64 = 0
+const CDG_REJECTS: u64 = 1
+const CDG_LASTERR: u64 = 2
+const CDG_W: u64 = 3
+const CDG_H: u64 = 4
+const CDG_PROFILE: u64 = 5
+const CDG_MB: u64 = 6
+
+fn codec_call(state: u64, was: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    if was == CDC_FRAME {
+        codecstat.cd_frame(state)
+        return 0
+    }
+    if was == CDC_REJECT {
+        codecstat.cd_reject(state, a1)
+        return 0
+    }
+    if was == CDC_SEEN {
+        codecstat.cd_seen(state, a1, a2, a3, 0)
+        return 0
+    }
+    if was == CDC_RESET {
+        codecstat.cd_reset(state)
+        return 0
+    }
+    if was == CDC_GET {
+        if a1 == CDG_FRAMES { return codecstat.cd_frames(state) }
+        if a1 == CDG_REJECTS { return codecstat.cd_rejects(state) }
+        if a1 == CDG_LASTERR { return codecstat.cd_lasterr(state) }
+        if a1 == CDG_W { return codecstat.cd_w(state) }
+        if a1 == CDG_H { return codecstat.cd_h(state) }
+        if a1 == CDG_PROFILE { return codecstat.cd_profile(state) }
+        if a1 == CDG_MB { return codecstat.cd_mb(state) }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn usb_call(state: u64, number: u64, a0: u64) -> u64 {
+    if number == SYS_OSUM_USBSTAT {
+        return usb.stat(state, a0)
+    }
+    if number == SYS_OSUM_USBPULL {
+        usb.unplug_now(state)
+        return usb.unplugs(state)
+    }
+    return sysuser.neg(errno.E_NOSYS)
+}
+
+fn wechsel_call(state: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    if a0 == WX_COUNT {
+        return wechsel.anzahl(state)
+    }
+    if a0 == WX_EVENTS {
+        return wechsel.ereignisse(state)
+    }
+    if a0 == WX_KOMMT {
+        return wechsel.angesteckt(state)
+    }
+    if a0 == WX_GEHT {
+        return wechsel.abgezogen(state)
+    }
+    if a0 == WX_AUS {
+        return wechsel.ausgeworfen(state)
+    }
+    if a1 >= wechsel.MAX_TRAEGER {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if a0 == WX_DEV {
+        return wechsel.traeger_dev(state, a1)
+    }
+    if a0 == WX_MNT {
+        return wechsel.traeger_mnt(state, a1)
+    }
+    if a0 == WX_BLOCKS {
+        return wechsel.traeger_bloecke(state, a1)
+    }
+    if a0 == WX_PATHCH {
+        let p: u64 = wechsel.traeger_pfad(state, a1)
+        if p == 0 || a2 >= 16 {
+            return 0
+        }
+        return kstate.get8(p + a2)
+    }
+    if a0 == WX_EJECT {
+        return wechsel.auswerfen(state, a1)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn late_call(state: u64, me: u64, number: u64, frame: u64) -> u64 {
+    let a0: u64 = sysuser.fget(frame, sysconst.F_RDI)
+    let a1: u64 = sysuser.fget(frame, sysconst.F_RSI)
+    let a2: u64 = sysuser.fget(frame, sysconst.F_RDX)
+    let a3: u64 = sysuser.fget(frame, sysconst.F_R10)
+    // ROUND A11Y-2: the tree, through the same seam as the WIG calls.
+    if number >= sysconst.AX_BASE && number <= sysconst.AX_MAXNR {
+        return gfx.sys_ax(state, me, number, a0, a1, a2)
+    }
+    if number >= sysconst.WIG_BASE && number <= sysconst.WIG_MAXNR {
+        return gfx.sys_wig(state, me, number, a0, a1, a2, a3,
+            sysuser.fget(frame, sysconst.F_R8))
+    }
+    return k13_call(state, me, number, a0, a1, a2, a3)
+}
+
+fn is_k13(number: u64) -> bool {
+    if number == SYS_ACCESS || number == SYS_UMASK || number == SYS_REBOOT {
+        return true
+    }
+    if number >= SYS_CHMOD && number <= SYS_LCHOWN {
+        return true
+    }
+    if number >= SYS_GETUID && number <= SYS_GETEGID {
+        return true
+    }
+    if number >= SYS_SETREUID && number <= SYS_GETRESGID {
+        return true
+    }
+    if number == SYS_FCHOWNAT || number == SYS_FCHMODAT
+        || number == SYS_FACCESSAT {
+        return true
+    }
+    if number == SYS_SENDFILE || number == SYS_MEMBARRIER
+        || number == SYS_FACCESSAT2 {
+        return true
+    }
+    if number == SYS_GETGROUPS || number == SYS_SETGROUPS {
+        return true
+    }
+    if number == SYS_OSUM_MUSTAT {
+        return true
+    }
+    if number == SYS_OSUM_DISKUP {
+        return true
+    }
+    return number == SYS_OSUM_USERINFO
+}
+
+fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
+    a3: u64) -> u64 {
+    if number == SYS_GETUID {
+        return sysproc.do_getid(state, me, sched.T_UID)
+    }
+    if number == SYS_GETEUID {
+        return sysproc.do_getid(state, me, sched.T_EUID)
+    }
+    if number == SYS_GETGID {
+        return sysproc.do_getid(state, me, sched.T_GID)
+    }
+    if number == SYS_GETEGID {
+        return sysproc.do_getid(state, me, sched.T_EGID)
+    }
+    if number == SYS_SETUID {
+        return sysproc.do_setuid(state, me, a0)
+    }
+    if number == SYS_SETGID {
+        return sysproc.do_setgid(state, me, a0)
+    }
+    if number == SYS_SETREUID {
+        return sysproc.do_setre(state, me, a0, a1, sched.T_UID, sched.T_EUID,
+            sched.T_SUID)
+    }
+    if number == SYS_SETREGID {
+        return sysproc.do_setre(state, me, a0, a1, sched.T_GID, sched.T_EGID,
+            sched.T_SGID)
+    }
+    if number == SYS_SETRESUID {
+        return sysproc.do_setres(state, me, a0, a1, a2, sched.T_UID, sched.T_EUID,
+            sched.T_SUID)
+    }
+    if number == SYS_SETRESGID {
+        return sysproc.do_setres(state, me, a0, a1, a2, sched.T_GID, sched.T_EGID,
+            sched.T_SGID)
+    }
+    if number == SYS_GETRESUID {
+        return sysproc.do_getres(state, me, a0, a1, a2, sched.T_UID, sched.T_EUID,
+            sched.T_SUID)
+    }
+    if number == SYS_GETRESGID {
+        return sysproc.do_getres(state, me, a0, a1, a2, sched.T_GID, sched.T_EGID,
+            sched.T_SGID)
+    }
+    if number == SYS_UMASK {
+        return sysproc.do_umask(state, me, a0)
+    }
+    if number == SYS_CHMOD {
+        return sysfile.do_chmod(state, me, a0, a1)
+    }
+    if number == SYS_FCHMOD {
+        return sysfile.do_fchmod(state, me, a0, a1)
+    }
+    if number == SYS_FCHMODAT {
+        let e1: u64 = sysfile.at_enter1(state, me, a0, a1)
+        if errno.is_error(e1) {
+            return e1
+        }
+        let r1: u64 = sysfile.do_chmod(state, me, a1, a2)
+        uio.set_atbase(state, me, 0)
+        return r1
+    }
+    if number == SYS_CHOWN || number == SYS_LCHOWN {
+        return sysfile.do_chown(state, me, a0, a1, a2)
+    }
+    if number == SYS_FCHOWN {
+        return sysfile.do_fchown(state, me, a0, a1, a2)
+    }
+    if number == SYS_FCHOWNAT {
+        let e2: u64 = sysfile.at_enter1(state, me, a0, a1)
+        if errno.is_error(e2) {
+            return e2
+        }
+        let r2: u64 = sysfile.do_chown(state, me, a1, a2, a3)
+        uio.set_atbase(state, me, 0)
+        return r2
+    }
+    if number == SYS_ACCESS {
+        return sysfile.do_access(state, me, a0, a1)
+    }
+    if number == SYS_FACCESSAT || number == SYS_FACCESSAT2 {
+        let e3: u64 = sysfile.at_enter1(state, me, a0, a1)
+        if errno.is_error(e3) {
+            return e3
+        }
+        let r3: u64 = sysfile.do_access(state, me, a1, a2)
+        uio.set_atbase(state, me, 0)
+        return r3
+    }
+    if number == SYS_SENDFILE {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if number == SYS_MEMBARRIER {
+        if a0 == 0 {
+            return 0
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if number == SYS_REBOOT {
+        return sysproc.do_reboot(state, me, a0)
+    }
+    if number == SYS_OSUM_USERINFO {
+        return sysproc.do_userinfo(state, me, a0)
+    }
+    if number == SYS_OSUM_DISKUP {
+        return sysfile.do_diskup(state, me)
+    }
+    if number == SYS_GETGROUPS {
+        return sysproc.do_getgroups(state, me, a0, a1)
+    }
+    if number == SYS_SETGROUPS {
+        return sysproc.do_setgroups(state, me, a0, a1)
+    }
+    if number == SYS_OSUM_MUSTAT {
+        return sysproc.do_mustat(state, me, a0)
+    }
+    return sysuser.neg(errno.E_NOSYS)
+}
+
+fn do_session_lock(state: u64, me: u64, op: u64, arg: u64) -> u64 {
+    let own_pid: u64 = sched.tget(state, me, sched.T_PID)
+    let sp: u64 = kstate.K11_OFF
+    if op == 0 {
+        return kstate.get(state, sp + kstate.SP_ON)
+    }
+    if op == 1 {
+        if kstate.get(state, sp + kstate.SP_ON) == 0 {
+            kstate.set(state, sp + kstate.SP_ON, 1)
+            kstate.add(state, sp + kstate.SP_LOCKS, 1)
+            // r382 LOCK SEAL: whoever turns the lock on from a program is
+            // the one program that may claim it (op 4) -- nobody else can
+            // step in between and become the locker.
+            kstate.set(state, sp + kstate.SP_SLOT, me)
+        }
+        return 0
+    }
+    if op == 2 {
+        if kstate.get(state, sp + kstate.SP_PID) != own_pid
+            || kstate.get(state, sp + kstate.SP_SLOT) != me {
+            return sysuser.neg(errno.E_PERM)
+        }
+        kstate.set(state, sp + kstate.SP_ON, 0)
+        kstate.set(state, sp + kstate.SP_PID, 0)
+        kstate.set(state, sp + kstate.SP_SLOT, 0)
+        kstate.add(state, sp + kstate.SP_UNLOCKS, 1)
+        kstate.set(state, sp + kstate.SP_LAST, time.mono_ns(state))
+        return 0
+    }
+    if op == 3 {
+        var l: u64 = kstate.get(state, sp + kstate.SP_LAST)
+        let now_ticks: u64 = time.mono_ns(state)
+        if l == 0 {
+            kstate.set(state, sp + kstate.SP_LAST, now_ticks)
+            l = now_ticks
+        }
+        if now_ticks < l {
+            return 0
+        }
+        return (now_ticks - l) / 1000000
+    }
+    if op == 4 {
+        if kstate.get(state, sp + kstate.SP_ON) == 0
+            || kstate.get(state, sp + kstate.SP_SLOT) != me {
+            return sysuser.neg(errno.E_PERM)
+        }
+        let alt: u64 = kstate.get(state, sp + kstate.SP_PID)
+        if alt != 0 && alt != own_pid {
+            if sched.find_pid(state, alt) < kstate.MAX_TASKS {
+                return sysuser.neg(errno.E_PERM)
+            }
+        }
+        kstate.set(state, sp + kstate.SP_PID, own_pid)
+        kstate.set(state, sp + kstate.SP_SLOT, me)
+        return 0
+    }
+    if op == 5 {
+        return kstate.add(state, sp + kstate.SP_TRIES, 1)
+    }
+    if op == 7 {
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        kstate.set(state, sp + kstate.SP_UID, arg)
+        kstate.set(state, sp + kstate.SP_LAST, time.mono_ns(state))
+        return 0
+    }
+    if op == 8 {
+        return kstate.get(state, sp + kstate.SP_UID)
+    }
+    // ============================================== RUNDE LOGIND
+    if op == 9 {
+        kstate.set(state, sp + kstate.SP_LOGOUT, 1)
+        return 0
+    }
+    if op == 10 {
+        return kstate.get(state, sp + kstate.SP_LOGOUTS)
+    }
+    // DAILY-DRIVER (r143): THE STANDBY WISH. Same rule as op 9: anyone who
+    // sits at the keyboard may put the machine to sleep -- and for the same
+    // reason it is a wish and not a deed: S3 needs the kernel's own context
+    // (the window server's loop does it, `kgui.standby_wache`), not a call in
+    // the middle of somebody's drawing.
+    if op == 11 {
+        kstate.set(state, sp + kstate.SP_STANDBYRC, 0)
+        kstate.set(state, sp + kstate.SP_STANDBY, 1)
+        return 0
+    }
+    if op == 12 {
+        return kstate.get(state, sp + kstate.SP_STANDBYRC)
+    }
+    if op == 13 {
+        return kstate.get(state, sp + kstate.SP_STANDBYS)
+    }
+    if op == 6 {
+        if arg == 0 {
+            return kstate.get(state, sp + kstate.SP_LOCKS)
+        }
+        if arg == 1 {
+            return kstate.get(state, sp + kstate.SP_UNLOCKS)
+        }
+        if arg == 2 {
+            return kstate.get(state, sp + kstate.SP_TRIES)
+        }
+        if arg == 3 {
+            return kstate.get(state, sp + kstate.SP_SPAWNS)
+        }
+        return kstate.get(state, sp + kstate.SP_PID)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_cpustat(state: u64, index: u64, field: u64) -> u64 {
+    if field == CS_COUNT {
+        return cpu.count(state)
+    }
+    if field == CS_ONLINE {
+        return cpu.online_count(state)
+    }
+    if index >= kstate.MAX_CPUS || index >= cpu.count(state) {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if field == CS_UP {
+        if cpu.online(state, index) {
+            return 1
+        }
+        return 0
+    }
+    if field == CS_APICID {
+        return cpu.apic_id(state, index)
+    }
+    if field == CS_TICKS {
+        return cpu.get(state, index, cpu.C_TICKS)
+    }
+    if field == CS_IDLE {
+        return cpu.get(state, index, cpu.C_IDLETICKS)
+    }
+    if field == CS_SWITCHES {
+        return cpu.get(state, index, cpu.C_SWITCHES)
+    }
+    if field == CS_PICKS {
+        return cpu.get(state, index, cpu.C_PICKS)
+    }
+    if field == CS_CYC {
+        return cpu.x_get(state, index, cpu.X_TOTCYC)
+    }
+    if field == CS_IDLECYC {
+        return cpu.x_get(state, index, cpu.X_IDLECYC)
+    }
+    if field == CS_CURPID {
+        let t: u64 = cpu.get(state, index, cpu.C_CUR)
+        if t >= kstate.MAX_TASKS {
+            return 0
+        }
+        return sched.tget(state, t, sched.T_PID)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_klog(state: u64, me: u64, was: u64, arg: u64, ptr: u64,
+        len: u64) -> u64 {
+    if was == KL_SEQ {
+        return klog.seq(state)
+    }
+    if was == KL_FIRST {
+        return klog.first_seq(state)
+    }
+    if was == KL_LOST {
+        return klog.lost(state)
+    }
+    if was == KL_FILT {
+        return klog.filtered(state)
+    }
+    if was == KL_MIN {
+        return klog.min_level(state)
+    }
+    if was == KL_SER {
+        return klog.ser_level(state)
+    }
+    if was == KL_NENT {
+        return klog.N_ENT
+    }
+    if was == KL_CRASH {
+        return crash.open(state)
+    }
+    if was == KL_LINE {
+        var b: [u8; 256] = [0 as u8; 256]
+        var max: u64 = len
+        if max > 256 {
+            max = 256
+        }
+        let n: u64 = klog.line_at(state, arg, (&b[0 as usize]) as u64, max)
+        if n == 0 {
+            return 0
+        }
+        if !sysuser.copy_out(state, me, ptr, (&b[0 as usize]) as u64, n) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return n
+    }
+    if was == KL_SETMIN || was == KL_SETSER {
+        if perm.euid(state, me) != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        if arg > klog.L_ERROR {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if was == KL_SETMIN {
+            klog.set_min(state, arg)
+        } else {
+            klog.set_ser(state, arg)
+        }
+        return 0
+    }
+    if was == KL_WRITE {
+        var t: [u8; 96] = [0 as u8; 96]
+        var max: u64 = len
+        if max > 95 {
+            max = 95
+        }
+        if !sysuser.copy_in(state, me, (&t[0 as usize]) as u64, ptr, max) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        kstate.set8((&t[0 as usize]) as u64 + max, 0 as u8)
+        var q: [u8; 5] = "prog\0"
+        var lv: u64 = arg
+        if lv > klog.L_ERROR {
+            lv = klog.L_INFO
+        }
+        klog.say(state, lv, (&q[0 as usize]) as u64,
+            (&t[0 as usize]) as u64)
+        return max
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_krach(state: u64, me: u64, art: u64) -> u64 {
+    if !kstate.mode_on(state, kstate.M_KRACH) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if perm.euid(state, me) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    crash.knall(state, art)
+    return 0
+}
+
+const DBG_LIST: u64 = 1
+const DBG_INFO: u64 = 2
+const DBG_CFGREAD: u64 = 3
+const DBG_CFGWRITE: u64 = 4
+const DBG_MMIOREAD: u64 = 5
+const DBG_MMIOWRITE: u64 = 6
+const DBG_DRIVER: u64 = 7
+const DBG_PRPHREAD: u64 = 8
+const DBG_WLAN_RELOAD: u64 = 9
+const DBG_WLAN_STATE: u64 = 10
+const DBG_WLAN_KNOB_NAME: u64 = 11
+const DBG_WLAN_KNOB_STATE: u64 = 12
+const DBG_WLAN_SCAN: u64 = 13
+const DBG_WLAN_REJOIN: u64 = 14
+const DBG_WLAN_RADIO_GET: u64 = 17
+const DBG_WLAN_RADIO_SET: u64 = 18
+const DBG_FSGROW_INFO: u64 = 15
+const DBG_FSGROW_STEP: u64 = 16
+const DBG_WRITE_MAGIC: u64 = 0x57524954
+
+fn dbg_out(state: u64, me: u64, dst: u64, src: u64, len: u64) -> u64 {
+    if !sysuser.copy_out(state, me, dst, src, len) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return len
+}
+
+fn do_dbg(state: u64, me: u64, op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
+    var tmp: [u8; 1024] = [0 as u8; 1024]
+    let t: u64 = (&tmp[0]) as u64
+    let root: bool = sched.tget(state, me, sched.T_EUID) == 0
+    var r: u64 = 0
+    if op == DBG_LIST {
+        r = pcidbg.list_devices(state, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a1, t, r * 8)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_INFO {
+        r = pcidbg.device_info(state, a1, t)
+        if r != 0 { return r }
+        return dbg_out(state, me, a2, t, pcidbg.INFO_QWORDS * 8)
+    }
+    if op == DBG_CFGREAD {
+        r = pcidbg.cfg_read(state, a1, a2, a4, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a3, t, r)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_DRIVER {
+        r = pcidbg.driver_text(state, a1, t, 256)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a2, t, r + 1)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_WLAN_STATE {
+        return wlan_reload.state_word()
+    }
+    if op == DBG_WLAN_RADIO_GET {
+        return wlan_reload.radio_get()
+    }
+    if op == DBG_FSGROW_INFO {
+        return fsgrow.info(state, a1)
+    }
+    if !root {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if op == DBG_CFGWRITE {
+        return pcidbg.cfg_write(state, a1, a2, a3, a4)
+    }
+    if op == DBG_MMIOWRITE {
+        if a4 != DBG_WRITE_MAGIC { return sysuser.neg(errno.E_PERM) }
+        return pcidbg.mmio_write(state, a1 & 0xFFFF, a1 >> 16, a2, a3)
+    }
+    if op == DBG_MMIOREAD {
+        r = pcidbg.mmio_read(state, a1 & 0xFFFF, a1 >> 16, a2, a4, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a3, t, r * 4)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_PRPHREAD {
+        r = iwl_dbg.prph_read(state, a1, a2, a4, t)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a3, t, r * 4)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    if op == DBG_FSGROW_STEP {
+        return fsgrow.step(state, a1)
+    }
+    if op == DBG_WLAN_RELOAD {
+        return wlan_reload.request(state, a1, a2)
+    }
+    if op == DBG_WLAN_RADIO_SET {
+        return wlan_reload.radio_set(a1)
+    }
+    if op == DBG_WLAN_SCAN {
+        return wlan_reload.scan()
+    }
+    if op == DBG_WLAN_REJOIN {
+        return wlan_reload.rejoin()
+    }
+    if op == DBG_WLAN_KNOB_STATE {
+        return wlan_knobs.state_of(state, a1)
+    }
+    if op == DBG_WLAN_KNOB_NAME {
+        r = wlan_knobs.name_text(a1, t, 64)
+        if errno.is_error(r) { return r }
+        let c: u64 = dbg_out(state, me, a2, t, r + 1)
+        if errno.is_error(c) { return c }
+        return r
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {
+    if kind == 0 {
+        if field >= pmon.PM_SCALARS {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return pmon.scalar(state, field)
+    }
+    if kind == 1 {
+        if index >= kstate.MAX_TASKS {
+            return sysuser.neg(errno.E_SRCH)
+        }
+        if field < pmon.PT_FIELDS {
+            return pmon.tget(state, index, field)
+        }
+        if field == PT_PID {
+            return pmon.task_pid(state, index)
+        }
+        if field == PT_ALIVE {
+            if pmon.task_alive(state, index) {
+                return 1
+            }
+            return 0
+        }
+        if field == PT_KIND {
+            return sched.tget(state, index, sched.T_KIND)
+        }
+        if field == PT_STATE {
+            return sched.tget(state, index, sched.T_STATE)
+        }
+        if field == PT_SCHEDTICKS {
+            return sched.tget(state, index, sched.T_TICKS)
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == 2 {
+        if index >= kstate.MAX_TASKS {
+            return sysuser.neg(errno.E_SRCH)
+        }
+        return pmon.name_at(state, index, field)
+    }
+    if kind == 3 {
+        if index >= pmon.NSAMPLE {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if field == 0 {
+            return pmon.sample_rate(state, index)
+        }
+        if field == 1 {
+            return pmon.sample_tick(state, index)
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if kind == 4 {
+        if index >= pmon.NBUCKET || field > 2 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return pmon.bucket_at(state, index, field)
+    }
+    if kind == 6 {
+        // A PROGRAM ROW. This is the table a person is shown: a process
+        // is not a program, and slot seven was `ls` a moment ago.
+        if index >= pmon.NPROG || field >= pmon.PR_FIELDS {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return pmon.prog_get(state, index, field)
+    }
+    if kind == 7 {
+        if index >= pmon.NPROG {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return pmon.prog_name_at(state, index, field)
+    }
+    if kind == 5 {
+        // WRITING IS FOR THE OWNER OF THE MACHINE. Everything under
+        // kind 5 destroys somebody else's numbers.
+        if sched.tget(state, me, sched.T_EUID) != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        if index == PS_ROLLDAY {
+            pmon.roll_day(state)
+            return 0
+        }
+        if index == PS_RESET {
+            pmon.reset_window(state)
+            return 0
+        }
+        if index == PS_EVERY {
+            if field == 0 || field > 1000 {
+                return sysuser.neg(errno.E_INVAL)
+            }
+            pmon.set_scalar(state, pmon.PM_EVERY / 8, field)
+            return 0
+        }
+        if index == PS_ONOFF {
+            pmon.set_on(state, field)
+            return 0
+        }
+        return sysuser.neg(errno.E_INVAL)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn pwr_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64) -> u64 {
+    if number == sysconst.SYS_OSUM_PWRGET {
+        return do_pwrget(state, a0)
+    }
+    if number == SYS_OSUM_PWRSET {
+        return do_pwrset(state, me, a0, a1)
+    }
+    return do_pwrstr(state, me, a0, a1, a2)
+}
+
+// ==================================================== RUNDE DISPLAY
+
+fn do_pwrget(state: u64, field: u64) -> u64 {
+    if field == PG_COUNT {
+        return PG_COUNT
+    }
+    if field == PG_READY {
+        if pwr.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    if !pwr.ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if field == PG_PROFILE {
+        return pwr.cur_profile(state)
+    }
+    if field == PG_CAPS {
+        return pwr.caps(state)
+    }
+    if field == PG_RATIOS {
+        return pwr.value(state, pwr.PW_RATIOS)
+    }
+    if field == PG_RATIOSRC {
+        return pwr.value(state, pwr.PW_RATIOSRC)
+    }
+    if field == PG_PERFCTL {
+        return pwr.value(state, pwr.PW_PERFCTL)
+    }
+    if field == PG_PERFBACK {
+        return pwr.value(state, pwr.PW_PERFBACK)
+    }
+    if field == PG_HWPREQ {
+        return pwr.value(state, pwr.PW_HWPREQ)
+    }
+    if field == PG_HWPBACK {
+        return pwr.value(state, pwr.PW_HWPBACK)
+    }
+    if field == PG_MISC {
+        return pwr.value(state, pwr.PW_MISC)
+    }
+    if field == PG_MISCBACK {
+        return pwr.value(state, pwr.PW_MISCBACK)
+    }
+    if field == PG_MISCORIG {
+        return pwr.value(state, pwr.PW_MISCORIG)
+    }
+    if field == PG_CSTATE {
+        return pwr.value(state, pwr.PW_CSTATE)
+    }
+    if field == PG_MWAITS {
+        return pwr.value(state, pwr.PW_MWAITS)
+    }
+    if field == PG_HLTS {
+        return pwr.value(state, pwr.PW_HLTS)
+    }
+    if field == PG_IDLERUNS {
+        return pwr.value(state, pwr.PW_IDLERUNS)
+    }
+    if field == PG_TEMP {
+        return pwr.temp_c(state)
+    }
+    if field == PG_TEMPOK {
+        return pwr.value(state, pwr.PW_TEMPOK)
+    }
+    if field == PG_TJMAX {
+        return pwr.value(state, pwr.PW_TJMAX)
+    }
+    if field == PG_THROTTLES {
+        return pwr.value(state, pwr.PW_THROTTLES)
+    }
+    if field == PG_THROTTLED {
+        return pwr.value(state, pwr.PW_THROTTLED)
+    }
+    if field == PG_APPLIES {
+        return pwr.value(state, pwr.PW_APPLIES)
+    }
+    if field == PG_SWITCHES {
+        return pwr.value(state, pwr.PW_SWITCHES)
+    }
+    if field == PG_MWAITHINT {
+        return pwr.value(state, pwr.PW_MWAITHINT)
+    }
+    if field == PG_LIMIT {
+        return pwr.value(state, pwr.PW_LIMIT)
+    }
+    if field == PG_TZRAW {
+        return pwr.value(state, pwr.PW_TZRAW)
+    }
+    if field == PG_BRIGHT {
+        return pwr.bright(state)
+    }
+    if field == PG_BLANKED {
+        return pwr.value(state, pwr.PW_BLANKED)
+    }
+    if field == PG_BLANKS {
+        return pwr.value(state, pwr.PW_BLANKS)
+    }
+    if field == PG_EVREADY {
+        if acpiev.ready(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_EVWHY {
+        return acpiev.why(state)
+    }
+    if field == PG_LIDOK {
+        if acpiev.lid_present(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_LID {
+        return acpiev.lid_state(state)
+    }
+    if field == PG_EVENTS {
+        return acpiev.events(state)
+    }
+    if field == PG_EVWAKE {
+        return acpiev.wakeups(state)
+    }
+    if field == PG_EVGPE {
+        return acpiev.gpe_armed(state)
+    }
+    if field == PG_EVSCI {
+        return acpiev.sci_gsi(state)
+    }
+    if field == PG_EVCHANGE {
+        return acpiev.take_change(state)
+    }
+    if field == PG_BTN {
+        if acpiev.button_take(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_BLANKAFTER {
+        return pwr.value(state, pwr.PW_BLANKAFTER) / 100
+    }
+
+    if field == PG_BATPRESENT {
+        if acpiev.batt_present(state) {
+            return 1
+        }
+        if batt.present(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_BATVALID {
+        if acpiev.batt_present(state) {
+            if acpiev.batt_valid(state) {
+                return 1
+            }
+            return 0
+        }
+        return 1
+    }
+    if field == PG_BATWHY {
+        return batt.why(state)
+    }
+    if field == PG_TABLES {
+        return batt.value(state, batt.BT_TABLES)
+    }
+    if field == PG_ACOK {
+        if batt.ac_known(state) {
+            return 1
+        }
+        return 0
+    }
+    if field == PG_AC {
+        if acpiev.ready(state) && acpiev.ac_online(state) {
+            return 1
+        }
+        if batt.ac_online(state) {
+            return 1
+        }
+        return 0
+    }
+    if !batt.present(state) && !acpiev.batt_present(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if field == PG_BATPERCENT {
+        if acpiev.batt_present(state) {
+            return acpiev.batt_percent(state)
+        }
+        return batt.percent(state)
+    }
+    if field == PG_BATMINUTES {
+        return batt.minutes(state)
+    }
+    if field == PG_BATSTATE {
+        if acpiev.batt_present(state) {
+            return acpiev.batt_state(state)
+        }
+        return batt.value(state, batt.BT_STATE)
+    }
+    if field == PG_BATRATE {
+        return batt.value(state, batt.BT_RATE)
+    }
+    if field == PG_BATREMAIN {
+        return batt.value(state, batt.BT_REMAIN)
+    }
+    if field == PG_BATFULL {
+        return batt.value(state, batt.BT_FULL)
+    }
+    if field == PG_BATDESIGN {
+        return batt.value(state, batt.BT_DESIGN)
+    }
+    if field == PG_BATVOLT {
+        return batt.value(state, batt.BT_VOLT)
+    }
+    if field == PG_BATWARN {
+        return batt.value(state, batt.BT_WARN)
+    }
+    if field == PG_BATLOW {
+        return batt.value(state, batt.BT_LOW)
+    }
+    if field == PG_BATUNIT {
+        return batt.value(state, batt.BT_UNIT)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_pwrset(state: u64, me: u64, field: u64, v: u64) -> u64 {
+    if !pwr.ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if sched.tget(state, me, sched.T_EUID) != 0 {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if field == PS_PROFILE {
+        if v >= pwr.PROF_COUNT {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if !pwr.set_profile(state, v) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == PS_BRIGHT {
+        if v > 100 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if !gfx.fb_ready(state) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        pwr.set_bright(state, v)
+        return 0
+    }
+    if field == PS_INJECT {
+        if !acpiev.inject(state, v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >> 24) & 255) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        return 0
+    }
+    if field == PS_BLANKAFTER {
+        // seconds -> ticks (100 per second); a day is the longest wait
+        if v > 86400 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        pwr.set_blank_after(state, v * 100)
+        return 0
+    }
+    if field == PS_BLANK {
+        if !gfx.fb_ready(state) {
+            return sysuser.neg(errno.E_NODEV)
+        }
+        if v != 0 {
+            pwr.blank(state)
+        } else {
+            pwr.unblank(state)
+        }
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_pwrstr(state: u64, me: u64, which: u64, dst: u64, len: u64) -> u64 {
+    if !pwr.ready(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    if which > 3 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !batt.present(state) {
+        return sysuser.neg(errno.E_NODEV)
+    }
+    let src: u64 = batt.text_at(state, which)
+    var n: u64 = 0
+    while n < 63 && kstate.get8(src + n) != 0 {
+        n = n + 1
+    }
+    if len < n + 1 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !sysuser.copy_out(state, me, dst, src, n + 1) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return n
+}
+
+fn handle_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
+    a2: u64, a3: u64) -> u64 {
+    if number > HND_MAXNR {
+        return handle.err(handle.E_INVALID)
+    }
+    if number == HND_VERSION {
+        return 1
+    }
+    if number == HND_COUNT {
+        return handle.used(state, file.owner(state, me))
+    }
+    if number == HND_FDH {
+        return file.fd_handle(state, me, a0)
+    }
+    if number == HND_RIGHTS {
+        if file.fd_handle(state, me, a0) == handle.HANDLE_NONE {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return file.fd_rights(state, me, a0)
+    }
+    if number == HND_BEGIN {
+        return handle.req_begin(state, me, a0, a1 & handle.R_ALL)
+    }
+    if number == HND_OBJECT {
+        if handle.req_owner(state, a0) != me {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return handle.req_object(state, a0)
+    }
+    if number == HND_STATE {
+        if handle.req_owner(state, a0) != me {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return handle.req_state(state, a0)
+    }
+    if number == HND_CANCEL {
+        if !handle.req_cancel(state, me, a0) {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        return 0
+    }
+    if number == HND_END {
+        if handle.req_owner(state, a0) != me {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        let settle_idx: u64 = handle.req_end(state, a0)
+        if settle_idx == 0 {
+            return 0
+        }
+        file.open_settle(state, settle_idx - 1)
+        return 1
+    }
+    if number == HND_DUP {
+        let of: u64 = sysuser.of_of(state, me, a0)
+        if of >= file.MAX_OPEN {
+            return handle.err(handle.E_BADHANDLE)
+        }
+        let nfd: u64 = file.fd_alloc(state, me, 0)
+        if nfd >= file.MAX_FD {
+            return handle.err(handle.E_EXHAUSTED)
+        }
+        let got: u64 = file.fd_pass(state, me, me, a0, a1, nfd)
+        if got >= file.MAX_FD {
+            return handle.err(handle.E_RIGHTS)
+        }
+        return got
+    }
+    if number == HND_PASS {
+        let target: u64 = sched.find_pid(state, a0)
+        if target >= kstate.MAX_TASKS {
+            return handle.err(handle.E_NOTFOUND)
+        }
+        let got: u64 = file.fd_pass(state, me, target, a1, a2, a3)
+        if got >= file.MAX_FD {
+            return handle.err(handle.E_RIGHTS)
+        }
+        return got
+    }
+    if number == HND_OBJINFO {
+        if !kstate.mode_on(state, kstate.M_HANDLE) {
+            if !kstate.mode_on(state, kstate.M_ASYNC) {
+                return handle.err(handle.E_UNSUPPORTED_HND)
+            }
+        }
+        return objinfo(state, me, a0, a1)
+    }
+    return handle.err(handle.E_INVALID)
+}
+
+fn objinfo(state: u64, me: u64, was: u64, arg: u64) -> u64 {
+    if was == 0 {
+        return handle.objects_used(state)
+    }
+    if was == 1 {
+        return handle.obj_refs(state, arg)
+    }
+    if was == 2 {
+        return handle.obj_flight(state, arg)
+    }
+    if was == 3 {
+        if handle.obj_live(state, arg) {
+            return 1
+        }
+        return 0
+    }
+    if was == 4 {
+        return handle.req_live(state)
+    }
+    if was == 5 {
+        return handle.obj_gen(state, arg)
+    }
+    if was == 6 {
+        if file.open_kind(state, arg) == file.K_FREE {
+            return 0
+        }
+        return 1
+    }
+    if was == 7 {
+        return file.open_refs(state, arg)
+    }
+    if was == 8 {
+        return sysuser.of_of(state, me, arg)
+    }
+    if was == 9 {
+        return handle.inflight_on(state, handle.OK_FILE, arg)
+    }
+    return handle.err(handle.E_INVALID)
+}
+
+// ====================================================== RUNDE DESKTOP
+fn kbd_call(state: u64, was: u64, value: u64) -> u64 {
+    if was == KB_GET {
+        return kbd.layout(state)
+    }
+    if was == KB_COUNT {
+        return kbd.LAYOUTS
+    }
+    if was == KB_SWITCH {
+        return kbd.switches(state)
+    }
+    if was == KB_SET {
+        if kbd.set_layout(state, value) {
+            return 0
+        }
+        return errno.neg(errno.E_INVAL)
+    }
+    return errno.neg(errno.E_INVAL)
+}
+
+// AB-003. GET is open to everyone -- the label is not a secret, it is the
+// thing a broker needs to know about its caller. SET only ever narrows
+// (kernel/sched/origin.fi).
+fn do_rights(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
+    let buf: u64 = sysuser.nameb(state)
+    let n: u64 = sysuser.fetch_name(state, me, a1, buf, policy.NAME_MAX + 1)
+    if errno.is_error(n) {
+        return n
+    }
+    if op == OG_RGET {
+        return policy.get_mask(buf)
+    }
+    if op == OG_CGET {
+        return policy.get_ceiling(buf)
+    }
+    // a labelled process (an app, or anything an app started) can never widen its own rights or its own ceiling
+    if !origin.is_empty(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    var r: u64 = 0
+    if op == OG_CSET {
+        r = policy.set_ceiling(buf, a2)
+    } else {
+        r = policy.set_mask(buf, a2)
+    }
+    if r == policy.E_FULL {
+        return sysuser.neg(errno.E_NOMEM)
+    }
+    if r == policy.E_CEIL {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if r != policy.E_OK {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    // W-WINOPTS S2: a float window whose owner just lost `window.float` goes back to L_NORMAL
+    let _f: u64 = gfx.sys_float_check(state)
+    return 0
+}
+
+fn do_origin(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
+    if op == OG_RGET || op == OG_RSET || op == OG_CGET || op == OG_CSET {
+        return do_rights(state, me, op, a1, a2)
+    }
+    if op == OG_GET {
+        var t: u64 = me
+        if a1 != 0 {
+            t = sched.find_pid(state, a1)
+            if t >= kstate.MAX_TASKS {
+                return sysuser.neg(errno.E_SRCH)
+            }
+        }
+        var n: u64 = 0
+        while n < origin.LEN && origin.byte_at(state, t, n) != 0 {
+            n = n + 1
+        }
+        if a2 == 0 {
+            return n
+        }
+        // the buffer is origin.LEN (32) octets -- the whole field goes
+        // out, zero-padded, so no length has to be passed
+        if !sysuser.copy_out(state, me, a2, origin.at(state, t), origin.LEN) {
+            return sysuser.neg(errno.E_FAULT)
+        }
+        return n
+    }
+    if op == OG_SET {
+        if a2 == 0 || a2 >= origin.LEN {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        let buf: u64 = sysuser.nameb(state)
+        let n: u64 = sysuser.fetch_name(state, me, a1, buf, origin.LEN)
+        if errno.is_error(n) {
+            return n
+        }
+        if n != a2 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        let r: u64 = origin.set_self(state, me, buf, n)
+        if r == 1 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        if r != 0 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_hotkey(state: u64, what: u64) -> u64 {
+    if what == HK_SEQ_Q {
+        return kbd.hotkey_seq(state)
+    }
+    if what == HK_KEY_Q {
+        return kbd.hotkey_key(state)
+    }
+    if what == HK_NS_Q {
+        return kbd.hotkey_ns(state)
+    }
+    if what == HK_DOWN_Q {
+        return kbd.super_down(state)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+const VM_E_BAD: u64 = 100
+const VM_E_TYPE: u64 = 101
+const VM_E_RIGHTS: u64 = 102
+
+fn vm_of(state: u64, me: u64, h: u64, need: u64) -> u64 {
+    let i: u64 = cap.find(state, me, h)
+    if i >= cap.MAX_CAPS {
+        return VM_E_BAD
+    }
+    if cap.kind_at(state, me, i) != cap.K_VM {
+        return VM_E_TYPE
+    }
+    if !cap.rights_contains(cap.rights_at(state, me, i), need) {
+        return VM_E_RIGHTS
+    }
+    let slot: u64 = cap.object_at(state, me, i)
+    if !hv.vm_valid(state, slot) {
+        return VM_E_BAD
+    }
+    return slot
+}
+
+fn vm_error(r: u64) -> u64 {
+    if r == VM_E_TYPE {
+        return cap.err(cap.E_WRONGTYPE)
+    }
+    if r == VM_E_RIGHTS {
+        return cap.err(cap.E_RIGHTS)
+    }
+    return cap.err(cap.E_BADHANDLE)
+}
+
+fn vm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
+    if number == sysconst.SYS_VM_CREATE {
+        return do_vm_create(state, me, a0, a1)
+    }
+    if number == SYS_VM_RUN {
+        let s: u64 = vm_of(state, me, a0, cap.R_WRITE)
+        if s >= hv.MAX_VMS {
+            return vm_error(s)
+        }
+        return hv.vm_run(state, s)
+    }
+    if number == SYS_VM_STAT {
+        return do_vm_stat(state, me, a0, a1)
+    }
+    if number == SYS_VM_KILL {
+        let s: u64 = vm_of(state, me, a0, cap.R_MANAGE)
+        if s >= hv.MAX_VMS {
+            return vm_error(s)
+        }
+        hv.vm_destroy(state, s)
+        cap.close(state, me, a0)
+        return 0
+    }
+    if number == sysconst.SYS_VM_VALUE {
+        let s: u64 = vm_of(state, me, a0, cap.R_READ)
+        if s >= hv.MAX_VMS {
+            return vm_error(s)
+        }
+        return hv.value_of(state, a1)
+    }
+    return cap.err(cap.E_INVALID)
+}
+
+fn do_vm_create(state: u64, me: u64, guest: u64, want: u64) -> u64 {
+    if !hv.ready(state) {
+        return cap.err(cap.E_UNSUPPORTED)
+    }
+    if guest >= hv.G_MAX {
+        return cap.err(cap.E_INVALID)
+    }
+    let moeglich: u64 = cap.R_READ | cap.R_WRITE | cap.R_INSPECT
+        | cap.R_MANAGE | cap.R_DUPLICATE | cap.R_TRANSFER
+    let slot: u64 = hv.vm_create(state, guest, me)
+    if slot >= hv.MAX_VMS {
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    let h: u64 = cap.insert(state, me, cap.K_VM,
+        cap.rights_restrict(moeglich, want), slot)
+    if h == cap.HANDLE_NONE {
+        hv.vm_destroy(state, slot)
+        return cap.err(cap.E_EXHAUSTED)
+    }
+    return h
+}
+
+const VMSTAT_WORDS: u64 = 5
+
+fn do_vm_stat(state: u64, me: u64, h: u64, aus: u64) -> u64 {
+    let s: u64 = vm_of(state, me, h, cap.R_INSPECT)
+    if s >= hv.MAX_VMS {
+        return vm_error(s)
+    }
+    if aus == 0 {
+        return 0
+    }
+    if !proc.user_ok(state, me, aus, VMSTAT_WORDS * 8) {
+        return cap.err(cap.E_INVALID)
+    }
+    var w: [u64; 5] = [0 as u64; 5]
+    w[0] = hv.vm_state(state, s)
+    w[1] = hv.vm_exits(state, s)
+    w[2] = hv.vm_result(state, s)
+    w[3] = hv.vm_guest(state, s)
+    w[4] = hv.exits_total(state)
+    if !sysuser.copy_out(state, me, aus, (&w[0]) as u64, VMSTAT_WORDS * 8) {
+        return cap.err(cap.E_INVALID)
+    }
+    return 0
+}

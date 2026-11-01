@@ -1,0 +1,278 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.kstate
+import sched.sched
+import sched.proc
+import lib.errno
+import fs.file
+import fs.unixsock
+import sys.sysconst
+import sys.sysuser
+import sys.sysfd
+
+export {
+    do_fcntl, locks_drop
+}
+
+const F_DUPFD: u64 = 0
+const F_GETFD: u64 = 1
+const F_SETFD: u64 = 2
+const F_GETFL: u64 = 3
+const F_SETFL: u64 = 4
+const F_SETLK: u64 = 6
+const F_SETLKW: u64 = 7
+const F_GETLK: u64 = 5
+const F_DUPFD_CLOEXEC: u64 = 1030
+const F_RDLCK: u64 = 0
+const F_WRLCK: u64 = 1
+const F_UNLCK: u64 = 2
+const FL_TYPE: u64 = 0
+const FL_WHENCE: u64 = 2
+const FL_START: u64 = 8
+const FL_LEN: u64 = 16
+const FL_PID: u64 = 24
+const FL_BYTES: u64 = 32
+const L_INO: u64 = 0
+const L_VON: u64 = 8
+const L_UNTIL: u64 = 16
+const L_ART: u64 = 24
+const L_PID: u64 = 32
+const L_MNT: u64 = 40
+
+fn do_fcntl(state: u64, me: u64, fd: u64, cmd: u64, arg: u64) -> u64 {
+    let of: u64 = file.fd_check(state, me, fd, 0)
+    if of >= file.MAX_OPEN {
+        return sysuser.neg(errno.E_BADF)
+    }
+    if cmd == F_GETFL {
+        return file.open_flags(state, of)
+    }
+    if cmd == F_SETFL {
+        // RUNDE UNTERBAU: the two flags that can change after open(): O_NONBLOCK and O_APPEND. Until now F_SETFL answered 0 and kept
+        // nothing, so `fcntl(fd, F_SETFL, O_NONBLOCK)` -- the first thing an event loop does to a socket or a pipe -- had no effect.
+        let keep: u64 = sysconst.UB_O_NONBLOCK | sysconst.O_APPEND
+        file.open_set_flags(state, of, (file.open_flags(state, of) & (~keep)) | (arg & keep))
+        return 0
+    }
+    if cmd == F_GETFD {
+        return sysfd.cx_bit(state, me, fd)
+    }
+    if cmd == F_SETFD {
+        sysfd.cx_put(state, me, fd, (arg & 1) != 0)
+        return 0
+    }
+    if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
+        let nd: u64 = sysfd.do_dup_min(state, me, fd, arg)
+        if cmd == F_DUPFD_CLOEXEC && !errno.is_error(nd) {
+            sysfd.cx_put(state, me, nd, true)
+        }
+        return nd
+    }
+    if cmd == F_SETLK || cmd == F_SETLKW || cmd == F_GETLK {
+        return do_lock(state, me, of, cmd, arg)
+    }
+    if cmd == F_ADD_SEALS {
+        if file.open_kind(state, of) != file.K_SHM {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        let i: u64 = file.open_ino(state, of)
+        if (unixsock.shm_seals(state, i) & F_SEAL_SEAL) != 0 {
+            return sysuser.neg(errno.E_PERM)
+        }
+        // K-07: F_SEAL_WRITE is refused (-EBUSY) while a writable mapping exists, and later writable mappings are refused (`map_shm`)
+        let sr: u64 = unixsock.shm_add_seals(state, i, arg)
+        if sr != 0 {
+            return sysuser.neg(sr)
+        }
+        return 0
+    }
+    if cmd == F_GET_SEALS {
+        if file.open_kind(state, of) != file.K_SHM {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return unixsock.shm_seals(state, file.open_ino(state, of))
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn lock_at(state: u64, i: u64) -> u64 {
+    return state + kstate.FLOCK_OFF + i * kstate.FLOCK_BYTES
+}
+
+fn lock_get(state: u64, i: u64, field: u64) -> u64 {
+    return kstate.get(state, lock_at(state, i) + field)
+}
+
+fn lock_set(state: u64, i: u64, field: u64, v: u64) {
+    kstate.set(state, lock_at(state, i) + field, v)
+}
+
+fn lock_trifft(a_von: u64, a_bis: u64, b_von: u64, b_bis: u64) -> bool {
+    if a_bis < b_von {
+        return false
+    }
+    if b_bis < a_von {
+        return false
+    }
+    return true
+}
+
+fn do_lock(state: u64, me: u64, of: u64, cmd: u64, arg: u64) -> u64 {
+    if !proc.user_ok(state, me, arg, FL_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    let art: u64 = sysuser.user_half(state, me, arg + FL_TYPE)
+    let whence: u64 = sysuser.user_half(state, me, arg + FL_WHENCE)
+    let start: u64 = sysuser.user_word(state, me, arg + FL_START)
+    let length: u64 = sysuser.user_word(state, me, arg + FL_LEN)
+    if art != F_RDLCK && art != F_WRLCK && art != F_UNLCK {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var von: u64 = start
+    if whence == sysconst.SEEK_CUR {
+        von = file.open_off(state, of) + start
+    }
+    if whence == sysconst.SEEK_END {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if whence != sysconst.SEEK_SET && whence != sysconst.SEEK_CUR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    var bis: u64 = 0xFFFFFFFFFFFFFFFF
+    if length != 0 {
+        if (length >> 63) != 0 {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        bis = von + length - 1
+    }
+    let ino: u64 = file.open_ino(state, of)
+    if ino == 0 {
+        return sysuser.neg(errno.E_BADF)
+    }
+    let mnt: u64 = file.open_mnt(state, of)
+    let wer: u64 = sched.tget(state, me, sched.T_TGID)
+
+    if cmd == F_GETLK {
+        var k: u64 = 0
+        while k < kstate.FLOCK_SLOTS {
+            if lock_get(state, k, L_INO) == ino
+                && lock_get(state, k, L_MNT) == mnt
+                && lock_get(state, k, L_PID) != wer {
+                let hart: u64 = lock_get(state, k, L_ART)
+                var stoert: bool = true
+                if art == F_RDLCK && hart == F_RDLCK {
+                    stoert = false
+                }
+                if stoert && lock_trifft(von, bis,
+                    lock_get(state, k, L_VON), lock_get(state, k, L_UNTIL)) {
+                    sysuser.put_half(state, me, arg + FL_TYPE, hart)
+                    sysuser.put_half(state, me, arg + FL_WHENCE, sysconst.SEEK_SET)
+                    sysuser.put64(state, me, arg + FL_START,
+                        lock_get(state, k, L_VON))
+                    var l: u64 = 0
+                    if lock_get(state, k, L_UNTIL) != 0xFFFFFFFFFFFFFFFF {
+                        l = lock_get(state, k, L_UNTIL)
+                            - lock_get(state, k, L_VON) + 1
+                    }
+                    sysuser.put64(state, me, arg + FL_LEN, l)
+                    sysuser.put_word32(state, me, arg + FL_PID,
+                        lock_get(state, k, L_PID))
+                    return 0
+                }
+            }
+            k = k + 1
+        }
+        sysuser.put_half(state, me, arg + FL_TYPE, F_UNLCK)
+        return 0
+    }
+
+    if art == F_UNLCK {
+        var k: u64 = 0
+        while k < kstate.FLOCK_SLOTS {
+            if lock_get(state, k, L_INO) == ino
+                && lock_get(state, k, L_MNT) == mnt
+                && lock_get(state, k, L_PID) == wer
+                && lock_trifft(von, bis, lock_get(state, k, L_VON),
+                    lock_get(state, k, L_UNTIL)) {
+                lock_free(state, k)
+            }
+            k = k + 1
+        }
+        return 0
+    }
+
+    var k2: u64 = 0
+    while k2 < kstate.FLOCK_SLOTS {
+        if lock_get(state, k2, L_INO) == ino
+            && lock_get(state, k2, L_MNT) == mnt
+            && lock_get(state, k2, L_PID) != wer {
+            let hart2: u64 = lock_get(state, k2, L_ART)
+            var stoert2: bool = true
+            if art == F_RDLCK && hart2 == F_RDLCK {
+                stoert2 = false
+            }
+            if stoert2 && lock_trifft(von, bis, lock_get(state, k2, L_VON),
+                lock_get(state, k2, L_UNTIL)) {
+                return sysuser.neg(errno.E_AGAIN)
+            }
+        }
+        k2 = k2 + 1
+    }
+    var k3: u64 = 0
+    while k3 < kstate.FLOCK_SLOTS {
+        if lock_get(state, k3, L_INO) == ino
+            && lock_get(state, k3, L_MNT) == mnt
+            && lock_get(state, k3, L_PID) == wer
+            && lock_trifft(von, bis, lock_get(state, k3, L_VON),
+                lock_get(state, k3, L_UNTIL)) {
+            lock_free(state, k3)
+        }
+        k3 = k3 + 1
+    }
+    var free: u64 = kstate.FLOCK_SLOTS
+    var k4: u64 = 0
+    while k4 < kstate.FLOCK_SLOTS {
+        if lock_get(state, k4, L_INO) == 0 && free == kstate.FLOCK_SLOTS {
+            free = k4
+        }
+        k4 = k4 + 1
+    }
+    if free >= kstate.FLOCK_SLOTS {
+        return sysuser.neg(errno.E_NOLCK)
+    }
+    lock_set(state, free, L_INO, ino)
+    lock_set(state, free, L_MNT, mnt)
+    lock_set(state, free, L_VON, von)
+    lock_set(state, free, L_UNTIL, bis)
+    lock_set(state, free, L_ART, art)
+    lock_set(state, free, L_PID, wer)
+    kstate.add(state, kstate.FLOCKS, 1)
+    return 0
+}
+
+fn lock_free(state: u64, k: u64) {
+    lock_set(state, k, L_INO, 0)
+    lock_set(state, k, L_MNT, 0)
+    lock_set(state, k, L_VON, 0)
+    lock_set(state, k, L_UNTIL, 0)
+    lock_set(state, k, L_ART, 0)
+    lock_set(state, k, L_PID, 0)
+}
+
+fn locks_drop(state: u64, me: u64) {
+    let wer: u64 = sched.tget(state, me, sched.T_TGID)
+    if wer == 0 {
+        return
+    }
+    var k: u64 = 0
+    while k < kstate.FLOCK_SLOTS {
+        if lock_get(state, k, L_INO) != 0
+            && lock_get(state, k, L_PID) == wer {
+            lock_free(state, k)
+        }
+        k = k + 1
+    }
+}
+const F_ADD_SEALS: u64 = 1033
+const F_GET_SEALS: u64 = 1034
+const F_SEAL_SEAL: u64 = 1
