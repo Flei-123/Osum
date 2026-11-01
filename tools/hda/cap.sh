@@ -117,7 +117,7 @@ echo "== 3. COUNTER-SAMPLES: no microphone must say so =="
 rc=$(run nodev "osum nokbd nosched noproc nofs audio audcap" "")
 same "nodev: the kernel ends normally (21)" 21 "$rc"
 hasnot "$TMPD/nodev.txt" "aud: done=1" "nodev: no capture test ran"
-has "$TMPD/nodev.txt" "aud: kein Geraet" "nodev: the audio layer says there is no device"
+has "$TMPD/nodev.txt" "aud: no device" "nodev: the audio layer says there is no device"
 has "$TMPD/nodev.txt" "kernel: done" "nodev: the system runs on"
 
 rc=$(run outonly "osum nokbd nosched noproc nofs audio audcap" "-device intel-hda -device hda-output,audiodev=snd0")

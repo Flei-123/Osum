@@ -213,9 +213,9 @@ fi
 kopf "6. GEGENPROBE: ohne 'anmeldung' ist der alte Weg unveraendert"
 T6=$(lauf ohne 45 "" @10 '#foto:direkt')
 if [ -f "$T6" ]; then
-    grep -qa 'desk: OHNE anmeldung' "$T6" \
+    grep -qa 'desk: WITHOUT sign-in' "$T6" \
         && ok "without the word the kernel reports the old path" \
-        || bad "'desk: OHNE anmeldung' fehlt"
+        || bad "'desk: WITHOUT sign-in' fehlt"
     grep -qaE 'desk: start /bin/desktop' "$T6" \
         && ok "and starts the desktop directly" \
         || bad "'desk: start /bin/desktop' fehlt"

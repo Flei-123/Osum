@@ -398,7 +398,7 @@ rc=$(lauf ohne "gfx dispeigen dispeigenbad $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 O="$TMPD/ohne.txt"
 hat_nicht "$O" "disp: eigen" "ohne 'disp' wird keine eigene Aufloesung gesetzt"
-hat_nicht "$O" "disp: kacheln" "und keine Belegung gemeldet"
+hat_nicht "$O" "disp: tiles" "und keine Belegung gemeldet"
 hat_nicht "$O" "disp: save" "und die Platte wird nicht angefasst"
 hat "$O" "fb: 800x600x32" "der Bildschirm von Runde K7 steht unveraendert"
 hat "$O" "fb: selftest 13 / 13" "und seine dreizehn Zusagen auch"
@@ -425,10 +425,10 @@ K16="$TMPD/klein16.txt"
 gleich "mit 16 MiB war es noch die Karte, die ablehnte" "1" \
     "$(grep -a '^disp: out   3840x2160' "$K16" | grep -ao 'reason=[0-9]*' | sed 's/reason=//')"
 ok "the same kernel, the same line, two reasons -- the limits are measured independently"
-ka=$(grep -a -m1 '^disp: kacheln' "$K16")
+ka=$(grep -a -m1 '^disp: tiles' "$K16")
 [ -n "$ka" ] && ok "the allocation of the window slots: $ka" || bad "keine Belegung gemeldet"
 gleich "sechzehn Plaetze zu 2 MiB sind 32 MiB Fenster" "16" \
-    "$(echo "$ka" | grep -ao 'alle=[0-9]*' | sed 's/.*=//')"
+    "$(echo "$ka" | grep -ao 'all=[0-9]*' | sed 's/.*=//')"
 num "und davon traegt der laengste zusammenhaengende Bereich weniger" \
     "$(echo "$ka" | grep -ao 'laufmax=[0-9]*' | sed 's/.*=//')" lt 16
 ok "the difference is the local APIC and the I/O-APIC -- two slots of 4 KiB registers each"
