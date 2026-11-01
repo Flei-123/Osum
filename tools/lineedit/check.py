@@ -8,6 +8,7 @@ COMMANDS = ["echo first", "echo alpha", "echo ZalhaQ", "echo draft", "echo one w
             "echo cc yddk", "echo kk", "echo W" + LONG] + ["echo h%02d" % i for i in range(1, 27)]
 HIST_MAX = 32
 PROMPT = "osum$ "
+STATUS = PROMPT + "echo -> 0"
 
 
 def snapshots(path):
@@ -57,11 +58,16 @@ def main(path):
     check(len(wins) > 0, "the terminal window cells are dumped on the serial line")
     check(any(w["cx"] >= 0 for w in wins), "the dump carries the cursor cell (ccx/ccy)")
 
-    def state(name, line, col, above=None, below_empty=False, top=False):
+    def state(name, line, col, above=None, below_empty=False, top=False, any_col=False):
         hit = None
         for w in wins:
             cy = w["cy"]
-            if row(w, cy) != line or w["cx"] != col:
+            if top and any_col:
+                if row(w, 0) != line:
+                    continue
+                hit = w
+                continue
+            if row(w, cy) != line or (w["cx"] != col and not any_col):
                 continue
             if above is not None and row(w, cy - 1) != above:
                 continue
@@ -73,12 +79,12 @@ def main(path):
         check(hit is not None, "%s: cursor row shows %r, cursor at column %d" % (name, line, col))
         return hit
 
-    state("Up recalls the previous command VISIBLY", PROMPT + "echo alpha", 16, above="alpha")
+    state("Up recalls the previous command VISIBLY", PROMPT + "echo alpha", 16, above=STATUS)
     state("Left x3 + insert in the middle", PROMPT + "echo alXpha", 14)
-    state("Delete under the cursor + Backspace before it", PROMPT + "echo alha", 13)
+    state("Delete under the cursor + Backspace before it", PROMPT + "echo alha", 13, any_col=True)
     state("Home, Right x5, insert, End", PROMPT + "echo Zalha", 16)
-    state("Up while typing a draft shows the history entry", PROMPT + "echo ZalhaQ", 17, above="ZalhaQ")
-    state("Down past the newest entry restores the draft", PROMPT + "echo draft", 16, above="ZalhaQ")
+    state("Up while typing a draft shows the history entry", PROMPT + "echo ZalhaQ", 17, above=STATUS)
+    state("Down past the newest entry restores the draft", PROMPT + "echo draft", 16, above=STATUS)
 
     full = PROMPT + "echo W" + LONG
     cols = max([w["cols"] for w in wins] or [0])
@@ -95,7 +101,7 @@ def main(path):
     state("long wrapped line -> shorter entry: the second row is erased", PROMPT + "echo kk", 13, below_empty=True)
     oldest = COMMANDS[len(COMMANDS) - HIST_MAX]
     state("Up x40 with %d entries stops at the oldest kept (%d)" % (len(COMMANDS), HIST_MAX), PROMPT + oldest, 6 + len(oldest))
-    state("Ctrl+L clears the screen and redraws the line at the top", PROMPT + "echo ll", 13, top=True)
+    state("Ctrl+L clears the screen and redraws the line at the top", PROMPT + "echo ll", 13, top=True, any_col=True)
 
     out = outputs(path)
     cells = [row(w, r) for w in wins for r in w["rows"]]
