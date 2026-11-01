@@ -3,7 +3,7 @@
 # Verwendung:  bash tools/customres/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke.sh
+. tools/lib/brand.sh
 marke_laden . || exit 1
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"

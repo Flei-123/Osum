@@ -1,7 +1,7 @@
 # Runde DUALBOOT — OrientOS neben ein vorhandenes System
 
 Zweig `dualboot`, abgezweigt von `main` (`e3e724a`).
-Gemessen mit `bash tools/dual/abnahme-cli.sh`, `tools/dual/startprobe.sh`
+Gemessen mit `bash tools/dual/acceptance-cli.sh`, `tools/dual/startprobe.sh`
 und `tools/dual/kettenprobe.sh`.
 
 Diese Runde greift den Rest von **`P-012`** an und den Satz, mit dem
@@ -49,7 +49,7 @@ statt es zu versuchen.
 | `tools/dual/fremdplatte.sh` | ~190 | eine Platte, auf der schon jemand wohnt — gebaut mit `sgdisk` |
 | `tools/dual/tafelpruef.py` | ~200 | die Tafel mit **fremden Augen** lesen, beide CRC32 selbst rechnen |
 | `tools/dual/beweis.c` | ~80 | eine echte UEFI-Anwendung, die sich selbst zu erkennen gibt |
-| `tools/dual/abnahme-cli.sh` | ~280 | die Abnahmekette mit Prüfsummen |
+| `tools/dual/acceptance-cli.sh` | ~280 | die Abnahmekette mit Prüfsummen |
 | `tools/dual/startprobe.sh` | ~130 | startet die Platte wirklich? |
 | `tools/dual/kettenprobe.sh` | ~150 | startet der **zweite** Eintrag wirklich? |
 | `locale/de,en/messages` | +32 je | die Texte |
@@ -199,13 +199,13 @@ Framebuffer steht (`fb: selftest 13 / 13 failed=0x0`) und
 `/bin/installer` im Wurzelabbild liegt.
 
 **Das ist nicht in dieser Runde entstanden.** Die Gegenprobe:
-`bash tools/install/abnahme.sh` — die Abnahme der vorigen Runde, die
+`bash tools/install/acceptance.sh` — die Abnahme der vorigen Runde, die
 laut `docs/RUNDE-INSTALLER.md` mit **27 Zusagen grün** ist — hängt in
 derselben Umgebung an derselben Stelle und meldet danach „keine
 EFI-Partition / kein BOOTX64.EFI / keine limine.conf". Ausgeschlossen
 wurden: der Beschleuniger (TCG wie KVM), die Plattengröße (320 MiB wie
 512 MiB) und die Kommandozeile (Wort für Wort die aus
-`tools/install/abnahme.sh:180`).
+`tools/install/acceptance.sh:180`).
 
 Deshalb **`dualcli.fi`**: derselbe Weg über die Kommandozeile. Das ist
 keine zweite Umsetzung — jede Zeile, die schreibt, steht in `dualkern`
@@ -216,7 +216,7 @@ genau dann aus, wenn man sie am dringendsten braucht.
 **Nachtrag, und er korrigiert den Absatz darüber teilweise:** die
 Ursache ist gefunden. Der Fensterserver läuft auf diesem Wirt **nur mit
 `desk wmshell`** in der Kommandozeile; `wmhold`+`wighalt` allein — die
-Kombination, die `tools/install/abnahme.sh` benutzt — genügt hier nicht.
+Kombination, die `tools/install/acceptance.sh` benutzt — genügt hier nicht.
 Mit `desk wmshell` steht das Fenster, und es ist fotografiert
 (`40-fenster-zwei-reiter.png`, `tools/dual/fensterprobe.sh`):
 
@@ -268,7 +268,7 @@ es eine fremde Tafel versteht.
 | Partition 2 | 71680..92159 (10 MiB) | „Microsoft basic data", FAT16, `WICHTIG.TXT` |
 | **frei** | 92160..163806 (34 MiB) | **hier soll OrientOS hin** |
 
-### 5.2 `tools/dual/abnahme-cli.sh` — **24 grün, 0 rot**
+### 5.2 `tools/dual/acceptance-cli.sh` — **24 grün, 0 rot**
 
 | Glied | Gemessen |
 |---|---|

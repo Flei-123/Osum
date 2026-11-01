@@ -83,13 +83,13 @@ if section "$O" '==A1==' '==A2==' | grep -aqE '(^| )base.osp/( |$)'; then bad "o
 if [ "${STARTFRESH_GUI:-1}" = 1 ]; then
   echo "== 4. launcher reloads /apps when the menu is shown =="
   D="$TMPD/gui"
-  bash tools/design/eh6.sh "$D" res=1280x800 accel=kvm drehbuch=tools/startfresh/dreh.txt "xfile=/etc/zzinfo=$ROOT/tools/startfresh/zzinfo" > "$TMPD/gui.log" 2>&1
+  bash tools/design/eh6.sh "$D" res=1280x800 accel=kvm drehbuch=tools/startfresh/script.txt "xfile=/etc/zzinfo=$ROOT/tools/startfresh/zzinfo" > "$TMPD/gui.log" 2>&1
   S="$D/serial.txt"
   grep -aqE 'launcher: apps reloaded [0-9]+' "$S" && ok "the launcher reloaded the app list after a bundle appeared" || bad "no 'launcher: apps reloaded' after the bundle was created"
   grep -aq 'launcher: treffer i=[0-9]* name=\[ZzFresh\]' "$S" && ok "search finds the fresh app 'ZzFresh'" || bad "search does not find 'ZzFresh'"
   echo "== 5. counter-proof: refresh=off =="
   D2="$TMPD/gui2"
-  bash tools/design/eh6.sh "$D2" res=1280x800 accel=kvm drehbuch=tools/startfresh/dreh.txt "xfile=/etc/zzinfo=$ROOT/tools/startfresh/zzinfo" "xfile=/etc/startmenu.conf=$ROOT/tools/startfresh/off.conf" > "$TMPD/gui2.log" 2>&1
+  bash tools/design/eh6.sh "$D2" res=1280x800 accel=kvm drehbuch=tools/startfresh/script.txt "xfile=/etc/zzinfo=$ROOT/tools/startfresh/zzinfo" "xfile=/etc/startmenu.conf=$ROOT/tools/startfresh/off.conf" > "$TMPD/gui2.log" 2>&1
   grep -aq 'launcher: treffer i=[0-9]* name=\[ZzFresh\]' "$D2/serial.txt" && bad "refresh=off still finds ZzFresh -- the check is blind" || ok "refresh=off: the stale list does not find ZzFresh (the HP state)"
 fi
 echo

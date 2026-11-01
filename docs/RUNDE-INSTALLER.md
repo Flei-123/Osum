@@ -1,7 +1,7 @@
 # Runde INSTALLER — der Weg vom Stick auf die Platte
 
 Zweig `installer`, abgezweigt von `main` (`ae381a3`).
-Gemessen mit `bash tools/install/abnahme.sh`.
+Gemessen mit `bash tools/install/acceptance.sh`.
 
 Diese Runde greift **`P-001`** an, den Punkt mit Priorität 1 in
 `/root/osum-roadmap/OFFEN.md`:
@@ -24,7 +24,7 @@ Der Befund war genau richtig, und er sagt auch, was zu tun war: die
 | `kernel/user/installer.fi` | ~700 | das Fenster: Platten zeigen, zweistufig fragen, installieren, Fortschritt |
 | `kernel/user/install.fi` | 934 → 349 | die Kommandozeile davor, unverändert in dem, **was** sie tut |
 | `assets/apps/installer.osp/` | — | das Bündel: INFO, start, symbol, data |
-| `tools/install/abnahme.sh` | 330 | die Abnahmekette mit Bildern |
+| `tools/install/acceptance.sh` | 330 | die Abnahmekette mit Bildern |
 | `tools/install/shot-gui.sh` | 100 | ein Foto vom Fenster |
 | `locale/de,en/messages` | +24 je | die Texte |
 

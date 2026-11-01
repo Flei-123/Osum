@@ -162,7 +162,7 @@ gegen "die zweite Schreibung eines Unterbefehls" "kernel/user/trashbin.fi" \
 
 echo
 echo "-- 5. die Spalten in ZEICHEN, die Puffer in Oktett"
-OSUM_ROOT=. python3 tools/i18n/spalten.py > "$TMPD/s.txt" 2>&1
+OSUM_ROOT=. python3 tools/i18n/columns.py > "$TMPD/s.txt" 2>&1
 SRC=$?
 sed 's/^/     /' "$TMPD/s.txt"
 is "spalten rc" "$SRC" "0"
@@ -173,12 +173,12 @@ mind "Zeichenketten passen genau in ihren Puffer" "${SP:-0}" 4000
 gegen "eine Spalte um EIN ZEICHEN verkuerzt" "kernel/user/power.fi" \
     'var s_t: [u8; 11] = "Wärme:   \0"' \
     'var s_t: [u8; 10] = "Wärme:  \0"' \
-    python3 tools/i18n/spalten.py
+    python3 tools/i18n/columns.py
 gegen "ein Literal, das nicht mehr in seinen Puffer passt" \
     "kernel/user/vpn.fi" \
     'var s_an: [u8; 14] = "vpn: läuft\0\0\0"' \
     'var s_an: [u8; 14] = "vpn: läuft noch\0"' \
-    python3 tools/i18n/spalten.py
+    python3 tools/i18n/columns.py
 
 echo
 echo "-- 6. die Schriften haben jedes Zeichen, das auf dem Schirm steht"

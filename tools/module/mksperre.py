@@ -41,7 +41,7 @@ def main(argv):
         sys.exit(__doc__)
     out = argv[0]
     seed_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "pruef.seed")
+                             "verify.seed")
     flip = False
     count_override = None
     mods = []

@@ -148,7 +148,7 @@ static int datei_schreiben(ntfs_volume *vol, ntfs_inode *eltern,
     // und keine Aussage ueber das Abbild.
     //
     // DASS DAS ABBILD IN ORDNUNG IST, WIRD NICHT GEGLAUBT, SONDERN
-    // GEPRUEFT: `tools/fremdfs/bild.sh` laesst hinterher `ntfsfix -n`
+    // GEPRUEFT: `tools/fremdfs/image.sh` laesst hinterher `ntfsfix -n`
     // und `ntfscat` ueber jede einzelne Datei laufen und vergleicht
     // die Pruefsummen mit denen des Wirtsbaums. Faellt dort etwas auf,
     // faellt der Bau -- und dann steht hier ein echter Fehler.

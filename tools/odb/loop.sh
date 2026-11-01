@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/odb/loop.sh -- agent round trip (ODB) on a FULL image in QEMU: boot, wait for the agent, then N rounds of
 # ping / info / exec / push+pull / ps / shot / login / desktop check / start Terminal / type a command / read it back /

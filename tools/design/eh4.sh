@@ -103,5 +103,5 @@ done
 find "$OUT" -name '*.ppm' -delete
 
 echo "== messen =="
-python3 tools/design/eh4mess.py "$OUT" | tee "$OUT/BEFUND.txt"
+python3 tools/design/eh4measure.py "$OUT" | tee "$OUT/BEFUND.txt"
 echo "== fertig: $OUT/bilder =="

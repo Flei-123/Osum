@@ -133,7 +133,7 @@ dort steht dieselbe Zeile. Nichts an dieser Runde hat das verursacht.
 
 `tools/metal2/run.sh` stellt die Bedingungen des Fotos her — 3440x1440
 mit `fbpad=16`, xHCI mit USB-Tastatur und -Maus — und prüft 33 Zusagen.
-`tools/metal2/maus.py` schickt den Bewegungsstrom über QMP
+`tools/metal2/mouse.py` schickt den Bewegungsstrom über QMP
 (`input-send-event`), das Bootwort `mausflut=<hz>` erzeugt ihn im Kern.
 
 Eine **Korrektur am Messgerät selbst** gehört in diesen Bericht: die

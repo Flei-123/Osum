@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 #
 #   bash tools/operation/store.sh [ausgabeverzeichnis]
 #
@@ -8,7 +8,7 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-/tmp/m5-store}
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 export OUT
 export OSUM_CPU=${OSUM_CPU:-max}

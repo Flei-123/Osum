@@ -38,7 +38,7 @@ rm -rf "$W"; mkdir -p "$W"
 cp "$WURZEL" "$W/disk.img"
 
 # ------------------------------------------------------ 2. Drehbuch
-cp tools/design/fenster.txt "$W/drehbuch.txt"
+cp tools/design/window.txt "$W/drehbuch.txt"
 
 APPEND="osum gfx disp fbres=${SW}x${SH} wm wig desk wmshell wmdauer herz"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=en usb hidgen modfs"

@@ -10,8 +10,8 @@ while IFS= read -r rel; do
     m=$(basename "$rel" .fi)
     d=$(dirname "$rel")
     [[ $d == "." ]] && ORT[$m]="" || ORT[$m]="${d//\//.}."
-done < <(python3 tools/struktur/huelle.py --liste kern
-         python3 tools/struktur/huelle.py --liste uprog)
+done < <(python3 tools/structure/shell.py --liste kern
+         python3 tools/structure/shell.py --liste uprog)
 
 GEAENDERT=0
 ZEILEN=0

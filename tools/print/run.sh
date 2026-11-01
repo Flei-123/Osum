@@ -31,7 +31,7 @@
 # Call:  bash tools/print/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke-env.sh
+. tools/lib/brand-env.sh
 ROOT=$(pwd)
 
 pass=0; fail=0

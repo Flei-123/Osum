@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # pakete/bauen.sh -- DIE PAKETE DIESES BAUMS BAUEN (wmplug x3, notes, stickwr, fvviewer, mail, jarvismini).
 #
-# Die Kette ist dieselbe wie bei tools/module/paket.sh, nur ohne Kern:
+# Die Kette ist dieselbe wie bei tools/module/package.sh, nur ohne Kern:
 #
 #   kernel/user/<prog>.fi
 #        │  firnc + ld (kernel/user/user.ld, USER_ENTRY=_F0.u_start)

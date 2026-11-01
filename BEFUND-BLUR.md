@@ -208,7 +208,7 @@ Hintergrunds, siehe Abschnitt 1). Dazugekommen sind deshalb:
   alles andere geht weiter den billigen Weg ueber `fb_row`.
 
 **Lehre:** ein Zaehler, der sagt "es wurde gerechnet", ist kein Beleg
-dafuer, dass man es sieht. Deshalb gibt es jetzt `tools/blur/kante.py`.
+dafuer, dass man es sieht. Deshalb gibt es jetzt `tools/blur/edge.py`.
 
 ### 3. Eine Namenskollision auf der Befehlszeile
 
@@ -280,7 +280,7 @@ Einstellungen ab; das ist der Grund, warum es den Schalter gibt.
 
 ### Der Bildbeweis, maschinell gelesen
 
-`tools/blur/kante.py` misst nicht die Summe der Unterschiede -- die
+`tools/blur/edge.py` misst nicht die Summe der Unterschiede -- die
 taugt nicht, weil eine getoente Flaeche schon kleinere Unterschiede
 hat, ohne weichgezeichnet zu sein. Gemessen wird die **Verteilung**:
 eine harte Kante ist **ein** grosser Sprung zwischen zwei Nachbarn,
@@ -367,7 +367,7 @@ war nichts durchsichtig.
 
 | Abnahme | Soll | Ist |
 |---|---|---|
-| `tools/install/abnahme.sh` | 35 / 0 | **35 gruen, 0 rot** |
+| `tools/install/acceptance.sh` | 35 / 0 | **35 gruen, 0 rot** |
 | `tools/hotplug/run.sh` | 45 / 0 | **45 passed, 0 failed** |
 | `tools/clip2/run.sh` | 32 / 0 | **32 gruen, 0 rot** |
 | `tools/logind/run.sh` (UITRACE=1) | 49 / 0 | 35 / 1 -- **siehe unten, nicht von dieser Runde** |

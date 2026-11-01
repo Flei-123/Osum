@@ -156,10 +156,10 @@ fi
 
 echo "== 3. die Pruefbilder, vom WIRT gebaut =="
 BILD="$TMPD/bild"
-if bash tools/fremdfs/bild.sh "$BILD" > "$TMPD/bild.log" 2>&1; then
+if bash tools/fremdfs/image.sh "$BILD" > "$TMPD/bild.log" 2>&1; then
     ok "die Abbilder stehen: $(grep -c . "$BILD/baum.sha") Dateien im Baum"
 else
-    bad "tools/fremdfs/bild.sh scheitert"
+    bad "tools/fremdfs/image.sh scheitert"
     sed 's/^/        /' "$TMPD/bild.log" | tail -15
     echo "FREMDFS: $pass bestanden, $fail gescheitert"
     exit 1

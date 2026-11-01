@@ -1,6 +1,6 @@
 # OrientOS auf eine Platte installieren (Stand 03.10.2026, main b6999e41)
 
-Gemessen mit `bash tools/install/abnahme.sh` (49 gruen / 0 rot): Installation in
+Gemessen mit `bash tools/install/acceptance.sh` (49 gruen / 0 rot): Installation in
 der VM, Start von der Platte ohne Stick (UEFI/OVMF), Datei ueberlebt Neustart,
 eigenes Konto, Anmeldung. **Echte Hardware ist damit nicht bewiesen.**
 

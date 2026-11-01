@@ -35,7 +35,7 @@ run() { # run <name> <extra kernel words>
     local fp=$!
     EH_NETDEV="-netdev socket,id=n0,udp=127.0.0.1:$hp,localaddr=127.0.0.1:$qp -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc" \
     bash tools/design/eh6.sh "$TMPD/$name" res=1280x800 accel=kvm netz=ja \
-        drehbuch=tools/netdidle/dreh.txt extra="$*" > "$TMPD/$name.log" 2>&1
+        drehbuch=tools/netdidle/script.txt extra="$*" > "$TMPD/$name.log" 2>&1
     kill $fp 2>/dev/null
     grep -a "FEHLGESCHLAGEN\|NICHT DA" "$TMPD/$name.log" | head -3
 }

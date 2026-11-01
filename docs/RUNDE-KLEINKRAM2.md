@@ -59,7 +59,7 @@ vier Plaetzen (die Verdraengung greift) rechnen weiter richtig.
 ### DIE OFFENE FRAGE AUS RUNDE AESNI -- JETZT BEANTWORTET
 
 Der Bericht der Runde AESNI liess ausdruecklich ungeprueft, ob der Plan
-nach `forget()` wirklich nirgends mehr steht. `tools/xtstafel/loeschen.fi`
+nach `forget()` wirklich nirgends mehr steht. `tools/xtstafel/delete.fi`
 sieht **im echten Speicher der Tafel** nach (`xts.tafel_von()`/`tafel_len()`,
 die Laenge aus dem Abstand zweier Plaetze, nicht geraten):
 
@@ -80,7 +80,7 @@ ist. Geprueft ist die Tafel.
   finden, **2366 Oktette** bleiben stehen, der Loeschtest schlaegt an.
 
 Die zweite Gegenprobe hat waehrend der Runde einen echten Fehler in der
-**Abnahme** gefunden: die erste Fassung von `loeschen.fi` benutzte einen
+**Abnahme** gefunden: die erste Fassung von `delete.fi` benutzte einen
 einzigen Schluessel, damit war nur Platz 0 belegt, und ein halbes
 `forget()` kam durch. Die Probe belegt jetzt erst alle vier Plaetze.
 Ebenso war die Tafellaenge zuerst mit 784 Oktetten je Platz fest
@@ -115,7 +115,7 @@ musste neu gekoppelt werden. In `OFFEN.md` steht dazu "haengt an P-001".
 
 Die zweite laesst sich messen, **ohne** die erste zu loesen: eine Wurzel
 auf einer IDE-Platte, die ueber zwei Starts dieselbe bleibt. Genau so
-misst `tools/bridge2/kette.sh` schon heute (Zeile 265-278: *"ein Rechner,
+misst `tools/bridge2/chain.sh` schon heute (Zeile 265-278: *"ein Rechner,
 der beim Neustart seine Identitaet verliert, DARF nicht mehr
 hereinkommen"*) -- nur fuer den Schluessel war es nie nachgeholt worden.
 
@@ -154,7 +154,7 @@ sie wuerde die Abnahme nur `jsig` mit sich selbst vergleichen.
 
 ### WAS OFFEN BLEIBT, UND WARUM
 
-`tools/install/abnahme.sh` Abschnitt 7b misst dieselbe Frage auf dem
+`tools/install/acceptance.sh` Abschnitt 7b misst dieselbe Frage auf dem
 **echten** Weg (installierte Platte). Der Abschnitt ist in dieser Runde
 von einem Platzhalter (64 von Hand hingeschriebene Hexziffern, die nur
 den PFAD belegen) auf den vollen Ed25519-Lebenslauf umgestellt worden --

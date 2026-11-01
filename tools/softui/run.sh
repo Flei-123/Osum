@@ -35,7 +35,7 @@ if shot A shape=classic scheme=day mode=light keep=yes accel=tcg; then
     ok "classic bootet (QEMU exit 21)"
     if [ -s "$REF" ]; then
         #
-        G=$(python3 tools/softui/gleich.py "$REF" "$TMPD/A/desktop.ppm" \
+        G=$(python3 tools/softui/equal.py "$REF" "$TMPD/A/desktop.ppm" \
             --zeit --ausser 26,62,560,380 2>&1)
         echo "$G" | sed 's/^/        /'
         D=$(echo "$G" | grep -oE 'unterschiedlich [0-9]+' | grep -oE '[0-9]+')
@@ -166,7 +166,7 @@ for v in "day light 516" "night dark 1236"; do
         W=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
             | awk '$3=="normal"{print $6}' | sort -n | head -1)
         echo "        kleinstes Textpaar im Modell: $W"
-        K=$(python3 tools/softui/titel.py "$TMPD/F-$1/desktop.ppm" \
+        K=$(python3 tools/softui/title.py "$TMPD/F-$1/desktop.ppm" \
             "$TMPD/F-$1/serial.txt" 2>&1 | tail -1)
         echo "        $K"
         R=$(echo "$K" | grep -oE 'ratio [0-9]+' | grep -oE '[0-9]+')

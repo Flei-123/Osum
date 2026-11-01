@@ -62,19 +62,19 @@ falsch-rote Laeufe gekostet.
 
 ### A-024: `/tmp/abnahme` gehoert allen
 
-`tools/install/abnahme.sh` legt seine Zielplatte unter
+`tools/install/acceptance.sh` legt seine Zielplatte unter
 `OUT=${1:-/tmp/abnahme}` ab -- ohne Argument also immer am selben Ort.
 Liefen zwei Runden gleichzeitig, misst die zweite Truemmer: **16/17
 statt 35/0**, mit Folgefehlern bis in `O-009` hinein, und KEINER davon
 echt. Mit eigenem Ziel gemessen: **35/0**.
 
-    bash tools/install/abnahme.sh /tmp/<eigener-pfad>
+    bash tools/install/acceptance.sh /tmp/<eigener-pfad>
 
 ## Abnahmen nach der Kernaenderung
 
 Alle Pflichtwerte gehalten:
 
-    tools/install/abnahme.sh   35/0
+    tools/install/acceptance.sh   35/0
     tools/hotplug/run.sh       45/0
     tools/clip2/run.sh         32/0
     tools/check-ui.sh          PASSED

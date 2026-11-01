@@ -16,14 +16,14 @@ ist, wenn das Ergebnis in JEDEM vorkommenden Fall exakt dasselbe ist.
 Geht alle n von 1 bis 33 und alle Summen von 0 bis n*255 durch --
 143 088 Faelle -- und meldet den groessten Fehler. Er muss 0 sein.
 
-## kante.py -- ist der Blur WIRKLICH im Bild?
+## edge.py -- ist der Blur WIRKLICH im Bild?
 
 Die Zaehler des Servers sagen, dass gerechnet wurde. Sie sagen nicht,
 dass man es SIEHT -- und genau diese Luecke gab es in dieser Runde
 einmal wirklich (der Filter lief, die Leiste kopierte ihren deckenden
 Puffer darueber).
 
-    python3 tools/blur/kante.py <bild.png>
+    python3 tools/blur/edge.py <bild.png>
 
 Misst nicht die Summe der Unterschiede (die taugt nicht: eine getoente
 Flaeche hat kleinere Unterschiede, ohne weichgezeichnet zu sein),

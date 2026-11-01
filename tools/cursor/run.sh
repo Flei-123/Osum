@@ -4,11 +4,11 @@
 #
 #   bash tools/cursor/run.sh [uiscale]      (run via /root/jarvis/bin/heavy)
 #
-# The drehbuch (tools/cursor/dreh.txt) moves the pointer over the desktop, the
+# The drehbuch (tools/cursor/script.txt) moves the pointer over the desktop, the
 # terminal grid, a title bar, two edges and two corners of the terminal window and
 # the start menu, taking a picture at each spot. tools/cursor/check.py cuts the
 # picture around the hot spot, renders all shapes from the SAME outlines the kernel
-# uses (tools/wm/zeiger2.py) at the target size (24 px * scale), and demands that
+# uses (tools/wm/cursor2.py) at the target size (24 px * scale), and demands that
 # the best match is the expected shape (hot spot position included: the cut is
 # placed by the shape's own hot spot). The serial lines `wm: form=N` must name the
 # shapes too.
@@ -25,7 +25,7 @@ export DESIGNBUILD="$TMPD/build"
 run() { # run <name> <extra kernel words>
     local name=$1; shift
     bash tools/design/eh6.sh "$TMPD/$name" res=$RES accel=kvm uiscale=$SCALE \
-        drehbuch=tools/cursor/dreh.txt extra="$*" > "$TMPD/$name.log" 2>&1
+        drehbuch=tools/cursor/script.txt extra="$*" > "$TMPD/$name.log" 2>&1
     grep -a "FEHLGESCHLAGEN\|NICHT DA" "$TMPD/$name.log" | head -3
     if [ -n "${KEEP:-}" ]; then mkdir -p "$KEEP/$name"; cp "$TMPD/$name"/*.ppm "$TMPD/$name"/serial.txt "$TMPD/$name.log" "$KEEP/$name"/ 2>/dev/null; fi
 }

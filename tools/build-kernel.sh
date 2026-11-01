@@ -85,7 +85,7 @@ if git status --porcelain 2>/dev/null | grep -q .; then
     FASSUNG_HASH="${FASSUNG_HASH:0:7}+"
 fi
 #
-python3 "$(dirname "$0")/marke-einsetzen.py" "$TMP" \
+python3 "$(dirname "$0")/brand-apply.py" "$TMP" \
     "$(dirname "$0")/../marke.conf" "$FASSUNG_HASH" "${IMAGE_ID:-dev}" || {
     echo "die Marke wurde NICHT eingesetzt -- Bau abgebrochen" >&2
     exit 1; }

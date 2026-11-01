@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 STICK_IMG=${STICK_IMG:?usage: STICK_IMG=<stick.img> bash tools/bootreg/stick.sh}
 pass=0; fail=0
 ok()  { echo "  OK    $1"; pass=$((pass+1)); }

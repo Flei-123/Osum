@@ -15,7 +15,7 @@ ROOT=$(pwd)
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" 2>/dev/null' EXIT
 export DESIGNBUILD="$TMPD/build"
-cat > "$TMPD/dreh.txt" <<'DREH'
+cat > "$TMPD/script.txt" <<'DREH'
 warteauf 'launcher: ready' || 120
 warte 8
 klick 300,600
@@ -97,7 +97,7 @@ foto a-end
 warte 12
 DREH
 run() { # run <outdir> <worktree>
-    (cd "$2" && DESIGNBUILD="$TMPD/build-$1" bash tools/design/eh6.sh "$TMPD/$1" accel=kvm moreprogs=term drehbuch="$TMPD/dreh.txt" > "$TMPD/$1.log" 2>&1)
+    (cd "$2" && DESIGNBUILD="$TMPD/build-$1" bash tools/design/eh6.sh "$TMPD/$1" accel=kvm moreprogs=term drehbuch="$TMPD/script.txt" > "$TMPD/$1.log" 2>&1)
     grep -a "FEHLGESCHLAGEN\|NICHT DA" "$TMPD/$1.log" | head -3
     [ -n "${KEEP:-}" ] && { mkdir -p "$KEEP/$1"; cp "$TMPD/$1/serial.txt" "$KEEP/$1"/; }
 }

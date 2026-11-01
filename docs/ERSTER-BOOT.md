@@ -63,7 +63,7 @@ Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265
 ## 6. Technik (fuer Entwickler)
 
 - Bau: `OSUM_BUILD_JOBS=6 /root/jarvis/bin/heavy bash tools/usbimg/build.sh <dir>` (Cache `/root/.osum-bcache`, ~2-5 min).
-- Gates: `STICK_IMG=<img> KERNEL=<osum.mb> heavy bash tools/ovmfboot/run.sh` (UEFI/OVMF, AHCI+NVMe), `bash tools/hwinv/run.sh`, `bash tools/hwinv/guest.sh`, `bash tools/install/abnahme.sh`, `bash tools/hwcheck/run.sh`.
+- Gates: `STICK_IMG=<img> KERNEL=<osum.mb> heavy bash tools/ovmfboot/run.sh` (UEFI/OVMF, AHCI+NVMe), `bash tools/hwinv/run.sh`, `bash tools/hwinv/guest.sh`, `bash tools/install/acceptance.sh`, `bash tools/hwcheck/run.sh`.
 - Zustandsdaten im Kern: `/proc/safe`, `/proc/firmware`, `/proc/pci`, `/proc/usb`.
 
 ## Fern-Test per USB-Tethering (Zwischenloesung bis WLAN laeuft)

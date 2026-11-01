@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvgaresize/run.sh -- the real desktop after host resolution changes (r1004), stick image, -vga vmware.
 # Sizes 1280x720 -> 1024x768 -> 1600x900 -> 1024x768 are requested through the VNC SetDesktopSize message (same kernel path as a

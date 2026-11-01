@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvga/desktop.sh -- VMSVGA driver on the REAL desktop (stick image, Limine, -smp 4, -vga vmware), 16.10.2026.
 #

@@ -5,7 +5,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 
 OUT=${1:-/tmp/osum-server}
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 GUI=off
 shift || true
 while [[ $# -gt 0 ]]; do

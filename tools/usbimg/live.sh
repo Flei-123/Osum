@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbimg/live.sh -- ROUND LIVE: THE ACCEPTANCE OF THE PUBLIC STICK.
 #
@@ -27,7 +27,7 @@
 #      questions being answered.
 #
 # The installation itself (GPT, copy, boot from the disk without the
-# stick, a file survives a restart) is tools/install/abnahme.sh, run with
+# stick, a file survives a restart) is tools/install/acceptance.sh, run with
 # BAU pointing at a public build -- see docs/LIVE-STICK.md.
 set -uo pipefail
 cd "$(dirname "$0")/../.."

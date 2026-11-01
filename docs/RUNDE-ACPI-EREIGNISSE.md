@@ -353,5 +353,5 @@ Namensraum       256 KiB Arena, ~90 KiB belegt -- nur gehalten, wenn es
 | `kernel/user/launcher.fi` | Taste öffnet das Energiemenü |
 | `tools/aml/pflichtenheft.py` | das gemessene Pflichtenheft |
 | `tools/aml/asl/`, `tools/acpiev/asl/` | die Tabellen als ASL-Quelltext |
-| `tools/acpiev/shot.sh`, `taste.sh` | die Abnahme mit Bildern |
+| `tools/acpiev/shot.sh`, `key.sh` | die Abnahme mit Bildern |
 | `tools/acpiev/brett.sh` | **was auf Justins Brett nachzumessen ist** |

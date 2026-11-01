@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/bench/gate.sh -- performance regression gate (budgets in tools/bench/budgets.json; regression = red).
 #

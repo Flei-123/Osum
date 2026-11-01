@@ -420,6 +420,6 @@ Meldung.
 `assets/icons/icons.map` + `lib/icons.fi` + `assets/osum-icons.ttf`
 (4 Glyphen), `locale/{de,en}/messages`, `tools/hda/mkmedia.sh`
 (`lang44`, `a4/b6`, `a5/b5`), `tools/hda/wavcheck.py`
-(`--von-ms`/`--bis-ms`), `tools/audio/mess.sh` (Plattengröße gerechnet,
+(`--von-ms`/`--bis-ms`), `tools/audio/measure.sh` (Plattengröße gerechnet,
 `TON_PLAYOPT`), `tools/design/capture.sh` (`ton=ja`), `test.sh`
 (Abschnitt 42), `docs/AUDIO.md` (Abschnitt 5b).

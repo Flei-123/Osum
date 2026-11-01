@@ -34,7 +34,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 FPS=${FPS:-40}
-DREH=${DREH:-$ROOT/tools/idlebudget/dreh.txt}   # DREH=<file>: another script (experiments with the measuring window)
+DREH=${DREH:-$ROOT/tools/idlebudget/script.txt}   # DREH=<file>: another script (experiments with the measuring window)
 
 run_tree() { # <tree> <out> [extra kernel words]
     local qp=$((20000 + RANDOM % 20000)) hp=$((40000 + RANDOM % 20000))

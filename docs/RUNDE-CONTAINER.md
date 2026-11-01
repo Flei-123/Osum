@@ -375,7 +375,7 @@ Ehrlich und vollstaendig:
 | `tools/container/run.sh` | neu | **52 passed, 0 failed** |
 | `tools/k17/run.sh` | 158 passed, 0 failed | **158 passed, 0 failed** |
 | `tools/hotplug/run.sh` | 45 / 0 | **45 passed, 0 failed** |
-| `tools/install/abnahme.sh` | 35 gruen / 0 rot | **35 gruen, 0 rot** |
+| `tools/install/acceptance.sh` | 35 gruen / 0 rot | **35 gruen, 0 rot** |
 
 ### Zwei Dinge, die dabei passiert sind, und beide gehoeren in den Bericht
 
@@ -395,7 +395,7 @@ also wurde ein zweiter Arbeitsbaum auf **demselben Ausgangscommit**
 
 | | Ausgangscommit `7e68da55` | dieser Zweig |
 |---|---|---|
-| `tools/install/abnahme.sh` | 35 gruen, 0 rot | 35 gruen, 0 rot |
+| `tools/install/acceptance.sh` | 35 gruen, 0 rot | 35 gruen, 0 rot |
 
 Der erste Lauf war an `installer: step=5` stehengeblieben, und von dort
 fielen alle spaeteren Abschnitte um (keine `limine.conf`, kein Start von

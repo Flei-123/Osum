@@ -21,7 +21,7 @@ dann jedem roten Laeufer nachgegangen, bis die Ursache feststand.
 | `audio/mischer` | -- | 25/0 | A-025 (`systemklaenge`) |
 | `build-kernel.sh --gui off` | rc=1 | rc=0 | A-027 |
 
-Pflicht-Abnahmen nach allen Kernaenderungen: `install/abnahme.sh` 35/0,
+Pflicht-Abnahmen nach allen Kernaenderungen: `install/acceptance.sh` 35/0,
 `hotplug` 45/0, `clip2` 32/0, `check-ui` PASSED, `anim-ab` anim=4.
 
 ## Der eine Fund, der wirklich Schaden anrichtete: A-025

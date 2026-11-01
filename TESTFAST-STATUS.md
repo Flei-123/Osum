@@ -13,7 +13,7 @@ Messbaum), `/root/tf-vor` (Gegenprobe auf reinem `mergeline`).
 ## DAS WICHTIGSTE IN DREI SAETZEN
 
 1. Die Parallelisierung von `test.sh` steht, ist mit einer eigenen
-   Pruefung im Repo belegt (`tools/lib/sched-pruef.sh`, alles gruen) und
+   Pruefung im Repo belegt (`tools/lib/sched-check.sh`, alles gruen) und
    ist der Hebel, der immer wirkt.
 2. KVM hat auf dem Kernelstand `e9fcc1c` **zwanzig von dreissig
    Abschnitten rot gemacht** und die Abnahme dabei sogar VERLANGSAMT
@@ -106,7 +106,7 @@ darum herum. **Das hat sich ausgezahlt:** der Merge von `mergeline`
 (inklusive der neuen `lauf`-Zeile fuer `tools/kvm/run.sh`) lief
 **konfliktfrei** durch, `test.sh` bekam genau `+1` Zeile.
 
-### 3. Die Parallelmaschinerie ist gepruefft -- `tools/lib/sched-pruef.sh`
+### 3. Die Parallelmaschinerie ist gepruefft -- `tools/lib/sched-check.sh`
 
 Sieben Stub-Laeufer mit bekannten Schlafzeiten, einer faellt absichtlich
 durch, zwei liegen unter `tools/net/` und `tools/netmon/`. Die Pruefung

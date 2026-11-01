@@ -297,7 +297,7 @@ klassische X11-Zeiger, dessen Schwanz sich in zwei Beine gabelt; in
 Hexadezimalzahlen geschrieben sieht das aus wie ein Pfeil und auf dem
 Schirm wie Bruchstücke.
 
-**Der neue Pfeil ist nicht von Hand gerechnet.** In `tools/wm/zeiger.py`
+**Der neue Pfeil ist nicht von Hand gerechnet.** In `tools/wm/cursor.py`
 steht eine Silhouette — je Zeile genau ein Bereich —, und die Füllung
 ist ihre **Erosion** um einen Bildpunkt in den vier Richtungen; was
 übrigbleibt, ist der Rand und ist damit überall genau einen Bildpunkt

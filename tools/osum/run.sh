@@ -502,7 +502,7 @@ for _ in $(seq 1 200); do
     sleep 0.2
 done
 if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/null; then
-    python3 tools/lib/tasten.py "$TMPD/mon.sock" "$TMPD/kbd.txt" \
+    python3 tools/lib/keys.py "$TMPD/mon.sock" "$TMPD/kbd.txt" \
         l s ret | sed 's/^/        /'
     wait $qemu_pid 2>/dev/null
     rc=$(cat "$TMPD/kbd.rc" 2>/dev/null || echo 99)

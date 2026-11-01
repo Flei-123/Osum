@@ -11,8 +11,8 @@ MODDIR = os.path.join(HERE, "..", "module")
 sys.path.insert(0, MODDIR)
 from mkomod import ed25519_sign  # noqa: E402
 
-SEED_PATH = os.path.join(MODDIR, "pruef.seed")
-PUB_PATH = os.path.join(MODDIR, "pruef.pub")
+SEED_PATH = os.path.join(MODDIR, "verify.seed")
+PUB_PATH = os.path.join(MODDIR, "verify.pub")
 MAX_INF = 1536
 MAX_MATCH = 8
 KEYS = ("name", "version", "abi", "rank", "module", "rights", "fw", "slot", "match")

@@ -255,7 +255,7 @@ Voraussetzung: ein Arbeitsbaum der Grundlinie und
 `SOFTUIBASEPPM=<pfad zum classic-Bild der Grundlinie>`.
 
 Werkzeuge dieser Runde in `tools/softui/`:
-`run.sh`, `gleich.py` (Bildpunktvergleich), `check.py` (Bild gegen
+`run.sh`, `equal.py` (Bildpunktvergleich), `check.py` (Bild gegen
 Mitschnitt), `knoepfe.py` (die drei Zeichen und der rote Knopf),
-`fokus.py` (Schattentiefe aktiv/inaktiv), `kontrast.py` und `titel.py`
+`fokus.py` (Schattentiefe aktiv/inaktiv), `contrast.py` und `title.py`
 (WCAG aus dem Bild), `hover.py` (Zeiger fahren ohne Klick).

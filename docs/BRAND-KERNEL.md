@@ -2,7 +2,7 @@
 
 Source of truth: `marke.conf` (PRODUKT, KERN, HERSTELLER, KURZ, WEB, FEED). Environment `OSUM_MARKE_<FIELD>` overrides it at build time. Defaults: product `XoffiOS`, slug `xoffi`, kernel name `Osum`.
 
-`tools/marke-einsetzen.py` writes the values into `kernel/lib/brand.fi` (`s_product`, `s_core`, `s_vendor`, `s_slug`, `s_web`, `s_feed`). The kernel version line is `<KERN lowercase> <hash>` (default `osum <hash>`), so tools that grep `osum <hash>` keep working.
+`tools/brand-apply.py` writes the values into `kernel/lib/brand.fi` (`s_product`, `s_core`, `s_vendor`, `s_slug`, `s_web`, `s_feed`). The kernel version line is `<KERN lowercase> <hash>` (default `osum <hash>`), so tools that grep `osum <hash>` keep working.
 
 ## Accessors
 - Kernel (`import lib.brand`): `brand.product()`, `brand.slug()`, `brand.vendor()`, `brand.web()`, `brand.core()`, `brand.feed()` (NUL-terminated pointers, `_n()` variants give the length), `brand.append(dst, at, src, limit)`.

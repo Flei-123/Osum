@@ -31,7 +31,7 @@ export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-$(mktemp -d /tmp/time-boot.XXXXXX)}
 trap '[ -n "${NTPPID:-}" ] && kill "$NTPPID" 2>/dev/null; [ "${KEEP:-0}" = 1 ] || rm -rf "$OUT"' EXIT
 mkdir -p "$OUT"
-. "$ROOT/tools/lib/sperre.sh" && osum_sperre "$OUT"
+. "$ROOT/tools/lib/lock.sh" && osum_sperre "$OUT"
 export OUT
 PORT=${TIME_PORT:-$(( 13000 + ($$ % 900) ))}
 export OSUM_CPU=${OSUM_CPU:-Haswell}

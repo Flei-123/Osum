@@ -9,7 +9,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 SCALES=${*:-"1 2"}
 
-cat > "$TMPD/dreh.txt" <<'EOF'
+cat > "$TMPD/script.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
 warte 5
 taste meta_l-a
@@ -60,7 +60,7 @@ check_scale() {
     # a key press that is lost on a loaded host (no `qs: open`) is tried once more
     for try in 1 2; do
         rm -rf "$D"
-        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$MODE accel=kvm tafel=nein drehbuch="$TMPD/dreh.txt" \
+        bash tools/design/eh6.sh "$D" res=$res uiscale=$sc mode=$MODE accel=kvm tafel=nein drehbuch="$TMPD/script.txt" \
             > "$TMPD/s$sc.log" 2>&1
         grep -aq 'qs: open ' "$D/serial.txt" 2>/dev/null && break
         echo "        (try $try: the panel did not open)"

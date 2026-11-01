@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """tools/cursor/check.py <outdir> <log> <serial> <scale> -- W-CURSOR checks.
 
-For every `foto NN-name` of tools/cursor/dreh.txt the picture is cut around the
+For every `foto NN-name` of tools/cursor/script.txt the picture is cut around the
 pointer's hot spot (the spot the drehbuch moved to is in the drive log as
 `fahrekante id=7 <where> -> X,Y`) and each of the ten shapes is rendered
-here from the SAME outlines the kernel uses (tools/wm/zeiger2.py), at the
+here from the SAME outlines the kernel uses (tools/wm/cursor2.py), at the
 target size (24 px * scale). The score of a shape is how many of its sure
 rim pixels are white and sure core pixels dark in the picture, minus the
 white/dark ink in the box that the shape does not explain. The best shape must

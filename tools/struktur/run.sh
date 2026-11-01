@@ -7,7 +7,7 @@ FEHLER=0
 
 # ---------------------------------------------------------------- 1. Ablage
 echo "== 1. die Ablage: liegt jede Datei an ihrem Platz? =="
-A=$(python3 tools/struktur/ablage.py --pruefen 2>&1)
+A=$(python3 tools/structure/filing.py --pruefen 2>&1)
 ARC=$?
 echo "$A" | head -40
 if (( ARC != 0 )); then
@@ -46,14 +46,14 @@ PROBE=$(mktemp -d)
 trap 'rm -rf "$PROBE"' EXIT
 cp -a kernel "$PROBE/kernel" || exit 1
 mkdir -p "$PROBE/tools/struktur"
-cp tools/struktur/ablage.py tools/struktur/ablage.txt \
+cp tools/structure/filing.py tools/structure/filing.txt \
    tools/struktur/erhebung.py tools/struktur/schichten.txt \
-   tools/struktur/huelle.py "$PROBE/tools/struktur/" || exit 1
+   tools/structure/shell.py "$PROBE/tools/struktur/" || exit 1
 
-VORHER=$(cd "$PROBE" && python3 tools/struktur/ablage.py --pruefen 2>&1 |
+VORHER=$(cd "$PROBE" && python3 tools/structure/filing.py --pruefen 2>&1 |
          sed -n 's/^Ablage: [0-9]* Dateien am richtigen Ort, \([0-9]*\) am falschen.*$/\1/p')
 mv "$PROBE/kernel/drv/blk/ahci.fi" "$PROBE/kernel/ahci.fi" 2>/dev/null
-NACHHER=$(cd "$PROBE" && python3 tools/struktur/ablage.py --pruefen 2>&1 |
+NACHHER=$(cd "$PROBE" && python3 tools/structure/filing.py --pruefen 2>&1 |
           sed -n 's/^Ablage: [0-9]* Dateien am richtigen Ort, \([0-9]*\) am falschen.*$/\1/p')
 echo "ahci.fi kuenstlich nach kernel/ zurueckgelegt: vorher $VORHER, nachher $NACHHER"
 if [[ -z $VORHER || -z $NACHHER ]]; then

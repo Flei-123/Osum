@@ -6,7 +6,7 @@ export FIRNLIB="$ROOT/lib"
 . tools/lib/qemu.sh
 OUT=${OUT:-/tmp/wrace-run}
 mkdir -p "$OUT"
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"
 export OUT
 ROUNDS=${1:-2}
 PROCS=4

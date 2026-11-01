@@ -271,7 +271,7 @@ während des Haltens statt eines am Ende.
 
 | Abnahme | Stand |
 |---|---|
-| `tools/install/abnahme.sh` | **35 grün, 0 rot**, RC=0 |
+| `tools/install/acceptance.sh` | **35 grün, 0 rot**, RC=0 |
 | `tools/clip2/run.sh` | **32 grün, 0 rot**, RC=0 |
 | `tools/hotplug/run.sh` | **45 passed, 0 failed**, RC=0 |
 | `tools/logind/run.sh` | **49 bestanden, 0 gescheitert**, RC=0 (mit `UITRACE=1`) |

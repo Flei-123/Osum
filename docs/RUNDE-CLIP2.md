@@ -148,7 +148,7 @@ Behoben mit `copy_remember(true)`.
 `bash tools/clip2/run.sh` — eine Maschine, ein Drehbuch mit **echten
 Maus-Ereignissen** (`ziehvon`: drücken, in acht Schritten fahren,
 loslassen), serielle Leitung gegen die Erwartung, und das
-**Plattenabbild danach vom Wirt gelesen** (`tools/clip2/lies.py`, auf
+**Plattenabbild danach vom Wirt gelesen** (`tools/clip2/read.py`, auf
 dem Leser aus `tools/fsrobust/check.py`).
 
 ### Die Kette, wie sie auf der Leitung steht
@@ -227,7 +227,7 @@ gegen die.
 | Datei | Was |
 |---|---|
 | `tools/clip2/run.sh` | die Abnahme, 32 Punkte, mit Gegenprobe |
-| `tools/clip2/lies.py` | liest das Abbild vom Wirt: Pfad, Inode, Inhalt |
+| `tools/clip2/read.py` | liest das Abbild vom Wirt: Pfad, Inode, Inhalt |
 | `tools/design/drive.py` | neuer Drehbuchbefehl `ziehvon <quelle> <ziel>` — von der Mitte eines gemeldeten Rechtecks in die Mitte eines zweiten |
 | `tools/design/capture.sh` | neuer Schalter `vorherbild=ja` |
 

@@ -45,7 +45,7 @@ Firn liest von einer Wurzel aus über `import` den ganzen Baum. Alles,
 was von keiner der beiden Wurzeln erreichbar ist, liegt zwar im
 Verzeichnis, ist aber **nicht im Abbild**.
 
-`tools/struktur/huelle.py` rechnet das aus:
+`tools/structure/shell.py` rechnet das aus:
 
 | Menge | Dateien | Zeilen |
 |---|---:|---:|
@@ -471,7 +471,7 @@ der Läufe unter Fremdlast (Load 20–55).
 |---|---|---|---|
 | `tools/k17/run.sh` | **158 passed, 0 failed** | 158/0 | ✅ |
 | `tools/hotplug/run.sh` | **45 passed, 0 failed** | 45/0 | ✅ |
-| `tools/install/abnahme.sh` | **35 grün, 0 rot** | 35/0 | ✅ |
+| `tools/install/acceptance.sh` | **35 grün, 0 rot** | 35/0 | ✅ |
 | `tools/core/run.sh` | 46 proofs, 0 failures | — | ✅ |
 | `tools/caps/run.sh` | 67 passed, 0 failed | — | ✅ |
 | `tools/struktur/run.sh` | STRUKTUR OK, Gegenprobe 47→48 | — | ✅ |
@@ -504,7 +504,7 @@ Messfehler des Vergleichs, kein Befund.
 | Datei | was sie tut |
 |---|---|
 | `tools/struktur/erhebung.py` | liest alle `.fi`, baut den Graphen, findet Zyklen (Tarjan), misst die Regel. `--json`, `--pruefen` |
-| `tools/struktur/huelle.py` | trennt KERN / UPROG / AUSSEN. `--liste kern` |
+| `tools/structure/shell.py` | trennt KERN / UPROG / AUSSEN. `--liste kern` |
 | `tools/struktur/schichten.txt` | die Zuordnung Modul → Schicht und die Ränge |
 | `tools/struktur/run.sh` | die Prüfung mit Deckel und Gegenprobe |
 | `tools/struktur/verschiebe.sh` | zieht **ein** Modul um, passt nur die import-Zeilen an |
@@ -549,15 +549,15 @@ tools/kpfad.sh            # dieselbe Auskunft als Shell-Funktion kfi
 Genau ein Treffer, sonst Code 1 und eine Meldung. `kernel/user/` und
 `kernel/app/` bleiben außen vor, weil dort Namen doppelt vorkommen.
 
-`tools/build-kernel.sh` und `tools/marke-einsetzen.py` buchstabieren
+`tools/build-kernel.sh` und `tools/brand-apply.py` buchstabieren
 keine Pfade mehr: `ersetze()`/`weg()` suchen Stummel und Ziel im
 Kopierbaum, `finde()` sucht `brand.fi` und `version.fi`. Damit
 überlebt der Bau jeden weiteren Umzug.
 
 ## 11. Die Ablage
 
-`tools/struktur/ablage.txt` sagt für **jede** der 138 Kerndateien, wo
-sie liegen soll; `ablage.py` vergleicht Soll und Ist.
+`tools/structure/filing.txt` sagt für **jede** der 138 Kerndateien, wo
+sie liegen soll; `filing.py` vergleicht Soll und Ist.
 
 ```
 Ablage: 138 Dateien am richtigen Ort, 0 am falschen, 0 ohne Soll, 0 vermisst
@@ -663,7 +663,7 @@ der Läufer misst still etwas Falsches oder wird rot.
 > Der Übersetzer sagt es einem, wenn ein `import` ins Leere zeigt.
 > Ein `grep` sagt gar nichts.
 
-`tools/struktur/tote-pfade.sh` sucht solche Stellen und nennt zu jeder
+`tools/structure/dead-paths.sh` sucht solche Stellen und nennt zu jeder
 den neuen Ort:
 
 | | Stellen |
@@ -688,7 +688,7 @@ K_KSTATE=$(kfi kstate) || exit 1
 Damit überlebt der Läufer auch den nächsten Umzug.
 
 **Was bewusst stehen bleibt:** 5 Nennungen in **Python-Docstrings**
-(`zeiger2.py`, `tasten.py`, `symtab.py`, `syscalls.py`) — Prosa, kein
+(`zeiger2.py`, `keys.py`, `symtab.py`, `syscalls.py`) — Prosa, kein
 Code. Und 232 Nennungen in `tools/english/*.tsv`: das sind die
 Umbenennungstafeln der Runde ENGLISCH, ein **Protokoll von damals**,
 das die Pfade von damals nennen soll.
@@ -761,9 +761,9 @@ GRUEN: die Richtungspruefung schlaegt an (47 -> 48).
 
 > **Gegenprobe A hat sich sofort bezahlt gemacht.** Beim ersten Lauf
 > meldete sie `vorher 0, nachher 0` — **rot**. Der Grund war ein echter
-> Fehler in `ablage.py`: eine an den falschen Ort gelegte Datei fällt
+> Fehler in `filing.py`: eine an den falschen Ort gelegte Datei fällt
 > aus der Erreichbarkeit heraus (ihr `import` zeigt ins Leere) und war
-> damit **unsichtbar**. `ablage.py` liest den Baum jetzt zusätzlich
+> damit **unsichtbar**. `filing.py` liest den Baum jetzt zusätzlich
 > flach und meldet Vermisste. Ohne Gegenprobe wäre diese Lücke
 > unbemerkt geblieben — und das Skript hätte für immer „OK" gesagt.
 

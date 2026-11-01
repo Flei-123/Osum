@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/fullhd/run.sh -- r1226: Full HD (1920x1080 / 1920x1200 / 1366x768 / 1024x768) on the vmware card: the desktop AND the taskbar fill the
 # WHOLE screen, and the stride (pitch) is width*4. Boss bug: "vmsvga draws only a small rectangle at 1920x1080/1920x1200, 1024x768 works"

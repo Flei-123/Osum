@@ -12,7 +12,7 @@ for smp in 1 4; do
     for i in $(seq 1 "$LAEUFE"); do
       d="$OUT/$smp-$q-$i"
       TON_PLAYOPT="-w 6" TON_KEEP=1 TON_TMPD="$d" \
-        timeout 2400 bash tools/audio/mess.sh /lang44.wav "$smp" "$q" \
+        timeout 2400 bash tools/audio/measure.sh /lang44.wav "$smp" "$q" \
         > "$OUT/$smp-$q-$i.log" 2>&1
       g() { grep -oaE "$2: *[0-9]+" "$OUT/$smp-$q-$i.log" | tail -1 | grep -oE '[0-9]+$'; }
       gp=$(grep -oaE 'gaps=[0-9]+' "$OUT/$smp-$q-$i.log" | tail -1 | grep -oE '[0-9]+$')

@@ -31,9 +31,9 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if [ -z "${OLD:-}" ]; then
     C="$T/tree/kernel/lib"; mkdir -p "$C"
     cp kernel/lib/version.fi kernel/lib/brand.fi "$C/"
-    python3 tools/marke-einsetzen.py "$T/tree" marke.conf abcd1234 > "$T/m1.txt" 2>&1
+    python3 tools/brand-apply.py "$T/tree" marke.conf abcd1234 > "$T/m1.txt" 2>&1
     grep -q "image id 'dev'" "$T/m1.txt" && ok "build tool: default image id is dev" || bad "build tool: default image id"
-    python3 tools/marke-einsetzen.py "$T/tree" marke.conf abcd1234 "a b" > "$T/m2.txt" 2>&1 \
+    python3 tools/brand-apply.py "$T/tree" marke.conf abcd1234 "a b" > "$T/m2.txt" 2>&1 \
         && bad "build tool: an image id with a blank is refused" || ok "build tool: an image id with a blank is refused"
 fi
 

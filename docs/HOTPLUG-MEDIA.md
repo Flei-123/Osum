@@ -252,7 +252,7 @@ K17. `usb_hold` hält deshalb **genau einmal** (`hold_getan`).
 
 ## Die Bilder
 
-`bash tools/hotplug/bild-term.sh` — drei Bildschirmfotos aus **einer**
+`bash tools/hotplug/image-term.sh` — drei Bildschirmfotos aus **einer**
 laufenden Maschine, `docs/shots/hotplug/`:
 
 | Bild | was darauf steht |
@@ -300,7 +300,7 @@ haben; drei verschiedene Bilder aus einem Lauf können es nicht.
 | `tools/hotplug/run.sh` | **neu** — die Abnahme, 33/0 |
 | `tools/hotplug/monitor.py` | **neu** — `device_add`/`device_del` |
 | `tools/hotplug/lauf.sh` | **neu** — ein Lauf mit Drehbuch |
-| `tools/hotplug/bild-term.sh` | **neu** — die drei Bilder |
+| `tools/hotplug/image-term.sh` | **neu** — die drei Bilder |
 | `tools/hotplug/bilder.sh` | **neu** — der Versuch im Dateimanager |
 | `tools/kernel/memmap.py` | `WECHSEL` in der Karte |
 | `locale/{de,en}/messages` | die fünf Texte des Knopfes |

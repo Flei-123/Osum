@@ -62,7 +62,7 @@ out brings the normal sign-in screen (live / live), not a loop.
 4. Entry 2: the installer opens on the live desktop, sees `/dev/hda`, and
    writes nothing without the two confirmations.
 
-The installation itself is `tools/install/abnahme.sh` with `BAU=` a public
+The installation itself is `tools/install/acceptance.sh` with `BAU=` a public
 build (`SCHNELL=1`): install onto an empty disk, boot it through OVMF without
 the stick, a file survives a restart.
 

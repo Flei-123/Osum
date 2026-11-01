@@ -12,7 +12,7 @@
 #                new version published by tools/ota/veroeffentlichen.py).
 #
 # What it measures (everything on an INSTALLED disk, because the stick root is RAM):
-#   1. install the image on an empty disk (the real /bin/installer, as abnahme.sh)
+#   1. install the image on an empty disk (the real /bin/installer, as acceptance.sh)
 #   2. image with version 0 sees the new feed (suchen)
 #   3. einspielen installs the packages, generation switches
 #   4. reboot from the disk: erprobung, bestaetigen, second search says "aktuell"

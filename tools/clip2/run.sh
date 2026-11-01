@@ -128,7 +128,7 @@ else
     #
     VOR=""
     if [ -s "$OUT/lauf/disk.img.vorher" ]; then
-        VOR=$(python3 tools/clip2/lies.py "$OUT/lauf/disk.img.vorher" \
+        VOR=$(python3 tools/clip2/read.py "$OUT/lauf/disk.img.vorher" \
               2>/dev/null \
               | grep -oE '^da /data/alpha\.txt ino=[0-9]+' \
               | grep -oE '[0-9]+$')
@@ -138,7 +138,7 @@ else
     else
         bad "MEASUREMENT INCOMPLETE: the inode before the run is not readable"
     fi
-    python3 tools/clip2/lies.py "$IMG" ${VOR:+"$VOR"} \
+    python3 tools/clip2/read.py "$IMG" ${VOR:+"$VOR"} \
         > "$OUT/platte.txt" 2>"$OUT/platte.err"
     if [ -s "$OUT/platte.txt" ]; then
         cat "$OUT/platte.txt"
@@ -206,7 +206,7 @@ else
                         "GEGENPROBE: ohne drop_an legt der Dateimanager nichts ab"
                     GIMG="$GEG/lauf/disk.img"
                     if [ -s "$GIMG" ]; then
-                        python3 tools/clip2/lies.py "$GIMG" \
+                        python3 tools/clip2/read.py "$GIMG" \
                             > "$GEG/platte.txt" 2>/dev/null
                         grep -qE '^da /data/alpha\.txt ' "$GEG/platte.txt" \
                             && ok "GEGENPROBE: alpha.txt blieb in /data" \

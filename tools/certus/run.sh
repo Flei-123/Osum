@@ -9,7 +9,7 @@ ROOT=$(pwd)
 SCHNELL=0
 if [ "${1:-}" = "--schnell" ]; then SCHNELL=1; shift; fi
 OUT=${1:-/tmp/certus}
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 export OUT
 mkdir -p "$OUT"
 SHOTS=${CERTUS_SHOTS:-docs/shots/certus}
@@ -239,8 +239,8 @@ if [ -s "$OUT/js.ppm" ]; then
     python3 tools/certus/pixel.py "$OUT/js.ppm" --json "$OUT/js.json" | sed 's/^/        /'
     JT=$(python3 -c "import json;print(json.load(open('$OUT/js.json'))['tintenpunkte'])")
     num "JS-Seite: Tintenpunkte" "$JT" ge 3000
-    ROT=$(python3 tools/certus/farbe.py "$OUT/js.ppm" cc0000)
-    BLAU=$(python3 tools/certus/farbe.py "$OUT/js.ppm" 0033aa)
+    ROT=$(python3 tools/certus/color.py "$OUT/js.ppm" cc0000)
+    BLAU=$(python3 tools/certus/color.py "$OUT/js.ppm" 0033aa)
     num "der Kasten ist ROT -- das Skript hat style.backgroundColor gesetzt" "$ROT" ge 5000
     num "und NICHT mehr blau (die Farbe aus dem Quelltext)" "$BLAU" eq 0
     mkdir -p "$SHOTS"

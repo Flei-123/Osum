@@ -92,7 +92,7 @@ Zeichenweg (GLYPHE), 43 Systembus, 44 Kernprotokoll.
 
 ## Zwei Bauskripte, die am Zusammenfuehren gestorben sind
 
-1. **`tools/clockwork/bauen.sh`** — `mkfs: '/bin/taskmgr' gibt es nicht`.
+1. **`tools/clockwork/build.sh`** — `mkfs: '/bin/taskmgr' gibt es nicht`.
    Der Zweig entstand, bevor `assets/apps/taskmgr.osp` da war; sein
    `bundle.py`-Aufruf nimmt JEDES Buendel, seine Programmliste kennt
    `taskmgr` aber nicht. Genau dieser Fall steht schon in

@@ -106,7 +106,7 @@ capture() { # tree out progs extra drehscript imgfiles
 }
 
 FILES_PROGS="desktop taskbar launcher settings theme explorer sh echo ls cat runbox xclip sleep"
-capture "$ROOT" "$OUT/files" "$FILES_PROGS" 'nostart wigapp=/bin/explorer' dreh-files.sh ""
+capture "$ROOT" "$OUT/files" "$FILES_PROGS" 'nostart wigapp=/bin/explorer' script-files.sh ""
 F="$OUT/files/serial.txt"
 has "$F" "explorer: clip n=8 schnitt=0 rc=0" "explorer: Ctrl+A, Ctrl+C put 8 paths on the bus"
 has "$F" "xclip: types mask=16 have=16" "the bus holds a text/uri-list (type bit 16), nothing else"
@@ -123,7 +123,7 @@ disk_same() { # image
 }
 disk_same "$OUT/files/disk.img" && ok "the host finds /data/bilder/beta.txt in the image with the same content" || bad "the pasted file is missing or differs"
 
-capture "$ROOT" "$OUT/image" "desktop taskbar launcher explorer viewer sh echo runbox xclip sleep" 'nostart wigapp=/bin/viewer,/a.png' dreh-image.sh \
+capture "$ROOT" "$OUT/image" "desktop taskbar launcher explorer viewer sh echo runbox xclip sleep" 'nostart wigapp=/bin/viewer,/a.png' script-image.sh \
     "/a.png=$OUT/png/a.png@0644 /b.png=$OUT/png/b.png@0644"
 I="$OUT/image/serial.txt"
 has "$I" "viewer: clip offer 0" "viewer: Ctrl+C offers the picture"
@@ -138,7 +138,7 @@ has "$I" "viewer: clip paste 248 w=40 h=30" "viewer: Ctrl+V opens the picture an
 
 term_once() { # tree out
     cd "$1" && rm -rf "$2" && DESIGNBUILD="$2.build" bash tools/design/eh6.sh "$2" accel=kvm moreprogs="nedit xclip runbox" \
-        xfile="/note.sh=$ROOT/tools/xfer/note.sh" drehbuch="$ROOT/tools/xfer/dreh-term.txt"
+        xfile="/note.sh=$ROOT/tools/xfer/note.sh" drehbuch="$ROOT/tools/xfer/script-term.txt"
 }
 capture_term() { # tree out
     ( try_thrice "$2.log" term_once "$@" )
@@ -155,7 +155,7 @@ T2="$OUT/mut-explorer"
 mkdir -p "$T2"; tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$T2" -xf -
 sed -i 's/        let _l: u64 = expakt.load_from_bus()/        let _l: u64 = 0/' "$T2/kernel/user/explorer.fi"
 if cmp -s "$T2/kernel/user/explorer.fi" "$ROOT/kernel/user/explorer.fi"; then bad "explorer mutant: the sed expression changed nothing"; else
-    capture "$T2" "$OUT/files-mut" "$FILES_PROGS" 'nostart wigapp=/bin/explorer' dreh-files.sh ""
+    capture "$T2" "$OUT/files-mut" "$FILES_PROGS" 'nostart wigapp=/bin/explorer' script-files.sh ""
     hasnt "$OUT/files-mut/serial.txt" "explorer: paste n=1 sprung=0 pos=0 rc=0" "mutant: without the bus the paste is NOT the other program's one file"
 fi
 rm -rf "$T2"

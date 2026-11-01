@@ -32,7 +32,7 @@ export FIRNLIB="$ROOT/lib"
 . tools/lib/qemu.sh
 OUT=${OUT:-/tmp/time-run}
 mkdir -p "$OUT"
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"
 export OUT
 PORT=${TIME_PORT:-$(( 12000 + ($$ % 900) ))}
 export OSUM_CPU=${OSUM_CPU:-Haswell}

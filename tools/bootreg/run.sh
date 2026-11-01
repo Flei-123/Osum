@@ -5,7 +5,7 @@
 # Env: KEEP=1 keeps the work dir.
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 pass=0; fail=0
 ok()  { echo "  OK    $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL  $1"; fail=$((fail+1)); }

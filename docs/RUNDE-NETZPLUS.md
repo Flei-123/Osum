@@ -129,7 +129,7 @@ geht es nicht, und **groesser** wird die MSS durch ICMP nie.
 
 ## 3. Gemessen
 
-Prüfstand: `tools/netzplus/run.sh` (Mechanik in `tools/netzplus/mess.sh`),
+Prüfstand: `tools/netzplus/run.sh` (Mechanik in `tools/netzplus/measure.sh`),
 Bauart wie Runde K8 — Osum in QEMU auf virtio-net, UDP zur Bruecke,
 AF_PACKET auf ein veth-Paar, Linux im eigenen Namensraum, `tc netem` fuer
 Verzoegerung und Verlust. **Verzoegerung ist der Punkt:** ueber loopback
@@ -205,7 +205,7 @@ tools/netzplus/run.sh   39 passed, 0 failed
 tools/net/run.sh        75 passed, 0 failed   (der Laeufer der Runde K8)
 tools/k17/run.sh       158 passed, 0 failed   (Sollwert 158/0)
 tools/hotplug/run.sh    45 passed, 0 failed   (Sollwert 45/0)
-tools/install/abnahme.sh 35 gruen, 0 rot      (Sollwert 35/0)
+tools/install/acceptance.sh 35 gruen, 0 rot      (Sollwert 35/0)
 ```
 
 `tools/net/run.sh` ist der wichtigste dieser vier, weil ihn diese Runde

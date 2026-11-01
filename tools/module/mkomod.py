@@ -167,7 +167,7 @@ def bauen(argv):
     name = "unbenannt"
     abi = 1
     seedpfad = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "pruef.seed")
+                            "verify.seed")
     kein_sig = False
     sig_dreh = False
     nutz_dreh = -1
@@ -257,7 +257,7 @@ def zeigen(argv):
     print("name      %s" % d[32:64].split(b"\0")[0].decode())
     print("laenge    %d (erwartet %d)" % (len(d), HDR + n + SIGLEN))
     seedpfad = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "pruef.seed")
+                            "verify.seed")
     if os.path.exists(seedpfad):
         seed = open(seedpfad, "rb").read()
         from cryptography.hazmat.primitives.asymmetric.ed25519 import (

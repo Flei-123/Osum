@@ -42,7 +42,7 @@ KEEP=${1:-}
 OWN_OUT=0
 if [ -z "${OUT:-}" ]; then OUT=$(mktemp -d "${TMPDIR:-/tmp}/osupdate-run.XXXXXX"); OWN_OUT=1; fi
 mkdir -p "$OUT"
-. "$ROOT/tools/lib/sperre.sh" && osum_sperre "$OUT"
+. "$ROOT/tools/lib/lock.sh" && osum_sperre "$OUT"
 export OUT
 PORT=${OSU_PORT:-$(( 18000 + ($$ % 900) ))}
 NETZ="nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0"

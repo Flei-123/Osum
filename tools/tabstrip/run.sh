@@ -4,7 +4,7 @@
 #
 #   bash /root/jarvis/bin/heavy bash tools/tabstrip/run.sh [<belege directory>]
 #
-# One machine (tools/design/audit.sh, KVM), the drehbuch tools/tabstrip/dreh.txt: open the file manager, a second tab, click each
+# One machine (tools/design/audit.sh, KVM), the drehbuch tools/tabstrip/script.txt: open the file manager, a second tab, click each
 # tab, drag from a tab (the window must stay), drag from the empty part of the strip (it must move by the pointer's way), double
 # click (maximise, restore), the three caption buttons over the strip. tools/tabstrip/check.py reads the serial log and the pictures.
 # COUNTER-PROOF: the same run with the kernel word `nostrip` (the server refuses the strip) must FAIL the checks of the strip,
@@ -15,12 +15,12 @@ BEL=${1:-}
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD" "$TMPD-build"' EXIT
 export DESIGNBUILD="$TMPD-build"
-bash tools/design/audit.sh "$TMPD/o" accel=kvm uitrace=yes halt=420 drehbuch="$(pwd)/tools/tabstrip/dreh.txt" > "$TMPD/run.log" 2>&1
+bash tools/design/audit.sh "$TMPD/o" accel=kvm uitrace=yes halt=420 drehbuch="$(pwd)/tools/tabstrip/script.txt" > "$TMPD/run.log" 2>&1
 grep -a "FEHLGESCHLAGEN\|NICHT DA\|KEIN RECHTECK\|KEINE" "$TMPD/run.log" | head -5
 python3 tools/tabstrip/check.py "$TMPD/o" ${BEL:+"$BEL"} | tee "$TMPD/fix.txt"
 f1=$(grep -c '^  FAIL' "$TMPD/fix.txt"); o1=$(grep -c '^  OK' "$TMPD/fix.txt")
 echo "== counter-proof: the server refuses the strip (kernel word nostrip) =="
-bash tools/design/audit.sh "$TMPD/n" accel=kvm uitrace=yes halt=420 extra=nostrip drehbuch="$(pwd)/tools/tabstrip/dreh.txt" > "$TMPD/run2.log" 2>&1
+bash tools/design/audit.sh "$TMPD/n" accel=kvm uitrace=yes halt=420 extra=nostrip drehbuch="$(pwd)/tools/tabstrip/script.txt" > "$TMPD/run2.log" 2>&1
 python3 tools/tabstrip/check.py "$TMPD/n" | tee "$TMPD/old.txt"
 f2=$(grep -c '^  FAIL' "$TMPD/old.txt")
 echo "== Ctrl+N opens a second file manager window =="

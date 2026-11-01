@@ -378,9 +378,9 @@ dieselbe wie bei einem offenen Kanal.
 | `kernel/tip-off.fi` | dieselbe Schnittstelle, die „es gibt sie nicht" sagt |
 | `kernel/user/settings.fi` | der elfte Reiter: Zustand sehen, Brücke abschalten |
 | `tools/bridge2/echt.sh` | 18 Zusagen gegen store.fleitec.com |
-| `tools/bridge2/kette.sh` | Osum in QEMU → Anschluss → Dienst → Bild |
+| `tools/bridge2/chain.sh` | Osum in QEMU → Anschluss → Dienst → Bild |
 | `tools/bridge2/abriss.sh` | Wiederverbindung, mit Zeitabständen |
-| `tools/bridge2/reiter.sh` | der Reiter, fotografiert — **noch nicht fertig** |
+| `tools/bridge2/tabs.sh` | der Reiter, fotografiert — **noch nicht fertig** |
 
 Der größte Teil der Brücke stand schon: `kernel/app/jarvisd.fi` (TLS
 1.3 hinaus, Ed25519, Rechteliste), `kernel/shot.fi` (Bildschirmfoto),
@@ -472,7 +472,7 @@ Zufallsforderung, falsche Unterschrift abgelehnt, richtige angenommen,
 fremder Schlüssel abgelehnt, Auftrag → Bild → abgeholt (Oktett für
 Oktett dasselbe), langes Polling 25 079 ms, Sperre wirkt.
 
-### Die ganze Kette — `tools/bridge2/kette.sh`, 9/0
+### Die ganze Kette — `tools/bridge2/chain.sh`, 9/0
 
 ```
 Osum (QEMU) --TLS 1.3--> anschluss.py --HTTP--> bruecke_server.py
@@ -639,5 +639,5 @@ eingespeist — egal was `input =` sagt; `jarvisd` meldet dann „emergency stop
 Einstellungen → Brücke → Aus (schreibt `input = no`). `jarvisctl input` zeigt Sperre und Anzeige.
 Nebenbei behoben: `jarvisctl input revoke` hieß durch die Umbenennung „transport“.
 
-**Abnahme.** `tools/bridge2/eingabe.sh` (Config-Schlüssel, Public-Wächter, Bau, Not-Aus in der VM mit
-Gegenprobe). Die volle Kette Auftrag → Gerät → Ergebnis: `tools/bridge2/kette.sh`.
+**Abnahme.** `tools/bridge2/input.sh` (Config-Schlüssel, Public-Wächter, Bau, Not-Aus in der VM mit
+Gegenprobe). Die volle Kette Auftrag → Gerät → Ergebnis: `tools/bridge2/chain.sh`.

@@ -25,7 +25,7 @@ Das ist der Abnahmelauf. Er macht alles selbst:
    "wm: kein Bildschirm"),
 5. bootet **sechs** QEMU-Laeufe: Absturz, Frist, Rechte, Schnittstelle,
    Verwaltung und die der zwei Modullaeufer,
-6. ruft `tools/wmplug/regel.sh` und `tools/wmplug/widget.sh` und
+6. ruft `tools/wmplug/rule.sh` und `tools/wmplug/widget.sh` und
    rechnet deren Zahlen in seine Summe ein,
 7. prueft `tools/check-ui.sh`,
 8. legt die Bilder nach `docs/shots/wmplug/`,
@@ -51,7 +51,7 @@ WMPLUG_SCHNELL=1 WMPLUG_KEEP=1 bash tools/wmplug/run.sh
 Beide laufen auch allein und bauen sich ihren Kernel selbst:
 
 ```bash
-bash tools/wmplug/regel.sh     # die Fensterregel-Engine
+bash tools/wmplug/rule.sh     # die Fensterregel-Engine
 bash tools/wmplug/widget.sh    # das Leistenwidget, an und aus
 ```
 

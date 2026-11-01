@@ -261,7 +261,7 @@ echo "== 10. the whole path: .omod -> .opk -> store -> disk -> kernel =="
 OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 STORE=${STORE:-/root/orientstore/werkzeug/store}
 if [ -f "$OPK" ] && [ -f "$STORE" ]; then
-    bash tools/module/paket.sh "$TMPD/pak" > "$TMPD/pak.txt" 2>&1
+    bash tools/module/package.sh "$TMPD/pak" > "$TMPD/pak.txt" 2>&1
     if grep -q 'Ergebnis    in Ordnung' "$TMPD/pak.txt"; then
         ok "the store catalog verifies itself (store verify --tief)"
     else

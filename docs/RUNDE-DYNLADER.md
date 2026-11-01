@@ -39,7 +39,7 @@ weil sie in derselben Datei stehen.
 ## 1. ZUERST GEMESSEN, NICHT GERATEN
 
 Ein dynamisches `hello` gegen musl gebaut und auf dem Linux-Wirt unter
-`strace` laufen lassen (`tools/dynlader/messung-wirt.sh`). Das ist die
+`strace` laufen lassen (`tools/dynlader/measure-host.sh`). Das ist die
 vollstaendige Liste dessen, was zwischen `execve` und der Ausgabe passiert:
 
 ```

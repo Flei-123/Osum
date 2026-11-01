@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/fvcrypto/run.sh -- gate for the FreeViewer viewer crypto (lib/fv/crypto.fi,
 # lib/crypto/gcm.fi) and for the path to the relay (DNS + TLS 1.3 from OrientOS).

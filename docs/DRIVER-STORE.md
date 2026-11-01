@@ -9,7 +9,7 @@ Directory `/lib/drivers/<name>/`:
 | File | Content |
 |---|---|
 | `driver.inf` | text manifest, at most 1536 bytes, `key=value` lines, `#` comments |
-| `driver.inf.sig` | 64 bytes Ed25519 over the exact bytes of `driver.inf`, **same key** as `.omod` and `/lib/omod.sperre` (`tools/module/pruef.seed`, public key compiled into the kernel) |
+| `driver.inf.sig` | 64 bytes Ed25519 over the exact bytes of `driver.inf`, **same key** as `.omod` and `/lib/omod.sperre` (`tools/module/verify.seed`, public key compiled into the kernel) |
 | `<module>.omod` | signed module (`tools/module/mkomod.py`, format unchanged) |
 
 Manifest keys:

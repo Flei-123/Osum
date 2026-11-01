@@ -436,7 +436,7 @@ eigenen Gegenstand ändert. Steht unter „was noch fehlt".
 | `kernel/kstate.fi` | +11 | zwei Modusworte in Wort 12 |
 | `kernel/hwdiag.fi` | +9 | `rootsel.report` im Bericht |
 | `kernel/hw.fi` | +5 | die Namensräume im NVMe-Bericht |
-| `tools/i18n/spalten.py` | +19/−4 | der Pufferprüfer zählt `\xNN` jetzt als **ein** Oktett |
+| `tools/i18n/columns.py` | +19/−4 | der Pufferprüfer zählt `\xNN` jetzt als **ein** Oktett |
 
 **3454 Zeilen eingefügt, 12 gelöscht, 13 Dateien.** Abbild:
 3 313 608 → **3 406 500 Oktett** (+92 892, **+2,8 %**).
@@ -587,7 +587,7 @@ druckbares Zeichen**, also `"\x1e\x30\x2e…"`. Sie ist 26 Oktette breit,
 und der Kern beweist es selbst — die Messung aus Teil 3 liest daraus
 `23 1e 26 26 18 1c`, also genau die richtigen Codes.
 
-`tools/i18n/spalten.py::oktette` sprang über **jeden** Escape mit
+`tools/i18n/columns.py::oktette` sprang über **jeden** Escape mit
 `i += 2`. Richtig für `\0`, `\n`, `\t` und `\\`; falsch für die
 hexadezimale Form: von `\x1e` wurde `\x` als ein Oktett gezählt und `1`
 und `e` danach als zwei weitere. Sechsundzwanzig davon ergeben 78.

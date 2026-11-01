@@ -60,7 +60,7 @@ nicht angefasst.
 | `tools/operation/run.sh` | 471 | der Läufer |
 | `tools/operation/vorbereiten.sh` | 107 | Pakete, Zertifikate, Bund, vier Auslieferungen, Abbild, Platte |
 | `tools/operation/crt-wirt.s` | 76 | zwei Zeilen Unterschied: dasselbe Programm auf dem Wirt |
-| `tools/operation/wirt.sh` · `masse.py` | 20 · 64 | Bauhelfer |
+| `tools/operation/wirt.sh` · `dimensions.py` | 20 · 64 | Bauhelfer |
 
 Geändert:
 

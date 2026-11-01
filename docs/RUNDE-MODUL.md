@@ -41,7 +41,7 @@ herunterladen."*
 | `tools/module/mkomod.py` | 257 | `.omod` bauen und signieren, samt allen kaputten Fassungen |
 | `tools/module/build.sh` | 95 | den Modulbaum zusammenstellen und übersetzen |
 | `tools/module/run.sh` | 381 | die Abnahme, zehn Abschnitte |
-| `tools/module/paket.sh` | 117 | `.omod` → `.opk` → Speicher → Platte |
+| `tools/module/package.sh` | 117 | `.omod` → `.opk` → Speicher → Platte |
 | `docs/MODUL-BEFUND.md` | 740 | Befund und Entwurf, mit 51 Quellen |
 
 Dazu geändert: `kernel/kstate.fi` (`MODUL_OFF`, drei Seiten auf
@@ -292,7 +292,7 @@ opk installieren  →  /apps/ps2maus.prog/lib/ps2maus.omod
 der Kern findet es und laedt es
 ```
 
-Gemessen (`bash tools/module/paket.sh`, Läuferabschnitt 10):
+Gemessen (`bash tools/module/package.sh`, Läuferabschnitt 10):
 
 * `store verify --tief`: **„Signatur gueltig (beide Umsetzungen einig) …
   Ergebnis in Ordnung"**
@@ -497,7 +497,7 @@ gefallen` (Lauf 2, ohne Abschnitt 10) bzw. der volle Lauf 3.
   einmal signiertes Modul bleibt für immer gültig. Windows hat dafür die
   „vulnerable driver blocklist"; Osum hat nichts.
 * **Der Schlüssel dieser Runde ist ein PRÜFSCHLÜSSEL** und liegt
-  absichtlich im Repo (`tools/module/pruef.seed`). Für eine Auslieferung
+  absichtlich im Repo (`tools/module/verify.seed`). Für eine Auslieferung
   braucht es einen anderen, der nirgends eingecheckt ist.
 
 **An der Messung:**

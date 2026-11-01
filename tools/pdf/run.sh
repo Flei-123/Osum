@@ -5,7 +5,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-/tmp/pdf-run}
 mkdir -p "$OUT"
-. tools/lib/sperre.sh && osum_sperre "$OUT"
+. tools/lib/lock.sh && osum_sperre "$OUT"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }

@@ -6,19 +6,19 @@ export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; th
 
 BAU=${1:-/tmp/abnahme/bau}
 OUT=${2:-/tmp/zweiplatten}
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 mkdir -p "$OUT"
 
 ok=0; bad=0
 ok()  { printf '  [ ok ] %s\n' "$*"; ok=$((ok+1)); }
 bad() { printf '  [FEHL] %s\n' "$*"; bad=$((bad+1)); }
 
-[ -f "$BAU/osum.mb" ] || { echo "== $BAU/osum.mb fehlt -- erst tools/install/abnahme.sh laufen lassen" >&2; exit 1; }
+[ -f "$BAU/osum.mb" ] || { echo "== $BAU/osum.mb fehlt -- erst tools/install/acceptance.sh laufen lassen" >&2; exit 1; }
 [ -f "$BAU/root.img" ] || { echo "== $BAU/root.img fehlt" >&2; exit 1; }
 
 QUELLE=${QUELLE:-/tmp/abnahme/platte.img}
 if [ ! -f "$QUELLE" ]; then
-    echo "== $QUELLE fehlt -- erst tools/install/abnahme.sh laufen lassen" >&2
+    echo "== $QUELLE fehlt -- erst tools/install/acceptance.sh laufen lassen" >&2
     exit 1
 fi
 cp -f "$QUELLE" "$OUT/hda.img"

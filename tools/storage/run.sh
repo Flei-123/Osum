@@ -109,7 +109,7 @@ has "$TMPD/mess.txt" "oktok=1" "die Gegenprobe des Gastes selbst"
 
 echo "== 3. JEDES Verzeichnis, Oktett fuer Oktett, gegen drei Zahlen"
 lauf probe 'du -p'
-if python3 tools/storage/pruefen.py "$TMPD/baum/soll" "$TMPD/probe.txt" \
+if python3 tools/storage/check.py "$TMPD/baum/soll" "$TMPD/probe.txt" \
         > "$TMPD/pruefen.log" 2>&1; then
     ok "$(tail -1 "$TMPD/pruefen.log")"
 else

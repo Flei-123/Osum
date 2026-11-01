@@ -17,7 +17,7 @@ PC), sind NICHT angefasst.
 | `ebpf` | 81/0 | 81/0 | erwartet jetzt die Umlautsaetze |
 | `ota` | 107/0 | **107/0** | Pflicht, Kern geaendert |
 
-Pflicht-Abnahmen nach den Kernaenderungen: `install/abnahme.sh` 35/0,
+Pflicht-Abnahmen nach den Kernaenderungen: `install/acceptance.sh` 35/0,
 `hotplug` 45/0, `clip2` 32/0, `check-ui` PASSED, `anim-ab` anim=4.
 
 ## A-028 -- die Gegenproben bauen aus einer Kopie
@@ -85,7 +85,7 @@ Die zehn roten Zusagen hatten vier Ursachen:
 
 ## Offen, neu
 
-- **A-032** `tools/wmplug/spalten.sh` 15/1 "im Foto ist kein
+- **A-032** `tools/wmplug/columns.sh` 15/1 "im Foto ist kein
   Tabellenkopf" -- auch auf `main` (872e3b71) so, also nicht aus dieser
   Runde. Die Farben des Terminals stimmen (nachgemessen).
 - **A-033** `themestore/run.sh` und `arch/order.sh` legen Probedateien

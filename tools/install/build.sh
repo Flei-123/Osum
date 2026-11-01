@@ -3,13 +3,13 @@
 # Verwendung:  bash tools/install/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke-env.sh
+. tools/lib/brand-env.sh
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 CC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${1:-/tmp/install}
-. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/sperre.sh" && osum_sperre "$OUT"   # A-024
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 ZIEL_MIB=${ZIEL_MIB:-256}
 # RUNDE MERGE-2: 32768 STATT 10240 BLOECKE (16 MiB statt 5 MiB).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvgaresize/stale.sh -- 800x600 on a host whose BYTES_PER_LINE register stays STALE after a mode set (VirtualBox, measured with
 # z10c: 800x600 kept 4096 instead of 3200 -> every row shifted, "line garbage"). Kernel word `vmsvgastale` emulates the stale register

@@ -4,7 +4,7 @@
 
     check.py <outdir of the run> [<belege directory>]
 
-Reads the serial log and the pictures of tools/tabstrip/dreh.txt and prints OK / FAIL lines (exit code = number of FAIL).
+Reads the serial log and the pictures of tools/tabstrip/script.txt and prints OK / FAIL lines (exit code = number of FAIL).
 
 What is measured (nothing here is "looks fine"):
   1  the program got its strip (`explorer: strip h=`), the window carries the flag (F_CAPCLIENT = 64 in `fl=`) and its drawing

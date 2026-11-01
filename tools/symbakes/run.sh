@@ -25,7 +25,7 @@ PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo l
 boot() { # name scale appsdir
     local res=1280x800; [ "$2" = 2 ] && res=1920x1080
     DESIGNBUILD="$TMPD/b-$1" APPS_DIR="$3" bash tools/design/eh6.sh "$TMPD/$1" res=$res accel=kvm uiscale=$2 mode=light lang=en tafel=nein progs="$PROGS" \
-        drehbuch=tools/symbakes/dreh.txt > "$TMPD/$1.log" 2>&1 < /dev/null
+        drehbuch=tools/symbakes/script.txt > "$TMPD/$1.log" 2>&1 < /dev/null
     rm -rf "$TMPD/b-$1"
 }
 for sc in 1 2; do

@@ -158,7 +158,7 @@ fi
 echo
 echo "== 4. der Umlauf: was wir geschrieben haben, mit Pillow nachgelesen =="
 
-python3 tools/bild/pruefen.py "$BILDER" "$HOL" > "$ARB/umlauf.txt" 2>&1
+python3 tools/bild/check.py "$BILDER" "$HOL" > "$ARB/umlauf.txt" 2>&1
 RCU=$?
 sed 's/^/    /' "$ARB/umlauf.txt"
 if [ "$RCU" -eq 0 ]; then

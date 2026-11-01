@@ -46,7 +46,7 @@ libjpegs Skalierung, Huffman-Tabellen aus Anhang K, Vorwaerts-DCT
 ### `tools/bild/` (neu)
 
 `run.sh` (die Abnahme), `mkbilder.py` (die Testbilder, mit Pillow
-gebaut), `pruefen.py` (der Umlauf, mit Zahlen).
+gebaut), `check.py` (der Umlauf, mit Zahlen).
 
 ## Die Zahlen
 
@@ -190,7 +190,7 @@ hat keine kdata-Seite gebraucht (Ring-3-Programme brauchen keine).
 das ist ausdruecklich **nicht** Teil des Schichtenmodells --
 `tools/struktur/schichten.txt` sagt in Zeile 11 selbst, dass
 `kernel/user/` (jetzt 190 Dateien) eigene Programme mit eigenen
-Wurzeln sind. Es waren also keine Eintraege in `ablage.txt` oder
+Wurzeln sind. Es waren also keine Eintraege in `filing.txt` oder
 `schichten.txt` faellig, und `STRUKTUR OK` bestaetigt das.
 
 **Abbildgroesse:** die Abnahme baut mit `bloecke=8192`, das Abbild ist

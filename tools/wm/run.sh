@@ -12,7 +12,7 @@
 # Verwendung:  bash tools/wm/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke.sh
+. tools/lib/brand.sh
 marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)
@@ -592,7 +592,7 @@ num "im Regellauf kommen Oktette auf BEIDEN Wegen an (Unterbrechungen)" \
 #
 echo
 echo "== 18. der Mauszeiger (Runde BLECH-HID) =="
-if python3 tools/wm/zeiger.py kernel/ui/wm/wmcursor.fi > "$TMPD/zeiger.txt" 2>&1; then
+if python3 tools/wm/cursor.py kernel/ui/wm/wmcursor.fi > "$TMPD/zeiger.txt" 2>&1; then
     ok "the pointer is an arrow: $(tail -1 "$TMPD/zeiger.txt" | sed 's/^ *//')"
 else
     bad "the pointer is not an arrow"

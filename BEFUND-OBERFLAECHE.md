@@ -214,7 +214,7 @@ gehoert in eine eigene Runde, und dann zuerst.
 |---|---|
 | `tools/check-ui.sh` | **PASSED**, 196 Dateien, 0 Verstoesse |
 | `tools/usbimg/build.sh` | **71 Pflichtpfade** im fertigen Dateisystem, 312 Umlautfolgen |
-| `tools/install/abnahme.sh` | **35 gruen, 0 rot**, RC=0 |
+| `tools/install/acceptance.sh` | **35 gruen, 0 rot**, RC=0 |
 | `tools/clip2/run.sh` | **32 gruen, 0 rot**, RC=0 |
 | `tools/hotplug/run.sh` | **45 gruen, 0 rot**, RC=0 |
 | `tools/logind/run.sh` | **49 gruen, 0 rot**, RC=0 (mit `UITRACE=1`) |

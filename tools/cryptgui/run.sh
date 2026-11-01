@@ -52,7 +52,7 @@ for t in "right:$PW:crypt: unlocked" "wrong:falsch:crypt: locked"; do
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
     grep -aq "$want" "$OUT/b-$n.txt" && ok "boot $n passphrase: $want" || bad "boot $n passphrase: $want"
 done
-# counter-check (slow, a second full install): CRYPTGUI_PLAIN=1; the plain GUI install is covered by tools/install/abnahme.sh
+# counter-check (slow, a second full install): CRYPTGUI_PLAIN=1; the plain GUI install is covered by tools/install/acceptance.sh
 if [ -n "${CRYPTGUI_PLAIN:-}" ]; then
 run_window p ""
 grep -aq 'installer: done' "$OUT/p.txt" && ok "plain install finished" || bad "plain install finished"

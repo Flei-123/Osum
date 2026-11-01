@@ -85,7 +85,7 @@ gemessen:
 
 Die UMSCHRIFT ist schon zwei Oktette lang. **Alle 42 Zeichenketten
 dieser Runde haben nach der Ersetzung exakt dieselbe Oktettzahl wie
-vorher** -- 42 von 42, nachgerechnet in `tools/i18n/spalten.py`. Kein
+vorher** -- 42 von 42, nachgerechnet in `tools/i18n/columns.py`. Kein
 einziger Puffer musste wegen der Oktettzahl wachsen.
 
 **Was sich sehr wohl aendert, ist die Zahl der ZEICHEN**, und genau
@@ -99,7 +99,7 @@ daran haengt eine Beschriftungsspalte:
 Der Puffer stimmt, der Uebersetzer schweigt, und die Tabelle ist
 schief. Drei Spalten waren davon betroffen -- `power.fi`, `vpn.fi` und
 (schon vorher) `tiling.fi`; drei Puffer sind dafuer um ein Oktett
-gewachsen. `tools/i18n/spalten.py` zaehlt die sechs
+gewachsen. `tools/i18n/columns.py` zaehlt die sechs
 Beschriftungsspalten dieses Baums von jetzt an in ZEICHEN.
 
 Dazu zwei Stellen, die "vier Zeichen" verlangen und Oktette gezaehlt

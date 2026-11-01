@@ -283,7 +283,7 @@ the width grows, not only the height).
   question. NOTE (read from the code, not measured): the old code set `frage = 2`
   BEFORE showing that single question, and its loop starts the writing
   when `frage == 2` -- so on that way the question seems not to have held
-  anything back. The new code starts only on the answer. `tools/install/abnahme.sh` (full chain: install, reboot from the
+  anything back. The new code starts only on the answer. `tools/install/acceptance.sh` (full chain: install, reboot from the
   disk, file survives, root block flipped).
 * `powermon`: label, table, close button.
 * `fuiscene.set_value` writes the live node's widget too. Before, `val_sync`

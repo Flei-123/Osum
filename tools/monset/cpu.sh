@@ -24,7 +24,7 @@ run_one() { # <name> <etc extra>
     local fp=$!
     EH_NETDEV="-netdev socket,id=n0,udp=127.0.0.1:$hp,localaddr=127.0.0.1:$qp -device e1000,netdev=n0,mac=52:54:00:aa:bb:cc" \
     EH_ETC_EXTRA="$2" EH_MKFS_EXTRA="/proc/" DESIGNBUILD="$TMPD/$1/build" bash tools/design/eh6.sh "$TMPD/$1/o" res=1280x800 accel=kvm netz=ja \
-        "extra=vfs lang=en" drehbuch="$ROOT/tools/idlebudget/dreh.txt" > "$TMPD/$1/o.log" 2>&1
+        "extra=vfs lang=en" drehbuch="$ROOT/tools/idlebudget/script.txt" > "$TMPD/$1/o.log" 2>&1
     kill $fp 2>/dev/null
 }
 share() { awk -v k="$2" '{ if ($0 ~ ("kind=" k " ") || $0 ~ ("name=" k " ")) { sub(/.*share=/, ""); s += $0 } } END { printf "%.1f", s }' "$1"; }

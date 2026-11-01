@@ -10,7 +10,7 @@ export DESIGNBUILD="$TMPD/build"
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
-cat > "$TMPD/dreh.txt" <<'EOF'
+cat > "$TMPD/script.txt" <<'EOF'
 warteauf 'taskbar: steht|taskbar: geom' || 120
 warte 5
 taste meta_l-a
@@ -27,7 +27,7 @@ run_case() {
     D="$TMPD/$name"
     for try in 1 2; do
         rm -rf "$D"
-        bash tools/design/eh6.sh "$D" res=1280x800 uiscale=1 mode=dark accel=kvm drehbuch="$TMPD/dreh.txt" "$@" > "$TMPD/$name.log" 2>&1
+        bash tools/design/eh6.sh "$D" res=1280x800 uiscale=1 mode=dark accel=kvm drehbuch="$TMPD/script.txt" "$@" > "$TMPD/$name.log" 2>&1
         grep -aq 'qs: open ' "$D/serial.txt" 2>/dev/null && break
         tail -n 12 "$TMPD/$name.log"
     done

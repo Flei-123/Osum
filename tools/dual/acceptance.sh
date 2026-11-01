@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
+set -uo pipefail
+cd "$(dirname "$0")/../.."
+export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
+. tools/lib/qemu.sh
+
+BAU=${1:-/tmp/dual-img}
+OUT=${2:-/tmp/dual-abnahme}
+. "$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)/tools/lib/lock.sh" && osum_sperre "$OUT"   # A-024
+mkdir -p "$OUT"
+
+ok=0; bad=0
+ok()  { printf '  [ ok ] %s\n' "$*"; ok=$((ok+1)); }
+bad() { printf '  [FEHL] %s\n' "$*"; bad=$((bad+1)); }
+titel() { printf '\n=== %s\n' "$*"; }
+
+[ -f "$BAU/osum.mb" ]  || { echo "== $BAU/osum.mb fehlt"  >&2; exit 1; }
+[ -f "$BAU/root.img" ] || { echo "== $BAU/root.img fehlt" >&2; exit 1; }
+
+ESP_START=2048;   ESP_SEK=$((64 * 2048))
+DAT_START=133120; DAT_SEK=$((128 * 2048))
+
+esp_summe()   { dd if="$1" bs=512 skip=$ESP_START count=$ESP_SEK status=none | sha256sum | cut -d' ' -f1; }
+daten_summe() { dd if="$1" bs=512 skip=$DAT_START count=$DAT_SEK status=none | sha256sum | cut -d' ' -f1; }
+
+# ==================================================================
+titel "1. eine Platte, auf der schon jemand wohnt"
+# ==================================================================
+bash tools/dual/fremdplatte.sh "$OUT/platte.img" 512 | sed 's/^/   /'
+[ -f "$OUT/platte.img" ] || { echo "die Platte wurde nicht gebaut" >&2; exit 1; }
+
+VOR_ESP=$(esp_summe   "$OUT/platte.img")
+VOR_DAT=$(daten_summe "$OUT/platte.img")
+echo "   VORHER  esp   $VOR_ESP"
+echo "   VORHER  daten $VOR_DAT"
+
+sgdisk -p "$OUT/platte.img" > "$OUT/gpt-vorher.txt" 2>&1
+grep -qE '^ +1 +2048' "$OUT/gpt-vorher.txt" && ok "die fremde Platte traegt eine ESP" \
+    || bad "die fremde Platte hat keine ESP"
+grep -qE '^ +2 +133120' "$OUT/gpt-vorher.txt" && ok "die fremde Platte traegt eine Datenpartition" \
+    || bad "die fremde Platte hat keine Datenpartition"
+
+# ==================================================================
+titel "2. ${MARKE_PRODUKT} in den freien Platz installieren"
+# ==================================================================
+APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=1800 nokbd nosched noproc nofs"
+APPEND="$APPEND lang=de uiscale=1 wigapp=/bin/installer,now,beside"
+
+timeout "${LIMIT:-1800}" $QEMU_X86 -m 512 \
+    -kernel "$BAU/osum.mb" -initrd "$BAU/root.img" -append "$APPEND" \
+    -serial "file:$OUT/ser.txt" -display none -no-reboot \
+    -device VGA,edid=on,xres=1280,yres=800,vgamem_mb=32 \
+    -drive "file=$OUT/platte.img,format=raw,if=ide,index=0" \
+    > "$OUT/qemu.log" 2>&1 &
+QP=$!
+i=0
+while [ $i -lt 1800 ]; do
+    grep -qa 'installer: done\|installer: ERROR\|installer: BESIDE_NO' "$OUT/ser.txt" 2>/dev/null && break
+    kill -0 "$QP" 2>/dev/null || break
+    sleep 1; i=$((i+1))
+done
+sleep 4
+kill "$QP" 2>/dev/null
+wait "$QP" 2>/dev/null
+
+echo "   was das Programm gesehen und getan hat:"
+grep -aE '^installer: (disk|ready|tafel=|part |frei |fremdesp=|weg=|neuepart|esp=|menue=|step=|fertig|FEHLER|NEBENNEIN|bei=)' \
+    "$OUT/ser.txt" 2>/dev/null | head -30 | sed 's/^/        /'
+
+grep -qa 'installer: table=2' "$OUT/ser.txt" \
+    && ok "es hat die fremde Partitionstafel gelesen (2 Partitionen)" \
+    || bad "die fremde Partitionstafel wurde nicht gelesen"
+grep -qa 'installer: foreign_esp=1' "$OUT/ser.txt" \
+    && ok "es hat die vorhandene EFI-Partition gefunden" \
+    || bad "die vorhandene EFI-Partition wurde nicht gefunden"
+grep -qa 'installer: newpart' "$OUT/ser.txt" \
+    && ok "es hat einen neuen Partitionseintrag ergaenzt" \
+    || bad "es wurde kein Partitionseintrag ergaenzt"
+grep -qa 'installer: done' "$OUT/ser.txt" \
+    && ok "die Installation meldet sich fertig" \
+    || bad "die Installation ist nicht fertig geworden"
+
+# ==================================================================
+titel "3. DIE FREMDEN PARTITIONEN -- BYTEWEISE UNVERAENDERT?"
+# ==================================================================
+NACH_ESP=$(esp_summe   "$OUT/platte.img")
+NACH_DAT=$(daten_summe "$OUT/platte.img")
+echo "   NACHHER esp   $NACH_ESP"
+echo "   NACHHER daten $NACH_DAT"
+
+if [ "$VOR_DAT" = "$NACH_DAT" ]; then
+    ok "DIE FREMDE DATENPARTITION IST OKTETT FUER OKTETT UNVERAENDERT"
+else
+    bad "die fremde Datenpartition wurde veraendert -- ${VOR_DAT:0:16}… -> ${NACH_DAT:0:16}…"
+fi
+
+if [ "$VOR_ESP" = "$NACH_ESP" ]; then
+    echo "   (die ESP ist unveraendert -- dann hat ${MARKE_PRODUKT} dort nichts abgelegt)"
+fi
+
+# ==================================================================
+titel "4. die Dateien des fremden Systems in der ESP"
+# ==================================================================
+ESPOFF=$((ESP_START * 512))
+mdir -i "$OUT/platte.img@@$ESPOFF" ::/EFI/Microsoft/Boot > "$OUT/esp-fremd.txt" 2>&1
+sed 's/^/        /' "$OUT/esp-fremd.txt" | head -10
+grep -qi 'bootmgfw' "$OUT/esp-fremd.txt" \
+    && ok "DER FREMDE BOOTMANAGER (bootmgfw.efi) IST NOCH DA" \
+    || bad "bootmgfw.efi ist verschwunden -- der fremde Bootlader wurde geloescht"
+grep -qi 'BCD' "$OUT/esp-fremd.txt" \
+    && ok "die fremde Datei BCD in der ESP ist noch da" \
+    || bad "die fremde Datei BCD ist verschwunden"
+
+mdir -i "$OUT/platte.img@@$ESPOFF" ::"/EFI/${MARKE_KURZ}" > "$OUT/esp-osum.txt" 2>&1
+sed 's/^/        /' "$OUT/esp-osum.txt" | head -8
+grep -qi 'osum' "$OUT/esp-osum.txt" \
+    && ok "${MARKE_PRODUKT} liegt in seinem eigenen Verzeichnis /EFI/${MARKE_KURZ}" \
+    || bad "unter /EFI/${MARKE_KURZ} liegt nichts"
+
+# ==================================================================
+titel "5. ist die GPT gueltig? -- mit FREMDEN Augen gelesen"
+# ==================================================================
+sgdisk -v "$OUT/platte.img" > "$OUT/gpt-pruef.txt" 2>&1
+sgdisk -p "$OUT/platte.img" > "$OUT/gpt-nachher.txt" 2>&1
+sed 's/^/        /' "$OUT/gpt-nachher.txt" | tail -8
+if grep -qi 'No problems found' "$OUT/gpt-pruef.txt"; then
+    ok "sgdisk sagt: No problems found (beide Koepfe, beide CRC32)"
+else
+    bad "sgdisk beanstandet die Tafel:"
+    sed 's/^/          /' "$OUT/gpt-pruef.txt" | head -8
+fi
+n=$(grep -cE '^ +[0-9]+ +[0-9]+' "$OUT/gpt-nachher.txt" || true)
+[ "${n:-0}" -ge 3 ] && ok "die Tafel traegt jetzt $n Partitionen (vorher 2)" \
+    || bad "die Tafel traegt nur ${n:-0} Partitionen"
+grep -qi 'OSUM' "$OUT/gpt-nachher.txt" \
+    && ok "die neue Partition heisst OSUM" \
+    || bad "keine Partition namens OSUM"
+
+python3 tools/dual/tafelpruef.py "$OUT/platte.img" > "$OUT/tafelpruef.txt" 2>&1
+TPRC=$?
+sed 's/^/        /' "$OUT/tafelpruef.txt"
+[ "$TPRC" = 0 ] && ok "der unabhaengige Pruefer bestaetigt beide Koepfe und beide Tafelsummen" \
+    || bad "der unabhaengige Pruefer beanstandet die Tafel"
+
+# ==================================================================
+titel "6. bietet das Bootmenue beide Systeme an?"
+# ==================================================================
+mtype -i "$OUT/platte.img@@$ESPOFF" ::/limine.conf > "$OUT/limine.txt" 2>&1
+sed 's/^/        /' "$OUT/limine.txt" | head -14
+grep -qi "${MARKE_PRODUKT}" "$OUT/limine.txt" \
+    && ok "das Bootmenue hat einen Eintrag fuer ${MARKE_PRODUKT}" \
+    || bad "im Bootmenue fehlt ${MARKE_PRODUKT}"
+if grep -qi 'efi_chainload' "$OUT/limine.txt" && grep -qi 'bootmgfw' "$OUT/limine.txt"; then
+    ok "DAS BOOTMENUE HAT EINEN EINTRAG FUER DAS FREMDE SYSTEM (Kettenstart)"
+else
+    bad "im Bootmenue fehlt der Eintrag fuer das fremde System"
+fi
+
+printf '\n=======================================================\n'
+printf 'DUALBOOT-ABNAHME:  %d gruen, %d rot\n' "$ok" "$bad"
+printf '=======================================================\n'
+[ "$bad" = 0 ] || exit 1
+exit 0

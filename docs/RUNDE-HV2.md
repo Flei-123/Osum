@@ -411,7 +411,7 @@ grün**.
 | `kernel/arch/x86_64/vmcb.fi` | +50 | die Konstanten des langen Modus (`ATTR_CODE64`, `EFER_LME/LMA`, `CR4_PAE`, `PT_PS`) |
 | `tools/hv/run.sh` | +90 | 18 neue Zusagen, 3 neue Gegenproben, angepasste Zahlen |
 | `tools/kernel/memmap.py` | +6 | der Bereich `VDEV` |
-| `tools/struktur/ablage.txt`, `schichten.txt` | +2 | `vdev` eingetragen |
+| `tools/structure/filing.txt`, `schichten.txt` | +2 | `vdev` eingetragen |
 
 ---
 

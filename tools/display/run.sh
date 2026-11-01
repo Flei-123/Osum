@@ -3,7 +3,7 @@
 # Verwendung:  bash tools/display/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke.sh
+. tools/lib/brand.sh
 marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 ROOT=$(pwd)

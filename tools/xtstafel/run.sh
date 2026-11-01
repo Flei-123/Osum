@@ -14,10 +14,10 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 echo "== 1. die Tafel: Wechsel ohne Neufuellen =="
-if $FIRNC tools/xtstafel/tafel.fi -o "$TMPD/tafel" 2>"$TMPD/t.err"; then
-    ok "tools/xtstafel/tafel.fi uebersetzt"
+if $FIRNC tools/xtstafel/board.fi -o "$TMPD/tafel" 2>"$TMPD/t.err"; then
+    ok "tools/xtstafel/board.fi uebersetzt"
 else
-    bad "tafel.fi laesst sich nicht uebersetzen"
+    bad "board.fi laesst sich nicht uebersetzen"
     sed 's/^/        /' "$TMPD/t.err" | head -20
     echo "XTSTAFEL: $pass bestanden, $fail gescheitert"; exit 1
 fi
@@ -37,7 +37,7 @@ else
 fi
 
 echo "== 2. der Loeschtest: nach forget() steht nichts mehr da =="
-if $FIRNC tools/xtstafel/loeschen.fi -o "$TMPD/loeschen" 2>"$TMPD/l.err"; then
+if $FIRNC tools/xtstafel/delete.fi -o "$TMPD/loeschen" 2>"$TMPD/l.err"; then
     "$TMPD/loeschen" > "$TMPD/loeschen.txt" 2>&1
     rc=$?
     sed 's/^/        /' "$TMPD/loeschen.txt"
@@ -47,7 +47,7 @@ if $FIRNC tools/xtstafel/loeschen.fi -o "$TMPD/loeschen" 2>"$TMPD/l.err"; then
         bad "nach forget() steht noch etwas in der Tafel"
     fi
 else
-    bad "loeschen.fi laesst sich nicht uebersetzen"
+    bad "delete.fi laesst sich nicht uebersetzen"
     sed 's/^/        /' "$TMPD/l.err" | head -20
 fi
 
@@ -58,7 +58,7 @@ rm -rf "$GLIB"; cp -a lib "$GLIB"
 echo "== 3. GEGENPROBE: ein Platz (der Zustand VOR dieser Runde) =="
 sed -i 's/^const SLOTS: usize = 4$/const SLOTS: usize = 1/' "$GLIB/crypto/xts.fi"
 if grep -q '^const SLOTS: usize = 1$' "$GLIB/crypto/xts.fi" && \
-   FIRNLIB="$GLIB" $FIRNC tools/xtstafel/tafel.fi -o "$TMPD/g1" 2>/dev/null; then
+   FIRNLIB="$GLIB" $FIRNC tools/xtstafel/board.fi -o "$TMPD/g1" 2>/dev/null; then
     "$TMPD/g1" > "$TMPD/g1.txt" 2>&1
     G=$(grep -oE '200 Sektoren abwechselnd, Fuellungen: [0-9]+' "$TMPD/g1.txt" | grep -oE '[0-9]+$')
     if [ "${G:-0}" -gt 0 ]; then
@@ -83,7 +83,7 @@ s=s.replace("""fn forget() {
     while s < 1 {""",1)
 open(p,"w",encoding="utf-8").write(s)
 PYEOF
-if FIRNLIB="$GLIB" $FIRNC tools/xtstafel/loeschen.fi -o "$TMPD/g2" 2>/dev/null; then
+if FIRNLIB="$GLIB" $FIRNC tools/xtstafel/delete.fi -o "$TMPD/g2" 2>/dev/null; then
     "$TMPD/g2" > "$TMPD/g2.txt" 2>&1
     if [ $? != 0 ]; then
         R=$(grep -oE 'Oktette ungleich 0 nach forget\(\): [0-9]+' "$TMPD/g2.txt" | grep -oE '[0-9]+$')

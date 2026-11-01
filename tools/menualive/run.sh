@@ -39,7 +39,7 @@ export DESIGNBUILD="$TMPD/build"
 run() { # run <name> <extra kernel words>
     local name=$1; shift
     bash tools/design/eh6.sh "$TMPD/$name" res=1920x1080 accel=kvm \
-        drehbuch=tools/menualive/dreh.txt extra="$*" > "$TMPD/$name.log" 2>&1
+        drehbuch=tools/menualive/script.txt extra="$*" > "$TMPD/$name.log" 2>&1
     grep -a "FEHLGESCHLAGEN\|NICHT DA\|killstarter:" "$TMPD/$name.log" | head -3
 }
 

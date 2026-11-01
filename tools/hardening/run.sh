@@ -18,7 +18,7 @@ if [[ ! -x $FIRNC ]]; then
     exit 1
 fi
 
-cp tools/hardening/kanarie.fi "$TMPD/kanarie.fi"
+cp tools/hardening/canary.fi "$TMPD/canary.fi"
 cp tools/hardening/proof.fi "$TMPD/nachweis.fi"
 
 export FIRNLIB="$(pwd)/vendor/firn/lib"

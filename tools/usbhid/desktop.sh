@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/usbhid/desktop.sh -- OHCI tablet on the REAL desktop (stick image, QEMU pci-ohci + usb-tablet). The QEMU cases of run.sh use the
 # ehcitest window, which has its own loop; VirtualBox's default tablet sat on the OHCI and the desktop (window server loop) never polled

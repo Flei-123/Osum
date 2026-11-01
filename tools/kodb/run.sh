@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke-env.sh
+. tools/lib/brand-env.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}

@@ -34,7 +34,7 @@ while [ $i -lt 1200 ]; do
     sleep 0.05; i=$((i+1))
 done
 sleep 2
-python3 tools/metal2/maus.py "$AUS/qmp.sock" "$SEK" "$HZ" \
+python3 tools/metal2/mouse.py "$AUS/qmp.sock" "$SEK" "$HZ" \
     shot="$AUS/shot.ppm" $MAUSOPT > "$AUS/maus.txt" 2>&1
 cat "$AUS/maus.txt"
 sleep 6

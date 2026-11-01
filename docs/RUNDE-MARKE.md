@@ -41,7 +41,7 @@ Ordner in „Programme" Anzeigetext. Hier sind ihre Entsprechungen —
 bewegen dürfen. Das ist der eine bewusste Unterschied zur Vorlage.
 
 **Kein `option_env!`.** Rust liest die Umgebung beim Übersetzen selbst,
-Firn kann das nicht. Also tut es der Bau: `tools/marke-einsetzen.py`
+Firn kann das nicht. Also tut es der Bau: `tools/brand-apply.py`
 ersetzt die Platzhalter in der **/tmp-Kopie** des Kernbaums und bricht
 ab, wenn ein Feld fehlt, leer, zu lang oder noch ein Fragezeichen ist.
 Der Arbeitsbaum bleibt sauber.

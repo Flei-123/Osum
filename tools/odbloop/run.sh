@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/odbloop/run.sh -- NIGHTLY GATE WRAPPER for tools/odb/loop.sh (ODB round trip on a FULL image, QEMU).
 #

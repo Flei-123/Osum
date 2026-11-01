@@ -462,7 +462,7 @@ Die Abnahmen liefen als Beleg, dass der Stand `0f7e047a` grün ist.
 | `tools/clip2/run.sh` | 32/0 | **32 grün, 0 rot**, RC=0 | grün |
 | `tools/hotplug/run.sh` | 45/0 | **45 passed, 0 failed**, RC=0 | grün |
 | `tools/logind/run.sh` | 49/0 | **37/0** — siehe unten | Messfalle |
-| `tools/install/abnahme.sh` | 35/0 | **34 grün, 1 rot** — siehe unten | Messfalle |
+| `tools/install/acceptance.sh` | 35/0 | **34 grün, 1 rot** — siehe unten | Messfalle |
 
 ### Die Messfalle, und warum sie keine Regression ist
 

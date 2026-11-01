@@ -363,7 +363,7 @@ jeder Läufer dieses Baums, der `desk` schreibt, fährt ohne das Wort
 | `tools/build-kernel.sh` | baut | **6 077 432 Oktette, Stufe 0** |
 | `tools/usbimg/build.sh` | baut | **RC=0**, 67 Pflichtpfade, Abbild 130 MiB |
 
-`tools/install/abnahme.sh` (35/0) ist **nicht** nachgemessen — siehe
+`tools/install/acceptance.sh` (35/0) ist **nicht** nachgemessen — siehe
 Abschnitt 5.1. `krypto` **61/0** und `aesni` **31/0** wurden dabei
 **zweimal unabhängig** bestätigt: einmal einzeln und einmal aus dem
 Nachbarabschnitt von `tools/argon/run.sh`, der sie selbst mitfährt.
@@ -481,7 +481,7 @@ dass `tools/osum/mkfs.py` wirklich da ist.
 
 ## 5. WAS OFFEN BLIEB
 
-**5.1 `tools/install/abnahme.sh` (35/0) ist nicht nachgemessen.** Der
+**5.1 `tools/install/acceptance.sh` (35/0) ist nicht nachgemessen.** Der
 Läufer braucht QEMU-Läufe mit echten Platten und kopiert die Wurzel
 rund **acht Minuten** (`docs/RUNDE-INSTALLER2.md` sagt das selbst,
 Abschnitt „Was diese Runde NICHT behauptet"). Auf dieser Maschine
@@ -493,7 +493,7 @@ Die Runde hat `kernel/user/install.fi` **nicht angefasst**. Die
 ankommen, prüft die Pflichtliste bei **jedem** Bau (`RC=0`, 67 Pfade).
 `tools/geraetekey/run.sh` — der Läufer, der in derselben Abnahme den
 Gerätschlüssel prüft — ist **nachgemessen und grün (12/0)**. Das ist
-ein starkes Argument, aber keine Messung von `abnahme.sh` selbst:
+ein starkes Argument, aber keine Messung von `acceptance.sh` selbst:
 **wer merged, sollte sie fahren.**
 
 **5.2 `argon` 35/0 nicht bestätigt.** Der serielle Nachlauf hat in

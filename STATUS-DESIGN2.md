@@ -115,7 +115,7 @@ Fenster auf halbem Weg stehen, bis die Maus wackelt.
 Justins Regel: *alles an Oberflaeche geht ueber das Rahmenwerk; was das
 Rahmenwerk nicht kann, wird INS Rahmenwerk eingebaut, nicht daneben.*
 
-`tools/design/zaehlen.py` zaehlt jeden Aufruf einer **malenden**
+`tools/design/count.py` zaehlt jeden Aufruf einer **malenden**
 Routine des Zeichenkerns ausserhalb von wlib/wlibc. Messende Routinen
 (`text_w`, `ascent_of`) zaehlen nicht -- eine Breite zu erfragen ist
 kein Malen.
@@ -348,7 +348,7 @@ Klickflaechen: 2 von 108 fassbaren Elementen unter 32 px (die
 
 ## 6. WERKZEUGE, DIE DIESE RUNDE HINTERLAESST
 
-* `tools/design/zaehlen.py` -- wer malt noch selbst, wer tippt noch
+* `tools/design/count.py` -- wer malt noch selbst, wer tippt noch
   eine Farbe. Beendigungscode 0 nur bei Summe 0.
 * `tools/design/lupe.py` -- derselbe Ausschnitt aus zwei Aufnahmen,
   vergroessert, nebeneinander. Ohne das ist ein Radius eine Behauptung.

@@ -45,9 +45,9 @@ export DESIGNBUILD="$TMPD/build"
     echo "taste ret"
     echo "warte 6"
     echo "foto z-end"
-} > "$TMPD/dreh.txt"
+} > "$TMPD/script.txt"
 run() { # run <outdir> <worktree> <log>
-    (cd "$2" && DESIGNBUILD="$TMPD/build-$1" bash tools/design/eh6.sh "$TMPD/$1" accel=kvm moreprogs=term drehbuch="$TMPD/dreh.txt" > "$TMPD/$1.log" 2>&1)
+    (cd "$2" && DESIGNBUILD="$TMPD/build-$1" bash tools/design/eh6.sh "$TMPD/$1" accel=kvm moreprogs=term drehbuch="$TMPD/script.txt" > "$TMPD/$1.log" 2>&1)
     grep -a "FEHLGESCHLAGEN\|NICHT DA" "$TMPD/$1.log" | head -3
     [ -n "${KEEP:-}" ] && { mkdir -p "$KEEP/$1"; cp "$TMPD/$1/serial.txt" "$KEEP/$1"/; }
 }

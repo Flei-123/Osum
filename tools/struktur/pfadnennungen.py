@@ -10,7 +10,7 @@ WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 def kernmodule():
     """Alle Module, die vom Abbild erreicht werden."""
     sys.path.insert(0, os.path.join(WURZEL, "tools", "struktur"))
-    import huelle
+    import shell
     kern = huelle.huelle(os.path.join(WURZEL, "kernel", "kmain.fi"))
     return {os.path.basename(p)[:-3] for p in kern}
 

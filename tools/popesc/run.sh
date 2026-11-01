@@ -16,7 +16,7 @@ PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo l
 
 run() {
     DESIGNBUILD="$TMPD/build-$1" bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm progs="$PROGS" \
-        tbextra="taskview=1" drehbuch="tools/popesc/dreh.txt" > "$TMPD/$1.log" 2>&1 < /dev/null
+        tbextra="taskview=1" drehbuch="tools/popesc/script.txt" > "$TMPD/$1.log" 2>&1 < /dev/null
 }
 
 check() {

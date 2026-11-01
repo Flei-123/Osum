@@ -194,7 +194,7 @@ auf seinem Brett doch etwas anderes klemmt.
 
 | Datei | was |
 | --- | --- |
-| `tools/clockwork/bauen.sh` | Kern + Wurzelabbild mit `clock_seconds=1` |
+| `tools/clockwork/build.sh` | Kern + Wurzelabbild mit `clock_seconds=1` |
 | `tools/clockwork/uhrprobe.sh` | fotografiert mehrmals **ohne Eingabe** und vergleicht den Uhrstreifen; sagt "DIE UHR STEHT" oder "LAEUFT" |
 | `tools/clockwork/messen.sh` | die Zahlen aus der seriellen Leitung (composes, TICKS, LOOP, PRE, HZ, die Zaehler der Leiste) |
 | `tools/clockwork/acceptance.sh` | 5 Laeufe je Kernzahl + Eingabe-Gegenprobe |

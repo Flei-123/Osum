@@ -18,7 +18,7 @@ mkdir -p "$TMPD"
 export TMPD
 [ -n "${NZP_ARB:-}" ] || trap 'rm -rf "$TMPD"' EXIT
 
-. tools/netzplus/mess.sh
+. tools/netzplus/measure.sh
 
 pass=0
 fail=0

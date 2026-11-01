@@ -4,7 +4,7 @@
 #
 #   bash /root/jarvis/bin/heavy bash tools/termsel/run.sh
 #
-# One boot of the stick's machine (tools/design/eh6.sh, KVM), drehbuch tools/termsel/dreh.txt: three echo lines, ten pictures
+# One boot of the stick's machine (tools/design/eh6.sh, KVM), drehbuch tools/termsel/script.txt: three echo lines, ten pictures
 # (blink), a mouse drag over a row, Ctrl+Shift+C, Ctrl+Shift+V, right click, Ctrl+C with a selection. tools/termsel/check.py reads the
 # serial witnesses (`wm: tcur`, `wm: tcopy`, `wm: tpaste`, `wm: termzeile`) and the pixels of the pictures.
 # COUNTER-PROOF: the same run on the tree WITHOUT the change (git worktree of the base ref in $OLDREF, default origin/main
@@ -15,7 +15,7 @@ ROOT=$(pwd)
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"; [ -n "${OLDWT:-}" ] && git worktree remove --force "$OLDWT" 2>/dev/null' EXIT
 export DESIGNBUILD="$TMPD/build"
-bash tools/design/eh6.sh "$TMPD/new" accel=kvm drehbuch="$ROOT/tools/termsel/dreh.txt" > "$TMPD/run.log" 2>&1
+bash tools/design/eh6.sh "$TMPD/new" accel=kvm drehbuch="$ROOT/tools/termsel/script.txt" > "$TMPD/run.log" 2>&1
 grep -a "FEHLGESCHLAGEN\|NICHT DA\|KEIN RECHTECK" "$TMPD/run.log" | head -5
 python3 tools/termsel/check.py "$TMPD/new" | tee "$TMPD/new.txt"
 f1=$(grep -c '^  FAIL' "$TMPD/new.txt"); o1=$(grep -c '^  OK' "$TMPD/new.txt")
@@ -28,7 +28,7 @@ if [ -n "$OLDREF" ]; then
     echo "== counter-proof: the same drehbuch on $OLDREF =="
     OLDWT="$TMPD/oldtree"
     git worktree add --detach "$OLDWT" "$OLDREF" > /dev/null 2>&1
-    (cd "$OLDWT" && DESIGNBUILD="$TMPD/oldbuild" bash tools/design/eh6.sh "$TMPD/old" accel=kvm drehbuch="$ROOT/tools/termsel/dreh.txt" > "$TMPD/run2.log" 2>&1)
+    (cd "$OLDWT" && DESIGNBUILD="$TMPD/oldbuild" bash tools/design/eh6.sh "$TMPD/old" accel=kvm drehbuch="$ROOT/tools/termsel/script.txt" > "$TMPD/run2.log" 2>&1)
     python3 tools/termsel/check.py "$TMPD/old" | tee "$TMPD/old.txt"
     f2=$(grep -c '^  FAIL' "$TMPD/old.txt")
     [ "$f2" -ge 8 ] && echo "  OK    the old tree fails $f2 checks: they measure something" || echo "  FAIL  the old tree fails only $f2 checks"

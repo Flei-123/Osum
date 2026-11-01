@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/vmsvgaboot/run.sh -- W-C3: the screen is fitted to the host at BOOT and the UI scale follows the final size.
 # QEMU never sends a host hint, so the kernel word `vmsvgaboot` plays 2400x1400 through kgui.host_boot_fit (the same call a VirtualBox

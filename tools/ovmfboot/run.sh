@@ -1,5 +1,5 @@
 #!/bin/bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # OVMF stick boot gate (HP-12 / HP-4, r1521): the stick must boot to the login screen under UEFI
 # (OVMF, q35 and i440fx, usb-storage like the real HP), the ACPI scan must find the RSDP, and
 # there must be no exception. Counter-proofs: word `acpiold` (old scan) must crash with

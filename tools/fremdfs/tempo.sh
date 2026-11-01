@@ -14,7 +14,7 @@ trap 'rm -rf "$W"' EXIT
 
 if [ -z "$BILD" ]; then
     BILD="$W/bild"
-    bash tools/fremdfs/bild.sh "$BILD" >/dev/null 2>&1 || {
+    bash tools/fremdfs/image.sh "$BILD" >/dev/null 2>&1 || {
         echo "tempo: die Abbilder lassen sich nicht bauen"; exit 1; }
 fi
 

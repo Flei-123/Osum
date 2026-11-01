@@ -44,7 +44,7 @@ Abschnitt 6.
 | `kernel/ntfs.fi` | ~1390 | NTFS lesend: Bootsektor, `$MFT`, **Fixups**, residente und nichtresidente Attribute, **Datenläufe**, `$I30`-Indizes, lange Namen |
 | `kernel/user/fremdfs.fi` | ~430 | das Messprogramm in Ring 3: liest, hasht, zählt, meldet jede Antwort als Zahl |
 | `kernel/user/fftempo.fi` | ~110 | dasselbe ohne Hash — nur die Zeit |
-| `tools/fremdfs/bild.sh` | ~330 | die Prüfbilder, vom Wirt gebaut, samt Gegenproben |
+| `tools/fremdfs/image.sh` | ~330 | die Prüfbilder, vom Wirt gebaut, samt Gegenproben |
 | `tools/fremdfs/ntfsbaum.c` | ~260 | einen Baum in ein NTFS legen **ohne** es einzuhängen (libntfs-3g ohne FUSE) |
 | `tools/fremdfs/ext4info.py` | ~180 | ein ext4 mit fremden Augen lesen: Baumtiefe, Extent-Zahl, htree-Bit |
 | `tools/fremdfs/run.sh` | ~550 | die Abnahme: 110 Zusagen |
@@ -52,7 +52,7 @@ Abschnitt 6.
 | `tools/fremdfs/einzeln.sh` | ~85 | ein einzelner Lauf zum Nachsehen |
 | `kernel/ext4-aus.fi` | ~115 | die Leerfassung für `--ohne-ext4` |
 | `kernel/ntfs-aus.fi` | ~110 | die Leerfassung für `--ohne-ntfs` |
-| `tools/fremdfs/bild-explorer.sh` | ~120 | die Bilder vom Dateimanager |
+| `tools/fremdfs/image-explorer.sh` | ~120 | die Bilder vom Dateimanager |
 
 Angebunden wie FAT32: `kernel/vfsops.fi` (`FS_EXT4`, `FS_NTFS`),
 `kernel/vfs.fi` (`ops_of`, `mount_at`, `umount_index`), `kernel/sys.fi`
@@ -432,7 +432,7 @@ Daneben: `-3-viele.png` (das Verzeichnis mit 512 Einträgen, htree) und
 `-4-tief.png` (`/mnt/a/b/c/d`, vier Ebenen tief). Erzeugt mit
 
 ```sh
-bash tools/fremdfs/bild-explorer.sh ext4 /tmp/bild
+bash tools/fremdfs/image-explorer.sh ext4 /tmp/bild
 ```
 
 ---
@@ -450,7 +450,7 @@ Einen einzelnen Fall nachsehen, mit voller serieller Ausgabe und ohne
 dass hinterher aufgeräumt wird:
 
 ```sh
-bash tools/fremdfs/bild.sh /tmp/bild
+bash tools/fremdfs/image.sh /tmp/bild
 bash tools/fremdfs/einzeln.sh ext4 /tmp/bild/ext4.img
 bash tools/fremdfs/einzeln.sh ntfs /tmp/bild/ntfs.img 'mount /dev/hdb1 /mnt ntfs -r;ls /mnt'
 ```
@@ -463,7 +463,7 @@ Die Abschaltbarkeit einzeln nachbauen:
 stat -c%s /tmp/voll.mb /tmp/ohne.mb
 ```
 
-**Ein Hinweis zum Wirt:** `bild.sh` schreibt mit `debugfs` und
+**Ein Hinweis zum Wirt:** `image.sh` schreibt mit `debugfs` und
 libntfs-3g **in die Abbilder** statt sie einzuhängen — in einem
 LXC-Behälter gibt es weder `/dev/loop*` noch `/dev/fuse`. Gebraucht
 werden `e2fsprogs`, `ntfs-3g`, `ntfs-3g-dev` und `gcc`. Die Abbilder

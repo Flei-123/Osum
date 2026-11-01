@@ -2,7 +2,7 @@
 
 Zweig `installer2`, Basis `main` (55ac7d9). Worktree `/root/osum-w-inst`.
 
-**Ergebnis: `tools/install/abnahme.sh` -- 35 gruen, 0 rot, einschliesslich
+**Ergebnis: `tools/install/acceptance.sh` -- 35 gruen, 0 rot, einschliesslich
 Abschnitt 7b.** P-001 traegt, und O-009 ist damit auch auf dem ECHTEN Weg
 gemessen (installierte Platte statt RAM-Wurzel).
 
@@ -114,10 +114,10 @@ Sekundentakt neu:
 | ohne `wmshell` (Fix) | **0** | **1878 Bloecke/min** |
 
 Der Installer verhungerte neben seinem eigenen Terminal. Die
-Kommandozeile in `tools/install/abnahme.sh` ist deshalb **unveraendert**;
+Kommandozeile in `tools/install/acceptance.sh` ist deshalb **unveraendert**;
 dort steht nur die Begruendung, warum `wmshell` nicht dazugehoert.
 
-### `tools/install/abnahme.sh` (Commit 3e54309) -- drei Fehler IN DER PROBE
+### `tools/install/acceptance.sh` (Commit 3e54309) -- drei Fehler IN DER PROBE
 
 Nachdem Glied 1-5 trugen, kam Glied 6/7 an die Reihe. Dort steckten drei
 Fehler, alle drei in der Abnahme und nicht im System; zwei haben sich
@@ -156,7 +156,7 @@ den SCHLECHTEREN der beiden Wege zu verlangen. BEHOBEN: 21 ODER 0 gelten;
 
 ## 3. GEMESSEN
 
-### `tools/install/abnahme.sh` -- **35 gruen, 0 rot**
+### `tools/install/acceptance.sh` -- **35 gruen, 0 rot**
 
 Glied 1-3, die vorher rot waren:
 
@@ -282,7 +282,7 @@ Die Zuteilung **0x138000..0x13A000 / Modus 1085..1087 ist unberuehrt**,
 
 **P-001 ist erledigt und gemessen.** Der Installer bekommt sein Fenster
 auf, findet die Platte, installiert, und die Maschine startet danach ohne
-Medium von der Platte. `tools/install/abnahme.sh` laeuft mit **35 gruen,
+Medium von der Platte. `tools/install/acceptance.sh` laeuft mit **35 gruen,
 0 rot** durch, einschliesslich **7b**.
 
 In `OFFEN.md` kann **O-009** von "gemessen, wartet auf P-001 fuer den

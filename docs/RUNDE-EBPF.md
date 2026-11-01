@@ -484,7 +484,7 @@ Vor dem Commit, auf demselben Stand:
 | `tools/hotplug/run.sh` | 45 passed, 0 failed | **45 passed, 0 failed** |
 | `tools/ebpf/run.sh` | — (neu) | **81 passed, 0 failed** |
 
-### `tools/install/abnahme.sh` — gelaufen, rot, und NICHT an dieser Runde
+### `tools/install/acceptance.sh` — gelaufen, rot, und NICHT an dieser Runde
 
 Der Sollwert ist 35 gruen, 0 rot. Gemessen wurde:
 
@@ -547,7 +547,7 @@ In der Reihenfolge, in der es sich lohnt:
    gebaut und nicht aufgehaengt.
 5. **Schleifen**, entweder begrenzt und geprueft oder gar nicht.
 6. **Die atomaren Befehle**, wenn ein Programm je Zaehler teilen soll.
-7. **`tools/install/abnahme.sh`** nachholen, sobald die Maschine Platz
+7. **`tools/install/acceptance.sh`** nachholen, sobald die Maschine Platz
    und Ruhe hat. Sie faellt derzeit auch auf dem unveraenderten `main`
    (siehe 8a) — das ist ein eigener Befund und gehoert dort behandelt,
    nicht hier.

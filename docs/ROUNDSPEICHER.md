@@ -92,7 +92,7 @@ seine eigene Eintragstabelle mit?"), stuende in beiden gleich falsch
 drin. Der Wirt weiss vom Kernel nichts.
 
 `du -p` prueft **jedes** Verzeichnis des Abbilds.
-`tools/storage/pruefen.py` haelt alle drei Zahlen nebeneinander:
+`tools/storage/check.py` haelt alle drei Zahlen nebeneinander:
 
 ```
 pruefen: 21 Verzeichnisse aus dem Gast, davon 17 auch gegen die Arithmetik des Wirts
@@ -372,6 +372,6 @@ Das ist der wichtigste Abschnitt, und er ist absichtlich lang.
 | `tools/storage/build.sh` | Kernel, Programme, beide Abbilder |
 | `tools/storage/run.sh` | der Laeufer mit den Messungen |
 | `tools/storage/tree.py` | das Abbild mit Inhalt **und** die Wahrheit dazu |
-| `tools/storage/pruefen.py` | die drei Zahlen nebeneinander |
+| `tools/storage/check.py` | die drei Zahlen nebeneinander |
 | `tools/storage/kachelprobe.py` | die Treemap im Bild nachgemessen |
 | `tools/gfx/ppm2png.py` | PPM → PNG, nur mit `zlib` |

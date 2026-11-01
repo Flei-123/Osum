@@ -5,7 +5,7 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-/tmp/r200-run}
 mkdir -p "$OUT"
-. tools/lib/sperre.sh && osum_sperre "$OUT"
+. tools/lib/lock.sh && osum_sperre "$OUT"
 POLLS=${R200_POLLS:-4000}
 KIB=${R200_KIB:-128}
 pass=0; fail=0

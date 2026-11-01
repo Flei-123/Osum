@@ -18,7 +18,7 @@
 #   ODB_KEEP=<dir> bash tools/odb/run.sh   keep the build (kernel, programs) in <dir> for reuse
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/lib/marke-env.sh
+. tools/lib/brand-env.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}

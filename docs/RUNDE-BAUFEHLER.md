@@ -167,7 +167,7 @@ Geaendert wurden nur Stellen, in deren Protokoll wirklich
 | `tools/netmon/run.sh` | 4096 | 16384 |
 | `tools/toolbench/build.sh` | 16384 | 32768 |
 | `tests/theme/build.sh` | 16384 | 32768 |
-| `tools/systembus/run.sh`, `desktop`, `entry`, `hidpunkte`, `hidweg`, `multicore`, `clockwork/bauen.sh` | 16384 | 32768 |
+| `tools/systembus/run.sh`, `desktop`, `entry`, `hidpunkte`, `hidweg`, `multicore`, `clockwork/build.sh` | 16384 | 32768 |
 
 `tools/look/shot.sh` wiegt dabei schwerer als alle anderen zusammen:
 darueber fotografieren **alle** Laeufer, die Aussehen pruefen. Der Kopf

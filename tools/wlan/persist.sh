@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 # SPDX-License-Identifier: GPL-2.0-only
 # tools/wlan/persist.sh -- W-WLAN16a gate: /etc/wlan.conf survives a restart of the live stick (root = RAM module).
 #   bash tools/wlan/persist.sh <build-dir> [old-build-dir]

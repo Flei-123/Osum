@@ -15,7 +15,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 fin() { echo "DRVPOLICY: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 
 python3 tools/module/mkpolicy.py lib/modpolicy/policydata.fi --check > "$D/chk.txt" 2>&1 && ok "checked-in policydata matches keys.default + banfloor.txt" || { bad "policydata stale"; cat "$D/chk.txt"; }
-DEVPUB=$(python3 -c "import sys;sys.path.insert(0,'tools/module');import mkomod;print(mkomod.pubkey(open('tools/module/pruef.seed','rb').read()).hex())")
+DEVPUB=$(python3 -c "import sys;sys.path.insert(0,'tools/module');import mkomod;print(mkomod.pubkey(open('tools/module/verify.seed','rb').read()).hex())")
 grep -q "^$DEVPUB" tools/module/keys.default && ok "keys.default has the development key" || bad "keys.default lacks the development key"
 grep -q "^$DEVPUB" tools/module/keys.release && bad "keys.release contains the development key" || ok "keys.release has no development key"
 [ "$(grep -vc '^#' tools/module/keys.release)" -eq 1 ] && ok "keys.release has exactly one key" || bad "keys.release key count"
@@ -36,7 +36,7 @@ d = sys.argv[1]
 seed = os.urandom(32)
 open(d + "/test.seed", "wb").write(seed)
 open(d + "/keys.test", "w").write(mkomod.pubkey(seed).hex() + "\n")
-open(d + "/keys.both", "w").write(mkomod.pubkey(open("tools/module/pruef.seed", "rb").read()).hex() + "\n" + mkomod.pubkey(seed).hex() + "\n")
+open(d + "/keys.both", "w").write(mkomod.pubkey(open("tools/module/verify.seed", "rb").read()).hex() + "\n" + mkomod.pubkey(seed).hex() + "\n")
 EOS
 bash tools/module/build.sh "$D/dev.omod" --quelle module/store/edudemo.fi > "$D/m1.txt" 2>&1 && ok "edudemo signed with the development key" || { bad "dev module"; tail -3 "$D/m1.txt"; fin; }
 bash tools/module/build.sh "$D/tst.omod" --quelle module/store/edudemo.fi --seed "$D/test.seed" > "$D/m2.txt" 2>&1 && ok "edudemo signed with the test delivery key" || { bad "test module"; tail -3 "$D/m2.txt"; fin; }
