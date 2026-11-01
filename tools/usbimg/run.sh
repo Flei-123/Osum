@@ -401,15 +401,14 @@ if [ -s "$TMPD/desk.ppm" ]; then
         local was=$1 text=$2; shift 2
         local aus rc
         aus=$(python3 tools/usbimg/searchtext.py "${BILD:-$TMPD/desk.ppm}" \
-              fui:assets/osum-sans.ttf 15 "$text" "$@" 2>&1)
+              fui:assets/osum-sans.ttf "${SZ:-15}" "$text" "$@" 2>&1)
         rc=$?
         if [ $rc = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi
     }
-    finde "DER UMLAUT STEHT IM BILD" "Ausführen"
-    finde "GEGENPROBE: die ASCII-Ersatzschreibung steht NICHT da" \
-          "Ausfuehren" --nicht
-    finde "GEGENPROBE: und der englische Text auch nicht" "Run" --nicht
-    finde "der deutsche Aufforderungstext des Starters" "Programm suchen:"
+    SZ=12 finde "DER UMLAUT STEHT IM BILD" "Zuletzt geöffnete Programme erscheinen hier"
+    SZ=12 finde "GEGENPROBE: die ASCII-Ersatzschreibung steht NICHT da" \
+          "Zuletzt geoeffnete Programme erscheinen hier" --nicht
+    SZ=12 finde "GEGENPROBE: und der englische Text auch nicht" "Programs you open show up here" --nicht
     BILD="$TMPD/desk2.ppm" finde "und das Kontrollzentrum ist ebenfalls deutsch" "Dunkelmodus"
     BILD="$TMPD/desk2.ppm" finde "GEGENPROBE: dort steht nicht das englische Wort" "Dark mode" --nicht
     python3 -c "
