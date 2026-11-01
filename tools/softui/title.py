@@ -53,7 +53,7 @@ def main(argv):
     w = ziel["ow"] - 2 * BORDER - CAP_N * CAP_W - 8
     h = TITLE_H - 1 - BORDER
     print("titel '%s' band %d,%d %dx%d" % (ziel["t"], x, y, w, h))
-    return kontrast.band(argv[1], x, y, w, h, 12)
+    return contrast.band(argv[1], x, y, w, h, 12)
 
 
 if __name__ == "__main__":
