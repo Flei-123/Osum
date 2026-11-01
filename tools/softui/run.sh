@@ -72,7 +72,7 @@ echo "== C. the shadow: mask against rings against none =="
 if [ -s "$TMPD/B/serial.txt" ]; then
     L=$(grep -a 'wmbench2: maske' "$TMPD/B/serial.txt" | tail -1)
     R=$(grep -a 'wmbench2: ringe' "$TMPD/B/serial.txt" | tail -1)
-    O=$(grep -a 'wmbench2: ohne' "$TMPD/B/serial.txt" | tail -1)
+    O=$(grep -a 'wmbench2: without' "$TMPD/B/serial.txt" | tail -1)
     echo "        $O"
     echo "        $L"
     echo "        $R"
