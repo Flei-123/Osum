@@ -47,7 +47,7 @@ hasnot() {
         || ok "$3"
 }
 num() {
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: not a number (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }

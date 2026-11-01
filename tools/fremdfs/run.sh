@@ -20,7 +20,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -58,13 +58,13 @@ for w in mkfs.ext4 debugfs e2fsck mkntfs sha256sum gcc python3; do
     command -v "$w" >/dev/null 2>&1 || {
         echo "FREMDFS: uebersprungen, $w fehlt"; exit 0; }
 done
-ok "die Werkzeuge des Wirts sind da (e2fsprogs, ntfs-3g, qemu, gcc)"
+ok "host tools are present (e2fsprogs, ntfs-3g, qemu, gcc)"
 
 # ---------------------------------------------------- 1. die Speicherkarte
 
-echo "== 1. die Speicherkarte von kdata =="
+echo "== 1. the kdata memory map =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Karte: $(tail -1 "$TMPD/karte.txt")"
+    ok "the map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
@@ -76,9 +76,9 @@ for r in EXT4_OFF NTFS_OFF; do
         | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))
     if [ "$d" -ge $((0x100000)) ] && [ "$d" -lt $((0x106000)) ]; then
-        ok "$r = $v liegt im zugeteilten Bereich 0x100000..0x106000"
+        ok "$r = $v lies in the allotted range 0x100000..0x106000"
     else
-        bad "$r = ${v:-fehlt} liegt AUSSERHALB von 0x100000..0x106000"
+        bad "$r = ${v:-missing} lies OUTSIDE 0x100000..0x106000"
     fi
 done
 
@@ -87,9 +87,9 @@ mkdir -p "$TMPD/kollision"
 sed -i 's/^const EXT4_OFF: u64 = 0x100000$/const EXT4_OFF: u64 = 0xF2000/' \
     "$TMPD/kollision/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
-    bad "GEGENPROBE: EXT4_OFF auf 0xF2000 (= VGPU_OFF) und der Pruefer schweigt"
+    bad "NEGATIVE: EXT4_OFF at 0xF2000 (= VGPU_OFF) and the checker stays silent"
 else
-    ok "GEGENPROBE: EXT4_OFF auf VGPU_OFF gelegt -- der Kartenpruefer schlaegt an"
+    ok "NEGATIVE: EXT4_OFF set to VGPU_OFF -- the map checker fires"
 fi
 
 for f in ext4 ntfs; do
@@ -100,15 +100,15 @@ for f in ext4 ntfs; do
     if [ "$f" = ext4 ]; then pb=$(( $(zahl BLKBUF) )); else pb=$(( $(zahl MFTBUF) )); fi
     ende=$(( no + nb * mn ))
     if [ "$ende" -le "$pb" ]; then
-        ok "$f.fi: die Knotentafel endet bei $(printf '0x%X' $ende), der Puffer beginnt bei $(printf '0x%X' $pb)"
+        ok "$f.fi: the node table ends at $(printf '0x%X' $ende), der Puffer beginnt bei $(printf '0x%X' $pb)"
     else
-        bad "$f.fi: die Knotentafel ragt in den Puffer ($(printf '0x%X' $ende) > $(printf '0x%X' $pb))"
+        bad "$f.fi: the node table reaches into the buffer ($(printf '0x%X' $ende) > $(printf '0x%X' $pb))"
     fi
 done
 
 for f in ext4 ntfs; do
     if grep -qaE '^\s*mask: vfsops\.OP_READONLY,' "kernel/fs/$f.fi"; then
-        ok "kernel/$f.fi sagt OP_READONLY zu (und nichts darueber hinaus)"
+        ok "kernel/$f.fi promises OP_READONLY (and nothing beyond)"
     else
         bad "kernel/$f.fi traegt nicht OP_READONLY"
     fi
@@ -116,16 +116,16 @@ done
 
 # --------------------------------------------------------------- 2. bauen
 
-echo "== 2. bauen: der Kern und der Werkzeugkasten, aus beiden Uebersetzern =="
+echo "== 2. build: the kernel and the toolbox, from both compilers =="
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
-    || bad "crt.s laesst sich nicht assemblieren"
+    || bad "crt.s cannot be assembled"
 
 baue_stufe() { # 0 | 1
     local s=$1 cc p rc=0
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" \
         > "$TMPD/k$s.log" 2>&1 || {
-        bad "firnc$s: der Kern laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/k$s.log" | head -12
         return 1
     }
@@ -145,11 +145,11 @@ baue_stufe() { # 0 | 1
     return $rc
 }
 baue_stufe 0 || { echo "FREMDFS: $pass bestanden, $((fail+1)) gescheitert"; exit 1; }
-ok "firnc0: der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
+ok "firnc0: the kernel and $(echo $PROGS | wc -w) programs are built"
 if baue_stufe 1; then
-    ok "firnc1: dasselbe aus dem Uebersetzer, der in Firn geschrieben ist"
+    ok "firnc1: the same from the compiler written in Firn"
 else
-    bad "firnc1 baut diese Runde nicht"
+    bad "firnc1 does not build this round"
 fi
 
 # ------------------------------------------------------- 3. die Pruefbilder
@@ -185,7 +185,7 @@ MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
 partitionieren() { # quelle ziel typ
@@ -248,7 +248,7 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
         "osum nokbd vfs script=fremdfs $art /dev/hdb1 /mnt")
     num "[$name] der Kernel beendet sich selbst (21)" "$rc" eq 21
     if [ ! -f "$D" ]; then
-        bad "[$name] keine serielle Ausgabe"
+        bad "[$name] no serial output"
         return
     fi
     sagt "$D" mount 1 "[$name] das Dateisystem wird eingehaengt"
@@ -284,9 +284,9 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
         s=$(soll "$p")
         i=$(shawert "$D" "/mnt/$p")
         if [ -z "$s" ]; then
-            bad "[$name] $p: der Wirt hat keine Summe"
+            bad "[$name] $p: the host has no checksum"
         elif [ -z "$i" ]; then
-            bad "[$name] $p: Osum liefert keine Summe"
+            bad "[$name] $p: Osum returns no checksum"
         elif [ "$s" = "$i" ]; then
             ok "[$name] $p: SHA-256 stimmt (${s:0:16}...)"
         else
@@ -298,9 +298,9 @@ durchgang() { # name abbild art erwartet_verweise(0/1)
     su=$(soll 'umlaut-äöü.txt')
     iu=$(shawert "$D" '/mnt/umlaut-äöü.txt')
     if [ -n "$su" ] && [ "$su" = "$iu" ]; then
-        ok "[$name] umlaut-äöü.txt: der Name mit Umlauten wird gefunden UND gelesen"
+        ok "[$name] umlaut-äöü.txt: the name with umlauts is found AND read"
     else
-        bad "[$name] umlaut-äöü.txt: SHA-256 weicht ab oder der Name wird nicht gefunden"
+        bad "[$name] umlaut-äöü.txt: SHA-256 differs or the name is not found"
         printf '        Wirt: %s\n        Osum: %s\n' "$su" "$iu"
     fi
 
@@ -346,9 +346,9 @@ NUR=${OSUM_FF_NUR:-beide}
 # ----------------------------------------------------------- 5. ext4
 
 if [ "$NUR" = beide ] || [ "$NUR" = ext4 ]; then
-echo "== 5. ext4: der ganze Baum, jede Pruefsumme =="
+echo "== 5. ext4: the whole tree, every checksum =="
 partitionieren "$BILD/ext4.img" "$TMPD/ext4-part.img" 83 \
-    && ok "die ext4-Partition steht (MBR, Typ 0x83)" \
+    && ok "the ext4 partition is ready (MBR, type 0x83)" \
     || bad "sfdisk scheitert"
 durchgang ext4 "$TMPD/ext4-part.img" ext4 1
 
@@ -360,16 +360,16 @@ fi
 # ----------------------------------------------------------- 6. NTFS
 
 if [ "$NUR" = beide ] || [ "$NUR" = ntfs ]; then
-echo "== 6. NTFS: der ganze Baum, jede Pruefsumme =="
+echo "== 6. NTFS: the whole tree, every checksum =="
 partitionieren "$BILD/ntfs.img" "$TMPD/ntfs-part.img" 7 \
-    && ok "die NTFS-Partition steht (MBR, Typ 0x07)" \
+    && ok "the NTFS partition is ready (MBR, type 0x07)" \
     || bad "sfdisk scheitert"
 durchgang ntfs "$TMPD/ntfs-part.img" ntfs 0
 fi
 
 # ------------------------------------------------------- 7. die Gegenproben
 
-echo "== 7. die Gegenproben: was NICHT gelesen werden darf =="
+echo "== 7. the negative tests: what must NOT be readable =="
 
 partitionieren "$BILD/kaputt-ext4.img" "$TMPD/kaputt-part.img" 83 >/dev/null
 rc=$(lauf kaputt "$TMPD/root.img" "$TMPD/kaputt-part.img" \
@@ -421,7 +421,7 @@ hat "$TMPD/schmutz.txt" "ext4: WARNUNG unsauber ausgehaengt" \
 # ------------------------------------------------- 7b. DIE ABSCHALTBARKEIT
 #
 
-echo "== 7b. die Abschaltbarkeit (--ohne-ext4 / --ohne-ntfs) =="
+echo "== 7b. switchability (--ohne-ext4 / --ohne-ntfs) =="
 
 baue_variante() { # name optionen...
     local name=$1; shift
@@ -444,29 +444,29 @@ num "das Abbild ohne NTFS ist gebaut" "${gr_on:-0}" gt 1000000
 num "das Abbild ohne beide ist gebaut" "${gr_ob:-0}" gt 1000000
 
 if [ "${gr_oe:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
-    ok "--ohne-ext4 spart $(( gr_voll - gr_oe )) Oktette ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
+    ok "--ohne-ext4 saves $(( gr_voll - gr_oe )) octets ($(( (gr_voll - gr_oe) / 1024 )) KiB)"
 else
-    bad "--ohne-ext4 macht das Abbild NICHT kleiner"
+    bad "--ohne-ext4 does NOT make the image smaller"
 fi
 if [ "${gr_on:-0}" -lt "${gr_voll:-0}" ] 2>/dev/null; then
-    ok "--ohne-ntfs spart $(( gr_voll - gr_on )) Oktette ($(( (gr_voll - gr_on) / 1024 )) KiB)"
+    ok "--ohne-ntfs saves $(( gr_voll - gr_on )) octets ($(( (gr_voll - gr_on) / 1024 )) KiB)"
 else
-    bad "--ohne-ntfs macht das Abbild NICHT kleiner"
+    bad "--ohne-ntfs does NOT make the image smaller"
 fi
 if [ "${gr_ob:-0}" -lt "${gr_oe:-0}" ] && [ "${gr_ob:-0}" -lt "${gr_on:-0}" ] 2>/dev/null; then
-    ok "--ohne-fremdfs spart $(( gr_voll - gr_ob )) Oktette ($(( (gr_voll - gr_ob) / 1024 )) KiB), mehr als jedes einzeln"
+    ok "--ohne-fremdfs saves $(( gr_voll - gr_ob )) octets ($(( (gr_voll - gr_ob) / 1024 )) KiB), more than either alone"
 else
-    bad "--ohne-fremdfs spart nicht mehr als die Einzelschalter"
+    bad "--ohne-fremdfs saves no more than the single switches"
 fi
 printf 'voll %s\nohne-ext4 %s\nohne-ntfs %s\nohne-beide %s\n' \
     "$gr_voll" "$gr_oe" "$gr_on" "$gr_ob" > "$TMPD/groessen.txt"
 
 grep -qa 'ext4=aus, ntfs=aus' "$TMPD/v-ohne-beide.log" \
     && ok "der Bau meldet 'ext4=aus, ntfs=aus'" \
-    || bad "der Bau sagt nicht, dass die zwei fehlen"
+    || bad "the build does not say that the two are missing"
 grep -qa 'ext4=an, ntfs=an' "$TMPD/v-voll.log" \
     && ok "und beim vollen Bau 'ext4=an, ntfs=an'" \
-    || bad "der volle Bau sagt es nicht"
+    || bad "the full build does not say it"
 
 lauf_mit() { # name kernel zweite kommandozeile
     local name=$1 kern=$2 second=$3 app=$4
@@ -492,9 +492,9 @@ if [ "${gr_ob:-0}" -gt 1000000 ]; then
     sagt "$TMPD/ohne-e4.txt" mount 0 \
         "[ohne-beide] ein ext4 wird ABGELEHNT (Dateisystem nicht unterstuetzt)"
     if grep -qa '^ext4: ' "$TMPD/ohne-e4.txt"; then
-        bad "[ohne-beide] der ext4-Treiber meldet sich -- er ist noch im Abbild"
+        bad "[ohne-beide] the ext4 driver reports in -- it is still in the image"
     else
-        ok "[ohne-beide] der ext4-Treiber meldet sich mit keiner Zeile"
+        ok "[ohne-beide] the ext4 driver reports with no line"
     fi
 
     rc=$(lauf_mit ohne-nt "$TMPD/v-ohne-beide.mb" "$TMPD/ntfs-part.img" \
@@ -503,9 +503,9 @@ if [ "${gr_ob:-0}" -gt 1000000 ]; then
     sagt "$TMPD/ohne-nt.txt" mount 0 \
         "[ohne-beide] ein NTFS wird ABGELEHNT"
     if grep -qa '^ntfs: ' "$TMPD/ohne-nt.txt"; then
-        bad "[ohne-beide] der NTFS-Treiber meldet sich -- er ist noch im Abbild"
+        bad "[ohne-beide] the NTFS driver reports in -- it is still in the image"
     else
-        ok "[ohne-beide] der NTFS-Treiber meldet sich mit keiner Zeile"
+        ok "[ohne-beide] the NTFS driver reports with no line"
     fi
 
     rc=$(lauf_mit ohne-ofs "$TMPD/v-ohne-beide.mb" "" \
@@ -532,7 +532,7 @@ rm -f "$TMPD"/v-*.mb "$TMPD"/v-*.mb.elf "$TMPD"/live-ohne-*.img \
 
 # ------------------------------------------------- 8. die Lesegeschwindigkeit
 
-echo "== 8. wie schnell gelesen wird (gegen das eigene OFS) =="
+echo "== 8. how fast it reads (against the own OFS) =="
 messen() { # name abbild art
     local name=$1 abbild=$2 art=$3 t0 t1
     t0=$(date +%s%N)
@@ -544,8 +544,8 @@ messen() { # name abbild art
 if [ "$NUR" = beide ]; then
     ms_ext4=$(messen zeit-ext4 "$TMPD/ext4-part.img" ext4)
     ms_ntfs=$(messen zeit-ntfs "$TMPD/ntfs-part.img" ntfs)
-    echo "  ext4: ${ms_ext4} ms fuer den ganzen Durchgang (6 MiB + 520 Dateien)"
-    echo "  ntfs: ${ms_ntfs} ms fuer den ganzen Durchgang (6 MiB + 520 Dateien)"
+    echo "  ext4: ${ms_ext4} ms for the whole pass (6 MiB + 520 files)"
+    echo "  ntfs: ${ms_ntfs} ms for the whole pass (6 MiB + 520 files)"
     printf 'ext4 %s\nntfs %s\n' "$ms_ext4" "$ms_ntfs" > "$TMPD/zeiten.txt"
     num "ext4 liest den Baum in unter 120 Sekunden" "${ms_ext4:-999999}" lt 120000
     num "ntfs liest den Baum in unter 120 Sekunden" "${ms_ntfs:-999999}" lt 120000

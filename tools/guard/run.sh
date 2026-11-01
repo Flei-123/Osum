@@ -49,7 +49,7 @@ for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then
         ok "firnc$s: der Kern ist gebaut ($(stat -c%s "$TMPD/k$s.mb") Oktette)"
     else
-        bad "firnc$s: der Kern laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/b$s.log" | head -12
     fi
 done
@@ -57,7 +57,7 @@ done
 
 PROGS="sh ls cat echo wc grep uname true false"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/as.err" \
-    || bad "crt.s laesst sich nicht assemblieren"
+    || bad "crt.s cannot be assembled"
 ubau=1
 for p in $PROGS; do
     "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" >"$TMPD/u$p.log" 2>&1 \

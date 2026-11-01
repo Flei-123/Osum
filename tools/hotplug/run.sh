@@ -32,7 +32,7 @@ hat_nicht() {
         || ok "$3"
 }
 num() {
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: not a number (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -75,7 +75,7 @@ num "Programme gebaut" "$gebaut" ge 15
 
 python3 tools/osum/mkfs.py build "$ARB/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ $MK > "$ARB/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht: $(tail -1 "$ARB/mkfs.log")" \
+    && ok "the root disk is ready: $(tail -1 "$ARB/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$ARB/mkfs.log" | head -5; }
 
 stick_bauen() { # <datei> <name> <inhalt>

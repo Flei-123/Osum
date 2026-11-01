@@ -142,7 +142,7 @@ APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
 if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
 
-as --64 -o "$OUT/crt.o" kernel/user/crt.s || fehler "crt.s laesst sich nicht assemblieren"
+as --64 -o "$OUT/crt.o" kernel/user/crt.s || fehler "crt.s cannot be assembled"
 gebaut=""
 rc=0
 #

@@ -129,7 +129,7 @@ hat kernel/user/settings.fi "SYS_DISPSET" \
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then
     ok "firnc1 baut diese Runde auch (der Uebersetzer in Firn)"
 else
-    bad "firnc1 baut diese Runde nicht"; tail -5 "$TMPD/k1.log" | sed 's/^/        /'
+    bad "firnc1 does not build this round"; tail -5 "$TMPD/k1.log" | sed 's/^/        /'
 fi
 
 MKARGS=""

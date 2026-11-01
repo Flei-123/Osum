@@ -30,7 +30,7 @@ hat_nicht() {
         && bad "$3 -- '$2' steht da und sollte NICHT" || ok "$3"
 }
 num() {
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: not a number (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -92,7 +92,7 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     /etc/wirt2="$TMPD/wirt2" \
     /c/eins/etc/eigen="$TMPD/eigen" \
     $MK $CMK > "$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -8; }
 
 # ============================================== der Laeufer

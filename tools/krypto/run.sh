@@ -71,9 +71,9 @@ fi
 
 # ---------------------------------------------------- 1. die Speicherkarte
 
-echo "== 1. die Speicherkarte von kdata =="
+echo "== 1. the kdata memory map =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Karte: $(tail -1 "$TMPD/karte.txt")"
+    ok "the map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10

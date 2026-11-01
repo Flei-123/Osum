@@ -169,7 +169,7 @@ echo
 echo "== 5. DIE ABNAHME: Schreibtisch, Fresser, und wer ueberlebt =="
 #
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
-    || bad "crt.s laesst sich nicht assemblieren"
+    || bad "crt.s cannot be assembled"
 PROGS="desktop taskbar launcher sh echo ls cat"
 BUILT=1
 for p in $PROGS; do

@@ -122,13 +122,13 @@ fi
 # --------------------------------------------------------------- 2. bauen
 
 echo "== 2. bauen: der Kern und der Werkzeugkasten, aus beiden Uebersetzern =="
-as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s laesst sich nicht assemblieren"
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s cannot be assembled"
 
 baue_stufe() { # 0 | 1
     local s=$1 cc p rc=0
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/k$s.log" 2>&1 || {
-        bad "firnc$s: der Kern laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/k$s.log" | head -12
         return 1
     }
@@ -149,9 +149,9 @@ baue_stufe() { # 0 | 1
 baue_stufe 0 || { echo "K14: $pass passed, $((fail+1)) failed"; exit 1; }
 ok "firnc0: der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
 if baue_stufe 1; then
-    ok "firnc1: dasselbe aus dem Uebersetzer, der in Firn geschrieben ist"
+    ok "firnc1: the same from the compiler written in Firn"
 else
-    bad "firnc1 baut diese Runde nicht"
+    bad "firnc1 does not build this round"
 fi
 
 echo "== 3. die Tafel der Verrichtungen ist eine Tafel von ZEIGERN =="
@@ -214,7 +214,7 @@ MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
 # ------------------------------------------------------------ der Lauf

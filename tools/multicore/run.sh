@@ -113,7 +113,7 @@ bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
          echo "VIELKERN: $pass bestanden, $fail gescheitert"; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
-as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s laesst sich nicht assemblieren"
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s cannot be assembled"
 bauen_ok=1
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"

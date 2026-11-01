@@ -19,7 +19,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: not a number (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -43,14 +43,14 @@ for w in ffmpeg python3 sha256sum; do
 done
 ffmpeg -hide_banner -encoders > "$TMPD/enc.txt" 2>/dev/null || true
 grep -q libx264 "$TMPD/enc.txt" || {
-    echo "CODEC: uebersprungen, ffmpeg kann kein libx264"; exit 0; }
-ok "die Werkzeuge des Wirts sind da (ffmpeg mit libx264, qemu, python3)"
+    echo "CODEC: skipped, ffmpeg has no libx264"; exit 0; }
+ok "host tools are present (ffmpeg with libx264, qemu, python3)"
 
 # ------------------------------------------------- 1. die Speicherkarte
 
-echo "== 1. die Speicherkarte von kdata =="
+echo "== 1. the kdata memory map =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Karte: $(tail -1 "$TMPD/karte.txt")"
+    ok "the map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
@@ -64,7 +64,7 @@ m=$(grep -aE "^const CODEC_MAX: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
 if [ "$((v))" -eq $((0x118000)) ] && [ "$((v + m))" -le $((0x120000)) ]; then
     ok "CODEC_OFF = $v, CODEC_MAX = $m -- genau der zugeteilte Bereich 0x118000..0x120000"
 else
-    bad "CODEC_OFF = ${v:-fehlt} (+${m:-?}) liegt AUSSERHALB von 0x118000..0x120000"
+    bad "CODEC_OFF = ${v:-missing} (+${m:-?}) lies OUTSIDE 0x118000..0x120000"
 fi
 
 mkdir -p "$TMPD/kollision"
@@ -72,25 +72,25 @@ mkdir -p "$TMPD/kollision"
 sed -i 's/^const CODEC_OFF: u64 = 0x118000$/const CODEC_OFF: u64 = 0x108000/' \
     "$TMPD/kollision/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
-    bad "GEGENPROBE: CODEC_OFF auf 0x108000 (= WMP_OFF) und der Pruefer schweigt"
+    bad "NEGATIVE: CODEC_OFF at 0x108000 (= WMP_OFF) and the checker stays silent"
 else
-    ok "GEGENPROBE: CODEC_OFF auf WMP_OFF gelegt -- der Kartenpruefer schlaegt an"
+    ok "NEGATIVE: CODEC_OFF set to WMP_OFF -- the map checker fires"
 fi
 
 if [ "$((m))" -le $((0x8000)) ]; then
-    ok "der Bereich ist $((m / 1024)) KiB -- zu klein fuer einen Bildpuffer, also liegt dort keiner"
+    ok "the region is $((m / 1024)) KiB -- too small for a frame buffer, so none lives there"
 else
-    bad "CODEC_MAX = $m ist groesser als die zugeteilten acht Seiten"
+    bad "CODEC_MAX = $m is larger than the eight allotted pages"
 fi
 
 # ------------------------------------------- 2. die erzeugten Tafeln
 
-echo "== 2. die Zahlentafeln: erzeugt, nicht abgetippt =="
+echo "== 2. the number tables: generated, not typed =="
 if python3 tools/codec/mktab.py > "$TMPD/h264tab.fi" 2>"$TMPD/tab.err"; then
     if cmp -s "$TMPD/h264tab.fi" kernel/user/h264tab.fi; then
-        ok "kernel/user/h264tab.fi ist genau das, was mktab.py erzeugt"
+        ok "kernel/user/h264tab.fi is exactly what mktab.py generates"
     else
-        bad "kernel/user/h264tab.fi weicht von mktab.py ab -- von Hand geaendert?"
+        bad "kernel/user/h264tab.fi differs from mktab.py -- edited by hand?"
     fi
 else
     bad "tools/codec/mktab.py scheitert"
@@ -98,24 +98,24 @@ else
 fi
 
 if python3 tools/codec/praefix.py > "$TMPD/praefix.txt" 2>&1; then
-    ok "alle CAVLC-Tafeln sind praefixfrei: $(tail -1 "$TMPD/praefix.txt")"
+    ok "all CAVLC tables are prefix-free: $(tail -1 "$TMPD/praefix.txt")"
 else
-    bad "eine CAVLC-Tafel ist MEHRDEUTIG"
+    bad "a CAVLC table is AMBIGUOUS"
     sed 's/^/        /' "$TMPD/praefix.txt" | head -10
 fi
 
 # ----------------------------------------------------------- 3. bauen
 
-echo "== 3. bauen: der Kern und die Programme, aus beiden Uebersetzern =="
+echo "== 3. build: the kernel and the programs, from both compilers =="
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
-    || bad "crt.s laesst sich nicht assemblieren"
+    || bad "crt.s cannot be assembled"
 
 baue_stufe() { # 0 | 1
     local s=$1 cc p rc=0
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" \
         > "$TMPD/k$s.log" 2>&1 || {
-        bad "firnc$s: der Kern laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         grep -viE 'warning|^\s+\||^\s+=|note:' "$TMPD/k$s.log" | tail -12 \
             | sed 's/^/        /'
         return 1
@@ -131,27 +131,27 @@ baue_stufe() { # 0 | 1
     return $rc
 }
 baue_stufe 0 || { echo "== CODEC: $pass bestanden, $((fail+1)) gescheitert =="; exit 1; }
-ok "firnc0: der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
+ok "firnc0: the kernel and $(echo $PROGS | wc -w) programs are built"
 if baue_stufe 1; then
-    ok "firnc1: dasselbe aus dem Uebersetzer, der in Firn geschrieben ist"
+    ok "firnc1: the same from the compiler written in Firn"
 else
-    bad "firnc1 baut diese Runde nicht"
+    bad "firnc1 does not build this round"
 fi
 
 for f in kernel/user/h264.fi kernel/user/h264tab.fi; do
     sed 's://.*::' "$f" > "$TMPD/ohnekomm.fi"
     if grep -qaE '\b(f32|f64)\b|allow_fp|std\.math' "$TMPD/ohnekomm.fi"; then
-        bad "$f enthaelt Fliesskomma -- damit ist Bitgleichheit nicht zu haben"
+        bad "$f contains floating point -- bit equality is not possible"
         grep -naE '\b(f32|f64)\b|allow_fp|std\.math' "$TMPD/ohnekomm.fi" \
             | head -5 | sed 's/^/        /'
     else
-        ok "kein Fliesskomma im Code von $(basename "$f") (keine f32/f64, kein allow_fp, kein std.math)"
+        ok "no floating point in the code of $(basename "$f") (keine f32/f64, kein allow_fp, kein std.math)"
     fi
 done
 
 # ------------------------------------------------- 4. das Pruefmaterial
 
-echo "== 4. das Pruefmaterial, vom WIRT mit x264 gebaut =="
+echo "== 4. the test material, built by the HOST with x264 =="
 MED="$TMPD/m"
 if bash tools/codec/mkmedia.sh "$MED" > "$TMPD/med.log" 2>&1; then
     ok "$(grep -c . "$MED/liste.txt") Stroeme stehen (Baseline, I und I+P)"
@@ -171,7 +171,7 @@ for f in "$MED"/*.264; do
         *) bad "$(basename "$f"): Profil '$pr' statt Baseline"; ;;
     esac
 done
-ok "alle Stroeme tragen das Baseline-Profil (ffprobe)"
+ok "all streams carry the baseline profile (ffprobe)"
 
 sl=$(python3 tools/codec/nalzahl.py "$MED/slices.264" 2>/dev/null)
 sl_n=$(echo "$sl" | cut -d' ' -f1)
@@ -179,26 +179,26 @@ sl_fm=$(echo "$sl" | cut -d' ' -f3)
 num "der Strom 'slices' hat so viele Slice-Einheiten (3 Bilder x 4)" \
     "${sl_n:-0}" eq 12
 case "$sl_fm" in
-    0,*) ok "und sie fangen bei verschiedenen Makrobloecken an ($sl_fm)" ;;
-    *) bad "die first_mb_in_slice-Werte sehen falsch aus: $sl_fm" ;;
+    0,*) ok "and they start at different macroblocks ($sl_fm)" ;;
+    *) bad "the first_mb_in_slice values look wrong: $sl_fm" ;;
 esac
 
 ffmpeg -y -v error -f lavfi -i testsrc2=size=128x96:rate=5 -frames:v 2 \
     -c:v libx264 -profile:v high -pix_fmt yuv420p -f h264 \
     "$MED/x_high.264" 2>/dev/null \
-    && ok "ein HIGH-Profile-Strom fuer die Gegenprobe steht" \
-    || bad "der High-Profile-Strom laesst sich nicht bauen"
+    && ok "a HIGH profile stream for the negative test exists" \
+    || bad "the HIGH profile stream cannot be built"
 ffmpeg -y -v error -f lavfi -i testsrc2=size=128x96:rate=5 -frames:v 2 \
     -c:v libx264 -profile:v main -coder 1 -pix_fmt yuv420p -f h264 \
     "$MED/x_cabac.264" 2>/dev/null \
-    && ok "ein CABAC-Strom (Main) fuer die Gegenprobe steht" \
-    || bad "der CABAC-Strom laesst sich nicht bauen"
+    && ok "a CABAC stream (Main) for the negative test exists" \
+    || bad "the CABAC stream cannot be built"
 
 ffmpeg -y -v error -f lavfi -i testsrc2=size=1920x1080:rate=5 -frames:v 1 \
     -c:v libx264 -profile:v baseline -pix_fmt yuv420p -f h264 \
     "$MED/x_gross.264" 2>/dev/null \
-    && ok "ein 1920x1080-Strom fuer die Grenzprobe steht" \
-    || bad "der 1920x1080-Strom laesst sich nicht bauen"
+    && ok "a 1920x1080 stream for the limit test exists" \
+    || bad "the 1920x1080 stream cannot be built"
 
 # ------------------------------------------------------ 5. die Platte
 
@@ -208,7 +208,7 @@ for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
 for f in "$MED"/*.264; do MKARGS="$MKARGS /v/$(basename "$f")=$f"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" 16384 --inodes=128 \
     /bin/ /v/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
 lauf() { # name kommandozeile [zeitlimit]
@@ -229,7 +229,7 @@ lauf() { # name kommandozeile [zeitlimit]
 # ============================================== 6. DIE GEGENPROBE
 #
 
-echo "== 6. die ffmpeg-Gegenprobe: jedes Bild, jede Pruefsumme =="
+echo "== 6. the ffmpeg cross-check: every frame, every checksum =="
 GESAMT_BILDER=0
 GESAMT_GLEICH=0
 NUR=${OSUM_CODEC_SCHNELL:-0}
@@ -240,10 +240,10 @@ while read -r name w h nf; do
     rc=$(lauf "$name" "osum nokbd script=h264t /v/$name.264")
     D="$TMPD/$name.txt"
     if [ "$rc" != 21 ]; then
-        bad "[$name] der Kernel beendet sich nicht selbst (rc=$rc)"
+        bad "[$name] the kernel does not exit by itself (rc=$rc)"
         continue
     fi
-    if [ ! -f "$D" ]; then bad "[$name] keine serielle Ausgabe"; continue; fi
+    if [ ! -f "$D" ]; then bad "[$name] no serial output"; continue; fi
     python3 tools/codec/mkyuvsha.py "$MED/$name.yuv" "$w" "$h" \
         > "$TMPD/$name.soll" 2>/dev/null
     gleich_hier=1
@@ -266,7 +266,7 @@ while read -r name w h nf; do
     if [ "$gleich_hier" = 1 ] && [ "$fr" = "$nf" ] && [ "$er" = 0 ]; then
         ok "[$name] ${w}x${h}, $fr Bilder BITGLEICH -- $ms ms, $((fps/100)).$(printf %02d $((fps%100))) Bilder/s"
     else
-        bad "[$name] ${w}x${h}: $fr von $nf Bildern, err=$er, $n_hier Summen geprueft"
+        bad "[$name] ${w}x${h}: $fr of $nf frames, err=$er, $n_hier sums checked"
     fi
     gleich "[$name] der Kern zaehlt dieselben Bilder (kdata CODEC_OFF)" "$nf" "$kf"
     gleich "[$name] der Kern kennt die Breite" "$w" "$kw"
@@ -274,7 +274,7 @@ while read -r name w h nf; do
 done < "$MED/liste.txt"
 num "die Gegenprobe insgesamt: bitgleiche Bilder" "$GESAMT_GLEICH" eq "$GESAMT_BILDER"
 
-echo "== 7. die Gegenproben: was ABGEWIESEN werden muss =="
+echo "== 7. the negative tests: what MUST be REJECTED =="
 
 rc=$(lauf high "osum nokbd script=h264t /v/x_high.264")
 num "[high] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
@@ -287,9 +287,9 @@ rc=$(lauf cabac "osum nokbd script=h264t /v/x_cabac.264")
 num "[cabac] der Kernel beendet sich selbst" "$rc" eq 21
 er=$(wert "$TMPD/cabac.txt" err)
 if [ "$er" = 2 ] || [ "$er" = 3 ]; then
-    ok "[cabac] ein CABAC-Strom wird ABGEWIESEN (err=$er)"
+    ok "[cabac] a CABAC stream is REJECTED (err=$er)"
 else
-    bad "[cabac] ein CABAC-Strom wird NICHT abgewiesen (err=$er)"
+    bad "[cabac] a CABAC stream is NOT rejected (err=$er)"
 fi
 
 echo "== 7c. abgeschnittene Stroeme =="
@@ -379,14 +379,14 @@ num "Unsinn als Eingabe, sauber abgewiesen (von 3)" "$unsinn_ok" eq 3
 
 # ---------------------------------------------------- 8. check-ui
 
-echo "== 7f. die Kreisprobe: schneller gegen langsamen Weg der MC =="
+echo "== 7f. the loop test: fast versus slow MC path =="
 while read -r name w h nf; do
     if [ "$NUR" = 1 ]; then
         case "$name" in i_klein|p_klein) ;; *) continue ;; esac
     fi
     rc=$(lauf "l_$name" "osum nokbd script=h264t --langsam /v/$name.264")
     if [ "$rc" != 21 ]; then
-        bad "[$name] der langsame Weg beendet sich nicht selbst (rc=$rc)"
+        bad "[$name] the slow path does not exit by itself (rc=$rc)"
         continue
     fi
     a=$(grep -a '^h264: sha ' "$TMPD/$name.txt" 2>/dev/null | tr -d '\r\000' | sort)
@@ -395,12 +395,12 @@ while read -r name w h nf; do
     if [ -n "$a" ] && [ "$a" = "$b" ]; then
         ok "[$name] schneller Weg == langsamer Weg, $na Bilder oktettweise gleich"
     else
-        bad "[$name] der schnelle Weg weicht vom langsamen ab"
+        bad "[$name] the fast path differs from the slow path"
         diff <(printf '%s\n' "$a") <(printf '%s\n' "$b") | head -4 | sed 's/^/        /'
     fi
 done < "$MED/liste.txt"
 
-echo "== 7g. ueber der Grenze (1280x720) wird abgewiesen =="
+echo "== 7g. above the limit (1280x720) is rejected =="
 rc=$(lauf gross "osum nokbd script=h264t /v/x_gross.264")
 num "[gross] der Kernel beendet sich selbst statt zu haengen" "$rc" eq 21
 er=$(wert "$TMPD/gross.txt" err)
