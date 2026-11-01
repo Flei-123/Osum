@@ -560,9 +560,10 @@ if [ -n "$WBACK" ] && [ "$WBACK" -ge 3 ]; then
 else
     bad "PUNKT 1: there came back ${WBACK:-0} tasks"
 fi
-# 17 Rahmen je Aufgabe (KSTACK_FRAMES + 1 Wache).
-if [ -n "$WKST" ] && [ -n "$WBACK" ] && [ "$WKST" -eq $((WBACK * 17)) ]; then
-    ok "PUNKT 1: $WKST Kernstapelrahmen == $WBACK Aufgaben * 17"
+KSF=$(grep -aoE '^const KSTACK_FRAMES: u64 = [0-9]+' kernel/sched/sched.fi | grep -oE '[0-9]+$')
+KSF=$(( ${KSF:-0} + 1 ))
+if [ -n "$WKST" ] && [ -n "$WBACK" ] && [ "$KSF" -gt 1 ] && [ "$WKST" -eq $((WBACK * KSF)) ]; then
+    ok "PUNKT 1: $WKST kernel stack frames == $WBACK tasks * $KSF"
 else
     bad "the kernel stack frames do not match: kstapel=${WKST:-?}, tasks=${WBACK:-?}"
 fi
