@@ -132,7 +132,7 @@ def check_eapol():
     ap, m1, kck, m2 = key_frames()
     good2 = False
     try:
-        ap.nachricht2_pruefen(m2)
+        ap.check_message2(m2)
         good2 = True
     except Exception as e:
         print("   ", e)
@@ -144,7 +144,7 @@ def check_eapol():
     m4 = bytes.fromhex(out[0].split()[1])
     good4 = False
     try:
-        ap.nachricht4_pruefen(m4)
+        ap.check_message4(m4)
         good4 = True
     except Exception as e:
         print("   ", e)
@@ -152,7 +152,7 @@ def check_eapol():
     ap2, m1b, kckb, m2b = key_frames(wrong_kck=True)
     bad = False
     try:
-        ap2.nachricht2_pruefen(m2b)
+        ap2.check_message2(m2b)
     except Exception:
         bad = True
     ok(bad, "control: message 2 with a wrong KCK is rejected")

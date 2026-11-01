@@ -7,8 +7,8 @@ import subprocess
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(os.path.dirname(HIER))
-ORAKEL = os.path.join(WURZEL, ".probe", "worakel")
+REPO_ROOT = os.path.dirname(os.path.dirname(HIER))
+ORAKEL = os.path.join(REPO_ROOT, ".probe", "worakel")
 MITSCHNITT = os.path.join(HIER, "mitschnitt.txt")
 
 QUICK = ("--quick" in sys.argv or "--schnell" in sys.argv)
@@ -29,7 +29,7 @@ def bad(text):
     print("  FAIL  %s" % text)
 
 
-def gleich(name, ist, soll):
+def equal(name, ist, soll):
     if ist == soll:
         ok("%s: %s" % (name, ist if len(str(ist)) < 60 else str(ist)[:57] + "..."))
     else:
@@ -38,25 +38,25 @@ def gleich(name, ist, soll):
 
 # ------------------------------------------------------------ das Orakel
 
-def orakel(zeilen):
-    eingabe = ("\n".join(zeilen) + "\n").encode()
-    p = subprocess.run([ORAKEL], input=eingabe, stdout=subprocess.PIPE,
+def orakel(rows):
+    input_text = ("\n".join(rows) + "\n").encode()
+    p = subprocess.run([ORAKEL], input=input_text, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE)
     if p.returncode != 0:
         bad("the oracle exited with code %d" % p.returncode)
-        return ["ABSTURZ"] * len(zeilen)
+        return ["ABSTURZ"] * len(rows)
     aus = p.stdout.decode(errors="replace").split("\n")
     while aus and aus[-1] == "":
         aus.pop()
-    if len(aus) != len(zeilen):
-        bad("the oracle gave %d lines for %d questions" % (len(aus), len(zeilen)))
-        while len(aus) < len(zeilen):
+    if len(aus) != len(rows):
+        bad("the oracle gave %d lines for %d questions" % (len(aus), len(rows)))
+        while len(aus) < len(rows):
             aus.append("FEHLT")
     return aus
 
 
-def eins(zeile):
-    return orakel([zeile])[0]
+def eins(row):
+    return orakel([row])[0]
 
 
 def h(b):
@@ -65,46 +65,46 @@ def h(b):
 
 # ============================================================ 1. SHA-1
 
-def teil_sha1():
+def part_sha1():
     print("== 1. SHA-1, HMAC-SHA1, PRF und PBKDF2 ==")
-    gleich("SHA-1(\"abc\")", eins("sha1 " + h(b"abc")),
+    equal("SHA-1(\"abc\")", eins("sha1 " + h(b"abc")),
            "a9993e364706816aba3e25717850c26c9cd0d89d")
     lang = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
-    gleich("SHA-1(56 octets, FIPS 180-4)", eins("sha1 " + h(lang)),
+    equal("SHA-1(56 octets, FIPS 180-4)", eins("sha1 " + h(lang)),
            "84983e441c3bd26ebaae4aa1f95129e5e54670f1")
-    gleich("SHA-1(leer)", eins("sha1 -"),
+    equal("SHA-1(leer)", eins("sha1 -"),
            "da39a3ee5e6b4b0d3255bfef95601890afd80709")
 
     laengen = list(range(0, 200)) if not QUICK else [0, 1, 55, 56, 63, 64, 65, 119, 120, 128]
-    fragen = []
+    queries = []
     sollen = []
     for n in laengen:
         m = bytes((i * 37 + n) & 255 for i in range(n))
-        fragen.append("sha1 " + h(m))
+        queries.append("sha1 " + h(m))
         sollen.append(hashlib.sha1(m).hexdigest())
-    antworten = orakel(fragen)
-    schlecht = [i for i in range(len(fragen)) if antworten[i] != sollen[i]]
-    if schlecht:
+    antworten = orakel(queries)
+    defective = [i for i in range(len(queries)) if antworten[i] != sollen[i]]
+    if defective:
         bad("SHA-1 vs hashlib: %d of %d wrong, first length %d"
-            % (len(schlecht), len(fragen), laengen[schlecht[0]]))
+            % (len(defective), len(queries), laengen[defective[0]]))
     else:
         ok("SHA-1 vs Python hashlib: %d lengths from %d to %d, all equal"
            % (len(laengen), laengen[0], laengen[-1]))
 
-    fragen = []
+    queries = []
     sollen = []
     for kl in [0, 1, 20, 63, 64, 65, 100, 200]:
         for ml in [0, 1, 64, 200]:
             k = bytes((i * 11 + kl) & 255 for i in range(kl))
             m = bytes((i * 7 + ml) & 255 for i in range(ml))
-            fragen.append("hmacsha1 %s %s" % (h(k), h(m)))
+            queries.append("hmacsha1 %s %s" % (h(k), h(m)))
             sollen.append(pyhmac.new(k, m, hashlib.sha1).hexdigest())
-    antworten = orakel(fragen)
+    antworten = orakel(queries)
     if antworten == sollen:
         ok("HMAC-SHA1 vs Python hmac: %d cases, including keys > 64 octets"
-           % len(fragen))
+           % len(queries))
     else:
-        i = [j for j in range(len(fragen)) if antworten[j] != sollen[j]][0]
+        i = [j for j in range(len(queries)) if antworten[j] != sollen[j]][0]
         bad("HMAC-SHA1: case %d wrong (%s instead of %s)" % (i, antworten[i], sollen[i]))
 
     # ---- PRF-SHA1, IEEE 802.11i 8.5.1.1 ----
@@ -126,10 +126,10 @@ def teil_sha1():
     ]
     for i, (key, data, soll) in enumerate(prf_faelle):
         soll = soll.replace(" ", "")
-        antwort = eins("prf %s %s %s %d" % (h(key), h(b"prefix"), h(data),
+        response = eins("prf %s %s %s %d" % (h(key), h(b"prefix"), h(data),
                                             len(soll) // 2))
-        gleich("PRF-SHA1, IEEE-802.11i-Vektor %d (aus hostapd 2.10)" % i,
-               antwort, soll)
+        equal("PRF-SHA1, IEEE-802.11i-Vektor %d (aus hostapd 2.10)" % i,
+               response, soll)
 
     # ---- PBKDF2-HMAC-SHA1, RFC 6070 ----
     for pw, salt, c, soll in [
@@ -140,8 +140,8 @@ def teil_sha1():
          b"saltSALTsaltSALTsaltSALTsaltSALTsalt", 4096,
          "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038"),
     ]:
-        antwort = eins("pbkdf2 %s %s %d %d" % (h(pw), h(salt), c, len(soll) // 2))
-        gleich("PBKDF2-SHA1, RFC 6070, c=%d" % c, antwort, soll)
+        response = eins("pbkdf2 %s %s %d %d" % (h(pw), h(salt), c, len(soll) // 2))
+        equal("PBKDF2-SHA1, RFC 6070, c=%d" % c, response, soll)
 
     #
     # HERKUNFT: hostapd 2.10, passphrase_tests[].
@@ -154,20 +154,20 @@ def teil_sha1():
          "becb93866bb8c3832cb777c2f559807c8c59afcb6eae7348850013 00a981cc62"
          .replace(" ", "")),
     ]:
-        antwort = eins("pmk %s %s" % (h(pw), h(ssid)))
-        gleich("PMK from password and SSID (%s)" % ssid.decode(), antwort, soll)
+        response = eins("pmk %s %s" % (h(pw), h(ssid)))
+        equal("PMK from password and SSID (%s)" % ssid.decode(), response, soll)
 
-    gleich("a password of 7 characters is REJECTED",
+    equal("a password of 7 characters is REJECTED",
            eins("pmk %s %s" % (h(b"1234567"), h(b"Netz"))), "FAIL")
-    gleich("a password of 64 characters is REJECTED",
+    equal("a password of 64 characters is REJECTED",
            eins("pmk %s %s" % (h(b"x" * 64), h(b"Netz"))), "FAIL")
-    gleich("an SSID of 33 octets is REJECTED",
+    equal("an SSID of 33 octets is REJECTED",
            eins("pmk %s %s" % (h(b"passwort"), h(b"y" * 33))), "FAIL")
 
 
 # ============================================================ 2. AES
 
-def teil_aes():
+def part_aes():
     print()
     print("== 2. AES, CMAC, Key Wrap und CCM ==")
     pt = bytes(range(0x00, 0x100, 0x11))
@@ -177,12 +177,12 @@ def teil_aes():
         (32, "8ea2b7ca516745bfeafc49904b496089"),
     ]:
         key = bytes(range(kl))
-        gleich("AES-%d, FIPS 197 Anhang C" % (kl * 8),
+        equal("AES-%d, FIPS 197 Anhang C" % (kl * 8),
                eins("aesenc %s %s" % (h(key), h(pt))), soll)
-        gleich("AES-%d rueckwaerts, FIPS 197 Anhang C" % (kl * 8),
+        equal("AES-%d rueckwaerts, FIPS 197 Anhang C" % (kl * 8),
                eins("aesdec %s %s" % (h(key), bytes.fromhex(soll).hex())),
                pt.hex())
-    gleich("a key of 20 octets is REJECTED",
+    equal("a key of 20 octets is REJECTED",
            eins("aesenc %s %s" % (h(b"x" * 20), h(pt))), "FAIL")
 
     try:
@@ -191,19 +191,19 @@ def teil_aes():
     except ImportError:
         have_crypto = False
     if have_crypto:
-        fragen = []
+        queries = []
         sollen = []
-        anzahl = 20 if QUICK else 200
-        for i in range(anzahl):
+        total = 20 if QUICK else 200
+        for i in range(total):
             kl = [16, 24, 32][i % 3]
             key = hashlib.sha256(b"k%d" % i).digest()[:kl]
             blk = hashlib.sha256(b"b%d" % i).digest()[:16]
             c = Cipher(algorithms.AES(key), modes.ECB())
-            fragen.append("aesenc %s %s" % (h(key), h(blk)))
+            queries.append("aesenc %s %s" % (h(key), h(blk)))
             sollen.append(c.encryptor().update(blk).hex())
-        if orakel(fragen) == sollen:
+        if orakel(queries) == sollen:
             ok("AES vs OpenSSL: %d blocks over all three key lengths"
-               % anzahl)
+               % total)
         else:
             bad("AES vs OpenSSL: at least one block wrong")
 
@@ -219,7 +219,7 @@ def teil_aes():
         (40, "dfa66747de9ae63030ca32611497c827"),
         (64, "51f0bebf7e3b9d92fc4974177936 3cfe".replace(" ", "")),
     ]:
-        gleich("AES-CMAC, RFC 4493, example with %d octets" % n,
+        equal("AES-CMAC, RFC 4493, example with %d octets" % n,
                eins("cmac %s %s" % (h(k), h(m[:n]))), soll)
 
     # ---- AES Key Wrap, RFC 3394 Abschnitt 4 ----
@@ -235,32 +235,32 @@ def teil_aes():
         kek = bytes(range(kek_l))
         plain = bytes.fromhex("00112233445566778899aabbccddeeff"
                               "000102030405060708090a0b0c0d0e0f")[:pl]
-        gleich("Key Wrap, RFC 3394, KEK %d bit / %d octets of content"
+        equal("Key Wrap, RFC 3394, KEK %d bit / %d octets of content"
                % (kek_l * 8, pl),
                eins("wrap %s %s" % (h(kek), h(plain))), soll)
-        gleich("and unwrapped again",
+        equal("and unwrapped again",
                eins("unwrap %s %s" % (h(kek), soll)), plain.hex())
     kek = bytes(range(16))
     gut = "1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5"
     b = bytearray.fromhex(gut)
     b[0] ^= 1
-    gleich("Key Wrap: one flipped bit in the package -> REJECTED",
+    equal("Key Wrap: one flipped bit in the package -> REJECTED",
            eins("unwrap %s %s" % (h(kek), bytes(b).hex())), "FAIL")
     kek2 = bytearray(kek)
     kek2[15] ^= 1
-    gleich("Key Wrap: a wrong key -> REJECTED",
+    equal("Key Wrap: a wrong key -> REJECTED",
            eins("unwrap %s %s" % (h(bytes(kek2)), gut)), "FAIL")
-    gleich("Key Wrap: 8 octets of content are too few -> REJECTED",
+    equal("Key Wrap: 8 octets of content are too few -> REJECTED",
            eins("wrap %s %s" % (h(kek), h(b"12345678"))), "FAIL")
 
     # ---- CCM gegen OpenSSL ----
     if have_crypto:
         from cryptography.hazmat.primitives.ciphers.aead import AESCCM
-        fragen = []
+        queries = []
         sollen = []
         faelle = []
-        anzahl = 12 if QUICK else 120
-        for i in range(anzahl):
+        total = 12 if QUICK else 120
+        for i in range(total):
             key = hashlib.sha256(b"ck%d" % i).digest()[:16]
             nlen = 7 + (i % 7)
             nonce = hashlib.sha256(b"cn%d" % i).digest()[:nlen]
@@ -272,52 +272,52 @@ def teil_aes():
             tl = [4, 6, 8, 10, 12, 14, 16][i % 7]
             c = AESCCM(key, tag_length=tl)
             soll = c.encrypt(nonce, msg, aad if alen else None).hex()
-            fragen.append("ccmenc %s %s %s %s %d"
+            queries.append("ccmenc %s %s %s %s %d"
                           % (h(key), h(nonce), h(aad), h(msg), tl))
             sollen.append(soll)
             faelle.append((key, nonce, aad, msg, tl, soll))
-        antworten = orakel(fragen)
+        antworten = orakel(queries)
         if antworten == sollen:
             ok("AES-CCM vs OpenSSL: %d cases, nonce 7..13, check value 4..16, "
-               "message 0..199" % anzahl)
+               "message 0..199" % total)
         else:
-            i = [j for j in range(len(fragen)) if antworten[j] != sollen[j]][0]
+            i = [j for j in range(len(queries)) if antworten[j] != sollen[j]][0]
             bad("AES-CCM: case %d wrong" % i)
-        fragen = []
+        queries = []
         sollen = []
         for key, nonce, aad, msg, tl, ct in faelle:
-            fragen.append("ccmdec %s %s %s %s %d"
+            queries.append("ccmdec %s %s %s %s %d"
                           % (h(key), h(nonce), h(aad), ct, tl))
             sollen.append(msg.hex() if msg else "-")
-        if orakel(fragen) == sollen:
-            ok("AES-CCM back: the same %d cases, plaintext equal" % anzahl)
+        if orakel(queries) == sollen:
+            ok("AES-CCM back: the same %d cases, plaintext equal" % total)
         else:
             bad("AES-CCM back: at least one case wrong")
-        fragen = []
+        queries = []
         for key, nonce, aad, msg, tl, ct in faelle:
             b = bytearray.fromhex(ct)
             b[-1] ^= 1
-            fragen.append("ccmdec %s %s %s %s %d"
+            queries.append("ccmdec %s %s %s %s %d"
                           % (h(key), h(nonce), h(aad), bytes(b).hex(), tl))
-        antworten = orakel(fragen)
+        antworten = orakel(queries)
         if all(a == "FAIL" for a in antworten):
             ok("AES-CCM: one flipped bit in the check value -> all %d REJECTED"
-               % anzahl)
+               % total)
         else:
             bad("AES-CCM: %d von %d Faelschungen wurden ANGENOMMEN"
-                % (sum(1 for a in antworten if a != "FAIL"), anzahl))
-        fragen = []
+                % (sum(1 for a in antworten if a != "FAIL"), total))
+        queries = []
         n = 0
         for key, nonce, aad, msg, tl, ct in faelle:
             if not aad:
                 continue
             b = bytearray(aad)
             b[0] ^= 1
-            fragen.append("ccmdec %s %s %s %s %d"
+            queries.append("ccmdec %s %s %s %s %d"
                           % (h(key), h(nonce), h(bytes(b)), ct, tl))
             n += 1
         if n:
-            antworten = orakel(fragen)
+            antworten = orakel(queries)
             if all(a == "FAIL" for a in antworten):
                 ok("AES-CCM: one flipped bit in the ADDITIONAL data "
                    "-> all %d REJECTED" % n)
@@ -350,25 +350,25 @@ CCMP_VEKTOREN = [
 ]
 
 
-def teil_ccmp():
+def part_ccmp():
     print()
     print("== 3. CCMP: nonce, additional data, whole MPDU ==")
     for name, tk, pn, klar, geschuetzt in CCMP_VEKTOREN:
-        gleich("%s -- schuetzen" % name,
+        equal("%s -- schuetzen" % name,
                eins("ccmpenc %s %s %s" % (tk, pn, klar)), geschuetzt)
         kb = bytearray.fromhex(klar)
         kb[1] &= ~0x40
-        gleich("%s -- entschuetzen" % name,
+        equal("%s -- entschuetzen" % name,
                eins("ccmpdec %s %s" % (tk, geschuetzt)), bytes(kb).hex())
         # steckt.
         roh = bytearray.fromhex(geschuetzt)
-        fragen = []
-        stellen = list(range(len(roh)))
-        for i in stellen:
+        queries = []
+        places = list(range(len(roh)))
+        for i in places:
             b = bytearray(roh)
             b[i] ^= 0x01
-            fragen.append("ccmpdec %s %s" % (tk, bytes(b).hex()))
-        antworten = orakel(fragen)
+            queries.append("ccmpdec %s %s" % (tk, bytes(b).hex()))
+        antworten = orakel(queries)
         durch = set(i for i, a in enumerate(antworten) if a != "FAIL")
         # verspricht, als sie haelt:
         #
@@ -377,12 +377,12 @@ def teil_ccmp():
         #           veraendern.
         #           wird ueberhaupt geprueft.
         #
-        kopf = 24
-        erwartet_frei = {2, 3, 23, kopf + 2, kopf + 3}
+        header = 24
+        erwartet_frei = {2, 3, 23, header + 2, header + 3}
         if durch == erwartet_frei:
             ok("%s -- of %d octets all are noticed except exactly the "
                "five the standard does not protect (duration, sequence number, "
-               "the two header fields)" % (name, len(fragen)))
+               "the two header fields)" % (name, len(queries)))
         else:
             zuviel = sorted(durch - erwartet_frei)
             zuwenig = sorted(erwartet_frei - durch)
@@ -391,12 +391,12 @@ def teil_ccmp():
                 % (name, zuviel, zuwenig))
         frei = [(1, 0x08, "Wiederholung"), (1, 0x10, "Stromsparen"),
                 (1, 0x20, "more data")]
-        fragen = []
+        queries = []
         for okt, bit, _ in frei:
             b = bytearray(roh)
             b[okt] ^= bit
-            fragen.append("ccmpdec %s %s" % (tk, bytes(b).hex()))
-        antworten = orakel(fragen)
+            queries.append("ccmpdec %s %s" % (tk, bytes(b).hex()))
+        antworten = orakel(queries)
         durch = [frei[i][2] for i, a in enumerate(antworten) if a != "FAIL"]
         if len(durch) == len(frei):
             ok("%s -- and the three bits EXEMPTED by the standard "
@@ -407,39 +407,39 @@ def teil_ccmp():
                 "die Norm sagt: %s" % (name, antworten))
         b = bytearray.fromhex(tk)
         b[0] ^= 1
-        gleich("%s -- wrong key -> REJECTED" % name,
+        equal("%s -- wrong key -> REJECTED" % name,
                eins("ccmpdec %s %s" % (bytes(b).hex(), geschuetzt)), "FAIL")
-        gleich("%s -- shortened by one octet -> REJECTED" % name,
+        equal("%s -- shortened by one octet -> REJECTED" % name,
                eins("ccmpdec %s %s" % (tk, geschuetzt[:-2])), "FAIL")
 
     # Klartextrahmen als Schluesseltext ausgeben.
     name, tk, pn, klar, geschuetzt = CCMP_VEKTOREN[0]
     b = bytearray.fromhex(geschuetzt)
     b[1] = b[1] & 0xBF
-    gleich("a frame WITHOUT the protected flag is not decrypted",
+    equal("a frame WITHOUT the protected flag is not decrypted",
            eins("ccmpdec %s %s" % (tk, bytes(b).hex())), "FAIL")
     b = bytearray.fromhex(geschuetzt)
     b[24 + 3] = b[24 + 3] & 0xDF
-    gleich("a CCMP header without the ExtIV bit is REJECTED",
+    equal("a CCMP header without the ExtIV bit is REJECTED",
            eins("ccmpdec %s %s" % (tk, bytes(b).hex())), "FAIL")
 
 
 # ============================================== 4. die echte Aufzeichnung
 
-def lies_mitschnitt():
+def read_capture():
     daten = {}
-    liste = {}
+    entries = {}
     with open(MITSCHNITT, encoding="utf-8") as f:
-        for zeile in f:
-            zeile = zeile.strip()
-            if not zeile or zeile.startswith("#"):
+        for row in f:
+            row = row.strip()
+            if not row or row.startswith("#"):
                 continue
-            k, _, v = zeile.partition(" ")
+            k, _, v = row.partition(" ")
             if k in ("beacon", "daten", "beacon_db"):
-                liste.setdefault(k, []).append(v)
+                entries.setdefault(k, []).append(v)
             else:
                 daten[k] = v
-    daten.update(liste)
+    daten.update(entries)
     return daten
 
 
@@ -453,42 +453,42 @@ def prf_sha1(key, label, data, n):
     return r[:n]
 
 
-def teil_mitschnitt():
+def part_capture():
     print()
     print("== 4. against a REAL capture (wpa-Induction.pcap) ==")
-    m = lies_mitschnitt()
+    m = read_capture()
 
     # ---- die Beacons ----
     for i, b in enumerate(m["beacon"]):
-        antwort = eins("beacon " + b)
-        felder = dict(x.split("=", 1) for x in antwort.split(" "))
+        response = eins("beacon " + b)
+        felder = dict(x.split("=", 1) for x in response.split(" "))
         if i == 0:
-            gleich("Beacon 1: SSID", bytes.fromhex(felder["ssid"]).decode(),
+            equal("Beacon 1: SSID", bytes.fromhex(felder["ssid"]).decode(),
                    "Coherer")
-            gleich("Beacon 1: channel", felder["kanal"], "1")
-            gleich("Beacon 1: band (derived from the channel number)",
+            equal("Beacon 1: channel", felder["kanal"], "1")
+            equal("Beacon 1: band (derived from the channel number)",
                    felder["band"], "1")
-            gleich("Beacon 1: Sicherheitsart WPA2", felder["sich"], "3")
-            gleich("Beacon 1: Paarchiffre CCMP-128", felder["paar"], "4")
-            gleich("Beacon 1: group cipher TKIP (as it is on the network)",
+            equal("Beacon 1: Sicherheitsart WPA2", felder["sich"], "3")
+            equal("Beacon 1: Paarchiffre CCMP-128", felder["paar"], "4")
+            equal("Beacon 1: group cipher TKIP (as it is on the network)",
                    felder["gruppe"], "2")
-            gleich("Beacon 1: Anmeldeverfahren PSK", felder["akm"], "2")
-            gleich("Beacon 1: no management frame protection", felder["pmf"], "0")
-            gleich("Beacon 1: Intervall 100 Zeiteinheiten", felder["intv"], "100")
-            gleich("Beacon 1: BSSID", felder["bssid"], "000c4182b255")
-            gleich("Beacon 1: SSID not hidden", felder["verbrg"], "0")
+            equal("Beacon 1: Anmeldeverfahren PSK", felder["akm"], "2")
+            equal("Beacon 1: no management frame protection", felder["pmf"], "0")
+            equal("Beacon 1: Intervall 100 Zeiteinheiten", felder["intv"], "100")
+            equal("Beacon 1: BSSID", felder["bssid"], "000c4182b255")
+            equal("Beacon 1: SSID not hidden", felder["verbrg"], "0")
         else:
             if felder["ssid"] == b"Coherer".hex() and felder["kanal"] == "1":
                 ok("Beacon %d of the same network: SSID and channel equal" % (i + 1))
             else:
-                bad("Beacon %d weicht ab: %s" % (i + 1, antwort))
-    gleich("Beacon 1: the chain of information elements",
+                bad("Beacon %d weicht ab: %s" % (i + 1, response))
+    equal("Beacon 1: the chain of information elements",
            eins("ies " + m["beacon"][0]),
            "0:7 1:8 3:1 5:4 42:1 47:1 48:24 50:4 221:6 221:28")
     if "probeantwort" in m:
-        antwort = eins("beacon " + m["probeantwort"])
-        felder = dict(x.split("=", 1) for x in antwort.split(" "))
-        gleich("a probe response is read like a beacon",
+        response = eins("beacon " + m["probeantwort"])
+        felder = dict(x.split("=", 1) for x in response.split(" "))
+        equal("a probe response is read like a beacon",
                bytes.fromhex(felder["ssid"]).decode(), "Coherer")
     if "beacon_db" in m:
         ok("Signal strength of the first beacon: %s dB (from the radiotap header, "
@@ -497,16 +497,16 @@ def teil_mitschnitt():
 
     # ---- der Handschlag ----
     for i in range(1, 5):
-        antwort = eins("eapol " + m["eapol%d" % i])
-        felder = dict(x.split("=", 1) for x in antwort.split(" "))
-        gleich("EAPOL frame %d is recognized as message %d" % (i, i),
+        response = eins("eapol " + m["eapol%d" % i])
+        felder = dict(x.split("=", 1) for x in response.split(" "))
+        equal("EAPOL frame %d is recognized as message %d" % (i, i),
                felder["nr"], str(i))
-    antwort = eins("eapol " + m["eapol3"])
-    felder = dict(x.split("=", 1) for x in antwort.split(" "))
-    gleich("message 3: key data is encrypted",
+    response = eins("eapol " + m["eapol3"])
+    felder = dict(x.split("=", 1) for x in response.split(" "))
+    equal("message 3: key data is encrypted",
            felder["kdec"], "1")
-    gleich("message 3: 'install' is set", felder["insta"], "1")
-    gleich("message 4: no key data",
+    equal("message 3: 'install' is set", felder["insta"], "1")
+    equal("message 4: no key data",
            dict(x.split("=", 1)
                 for x in eins("eapol " + m["eapol4"]).split(" "))["dlen"], "0")
 
@@ -514,7 +514,7 @@ def teil_mitschnitt():
     ssid = bytes.fromhex(m["ssidhex"])
     pmk_soll = hashlib.pbkdf2_hmac("sha1", pw, ssid, 4096, 32).hex()
     pmk = eins("pmk %s %s" % (m["pwhex"], m["ssidhex"]))
-    gleich("PMK from 'Induction' and 'Coherer'", pmk, pmk_soll)
+    equal("PMK from 'Induction' and 'Coherer'", pmk, pmk_soll)
 
     aa = m["aa"]
     spa = m["spa"]
@@ -530,7 +530,7 @@ def teil_mitschnitt():
          + max(bytes.fromhex(anonce), bytes.fromhex(snonce)))
     ptk_soll = prf_sha1(bytes.fromhex(pmk_soll), b"Pairwise key expansion",
                         d, 48).hex()
-    gleich("PTK from the real handshake (48 octets)", ptk, ptk_soll)
+    equal("PTK from the real handshake (48 octets)", ptk, ptk_soll)
     kck = ptk[:32]
     kek = ptk[32:64]
     tk = ptk[64:96]
@@ -539,22 +539,22 @@ def teil_mitschnitt():
         roh = bytes.fromhex(m["eapol%d" % i])
         echt = roh[81:97].hex()
         gerechnet = eins("mic %s %s 2" % (kck, m["eapol%d" % i]))
-        gleich("check value of message %d, against the REAL frame" % i,
+        equal("check value of message %d, against the REAL frame" % i,
                gerechnet, echt)
     b = bytearray.fromhex(kck)
     b[0] ^= 1
-    falsch = eins("mic %s %s 2" % (bytes(b).hex(), m["eapol2"]))
-    if falsch != bytes.fromhex(m["eapol2"])[81:97].hex():
+    incorrect = eins("mic %s %s 2" % (bytes(b).hex(), m["eapol2"]))
+    if incorrect != bytes.fromhex(m["eapol2"])[81:97].hex():
         ok("a KCK with one flipped bit gives a DIFFERENT check value")
     else:
         bad("a wrong KCK gave the same check value -- that cannot be")
 
     kd = bytes.fromhex(m["eapol3"])[99:].hex()
-    antwort = eins("gtk %s %s" % (kek, kd))
-    if antwort == "FAIL":
+    response = eins("gtk %s %s" % (kek, kd))
+    if response == "FAIL":
         bad("the group key from message 3 could not be unwrapped")
     else:
-        gtk, nummer = antwort.split(" ")
+        gtk, number = response.split(" ")
         try:
             from cryptography.hazmat.primitives import keywrap
             klar = keywrap.aes_key_unwrap(bytes.fromhex(kek),
@@ -570,26 +570,26 @@ def teil_mitschnitt():
                 if klar[at] == 0 and l == 0:
                     break
                 at += 2 + l
-            gleich("group key from message 3 (vs OpenSSL)",
+            equal("group key from message 3 (vs OpenSSL)",
                    gtk, gefunden)
         except ImportError:
             ok("group key unwrapped: %s (key number %s)"
-               % (gtk, nummer))
-        gleich("key number of the group key", nummer, "2")
+               % (gtk, number))
+        equal("key number of the group key", number, "2")
     b = bytearray.fromhex(kek)
     b[0] ^= 1
-    gleich("with a wrong KEK message 3 can NOT be unwrapped",
+    equal("with a wrong KEK message 3 can NOT be unwrapped",
            eins("gtk %s %s" % (bytes(b).hex(), kd)), "FAIL")
 
-    fragen = ["ccmpdec %s %s" % (tk, f) for f in m["daten"]]
-    antworten = orakel(fragen)
+    queries = ["ccmpdec %s %s" % (tk, f) for f in m["daten"]]
+    antworten = orakel(queries)
     gut = 0
     for i, a in enumerate(antworten):
         if a == "FAIL":
             bad("real data frame %d could not be decrypted" % (i + 1))
             continue
         roh = bytes.fromhex(a)
-        kopf = len(bytes.fromhex(m["daten"][i])) - len(roh) - 8
+        header = len(bytes.fromhex(m["daten"][i])) - len(roh) - 8
         rumpf = roh[24:]
         if rumpf[:6] == b"\xaa\xaa\x03\x00\x00\x00":
             gut += 1
@@ -611,22 +611,22 @@ def teil_mitschnitt():
 
 
 
-def teil_kanal():
+def part_channel():
     print()
     print("== 5. channels, frequencies and the ETSI table ==")
     for f, k, band in [(2412, 1, 1), (2437, 6, 1), (2472, 13, 1),
                        (2484, 14, 1), (5180, 36, 2), (5320, 64, 2),
                        (5500, 100, 2), (5745, 149, 2), (5955, 1, 3),
                        (6175, 45, 3)]:
-        gleich("%d MHz is channel %d in band %d" % (f, k, band),
+        equal("%d MHz is channel %d in band %d" % (f, k, band),
                eins("kanal %d" % f), "%d %d" % (k, band))
-        gleich("and back: channel %d in band %d is %d MHz" % (k, band, f),
+        equal("and back: channel %d in band %d is %d MHz" % (k, band, f),
                eins("freq %d %d" % (k, band)), str(f))
     for f in [2413, 2500, 5181, 1000, 9999]:
-        gleich("%d MHz is not a channel" % f, eins("kanal %d" % f), "FAIL")
-    gleich("channel 2 in the 6 GHz band is the outlier 5935 MHz",
+        equal("%d MHz is not a channel" % f, eins("kanal %d" % f), "FAIL")
+    equal("channel 2 in the 6 GHz band is the outlier 5935 MHz",
            eins("freq 2 3"), "5935")
-    gleich("channel 2 in the 2.4 GHz band is 2417 MHz", eins("freq 2 1"), "2417")
+    equal("channel 2 in the 2.4 GHz band is 2417 MHz", eins("freq 2 1"), "2417")
 
     faelle = [
         (1, 1, "erlaubt=1 dbm=20 dfs=0 innen=0 passiv=0 senden=1 aktiv=1",
@@ -655,23 +655,23 @@ def teil_kanal():
          "channel 97 is above 6425 MHz -> not allocated"),
     ]
     for band, k, soll, name in faelle:
-        gleich(name, eins("etsi %d %d" % (band, k)), soll)
-    fragen = []
+        equal(name, eins("etsi %d %d" % (band, k)), soll)
+    queries = []
     for band in (1, 2, 3):
         for k in range(0, 250):
-            fragen.append("etsi %d %d" % (band, k))
-    antworten = orakel(fragen)
+            queries.append("etsi %d %d" % (band, k))
+    antworten = orakel(queries)
     verstoss = []
-    for zeile in antworten:
-        f = dict(x.split("=", 1) for x in zeile.split(" "))
+    for row in antworten:
+        f = dict(x.split("=", 1) for x in row.split(" "))
         if f["senden"] == "1" and (f["erlaubt"] == "0" or f["dfs"] == "1"):
-            verstoss.append(zeile)
+            verstoss.append(row)
         if f["aktiv"] == "1" and (f["erlaubt"] == "0" or f["passiv"] == "1"):
-            verstoss.append(zeile)
+            verstoss.append(row)
     if not verstoss:
         ok("over ALL %d channels in three bands: never transmit without allocation, "
            "never transmit on a radar channel, never scan actively where only "
-           "listening is allowed" % len(fragen))
+           "listening is allowed" % len(queries))
     else:
         bad("%d channels violate the rule, first: %s"
             % (len(verstoss), verstoss[0]))
@@ -683,18 +683,18 @@ ALPHABET = "sbaAcC1234dtx"
 RICHTIG = "sbac1234"
 
 
-def zerlege_automat(zeile):
-    return dict(x.split("=", 1) for x in zeile.split(" "))
+def zerlege_automat(row):
+    return dict(x.split("=", 1) for x in row.split(" "))
 
 
-def teil_automat():
+def part_state_machine():
     print()
     print("== 6. the state machine: there is no half connection ==")
     f = zerlege_automat(eins("automat " + RICHTIG))
-    gleich("the correct sequence '%s' leads to CONNECTED" % RICHTIG,
+    equal("the correct sequence '%s' leads to CONNECTED" % RICHTIG,
            f["z"], "8")
-    gleich("and may send data", f["daten"], "1")
-    gleich("and installed the key EXACTLY ONCE", f["inst"], "1")
+    equal("and may send data", f["daten"], "1")
+    equal("and installed the key EXACTLY ONCE", f["inst"], "1")
 
     faelle = []
     for i in range(len(RICHTIG)):
@@ -711,25 +711,25 @@ def teil_automat():
         for c in ALPHABET:
             faelle.append(("Inserting '%s' at position %d" % (c, i),
                            RICHTIG[:i] + c + RICHTIG[i:]))
-    fragen = ["automat " + folge for _, folge in faelle]
-    antworten = orakel(fragen)
-    schlecht = []
-    for (name, folge), zeile in zip(faelle, antworten):
-        f = zerlege_automat(zeile)
-        erlaubt = ist_gueltige_folge(folge)
+    queries = ["automat " + sequence for _, sequence in faelle]
+    antworten = orakel(queries)
+    defective = []
+    for (name, sequence), row in zip(faelle, antworten):
+        f = zerlege_automat(row)
+        erlaubt = is_valid_sequence(sequence)
         if (f["daten"] == "1") != erlaubt:
-            schlecht.append((name, folge, zeile))
+            defective.append((name, sequence, row))
         if int(f["inst"]) > 1:
-            schlecht.append(("MEHRFACHE Installation", folge, zeile))
-    if not schlecht:
+            defective.append(("MEHRFACHE Installation", sequence, row))
+    if not defective:
         ok("all %d mutilations of the correct sequence (omit, "
            "Wiederholen, Vertauschen, Einschieben) enden genau dann in "
            "CONNECTED when they are valid again" % len(faelle))
     else:
-        for name, folge, zeile in schlecht[:5]:
-            bad("%s ('%s') -> %s" % (name, folge, zeile))
+        for name, sequence, row in defective[:5]:
+            bad("%s ('%s') -> %s" % (name, sequence, row))
 
-    for folge, grund, name in [
+    for sequence, grund, name in [
         ("sbAc1234", "2", "abgelehnte Authentifizierung -> Grund 2"),
         ("sbacC1234", "1", "'C' after the handshake start -> reason 1"),
         ("sbatc1234", "3", "Zeitueberschreitung -> Grund 3"),
@@ -737,10 +737,10 @@ def teil_automat():
         ("sbac1233", "5", "message 3 twice (KRACK) -> reason 5"),
         ("sbac123x", "6", "message 3 with wrong check value -> reason 6"),
     ]:
-        f = zerlege_automat(eins("automat " + folge))
-        gleich(name, "%s/%s" % (f["z"], f["grund"]), "9/%s" % grund)
+        f = zerlege_automat(eins("automat " + sequence))
+        equal(name, "%s/%s" % (f["z"], f["grund"]), "9/%s" % grund)
         if f["daten"] != "0":
-            bad("'%s' ends in error and may still send data" % folge)
+            bad("'%s' ends in error and may still send data" % sequence)
 
     tiefe = 3 if QUICK else 4
     folgen = [""]
@@ -749,84 +749,84 @@ def teil_automat():
         folgen = [f + c for f in folgen for c in ALPHABET]
         alle.extend(folgen)
     antworten = orakel(["automat " + f for f in alle])
-    schlecht = []
-    for folge, zeile in zip(alle, antworten):
-        f = zerlege_automat(zeile)
+    defective = []
+    for sequence, row in zip(alle, antworten):
+        f = zerlege_automat(row)
         if f["daten"] != "0" or f["inst"] != "0" or f["verbund"] != "0":
-            schlecht.append((folge, zeile))
-    if not schlecht:
+            defective.append((sequence, row))
+    if not defective:
         ok("EXHAUSTIVE: all %d event sequences up to length %d over an "
            "alphabet of %d -- not a single one connects, none installs "
            "a key" % (len(alle), tiefe, len(ALPHABET)))
     else:
         bad("%d sequences up to length %d get too far, first: '%s' -> %s"
-            % (len(schlecht), tiefe, schlecht[0][0], schlecht[0][1]))
+            % (len(defective), tiefe, defective[0][0], defective[0][1]))
 
-    fragen = []
-    for folge in ["sbAc1234", "s1", "d", "sbacd", "sbac1233"]:
+    queries = []
+    for sequence in ["sbAc1234", "s1", "d", "sbacd", "sbac1233"]:
         for anhang in ["", "s", "sbac1234", "1234", "tttt"]:
-            fragen.append("automat " + folge + anhang)
-    antworten = orakel(fragen)
+            queries.append("automat " + sequence + anhang)
+    antworten = orakel(queries)
     if all(zerlege_automat(a)["z"] == "9" and zerlege_automat(a)["daten"] == "0"
            for a in antworten):
         ok("the error state is a dead end: %d sequences that were aborted once "
            "do not come out again with any suffix"
-           % len(fragen))
+           % len(queries))
     else:
         bad("an aborted sequence came out again")
 
 
-def ist_gueltige_folge(folge):
+def is_valid_sequence(sequence):
     i = 0
-    n = len(folge)
-    if i >= n or folge[i] != "s":
+    n = len(sequence)
+    if i >= n or sequence[i] != "s":
         return False
-    while i < n and folge[i] == "s":
+    while i < n and sequence[i] == "s":
         i += 1
-    if i >= n or folge[i] != "b":
+    if i >= n or sequence[i] != "b":
         return False
-    while i < n and folge[i] == "b":
+    while i < n and sequence[i] == "b":
         i += 1
-    return folge[i:] == "ac1234"
+    return sequence[i:] == "ac1234"
 
 
 # ==================================================== 7. die Grenzfaelle
 
-def teil_grenzen():
+def part_limits():
     print()
-    print("== 7. was NICHT durchgehen darf ==")
-    m = lies_mitschnitt()
+    print("== 7. what must NOT pass ==")
+    m = read_capture()
     b = m["beacon"][0]
     roh = bytearray.fromhex(b)
 
     # unverschluesselte Verbindung.
-    schlecht = 0
-    fragen = []
+    defective = 0
+    queries = []
     laengen = list(range(0, len(roh)))
     for i in laengen:
-        fragen.append("beacon " + bytes(roh[:i]).hex())
-    antworten = orakel(fragen)
+        queries.append("beacon " + bytes(roh[:i]).hex())
+    antworten = orakel(queries)
     for i, a in zip(laengen, antworten):
         if a != "FAIL":
             # kuerzerer Beacon.
             f = dict(x.split("=", 1) for x in a.split(" "))
             if f["sich"] == "0" and "48" in eins("ies " + b):
-                schlecht += 1
-    if schlecht == 0:
+                defective += 1
+    if defective == 0:
         ok("all %d prefixes of the real beacon: none is reported as an OPEN "
            "network although the network is WPA2" % len(laengen))
     else:
         bad("%d truncated beacons were reported as an open network"
-            % schlecht)
+            % defective)
 
     ies_start = 24 + 12
-    fragen = []
-    for luege in (0xFF, 0x80, len(roh)):
+    queries = []
+    for lie in (0xFF, 0x80, len(roh)):
         v = bytearray(roh)
-        v[ies_start + 1] = luege & 255
-        fragen.append("beacon " + bytes(v).hex())
-        fragen.append("ies " + bytes(v).hex())
-    antworten = orakel(fragen)
+        v[ies_start + 1] = lie & 255
+        queries.append("beacon " + bytes(v).hex())
+        queries.append("ies " + bytes(v).hex())
+    antworten = orakel(queries)
     if all(a == "FAIL" or "KAPUTT" in a for a in antworten):
         ok("a length field pointing past the end of the frame "
            "is detected and not read")
@@ -844,13 +844,13 @@ def teil_grenzen():
     if rsn_at is None:
         bad("the real beacon has no RSN element -- test not possible")
     else:
-        fragen = []
-        for wert in (0xFFFF, 0x0100, 0x0010):
+        queries = []
+        for value in (0xFFFF, 0x0100, 0x0010):
             v = bytearray(roh)
-            v[rsn_at + 2 + 6] = wert & 255
-            v[rsn_at + 2 + 7] = (wert >> 8) & 255
-            fragen.append("beacon " + bytes(v).hex())
-        antworten = orakel(fragen)
+            v[rsn_at + 2 + 6] = value & 255
+            v[rsn_at + 2 + 7] = (value >> 8) & 255
+            queries.append("beacon " + bytes(v).hex())
+        antworten = orakel(queries)
         if all(a == "FAIL" for a in antworten):
             ok("an RSN element announcing more ciphers than it has "
                "(0xFFFF, 0x0001, 0x1000), is REJECTED")
@@ -864,47 +864,47 @@ def teil_grenzen():
         ("one octet", "80"),
         ("a frame with protocol version 1", "8100" + b[4:]),
     ]:
-        gleich("%s is not a beacon" % name, eins("beacon " + roh2), "FAIL")
+        equal("%s is not a beacon" % name, eins("beacon " + roh2), "FAIL")
 
     # EAPOL: die beiden Laengenfelder muessen zueinander passen.
     e = bytearray.fromhex(m["eapol3"])
     v = bytearray(e)
     v[97] = 0xFF
     v[98] = 0xFF
-    gleich("EAPOL: a key data length of 65535 -> REJECTED",
+    equal("EAPOL: a key data length of 65535 -> REJECTED",
            eins("eapol " + bytes(v).hex()), "FAIL")
     v = bytearray(e)
     v[2] = 0xFF
     v[3] = 0xFF
-    gleich("EAPOL: a body length of 65535 -> REJECTED",
+    equal("EAPOL: a body length of 65535 -> REJECTED",
            eins("eapol " + bytes(v).hex()), "FAIL")
     v = bytearray(e)
     v[1] = 0
-    gleich("EAPOL: a packet type other than 3 -> REJECTED",
+    equal("EAPOL: a packet type other than 3 -> REJECTED",
            eins("eapol " + bytes(v).hex()), "FAIL")
     v = bytearray(e)
     v[4] = 7
-    gleich("EAPOL: an unknown descriptor type -> REJECTED",
+    equal("EAPOL: an unknown descriptor type -> REJECTED",
            eins("eapol " + bytes(v).hex()), "FAIL")
     for n in range(0, len(e)):
         pass
-    fragen = ["eapol " + bytes(e[:n]).hex() for n in range(1, 99)]
-    antworten = orakel(fragen)
+    queries = ["eapol " + bytes(e[:n]).hex() for n in range(1, 99)]
+    antworten = orakel(queries)
     if all(a == "FAIL" for a in antworten):
         ok("EAPOL: all 98 prefixes below the fixed part -> REJECTED")
     else:
         bad("a too short EAPOL frame got through")
 
     kck = "00" * 16
-    gleich("MIC with an unknown key descriptor -> REJECTED",
+    equal("MIC with an unknown key descriptor -> REJECTED",
            eins("mic %s %s 99" % (kck, m["eapol2"])), "FAIL")
-    gleich("MIC with a KCK of 15 octets -> REJECTED",
+    equal("MIC with a KCK of 15 octets -> REJECTED",
            eins("mic %s %s 2" % ("00" * 15, m["eapol2"])), "FAIL")
 
 
 # ==================================================== 8. WPA3-Ableitung
 
-def teil_wpa3():
+def part_wpa3():
     print()
     print("== 8. the SHA-256 derivation (WPA3 AKM and PSK-SHA256) ==")
     # gebaut -- Begruendung in docs/WLAN-BEFUND.md Abschnitt 6 --, aber
@@ -932,7 +932,7 @@ def teil_wpa3():
         soll = kdf(pmk, b"Pairwise key expansion", d, 48 * 8).hex()
         ist = eins("ptk %s %s %s %s %s %d 48"
                    % (pmk.hex(), aa.hex(), spa.hex(), an.hex(), sn.hex(), akm))
-        gleich("PTK mit KDF-SHA256, AKM %d (%s)" % (akm, name), ist, soll)
+        equal("PTK mit KDF-SHA256, AKM %d (%s)" % (akm, name), ist, soll)
     mit_sha1 = eins("ptk %s %s %s %s %s 2 48"
                     % (pmk.hex(), aa.hex(), spa.hex(), an.hex(), sn.hex()))
     mit_sha256 = eins("ptk %s %s %s %s %s 8 48"
@@ -942,7 +942,7 @@ def teil_wpa3():
     else:
         bad("AKM 2 and AKM 8 gave the same key -- so one "
             "of the two paths computes wrongly")
-    m = lies_mitschnitt()
+    m = read_capture()
     a = eins("mic %s %s 2" % ("00" * 16, m["eapol2"]))
     b = eins("mic %s %s 8" % ("00" * 16, m["eapol2"]))
     if a != b and a != "FAIL" and b != "FAIL":
@@ -969,14 +969,14 @@ def main():
     if not os.path.exists(ORAKEL):
         print("  FAIL  %s does not exist -- erst tools/wlan/run.sh" % ORAKEL)
         return 1
-    teil_sha1()
-    teil_aes()
-    teil_ccmp()
-    teil_mitschnitt()
-    teil_kanal()
-    teil_automat()
-    teil_grenzen()
-    teil_wpa3()
+    part_sha1()
+    part_aes()
+    part_ccmp()
+    part_capture()
+    part_channel()
+    part_state_machine()
+    part_limits()
+    part_wpa3()
     print()
     print("WLAN: %d Zusagen, %d Fehler" % (pass_n, fail_n))
     return 1 if fail_n else 0

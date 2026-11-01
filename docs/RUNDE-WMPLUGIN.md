@@ -246,7 +246,7 @@ wmplug: unreg boese grund=1 holte=0 verlor=0
 * **Der Grund steht auf der Leitung**: `grund=1` = `G_CRASH`.
 * **Der Schreibtisch laeuft nachweislich weiter:** der Zusammensetzer
   lief in diesem Lauf **163 Runden** (`wm: comp=163`), und das Foto
-  danach (`docs/shots/wmplug/nach-absturz.png`) ist 800x600 mit
+  danach (`docs/shots/wmplug/after-crash.png`) ist 800x600 mit
   **479819 von 480000** nicht-schwarzen Bildpunkten. Kein Panik.
 * **Und genau einmal**: eine Zeile `wmplug: tot`, `kicks=1`. Das ist
   nicht selbstverstaendlich, siehe Abschnitt 9, Punkt 2.
@@ -896,7 +896,7 @@ checkshot pixel (670,585): vorher [38 48 60], nach dem Absturz [30 41 59]
 
 Vorher die Farbe des Widgetkastens, nachher die nackte Leiste: das Feld
 ist weg, weil der Platz frei ist. Bilder:
-`docs/shots/wmplug/vor-absturz.png` und `nach-absturz.png`. Dazu
+`docs/shots/wmplug/before-crash.png` und `after-crash.png`. Dazu
 weiterhin: `wm: comp=172` Bildrunden nach dem Absturz, 479819 von 480000
 Bildpunkten nicht schwarz, `kicks=1`, `wmplug: tot` genau einmal.
 

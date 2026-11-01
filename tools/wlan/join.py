@@ -8,8 +8,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from gegenstelle import Authenticator, Zugangspunkt, ptk_ableiten, pmk_aus_psk, ip2i
-from gegenstelle import dhcp_ack_bauen, udp_bauen, ipv4_bauen
-from weg import beacon_bauen
+from gegenstelle import build_dhcp_ack, build_udp, build_ipv4
+from path_run import build_beacon
 
 BIN = sys.argv[1]
 PASS = 0
@@ -33,12 +33,12 @@ def addr_list(names):
 
 
 def multi_addr_reply(zp, xid, kind, seq):
-    d = dhcp_ack_bauen(xid, zp.klient, zp.klient_ip, zp.server, zp.maske, zp.server, zp.server, art=kind)
+    d = build_dhcp_ack(xid, zp.klient, zp.klient_ip, zp.server, zp.maske, zp.server, zp.server, art=kind)
     one = struct.pack(">I", zp.server)
     d = d.replace(bytes([3, 4]) + one, bytes([3, 4 * len(ROUTERS)]) + addr_list(ROUTERS), 1)
     d = d.replace(bytes([6, 4]) + one, bytes([6, 4 * len(SERVERS)]) + addr_list(SERVERS), 1)
-    u = udp_bauen(zp.server, zp.klient_ip, 67, 68, d)
-    return zp._rahmen(ipv4_bauen(zp.server, zp.klient_ip, 17, u, 2), seq)
+    u = build_udp(zp.server, zp.klient_ip, 67, 68, d)
+    return zp._frame(build_ipv4(zp.server, zp.klient_ip, 17, u, 2), seq)
 
 
 def ok(cond, text):
@@ -99,15 +99,15 @@ def scenario(pw=PW, ap_pw=PW, beacon="ok", auth=0, assoc=0, skip=(), tamper_m3=F
     m3 = ap.nachricht3()
     tk = ap.ptk[32:48]
     zp = Zugangspunkt(dhcp_key or tk, BSSID, MAC)
-    offer = zp.dhcp_antwort(offer_xid, art=offer_art, seq=1)
-    ack = zp.dhcp_antwort(XID, art=ack_art, seq=2)
+    offer = zp.dhcp_reply(offer_xid, art=offer_art, seq=1)
+    ack = zp.dhcp_reply(XID, art=ack_art, seq=2)
     if multi_addr:
         offer = multi_addr_reply(zp, offer_xid, offer_art, 1)
         ack = multi_addr_reply(zp, XID, ack_art, 2)
     if beacon == "ok":
-        b = beacon_bauen(ssid_beacon, kanal=6, rsn=True, bssid=BSSID)
+        b = build_beacon(ssid_beacon, kanal=6, rsn=True, bssid=BSSID)
     elif beacon == "open":
-        b = beacon_bauen(ssid_beacon, kanal=6, rsn=False, bssid=BSSID)
+        b = build_beacon(ssid_beacon, kanal=6, rsn=False, bssid=BSSID)
     else:
         b = b""
     parts = {
@@ -217,10 +217,10 @@ def check_all():
         ap.nachricht1()
         good2 = good4 = False
         try:
-            ap.nachricht2_pruefen(eapol_of(g.tx[2]))
+            ap.check_message2(eapol_of(g.tx[2]))
             good2 = True
             ap.nachricht3()
-            ap.nachricht4_pruefen(eapol_of(g.tx[3]))
+            ap.check_message4(eapol_of(g.tx[3]))
             good4 = True
         except Exception as e:
             print("   ", e)
@@ -231,7 +231,7 @@ def check_all():
         plains = []
         for k in (4, 5):
             try:
-                plains.append(zp.oeffnen(g.tx[k]))
+                plains.append(zp.open_frame(g.tx[k]))
             except Exception as e:
                 print("   ", e)
         ok(len(plains) == 2 and g.tx[4][1] & 0x40 and g.tx[5][1] & 0x40,
@@ -257,7 +257,7 @@ def check_all():
         ap.nachricht1()
         bad = False
         try:
-            ap.nachricht2_pruefen(eapol_of(w.tx[2]))
+            ap.check_message2(eapol_of(w.tx[2]))
         except Exception:
             bad = True
         ok(bad, "wrong password: the authenticator rejects message 2")

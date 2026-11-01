@@ -9,16 +9,16 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 
-from gegenstelle import (Authenticator, eapol_zerlegen, eapol_mic_setzen,
-                         eapol_mic_pruefen, eapol_bauen, aes_unwrap,
-                         ccmp_schuetzen, ccmp_oeffnen, gtk_kde,
-                         ptk_ableiten, pmk_aus_psk, h, u, MIC_VERSATZ)
+from gegenstelle import (Authenticator, eapol_zerlegen, set_eapol_mic,
+                         check_eapol_mic, build_eapol, aes_unwrap,
+                         ccmp_schuetzen, ccmp_open, gtk_kde,
+                         ptk_ableiten, pmk_aus_psk, h, u, MIC_OFFSET)
 
 ORAKEL = os.environ.get('ORAKEL', os.path.join(HIER, '..', '..',
                                                '.probe', 'worakel'))
 
 gut = 0
-schlecht = 0
+defective = 0
 
 
 def ok(t):
@@ -28,13 +28,13 @@ def ok(t):
 
 
 def bad(t):
-    global schlecht
-    schlecht += 1
+    global defective
+    defective += 1
     print("  FAIL  %s" % t)
 
 
-def orakel(zeilen):
-    ein = "\n".join(zeilen) + "\n"
+def orakel(rows):
+    ein = "\n".join(rows) + "\n"
     p = subprocess.run([ORAKEL], input=ein.encode(),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return p.stdout.decode().strip().split("\n")
@@ -87,16 +87,16 @@ def lauf_glaeubig(nr, sha256=False):
 
     rsn = a.rsn_ie
     ki = 0x010A if not sha256 else 0x010B
-    m2roh = eapol_bauen(ki, 16, d1['replay'], snonce, 0, rsn)
+    m2roh = build_eapol(ki, 16, d1['replay'], snonce, 0, rsn)
     ant = orakel(["mic %s %s %s" % (h(kck), h(m2roh), akm)])
     mic_osum = ant[0]
     if len(mic_osum) != 32:
         bad("Run %d: Osum returns no MIC (%r)" % (nr, ant[0]))
         return
-    m2 = m2roh[:MIC_VERSATZ] + u(mic_osum) + m2roh[MIC_VERSATZ + 16:]
+    m2 = m2roh[:MIC_OFFSET] + u(mic_osum) + m2roh[MIC_OFFSET + 16:]
 
     try:
-        a.nachricht2_pruefen(m2)
+        a.check_message2(m2)
     except ValueError as e:
         bad("Run %d: the peer rejects Osum's message 2: %s" % (nr, e))
         return
@@ -107,9 +107,9 @@ def lauf_glaeubig(nr, sha256=False):
 
     m3 = a.nachricht3()
     ant = orakel(["mic %s %s %s"
-                  % (h(kck), h(m3[:MIC_VERSATZ] + b'\x00' * 16 +
-                               m3[MIC_VERSATZ + 16:]), akm)])
-    if ant[0] != h(m3[MIC_VERSATZ:MIC_VERSATZ + 16]):
+                  % (h(kck), h(m3[:MIC_OFFSET] + b'\x00' * 16 +
+                               m3[MIC_OFFSET + 16:]), akm)])
+    if ant[0] != h(m3[MIC_OFFSET:MIC_OFFSET + 16]):
         bad("Run %d: Osum computes a different check value for message 3"
             % nr)
         return
@@ -120,27 +120,27 @@ def lauf_glaeubig(nr, sha256=False):
     if ant[0] == 'FAIL':
         bad("Run %d: Osum does not get the GTK from message 3" % nr)
         return
-    teil = ant[0].split()
-    if len(teil) != 2:
+    part = ant[0].split()
+    if len(part) != 2:
         bad("Run %d: Osum's GTK answer has %d fields instead of two (%r)"
-            % (nr, len(teil), ant[0]))
+            % (nr, len(part), ant[0]))
         return
-    if teil[0] != h(a.gtk):
+    if part[0] != h(a.gtk):
         bad("Run %d: Osum unwraps a different GTK: %s instead of %s"
-            % (nr, teil[0], h(a.gtk)))
+            % (nr, part[0], h(a.gtk)))
         return
-    if teil[1] != '1':
+    if part[1] != '1':
         bad("Run %d: Osum reads the key number as %s instead of 1"
-            % (nr, teil[1]))
+            % (nr, part[1]))
         return
 
     # --- Nachricht 4: Osum bestaetigt ---------------------------------
     ki4 = 0x030A if not sha256 else 0x030B
-    m4roh = eapol_bauen(ki4, 16, d3['replay'], b'\x00' * 32, 0, b'')
+    m4roh = build_eapol(ki4, 16, d3['replay'], b'\x00' * 32, 0, b'')
     ant = orakel(["mic %s %s %s" % (h(kck), h(m4roh), akm)])
-    m4 = m4roh[:MIC_VERSATZ] + u(ant[0]) + m4roh[MIC_VERSATZ + 16:]
+    m4 = m4roh[:MIC_OFFSET] + u(ant[0]) + m4roh[MIC_OFFSET + 16:]
     try:
-        a.nachricht4_pruefen(m4)
+        a.check_message4(m4)
     except ValueError as e:
         bad("Run %d: the peer rejects Osum's message 4: %s" % (nr, e))
         return
@@ -159,12 +159,12 @@ def lauf_glaeubig(nr, sha256=False):
         bad("Run %d: Osum cannot protect the frame" % nr)
         return
     try:
-        zurueck = ccmp_oeffnen(tk, u(ant[0]))
+        back = ccmp_open(tk, u(ant[0]))
     except Exception as e:
         bad("Run %d: the peer does not open Osum's frame: %s"
             % (nr, e))
         return
-    if zurueck != nutz:
+    if back != nutz:
         bad("Run %d: the content comes back changed" % nr)
         return
     return True
@@ -188,8 +188,8 @@ def lauf_boese():
     m3 = a.nachricht3()
     ant = orakel(["mic %s %s 2"
                   % (h(ptk[0:16]),
-                     h(m3[:MIC_VERSATZ] + b'\x00' * 16 + m3[MIC_VERSATZ + 16:]))])
-    if ant[0] != h(m3[MIC_VERSATZ:MIC_VERSATZ + 16]):
+                     h(m3[:MIC_OFFSET] + b'\x00' * 16 + m3[MIC_OFFSET + 16:]))])
+    if ant[0] != h(m3[MIC_OFFSET:MIC_OFFSET + 16]):
         ok("message 3 with wrong check value: Osum computes a different one "
            "and can thus discard it")
     else:
@@ -207,10 +207,10 @@ def lauf_boese():
     else:
         bad("Osum nimmt ein unverpacktes GTK an")
 
-    for name, folge in (("message 3 without message 1", "03"),
+    for name, sequence in (("message 3 without message 1", "03"),
                         ("only message 1", "01"),
                         ("message 4 first", "04")):
-        ant = orakel(["automat %s" % folge])
+        ant = orakel(["automat %s" % sequence])
         if 'verbund=1' in ant[0] or 'inst=1' in ant[0]:
             bad("state machine: %s leads to a key (%s)" % (name, ant[0]))
         else:
@@ -246,8 +246,8 @@ def main():
     lauf_boese()
 
     print()
-    print("HANDSCHLAG: %d Zusagen, %d Fehler" % (gut, schlecht))
-    return 1 if schlecht else 0
+    print("HANDSCHLAG: %d Zusagen, %d Fehler" % (gut, defective))
+    return 1 if defective else 0
 
 
 if __name__ == '__main__':

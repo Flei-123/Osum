@@ -44,7 +44,7 @@ fi
 if grep -q '0600\|384' kernel/user/wlan.fi; then
     ok "/etc/wlan.conf gets mode 0600 (the PMK is a secret)"
 else
-    bad "die Rechte von /etc/wlan.conf werden nicht gesetzt"
+    bad "the permissions of /etc/wlan.conf are not set"
 fi
 if grep -q 'SYS_UNLINK' kernel/user/wlan.fi; then
     ok "if setting the mode fails, the file is DELETED AGAIN"

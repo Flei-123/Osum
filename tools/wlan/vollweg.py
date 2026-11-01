@@ -8,16 +8,16 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 
-from gegenstelle import (Zugangspunkt, eapol_bauen, eapol_mic_setzen,
+from gegenstelle import (Zugangspunkt, build_eapol, set_eapol_mic,
                          aes_wrap, gtk_kde, pmk_aus_psk, ptk_ableiten,
-                         h, u, ip2i, MIC_VERSATZ)
-from weg import beacon_bauen, handschlag_bauen
+                         h, u, ip2i, MIC_OFFSET)
+from path_run import build_beacon, build_handshake
 
 ORAKEL = os.environ.get('ORAKEL',
                         os.path.join(HIER, '..', '..', '.probe', 'worakel'))
 
 gut = 0
-schlecht = 0
+defective = 0
 
 
 def ok(t):
@@ -27,22 +27,22 @@ def ok(t):
 
 
 def bad(t):
-    global schlecht
-    schlecht += 1
+    global defective
+    defective += 1
     print("  FAIL  %s" % t)
 
 
-def orakel(zeile):
-    p = subprocess.run([ORAKEL], input=(zeile + "\n").encode(),
+def orakel(row):
+    p = subprocess.run([ORAKEL], input=(row + "\n").encode(),
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return p.stdout.decode().strip()
 
 
-def felder(antwort):
+def felder(response):
     d = {}
-    for teil in antwort.split():
-        if '=' in teil:
-            k, v = teil.split('=', 1)
+    for part in response.split():
+        if '=' in part:
+            k, v = part.split('=', 1)
             d[k] = v
     return d
 
@@ -58,14 +58,14 @@ SNONCE = b'\x44' * 32
 XID = 0x12345678
 
 
-def aufbau(pw=PW, gtk=b'\x11' * 16, kaputt=None):
+def aufbau(pw=PW, gtk=b'\x11' * 16, broken=None):
     pmk = pmk_aus_psk(pw, SSID)
-    m1, m3, ptk, g = handschlag_bauen(pmk, AA, SPA, SNONCE, gtk=gtk,
-                                      kaputt=kaputt)
+    m1, m3, ptk, g = build_handshake(pmk, AA, SPA, SNONCE, gtk=gtk,
+                                      broken=broken)
     return pmk, m1, m3, ptk
 
 
-def zeile_bauen(beacon, pmk, m1, m3, ein, dhcp, http):
+def build_row(beacon, pmk, m1, m3, ein, dhcp, http):
     def f(x):
         return h(x) if x else '-'
     return "vollweg %s %s %s %s %s %s %s %s %s %s" % (
@@ -73,33 +73,33 @@ def zeile_bauen(beacon, pmk, m1, m3, ein, dhcp, http):
         f(ein), f(dhcp), f(http))
 
 
-def lauf(pw=PW, beacon=None, kaputt=None, tk_falsch=False,
-         ohne_m3=False, pn_wiederholt=False, http_kaputt=False,
-         dhcp_fremd=False):
+def lauf(pw=PW, beacon=None, broken=None, tk_wrong=False,
+         without_m3=False, pn_wiederholt=False, http_broken=False,
+         dhcp_foreign=False):
     # Passwort gebaut.
-    pmk_echt, m1, m3, ptk = aufbau(pw=PW, kaputt=kaputt)
+    pmk_echt, m1, m3, ptk = aufbau(pw=PW, broken=broken)
     pmk = pmk_aus_psk(pw, SSID)
     tk = ptk[32:48]
-    if tk_falsch:
+    if tk_wrong:
         tk = bytes((b ^ 0xFF) for b in tk)
     ap = Zugangspunkt(tk, AA, SPA)
     if beacon is None:
-        beacon = beacon_bauen(SSID, rsn=True)
+        beacon = build_beacon(SSID, rsn=True)
     ein = ap.echo()
     if pn_wiederholt:
         # zurueckgedreht.
         ap.pn = 1
         ein = ap.echo()
-    dh = ap.dhcp_antwort(XID)
-    if dhcp_fremd:
-        fremd = Zugangspunkt(bytes(16), AA, SPA)
-        dh = fremd.dhcp_antwort(XID)
-    ht = ap.http_antwort(status=b'200 OK')
-    if http_kaputt:
-        ht = ap.http_antwort(rumpf=b'x', status=b'500 Fehler')
-    if ohne_m3:
+    dh = ap.dhcp_reply(XID)
+    if dhcp_foreign:
+        alien = Zugangspunkt(bytes(16), AA, SPA)
+        dh = alien.dhcp_reply(XID)
+    ht = ap.http_reply(status=b'200 OK')
+    if http_broken:
+        ht = ap.http_reply(rumpf=b'x', status=b'500 Fehler')
+    if without_m3:
         m3 = None
-    return felder(orakel(zeile_bauen(beacon, pmk, m1, m3, ein, dh, ht)))
+    return felder(orakel(build_row(beacon, pmk, m1, m3, ein, dh, ht)))
 
 
 def main():
@@ -108,7 +108,7 @@ def main():
         return 2
 
     # =================================================================
-    print("== 1. DER GANZE WEG: er MUSS Schritt fuer Schritt durchgehen ==")
+    print("== 1. THE WHOLE PATH: it MUST pass step by step ==")
     # =================================================================
     a = lauf()
 
@@ -184,7 +184,7 @@ def main():
 
     # =================================================================
     print()
-    print("== 2. DIE GEGENPROBEN: hier MUSS der Weg abbrechen ==")
+    print("== 2. THE COUNTER-CHECKS: the path MUST abort here ==")
     # =================================================================
 
     a = lauf(pw=b'daspasswortistfalsch')
@@ -197,7 +197,7 @@ def main():
     else:
         bad("a wrong password gets too far: %s" % a)
 
-    a = lauf(kaputt='mic')
+    a = lauf(broken='mic')
     if a.get('m1') == '1' and a.get('m3') == '0' \
             and a.get('skeys') == '0' and a.get('darf') == '0':
         ok("DAMAGED HANDSHAKE (message 3 without a valid "
@@ -206,7 +206,7 @@ def main():
         bad("a damaged handshake leaves something behind: %s" % a)
 
     # --- 3. Gar keine Nachricht 3.
-    a = lauf(ohne_m3=True)
+    a = lauf(without_m3=True)
     if a.get('m1') == '1' and a.get('m3') == '0' \
             and a.get('skeys') == '0' and a.get('dhcp') == '0':
         ok("HANDSHAKE ABORTS AFTER MESSAGE 1: no key, "
@@ -214,7 +214,7 @@ def main():
     else:
         bad("an aborted handshake gets too far: %s" % a)
 
-    a = lauf(beacon=beacon_bauen(SSID, rsn=False))
+    a = lauf(beacon=build_beacon(SSID, rsn=False))
     if a.get('netze') == '1' and a.get('wahl') == '0' \
             and a.get('skeys') == '0' and a.get('darf') == '0':
         ok("OPEN NETWORK: it is found and NAMED, but not "
@@ -223,7 +223,7 @@ def main():
         bad("an open network gets too far: %s" % a)
 
     #
-    a = lauf(tk_falsch=True)
+    a = lauf(tk_wrong=True)
     if int(a.get('rx', '0')) <= 0 and a.get('dhcp') == '0' \
             and a.get('http') == '0':
         ok("FOREIGN KEY: the handshake succeeds, but the frames "
@@ -231,7 +231,7 @@ def main():
     else:
         bad("frames with a foreign key get through: %s" % a)
 
-    a = lauf(dhcp_fremd=True)
+    a = lauf(dhcp_foreign=True)
     if a.get('dhcp') == '0' and a.get('ip') == '0':
         ok("FOREIGN DHCP ANSWER: it is encrypted with another key "
            "and is dropped -- NO address")
@@ -239,7 +239,7 @@ def main():
         bad("a foreign DHCP answer brings an address: %s" % a)
 
     #
-    a = lauf(http_kaputt=True)
+    a = lauf(http_broken=True)
     if a.get('http') == '500':
         ok("A DIFFERENT HTTP ANSWER is also read as different (500 "
            "instead of 200) -- the field is not hard-wired")
@@ -247,7 +247,7 @@ def main():
         bad("the HTTP status is not really read: %s" % a)
 
     # --- 8. Verstuemmelte Beacons.
-    beacon = beacon_bauen(SSID, rsn=True)
+    beacon = build_beacon(SSID, rsn=True)
     schlimm = None
     for schnitt in (8, 12, 16, 20, 24, 30, 36, 44):
         a = lauf(beacon=beacon[:schnitt])
@@ -265,17 +265,17 @@ def main():
     # Schluesseltext darf unbemerkt durchgehen.
     pmk, m1, m3, ptk = aufbau()
     ap = Zugangspunkt(ptk[32:48], AA, SPA)
-    echt = ap.dhcp_antwort(XID)
+    echt = ap.dhcp_reply(XID)
     ein = ap.echo()
-    ht = ap.http_antwort()
+    ht = ap.http_reply()
     durch = 0
     geprueft = 0
     for i in range(32, len(echt)):
-        kaputt = bytearray(echt)
-        kaputt[i] ^= 0x01
+        broken = bytearray(echt)
+        broken[i] ^= 0x01
         geprueft += 1
-        b = felder(orakel(zeile_bauen(beacon, pmk, m1, m3, ein,
-                                      bytes(kaputt), ht)))
+        b = felder(orakel(build_row(beacon, pmk, m1, m3, ein,
+                                      bytes(broken), ht)))
         if b.get('dhcp') != '0':
             durch += 1
     if durch == 0:
@@ -290,7 +290,7 @@ def main():
     geprueft = 0
     for schnitt in range(24, len(echt), 7):
         geprueft += 1
-        b = felder(orakel(zeile_bauen(beacon, pmk, m1, m3, ein,
+        b = felder(orakel(build_row(beacon, pmk, m1, m3, ein,
                                       echt[:schnitt], ht)))
         if b.get('dhcp') != '0':
             durch += 1
@@ -313,7 +313,7 @@ def main():
     if not os.path.exists(mitschnitt):
         bad("tools/wlan/mitschnitt.txt fehlt")
     else:
-        from gegenstelle import ccmp_oeffnen
+        from gegenstelle import ccmp_open
         daten = []
         mp = {}
         for ln in open(mitschnitt):
@@ -332,7 +332,7 @@ def main():
                             e1[17:49], e2[17:49])[32:48]
 
         # --- der echte DHCP-Request
-        pt = ccmp_oeffnen(tk_e, daten[0])
+        pt = ccmp_open(tk_e, daten[0])
         b = felder(orakel("ipdhcp %s" % h(pt)))
         if b.get('et') == '2048' and b.get('ipsum') == '1' \
                 and b.get('udpsum') == '1' and b.get('dart') == '3' \
@@ -344,7 +344,7 @@ def main():
             bad("the real DHCP request is read wrongly: %s" % b)
 
         # --- das echte DHCP-Ack
-        pt = ccmp_oeffnen(tk_e, daten[1])
+        pt = ccmp_open(tk_e, daten[1])
         b = felder(orakel("ipdhcp %s" % h(pt)))
         if b.get('dart') == '5' \
                 and b.get('yiaddr') == str(ip2i('192.168.0.50')) \
@@ -366,9 +366,9 @@ def main():
             bad("the checksums of the real ack do not match: %s" % b)
 
         #     brechen. Sonst prueft sie nichts.
-        kaputt = bytearray(pt)
-        kaputt[20] ^= 0x01
-        b2 = felder(orakel("ipdhcp %s" % h(bytes(kaputt))))
+        broken = bytearray(pt)
+        broken[20] ^= 0x01
+        b2 = felder(orakel("ipdhcp %s" % h(bytes(broken))))
         if b2.get('ipsum') == '0':
             ok("a single flipped octet in the IP header of the real "
                "packet breaks the checksum -- it is really "
@@ -377,8 +377,8 @@ def main():
             bad("a flipped IP checksum goes unnoticed: %s" % b2)
 
     print()
-    print("VOLLWEG: %d Zusagen, %d Fehler" % (gut, schlecht))
-    return 1 if schlecht else 0
+    print("VOLLWEG: %d Zusagen, %d Fehler" % (gut, defective))
+    return 1 if defective else 0
 
 
 if __name__ == '__main__':

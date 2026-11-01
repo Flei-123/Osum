@@ -211,7 +211,7 @@ k_segv=$(zahl "$S" '^wmplug: bilanz' 'kicks')
     && ok "and counted exactly once (kicks=1 for one crash)" \
     || bad "the balance counts kicks=${k_segv} for ONE crash"
 if [ -s "$TMPD/segv-2.ppm" ]; then
-    cp -f "$TMPD/segv-2.ppm" "$SHOTS/nach-absturz.ppm"
+    cp -f "$TMPD/segv-2.ppm" "$SHOTS/after-crash.ppm"
     masse=$(python3 tools/gfx/checkshot.py size "$TMPD/segv-2.ppm" 2>/dev/null)
     [ "$masse" = "800 600" ] \
         && ok "photo after the crash: 800x600, the display mode is still set" \
@@ -223,11 +223,11 @@ if [ -s "$TMPD/segv-2.ppm" ]; then
     else
         bad "nur '$nl' nichtschwarze Bildpunkte -- der Schirm ist nach dem Absturz leer"
     fi
-    python3 -c "from PIL import Image; Image.open('$SHOTS/nach-absturz.ppm').save('$SHOTS/nach-absturz.png')" \
-        2>/dev/null && rm -f "$SHOTS/nach-absturz.ppm"
-    [ -s "$SHOTS/nach-absturz.png" ] \
-        && ok "the photo is at docs/shots/wmplug/nach-absturz.png" \
-        || bad "nach-absturz.png was not stored"
+    python3 -c "from PIL import Image; Image.open('$SHOTS/after-crash.ppm').save('$SHOTS/after-crash.png')" \
+        2>/dev/null && rm -f "$SHOTS/after-crash.ppm"
+    [ -s "$SHOTS/after-crash.png" ] \
+        && ok "the photo is at docs/shots/wmplug/after-crash.png" \
+        || bad "after-crash.png was not stored"
 else
     bad "no photo after the crash"
 fi
@@ -244,7 +244,7 @@ if [ -n "${bx:-}" ] && [ -n "${bw:-}" ] && [ -s "$TMPD/segv.ppm" ] \
     && [ -s "$TMPD/segv-2.ppm" ]; then
     cx=$((tgx + bx + bw / 2)); cy=$((tgy + by + bh / 2))
     ok "the plugin field of the bar is at x=$bx y=$by w=$bw h=$bh, centre ($cx,$cy)"
-    cp -f "$TMPD/segv.ppm" "$SHOTS/vor-absturz.ppm"
+    cp -f "$TMPD/segv.ppm" "$SHOTS/before-crash.ppm"
     f1=$(python3 tools/gfx/checkshot.py pixel "$TMPD/segv.ppm" "$cx" "$cy" 2>&1)
     f2=$(python3 tools/gfx/checkshot.py pixel "$TMPD/segv-2.ppm" "$cx" "$cy" 2>&1)
     if [ "$f1" != "$f2" ]; then
@@ -252,11 +252,11 @@ if [ -n "${bx:-}" ] && [ -n "${bw:-}" ] && [ -s "$TMPD/segv.ppm" ] \
     else
         bad "checkshot pixel ($cx,$cy): vorher und nachher beide [$f1]"
     fi
-    python3 -c "from PIL import Image; Image.open('$SHOTS/vor-absturz.ppm').save('$SHOTS/vor-absturz.png')" \
-        2>/dev/null && rm -f "$SHOTS/vor-absturz.ppm"
-    [ -s "$SHOTS/vor-absturz.png" ] \
-        && ok "the photo BEFORE the crash is at docs/shots/wmplug/vor-absturz.png" \
-        || bad "vor-absturz.png was not stored"
+    python3 -c "from PIL import Image; Image.open('$SHOTS/before-crash.ppm').save('$SHOTS/before-crash.png')" \
+        2>/dev/null && rm -f "$SHOTS/before-crash.ppm"
+    [ -s "$SHOTS/before-crash.png" ] \
+        && ok "the photo BEFORE the crash is at docs/shots/wmplug/before-crash.png" \
+        || bad "before-crash.png was not stored"
 else
     bad "no two photos or no bar coordinate -- the visible evidence is missing"
 fi
@@ -583,7 +583,7 @@ fi
 
 # ================================================= 11. die Fotos liegen da
 echo "== 11. die Fotos =="
-for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit nach-absturz \
+for b in regel-mit-recht regel-ohne-recht widget-an widget-aus-laufzeit after-crash \
          enable-vorher enable-nachher; do
     if [ -s "$SHOTS/$b.png" ] || [ -s "$SHOTS/$b.ppm" ]; then
         ok "docs/shots/wmplug/$b liegt da"

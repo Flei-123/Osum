@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/bundle.py -- aus `assets/apps/*.osp` die Angaben fuer mkfs.
+"""tools/k15/bundle.py -- the mkfs entries from `assets/apps/*.osp`.
 
 Runde K15, zweiter Nachtrag. Ein Programm ist ein VERZEICHNIS:
 
@@ -53,39 +53,39 @@ sys.path.insert(0, HIER)
 import symjoin  # noqa: E402
 
 
-INFO_GRENZE = 1023
+INFO_LIMIT = 1023
 
 
-def angaben_stehen_vorn(pfad):
+def angaben_stehen_vorn(file_path):
     """Ende der letzten `schluessel=wert`-Zeile in der INFO.
 
     Gibt (ende, grenze). `ende < grenze` ist die Bedingung."""
-    roh = open(pfad, "rb").read()
-    letzte = -1
-    for zeile in (b"name=", b"info=", b"keys=", b"fassung=", b"net=",
+    roh = open(file_path, "rb").read()
+    last_item = -1
+    for line_text in (b"name=", b"info=", b"keys=", b"fassung=", b"net=",
                   b"exec=", b"icon="):
-        p = roh.find(zeile)
-        if p > letzte:
-            letzte = p
-    if letzte < 0:
-        return (0, INFO_GRENZE)
-    ende = roh.find(b"\n", letzte)
-    return (len(roh) if ende < 0 else ende, INFO_GRENZE)
+        p = roh.find(line_text)
+        if p > last_item:
+            last_item = p
+    if last_item < 0:
+        return (0, INFO_LIMIT)
+    ende = roh.find(b"\n", last_item)
+    return (len(roh) if ende < 0 else ende, INFO_LIMIT)
 
 
-def start_von(pfad):
+def start_von(file_path):
     """Welche Datei unter /bin `start` sein soll -- steht in start.txt."""
-    for zeile in open(os.path.join(pfad, "start.txt"), encoding="ascii"):
-        zeile = zeile.strip()
-        if zeile and not zeile.startswith("#"):
-            return zeile
-    raise SystemExit("buendel: %s/start.txt nennt kein Programm" % pfad)
+    for line_text in open(os.path.join(file_path, "start.txt"), encoding="ascii"):
+        line_text = line_text.strip()
+        if line_text and not line_text.startswith("#"):
+            return line_text
+    raise SystemExit("buendel: %s/start.txt nennt kein Programm" % file_path)
 
 
-def console_von(pfad):
+def console_von(file_path):
     """r543: a bundle whose program is a CONSOLE program (needs a tty) has a `console.txt` file. Its start is then a
     script `#!/bin/term -c<program>` (a new terminal window, see kernel/user/term.fi), not a second name of the program."""
-    return os.path.isfile(os.path.join(pfad, "console.txt"))
+    return os.path.isfile(os.path.join(file_path, "console.txt"))
 
 
 REQUIRED_FILES = ("INFO", "start.txt", os.path.join("data", "README"))
@@ -121,8 +121,8 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    quelle, arbeit = argv[1], argv[2]
-    problems = lint_all(quelle)
+    source_dir, arbeit = argv[1], argv[2]
+    problems = lint_all(source_dir)
     if problems:
         for line in problems:
             print("bundle lint: " + line, file=sys.stderr)
@@ -132,62 +132,62 @@ def main(argv):
         if a.startswith("nur="):
             nur = set("/bin/" + w for w in a[4:].split())
     os.makedirs(arbeit, exist_ok=True)
-    zeilen = ["/apps/"]
-    for name in sorted(os.listdir(quelle)):
+    line_list = ["/apps/"]
+    for name in sorted(os.listdir(source_dir)):
         if not name.endswith(".osp"):
             continue
-        pfad = os.path.join(quelle, name)
-        if nur is not None and start_von(pfad) not in nur:
+        file_path = os.path.join(source_dir, name)
+        if nur is not None and start_von(file_path) not in nur:
             continue
-        ende, grenze = angaben_stehen_vorn(os.path.join(pfad, "INFO"))
-        if ende >= grenze:
+        ende, limit = angaben_stehen_vorn(os.path.join(file_path, "INFO"))
+        if ende >= limit:
             print("bundle: %s/INFO -- the entries end only at octet %d,"
                   " appdir.eine_datei liest nur %d. Der Starter wuerde dieses"
                   " Buendel stumm uebergehen. Kommentar hinter die Angaben."
-                  % (pfad, ende, grenze), file=sys.stderr)
+                  % (file_path, ende, limit), file=sys.stderr)
             return 1
-        ziel = "/apps/%s" % name
-        zeilen.append(ziel + "/")
-        zeilen.append("%s/INFO=%s" % (ziel, os.path.join(pfad, "INFO")))
+        target_dir = "/apps/%s" % name
+        line_list.append(target_dir + "/")
+        line_list.append("%s/INFO=%s" % (target_dir, os.path.join(file_path, "INFO")))
         sym = os.path.join(arbeit, name + ".symbol")
         # r399 (design audit): a bundle may carry a finished OSYM picture
         # (`symbol.osym`, vector art baked from symbol.svg by tools/svg/apps.sh); it wins over the
         # 16x16 drawing in `symbol.txt`.
-        fertig = os.path.join(pfad, "symbol.osym")
-        if os.path.isfile(os.path.join(pfad, "symbol.svg")) and not os.path.isfile(fertig):
-            print("bundle: %s has symbol.svg but no baked symbol.osym (run tools/svg/apps.sh)" % pfad, file=sys.stderr)
+        fertig = os.path.join(file_path, "symbol.osym")
+        if os.path.isfile(os.path.join(file_path, "symbol.svg")) and not os.path.isfile(fertig):
+            print("bundle: %s has symbol.svg but no baked symbol.osym (run tools/svg/apps.sh)" % file_path, file=sys.stderr)
             return 1
         if os.path.isfile(fertig):
             with open(sym, "wb") as out:
-                out.write(symjoin.joined(pfad))
+                out.write(symjoin.joined(file_path))
         else:
             r = subprocess.run([sys.executable, os.path.join(HIER, "icon.py"),
-                                os.path.join(pfad, "symbol.txt"), sym],
+                                os.path.join(file_path, "symbol.txt"), sym],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 print(r.stdout + r.stderr, file=sys.stderr)
                 return 1
-        zeilen.append("%s/symbol=%s" % (ziel, sym))
+        line_list.append("%s/symbol=%s" % (target_dir, sym))
         # AB-003: the image's own bundles carry SYSTEM -- their programs act
         # as the user and get no app label from the kernel
         # (kernel/sched/origin.fi). `opk` never installs this name.
-        marke = os.path.join(arbeit, "SYSTEM")
-        if not os.path.exists(marke):
-            with open(marke, "w") as f:
+        brand_name = os.path.join(arbeit, "SYSTEM")
+        if not os.path.exists(brand_name):
+            with open(brand_name, "w") as f:
                 f.write("shipped with the {{PRODUCT}} image; see docs/ACTION-BUS.md 5.2\n")
-        zeilen.append("%s/SYSTEM=%s" % (ziel, marke))
-        zeilen.append("%s/data/" % ziel)
-        zeilen.append("%s/data/README=%s"
-                      % (ziel, os.path.join(pfad, "data", "README")))
-        if (console_von(pfad) and nur is not None and "/bin/term" in nur
+        line_list.append("%s/SYSTEM=%s" % (target_dir, brand_name))
+        line_list.append("%s/data/" % target_dir)
+        line_list.append("%s/data/README=%s"
+                      % (target_dir, os.path.join(file_path, "data", "README")))
+        if (console_von(file_path) and nur is not None and "/bin/term" in nur
                 and not os.environ.get("OSUM_NOCONSOLE")):   # OSUM_NOCONSOLE: counter-proof switch of tools/term/editwin.sh
             skript = os.path.join(arbeit, name + ".start")
             with open(skript, "w") as f:
-                f.write("#!/bin/term -c%s\n" % start_von(pfad))
-            zeilen.append("%s/start=%s" % (ziel, skript))
+                f.write("#!/bin/term -c%s\n" % start_von(file_path))
+            line_list.append("%s/start=%s" % (target_dir, skript))
         else:
-            zeilen.append("%s/start@%s" % (ziel, start_von(pfad)))
-    for z in zeilen:
+            line_list.append("%s/start@%s" % (target_dir, start_von(file_path)))
+    for z in line_list:
         print(z)
     return 0
 

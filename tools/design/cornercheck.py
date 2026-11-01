@@ -43,29 +43,29 @@ def readpng(p):
     return w,h,px
 
 def flaechen(px,w,h,minflaeche=2000):
-    """Rechteckige Bloecke einer Farbe finden (Zeilenlauf-Verfahren)."""
+    """Find rectangular blocks of one color (run-length method)."""
     c=Counter()
     for y in range(0,h,2):
         for x in range(0,w,2):
             c[px[y][x]]+=1
     out=[]
-    for farbe,n in c.most_common(8):
+    for color,n in c.most_common(8):
         if n*4<minflaeche: continue
         xs=[];ys=[]
         for y in range(h):
             for x in range(w):
-                if px[y][x]==farbe: xs.append(x);ys.append(y)
+                if px[y][x]==color: xs.append(x);ys.append(y)
         if not xs: continue
         bx0,by0,bx1,by1=min(xs),min(ys),max(xs),max(ys)
-        flaeche=(bx1-bx0+1)*(by1-by0+1)
-        if flaeche==0 or len(xs)*100//flaeche < 60: continue
-        if flaeche > w*h*70//100: continue
-        out.append((farbe,bx0,by0,bx1,by1,len(xs)))
+        area=(bx1-bx0+1)*(by1-by0+1)
+        if area==0 or len(xs)*100//area < 60: continue
+        if area > w*h*70//100: continue
+        out.append((color,bx0,by0,bx1,by1,len(xs)))
     return out
 
-def eckpruef(px,w,h,farbe,x0,y0,x1,y1,rmax=32):
+def eckpruef(px,w,h,color,x0,y0,x1,y1,rmax=32):
     """Radius aus dem Bild bestimmen und Ausreisser zaehlen."""
-    obere=[x for x in range(x0,x1+1) if px[y0][x]==farbe]
+    obere=[x for x in range(x0,x1+1) if px[y0][x]==color]
     if not obere: return None
     r=obere[0]-x0
     if r<1 or r>rmax: r=0
@@ -79,18 +79,18 @@ def eckpruef(px,w,h,farbe,x0,y0,x1,y1,rmax=32):
                     if not (0<=X<w and 0<=Y<h): continue
                     gepr+=1
                     d2=(r-dx)**2+(r-dy)**2
-                    if d2>(r+0.5)**2 and px[Y][X]==farbe: aus+=1
+                    if d2>(r+0.5)**2 and px[Y][X]==color: aus+=1
     return r,aus,gepr
 
 if __name__=='__main__':
     print("%-44s %-16s %5s %6s %6s %s"%("Bild","Farbe","Radius","ausserhalb","geprueft","Urteil"))
     for f in sys.argv[1:]:
         w,h,px=readpng(f)
-        for (farbe,x0,y0,x1,y1,n) in flaechen(px,w,h):
+        for (color,x0,y0,x1,y1,n) in flaechen(px,w,h):
             if (x1-x0)<40 or (y1-y0)<40: continue
-            e=eckpruef(px,w,h,farbe,x0,y0,x1,y1)
+            e=eckpruef(px,w,h,color,x0,y0,x1,y1)
             if not e: continue
             r,aus,gepr=e
             if r==0: continue
-            print("%-44s %-16s %5d %6d %6d %s"%(f.split('/')[-1],"#%02x%02x%02x"%farbe,r,aus,gepr,
+            print("%-44s %-16s %5d %6d %6d %s"%(f.split('/')[-1],"#%02x%02x%02x"%color,r,aus,gepr,
                   "OK" if aus==0 else "RECHTECK SICHTBAR"))

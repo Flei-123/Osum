@@ -46,7 +46,7 @@ $FIRNC tools/wlan/oracle.fi -o .probe/worakel 2> "$OUT/orakel.err" \
     || { bad "tools/wlan/oracle.fi cannot be built"; head -20 "$OUT/orakel.err"; }
 
 if [ ! -x .probe/worakel ]; then
-    echo "WLAN: ohne Orakel geht nichts weiter."
+    echo "WLAN: nothing proceeds without the oracle."
     echo "WLAN: $pass Zusagen, $((fail+1)) Fehler"
     exit 1
 fi
@@ -79,7 +79,7 @@ fail=$((fail + VF))
 
 # =====================================================================
 echo
-echo "== 9. der Fuzz-Lauf: verstuemmelte Rahmen unter valgrind =="
+echo "== 9. the fuzz run: mangled frames under valgrind =="
 # =====================================================================
 python3 tools/wlan/fuzz.py $QUICK 2>&1 | tee "$OUT/fuzz.txt"
 FP=$(grep -c '^  OK    ' "$OUT/fuzz.txt" || true)
@@ -110,7 +110,7 @@ fi
 if grep -rqn 'fn sae_\|dragonfly\|hunting' --include=*.fi lib/wlan/ 2>/dev/null; then
     bad "SAE was started without any test vectors"
 else
-    ok "SAE ist NICHT gebaut -- Begruendung in docs/WLAN-BEFUND.md Abschnitt 6"
+    ok "SAE is NOT built -- reason in docs/WLAN-BEFUND.md section 6"
 fi
 if grep -rqn 'TKIP wird\|fn tkip' --include=*.fi lib/wlan/ 2>/dev/null; then
     bad "TKIP was implemented -- it is broken and does not belong here"

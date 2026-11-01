@@ -151,12 +151,12 @@ W = fr // 20
 w880 = [(g(L[s:s + W], 880), s * 1000 // fr) for s in range(0, len(L) - W, W)]
 w880.sort(reverse=True)
 med = sorted(x[0] for x in w880)[len(w880) // 2]
-print("klang_max=%d klang_bei_ms=%d klang_grund=%d"
+print("tone_max=%d tone_at_ms=%d tone_floor=%d"
       % (w880[0][0], w880[0][1], med))
 PYEOF
 sed 's/^/    /' "$OUT/klangf.txt"
-kf=$(grep -oE 'klang_max=[0-9]+' "$OUT/klangf.txt" | grep -oE '[0-9]+$')
-kg=$(grep -oE 'klang_grund=[0-9]+' "$OUT/klangf.txt" | grep -oE '[0-9]+$')
+kf=$(grep -oE 'tone_max=[0-9]+' "$OUT/klangf.txt" | grep -oE '[0-9]+$')
+kg=$(grep -oE 'tone_floor=[0-9]+' "$OUT/klangf.txt" | grep -oE '[0-9]+$')
 num "der Hinweiston (880 Hz) ist im Stueck zu finden" "${kf:-0}" ge 300
 num "und daneben ist bei 880 Hz nichts"               "${kg:-999}" le 20
 sy=$(grep -aoE 'systemklaenge: *[0-9]+' "$OUT/$n.txt" | tail -1 | grep -oE '[0-9]+$')

@@ -141,10 +141,10 @@ def aes_unwrap(kek, ct):
 # EAPOL-Key-Rahmen. IEEE 802.11-2016 12.7.2.
 # ---------------------------------------------------------------------
 
-MIC_VERSATZ = 4 + 1 + 2 + 2 + 8 + 32 + 16 + 8 + 8   # = 81
+MIC_OFFSET = 4 + 1 + 2 + 2 + 8 + 32 + 16 + 8 + 8   # = 81
 
 
-def eapol_bauen(key_info, key_len, replay, nonce, keyrsc, keydata,
+def build_eapol(key_info, key_len, replay, nonce, keyrsc, keydata,
                 mic=None, iv=b'\x00' * 16, ver=2, deskriptor=2):
     body = struct.pack('!BHH', deskriptor, key_info, key_len)
     body += struct.pack('!Q', replay)
@@ -158,18 +158,18 @@ def eapol_bauen(key_info, key_len, replay, nonce, keyrsc, keydata,
     return struct.pack('!BB H', ver, 3, len(body)) + body
 
 
-def eapol_mic_setzen(frame, kck, sha256=False):
-    null = frame[:MIC_VERSATZ] + b'\x00' * 16 + frame[MIC_VERSATZ + 16:]
+def set_eapol_mic(frame, kck, sha256=False):
+    null = frame[:MIC_OFFSET] + b'\x00' * 16 + frame[MIC_OFFSET + 16:]
     if sha256:
         m = aes_cmac(kck, null)[:16]
     else:
         m = hmac.new(kck, null, hashlib.sha1).digest()[:16]
-    return frame[:MIC_VERSATZ] + m + frame[MIC_VERSATZ + 16:], m
+    return frame[:MIC_OFFSET] + m + frame[MIC_OFFSET + 16:], m
 
 
-def eapol_mic_pruefen(frame, kck, sha256=False):
-    ist = frame[MIC_VERSATZ:MIC_VERSATZ + 16]
-    _, soll = eapol_mic_setzen(frame, kck, sha256)
+def check_eapol_mic(frame, kck, sha256=False):
+    ist = frame[MIC_OFFSET:MIC_OFFSET + 16]
+    _, soll = set_eapol_mic(frame, kck, sha256)
     return hmac.compare_digest(ist, soll), ist, soll
 
 
@@ -213,7 +213,7 @@ def gtk_kde(gtk, idx=1):
 # CCMP. IEEE 802.11-2016 12.5.3.
 # ---------------------------------------------------------------------
 
-def kopf_laenge(hdr):
+def header_len(hdr):
     fc = struct.unpack('<H', hdr[0:2])[0]
     typ = (fc >> 2) & 3
     untertyp = (fc >> 4) & 15
@@ -262,7 +262,7 @@ def ccmp_aad(hdr):
     return aad
 
 
-def ccmp_kopf(pn, keyid=0):
+def ccmp_header(pn, keyid=0):
     return bytes([pn[5], pn[4], 0x00, 0x20 | ((keyid & 3) << 6),
                   pn[3], pn[2], pn[1], pn[0]])
 
@@ -286,20 +286,20 @@ def ccmp_schuetzen(tk, hdr, plain, pn, prio=None):
     a2 = hdr[10:16]
     c = AESCCM(tk, tag_length=8)
     ct = c.encrypt(ccmp_nonce(a2, pn, prio), plain, ccmp_aad(hdr))
-    return hdr + ccmp_kopf(pn) + ct
+    return hdr + ccmp_header(pn) + ct
 
 
-def ccmp_oeffnen(tk, mpdu, hlen=None, prio=None):
+def ccmp_open(tk, mpdu, hlen=None, prio=None):
     if not HAVE_CRYPTO:
         raise RuntimeError("cryptography fehlt")
     if hlen is None:
-        hlen = kopf_laenge(mpdu)
+        hlen = header_len(mpdu)
     hdr = mpdu[:hlen]
     if prio is None:
         prio = _prio_aus(hdr)
-    kopf = mpdu[hlen:hlen + 8]
+    header = mpdu[hlen:hlen + 8]
     # zurueck in "hoechstwertig zuerst": PN5..PN0
-    pn = bytes([kopf[7], kopf[6], kopf[5], kopf[4], kopf[1], kopf[0]])
+    pn = bytes([header[7], header[6], header[5], header[4], header[1], header[0]])
     a2 = hdr[10:16]
     c = AESCCM(tk, tag_length=8)
     return c.decrypt(ccmp_nonce(a2, pn, prio), mpdu[hlen + 8:], ccmp_aad(hdr))
@@ -340,9 +340,9 @@ class Authenticator:
 
     def nachricht1(self):
         ki = 0x008A if not self.sha256 else 0x008B
-        return eapol_bauen(ki, 16, self.replay, self.anonce, 0, b'')
+        return build_eapol(ki, 16, self.replay, self.anonce, 0, b'')
 
-    def nachricht2_pruefen(self, frame):
+    def check_message2(self, frame):
         d = eapol_zerlegen(frame)
         if not d['mic_gesetzt']:
             raise ValueError("message 2 without MIC")
@@ -352,7 +352,7 @@ class Authenticator:
         self.snonce = d['nonce']
         self.ptk = ptk_ableiten(self.pmk, self.aa, self.spa,
                                 self.anonce, self.snonce, self.sha256)
-        ok, ist, soll = eapol_mic_pruefen(frame, self.kck, self.sha256)
+        ok, ist, soll = check_eapol_mic(frame, self.kck, self.sha256)
         if not ok:
             raise ValueError("MIC of message 2 wrong: %s instead of %s"
                              % (h(ist), h(soll)))
@@ -368,17 +368,17 @@ class Authenticator:
         else:
             verpackt = aes_wrap(self.kek, kd)
         ki = 0x13CA if not self.sha256 else 0x13CB
-        f = eapol_bauen(ki, 16, self.replay, self.anonce, 0, verpackt)
+        f = build_eapol(ki, 16, self.replay, self.anonce, 0, verpackt)
         if 'mic3_falsch' in self.boese:
-            return f[:MIC_VERSATZ] + b'\x00' * 16 + f[MIC_VERSATZ + 16:]
-        f, _ = eapol_mic_setzen(f, self.kck, self.sha256)
+            return f[:MIC_OFFSET] + b'\x00' * 16 + f[MIC_OFFSET + 16:]
+        f, _ = set_eapol_mic(f, self.kck, self.sha256)
         return f
 
-    def nachricht4_pruefen(self, frame):
+    def check_message4(self, frame):
         d = eapol_zerlegen(frame)
         if d['replay'] != self.replay:
             raise ValueError("message 4 with wrong replay counter")
-        ok, ist, soll = eapol_mic_pruefen(frame, self.kck, self.sha256)
+        ok, ist, soll = check_eapol_mic(frame, self.kck, self.sha256)
         if not ok:
             raise ValueError("MIC of message 4 wrong: %s instead of %s"
                              % (h(ist), h(soll)))
@@ -388,17 +388,17 @@ class Authenticator:
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
 
-def lade_mitschnitt(pfad):
+def load_capture(file_path):
     d = {}
     mehr = {}
-    for zeile in open(pfad, encoding='utf-8'):
-        zeile = zeile.strip()
-        if not zeile or zeile.startswith('#'):
+    for row in open(file_path, encoding='utf-8'):
+        row = row.strip()
+        if not row or row.startswith('#'):
             continue
-        teil = zeile.split(None, 1)
-        if len(teil) != 2:
+        part = row.split(None, 1)
+        if len(part) != 2:
             continue
-        k, v = teil
+        k, v = part
         if k in d:
             mehr.setdefault(k, [d[k]]).append(v)
         else:
@@ -407,18 +407,18 @@ def lade_mitschnitt(pfad):
     return d
 
 
-def selbsttest(pfad):
-    m = lade_mitschnitt(pfad)
-    fehler = 0
+def selbsttest(file_path):
+    m = load_capture(file_path)
+    error_list = 0
     gut = 0
 
-    def pruef(name, ist, soll):
-        nonlocal fehler, gut
+    def verify(name, ist, soll):
+        nonlocal error_list, gut
         if ist == soll:
             gut += 1
             print("  OK    %s" % name)
         else:
-            fehler += 1
+            error_list += 1
             print("  FAIL  %s: %s statt %s" % (name, ist, soll))
 
     pw = u(m['pwhex'])
@@ -431,7 +431,7 @@ def selbsttest(pfad):
     e4 = u(m['eapol4'])
 
     pmk = pmk_aus_psk(pw, ssid)
-    pruef("PMK aus 'Induction'/'Coherer' (PBKDF2, 4096 Runden)",
+    verify("PMK aus 'Induction'/'Coherer' (PBKDF2, 4096 Runden)",
           h(pmk),
           "a288fcf0caaacda9a9f58633ff35e8992a01d9c10ba5e02efdf8cb5d730ce7bc")
 
@@ -444,22 +444,22 @@ def selbsttest(pfad):
 
     # standen, muessen sich nachrechnen lassen.
     for name, fr in (("2", e2), ("3", e3), ("4", e4)):
-        ok, ist, soll = eapol_mic_pruefen(fr, kck)
-        pruef("check value of message %s matches the real wire" % name,
+        ok, ist, soll = check_eapol_mic(fr, kck)
+        verify("check value of message %s matches the real wire" % name,
               h(ist), h(soll))
 
     d3 = eapol_zerlegen(e3)
     kek = ptk[16:32]
     kd = aes_unwrap(kek, d3['keydata'])
     if kd is None:
-        fehler += 1
+        error_list += 1
         print("  FAIL  key data of message 3 cannot be unwrapped")
     else:
         gut += 1
         print("  OK    key data of message 3 unwrapped (%d octets)"
               % len(kd))
 
-    return gut, fehler
+    return gut, error_list
 
 
 # =====================================================================
@@ -488,54 +488,54 @@ def sum16(daten, start=0):
     return (~s) & 0xFFFF
 
 
-def pseudo(qip, zip_, proto, laenge):
+def pseudo(qip, zip_, proto, length):
     return ((qip >> 16) + (qip & 0xFFFF) + (zip_ >> 16) +
-            (zip_ & 0xFFFF) + proto + laenge)
+            (zip_ & 0xFFFF) + proto + length)
 
 
-def ipv4_bauen(qip, zip_, proto, nutz, kennung=1):
-    kopf = bytearray(20)
-    kopf[0] = 0x45
-    struct.pack_into('>H', kopf, 2, 20 + len(nutz))
-    struct.pack_into('>H', kopf, 4, kennung)
-    struct.pack_into('>H', kopf, 6, 0x4000)
-    kopf[8] = 64
-    kopf[9] = proto
-    struct.pack_into('>I', kopf, 12, qip)
-    struct.pack_into('>I', kopf, 16, zip_)
-    struct.pack_into('>H', kopf, 10, sum16(bytes(kopf)))
-    return bytes(kopf) + nutz
+def build_ipv4(qip, zip_, proto, nutz, kennung=1):
+    header = bytearray(20)
+    header[0] = 0x45
+    struct.pack_into('>H', header, 2, 20 + len(nutz))
+    struct.pack_into('>H', header, 4, kennung)
+    struct.pack_into('>H', header, 6, 0x4000)
+    header[8] = 64
+    header[9] = proto
+    struct.pack_into('>I', header, 12, qip)
+    struct.pack_into('>I', header, 16, zip_)
+    struct.pack_into('>H', header, 10, sum16(bytes(header)))
+    return bytes(header) + nutz
 
 
-def udp_bauen(qip, zip_, qport, zport, nutz):
-    kopf = bytearray(8)
-    struct.pack_into('>H', kopf, 0, qport)
-    struct.pack_into('>H', kopf, 2, zport)
-    struct.pack_into('>H', kopf, 4, 8 + len(nutz))
-    ganz = bytes(kopf) + nutz
+def build_udp(qip, zip_, qport, zport, nutz):
+    header = bytearray(8)
+    struct.pack_into('>H', header, 0, qport)
+    struct.pack_into('>H', header, 2, zport)
+    struct.pack_into('>H', header, 4, 8 + len(nutz))
+    ganz = bytes(header) + nutz
     s = sum16(ganz, pseudo(qip, zip_, 17, len(ganz)))
     if s == 0:
         s = 0xFFFF
-    struct.pack_into('>H', kopf, 6, s)
-    return bytes(kopf) + nutz
+    struct.pack_into('>H', header, 6, s)
+    return bytes(header) + nutz
 
 
-def tcp_bauen(qip, zip_, qport, zport, seq, ack, flags, nutz=b''):
-    kopf = bytearray(20)
-    struct.pack_into('>H', kopf, 0, qport)
-    struct.pack_into('>H', kopf, 2, zport)
-    struct.pack_into('>I', kopf, 4, seq)
-    struct.pack_into('>I', kopf, 8, ack)
-    kopf[12] = 0x50
-    kopf[13] = flags
-    struct.pack_into('>H', kopf, 14, 8192)
-    ganz = bytes(kopf) + nutz
-    struct.pack_into('>H', kopf, 16,
+def build_tcp(qip, zip_, qport, zport, seq, ack, flags, nutz=b''):
+    header = bytearray(20)
+    struct.pack_into('>H', header, 0, qport)
+    struct.pack_into('>H', header, 2, zport)
+    struct.pack_into('>I', header, 4, seq)
+    struct.pack_into('>I', header, 8, ack)
+    header[12] = 0x50
+    header[13] = flags
+    struct.pack_into('>H', header, 14, 8192)
+    ganz = bytes(header) + nutz
+    struct.pack_into('>H', header, 16,
                      sum16(ganz, pseudo(qip, zip_, 6, len(ganz))))
-    return bytes(kopf) + nutz
+    return bytes(header) + nutz
 
 
-def dhcp_ack_bauen(xid, mac, angeboten, server, maske, tor, dns,
+def build_dhcp_ack(xid, mac, angeboten, server, maske, tor, dns,
                    miete=86400, art=5):
     b = bytearray(240)
     b[0] = 2           # op: Antwort
@@ -562,7 +562,7 @@ def snap(ethertype=0x0800):
         struct.pack('>H', ethertype)
 
 
-def datenkopf(bssid, ziel, quelle, fromds=True, seq=0,
+def datenkopf(bssid, target, source, fromds=True, seq=0,
               geschuetzt=False):
     # GESENDET WIRD.
     #
@@ -571,8 +571,8 @@ def datenkopf(bssid, ziel, quelle, fromds=True, seq=0,
     fc = 0x0208 if fromds else 0x0108
     if geschuetzt:
         fc |= 0x4000
-    return struct.pack('<H', fc) + b'\x00\x00' + ziel + bssid + \
-        quelle + struct.pack('<H', seq << 4)
+    return struct.pack('<H', fc) + b'\x00\x00' + target + bssid + \
+        source + struct.pack('<H', seq << 4)
 
 
 class Zugangspunkt:
@@ -592,48 +592,48 @@ class Zugangspunkt:
         self.pn += 1
         return bytes([0, 0, 0, 0, (p >> 8) & 255, p & 255])
 
-    def _rahmen(self, nutzlast_ip, seq=0):
+    def _frame(self, nutzlast_ip, seq=0):
         hdr = datenkopf(self.bssid, self.klient, self.bssid, True, seq,
                         geschuetzt=True)
         klar = snap(0x0800) + nutzlast_ip
         return ccmp_schuetzen(self.tk, hdr, klar, self._pn())
 
-    def dhcp_antwort(self, xid, art=5, seq=1):
-        d = dhcp_ack_bauen(xid, self.klient, self.klient_ip,
+    def dhcp_reply(self, xid, art=5, seq=1):
+        d = build_dhcp_ack(xid, self.klient, self.klient_ip,
                            self.server, self.maske, self.server,
                            self.server, art=art)
-        u = udp_bauen(self.server, self.klient_ip, 67, 68, d)
-        return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
+        u = build_udp(self.server, self.klient_ip, 67, 68, d)
+        return self._frame(build_ipv4(self.server, self.klient_ip,
                                        17, u, 2), seq)
 
-    def http_antwort(self, rumpf=b'OsumOK', seq=2, status=b'200 OK'):
-        kopf = b'HTTP/1.0 ' + status + b'\r\n' + \
+    def http_reply(self, rumpf=b'OsumOK', seq=2, status=b'200 OK'):
+        header = b'HTTP/1.0 ' + status + b'\r\n' + \
             b'Content-Type: text/plain\r\n' + \
             b'Content-Length: ' + str(len(rumpf)).encode() + b'\r\n' + \
             b'\r\n'
-        t = tcp_bauen(self.server, self.klient_ip, 80, 40000,
-                      1000, 1, 0x18, kopf + rumpf)
-        return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
+        t = build_tcp(self.server, self.klient_ip, 80, 40000,
+                      1000, 1, 0x18, header + rumpf)
+        return self._frame(build_ipv4(self.server, self.klient_ip,
                                        6, t, 3), seq)
 
     def echo(self, nutz=b'ABCDEFG', seq=0):
-        u = udp_bauen(self.server, self.klient_ip, 67, 68, nutz)
-        return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
+        u = build_udp(self.server, self.klient_ip, 67, 68, nutz)
+        return self._frame(build_ipv4(self.server, self.klient_ip,
                                        17, u, 4), seq)
 
-    def oeffnen(self, mpdu):
-        return ccmp_oeffnen(self.tk, mpdu)
+    def open_frame(self, mpdu):
+        return ccmp_open(self.tk, mpdu)
 
 
 def main():
     if '--selbsttest' in sys.argv:
         i = sys.argv.index('--selbsttest')
-        pfad = sys.argv[i + 1] if len(sys.argv) > i + 1 else \
+        file_path = sys.argv[i + 1] if len(sys.argv) > i + 1 else \
             os.path.join(os.path.dirname(__file__), 'mitschnitt.txt')
         print("== the peer calibrates itself on the real capture ==")
-        gut, fehler = selbsttest(pfad)
-        print("GEGENSTELLE-SELBSTTEST: %d Zusagen, %d Fehler" % (gut, fehler))
-        return 1 if fehler else 0
+        gut, error_list = selbsttest(file_path)
+        print("GEGENSTELLE-SELBSTTEST: %d Zusagen, %d Fehler" % (gut, error_list))
+        return 1 if error_list else 0
     print(__doc__)
     return 0
 

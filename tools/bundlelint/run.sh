@@ -16,6 +16,6 @@ done
 rm -rf "$W/apps"; cp -r assets/apps "$W/apps"
 rm -f "$W/apps/viewer.osp/symbol.osym" "$W/apps/viewer.osp/symbol.txt"
 chk "lint fails when a bundle has no symbol" "! python3 -I tools/k15/bundle.py --lint $W/apps >/dev/null 2>&1"
-chk "every bundle build entry point calls the lint" "grep -q 'lint_all(quelle)' tools/k15/bundle.py"
+chk "every bundle build entry point calls the lint" "grep -q 'lint_all(source_dir)' tools/k15/bundle.py"
 echo "BUNDLELINT: $ok ok, $bad fail"
 [ "$bad" = 0 ]

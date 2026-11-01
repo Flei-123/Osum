@@ -131,7 +131,7 @@ BBDYN=${BBDYN:-/root/bbdyn/busybox}
 # the proof stones live in /root/stones (rebuild: tools/unterbau/build-stones.sh /root/stones); STONES= (empty) switches them off. They run with the network stage by default (STONES_NET=0 switches that off).
 STONES=${STONES-/root/stones}; [ -r "$STONES/python3" ] || STONES=""
 STONES_NET=${STONES_NET-1}; [ "$STONES_NET" = 0 ] && STONES_NET=""
-printf 'eins\nzwei\ndrei\n' > "$D/pruef.txt"
+printf 'one\ntwo\nthree\n' > "$D/pruef.txt"
 cat > "$D/bb.sh" <<'BBS'
 echo "BB echo ok"
 x=$(echo sub); [ "$x" = sub ] && echo "BB cmdsubst ok" || echo "BB cmdsubst FAIL"
@@ -140,7 +140,7 @@ echo "BB pipe $(echo a b c | /bin/busybox wc -w)"
 echo "BB forloop $(for i in 1 2 3; do printf %s $i; done)"
 /bin/busybox sh -c 'echo "BB nested-sh ok"'
 (exit 3); echo "BB exitstatus $?"
-echo "BB grep $(/bin/busybox grep -c zwei /etc/pruef.txt)"
+echo "BB grep $(/bin/busybox grep -c two /etc/pruef.txt)"
 echo "BB sort $(/bin/busybox sort -r /etc/pruef.txt | /bin/busybox head -1)"
 /bin/busybox mkdir /tmp/bbd && /bin/busybox touch /tmp/bbd/f && echo "BB mkdir-touch $(/bin/busybox ls /tmp/bbd)"
 echo hello > /tmp/bbd/g; echo "BB redirect $(/bin/busybox cat /tmp/bbd/g)"
@@ -227,9 +227,9 @@ if [ -r "$BBDYN" ] && { [ -z "${ONLY:-}" ] || echo " $ONLY " | grep -q " busybox
         if [ "$line" = "BB $1 $2" ]; then BBOK=$((BBOK+1)); printf '        BB-OK   %s\n' "$1"; else BBBAD=$((BBBAD+1)); printf '        BB-GAP  %s  (got: %s)\n' "$1" "${line:-nothing}"; fi
     }
     bbchk echo ok; bbchk cmdsubst ok; bbchk arith 42; bbchk pipe 3; bbchk forloop 123; bbchk nested-sh ok; bbchk exitstatus 3
-    bbchk grep 1; bbchk sort zwei; bbchk mkdir-touch f; bbchk redirect hello; bbchk awk 3; bbchk sed aXc; bbchk sha256 "$SHA12"
+    bbchk grep 1; bbchk sort two; bbchk mkdir-touch f; bbchk redirect hello; bbchk awk 3; bbchk sed aXc; bbchk sha256 "$SHA12"
     bbchk loadavg 0.00; bbchk uptime-cmd ok; bbchk df-cmd ok; bbchk free-cmd ok; bbchk ps-cmd ok; bbchk date-cmd ok
-    bbchk head-n 2; bbchk tail drei; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk id 0
+    bbchk head-n 2; bbchk tail three; bbchk tr ABC; bbchk find 2; bbchk xargs 3; bbchk cp-mv-rm ok; bbchk symlink 3; bbchk chmod-stat 600; bbchk id 0
     bbchk uname ok; bbchk hostname ok; bbchk pwd /tmp; bbchk tar etc/pruef.txt; bbchk gzip 3; bbchk diff same; bbchk seq 5; bbchk dd 4096; bbchk sort-uniq 2
     bbchk date-fmt 5; bbchk mktemp ok; bbchk realpath /etc/pruef.txt; bbchk ash-func 42; bbchk heredoc hd; bbchk sed-i y; bbchk sleep ok; bbchk bg-wait ok; bbchk kill done
     bbchk mounts ok; bbchk mount-cmd ok; bbchk ip-cmd ok; bbchk ip-addr 1; bbchk ip-link 1; bbchk ip-route 2; bbchk ifconfig-cmd ok; bbchk top-cmd ok; bbchk lsof-cmd ok

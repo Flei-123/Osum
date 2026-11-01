@@ -6,8 +6,8 @@ import subprocess
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(os.path.dirname(HIER))
-ORAKEL = os.path.join(WURZEL, ".probe", "worakel")
+REPO_ROOT = os.path.dirname(os.path.dirname(HIER))
+ORAKEL = os.path.join(REPO_ROOT, ".probe", "worakel")
 MITSCHNITT = os.path.join(HIER, "mitschnitt.txt")
 
 QUICK = ("--quick" in sys.argv or "--schnell" in sys.argv)
@@ -29,9 +29,9 @@ def bad(t):
     print("  FAIL  %s" % t)
 
 
-def lies_mitschnitt():
+def read_capture():
     daten = {}
-    liste = {}
+    entries = {}
     with open(MITSCHNITT, encoding="utf-8") as f:
         for z in f:
             z = z.strip()
@@ -39,15 +39,15 @@ def lies_mitschnitt():
                 continue
             k, _, v = z.partition(" ")
             if k in ("beacon", "daten", "beacon_db"):
-                liste.setdefault(k, []).append(v)
+                entries.setdefault(k, []).append(v)
             else:
                 daten[k] = v
-    daten.update(liste)
+    daten.update(entries)
     return daten
 
 
-def baue_faelle():
-    m = lies_mitschnitt()
+def build_cases():
+    m = read_capture()
     quellen = []
     for b in m["beacon"]:
         quellen.append(("beacon", bytes.fromhex(b)))
@@ -61,31 +61,31 @@ def baue_faelle():
     faelle = []
     strukturell = []
 
-    for befehl, roh in quellen:
+    for command, roh in quellen:
         for n in range(0, len(roh) + 1):
             strukturell.append(len(faelle))
-            faelle.append((befehl, roh[:n]))
-            if befehl == "beacon":
+            faelle.append((command, roh[:n]))
+            if command == "beacon":
                 strukturell.append(len(faelle))
                 faelle.append(("ies", roh[:n]))
 
-    anzahl = 1 if QUICK else 4
-    for befehl, roh in quellen:
+    total = 1 if QUICK else 4
+    for command, roh in quellen:
         for i in range(len(roh)):
-            for wert in ([0xFF] if QUICK
+            for value in ([0xFF] if QUICK
                          else [0x00, 0xFF, 0x80, r.randrange(256)]):
                 v = bytearray(roh)
-                v[i] = wert
-                faelle.append((befehl, bytes(v)))
+                v[i] = value
+                faelle.append((command, bytes(v)))
 
-    for befehl, roh in quellen:
-        if befehl != "beacon":
+    for command, roh in quellen:
+        if command != "beacon":
             continue
         at = 36
         while at + 2 <= len(roh):
-            for wert in (0xFF, 0xFE, 0x80, len(roh), 0x00):
+            for value in (0xFF, 0xFE, 0x80, len(roh), 0x00):
                 v = bytearray(roh)
-                v[at + 1] = wert & 255
+                v[at + 1] = value & 255
                 strukturell.append(len(faelle))
                 faelle.append(("beacon", bytes(v)))
                 strukturell.append(len(faelle))
@@ -100,7 +100,7 @@ def baue_faelle():
             faelle.append((r.choice(["beacon", "ies", "eapol", "ccmpdec"]),
                            roh))
 
-    grund = bytearray(bytes.fromhex(lies_mitschnitt()["daten"][0]))
+    grund = bytearray(bytes.fromhex(read_capture()["daten"][0]))
     for bits in range(16):
         fc = 0x0008  # data frame
         if bits & 1:
@@ -124,35 +124,35 @@ def baue_faelle():
 TK = "15798d511beae0028313c8ab32f12c7e"
 
 
-def zeile_fuer(befehl, roh):
-    if befehl == "ccmpdec":
+def row_for(command, roh):
+    if command == "ccmpdec":
         return "ccmpdec %s %s" % (TK, roh.hex() if roh else "-")
-    return "%s %s" % (befehl, roh.hex() if roh else "-")
+    return "%s %s" % (command, roh.hex() if roh else "-")
 
 
-def wohlgeformt(befehl, antwort):
-    if antwort == "FAIL":
+def wohlgeformt(command, response):
+    if response == "FAIL":
         return True
-    if befehl == "ies":
-        for teil in antwort.split(" "):
-            if teil in ("KAPUTT", "LEER"):
+    if command == "ies":
+        for part in response.split(" "):
+            if part in ("KAPUTT", "LEER"):
                 continue
-            if ":" not in teil:
+            if ":" not in part:
                 return False
-            a, b = teil.split(":", 1)
+            a, b = part.split(":", 1)
             if not a.isdigit() or not b.isdigit():
                 return False
         return True
-    if befehl in ("beacon", "eapol"):
-        for teil in antwort.split(" "):
-            if "=" not in teil:
+    if command in ("beacon", "eapol"):
+        for part in response.split(" "):
+            if "=" not in part:
                 return False
         return True
-    if befehl == "ccmpdec":
-        if len(antwort) % 2 != 0:
+    if command == "ccmpdec":
+        if len(response) % 2 != 0:
             return False
         try:
-            bytes.fromhex(antwort)
+            bytes.fromhex(response)
         except ValueError:
             return False
         return True
@@ -163,12 +163,12 @@ def main():
     if not os.path.exists(ORAKEL):
         print("  FAIL  %s does not exist" % ORAKEL)
         return 1
-    faelle, strukturell = baue_faelle()
+    faelle, strukturell = build_cases()
     print("== the fuzz run: %d mutilated frames ==" % len(faelle))
-    zeilen = [zeile_fuer(b, r) for b, r in faelle]
-    eingabe = ("\n".join(zeilen) + "\n").encode()
+    rows = [row_for(b, r) for b, r in faelle]
+    input_text = ("\n".join(rows) + "\n").encode()
 
-    p = subprocess.run([ORAKEL], input=eingabe, stdout=subprocess.PIPE,
+    p = subprocess.run([ORAKEL], input=input_text, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, timeout=1800)
     if p.returncode != 0:
         bad("the oracle exited on %d cases with code %d"
@@ -180,38 +180,38 @@ def main():
     aus = p.stdout.decode(errors="replace").split("\n")
     while aus and aus[-1] == "":
         aus.pop()
-    if len(aus) == len(zeilen):
-        ok("exactly one answer line per question: %d of %d" % (len(aus), len(zeilen)))
+    if len(aus) == len(rows):
+        ok("exactly one answer line per question: %d of %d" % (len(aus), len(rows)))
     else:
-        bad("%d answers to %d questions" % (len(aus), len(zeilen)))
+        bad("%d answers to %d questions" % (len(aus), len(rows)))
         return 1
 
-    schlecht = [(faelle[i][0], zeilen[i][:70], aus[i][:70])
+    defective = [(faelle[i][0], rows[i][:70], aus[i][:70])
                 for i in range(len(aus))
                 if not wohlgeformt(faelle[i][0], aus[i])]
-    if not schlecht:
+    if not defective:
         ok("each of the %d answers is either FAIL or a well-formed "
            "line -- no partial output, no garbage" % len(aus))
     else:
-        for b, f, a in schlecht[:5]:
+        for b, f, a in defective[:5]:
             bad("%s: '%s' -> '%s'" % (b, f, a))
 
     # Uebertragungsfehler eine unverschluesselte Verbindung.
-    offen = 0
-    fuer_beacons = 0
-    for i, (befehl, roh) in enumerate(faelle):
-        if befehl != "beacon" or aus[i] == "FAIL":
+    is_open = 0
+    for_beacons = 0
+    for i, (command, roh) in enumerate(faelle):
+        if command != "beacon" or aus[i] == "FAIL":
             continue
-        fuer_beacons += 1
+        for_beacons += 1
         f = dict(x.split("=", 1) for x in aus[i].split(" ") if "=" in x)
         if f.get("sich") == "0" and f.get("ssid") == b"Coherer".hex():
-            offen += 1
-    if offen == 0:
+            is_open += 1
+    if is_open == 0:
         ok("of the %d mutilated beacons that get through at all, "
-           "NONE reports the network 'Coherer' as open" % fuer_beacons)
+           "NONE reports the network 'Coherer' as open" % for_beacons)
     else:
         bad("%d mutilated beacons report 'Coherer' as an OPEN network"
-            % offen)
+            % is_open)
 
     if QUICK:
         print("  --    valgrind uebersprungen (--quick)")
@@ -221,12 +221,12 @@ def main():
         #
         #
         if os.environ.get("WLAN_VALGRIND") == "alle":
-            teil = list(range(len(faelle)))
-            was = "alle %d" % len(teil)
+            part = list(range(len(faelle)))
+            was = "alle %d" % len(part)
         else:
-            teil = sorted(set(strukturell))
-            was = "the %d structural of %d" % (len(teil), len(faelle))
-        vein = ("\n".join(zeilen[i] for i in teil) + "\n").encode()
+            part = sorted(set(strukturell))
+            was = "the %d structural of %d" % (len(part), len(faelle))
+        vein = ("\n".join(rows[i] for i in part) + "\n").encode()
         try:
             v = subprocess.run(
                 ["valgrind", "--error-exitcode=42",
