@@ -1,0 +1,1904 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import acpi.acpiev
+import block.blk
+import ldr.bootmod
+import gfx.fb
+import ui.frameprof
+import fs.fs
+import gfx.gfx
+import diag.hw
+import drv.hid.i2chid
+import net.inet
+import lib.kstate
+import lib.kutil
+import mm.mem
+import net.netdev
+import net.netsvc
+import drv.usb.ohci
+import pwr.pmon
+import sched.proc
+import drv.hid.ps2m
+import diag.safe
+import sched.sched
+import serial
+import diag.stall
+import ui.sysmon
+import ui.wm.tiling
+import sched.time
+import arch.x86_64.trap
+import gfx.ttf
+import usb.usb
+import lib.version
+import drv.gpu.vgpu
+import gfx.vmode
+import drv.gpu.vmsvga
+import ui.wig
+import ui.wm
+import ui.wm.wmanimctl
+import ui.wm.wmbase
+import ui.wm.wmchrome
+import ui.wm.wmcompose
+import ui.wm.wmcore
+import ui.wm.wmcursor
+import ui.wm.wmkeys
+import ui.wm.wmlatency
+import ui.wm.wmmeasure
+import ui.wm.wmoverlay
+import ui.wmplug
+import ui.wm.wmsay
+import ui.wm.wmtabs
+import ui.wm.wmterm
+import ui.wm.wmtermio
+import drv.usb.xhci
+import ui.kgui.kgbase
+import ui.kgui.kgdisp
+import ui.kgui.kgsvc
+import ui.kgui.kgwm
+
+const QUIET_TICKS: u64 = 200
+
+const QUIET_DEPTH: u64 = 3
+
+const QUIET_FRAME_GAP: u64 = 8
+
+fn wait_wm(state: u64, i: u64, tw: u64) -> u64 {
+    let duration: bool = kstate.mode_on(state, kstate.M_WMDAUER)
+    kgwm.st(27)
+    if i == 0 && !duration {
+        kgwm.st(28)
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    kgwm.st(29)
+    var s_d: [u8; 12] = "wm: dauer\0\0\0"
+    if duration {
+        serial.puts((&s_d[0]) as u64)
+        serial.nl()
+    }
+
+    if duration && fb.phases_an(state) {
+        var s_wj: [u8; 10] = "wm: hold\0\0"
+        serial.puts((&s_wj[0]) as u64)
+        serial.nl()
+    }
+    var cur: u64 = i
+    var rounds: u64 = 0
+
+    var q_t0: u64 = kstate.get(state, kstate.TICKS)
+    var q_seq: u64 = kgsvc.quiet_seq(state)
+    var q_frames: u64 = wm.frames_total(state)
+    var q_fr_t: u64 = q_t0
+    var neustarts: u64 = 0
+    var shell_next: u64 = 0
+    var shell_born: u64 = 0
+    var shell_back: u64 = 100
+
+    var shell_gone: bool = false
+    var naechster: u64 = kstate.get(state, kstate.TICKS) + PULSE_MARKS
+    var next_round: u64 = PULSE_ROUNDS
+    var last_mark: u64 = kstate.get(state, kstate.TICKS)
+    kgwm.st(30)
+    while duration || rounds < 20000 {
+        kgwm.st(31)
+        kgbase.wmrunden = rounds
+        stall_spin(state)
+        safe.loop(state)
+
+        kgwm.sub(1)
+        acpiev.pump(state)
+        kgwm.sub(2)
+        kgsvc.jarvis_watch(state)
+        kgsvc.sv2_watch(state)
+        kgsvc.shell_watch(state)
+        kgwm.sub(3)
+        kgsvc.svc_flush(state)
+        kgwm.sub(4)
+        if cur != 0 && sched.tget(state, cur, sched.T_STATE) == sched.S_ZOMBIE {
+            let code: u64 = sched.tget(state, cur, sched.T_EXIT)
+            proc.reap(state, cur)
+            if !duration {
+                return code
+            }
+
+            cur = 0
+            if kstate.mode_on(state, kstate.M_NOKBD) {
+                shell_gone = true
+            }
+            let t_dead: u64 = kstate.get(state, kstate.TICKS)
+            if t_dead - shell_born < 300 {
+                shell_back = shell_back * 2
+                if shell_back > 3000 {
+                    shell_back = 3000
+                }
+            } else {
+                shell_back = 100
+            }
+            shell_next = t_dead + shell_back
+        }
+        if cur == 0 && !shell_gone && shell_next != 0 && kstate.get(state, kstate.TICKS) >= shell_next {
+            shell_next = 0
+            cur = kgsvc.shell_start(state)
+            if cur != 0 {
+                neustarts = neustarts + 1
+                shell_born = kstate.get(state, kstate.TICKS)
+            } else {
+                shell_next = kstate.get(state, kstate.TICKS) + shell_back
+            }
+        }
+
+        kgdisp.dnd_pump(state)
+        kgdisp.termclip_pump(state)
+        if wmtabs.tt_want_spawn(state) {
+            kgsvc.tabs_spawn(state)
+        }
+        kgsvc.tabs_reap(state)
+        kgwm.sub(5)
+        kgsvc.mausflut_schritt(state)
+        kgwm.sub(6)
+        kgwm.st(32)
+        usb.poll(state)
+        let _oh: bool = ohci.poll_wm(state)
+
+        let _dp: bool = vmode.poll(state)
+        i2chid.poll_tick(state)
+        kgwm.st(33)
+        usb.hotplug_work(state)
+        if netdev.late_usb(state) {
+            netsvc.stage(state)
+        }
+        kgwm.wechsel_schritt(state)
+        kgwm.st(34)
+        kgwm.sub(7)
+        wmkeys.poll(state)
+        kgwm.sub(8)
+        wmlatency.lj_round(state)
+        kgsvc.lock_watch(state)
+
+        kgsvc.abmelde_wache(state)
+        kgsvc.standby_wache(state)
+        kgsvc.window_watch(state)
+        kgsvc.winch_wache(state)
+        kgsvc.hup_wache(state)
+
+        if vmsvga.is_ready(state) && !vgpu.usable(state) {
+            let hp: u64 = vmsvga.host_pending(state)
+            if hp != 0 {
+                let _hf: u64 = vmode.follow_host(state, hp / 65536, hp % 65536)
+            }
+        }
+        if kstate.mode_on(state, kstate.M_VMSVGAHINTS) && (rounds & 63) == 0 {
+            kgdisp.hint_player(state)
+        }
+        kgwm.sub(9)
+        kgsvc.zombie_sweep(state)
+        kgwm.sub(10)
+        kgwm.st(35)
+
+        let _an: u64 = wmanimctl.anim_tick(state)
+        kgwm.sub(11)
+        if wmlatency.lj_may_compose(state) {
+            wmcompose.compose(state)
+        }
+
+        kgwm.sub(12)
+        wmoverlay.cadence_note(state, vmsvga.is_ready(state) && vmsvga.pending(state))
+        gfx.frame_done(state)
+        wmlatency.lj_done(state)
+        kgwm.sub(13)
+        kgwm.st(36)
+        board_shell(cur)
+        header_paint(state)
+        kgwm.sub(14)
+        kgwm.st(37)
+        if duration {
+            let now: u64 = kstate.get(state, kstate.TICKS)
+            var feuern: bool = false
+            if now >= naechster + kgsvc.pulse_extra() {
+                naechster = now + PULSE_MARKS
+                next_round = rounds + PULSE_ROUNDS
+                last_mark = now
+                feuern = true
+            } else if rounds >= next_round {
+                next_round = rounds + PULSE_ROUNDS
+                if now == last_mark {
+                    feuern = true
+                }
+            }
+            if feuern {
+
+                kgsvc.ser_defer_on(state)
+                kgwm.sub(20)
+                input_pulse(state, tw, neustarts)
+                kgwm.sub(21)
+                vmsvga.pulse_say(state)
+                kgwm.sub(22)
+                if fb.phases_an(state) {
+                    kgwm.sect_say(state)
+
+                    sched.dump_tasks(state)
+                }
+                kgwm.sub(23)
+                board_serial_on()
+                kgsvc.ser_defer_off(state)
+                if fb.termdump_an(state) {
+                    wmterm.term_dump(state, wmterm.term_win(state))
+                    wmterm.term_dump_all(state)
+                }
+                if cur == 0 && shell_next == 0 && !shell_gone {
+                    cur = kgsvc.shell_start(state)
+                    if cur != 0 {
+                        neustarts = neustarts + 1
+                        shell_born = kstate.get(state, kstate.TICKS)
+                    }
+                }
+            }
+        }
+        if kstate.mode_on(state, kstate.M_KNALL) {
+            if kstate.get(state, kstate.TICKS) > 1000 {
+                __mmio_write64(0x00007FFFFFFF0000 as *mut u64, 1)
+            }
+        }
+        if kstate.mode_on(state, kstate.M_ZUMACHEN) {
+            let jj: u64 = kstate.get(state, kstate.TICKS)
+            if jj > 1000 && jj >= close_mark {
+                close_mark = jj + 500
+                if kgbase.close_done == 0 {
+                    let ti: u64 = wmterm.term_win(state)
+                    if ti < wm.MAX_WIN {
+                        let pkt: u64 = wm.cross_point(state, ti)
+                        ps2m.set_pos(state, pkt >> 32, pkt & 0xFFFFFFFF)
+                        wmkeys.poll(state)
+                        ps2m.usb_packet(state, 8 | ps2m.B_LEFT, 0, 0, 0,
+                            false)
+                        let _p1: bool = wmkeys.poll(state)
+                        ps2m.usb_packet(state, 8, 0, 0, 0, false)
+                        let _p2: bool = wmkeys.poll(state)
+                        kgbase.close_window = ti + 1
+                    }
+                } else {
+                    ps2m.set_pos(state, 400 + kgbase.close_done * 40, 500)
+                    let _p3: bool = wmkeys.poll(state)
+                    kgbase.close_window = wmcore.close_top(state) + 1
+                }
+                kgbase.close_done = kgbase.close_done + 1
+                kgwm.close_say(state)
+            }
+        }
+        kgwm.sub(15)
+        kgwm.st(38)
+        if duration && kgsvc.lj_wait(state) {
+
+            kgbase.board_quiet = 0
+            q_t0 = kstate.get(state, kstate.TICKS)
+            q_seq = kgsvc.quiet_seq(state)
+            q_frames = wm.frames_total(state)
+            q_fr_t = q_t0
+        } else {
+
+            var depth: u64 = 1
+            if duration && !kstate.mode_on(state, kstate.M_NOQUIET) {
+                let now_q: u64 = kstate.get(state, kstate.TICKS)
+                let seq_q: u64 = kgsvc.quiet_seq(state)
+                let fr_q: u64 = wm.frames_total(state)
+                var busy_q: bool = false
+                if wm.input_hot(state) {
+                    busy_q = true
+                    kgbase.quiet_why[0] = kgbase.quiet_why[0] + 1
+                }
+                if seq_q != q_seq {
+                    busy_q = true
+                    kgbase.quiet_why[1] = kgbase.quiet_why[1] + 1
+                }
+                if vmsvga.is_ready(state) && vmsvga.pending(state) {
+                    busy_q = true
+                    kgbase.quiet_why[2] = kgbase.quiet_why[2] + 1
+                }
+                if fr_q != q_frames {
+
+                    if now_q - q_fr_t < QUIET_FRAME_GAP {
+                        busy_q = true
+                        kgbase.quiet_why[3] = kgbase.quiet_why[3] + 1
+                    }
+                    q_fr_t = now_q
+                    q_frames = fr_q
+                }
+                if busy_q {
+                    q_t0 = now_q
+                    q_seq = seq_q
+                } else if now_q - q_t0 >= QUIET_TICKS {
+                    depth = QUIET_DEPTH
+                }
+                kgbase.quiet_rounds = kgbase.quiet_rounds + (depth - 1)
+            }
+            kgbase.board_quiet = depth - 1
+            let t_goal: u64 = kstate.get(state, kstate.TICKS) + depth
+            sched.sleep_ticks(state, 1)
+
+            if duration && !fb.hlt_aus(state) {
+                sched.idle_wait(state)
+                if depth > 1 {
+                    kgsvc.quiet_more(state, t_goal, q_seq)
+                }
+            }
+        }
+        rounds = rounds + 1
+    }
+    return 0xFFFFFFFFFFFFFFFE
+}
+
+const PULSE_MARKS: u64 = 500
+
+const PULSE_ROUNDS: u64 = 4000
+
+static mut header: [u8; 176] = [0 as u8; 176]
+
+static mut header_n: u64 = 0
+
+fn header_set(state: u64, p: u64, n: u64) {
+    var i: u64 = 0
+    var m: u64 = n
+    if m > 175 {
+        m = 175
+    }
+    while i < m {
+        kstate.set8((&header[0]) as u64 + i, kstate.get8(p + i) as u8)
+        i = i + 1
+    }
+    header_n = m
+}
+
+const BOARD_COLUMNS: u64 = 48
+
+const BOARD_MARKS: u64 = 10
+
+const BOARD_QUIET_MARKS: u64 = 1000
+
+fn board_iv() -> u64 {
+    if kgbase.board_quiet != 0 {
+        return BOARD_QUIET_MARKS
+    }
+    return BOARD_MARKS
+}
+
+const BOARD_ROUNDS: u64 = 200
+
+const BOARD_SERIAL_MARKS: u64 = 500
+
+static mut close_mark: u64 = 0
+
+static mut board_mark: u64 = 0
+
+static mut board_round: u64 = 0
+
+static mut board_sh: u64 = 0
+
+static mut board_serial: u64 = 0
+
+fn board_serial_on() {
+    board_serial = 1
+    header_serial = 1
+}
+
+static mut header_serial: u64 = 0
+
+fn header_line_say(state: u64, b: u64, n: u64) {
+    if header_serial == 0 {
+        return
+    }
+    var v: [u8; 8] = "tafel: \0"
+    let z: u64 = serial.line_at(sched.hier(state))
+    kgsvc.ser_defer_on(state)
+    serial.puts((&v[0]) as u64)
+    serial.text(b, n)
+    serial.nl()
+    kgsvc.ser_defer_off(state)
+    serial.line_clear(z)
+}
+
+fn board_shell(v: u64) {
+    board_sh = v
+}
+
+fn board_line_say(state: u64, b: u64, n: u64) {
+    if board_serial == 0 {
+        return
+    }
+    var v: [u8; 8] = "tafel: \0"
+    let z: u64 = serial.line_at(sched.hier(state))
+    kgsvc.ser_defer_on(state)
+    serial.puts((&v[0]) as u64)
+    serial.text(b, n)
+    serial.nl()
+    kgsvc.ser_defer_off(state)
+    serial.line_clear(z)
+}
+
+const BOARD_SP: u64 = 48
+
+static mut board_txt: [u8; 1200] = [0 as u8; 1200]
+
+static mut board_len: [u64; 25] = [0 as u64; 25]
+
+static mut board_fg: [u64; 25] = [0 as u64; 25]
+
+static mut board_has: u64 = 0
+
+static mut board_inside: u64 = 0
+
+static mut board_paint: u64 = 0
+
+static mut board_loop: u64 = 0
+
+static mut board_irqm: u64 = 0
+
+static mut board_serial_mark: u64 = 0
+
+static mut zu_lang: u64 = 0
+
+static mut lang_max: u64 = 0
+
+static mut long_line: u64 = 0
+
+fn board_remember(line: u64, p: u64, n: u64, fg: u64) {
+    if line >= kgbase.BOARD_LINES {
+        return
+    }
+    var m: u64 = n
+    if m > BOARD_SP {
+        zu_lang = zu_lang | (1 << line)
+        if n > lang_max {
+            lang_max = n
+            long_line = line
+        }
+        m = BOARD_SP
+    }
+    let target: u64 = (&board_txt[0]) as u64 + line * BOARD_SP
+    var i: u64 = 0
+    while i < m {
+        kstate.set8(target + i, kstate.get8(p + i) as u8)
+        i = i + 1
+    }
+    board_len[line as usize] = m
+    board_fg[line as usize] = fg
+    board_has = 1
+}
+
+static mut ab_klinke: u64 = 0
+
+static mut ab_count: u64 = 0
+
+static mut ab_vec: u64 = 0
+
+static mut ab_rip: u64 = 0
+
+static mut ab_cr2: u64 = 0
+
+static mut ab_rsp: u64 = 0
+
+static mut ab_err: u64 = 0
+
+static mut ab_cs: u64 = 0
+
+static mut ab_kern: u64 = 0
+
+static mut ab_haelt: u64 = 0
+
+static mut ab_trace: [u64; 5] = [0 as u64; 5]
+
+static mut ab_spurn: u64 = 0
+
+static mut ab_stopp: u64 = 0
+
+fn crash_lines(state: u64) {
+    var b: [u8; 64] = [0 as u8; 64]
+    let p: u64 = (&b[0]) as u64
+    let rot: u64 = wmmeasure.measure_red(state)
+    var names: [u8; 128] = "#DE\0#DB\0NMI\0#BP\0#OF\0#BR\0#UD\0#NM\0#DF\0#CO\0#TS\0#NP\0#SS\0#GP\0#PF\0r15\0#MF\0#AC\0#MC\0#XM\0#VE\0#CP\0r22\0r23\0r24\0r25\0r26\0#HV\0#VC\0#SX\0r30\0r31\0"
+    var t0: [u8; 10] = "9 KNALL  \0"
+    var s_n: [u8; 4] = "N \0\0"
+    var s_v: [u8; 5] = " VEK\0"
+    var s_k: [u8; 4] = " K\0\0"
+    var s_h: [u8; 8] = " HAELT\0\0"
+    var s_w: [u8; 8] = " WEITER\0"
+    var n: u64 = 0
+    n = kgsvc.pulse_text(state, p, 0, (&t0[0]) as u64)
+    n = kgsvc.pulse_text(state, p, n, (&s_n[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, ab_count)
+    n = kgsvc.pulse_text(state, p, n, (&s_v[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, ab_vec)
+    if ab_vec < 32 {
+        n = kgsvc.pulse_text(state, p, n, (&names[0]) as u64 + ab_vec * 4)
+    }
+    n = kgsvc.pulse_text(state, p, n, (&s_k[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, ab_kern)
+    if ab_haelt != 0 {
+        n = kgsvc.pulse_text(state, p, n, (&s_h[0]) as u64)
+    } else {
+        n = kgsvc.pulse_text(state, p, n, (&s_w[0]) as u64)
+    }
+    board_remember(9, p, n, rot)
+    board_line_say(state, p, n)
+
+    var t1: [u8; 10] = "13 KRIP  \0"
+    var s_c: [u8; 7] = "  CS \0\0"
+    var s_e: [u8; 7] = " ERR \0\0"
+    n = kgsvc.pulse_text(state, p, 0, (&t1[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, ab_rip, 8)
+    n = kgsvc.pulse_text(state, p, n, (&s_c[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, ab_cs & 0xFFFF, 4)
+    n = kgsvc.pulse_text(state, p, n, (&s_e[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, ab_err & 0xFFFF, 4)
+    if ab_vec == 14 {
+        var s_r: [u8; 7] = " CR2 \0\0"
+        n = kgsvc.pulse_text(state, p, n, (&s_r[0]) as u64)
+        n = kgsvc.pulse_hexn(state, p, n, ab_cr2, 8)
+    } else {
+        var s_s: [u8; 7] = " RSP \0\0"
+        n = kgsvc.pulse_text(state, p, n, (&s_s[0]) as u64)
+        n = kgsvc.pulse_hexn(state, p, n, ab_rsp, 8)
+    }
+    board_remember(13, p, n, rot)
+    board_line_say(state, p, n)
+}
+
+fn crash_hook() -> u64 {
+    return ab_klinke
+}
+
+fn crash(state: u64, vec: u64, err: u64, rip: u64, cr2: u64, rsp: u64,
+    cs: u64, kern: u64, trace: u64, spurn: u64, gestoppt: u64) {
+    ab_count = ab_count + 1
+    if ab_klinke == 0 {
+        ab_vec = vec
+        ab_rip = rip
+        ab_cr2 = cr2
+        ab_rsp = rsp
+        ab_err = err
+        ab_cs = cs
+        ab_kern = kern
+        ab_spurn = 0
+        while ab_spurn < spurn && ab_spurn < 5 {
+            ab_trace[ab_spurn as usize] =
+                __mmio_read64((trace + ab_spurn * 8) as *mut u64)
+            ab_spurn = ab_spurn + 1
+        }
+        ab_stopp = gestoppt
+        ab_haelt = 0
+        if kstate.mode_on(state, kstate.M_CRASH) {
+            ab_haelt = 1
+        }
+        ab_klinke = 1
+    }
+    if !fb.ready(state) {
+        return
+    }
+    var names: [u8; 128] = "#DE\0#DB\0NMI\0#BP\0#OF\0#BR\0#UD\0#NM\0#DF\0#CO\0#TS\0#NP\0#SS\0#GP\0#PF\0r15\0#MF\0#AC\0#MC\0#XM\0#VE\0#CP\0r22\0r23\0r24\0r25\0r26\0#HV\0#VC\0#SX\0r30\0r31\0"
+    fb.band_open(state, true)
+    if wmmeasure.measure_lines() != kgbase.BOARD_LINES {
+        var s_uz: [u8; 33] = "tafel: ZEILENZAHL UNGLEICH kgui=\0"
+        var s_uw: [u8; 6] = "  wm=\0"
+        serial.puts((&s_uz[0]) as u64)
+        serial.dec(kgbase.BOARD_LINES)
+        serial.puts((&s_uw[0]) as u64)
+        serial.dec(wmmeasure.measure_lines())
+        serial.nl()
+    }
+    wmmeasure.measure_reason(state, kgbase.BOARD_LINES, BOARD_COLUMNS)
+    var b: [u8; 64] = [0 as u8; 64]
+    let p: u64 = (&b[0]) as u64
+    let rot: u64 = wmmeasure.measure_red(state)
+    let gelb: u64 = wmmeasure.measure_yellow(state)
+    var n: u64 = 0
+
+    var z0: [u8; 21] = "*** ABSTURZ *** VEK \0"
+    var lz: [u8; 2] = " \0"
+    n = kgsvc.pulse_text(state, p, 0, (&z0[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, vec)
+    n = kgsvc.pulse_text(state, p, n, (&lz[0]) as u64)
+    if vec < 32 {
+        n = kgsvc.pulse_text(state, p, n, (&names[0]) as u64 + vec * 4)
+    }
+    kgwm.from_line(state, 0, p, n, rot)
+
+    var z1: [u8; 5] = "RIP \0"
+    n = kgsvc.pulse_text(state, p, 0, (&z1[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, rip, 16)
+    kgwm.from_line(state, 1, p, n, rot)
+
+    var z2: [u8; 5] = "CR2 \0"
+    var z2a: [u8; 12] = "  (ALT, \0\0\0\0"
+    var z2b: [u8; 17] = "gilt nur bei PF)\0"
+    n = kgsvc.pulse_text(state, p, 0, (&z2[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, cr2, 16)
+    if vec != 14 {
+        n = kgsvc.pulse_text(state, p, n, (&z2a[0]) as u64)
+        n = kgsvc.pulse_text(state, p, n, (&z2b[0]) as u64)
+    }
+    kgwm.from_line(state, 2, p, n, rot)
+
+    var z3: [u8; 5] = "ERR \0"
+    var z3b: [u8; 6] = "  CS \0"
+    n = kgsvc.pulse_text(state, p, 0, (&z3[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, err & 0xFFFFFFFF, 8)
+    n = kgsvc.pulse_text(state, p, n, (&z3b[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, cs & 0xFFFF, 4)
+    kgwm.from_line(state, 3, p, n, rot)
+
+    var z4: [u8; 5] = "RSP \0"
+    n = kgsvc.pulse_text(state, p, 0, (&z4[0]) as u64)
+    n = kgsvc.pulse_hexn(state, p, n, rsp, 16)
+    kgwm.from_line(state, 4, p, n, rot)
+
+    var z5: [u8; 10] = "STUFE ST \0"
+    var z5b: [u8; 6] = " MAX \0"
+    var z5c: [u8; 6] = " RND \0"
+    n = kgsvc.pulse_text(state, p, 0, (&z5[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, kgwm.level_num())
+    n = kgsvc.pulse_text(state, p, n, (&z5b[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, kgwm.level_max())
+    n = kgsvc.pulse_text(state, p, n, (&z5c[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, kgwm.wm_runden())
+    kgwm.from_line(state, 5, p, n, gelb)
+
+    var z7: [u8; 5] = "AUF \0"
+    var z7b: [u8; 7] = " PID \0\0"
+    var z7c: [u8; 7] = " ART \0\0"
+    var z7d: [u8; 7] = " PRG \0\0"
+    var z7e: [u8; 7] = " BAD \0\0"
+    let cur: u64 = sched.current(state)
+    n = kgsvc.pulse_text(state, p, 0, (&z7[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, cur)
+    n = kgsvc.pulse_text(state, p, n, (&z7b[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, sched.tget(state, cur, sched.T_PID))
+    n = kgsvc.pulse_text(state, p, n, (&z7c[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, sched.tget(state, cur, sched.T_KIND))
+    n = kgsvc.pulse_text(state, p, n, (&z7d[0]) as u64)
+    var pn: u64 = 0
+    while pn < 16 && pmon.name_at(state, cur, pn) != 0 {
+        if n < BOARD_COLUMNS - 1 {
+            kstate.set8(p + n, pmon.name_at(state, cur, pn) as u8)
+            n = n + 1
+        }
+        pn = pn + 1
+    }
+    n = kgsvc.pulse_text(state, p, n, (&z7e[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, proc.badentry_num())
+    kgwm.from_line(state, 6, p, n, gelb)
+
+    var z8: [u8; 6] = "KERN \0"
+    var z8a: [u8; 26] = " HAELT AN -- BITTE FOTO\0\0\0"
+    var z8b: [u8; 29] = " LAEUFT WEITER -- BITTE FOTO\0"
+    var z8c: [u8; 9] = "  NR \0\0\0\0"
+    n = kgsvc.pulse_text(state, p, 0, (&z8[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, ab_kern)
+    if ab_haelt != 0 {
+        n = kgsvc.pulse_text(state, p, n, (&z8a[0]) as u64)
+    } else {
+        n = kgsvc.pulse_text(state, p, n, (&z8b[0]) as u64)
+    }
+    n = kgsvc.pulse_text(state, p, n, (&z8c[0]) as u64)
+    n = kgsvc.pulse_num(state, p, n, ab_count)
+    kgwm.from_line(state, 7, p, n, gelb)
+
+    var z9: [u8; 7] = "SPUR  \0"
+    var z9k: [u8; 9] = "(keine) \0"
+    var z9l: [u8; 3] = "  \0"
+    n = kgsvc.pulse_text(state, p, 0, (&z9[0]) as u64)
+    if ab_spurn == 0 {
+        n = kgsvc.pulse_text(state, p, n, (&z9k[0]) as u64)
+    } else {
+        var si: u64 = 0
+        while si < ab_spurn && si < 4 {
+            n = kgsvc.pulse_hexn(state, p, n, ab_trace[si as usize], 8)
+            n = kgsvc.pulse_text(state, p, n, (&z9l[0]) as u64)
+            si = si + 1
+        }
+    }
+    kgwm.from_line(state, 8, p, n, gelb)
+
+    var za: [u8; 16] = "ANDERE KERNE:  \0"
+    var zb: [u8; 22] = " NMI, MASCHINE STEHT \0"
+    var zc: [u8; 18] = "keiner -- allein \0"
+    n = kgsvc.pulse_text(state, p, 0, (&za[0]) as u64)
+    if ab_stopp == 0 {
+        n = kgsvc.pulse_text(state, p, n, (&zc[0]) as u64)
+    } else {
+        n = kgsvc.pulse_num(state, p, n, ab_stopp)
+        n = kgsvc.pulse_text(state, p, n, (&zb[0]) as u64)
+    }
+    kgwm.from_line(state, 9, p, n, gelb)
+
+    fb.flush_rect(state, 0, 0, wmmeasure.measure_full_width(state),
+        wmmeasure.measure_height(state, kgbase.BOARD_LINES))
+    fb.band_open(state, false)
+}
+
+fn board_clear(state: u64) {
+    if !fb.ready(state) {
+        return
+    }
+    if board_inside != 0 {
+        return
+    }
+    board_inside = 1
+    board_paint = board_paint + 1
+    if ab_klinke != 0 {
+        crash_lines(state)
+    }
+    var tb: [u8; 64] = [0 as u8; 64]
+    let tp: u64 = (&tb[0]) as u64
+
+    var t8: [u8; 9] = "8 TICK  \0"
+    var t_i: [u8; 5] = "IRQ \0"
+    var t_m: [u8; 6] = " MAL \0"
+    var t_l: [u8; 7] = " LOOP \0"
+    var tn: u64 = 0
+    tn = kgsvc.pulse_text(state, tp, 0, (&t8[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_i[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgbase.board_irq)
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_m[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, board_paint)
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_l[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, board_loop)
+    var t_p: [u8; 6] = " PRE \0"
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_p[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kstate.get(state, kstate.PREEMPT))
+    var t_hz: [u8; 5] = " HZ \0"
+    let hz: u64 = kgwm.hz_takt(state)
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_hz[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, hz)
+    board_remember(8, tp, tn, wmmeasure.measure_light(state, board_loop))
+    board_line_say(state, tp, tn)
+
+    var t9: [u8; 10] = "9 CALIB  \0"
+    var k_l: [u8; 5] = "LSR \0"
+    var t_s: [u8; 6] = " PIT \0"
+    var k_v: [u8; 5] = " PM \0"
+    var t_a: [u8; 6] = " ABW \0"
+    var k_m: [u8; 5] = " FB \0"
+    var k_wb: [u8; 3] = "WB\0"
+    var k_wc: [u8; 3] = "WC\0"
+    var k_uc: [u8; 3] = "UC\0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t9[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&k_l[0]) as u64)
+    tn = kgsvc.pulse_hex(state, tp, tn, serial.lsr_roh())
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_s[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, time.khz(state) / 1000)
+    tn = kgsvc.pulse_text(state, tp, tn, (&k_v[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, hw.pm_tschz(state) / 1000000)
+    tn = kgsvc.pulse_text(state, tp, tn, (&t_a[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, hw.pm_abweichung(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&k_m[0]) as u64)
+    if fb.uncached(state) {
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_uc[0]) as u64)
+    } else if fb.wc(state) != 0 {
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_wc[0]) as u64)
+    } else {
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_wb[0]) as u64)
+    }
+    var kfarbe: u64 = wmmeasure.measure_red(state)
+    if hw.pm_abweichung(state) < 10 {
+        kfarbe = wmmeasure.measure_green(state)
+    }
+    board_remember(9, tp, tn, kfarbe)
+    board_line_say(state, tp, tn)
+
+    var t10: [u8; 10] = "10 BEAT  \0"
+    var h_h: [u8; 6] = "SCHL \0"
+    var h_t: [u8; 6] = " TOT \0"
+    var h_l: [u8; 6] = " LED \0"
+    var h_b: [u8; 8] = " BLINK \0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t10[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&h_h[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.beat_num())
+    tn = kgsvc.pulse_text(state, tp, tn, (&h_t[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, sched.dead_sleeps(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&h_l[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.leds_sent(state))
+    var h_v: [u8; 2] = "/\0"
+    tn = kgsvc.pulse_text(state, tp, tn, (&h_v[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.leds_try(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&h_v[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.leds_fail(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&h_b[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.beat_brightnum())
+    board_remember(10, tp, tn, wmmeasure.measure_light(state, kgwm.beat_num()))
+    board_line_say(state, tp, tn)
+
+    var t11: [u8; 10] = "11 USB   \0"
+    var u_d: [u8; 5] = "DEV \0"
+    var u_f: [u8; 7] = " FUND \0"
+    var u_h: [u8; 6] = " HUB \0"
+    var u_k: [u8; 6] = " KBD \0"
+    var u_t: [u8; 6] = " TAS \0"
+    var u_x: [u8; 7] = " FAIL \0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t11[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_d[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.count(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_f[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.fund_count(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_h[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.hubs(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_k[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.kbd_dev(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_t[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.hid_keys(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_x[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.fails(state))
+    board_remember(11, tp, tn, wmmeasure.measure_light(state, usb.fund_count(state)))
+    board_line_say(state, tp, tn)
+
+    var t12: [u8; 10] = "12 STAGE \0"
+    var s_st: [u8; 4] = "ST \0"
+    var s_mx: [u8; 6] = " MAX \0"
+    var s_rd: [u8; 6] = " RND \0"
+    var s_lp: [u8; 7] = " LOOP \0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t12[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&s_st[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.level_num())
+    tn = kgsvc.pulse_text(state, tp, tn, (&s_mx[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.level_max())
+    tn = kgsvc.pulse_text(state, tp, tn, (&s_rd[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.wm_runden())
+    tn = kgsvc.pulse_text(state, tp, tn, (&s_lp[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, board_loop)
+    var s_tb: [u8; 5] = " TB \0"
+    tn = kgsvc.pulse_text(state, tp, tn, (&s_tb[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.taskbar_state(state))
+    var ampel12: u64 = wmmeasure.measure_light(state, kgwm.wm_runden())
+    board_remember(12, tp, tn, ampel12)
+    board_line_say(state, tp, tn)
+
+    var t13: [u8; 10] = "13 IMAGE \0"
+    var a_p: [u8; 6] = " PDE \0"
+    var a_t: [u8; 6] = " PAT \0"
+    var a_k: [u8; 6] = " KCH \0"
+    let pde: u64 = fb.pde_roh(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t13[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&a_p[0]) as u64)
+    tn = kgsvc.pulse_hexn(state, tp, tn, pde & 0xFFFF, 4)
+    tn = kgsvc.pulse_text(state, tp, tn, (&a_t[0]) as u64)
+    tn = kgsvc.pulse_hexn(state, tp, tn, (fb.pat_roh(state) >> 32) & 0xFF, 2)
+    tn = kgsvc.pulse_text(state, tp, tn, (&a_k[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, fb.stripe_slots(state))
+    var afarbe: u64 = wmmeasure.measure_red(state)
+    if (pde & 0x1000) != 0 || (pde & 0x18) != 0 {
+        afarbe = wmmeasure.measure_green(state)
+    }
+    board_remember(13, tp, tn, afarbe)
+    board_line_say(state, tp, tn)
+
+    var t14: [u8; 10] = "14 PICK  \0"
+    var w_hc: [u8; 4] = "HC \0"
+    var w_vo: [u8; 2] = "/\0"
+    var w_pk: [u8; 4] = " P \0"
+    var w_ko: [u8; 2] = ",\0"
+    var w_rv: [u8; 6] = " RVR \0"
+    var w_rf: [u8; 6] = " RFL \0"
+    var w_mm: [u8; 6] = " MMU \0"
+    let nhc: u64 = xhci.count_hc(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t14[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&w_hc[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.choice(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&w_vo[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, nhc)
+    tn = kgsvc.pulse_text(state, tp, tn, (&w_pk[0]) as u64)
+    var hi: u64 = 0
+    while hi < nhc && hi < 4 {
+        if hi != 0 {
+            tn = kgsvc.pulse_text(state, tp, tn, (&w_ko[0]) as u64)
+        }
+        tn = kgsvc.pulse_num(state, tp, tn, usb.pkt_get(state, hi))
+        hi = hi + 1
+    }
+    tn = kgsvc.pulse_text(state, tp, tn, (&w_rv[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, xhci.reset_vorbelegt(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&w_rf[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, xhci.reset_fails(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&w_mm[0]) as u64)
+    tn = kgsvc.pulse_hexn(state, tp, tn, xhci.bar_pde(state) & 0xFFF, 3)
+    board_remember(14, tp, tn, wmmeasure.measure_light(state, usb.kbd_dev(state)))
+    board_line_say(state, tp, tn)
+
+    var t15: [u8; 10] = "15 STRIP \0"
+    var b_h: [u8; 3] = "H \0"
+    var b_k: [u8; 6] = " KOL \0"
+    var b_s: [u8; 5] = " SP \0"
+    var b_w: [u8; 5] = " BR \0"
+    let bh: u64 = fb.band(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t15[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&b_h[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, bh)
+    tn = kgsvc.pulse_text(state, tp, tn, (&b_k[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, wmmeasure.measure_col(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&b_s[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, BOARD_COLUMNS)
+    tn = kgsvc.pulse_text(state, tp, tn, (&b_w[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, wmmeasure.measure_full_width(state))
+    board_remember(15, tp, tn, wmmeasure.measure_light(state, bh))
+    board_line_say(state, tp, tn)
+
+    var t16: [u8; 8] = "16 ISR \0"
+    var i_m: [u8; 5] = "MAX \0"
+    var i_v: [u8; 8] = " TVERL \0"
+    var i_s: [u8; 8] = " SPAET \0"
+    let us: u64 = trap.isr_us_max()
+    tn = kgsvc.pulse_text(state, tp, 0, (&t16[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&i_m[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, us)
+    tn = kgsvc.pulse_text(state, tp, tn, (&i_v[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, trap.ticks_lost())
+    tn = kgsvc.pulse_text(state, tp, tn, (&i_s[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, trap.ticks_late())
+    var i_lm: [u8; 5] = " LM \0"
+    tn = kgsvc.pulse_text(state, tp, tn, (&i_lm[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, trap.ticks_lost_at() / 100)
+    var ifarbe: u64 = wmmeasure.measure_green(state)
+    if us > 5000 {
+        ifarbe = wmmeasure.measure_red(state)
+    }
+    board_remember(16, tp, tn, ifarbe)
+    board_line_say(state, tp, tn)
+
+    var t17: [u8; 10] = "17 BOARD \0"
+    var q_g: [u8; 5] = "GPE \0"
+    var q_s: [u8; 5] = " ST \0"
+    var q_i: [u8; 6] = " IVR \0"
+    var q_c: [u8; 6] = " CTL \0"
+    var q_p: [u8; 6] = " PMT \0"
+    let ivr: u64 = hw.ivrs_info(state)
+    let ctl: u64 = hw.iommu_ctrl(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t17[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_g[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, hw.gpe_abgeschaltet(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_s[0]) as u64)
+    tn = kgsvc.pulse_hex(state, tp, tn, hw.gpe_status(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_i[0]) as u64)
+    tn = kgsvc.pulse_hexn(state, tp, tn, ivr & 0xFFFF, 4)
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_c[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, ctl & 1)
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_p[0]) as u64)
+    tn = kgsvc.pulse_hexn(state, tp, tn, hw.pmtmr_port(state) & 0xFFFF, 4)
+    var bfarbe: u64 = wmmeasure.measure_green(state)
+    if (ctl & 1) != 0 {
+        bfarbe = wmmeasure.measure_red(state)
+    }
+    board_remember(17, tp, tn, bfarbe)
+    board_line_say(state, tp, tn)
+
+    var t18: [u8; 10] = "18 KEYS  \0"
+    var k_d: [u8; 3] = "D \0"
+    var k_b: [u8; 6] = " BER \0"
+    var k_a: [u8; 6] = " ARM \0"
+    var k_c: [u8; 5] = " CC \0"
+    var k_r: [u8; 6] = " RK  \0"
+    let kd: u64 = usb.kbd_dev(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t18[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&k_d[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kd)
+    var kfarb: u64 = wmmeasure.measure_red(state)
+    if kd != 0 {
+        let kdev: u64 = kd - 1
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_b[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_reps(state, kdev))
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_a[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_arms(state, kdev))
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_c[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_cc(state, kdev))
+        let rw: u64 = usb.dev_rohw(state, kdev)
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_r[0]) as u64)
+        tn = kgsvc.pulse_hexn(state, tp, tn, rw & 0xFF, 2)
+        tn = kgsvc.pulse_hexn(state, tp, tn, (rw >> 16) & 0xFF, 2)
+        tn = kgsvc.pulse_hexn(state, tp, tn, (rw >> 24) & 0xFF, 2)
+        tn = kgsvc.pulse_hexn(state, tp, tn, (rw >> 32) & 0xFF, 2)
+        var k_n: [u8; 5] = " N  \0"
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_n[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_rohn(state, kdev))
+        var k_w: [u8; 4] = " W \0"
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_w[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.wachen(state))
+        var k_nu: [u8; 6] = " NEU \0"
+        tn = kgsvc.pulse_text(state, tp, tn, (&k_nu[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.wiedern(state))
+        if usb.dev_reps(state, kdev) != 0 {
+            kfarb = wmmeasure.measure_green(state)
+        }
+    }
+    board_remember(18, tp, tn, kfarb)
+    board_line_say(state, tp, tn)
+
+    var t19: [u8; 8] = "19 UHR \0"
+    var u_r: [u8; 5] = "RTC \0"
+    var u_dp: [u8; 2] = ":\0"
+    var u_kr: [u8; 4] = " K \0"
+    var u_tz: [u8; 4] = " Z \0"
+    var u_dd: [u8; 4] = " D \0"
+    var u_pt: [u8; 2] = ".\0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t19[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_r[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, time.rtc_field(time.R_HOUR))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, time.rtc_field(time.R_MIN))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, time.rtc_field(time.R_SEC))
+    let ks: u64 = time.now_local(state) % 86400
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_kr[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, ks / 3600)
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, (ks % 3600) / 60)
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_dp[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, ks % 60)
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_tz[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, time.tz_min(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_dd[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, time.rtc_field(time.R_DAY))
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_pt[0]) as u64)
+    tn = kgsvc.pulse_two(state, tp, tn, time.rtc_field(time.R_MONTH))
+    var u_u: [u8; 4] = " U \0"
+    tn = kgsvc.pulse_text(state, tp, tn, (&u_u[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, time.rtc_utc(state))
+    var ufarb: u64 = wmmeasure.measure_red(state)
+    if (ks / 60) % 60 == time.rtc_field(time.R_MIN) {
+        ufarb = wmmeasure.measure_green(state)
+    }
+    board_remember(19, tp, tn, ufarb)
+    board_line_say(state, tp, tn)
+
+    var t24: [u8; 7] = "24 FB \0"
+    var f_x: [u8; 2] = "x\0"
+    var f_tf: [u8; 3] = " T\0"
+    var f_zl: [u8; 3] = " Z\0"
+    var f_t: [u8; 3] = " B\0"
+    var f_sk: [u8; 3] = " S\0"
+    var f_st: [u8; 3] = " R\0"
+    let lw: u64 = fb.width(state)
+    let lh: u64 = fb.height(state)
+    let pw: u64 = fb.panel_w(state)
+    let ph: u64 = fb.panel_h(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t24[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, lw)
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_x[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, lh)
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_tf[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, pw)
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_x[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, ph)
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_zl[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, fb.pitch(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_t[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, fb.bpp(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_sk[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, fb.uiscale(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&f_st[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgdisp.bnum(fb.stripe(state)))
+    var ffarb: u64 = wmmeasure.measure_green(state)
+    if lw != pw || lh != ph {
+        ffarb = wmmeasure.measure_red(state)
+    }
+    board_remember(24, tp, tn, ffarb)
+    board_line_say(state, tp, tn)
+
+    var t20: [u8; 10] = "20 ENDP  \0"
+    var e_k: [u8; 5] = "KBD \0"
+    var e_m: [u8; 6] = " MAU \0"
+    var e_e: [u8; 4] = "EP\0\0"
+    var e_f: [u8; 3] = " F\0"
+    var e_h: [u8; 3] = " H\0"
+    var e_hg: [u8; 6] = " HEI \0"
+    var e_op: [u8; 5] = " OP \0"
+    let ekd: u64 = usb.kbd_dev(state)
+    let emd: u64 = usb.mouse_dev(state)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t20[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_k[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_e[0]) as u64)
+    var ekst: u64 = 0
+    if ekd != 0 {
+        ekst = usb.dev_epstate(state, ekd - 1)
+    }
+    tn = kgsvc.pulse_num(state, tp, tn, ekst)
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_f[0]) as u64)
+    if ekd != 0 {
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_errs(state, ekd - 1))
+    } else {
+        tn = kgsvc.pulse_num(state, tp, tn, 0)
+    }
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_h[0]) as u64)
+    if ekd != 0 {
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_heal(state, ekd - 1))
+    } else {
+        tn = kgsvc.pulse_num(state, tp, tn, 0)
+    }
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_m[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_e[0]) as u64)
+    var emst: u64 = 0
+    if emd != 0 {
+        emst = usb.dev_epstate(state, emd - 1)
+    }
+    tn = kgsvc.pulse_num(state, tp, tn, emst)
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_f[0]) as u64)
+    if emd != 0 {
+        tn = kgsvc.pulse_num(state, tp, tn, usb.dev_errs(state, emd - 1))
+    } else {
+        tn = kgsvc.pulse_num(state, tp, tn, 0)
+    }
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_hg[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.heilungen(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&e_op[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, usb.without_space(state))
+    var efarb: u64 = wmmeasure.measure_red(state)
+    if ekst == 1 {
+        efarb = wmmeasure.measure_green(state)
+    }
+    board_remember(20, tp, tn, efarb)
+    board_line_say(state, tp, tn)
+
+    var t21: [u8; 10] = "21 FOUND \0"
+    var f_dp: [u8; 2] = ":\0"
+    var f_sp: [u8; 2] = " \0"
+    var f_a: [u8; 2] = "A\0"
+    var f_d: [u8; 2] = "D\0"
+    var f_c: [u8; 2] = "C\0"
+    var f_b: [u8; 2] = "B\0"
+    var f_n: [u8; 2] = "-\0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t21[0]) as u64)
+    var fi: u64 = 0
+    var fvoll: u64 = 0
+    while fi < usb.fund_count(state) && fi < 5 {
+        let fl: u64 = usb.fund_flags(state, fi)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.fund_port(state, fi))
+        tn = kgsvc.pulse_text(state, tp, tn, (&f_dp[0]) as u64)
+        if (fl & 1) != 0 {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_a[0]) as u64)
+        } else {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_n[0]) as u64)
+        }
+        if (fl & 2) != 0 {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_d[0]) as u64)
+        } else {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_n[0]) as u64)
+        }
+        if (fl & 4) != 0 {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_c[0]) as u64)
+        } else {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_n[0]) as u64)
+        }
+        if (fl & 8) != 0 {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_b[0]) as u64)
+            fvoll = fvoll + 1
+        } else {
+            tn = kgsvc.pulse_text(state, tp, tn, (&f_n[0]) as u64)
+        }
+        tn = kgsvc.pulse_text(state, tp, tn, (&f_sp[0]) as u64)
+        fi = fi + 1
+    }
+    if usb.fund_count(state) > 5 {
+        var f_pl: [u8; 2] = "+\0"
+        tn = kgsvc.pulse_text(state, tp, tn, (&f_pl[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, usb.fund_count(state) - 5)
+    }
+    board_remember(21, tp, tn, wmmeasure.measure_light(state, fvoll))
+    board_line_say(state, tp, tn)
+
+    var t22: [u8; 9] = "22 NET  \0"
+    var n_k: [u8; 3] = "K\0\0"
+    var n_b: [u8; 6] = " BDF \0"
+    var n_l: [u8; 4] = " L \0"
+    var n_a: [u8; 6] = " ABL \0"
+    var n_d: [u8; 2] = ":\0"
+    var n_i: [u8; 5] = " IP \0"
+    var n_p: [u8; 2] = ".\0"
+    let nk0: u64 = netdev.kind_on(state, 0)
+    tn = kgsvc.pulse_text(state, tp, 0, (&t22[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_k[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, nk0)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_b[0]) as u64)
+    tn = kgsvc.pulse_hexn(state, tp, tn, netdev.bdf_on(state, 0), 4)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_l[0]) as u64)
+    var lnk: u64 = 0
+    if netdev.link_up_on(state, 0) {
+        lnk = 1
+    }
+    tn = kgsvc.pulse_num(state, tp, tn, lnk)
+    let abl: u64 = netdev.unsupported_count(state)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_a[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, abl)
+    if abl != 0 {
+        tn = kgsvc.pulse_text(state, tp, tn, (&n_d[0]) as u64)
+        tn = kgsvc.pulse_hexn(state, tp, tn, netdev.unsupported_vendor(state, 0), 4)
+        tn = kgsvc.pulse_text(state, tp, tn, (&n_d[0]) as u64)
+        tn = kgsvc.pulse_hexn(state, tp, tn, netdev.unsupported_device(state, 0), 4)
+    }
+    let adr: u64 = inet.ip(state)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_i[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, (adr >> 24) & 255)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_p[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, (adr >> 16) & 255)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_p[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, (adr >> 8) & 255)
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_p[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, adr & 255)
+    var n_dh: [u8; 3] = " D\0"
+    let dst: u64 = inet.dhcp_get(0)
+    let dtx: u64 = inet.dhcp_get(1)
+    var dz: [u8; 2] = ".\0"
+    if dst == 1 {
+        dz[0] = 100 as u8
+        if dtx == 0 {
+            dz[0] = 120 as u8
+        }
+    }
+    if dst == 2 {
+        dz[0] = 111 as u8
+    }
+    if dst == 3 {
+        dz[0] = 114 as u8
+    }
+    if dst == 4 {
+        dz[0] = 65 as u8
+    }
+    if dst == 5 {
+        dz[0] = 116 as u8
+    }
+    if dst == 6 {
+        dz[0] = 110 as u8
+    }
+    tn = kgsvc.pulse_text(state, tp, tn, (&n_dh[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&dz[0]) as u64)
+    var nfarb: u64 = wmmeasure.measure_red(state)
+    if nk0 != 0 {
+        nfarb = wmmeasure.measure_light(state, lnk)
+    }
+    board_remember(22, tp, tn, nfarb)
+    board_line_say(state, tp, tn)
+
+    var t23: [u8; 12] = "23 SAFETY  \0"
+    var q_wa: [u8; 5] = "WA  \0"
+    var q_ks: [u8; 6] = " KS  \0"
+    var q_rw: [u8; 7] = " R3W  \0"
+    var q_rk: [u8; 7] = " R3K  \0"
+    var q_lg: [u8; 6] = " LG  \0"
+    tn = kgsvc.pulse_text(state, tp, 0, (&t23[0]) as u64)
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_wa[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, sched.guard_faults())
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_ks[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, kgwm.kstack_up(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_rw[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, sched.gs_error(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_rk[0]) as u64)
+    tn = kgsvc.pulse_num(state, tp, tn, sched.ring3_cores(state))
+    tn = kgsvc.pulse_text(state, tp, tn, (&q_lg[0]) as u64)
+    var lz: u64 = 0
+    var lb: u64 = 0
+    while lb < kgbase.BOARD_LINES {
+        if ((zu_lang >> lb) & 1) != 0 {
+            lz = lz + 1
+        }
+        lb = lb + 1
+    }
+    tn = kgsvc.pulse_num(state, tp, tn, lz)
+    if lz != 0 {
+        var q_lz: [u8; 4] = " Z \0"
+        tn = kgsvc.pulse_text(state, tp, tn, (&q_lz[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, long_line)
+        var q_ls: [u8; 3] = "  \0"
+        tn = kgsvc.pulse_text(state, tp, tn, (&q_ls[0]) as u64)
+        tn = kgsvc.pulse_num(state, tp, tn, lang_max)
+    }
+    var f23: u64 = wmmeasure.measure_green(state)
+    if sched.guard_faults() != 0 || sched.gs_error(state) != 0
+       || zu_lang != 0 {
+        f23 = wmmeasure.measure_red(state)
+    }
+    board_remember(23, tp, tn, f23)
+    board_line_say(state, tp, tn)
+    if board_serial != 0 {
+        sched.ring3_report(state)
+        wmterm.term_dump(state, wmterm.term_win(state))
+        wmterm.term_dump_all(state)
+    }
+
+    fb.band_open(state, true)
+    board_comp = wmoverlay.composites(state)
+    if board_background == 0 {
+        board_background = 1
+        wmmeasure.measure_reason(state, kgbase.BOARD_LINES, BOARD_COLUMNS)
+        fb.flush_rect(state, 0, 0, wmmeasure.measure_full_width(state),
+            wmmeasure.measure_height(state, kgbase.BOARD_LINES))
+    }
+    let cur_width: u64 = wmmeasure.measure_width(state, BOARD_COLUMNS)
+    let zh: u64 = wmmeasure.measure_row_h(state)
+    var z: u64 = 0
+    while z < kgbase.BOARD_LINES {
+        let n: u64 = board_len[z as usize]
+        if n != 0 && board_changed(z, n) {
+            wmmeasure.measure_row(state, z, (&board_txt[0]) as u64 + z * BOARD_SP,
+                n, board_fg[z as usize])
+            fb.flush_rect(state, wmmeasure.measure_row_x(state, z),
+                wmmeasure.measure_row_y(state, z), cur_width, zh)
+            board_remember_old(z, n)
+        }
+        z = z + 1
+    }
+    fb.band_open(state, false)
+    board_inside = 0
+}
+
+static mut board_old: [u8; 1152] = [0 as u8; 1152]
+
+static mut board_oldlen: [u64; 25] = [0 as u64; 25]
+
+static mut board_oldfg: [u64; 25] = [0 as u64; 25]
+
+static mut board_background: u64 = 0
+
+static mut board_comp: u64 = 0
+
+fn board_changed(z: u64, n: u64) -> bool {
+    if board_oldlen[z as usize] != n {
+        return true
+    }
+    if board_oldfg[z as usize] != board_fg[z as usize] {
+        return true
+    }
+    let a: u64 = (&board_txt[0]) as u64 + z * BOARD_SP
+    let b: u64 = (&board_old[0]) as u64 + z * BOARD_SP
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn board_remember_old(z: u64, n: u64) {
+    let a: u64 = (&board_txt[0]) as u64 + z * BOARD_SP
+    let b: u64 = (&board_old[0]) as u64 + z * BOARD_SP
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(b + i, kstate.get8(a + i) as u8)
+        i = i + 1
+    }
+    board_oldlen[z as usize] = n
+    board_oldfg[z as usize] = board_fg[z as usize]
+}
+
+fn stall_inputs(state: u64) -> u64 {
+    return kstate.get(state, kstate.KEYS) + ps2m.packets(state) + ps2m.clicks(state)
+}
+
+fn stall_tick(state: u64) {
+    frameprof.tick(state)
+    sysmon.tick(state)
+    let _s: bool = stall.check(state, stall_inputs(state), kgbase.wmrunden, wm.frames_total(state))
+    safe.tick(state, kgbase.wmrunden)
+}
+
+fn stall_spin(state: u64) {
+    let n: u64 = stall.spin_due(state, stall_inputs(state))
+    if n == 0 {
+        return
+    }
+    let end: u64 = kstate.get(state, kstate.TICKS) + n
+    var spun: u64 = 0
+    while kstate.get(state, kstate.TICKS) < end {
+        spun = spun + 1
+    }
+}
+
+fn board_tick(state: u64) {
+    if !kstate.mode_on(state, kstate.M_BOARD) {
+        return
+    }
+    kgbase.board_irq = kgbase.board_irq + 1
+    if usb.busy(state) != 0 {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    var faellig: bool = false
+    if now >= board_irqm + board_iv() {
+        board_irqm = now
+        faellig = true
+    }
+    if !faellig {
+        return
+    }
+    if now >= board_serial_mark + BOARD_SERIAL_MARKS + kgsvc.pulse_extra() {
+        board_serial_mark = now
+        board_serial = 1
+        header_serial = 1
+    }
+    kgsvc.ser_defer_on(state)
+    board_clear(state)
+    kgsvc.ser_defer_off(state)
+    board_serial = 0
+}
+
+fn board_boot(state: u64, level: u64) {
+    if !kstate.mode_on(state, kstate.M_BOARD) {
+        return
+    }
+    if !fb.ready(state) {
+        return
+    }
+    var s_b: [u8; 24] = "tafel: STANDBILD gemalt\0"
+    var lz: [u8; 25] = "-- noch keine Messung --\0"
+    var z: u64 = 0
+    while z < kgbase.BOARD_LINES {
+        if board_len[z as usize] == 0 {
+            board_remember(z, (&lz[0]) as u64, 24, wmmeasure.measure_yellow(state))
+        }
+        z = z + 1
+    }
+    var sb: [u8; 64] = [0 as u8; 64]
+    let sp: u64 = (&sb[0]) as u64
+    var t_st: [u8; 10] = "STANDBILD\0"
+    var t_su: [u8; 8] = " STUFE \0"
+    var sn: u64 = 0
+    sn = kgsvc.pulse_text(state, sp, 0, (&t_st[0]) as u64)
+    sn = kgsvc.pulse_text(state, sp, sn, (&t_su[0]) as u64)
+    sn = kgsvc.pulse_num(state, sp, sn, level)
+    board_remember(0, sp, sn, wmmeasure.measure_yellow(state))
+    board_serial = 1
+    board_clear(state)
+    board_serial = 0
+    serial.puts((&s_b[0]) as u64)
+    serial.nl()
+}
+
+fn header_paint(state: u64) {
+    if !fb.ready(state) {
+        return
+    }
+
+    if !kstate.mode_on(state, kstate.M_BOARD)
+        || kstate.mode_on(state, kstate.M_NOTAFEL) {
+        return
+    }
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    board_round = board_round + 1
+    if now != board_mark {
+        if now < board_mark + board_iv() {
+            return
+        }
+        board_mark = now
+        board_round = 0
+    } else {
+        if board_round < BOARD_ROUNDS {
+            return
+        }
+        board_round = 0
+    }
+    board_loop = board_loop + 1
+    var buf: [u8; 64] = [0 as u8; 64]
+    let b: u64 = (&buf[0]) as u64
+    var n: u64 = 0
+
+    var t_b: [u8; 4] = " B\0\0"
+    var t_t: [u8; 4] = " T\0\0"
+    n = kgsvc.tz_text(state, b, 0, version.text())
+    n = kgsvc.tz_text(state, b, n, (&t_b[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wmoverlay.composites(state))
+    n = kgsvc.tz_text(state, b, n, (&t_t[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, kstate.get(state, kstate.TICKS))
+    var t_sh: [u8; 5] = " sh\0\0"
+    n = kgsvc.tz_text(state, b, n, (&t_sh[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, board_sh)
+    var t_to: [u8; 5] = " TO\0\0"
+    var t_tp: [u8; 5] = " TP\0\0"
+    n = kgsvc.tz_text(state, b, n, (&t_to[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wmterm.term_outs(state))
+    n = kgsvc.tz_text(state, b, n, (&t_tp[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wmterm.term_puts_n(state))
+    board_remember(0, b, n, wmmeasure.measure_white(state))
+    header_line_say(state, b, n)
+
+    var t1: [u8; 12] = "1 USB  BER \0"
+    var t_w: [u8; 7] = " WAHL \0"
+    let ber: u64 = usb.reports(state)
+    n = kgsvc.tz_text(state, b, 0, (&t1[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, ber)
+    n = kgsvc.tz_text(state, b, n, (&t_w[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, usb.choice(state))
+    board_remember(1, b, n, wmmeasure.measure_light(state, ber))
+    header_line_say(state, b, n)
+
+    var t2: [u8; 9] = "2 QUEUE \0"
+    var t_ta: [u8; 3] = "T\0\0"
+    var t_ma: [u8; 4] = " M\0\0"
+    var t_ka: [u8; 4] = " K\0\0"
+    let e_ta: u64 = usb.hid_keys(state)
+    let e_ma: u64 = ps2m.packets(state)
+    n = kgsvc.tz_text(state, b, 0, (&t2[0]) as u64)
+    n = kgsvc.tz_text(state, b, n, (&t_ta[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, e_ta)
+    n = kgsvc.tz_text(state, b, n, (&t_ma[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, e_ma)
+    n = kgsvc.tz_text(state, b, n, (&t_ka[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, ps2m.clicks(state))
+    var t_d: [u8; 4] = " D\0\0"
+    n = kgsvc.tz_text(state, b, n, (&t_d[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wm.downs(state))
+    board_remember(2, b, n, wmmeasure.measure_light(state, e_ta + e_ma))
+    header_line_say(state, b, n)
+
+    var t3: [u8; 9] = "3 SERV  \0"
+    let s_ta: u64 = wm.keyin(state)
+    let s_ma: u64 = wm.moves_seen(state)
+    n = kgsvc.tz_text(state, b, 0, (&t3[0]) as u64)
+    n = kgsvc.tz_text(state, b, n, (&t_ta[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, s_ta)
+    n = kgsvc.tz_text(state, b, n, (&t_ma[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, s_ma)
+    board_remember(3, b, n, wmmeasure.measure_light(state, s_ta + s_ma))
+    header_line_say(state, b, n)
+
+    var t4: [u8; 10] = "4 RING   \0"
+    var t_v: [u8; 8] = "  VERL \0"
+    var t_ko: [u8; 7] = " KOAL \0"
+    let rein: u64 = wm.evpush(state)
+    let verl: u64 = wm.evdrops(state)
+    n = kgsvc.tz_text(state, b, 0, (&t4[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, rein)
+    n = kgsvc.tz_text(state, b, n, (&t_v[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, verl)
+    n = kgsvc.tz_text(state, b, n, (&t_ko[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wm.evkoal(state))
+    var f4: u64 = wmmeasure.measure_light(state, rein)
+    if verl != 0 {
+        f4 = wmmeasure.measure_red(state)
+    }
+    board_remember(4, b, n, f4)
+    header_line_say(state, b, n)
+
+    var t5: [u8; 10] = "5 APP    \0"
+    let raus: u64 = wm.evpop(state)
+    n = kgsvc.tz_text(state, b, 0, (&t5[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, raus)
+    board_remember(5, b, n, wmmeasure.measure_light(state, raus))
+    header_line_say(state, b, n)
+
+    var t6: [u8; 10] = "6 CURSOR \0"
+    var t_x: [u8; 3] = "X\0\0"
+    var t_y: [u8; 4] = " Y\0\0"
+    n = kgsvc.tz_text(state, b, 0, (&t6[0]) as u64)
+    n = kgsvc.tz_text(state, b, n, (&t_x[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wmcursor.curx(state))
+    n = kgsvc.tz_text(state, b, n, (&t_y[0]) as u64)
+    n = kgsvc.pulse_num(state, b, n, wmcursor.cury(state))
+    board_remember(6, b, n, wmmeasure.measure_light(state, s_ma))
+    header_line_say(state, b, n)
+
+    var t7: [u8; 10] = "7 PANEL  \0"
+    var t_id: [u8; 4] = "id\0\0"
+    var t_yy: [u8; 4] = " y\0\0"
+    var t_ml: [u8; 6] = " MAL \0"
+    var t_fl: [u8; 4] = " fl\0"
+    let tb: u64 = wmbase.panel_win(state)
+    n = kgsvc.tz_text(state, b, 0, (&t7[0]) as u64)
+    if tb >= wm.MAX_WIN {
+        var t_kein: [u8; 5] = "KEIN\0"
+        n = kgsvc.tz_text(state, b, n, (&t_kein[0]) as u64)
+        board_remember(7, b, n, wmmeasure.measure_red(state))
+    header_line_say(state, b, n)
+    } else {
+        let draw: u64 = wm.win_paints(state, tb)
+        n = kgsvc.tz_text(state, b, n, (&t_id[0]) as u64)
+        n = kgsvc.pulse_num(state, b, n, wm.win_id(state, tb))
+        n = kgsvc.tz_text(state, b, n, (&t_yy[0]) as u64)
+        n = kgsvc.pulse_num(state, b, n, wmbase.win_y(state, tb) as u64)
+        n = kgsvc.tz_text(state, b, n, (&t_ml[0]) as u64)
+        n = kgsvc.pulse_num(state, b, n, draw)
+        n = kgsvc.tz_text(state, b, n, (&t_fl[0]) as u64)
+        n = kgsvc.pulse_num(state, b, n, wm.win_flags(state, tb))
+        var t_zu: [u8; 5] = " ZU \0"
+        let bo: u64 = wmbase.win_owner(state, tb)
+        n = kgsvc.tz_text(state, b, n, (&t_zu[0]) as u64)
+        n = kgsvc.pulse_num(state, b, n, sched.tget(state, bo, sched.T_STATE))
+        var l_tk: [u8; 5] = " TK \0"
+        n = kgsvc.pulse_text(state, b, n, (&l_tk[0]) as u64)
+        let tk: u64 = wmchrome.title_clipped()
+        n = kgsvc.pulse_num(state, b, n, tk)
+        var f7: u64 = wmmeasure.measure_light(state, draw)
+        if tk != 0 {
+            f7 = wmmeasure.measure_red(state)
+        }
+        board_remember(7, b, n, f7)
+        header_line_say(state, b, n)
+    }
+    board_clear(state)
+    board_serial = 0
+    header_serial = 0
+}
+
+fn input_pulse(state: u64, tw: u64, neustarts: u64) {
+    kgwm.sub(24)
+    usb.probe(state)
+    kgwm.sub(25)
+    var buf: [u8; 200] = [0 as u8; 200]
+    var n: u64 = 0
+    var m_ber: [u8; 10] = "eingabe: \0"
+    var m_b: [u8; 5] = "ber=\0"
+    var m_i: [u8; 6] = " irq=\0"
+    var m_e: [u8; 5] = " ev=\0"
+    var m_s: [u8; 6] = " sts=\0"
+    var m_n: [u8; 7] = " iman=\0"
+    var m_mk: [u8; 5] = " mk=\0"
+    var m_if: [u8; 5] = " if=\0"
+    var m_t: [u8; 5] = " ta=\0"
+    var m_l: [u8; 5] = " lo=\0"
+    var m_w: [u8; 6] = " bew=\0"
+    var m_p: [u8; 5] = " pk=\0"
+    var m_x: [u8; 5] = " xy=\0"
+    var m_k: [u8; 2] = ",\0"
+    var m_m: [u8; 5] = " wm=\0"
+    var m_c: [u8; 5] = " kl=\0"
+    var m_sh: [u8; 5] = " sh=\0"
+    var m_select: [u8; 7] = " wahl=\0"
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, version.text())
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_select[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.choice(state))
+    kstate.set8((&buf[0]) as u64 + n, 32)
+    n = n + 1
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_ber[0]) as u64)
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_b[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.reports(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_i[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, xhci.irqs(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_e[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, xhci.events(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_s[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, xhci.usbsts(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_n[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, xhci.iman(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_mk[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, kstate.get(state, kstate.TICKS))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_if[0]) as u64)
+    let fl: u64 = asm("pushfq\npop rax", out("rax"))
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, (fl >> 9) & 1)
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_t[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.hid_keys(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_l[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.hid_los(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_w[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.hid_bew(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_p[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, ps2m.packets(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_x[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, ps2m.x(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_k[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, ps2m.y(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_m[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, wm.moves_seen(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_c[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, wm.downs(state))
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_sh[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, neustarts)
+    var m_sc: [u8; 5] = " sc=\0"
+    var m_sx: [u8; 5] = " sx=\0"
+    var m_sj: [u8; 5] = " sj=\0"
+    var m_dx: [u8; 5] = " dx=\0"
+    var m_rp: [u8; 5] = " rp=\0"
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_sc[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.service_cpus())
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_sx[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.service_skips())
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_sj[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.service_seq_jumps())
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_dx[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, xhci.drain_overlaps())
+    n = kgsvc.pulse_text(state, (&buf[0]) as u64, n, (&m_rp[0]) as u64)
+    n = kgsvc.pulse_num(state, (&buf[0]) as u64, n, usb.ring_peak_get())
+    kstate.set8((&buf[0]) as u64 + n, 10)
+    n = n + 1
+    if tw < wm.MAX_WIN && !kstate.mode_on(state, kstate.M_NOPULS) {
+        let _w: u64 = wmtermio.term_write(state, tw, (&buf[0]) as u64, n)
+    }
+    let pz: u64 = serial.line_at(sched.hier(state))
+    wmsay.wins_say(state)
+    ohci.pulse_say(state)
+    if n > 0 {
+        header_set(state, (&buf[0]) as u64, n - 1)
+    }
+    kstate.set8((&buf[0]) as u64 + n - 1, 0)
+    serial.puts((&buf[0]) as u64)
+    serial.nl()
+    serial.line_clear(pz)
+    kstate.set8((&buf[0]) as u64 + n - 1, 10)
+}
+
+fn wmplug_bilanz(state: u64) {
+    if !wmplug.ready(state) {
+        return
+    }
+    var s_b: [u8; 16] = "wmplug: bilanz  "
+    var s_p: [u8; 9] = "  plugs= "
+    var s_i: [u8; 8] = "  evin= "
+    var s_o: [u8; 9] = "  evout= "
+    var s_k: [u8; 10] = "  kicks=  "
+    var s_d: [u8; 9] = "  deny=  "
+    var s_t: [u8; 12] = "  plugkeys= "
+    serial.puts((&s_b[0]) as u64)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(wmplug.plugs(state))
+    serial.puts((&s_i[0]) as u64)
+    serial.dec(wmplug.events_in(state))
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(wmplug.events_out(state))
+    serial.puts((&s_k[0]) as u64)
+    serial.dec(wmplug.kicks(state))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(wmplug.denials(state))
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(tiling.plugkeys(state))
+    serial.nl()
+}
+
+fn kern_pairs(state: u64, f: u64, px: u64) -> u64 {
+    var n: u64 = 0
+    var a: u64 = 0x20
+    while a <= 0x7E {
+        var b: u64 = 0x20
+        while b <= 0x7E {
+            if ttf.kern26(state, f, ttf.glyph_of(state, f, a),
+                ttf.glyph_of(state, f, b), px) != 0 {
+                n = n + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    return n
+}
+
+fn grace_ready(state: u64) -> u64 {
+    var s_gf: [u8; 18] = "gui: grace font=\0\0"
+    var s_gfs: [u8; 8] = "  fs=\0\0\0"
+    if ttf.fonts(state) > 0 {
+        wig.race_ready(state, 0)
+        return 0
+    }
+    let arena: u64 = mem.frame_run(state, kgbase.WM_ARENA_FRAMES)
+    if arena == 0
+        || !ttf.init(state, arena, kgbase.WM_ARENA_FRAMES * mem.FRAME_SIZE) {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        var quelle: bool = false
+        if bootmod.ready(state) {
+            blk.ram_init(state, bootmod.base(state), bootmod.blocks(state))
+            quelle = true
+        } else {
+            if blk.present(state) {
+                blk.use_ata(state, kutil.root_blocks(state))
+                quelle = true
+            }
+        }
+        if quelle {
+            let m: bool = fs.mount(state)
+            serial.puts((&s_gfs[0]) as u64)
+            serial.dec(kutil.yes(m))
+        }
+    }
+    var p_sans: [u8; 15] = "/lib/sans.ttf\0\0"
+    let f: u64 = load_font(state, (&p_sans[0]) as u64)
+    serial.puts((&s_gf[0]) as u64)
+    serial.dec(f)
+    serial.nl()
+    if f >= ttf.MAX_FONTS {
+        return 0xFFFFFFFFFFFFFFFF
+    }
+    wig.race_ready(state, f)
+    return f
+}
+
+fn grace_soll(state: u64, index: u64) -> u64 {
+    return wig.race_soll(state, index)
+}
+
+fn grace_core(state: u64, index: u64, runden: u64, soll: u64) -> u64 {
+    return wig.race_core(state, index, runden, soll)
+}
+
+fn grace_cold(state: u64) {
+    ttf.cache_clear(state)
+}
+
+fn load_font(state: u64, cur_path: u64) -> u64 {
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return ttf.MAX_FONTS
+    }
+    let ino: u64 = fs.path(state, cur_path)
+    if ino == 0 {
+        return ttf.MAX_FONTS
+    }
+    let n: u64 = fs.inode_size(state, ino)
+    if n < 12 || n > 1048576 {
+        return ttf.MAX_FONTS
+    }
+    let frame: u64 = (n + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
+    let buf: u64 = mem.frame_run(state, frame)
+    if buf == 0 {
+        return ttf.MAX_FONTS
+    }
+    var off: u64 = 0
+    while off < n {
+        var c: u64 = n - off
+        if c > 4096 {
+            c = 4096
+        }
+        let got: u64 = fs.read_at(state, ino, off, buf + off, c)
+        if got == 0 {
+            off = n
+        } else {
+            off = off + got
+        }
+    }
+    return ttf.load_font(state, buf, n)
+}
+
+fn glyph_sum(state: u64, slot: u64) -> u64 {
+    var acc: u64 = 2166136261
+    var i: u64 = 0
+    let n: u64 = ttf.g_w(state, slot) * ttf.g_h(state, slot)
+    while i < n {
+        let a: u64 = ttf.g_pixel(state, slot, i % ttf.g_w(state, slot),
+            i / ttf.g_w(state, slot))
+        acc = ((acc ^ a) *% 16777619) & 0xFFFFFFFF
+        i = i + 1
+    }
+    return acc
+}
+
+fn wmplug_stage(state: u64) {
+    if kstate.mode_on(state, kstate.M_PLUGTEST) {
+        wmplug.selftest(state)
+        if !kstate.mode_on(state, kstate.M_WMPLUG)
+            || kstate.mode_on(state, kstate.M_PLUGAUS) {
+            wmplug.set_ready(state, false)
+        }
+    }
+    if kstate.mode_on(state, kstate.M_PLUGFRIST) {
+        wmplug.set_timeout(state, 3)
+    }
+    var s_p: [u8; 9] = "wmplug: \0"
+    var s_a: [u8; 5] = "abi=\0"
+    var s_s: [u8; 9] = "  tafel=\0"
+    var s_f: [u8; 9] = "  frist=\0"
+    var s_z: [u8; 4] = " zu\0"
+    var s_o: [u8; 7] = " offen\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(wmplug.WMP_ABI)
+    serial.puts((&s_s[0]) as u64)
+    if wmplug.ready(state) {
+        serial.puts((&s_o[0]) as u64)
+    } else {
+        serial.puts((&s_z[0]) as u64)
+    }
+    serial.puts((&s_f[0]) as u64)
+    serial.dec(wmplug.timeout(state))
+    serial.nl()
+}

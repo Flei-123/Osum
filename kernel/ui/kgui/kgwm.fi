@@ -1,0 +1,983 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.x86_64.apic
+import block.blk
+import gfx.fb
+import gfx.gfx
+import lib.kstate
+import lib.kutil
+import mm.mem
+import net.netdev
+import net.netsvc
+import sched.proc
+import drv.hid.ps2m
+import sched.sched
+import serial
+import ui.shot
+import sched.time
+import ipc.tip
+import gfx.ttf
+import usb.usb
+import fs.vfs
+import drv.gpu.vgpu
+import gfx.vmode
+import drv.gpu.vmsvga
+import block.wechsel
+import ui.wm
+import ui.wm.wmbase
+import ui.wm.wmcompose
+import ui.wm.wmcore
+import ui.wm.wmdraw
+import ui.wm.wmgeom
+import ui.wm.wmlayout
+import ui.wm.wmmeasure
+import ui.wm.wmshadow
+import drv.usb.xhci
+import ui.kgui.kgbase
+import ui.kgui.kgdisp
+
+const P_FB: u64 = 13
+
+const K10_RUNDEN: u64 = 20
+
+fn graphics(state: u64, mbi: u64) {
+    var s_none: [u8; 24] = "fb: kein Rahmenpuffer\0\0\0"
+    var s_geo: [u8; 5] = "fb: \0"
+    var s_x: [u8; 2] = "x\0"
+    var s_bpp: [u8; 4] = "x32\0"
+    var s_pitch: [u8; 9] = "  pitch=\0"
+    var s_src: [u8; 7] = "  src=\0"
+    var s_mb: [u8; 3] = "mb\0"
+    var s_vbe: [u8; 4] = "vbe\0"
+    var s_phys: [u8; 8] = "  phys=\0"
+    var s_win: [u8; 7] = "  win=\0"
+    var s_huge: [u8; 8] = "  huge=\0"
+    var s_cols: [u8; 8] = "  cols=\0"
+    var s_rows: [u8; 8] = "  rows=\0"
+    var s_back: [u8; 8] = "  back=\0"
+    var s_none2: [u8; 5] = "none\0"
+    var s_uc: [u8; 6] = "  uc=\0"
+    var s_wc: [u8; 6] = "  wc=\0"
+    var s_st: [u8; 14] = "fb: selftest \0"
+    var s_of: [u8; 4] = " / \0"
+    var s_on: [u8; 31] = "fb: console mirrored to screen\0"
+
+    if !fb.want(state, fb.M_GFX) {
+        return
+    }
+    var w: u64 = fb.WIDTH_STD
+    var h: u64 = fb.HEIGHT_STD
+    if fb.want(state, fb.M_BIG) {
+        w = fb.WIDTH_BIG
+        h = fb.HEIGHT_BIG
+    }
+
+    var size_source: u64 = 0
+    if fb.want(state, fb.M_RES) && fb.res_w(state) != 0 {
+        w = fb.res_w(state)
+        h = fb.res_h(state)
+        size_source = 1
+    } else {
+        let nat: u64 = vmode.native(state)
+        if nat != 0 {
+            w = nat >> 16
+            h = nat & 0xFFFF
+            size_source = 2
+        }
+    }
+
+    if kstate.mode_on(state, kstate.M_VGPUEXT) && !kstate.mode_on(state, kstate.M_NOVGPU) && size_source != 1 {
+        let pd: u64 = vgpu.probe_desktop(state)
+        if pd != 0 {
+            w = pd >> 16
+            h = pd & 0xFFFF
+            size_source = 3
+            var s_pd: [u8; 18] = "fb: heads desk=\0\0\0"
+            serial.puts((&s_pd[0]) as u64)
+            serial.dec(w)
+            serial.put(120)
+            serial.dec(h)
+            serial.nl()
+        }
+    }
+    var s_nat: [u8; 10] = "fb: nat=\0\0"
+    var s_natx: [u8; 2] = "x\0"
+    var s_why: [u8; 8] = "  why=\0\0"
+    serial.puts((&s_nat[0]) as u64)
+    serial.dec(vmode.edid_native_w(state))
+    serial.puts((&s_natx[0]) as u64)
+    serial.dec(vmode.edid_native_h(state))
+    serial.puts((&s_why[0]) as u64)
+    serial.dec(vmode.edid_why(state))
+    serial.nl()
+    if (mbi == 0 || (kstate.get32(mbi) & 0x1000) == 0) && !kstate.mode_on(state, kstate.M_NOBOOTFIT) {
+        let vram_b: u64 = vmode.boot_vram()
+        if vram_b != 0 {
+            let fit: u64 = vmode.boot_fit(w, h, vram_b)
+            if fit != ((w << 16) | h) {
+                var s_fit: [u8; 9] = "fb: fit \0"
+                var s_vr: [u8; 7] = " vram=\0"
+                w = fit >> 16
+                h = fit & 0xFFFF
+                serial.puts((&s_fit[0]) as u64)
+                serial.dec(w)
+                serial.put(120)
+                serial.dec(h)
+                serial.puts((&s_vr[0]) as u64)
+                serial.dec(vram_b / 1024)
+                serial.nl()
+            }
+        }
+    }
+    var back: u64 = 0
+    var back_bytes: u64 = 0
+    var shadow: u64 = 0
+    var fb_ok: bool = false
+    var s_retry: [u8; 11] = "fb: retry \0"
+    while !fb_ok {
+
+        var mbi_use: u64 = mbi
+        if mbi == 0 || (kstate.get32(mbi) & 0x1000) == 0 {
+            let m3: u64 = vmsvga.boot_mbi(state, w, h)
+            if m3 != 0 {
+                mbi_use = m3
+            }
+        }
+        back = 0
+        back_bytes = 0
+        shadow = 0
+        if !fb.want(state, fb.M_NODBL) {
+            var noetig: u64 = fb.need_bytes(mbi_use, w, h)
+            if noetig == 0 {
+                noetig = w * h * 4
+            }
+            let frame: u64 = (noetig + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE + 8
+            back = mem.frame_run(state, frame)
+            if back != 0 {
+                back_bytes = frame * mem.FRAME_SIZE
+
+                shadow = mem.frame_run(state, frame)
+            }
+        }
+        if fb.init(state, mbi_use, w, h, back, back_bytes, fb.want(state, fb.M_UC)) {
+            fb_ok = true
+        } else {
+            if shadow != 0 {
+                mem.frame_free_run(state, shadow, back_bytes / mem.FRAME_SIZE)
+            }
+            if back != 0 {
+                mem.frame_free_run(state, back, back_bytes / mem.FRAME_SIZE)
+            }
+            var nx: u64 = vmode.boot_step(w, h)
+            if kstate.mode_on(state, kstate.M_NOBOOTRETRY) {
+                nx = 0
+            }
+            if nx == 0 {
+                serial.puts((&s_none[0]) as u64)
+                serial.nl()
+                return
+            }
+            w = nx >> 16
+            h = nx & 0xFFFF
+            serial.puts((&s_retry[0]) as u64)
+            serial.dec(w)
+            serial.put(120)
+            serial.dec(h)
+            serial.nl()
+        }
+    }
+    if shadow != 0 {
+        fb.set_shadow(state, shadow, back_bytes)
+    }
+    if fb.want(state, fb.M_NOCUR) {
+        fb.set_cursor(state, false)
+    }
+
+    if !kstate.mode_on(state, kstate.M_NOVGPU) {
+        if vgpu.init(state) {
+            fb.set_vgpu(state, true)
+        }
+    }
+
+    if !fb.on_vgpu(state) && !kstate.mode_on(state, kstate.M_NOVMSVGA) {
+        let _v: bool = vmsvga.init(state)
+    }
+    vgpu.say(state)
+    vmsvga.say(state)
+
+    shot.init(state)
+
+    tip.init(state)
+
+    if fb.res_w(state) == 0 {
+        let ds: u64 = vmode.dpi_scale(state, fb.width(state))
+        if ds != 0 {
+            let _sc: bool = fb.set_uiscale(state, ds)
+        } else if vgpu.usable(state) && vgpu.head_edid_ok(state, 0) {
+
+            let vs: u64 = (vgpu.head_scale(state, 0) + 50) / 100
+            if vs >= 2 && vs <= 4 {
+                let _sv: bool = fb.set_uiscale(state, vs)
+            }
+        }
+    }
+
+    let uw: u64 = kstate.get(state, kstate.UISCALE_WUNSCH)
+    if uw >= 1 && uw <= 4 {
+        let _sw: bool = fb.set_uiscale(state, uw)
+    }
+
+    serial.puts((&s_geo[0]) as u64)
+    serial.dec(fb.width(state))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(fb.height(state))
+    serial.puts((&s_bpp[0]) as u64)
+    serial.puts((&s_pitch[0]) as u64)
+    serial.dec(fb.pitch(state))
+    serial.puts((&s_src[0]) as u64)
+    if fb.source(state) == fb.SRC_MB {
+        serial.puts((&s_mb[0]) as u64)
+    } else {
+        serial.puts((&s_vbe[0]) as u64)
+    }
+    serial.puts((&s_phys[0]) as u64)
+    serial.hex(fb.phys(state))
+    serial.puts((&s_win[0]) as u64)
+    serial.hex(fb.addr(state))
+    serial.puts((&s_huge[0]) as u64)
+    serial.dec(fb.huges(state))
+    serial.puts((&s_cols[0]) as u64)
+    serial.dec(fb.cols(state))
+    serial.puts((&s_rows[0]) as u64)
+    serial.dec(fb.rows(state))
+    serial.puts((&s_back[0]) as u64)
+    if fb.back(state) == 0 {
+        serial.puts((&s_none2[0]) as u64)
+    } else {
+        serial.hex(fb.back(state))
+    }
+    serial.puts((&s_uc[0]) as u64)
+    serial.dec(kgdisp.bnum(fb.uncached(state)))
+    serial.puts((&s_wc[0]) as u64)
+    serial.dec(fb.wc(state))
+    serial.nl()
+    var s_ord: [u8; 17] = "fb: order panel=\0"
+    var s_swz: [u8; 7] = "  swz=\0"
+    serial.puts((&s_ord[0]) as u64)
+    serial.dec(fb.panel_order(state))
+    serial.puts((&s_swz[0]) as u64)
+    serial.dec(kgdisp.bnum(fb.swizzled(state)))
+    serial.nl()
+    var s_sc: [u8; 13] = "fb: skala x\0\0"
+    var s_src2: [u8; 10] = "  quelle=\0"
+    var s_str: [u8; 12] = "  streifen=\0"
+    var s_mm: [u8; 7] = "  mm=\0\0"
+    serial.puts((&s_sc[0]) as u64)
+    serial.dec(fb.uiscale(state))
+    serial.puts((&s_src2[0]) as u64)
+    serial.dec(size_source)
+    serial.puts((&s_str[0]) as u64)
+    serial.dec(kgdisp.bnum(fb.stripe(state)))
+    serial.puts((&s_mm[0]) as u64)
+    serial.dec(vmode.edid_mm_w(state))
+    serial.nl()
+
+    let n: u64 = fb.selftest(state)
+    serial.puts((&s_st[0]) as u64)
+    serial.dec(n)
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(fb.selftest_max())
+    var s_fbf: [u8; 11] = "  failed=\0\0"
+    serial.puts((&s_fbf[0]) as u64)
+    serial.hex(fb.failbits(state))
+    serial.nl()
+
+    gfx_bench(state, back)
+    kgdisp.paint_bench(state)
+    kgdisp.durchsatz(state)
+    kgdisp.fbperf(state, back)
+
+    kgdisp.vmode_stage(state)
+
+    if kstate.mode_on(state, kstate.M_BOARD)
+        && !kstate.mode_on(state, kstate.M_NOTAFEL) {
+        let cur_height: u64 = wmmeasure.measure_height(state, kgbase.BOARD_LINES)
+        let gesetzt: bool = fb.set_band(state, cur_height)
+        var s_bd: [u8; 12] = "fb: band=\0\0\0"
+        var s_bk: [u8; 7] = "  kol=\0"
+        serial.puts((&s_bd[0]) as u64)
+        serial.dec(fb.band(state))
+        serial.puts((&s_bk[0]) as u64)
+        serial.dec(wmmeasure.measure_col(state))
+        serial.put(32 as u8)
+        serial.dec(kgdisp.bnum(gesetzt))
+        serial.nl()
+    }
+
+    fb.clear(state, 0)
+    fb.home(state)
+    fb.set_echo(state, true)
+    serial.puts((&s_on[0]) as u64)
+    serial.nl()
+}
+
+fn gfx_bench(state: u64, back: u64) {
+    var s_b1: [u8; 26] = "        fbbench: direct  \0"
+    var s_b2: [u8; 26] = "        fbbench: buffered\0"
+    var s_fill: [u8; 8] = "  fill=\0"
+    var s_scr: [u8; 10] = "  scroll=\0"
+    var s_fl: [u8; 9] = "  flush=\0"
+    var s_ln: [u8; 9] = "  line=\0\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_nb: [u8; 30] = "        fbbench: no time base\0"
+
+    if apic.tsc_hz(state) == 0 {
+        serial.puts((&s_nb[0]) as u64)
+        serial.nl()
+        return
+    }
+    let color: u64 = fb.rgb(state, 0x20, 0x30, 0x40)
+
+    fb.set_back(state, 0)
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < kgbase.GFX_RUNDEN {
+        fb.clear(state, color)
+        i = i + 1
+    }
+    let d_fill: u64 = kgdisp.us_of(state, apic.tsc() - t) / kgbase.GFX_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < kgbase.GFX_RUNDEN {
+        fb.scroll(state)
+        i = i + 1
+    }
+    let d_scroll: u64 = kgdisp.us_of(state, apic.tsc() - t) / kgbase.GFX_RUNDEN
+    let d_line: u64 = kgdisp.bench_line(state)
+    serial.puts((&s_b1[0]) as u64)
+    serial.puts((&s_fill[0]) as u64)
+    serial.dec(d_fill)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_scr[0]) as u64)
+    serial.dec(d_scroll)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_ln[0]) as u64)
+    serial.dec(d_line)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
+
+    if back == 0 {
+        fb.set_back(state, 0)
+        return
+    }
+
+    fb.set_back(state, back)
+    t = apic.tsc()
+    i = 0
+    while i < kgbase.GFX_RUNDEN {
+        fb.clear(state, color)
+        i = i + 1
+    }
+    let b_fill: u64 = kgdisp.us_of(state, apic.tsc() - t) / kgbase.GFX_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < kgbase.GFX_RUNDEN {
+        fb.scroll(state)
+        i = i + 1
+    }
+    let b_scroll: u64 = kgdisp.us_of(state, apic.tsc() - t) / kgbase.GFX_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < kgbase.GFX_RUNDEN {
+        fb.dirty_all(state)
+        fb.flush(state)
+        i = i + 1
+    }
+    let b_flush: u64 = kgdisp.us_of(state, apic.tsc() - t) / kgbase.GFX_RUNDEN
+    let b_line: u64 = kgdisp.bench_line(state)
+    serial.puts((&s_b2[0]) as u64)
+    serial.puts((&s_fill[0]) as u64)
+    serial.dec(b_fill)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_scr[0]) as u64)
+    serial.dec(b_scroll)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_fl[0]) as u64)
+    serial.dec(b_flush)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_ln[0]) as u64)
+    serial.dec(b_line)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
+}
+
+fn gfx_user(state: u64) {
+    var s_run: [u8; 30] = "fb: ring 3 paints, mirror off\0"
+    var s_exit: [u8; 18] = "fb: ring 3 exit=\0\0"
+
+    serial.puts((&s_run[0]) as u64)
+    serial.nl()
+    fb.set_echo(state, false)
+    fb.set_cursor(state, false)
+    fb.clear(state, 0)
+    fb.dirty_all(state)
+    fb.flush(state)
+    let arg: u64 = (fb.width(state) << 16) | fb.height(state)
+    let t: u64 = proc.create(state, P_FB, arg, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+}
+
+fn gfx_hold(state: u64) {
+    var s_pat: [u8; 64] = [0 as u8; 64]
+    let _pk: u64 = kgdisp.testimage_header((&s_pat[0]) as u64)
+    var s_pat2: [u8; 26] = "abcdefghijklm ABCDEFGHIJK\0"
+    var s_hold: [u8; 10] = "fb: hold\0\0"
+    var s_go: [u8; 10] = "fb: go\0\0\0\0"
+
+    if fb.ready(state) {
+        if fb.want(state, fb.M_USER) {
+            gfx_user(state)
+        }
+        kgdisp.display_hold(state)
+        if fb.want(state, fb.M_PATTERN) {
+            kgdisp.pattern(state, (&s_pat[0]) as u64, (&s_pat2[0]) as u64)
+        }
+        fb.canon_probe(state)
+        kgdisp.power_screen(state)
+        fb.flush(state)
+
+        gfx.frame_done(state)
+    }
+    if !fb.want(state, fb.M_HOLD) {
+        return
+    }
+    serial.puts((&s_hold[0]) as u64)
+    serial.nl()
+    if kstate.mode_on(state, kstate.M_VGPUHW) {
+        kgdisp.vgpuhw_run(state)
+    }
+    if kstate.mode_on(state, kstate.M_VMSVGAHW) {
+        kgdisp.vmsvga_run(state)
+    }
+    let hz: u64 = apic.tsc_hz(state)
+    if hz != 0 {
+        let bis: u64 = apic.tsc() + hz * 4
+        while apic.tsc() < bis {
+            usb.hotplug_work(state)
+            if netdev.late_usb(state) {
+                netsvc.stage(state)
+            }
+            wechsel_schritt(state)
+        }
+    }
+    serial.puts((&s_go[0]) as u64)
+    serial.nl()
+}
+
+fn close_say(state: u64) {
+    var s_z: [u8; 12] = "zumachen n=\0"
+    var s_w: [u8; 4] = " w=\0"
+    var s_c: [u8; 4] = " c=\0"
+    serial.puts((&s_z[0]) as u64)
+    serial.dec(kgbase.close_done)
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(kgbase.close_window)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(wmcore.count(state))
+    serial.nl()
+}
+
+static mut hp_gen: u64 = 0
+
+static mut hp_gone: u64 = 0
+
+fn wechsel_schritt(state: u64) {
+    var s_d: [u8; 20] = "kgui: wechsel gen=\0\0"
+    var s_w: [u8; 8] = "  weg=\0\0"
+    var s_v: [u8; 9] = "  vfs=\0\0\0"
+    let gen: u64 = usb.msc_gen(state)
+    let gone: u64 = usb.msc_gone(state)
+    if gen != hp_gen || gone != hp_gone {
+        serial.puts((&s_d[0]) as u64)
+        serial.dec(gen)
+        serial.puts((&s_w[0]) as u64)
+        serial.dec(gone)
+        serial.puts((&s_v[0]) as u64)
+        serial.dec(kutil.yes(vfs.ready(state)))
+        serial.nl()
+    }
+    if gone != hp_gone {
+        hp_gone = gone
+        var i: u64 = 0
+        while i < blk.MAX_USB {
+            let d: u64 = blk.usb_dev(i)
+            if !usb.msc_ready_at(state, i) && wechsel.hat_dev(state, d) {
+                let _n: u64 = wechsel.geht(state, d)
+            }
+            i = i + 1
+        }
+    }
+    if gen != hp_gen {
+        hp_gen = gen
+        var j: u64 = 0
+        while j < blk.MAX_USB {
+            let d2: u64 = blk.usb_dev(j)
+            if usb.msc_ready_at(state, j) && !wechsel.hat_dev(state, d2) {
+                let _i: u64 = wechsel.kommt(state, d2)
+            }
+            j = j + 1
+        }
+    }
+}
+
+static mut hz_tsc: u64 = 0
+
+static mut hz_irq: u64 = 0
+
+static mut hz_value: u64 = 0
+
+fn hz_takt(state: u64) -> u64 {
+    let k: u64 = time.khz(state)
+    if k == 0 {
+        return 0
+    }
+    let t: u64 = time.tsc()
+    if hz_tsc == 0 || t <= hz_tsc || kgbase.board_irq < hz_irq {
+        hz_tsc = t
+        hz_irq = kgbase.board_irq
+        return hz_value
+    }
+    let dt: u64 = t - hz_tsc
+    if dt < k * 1000 {
+        return hz_value
+    }
+    let di: u64 = kgbase.board_irq - hz_irq
+    hz_value = di * k * 1000 / dt
+    hz_tsc = t
+    hz_irq = kgbase.board_irq
+    return hz_value
+}
+
+fn from_line(state: u64, z: u64, p: u64, n: u64, color: u64) {
+    wmmeasure.measure_row(state, z, p, n, color)
+    var v: [u8; 12] = "absturz:   \0"
+    serial.puts((&v[0]) as u64)
+    serial.dec(z)
+    serial.put(32 as u8)
+    serial.text(p, n)
+    serial.nl()
+}
+
+fn kstack_up(state: u64) -> u64 {
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    var i: u64 = 0
+    var m: u64 = 0
+    while i < n {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            let h: u64 = sched.stack_high(state, i)
+            if h > m {
+                m = h
+            }
+        }
+        i = i + 1
+    }
+    return m
+}
+
+fn taskbar_state(state: u64) -> u64 {
+    let tb: u64 = wmbase.panel_win(state)
+    if tb >= wm.MAX_WIN {
+        return 0
+    }
+    let o: u64 = wmbase.win_owner(state, tb)
+    if o >= kstate.MAX_TASKS {
+        return 0
+    }
+    return sched.tget(state, o, sched.T_STATE)
+}
+
+static mut level: u64 = 0
+
+static mut level_up: u64 = 0
+
+static mut sect_sum: [u64; 40] = [0 as u64; 40]
+
+static mut sect_max: [u64; 40] = [0 as u64; 40]
+
+static mut sect_n: [u64; 40] = [0 as u64; 40]
+
+static mut sect_last: u64 = 0
+
+static mut sub_sum: [u64; 40] = [0 as u64; 40]
+
+static mut sub_max: [u64; 40] = [0 as u64; 40]
+
+static mut sub_last: u64 = 0
+
+fn sub(k: u64) {
+    let now: u64 = time.tsc()
+    if sub_last != 0 && now > sub_last && k < 40 {
+        let d: u64 = now - sub_last
+        sub_sum[k as usize] = sub_sum[k as usize] + d
+        if d > sub_max[k as usize] {
+            sub_max[k as usize] = d
+        }
+    }
+    sub_last = now
+}
+
+fn st(n: u64) {
+    if level >= 31 && level <= 38 {
+        let now: u64 = time.tsc()
+        if sect_last != 0 && now > sect_last {
+            let d: u64 = now - sect_last
+            sect_sum[level as usize] = sect_sum[level as usize] + d
+            sect_n[level as usize] = sect_n[level as usize] + 1
+            if d > sect_max[level as usize] {
+                sect_max[level as usize] = d
+            }
+        }
+        sect_last = now
+    } else if n >= 31 && n <= 38 {
+        sect_last = time.tsc()
+    }
+    level = n
+    if n > level_up {
+        level_up = n
+    }
+}
+
+fn sect_say(state: u64) {
+    let kh: u64 = time.khz(state)
+    if kh < 1000 {
+        return
+    }
+    let per_us: u64 = kh / 1000
+    var s_h: [u8; 10] = "wm: sect \0"
+    var s_s: [u8; 3] = " s\0"
+    var s_e: [u8; 2] = "=\0"
+    var s_m: [u8; 2] = "/\0"
+    var s_n: [u8; 4] = " n=\0"
+    serial.puts((&s_h[0]) as u64)
+    var k: u64 = 31
+    while k <= 38 {
+        let n: u64 = sect_n[k as usize]
+        serial.puts((&s_s[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_e[0]) as u64)
+        if n != 0 {
+            serial.dec(sect_sum[k as usize] / n / per_us)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&s_m[0]) as u64)
+        serial.dec(sect_max[k as usize] / per_us)
+        k = k + 1
+    }
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(sect_n[31])
+    serial.nl()
+    var s_u: [u8; 10] = "wm: sub \0\0"
+    var s_k: [u8; 2] = "k\0"
+    serial.puts((&s_u[0]) as u64)
+    k = 1
+    while k < 40 {
+        if sub_sum[k as usize] != 0 {
+            serial.puts((&s_k[0]) as u64)
+            serial.dec(k)
+            serial.puts((&s_e[0]) as u64)
+            let nn: u64 = sect_n[31]
+            if nn != 0 {
+                serial.dec(sub_sum[k as usize] / nn / per_us)
+            } else {
+                serial.dec(0)
+            }
+            serial.puts((&s_m[0]) as u64)
+            serial.dec(sub_max[k as usize] / per_us)
+            serial.puts((&s_s[0]) as u64)
+        }
+        k = k + 1
+    }
+    var s_q: [u8; 8] = " quiet=\0"
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(kgbase.quiet_rounds)
+    var s_qs: [u8; 5] = " qs=\0"
+    serial.puts((&s_qs[0]) as u64)
+    serial.dec(usb.reports(state))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(xhci.events(state))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(ps2m.packets(state))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(usb.hid_keys(state))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kstate.get(state, kstate.KEYLEN))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kstate.get(state, kstate.K11_OFF + kstate.KB_HHEAD))
+    var s_w: [u8; 7] = " why=\0\0"
+    serial.puts((&s_w[0]) as u64)
+    serial.dec(kgbase.quiet_why[0])
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kgbase.quiet_why[1])
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kgbase.quiet_why[2])
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(kgbase.quiet_why[3])
+    serial.nl()
+    k = 0
+    while k < 40 {
+        sect_sum[k as usize] = 0
+        sect_max[k as usize] = 0
+        sect_n[k as usize] = 0
+        sub_sum[k as usize] = 0
+        sub_max[k as usize] = 0
+        k = k + 1
+    }
+}
+
+fn level_num() -> u64 {
+    return level
+}
+
+fn level_max() -> u64 {
+    return level_up
+}
+
+fn wm_runden() -> u64 {
+    return kgbase.wmrunden
+}
+
+static mut beat_n: u64 = 0
+
+static mut beat_mark: u64 = 0
+
+static mut beat_on: u64 = 0
+
+static mut beat_secs: u64 = 0
+
+static mut beat_led: u64 = 0
+
+static mut beat_bright: u64 = 0
+
+fn beat_num() -> u64 {
+    return beat_n
+}
+
+fn beat_brightnum() -> u64 {
+    return beat_bright
+}
+
+fn beat_tick(state: u64) {
+    if !kstate.mode_on(state, kstate.M_BEAT) {
+        return
+    }
+    beat_n = beat_n + 1
+    let now: u64 = kstate.get(state, kstate.TICKS)
+    if now < beat_mark + 25 {
+        return
+    }
+    beat_mark = now
+    beat_on = 1 - beat_on
+    beat_bright = beat_bright + beat_on
+    if kstate.mode_on(state, kstate.M_PULSLED) {
+        fb.beat(state, 0, beat_on)
+        fb.beat(state, 1, beat_on)
+    }
+    if !kstate.mode_on(state, kstate.M_PULSLED) {
+        return
+    }
+    beat_secs = beat_secs + 1
+    if (beat_secs & 1) == 0 {
+        beat_led = 1 - beat_led
+        usb.beat_leds(state, beat_led)
+    }
+}
+
+fn wm_bench(state: u64, f: u64, px: u64) {
+    var s_c: [u8; 23] = "wmbench: compose full=\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_sm: [u8; 10] = "  small=\0\0"
+    var s_fa: [u8; 11] = "  factor=\0\0"
+    var s_g: [u8; 21] = "wmbench: glyph cold=\0"
+    var s_wa: [u8; 9] = "  warm=\0\0"
+    var s_pc: [u8; 12] = " (je 95 Zn)\0"
+
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < K10_RUNDEN {
+        wmbase.damage_all(state)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    let full: u64 = kgdisp.us_of(state, apic.tsc() - t) / K10_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < K10_RUNDEN {
+        wmbase.damage(state, 300, 300, 312, 318)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    var small: u64 = kgdisp.us_of(state, apic.tsc() - t) / K10_RUNDEN
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(full)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sm[0]) as u64)
+    serial.dec(small)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_fa[0]) as u64)
+    if small == 0 {
+        small = 1
+    }
+    serial.dec(full * 100 / small)
+    serial.nl()
+
+    if f < ttf.MAX_FONTS {
+        let cold_px: u64 = px + 7
+        t = apic.tsc()
+        var c: u64 = 0x20
+        while c <= 0x7E {
+            ttf.glyph(state, f, c, cold_px)
+            c = c + 1
+        }
+        let cold: u64 = kgdisp.us_of(state, apic.tsc() - t)
+        t = apic.tsc()
+        c = 0x20
+        while c <= 0x7E {
+            ttf.glyph(state, f, c, cold_px)
+            c = c + 1
+        }
+        var warm: u64 = kgdisp.us_of(state, apic.tsc() - t)
+        serial.puts((&s_g[0]) as u64)
+        serial.dec(cold)
+        serial.puts((&s_us[0]) as u64)
+        serial.puts((&s_wa[0]) as u64)
+        serial.dec(warm)
+        serial.puts((&s_us[0]) as u64)
+        serial.puts((&s_fa[0]) as u64)
+        if warm == 0 {
+            warm = 1
+        }
+        serial.dec(cold * 100 / warm)
+        serial.puts((&s_pc[0]) as u64)
+        serial.nl()
+    }
+}
+
+const SOFTUI_RUNDEN: u64 = 20
+
+fn wm_bench2(state: u64) {
+    var s_c: [u8; 24] = "wmbench2: compose full=\0"
+    var s_us: [u8; 4] = " us\0"
+    var s_sm: [u8; 10] = "  small=\0\0"
+    var s_sp: [u8; 13] = "  shadowpx=\0\0"
+    var s_aa: [u8; 9] = "  aapx=\0\0"
+    var s_sb: [u8; 12] = "  shbuild=\0\0"
+    var s_r: [u8; 25] = "wmbench2: ringe   full=\0\0"
+    var s_m: [u8; 25] = "wmbench2: maske   full=\0\0"
+    var s_o: [u8; 25] = "wmbench2: ohne    full=\0\0"
+    let hz: u64 = apic.tsc_hz(state)
+    if hz == 0 {
+        return
+    }
+    var t: u64 = apic.tsc()
+    var i: u64 = 0
+    while i < SOFTUI_RUNDEN {
+        wmbase.damage_all(state)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    let full: u64 = kgdisp.us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wmbase.damage(state, 300, 300, 312, 318)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    let small: u64 = kgdisp.us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    wmdraw.paint_reset(state)
+    wmbase.damage_all(state)
+    wmcompose.compose(state)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(full)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sm[0]) as u64)
+    serial.dec(small)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(wmshadow.shadow_px(state))
+    serial.puts((&s_aa[0]) as u64)
+    serial.dec(wmdraw.aa_px(state))
+    serial.puts((&s_sb[0]) as u64)
+    serial.dec(wmshadow.shadow_builds(state))
+    serial.nl()
+    wmdraw.paint_reset(state)
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wmbase.damage_all(state)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    let m_us: u64 = kgdisp.us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    let m_sp: u64 = wmshadow.shadow_px(state) / SOFTUI_RUNDEN
+    let m_aa: u64 = wmdraw.aa_px(state) / SOFTUI_RUNDEN
+    wm.set_shadow_old(state, true)
+    wmdraw.paint_reset(state)
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wmbase.damage_all(state)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    let r_us: u64 = kgdisp.us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    let r_sp: u64 = wmshadow.shadow_px(state) / SOFTUI_RUNDEN
+    let r_aa: u64 = wmdraw.aa_px(state) / SOFTUI_RUNDEN
+    wm.set_shadow_old(state, false)
+    let s1: u64 = wmgeom.form(state, wmlayout.FM_SHADOW)
+    let s2: u64 = wmgeom.form(state, wmlayout.FM_SHADOW2)
+    let _f1: bool = wmdraw.set_form(state, wmlayout.FM_SHADOW, 0)
+    let _f2: bool = wmdraw.set_form(state, wmlayout.FM_SHADOW2, 0)
+    t = apic.tsc()
+    i = 0
+    while i < SOFTUI_RUNDEN {
+        wmbase.damage_all(state)
+        wmcompose.compose(state)
+        i = i + 1
+    }
+    let o_us: u64 = kgdisp.us_of(state, apic.tsc() - t) / SOFTUI_RUNDEN
+    let _f3: bool = wmdraw.set_form(state, wmlayout.FM_SHADOW, s1)
+    let _f4: bool = wmdraw.set_form(state, wmlayout.FM_SHADOW2, s2)
+    serial.puts((&s_o[0]) as u64)
+    serial.dec(o_us)
+    serial.puts((&s_us[0]) as u64)
+    serial.nl()
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(m_us)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(m_sp)
+    serial.puts((&s_aa[0]) as u64)
+    serial.dec(m_aa)
+    serial.nl()
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(r_us)
+    serial.puts((&s_us[0]) as u64)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(r_sp)
+    serial.puts((&s_aa[0]) as u64)
+    serial.dec(r_aa)
+    serial.nl()
+    wmdraw.paint_reset(state)
+    wmbase.damage_all(state)
+    wmcompose.compose(state)
+}

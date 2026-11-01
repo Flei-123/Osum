@@ -24,7 +24,7 @@ import sys
 
 GRAFIK = ["fb", "wm", "wig", "font", "ttf", "tile", "vmode", "ansi", "ps2m"]
 EIGEN = set(g + ".fi" for g in GRAFIK) | {
-    "gfx.fi", "gfx-aus.fi", "kgui.fi", "sysgui.fi",
+    "gfx.fi", "gfx-aus.fi", "kgui.fi", "kgbase.fi", "kgdisp.fi", "kgsvc.fi", "kgwm.fi", "kgrun.fi", "kgstage.fi", "sysgui.fi",
     "dispsave.fi",
     "zeiger.fi",
     "vgpu.fi",

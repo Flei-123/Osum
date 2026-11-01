@@ -70,8 +70,8 @@ check "supervisor start: one lease only, no restart after it" "$([ "$(grep -ac '
 check "supervisor start: no dhcp respawn by the supervisor" "$([ "$(grep -ac 'desk: shell dhcp respawn' "$SV/s.klar")" -eq 0 ] && echo 1 || echo 0)"
 argc_ok=1
 python3 -I - kernel/ui/kgui.fi <<'PY' || argc_ok=0
-import re, sys
-src = open(sys.argv[1], "rb").read().decode("latin-1")
+import re, subprocess, sys
+src = subprocess.run(["bash", "tools/structure/catprog.sh", sys.argv[1]], capture_output=True).stdout.decode("latin-1")
 for m in re.finditer(r'desk_spawn_svc\(state, 2, \(&(\w+)\[0\]\) as u64,\s*\(&(\w+)\[0\]\) as u64, (\d+), (\d+)\)', src):
     decl = re.search(r'var ' + m.group(2) + r': \[u8; \d+\] = "([^"]*)"', src)
     words = decl.group(1).split("\\0")
