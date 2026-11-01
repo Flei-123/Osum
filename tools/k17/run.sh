@@ -244,7 +244,7 @@ mkfs.vfat -F 32 -s 1 -n USBSTICK "$TMPD/fat.img" >/dev/null 2>&1 \
     && ok "mkfs.vfat created a FAT32 for the stick" \
     || bad "mkfs.vfat scheitert"
 mcopy -i "$TMPD/fat.img" "$TMPD/host.txt" ::host.txt \
-    && ok "mcopy hat host.txt hineingelegt (24 Oktette)" \
+    && ok "mcopy hat host.txt hineingelegt (20 octets)" \
     || bad "mcopy scheitert"
 dd if=/dev/zero of="$TMPD/stick.img" bs=1M count=64 status=none
 printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$TMPD/stick.img" >/dev/null 2>&1 \
@@ -528,7 +528,7 @@ sagt "$S" ready 1 "Ring 3 sieht den Baum"
 sagt "$S" msc 1 "Ring 3 sieht den Stick"
 sagt "$S" bsize 512 "und seine Blockgroesse"
 sagt "$S" blocks 131072 "und seine Groesse in Bloecken (64 MiB)"
-sagt "$S" hostlen 24 "die Datei des WIRTS ist 24 Oktette lang"
+sagt "$S" hostlen 20 "the host file is 20 octets long"
 sagt "$S" hostok 1 "and its content matches octet for octet"
 sagt "$S" wrote 14 "Osum schreibt 14 Oktette auf den Stick"
 sagt "$S" reread 14 "und liest sie unmittelbar danach wieder"
