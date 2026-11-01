@@ -1,0 +1,78 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import wlan.iwl_le
+
+export {
+    Dtim, dtim_new, dtim_phy, dtim_beacon, dtim_have, dtim_time, dtim_tsf, dtim_arrive, dtim_bi, dtim_interval
+}
+
+const FC0_BEACON: u64 = 0x80
+const BODY_TSF: u64 = 24
+const BODY_INTERVAL: u64 = 32
+const BODY_IES: u64 = 36
+const ADDR3: u64 = 16
+const IE_TIM: u64 = 5
+const TU_US: u64 = 1024
+
+struct Dtim {
+    have: bool,
+    sys_ts: u64,
+    time: u64,
+    tsf: u64,
+    arrive: u64,
+    bi: u64,
+    interval: u64
+}
+
+fn dtim_new() -> Dtim {
+    var d: Dtim = Dtim { have: false, sys_ts: 0, time: 0, tsf: 0, arrive: 0, bi: 0, interval: 0 }
+    return d
+}
+
+fn dtim_phy(d: *mut Dtim, sys_ts: u64) { (*d).sys_ts = sys_ts }
+fn dtim_have(d: *mut Dtim) -> bool { return (*d).have }
+fn dtim_time(d: *mut Dtim) -> u64 { return (*d).time }
+fn dtim_tsf(d: *mut Dtim) -> u64 { return (*d).tsf }
+fn dtim_arrive(d: *mut Dtim) -> u64 { return (*d).arrive }
+fn dtim_bi(d: *mut Dtim) -> u64 { return (*d).bi }
+fn dtim_interval(d: *mut Dtim) -> u64 { return (*d).interval }
+
+fn same_bssid(f: u64, bssid: u64) -> bool {
+    var i: u64 = 0
+    while i < 6 {
+        if iwl_le.ld8(f, ADDR3 + i) != iwl_le.ld8(bssid, i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn dtim_beacon(d: *mut Dtim, f: u64, n: u64, bssid: u64) {
+    if n < BODY_IES + 2 { return }
+    if iwl_le.ld8(f, 0) != FC0_BEACON { return }
+    if !same_bssid(f, bssid) { return }
+    let bi: u64 = iwl_le.ld16(f, BODY_INTERVAL)
+    if bi == 0 { return }
+    var at: u64 = BODY_IES
+    var found: bool = false
+    var count: u64 = 0
+    var period: u64 = 0
+    while !found && at + 2 <= n {
+        let id: u64 = iwl_le.ld8(f, at)
+        let len: u64 = iwl_le.ld8(f, at + 1)
+        if at + 2 + len > n { at = n }
+        else if id == IE_TIM && len >= 2 {
+            count = iwl_le.ld8(f, at + 2)
+            period = iwl_le.ld8(f, at + 3)
+            found = true
+        } else {
+            at = at + 2 + len
+        }
+    }
+    if !found { return }
+    let offs: u64 = count * bi * TU_US
+    (*d).arrive = (*d).sys_ts
+    (*d).time = ((*d).sys_ts + offs) & 0xFFFFFFFF
+    (*d).tsf = iwl_le.ld64(f, BODY_TSF) + offs
+    (*d).bi = bi
+    (*d).interval = period * bi
+    (*d).have = true
+}

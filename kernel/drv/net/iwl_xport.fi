@@ -11,9 +11,11 @@ import wlan.iwl_mvm_txq
 import wlan.iwl_fwcaps
 import wlan.iwl_fwerr
 
-export { XCtx, xp_last_cmd, xp_last_len, xp_last_w0, xp_last_err, xp_sent, xp_dq_on, xp_dq_sent, xp_dq_reclaimed, xp_dq_wr, xp_dq_rd, xp_fw_dead, xp_uerr_ptr, xp_fwerr, xp_umac, xp_capture, xp_words, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
+export { XCtx, xp_last_cmd, xp_last_len, xp_last_w0, xp_bad_cmd, xp_bad_status, xp_last_err, xp_sent, xp_dq_on, xp_dq_sent, xp_dq_reclaimed, xp_dq_wr, xp_dq_rd, xp_fw_dead, xp_uerr_ptr, xp_fwerr, xp_umac, xp_capture, xp_words, xctx_new, xctx_fast, xport_make, tr_submit, tr_poll, E_XP_NOCQ }
 
 const E_XP_NOCQ: i64 = -80
+const CMD_ADD_STA_KEY: u64 = 0x17
+const STA_SUCCESS: u64 = 1
 const PEND_CAP: u64 = 4096
 const ACCESS_TRIES: u64 = 3
 const RECV_BUDGET_MS: u64 = 250
@@ -31,6 +33,8 @@ struct XCtx {
     last_cmd: u64,
     last_len: u64,
     last_w0: u64,
+    bad_cmd: u64,
+    bad_status: u64,
     sent: u64,
     budget_ms: u64,
     spin_max: u64,
@@ -39,7 +43,7 @@ struct XCtx {
 }
 
 fn xctx_new(state: u64, cq: u64, p: u64, pend: u64) -> XCtx {
-    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0, last_cmd: 0, last_len: 0, last_w0: 0, sent: 0, budget_ms: RECV_BUDGET_MS, spin_max: RECV_SPIN_MAX, fe: iwl_fwerr.fwerr_new(), fu: iwl_fwerr.fwerr_new() }
+    var x: XCtx = XCtx { state: state, cq: cq, p: p, pend: pend, pend_len: 0, last_err: 0, last_cmd: 0, last_len: 0, last_w0: 0, bad_cmd: 0, bad_status: 0, sent: 0, budget_ms: RECV_BUDGET_MS, spin_max: RECV_SPIN_MAX, fe: iwl_fwerr.fwerr_new(), fu: iwl_fwerr.fwerr_new() }
     return x
 }
 
@@ -83,8 +87,17 @@ fn xp_send(ctx: u64, a: u64, n: u64) -> i64 {
     (*x).pend_len = r as u64
     (*x).last_len = r as u64
     if r >= 8 { (*x).last_w0 = iwl_le.ld32((*x).pend, 4) }
+    note_sta_status(x, r)
     if iwl_le.ld8(a, 0) == iwl_fwcaps.CMD_SCD_QUEUE_CFG { scd_track(cq, a, n) }
     return 0
+}
+
+fn note_sta_status(x: *mut XCtx, r: i64) {
+    if r < 8 || (*x).bad_cmd != 0 { return }
+    if (*x).last_cmd != iwl_fwcaps.CMD_ADD_STA && (*x).last_cmd != CMD_ADD_STA_KEY { return }
+    if (*x).last_w0 == STA_SUCCESS { return }
+    (*x).bad_cmd = (*x).last_cmd
+    (*x).bad_status = (*x).last_w0
 }
 
 fn xp_capture(x: *mut XCtx) {
@@ -158,6 +171,8 @@ fn tr_poll(ctx: u64, a: u64, n: usize) -> i64 { return xp_recv(ctx, a, n as u64)
 fn xp_last_cmd(x: *mut XCtx) -> u64 { return (*x).last_cmd }
 fn xp_last_len(x: *mut XCtx) -> u64 { return (*x).last_len }
 fn xp_last_w0(x: *mut XCtx) -> u64 { return (*x).last_w0 }
+fn xp_bad_cmd(x: *mut XCtx) -> u64 { return (*x).bad_cmd }
+fn xp_bad_status(x: *mut XCtx) -> u64 { return (*x).bad_status }
 fn xp_last_err(x: *mut XCtx) -> i64 { return (*x).last_err }
 fn xp_sent(x: *mut XCtx) -> u64 { return (*x).sent }
 fn xp_dq_on(x: *mut XCtx) -> bool {
