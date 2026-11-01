@@ -496,7 +496,8 @@ msr_read_safe:
     popfq
     ret
 .Lmsr_rd_fix:
-    movq $0, (%rsi)    movl $1, %eax
+    movq $0, (%rsi)
+    movl $1, %eax
     popq %rdx
     popq %rcx
     popfq
@@ -519,7 +520,8 @@ msr_write_safe:
     pushq %rcx
     pushq %rdx
     movq %rdi, %rcx
-    movq %rsi, %rax    movq %rsi, %rdx
+    movq %rsi, %rax
+    movq %rsi, %rdx
     shrq $32, %rdx
 .Lmsr_wr_insn:
     wrmsr                           /* <- darf fehlschlagen */

@@ -3,7 +3,8 @@
     .globl _start
 _start:
     xorq %rbp, %rbp
-    movq %rsp, %rdi    andq $-16, %rsp
+    movq %rsp, %rdi
+    andq $-16, %rsp
     call USER_ENTRY
     movq %rax, %rdi
     movq $60, %rax

@@ -241,4 +241,5 @@ kdata:
     .align 8
     .weak osym_tab
 osym_tab:
-    .quad 0    .quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .quad 0
+    .quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0

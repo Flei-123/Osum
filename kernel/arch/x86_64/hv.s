@@ -59,7 +59,8 @@ hv_vmrun:
     popq %rax                       /* rsi des Gasts */
     movq %rax, 104(%rsi)
 
-    popq %rsi    popq %rdx                       /* Wirtsbereich */
+    popq %rsi
+    popq %rdx                       /* Wirtsbereich */
     popq %rdi                       /* das VMCB */
     movq %rdi, %rax
     vmsave                          /* Gast: FS/GS/TR/LDTR zurueck ins VMCB */
@@ -103,7 +104,8 @@ g_hello_start:
     movw $0x0100, %ax
     movw %ax, %ds                   /* DS.base = 0x1000: das Abbild */
     xorw %ax, %ax
-    movw %ax, %es    movw %ax, %ss
+    movw %ax, %es
+    movw %ax, %ss
     movw $0x0FF0, %sp
 
     movw $(g_hello_txt - g_hello_start), %si
@@ -116,7 +118,8 @@ g_hello_start:
     jmp 1b
 2:
     xorl %eax, %eax
-    cpuid    movl $1, %ecx
+    cpuid
+    movl $1, %ecx
     movl $1, %eax
     vmmcall
 
@@ -141,7 +144,8 @@ g_hello_start:
     movw %ax, %es:2(%si)
     xorl %ebp, %ebp
     movl $1, %ecx
-    movl $3, %eax    vmmcall
+    movl $3, %eax
+    vmmcall
     movl %ebp, %ebx
     movl $4, %ecx
     movl $1, %eax
@@ -167,7 +171,8 @@ g_hello_end:
 g_pm_start:
     cli
     movw $0x0100, %ax
-    movw %ax, %ds    xorw %ax, %ax
+    movw %ax, %ds
+    xorw %ax, %ax
     movw %ax, %ss
     movw $0x0FF0, %sp
 
@@ -225,7 +230,8 @@ g_pm_32:
     movl $1, %eax
     vmmcall
 
-    movl %cr0, %ebx    movl $6, %ecx
+    movl %cr0, %ebx
+    movl $6, %ecx
     movl $1, %eax
     vmmcall
     movl %cr3, %ebx
@@ -281,7 +287,8 @@ g_fault_start:
 
     movw $0x7000, %si
     movw $0xC0DE, %ax
-    movw %ax, %es:(%si)    movw %es:(%si), %bx             /* danach muss dasselbe dastehen */
+    movw %ax, %es:(%si)
+    movw %es:(%si), %bx             /* danach muss dasselbe dastehen */
     movzwl %bx, %ebx
     movl $8, %ecx
     movl $1, %eax
@@ -307,7 +314,8 @@ g_crash_start:
     movl $9, %ecx
     movl $1, %eax
     vmmcall                         /* noch lebt er */
-    ud21:  jmp 1b
+    ud2
+1:  jmp 1b
     .align 4
 g_crash_end:
 
@@ -482,7 +490,8 @@ g_dev_start:
     movb $0x83, %al                 /* DLAB an, 8N1 */
     outb %al, %dx
     movw $0x03F8, %dx
-    movb $0x0C, %al    outb %al, %dx
+    movb $0x0C, %al
+    outb %al, %dx
     inb %dx, %al                    /* muss 12 zurueckgeben */
     movzbl %al, %ebx
     movl $42, %ecx
@@ -492,7 +501,8 @@ g_dev_start:
     movw $0x03FB, %dx
     movb $0x03, %al                 /* DLAB aus */
     outb %al, %dx
-    inb %dx, %al    movzbl %al, %ebx
+    inb %dx, %al
+    movzbl %al, %ebx
     movl $43, %ecx
     movl $1, %eax
     vmmcall
@@ -511,7 +521,8 @@ g_dev_start:
     outb %al, %dx
     movb $0x01, %al                 /* ICW4: 8086-Modus */
     outb %al, %dx
-    movb $0xFD, %al    outb %al, %dx
+    movb $0xFD, %al
+    outb %al, %dx
     inb %dx, %al                    /* und zurueklesen */
     movzbl %al, %ebx
     movl $44, %ecx
@@ -532,7 +543,8 @@ g_dev_start:
 
     movw $(g_dev_txt - g_dev_start), %si
     movw $0x0100, %ax
-    movw %ax, %ds    movw $0x03F8, %dx
+    movw %ax, %ds
+    movw $0x03F8, %dx
 1:  movb (%si), %al
     testb %al, %al
     jz 2f
