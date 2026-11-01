@@ -99,7 +99,7 @@ done
 
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/uprog.fi' -e '^kernel/user/power.fi' \
-              -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' \
+              -e '^kernel/user/powermon.fi' -e '^kernel/user/taskbar.fi' -e '^kernel/user/taskbar/' \
               -e '^kernel/user/qs.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
 #
 if [ -z "$fremd" ]; then

@@ -59,6 +59,14 @@ FILES = [
     "kernel/user/wlibc.fi",
     "kernel/user/wlib.fi",
     "kernel/user/taskbar.fi",
+    "kernel/user/taskbar/tbbase.fi",
+    "kernel/user/taskbar/tbhover.fi",
+    "kernel/user/taskbar/tbinput.fi",
+    "kernel/user/taskbar/tblayout.fi",
+    "kernel/user/taskbar/tbmetrics.fi",
+    "kernel/user/taskbar/tbpaint.fi",
+    "kernel/user/taskbar/tbpopup.fi",
+    "kernel/user/taskbar/tbstatus.fi",
     "kernel/user/desktop.fi",
     "kernel/user/settings.fi",
     "kernel/user/explorer.fi",
@@ -96,7 +104,8 @@ ALLOWED_FN = {
     "kernel/user/wlibc.fi": ["fn primitives_builtin", "fn platte", "fn plate_ink"],
     # The two report functions print the bar's colour as six hex digits:
     # `& 0xFFFFFF` strips the alpha byte, it names no colour.
-    "kernel/user/taskbar.fi": ["fn glas_say", "fn schild_say"],
+    "kernel/user/taskbar/tbstatus.fi": ["fn glas_say"],
+    "kernel/user/taskbar/tbmetrics.fi": ["fn schild_say"],
     "kernel/ui/wm.fi": [
         # The server paints frame and title bar because it composites the
         # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`

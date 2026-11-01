@@ -148,8 +148,8 @@ else
 fi
 grep -aq 'taskbar: toast zu' "$S" && ok "the toast was closed (\`taskbar: toast zu\`)" || bad "no 'taskbar: toast zu'"
 # 4. nothing refused
-if grep -aq 'kein Platz\|no tooltip/toast host' "$S"; then
-    bad "a pop-up was refused: $(grep -a 'kein Platz\|no tooltip/toast host' "$S" | head -1)"
+if grep -aq 'tip no space\|toast no space\|no tooltip/toast host' "$S"; then
+    bad "a pop-up was refused: $(grep -a 'tip no space\|toast no space\|no tooltip/toast host' "$S" | head -1)"
 else
     ok "no pop-up was refused (no 'kein Platz', the host was there)"
 fi

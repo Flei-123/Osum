@@ -7,7 +7,11 @@ root = sys.argv[1]
 
 
 def rd(path):
-    return open(os.path.join(root, path), "rb").read().decode("latin1")
+    t = open(os.path.join(root, path), "rb").read().decode("latin1")
+    d = os.path.join(root, path[:-3])
+    if os.path.isdir(d):
+        t += "".join(open(os.path.join(d, f), "rb").read().decode("latin1") for f in sorted(os.listdir(d)) if f.endswith(".fi"))
+    return t
 
 
 checks = [

@@ -181,8 +181,8 @@ else
     [ "$us" -gt 0 ] && [ "$us" -le "$tt" ] && ok "used memory plausible ($us of $tt MB)" || bad "memory implausible: used=$us tot=$tt"
 fi
 if grep -aq 'no fpsov host' "$SA"; then bad "the bar had no room for the overlay window"; else ok "the bar had room for the window"; fi
-if grep -aq 'kein Platz\|no tooltip/toast host\|no notifc host\|no task view card' "$SA"; then
-    bad "a pop-up window was refused: $(grep -a 'kein Platz\|no tooltip/toast host\|no notifc host\|no task view card' "$SA" | head -1)"
+if grep -aq 'tip no space\|toast no space\|no tooltip/toast host\|no notifc host\|no task view card' "$SA"; then
+    bad "a pop-up window was refused: $(grep -a 'tip no space\|toast no space\|no tooltip/toast host\|no notifc host\|no task view card' "$SA" | head -1)"
 else ok "no other pop-up window was refused (nine fit)"; fi
 if grep -aq 'wm: monov\|fpsov: ' "$SB"; then bad "COUNTER-PROOF: monov/fpsov lines without the key: $(grep -a 'wm: monov\|fpsov: ' "$SB" | head -1)"
 else ok "COUNTER-PROOF: without the key there is no monov and no fpsov line"; fi

@@ -82,7 +82,7 @@ for name, files, force in PARTS:
     all_lines += n
     if cls == "SCENE":
         scene_lines += n
-tb = src("kernel/user/taskbar.fi")
+tb = src("kernel/user/taskbar.fi") + "".join(src("kernel/user/taskbar/" + f) for f in sorted(os.listdir(os.path.join(root, "kernel/user/taskbar"))))
 tb_tree = fn_lines(tb, r"\w*(build|tree|ghost|bar_scene)\w*")
 tb_paint = fn_lines(tb, r"\w*paint\w*")
 print("%-72s %7s  %-12s %8s %12s" % ("part", "lines", "class", "fuiscene", "direct-paint"))

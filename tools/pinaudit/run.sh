@@ -48,8 +48,8 @@ for d in sorted(glob.glob(root + "/assets/pkgicons/*")):
         sys.exit(1)
 print("  worst mean", worst)
 PY
-for f in kernel/user/launcher.fi kernel/user/taskbar.fi; do grep -aq 'appreg.launch' $f && ok "$f starts programs through appreg.launch" || bad "$f bypasses appreg.launch"; done
-for f in kernel/user/appdir.fi kernel/user/taskbar.fi kernel/user/taskmgr.fi; do grep -aq 'appreg.resolve_symbol' $f && ok "$f resolves symbols through the registry" || bad "$f skips the registry"; done
+for f in kernel/user/launcher.fi kernel/user/taskbar.fi; do grep -aq 'appreg.launch' $f ${f%.fi}/*.fi && ok "$f starts programs through appreg.launch" || bad "$f bypasses appreg.launch"; done
+for f in kernel/user/appdir.fi kernel/user/taskbar.fi kernel/user/taskmgr.fi; do grep -aq 'appreg.resolve_symbol' $f ${f%.fi}/*.fi && ok "$f resolves symbols through the registry" || bad "$f skips the registry"; done
 grep -aq 'appreg.duplicate_of' kernel/user/appdir.fi && ok "appdir drops aliased duplicates through the registry" || bad "appdir lists duplicates"
 grep -aq 'start_ok' kernel/user/appdir.fi && ok "appdir drops entries without a startable target" || bad "appdir lists dead entries"
 

@@ -111,7 +111,7 @@ echo "== COUNTER-PROOF nofb (sym_fallback returns 0) =="
 OLD="$OUTD/oldtree"
 mkdir -p "$OLD"
 tar -C "$ROOT" --exclude=.git --exclude='docs/shots' -cf - . | tar -C "$OLD" -xf -
-python3 -I - "$OLD/kernel/user/taskbar.fi" <<'PY'
+python3 -I - "$OLD/kernel/user/taskbar/tblayout.fi" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding="latin1").read()

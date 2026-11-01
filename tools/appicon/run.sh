@@ -46,7 +46,12 @@ wire() { # wire <root>: prints OK/FAIL lines
 python3 -I - "$1" <<'PY'
 import sys,re,os
 r=sys.argv[1]
-def rd(p): return open(os.path.join(r,p),'rb').read().decode('latin1')
+def rd(p):
+    t = open(os.path.join(r, p), 'rb').read().decode('latin1')
+    d = os.path.join(r, p[:-3])
+    if os.path.isdir(d):
+        t += ''.join(open(os.path.join(d, f), 'rb').read().decode('latin1') for f in sorted(os.listdir(d)) if f.endswith('.fi'))
+    return t
 def say(ok,m): print(("OK    " if ok else "FAIL  ")+m)
 say("app_icon" in rd("kernel/user/taskbar.fi"), "bar: taskbar.sym_of asks appicon (wlibc.app_icon)")
 say("app_icon" in rd("kernel/user/appdir.fi"), "start menu: appdir.icon_load asks the fallback")
@@ -58,6 +63,7 @@ wire "$ROOT" > "$T/wire.out"; cat "$T/wire.out"; PASS=$((PASS+$(grep -c '^OK' "$
 # COUNTER-PROOF: the tree before the wiring (git stash-free: copy of the files with the calls removed) must fail
 mkdir -p "$T/old/kernel/user" "$T/old/kernel/ui"
 for f in kernel/user/taskbar.fi kernel/user/appdir.fi kernel/ui/wm.fi kernel/user/taskmgr.fi; do sed 's/app_icon\|appicon\./REMOVED_/g' "$f" > "$T/old/$f"; done
+mkdir -p "$T/old/kernel/user/taskbar"; for f in kernel/user/taskbar/*.fi; do sed 's/app_icon\|appicon\./REMOVED_/g' "$f" > "$T/old/$f"; done
 wire "$T/old" > "$T/wire.old"
 if [ "$(grep -c '^FAIL' "$T/wire.old")" = 4 ]; then ok "counter-proof: without the wiring all four places are red"; else bad "counter-proof did not turn red"; fi
 echo "== APPICON: $PASS green, $FAIL red =="

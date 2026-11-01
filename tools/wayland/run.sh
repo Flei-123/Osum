@@ -150,7 +150,7 @@ grep -q 'kernel/user/wayd.fi' kernel/user/wayd.fi 2>/dev/null \
     && ok "der Server ist ein Ring-3-Programm (kernel/user/wayd.fi)" \
     || bad "wayd.fi fehlt"
 n=$(grep -rl 'wayd\.' kernel/*.fi kernel/user/desktop.fi \
-        kernel/user/taskbar.fi 2>/dev/null | wc -l)
+        kernel/user/taskbar.fi kernel/user/taskbar 2>/dev/null | wc -l)
 [ "$n" -eq 0 ] \
     && ok "GEGENPROBE: kein Kernteil und kein Schreibtischteil ruft wayd" \
     || bad "$n Datei(en) rufen wayd -- er waere nicht abschaltbar"
