@@ -413,9 +413,10 @@ fn sh_window(wx: i64, wy: i64, ow: i64, oh: i64, reach: u64, bank: u64, color: u
 
 const CHR_MAGIC: u64 = 0x52484357
 const CHR_TITLE: u64 = 32
-const CHR_PLUS: u64 = 160
+const CHR_STRIP: u64 = 160
 const CHR_MARK: u64 = 192
-const CHR_WORDS: u64 = 224
+const CHR_TABC: u64 = 224
+const CHR_WORDS: u64 = 256
 const CAP_N: u64 = 3
 const CAP_MIN: u64 = 0
 const CAP_MAX: u64 = 1
@@ -426,8 +427,9 @@ const CG_SIDE: u64 = 40
 const CG_CELL: u64 = 6400
 const GL_BUF: u64 = 8192
 
-static mut chr1: [u64; 224] = [0 as u64; 224]
-static mut chr2: [u64; 224] = [0 as u64; 224]
+static mut chr1: [u64; 256] = [0 as u64; 256]
+static mut chr2: [u64; 256] = [0 as u64; 256]
+static mut ch_clip_y1: i64 = 1 << 30
 static mut p_chr: u64 = 0
 static mut ch_have: u64 = 0
 static mut ch_px: u64 = 0
@@ -480,7 +482,7 @@ fn same_chr() -> bool {
 }
 
 fn ch_set(x: i64, y: i64, color: u64) {
-    if x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
+    if x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 || y >= ch_clip_y1 {
         return
     }
     let p: u64 = (&sb[0 as usize]) as u64 + (y as u64 * scr_w + x as u64) * 4
@@ -489,7 +491,7 @@ fn ch_set(x: i64, y: i64, color: u64) {
 }
 
 fn ch_mix(x: i64, y: i64, color: u64, a: u64) {
-    if a == 0 || x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
+    if a == 0 || x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 || y >= ch_clip_y1 {
         return
     }
     if a >= 255 {
@@ -512,7 +514,7 @@ fn ch_fill(x: i64, y: i64, w: i64, h: i64, color: u64, a: u64) {
     let x0: i64 = imax(x, 0)
     let y0: i64 = imax(y, 0)
     let x1: i64 = imin(x + w, scr_w as i64)
-    let y1: i64 = imin(y + h, scr_h as i64)
+    let y1: i64 = imin(imin(y + h, scr_h as i64), ch_clip_y1)
     if x1 <= x0 || y1 <= y0 {
         return
     }
@@ -853,18 +855,82 @@ fn ch_title_text(tp: u64, x: i64, y: i64, color: u64, limit: i64, px: u64) {
     }
 }
 
-fn ch_plus(cell: u64, wx: i64, wy: i64, color: u64) {
-    let sq: i64 = chr1[30] as i64
+fn ch_glyph_mid(c: u64, x0: i64, w: i64, wy: i64, color: u64) {
     let px: u64 = chr1[25]
     let gb: u64 = (&gl_buf[0 as usize]) as u64
-    let n: u64 = wlibc.sys5(wlibc.WIG_GLYPH, 0, px, 43, gb, GL_BUF)
+    let n: u64 = wlibc.sys5(wlibc.WIG_GLYPH, 0, px, c, gb, GL_BUF)
     if ulib.bad(n) || n < 48 {
         return
     }
     let adv: i64 = (rd64(gb + 32) as i64) >> 6
-    let x0: i64 = wx + (cell - 1) as i64
-    plus_txt[0 as usize] = 43 as u8
-    ch_title_text((&plus_txt[0 as usize]) as u64, x0 + (sq - adv) / 2, wy + chr1[27] as i64, color, x0 + sq + 8, px)
+    plus_txt[0 as usize] = c as u8
+    plus_txt[1 as usize] = 0 as u8
+    ch_title_text((&plus_txt[0 as usize]) as u64, x0 + (w - adv) / 2, wy + chr1[27] as i64, color, x0 + w + 8, px)
+}
+
+fn ch_tab_label(k: u64, mode: u64) -> u64 {
+    var w: [u8; 10] = "Terminal \0"
+    var keep: u64 = 9
+    if mode == 1 {
+        keep = 5
+    } else if mode == 2 {
+        keep = 2
+    } else if mode >= 3 {
+        keep = 0
+    }
+    var j: u64 = 0
+    while j < keep {
+        plus_txt[j as usize] = w[j as usize]
+        j = j + 1
+    }
+    var n: u64 = keep
+    if k >= 10 {
+        plus_txt[n as usize] = (48 + (k / 10) % 10) as u8
+        n = n + 1
+    }
+    plus_txt[n as usize] = (48 + k % 10) as u8
+    plus_txt[(n + 1) as usize] = 0 as u8
+    return n + 1
+}
+
+fn ch_tabs(strip: u64, tabc: u64, wx: i64, wy: i64, title: u64, font: u64) {
+    let uk: i64 = chr1[20] as i64
+    let ty: i64 = wy + chr1[17] as i64 + 3 * uk
+    let tbot: i64 = wy + chr1[18] as i64 - 1
+    let tbh: i64 = tbot - ty
+    if tbh <= 4 {
+        return
+    }
+    let tw: i64 = (strip & 0xFFFF) as i64
+    let n: u64 = (strip >> 16) & 63
+    let on: u64 = (strip >> 22) & 63
+    let lo: i64 = (chr1[17] + chr1[26]) as i64
+    let sq: i64 = chr1[30] as i64
+    let px: u64 = chr1[25]
+    var k: u64 = 0
+    while k < n {
+        let x0: i64 = wx + lo + (k as i64) * tw
+        let x1: i64 = x0 + tw - 2 * uk
+        var col: u64 = font
+        ch_clip_y1 = tbot
+        if k == on {
+            ch_round(x0, ty, x1 - x0, tbh + 8 * uk, (6 * uk) as u64, tabc & 0xFFFFFF, 255)
+            ch_round(x0 + 6 * uk, tbot - 3 * uk, x1 - x0 - 12 * uk, 3 * uk, uk as u64, chr1[9], 255)
+            col = (tabc >> 32) & 0xFFFFFF
+        } else {
+            ch_round(x0, ty, x1 - x0, tbh + 8 * uk, (6 * uk) as u64, comp.blend(title, font, 40), 255)
+        }
+        ch_clip_y1 = 1 << 30
+        var mode: u64 = 3
+        if k < 16 {
+            mode = (strip >> (32 + k * 2)) & 3
+        }
+        let _l: u64 = ch_tab_label(k + 1, mode)
+        ch_title_text((&plus_txt[0 as usize]) as u64, x0 + 8 * uk, wy + chr1[27] as i64, col, x1 - sq + 4, px)
+        ch_glyph_mid(120, x1 - sq, sq, wy, col)
+        k = k + 1
+    }
+    ch_glyph_mid(43, wx + lo + (n as i64) * tw, sq, wy, font)
 }
 
 fn chrome_geo(k: u64, x: i64, y: i64, ow: i64, oh: i64, focused: bool, capc: bool) {
@@ -932,9 +998,11 @@ fn ch_window(row: u64, wx: i64, wy: i64, ow: i64, oh: i64, focused: bool, slot: 
     let capc: bool = (flags & F_CAPCLIENT) != 0
     var frame: u64 = chr1[6]
     var font: u64 = chr1[8]
+    var title: u64 = chr1[7]
     if focused {
         frame = chr1[9]
         font = chr1[11]
+        title = chr1[10]
     }
     ch_round(wx, wy, ow, oh, chr1[14], frame, chr1[21])
     if capc {
@@ -944,11 +1012,12 @@ fn ch_window(row: u64, wx: i64, wy: i64, ow: i64, oh: i64, focused: bool, slot: 
     ch_caption(wx, wy, ow, focused, slot, maximized)
     let bo: i64 = chr1[17] as i64
     let limit: i64 = wx + ow - bo - CAP_N as i64 * chr1[19] as i64
-    let tp: u64 = (&chr1[0 as usize]) as u64 + (CHR_TITLE + row * 4) * 8
-    ch_title_text(tp, wx + bo + chr1[26] as i64, wy + chr1[27] as i64, font, limit, chr1[25])
-    let plus: u64 = chr1[(CHR_PLUS + row) as usize]
-    if plus != 0 {
-        ch_plus(plus, wx, wy, font)
+    let strip: u64 = chr1[(CHR_STRIP + row) as usize]
+    if strip != 0 {
+        ch_tabs(strip, chr1[(CHR_TABC + row) as usize], wx, wy, title, font)
+    } else {
+        let tp: u64 = (&chr1[0 as usize]) as u64 + (CHR_TITLE + row * 4) * 8
+        ch_title_text(tp, wx + bo + chr1[26] as i64, wy + chr1[27] as i64, font, limit, chr1[25])
     }
     ch_win = ch_win + 1
 }

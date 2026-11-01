@@ -46,6 +46,26 @@ fn tt_grouped(state: u64, i: u64) -> bool {
     return g != 0 && tt_count(state, g) >= 2
 }
 
+fn tt_strip(state: u64, i: u64) -> bool {
+    return i < 32 && wmbase.valid(state, i) && wmlayout.wg(state, i, wmlayout.W_KIND) == wmlayout.K_TERM
+}
+
+fn tt_tabs(state: u64, i: u64) -> u64 {
+    let n: u64 = tt_count(state, tt_grp_of(state, i))
+    if n < 2 {
+        return 1
+    }
+    return n
+}
+
+fn tt_tab(state: u64, i: u64, k: u64) -> u64 {
+    let g: u64 = tt_grp_of(state, i)
+    if tt_count(state, g) < 2 {
+        return i
+    }
+    return tt_nth(state, g, k)
+}
+
 fn tt_is_bg(state: u64, i: u64) -> bool {
     if i >= 32 || !wmbase.valid(state, i) {
         return false
@@ -253,14 +273,18 @@ fn tt_measure(state: u64, f: u64, len: u64) -> i64 {
     return cx >> 6
 }
 
-fn tt_fit_label(state: u64, f: u64, k: u64, avail: i64) -> u64 {
+fn tt_fit_mode(state: u64, f: u64, k: u64, avail: i64) -> u64 {
     var mode: u64 = 0
     var len: u64 = tt_label(k, 0)
     while mode < 3 && tt_measure(state, f, len) > avail {
         mode = mode + 1
         len = tt_label(k, mode)
     }
-    return len
+    return mode
+}
+
+fn tt_fit_label(state: u64, f: u64, k: u64, avail: i64) -> u64 {
+    return tt_label(k, tt_fit_mode(state, f, k, avail))
 }
 
 fn tt_text(state: u64, f: u64, p: u64, len: u64, x: i64, y: i64, color: u64,
@@ -304,11 +328,7 @@ fn tt_glyph_mid(state: u64, f: u64, c: u64, x0: i64, w: i64, y: i64, color: u64,
 
 fn tt_paint(state: u64, i: u64, wx: i64, wy: i64, title: u64, font: u64,
     ax0: i64, ay0: i64, ax1: i64, ay1: i64, f: u64) {
-    let g: u64 = tt_grp_of(state, i)
-    let n: u64 = tt_count(state, g)
-    if n == 0 {
-        return
-    }
+    let n: u64 = tt_tabs(state, i)
     let uk: i64 = wmgeom.uisc(state) as i64
     let ty: i64 = wy + wmgeom.border(state) as i64 + 3 * uk
     let tbot: i64 = wy + wmgeom.title_h(state) as i64 - 1
@@ -323,7 +343,7 @@ fn tt_paint(state: u64, i: u64, wx: i64, wy: i64, title: u64, font: u64,
     let cy1: i64 = wmbase.imin(ay1, tbot)
     var k: u64 = 0
     while k < n {
-        let wi: u64 = tt_nth(state, g, k)
+        let wi: u64 = tt_tab(state, i, k)
         let x0: i64 = wx + lo + (k as i64) * tw
         let x1: i64 = x0 + tw - 2 * uk
         var col: u64 = 0
@@ -349,17 +369,28 @@ fn tt_paint(state: u64, i: u64, wx: i64, wy: i64, title: u64, font: u64,
     let px0: i64 = wx + lo + (n as i64) * tw
     tt_glyph_mid(state, f, 43, px0, sq, base, font, ax0, ay0, ax1, ay1)
 }
-
-fn tt_plus_cell(state: u64, i: u64) -> u64 {
-    if i >= 32 || wmlayout.wg(state, i, wmlayout.W_KIND) != wmlayout.K_TERM || tt_grouped(state, i) {
+fn tt_strip_word(state: u64, i: u64) -> u64 {
+    let f: u64 = wmlayout.gs(state, wmlayout.S_FONT_UI)
+    if !tt_strip(state, i) || f >= ttf.MAX_FONTS {
         return 0
     }
-    return (tt_hi(state, i) - tt_sq(state)) as u64 + 1
-}
-
-fn tt_paint_plus(state: u64, i: u64, wx: i64, wy: i64, font: u64,
-    ax0: i64, ay0: i64, ax1: i64, ay1: i64, f: u64) {
-    let sq: i64 = tt_sq(state)
-    let base: i64 = wy + wmgeom.title_base(state, f)
-    tt_glyph_mid(state, f, 43, wx + tt_hi(state, i) - sq, sq, base, font, ax0, ay0, ax1, ay1)
+    let n: u64 = tt_tabs(state, i)
+    let tw: i64 = tt_tabw(state, i, n)
+    let avail: i64 = tw - 12 * wmgeom.uisc(state) as i64 - tt_sq(state)
+    var on: u64 = 0
+    var modes: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        if tt_tab(state, i, k) == i {
+            on = k
+        }
+        if k < 16 {
+            modes = modes | (tt_fit_mode(state, f, k + 1, avail) << (k * 2))
+        }
+        k = k + 1
+    }
+    if n > 63 || on > 63 {
+        return 0
+    }
+    return (tw as u64 & 0xFFFF) | (n << 16) | (on << 22) | (modes << 32)
 }

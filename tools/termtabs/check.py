@@ -92,6 +92,7 @@ def tabs(n, xs):
 
 
 X2, X3 = (45, 200), (45, 170, 295)
+chk(tabs('t0-single', (45,)) == 'A' and tabs('t7-closed', (45,)) == 'A', 'a single terminal shows its one active tab [%s %s]' % (tabs('t0-single', (45,)), tabs('t7-closed', (45,))))
 chk(differs(img['t0-single'], img['t1-two'], STRIP) > 400, 'the title strip changes when the second tab opens (%d px)' % differs(img['t0-single'], img['t1-two'], STRIP))
 chk(tabs('t1-two', X2) == 'iA', 'new tab is the active one (tab2) [%s]' % tabs('t1-two', X2))
 chk(differs(img['t1-two'], img['t2-typed'], (26, 456, 580, 830)) > 300, 'typing shows in the new tab')
@@ -104,7 +105,7 @@ t6 = tabs('t6-x', X2)
 chk(sorted(t6) == ['A', 'i'], 'the x on tab3 closes it: two tabs, one active [%s]' % t6)
 chk(differs(img['t5-plus'], img['t6-x'], STRIP) > 300, 'the strip changes when tab3 closes (%d px)' % differs(img['t5-plus'], img['t6-x'], STRIP))
 chk(differs(img['t0-single'], img['t7-closed'], STRIP) < 200, 'back to one terminal: the strip looks like the start again (%d px)' % differs(img['t0-single'], img['t7-closed'], STRIP))
-chk(differs(img['t6-x'], img['t7-closed'], STRIP) > 300, 'Ctrl+Shift+W took the strip away (%d px)' % differs(img['t6-x'], img['t7-closed'], STRIP))
+chk(differs(img['t6-x'], img['t7-closed'], STRIP) > 300, 'Ctrl+Shift+W leaves a single tab (%d px)' % differs(img['t6-x'], img['t7-closed'], STRIP))
 print('== result ==')
 print('  %d ok, %d fail' % (ok, bad))
 sys.exit(1 if bad else 0)
