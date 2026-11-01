@@ -205,6 +205,9 @@ vaultui.register(PAGES, icon, base_css)
 import qsmedia
 
 qsmedia.register(PAGES, icon, base_css)
+import termtab
+
+termtab.register(PAGES, icon, base_css)
 
 
 def main():
