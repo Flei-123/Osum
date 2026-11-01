@@ -52,5 +52,7 @@ out['wtx'] = bytes([3, 0, 2, 5, 2, 8, 0, 0])
 out['aux'] = hdr(0x18, 0, 11) + struct.pack('<BBHI6sHBBHIIBBHHBBHHIHBB', 0, 0, 0xFFFF, 4, bytes(6), 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0x2, 0, 0, 0)
 assert len(out['aux']) == 4 + 48
 out['dqa'] = struct.pack('<BBHHBB', 0x00, 5, 12, 4, 0, 0) + struct.pack('<I', 0)
-for k in ['aux', 'dqa', 'nvm', 'phy', 'pc3', 'sfc', 'btc', 'ant', 'ctx', 'ctw', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx', 'txo', 'bcb', 'wtx']:
+out['lq'] = hdr(0x4e, 0, 13) + struct.pack('<BBHBBBB4BHBBI', 0, 0, 0, 2, 0, 1, 3, 0, 0, 0, 0, 4000, 3, 63, 0) + struct.pack('<16I', *([0x400D] * 16)) + struct.pack('<I', 0)
+assert len(out['lq']) == 4 + 88
+for k in ['lq', 'aux', 'dqa', 'nvm', 'phy', 'pc3', 'sfc', 'btc', 'ant', 'ctx', 'ctw', 'sta', 'key', 'gkey', 'mac', 'bnd', 'scf', 'srq', 'sr7', 'sab', 'tx', 'txo', 'bcb', 'wtx']:
     print(k, out[k].hex())

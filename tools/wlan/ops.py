@@ -194,8 +194,35 @@ def check_diag():
     ok(f[2] == "0" and f[4] == "0" and f[6] == "0" and f[10] == "94", "all steps ok: no failed step, ok mask 0x5e: " + out[5])
 
 
+def check_lq():
+    print("== link quality command and station rate ==")
+    for on in (True, False):
+        out = run(["lq" + ("on" if on else "off")])
+        c = cmds(out)
+        ids = [x[0] for x in c]
+        name = "wllq on" if on else "wllq off"
+        want = [0x18, 0x28] + ([0x4E] if on else []) + [0x1C, 0x1C, 0x1C]
+        ok(ids == want, "%s: command ids %s" % (name, " ".join("%02x" % i for i in ids)))
+        tx = [x for x in c if x[0] == 0x1C]
+        ok(len(tx) == 3, "%s: three data frames sent" % name)
+        if on:
+            lq = [x for x in c if x[0] == 0x4E][0]
+            ref = struct.pack("<BBHBBBB4BHBBI", 0, 0, 0, 2, 0, 1, 3, 0, 0, 0, 0, 4000, 3, 63, 0) + struct.pack("<16I", *([0x400D] * 16)) + struct.pack("<I", 0)
+            ok(lq[4:] == ref and len(lq) == 4 + 88, "LQ_CMD == Linux iwl_lq_cmd layout: station 0, legacy 6M on antenna A in all 16 retries")
+        for i, label in enumerate(("before the key", "after the key, unprotected", "after the key, protected")):
+            flags = le(tx[i], 4 + 4, 4)
+            rate = le(tx[i], 4 + 12, 4)
+            if on and i == 2:
+                ok(flags & 0x10 == 0x10 and rate == 0 and tx[i][4 + 18] == 0, "%s: data frame %s uses the station rate (flag 0x10, initial rate index 0)" % (name, label))
+            else:
+                ok(flags & 0x10 == 0 and rate == 0x400D, "%s: data frame %s keeps the fixed 6M rate" % (name, label))
+        rc = [l for l in out if l.startswith("rc ")][0].split()
+        ok(rc[1:] == ["0", "0", "0", "30", "0", "30", "30"] or rc[1:] == ["0", "0", "0", "40", "0", "40", "40"], "%s: all operations returned 0: %s" % (name, " ".join(rc[1:])))
+
+
 check_seq(True)
 check_seq(False)
+check_lq()
 check_diag()
 check_eapol()
 check_parse()

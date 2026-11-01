@@ -53,5 +53,8 @@ mut 's/const PM_FRAME_ASSOC: u64 = 3/const PM_FRAME_ASSOC: u64 = 2/' "pm_frame_t
 mut 's/if st == SUBTYPE_ACTION { return 0 }/if st == SUBTYPE_ACTION { return 2 }/' "pm_frame_timeout for action frames" iwl_mvm_tx.fi
 mut 's/const TID_MGMT: u64 = 8/const TID_MGMT: u64 = 0/' "TX_CMD tid for management and non-QoS frames" iwl_mvm_tx.fi
 mut 's/var bytes: u64 = flen + 8/var bytes: u64 = flen + 4/' "byte-count table entry in bytes" iwl_mvm_txq.fi
+mut 's/const CMD_LQ: u64 = 0x4E/const CMD_LQ: u64 = 0x4F/' "LQ_CMD command id" iwl_mvm_rs.fi
+mut 's/iwl_le.st32(a, h + 20 + i \* 4, rate)/iwl_le.st32(a, h + 24 + i * 4, rate)/' "LQ_CMD rs_table offset" iwl_mvm_rs.fi
+mut 's/iwl_le.st8(a, h + 15, LQ_AGG_FRAME_LIMIT)/iwl_le.st8(a, h + 14, LQ_AGG_FRAME_LIMIT)/' "LQ_CMD agg_frame_cnt_limit offset" iwl_mvm_rs.fi
 echo "RESULT pass=$pass fail=$fail"
 [ "$fail" -eq 0 ]
