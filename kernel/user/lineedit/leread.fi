@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import lineedit.ttyraw
+import lineedit.lekeys
+import lineedit.lehist
+import lineedit.lebuf
+import lineedit.ledraw
+
+export { read_line, NO_TTY }
+
+const NO_TTY: u64 = 0xFFFFFFFFFFFFFFFE
+const DRAFT_MAX: u64 = 256
+const NO_AGE: u64 = 0xFFFFFFFFFFFFFFFF
+const GO_ON: u64 = 0xFFFFFFFFFFFFFFFD
+
+static mut draft: [u8; 256] = [0 as u8; 256]
+static mut age: u64 = 0xFFFFFFFFFFFFFFFF
+static mut buf: u64 = 0
+static mut cap: u64 = 0
+static mut len: u64 = 0
+static mut pos: u64 = 0
+static mut prompt_copy: [u8; 64] = [0 as u8; 64]
+static mut prompt: u64 = 0
+static mut plen: u64 = 0
+static mut fd_in: u64 = 0
+
+fn read_byte() -> u64 {
+    var b: [u8; 1] = [0 as u8; 1]
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd_in, (&b[0 as usize]) as u64, 1)
+    if n != 1 {
+        return 256
+    }
+    return b[0 as usize] as u64
+}
+
+fn redraw() {
+    ledraw.refresh(prompt, plen, buf, len, pos, ttyraw.cols(fd_in))
+}
+
+fn load(src: u64) {
+    len = lebuf.copy(buf, src, cap)
+    pos = len
+}
+
+fn history_up() {
+    var next_age: u64 = 0
+    if age != NO_AGE {
+        next_age = age + 1
+    }
+    if lehist.entry(next_age) == 0 {
+        return
+    }
+    if age == NO_AGE {
+        lebuf.copy((&draft[0 as usize]) as u64, buf, DRAFT_MAX)
+    }
+    age = next_age
+    load(lehist.entry(age))
+    redraw()
+}
+
+fn history_down() {
+    if age == NO_AGE {
+        return
+    }
+    if age == 0 {
+        age = NO_AGE
+        load((&draft[0 as usize]) as u64)
+    } else {
+        age = age - 1
+        load(lehist.entry(age))
+    }
+    redraw()
+}
+
+fn cut(from: u64, to: u64) {
+    if to <= from {
+        return
+    }
+    len = lebuf.remove(buf, len, from, to)
+    pos = from
+    redraw()
+}
+
+fn move_to(p: u64) {
+    if p != pos {
+        pos = p
+        redraw()
+    }
+}
+
+fn insert(b: u64) {
+    if !lebuf.insert(buf, len, cap, pos, b) {
+        return
+    }
+    len = len + 1
+    pos = pos + 1
+    if pos == len && ledraw.append(b, plen, buf, len, ttyraw.cols(fd_in)) {
+        return
+    }
+    if b >= 192 && b <= 244 {
+        return
+    }
+    redraw()
+}
+
+fn clear_screen() {
+    ledraw.clear_screen()
+    redraw()
+}
+
+fn key(k: u64) -> u64 {
+    if k == 10 || k == 13 {
+        ledraw.finish(plen, buf, len, ttyraw.cols(fd_in), 0)
+        return len
+    }
+    if k == 3 {
+        var s_int: [u8; 3] = "^C\0"
+        ledraw.finish(plen, buf, len, ttyraw.cols(fd_in), (&s_int[0 as usize]) as u64)
+        len = 0
+        *(buf as *mut u8) = 0 as u8
+        return 0
+    }
+    if k == 4 {
+        if len == 0 {
+            ledraw.finish(plen, buf, len, ttyraw.cols(fd_in), 0)
+            return ulib.EOF
+        }
+        cut(pos, lebuf.next(buf, len, pos))
+    } else if k == 8 || k == 127 {
+        cut(lebuf.prev(buf, pos), pos)
+    } else if k == lekeys.DEL {
+        cut(pos, lebuf.next(buf, len, pos))
+    } else if k == lekeys.LEFT || k == 2 {
+        move_to(lebuf.prev(buf, pos))
+    } else if k == lekeys.RIGHT || k == 6 {
+        move_to(lebuf.next(buf, len, pos))
+    } else if k == lekeys.HOME || k == 1 {
+        move_to(0)
+    } else if k == lekeys.END || k == 5 {
+        move_to(len)
+    } else if k == lekeys.WORD_LEFT {
+        move_to(lebuf.word_left(buf, pos))
+    } else if k == lekeys.WORD_RIGHT {
+        move_to(lebuf.word_right(buf, len, pos))
+    } else if k == lekeys.UP || k == 14 || k == 16 {
+        history_up()
+    } else if k == lekeys.DOWN {
+        history_down()
+    } else if k == 11 {
+        cut(pos, len)
+    } else if k == 21 {
+        cut(0, pos)
+    } else if k == 23 {
+        cut(lebuf.word_left(buf, pos), pos)
+    } else if k == 12 {
+        clear_screen()
+    } else if k >= 32 && k < 256 {
+        insert(k)
+    }
+    return GO_ON
+}
+
+fn read_line(fd: u64, p: u64, out: u64, max: u64) -> u64 {
+    if !ttyraw.raw_on(fd) {
+        return NO_TTY
+    }
+    fd_in = fd
+    prompt = (&prompt_copy[0 as usize]) as u64
+    let pn: u64 = lebuf.copy(prompt, p, 64)
+    plen = lebuf.cells(prompt, 0, pn)
+    buf = out
+    cap = max
+    len = 0
+    pos = 0
+    age = NO_AGE
+    *(buf as *mut u8) = 0 as u8
+    lekeys.reset()
+    ledraw.begin(prompt, plen, ttyraw.cols(fd))
+    var result: u64 = GO_ON
+    while result == GO_ON {
+        let c: u64 = read_byte()
+        if c == 256 {
+            result = ulib.EOF
+            if len > 0 {
+                result = len
+            }
+        } else {
+            let k: u64 = lekeys.feed(c)
+            if k != lekeys.NONE {
+                result = key(k)
+            }
+        }
+    }
+    ttyraw.raw_off(fd)
+    if result != ulib.EOF {
+        *((buf + len) as *mut u8) = 0 as u8
+        lehist.add(buf, len)
+    }
+    return result
+}
