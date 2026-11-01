@@ -37,12 +37,12 @@ echo "== 0. bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.txt" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; sed 's/^/        /' "$TMPD/build.txt"; \
+    || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/build.txt"; \
          echo "HDA: $pass bestanden, $fail gefallen"; exit 1; }
 
 bash tools/build-kernel.sh "$TMPD/ks.mb" --gui off > "$TMPD/builds.txt" 2>&1 \
     && ok "der Serverbau (--gui off) baut" \
-    || { bad "der Serverbau baut nicht"; sed 's/^/        /' "$TMPD/builds.txt"; }
+    || { bad "the server build does not build"; sed 's/^/        /' "$TMPD/builds.txt"; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 for p in $PROGS; do
@@ -66,7 +66,7 @@ for p in $PROGS; do [ -f "$TMPD/$p.elf" ] && SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; 
 SPEC="$SPEC /ton.wav=$TMPD/m/ton.wav /ton44.wav=$TMPD/m/ton44.wav /mono.wav=$TMPD/m/mono.wav"
 [ $MP3DA = 1 ] && SPEC="$SPEC /ton.mp3=$TMPD/m/ton.mp3"
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "die Platte gebaut" || { bad "mkfs"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
+    && ok "the disk is built" || { bad "mkfs"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 # ---------------------------------------------------------------- Laeufer
 HDADEV="-device intel-hda -device hda-duplex,audiodev=snd0"
@@ -84,7 +84,7 @@ lauf() { # name  kommandozeile  geraet  [zeit] [platte]
     echo $?
 }
 
-echo "== 1. der Regler kommt hoch und findet einen Weg zum Lautsprecher =="
+echo "== 1. the control comes up and finds a way to the speaker =="
 rc=$(lauf hup "osum nokbd nosched noproc nofs audio audgraph audsay" "$HDADEV")
 same "der Kern beendet sich selbst (21)" 21 "$rc"
 has "$TMPD/hup.txt" "hda: ready" "der HD-Audio-Regler ist aufgesetzt"
@@ -106,7 +106,7 @@ num "Ausgabelatenz in Mikrosekunden (der ganze Ring)" \
     "$(val "$TMPD/hup.txt" latencyus)" eq 85333
 has "$TMPD/hup.txt" "kernel: done" "der Kern laeuft nach dem Aufsetzen normal weiter"
 
-echo "== 2. GEGENPROBEN: ohne das Wort, ohne Geraet, ohne Codec =="
+echo "== 2. CONTROLS: without the word, without device, without codec =="
 rc=$(lauf off "osum nokbd nosched noproc nofs" "$HDADEV")
 same "ohne das Wort 'audio' beendet sich der Kern normal" 21 "$rc"
 has "$TMPD/off.txt" "aud: aus (kein Wort)" "ohne das Wort passiert NICHTS"
@@ -124,7 +124,7 @@ has "$TMPD/nodev.txt" "ac97: no device 04:01" "AC97 sagt es auch"
 has "$TMPD/nodev.txt" "aud: kein Geraet, why2" "und die Schicht gibt eine ZAHL heraus (2 = kein Geraet)"
 has "$TMPD/nodev.txt" "kernel: done" "das System laeuft danach ganz normal weiter"
 
-echo "== 3. ZUSAGE (a): DER SINUS WIRD NACHGERECHNET =="
+echo "== 3. PROMISE (a): THE SINE IS RECOMPUTED =="
 rc=$(lauf sine "osum nokbd nosched noproc nofs audio audsine audsay" "$HDADEV")
 same "der Lauf endet sauber" 21 "$rc"
 num "geschriebene Rahmen" "$(val "$TMPD/sine.txt" written)" eq 48000
@@ -144,15 +144,15 @@ sed 's/^/    /' "$TMPD/sine.ref"
 d=$(grep -oE 'ungleich=[0-9]+' "$TMPD/sine.ref" | grep -oE '[0-9]+$')
 num "ZUSAGE (a): Werte, die von der nachgerechneten Reihe abweichen" "${d:-999}" eq 0
 
-echo "== 4. ZUSAGE (b): DIE POSITION, ueber 1 s und ueber 10 s =="
+echo "== 4. PROMISE (b): THE POSITION, over 1 s and over 10 s =="
 dt=$(val "$TMPD/sine.txt" dt_ns); df=$(val "$TMPD/sine.txt" dframes)
 if [ -n "$dt" ] && [ -n "$df" ] && [ "$dt" -gt 0 ]; then
     hz1=$(( df * 1000000000 / dt ))
-    echo "    ueber 1 s: $df Rahmen in $dt ns -> $hz1 Hz"
+    echo "    over 1 s: $df frames in $dt ns -> $hz1 Hz"
     num "Tempo ueber eine Sekunde (48000 Hz +-2 %)" "$hz1" ge 47040
     num "Tempo ueber eine Sekunde, Obergrenze" "$hz1" le 48960
 else
-    bad "die Messwerte der kurzen Strecke fehlen"
+    bad "the readings of the short run are missing"
 fi
 rc=$(lauf pos "osum nokbd nosched noproc nofs audio audpos audsay" "$HDADEV" 180)
 same "der Zehn-Sekunden-Lauf endet sauber" 21 "$rc"
@@ -162,12 +162,12 @@ dt=$(val "$TMPD/pos.txt" pos_dtns); df=$(val "$TMPD/pos.txt" pos_dfr)
 if [ -n "$dt" ] && [ -n "$df" ] && [ "$dt" -gt 0 ]; then
     hz10=$(( df * 1000000000 / dt ))
     ppm=$(( (hz10 - 48000) * 1000000 / 48000 ))
-    echo "    ueber 10 s: $df Rahmen in $dt ns -> $hz10 Hz (${ppm} ppm gegen 48000)"
+    echo "    over 10 s: $df frames in $dt ns -> $hz10 Hz (${ppm} ppm against 48000)"
     #
     num "Tempo ueber zehn Sekunden (48000 Hz +-5 %)" "$hz10" ge 45600
     num "Tempo ueber zehn Sekunden, Obergrenze" "$hz10" le 50400
 else
-    bad "die Messwerte der langen Strecke fehlen"
+    bad "the readings of the long run are missing"
 fi
 rc=$(lauf load "osum nokbd nosched noproc nofs audio audpos audload audsay" "$HDADEV" 180)
 same "derselbe Lauf UNTER RECHENLAST endet sauber" 21 "$rc"
@@ -177,7 +177,7 @@ python3 tools/hda/wavcheck.py "$TMPD/load.wav" --hz 440 --rate 48000 > "$TMPD/lo
 gl=$(grep -oE 'gaps=[0-9]+' "$TMPD/load.chk" | grep -oE '[0-9]+$')
 num "Luecken in der Datei unter Last" "${gl:-999}" eq 0
 
-echo "== 5. ZUSAGE (c): ZWEI PROGRAMME GLEICHZEITIG =="
+echo "== 5. PROMISE (c): TWO PROGRAMS AT THE SAME TIME =="
 rc=$(lauf mix "osum nokbd nosched noproc nofs audio audmix audsay" "$HDADEV" 180)
 same "der Lauf mit zwei Stroemen endet sauber" 21 "$rc"
 num "Strom A bekam eine Kennung" "$(val "$TMPD/mix.txt" mix_ida)" lt 4
@@ -226,7 +226,7 @@ lr=$(grep -oE 'luecke_rest=[0-9]+' "$TMPD/starve.chk" | grep -oE '[0-9]+$')
 num "ZUSAGE (d): und sie ist STILL -- kein Rest des alten Signals darin" \
     "${lr:-999}" eq 0
 
-echo "== 7. ZUSAGE (e): MITTEN IM LAUF SCHLIESSEN =="
+echo "== 7. PROMISE (e): CLOSE IN THE MIDDLE OF A RUN =="
 rc=$(lauf close "osum nokbd nosched noproc nofs audio audclose audsay" "$HDADEV")
 same "der Lauf endet sauber" 21 "$rc"
 num "es lief wirklich etwas, als geschlossen wurde" \
@@ -301,7 +301,7 @@ python3 tools/hda/wavcheck.py "$TMPD/r441.wav" --hz 440 --rate 48000 > "$TMPD/r4
 g4=$(grep -oE 'gaps=[0-9]+' "$TMPD/r441.chk" | grep -oE '[0-9]+$')
 num "und die Datei hat keine Luecke" "${g4:-999}" eq 0
 
-echo "== 9. ZUSAGE (g): RING 3 -- /bin/play auf einer Datei von der Platte =="
+echo "== 9. PROMISE (g): RING 3 -- /bin/play on a file from the disk =="
 #
 pl() { # name  befehlszeile
     local n=$1 cmd=$2
@@ -339,14 +339,14 @@ num "Luecken in dem, was /bin/play ausgegeben hat" "${gp:-999}" eq 0
 pp=$(grep -oE 'peak_hz=[0-9]+' "$TMPD/pwav.chk" | grep -oE '[0-9]+$')
 num "und die Spitze liegt bei 440 Hz" "${pp:-0}" eq 440
 
-echo "-- WAV, 44100 Hz: die Rate wird ausgehandelt --"
+echo "-- WAV, 44100 Hz: the rate is negotiated --"
 rc=$(pl p44 "/bin/play /ton44.wav")
 num "die Datei meldet 44100 Hz" "$(pv "$TMPD/p44.txt" 'rate')" eq 44100
 num "und das Geraet wird darauf gestellt" "$(pv "$TMPD/p44.txt" 'geraetrate')" eq 44100
 num "gespielte Rahmen" "$(pv "$TMPD/p44.txt" 'gespielt')" eq 44100
 num "Aussetzer" "$(pv "$TMPD/p44.txt" 'aussetzer')" eq 0
 
-echo "-- ein Kanal wird zu zweien --"
+echo "-- one channel becomes two --"
 rc=$(pl pmono "/bin/play /mono.wav")
 num "die Datei hat EINEN Kanal" "$(pv "$TMPD/pmono.txt" 'kanaele')" eq 1
 num "und es gehen trotzdem 48000 Rahmen hinaus" \
@@ -356,7 +356,7 @@ gm2=$(grep -oE 'gaps=[0-9]+' "$TMPD/pmono.chk" | grep -oE '[0-9]+$')
 num "ohne Luecken" "${gm2:-999}" eq 0
 
 if [ $MP3DA = 1 ]; then
-echo "-- MP3, durch den Dekodierer aus Runde DEMUX --"
+echo "-- MP3, through the decoder from round DEMUX --"
 rc=$(pl pmp3 "/bin/play /ton.mp3")
 has "$TMPD/pmp3.txt" "art: mp3" "/bin/play erkennt die MP3-Datei"
 mr=$(pv "$TMPD/pmp3.txt" 'rate')
@@ -383,33 +383,33 @@ rq=$(grep -oE 'rms=[0-9]+' "$TMPD/pmp3.chk" | grep -oE '[0-9]+$')
 num "mit einem Pegel in der Groessenordnung des Originals (16970)" "${rq:-0}" ge 12000
 num "und nicht darueber" "${rq:-99999}" le 22000
 else
-    echo "    (ffmpeg fehlt auf dem Wirt -- der MP3-Abschnitt wurde NICHT gemessen)"
-    bad "ZUSAGE (g) UNGEPRUEFT: ohne ffmpeg gibt es keine MP3-Datei zum Abspielen"
+    echo "    (ffmpeg is missing on the host -- the MP3 section was NOT measured)"
+    bad "PROMISE (g) UNCHECKED: without ffmpeg there is no MP3 file to play"
 fi
 
-echo "== 10. ZWEI PROGRAMME GLEICHZEITIG, aus Ring 3 =="
+echo "== 10. TWO PROGRAMS AT THE SAME TIME, from ring 3 =="
 rc=$(pl zwei "/bin/play /ton.wav & /bin/play /ton44.wav")
 n2=$(grep -ca 'strom:' "$TMPD/zwei.txt" || true)
 num "zwei Abspieler haben je einen Strom bekommen" "${n2:-0}" ge 1
 hasnot "$TMPD/zwei.txt" "Gerät ist belegt" "keiner der beiden wurde abgewiesen"
 
-echo "== 11. die Zahlen der Runde =="
+echo "== 11. the numbers of the round =="
 echo "    Zeilen je Datei:"
 for f in kernel/drv/snd/hda.fi kernel/drv/snd/ac97.fi kernel/drv/snd/audio.fi kernel/drv/snd/mix.fi kernel/user/play.fi; do
     printf '      %-24s %5d\n' "$f" "$(grep -c '' "$f")"
 done
 echo "    Ausgabelatenz:      $(val "$TMPD/hup.txt" latencyus) us (ganzer Ring, 4096 Rahmen)"
-echo "    ein Eintrag:        $(val "$TMPD/hup.txt" entryus) us (128 Rahmen)"
-echo "    Aussetzer/Minute:   siehe Abschnitt 4 (10 s mit und ohne Last)"
+echo "    one entry:        $(val "$TMPD/hup.txt" entryus) us (128 Rahmen)"
+echo "    dropouts/minute:   see section 4 (10 s with and without load)"
 
 for n in 1850 1851 1852 1853 1854; do
     c=$(grep -rlan "u64 = $n\$" kernel --include=*.fi | grep -v '^kernel/user/' | grep -vc 'kernel/sys/sys.fi' || true)
-    [ "${c:-0}" = "0" ] && ok "die Aufrufnummer $n ist im Kern nur in sys.fi vergeben" \
-                        || bad "die Aufrufnummer $n kommt $c mal ausserhalb von sys.fi im Kern vor"
+    [ "${c:-0}" = "0" ] && ok "the call number $n is assigned in the kernel only in sys.fi" \
+                        || bad "the call number $n occurs $c times outside sys.fi in the kernel"
 done
 python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1 \
-    && ok "die Speicherkarte von kdata ist ueberschneidungsfrei" \
-    || { bad "die Speicherkarte hat Kollisionen"; sed 's/^/        /' "$TMPD/map.txt"; }
+    && ok "the memory map of kdata has no overlaps" \
+    || { bad "the memory map has collisions"; sed 's/^/        /' "$TMPD/map.txt"; }
 grep -q '0 collisions' "$TMPD/map.txt" && ok "$(tail -1 "$TMPD/map.txt")" || true
 
 echo

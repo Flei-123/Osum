@@ -40,7 +40,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 hin() { printf '  --    %s\n' "$1"; }
 is()  { if [ "${2:-}" = "$3" ]; then ok "$1: $2"; else bad "$1: '${2:-}', erwartet '$3'"; fi; }
 num() { local n=$1 v=${2:-} o=$3 w=$4
-    if [ -z "$v" ]; then bad "$n: keine Zahl (erwartet $o $w)"; return; fi
+    if [ -z "$v" ]; then bad "$n: not a number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, erwartet $o $w"; fi
 }
 kv() { grep -aoE "^ipprint: $2 = .*" "$1" 2>/dev/null | tail -1 | sed 's/^ipprint: [a-z_]* = //' | tr -d '\r'; }
@@ -50,7 +50,7 @@ for t in qemu-system-x86_64 python3 ip ippeveprinter ipptool tesseract; do
     command -v "$t" >/dev/null 2>&1 || { echo "IPPRINT: uebersprungen, $t fehlt"; exit 0; }
 done
 tesseract --list-langs 2>/dev/null | grep -qx deu || {
-    echo "IPPRINT: uebersprungen, tesseract ohne deu"; exit 0; }
+    echo "IPPRINT: skipped, tesseract without deu"; exit 0; }
 
 TMPD=$(mktemp -d)
 NS=drk-$$
@@ -85,14 +85,14 @@ else
     echo "IPPRINT: $pass passed, $fail failed"; exit 1
 fi
 undef=$(nm -u "$TMPD/ipprint.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "keine undefinierte Marke" || bad "undefiniert: $undef"
+[ -z "$undef" ] && ok "no undefined mark" || bad "undefiniert: $undef"
 ld -T kernel/user/user.ld -o "$TMPD/ipprint.elf" "$TMPD/ipprint.o" 2>"$TMPD/ld.err" \
     && ok "ld mit kernel/user/user.ld" || { bad "ld schlaegt fehl"; head -3 "$TMPD/ld.err"; }
 strip --strip-all "$TMPD/ipprint.elf" 2>/dev/null
 num "das Programm auf der Platte, in Oktetten" "$(stat -c%s "$TMPD/ipprint.elf" 2>/dev/null)" le 1500000
 
 HWNET_PROGS="sh ls cat echo" bash tools/hwnet/build.sh "$TMPD/s0" 0 > "$TMPD/b0.txt" 2>&1 \
-    || { bad "der Kern baut nicht"; tail -8 "$TMPD/b0.txt" | sed 's/^/        /'
+    || { bad "the kernel does not build"; tail -8 "$TMPD/b0.txt" | sed 's/^/        /'
          echo "IPPRINT: $pass passed, $fail failed"; exit 1; }
 ok "Kern und Userland gebaut"
 K="$TMPD/s0/k.mb"
@@ -209,7 +209,7 @@ lauf() { # <script> <out>
 U=ipp://10.9.0.1:8631/ipp/print
 
 # ======================================================================
-echo "== 2. der Drucker, so wie ipprint ihn sieht -- und wie CUPS ihn sieht =="
+echo "== 2. the printer as ipprint sees it -- and as CUPS sees it =="
 # ======================================================================
 lauf "ipprint info $U" "$TMPD/o_info.txt"
 is "stand" "$(kv "$TMPD/o_info.txt" state)" "ok"
@@ -234,7 +234,7 @@ grep -aoE '^ipprint: resolution = .*' "$TMPD/o_info.txt" | sed 's/^ipprint: reso
 is "pwg-raster-document-resolution-supported wie ipptool" "$(cat "$TMPD/res_ipprint.txt")" "$(cat "$TMPD/res_cups.txt")"
 
 # ======================================================================
-echo "== 3. zwei Seiten deutscher Text =="
+echo "== 3. two pages of German text =="
 # ======================================================================
 T0=$(date +%s)
 lauf "ipprint $U /doc/probe.txt" "$TMPD/o_p.txt"
@@ -249,10 +249,10 @@ JOB=$(kv "$TMPD/o_p.txt" job)
 hin "Auftrag $JOB, ganzer Lauf in QEMU $((T1-T0)) s"
 SP=$(ls "$TMPD/sp1/$JOB"-*.pwg 2>/dev/null | head -1)
 if [ -n "$SP" ]; then
-    ok "der Drucker hat die Datei gespoolt: $(basename "$SP"), $(stat -c%s "$SP") Oktette"
+    ok "the printer spooled the file: $(basename "$SP"), $(stat -c%s "$SP") Oktette"
     is "  so viele Oktette, wie ipprint nennt" "$(stat -c%s "$SP")" "$(kv "$TMPD/o_p.txt" octets)"
 else
-    bad "keine gespoolte Datei fuer Auftrag $JOB"; ls -la "$TMPD/sp1" | sed 's/^/        /'
+    bad "no spooled file for job $JOB"; ls -la "$TMPD/sp1" | sed 's/^/        /'
 fi
 grep -a "Print-Job" "$TMPD/p1.log" | head -2 | sed 's/^/        /'
 mkdir -p "$TMPD/pg"
@@ -261,8 +261,8 @@ sed 's/^/        /' "$TMPD/chk.txt"
 is "der zweite PWG-Leser: gueltig" "$(pk "$TMPD/chk.txt" ok)" "1"
 is "Seiten in der Datei" "$(pk "$TMPD/chk.txt" pages)" "2"
 grep -q '^page1=2480x3508 dpi=300x300 bpc=8 bpp=8 bpl=2480 cs=18 ncol=1 pagesize=595x842 total=2 ' "$TMPD/chk.txt" \
-    && ok "Seite 1: A4 = 2480x3508 bei 300 dpi, sgray 8 Bit, TotalPageCount 2" \
-    || bad "Seite 1 hat nicht die erwarteten Kopfwerte"
+    && ok "Page 1: A4 = 2480x3508 at 300 dpi, sgray 8 bit, TotalPageCount 2" \
+    || bad "page 1 does not have the expected header values"
 grep -q 'size=iso_a4_210x297mm' "$TMPD/chk.txt" && ok "PageSizeName iso_a4_210x297mm" || bad "PageSizeName fehlt"
 BOX=$(grep -oE '^page1_ink=[0-9]+ box=[0-9,-]+' "$TMPD/chk.txt" | sed 's/.*box=//')
 IFS=, read -r BL BT BR BB <<< "$BOX"
@@ -275,19 +275,19 @@ fi
 tesseract "$TMPD/pg/page-1.pgm" - -l deu --psm 6 > "$TMPD/ocr1.txt" 2>/dev/null
 tesseract "$TMPD/pg/page-2.pgm" - -l deu --psm 6 > "$TMPD/ocr2.txt" 2>/dev/null
 grep -q 'Drucktest' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Drucktest'" || bad "OCR Seite 1 liest 'Drucktest' nicht"
-grep -q 'Grüße aus Österreich' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Grüße aus Österreich' -- mit Umlauten und ß" || bad "OCR Seite 1: die Umlautzeile fehlt: $(sed -n 2p "$TMPD/ocr1.txt")"
+grep -q 'Grüße aus Österreich' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Grüße aus Österreich' -- mit Umlauten und ß" || bad "OCR page 1: the umlaut line is missing: $(sed -n 2p "$TMPD/ocr1.txt")"
 grep -q 'äöü ß' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'äöü ß'" || bad "OCR: 'äöü ß' fehlt"
 grep -q 'Übel Ärger Öfen' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Übel Ärger Öfen' -- grosse Umlaute" || bad "OCR: 'Übel Ärger Öfen' fehlt: $(sed -n 2p "$TMPD/ocr1.txt")"
 grep -q 'quick brown fox' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'quick brown fox'" || bad "OCR: 'quick brown fox' fehlt"
 Z1=$(grep -c 'Kalender Fenster Drucker Netzwerk' "$TMPD/ocr1.txt")
 Z2=$(grep -c 'Kalender Fenster Drucker Netzwerk' "$TMPD/ocr2.txt")
 num "OCR: Textzeilen auf beiden Seiten zusammen (von 89)" "$((Z1+Z2))" ge 86
-grep -q 'Zeile 001' "$TMPD/ocr1.txt" && ok "Zeile 001 auf Seite 1" || bad "Zeile 001 nicht auf Seite 1"
-grep -q 'Zeile 089' "$TMPD/ocr2.txt" && ok "Zeile 089 auf Seite 2" || bad "Zeile 089 nicht auf Seite 2"
+grep -q 'Zeile 001' "$TMPD/ocr1.txt" && ok "Line 001 on page 1" || bad "Line 001 not on page 1"
+grep -q 'Zeile 089' "$TMPD/ocr2.txt" && ok "Line 089 on page 2" || bad "Line 089 not on page 2"
 if grep -q 'Drucktest\|Zeile 001' "$TMPD/ocr2.txt"; then
     bad "Gegenprobe: Seite 2 enthaelt Seite 1"
 else
-    ok "Gegenprobe: Seite 2 enthaelt NICHT Seite 1 (die Seiten sind verschieden)"
+    ok "Control: page 2 does NOT contain page 1 (the pages differ)"
 fi
 # The reader must be able to say no.
 head -c $(( $(stat -c%s "${SP:-/dev/null}") - 5000 )) "${SP:-/dev/null}" > "$TMPD/kaputt.pwg" 2>/dev/null
@@ -303,7 +303,7 @@ python3 tools/print/pwgcheck.py "$TMPD/kaputt2.pwg" "$TMPD" > "$TMPD/chk3.txt" 2
 is "Gegenprobe: eine falsche Wiederholzahl -> der Leser lehnt ab" "$(pk "$TMPD/chk3.txt" ok)" "0"
 
 # ======================================================================
-echo "== 4. ohne Adresse: /etc/printer.conf =="
+echo "== 4. without address: /etc/printer.conf =="
 # ======================================================================
 T0=$SECONDS
 lauf "ipprint /doc/kurz.txt" "$TMPD/o_c.txt"
@@ -317,7 +317,7 @@ is "ziel aus der Datei" "$(kv "$TMPD/o_c.txt" target)" "$U"
 is "seiten" "$(kv "$TMPD/o_c.txt" pages)" "1"
 
 # ======================================================================
-echo "== 5. eine Zeile, laenger als das Blatt =="
+echo "== 5. a line longer than the sheet =="
 # ======================================================================
 lauf "ipprint $U /doc/lang.txt" "$TMPD/o_l.txt"
 is "stand" "$(kv "$TMPD/o_l.txt" state)" "ok"
@@ -332,7 +332,7 @@ for w in Apfel Birne Kirsche Dattel Erbse Feige Gurke Hafer Ingwer Kohl Linse Ma
     grep -qw "$w" "$TMPD/ocrl.txt" && N=$((N+1))
 done
 num "OCR: verschiedene Woerter der langen Zeile auf dem Blatt (von 30)" "$N" ge 28
-grep -qw 'Pflaume' "$TMPD/ocrl.txt" && ok "das letzte Wort ist auf dem Papier (umgebrochen, nicht abgeschnitten)" || bad "Pflaume (das letzte Wort) fehlt"
+grep -qw 'Pflaume' "$TMPD/ocrl.txt" && ok "the last word is on the paper (wrapped, not cut off)" || bad "Pflaume (the last word) is missing"
 num "sie steht auf mehr als einer Zeile" "$(grep -cE 'Apfel|Birne|Kirsche|Dattel|Erbse|Feige|Gurke|Hafer|Ingwer|Kohl|Linse|Mais|Nudel|Olive|Paprika|Quark|Rettich|Salat|Tomate|Rucola|Vanille|Weizen|Zwiebel|Banane|Karotte|Melone|Spinat|Kresse|Fenchel|Pflaume' "$TMPD/ocrl.txt")" ge 3
 BOXL=$(grep -oE '^page1_ink=[0-9]+ box=[0-9,-]+' "$TMPD/chkl.txt" | sed 's/.*box=//')
 BRL=$(echo "$BOXL" | cut -d, -f3)
@@ -354,9 +354,9 @@ is "format" "$(kv "$TMPD/o_pdf.txt" format)" "application/pdf"
 JP=$(kv "$TMPD/o_pdf.txt" job)
 SPDF=$(ls "$TMPD/sp1/$JP"-*.pdf 2>/dev/null | head -1)
 if [ -n "$SPDF" ] && [ "$(sha256sum < "$SPDF")" = "$(sha256sum < "$TMPD/probe.pdf")" ]; then
-    ok "die gespoolte Datei ist Oktett fuer Oktett das PDF ($(stat -c%s "$SPDF") Oktette)"
+    ok "the spooled file is byte for byte the PDF ($(stat -c%s "$SPDF") Oktette)"
 else
-    bad "das PDF kam nicht unveraendert an: '${SPDF:-keine Datei}'"
+    bad "the PDF did not arrive unchanged: '${SPDF:-keine Datei}'"
 fi
 
 # ======================================================================
@@ -369,10 +369,10 @@ is "  und kein Auftrag beim Drucker (Dateien im Spool)" "$(ls "$TMPD/sp1" | wc -
 lauf "ipprint ipp://10.9.0.1:8632/ipp/print /doc/kurz.txt" "$TMPD/o_np.txt"
 is "Text an einen reinen PDF-Drucker" "$(kv "$TMPD/o_np.txt" state)" "noformat"
 is "  und dort liegt nichts" "$(ls "$TMPD/sp2" | wc -l)" "0"
-grep -qa 'takes neither PWG raster' "$TMPD/o_np.txt" && ok "  mit einem Satz, der sagt warum" || bad "  ohne Begruendung"
+grep -qa 'takes neither PWG raster' "$TMPD/o_np.txt" && ok "  with a sentence that says why" || bad "  ohne Begruendung"
 
 # ======================================================================
-echo "== 9. US Letter, weil der Drucker es sagt =="
+echo "== 9. US Letter, because the printer says so =="
 # ======================================================================
 lauf "ipprint ipp://10.9.0.1:8633/ipp/print /doc/kurz.txt" "$TMPD/o_lt.txt"
 is "stand" "$(kv "$TMPD/o_lt.txt" state)" "ok"
@@ -381,10 +381,10 @@ is "hoehe (11 Zoll)" "$(kv "$TMPD/o_lt.txt" height)" "3300"
 SLT=$(ls "$TMPD/sp3/"*.pwg 2>/dev/null | head -1)
 python3 tools/print/pwgcheck.py "${SLT:-/nonexistent}" "$TMPD" > "$TMPD/chklt.txt" 2>&1
 grep -q 'size=na_letter_8.5x11in' "$TMPD/chklt.txt" && grep -q '^ok=1' "$TMPD/chklt.txt" \
-    && ok "die Datei: gueltig, na_letter_8.5x11in" || bad "Letter-Datei: $(tail -2 "$TMPD/chklt.txt")"
+    && ok "the file: valid, na_letter_8.5x11in" || bad "Letter-Datei: $(tail -2 "$TMPD/chklt.txt")"
 
 # ======================================================================
-echo "== 10. kein Drucker unter der Adresse =="
+echo "== 10. no printer at the address =="
 # ======================================================================
 T0=$(date +%s)
 lauf "ipprint ipp://10.9.0.1:8699/ipp/print /doc/kurz.txt" "$TMPD/o_n.txt"

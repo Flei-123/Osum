@@ -21,7 +21,7 @@ num() { # name wert vergleich soll
 }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "GUI-EDITOR: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "GUI-EDITOR: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 python3 -c "import PIL" 2>/dev/null || {
     echo "GUI-EDITOR: uebersprungen, Pillow fehlt"; exit 0; }
@@ -73,7 +73,7 @@ lauf() {
     return $?
 }
 
-echo "== 1. bauen: die Bibliothek, das Programm und das Buendel =="
+echo "== 1. build: the library, the program and the bundle =="
 if vendor/firn/bin/firnc --profile=app -c kernel/user/nedit.fi \
         -o "$OUT/nedit.o" > "$OUT/e-nedit" 2>&1; then
     ok "kernel/user/nedit.fi uebersetzt"
@@ -81,17 +81,17 @@ else
     bad "kernel/user/nedit.fi uebersetzt"; head -12 "$OUT/e-nedit"
 fi
 rm -f "$OUT/nedit.o"
-[ -f assets/apps/editor.osp/INFO ] && ok "das Buendel assets/apps/editor.osp ist da" \
-    || bad "das Buendel assets/apps/editor.osp fehlt"
+[ -f assets/apps/editor.osp/INFO ] && ok "the bundle assets/apps/editor.osp is there" \
+    || bad "the bundle assets/apps/editor.osp is missing"
 if python3 tools/k15/icon.py assets/apps/editor.osp/symbol.txt \
         "$OUT/sym.bin" > /dev/null 2>&1; then
-    ok "sein Symbol laesst sich in ein Bild wandeln"
+    ok "its icon can be converted into an image"
 else
-    bad "sein Symbol laesst sich in ein Bild wandeln"
+    bad "its icon can be converted into an image"
 fi
 grep -qa '^import wlib$' kernel/user/edit.fi \
-    && bad "kernel/user/edit.fi zieht auf einmal wlib herein -- das ist der TERMINAL-Editor" \
-    || ok "kernel/user/edit.fi ist unveraendert ein Terminalprogramm (kein wlib)"
+    && bad "kernel/user/edit.fi suddenly pulls in wlib -- that is the TERMINAL editor" \
+    || ok "kernel/user/edit.fi is still a terminal program (no wlib)"
 grep -qa '^/bin/nedit' assets/apps/editor.osp/start.txt \
     && ok "assets/apps/editor.osp (the merged Editor) starts /bin/nedit" \
     || bad "assets/apps/editor.osp does not start /bin/nedit"
@@ -99,14 +99,14 @@ grep -qa '^/bin/nedit' assets/apps/editor.osp/start.txt \
     && bad "assets/apps/nedit.osp is back: two Editor entries in the start menu" \
     || ok "no second Editor+ bundle (merged into editor.osp)"
 
-echo "== 2. die Bibliothek malt nicht an fUi vorbei =="
+echo "== 2. the library does not paint past fUi =="
 if bash tools/check-ui.sh > "$OUT/checkui.txt" 2>&1; then
     ok "tools/check-ui.sh: bestanden"
 else
     bad "tools/check-ui.sh: gescheitert"; sed -n '1,12p' "$OUT/checkui.txt"
 fi
 
-echo "== 3. eine Datei mit 5000 Zeilen =="
+echo "== 3. a file with 5000 lines =="
 lauf gross /gross.fi "$GROSS" ",rollnur=2000,messen=5000"
 S="$OUT/gross/serial.txt"
 zeilen=$(grep -aoE 'nedit: reiter [0-9]+ zeilen [0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
@@ -115,7 +115,7 @@ tipp=$(grep -aoE 'tippen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S" | head -1 | gre
 roll=$(grep -aoE 'rollen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
 echo "        gemessen: tippen ${tipp:-?} us/Taste, rollen ${roll:-?} us/Taste (5001 Zeilen)"
 
-echo "== 4. dasselbe mit ZWOELF Zeilen -- der Vergleich ist die Aussage =="
+echo "== 4. the same with TWELVE lines -- the comparison is the statement =="
 lauf klein /probe.fi "$KLEIN" ",rollnur=2000,messen=5000"
 S2="$OUT/klein/serial.txt"
 tipp2=$(grep -aoE 'tippen n[0-9]+ ticks [0-9]+ us_je [0-9]+' "$S2" | head -1 | grep -oE '[0-9]+$')
@@ -125,17 +125,17 @@ if [ -n "${tipp:-}" ] && [ -n "${tipp2:-}" ]; then
     if [ "$tipp2" -eq 0 ]; then tipp2=1; fi
     v=$(( tipp * 100 / tipp2 ))
     if [ "$v" -le 300 ]; then
-        ok "Tippen kostet bei 5001 Zeilen nicht mehr als das Dreifache von 12 Zeilen ($v %)"
+        ok "Typing at 5001 lines costs no more than three times 12 lines ($v %)"
     else
-        bad "Tippen kostet bei 5001 Zeilen das ${v}-fache (in Prozent) von 12 Zeilen"
+        bad "Typing at 5001 lines costs ${v} times (in percent) 12 lines"
     fi
     num "Tippen je Taste unter 2000 us" "$tipp" -lt 2000
 else
-    bad "die Messzeilen fehlen auf der Leitung"
+    bad "the measurement lines are missing on the wire"
 fi
 num "Rollen je Taste unter 2000 us (ohne Anstrich)" "${roll:-999999}" -lt 2000
 
-echo "== 5. zwei Dateien in zwei Reitern =="
+echo "== 5. two files in two tabs =="
 d="$OUT/reiter"
 bash tools/alltag/build.sh "$d" \
     progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
@@ -146,9 +146,9 @@ S3="$d/serial.txt"
 rt=$(grep -aoE 'nedit: reiter [0-9]+' "$S3" | head -1 | grep -oE '[0-9]+$')
 num "zwei Reiter offen" "${rt:-0}" -eq 2
 [ -s "$d/desktop.png" ] && cp "$d/desktop.png" "$SHOTS/ab-reiter.png"
-[ -s "$SHOTS/ab-reiter.png" ] && ok "Bild: zwei Reiter" || bad "Bild: zwei Reiter fehlt"
+[ -s "$SHOTS/ab-reiter.png" ] && ok "Image: two tabs" || bad "Image: two tabs missing"
 
-echo "== 6. Auswahl, Suchen, Ersetzen -- je ein Bild =="
+echo "== 6. selection, search, replace -- one image each =="
 for z in 1 2 3; do
     d="$OUT/zeig$z"
     bash tools/alltag/build.sh "$d" \
@@ -162,8 +162,8 @@ z1=$(grep -aoE 'nedit: reiter [0-9]+ zeilen [0-9]+ zeile [0-9]+ spalte [0-9]+' \
      "$OUT/zeig1/serial.txt" | tail -1)
 z2=$(grep -aoE 'zeile [0-9]+ spalte [0-9]+' "$OUT/zeig2/serial.txt" | tail -1)
 z3=$(grep -aoE 'modif [0-9]+' "$OUT/zeig3/serial.txt" | tail -1 | grep -oE '[0-9]+$')
-echo "        Auswahl endet bei: $z1"
-echo "        Suchtreffer steht bei: $z2"
+echo "        selection ends at: $z1"
+echo "        search hit is at: $z2"
 num "nach dem Ersetzen ist die Datei veraendert" "${z3:-0}" -eq 1
 
 python3 - "$SHOTS/ab-zeig2.png" > "$OUT/farben.txt" 2>&1 <<'PY'
@@ -183,7 +183,7 @@ nf=$(grep -aoE '^farben=[0-9]+' "$OUT/farben.txt" | grep -oE '[0-9]+')
 num "der Text hat mehr als eine Farbe (Syntaxhervorhebung)" "${nf:-0}" -ge 3
 sed -n '2,6p' "$OUT/farben.txt" | sed 's/^/        /'
 
-echo "== 7. Sichern: die Oktette liegen wirklich auf der Platte =="
+echo "== 7. save: the bytes really are on the disk =="
 #
 d="$OUT/sichern"
 bash tools/alltag/build.sh "$d" \
@@ -192,8 +192,8 @@ bash tools/alltag/build.sh "$d" \
     "xfile=/probe.fi=$KLEIN" \
     extra="wigapp=/bin/nedit,/probe.fi,zeig=5" > "$d.log" 2>&1
 grep -qa 'nedit: gesichert' "$d/serial.txt" \
-    && ok "der Editor meldet, dass er gesichert hat" \
-    || bad "der Editor meldet kein Sichern"
+    && ok "the editor reports that it saved" \
+    || bad "the editor reports no save"
 mod=$(grep -aoE 'modif [0-9]+' "$d/serial.txt" | tail -1 | grep -oE '[0-9]+$')
 num "nach dem Sichern ist das Aenderungszeichen weg" "${mod:-1}" -eq 0
 d2="$OUT/nachlesen"
@@ -201,14 +201,14 @@ bash tools/alltag/build.sh "$d2" \
     progs="desktop taskbar nedit sh echo ls cat" accel="${OSUM_ACCEL:-kvm}" \
     shot=no platte="$d/disk.img" script="cat /probe.fi" > "$d2.log" 2>&1
 if grep -qa 'var TOTAL: u64 = 0' "$d2/serial.txt"; then
-    ok "eine ZWEITE Maschine liest die geaenderte Zeile von derselben Platte"
+    ok "a SECOND machine reads the changed line from the same disk"
 else
-    bad "die geaenderte Zeile steht nicht auf der Platte"
+    bad "the changed line is not on the disk"
     grep -a -A3 'probe.fi --' "$d2/serial.txt" | head -5 | sed 's/^/        /'
 fi
 grep -qa 'const TEXT: u64 = 0x1234' "$d2/serial.txt" \
-    && ok "der Rest der Datei ist unveraendert" \
-    || bad "der Rest der Datei hat gelitten"
+    && ok "the rest of the file is unchanged" \
+    || bad "the rest of the file was damaged"
 
 echo
 echo "GUI-EDITOR: $pass bestanden, $fail gescheitert"

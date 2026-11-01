@@ -57,7 +57,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 
 # =====================================================================
-echo "== 1. die Nummern und die Speicherkarte, ohne den Kernel zu starten =="
+echo "== 1. the numbers and the memory map, without starting the kernel =="
 # =====================================================================
 
 for f in kernel/sys/sys.fi lib/libc/kcall.fi; do
@@ -85,7 +85,7 @@ done
 
 kk=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/lib/kstate.fi | head -1)
 kb=$(sed -n 's/.*\.set KDATA_SIZE, \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/arch/x86_64/boot.s | head -1)
-if [ "$kk" = "$kb" ] && [ -n "$kk" ]; then ok "KDATA_SIZE: kstate.fi und boot.s sagen beide $kk"
+if [ "$kk" = "$kb" ] && [ -n "$kk" ]; then ok "KDATA_SIZE: kstate.fi and boot.s both say $kk"
 else bad "KDATA_SIZE: kstate.fi='$kk', boot.s='$kb'"; fi
 
 if python3 tools/kernel/memmap.py > "$TMPD/memmap.txt" 2>&1; then
@@ -95,7 +95,7 @@ else
 fi
 
 # =====================================================================
-echo "== 2. bauen: Kernel und /bin/aiot, mit beiden Uebersetzern =="
+echo "== 2. build: kernel and /bin/aiot, with both compilers =="
 # =====================================================================
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 for f in boot isr switch smp hv; do
@@ -109,7 +109,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     [ -x "$cc" ] || return 1
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
-        || { bad "firnc$s uebersetzt den Kernel nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
+        || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     "$cc" kernel/uprog.fi -o "$TMPD/uprog$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt uprog.fi nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     ld -n -T "$LDSCRIPT" \
@@ -122,7 +122,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=USER_MAIN="_F$s.u_enter" \
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
         "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/uprog$s.o" 2>"$TMPD/ld$s.err" \
-        || { bad "firnc$s: ld ist am Kernel gescheitert"; return 1; }
+        || { bad "firnc$s: ld failed on the kernel"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
     for p in $PROGS; do
         "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
@@ -137,19 +137,19 @@ build_stage() { # 0 = firnc0, 1 = firnc1
 build_stage 0 || { echo "ASYNC: $pass bestanden, $fail durchgefallen"; exit 1; }
 ok "firnc0: Kernel + $(echo $PROGS | wc -w) Programme"
 if build_stage 1; then
-    ok "firnc1: dasselbe, aus dem in Firn geschriebenen Uebersetzer"
+    ok "firnc1: the same, from the compiler written in Firn"
 else
     note "firnc1 hat nicht gebaut -- die Messungen unten laufen mit firnc0"
 fi
 
 undef=$(nm -u "$TMPD/aiot0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "/bin/aiot hat keinen undefinierten Namen -- die libc-Anbindung ist vollstaendig" \
+[ -z "$undef" ] && ok "/bin/aiot has no undefined name -- the libc binding is complete" \
                 || bad "undefinierte Namen in aiot: $undef"
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py hat ein OFS-Abbild mit /bin/aiot gebaut" \
+    && ok "mkfs.py built an OFS image with /bin/aiot" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 run_kernel() { # abbild anhang ausgabe [weitere qemu-argumente]
@@ -167,7 +167,7 @@ run_disk() { # abbild anhang ausgabe
 }
 
 # =====================================================================
-echo "== 3. die sechs Fehlerklassen, aus Ring 3 ($OSUM_QEMU_ACCEL) =="
+echo "== 3. the six error classes, from ring 3 ($OSUM_QEMU_ACCEL) =="
 # =====================================================================
 T0=$(date +%s%N)
 run_kernel "$TMPD/k0.mb" "async" "$TMPD/a0.txt"
@@ -175,24 +175,24 @@ rc=$?
 T1=$(date +%s%N)
 tr -d '\000' < "$TMPD/a0.txt" > "$TMPD/a0.clean"
 F="$TMPD/a0.clean"
-[ "$rc" -eq 21 ] && ok "der Kernel hat selbst Schluss gemacht (Beendigungscode 21)" \
+[ "$rc" -eq 21 ] && ok "the kernel stopped on its own (exit code 21)" \
                  || { bad "QEMU-Beendigungscode $rc, erwartet 21"; tail -8 "$F" | sed 's/^/        /'; }
 note "Laufzeit dieses Abschnitts: $(( (T1-T0)/1000000 )) ms mit $OSUM_QEMU_ACCEL"
 
-echo "   -- (a) das Handle wird geschlossen, waehrend der Auftrag laeuft"
+echo "   -- (a) the handle is closed while the job is running"
 zusage "$F" "a-auftrag-laeuft"
 zusage "$F" "a-kein-free-in-flug"
 zusage "$F" "a-ergebnis-vier"
 zusage "$F" "a-danach-frei"
 zusage "$F" "a-kein-leck"
 
-echo "   -- (b) der Platz wird neu vergeben (die io_uring-Fehlerklasse)"
+echo "   -- (b) the slot is reassigned (the io_uring error class)"
 zusage "$F" "b-selber-platz"
 zusage "$F" "b-veraltet"
 zusage "$F" "b-nicht-das-neue-ding"
 zusage "$F" "b-kein-leck"
 
-echo "   -- (c) Abbruch, und GENAU EINE Fertigmeldung"
+echo "   -- (c) abort, and EXACTLY ONE completion message"
 zusage "$F" "c-angelegt"
 zusage "$F" "c-abgebrochen"
 zusage "$F" "c-nach-abbruch-weg"
@@ -208,21 +208,21 @@ zusage "$F" "e-nichtblockierend"
 zusage "$F" "e-zeitgrenze"
 zusage "$F" "e-kein-leck"
 
-echo "   -- (f) ein fremder Auftrag, und (d) der Prozesstod"
+echo "   -- (f) a foreign job, and (d) the process death"
 zusage "$F" "f-es-gibt-ihn-wirklich"
 zusage "$F" "f-fremder-zustand"
 zusage "$F" "f-fremder-abbruch"
 zusage "$F" "d-tod-raeumt-ab"
 zusage "$F" "d-drei-abgeraeumt"
 
-echo "   -- die Arten: schreiben, schliessen"
+echo "   -- the kinds: write, close"
 zusage "$F" "arten-fassung"
 zusage "$F" "arten-schreiben"
 zusage "$F" "arten-schliessen"
 zusage "$F" "arten-danach-zu"
 zusage "$F" "arten-kein-leck"
 
-echo "   -- und dieselben Arten auf einem Dateisystem"
+echo "   -- and the same kinds on a file system"
 zusage "$F" "fs-open-geht"
 zusage "$F" "fs-read-vierzehn"
 zusage "$F" "fs-fsync-ok"
@@ -235,7 +235,7 @@ has "$F" "async: 32/32 Zusagen" "das Programm zaehlt selbst 32 von 32"
 has "$F" "asyncfs: 7/7 Zusagen" "und 7 von 7 auf dem Dateisystem"
 has "$F" "async: ring 3 exit=0" "Beendigungscode 0: keine Zusage gefallen"
 
-echo "   -- die Leckzahlen (sie sind der eigentliche Beweis)"
+echo "   -- the leak counts (they are the actual proof)"
 num "belegte Auftragsplaetze nach dem Lauf" "$(zahl "$F" used)" eq 0
 num "laufende Auftraege nach dem Lauf"      "$(zahl "$F" live)" eq 0
 num "verlorene Fertigmeldungen"             "$(zahl "$F" lost)" eq 0
@@ -253,7 +253,7 @@ num "Zugriffe auf fremde Auftraege"         "$(zahl "$F" denied)" ge 2
 num "Durchlaeufe der Arbeitsfaeden mit Arbeit" "$(zahl "$F" workruns)" lt 2000
 
 # =====================================================================
-echo "== 4. die drei Gegenproben: ohne sie beweist Abschnitt 3 nichts =="
+echo "== 4. the three controls: without them section 3 proves nothing =="
 # =====================================================================
 run_kernel "$TMPD/k0.mb" "async noagen" "$TMPD/g1.txt"
 tr -d '\000' < "$TMPD/g1.txt" > "$TMPD/g1.clean"
@@ -278,14 +278,14 @@ note "mehrere Zusagen fallen, ist der Nachweis, dass die Arbeit im"
 note "Regelbetrieb wirklich woanders geschieht -- und nicht nur so heisst."
 
 # =====================================================================
-echo "== 5. die libc-Anbindung: /bin/aiot von der Platte =="
+echo "== 5. the libc binding: /bin/aiot from the disk =="
 # =====================================================================
 run_disk "$TMPD/k0.mb" "osum nokbd nosched noproc noring3 async script=aiot;exit" \
          "$TMPD/d0.txt"
 rc=$?
 tr -d '\000' < "$TMPD/d0.txt" > "$TMPD/d0.clean"
 D="$TMPD/d0.clean"
-[ "$rc" -eq 21 ] && ok "der Lauf von der Platte ist sauber zu Ende gekommen" \
+[ "$rc" -eq 21 ] && ok "the run from the disk finished cleanly" \
                  || { bad "QEMU-Beendigungscode $rc, erwartet 21"; tail -8 "$D" | sed 's/^/        /'; }
 
 num "aio_version"                        "$(azahl "$D" version)"     eq 1
@@ -317,7 +317,7 @@ num "der siebzehnte gibt -EAGAIN"        "$(azahl "$D" voll_fehler)" eq 11
 num "und alle sechzehn kommen zurueck"   "$(azahl "$D" voll_weg)"    eq 16
 
 # =====================================================================
-echo "== 6. die Messung: Latenz und Durchsatz gegen den synchronen Weg =="
+echo "== 6. the measurement: latency and throughput against the synchronous path =="
 # =====================================================================
 run_kernel "$TMPD/k0.mb" "abench unix" "$TMPD/b0.txt"
 tr -d '\000' < "$TMPD/b0.txt" > "$TMPD/b0.clean"
@@ -337,26 +337,26 @@ if [ -n "$khz" ] && [ "$khz" -gt 0 ] 2>/dev/null && [ -n "$a16" ]; then
     note "  nur die Abgabe       $su Zyklen = $(us "$su") us    (was der ABGEBER zahlt)"
     note "  Speicher je Auftrag  $by Oktett"
 else
-    bad "die Messung hat keine Zahlen geliefert"
+    bad "the measurement delivered no numbers"
 fi
 if [ -n "$a1" ] && [ -n "$a16" ]; then
     if [ "$a16" -lt "$a1" ]; then
-        ok "die Tiefe zahlt sich aus: 16 offene Auftraege kosten je $a16 Zyklen, einer $a1"
+        ok "the depth pays off: 16 open jobs cost $a16 cycles each, one costs $a1"
     else
-        bad "die Tiefe zahlt sich NICHT aus: 16 offene kosten je $a16, einer $a1"
+        bad "the depth does NOT pay off: 16 open cost $a16 each, one $a1"
     fi
 fi
 if [ -n "$su" ] && [ -n "$sy" ]; then
     if [ "$su" -lt "$sy" ]; then
         ok "der Abgeber zahlt $su statt $sy Zyklen je Lesevorgang"
     else
-        bad "die Abgabe ($su) ist nicht billiger als der synchrone Aufruf ($sy)"
+        bad "the submission ($su) is not cheaper than the synchronous call ($sy)"
     fi
 fi
 num "Speicher je Auftrag in Oktett (Satz + Fertigmeldung)" "${by:-0}" eq 112
 
 # =====================================================================
-echo "== 7. derselbe Kernel aus dem zweiten Uebersetzer =="
+echo "== 7. the same kernel from the second compiler =="
 # =====================================================================
 if [ -f "$TMPD/k1.mb" ]; then
     run_kernel "$TMPD/k1.mb" "async" "$TMPD/a1.txt"
