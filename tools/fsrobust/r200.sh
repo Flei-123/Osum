@@ -44,7 +44,7 @@ tar --exclude=.git --exclude='*.o' -cf - . | (cd "$OUT/revtree" && tar xf -)
 python3 - "$OUT/revtree" <<'PY'
 import sys, os
 root = sys.argv[1]
-for p in ("kernel/sys/sys.fi", "kernel/sys/sysgui.fi"):
+for p in ("kernel/sys/sysuser.fi", "kernel/sys/sysgui.fi"):
     f = os.path.join(root, p)
     s = open(f).read()
     i = s.index("fn blockb(state: u64) -> u64 {")

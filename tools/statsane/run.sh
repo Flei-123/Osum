@@ -58,7 +58,7 @@ echo "== B. counter-proof nostatsane: the old cast panics, the hang report names
 boot b "nostatsane" 90
 S=$TMPD/b.ser
 grep -qax "statdone" "$S" && bad "B statdone printed" || ok "B script stops at the stat"
-has "$S" "panic: integer overflow casting 'u64 as u32' at kernel/sys/sys.fi" "B COM1 shows the checked-cast panic"
+has "$S" "panic: integer overflow casting 'u64 as u32' at kernel/sys/sysfile.fi" "B COM1 shows the checked-cast panic"
 f=$(crash_file "$TMPD/b.img")
 if [ -n "$f" ]; then
     python3 tools/osum/mkfs.py cat "$TMPD/b.img" "/$f" 2>/dev/null | tr -cd '\11\12\15\40-\176' > "$TMPD/b.rep"
