@@ -345,6 +345,7 @@ WH=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]*' "$SE" | tail -1 \
      | grep -oE 'h=[0-9]+' | cut -d= -f2)
 num "das Fenster ist so hoch wie der Arbeitsbereich zulaesst" "${WH:-0}" ge 560
 INNER=$((${WH:-566} - 24))
+CLIENT_H=${WH:-566}
 #
 VKLICK=$(python3 - "$SE" locale/de/messages <<'PYV'
 import re, sys
@@ -646,11 +647,11 @@ WX=$(grep -ao 'name=win x=[0-9]*' "$SE" | tail -1 | cut -d= -f3)
 WY=$(grep -ao 'name=win x=[0-9]* y=[0-9]*' "$SE" | tail -1 | grep -oE 'y=[0-9]+' | cut -d= -f2)
 WW=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]*' "$SE" | tail -1 | grep -oE 'w=[0-9]+' | cut -d= -f2)
 IX=$(( ${WX:-50} + 2 )); IY=$(( ${WY:-3} + 22 ))
-IW=$(( ${WW:-700} - 4 ))
+IW=${WW:-700}
 for pair in "set:Darstellung" "setv:Vorlagen"; do
     d=${pair%%:*}; nm=${pair##*:}
     out=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
-          "$TMPD/$d/serial.txt" "--window=$IX,$IY,$IW,$INNER" 2>&1)
+          "$TMPD/$d/serial.txt" "--window=$IX,$IY,$IW,$CLIENT_H" 2>&1)
     e=$(printf '%s' "$out" | grep -oE 'empty [0-9]+' | grep -oE '[0-9]+')
     c=$(printf '%s' "$out" | grep -oE 'cut [0-9]+' | grep -oE '[0-9]+')
     o=$(printf '%s' "$out" | grep -oE 'overlapping [0-9]+' | grep -oE '[0-9]+')
@@ -1687,29 +1688,42 @@ TLOG="$TMPD/al100/serial.txt"
 TPPM="$TMPD/al100/desktop.ppm"
 has "$TLOG" "wm: termgitter win=" \
     "der Kern nennt das Zellenraster des Terminals (Lage, Zelle, Aufsteiger)"
-UM=$(python3 tools/look/umlaut.py "$TLOG" "$TPPM" --gitter=1,1 \
-     'KEIN EINZIGES GERÄT!' 2>&1 | head -1)
-UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ wrong' | grep -oE '^[0-9]+')
-UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ ink pixels' | grep -oE '^[0-9]+')
-num "das Ä im Terminal ist bildpunktgenau gerastert (falsche Punkte)" \
-    "${UF:-99}" eq 0
-num "und es ist ueberhaupt Tinte gemessen worden" "${UT:-0}" ge 500
-#
 TG=$(grep -a 'wm: termgitter win=' "$TLOG" | tail -1)
 tgv() { printf '%s' "$TG" | grep -oE " $1=[0-9]+" | grep -oE '[0-9]+'; }
 TGX=$(tgv x); TGY=$(tgv y); TGW=$(tgv cellw); TGH=$(tgv cellh)
-TGP=$(tgv px)
-hexrgb() { printf '%d %d %d' "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}"; }
-UFG=$(hexrgb "$(printf '%s' "$UM" | grep -oE 'fg=[0-9a-f]{6}' | cut -d= -f2)")
-UBG=$(hexrgb "$(printf '%s' "$UM" | grep -oE 'bg=[0-9a-f]{6}' | cut -d= -f2)")
-if python3 tools/gfx/checkshot.py tgrid "$TPPM" assets/osum-mono.ttf \
+TGP=$(tgv px); TGA=$(tgv asc)
+TLINE='NOT A SINGLE DEVICE!'
+COLS=$(python3 - "$TPPM" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" \
+    "${TGA:-14}" "${#TLINE}" <<'PYC'
+import sys
+sys.path.insert(0, "tools/look")
+import umlaut
+ppm = sys.argv[1]
+x, y, cw, ch, asc, n = [int(v) for v in sys.argv[2:8]]
+ax, ay = x + cw, y + ch + asc
+fb = umlaut.grundfarben(ppm, ax, ay - asc, ax + n * cw, ay + 4)
+if fb is None:
+    print("0 0 0 0 0 0")
+else:
+    print(" ".join(str(v) for c in fb for v in c))
+PYC
+)
+tgrid() {
+    python3 tools/gfx/checkshot.py tgrid "$TPPM" assets/osum-mono.ttf \
         "${TGP:-16}" "${TGX:-0}" "${TGY:-0}" "${TGW:-10}" "${TGH:-19}" 1 1 \
-        $UFG $UBG 'KEIN EINZIGES GERT!' 0 >/dev/null 2>&1; then
-    bad "GEGENPROBE: 'GERT!' und 'GERÄT!' sind fuer den Rasterer dasselbe"
-else
-    ok "CONTROL: the old, mangled line does NOT fit any more"
-fi
-
+        $COLS "$1" 0 2>&1
+}
+UM=$(tgrid "$TLINE" | head -1)
+UF=$(printf '%s' "$UM" | grep -oE '[0-9]+ wrong' | grep -oE '^[0-9]+')
+UT=$(printf '%s' "$UM" | grep -oE '[0-9]+ ink pixels' | grep -oE '^[0-9]+')
+num "the terminal text is rasterised pixel-exact (wrong pixels)" \
+    "${UF:-99}" eq 0
+num "and ink was actually measured" "${UT:-0}" ge 500
+UC=$(tgrid 'NOT A SINGLE DEVCE!' | head -1 | grep -oE '[0-9]+ wrong' \
+     | grep -oE '^[0-9]+')
+num "CONTROL: a line with a letter missing does NOT fit the raster" \
+    "${UC:-0}" gt 0
+#
 BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --leiste 2>&1 \
      | grep -a 'shotcheck: leiste')
 echo "        $BL"
