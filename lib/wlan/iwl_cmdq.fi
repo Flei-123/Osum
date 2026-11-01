@@ -4,10 +4,12 @@ import wlan.iwl_pwr
 import wlan.iwl_g1
 import wlan.iwl_le
 import wlan.iwl_mvm_txq
+import wlan.iwl_txresp
+import wlan.iwl_buf
 import wlan.regtrace
 
 export {
-    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_prepare, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_dq_inflight, cq_dq_wr, cq_dq_rd, cq_bc_bytes, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
+    Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_prepare, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_txresp, cq_dq_inflight, cq_dq_wr, cq_dq_rd, cq_bc_bytes, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
     CMD_ALIVE, FRAME_INVALID, FRAME_SIZE_MSK, RX_MASK,
     CQ_RB_SIZE, CQ_RB_COUNT, CQ_TFD_SIZE, CQ_TFD_COUNT, CQ_SLOT_SIZE, CQ_CMD_SLOT_SIZE, CQ_SLOTS, CQ_NOTIF_SLOT, CQ_NOTIF_SLOTS, CQ_OLD_NOTIF_SLOT, cq_set_slot_cap, cq_drops,
     cq_err_ptr, cq_uerr_ptr, cq_fw_dead, E_CQ_FWDEAD, CQ_WAIT_CMD, CQ_WAIT_NOTIF, ALIVE_SCD_OFF, ALIVE_PKT_MIN, CMD_QUEUE,
@@ -94,13 +96,14 @@ struct Cq {
     stage: u64,
     err_ptr: u64,
     uerr_ptr: u64,
-    fw_dead: u64
+    fw_dead: u64,
+    txr: iwl_txresp.TxResp
 }
 
 fn cq_new() -> Cq {
     var c: Cq = Cq { rx_bd: 0, rx_stts: 0, rb: 0, tfd: 0, cmdbuf: 0, kw: 0, bc: 0, notif: 0, wr: 0, rd: 0, rxr: 0, rx_wptr: 0,
         rx_on: 0, tx_on: 0, nh: 0, nt: 0, scd: 0, dropped: 0, slot_cap: CQ_NOTIF_SLOT, matched: 0,
-        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, bcb: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0, err_ptr: 0, uerr_ptr: 0, fw_dead: 0 }
+        dtfd: 0, dbuf: 0, dwr: 0, drd: 0, dq_on: 0, bcb: 0, dsent: 0, dreclaimed: 0, rx_raw: 0, scd_alive: 0, alive_cnt: 0, scd_hw: 0, stage: 0, err_ptr: 0, uerr_ptr: 0, fw_dead: 0, txr: iwl_txresp.txresp_new() }
     return c
 }
 
@@ -163,6 +166,7 @@ fn cq_bc_bytes(c: *mut Cq, on: bool) {
 }
 fn cq_dq_sent(c: *mut Cq) -> u64 { return (*c).dsent }
 fn cq_dq_reclaimed(c: *mut Cq) -> u64 { return (*c).dreclaimed }
+fn cq_txresp(c: *mut Cq) -> *mut iwl_txresp.TxResp { return &(*c).txr }
 fn cq_dq_inflight(c: *mut Cq) -> u64 { return (*c).dwr - (*c).drd }
 
 fn cq_dq_enable(c: *mut Cq) {
@@ -304,6 +308,7 @@ fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp
     if regtrace.is_on() { regtrace.rec_host(regtrace.K_RX, pkt, len) }
     let seq: u64 = iwl_le.ld16(pkt, 2)
     if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == iwl_mvm_txq.DATA_QUEUE && iwl_le.ld8(pkt, 0) == CMD_TX_DATA && (*c).dq_on != 0 {
+        if len > iwl_buf.HDR { iwl_txresp.txresp_parse(&(*c).txr, pkt + iwl_buf.HDR, len - iwl_buf.HDR) }
         reclaim_data(c, seq & 0xFF)
         return false
     }
