@@ -122,7 +122,7 @@ echo "== g. A/B trial: watchdog resets count as failed starts =="
 grep -a '^ab: ' "$D/trial.klar" | head -6 | sed 's/^/        /'
 has trial "ab: gen=2 versuch=1 " && ok "first start counted" || bad "first start not counted"
 has trial "ab: gen=2 versuch=2 " && ok "watchdog reset counted as second start" || bad "second start not counted"
-has trial "ab: ERPROBUNG gescheitert" && ok "next start after watchdog resets: trial declared failed" || bad "trial not declared failed"
+has trial "ab: TRIAL failed" && ok "next start after watchdog resets: trial declared failed" || bad "trial not declared failed"
 if [ -n "${WDT_DESK:-}" ]; then
     SECS="${WDT_DESK_SECS:-330}"
     echo "== e2. desktop image idle $SECS s, default watchdog =="

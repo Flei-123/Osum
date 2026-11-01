@@ -132,7 +132,7 @@ lauf "$TMPD/neu.mb" "osum nokbd" "$TMPD/2.txt" \
     -device "ahci,id=a0" \
     -drive "file=$TMPD/ah.img,format=raw,if=none,id=d1" \
     -device "ide-hd,drive=d1,bus=a0.0"
-hat "$TMPD/2.txt" "rootsel: nvme -- keine Wurzel darauf" \
+hat "$TMPD/2.txt" "rootsel: nvme -- no root on it" \
     "die LEERE NVMe-Platte wird abgelehnt, obwohl sie zuerst drankommt"
 hat "$TMPD/2.txt" "rootsel: ahci -- WURZEL" \
     "und die AHCI-Platte mit dem System gewinnt"
@@ -159,13 +159,13 @@ lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/4.txt" \
     -device megasas -device sdhci-pci \
     -drive "file=$TMPD/leer.img,format=raw,if=none,id=n0" \
     -device "nvme,drive=n0,serial=x" -device "ahci,id=a0"
-hat "$TMPD/4.txt" "RAID-Modus" \
+hat "$TMPD/4.txt" "RAID mode" \
     "ein Controller der Klasse 01:04 wird als RAID-Modus erkannt"
 hat "$TMPD/4.txt" "1000:0060" "und mit SEINEN NUMMERN genannt"
 hat "$TMPD/4.txt" "MegaRAID" "und mit seinem NAMEN"
-hat "$TMPD/4.txt" 'im BIOS "SATA Mode" auf AHCI stellen' \
+hat "$TMPD/4.txt" 'set BIOS "SATA Mode" to AHCI' \
     "und es steht daneben, was zu tun ist"
-hat "$TMPD/4.txt" "SD/eMMC-Regler" "der SD-Regler ebenfalls"
+hat "$TMPD/4.txt" "SD/eMMC controller" "der SD-Regler ebenfalls"
 hat "$TMPD/4.txt" "blkdev: reihenfolge: nvme > ahci > ide" \
     "und die Reihenfolge, in der gesucht wird, steht in EINER Zeile"
 

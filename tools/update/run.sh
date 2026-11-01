@@ -149,7 +149,7 @@ hatnicht "$OUT/ab3.txt" "opk: trial confirmed" "immer noch kein Erfolgsvermerk"
 
 rc=$(lauf ab4 "$START")
 gleich "Start 3: die Maschine kommt hoch" "$rc" "21"
-hat "$OUT/ab4.txt" "ab: ERPROBUNG gescheitert, zurueck auf 0" "DER PUNKT DER RUNDE: der Kern faellt VON SELBST zurueck"
+hat "$OUT/ab4.txt" "ab: TRIAL failed, back to 0" "DER PUNKT DER RUNDE: der Kern faellt VON SELBST zurueck"
 hat "$OUT/ab4.txt" "paket-hallo fassung 1" "und die alte, laufende Fassung ist wieder da"
 hatnicht "$OUT/ab4.txt" "SCHEITERT" "die kaputte Fassung laeuft nicht mehr"
 

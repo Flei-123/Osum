@@ -31,7 +31,7 @@ pruefe() { # $1 = Protokoll, $2 = Name des Falles, $3 = erwartete Breite (oder "
     local z
     z=$(grep -a 'hwdiag: fb ' "$f" | tail -1)
     if [ -z "$z" ]; then
-        if grep -qa 'fb=KEINER' "$f"; then
+        if grep -qa 'fb=NONE' "$f"; then
             hin "$name: KEIN Rahmenpuffer -- der Kern sagt es (fb=KEINER) und laeuft weiter"
             OHNE=$((OHNE+1))
             return 0

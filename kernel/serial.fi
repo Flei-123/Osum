@@ -9,7 +9,7 @@ export {
     init, put, puts, text, nl, hex, hex_digits, hex_width, dec, pad_dec,
     COM1, COM2, port, set_port, rx_ready, rx_take, rx_on, rx_off,
     overrun, drain_fifo,
-    probe, off, set_off, verworfen, lsr_roh, scr_roh,
+    probe, off, set_off, dropped, lsr_roh, scr_roh,
     line_at, line_clear, line_lost, line_stolen,
     defer_on, defer_off, pump, ring_used, ring_flushed, ring_say, wire_overlap_count,
     ring_stolen_count
@@ -19,8 +19,8 @@ const LINE_LIMIT: u64 = 20000000
 
 const LINE_STALE: u64 = 300000000
 
-static mut zeile_wer: [u64; 1] = [0 as u64; 1]
-static mut zeile_daneben: [u64; 1] = [0 as u64; 1]
+static mut line_who: [u64; 1] = [0 as u64; 1]
+static mut line_beside: [u64; 1] = [0 as u64; 1]
 static mut entry_stamp: [u64; 1] = [0 as u64; 1]
 static mut entry_auto: [u64; 1] = [0 as u64; 1]
 static mut entry_open: [u64; 1] = [0 as u64; 1]
@@ -30,7 +30,7 @@ fn line_at(me: u64) -> u64 {
     if kstate.mode_on(arch.kdata_base(), kstate.M_SERWIDEN) {
         return 0
     }
-    let a: u64 = (&zeile_wer[0]) as u64
+    let a: u64 = (&line_who[0]) as u64
     if __mmio_read64(a as *mut u64) == me + 1 {
         if __mmio_read64((&entry_auto[0]) as u64 as *mut u64) != 0 as u64 {
             entry_auto[0] = 0
@@ -54,7 +54,7 @@ fn line_at(me: u64) -> u64 {
         arch.pause()
         spins = spins + 1
         if spins > LINE_LIMIT {
-            zeile_daneben[0] = zeile_daneben[0] + 1
+            line_beside[0] = line_beside[0] + 1
             return 0
         }
     }
@@ -67,7 +67,7 @@ fn line_clear(hat: u64) {
         return
     }
     let me: u64 = cpu.here(arch.kdata_base())
-    let a: u64 = (&zeile_wer[0]) as u64
+    let a: u64 = (&line_who[0]) as u64
     if __mmio_read64(a as *mut u64) != me + 1 {
         return
     }
@@ -80,7 +80,7 @@ fn line_clear(hat: u64) {
 }
 
 fn line_lost() -> u64 {
-    return zeile_daneben[0]
+    return line_beside[0]
 }
 
 fn line_stolen() -> u64 {
@@ -102,8 +102,8 @@ const LSR_TX: u8 = 0x20
 const IER_RX: u8 = 0x01
 const R_SCR: u16 = 7
 
-const PUT_GRENZE: u64 = 100000
-const VERW_GRENZE: u64 = 16
+const PUT_LIMIT: u64 = 100000
+const DROP_LIMIT: u64 = 16
 
 static mut ser_aus: u64 = 0
 static mut ser_verw: u64 = 0
@@ -171,7 +171,7 @@ fn set_off(v: u64) {
     ser_aus = v
 }
 
-fn verworfen() -> u64 {
+fn dropped() -> u64 {
     return ser_verw
 }
 
@@ -304,10 +304,10 @@ fn ring_out_one() {
 fn ring_drain_blocking() {
     while ring_tail[0] != ring_head[0] {
         var n: u64 = 0
-        while !ready() && n < PUT_GRENZE {
+        while !ready() && n < PUT_LIMIT {
             n = n + 1
         }
-        if n >= PUT_GRENZE {
+        if n >= PUT_LIMIT {
             ser_aus = 1
             ring_tail[0] = ring_head[0]
             return
@@ -320,10 +320,10 @@ fn ring_drain_some(n: u64) {
     var k: u64 = 0
     while k < n && ring_tail[0] != ring_head[0] {
         var w: u64 = 0
-        while !ready() && w < PUT_GRENZE {
+        while !ready() && w < PUT_LIMIT {
             w = w + 1
         }
-        if w >= PUT_GRENZE {
+        if w >= PUT_LIMIT {
             ser_aus = 1
             ring_tail[0] = ring_head[0]
             return
@@ -430,7 +430,7 @@ fn put(c: u8) {
     if z != 0 {
         entry_auto[0] = 1
     }
-    let a: u64 = (&zeile_wer[0]) as u64
+    let a: u64 = (&line_who[0]) as u64
     if __mmio_read64(a as *mut u64) == me + 1 {
         entry_stamp[0] = arch.cycles()
     }
@@ -519,12 +519,12 @@ fn uart_write(c: u8) {
 
 fn wire_out(c: u8) {
     var n: u64 = 0
-    while !ready() && n < PUT_GRENZE {
+    while !ready() && n < PUT_LIMIT {
         n = n + 1
     }
-    if n >= PUT_GRENZE {
+    if n >= PUT_LIMIT {
         ser_verw = ser_verw + 1
-        if ser_verw >= VERW_GRENZE {
+        if ser_verw >= DROP_LIMIT {
             ser_aus = 1
         }
         return

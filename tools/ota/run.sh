@@ -444,7 +444,7 @@ for r in $(seq 1 "$RUNDEN"); do
     T0=$(date +%s%N)
     rc3=$(lauf "d$r-s3" "sh /start.sh;exit")
     T1=$(date +%s%N)
-    zurueck=$(grep -ca "ab: ERPROBUNG gescheitert, zurueck auf 0" "$OUT/d$r-s3.txt")
+    zurueck=$(grep -ca "ab: TRIAL failed, back to 0" "$OUT/d$r-s3.txt")
     alt=$(grep -ca "paket-hallo fassung 1" "$OUT/d$r-s3.txt")
     kaputt=$(grep -ca "SCHEITERT" "$OUT/d$r-s3.txt")
     if [ "$e1" -ge 1 ] && [ "$rc3" = 21 ] && [ "$zurueck" -ge 1 ] \

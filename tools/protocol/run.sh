@@ -240,7 +240,7 @@ echo "== 5b. K-011: der Bericht ueberlebt den warmen Neustart im Speicher =="
 lauf_platte "$K0" "osum $QUIET logall krach script=krach kernfs;exit" \
     "$TMPD/kalt1.txt" "$TMPD/disk.img"
 has "$TMPD/kalt1.txt" "Bestellung, art 2" "K-011: die Panik mit gehaltener Sperre hat stattgefunden"
-has "$TMPD/kalt1.txt" "absturz: Dateisystem gesperrt, kein Bericht" \
+has "$TMPD/kalt1.txt" "absturz: filesystem locked, no report" \
     "K-011: der Riegel verbietet die Platte (so soll es sein)"
 lauf_platte "$K0" "osum $QUIET logall script=absturz;exit" \
     "$TMPD/kalt2.txt" "$TMPD/disk.img"
@@ -281,7 +281,7 @@ else
 fi
 kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null; rm -f "$wsock"
 awk '/kernel halted/ { n++; next } n == 1' "$TMPD/warm.txt" > "$TMPD/warm2.txt"
-has "$TMPD/warm2.txt" "absturz: bericht aus dem speicher gerettet" \
+has "$TMPD/warm2.txt" "absturz: report rescued from memory" \
     "K-011 warm: der zweite Start findet den Bericht im Speicher"
 grep -qaE 'absturz: bericht +/var/crash/[0-9]+\.txt +geschrieben' "$TMPD/warm2.txt" \
     && ok "K-011 warm: und legt ihn als Datei unter /var/crash ab" \

@@ -293,19 +293,19 @@ fi
 echo "== 7. keine Platte, keine Karte -- und trotzdem ein Bericht =="
 #
 lauf_direkt leer "hwdiag hwdiagstop gfx nopci nokbd nosched noproc nofs noring3"
-if grep -qa 'hwdiag: pci=KEIN GERÄT' "$TMPD/leer.txt"; then
+if grep -qa 'hwdiag: pci=NO DEVICE' "$TMPD/leer.txt"; then
     ok "ohne Bus sagt der Bericht das, statt still zu haengen"
 else
     bad "ohne Bus fehlt die Meldung"
     grep -a 'hwdiag: pci' "$TMPD/leer.txt" | sed 's/^/       /' | head -3
 fi
-if grep -qa 'hwdiag: disk=KEINER' "$TMPD/leer.txt"; then
+if grep -qa 'hwdiag: disk=NONE' "$TMPD/leer.txt"; then
     ok "und ohne Plattencontroller ebenso"
 else
     bad "ohne Plattencontroller fehlt die Meldung"
     grep -a 'hwdiag: disk' "$TMPD/leer.txt" | sed 's/^/       /'
 fi
-if grep -qa 'hwdiag: net=KEINE KARTE' "$TMPD/leer.txt"; then
+if grep -qa 'hwdiag: net=NO CARD' "$TMPD/leer.txt"; then
     ok "und ohne Netzkarte auch"
 else
     bad "ohne Netzkarte fehlt die Meldung"
@@ -323,7 +323,7 @@ else
     bad "GEGENPROBE: die Maschine mit Bus meldet keinen Controller"
     grep -a 'hwdiag: disk' "$TMPD/mitbus.txt" | sed 's/^/       /'
 fi
-if grep -qa 'hwdiag: net=KEINE KARTE' "$TMPD/mitbus.txt"; then
+if grep -qa 'hwdiag: net=NO CARD' "$TMPD/mitbus.txt"; then
     ok "und ohne Netzkarte (aber mit Bus) sagt sie auch das"
 else
     bad "die Maschine ohne Netzkarte meldet das nicht"

@@ -94,7 +94,7 @@ echo
 echo "== 3. trial used up: kernel flips the loader back to slot A =="
 rc=$(lauf f1 "exit" two)
 gleich "boot 2 (3rd attempt)" "$rc" "21"
-hat "$OUT/f1.txt" "ab: ERPROBUNG gescheitert, zurueck auf 0" "generation rolled back"
+hat "$OUT/f1.txt" "ab: TRIAL failed, back to 0" "generation rolled back"
 hat "$OUT/f1.txt" "ab: esp: default_entry set to 1" "kernel reports the flip"
 grep -qa '^default_entry: 1' "$OUT/f1.after" && ok "ESP now reads default_entry: 1" || bad "ESP not flipped"
 cmp -s <(sed 's/^default_entry: 2/default_entry: 1/' "$OUT/f1.before") "$OUT/f1.after" \
@@ -113,7 +113,7 @@ echo
 echo "== 5. ESP config without default_entry =="
 rc=$(lauf z1 "cp /erpseed /system/ERPROBUNG;exit" none)
 rc=$(lauf z2 "exit" none)
-hat "$OUT/z2.txt" "ab: ERPROBUNG gescheitert, zurueck auf 0" "rollback happens again"
+hat "$OUT/z2.txt" "ab: TRIAL failed, back to 0" "rollback happens again"
 hat "$OUT/z2.txt" "ab: esp: no default_entry" "kernel says there is no default_entry line"
 cmp -s "$OUT/z2.before" "$OUT/z2.after" && ok "config untouched" || bad "config was modified"
 

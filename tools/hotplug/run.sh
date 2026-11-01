@@ -239,7 +239,7 @@ num "BEIDE Sticks werden aufgezaehlt (der USB-Baum kann zwei)" "${dv:-0}" ge 2
 n_kommt=$(grep -ac 'wechsel: kommt' "$S" 2>/dev/null || echo 0)
 num "BEIDE Sticks werden eingehaengt (zwei 'wechsel: kommt')" \
     "${n_kommt:-0}" eq 2
-hat_nicht "$S" "wechsel: dev schon in der Tafel" \
+hat_nicht "$S" "wechsel: dev already in the table" \
     "kein Stick wird mehr als Doppelgaenger abgelehnt"
 hat "$S" "/medien/usb0" "der erste haengt unter /medien/usb0"
 hat "$S" "/medien/usb1" "der zweite unter /medien/usb1 -- EIGENER Pfad"

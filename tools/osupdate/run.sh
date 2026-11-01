@@ -319,14 +319,14 @@ for b in 2 3 4; do
 done
 for b in 2 3 4; do
     if [ "$b" = 4 ]; then # the third attempt gives up (rolls back) instead of counting
-        hat "$OUT/p$b.txt" "ab: ERPROBUNG gescheitert" "boot $((b-1)) of the trial kernel reached ab_boot (gives up)"
+        hat "$OUT/p$b.txt" "ab: TRIAL failed" "boot $((b-1)) of the trial kernel reached ab_boot (gives up)"
     else
         hat "$OUT/p$b.txt" "ab: gen=" "boot $((b-1)) of the trial kernel reached ab_boot"
     fi
     gleich "boot $((b-1)) runs the NEW kernel" "$(commit_of "$OUT/p$b.txt")" "$NEW"
     hatnicht "$OUT/p$b.txt" "glogin: bereit" "boot $((b-1)) never reached the desktop (fault)"
 done
-hat "$OUT/p4.txt" "ab: ERPROBUNG gescheitert" "third attempt: trial declared failed"
+hat "$OUT/p4.txt" "ab: TRIAL failed" "third attempt: trial declared failed"
 hat "$OUT/p4.txt" "ab: esp: default_entry set to 1" "kernel puts the loader back on slot A"
 gleich "ESP now reads default_entry 1" "$(conf_default)" "1"
 rc=$(lauf p5 "cat /users/gate2.txt;ota system confirm;ota system status;cat /system/SYSVERSION;cat /bin/gate-ovl.txt;shasum /bin/gate-big.txt;ls /bin;exit" keep)

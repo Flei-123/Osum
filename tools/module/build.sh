@@ -11,7 +11,7 @@ fi
 shift
 
 STUFE=0
-QUELLE=module/ps2maus.fi
+QUELLE=module/ps2mouse.fi
 MKARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
