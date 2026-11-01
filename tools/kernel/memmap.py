@@ -364,6 +364,11 @@ def main():
                 break
         if p is not None:
             dateien[d] = konstanten(p)
+            sub = p[:-3]
+            if os.path.isdir(sub):
+                for f in sorted(os.listdir(sub)):
+                    if f.endswith(".fi"):
+                        dateien[d].update(konstanten(os.path.join(sub, f)))
 
     kdata = value(dateien["kstate.fi"], "KDATA_SIZE")
 
