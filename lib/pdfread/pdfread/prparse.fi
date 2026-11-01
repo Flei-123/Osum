@@ -1,0 +1,1901 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.deflate
+import std.md5
+import std.rt
+import pdfread.pdfread.prbase
+
+fn val_none() -> prbase.Val {
+    return prbase.Val { kind: prbase.K_NONE, a: 0, n: 0, num: 0.0, so: 0, sl: 0, rn: 0, rg: 0, hex: 0 }
+}
+
+const MAXDEPTH: u64 = 32
+
+fn doc_new() -> prbase.Doc {
+    return prbase.Doc {
+        data: 0, len: 0, nobj: 0, xk: 0, xo: 0, xi: 0,
+        trailer: val_none(), root: val_none(), npages: 0, pages: 0, err: 0,
+        os: prbase.OStm { num: 0, buf: rt.buf_new(), count: 0, first: 0 },
+        nimg: 0, img: 0, depth: 0, fonts: 0, nfonts: 0, enc_mode: 0, enc_klen: 0, enc_key: [0; 16], styles: 0, tcap: rt.buf_new(),
+    }
+}
+
+fn doc_styles(d: *mut prbase.Doc) -> u32 {
+    return (*d).styles
+}
+
+fn doc_tcap_count(d: *mut prbase.Doc) -> u64 {
+    return (rt.buf_len(&(*d).tcap) as u64) / 32
+}
+
+fn doc_tcap_word(d: *mut prbase.Doc, i: u64, k: u64) -> u32 {
+    let p: u64 = rt.buf_ptr(&(*d).tcap) + i * 32 + k * 4
+    return *(p as *mut u32)
+}
+
+fn doc_tcap_clear(d: *mut prbase.Doc) {
+    rt.buf_clear(&(*d).tcap)
+}
+
+fn push32(b: *mut rt.Buf, v: u32) {
+    rt.buf_push(b, (v & 255) as u8)
+    rt.buf_push(b, ((v >> 8) & 255) as u8)
+    rt.buf_push(b, ((v >> 16) & 255) as u8)
+    rt.buf_push(b, ((v >> 24) & 255) as u8)
+}
+
+fn q16(v: f64) -> u32 {
+    return f2u32(v * 16.0 + 1073741824.0)
+}
+
+fn doc_error(d: *mut prbase.Doc) -> u32 {
+    return (*d).err
+}
+
+fn doc_pages(d: *mut prbase.Doc) -> u64 {
+    return (*d).npages
+}
+
+// ---------------------------------------------------------- small helpers
+
+fn ld(p: u64) -> u32 {
+    let v: u8 = *(p as *mut u8)
+    return v as u32
+}
+
+fn is_ws(c: u32) -> bool {
+    return c == 32 || c == 10 || c == 13 || c == 9 || c == 12 || c == 0
+}
+
+fn is_delim(c: u32) -> bool {
+    return c == 40 || c == 41 || c == 60 || c == 62 || c == 91 || c == 93
+        || c == 123 || c == 125 || c == 47 || c == 37
+}
+
+fn is_digit(c: u32) -> bool {
+    return c >= 48 && c <= 57
+}
+
+fn hexval(c: u32) -> u32 {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    return 16
+}
+
+fn skip_ws(p0: u64, end: u64) -> u64 {
+    var p: u64 = p0
+    while p < end {
+        let c: u32 = ld(p)
+        if is_ws(c) {
+            p = p + 1
+        } else if c == 37 {
+            while p < end && ld(p) != 10 && ld(p) != 13 {
+                p = p + 1
+            }
+        } else {
+            return p
+        }
+    }
+    return p
+}
+
+fn mem_eq_str(p: u64, n: u64, lit: str) -> bool {
+    if n != lit.n as u64 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if ld(p + i) != (*((lit.p as u64 + i) as *mut u8)) as u32 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn starts_with(p: u64, end: u64, lit: str) -> bool {
+    if p + (lit.n as u64) > end {
+        return false
+    }
+    var i: u64 = 0
+    while i < (lit.n as u64) {
+        if ld(p + i) != (*((lit.p as u64 + i) as *mut u8)) as u32 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn fabs(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    return x
+}
+
+// float -> integer without a panic: NaN, negatives and huge values are clamped
+fn f2u(v: f64) -> u64 {
+    if v != v || v < 0.0 {
+        return 0
+    }
+    if v > 1.0e15 {
+        return 1000000000000000
+    }
+    return v as u64
+}
+
+fn f2u32(v: f64) -> u32 {
+    let u: u64 = f2u(v)
+    if u > 4294967295 {
+        return 4294967295
+    }
+    return u as u32
+}
+
+fn f2i(v: f64) -> i64 {
+    if v != v {
+        return 0
+    }
+    if v > 1.0e15 {
+        return 1000000000000000
+    }
+    if v < 0.0 - 1.0e15 {
+        return 0 - 1000000000000000
+    }
+    return v as i64
+}
+
+fn u2u32(v: u64) -> u32 {
+    return (v & 0xFFFFFFFF) as u32
+}
+
+fn fsqrt(x: f64) -> f64 {
+    if x <= 0.0 {
+        return 0.0
+    }
+    var g: f64 = x
+    if g < 1.0 {
+        g = 1.0
+    }
+    var i: u64 = 0
+    while i < 40 {
+        g = (g + x / g) / 2.0
+        i = i + 1
+    }
+    return g
+}
+
+// ------------------------------------------------------------ the parser
+
+// Parses one value at p (end = the end of the readable range). Returns the
+// position after it. A bare keyword (an operator in a content stream, or
+// `obj`, `endobj`, `R`, `stream` ...) comes back as K_OP with its bytes.
+// `R` is NOT folded here (`parse_ref` does it where refs can occur).
+fn parse_val(p0: u64, end: u64, v: *mut prbase.Val) -> u64 {
+    var p: u64 = skip_ws(p0, end)
+    *v = val_none()
+    if p >= end {
+        return p
+    }
+    let c: u32 = ld(p)
+    if c == 47 {
+        // name
+        p = p + 1
+        (*v).kind = prbase.K_NAME
+        (*v).a = p
+        while p < end && !is_ws(ld(p)) && !is_delim(ld(p)) {
+            p = p + 1
+        }
+        (*v).n = p - (*v).a
+        return p
+    }
+    if c == 40 {
+        // string with escapes and balanced parentheses
+        p = p + 1
+        (*v).kind = prbase.K_STR
+        (*v).a = p
+        var depth: u64 = 1
+        while p < end {
+            let ch: u32 = ld(p)
+            if ch == 92 {
+                p = p + 2
+            } else {
+                if ch == 40 {
+                    depth = depth + 1
+                } else if ch == 41 {
+                    depth = depth - 1
+                    if depth == 0 {
+                        (*v).n = p - (*v).a
+                        return p + 1
+                    }
+                }
+                p = p + 1
+            }
+        }
+        (*v).n = end - (*v).a
+        return end
+    }
+    if c == 60 {
+        if p + 1 < end && ld(p + 1) == 60 {
+            // dictionary
+            p = p + 2
+            (*v).kind = prbase.K_DICT
+            (*v).a = p
+            var depth: u64 = 1
+            while p < end {
+                let ch: u32 = ld(p)
+                if ch == 60 && p + 1 < end && ld(p + 1) == 60 {
+                    depth = depth + 1
+                    p = p + 2
+                } else if ch == 62 && p + 1 < end && ld(p + 1) == 62 {
+                    depth = depth - 1
+                    if depth == 0 {
+                        (*v).n = p - (*v).a
+                        return p + 2
+                    }
+                    p = p + 2
+                } else if ch == 40 {
+                    // skip a string whole: ">>" inside it is not the end
+                    var sv: prbase.Val = val_none()
+                    p = parse_val(p, end, &sv)
+                } else {
+                    p = p + 1
+                }
+            }
+            (*v).n = end - (*v).a
+            return end
+        }
+        // hex string
+        p = p + 1
+        (*v).kind = prbase.K_STR
+        (*v).hex = 1
+        (*v).a = p
+        while p < end && ld(p) != 62 {
+            p = p + 1
+        }
+        (*v).n = p - (*v).a
+        if p < end {
+            p = p + 1
+        }
+        return p
+    }
+    if c == 91 {
+        p = p + 1
+        (*v).kind = prbase.K_ARR
+        (*v).a = p
+        var depth: u64 = 1
+        while p < end {
+            let ch: u32 = ld(p)
+            if ch == 91 {
+                depth = depth + 1
+                p = p + 1
+            } else if ch == 93 {
+                depth = depth - 1
+                if depth == 0 {
+                    (*v).n = p - (*v).a
+                    return p + 1
+                }
+                p = p + 1
+            } else if ch == 40 || ch == 60 {
+                var sv2: prbase.Val = val_none()
+                p = parse_val(p, end, &sv2)
+            } else {
+                p = p + 1
+            }
+        }
+        (*v).n = end - (*v).a
+        return end
+    }
+    if c == 93 || c == 62 || c == 41 || c == 123 || c == 125 {
+        // a stray delimiter: skip it as an operator of one byte
+        (*v).kind = prbase.K_OP
+        (*v).a = p
+        (*v).n = 1
+        return p + 1
+    }
+    if is_digit(c) || c == 43 || c == 45 || c == 46 {
+        // number (or a keyword that starts with a sign -- not in PDF)
+        var q: u64 = p
+        var neg: bool = false
+        if ld(q) == 45 {
+            neg = true
+            q = q + 1
+        } else if ld(q) == 43 {
+            q = q + 1
+        }
+        var ip: f64 = 0.0
+        var any: bool = false
+        var real: bool = false
+        while q < end && (is_digit(ld(q)) || ld(q) == 45) {
+            if ld(q) != 45 {
+                ip = ip * 10.0 + ((ld(q) - 48) as f64)
+                any = true
+            }
+            q = q + 1
+        }
+        if q < end && ld(q) == 46 {
+            real = true
+            q = q + 1
+            var scale: f64 = 0.1
+            while q < end && is_digit(ld(q)) {
+                ip = ip + ((ld(q) - 48) as f64) * scale
+                scale = scale / 10.0
+                any = true
+                q = q + 1
+            }
+        }
+        if any && (q >= end || is_ws(ld(q)) || is_delim(ld(q))) {
+            if neg {
+                ip = 0.0 - ip
+            }
+            if real {
+                (*v).kind = prbase.K_REAL
+            } else {
+                (*v).kind = prbase.K_INT
+            }
+            (*v).num = ip
+            (*v).a = p
+            (*v).n = q - p
+            return q
+        }
+    }
+    // a keyword
+    (*v).kind = prbase.K_OP
+    (*v).a = p
+    while p < end && !is_ws(ld(p)) && !is_delim(ld(p)) {
+        p = p + 1
+    }
+    if p == (*v).a {
+        p = p + 1
+    }
+    (*v).n = p - (*v).a
+    // true / false / null
+    if mem_eq_str((*v).a, (*v).n, "true") {
+        (*v).kind = prbase.K_BOOL
+        (*v).num = 1.0
+    } else if mem_eq_str((*v).a, (*v).n, "false") {
+        (*v).kind = prbase.K_BOOL
+        (*v).num = 0.0
+    } else if mem_eq_str((*v).a, (*v).n, "null") {
+        (*v).kind = prbase.K_NONE
+    }
+    return p
+}
+
+// A value where an indirect reference may stand: "N G R" becomes K_REF.
+fn parse_ref(p0: u64, end: u64, v: *mut prbase.Val) -> u64 {
+    let p1: u64 = parse_val(p0, end, v)
+    if (*v).kind != prbase.K_INT || (*v).num < 0.0 {
+        return p1
+    }
+    var g: prbase.Val = val_none()
+    let p2: u64 = parse_val(p1, end, &g)
+    if g.kind != prbase.K_INT {
+        return p1
+    }
+    var r: prbase.Val = val_none()
+    let p3: u64 = parse_val(p2, end, &r)
+    if r.kind == prbase.K_OP && r.n == 1 && ld(r.a) == 82 {
+        (*v).rn = f2u32((*v).num)
+        (*v).rg = f2u32(g.num)
+        (*v).kind = prbase.K_REF
+        return p3
+    }
+    return p1
+}
+
+// A name equal to `lit`? (names with #xx escapes are decoded)
+fn name_is(v: *mut prbase.Val, lit: str) -> bool {
+    if (*v).kind != prbase.K_NAME {
+        return false
+    }
+    var i: u64 = 0
+    var j: u64 = 0
+    while i < (*v).n {
+        var c: u32 = ld((*v).a + i)
+        if c == 35 && i + 2 < (*v).n {
+            let h1: u32 = hexval(ld((*v).a + i + 1))
+            let h2: u32 = hexval(ld((*v).a + i + 2))
+            if h1 < 16 && h2 < 16 {
+                c = h1 * 16 + h2
+                i = i + 2
+            }
+        }
+        if j >= (lit.n as u64) {
+            return false
+        }
+        if c != (*((lit.p as u64 + j) as *mut u8)) as u32 {
+            return false
+        }
+        i = i + 1
+        j = j + 1
+    }
+    return j == (lit.n as u64)
+}
+
+// Looks `key` up in the dictionary bytes [a, a+n). The value is NOT resolved.
+fn dict_find(a: u64, n: u64, key: str, out: *mut prbase.Val) -> bool {
+    var p: u64 = a
+    let end: u64 = a + n
+    var guard: u64 = 0
+    while guard < 4096 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var k: prbase.Val = val_none()
+        p = parse_val(p, end, &k)
+        if k.kind == prbase.K_NAME {
+            var v: prbase.Val = val_none()
+            p = parse_ref(p, end, &v)
+            if name_is(&k, key) {
+                *out = v
+                return true
+            }
+        }
+    }
+    *out = val_none()
+    return false
+}
+
+// ---------------------------------------------------------- numbers etc.
+
+fn val_num(v: *mut prbase.Val) -> f64 {
+    if (*v).kind == prbase.K_INT || (*v).kind == prbase.K_REAL || (*v).kind == prbase.K_BOOL {
+        return (*v).num
+    }
+    return 0.0
+}
+
+// the n-th element of the array bytes [a, a+len); false when there is none
+fn arr_at(a: u64, len: u64, idx: u64, out: *mut prbase.Val) -> bool {
+    var p: u64 = a
+    let end: u64 = a + len
+    var i: u64 = 0
+    var guard: u64 = 0
+    while guard < 200000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var v: prbase.Val = val_none()
+        p = parse_ref(p, end, &v)
+        if i == idx {
+            *out = v
+            return true
+        }
+        i = i + 1
+    }
+    *out = val_none()
+    return false
+}
+
+fn arr_len(a: u64, len: u64) -> u64 {
+    var p: u64 = a
+    let end: u64 = a + len
+    var i: u64 = 0
+    var guard: u64 = 0
+    while guard < 200000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var v: prbase.Val = val_none()
+        p = parse_ref(p, end, &v)
+        i = i + 1
+    }
+    return i
+}
+
+// ------------------------------------------------------ raw memory access
+
+fn rd64(p: u64) -> u64 {
+    return *(p as *mut u64)
+}
+
+fn wr64(p: u64, v: u64) {
+    *(p as *mut u64) = v
+}
+
+fn rd32(p: u64) -> u32 {
+    return *(p as *mut u32)
+}
+
+fn wr32(p: u64, v: u32) {
+    *(p as *mut u32) = v
+}
+
+fn rd8(p: u64) -> u32 {
+    return ld(p)
+}
+
+fn wr8(p: u64, v: u32) {
+    *(p as *mut u8) = (v & 255) as u8
+}
+
+fn alloc0(n: u64) -> u64 {
+    let p: u64 = rt.heap_alloc(n as usize)
+    if p != 0 {
+        rt.mem_set(p, 0 as u8, n as usize)
+    }
+    return p
+}
+
+// make room for object number `num` in the cross-reference arrays
+fn xgrow(d: *mut prbase.Doc, num: u64) -> bool {
+    if num < (*d).nobj {
+        return true
+    }
+    if num > 16777216 {
+        return false
+    }
+    var ncap: u64 = (*d).nobj * 2
+    if ncap < num + 1024 {
+        ncap = num + 1024
+    }
+    let nk: u64 = alloc0(ncap)
+    let no: u64 = alloc0(ncap * 8)
+    let ni: u64 = alloc0(ncap * 4)
+    if nk == 0 || no == 0 || ni == 0 {
+        (*d).err = prbase.ERR_MEMORY
+        return false
+    }
+    if (*d).nobj > 0 {
+        rt.mem_copy(nk, (*d).xk, (*d).nobj as usize)
+        rt.mem_copy(no, (*d).xo, ((*d).nobj * 8) as usize)
+        rt.mem_copy(ni, (*d).xi, ((*d).nobj * 4) as usize)
+        rt.heap_free((*d).xk, (*d).nobj as usize)
+        rt.heap_free((*d).xo, ((*d).nobj * 8) as usize)
+        rt.heap_free((*d).xi, ((*d).nobj * 4) as usize)
+    }
+    (*d).xk = nk
+    (*d).xo = no
+    (*d).xi = ni
+    (*d).nobj = ncap
+    return true
+}
+
+const F_JPX: u32 = 2
+
+const F_CCITT: u32 = 3
+
+const F_JBIG2: u32 = 4
+
+fn push(b: *mut rt.Buf, c: u32) {
+    rt.buf_push(b, (c & 255) as u8)
+}
+
+fn ascii_hex(src: u64, n: u64, out: *mut rt.Buf) {
+    var i: u64 = 0
+    var hi: u32 = 16
+    while i < n {
+        let c: u32 = ld(src + i)
+        if c == 62 {
+            break
+        }
+        let h: u32 = hexval(c)
+        if h < 16 {
+            if hi == 16 {
+                hi = h
+            } else {
+                push(out, hi * 16 + h)
+                hi = 16
+            }
+        }
+        i = i + 1
+    }
+    if hi != 16 {
+        push(out, hi * 16)
+    }
+}
+
+fn ascii85(src: u64, n: u64, out: *mut rt.Buf) {
+    var i: u64 = 0
+    var grp: [u32; 5] = [0 as u32; 5]
+    var k: u64 = 0
+    while i < n {
+        let c: u32 = ld(src + i)
+        i = i + 1
+        if c == 126 {
+            break
+        }
+        if is_ws(c) {
+            continue_marker()
+        } else if c == 122 && k == 0 {
+            push(out, 0)
+            push(out, 0)
+            push(out, 0)
+            push(out, 0)
+        } else if c >= 33 && c <= 117 {
+            grp[k as usize] = c - 33
+            k = k + 1
+            if k == 5 {
+                var v: u64 = 0
+                var j: u64 = 0
+                while j < 5 {
+                    v = v * 85 + (grp[j as usize] as u64)
+                    j = j + 1
+                }
+                push(out, ((v >> 24) & 255) as u32)
+                push(out, ((v >> 16) & 255) as u32)
+                push(out, ((v >> 8) & 255) as u32)
+                push(out, (v & 255) as u32)
+                k = 0
+            }
+        }
+    }
+    if k > 1 {
+        var j2: u64 = k
+        while j2 < 5 {
+            grp[j2 as usize] = 84
+            j2 = j2 + 1
+        }
+        var v2: u64 = 0
+        var j3: u64 = 0
+        while j3 < 5 {
+            v2 = v2 * 85 + (grp[j3 as usize] as u64)
+            j3 = j3 + 1
+        }
+        var sh: u64 = 24
+        var m: u64 = 0
+        while m < k - 1 {
+            push(out, ((v2 >> sh) & 255) as u32)
+            sh = sh - 8
+            m = m + 1
+        }
+    }
+}
+
+fn continue_marker() {
+}
+
+fn run_length(src: u64, n: u64, out: *mut rt.Buf) {
+    var i: u64 = 0
+    while i < n {
+        let l: u32 = ld(src + i)
+        i = i + 1
+        if l == 128 {
+            break
+        }
+        if l < 128 {
+            var k: u64 = 0
+            while k < (l as u64) + 1 && i < n {
+                push(out, ld(src + i))
+                i = i + 1
+                k = k + 1
+            }
+        } else {
+            if i < n {
+                let c: u32 = ld(src + i)
+                i = i + 1
+                var k2: u64 = 0
+                while k2 < 257 - (l as u64) {
+                    push(out, c)
+                    k2 = k2 + 1
+                }
+            }
+        }
+    }
+}
+
+// LZW as PDF has it (MSB first, 9..12 bits, 256 clear, 257 end). Entry i >= 258
+// is (prefix code, last byte): tab[i] = (byte << 16) | prefix.
+fn lzw_expand(tab: u64, tmp: u64, code0: u64, out: *mut rt.Buf) -> u32 {
+    var c: u64 = code0
+    var len: u64 = 0
+    var guard: u64 = 0
+    while c >= 258 && guard < 4100 {
+        let e: u32 = rd32(tab + c * 4)
+        wr8(tmp + len, e >> 16)
+        len = len + 1
+        c = (e & 65535) as u64
+        guard = guard + 1
+    }
+    if c >= 256 {
+        c = 0
+    }
+    wr8(tmp + len, c as u32)
+    len = len + 1
+    let first: u32 = rd8(tmp + len - 1)
+    var j: u64 = len
+    while j > 0 {
+        push(out, rd8(tmp + j - 1))
+        j = j - 1
+    }
+    return first
+}
+
+fn lzw(src: u64, n: u64, early: u64, out: *mut rt.Buf) {
+    let tab: u64 = alloc0(4096 * 4)
+    let tmp: u64 = alloc0(4200)
+    if tab == 0 || tmp == 0 {
+        return
+    }
+    var next: u64 = 258
+    var bits: u64 = 9
+    var acc: u64 = 0
+    var nacc: u64 = 0
+    var prev: u64 = 65536
+    var i: u64 = 0
+    var done: bool = false
+    while i < n && !done {
+        acc = ((acc << 8) | (ld(src + i) as u64)) & 0xFFFFFF
+        nacc = nacc + 8
+        i = i + 1
+        while nacc >= bits && !done {
+            let code: u64 = (acc >> (nacc - bits)) & ((1 << bits) - 1)
+            nacc = nacc - bits
+            if code == 256 {
+                next = 258
+                bits = 9
+                prev = 65536
+            } else if code == 257 {
+                done = true
+            } else if prev == 65536 {
+                if code < 256 {
+                    push(out, code as u32)
+                }
+                prev = code
+            } else if code > next {
+                done = true
+            } else {
+                if code < next {
+                    let first: u32 = lzw_expand(tab, tmp, code, out)
+                    if next < 4096 {
+                        wr32(tab + next * 4, (first << 16) | (prev as u32))
+                        next = next + 1
+                    }
+                } else {
+                    // the string of `prev` plus its own first byte
+                    let first2: u32 = lzw_expand(tab, tmp, prev, out)
+                    push(out, first2)
+                    if next < 4096 {
+                        wr32(tab + next * 4, (first2 << 16) | (prev as u32))
+                        next = next + 1
+                    }
+                }
+                prev = code
+            }
+            if next + early >= 2048 {
+                bits = 12
+            } else if next + early >= 1024 {
+                bits = 11
+            } else if next + early >= 512 {
+                bits = 10
+            } else {
+                bits = 9
+            }
+        }
+    }
+    rt.heap_free(tab, 4096 * 4)
+    rt.heap_free(tmp, 4200)
+}
+
+// PNG predictors (10..15) and TIFF predictor 2 on 8-bit data
+fn predictor(src: u64, n: u64, pred: u64, colors: u64, bpc: u64, cols: u64, out: *mut rt.Buf) {
+    var rb: u64 = (colors * bpc * cols + 7) / 8
+    var bpp: u64 = (colors * bpc + 7) / 8
+    if bpp < 1 {
+        bpp = 1
+    }
+    if rb == 0 {
+        return
+    }
+    if pred == 2 {
+        // TIFF: horizontal differencing, 8 bits only
+        var row: u64 = 0
+        let rows: u64 = n / rb
+        while row < rows {
+            var k: u64 = 0
+            while k < rb {
+                var v: u32 = ld(src + row * rb + k)
+                if k >= colors && bpc == 8 {
+                    v = (v + ld(src + row * rb + k - colors)) & 255
+                    wr8(src + row * rb + k, v)
+                }
+                push(out, v)
+                k = k + 1
+            }
+            row = row + 1
+        }
+        return
+    }
+    let prev: u64 = alloc0(rb + 8)
+    let cur: u64 = alloc0(rb + 8)
+    if prev == 0 || cur == 0 {
+        return
+    }
+    var p: u64 = 0
+    while p + 1 + rb <= n {
+        let ft: u32 = ld(src + p)
+        var i: u64 = 0
+        while i < rb {
+            let x: u32 = ld(src + p + 1 + i)
+            var a: u32 = 0
+            var b: u32 = ld(prev + i)
+            var c: u32 = 0
+            if i >= bpp {
+                a = ld(cur + i - bpp)
+                c = ld(prev + i - bpp)
+            }
+            var v: u32 = x
+            if ft == 1 {
+                v = (x + a) & 255
+            } else if ft == 2 {
+                v = (x + b) & 255
+            } else if ft == 3 {
+                v = (x + ((a + b) / 2)) & 255
+            } else if ft == 4 {
+                let pa: i64 = (b as i64) - (c as i64)
+                let pb: i64 = (a as i64) - (c as i64)
+                let pc: i64 = pa + pb
+                var apa: i64 = pa
+                if apa < 0 {
+                    apa = 0 - apa
+                }
+                var apb: i64 = pb
+                if apb < 0 {
+                    apb = 0 - apb
+                }
+                var apc: i64 = pc
+                if apc < 0 {
+                    apc = 0 - apc
+                }
+                var pr: u32 = c
+                if apa <= apb && apa <= apc {
+                    pr = a
+                } else if apb <= apc {
+                    pr = b
+                }
+                v = (x + pr) & 255
+            }
+            wr8(cur + i, v)
+            i = i + 1
+        }
+        var j: u64 = 0
+        while j < rb {
+            push(out, rd8(cur + j))
+            wr8(prev + j, rd8(cur + j))
+            j = j + 1
+        }
+        p = p + 1 + rb
+    }
+    rt.heap_free(prev, (rb + 8) as usize)
+    rt.heap_free(cur, (rb + 8) as usize)
+}
+
+fn inflate_into(src: u64, n: u64, out: *mut rt.Buf) -> bool {
+    let r: usize = deflate.zlib_decompress(src, n as usize, out) catch 0
+    if r > 0 {
+        return true
+    }
+    // a damaged or headerless stream: raw deflate, or whatever came out
+    if rt.buf_len(out) > 0 {
+        return true
+    }
+    if n > 2 {
+        let r2: usize = deflate.inflate(src + 2, (n - 2) as usize, out) catch 0
+        if r2 > 0 {
+            return true
+        }
+    }
+    return false
+}
+
+fn rc4(key: u64, klen: u64, src: u64, n: u64, dst: u64) {
+    var st: [u8; 256] = [0 as u8; 256]
+    var i: u64 = 0
+    while i < 256 {
+        st[i as usize] = i as u8
+        i = i + 1
+    }
+    var j: u64 = 0
+    i = 0
+    while i < 256 {
+        j = (j + (st[i as usize] as u64) + (ld(key + (i % klen)) as u64)) & 255
+        let t: u8 = st[i as usize]
+        st[i as usize] = st[j as usize]
+        st[j as usize] = t
+        i = i + 1
+    }
+    var a: u64 = 0
+    var b: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        a = (a + 1) & 255
+        b = (b + (st[a as usize] as u64)) & 255
+        let t2: u8 = st[a as usize]
+        st[a as usize] = st[b as usize]
+        st[b as usize] = t2
+        let ks: u64 = st[(((st[a as usize] as u64) + (st[b as usize] as u64)) & 255) as usize] as u64
+        wr8(dst + k, ((ld(src + k) as u64) ^ ks) as u32)
+        k = k + 1
+    }
+}
+
+fn md5_of(p: u64, n: u64, out: u64) {
+    md5.md5(p, n as usize, out)
+}
+
+// ---- AES-128, decryption only (CBC), self-contained: lib/std/crypto/aes.fi uses
+// AES-NI inline assembly that the stage-1 compiler (tools/k16, firnc1) cannot
+// compile, and every program of the userland must go through both compilers.
+struct AesTab {
+    sbox: [u8; 256],
+    isbox: [u8; 256],
+}
+
+fn xtime(a: u32) -> u32 {
+    let v: u32 = (a << 1) & 255
+    if (a & 128) != 0 {
+        return v ^ 27
+    }
+    return v
+}
+
+fn gmul(a0: u32, b0: u32) -> u32 {
+    var a: u32 = a0
+    var b: u32 = b0
+    var r: u32 = 0
+    var i: u32 = 0
+    while i < 8 {
+        if (b & 1) != 0 {
+            r = r ^ a
+        }
+        a = xtime(a)
+        b = b >> 1
+        i = i + 1
+    }
+    return r
+}
+
+fn aes_tables(t: *mut AesTab) {
+    // sbox[x] = affine(inverse(x)); the inverse by search (256 x 256, once per file)
+    var x: u32 = 0
+    while x < 256 {
+        var inv: u32 = 0
+        if x != 0 {
+            var y: u32 = 1
+            while y < 256 {
+                if gmul(x, y) == 1 {
+                    inv = y
+                    y = 256
+                } else {
+                    y = y + 1
+                }
+            }
+        }
+        var b: u32 = inv
+        var r: u32 = inv
+        var k: u32 = 0
+        while k < 4 {
+            b = ((b << 1) | (b >> 7)) & 255
+            r = r ^ b
+            k = k + 1
+        }
+        r = r ^ 99
+        (*t).sbox[x as usize] = r as u8
+        (*t).isbox[r as usize] = x as u8
+        x = x + 1
+    }
+}
+
+// the 176 octets of round keys of a 16-octet key
+fn aes_expand(t: *mut AesTab, key: u64, rk: u64) {
+    var i: u64 = 0
+    while i < 16 {
+        wr8(rk + i, ld(key + i))
+        i = i + 1
+    }
+    var rcon: u32 = 1
+    i = 16
+    while i < 176 {
+        var t0: u32 = ld(rk + i - 4)
+        var t1: u32 = ld(rk + i - 3)
+        var t2: u32 = ld(rk + i - 2)
+        var t3: u32 = ld(rk + i - 1)
+        if (i % 16) == 0 {
+            let a: u32 = t0
+            t0 = (*t).sbox[t1 as usize] as u32 ^ rcon
+            t1 = (*t).sbox[t2 as usize] as u32
+            t2 = (*t).sbox[t3 as usize] as u32
+            t3 = (*t).sbox[a as usize] as u32
+            rcon = xtime(rcon)
+        }
+        wr8(rk + i, ld(rk + i - 16) ^ t0)
+        wr8(rk + i + 1, ld(rk + i - 15) ^ t1)
+        wr8(rk + i + 2, ld(rk + i - 14) ^ t2)
+        wr8(rk + i + 3, ld(rk + i - 13) ^ t3)
+        i = i + 4
+    }
+}
+
+// one block, in -> out (16 octets each; may be the same memory)
+fn aes_decrypt_block(t: *mut AesTab, rk: u64, inp: u64, outp: u64) {
+    var st: [u32; 16] = [0 as u32; 16]
+    var i: u64 = 0
+    while i < 16 {
+        st[i as usize] = ld(inp + i) ^ ld(rk + 160 + i)
+        i = i + 1
+    }
+    var round: u64 = 9
+    while round > 0 {
+        // InvShiftRows (state is column-major: index = col * 4 + row)
+        var s2: [u32; 16] = [0 as u32; 16]
+        var c: u64 = 0
+        while c < 4 {
+            var r: u64 = 0
+            while r < 4 {
+                s2[(((c + r) % 4) * 4 + r) as usize] = st[(c * 4 + r) as usize]
+                r = r + 1
+            }
+            c = c + 1
+        }
+        i = 0
+        while i < 16 {
+            st[i as usize] = (*t).isbox[s2[i as usize] as usize] as u32 ^ ld(rk + round * 16 + i)
+            i = i + 1
+        }
+        // InvMixColumns
+        c = 0
+        while c < 4 {
+            let a0: u32 = st[(c * 4) as usize]
+            let a1: u32 = st[(c * 4 + 1) as usize]
+            let a2: u32 = st[(c * 4 + 2) as usize]
+            let a3: u32 = st[(c * 4 + 3) as usize]
+            st[(c * 4) as usize] = gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9)
+            st[(c * 4 + 1) as usize] = gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13)
+            st[(c * 4 + 2) as usize] = gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14) ^ gmul(a3, 11)
+            st[(c * 4 + 3) as usize] = gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9) ^ gmul(a3, 14)
+            c = c + 1
+        }
+        round = round - 1
+    }
+    // the last round: InvShiftRows, InvSubBytes, AddRoundKey(0)
+    var s3: [u32; 16] = [0 as u32; 16]
+    var c2: u64 = 0
+    while c2 < 4 {
+        var r2: u64 = 0
+        while r2 < 4 {
+            s3[(((c2 + r2) % 4) * 4 + r2) as usize] = st[(c2 * 4 + r2) as usize]
+            r2 = r2 + 1
+        }
+        c2 = c2 + 1
+    }
+    i = 0
+    while i < 16 {
+        wr8(outp + i, (*t).isbox[s3[i as usize] as usize] as u32 ^ ld(rk + i))
+        i = i + 1
+    }
+}
+
+// CBC over whole blocks (`n` a multiple of 16)
+fn aes128_cbc_decrypt(key: u64, iv: u64, src: u64, n: u64, dst: u64) -> bool {
+    if n % 16 != 0 {
+        return false
+    }
+    let tp: u64 = alloc0(1024)
+    let rkp: u64 = alloc0(256)
+    if tp == 0 || rkp == 0 {
+        return false
+    }
+    let t: *mut AesTab = tp as *mut AesTab
+    aes_tables(t)
+    aes_expand(t, key, rkp)
+    var prev: [u8; 16] = [0 as u8; 16]
+    var cur: [u8; 16] = [0 as u8; 16]
+    var i: u64 = 0
+    while i < 16 {
+        prev[i as usize] = ld(iv + i) as u8
+        i = i + 1
+    }
+    var at: u64 = 0
+    while at < n {
+        i = 0
+        while i < 16 {
+            cur[i as usize] = ld(src + at + i) as u8
+            i = i + 1
+        }
+        aes_decrypt_block(t, rkp, (&cur[0]) as u64, dst + at)
+        i = 0
+        while i < 16 {
+            wr8(dst + at + i, ld(dst + at + i) ^ (prev[i as usize] as u32))
+            prev[i as usize] = cur[i as usize]
+            i = i + 1
+        }
+        at = at + 16
+    }
+    rt.heap_free(tp, 1024)
+    rt.heap_free(rkp, 256)
+    return true
+}
+
+// Algorithm 1: the key of one object, then RC4 or AES-CBC (IV = first 16 octets,
+// PKCS#7 padding). `out` receives the plain octets.
+fn decrypt_stream(d: *mut prbase.Doc, rn: u64, rg: u64, src: u64, n: u64, out: *mut rt.Buf) -> bool {
+    var inb: [u8; 32] = [0 as u8; 32]
+    var at: u64 = 0
+    var k: u64 = 0
+    let klen: u64 = (*d).enc_klen as u64
+    while k < klen {
+        inb[at as usize] = (*d).enc_key[k as usize]
+        at = at + 1
+        k = k + 1
+    }
+    inb[at as usize] = (rn & 255) as u8
+    inb[(at + 1) as usize] = ((rn >> 8) & 255) as u8
+    inb[(at + 2) as usize] = ((rn >> 16) & 255) as u8
+    inb[(at + 3) as usize] = (rg & 255) as u8
+    inb[(at + 4) as usize] = ((rg >> 8) & 255) as u8
+    at = at + 5
+    if (*d).enc_mode == 2 {
+        inb[at as usize] = 115
+        inb[(at + 1) as usize] = 65
+        inb[(at + 2) as usize] = 108
+        inb[(at + 3) as usize] = 84
+        at = at + 4
+    }
+    var h: [u8; 16] = [0 as u8; 16]
+    md5_of((&inb[0]) as u64, at, (&h[0]) as u64)
+    var okl: u64 = klen + 5
+    if okl > 16 {
+        okl = 16
+    }
+    if (*d).enc_mode == 1 {
+        let tmp: u64 = alloc0(n + 16)
+        if tmp == 0 {
+            return false
+        }
+        rc4((&h[0]) as u64, okl, src, n, tmp)
+        rt.buf_push_bytes(out, tmp, n as usize)
+        rt.heap_free(tmp, (n + 16) as usize)
+        return true
+    }
+    // AES-128-CBC
+    if n < 32 || (n % 16) != 0 {
+        return false
+    }
+    let body: u64 = n - 16
+    let tmp2: u64 = alloc0(body + 16)
+    if tmp2 == 0 {
+        return false
+    }
+    if !aes128_cbc_decrypt((&h[0]) as u64, src, src + 16, body, tmp2) {
+        rt.heap_free(tmp2, (body + 16) as usize)
+        return false
+    }
+    var plain: u64 = body
+    let padn: u64 = ld(tmp2 + body - 1) as u64
+    if padn >= 1 && padn <= 16 && padn <= body {
+        plain = body - padn
+    }
+    rt.buf_push_bytes(out, tmp2, plain as usize)
+    rt.heap_free(tmp2, (body + 16) as usize)
+    return true
+}
+
+fn val_resolved_int(d: *mut prbase.Doc, v: *mut prbase.Val, dflt: u64) -> u64 {
+    var r: prbase.Val = val_none()
+    resolve(d, v, &r)
+    if r.kind == prbase.K_INT || r.kind == prbase.K_REAL {
+        if r.num < 0.0 {
+            return dflt
+        }
+        return f2u(r.num)
+    }
+    return dflt
+}
+
+// Decodes the stream `v` fully into `out`. `imgf` receives F_DCT etc. when the
+// last filter is an image codec (then `out` holds that codec's raw bytes).
+fn doc_stream(d: *mut prbase.Doc, v: *mut prbase.Val, out: *mut rt.Buf, imgf: *mut u32) -> bool {
+    *imgf = prbase.F_NONE
+    if (*v).kind != prbase.K_STREAM {
+        return false
+    }
+    var cur: u64 = (*v).so
+    var curn: u64 = (*v).sl
+    var own: rt.Buf = rt.buf_new()
+    var haveown: bool = false
+    if (*d).enc_mode != 0 {
+        var ty: prbase.Val = val_none()
+        var is_xref: bool = false
+        if dict_find((*v).a, (*v).n, "Type", &ty) && name_is(&ty, "XRef") {
+            is_xref = true
+        }
+        if !is_xref {
+            var dec: rt.Buf = rt.buf_new()
+            if decrypt_stream(d, (*v).rn as u64, (*v).rg as u64, cur, curn, &dec) {
+                own = dec
+                haveown = true
+                cur = rt.buf_ptr(&own)
+                curn = rt.buf_len(&own) as u64
+            }
+        }
+    }
+    var fl: prbase.Val = val_none()
+    var fr: prbase.Val = val_none()
+    if !dict_find((*v).a, (*v).n, "Filter", &fl) {
+        dict_find((*v).a, (*v).n, "F", &fl)
+    }
+    resolve(d, &fl, &fr)
+    var pl: prbase.Val = val_none()
+    var pr: prbase.Val = val_none()
+    if !dict_find((*v).a, (*v).n, "DecodeParms", &pl) {
+        dict_find((*v).a, (*v).n, "DP", &pl)
+    }
+    resolve(d, &pl, &pr)
+    var nf: u64 = 0
+    if fr.kind == prbase.K_NAME {
+        nf = 1
+    } else if fr.kind == prbase.K_ARR {
+        nf = arr_len(fr.a, fr.n)
+    }
+    var fi: u64 = 0
+    while fi < nf {
+        var fname: prbase.Val = val_none()
+        var parm: prbase.Val = val_none()
+        if fr.kind == prbase.K_NAME {
+            fname = fr
+            if pr.kind == prbase.K_DICT {
+                parm = pr
+            }
+        } else {
+            var e: prbase.Val = val_none()
+            arr_at(fr.a, fr.n, fi, &e)
+            resolve(d, &e, &fname)
+            if pr.kind == prbase.K_ARR {
+                var pe: prbase.Val = val_none()
+                arr_at(pr.a, pr.n, fi, &pe)
+                resolve(d, &pe, &parm)
+            } else if pr.kind == prbase.K_DICT && nf == 1 {
+                parm = pr
+            }
+        }
+        var nb: rt.Buf = rt.buf_new()
+        var handled: bool = true
+        if name_is(&fname, "FlateDecode") || name_is(&fname, "Fl") {
+            inflate_into(cur, curn, &nb)
+        } else if name_is(&fname, "ASCIIHexDecode") || name_is(&fname, "AHx") {
+            ascii_hex(cur, curn, &nb)
+        } else if name_is(&fname, "ASCII85Decode") || name_is(&fname, "A85") {
+            ascii85(cur, curn, &nb)
+        } else if name_is(&fname, "RunLengthDecode") || name_is(&fname, "RL") {
+            run_length(cur, curn, &nb)
+        } else if name_is(&fname, "LZWDecode") || name_is(&fname, "LZW") {
+            var early: u64 = 1
+            if parm.kind == prbase.K_DICT {
+                var ev: prbase.Val = val_none()
+                if dict_find(parm.a, parm.n, "EarlyChange", &ev) {
+                    if ev.num == 0.0 {
+                        early = 0
+                    }
+                }
+            }
+            lzw(cur, curn, early, &nb)
+        } else if name_is(&fname, "DCTDecode") || name_is(&fname, "DCT") {
+            *imgf = prbase.F_DCT
+            handled = false
+        } else if name_is(&fname, "JPXDecode") {
+            *imgf = F_JPX
+            handled = false
+        } else if name_is(&fname, "CCITTFaxDecode") || name_is(&fname, "CCF") {
+            *imgf = F_CCITT
+            handled = false
+        } else if name_is(&fname, "JBIG2Decode") {
+            *imgf = F_JBIG2
+            handled = false
+        } else {
+            // Crypt, unknown: leave the data alone
+            handled = false
+        }
+        if !handled {
+            rt.buf_free(&nb)
+            fi = nf
+        } else {
+            // predictor for Flate and LZW
+            var pv: u64 = 1
+            if parm.kind == prbase.K_DICT && (name_is(&fname, "FlateDecode") || name_is(&fname, "Fl")
+                || name_is(&fname, "LZWDecode") || name_is(&fname, "LZW")) {
+                var t: prbase.Val = val_none()
+                if dict_find(parm.a, parm.n, "Predictor", &t) {
+                    pv = val_resolved_int(d, &t, 1)
+                }
+                if pv > 1 {
+                    var colors: u64 = 1
+                    var bpc: u64 = 8
+                    var cols: u64 = 1
+                    if dict_find(parm.a, parm.n, "Colors", &t) {
+                        colors = val_resolved_int(d, &t, 1)
+                    }
+                    if dict_find(parm.a, parm.n, "BitsPerComponent", &t) {
+                        bpc = val_resolved_int(d, &t, 8)
+                    }
+                    if dict_find(parm.a, parm.n, "Columns", &t) {
+                        cols = val_resolved_int(d, &t, 1)
+                    }
+                    var pb: rt.Buf = rt.buf_new()
+                    predictor(rt.buf_ptr(&nb), rt.buf_len(&nb) as u64, pv, colors, bpc, cols, &pb)
+                    rt.buf_free(&nb)
+                    nb = pb
+                }
+            }
+            if haveown {
+                rt.buf_free(&own)
+            }
+            own = nb
+            haveown = true
+            cur = rt.buf_ptr(&own)
+            curn = rt.buf_len(&own) as u64
+            fi = fi + 1
+        }
+    }
+    if haveown {
+        *out = own
+        return true
+    }
+    // no filter we handle: the raw bytes
+    rt.buf_push_bytes(out, cur, curn as usize)
+    return true
+}
+
+// parse "N G obj <value> [stream]" at file offset `off`; fills `out`
+fn parse_indirect_at(d: *mut prbase.Doc, off: u64, out: *mut prbase.Val, want: u64) -> bool {
+    if off >= (*d).len {
+        return false
+    }
+    let end: u64 = (*d).data + (*d).len
+    var p: u64 = (*d).data + off
+    var t1: prbase.Val = val_none()
+    var t2: prbase.Val = val_none()
+    var t3: prbase.Val = val_none()
+    p = parse_val(p, end, &t1)
+    p = parse_val(p, end, &t2)
+    p = parse_val(p, end, &t3)
+    if t1.kind != prbase.K_INT || t2.kind != prbase.K_INT || t3.kind != prbase.K_OP || !mem_eq_str(t3.a, t3.n, "obj") {
+        return false
+    }
+    if want != 0xFFFFFFFFFFFFFFFF && (f2u(t1.num)) != want {
+        return false
+    }
+    var v: prbase.Val = val_none()
+    p = parse_ref(p, end, &v)
+    *out = v
+    (*out).rn = f2u32(t1.num)
+    (*out).rg = f2u32(t2.num)
+    if v.kind == prbase.K_DICT {
+        let q: u64 = skip_ws(p, end)
+        if starts_with(q, end, "stream") {
+            var s: u64 = q + 6
+            if s < end && ld(s) == 13 {
+                s = s + 1
+            }
+            if s < end && ld(s) == 10 {
+                s = s + 1
+            }
+            var lv: prbase.Val = val_none()
+            var sl: u64 = 0xFFFFFFFFFFFFFFFF
+            if dict_find(v.a, v.n, "Length", &lv) {
+                if (*d).depth < MAXDEPTH {
+                    (*d).depth = (*d).depth + 1
+                    sl = val_resolved_int(d, &lv, 0xFFFFFFFFFFFFFFFF)
+                    (*d).depth = (*d).depth - 1
+                }
+            }
+            var ok: bool = false
+            if sl != 0xFFFFFFFFFFFFFFFF && s + sl <= end {
+                let e2: u64 = skip_ws(s + sl, end)
+                if starts_with(e2, end, "endstream") {
+                    ok = true
+                }
+            }
+            if !ok {
+                // length wrong or missing: look for "endstream"
+                var f: u64 = s
+                var found: bool = false
+                while f + 9 <= end && !found {
+                    if ld(f) == 101 && starts_with(f, end, "endstream") {
+                        found = true
+                    } else {
+                        f = f + 1
+                    }
+                }
+                if found {
+                    sl = f - s
+                    if sl > 0 && ld(s + sl - 1) == 10 {
+                        sl = sl - 1
+                    }
+                    if sl > 0 && ld(s + sl - 1) == 13 {
+                        sl = sl - 1
+                    }
+                } else {
+                    sl = end - s
+                }
+            }
+            (*out).kind = prbase.K_STREAM
+            (*out).so = s
+            (*out).sl = sl
+        }
+    }
+    return true
+}
+
+// the decoded object stream number `stm`; returns its slot or OS_MAX
+fn ostm_slot(d: *mut prbase.Doc, stm: u64) -> u64 {
+    if (*d).os.num == 0 && (*d).os.first == 0 {
+        // lazily allocate the table: 4 words per slot (num, ptr, len, first|count<<32)
+    }
+    var i: u64 = 0
+    let tab: u64 = (*d).os.count
+    var cnt: u64 = (*d).os.num
+    while i < cnt {
+        if rd64(tab + i * 40) == stm {
+            return i
+        }
+        i = i + 1
+    }
+    if cnt >= prbase.OS_MAX {
+        return prbase.OS_MAX
+    }
+    var sv: prbase.Val = val_none()
+    if !load_obj(d, stm, &sv) || sv.kind != prbase.K_STREAM {
+        return prbase.OS_MAX
+    }
+    var b: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !doc_stream(d, &sv, &b, &imf) {
+        return prbase.OS_MAX
+    }
+    var nv: prbase.Val = val_none()
+    var fv: prbase.Val = val_none()
+    var n: u64 = 0
+    var first: u64 = 0
+    if dict_find(sv.a, sv.n, "N", &nv) {
+        n = val_resolved_int(d, &nv, 0)
+    }
+    if dict_find(sv.a, sv.n, "First", &fv) {
+        first = val_resolved_int(d, &fv, 0)
+    }
+    wr64(tab + cnt * 40, stm)
+    wr64(tab + cnt * 40 + 8, rt.buf_ptr(&b))
+    wr64(tab + cnt * 40 + 16, rt.buf_len(&b) as u64)
+    wr64(tab + cnt * 40 + 24, (n << 32) | first)
+    wr64(tab + cnt * 40 + 32, b.cap as u64)
+    (*d).os.num = cnt + 1
+    return cnt
+}
+
+fn load_obj(d: *mut prbase.Doc, num: u64, out: *mut prbase.Val) -> bool {
+    *out = val_none()
+    if num >= (*d).nobj || (*d).xk == 0 {
+        return false
+    }
+    let k: u32 = rd8((*d).xk + num)
+    if k == 1 {
+        return parse_indirect_at(d, rd64((*d).xo + num * 8), out, num)
+    }
+    if k == 2 {
+        let stm: u64 = rd64((*d).xo + num * 8)
+        let slot: u64 = ostm_slot(d, stm)
+        if slot >= prbase.OS_MAX {
+            return false
+        }
+        let tab: u64 = (*d).os.count
+        let base: u64 = rd64(tab + slot * 40 + 8)
+        let blen: u64 = rd64(tab + slot * 40 + 16)
+        let nf: u64 = rd64(tab + slot * 40 + 24)
+        let n: u64 = nf >> 32
+        let first: u64 = nf & 0xFFFFFFFF
+        let end: u64 = base + blen
+        // the header: N pairs of (object number, offset)
+        var p: u64 = base
+        var i: u64 = 0
+        while i < n {
+            var a: prbase.Val = val_none()
+            var b: prbase.Val = val_none()
+            p = parse_val(p, end, &a)
+            p = parse_val(p, end, &b)
+            if a.kind != prbase.K_INT || b.kind != prbase.K_INT {
+                return false
+            }
+            if (f2u(a.num)) == num {
+                let at: u64 = base + first + (f2u(b.num))
+                if at >= end {
+                    return false
+                }
+                parse_ref(at, end, out)
+                return true
+            }
+            i = i + 1
+        }
+        return false
+    }
+    return false
+}
+
+// Follows references until a direct value (or nothing) comes back.
+fn resolve(d: *mut prbase.Doc, v: *mut prbase.Val, out: *mut prbase.Val) {
+    var cur: prbase.Val = *v
+    var guard: u64 = 0
+    while cur.kind == prbase.K_REF && guard < 16 {
+        var nx: prbase.Val = val_none()
+        if !load_obj(d, cur.rn as u64, &nx) {
+            *out = val_none()
+            return
+        }
+        cur = nx
+        guard = guard + 1
+    }
+    if cur.kind == prbase.K_REF {
+        cur = val_none()
+    }
+    *out = cur
+}
+
+fn doc_object(d: *mut prbase.Doc, num: u64, out: *mut prbase.Val) -> bool {
+    return load_obj(d, num, out)
+}
+
+// dictionary lookup with reference resolution (value comes back direct)
+fn doc_dict_get(d: *mut prbase.Doc, dv: *mut prbase.Val, key: str, out: *mut prbase.Val) -> bool {
+    var raw: prbase.Val = val_none()
+    if (*dv).kind != prbase.K_DICT && (*dv).kind != prbase.K_STREAM {
+        *out = val_none()
+        return false
+    }
+    if !dict_find((*dv).a, (*dv).n, key, &raw) {
+        *out = val_none()
+        return false
+    }
+    resolve(d, &raw, out)
+    return (*out).kind != prbase.K_NONE
+}
+
+fn doc_obj_of(d: *mut prbase.Doc, dv: *mut prbase.Val, key: str) -> u64 {
+    var raw: prbase.Val = val_none()
+    if dict_find((*dv).a, (*dv).n, key, &raw) {
+        if raw.kind == prbase.K_REF {
+            return raw.rn as u64
+        }
+    }
+    return 0
+}
+
+// ------------------------------------------------------ the cross-reference
+
+fn set_entry(d: *mut prbase.Doc, num: u64, kind: u32, off: u64, gen: u32) {
+    if !xgrow(d, num) {
+        return
+    }
+    if rd8((*d).xk + num) != 0 {
+        return
+    }
+    wr8((*d).xk + num, kind)
+    wr64((*d).xo + num * 8, off)
+    wr32((*d).xi + num * 4, gen)
+}
+
+fn find_startxref(d: *mut prbase.Doc) -> u64 {
+    let n: u64 = (*d).len
+    var from: u64 = 0
+    if n > 4096 {
+        from = n - 4096
+    }
+    var p: u64 = n
+    while p > from + 9 {
+        p = p - 1
+        if ld((*d).data + p) == 115 && starts_with((*d).data + p, (*d).data + n, "startxref") {
+            var v: prbase.Val = val_none()
+            parse_val((*d).data + p + 9, (*d).data + n, &v)
+            if v.kind == prbase.K_INT {
+                return f2u(v.num)
+            }
+            return 0xFFFFFFFFFFFFFFFF
+        }
+    }
+    return 0xFFFFFFFFFFFFFFFF
+}
+
+fn read_xref_stream(d: *mut prbase.Doc, off: u64, first: bool, prev: *mut u64, xrefstm: *mut u64) -> bool {
+    var sv: prbase.Val = val_none()
+    if !parse_indirect_at(d, off, &sv, 0xFFFFFFFFFFFFFFFF) || sv.kind != prbase.K_STREAM {
+        return false
+    }
+    var buf: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !doc_stream(d, &sv, &buf, &imf) {
+        return false
+    }
+    var wv: prbase.Val = val_none()
+    if !dict_find(sv.a, sv.n, "W", &wv) || wv.kind != prbase.K_ARR {
+        rt.buf_free(&buf)
+        return false
+    }
+    var w: [u64; 3] = [0 as u64; 3]
+    var i: u64 = 0
+    while i < 3 {
+        var e: prbase.Val = val_none()
+        arr_at(wv.a, wv.n, i, &e)
+        w[i as usize] = val_resolved_int(d, &e, 0)
+        i = i + 1
+    }
+    let rowlen: u64 = w[0] + w[1] + w[2]
+    if rowlen == 0 || rowlen > 24 {
+        rt.buf_free(&buf)
+        return false
+    }
+    var size: u64 = 0
+    var sz: prbase.Val = val_none()
+    if dict_find(sv.a, sv.n, "Size", &sz) {
+        size = val_resolved_int(d, &sz, 0)
+    }
+    var idx: prbase.Val = val_none()
+    var has_index: bool = dict_find(sv.a, sv.n, "Index", &idx) && idx.kind == prbase.K_ARR
+    var pairs: u64 = 1
+    if has_index {
+        pairs = arr_len(idx.a, idx.n) / 2
+    }
+    var data: u64 = rt.buf_ptr(&buf)
+    let total: u64 = rt.buf_len(&buf) as u64
+    var pos: u64 = 0
+    var pi: u64 = 0
+    while pi < pairs {
+        var start: u64 = 0
+        var count: u64 = size
+        if has_index {
+            var a: prbase.Val = val_none()
+            var b: prbase.Val = val_none()
+            arr_at(idx.a, idx.n, pi * 2, &a)
+            arr_at(idx.a, idx.n, pi * 2 + 1, &b)
+            start = val_resolved_int(d, &a, 0)
+            count = val_resolved_int(d, &b, 0)
+        }
+        var k: u64 = 0
+        while k < count && pos + rowlen <= total {
+            var f: [u64; 3] = [0 as u64; 3]
+            var fi: u64 = 0
+            var q: u64 = pos
+            while fi < 3 {
+                var val: u64 = 0
+                var bi: u64 = 0
+                while bi < w[fi as usize] {
+                    val = (val << 8) | (ld(data + q) as u64)
+                    q = q + 1
+                    bi = bi + 1
+                }
+                f[fi as usize] = val
+                fi = fi + 1
+            }
+            var t: u64 = f[0]
+            if w[0] == 0 {
+                t = 1
+            }
+            let num: u64 = start + k
+            if t == 1 {
+                set_entry(d, num, 1, f[1], u2u32(f[2]))
+            } else if t == 2 {
+                set_entry(d, num, 2, f[1], u2u32(f[2]))
+            } else if t == 0 {
+                set_entry(d, num, 3, 0, 0)
+            }
+            pos = pos + rowlen
+            k = k + 1
+        }
+        pi = pi + 1
+    }
+    rt.buf_free(&buf)
+    var pv: prbase.Val = val_none()
+    if dict_find(sv.a, sv.n, "Prev", &pv) {
+        *prev = val_resolved_int(d, &pv, 0xFFFFFFFFFFFFFFFF)
+    } else {
+        *prev = 0xFFFFFFFFFFFFFFFF
+    }
+    *xrefstm = 0xFFFFFFFFFFFFFFFF
+    if first {
+        (*d).trailer = sv
+        (*d).trailer.kind = prbase.K_DICT
+    }
+    return true
+}
+
+fn read_xref_table(d: *mut prbase.Doc, off: u64, first: bool, prev: *mut u64, xrefstm: *mut u64) -> bool {
+    let end: u64 = (*d).data + (*d).len
+    var p: u64 = (*d).data + off + 4
+    var guard: u64 = 0
+    while guard < 100000 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            return false
+        }
+        if starts_with(p, end, "trailer") {
+            p = p + 7
+            break
+        }
+        var a: prbase.Val = val_none()
+        var b: prbase.Val = val_none()
+        p = parse_val(p, end, &a)
+        p = parse_val(p, end, &b)
+        if a.kind != prbase.K_INT || b.kind != prbase.K_INT {
+            return false
+        }
+        var start: u64 = f2u(a.num)
+        let count: u64 = f2u(b.num)
+        var k: u64 = 0
+        while k < count {
+            var o: prbase.Val = val_none()
+            var g: prbase.Val = val_none()
+            var t: prbase.Val = val_none()
+            p = parse_val(p, end, &o)
+            p = parse_val(p, end, &g)
+            p = parse_val(p, end, &t)
+            if o.kind != prbase.K_INT || g.kind != prbase.K_INT || t.kind != prbase.K_OP {
+                return false
+            }
+            if ld(t.a) == 110 {
+                set_entry(d, start + k, 1, f2u(o.num), f2u32(g.num))
+            } else {
+                set_entry(d, start + k, 3, 0, 0)
+            }
+            k = k + 1
+        }
+    }
+    var tv: prbase.Val = val_none()
+    p = parse_val(p, end, &tv)
+    if tv.kind != prbase.K_DICT {
+        return false
+    }
+    if first {
+        (*d).trailer = tv
+    }
+    var pv: prbase.Val = val_none()
+    *prev = 0xFFFFFFFFFFFFFFFF
+    if dict_find(tv.a, tv.n, "Prev", &pv) {
+        *prev = val_resolved_int(d, &pv, 0xFFFFFFFFFFFFFFFF)
+    }
+    *xrefstm = 0xFFFFFFFFFFFFFFFF
+    var xv: prbase.Val = val_none()
+    if dict_find(tv.a, tv.n, "XRefStm", &xv) {
+        *xrefstm = val_resolved_int(d, &xv, 0xFFFFFFFFFFFFFFFF)
+    }
+    return true
+}
+
+fn read_xref_chain(d: *mut prbase.Doc) -> bool {
+    var off: u64 = find_startxref(d)
+    var first: bool = true
+    var guard: u64 = 0
+    let end: u64 = (*d).data + (*d).len
+    while off != 0xFFFFFFFFFFFFFFFF && off < (*d).len && guard < 256 {
+        guard = guard + 1
+        let p: u64 = skip_ws((*d).data + off, end)
+        var prev: u64 = 0xFFFFFFFFFFFFFFFF
+        var xs: u64 = 0xFFFFFFFFFFFFFFFF
+        var ok: bool = false
+        if starts_with(p, end, "xref") {
+            // `off` may point at whitespace before it
+            ok = read_xref_table(d, p - (*d).data, first, &prev, &xs)
+            if ok && xs != 0xFFFFFFFFFFFFFFFF && xs < (*d).len {
+                var p2: u64 = 0xFFFFFFFFFFFFFFFF
+                var x2: u64 = 0xFFFFFFFFFFFFFFFF
+                read_xref_stream(d, xs, false, &p2, &x2)
+            }
+        } else {
+            ok = read_xref_stream(d, p - (*d).data, first, &prev, &xs)
+        }
+        if !ok {
+            return false
+        }
+        first = false
+        off = prev
+    }
+    return !first
+}
+
+// ------------------------------------------------------------- the page tree
+
+fn collect_pages(d: *mut prbase.Doc, node: u64, depth: u64) {
+    if depth > MAXDEPTH || (*d).npages >= 100000 {
+        return
+    }
+    var nv: prbase.Val = val_none()
+    if !load_obj(d, node, &nv) || nv.kind != prbase.K_DICT {
+        return
+    }
+    var kids: prbase.Val = val_none()
+    var kr: prbase.Val = val_none()
+    var has_kids: bool = dict_find(nv.a, nv.n, "Kids", &kr)
+    if has_kids {
+        resolve(d, &kr, &kids)
+    }
+    if has_kids && kids.kind == prbase.K_ARR {
+        var i: u64 = 0
+        let nk: u64 = arr_len(kids.a, kids.n)
+        while i < nk {
+            var e: prbase.Val = val_none()
+            arr_at(kids.a, kids.n, i, &e)
+            if e.kind == prbase.K_REF {
+                collect_pages(d, e.rn as u64, depth + 1)
+            }
+            i = i + 1
+        }
+        return
+    }
+    // a leaf
+    if (*d).pages == 0 {
+        (*d).pages = alloc0(400000)
+    }
+    if (*d).pages == 0 {
+        return
+    }
+    wr32((*d).pages + (*d).npages * 4, node as u32)
+    (*d).npages = (*d).npages + 1
+}
+
+fn dict_find_name(a: u64, n: u64, np: u64, nn: u64, out: *mut prbase.Val) -> bool {
+    var p: u64 = a
+    let end: u64 = a + n
+    var guard: u64 = 0
+    while guard < 8192 {
+        guard = guard + 1
+        p = skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var k: prbase.Val = val_none()
+        p = parse_val(p, end, &k)
+        if k.kind == prbase.K_NAME {
+            var v: prbase.Val = val_none()
+            p = parse_ref(p, end, &v)
+            if k.n == nn {
+                var same: bool = true
+                var i: u64 = 0
+                while i < nn {
+                    if ld(k.a + i) != ld(np + i) {
+                        same = false
+                        i = nn
+                    } else {
+                        i = i + 1
+                    }
+                }
+                if same {
+                    *out = v
+                    return true
+                }
+            }
+        }
+    }
+    *out = val_none()
+    return false
+}

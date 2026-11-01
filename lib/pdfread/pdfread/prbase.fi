@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+
+const ERR_MEMORY: u32 = 4
+
+const K_NONE: u32 = 0
+
+const K_BOOL: u32 = 1
+
+const K_INT: u32 = 2
+
+const K_REAL: u32 = 3
+
+const K_STR: u32 = 4
+
+const K_NAME: u32 = 5
+
+const K_ARR: u32 = 6
+
+const K_DICT: u32 = 7
+
+const K_REF: u32 = 8
+
+const K_STREAM: u32 = 9
+
+const K_OP: u32 = 10
+
+// One PDF value. For strings, names, arrays and dictionaries `a`/`n` is the
+// byte range INSIDE the delimiters (a string keeps its escapes: `str_bytes`
+// decodes it). For a stream `a`/`n` is the dictionary and `so`/`sl` the data.
+struct Val {
+    kind: u32,
+    a: u64,
+    n: u64,
+    num: f64,
+    so: u64,
+    sl: u64,
+    rn: u32,
+    rg: u32,
+    hex: u32,
+}
+
+struct OStm {
+    num: u64,
+    buf: rt.Buf,
+    count: u64,
+    first: u64,
+}
+
+struct Doc {
+    data: u64,
+    len: u64,
+    nobj: u64,
+    xk: u64,      // u8 per object: 0 free, 1 at offset, 2 in an object stream
+    xo: u64,      // u64 per object: offset, or the number of the object stream
+    xi: u64,      // u32 per object: gen, or the index in the object stream
+    trailer: Val,
+    root: Val,
+    npages: u64,
+    pages: u64,   // u32 object numbers of the leaves
+    err: u32,
+    os: OStm,
+    nimg: u64,
+    img: u64,     // ImgPlace records (IMG_MAX)
+    depth: u64,
+    fonts: u64,   // FontInfo records (FONT_MAX)
+    nfonts: u64,
+    enc_mode: u32,   // 0 not encrypted, 1 RC4, 2 AES-128 (the standard handler, empty user password)
+    enc_klen: u32,
+    enc_key: [u8; 16],
+    styles: u32,   // bit 2: bold text was seen, bit 3: monospace, bit 4: serif, bit 5: serif bold (layers of doc_page_svg)
+    tcap: rt.Buf,  // text capture (which == WHICH_TEXT): 8 u32 per glyph, see text_cap
+}
+
+// ------------------------------------------------------------ text capture
+//
+// A pass with `which == WHICH_TEXT` draws NOTHING and records every glyph the
+// content stream shows (also invisible text, render mode 3 -- the layer an OCR
+// program puts under a scan). 8 u32 per glyph (32 bytes):
+//   0 unicode  1 x*16  2 y*16 (the glyph origin in device pixels, offset 2^30)
+//   3 advance*16  4 em*16  5 dx*4096  6 dy*4096 (the unit vector of the baseline)
+//   7 reserved
+// The search in pdftext.fi turns this into text and rectangles.
+const WHICH_TEXT: u32 = 99
+
+// ------------------------------------------------------------- the filters
+
+const F_NONE: u32 = 0
+
+const F_DCT: u32 = 1
+
+// -------------------------------------------------------------- the objects
+
+// Object streams stay decoded for the life of the document: a value read
+// from one holds pointers into it. Up to OS_MAX of them.
+const OS_MAX: u64 = 512
+
+// ============================================================ the renderer
+
+const IMG_MAX: u64 = 256
+
+struct M {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+struct GS {
+    ctm: M,
+    fill: u32,
+    stroke: u32,
+    fill_a: f64,
+    stroke_a: f64,
+    lw: f64,
+    cap: u32,
+    join: u32,
+    miter: f64,
+    dash: [f64; 8],
+    ndash: u32,
+    dphase: f64,
+    fcs: u32,   // components of the fill colour space (1, 3, 4; 9 = pattern)
+    scs: u32,
+    fsep: u32,  // 1 when the fill space is a Separation (value = tint)
+    ssep: u32,
+    gslevel: u64,
+    font: u64,
+    fsize: f64,
+    tc: f64,
+    tw: f64,
+    th: f64,
+    tl: f64,
+    ts: f64,
+    tr: u32,
+}
+
+struct R {
+    d: *mut Doc,
+    out: *mut rt.Buf,
+    gs: GS,
+    stack: [GS; 32],
+    sp: u64,
+    path: rt.Buf,
+    cx: f64,
+    cy: f64,
+    sx: f64,
+    sy: f64,
+    pclip: u32,
+    clipid: u32,
+    open_groups: u64,
+    tm: M,
+    tlm: M,
+    res: Val,
+    depth: u64,
+    scratch: u64,
+    ops: u64,
+    in_text: bool,
+    which: u32,    // 0 everything, 1 vectors + regular text, 2 bold text only, 3 monospace text only, 4 serif, 5 serif bold
+}

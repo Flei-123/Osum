@@ -1,0 +1,1890 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import pdfread.pdftab
+import std.rt
+import pdfread.pdfread.prbase
+import pdfread.pdfread.prparse
+
+const ERR_NONE: u32 = 0
+
+const ERR_FORMAT: u32 = 1
+
+const ERR_ENCRYPTED: u32 = 2
+
+const ERR_NOPAGES: u32 = 3
+
+const TCAP_MAX: u64 = 4000000   // bytes: 125 000 glyphs per page
+
+// ----------------------------------------------------------- encryption
+//
+// The standard security handler with the EMPTY user password (a file that opens
+// in every viewer without asking): V 1-3 (RC4 40..128 bit) and V 4 with RC4 or
+// AES-128 (R 2-4). Streams are decrypted; the strings of dictionaries are not
+// (nothing that is drawn depends on them, but an Indexed palette written as a
+// string). V 5 (AES-256, R 5/6) needs SHA-512 and is refused as encrypted.
+
+static mut PADSTR: [u8; 32] = [40, 191, 78, 94, 78, 117, 138, 65, 100, 0, 78, 86, 255, 250, 1, 8,
+    46, 46, 0, 182, 208, 104, 62, 128, 47, 12, 169, 254, 100, 83, 105, 122]
+
+// Algorithm 2 (key from the empty user password) and the check of Algorithm 4/5
+fn enc_setup(d: *mut prbase.Doc) -> bool {
+    var ev: prbase.Val = prparse.val_none()
+    var er: prbase.Val = prparse.val_none()
+    if !prparse.dict_find((*d).trailer.a, (*d).trailer.n, "Encrypt", &ev) {
+        return true
+    }
+    prparse.resolve(d, &ev, &er)
+    if er.kind != prbase.K_DICT {
+        return false
+    }
+    var t: prbase.Val = prparse.val_none()
+    if !prparse.doc_dict_get(d, &er, "Filter", &t) || !prparse.name_is(&t, "Standard") {
+        return false
+    }
+    var vv: u64 = 0
+    var rr: u64 = 2
+    var lenbits: u64 = 40
+    if prparse.doc_dict_get(d, &er, "V", &t) {
+        vv = prparse.f2u(prparse.val_num(&t))
+    }
+    if prparse.doc_dict_get(d, &er, "R", &t) {
+        rr = prparse.f2u(prparse.val_num(&t))
+    }
+    if prparse.doc_dict_get(d, &er, "Length", &t) {
+        lenbits = prparse.f2u(prparse.val_num(&t))
+    }
+    if vv >= 5 || rr > 4 || rr < 2 {
+        return false
+    }
+    var pval: u32 = 0
+    if prparse.doc_dict_get(d, &er, "P", &t) {
+        pval = (prparse.f2i(prparse.val_num(&t)) & 0xFFFFFFFF) as u32
+    }
+    var obuf: [u8; 64] = [0 as u8; 64]
+    var ubuf: [u8; 64] = [0 as u8; 64]
+    var on: u64 = 0
+    var un: u64 = 0
+    if prparse.doc_dict_get(d, &er, "O", &t) && t.kind == prbase.K_STR {
+        on = str_bytes(&t, (&obuf[0]) as u64, 64)
+    }
+    if prparse.doc_dict_get(d, &er, "U", &t) && t.kind == prbase.K_STR {
+        un = str_bytes(&t, (&ubuf[0]) as u64, 64)
+    }
+    if on < 32 || un < 32 {
+        return false
+    }
+    var encmeta: bool = true
+    if prparse.doc_dict_get(d, &er, "EncryptMetadata", &t) && t.kind == prbase.K_BOOL {
+        encmeta = t.num != 0.0
+    }
+    var mode: u32 = 1
+    var klen: u64 = 5
+    if vv >= 2 {
+        klen = lenbits / 8
+    }
+    if klen < 5 {
+        klen = 5
+    }
+    if klen > 16 {
+        klen = 16
+    }
+    if vv == 4 {
+        // the crypt filter named by /StmF
+        var smf: prbase.Val = prparse.val_none()
+        var cf: prbase.Val = prparse.val_none()
+        klen = 16
+        if !prparse.doc_dict_get(d, &er, "StmF", &smf) || smf.kind != prbase.K_NAME || !prparse.doc_dict_get(d, &er, "CF", &cf) || cf.kind != prbase.K_DICT {
+            return false
+        }
+        if prparse.name_is(&smf, "Identity") {
+            (*d).enc_mode = 0
+            return true
+        }
+        var f: prbase.Val = prparse.val_none()
+        var fr: prbase.Val = prparse.val_none()
+        if !prparse.dict_find_name(cf.a, cf.n, smf.a, smf.n, &f) {
+            return false
+        }
+        prparse.resolve(d, &f, &fr)
+        var cfm: prbase.Val = prparse.val_none()
+        if !prparse.doc_dict_get(d, &fr, "CFM", &cfm) {
+            return false
+        }
+        if prparse.name_is(&cfm, "V2") {
+            mode = 1
+        } else if prparse.name_is(&cfm, "AESV2") {
+            mode = 2
+        } else {
+            return false
+        }
+    }
+    // the first element of the trailer's /ID
+    var idb: [u8; 64] = [0 as u8; 64]
+    var idn: u64 = 0
+    var idv: prbase.Val = prparse.val_none()
+    var idr: prbase.Val = prparse.val_none()
+    if prparse.dict_find((*d).trailer.a, (*d).trailer.n, "ID", &idv) {
+        prparse.resolve(d, &idv, &idr)
+        if idr.kind == prbase.K_ARR {
+            var e0: prbase.Val = prparse.val_none()
+            var e0r: prbase.Val = prparse.val_none()
+            prparse.arr_at(idr.a, idr.n, 0, &e0)
+            prparse.resolve(d, &e0, &e0r)
+            if e0r.kind == prbase.K_STR {
+                idn = str_bytes(&e0r, (&idb[0]) as u64, 64)
+            }
+        }
+    }
+    // Algorithm 2: MD5(pad + O + P + ID [+ FFFFFFFF]) (+ 50 more rounds for R >= 3)
+    let inb: u64 = prparse.alloc0(256)
+    if inb == 0 {
+        return false
+    }
+    var at: u64 = 0
+    var k: u64 = 0
+    while k < 32 {
+        prparse.wr8(inb + at, PADSTR[k as usize] as u32)
+        at = at + 1
+        k = k + 1
+    }
+    k = 0
+    while k < 32 {
+        prparse.wr8(inb + at, prparse.ld((&obuf[0]) as u64 + k))
+        at = at + 1
+        k = k + 1
+    }
+    prparse.wr8(inb + at, pval & 255)
+    prparse.wr8(inb + at + 1, (pval >> 8) & 255)
+    prparse.wr8(inb + at + 2, (pval >> 16) & 255)
+    prparse.wr8(inb + at + 3, (pval >> 24) & 255)
+    at = at + 4
+    k = 0
+    while k < idn {
+        prparse.wr8(inb + at, prparse.ld((&idb[0]) as u64 + k))
+        at = at + 1
+        k = k + 1
+    }
+    if rr >= 4 && !encmeta {
+        prparse.wr8(inb + at, 255)
+        prparse.wr8(inb + at + 1, 255)
+        prparse.wr8(inb + at + 2, 255)
+        prparse.wr8(inb + at + 3, 255)
+        at = at + 4
+    }
+    var h: [u8; 16] = [0 as u8; 16]
+    prparse.md5_of(inb, at, (&h[0]) as u64)
+    if rr >= 3 {
+        var round: u64 = 0
+        while round < 50 {
+            var h2: [u8; 16] = [0 as u8; 16]
+            prparse.md5_of((&h[0]) as u64, klen, (&h2[0]) as u64)
+            k = 0
+            while k < 16 {
+                h[k as usize] = h2[k as usize]
+                k = k + 1
+            }
+            round = round + 1
+        }
+    }
+    var key: [u8; 16] = [0 as u8; 16]
+    k = 0
+    while k < klen {
+        key[k as usize] = h[k as usize]
+        k = k + 1
+    }
+    // check against /U (Algorithm 4 for R 2, Algorithm 5 for R >= 3)
+    var good: bool = false
+    var chk: [u8; 32] = [0 as u8; 32]
+    if rr == 2 {
+        prparse.rc4((&key[0]) as u64, klen, (&PADSTR[0]) as u64, 32, (&chk[0]) as u64)
+        good = true
+        k = 0
+        while k < 32 {
+            if chk[k as usize] != ubuf[k as usize] {
+                good = false
+            }
+            k = k + 1
+        }
+    } else {
+        // MD5(pad + ID), then RC4 with the key and 19 more passes with key XOR i
+        at = 0
+        k = 0
+        while k < 32 {
+            prparse.wr8(inb + at, PADSTR[k as usize] as u32)
+            at = at + 1
+            k = k + 1
+        }
+        k = 0
+        while k < idn {
+            prparse.wr8(inb + at, prparse.ld((&idb[0]) as u64 + k))
+            at = at + 1
+            k = k + 1
+        }
+        var m: [u8; 16] = [0 as u8; 16]
+        prparse.md5_of(inb, at, (&m[0]) as u64)
+        var cur: [u8; 16] = [0 as u8; 16]
+        prparse.rc4((&key[0]) as u64, klen, (&m[0]) as u64, 16, (&cur[0]) as u64)
+        var pass: u64 = 1
+        while pass < 20 {
+            var xk: [u8; 16] = [0 as u8; 16]
+            k = 0
+            while k < klen {
+                xk[k as usize] = ((key[k as usize] as u64) ^ pass) as u8
+                k = k + 1
+            }
+            var nx: [u8; 16] = [0 as u8; 16]
+            prparse.rc4((&xk[0]) as u64, klen, (&cur[0]) as u64, 16, (&nx[0]) as u64)
+            k = 0
+            while k < 16 {
+                cur[k as usize] = nx[k as usize]
+                k = k + 1
+            }
+            pass = pass + 1
+        }
+        good = true
+        k = 0
+        while k < 16 {
+            if cur[k as usize] != ubuf[k as usize] {
+                good = false
+            }
+            k = k + 1
+        }
+    }
+    rt.heap_free(inb, 256)
+    if !good {
+        return false
+    }
+    (*d).enc_mode = mode
+    (*d).enc_klen = klen as u32
+    k = 0
+    while k < 16 {
+        (*d).enc_key[k as usize] = key[k as usize]
+        k = k + 1
+    }
+    return true
+}
+
+// --------------------------------------------- a damaged file: scan for objects
+
+fn rebuild(d: *mut prbase.Doc) -> bool {
+    let end: u64 = (*d).data + (*d).len
+    var p: u64 = (*d).data
+    var guard_trailer: bool = false
+    while p < end {
+        let c: u32 = prparse.ld(p)
+        // an object header starts a line: digits, blank, digits, blank, "obj"
+        var line_start: bool = p == (*d).data
+        if !line_start {
+            let pc: u32 = prparse.ld(p - 1)
+            line_start = pc == 10 || pc == 13 || prparse.is_ws(pc)
+        }
+        if line_start && prparse.is_digit(c) {
+            var q: u64 = p
+            var num: u64 = 0
+            while q < end && prparse.is_digit(prparse.ld(q)) && q - p < 10 {
+                num = num * 10 + ((prparse.ld(q) - 48) as u64)
+                q = q + 1
+            }
+            if q < end && prparse.ld(q) == 32 {
+                q = q + 1
+                var gen: u64 = 0
+                var gd: u64 = 0
+                while q < end && prparse.is_digit(prparse.ld(q)) && gd < 6 {
+                    gen = gen * 10 + ((prparse.ld(q) - 48) as u64)
+                    q = q + 1
+                    gd = gd + 1
+                }
+                if gd > 0 && q < end && prparse.ld(q) == 32 {
+                    q = q + 1
+                    if prparse.starts_with(q, end, "obj") {
+                        if prparse.xgrow(d, num) {
+                            prparse.wr8((*d).xk + num, 1)
+                            prparse.wr64((*d).xo + num * 8, p - (*d).data)
+                            prparse.wr32((*d).xi + num * 4, gen as u32)
+                        }
+                        p = q + 3
+                        prparse.continue_marker()
+                    }
+                }
+            }
+        }
+        if c == 116 && prparse.starts_with(p, end, "trailer") {
+            var tv: prbase.Val = prparse.val_none()
+            prparse.parse_val(p + 7, end, &tv)
+            if tv.kind == prbase.K_DICT {
+                var rv: prbase.Val = prparse.val_none()
+                if prparse.dict_find(tv.a, tv.n, "Root", &rv) {
+                    (*d).trailer = tv
+                    guard_trailer = true
+                }
+            }
+        }
+        p = p + 1
+    }
+    // object streams: register what they hold
+    var i: u64 = 0
+    while i < (*d).nobj && i < 100000 {
+        if prparse.rd8((*d).xk + i) == 1 {
+            var ov: prbase.Val = prparse.val_none()
+            if prparse.load_obj(d, i, &ov) && ov.kind == prbase.K_STREAM {
+                var tv2: prbase.Val = prparse.val_none()
+                var raw: prbase.Val = prparse.val_none()
+                if prparse.dict_find(ov.a, ov.n, "Type", &raw) {
+                    prparse.resolve(d, &raw, &tv2)
+                    if prparse.name_is(&tv2, "ObjStm") {
+                        var b: rt.Buf = rt.buf_new()
+                        var imf: u32 = 0
+                        if prparse.doc_stream(d, &ov, &b, &imf) {
+                            var nv: prbase.Val = prparse.val_none()
+                            var n: u64 = 0
+                            if prparse.dict_find(ov.a, ov.n, "N", &nv) {
+                                n = prparse.val_resolved_int(d, &nv, 0)
+                            }
+                            var pp: u64 = rt.buf_ptr(&b)
+                            let be: u64 = pp + (rt.buf_len(&b) as u64)
+                            var k: u64 = 0
+                            while k < n && k < 100000 {
+                                var a: prbase.Val = prparse.val_none()
+                                var o: prbase.Val = prparse.val_none()
+                                pp = prparse.parse_val(pp, be, &a)
+                                pp = prparse.parse_val(pp, be, &o)
+                                if a.kind == prbase.K_INT && prparse.xgrow(d, prparse.f2u(a.num)) {
+                                    let an: u64 = prparse.f2u(a.num)
+                                    if prparse.rd8((*d).xk + an) == 0 {
+                                        prparse.wr8((*d).xk + an, 2)
+                                        prparse.wr64((*d).xo + an * 8, i)
+                                        prparse.wr32((*d).xi + an * 4, k as u32)
+                                    }
+                                }
+                                k = k + 1
+                            }
+                        }
+                        rt.buf_free(&b)
+                    } else if prparse.name_is(&tv2, "XRef") {
+                        var rr: prbase.Val = prparse.val_none()
+                        if prparse.dict_find(ov.a, ov.n, "Root", &rr) && !guard_trailer {
+                            (*d).trailer = ov
+                            (*d).trailer.kind = prbase.K_DICT
+                            guard_trailer = true
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    if !guard_trailer {
+        // no trailer anywhere: the catalog is the object that says so
+        var c: u64 = 0
+        while c < (*d).nobj && c < 200000 && !guard_trailer {
+            if prparse.rd8((*d).xk + c) != 0 {
+                var cv: prbase.Val = prparse.val_none()
+                if prparse.load_obj(d, c, &cv) && cv.kind == prbase.K_DICT {
+                    var tv3: prbase.Val = prparse.val_none()
+                    var tr3: prbase.Val = prparse.val_none()
+                    if prparse.dict_find(cv.a, cv.n, "Type", &tv3) {
+                        prparse.resolve(d, &tv3, &tr3)
+                        if prparse.name_is(&tr3, "Catalog") {
+                            // a synthetic trailer: "<< /Root N 0 R >>"
+                            let tb: u64 = prparse.alloc0(64)
+                            if tb != 0 {
+                                var ob: rt.Buf = rt.buf_new()
+                                put_s(&ob, " /Root ")
+                                put_u(&ob, c)
+                                put_s(&ob, " 0 R ")
+                                rt.mem_copy(tb, rt.buf_ptr(&ob), rt.buf_len(&ob))
+                                (*d).trailer = prparse.val_none()
+                                (*d).trailer.kind = prbase.K_DICT
+                                (*d).trailer.a = tb
+                                (*d).trailer.n = rt.buf_len(&ob) as u64
+                                rt.buf_free(&ob)
+                                guard_trailer = true
+                            }
+                        }
+                    }
+                }
+            }
+            c = c + 1
+        }
+    }
+    return guard_trailer
+}
+
+fn doc_open(d: *mut prbase.Doc, data: u64, len: u64) -> bool {
+    (*d).data = data
+    (*d).len = len
+    (*d).err = ERR_NONE
+    (*d).os.count = prparse.alloc0(prbase.OS_MAX * 40)
+    (*d).os.num = 0
+    (*d).img = prparse.alloc0(prbase.IMG_MAX * 64)
+    (*d).fonts = prparse.alloc0(FONT_MAX * FONT_SZ)
+    if (*d).os.count == 0 || (*d).img == 0 || (*d).fonts == 0 {
+        (*d).err = prbase.ERR_MEMORY
+        return false
+    }
+    if len < 8 || !prparse.starts_with(data, data + len, "%PDF") {
+        // some files carry junk before the header: look for it
+        var f: u64 = 0
+        var found: bool = false
+        while f + 5 < len && f < 1024 && !found {
+            if prparse.starts_with(data + f, data + len, "%PDF") {
+                found = true
+            } else {
+                f = f + 1
+            }
+        }
+        if !found {
+            (*d).err = ERR_FORMAT
+            return false
+        }
+    }
+    var ok: bool = prparse.read_xref_chain(d)
+    var root: prbase.Val = prparse.val_none()
+    var rr: prbase.Val = prparse.val_none()
+    if ok {
+        // an encrypted file: the key first -- the catalog may sit in an
+        // (encrypted) object stream
+        if !enc_setup(d) {
+            (*d).err = ERR_ENCRYPTED
+            return false
+        }
+    }
+    if ok {
+        if prparse.dict_find((*d).trailer.a, (*d).trailer.n, "Root", &rr) {
+            prparse.resolve(d, &rr, &root)
+        }
+        if root.kind != prbase.K_DICT {
+            ok = false
+        }
+    }
+    if !ok {
+        // start again from the scan
+        if (*d).xk != 0 {
+            rt.mem_set((*d).xk, 0 as u8, (*d).nobj as usize)
+        }
+        (*d).trailer = prparse.val_none()
+        (*d).os.num = 0
+        ok = rebuild(d)
+        if ok {
+            if !enc_setup(d) {
+                (*d).err = ERR_ENCRYPTED
+                return false
+            }
+        }
+        if ok {
+            if prparse.dict_find((*d).trailer.a, (*d).trailer.n, "Root", &rr) {
+                prparse.resolve(d, &rr, &root)
+            }
+            if root.kind != prbase.K_DICT {
+                ok = false
+            }
+        }
+    }
+    if !ok {
+        (*d).err = ERR_FORMAT
+        return false
+    }
+    (*d).root = root
+    var pr: prbase.Val = prparse.val_none()
+    if !prparse.dict_find(root.a, root.n, "Pages", &pr) || pr.kind != prbase.K_REF {
+        (*d).err = ERR_NOPAGES
+        return false
+    }
+    prparse.collect_pages(d, pr.rn as u64, 0)
+    if (*d).npages == 0 {
+        (*d).err = ERR_NOPAGES
+        return false
+    }
+    return true
+}
+
+fn doc_free(d: *mut prbase.Doc) {
+    if (*d).xk != 0 {
+        rt.heap_free((*d).xk, (*d).nobj as usize)
+        rt.heap_free((*d).xo, ((*d).nobj * 8) as usize)
+        rt.heap_free((*d).xi, ((*d).nobj * 4) as usize)
+    }
+    var i: u64 = 0
+    while i < (*d).os.num {
+        let t: u64 = (*d).os.count
+        rt.heap_free(prparse.rd64(t + i * 40 + 8), prparse.rd64(t + i * 40 + 32) as usize)
+        i = i + 1
+    }
+    if (*d).os.count != 0 {
+        rt.heap_free((*d).os.count, (prbase.OS_MAX * 40) as usize)
+    }
+    if (*d).pages != 0 {
+        rt.heap_free((*d).pages, 400000)
+    }
+    if (*d).img != 0 {
+        rt.heap_free((*d).img, (prbase.IMG_MAX * 64) as usize)
+    }
+    if (*d).fonts != 0 {
+        rt.heap_free((*d).fonts, (FONT_MAX * FONT_SZ) as usize)
+    }
+    rt.buf_free(&(*d).tcap)
+    *d = prparse.doc_new()
+}
+
+const FONT_MAX: u64 = 48
+
+const FONT_SZ: u64 = 128
+
+fn m_id() -> prbase.M {
+    return prbase.M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }
+}
+
+// x then y: the point goes through `p` first, then through `q`
+fn m_mul(p: prbase.M, q: prbase.M) -> prbase.M {
+    return prbase.M {
+        a: p.a * q.a + p.b * q.c,
+        b: p.a * q.b + p.b * q.d,
+        c: p.c * q.a + p.d * q.c,
+        d: p.c * q.b + p.d * q.d,
+        e: p.e * q.a + p.f * q.c + q.e,
+        f: p.e * q.b + p.f * q.d + q.f,
+    }
+}
+
+fn gs_new() -> prbase.GS {
+    return prbase.GS {
+        ctm: m_id(), fill: 0, stroke: 0, fill_a: 1.0, stroke_a: 1.0, lw: 1.0,
+        cap: 0, join: 0, miter: 10.0, dash: [0.0; 8], ndash: 0, dphase: 0.0,
+        fcs: 1, scs: 1, fsep: 0, ssep: 0, gslevel: 0,
+        font: 4294967295, fsize: 0.0, tc: 0.0, tw: 0.0, th: 1.0, tl: 0.0, ts: 0.0, tr: 0,
+    }
+}
+
+// ---------------------------------------------------------------- output
+
+fn put_s(b: *mut rt.Buf, s: str) {
+    rt.buf_push_bytes(b, s.p as u64, s.n)
+}
+
+fn put_u(b: *mut rt.Buf, v: u64) {
+    rt.buf_push_dec_u64(b, v)
+}
+
+// a number with `dec` decimals (0..4)
+fn put_f(b: *mut rt.Buf, v0: f64, dec: u64) {
+    var v: f64 = v0
+    if v != v || v > 1.0e9 || v < 0.0 - 1.0e9 {
+        v = 0.0
+    }
+    if v < 0.0 {
+        prparse.push(b, 45)
+        v = 0.0 - v
+    }
+    var mul: f64 = 1.0
+    var i: u64 = 0
+    while i < dec {
+        mul = mul * 10.0
+        i = i + 1
+    }
+    let scaled: u64 = prparse.f2u(v * mul + 0.5)
+    let ip: u64 = scaled / (mul as u64)
+    var fp: u64 = scaled % (mul as u64)
+    put_u(b, ip)
+    if dec > 0 && fp > 0 {
+        prparse.push(b, 46)
+        var div: u64 = (mul as u64) / 10
+        var tail: bool = true
+        // write the fraction without trailing zeros
+        var digits: [u32; 5] = [0 as u32; 5]
+        var k: u64 = 0
+        while k < dec {
+            digits[k as usize] = ((fp / div) % 10) as u32
+            div = div / 10
+            if div == 0 {
+                div = 1
+            }
+            k = k + 1
+        }
+        var last: u64 = dec
+        while last > 0 && digits[(last - 1) as usize] == 0 {
+            last = last - 1
+        }
+        var m: u64 = 0
+        while m < last {
+            prparse.push(b, 48 + digits[m as usize])
+            m = m + 1
+        }
+        if tail {
+            tail = false
+        }
+    }
+}
+
+fn put_hex2(b: *mut rt.Buf, v: u32) {
+    let h: str = "0123456789abcdef"
+    prparse.push(b, (*((h.p as u64 + ((v >> 4) & 15) as u64) as *mut u8)) as u32)
+    prparse.push(b, (*((h.p as u64 + (v & 15) as u64) as *mut u8)) as u32)
+}
+
+fn put_color(b: *mut rt.Buf, rgb: u32) {
+    prparse.push(b, 35)
+    put_hex2(b, (rgb >> 16) & 255)
+    put_hex2(b, (rgb >> 8) & 255)
+    put_hex2(b, rgb & 255)
+}
+
+fn put_utf8_xml(b: *mut rt.Buf, u: u32) {
+    if u == 60 {
+        put_s(b, "&lt;")
+    } else if u == 62 {
+        put_s(b, "&gt;")
+    } else if u == 38 {
+        put_s(b, "&amp;")
+    } else if u < 128 {
+        prparse.push(b, u)
+    } else if u < 2048 {
+        prparse.push(b, 192 | (u >> 6))
+        prparse.push(b, 128 | (u & 63))
+    } else if u < 65536 {
+        prparse.push(b, 224 | (u >> 12))
+        prparse.push(b, 128 | ((u >> 6) & 63))
+        prparse.push(b, 128 | (u & 63))
+    } else if u < 1114112 {
+        prparse.push(b, 240 | (u >> 18))
+        prparse.push(b, 128 | ((u >> 12) & 63))
+        prparse.push(b, 128 | ((u >> 6) & 63))
+        prparse.push(b, 128 | (u & 63))
+    }
+}
+
+// device coordinates of the point (x, y) under `m`
+fn tx_x(m: prbase.M, x: f64, y: f64) -> f64 {
+    return m.a * x + m.c * y + m.e
+}
+
+fn tx_y(m: prbase.M, x: f64, y: f64) -> f64 {
+    return m.b * x + m.d * y + m.f
+}
+
+// ------------------------------------------------------------ the path
+
+fn path_xy(r: *mut prbase.R, x: f64, y: f64) {
+    put_f(&(*r).path, tx_x((*r).gs.ctm, x, y), 2)
+    prparse.push(&(*r).path, 32)
+    put_f(&(*r).path, tx_y((*r).gs.ctm, x, y), 2)
+    prparse.push(&(*r).path, 32)
+}
+
+fn path_move(r: *mut prbase.R, x: f64, y: f64) {
+    prparse.push(&(*r).path, 77)
+    prparse.push(&(*r).path, 32)
+    path_xy(r, x, y)
+    (*r).cx = x
+    (*r).cy = y
+    (*r).sx = x
+    (*r).sy = y
+}
+
+fn path_line(r: *mut prbase.R, x: f64, y: f64) {
+    if rt.buf_len(&(*r).path) == 0 {
+        path_move(r, x, y)
+        return
+    }
+    prparse.push(&(*r).path, 76)
+    prparse.push(&(*r).path, 32)
+    path_xy(r, x, y)
+    (*r).cx = x
+    (*r).cy = y
+}
+
+fn path_curve(r: *mut prbase.R, x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64) {
+    if rt.buf_len(&(*r).path) == 0 {
+        path_move(r, x1, y1)
+    }
+    prparse.push(&(*r).path, 67)
+    prparse.push(&(*r).path, 32)
+    path_xy(r, x1, y1)
+    path_xy(r, x2, y2)
+    path_xy(r, x3, y3)
+    (*r).cx = x3
+    (*r).cy = y3
+}
+
+fn path_close(r: *mut prbase.R) {
+    if rt.buf_len(&(*r).path) == 0 {
+        return
+    }
+    prparse.push(&(*r).path, 90)
+    prparse.push(&(*r).path, 32)
+    (*r).cx = (*r).sx
+    (*r).cy = (*r).sy
+}
+
+fn path_reset(r: *mut prbase.R) {
+    rt.buf_clear(&(*r).path)
+}
+
+// the scale of the CTM (for line widths)
+fn ctm_scale(m: prbase.M) -> f64 {
+    let det: f64 = prparse.fabs(m.a * m.d - m.b * m.c)
+    return prparse.fsqrt(det)
+}
+
+fn emit_clip(r: *mut prbase.R) {
+    if (*r).pclip == 0 || rt.buf_len(&(*r).path) == 0 {
+        (*r).pclip = 0
+        return
+    }
+    (*r).clipid = (*r).clipid + 1
+    let o: *mut rt.Buf = (*r).out
+    put_s(o, "<clipPath id=\"c")
+    put_u(o, (*r).clipid as u64)
+    put_s(o, "\"><path d=\"")
+    rt.buf_push_bytes(o, rt.buf_ptr(&(*r).path), rt.buf_len(&(*r).path))
+    if (*r).pclip == 2 {
+        put_s(o, "\" clip-rule=\"evenodd\"/></clipPath>")
+    } else {
+        put_s(o, "\"/></clipPath>")
+    }
+    put_s(o, "<g clip-path=\"url(#c")
+    put_u(o, (*r).clipid as u64)
+    put_s(o, ")\">")
+    (*r).open_groups = (*r).open_groups + 1
+    (*r).pclip = 0
+}
+
+fn paint_path(r: *mut prbase.R, fill: bool, stroke: bool, evenodd: bool) {
+    if rt.buf_len(&(*r).path) == 0 {
+        (*r).pclip = 0
+        return
+    }
+    if (fill || stroke) && (*r).which <= 1 {
+        let o: *mut rt.Buf = (*r).out
+        put_s(o, "<path d=\"")
+        rt.buf_push_bytes(o, rt.buf_ptr(&(*r).path), rt.buf_len(&(*r).path))
+        put_s(o, "\"")
+        if fill {
+            put_s(o, " fill=\"")
+            put_color(o, (*r).gs.fill)
+            put_s(o, "\"")
+            if (*r).gs.fill_a < 0.999 {
+                put_s(o, " fill-opacity=\"")
+                put_f(o, (*r).gs.fill_a, 3)
+                put_s(o, "\"")
+            }
+            if evenodd {
+                put_s(o, " fill-rule=\"evenodd\"")
+            }
+        } else {
+            put_s(o, " fill=\"none\"")
+        }
+        if stroke {
+            put_s(o, " stroke=\"")
+            put_color(o, (*r).gs.stroke)
+            put_s(o, "\" stroke-width=\"")
+            var w: f64 = (*r).gs.lw * ctm_scale((*r).gs.ctm)
+            if w < 0.5 {
+                w = 0.5
+            }
+            put_f(o, w, 3)
+            put_s(o, "\"")
+            if (*r).gs.stroke_a < 0.999 {
+                put_s(o, " stroke-opacity=\"")
+                put_f(o, (*r).gs.stroke_a, 3)
+                put_s(o, "\"")
+            }
+            if (*r).gs.cap == 1 {
+                put_s(o, " stroke-linecap=\"round\"")
+            } else if (*r).gs.cap == 2 {
+                put_s(o, " stroke-linecap=\"square\"")
+            }
+            if (*r).gs.join == 1 {
+                put_s(o, " stroke-linejoin=\"round\"")
+            } else if (*r).gs.join == 2 {
+                put_s(o, " stroke-linejoin=\"bevel\"")
+            }
+            if (*r).gs.ndash > 0 {
+                put_s(o, " stroke-dasharray=\"")
+                var i: u64 = 0
+                let sc: f64 = ctm_scale((*r).gs.ctm)
+                while i < ((*r).gs.ndash as u64) {
+                    if i > 0 {
+                        prparse.push(o, 32)
+                    }
+                    put_f(o, (*r).gs.dash[i as usize] * sc, 2)
+                    i = i + 1
+                }
+                put_s(o, "\" stroke-dashoffset=\"")
+                put_f(o, (*r).gs.dphase * sc, 2)
+                put_s(o, "\"")
+            }
+        }
+        put_s(o, "/>")
+    }
+    emit_clip(r)
+    path_reset(r)
+}
+
+// ----------------------------------------------------------------- colours
+
+fn rgb_pack(r: f64, g: f64, b: f64) -> u32 {
+    var rr: f64 = r
+    var gg: f64 = g
+    var bb: f64 = b
+    if rr < 0.0 {
+        rr = 0.0
+    }
+    if rr > 1.0 {
+        rr = 1.0
+    }
+    if gg < 0.0 {
+        gg = 0.0
+    }
+    if gg > 1.0 {
+        gg = 1.0
+    }
+    if bb < 0.0 {
+        bb = 0.0
+    }
+    if bb > 1.0 {
+        bb = 1.0
+    }
+    return ((prparse.f2u32(rr * 255.0 + 0.5)) << 16) | ((prparse.f2u32(gg * 255.0 + 0.5)) << 8) | (prparse.f2u32(bb * 255.0 + 0.5))
+}
+
+fn cmyk_pack(c: f64, m: f64, y: f64, k: f64) -> u32 {
+    return rgb_pack((1.0 - c) * (1.0 - k), (1.0 - m) * (1.0 - k), (1.0 - y) * (1.0 - k))
+}
+
+// ------------------------------------------------------------------ fonts
+//
+// FontInfo record (FONT_SZ octets):
+//   0 key (u64: object number + 1; 0 = free)    8 kind (1 simple, 2 type0)
+//  16 dw f64     24 missing width f64           32 widths ptr (256 f64, simple)
+//  40 unicode ptr (256 u32, simple)             48 tounicode ptr   56 count
+//  64 cid widths ptr   72 count   80 has_tounicode   88 stdkind (+1; 0 none)
+
+fn fslot(d: *mut prbase.Doc, i: u64) -> u64 {
+    return (*d).fonts + i * FONT_SZ
+}
+
+fn font_release(d: *mut prbase.Doc, i: u64) {
+    let s: u64 = fslot(d, i)
+    if prparse.rd64(s + 32) != 0 {
+        rt.heap_free(prparse.rd64(s + 32), 2048)
+    }
+    if prparse.rd64(s + 40) != 0 {
+        rt.heap_free(prparse.rd64(s + 40), 1024)
+    }
+    if prparse.rd64(s + 48) != 0 {
+        rt.heap_free(prparse.rd64(s + 48), (CMAP_MAX * 12) as usize)
+    }
+    if prparse.rd64(s + 64) != 0 {
+        rt.heap_free(prparse.rd64(s + 64), (CIDW_MAX * 16) as usize)
+    }
+    rt.mem_set(s, 0 as u8, FONT_SZ as usize)
+}
+
+const CMAP_MAX: u64 = 8192
+
+const CIDW_MAX: u64 = 4096
+
+fn hex_run(p: u64, end: u64, out: *mut u64) -> u64 {
+    // reads "<hex>" at p (after whitespace): value of up to 8 hex digits
+    var q: u64 = prparse.skip_ws(p, end)
+    var v: u64 = 0
+    if q < end && prparse.ld(q) == 60 {
+        q = q + 1
+        while q < end && prparse.ld(q) != 62 {
+            let h: u32 = prparse.hexval(prparse.ld(q))
+            if h < 16 {
+                v = (v << 4) | (h as u64)
+            }
+            q = q + 1
+        }
+        if q < end {
+            q = q + 1
+        }
+        *out = v
+        return q
+    }
+    *out = 0xFFFFFFFFFFFFFFFF
+    return q
+}
+
+// a UTF-16BE value read from <...> (first code point)
+fn utf16_first(v: u64, nd: u64) -> u32 {
+    // nd = number of hex digits read; for 8 digits: a surrogate pair?
+    if nd >= 8 {
+        let hi: u64 = (v >> 16) & 0xFFFF
+        let lo: u64 = v & 0xFFFF
+        if hi >= 0xD800 && hi < 0xDC00 && lo >= 0xDC00 && lo < 0xE000 {
+            return prparse.u2u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
+        }
+        return prparse.u2u32(hi)
+    }
+    return prparse.u2u32(v)
+}
+
+fn cmap_add(tab: u64, cnt: *mut u64, lo: u64, hi: u64, dst: u64) {
+    if *cnt >= CMAP_MAX {
+        return
+    }
+    prparse.wr32(tab + (*cnt) * 12, prparse.u2u32(lo))
+    prparse.wr32(tab + (*cnt) * 12 + 4, prparse.u2u32(hi))
+    prparse.wr32(tab + (*cnt) * 12 + 8, prparse.u2u32(dst))
+    *cnt = *cnt + 1
+}
+
+// the ToUnicode CMap: bfchar and bfrange
+fn parse_tounicode(p0: u64, n: u64, tab: u64, cnt: *mut u64) {
+    let end: u64 = p0 + n
+    var p: u64 = p0
+    var guard: u64 = 0
+    while p < end && guard < 400000 {
+        guard = guard + 1
+        var t: prbase.Val = prparse.val_none()
+        p = prparse.parse_val(p, end, &t)
+        if t.kind == prbase.K_OP && t.n == 11 && prparse.mem_eq_str(t.a, t.n, "beginbfchar") {
+            var go: bool = true
+            while go {
+                var a: u64 = 0
+                var q: u64 = hex_run(p, end, &a)
+                if a == 0xFFFFFFFFFFFFFFFF {
+                    go = false
+                } else {
+                    var b: u64 = 0
+                    var q2: u64 = q
+                    // count the digits of the destination
+                    let sv: u64 = prparse.skip_ws(q, end)
+                    q2 = hex_run(q, end, &b)
+                    var nd: u64 = 0
+                    if q2 > sv {
+                        nd = q2 - sv - 2
+                    }
+                    cmap_add(tab, cnt, a, a, utf16_first(b, nd) as u64)
+                    p = q2
+                }
+            }
+        } else if t.kind == prbase.K_OP && t.n == 12 && prparse.mem_eq_str(t.a, t.n, "beginbfrange") {
+            var go2: bool = true
+            while go2 {
+                var lo: u64 = 0
+                var hi: u64 = 0
+                var q: u64 = hex_run(p, end, &lo)
+                if lo == 0xFFFFFFFFFFFFFFFF {
+                    go2 = false
+                } else {
+                    q = hex_run(q, end, &hi)
+                    let q3: u64 = prparse.skip_ws(q, end)
+                    if q3 < end && prparse.ld(q3) == 91 {
+                        // an array of destinations
+                        var r: u64 = q3 + 1
+                        var c: u64 = lo
+                        var inner: bool = true
+                        while inner && c <= hi {
+                            let sv2: u64 = prparse.skip_ws(r, end)
+                            if sv2 < end && prparse.ld(sv2) == 93 {
+                                inner = false
+                            } else {
+                                var dv: u64 = 0
+                                let r2: u64 = hex_run(r, end, &dv)
+                                if dv == 0xFFFFFFFFFFFFFFFF {
+                                    inner = false
+                                } else {
+                                    var nd2: u64 = 0
+                                    if r2 > sv2 {
+                                        nd2 = r2 - sv2 - 2
+                                    }
+                                    cmap_add(tab, cnt, c, c, utf16_first(dv, nd2) as u64)
+                                    c = c + 1
+                                    r = r2
+                                }
+                            }
+                        }
+                        // skip to the closing bracket
+                        while r < end && prparse.ld(r) != 93 {
+                            r = r + 1
+                        }
+                        p = r + 1
+                    } else {
+                        var dst: u64 = 0
+                        let sv3: u64 = prparse.skip_ws(q, end)
+                        let q4: u64 = hex_run(q, end, &dst)
+                        var nd3: u64 = 0
+                        if q4 > sv3 {
+                            nd3 = q4 - sv3 - 2
+                        }
+                        if dst != 0xFFFFFFFFFFFFFFFF {
+                            cmap_add(tab, cnt, lo, hi, utf16_first(dst, nd3) as u64)
+                        }
+                        p = q4
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn tounicode_lookup(s: u64, code: u64) -> u32 {
+    let tab: u64 = prparse.rd64(s + 48)
+    let cnt: u64 = prparse.rd64(s + 56)
+    var i: u64 = 0
+    while i < cnt {
+        let lo: u64 = prparse.rd32(tab + i * 12) as u64
+        let hi: u64 = prparse.rd32(tab + i * 12 + 4) as u64
+        if code >= lo && code <= hi {
+            return prparse.rd32(tab + i * 12 + 8) + ((code - lo) as u32)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cid_width(s: u64, cid: u64) -> f64 {
+    let tab: u64 = prparse.rd64(s + 64)
+    let cnt: u64 = prparse.rd64(s + 72)
+    var i: u64 = 0
+    while i < cnt {
+        let lo: u64 = prparse.rd32(tab + i * 16) as u64
+        let hi: u64 = prparse.rd32(tab + i * 16 + 4) as u64
+        if cid >= lo && cid <= hi {
+            return *((tab + i * 16 + 8) as *mut f64)
+        }
+        i = i + 1
+    }
+    return *((s + 16) as *mut f64)
+}
+
+fn std_kind_of(name_p: u64, n: u64) -> u32 {
+    // 0 Helvetica 1 Helvetica-Bold 2 Times 3 Times-Bold 4 Times-Italic 5 Times-BoldItalic 6 Courier; 99 none
+    var bold: bool = false
+    var ital: bool = false
+    var fam: u32 = 99
+    var i: u64 = 0
+    // skip a subset prefix "ABCDEF+"
+    var from: u64 = 0
+    if n > 7 && prparse.ld(name_p + 6) == 43 {
+        from = 7
+    }
+    i = from
+    while i + 3 <= n {
+        let c0: u32 = prparse.ld(name_p + i) | 32
+        let c1: u32 = prparse.ld(name_p + i + 1) | 32
+        let c2: u32 = prparse.ld(name_p + i + 2) | 32
+        let c3: u32 = 0
+        if i + 4 <= n {
+            let _x: u32 = prparse.ld(name_p + i + 3) | 32
+        }
+        if c0 == 99 && c1 == 111 && c2 == 117 {
+            fam = 6
+        } else if c0 == 104 && c1 == 101 && c2 == 108 {
+            fam = 0
+        } else if c0 == 97 && c1 == 114 && c2 == 105 {
+            fam = 0
+        } else if c0 == 116 && c1 == 105 && c2 == 109 {
+            fam = 2
+        } else if c0 == 98 && c1 == 111 && c2 == 108 {
+            bold = true
+        } else if c0 == 105 && c1 == 116 && c2 == 97 {
+            ital = true
+        } else if c0 == 111 && c1 == 98 && c2 == 108 {
+            ital = true
+        }
+        let _y: u32 = c3
+        i = i + 1
+    }
+    if fam == 99 {
+        return 99
+    }
+    if fam == 6 {
+        return 6
+    }
+    if fam == 0 {
+        if bold {
+            return 1
+        }
+        return 0
+    }
+    if bold && ital {
+        return 5
+    }
+    if bold {
+        return 3
+    }
+    if ital {
+        return 4
+    }
+    return 2
+}
+
+// case-insensitive substring search
+fn has_sub(p: u64, n: u64, lit: str) -> bool {
+    let m: u64 = lit.n as u64
+    if m == 0 || n < m {
+        return false
+    }
+    var i: u64 = 0
+    while i + m <= n {
+        var k: u64 = 0
+        var same: bool = true
+        while k < m {
+            let a: u32 = prparse.ld(p + i + k) | 32
+            let b: u32 = (*((lit.p as u64 + k) as *mut u8)) as u32
+            if a != b {
+                same = false
+                k = m
+            } else {
+                k = k + 1
+            }
+        }
+        if same {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// the style bits of a font by its name: 1 bold, 2 monospace, 4 italic, 8 serif
+fn style_of_name(p: u64, n: u64) -> u64 {
+    var st: u64 = 0
+    // DD / PDFVIEW: serif faces. `times` (Times-Roman, TimesNewRoman, TimesNewRomanPS), `serif` but not
+    // `sans`, and the other well known text faces; a font descriptor can also say it (flag 2)
+    if has_sub(p, n, "times") || has_sub(p, n, "georgia") || has_sub(p, n, "garamond") || has_sub(p, n, "palatino")
+        || has_sub(p, n, "bookman") || has_sub(p, n, "century") || has_sub(p, n, "minion") || has_sub(p, n, "cambria")
+        || has_sub(p, n, "charter") || has_sub(p, n, "caslon") || has_sub(p, n, "baskerville") || has_sub(p, n, "didot")
+        || has_sub(p, n, "bodoni") || has_sub(p, n, "tinos") || has_sub(p, n, "liberationserif") || has_sub(p, n, "nimbusrom")
+        || (has_sub(p, n, "serif") && !has_sub(p, n, "sans")) {
+        st = st | 8
+    }
+    if has_sub(p, n, "bold") || has_sub(p, n, "black") || has_sub(p, n, "heavy") || has_sub(p, n, "demi") {
+        st = st | 1
+    }
+    if has_sub(p, n, "courier") || has_sub(p, n, "mono") || has_sub(p, n, "consolas") || has_sub(p, n, "typewriter")
+        || has_sub(p, n, "fixed") {
+        st = st | 2
+    }
+    if has_sub(p, n, "italic") || has_sub(p, n, "oblique") {
+        st = st | 4
+    }
+    return st
+}
+
+fn font_build(d: *mut prbase.Doc, fd: *mut prbase.Val, key: u64, slot: u64) {
+    let s: u64 = fslot(d, slot)
+    rt.mem_set(s, 0 as u8, FONT_SZ as usize)
+    prparse.wr64(s, key)
+    var st: prbase.Val = prparse.val_none()
+    var kind: u64 = 1
+    if prparse.doc_dict_get(d, fd, "Subtype", &st) {
+        if prparse.name_is(&st, "Type0") {
+            kind = 2
+        }
+    }
+    prparse.wr64(s + 8, kind)
+    *((s + 16) as *mut f64) = 1000.0
+    *((s + 24) as *mut f64) = 0.0
+    // the ToUnicode map (any kind of font)
+    var tu: prbase.Val = prparse.val_none()
+    if prparse.doc_dict_get(d, fd, "ToUnicode", &tu) && tu.kind == prbase.K_STREAM {
+        var b: rt.Buf = rt.buf_new()
+        var imf: u32 = 0
+        if prparse.doc_stream(d, &tu, &b, &imf) {
+            let tab: u64 = prparse.alloc0(CMAP_MAX * 12)
+            if tab != 0 {
+                var cnt: u64 = 0
+                parse_tounicode(rt.buf_ptr(&b), rt.buf_len(&b) as u64, tab, &cnt)
+                prparse.wr64(s + 48, tab)
+                prparse.wr64(s + 56, cnt)
+                if cnt > 0 {
+                    prparse.wr64(s + 80, 1)
+                }
+            }
+        }
+        rt.buf_free(&b)
+    }
+    var bf: prbase.Val = prparse.val_none()
+    var std: u32 = 99
+    var fstyle: u64 = 0
+    if prparse.doc_dict_get(d, fd, "BaseFont", &bf) && bf.kind == prbase.K_NAME {
+        std = std_kind_of(bf.a, bf.n)
+        fstyle = style_of_name(bf.a, bf.n)
+    }
+    prparse.wr64(s + 96, fstyle)
+    if kind == 2 {
+        // Type0: the descendant's /DW and /W
+        var df: prbase.Val = prparse.val_none()
+        if prparse.doc_dict_get(d, fd, "DescendantFonts", &df) && df.kind == prbase.K_ARR {
+            var e0: prbase.Val = prparse.val_none()
+            var e0r: prbase.Val = prparse.val_none()
+            prparse.arr_at(df.a, df.n, 0, &e0)
+            prparse.resolve(d, &e0, &e0r)
+            if e0r.kind == prbase.K_DICT {
+                var dwv: prbase.Val = prparse.val_none()
+                if prparse.doc_dict_get(d, &e0r, "DW", &dwv) {
+                    *((s + 16) as *mut f64) = prparse.val_num(&dwv)
+                }
+                var wv: prbase.Val = prparse.val_none()
+                if prparse.doc_dict_get(d, &e0r, "W", &wv) && wv.kind == prbase.K_ARR {
+                    let tab: u64 = prparse.alloc0(CIDW_MAX * 16)
+                    if tab != 0 {
+                        var cnt: u64 = 0
+                        var p: u64 = wv.a
+                        let end: u64 = wv.a + wv.n
+                        var guard: u64 = 0
+                        while p < end && cnt < CIDW_MAX - 1 && guard < 100000 {
+                            guard = guard + 1
+                            var a: prbase.Val = prparse.val_none()
+                            p = prparse.parse_ref(p, end, &a)
+                            if a.kind != prbase.K_INT {
+                                prparse.continue_marker()
+                            } else {
+                                var b2: prbase.Val = prparse.val_none()
+                                p = prparse.parse_ref(p, end, &b2)
+                                if b2.kind == prbase.K_ARR {
+                                    var k: u64 = 0
+                                    var q: u64 = b2.a
+                                    let qe: u64 = b2.a + b2.n
+                                    while q < qe && cnt < CIDW_MAX - 1 {
+                                        var wvv: prbase.Val = prparse.val_none()
+                                        q = prparse.parse_ref(q, qe, &wvv)
+                                        var wr: prbase.Val = prparse.val_none()
+                                        prparse.resolve(d, &wvv, &wr)
+                                        let c: u64 = (prparse.f2u(a.num)) + k
+                                        prparse.wr32(tab + cnt * 16, prparse.u2u32(c))
+                                        prparse.wr32(tab + cnt * 16 + 4, prparse.u2u32(c))
+                                        *((tab + cnt * 16 + 8) as *mut f64) = prparse.val_num(&wr)
+                                        cnt = cnt + 1
+                                        k = k + 1
+                                    }
+                                } else if b2.kind == prbase.K_INT {
+                                    var w3: prbase.Val = prparse.val_none()
+                                    p = prparse.parse_ref(p, end, &w3)
+                                    var w3r: prbase.Val = prparse.val_none()
+                                    prparse.resolve(d, &w3, &w3r)
+                                    prparse.wr32(tab + cnt * 16, prparse.f2u32(a.num))
+                                    prparse.wr32(tab + cnt * 16 + 4, prparse.f2u32(b2.num))
+                                    *((tab + cnt * 16 + 8) as *mut f64) = prparse.val_num(&w3r)
+                                    cnt = cnt + 1
+                                }
+                            }
+                        }
+                        prparse.wr64(s + 64, tab)
+                        prparse.wr64(s + 72, cnt)
+                    }
+                }
+            }
+        }
+        return
+    }
+    // simple font: widths and the code -> Unicode table
+    let wt: u64 = prparse.alloc0(2048)
+    let ut: u64 = prparse.alloc0(1024)
+    if wt == 0 || ut == 0 {
+        return
+    }
+    prparse.wr64(s + 32, wt)
+    prparse.wr64(s + 40, ut)
+    prparse.wr64(s + 88, if_std(std))
+    // encoding
+    var enc: u32 = 0
+    var diff: prbase.Val = prparse.val_none()
+    var ev: prbase.Val = prparse.val_none()
+    var has_diff: bool = false
+    if prparse.doc_dict_get(d, fd, "Encoding", &ev) {
+        if ev.kind == prbase.K_NAME {
+            if prparse.name_is(&ev, "MacRomanEncoding") {
+                enc = 1
+            } else if prparse.name_is(&ev, "StandardEncoding") {
+                enc = 2
+            }
+        } else if ev.kind == prbase.K_DICT {
+            var be: prbase.Val = prparse.val_none()
+            if prparse.doc_dict_get(d, &ev, "BaseEncoding", &be) {
+                if prparse.name_is(&be, "MacRomanEncoding") {
+                    enc = 1
+                } else if prparse.name_is(&be, "StandardEncoding") {
+                    enc = 2
+                }
+            }
+            if prparse.doc_dict_get(d, &ev, "Differences", &diff) && diff.kind == prbase.K_ARR {
+                has_diff = true
+            }
+        }
+    }
+    var c: u64 = 0
+    while c < 256 {
+        prparse.wr32(ut + c * 4, pdftab.base_uni(enc, c as u32))
+        c = c + 1
+    }
+    if has_diff {
+        var p: u64 = diff.a
+        let end: u64 = diff.a + diff.n
+        var code: u64 = 0
+        var guard: u64 = 0
+        while p < end && guard < 4000 {
+            guard = guard + 1
+            var e: prbase.Val = prparse.val_none()
+            p = prparse.parse_ref(p, end, &e)
+            if e.kind == prbase.K_INT {
+                code = prparse.f2u(e.num)
+            } else if e.kind == prbase.K_NAME {
+                if code < 256 {
+                    let u: u32 = pdftab.agl_lookup(e.a, e.n)
+                    if u != 0 {
+                        prparse.wr32(ut + code * 4, u)
+                    }
+                }
+                code = code + 1
+            }
+        }
+    }
+    // widths
+    var fc: prbase.Val = prparse.val_none()
+    var first: u64 = 0
+    if prparse.doc_dict_get(d, fd, "FirstChar", &fc) {
+        first = prparse.f2u(prparse.val_num(&fc))
+    }
+    var mw: f64 = 0.0
+    var fdesc: prbase.Val = prparse.val_none()
+    if prparse.doc_dict_get(d, fd, "FontDescriptor", &fdesc) && fdesc.kind == prbase.K_DICT {
+        var mv: prbase.Val = prparse.val_none()
+        if prparse.doc_dict_get(d, &fdesc, "MissingWidth", &mv) {
+            mw = prparse.val_num(&mv)
+        }
+        var fl: prbase.Val = prparse.val_none()
+        if prparse.doc_dict_get(d, &fdesc, "Flags", &fl) {
+            let fb: u64 = prparse.f2u(prparse.val_num(&fl))
+            if (fb & 1) != 0 {
+                prparse.wr64(s + 96, prparse.rd64(s + 96) | 2)
+            }
+            if (fb & 2) != 0 {
+                prparse.wr64(s + 96, prparse.rd64(s + 96) | 8)
+            }
+            if (fb & 64) != 0 {
+                prparse.wr64(s + 96, prparse.rd64(s + 96) | 4)
+            }
+            if (fb & 262144) != 0 {
+                prparse.wr64(s + 96, prparse.rd64(s + 96) | 1)
+            }
+        }
+        var fw: prbase.Val = prparse.val_none()
+        if prparse.doc_dict_get(d, &fdesc, "FontWeight", &fw) {
+            if prparse.val_num(&fw) >= 600.0 {
+                prparse.wr64(s + 96, prparse.rd64(s + 96) | 1)
+            }
+        }
+    }
+    *((s + 24) as *mut f64) = mw
+    var wa: prbase.Val = prparse.val_none()
+    var have_w: bool = false
+    if prparse.doc_dict_get(d, fd, "Widths", &wa) && wa.kind == prbase.K_ARR {
+        have_w = true
+    }
+    var k: u64 = 0
+    while k < 256 {
+        var wv: f64 = mw
+        if have_w && k >= first {
+            var e2: prbase.Val = prparse.val_none()
+            var e2r: prbase.Val = prparse.val_none()
+            if prparse.arr_at(wa.a, wa.n, k - first, &e2) {
+                prparse.resolve(d, &e2, &e2r)
+                if e2r.kind == prbase.K_INT || e2r.kind == prbase.K_REAL {
+                    wv = e2r.num
+                }
+            }
+        } else if !have_w && std != 99 {
+            // a standard font without /Widths: Adobe's metrics, by WinAnsi code
+            wv = pdftab.std_width(std, k as u32) as f64
+        } else if !have_w {
+            wv = 500.0
+        }
+        *((wt + k * 8) as *mut f64) = wv
+        k = k + 1
+    }
+}
+
+fn if_std(std: u32) -> u64 {
+    if std == 99 {
+        return 0
+    }
+    return (std as u64) + 1
+}
+
+// Resources/<sub>/<name> -> the direct value
+fn res_get(r: *mut prbase.R, sub: str, np: u64, nn: u64, out: *mut prbase.Val) -> bool {
+    var sv: prbase.Val = prparse.val_none()
+    if !prparse.doc_dict_get((*r).d, &(*r).res, sub, &sv) || sv.kind != prbase.K_DICT {
+        *out = prparse.val_none()
+        return false
+    }
+    var raw: prbase.Val = prparse.val_none()
+    if !prparse.dict_find_name(sv.a, sv.n, np, nn, &raw) {
+        *out = prparse.val_none()
+        return false
+    }
+    prparse.resolve((*r).d, &raw, out)
+    return (*out).kind != prbase.K_NONE
+}
+
+fn res_obj(r: *mut prbase.R, sub: str, np: u64, nn: u64) -> u64 {
+    var sv: prbase.Val = prparse.val_none()
+    if !prparse.doc_dict_get((*r).d, &(*r).res, sub, &sv) || sv.kind != prbase.K_DICT {
+        return 0
+    }
+    var raw: prbase.Val = prparse.val_none()
+    if prparse.dict_find_name(sv.a, sv.n, np, nn, &raw) && raw.kind == prbase.K_REF {
+        return raw.rn as u64
+    }
+    return 0
+}
+
+// the slot of the font named np/nn in the current resources
+fn font_slot_for(r: *mut prbase.R, np: u64, nn: u64) -> u64 {
+    let d: *mut prbase.Doc = (*r).d
+    let objn: u64 = res_obj(r, "Font", np, nn)
+    var fv: prbase.Val = prparse.val_none()
+    if !res_get(r, "Font", np, nn, &fv) || fv.kind != prbase.K_DICT {
+        return 4294967295
+    }
+    var key: u64 = objn + 1
+    if objn == 0 {
+        key = fv.a | 0x8000000000000000
+    }
+    var i: u64 = 0
+    while i < FONT_MAX {
+        if prparse.rd64(fslot(d, i)) == key {
+            return i
+        }
+        i = i + 1
+    }
+    // a free slot, else the next one in turn
+    var free: u64 = FONT_MAX
+    var j: u64 = 0
+    while j < FONT_MAX {
+        if prparse.rd64(fslot(d, j)) == 0 && free == FONT_MAX {
+            free = j
+        }
+        j = j + 1
+    }
+    if free == FONT_MAX {
+        free = (*d).nfonts % FONT_MAX
+        (*d).nfonts = (*d).nfonts + 1
+        font_release(d, free)
+    }
+    font_build(d, &fv, key, free)
+    return free
+}
+
+// ------------------------------------------------------------- strings
+
+// decodes a string value into `out` (at most max); returns the octets
+fn str_bytes(v: *mut prbase.Val, out: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    if (*v).hex == 1 {
+        var hi: u32 = 16
+        var i: u64 = 0
+        while i < (*v).n {
+            let h: u32 = prparse.hexval(prparse.ld((*v).a + i))
+            if h < 16 {
+                if hi == 16 {
+                    hi = h
+                } else {
+                    if n < max {
+                        prparse.wr8(out + n, hi * 16 + h)
+                        n = n + 1
+                    }
+                    hi = 16
+                }
+            }
+            i = i + 1
+        }
+        if hi != 16 && n < max {
+            prparse.wr8(out + n, hi * 16)
+            n = n + 1
+        }
+        return n
+    }
+    var i2: u64 = 0
+    while i2 < (*v).n {
+        var c: u32 = prparse.ld((*v).a + i2)
+        if c == 92 && i2 + 1 < (*v).n {
+            i2 = i2 + 1
+            let e: u32 = prparse.ld((*v).a + i2)
+            if e == 110 {
+                c = 10
+            } else if e == 114 {
+                c = 13
+            } else if e == 116 {
+                c = 9
+            } else if e == 98 {
+                c = 8
+            } else if e == 102 {
+                c = 12
+            } else if e >= 48 && e <= 55 {
+                var o: u32 = e - 48
+                var k: u64 = 1
+                while k < 3 && i2 + 1 < (*v).n && prparse.ld((*v).a + i2 + 1) >= 48 && prparse.ld((*v).a + i2 + 1) <= 55 {
+                    i2 = i2 + 1
+                    o = o * 8 + (prparse.ld((*v).a + i2) - 48)
+                    k = k + 1
+                }
+                c = o & 255
+            } else if e == 13 || e == 10 {
+                // a line continuation
+                if e == 13 && i2 + 1 < (*v).n && prparse.ld((*v).a + i2 + 1) == 10 {
+                    i2 = i2 + 1
+                }
+                i2 = i2 + 1
+                prparse.continue_marker()
+                c = 256
+            } else {
+                c = e
+            }
+        }
+        if c < 256 && n < max {
+            prparse.wr8(out + n, c)
+            n = n + 1
+        }
+        i2 = i2 + 1
+    }
+    return n
+}
+
+// ------------------------------------------------------------------- text
+
+fn glyph_out(r: *mut prbase.R, code: u64, is_t0: bool) -> f64 {
+    // draws one glyph at the current text position; returns its advance in
+    // thousandths of an em
+    let d: *mut prbase.Doc = (*r).d
+    if (*r).gs.font >= FONT_MAX {
+        return 500.0
+    }
+    let s: u64 = fslot(d, (*r).gs.font)
+    var w: f64 = 0.0
+    var u: u32 = 0
+    if prparse.rd64(s + 80) != 0 {
+        u = tounicode_lookup(s, code)
+    }
+    if is_t0 {
+        w = cid_width(s, code)
+        if u == 0 && prparse.rd64(s + 80) == 0 {
+            u = 0
+        }
+    } else {
+        let wt: u64 = prparse.rd64(s + 32)
+        let ut: u64 = prparse.rd64(s + 40)
+        if code < 256 {
+            if wt != 0 {
+                w = *((wt + code * 8) as *mut f64)
+            }
+            if u == 0 && ut != 0 {
+                u = prparse.rd32(ut + code * 4)
+            }
+        }
+    }
+    if (*r).which == prbase.WHICH_TEXT {
+        if u >= 32 {
+            text_cap(r, u, w)
+        }
+        return w
+    }
+    if (*r).gs.tr == 3 || u == 0 || u == 32 || u < 32 {
+        return w
+    }
+    // the layer of this glyph: the system has a regular, a bold and a monospace face
+    let style: u64 = prparse.rd64(s + 96)
+    var layer: u32 = 1
+    if (style & 2) != 0 {
+        layer = 3
+    } else if (style & 8) != 0 {
+        layer = 4
+        if (style & 1) != 0 {
+            layer = 5
+        }
+    } else if (style & 1) != 0 {
+        layer = 2
+    }
+    if layer > 1 {
+        (*d).styles = (*d).styles | (1 << layer)
+    }
+    if (*r).which != 0 && (*r).which != layer {
+        return w
+    }
+    // the text rendering matrix (an italic face is the upright one sheared by 12 degrees)
+    let fs: f64 = (*r).gs.fsize
+    var slant: f64 = 0.0
+    if (style & 4) != 0 {
+        slant = 0.2126
+    }
+    let local: prbase.M = prbase.M { a: fs * (*r).gs.th, b: 0.0, c: slant * fs, d: fs, e: 0.0, f: (*r).gs.ts }
+    let trm: prbase.M = m_mul(m_mul(local, (*r).tm), (*r).gs.ctm)
+    var em: f64 = prparse.fsqrt(trm.c * trm.c + trm.d * trm.d) / prparse.fsqrt(1.0 + slant * slant)
+    if em < 0.05 {
+        return w
+    }
+    let o: *mut rt.Buf = (*r).out
+    let ia: f64 = trm.a / em
+    let ib: f64 = trm.b / em
+    let ic: f64 = 0.0 - trm.c / em
+    let id: f64 = 0.0 - trm.d / em
+    var plain: bool = false
+    if prparse.fabs(ia - 1.0) < 0.002 && prparse.fabs(ib) < 0.002 && prparse.fabs(ic) < 0.002 && prparse.fabs(id - 1.0) < 0.002 {
+        plain = true
+    }
+    // A transformed glyph goes into a <g> that carries the matrix and the text
+    // sits at 0,0 inside it: lib/svg applies a `transform` that is written ON a
+    // <text> element TWICE (times_text applies the state again), so a matrix on
+    // the text itself would double the translation and square the shear.
+    if plain {
+        put_s(o, "<text x=\"")
+        put_f(o, trm.e, 2)
+        put_s(o, "\" y=\"")
+        put_f(o, trm.f, 2)
+        put_s(o, "\"")
+    } else {
+        put_s(o, "<g transform=\"matrix(")
+        put_f(o, ia, 4)
+        prparse.push(o, 32)
+        put_f(o, ib, 4)
+        prparse.push(o, 32)
+        put_f(o, ic, 4)
+        prparse.push(o, 32)
+        put_f(o, id, 4)
+        prparse.push(o, 32)
+        put_f(o, trm.e, 2)
+        prparse.push(o, 32)
+        put_f(o, trm.f, 2)
+        put_s(o, ")\"><text x=\"0\" y=\"0\"")
+    }
+    put_s(o, " font-size=\"")
+    put_f(o, em, 2)
+    put_s(o, "\" fill=\"")
+    put_color(o, (*r).gs.fill)
+    put_s(o, "\"")
+    if (*r).gs.fill_a < 0.999 {
+        put_s(o, " fill-opacity=\"")
+        put_f(o, (*r).gs.fill_a, 3)
+        put_s(o, "\"")
+    }
+    put_s(o, ">")
+    put_utf8_xml(o, u)
+    put_s(o, "</text>")
+    if !plain {
+        put_s(o, "</g>")
+    }
+    return w
+}
+
+// records one glyph (see the comment at WHICH_TEXT)
+fn text_cap(r: *mut prbase.R, u: u32, w: f64) {
+    let d: *mut prbase.Doc = (*r).d
+    let o: *mut rt.Buf = &(*d).tcap
+    if (rt.buf_len(o) as u64) >= TCAP_MAX {
+        return
+    }
+    let fs: f64 = (*r).gs.fsize
+    let local: prbase.M = prbase.M { a: fs * (*r).gs.th, b: 0.0, c: 0.0, d: fs, e: 0.0, f: (*r).gs.ts }
+    let trm: prbase.M = m_mul(m_mul(local, (*r).tm), (*r).gs.ctm)
+    let along: f64 = prparse.fsqrt(trm.a * trm.a + trm.b * trm.b)
+    let em: f64 = prparse.fsqrt(trm.c * trm.c + trm.d * trm.d)
+    if em < 0.05 || along < 0.00001 {
+        return
+    }
+    let dx: f64 = trm.a / along
+    let dy: f64 = trm.b / along
+    prparse.push32(o, u)
+    prparse.push32(o, prparse.q16(trm.e))
+    prparse.push32(o, prparse.q16(trm.f))
+    prparse.push32(o, prparse.f2u32(w / 1000.0 * along * 16.0))
+    prparse.push32(o, prparse.f2u32(em * 16.0))
+    prparse.push32(o, prparse.f2u32(dx * 4096.0 + 8192.0))
+    prparse.push32(o, prparse.f2u32(dy * 4096.0 + 8192.0))
+    prparse.push32(o, 0)
+}
+
+fn text_show(r: *mut prbase.R, v: *mut prbase.Val) {
+    let d: *mut prbase.Doc = (*r).d
+    let n: u64 = str_bytes(v, (*r).scratch, 65536)
+    var is_t0: bool = false
+    if (*r).gs.font < FONT_MAX {
+        is_t0 = prparse.rd64(fslot(d, (*r).gs.font) + 8) == 2
+    }
+    var i: u64 = 0
+    while i < n {
+        var code: u64 = 0
+        var single: bool = true
+        if is_t0 {
+            if i + 1 < n {
+                code = ((prparse.rd8((*r).scratch + i) as u64) << 8) | (prparse.rd8((*r).scratch + i + 1) as u64)
+            } else {
+                code = prparse.rd8((*r).scratch + i) as u64
+            }
+            i = i + 2
+            single = false
+        } else {
+            code = prparse.rd8((*r).scratch + i) as u64
+            i = i + 1
+        }
+        let w: f64 = glyph_out(r, code, is_t0)
+        var adv: f64 = w / 1000.0 * (*r).gs.fsize + (*r).gs.tc
+        if single && code == 32 {
+            adv = adv + (*r).gs.tw
+        }
+        adv = adv * (*r).gs.th
+        (*r).tm = m_mul(prbase.M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: adv, f: 0.0 }, (*r).tm)
+    }
+}
+
+fn text_tj_array(r: *mut prbase.R, v: *mut prbase.Val) {
+    var p: u64 = (*v).a
+    let end: u64 = (*v).a + (*v).n
+    var guard: u64 = 0
+    while guard < 100000 {
+        guard = guard + 1
+        p = prparse.skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var e: prbase.Val = prparse.val_none()
+        p = prparse.parse_val(p, end, &e)
+        if e.kind == prbase.K_STR {
+            text_show(r, &e)
+        } else if e.kind == prbase.K_INT || e.kind == prbase.K_REAL {
+            let adj: f64 = 0.0 - e.num / 1000.0 * (*r).gs.fsize * (*r).gs.th
+            (*r).tm = m_mul(prbase.M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: adj, f: 0.0 }, (*r).tm)
+        }
+    }
+}
+
+fn text_nextline(r: *mut prbase.R, tx: f64, ty: f64) {
+    (*r).tlm = m_mul(prbase.M { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: tx, f: ty }, (*r).tlm)
+    (*r).tm = (*r).tlm
+}
+
+// ----------------------------------------------------- colour space names
+
+// components of a colour space value (name or array); 9 = Pattern
+fn cs_comps(r: *mut prbase.R, v: *mut prbase.Val, sep: *mut u32) -> u32 {
+    *sep = 0
+    if (*v).kind == prbase.K_NAME {
+        if prparse.name_is(v, "DeviceGray") || prparse.name_is(v, "G") || prparse.name_is(v, "CalGray") {
+            return 1
+        }
+        if prparse.name_is(v, "DeviceRGB") || prparse.name_is(v, "RGB") || prparse.name_is(v, "CalRGB") {
+            return 3
+        }
+        if prparse.name_is(v, "DeviceCMYK") || prparse.name_is(v, "CMYK") {
+            return 4
+        }
+        if prparse.name_is(v, "Pattern") {
+            return 9
+        }
+        var cv: prbase.Val = prparse.val_none()
+        if res_get(r, "ColorSpace", (*v).a, (*v).n, &cv) {
+            if cv.kind == prbase.K_NAME {
+                return cs_comps(r, &cv, sep)
+            }
+            if cv.kind == prbase.K_ARR {
+                return cs_comps(r, &cv, sep)
+            }
+        }
+        return 1
+    }
+    if (*v).kind == prbase.K_ARR {
+        var f: prbase.Val = prparse.val_none()
+        var fr: prbase.Val = prparse.val_none()
+        prparse.arr_at((*v).a, (*v).n, 0, &f)
+        prparse.resolve((*r).d, &f, &fr)
+        if prparse.name_is(&fr, "ICCBased") {
+            var sv: prbase.Val = prparse.val_none()
+            var sr: prbase.Val = prparse.val_none()
+            prparse.arr_at((*v).a, (*v).n, 1, &sv)
+            prparse.resolve((*r).d, &sv, &sr)
+            var nn: prbase.Val = prparse.val_none()
+            if (sr.kind == prbase.K_STREAM || sr.kind == prbase.K_DICT) && prparse.doc_dict_get((*r).d, &sr, "N", &nn) {
+                return prparse.f2u32(prparse.val_num(&nn))
+            }
+            return 3
+        }
+        if prparse.name_is(&fr, "CalRGB") || prparse.name_is(&fr, "Lab") {
+            return 3
+        }
+        if prparse.name_is(&fr, "CalGray") || prparse.name_is(&fr, "Indexed") || prparse.name_is(&fr, "I") {
+            return 1
+        }
+        if prparse.name_is(&fr, "Separation") {
+            *sep = 1
+            return 1
+        }
+        if prparse.name_is(&fr, "DeviceN") {
+            var nv: prbase.Val = prparse.val_none()
+            var nr: prbase.Val = prparse.val_none()
+            prparse.arr_at((*v).a, (*v).n, 1, &nv)
+            prparse.resolve((*r).d, &nv, &nr)
+            if nr.kind == prbase.K_ARR {
+                return prparse.arr_len(nr.a, nr.n) as u32
+            }
+            return 1
+        }
+        if prparse.name_is(&fr, "Pattern") {
+            return 9
+        }
+        return cs_comps(r, &fr, sep)
+    }
+    return 1
+}
+
+fn set_color_from(r: *mut prbase.R, ops: *mut [prbase.Val; 64], n: usize, stroke: bool) {
+    var comps: u32 = (*r).gs.fcs
+    var sep: u32 = (*r).gs.fsep
+    if stroke {
+        comps = (*r).gs.scs
+        sep = (*r).gs.ssep
+    }
+    var col: u32 = 0
+    if comps == 9 {
+        col = 0x808080
+    } else if n == 0 {
+        return
+    } else if sep == 1 {
+        let t: f64 = prparse.val_num(&(*ops)[0])
+        col = rgb_pack(1.0 - t, 1.0 - t, 1.0 - t)
+    } else if n >= 4 && comps >= 4 {
+        col = cmyk_pack(prparse.val_num(&(*ops)[n - 4]), prparse.val_num(&(*ops)[n - 3]), prparse.val_num(&(*ops)[n - 2]), prparse.val_num(&(*ops)[n - 1]))
+    } else if n >= 3 && comps >= 3 {
+        col = rgb_pack(prparse.val_num(&(*ops)[n - 3]), prparse.val_num(&(*ops)[n - 2]), prparse.val_num(&(*ops)[n - 1]))
+    } else {
+        let g: f64 = prparse.val_num(&(*ops)[n - 1])
+        col = rgb_pack(g, g, g)
+    }
+    if stroke {
+        (*r).gs.stroke = col
+    } else {
+        (*r).gs.fill = col
+    }
+}
+
+// ------------------------------------------------------- the interpreter
+
+fn close_groups_to(r: *mut prbase.R, level: u64) {
+    while (*r).open_groups > level {
+        put_s((*r).out, "</g>")
+        (*r).open_groups = (*r).open_groups - 1
+    }
+}
+
+fn gs_apply_ext(r: *mut prbase.R, ev: *mut prbase.Val) {
+    var v: prbase.Val = prparse.val_none()
+    if prparse.doc_dict_get((*r).d, ev, "ca", &v) {
+        (*r).gs.fill_a = prparse.val_num(&v)
+    }
+    if prparse.doc_dict_get((*r).d, ev, "CA", &v) {
+        (*r).gs.stroke_a = prparse.val_num(&v)
+    }
+    if prparse.doc_dict_get((*r).d, ev, "LW", &v) {
+        (*r).gs.lw = prparse.val_num(&v)
+    }
+    if prparse.doc_dict_get((*r).d, ev, "LC", &v) {
+        (*r).gs.cap = prparse.f2u32(prparse.val_num(&v))
+    }
+    if prparse.doc_dict_get((*r).d, ev, "LJ", &v) {
+        (*r).gs.join = prparse.f2u32(prparse.val_num(&v))
+    }
+}

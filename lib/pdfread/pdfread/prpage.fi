@@ -1,0 +1,1076 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import jpeg.jpeg
+import std.rt
+import pdfread.pdfread.prbase
+import pdfread.pdfread.prfont
+import pdfread.pdfread.prparse
+
+// ImgPlace record (64 octets): obj u32 @0, m[6] f64 @8..56
+fn doc_img_count(d: *mut prbase.Doc) -> u64 {
+    return (*d).nimg
+}
+
+fn doc_img_obj(d: *mut prbase.Doc, i: u64) -> u64 {
+    return prparse.rd32((*d).img + i * 64) as u64
+}
+
+fn doc_img_m(d: *mut prbase.Doc, i: u64, k: u64) -> f64 {
+    return *(((*d).img + i * 64 + 8 + k * 8) as *mut f64)
+}
+
+fn do_xobject(r: *mut prbase.R, np: u64, nn: u64) {
+    let d: *mut prbase.Doc = (*r).d
+    var xv: prbase.Val = prparse.val_none()
+    if !prfont.res_get(r, "XObject", np, nn, &xv) || xv.kind != prbase.K_STREAM {
+        return
+    }
+    var st: prbase.Val = prparse.val_none()
+    var sub: bool = prparse.doc_dict_get(d, &xv, "Subtype", &st)
+    if sub && prparse.name_is(&st, "Image") {
+        if (*d).nimg < prbase.IMG_MAX {
+            let rec: u64 = (*d).img + (*d).nimg * 64
+            prparse.wr32(rec, prfont.res_obj(r, "XObject", np, nn) as u32)
+            *((rec + 8) as *mut f64) = (*r).gs.ctm.a
+            *((rec + 16) as *mut f64) = (*r).gs.ctm.b
+            *((rec + 24) as *mut f64) = (*r).gs.ctm.c
+            *((rec + 32) as *mut f64) = (*r).gs.ctm.d
+            *((rec + 40) as *mut f64) = (*r).gs.ctm.e
+            *((rec + 48) as *mut f64) = (*r).gs.ctm.f
+            prparse.wr32(rec + 56, (*r).gs.fill)
+            (*d).nimg = (*d).nimg + 1
+        }
+        return
+    }
+    if !sub || !prparse.name_is(&st, "Form") {
+        return
+    }
+    if (*r).depth >= 8 {
+        return
+    }
+    var buf: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !prparse.doc_stream(d, &xv, &buf, &imf) {
+        return
+    }
+    // save, apply the form matrix, run, restore
+    let saved_gs: prbase.GS = (*r).gs
+    let saved_res: prbase.Val = (*r).res
+    let saved_level: u64 = (*r).open_groups
+    let saved_tm: prbase.M = (*r).tm
+    let saved_tlm: prbase.M = (*r).tlm
+    var mv: prbase.Val = prparse.val_none()
+    if prparse.doc_dict_get(d, &xv, "Matrix", &mv) && mv.kind == prbase.K_ARR {
+        var fm: prbase.M = prfont.m_id()
+        var k: u64 = 0
+        var vals: [f64; 6] = [0.0; 6]
+        while k < 6 {
+            var e: prbase.Val = prparse.val_none()
+            var er: prbase.Val = prparse.val_none()
+            prparse.arr_at(mv.a, mv.n, k, &e)
+            prparse.resolve(d, &e, &er)
+            vals[k as usize] = prparse.val_num(&er)
+            k = k + 1
+        }
+        fm = prbase.M { a: vals[0], b: vals[1], c: vals[2], d: vals[3], e: vals[4], f: vals[5] }
+        (*r).gs.ctm = prfont.m_mul(fm, (*r).gs.ctm)
+    }
+    var rv: prbase.Val = prparse.val_none()
+    if prparse.doc_dict_get(d, &xv, "Resources", &rv) && rv.kind == prbase.K_DICT {
+        (*r).res = rv
+    }
+    (*r).depth = (*r).depth + 1
+    run_content(r, rt.buf_ptr(&buf), rt.buf_len(&buf) as u64)
+    (*r).depth = (*r).depth - 1
+    prfont.close_groups_to(r, saved_level)
+    (*r).gs = saved_gs
+    (*r).res = saved_res
+    (*r).tm = saved_tm
+    (*r).tlm = saved_tlm
+    rt.buf_free(&buf)
+}
+
+fn run_content(r: *mut prbase.R, data: u64, len: u64) {
+    var ops: [prbase.Val; 64] = [prparse.val_none(); 64]
+    var nops: usize = 0
+    var p: u64 = data
+    let end: u64 = data + len
+    var guard: u64 = 0
+    while p < end && guard < 4000000 {
+        guard = guard + 1
+        p = prparse.skip_ws(p, end)
+        if p >= end {
+            break
+        }
+        var t: prbase.Val = prparse.val_none()
+        p = prparse.parse_val(p, end, &t)
+        if t.kind != prbase.K_OP {
+            if nops < 64 {
+                ops[nops] = t
+                nops = nops + 1
+            }
+        } else {
+            // an operator
+            (*r).ops = (*r).ops + 1
+            let o: u64 = t.a
+            let on: u64 = t.n
+            if on == 1 {
+                let c: u32 = prparse.ld(o)
+                if c == 109 && nops >= 2 {
+                    prfont.path_move(r, prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c == 108 && nops >= 2 {
+                    prfont.path_line(r, prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c == 99 && nops >= 6 {
+                    prfont.path_curve(r, prparse.val_num(&ops[nops - 6]), prparse.val_num(&ops[nops - 5]), prparse.val_num(&ops[nops - 4]),
+                        prparse.val_num(&ops[nops - 3]), prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c == 118 && nops >= 4 {
+                    prfont.path_curve(r, (*r).cx, (*r).cy, prparse.val_num(&ops[nops - 4]), prparse.val_num(&ops[nops - 3]),
+                        prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c == 121 && nops >= 4 {
+                    prfont.path_curve(r, prparse.val_num(&ops[nops - 4]), prparse.val_num(&ops[nops - 3]), prparse.val_num(&ops[nops - 2]),
+                        prparse.val_num(&ops[nops - 1]), prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c == 104 {
+                    prfont.path_close(r)
+                } else if c == 83 {
+                    prfont.paint_path(r, false, true, false)
+                } else if c == 115 {
+                    prfont.path_close(r)
+                    prfont.paint_path(r, false, true, false)
+                } else if c == 102 || c == 70 {
+                    prfont.paint_path(r, true, false, false)
+                } else if c == 66 {
+                    prfont.paint_path(r, true, true, false)
+                } else if c == 98 {
+                    prfont.path_close(r)
+                    prfont.paint_path(r, true, true, false)
+                } else if c == 110 {
+                    prfont.paint_path(r, false, false, false)
+                } else if c == 87 {
+                    (*r).pclip = 1
+                } else if c == 113 {
+                    if (*r).sp < 31 {
+                        (*r).gs.gslevel = (*r).open_groups
+                        (*r).stack[(*r).sp as usize] = (*r).gs
+                        (*r).sp = (*r).sp + 1
+                    }
+                } else if c == 81 {
+                    if (*r).sp > 0 {
+                        (*r).sp = (*r).sp - 1
+                        let sv: prbase.GS = (*r).stack[(*r).sp as usize]
+                        prfont.close_groups_to(r, sv.gslevel)
+                        (*r).gs = sv
+                    }
+                } else if c == 119 && nops >= 1 {
+                    (*r).gs.lw = prparse.val_num(&ops[nops - 1])
+                } else if c == 74 && nops >= 1 {
+                    (*r).gs.cap = prparse.f2u32(prparse.val_num(&ops[nops - 1]))
+                } else if c == 106 && nops >= 1 {
+                    (*r).gs.join = prparse.f2u32(prparse.val_num(&ops[nops - 1]))
+                } else if c == 77 && nops >= 1 {
+                    (*r).gs.miter = prparse.val_num(&ops[nops - 1])
+                } else if c == 100 && nops >= 2 {
+                    (*r).gs.ndash = 0
+                    if ops[nops - 2].kind == prbase.K_ARR {
+                        let na: u64 = prparse.arr_len(ops[nops - 2].a, ops[nops - 2].n)
+                        var k: u64 = 0
+                        while k < na && k < 8 {
+                            var e: prbase.Val = prparse.val_none()
+                            prparse.arr_at(ops[nops - 2].a, ops[nops - 2].n, k, &e)
+                            (*r).gs.dash[k as usize] = prparse.val_num(&e)
+                            k = k + 1
+                        }
+                        (*r).gs.ndash = k as u32
+                        // a dash pattern of zeros is no pattern
+                        var any: bool = false
+                        var q: u64 = 0
+                        while q < k {
+                            if (*r).gs.dash[q as usize] > 0.0 {
+                                any = true
+                            }
+                            q = q + 1
+                        }
+                        if !any {
+                            (*r).gs.ndash = 0
+                        }
+                    }
+                    (*r).gs.dphase = prparse.val_num(&ops[nops - 1])
+                } else if c == 103 && nops >= 1 {
+                    let g: f64 = prparse.val_num(&ops[nops - 1])
+                    (*r).gs.fill = prfont.rgb_pack(g, g, g)
+                    (*r).gs.fcs = 1
+                    (*r).gs.fsep = 0
+                } else if c == 71 && nops >= 1 {
+                    let g2: f64 = prparse.val_num(&ops[nops - 1])
+                    (*r).gs.stroke = prfont.rgb_pack(g2, g2, g2)
+                    (*r).gs.scs = 1
+                    (*r).gs.ssep = 0
+                } else if c == 107 && nops >= 4 {
+                    (*r).gs.fill = prfont.cmyk_pack(prparse.val_num(&ops[nops - 4]), prparse.val_num(&ops[nops - 3]), prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                    (*r).gs.fcs = 4
+                    (*r).gs.fsep = 0
+                } else if c == 75 && nops >= 4 {
+                    (*r).gs.stroke = prfont.cmyk_pack(prparse.val_num(&ops[nops - 4]), prparse.val_num(&ops[nops - 3]), prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                    (*r).gs.scs = 4
+                    (*r).gs.ssep = 0
+                }
+            } else if on == 2 {
+                let c0: u32 = prparse.ld(o)
+                let c1: u32 = prparse.ld(o + 1)
+                if c0 == 99 && c1 == 109 && nops >= 6 {
+                    let m: prbase.M = prbase.M { a: prparse.val_num(&ops[nops - 6]), b: prparse.val_num(&ops[nops - 5]), c: prparse.val_num(&ops[nops - 4]),
+                        d: prparse.val_num(&ops[nops - 3]), e: prparse.val_num(&ops[nops - 2]), f: prparse.val_num(&ops[nops - 1]) }
+                    (*r).gs.ctm = prfont.m_mul(m, (*r).gs.ctm)
+                } else if c0 == 114 && c1 == 101 && nops >= 4 {
+                    let x: f64 = prparse.val_num(&ops[nops - 4])
+                    let y: f64 = prparse.val_num(&ops[nops - 3])
+                    let w: f64 = prparse.val_num(&ops[nops - 2])
+                    let h: f64 = prparse.val_num(&ops[nops - 1])
+                    prfont.path_move(r, x, y)
+                    prfont.path_line(r, x + w, y)
+                    prfont.path_line(r, x + w, y + h)
+                    prfont.path_line(r, x, y + h)
+                    prfont.path_close(r)
+                } else if c0 == 102 && c1 == 42 {
+                    prfont.paint_path(r, true, false, true)
+                } else if c0 == 66 && c1 == 42 {
+                    prfont.paint_path(r, true, true, true)
+                } else if c0 == 98 && c1 == 42 {
+                    prfont.path_close(r)
+                    prfont.paint_path(r, true, true, true)
+                } else if c0 == 87 && c1 == 42 {
+                    (*r).pclip = 2
+                } else if c0 == 114 && c1 == 103 && nops >= 3 {
+                    (*r).gs.fill = prfont.rgb_pack(prparse.val_num(&ops[nops - 3]), prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                    (*r).gs.fcs = 3
+                    (*r).gs.fsep = 0
+                } else if c0 == 82 && c1 == 71 && nops >= 3 {
+                    (*r).gs.stroke = prfont.rgb_pack(prparse.val_num(&ops[nops - 3]), prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                    (*r).gs.scs = 3
+                    (*r).gs.ssep = 0
+                } else if c0 == 99 && c1 == 115 && nops >= 1 {
+                    var sp: u32 = 0
+                    (*r).gs.fcs = prfont.cs_comps(r, &ops[nops - 1], &sp)
+                    (*r).gs.fsep = sp
+                    if (*r).gs.fcs == 1 {
+                        (*r).gs.fill = 0
+                        if sp == 1 {
+                            (*r).gs.fill = 0
+                        }
+                    } else if (*r).gs.fcs == 3 || (*r).gs.fcs == 4 {
+                        (*r).gs.fill = 0
+                    }
+                } else if c0 == 67 && c1 == 83 && nops >= 1 {
+                    var sp2: u32 = 0
+                    (*r).gs.scs = prfont.cs_comps(r, &ops[nops - 1], &sp2)
+                    (*r).gs.ssep = sp2
+                    (*r).gs.stroke = 0
+                } else if c0 == 115 && c1 == 99 {
+                    prfont.set_color_from(r, &ops, nops, false)
+                } else if c0 == 83 && c1 == 67 {
+                    prfont.set_color_from(r, &ops, nops, true)
+                } else if c0 == 103 && c1 == 115 && nops >= 1 {
+                    var ev: prbase.Val = prparse.val_none()
+                    if prfont.res_get(r, "ExtGState", ops[nops - 1].a, ops[nops - 1].n, &ev) && ev.kind == prbase.K_DICT {
+                        prfont.gs_apply_ext(r, &ev)
+                    }
+                } else if c0 == 68 && c1 == 111 && nops >= 1 {
+                    do_xobject(r, ops[nops - 1].a, ops[nops - 1].n)
+                } else if c0 == 66 && c1 == 84 {
+                    (*r).tm = prfont.m_id()
+                    (*r).tlm = prfont.m_id()
+                    (*r).in_text = true
+                } else if c0 == 69 && c1 == 84 {
+                    (*r).in_text = false
+                } else if c0 == 84 && c1 == 102 && nops >= 2 {
+                    (*r).gs.fsize = prparse.val_num(&ops[nops - 1])
+                    if ops[nops - 2].kind == prbase.K_NAME {
+                        (*r).gs.font = prfont.font_slot_for(r, ops[nops - 2].a, ops[nops - 2].n)
+                    }
+                } else if c0 == 84 && c1 == 100 && nops >= 2 {
+                    prfont.text_nextline(r, prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c0 == 84 && c1 == 68 && nops >= 2 {
+                    (*r).gs.tl = 0.0 - prparse.val_num(&ops[nops - 1])
+                    prfont.text_nextline(r, prparse.val_num(&ops[nops - 2]), prparse.val_num(&ops[nops - 1]))
+                } else if c0 == 84 && c1 == 109 && nops >= 6 {
+                    (*r).tm = prbase.M { a: prparse.val_num(&ops[nops - 6]), b: prparse.val_num(&ops[nops - 5]), c: prparse.val_num(&ops[nops - 4]),
+                        d: prparse.val_num(&ops[nops - 3]), e: prparse.val_num(&ops[nops - 2]), f: prparse.val_num(&ops[nops - 1]) }
+                    (*r).tlm = (*r).tm
+                } else if c0 == 84 && c1 == 42 {
+                    prfont.text_nextline(r, 0.0, 0.0 - (*r).gs.tl)
+                } else if c0 == 84 && c1 == 99 && nops >= 1 {
+                    (*r).gs.tc = prparse.val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 119 && nops >= 1 {
+                    (*r).gs.tw = prparse.val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 122 && nops >= 1 {
+                    (*r).gs.th = prparse.val_num(&ops[nops - 1]) / 100.0
+                } else if c0 == 84 && c1 == 76 && nops >= 1 {
+                    (*r).gs.tl = prparse.val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 115 && nops >= 1 {
+                    (*r).gs.ts = prparse.val_num(&ops[nops - 1])
+                } else if c0 == 84 && c1 == 114 && nops >= 1 {
+                    (*r).gs.tr = prparse.f2u32(prparse.val_num(&ops[nops - 1]))
+                } else if c0 == 84 && c1 == 106 && nops >= 1 {
+                    if ops[nops - 1].kind == prbase.K_STR {
+                        prfont.text_show(r, &ops[nops - 1])
+                    }
+                } else if c0 == 84 && c1 == 74 && nops >= 1 {
+                    if ops[nops - 1].kind == prbase.K_ARR {
+                        prfont.text_tj_array(r, &ops[nops - 1])
+                    }
+                } else if c0 == 66 && c1 == 73 {
+                    // an inline image: skip to its EI
+                    var q: u64 = p
+                    var found: bool = false
+                    while q + 2 <= end && !found {
+                        if prparse.ld(q) == 69 && prparse.ld(q + 1) == 73 && (q + 2 == end || prparse.is_ws(prparse.ld(q + 2)))
+                            && q > data && prparse.is_ws(prparse.ld(q - 1)) {
+                            found = true
+                        } else {
+                            q = q + 1
+                        }
+                    }
+                    p = q + 2
+                }
+            } else if on == 3 {
+                if prparse.ld(o) == 84 && prparse.ld(o + 1) == 42 {
+                    prparse.continue_marker()
+                }
+            }
+            if on == 1 && (prparse.ld(o) == 39 || prparse.ld(o) == 34) {
+                // ' and "
+                if prparse.ld(o) == 34 && nops >= 3 {
+                    (*r).gs.tw = prparse.val_num(&ops[nops - 3])
+                    (*r).gs.tc = prparse.val_num(&ops[nops - 2])
+                }
+                prfont.text_nextline(r, 0.0, 0.0 - (*r).gs.tl)
+                if nops >= 1 && ops[nops - 1].kind == prbase.K_STR {
+                    prfont.text_show(r, &ops[nops - 1])
+                }
+            }
+            nops = 0
+        }
+    }
+}
+
+// ---------------------------------------------------------------- pages
+
+fn page_attr(d: *mut prbase.Doc, pv: *mut prbase.Val, key: str, out: *mut prbase.Val) -> bool {
+    var cur: prbase.Val = *pv
+    var guard: u64 = 0
+    while guard < 32 && cur.kind == prbase.K_DICT {
+        if prparse.doc_dict_get(d, &cur, key, out) {
+            return true
+        }
+        var par: prbase.Val = prparse.val_none()
+        if !prparse.doc_dict_get(d, &cur, "Parent", &par) {
+            break
+        }
+        cur = par
+        guard = guard + 1
+    }
+    *out = prparse.val_none()
+    return false
+}
+
+fn box_of(d: *mut prbase.Doc, pv: *mut prbase.Val, key: str, bx: *mut [f64; 4]) -> bool {
+    var v: prbase.Val = prparse.val_none()
+    if !page_attr(d, pv, key, &v) || v.kind != prbase.K_ARR {
+        return false
+    }
+    var i: u64 = 0
+    while i < 4 {
+        var e: prbase.Val = prparse.val_none()
+        var er: prbase.Val = prparse.val_none()
+        if !prparse.arr_at(v.a, v.n, i, &e) {
+            return false
+        }
+        prparse.resolve(d, &e, &er)
+        (*bx)[i as usize] = prparse.val_num(&er)
+        i = i + 1
+    }
+    // normalise
+    if (*bx)[0] > (*bx)[2] {
+        let t: f64 = (*bx)[0]
+        (*bx)[0] = (*bx)[2]
+        (*bx)[2] = t
+    }
+    if (*bx)[1] > (*bx)[3] {
+        let t2: f64 = (*bx)[1]
+        (*bx)[1] = (*bx)[3]
+        (*bx)[3] = t2
+    }
+    return (*bx)[2] - (*bx)[0] > 1.0 && (*bx)[3] - (*bx)[1] > 1.0
+}
+
+fn page_geometry(d: *mut prbase.Doc, page: u64, bx: *mut [f64; 4], rot: *mut u64, pv: *mut prbase.Val) -> bool {
+    if page >= (*d).npages {
+        return false
+    }
+    if !prparse.load_obj(d, prparse.rd32((*d).pages + page * 4) as u64, pv) || (*pv).kind != prbase.K_DICT {
+        return false
+    }
+    if !box_of(d, pv, "CropBox", bx) {
+        if !box_of(d, pv, "MediaBox", bx) {
+            (*bx)[0] = 0.0
+            (*bx)[1] = 0.0
+            (*bx)[2] = 612.0
+            (*bx)[3] = 792.0
+        }
+    }
+    var rv: prbase.Val = prparse.val_none()
+    *rot = 0
+    if page_attr(d, pv, "Rotate", &rv) {
+        var q: i64 = prparse.f2i(prparse.val_num(&rv))
+        q = q % 360
+        if q < 0 {
+            q = q + 360
+        }
+        *rot = ((q / 90) & 3) as u64
+    }
+    return true
+}
+
+// the size of the page in points, rotation applied
+fn doc_page_size(d: *mut prbase.Doc, page: u64, w: *mut f64, h: *mut f64) -> bool {
+    var bx: [f64; 4] = [0.0; 4]
+    var rot: u64 = 0
+    var pv: prbase.Val = prparse.val_none()
+    if !page_geometry(d, page, &bx, &rot, &pv) {
+        return false
+    }
+    if rot % 2 == 1 {
+        *w = bx[3] - bx[1]
+        *h = bx[2] - bx[0]
+    } else {
+        *w = bx[2] - bx[0]
+        *h = bx[3] - bx[1]
+    }
+    return true
+}
+
+// The page as SVG text at `scale` (1.0 = one point per pixel). `wo`/`ho`
+// receive the size in pixels.
+fn doc_page_svg(d: *mut prbase.Doc, page: u64, scale: f64, which: u32, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
+    var bx: [f64; 4] = [0.0; 4]
+    var rot: u64 = 0
+    var pv: prbase.Val = prparse.val_none()
+    if !page_geometry(d, page, &bx, &rot, &pv) {
+        return false
+    }
+    let s: f64 = scale
+    var pw: f64 = bx[2] - bx[0]
+    var ph: f64 = bx[3] - bx[1]
+    var base: prbase.M = prbase.M { a: s, b: 0.0, c: 0.0, d: 0.0 - s, e: 0.0 - bx[0] * s, f: bx[3] * s }
+    if rot == 1 {
+        base = prbase.M { a: 0.0, b: s, c: s, d: 0.0, e: 0.0 - bx[1] * s, f: 0.0 - bx[0] * s }
+        let t: f64 = pw
+        pw = ph
+        ph = t
+    } else if rot == 2 {
+        base = prbase.M { a: 0.0 - s, b: 0.0, c: 0.0, d: s, e: bx[2] * s, f: 0.0 - bx[1] * s }
+    } else if rot == 3 {
+        base = prbase.M { a: 0.0, b: 0.0 - s, c: 0.0 - s, d: 0.0, e: bx[3] * s, f: bx[2] * s }
+        let t2: f64 = pw
+        pw = ph
+        ph = t2
+    }
+    var wpx: u64 = prparse.f2u(pw * s + 0.5)
+    var hpx: u64 = prparse.f2u(ph * s + 0.5)
+    if wpx < 1 {
+        wpx = 1
+    }
+    if hpx < 1 {
+        hpx = 1
+    }
+    *wo = wpx
+    *ho = hpx
+    if which <= 1 {
+        (*d).styles = 0
+    }
+    if which == prbase.WHICH_TEXT {
+        rt.buf_clear(&(*d).tcap)
+    }
+    (*d).nimg = 0
+    // the contents: one stream or an array of them
+    var cv: prbase.Val = prparse.val_none()
+    var content: rt.Buf = rt.buf_new()
+    var got: bool = false
+    var craw: prbase.Val = prparse.val_none()
+    if prparse.dict_find(pv.a, pv.n, "Contents", &craw) {
+        prparse.resolve(d, &craw, &cv)
+        if cv.kind == prbase.K_STREAM {
+            var imf: u32 = 0
+            got = prparse.doc_stream(d, &cv, &content, &imf)
+        } else if cv.kind == prbase.K_ARR {
+            let na: u64 = prparse.arr_len(cv.a, cv.n)
+            var i: u64 = 0
+            while i < na {
+                var e: prbase.Val = prparse.val_none()
+                var er: prbase.Val = prparse.val_none()
+                prparse.arr_at(cv.a, cv.n, i, &e)
+                prparse.resolve(d, &e, &er)
+                if er.kind == prbase.K_STREAM {
+                    var imf2: u32 = 0
+                    prparse.doc_stream(d, &er, &content, &imf2)
+                    prparse.push(&content, 10)
+                }
+                i = i + 1
+            }
+            got = true
+        }
+    }
+    prfont.put_s(out, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"")
+    prfont.put_u(out, wpx)
+    prfont.put_s(out, "\" height=\"")
+    prfont.put_u(out, hpx)
+    prfont.put_s(out, "\" viewBox=\"0 0 ")
+    prfont.put_u(out, wpx)
+    prparse.push(out, 32)
+    prfont.put_u(out, hpx)
+    prfont.put_s(out, "\">")
+    if got {
+        var r: prbase.R = prbase.R {
+            d: d, out: out, gs: prfont.gs_new(), stack: [prfont.gs_new(); 32], sp: 0, path: rt.buf_new(),
+            cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, pclip: 0, clipid: 0, open_groups: 0,
+            tm: prfont.m_id(), tlm: prfont.m_id(), res: prparse.val_none(), depth: 0, scratch: 0, ops: 0, in_text: false, which: which,
+        }
+        r.gs.ctm = base
+        r.scratch = prparse.alloc0(65536 + 16)
+        var rv: prbase.Val = prparse.val_none()
+        if page_attr(d, &pv, "Resources", &rv) {
+            r.res = rv
+        }
+        if r.scratch != 0 {
+            run_content(&r, rt.buf_ptr(&content), rt.buf_len(&content) as u64)
+            rt.heap_free(r.scratch, 65536 + 16)
+        }
+        prfont.close_groups_to(&r, 0)
+        rt.buf_free(&r.path)
+    }
+    prfont.put_s(out, "</svg>")
+    rt.buf_free(&content)
+    return true
+}
+
+// image information for the viewer: width, height, bits, components, filter,
+// colour-space name kind (1 gray, 3 rgb, 4 cmyk), has SMask object, mask flag
+fn doc_img_info(d: *mut prbase.Doc, obj: u64, w: *mut u64, h: *mut u64, bpc: *mut u64, comps: *mut u64, smask: *mut u64, imagemask: *mut bool) -> bool {
+    var v: prbase.Val = prparse.val_none()
+    if !prparse.load_obj(d, obj, &v) || v.kind != prbase.K_STREAM {
+        return false
+    }
+    var t: prbase.Val = prparse.val_none()
+    *w = 0
+    *h = 0
+    *bpc = 8
+    *comps = 3
+    *smask = 0
+    *imagemask = false
+    if prparse.doc_dict_get(d, &v, "Width", &t) {
+        *w = prparse.f2u(prparse.val_num(&t))
+    }
+    if prparse.doc_dict_get(d, &v, "Height", &t) {
+        *h = prparse.f2u(prparse.val_num(&t))
+    }
+    if prparse.doc_dict_get(d, &v, "BitsPerComponent", &t) {
+        *bpc = prparse.f2u(prparse.val_num(&t))
+    }
+    if prparse.doc_dict_get(d, &v, "ImageMask", &t) {
+        if t.num != 0.0 {
+            *imagemask = true
+            *bpc = 1
+            *comps = 1
+        }
+    }
+    if prparse.doc_dict_get(d, &v, "ColorSpace", &t) {
+        var sep: u32 = 0
+        var rr: prbase.R = prbase.R {
+            d: d, out: 0 as *mut rt.Buf, gs: prfont.gs_new(), stack: [prfont.gs_new(); 32], sp: 0, path: rt.buf_new(),
+            cx: 0.0, cy: 0.0, sx: 0.0, sy: 0.0, pclip: 0, clipid: 0, open_groups: 0,
+            tm: prfont.m_id(), tlm: prfont.m_id(), res: prparse.val_none(), depth: 0, scratch: 0, ops: 0, in_text: false, which: 0,
+        }
+        *comps = prfont.cs_comps(&rr, &t, &sep) as u64
+    }
+    *smask = prparse.doc_obj_of(d, &v, "SMask")
+    return *w > 0 && *h > 0
+}
+
+// ============================================================ the pictures
+
+fn doc_img_color(d: *mut prbase.Doc, i: u64) -> u32 {
+    return prparse.rd32((*d).img + i * 64 + 56)
+}
+
+// the colour space of an image: kind 1 gray, 3 rgb, 4 cmyk, 5 indexed (palette
+// of `pn` entries of `pc` components), 6 separation (tint)
+fn img_space(d: *mut prbase.Doc, v: *mut prbase.Val, kind: *mut u32, pal: *mut u64, pn: *mut u64, pc: *mut u32, depth: u64) {
+    *kind = 3
+    if depth > 4 {
+        return
+    }
+    if (*v).kind == prbase.K_NAME {
+        if prparse.name_is(v, "DeviceGray") || prparse.name_is(v, "G") || prparse.name_is(v, "CalGray") {
+            *kind = 1
+        } else if prparse.name_is(v, "DeviceRGB") || prparse.name_is(v, "RGB") || prparse.name_is(v, "CalRGB") {
+            *kind = 3
+        } else if prparse.name_is(v, "DeviceCMYK") || prparse.name_is(v, "CMYK") {
+            *kind = 4
+        }
+        return
+    }
+    if (*v).kind != prbase.K_ARR {
+        return
+    }
+    var f: prbase.Val = prparse.val_none()
+    var fr: prbase.Val = prparse.val_none()
+    prparse.arr_at((*v).a, (*v).n, 0, &f)
+    prparse.resolve(d, &f, &fr)
+    if prparse.name_is(&fr, "ICCBased") {
+        var sv: prbase.Val = prparse.val_none()
+        var sr: prbase.Val = prparse.val_none()
+        prparse.arr_at((*v).a, (*v).n, 1, &sv)
+        prparse.resolve(d, &sv, &sr)
+        var nn: prbase.Val = prparse.val_none()
+        var n: u64 = 3
+        if (sr.kind == prbase.K_STREAM || sr.kind == prbase.K_DICT) && prparse.doc_dict_get(d, &sr, "N", &nn) {
+            n = prparse.f2u(prparse.val_num(&nn))
+        }
+        if n == 1 {
+            *kind = 1
+        } else if n == 4 {
+            *kind = 4
+        } else {
+            *kind = 3
+        }
+    } else if prparse.name_is(&fr, "CalGray") {
+        *kind = 1
+    } else if prparse.name_is(&fr, "Separation") {
+        *kind = 6
+    } else if prparse.name_is(&fr, "Indexed") || prparse.name_is(&fr, "I") {
+        var bv: prbase.Val = prparse.val_none()
+        var br: prbase.Val = prparse.val_none()
+        prparse.arr_at((*v).a, (*v).n, 1, &bv)
+        prparse.resolve(d, &bv, &br)
+        var bk: u32 = 3
+        var dummy_pal: u64 = 0
+        var dummy_n: u64 = 0
+        var dummy_c: u32 = 0
+        img_space(d, &br, &bk, &dummy_pal, &dummy_n, &dummy_c, depth + 1)
+        var bc: u32 = 3
+        if bk == 1 || bk == 6 {
+            bc = 1
+        } else if bk == 4 {
+            bc = 4
+        }
+        var hv: prbase.Val = prparse.val_none()
+        var hr: prbase.Val = prparse.val_none()
+        prparse.arr_at((*v).a, (*v).n, 2, &hv)
+        prparse.resolve(d, &hv, &hr)
+        let hival: u64 = prparse.f2u(prparse.val_num(&hr))
+        var lv: prbase.Val = prparse.val_none()
+        var lr: prbase.Val = prparse.val_none()
+        prparse.arr_at((*v).a, (*v).n, 3, &lv)
+        prparse.resolve(d, &lv, &lr)
+        let cnt: u64 = hival + 1
+        let table: u64 = prparse.alloc0(cnt * 4 + 16)
+        if table != 0 {
+            // the lookup bytes, converted to rgb right here
+            var raw: rt.Buf = rt.buf_new()
+            if lr.kind == prbase.K_STR {
+                let tmp: u64 = prparse.alloc0(cnt * 4 + 16)
+                if tmp != 0 {
+                    let got: u64 = prfont.str_bytes(&lr, tmp, cnt * (bc as u64))
+                    rt.buf_push_bytes(&raw, tmp, got as usize)
+                    rt.heap_free(tmp, (cnt * 4 + 16) as usize)
+                }
+            } else if lr.kind == prbase.K_STREAM {
+                var imf: u32 = 0
+                prparse.doc_stream(d, &lr, &raw, &imf)
+            }
+            var k: u64 = 0
+            while k < cnt {
+                var r8: u32 = 0
+                var g8: u32 = 0
+                var b8: u32 = 0
+                let base: u64 = k * (bc as u64)
+                if base + (bc as u64) <= (rt.buf_len(&raw) as u64) {
+                    let rp: u64 = rt.buf_ptr(&raw) + base
+                    if bc == 1 {
+                        var gv: u32 = prparse.rd8(rp)
+                        if bk == 6 {
+                            gv = 255 - gv
+                        }
+                        r8 = gv
+                        g8 = gv
+                        b8 = gv
+                    } else if bc == 4 {
+                        let cc: f64 = (prparse.rd8(rp) as f64) / 255.0
+                        let mm: f64 = (prparse.rd8(rp + 1) as f64) / 255.0
+                        let yy: f64 = (prparse.rd8(rp + 2) as f64) / 255.0
+                        let kk: f64 = (prparse.rd8(rp + 3) as f64) / 255.0
+                        let px: u32 = prfont.cmyk_pack(cc, mm, yy, kk)
+                        r8 = (px >> 16) & 255
+                        g8 = (px >> 8) & 255
+                        b8 = px & 255
+                    } else {
+                        r8 = prparse.rd8(rp)
+                        g8 = prparse.rd8(rp + 1)
+                        b8 = prparse.rd8(rp + 2)
+                    }
+                }
+                prparse.wr32(table + k * 4, (r8 << 16) | (g8 << 8) | b8)
+                k = k + 1
+            }
+            rt.buf_free(&raw)
+            *pal = table
+            *pn = cnt
+        }
+        *pc = 3
+        *kind = 5
+    }
+}
+
+// sample `s` of `bpc` bits at index `idx` of a row starting at `row`
+fn sample_at(row: u64, idx: u64, bpc: u64) -> u64 {
+    if bpc == 8 {
+        return prparse.rd8(row + idx) as u64
+    }
+    if bpc == 16 {
+        return prparse.rd8(row + idx * 2) as u64
+    }
+    if bpc == 1 {
+        return ((prparse.rd8(row + idx / 8) >> (7 - (idx % 8))) & 1) as u64
+    }
+    if bpc == 2 {
+        return ((prparse.rd8(row + idx / 4) >> (6 - 2 * (idx % 4))) & 3) as u64
+    }
+    // 4
+    return ((prparse.rd8(row + idx / 2) >> (4 - 4 * (idx % 2))) & 15) as u64
+}
+
+fn scale_sample(v: u64, bpc: u64) -> u32 {
+    if bpc == 8 || bpc == 16 {
+        return v as u32
+    }
+    if bpc == 1 {
+        return (v * 255) as u32
+    }
+    if bpc == 2 {
+        return (v * 85) as u32
+    }
+    return (v * 17) as u32
+}
+
+const IMG_MAXPX: u64 = 12000000
+
+// The pixels of image object `obj` as straight RGBA into `out`. `fillrgb` is
+// the colour of an image mask. Returns false for what it cannot decode
+// (JPX, CCITT, JBIG2 -- the viewer then draws a grey box).
+fn doc_img_rgba(d: *mut prbase.Doc, obj: u64, fillrgb: u32, out: *mut rt.Buf, wo: *mut u64, ho: *mut u64) -> bool {
+    var v: prbase.Val = prparse.val_none()
+    if !prparse.load_obj(d, obj, &v) || v.kind != prbase.K_STREAM {
+        return false
+    }
+    var w: u64 = 0
+    var h: u64 = 0
+    var bpc: u64 = 8
+    var comps: u64 = 3
+    var smask: u64 = 0
+    var is_mask: bool = false
+    if !doc_img_info(d, obj, &w, &h, &bpc, &comps, &smask, &is_mask) {
+        return false
+    }
+    if w * h > 400000000 {
+        return false
+    }
+    var data: rt.Buf = rt.buf_new()
+    var imf: u32 = 0
+    if !prparse.doc_stream(d, &v, &data, &imf) {
+        return false
+    }
+    var invert: bool = false
+    var dv: prbase.Val = prparse.val_none()
+    if prparse.doc_dict_get(d, &v, "Decode", &dv) && dv.kind == prbase.K_ARR {
+        var d0: prbase.Val = prparse.val_none()
+        var d1: prbase.Val = prparse.val_none()
+        prparse.arr_at(dv.a, dv.n, 0, &d0)
+        prparse.arr_at(dv.a, dv.n, 1, &d1)
+        if prparse.val_num(&d0) > prparse.val_num(&d1) {
+            invert = true
+        }
+    }
+    if imf == prbase.F_DCT {
+        var im: jpeg.JpegImage = jpeg.jpeg_image_new()
+        let ok: bool = jpeg.jpeg_decode_limited(rt.buf_ptr(&data), rt.buf_len(&data), 16000000, &im) catch false
+        rt.buf_free(&data)
+        if !ok {
+            jpeg.jpeg_image_free(&im)
+            return false
+        }
+        *wo = im.w as u64
+        *ho = im.h as u64
+        rt.buf_push_bytes(out, rt.buf_ptr(&im.px), rt.buf_len(&im.px))
+        jpeg.jpeg_image_free(&im)
+        if smask != 0 {
+            apply_smask(d, smask, out, *wo, *ho)
+        }
+        return true
+    }
+    if imf != prbase.F_NONE {
+        rt.buf_free(&data)
+        return false
+    }
+    // raw samples
+    var kind: u32 = 3
+    var pal: u64 = 0
+    var pn: u64 = 0
+    var pc: u32 = 0
+    var csv: prbase.Val = prparse.val_none()
+    if is_mask {
+        kind = 1
+    } else if prparse.doc_dict_get(d, &v, "ColorSpace", &csv) {
+        img_space(d, &csv, &kind, &pal, &pn, &pc, 0)
+    }
+    var ncomp: u64 = 3
+    if kind == 1 || kind == 6 || kind == 5 {
+        ncomp = 1
+    } else if kind == 4 {
+        ncomp = 4
+    }
+    var step: u64 = 1
+    while (w / step) * (h / step) > IMG_MAXPX {
+        step = step + 1
+    }
+    let ow: u64 = w / step
+    let oh: u64 = h / step
+    if ow == 0 || oh == 0 {
+        rt.buf_free(&data)
+        return false
+    }
+    let rowbytes: u64 = (w * ncomp * bpc + 7) / 8
+    if (rt.buf_len(&data) as u64) < rowbytes * h {
+        // a short stream: the missing rows stay empty
+    }
+    rt.buf_reserve(out, (ow * oh * 4) as usize)
+    let base: u64 = rt.buf_ptr(&data)
+    let dlen: u64 = rt.buf_len(&data) as u64
+    var y: u64 = 0
+    while y < oh {
+        let row: u64 = base + (y * step) * rowbytes
+        var x: u64 = 0
+        while x < ow {
+            var r8: u32 = 255
+            var g8: u32 = 255
+            var b8: u32 = 255
+            var a8: u32 = 255
+            let sx: u64 = x * step
+            if (y * step + 1) * rowbytes > dlen {
+                a8 = 0
+            } else if is_mask {
+                let bit: u64 = sample_at(row, sx, 1)
+                var paint: bool = bit == 0
+                if invert {
+                    paint = bit == 1
+                }
+                r8 = (fillrgb >> 16) & 255
+                g8 = (fillrgb >> 8) & 255
+                b8 = fillrgb & 255
+                if !paint {
+                    a8 = 0
+                }
+            } else if kind == 5 {
+                let ix: u64 = sample_at(row, sx, bpc)
+                var px: u32 = 0
+                if pal != 0 && ix < pn {
+                    px = prparse.rd32(pal + ix * 4)
+                }
+                r8 = (px >> 16) & 255
+                g8 = (px >> 8) & 255
+                b8 = px & 255
+            } else if kind == 1 || kind == 6 {
+                var g: u32 = scale_sample(sample_at(row, sx, bpc), bpc)
+                if invert != (kind == 6) {
+                    g = 255 - g
+                }
+                r8 = g
+                g8 = g
+                b8 = g
+            } else if kind == 4 {
+                let c0: f64 = (scale_sample(sample_at(row, sx * 4, bpc), bpc) as f64) / 255.0
+                let c1: f64 = (scale_sample(sample_at(row, sx * 4 + 1, bpc), bpc) as f64) / 255.0
+                let c2: f64 = (scale_sample(sample_at(row, sx * 4 + 2, bpc), bpc) as f64) / 255.0
+                let c3: f64 = (scale_sample(sample_at(row, sx * 4 + 3, bpc), bpc) as f64) / 255.0
+                let px2: u32 = prfont.cmyk_pack(c0, c1, c2, c3)
+                r8 = (px2 >> 16) & 255
+                g8 = (px2 >> 8) & 255
+                b8 = px2 & 255
+            } else {
+                r8 = scale_sample(sample_at(row, sx * 3, bpc), bpc)
+                g8 = scale_sample(sample_at(row, sx * 3 + 1, bpc), bpc)
+                b8 = scale_sample(sample_at(row, sx * 3 + 2, bpc), bpc)
+            }
+            prparse.push(out, r8)
+            prparse.push(out, g8)
+            prparse.push(out, b8)
+            prparse.push(out, a8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    rt.buf_free(&data)
+    if pal != 0 {
+        rt.heap_free(pal, (pn * 4 + 16) as usize)
+    }
+    *wo = ow
+    *ho = oh
+    if smask != 0 {
+        apply_smask(d, smask, out, ow, oh)
+    }
+    return true
+}
+
+// the soft mask (8-bit gray, any size) as the alpha channel of `px` (w x h RGBA)
+fn apply_smask(d: *mut prbase.Doc, mobj: u64, px: *mut rt.Buf, w: u64, h: u64) {
+    var mb: rt.Buf = rt.buf_new()
+    var mw: u64 = 0
+    var mh: u64 = 0
+    if !doc_img_rgba(d, mobj, 0, &mb, &mw, &mh) {
+        return
+    }
+    if mw == 0 || mh == 0 {
+        rt.buf_free(&mb)
+        return
+    }
+    let dst: u64 = rt.buf_ptr(px)
+    let src: u64 = rt.buf_ptr(&mb)
+    var y: u64 = 0
+    while y < h {
+        var x: u64 = 0
+        while x < w {
+            let sx: u64 = x * mw / w
+            let sy: u64 = y * mh / h
+            prparse.wr8(dst + (y * w + x) * 4 + 3, prparse.rd8(src + (sy * mw + sx) * 4))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    rt.buf_free(&mb)
+}
+
+// Draws placement `i` of the last page (see doc_page_svg) into `dst`: w x h
+// pixels of 0x00RRGGBB. The unit square of the image goes through the
+// placement matrix (device pixels); nearest neighbour with 2x2 averaging when
+// the picture is much larger than its place.
+fn doc_img_blit(d: *mut prbase.Doc, i: u64, dst: u64, w: u64, h: u64) -> bool {
+    if i >= (*d).nimg {
+        return false
+    }
+    let obj: u64 = doc_img_obj(d, i)
+    var px: rt.Buf = rt.buf_new()
+    var iw: u64 = 0
+    var ih: u64 = 0
+    var ok: bool = doc_img_rgba(d, obj, doc_img_color(d, i), &px, &iw, &ih)
+    let m: prbase.M = prbase.M { a: doc_img_m(d, i, 0), b: doc_img_m(d, i, 1), c: doc_img_m(d, i, 2),
+        d: doc_img_m(d, i, 3), e: doc_img_m(d, i, 4), f: doc_img_m(d, i, 5) }
+    // the bounding box on the page
+    var minx: f64 = m.e
+    var maxx: f64 = m.e
+    var miny: f64 = m.f
+    var maxy: f64 = m.f
+    var k: u64 = 1
+    while k < 4 {
+        var ux: f64 = 0.0
+        var uy: f64 = 0.0
+        if k == 1 || k == 3 {
+            ux = 1.0
+        }
+        if k == 2 || k == 3 {
+            uy = 1.0
+        }
+        let X: f64 = prfont.tx_x(m, ux, uy)
+        let Y: f64 = prfont.tx_y(m, ux, uy)
+        if X < minx {
+            minx = X
+        }
+        if X > maxx {
+            maxx = X
+        }
+        if Y < miny {
+            miny = Y
+        }
+        if Y > maxy {
+            maxy = Y
+        }
+        k = k + 1
+    }
+    var x0: i64 = prparse.f2i(minx)
+    var x1: i64 = prparse.f2i(maxx + 1.0)
+    var y0: i64 = prparse.f2i(miny)
+    var y1: i64 = prparse.f2i(maxy + 1.0)
+    if x0 < 0 {
+        x0 = 0
+    }
+    if y0 < 0 {
+        y0 = 0
+    }
+    if x1 > (w as i64) {
+        x1 = w as i64
+    }
+    if y1 > (h as i64) {
+        y1 = h as i64
+    }
+    let det: f64 = m.a * m.d - m.b * m.c
+    if prparse.fabs(det) < 0.0001 {
+        rt.buf_free(&px)
+        return false
+    }
+    // inverse: device -> unit square
+    let ia: f64 = m.d / det
+    let ib: f64 = 0.0 - m.b / det
+    let ic: f64 = 0.0 - m.c / det
+    let id: f64 = m.a / det
+    let ie: f64 = (m.c * m.f - m.d * m.e) / det
+    let iff: f64 = (m.b * m.e - m.a * m.f) / det
+    var yy: i64 = y0
+    while yy < y1 {
+        var xx: i64 = x0
+        while xx < x1 {
+            let dx: f64 = (xx as f64) + 0.5
+            let dy: f64 = (yy as f64) + 0.5
+            let u: f64 = ia * dx + ic * dy + ie
+            let vv: f64 = ib * dx + id * dy + iff
+            if u >= 0.0 && u < 1.0 && vv >= 0.0 && vv < 1.0 {
+                var r8: u32 = 200
+                var g8: u32 = 200
+                var b8: u32 = 200
+                var a8: u32 = 255
+                if ok {
+                    // image row 0 is the TOP of the picture = v = 1
+                    let sx: u64 = (u * (iw as f64)) as u64
+                    let sy: u64 = ((1.0 - vv) * (ih as f64)) as u64
+                    let sp: u64 = rt.buf_ptr(&px) + (sy * iw + sx) * 4
+                    r8 = prparse.rd8(sp)
+                    g8 = prparse.rd8(sp + 1)
+                    b8 = prparse.rd8(sp + 2)
+                    a8 = prparse.rd8(sp + 3)
+                }
+                if a8 > 0 {
+                    let dp: u64 = dst + ((yy as u64) * w + (xx as u64)) * 4
+                    let old: u32 = prparse.rd32(dp)
+                    let or: u32 = (old >> 16) & 255
+                    let og: u32 = (old >> 8) & 255
+                    let ob: u32 = old & 255
+                    let nr: u32 = (r8 * a8 + or * (255 - a8)) / 255
+                    let ng: u32 = (g8 * a8 + og * (255 - a8)) / 255
+                    let nb: u32 = (b8 * a8 + ob * (255 - a8)) / 255
+                    prparse.wr32(dp, (nr << 16) | (ng << 8) | nb)
+                }
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    rt.buf_free(&px)
+    ok = true
+    return ok
+}

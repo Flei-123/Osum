@@ -64,7 +64,7 @@ def split_top(s):
 
 
 def make_wrapper(item_lines, mod):
-    text = "\n".join(item_lines).lstrip()
+    text = "\n".join(l for l in item_lines if not l.lstrip().startswith("//")).lstrip()
     m = re.match(r"fn (\w+)\(", text)
     if not m:
         return None
@@ -92,7 +92,7 @@ def make_wrapper(item_lines, mod):
 
 
 def make_const_alias(item_lines, mod):
-    m = re.match(r"const (\w+)\s*:\s*([^=]+?)\s*=", "\n".join(item_lines).lstrip())
+    m = re.match(r"const (\w+)\s*:\s*([^=]+?)\s*=", "\n".join(l for l in item_lines if not l.lstrip().startswith("//")).lstrip())
     if not m:
         return None
     return "const %s: %s = %s.%s" % (m.group(1), m.group(2), mod, m.group(1))
@@ -172,6 +172,8 @@ def main():
     members = {}
     for n in by:
         members.setdefault(place[n], []).append(n)
+    if a.wrap:
+        members.setdefault("main", [])
     sizes = {}
     em = EXPORT.search("\n".join(header) + "\n")
     exported = [x.strip() for x in em.group(1).replace("\n", " ").split(",") if x.strip()] if em else []
