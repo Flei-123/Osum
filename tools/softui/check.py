@@ -91,7 +91,7 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    image_2, ser = argv[1], argv[2]
+    image, ser = argv[1], argv[2]
     asc = 12
     slop = 0
     for a in argv[3:]:
@@ -99,7 +99,7 @@ def main(argv):
             asc = int(a.split("=")[1])
         elif a.startswith("--slop="):
             slop = int(a.split("=")[1])
-    W, H, px = ppm(image_2)
+    W, H, px = ppm(image)
     wins = {}
     texte = []
     epoche = {}
@@ -135,28 +135,28 @@ def main(argv):
     bad = 0
     seen = 0
     kaesten = {}
-    taskbar = wins.get("Taskleiste", (0, 0, W, H))
-    last_3 = {}
+    leiste = wins.get("Taskleiste", (0, 0, W, H))
+    last_2 = {}
     for n_, m in enumerate(texte):
         k = (m.group(1), m.group(2), m.group(9), m.group(10),
              m.group(4), m.group(5))
-        last_3[k] = (n_, m)
+        last_2[k] = (n_, m)
     def leistenschluessel(m):
         mk = brand_von.get(id(m), "")
         if mk and mk != "button":
             return mk
         return "button:" + m.group(11)
     jung = {}
-    for k, (n_, m) in last_3.items():
+    for k, (n_, m) in last_2.items():
         if m.group(1) == "taskbar":
             lk = leistenschluessel(m)
             if lk not in jung or jung[lk] < n_:
                 jung[lk] = n_
-    last_3 = {k: m for k, (n_, m) in last_3.items()
+    last_2 = {k: m for k, (n_, m) in last_2.items()
               if m.group(1) != "taskbar" or jung[leistenschluessel(m)] == n_}
-    for m in last_3.values():
-        source_2 = m.group(1)
-        wid = m.group(2) or source_2
+    for m in last_2.values():
+        source = m.group(1)
+        wid = m.group(2) or source
         x, base = int(m.group(4)), int(m.group(5))
         fg = int(m.group(6))
         tw = int(m.group(8) or 0)
@@ -167,8 +167,8 @@ def main(argv):
         if m.group(9) is not None:
             ox, oy = int(m.group(9)), int(m.group(10))
             ww, wh = W - ox, H - oy
-        elif source_2 == "taskbar":
-            ox, oy, ww, wh = taskbar
+        elif source == "taskbar":
+            ox, oy, ww, wh = leiste
         else:
             ox, oy, ww, wh = 0, 0, W, H
         x0 = max(0, ox + x)

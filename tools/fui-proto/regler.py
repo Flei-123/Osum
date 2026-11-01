@@ -33,7 +33,7 @@ def read_2(p):
         return f.read().decode("latin1")
 
 
-def all_(txt, muster):
+def all_2(txt, muster):
     return [m for m in re.finditer(muster, txt)]
 
 
@@ -45,7 +45,7 @@ def main():
     error = 0
 
     print("== THE GROOVE AS THE CONTROL CENTER REPORTS IT ==")
-    trace = all_(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
+    trace = all_2(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
     if not trace:
         print("  NO groove reported -- the control center was never open")
         return 1
@@ -55,7 +55,7 @@ def main():
     print()
     print("== WHAT THE SLIDER COMPUTES FROM THE POINTER POSITION ==")
     gerechnet = [(int(m.group(1)), int(m.group(2)))
-                 for m in all_(txt, r"qs: bright to =(\d+) rc=(-?\d+)")]
+                 for m in all_2(txt, r"qs: bright to =(\d+) rc=(-?\d+)")]
     if gerechnet:
         vs = sorted({v for v, _ in gerechnet})
         rcs = sorted({rc for _, rc in gerechnet})
@@ -78,7 +78,7 @@ def main():
 
     print()
     print("== THE VALUE THE PANEL READS WHEN PAINTING ==")
-    values = [int(m.group(1)) for m in all_(txt, r"qs: bright is=(\d+)")]
+    values = [int(m.group(1)) for m in all_2(txt, r"qs: bright is=(\d+)")]
     seq = []
     for w in values:
         if not seq or seq[-1] != w:
@@ -99,7 +99,7 @@ def main():
 
     print()
     print("== DIE LAUTSTAERKE ==")
-    vol = [int(m.group(1)) for m in all_(txt, r"qs: vol ist=(\d+)")]
+    vol = [int(m.group(1)) for m in all_2(txt, r"qs: vol ist=(\d+)")]
     if vol:
         print(f"  gemeldet: {sorted(set(vol))}  (letzter {vol[-1]})")
     else:
@@ -107,7 +107,7 @@ def main():
 
     print()
     print("== DID fUi PAINT? (taskbar report) ==")
-    fui = all_(txt, r"fui=(\d+) fuix=(\d+)")
+    fui = all_2(txt, r"fui=(\d+) fuix=(\d+)")
     if not fui:
         print("  NO counter on the wire -- unknown")
         error += 1

@@ -113,12 +113,12 @@ for (ph, where, want), (w2, x, y) in zip(TARGETS, spots):
     best, sc = classify(img, x, y, g, base)
     seen[ph] = best
     ok(best == want, "%s at %s (%d,%d): shape %s, expected %s  [score %.2f vs best other %.2f]"
-       % (ph, where, x, y, cursor2.NAMES_2[best] if best >= 0 else "?", cursor2.NAMES_2[want],
+       % (ph, where, x, y, cursor2.NAMES[best] if best >= 0 else "?", cursor2.NAMES[want],
           sc[want], max(v for i, v in enumerate(sc) if i != want)))
 ok(len(spots) >= 7, "drive log names %d spots" % len(spots))
 ser = open(ser_path, "rb").read().decode("latin1")
 forms = [int(m.group(1)) for m in re.finditer(r"wm: form=(\d+) x=", ser)]
 ok(bool(forms) and max(forms) < len(cursor2.FORMEN), "serial: %d shape changes, all < %d" % (len(forms), len(cursor2.FORMEN)))
 for want in (0, 1, 3, 4, 5):
-    ok(want in forms, "serial: shape %s was announced" % cursor2.NAMES_2[want])
+    ok(want in forms, "serial: shape %s was announced" % cursor2.NAMES[want])
 sys.exit(fails)

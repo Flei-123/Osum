@@ -4,8 +4,8 @@ import os
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-ROOT_2 = os.path.normpath(os.path.join(HIER, "..", ".."))
-sys.path.insert(0, os.path.join(ROOT_2, "tools", "ttf"))
+ROOT = os.path.normpath(os.path.join(HIER, "..", ".."))
+sys.path.insert(0, os.path.join(ROOT, "tools", "ttf"))
 
 import raster
 
@@ -20,20 +20,20 @@ def raster_s(f, gid, px, S):
     schritt = 64 // S
     halb = schritt // 2
     scale = raster.scale_of(px, f.upm)
-    edges_2 = []
+    edges = []
     for k in f.contours(gid):
-        points_2 = raster.flatten(k, scale)
-        for i in range(len(points_2)):
-            ax, ay = points_2[i]
-            bx, by = points_2[(i + 1) % len(points_2)]
+        points = raster.flatten(k, scale)
+        for i in range(len(points)):
+            ax, ay = points[i]
+            bx, by = points[(i + 1) % len(points)]
             if ay != by:
-                edges_2.append((ax, ay, bx, by))
-    if not edges_2:
+                edges.append((ax, ay, bx, by))
+    if not edges:
         return 0, 0, 0, 0, []
-    minx = min(min(k[0], k[2]) for k in edges_2)
-    maxx = max(max(k[0], k[2]) for k in edges_2)
-    miny = min(min(k[1], k[3]) for k in edges_2)
-    maxy = max(max(k[1], k[3]) for k in edges_2)
+    minx = min(min(k[0], k[2]) for k in edges)
+    maxx = max(max(k[0], k[2]) for k in edges)
+    miny = min(min(k[1], k[3]) for k in edges)
+    maxy = max(max(k[1], k[3]) for k in edges)
     bx0, bx1 = minx >> 6, (maxx + 63) >> 6
     by0, by1 = miny >> 6, (maxy + 63) >> 6
     w, h = bx1 - bx0, by1 - by0
@@ -46,7 +46,7 @@ def raster_s(f, gid, px, S):
         for sub in range(S):
             ys = py * 64 + halb + sub * schritt
             schnitte = []
-            for (ax, ay, bx, by) in edges_2:
+            for (ax, ay, bx, by) in edges:
                 lo, hi = (ay, by) if ay < by else (by, ay)
                 if ys < lo or ys >= hi:
                     continue
@@ -71,12 +71,12 @@ def raster_s(f, gid, px, S):
                         j1 = bx1 * S
                     for j in range(j0, j1):
                         cov[(j // S) - bx0] += 1
-        line_3 = (by1 - 1 - py) * w
+        line = (by1 - 1 - py) * w
         for i in range(w):
             c = cov[i]
             if c > voll:
                 c = voll
-            a[line_3 + i] = (c * 255 + voll // 2) // voll
+            a[line + i] = (c * 255 + voll // 2) // voll
     return w, h, bx0, by1, a
 
 
@@ -119,7 +119,7 @@ def abweichung(aw, ah, af, bw, bh, bf):
     bestes = None
     for dy in range(-2, 3):
         for dx in range(-2, 3):
-            sum_ = 0
+            sum_2 = 0
             groesst = 0
             n = 0
             x0 = min(0, dx)
@@ -131,13 +131,13 @@ def abweichung(aw, ah, af, bw, bh, bf):
                     a = hole(af, aw, ah, x, y)
                     b = hole(bf, bw, bh, x - dx, y - dy)
                     d = abs(a - b)
-                    sum_ += d
+                    sum_2 += d
                     if d > groesst:
                         groesst = d
                     n += 1
             if n == 0:
                 continue
-            value = (sum_ / float(n), groesst, dx, dy)
+            value = (sum_2 / float(n), groesst, dx, dy)
             if bestes is None or value[0] < bestes[0]:
                 bestes = value
     return bestes
@@ -145,7 +145,7 @@ def abweichung(aw, ah, af, bw, bh, bf):
 
 def main():
     args = sys.argv[1:]
-    path_2 = os.path.join(ROOT_2, "assets", "osum-sans.ttf")
+    path_2 = os.path.join(ROOT, "assets", "osum-sans.ttf")
     groessen = [11, 13, 16, 24]
     zeichen = "AOSgex8"
     i = 0
@@ -163,9 +163,9 @@ def main():
     if rest:
         path_2 = rest[0]
 
-    data_2 = open(path_2, "rb").read()
-    print("PAINT-AA: %s, %d Oktette" % (os.path.relpath(path_2, ROOT_2),
-                                        len(data_2)))
+    data = open(path_2, "rb").read()
+    print("PAINT-AA: %s, %d Oktette" % (os.path.relpath(path_2, ROOT),
+                                        len(data)))
     if not HAT_PIL:
         print("   Pillow is missing -- the levels are counted, the "
               "Vergleich gegen FreeType nicht.")
@@ -181,7 +181,7 @@ def main():
     REF = 32
 
     for px in groessen:
-        s = raster.Font_2(path_2, px)
+        s = raster.Font(path_2, px)
         for c in zeichen:
             g = s.glyphe(ord(c))
             if g.w == 0 or g.h == 0:
@@ -191,7 +191,7 @@ def main():
             ka = kantenstufen(g.w, g.h, feld)
             all_stufen.append(st)
             all_edges.append(ka)
-            line_3 = ("   px=%2d  '%s'  %2dx%-2d  stufen=%-3d kante=%-3d"
+            line = ("   px=%2d  '%s'  %2dx%-2d  stufen=%-3d kante=%-3d"
                      % (px, c, g.w, g.h, st, ka))
             if HAT_PIL:
                 bw, bh, bf = deckung_freetype(path_2, px, c)
@@ -199,7 +199,7 @@ def main():
                                                      bw, bh, bf)
                 all_d.append(mittel)
                 all_max.append(groesst)
-                line_3 += ("  |d|=%6.2f  max=%3d  (versatz %+d,%+d)"
+                line += ("  |d|=%6.2f  max=%3d  (versatz %+d,%+d)"
                           % (mittel, groesst, dx, dy))
             gid = s.f.glyph_of(ord(c))
             rw, rh, _, _, rf = raster_s(s.f, gid, px, REF)
@@ -214,7 +214,7 @@ def main():
                     e[1] += 1
                     if d > e[2]:
                         e[2] = d
-            print(line_3)
+            print(line)
 
     n = len(all_stufen)
     if n == 0:
@@ -264,11 +264,11 @@ def main():
         print("PAINT-AA: Abtastdichte gegen %dx%d (Referenz, %d Stufen)"
               % (REF, REF, REF * REF + 1))
         for S in sorted(dichte):
-            sum_, n, groesst = dichte[S]
+            sum_2, n, groesst = dichte[S]
             print("   %2dx%-2d  stufen=%-4d  |d|=%6.3f von 255 (%.3f%%)"
                   "  max=%3d  ueber %d Bildpunkte"
-                  % (S, S, S * S + 1, sum_ / float(n),
-                     100.0 * sum_ / float(n) / 255.0, groesst, n))
+                  % (S, S, S * S + 1, sum_2 / float(n),
+                     100.0 * sum_2 / float(n) / 255.0, groesst, n))
         if 4 in dichte and 8 in dichte:
             v4 = dichte[4][0] / float(dichte[4][1])
             v8 = dichte[8][0] / float(dichte[8][1])

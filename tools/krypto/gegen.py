@@ -81,10 +81,10 @@ def kdf(pw, salt, t, m, p, n=WRAP_LEN):
         parallelism=p, hash_len=n, type=argon2ll.Type.ID, version=19)
 
 
-def xts(key, tweak, data_2, ent):
+def xts(key, tweak, data, ent):
     c = Cipher(algorithms.AES(key), modes.XTS(tweak))
     k = c.decryptor() if ent else c.encryptor()
-    return k.update(data_2) + k.finalize()
+    return k.update(data) + k.finalize()
 
 
 def tweak_of(lba):
@@ -148,9 +148,9 @@ def hauptschluessel(hdr, pw):
 
 
 
-def cmd_read(path_2, pw):
+def cmd_read(path, pw):
     """Was Osum geschrieben hat, mit fremdem Werkzeug aufmachen."""
-    d = open(path_2, "rb").read()
+    d = open(path, "rb").read()
     hdr = d[:HDR_SECTORS * SECTOR]
     k, mk, wo = hauptschluessel(hdr, pw)
     print("kopf: kennung=1 fassung=%d chiffre=%d kdf=%d sektor=%d"
@@ -174,7 +174,7 @@ def cmd_read(path_2, pw):
 
 
 
-def cmd_write(path_2, pw, t=1, m=64, p=1, bloecke=8192):
+def cmd_write(path, pw, t=1, m=64, p=1, bloecke=8192):
     """EINEN TRAEGER ANLEGEN, DEN NUR DIESES PROGRAMM GESCHRIEBEN HAT.
 
     Das ist die schaerfere Richtung der Gegenprobe: Osum muss einen
@@ -208,16 +208,16 @@ def cmd_write(path_2, pw, t=1, m=64, p=1, bloecke=8192):
     hdr[sl + S_MAC:sl + S_MAC + 32] = mac
     hdr[H_SUM:H_SUM + 32] = header_sum(bytes(hdr))
 
-    with open(path_2, "wb") as f:
+    with open(path, "wb") as f:
         f.write(bytes(hdr))
         f.truncate(bloecke * SECTOR)
-    print("schrieb: %s bloecke=%d t=%d m=%d p=%d" % (path_2, bloecke, t, m, p))
+    print("schrieb: %s bloecke=%d t=%d m=%d p=%d" % (path, bloecke, t, m, p))
     print("schluessel: %s" % mk.hex())
     return 0
 
 
 
-def cmd_roh(path_2):
+def cmd_roh(path):
     """Das Rohgeraet ansehen: steht dort irgendetwas Erkennbares?
 
     Gemessen wird dreierlei, und die Unterscheidung ist wichtig:
@@ -228,9 +228,9 @@ def cmd_roh(path_2):
     import collections
     import math
     import re
-    d = open(path_2, "rb").read()
-    data_2 = d[HDR_SECTORS * SECTOR:]
-    n = len(data_2) // SECTOR
+    d = open(path, "rb").read()
+    data = d[HDR_SECTORS * SECTOR:]
+    n = len(data) // SECTOR
 
     sig = {
         b"OSUM-OFS": "OFS-Superblock",
@@ -241,12 +241,12 @@ def cmd_roh(path_2):
     }
     print("roh: sektoren=%d" % n)
     for pat, name in sig.items():
-        print("roh: sig %s = %d" % (name, data_2.count(pat)))
+        print("roh: sig %s = %d" % (name, data.count(pat)))
 
     empty = 0
     ents = []
     for i in range(n):
-        s = data_2[i * SECTOR:(i + 1) * SECTOR]
+        s = data[i * SECTOR:(i + 1) * SECTOR]
         if s == b"\0" * SECTOR:
             empty += 1
             continue
@@ -258,7 +258,7 @@ def cmd_roh(path_2):
         print("raw: entropy_min=%.3f mean=%.3f below7=%d"
               % (min(ents), sum(ents) / len(ents),
                  sum(1 for e in ents if e < 7.0)))
-    lang = [r for r in re.findall(rb"[ -~]{16,}", data_2)]
+    lang = [r for r in re.findall(rb"[ -~]{16,}", data)]
     print("roh: textfolgen16=%d" % len(lang))
     return 0
 
@@ -445,8 +445,8 @@ def _ofs_leser(blk):
     return root, file
 
 
-def cmd_tree(path_2, pw):
-    d = open(path_2, "rb").read()
+def cmd_tree(path, pw):
+    d = open(path, "rb").read()
     k, mk, wo = hauptschluessel(d[:HDR_SECTORS * SECTOR], pw)
     if mk is None:
         print("baum: auf=0")

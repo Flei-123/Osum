@@ -117,7 +117,7 @@ def aufgehellt(px, w, h, soll):
 BEFUND = {"fehler": 0, "vertauscht": 0}
 
 
-def check_color(image_2, r, g, bl, n, ramp):
+def check_color(image, r, g, bl, n, ramp):
     best, bd = None, 10 ** 9
     for nm, (sr, sg, sb) in ramp.items():
         d = abs(r - sr) + abs(g - sg) + abs(bl - sb)
@@ -129,17 +129,17 @@ def check_color(image_2, r, g, bl, n, ramp):
         if (r, g, bl) == (qb, qg, qr) and qr != qb:
             rot = qn
             break
-    short = image_2.split("/")[-1]
+    kurz = image.split("/")[-1]
     if rot:
-        print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
+        print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  = {rot} MIT VERTAUSCHTEM R UND B")
         BEFUND["vertauscht"] += 1
         BEFUND["fehler"] += 1
     elif bd <= 6:
-        print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
+        print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  = {nm}  OK")
     else:
-        print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
+        print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  naechste Stufe {nm} +{bd} -- in keiner Rampe")
 
 
@@ -179,17 +179,17 @@ def main():
             if (r, g, bl) == (qb, qg, qr) and qr != qb:
                 rot = qn
                 break
-        short = b.split("/")[-1]
+        kurz = b.split("/")[-1]
         if rot:
-            print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d})"
+            print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
                   f"  = {rot} MIT VERTAUSCHTEM R UND B")
             vertauscht += 1
             error += 1
         elif bd <= 6:
-            print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d})"
+            print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
                   f"  = {nm} (Abweichung {bd})  OK")
         else:
-            print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d})"
+            print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
                   f"  naechste Stufe {nm} +{bd} -- IN KEINER RAMPE")
             error += 1
 
@@ -209,14 +209,14 @@ def main():
                     if abs(q[0] - soll[0]) + abs(q[1] - soll[1]) \
                             + abs(q[2] - soll[2]) <= 8:
                         c[q] += 1
-            short = b.split("/")[-1]
+            kurz = b.split("/")[-1]
             if c:
                 (ar, ag, ab), an = c.most_common(1)[0]
-                print(f"  {short:26s} RGB({ar:3d},{ag:3d},{ab:3d})"
+                print(f"  {kurz:26s} RGB({ar:3d},{ag:3d},{ab:3d})"
                       f" {an:6d} Punkte  OK")
             elif aufgehellt(px, w, h, soll) is not None:
                 t, gf = aufgehellt(px, w, h, soll)
-                print(f"  {short:26s} RGB{gf} = accent at {t*100:.0f} %"
+                print(f"  {kurz:26s} RGB{gf} = accent at {t*100:.0f} %"
                       f" gegen Weiss gemischt  OK")
             else:
                 gedreht = (soll[2], soll[1], soll[0])
@@ -228,12 +228,12 @@ def main():
                                 + abs(q[2] - gedreht[2]) <= 8:
                             c2 += 1
                 if c2 > 20:
-                    print(f"  {short:26s} AKZENT VERTAUSCHT:"
+                    print(f"  {kurz:26s} AKZENT VERTAUSCHT:"
                           f" RGB{gedreht} {c2} Punkte")
                     error += 1
                     vertauscht += 1
                 else:
-                    print(f"  {short:26s} no accent in the image")
+                    print(f"  {kurz:26s} no accent in the image")
 
     error += BEFUND["fehler"]
     vertauscht += BEFUND["vertauscht"]

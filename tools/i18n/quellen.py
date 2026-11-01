@@ -67,7 +67,7 @@ def funde(wurzel):
         rel = os.path.relpath(path_2, wurzel).replace(os.sep, '/')
         txt = open(path_2, encoding='utf-8').read()
         zeilen = txt.split('\n')
-        window_2 = ('import wlib' in txt) or ('import wlibc' in txt)
+        window = ('import wlib' in txt) or ('import wlibc' in txt)
         kern = not rel.startswith('kernel/user/')
         for nr, z in enumerate(zeilen, 1):
             if z.lstrip().startswith('//'):
@@ -85,13 +85,13 @@ def funde(wurzel):
                 inhalt = inhalt_von(roh)
                 if not translit.finde(without_pfade(inhalt)):
                     continue
-                kl = klasse(name, inhalt, zeilen, nr, code, window_2, kern,
+                kl = klasse(name, inhalt, zeilen, nr, code, window, kern,
                             fest)
-                wire_2 = WIRE.search(z) is not None
-                if wire_2:
+                wire = WIRE.search(z) is not None
+                if wire:
                     kl = 'MARKE'
-                aus.append(dict(file_2=rel, line_3=nr, klasse=kl, name=name,
-                                wire_2=wire_2,
+                aus.append(dict(file_2=rel, line=nr, klasse=kl, name=name,
+                                wire=wire,
                                 width_2=width_2, inhalt=inhalt, roh=roh,
                                 stamm=[s for s, _ in
                                        translit.finde(inhalt)],
@@ -118,7 +118,7 @@ def block(zeilen, nr):
     return von, bis
 
 
-def stellen(zeilen, name, ausser, fest):
+def ask(zeilen, name, ausser, fest):
     such = re.compile(r'(?<![A-Za-z_0-9])%s(?![A-Za-z_0-9])'
                       % re.escape(name))
     if not fest:
@@ -136,10 +136,10 @@ def stellen(zeilen, name, ausser, fest):
     return aus
 
 
-def klasse(name, inhalt, zeilen, nr, code, window_2, kern, fest):
+def klasse(name, inhalt, zeilen, nr, code, window, kern, fest):
     if sieht_aus_wie_name(inhalt):
         return 'MARKE'
-    benutzt = stellen(zeilen, name, nr, fest) if name != '-' else [code]
+    benutzt = ask(zeilen, name, nr, fest) if name != '-' else [code]
     for z in benutzt:
         if VERGL.search(z):
             return 'MARKE'
@@ -149,9 +149,9 @@ def klasse(name, inhalt, zeilen, nr, code, window_2, kern, fest):
             r'(?:sag|sagn|kv|kvs|kvt|say_line|h_claim|emit|say|say_kt|say_kv)\s*\(\s*\(?\s*&%s\s*\['
             % re.escape(name))
         feld = any(wieerst.search(z) for z in benutzt)
-    if window_2 or kern or feld:
+    if window or kern or feld:
         if not benutzt:
-            return 'MITSCHNITT' if (window_2 or kern) else 'SICHTBAR'
+            return 'MITSCHNITT' if (window or kern) else 'SICHTBAR'
         for z in benutzt:
             if not TRACE.search(z):
                 return 'SICHTBAR'
@@ -170,7 +170,7 @@ def marken(wurzel):
         zeilen = txt.split('\n')
         fest = re.match(r'^\s*(?:static|const)\b',
                         zeilen[r['zeile'] - 1]) is not None
-        benutzt = stellen(zeilen, r['name'], r['zeile'], fest)
+        benutzt = ask(zeilen, r['name'], r['zeile'], fest)
         if not any(VERGL.search(z) for z in benutzt):
             continue
         n += 1
@@ -191,7 +191,7 @@ def marken(wurzel):
                           % (r['datei'], r['zeile'], r['name'],
                              r['inhalt'], soll))
             continue
-        zw = stellen(zeilen, gefunden, 0, True)
+        zw = ask(zeilen, gefunden, 0, True)
         if not any(VERGL.search(z) for z in zw):
             klagen.append('%s  %s = %r steht da, wird aber mit nichts '
                           'verglichen' % (r['datei'], gefunden, soll))

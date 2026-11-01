@@ -108,9 +108,9 @@ FAELLE = ["kennung", "inodes", "bloecke", "bereiche", "zeigerkreis",
           "leerkarte", "muell", "jmuell"]
 
 
-def mach(fall, reason_2, target):
-    shutil.copyfile(reason_2, target)
-    r = Roh(target)
+def mach(fall, reason, ziel):
+    shutil.copyfile(reason, ziel)
+    r = Roh(ziel)
     if fall == "kennung":
         r.s(mkfs.SB["MAGIC"], 0xDEADBEEFDEADBEEF)
     elif fall == "inodes":
@@ -128,14 +128,14 @@ def mach(fall, reason_2, target):
         r.inode_set(2, mkfs.I_INDIRECT, b)
         r.inode_set(2, mkfs.I_SIZE, 1 << 20)
     elif fall == "verzkreis":
-        image_2 = _image(target)
-        binino = image_2.finde("/bin")
-        image_2.f.close()
+        image = _image(ziel)
+        binino = image.finde("/bin")
+        image.f.close()
         _dir_add(r, binino, "hoch", 1)
     elif fall == "selbstverz":
-        image_2 = _image(target)
-        binino = image_2.finde("/bin")
-        image_2.f.close()
+        image = _image(ziel)
+        binino = image.finde("/bin")
+        image.f.close()
         _dir_add(r, binino, "ich", binino)
     elif fall == "doppelt":
         b = r.inode_get(2, mkfs.I_DIRECT)
@@ -143,9 +143,9 @@ def mach(fall, reason_2, target):
     elif fall == "wildzeiger":
         r.inode_set(2, mkfs.I_DIRECT, r.g(mkfs.SB["BLOCKS"]) + 1000)
     elif fall == "totlink":
-        image_2 = _image(target)
-        binino = image_2.finde("/bin")
-        image_2.f.close()
+        image = _image(ziel)
+        binino = image.finde("/bin")
+        image.f.close()
         _dir_add(r, binino, "nirgends", r.g(mkfs.SB["INODES"]) - 1)
     elif fall == "leerkarte":
         bmb = r.g(mkfs.SB["BMBLOCKS"]) or 1
@@ -167,13 +167,13 @@ def mach(fall, reason_2, target):
     else:
         raise SystemExit("kaputt: unbekannter Fall %s" % fall)
     r.zu()
-    return target
+    return ziel
 
 
 def _image(path_2):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import check
-    return check.Image_(path_2)
+    return check.Image_2(path_2)
 
 
 def _frei(r):
@@ -194,7 +194,7 @@ def _frei(r):
     raise SystemExit("kaputt: kein freier Block")
 
 
-def _dir_add(r, dirino, name, target):
+def _dir_add(r, dirino, name, ziel):
     """Einen Eintrag ans Ende eines Verzeichnisses haengen, roh.
 
     Ein Eintrag der Fassung 3 ist 264 Oktette lang und geht deshalb
@@ -205,7 +205,7 @@ def _dir_add(r, dirino, name, target):
     dirent = r.dirent
     sz = r.inode_get(dirino, mkfs.I_SIZE)
     roh = bytearray(dirent)
-    struct.pack_into("<Q", roh, 0, target)
+    struct.pack_into("<Q", roh, 0, ziel)
     nm = name.encode("latin-1")[:dirent - 9] + b"\0"
     roh[8:8 + len(nm)] = nm
     geschrieben = 0
@@ -230,12 +230,12 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    reason_2, aus = argv[1], argv[2]
+    reason, aus = argv[1], argv[2]
     faelle = argv[3:] or FAELLE
     os.makedirs(aus, exist_ok=True)
     for f in faelle:
         z = os.path.join(aus, "kaputt-%s.img" % f)
-        mach(f, reason_2, z)
+        mach(f, reason, z)
         print("kaputt: %s" % z)
     return 0
 

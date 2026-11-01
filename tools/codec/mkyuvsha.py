@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 import hashlib, sys
 
-path_2, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+path, w, h = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 big = w * h * 3 // 2
-d = open(path_2, 'rb').read()
+d = open(path, 'rb').read()
 if len(d) % big:
     print("WARNING: %d octets are not a multiple of %d" % (len(d), big),
           file=sys.stderr)

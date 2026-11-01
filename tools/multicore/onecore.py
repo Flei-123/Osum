@@ -65,7 +65,7 @@ def main(argv):
             nur = argv[i + 1]
 
     gesperrt = []
-    open_ = []
+    open_2 = []
     mitwissen = []
     for root, _, dateien in os.walk(os.path.join(ROOT, "kernel")):
         for d in sorted(dateien):
@@ -95,7 +95,7 @@ def main(argv):
                 if LOCK.search(text) or d in RUHIG:
                     gesperrt.append(entry)
                 else:
-                    open_.append(entry)
+                    open_2.append(entry)
 
     if liste:
         print("== LOCKED: the buffer is used under a lock ==")
@@ -103,7 +103,7 @@ def main(argv):
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
         print("== OPEN: no lock word in the body ==")
-        for k, f, p in open_:
+        for k, f, p in open_2:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
     if liste and mitwissen:
@@ -112,9 +112,9 @@ def main(argv):
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
             print("      %s" % MITWISSEN[(k, f)])
         print()
-    dat_open = sorted(set(k for k, _, _ in open_))
+    dat_open = sorted(set(k for k, _, _ in open_2))
     print("einkern gesperrt=%d offen=%d mitwissen=%d dateien=%s"
-          % (len(gesperrt), len(open_), len(mitwissen),
+          % (len(gesperrt), len(open_2), len(mitwissen),
              ",".join(dat_open) or "-"))
     return 0
 

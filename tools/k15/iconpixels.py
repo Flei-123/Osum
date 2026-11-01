@@ -59,12 +59,12 @@ def main(argv):
         int(argv[4]), int(argv[5]), argv[6]
     tol = int(argv[7]) if len(argv) > 7 else 0
     w, h, roh = ppm(screen)
-    sw, sh, image_2 = symmod.back_2(sym)
+    sw, sh, image = symmod.back(sym)
     deckend = 0
     wrong = 0
     for r in range(min(bh, sh)):
         for c in range(min(bw, sw)):
-            soll = image_2[r][c]
+            soll = image[r][c]
             if soll is None:
                 continue
             deckend += 1

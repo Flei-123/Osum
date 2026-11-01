@@ -15,12 +15,12 @@ def main(argv):
     if len(argv) < 2:
         print("Aufruf: read.py <abbild>", file=sys.stderr)
         return 2
-    b = check.Image_(argv[1])
+    b = check.Image_2(argv[1])
     if not b.magic:
         print("kein OFS-Abbild", file=sys.stderr)
         return 1
 
-    def show_2(path_2):
+    def show(path_2):
         ino = b.finde(path_2)
         if ino:
             print("da %s ino=%d size=%d"
@@ -29,10 +29,10 @@ def main(argv):
             print("weg %s" % path_2)
         return ino
 
-    alt = show_2("/data/alpha.txt")
-    new = show_2("/data/bilder/alpha.txt")
-    show_2("/data/notizen")
-    show_2("/data/beta.txt")
+    alt = show("/data/alpha.txt")
+    new = show("/data/bilder/alpha.txt")
+    show("/data/notizen")
+    show("/data/beta.txt")
 
     if len(argv) > 2:
         try:

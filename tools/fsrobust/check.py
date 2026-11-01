@@ -47,13 +47,13 @@ def block_hash(b):
     return h
 
 
-class Image_:
+class Image_2:
     """Ein Abbild, blockweise, ohne es in den Speicher zu ziehen."""
 
     def __init__(self, path_2):
         self.f = open(path_2, "rb")
-        self.len_ = os.path.getsize(path_2)
-        self.geraet = self.len_ // BS
+        self.len_2 = os.path.getsize(path_2)
+        self.geraet = self.len_2 // BS
         sb = self.blk(0)
         self.magic = int.from_bytes(sb[0:8], "little") == mkfs.MAGIC
 
@@ -146,7 +146,7 @@ class Image_:
             if p:
                 aus.append(p)
 
-        def level_2(p, tiefe):
+        def level(p, tiefe):
             if not p:
                 return
             aus.append(p)
@@ -162,13 +162,13 @@ class Image_:
                 if tiefe == 1:
                     aus.append(q)
                 else:
-                    level_2(q, tiefe - 1)
+                    level(q, tiefe - 1)
 
-        level_2(g(mkfs.I_INDIRECT), 1)
-        level_2(g(mkfs.I_DINDIRECT), 2)
+        level(g(mkfs.I_INDIRECT), 1)
+        level(g(mkfs.I_DINDIRECT), 2)
         if self.version >= 3:
-            level_2(g(mkfs.I_TINDIRECT), 3)
-            level_2(g(mkfs.I_QINDIRECT), 4)
+            level(g(mkfs.I_TINDIRECT), 3)
+            level(g(mkfs.I_QINDIRECT), 4)
         return aus
 
     def datenblock(self, ino, idx):
@@ -180,7 +180,7 @@ class Image_:
         def im(p):
             return p if self.valid(p) else 0
 
-        def show_2(b, k):
+        def show(b, k):
             if not b:
                 return 0
             blk = self.blk(b)
@@ -190,25 +190,25 @@ class Image_:
             return im(g(mkfs.I_DIRECT + idx * 8))
         k = idx - self.directs
         if k < PER_BLOCK:
-            return show_2(im(g(mkfs.I_INDIRECT)), k)
+            return show(im(g(mkfs.I_INDIRECT)), k)
         k -= PER_BLOCK
         if k < PER_BLOCK ** 2:
-            return show_2(show_2(im(g(mkfs.I_DINDIRECT)), k // PER_BLOCK),
+            return show(show(im(g(mkfs.I_DINDIRECT)), k // PER_BLOCK),
                         k % PER_BLOCK)
         if self.version < 3:
             return 0
         k -= PER_BLOCK ** 2
         if k < PER_BLOCK ** 3:
-            a = show_2(im(g(mkfs.I_TINDIRECT)), k // (PER_BLOCK ** 2))
-            b = show_2(a, (k // PER_BLOCK) % PER_BLOCK)
-            return show_2(b, k % PER_BLOCK)
+            a = show(im(g(mkfs.I_TINDIRECT)), k // (PER_BLOCK ** 2))
+            b = show(a, (k // PER_BLOCK) % PER_BLOCK)
+            return show(b, k % PER_BLOCK)
         k -= PER_BLOCK ** 3
         if k >= PER_BLOCK ** 4:
             return 0
-        a = show_2(im(g(mkfs.I_QINDIRECT)), k // (PER_BLOCK ** 3))
-        b = show_2(a, (k // (PER_BLOCK ** 2)) % PER_BLOCK)
-        c = show_2(b, (k // PER_BLOCK) % PER_BLOCK)
-        return show_2(c, k % PER_BLOCK)
+        a = show(im(g(mkfs.I_QINDIRECT)), k // (PER_BLOCK ** 3))
+        b = show(a, (k // (PER_BLOCK ** 2)) % PER_BLOCK)
+        c = show(b, (k // PER_BLOCK) % PER_BLOCK)
+        return show(c, k % PER_BLOCK)
 
     def read_2(self, ino, off, n):
         aus = bytearray()
@@ -252,25 +252,25 @@ class Image_:
         return ino
 
 
-def struktur(image_2):
+def struktur(image):
     """Die Strukturpruefung. Rueckgabe: (befunde, zahlen)."""
     z = dict(dateien=0, dirs=0, bloecke=0, ausser=0, doppelt=0, badtype=0,
              lost=0, fehlend=0, totlinks=0, kreise=0)
     befunde = []
-    if not image_2.magic:
+    if not image.magic:
         return ["keine OSUM-OFS-Kennung"], z
-    if image_2.bsize != BS:
-        befunde.append("Blockgroesse %d" % image_2.bsize)
-    if not (image_2.bmstart < image_2.itable < image_2.data < image_2.blocks):
+    if image.bsize != BS:
+        befunde.append("Blockgroesse %d" % image.bsize)
+    if not (image.bmstart < image.itable < image.data < image.blocks):
         befunde.append("Bereiche nicht in der Reihenfolge "
                        "Karte<Tabelle<Daten<Ende")
-    seen = bytearray(image_2.blocks)
-    for b in range(min(image_2.data, image_2.blocks)):
+    seen = bytearray(image.blocks)
+    for b in range(min(image.data, image.blocks)):
         seen[b] = 1
-    for b in range(image_2.hole_lo, min(image_2.hole_hi, image_2.blocks)):
+    for b in range(image.hole_lo, min(image.hole_hi, image.blocks)):
         seen[b] = 1
-    for ino in range(1, image_2.total_inodes() + 1):
-        art = image_2.ig(ino, mkfs.I_TYPE)
+    for ino in range(1, image.total_inodes() + 1):
+        art = image.ig(ino, mkfs.I_TYPE)
         if art == 0:
             continue
         if art not in (mkfs.T_FILE, mkfs.T_DIR, mkfs.T_LINK):
@@ -279,31 +279,31 @@ def struktur(image_2):
         z["dateien"] += 1
         if art == mkfs.T_DIR:
             z["dirs"] += 1
-        for p in image_2.bloecke(ino):
-            if not image_2.valid(p):
+        for p in image.bloecke(ino):
+            if not image.valid(p):
                 z["ausser"] += 1
             elif seen[p]:
                 z["doppelt"] += 1
             else:
                 seen[p] = 1
                 z["bloecke"] += 1
-    for b in range(image_2.data, image_2.blocks):
-        if image_2.hole_lo <= b < image_2.hole_hi:
+    for b in range(image.data, image.blocks):
+        if image.hole_lo <= b < image.hole_hi:
             continue
-        bit = image_2.bit(b)
+        bit = image.bit(b)
         if bit and not seen[b]:
             z["verloren"] += 1
         if not bit and seen[b]:
             z["fehlend"] += 1
     besucht = set()
-    stack = [image_2.root]
-    besucht.add(image_2.root)
+    stack = [image.root]
+    besucht.add(image.root)
     while stack:
         d = stack.pop()
-        for kind, name in image_2.eintraege(d):
-            if kind > image_2.total_inodes() or image_2.ig(kind, mkfs.I_TYPE) == 0:
+        for kind, name in image.eintraege(d):
+            if kind > image.total_inodes() or image.ig(kind, mkfs.I_TYPE) == 0:
                 z["totlinks"] += 1
-            elif image_2.ig(kind, mkfs.I_TYPE) == mkfs.T_DIR:
+            elif image.ig(kind, mkfs.I_TYPE) == mkfs.T_DIR:
                 if kind not in besucht:
                     besucht.add(kind)
                     stack.append(kind)
@@ -316,35 +316,35 @@ def struktur(image_2):
     return befunde, z
 
 
-def journal(image_2):
+def journal(image):
     """Steht eine Bestaetigung offen, und stimmt sie?"""
-    if not image_2.jstart or image_2.jblocks < J_BLOCKS:
+    if not image.jstart or image.jblocks < J_BLOCKS:
         return dict(vorhanden=0)
-    c = image_2.blk(image_2.jstart + 521)
+    c = image.blk(image.jstart + 521)
     magic = int.from_bytes(c[0:8], "little")
     if magic != COMMIT_MAGIC:
-        return dict(vorhanden=1, open_=0)
+        return dict(vorhanden=1, open_2=0)
     seq = int.from_bytes(c[8:16], "little")
     n = int.from_bytes(c[16:24], "little")
     sm = int.from_bytes(c[24:32], "little")
     if n == 0 or n > 512:
-        return dict(vorhanden=1, open_=1, gueltig=0, reason_2="Anzahl %d" % n)
-    h = image_2.blk(image_2.jstart)
+        return dict(vorhanden=1, open_2=1, gueltig=0, reason="Anzahl %d" % n)
+    h = image.blk(image.jstart)
     if (int.from_bytes(h[0:8], "little") != HEAD_MAGIC
             or int.from_bytes(h[8:16], "little") != seq
             or int.from_bytes(h[16:24], "little") != n):
-        return dict(vorhanden=1, open_=1, gueltig=0, reason_2="Kopf passt nicht")
+        return dict(vorhanden=1, open_2=1, gueltig=0, reason="Kopf passt nicht")
     ziele = []
     for k in range((n + 63) // 64):
-        t = image_2.blk(image_2.jstart + 1 + k)
+        t = image.blk(image.jstart + 1 + k)
         for j in range(64):
             if k * 64 + j < n:
                 ziele.append(int.from_bytes(t[j * 8:j * 8 + 8], "little"))
     p = mix(mix(FNV_OFF, seq), n)
     for i in range(n):
         p = mix(p, ziele[i])
-        p = mix(p, block_hash(image_2.blk(image_2.jstart + 9 + i)))
-    return dict(vorhanden=1, open_=1, gueltig=1 if p == sm else 0,
+        p = mix(p, block_hash(image.blk(image.jstart + 9 + i)))
+    return dict(vorhanden=1, open_2=1, gueltig=1 if p == sm else 0,
                 seq=seq, n=n)
 
 
@@ -352,16 +352,16 @@ def muster(g, k):
     return (((g * 2654435761) & M64) + ((k * 40503) & M64)) % 251
 
 
-def inhalt(image_2):
+def inhalt(image):
     """Die Messdateien der Runde: /d/count, /d/roll, /d/fN."""
     befunde = []
-    d = image_2.finde("/d")
+    d = image.finde("/d")
     if not d:
         return ["/d fehlt"], dict(count=0, ganz=0)
-    ci = image_2.finde("/d/count")
+    ci = image.finde("/d/count")
     c = 0
     if ci:
-        roh = image_2.read_2(ci, 0, image_2.ig(ci, mkfs.I_SIZE))
+        roh = image.read_2(ci, 0, image.ig(ci, mkfs.I_SIZE))
         ziffern = b""
         for ch in roh:
             if 48 <= ch <= 57:
@@ -370,16 +370,16 @@ def inhalt(image_2):
                 break
         c = int(ziffern) if ziffern else 0
     for name in ("/d/roll", "/d/roll2"):
-        ri = image_2.finde(name)
+        ri = image.finde(name)
         if ri:
-            sz = image_2.ig(ri, mkfs.I_SIZE)
+            sz = image.ig(ri, mkfs.I_SIZE)
             if sz not in (0, 4096):
                 befunde.append("%s ist %d Oktette gross" % (name, sz))
             elif sz == 0 and c:
                 befunde.append("%s ist leer, der Zaehler steht auf %d"
                                % (name, c))
             elif sz == 4096:
-                r = image_2.read_2(ri, 0, 4096)
+                r = image.read_2(ri, 0, 4096)
                 g = int.from_bytes(r[0:8], "little")
                 for i in range(8, 4096):
                     if r[i] != muster(g, i):
@@ -394,50 +394,50 @@ def inhalt(image_2):
                            % (name, c))
     ganz = 0
     for k in range(1, c + 1):
-        ino = image_2.finde("/d/%d" % k)
+        ino = image.finde("/d/%d" % k)
         if not ino:
             befunde.append("/d/%d fehlt" % k)
             continue
         soll = 512 + (k * 617) % 1536
-        sz = image_2.ig(ino, mkfs.I_SIZE)
+        sz = image.ig(ino, mkfs.I_SIZE)
         if sz != soll:
             befunde.append("/d/%d ist %d statt %d Oktette" % (k, sz, soll))
             continue
-        roh = image_2.read_2(ino, 0, sz)
-        bad = -1
+        roh = image.read_2(ino, 0, sz)
+        bad_2 = -1
         for i in range(sz):
             if roh[i] != muster(k + 1000000, i):
-                bad = i
+                bad_2 = i
                 break
-        if bad >= 0:
-            befunde.append("/d/%d: Oktett %d falsch" % (k, bad))
+        if bad_2 >= 0:
+            befunde.append("/d/%d: Oktett %d falsch" % (k, bad_2))
             continue
-        m = image_2.ig(ino, mkfs.I_MODE) & 0o7777
+        m = image.ig(ino, mkfs.I_MODE) & 0o7777
         if m != 0o600 + (k % 8):
             befunde.append("/d/%d traegt Modus %o statt %o"
                            % (k, m, 0o600 + (k % 8)))
         else:
             ganz += 1
-    ino = image_2.finde("/d/%d" % (c + 1))
-    naechste = 0
+    ino = image.finde("/d/%d" % (c + 1))
+    next_2 = 0
     if ino:
-        sz = image_2.ig(ino, mkfs.I_SIZE)
+        sz = image.ig(ino, mkfs.I_SIZE)
         soll = 512 + ((c + 1) * 617) % 1536
         if sz == 0:
-            naechste = 1
+            next_2 = 1
         elif sz == soll:
-            roh = image_2.read_2(ino, 0, sz)
+            roh = image.read_2(ino, 0, sz)
             ok = all(roh[i] == muster(c + 1 + 1000000, i) for i in range(sz))
-            naechste = 2 if ok else 3
+            next_2 = 2 if ok else 3
         else:
-            naechste = 3
-        if naechste == 3:
+            next_2 = 3
+        if next_2 == 3:
             befunde.append("/d/%d ist halb geschrieben (%d Oktette)"
                            % (c + 1, sz))
-    if image_2.finde("/d/%d" % (c + 2)):
+    if image.finde("/d/%d" % (c + 2)):
         befunde.append("/d/%d gibt es, obwohl der Zaehler auf %d steht"
                        % (c + 2, c))
-    return befunde, dict(count=c, ganz=ganz, naechste=naechste)
+    return befunde, dict(count=c, ganz=ganz, next_2=next_2)
 
 
 def main(argv):
@@ -445,19 +445,19 @@ def main(argv):
         print(__doc__)
         return 2
     was, path_2 = argv[1], argv[2]
-    image_2 = Image_(path_2)
+    image = Image_2(path_2)
     if was == "struktur":
-        befunde, z = struktur(image_2)
+        befunde, z = struktur(image)
         print("struktur: " + " ".join("%s=%d" % kv for kv in z.items()))
         for b in befunde:
             print("  BEFUND " + b)
         return 1 if befunde else 0
     if was == "journal":
         print("journal: " + " ".join("%s=%s" % kv
-                                     for kv in journal(image_2).items()))
+                                     for kv in journal(image).items()))
         return 0
     if was == "inhalt":
-        befunde, z = inhalt(image_2)
+        befunde, z = inhalt(image)
         print("inhalt: " + " ".join("%s=%d" % kv for kv in z.items()))
         for b in befunde:
             print("  BEFUND " + b)

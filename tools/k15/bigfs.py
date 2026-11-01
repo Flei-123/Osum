@@ -58,36 +58,36 @@ def main(argv):
     arbeit = argv[1]
     n = int(argv[2]) if len(argv) > 2 else 4000
     os.makedirs(arbeit, exist_ok=True)
-    list_ = names(n)
+    list_2 = names(n)
 
     zeilen = ["--inodes=4096", "/data/"]
     seen = set()
-    for path_2, _ in list_:
-        parts_2 = path_2.strip("/").split("/")
-        for k in range(1, len(parts_2) + 1):
-            p = "/" + "/".join(parts_2[:k]) + "/"
+    for path_2, _ in list_2:
+        parts = path_2.strip("/").split("/")
+        for k in range(1, len(parts) + 1):
+            p = "/" + "/".join(parts[:k]) + "/"
             if p not in seen:
                 seen.add(p)
                 if p != "/data/":
                     zeilen.append(p)
-    for path_2, name in list_:
+    for path_2, name in list_2:
         zeilen.append("%s/%s=" % (path_2, name))
     with open(os.path.join(arbeit, "angaben"), "w") as f:
         f.write("\n".join(zeilen) + "\n")
 
     with open(os.path.join(arbeit, "namen"), "w") as f:
-        for path_2, name in list_:
+        for path_2, name in list_2:
             f.write("%s/%s\n" % (path_2, name))
 
-    all_ = [name for _, name in list_]
-    all_ += [p.strip("/").split("/")[-1] for p in sorted(seen)]
-    all_ += ["data"]
+    alle = [name for _, name in list_2]
+    alle += [p.strip("/").split("/")[-1] for p in sorted(seen)]
+    alle += ["data"]
     with open(os.path.join(arbeit, "erwartet"), "w") as f:
         for w in WOERTER:
             f.write("%s %d\n"
-                    % (w, sum(1 for x in all_ if w.lower() in x.lower())))
+                    % (w, sum(1 for x in alle if w.lower() in x.lower())))
     print("big: %d files, %d folders, %d names"
-          % (n, len(seen), len(all_)))
+          % (n, len(seen), len(alle)))
     return 0
 
 

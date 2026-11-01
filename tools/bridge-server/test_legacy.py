@@ -37,8 +37,8 @@ class Dev:
         self.pub = self.k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
         self.kennung = "osum-" + self.pub[:12]
         self.sid = secrets.token_hex(8)
-    def send(self, header_2, nutz=b""):
-        body = (header_2 + " " + str(len(nutz))).encode() + b"\n" + nutz
+    def send(self, header, nutz=b""):
+        body = (header + " " + str(len(nutz))).encode() + b"\n" + nutz
         r = urllib.request.Request(URL + "/bruecke/draht", data=body, headers={"X-Draht": self.sid})
         return urllib.request.urlopen(r, timeout=10).read()
     def prepair(self):

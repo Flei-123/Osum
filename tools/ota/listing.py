@@ -108,11 +108,11 @@ def meta_aus_opk(path_2):
         ml = int.from_bytes(header[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
     name = fassung = None
-    for line_3 in meta.split("\n"):
-        if line_3.startswith("name="):
-            name = line_3[5:].strip()
-        elif line_3.startswith("fassung="):
-            fassung = line_3[8:].strip()
+    for line in meta.split("\n"):
+        if line.startswith("name="):
+            name = line[5:].strip()
+        elif line.startswith("fassung="):
+            fassung = line[8:].strip()
     if not name:
         raise SystemExit("verzeichnis: %s hat keinen Namen" % path_2)
     return name, fassung or "0"
@@ -122,7 +122,7 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    source_2 = sys.argv[1]
+    source = sys.argv[1]
     fassung = None
     schluessel = None
     kaputt = None
@@ -145,13 +145,13 @@ def main():
         print(__doc__)
         return 2
 
-    dateien = sorted(f for f in os.listdir(source_2) if f.endswith(".opk"))
+    dateien = sorted(f for f in os.listdir(source) if f.endswith(".opk"))
     if not dateien:
-        raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % source_2)
+        raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % source)
 
     zeilen = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t0"]
     for d in dateien:
-        p = os.path.join(source_2, d)
+        p = os.path.join(source, d)
         roh = open(p, "rb").read()
         h = hashlib.sha256(roh).hexdigest()
         if kaputt == d:
@@ -174,9 +174,9 @@ def main():
         raise SystemExit("verzeichnis: eine FREMDE Umsetzung erkennt die "
                          "Signatur nicht an")
 
-    with open(os.path.join(source_2, "VERZEICHNIS"), "wb") as f:
+    with open(os.path.join(source, "VERZEICHNIS"), "wb") as f:
         f.write(roh)
-    with open(os.path.join(source_2, "VERZEICHNIS.sig"), "wb") as f:
+    with open(os.path.join(source, "VERZEICHNIS.sig"), "wb") as f:
         f.write(sig)
     print("   VERZEICHNIS  fassung %d, %d Paket(e), %d Oktette, sig %s...%s"
           % (fassung, len(dateien), len(roh), sig.hex()[:12],

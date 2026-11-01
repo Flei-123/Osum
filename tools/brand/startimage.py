@@ -7,8 +7,8 @@ from PIL import Image
 GROESSEN = [16, 24, 32, 48, 64]
 
 
-def load(path_2, n):
-    im = Image.open(path_2).convert("RGBA")
+def load(path, n):
+    im = Image.open(path).convert("RGBA")
     if im.size != (n, n):
         im = im.resize((n, n), Image.LANCZOS)
     return im

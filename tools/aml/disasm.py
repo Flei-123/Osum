@@ -682,7 +682,7 @@ def main(argv):
         return 1
     mode = argv[1]
     if mode == "deckung":
-        list_ = argv[2]
+        list_2 = argv[2]
         paths = argv[3:]
     else:
         paths = argv[2:]
@@ -707,7 +707,7 @@ def main(argv):
                 print("%-40s %-16s %s" % (full, kind, extra))
     elif mode == "deckung":
         koennen = set()
-        for line in open(list_):
+        for line in open(list_2):
             line = line.split("#")[0].strip()
             if not line:
                 continue

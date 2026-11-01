@@ -83,8 +83,8 @@ def main():
             f.write(z + "\n")
     soll.sort(key=lambda t: (0 if t[2] == "d" else 1, t[0]))
     with open(os.path.join(d, "soll.txt"), "w") as f:
-        for name, size_2, art in soll:
-            f.write("%s\t%d\t%s\n" % (name, size_2, art))
+        for name, size, art in soll:
+            f.write("%s\t%d\t%s\n" % (name, size, art))
     print("tree: %d entries in /data, %d lines for mkfs"
           % (len(soll), len(zeilen)))
     return 0

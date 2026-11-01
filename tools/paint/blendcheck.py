@@ -4,7 +4,7 @@ import os
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-ROOT_2 = os.path.normpath(os.path.join(HIER, "..", ".."))
+ROOT = os.path.normpath(os.path.join(HIER, "..", ".."))
 
 
 def exakt(dst, src, a):
@@ -54,16 +54,16 @@ def messen(schritt):
 
 
 def randbedingungen():
-    bad = []
+    bad_2 = []
     for name, f in FASSUNGEN:
         for v in range(256):
             if f(v, 0, 0) != v:
-                bad.append("%s: a=0 aendert dst=%d" % (name, v))
+                bad_2.append("%s: a=0 aendert dst=%d" % (name, v))
                 break
             if f(0, v, 255) != v:
-                bad.append("%s: a=255 liefert src=%d nicht" % (name, v))
+                bad_2.append("%s: a=255 liefert src=%d nicht" % (name, v))
                 break
-    return bad
+    return bad_2
 
 
 QUELLEN = [
@@ -77,13 +77,13 @@ QUELLEN = [
 
 
 def quellen_check():
-    missing_2 = []
+    missing = []
     for file_2, nadel in QUELLEN:
-        p = os.path.join(ROOT_2, file_2)
+        p = os.path.join(ROOT, file_2)
         try:
             fh = open(p, "rb")
         except OSError:
-            missing_2.append("%s fehlt" % file_2)
+            missing.append("%s fehlt" % file_2)
             continue
         text = fh.read().decode("utf-8", "replace")
         fh.close()
@@ -93,8 +93,8 @@ def quellen_check():
                 with open(os.path.join(moddir, mod), "rb") as mh:
                     text += mh.read().decode("utf-8", "replace")
         if nadel not in text:
-            missing_2.append("%s: %r steht nicht darin" % (file_2, nadel))
-    return missing_2
+            missing.append("%s: %r steht nicht darin" % (file_2, nadel))
+    return missing
 
 
 def main():
@@ -108,11 +108,11 @@ def main():
     print("PAINT-BLEND: %d Tripel (a, src, dst)%s"
           % (gesamt, "  [--schnell: jedes 7. a]" if schnell else ""))
     for name, _ in FASSUNGEN:
-        mx, sum_, wrong, n = erg[name]
+        mx, sum_2, wrong, n = erg[name]
         print("   %s  max=%d  mittel=%.6f  falsch=%d (%.3f%%)"
-              % (name, mx, sum_ / float(n), wrong, 100.0 * wrong / n))
+              % (name, mx, sum_2 / float(n), wrong, 100.0 * wrong / n))
 
-    mx, sum_, wrong, n = erg[FASSUNGEN[0][0]]
+    mx, sum_2, wrong, n = erg[FASSUNGEN[0][0]]
     if mx == 1 and wrong > n * 4 // 10:
         print("  OK    truncation: error 1 on %.2f%% of all triples"
               % (100.0 * wrong / n))
@@ -123,7 +123,7 @@ def main():
         error += 1
 
     for name in ("(num+127)/255 (Python)  ", "(t+(t>>8))>>8 verworfen "):
-        mx, sum_, wrong, n = erg[name]
+        mx, sum_2, wrong, n = erg[name]
         if mx == 0 and wrong == 0:
             print("  OK    %s is exact on all %d triples" % (name, n))
             zusagen += 1
@@ -146,24 +146,24 @@ def main():
               % ungleich)
         error += 1
 
-    bad = randbedingungen()
-    if not bad:
+    bad_2 = randbedingungen()
+    if not bad_2:
         print("  OK    a=0 leaves the background and a=255 gives the new "
               "Farbe -- bei allen drei Fassungen")
         zusagen += 1
     else:
-        for z in bad:
+        for z in bad_2:
             print("  FAIL  %s" % z)
         error += 1
 
     if "--quellen" in sys.argv:
-        missing_2 = quellen_check()
-        if not missing_2:
+        missing = quellen_check()
+        if not missing:
             print("  OK    all %d occurrences carry the same rounding"
                   % len(QUELLEN))
             zusagen += 1
         else:
-            for z in missing_2:
+            for z in missing:
                 print("  FAIL  %s" % z)
             error += 1
 

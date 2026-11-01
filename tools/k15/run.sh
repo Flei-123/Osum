@@ -462,7 +462,7 @@ MENUBG=$(python3 -c "print(0x2a3542)")
 UIFG=$(python3 tools/theme/model.py semantic assets/schemes/day.scheme dark \
     | awk '$2 == "text-primary" {print $3}')
 UIFG=$((16#$UIFG))
-MASC=$(python3 -c "import sys; sys.path.insert(0,'tools/ttf'); import raster; print(raster.Schrift('$SANS', 15).glyphe(108).oben)")
+MASC=$(python3 -c "import sys; sys.path.insert(0,'tools/ttf'); import raster; print(raster.Font('$SANS', 15).glyphe(108).top_2)")
 i=0
 for punkt in Öffnen Umbenennen Entfernen; do
     schau "menu item $i is in the menu window pixel-exact: '$punkt'" \

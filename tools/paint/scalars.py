@@ -5,7 +5,7 @@ import re
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-ROOT_2 = os.path.normpath(os.path.join(HIER, "..", ".."))
+ROOT = os.path.normpath(os.path.join(HIER, "..", ".."))
 
 CONST = re.compile(
     r"^const\s+(S_[A-Z0-9_]+)\s*:\s*u64\s*=\s*(0x[0-9A-Fa-f]+)\s*(//.*)?$")
@@ -27,8 +27,8 @@ def laengen(path_2):
         konst[m.group(1)] = int(m.group(2), 0)
     aus = []
     file_2 = os.path.basename(path_2)
-    for nr, line_3 in enumerate(text.splitlines(), 1):
-        m = CONST.match(line_3.strip())
+    for nr, line in enumerate(text.splitlines(), 1):
+        m = CONST.match(line.strip())
         if not m:
             continue
         name = m.group(1)
@@ -43,9 +43,9 @@ def laengen(path_2):
             n = int(w.group(1)) * 8
         elif o:
             n = int(o.group(1))
-        key_2 = (file_2, name)
-        if key_2 in LEN_AUS:
-            k = LEN_AUS[key_2]
+        schluessel = (file_2, name)
+        if schluessel in LEN_AUS:
+            k = LEN_AUS[schluessel]
             if k in konst:
                 n = konst[k] * 8
         aus.append((name, value, n, nr))
@@ -67,25 +67,25 @@ def check(path_2):
 def main():
     dateien = sys.argv[1:]
     if not dateien:
-        kdir = os.path.join(ROOT_2, "kernel")
+        kdir = os.path.join(ROOT, "kernel")
         dateien = sorted(os.path.join(kdir, f)
                          for f in os.listdir(kdir) if f.endswith(".fi"))
     gesamt = 0
-    bad = 0
+    bad_2 = 0
     for p in dateien:
         eintraege, treffer = check(p)
         gesamt += len(eintraege)
-        rel = os.path.relpath(p, ROOT_2)
+        rel = os.path.relpath(p, ROOT)
         for (an, aw, al, az, bn, bw, bl, bz) in treffer:
-            bad += 1
+            bad_2 += 1
             print("  FAIL  %s: %s (0x%X, %d octets, line %d) and "
                   "%s (0x%X, %d Oktette, Zeile %d) ueberschneiden sich"
                   % (rel, an, aw, al, az, bn, bw, bl, bz))
     print("PAINT-SKALARE: %d Skalare in %d Dateien, %d Ueberschneidungen"
-          % (gesamt, len(dateien), bad))
-    if bad == 0:
+          % (gesamt, len(dateien), bad_2))
+    if bad_2 == 0:
         print("  OK    no two scalars of a file lie on top of each other")
-    return 1 if bad else 0
+    return 1 if bad_2 else 0
 
 
 if __name__ == "__main__":

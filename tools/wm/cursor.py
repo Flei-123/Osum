@@ -61,14 +61,14 @@ def firn(values):
     return aus + "\\x00"
 
 
-def read_2(path_2):
-    q = open(path_2, encoding="utf-8", errors="replace").read()
+def read_2(path):
+    q = open(path, encoding="utf-8", errors="replace").read()
     raus = {}
     for name in ("umriss", "innen"):
         m = re.search(r'var %s: \[u8; \d+\] = b"((?:\\x[0-9a-fA-F]{2})+)"'
                       % name, q)
         if not m:
-            print("  CASE  %s is not in %s" % (name, path_2))
+            print("  CASE  %s is not in %s" % (name, path))
             return None
         okt = [int(t, 16) for t in re.findall(r'\\x([0-9a-fA-F]{2})',
                                               m.group(1))]
@@ -186,8 +186,8 @@ def main():
         print('umriss = b"%s"' % firn(um))
         print('innen  = b"%s"' % firn(inn))
         return 0
-    path_2 = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm/wmcursor.fi"
-    m = read_2(path_2)
+    path = sys.argv[1] if len(sys.argv) > 1 else "kernel/ui/wm/wmcursor.fi"
+    m = read_2(path)
     if m is None:
         return 1
     sil, body = gitter(m["umriss"], m["innen"])

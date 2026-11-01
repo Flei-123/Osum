@@ -130,11 +130,11 @@ def main(argv):
         for c in t:
             if ord(c) > 127:
                 gebraucht.setdefault(c, herkunft)
-    missing_2 = []
+    missing = []
     for c, herkunft in sorted(gebraucht.items()):
         for s in SCHRIFTEN:
             if ord(c) not in decken[s]:
-                missing_2.append('%s U+%04X %r fehlt in %s (z. B. %s)'
+                missing.append('%s U+%04X %r fehlt in %s (z. B. %s)'
                              % (herkunft, ord(c), c, s, herkunft))
     print('font probe: %d text spots, %d different characters over '
           'ASCII, %s' % (len(text), len(gebraucht),
@@ -143,9 +143,9 @@ def main(argv):
                                   for s in SCHRIFTEN)))
     print('schriftprobe: benutzt werden %s'
           % ' '.join(sorted(gebraucht)))
-    for z in missing_2:
+    for z in missing:
         print('    FEHLT  ' + z)
-    return 1 if missing_2 else 0
+    return 1 if missing else 0
 
 
 if __name__ == '__main__':

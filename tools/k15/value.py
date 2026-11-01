@@ -26,9 +26,9 @@ def main():
     if len(sys.argv) < 4:
         print(__doc__)
         return 2
-    path_2, begin, key_2 = sys.argv[1], sys.argv[2], sys.argv[3]
+    path_2, begin, schluessel = sys.argv[1], sys.argv[2], sys.argv[3]
     alsrgb = len(sys.argv) > 4 and sys.argv[4] == "rgb"
-    pat = re.compile(r"(?:^|\s)%s=(-?\d+)" % re.escape(key_2))
+    pat = re.compile(r"(?:^|\s)%s=(-?\d+)" % re.escape(schluessel))
     treffer = None
     with open(path_2, "rb") as f:
         for roh in f:

@@ -286,15 +286,15 @@ class FlachErzeuger:
         o.append(' while true {')
         o.append('  match fall {')
         for nr in sorted(self.stuecke):
-            lines_2 = self.stuecke[nr]
-            if nr != 0 and not lines_2 and nr not in self.gebraucht:
+            lines = self.stuecke[nr]
+            if nr != 0 and not lines and nr not in self.gebraucht:
                 continue
             o.append('   %d => {' % nr)
-            for z in lines_2:
+            for z in lines:
                 o.append('    ' + z)
-            if not lines_2 or not (lines_2[-1].startswith('continue')
-                                  or lines_2[-1].startswith('return')
-                                  or lines_2[-1].lstrip().startswith('return')):
+            if not lines or not (lines[-1].startswith('continue')
+                                  or lines[-1].startswith('return')
+                                  or lines[-1].lstrip().startswith('return')):
                 o.append('    break')
             o.append('   }')
         o.append('   _ => {')

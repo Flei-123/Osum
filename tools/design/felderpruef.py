@@ -21,10 +21,10 @@ def main(root='.'):
                          r'[^\n]*?//\s*([A-Za-z_]\w*(?:\s*\*\s*[A-Za-z0-9_]+)+)', re.M)
         for m in pat.finditer(txt):
             name, size, expr = m.group(1), int(m.group(2)), m.group(3)
-            parts_2 = [t.strip() for t in expr.split('*')]
+            parts = [t.strip() for t in expr.split('*')]
             want = 1
             ok = True
-            for t in parts_2:
+            for t in parts:
                 if t.isdigit():
                     want *= int(t)
                 elif t in C:

@@ -14,22 +14,22 @@ BILANZ = re.compile(r'^(ALLE (\d+) ABSCHNITTE BESTANDEN, (\d+) Zusagen'
 def read_2(path_2):
     """-> {name: {ms, accel, titel, ok, zusagen}}, gesamt_s, bilanz"""
     ab = {}
-    title_2 = None
-    open_ = {"titel": None, "fehler": False, "zusagen": None}
+    title = None
+    open_2 = {"titel": None, "fehler": False, "zusagen": None}
     gesamt = None
     bilanz = None
-    for line_3 in open(path_2, errors="replace"):
-        z = line_3.rstrip("\n")
+    for line in open(path_2, errors="replace"):
+        z = line.rstrip("\n")
         m = HEADER.match(z)
         if m:
-            open_ = {"titel": m.group(1), "fehler": False, "zusagen": None}
+            open_2 = {"titel": m.group(1), "fehler": False, "zusagen": None}
             continue
         m = ZUS.match(z)
         if m:
-            open_["zusagen"] = int(m.group(2))
+            open_2["zusagen"] = int(m.group(2))
             continue
         if FAIL.match(z):
-            open_["fehler"] = True
+            open_2["fehler"] = True
             continue
         m = TIME.match(z)
         if m:
@@ -37,9 +37,9 @@ def read_2(path_2):
             ab[name] = {
                 "ms": s * 1000 + ms,
                 "accel": accel or "tcg-fest",
-                "titel": open_["titel"] or name,
-                "ok": not open_["fehler"],
-                "zusagen": open_["zusagen"],
+                "titel": open_2["titel"] or name,
+                "ok": not open_2["fehler"],
+                "zusagen": open_2["zusagen"],
             }
             continue
         m = re.match(r'^SEKUNDEN=(\d+)$|^RC=(\d+) SEKUNDEN=(\d+)$', z)
@@ -51,9 +51,9 @@ def read_2(path_2):
     return ab, gesamt, bilanz
 
 
-def short(title_2, name):
+def kurz(title, name):
     """Die Abschnittsnummer und ein paar Worte."""
-    m = re.match(r'^(\d+)\.\s*(.{0,42})', title_2)
+    m = re.match(r'^(\d+)\.\s*(.{0,42})', title)
     if not m:
         return name
     return f"{m.group(1):>2}. {m.group(2).strip()}"
@@ -94,8 +94,8 @@ def main():
             acc = f" ({e['accel']})" if e["accel"] not in ("kvm", "tcg", "?") else ""
             return f"{mark}, {z}{acc}"
 
-        title_2 = short((ea or eb)["titel"], n)
-        print(f"| {title_2} (`{n}`) | {ta} | {tb} | {fak} | {erg(ea)} | {erg(eb)} |")
+        title = kurz((ea or eb)["titel"], n)
+        print(f"| {title} (`{n}`) | {ta} | {tb} | {fak} | {erg(ea)} | {erg(eb)} |")
         if ea and eb and ea["ok"] and not eb["ok"]:
             rot.append(n)
 

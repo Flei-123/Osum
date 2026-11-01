@@ -3,9 +3,9 @@
 import os
 import sys
 
-ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-KERN = os.path.join(ROOT_2, "kernel")
-SOLLDATEI = os.path.join(ROOT_2, "tools", "struktur", "filing.txt")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(ROOT, "kernel")
+SOLLDATEI = os.path.join(ROOT, "tools", "struktur", "filing.txt")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from erhebung import read_2  # noqa: E402
@@ -38,9 +38,9 @@ def ist_clipboard():
 
 def all_dateien():
     aus = {}
-    for stamm, verz, names_2 in os.walk(KERN):
+    for stamm, verz, names in os.walk(KERN):
         verz[:] = [d for d in verz if d not in ("user", "app")]
-        for n in names_2:
+        for n in names:
             if n.endswith(".fi"):
                 rel = os.path.relpath(os.path.join(stamm, n), KERN)
                 d = os.path.dirname(rel)
@@ -55,7 +55,7 @@ def vergleiche():
     for m, d in flach.items():
         if m in soll and m not in ist:
             ist[m] = d
-    fits, wrong, without_soll, missing_2 = [], [], [], []
+    fits, wrong, without_soll, missing = [], [], [], []
     for m, d in sorted(ist.items()):
         s = soll.get(m)
         if s is None:
@@ -66,13 +66,13 @@ def vergleiche():
             wrong.append((m, d, s))
     for m in sorted(soll):
         if m not in ist and m not in flach:
-            missing_2.append(m)
-    return fits, wrong, without_soll, soll, ist, missing_2
+            missing.append(m)
+    return fits, wrong, without_soll, soll, ist, missing
 
 
 def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
-    fits, wrong, without_soll, soll, ist, missing_2 = vergleiche()
+    fits, wrong, without_soll, soll, ist, missing = vergleiche()
 
     if modus == "--fehlend":
         for m, d in without_soll:
@@ -90,14 +90,14 @@ def main():
             return 1
         print("filing: %d files in the right place, %d in the wrong one, "
               "%d ohne Soll, %d vermisst"
-              % (len(fits), len(wrong), len(without_soll), len(missing_2)))
+              % (len(fits), len(wrong), len(without_soll), len(missing)))
         for m, d, s in wrong:
             print("  WRONG  %s is in '%s', soll nach '%s'" % (m, d, s))
         for m, d in without_soll:
             print("  NO TARGET  %s (is in '%s')" % (m, d))
-        for m in missing_2:
+        for m in missing:
             print("  MISSING  %s is in the target, but is nowhere" % m)
-        return 1 if (wrong or without_soll or missing_2) else 0
+        return 1 if (wrong or without_soll or missing) else 0
 
     print("== ABLAGE ==")
     print("Soll-Eintraege: %d, Kerndateien: %d" % (len(soll), len(ist)))

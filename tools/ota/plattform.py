@@ -6,7 +6,7 @@ ELF_MASCHINE = {62: "x86_64", 183: "aarch64"}
 WOERTER = ("osum-x86_64", "osum-aarch64", "osum-any")
 
 
-def parts_2(roh):
+def parts(roh):
     if len(roh) < 64 or roh[0:8] != b"OPKG0001":
         raise ValueError("not an OPKG file (Kennung fehlt)")
     ml, dl = struct.unpack_from("<QQ", roh, 8)
@@ -20,21 +20,21 @@ def elf_maschine(oktette):
     return em
 
 
-def maschinen_im_archive(data_2):
+def maschinen_im_archive(data):
     aus = set()
     i = 0
     try:
-        while i < len(data_2):
-            typ = chr(data_2[i])
+        while i < len(data):
+            typ = chr(data[i])
             i += 1
-            _modus, nl = struct.unpack_from("<HH", data_2, i)
+            _modus, nl = struct.unpack_from("<HH", data, i)
             i += 4 + nl
-            (n,) = struct.unpack_from("<Q", data_2, i)
+            (n,) = struct.unpack_from("<Q", data, i)
             i += 8
-            if typ not in "fd" or n > len(data_2) - i:
+            if typ not in "fd" or n > len(data) - i:
                 return set()
             if typ == "f":
-                em = elf_maschine(data_2[i:i + 20])
+                em = elf_maschine(data[i:i + 20])
                 if em is not None:
                     aus.add(em)
             i += n
@@ -58,14 +58,14 @@ def aus_meta(meta):
 
 
 def plattform_von_roh(roh, name="?"):
-    meta, data_2 = parts_2(roh)
+    meta, data = parts(roh)
     p = aus_meta(meta)
     if p is not None:
         if p not in WOERTER:
             raise SystemExit("plattform: %s nennt %r -- bekannt sind %s"
                              % (name, p, ", ".join(WOERTER)))
         return p
-    ems = maschinen_im_archive(data_2)
+    ems = maschinen_im_archive(data)
     if not ems:
         return "osum-any"
     woerter = sorted(set(ELF_MASCHINE.get(e, "elf-%d" % e) for e in ems))

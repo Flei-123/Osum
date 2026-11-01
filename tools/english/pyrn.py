@@ -161,6 +161,8 @@ def protected_files(files, names):
             m = re.match(r"^([A-Za-z]*)(\"\"\"|'''|\"|')", s)
             isf = m and "f" in m.group(1).lower()
             body = s[m.end():-len(m.group(2))] if m else s
+            if "\n" in body and not isf and len(body) > 200:
+                continue
             near = {x.string for x in toks[max(0, i - 6):i] if x.type == tokenize.NAME}
             for n in names:
                 if n in prot or n not in body:
@@ -193,24 +195,47 @@ def protected(names, strings):
     return prot
 
 
+def file_tokens(fl):
+    per = {}
+    for f in fl:
+        try:
+            _, toks = tokens(os.path.join(ROOT, f))
+        except Exception:
+            continue
+        cur = set()
+        for t in toks:
+            if t.type == tokenize.NAME:
+                cur.add(t.string)
+            elif t.type == tokenize.STRING:
+                for expr in fstring_names(t.string):
+                    cur.update(WORD.findall(expr))
+        per[f] = cur
+    return per
+
+
 def build_map(names, alltok, prot, fl=None):
     mapping = {}
-    used = set(alltok)
+    per = file_tokens(fl or [])
+    occ = {n: [f for f, ts in per.items() if n in ts] for n in names}
+    taken = collections.defaultdict(set)
     for n in sorted(names):
         if n in prot:
             continue
         new = translate(n)
         if new == n:
             continue
-        cand = new
+        files = occ[n]
         k = 2
-        while cand in RESERVED or (cand in used and cand != n) or cand in mapping.values():
-            cand = "%s_%d" % (new, k) if new not in RESERVED else "%s_" % new
-            if cand in RESERVED or cand in used:
-                cand = "%s_%d" % (new.rstrip("_"), k)
+        cand = new
+        while True:
+            bad = cand in RESERVED or any(cand in per[f] for f in files) or any(cand in taken and f in taken[cand] for f in files)
+            if not bad:
+                break
+            cand = "%s_%d" % (new.rstrip("_"), k)
             k += 1
         mapping[n] = cand
-        used.add(cand)
+        for f in files:
+            taken[cand].add(f)
     return mapping
 
 
@@ -361,7 +386,7 @@ def main():
         fl = [f for f in fl if os.path.exists(os.path.join(ROOT, f))]
         names, strings, alltok = scan(fl)
         prot = protected_files(fl, names) | (set(names) & shared_names)
-        mapping = build_map(names, alltok, prot)
+        mapping = build_map(names, alltok, prot, fl)
         total += len(mapping)
         allmap[d] = mapping
         print("%s: files %d, names %d, protected %d, renamed %d" % (d, len(fl), len(names), len(prot), len(mapping)))

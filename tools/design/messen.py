@@ -76,7 +76,7 @@ def ppm(path_2):
     return f[0], f[1], d[at:]
 
 
-class Image_:
+class Image_2:
     def __init__(self, path_2):
         self.w, self.h, self.d = ppm(path_2)
 
@@ -120,9 +120,9 @@ def sammle(serial):
     t = read_2(serial)
     rechtecke = []
     for m in RE_RECT.finditer(t):
-        source_2 = m.group(1)
+        source = m.group(1)
         art = int(m.group(3)) if m.group(3) else -1
-        rechtecke.append((source_2, art, int(m.group(5)), int(m.group(6)),
+        rechtecke.append((source, art, int(m.group(5)), int(m.group(6)),
                           int(m.group(7)), int(m.group(8))))
     for m in RE_TBF.finditer(t):
         was = m.group(1).split()[0]
@@ -152,21 +152,21 @@ def raster(rechtecke, n=4):
     """Wie viele gemeldete Laengen liegen auf dem n-Raster?"""
     gut = ges = 0
     schuldige = {}
-    for source_2, _art, x, y, w, h in rechtecke:
+    for source, _art, x, y, w, h in rechtecke:
         for value, name in ((x, "x"), (y, "y"), (w, "w"), (h, "h")):
             ges += 1
             if value % n == 0:
                 gut += 1
             else:
-                schuldige[source_2] = schuldige.get(source_2, 0) + 1
+                schuldige[source] = schuldige.get(source, 0) + 1
     return gut, ges, schuldige
 
 
 def klickflaechen(rechtecke, mindest=32):
     zu_small = []
-    for source_2, art, _x, _y, w, h in rechtecke:
+    for source, art, _x, _y, w, h in rechtecke:
         if art in FASSBAR and h > 0 and h < mindest:
-            zu_small.append((source_2, art, w, h))
+            zu_small.append((source, art, w, h))
     return zu_small
 
 
@@ -226,24 +226,24 @@ def schatten(b, x, y, w, h, tiefe=8):
     Zeile `tiefe` weiter unten (die schon wieder Schreibtisch ist)."""
     def bright(p):
         return (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
-    unten = []
+    bottom = []
     ref = []
     for i in range(1, tiefe + 1):
-        line_3 = []
+        line = []
         for xx in range(x + w // 4, x + 3 * w // 4, 4):
             p = b.px(xx, y + h + i - 1)
             if p:
-                line_3.append(bright(p))
-        if line_3:
-            unten.append(sum(line_3) // len(line_3))
+                line.append(bright(p))
+        if line:
+            bottom.append(sum(line) // len(line))
     for xx in range(x + w // 4, x + 3 * w // 4, 4):
         p = b.px(xx, y + h + tiefe + 12)
         if p:
             ref.append(bright(p))
-    if not unten or not ref:
+    if not bottom or not ref:
         return None
     r = sum(ref) // len(ref)
-    return [r - v for v in unten]
+    return [r - v for v in bottom]
 
 
 def entdoppeln(texte):
@@ -264,12 +264,12 @@ def entdoppeln(texte):
     return list(d.values())
 
 
-def text_check(b, texte, window_2=None):
+def text_check(b, texte, window=None):
     """Leere Beschriftung, abgeschnitten, ueberlappend -- die drei
     Fragen aus tools/themestore/shotcheck.py."""
-    empty_3 = ab = 0
+    empty_2 = ab = 0
     belegt = {}
-    ueber = 0
+    over = 0
     for tx in texte:
         if not tx["t"].strip():
             continue
@@ -278,7 +278,7 @@ def text_check(b, texte, window_2=None):
         w = max(tx["tw"], 1)
         bg = ((tx["bg"] >> 16) & 255, (tx["bg"] >> 8) & 255, tx["bg"] & 255)
         tinte = 0
-        last_3 = 0
+        last_2 = 0
         for yy in range(y0, y0 + 16):
             for xx in range(x0, x0 + w):
                 p = b.px(xx, yy)
@@ -287,16 +287,16 @@ def text_check(b, texte, window_2=None):
                 if max(abs(p[k] - bg[k]) for k in range(3)) > 24:
                     tinte += 1
                     if xx >= x0 + w - 1:
-                        last_3 += 1
+                        last_2 += 1
                     k = (xx, yy)
                     if k in belegt:
-                        ueber += 1
+                        over += 1
                     belegt[k] = 1
         if tinte == 0:
-            empty_3 += 1
-        if last_3 > 0:
+            empty_2 += 1
+        if last_2 > 0:
             ab += 1
-    return empty_3, ab, ueber
+    return empty_2, ab, over
 
 
 def hauptfarben(b):
@@ -354,7 +354,7 @@ def main():
     erg["bilder"] = {}
     for path_2 in bilder:
         name = os.path.basename(path_2)[:-4]
-        b = Image_(path_2)
+        b = Image_2(path_2)
         e = {}
         n, stark = hauptfarben(b)
         e["farben"], e["farben_stark"] = n, stark
@@ -393,13 +393,13 @@ def main():
             _r2, t2, _f2, _z2, _g2, _s2 = sammle(own)
         else:
             t2 = texte
-        empty_3, ab, ueber = text_check(b, entdoppeln(t2))
-        e["text_leer"], e["text_ab"], e["text_ueber"] = empty_3, ab, ueber
+        empty_2, ab, over = text_check(b, entdoppeln(t2))
+        e["text_leer"], e["text_ab"], e["text_ueber"] = empty_2, ab, over
         erg["bilder"][name] = e
         print("   %-20s farben=%-5d tragend=%-3d eckfarben=%-4s "
               "schatten=%-16s leer=%d ab=%d ueber=%d"
               % (name, n, stark, e.get("eckfarben", "-"),
-                 str(e.get("schatten", "-"))[:16], empty_3, ab, ueber))
+                 str(e.get("schatten", "-"))[:16], empty_2, ab, over))
 
     if "--json" in sys.argv:
         j = sys.argv[sys.argv.index("--json") + 1]

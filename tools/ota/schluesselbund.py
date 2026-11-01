@@ -204,14 +204,14 @@ def wechseln(bund, mit_fallback=False):
     m = opkmod()
     alt_secret = secret_get(d, "ersatz" if mit_fallback else "haupt")
     hp = pass_get("OSUM_SIGN_PASS", "Passphrase Hauptschluessel (neu): ")
-    neu = os.urandom(32)
-    new_pub = m.ed25519_public(neu)
+    new = os.urandom(32)
+    new_pub = m.ed25519_public(new)
     gen = d["haupt"]["gen"] + 1
     sig = m.ed25519_sign(alt_secret, chain_nachricht(gen, new_pub.hex()))
     d["kette"].append({"gen": gen, "pub": new_pub.hex(), "sig": sig.hex(),
                        "von": "ersatz" if mit_fallback else "haupt"})
     d["haupt"] = {"gen": gen, "pub": new_pub.hex(),
-                  "huelle": huelle(neu, hp)}
+                  "huelle": huelle(new, hp)}
     save(bund, d)
     print("Schluesselwechsel auf gen %d: %s (signiert vom %s)"
           % (gen, new_pub.hex(), "Ersatzschluessel" if mit_fallback

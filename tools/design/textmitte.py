@@ -34,11 +34,11 @@ def messen(px, w, h, bx, by, bw, bh, name):
     if not zaehl:
         print("  %s: Rechteck liegt ausserhalb" % name)
         return False
-    reason_2 = max(zaehl.items(), key=lambda kv: kv[1])[0]
+    reason = max(zaehl.items(), key=lambda kv: kv[1])[0]
 
     def changed(c):
-        return (abs(c[0] - reason_2[0]) + abs(c[1] - reason_2[1])
-                + abs(c[2] - reason_2[2])) > 90
+        return (abs(c[0] - reason[0]) + abs(c[1] - reason[1])
+                + abs(c[2] - reason[2])) > 90
 
     pts = [(x, y)
            for y in range(by, min(by + bh, h))
@@ -51,13 +51,13 @@ def messen(px, w, h, bx, by, bw, bh, name):
     links = min(xs) - bx
     right = (bx + bw - 1) - max(xs)
     top_2 = min(ys) - by
-    unten = (by + bh - 1) - max(ys)
+    bottom = (by + bh - 1) - max(ys)
     dx = abs(links - right)
-    dy = abs(top_2 - unten)
+    dy = abs(top_2 - bottom)
     ok = dx <= 1 and dy <= 1
     print("  %-14s Knopf %dx%d   links %3d rechts %3d (Diff %d)   "
           "oben %3d unten %3d (Diff %d)   %s"
-          % (name, bw, bh, links, right, dx, top_2, unten, dy,
+          % (name, bw, bh, links, right, dx, top_2, bottom, dy,
              "MITTIG" if ok else "NICHT MITTIG"))
     return ok
 

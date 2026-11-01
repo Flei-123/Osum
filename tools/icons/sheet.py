@@ -37,8 +37,8 @@ import sys
 import zlib
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-ROOT_2 = os.path.dirname(os.path.dirname(HIER))
-sys.path.insert(0, os.path.join(ROOT_2, "tools", "ttf"))
+ROOT = os.path.dirname(os.path.dirname(HIER))
+sys.path.insert(0, os.path.join(ROOT, "tools", "ttf"))
 
 import raster  # noqa: E402
 
@@ -50,7 +50,7 @@ DUNKEL_FG = (0xF1, 0xF5, 0xF9)
 DUNKEL_DIM = (0x94, 0xA3, 0xB8)
 
 
-class Image_:
+class Image_2:
     def __init__(self, w, h, bg):
         self.w = w
         self.h = h
@@ -89,9 +89,9 @@ class Image_:
             at = y * self.w * 3
             roh += self.d[at:at + self.w * 3]
 
-        def block(brand_2, nutz):
-            return (struct.pack(">I", len(nutz)) + brand_2 + nutz
-                    + struct.pack(">I", zlib.crc32(brand_2 + nutz) & 0xFFFFFFFF))
+        def block(brand, nutz):
+            return (struct.pack(">I", len(nutz)) + brand + nutz
+                    + struct.pack(">I", zlib.crc32(brand + nutz) & 0xFFFFFFFF))
 
         header = struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0)
         file_2 = (b"\x89PNG\r\n\x1a\n" + block(b"IHDR", header)
@@ -101,7 +101,7 @@ class Image_:
         return len(file_2)
 
 
-def glyphe_paint(image_2, f, cp, px, x, y, rgb):
+def glyphe_paint(image, f, cp, px, x, y, rgb):
     """One glyph, top left at (x, y), the em box px on a side.
 
     The icon font's ascent is its whole em, so the baseline sits at
@@ -113,20 +113,20 @@ def glyphe_paint(image_2, f, cp, px, x, y, rgb):
     if gid == 0:
         return 0
     g = raster.raster(f, gid, px)
-    reason_2 = y + px
+    reason = y + px
     x0 = x + g.links
-    y0 = reason_2 - g.top_2
+    y0 = reason - g.top_2
     gesetzt = 0
     for r in range(g.h):
         for c in range(g.w):
             a = g.a[r * g.w + c]
             if a:
-                image_2.mische(x0 + c, y0 + r, rgb, a)
+                image.mische(x0 + c, y0 + r, rgb, a)
                 gesetzt += 1
     return gesetzt
 
 
-def text_paint(image_2, f, px, x, reason_2, s, rgb):
+def text_paint(image, f, px, x, reason, s, rgb):
     cx = x * 64
     vorher = 0
     for ch in s:
@@ -136,12 +136,12 @@ def text_paint(image_2, f, px, x, reason_2, s, rgb):
             cx += f.kern(vorher, gid) * raster.scale_of(px, f.upm) >> 10
         g = raster.raster(f, gid, px)
         x0 = (cx >> 6) + g.links
-        y0 = reason_2 - g.top_2
+        y0 = reason - g.top_2
         for r in range(g.h):
             for cc in range(g.w):
                 a = g.a[r * g.w + cc]
                 if a:
-                    image_2.mische(x0 + cc, y0 + r, rgb, a)
+                    image.mische(x0 + cc, y0 + r, rgb, a)
         cx += g.adv26
         vorher = gid
     return cx >> 6
@@ -169,7 +169,7 @@ def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
     header = 34
     w = rand * 2 + zellw * columns
     h = header + rand + je * zeilh
-    b = Image_(w, h, bg)
+    b = Image_2(w, h, bg)
     text_paint(b, tfont, 15, rand, rand + 12, title, fg)
     x0 = rand
     for i, (name, cp, _q) in enumerate(eintraege):
@@ -180,16 +180,16 @@ def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
         for px in sizes:
             glyphe_paint(b, ifont, cp, px, cx, cy + (max(sizes) - px) // 2, fg)
             cx += px + 6
-        short = name[5:] if name.startswith("icon.") else name
-        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, short, dim)
+        kurz = name[5:] if name.startswith("icon.") else name
+        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, kurz, dim)
     return b
 
 
 def main(argv):
-    ifont_p = os.path.join(ROOT_2, "assets", "osum-icons.ttf")
-    tfont_p = os.path.join(ROOT_2, "assets", "osum-sans.ttf")
-    list_p = os.path.join(ROOT_2, "assets", "icons", "icons.list")
-    aus_d = os.path.join(ROOT_2, "docs", "icons")
+    ifont_p = os.path.join(ROOT, "assets", "osum-icons.ttf")
+    tfont_p = os.path.join(ROOT, "assets", "osum-sans.ttf")
+    list_p = os.path.join(ROOT, "assets", "icons", "icons.list")
+    aus_d = os.path.join(ROOT, "docs", "icons")
     sizes = [16, 20, 24]
     i = 1
     while i < len(argv):
@@ -238,7 +238,7 @@ def main(argv):
     for name, b in stuecke:
         n = b.png(os.path.join(aus_d, name))
         print("%s: %d x %d, %d octets"
-              % (os.path.join(os.path.relpath(aus_d, ROOT_2), name),
+              % (os.path.join(os.path.relpath(aus_d, ROOT), name),
                  b.w, b.h, n))
 
     print()

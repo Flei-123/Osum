@@ -85,29 +85,29 @@ def eq(gast: float, wirt: float) -> bool:
 
 
 def skript(target: str) -> int:
-    lines_2 = ["# von tools/alltag/rechner.py erzeugt"]
+    lines = ["# von tools/alltag/rechner.py erzeugt"]
     for i, a in enumerate(ausdruecke()):
-        lines_2.append("echo AUSDRUCK-%d" % i)
-        lines_2.append("calc -e %s" % a)
-    lines_2.append("echo AUSDRUECKE-FERTIG")
-    open(target, "w", encoding="utf-8").write("\n".join(lines_2) + "\n")
+        lines.append("echo AUSDRUCK-%d" % i)
+        lines.append("calc -e %s" % a)
+    lines.append("echo AUSDRUECKE-FERTIG")
+    open(target, "w", encoding="utf-8").write("\n".join(lines) + "\n")
     print("%d Ausdruecke nach %s" % (len(ausdruecke()), target))
     return 0
 
 
 def pruefen(serial: str) -> int:
     text = open(serial, "rb").read().decode("utf-8", "replace")
-    lines_2 = text.split("\n")
+    lines = text.split("\n")
     aus = ausdruecke()
     gut = 0
-    bad_2 = 0
+    bad = 0
     for i, a in enumerate(aus):
         brand = "AUSDRUCK-%d" % i
         reply = None
-        for k, z in enumerate(lines_2):
+        for k, z in enumerate(lines):
             if z.strip() == brand:
-                for j in range(k + 1, min(k + 12, len(lines_2))):
-                    s = lines_2[j].strip()
+                for j in range(k + 1, min(k + 12, len(lines))):
+                    s = lines[j].strip()
                     if not s or s.startswith("elf:") or s.startswith("osum$"):
                         continue
                     reply = s
@@ -117,23 +117,23 @@ def pruefen(serial: str) -> int:
         if reply is None:
             print("  FAIL  %-22s no answer in the guest (expected %.12g)"
                   % (a, soll))
-            bad_2 += 1
+            bad += 1
             continue
         try:
             ist = float(reply)
         except ValueError:
             print("  FAIL  %-22s Gast sagt '%s' (soll %.12g)"
                   % (a, reply, soll))
-            bad_2 += 1
+            bad += 1
             continue
         if eq(ist, soll):
             print("  OK    %-22s %s" % (a, reply))
             gut += 1
         else:
             print("  FAIL  %-22s Gast %s, Python %.12g" % (a, reply, soll))
-            bad_2 += 1
+            bad += 1
     print("calc: %d of %d match Python" % (gut, len(aus)))
-    return 0 if bad_2 == 0 else 1
+    return 0 if bad == 0 else 1
 
 
 def main(argv):

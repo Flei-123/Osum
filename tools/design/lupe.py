@@ -65,32 +65,32 @@ def main():
     view_2 = sys.argv[1]
     x0, y0, bw, bh = (int(v) for v in sys.argv[2:6])
     zoom = int(sys.argv[6]) if len(sys.argv) > 6 else 6
-    target = sys.argv[7] if len(sys.argv) > 7 else os.path.join(
+    ziel = sys.argv[7] if len(sys.argv) > 7 else os.path.join(
         SHOTS, "lupe", "lupe-%s.png" % view_2)
-    os.makedirs(os.path.dirname(target), exist_ok=True)
+    os.makedirs(os.path.dirname(ziel), exist_ok=True)
 
-    parts_2 = []
+    parts = []
     for run_2 in ("vorher-run", "nachher-run"):
         p = os.path.join(SHOTS, run_2, "bilder", view_2 + ".ppm")
         if not os.path.exists(p):
             print("fehlt: %s" % p)
             return 1
         w, h, roh = read_ppm_2(p)
-        parts_2.append(schnitt(w, h, roh, x0, y0, bw, bh, zoom))
+        parts.append(schnitt(w, h, roh, x0, y0, bw, bh, zoom))
 
-    lw, lh, _ = parts_2[0]
+    lw, lh, _ = parts[0]
     spalt = 8
     gw = lw * 2 + spalt
     aus = bytearray(b"\x20" * (gw * lh * 3))
-    for k, (tw, th, td) in enumerate(parts_2):
+    for k, (tw, th, td) in enumerate(parts):
         ox = k * (lw + spalt)
         for y in range(th):
             d = (y * gw + ox) * 3
             s = y * tw * 3
             aus[d : d + tw * 3] = td[s : s + tw * 3]
-    write_png(target, gw, lh, bytes(aus))
+    write_png(ziel, gw, lh, bytes(aus))
     print("%s  (links vorher, rechts nachher, %dx%d, zoom %d)"
-          % (target, gw, lh, zoom))
+          % (ziel, gw, lh, zoom))
     return 0
 
 

@@ -30,7 +30,7 @@ def main(argv):
     if len(argv) < 4:
         print(__doc__)
         return 2
-    img = check.Image_(argv[2])
+    img = check.Image_2(argv[2])
     if not img.magic:
         print("not an OFS image")
         return 1

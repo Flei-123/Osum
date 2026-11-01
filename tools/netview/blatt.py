@@ -32,11 +32,11 @@ BIG = 6
 AIR = 6
 
 
-def image_2(name, farben):
+def image(name, farben):
     palette, zeilen = symmod.read_2(iconmod.zeichnung(name))
     h = len(zeilen)
     w = len(zeilen[0])
-    points_2 = []
+    points = []
     for z in zeilen:
         reihe = []
         for c in z:
@@ -47,8 +47,8 @@ def image_2(name, farben):
                 reihe.append(farben[ROLLE_NAME[v[1]]])
             else:
                 reihe.append(v)
-        points_2.append(reihe)
-    return w, h, points_2
+        points.append(reihe)
+    return w, h, points
 
 
 def main(argv):
@@ -66,16 +66,16 @@ def main(argv):
         farben = iconmod.SCHEMEN[schema]
         eins = []
         for n in names:
-            eins.append(image_2(n, farben))
+            eins.append(image(n, farben))
         width_2 = AIR + sum(max(w, w * BIG) + AIR for w, _, _ in eins)
         height_2 = AIR + 16 + AIR + 16 * BIG + AIR
         im = Image.new("RGB", (width_2, height_2),
                        tuple(((farben["panel"] >> s) & 255) for s in (16, 8, 0)))
         x = AIR
-        for w, h, points_2 in eins:
+        for w, h, points in eins:
             for r in range(h):
                 for c in range(w):
-                    v = points_2[r][c]
+                    v = points[r][c]
                     if v is None:
                         continue
                     rgb = ((v >> 16) & 255, (v >> 8) & 255, v & 255)

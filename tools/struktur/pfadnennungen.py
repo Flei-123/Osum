@@ -4,25 +4,25 @@ import os
 import re
 import sys
 
-ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def kernmodule():
-    sys.path.insert(0, os.path.join(ROOT_2, "tools", "struktur"))
+    sys.path.insert(0, os.path.join(ROOT, "tools", "struktur"))
     import shell
-    kern = envelope.envelope(os.path.join(ROOT_2, "kernel", "kmain.fi"))
+    kern = envelope.envelope(os.path.join(ROOT, "kernel", "kmain.fi"))
     return {os.path.basename(p)[:-3] for p in kern}
 
 
 def durchsuche():
     ziele = {}
-    for stamm, verz, names in os.walk(ROOT_2):
+    for stamm, verz, names in os.walk(ROOT):
         verz[:] = [d for d in verz if d not in (".git", "kernel", "docs", "vendor")]
         for n in names:
             if not n.endswith((".sh", ".py", ".yml", ".yaml", ".mk")) and n != "Makefile":
                 continue
             p = os.path.join(stamm, n)
-            rel = os.path.relpath(p, ROOT_2)
+            rel = os.path.relpath(p, ROOT)
             try:
                 with open(p, "rb") as f:
                     txt = f.read().decode("utf-8", "replace")

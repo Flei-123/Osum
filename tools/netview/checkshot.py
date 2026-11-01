@@ -72,9 +72,9 @@ def main(argv):
     w, h, roh = ppm(screen)
     deckend = 0
     wrong = 0
-    for r, line_3 in enumerate(zeilen):
-        for c, char in enumerate(line_3):
-            soll = palette[char]
+    for r, line in enumerate(zeilen):
+        for c, zeichen in enumerate(line):
+            soll = palette[zeichen]
             if soll is None:
                 continue
             if isinstance(soll, tuple):

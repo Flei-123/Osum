@@ -94,7 +94,7 @@ def loese(text):
     return new, aus
 
 
-def stellen(wurzel):
+def ask(wurzel):
     umg = dict(os.environ, OSUM_ROOT=wurzel)
     p = subprocess.run([sys.executable, "tools/i18n/quellen.py", "--alle"],
                        capture_output=True, text=True, cwd=wurzel, env=umg)
@@ -154,11 +154,11 @@ def bearbeite(path_2, zeilennummern, schreibe):
 def main(argv):
     schreibe = "--schreibe" in argv
     wurzel = os.environ.get("OSUM_ROOT", ".")
-    target = [a for a in argv[1:] if not a.startswith("--")]
-    karte = stellen(wurzel)
-    if target:
+    ziel = [a for a in argv[1:] if not a.startswith("--")]
+    karte = ask(wurzel)
+    if ziel:
         karte = {d: n for d, n in karte.items()
-                 if any(d.endswith(z) or z in d for z in target)}
+                 if any(d.endswith(z) or z in d for z in ziel)}
     ges = 0
     for file_2 in sorted(karte):
         path_2 = os.path.join(wurzel, file_2)

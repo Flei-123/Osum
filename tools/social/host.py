@@ -125,7 +125,7 @@ def watch(port, secret, serial, out):
             if it:
                 st2, j2 = api(port, t["anna"], "/api/kontakte/einladung/antwort", {"id": it[0]["id"], "ja": True})
                 say(st2 == 200 and j2.get("einladung", {}).get("ziel") == "mc://10.0.2.15:25565",
-                    f"anna says yes and gets the target: {st2} {j2.get('einladung', {}).get('target')!r}")
+                    f"anna says yes and gets the target: {st2} {j2.get('einladung', {}).get('ziel')!r}")
             st3, j3 = api(port, t["anna"], "/api/kontakte/einladen",
                           {"konto": "u_JUSTIN", "art": "einladen", "name": "Counter-Strike 2", "ziel": "steam://connect/10.0.2.2:27015"})
             say(st3 == 200, f"anna invites justin into Counter-Strike 2: {st3}")

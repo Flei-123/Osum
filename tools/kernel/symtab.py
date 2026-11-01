@@ -130,13 +130,13 @@ def lines(elf):
         roh.append((adr, parts[0], nr))
     roh.sort()
     raus = []
-    for adr, file_2, nr in roh:
+    for adr, file, nr in roh:
         if raus and raus[-1][0] == adr:
-            raus[-1] = (adr, file_2, nr)
+            raus[-1] = (adr, file, nr)
             continue
-        if raus and raus[-1][1] == file_2 and raus[-1][2] == nr:
+        if raus and raus[-1][1] == file and raus[-1][2] == nr:
             continue
-        raus.append((adr, file_2, nr))
+        raus.append((adr, file, nr))
     return raus
 
 
@@ -234,15 +234,15 @@ def blob(syms, lns):
     fassen 1048575 Zeilen; die laengste Datei dieses Baums hat 10216.
     Zwoelf Bits fassen 4096 Dateien; es sind 113.
     """
-    names_2 = bytearray(b"\0")
+    names = bytearray(b"\0")
     nvers = {}
 
     def leg_ab(s):
         b = s.encode("utf-8", "replace") + b"\0"
         if b in nvers:
             return nvers[b]
-        p = len(names_2)
-        names_2.extend(b)
+        p = len(names)
+        names.extend(b)
         nvers[b] = p
         return p
 
@@ -255,11 +255,11 @@ def blob(syms, lns):
     dateien = []
     dvers = {}
     zeil_roh = []
-    for adr, file_2, nr in lns:
-        if file_2 not in dvers:
-            dvers[file_2] = len(dateien)
-            dateien.append(file_2)
-        f = dvers[file_2]
+    for adr, file, nr in lns:
+        if file not in dvers:
+            dvers[file] = len(dateien)
+            dateien.append(file)
+        f = dvers[file]
         if nr > 0xFFFFF:
             nr = 0xFFFFF
         if f > 0xFFF:
@@ -286,7 +286,7 @@ def blob(syms, lns):
     o_sadr = HDR
     o_snam = o_sadr + len(sym_adr)
     o_str = o_snam + len(sym_nam)
-    o_zeil = ausrichten(o_str + len(names_2))
+    o_zeil = ausrichten(o_str + len(names))
     o_lstr = o_zeil + len(zeil)
     o_dver = ausrichten(o_lstr + len(zstrom))
     o_dstr = o_dver + len(dat_ver)
@@ -299,7 +299,7 @@ def blob(syms, lns):
     b = bytearray(header)
     b += sym_adr
     b += sym_nam
-    b += names_2
+    b += names
     while len(b) < o_zeil:
         b.append(0)
     b += zeil

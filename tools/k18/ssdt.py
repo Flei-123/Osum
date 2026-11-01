@@ -164,8 +164,8 @@ def main():
         prozent = (a.rest * 100 + a.voll // 2) // a.voll if a.voll else 0
         prozent = min(prozent, 100)
         if a.rate:
-            set_ = a.voll - a.rest if (a.zustand & 2) else a.rest
-            minuten = (set_ * 60) // a.rate
+            set_2 = a.voll - a.rest if (a.zustand & 2) else a.rest
+            minuten = (set_2 * 60) // a.rate
         else:
             minuten = 0
     grad = (a.temp - 2732) // 10

@@ -161,7 +161,7 @@ def func_in_text(elf: bytes, endung: str):
     return None
 
 
-def build_2(argv):
+def build(argv):
     ein = argv[0]
     aus = argv[1]
     name = "unbenannt"
@@ -202,8 +202,8 @@ def build_2(argv):
     nutz = bytearray(strip_debug(ein))
 
     if text_rot > 0:
-        off, len_ = text_bereich(bytes(nutz))
-        begin = off + len_ // 2
+        off, len_2 = text_bereich(bytes(nutz))
+        begin = off + len_2 // 2
         target = (func_in_text(bytes(nutz), "ps2m__init_inner")
                 or func_in_text(bytes(nutz), "ps2m__init"))
         if target is not None:
@@ -236,12 +236,12 @@ def build_2(argv):
     if kennung_broken:
         header[0] = 0x58
 
-    data_2 = bytes(header) + nb + bytes(sig)
-    open(aus, "wb").write(data_2)
+    data = bytes(header) + nb + bytes(sig)
+    open(aus, "wb").write(data)
     print("%s (%d Oktette: Kopf %d, Nutzlast %d, Signatur %d), abi=%d, "
           "name=%s, sha256=%s"
-          % (aus, len(data_2), HDR, len(nb), SIGLEN, abi, name,
-             hashlib.sha256(data_2).hexdigest()[:16]))
+          % (aus, len(data), HDR, len(nb), SIGLEN, abi, name,
+             hashlib.sha256(data).hexdigest()[:16]))
     return 0
 
 
@@ -276,7 +276,7 @@ def main(argv):
         print(__doc__)
         return 1
     if argv[1] == "bauen":
-        return build_2(argv[2:])
+        return build(argv[2:])
     if argv[1] == "zeigen":
         return show(argv[2:])
     print(__doc__)

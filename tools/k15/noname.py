@@ -66,10 +66,10 @@ def main():
     roh = open(path_2, encoding="utf-8", errors="replace").read()
     code = without_anmerkungen(roh)
     if name in code:
-        for nr, line_3 in enumerate(code.split("\n"), 1):
-            if name in line_3:
+        for nr, line in enumerate(code.split("\n"), 1):
+            if name in line:
                 print("%s:%d: '%s' is in the code: %s"
-                      % (path_2, nr, name, line_3.strip()[:80]))
+                      % (path_2, nr, name, line.strip()[:80]))
                 return 1
     inkomm = name in roh and name not in code
     print("'%s' is not in the code of %s%s"

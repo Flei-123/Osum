@@ -61,22 +61,22 @@ def oktette(roh: str) -> bytes:
     return bytes(out)
 
 
-def file(path_2: str) -> int:
-    alt = open(path_2, "r", encoding="utf-8").read()
+def file(path: str) -> int:
+    alt = open(path, "r", encoding="utf-8").read()
     aus = []
     n = 0
-    for line_2 in alt.split("\n"):
-        m = LINE.match(line_2)
+    for line in alt.split("\n"):
+        m = LINE.match(line)
         if not m:
-            aus.append(line_2)
+            aus.append(line)
             continue
         text = m.group("text")
-        len_ = len(oktette(text)) + 1
-        aus.append('%s%d%s"%s\\0"%s' % (m.group("kopf"), len_,
+        len_2 = len(oktette(text)) + 1
+        aus.append('%s%d%s"%s\\0"%s' % (m.group("kopf"), len_2,
                                         m.group("mitte"), text,
                                         m.group("rest")))
         n += 1
-    open(path_2, "w", encoding="utf-8").write("\n".join(aus))
+    open(path, "w", encoding="utf-8").write("\n".join(aus))
     return n
 
 

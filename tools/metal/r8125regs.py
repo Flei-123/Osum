@@ -151,9 +151,9 @@ def main():
     print("DELIBERATELY OPEN (not an error, but unchecked)")
     for name, text in OPEN.items():
         print("   %s = %s" % (name, ok_.get(name)))
-        for line_2 in re.findall(r".{1,64}(?:\s|$)", text):
-            if line_2.strip():
-                print("        " + line_2.strip())
+        for line in re.findall(r".{1,64}(?:\s|$)", text):
+            if line.strip():
+                print("        " + line.strip())
 
     print()
     if error:

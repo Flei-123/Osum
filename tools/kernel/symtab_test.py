@@ -8,8 +8,8 @@ elf = sys.argv[1]
 lns = symtab.lines(elf)
 files = {}
 ents = []
-for adr, file_2, nr in lns:
-    f = files.setdefault(file_2, len(files))
+for adr, file, nr in lns:
+    f = files.setdefault(file, len(files))
     ents.append((adr & 0xFFFFFFFF, (min(f, 0xFFF) << 20) | min(nr, 0xFFFFF)))
 idx, st = symtab.pack_lines(ents)
 n = len(ents)

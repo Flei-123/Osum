@@ -5,9 +5,9 @@ import os
 import re
 import sys
 
-ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-KERN = os.path.join(ROOT_2, "kernel")
-SCHICHTDATEI = os.path.join(ROOT_2, "tools", "struktur", "schichten.txt")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(ROOT, "kernel")
+SCHICHTDATEI = os.path.join(ROOT, "tools", "struktur", "schichten.txt")
 
 IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][A-Za-z0-9_.]*)[ \t]*(?://.*)?$")
 
@@ -25,10 +25,10 @@ def sammle():
             if not n.endswith(".fi"):
                 continue
             path_2 = os.path.join(stamm, n)
-            rel = os.path.relpath(path_2, ROOT_2)
+            rel = os.path.relpath(path_2, ROOT)
             name = n[:-3]
             src = read_2(path_2)
-            lines_2 = src.count("\n") + (0 if src.endswith("\n") or not src else 1)
+            lines = src.count("\n") + (0 if src.endswith("\n") or not src else 1)
             ziele = []
             for z in src.splitlines():
                 m = IMPORT_RE.match(z)
@@ -40,13 +40,13 @@ def sammle():
             module[name] = {
                 "pfad": rel,
                 "ordner": os.path.relpath(stamm, KERN).replace(os.sep, "/"),
-                "zeilen": lines_2,
+                "zeilen": lines,
                 "importe": sorted(set(ziele)),
             }
     return module, kollisionen
 
 
-def tarjan(node, edges_2):
+def tarjan(node, edges):
     index = {}
     tief = {}
     aufstapel = set()
@@ -56,7 +56,7 @@ def tarjan(node, edges_2):
     for start in node:
         if start in index:
             continue
-        arbeit = [(start, iter(edges_2.get(start, ())))]
+        arbeit = [(start, iter(edges.get(start, ())))]
         index[start] = tief[start] = counter[0]
         counter[0] += 1
         stack.append(start)
@@ -72,7 +72,7 @@ def tarjan(node, edges_2):
                     counter[0] += 1
                     stack.append(n)
                     aufstapel.add(n)
-                    arbeit.append((n, iter(edges_2.get(n, ()))))
+                    arbeit.append((n, iter(edges.get(n, ()))))
                     progress = True
                     break
                 if n in aufstapel:
@@ -143,13 +143,13 @@ def check_rule(module, zuord, rang):
 def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
     module, kollisionen = sammle()
-    edges_2 = {k: v["importe"] for k, v in module.items()}
+    edges = {k: v["importe"] for k, v in module.items()}
     ein = {k: 0 for k in module}
-    for k, zs in edges_2.items():
+    for k, zs in edges.items():
         for z in zs:
             if z in ein:
                 ein[z] += 1
-    zyklen = tarjan(set(module), edges_2)
+    zyklen = tarjan(set(module), edges)
     zuord, rang = read_schichten()
     hold, brueche = check_rule(module, zuord, rang)
 
@@ -173,7 +173,7 @@ def main():
     gesamt = sum(m["zeilen"] for m in module.values())
     print("== ERHEBUNG kernel/ ==")
     print("Dateien: %d, Zeilen: %d, Kanten: %d"
-          % (len(module), gesamt, sum(len(v) for v in edges_2.values())))
+          % (len(module), gesamt, sum(len(v) for v in edges.values())))
     if kollisionen:
         print("NAMENSKOLLISIONEN: %s" % kollisionen)
     print()

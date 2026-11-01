@@ -28,11 +28,11 @@ def ppm_read(path_2):
     return w, h, d[i:i + w * h * 3]
 
 
-def punkt(image_2, w, h, x, y):
+def punkt(image, w, h, x, y):
     if x < 0 or y < 0 or x >= w or y >= h:
         return None
     o = (y * w + x) * 3
-    return (image_2[o], image_2[o + 1], image_2[o + 2])
+    return (image[o], image[o + 1], image[o + 2])
 
 
 def bright(p):
@@ -103,7 +103,7 @@ def schatten(argv):
     return 1 if error else 0
 
 
-def corner_2(argv):
+def corner(argv):
     """Die Ecke, gegen den Lauf mit der eckigen."""
     without, mit = argv[0], argv[1]
     x, y = int(argv[2]), int(argv[3])
@@ -122,15 +122,15 @@ def corner_2(argv):
         hineinrechnet.
         """
         frame = punkt(b, w, h, x + r + 2, y + r + 2)
-        reason_2 = punkt(b, w, h, x - 3, y - 3)
+        reason = punkt(b, w, h, x - 3, y - 3)
         n = 0
         for dy in range(r):
             for dx in range(r):
                 p = punkt(b, w, h, x + dx, y + dy)
-                if p is None or p == frame or p == reason_2:
+                if p is None or p == frame or p == reason:
                     continue
                 n += 1
-        return n, frame, reason_2
+        return n, frame, reason
 
     na, ra, ga = gemischt(A, wa, ha)
     nb, rb, gb = gemischt(B, wb, hb)
@@ -201,7 +201,7 @@ def main():
     if was == "schatten":
         return schatten(rest)
     if was == "ecke":
-        return corner_2(rest)
+        return corner(rest)
     if was == "vergleich":
         return vergleich(rest)
     print("unbekannt: %s" % was)

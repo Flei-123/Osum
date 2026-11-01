@@ -4,27 +4,27 @@ import os
 import re
 import sys
 
-ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MUSTER = re.compile(r"kernel/([a-z0-9_]+)\.fi")
 
 
 def ort_von(name):
-    for stamm, verz, names in os.walk(os.path.join(ROOT_2, "kernel")):
+    for stamm, verz, names in os.walk(os.path.join(ROOT, "kernel")):
         verz[:] = [d for d in verz if d not in ("user", "app")]
         if name + ".fi" in names:
             p = os.path.join(stamm, name + ".fi")
-            return os.path.relpath(p, ROOT_2)
+            return os.path.relpath(p, ROOT)
     return None
 
 
 def dateien():
-    for stamm, verz, names in os.walk(ROOT_2):
+    for stamm, verz, names in os.walk(ROOT):
         verz[:] = [d for d in verz
                    if d not in (".git", "kernel", "vendor", "docs", "lib")]
         for n in names:
             if n.endswith((".sh", ".py")) or n == "test.sh":
                 p = os.path.join(stamm, n)
-                rel = os.path.relpath(p, ROOT_2)
+                rel = os.path.relpath(p, ROOT)
                 if rel.startswith("tools/struktur/"):
                     continue
                 yield p, rel
@@ -43,9 +43,9 @@ def main():
             continue
         if "kernel/" not in roh:
             continue
-        lines_2 = roh.split("\n")
+        lines = roh.split("\n")
         geaendert = False
-        for i, z in enumerate(lines_2):
+        for i, z in enumerate(lines):
             nackt = z.lstrip()
             if nackt.startswith("#") or nackt.startswith("//"):
                 continue
@@ -56,7 +56,7 @@ def main():
                 nonlocal geaendert
                 name = m.group(1)
                 alt = "kernel/%s.fi" % name
-                if os.path.exists(os.path.join(ROOT_2, alt)):
+                if os.path.exists(os.path.join(ROOT, alt)):
                     return m.group(0)
                 if name not in cache:
                     cache[name] = ort_von(name)
@@ -72,13 +72,13 @@ def main():
                     print("  %s:%d" % (rel, i + 1))
                     print("    - %s" % z.strip()[:110])
                     print("    + %s" % new_z.strip()[:110])
-                lines_2[i] = new_z
+                lines[i] = new_z
                 n_lines += 1
         if geaendert:
             n_dateien += 1
             if not trocken:
                 with open(p, "w", encoding="utf-8") as f:
-                    f.write("\n".join(lines_2))
+                    f.write("\n".join(lines))
     word = "waeren zu richten" if trocken else "gerichtet"
     print("%d Zeilen in %d Dateien %s" % (n_lines, n_dateien, word))
     return 0

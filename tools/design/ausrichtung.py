@@ -10,7 +10,7 @@ except ImportError:
     sys.exit(2)
 
 
-def reason_2(px, x0, y0, w, h):
+def reason(px, x0, y0, w, h):
     zaehl = {}
     for y in range(y0, y0 + h):
         for x in range(x0, x0 + w):
@@ -55,28 +55,28 @@ def columns(m):
 def buendel(voll, luecke):
     out = []
     run_2 = None
-    empty_3 = 0
+    empty_2 = 0
     for x, v in enumerate(voll):
         if v:
             if run_2 is None:
                 run_2 = [x, x]
             else:
                 run_2[1] = x
-            empty_3 = 0
+            empty_2 = 0
         else:
             if run_2 is not None:
-                empty_3 += 1
-                if empty_3 >= luecke:
+                empty_2 += 1
+                if empty_2 >= luecke:
                     out.append((run_2[0], run_2[1]))
                     run_2 = None
-                    empty_3 = 0
+                    empty_2 = 0
     if run_2 is not None:
         out.append((run_2[0], run_2[1]))
     return out
 
 
 def field_messen(px, x0, y0, w, h, name, args):
-    bg = reason_2(px, x0, y0, w, h)
+    bg = reason(px, x0, y0, w, h)
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
     for r in range(max(0, h - args.rand_unten), h):
         for c in range(w):
@@ -163,12 +163,12 @@ def bericht(r, args, error):
         if d > args.tol:
             print("               VERLETZT mitte: %.1f Punkte" % d)
             error.append("%s: mitte %.1f" % (r["name"], d))
-        spacing_2 = t[0] - s[2] - 1
-        print("               Abstand Symbol->Text %d" % spacing_2)
+        spacing = t[0] - s[2] - 1
+        print("               Abstand Symbol->Text %d" % spacing)
 
 
 def lines_find(px, x0, y0, w, h, args):
-    bg = reason_2(px, x0, y0, w, h)
+    bg = reason(px, x0, y0, w, h)
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
     voll = [any(m[y][x] for x in range(w)) for y in range(h)]
     out = []
@@ -218,9 +218,9 @@ def main():
                     help="messen und berichten, aber nicht durchfallen")
     args = ap.parse_args()
 
-    im = Image.open(args.image_2).convert("RGB")
+    im = Image.open(args.image).convert("RGB")
     px = im.load()
-    print("BILD %s  %dx%d" % (args.image_2, im.width, im.height))
+    print("BILD %s  %dx%d" % (args.image, im.width, im.height))
     error = []
 
     felder = []

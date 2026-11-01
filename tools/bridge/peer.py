@@ -47,11 +47,11 @@ class Wire:
     def nachricht(self):
         z = self.line()
         f = z.split(" ")
-        len_ = 0
+        len_2 = 0
         if f and f[-1].isdigit():
-            len_ = int(f[-1])
+            len_2 = int(f[-1])
             f = f[:-1]
-        return f, self.oktette(len_)
+        return f, self.oktette(len_2)
 
     def sende(self, felder, nutz=b""):
         header = " ".join(felder) + " " + str(len(nutz)) + "\n"

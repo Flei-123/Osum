@@ -55,8 +55,8 @@ def path_points(d, tol=0.2):
     if len(akt)>1: konturen.append(akt)
     return konturen
 
-def rastern(pfade, size_2, vb, ss=4):
-    W=H=size_2
+def rastern(pfade, size, vb, ss=4):
+    W=H=size
     vx,vy,vw,vh = vb
     acc=[[None]*(W) for _ in range(H)]
     for konturen, color in pfade:

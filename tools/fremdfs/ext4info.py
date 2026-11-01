@@ -81,13 +81,13 @@ class Ext4:
             return 0
         if tiefe == 0:
             return eintraege
-        sum_ = 0
+        sum_2 = 0
         for i in range(eintraege):
             e = 12 + i * 12
             lo = struct.unpack_from('<I', node, e + 4)[0]
             hi = struct.unpack_from('<H', node, e + 8)[0]
-            sum_ += self._count(self.block(lo | (hi << 32)))
-        return sum_
+            sum_2 += self._count(self.block(lo | (hi << 32)))
+        return sum_2
 
     def find(self, path):
         """Inodenummer zu einem Pfad. Nur so viel Verzeichnislogik wie
@@ -114,11 +114,11 @@ class Ext4:
         for i in range(eintraege):
             e = 12 + i * 12
             if tiefe == 0:
-                len_ = struct.unpack_from('<H', node, e + 4)[0]
+                len_2 = struct.unpack_from('<H', node, e + 4)[0]
                 lo = struct.unpack_from('<I', node, e + 8)[0]
                 hi = struct.unpack_from('<H', node, e + 6)[0]
                 start = lo | (hi << 32)
-                for k in range(len_ & 0x7FFF):
+                for k in range(len_2 & 0x7FFF):
                     yield start + k
             else:
                 lo = struct.unpack_from('<I', node, e + 4)[0]

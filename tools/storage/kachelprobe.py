@@ -96,7 +96,7 @@ def main(argv):
     print("tile probe: %d tiles, offset of the window content %d,%d"
           % (len(kacheln), ox, oy))
 
-    bad = 0
+    bad_2 = 0
     breiten = []
     for _i, x, y, w, h, f, n in kacheln:
         mitte = x + w // 2 + ox
@@ -115,7 +115,7 @@ def main(argv):
         breiten.append((n, w, gemessen))
         gut = abs(gemessen - w) <= 4
         if not gut:
-            bad += 1
+            bad_2 += 1
         print("  %-10s reported w=%-5d in image %-5d %s"
               % (n, w, gemessen, "" if gut else "<-- ABWEICHUNG"))
 
@@ -123,8 +123,8 @@ def main(argv):
                   for k in range(len(breiten) - 1))
     print("tile probe: the widths fall with the share: %s"
           % ("ja" if fallend else "NEIN"))
-    if bad or not fallend:
-        print("kachelprobe: %d Kacheln stimmen nicht" % bad)
+    if bad_2 or not fallend:
+        print("kachelprobe: %d Kacheln stimmen nicht" % bad_2)
         return 1
     print("tile probe: all tiles have in the image the width that the "
           "Programm gemeldet hat")

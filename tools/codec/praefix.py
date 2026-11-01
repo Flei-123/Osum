@@ -4,8 +4,8 @@ import re, sys
 
 SOURCE = 'kernel/user/h264tab.fi'
 
-def felder(path_2):
-    s = open(path_2, encoding='utf-8').read()
+def felder(path):
+    s = open(path, encoding='utf-8').read()
     out = {}
     for m in re.finditer(r'static mut (\w+): \[u64; (\d+)\] = \[(.*?)\]',
                          s, re.S):
@@ -19,17 +19,17 @@ def felder(path_2):
 
 def check(name, lens, bits):
     codes = [(l, b) for l, b in zip(lens, bits) if l > 0]
-    bad_2 = 0
+    bad = 0
     for i in range(len(codes)):
         for j in range(i + 1, len(codes)):
             l1, b1 = codes[i]
             l2, b2 = codes[j]
             if l1 <= l2:
-                if (b2 >> (l2 - l1)) == b1: bad_2 += 1
+                if (b2 >> (l2 - l1)) == b1: bad += 1
             else:
-                if (b1 >> (l1 - l2)) == b2: bad_2 += 1
+                if (b1 >> (l1 - l2)) == b2: bad += 1
     kraft = sum(2.0 ** -l for l, _ in codes)
-    return len(codes), bad_2, kraft
+    return len(codes), bad, kraft
 
 def main():
     F = felder(SOURCE)
@@ -56,12 +56,12 @@ def main():
     error = 0
     ncodes = 0
     for name, lens, bits in tafeln:
-        n, bad_2, kraft = check(name, lens, bits)
+        n, bad, kraft = check(name, lens, bits)
         ncodes += n
-        if bad_2 or kraft > 1.0000001:
+        if bad or kraft > 1.0000001:
             error += 1
             print("  MEHRDEUTIG %-28s %3d Codes, %d Kollisionen, Kraft %.6f"
-                  % (name, n, bad_2, kraft))
+                  % (name, n, bad, kraft))
     if error:
         print("%d of %d tables are ambiguous" % (error, len(tafeln)))
         return 1

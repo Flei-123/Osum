@@ -109,9 +109,9 @@ class Vorlage:
         n = u16(self.d, 4)
         self.tab = {}
         for i in range(n):
-            brand_2, _, off, len_ = struct.unpack_from(">4sIII", self.d,
+            brand, _, off, len_2 = struct.unpack_from(">4sIII", self.d,
                                                        12 + 16 * i)
-            self.tab[brand_2.decode("latin1")] = (off, len_)
+            self.tab[brand.decode("latin1")] = (off, len_2)
         for m in ("head", "hhea", "maxp", "hmtx", "cmap", "loca", "glyf"):
             if m not in self.tab:
                 raise SystemExit("schnitt: Tabelle '%s' fehlt" % m)
@@ -282,7 +282,7 @@ def pad4(b):
     return b + b"\x00" * ((4 - len(b) % 4) % 4)
 
 
-def sum_(b):
+def sum_2(b):
     b = pad4(b)
     s = 0
     for i in range(0, len(b), 4):
@@ -292,16 +292,16 @@ def sum_(b):
 
 def cmap4(paare):
     """Format 4, ein Segment je zusammenhaengendem Block plus 0xFFFF."""
-    char = sorted(paare)
+    zeichen = sorted(paare)
     segmente = []
     i = 0
-    while i < len(char):
-        a = char[i]
+    while i < len(zeichen):
+        a = zeichen[i]
         j = i
-        while (j + 1 < len(char) and char[j + 1] == char[j] + 1
-               and paare[char[j + 1]] == paare[char[j]] + 1):
+        while (j + 1 < len(zeichen) and zeichen[j + 1] == zeichen[j] + 1
+               and paare[zeichen[j + 1]] == paare[zeichen[j]] + 1):
             j += 1
-        segmente.append((a, char[j], (paare[a] - a) & 0xFFFF))
+        segmente.append((a, zeichen[j], (paare[a] - a) & 0xFFFF))
         i = j + 1
     segmente.append((0xFFFF, 0xFFFF, 1))
     n = len(segmente)
@@ -326,8 +326,8 @@ def cmap4(paare):
 def kern0_build(paare):
     if not paare:
         return None
-    list_ = sorted(paare)
-    n = len(list_)
+    list_2 = sorted(paare)
+    n = len(list_2)
     suchbereich = 6
     while suchbereich * 2 <= n * 6:
         suchbereich *= 2
@@ -338,7 +338,7 @@ def kern0_build(paare):
         v //= 2
     koerper = struct.pack(">HHHH", n, suchbereich, entry,
                           n * 6 - suchbereich)
-    for li, re in list_:
+    for li, re in list_2:
         koerper += struct.pack(">HHh", li, re, paare[(li, re)])
     under = struct.pack(">HHH", 0, 14 + len(koerper), 0x0001) + koerper
     return struct.pack(">HH", 0, 1) + under
@@ -348,7 +348,7 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    source_2, target = argv[1], argv[2]
+    source, ziel = argv[1], argv[2]
     rest = argv[3:]
     if rest and rest[0] == "--set":
         if rest[1] not in SAETZE:
@@ -364,26 +364,26 @@ def main(argv):
     else:
         bereiche = SAETZE[VORGABE]
 
-    v = Vorlage(source_2)
+    v = Vorlage(source)
     voll = v.cmap()
 
     behalten = [0]
-    char = {}
+    zeichen = {}
     for erst, letzt in bereiche:
         for c in range(erst, letzt + 1):
             g = voll.get(c)
             if g is None:
                 continue
-            char[c] = g
+            zeichen[c] = g
             if g not in behalten:
                 behalten.append(g)
-    open_ = list(behalten)
-    while open_:
-        g = open_.pop()
+    open_2 = list(behalten)
+    while open_2:
+        g = open_2.pop()
         for k in komponenten(v.glyph_bytes(g)):
             if k not in behalten:
                 behalten.append(k)
-                open_.append(k)
+                open_2.append(k)
     behalten.sort()
     karte = {alt: new for new, alt in enumerate(behalten)}
 
@@ -413,7 +413,7 @@ def main(argv):
     struct.pack_into(">H", maxp, 4, len(behalten))
 
     tabellen = {
-        "cmap": cmap4({c: karte[g] for c, g in char.items()}),
+        "cmap": cmap4({c: karte[g] for c, g in zeichen.items()}),
         "glyf": bytes(glyf),
         "head": bytes(head),
         "hhea": bytes(hhea),
@@ -444,21 +444,21 @@ def main(argv):
     koerper = b""
     for m in marken:
         d = tabellen[m]
-        verz += struct.pack(">4sIII", m.encode("latin1"), sum_(d), pos,
+        verz += struct.pack(">4sIII", m.encode("latin1"), sum_2(d), pos,
                             len(d))
         koerper += pad4(d)
         pos += len(pad4(d))
     file_2 = bytearray(header + verz + koerper)
-    check = (0xB1B0AFBA - sum_(bytes(file_2))) & 0xFFFFFFFF
+    check = (0xB1B0AFBA - sum_2(bytes(file_2))) & 0xFFFFFFFF
     for i, m in enumerate(marken):
         if m == "head":
             hoff = u32(file_2, 12 + 16 * i + 8)
             struct.pack_into(">I", file_2, hoff + 8, check)
 
-    open(target, "wb").write(bytes(file_2))
+    open(ziel, "wb").write(bytes(file_2))
     print("%s: %d Glyphen, %d Zeichen, %d Oktette (%s), upm=%d, "
           "asc=%d desc=%d gap=%d, kern=%d Paare"
-          % (target, len(behalten), len(char), len(file_2),
+          % (ziel, len(behalten), len(zeichen), len(file_2),
              ", ".join(marken), v.upm, v.ascent, v.descent, v.gap, len(kp)))
     return 0
 

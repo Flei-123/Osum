@@ -52,11 +52,11 @@ def ppm_read(path_2):
     b, h, up = felder
     if up != 255:
         raise SystemExit("ppm2png: nur 8 Bit je Kanal, nicht %d" % up)
-    data_2 = roh[at:at + b * h * 3]
-    if len(data_2) < b * h * 3:
+    data = roh[at:at + b * h * 3]
+    if len(data) < b * h * 3:
         raise SystemExit("ppm2png: %d Oktette zu wenig"
-                         % (b * h * 3 - len(data_2)))
-    return b, h, data_2
+                         % (b * h * 3 - len(data)))
+    return b, h, data
 
 
 def chunk(art, nutz):
@@ -68,12 +68,12 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    b, h, data_2 = ppm_read(argv[1])
+    b, h, data = ppm_read(argv[1])
 
     zeilen = bytearray()
     schritt = b * 3
     for y in range(h):
-        z = data_2[y * schritt:(y + 1) * schritt]
+        z = data[y * schritt:(y + 1) * schritt]
         zeilen.append(1)
         zeilen += z[:3]
         vorher = memoryview(z)[:-3]

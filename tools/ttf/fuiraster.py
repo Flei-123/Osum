@@ -482,22 +482,22 @@ def glyph(f, gid, px, hint=True):
     return kern.Glyphe(w, h, bx0, by1, adv, a)
 
 
-class Font_2(kern.Font_2):
+class Font(kern.Font):
 
     def glyphe(self, c):
-        if c in self.mem_2:
-            return self.mem_2[c]
+        if c in self.mem:
+            return self.mem[c]
         gid = self.f.glyph_of(c)
         g = glyph(self.f, gid, self.px)
         if g is None:
             g = kern.raster_kern(self.f, gid, self.px)
-        self.mem_2[c] = g
+        self.mem[c] = g
         return g
 
 
 def main(argv):
     if len(argv) >= 4 and argv[0] == "glyphe":
-        s = Font_2(argv[1], int(argv[2]))
+        s = Font(argv[1], int(argv[2]))
         g = s.glyphe(ord(argv[3]))
         print("w=%d h=%d left=%d top=%d adv26=%d" %
               (g.w, g.h, g.links, g.top_2, g.adv26))
@@ -506,8 +506,8 @@ def main(argv):
                           for x in range(g.w)))
         return 0
     if len(argv) >= 4 and argv[0] == "summe":
-        s = Font_2(argv[1], int(argv[2]))
-        print(kern.sum_(s.glyphe(ord(argv[3]))))
+        s = Font(argv[1], int(argv[2]))
+        print(kern.sum_2(s.glyphe(ord(argv[3]))))
         return 0
     print("fuiraster.py glyphe|summe <ttf> <px> <zeichen>", file=sys.stderr)
     return 2

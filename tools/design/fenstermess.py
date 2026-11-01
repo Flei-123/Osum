@@ -30,7 +30,7 @@ def ppm(path_2):
     return tok[0], tok[1], d[i:]
 
 
-def band(path_2, height_2, von_bottom):
+def band(path_2, hoehe, von_bottom):
     w, h, px = ppm(path_2)
     s = {}
     for y in range(h - von_bottom, h, 2):
@@ -97,10 +97,10 @@ def main():
 
     print("== 1. IS THE BAR ON TOP? ==")
     bloecke = []
-    for chunk_2 in t.split("wm: work ")[1:]:
+    for chunk in t.split("wm: work ")[1:]:
         fen = re.findall(
             r"wm: fen i=(\d+) id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
-            r" lay=(\d+) fl=(\d+) z=(\d+)", chunk_2)
+            r" lay=(\d+) fl=(\d+) z=(\d+)", chunk)
         bloecke.append([tuple(int(v) for v in f_) for f_ in fen])
     print("   %d measuring points (F12) on the wire" % len(bloecke))
 
@@ -119,19 +119,19 @@ def main():
         return t_
 
     if bloecke:
-        last_3 = max(bloecke, key=tiefe)
-        lay_t, id_t = taskbar_ebene(last_3)
+        last_2 = max(bloecke, key=tiefe)
+        lay_t, id_t = taskbar_ebene(last_2)
         if lay_t is None:
             print("   the bar cannot be recognised in the window list")
         else:
             print("   Leiste: id=%d Ebene=%d" % (id_t, lay_t))
             edge = ty if ty is not None else SH - 80
-            unten = [(i_, id_, x, y, w, h, lay, fl, z)
-                     for (i_, id_, x, y, w, h, lay, fl, z) in last_3
+            bottom = [(i_, id_, x, y, w, h, lay, fl, z)
+                     for (i_, id_, x, y, w, h, lay, fl, z) in last_2
                      if id_ != id_t and lay == 1
                      and i64(y) + h > edge]
-            if unten:
-                for (i_, id_, x, y, w, h, lay, fl, z) in unten:
+            if bottom:
+                for (i_, id_, x, y, w, h, lay, fl, z) in bottom:
                     print("   window id=%d is at y=%d, is %d high "
                           "-> Unterkante y=%d" % (id_, i64(y), h, i64(y) + h))
                     print("   that is %d points BELOW the bar's top edge "
@@ -150,9 +150,9 @@ def main():
     b1 = os.path.join(folder, "11-fenster-normal.ppm")
     b2 = os.path.join(folder, "12-unter-der-leiste.ppm")
     if os.path.exists(b1) and os.path.exists(b2):
-        height_2 = (SH - ty) if ty is not None else 80
-        s1 = band(b1, SH, height_2)
-        s2 = band(b2, SH, height_2)
+        hoehe = (SH - ty) if ty is not None else 80
+        s1 = band(b1, SH, hoehe)
+        s2 = band(b2, SH, hoehe)
         eq = sum(min(s1.get(c, 0), s2.get(c, 0))
                      for c in set(s1) | set(s2))
         gesamt = sum(s1.values())

@@ -140,18 +140,18 @@ try:
         "[Fenster %d,%d + Rechteck %s,%s %sx%s]"
         % (cx, cy, wx, wy, rx, ry, rw, rh))
 
-    list_ = None
+    list_2 = None
     oid = re.findall(r"explorer: orteliste id=(\d+)", txt)
     if oid:
         for r in rects:
             if r[0] == oid[-1]:
-                list_ = r
+                list_2 = r
     lines = re.findall(r"explorer: ortzeile i=(\d+) y=(-?\d+) h=(\d+)", txt)
-    if list_ is None or not lines:
+    if list_2 is None or not lines:
         say("Place list or carrier line not reported "
-            "(liste=%s zeilen=%d)" % (list_ is not None, len(lines)))
+            "(liste=%s zeilen=%d)" % (list_2 is not None, len(lines)))
         raise SystemExit(1)
-    lx, ly, lw = int(list_[2]), int(list_[3]), int(list_[4])
+    lx, ly, lw = int(list_2[2]), int(list_2[3]), int(list_2[4])
     zi, zy, zh = (int(v) for v in lines[-1])
     zx = wx + lx + lw // 2
     zyy = wy + ly + zy + zh // 2

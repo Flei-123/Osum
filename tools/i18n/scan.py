@@ -73,25 +73,25 @@ QUELLEN = ["kernel"]
 EXCEPTIONS = ["kernel/user/i18nt.fi"]
 
 
-def literale(line_3):
+def literale(line):
     aus = []
     i = 0
-    n = len(line_3)
+    n = len(line)
     while i < n:
-        c = line_3[i]
-        if c == "/" and i + 1 < n and line_3[i + 1] == "/":
+        c = line[i]
+        if c == "/" and i + 1 < n and line[i + 1] == "/":
             break
         if c == '"':
             j = i + 1
             buf = []
             while j < n:
-                if line_3[j] == "\\" and j + 1 < n:
-                    buf.append(line_3[j:j + 2])
+                if line[j] == "\\" and j + 1 < n:
+                    buf.append(line[j:j + 2])
                     j += 2
                     continue
-                if line_3[j] == '"':
+                if line[j] == '"':
                     break
-                buf.append(line_3[j])
+                buf.append(line[j])
                 j += 1
             aus.append("".join(buf))
             i = j + 1
@@ -120,10 +120,10 @@ def erlaubt(text):
 def list_check(wurzel):
     if len(sys.argv) > 1:
         return
-    missing_2 = [r for r in OBERFLAECHE
+    missing = [r for r in OBERFLAECHE
              if not os.path.isfile(os.path.join(wurzel, r))]
-    if missing_2:
-        for r in missing_2:
+    if missing:
+        for r in missing:
             print("scan: EXECUTED, BUT NOT THERE: %s" % r)
         raise SystemExit(2)
 
@@ -135,8 +135,8 @@ def check(path_2, streng):
     except OSError:
         print("scan: EXECUTED, BUT NOT THERE: %s" % path_2)
         raise SystemExit(2)
-    for nr, line_3 in enumerate(roh.split("\n"), 1):
-        for lit in literale(line_3):
+    for nr, line in enumerate(roh.split("\n"), 1):
+        for lit in literale(line):
             if erlaubt(lit):
                 continue
             klar = lit.replace("\\0", "").replace("\\n", " ") \
@@ -176,13 +176,13 @@ def main():
                     surface += check(p, True)
                 else:
                     rest += check(p, False)
-    for path_2, nr, word, text in surface:
-        print("%s:%d: '%s' in \"%s\"" % (path_2, nr, word, text[:70]))
+    for path_2, nr, word_2, text in surface:
+        print("%s:%d: '%s' in \"%s\"" % (path_2, nr, word_2, text[:70]))
     print("gefunden: %d" % len(surface))
     print("not in the catalog, but counted (own windows and"
           " uebersetzt): %d" % len(rest))
-    for path_2, nr, word, text in rest:
-        print("    %s:%d: '%s'" % (path_2, nr, word))
+    for path_2, nr, word_2, text in rest:
+        print("    %s:%d: '%s'" % (path_2, nr, word_2))
     return 1 if surface else 0
 
 

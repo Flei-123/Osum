@@ -403,11 +403,11 @@ class _InkChooser:
     def __init__(self, raster):
         self.r = raster
 
-    def Font_2(self, path, px):
+    def Font(self, path, px):
         if path.startswith("fui:"):
             import fuiraster
-            return fuiraster.Font_2(path[4:], px)
-        return self.r.Font_2(path, px)
+            return fuiraster.Font(path[4:], px)
+        return self.r.Font(path, px)
 
 
 def blend(old, new, a):
@@ -479,14 +479,14 @@ def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
 def cmd_tchain(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Font_2(a[1], int(a[2]))
+    face = raster.Font(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     fg = (int(a[5]), int(a[6]), int(a[7]))
     bg = (int(a[8]), int(a[9]), int(a[10]))
     text = a[11]
     tol = int(a[12]) if len(a) > 12 else 0
     ymax = int(a[13]) if len(a) > 13 else None
-    places = [(c, x + (dx >> 6), y) for (c, dx) in face.stellen(text)]
+    places = [(c, x + (dx >> 6), y) for (c, dx) in face.ask(text)]
 
     expected = {}
     for (c, gx, gy) in places:
@@ -556,7 +556,7 @@ def cmd_tchain(a):
 
 def cmd_tright(a):
     raster = _load_raster()
-    face = raster.Font_2(a[1], int(a[2]))
+    face = raster.Font(a[1], int(a[2]))
     text = a[11]
     width = face.laufweite(text) >> 6
     last = None
@@ -579,13 +579,13 @@ def cmd_tright(a):
 def cmd_ttext(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Font_2(a[1], int(a[2]))
+    face = raster.Font(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     fg = (int(a[5]), int(a[6]), int(a[7]))
     bg = (int(a[8]), int(a[9]), int(a[10]))
     text = a[11]
     tol = int(a[12]) if len(a) > 12 else 0
-    places = [(c, x + (dx >> 6), y) for (c, dx) in face.stellen(text)]
+    places = [(c, x + (dx >> 6), y) for (c, dx) in face.ask(text)]
     n, ink_count, wrong, empty, bad_cells = _check_glyphs(
         image, face, places, y, fg, bg, tol)
     print("%d chars, %d ink pixels checked, %d wrong"
@@ -605,7 +605,7 @@ def cmd_ttext(a):
 def cmd_tink(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Font_2(a[1], int(a[2]))
+    face = raster.Font(a[1], int(a[2]))
     x, y = int(a[3]), int(a[4])
     fg = (int(a[5]), int(a[6]), int(a[7]))
     bg = (int(a[8]), int(a[9]), int(a[10]))
@@ -618,7 +618,7 @@ def cmd_tink(a):
     drift = 0
     explained = set()
     x0 = x1 = y0 = y1 = None
-    for (c, dx) in face.stellen(text):
+    for (c, dx) in face.ask(text):
         g = face.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
@@ -700,7 +700,7 @@ def cmd_tink(a):
 def cmd_tgrid(a):
     raster = _load_raster()
     image = Image(a[0])
-    face = raster.Font_2(a[1], int(a[2]))
+    face = raster.Font(a[1], int(a[2]))
     x0, y0 = int(a[3]), int(a[4])
     cell_w, cell_h = int(a[5]), int(a[6])
     row, column = int(a[7]), int(a[8])

@@ -127,17 +127,17 @@ def main(argv):
         for line in problems:
             print("bundle lint: " + line, file=sys.stderr)
         return 1
-    only = None
+    nur = None
     for a in argv[3:]:
         if a.startswith("nur="):
-            only = set("/bin/" + w for w in a[4:].split())
+            nur = set("/bin/" + w for w in a[4:].split())
     os.makedirs(arbeit, exist_ok=True)
     line_list = ["/apps/"]
     for name in sorted(os.listdir(source_dir)):
         if not name.endswith(".osp"):
             continue
         file_path = os.path.join(source_dir, name)
-        if only is not None and start_von(file_path) not in only:
+        if nur is not None and start_von(file_path) not in nur:
             continue
         ende, limit = angaben_stehen_vorn(os.path.join(file_path, "INFO"))
         if ende >= limit:
@@ -173,7 +173,7 @@ def main(argv):
         line_list.append("%s/data/" % target_dir)
         line_list.append("%s/data/README=%s"
                       % (target_dir, os.path.join(file_path, "data", "README")))
-        if (console_von(file_path) and only is not None and "/bin/term" in only
+        if (console_von(file_path) and nur is not None and "/bin/term" in nur
                 and not os.environ.get("OSUM_NOCONSOLE")):
             skript = os.path.join(arbeit, name + ".start")
             with open(skript, "w") as f:

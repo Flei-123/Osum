@@ -69,7 +69,7 @@ def dig(name, typ, server):
         if "status:" in z:
             status = z.split("status:")[1].split(",")[0].strip()
             break
-    set_ = set()
+    set_2 = set()
     im_abschnitt = False
     for z in r.stdout.splitlines():
         if z.startswith(";; ANSWER SECTION"):
@@ -80,8 +80,8 @@ def dig(name, typ, server):
                 break
             f = z.split()
             if len(f) >= 5 and f[3] == typ:
-                set_.add(norm(f[4]))
-    return status, set_
+                set_2.add(norm(f[4]))
+    return status, set_2
 
 
 def norm(a):
@@ -120,22 +120,22 @@ def main():
         t0 = time.time()
         h = host(prog, name, typ, server)
         ms = int((time.time() - t0) * 1000)
-        status, set_ = dig(name, typ, server)
+        status, set_2 = dig(name, typ, server)
         if status == "NXDOMAIN":
             ok = (h == "NXDOMAIN")
             erwartet = "NXDOMAIN"
-        elif not set_:
+        elif not set_2:
             ok = h in ("NODATA", "(leer)")
             erwartet = "NODATA"
         else:
-            ok = norm(h) in set_
+            ok = norm(h) in set_2
             if not ok:
                 _, m2 = dig(name, typ, server)
-                set_ |= m2
-                ok = norm(h) in set_
-            erwartet = " ".join(sorted(set_)[:3])
-            if len(set_) > 3:
-                erwartet += " (+%d)" % (len(set_) - 3)
+                set_2 |= m2
+                ok = norm(h) in set_2
+            erwartet = " ".join(sorted(set_2)[:3])
+            if len(set_2) > 3:
+                erwartet += " (+%d)" % (len(set_2) - 3)
         if ok:
             gut += 1
         else:

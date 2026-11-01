@@ -42,9 +42,9 @@ def main():
     n = 0
     ganz = 0
     for y in range(y0, min(y0 + h, ah)):
-        line_3 = y * aw * 3
+        line = y * aw * 3
         for x in range(x0, min(x0 + w, aw)):
-            o = line_3 + x * 3
+            o = line + x * 3
             ganz += 1
             if a[o:o + 3] != b[o:o + 3]:
                 n += 1

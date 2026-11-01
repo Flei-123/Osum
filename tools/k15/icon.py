@@ -68,26 +68,26 @@ def read_2(path_2):
         if roh.startswith("#"):
             part = roh[1:].strip()
             if "=" in part:
-                char, _, value = part.partition("=")
-                char = char.strip()
+                zeichen, _, value = part.partition("=")
+                zeichen = zeichen.strip()
                 value = value.strip()
-                if len(char) != 1:
+                if len(zeichen) != 1:
                     raise SystemExit(
-                        "symbol: '%s' ist kein einzelnes Zeichen" % char)
+                        "symbol: '%s' ist kein einzelnes Zeichen" % zeichen)
                 if not value:
-                    palette[char] = None
+                    palette[zeichen] = None
                 elif value.startswith("@"):
                     name = value[1:]
                     if name not in ROLLEN:
                         raise SystemExit(
                             "symbol: '@%s' ist keine Rolle (%s)"
                             % (name, ", ".join(sorted(ROLLEN))))
-                    palette[char] = ("rolle", ROLLEN[name])
+                    palette[zeichen] = ("rolle", ROLLEN[name])
                 else:
                     if len(value) != 6:
                         raise SystemExit(
                             "symbol: '%s' sind nicht sechs Hexziffern" % value)
-                    palette[char] = int(value, 16)
+                    palette[zeichen] = int(value, 16)
             continue
         if roh.strip() == "":
             continue
@@ -106,7 +106,7 @@ def read_2(path_2):
     return palette, zeilen
 
 
-def build_2(path_2):
+def build(path_2):
     palette, zeilen = read_2(path_2)
     h = len(zeilen)
     w = len(zeilen[0])
@@ -125,7 +125,7 @@ def build_2(path_2):
     return bytes(aus)
 
 
-def back_2(path_2):
+def back(path_2):
     """Das Bild wieder als Farben lesen -- die zweite Umsetzung, gegen die
     der Testlaeufer den Schirm haelt. Sie liest die DATEI, nicht die
     Zeichnung, und rechnet deshalb wirklich nach, was ausgeliefert wurde.
@@ -164,7 +164,7 @@ def main(argv):
         print("symbol: the image does not carry the octets of %s (with the row images)" % argv[3])
         return 1
     if len(argv) >= 4 and argv[1] == "--pruefe":
-        w, h, image_2 = back_2(argv[2])
+        w, h, image = back(argv[2])
         palette, zeilen = read_2(argv[3])
         if h != len(zeilen) or w != len(zeilen[0]):
             print("symbol: %dx%d in the image, %dx%d in the drawing"
@@ -173,7 +173,7 @@ def main(argv):
         wrong = 0
         for y in range(h):
             for x in range(w):
-                if image_2[y][x] != palette[zeilen[y][x]]:
+                if image[y][x] != palette[zeilen[y][x]]:
                     wrong += 1
         if wrong:
             print("symbol: %d of %d pixels different" % (wrong, w * h))
@@ -183,7 +183,7 @@ def main(argv):
     if len(argv) != 3:
         print(__doc__)
         return 2
-    d = build_2(argv[1])
+    d = build(argv[1])
     with open(argv[2], "wb") as f:
         f.write(d)
     print("symbol: %s  %d Oktette" % (argv[2], len(d)))

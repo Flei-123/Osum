@@ -302,11 +302,11 @@ BROKEN = [
 
 
 
-def bitset(buf, bit, value_2, n=1):
+def bitset(buf, bit, value, n=1):
     """Ein Feld von n Bit ab `bit` setzen -- HID packt von der
     niedrigsten Stelle aus."""
     for k in range(n):
-        if (value_2 >> k) & 1:
+        if (value >> k) & 1:
             buf[bit // 8 + (bit % 8 + k) // 8] |= 1 << ((bit % 8 + k) % 8)
     return buf
 
@@ -487,11 +487,11 @@ BERICHTE = [
 
 
 
-def i2c_res(adr, hz=400000, source_2=b"\\_SB.PCI0.I2C1\0"):
+def i2c_res(adr, hz=400000, source=b"\\_SB.PCI0.I2C1\0"):
     header = bytes([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01])
     tdl = (6).to_bytes(2, "little")
     rest = header + tdl + hz.to_bytes(4, "little") \
-        + adr.to_bytes(2, "little") + source_2
+        + adr.to_bytes(2, "little") + source
     return bytes([0x8E]) + len(rest).to_bytes(2, "little") + rest
 
 
@@ -507,7 +507,7 @@ def acpi_table(adressen, sig=b"DSDT"):
     koerper += bytes([0x8E, 0x00, 0x00, 0xFF])
     koerper += i2c_res(adressen[0])
     koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])
-    koerper += i2c_res(adressen[1], source_2=b"\\_SB.PCI0.I2C0\0")
+    koerper += i2c_res(adressen[1], source=b"\\_SB.PCI0.I2C0\0")
     koerper += i2c_res(adressen[0])
     header = bytearray(36)
     header[0:4] = sig
@@ -799,9 +799,9 @@ def firn():
     a("// Der Name, acht Zeichen in EINEM Wort -- so bleibt die Meldung")
     a("// lesbar, ohne dass eine Zeichenkettentabelle noetig waere.")
     a("fn name_of(i: u64) -> u64 {")
-    names_2 = ["0x%016X" % int.from_bytes((nm + "        ")[:8].encode("ascii"),
+    names = ["0x%016X" % int.from_bytes((nm + "        ")[:8].encode("ascii"),
                                         "little") for nm, _ in ALL]
-    a("    var t: [u64; %d] = [%s]" % (len(ALL), ", ".join(names_2)))
+    a("    var t: [u64; %d] = [%s]" % (len(ALL), ", ".join(names)))
     a("    if i >= N {")
     a("        return 0")
     a("    }")
@@ -1018,16 +1018,16 @@ def field_lines():
     return out
 
 
-def nr_von(brand_2):
+def nr_von(brand):
     """Die Nummer des Berichts mit dieser Bemerkung.  tools/hid/run.sh
     holt sie SO und schreibt sie nicht hin -- als in dieser Runde zwei
     Berichte fuer die Super-Taste dazukamen, verschoben sich alle
     folgenden Nummern, und drei Zusagen fielen, obwohl am Kernel nichts
     falsch war."""
     for i, (_, _, k) in enumerate(BERICHTE):
-        if k == brand_2:
+        if k == brand:
             return i
-    raise SystemExit("kein Bericht mit der Bemerkung %r" % brand_2)
+    raise SystemExit("kein Bericht mit der Bemerkung %r" % brand)
 
 
 def main():
@@ -1042,14 +1042,14 @@ def main():
     elif was == "felder":
         print("\n".join(field_lines()))
     elif was == "fehler":
-        bad = 0
+        bad_2 = 0
         for nm, d, e in BROKEN:
             k, _ = zerlege(d)
             gut = (e == k["err"] and k["ok"] == 0)
-            bad += 0 if gut else 1
+            bad_2 += 0 if gut else 1
             print("%-10s erwartet=%2d bekommen=%2d %s"
                   % (nm, e, k["err"], "ok" if gut else "FALSCH"))
-        return 1 if bad else 0
+        return 1 if bad_2 else 0
     else:
         print(__doc__)
         return 1

@@ -177,10 +177,10 @@ class Griff(BaseHTTPRequestHandler):
     def bremse(self, kennung):
         now = time.time()
         with state["sperre"]:
-            list_ = [t for t in state["fehlversuche"].get(kennung, [])
+            list_2 = [t for t in state["fehlversuche"].get(kennung, [])
                      if now - t < 60]
-            state["fehlversuche"][kennung] = list_
-            return len(list_) >= 10
+            state["fehlversuche"][kennung] = list_2
+            return len(list_2) >= 10
 
     def fehlschlag(self, kennung):
         with state["sperre"]:

@@ -78,7 +78,7 @@ def ppm(path_2):
     return w, h, d[at:]
 
 
-def check(w, h, pixel, kacheln, top_2, rand=2):
+def pruefe(w, h, pixel, kacheln, top_2, rand=2):
     """kacheln: Liste (tx, ty, tw, th). Gibt (fehler, meldungen)."""
     error = []
     meld = []
@@ -155,7 +155,7 @@ def main(argv):
             at = (y * w + x) * 3
             return (roh[at], roh[at + 1], roh[at + 2])
 
-        error, meld = check(w, h, pixel, rects, top_2, rand)
+        error, meld = pruefe(w, h, pixel, rects, top_2, rand)
         for m in meld:
             print(m)
         if error:
@@ -186,7 +186,7 @@ def main(argv):
         tx = px + pad + (t % 2) * (tw + gap)
         ty = py + pad + (t // 2) * (th + gap)
         kacheln.append((tx, ty, tw, th))
-    error, meld = check(w, h, pixel, kacheln, top_2)
+    error, meld = pruefe(w, h, pixel, kacheln, top_2)
     for m in meld:
         print(m)
     if error:

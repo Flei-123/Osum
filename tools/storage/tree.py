@@ -68,9 +68,9 @@ def groessen(n, budget):
         roh.append(value)
         if value > 64:
             value = value * 88 // 100
-    sum_ = sum(roh)
+    sum_2 = sum(roh)
     for k, i in enumerate(kand):
-        aus[i] = max(1, roh[k] * budget // sum_)
+        aus[i] = max(1, roh[k] * budget // sum_2)
     return aus
 
 
@@ -84,12 +84,12 @@ def main(argv):
     inhalt = os.path.join(arbeit, "inhalt")
     os.makedirs(inhalt, exist_ok=True)
 
-    list_ = names(n)
+    list_2 = names(n)
     sz = groessen(n, budget)
 
     zeilen = ["--inodes=4096", "/data/"]
     seen = set()
-    for path_2, _ in list_:
+    for path_2, _ in list_2:
         parts = path_2.strip("/").split("/")
         for k in range(1, len(parts) + 1):
             p = "/" + "/".join(parts[:k]) + "/"
@@ -98,7 +98,7 @@ def main(argv):
                 if p != "/data/":
                     zeilen.append(p)
 
-    for i, (path_2, name) in enumerate(list_):
+    for i, (path_2, name) in enumerate(list_2):
         if sz[i] > 0:
             wirt = os.path.join(inhalt, "f%05d" % i)
             with open(wirt, "wb") as f:
@@ -126,7 +126,7 @@ def main(argv):
             kb[d] = kb.get(d, 0) + (o + 1023) // 1024
             dat[d] = dat.get(d, 0) + 1
 
-    for i, (path_2, _name) in enumerate(list_):
+    for i, (path_2, _name) in enumerate(list_2):
         add_2(path_2, sz[i])
     for d in sorted(seen):
         dd = d if len(d) == 1 else d.rstrip("/")

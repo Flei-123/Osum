@@ -46,25 +46,25 @@ if __name__ == '__main__':
     for n, name in ((2, "SCHLIESSEN"), (1, "MAXIMIEREN"), (0, "MINIMIEREN")):
         x1 = xr - (2 - n) * CAPW
         x0 = x1 - CAPW
-        points_2 = []
+        points = []
         for y in range(ytop, ytop + 60):
             for x in range(x0, x1):
                 if 0 <= x < w and 0 <= y < h:
                     r, g, b = f(x, y)
                     if r + g + b > 330:
-                        points_2.append((x, y))
-        if not points_2:
+                        points.append((x, y))
+        if not points:
             print("  %-11s NO stroke found (x %d..%d)" % (name, x0, x1))
             continue
-        xs = sorted(set(p[0] for p in points_2))
-        ys = sorted(set(p[1] for p in points_2))
+        xs = sorted(set(p[0] for p in points))
+        ys = sorted(set(p[1] for p in points))
         mx = (xs[0] + xs[-1]) / 2.0
         beide = 0
         only_left = 0
         only_right = 0
         for y in ys:
-            l = sum(1 for p in points_2 if p[1] == y and p[0] < mx)
-            r = sum(1 for p in points_2 if p[1] == y and p[0] > mx)
+            l = sum(1 for p in points if p[1] == y and p[0] < mx)
+            r = sum(1 for p in points if p[1] == y and p[0] > mx)
             if l and r:
                 beide += 1
             elif l:
@@ -72,7 +72,7 @@ if __name__ == '__main__':
             elif r:
                 only_right += 1
         print("  %-11s %3d points, %2dx%2d, rows: both %2d / left only %2d / right only %2d"
-              % (name, len(points_2), xs[-1] - xs[0] + 1, ys[-1] - ys[0] + 1,
+              % (name, len(points), xs[-1] - xs[0] + 1, ys[-1] - ys[0] + 1,
                  beide, only_left, only_right))
         if name == "SCHLIESSEN":
             if beide >= (len(ys) * 2) // 3:

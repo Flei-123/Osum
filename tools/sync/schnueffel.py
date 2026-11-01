@@ -110,16 +110,16 @@ def main():
             modus.append(a)
 
     brand = b"GEHEIMNIS-4711"
-    all_ = b""
+    all_2 = b""
     dateien = []
     for f in sorted(os.listdir(mem)):
         p = os.path.join(mem, f)
         if os.path.isfile(p):
             dateien.append(f)
-            all_ += open(p, "rb").read()
+            all_2 += open(p, "rb").read()
     print("  the memory: %s, %d octets together"
-          % (", ".join(dateien), len(all_)))
-    eq("(b) der Klartext steht NICHT im Speicher", brand in all_, False)
+          % (", ".join(dateien), len(all_2)))
+    eq("(b) der Klartext steht NICHT im Speicher", brand in all_2, False)
     eq("(b) und auch nicht als Dateiname",
            any(brand.decode() in f for f in dateien), False)
     imbaum = False

@@ -58,25 +58,25 @@ MAX_LIBJPEG = 40
 SIZE_FACTOR = 1.35
 
 
-def points_2(im):
+def points(im):
     return list(im.convert("RGB").getdata())
 
 
-def spacing_2(a, b):
+def spacing(a, b):
     """Groesster und mittlerer Abstand je Bildpunkt (ueber die drei
     Kanaele das Maximum)."""
     worst = 0
-    sum_ = 0
+    sum_2 = 0
     nz = 0
     for x, y in zip(a, b):
         d = max(abs(x[0] - y[0]), abs(x[1] - y[1]), abs(x[2] - y[2]))
         if d:
             nz += 1
-        sum_ += d
+        sum_2 += d
         if d > worst:
             worst = d
     n = max(1, len(a))
-    return worst, sum_ / n, nz, n
+    return worst, sum_2 / n, nz, n
 
 
 def main(argv):
@@ -84,36 +84,36 @@ def main(argv):
         print(__doc__)
         return 2
     quelldir, holdir = argv[1], argv[2]
-    bad = 0
-    for name, source_2, art, q in FAELLE:
+    bad_2 = 0
+    for name, source, art, q in FAELLE:
         hp = os.path.join(holdir, name)
-        qp = os.path.join(quelldir, source_2)
+        qp = os.path.join(quelldir, source)
         if not os.path.exists(hp) or os.path.getsize(hp) == 0:
             print("FAIL  %-12s the file did not come from the image" % name)
-            bad += 1
+            bad_2 += 1
             continue
         try:
             mein = Image.open(hp)
             mein.load()
         except Exception as e:
             print("FAIL  %-12s Pillow cannot open it: %s" % (name, e))
-            bad += 1
+            bad_2 += 1
             continue
         orig = Image.open(qp)
         orig.seek(0)
         if mein.size != orig.size:
             print("FAIL  %-12s dimensions %s instead of %s"
                   % (name, mein.size, orig.size))
-            bad += 1
+            bad_2 += 1
             continue
         fmt = (mein.format or "?").lower()
         if fmt != art:
             print("FAIL  %-12s Pillow nennt es %s, erwartet %s"
                   % (name, fmt, art))
-            bad += 1
+            bad_2 += 1
             continue
-        pm, po = points_2(mein), points_2(orig)
-        worst, mittel, nz, n = spacing_2(pm, po)
+        pm, po = points(mein), points(orig)
+        worst, mittel, nz, n = spacing(pm, po)
         if art == "png":
             if worst == 0:
                 print("OK    %-12s %dx%d PNG verlustfrei, Abweichung 0 "
@@ -123,13 +123,13 @@ def main(argv):
                 print("FAIL  %-12s PNG is NOT lossless: maxdiff=%d, "
                       "%d von %d Bildpunkten weichen ab"
                       % (name, worst, nz, n))
-                bad += 1
+                bad_2 += 1
             continue
         b = io.BytesIO()
         orig.convert("RGB").save(b, "JPEG", quality=q, subsampling=0)
-        libp = points_2(Image.open(io.BytesIO(b.getvalue())))
-        lw, lm, _lnz, _ln = spacing_2(libp, po)
-        vw, vm, _vnz, _vn = spacing_2(pm, libp)
+        libp = points(Image.open(io.BytesIO(b.getvalue())))
+        lw, lm, _lnz, _ln = spacing(libp, po)
+        vw, vm, _vnz, _vn = spacing(pm, libp)
         libgr = len(b.getvalue())
         meingr = os.path.getsize(hp)
         schlimm = []
@@ -149,11 +149,11 @@ def main(argv):
                    lw, lm, vw, vm, meingr, libgr))
         if schlimm:
             print("FAIL  " + header + " -- " + "; ".join(schlimm))
-            bad += 1
+            bad_2 += 1
         else:
             print("OK    " + header)
-    print("pruefen: %d Faelle, %d schlecht" % (len(FAELLE), bad))
-    return 0 if bad == 0 else 1
+    print("pruefen: %d Faelle, %d schlecht" % (len(FAELLE), bad_2))
+    return 0 if bad_2 == 0 else 1
 
 
 if __name__ == "__main__":

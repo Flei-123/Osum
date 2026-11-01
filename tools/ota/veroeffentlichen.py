@@ -197,11 +197,11 @@ def gesperrt_read(aus):
     return sorted(set(out))
 
 
-def gesperrt_write(aus, list_):
+def gesperrt_write(aus, list_2):
     with open(os.path.join(aus, "gesperrt.txt"), "w") as f:
         f.write("# withdrawn versions. A device does NOT install them\n")
         f.write("# any more, even if it was offline for a long time.\n")
-        for n in sorted(set(list_)):
+        for n in sorted(set(list_2)):
             f.write("%d\n" % n)
 
 
@@ -218,13 +218,13 @@ def dir_text(fassung, gen, kette, gesperrt, pakete):
     return ("\n".join(z) + "\n").encode("ascii")
 
 
-def verknuepfen(source_2, target_2):
-    if os.path.exists(target_2):
-        os.remove(target_2)
+def verknuepfen(source, ziel):
+    if os.path.exists(ziel):
+        os.remove(ziel)
     try:
-        os.link(source_2, target_2)
+        os.link(source, ziel)
     except OSError:
-        shutil.copy2(source_2, target_2)
+        shutil.copy2(source, ziel)
 
 
 def current_set(aus, register, gesperrt):
@@ -367,7 +367,7 @@ def main():
     aus = sys.argv[1]
     stand = bund = notiz = None
     sperren = []
-    back_2 = None
+    back = None
     nurzeigen = False
     feste = None
     signierer = "haupt"
@@ -392,7 +392,7 @@ def main():
             feste = int(sys.argv[i])
         elif a == "--zuruecknehmen":
             i += 1
-            back_2 = int(sys.argv[i])
+            back = int(sys.argv[i])
         elif a == "--signierer":
             i += 1
             signierer = sys.argv[i]
@@ -407,8 +407,8 @@ def main():
     os.makedirs(aus, exist_ok=True)
     if nurzeigen:
         return zeigen(aus)
-    if back_2 is not None:
-        return zuruecknehmen(aus, back_2)
+    if back is not None:
+        return zuruecknehmen(aus, back)
     if not stand or not bund:
         print(__doc__)
         return 2

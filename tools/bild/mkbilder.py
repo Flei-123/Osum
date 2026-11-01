@@ -79,9 +79,9 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    target = sys.argv[1]
-    os.makedirs(target, exist_ok=True)
-    p = lambda n: os.path.join(target, n)
+    ziel = sys.argv[1]
+    os.makedirs(ziel, exist_ok=True)
+    p = lambda n: os.path.join(ziel, n)
     gemacht = []
 
     def say(name, extra=""):

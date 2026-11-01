@@ -1,10 +1,10 @@
 import os, sys, time
 
-file_2, brand_2 = sys.argv[1], sys.argv[2]
+file_2, brand = sys.argv[1], sys.argv[2]
 offset = int(sys.argv[3]) / 1000.0
-deadline_2 = float(sys.argv[4])
-mb = brand_2.encode()
-ende = time.time() + deadline_2
+deadline = float(sys.argv[4])
+mb = brand.encode()
+ende = time.time() + deadline
 pos = 0
 seen = False
 while time.time() < ende:

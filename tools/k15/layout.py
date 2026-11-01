@@ -32,10 +32,10 @@ import re
 import sys
 
 
-def rechtecke(path_2, brand_2):
+def rechtecke(path_2, brand):
     pat = re.compile(
         r"^%s: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
-        % re.escape(brand_2))
+        % re.escape(brand))
     aus = []
     with open(path_2, "rb") as f:
         for roh in f:
@@ -50,11 +50,11 @@ def main():
     if len(sys.argv) < 5:
         print(__doc__)
         return 2
-    path_2, brand_2 = sys.argv[1], sys.argv[2]
+    path_2, brand = sys.argv[1], sys.argv[2]
     bw, bh = int(sys.argv[3]), int(sys.argv[4])
     mind = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     vertical = [int(v) for v in sys.argv[6].split(",")] if len(sys.argv) > 6 else []
-    r = rechtecke(path_2, brand_2)
+    r = rechtecke(path_2, brand)
     error = []
     if len(r) < mind:
         error.append("only %d rectangles reported, %d expected"
@@ -81,10 +81,10 @@ def main():
         if i >= 50 or i in vertical:
             continue
         columns.setdefault(x, []).append((i, y))
-    for x, list_ in columns.items():
-        if len(list_) < 2:
+    for x, list_2 in columns.items():
+        if len(list_2) < 2:
             continue
-        nach_id = [y for (i, y) in sorted(list_)]
+        nach_id = [y for (i, y) in sorted(list_2)]
         if nach_id != sorted(nach_id):
             error.append("at x=%d the order is upside down: %s"
                           % (x, nach_id))

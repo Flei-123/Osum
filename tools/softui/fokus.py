@@ -72,7 +72,7 @@ def main(argv):
         o = (y * W + x) * 3
         return (px[o], px[o + 1], px[o + 2])
 
-    def spacing_2(a, b):
+    def spacing(a, b):
         return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
 
     wins = []
@@ -100,17 +100,17 @@ def main(argv):
             probe = [at(x0 - k, y) for k in range(20, 12, -1)]
             if any(p != probe[0] for p in probe):
                 continue
-            reason_2 = probe[0]
+            reason = probe[0]
             t = 0
             wt = 0
             for k in range(1, 13):
-                d = spacing_2(reason_2, at(x0 - k, y))
+                d = spacing(reason, at(x0 - k, y))
                 if d > 1:
                     wt = max(wt, k)
                     t = max(t, d)
             tiefen.append(t)
             weiten.append(wt)
-            gruende.append(reason_2)
+            gruende.append(reason)
         if not tiefen:
             print("%s: no row with a calm background found" % w["t"])
             bad += 1
@@ -118,14 +118,14 @@ def main(argv):
         tiefen.sort()
         weiten.sort()
         tiefe = tiefen[len(tiefen) // 2]
-        width_3 = weiten[len(weiten) // 2]
-        reason_2 = gruende[len(gruende) // 2]
+        width = weiten[len(weiten) // 2]
+        reason = gruende[len(gruende) // 2]
         y = w["y"] + w["oh"] // 2
         art = "aktiv" if w["fok"] else "inaktiv"
         print("%s '%s' bei %d,%d: tiefe=%d weite=%d (grund "
               "#%02x%02x%02x, %d Zeilen)"
-              % (art, w["t"], w["x"], w["y"], tiefe, width_3, reason_2[0],
-                 reason_2[1], reason_2[2], len(tiefen)))
+              % (art, w["t"], w["x"], w["y"], tiefe, width, reason[0],
+                 reason[1], reason[2], len(tiefen)))
         cnt = Counter()
         for j in range(w["y"] + BORDER, w["y"] + TITLE_H - 1):
             for i in range(w["x"] + BORDER, w["x"] + w["ow"] - BORDER):

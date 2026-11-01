@@ -50,11 +50,11 @@ import os
 import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-ROOT_2 = os.path.dirname(HIER)
-sys.path.insert(0, os.path.join(ROOT_2, "k15"))
+ROOT = os.path.dirname(HIER)
+sys.path.insert(0, os.path.join(ROOT, "k15"))
 import icon as symmod  # noqa: E402
 
-SOURCE = os.path.join(ROOT_2, "..", "assets", "netview")
+SOURCE = os.path.join(ROOT, "..", "assets", "netview")
 
 ZUSTAENDE = ["state-nocarrier", "state-noip", "state-noroute", "state-online"]
 MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
@@ -82,10 +82,10 @@ def schema_read(path_2):
         k, _, v = roh.partition("=")
         values[k.strip()] = int(v.strip(), 16)
     aus = {}
-    for rolle, key_2 in FILE_NAME.items():
-        if key_2 not in values:
-            raise SystemExit("icons: %s hat kein %s=" % (path_2, key_2))
-        aus[rolle] = values[key_2]
+    for rolle, schluessel in FILE_NAME.items():
+        if schluessel not in values:
+            raise SystemExit("icons: %s hat kein %s=" % (path_2, schluessel))
+        aus[rolle] = values[schluessel]
     return aus
 
 
@@ -302,12 +302,12 @@ def kernquelle():
     }
 
 
-def bauen(target):
-    os.makedirs(target, exist_ok=True)
+def bauen(ziel):
+    os.makedirs(ziel, exist_ok=True)
     n = 0
     for name in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
-        d = symmod.build_2(zeichnung(name))
-        with open(os.path.join(target, name), "wb") as f:
+        d = symmod.build(zeichnung(name))
+        with open(os.path.join(ziel, name), "wb") as f:
             f.write(d)
         n += 1
     return n
@@ -330,7 +330,7 @@ def main(argv):
         return 0
     if len(argv) >= 2 and argv[1] == "pruefe":
         error = check_gestaltung()
-        kdatei = os.path.join(ROOT_2, "..", "kernel", "net", "netmark.fi")
+        kdatei = os.path.join(ROOT, "..", "kernel", "net", "netmark.fi")
         if "--kern" in argv:
             kdatei = argv[argv.index("--kern") + 1]
         soll = kernquelle()

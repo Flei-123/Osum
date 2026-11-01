@@ -41,8 +41,8 @@ import sys
 from PIL import Image
 
 
-def nums(path_2):
-    im = Image.open(path_2)
+def nums(path):
+    im = Image.open(path)
     art = im.format.lower()
     voll = True
     if art == "jpeg":
@@ -140,22 +140,22 @@ def main(argv):
         return 0
     text = open(argv[2], "rb").read().decode("latin1")
     gut = 0
-    bad_2 = 0
-    for path_2 in argv[3:]:
-        name = path_2.split("/")[-1]
-        w = nums(path_2)
+    bad = 0
+    for path in argv[3:]:
+        name = path.split("/")[-1]
+        w = nums(path)
         g = gast(text, name)
         if g is None:
             print("  FAIL  %-16s the guest said nothing" % name)
-            bad_2 += 1
+            bad += 1
             continue
         if vergleich(g, w, name):
             gut += 1
         else:
-            bad_2 += 1
+            bad += 1
     print("bildref: %d of %d images match Pillow"
-          % (gut, gut + bad_2))
-    return 0 if bad_2 == 0 else 1
+          % (gut, gut + bad))
+    return 0 if bad == 0 else 1
 
 
 if __name__ == "__main__":

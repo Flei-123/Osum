@@ -33,18 +33,18 @@ def main():
     worte = {}
     def _all(d):
         aus = []
-        for stamm, verz, names_2 in os.walk(d):
+        for stamm, verz, names in os.walk(d):
             verz[:] = [v for v in verz if v not in ("user", "app")]
-            aus += [os.path.join(stamm, n) for n in names_2 if n.endswith(".fi")]
+            aus += [os.path.join(stamm, n) for n in names if n.endswith(".fi")]
         return sorted(aus)
 
     for path_2 in _all(kdir):
-        source_2 = open(path_2, "r", encoding="utf-8", errors="replace").read()
+        source = open(path_2, "r", encoding="utf-8", errors="replace").read()
         for name, w in re.findall(
-                r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', source_2):
+                r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', source):
             worte.setdefault(w, []).append("%s:%s" % (os.path.basename(path_2),
                                                       name))
-    bad = 0
+    bad_2 = 0
     gefunden = set()
     for a in sorted(worte):
         for b in sorted(worte):
@@ -53,14 +53,14 @@ def main():
                 if (a, b) not in BEKANNT:
                     print("  FALL  %-10s steckt in %-10s (%s / %s)"
                           % (a, b, worte[a][0], worte[b][0]))
-                    bad += 1
+                    bad_2 += 1
     tot = BEKANNT - gefunden
     for a, b in sorted(tot):
         print("  NOTE %s/%s is in KNOWN, but no longer exists"
               % (a, b))
-    if bad:
+    if bad_2:
         print("  %d NEW overlaps among %d mode words"
-              % (bad, len(worte)))
+              % (bad_2, len(worte)))
         return 1
     print("  ok    %d mode words, %d known overlaps, none new"
           % (len(worte), len(gefunden)))

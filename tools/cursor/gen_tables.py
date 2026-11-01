@@ -4,13 +4,13 @@ import os, re, sys
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "wm"))
 import cursor2
-header, data_2 = cursor2.board()
+header, data = cursor2.board()
 kb = []
 for (off, n, hx, hy) in header:
     assert off % 2 == 0 and off // 2 < 256 and n < 256
     kb += [off // 2, n, hx, hy]
-assert all(0 <= b <= 255 for b in data_2)
-nf, nk, nd = len(cursor2.FORMEN), len(kb), len(data_2)
+assert all(0 <= b <= 255 for b in data)
+nf, nk, nd = len(cursor2.FORMEN), len(kb), len(data)
 path = os.path.normpath(os.path.join(here, "..", "..", "kernel", "gfx", "cursor.fi"))
 s = open(path, encoding="utf-8").read()
 o = s
@@ -23,7 +23,7 @@ sub(r'const FORMEN: u64 = \d+', 'const FORMEN: u64 = %d' % nf)
 sub(r'static mut kopf: \[u8; \d+\] = \[0 as u8; \d+\]', 'static mut kopf: [u8; %d] = [0 as u8; %d]' % (nk, nk))
 sub(r'static mut punkte: \[u8; \d+\] = \[0 as u8; \d+\]', 'static mut punkte: [u8; %d] = [0 as u8; %d]' % (nd, nd))
 sub(r'var tk: \[u8; \d+\] = b"[^"]*"', lambda m: 'var tk: [u8; %d] = b"%s"' % (nk, esc(kb)))
-sub(r'var tp: \[u8; \d+\] = b"[^"]*"', lambda m: 'var tp: [u8; %d] = b"%s"' % (nd, esc(data_2)))
+sub(r'var tp: \[u8; \d+\] = b"[^"]*"', lambda m: 'var tp: [u8; %d] = b"%s"' % (nd, esc(data)))
 sub(r'while i < \d+ \{\n        kopf', 'while i < %d {\n        kopf' % nk)
 sub(r'while i < \d+ \{\n        punkte', 'while i < %d {\n        punkte' % nd)
 sub(r'static mut kcache: \[u8; \d+\] = \[0 as u8; \d+\]', 'static mut kcache: [u8; %d] = [0 as u8; %d]' % (nf * 6912, nf * 6912))

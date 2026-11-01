@@ -73,7 +73,7 @@ def glyphkasten(s, name, m):
     """(Zeichen, x, y, Glyphe) je Zeichen einer gemalten Kachelzeile."""
     x0 = int(m.group(7)) + int(m.group(2))
     base = int(m.group(8)) + int(m.group(3))
-    for c, x26 in s.stellen(name):
+    for c, x26 in s.ask(name):
         g = s.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
@@ -84,12 +84,12 @@ def main(argv):
     if len(argv) < 4:
         print(__doc__)
         return 2
-    image_2, serial, themes = argv[1], argv[2], argv[3]
+    image, serial, themes = argv[1], argv[2], argv[3]
     roh = open(serial, "rb").read().decode("latin1")
     schnitt = roh.rfind("settings: rect name=waa ")
-    tail_2 = roh[schnitt:] if schnitt >= 0 else roh
+    tail = roh[schnitt:] if schnitt >= 0 else roh
     gemalt = {}
-    for ln in tail_2.splitlines():
+    for ln in tail.splitlines():
         m = LINE.search(ln)
         if m:
             gemalt[m.group(11)] = m
@@ -100,8 +100,8 @@ def main(argv):
             if ln.startswith("name="):
                 soll[ln[5:].strip()] = os.path.basename(p)
 
-    im = Image.open(image_2).convert("RGB")
-    s = fuiraster.Font_2(FONT, PX_UI)
+    im = Image.open(image).convert("RGB")
+    s = fuiraster.Font(FONT, PX_UI)
 
     if len(argv) > 4:
         loch = im.copy()
@@ -121,8 +121,8 @@ def main(argv):
                 break
         loch.save(argv[4])
 
-    missing_2 = [n for n in soll if n not in gemalt]
-    short = [n for n, m in gemalt.items()
+    missing = [n for n in soll if n not in gemalt]
+    kurz = [n for n, m in gemalt.items()
             if m.group(9) != m.group(10)
             or len(n.encode("latin1")) != int(m.group(10))]
     empty_2 = []
@@ -149,10 +149,10 @@ def main(argv):
                 empty_2.append("%s: '%s' bei x=%d hat %d Tintenpunkte"
                             % (name, chr(c), gx, tinte))
     print("names painted=%d expected=%d missing=%d shortened=%d noink=%d"
-          % (len(gemalt), len(soll), len(missing_2), len(short), len(empty_2)))
-    for z in missing_2[:5]:
+          % (len(gemalt), len(soll), len(missing), len(kurz), len(empty_2)))
+    for z in missing[:5]:
         print("    fehlt: %s" % z)
-    for z in short[:5]:
+    for z in kurz[:5]:
         print("    gekuerzt: %s" % z)
     for z in empty_2[:5]:
         print("    %s" % z)

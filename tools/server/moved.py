@@ -78,12 +78,12 @@ def funktionen(text):
             name = m.group(1)
             tiefe = 0
             j = i
-            open_ = False
+            open_2 = False
             while j < len(code):
                 tiefe += code[j].count("{") - code[j].count("}")
                 if "{" in code[j]:
-                    open_ = True
-                if open_ and tiefe <= 0:
+                    open_2 = True
+                if open_2 and tiefe <= 0:
                     break
                 j += 1
             aus[name] = "\n".join(lines[i:j + 1])

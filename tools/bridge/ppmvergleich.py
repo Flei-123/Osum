@@ -3,10 +3,10 @@
 import sys
 
 
-def ppm(path_2):
-    d = open(path_2, "rb").read()
+def ppm(path):
+    d = open(path, "rb").read()
     if not d.startswith(b"P6"):
-        raise SystemExit("keine P6-Datei: " + path_2)
+        raise SystemExit("keine P6-Datei: " + path)
     felder = []
     at = 2
     while len(felder) < 3:

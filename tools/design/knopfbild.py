@@ -19,7 +19,7 @@ def png(path_2, w, h, px):
         + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b''))
 
 
-def empty_3(n):
+def empty_2(n):
     return [0] * (n * n * 3)
 
 
@@ -79,11 +79,11 @@ def deckung_vektor():
     return f
 
 
-def paint(path_2, felder, title_2):
+def paint(path_2, felder, title):
     n = len(felder)
     width_2 = n * (D + 2) * ZOOM
-    height_2 = (D + 2) * ZOOM
-    px = [255] * (width_2 * height_2 * 3)
+    hoehe = (D + 2) * ZOOM
+    px = [255] * (width_2 * hoehe * 3)
     for fi, f in enumerate(felder):
         ox = fi * (D + 2) * ZOOM + ZOOM
         for y in range(D):
@@ -105,8 +105,8 @@ def paint(path_2, felder, title_2):
                         Y = ZOOM + y * ZOOM + dy
                         i = (Y * width_2 + X) * 3
                         px[i], px[i + 1], px[i + 2] = rr, gg, bb
-    png(path_2, width_2, height_2, px)
-    print("  %-46s %s" % (title_2, path_2))
+    png(path_2, width_2, hoehe, px)
+    print("  %-46s %s" % (title, path_2))
 
 
 if __name__ == '__main__':

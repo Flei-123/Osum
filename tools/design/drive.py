@@ -111,11 +111,11 @@ class Fahrer:
         if self.s is None:
             raise SystemExit("kein Monitor an %s" % sock)
         time.sleep(0.3)
-        self.clear_2()
+        self.clear()
         self.x, self.y = 0, 0
-        self.corner_2()
+        self.corner()
 
-    def clear_2(self):
+    def clear(self):
         try:
             self.s.settimeout(0.4)
             end = time.time() + 3.0
@@ -127,23 +127,23 @@ class Fahrer:
         finally:
             self.s.settimeout(5.0)
 
-    def cmd(self, line_3):
+    def cmd(self, line):
         try:
-            self.s.sendall((line_3 + "\n").encode())
+            self.s.sendall((line + "\n").encode())
         except OSError as e:
-            raise SystemExit("monitor write failed (%s): %s" % (e, line_3))
+            raise SystemExit("monitor write failed (%s): %s" % (e, line))
         time.sleep(0.06)
-        self.clear_2()
+        self.clear()
 
     ECKSCHRITTE = 32
 
-    def corner_2(self):
+    def corner(self):
         for _ in range(self.ECKSCHRITTE):
             self.cmd("mouse_move -120 -120")
         self.x, self.y = 0, 0
 
     def fahre(self, x, y):
-        self.corner_2()
+        self.corner()
         dx, dy = x, y
         while dx > 0 or dy > 0:
             sx, sy = min(dx, 120), min(dy, 120)
@@ -152,7 +152,7 @@ class Fahrer:
             dy -= sy
         self.x, self.y = x, y
 
-    def klick_nahe(self, x, y, mal=1, key_3=1, hold_2=0.05):
+    def klick_nahe(self, x, y, mal=1, key_2=1, hold=0.05):
         dx, dy = x - self.x, y - self.y
         while dx or dy:
             sx = max(-120, min(120, dx))
@@ -163,8 +163,8 @@ class Fahrer:
         self.x, self.y = x, y
         time.sleep(0.35)
         for _ in range(mal):
-            self.cmd("mouse_button %d" % key_3)
-            time.sleep(hold_2)
+            self.cmd("mouse_button %d" % key_2)
+            time.sleep(hold)
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
@@ -274,11 +274,11 @@ class Fahrer:
         out.append((nm, cx, cy, "end"))
         return out
 
-    def klick(self, x, y, mal=1, key_3=1):
+    def klick(self, x, y, mal=1, key_2=1):
         self.fahre(x, y)
         time.sleep(0.35)
         for i in range(mal):
-            self.cmd("mouse_button %d" % key_3)
+            self.cmd("mouse_button %d" % key_2)
             if mal == 1:
                 time.sleep(0.05)
             self.cmd("mouse_button 0")
@@ -335,57 +335,57 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
-    def key_3(self, name):
+    def key_2(self, name):
         self.cmd("sendkey %s" % name)
         time.sleep(0.4)
 
-    def warteauf(self, muster, deadline_2=25.0):
+    def warteauf(self, muster, deadline=25.0):
         r = re.compile(muster)
-        bis = time.time() + deadline_2
+        bis = time.time() + deadline
         while time.time() < bis:
             if r.search(read_2(self.serial)):
                 return True
             time.sleep(0.2)
         return False
 
-    def brand_2(self, muster):
+    def brand(self, muster):
         self.brand_muster = re.compile(muster)
         self.marke_n = len(self.brand_muster.findall(read_2(self.serial)))
 
-    def warteneu(self, muster, deadline_2=25.0):
+    def warteneu(self, muster, deadline=25.0):
         r = re.compile(muster)
         n0 = getattr(self, "marke_n", 0)
-        bis = time.time() + deadline_2
+        bis = time.time() + deadline
         while time.time() < bis:
             if len(r.findall(read_2(self.serial))) > n0:
                 return True
             time.sleep(0.2)
         return False
 
-    def photo(self, name, deadline_2=30.0):
-        target = os.path.join(self.out, name + ".ppm")
-        if os.path.exists(target):
-            os.unlink(target)
-        self.cmd("screendump %s" % target)
-        last_3, ruhig = -1, 0
-        bis = time.time() + deadline_2
+    def photo(self, name, deadline=30.0):
+        ziel = os.path.join(self.out, name + ".ppm")
+        if os.path.exists(ziel):
+            os.unlink(ziel)
+        self.cmd("screendump %s" % ziel)
+        last_2, ruhig = -1, 0
+        bis = time.time() + deadline
         while time.time() < bis:
             time.sleep(0.15)
             try:
-                now = os.path.getsize(target)
+                now = os.path.getsize(ziel)
             except OSError:
                 continue
-            if now == last_3 and now > 0:
+            if now == last_2 and now > 0:
                 ruhig += 1
                 if ruhig >= 3:
                     print("foto %s %d Oktette" % (name, now))
                     return True
             else:
-                ruhig, last_3 = 0, now
+                ruhig, last_2 = 0, now
         print("foto %s FEHLGESCHLAGEN" % name)
         return False
 
-    def serie(self, mode, n, name, deadline_2=60.0, pace_ms=0):
+    def serie(self, mode, n, name, deadline=60.0, pace_ms=0):
         cmds = []
         if mode == "click":
             cmds += ["mouse_button 1", "mouse_button 0"]
@@ -415,30 +415,30 @@ class Fahrer:
                     time.sleep(pace_ms / 1000.0)
         else:
             self.s.sendall(("\n".join(cmds) + "\n").encode())
-        bis = time.time() + deadline_2
+        bis = time.time() + deadline
         for pth in paths:
-            last_3, ruhig = -1, 0
+            last_2, ruhig = -1, 0
             while time.time() < bis:
                 time.sleep(0.1)
                 try:
                     now = os.path.getsize(pth)
                 except OSError:
                     continue
-                if now == last_3 and now > 0:
+                if now == last_2 and now > 0:
                     ruhig += 1
                     if ruhig >= 2:
                         break
                 else:
-                    ruhig, last_3 = 0, now
+                    ruhig, last_2 = 0, now
             else:
                 print("serie %s FAILED at %s" % (name, pth))
-                self.clear_2()
+                self.clear()
                 return False
-        self.clear_2()
+        self.clear()
         print("serie %s: %d frames" % (name, n))
         return True
 
-    def window_2(self, prog):
+    def window(self, prog):
         """Der Ursprung der Malflaeche eines Programmfensters."""
         t = read_2(self.serial)
         m = None
@@ -512,7 +512,7 @@ class Fahrer:
     def rechteck(self, name):
         t = read_2(self.serial)
 
-        def last_3(muster):
+        def last_2(muster):
             m = None
             for m in re.finditer(muster, t):
                 pass
@@ -522,13 +522,13 @@ class Fahrer:
             fen = []
             k = t.rfind("wm: fenliste")
             tt = t[k:] if k >= 0 else t
-            last_2 = []
+            last = []
             for m in re.finditer(r"wm: fen i=(\d+) id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) lay=\d+ "
                                  r"fl=(\d+) z=(\d+) [^\n]*? bar=(\d+) capw=(\d+) fr=(\d+)", tt):
                 x_, y_, w_, h_, fl_, z_, bar_, capw_, fr_ = (int(v) for v in m.groups()[1:])
                 if fl_ & 1 == 0:
-                    last_2.append((x_, y_, w_, h_, z_, bar_, capw_, fr_))
-            fen = last_2
+                    last.append((x_, y_, w_, h_, z_, bar_, capw_, fr_))
+            fen = last
             if not fen:
                 return None
             x, y, w, h, z, bar, capw, fr = max(fen, key=lambda r: r[4])
@@ -537,35 +537,35 @@ class Fahrer:
             return (x + ow - fr - 3 * capw + n * capw, y + fr, capw, bar)
         if name in ("start_alle", "start_zurueck", "start_power", "start_feld"):
             n_ = {"start_alle": 5, "start_zurueck": 6, "start_power": 4, "start_feld": 1}[name]
-            m = last_3(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n_)
-            g = last_3(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n_)
+            g = last_2(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
             return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("start_row"):
             n_ = int(name[9:])
-            m = last_3(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            g = last_3(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            z = last_3(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
+            m = last_2(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            g = last_2(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = last_2(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
             if m is None or g is None or z is None:
                 return None
             zh = int(z.group(1))
             return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)) + n_ * zh,
                     int(m.group(3)), zh)
         if name.startswith("start_"):
-            m = last_3(r"launcher: tile i=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+name=\[%s\]"
+            m = last_2(r"launcher: tile i=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\s+name=\[%s\]"
                        % re.escape(name[6:]))
-            g = last_3(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            g = last_2(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
             return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("qskachel"):
             n = int(name[8:])
-            m = last_3(r"qs: kachel n=%d platz=\d+ x=(\d+) y=(\d+) "
+            m = last_2(r"qs: kachel n=%d platz=\d+ x=(\d+) y=(\d+) "
                        r"w=(\d+) h=(\d+) an=\d+" % n)
-            g = last_3(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
             return (int(g.group(1)) + int(m.group(1)),
@@ -573,102 +573,102 @@ class Fahrer:
                     int(m.group(3)), int(m.group(4)))
         if name in ("qsmprev", "qsmplay", "qsmnext"):
             word = {"qsmprev": "mprev", "qsmplay": "mplay", "qsmnext": "mnext"}[name]
-            m = last_3(r"qs: %s +x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word)
-            g = last_3(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"qs: %s +x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word)
+            g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
             return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name in ("qstm", "qsset"):
             word_2 = "tm" if name == "qstm" else "set"
-            m = last_3(r"qs: zeile %s y=(\d+) h=(\d+)" % word_2)
-            g = last_3(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"qs: zeile %s y=(\d+) h=(\d+)" % word_2)
+            g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
             y0, hh = int(m.group(1)), int(m.group(2))
             return (int(g.group(1)) + 8, y0, int(g.group(3)) - 16, hh)
         if name == "hellspur":
-            m = last_3(r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
+            m = last_2(r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
             if m is None:
                 return None
             x0, x1, ym = (int(m.group(i)) for i in (1, 2, 3))
             return (x0, ym - 4, x1 - x0, 8)
-        gm = last_3(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+        gm = last_2(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
         if name.startswith("pin") and not name[3:].isdigit():
             word_2 = name[3:]
-            all_ = list(re.finditer(
+            alle = list(re.finditer(
                 r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word_2, t))
-            if not all_ or tb is None:
+            if not alle or tb is None:
                 return None
-            m = all_[-1]
+            m = alle[-1]
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("pin") and name[3:].isdigit():
             k = int(name[3:])
-            all_ = list(re.finditer(
+            alle = list(re.finditer(
                 r"taskbar: pin (\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t))
-            if not all_:
+            if not alle:
                 return None
-            last_2 = all_[-1].group(1)
+            last = alle[-1].group(1)
             n = 1
-            for m2 in reversed(all_[:-1]):
-                if m2.group(1) == last_2:
+            for m2 in reversed(alle[:-1]):
+                if m2.group(1) == last:
                     break
                 n += 1
-            letzten = all_[-n:]
+            letzten = alle[-n:]
             if k >= len(letzten):
                 return None
             m = letzten[k]
             return (tb[0] + int(m.group(2)), tb[1] + int(m.group(3)),
                     int(m.group(4)), int(m.group(5)))
         if name == "start":
-            m = last_3(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name == "chevron":
-            m = last_3(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("traytile") and name[8:].isdigit():
-            o = last_3(r"traypop: open n=\d+ x=(\d+) y=(\d+)")
-            m = last_3(r"traypop: tile i=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[8:])
+            o = last_2(r"traypop: open n=\d+ x=(\d+) y=(\d+)")
+            m = last_2(r"traypop: tile i=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[8:])
             if o is None or m is None:
                 return None
             return (int(o.group(1)) + int(m.group(1)), int(o.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("ncrow") and name[5:].isdigit():
-            m = last_3(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
             k = ow / 400.0
             return (ox + int(10 * k), oy + int((38 + 32 * int(name[5:])) * k), int((400 - 20) * k), int(28 * k))
         if name.startswith("ncsec") and name[5:].isdigit():
-            m = last_3(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"notifc: open n=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             ox, oy, ow = int(m.group(1)), int(m.group(2)), int(m.group(3))
             k = ow / 400.0
             return (ox + int((400 - 10 - 96) * k), oy + int((38 + 32 * int(name[5:])) * k), int(96 * k), int(28 * k))
         if name == "toast":
-            m = last_3(r"taskbar: toast \[.*\] x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"taskbar: toast \[.*\] x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name == "glocke":
-            m = last_3(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("tbbtn"):
             n = int(name[5:])
-            m = last_3(r"taskbar: btn i=%d id=\d+ x=(\d+) y=(\d+) "
+            m = last_2(r"taskbar: btn i=%d id=\d+ x=(\d+) y=(\d+) "
                        r"w=(\d+) h=(\d+)" % n)
             if m is None:
                 return None
@@ -676,93 +676,93 @@ class Fahrer:
                     int(m.group(3)), int(m.group(4)))
         if name in ("netz", "uhr"):
             f = "net" if name == "netz" else "clock"
-            m = last_3(r"taskbar: field %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % f)
+            m = last_2(r"taskbar: field %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % f)
             if m is None:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("fmbar"):
             n = int(name[5:])
-            m = last_3(r"explorer: rect id=%d kind=7 "
+            m = last_2(r"explorer: rect id=%d kind=7 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
-            o = self.window_2("explorer")
+            o = self.window("explorer")
             if m is None or o is None:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("dmenue"):
             n = int(name[6:])
-            m = last_3(r"desktop: context open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"desktop: context open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             zh = (int(m.group(4)) - 4) // 4
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("bmenue"):
             n = int(name[6:])
-            m = last_3(r"taskbar: kontext leer x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
+            m = last_2(r"taskbar: kontext leer x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
             if m is None:
                 return None
             zh = (int(m.group(4)) - 4) // int(m.group(5))
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("emenue"):
             n = int(name[6:])
-            m = last_3(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)(?: zh=(\d+))?")
+            m = last_2(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)(?: zh=(\d+))?")
             if m is None:
                 return None
             zh = int(m.group(4)) if m.group(4) else 20
             return (int(m.group(1)) + 8, int(m.group(2)) + 4 + n * zh, 90, zh)
         if name == "qsalle":
-            g = last_3(r"qs: zeile set y=(\d+) x=(\d+) h=(\d+)")
+            g = last_2(r"qs: zeile set y=(\d+) x=(\d+) h=(\d+)")
             if g is not None:
                 return (int(g.group(2)), int(g.group(1)), int(g.group(3)), int(g.group(3)))
-            m = last_3(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            m = last_2(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
-                m = last_3(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+                m = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
             x, y = int(m.group(1)), int(m.group(2))
             w, h = int(m.group(3)), int(m.group(4))
             return (x + 10, y + h - 10 - 22, w - 20, 22)
         if name.startswith("trayrect"):
-            m = last_3(r"traypop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[8:]))
+            m = last_2(r"traypop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[8:]))
             if m is None:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("calrect"):
-            m = last_3(r"calpop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[7:]))
+            m = last_2(r"calpop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[7:]))
             if m is None:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("oskrect"):
-            m = last_3(r"osk: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[7:]))
+            m = last_2(r"osk: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[7:]))
             if m is None:
                 return None
             return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("osktrect"):
-            m = last_3(r"osktest: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[8:]))
+            m = last_2(r"osktest: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[8:]))
             if m is None:
                 return None
             return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("chrect"):
-            m = last_3(r"charmap: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))
+            m = last_2(r"charmap: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))
             if m is None:
                 return None
             return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("lrect"):
             n = int(name[5:])
-            m = last_3(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
-            o = self.window_2("launcher")
+            m = last_2(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
+            o = self.window("launcher")
             if m is None or o is None:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("lzeile"):
             n = int(name[6:])
-            m = last_3(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\]")
+            m = last_2(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\]")
             if m is None:
-                m = last_3(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            z = last_3(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
-            o = self.window_2("launcher")
+                m = last_2(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
+            z = last_2(r"launcher: rows x=\d+ base=\d+ zh=(\d+)")
+            o = self.window("launcher")
             if m is None or z is None or o is None:
                 return None
             zh = int(z.group(1))
@@ -770,7 +770,7 @@ class Fahrer:
                     int(m.group(3)), zh)
         if name.startswith("sreiter"):
             n = int(name[7:])
-            m = last_3(r"settings: rect name=waa x=(\d+) y=(\d+) "
+            m = last_2(r"settings: rect name=waa x=(\d+) y=(\d+) "
                        r"w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)")
             if m is None:
                 return None
@@ -784,21 +784,21 @@ class Fahrer:
                     w // tab, h)
         if name.startswith("srect"):
             k = name[5:]
-            ms = last_3(r"settings: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % k)
+            ms = last_2(r"settings: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % k)
             if ms is not None:
                 return (int(ms.group(3)), int(ms.group(4)), int(ms.group(1)), int(ms.group(2)))
-            m = last_3(r"settings: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % k)
-            o = self.window_2("settings")
+            m = last_2(r"settings: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % k)
+            o = self.window("settings")
             if m is None or o is None:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("ftabzeile"):
             n = int(name[9:])
-            m = last_3(r"explorer: rect id=\d+ kind=6 "
+            m = last_2(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            z = last_3(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: kopf=\d+ kopfh=(\d+))?")
-            o = self.window_2("explorer")
+            z = last_2(r"explorer: rows x=\d+ base=\d+ zh=(\d+)(?: kopf=\d+ kopfh=(\d+))?")
+            o = self.window("explorer")
             if m is None or z is None or o is None:
                 return None
             zh = int(z.group(1))
@@ -807,27 +807,27 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
         if name.startswith("fkante"):
             n = int(name[6:])
-            sp = last_3(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)")
-            m = last_3(r"explorer: rect id=\d+ kind=6 "
+            sp = last_2(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)")
+            m = last_2(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-            o = self.window_2("explorer")
+            o = self.window("explorer")
             if sp is None or m is None or o is None or n > 2:
                 return None
             ex = int(sp.group(n + 2)) - 10
             return (o[0] + ex, o[1] + int(m.group(2)) + 14, 0, 0)
         if name in ("ftab", "fbaum"):
             art = 6 if name == "ftab" else 5
-            m = last_3(r"explorer: rect id=\d+ kind=%d "
+            m = last_2(r"explorer: rect id=\d+ kind=%d "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % art)
-            o = self.window_2("explorer")
+            o = self.window("explorer")
             if m is None or o is None:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("fvrect") or name.startswith("fvpt"):
             nm = name[6:] if name.startswith("fvrect") else "view"
-            m = last_3(r"fvviewer: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
-            o = self.window_2("fvviewer")
+            m = last_2(r"fvviewer: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
+            o = self.window("fvviewer")
             if m is None or o is None:
                 return None
             rx, ry, rw_, rh_ = (int(m.group(i)) for i in (1, 2, 3, 4))
@@ -837,8 +837,8 @@ class Fahrer:
             return (o[0] + rx, o[1] + ry, rw_, rh_)
         if name.startswith("mailrect") or name.startswith("mailpt"):
             nm = name[8:] if name.startswith("mailrect") else "list"
-            m = last_3(r"mail: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
-            o = self.window_2("mail")
+            m = last_2(r"mail: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
+            o = self.window("mail")
             if m is None or o is None:
                 return None
             rx, ry, rw_, rh_ = (int(m.group(i)) for i in (1, 2, 3, 4))
@@ -855,7 +855,7 @@ class Fahrer:
                 if rows[i][0] <= rows[i - 1][0]:
                     start = i
             batch = [r for r in rows[start:] if r[1] == kind]
-            o = self.window_2("welcome")
+            o = self.window("welcome")
             if o is None or not -len(batch) <= idx < len(batch):
                 return None
             r = batch[idx]
@@ -869,23 +869,23 @@ class Fahrer:
                 if rows[i][0] <= rows[i - 1][0]:
                     start = i
             batch = [r for r in rows[start:] if r[1] == kind]
-            o = self.window_2("freunde")
+            o = self.window("freunde")
             if o is None or not -len(batch) <= idx < len(batch):
                 return None
             r = batch[idx]
             return (o[0] + r[2], o[1] + r[3], r[4], r[5])
         if name.startswith("fdrect"):
             n = int(name[6:])
-            m = last_3(r"freunde: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
-            o = self.window_2("freunde")
+            m = last_2(r"freunde: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
+            o = self.window("freunde")
             if m is None or o is None:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("frect"):
             n = int(name[5:])
-            m = last_3(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
-            o = self.window_2("explorer")
+            m = last_2(r"explorer: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
+            o = self.window("explorer")
             if m is None or o is None:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
@@ -910,9 +910,9 @@ def main():
         z = roh.strip()
         if not z or z.startswith("#"):
             continue
-        parts_2 = z.split(None, 1)
-        b = parts_2[0]
-        arg = parts_2[1].strip() if len(parts_2) > 1 else ""
+        parts = z.split(None, 1)
+        b = parts[0]
+        arg = parts[1].strip() if len(parts) > 1 else ""
         if b == "killstarter":
             pids = re.findall(r"launcher: pid=(\d+)",
                               open(serial, errors="replace").read())
@@ -936,7 +936,7 @@ def main():
         if b == "warte":
             time.sleep(float(arg))
         elif b == "marke":
-            f.brand_2(arg.strip().strip("'\""))
+            f.brand(arg.strip().strip("'\""))
         elif b == "warteneu":
             st = arg.split("||")
             muster = st[0].strip().strip("'\"")
@@ -985,7 +985,7 @@ def main():
             if b == "fahre":
                 f.fahre(x, y)
             elif b == "rklick":
-                f.klick(x, y, 1, key_3=2)
+                f.klick(x, y, 1, key_2=2)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
         elif b == "wische":
@@ -1045,9 +1045,9 @@ def main():
             print("klickauf %s -> %d,%d  (rect %d,%d %dx%d)"
                   % (arg, x, y, r[0], r[1], r[2], r[3]))
             if b == "rklickauf":
-                f.klick(x, y, 1, key_3=2)
+                f.klick(x, y, 1, key_2=2)
             elif b == "mklickauf":
-                f.klick(x, y, 1, key_3=4)
+                f.klick(x, y, 1, key_2=4)
             elif arg == "toast":
                 f.klick_nahe(x, y, 1, 1, 0.15)
             else:
@@ -1101,14 +1101,14 @@ def main():
             uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
-            pos_2 = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
+            pos = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
                       "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
                       "lu": (lx, uy), "ru": (rx, uy)}
-            if edge not in pos_2:
+            if edge not in pos:
                 print("ziehkante: unbekannte Kante %s" % edge)
                 error += 1
                 continue
-            x0, y0 = pos_2[edge]
+            x0, y0 = pos[edge]
             f.ziehe(x0, y0, x0 + dx, y0 + dy)
             print("dragedge id=%d %s from %d,%d by %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
@@ -1129,12 +1129,12 @@ def main():
             uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
-            pos_2 = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
+            pos = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
                       "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
                       "lu": (lx, uy), "ru": (rx, uy), "mitte": (mx, my),
                       "titel": (wx + bo + ww // 4, wy + bo + (ti - bo) // 2),
                       "aussen": (wx + ww + 2 * bo + 40 if wx + ww + 2 * bo + 40 < 1800 else max(wx - 40, 2), my)}
-            x0, y0 = pos_2[edge]
+            x0, y0 = pos[edge]
             f.fahre(x0, y0)
             print("fahrekante id=%d %s -> %d,%d" % (wid, edge, x0, y0))
         elif b == "kappe":
@@ -1354,9 +1354,9 @@ def main():
                 print("extern TIMEOUT: %s" % arg)
                 error += 1
         elif b == "taste":
-            f.key_3(arg)
+            f.key_2(arg)
         elif b == "tippe":
-            names_2 = {" ": "spc", "-": "minus", ".": "dot",
+            names = {" ": "spc", "-": "minus", ".": "dot",
                      ",": "comma", "/": "slash", "_": "shift-minus",
                      ":": "shift-semicolon", ";": "semicolon",
                      "=": "equal", "+": "shift-equal", "?": "shift-slash",
@@ -1364,7 +1364,7 @@ def main():
             if any(arg[i] == arg[i + 1] for i in range(len(arg) - 1)):
                 tippe_gap = max(tippe_gap, 0.4)
             for ch in arg:
-                f.key_3(names_2.get(ch, "shift-" + ch.lower() if ch.isalpha() and ch.isupper() else ch))
+                f.key_2(names.get(ch, "shift-" + ch.lower() if ch.isalpha() and ch.isupper() else ch))
                 time.sleep(tippe_gap)
             tippe_gap = base_gap
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))

@@ -11,9 +11,9 @@ def main():
         rec = ((1 << SHIFT) + n - 1) // n
         if rec >> 32:
             print(f"  n={n}: reciprocal does not fit in 32 bits"); return 1
-        for sum_ in range(0, n * 255 + 1):
-            exakt = (sum_ + n // 2) // n
-            got = (sum_ * rec + rund) >> SHIFT
+        for sum_2 in range(0, n * 255 + 1):
+            exakt = (sum_2 + n // 2) // n
+            got = (sum_2 * rec + rund) >> SHIFT
             faelle += 1
             d = abs(exakt - got)
             if d > schlimm:

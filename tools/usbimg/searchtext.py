@@ -86,16 +86,16 @@ def ppm_read(path_2):
     return d.reshape(h, w, 3).astype(np.int16)
 
 
-def points_2(text, ttf, px, deckung):
+def points(text, ttf, px, deckung):
     """(dx, dy, tinte?) -- dy ist relativ zur Grundlinie."""
     if ttf.startswith("fui:"):
         import fuiraster
-        s = fuiraster.Font_2(ttf[4:], px)
+        s = fuiraster.Font(ttf[4:], px)
     else:
-        s = raster.Font_2(ttf, px)
+        s = raster.Font(ttf, px)
     voll = []
     rand = []
-    for (c, x26) in s.stellen(text):
+    for (c, x26) in s.ask(text):
         g = s.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
@@ -112,8 +112,8 @@ def points_2(text, ttf, px, deckung):
     return voll, rand, s
 
 
-def search(image_2, voll, rand, tol):
-    h, w, _ = image_2.shape
+def search(image, voll, rand, tol):
+    h, w, _ = image.shape
     xs = [p[0] for p in voll] + [p[0] for p in rand]
     ys = [p[1] for p in voll] + [p[1] for p in rand]
     x0, x1 = min(xs), max(xs)
@@ -128,7 +128,7 @@ def search(image_2, voll, rand, tol):
     def area(dx, dy):
         ax = dx - x0
         ay = dy - y0
-        return image_2[ay:ay + ny, ax:ax + nx, :]
+        return image[ay:ay + ny, ax:ax + nx, :]
 
     first = area(voll[0][0], voll[0][1])
     treffer = np.zeros((ny, nx), dtype=np.int32)
@@ -170,12 +170,12 @@ def main(argv):
             mind = float(argv[i + 1])
         if a == "--deckung":
             deckung = int(argv[i + 1])
-    image_2 = ppm_read(ppm)
-    voll, rand, _ = points_2(text, ttf, px, deckung)
+    image = ppm_read(ppm)
+    voll, rand, _ = points(text, ttf, px, deckung)
     if not voll:
         print("die Zeile '%s' hat keinen einzigen vollgedeckten Punkt" % text)
         return 2
-    e = search(image_2, voll, rand, tol)
+    e = search(image, voll, rand, tol)
     if e is None:
         print("the line is larger than the image")
         return 2

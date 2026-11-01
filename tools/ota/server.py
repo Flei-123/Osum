@@ -64,7 +64,7 @@ import sys
 import threading
 import time
 
-ROOT_2 = "."
+ROOT = "."
 NORANGE = False
 ABBRUCH = {}
 SHORT = {}
@@ -75,13 +75,13 @@ COUNTER = {"anfragen": 0, "oktette": 0}
 
 
 def protokoll(*w):
-    line_3 = " ".join(str(x) for x in w)
+    line = " ".join(str(x) for x in w)
     if LOG:
         with open(LOG, "a") as f:
-            f.write(line_3 + "\n")
+            f.write(line + "\n")
             f.flush()
     else:
-        sys.stderr.write(line_3 + "\n")
+        sys.stderr.write(line + "\n")
         sys.stderr.flush()
 
 
@@ -119,10 +119,10 @@ class Hand(http.server.BaseHTTPRequestHandler):
         COUNTER["anfragen"] += 1
         path_2 = self.path.split("?")[0]
         name = os.path.basename(path_2)
-        file_2 = os.path.join(ROOT_2, name)
+        file_2 = os.path.join(ROOT, name)
         rel = path_2.lstrip("/")
         if rel and ".." not in rel.split("/"):
-            tief = os.path.join(ROOT_2, rel)
+            tief = os.path.join(ROOT, rel)
             if os.path.isfile(tief):
                 file_2 = tief
                 name = rel
@@ -150,11 +150,11 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     self.end_headers()
                     return
 
-        len_ = gesamt - von
+        len_2 = gesamt - von
         limit = ABBRUCH.get(name, ABBRUCH.get(os.path.basename(name)))
         self.send_response(206 if part else 200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len_))
+        self.send_header("Content-Length", str(len_2))
         if part:
             self.send_header("Content-Range",
                              "bytes %d-%d/%d" % (von, gesamt - 1, gesamt))
@@ -167,20 +167,20 @@ class Hand(http.server.BaseHTTPRequestHandler):
         kgrenze = SHORT.get(name, SHORT.get(os.path.basename(name)))
         with open(file_2, "rb") as f:
             f.seek(von)
-            while geschrieben < len_:
-                pos_2 = von + geschrieben
-                if kgrenze is not None and pos_2 >= kgrenze:
-                    protokoll("KURZ", name, "bei", pos_2,
+            while geschrieben < len_2:
+                pos = von + geschrieben
+                if kgrenze is not None and pos >= kgrenze:
+                    protokoll("KURZ", name, "bei", pos,
                               "nach", geschrieben,
-                              "von", len_, "angekuendigt")
+                              "von", len_2, "angekuendigt")
                     COUNTER["oktette"] += geschrieben
                     if EINMAL:
                         GETAN.set()
                     return
-                if limit is not None and pos_2 >= limit:
-                    protokoll("ABBRUCH", name, "bei", pos_2,
+                if limit is not None and pos >= limit:
+                    protokoll("ABBRUCH", name, "bei", pos,
                               "nach", geschrieben,
-                              "von", len_, "angekuendigt")
+                              "von", len_2, "angekuendigt")
                     COUNTER["oktette"] += geschrieben
                     self._hart_zu()
                     if EINMAL:
@@ -188,10 +188,10 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     return
                 chunk = 4096
                 if limit is not None:
-                    chunk = min(chunk, limit - pos_2)
+                    chunk = min(chunk, limit - pos)
                 if kgrenze is not None:
-                    chunk = min(chunk, kgrenze - pos_2)
-                chunk = min(chunk, len_ - geschrieben)
+                    chunk = min(chunk, kgrenze - pos)
+                chunk = min(chunk, len_2 - geschrieben)
                 b = f.read(chunk)
                 if not b:
                     break
@@ -209,7 +209,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
 
 def main():
-    global ROOT_2, LOG, EINMAL, NORANGE
+    global ROOT, LOG, EINMAL, NORANGE
     port = 8443
     cert = key = None
     pid = None
@@ -218,7 +218,7 @@ def main():
         a = sys.argv[i]
         if a == "--wurzel" and i + 1 < len(sys.argv):
             i += 1
-            ROOT_2 = sys.argv[i]
+            ROOT = sys.argv[i]
         elif a == "--cert" and i + 1 < len(sys.argv):
             i += 1
             cert = sys.argv[i]
@@ -264,7 +264,7 @@ def main():
         with open(pid, "w") as f:
             f.write(str(os.getpid()))
     protokoll("START port=%d wurzel=%s abbruch=%s kurz=%s"
-              % (port, ROOT_2, ABBRUCH or "-", SHORT or "-"))
+              % (port, ROOT, ABBRUCH or "-", SHORT or "-"))
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     try:

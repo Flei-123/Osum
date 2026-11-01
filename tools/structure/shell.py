@@ -3,8 +3,8 @@
 import os
 import sys
 
-ROOT_2 = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-KERN = os.path.join(ROOT_2, "kernel")
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+KERN = os.path.join(ROOT, "kernel")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from erhebung import IMPORT_RE, read_2  # noqa: E402
@@ -13,53 +13,53 @@ from erhebung import IMPORT_RE, read_2  # noqa: E402
 def envelope(wurzeldatei):
     basis = os.path.dirname(wurzeldatei)
     seen = set()
-    stack_2 = [wurzeldatei]
-    while stack_2:
-        p = stack_2.pop()
+    stack = [wurzeldatei]
+    while stack:
+        p = stack.pop()
         rp = os.path.realpath(p)
         if rp in seen or not os.path.exists(p):
             continue
         seen.add(rp)
-        own_2 = os.path.dirname(p)
+        own = os.path.dirname(p)
         for z in read_2(p).splitlines():
             m = IMPORT_RE.match(z)
             if not m:
                 continue
-            parts_2 = m.group(1).split(".")
-            kand = os.path.join(own_2, *parts_2) + ".fi"
+            parts = m.group(1).split(".")
+            kand = os.path.join(own, *parts) + ".fi"
             if not os.path.exists(kand):
-                kand = os.path.join(basis, *parts_2) + ".fi"
+                kand = os.path.join(basis, *parts) + ".fi"
             if os.path.exists(kand):
-                stack_2.append(kand)
+                stack.append(kand)
     return {os.path.relpath(p, KERN) for p in seen}
 
 
 def main():
     kern = envelope(os.path.join(KERN, "kmain.fi"))
     uprog = envelope(os.path.join(KERN, "uprog.fi"))
-    all_ = set()
-    for stamm, _, names_2 in os.walk(KERN):
-        for n in names_2:
+    all_2 = set()
+    for stamm, _, names in os.walk(KERN):
+        for n in names:
             if n.endswith(".fi"):
-                all_.add(os.path.relpath(os.path.join(stamm, n), KERN))
-    aussen = all_ - kern - uprog
+                all_2.add(os.path.relpath(os.path.join(stamm, n), KERN))
+    aussen = all_2 - kern - uprog
 
     if len(sys.argv) > 2 and sys.argv[1] == "--liste":
-        set_ = {"kern": kern, "uprog": uprog, "aussen": aussen}[sys.argv[2]]
-        for p in sorted(set_):
+        set_2 = {"kern": kern, "uprog": uprog, "aussen": aussen}[sys.argv[2]]
+        for p in sorted(set_2):
             print(p)
         return 0
 
-    def lines_2(set_):
+    def lines(set_2):
         s = 0
-        for p in set_:
+        for p in set_2:
             s += read_2(os.path.join(KERN, p)).count("\n")
         return s
 
-    print("files under kernel/ total    : %3d  (%d lines)" % (len(all_), lines_2(all_)))
-    print("  KERN  (ab kmain.fi)        : %3d  (%d Zeilen)" % (len(kern), lines_2(kern)))
-    print("  UPROG (ab uprog.fi)        : %3d  (%d Zeilen)" % (len(uprog), lines_2(uprog)))
-    print("  OUTSIDE (not in the image) : %3d  (%d lines)" % (len(aussen), lines_2(aussen)))
+    print("files under kernel/ total    : %3d  (%d lines)" % (len(all_2), lines(all_2)))
+    print("  KERN  (ab kmain.fi)        : %3d  (%d Zeilen)" % (len(kern), lines(kern)))
+    print("  UPROG (ab uprog.fi)        : %3d  (%d Zeilen)" % (len(uprog), lines(uprog)))
+    print("  OUTSIDE (not in the image) : %3d  (%d lines)" % (len(aussen), lines(aussen)))
     print()
     print("OUTSIDE by folder:")
     nach = {}

@@ -127,9 +127,9 @@ def main(argv):
     time.sleep(vorlauf)
 
     fehlend = []
-    for nr, key_3 in enumerate(keys_2, 1):
+    for nr, key_2 in enumerate(keys_2, 1):
         vorher = zeilen(seriell)
-        s.sendall(("sendkey %s\n" % key_3).encode())
+        s.sendall(("sendkey %s\n" % key_2).encode())
         begin = time.time()
         ende = begin + zeit
         angekommen = False
@@ -141,11 +141,11 @@ def main(argv):
         dur = time.time() - begin
         if angekommen:
             print("keys: %2d/%d  %-10s arrived after %.2fs"
-                  % (nr, len(keys_2), key_3, dur))
+                  % (nr, len(keys_2), key_2, dur))
         else:
             print("keys: %2d/%d  %-10s NOT arrived (waited %.1fs)"
-                  % (nr, len(keys_2), key_3, dur))
-            fehlend.append(key_3)
+                  % (nr, len(keys_2), key_2, dur))
+            fehlend.append(key_2)
     s.close()
 
     if fehlend:

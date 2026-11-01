@@ -54,10 +54,10 @@ def belegte(wurzel):
     path_2 = os.path.join(wurzel, "assets", "icons", "icons.map")
     aus = {}
     for roh in open(path_2, encoding="ascii").read().splitlines():
-        line_3 = roh.split("#", 1)[0].strip()
-        if "=" not in line_3:
+        line = roh.split("#", 1)[0].strip()
+        if "=" not in line:
             continue
-        name, _, rest = line_3.partition("=")
+        name, _, rest = line.partition("=")
         parts = rest.split()
         if len(parts) == 2 and parts[0] != "alias":
             aus[int(parts[0], 16)] = name.strip()
@@ -100,7 +100,7 @@ def without_kommentare(text):
     i = 0
     n = len(text)
     in_text = False
-    char = ''
+    zeichen = ''
     while i < n:
         c = text[i]
         if in_text:
@@ -109,14 +109,14 @@ def without_kommentare(text):
                 aus.append(text[i + 1])
                 i += 2
                 continue
-            if c == char:
+            if c == zeichen:
                 in_text = False
             aus.append(c)
             i += 1
             continue
         if c in '"\'':
             in_text = True
-            char = c
+            zeichen = c
             aus.append(c)
             i += 1
             continue
@@ -144,8 +144,8 @@ def treffer(text, erlaubt_values):
         for m in muster.finditer(text):
             v = int(m.group(1), basis)
             if v in erlaubt_values:
-                line_3 = text.count("\n", 0, m.start()) + 1
-                aus.append((line_3, art, v))
+                line = text.count("\n", 0, m.start()) + 1
+                aus.append((line, art, v))
     return sorted(aus)
 
 
@@ -172,10 +172,10 @@ def main(argv):
         rel = os.path.relpath(voll, wurzel)
         text = without_kommentare(
             open(voll, encoding="utf-8", errors="replace").read())
-        for line_3, art, value in treffer(text, karte):
+        for line, art, value in treffer(text, karte):
             n += 1
             print("rawcp: %s:%d: raw code point (%s) U+%04X -- write %s"
-                  % (rel, line_3, art, value, karte[value]))
+                  % (rel, line, art, value, karte[value]))
 
     print("rawcp: %d raw code points in %d files of drawing code, "
           "%d code points given away"

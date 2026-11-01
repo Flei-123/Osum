@@ -60,7 +60,7 @@ def read_ppm(path):
     return w, h, d[at:]
 
 
-class Image_:
+class Image_2:
     def __init__(self, path):
         self.w, self.h, self.px = read_ppm(path)
 
@@ -75,7 +75,7 @@ def main(argv):
     if len(argv) < 4:
         print(__doc__)
         return 2
-    image = Image_(argv[1])
+    image = Image_2(argv[1])
     txt = open(argv[2], "rb").read().decode("latin1").splitlines()
     wx, wy = (int(v) for v in argv[3].split(","))
 
