@@ -16,9 +16,9 @@ python3 -I tools/rowicons/check.py . | tee "$TMPD/host.txt"
 grep -q 'ROWICONS-HOST: [0-9]* passed, 0 failed' "$TMPD/host.txt" && ok "host: all bundles incl. jarvismini carry exact bakes" || bad "host: bake checks"
 python3 -I tools/symbakes/wire.py . | tee "$TMPD/wire.txt"
 grep -q '^WIRE: 0 red' "$TMPD/wire.txt" && ok "wiring: taskmgr, taskbar, icon_at, jarvismini" || bad "wiring audit"
-mkdir -p "$TMPD/old/kernel/user" "$TMPD/old/tools/usbimg"
-for f in kernel/user/taskmgr.fi kernel/user/taskbar.fi kernel/user/fuiscene.fi tools/usbimg/build.sh; do sed 's/symvar\.\(register\|pick\)/symvar_removed/g; s/jarvismini\.symbol/jarvismini.removed/g' "$f" > "$TMPD/old/$f"; done
-mkdir -p "$TMPD/old/kernel/user/taskbar"; for f in kernel/user/taskbar/*.fi; do sed 's/symvar\.\(register\|pick\)/symvar_removed/g; s/jarvismini\.symbol/jarvismini.removed/g' "$f" > "$TMPD/old/$f"; done
+mkdir -p "$TMPD/old/kernel/user/fuiscene" "$TMPD/old/tools/usbimg"
+for f in kernel/user/taskmgr.fi kernel/user/taskbar.fi kernel/user/fuiscene.fi kernel/user/fuiscene/fsdraw.fi tools/usbimg/build.sh; do sed 's/symvar\.\(register\|pick\)/symvar_removed/g; s/jarvismini\.symbol/jarvismini.removed/g' "$f" > "$TMPD/old/$f"; done
+mkdir -p "$TMPD/old/kernel/user/taskbar" "$TMPD/old/kernel/user/fuiscene"; for f in kernel/user/taskbar/*.fi; do sed 's/symvar\.\(register\|pick\)/symvar_removed/g; s/jarvismini\.symbol/jarvismini.removed/g' "$f" > "$TMPD/old/$f"; done
 [ "$(python3 -I tools/symbakes/wire.py "$TMPD/old" | grep -c '^  FAIL')" -ge 5 ] && ok "counter-proof: wiring audit turns red without the calls" || bad "counter-proof: wiring audit stayed green"
 cp -a assets/apps "$TMPD/oldapps"; rm -f "$TMPD"/oldapps/*/symbol44.osym "$TMPD"/oldapps/*/symbol64.osym
 PROGS="desktop taskbar settings launcher explorer netview taskmgr edit sh echo ls cat ps kill top"

@@ -89,7 +89,7 @@ print("%-72s %7s  %-12s %8s %12s" % ("part", "lines", "class", "fuiscene", "dire
 for r in rows:
     print("%-72s %7d  %-12s %8d %12d" % r)
 print("task bar: lines in tree-building functions %d, in paint* functions %d, of %d" % (tb_tree, tb_paint, tb.count("\n") + 1))
-fs = src("kernel/user/fuiscene.fi")
+fs = src("kernel/user/fuiscene.fi") + "".join(src("kernel/user/fuiscene/" + f) for f in sorted(os.listdir(os.path.join(root, "kernel/user/fuiscene"))))
 print("fuiscene.fi (the host itself) %d lines; own popup/dialog/tooltip painting inside it: %d lines (pop_paint/dlg_paint/tip_paint)" % (fs.count("\n") + 1, fn_lines(fs, r"pop_paint|dlg_paint|tip_paint")))
 wm = src("kernel/ui/wm.fi")
 print("kernel/ui/wm.fi (window server: frame, title bar, terminal grid) %d lines; not a scene tree" % (wm.count("\n") + 1))

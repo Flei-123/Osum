@@ -208,7 +208,7 @@ sys.exit(0 if after and back and after[0] == back[0] else 1)
 PY
 
 echo "== 4c. resize cursor (source) =="
-grep -q 'fn ct_edge_at' kernel/user/fuiscene.fi && grep -q 'shp = 3' kernel/user/fuiscene.fi \
+grep -q 'fn ct_edge_at' kernel/user/fuiscene/*.fi && grep -q 'shp = 3' kernel/user/fuiscene/*.fi \
     && ok "fuiscene.scene_cursor answers shape 3 over a header edge and during a drag" || bad "no resize cursor in fuiscene"
 
 echo "== 5. catalog =="
