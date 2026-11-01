@@ -283,9 +283,8 @@ def check_rx_status():
     ok(rxs[:12] == ["4", "4", "3", "1", "1", "1", "1", "2", "0", "0", "1", "32"], "receive counters: %s" % " ".join(rxs))
 
 
-def ccmp_group_frame(key, pn, keyid, body):
+def ccmp_group_frame(key, pn, keyid, body, a1=bytes([0xFF] * 6)):
     from cryptography.hazmat.primitives.ciphers.aead import AESCCM
-    a1 = bytes([0xFF] * 6)
     a2 = BSSID
     a3 = bytes([2, 0, 0, 0, 9, 9])
     fc = bytes([0x08, 0x42])
@@ -321,6 +320,10 @@ def check_sw_group():
     swb = [l for l in badr if l.startswith("swrx ")][0].split()
     rxb = [l for l in badr if l.startswith("rxs")][0].split()[1:]
     ok(swb[1] == "0" and rxb[15] == "1", "forged MIC is dropped and counted (%s fail=%s)" % (swb[1], rxb[15]))
+    uni = ccmp_group_frame(bytes([0x55] * 16), 9, 0, body, MAC)
+    un = run(["swgrp %s %s" % (key.hex(), uni.hex())])
+    swu = [l for l in un if l.startswith("swrx ")][0].split()
+    ok(swu[1] == str(24 + len(body)) and bytes.fromhex(swu[2])[24:] == body, "unicast frame with the pairwise key is decrypted in software too (%s)" % swu[1])
     wrong = run(["swgrp %s %s" % (bytes(16).hex(), fr.hex())])
     swc = [l for l in wrong if l.startswith("swrx ")][0].split()
     ok(swc[1] == "0", "wrong group key is dropped (%s)" % swc[1])
