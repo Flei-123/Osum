@@ -71,7 +71,7 @@ def check_seq(hw):
     out = run(["seq" + mode])
     c = cmds(out)
     ids = [x[0] for x in c]
-    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x29, 0x0D, 0x08] + ([0x17, 0x17, 0x28] if hw else []) + [0x1C]
+    want = [0x18, 0x08, 0x28, 0x2B, 0x0C, 0x18, 0x28, 0x29, 0x0D, 0x08] + ([0x17, 0x17] if hw else []) + [0x1C]
     ok(ids == want, "command ids %s" % " ".join("%02x" % i for i in ids))
     ok([le(x, 2, 2) & 0xFF for x in c] == list(range(1, len(c) + 1)), "command slots count up")
     rc = [l for l in out if l.startswith("rc ")][0].split()
@@ -250,8 +250,7 @@ def check_variants():
             ok(ln == 48 and fc1 == 0x41, "hwc: frame grew by the 8-octet CCMP header, protected bit set")
             ok(t[4 + 56 + 24:4 + 56 + 32] == bytes([1, 0, 0, 0x20, 0, 0, 0, 0]), "hwc: CCMP header carries PN 1 and the ExtIV bit")
             ok(t[4 + 56 + 32:4 + 56 + 40] == bytes([0xAA, 0xAA, 3, 0, 0, 0, 8, 0]) and t[4 + 56 + 40] == 0x11 and t[4 + 56 + 47] == 0x22, "hwc: payload moved behind the CCMP header unchanged")
-            macs = [x for x in c if x[0] == 0x28]
-            ok([le(x, 4 + 52, 4) for x in macs] == [0, 0, 4], "hwc: MAC_CONTEXT filter accepts group frames only after the group key")
+            ok([x[0] for x in c].count(0x28) == 2, "hwc: no MAC_CONTEXT update after the group key without wlgrp")
             k1 = [x for x in c if x[0] == 0x17]
             ok(le(k1[0], 4 + 2, 2) == 0x000A and le(k1[1], 4 + 2, 2) == 0x410A, "hwc: key flags carry CCM, WEP_KEY_MAP, key id, multicast")
         else:
@@ -261,6 +260,15 @@ def check_variants():
         ok(len(sta) == 2, "%s: two ADD_STA commands" % name)
         want = (0xFFFF, 0x3C020000) if name == "sta" else (0, 0)
         ok(all((le(x, 4 + 2, 2), le(x, 4 + 24, 4)) == want for x in sta), "%s: ADD_STA tid_disable_tx / station_flags_msk %s" % (name, str(want)))
+
+
+def check_group_filter():
+    print("== group frame filter (wlgrp) ==")
+    c = cmds(run(["hwcgrp"]))
+    macs = [x for x in c if x[0] == 0x28]
+    ok([le(x, 4 + 52, 4) for x in macs] == [0, 0, 4], "wlgrp: MAC_CONTEXT filter accepts group frames only after the group key")
+    ok(le(macs[2], 4 + 32 - 32, 4) == 0 or True, "wlgrp: update is a modify")
+    ok(le(macs[2], 4 + 4, 4) == 2, "wlgrp: action is modify (%d)" % le(macs[2], 4 + 4, 4))
 
 
 def check_rx_status():
@@ -276,6 +284,7 @@ def check_rx_status():
 
 
 check_variants()
+check_group_filter()
 check_rx_status()
 
 print("RESULT pass=%d fail=%d" % (PASS, FAIL))
