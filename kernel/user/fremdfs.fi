@@ -1,50 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/fremdfs.fi -- Runde FREMDFS: die fremden Dateisysteme,
 // von AUSSEN gemessen.
-//
-// Wie `/bin/k14` und `/bin/posix`: das Programm laeuft in Ring 3, macht
-// jeden Aufruf wirklich, und schreibt jede Antwort als
-//
 //     ff: <name> = <zahl>
-//
-// auf die Konsole. Fuer Pruefsummen zusaetzlich
-//
 //     ff: sha <pfad> = <64 Hexziffern>
-//
-// `tools/fremdfs/run.sh` haelt jede dieser Zeilen gegen das, was der
-// WIRT beim Bau des Abbilds gemessen hat -- SHA-256 gegen SHA-256,
-// Zahl gegen Zahl. Was hier nicht als Zahl oder Hexkette herauskommt,
-// ist keine Zusage, sondern eine Behauptung.
-//
 // AUFRUF:
 //     fremdfs <art> <quelle> <ziel>
-//
-// z. B. `fremdfs ext4 /dev/hdb1 /mnt`. Die Art wird unveraendert an
-// `mount` weitergereicht, damit dieses Programm nichts ueber die
-// Treiber wissen muss.
-//
-// WAS GEMESSEN WIRD, und warum genau das:
-//
-//   1. EINHAENGEN. Geht es ueberhaupt? Und bei den Gegenproben: geht
-//      es RICHTIGERWEISE nicht?
-//   2. DIE PRUEFSUMMEN. Jede Datei des bekannten Baums wird GANZ
-//      gelesen -- in Stuecken von 4096 Oktetten, also ueber viele
-//      Aufrufe hinweg -- und durch SHA-256 geschickt. Das ist die
-//      eigentliche Zusage dieser Runde: nicht "es sieht richtig aus",
-//      sondern "es ist Oktett fuer Oktett dasselbe".
-//   3. DIE VERZEICHNISSE. Die Zahl der Eintraege, gezaehlt mit
-//      `getdents64`. Ein Verzeichnis, das die Haelfte zeigt, faellt
-//      hier auf und nicht erst beim Benutzer.
-//   4. DIE GROESSEN. `stat` auf jede Datei -- eine Datei mit null
-//      Oktetten muss null sagen, die grosse ihre wirkliche Groesse.
-//   5. DER SYMBOLISCHE VERWEIS. Sein ZIEL, gelesen mit `readlink`.
-//      Beide Faelle: das kurze Ziel (steht im Inode) und das lange
-//      (steht in einem Datenblock).
-//   6. DAS LESEN AB EINER STELLE. `lseek` mitten in die grosse Datei
-//      und von dort lesen -- der Weg, den `chain_at` bzw. der
-//      Extent-Baum nehmen muss, wenn nicht bei null angefangen wird.
-//   7. WAS NICHT GEHEN DARF: schreiben. Beide Dateisysteme sind nur
-//      lesend, und ein `open` zum Schreiben MUSS scheitern.
 
 profile kernel
 
@@ -78,9 +38,6 @@ const S_IFLNK: u64 = 40960
 
 const MNT_RDONLY: u64 = 1
 
-// Der Lesepuffer. 4096 Oktette -- gross genug, dass die grosse Datei
-// nicht tausendmal gelesen wird, klein genug fuer den Stapel eines
-// Ring-3-Programms.
 static mut LESE: [u8; 4096] = [0 as u8; 4096]
 static mut DIRBUF: [u8; 4096] = [0 as u8; 4096]
 static mut PFAD: [u8; 256] = [0 as u8; 256]
@@ -111,7 +68,6 @@ fn slen(p: u64) -> u64 {
     return n
 }
 
-// Zwei Stuecke zu einem Pfad: "<a>/<b>", nach PFAD.
 fn pfad_bauen(a: u64, b: u64) -> u64 {
     let ziel: u64 = (&PFAD[0 as usize]) as u64
     var n: u64 = 0
@@ -134,16 +90,6 @@ fn pfad_bauen(a: u64, b: u64) -> u64 {
 }
 
 // ---------------------------------------------------- die Pruefsumme
-//
-// EINE DATEI GANZ LESEN UND DURCH SHA-256 SCHICKEN.
-//
-// In Stuecken von 4096 Oktetten, also ueber viele `read`-Aufrufe --
-// und genau das ist gewollt: eine Datei von sechs Megaoktett geht so
-// ueber anderthalbtausend Aufrufe, und jeder einzelne muss an der
-// richtigen Stelle weiterlesen. Ein Treiber, der den Versatz falsch
-// rechnet, liefert eine falsche Summe, und keine, die "fast stimmt".
-//
-// Ausgabe: "ff: sha <pfad> = <hex>", oder "ff: sha <pfad> = FEHLER".
 fn summe(pfad: u64) {
     var s_pre: [u8; 9] = "ff: sha \0"
     var s_eq: [u8; 4] = " = \0"
@@ -178,7 +124,6 @@ fn summe(pfad: u64) {
     ulib.nl()
 }
 
-// Wie viele Eintraege hat dieses Verzeichnis (OHNE `.` und `..`)?
 fn dir_count(pfad: u64) -> u64 {
     let fd: u64 = ulib.sys(SYS_OPEN, pfad, O_RDONLY, 0)
     if ulib.bad(fd) {
@@ -242,8 +187,6 @@ fn art(pfad: u64) -> u64 {
     return mode & S_IFMT
 }
 
-// DAS ZIEL EINES SYMBOLISCHEN VERWEISES. Ausgabe als Text, damit der
-// Pruefstand ihn Zeichen fuer Zeichen vergleichen kann.
 fn verweis(pfad: u64) {
     var s_pre: [u8; 12] = "ff: ziel \0\0\0"
     var s_eq: [u8; 4] = " = \0"
@@ -264,9 +207,6 @@ fn verweis(pfad: u64) {
     ulib.nl()
 }
 
-// DAS LESEN AB EINER STELLE. `lseek` mitten hinein, dann lesen -- und
-// die Summe der gelesenen Oktette melden, damit ein Treiber, der ab
-// der falschen Stelle liest, an einer anderen Zahl auffaellt.
 fn ab_stelle(pfad: u64, wo: u64, wieviel: u64) -> u64 {
     let fd: u64 = ulib.sys(SYS_OPEN, pfad, O_RDONLY, 0)
     if ulib.bad(fd) {
@@ -341,13 +281,9 @@ fn u_start(args: u64) -> u64 {
     let quelle: u64 = ulib.arg_at(args, 2)
     let ziel: u64 = ulib.arg_at(args, 3)
 
-    // 1. EINHAENGEN, ausdruecklich nur lesend.
     let r: u64 = ulib.sys4(SYS_MOUNT, quelle, ziel, art_s, MNT_RDONLY)
     if ulib.bad(r) {
         line((&n_mount[0 as usize]) as u64, 0)
-        // OHNE EINHAENGUNG IST ALLES ANDERE SINNLOS -- und genau das
-        // ist bei den Gegenproben der Sinn der Sache: das Abbild MUSS
-        // hier scheitern, und der Pruefstand sieht die Null.
         return 0
     }
     line((&n_mount[0 as usize]) as u64, 1)
@@ -375,7 +311,6 @@ fn u_start(args: u64) -> u64 {
     line((&n_art_dir[0 as usize]) as u64,
         art(pfad_bauen(ziel, (&p_viele[0 as usize]) as u64)))
 
-    // 5. DIE PRUEFSUMMEN. Das ist die eigentliche Zusage.
     summe(pfad_bauen(ziel, (&p_hallo[0 as usize]) as u64))
     summe(pfad_bauen(ziel, (&p_leer[0 as usize]) as u64))
     summe(pfad_bauen(ziel, (&p_mittel[0 as usize]) as u64))
@@ -386,21 +321,15 @@ fn u_start(args: u64) -> u64 {
     summe(pfad_bauen(ziel, (&p_viele0[0 as usize]) as u64))
     summe(pfad_bauen(ziel, (&p_viele511[0 as usize]) as u64))
 
-    // 6. DAS LESEN AB EINER STELLE -- mitten in die grosse Datei.
     line((&n_mitte[0 as usize]) as u64,
         ab_stelle(pfad_bauen(ziel, (&p_gross[0 as usize]) as u64),
             3000000, 4096))
 
-    // 7. DIE SYMBOLISCHEN VERWEISE. Sie gibt es nur auf ext4; auf
-    //    NTFS liefert `readlink` FEHLER, und das ist richtig so.
     line((&n_art_lnk[0 as usize]) as u64,
         art(pfad_bauen(ziel, (&p_verweis[0 as usize]) as u64)))
     verweis(pfad_bauen(ziel, (&p_verweis[0 as usize]) as u64))
     verweis(pfad_bauen(ziel, (&p_langverweis[0 as usize]) as u64))
 
-    // 8. WAS NICHT GEHEN DARF. Diese Dateisysteme sind nur lesend --
-    //    ein `open` zum Schreiben MUSS scheitern. Eine Schicht, die
-    //    alles erlaubt, trennt nichts.
     var p_neu: [u8; 8] = "neu.txt\0"
     let wfd: u64 = ulib.sys(SYS_OPEN,
         pfad_bauen(ziel, (&p_neu[0 as usize]) as u64), O_WRONLY | O_CREAT, 438)
@@ -411,7 +340,6 @@ fn u_start(args: u64) -> u64 {
         line((&n_schreib[0 as usize]) as u64, 1)
     }
 
-    // 9. AUSHAENGEN. Es muss gehen -- und danach ist der Punkt leer.
     let u: u64 = ulib.sys(SYS_UMOUNT2, ziel, 0, 0)
     if ulib.bad(u) {
         line((&n_umount[0 as usize]) as u64, 0)

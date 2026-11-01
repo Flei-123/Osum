@@ -1,65 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/expdlg.fi -- RUNDE EXPLORER-2: DIE AUSKUENFTE.
-//
-// Was ein Dateimanager ANZEIGT, wenn man nach mehr fragt als nach dem
-// Namen: die Eigenschaften eines Stuecks, die Liste der Programme, die
-// es oeffnen koennen, und die Miniatur eines Bildes.
-//
-// EIGENSCHAFTEN: Name, Art, Groesse, bei einem Ordner die REKURSIV
-// gezaehlte Groesse und die Zahl der Stuecke darin
-// (`fileop.groesse_rekursiv` / `zaehle_rekursiv` -- eine Umsetzung,
-// nicht zwei), dazu die DREI Zeiten aus `stat` (mtime/ctime/atime, OFS
-// v3 liefert sie wirklich), die Rechte als rwx-Kette und der
-// Eigentuemer mit Namen aus /etc/passwd (`pw.name_of_uid`).
-//
-// DER TEXT WIRD GEBAUT UND NICHT GEMALT. Diese Datei setzt Zeilen aus
-// Katalogschluesseln und Zahlen zusammen; `explorer.fi` haengt das
-// Ergebnis in ein Bedienelement von `wlib`. Kein Zeichenaufruf steht
-// hier, und das ist Absicht: die Regel dieses Baums ist, dass ausser
-// wlib/wlibc niemand malt.
-//
-// TIME: this program has exactly ONE time calculation, the model's
-// (`expmodell.zeit_text`, offset from /etc/time.conf, the same source as
-// the taskbar). The plan calls the third value of `eig_bauen`
-// "zeit_fn_oder_0"; here it is a plain SWITCH instead of a function
-// pointer: != 0 means "readable local time via the model", 0 means "raw
-// seconds" (for callers without a model, e.g. a probe). The calculation
-// stays in one place either way.
-//
-// OEFFNEN MIT: die Liste kommt aus `/apps/*.osp` ueber
-// `kernel/user/appdir.fi` -- dieselbe Quelle, aus der der Starter und
-// die Taskleiste ihre Eintraege nehmen. Eine zweite Liste waere eine
-// zweite Wahrheit darueber, was auf dieser Maschine installiert ist.
-//
-// MINIATUREN: PNG/BMP ueber `bild.fi`, JPEG ueber `jpeg.fi` -- dieselben
-// Umsetzer, die der Bildbetrachter (`viewer.fi`) benutzt. Die grossen
-// Puffer stehen NICHT im BSS: gemessen sind 4.210.688 Oktette fuer die
-// Bildpunkte (1280*800 plus Luft) und 786.432 fuer die Datei; das waere
-// mehr, als sich dieses Programm statisch nehmen darf (PLAN.md 1:
-// hoechstens rund 1 MiB BSS). Sie werden beim ERSTEN Miniaturwunsch
-// ueber `mem.map_pages` geholt -- wer nur die Liste ansieht, zahlt
-// nichts. Passt ein Bild nicht in den Puffer, sagt `mini_bereit` nein
-// und die Symbolansicht nimmt das Endungssymbol; halb geladen wird
-// nichts.
 
 profile kernel
 
 import ulib
 import libc.io
-// RUNDE 31: `libc.mem` IST HIER WEG -- WEGEN EINES NAMENSKONFLIKTS.
-//
-// Firn benennt ein Modul nach dem LETZTEN Teil des Pfades: `libc.mem`
-// heisst `mem`. `paint/canvas.fi`, das fUi zum Malen braucht, importiert
-// `html.mem` -- das heisst AUCH `mem`. Sobald der Explorer (der diese
-// Datei zieht) seine Bedienelemente von fUi malen laesst, ist der Name
-// doppelt belegt, und canvas.fi findet sein `heap_alloc` nicht:
-//
 //   error: module 'mem' has no element 'heap_alloc'
 //          --> paint/canvas.fi:121
-//
-// Gebraucht wurden hier nur drei `mem.map_pages`, und das ist selbst
-// nur eine Zeile um `kcall.map_anon` (lib/libc/mem.fi). Also direkt
-// dorthin -- ein Modul weniger im Weg, dieselben Seiten.
 import libc.kcall
 import msg
 import fileop
@@ -69,9 +16,6 @@ import image
 import jpeg
 import pw
 
-// Dieselben drei Zeilen wie `map_pages` in lib/libc/mem.fi -- sie
-// stehen hier, weil das Modul `mem` nicht mehr importiert werden kann
-// (siehe oben). Anonyme, private, lesbare und schreibbare Seiten.
 fn map_pages_hier(len: u64) -> u64 {
     let prot: u64 = kcall.PROT_READ | kcall.PROT_WRITE
     let flags: u64 = kcall.MAP_PRIVATE | kcall.MAP_ANONYMOUS
@@ -89,18 +33,11 @@ export {
 
 const MAXAPP: u64 = 24
 
-// Der Puffer fuer die Bildpunkte (1280*800*4 plus eine Seite Luft) und
-// fuer die Datei -- die Zahlen sind aus viewer.fi uebernommen, damit
-// beide Programme dieselben Bilder schaffen und nicht jedes andere.
 const PIXCAP: u64 = 4210688
 const DATCAP: u64 = 786432
 const MINIW: u64 = 64        // Kantenlaenge einer Miniatur
 const MINSLOT: u64 = 16      // so viele Miniaturen haelt die Symbolansicht
 
-// Der Eigentuemer steht im stat-Puffer an Versatz 28 als 32-Bit-Zahl
-// (kernel/sys.fi:1850 `ST_UID`); lib/libc/io.fi gibt ihn heute nicht
-// heraus, deshalb steht die gemessene Zahl hier und nicht als Vermutung
-// irgendwo im Code.
 const ST_UID: u64 = 28
 
 static mut txt: [u8; 2048] = [0 as u8; 2048]
@@ -127,7 +64,7 @@ static mut m_daten: u64 = 0
 static mut m_pix: u64 = 0
 static mut m_dat: u64 = 0
 static mut m_cache: u64 = 0
-static mut m_kein: u64 = 0     // 1 = Abbilden ist schon fehlgeschlagen
+static mut m_kein: u64 = 0
 static mut bw: u64 = 0
 static mut bh: u64 = 0
 static mut s_w: [u64; 16] = [0 as u64; 16]
@@ -209,8 +146,6 @@ fn line_num(key: u64, wert: u64) {
     lines = lines + 1
 }
 
-// Eine Zeit als Zeile. `als_ort` != 0 heisst: durch das Modell, also
-// "JJJJ-MM-TT SS:MM" in Ortszeit; sonst die rohe Sekunde.
 fn line_time(key: u64, sek: u64, als_ort: u64) {
     if als_ort != 0 {
         let _p: u64 = expmodell.time_text(sek, (&tbuf[(0) as usize]) as u64)
@@ -227,8 +162,6 @@ fn kleinbuch(c: u64) -> u64 {
     return c
 }
 
-// Endet der Name auf ".<endung>"? Gross und klein gilt gleich -- OFS
-// unterscheidet die Schreibweise, die Endung sagt sie nicht.
 fn ends_with(name: u64, endung: u64) -> bool {
     let n: u64 = ulib.length(name)
     let e: u64 = ulib.length(endung)
@@ -284,13 +217,6 @@ fn ist_textname(name: u64) -> bool {
     return false
 }
 
-// Die Art eines Stuecks als Katalogschluessel. Die ENDUNG kommt vor dem
-// Rechtebit, und das ist gemessen: `tools/osum/mkfs.py` legt JEDE Datei
-// eines Abbilds mit 0755 an -- entschiede das x-Bit zuerst, hiesse auf
-// einem frisch installierten System auch `eins.txt` "Programm". Ein
-// Bild und ein Text sind an ihrer Endung sicher zu erkennen; erst was
-// keine kennbare Endung hat, wird ueber das x-Bit zum Programm (auf
-// diesem System heisst ein Programm nicht ".exe").
 fn artschluessel(dir: bool, m: u64, name: u64) -> u64 {
     if dir {
         return (&k_tdir[(0) as usize]) as u64
@@ -336,10 +262,6 @@ fn modetext(m: u64, dir: bool, out: u64) {
     __mmio_write8((out + at) as *mut u8, 0 as u8)
 }
 
-// Der Eigentuemer: erst die Nummer aus dem stat-Puffer, dann der Name
-// aus /etc/passwd. Findet sich kein Eintrag (fremder Datentraeger,
-// geloeschtes Konto), bleibt die Nummer stehen -- lieber eine wahre
-// Zahl als ein erfundener Name.
 fn eigner_text(sb: u64, out: u64) {
     let uid: u64 = (__mmio_read32((sb + ST_UID) as *mut u32)) as u64
     if pw.name_of_uid(uid, out, 60) {
@@ -351,8 +273,6 @@ fn eigner_text(sb: u64, out: u64) {
     __mmio_write8((out + n) as *mut u8, 0 as u8)
 }
 
-// Die Eigenschaften eines Stuecks. `zeit_ort` != 0 laesst die drei
-// Zeiten durch die Ortszeit des Modells laufen (siehe Kopf).
 fn eig_bauen(pfad: u64, name: u64, zeit_ort: u64) -> u64 {
     tp = 0
     lines = 0
@@ -369,9 +289,6 @@ fn eig_bauen(pfad: u64, name: u64, zeit_ort: u64) -> u64 {
         line_txt((&k_typ[(0) as usize]) as u64,
             msg.get(artschluessel(dir, m, name)))
         if dir {
-            // Ein Ordner hat keine eigene Groesse, die einen Menschen
-            // interessiert -- gefragt ist, was drin liegt. Beides kommt
-            // aus fileop, damit `du` und dieses Fenster dasselbe sagen.
             gr_summe = fileop.size_recursive(pfad, 0)
             st_zahl = fileop.zaehle_rekursiv(pfad, 0)
             line_num((&k_size[(0) as usize]) as u64, gr_summe)
@@ -381,8 +298,6 @@ fn eig_bauen(pfad: u64, name: u64, zeit_ort: u64) -> u64 {
             st_zahl = 1
             line_num((&k_size[(0) as usize]) as u64, gr_summe)
         }
-        // Die drei ECHTEN Zeiten -- OFS v3 fuellt sie, sie sind nicht
-        // mehr das "--" von frueher.
         line_time((&k_ctime[(0) as usize]) as u64, io.stat_ctime(sb),
             zeit_ort)
         line_time((&k_mtime[(0) as usize]) as u64, io.stat_mtime(sb),
@@ -443,9 +358,6 @@ fn oeffnenmit_ptr() -> u64 {
     return (&a_blob[(0) as usize]) as u64
 }
 
-// Die Programme aus /apps als Menuetext. Der Pfad, den ein Eintrag
-// startet, bleibt daneben stehen -- die Nummer im Menue ist die Nummer
-// in `oeffnenmit_exec`.
 fn oeffnenmit_bauen() -> u64 {
     n_app = 0
     var bp: u64 = 0
@@ -480,11 +392,6 @@ fn oeffnenmit_bauen() -> u64 {
     return n_app
 }
 
-// Den Eintrag `i` mit der Datei `datei` starten. SYS_EXEC ist der
-// Aufruf MIT Argumenten (SYS_SPAWN nimmt keine) -- genau so startet
-// explorer.fi seit RUNDE TUERSCHLOSS auch alles andere. Rueckgabe ist
-// die Nummer des neuen Prozesses oder ein Kernfehler; wer sie nicht
-// prueft, verschluckt einen Fehlschlag, und das ist hier verboten.
 fn oeffnenmit_start(i: u64, datei: u64) -> u64 {
     if i >= n_app {
         return 0 -% 22
@@ -505,8 +412,6 @@ fn oeffnenmit_start(i: u64, datei: u64) -> u64 {
 
 // ----------------------------------------------------- neue Datei
 
-// Eine leere Datei oder eine mit Inhalt anlegen. Rueckgabe 0 oder die
-// Nummer des Kerns -- `explorer.fi` macht daraus ein Hinweisfenster.
 fn new_file(pfad: u64, inhalt: u64) -> u64 {
     let fd: u64 = io.create(pfad)
     if ulib.bad(fd) {
@@ -528,10 +433,6 @@ fn new_file(pfad: u64, inhalt: u64) -> u64 {
 
 // ------------------------------------------------------- Miniaturen
 
-// Die Puffer erst beim ersten Wunsch holen (siehe Kopf). Geht das
-// Abbilden schief, wird es NICHT jedes Mal neu versucht -- `m_kein`
-// merkt sich das, damit eine Symbolansicht auf einer engen Maschine
-// nicht bei jeder Zeile in denselben Fehler laeuft.
 fn puffer_da() -> bool {
     if m_kein != 0 {
         return false
@@ -588,8 +489,6 @@ fn file_read(pfad: u64) -> u64 {
     return n
 }
 
-// Ein Bild in den grossen Puffer holen. PNG und BMP macht `bild.fi`,
-// JPEG `jpeg.fi` -- dieselben Umsetzer wie im Bildbetrachter.
 fn image_get(pfad: u64) -> bool {
     bw = 0
     bh = 0
@@ -624,11 +523,6 @@ fn image_get(pfad: u64) -> bool {
     return false
 }
 
-// Verkleinern mit dem naechsten Bildpunkt: eine Miniatur von 64 Kante
-// ist zu klein, als dass Mitteln sich lohnte, und ein Filter ueber ein
-// ganzes Bild kostet bei jedem Ordnerwechsel Zeit. Das Seitenverhaeltnis
-// bleibt: die laengere Kante wird MINIW, die kuerzere entsprechend
-// kleiner, damit nichts verzerrt.
 fn verkleinern(ziel: u64) -> u64 {
     var i: u64 = 0
     while i < MINIW * MINIW {
@@ -690,13 +584,6 @@ fn slot_ptr(s: u64) -> u64 {
     return m_cache + s * MINIW * MINIW * 4
 }
 
-// Eine einzelne Miniatur. Rueckgabe ist die BREITE der Miniatur; 0
-// heisst "geht nicht" -- dann sagt `mini_bereit` ebenfalls nein und die
-// Symbolansicht nimmt das Endungssymbol. Der Zeiger aus `mini_daten`
-// gilt bis zum naechsten `mini_laden`; wer mehrere Bilder gleichzeitig
-// zeigen will, nimmt die Faecher (`mini_slot_laden`). ACHTUNG: dies
-// hier IST das Fach 0 -- die Symbolansicht faengt deshalb bei Fach 1
-// an, wenn sie daneben noch eine einzelne Vorschau haelt.
 fn mini_load(pfad: u64) -> u64 {
     m_da = 0
     m_w = 0
@@ -724,9 +611,6 @@ fn mini_load(pfad: u64) -> u64 {
     return m_w
 }
 
-// Dasselbe in ein Fach der Symbolansicht. Der Zeiger eines Fachs bleibt
-// stehen, solange kein anderes Bild in DIESES Fach geladen wird -- wlib
-// liest ihn beim naechsten Malen erneut, also darf er nicht wandern.
 fn mini_slot_load(pfad: u64, slot: u64) -> u64 {
     if slot >= MINSLOT {
         return 0

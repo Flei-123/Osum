@@ -1,72 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/fas.fi -- RUNDE K16: DER ASSEMBLER UND BINDER, IN FIRN.
-//
-// DAS LOCH, DAS DIESE DATEI ZUMACHT. `firnc` hoert bei einem `.s` auf: es
-// schreibt Assemblertext und ruft dann `/usr/bin/as` und `/usr/bin/ld`.
-// Auf Linux ist das vernuenftig -- die beiden sind da. Auf Osum sind sie
-// nicht da, und sie werden auch nicht da sein, denn sie sind zwei
-// Programme aus einem anderen Projekt in einer anderen Sprache. Solange
-// der Uebersetzer sie braucht, kann er auf diesem System nicht arbeiten,
-// egal wie vollstaendig der Kernel darunter ist.
-//
-// Also erzeugt dieses Programm aus dem `.s` UNMITTELBAR eine
-// ausfuehrbare Datei. Kein Objektformat dazwischen, keine
-// Verschiebungseintraege, kein Binder -- weil es nichts zu binden gibt:
-// ein Firn-Programm ist EINE Uebersetzungseinheit, alle Namen darin sind
-// innere Namen, und die Aufteilung in `.text`, `.rodata`, `.data` und
-// `.bss` macht der Uebersetzer schon. Was fehlt, ist genau zweierlei:
-// die Befehle in Oktette und die vier Abschnitte in ein ELF.
-//
-// WARUM DAS UEBERHAUPT GEHT -- DIE ZAHL, DIE ALLES ENTSCHEIDET. Ein
-// vollstaendiger x86-64-Assembler ist ein Lebenswerk: der Befehlssatz hat
-// ueber tausend Befehle und ein Dutzend Adressierungsarten. Der
-// Uebersetzer benutzt davon NICHTS. Gemessen ueber alle 52 Programme
-// dieses Userlands und ueber `firnc1` selbst (1.533.513 Zeilen
-// Assemblertext, `tools/k16/mnemonik.py`):
-//
-//     58 verschiedene Mnemoniken
-//     96 verschiedene Paare aus Mnemonik und Operandenform
-//      8 Direktiven
-//      4 Speicherausdruecke:  [reg]   [reg+N]   [rbp-N]   [rip + name]
-//
-// KEIN Indexregister, KEIN Massstab, KEIN Segment. Das ist kein
-// Assembler fuer x86-64; das ist ein Assembler fuer die Sprache, die
-// `lib/firnc1/codegen.fi` spricht, und deshalb passt er in eine Datei.
-//
-// DREI ENTSCHEIDUNGEN, DIE IHN KURZ HALTEN:
-//
-//   1. JEDER SPRUNG IST EIN rel32, JEDE VERSCHIEBUNG EIN disp32. Ein
-//      echter Assembler waehlt die kuerzeste Form und muss dafuer so
-//      lange iterieren, bis sich nichts mehr bewegt ("branch
-//      relaxation"). Hier steht die Laenge jedes Befehls nach dem ersten
-//      Blick fest, also genuegen ZWEI Durchgaenge: einer zaehlt und sammelt
-//      die Marken ein, der zweite schreibt. Der Preis sind ein paar
-//      Prozent groessere Programme, und der ist es wert.
-//   2. KEINE VERSCHIEBUNGSEINTRAEGE. Nach dem ersten Durchgang stehen die
-//      Laengen aller vier Abschnitte fest, daraus stehen ihre Adressen
-//      fest, und im zweiten Durchgang ist jede Marke eine Zahl.
-//   3. WAS NICHT VORKOMMT, WIRD ABGELEHNT -- LAUT. Ein Befehl, den dieses
-//      Programm nicht kennt, ist ein Abbruch mit Zeilennummer und Text,
-//      kein stilles Auslassen.
-//
-//      RUNDE ALLTAG: DIE GLEITKOMMABEFEHLE KOMMEN JETZT VOR. Hier stand,
-//      sie seien ausdruecklich nicht unterstuetzt, weil "kein Programm
-//      dieses Userlands eine f64 hat". Der Taschenrechner hat eine (er
-//      zerteilt und rechnet in f64) und die IDCT des JPEG-Decoders auch.
-//      Also stehen sie jetzt drin -- genau die dreizehn, die `firnc1`
-//      dafuer erzeugt, jeder gegen `as` gemessen (tools/k16/run.sh
-//      vergleicht Oktett fuer Oktett gegen `as`+`ld`). Ein halb
-//      richtiger SSE-Encoder waere schlimmer als keiner; ein
-//      gemessener ist besser als eine Ausnahme in der Abnahme.
-//
-// AUFRUF:
-//     fas quelle.s -o ziel            ein Programm fuer Osum (0x40100000)
-//     fas quelle.s -o ziel --wirt     dasselbe fuer Linux (0x400000)
-//
-// DAS ABBILD, das dabei entsteht, ist Zeile fuer Zeile das, was
-// `kernel/user/user.ld` beschreibt und was `kernel/elf.fi` verlangt:
-// drei PT_LOAD, jedes auf eigenen Seiten, Kopf und Programmkoepfe INNEN
-// im ersten. Der Einsprungpunkt ist `_start`.
 
 profile kernel
 
@@ -75,7 +6,6 @@ import libc.mem
 
 export { u_start }
 
-// Runde K13: die Rechte einer Datei setzen (`chmod`).
 const SYS_CHMOD: u64 = 90
 
 // ------------------------------------------------------- die Abschnitte
@@ -84,7 +14,7 @@ const SEC_TEXT: u64 = 0
 const SEC_RODATA: u64 = 1
 const SEC_DATA: u64 = 2
 const SEC_BSS: u64 = 3
-const SEC_NONE: u64 = 4 // `.note.GNU-stack` und alles, was verfaellt
+const SEC_NONE: u64 = 4
 
 // Die Operandenarten.
 const K_NONE: u64 = 0
@@ -136,14 +66,13 @@ static mut lb_max: u64 = 0
 static mut hb: u64 = 0
 static mut hb_n: u64 = 0
 
-// Die beiden Operanden der Zeile.
 static mut k0: u64 = 0
 static mut r0: u64 = 0
 static mut s0: u64 = 0
 static mut b0: u64 = 0
 static mut d0: u64 = 0
 static mut p0: u64 = 0 // rip-relativ?
-static mut n0: u64 = 0 // Name: Anfang im Quelltext
+static mut n0: u64 = 0
 static mut e0: u64 = 0 // Name: Ende
 
 static mut k1: u64 = 0
@@ -212,8 +141,6 @@ fn ist_luecke(c: u64) -> bool {
     return c == 32 || c == 9 || c == 13
 }
 
-// Ein Zeichen, das zu einem Namen gehoert: Buchstaben, Ziffern, `_`, `.`,
-// `$`. `.L_F1.ulib__say__bb0` ist ein Name, und `.text` ist einer.
 fn ist_namenszeichen(c: u64) -> bool {
     if c >= 97 && c <= 122 {
         return true
@@ -237,10 +164,6 @@ fn sagn(v: u64) {
     ulib.eput(text_of(v))
 }
 
-// EIN KLEINER PUFFER AUS DER HALDE UND KEIN `static`-FELD. `firnc1`
-// uebersetzt ein `static`-Feld und liest daraus, kann aber seine ADRESSE
-// nicht nehmen (docs/SELF_HOSTING.md im Firn-Repo, Abschnitt 7); beide
-// Uebersetzer muessen dieses Programm bauen koennen.
 static mut kratz: u64 = 0
 
 fn text_of(v: u64) -> u64 {
@@ -259,8 +182,6 @@ fn text_of(v: u64) -> u64 {
     return kratz + i
 }
 
-// Ein Abbruch mit Zeilennummer. DAS ist der Unterschied zwischen einem
-// Werkzeug, mit dem man arbeiten kann, und einem, das "geht nicht" sagt.
 fn oops(t: u64) {
     var f: [u8; 12] = "fas: Zeile \0"
     var d: [u8; 3] = ": \0"
@@ -347,7 +268,6 @@ fn cur_buf() -> u64 {
     return 0
 }
 
-// Die Adresse, an der der laufende Abschnitt gerade steht.
 fn hier() -> u64 {
     if cur == SEC_TEXT {
         return adr_t + len_t
@@ -487,9 +407,6 @@ fn sec_addr(s: u64) -> u64 {
     return 0
 }
 
-// Die Adresse einer Marke. Im ERSTEN Durchgang steht sie noch nicht fest
-// -- dort zaehlt nur die Laenge des Befehls, und die haengt nicht davon
-// ab. Deshalb 0.
 fn label_addr(a: u64, b: u64) -> u64 {
     if durchgang == 1 {
         return 0
@@ -613,8 +530,6 @@ fn num_from(a: u64, b: u64) -> u64 {
     return v
 }
 
-// Ein Register erkennen. Zurueck: Groesse * 256 + Nummer, oder 0xFFFF.
-// Groessen: 1, 2, 4, 8, 16 (=xmm).
 fn reg_of(a: u64, b: u64) -> u64 {
     let n: u64 = b - a
     if n < 2 || n > 5 {
@@ -631,7 +546,6 @@ fn reg_of(a: u64, b: u64) -> u64 {
     }
     if c0 == 114 {
         if ist_ziffer(c1) {
-            // r8 .. r15, mit den Endungen d/w/b
             var e: u64 = b
             var gr: u64 = 8
             let letzt: u64 = at(b - 1)
@@ -745,8 +659,6 @@ fn lit_eq(a: u64, b: u64, p: u64) -> bool {
 
 // ------------------------------------------------------- die Operanden
 
-// Zahl mit Vorzeichen und 0x. Liefert den Wert; `neg` sagt, ob ein Minus
-// davor stand (dann ist der Wert das Zweierkomplement).
 fn imm_von(a: u64, b: u64) -> u64 {
     var i: u64 = a
     var minus: bool = false
@@ -792,7 +704,6 @@ fn imm_von(a: u64, b: u64) -> u64 {
     return v
 }
 
-// Einen Operanden lesen. `nr` ist 0 oder 1.
 fn operand(a: u64, b: u64, nr: u64) {
     var i: u64 = gap_gone(a, b)
     var groesse: u64 = 0
@@ -966,7 +877,6 @@ fn rex(w: bool, r: u64, x: u64, bb: u64, zwang: bool) {
     }
 }
 
-// Braucht dieses 8-Bit-Register ein REX, damit es nicht ah/ch/dh/bh wird?
 fn braucht_rex8(gr: u64, r: u64) -> bool {
     if gr != 1 {
         return false
@@ -978,7 +888,6 @@ fn modrm_reg(reg: u64, rm: u64) {
     emit(0xC0 | ((reg & 7) << 3) | (rm & 7))
 }
 
-// Der Speicheroperand steht in b?/d?/p? -- `wo` sagt, welcher (0 oder 1).
 fn modrm_mem(reg: u64, wo: u64) {
     var basisreg: u64 = b0
     var disp: u64 = d0
@@ -996,9 +905,6 @@ fn modrm_mem(reg: u64, wo: u64) {
     }
     if riprel != 0 {
         emit(((reg & 7) << 3) | 5)
-        // Der Abstand zaehlt ab dem ENDE des Befehls, und das Ende ist
-        // vier Oktette hinter dem Feld, das gerade geschrieben wird --
-        // hinter diesen Befehlen steht in dieser Sprache nie noch etwas.
         var ziel: u64 = 0
         if wo == 0 {
             ziel = label_addr(n0, e0)
@@ -1015,7 +921,6 @@ fn modrm_mem(reg: u64, wo: u64) {
     emit32(disp & 0xFFFFFFFF)
 }
 
-// Der REX-Anteil des Speicheroperanden: nur das Grundregister.
 fn mem_base(wo: u64) -> u64 {
     if wo == 1 {
         if p1 != 0 {
@@ -1048,8 +953,6 @@ fn ist(a: u64, b: u64, p: u64) -> bool {
     return lit_eq(a, b, p)
 }
 
-// Ein Sprungbefehl: 0 = keiner, sonst 0x100 + Bedingungscode, und
-// 0x1FF fuer den unbedingten.
 fn sprung_code(a: u64, b: u64) -> u64 {
     var w_jmp: [u8; 4] = "jmp\0"
     if ist(a, b, (&w_jmp[0]) as u64) {
@@ -1188,10 +1091,6 @@ fn setz_code(a: u64, b: u64) -> u64 {
     if ist(a, b, (&wd[0]) as u64) {
         return 0x199
     }
-    // RUNDE ALLTAG: DIE PARITAETSBEDINGUNG. `comisd` setzt PF, wenn
-    // einer der beiden Werte NaN ist, und `firnc1` fragt genau das ab
-    // ("ist der Vergleich ueberhaupt geordnet?"). Ohne diese beiden
-    // Zeilen bricht der Assembler mitten im Taschenrechner ab.
     var we: [u8; 6] = "setnp\0"
     if ist(a, b, (&we[0]) as u64) {
         return 0x19B
@@ -1211,8 +1110,6 @@ fn setz_code(a: u64, b: u64) -> u64 {
     return 0
 }
 
-// Die Rechenbefehle mit zwei Operanden: 0x100 + Grundopcode, und die
-// Erweiterung fuer die Sofortform in den naechsten acht Bit.
 fn arith_code(a: u64, b: u64) -> u64 {
     var w: [u8; 4] = "add\0"
     if ist(a, b, (&w[0]) as u64) {
@@ -1241,7 +1138,6 @@ fn arith_code(a: u64, b: u64) -> u64 {
     return 0
 }
 
-// Die Ein-Operanden-Gruppe F7: 0x100 + Erweiterung.
 fn grp3_code(a: u64, b: u64) -> u64 {
     var w: [u8; 4] = "not\0"
     if ist(a, b, (&w[0]) as u64) {
@@ -1290,8 +1186,6 @@ fn shift_code(a: u64, b: u64) -> u64 {
     return 0
 }
 
-// ================================================== ein Befehl, kodiert
-
 fn do_cmd(a: u64, m: u64, b: u64) {
     // a..m = Mnemonik, m..b = die Operanden
     k0 = K_NONE
@@ -1301,7 +1195,6 @@ fn do_cmd(a: u64, m: u64, b: u64) {
     seg_fs = false
     var i: u64 = gap_gone(m, b)
     if i < b {
-        // Bei den beiden Ketten-Praefixen steht ein zweiter Befehl dahinter.
         var repw: [u8; 4] = "rep\0"
         if ist(a, m, (&repw[0]) as u64) {
             let we: u64 = word_end(i, b)
@@ -1342,8 +1235,6 @@ fn do_cmd(a: u64, m: u64, b: u64) {
             oops_word((&t[0]) as u64, i, we)
             return
         }
-        // In zwei Operanden trennen. Ein Komma innerhalb von [ ] kommt in
-        // dieser Sprache nicht vor, ein Komma innerhalb von " " auch nicht.
         var komma: u64 = b
         var j: u64 = i
         while j < b {
@@ -1421,7 +1312,6 @@ fn third_operand(a: u64, b: u64) {
     oops_word((&t3[0]) as u64, i, e)
 }
 
-// Die Groesse, in der dieser Befehl arbeitet.
 fn size_from() -> u64 {
     if k0 == K_REG {
         return s0
@@ -1438,9 +1328,6 @@ fn size_from() -> u64 {
     return 8
 }
 
-// reg = das Registerfeld, rm = der andere Operand (Register oder Speicher).
-// `wo_mem` sagt, welcher der beiden der Speicheroperand ist (0, 1 oder 2 =
-// keiner).
 fn rm_form(w: bool, gr: u64, reg: u64, rmreg: u64, wo_mem: u64,
     op: u64, zweites: u64, rex8: bool) {
     praefix16(gr)
@@ -1461,21 +1348,6 @@ fn rm_form(w: bool, gr: u64, reg: u64, rmreg: u64, wo_mem: u64,
 }
 
 // ================================================== RUNDE ALLTAG: SSE2
-//
-// Bis hierher stand oben im Kopf dieser Datei, die Gleitkommabefehle
-// seien AUSDRUECKLICH nicht unterstuetzt, mit der Begruendung "kein
-// Programm dieses Userlands hat eine f64". Diese Runde hat zwei
-// gebracht: der Taschenrechner zerteilt und rechnet in f64, und die
-// IDCT des JPEG-Decoders ebenso. `firnc1` erzeugt dafuer genau
-// dreizehn Befehle, und tools/k16/run.sh hat sie namentlich gemeldet
-// ("fas kennt 'movsd' nicht"), also werden sie hier kodiert -- nicht
-// mehr und nicht weniger als die dreizehn.
-//
-// DIE FORM IST IMMER DIESELBE: ein Praefix (F2 fuer double, F3 fuer
-// single, 66 fuer den Ganzzahlweg), dann REX, dann 0F, dann das
-// Opcode-Oktett, dann ModRM. Das Praefix steht VOR REX -- steht es
-// dahinter, kodiert der Prozessor etwas anderes.
-//
 //   movsd  xmm, m64   F2 0F 10      movsd m64, xmm    F2 0F 11
 //   movss  xmm, m32   F3 0F 10      movss m32, xmm    F3 0F 11
 //   addsd/subsd/mulsd/divsd         F2 0F 58/5C/59/5E
@@ -1483,9 +1355,6 @@ fn rm_form(w: bool, gr: u64, reg: u64, rmreg: u64, wo_mem: u64,
 //   cvtsi2sd xmm, r   F2 [W] 0F 2A  cvttsd2si r, xmm  F2 [W] 0F 2C
 //   cvtss2sd          F3 0F 5A      cvtsd2ss          F2 0F 5A
 //   movd/movq r, xmm  66 [W] 0F 7E  movd/movq xmm, r  66 [W] 0F 6E
-//
-// `wr` sagt, welcher der beiden Operanden ins Registerfeld gehoert;
-// der andere ist rm und darf Speicher sein.
 fn sse_emit(pre: u64, op: u64, wr: u64, w: bool) {
     sse_emitx(pre, 0, op, wr, w)
 }
@@ -1527,8 +1396,6 @@ fn sse_emitx(pre: u64, esc: u64, op: u64, wr: u64, w: bool) {
     }
 }
 
-// Sind beide Operanden da? Ein SSE-Befehl mit einem ist ein Fehler und
-// keine stille Null.
 fn sse_two() -> bool {
     if k0 == K_NONE || k1 == K_NONE {
         var t: [u8; 30] = "SSE-Befehl braucht zwei Teile\0"
@@ -1683,7 +1550,6 @@ fn vec(a: u64, m: u64) -> bool {
     return false
 }
 
-// 0 = kein SSE-Befehl. Sonst ist er hier fertig kodiert.
 fn sse(a: u64, m: u64) -> bool {
     if vec(a, m) {
         return true
@@ -1806,7 +1672,6 @@ fn sse(a: u64, m: u64) -> bool {
     var w_cvtsi2sd: [u8; 9] = "cvtsi2sd\0"
     if ist(a, m, (&w_cvtsi2sd[0]) as u64) {
         if sse_two() {
-            // Die Breite kommt von der GANZZAHL, nicht vom xmm.
             sse_emit(0xF2, 0x2A, 0, s1 == 8)
         }
         return true
@@ -1854,8 +1719,6 @@ fn sse(a: u64, m: u64) -> bool {
         if !sse_two() {
             return true
         }
-        // Welche Seite ist das xmm? Es steht im Registerfeld, die
-        // Ganzzahlseite ist rm -- in BEIDE Richtungen.
         if k0 == K_REG && s0 == 16 {
             sse_emit(0x66, 0x6E, 0, ismovq)
         } else {
@@ -1888,8 +1751,6 @@ fn kodiere(a: u64, m: u64) {
         emit(0x05)
         return
     }
-    // K16/A-007 (24.09.2026): `rdtsc` -- firnc1 emits it for the clock of
-    // h264t (tools/k16/run.sh: "diesen Befehl kennt fas nicht 'rdtsc'").
     var w_tsc: [u8; 6] = "rdtsc\0"
     if ist(a, m, (&w_tsc[0]) as u64) {
         emit(0x0F)
@@ -2324,7 +2185,6 @@ fn kodiere(a: u64, m: u64) {
             return
         }
     }
-    // ---- imul mit zwei Operanden
     var w_imul: [u8; 5] = "imul\0"
     if ist(a, m, (&w_imul[0]) as u64) && k1 != K_NONE {
         let gr: u64 = size_from()
@@ -2361,7 +2221,6 @@ fn kodiere(a: u64, m: u64) {
         rm_form(gr == 8, gr, erw, rmr, wo, opi, 0, false)
         return
     }
-    // ---- not/neg/mul/imul/div/idiv mit EINEM Operanden
     let g3: u64 = grp3_code(a, m)
     if g3 != 0 && k1 == K_NONE {
         let gr: u64 = size_from()
@@ -2389,7 +2248,6 @@ fn kodiere(a: u64, m: u64) {
             rmr = 0
         }
         if k1 == K_REG {
-            // nur cl ist erlaubt
             if r1 != 1 || s1 != 1 {
                 var t: [u8; 30] = "Schieben nur um cl oder Zahl\0\0"
                 oops((&t[0]) as u64)
@@ -2412,7 +2270,6 @@ fn kodiere(a: u64, m: u64) {
             return
         }
     }
-    // ---- und sonst: sagen, was fehlt
     var t: [u8; 34] = "diesen Befehl kennt fas nicht\0\0\0\0\0"
     oops_word((&t[0]) as u64, a, m)
 }
@@ -2473,7 +2330,6 @@ fn tue_direktive(a: u64, w: u64, b: u64) {
             cur = SEC_RODATA
             return
         }
-        // `.note.GNU-stack` und alles andere: verfaellt.
         cur = SEC_NONE
         return
     }
@@ -2780,7 +2636,6 @@ fn hoch8(v: u64) -> u64 {
     return (v + 7) & 0xFFFFFFFFFFFFFFF8
 }
 
-// Die Adresse einer Marke, gesucht ueber einen nullbeendeten Text.
 fn brand_from_text(p: u64) -> u64 {
     var i: u64 = 0
     while i < lb_n {
@@ -2835,9 +2690,6 @@ fn ph(nr: u64, flags: u64, off: u64, vaddr: u64, filesz: u64, memsz: u64) {
     k64(a + 48, PAGE)
 }
 
-// Der Kopf, so wie `kernel/user/user.ld` ihn erzeugt: ELF-Kopf und
-// Programmkoepfe liegen INNEN im ersten Segment (FILEHDR PHDRS), und
-// deshalb faengt `.text` bei HDRS an und nicht bei null.
 fn build_header(einsprung: u64, off_r: u64, off_d: u64) {
     var i: u64 = 0
     while i < HDRS {
@@ -2928,35 +2780,11 @@ fn schreib_elf(ziel: u64, off_r: u64, off_d: u64) -> bool {
         gut = write_all(fd, buf_d, len_d)
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    // DAS X-BIT SETZT DER BINDER, NICHT DER KERN. `open` legt eine Datei
-    // mit 0o666 abzueglich der Maske an -- das ist richtig fuer DATEN.
-    // Was hier entsteht, ist ein PROGRAMM: ohne Ausfuehrrecht gibt
-    // `execve` darauf 127, und genau das ist beim Merge von K15
-    // passiert, als die Rechtepruefung wieder wirkte. `chmod 0755` ist
-    // dieselbe Zeile, die `ld` auf jedem anderen Unix auch macht.
     ulib.sys(SYS_CHMOD, ziel, 493, 0)
     return gut
 }
 
 // ====================================== der eingebaute Anlauf ("crt")
-//
-// WARUM EIN BINDER EINEN ANLAUF MITBRINGT. Die 52 Programme dieses
-// Userlands werden mit `kernel/user/crt.s` gebunden, und dort stehen die
-// vier Dinge, die eine Sprache nicht ausdruecken kann: der Einsprung
-// `_start`, der Weg hinaus (`exit`), `osum_panic` fuer eine gepruefte
-// Rechnung, die ueberlaeuft, und drei Signalroutinen samt ihren Zaehlern.
-// `as` und `ld` bekommen das als zweite Objektdatei; `fas` kennt keine
-// zweite Objektdatei, weil es keine Objektdateien kennt.
-//
-// Also traegt es den Anlauf als TEXT bei sich und haengt ihn an die
-// Quelle. Das ist nicht gespart, sondern richtig: der Anlauf ist Teil des
-// Binders und nicht des Programms, genau wie `crt1.o` bei jedem anderen
-// Unix -- nur dass er hier nicht als Datei irgendwo liegt, sondern
-// nachlesbar in dieser Datei steht.
-//
-// `--crt NAME` sagt, welche Funktion `_start` rufen soll (`_F0.u_start`
-// oder `_F1.u_start`, je nach Uebersetzerstufe -- dieselbe Zahl, die
-// `ld --defsym=USER_ENTRY=` bekommt).
 static mut crt_ziel: u64 = 0
 
 fn anh(p: u64, t: u64) -> u64 {
@@ -3023,7 +2851,7 @@ fn read_file(pfad: u64) -> bool {
         ulib.eput((&t2[0]) as u64)
         return false
     }
-    src = hole(n + 2048) // Platz fuer den eingebauten Anlauf
+    src = hole(n + 2048)
     if src == 0 {
         return false
     }
@@ -3095,15 +2923,10 @@ fn u_start(args: u64) -> u64 {
         return 2
     }
     if crt_ziel != 0 {
-        // Er wird ANGEHAENGT und nicht vorangestellt: so bleiben die
-        // Zeilennummern in jeder Fehlermeldung die der Quelle.
         let ende: u64 = crt_text(src + src_n, crt_ziel)
         src_n = ende - src
     }
 
-    // Die Tafeln. Ihre Groesse haengt an der Quelle: mehr Marken als
-    // Zeilen kann es nicht geben, und eine Zeile ist mindestens zwei
-    // Oktette lang.
     lb_max = src_n / 8 + 256
     nm_max = src_n / 2 + 4096
     hb_n = pow2_over(lb_max * 2)
@@ -3126,18 +2949,12 @@ fn u_start(args: u64) -> u64 {
         return 3
     }
 
-    // ERSTER DURCHGANG: zaehlen und die Marken einsammeln. Die Adressen
-    // der Abschnitte stehen dabei noch nicht fest, und sie muessen es
-    // auch nicht -- kein Befehl dieser Sprache aendert seine LAENGE,
-    // wenn sich eine Adresse aendert. Genau darum genuegen zwei
-    // Durchgaenge und nicht n.
     durchgang = 1
     durchlauf()
     if fehler != 0 {
         return 1
     }
 
-    // Jetzt stehen die vier Laengen fest, also auch die vier Adressen.
     let off_r: u64 = hoch4k(HDRS + len_t)
     let off_d: u64 = hoch4k(off_r + len_r)
     adr_t = basis + HDRS
@@ -3152,10 +2969,6 @@ fn u_start(args: u64) -> u64 {
         return 3
     }
 
-    // ZWEITER DURCHGANG: dasselbe noch einmal, und diesmal wird
-    // geschrieben. Dass beide Durchgaenge dieselben Laengen ergeben,
-    // wird gleich nachgerechnet -- ein Assembler, bei dem sie
-    // auseinanderlaufen, erzeugt stillen Unsinn.
     let t1: u64 = len_t
     let r1x: u64 = len_r
     let d1x: u64 = len_d

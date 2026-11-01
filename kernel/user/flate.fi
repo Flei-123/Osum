@@ -1,28 +1,5 @@
 // SPDX-License-Identifier: MIT
 // kernel/user/flate.fi -- Runde K11: DEFLATE, in Firn.
-//
-// RFC 1951 (deflate) und RFC 1952 (gzip). Beides in einem Modul, weil
-// `gzip` und `gunzip` dieselben Tabellen brauchen und zwei Kopien davon
-// zwei Gelegenheiten waeren, eine falsch abzuschreiben.
-//
-// AUSPACKEN kann alle drei Blockarten: gespeichert, feste Huffman-Baeume
-// und eigene Baeume samt der Lauflaengenkodierung ihrer Codelaengen. Der
-// Dekodierer ist der von `puff` (zlib): je Laenge wird gezaehlt, wie
-// viele Codes es gibt, und Bit fuer Bit verglichen -- keine Tabellen mit
-// 32768 Eintraegen, dafuer eine Schleife je Zeichen. Auf einer Maschine,
-// die ohnehin durch einen Systemaufruf je Block laeuft, ist das die
-// richtige Seite des Handels.
-//
-// EINPACKEN nimmt die FESTEN Baeume und sucht Wiederholungen mit einer
-// Streuwerttabelle ueber drei Oktette und Ketten rueckwaerts. Eigene
-// Baeume waeren zwei Kilobyte besser und ein Huffman-Erzeuger mehr; was
-// hier steht, ist echtes deflate und wird von `gunzip` auf dem Wirt
-// ausgepackt -- und genau das misst tools/k11/run.sh.
-//
-// DIE UEBERLAUFFALLE: Pruefsummen rechnen mit Umdeutung, nicht mit
-// Zahlen. `crc32` maskiert mit `0 -% (crc & 1)` und nicht mit `-`, weil
-// `-` seit Runde 72 panickt. Dasselbe gilt fuer jede Stelle, an der ein
-// Wert absichtlich bei 2^32 umlaeuft.
 
 profile kernel
 
@@ -36,17 +13,14 @@ export {
 
 const MAXBITS: u64 = 15
 const E_OK: u64 = 0
-const E_INPUT: u64 = 1 // die Eingabe ist zu Ende, bevor sie fertig war
-const E_ROOM: u64 = 2 // das Ergebnis passt nicht in den Puffer
-const E_FORMAT: u64 = 3 // das ist kein gueltiges deflate
+const E_INPUT: u64 = 1
+const E_ROOM: u64 = 2
+const E_FORMAT: u64 = 3
 
 const M32: u64 = 0xFFFFFFFF
 
 // ---------------------------------------------------------- Pruefsumme
 
-// CRC-32 nach RFC 1952, ohne Tabelle: acht Schritte je Oktett. Die Maske
-// ist `0 -% (crc & 1)` -- das ist 0 oder 0xFFFFFFFF, und es ist eine
-// UMDEUTUNG und keine Subtraktion.
 fn crc32(p: u64, n: u64) -> u64 {
     var crc: u64 = M32
     var i: u64 = 0
@@ -72,13 +46,6 @@ static mut dext: [u64; 30] = [0 as u64; 30]
 static mut clorder: [u64; 19] = [0 as u64; 19]
 static mut ready: u64 = 0
 
-// Die Tabellen aus RFC 1951 werden GERECHNET und nicht abgeschrieben:
-// die Zahl der Zusatzbits waechst ab dem achten Code alle vier Codes um
-// eins, und jede Basis ist die vorige plus 2^Zusatzbits. Nur der letzte
-// Laengencode faellt heraus (258 ohne Zusatzbits), und genau das ist die
-// Stelle, an der eine abgeschriebene Tabelle einen Tippfehler hat.
-// Dieselbe Pruefsumme, aber in Stuecken: der Stand geht hinein und
-// kommt heraus. `crc32(p, n)` ist `crc32_fort(0, p, n)`.
 fn crc32_fort(stand: u64, p: u64, n: u64) -> u64 {
     var crc: u64 = (stand ^ M32) & M32
     var i: u64 = 0
@@ -126,8 +93,6 @@ fn setup() {
         b = b + (1 << e)
         i = i + 1
     }
-    // Die Reihenfolge, in der die Codelaengen der Codelaengen stehen.
-    // Sie ist willkuerlich und steht so in RFC 1951, Abschnitt 3.2.7.
     clorder[0 as usize] = 16
     clorder[1 as usize] = 17
     clorder[2 as usize] = 18
@@ -194,9 +159,6 @@ static mut dcnt: [u64; 16] = [0 as u64; 16]
 static mut dsym: [u64; 32] = [0 as u64; 32]
 static mut lengths: [u64; 320] = [0 as u64; 320]
 
-// Ein kanonischer Baum aus den Codelaengen: `cnt[l]` ist die Zahl der
-// Codes der Laenge l, `sym` die Zeichen in aufsteigender Reihenfolge.
-// Genau diese zwei Felder braucht der Dekodierer unten.
 fn construct(cnt: u64, sym: u64, from: u64, n: u64) -> bool {
     var i: u64 = 0
     while i < 16 {
@@ -213,8 +175,6 @@ fn construct(cnt: u64, sym: u64, from: u64, n: u64) -> bool {
     if *((cnt) as *mut u64) == n {
         return true
     }
-    // Ein Baum, der mehr Codes hat, als in seine Laengen passen, ist
-    // kaputt -- die Kraft-Ungleichung.
     var left: u64 = 1
     var l: u64 = 1
     while l < 16 {
@@ -322,8 +282,6 @@ fn dynamic_trees() -> bool {
         oops = E_FORMAT
         return false
     }
-    // Die Codelaengen selbst sind lauflaengenkodiert: 16 wiederholt die
-    // vorige, 17 und 18 sind Laeufe von Nullen.
     var have: u64 = 0
     var out: [u64; 320] = [0 as u64; 320]
     while have < hlit + hdist {
@@ -431,7 +389,6 @@ fn block_body() -> bool {
     return true
 }
 
-// Auspacken. `out_len` bekommt die Zahl der erzeugten Oktette.
 fn inflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     out_len: u64) -> u64 {
     setup()
@@ -451,8 +408,6 @@ fn inflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
         if oops != E_OK {
             last = 1
         } else if kind == 0 {
-            // Gespeichert: auf das naechste Oktett ausrichten, dann
-            // LEN und sein Einerkomplement.
             bp = 0
             bn = 0
             if spos + 4 > send {
@@ -491,15 +446,6 @@ fn inflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     return oops
 }
 
-// GESPEICHERTE BLOECKE. Zufallszahlen lassen sich nicht packen, und ein
-// Packer, der sie trotzdem durch die Huffman-Baeume schiebt, macht sie um
-// ein Achtel GROESSER. Deshalb hat deflate die Blockart 0: Laenge,
-// Einerkomplement der Laenge, dann die Oktette roh. Hoechstens 65535 je
-// Block, also mehrere hintereinander.
-//
-// `gzip` dieser Runde packt zuerst richtig und nimmt DAS hier, wenn das
-// Ergebnis nicht kleiner geworden ist -- dieselbe Regel, die GNU seit
-// jeher hat.
 fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     out_len: u64) -> u64 {
     dst = out_p
@@ -536,12 +482,6 @@ fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
 
 // -------------------------------------------------------- das Einpacken
 
-// Das Fenster ist 16 KiB statt der 32 KiB, die deflate erlaubt. Der
-// Grund ist Speicher und sonst nichts: die Kette kostet acht Oktette je
-// Stelle, und ein Programm auf dieser Maschine hat 1 MiB zwischen
-// `proc.IMAGE_BASE` und `proc.IMAGE_END`. Ein kuerzeres Fenster ist
-// GUELTIGES deflate -- jeder Entpacker liest es, es wird nur ein wenig
-// groesser.
 const WSIZE: u64 = 4096
 const PREVN: u64 = 16384
 const PREVM: u64 = 16383
@@ -563,9 +503,6 @@ fn put_bits(v: u64, n: u64) {
     }
 }
 
-// Ein Huffman-Code steht mit dem hoechsten Bit ZUERST im Strom, jedes
-// andere Feld mit dem niedrigsten. Das ist die eine Regel von RFC 1951,
-// an der jede eigene Fassung von deflate zuerst scheitert.
 fn put_code(code: u64, n: u64) {
     var i: u64 = n
     while i > 0 {
@@ -616,10 +553,6 @@ fn hash3(p: u64, at: u64) -> u64 {
     return ((a << 10) ^ (b << 5) ^ c) & (WSIZE - 1)
 }
 
-// Einpacken mit den FESTEN Baeumen, ein einziger Block. Gibt E_OK oder
-// E_ROOM; `out_len` bekommt die Laenge.
-// Einpacken mit den FESTEN Baeumen, ein einziger Block. Gibt E_OK oder
-// E_ROOM; `out_len` bekommt die Laenge.
 fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     out_len: u64) -> u64 {
     strom_start(out_p, out_cap)
@@ -631,21 +564,6 @@ fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
 }
 
 // ================================== RUNDE ALLTAG: DEFLATE IN STUECKEN
-//
-// `deflate` will die ganze Eingabe auf einmal und den ganzen Ausgang in
-// einem Puffer. Fuer ein Bildschirmfoto ist beides zu viel: 1280 mal
-// 800 Bildpunkte sind vier Megabyte ungepackt, und ein Prozess dieses
-// Systems hat sechs.
-//
-// Also derselbe Packer, aber in Bloecken: `strom_start` einmal,
-// `strom_block` je Streifen (jeder ein eigener deflate-Block mit
-// eigenen Uebereinstimmungen, deshalb in sich abgeschlossen),
-// dazwischen die fertigen Oktette wegschreiben und `strom_leeren`.
-// Der BITSTAND BLEIBT dabei stehen -- deshalb duerfen die Bloecke
-// aneinandergehaengt werden, ohne dass ein Entpacker aus dem Tritt
-// kommt. Das ist der ganze Unterschied zu "jeden Streifen einzeln
-// packen", was einen Strom aus lauter Schlussbloecken gaebe, von dem
-// jeder Entpacker nur den ersten liest.
 fn strom_start(out_p: u64, out_cap: u64) {
     setup()
     dst = out_p
@@ -656,13 +574,10 @@ fn strom_start(out_p: u64, out_cap: u64) {
     oops = E_OK
 }
 
-// Wieviele fertige Oktette im Puffer stehen.
 fn strom_pos() -> u64 {
     return dpos
 }
 
-// Sie sind weggeschrieben -- von vorn. Die angefangenen BITS bleiben,
-// wo sie sind (in `wbuf`), sonst waere der Strom hin.
 fn strom_leeren() {
     dpos = 0
 }
@@ -672,9 +587,6 @@ fn strom_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
     if letzt {
         f = 1
     }
-    // Die Streuwerttabellen JE BLOCK leeren: eine Uebereinstimmung darf
-    // nur in diesen Block zurueckzeigen, sonst waere er nicht fuer sich
-    // lesbar.
     var i: u64 = 0
     while i < WSIZE {
         head[(i) as usize] = 0
@@ -685,7 +597,7 @@ fn strom_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
         prev[(i) as usize] = 0
         i = i + 1
     }
-    put_bits(f, 1) // BFINAL nur im letzten
+    put_bits(f, 1)
     put_bits(1, 2) // feste Baeume
     var at: u64 = 0
     while at < in_n && oops == E_OK {
@@ -715,16 +627,12 @@ fn strom_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
                     tries = tries + 1
                 }
             }
-            // ERST die Kette, DANN der Kopf: umgekehrt zeigte der
-            // Eintrag auf sich selbst und die Suche liefe im Kreis.
             prev[(at & PREVM) as usize] = head[(h) as usize]
             head[(h) as usize] = at + 1
         }
         if best >= 3 {
             put_length(best)
             put_dist(bestd)
-            // Jede uebersprungene Stelle gehoert trotzdem in die
-            // Streuwerttabelle, sonst findet der naechste Lauf sie nicht.
             var k: u64 = 1
             while k < best {
                 if at + k + 3 <= in_n {
@@ -740,7 +648,7 @@ fn strom_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
             at = at + 1
         }
     }
-    put_code(0, 7) // das Zeichen 256: Ende des Blocks
+    put_code(0, 7)
     return oops
 }
 

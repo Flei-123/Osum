@@ -1,52 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/dhcp.fi -- Runde DESKTOP: /bin/dhcp, DER DHCP-KLIENT.
-//
-// EHRLICHER AUSGANGSPUNKT, und er steht im Auftrag dieser Runde: Osum
-// hat seit Runde K3 einen TCP/IP-Stapel, seit Runde K8 eine Karte
-// darunter und `ping` und `wget` darueber -- aber die ADRESSE wurde in
-// `inet.init` festgenagelt, aus der Kernel-Befehlszeile. Es gab kein
-// DHCP. In jedem Netz, das man nicht selbst aufgesetzt hat, ist ein
-// Rechner ohne DHCP ein Rechner ohne Netz.
-//
-// WAS HIER LAEUFT, ist RFC 2131 in seiner kuerzesten ehrlichen Form:
-//
-//     DISCOVER  ->  (Rundruf an 255.255.255.255:67)
-//               <-  OFFER     (yiaddr, Maske, Gateway, Server)
-//     REQUEST   ->  (mit Option 50 und 54)
-//               <-  ACK
-//
-// Danach geht die Adresse ueber `osum_netset` (Runde DESKTOP,
-// kernel/sys.fi) in den Kernel und in `/etc/network.conf` auf die Platte.
-//
-// WAS ER NICHT TUT, und das gehoert genannt: keine Erneuerung des
-// Vertrages (T1/T2), kein DECLINE nach einer ARP-Probe, kein RELEASE,
-// kein INFORM. Die Laufzeit wird gelesen und gemeldet, aber nicht
-// abgewartet -- ein Klient, der nach zwoelf Stunden erneuert, ist auf
-// einer Maschine, die zehn Sekunden lang gemessen wird, nicht pruefbar.
-// Das steht so im Logbuch unter "was nicht bewiesen ist".
-//
-// DER RUNDRUF, UND WAS AN IHM WIRKLICH GEHT -- die ehrlichste Stelle
-// dieser Datei.
-//
-// HEREIN: `ip_in` in `vendor/firn/lib/net/stack.fi` nimmt ein Paket an
-// 255.255.255.255 ausdruecklich an. Ein Angebot per Rundruf kommt also
-// wirklich bei uns an, und das Rundruf-Bit im Paket ist nicht Zierde.
-//
-// HINAUS: dort fehlt der Sonderfall. `net_output` sucht auch fuer
-// 255.255.255.255 den naechsten Sprung und fragt per ARP nach dessen
-// Hardwareadresse -- statt ff:ff:ff:ff:ff:ff zu nehmen. Antwortet
-// niemand, bleibt das Paket liegen. In einem Netz, in dem das Gateway
-// selbst der DHCP-Server ist (QEMUs Benutzernetz, jeder Heimrouter),
-// geht es trotzdem durch: die ARP-Antwort kommt vom Gateway, und der
-// Server hoert auf UDP 67, nicht auf eine Hardwareadresse.
-//
-// Dieser Klient sendet deshalb ABWECHSELND: geradzahlige Versuche als
-// Rundruf, ungeradzahlige als Einzelruf an das Gateway. Letzteres
-// sieht RFC 2131 fuer den Zustand RENEWING ohnehin vor. Was damit
-// NICHT bewiesen ist, steht im Logbuch: ein Rundruf in einem Netz, in
-// dem der DHCP-Server NICHT das Gateway ist. Dafuer braeuchte der
-// Stapel drei Zeilen mehr, und der Stapel ist festgenagelter Vorrat
-// (vendor/firn) -- er gehoert dieser Runde nicht.
 
 profile kernel
 
@@ -61,9 +14,6 @@ export { u_start }
 const RETRY: u64 = 0xFFFF
 const SYS_NETGET: u64 = 1300
 const SYS_NETSET: u64 = 1301
-// RUNDE ECHTHARDWARE-1: der Fortschritt geht in den Kern, damit die
-// Messtafel ihn zeigen kann -- Justins Brett hat keine serielle
-// Leitung, und ohne die war jede Meldung dieses Programms unsichtbar.
 const SYS_DHCPST: u64 = 1302
 const D_ST: u64 = 0
 const D_TX: u64 = 1
@@ -81,9 +31,8 @@ const NG_MAC1: u64 = 5
 
 const PORT_S: u64 = 67
 const PORT_C: u64 = 68
-const PAKET: u64 = 548 // 236 BOOTP + Optionen, unter der 576er Grenze
+const PAKET: u64 = 548
 
-// Die Stellen im BOOTP-Kopf (RFC 951, RFC 2131).
 const B_OP: u64 = 0
 const B_HTYPE: u64 = 1
 const B_HLEN: u64 = 2
@@ -107,9 +56,6 @@ static mut o_lease: u64 = 0
 // `bauen(3)` a RENEWING request: ciaddr = our address, no options 50/54, and the
 // broadcast bit off.
 static mut renewing: u64 = 0
-// RUNDE BETRIEB: der Nameserver. DHCP-Option 6 traegt eine LISTE von
-// Adressen zu je vier Oktetten; drei sind mehr als genug, und mehr als
-// vier nimmt der Aufloeser ohnehin nicht (`lib/libc/dns.fi`, MAX_SRV).
 static mut o_dns1: u64 = 0
 static mut o_dns2: u64 = 0
 static mut o_dns3: u64 = 0
@@ -427,10 +373,6 @@ fn g32(p: u64, at: u64) -> u64 {
         | g8(p, at + 3)
 }
 
-// EIN BOOTP-PAKET BAUEN. `art` ist 1 fuer DISCOVER und 3 fuer REQUEST;
-// bei REQUEST kommen die Optionen 50 (gewuenschte Adresse) und 54
-// (Server) dazu -- ohne sie beantwortet ein Server mit mehreren
-// Angeboten das falsche.
 fn bauen(art: u64) -> u64 {
     var i: u64 = 0
     while i < PAKET {
@@ -441,8 +383,6 @@ fn bauen(art: u64) -> u64 {
     s8(B_HTYPE, 1) // Ethernet
     s8(B_HLEN, 6)
     s32(B_XID, xid)
-    // DAS RUNDRUF-BIT. Ohne es antwortet ein Server an die Adresse, die
-    // wir noch nicht haben -- und das Paket kommt nie an.
     s8(B_FLAGS, 0x80)
     s8(B_FLAGS + 1, 0)
     if art == 3 && renewing != 0 {
@@ -475,7 +415,7 @@ fn bauen(art: u64) -> u64 {
         s8(at + 4, (o_ip >> 8) & 255)
         s8(at + 5, o_ip & 255)
         at = at + 6
-        s8(at, 54) // der Server, von dem das Angebot kam
+        s8(at, 54)
         s8(at + 1, 4)
         s8(at + 2, (o_server >> 24) & 255)
         s8(at + 3, (o_server >> 16) & 255)
@@ -492,14 +432,11 @@ fn bauen(art: u64) -> u64 {
     s8(at, 255) // Ende
     at = at + 1
     if at < 300 {
-        at = 300 // ein BOOTP-Paket ist mindestens 300 Oktette lang
+        at = 300
     }
     return at
 }
 
-// DIE OPTIONEN EINER ANTWORT LESEN. Gibt die Nachrichtenart (Option 53)
-// zurueck, oder 0. Ein Paket mit falscher Kennung oder falscher
-// Vorgangsnummer wird verworfen und NICHT halb ausgewertet.
 fn read(p: u64, n: u64) -> u64 {
     if n < B_OPT {
         return 0
@@ -544,11 +481,6 @@ fn read(p: u64, n: u64) -> u64 {
                     } else if t == 51 && l == 4 {
                         o_lease = g32(p, at + 2)
                     } else if t == 6 && l >= 4 {
-                        // RUNDE BETRIEB: die Nameserver. `dhcp.fi kennt
-                        // den Nameserver schon` sagte docs/OTA.md -- das
-                        // stimmte fuer das Paket und nicht fuer diesen
-                        // Zerteiler: Option 6 wurde bis hierher
-                        // UEBERSPRUNGEN. Jetzt wird sie gelesen.
                         o_dns1 = g32(p, at + 2)
                         if l >= 8 {
                             o_dns2 = g32(p, at + 6)
@@ -639,24 +571,10 @@ fn net_note(v: u64) {
     }
 }
 
-
 // RUNDE BETRIEB: /etc/resolv.conf SCHREIBEN.
-//
-// Bis zu dieser Runde schrieb diese Datei NIEMAND -- das war Punkt 2 der
-// Fehlliste in docs/OTA.md, und es war der billigste. Der Vertrag nennt
-// den Nameserver seit RFC 2132 in Option 6; hier wird er auf die Platte
-// gelegt, wo `lib/libc/dns.fi` ihn findet.
-//
-// WAS ERHALTEN BLEIBT: jede Zeile, die mit `fallback` anfaengt. Das ist
-// der sichtbare, abschaltbare Rueckfall aus dem Auftrag -- ein
-// Nameserver, den ein Mensch von Hand eingetragen hat, weil der aus dem
-// Netz nicht taugt. Er darf nicht bei jedem Vertrag verlorengehen, und
-// er steht ABSICHTLICH nicht als `nameserver` da: sonst wuerde er MIT
-// gefragt, statt NUR DANN, wenn niemand sonst antwortet.
 fn resolv_write(p_res: u64, k_ns: u64, k_fb: u64, k_nl: u64) -> u64 {
     let r: u64 = (&rconf[0 as usize]) as u64
     let a: u64 = (&alt[0 as usize]) as u64
-    // das Alte lesen, BEVOR es ueberschrieben wird
     var an: u64 = 0
     let fo: u64 = ulib.sys(ulib.SYS_OPEN, p_res, 0, 0)
     if !ulib.bad(fo) {
@@ -686,7 +604,6 @@ fn resolv_write(p_res: u64, k_ns: u64, k_fb: u64, k_nl: u64) -> u64 {
         }
         d = d + 1
     }
-    // die aufgehobenen `fallback`-Zeilen
     var i: u64 = 0
     while i < an {
         var e: u64 = i
@@ -1045,8 +962,6 @@ fn renew_loop(t1_test: u64) -> u64 {
     return 0
 }
 
-
-
 fn run_once(args: u64) -> u64 {
     var s_no: [u8; 26] = "dhcp: kein Netz im Kernel\0"
     var s_ns: [u8; 26] = "dhcp: kein Socket, errno \0"
@@ -1085,27 +1000,6 @@ fn run_once(args: u64) -> u64 {
     var p_conf: [u8; 18] = "/etc/network.conf\0"
     var s_ei: [u8; 7] = "einmal\0"
     var s_spaet: [u8; 44] = "dhcp: Karte war spaet, gewartet (x100ms): \0\0"
-    // ============================================ RUNDE ECHTHARDWARE-6
-    // `dauer` -- NACH EINEM FEHLSCHLAG SPAETER WIEDER FRAGEN.
-    //
-    // Justins Tafel: `NET K3 BDF 0900 L 1 ABL 0 IP 169.254.10.1 Dd`.
-    // Der Buchstabe hinter `D` ist der Zustand des Klienten, und `d`
-    // heisst: DISCOVER ist HINAUSGEGANGEN (waere nichts hinausgegangen,
-    // staende dort `x`), aber es kam KEIN Angebot zurueck. `ABL 0`
-    // heisst, dass keine zweite Netzkarte abgelehnt wurde -- die Karte
-    // ist also die richtige, `L 1` sagt, das Kabel steckt.
-    //
-    // Zusammen: unsere Seite hat gefragt und niemand hat geantwortet.
-    // Im Lauf davor gab es `192.168.1.107`, also antwortet derselbe
-    // Router sonst. Das ist kein Fehler unseres Stapels, sondern eine
-    // Frage des Zeitpunkts -- ein Router, der gerade neu startet, ein
-    // Anschluss, der noch aushandelt, ein WLAN, das aus war.
-    //
-    // Der Klient hat danach AUFGEGEBEN und das System blieb fuer immer
-    // auf der Notadresse. Genau das ist der Mangel: sechs Versuche in
-    // wenigen Sekunden, und danach nie wieder. Mit `dauer` fragt er
-    // weiter -- mit wachsendem Abstand, damit ein Netz ohne
-    // DHCP-Server nicht dauerhaft mit Rundrufen belegt wird.
     var s_da: [u8; 6] = "dauer\0"
     var s_t1: [u8; 4] = "t1=\0"
     var t1_test: u64 = 0
@@ -1137,26 +1031,6 @@ fn run_once(args: u64) -> u64 {
         }
         a = a + 1
     }
-    // ==================================================== RUNDE ECHT
-    // DER WETTLAUF ZWISCHEN TREIBER UND KLIENT -- Justins sporadisches
-    // Netz.
-    //
-    // Gemessen an seinem Geraet: einmal `IP 0.0.0.0`, nach einem
-    // Neustart `192.168.1.109` aus demselben Router. Netzchip und DHCP
-    // gehen also GRUNDSAETZLICH; der Fehler ist eine Frage des
-    // Zeitpunkts. Und genau hier stand er: ist der Kartentreiber beim
-    // Start noch nicht fertig (`NG_READY != 1`), gab dieser Klient auf
-    // -- mit `return 1`, also OHNE die `dauer`-Schleife weiter unten
-    // anzustossen. Der Kern startet `dhcp dauer` frueh (kgui.fi), damit
-    // die Adresse da ist, wenn der Schreibtisch steht; ist die Karte
-    // in diesem Moment noch nicht angemeldet, blieb das System fuer
-    // IMMER ohne Adresse, obwohl die Karte Sekunden spaeter bereit war.
-    //
-    // Ein Klient, der auf den Treiber wartet, ist kein Sonderfall,
-    // sondern der Normalfall auf echtem Blech: dort dauert die
-    // Anmeldung einer PCI-Karte laenger als im Emulator. Also wird
-    // gewartet -- in kleinen Schritten und mit Obergrenze, damit ein
-    // Rechner OHNE Netzkarte nicht haengt.
     var bereit: u64 = ulib.sys(SYS_NETGET, NG_READY, 0, 0)
     if bereit != 1 {
         var gewartet: u64 = 0
@@ -1174,12 +1048,6 @@ fn run_once(args: u64) -> u64 {
     if bereit != 1 {
         say((&s_no[0 as usize]) as u64)
         ulib.nl()
-        // MIT `dauer` IST AUCH DAS KEIN ENDE. Eine Karte, die nach
-        // zehn Sekunden noch nicht da ist, kann nach einer Minute da
-        // sein (spaet geladenes Modul, langsamer Bus). Ohne diese
-        // Zeile war "Treiber noch nicht fertig" endgueltig, waehrend
-        // "kein Angebot" es nicht war -- zwei Maesse fuer denselben
-        // Fall.
         if dauer != 0 {
             var wn: u64 = 5
             if anlauf < 4 {
@@ -1196,8 +1064,6 @@ fn run_once(args: u64) -> u64 {
         }
         return 1
     }
-    // Die Hardwareadresse aus dem Kernel. Sie MUSS in das Paket -- ein
-    // Server ordnet den Vertrag ihr zu und nicht dem Absender.
     let m0: u64 = ulib.sys(SYS_NETGET, NG_MAC0, 0, 0)
     let m1: u64 = ulib.sys(SYS_NETGET, NG_MAC1, 0, 0)
     mac[(0) as usize] = ((m0 >> 24) & 255) as u8
@@ -1206,8 +1072,6 @@ fn run_once(args: u64) -> u64 {
     mac[(3) as usize] = (m0 & 255) as u8
     mac[(4) as usize] = ((m1 >> 8) & 255) as u8
     mac[(5) as usize] = (m1 & 255) as u8
-    // Die Vorgangsnummer aus der Uhr. Zwei Klienten im selben Netz
-    // duerfen nicht dieselbe haben.
     xid = (ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0) *% 2654435761)
         & 0xFFFFFFFF
     if xid == 0 {
@@ -1260,10 +1124,6 @@ fn run_once(args: u64) -> u64 {
     var von: u64 = 0
     var runde: u64 = 0
     var weg: u64 = 0 // 0 = Rundruf, 1 = Einzelruf ans Gateway
-    // 1. DISCOVER, so oft wie noetig -- die erste Nachricht an eine
-    //    Adresse, deren Hardwareadresse der Stapel nicht kennt, wird
-    //    gegen eine ARP-Frage getauscht. Das ist kein Fehler, das ist
-    //    ein Grund, es gleich noch einmal zu sagen.
     var tx: u64 = 0
     var rx: u64 = 0
     while runde < versuche && art != 2 {
@@ -1274,10 +1134,6 @@ fn run_once(args: u64) -> u64 {
         }
         let _s: u64 = net.sendto_ip(fd, (&aus[0 as usize]) as u64, n, ziel,
             PORT_S)
-        // NUR EIN WIRKLICH ABGESCHICKTES PAKET ZAEHLT. `sendto_ip`
-        // gibt einen Fehler zurueck, wenn der Stapel es nicht
-        // loswurde -- und genau dieser Fall ("TX 0 trotz Link") ist
-        // die Diagnose, die auf Justins Tafel fehlte.
         if !net.failed(_s) {
             tx = tx + 1
         }
@@ -1311,11 +1167,6 @@ fn run_once(args: u64) -> u64 {
         say((&s_ve[0 as usize]) as u64)
         ulib.nl()
         net.close(fd)
-        // RUNDE ECHTHARDWARE-6: mit `dauer` ist "kein Angebot" kein
-        // Ende, sondern eine Pause. Der Abstand waechst (5, 10, 20,
-        // 40, dann 60 Sekunden), damit ein Netz ohne DHCP-Server
-        // nicht dauerhaft mit Rundrufen belegt wird, ein Router, der
-        // gerade hochfaehrt, aber schnell wieder eingefangen wird.
         if dauer != 0 {
             var w: u64 = 5
             if anlauf < 4 {
@@ -1368,7 +1219,7 @@ fn run_once(args: u64) -> u64 {
                     art = 5
                 } else if t2 == 6 {
                     melde(D_ST, 6) // NAK
-                    runde = versuche // NAK: nicht weiter fragen
+                    runde = versuche
                 }
             } else {
                 ulib.sleep_ms(50)
@@ -1377,10 +1228,6 @@ fn run_once(args: u64) -> u64 {
         }
         runde = runde + 1
     }
-    // DEN SOCKET ZUERST SCHLIESSEN. `osum_netset` setzt den Stapel neu
-    // auf (kernel/inet.fi, `readdr`) und raeumt dabei die Sockettabelle
-    // -- ein Deskriptor, der danach noch offen waere, zeigte auf einen
-    // Platz, den es nicht mehr gibt.
     net.close(fd)
     if art != 5 {
         if ulib.sys(SYS_DHCPST, D_ST, 0, 0) != 6 {
@@ -1393,7 +1240,7 @@ fn run_once(args: u64) -> u64 {
         return later(dauer)
     }
     anlauf = 0
-    melde(D_ST, 4) // ACK -- die Adresse steht
+    melde(D_ST, 4)
     sag_ip((&s_ak[0 as usize]) as u64, o_ip)
     say((&s_ls[0 as usize]) as u64)
     ulib.sayn(o_lease)
@@ -1414,7 +1261,6 @@ fn run_once(args: u64) -> u64 {
     ulib.nl()
     net_note(ulib.sys(SYS_NETGET, NG_IP, 0, 0))
 
-    // 3. Und auf die Platte, damit der naechste Start es weiss.
     let c: u64 = (&conf[0 as usize]) as u64
     var at: u64 = text_an(c, 0, (&k_kopf[0 as usize]) as u64)
     at = text_an(c, at, (&k_nl[0 as usize]) as u64)
@@ -1463,7 +1309,6 @@ fn run_once(args: u64) -> u64 {
     }
     log_lease((&LOG_LEASE[0 as usize]) as u64)
 
-    // 4. RUNDE BETRIEB: der Nameserver nach /etc/resolv.conf.
     if o_dns1 == 0 {
         say((&s_rn[0 as usize]) as u64)
         ulib.nl()

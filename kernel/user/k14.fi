@@ -1,41 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/k14.fi -- Runde K14: die VFS-Schicht, von AUSSEN gemessen.
-//
-// Wie `/bin/posix` (K4) und `/bin/unix` (K9): das Programm laeuft in
-// Ring 3, macht jeden Aufruf wirklich, und schreibt jede Antwort als
-//
 //     k14: <name> = <zahl>
-//
-// auf die Konsole. `tools/k14/run.sh` haelt jede dieser Zahlen gegen
-// das, was sie sein MUSS. Was hier nicht als Zahl herauskommt, ist
-// keine Zusage, sondern eine Behauptung.
-//
-// SECHS ABSCHNITTE, in der Reihenfolge des Auftrags dieser Runde:
-//
-//   1. DIE EINHAENGETAFEL. Wie viele Einhaengungen es gibt, welche Art
-//      sie haben, wo sie liegen -- gelesen ueber SYS_OSUM_MNTSTAT, also
-//      aus der Tafel des Kernels und nicht aus einer Vermutung.
-//   2. DIE PFADAUFLOESUNG UEBER GRENZEN HINWEG. Derselbe Aufruf
-//      (`stat`) auf zwei Pfaden, die auf zwei verschiedenen
-//      Dateisystemen liegen, muss zwei verschiedene `st_dev` geben --
-//      und "/mnttest" darf NICHT auf "/mnt" landen, obwohl die vier
-//      Oktette stimmen. Das ist die eine Zeile, an der eine
-//      Einhaengeschicht falsch wird.
-//   3. AUSHAENGEN MIT OFFENEN DESKRIPTOREN. Eine Datei wird geoeffnet,
-//      der Zaehler der Einhaengung geht auf eins, `umount` MUSS -EBUSY
-//      geben, nach `close` MUSS es gehen -- und danach ist das
-//      Verzeichnis wirklich leer.
-//   4. /proc. Der eigene Prozess, in Zahlen: die Pid in
-//      /proc/<pid>/status, die eigenen Deskriptoren in
-//      /proc/<pid>/fd, und /proc/<pid>/maps, das sich AENDERT, wenn
-//      der Prozess eine Seite mehr bekommt.
-//   5. /dev. null, zero, urandom und das BLOCKGERAET -- und das
-//      Blockgeraet ist die eine Datei hier, deren Oktette wirklich auf
-//      einem Traeger liegen. Der Bootsektor der zweiten Platte wird
-//      gelesen und gegen 0x55 0xAA geprueft.
-//   6. WAS NICHT GEHEN DARF. Schreiben in /proc, Anlegen in /dev,
-//      Umbenennen ueber eine Einhaengegrenze (-EXDEV) -- eine Schicht,
-//      die alles erlaubt, trennt nichts.
 
 profile kernel
 
@@ -74,7 +37,6 @@ const O_TRUNC: u64 = 512
 const SEEK_SET: u64 = 0
 const SEEK_END: u64 = 2
 
-// Die Felder von `struct stat`, x86-64 (kernel/sys.fi).
 const ST_DEV: u64 = 0
 const ST_INO: u64 = 8
 const ST_MODE: u64 = 24
@@ -86,7 +48,6 @@ const S_IFREG: u64 = 32768
 const S_IFCHR: u64 = 8192
 const S_IFBLK: u64 = 24576
 
-// Die Felder von SYS_MNTSTAT.
 const MS_USED: u64 = 0
 const MS_TYPE: u64 = 1
 const MS_DEV: u64 = 2
@@ -119,8 +80,6 @@ fn line(name: u64, v: u64) {
     ulib.nl()
 }
 
-// Ein Fehler als POSITIVE Zahl, damit die Zeilen lesbar bleiben: 0
-// heisst "hat geklappt", 16 heisst -EBUSY.
 fn code(v: u64) -> u64 {
     if errno.is_error(v) {
         return 0 -% v
@@ -177,11 +136,6 @@ fn mnt_by_path(p: u64) -> u64 {
     return 8
 }
 
-// Die Art der Einhaengung an diesem Ort -- 0, wenn es sie nicht gibt.
-// NICHT der Fehler von SYS_MNTSTAT: eine Gegenprobe soll "gibt es
-// nicht" sagen koennen, und -EINVAL ("die Nummer 8 ist keine
-// Einhaengung") ist eine Aussage ueber die FRAGE und nicht ueber die
-// Antwort.
 fn type_at(p: u64) -> u64 {
     let m: u64 = mnt_by_path(p)
     if m >= 8 {
@@ -215,8 +169,6 @@ fn section_table() {
     line((&n_fatdev[0 as usize]) as u64, fdev)
 }
 
-// ================================= 2. Aufloesung ueber Grenzen hinweg
-
 fn section_cross() {
     var st: [u8; 160] = [0 as u8; 160]
     var st2: [u8; 160] = [0 as u8; 160]
@@ -235,10 +187,6 @@ fn section_cross() {
     var p_trap: [u8; 19] = "/mnttest/hello.txt\0"
     var p_deep: [u8; 20] = "/mnt/unter/tief.txt\0"
     var p_unter: [u8; 12] = "/mnt/unter\0\0"
-    // BEIDE Puffer werden geleert, BEVOR gefragt wird. Ein `stat`, das
-    // fehlschlaegt, schreibt nichts -- und was dann im Puffer stuende,
-    // waere der Rest vom letzten Mal. Genau daran ist die erste
-    // Fassung dieser Gegenprobe gescheitert.
     zero((&st[0 as usize]) as u64, 160)
     zero((&st2[0 as usize]) as u64, 160)
     var have_root: bool = !ulib.bad(ulib.sys(SYS_STAT,
@@ -262,9 +210,6 @@ fn section_cross() {
         diff = 1
     }
     line((&n_same[0 as usize]) as u64, diff)
-    // DIE NAMENSGRENZE. "/mnttest" faengt mit "/mnt" an -- Oktett fuer
-    // Oktett. Ein Praefixvergleich ohne Grenze wuerde die Datei auf dem
-    // FAT32 suchen und finden. Sie MUSS unauffindbar sein.
     line((&n_trap[0 as usize]) as u64,
         code(ulib.sys(SYS_STAT, (&p_trap[0 as usize]) as u64,
             (&st[0 as usize]) as u64, 0)))
@@ -313,11 +258,6 @@ fn section_busy() {
     ulib.sys(SYS_CLOSE, fd, 0, 0)
     line((&n_after[0 as usize]) as u64,
         ulib.sys(SYS_MNTSTAT, m, MS_OPENS, 0))
-    // ZWEI DESKRIPTOREN, EINE OFFENE DATEI. `dup` macht aus einem
-    // Deskriptor zwei -- die EINHAENGUNG ist danach trotzdem einmal
-    // offen und nicht zweimal, denn die Zahl haengt am Eintrag der
-    // Tafel der offenen Dateien und nicht an der Deskriptornummer.
-    // Erst wenn der LETZTE Deskriptor faellt, geht sie herunter.
     let d1: u64 = ulib.sys(SYS_OPEN, (&p_hello[0 as usize]) as u64,
         O_RDONLY, 0)
     let d2: u64 = ulib.sys(SYS_DUP, d1, 0, 0)
@@ -368,7 +308,6 @@ fn read_all(path: u64, dst: u64, max: u64) -> u64 {
     return got
 }
 
-// Die Zahl hinter dem n-ten Doppelpunkt-Feld mit diesem Namen.
 fn field_num(text: u64, name: u64) -> u64 {
     var i: u64 = 0
     while byte_at(text, i) != 0 {
@@ -484,10 +423,6 @@ fn section_proc() {
         count_lines((&text[0 as usize]) as u64))
     line((&n_up[0 as usize]) as u64,
         read_all((&p_up[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200))
-    // /proc/<pid>/maps AENDERT SICH, wenn der Prozess eine Seite mehr
-    // bekommt. Das ist die Zusage "hier steht die Seitentabelle und
-    // keine Liste von Konstanten" -- und sie ist genau dann etwas wert,
-    // wenn die Zahl VORHER kleiner ist als NACHHER.
     num_to_path(pid, (&pre[0 as usize]) as u64,
         (&s_maps[0 as usize]) as u64, (&path[0 as usize]) as u64)
     read_all((&path[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200)
@@ -507,8 +442,6 @@ fn section_proc() {
         (&s_cmd[0 as usize]) as u64, (&path[0 as usize]) as u64)
     line((&n_cmd[0 as usize]) as u64,
         read_all((&path[0 as usize]) as u64, (&text[0 as usize]) as u64, 2200))
-    // Die eigenen Deskriptoren, gezaehlt ueber `getdents64` auf
-    // /proc/<pid>/fd. Drei sind es mindestens: 0, 1 und 2.
     var s_fd: [u8; 4] = "/fd\0"
     num_to_path(pid, (&pre[0 as usize]) as u64,
         (&s_fd[0 as usize]) as u64, (&path[0 as usize]) as u64)
@@ -516,7 +449,6 @@ fn section_proc() {
         dir_count((&path[0 as usize]) as u64))
 }
 
-// Wie viele Eintraege hat dieses Verzeichnis (ohne `.` und `..`)?
 fn dir_count(path: u64) -> u64 {
     var buf: [u8; 1024] = [0 as u8; 1024]
     let fd: u64 = ulib.sys(SYS_OPEN, path, O_RDONLY, 0)
@@ -600,9 +532,6 @@ fn section_dev() {
         i = i + 1
     }
     line((&n_zero[0 as usize]) as u64, allzero)
-    // /dev/urandom: zwei Puffer hintereinander, die verschieden sein
-    // muessen. Ein Geraet, das immer dasselbe liefert, besteht jede
-    // Pruefung, die nur "es kamen Oktette" misst.
     var r1: [u8; 64] = [0 as u8; 64]
     var r2: [u8; 64] = [0 as u8; 64]
     let c: u64 = ulib.sys(SYS_OPEN, (&p_rand[0 as usize]) as u64, O_RDONLY, 0)
@@ -619,9 +548,6 @@ fn section_dev() {
         i = i + 1
     }
     line((&n_rand[0 as usize]) as u64, differ)
-    // DAS BLOCKGERAET. Der erste Sektor der zweiten Platte ist ihr
-    // Bootsatz, und dessen letzte zwei Oktette sind 0x55 0xAA -- das
-    // steht dort, weil `sfdisk` auf dem WIRT es hineingeschrieben hat.
     let d: u64 = ulib.sys(SYS_OPEN, (&p_hdb[0 as usize]) as u64, O_RDONLY, 0)
     var got: u64 = 0
     if !ulib.bad(d) {
@@ -653,8 +579,6 @@ fn section_dev() {
     }
     line((&n_nmode[0 as usize]) as u64, ischr)
 }
-
-// ========================================= 6. was nicht gehen darf
 
 fn section_refuse() {
     var n_pw: [u8; 15] = "proc_write_err\0"
@@ -688,8 +612,6 @@ fn section_refuse() {
     line((&n_dc[0 as usize]) as u64,
         code(ulib.sys(SYS_OPEN, (&p_dev[0 as usize]) as u64,
             O_WRONLY | O_CREAT, 0)))
-    // UMBENENNEN UEBER EINE EINHAENGEGRENZE GEHT NICHT. -EXDEV, und
-    // `mv` weiss, was das heisst.
     line((&n_xd[0 as usize]) as u64,
         code(ulib.sys(SYS_RENAME, (&p_a[0 as usize]) as u64,
             (&p_b[0 as usize]) as u64, 0)))
@@ -700,7 +622,6 @@ fn section_refuse() {
     line((&n_rn2[0 as usize]) as u64,
         code(ulib.sys(SYS_STAT, (&p_c[0 as usize]) as u64,
             (&st[0 as usize]) as u64, 0)))
-    // ...und zurueck, damit der naechste Lauf dieselbe Platte sieht.
     line((&n_ro[0 as usize]) as u64,
         code(ulib.sys(SYS_RENAME, (&p_c[0 as usize]) as u64,
             (&p_a[0 as usize]) as u64, 0)))

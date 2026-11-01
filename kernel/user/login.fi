@@ -1,55 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/login.fi -- die Anmeldung.
-//
-// Das Programm, das es ohne `init` nicht geben koennte -- es braucht
-// einen Ort, an dem es laeuft, und dieser Ort ist der Prozess 1. `init`
-// startet es, es fragt nach Namen und Passwort, legt die Rechte des
-// Systems ab und WIRD die Shell des Menschen.
-//
-//     login              fragt nach Namen und Passwort
-//     login NAME         fragt nur nach dem Passwort
-//
 // ================================================ RUNDE MULTIUSER
-//
-// DREI DINGE SIND ANDERS, und das erste ist das, was K13 als Grenze
-// hingeschrieben und nicht gebaut hat:
-//
-//     "WAS ES NICHT TUT: es zaehlt Fehlversuche nicht ueber seine
-//      eigene Lebensdauer hinaus und wartet nach einem Fehlversuch
-//      nicht. Beides gehoert zu einer ernsthaften Anmeldung dazu."
-//
-// 1. DIE VERZOEGERUNG, und sie VERDOPPELT SICH. Nach dem ersten
-//    Fehlversuch eine Sekunde, nach dem zweiten zwei, nach dem dritten
-//    vier. Warum das der richtige Mechanismus ist und nicht bloss ein
-//    aergerlicher: die Kosten des Ratens steigen mit der Zahl der
-//    Versuche, die des ehrlichen Vertippens nicht -- wer sich einmal
-//    vertippt, wartet eine Sekunde und ist fertig.
-//
-//    DIE ZAHL, GEGEN DIE SIE ANTRITT, steht in `kernel/user/pw.fi`
-//    ausgerechnet: bei 8192 Runden schafft ein Angreifer mit einer
-//    optimierten Umsetzung rund 216 Rateversuche je Sekunde und Kern,
-//    WENN er /etc/shadow hat. An DIESER Anmeldung schafft er mit der
-//    Verdopplung nach zehn Versuchen einen alle siebzehn Minuten. Der
-//    Kostenfaktor und die Verzoegerung sind zwei verschiedene
-//    Abwehrmassnahmen gegen zwei verschiedene Angriffe, und keine
-//    ersetzt die andere.
-//
-// 2. DER ZAEHLER LAEUFT UEBER DIE GANZE LEBENSDAUER. Er stand vorher
-//    in der Schleife und wurde mit jedem neuen Namen zurueckgesetzt --
-//    wer nach zwei Fehlversuchen einen anderen Namen eintippte, fing
-//    von vorn an. Jetzt zaehlt `fehler` alles, was schiefging, und die
-//    Wartezeit richtet sich danach.
-//
-// 3. DIE ZUSATZGRUPPEN. `pw.initgroups` traegt alles ein, in dem
-//    dieser Name in /etc/group als Mitglied steht -- und zwar VOR
-//    `setgid`/`setuid`, weil `setgroups` root vorbehalten ist und
-//    dieser Prozess danach keiner mehr ist.
-//
-// WAS AUS /etc/login.conf KOMMT, wenn die Datei da ist:
-//     verzoegerung_ms   die erste Wartezeit (Vorgabe 1000)
-//     max_versuche      wie oft (Vorgabe 3)
-// Ohne die Datei gelten die Vorgaben -- ein System ohne sie muss sich
-// anmelden lassen.
 
 profile kernel
 
@@ -90,14 +39,6 @@ fn read_name(out: u64, max: u64) -> u64 {
     return n
 }
 
-// Die Wartezeit nach dem `n`-ten Fehlversuch: `basis` mal zwei hoch
-// (n-1), gedeckelt bei einer Minute. Der Deckel ist kein Zugestaendnis
-// -- ohne ihn wuerde der zwanzigste Fehlversuch acht Tage warten, und
-// eine Anmeldung, die nie wiederkommt, ist ein kaputtes Terminal und
-// keine Sicherheitsmassnahme. Wer wirklich raet, hat bei einer Minute
-// je Versuch laengst aufgegeben.
-// Die Uhr der Maschine in Millisekunden -- CLOCK_MONOTONIC, also der
-// Zyklenzaehler und nicht der Zeitgeberinterrupt.
 fn now_ms() -> u64 {
     var ts: [u64; 2] = [0 as u64; 2]
     if ulib.bad(ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
@@ -143,8 +84,6 @@ fn u_start(args: u64) -> u64 {
         hoechst = 3
     }
 
-    // DER ZAEHLER STEHT VOR DER SCHLEIFE. Genau das ist der Unterschied
-    // zu vorher: er ueberlebt den Namenswechsel.
     var fehler: u64 = 0
     var tries: u64 = 0
     while tries < hoechst {
@@ -168,26 +107,10 @@ fn u_start(args: u64) -> u64 {
                 okay = pw.check_hash((&have[0]) as u64, (&given[0]) as u64)
             }
         } else {
-            // DER UNBEKANNTE NAME WIRD TROTZDEM GEPRUEFT -- gegen einen
-            // Eintrag, der nie stimmt. Sonst waere an der Antwortzeit zu
-            // sehen, welche Namen es gibt: ein unbekannter Name kaeme
-            // sofort zurueck, ein bekannter erst nach der vollen
-            // Rundenzahl.
-            //
-            // RUNDE MULTIUSER: die Rundenzahl im Scheineintrag ist
-            // dieselbe, die diese Runde als Kostenfaktor gewaehlt hat
-            // (`pw.KOSTEN`, 8192) -- stuende dort weiter 2048, waere
-            // ein unbekannter Name viermal schneller abgewiesen als ein
-            // bekannter, und die ganze Vorsichtsmassnahme waere ihr
-            // eigenes Leck.
             var dummy: [u8; 94] = "$osum1$8192$0000000000000000$0000000000000000000000000000000000000000000000000000000000000000\0"
             pw.check_hash((&dummy[0]) as u64, (&given[0]) as u64)
         }
         if okay {
-            // ERST DIE ZUSATZGRUPPEN, dann die Gruppe, dann der
-            // Benutzer. Die Reihenfolge ist nicht beliebig: `setgroups`
-            // und `setgid` sind root vorbehalten, und nach `setuid` ist
-            // dieser Prozess keiner mehr.
             grp.initgroups((&name[0]) as u64)
             let gid: u64 = pw.gid_of_name((&name[0]) as u64)
             ulib.sys(SYS_SETGID, gid, 0, 0)
@@ -211,35 +134,13 @@ fn u_start(args: u64) -> u64 {
             return 127
         }
         fehler = fehler + 1
-        // DIE VERZOEGERUNG KOMMT VOR DER MELDUNG. Der Grund ist derselbe
-        // wie beim Scheineintrag oben: was zuerst kommt, ist an der Zeit
-        // zu sehen. Stuende die Meldung davor, wuesste ein Angreifer
-        // sofort, dass es nicht gestimmt hat, und koennte die Verbindung
-        // abbrechen, statt zu warten -- die Verzoegerung kostete ihn
-        // dann nichts.
         let ms: u64 = wartezeit(basis, fehler)
         if ms > 0 {
-            // Die Wartezeit steht auf der Fehlerausgabe, weil ein
-            // Terminal, das drei Sekunden lang nichts tut, sonst wie ein
-            // haengendes aussieht -- und weil der Testlaeufer die Zahl
-            // gegen die gemessene Zeit halten kann.
             ulib.eput((&s_wait[0]) as u64)
             var num: [u8; 24] = [0 as u8; 24]
             ulib.digits(ms, (&num[0]) as u64)
             ulib.eput((&num[0]) as u64)
             ulib.eput((&s_ms[0]) as u64)
-            // UND DANN WIRD NACHGEMESSEN, MIT DER UHR DER MASCHINE
-            // SELBST. Die Zahl oben koennte jemand hinschreiben, ohne zu
-            // schlafen -- `login: gewartet N ms` kommt aus
-            // CLOCK_MONOTONIC und ist der Beweis, dass wirklich Zeit
-            // vergangen ist.
-            //
-            // WARUM NICHT DIE UHR DES WIRTS: die misst den ganzen Lauf,
-            // und darin steckt auch die Passwortpruefung. Auf einer
-            // ausgelasteten Maschine ist der Unterschied zwischen zwei
-            // Laeufen dann groesser als die Verzoegerung, und man weiss
-            // nicht mehr, welcher Teil wovon kam. Diese Zahl hier kennt
-            // nur den Schlaf.
             let vorher: u64 = now_ms()
             ulib.sleep_ms(ms)
             let nachher: u64 = now_ms()

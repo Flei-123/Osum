@@ -1,73 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/gif.fi -- Runde BILD: GIF LESEN, GIF87a UND GIF89a.
-//
-// WARUM EIN EIGENES MODUL UND NICHT IN `image.fi` DAZU: `image.fi` ist
-// die gemeinsame Bildarbeit von Betrachter und Ausschnittwerkzeug und
-// hat mit PNG und BMP schon 800 Zeilen. GIF bringt einen eigenen
-// Entpacker mit (LZW, kein Deflate), eine eigene Farbtafelverwaltung
-// und die Teilbildlogik -- das gehoert getrennt, genau wie `jpeg.fi`
-// getrennt steht. `image.ist_gif` erkennt es, geladen wird es hier.
-//
-// DREI DINGE MACHEN GIF AUS, und alle drei stehen hier:
-//
-//   LZW        Der einzige echte Aufwand. Ein Woerterbuch, das mit
-//              jedem gelesenen Code um einen Eintrag waechst, und eine
-//              Codebreite, die bei 4096 Eintraegen stehenbleibt, bis
-//              ein Loeschcode kommt. Der Sonderfall KwKwK (ein Code,
-//              der auf sich selbst zeigt, weil er gerade erst
-//              entsteht) ist NICHT auslassbar -- ohne ihn bricht jedes
-//              zweite echte GIF mitten im Bild ab.
-//   Farbtafeln Eine globale und je Teilbild eine eigene, hoechstens 256
-//              Farben, eine davon darf durchsichtig sein.
-//   Entsorgung Nach jedem Teilbild sagt der Steuerblock, was mit dem
-//              Rechteck passiert: stehenlassen, mit dem Hintergrund
-//              fuellen oder den Zustand davor wiederherstellen. Wer das
-//              weglaesst, bekommt Schlieren -- der haeufigste Fehler in
-//              selbstgebauten GIF-Lesern.
-//
-// VERSCHACHTELT (interlaced) wird mitgelesen: vier Durchgaenge mit den
-// Schrittweiten 8/8/4/2 ab Zeile 0/4/2/1. Ein verschachteltes GIF, das
-// ein Leser nicht kennt, sieht nicht kaputt aus -- es sieht nur FALSCH
-// aus (die Zeilen liegen an der falschen Stelle), und genau das faellt
-// ohne Gegenprobe niemandem auf. Deshalb steht ein verschachteltes
-// Bild im Testsatz.
-//
-// DAS FORMAT IM SPEICHER ist dasselbe wie bei `image.fi`: ein Feld aus
-// u32, eine Zahl je Bildpunkt, 0xAARRGGBB. Wer GIF liest, bekommt
-// genau das, was `png_read` auch liefert -- der Betrachter merkt
-// keinen Unterschied.
-//
-// DER SPEICHER KOMMT VOM RUFER, wie bei `image.fi` und `jpeg.fi`. Der
-// alte Zweig `viewer` hatte hier einen eigenen kleinen Haldenverwalter
-// (`imgmem.take`); den gibt es in diesem Baum nicht, und er soll auch
-// nicht wieder hereinkommen -- ein Ring-3-Programm dieses Systems hat
-// eine 6 MiB grosse Arena (kernel/sys.fi, `big_map`) und verteilt sie
-// selbst. `gif_read` bekommt also den Ausgabepuffer und schreibt die
-// Leinwand direkt dorthin.
-//
-// WAS ES NICHT KANN, und es steht hier, statt verschwiegen zu werden:
-//
-//   * DIE BILDFOLGE WIRD NICHT ANIMIERT. `gif_read` legt alle
-//     Teilbilder der Reihe nach auf die Leinwand und gibt das ERSTE
-//     VOLLBILD zuruecks -- also genau das, was ein Betrachter als
-//     Standbild zeigen muss. Die Zahl der Teilbilder steht in
-//     `frames()`, die Anzeigedauer des ersten in `delay_ms()`. Wer die
-//     Folge abspielen will, braucht einen zweiten Puffer fuer den
-//     Zustand davor und eine Uhr; das ist nicht gebaut, und ein
-//     sauberes Standbild ist mehr wert als eine halbe Animation.
-//   * DIE ENTSORGUNGSART 3 ("Zustand davor wiederherstellen") braucht
-//     genau diesen zweiten Puffer. Sie wird ERKANNT und wie Art 2
-//     behandelt (Rechteck auf durchsichtig). Das ist fuer das erste
-//     Vollbild ohne Folgen -- vor dem ersten Teilbild gibt es keinen
-//     Zustand davor.
-//   * ZOOM ODER SKALIERUNG macht dieses Modul nicht; das ist die
-//     Aufgabe von `wlib.bild`.
-//
-// GEMESSEN WIRD GEGEN PILLOW (giflib), nicht gegen sich selbst:
-// `tools/bild/run.sh` laesst `viewer -i` dieselbe Datei lesen, die
-// Pillow gelesen hat, und vergleicht Groesse, die Summe jedes
-// Farbkanals und fuenf einzelne Bildpunkte. GIF ist verlustfrei, also
-// muss die Abweichung NULL sein -- nicht "klein".
 
 profile app
 
@@ -80,10 +10,10 @@ export {
 }
 
 const G_OK: u64 = 0
-const G_FORM: u64 = 1 // das ist kein GIF, oder der Kopf ist falsch
-const G_TRUNC: u64 = 2 // die Datei ist vor dem Ende abgeschnitten
-const G_BIG: u64 = 3 // die Leinwand passt nicht in den Puffer
-const G_LZW: u64 = 4 // der gepackte Datenstrom ist beschaedigt
+const G_FORM: u64 = 1
+const G_TRUNC: u64 = 2
+const G_BIG: u64 = 3
+const G_LZW: u64 = 4
 
 static mut g_w: u64 = 0
 static mut g_h: u64 = 0
@@ -91,24 +21,13 @@ static mut g_err: u64 = 0
 static mut g_frames: u64 = 0
 static mut g_delay: u64 = 0
 
-// Die Farbtafeln: 256 Eintraege, je 4 Oktette 0xAARRGGBB. Zwei Stueck,
-// weil ein Teilbild eine eigene mitbringen darf, ohne die globale zu
-// verlieren.
 static mut gct: [u8; 1024] = [0 as u8; 1024]
 static mut lct: [u8; 1024] = [0 as u8; 1024]
 
-// Das LZW-Woerterbuch. 4096 Eintraege ist die Obergrenze des Formats.
-// `lz_prefix` braucht 16 Bit je Eintrag, `lz_suffix` und `lz_stack` je
-// 8 -- zusammen 16 KiB statisch, und das ist billiger als jede
-// Verwaltung zur Laufzeit.
 static mut lz_prefix: [u16; 4096] = [0 as u16; 4096]
 static mut lz_suffix: [u8; 4096] = [0 as u8; 4096]
 static mut lz_stack: [u8; 4096] = [0 as u8; 4096]
 
-// Der Datenstrom, waehrend gelesen wird. Alles Versaetze in die Datei
-// und keine Adressen -- der Unterschied hat im alten Zweig einen
-// Seitenfehler gekostet und steht deshalb in den Namen (`o8` liest
-// "am Versatz", `ld8` "an der Adresse").
 static mut src: u64 = 0
 static mut srcn: u64 = 0
 static mut at: u64 = 0
@@ -157,9 +76,6 @@ fn fehlertext() -> u64 {
     return (&t_ok[(0) as usize]) as u64
 }
 
-// Wieviel Platz eine Leinwand dieser Groesse braucht: vier Oktette je
-// Bildpunkt, nicht mehr. GIF entpackt Index fuer Index direkt auf die
-// Leinwand, es gibt also keinen zweiten Zwischenstrom wie bei PNG.
 fn bedarf(w: u64, h: u64) -> u64 {
     return w * h * 4
 }
@@ -168,7 +84,6 @@ fn ld8(p: u64, off: u64) -> u64 {
     return (*((p + off) as *mut u8)) as u64
 }
 
-// Am Versatz in die GELADENE DATEI, mit Grenze.
 fn o8(off: u64) -> u64 {
     if off >= srcn {
         return 0
@@ -180,8 +95,6 @@ fn o16(off: u64) -> u64 {
     return o8(off) | (o8(off + 1) << 8)
 }
 
-// "GIF87a" oder "GIF89a". Nur die drei Buchstaben und die Version
-// werden geprueft; alles andere entscheidet der Kopf.
 fn ist_gif(p: u64, n: u64) -> bool {
     if n < 13 {
         return false
@@ -199,11 +112,6 @@ fn ist_gif(p: u64, n: u64) -> bool {
     return ld8(p, 5) == 97
 }
 
-// Eine Farbtafel aus drei Oktetten je Eintrag in 0xAARRGGBB umschreiben.
-// Deckung 255 fuer alle; der durchsichtige Index wird beim Setzen des
-// Bildpunkts uebersprungen und nicht in der Tafel vermerkt -- eine
-// Tafel kann von mehreren Teilbildern mit VERSCHIEDENEM
-// Durchsichtigkeitsindex benutzt werden.
 fn read_pal(dst: u64, off: u64, n: u64) {
     var i: u64 = 0
     while i < n && i < 256 {
@@ -216,9 +124,6 @@ fn read_pal(dst: u64, off: u64, n: u64) {
     }
 }
 
-// Ueber eine Kette von Unterbloecken hinweg: jeder beginnt mit seiner
-// Laenge, eine Laenge von 0 beendet die Kette. Gibt den Versatz
-// dahinter.
 fn skip_blocks(from: u64) -> u64 {
     var q: u64 = from
     while q < srcn {
@@ -231,9 +136,6 @@ fn skip_blocks(from: u64) -> u64 {
     return srcn
 }
 
-// Wie viele Teilbilder hat die Datei? Einmal durchzaehlen, ohne zu
-// entpacken -- der Betrachter will die Zahl im Kopf stehen haben, auch
-// wenn er nur das erste Bild zeigt.
 fn count_frames() -> u64 {
     var q: u64 = at
     var c: u64 = 0
@@ -276,8 +178,6 @@ static mut acc: u64 = 0
 static mut accn: u64 = 0
 static mut lz_bad: bool = false
 
-// Das naechste Oktett aus der Kette der Unterbloecke. -1 heisst: die
-// Kette ist zu Ende (oder die Datei).
 fn nextbyte() -> i64 {
     while blk_left == 0 {
         if blk_at >= srcn {
@@ -299,9 +199,6 @@ fn nextbyte() -> i64 {
     return b as i64
 }
 
-// GIF packt die Codes VON UNTEN NACH OBEN in die Oktette (das kleinste
-// Bit zuerst) -- andersherum als JPEG. Wer das verwechselt, bekommt
-// Rauschen und keinen Fehler.
 fn getcode(nbits: u64) -> i64 {
     while accn < nbits {
         let b: i64 = nextbyte()
@@ -317,7 +214,6 @@ fn getcode(nbits: u64) -> i64 {
     return v as i64
 }
 
-// Die vier Durchgaenge eines verschachtelten GIF.
 fn il_start(p: u64) -> u64 {
     if p == 0 {
         return 0
@@ -349,13 +245,12 @@ fn put_px(pal: u64, idx: u64, x: u64, y: u64) {
         return
     }
     if idx == tidx {
-        return // durchsichtig: was darunter liegt, bleibt stehen
+        return
     }
     __mmio_write32((canvas + (y * g_w + x) * 4) as *mut u32,
         (__mmio_read32((pal + idx * 4) as *mut u32)) as u32)
 }
 
-// Der Entpacker. Gibt zuruecks, wo es nach den Datenbloecken weitergeht.
 fn lzw(from: u64, minbits: u64, pal: u64, fx: u64, fy: u64, fw: u64,
     fh: u64, ilace: u64) -> u64 {
     blk_at = from
@@ -377,8 +272,6 @@ fn lzw(from: u64, minbits: u64, pal: u64, fx: u64, fy: u64, fw: u64,
         if code < 0 {
             going = false
         } else if (code as u64) == clear {
-            // Das Woerterbuch faengt von vorn an. Das darf mitten im
-            // Bild passieren, so oft es will.
             nbits = minbits + 1
             next = clear + 2
             old = 0 - 1
@@ -388,9 +281,6 @@ fn lzw(from: u64, minbits: u64, pal: u64, fx: u64, fy: u64, fw: u64,
             var sp: u64 = 0
             var c: u64 = code as u64
             if c >= next {
-                // KwKwK: der Code zeigt auf den Eintrag, der gerade
-                // erst entsteht. Sein Inhalt ist die vorige Folge plus
-                // deren erstes Zeichen.
                 if old < 0 {
                     lz_bad = true
                     going = false
@@ -402,10 +292,6 @@ fn lzw(from: u64, minbits: u64, pal: u64, fx: u64, fy: u64, fw: u64,
                 }
             }
             if going {
-                // Die Kette rueckwaerts auf den Stapel. `guard` ist
-                // kein Schmuck: eine beschaedigte Datei kann einen
-                // Zeiger auf sich selbst enthalten, und ohne die
-                // Schranke laeuft das Programm ewig.
                 var guard: u64 = 0
                 while c >= clear + 2 && guard < 4096 {
                     lz_stack[(sp) as usize] = lz_suffix[(c) as usize]
@@ -420,8 +306,6 @@ fn lzw(from: u64, minbits: u64, pal: u64, fx: u64, fy: u64, fw: u64,
                     first = c
                     lz_stack[(sp) as usize] = c as u8
                     sp = sp + 1
-                    // Der Stapel wird rueckwaerts geleert -- so kommt
-                    // die Folge in der richtigen Reihenfolge heraus.
                     while sp > 0 {
                         sp = sp - 1
                         let idx: u64 = lz_stack[(sp) as usize] as u64
@@ -446,9 +330,6 @@ fn lzw(from: u64, minbits: u64, pal: u64, fx: u64, fy: u64, fw: u64,
                         lz_prefix[(next) as usize] = old as u16
                         lz_suffix[(next) as usize] = first as u8
                         next = next + 1
-                        // Ein Eintrag mehr, als die Breite tragen kann:
-                        // ab jetzt ein Bit mehr je Code. Bei 12 Bit ist
-                        // Schluss, dann muss ein Loeschcode kommen.
                         if next == (1 << nbits) && nbits < 12 {
                             nbits = nbits + 1
                         }
@@ -482,7 +363,6 @@ fn fill_rect(x: u64, y: u64, w: u64, h: u64) {
     }
 }
 
-// Ein Teilbild auf die Leinwand. Gibt false, wenn die Datei hier endet.
 fn draw_frame(disposal: u64) -> bool {
     if at + 10 > srcn {
         g_err = G_TRUNC
@@ -496,7 +376,6 @@ fn draw_frame(disposal: u64) -> bool {
     var q: u64 = at + 10
     var pal: u64 = (&gct[(0) as usize]) as u64
     if (fl & 128) != 0 {
-        // Eine eigene Farbtafel fuer dieses Teilbild.
         let n: u64 = 1 << ((fl & 7) + 1)
         if q + n * 3 > srcn {
             g_err = G_TRUNC
@@ -519,19 +398,12 @@ fn draw_frame(disposal: u64) -> bool {
     }
     at = lzw(q, minbits, pal, fx, fy, fw, fh, ilace)
     g_frames = g_frames + 1
-    // Entsorgung NACH diesem Teilbild, fuer das naechste. Art 2 fuellt
-    // das Rechteck mit durchsichtig; Art 3 waere "Zustand davor", und
-    // ohne zweiten Puffer wird sie wie 2 behandelt (siehe Kopf).
     if disposal == 2 || disposal == 3 {
         fill_rect(fx, fy, fw, fh)
     }
     return true
 }
 
-// Die Datei lesen und die Leinwand mit dem ERSTEN VOLLBILD fuellen.
-//
-// `out` nimmt g_w * g_h * 4 Oktette; `outcap` ist, was da ist. Ist das
-// Bild groesser, wird es ABGELEHNT (G_BIG) und nicht halb gelesen.
 fn gif_read(p: u64, n: u64, out: u64, outcap: u64) -> bool {
     src = p
     srcn = n
@@ -551,8 +423,6 @@ fn gif_read(p: u64, n: u64, out: u64, outcap: u64) -> bool {
         g_err = G_FORM
         return false
     }
-    // Vor der Multiplikation pruefen, nicht danach: 65535 * 65535 * 4
-    // laeuft in u64 nicht ueber, aber der Puffer waere 17 GiB.
     if bedarf(g_w, g_h) > outcap {
         g_err = G_BIG
         return false
@@ -560,16 +430,11 @@ fn gif_read(p: u64, n: u64, out: u64, outcap: u64) -> bool {
     canvas = out
     let flags: u64 = o8(10)
     at = 13
-    // Die Leinwand faengt durchsichtig an. Ein GIF, dessen erstes
-    // Teilbild kleiner ist als die Leinwand, hat dort nichts -- und
-    // "nichts" ist durchsichtig und nicht schwarz.
     var i: u64 = 0
     while i < g_w * g_h {
         __mmio_write32((canvas + i * 4) as *mut u32, 0 as u32)
         i = i + 1
     }
-    // Die globale Farbtafel auf Schwarz, falls die Datei keine hat und
-    // ein Teilbild trotzdem darauf zeigt.
     var k: u64 = 0
     while k < 256 {
         __mmio_write32(((&gct[(0) as usize]) as u64 + k * 4) as *mut u32,
@@ -592,8 +457,6 @@ fn gif_read(p: u64, n: u64, out: u64, outcap: u64) -> bool {
         g_err = G_FORM
         return false
     }
-    // Jetzt das erste Teilbild suchen und zeichnen. Steuerbloecke
-    // davor liefern Anzeigedauer und Durchsichtigkeitsindex.
     var disposal: u64 = 0
     var fertig: bool = false
     while !fertig && at < srcn {
@@ -640,8 +503,6 @@ fn gif_read(p: u64, n: u64, out: u64, outcap: u64) -> bool {
         g_err = G_LZW
         return false
     }
-    // Die Zahl der Teilbilder ist die GEZAEHLTE, nicht die gezeichnete
-    // -- der Betrachter will "1 von 12" sagen koennen.
     g_frames = anzahl
     g_err = G_OK
     return true

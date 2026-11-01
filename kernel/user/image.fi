@@ -1,34 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/bild.fi -- Runde ALLTAG: PNG UND BMP, LESEN UND SCHREIBEN.
-//
-// Zwei Programme dieser Runde brauchen dasselbe: der Bildbetrachter
-// macht Bilder auf, das Ausschnittwerkzeug legt eines an. Also steht es
-// hier und nicht zweimal.
-//
-// WAS ES KANN:
-//
-//   png_lesen    PNG, Farbtiefe 8, alle fuenf Farbarten (Grau, RGB,
-//                Palette, Grau+Deckung, RGBA), Deckungskapitel tRNS,
-//                nicht verschachtelt (kein Adam7).
-//   png_schreiben  PNG, Farbart 6 (RGBA), Filter 0, ein IDAT.
-//   bmp_lesen    BMP mit 24 und 32 Bit, von unten nach oben und von
-//                oben nach unten, unkomprimiert.
-//
-// WAS ES NICHT KANN, und es steht hier: Farbtiefe 16 (wird abgelehnt,
-// nicht halbiert), Adam7, RLE-BMP, Farbtafeln unter 8 Bit. Jedes davon
-// sagt `fehler()`, statt etwas Falsches zu zeigen.
-//
-// DAS FORMAT IM SPEICHER ist ein Feld aus u32, eine Zahl je Bildpunkt,
-// 0xAARRGGBB -- dieselbe Anordnung, die `wlibc.px` erwartet, und
-// dieselbe, in der die Symbole dieses Systems liegen (`wlib.bild_malen`).
-//
-// EIN EINZIGER GROSSER PUFFER, und das ist kein Geiz: ein Prozess in
-// diesem System hat 6 MiB grosse Arena (kernel/sys.fi, `big_map`) und
-// die Zeichenflaeche von wlib will davon schon eines. Also wird der
-// entpackte Bilddatenstrom IN DEN AUSGABEPUFFER inflatiert, dort
-// entfiltert und dort -- VON HINTEN NACH VORN -- zu 0xAARRGGBB
-// auseinandergezogen. Ein zweiter Puffer waere bequemer und wuerde das
-// groesste Bild halbieren, das dieses System aufmachen kann.
 
 profile kernel
 
@@ -43,11 +12,11 @@ export {
 }
 
 const E_OK: u64 = 0
-const E_FORM: u64 = 1 // das ist kein PNG/BMP, oder es ist beschaedigt
-const E_TIEFE: u64 = 2 // Farbtiefe 16 oder Adam7 -- wird nicht gemacht
-const E_BIG: u64 = 3 // passt nicht in den Puffer
-const E_PACK: u64 = 4 // der Datenstrom laesst sich nicht auspacken
-const E_SPACE: u64 = 5 // der Ausgabepuffer ist zu klein
+const E_FORM: u64 = 1
+const E_TIEFE: u64 = 2
+const E_BIG: u64 = 3
+const E_PACK: u64 = 4
+const E_SPACE: u64 = 5
 
 static mut b_w: u64 = 0
 static mut b_h: u64 = 0
@@ -94,8 +63,6 @@ fn fehlertext() -> u64 {
     return (&t_ok[(0) as usize]) as u64
 }
 
-// Wieviel Platz ein Bild dieser Groesse braucht: das Feld selbst, oder
-// der entpackte Datenstrom davor -- was groesser ist.
 fn bedarf(w: u64, h: u64, kanaele: u64) -> u64 {
     let a: u64 = w * h * 4
     let b: u64 = (w * kanaele + 1) * h
@@ -181,20 +148,12 @@ fn paeth(a: u64, b: u64, c: u64) -> u64 {
     return c
 }
 
-// Die Filter zuruecknehmen, Zeile fuer Zeile, IM Puffer. Danach steht
-// dort derselbe Strom ohne die fuehrenden Filteroktette -- die Zeilen
-// ruecken zusammen.
 fn entfiltern(buf: u64, zeile: u64, h: u64, kan: u64) {
     var y: u64 = 0
     while y < h {
         let ein: u64 = buf + y * (zeile + 1)
         let f: u64 = ld8(ein, 0)
         let hier: u64 = ein + 1
-        // Die vorige Zeile steht schon ENTFILTERT an ihrem alten Platz.
-        // NUR AUSRECHNEN, WENN ES SIE GIBT: `(y - 1)` bei y = 0 ist in
-        // Firn kein grosses Ergebnis, sondern ein Abbruch ("integer
-        // overflow in 'u64 - u64'"), und genau daran ist der erste
-        // Anlauf gestorben.
         var oben: u64 = hier
         if y > 0 {
             oben = buf + (y - 1) * (zeile + 1) + 1
@@ -229,9 +188,6 @@ fn entfiltern(buf: u64, zeile: u64, h: u64, kan: u64) {
         }
         y = y + 1
     }
-    // Jetzt die Filteroktette herausnehmen: Zeile y liegt bei
-    // y*(zeile+1)+1 und soll bei y*zeile liegen. Von VORN nach hinten,
-    // denn das Ziel liegt immer links von der Quelle.
     y = 0
     while y < h {
         let von: u64 = buf + y * (zeile + 1) + 1
@@ -245,15 +201,6 @@ fn entfiltern(buf: u64, zeile: u64, h: u64, kan: u64) {
     }
 }
 
-// FARBTIEFE 1, 2 UND 4 AUSPACKEN -- ein Oktett je Abtastwert daraus
-// machen. Von hinten, denn das Ergebnis ist groesser als die Vorlage
-// und liegt im selben Puffer.
-//
-// Warum ueberhaupt: Pillow schreibt eine Farbtafel mit sechzehn
-// Eintraegen als PNG mit VIER Bit je Bildpunkt, und das ist kein
-// Sonderfall, sondern der Normalfall bei Symbolen und Bildschirmfotos
-// mit wenigen Farben. Ein Betrachter, der daran scheitert, scheitert an
-// der Haelfte dessen, was auf einer Platte liegt.
 fn auspacken(buf: u64, w: u64, h: u64, tiefe: u64, grau: bool) {
     let proz: u64 = 8 / tiefe
     let zb: u64 = (w * tiefe + 7) / 8
@@ -275,8 +222,6 @@ fn auspacken(buf: u64, w: u64, h: u64, tiefe: u64, grau: bool) {
     }
 }
 
-// Aus `kan` Oktetten je Bildpunkt eine Zahl 0xAARRGGBB machen -- VON
-// HINTEN, damit Quelle und Ziel derselbe Puffer sein duerfen.
 fn ausziehen(buf: u64, w: u64, h: u64, kan: u64, art: u64) {
     var i: u64 = w * h
     while i > 0 {
@@ -320,9 +265,6 @@ fn ausziehen(buf: u64, w: u64, h: u64, kan: u64, art: u64) {
     }
 }
 
-// `src` DARF veraendert werden -- die IDAT-Stuecke werden darin
-// zusammengeschoben. `out` nimmt erst den entpackten Strom und danach
-// die Bildpunkte auf; `outcap` muss `bedarf(w, h, kanaele)` sein.
 fn png_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
     b_err = E_OK
     b_w = 0
@@ -336,7 +278,7 @@ fn png_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
     var tiefe: u64 = 0
     var art: u64 = 0
     var kan: u64 = 0
-    var dat: u64 = 0 // wohin die IDAT-Oktette geschoben werden
+    var dat: u64 = 0
     var datn: u64 = 0
     var kopf: bool = false
     var fertig: bool = false
@@ -356,8 +298,6 @@ fn png_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
                 b_err = E_TIEFE
                 return false
             }
-            // Tiefe 1, 2 und 4 gibt es nur bei Grau und Farbtafel; 16
-            // wird nicht halbiert, sondern abgelehnt.
             if tiefe != 8 {
                 if tiefe != 1 && tiefe != 2 && tiefe != 4 {
                     b_err = E_TIEFE
@@ -405,8 +345,6 @@ fn png_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
             }
             ntrns = len
             if art == 0 && len >= 2 {
-                // Grau: zwei Oktette, das zweite ist der Wert bei
-                // Tiefe 8.
                 st8((&trns[(0) as usize]) as u64, 0, ld8(inhalt, 1))
                 ntrns = 1
             }
@@ -419,8 +357,6 @@ fn png_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
                 dat = src + at + 8
                 datn = len
             } else {
-                // Zusammenschieben: das Stueck wandert direkt hinter
-                // das vorige. Das ist in der Quelle immer nach links.
                 var j: u64 = 0
                 while j < len {
                     st8(dat, datn + j, ld8(inhalt, j))
@@ -437,8 +373,6 @@ fn png_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
         b_err = E_FORM
         return false
     }
-    // zlib: zwei Oktette Kopf, danach deflate. Ein Woerterbuch (Bit 5
-    // des zweiten Oktetts) gibt es in PNG nicht.
     if (ld8(dat, 1) & 32) != 0 {
         b_err = E_FORM
         return false
@@ -521,8 +455,6 @@ fn bmp_read(src: u64, srcn: u64, out: u64, outcap: u64) -> bool {
             var a: u64 = 255
             if bpp == 4 {
                 a = ld8(s, 3)
-                // Ein BMP mit lauter Nullen in der Deckung ist ein BMP
-                // ohne Deckung, kein unsichtbares Bild.
                 if a == 0 {
                     a = 255
                 }
@@ -557,7 +489,6 @@ fn bst32(p: u64, at: u64, v: u64) {
     st8(p, at + 3, v)
 }
 
-// Ein Kapitel: Laenge, Name, Inhalt, CRC ueber Name und Inhalt.
 fn kapitel(out: u64, at: u64, typ: u64, inhalt: u64, n: u64) -> u64 {
     bst32(out, at, n)
     bst32(out, at + 4, typ)
@@ -571,13 +502,6 @@ fn kapitel(out: u64, at: u64, typ: u64, inhalt: u64, n: u64) -> u64 {
     return at + 12 + n
 }
 
-// Ein PNG aus einem Feld 0xAARRGGBB. `roh` ist ein Arbeitspuffer fuer
-// den ungepackten Strom: (w*4+1)*h Oktette.
-//
-// FARBART 6 UND FILTER 0. Filter kosten Rechenzeit und bringen bei
-// einem Bildschirmfoto (grosse gleichfarbige Flaechen) fast nichts,
-// weil deflate die Wiederholungen ohnehin findet -- gemessen an einem
-// Fenster: 2 Prozent.
 fn png_write(pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
     out: u64, outcap: u64, out_len: u64) -> bool {
     b_err = E_OK
@@ -625,7 +549,6 @@ fn png_write(pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
     st8(ih, 11, 0)
     st8(ih, 12, 0)
     var at: u64 = kapitel(out, 8, 0x49484452, ih, 13)
-    // Der Platz des IDAT-Inhalts: hinter Laenge und Name.
     let dstart: u64 = at + 8
     st8(out, dstart, 0x78)
     st8(out, dstart + 1, 0x01)
@@ -652,24 +575,6 @@ fn png_write(pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
     return true
 }
 
-// ================================== RUNDE ALLTAG: PNG DIREKT IN EINE DATEI
-//
-// `png_schreiben` braucht drei Puffer in voller Bildgroesse (die
-// Bildpunkte, den gefilterten Strom, das Ergebnis). Fuer ein
-// Bildschirmfoto von 1280 mal 800 sind das zwoelf Megabyte, und ein
-// Prozess dieses Systems hat sechs.
-//
-// Also derselbe Aufbau, aber STREIFENWEISE in die Datei: ein Streifen
-// wird gefiltert, gepackt (flate.strom_block), weggeschrieben, der
-// Puffer wieder von vorn. Was dabei nicht in einen Puffer passen muss,
-// ist das Bild -- nur ein Streifen.
-//
-// DIE LAENGE DES IDAT-KAPITELS steht VOR seinen Daten und ist erst
-// hinterher bekannt. Also wird sie als Null geschrieben und am Ende
-// nachgetragen (`io.seek`); die Pruefsumme laeuft nebenher mit
-// (`flate.crc32_fort`). Das ist der uebliche Weg, und er ist der
-// Grund, warum diese Funktion einen Dateizeiger nimmt und keinen
-// Puffer.
 fn png_file(fd: u64, pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
     komp: u64, kompcap: u64) -> bool {
     b_err = E_OK
@@ -702,7 +607,6 @@ fn png_file(fd: u64, pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
         b_err = E_SPACE
         return false
     }
-    // Der Kopf des IDAT: Laenge noch unbekannt.
     let laenge_bei: u64 = ende
     bst32(k, 0, 0)
     bst32(k, 4, 0x49444154)
@@ -783,7 +687,6 @@ fn png_file(fd: u64, pix: u64, w: u64, h: u64, roh: u64, rohcap: u64,
         b_err = E_SPACE
         return false
     }
-    // Die Laenge nachtragen.
     if ulib.bad(io.seek(fd, laenge_bei, 0)) {
         b_err = E_SPACE
         return false

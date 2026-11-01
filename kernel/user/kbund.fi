@@ -1,99 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/kbund.fi -- RUNDE SYNC: das Konto auf diesem Geraet.
-//
-// EIN Modul, das sowohl `/bin/sync` als auch `/bin/vault` benutzen --
-// damit es die Schluesselkette genau EINMAL gibt. Zwei Programme mit
-// zwei Fassungen derselben Ableitung waeren zwei Fassungen, die eines
-// Tages auseinanderlaufen, und der Tag, an dem das auffaellt, ist der
-// Tag, an dem jemand nicht mehr an seine Daten kommt.
-//
-// ================================================ WAS EIN KONTO HIER IST
-//
-// FAST NICHTS. Das ist Absicht und folgt dem Satz aus der Roadmap 6.1e,
-// den diese Runde nicht antasten darf:
-//
-//     "Ein Konto ist eine Bequemlichkeit, es ist nie eine Bedingung."
-//
-// Ein Konto ist hier eine DATEI mit einem Salz und zwei Huellen. Kein
-// Server wird gefragt, keine Anmeldung findet statt, kein Name muss
-// irgendwo eingetragen sein. `/konto/KOPF` anlegen kann jeder, jederzeit,
-// ohne Netz. Was die Runde KONTO parallel baut (Anbieter, Sitzung,
-// Token), ist die BEQUEMLICHKEIT darueber und wird hier nur an genau
-// drei Stellen gebraucht -- siehe `docs/SYNC.md`, Abschnitt "Die
-// Uebergabe".
-//
 // ===================================================== DIE KOPFDATEI
-//
-//     osumkonto1
-//     kdf scrypt <N> <r> <p>
-//     salz    <32 hex>          16 Oktette, frisch je Konto
-//     pruef   <64 hex>          K_PRUEF -- daran wird eine falsche
-//                               Passphrase in der ersten Sekunde erkannt
-//     pnonce  <48 hex>          fuer die Huelle unter der Passphrase
-//     phuelle <96 hex>          MK, eingepackt unter der Passphrase
-//     rnonce  <48 hex>          fuer die Huelle unter dem Code
-//     rhuelle <96 hex>          MK, eingepackt unter dem Wiederherstellungscode
-//     anbieter <eigen|jarvis|xoffi>
-//     ziel <pfad oder URL>
-//
-// SIE IST KLARTEXT UND DARF ES SEIN. Es steht nichts darin, was die
-// Passphrase nicht schon schuetzt: die beiden Huellen sind ohne
-// Passphrase oder Code 48 Oktette Rauschen mit einem Siegel daran, und
-// `pruef` ist eine HKDF-Ausgabe aus einem Schluessel, den niemand hat.
-// Ein Kopf, den ein Mensch mit `cat` ansehen kann, ist ausserdem ein
-// Kopf, den ein Mensch reparieren kann.
-//
-// ================================================ ZWEI WEGE ZU EINEM MK
-//
 //     Passphrase --scrypt--> pass_key --oeffnet--> phuelle --> MK
 //     Code       --base32-->  rkey    --oeffnet--> rhuelle --> MK
-//
-// Der Hauptschluessel MK ist ZUFALL und kommt aus `getrandom`, nicht aus
-// der Passphrase. Drei Dinge folgen daraus, und alle drei sind der Grund
-// fuer diesen Umweg:
-//
-//   1. PASSPHRASE AENDERN heisst 48 Oktette neu schreiben. Nicht: jeden
-//      Block neu verschluesseln.
-//   2. DER WIEDERHERSTELLUNGSCODE ist ein ZWEITER, gleichberechtigter
-//      Weg -- und nicht ein Abdruck der Passphrase, den man auch raten
-//      koennte.
-//   3. EINE SCHWACHE PASSPHRASE schwaecht die Huelle, nicht die Daten.
-//      Das ist ein kleiner Trost und ein echter: wer die Huelle knackt,
-//      hat alles; wer sie nicht knackt, hat nichts, egal wieviele Bloecke
-//      er sieht.
-//
-// OHNE BEIDES SIND DIE DATEN WEG. Nicht "schwer wiederherzustellen" --
-// WEG. Es gibt keinen Notausgang, keinen Hinterschluessel und keine
-// Stelle, die helfen koennte, weil es diese Stelle absichtlich nicht
-// gibt. `sync konto neu` schreibt diesen Satz hin und verlangt, dass er
-// bestaetigt wird, BEVOR ein Konto entsteht. Das ist Teil der Runde und
-// kein Nachgedanke.
-//
 // ================================================================ EHRLICH
-//
-// B1 DIE PASSPHRASE STEHT AUF DER BEFEHLSZEILE. `ps` sieht sie, die
-//    Shell merkt sie sich. `pw.fi` hat `read_pass` (Eingabe ohne Echo),
-//    und die Oberflaeche der Runde ruft es; die Befehlszeile bleibt der
-//    Weg fuer Skripte und fuer den Testlauf. Dieselbe Grenze wie in
-//    `bsec.fi` B3, und sie wird hier genannt statt geerbt.
-// B2 N = 4096, r = 8 IST DER VOREINGESTELLTE PREIS -- 4 MiB, und im
-//    System gemessen rund 500 ms (`tools/sync/tresorzeit.sh`, KVM).
-//    HIER STAND EINMAL N = 16384, und das war schlicht falsch: 16 MiB
-//    passen nicht in die grosse Arena (siehe B3), `sync neu` scheitert
-//    damit, und danach geht der Tresor nie auf. Gemessen, nicht
-//    vermutet -- der Testlauf faehrt den Fall als Gegenprobe.
-//    Der uebrige Testlauf faehrt mit N = 256, weil er sonst in QEMU
-//    ewig braucht; WER N KLEINER SETZT, MACHT SEIN KONTO SCHWAECHER,
-//    und die Zahl steht im Kopf, damit man es sieht.
-//    EHRLICH GESAGT: 4 MiB sind WENIGER, als man heute fuer eine
-//    Passphrase empfehlen wuerde (uebliche Empfehlung: 16 MiB und
-//    mehr). Das ist eine Grenze dieses Kernels und keine Entscheidung
-//    fuer Bequemlichkeit; sie steht in docs/RUNDE-SYNC.md.
-// B3 DER ARBEITSSPEICHER FUER scrypt KOMMT AUS `mmap` (die grosse Arena
-//    aus Runde K16, 6 MiB). Damit ist N * 128 * r <= 6 MiB, also bei
-//    r = 8 hoechstens N = 4096. Fuer mehr braeuchte dieser Ring mehr
-//    Adressraum; das ist eine Grenze DIESES KERNELS und keine von
-//    scrypt, und sie steht in `docs/RUNDE-SYNC.md` unter den Messungen.
 
 profile kernel
 
@@ -145,8 +53,6 @@ fn st8(p: u64, i: u64, v: u64) {
     *((p + i) as *mut u8) = (v & 255) as u8
 }
 
-// `<verz>/<name>` -- eine Stelle, damit es niemand zweimal leicht anders
-// zusammensetzt.
 fn path2(verz: u64, name: u64) -> u64 {
     var sl: [u8; 2] = "/\0"
     ulib.strncpy((&p2[0]) as u64, verz, PFADMAX)
@@ -175,7 +81,6 @@ fn unhex(c: u64) -> u64 {
     return 16
 }
 
-// `n` Oktette als Hexadezimaltext nach `out`, mit abschliessender Null.
 fn hex_out(src: u64, n: u64, out: u64) {
     var i: u64 = 0
     while i < n {
@@ -187,8 +92,6 @@ fn hex_out(src: u64, n: u64, out: u64) {
     st8(out, n * 2, 0)
 }
 
-// Hexadezimaltext zurueck in `n` Oktette. `false` bei jedem Zeichen, das
-// keines ist -- eine halb gelesene Huelle waere schlimmer als keine.
 fn hex_in(src: u64, n: u64, out: u64) -> bool {
     var i: u64 = 0
     while i < n {
@@ -203,7 +106,6 @@ fn hex_in(src: u64, n: u64, out: u64) -> bool {
     return true
 }
 
-// Eine Dezimalzahl nach `p`; gibt die Zahl der Zeichen zurueck.
 fn num_out(p: u64, v: u64) -> u64 {
     var d: [u8; 24] = [0 as u8; 24]
     var n: u64 = 0
@@ -240,10 +142,6 @@ fn zufall(out: u64, n: u64) -> bool {
     return !ulib.bad(ulib.sys(SYS_GETRANDOM, out, n, 0))
 }
 
-// scrypt braucht Platz. Der kommt aus der grossen Arena (Runde K16) und
-// wird danach wieder zurueckgegeben -- ein Programm, das 4 MiB behaelt,
-// nachdem es sie einmal gebraucht hat, ist auf dieser Maschine
-// unhoeflich.
 fn ableiten(pw: u64, plen: u64, salz: u64, n: u64, r: u64, out32: u64) -> bool {
     let need: u64 = scrypt.scrypt_need(n, r, 1)
     let mp: u64 = mem.map_pages(need)
@@ -315,7 +213,7 @@ fn header_write(verz: u64) -> bool {
         ok = false
     }
     var n_salz: [u8; 5] = "salz\0"
-    var n_pr: [u8; 6] = "pruef\0"  // DRAHT: Feldname im KOPF, tools/sync/schnueffel.py liest `pruef`
+    var n_pr: [u8; 6] = "pruef\0"
     var n_pn: [u8; 7] = "pnonce\0"
     var n_ph: [u8; 8] = "phuelle\0"
     var n_rn: [u8; 7] = "rnonce\0"
@@ -341,9 +239,6 @@ fn header_write(verz: u64) -> bool {
     return ok
 }
 
-// Legt ein Konto an. `code_out` bekommt den Wiederherstellungscode --
-// das EINZIGE Mal, dass er entsteht; er steht danach nirgends mehr, denn
-// was auf der Platte liegt, ist die Huelle und nicht der Code.
 fn kb_new(verz: u64, pw: u64, plen: u64, n: u64, r: u64,
     anbieter: u64, ziel: u64, code_out: u64) -> bool {
     c_n = n
@@ -390,7 +285,6 @@ fn kb_new(verz: u64, pw: u64, plen: u64, n: u64, r: u64,
     let cl: u64 = chain.code_write(rkp, (&c_code[0]) as u64)
     st8((&c_code[0]) as u64, cl, 0)
     ulib.strcpy(code_out, (&c_code[0]) as u64)
-    // MK und die beiden Einpackschluessel sind ab hier ueberfluessig.
     i = 0
     while i < 32 {
         st8(mkp, i, 0)
@@ -426,8 +320,6 @@ fn after_word(p: u64) -> u64 {
     return p + i
 }
 
-// Liest den Kopf. Danach stehen Salz, Huellen und Ziel bereit -- aber
-// KEIN Schluessel: dafuer braucht es die Passphrase oder den Code.
 fn kb_da(verz: u64) -> bool {
     let fd: u64 = io.open(kb_kopfpfad(verz), 0)
     if ulib.bad(fd) {
@@ -435,7 +327,7 @@ fn kb_da(verz: u64) -> bool {
     }
     var n_kdf: [u8; 4] = "kdf\0"
     var n_salz: [u8; 5] = "salz\0"
-    var n_pr: [u8; 6] = "pruef\0"  // DRAHT: Feldname im KOPF, tools/sync/schnueffel.py liest `pruef`
+    var n_pr: [u8; 6] = "pruef\0"
     var n_pn: [u8; 7] = "pnonce\0"
     var n_ph: [u8; 8] = "phuelle\0"
     var n_rn: [u8; 7] = "rnonce\0"
@@ -485,10 +377,6 @@ fn kb_da(verz: u64) -> bool {
     return gut
 }
 
-// Der Bund stimmt, wenn K_PRUEF das ist, was im Kopf steht. DAS IST DIE
-// STELLE, an der eine falsche Passphrase abgewiesen wird -- bevor
-// irgendetwas entschluesselt wird, und ohne dass das Programm dem
-// Fragenden etwas ueber den Schluessel sagt ausser ja oder nein.
 fn bundle_check() -> bool {
     return chain.bundle_eq(chain.bund_key((&bund[0]) as u64, chain.K_CHECK),
         (&c_pruef[0]) as u64, 32)
@@ -586,9 +474,6 @@ fn kb_code_letzt() -> u64 {
     return (&c_code[0]) as u64
 }
 
-// Schluessel weg. Was `bund_loeschen` NICHT kann, steht in kette.fi K2:
-// ob der Uebersetzer das Ueberschreiben stehenlaesst, ist hier nicht
-// geprueft, und der Testlauf sagt genau das.
 fn kb_close() {
     chain.bundle_delete((&bund[0]) as u64)
     offen = false

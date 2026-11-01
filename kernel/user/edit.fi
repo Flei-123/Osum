@@ -1,50 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/edit.fi -- Runde K11: ein Editor, mit dem man arbeitet.
-//
-// Bis zu dieser Runde konnte auf Osum niemand eine Datei aendern. Es lief
-// nur, was vorher hineinkompiliert worden war -- und das macht aus einem
-// Vorfuehrsystem kein benutzbares.
-//
-// AN WELCHER BEDIENUNG DAS HIER SICH ORIENTIERT UND WARUM: an `nano`
-// (und damit an `pico`), nicht an `vi`. Drei Gruende, und der dritte ist
-// der eigentliche:
-//
-//   1. Modenlos. Es gibt keinen Zustand, in dem `dd` etwas anderes tut
-//      als `dd`. Wer den Editor zum ersten Mal sieht, kann tippen.
-//   2. Jeder Befehl ist ein Steuerzeichen und damit EIN Oktett. Das ist
-//      genau das, was `sendkey ctrl-o` ueber den QEMU-Monitor schickt --
-//      der Testlauf bedient also dieselben Tasten wie ein Mensch.
-//   3. `vi` braeuchte die Fluchttaste als Befehl. Die Fluchttaste ist
-//      aber auch das erste Oktett JEDER Pfeiltaste (`ESC [ A`). Ein
-//      modaler Editor muss deshalb auf ein ZEITLIMIT warten, um beides
-//      zu unterscheiden -- und ein Zeitlimit ist genau die Sorte Sache,
-//      die eine Messung wetterfuehlig macht. Modenlos gibt es das
-//      Problem nicht.
-//
-// ABWEICHUNGEN VON NANO, aufgeschrieben statt verschwiegen:
-//   STRG-B / STRG-F   Wort zurueck / Wort vor (nano: Zeichen)
-//   STRG-T / STRG-G   Anfang / Ende der Datei (nano: Rechtschreibung/Hilfe)
-//   STRG-R            Suchen und Ersetzen (nano: STRG-Backslash; der
-//                     Backslash ist ueber `sendkey` nicht erreichbar)
-//   STRG-O            sichert SOFORT unter dem bekannten Namen und fragt
-//                     nur, wenn es keinen gibt (nano fragt immer)
-//
-// DIE TASTATUR HAT ZWEI WEGE HEREIN, und der Editor versteht beide:
-//   * Von einer seriellen Leitung kommen die Fluchtfolgen von VT100:
-//     `ESC [ A/B/C/D`, `ESC [ H`, `ESC [ F`, `ESC [ 5~`, `ESC [ 6~`,
-//     `ESC [ 3~`.
-//   * Von der PS/2-Tastatur dieses Rechners kommt die Pfeiltaste NACH
-//     OBEN seit Runde K6 als das einzelne Oktett 14, weil die Shell sie
-//     dort als "die Zeile von vorhin" liest. Das bleibt so -- an dieser
-//     Zahl haengt Abschnitt 11 von tools/userland/run.sh. Runde K11 hat
-//     `kernel/kbd.fi` um Umschalt, Steuerung und die UEBRIGEN
-//     Pfeiltasten erweitert; die schicken echte Fluchtfolgen.
-//
-// LANGE ZEILEN werden nicht umgebrochen, sondern GESCHOBEN: `coloff`
-// sagt, ab welcher Spalte das Fenster steht, und ein `$` am Rand sagt,
-// dass es weitergeht. Ein Umbruch waere eine zweite Zuordnung zwischen
-// Text- und Bildschirmzeilen, und die ist die haeufigste Fehlerquelle
-// eines Editors.
 
 profile kernel
 
@@ -61,13 +14,12 @@ const UPOOL: u64 = 8192
 const CUTMAX: u64 = 4096
 const IDLE_GIVEUP: u64 = 8
 
-// Was ein Rueckgaengig-Schritt war.
-const U_INS: u64 = 1 // ein Zeichen eingefuegt
-const U_DEL: u64 = 2 // ein Zeichen geloescht
-const U_SPLIT: u64 = 3 // eine Zeile getrennt
-const U_JOIN: u64 = 4 // zwei Zeilen verbunden
-const U_CUTL: u64 = 5 // eine Zeile herausgeschnitten
-const U_INSL: u64 = 6 // eine Zeile eingesetzt
+const U_INS: u64 = 1
+const U_DEL: u64 = 2
+const U_SPLIT: u64 = 3
+const U_JOIN: u64 = 4
+const U_CUTL: u64 = 5
+const U_INSL: u64 = 6
 
 static mut pool: [u8; 65536] = [0 as u8; 65536]
 static mut lat: [u64; 1024] = [0 as u64; 1024]
@@ -75,14 +27,13 @@ static mut llen: [u64; 1024] = [0 as u64; 1024]
 static mut nline: u64 = 0
 static mut used: u64 = 0
 
-static mut cy: u64 = 0 // Zeile im Text
-static mut cx: u64 = 0 // Spalte in der Zeile
+static mut cy: u64 = 0
+static mut cx: u64 = 0
 static mut rowoff: u64 = 0
 static mut coloff: u64 = 0
 static mut rows: u64 = 24
 static mut cols: u64 = 80
 static mut dirty: u64 = 0
-// 0 = nichts, 1 = nur die Zeile unter der Marke, 2 = alles.
 const W_NONE: u64 = 0
 const W_LINE: u64 = 1
 const W_ALL: u64 = 2
@@ -137,14 +88,9 @@ fn raw_on() {
         saved_t[(i) as usize] = t[(i) as usize]
         i = i + 1
     }
-    // c_lflag steht bei +12. ICANON, ECHO und ISIG fallen weg -- damit
-    // kommt jedes Oktett einzeln, ohne Echo, und STRG-C ist ein Zeichen
-    // und kein Signal.
     let lf: u64 = __mmio_read32((((&t[12 as usize]) as u64)) as *mut u32) as u64
     __mmio_write32((((&t[12 as usize]) as u64)) as *mut u32,
         (lf & 0xFFFFFFF4) as u32)
-    // ICRNL raus: die Eingabetaste soll als 13 ankommen und nicht schon
-    // hier zu 10 werden -- der Editor entscheidet das selbst.
     let inf: u64 = __mmio_read32((((&t[0 as usize]) as u64)) as *mut u32) as u64
     __mmio_write32((((&t[0 as usize]) as u64)) as *mut u32,
         (inf & 0xFFFFFEFF) as u32)
@@ -212,32 +158,11 @@ fn window() {
     }
 }
 
-// Wie viele Zeilen Text auf den Schirm passen: Titel oben, Meldung und
-// Tastenzeile unten.
 fn textrows() -> u64 {
     return rows - 3
 }
 
 // ====================================================== RUNDE ALLTAG
-//
-// ZEILENNUMMERN AM RAND.
-//
-// Justin will einen Editor "wie Notepad++". Das Erste, was man dort
-// sieht, ist die Nummernspalte -- und sie ist auch das Nuetzlichste:
-// ein Uebersetzerfehler nennt eine Zeilennummer, und ohne die Spalte
-// muss man sie abzaehlen.
-//
-// SIE LAESST SICH ABSCHALTEN (Strg-N), und das ist kein Luxus: die
-// Abnahme in tools/k11/run.sh vergleicht den seriellen Mitschnitt mit
-// einem Bildschirmfoto Zeile fuer Zeile. Eine Spalte, die sich nicht
-// wegnehmen laesst, waere dort eine dauerhafte Aenderung an etwas, das
-// seit Runde K11 gemessen wird.
-//
-// DIE BREITE WAECHST MIT DER DATEI und ist nicht fest: bei 9 Zeilen
-// zwei Stellen und ein Trenner, bei 1000 Zeilen fuenf. Eine feste
-// Breite waere entweder verschwendeter Platz oder abgeschnittene
-// Nummern (Punkt G-010 -- genau die Sorte Fehler, die dieses Projekt
-// auf Bildern sucht).
 static mut nums_an: u64 = 1
 
 fn num_breite() -> u64 {
@@ -253,14 +178,9 @@ fn num_breite() -> u64 {
     if stellen < 2 {
         stellen = 2
     }
-    // Eine Spalte Abstand zwischen Nummer und Text, sonst klebt beides
-    // aneinander und die Nummer sieht aus wie Teil der Zeile.
     return stellen + 1
 }
 
-// Die Nummer einer Zeile ausgeben, rechtsbuendig, mit dem Abstand.
-// `leer` malt stattdessen Leerzeichen -- fuer die Zeilen hinter dem
-// Dateiende, wo eine Nummer eine Zeile verspraeche, die es nicht gibt.
 fn num_aus(i: u64, leer: bool) {
     let b: u64 = num_breite()
     if b == 0 {
@@ -339,13 +259,6 @@ fn cursor(on: bool) {
     }
 }
 
-// Eine Zeile bis zur Breite fuellen, damit die Umkehrung wirklich ueber
-// den ganzen Balken geht.
-// DIE LETZTE SPALTE BLEIBT FREI. `fb.advance` (Runde K7) bricht die
-// Zeile um, SOBALD die Marke die Breite erreicht -- ein Balken ueber die
-// volle Breite wuerde also in der untersten Zeile den ganzen Schirm
-// rollen lassen. Auf einer seriellen Leitung faellt das nicht auf, auf
-// dem Schirm sofort.
 fn bar(p: u64, n: u64) {
     var i: u64 = 0
     while i < n && i + 1 < cols {
@@ -362,19 +275,10 @@ fn line_ptr(i: u64) -> u64 {
     return (&pool[(lat[(i) as usize]) as usize]) as u64
 }
 
-// EINE einzelne Textzeile neu. Der Grund dafuer ist eine Zahl: ein
-// ganzer Schirm sind rund zweitausend Oktette, und die gehen bei jedem
-// Tastendruck ueber dieselbe serielle Leitung, auf die `serial.put` Bit
-// fuer Bit wartet. Wer einen Absatz tippt, schickt so ein Vielfaches
-// dessen, was er geschrieben hat. Solange sich weder der Ausschnitt noch
-// die Zahl der Zeilen aendert, genuegt die eine Zeile.
 fn draw_line() {
     cursor(false)
     goto(cy - rowoff + 1, 0)
     clear_eol()
-    // RUNDE ALLTAG: auch die einzeln neu gemalte Zeile bekommt ihre
-    // Nummer. Ohne diese Zeile verschwaende sie beim Tippen -- und
-    // zwar nur in DER Zeile, in der der Mensch gerade steht.
     num_aus(cy, false)
     let n: u64 = llen[(cy) as usize]
     if coloff < n {
@@ -426,7 +330,6 @@ fn draw() {
         clear_eol()
         let i: u64 = rowoff + r
         if i < nline {
-            // RUNDE ALLTAG: die Nummer, dann der Text.
             num_aus(i, false)
             let n: u64 = llen[(i) as usize]
             if coloff < n {
@@ -455,25 +358,12 @@ fn draw() {
     clear_eol()
     reverse_on()
     // ================================================== RUNDE ALLTAG
-    //
-    // DIE STATUSZEILE SAGT JETZT, WO MAN IST UND WAS GILT.
-    //
-    // Bis hierher stand hier nur die letzte Meldung, und die ist oft
-    // leer -- ein breiter, heller Balken ohne Inhalt. Jeder heutige
-    // Editor zeigt an dieser Stelle Zeile, Spalte und den
-    // Aenderungsstand; sie zu suchen ist die haeufigste Frage an einen
-    // Editor ueberhaupt ("in welcher Zeile stehe ich?").
-    //
-    // LINKS die Meldung, RECHTS die Zahlen. Rechtsbuendig, damit sie
-    // beim Tippen nicht springen: eine Anzeige, die bei jedem Zeichen
-    // ihre Stelle wechselt, liest niemand.
     var st: [u8; 256] = [0 as u8; 256]
     ulib.strcpy((&st[0 as usize]) as u64, (&msg[0 as usize]) as u64)
     var rechts: [u8; 64] = [0 as u8; 64]
     var at: u64 = 0
     at = at + status_rechts((&rechts[0 as usize]) as u64)
     let ml: u64 = ulib.length((&st[0 as usize]) as u64)
-    // So viele Leerzeichen, dass der rechte Teil am Rand endet.
     var fuell: u64 = 0
     if ml + at + 1 < cols {
         fuell = cols - 1 - ml - at
@@ -500,15 +390,6 @@ fn draw() {
     tools.ob_flush()
 }
 
-// Die Schreibmarke dorthin, wo sie im Text steht.
-// ====================================================== RUNDE ALLTAG
-//
-// DER RECHTE TEIL DER STATUSZEILE: "Z 12/340  S 5  UTF-8  geaendert".
-//
-// Die Kodierung steht dabei, obwohl dieser Editor nur eine kennt -- und
-// gerade deshalb: wer sie liest, weiss, dass die Datei nicht in etwas
-// anderem gespeichert wird. Eine Anzeige, die schweigt, laesst die
-// Frage offen.
 static mut s_space: [u8; 2] = " \0"
 static mut s_z: [u8; 3] = "Z \0"
 static mut s_slash: [u8; 2] = "/\0"
@@ -534,8 +415,6 @@ fn status_rechts(aus: u64) -> u64 {
     return at
 }
 
-// Eine Zahl als Text anhaengen. `ulib` hat dafuer nichts, was in einen
-// Puffer schreibt -- `sayn` geht auf die Leitung.
 fn zahl_an(aus: u64, v: u64) -> u64 {
     var ziffern: [u8; 24] = [0 as u8; 24]
     var n: u64 = v
@@ -559,10 +438,6 @@ fn zahl_an(aus: u64, v: u64) -> u64 {
 }
 
 fn place() {
-    // RUNDE ALLTAG: der Schreibzeiger steht hinter der Nummernspalte.
-    // Ohne den Versatz staende er mitten in der Nummer, und jedes
-    // getippte Zeichen erschiene an der falschen Stelle -- einer der
-    // Fehler, die man erst auf einem Bild sieht.
     goto(cy - rowoff + 1, cx - coloff + num_breite())
     tools.ob_flush()
 }
@@ -665,7 +540,6 @@ fn join_line(row: u64) -> bool {
     return true
 }
 
-// Eine ganze Zeile herausnehmen; ihr Text kommt nach `out`.
 fn take_line(row: u64, out: u64) -> u64 {
     let n: u64 = llen[(row) as usize]
     var i: u64 = 0
@@ -724,9 +598,6 @@ fn push_undo(kind: u64, row: u64, col: u64, c: u64, p: u64, n: u64) {
         return
     }
     if u_n >= UNDO {
-        // Der aelteste Schritt faellt weg. Ein Editor mit begrenztem
-        // Gedaechtnis ist ehrlicher als einer, der bei voller Liste
-        // gar nichts mehr merkt.
         var i: u64 = 0
         while i + 1 < UNDO {
             u_kind[(i) as usize] = u_kind[(i + 1) as usize]
@@ -855,9 +726,6 @@ fn load(path: u64) -> bool {
         llen[(nline) as usize] = total - start
         nline = nline + 1
     }
-    // DIE ZEILENUMBRUECHE STEHEN NICHT MEHR IM SPEICHER: `used` zaehlt
-    // sie noch mit, und jede Einfuegung wuerde sie mitschieben. Also
-    // werden sie herausgenommen und die Anfaenge nachgezogen.
     compact()
     if nline == 0 {
         lat[0 as usize] = 0
@@ -867,7 +735,6 @@ fn load(path: u64) -> bool {
     return true
 }
 
-// Die Zeilen dicht hintereinander, ohne Trennzeichen dazwischen.
 fn compact() {
     var out: u64 = 0
     var i: u64 = 0
@@ -897,10 +764,6 @@ fn save(path: u64) -> bool {
     var i: u64 = 0
     while i < nline {
         tools.ob_put(line_ptr(i), llen[(i) as usize])
-        // JEDE Zeile bekommt ihren Umbruch, auch die letzte. Eine Datei
-        // ohne abschliessenden Umbruch ist auf einem Unix die Ausnahme;
-        // wer sie braucht, sagt es -- und dieser Editor sagt hier, dass
-        // er sie nicht macht (docs/ROUNDK11.md).
         tools.ob_byte(10)
         i = i + 1
     }
@@ -934,8 +797,6 @@ fn next_byte() -> u64 {
     return (inbuf[0 as usize]) as u64
 }
 
-// Ein Tastendruck. Steuerzeichen kommen als sie selbst, besondere Tasten
-// als Zahlen ab 300.
 const K_UP: u64 = 300
 const K_DOWN: u64 = 301
 const K_RIGHT: u64 = 302
@@ -953,7 +814,6 @@ fn key() -> u64 {
         return K_NONE
     }
     if c == 14 {
-        // Die Pfeiltaste nach oben der PS/2-Tastatur (Runde K6).
         return K_UP
     }
     if c != 27 {
@@ -1017,8 +877,6 @@ fn set_msg2(p: u64, q: u64) {
     want_draw = W_ALL
 }
 
-// Eine Frage in der Meldungszeile, mit einem winzigen Zeileneditor.
-// Gibt false, wenn abgebrochen wurde (STRG-C oder die Fluchttaste).
 fn ask(question: u64, out: u64, max: u64) -> bool {
     var n: u64 = ulib.length(out)
     var going: bool = true
@@ -1058,9 +916,6 @@ fn ask(question: u64, out: u64, max: u64) -> bool {
     return ok
 }
 
-// Eine Frage, die mit EINER Taste beantwortet wird -- `y`, `n`, `a`.
-// Ohne Eingabetaste, so wie bei nano: wer schon getippt hat, dass er
-// nicht sichern will, soll das nicht noch bestaetigen muessen.
 fn ask_char(question: u64) -> u64 {
     goto(rows - 2, 0)
     clear_eol()
@@ -1154,10 +1009,6 @@ fn word_left() {
 
 // ============================================================== Suchen
 
-// `wrap` sagt, ob am Dateiende von vorn begonnen wird. SUCHEN tut das
-// (so wie nano), ERSETZEN nicht: ein Ersetzen, das umlaeuft, fragt
-// dieselbe Stelle ein zweites Mal, und wer dann `n` sagt, sitzt in einer
-// Schleife, die nie endet. Genau das ist beim ersten Versuch passiert.
 fn find_from(row: u64, col: u64, pat: u64, wrap: bool) -> bool {
     let m: u64 = ulib.length(pat)
     if m == 0 {
@@ -1334,17 +1185,6 @@ fn do_cut() {
     cutlen = cutlen + 1
     cutlines = cutlines + 1
     // ==================================================== RUNDE SYSTEMBUS
-    //
-    // WAS AUSGESCHNITTEN WURDE, LIEGT AB HIER NICHT MEHR NUR IN DIESEM
-    // PROZESS. Der Kern hat eine Zwischenablage, und `cut` ist ihr
-    // Abbild in diesem Editor -- nicht ihr Ersatz. Das ist der ganze
-    // Punkt der Zusage "Text zwischen ZWEI verschiedenen Prozessen":
-    // vorher hat `edit` in seinen eigenen Puffer geschnitten, und die
-    // Kommandozeile daneben hat davon nichts erfahren.
-    //
-    // Der interne Puffer BLEIBT: er kann mehr als 192 Oktette und mehr
-    // als eine Zeile, und ein Editor, der beim Ausschneiten von zehn
-    // Zeilen neun verliert, waere fuer den Bus schlechter geworden.
     let _b: u64 = ulib.clip_put(ulib.BT_TEXT, (&cut[0 as usize]) as u64,
         cutlen)
     dirty = 1
@@ -1353,10 +1193,6 @@ fn do_cut() {
 }
 
 fn do_paste() {
-    // RUNDE SYSTEMBUS: ERST DEN KERN FRAGEN. Liegt dort etwas Neueres
-    // als das, was dieser Editor selbst geschnitten hat, gewinnt der
-    // Kern -- sonst waere "im Terminal kopieren, im Editor einfuegen"
-    // eine Bewegung, die nichts bewirkt.
     var ein: [u8; 192] = [0 as u8; 192]
     let m: u64 = ulib.clip_take((&ein[0 as usize]) as u64, 192)
     if m > 0 {
@@ -1374,8 +1210,6 @@ fn do_paste() {
                 cut[(k) as usize] = ein[(k) as usize]
                 k = k + 1
             }
-            // Eine Ablage ohne Zeilenende ist EINE Zeile. Ohne diese
-            // zwei Zeilen haengt die Schleife unten am fehlenden 10.
             if m > 0 && ein[(m - 1) as usize] != 10 as u8 {
                 cut[(m) as usize] = 10 as u8
                 cutlen = m + 1
@@ -1524,17 +1358,6 @@ fn handle(k: u64) {
         dirty = 1
         want_draw = W_ALL
     } else if k == 16 {
-        // RUNDE ALLTAG: Strg-P schaltet die Nummernspalte um.
-        //
-        // NICHT Strg-N, und das ist gemessen: 14 ist schon die
-        // Pfeiltaste nach oben der PS/2-Tastatur (`key`, Zeile 913,
-        // seit Runde K6) -- `k == 14` kommt im Tastenblock nie an, der
-        // Zweig war tot. Der erste Entwurf dieser Runde hatte ihn
-        // trotzdem, und auf dem Bild sah es aus, als tue Strg-N
-        // nichts: die Nummern standen vorher und nachher da.
-        //
-        // 16 (Strg-P) ist wirklich frei -- vergeben sind 1..15, 18,
-        // 20..27 und 127.
         if nums_an == 0 {
             nums_an = 1
         } else {
@@ -1596,11 +1419,6 @@ fn handle(k: u64) {
             }
         }
     } else if k == 9 || (k >= 32 && k < 127) {
-        // EINE GRUPPE JE ZUSAMMENHAENGENDEM TIPPEN. Ohne diese Zeile
-        // gehoert das getippte Zeichen zur Gruppe der Aktion davor, und
-        // ein STRG-Z nimmt dann das Einfuegen einer ganzen Zeile mit
-        // zurueck, das der Benutzer gar nicht gemeint hat. Genau das ist
-        // beim ersten Messlauf passiert.
         if u_n == 0 || u_kind[(u_n - 1) as usize] != U_INS
         || u_row[(u_n - 1) as usize] != cy
         || u_col[(u_n - 1) as usize] + 1 != cx {
@@ -1635,15 +1453,6 @@ fn u_start(args: u64) -> u64 {
         }
     } else {
         // ============================================ RUNDE SYSTEMBUS
-        //
-        // OHNE DATEINAMEN: LIEGT ETWAS AUF DEM ZIEHPLATZ? Dann ist das
-        // die Datei, die jemand hierher gezogen hat -- der Explorer hat
-        // sie beim Anfassen dorthin gelegt (`explorer.ziehen`), und ein
-        // Ziehen, das im Ziel nichts oeffnet, ist kein Ziehen.
-        //
-        // WAS DAS NICHT IST: eine Ziehgrafik unter dem Zeiger. Dieses
-        // System hat keine, und der Bus traegt den INHALT und nicht das
-        // Bild dazu. Wer es sieht, sieht die geoeffnete Datei.
         var zp: [u8; 192] = [0 as u8; 192]
         var genommen: bool = false
         if ulib.drag_an() {
@@ -1671,10 +1480,6 @@ fn u_start(args: u64) -> u64 {
     winch_arm()
     winch_seen = winch_count()
     raw_on()
-    // DIESE ZEILE GEHT AUF DIE SERIELLE LEITUNG UND AUF DEN SCHIRM, und
-    // sie steht hier, damit ein Testlaeufer weiss, WANN er die Tasten
-    // schicken darf. Ohne so ein Zeichen faengt er zu frueh an und die
-    // ersten Tasten fallen in die Shell.
     tools.ob_str((&s_ready[0 as usize]) as u64)
     tools.ob_byte(10)
     tools.ob_flush()
@@ -1695,7 +1500,6 @@ fn u_start(args: u64) -> u64 {
             place()
         }
     }
-    // Aufraeumen: Schirm loeschen, Marke zurueck, Terminal wie vorher.
     tools.ob_byte(27)
     tools.ob_byte(91)
     tools.ob_byte(50)

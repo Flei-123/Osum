@@ -1,64 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/expmodell.fi -- RUNDE EXPLORER-2: DAS MODELL DES
-// DATEIMANAGERS -- die Liste, die Zeiten, die Sortierung.
-//
-// WARUM DIESE DATEI UEBERHAUPT: `explorer.fi` trug seine Liste in
-// festen Feldern von 96 Eintraegen zu 32 Oktetten Name. Gemessen:
-// /apps hat mehr als 96 Eintraege, und ein Name von 32 Oktetten
-// schneidet `osum-icons-fallback.ttf` mitten durch. Die Grenzen
-// muessen auf 4096 Eintraege und 256 Oktette -- und 4096 * 256 sind
-// ein Megaoktett, das ein Programm OHNE HAUFEN nicht als Rechteck
-// hinlegen darf.
-//
-// DIE PUFFERSTRATEGIE, und sie ist gemessen und nicht geraten:
-//
-//   1. NAMEN LIEGEN IN EINEM BLOB, NICHT IN EINEM RECHTECK. `nblob`
-//      ist 320 KiB gross, die Namen liegen darin hintereinander, und
-//      `noff[i]` sagt, wo der Name des Eintrags i anfaengt. Gemessen
-//      auf diesem Baum: der Mittelwert eines Dateinamens ist 17
-//      Oktette (`ls -R` ueber das Wurzelabbild, 4211 Eintraege,
-//      71 604 Oktette Namen). 320 KiB fassen also die 4096 Eintraege
-//      mit dem Vierfachen Luft -- und der EINZELNE Name darf trotzdem
-//      NAMEB = 256 Oktette lang sein.
-//   2. LAEUFT EIN PUFFER VOLL, WIRD NICHT UEBERSCHRIEBEN. `ueberlauf()`
-//      zaehlt JEDEN Eintrag, der nicht mehr hineinpasste -- beim
-//      Einlesen (Namensblob oder MAXENT voll) UND beim Tabellenbau
-//      (Textblob voll). Die Statuszeile sagt die Zahl. Ein stiller
-//      Verlust waere schlimmer als eine unvollstaendige Liste, von
-//      der man weiss.
-//   3. DER TEXTBLOB IST AUS DEM NAMENSBLOB HERGELEITET, nicht geraten:
-//      eine Tabellenzeile ist der Name plus hoechstens 50 Oktette
-//      (Groesse, Zeit "JJJJ-MM-TT SS:MM", zehn Rechtezeichen, drei
-//      Tabulatoren, Zeilenende). Mehr als BLOB Oktette Namen kann es
-//      nach Regel 1 nicht geben, also reicht
-//      BLOB + MAXENT * 50 = 327680 + 204800 = 532 480; `TBLOB` ist
-//      auf 544 KiB aufgerundet und damit BEWEISBAR gross genug.
-//   4. DAS PASST INS ABBILD. `kernel/proc.fi` gibt einem Prozess
-//      0x40100000..0x40C00000 = 11 MiB fuer Text, Daten und BSS
-//      (IMAGE_BASE/IMAGE_END), und `wlibc` holt seine Malflaeche per
-//      anonymem `mmap` aus der grossen Arena ab 0x40C00000 -- die
-//      Warnung "Abbild ueber 1 MiB ODER Rahmenpuffer" gilt nur fuer
-//      Programme, die `fb.USER_BASE` selbst abbilden. Dieses tut es
-//      nicht. Zusammen belegt das Modell rund 1,13 MiB BSS
-//      (320 + 544 KiB Blobs, 9 Felder zu 32 KiB).
-//
-// GELADEN IST NICHT GEZEIGT: `lade` legt ALLE Eintraege ab, `sortiere`
-// baut daraus die Ansicht `folge[]` und laesst dabei versteckte Namen
-// (Punkt-Konvention, Strg+H) und Namen ohne Filtertreffer (Strg+F)
-// weg. Darum wirken `setz_versteckt` und `setz_filter` schon mit einem
-// blossen `sortiere()` -- der Rahmen muss nicht neu einlesen, und ein
-// Filter ueber 4096 Eintraege kostet keinen Plattenzugriff.
-//
-// SORTIERT WIRD MIT MISCHEN, NICHT MIT EINFUEGEN: bei MAXENT = 4096
-// braucht Einfuegesortierung im schlechtesten Fall rund 8 Millionen
-// Namensvergleiche; das haengt sichtbar. Aufsteigendes Mischen
-// (`hilf[]`, 32 KiB) braucht 12 Laeufe zu 4096 Vergleichen und ist
-// ausserdem stabil.
-//
-// DIE ZEIT KOMMT AUS DEM DATEISYSTEM UND DER VERSATZ AUS
-// /etc/time.conf -- DERSELBEN DATEI wie bei der Taskleiste
-// (`kernel/user/taskbar.fi::offset_read`, `offset=<Minuten>`). Zwei
-// Quellen fuer eine Ortszeit sind zwei Uhren, die verschieden gehen.
 
 profile kernel
 
@@ -103,7 +42,7 @@ static mut symbole: [u64; 4096] = [0 as u64; 4096]
 static mut tblob: [u8; 557056] = [0 as u8; 557056]
 
 static mut n_all: u64 = 0    // eingelesene Eintraege
-static mut n_sicht: u64 = 0  // davon in der Ansicht (folge[0..n_sicht))
+static mut n_sicht: u64 = 0
 static mut n_weg: u64 = 0    // beim Einlesen verloren
 static mut t_weg: u64 = 0    // beim Tabellenbau abgeschnitten
 static mut bp: u64 = 0
@@ -126,13 +65,10 @@ static mut s_lz: [u8; 2] = " \0"
 static mut s_kd: [u8; 8] = "kdirs=\0\0"
 static mut s_kv: [u8; 8] = "kvis=\0\0\0"
 
-// Die Zahl der ANGEZEIGTEN Zeilen -- das ist es, was der Rahmen fuer
-// Auswahl, Statuszeile und Tabellenhoehe braucht.
 fn anzahl() -> u64 {
     return n_sicht
 }
 
-// Verloren ist verloren, egal an welchem Puffer: beide Zaehler.
 fn ueberlauf() -> u64 {
     return n_weg + t_weg
 }
@@ -190,9 +126,6 @@ fn atime_at(e: u64) -> u64 {
     return e_atime[(e) as usize]
 }
 
-// Zeile der Ansicht -> Eintrag. Die Ansicht ist sortiert UND gefiltert,
-// die Eintraege sind es nicht: wer eine Zeile anfasst, fasst `ord_at`
-// davon an und nie den Index selbst.
 fn ord_at(i: u64) -> u64 {
     if i >= n_sicht {
         return 0
@@ -200,9 +133,6 @@ fn ord_at(i: u64) -> u64 {
     return folge[(i) as usize]
 }
 
-// Der Rueckweg: welche ZEILE zeigt den Eintrag e. Nach einer
-// Umbenennung will die Auswahl dorthin, wo der Name jetzt steht.
-// Ist der Eintrag nicht sichtbar, kommt `anzahl()` zurueck.
 fn ord_finde(e: u64) -> u64 {
     var i: u64 = 0
     while i < n_sicht {
@@ -256,8 +186,6 @@ fn filter_ptr() -> u64 {
 
 // ------------------------------------------------------------ die Zeit
 
-// Der Ortsversatz in Minuten, aus /etc/time.conf -- Zeile fuer Zeile
-// dieselbe Lesart wie `taskbar.fi::offset_read`.
 fn time_load() -> u64 {
     var buf: [u8; 64] = [0 as u8; 64]
     versatz_da = 1
@@ -307,17 +235,6 @@ fn two(out: u64, at: u64, v: u64) -> u64 {
     return at + 2
 }
 
-// Sekunden seit 1970 (UTC) als ORTSZEIT "JJJJ-MM-TT SS:MM" nach `out`.
-// Der Versatz kommt aus /etc/time.conf, genau wie in der Taskleiste.
-// Null heisst "keine Zeit vom Dateisystem" und wird zu "--"; alles
-// andere waere eine erfundene Zahl.
-// DAILY-DRIVER: FILE TIMES FOLLOW SUMMER TIME TOO.
-// `/etc/time.conf` carries one fixed offset; with the zone rule of the
-// kernel (`tzrule=eu`, SETTZ) the right offset depends on the instant of
-// the FILE, not on now: a file from July shows summer time, one from
-// January winter time -- even when it is looked at in December. The
-// kernel is asked for the standard offset and the rule; without a zone in
-// the kernel the file's offset is used, as before.
 fn days_civil(y0: u64, m: u64, d: u64) -> u64 {
     var y: u64 = y0
     if m <= 2 {
@@ -422,15 +339,10 @@ fn is_point(name: u64) -> bool {
     return false
 }
 
-// Punkt-Konvention: ein fuehrender Punkt heisst versteckt. "." und
-// ".." sind schon beim Einlesen weg, die zaehlen hier nicht mit.
 fn versteckt_name(name: u64) -> bool {
     return (__mmio_read8((name) as *mut u8)) == 46 as u8
 }
 
-// Passt der Name zum Filterfeld (Strg+F)? Leerer Filter passt immer;
-// sonst muss die Zeichenkette irgendwo vorkommen, ohne Ruecksicht auf
-// Gross- und Kleinschreibung.
 fn passt(name: u64) -> bool {
     if filter[(0) as usize] == 0 as u8 {
         return true
@@ -484,9 +396,6 @@ fn kernel_dir(name: u64) -> bool {
     return false
 }
 
-// Steht der Eintrag in der Ansicht? Versteckt (Strg+H) und Filter
-// (Strg+F) entscheiden hier und NICHT beim Einlesen -- sonst muesste
-// jeder Tastendruck im Filterfeld das Verzeichnis neu lesen.
 fn sichtbar(e: u64) -> bool {
     let p: u64 = name_at(e)
     if zeig_versteckt == 0 && versteckt_name(p) {
@@ -582,8 +491,6 @@ fn eintragen(dir: u64, name: u64) {
     e_mtime[(n_all) as usize] = 0
     e_ctime[(n_all) as usize] = 0
     e_atime[(n_all) as usize] = 0
-    // Die drei Zeiten kommen WIRKLICH aus stat (OFS v3 liefert sie);
-    // die Spalte hat frueher "--" gezeigt, weil niemand gefragt hat.
     let sr: u64 = io.stat_into(vp, (&st[(0) as usize]) as u64)
     if !ulib.bad(sr) {
         let sb: u64 = (&st[(0) as usize]) as u64
@@ -602,8 +509,6 @@ fn eintragen(dir: u64, name: u64) {
     n_all = n_all + 1
 }
 
-// Ein Verzeichnis einlesen. Rueckgabe: die Zahl der ANGEZEIGTEN
-// Eintraege, oder der Fehler des Kerns (dann ist `ulib.bad` wahr).
 fn lade(dir: u64) -> u64 {
     var puffer: [u8; 1024] = [0 as u8; 1024]
     n_all = 0
@@ -649,12 +554,6 @@ fn lade(dir: u64) -> u64 {
 
 // ---------------------------------------------------------- sortieren
 
-// Zwei Namen vergleichen: 0 = a vor b, 1 = gleich, 2 = a nach b.
-// GROSS UND KLEIN ZAEHLT NICHT -- gemessen an jedem Vorbild: Nautilus,
-// Dolphin und der Explorer stellen "Bilder" neben "bilder" und nicht
-// zwei Bloecke weit auseinander, weil 'B' = 66 und 'b' = 98 ist.
-// Bei Gleichstand entscheidet doch das rohe Oktett, damit die Ordnung
-// eindeutig bleibt und das Mischen nicht von Zufaellen abhaengt.
 fn name_cmp(a: u64, b: u64) -> u64 {
     let pa: u64 = name_at(a)
     let pb: u64 = name_at(b)
@@ -680,9 +579,6 @@ fn name_cmp(a: u64, b: u64) -> u64 {
             i = i + 1
         }
     }
-    // `ulib.cmp` gibt 0 gleich, 1 a-vor-b, 2 b-vor-a -- also NICHT
-    // das Vorzeichen von strcmp; wer das verwechselt, sortiert gar
-    // nicht. (Genau dieser Fehler stand hier vorher.)
     let c: u64 = ulib.cmp(pa, pb)
     if c == 1 {
         return 0
@@ -693,10 +589,6 @@ fn name_cmp(a: u64, b: u64) -> u64 {
     return 1
 }
 
-// Vergleich NUR nach der gewaehlten Spalte, ohne Verzeichnisregel und
-// ohne Umkehr: 0 = a vor b, 1 = gleich, 2 = a nach b. Der Name ist
-// immer der letzte Ausschlag, sonst waere die Ordnung nicht eindeutig
-// und das Mischen haengt von Zufaellen ab.
 fn schl_cmp(a: u64, b: u64) -> u64 {
     if s_spalte == 1 {
         if e_groesse[(a) as usize] < e_groesse[(b) as usize] {
@@ -731,9 +623,6 @@ fn schl_cmp(a: u64, b: u64) -> u64 {
     return name_cmp(a, b)
 }
 
-// Soll a vor b stehen? Verzeichnisse zuerst -- in JEDER Sortierung und
-// auch umgekehrt, wie in jedem anderen Dateimanager auch. `sort_rev`
-// dreht nur den Schluessel, nicht die Verzeichnisregel.
 fn vorher(a: u64, b: u64) -> bool {
     if e_art[(a) as usize] != e_art[(b) as usize] {
         return e_art[(a) as usize] > e_art[(b) as usize]
@@ -748,8 +637,6 @@ fn vorher(a: u64, b: u64) -> bool {
     return c == 0
 }
 
-// Die Ansicht neu bauen: erst die sichtbaren Eintraege einsammeln,
-// dann aufsteigend mischen (stabil, O(n log n) -- siehe Kopf).
 fn sortiere() {
     n_sicht = 0
     var i: u64 = 0
@@ -778,8 +665,6 @@ fn sortiere() {
             while o < r {
                 var nimm_a: bool = false
                 if pa < m && pb < r {
-                    // Gleichstand nimmt den linken Lauf -- das haelt
-                    // die Sortierung stabil.
                     nimm_a = !vorher(folge[(pb) as usize],
                         folge[(pa) as usize])
                 } else if pa < m {
@@ -803,9 +688,6 @@ fn sortiere() {
         }
         breite = breite + breite
     }
-    // Die Symboltafel gehoert zur Ansicht, nicht zum Tabellentext:
-    // die Symbolansicht (Pflichtpunkt 10) fragt `symbole_ptr` auch
-    // ohne `tabelle_bauen`.
     var s: u64 = 0
     while s < n_sicht {
         symbole[(s) as usize] = icon_for(folge[(s) as usize])
@@ -996,8 +878,6 @@ fn icon_for(e: u64) -> u64 {
     return wlib.icon_tint(wlib.icon_id(icons.FILE_FILE), 9741240)
 }
 
-// Gibt der Textblob noch `n` Oktette her? Wer das vorher fragt, haengt
-// keine halbe Zeile in die Tabelle.
 fn tplatz(n: u64) -> bool {
     return tp + n + 1 < TBLOB
 }
@@ -1052,12 +932,6 @@ fn tputmode(m: u64, dir: u64) {
     }
 }
 
-// Den Tabellentext bauen. `kopf` ist die Kopfzeile aus dem Katalog
-// (`explorer.columns`), damit hier keine sichtbare Zeichenkette steht.
-// Nebenbei fuellt das die Symboltafel `symbole[]` fuer `wlib.row_icons`
-// -- Zeile fuer Zeile, denn die Bibliothek zaehlt Ansichtszeilen und
-// keine Eintraege.
-// Rueckgabe: die Zahl der WIRKLICH geschriebenen Zeilen.
 fn table_build(kopf: u64) -> u64 {
     tp = 0
     t_weg = 0
@@ -1067,11 +941,6 @@ fn table_build(kopf: u64) -> u64 {
     var reisst: bool = false
     while i < n_sicht {
         let e: u64 = folge[(i) as usize]
-        // Name + hoechstens 50 Oktette Rest, siehe Kopf Regel 3.
-        // Reisst der Platz einmal, wird ABGEBROCHEN und nicht weiter
-        // gesiebt: die Zeilen muessen ein Anfangsstueck der Ansicht
-        // bleiben, sonst zeigt `wlib.row_icons` das Symbol der
-        // falschen Zeile.
         if !reisst && !tplatz(ulib.length(name_at(e)) + 50) {
             reisst = true
         }
@@ -1110,9 +979,6 @@ fn symbole_ptr() -> u64 {
     return (&symbole[(0) as usize]) as u64
 }
 
-// Der Beleg auf der seriellen Leitung: wie viele Eintraege in der
-// Ansicht, wie viel Namensblob belegt, wie viele verloren, welcher
-// Ortsversatz in Minuten.
 fn melde() {
     lineout.add_text((&s_mod[(0) as usize]) as u64)
     lineout.add_num(n_sicht)

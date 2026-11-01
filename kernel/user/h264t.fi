@@ -1,26 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/h264t.fi -- Runde CODEC: das Messgeraet im laufenden Kern.
-//
-// Es liest einen rohen Annex-B-Strom (.264), dekodiert ihn mit
-// `h264.fi` und gibt aus, was sich VERGLEICHEN laesst:
-//
-//   h264: profile = <Zahl>      66 = Baseline
-//   h264: w = <Breite>          aus dem SPS, nach dem Beschnitt
-//   h264: h = <Hoehe>
-//   h264: frames = <Zahl>       wieviele Bilder herauskamen
-//   h264: err = <Zahl>          0 = in Ordnung
-//   h264: sha <i> = <hex>       SHA-256 JE BILD ueber Y, dann U, dann V
-//   h264: ms = <Zahl>           die Zeit fuer den ganzen Strom
-//   h264: fps = <Zahl>          Bilder je Sekunde, hundertfach
-//
-// DIE PRUEFSUMME IST DER KERN. Der Wirt rechnet mit ffmpeg dieselbe
-// Datei nach rohem YUV 4:2:0 und daraus dieselbe SHA-256. Stimmen
-// beide, ist das Bild OKTETT FUER OKTETT dasselbe -- das ist eine
-// Aussage und keine Ansicht. "Sieht aehnlich aus" kommt hier nicht vor.
-//
-// JE BILD und nicht ueber den ganzen Strom: weicht eines ab, sagt die
-// Liste sofort, WELCHES. Bei einer Summe ueber alles wuesste man nur,
-// dass irgendwo etwas nicht stimmt.
 
 profile kernel
 
@@ -33,7 +10,6 @@ export { u_start }
 const EINGABE: u64 = 1048576      // 1 MiB rohe .264-Daten
 const SYS_CLOCK_GETTIME: u64 = 228
 const CLOCK_MONOTONIC: u64 = 1
-// Die Zaehler des Kerns (kernel/codecstat.fi, Bereich CODEC_OFF).
 const SYS_OSUM_CODEC: u64 = 1970
 const CDC_FRAME: u64 = 0
 const CDC_REJECT: u64 = 1
@@ -79,9 +55,6 @@ fn u_start(args: u64) -> u64 {
         ulib.esay_line((&s_use[(0) as usize]) as u64, 0)
         return 1
     }
-    // --langsam: die GEGENPROBE. Dann rechnet die Bewegungskompensation
-    // Punkt fuer Punkt wie vor dieser Runde. Die Pruefsummen muessen
-    // dieselben sein -- sonst ist der schnelle Weg nicht bitgleich.
     var s_lang: [u8; 10] = "--langsam\0"
     var pfad: u64 = ulib.arg_at(args, 1)
     if ulib.streq(pfad, (&s_lang[(0) as usize]) as u64) {
@@ -97,8 +70,6 @@ fn u_start(args: u64) -> u64 {
         ulib.esay_line((&s_open[(0) as usize]) as u64, pfad)
         return 1
     }
-    // Die ganze Datei einlesen. `read` darf WENIGER liefern als
-    // verlangt -- deshalb die Schleife und nicht ein Aufruf.
     var n: u64 = 0
     var weiter: bool = true
     while weiter {
@@ -120,17 +91,12 @@ fn u_start(args: u64) -> u64 {
     h264.h264_open((&daten[(0) as usize]) as u64, n)
     var i: u64 = 0
     while h264.h264_next() {
-        // Die Pruefsumme des Bildes: erst Y, dann U, dann V -- genau
-        // die Reihenfolge, in der ffmpeg rohes yuv420p schreibt.
         let w: u64 = h264.h264_stride()
         let hh: u64 = h264.h264_height()
         let ww: u64 = h264.h264_width()
         let cw: u64 = h264.h264_cstride()
         let slot: u64 = h264.h264_cur_slot()
         sha.begin()
-        // Zeile fuer Zeile, damit der BESCHNITT stimmt: das Bild im
-        // Speicher ist auf ganze Makrobloecke aufgerundet, die Datei
-        // von ffmpeg nicht.
         var y: u64 = 0
         while y < hh {
             sha.update(h264.h264_plane_y(slot) + y * w, ww)
@@ -158,8 +124,6 @@ fn u_start(args: u64) -> u64 {
         i = i + 1
     }
     let t1: u64 = jetzt_ms()
-    // Dem Kern sagen, was hier lief -- das ist der EINZIGE Zustand,
-    // den dieser Lauf ueberdauert (kdata, Bereich CODEC_OFF).
     ulib.sys4(SYS_OSUM_CODEC, CDC_SEEN, h264.h264_width(),
               h264.h264_height(), h264.h264_profile())
     if h264.h264_err() != 0 {
@@ -187,15 +151,11 @@ fn u_start(args: u64) -> u64 {
     ulib.put((&s_ms[(0) as usize]) as u64, 11)
     ulib.sayn(t1 - t0)
     ulib.nl()
-    // Bilder je Sekunde, hundertfach -- damit auch 2,5 ablesbar ist.
     var fps: u64 = 0
     if t1 > t0 { fps = h264.h264_frames() * 100000 / (t1 - t0) }
     ulib.put((&s_fps[(0) as usize]) as u64, 12)
     ulib.sayn(fps)
     ulib.nl()
-    // Die Gegenprobe: dieselben Zahlen aus dem KERN zurueckgelesen.
-    // Stimmen sie mit denen hier ueberein, ist der kdata-Bereich
-    // wirklich beschrieben worden und nicht nur zugeteilt.
     var s_kf: [u8; 17] = "h264: kframes = \0"
     var s_kw: [u8; 12] = "h264: kw = \0"
     var s_kh: [u8; 12] = "h264: kh = \0"
@@ -212,9 +172,6 @@ fn u_start(args: u64) -> u64 {
     ulib.put((&s_kr[(0) as usize]) as u64, 17)
     ulib.sayn(ulib.sys(SYS_OSUM_CODEC, CDC_GET, CDG_REJECTS, 0))
     ulib.nl()
-    // ---- DIE PROFILUHR (P-023). Takte je Abschnitt und Aufrufe.
-    // Ausgegeben wird roh; die Anteile rechnet der Wirt, damit hier
-    // keine Division die Zahlen verfaelscht.
     var s_pf: [u8; 12] = "h264: prof \0"
     var s_pn: [u8; 12] = "h264: pcnt \0"
     var pk: u64 = 0

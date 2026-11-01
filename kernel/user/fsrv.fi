@@ -1,32 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/fsrv.fi -- RUNDE FSROBUST: WAS NACH DEM STROMAUSFALL
-// DASTEHT.
-//
-// Es laeuft im ZWEITEN Start auf derselben Platte, nachdem `fsrw` mitten
-// im Schreiben abgeschossen wurde. Beim Einhaengen hat der Kern das
-// Journal nachgetragen; dieses Programm prueft, was dabei herauskam --
-// und zwar durch dieselben Systemaufrufe wie jedes andere Programm, weil
-// ein Kern, der sich selbst prueft, nichts beweist.
-//
-// DIE ZUSAGEN, GEGEN DIE GEMESSEN WIRD:
-//
-//   1. /d/roll TRAEGT GENAU EINE GENERATION. Die ersten acht Oktette
-//      sagen welche; die restlichen 4088 muessen dazu passen. Eine
-//      Datei, die vorne neu und hinten alt ist, ist der Schaden, den
-//      ein Journal ohne Datensicherung hinterlaesst -- hier faellt er
-//      auf.
-//   2. JEDE DATEI BIS /d/count IST VOLLSTAENDIG. Der Zaehler wird als
-//      LETZTES geschrieben; was unter ihm liegt, war fertig, bevor er
-//      entstand.
-//   3. DIE DATEI DANACH IST ENTWEDER NICHT DA, LEER ODER GANZ. `create`
-//      und `write` sind zwei Systemaufrufe; eine Datei mit null
-//      Oktetten ist deshalb ein erlaubter Zwischenzustand. Eine mit
-//      HALBEM Inhalt ist es nicht.
-//   4. WEITER OBEN LIEGT NICHTS. Eine Datei zwei Runden hinter dem
-//      Zaehler kann es nicht geben.
-//
-// Jede Zeile: `fsrv: <name> = <zahl>`. Die letzte ist `schaeden`, und
-// sie ist die Zahl, um die es in dieser Runde geht.
 
 profile kernel
 
@@ -45,10 +16,6 @@ static mut st: [u8; 160] = [0 as u8; 160];
 static mut ents: [u8; 4096] = [0 as u8; 4096];
 
 fn muster(g: u64, k: u64) -> u64 {
-    // `*%` und `+%`: die Rechnung LAEUFT UEBER, und das ist der Sinn --
-    // sie soll aus benachbarten Stellen weit auseinanderliegende Werte
-    // machen. Firn haelt einen ueberlaufenden `*` fuer einen Fehler und
-    // hat damit ueberall sonst recht.
     return ((g *% 2654435761) +% (k *% 40503)) % 251;
 }
 
@@ -92,8 +59,6 @@ fn build_path(g: u64) {
     ulib.strcat((&pfad[0 as usize]) as u64, (&zahl[0 as usize]) as u64);
 }
 
-// 0 = gibt es nicht, 1 = da und leer, 2 = da und vollstaendig,
-// 3 = da und KAPUTT (falsche Laenge oder falsche Oktette)
 fn check_file(g: u64) -> u64 {
     build_path(g);
     let fd: u64 = io.open((&pfad[0 as usize]) as u64, 0);
@@ -119,10 +84,6 @@ fn check_file(g: u64) -> u64 {
         }
         i = i + 1;
     }
-    // DIE RECHTE-METADATEN (Runde MULTIUSER). Der Modus wurde nach dem
-    // Schreiben auf 0600 | (g % 8) gesetzt, und der Zaehler kam DANACH.
-    // Steht hier etwas anderes, ist eine Aenderung im Inode verloren
-    // gegangen, obwohl der Zaehler sie fuer erledigt erklaert hat.
     if !errno.failed(io.stat_into((&pfad[0 as usize]) as u64,
         (&st[0 as usize]) as u64)) {
         let m: u64 = io.stat_mode_of((&st[0 as usize]) as u64) & 4095;
@@ -137,17 +98,9 @@ static mut letzte_gen: u64 = 0;
 static mut letzte_len: u64 = 0;
 
 // EINE ROLLDATEI. Rueckgabe 1 = in Ordnung.
-//
-// In Ordnung heisst: die Datei traegt GENAU EINE Generation. Die ersten
-// acht Oktette sagen welche, die restlichen 4088 muessen dazu passen.
-// Eine Datei, die vorne neu und hinten alt ist, ist der Schaden, den ein
-// Ueberschreiben ohne Journal hinterlaesst -- und der einzige, den man
-// ueberhaupt sehen kann: eine NEU angelegte Datei sieht nach einem
-// Abbruch schlicht leer aus, und das ist erlaubt.
 fn pruefe_roll(pfad: u64, c: u64) -> u64 {
     let rf: u64 = io.open(pfad, 0);
     if errno.failed(rf) {
-        // Nur erlaubt, solange noch keine Runde fertig wurde.
         if c == 0 {
             return 1;
         }
@@ -246,7 +199,6 @@ fn u_start(args: u64) -> u64 {
         schaeden = schaeden + 1;
     }
 
-    // --------------------------------------- jede Datei bis zum Zaehler
     var int: u64 = 0;
     var modefehler: u64 = 0;
     var g2: u64 = 1;
@@ -265,20 +217,17 @@ fn u_start(args: u64) -> u64 {
     sag((&n_ganz[0 as usize]) as u64, int);
     sag((&n_mode[0 as usize]) as u64, modefehler);
 
-    // ------------------------------------------------ die Datei danach
     let z1: u64 = check_file(c + 1);
     sag((&n_next[0 as usize]) as u64, z1);
     if z1 == 3 {
         schaeden = schaeden + 1;
     }
-    // und die uebernaechste: die darf es nicht geben
     let z2: u64 = check_file(c + 2);
     sag((&n_next2[0 as usize]) as u64, z2);
     if z2 != 0 {
         schaeden = schaeden + 1;
     }
 
-    // ------------------------------------ das Verzeichnis laesst sich lesen
     var dents: u64 = 0;
     let dd: u64 = io.dir_open((&p_d[0 as usize]) as u64);
     if errno.failed(dd) {

@@ -1,70 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/fuib.fi -- DIE BRUECKE: wlibs BEDIENELEMENTE KOMMEN AB
-// JETZT AUS fUi.
-//
 // ====================================================== WARUM SIE EXISTIERT
-//
-// Justin, 11.09.2026, woertlich: "wenn fui alles kann bitte bau es
-// ueberall ein. ich will nicht dass jemand es selber hardcodiert oder
-// eine eigene library verwendet, das ergibt nur chaos, wenns ein bug
-// gibt brauchen wir nur einmal die lib aendern."
-//
-// Genau dieses Chaos stand im Baum: fUi (7963 Zeilen, lib/fui, ueber
-// den festgenagelten Commit in JEDEM Baum derselbe) malt einen Knopf,
-// und wlib.fi malt DENSELBEN Knopf ein zweites Mal, 1168 Zeilen weiter
-// unten -- paint_button, paint_slider, paint_check, paint_entry,
-// paint_list, paint_table, paint_tabs, paint_tile, mal_tafel,
-// mal_balken. Zwei Umsetzungen einer Optik heisst: zwei Orte fuer
-// jeden Fehler, und der zweite wird vergessen.
-//
-// ============================================ WARUM ES EINE BRUECKE IST
-//                                              UND NICHT EIN NEUBAU
-//
-// Gemessen in diesem Baum, nicht angenommen: von wlibs 7246 Zeilen sind
-// nur 1168 Bedienelemente und Malschicht. Die anderen 6078 sind etwas
-// ANDERES als eine Widget-Bibliothek:
-//
-//   on_down 272 Zeilen, taste_verarbeiten 199, on_move 163, step 132
-//        -- die Ereignisschleife und die Tastatur,
-//   begin/window/window_app/new_win/place/dirty/paint_all
-//        -- der Fensterserver und die Schmutzrechtecke,
-//   box_v/box_h/box_grid/box_at  -- das Kastenlayout,
-//   dlg_new 99/dlg_wahl 84       -- die Dialoge,
-//   anim_*, theme_watch, sel_*, K_LEINWAND (fuer Certus).
-//
-// Dahinter haengen 23 Programme mit ueber 1300 Aufrufstellen --
-// settings.fi allein 363. fUi ist IMMEDIATE MODE (malt ein Widget je
-// Bild), wlib ist RETAINED MODE (haelt eine Widgetliste). Das sind
-// zwei Architekturen; wer sie in einem Schritt tauscht, fasst 23
-// Programme gleichzeitig an und kann am Ende nichts davon messen.
-//
-// Also die Naht dort, wo die beiden sich WIRKLICH ueberschneiden:
-// `wlib.paint_one` -- die EINE Stelle, an der wlib entscheidet, welches
-// Element gemalt wird. Sie ruft ab jetzt hierher, und hier malt fUi.
-// Die Programme merken nichts, die Fensterverwaltung bleibt, und es
-// gibt trotzdem nur noch EINE Umsetzung jedes Bedienelements.
-//
-// ============================================== WIE fUi AUF DIE FLAECHE KOMMT
-//
-// Ohne zweiten Puffer und ohne Kopie. `wlibc.surface()` gibt die
-// Fensterflaeche des Servers her: w * h * 4 Oktette, ein 32-Bit-Punkt
-// je Stelle, zeilenweise -- `wlibc.px` schreibt an (r * w + x) * 4.
-// `paint.canvas.Canvas` ist dasselbe: `px: *mut u8`, w * h * 4, RGBA.
-// Also zeigt die Leinwand DIREKT auf die Flaeche des Servers
-// (`canvas_on_surface`), und fUi malt dort, wo wlibc malen wuerde.
-//
-// Das ist gemessen und nicht gehofft: /tmp/mix2/wrap.fi hat genau das
-// getan und liess sich zu einer Ring-3-ELF binden.
-//
 // ================================================== DAS FARBSCHEMA GEWINNT
-//
-// fUi bringt eigene Farben mit (theme.colors_light/colors_dark). Die
-// werden hier NICHT benutzt. Das System hat ein Schema -- /etc/theme.conf,
-// fuenf Schemata, hell/dunkel/automatisch, Akzentfarbe -- und es liegt
-// in `wlibc.theme(T_*)`. `theme_from_osum` schreibt genau diese Werte
-// in fUis Farbtafel. Damit schlaegt ein Wechsel des Schemas durch, ohne
-// dass hier eine Farbe steht, und ein dunkles System hat kein weisses
-// Fenster.
 profile app
 
 import ulib
@@ -87,22 +22,10 @@ export {
     ready, draw, draw_area_on, theme_new, theme_sync, haupt,
     // FUI-ALL stage 3: fUi's password mask.
     secret_mask,
-    // RUNDE 31: DIE ZAEHLER. Ohne sie ist "fUi malt jetzt" eine
-    // Behauptung: `mal` hat einen Rueckfall auf wlibs alten Weg, und
-    // ein Bild sieht in beiden Faellen aehnlich aus. Diese zwei Zahlen
-    // sagen, WELCHER Weg gelaufen ist -- gemalt und abgelehnt.
     fui_painted, fui_rejected, fui_reasons,
-    // RUNDE 31: die MALSCHICHT. wlibs `mal_tafel`/`mal_flaeche`/
-    // `mal_balken` geben ihre Farbe SELBST vor (das Kontrollzentrum
-    // waehlt sie sorgfaeltig) -- fUi soll sie malen, nicht ersetzen.
     tafel, area, ring, tip_place,
-    // RUNDE GLAS: der Anstoss fuer ein neues Bild. `wlib.paint_all`
-    // ruft ihn, damit die zwei Wege dieser Bruecke im selben Takt
-    // melden wie wlibs Widgettypen.
     radius_bild,
-    // Fuer wlib: die Zustaende, die ein Element haben kann.
     Z_NORMAL, Z_HOVER, Z_PRESSED, Z_OFF, Z_FOCUS,
-    // Die Sorten, die diese Bruecke malen kann.
     S_BUTTON, S_LABEL, S_CHECK, S_ENTRY, S_SLIDER, S_TILE,
     S_CARD, S_SEP, S_TABS, S_MENUBAR, S_CHOICE, S_SCROLL,
     S_PROGRESS,
@@ -133,31 +56,6 @@ const S_CHOICE: u64 = 10
 const S_SCROLL: u64 = 11
 const S_PROGRESS: u64 = 12
 
-// Der Zustand dieser Bruecke. Er wird EINMAL aufgebaut und dann bei
-// jedem Anstrich benutzt -- eine Leinwand je Bild waere eine
-// Speicheranforderung je Bild.
-// ANMERKUNG ZU DEN `static`s: Firn schreibt den Anfangswert eines
-// `static` in die Objektdatei, also MUSS er ein Literal sein -- es
-// laeuft kein Code vor `main`, der ihn ausrechnen koennte (SPEC
-// 14.1.statics). `canvas_new()` und `theme_new()` sind Aufrufe, also
-// hier nicht erlaubt.
-//
-// Die Strukturen liegen deshalb als WORTFELDER da und werden in
-// `bereit()` einmal richtig gefuellt. Das ist dieselbe Bauweise, die
-// wlib fuer seine Fenstertafel benutzt: ein Feld Woerter, ein Zeiger
-// darauf, und die Struktur liegt darin. Reichlich bemessen, damit ein
-// Zuwachs in der Bibliothek hier nicht still daneben schreibt --
-// geprueft wird das trotzdem, siehe `bereit`.
-// Firn will bei der Laenge eines Feldes eine ZAHL sehen, keinen
-// benannten Wert -- deshalb stehen die 128/64/128 hier ausgeschrieben
-// und die Namen daneben nur als Erklaerung.
-//   s_cvm  128 Woerter = 1024 Oktette  fuer paint.canvas.Canvas
-//   s_pzm  512 Woerter = 4096 Oktette  fuer fui.painter.Painter (2560 with the Firn pin 8e56de678)
-//          (FUI-ALL: Painter is 648 octets since the Firn pin of stage 0;
-//          at 64 words `ready()` refused it and EVERY program silently
-//          painted with wlibc again -- measured: prims=0, fui=0.)
-//   s_thm  128 Woerter = 1024 Oktette  fuer fui.theme.Theme
-// Ob das reicht, wird in `bereit()` GEMESSEN und nicht geglaubt.
 const CV_BYTES: usize = 1024
 const PZ_BYTES: usize = 4096
 const TH_BYTES: usize = 1024
@@ -178,27 +76,10 @@ fn ctx() -> *mut render.Ctx { return (&s_ctxm[0 as usize]) as u64 as *mut render
 static mut s_fm: u64 = 0
 static mut s_n_ok: u64 = 0
 static mut s_n_no: u64 = 0
-// RUNDE 32: WARUM wurde abgelehnt? `fuix` allein sagt es nicht, und
-// ohne den Grund kann man nicht entscheiden, ob der Rueckfall noch
-// gebraucht wird. Vier Gruende, vier Zaehler.
 static mut s_no_bereit: u64 = 0
 static mut s_no_leer: u64 = 0
 static mut s_no_band: u64 = 0
 static mut s_no_art: u64 = 0
-// ====================================================== RUNDE GLAS
-// WELCHER RADIUS AUF WELCHEM WEG -- UND WARUM DAS GEMESSEN WIRD.
-//
-// `tafel` hat zwei Ausgaenge: den Vektorzeichner (`painter.round_rect`)
-// und, wenn es keine Fensterflaeche gibt, `wlibc.rrect`. Beide bekommen
-// DENSELBEN `r` -- das steht seit Runde 32 so da, aber es stand
-// nirgends auf der Leitung. Eine Zusage "der Radius kommt ueberall an",
-// bei der ein Weg heimlich eckig malen koennte, ist keine Zusage,
-// sondern eine Hoffnung.
-//
-// Gemeldet wird der GEDECKELTE Wert (halbe kuerzere Seite), weil genau
-// der im Bild steht, und je Bild nur EINMAL je Wert und Weg: eine Seite
-// malt hunderte Tafeln mit drei verschiedenen Radien, und drei Zeilen
-// sagen darueber alles, was hundert Zeilen auch sagen.
 static mut s_rreden: u64 = 0
 static mut s_rvek: [u64; 8] = [0; 8]
 static mut s_rrct: [u64; 8] = [0; 8]
@@ -218,9 +99,6 @@ fn radius_bild(reden: bool) {
     s_nrct = 0
 }
 
-// Der Wert, den `rrect` und `round_rect` wirklich malen: beide deckeln
-// auf die halbe kuerzere Seite, und MR_GRIFF schickt absichtlich
-// 0xFFFF ("so rund wie moeglich").
 fn radius_eff(r: u64, w: u64, h: u64) -> u64 {
     var kurz: u64 = w
     if h < kurz {
@@ -279,8 +157,6 @@ fn fui_rejected() -> u64 {
     return s_n_no
 }
 
-// Die Gruende, in einer Zahl: bereit*1000000 + leer*10000 + band*100 + art.
-// Eine Zahl, weil die Taskleiste sie in EINER Zeile meldet.
 fn fui_reasons() -> u64 {
     return s_no_bereit * 1000000 + s_no_leer * 10000
         + s_no_band * 100 + s_no_art
@@ -298,68 +174,9 @@ fn th() -> *mut theme.Theme {
     return ((&s_thm[0 as usize]) as u64) as *mut theme.Theme
 }
 
-// ------------------------------------------------------------------
-// DIE LEINWAND ZEIGT AUF DIE FENSTERFLAECHE.
-//
-// `canvas_init` wuerde einen eigenen Puffer anfordern; das ist hier
-// genau falsch -- die Bildpunkte gehoeren dem Fensterserver. Die
-// Felder werden deshalb direkt gesetzt. Es gibt in `paint.canvas`
-// kein `canvas_wrap`, und eines dort einzubauen waere eine Aenderung
-// an der gemeinsamen Bibliothek fuer einen Fall, den nur Osum hat.
-// ------------------------------------------------------------------
-// ==================================================================
-// RUNDE 32: DIE KANALREIHENFOLGE. DER FEHLER, DEN RUNDE 31 EINGEBAUT
-// UND DIE HELLIGKEITSMESSUNG NICHT GESEHEN HAT.
-//
-// Justin hat die Belege selbst nachgemessen, nach FARBTON und nicht
-// nach Helligkeit, und damit den Fehler gefunden:
-//
 //   dunkel-05-kontrollzentrum.png
 //     Panel und Taskleiste   RGB( 59, 41, 30)   braun
 //     dieselbe Farbe woanders RGB( 30, 41, 59)  neutral-dunkelblau
-//
-// Zweimal dieselbe Farbe im SELBEN Bild, einmal richtig und einmal mit
-// vertauschtem R und B. `night.scheme` sagt `neutral800=1e293b`, also
-// ist RGB(30,41,59) richtig und RGB(59,41,30) die Umkehrung.
-//
-// WARUM: die beiden Seiten legen einen Bildpunkt VERSCHIEDEN ab.
-//
-//   wlibc.px schreibt EIN u32 (`__mmio_write32`), und wlibc baut die
-//   Farbe als (r << 16) | (g << 8) | b. Auf x86 liegt ein u32 mit dem
-//   niedrigsten Oktett zuerst -- im Speicher steht also B, G, R, A.
-//
-//   paint/canvas.fi legt VIER OKTETTE ab, und zwar in dieser Reihe:
-//       st8(p,   (v >> 16) & 255)   // R
-//       st8(p+1, (v >>  8) & 255)   // G
-//       st8(p+2,  v        & 255)   // B
-//       st8(p+3, (v >> 24) & 255)   // A
-//   also R, G, B, A.
-//
-// Beide Wege malen in DENSELBEN Speicher (die Bruecke laesst die
-// Leinwand ja mit Absicht direkt auf `wlibc.surface()` zeigen). Wer
-// die Oktette der Leinwand als BGRA liest, sieht R und B getauscht.
-//
-// Nachgerechnet fuer 0x1E293B: canvas legt 30,41,59 ab; als BGRA
-// gelesen ist das B=30 G=41 R=59, also RGB(59,41,30) -- genau der
-// gemessene Braunton.
-//
-// WARUM ES IM HELLMODUS NICHT AUFFIEL: |R-B| ist bei Weiss 0, bei
-// f8fafc 4, bei f1f5f9 8. Grautoene sind unter der Umkehr fast
-// unveraendert, und die Abnahme hat nur die HELLIGKEIT gemessen --
-// Braun ist dunkler als Weiss, also war sie gruen. Erst eine
-// gesaettigte Dunkelfarbe zeigt es.
-//
-// WO DER FEHLER BEHOBEN WIRD, UND WO NICHT:
-//
-//   NICHT in paint/canvas.fi. Das ist die GEMEINSAME Bibliothek (Certus
-//   malt damit seine Seiten, der fUi-Pruefstand seine PNG). Dort ist
-//   R,G,B,A richtig -- ein PNG erwartet genau das. Wer sie umbaut,
-//   dreht jedes andere Bild falsch.
-//
-//   SONDERN HIER, an der Naht. Diese Bruecke ist die einzige Stelle,
-//   an der eine wlibc-Farbe in fUis Maler geht, also ist sie die
-//   einzige Stelle, an der umgerechnet werden muss -- genau einmal,
-//   fuer jede Farbe, die hinuebergeht.
 fn swap_rb(c: u64) -> u32 {
     // Swap R and B, leave G and A alone. That makes canvas.fi lay the
     // octets down in the order the framebuffer expects.
@@ -384,13 +201,6 @@ fn canvas_on_surface(c: *mut canvas.Canvas, px: u64, w: usize, h: usize) {
     (*c).ok = 1
 }
 
-// ------------------------------------------------------------------
-// DAS SCHEMA DES SYSTEMS IN fUis FARBTAFEL.
-//
-// Jede Rolle, die fUi kennt, bekommt den Wert, den das System dafuer
-// fuehrt. Wo Osum keine eigene Rolle hat, wird die naechstliegende
-// genommen und das steht daneben -- geraten wird nichts.
-// ------------------------------------------------------------------
 fn theme_sync() -> bool {
     if s_auf == 0 || wlibc.theme_gen() == s_theme_gen {
         return false
@@ -406,14 +216,11 @@ fn theme_new() {
     let f: *mut theme.Colors = theme.theme_colors(th())
     (*f).base = swap_rb(wlibc.theme(wlibc.T_BG))
     (*f).surface = swap_rb(wlibc.theme(wlibc.T_PANEL))
-    // Eine Karte und ein Menue stehen naeher am Auge als die Flaeche.
     (*f).surface_raised = swap_rb(wlibc.theme(wlibc.T_MENU))
     (*f).button = swap_rb(wlibc.theme(wlibc.T_BTN))
     (*f).button_hover = swap_rb(wlibc.theme(wlibc.T_BTNHI))
     (*f).button_active = swap_rb(wlibc.theme(wlibc.T_BTNDN))
     (*f).field = swap_rb(wlibc.theme(wlibc.T_ENTRY))
-    // Osum kennt kein eigenes "Feld hat den Fokus": der Fokusring
-    // macht das sichtbar, die Flaeche bleibt.
     (*f).field_focus = swap_rb(wlibc.theme(wlibc.T_ENTRY))
     (*f).border_col = swap_rb(wlibc.theme(wlibc.T_LINE))
     (*f).separator = swap_rb(wlibc.theme(wlibc.T_LINE))
@@ -427,8 +234,6 @@ fn theme_new() {
     // selection is a tint now and keeps the normal text colour)
     (*f).text_on_accent = swap_rb(wlibc.theme(wlibc.C_TITLEBAR_TEXT))
     (*f).dark = dunkel
-    // Die Form: Osum fuehrt die Radien in seinen Metriken, und
-    // `classic` heisst Radius 0. Dieselbe Zahl, nicht eine zweite.
     let fo: *mut theme.Shape = theme.theme_shape(th())
     (*fo).r_button = wlibc.metric(wlibc.M_RADIUS_BUTTON) as usize
     (*fo).r_panel = wlibc.metric(wlibc.M_RADIUS_PANEL) as usize
@@ -460,16 +265,6 @@ fn theme_new() {
     }
 }
 
-// ------------------------------------------------------------------
-// EINMAL AUFBAUEN. Danach ist `bereit` wahr und `mal` kann malen.
-//
-// Die Schrift ist die des Systems, nicht die der Bibliothek: Osum
-// rastert seine Glyphen selbst (wlibc), und fUis Maler braucht eine
-// eigene Schrift nur fuer den Text, den er selbst setzt. Findet er
-// keine, malt er die Flaechen und ueberlaesst den Text der
-// aufrufenden Seite -- genau so, wie wlib den Text heute schon selbst
-// setzt (`put_text`, damit Umlaute und Kuerzung gleich bleiben).
-// ------------------------------------------------------------------
 fn ready() -> bool {
     if s_auf != 0 {
         return true
@@ -483,12 +278,6 @@ fn ready() -> bool {
     if w == 0 || h == 0 {
         return false
     }
-    // DIE WORTFELDER MUESSEN GROSS GENUG SEIN. Wuechse eine der
-    // Strukturen in der Bibliothek ueber ihr Feld hinaus, schriebe
-    // `painter_init` daneben -- in `s_thm` oder ins Nichts. Das waere
-    // ein Fehler, der irgendwo ANDERS auftaucht. Also einmal messen,
-    // und zwar an der Struktur selbst und nicht an einer getippten
-    // Zahl: der Abstand zweier Felder eines Feldes IST ihre Groesse.
     var mcv: [canvas.Canvas; 2] = [canvas.canvas_new(); 2]
     let ncv: usize = ((&mcv[1]) as u64 - (&mcv[0]) as u64) as usize
     var mpz: [painter.Painter; 2] = [painter.painter_new(); 2]
@@ -515,48 +304,6 @@ fn ready() -> bool {
         return false
     }
     canvas_on_surface(cv(), sp, w, h)
-    // ==================================== RUNDE FUI-VENDOR-BILD
-    // DER RASTERVORRAT MUSS DIE HOECHSTE FLAECHE FASSEN, DIE fUi HIER
-    // MALT -- SONST MALT ES SIE STILL GAR NICHT.
-    //
-    // Hier stand 64, ohne Begruendung. `painter.raster_window` gibt
-    // `false` zurueck, sobald die gewuenschte Flaeche hoeher ist als
-    // dieser Vorrat, und `round_rect` kehrt daraufhin WORTLOS zurueck
-    // (der Kopf von `run_draw` beschreibt dieselbe Falle fuer Text:
-    // "the gradient looked broken; in truth nothing was drawn at all").
-    //
-    // GEMESSEN, 13.09.2026: die Kachel des Kontrollzentrums wurde in
-    // dieser Runde von 49 auf 67 Bildpunkte hoch (zweizeilige
-    // Beschriftung). 67 + 2 Punkte Luft > 64, also fiel die Fuellung
-    // aus. Im Bild blieben von der eingeschalteten Kachel 13 Zeilen
-    // Akzentfarbe statt 67 -- der Rest kam aus dem Rueckfall. Der
-    // Quelltext sah dabei voellig richtig aus; nur das Bild zeigte es.
-    //
-    // ==================================== RUNDE GEISTERBALKEN
-    // DER VORRAT FOLGT DER FLAECHE, NICHT EINER GETIPPTEN ZAHL.
-    //
-    // Hier stand 96, mit der Begruendung "mehr als `wlibc.SURF_ROWS`
-    // (81)". Die Begruendung stimmte nicht: eine Konstante SURF_ROWS
-    // gibt es in diesem Baum nicht. `wlibc.surf_rows()` ist GERECHNET
-    // -- SURF_BUDGET (1 MiB) geteilt durch Schirmbreite*4 -- und
-    // liefert 204 Zeilen bei 1280, 136 bei 1920, 76 bei 3440. Die 96
-    // war also je nach Schirm zu gross ODER ZU KLEIN, und zu klein
-    // heisst bei `raster_window`: `false`, und `round_rect` kehrt
-    // WORTLOS zurueck.
-    //
-    // `h` ist genau die Zahl, die zaehlt: so viele Zeilen traegt die
-    // Zeichenflaeche, und mehr kann auf ihr gar nicht entstehen --
-    // `wlibc.px` verwirft alles dahinter. Plus 3, weil `raster_window`
-    // mit `luft = 1.0` oben und unten je einen Punkt dazunimmt und
-    // dann noch aufrundet ((by-ay) as usize + 1).
-    //
-    // Warum das jetzt WICHTIG ist: seit Runde GEISTERBALKEN malt das
-    // Kontrollzentrum eine Kachel in EINEM Stueck (die Bandgrenzen
-    // liegen auf Elementkanten, qs.fi `band_ende`). Vorher kam nie
-    // eine Form ueber 64 Zeilen hier an, weil das Band sie zerschnitt
-    // -- deshalb ist der Vorrat bisher nie aufgefallen. Jetzt kommen
-    // 136 Zeilen am Stueck, und ein zu kleiner Vorrat waere derselbe
-    // stille Fehlschlag wie damals, nur an anderer Stelle.
     let vorrat: usize = h + 3
     if !painter.painter_init(pz(), cv(), w, vorrat) {
         return false
@@ -576,9 +323,6 @@ fn ready() -> bool {
     return true
 }
 
-// Die Flaeche kann sich aendern (Fenstergroesse, Aufloesung, Band).
-// Dann zeigt die Leinwand auf den falschen Speicher, und das waere ein
-// Schreiben daneben -- also bei jedem Anstrich nachziehen.
 fn draw_area_on() {
     let sp: u64 = wlibc.surface()
     if sp == 0 {
@@ -591,46 +335,11 @@ fn draw_area_on() {
     }
 }
 
-// ------------------------------------------------------------------
-// EINE TAFEL MIT VORGEGEBENER FARBE -- fUis Maler, wlibs Farbe.
-//
-// `mal_tafel` bekommt Fuellung und Rand vom Aufrufer; das Kontroll-
-// zentrum rechnet seine Kachelfarben aus dem Schema und dem Zustand
-// selbst. fUi soll hier also nicht die Farbe BESTIMMEN, sondern die
-// FLAECHE malen -- dieselbe Kurve, derselbe Radius, ein Rasterer.
-// Genau das ist `painter.round_rect`/`round_ring`.
-// ====================================================== RUNDE 32
-// DER RUECKFALL LIEGT JETZT HIER UND NICHT BEI JEDEM AUFRUFER.
-//
-// Justin: "wlib.fi ist auf 7355 Zeilen GEWACHSEN statt geschrumpft --
-// am Ende dieser Runde muss es deutlich kleiner sein. Sag die Zahl."
-//
-// Der Zuwachs war der Rueckfall: jede der 26 Stellen in wlib trug ein
-//
-//     if !fuib.tafel(...) { <der alte Weg mit wlibc> }
-//
-// also drei bis sechs zusaetzliche Zeilen. Sechsundzwanzig Mal.
-//
-// GEMESSEN, warum das weg kann (der Zaehler `fuig` aus dieser Runde):
-// in einem vollen Lauf gab es VIER Ablehnungen, alle vier "leeres
-// Rechteck" (w oder h ist 0), und NULL "nicht bereit". Und ein leeres
-// Rechteck malt auch der alte Weg nicht: `wlibc.rect` prueft in seiner
-// zweiten Zeile `if w == 0 || h == 0 { return }`, und rrect, rframe,
-// rring, vrect, vkreis und divider tun dasselbe. Der Rueckfall fuer
-// diesen Fall war also nachweislich toter Code.
-//
-// Bleibt der Fall, in dem es KEINE Fensterflaeche gibt (`bereit` ist
-// falsch). Der ist in den Messungen nie eingetreten, aber er ist
-// moeglich -- und ein Element, das dann gar nicht erscheint, waere
-// schlimmer als ein eckiges. Also malt die Bruecke in diesem Fall
-// SELBST mit wlibc, hier, an einer Stelle. Damit gibt `tafel` immer
-// `true` zurueck und der Aufrufer braucht kein `if` mehr.
 fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
     rand: u64, randbreite: u64) -> bool {
     if !ready() {
         s_n_no = s_n_no + 1
         s_no_bereit = s_no_bereit + 1
-        // Der alte Weg, EINMAL, statt sechsundzwanzigmal in wlib.
         say_tafel(radius_eff(r, w, h), false)
         if rand == 0 || randbreite == 0 {
             wlibc.rrect(x, y, w, h, r, fuellung)
@@ -645,31 +354,12 @@ fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
         return false
     }
     clip_sync()
-    // ================================================== RUNDE 32
-    // EIN RECHTECK, DAS OBEN AUS DEM BAND HERAUSRAGT, WIRD BESCHNITTEN
-    // UND NICHT ABGELEHNT.
-    //
-    // GEMESSEN (fuig=41400, der Zaehler aus dieser Runde): von 18
-    // Ablehnungen in einem vollen Lauf waren VIERZEHN `y < band_y`.
-    // Das Band ist der waagerechte Streifen, den der Fensterserver
-    // gerade neu malen laesst (`wlibc.set_band`); ein Element, das
-    // hoeher beginnt, ist kein Fehler -- es ist teilweise sichtbar.
-    // `wlibc.px` verwirft dann einfach die Punkte darueber.
-    //
-    // Vorher gab die Bruecke in diesem Fall auf, und der alte Weg
-    // malte -- also malten pro Lauf vierzehn Flaechen NICHT mit fUi,
-    // ohne dass man es im Bild sah. Jetzt wird der obere Teil
-    // abgeschnitten und der Rest von fUi gemalt.
     let b: u64 = wlibc.band_y()
     var yy: u64 = y
     var hh: u64 = h
     if yy < b {
         let weg: u64 = b - yy
         if weg >= hh {
-            // Ganz oberhalb des Bandes: nichts zu malen, und das ist
-            // KEIN Rueckfall -- der alte Weg haette auch nichts
-            // gemalt. Also als Erfolg zaehlen, sonst zaehlt der
-            // Zaehler eine Ablehnung, die keine ist.
             s_n_ok = s_n_ok + 1
             return true
         }
@@ -677,16 +367,6 @@ fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
         yy = b
     }
     let fy: f64 = (yy - b) as f64
-    // `rrect` deckelt den Radius auf die halbe kuerzere Seite, und
-    // MR_GRIFF schickt absichtlich 0xFFFF ("so rund wie moeglich").
-    // Dieselbe Deckelung hier, sonst malt fUi eine Ecke, wo wlib eine
-    // Kapsel gemalt haette.
-    // Der Radius richtet sich nach der ECHTEN Groesse des Elements
-    // (h), nicht nach dem beschnittenen Teil (hh): eine Kachel, die
-    // halb im Band liegt, hat oben denselben Rundungsradius wie eine
-    // ganz sichtbare. Wuerde hier `hh` stehen, wechselte die Rundung
-    // mit dem Band -- und das Band haengt daran, was der Server gerade
-    // neu malen laesst.
     var rr: u64 = r
     var short: u64 = w
     if h < short {
@@ -706,23 +386,6 @@ fn tafel(x: u64, y: u64, w: u64, h: u64, r: u64, fuellung: u64,
     return true
 }
 
-// Eine Flaeche ohne Radius und ohne Rand -- `mal_flaeche`.
-// ============================================= RUNDE BELEG: DIE BLASE
-// WEICHT AUS, UND ZWAR IN fUi GERECHNET.
-//
-// Justins Befund am Abbild: die Blase "no network" klebte rechts unten
-// bei der Uhr. Gemessen an dunkel-05-kontrollzentrum.png: Blase
-// x 1140..1215 y 730..753, Leiste ab y 760, Uhr x 1166..1269. Sie
-// verdeckte die Uhr nicht, stand aber in derselben Spalte, und ihre
-// Unterkante beruehrte die Leiste.
-//
-// Die Rechnung dazu steht in fUi (`wave2.tooltip_place`) und NICHT hier
-// und auch nicht in der Leiste -- sonst hat jeder Aufrufer seine eigene
-// Antwort auf dieselben drei Fragen (faellt sie vom Schirm, verdeckt sie
-// ihre eigene Leiste, verdeckt sie etwas Lesbares).
-//
-// Diese Bruecke rechnet nur um: Osum rechnet in ganzen Bildpunkten, fUi
-// in f64.
 fn tip_place(sx: u64, sy: u64, bw: u64, bh: u64,
     sw: u64, sh: u64, ay0: u64, ay1: u64, ax0: u64, ax1: u64,
     gap: u64, ox: *mut u64, oy: *mut u64) {
@@ -745,7 +408,6 @@ fn area(x: u64, y: u64, w: u64, h: u64, farbe: u64) -> bool {
     return tafel(x, y, w, h, 0, farbe, 0, 0)
 }
 
-// Nur der Rand -- der Fokusring.
 fn ring(x: u64, y: u64, w: u64, h: u64, r: u64, breite: u64,
     farbe: u64) -> bool {
     if !ready() {
@@ -760,11 +422,6 @@ fn ring(x: u64, y: u64, w: u64, h: u64, r: u64, breite: u64,
         return false
     }
     clip_sync()
-    // Wie in `tafel`: oben aus dem Band herausragen ist kein Fehler.
-    // Ein RING wird allerdings nicht beschnitten, sondern ganz
-    // weggelassen, wenn seine Oberkante fehlt -- ein halber Ring ist
-    // eine Linie, und die sieht aus wie ein Fehler. Der alte Weg
-    // (`wlibc.rring`) wuerde hier denselben oberen Teil verlieren.
     let b: u64 = wlibc.band_y()
     if y < b {
         if b - y >= h {
@@ -836,17 +493,6 @@ fn art_von(sorte: u64) -> u32 {
     return widget.KIND_NONE
 }
 
-// ------------------------------------------------------------------
-// EIN ELEMENT MALEN. Das ist alles, was wlib von hier braucht.
-//
-// `wert` ist der Wert von Regler, Fortschritt und Umschalter; bei den
-// uebrigen Sorten wird er nicht gelesen. Der TEXT wird hier NICHT
-// gemalt: Osum setzt seinen Text selbst (Umlaute, Kuerzung, die
-// Symbolschrift, `say_painted` fuer die Pruefstaende), und zwei
-// Schriftsetzer auf einer Flaeche waeren zwei Ergebnisse.
-// ------------------------------------------------------------------
-// The main button: while set, a button is drawn in the accent colours
-// instead of the grey control steps.
 static mut s_haupt: u64 = 0
 
 fn haupt(on: bool) {
@@ -876,8 +522,6 @@ fn draw(sorte: u64, x: u64, y: u64, w: u64, h: u64, z: u64,
         return false
     }
     var e: widget.Widget = widget.widget_new(art)
-    // Das Band: wlibc malt in Fensterkoordinaten, die Flaeche des
-    // Servers beginnt bei `band_y`. Dieselbe Rechnung wie wlibc.px.
     let b: u64 = wlibc.band_y()
     if y < b {
         s_n_no = s_n_no + 1

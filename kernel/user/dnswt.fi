@@ -1,17 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // kernel/user/dnswt.fi -- RUNDE BETRIEB: die feindlichen Nachrichten.
-//
-// `libc/dnswire.fi` enthaelt keinen Systemaufruf. Deshalb laesst sich
-// jede Falle, an der ein selbstgebauter Aufloeser stirbt, OHNE EIN PAKET
-// pruefen: die Nachricht wird hier von Hand gebaut und dem Zerteiler
-// hingelegt. Sechzehn Faelle, und der Punkt bei den ersten sechs ist
-// nicht nur "es kommt NEIN heraus", sondern "es kommt UEBERHAUPT etwas
-// heraus" -- ein Zerteiler ohne Sprungschranke haengt hier fuer immer,
-// und ein haengender Lauf ist ein roter Lauf.
-//
-// Dieses Programm liegt in KEINEM Abbild (es steht nicht in $PROGS von
-// tools/install/build.sh); es wird von `tools/operation/run.sh` fuer den
-// Wirt gebaut und dort gefahren.
 
 profile kernel
 
@@ -88,7 +76,6 @@ fn urteil_n(t: u64, ok: bool, v: u64) {
     ulib.nl()
 }
 
-// Eine Frage `www.test` bauen und in Q ablegen. Gibt die Laenge zurueck.
 fn ask_build(qtype: u64) -> u64 {
     var i: u64 = 0
     while i < 40 {
@@ -99,8 +86,6 @@ fn ask_build(qtype: u64) -> u64 {
         qtype, (&RND[0 as usize]) as u64)
 }
 
-// Den Kopf einer ANTWORT aus der Frage abschreiben und die Zaehler
-// setzen. Gibt die Stelle hinter dem Fragenteil zurueck.
 fn reply_header(qlen: u64, an: u64, rcode: u64) -> u64 {
     var i: u64 = 0
     while i < qlen {
@@ -112,7 +97,6 @@ fn reply_header(qlen: u64, an: u64, rcode: u64) -> u64 {
     return qlen
 }
 
-// Einen Satz schreiben: Name als Zeiger auf HDR, dann TYPE/CLASS/TTL/RDLEN.
 fn record_cursor(at: u64, typ: u64, rl: u64) -> u64 {
     m8(at, 0xC0); m8(at + 1, 12); m8(at + 2, (typ >> 8) & 255); m8(at + 3, typ & 255); m8(at + 4, 0); m8(at + 5, 1); m8(at + 6, 0); m8(at + 7, 0); m8(at + 8, 0); m8(at + 9, 60); m8(at + 10, (rl >> 8) & 255); m8(at + 11, rl & 255)
     return at + 12
@@ -149,35 +133,29 @@ fn u_start(args: u64) -> u64 {
     var r: u64 = 0
     var i: u64 = 0
 
-    // ---- 1. ein Zeiger, der auf sich selbst zeigt
     i = 0
     while i < 600 { m8(i, 0); i = i + 1 }
     m8(12, 0xC0); m8(13, 12)
     r = dnswire.name_at(mp(), 600, 12, (&NAM[0 as usize]) as u64, 300)
     urteil((&t1[0 as usize]) as u64, r == 0)
 
-    // ---- 2. ein Zeiger nach vorn
     i = 0
     while i < 600 { m8(i, 0); i = i + 1 }
     m8(12, 0xC0); m8(13, 40); m8(40, 1); m8(41, 97); m8(42, 0)
     r = dnswire.name_at(mp(), 600, 12, (&NAM[0 as usize]) as u64, 300)
     urteil((&t2[0 as usize]) as u64, r == 0)
 
-    // ---- 3. eine RUECKWAERTSKETTE: jeder Sprung geht echt nach unten,
-    // also faengt Schranke 1 sie NICHT. Erst die Sprungzaehlung tut es.
     i = 0
     while i < 600 { m8(i, 0); i = i + 1 }
     i = 0
     while i < 100 {
-        // an Stelle 400-2i steht ein Zeiger auf 400-2(i+1)
         cursor(400 - i * 2, 400 - (i + 1) * 2)
         i = i + 1
     }
-    m8(198, 0) // die Wurzel am Ende der Kette
+    m8(198, 0)
     r = dnswire.name_at(mp(), 600, 400, (&NAM[0 as usize]) as u64, 300)
     urteil((&t3[0 as usize]) as u64, r == 0)
 
-    // ---- 4. ein Name ueber 255 Oktett: sechs Marken zu 63
     i = 0
     while i < 600 { m8(i, 0); i = i + 1 }
     var at: u64 = 12
@@ -196,7 +174,6 @@ fn u_start(args: u64) -> u64 {
     r = dnswire.name_at(mp(), 600, 12, (&NAM[0 as usize]) as u64, 300)
     urteil((&t4[0 as usize]) as u64, r == 0)
 
-    // ---- 5. eine Marke, die ueber das Ende der Nachricht reicht
     i = 0
     while i < 600 { m8(i, 0); i = i + 1 }
     m8(12, 40)
@@ -210,7 +187,6 @@ fn u_start(args: u64) -> u64 {
     r = dnswire.name_at(mp(), 600, 12, (&NAM[0 as usize]) as u64, 300)
     urteil((&t6[0 as usize]) as u64, r == 0)
 
-    // ---- 7. rdlength ueber das Ende hinaus
     at = reply_header(qlen, 1, 0)
     at = record_cursor(at, dnswire.T_A, 4)
     r = dnswire.ans_check(mp(), at + 2, qp(), qlen, dnswire.T_A, op())
@@ -222,11 +198,8 @@ fn u_start(args: u64) -> u64 {
     r = dnswire.ans_check(mp(), at + 4, qp(), qlen, dnswire.T_A, op())
     urteil_n((&t8[0 as usize]) as u64, r == dnswire.R_MISMATCH, r)
 
-    // ---- 9. die 0x20-Kodierung: ein Buchstabe der zurueckgesendeten
-    // Frage anders geschrieben. Die Kennung stimmt, alles andere auch.
     at = reply_header(qlen, 1, 0)
     at = record_cursor(at, dnswire.T_A, 4); m8(at, 10); m8(at + 1, 1); m8(at + 2, 2); m8(at + 3, 3)
-    // das erste 'w' der Frage gross schreiben
     m8(13, g8(mp(), 13) & 223)
     if g8(mp(), 13) == g8(qp(), 13) {
         m8(13, g8(mp(), 13) | 32)
@@ -234,7 +207,6 @@ fn u_start(args: u64) -> u64 {
     r = dnswire.ans_check(mp(), at + 4, qp(), qlen, dnswire.T_A, op())
     urteil_n((&t9[0 as usize]) as u64, r == dnswire.R_MISMATCH, r)
 
-    // ---- 10. das QR-Bit fehlt
     at = reply_header(qlen, 1, 0)
     at = record_cursor(at, dnswire.T_A, 4); m8(at, 10); m8(at + 1, 1); m8(at + 2, 2); m8(at + 3, 3); m8(2, 0x01)
     r = dnswire.ans_check(mp(), at + 4, qp(), qlen, dnswire.T_A, op())
@@ -245,7 +217,6 @@ fn u_start(args: u64) -> u64 {
     r = dnswire.ans_check(mp(), at, qp(), qlen, dnswire.T_A, op())
     urteil_n((&tb[0 as usize]) as u64, r == dnswire.R_NXDOMAIN, r)
 
-    // ---- 12. die gute Antwort
     at = reply_header(qlen, 1, 0)
     at = record_cursor(at, dnswire.T_A, 4); m8(at, 10); m8(at + 1, 1); m8(at + 2, 2); m8(at + 3, 3)
     r = dnswire.ans_check(mp(), at + 4, qp(), qlen, dnswire.T_A, op())
@@ -253,24 +224,19 @@ fn u_start(args: u64) -> u64 {
         && g8(op(), 0) == 10 && g8(op(), 1) == 1 && g8(op(), 2) == 2
         && g8(op(), 3) == 3, r)
 
-    // ---- 13. eine CNAME-Kette: www.test CNAME z.test, z.test A 9.8.7.6
     at = reply_header(qlen, 2, 0)
     var cn: u64 = at
     at = record_cursor(at, dnswire.T_CNAME, 9)
-    // "z.test" als eigener Name, ohne Kompression
     m8(at, 1); m8(at + 1, 122); m8(at + 2, 4); m8(at + 3, 116); m8(at + 4, 101); m8(at + 5, 115); m8(at + 6, 116); m8(at + 7, 0)
     let zziel: u64 = at
     at = at + 8
-    // Satz 2: Besitzer ist derselbe Name, als Zeiger auf zziel
     m8(at, 0xC0); m8(at + 1, zziel & 255); m8(at + 2, 0); m8(at + 3, 1) // A
     m8(at + 4, 0); m8(at + 5, 1); m8(at + 6, 0); m8(at + 7, 0); m8(at + 8, 0); m8(at + 9, 60); m8(at + 10, 0); m8(at + 11, 4); m8(at + 12, 9); m8(at + 13, 8); m8(at + 14, 7); m8(at + 15, 6)
-    // das rdlength des CNAME richtigstellen: 8 Oktette
     m8(cn + 10, 0); m8(cn + 11, 8)
     r = dnswire.ans_check(mp(), at + 16, qp(), qlen, dnswire.T_A, op())
     urteil_n((&td[0 as usize]) as u64, r == dnswire.R_OK
         && g8(op(), 0) == 9 && g8(op(), 3) == 6, r)
 
-    // ---- 14. eine CNAME-SCHLEIFE: a -> b -> a. Muss ENDEN.
     at = reply_header(qlen, 2, 0)
     var c1: u64 = at
     at = record_cursor(at, dnswire.T_CNAME, 8); m8(at, 1); m8(at + 1, 122); m8(at + 2, 4); m8(at + 3, 116); m8(at + 4, 101); m8(at + 5, 115); m8(at + 6, 116); m8(at + 7, 0)
@@ -288,9 +254,6 @@ fn u_start(args: u64) -> u64 {
     urteil_n((&te[0 as usize]) as u64, r == dnswire.R_LOOP
         || r == dnswire.R_NODATA, r)
 
-    // ---- 15. ein Satz mit FREMDEM Besitzernamen. Das ist der
-    // klassische Beipack einer Vergiftung: die Antwort ist formal in
-    // Ordnung, aber der Satz gehoert zu einem anderen Namen.
     at = reply_header(qlen, 1, 0); m8(at, 1); m8(at + 1, 120) // "x"
     m8(at + 2, 4); m8(at + 3, 116); m8(at + 4, 101); m8(at + 5, 115); m8(at + 6, 116); m8(at + 7, 0)
     at = at + 8
@@ -304,8 +267,6 @@ fn u_start(args: u64) -> u64 {
     r = dnswire.ans_check(mp(), at, qp(), qlen, dnswire.T_A, op())
     urteil_n((&tg[0 as usize]) as u64, r == dnswire.R_TRUNC, r)
 
-    // ---- 17. wuerfelt die 0x20-Kodierung wirklich? Zwei Anfragen mit
-    // verschiedenem Zufall muessen sich im Fragenteil unterscheiden.
     i = 0
     while i < 40 { s8((&RND[0 as usize]) as u64, i, 0); i = i + 1 }
     var nm: [u8; 9] = "www.test\0"
@@ -324,13 +285,11 @@ fn u_start(args: u64) -> u64 {
     }
     urteil_n((&th[0 as usize]) as u64, l1 == l2 && anders == 7, anders)
 
-    // ---- 18. eine leere Marke in der Anfrage
     var n2: [u8; 8] = "a..test\0"
     let l3: u64 = dnswire.q_build(qp(), 600, 1, (&n2[0 as usize]) as u64,
         dnswire.T_A, (&RND[0 as usize]) as u64)
     urteil((&ti[0 as usize]) as u64, l3 == 0)
 
-    // ---- 19. eine Marke ueber 63 Oktett in der Anfrage
     i = 0
     while i < 70 {
         s8((&NAM[0 as usize]) as u64, i, 97); i = i + 1
