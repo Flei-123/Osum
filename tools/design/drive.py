@@ -630,7 +630,7 @@ class Fahrer:
             y0, hh = int(m.group(1)), int(m.group(2))
             return (int(g.group(1)) + 8, y0, int(g.group(3)) - 16, hh)
         if name == "hellspur":
-            m = letzte(r"qs: hell spur von=(\d+) bis=(\d+) ym=(\d+)")
+            m = letzte(r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
             if m is None:
                 return None
             x0, x1, ym = (int(m.group(i)) for i in (1, 2, 3))

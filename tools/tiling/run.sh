@@ -274,7 +274,7 @@ lauf "$K0" "gfx wm tile wmshell $GRUND script=tiling;tiling load;tiling keys" \
     "$TMPD/u.txt" "$DISK"
 num "der Lauf mit /bin/tiling endet sauber" "$?" eq 21
 U="$TMPD/u.txt"
-has "$U" "tiling: der Kachelbetrieb läuft" "das Programm sieht den Kachelbetrieb"
+has "$U" "tiling: tiling mode is running" "das Programm sieht den Kachelbetrieb"
 has "$U" "Fenster: 2 von 48" "es nennt die Zahl der Fenster und die Obergrenze"
 has "$U" "Aufbau:  split" "es nennt den Modus des Containers"
 has "$U" "Invariante: hält" "und es laesst den Kern die Invariante NACHRECHNEN"

@@ -213,10 +213,10 @@ for sec in UNSIGNED:FOREIGNSIG FOREIGNSIG:FLIPPART FLIPPART:MISSINGPART MISSINGP
     has "$TMPD/p.txt" "phase=fehler" "$a: the store reports the failure"
 done
 part "$G" FLIPPART MISSINGPART > "$TMPD/p.txt"
-has "$TMPD/p.txt" "Firefox-Teile nicht zu holen oder abgelehnt" "flipped part: refused at the part hash, package rolled back"
+has "$TMPD/p.txt" "Firefox parts could not be fetched or were rejected" "flipped part: refused at the part hash, package rolled back"
 hasnot "$TMPD/p.txt" "firefox.tar.part002" "flipped part: the bad part is not kept"
 part "$G" MISSINGPART GOOD-LIST > "$TMPD/p.txt"
-has "$TMPD/p.txt" "Firefox-Teile nicht zu holen oder abgelehnt" "missing part: refused, package rolled back"
+has "$TMPD/p.txt" "Firefox parts could not be fetched or were rejected" "missing part: refused, package rolled back"
 part "$G" UNSIGNED FOREIGNSIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "msg=Paket" "unsigned package: refused"
 part "$G" FOREIGNSIG FLIPPART > "$TMPD/p.txt"

@@ -656,7 +656,7 @@ R="$TMPD/c5.txt"
 has "$R" "wget: octets $BODY" "the same boot really moved octets first"
 has "$R" "netstat: programs written" "and wrote them into the history"
 if grep -qaF "netmon: no window server" "$R"; then
-    if grep -qaF "widgetdemo: keine Flaeche" "$R"; then
+    if grep -qaF "widgetdemo: no surface" "$R"; then
         ok "netmon cannot raise a window from a shell -- AND NEITHER CAN widgetdemo,"
         note "the reference application of round K15, in the same boot. The limit is"
         note "the shell path and not this round. docs/NETMON.md says so under"

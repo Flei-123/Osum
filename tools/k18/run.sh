@@ -480,7 +480,7 @@ hat "$S" "OSUM-BAT" "und den Modellnamen aus _BIF"
 hat "$S" "Netz:" "sie nennt das Netzteil"
 hat "$S" "Wärme:" "sie nennt die Temperatur"
 hat "$S" "Ruhe:" "sie nennt den Ruhezustand"
-hat "$S" "power: jetzt auf Höchstleistung" "das Umschalten meldet sich"
+hat "$S" "power: now on Höchstleistung" "das Umschalten meldet sich"
 hat "$S" "Profil:  Höchstleistung" "und danach steht wirklich Hoechstleistung da"
 if grep -qa '75%' "$S"; then ok "der Ladestand steht als Zahl da (75%)"
 else bad "der Ladestand 75% steht nicht in der Uebersicht"; fi
@@ -489,7 +489,7 @@ else bad "der Balken fehlt"; fi
 
 RC=$(lauf shellaus "osum nokbd nosched noproc nopwr script=power" akku)
 SA="$TMPD/shellaus.txt"
-hat "$SA" "power: die Energieschicht läuft nicht" "GEGENPROBE nopwr: /bin/power sagt es und rechnet nicht weiter"
+hat "$SA" "power: the energy layer is not running" "GEGENPROBE nopwr: /bin/power sagt es und rechnet nicht weiter"
 hat_nicht "$SA" "Profil:" "und zeigt kein Profil"
 hat_nicht "$SA" "Akku:" "und keinen Akku"
 hat "$SA" "pwr: skipped" "der Kernel sagt es ebenfalls"

@@ -344,7 +344,7 @@ P=$TMPD/probe.clean
 sauber probe
 has "$P" "probe: abi=1" "PL_ABI meldet die Fassung 1 -- die Schnittstelle ist versioniert"
 hasre "$P" '^probe: platz=[0-9]+' "der Prueflauf hat einen Tafelplatz"
-hasre "$P" '^probe: key ohne rc=-[0-9]+' \
+hasre "$P" '^probe: key without rc=-[0-9]+' \
     "ein Kuerzel OHNE R_ACT_KEY wird abgewiesen"
 hasre "$P" '^probe: key mit rc=[0-9]+' \
     "und MIT Gewaehrung (WM_PLUG_GRANT) angenommen"
@@ -406,7 +406,7 @@ fi
 
 echo "== 7c. wmplug enable an einem LAUFENDEN Plugin =="
 lauf spaet "wigapp=/bin/uhrspaet,uhrspaet,wartems=3000,runden=40" \
-    'uhrspaet: vor dem enable' 'taskbar: text plug '
+    'uhrspaet: before enable' 'taskbar: text plug '
 SP=$TMPD/spaet.clean
 sauber spaet
 has "$SP" "pluguhr: KEIN recht R_ACT_BAR" \

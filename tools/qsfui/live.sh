@@ -36,7 +36,7 @@ live_before_release() {
     local S=$1
     local l r
     l=$(grep -an 'qs: live hell=' "$S" | head -1 | cut -d: -f1)
-    r=$(grep -an 'qs: hell auf =' "$S" | head -1 | cut -d: -f1)
+    r=$(grep -an 'qs: bright to =' "$S" | head -1 | cut -d: -f1)
     [ -n "$l" ] && { [ -z "$r" ] || [ "$l" -lt "$r" ]; }
 }
 : > "$TMPD/flag"

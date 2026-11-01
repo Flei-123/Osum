@@ -125,13 +125,13 @@ check_scale() {
         bad "scale $sc: the tile looks the same after the click ($a)"
     fi
     # 4. the slider
-    hv=$(grep -aoE 'qs: hell auf =[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
+    hv=$(grep -aoE 'qs: bright to =[0-9]+' "$S" | head -1 | grep -oE '[0-9]+$')
     if [ -n "$hv" ] && [ "$hv" -ge 100 ] && [ "$hv" -le 120 ]; then
         ok "scale $sc: a click in the middle of the brightness slider sets $hv (range 20..200)"
     else
         bad "scale $sc: brightness after the click: ${hv:-nothing}"
     fi
-    sp=$(grep -aoE 'qs: hell spur von=[0-9]+ bis=[0-9]+ ym=[0-9]+' "$S" | head -1)
+    sp=$(grep -aoE 'qs: bright trace from=[0-9]+ bis=[0-9]+ ym=[0-9]+' "$S" | head -1)
     ym=$(echo "$sp" | sed -E 's/.* ym=([0-9]+).*/\1/'); von=$(echo "$sp" | sed -E 's/.* von=([0-9]+).*/\1/')
     bis=$(echo "$sp" | sed -E 's/.* bis=([0-9]+).*/\1/')
     # the knob: at the middle of the track the picture shows the track before

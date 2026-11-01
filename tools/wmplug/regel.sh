@@ -132,7 +132,7 @@ echo "== 4. the run WITHOUT the right (rights control) =="
 lauf ohne "demo"
 [ "$RC" = 21 ] && ok "the kernel exits cleanly (21)" || bad "Exitcode $RC statt 21"
 has "$TMPD/ohne.klar" "rechte=0x1f" "ohne Eintrag bekommt das Plugin nur R_DEFAULT"
-has "$TMPD/ohne.klar" "plugregel: OHNE R_ACT_WIN -- nur zusehen" \
+has "$TMPD/ohne.klar" "plugregel: WITHOUT R_ACT_WIN -- watching only" \
     "und sagt selbst, dass es nichts anfassen darf"
 has "$TMPD/ohne.klar" "app=rechner" "dieselbe Regel trifft dasselbe Fenster"
 has "$TMPD/ohne.klar" "abgewiesen handlung=6 id=" "PA_DESK wird abgewiesen"

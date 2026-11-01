@@ -45,7 +45,7 @@ def main():
     fehler = 0
 
     print("== THE GROOVE AS THE CONTROL CENTER REPORTS IT ==")
-    spur = alle(txt, r"qs: hell spur von=(\d+) bis=(\d+) ym=(\d+)")
+    spur = alle(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
     if not spur:
         print("  NO groove reported -- the control center was never open")
         return 1
@@ -55,7 +55,7 @@ def main():
     print()
     print("== WHAT THE SLIDER COMPUTES FROM THE POINTER POSITION ==")
     gerechnet = [(int(m.group(1)), int(m.group(2)))
-                 for m in alle(txt, r"qs: hell auf =(\d+) rc=(-?\d+)")]
+                 for m in alle(txt, r"qs: bright to =(\d+) rc=(-?\d+)")]
     if gerechnet:
         vs = sorted({v for v, _ in gerechnet})
         rcs = sorted({rc for _, rc in gerechnet})
@@ -78,7 +78,7 @@ def main():
 
     print()
     print("== THE VALUE THE PANEL READS WHEN PAINTING ==")
-    werte = [int(m.group(1)) for m in alle(txt, r"qs: hell ist=(\d+)")]
+    werte = [int(m.group(1)) for m in alle(txt, r"qs: bright is=(\d+)")]
     folge = []
     for w in werte:
         if not folge or folge[-1] != w:

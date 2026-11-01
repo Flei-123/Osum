@@ -253,7 +253,7 @@ done
 S3="$TMPD/b3/serial.txt"
 has "$S3" "qs: symbols n=6" "sechs Kacheln, sechs Symbole von der Platte"
 has "$S3" "qs: open x=" "ein Klick in die Ecke der Leiste oeffnet das Panel"
-has "$S3" "qs: hell ist=" "der Helligkeitsregler steht und meldet seinen Wert"
+has "$S3" "qs: bright is=" "der Helligkeitsregler steht und meldet seinen Wert"
 has "$S3" "qs: tile n=3 to=1" "die Kachel Dunkelmodus schaltet auf an"
 RC=$(grep -a 'qs: tile n=3' "$S3" | head -1 | sed -E 's/.*rc=([0-9]+).*/\1/')
 num "und /etc/theme.conf wurde dabei geschrieben (rc)" "${RC:-1}" eq 0
