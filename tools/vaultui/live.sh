@@ -97,10 +97,10 @@ hasnot "$S" "vaultui: unlock ok" "COUNTER-PROOF: a wrong PIN never unlocks"
 has "$S" "vaultui: state 1" "the window goes to the 'wrong PIN' state"
 if [ -s "$TMPD/r3/desktop.png" ]; then
     python3 -I -c "
-from PIL import Image
-a=Image.open('$TMPD/r1/desktop.png').convert('RGB'); b=Image.open('$TMPD/r3/desktop.png').convert('RGB')
+from PIL import Image, ImageChops
 import sys
-d=sum(1 for p,q in zip(a.getdata(),b.getdata()) if p!=q)
+a=Image.open('$TMPD/r1/desktop.png').convert('RGB'); b=Image.open('$TMPD/r3/desktop.png').convert('RGB')
+d=ImageChops.difference(a,b).convert('L').point(lambda v: 255 if v else 0).histogram()[255]
 sys.exit(0 if d>200 else 1)" && ok "the message changes pixels on screen" || bad "the screen did not change after the wrong PIN"
 fi
 
