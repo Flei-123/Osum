@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import actwire
+
+export { hex_body, R_OK, R_FAIL, R_NOBUS, round_trip, reply, reply_num, reply_has, begin, put_hex, put_num }
+
+const R_OK: u64 = 0
+const R_FAIL: u64 = 1
+const R_NOBUS: u64 = 2
+const WAIT_TICKS: u64 = 7500
+
+static mut rep: [u8; 4096] = [0 as u8; 4096]
+static mut val: [u8; 32] = [0 as u8; 32]
+
+fn reply() -> u64 {
+    return (&rep[0 as usize]) as u64
+}
+
+fn begin(op: u64) {
+    var k_op: [u8; 4] = "op=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&k_op[0 as usize]) as u64)
+    actwire.ob_str(op)
+    actwire.ob_ch(10)
+}
+
+fn hex_body(src: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let b: u64 = actwire.ld8(src, i)
+        let hi: u64 = b >> 4
+        let lo: u64 = b & 15
+        actwire.ob_ch(if hi < 10 { 48 + hi } else { 87 + hi })
+        actwire.ob_ch(if lo < 10 { 48 + lo } else { 87 + lo })
+        i = i + 1
+    }
+}
+
+fn put_hex(key: u64, src: u64, n: u64) {
+    actwire.ob_str(key)
+    actwire.ob_ch(61)
+    hex_body(src, n)
+    actwire.ob_ch(10)
+}
+
+fn put_num(key: u64, v: u64) {
+    actwire.ob_str(key)
+    actwire.ob_ch(61)
+    actwire.ob_num(v)
+    actwire.ob_ch(10)
+}
+
+fn round_trip() -> u64 {
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    var n_svc: [u8; 13] = "orient.vault\0"
+    let np: u64 = (&nm[0 as usize]) as u64
+    actwire.name_of((&pre[0 as usize]) as u64, ulib.sys(ulib.SYS_GETPID, 0, 0, 0), np)
+    if ulib.bad(actwire.bus_reg(np, actwire.A_SAMEUID)) {
+        return R_NOBUS
+    }
+    let svc: u64 = actwire.bus_find((&n_svc[0 as usize]) as u64)
+    if ulib.bad(svc) {
+        return R_NOBUS
+    }
+    let id: u64 = actwire.rnd() & 0xFFFFFFFF
+    if ulib.bad(actwire.send_msg(svc, actwire.K_REQ, id, actwire.ob_ptr(), actwire.ob_len())) {
+        return R_NOBUS
+    }
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let rp: u64 = reply()
+    var rlen: u64 = 0
+    var done: bool = false
+    let t0: u64 = actwire.ticks()
+    while !done && actwire.ticks() - t0 < WAIT_TICKS {
+        let n: u64 = actwire.bus_wait(fp, mp, 100)
+        if !ulib.bad(n) && n > 0 && actwire.ld8(fp, 0) == 0xA7 && actwire.ld8(fp, 1) == actwire.K_REP
+            && actwire.ld32(fp, 4) == id {
+            if (actwire.ld8(fp, 2) & 1) != 0 {
+                rlen = 0
+            }
+            var i: u64 = 0
+            while i < actwire.ld8(fp, 3) && rlen < 4095 {
+                actwire.st8(rp, rlen, actwire.ld8(fp, 8 + i))
+                rlen = rlen + 1
+                i = i + 1
+            }
+            if (actwire.ld8(fp, 2) & 2) != 0 {
+                done = true
+            }
+        }
+    }
+    actwire.st8(rp, rlen, 0)
+    if !done {
+        return R_NOBUS
+    }
+    if actwire.ld8(rp, 3) == 49 {
+        return R_OK
+    }
+    return R_FAIL
+}
+
+fn reply_num(key: u64, dflt: u64) -> u64 {
+    let vp: u64 = (&val[0 as usize]) as u64
+    if !actwire.kv_find(reply(), key, vp, 31) {
+        return dflt
+    }
+    var v: u64 = 0
+    var i: u64 = 0
+    while actwire.ld8(vp, i) >= 48 && actwire.ld8(vp, i) <= 57 && i < 18 {
+        v = v * 10 + actwire.ld8(vp, i) - 48
+        i = i + 1
+    }
+    if i == 0 {
+        return dflt
+    }
+    return v
+}
+
+fn reply_has(key: u64, want: u64) -> bool {
+    let vp: u64 = (&val[0 as usize]) as u64
+    if !actwire.kv_find(reply(), key, vp, 31) {
+        return false
+    }
+    return actwire.str_eq(vp, want)
+}

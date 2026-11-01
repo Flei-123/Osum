@@ -1,0 +1,358 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import lineout
+import actwire
+import fuiscene
+import msg
+import vaultcall
+
+export { u_start }
+
+const EXIT_OK: u64 = 0
+const EXIT_CANCEL: u64 = 1
+const EXIT_NO_UI: u64 = 3
+const K_UNLOCK: u64 = 1
+const K_CANCEL: u64 = 2
+const K_PIN: u64 = 3
+const MARGIN: u64 = 28
+const CTL_H: u64 = 36
+const ENTRY_H: u64 = 40
+const TICKS_PER_SEC: u64 = 100
+const PIN_MIN: u64 = 4
+const PIN_MAX: u64 = 12
+const WIN_X: u64 = 200
+const WIN_Y: u64 = 140
+const WIN_W: u64 = 440
+const WIN_H: u64 = 300
+
+const ST_READY: u64 = 0
+const ST_BAD: u64 = 1
+const ST_SHORT: u64 = 2
+const ST_WAIT: u64 = 3
+const ST_OFF: u64 = 4
+const ST_NOSLOT: u64 = 5
+const ST_NOTPM: u64 = 6
+const ST_NOSVC: u64 = 7
+const ST_OPEN: u64 = 8
+const ST_NONE: u64 = 9
+const ST_FAIL: u64 = 10
+
+static mut k_title: [u8; 14] = "vaultui.title\0"
+static mut k_head: [u8; 13] = "vaultui.head\0"
+static mut k_note: [u8; 13] = "vaultui.note\0"
+static mut k_pin: [u8; 12] = "vaultui.pin\0"
+static mut k_unlock: [u8; 15] = "vaultui.unlock\0"
+static mut k_cancel: [u8; 15] = "vaultui.cancel\0"
+static mut k_ready: [u8; 14] = "vaultui.ready\0"
+static mut k_bad: [u8; 12] = "vaultui.bad\0"
+static mut k_short: [u8; 14] = "vaultui.short\0"
+static mut k_wait_a: [u8; 15] = "vaultui.wait_a\0"
+static mut k_wait_b: [u8; 15] = "vaultui.wait_b\0"
+static mut k_off: [u8; 12] = "vaultui.off\0"
+static mut k_noslot: [u8; 15] = "vaultui.noslot\0"
+static mut k_notpm: [u8; 14] = "vaultui.notpm\0"
+static mut k_nosvc: [u8; 14] = "vaultui.nosvc\0"
+static mut k_open: [u8; 13] = "vaultui.open\0"
+static mut k_none: [u8; 13] = "vaultui.none\0"
+static mut k_fail: [u8; 13] = "vaultui.fail\0"
+
+static mut pin_blank: [u8; 2] = [0 as u8; 2]
+static mut wait_txt: [u8; 160] = [0 as u8; 160]
+static mut state: u64 = 0
+static mut wait_end: u64 = 0
+static mut wait_shown: u64 = 0
+
+fn say(p: u64) {
+    lineout.add_text(p)
+}
+
+fn trace(p: u64) {
+    say(p)
+    lineout.end_line()
+}
+
+fn trace_state() {
+    var s_st: [u8; 16] = "vaultui: state \0"
+    say((&s_st[0 as usize]) as u64)
+    lineout.add_unum(state)
+    lineout.end_line()
+}
+
+fn put_str(at: u64, p: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while *((p + i) as *mut u8) != 0 as u8 && o < 150 {
+        wait_txt[(o) as usize] = *((p + i) as *mut u8)
+        o = o + 1
+        i = i + 1
+    }
+    return o
+}
+
+fn put_num(at: u64, v: u64) -> u64 {
+    var digits: [u8; 20] = [0 as u8; 20]
+    var n: u64 = 0
+    var x: u64 = v
+    if x == 0 {
+        digits[0 as usize] = 48 as u8
+        n = 1
+    }
+    while x > 0 && n < 20 {
+        digits[(n) as usize] = (48 + x % 10) as u8
+        x = x / 10
+        n = n + 1
+    }
+    var o: u64 = at
+    while n > 0 {
+        n = n - 1
+        wait_txt[(o) as usize] = digits[(n) as usize]
+        o = o + 1
+    }
+    return o
+}
+
+fn seconds_left() -> u64 {
+    let now: u64 = actwire.ticks()
+    if now >= wait_end {
+        return 0
+    }
+    return (wait_end - now + TICKS_PER_SEC - 1) / TICKS_PER_SEC
+}
+
+fn message_text() -> u64 {
+    if state == ST_WAIT {
+        wait_shown = seconds_left()
+        var o: u64 = put_str(0, msg.get((&k_wait_a[0 as usize]) as u64))
+        wait_txt[(o) as usize] = 32 as u8
+        o = put_num(o + 1, wait_shown)
+        wait_txt[(o) as usize] = 32 as u8
+        o = put_str(o + 1, msg.get((&k_wait_b[0 as usize]) as u64))
+        wait_txt[(o) as usize] = 0 as u8
+        return (&wait_txt[0 as usize]) as u64
+    }
+    var key: u64 = (&k_ready[0 as usize]) as u64
+    if state == ST_BAD {
+        key = (&k_bad[0 as usize]) as u64
+    } else if state == ST_SHORT {
+        key = (&k_short[0 as usize]) as u64
+    } else if state == ST_OFF {
+        key = (&k_off[0 as usize]) as u64
+    } else if state == ST_NOSLOT {
+        key = (&k_noslot[0 as usize]) as u64
+    } else if state == ST_NOTPM {
+        key = (&k_notpm[0 as usize]) as u64
+    } else if state == ST_NOSVC {
+        key = (&k_nosvc[0 as usize]) as u64
+    } else if state == ST_OPEN {
+        key = (&k_open[0 as usize]) as u64
+    } else if state == ST_NONE {
+        key = (&k_none[0 as usize]) as u64
+    } else if state == ST_FAIL {
+        key = (&k_fail[0 as usize]) as u64
+    }
+    return msg.get(key)
+}
+
+fn can_try() -> bool {
+    return state == ST_READY || state == ST_BAD || state == ST_SHORT || state == ST_FAIL
+}
+
+fn build() {
+    let col: usize = fuiscene.root()
+    fuiscene.set_pad(col, MARGIN)
+    fuiscene.set_gap(col, 4)
+    let w: u64 = fuiscene.width() - 2 * MARGIN
+    let head: usize = fuiscene.row(col)
+    fuiscene.set_size(head, w, 32)
+    let h1: usize = fuiscene.label_heading(head, msg.get((&k_head[0 as usize]) as u64))
+    fuiscene.set_grow(h1, 1)
+    let _n: usize = fuiscene.label_muted(col, msg.get((&k_note[0 as usize]) as u64))
+    let body: usize = fuiscene.column(col)
+    fuiscene.set_gap(body, 12)
+    fuiscene.set_grow(body, 1)
+    let e: usize = fuiscene.entry(body, K_PIN, w, (&pin_blank[0 as usize]) as u64)
+    fuiscene.set_size(e, w, ENTRY_H)
+    fuiscene.entry_secret(K_PIN, true)
+    fuiscene.entry_hint(K_PIN, msg.get((&k_pin[0 as usize]) as u64))
+    fuiscene.ax_name(K_PIN, msg.get((&k_pin[0 as usize]) as u64))
+    if !can_try() {
+        fuiscene.set_enabled(e, false)
+    }
+    let _m: usize = fuiscene.label_muted(body, message_text())
+    let bar: usize = fuiscene.row(col)
+    fuiscene.set_size(bar, w, CTL_H)
+    fuiscene.set_gap(bar, 8)
+    let b1: usize = fuiscene.button_main(bar, msg.get((&k_unlock[0 as usize]) as u64), K_UNLOCK)
+    fuiscene.set_noshrink(b1)
+    fuiscene.set_size(b1, 140, CTL_H)
+    if !can_try() {
+        fuiscene.set_enabled(b1, false)
+    }
+    let b2: usize = fuiscene.button(bar, msg.get((&k_cancel[0 as usize]) as u64), K_CANCEL)
+    fuiscene.set_noshrink(b2)
+    fuiscene.set_size(b2, 120, CTL_H)
+}
+
+fn probe() {
+    var op: [u8; 7] = "status\0"
+    vaultcall.begin((&op[0 as usize]) as u64)
+    let r: u64 = vaultcall.round_trip()
+    if r == vaultcall.R_NOBUS {
+        state = ST_NOSVC
+        return
+    }
+    var k_state: [u8; 6] = "state\0"
+    var v_open: [u8; 5] = "open\0"
+    var v_none: [u8; 5] = "none\0"
+    var k_pu: [u8; 10] = "pinunlock\0"
+    var k_tpm: [u8; 4] = "tpm\0"
+    var v_one: [u8; 2] = "1\0"
+    if vaultcall.reply_has((&k_state[0 as usize]) as u64, (&v_open[0 as usize]) as u64) {
+        state = ST_OPEN
+    } else if vaultcall.reply_has((&k_state[0 as usize]) as u64, (&v_none[0 as usize]) as u64) {
+        state = ST_NONE
+    } else if vaultcall.reply_has((&k_pu[0 as usize]) as u64, (&v_one[0 as usize]) as u64) {
+        state = ST_READY
+    } else if vaultcall.reply_has((&k_tpm[0 as usize]) as u64, (&v_one[0 as usize]) as u64) {
+        state = ST_NOSLOT
+    } else {
+        state = ST_NOTPM
+    }
+}
+
+fn err_state() -> u64 {
+    var k_err: [u8; 4] = "err\0"
+    var e_bad: [u8; 4] = "bad\0"
+    var e_wait: [u8; 5] = "wait\0"
+    var e_nopin: [u8; 6] = "nopin\0"
+    var e_tpm: [u8; 4] = "tpm\0"
+    var e_tpmlock: [u8; 8] = "tpmlock\0"
+    var e_noslot: [u8; 7] = "noslot\0"
+    var e_locked: [u8; 7] = "locked\0"
+    let k: u64 = (&k_err[0 as usize]) as u64
+    if vaultcall.reply_has(k, (&e_bad[0 as usize]) as u64) {
+        return ST_BAD
+    }
+    if vaultcall.reply_has(k, (&e_wait[0 as usize]) as u64) {
+        return ST_WAIT
+    }
+    if vaultcall.reply_has(k, (&e_nopin[0 as usize]) as u64) || vaultcall.reply_has(k, (&e_tpmlock[0 as usize]) as u64) {
+        return ST_OFF
+    }
+    if vaultcall.reply_has(k, (&e_tpm[0 as usize]) as u64) {
+        return ST_NOTPM
+    }
+    if vaultcall.reply_has(k, (&e_noslot[0 as usize]) as u64) {
+        return ST_NOSLOT
+    }
+    if vaultcall.reply_has(k, (&e_locked[0 as usize]) as u64) {
+        return ST_FAIL
+    }
+    return ST_FAIL
+}
+
+fn attempt() -> bool {
+    var s_ok: [u8; 19] = "vaultui: unlock ok\0"
+    var s_bad: [u8; 20] = "vaultui: unlock bad\0"
+    var s_wt: [u8; 21] = "vaultui: unlock wait\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_other: [u8; 22] = "vaultui: unlock other\0"
+    var k_pin_key: [u8; 4] = "pin\0"
+    var k_wait_key: [u8; 5] = "wait\0"
+    var op: [u8; 7] = "unlock\0"
+    let pin: u64 = fuiscene.entry_text(K_PIN)
+    let n: u64 = ulib.length(pin)
+    if n < PIN_MIN || n > PIN_MAX {
+        state = ST_SHORT
+        return false
+    }
+    vaultcall.begin((&op[0 as usize]) as u64)
+    vaultcall.put_hex((&k_pin_key[0 as usize]) as u64, pin, n)
+    let r: u64 = vaultcall.round_trip()
+    actwire.ob_reset()
+    fuiscene.entry_set(K_PIN, (&pin_blank[0 as usize]) as u64)
+    if r == vaultcall.R_OK {
+        trace((&s_ok[0 as usize]) as u64)
+        return true
+    }
+    if r == vaultcall.R_NOBUS {
+        state = ST_NOSVC
+        trace((&s_other[0 as usize]) as u64)
+        return false
+    }
+    state = err_state()
+    if state == ST_WAIT {
+        let secs: u64 = vaultcall.reply_num((&k_wait_key[0 as usize]) as u64, 60)
+        wait_end = actwire.ticks() + secs * TICKS_PER_SEC
+        say((&s_wt[0 as usize]) as u64)
+        say((&s_sp[0 as usize]) as u64)
+        lineout.add_unum(secs)
+        lineout.end_line()
+    } else if state == ST_BAD {
+        trace((&s_bad[0 as usize]) as u64)
+    } else {
+        trace((&s_other[0 as usize]) as u64)
+    }
+    return false
+}
+
+fn run() -> u64 {
+    var s_bad: [u8; 20] = "vaultui: no surface\0"
+    var s_go: [u8; 15] = "vaultui: ready\0"
+    var s_cn: [u8; 16] = "vaultui: cancel\0"
+    var s_nm: [u8; 8] = "vaultui\0"
+    let _mi: u64 = msg.init()
+    probe()
+    if !fuiscene.open(WIN_X, WIN_Y, WIN_W, WIN_H, msg.get((&k_title[0 as usize]) as u64), build) {
+        trace((&s_bad[0 as usize]) as u64)
+        return EXIT_NO_UI
+    }
+    fuiscene.set_app((&s_nm[0 as usize]) as u64)
+    var first: bool = true
+    var spin: u64 = 0
+    var code: u64 = EXIT_CANCEL
+    while fuiscene.alive() {
+        let key: u64 = fuiscene.pump()
+        if first {
+            first = false
+            fuiscene.say_rects((&s_nm[0 as usize]) as u64)
+            trace((&s_go[0 as usize]) as u64)
+            trace_state()
+        }
+        if key == K_CANCEL {
+            trace((&s_cn[0 as usize]) as u64)
+            code = EXIT_CANCEL
+            fuiscene.quit()
+        } else if (key == K_UNLOCK || key == K_PIN) && can_try() {
+            if attempt() {
+                code = EXIT_OK
+                fuiscene.quit()
+            } else {
+                trace_state()
+                fuiscene.refresh()
+            }
+        }
+        spin = spin + 1
+        if state == ST_WAIT && (spin % 8) == 0 {
+            let left: u64 = seconds_left()
+            if left == 0 {
+                state = ST_READY
+                trace_state()
+                fuiscene.refresh()
+            } else if left != wait_shown {
+                fuiscene.refresh()
+            }
+        }
+    }
+    return code
+}
+
+fn u_start(args: u64) -> u64 {
+    return run()
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

@@ -199,6 +199,9 @@ welcome_pages.register(PAGES, icon, base_css)
 import vaultprompt
 
 vaultprompt.register(PAGES, icon, base_css)
+import vaultui
+
+vaultui.register(PAGES, icon, base_css)
 import qsmedia
 
 qsmedia.register(PAGES, icon, base_css)
