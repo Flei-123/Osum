@@ -33,10 +33,10 @@ const PAGE: u64 = 4096
 static mut src: u64 = 0
 static mut src_n: u64 = 0
 static mut pos: u64 = 0
-static mut zeile: u64 = 0
+static mut line: u64 = 0
 static mut durchgang: u64 = 0
 static mut cur: u64 = 0
-static mut fehler: u64 = 0
+static mut err: u64 = 0
 
 static mut len_t: u64 = 0
 static mut len_r: u64 = 0
@@ -137,7 +137,7 @@ fn at(i: u64) -> u64 {
     return ld8(src + i)
 }
 
-fn ist_luecke(c: u64) -> bool {
+fn is_gap(c: u64) -> bool {
     return c == 32 || c == 9 || c == 13
 }
 
@@ -186,12 +186,12 @@ fn oops(t: u64) {
     var f: [u8; 12] = "fas: Zeile \0"
     var d: [u8; 3] = ": \0"
     ulib.eput((&f[0]) as u64)
-    sagn(zeile)
+    sagn(line)
     ulib.eput((&d[0]) as u64)
     ulib.eput(t)
     var nl: [u8; 2] = "\n\0"
     ulib.eput((&nl[0]) as u64)
-    fehler = fehler + 1
+    err = err + 1
 }
 
 fn oops_word(t: u64, a: u64, b: u64) {
@@ -200,7 +200,7 @@ fn oops_word(t: u64, a: u64, b: u64) {
     var q: [u8; 3] = " '\0"
     var q2: [u8; 3] = "'\n\0"
     ulib.eput((&f[0]) as u64)
-    sagn(zeile)
+    sagn(line)
     ulib.eput((&d[0]) as u64)
     ulib.eput(t)
     ulib.eput((&q[0]) as u64)
@@ -210,7 +210,7 @@ fn oops_word(t: u64, a: u64, b: u64) {
         i = i + 1
     }
     ulib.eput((&q2[0]) as u64)
-    fehler = fehler + 1
+    err = err + 1
 }
 
 fn put_one(c: u64) {
@@ -625,17 +625,17 @@ fn reg_of(a: u64, b: u64) -> u64 {
 
 // --------------------------------------------------------- die Zeile
 
-fn word_end(a: u64, grenze: u64) -> u64 {
+fn word_end(a: u64, limit: u64) -> u64 {
     var i: u64 = a
-    while i < grenze && ist_namenszeichen(at(i)) {
+    while i < limit && ist_namenszeichen(at(i)) {
         i = i + 1
     }
     return i
 }
 
-fn gap_gone(a: u64, grenze: u64) -> u64 {
+fn gap_gone(a: u64, limit: u64) -> u64 {
     var i: u64 = a
-    while i < grenze && ist_luecke(at(i)) {
+    while i < limit && is_gap(at(i)) {
         i = i + 1
     }
     return i
@@ -706,7 +706,7 @@ fn imm_von(a: u64, b: u64) -> u64 {
 
 fn operand(a: u64, b: u64, nr: u64) {
     var i: u64 = gap_gone(a, b)
-    var groesse: u64 = 0
+    var size: u64 = 0
     // "qword ptr [", "dword ptr [", "word ptr [", "byte ptr ["
     let w: u64 = word_end(i, b)
     if w > i {
@@ -716,21 +716,21 @@ fn operand(a: u64, b: u64, nr: u64) {
         var bw: [u8; 5] = "byte\0"
         var xw: [u8; 8] = "xmmword\0"
         if lit_eq(i, w, (&qw[0]) as u64) {
-            groesse = 8
+            size = 8
         }
         if lit_eq(i, w, (&dw[0]) as u64) {
-            groesse = 4
+            size = 4
         }
         if lit_eq(i, w, (&ww[0]) as u64) {
-            groesse = 2
+            size = 2
         }
         if lit_eq(i, w, (&bw[0]) as u64) {
-            groesse = 1
+            size = 1
         }
         if lit_eq(i, w, (&xw[0]) as u64) {
-            groesse = 16
+            size = 16
         }
-        if groesse != 0 {
+        if size != 0 {
             i = gap_gone(w, b)
             let w2: u64 = word_end(i, b)
             var pw: [u8; 4] = "ptr\0"
@@ -743,22 +743,22 @@ fn operand(a: u64, b: u64, nr: u64) {
         }
     }
     if i < b && at(i) == 91 {
-        mem_operand(i + 1, b, nr, groesse)
+        mem_operand(i + 1, b, nr, size)
         return
     }
     // RUNDE SOCIAL: `qword ptr fs:0` -- the thread block of `profile
     // app` (__thread_tcb). The segment prefix 64 goes in front of the
     // instruction (do_cmd), the address is absolute: ModRM rm=100 with
     // SIB 0x25 and a 32-bit displacement (p = 2, modrm_mem).
-    if groesse != 0 && i + 3 <= b && at(i) == 102 && at(i + 1) == 115
+    if size != 0 && i + 3 <= b && at(i) == 102 && at(i + 1) == 115
         && at(i + 2) == 58 {
         seg_fs = true
         let ze: u64 = word_end(i + 3, b)
         let v: u64 = imm_von(i + 3, ze)
-        setz(nr, K_MEM, 0, groesse, 0, v, 2, 0, 0)
+        set(nr, K_MEM, 0, size, 0, v, 2, 0, 0)
         return
     }
-    if groesse != 0 {
+    if size != 0 {
         var t2: [u8; 23] = "nach 'ptr' fehlt '['\0\0\0"
         oops((&t2[0]) as u64)
         return
@@ -774,23 +774,23 @@ fn operand(a: u64, b: u64, nr: u64) {
     if we > i {
         let rg: u64 = reg_of(i, we)
         if rg != 0xFFFF {
-            setz(nr, K_REG, rg & 255, (rg >> 8) & 255, 0, 0, 0, i, we)
+            set(nr, K_REG, rg & 255, (rg >> 8) & 255, 0, 0, 0, i, we)
             return
         }
         if numref(i, we) {
-            setz(nr, K_LBL, 0, 0, 0, 0, 0, i, we)
+            set(nr, K_LBL, 0, 0, 0, 0, 0, i, we)
             return
         }
         if ist_ziffer(at(i)) {
-            setz(nr, K_IMM, 0, 0, 0, imm_von(i, we), 0, i, we)
+            set(nr, K_IMM, 0, 0, 0, imm_von(i, we), 0, i, we)
             return
         }
-        setz(nr, K_LBL, 0, 0, 0, 0, 0, i, we)
+        set(nr, K_LBL, 0, 0, 0, 0, 0, i, we)
         return
     }
     if i < b && at(i) == 45 {
         let we2: u64 = word_end(i + 1, b)
-        setz(nr, K_IMM, 0, 0, 0, imm_von(i, we2), 0, i, we2)
+        set(nr, K_IMM, 0, 0, 0, imm_von(i, we2), 0, i, we2)
         return
     }
     var t3: [u8; 20] = "Operand unklar\0\0\0\0\0\0"
@@ -798,7 +798,7 @@ fn operand(a: u64, b: u64, nr: u64) {
 }
 
 // `[rbp-40]`, `[rax]`, `[rax+8]`, `[rip + name]`
-fn mem_operand(a: u64, b: u64, nr: u64, groesse: u64) {
+fn mem_operand(a: u64, b: u64, nr: u64, size: u64) {
     var i: u64 = gap_gone(a, b)
     let w: u64 = word_end(i, b)
     var rip: [u8; 4] = "rip\0"
@@ -808,7 +808,7 @@ fn mem_operand(a: u64, b: u64, nr: u64, groesse: u64) {
             j = gap_gone(j + 1, b)
         }
         let ne: u64 = word_end(j, b)
-        setz(nr, K_MEM, 0, groesse, 0, 0, 1, j, ne)
+        set(nr, K_MEM, 0, size, 0, 0, 1, j, ne)
         return
     }
     let rg: u64 = reg_of(i, w)
@@ -830,10 +830,10 @@ fn mem_operand(a: u64, b: u64, nr: u64, groesse: u64) {
             d = v
         }
     }
-    setz(nr, K_MEM, rg & 255, groesse, rg & 255, d, 0, 0, 0)
+    set(nr, K_MEM, rg & 255, size, rg & 255, d, 0, 0, 0)
 }
 
-fn setz(nr: u64, k: u64, r: u64, s: u64, bb: u64, d: u64, p: u64,
+fn set(nr: u64, k: u64, r: u64, s: u64, bb: u64, d: u64, p: u64,
     na: u64, ne: u64) {
     if nr == 0 {
         k0 = k
@@ -905,13 +905,13 @@ fn modrm_mem(reg: u64, wo: u64) {
     }
     if riprel != 0 {
         emit(((reg & 7) << 3) | 5)
-        var ziel: u64 = 0
+        var target: u64 = 0
         if wo == 0 {
-            ziel = label_addr(n0, e0)
+            target = label_addr(n0, e0)
         } else {
-            ziel = label_addr(n1, e1)
+            target = label_addr(n1, e1)
         }
-        emit32((ziel -% (hier() + 4 + after_disp)) & 0xFFFFFFFF)
+        emit32((target -% (hier() + 4 + after_disp)) & 0xFFFFFFFF)
         return
     }
     emit(0x80 | ((reg & 7) << 3) | (basisreg & 7))
@@ -940,7 +940,7 @@ fn praefix16(gr: u64) {
     }
 }
 
-fn passt_i32(v: u64) -> bool {
+fn fits_i32(v: u64) -> bool {
     if v < 0x80000000 {
         return true
     }
@@ -1034,7 +1034,7 @@ fn sprung_code(a: u64, b: u64) -> u64 {
 }
 
 // `setCC` -> 0x100 + zweites Oktett, sonst 0.
-fn setz_code(a: u64, b: u64) -> u64 {
+fn set_code(a: u64, b: u64) -> u64 {
     var w: [u8; 5] = "sete\0"
     if ist(a, b, (&w[0]) as u64) {
         return 0x194
@@ -1265,14 +1265,14 @@ fn do_cmd(a: u64, m: u64, b: u64) {
             operand(i, b, 0)
         }
     }
-    if fehler != 0 {
+    if err != 0 {
         return
     }
     if seg_fs {
         emit(0x64)
     }
     kodiere(a, m)
-    if fehler == 0 && k2 != K_NONE && !k2_taken {
+    if err == 0 && k2 != K_NONE && !k2_taken {
         var t4: [u8; 36] = "this instruction has no third part\0\0"
         oops_word((&t4[0]) as u64, a, m)
     }
@@ -1805,23 +1805,23 @@ fn kodiere(a: u64, m: u64) {
             oops((&t[0]) as u64)
             return
         }
-        let ziel: u64 = label_addr(n0, e0)
+        let target: u64 = label_addr(n0, e0)
         if sp == 0x1FF {
             emit(0xE9)
-            emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+            emit32((target -% (hier() + 4)) & 0xFFFFFFFF)
             return
         }
         emit(0x0F)
         emit(0x80 | (sp & 0x0F))
-        emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+        emit32((target -% (hier() + 4)) & 0xFFFFFFFF)
         return
     }
     var w_call: [u8; 5] = "call\0"
     if ist(a, m, (&w_call[0]) as u64) {
         if k0 == K_LBL {
-            let ziel: u64 = label_addr(n0, e0)
+            let target: u64 = label_addr(n0, e0)
             emit(0xE8)
-            emit32((ziel -% (hier() + 4)) & 0xFFFFFFFF)
+            emit32((target -% (hier() + 4)) & 0xFFFFFFFF)
             return
         }
         if k0 == K_REG {
@@ -1838,7 +1838,7 @@ fn kodiere(a: u64, m: u64) {
         }
     }
     // ---- setCC
-    let sc: u64 = setz_code(a, m)
+    let sc: u64 = set_code(a, m)
     if sc != 0 {
         if k0 == K_REG {
             rex(false, 0, 0, r0, braucht_rex8(s0, r0))
@@ -1900,10 +1900,10 @@ fn kodiere(a: u64, m: u64) {
             return
         }
         if k0 == K_REG && k1 == K_LBL {
-            let ziel: u64 = label_addr(n1, e1)
+            let target: u64 = label_addr(n1, e1)
             rex(true, 0, 0, r0, false)
             emit(0xB8 + (r0 & 7))
-            emit64(ziel)
+            emit64(target)
             return
         }
     }
@@ -2024,41 +2024,41 @@ fn kodiere(a: u64, m: u64) {
             return
         }
         if k0 == K_REG && (k1 == K_IMM || k1 == K_LBL) {
-            var wert: u64 = d1
+            var value: u64 = d1
             if k1 == K_LBL {
-                wert = label_addr(n1, e1)
+                value = label_addr(n1, e1)
             }
             if gr == 8 {
-                if passt_i32(wert) {
+                if fits_i32(value) {
                     rm_form(true, gr, 0, r0, 2, 0xC7, 0, false)
-                    emit32(wert & 0xFFFFFFFF)
+                    emit32(value & 0xFFFFFFFF)
                     return
                 }
                 rex(true, 0, 0, r0, false)
                 emit(0xB8 + (r0 & 7))
-                emit64(wert)
+                emit64(value)
                 return
             }
             if gr == 1 {
                 rex(false, 0, 0, r0, braucht_rex8(1, r0))
                 emit(0xB0 + (r0 & 7))
-                emit(wert & 255)
+                emit(value & 255)
                 return
             }
             praefix16(gr)
             rex(false, 0, 0, r0, false)
             emit(0xB8 + (r0 & 7))
             if gr == 2 {
-                emit16(wert & 0xFFFF)
+                emit16(value & 0xFFFF)
             } else {
-                emit32(wert & 0xFFFFFFFF)
+                emit32(value & 0xFFFFFFFF)
             }
             return
         }
         if k0 == K_MEM && (k1 == K_IMM || k1 == K_LBL) {
-            var wert2: u64 = d1
+            var value2: u64 = d1
             if k1 == K_LBL {
-                wert2 = label_addr(n1, e1)
+                value2 = label_addr(n1, e1)
             }
             var op4: u64 = 0xC7
             if gr == 1 {
@@ -2066,12 +2066,12 @@ fn kodiere(a: u64, m: u64) {
             }
             rm_form(gr == 8, gr, 0, 0, 0, op4, 0, false)
             if gr == 1 {
-                emit(wert2 & 255)
+                emit(value2 & 255)
             } else {
                 if gr == 2 {
-                    emit16(wert2 & 0xFFFF)
+                    emit16(value2 & 0xFFFF)
                 } else {
-                    emit32(wert2 & 0xFFFFFFFF)
+                    emit32(value2 & 0xFFFFFFFF)
                 }
             }
             return
@@ -2080,38 +2080,38 @@ fn kodiere(a: u64, m: u64) {
     // ---- add/or/and/sub/xor/cmp
     let ar: u64 = arith_code(a, m)
     if ar != 0 {
-        let grund: u64 = ar & 255
+        let reason: u64 = ar & 255
         let erw: u64 = (ar >> 8) & 255
         let gr: u64 = size_from()
         if k0 == K_REG && k1 == K_REG {
-            var op: u64 = grund + 1
+            var op: u64 = reason + 1
             if gr == 1 {
-                op = grund
+                op = reason
             }
             let rz: bool = braucht_rex8(gr, r0) || braucht_rex8(gr, r1)
             rm_form(gr == 8, gr, r1, r0, 2, op, 0, rz)
             return
         }
         if k0 == K_REG && k1 == K_MEM {
-            var op2: u64 = grund + 3
+            var op2: u64 = reason + 3
             if gr == 1 {
-                op2 = grund + 2
+                op2 = reason + 2
             }
             rm_form(gr == 8, gr, r0, 0, 1, op2, 0, braucht_rex8(gr, r0))
             return
         }
         if k0 == K_MEM && k1 == K_REG {
-            var op3: u64 = grund + 1
+            var op3: u64 = reason + 1
             if gr == 1 {
-                op3 = grund
+                op3 = reason
             }
             rm_form(gr == 8, gr, r1, 0, 0, op3, 0, braucht_rex8(gr, r1))
             return
         }
         if k0 != K_NONE && (k1 == K_IMM || k1 == K_LBL) {
-            var wert: u64 = d1
+            var value: u64 = d1
             if k1 == K_LBL {
-                wert = label_addr(n1, e1)
+                value = label_addr(n1, e1)
             }
             var opi: u64 = 0x81
             if gr == 1 {
@@ -2126,12 +2126,12 @@ fn kodiere(a: u64, m: u64) {
             let rz2: bool = k0 == K_REG && braucht_rex8(gr, r0)
             rm_form(gr == 8, gr, erw, rmr, wo, opi, 0, rz2)
             if gr == 1 {
-                emit(wert & 255)
+                emit(value & 255)
             } else {
                 if gr == 2 {
-                    emit16(wert & 0xFFFF)
+                    emit16(value & 0xFFFF)
                 } else {
-                    emit32(wert & 0xFFFFFFFF)
+                    emit32(value & 0xFFFFFFFF)
                 }
             }
             return
@@ -2142,9 +2142,9 @@ fn kodiere(a: u64, m: u64) {
     if ist(a, m, (&w_test[0]) as u64) {
         let gr: u64 = size_from()
         if k0 != K_NONE && (k1 == K_IMM || k1 == K_LBL) {
-            var wert: u64 = d1
+            var value: u64 = d1
             if k1 == K_LBL {
-                wert = label_addr(n1, e1)
+                value = label_addr(n1, e1)
             }
             var opi: u64 = 0xF7
             if gr == 1 {
@@ -2159,12 +2159,12 @@ fn kodiere(a: u64, m: u64) {
             rm_form(gr == 8, gr, 0, rmr, wo, opi, 0,
                 k0 == K_REG && braucht_rex8(gr, r0))
             if gr == 1 {
-                emit(wert & 255)
+                emit(value & 255)
             } else {
                 if gr == 2 {
-                    emit16(wert & 0xFFFF)
+                    emit16(value & 0xFFFF)
                 } else {
-                    emit32(wert & 0xFFFFFFFF)
+                    emit32(value & 0xFFFFFFFF)
                 }
             }
             return
@@ -2289,7 +2289,7 @@ fn align_off(n: u64) {
     }
 }
 
-fn tue_direktive(a: u64, w: u64, b: u64) {
+fn do_directive(a: u64, w: u64, b: u64) {
     var d_text: [u8; 6] = ".text\0"
     if ist(a, w, (&d_text[0]) as u64) {
         cur = SEC_TEXT
@@ -2428,7 +2428,7 @@ fn tue_direktive(a: u64, w: u64, b: u64) {
     oops_word((&t2[0]) as u64, a, w)
 }
 
-fn list(a: u64, b: u64, breite: u64) {
+fn list(a: u64, b: u64, width: u64) {
     var i: u64 = gap_gone(a, b)
     while i < b {
         var neg: bool = false
@@ -2445,13 +2445,13 @@ fn list(a: u64, b: u64, breite: u64) {
             return
         }
         let v: u64 = imm_von(i, e)
-        if breite == 1 {
+        if width == 1 {
             emit(v & 255)
         } else {
-            if breite == 2 {
+            if width == 2 {
                 emit16(v & 0xFFFF)
             } else {
-                if breite == 4 {
+                if width == 4 {
                     emit32(v & 0xFFFFFFFF)
                 } else {
                     emit64(v)
@@ -2582,7 +2582,7 @@ fn do_line(a0z: u64, b: u64) {
         }
     }
     if c == 46 {
-        tue_direktive(i, w, b)
+        do_directive(i, w, b)
         return
     }
     // RUNDE SOCIAL: the `lock` prefix (F0) in front of an instruction.
@@ -2608,7 +2608,7 @@ fn do_line(a0z: u64, b: u64) {
 
 fn durchlauf() {
     pos = 0
-    zeile = 1
+    line = 1
     nl_idx = 0
     cur = SEC_TEXT
     len_t = 0
@@ -2622,17 +2622,17 @@ fn durchlauf() {
         }
         do_line(pos, e)
         pos = e + 1
-        zeile = zeile + 1
+        line = line + 1
     }
 }
 
 // ============================================================== das ELF
 
-fn hoch4k(v: u64) -> u64 {
+fn up4k(v: u64) -> u64 {
     return (v + PAGE - 1) & 0xFFFFFFFFFFFFF000
 }
 
-fn hoch8(v: u64) -> u64 {
+fn up8(v: u64) -> u64 {
     return (v + 7) & 0xFFFFFFFFFFFFFFF8
 }
 
@@ -2641,15 +2641,15 @@ fn brand_from_text(p: u64) -> u64 {
     while i < lb_n {
         var q: u64 = nm + ld64(lb_name + i * 8)
         var r: u64 = p
-        var gleich: bool = true
-        while gleich && ld8(q) != 0 && ld8(r) != 0 {
+        var eq: bool = true
+        while eq && ld8(q) != 0 && ld8(r) != 0 {
             if ld8(q) != ld8(r) {
-                gleich = false
+                eq = false
             }
             q = q + 1
             r = r + 1
         }
-        if gleich && ld8(q) == 0 && ld8(r) == 0 {
+        if eq && ld8(q) == 0 && ld8(r) == 0 {
             return sec_addr(ld64(lb_sec + i * 8)) + ld64(lb_off + i * 8)
         }
         i = i + 1
@@ -2657,15 +2657,15 @@ fn brand_from_text(p: u64) -> u64 {
     return 0
 }
 
-static mut kopf: u64 = 0
+static mut header: u64 = 0
 
 fn k8(off: u64, v: u64) {
-    st8(kopf + off, v & 255)
+    st8(header + off, v & 255)
 }
 
 fn k16(off: u64, v: u64) {
-    st8(kopf + off, v & 255)
-    st8(kopf + off + 1, (v >> 8) & 255)
+    st8(header + off, v & 255)
+    st8(header + off + 1, (v >> 8) & 255)
 }
 
 fn k32(off: u64, v: u64) {
@@ -2693,7 +2693,7 @@ fn ph(nr: u64, flags: u64, off: u64, vaddr: u64, filesz: u64, memsz: u64) {
 fn build_header(einsprung: u64, off_r: u64, off_d: u64) {
     var i: u64 = 0
     while i < HDRS {
-        st8(kopf + i, 0)
+        st8(header + i, 0)
         i = i + 1
     }
     k8(0, 0x7F)
@@ -2718,7 +2718,7 @@ fn build_header(einsprung: u64, off_r: u64, off_d: u64) {
     k16(62, 0)
     ph(0, 5, 0, basis, HDRS + len_t, HDRS + len_t)
     ph(1, 4, off_r, basis + off_r, len_r, len_r)
-    let bss_a: u64 = hoch8(basis + off_d + len_d)
+    let bss_a: u64 = up8(basis + off_d + len_d)
     ph(2, 6, off_d, basis + off_d, len_d, (bss_a + len_b) - (basis + off_d))
 }
 
@@ -2754,8 +2754,8 @@ fn fuellen(fd: u64, n: u64) -> bool {
     return true
 }
 
-fn schreib_elf(ziel: u64, off_r: u64, off_d: u64) -> bool {
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, ziel, ulib.O_MAKE, 493)
+fn write_elf(target: u64, off_r: u64, off_d: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, target, ulib.O_MAKE, 493)
     if ulib.bad(fd) {
         var t: [u8; 30] = "fas: Ziel lässt sich nicht \0\0"
         var t2: [u8; 10] = "anlegen\n\0\0"
@@ -2763,7 +2763,7 @@ fn schreib_elf(ziel: u64, off_r: u64, off_d: u64) -> bool {
         ulib.eput((&t2[0]) as u64)
         return false
     }
-    var gut: bool = write_all(fd, kopf, HDRS)
+    var gut: bool = write_all(fd, header, HDRS)
     if gut {
         gut = write_all(fd, buf_t, len_t)
     }
@@ -2780,12 +2780,12 @@ fn schreib_elf(ziel: u64, off_r: u64, off_d: u64) -> bool {
         gut = write_all(fd, buf_d, len_d)
     }
     ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-    ulib.sys(SYS_CHMOD, ziel, 493, 0)
+    ulib.sys(SYS_CHMOD, target, 493, 0)
     return gut
 }
 
 // ====================================== der eingebaute Anlauf ("crt")
-static mut crt_ziel: u64 = 0
+static mut crt_target: u64 = 0
 
 fn anh(p: u64, t: u64) -> u64 {
     var i: u64 = 0
@@ -2835,17 +2835,17 @@ fn hole(n: u64) -> u64 {
     return p
 }
 
-fn read_file(pfad: u64) -> bool {
-    let n: u64 = ulib.size_of(pfad)
+fn read_file(file_path: u64) -> bool {
+    let n: u64 = ulib.size_of(file_path)
     if ulib.bad(n) {
         var t: [u8; 30] = "fas: diese Quelle gibt es ni\0\0"
         var nl: [u8; 3] = "\n\0\0"
         ulib.eput((&t[0]) as u64)
-        ulib.eput(pfad)
+        ulib.eput(file_path)
         ulib.eput((&nl[0]) as u64)
         return false
     }
-    let fd: u64 = ulib.sys(ulib.SYS_OPEN, pfad, 0, 0)
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, file_path, 0, 0)
     if ulib.bad(fd) {
         var t2: [u8; 32] = "fas: die Quelle geht nicht auf\n\0"
         ulib.eput((&t2[0]) as u64)
@@ -2883,8 +2883,8 @@ fn u_start(args: u64) -> u64 {
         return 3
     }
     let argc: u64 = ulib.arg_count(args)
-    var quelle: u64 = 0
-    var ziel: u64 = 0
+    var source: u64 = 0
+    var target: u64 = 0
     var i: u64 = 1
     var w_o: [u8; 3] = "-o\0"
     var w_wirt: [u8; 7] = "--wirt\0"
@@ -2894,36 +2894,36 @@ fn u_start(args: u64) -> u64 {
         if ulib.streq(p, (&w_o[0]) as u64) {
             i = i + 1
             if i < argc {
-                ziel = ulib.arg_at(args, i)
+                target = ulib.arg_at(args, i)
             }
         } else {
             if ulib.streq(p, (&w_crt[0]) as u64) {
                 i = i + 1
                 if i < argc {
-                    crt_ziel = ulib.arg_at(args, i)
+                    crt_target = ulib.arg_at(args, i)
                 }
             } else {
             if ulib.streq(p, (&w_wirt[0]) as u64) {
                 basis = 0x400000
             } else {
-                if quelle == 0 {
-                    quelle = p
+                if source == 0 {
+                    source = p
                 }
             }
             }
         }
         i = i + 1
     }
-    if quelle == 0 || ziel == 0 {
+    if source == 0 || target == 0 {
         var u: [u8; 44] = "Aufruf: fas quelle.s -o ziel [--wirt]\n\0\0\0\0\0\0"
         ulib.eput((&u[0]) as u64)
         return 2
     }
-    if !read_file(quelle) {
+    if !read_file(source) {
         return 2
     }
-    if crt_ziel != 0 {
-        let ende: u64 = crt_text(src + src_n, crt_ziel)
+    if crt_target != 0 {
+        let ende: u64 = crt_text(src + src_n, crt_target)
         src_n = ende - src
     }
 
@@ -2935,7 +2935,7 @@ fn u_start(args: u64) -> u64 {
     lb_off = hole(lb_max * 8)
     hb = hole(hb_n * 8)
     nm = hole(nm_max)
-    kopf = hole(HDRS + 64)
+    header = hole(HDRS + 64)
     nl_num = hole(NL_MAX * 8)
     nl_sec = hole(NL_MAX * 8)
     nl_off = hole(NL_MAX * 8)
@@ -2945,22 +2945,22 @@ fn u_start(args: u64) -> u64 {
     if lb_name == 0 || lb_sec == 0 || lb_off == 0 || hb == 0 || nm == 0 {
         return 3
     }
-    if kopf == 0 {
+    if header == 0 {
         return 3
     }
 
     durchgang = 1
     durchlauf()
-    if fehler != 0 {
+    if err != 0 {
         return 1
     }
 
-    let off_r: u64 = hoch4k(HDRS + len_t)
-    let off_d: u64 = hoch4k(off_r + len_r)
+    let off_r: u64 = up4k(HDRS + len_t)
+    let off_d: u64 = up4k(off_r + len_r)
     adr_t = basis + HDRS
     adr_r = basis + off_r
     adr_d = basis + off_d
-    adr_b = hoch8(adr_d + len_d)
+    adr_b = up8(adr_d + len_d)
 
     buf_t = hole(len_t + 16)
     buf_r = hole(len_r + 16)
@@ -2975,7 +2975,7 @@ fn u_start(args: u64) -> u64 {
     let b1x: u64 = len_b
     durchgang = 2
     durchlauf()
-    if fehler != 0 {
+    if err != 0 {
         return 1
     }
     if len_t != t1 || len_r != r1x || len_d != d1x || len_b != b1x {
@@ -2992,7 +2992,7 @@ fn u_start(args: u64) -> u64 {
         return 5
     }
     build_header(einsprung, off_r, off_d)
-    if !schreib_elf(ziel, off_r, off_d) {
+    if !write_elf(target, off_r, off_d) {
         return 6
     }
     return 0

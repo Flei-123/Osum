@@ -7,32 +7,32 @@ import libc.errno
 import tools
 
 export {
-    kopiere, verschiebe, loesche, copy_tree,
-    gibt_es, is_dir, size_recursive, zaehle_rekursiv,
-    fortschritt_an, progress_off, getan_dateien, getan_oktette,
-    abbrechen, abgebrochen, last_error,
-    MAXTIEFE, PUFFER
+    copy, verschiebe, loesche, copy_tree,
+    gibt_es, is_dir, size_recursive, count_recursive,
+    progress_on, progress_off, getan_dateien, getan_oktette,
+    cancel, abgebrochen, last_error,
+    MAXTIEFE, BUFFER
 }
 
-const PUFFER: u64 = 4096
+const BUFFER: u64 = 4096
 const MAXTIEFE: u64 = 16
 
 static mut f_an: u64 = 0
 static mut f_dateien: u64 = 0
 static mut f_oktette: u64 = 0
 static mut f_abbruch: u64 = 0
-static mut f_fehler: u64 = 0
+static mut f_err: u64 = 0
 
 static mut buf: [u8; 4096] = [0 as u8; 4096]
 static mut st_q: [u8; 144] = [0 as u8; 144]
 static mut zeitpaar: [u64; 4] = [0 as u64; 4]
 
-fn fortschritt_an() {
+fn progress_on() {
     f_an = 1
     f_dateien = 0
     f_oktette = 0
     f_abbruch = 0
-    f_fehler = 0
+    f_err = 0
 }
 
 fn progress_off() {
@@ -47,7 +47,7 @@ fn getan_oktette() -> u64 {
     return f_oktette
 }
 
-fn abbrechen() {
+fn cancel() {
     f_abbruch = 1
 }
 
@@ -56,23 +56,23 @@ fn abgebrochen() -> bool {
 }
 
 fn last_error() -> u64 {
-    return f_fehler
+    return f_err
 }
 
-fn gibt_es(pfad: u64) -> bool {
-    return !ulib.bad(io.stat_mode(pfad))
+fn gibt_es(file_path: u64) -> bool {
+    return !ulib.bad(io.stat_mode(file_path))
 }
 
-fn is_dir(pfad: u64) -> bool {
-    let m: u64 = io.stat_mode(pfad)
+fn is_dir(file_path: u64) -> bool {
+    let m: u64 = io.stat_mode(file_path)
     if ulib.bad(m) {
         return false
     }
     return io.is_dir_mode(m)
 }
 
-fn kopiere(quelle: u64, ziel: u64) -> u64 {
-    let sr: u64 = io.stat_into(quelle, (&st_q[0 as usize]) as u64)
+fn copy(source: u64, target: u64) -> u64 {
+    let sr: u64 = io.stat_into(source, (&st_q[0 as usize]) as u64)
     var mtime: u64 = 0
     var atime: u64 = 0
     var modus: u64 = 420
@@ -81,30 +81,30 @@ fn kopiere(quelle: u64, ziel: u64) -> u64 {
         atime = io.stat_atime((&st_q[0 as usize]) as u64)
         modus = io.stat_mode_of((&st_q[0 as usize]) as u64) & 4095
     }
-    let q: u64 = io.open(quelle, 0)
+    let q: u64 = io.open(source, 0)
     if ulib.bad(q) {
-        f_fehler = q
+        f_err = q
         return q
     }
-    let z: u64 = io.create(ziel)
+    let z: u64 = io.create(target)
     if ulib.bad(z) {
         io.close(q)
-        f_fehler = z
+        f_err = z
         return z
     }
     var rc: u64 = 0
-    var weiter: bool = true
-    while weiter {
+    var next: bool = true
+    while next {
         if f_abbruch != 0 {
-            weiter = false
+            next = false
         } else {
-            let n: u64 = io.read(q, (&buf[0 as usize]) as u64, PUFFER)
+            let n: u64 = io.read(q, (&buf[0 as usize]) as u64, BUFFER)
             if ulib.bad(n) {
                 rc = n
-                f_fehler = n
-                weiter = false
+                f_err = n
+                next = false
             } else if n == 0 {
-                weiter = false
+                next = false
             } else {
                 let w: u64 = io.write_all(z, (&buf[0 as usize]) as u64, n)
                 if ulib.bad(w) || w != n {
@@ -112,8 +112,8 @@ fn kopiere(quelle: u64, ziel: u64) -> u64 {
                     if !ulib.bad(w) {
                         rc = 0 -% errno.E_NOSPC
                     }
-                    f_fehler = rc
-                    weiter = false
+                    f_err = rc
+                    next = false
                 } else {
                     f_oktette = f_oktette + n
                 }
@@ -126,49 +126,49 @@ fn kopiere(quelle: u64, ziel: u64) -> u64 {
         return rc
     }
     if f_abbruch != 0 {
-        let _u: u64 = io.unlink(ziel)
+        let _u: u64 = io.unlink(target)
         return 0 -% errno.E_INTR
     }
     zeitpaar[(0) as usize] = atime
     zeitpaar[(1) as usize] = 0
     zeitpaar[(2) as usize] = mtime
     zeitpaar[(3) as usize] = 0
-    let _t: u64 = io.set_times(ziel, (&zeitpaar[0 as usize]) as u64)
+    let _t: u64 = io.set_times(target, (&zeitpaar[0 as usize]) as u64)
     let _m: u64 = modus
     f_dateien = f_dateien + 1
     return 0
 }
 
-fn copy_tree(quelle: u64, ziel: u64, tiefe: u64) -> u64 {
+fn copy_tree(source: u64, target: u64, tiefe: u64) -> u64 {
     if tiefe > MAXTIEFE {
-        f_fehler = 0 -% errno.E_LOOP
+        f_err = 0 -% errno.E_LOOP
         return 0 -% errno.E_LOOP
     }
     if f_abbruch != 0 {
         return 0 -% errno.E_INTR
     }
-    if !is_dir(quelle) {
-        return kopiere(quelle, ziel)
+    if !is_dir(source) {
+        return copy(source, target)
     }
-    let mr: u64 = io.make_dir(ziel)
+    let mr: u64 = io.make_dir(target)
     if ulib.bad(mr) && mr != (0 -% errno.E_EXIST) {
-        f_fehler = mr
+        f_err = mr
         return mr
     }
     var kq: [u8; 512] = [0 as u8; 512]
     var kz: [u8; 512] = [0 as u8; 512]
     var dbuf: [u8; 1024] = [0 as u8; 1024]
-    let fd: u64 = io.dir_open(quelle)
+    let fd: u64 = io.dir_open(source)
     if ulib.bad(fd) {
-        f_fehler = fd
+        f_err = fd
         return fd
     }
     var rc: u64 = 0
-    var weiter: bool = true
-    while weiter {
+    var next: bool = true
+    while next {
         let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
         if ulib.bad(n) || n == 0 {
-            weiter = false
+            next = false
         } else {
             var at: u64 = 0
             while at < n {
@@ -179,8 +179,8 @@ fn copy_tree(quelle: u64, ziel: u64, tiefe: u64) -> u64 {
                 } else {
                     let nm: u64 = io.dir_name(rec)
                     if !point(nm) && f_abbruch == 0 {
-                        tools.join((&kq[0 as usize]) as u64, quelle, nm)
-                        tools.join((&kz[0 as usize]) as u64, ziel, nm)
+                        tools.join((&kq[0 as usize]) as u64, source, nm)
+                        tools.join((&kz[0 as usize]) as u64, target, nm)
                         let r2: u64 = copy_tree(
                             (&kq[0 as usize]) as u64,
                             (&kz[0 as usize]) as u64, tiefe + 1)
@@ -195,7 +195,7 @@ fn copy_tree(quelle: u64, ziel: u64, tiefe: u64) -> u64 {
     }
     io.close(fd)
     if !ulib.bad(rc) {
-        let sr: u64 = io.stat_into(quelle, (&st_q[0 as usize]) as u64)
+        let sr: u64 = io.stat_into(source, (&st_q[0 as usize]) as u64)
         if !ulib.bad(sr) {
             zeitpaar[(0) as usize] =
                 io.stat_atime((&st_q[0 as usize]) as u64)
@@ -203,7 +203,7 @@ fn copy_tree(quelle: u64, ziel: u64, tiefe: u64) -> u64 {
             zeitpaar[(2) as usize] =
                 io.stat_mtime((&st_q[0 as usize]) as u64)
             zeitpaar[(3) as usize] = 0
-            let _t: u64 = io.set_times(ziel,
+            let _t: u64 = io.set_times(target,
                 (&zeitpaar[0 as usize]) as u64)
         }
     }
@@ -211,33 +211,33 @@ fn copy_tree(quelle: u64, ziel: u64, tiefe: u64) -> u64 {
 }
 
 // --------------------------------------------------------- verschieben
-fn verschiebe(quelle: u64, ziel: u64) -> u64 {
-    let r: u64 = io.rename(quelle, ziel)
+fn verschiebe(source: u64, target: u64) -> u64 {
+    let r: u64 = io.rename(source, target)
     if !ulib.bad(r) {
         f_dateien = f_dateien + 1
         return 0
     }
     if r != (0 -% errno.E_XDEV) {
-        f_fehler = r
+        f_err = r
         return r
     }
-    let k: u64 = copy_tree(quelle, ziel, 0)
+    let k: u64 = copy_tree(source, target, 0)
     if ulib.bad(k) {
         return k
     }
-    return loesche(quelle, 0)
+    return loesche(source, 0)
 }
 
 // ------------------------------------------------------------- loeschen
-fn loesche(pfad: u64, tiefe: u64) -> u64 {
+fn loesche(file_path: u64, tiefe: u64) -> u64 {
     if tiefe > MAXTIEFE {
-        f_fehler = 0 -% errno.E_LOOP
+        f_err = 0 -% errno.E_LOOP
         return 0 -% errno.E_LOOP
     }
-    if !is_dir(pfad) {
-        let r: u64 = io.unlink(pfad)
+    if !is_dir(file_path) {
+        let r: u64 = io.unlink(file_path)
         if ulib.bad(r) {
-            f_fehler = r
+            f_err = r
             return r
         }
         f_dateien = f_dateien + 1
@@ -251,23 +251,23 @@ fn loesche(pfad: u64, tiefe: u64) -> u64 {
     while !empty && runden < 8192 && f_abbruch == 0 {
         runden = runden + 1
         var gefunden: bool = false
-        let fd: u64 = io.dir_open(pfad)
+        let fd: u64 = io.dir_open(file_path)
         if ulib.bad(fd) {
-            f_fehler = fd
+            f_err = fd
             return fd
         }
-        var weiter: bool = true
-        while weiter && !gefunden {
+        var next: bool = true
+        while next && !gefunden {
             let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
             if ulib.bad(n) || n == 0 {
-                weiter = false
+                next = false
             } else {
                 var at: u64 = 0
                 while at < n && !gefunden {
                     let rec: u64 = (&dbuf[0 as usize]) as u64 + at
                     let nm: u64 = io.dir_name(rec)
                     if !point(nm) {
-                        tools.join((&kind[0 as usize]) as u64, pfad, nm)
+                        tools.join((&kind[0 as usize]) as u64, file_path, nm)
                         gefunden = true
                     }
                     let rl: u64 = io.dir_reclen(rec)
@@ -293,9 +293,9 @@ fn loesche(pfad: u64, tiefe: u64) -> u64 {
     if ulib.bad(rc) {
         return rc
     }
-    let r3: u64 = io.remove_dir(pfad)
+    let r3: u64 = io.remove_dir(file_path)
     if ulib.bad(r3) {
-        f_fehler = r3
+        f_err = r3
         return r3
     }
     f_dateien = f_dateien + 1
@@ -303,12 +303,12 @@ fn loesche(pfad: u64, tiefe: u64) -> u64 {
 }
 
 // ------------------------------------------------------------- zaehlen
-fn size_recursive(pfad: u64, tiefe: u64) -> u64 {
+fn size_recursive(file_path: u64, tiefe: u64) -> u64 {
     if tiefe > MAXTIEFE {
         return 0
     }
-    if !is_dir(pfad) {
-        let g: u64 = io.size_of(pfad)
+    if !is_dir(file_path) {
+        let g: u64 = io.size_of(file_path)
         if ulib.bad(g) {
             return 0
         }
@@ -316,16 +316,16 @@ fn size_recursive(pfad: u64, tiefe: u64) -> u64 {
     }
     var kind: [u8; 512] = [0 as u8; 512]
     var dbuf: [u8; 1024] = [0 as u8; 1024]
-    let fd: u64 = io.dir_open(pfad)
+    let fd: u64 = io.dir_open(file_path)
     if ulib.bad(fd) {
         return 0
     }
     var sum: u64 = 0
-    var weiter: bool = true
-    while weiter {
+    var next: bool = true
+    while next {
         let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
         if ulib.bad(n) || n == 0 {
-            weiter = false
+            next = false
         } else {
             var at: u64 = 0
             while at < n {
@@ -336,7 +336,7 @@ fn size_recursive(pfad: u64, tiefe: u64) -> u64 {
                 } else {
                     let nm: u64 = io.dir_name(rec)
                     if !point(nm) {
-                        tools.join((&kind[0 as usize]) as u64, pfad, nm)
+                        tools.join((&kind[0 as usize]) as u64, file_path, nm)
                         sum = sum + size_recursive(
                             (&kind[0 as usize]) as u64, tiefe + 1)
                     }
@@ -349,25 +349,25 @@ fn size_recursive(pfad: u64, tiefe: u64) -> u64 {
     return sum
 }
 
-fn zaehle_rekursiv(pfad: u64, tiefe: u64) -> u64 {
+fn count_recursive(file_path: u64, tiefe: u64) -> u64 {
     if tiefe > MAXTIEFE {
         return 0
     }
-    if !is_dir(pfad) {
+    if !is_dir(file_path) {
         return 1
     }
     var kind: [u8; 512] = [0 as u8; 512]
     var dbuf: [u8; 1024] = [0 as u8; 1024]
-    let fd: u64 = io.dir_open(pfad)
+    let fd: u64 = io.dir_open(file_path)
     if ulib.bad(fd) {
         return 0
     }
     var n_ges: u64 = 0
-    var weiter: bool = true
-    while weiter {
+    var next: bool = true
+    while next {
         let n: u64 = io.dir_read(fd, (&dbuf[0 as usize]) as u64, 1024)
         if ulib.bad(n) || n == 0 {
-            weiter = false
+            next = false
         } else {
             var at: u64 = 0
             while at < n {
@@ -378,8 +378,8 @@ fn zaehle_rekursiv(pfad: u64, tiefe: u64) -> u64 {
                 } else {
                     let nm: u64 = io.dir_name(rec)
                     if !point(nm) {
-                        tools.join((&kind[0 as usize]) as u64, pfad, nm)
-                        n_ges = n_ges + 1 + zaehle_rekursiv(
+                        tools.join((&kind[0 as usize]) as u64, file_path, nm)
+                        n_ges = n_ges + 1 + count_recursive(
                             (&kind[0 as usize]) as u64, tiefe + 1)
                     }
                     at = at + rl
