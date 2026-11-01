@@ -1,27 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/sched/futex.fi -- futex with a REAL wait queue (r714).
-//
-// Until now `futex(WAIT)` polled: every waiter slept one tick (10 ms), looked at the word again, and `FUTEX_WAKE`
-// did nothing. A lock handed over between threads cost up to 10 ms per hand-over (GTK, Qt, Firefox, foot's worker pool).
-//
-// Now: a waiter is entered into a table (one entry per task slot) and sleeps in S_SLEEP; a waker finds the entries of the
-// word and makes exactly the requested number ready.
-//
-// RACE FREEDOM. The value check, the entry in the table, S_SLEEP and the switch happen under ONE hold of L_SCHED (the same
-// lock `sleep_ticks` and `wait_sleep` use). Every waker takes the same lock. So a wake can not fall between "the value
-// still stands" and "the waiter sleeps": either the waker comes first (the user space already changed the word, the
-// waiter sees the new value and answers EAGAIN) or it comes after (the entry is in the table, it is found and woken).
-// The only thing left without the lock is a SIGNAL: `signal.send_task` does a lock-free CAS S_SLEEP -> S_READY. A signal that
-// arrives between our `interrupted` check and S_SLEEP is not lost forever, because an untimed wait is cut to one second
-// (answer 0 = spurious wake-up, which futex(2) allows).
-//
-// KEYS. A waiter is found by the PHYSICAL address of the word (shared mappings, other processes) OR by (address space,
-// virtual address) (a private word whose page was copied by COW between wait and wake). Over-matching is only a spurious
-// wake-up; under-matching would be a lost wake-up. A wake serves the virtual-key matches first, then the physical-only ones.
-//
-// Operations: WAIT, WAKE, REQUEUE, CMP_REQUEUE, WAKE_OP, WAIT_BITSET, WAKE_BITSET, LOCK_PI, UNLOCK_PI, TRYLOCK_PI.
-// PI is the MINIMUM: the owner word protocol of Linux (tid | WAITERS | OWNER_DIED bit untouched) and hand-over to the oldest
-// waiter -- but NO priority boost. Not done: the *_REQUEUE_PI pair (ENOSYS), robust lists.
 import lib.kstate
 import lib.errno
 import sched.sched
@@ -36,7 +12,7 @@ export {
     call, stats_waits, stats_wakes, queued_count
 }
 
-const FQ_MAX: u64 = 256 // table size, >= kstate.MAX_TASKS (W-LIMITS3 goes to 128)
+const FQ_MAX: u64 = 256
 
 const OP_WAIT: u64 = 0
 const OP_WAKE: u64 = 1
@@ -52,20 +28,19 @@ const FLAG_PRIVATE: u64 = 128
 const FLAG_CLOCK_RT: u64 = 256
 
 const BITS_ANY: u64 = 0xFFFFFFFF
-const PI_BITS: u64 = 0x100000000 // marks a PI waiter: no 32-bit mask can match it
+const PI_BITS: u64 = 0x100000000
 const TID_MASK: u64 = 0x3FFFFFFF
 const WAITERS_BIT: u64 = 0x80000000
 const E_DEADLK: u64 = 35
-const SLEEP_CAP: u64 = 100 // ticks: an untimed wait is cut after this (spurious wake-up)
+const SLEEP_CAP: u64 = 100
 const FOREVER: u64 = 0x3FFFFFFFFFFFFFFF
 
-// One entry per task slot. The entry is live while `fq_vkey` is not 0.
 static mut fq_vkey: [u64; 256] = [0 as u64; 256]
 static mut fq_pkey: [u64; 256] = [0 as u64; 256]
 static mut fq_bits: [u64; 256] = [0 as u64; 256]
 static mut fq_pid: [u64; 256] = [0 as u64; 256]
 static mut fq_ticket: [u64; 256] = [0 as u64; 256]
-static mut fq_count: [u64; 4] = [0 as u64; 4] // 0 = next ticket, 1 = waits, 2 = wakes
+static mut fq_count: [u64; 4] = [0 as u64; 4]
 
 fn neg(e: u64) -> u64 {
     return errno.neg(e)
@@ -91,7 +66,6 @@ fn queued_count() -> u64 {
     return n
 }
 
-// ------------------------------------------------------------ user memory
 
 fn rd32(state: u64, me: u64, addr: u64) -> u64 {
     let phys: u64 = proc.translate(state, me, addr)
@@ -115,8 +89,6 @@ fn rd64(state: u64, me: u64, addr: u64) -> u64 {
     return rd32(state, me, addr) | (rd32(state, me, addr + 4) << 32)
 }
 
-// Atomic compare-and-swap of a 32-bit word in user memory (through the identity mapping), done as a 64-bit CAS on the
-// aligned octet pair. True when the word was `old` and is `new` now.
 fn cas32(state: u64, phys: u64, old: u64, new: u64) -> bool {
     let base: u64 = phys & (~7)
     var shift: u64 = 0
@@ -144,7 +116,6 @@ fn cas32(state: u64, phys: u64, old: u64, new: u64) -> bool {
     return false
 }
 
-// The key of an address: the virtual key needs the address space (the thread group leader's slot).
 fn space_of(state: u64, me: u64) -> u64 {
     let g: u64 = sched.tget(state, me, sched.T_TGID)
     if g == 0 || g == sched.tget(state, me, sched.T_PID) {
@@ -161,7 +132,6 @@ fn vkey_of(state: u64, me: u64, addr: u64) -> u64 {
     return ((space_of(state, me) + 1) << 48) | (addr & 0xFFFFFFFFFFFF)
 }
 
-// ---------------------------------------------- queue (L_SCHED must be held)
 
 fn lock(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
@@ -174,7 +144,6 @@ fn unlock(state: u64, flags: u64) {
     sched.irq_restore(flags)
 }
 
-// Is the entry of slot `j` a sleeper that a wake may take? A stale entry (slot reused by another pid) is dropped.
 fn live(state: u64, j: u64) -> bool {
     if fq_vkey[j as usize] == 0 {
         return false
@@ -193,7 +162,6 @@ fn matches(j: u64, pkey: u64, vkey: u64, pass: u64) -> bool {
     return fq_pkey[j as usize] == pkey && fq_vkey[j as usize] != vkey
 }
 
-// Oldest live waiter of the word whose mask meets `bits`, or FQ_MAX.
 fn oldest(state: u64, pkey: u64, vkey: u64, bits: u64, pass: u64) -> u64 {
     var best: u64 = FQ_MAX
     var best_t: u64 = 0xFFFFFFFFFFFFFFFF
@@ -216,7 +184,6 @@ fn wake_slot(state: u64, j: u64) {
     fq_count[2 as usize] = fq_count[2 as usize] + 1
 }
 
-// Wake up to `want` waiters of the word. Returns how many.
 fn wake_some(state: u64, pkey: u64, vkey: u64, want: u64, bits: u64) -> u64 {
     var done: u64 = 0
     var pass: u64 = 0
@@ -236,7 +203,6 @@ fn wake_some(state: u64, pkey: u64, vkey: u64, want: u64, bits: u64) -> u64 {
     return done
 }
 
-// Move up to `want` waiters from one word to another (no wake-up). Returns how many.
 fn move_some(state: u64, pkey: u64, vkey: u64, pkey2: u64, vkey2: u64, want: u64) -> u64 {
     var done: u64 = 0
     var pass: u64 = 0
@@ -261,11 +227,7 @@ fn pi_waiting(state: u64, pkey: u64, vkey: u64) -> bool {
     return oldest(state, pkey, vkey, PI_BITS, 0) < FQ_MAX || oldest(state, pkey, vkey, PI_BITS, 1) < FQ_MAX
 }
 
-// ------------------------------------------------------------------ waiting
 
-// Enter the table and sleep until woken, signalled or `deadline` (absolute tick, 0 = none).
-// `expect` is the value the word must still have; PI passes check_word = false (it did its own check).
-// Returns 0 woken (or spurious), -EAGAIN, -EINTR, -ETIMEDOUT.
 fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, deadline: u64,
     check_word: bool) -> u64 {
     if signal.interrupted(state, me) {
@@ -296,7 +258,6 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
     sched.tset(state, me, sched.T_STATE, sched.S_SLEEP)
     sched.schedule_locked(state)
     sched.irq_restore(flags)
-    // Back again: woken by a waker (entry already cleared), or by the timer / a signal (entry still ours).
     let f2: u64 = lock(state)
     var queued: bool = false
     if fq_vkey[me as usize] != 0 && fq_pid[me as usize] == sched.tget(state, me, sched.T_PID) {
@@ -316,8 +277,6 @@ fn sleep_on(state: u64, me: u64, phys: u64, vkey: u64, expect: u64, bits: u64, d
     return 0
 }
 
-// The tick at which a wait ends: from the user timespec (0 = no timeout). `absolute` = FUTEX_WAIT_BITSET.
-// Result >= DL_ERR is an error: DL_ERR | errno (no real deadline tick gets that high).
 const DL_ERR: u64 = 0xF000000000000000
 
 fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool) -> u64 {
@@ -344,7 +303,7 @@ fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool) -> u
             ns = sec * 1000000000 + nsec
         }
         if ns <= clock {
-            return 1 // already past: tick 1 is always in the past
+            return 1
         }
         ns = ns - clock
     } else {
@@ -364,7 +323,6 @@ fn deadline_of(state: u64, me: u64, ts: u64, absolute: bool, on_real: bool) -> u
     return kstate.get(state, kstate.TICKS) + rest
 }
 
-// ------------------------------------------------------------------- PI
 
 fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
     var phys: u64 = proc.translate(state, me, uaddr)
@@ -379,7 +337,6 @@ fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
     }
     var rounds: u64 = 0
     while rounds < 100000 {
-        // translate again every round: `phys` must not outlive the sleep (another thread may have unmapped the page; docs/SECURITY-TOCTOU-KERNEL.md K-06)
         phys = proc.translate(state, me, uaddr)
         if phys == 0 {
             return neg(errno.E_FAULT)
@@ -406,7 +363,6 @@ fn lock_pi(state: u64, me: u64, uaddr: u64, ts: u64) -> u64 {
     return neg(errno.E_AGAIN)
 }
 
-// The lock was just taken from state 0: keep the WAITERS bit if more PI waiters are queued.
 fn take_done(state: u64, phys: u64, vkey: u64, tid: u64) -> u64 {
     let flags: u64 = lock(state)
     let more: bool = pi_waiting(state, phys, vkey)
@@ -449,7 +405,6 @@ fn unlock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
         if (v & TID_MASK) != tid {
             return neg(errno.E_PERM)
         }
-        // Free the word, then wake the oldest PI waiter, which takes it in its own retry.
         if cas32(state, phys, v, 0) {
             let flags: u64 = lock(state)
             wake_some(state, phys, vkey, 1, PI_BITS)
@@ -461,10 +416,8 @@ fn unlock_pi(state: u64, me: u64, uaddr: u64) -> u64 {
     return neg(errno.E_AGAIN)
 }
 
-// ----------------------------------------------------------------- WAKE_OP
 
 fn cmp_ok(cmp: u64, a: u64, b: u64) -> bool {
-    // a, b are 32-bit; compare as signed 32-bit
     var x: u64 = a
     var y: u64 = b
     if x >= 0x80000000 {
@@ -473,7 +426,6 @@ fn cmp_ok(cmp: u64, a: u64, b: u64) -> bool {
     if y >= 0x80000000 {
         y = y + 0xFFFFFFFF00000000
     }
-    // bias both by 2^63 so unsigned order equals signed order
     let xs: u64 = x ^ 0x8000000000000000
     let ys: u64 = y ^ 0x8000000000000000
     if cmp == 0 {
@@ -506,7 +458,7 @@ fn wake_op(state: u64, me: u64, uaddr: u64, nwake: u64, uaddr2: u64, nwake2: u64
     let cmparg12: u64 = enc & 0xFFF
     var oparg32: u64 = oparg12
     if oparg12 >= 0x800 {
-        oparg32 = oparg12 + 0xFFFFF000 // sign-extend 12 -> 32 bit
+        oparg32 = oparg12 + 0xFFFFF000
     }
     if (op & 8) != 0 {
         op = op & 7
@@ -554,9 +506,7 @@ fn wake_op(state: u64, me: u64, uaddr: u64, nwake: u64, uaddr2: u64, nwake2: u64
     return n
 }
 
-// --------------------------------------------------------------------- entry
 
-// futex(uaddr, op, val, timeout|val2, uaddr2, val3). All return values are Linux's.
 fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64, val3: u64) -> u64 {
     var cmd: u64 = op
     if (cmd & FLAG_PRIVATE) != 0 {
@@ -595,7 +545,6 @@ fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64
                 return neg(errno.E_INVAL)
             }
         }
-        // A stale value is answered before the timeout is looked at (the timeout register may be garbage then).
         if rd32_phys(state, phys) != (val & 0xFFFFFFFF) {
             return neg(errno.E_AGAIN)
         }
@@ -615,7 +564,7 @@ fn call(state: u64, me: u64, uaddr: u64, op: u64, val: u64, a3: u64, uaddr2: u64
         }
         let want: u64 = val & 0xFFFFFFFF
         if want >= 0x80000000 {
-            return 0 // a negative count wakes nobody
+            return 0
         }
         let flags: u64 = lock(state)
         let n: u64 = wake_some(state, phys, vkey, want, bits)

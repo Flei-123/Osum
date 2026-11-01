@@ -1,5 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/time.fi -- Runde K9: die Uhr.
 
 import serial
 import lib.kstate
@@ -12,10 +10,8 @@ export {
     init, calibrate, mono_ns, real_ns, boot_sec, rtc_field, tsc, khz,
     set_rtc_utc, rtc_utc, tz_anwenden, rtc_raw, rtc_frame_get, sync_get, clock_moved_get, tz_done_get,
     tz_min, set_tz, now_local,
-    // DAILY-DRIVER: summer time by rule, setting the clock.
     tz_base, tz_rule_get, set_tz_rule, eu_dst, set_utc, rtc_write,
     epoch_of, days_from_civil, now_sec, split, set_utc_ns, slew_by, slew_remaining,
-    // DD-12: clock across S3.
     suspend_mark, resume_fix,
     CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS, CLOCK_THREAD,
     CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
@@ -49,7 +45,6 @@ const TICK_NS: u64 = 10000000
 
 const CAL_TICKS: u64 = 20
 
-// ------------------------------------------------------ der Zyklenzaehler
 
 fn tsc() -> u64 {
     var lo: u64 = 0
@@ -62,7 +57,6 @@ fn khz(state: u64) -> u64 {
     return kstate.get(state, kstate.TIME_KHZ)
 }
 
-// ------------------------------------------------------------ die CMOS-Uhr
 
 fn cmos(reg: u64) -> u64 {
     serial.out8(0x70 as u16, reg as u8)
@@ -104,7 +98,6 @@ fn rtc_field(what: u64) -> u64 {
     if (b & 4) == 0 {
         v = (raw & 15) + (raw >> 4) * 10
     }
-    // 12-hour chip: 12 AM is hour 0, 12 PM is hour 12, 1..11 PM add 12.
     if what == R_HOUR && (b & 2) == 0 {
         v = v % 12
         if pm {
@@ -165,7 +158,6 @@ fn split(secs: u64, out: u64) {
     __mmio_write64((out + R_SEC * 8) as *mut u64, rest % 60)
 }
 
-// ------------------------------------------------------------- der Start
 
 fn init(state: u64) -> u64 {
     let y: u64 = rtc_field(R_YEAR)
@@ -222,7 +214,6 @@ fn calibrate(state: u64) -> u64 {
     return k
 }
 
-// ------------------------------------------------------- die beiden Uhren
 
 fn raw_ns(state: u64) -> u64 {
     let k: u64 = kstate.get(state, kstate.TIME_KHZ)
@@ -263,18 +254,11 @@ fn now_sec(state: u64) -> u64 {
     return real_ns(state) / NS_PER_SEC
 }
 
-static mut tz_offset: u64 = 0 // the MAGNITUDE of the standard offset in minutes
-// N-004: zones west of Greenwich. `tz_west` = 1 makes the standard offset negative;
-// all arithmetic goes through `base_w()`, the offset as wrapped signed minutes
-// (lib/tz/tz.fi), so `utc +% (off *% 60)` is right for both signs.
+static mut tz_offset: u64 = 0
 static mut tz_west: u64 = 0
 
-//     19 UHR  RTC 12:38:07  KRN 14:38:06  TZ 120
 static mut rtc_is_utc: u64 = 0
 static mut rtc_roh: u64 = 0
-// r544: 1 once `tz_anwenden` has converted with a known zone / once the
-// clock was set by somebody (set_utc): no conversion from the raw RTC
-// value after that.
 static mut tz_done: u64 = 0
 static mut clock_moved: u64 = 0
 static mut rtc_frame: u64 = 0
@@ -319,22 +303,12 @@ fn set_tz(state: u64, minuten: u64) {
     tz_offset = minuten
 }
 
-// ============================================ DAILY-DRIVER: SUMMER TIME
-// `tz=<minutes>` alone is a fixed offset: `tz=120` (Central Europe in
-// summer) was what the installer wrote into the boot line, so the clock
-// was an hour wrong from the last Sunday of October to the last Sunday of
-// March. With `tzrule=eu` (boot line) or SETTZ (system call) the offset
-// is the STANDARD offset (`tz=60` for Vienna) and one hour is added while
-// summer time of the European Union is in force: from 01:00 UTC on the
-// last Sunday of March until 01:00 UTC on the last Sunday of October --
-// the same instant for every zone of the Union.
-static mut tz_rule: u64 = 0 // 0 = fixed offset, 1 EU, 2 US/CA, 3 AU (south), 4 NZ (lib/tz/tz.fi)
+static mut tz_rule: u64 = 0
 
 fn base_w() -> u64 {
     return tz.to_wrapped(tz_offset, tz_west)
 }
 
-// `arg` = rule | (west << 8), the same word SYS_OSUM_SETTZ carries. A bad rule is ignored.
 fn set_tz_rule(state: u64, arg: u64) {
     let r: u64 = tz.rule_of_arg(arg)
     if r <= rules.RULE_MAX {
@@ -343,22 +317,18 @@ fn set_tz_rule(state: u64, arg: u64) {
     }
 }
 
-// the rule as the sysinfo word: rule | (west << 8)
 fn tz_rule_get(state: u64) -> u64 {
     return tz_rule | (tz_west << 8)
 }
 
-// the standard offset, without summer time
 fn tz_base(state: u64) -> u64 {
     return tz_offset
 }
 
-// 0 = Sunday. 1 January 1970 was a Thursday.
 fn weekday_of_days(days: u64) -> u64 {
     return (days +% 4) % 7
 }
 
-// The last Sunday of a 31-day month, as days since 1970.
 fn last_sunday(y: u64, m: u64) -> u64 {
     let d31: u64 = days_from_civil(y, m, 31)
     return d31 -% weekday_of_days(d31)
@@ -368,7 +338,6 @@ fn eu_dst(utc: u64) -> bool {
     return tz.dst_active(utc, base_w(), tz_rule)
 }
 
-// the extra minutes (0 or 60) at this instant (UTC seconds)
 fn dst_min(utc: u64) -> u64 {
     if eu_dst(utc) {
         return 60
@@ -376,8 +345,6 @@ fn dst_min(utc: u64) -> u64 {
     return 0
 }
 
-// the total offset NOW as a magnitude (callers only test it for 0 or show it; the
-// sign is `tz_rule_get(..) >> 8`). tz_offset stays the magnitude of the STANDARD offset.
 fn tz_min(state: u64) -> u64 {
     return tz.magnitude(tz.offset_min(now_sec(state), base_w(), tz_rule))
 }
@@ -405,16 +372,9 @@ fn now_local(state: u64) -> u64 {
 
 fn tz_anwenden(state: u64) {
     let roh: u64 = rtc_roh
-    // r544: `mode_of` (command line) runs BEFORE `time.init` (RTC read), so
-    // its call finds nothing here and returns; `kernel_main` calls this
-    // function again right after `init`. It used to be called only from
-    // `mode_of`, i.e. never effective: a hardware clock on local time was
-    // taken for UTC and the display went 2 h ahead until sntp fixed it.
     if roh == 0 {
         return
     }
-    // once is enough, and never after somebody set the clock (the offset
-    // would be taken off a value that is already UTC)
     if tz_done != 0 || clock_moved != 0 {
         return
     }
@@ -422,13 +382,10 @@ fn tz_anwenden(state: u64) {
     var frame: u64 = 3
     if rtc_is_utc == 0 {
         frame = 1
-        // wrapped signed seconds: east of Greenwich subtracts, west adds
         let ab: u64 = base_w() *% 60
         if tz_west != 0 || roh > ab {
             utc = roh -% ab
         }
-        // with a summer-time rule the wall clock may be an hour ahead:
-        // try that reading first and keep it if it is summer time then
         if tz_rule != 0 && roh > 1000000 {
             let u1: u64 = roh -% (ab +% 3600)
             if eu_dst(u1) {
@@ -439,20 +396,11 @@ fn tz_anwenden(state: u64) {
     }
     rtc_frame = frame
     kstate.set(state, kstate.TIME_BOOT, utc)
-    // A zone that is not known yet (no `tz=` on the boot line; it comes
-    // later from /etc/time.conf through SETTZ) leaves the door open: the
-    // next call with a zone does the one conversion.
     if tz_offset != 0 || tz_west != 0 || tz_rule != 0 || rtc_is_utc != 0 {
         tz_done = 1
     }
 }
 
-// SETTING THE CLOCK (clock_settime, 227, root only; DAILY-DRIVER).
-// TIME_BOOT is the UTC instant of the start, `real_ns` adds the monotone
-// clock to it -- so setting the clock is moving TIME_BOOT, and nothing
-// else moves: the monotone clock never jumps, timers keep their length.
-// Sanity bounds: a clock set to the year 1970 or 2200 by a bug would
-// break every certificate check at once, so the call refuses it.
 fn set_utc(state: u64, utc: u64) -> bool {
     return set_utc_ns(state, utc, 0)
 }
@@ -511,10 +459,6 @@ fn to_bcd(b: u64, v: u64) -> u64 {
     return v
 }
 
-// Write the hardware clock from the kernel's time, in the convention this
-// machine uses (local time unless `rtcutc`) -- so that the next start does
-// not undo what was just set. Only in 24-hour mode; a chip in 12-hour mode
-// is left alone (honest: returns false).
 fn rtc_write(state: u64) -> bool {
     let b: u64 = cmos(0x0B)
     if (b & 2) == 0 {
@@ -530,7 +474,7 @@ fn rtc_write(state: u64) -> bool {
     if y < 2000 || y > 2099 {
         return false
     }
-    cmos_w(0x0B, b | 0x80) // SET: the chip stops counting while we write
+    cmos_w(0x0B, b | 0x80)
     cmos_w(9, to_bcd(b, y - 2000))
     cmos_w(8, to_bcd(b, f[(R_MONTH) as usize]))
     cmos_w(7, to_bcd(b, f[(R_DAY) as usize]))
@@ -551,24 +495,10 @@ fn boot_sec(state: u64) -> u64 {
     return kstate.get(state, kstate.TIME_BOOT)
 }
 
-// ======================================================= DD-12: CLOCK ACROSS S3
-//
-// During S3 the kernel's counters stand still (the timer is off, and on
-// many boards the TSC restarts from zero), but the wall clock goes on.
-// `suspend_mark` remembers the hardware clock and the monotone clock before
-// the sleep; `resume_fix` after it (a) puts the cycle counter's origin so
-// that the monotone clock continues WHERE IT STOPPED (sleep time does not
-// count, like CLOCK_MONOTONIC on Linux; the counter-reset case is covered
-// too) and (b) moves TIME_BOOT forward by the seconds the hardware clock
-// advanced, so real time includes the sleep. Using the DIFFERENCE of two
-// hardware clock readings (not its absolute value) keeps a clock that was
-// set by SNTP or by hand correct: whatever offset the kernel's clock has
-// to the CMOS stays.
 static mut s3_rtc0: u64 = 0
 static mut s3_mono0: u64 = 0
 
 fn rtc_epoch_now() -> u64 {
-    // read twice: a reading that straddles a carry differs from the next
     var a: u64 = 0
     var n: u64 = 0
     while n < 3 {
@@ -596,8 +526,6 @@ fn suspend_mark(state: u64) {
     s3_mono0 = mono_ns(state)
 }
 
-// Returns the seconds the sleep added to the wall clock (0 when the
-// hardware clock is unreadable or went backwards).
 fn resume_fix(state: u64) -> u64 {
     let r1: u64 = rtc_epoch_now()
     var dt: u64 = 0
@@ -606,8 +534,6 @@ fn resume_fix(state: u64) -> u64 {
     }
     let k: u64 = kstate.get(state, kstate.TIME_KHZ)
     if k != 0 {
-        // raw_ns(now) must equal the monotone value at the moment of
-        // the sleep: origin = now - mono0 * khz / 1e6
         let back: u64 = (s3_mono0 / 1000000) *% k +% (((s3_mono0 % 1000000) *% k) / 1000000)
         kstate.set(state, kstate.TIME_TSC0, tsc() -% back)
     }

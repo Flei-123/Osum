@@ -1,30 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/sched.fi -- round 62: tasks and the scheduler.
-//
-// Round 59 had one thread of control: `kernel_main` ran from top to
-// bottom, and the only thing that ever took the processor away from it
-// was an interrupt that gave it straight back. From here on the kernel
-// has TASKS, and the timer takes the processor away for good.
-//
-// A task is 256 octets in the data area (`kstate.TASK_OFF`) plus a
-// KERNEL STACK OF ITS OWN out of the frame allocator. Everything a task
-// needs in order to be interrupted in the middle and continued later
-// lives on that stack; the task record only holds the stack pointer.
-// That is the whole trick of a context switch, and `switch.s` does the
-// six lines that a language cannot do.
-//
-// THE PLAN: weighted round robin. Every ready task gets a turn, in the
-// order of the table, and the length of the turn is its priority in timer
-// ticks. Priority 3 therefore gets three times the processor of priority
-// 1 -- and nothing starves, which is what a strict priority order would
-// do. The proof is in `tools/kernel/run.sh`: three workers with the
-// priorities 1, 2 and 3 do the same amount of work, and the one with the
-// highest priority is done first.
-//
-// THE COUNTER-CHECK belongs to it: with `nopreempt` on the command line
-// the timer does not switch, and the same three workers run one after the
-// other -- each one scheduled exactly ONCE. Interleaving that a spin loop
-// produces on its own would show up here.
 
 import serial
 import lib.kstate
@@ -67,132 +40,84 @@ export {
     T_NETV, T_NETOK, NETOK_MAX, T_DISKR, T_DISKW,
     S_POLL, T_POLLSEQ, poll_seq, poll_kick, poll_kick_one, poll_sleep,
     POLL_FOREVER,
-    // ---- RUNDE MULTIUSER ----
     T_NGROUPS, groups_count, groups_at, groups_has, groups_set,
     groups_clear, groups_inherit, GROUPS_MAX,
-    // ---- ROUND SESSUID ----
     T_EXAS, session_identity,
-    // ---- RUNDE AVX ----
     T_FPU, fpu_area, fpu_set_area, fpu_inherit, fpu_reset,
-    // ---- RUNDE LAUFZEIT ----
     T_FSBASE, T_GSBASE, fsbase_apply,
-    // ---- DELL STABILITY ----
     state_cas, schedule_locked, KILL_SET, KILL_PLAIN, kill_requested, stop_sleep, kill_other, KILL_DONE, KILL_LATER, KILL_GONE, group_of, group_live, kill_group,
-    // ---- RUNDE O-CONTAINER ----
     T_CTR,
-    // ---- RUNDE SPEICHERDRUCK (K-002) ----
     T_UPAGES, T_OOMSAFE,
-    // ---- AB-003 ----
     T_ORIGIN,
 }
 
-// ------------------------------------------------------ the task record
 
-const T_STATE: u64 = 0 // one of the S_* below
+const T_STATE: u64 = 0
 const T_PID: u64 = 8
-const T_RSP: u64 = 16 // where the switch left the stack pointer
-const T_KSTACK: u64 = 24 // lowest octet of the kernel stack
-const T_KTOP: u64 = 32 // upper end of it
-const T_PRIO: u64 = 40 // 1..3, also the length of a turn in ticks
-const T_BUDGET: u64 = 48 // ticks left in this turn
-const T_WORK: u64 = 56 // what the task counted up itself; in a
-// process before its start: its argument
-const T_WAKE: u64 = 64 // tick at which a sleeper is due
-const T_CR3: u64 = 72 // its address space
-const T_PARENT: u64 = 80 // index of the creator
-const T_EXIT: u64 = 88 // the code it left with
-const T_RUNS: u64 = 96 // how often it got the processor
-const T_ENTRY: u64 = 104 // rip in ring 3
-const T_USTACK: u64 = 112 // rsp in ring 3
-const T_KIND: u64 = 120 // K_* below
-const T_WAITPID: u64 = 128 // which child it is waiting for
-const T_TICKS: u64 = 136 // timer ticks spent in this task
-const T_PDPT: u64 = 144 // the four frames of its page tables
+const T_RSP: u64 = 16
+const T_KSTACK: u64 = 24
+const T_KTOP: u64 = 32
+const T_PRIO: u64 = 40
+const T_BUDGET: u64 = 48
+const T_WORK: u64 = 56
+const T_WAKE: u64 = 64
+const T_CR3: u64 = 72
+const T_PARENT: u64 = 80
+const T_EXIT: u64 = 88
+const T_RUNS: u64 = 96
+const T_ENTRY: u64 = 104
+const T_USTACK: u64 = 112
+const T_KIND: u64 = 120
+const T_WAITPID: u64 = 128
+const T_TICKS: u64 = 136
+const T_PDPT: u64 = 144
 const T_PD: u64 = 152
 const T_PT: u64 = 160
-const T_DATA: u64 = 168 // its private data page (physical)
-const T_CWD: u64 = 176 // inode of the working directory
-const T_ARG: u64 = 184 // which program of uprog.fi (proc.fi)
-const T_END: u64 = 192 // tick at which it ended
-// r146: T_BORN = the tick at which the task was created (age for SYS_PSTAT). It takes the first of the
-// three dead descriptor words (T_FD, 200..223): the descriptors moved to kernel/file.fi in round K4 and
-// nothing reads or writes T_FD since. The record is zeroed on creation, both creators set T_BORN.
+const T_DATA: u64 = 168
+const T_CWD: u64 = 176
+const T_ARG: u64 = 184
+const T_END: u64 = 192
 const T_BORN: u64 = 200
-const T_FD: u64 = 200 // (dead since K4; first word = T_BORN) three open files: inode + 1, 0 = closed
-const T_FDOFF: u64 = 224 // and the read/write position of each
-const T_FAULTS: u64 = 248 // faults it caused
+const T_FD: u64 = 200
+const T_FDOFF: u64 = 224
+const T_FAULTS: u64 = 248
 
-// ROUND K4. A record is 512 octets now (`kstate.TASK_BYTES`), and what the
-// new half holds is what a POSIX process has besides its code: where its
-// program break stands and how far its mmap area has grown down. The
-// DESCRIPTORS moved out of the record altogether -- `kernel/file.fi`
-// keeps them, because `dup2` and `fork` need two descriptors to be able to
-// mean ONE open file, and an inode in the record cannot do that.
-const T_BRK: u64 = 256 // `brk`, 0 = the process has never asked
-const T_MMAP: u64 = 264 // the lower end of the mmap area, 0 = none yet
+const T_BRK: u64 = 256
+const T_MMAP: u64 = 264
 
 const T_SIGPEND: u64 = 272
-const T_SIGMASK: u64 = 280 // blockierte Signale
-const T_SIGLAST: u64 = 288 // das zuletzt zugestellte
-const T_PGID: u64 = 296 // Prozessgruppe (0 = die eigene pid)
-const T_SID: u64 = 304 // Sitzung
-const T_TTY: u64 = 312 // beherrschendes Terminal + 1, 0 = keines
-const T_SIGDEL: u64 = 320 // wie viele Signale zugestellt wurden
+const T_SIGMASK: u64 = 280
+const T_SIGLAST: u64 = 288
+const T_PGID: u64 = 296
+const T_SID: u64 = 304
+const T_TTY: u64 = 312
+const T_SIGDEL: u64 = 320
 const T_STOPSIG: u64 = 328
 const T_SIGRET: u64 = 336
 const T_ALARM: u64 = 344
-const T_TGID: u64 = 352 // Fadengruppe (clone), 0 = die eigene pid
+const T_TGID: u64 = 352
 const T_SHARED: u64 = 360
 const T_FUTEX: u64 = 368
 const T_FUTEXVAL: u64 = 376
 const T_KILLCODE: u64 = 384
 
-const T_UID: u64 = 392 // die echte Benutzerkennung
-const T_GID: u64 = 400 // die echte Gruppenkennung
+const T_UID: u64 = 392
+const T_GID: u64 = 400
 const T_EUID: u64 = 408
 const T_EGID: u64 = 416
-const T_SUID: u64 = 424 // die gesicherte (setuid-Bit, `su`)
+const T_SUID: u64 = 424
 const T_SGID: u64 = 432
-const T_UMASK: u64 = 440 // was `open`/`mkdir` abziehen
+const T_UMASK: u64 = 440
 const T_BIG: u64 = 448
 
-// ------------------------------------------- ROUND NETVIEW: THE NETWORK
-//
-// WHICH NETWORK THIS PROCESS SEES. 0 = the wire, and 0 is what
-// `sched.create` leaves behind when it zeroes the record -- so every
-// process that existed before this round, and every process started
-// without anybody saying otherwise, goes on seeing exactly what it saw.
-// The four values and what they mean are in `kernel/netview.fi`; the
-// only thing the scheduler knows about them is that they are a number in
-// a slot.
-//
-// AND THE LIST OF DESTINATIONS the `filtered` view lets through, six
-// words, 0 = empty. They stand HERE and not in a table of their own for
-// the reason round K13 gave for the six identity words twelve lines
-// above: an attribute of a process belongs in the record of that
-// process, and a second table beside the task table is a second place
-// to forget to clear.
-//
-// The record has been 512 octets since round K4.
 const T_NETV: u64 = 456
 const T_NETOK: u64 = 464
 const NETOK_MAX: u64 = 6
 
 const T_POLLSEQ: u64 = 504
 
-// ------------------------------------- RUNDE MULTIUSER: DIE ZUSATZGRUPPEN
 const T_NGROUPS: u64 = 512
 
-// ROUND SESSUID: ONE PENDING "START THE CHILD AS THE SESSION USER" MARK
-// PER TASK. 520 is a free word (512 + 8; the group LIST lives in the MU
-// table, not in the record). `SYS_OSUM_EXECAS` (1005, sys.fi) sets it on
-// the CALLER for the length of one `exec` and clears it again;
-// `create` below reads it from `current` and hands the child the
-// identity of the signed-in user instead of the caller's. It is a word
-// of the task and not a word of the machine on purpose: two callers in
-// `exec` at the same moment cannot take each other's mark, and a mark
-// that is lost can only leave the child with the caller's own identity
-// -- never with a stranger's.
 const T_EXAS: u64 = 520
 
 const T_DISKR: u64 = 536
@@ -203,42 +128,24 @@ const T_FPU: u64 = 640
 const T_FSBASE: u64 = 648
 const T_GSBASE: u64 = 528
 
-// RUNDE O-CONTAINER: IN WELCHEM CONTAINER DIESE AUFGABE LAEUFT.
 const T_CTR: u64 = 656
 
-// ==================================================== RUNDE SPEICHERDRUCK
 const T_UPAGES: u64 = 664
 const T_OOMSAFE: u64 = 672
-// ==================================================== AB-003
-//
-// WHERE THE PROCESS COMES FROM: 32 octets, a zero-terminated label such
-// as `app:notes` or `jarvis`, empty = the system / the user. Written only
-// by `kernel/sched/origin.fi` (the rules are there). 688..719, behind
-// T_OOMSAFE (672) and a free word, far below TASK_BYTES (1024); the
-// record is zeroed on creation, so every task starts empty.
 const T_ORIGIN: u64 = 688
-// RUNDE EVENTS (signals): 720..759, behind T_ORIGIN (688..719), far below TASK_BYTES (1024). Zeroed in `clear_signals`.
-const T_ITIV: u64 = 720 // setitimer(ITIMER_REAL): the interval in ticks, 0 = one-shot
-const T_ALTSP: u64 = 728 // sigaltstack: base of the alternate signal stack
-const T_ALTSZ: u64 = 736 // its size, 0 = none
-const T_SUSP: u64 = 744 // sigsuspend: 1 = the signal mask is a temporary one, T_SUSPMASK is the one to give back
+const T_ITIV: u64 = 720
+const T_ALTSP: u64 = 728
+const T_ALTSZ: u64 = 736
+const T_SUSP: u64 = 744
 const T_SUSPMASK: u64 = 752
-const T_RESV: u64 = 768 // RUNDE LIMITS3: 15 pairs (start, length) of PROT_NONE reservations above 4 GiB, 768..1007 (kernel/sys/sys.fi res_*)
-// RUNDE LC1: the process name (prctl PR_SET_NAME/PR_GET_NAME, /proc/<pid>/status Name): 15 characters + NUL in two free words
-// (680 = characters 0..7, 760 = characters 8..14; the 16th octet is the implicit NUL). Zero = never set (status falls back to the kind name).
+const T_RESV: u64 = 768
 const T_COMMA: u64 = 680
 const T_COMMB: u64 = 760
 const T_LAZY: u64 = 992
-const T_RESNEXT: u64 = 1008 // their bump pointer; zeroed with the record (create) and by exec
-// LC-001 (CLONE_FILES): whose descriptor table this task uses. Bits 0..15 = slot + 1 of the table owner
-// (0 = its own table), 16..47 = the owner's pid at share time, bit 63 = this task let go of the table
-// (see file.owner / file.release_use). Zeroed with the record by create.
+const T_RESNEXT: u64 = 1008
 const T_FDOWN: u64 = 1016
 const GROUPS_MAX: u64 = 16
 
-// The three descriptor slots of round 62. Nothing writes them any more;
-// they stay named so that a reader of a task dump knows what the hole in
-// the middle of the record was.
 const FD_SLOTS: u64 = 3
 
 const S_FREE: u64 = 0
@@ -247,23 +154,9 @@ const S_RUN: u64 = 2
 const S_SLEEP: u64 = 3
 const S_WAIT: u64 = 4
 const S_ZOMBIE: u64 = 5
-// Under construction: the record exists, the stack exists, and the
-// scheduler must NOT take it yet. Round 62 learned this the hard way --
-// `proc.create` fills in the address space and the entry point AFTER the
-// task record, and a timer interrupt in between started a process whose
-// rip was still zero. A task becomes runnable when its creator says so,
-// and not a moment earlier.
 const S_NEW: u64 = 6
 const S_STOP: u64 = 7
 const S_POLL: u64 = 8
-// BEING REAPED (27.09.2026). Exactly one reaper has claimed the zombie with
-// `claim_zombie` and is giving its address space back. Before this state
-// existed, "is it a zombie? then proc.reap" was a check and an act without a
-// lock in between: the parent's wait4, the desktop's launcher loop and the
-// kernel's wait loops could all reap the SAME task at once on different
-// cores. Every frame of its address space went back to the free list twice,
-// was handed out twice, and a page table ended up holding a new program's
-// code (#GP in proc.free_space, VM with 4 cores, and the Dell crashes).
 const S_REAPING: u64 = 9
 const POLL_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -271,19 +164,7 @@ const K_BOOT: u64 = 0
 const K_IDLE: u64 = 1
 const K_WORKER: u64 = 2
 const K_USER: u64 = 3
-// ROUND K5. A kernel task that does ARITHMETIC and nothing else. The
-// worker of round 62 spins on `pause`, which is the right instruction for
-// showing that a task is interruptible and the wrong one for measuring
-// how fast four cores are: QEMU's translator leaves the emulation loop at
-// every `pause`, so eight such tasks on four cores are eight tasks
-// waiting on the emulator, not on the processor.
 const K_GRIND: u64 = 4
-// ROUND K8: the task that moves frames between the card and the TCP/IP
-// stack. It is a task and not a loop inside a system call because a
-// `ping` from the other side has to be answered while every process in
-// this system is waiting for something else. Its body is
-// `inet.netd_body`, reached through `tasks.main` like every other kernel
-// task.
 const K_NETD: u64 = 5
 const K_AIO: u64 = 6
 const K_VEC: u64 = 7
@@ -291,40 +172,12 @@ const K_YIELD: u64 = 8
 const K_ARGON: u64 = 9
 const K_WLAN: u64 = 10
 
-// ROUND 62 had two, and two were enough for what a system call did then:
-// write an octet, look up an inode, hand a page back. ROUND K1 made the
-// deepest system call much deeper --
-//
-//   syscall_entry -> sys.entry -> do_exec -> elf.spawn -> elf.load
-//                 -> elf.segment -> fs.read_at -> blk.read -> ata_read
-//
-// -- and it overflowed, in a way worth writing down because it is the
-// kind of bug that looks like something else: the stack ran off its lower
-// end into the frame below, a `ret` picked up an octet of a neighbouring
-// page as a return address, and the machine died at a #GP or a #UD whose
-// rip was an address in its own stack, with a register dump that pointed
-// at the ATA driver. The driver was innocent. It was simply the deepest
-// thing on the stack when it broke.
-//
-//     osum: kstack deepest=16384 of 16384
-//
-//     *** EXCEPTION 6 #UD  rip=0x9fc42  rsp=0x506ff8
-//
-//   sys.dispatch -> do_read -> vfs_read -> vfs.v_read -> fat.read
-//                -> blk.read_on -> usb.msc_read -> usb.bot
-//                -> xhci.bulk -> xhci.wait_ep -> xhci.drain
-//
-//   user fault: pid=4  vector=14  err=0x15  cr2=0xd70  rip=0xd70
-//     spur rsp=0x40079dd0  phys=0x3169dd0  kstack=0x2eca000
-//         0x573068 0x573068 0x505fd0 0x505fd0 0x527000 0x3169f00 ...
 const KSTACK_FRAMES: u64 = 32
 
-// What an untouched octet of kernel stack looks like.
 const STACK_PAINT: u64 = 0x5A5A5A5A5A5A5A5A
 
 const GUARD_PAINT: u64 = 0xC0DEFACEC0DEFACE
 
-// Indices in the table out of isr.s.
 const V_SWITCH: u64 = 55
 const V_GUARD: u64 = 57
 const V_TASK_MAIN: u64 = 62
@@ -333,7 +186,6 @@ fn vector(state: u64, i: u64) -> u64 {
     return __mmio_read64((kstate.get(state, kstate.VECTORS) + i * 8) as *mut u64)
 }
 
-// ------------------------------------------------------- the accesses
 
 fn task_at(state: u64, i: u64) -> u64 {
     return state + kstate.TASK_OFF + i * kstate.TASK_BYTES
@@ -347,45 +199,29 @@ fn tset(state: u64, i: u64, field: u64, v: u64) {
     __mmio_write64((task_at(state, i) + field) as *mut u64, v)
 }
 
-// DELL STABILITY (08.10.2026): THE LOCK-FREE WAKE-UPS MUST NOT OVERWRITE A
-// STATE THEY DID NOT SEE. `wake_pid`, `poll_kick`, `send_task` and the timer
-// used to read "S_WAIT" and then store "S_READY" with two plain accesses. In
-// between, the sleeper could have been woken by someone else and scheduled
-// on another core (S_RUN): the store then turned a RUNNING task into a READY
-// one, a third core picked it up with the stack pointer of its last switch,
-// and two cores ran on one kernel stack (garbage return addresses, #GP/#UD).
-// The change is one atomic compare-and-swap: it takes effect only if the
-// state is still the one the caller looked at.
 fn state_cas(state: u64, i: u64, from: u64, to: u64) -> bool {
     if i >= kstate.MAX_TASKS {
         return false
     }
     let won: bool = atomic.cas(task_at(state, i) + T_STATE, from, to) == from
     if won && to == S_READY {
-        // AR-2b: a blocked task of an app became ready again = one wakeup of that app.
         let ap_wake: u64 = policy.acct_addr(task_at(state, i) + T_ORIGIN, policy.A_WAKE)
         if ap_wake != 0 {
             atomic.fetch_add(ap_wake, 1)
         }
-        // W-SMP3: a task became READY while THIS core is busy -> wake one sleeping application core now (not at core 0's next tick).
         kick_one(state, i)
     }
     return won
 }
 
-// `kill_pid` could not end the task at once because it was running on
-// another core: the request is carried in T_KILLCODE (KILL_SET + exit code)
-// and the task ends itself at its next trap / system call return.
 const KILL_SET: u64 = 0x4000000000000000
 
-// An exit_group() status is a plain exit code, never "died of a signal": a status in 129..191 must not turn into WTERMSIG.
 const KILL_PLAIN: u64 = 0x2000000000000000
 
 fn kill_requested(state: u64, i: u64) -> bool {
     return (tget(state, i, T_KILLCODE) & KILL_SET) != 0
 }
 
-// ----------------------------- RUNDE MULTIUSER: die Zusatzgruppen
 fn groups_slot(state: u64, i: u64, k: u64) -> u64 {
     return state + kstate.MU_OFF + kstate.MU_GRP
         + (i * kstate.MU_GRPMAX + k) * 8
@@ -456,22 +292,6 @@ fn groups_inherit(state: u64, kind: u64, parent_kind: u64) {
     tset(state, kind, T_NGROUPS, n)
 }
 
-// ROUND SESSUID: THE IDENTITY OF THE PERSON WHO IS SIGNED IN.
-//
-// `glogin` records the session owner (SYS_OSUM_LOCK op 7 -> SP_UID,
-// root only) and then drops to that user itself. The taskbar and the
-// start menu are started by the kernel BEFORE anybody signs in and stay
-// root, and everything they started used to stay root with them. A
-// child that `SYS_OSUM_EXECAS` starts for the session gets this
-// identity: uid/euid/suid = SP_UID, and the rest of it (gid, umask,
-// supplementary groups) from a LIVING task that already carries exactly
-// that uid -- the desktop `glogin` started. Without such a donor the
-// child gets gid = uid, umask 022 and NO groups. The groups of the
-// caller (root) are never copied: that would be the privilege the
-// whole thing takes away.
-//
-// No session (SP_UID == 0: an image without sign-in) changes nothing --
-// the child keeps the caller's identity, as before this round.
 fn session_identity(state: u64, slot: u64) {
     let uid: u64 = kstate.get(state, kstate.K11_OFF + kstate.SP_UID)
     if uid == 0 {
@@ -509,21 +329,14 @@ fn session_identity(state: u64, slot: u64) {
     }
 }
 
-// ROUND K5. This used to be one word for the whole machine
-// (`kstate.CURRENT`). With four cores it has to be one word PER CORE --
-// a scheduler that reads a single global "the running task" hands the
-// same task to two processors, and then two stacks are one stack.
 fn current(state: u64) -> u64 {
     return cpu.get(state, cpu.here(state), cpu.C_CUR)
 }
 
-// The second table round K5 needs: which core last ran a task, and which
-// cores have ever run it. It lies beside the task table rather than in it
-// because the task record is exactly full (248 + 8 = 256 = TASK_BYTES).
 const TC_CPU: u64 = 0
 const TC_MASK: u64 = 8
-const TC_AFF: u64 = 16 // the only core that may run this task
-const ANY_CPU: u64 = 99 // ... or this, when any of them may
+const TC_AFF: u64 = 16
+const ANY_CPU: u64 = 99
 
 fn tc_set(state: u64, i: u64, field: u64, v: u64) {
     __mmio_write64((state + kstate.TCPU_OFF + i * kstate.TCPU_BYTES + field)
@@ -543,14 +356,6 @@ fn cpu_mask(state: u64, i: u64) -> u64 {
     return tc_get(state, i, TC_MASK)
 }
 
-// AFFINITY, and round K5 needs exactly one of it. Task 0 is
-// `kernel_main` itself, and three things it does afterwards belong to the
-// BOOT processor and to no other: the excursion into ring 3 (whose MSRs
-// `user.setup` wrote on the boot processor alone), the word `isr.s` reads
-// the kernel stack out of, and the two static save slots of `enter_user`.
-// Without this, `kernel_main` migrates to whichever core happens to be
-// free -- which is what a scheduler is supposed to do, and which broke
-// the run in one attempt out of six until the reason was found.
 fn set_affinity(state: u64, i: u64, c: u64) {
     tc_set(state, i, TC_AFF, c)
 }
@@ -785,15 +590,6 @@ fn ring3_report(state: u64) {
     var s_su: [u8; 8] = "  sum=\0\0"
     var s_ab: [u8; 9] = "  diff=\0\0"
     serial.puts((&s_s[0]) as u64)
-    // A-006 (24.09.2026): the global counter is read BEFORE and AFTER the
-    // per-core ones, not once afterwards. The other cores keep making
-    // system calls while this line is printed; one read at the end
-    // measured the time the printing took (abw=247 / 208 with -smp 4/8),
-    // not a lost count. isr.s counts per core on ENTRY, sys.dispatch
-    // globally a few instructions later, so at every instant
-    //     global <= per-core sum <= global + (calls between the two) .
-    // Read as  ks0 <= sum <= ks1 + cores  the promise is exact and the
-    // printing does not enter it; `abw` is the distance outside that window.
     let ks0: u64 = kstate.get(state, kstate.SYSCALLS)
     var k: u64 = 0
     var sum: u64 = 0
@@ -837,19 +633,7 @@ fn ring3_foreign(state: u64) -> u64 {
     return c
 }
 
-// ------------------------------------------------- the interrupt flag
 
-// A critical section in a kernel is not a lock -- on one processor it is
-// the interrupt flag. `irq_save` turns interrupts off AND says whether
-// they were on; `irq_restore` puts back exactly that state. Plain
-// `cli`/`sti` would switch them on in places where they have to stay off
-// (inside an interrupt handler, for instance).
-// ROUND K5: still true, and no longer SUFFICIENT. Turning interrupts off
-// keeps the OTHER cores out of nothing at all; what it protects is this
-// core against its own interrupt handler. Every place that used to make
-// do with it and touches shared state now takes a lock as well -- and
-// takes it with interrupts already off, because a handler that waits for
-// a lock its own core holds waits for ever.
 fn irq_save() -> u64 {
     return asm("pushfq\npop rax\ncli", out("rax"))
 }
@@ -860,11 +644,7 @@ fn irq_restore(flags: u64) {
     }
 }
 
-// ------------------------------------------------------------ the trace
 
-// One octet per turn: which pid got the processor. That is the evidence
-// for interleaving -- not a claim of the kernel but the list of the
-// switches it really made.
 fn trace_push(state: u64, v: u64) {
     let n: u64 = kstate.get(state, kstate.TRACE_LEN)
     if n < kstate.TRACE_MAX {
@@ -888,11 +668,7 @@ fn trace_dump(state: u64, label: u64, limit: u64) {
     serial.nl()
 }
 
-// ------------------------------------------------------------ creating
 
-// Task 0 is the one that is already running: `kernel_main` itself. It
-// gets a record so that the switch has somewhere to put its stack
-// pointer -- its stack is the one out of boot.s.
 fn init(state: u64) {
     var i: u64 = 0
     while i < kstate.MAX_TASKS {
@@ -927,25 +703,17 @@ fn init(state: u64) {
         tc_set(state, t, TC_AFF, ANY_CPU)
         t = t + 1
     }
-    // The one task in this kernel that is not allowed to move.
     tc_set(state, 0, TC_AFF, 0)
     tset(state, 0, T_FPU, fpu.area_new(state))
     set_kernel_stack(state, vector(state, 61))
     trace_push(state, 1)
 }
 
-// The idle task of the BOOT processor. Kept in `kstate.IDLE` as before
-// (several counters read it) and in the per-core record, because from
-// round K5 on every core has one of its own.
 fn set_idle(state: u64, i: u64) {
     kstate.set(state, kstate.IDLE, i)
     cpu.set(state, cpu.here(state), cpu.C_IDLE, i)
 }
 
-// A record for a context that is ALREADY running -- the way `init` gives
-// task 0 to `kernel_main`, only later and for a core that has just come
-// up. Its stack is not one the frame allocator handed out for a task, so
-// T_KSTACK stays zero and `reap` will not give it back.
 fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
     let vec_area: u64 = fpu.area_new(state)
     let flags: u64 = irq_save()
@@ -982,7 +750,7 @@ fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
     tset(state, slot, T_STATE, S_RUN)
     tc_set(state, slot, TC_CPU, cpu.here(state))
     tc_set(state, slot, TC_MASK, 1 << cpu.here(state))
-    tc_set(state, slot, 24, 0) // RUNDE UNTERBAU: no FD_CLOEXEC marks from the slot's previous task
+    tc_set(state, slot, 24, 0)
     tc_set(state, slot, TC_AFF, cpu.here(state))
     clear_signals(state, slot)
     if slot + 1 > kstate.get(state, kstate.TASKS) {
@@ -993,10 +761,6 @@ fn adopt(state: u64, kind: u64, prio: u64, ktop: u64) -> u64 {
     return slot
 }
 
-// The initial stack of a task that has never run. It is built so that it
-// looks EXACTLY like a task the switch stepped out of a moment ago -- see
-// the layout in switch.s. That way `context_switch` needs no special case
-// for a first start.
 fn frame_build(state: u64, ktop: u64, entry: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     let base: u64 = ktop - 144
@@ -1005,35 +769,15 @@ fn frame_build(state: u64, ktop: u64, entry: u64, a0: u64, a1: u64,
         __mmio_write64((base + i * 8) as *mut u64, 0)
         i = i + 1
     }
-    // ROUND K5: IF OFF, not on. A task that has never run starts with
-    // the run queue lock held -- the core that switched to it took it and
-    // could not give it back, because giving it back before the switch
-    // would let a third core pick up a task whose registers are not saved
-    // yet. `enter_task`, the first line of every task body, gives the
-    // lock back and only THEN switches interrupts on. Starting with them
-    // on would let this core's own timer interrupt run into a lock this
-    // core holds.
-    __mmio_write64(base as *mut u64, 0x002) // rflags: IF off until enter_task
-    __mmio_write64((base + 72) as *mut u64, a0) // rdi
-    __mmio_write64((base + 80) as *mut u64, a1) // rsi
-    __mmio_write64((base + 104) as *mut u64, a2) // rdx
-    __mmio_write64((base + 128) as *mut u64, entry) // where `ret` goes
+    __mmio_write64(base as *mut u64, 0x002)
+    __mmio_write64((base + 72) as *mut u64, a0)
+    __mmio_write64((base + 80) as *mut u64, a1)
+    __mmio_write64((base + 104) as *mut u64, a2)
+    __mmio_write64((base + 128) as *mut u64, entry)
     __mmio_write64((base + 136) as *mut u64, vector(state, V_GUARD))
     return base
 }
 
-// A new task. `entry` is the address of the Firn function it starts in
-// (out of the table in isr.s, because Firn cannot name the address of a
-// function of its own in the kernel profile); it gets `state`, its index
-// and `kind` as arguments. Returns the index, or 0 when the table is
-// full -- index 0 is `kernel_main` and can never be handed out.
-// ROUND K5: the stack is fetched BEFORE the run queue lock is taken, and
-// that order is not cosmetic. The frame allocator has a lock of its own
-// now; a core that held the run queue and then asked for a frame would be
-// holding two locks in an order that another core takes the other way
-// round the moment it faults in an interrupt. The rule this kernel keeps
-// is the simplest one that cannot deadlock: NO LOCK IS EVER HELD WHILE
-// ANOTHER IS TAKEN.
 fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     let raw_base: u64 = mem.frame_run(state, KSTACK_FRAMES + 1)
     if raw_base == 0 {
@@ -1066,9 +810,6 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
         return 0
     }
     let ktop: u64 = stack + KSTACK_FRAMES * mem.FRAME_SIZE
-    // ROUND K1: paint it, so that afterwards it can be said how much of
-    // it was ever used. `frame_build` writes over the top 136 octets of
-    // this in a moment; everything below is the measurement.
     var w: u64 = stack
     while w < ktop {
         __mmio_write64(w as *mut u64, STACK_PAINT)
@@ -1102,8 +843,6 @@ fn create(state: u64, kind: u64, prio: u64, arg: u64, entry: u64) -> u64 {
     tset(state, slot, T_SGID, tget(state, par, T_SGID))
     tset(state, slot, T_UMASK, tget(state, par, T_UMASK))
     groups_inherit(state, slot, par)
-    // ROUND SESSUID: a root caller that asked for `SYS_OSUM_EXECAS` mode 0
-    // gets a child that belongs to the person at the keyboard.
     if tget(state, par, T_EXAS) != 0 {
         session_identity(state, slot)
     }
@@ -1156,7 +895,7 @@ fn clear_signals(state: u64, i: u64) {
     tset(state, i, T_ALTSZ, 0)
     tset(state, i, T_SUSP, 0)
     tset(state, i, T_STOPSIG, 0)
-    tset(state, i, T_SIGLAST, 0) // RUNDE UNTERBAU: bit 8 ("died of a signal") must not outlive the task in this slot
+    tset(state, i, T_SIGLAST, 0)
     let pid: u64 = tget(state, i, T_PID)
     tset(state, i, T_PGID, pid)
     tset(state, i, T_SID, pid)
@@ -1250,11 +989,6 @@ fn guard_last_depth() -> u64 {
     return watch_depth
 }
 
-// ROUND K1: the deepest this task's kernel stack has ever been, in
-// octets. The paint of `create` is looked for from the LOWER end
-// upwards; the first octet that is not paint any more is the deepest
-// point anything ever wrote to. A task that overflowed its stack reports
-// the full size -- and that is the number that has to stay below it.
 fn stack_high(state: u64, i: u64) -> u64 {
     let base: u64 = tget(state, i, T_KSTACK)
     let ktop: u64 = tget(state, i, T_KTOP)
@@ -1271,7 +1005,6 @@ fn stack_high(state: u64, i: u64) -> u64 {
     return 0
 }
 
-// Now it may run. Whoever created the task decides when it is complete.
 fn start(state: u64, i: u64) -> bool {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
@@ -1302,14 +1035,11 @@ fn set_kernel_stack(state: u64, ktop: u64) {
     }
 }
 
-// The first line of every task body (`tasks.main`, `proc.user_start`).
-// See `frame_build`: the lock comes from the core that started this task.
 fn enter_task(state: u64) {
     atomic.lock_give(state, atomic.L_SCHED)
     asm("sti")
 }
 
-// -------------------------------------------------------- the decision
 
 fn ready_count(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
@@ -1324,8 +1054,6 @@ fn ready_count(state: u64) -> u64 {
     return c
 }
 
-// How many corpses of a kind are lying about. The boot processor waits on
-// this while the other cores work the tasks off.
 fn zombies(state: u64, kind: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
@@ -1339,8 +1067,6 @@ fn zombies(state: u64, kind: u64) -> u64 {
     return c
 }
 
-// DELL ROUND: how many slots of the task table are free (slot 0 is never
-// given out). 0 means every further program is refused.
 fn free_slots(state: u64) -> u64 {
     var i: u64 = 1
     var c: u64 = 0
@@ -1366,7 +1092,6 @@ fn reap_all(state: u64) -> u64 {
     return c
 }
 
-// Everything that is not free and not a corpse.
 fn alive_count(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
@@ -1381,26 +1106,11 @@ fn alive_count(state: u64) -> u64 {
     return c
 }
 
-// Round robin: from the current task onwards, the first ready one. The
-// idle task is skipped -- it only gets the processor when nobody else
-// wants it.
-// ROUND K5: two changes, both forced by the second core. EVERY idle task
-// is skipped, not only the one whose index stood in `kstate.IDLE` -- each
-// core has one now. And what is returned when nothing is ready is THIS
-// core's idle task, not the boot processor's; two cores on one idle task
-// would be two cores on one stack.
-//
-// Only the caller of this function under the run queue lock may act on
-// the answer. A task that is S_READY here is claimed by the caller before
-// the lock is given up, which is what keeps two cores from taking it.
 fn pick(state: u64) -> u64 {
     let n: u64 = kstate.get(state, kstate.TASKS)
     let cur: u64 = current(state)
     let me: u64 = cpu.here(state)
     let myidle: u64 = cpu.get(state, me, cpu.C_IDLE)
-    // DD-12 (K-004c): a core that has been asked to park (S3) takes no
-    // new task; what it runs now goes back to the queue at this switch
-    // and the other cores pick it up. The boot processor is never parked.
     if me != 0 && myidle != 0 && cpu.get(state, me, cpu.C_PARKREQ) != 0 {
         return myidle
     }
@@ -1419,9 +1129,6 @@ fn pick(state: u64) -> u64 {
     return myidle
 }
 
-// The switch itself. Everything that is per task and lives outside the
-// task record is put in place here: the address space, the kernel stack
-// for the next entry out of ring 3 -- and only then the stack pointer.
 fn switch_to(state: u64, from: u64, to: u64) {
     let me: u64 = cpu.here(state)
     cpu.set(state, me, cpu.C_CUR, to)
@@ -1494,22 +1201,6 @@ fn fpu_reset(state: u64, i: u64) {
     fpu.adopt_now(state, a)
 }
 
-// Give the processor away. Comes back when this task is scheduled again
-// -- or never, if it is a corpse by then.
-//
-// ROUND K5, AND THIS IS THE HEART OF IT. The run queue lock is taken here
-// and is NOT given back here: it is given back by whoever the processor
-// switches TO, in that task's own `schedule_locked` right after its
-// `switch_to` came back, or -- for a task that has never run -- in
-// `enter_task`, its first line.
-//
-// The reason is one race and there is no cheaper cure. If the lock were
-// given back before `switch_to`, another core could pick up the task this
-// core has just marked S_READY -- while this core is still executing on
-// that task's stack, inside `context_switch`, with its registers not yet
-// written down. Two cores, one stack. Holding the lock across the switch
-// means: while any core is between "I have chosen" and "the registers are
-// saved", no other core is choosing anything.
 fn schedule(state: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
@@ -1517,9 +1208,6 @@ fn schedule(state: u64) {
     irq_restore(flags)
 }
 
-// The run queue lock must be held. On return it is held again -- by this
-// task, on whichever core resumed it.
-// ================================ RUNDE O-CONTAINER: DER CPU-ANTEIL
 const CTR_BYTES_: u64 = 256
 const X_CPUSH_: u64 = 40
 const X_CPUTICK_: u64 = 48
@@ -1564,27 +1252,11 @@ fn schedule_locked(state: u64) {
     let cur: u64 = current(state)
     let next: u64 = pick(state)
     if next == cur {
-        // r378 (06.10.2026): `cur` may be READY here and still be the task that
-        // is running. A task that went to sleep (S_WAIT, S_SLEEP, S_POLL) is
-        // made READY by `wake_pid` / `poll_kick` WITHOUT the lock, and when that
-        // happens between its state write and this pick, `pick` finds it again
-        // (the loop ends at cur). Without the line below it returned with the
-        // state READY: a second core then picked the task that was running on
-        // this one, with the stack pointer of its LAST switch, and two cores ran
-        // on one kernel stack (#UD / #GP at garbage return addresses, 2 of 12
-        // boots with 4 cores and two spawns at once).
         tset(state, cur, T_STATE, S_RUN)
         tset(state, cur, T_BUDGET, budget_for(state, cur))
         atomic.lock_give(state, atomic.L_SCHED)
         return
     }
-    // GUARD (27.09.2026): the VM showed a #DF with rsp near 0 on core 3 --
-    // a core had loaded a task whose saved stack pointer was 0, i.e. a
-    // task that was never switched out (running on another core, or an
-    // adopted idle task). Stop right here with the evidence in the
-    // registers instead of running on page 0 until something faults:
-    // rdi = next, rsi = its T_RSP, rdx = its state, rcx = its kind,
-    // r8 = this core, r9 = cur, r10 = the core it last ran on.
     let next_rsp: u64 = tget(state, next, T_RSP)
     if next_rsp < 0x1000 || tget(state, next, T_STATE) == S_RUN {
         asm("ud2", in("rdi") next, in("rsi") next_rsp,
@@ -1606,16 +1278,7 @@ fn yield_now(state: u64) {
     schedule(state)
 }
 
-// --------------------------------------------------------- the timer
 
-// Called out of the interrupt handler, after the end-of-interrupt. Two
-// jobs: wake what is due, and take the processor away when the turn is
-// over.
-// Called out of the interrupt handler, on EVERY core, with interrupts
-// already off -- which is why the lock may be taken here at all.
-// vboxlag: the PAT register is per core. The boot core sets index 4 to write-combining when the screen comes up (`fb.pat_setup`), the
-// other cores were started earlier and still have write-back there. Every core copies the value in its next tick (once; bit per core).
-// The offsets are `fb.FB_OFF + S_PATVAL / S_PATDONE`.
 fn pat_here(state: u64, me: u64) {
     if me >= 63 {
         return
@@ -1629,7 +1292,6 @@ fn pat_here(state: u64, me: u64) {
         return
     }
     if msr.wr(state, 0x277, patv) {
-        // the mappings were made under the old value on this core: drop its translations and its cache lines once
         let c: u64 = asm("mov rax, cr3", out("rax"))
         asm("mov cr3, rax", in("rax") c)
         asm("wbinvd")
@@ -1637,13 +1299,6 @@ fn pat_here(state: u64, me: u64) {
     atomic.fetch_add(state + 0x3C000 + 0x940, bit)
 }
 
-// W-SMP2: THE KICK. Application cores that have nothing to do sleep in `hlt` with a 10 Hz tick (W-TSC); nothing woke them when a task
-// became READY, so core 0 took everything and the others stayed at 0 %. Called from the boot core's timer tick (scheduler lock held)
-// when core 0 itself is busy: for every READY task that a sleeping core may run, send ONE timer-vector IPI to such a core. The ISR is
-// the normal tick (harmless: counted in C_TICKS), the core leaves `hlt`, and its idle loop calls `yield_now` -> `pick` takes the task.
-// A core with a kick pending is not kicked again; `nokick` on the command line switches all of it off (counter-proof).
-// W-SMP3: the DIRECT kick -- the same IPI as `kick_idle_cores`, but for ONE task that just became READY (`state_cas` to READY, `start`).
-// Only when the calling core is busy with a real task: an idle core takes the new task itself, so a quiet desktop sends none (idle budget).
 fn kick_one(state: u64, i: u64) {
     if kstate.mode_on(state, kstate.M_NOKICK) {
         return
@@ -1731,9 +1386,6 @@ fn on_tick(state: u64) {
         i = i + 1
     }
     let cur: u64 = current(state)
-    // 04.10.2026 (Dell): a tick that falls into `idle_wait` belongs to the
-    // core's IDLE task, not to the boot task that is waiting -- otherwise
-    // `ps` and the taskbar's CPU gauge both call a waiting desktop "busy".
     var tick_to: u64 = cur
     var in_wait: bool = false
     if me < 8 && desk_hlt[me as usize] != 0 {
@@ -1747,7 +1399,6 @@ fn on_tick(state: u64) {
         }
     }
     tset(state, tick_to, T_TICKS, tget(state, tick_to, T_TICKS) + 1)
-    // AR-2b: the same tick, booked to the app whose label the task carries (unlabelled: one byte compare).
     let ap_cpu: u64 = policy.acct_addr(task_at(state, tick_to) + T_ORIGIN, policy.A_CPU)
     if ap_cpu != 0 {
         atomic.fetch_add(ap_cpu, 1)
@@ -1756,8 +1407,6 @@ fn on_tick(state: u64) {
     if idle_now {
         cpu.add(state, me, cpu.C_IDLETICKS, 1)
     }
-    // W-SMP2: TIME-weighted accounting. An idle application core ticks at 10 Hz and a busy one at 100 Hz, so tick counts of
-    // different cores must not be added up; the cycles since this core's previous tick are booked to what it was doing now.
     let tsc_now: u64 = apic.tsc()
     let tsc_last: u64 = cpu.x_get(state, me, cpu.X_LASTTSC)
     if tsc_last != 0 && tsc_now > tsc_last {
@@ -1788,7 +1437,6 @@ fn on_tick(state: u64) {
     schedule_locked(state)
 }
 
-// ---------------------------------------------------------- blocking
 
 fn timer_tot(state: u64) -> bool {
     let hz: u64 = apic.tsc_hz(state)
@@ -1800,13 +1448,6 @@ fn timer_tot(state: u64) -> bool {
     let t: u64 = apic.tsc()
     let mark_ticks: u64 = cpu.get(state, k, cpu.C_TOTMARKE)
     if now_ticks != mark_ticks {
-        // r1268 (VirtualBox boss VM, 1 vCPU, 100 % host burn): `tsc_hz` is calibrated
-        // against the emulated PIT and came out 10x too low (198 MHz, the counter really
-        // runs ~2.1 GHz), so "hz / 3" was ~30 ms of real time, i.e. three ticks. Every short
-        // stall declared the timer dead and `sleep_ticks` of the terminal reader spun in
-        // `yield_now` for ever (13 million refusals in 100 s). The wait for a dead timer is
-        // therefore measured in ticks as seen on THIS core: a smoothed cycles-per-tick
-        // value (C_TOTPER) from the observations below; the gap must exceed eight of them.
         let time0: u64 = cpu.get(state, k, cpu.C_TOTZEIT)
         if mark_ticks != 0 && time0 != 0 && t > time0 && now_ticks > mark_ticks {
             var d: u64 = (t - time0) / (now_ticks - mark_ticks)
@@ -1851,13 +1492,6 @@ fn dead_sleeps(state: u64) -> u64 {
     return sum
 }
 
-// `ticks` timer ticks, 10 ms each at 100 Hz. Zero is a yield.
-// 04.10.2026 (DELL): THE DESKTOP LOOP MUST NOT SPIN. The desktop loop runs in
-// the boot task and its `sleep_ticks` hands the core straight back (measured:
-// 97 % of core 0 in 30 s with nothing on the screen, ~8 rounds per tick, the
-// core's idle task never ran; the taskbar's "CPU 100 %" reads exactly this
-// core). `idle_wait` waits for the next interrupt (timer: 10 ms; a key or a
-// pointer packet comes sooner) and tells `on_tick` that the core was idle.
 static mut desk_hlt: [u64; 8] = [0 as u64; 8]
 
 fn idle_wait(state: u64) {
@@ -1870,15 +1504,6 @@ fn idle_wait(state: u64) {
     desk_hlt[me as usize] = 0
 }
 
-// r1307 (W-STALLFIX): RATE-LIMITED SLEEP WHILE THE TIMER WATCHDOG FIRES.
-// Under VirtualBox/NEM an exit storm lets the guest's virtual clock lag minutes behind the real one (VirtSync catch-up): the ticks
-// then arrive late, `timer_tot` turns true, and the old answer -- a bare `yield_now` -- made every sleeper (desktop loop, taskbar,
-// starter, terminal reader) run its full poll round as fast as it could. Each round costs port/MMIO exits (50-100 us each in NEM),
-// which deepens the lag: self-reinforcing, only Pause/Resume broke it. Now the rounds of one core are spaced `min(ticks, 2)` tick
-// lengths apart on the TSC (one tick = max(hz / 100, the smoothed cycles-per-tick seen on this core)), the wait is `pause` (no exit)
-// in 1 ms slices with a `yield_now` between them (other ready tasks still run), and it ends early the moment a tick arrives. A
-// really dead timer is still survived (sleepers come back after at most two tick lengths), but at <= 100 rounds/s per core.
-// `tot_last` = TSC stamp of the last round let through on this core (shared by all tasks of the core: their sum is limited).
 static mut tot_last: [u64; 8] = [0 as u64; 8]
 static mut tot_waits: u64 = 0
 
@@ -1904,13 +1529,6 @@ fn sleep_tot(state: u64, ticks: u64) {
     let t0: u64 = kstate.get(state, kstate.TICKS)
     let next: u64 = tot_last[me as usize] + n * per
     tot_waits = tot_waits + 1
-    // r1321 (boss VM freeze after a click, 20.10.2026): the old wait spun on `pause` for the whole span with
-    // interrupts OFF (a syscall sleeper, e.g. nanosleep). Dump of the frozen boss VM: vCPU2 sat in this
-    // loop for 22 minutes without a single exit, vCPU0/1 halted, VirtSync "catchup" lag 1310 s and growing,
-    // all TM counters frozen -- only Pause/Resume woke it. VirtualBox catches its virtual-sync clock up while
-    // vCPUs are IDLE (HLT), never while one burns exit-free: so the wait now HALTS (interrupts on for the
-    // halt only) and wakes with the next interrupt (BSP tick 10 ms, AP tick 100 ms, IPIs, input), after a
-    // `yield_now` that lets other ready tasks of the core run first. Never more than two tick lengths.
     var guard: u64 = 0
     while apic.tsc() < next && kstate.get(state, kstate.TICKS) == t0 && guard < 4 {
         yield_now(state)
@@ -1942,19 +1560,10 @@ fn sleep_ticks(state: u64, ticks: u64) {
     irq_restore(flags)
 }
 
-// Go to sleep until a child `want` (0 = any) changes. State and the
-// switch happen under ONE hold of L_SCHED (27.09.2026). wait4 used to write
-// S_WAIT without the lock and call `schedule` afterwards: a child exiting on
-// another core in that gap woke the parent (S_READY) while it was still
-// running here, a third core picked it up with the stack pointer of its LAST
-// switch, and two cores ran on one kernel stack -- #GP/#DF at garbage return
-// addresses right after a script started a program (VM, 4 cores: every time).
 fn wait_sleep(state: u64, want: u64, untraced: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
     let cur: u64 = current(state)
-    // A child that died between the caller's look and this lock has
-    // already called wake_pid -- nobody would wake us again.
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
     while i < n {
@@ -2011,9 +1620,6 @@ fn stop_claim(state: u64, task: u64) -> u64 {
     return claimed
 }
 
-// SIGSTOP & co: S_STOP and the switch under one hold of L_SCHED. `contbit`
-// is the pending-signal bit of SIGCONT: one that arrived before we got the
-// lock must not be slept through.
 fn stop_sleep(state: u64, contbit: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
@@ -2029,7 +1635,6 @@ fn stop_sleep(state: u64, contbit: u64) {
     irq_restore(flags)
 }
 
-// Whoever waits for this pid becomes ready again.
 fn wake_pid(state: u64, pid: u64) {
     let n: u64 = kstate.get(state, kstate.TASKS)
     var i: u64 = 0
@@ -2044,7 +1649,6 @@ fn wake_pid(state: u64, pid: u64) {
     }
 }
 
-// ------------------------------------------------- RUNDE POLL: WECKEN
 fn poll_seq(state: u64) -> u64 {
     return kstate.get(state, kstate.POLLSEQ)
 }
@@ -2099,19 +1703,7 @@ fn find_pid(state: u64, pid: u64) -> u64 {
     return kstate.MAX_TASKS
 }
 
-// ------------------------------------------------------------ the end
 
-// r389 (06.10.2026): THE LOCKER DIES, THE LOCK MUST FORGET ITS SLOT AT ONCE.
-// While the screen is locked `SP_SLOT` names the task slot of the locker and
-// `osum_sperre` op 4 ("be the locker") accepts the task that stands in that
-// slot. After the locker was killed the kernel's guard (`sperre_wache`) needs up
-// to 32 turns to start a new one, and the zombie reaper frees the slot within
-// ~16: a process that landed in the freed slot passed op 4 (slot equal, old pid
-// gone) and could open the lock with op 2, no password. Whoever ends a task
-// calls this under the same hold of L_SCHED: if the task is the one the lock
-// names, pid and slot are cleared to a slot no task can have. The lock stays ON
-// (nobody is allowed to draw: `wm.darf` is false without a locker) and the guard
-// starts a new locker as before, because the pid is 0 now.
 const LOCK_NOSLOT: u64 = 0xFFFF
 
 fn lock_gone(state: u64, task: u64) {
@@ -2126,10 +1718,6 @@ fn lock_gone(state: u64, task: u64) {
     kstate.set(state, sp + kstate.SP_SLOT, LOCK_NOSLOT)
 }
 
-// A task ends. It stays in the table as a corpse until its creator picks
-// up the exit code -- otherwise `wait` would have nothing left to read.
-// Its kernel stack is the one this function is standing on and is
-// therefore NOT freed here; that happens in the reaper.
 fn exit_task(state: u64, code: u64) {
     let flags: u64 = irq_save()
     atomic.lock_take(state, atomic.L_SCHED, cpu.here(state))
@@ -2143,33 +1731,11 @@ fn exit_task(state: u64, code: u64) {
     wake_pid(state, group_of(state, cur))
     schedule_locked(state)
     irq_restore(flags)
-    // The scheduler never comes back to a corpse. If it does, something
-    // is broken enough that going on would be worse.
     while true {
         asm("hlt")
     }
 }
 
-// DELL STABILITY (08.10.2026): `kill` of ANOTHER task.
-//
-// Before: `uio.kill_pid` wrote S_ZOMBIE into the victim without the run queue
-// lock, whatever the victim was doing. A victim that was RUNNING on another
-// core became a corpse while that core still stood on its kernel stack; the
-// parent's wait4 (or the desktop loop) then reaped the corpse on a third core,
-// the stack frames went back to the frame allocator, and `create` painted them
-// with STACK_PAINT while the victim's core was still executing on them. The
-// Dell saw that as `ret` to 0x5A5A5A5A5A5A5A5A (stack scan in the panic report:
-// reap -> fd_free -> lock_take -> context_switch, RIP in .bss); the VM series
-// (tools/stab/crash.sh) shows the same as #GP at a painted return address.
-//
-// Now, under ONE hold of L_SCHED:
-//   * not running (READY, SLEEP, WAIT, POLL, STOP): its stack is quiet, it is
-//     made a corpse right here -- as before, but also reparenting its children
-//     (`exit_task` always did, `kill_pid` never did);
-//   * running (S_RUN, on any core): nothing is torn down. The request goes
-//     into T_KILLCODE (KILL_SET + code) and the victim ends ITSELF in
-//     `exit_task`, at its next trap or system call return (`signal.deliverable`
-//     reports SIGKILL for it).
 const KILL_DONE: u64 = 0
 const KILL_LATER: u64 = 1
 const KILL_GONE: u64 = 2
@@ -2198,7 +1764,6 @@ fn kill_other(state: u64, i: u64, pid: u64, code: u64) -> u64 {
     let plain: bool = (code & KILL_PLAIN) != 0
     let ecode: u64 = code & (0xFFFFFFFFFFFFFFFF -% KILL_PLAIN)
     tset(state, i, T_EXIT, ecode)
-    // RUNDE UNTERBAU: a kill code 128 + n is "died of signal n" (bit 8 of T_SIGLAST, read by `wait4`)
     if !plain && ecode > 128 && ecode < 192 {
         tset(state, i, T_SIGLAST, ((ecode - 128) & 127) | 256)
     }
@@ -2276,20 +1841,6 @@ fn reparent(state: u64, dying: u64) {
     }
 }
 
-// The corpse is cleared away: its kernel stack goes back to the frame
-// allocator, its slot into the table. Whoever calls this must have picked
-// up the exit code beforehand -- and must not be standing on that stack,
-// which is why a task can never reap itself.
-// ROUND K5: the slot is released under the run queue lock, the FRAMES
-// are given back afterwards, outside it. Same rule as in `create` and for
-// the same reason -- the two locks of this kernel are never nested.
-// Claim a zombie for reaping. Only the caller that gets `true` may free
-// anything of it; everyone else must leave it alone.
-// DELL STABILITY: is task `i` the current task of ANY core? A corpse whose kernel
-// stack a core still stands on must not be torn down (the frames would go to
-// the allocator and be repainted under that core). `kill_other` no longer makes
-// such corpses; this is the second line, and a stop with evidence instead of a
-// panic: the reap is refused and tried again later.
 fn on_a_core(state: u64, i: u64) -> bool {
     let n: u64 = cpu.count(state)
     var c: u64 = 0
@@ -2320,7 +1871,6 @@ fn reap(state: u64, i: u64) -> bool {
     return reap_in(state, i, S_ZOMBIE)
 }
 
-// The second half after `claim_zombie`: kernel stack, vector area, slot.
 fn reap_claimed(state: u64, i: u64) -> bool {
     return reap_in(state, i, S_REAPING)
 }
@@ -2350,10 +1900,6 @@ fn reap_in(state: u64, i: u64, want: u64) -> bool {
     return true
 }
 
-// A fault in ring 3 kills the process, not the kernel. This is the point
-// at which an operating system differs from the kernel of round 59: there
-// the machine stopped at every exception, and rightly so -- there was
-// nobody else the fault could belong to.
 fn kill_current(state: u64, pid_vector: u64, err: u64, cr2: u64, rip: u64) {
     var s_kill: [u8; 13] = "user fault: \0"
     var s_pid: [u8; 6] = "pid=\0\0"
@@ -2378,11 +1924,9 @@ fn kill_current(state: u64, pid_vector: u64, err: u64, cr2: u64, rip: u64) {
     serial.nl()
     kstate.add(state, kstate.KILLED, 1)
     tset(state, cur, T_FAULTS, tget(state, cur, T_FAULTS) + 1)
-    // 128 + vector, the way a system with signals would count it.
     exit_task(state, 128 + pid_vector)
 }
 
-// ------------------------------------------------------------ the view
 
 fn dump_tasks(state: u64) {
     var s_row: [u8; 7] = "task: \0"

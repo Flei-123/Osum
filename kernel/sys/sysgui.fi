@@ -39,8 +39,6 @@ import sys.sysnet
 
 export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call, ax_call, float_check }
 
-// The copy page of THIS system call: one page per core for ring 3 callers,
-// the shared BLOCK_OFF for kernel tasks (see kstate.BLOCKK_OFF).
 fn blockb(state: u64) -> u64 {
     let cur: u64 = sched.current(state)
     if sched.tget(state, cur, sched.T_KIND) != sched.K_USER {
@@ -194,7 +192,6 @@ fn do_dispget(state: u64, field: u64) -> u64 {
     if field == sys.DG_TOOBIG {
         return vmode.toobig(state)
     }
-    // ============================================ RUNDE CUSTOMRES
     if field == sys.DG_CUSTWHY {
         return vmode.cust_why(state)
     }
@@ -464,14 +461,6 @@ fn is_taskbar(state: u64, me: u64) -> bool {
     var i: u64 = 0
     while i < wm.MAX_WIN {
         if wm.valid(state, i) && wm.win_owner(state, i) == me {
-            // ADDENDUM TASKBAR: THE TEST IS THE STRUT AND NO LONGER THE
-            // LAYER. A panel is a process that has RESERVED A SCREEN
-            // EDGE -- and only root can do that (sys.WM_STRUT). The old
-            // test asked for layer L_TOP, and it was wrong the moment
-            // the taskbar got a setting for "always on top": with that
-            // setting off the bar drops to the ordinary layer, and it
-            // would have lost the right to list windows while still
-            // being the taskbar.
             if wm.win_strut_size(state, i) != 0 {
                 return true
             }
@@ -523,8 +512,6 @@ fn wm_list(state: u64, me: u64, slot: u64, aus: u64, max: u64) -> u64 {
     return wl_fill(state, me, slot, aus, sys.WL_BYTES)
 }
 
-// One record of the window table into Ring 3: WL_BYTES for the taskbar,
-// FW_BYTES (with owner and kind) for the foreign-window layer.
 fn wl_fill(state: u64, me: u64, slot: u64, aus: u64, n: u64) -> u64 {
     let buffer: u64 = blockb(state) + 3600
     var k: u64 = 0
@@ -532,8 +519,6 @@ fn wl_fill(state: u64, me: u64, slot: u64, aus: u64, n: u64) -> u64 {
         kstate.set8(buffer + k, 0 as u8)
         k = k + 1
     }
-    // r382 LOCK SEAL: while the screen is locked the table shows nothing
-    // of the windows behind the lock (no title, no size, no owner).
     if !wm.valid(state, slot) || !wm.allowed(state, slot) || wm.tt_is_bg(state, slot) {
         if !sysuser.copy_out(state, me, aus, buffer, n) {
             return cap.err(cap.E_INVALID)
@@ -584,12 +569,6 @@ fn wl_fill(state: u64, me: u64, slot: u64, aus: u64, n: u64) -> u64 {
     return 1
 }
 
-// ============================================ ROUND ACTION-BUS-3 (AB-008b)
-//
-// MAY THE FOREIGN-WINDOW LAYER TOUCH THIS WINDOW? Four windows it never
-// touches, whoever asks:
-// Everything else is a program's own window, and the broker only names
-// one that its wrapper manifest describes (`for window <glob>`).
 fn owner_foreign(state: u64, t: u64) -> bool {
     var want: [u8; 8] = "compat:\0"
     var i: u64 = 0
@@ -659,9 +638,9 @@ fn wm_fwin(state: u64, me: u64, op: u64, a: u64, b: u64, c: u64) -> u64 {
         if x >= wm.win_w(state, w) || y >= wm.win_h(state, w) {
             return cap.err(cap.E_INVALID)
         }
-        var btn: u64 = 1 // ps2m.B_LEFT
+        var btn: u64 = 1
         if c == 2 {
-            btn = 2 // ps2m.B_RIGHT
+            btn = 2
         }
         wm.ev_push(state, w, wm.E_DOWN, x, y, btn)
         wm.ev_push(state, w, wm.E_UP, x, y, btn)
@@ -681,11 +660,7 @@ fn wm_fwin(state: u64, me: u64, op: u64, a: u64, b: u64, c: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
-// ROUND ACTION-BUS-5 (AB-004): the trusted dialog, see sys.WM_TRUST.
-// The text is COPIED into the kernel; the window server never follows a
-// pointer of the caller.
 static mut trust_buf: [u8; 656] = [0 as u8; 656]
-// r831: the output the start menu opens on (WS_STARTHEAD); a plain number, set by the taskbar of the output that was clicked
 static mut start_head: u64 = 0
 
 fn wm_trust(state: u64, me: u64, op: u64, no: u64, p: u64, n: u64) -> u64 {
@@ -720,7 +695,6 @@ fn wm_trust(state: u64, me: u64, op: u64, no: u64, p: u64, n: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
-// A descriptor of shared object `k` for task `me`, read-only (it can be mapped PROT_READ, never PROT_WRITE). One reference for the open file.
 fn shm_fd(state: u64, me: u64, k: u64) -> u64 {
     unixsock.shm_ref(state, k)
     let of: u64 = file.open_alloc(state, file.K_SHM, k, 0)
@@ -738,7 +712,6 @@ fn shm_fd(state: u64, me: u64, k: u64) -> u64 {
     return fd
 }
 
-// COMPOSITOR S5: WM_COMP (op, a, b). The window server does the work (wm.cp_*); this maps its answers to the system call's.
 fn comp_call(state: u64, me: u64, op: u64, a: u64, b: u64) -> u64 {
     if op == sys.CP_ATTACH {
         let r: u64 = wm.cp_attach(state, me)
@@ -812,7 +785,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return cap.err(cap.E_UNSUPPORTED)
     }
     if number == sys.WM_CREATE {
-        // W-WINOPTS stage 1: an unknown option bit refuses the whole call, before a window exists
         if (a3 & ~sys.WO_KNOWN) != 0 {
             return cap.err(cap.E_INVALID)
         }
@@ -828,7 +800,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
                 if !proc.user_ok(state, me, a2 + k, 1) {
                     return cap.err(cap.E_INVALID)
                 }
-                // one fetch through the checked reader (translate() == 0 after a racing munmap must not be dereferenced)
                 c = sysuser.peek(state, me, a2 + k)
             }
             kstate.set8(title + k, c as u8)
@@ -839,9 +810,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             }
         }
         kstate.set8(title + 31, 0 as u8)
-        // COMPOSITOR S3: a fifth argument names a memfd (descriptor + 1, made with MFD_FRAMES) the window paints from. Anything that
-        // does not fit (not contiguous, too small, the word `noshare`) is NOT an error: the window gets its own buffer and the client
-        // finds out with WM_INFO / WI_SHARED and copies with WIG_BLIT as before.
         var sbase: u64 = 0
         var sbytes: u64 = 0
         var sidx: u64 = 0
@@ -866,7 +834,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             wm.destroy(state, i)
             return cap.err(cap.E_EXHAUSTED)
         }
-        // W-WINOPTS stage 1: the options word, applied before the window opens (no frame flash, no opaque first picture)
         if (a3 & sys.WO_FRAMELESS) != 0 {
             wm.set_deco(state, i, false)
         }
@@ -883,7 +850,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return hh
     }
     if number == sys.WM_TABLE {
-        // S6b: argument 1 = the chrome page (colours, measures, hover state, titles): root only, it is the compositor's
         if a0 == 1 {
             if !perm.is_root(state, me) {
                 return cap.err(cap.E_RIGHTS)
@@ -900,7 +866,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         }
         return shm_fd(state, me, k)
     }
-    // ... and the buffer of a shared window, for root only (the compositor), never while the screen is locked
     if number == sys.WM_BUFFD {
         if !perm.is_root(state, me) || wm.lock_on(state) {
             return cap.err(cap.E_RIGHTS)
@@ -915,7 +880,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         }
         return shm_fd(state, me, sh - 1)
     }
-    // COMPOSITOR S5: the compositor in ring 3 (root only: it sees the pointer and shortcut keys, and it decides when a frame is shown)
     if number == sys.WM_COMP {
         if !perm.is_root(state, me) {
             return cap.err(cap.E_RIGHTS)
@@ -977,12 +941,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if w >= wm.MAX_WIN {
             return cap.err(cap.E_NOTFOUND)
         }
-        // Hier stand:
-        //
-        //     if wm.win_layer(state, w) != wm.L_NORMAL {
-        //         return cap.err(cap.E_RIGHTS)
-        //     }
-        // GEMESSEN (1280x800, Abnahmelauf dieser Runde, serial.txt):
         if wm.win_layer(state, w) == wm.L_DESK {
             return cap.err(cap.E_RIGHTS)
         }
@@ -1139,7 +1097,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if a1 == sys.WI_TB_ALPHA_IST {
             return wm.tb_alpha_ist(state)
         }
-        // r454: the strip of a window that paints its own title bar
         if a1 == sys.WI_STRIPH {
             return wm.strip_h(state)
         }
@@ -1149,7 +1106,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if a1 == sys.WI_OPAC {
             return wm.win_opac(state, i)
         }
-        // W-WINOPTS S4: what lies behind the (own) window -- a window can only ask about itself (the handle names it)
         if a1 == sys.WI_BACKLUM {
             return wm.backlum(state, i, wm.BL_MEAN)
         }
@@ -1196,7 +1152,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wm.compose(state)
         return 0
     }
-    // COMPOSITOR S3: the window paints from a memfd of the client (made with MFD_FRAMES, long enough for the window)
     if number == sys.WM_SETBUF {
         if !cap.rights_contains(rights, cap.R_WRITE) {
             return cap.err(cap.E_RIGHTS)
@@ -1213,7 +1168,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         }
         return 0
     }
-    // the client painted this rectangle (window coordinates) into its shared buffer: only the damage is named, nothing is copied
     if number == sys.WM_DAMAGE {
         if !cap.rights_contains(rights, cap.R_WRITE) {
             return cap.err(cap.E_RIGHTS)
@@ -1274,7 +1228,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             wm.set_keys(state, i, a2 != 0)
             return 0
         }
-        // r454: tabs in the title bar -- the program asks for its own strip, and declares its empty part
         if a1 == sys.WS_CAPSTRIP {
             if !wm.set_cap_client(state, i, a2 != 0) {
                 return cap.err(cap.E_INVALID)
@@ -1282,7 +1235,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             wm.compose(state)
             return 0
         }
-        // W-WINOPTS stage 1: the window's own opacity. Above 255 is refused, not clamped.
         if a1 == sys.WS_OPAC {
             if a2 > 255 {
                 return cap.err(cap.E_INVALID)
@@ -1300,11 +1252,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return 0
         }
         if a1 == sys.WS_MAXIMIZED {
-            // MAXIMIZE CAN FAIL, and it says so. The window keeps the
-            // buffer it was created with; a window created small cannot
-            // grow past it (`wm.resize_win`), and pretending otherwise
-            // would leave the caller drawing into a rectangle that is
-            // not there.
             if !wm.maximize(state, i, a2 != 0) {
                 return cap.err(cap.E_INVALID)
             }
@@ -1349,17 +1296,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if !cap.rights_contains(rights, cap.R_MANAGE) {
             return cap.err(cap.E_RIGHTS)
         }
-        // RESERVING A SCREEN EDGE IS WHAT A PANEL DOES. A window that
-        // can take 400 pixels off the screen shrinks the world of every
-        // other application without being visible at all, so this is
-        // root and nothing less.
-        //
-        // WHY ROOT AND NOT "MUST BE ON LAYER L_TOP", which was the
-        // first version: because the taskbar has a setting called
-        // `ontop`, and switching it off puts the bar on the ordinary
-        // layer. A rule tied to the layer would have taken the strut
-        // away at exactly that moment, and the work area would have
-        // grown over a bar that is still on the screen.
         if !perm.is_root(state, me) {
             return cap.err(cap.E_RIGHTS)
         }
@@ -1392,7 +1328,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     return cap.err(cap.E_UNSUPPORTED)
 }
 
-// ------------------------------------------------------------ RUNDE K15
 fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
     if number == sys.WIG_SCAN {
@@ -1519,8 +1454,6 @@ fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         return sysuser.neg(errno.E_INVAL)
     }
     if number == sys.WIG_CURSOR {
-        // W-CURSOR: was `a0 > 1`, so the hand (2) and every other shape
-        // the library asked for was refused with E_INVAL and never reached the server.
         if a0 > 9 {
             return sysuser.neg(errno.E_INVAL)
         }
@@ -1910,9 +1843,6 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     return sysuser.neg(errno.E_INVAL)
 }
 
-// TQ_KEYFOR: the key that types code point `cp & 0xFFFFFF` on the layout in force (or on layout `(cp >> 24) - 1` when the
-// top byte is set). The inverse of kbd.code_of, found by scanning the keys plain, with Shift, with AltGr. The bridge agent
-// (odbd, `input text`) asks here so that typed text comes out right on a German or French keyboard, not only on US.
 fn keyfor(state: u64, arg: u64) -> u64 {
     let cp: u64 = arg & 0xFFFFFF
     var lay: u64 = kbd.layout(state)
@@ -2209,9 +2139,6 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return 1
     }
     if number == sys.WM_PLUG_KEY {
-        // W-S3: with the flag KF_ADD in the mods argument the call ADDS one more key (a helper may own several) and says WHY
-        // it refused: E_RIGHTS = no R_ACT_KEY, E_EXHAUSTED = table full, E_WRONGTYPE = already held by
-        // somebody (never a silent overwrite), E_UNSUPPORTED = a system key (a binding of the tile tree owns it).
         if (a1 & wmplug.KF_ADD) != 0 {
             let km: u64 = a1 & 0xFF
             if wmplug.key_owner(state, a0, km) >= wmplug.MAX_PLUG && tile.bind_lookup(state, a0, km) != tile.A_NONE {
@@ -2523,12 +2450,6 @@ fn desk_anwenden(state: u64) {
     wm.damage_all(state)
 }
 
-// ====================================================== ROUND A11Y-2
-//
-// THE SEVEN CALLS OF THE ACCESSIBILITY TREE (sys.AX_*, docs/A11Y.md 5).
-// The store is `kernel/ui/ax.fi`; every check that needs the window table
-// is HERE, next to the other window calls -- `ax.fi` cannot import the
-// window server, the window server imports it.
 fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64) -> u64 {
     if !ax.ready(state) {
@@ -2548,10 +2469,6 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         if a0 >= ax.node_count(state) || a2 < ax.NODE_BYTES {
             return errno.neg(errno.E_INVAL)
         }
-        // r382 LOCK SEAL: while the screen is locked a node of any other
-        // task than the locker reads as an empty node (role none, no
-        // name, no value, no place): the tree must not tell what is
-        // behind the lock.
         var src: u64 = ax.node_addr(state, a0)
         if wm.lock_on(state) && ax.node_task(state, a0) != wm.lock_space(state) {
             let zb: u64 = blockb(state) + 3456
@@ -2580,9 +2497,6 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         if ax.ev_pop(state, buf) == 0 {
             return 0
         }
-        // r382 LOCK SEAL: while locked, an event about a node of anyone
-        // but the locker is dropped (focus and value changes of the
-        // windows behind the lock). At most 64 are looked at per call.
         if wm.lock_on(state) {
             var evn: u64 = 0
             var evgo: bool = true
@@ -2613,14 +2527,9 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         if a0 == sys.AP_COUNT {
             return ax.granted(state)
         }
-        // GIVING IS A HUMAN DECISION, taken by root: a reader sees every
-        // label and field on the screen, a presser can click in another
-        // program's window.
         if sched.tget(state, me, sched.T_EUID) != 0 {
             return errno.neg(errno.E_PERM)
         }
-        // task 0xFFFF = the caller itself (a root provider such as axd
-        // does not know its own task number)
         var t: u64 = a1
         if t == 0xFFFF {
             t = me
@@ -2639,9 +2548,6 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return errno.neg(errno.E_INVAL)
     }
     if number == sys.AX_SET {
-        // SYSTEM-WIDE MEANS: NOT ANYONE. Contrast, magnifier and sticky
-        // keys hold for every window; any program that could switch them
-        // could make everyone else's screen unusable.
         if sched.tget(state, me, sched.T_EUID) != 0 {
             return errno.neg(errno.E_PERM)
         }
@@ -2664,16 +2570,6 @@ fn ax_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     return errno.neg(errno.E_NOSYS)
 }
 
-// NODES FROM RING 3, in exactly the packing of the store. At most 32 per
-// call (32 * 96 = 3072 octets of this core's copy page); more are sent in
-// several calls between the begin (0, 1) and the end (0, 0).
-//
-// PUSH ONLY FOR ONE'S OWN WINDOWS. A window node (R_WINDOW, R_DIALOG or
-// R_MENU) names
-// its window-server window by id in its value; the kernel looks it up and
-// maps the ring-3 window number to the slot ONLY if the caller owns it.
-// Every other node of an unmapped window is refused and counted
-// (AI_FOREIGN) -- a process cannot put nodes under another window.
 fn ax_push(state: u64, me: u64, ptr: u64, n: u64) -> u64 {
     if ptr == 0 {
         if n == 0 {
@@ -2712,22 +2608,6 @@ fn ax_push(state: u64, me: u64, ptr: u64, n: u64) -> u64 {
     return taken
 }
 
-// MAY THE TREE PRESS THIS CONTROL? The same spirit as `fwin_target` of
-// the foreign-window layer (AB-008b), for the controls of native apps:
-//
-//   * a button or a check box, enabled, visible, not protected;
-//   * the tree has not changed since the caller read it (`gen`) -- a
-//     press by number into a tree that moved could hit another control;
-//   * the window is still the one the node was pushed for, owned by the
-//     task that pushed it;
-//   * NOT while the screen is locked, NOT the desktop or a panel, NOT a
-//     terminal, NOT the caller's own window;
-//   * ONLY a window of an APP or a FOREIGN program: the owner's kernel
-//     label (AB-003) starts with `app:` or `compat:`. The user's own tools
-//     (settings, explorer, the login and lock screens -- no label) are
-//     never pressed: the settings window has the "Yes, change it" of a
-//     critical bus call, and an agent with a press grant must not be
-//     able to answer its own question.
 fn ax_press(state: u64, me: u64, n: u64, gen: u64) -> u64 {
     if !ax.allowed(state, me, ax.P_ACT) {
         ax.count_denied(state)
@@ -2795,10 +2675,6 @@ fn owner_app(state: u64, t: u64) -> bool {
     return true
 }
 
-// THE STORE ON THE SERIAL LINE (AX_SET 99, root). Not for convenience:
-// it is the one place where a test sees what is REALLY in the kernel
-// instead of what a ring-3 program says about it. A password node shows
-// here as well -- with the value 0 it was forced to on entry.
 fn ax_dump(state: u64) {
     ax.say(state)
     wm.say_mag(state)
@@ -2869,9 +2745,6 @@ fn ax_dump(state: u64) {
     }
 }
 
-// W-WINOPTS S2: a window on L_FLOAT lives only as long as its owner HAS the right `window.float`. Called after every change of the
-// rights table (grant, revoke, ceiling): a float window whose owner lost the right goes back to L_NORMAL at once (root and
-// unlabelled processes are never gated, see policy.label_allows). Returns how many windows were put back.
 fn float_check(state: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
