@@ -43,7 +43,7 @@ for l in de en; do
 done
 grep -q 'vaultprompt vaultui' tools/usbimg/build.sh && ok "usbimg PROGS has vaultui" || bad "usbimg PROGS"
 grep -q '/bin/vaultprompt /bin/vaultui' tools/usbimg/build.sh && ok "usbimg PFLICHT has vaultui" || bad "usbimg PFLICHT"
-[ "$(grep -acE '^[[:space:]]*//' kernel/user/vaultui.fi kernel/user/vaultcall.fi | awk -F: '{s+=$2} END{print s+0}')" = 0 ] && ok "no comments in the new modules" || bad "comments in the new modules"
+[ "$(grep -hE '^[[:space:]]*//' kernel/user/vaultui.fi kernel/user/vaultcall.fi tools/vaultui/run.sh | grep -vc SPDX)" = 0 ] && ok "no comments in the new modules" || bad "comments in the new modules"
 python3 -I -c "
 import re,sys
 s=open('kernel/user/vaultui.fi',encoding='utf-8').read()
@@ -148,10 +148,10 @@ for n in 1 2 3 4; do
     hasnot "$TMPD/p.txt" "wait=" "wrong PIN $n: no delay yet"
 done
 part "$A" A-BAD5 A-DELAYED > "$TMPD/p.txt"
-has "$TMPD/p.txt" "err=wait" "wrong PIN 5: err=wait (window: countdown)"
-has "$TMPD/p.txt" "wait=60" "... with the delay in seconds"
+has "$TMPD/p.txt" "err=bad" "wrong PIN 5: err=bad, the delay starts after it"
 part "$A" A-DELAYED A-PW > "$TMPD/p.txt"
-has "$TMPD/p.txt" "err=wait" "COUNTER-PROOF: the right PIN during the delay is refused"
+has "$TMPD/p.txt" "err=wait" "COUNTER-PROOF: the right PIN during the delay is refused (window: countdown)"
+has "$TMPD/p.txt" "wait=60" "... with the delay in seconds"
 has "$TMPD/p.txt" "state=locked" "... and the vault stays locked"
 part "$A" A-PW FERTIG > "$TMPD/p.txt"
 has "$TMPD/p.txt" "ok=1" "the password still opens the vault during the PIN delay"
@@ -171,6 +171,13 @@ cwin w1
 S=$TMPD/w1/serial.txt
 has "$S" "vaultui: ready" "the window opens"
 has "$S" "vaultui: state 7" "without vaultd the window reports 'service not running' (state 7)"
+if [ -s "$TMPD/w1/desktop.png" ]; then
+    sc=$(python3 -I tools/mockup/ssim.py /root/jarvis/data/projects_kb/orientos/reports/mockups/vaultui-nosvc.png "$TMPD/w1/desktop.png" auto "$TMPD/crop.png" 2>&1 | tail -1)
+    v=$(echo "$sc" | sed -n 's/.*"ssim": *\([0-9.]*\).*/\1/p')
+    python3 -I -c "import sys; sys.exit(0 if float('${v:-0}') >= 0.95 else 1)" && ok "mockup match: $sc" || bad "mockup match: $sc"
+else
+    bad "no screenshot"
+fi
 N=$(grep -ac 'vaultui: rect ' "$S")
 [ "$N" -ge 3 ] && ok "the host reports $N controls" || bad "controls: $N, expected >= 3"
 cwin w2 tab tab ret
