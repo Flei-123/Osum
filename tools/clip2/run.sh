@@ -35,7 +35,7 @@ fi
 echo "== 1. Quelltext =="
 grep -qE '^const K_DROP: u64 = [0-9]+' kernel/user/wlib.fi \
     && ok "wlib kennt K_DROP" || bad "wlib kennt kein K_DROP"
-grep -qE 'fire\(d, K_DROP, zeile, w\)' kernel/user/wlib.fi \
+grep -qE 'fire\(d, K_DROP, line, w\)' kernel/user/wlib.fi \
     && ok "on_up feuert K_DROP" || bad "on_up feuert kein K_DROP"
 grep -qE 'fn drop_an\(' kernel/user/wlib.fi \
     && ok "wlib has drop_an (a window registers as a target)" \
@@ -46,7 +46,7 @@ grep -qE 'fuiscene\.drop_accept\(true\)' kernel/user/explorer.fi \
 grep -qE 'fn ablegen\(' kernel/user/explorer.fi \
     && ok "the file manager has a drop function" \
     || bad "the file manager has no drop function"
-grep -qE 'expakt\.einfuegen' kernel/user/explorer.fi \
+grep -qE 'expakt\.paste' kernel/user/explorer.fi \
     && ok "dropping goes through expakt.einfuegen (so io.rename)" \
     || bad "das Ablegen geht an expakt vorbei"
 if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
