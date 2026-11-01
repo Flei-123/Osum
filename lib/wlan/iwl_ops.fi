@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import wlan.device
+import wlan.ccmp
 import wlan.frame
 import wlan.iwl_buf
 import wlan.iwl_le
@@ -67,6 +68,8 @@ const RXS_LAST_STATUS: u64 = 10
 const RXS_LAST_LEN: u64 = 11
 const RXS_LAST_FC: u64 = 12
 const RXS_MGMT: u64 = 13
+const RXS_SW_GROUP_OK: u64 = 14
+const RXS_SW_GROUP_FAIL: u64 = 15
 const MAC_FILTER_ACCEPT_GRP: u64 = 4
 
 const CMD_REMOVE_STA: u64 = 0x19
@@ -115,6 +118,8 @@ struct Mvm {
     rxs: [u64; 16],
     aid: u64,
     grp_pass: bool,
+    gtk: [u8; 64],
+    gtk_mask: u64,
     cmd: [u8; 2600],
     rx: [u8; 2600]
 }
@@ -131,7 +136,7 @@ fn mvm_new() -> Mvm {
         scan_state: 0, scan_uid: 0, scan_status: 0,
         rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
         fail_step: 0, fail_rc: 0, fail_cmd: 0, ok_steps: 0,
-        caps: [0; 16], rxs: [0; 16], aid: 0, grp_pass: false, cmd: [0; 2600], rx: [0; 2600]
+        caps: [0; 16], rxs: [0; 16], aid: 0, grp_pass: false, gtk: [0; 64], gtk_mask: 0, cmd: [0; 2600], rx: [0; 2600]
     }
     iwl_fwcaps.caps_default((&o.caps[0]) as *mut u64)
     return o
@@ -547,12 +552,35 @@ fn o_channel(ctx: u64, channel: u64, band: u64) -> i64 {
     return 0
 }
 
+fn store_gtk(o: *mut Mvm, id: u64, key: u64) {
+    let base: u64 = (id & 3) * 16
+    var k: u64 = 0
+    while k < 16 {
+        (*o).gtk[(base + k) as usize] = *((key + k) as *mut u8)
+        k = k + 1
+    }
+    (*o).gtk_mask = (*o).gtk_mask | (1 << (id & 3))
+}
+
+fn sw_group_decrypt(o: *mut Mvm, out: u64, bytes: u64, room: usize) -> i64 {
+    let hli: i64 = frame.header_len(out, bytes as usize)
+    if hli <= 0 || bytes < (hli as u64) + 4 { return -1 }
+    let keyid: u64 = (iwl_le.ld8(out, hli as u64 + 3) >> 6) & 3
+    if ((*o).gtk_mask & (1 << keyid)) == 0 { return -1 }
+    let scratch: u64 = rx_addr(o)
+    let n: i64 = ccmp.unprotect((&(*o).gtk[(keyid * 16) as usize]) as u64, out, bytes as usize, scratch, RX_BUF)
+    if n <= 0 || (n as usize) > room { return -1 }
+    iwl_le.copy(out, scratch, n as u64)
+    return n
+}
+
 fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
     let o: *mut Mvm = ctx as *mut Mvm
     if art == device.KEY_OFF {
         (*o).ptk_set = false
         (*o).tx_pn = 0
         (*o).grp_pass = false
+        (*o).gtk_mask = 0
         if hwc_on(o) { return ops_peer_remove(o) }
         return 0
     }
@@ -565,6 +593,7 @@ fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
             k = k + 1
         }
     }
+    if art == device.KEY_GTK && len >= 16 { store_gtk(o, id, key) }
     if !hwc_on(o) { return 0 }
     if !(*o).peer_added { return E_OPS_STATE }
     var pn: [u8; 6] = [0; 6]
@@ -708,6 +737,15 @@ fn rx_mpdu(o: *mut Mvm, out: u64, bytes: u64, a: u64, h: u64, n: u64) -> i64 {
     if !(quirk_on(o, iwl_fwcaps.Q_HWC) && (*o).ptk_set) {
         rxs_add(o, RXS_DELIVERED)
         return bytes as i64
+    }
+    if (iwl_le.ld8(out, 4) & 1) != 0 && quirk_on(o, iwl_fwcaps.Q_SWGRP) && !iwl_mvm_crypt.rx_hw_decrypted(status) {
+        let sw: i64 = sw_group_decrypt(o, out, bytes, RX_BUF)
+        if sw > 0 {
+            rxs_add(o, RXS_SW_GROUP_OK)
+            rxs_add(o, RXS_DELIVERED)
+            return sw
+        }
+        rxs_add(o, RXS_SW_GROUP_FAIL)
     }
     let v: u64 = iwl_mvm_crypt.rx_verdict(out, bytes, status)
     if v == iwl_mvm_crypt.RX_DROP_MIC {

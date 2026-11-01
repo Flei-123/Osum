@@ -283,9 +283,53 @@ def check_rx_status():
     ok(rxs[:12] == ["4", "4", "3", "1", "1", "1", "1", "2", "0", "0", "1", "32"], "receive counters: %s" % " ".join(rxs))
 
 
+def ccmp_group_frame(key, pn, keyid, body):
+    from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+    a1 = bytes([0xFF] * 6)
+    a2 = BSSID
+    a3 = bytes([2, 0, 0, 0, 9, 9])
+    fc = bytes([0x08, 0x42])
+    seq = bytes([0x10, 0x00])
+    pnb = pn.to_bytes(6, "little")
+    hdr = fc + bytes([0, 0]) + a1 + a2 + a3 + seq
+    ccmp = bytes([pnb[0], pnb[1], 0, 0x20 | (keyid << 6), pnb[2], pnb[3], pnb[4], pnb[5]])
+    nonce = bytes([0]) + a2 + pn.to_bytes(6, "big")
+    aad = bytes([0x08, 0x42]) + a1 + a2 + a3 + bytes([0x00, 0x00])
+    ct = AESCCM(key, tag_length=8).encrypt(nonce, body, aad)
+    return hdr + ccmp + ct
+
+
+def check_sw_group():
+    print("== software group decrypt (wlswgrp) ==")
+    key = bytes(range(16))
+    body = bytes([0xAA, 0xAA, 3, 0, 0, 0, 8, 0, 0xDE, 0xAD, 0xBE, 0xEF])
+    fr = ccmp_group_frame(key, 7, 1, body)
+    bad = bytearray(fr)
+    bad[-1] ^= 1
+    on = run(["swgrp %s %s" % (key.hex(), fr.hex())])
+    sw = [l for l in on if l.startswith("swrx ")][0].split()
+    rxs = [l for l in on if l.startswith("rxs")][0].split()[1:]
+    plain = bytes.fromhex(sw[2]) if len(sw) > 2 else b""
+    ok(sw[1] == str(24 + len(body)), "group frame with ENC_ERR is decrypted in software (len %s)" % sw[1])
+    ok(plain[24:] == body, "decrypted payload equals the original")
+    ok(plain[0:2] == bytes([0x08, 0x02]) and plain[4:10] == bytes([0xFF] * 6), "protected bit cleared, header kept")
+    ok(rxs[14] == "1" and rxs[15] == "0", "software counters: ok=1 fail=0 (%s %s)" % (rxs[14], rxs[15]))
+    off = run(["swgrpoff %s %s" % (key.hex(), fr.hex())])
+    sw0 = [l for l in off if l.startswith("swrx ")][0].split()
+    ok(sw0[1] == "0", "without wlswgrp the undecrypted group frame is still dropped (%s)" % sw0[1])
+    badr = run(["swgrp %s %s" % (key.hex(), bytes(bad).hex())])
+    swb = [l for l in badr if l.startswith("swrx ")][0].split()
+    rxb = [l for l in badr if l.startswith("rxs")][0].split()[1:]
+    ok(swb[1] == "0" and rxb[15] == "1", "forged MIC is dropped and counted (%s fail=%s)" % (swb[1], rxb[15]))
+    wrong = run(["swgrp %s %s" % (bytes(16).hex(), fr.hex())])
+    swc = [l for l in wrong if l.startswith("swrx ")][0].split()
+    ok(swc[1] == "0", "wrong group key is dropped (%s)" % swc[1])
+
+
 check_variants()
 check_group_filter()
 check_rx_status()
+check_sw_group()
 
 print("RESULT pass=%d fail=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
