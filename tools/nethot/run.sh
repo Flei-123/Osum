@@ -22,7 +22,7 @@ fi
 mkscript() { printf 'echo ==START==\ndhcp\nping %s\necho ==PINGDONE==\ncat /proc/net/dev\necho ==ALIVE==\n' "$2" > "$T/$1.sh"; }
 mkscript s_usb 10.0.5.2
 mkscript s_eth 10.0.2.2
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/cat="$T/bin/cat.elf" \
     /t/s_usb.sh="$T/s_usb.sh" /t/s_eth.sh="$T/s_eth.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
@@ -68,7 +68,7 @@ run fallback "$KNEW" s_eth.sh 1 "$T/p_fallback"; H="$T/fallback.klar"; plan_ok f
 grep -aq 'nethot: usbnet detached' "$H" && ok "fallback: card removed" || bad "fallback: no detach"
 grep -aq 'dhcp: ack ip=10.0.2.15' "$H" && ok "fallback: lease from e1000" || bad "fallback: no e1000 lease"
 grep -aq '[1-9][0-9]* received' "$H" && ok "fallback: ping 10.0.2.2 answered" || bad "fallback: no ping replies"
-grep -aq 'usb0:' "$H" && bad "fallback: usb0 still listed" || ok "fallback: usb0 gone from /proc/net/dev"
+grep -aq 'eth0: *[1-9]' "$H" && ! grep -aq 'usb0:' "$H" && ok "fallback: /proc/net/dev lists eth0, usb0 gone" || bad "fallback: /proc/net/dev wrong (eth0 missing or usb0 listed)"
 common fallback
 echo "== usbonly =="
 run usbonly "$KNEW" s_usb.sh 0 "$T/p_usbonly"; H="$T/usbonly.klar"; plan_ok usbonly

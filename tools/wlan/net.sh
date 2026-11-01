@@ -52,10 +52,10 @@ image() {
         || { tail -3 "$T/$n.mkfs"; return 1; }
 }
 run() {
-    local n=$1 words=$2
+    local n=$1 words=$2 nics=${3:--nic none}
     timeout 400 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k.img" -m 512 \
         -append "osum vfs $words script=sh /t/s.sh;exit" \
-        -serial "file:$T/$n.txt" -display none -no-reboot -nic none \
+        -serial "file:$T/$n.txt" -display none -no-reboot $nics \
         -drive "file=$T/$n.img,format=raw,if=ide,index=0" \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     tr -cd '\11\12\15\40-\176' < "$T/$n.txt" > "$T/$n.klar"
@@ -75,7 +75,28 @@ has "$C" 'fakeap: echo' "AP mirrors the ARP broadcast (group key) in the same bu
 has "$C" 'fakeap: icmp' "ICMP echo reached the AP"
 awk '/==WAITED==/{f=1} /==PING1==/{f=0} f' "$C" > "$T/p1.txt"
 grep -aqE 'octets from 192\.168\.77\.1' "$T/p1.txt" && ok "ping gateway answered" || { bad "ping gateway not answered"; head -12 "$T/p1.txt"; }
+has "$C" 'stack wired=1 uplink=0' "/proc/wlan stack line: wired, uplink card 0"
+awk '/==PING1==/{f=1} f' "$C" | grep -aqE 'stack wired=1 .* gwmac=[0-9a-f]{2}:' && ok "/proc/wlan stack line: gateway MAC learned" || bad "/proc/wlan stack line: no gateway MAC"
+grep -aqE 'stack wired=1 .* drop=[0-9]+ echo=[0-9]+ dns=' "$C" && ok "/proc/wlan stack line: drop/echo/dns fields" || bad "/proc/wlan stack line: drop/echo/dns fields missing"
 has "$C" '==END==' "system keeps running"
+
+ETH="-netdev user,id=n0,net=10.0.2.0/24 -device e1000,netdev=n0"
+echo "-- E: e1000 + wlan0: the WLAN link becomes the uplink, ping goes over WLAN"
+run e "iwlfhtest iwlfhbind nic" "$ETH"
+E="$T/e.klar"
+has "$E" 'auto=up rc=0' "two cards: autostart up"
+has "$E" 'stack wired=1 uplink=1' "two cards: uplink is the WLAN card"
+awk '/==WAITED==/{f=1} /==PING1==/{f=0} f' "$E" > "$T/p2.txt"
+grep -aqE 'octets from 192\.168\.77\.1' "$T/p2.txt" && ok "two cards: ping over WLAN answered" || { bad "two cards: ping over WLAN not answered"; head -12 "$T/p2.txt"; }
+has "$E" '==END==' "two cards: system keeps running"
+
+echo "-- F: control noupprefer: uplink stays on the e1000, ping over WLAN fails"
+run f "iwlfhtest iwlfhbind nic noupprefer" "$ETH"
+F="$T/f.klar"
+has "$F" 'auto=up rc=0' "control: autostart up"
+has "$F" 'stack wired=1 uplink=0' "control: uplink stays on the e1000"
+awk '/==WAITED==/{f=1} /==PING1==/{f=0} f' "$F" > "$T/p3.txt"
+grep -aqE 'octets from 192\.168\.77\.1' "$T/p3.txt" && bad "control: ping answered without uplink_prefer" || ok "control: no ping reply without uplink_prefer"
 
 echo "-- D: no conf: no stack on wlan0, ping cannot succeed"
 run d "iwlfhtest iwlfhbind nic"

@@ -377,12 +377,12 @@ echo "== 11. the honest inventory, also beyond non-Ethernet =="
 #
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/10.txt" \
     -device e1000e,netdev=nx -netdev user,id=nx -device rocker,name=sw1
-hat "$TMPD/10.txt" "netdev: bestand" "die Bestandsliste wird gedruckt"
+hat "$TMPD/10.txt" "netdev: inventory" "die Bestandsliste wird gedruckt"
 hat "$TMPD/10.txt" "82574L (1G) -> e1000" \
     "die Karte MIT Treiber steht mit ihrem Modellnamen da, nicht nur als 'Intel'"
-hat "$TMPD/10.txt" "kein Treiber (kein Ethernet-Port)" \
+hat "$TMPD/10.txt" "no driver (no Ethernet port)" \
     "und das Klasse-02:80-Geraet wird GENANNT statt verschwiegen"
-hat "$TMPD/10.txt" "netdev: bestand 2 geraete, 1 mit treiber, 1 ohne" \
+hat "$TMPD/10.txt" "netdev: inventory 2 devices, 1 with driver, 1 without" \
     "und die Zaehlung darunter stimmt"
 
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/11.txt" \
