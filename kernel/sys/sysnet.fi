@@ -5,7 +5,6 @@ import sched.sched
 import sched.proc
 import lib.errno
 import fs.file
-import ipc.uio
 import net.inet
 import net.netlink
 import net.netview
@@ -26,7 +25,7 @@ import sys.sysmem
 import sys.sysevent
 
 export {
-    do_accept, do_bind, do_connect, do_getsockopt, do_listen, do_recvmsg, do_sendmsg, do_setsockopt, do_shutdown, do_socket, do_socketpair, do_sockname, kill_allowed, net_call, shm_of, sock_close_all
+    ctr_admin, do_accept, do_bind, do_connect, do_ebpf_attach, do_ebpf_load, do_ebpf_map, do_ebpf_prog, do_ebpf_stat, do_getsockopt, do_listen, do_netmon, do_netvallow, do_netvfb, do_netvget, do_netvset, do_recvmsg, do_sendmsg, do_setsockopt, do_share, do_shutdown, do_socket, do_socketpair, do_sockname, do_wgget, do_wgset, kill_allowed, shm_of, sock_close_all
 }
 
 const SOCK_STREAM: u64 = 1
@@ -35,39 +34,6 @@ const SOCK_CLOEXEC: u64 = 524288 // 0o2000000
 const IPPROTO_ICMP: u64 = 1
 const IPPROTO_TCP: u64 = 6
 const IPPROTO_UDP: u64 = 17
-const SYS_OSUM_NETSET: u64 = 1301 // (ip, maske, gateway) -> 0
-
-const NG_READY: u64 = 0
-const NG_IP: u64 = 1
-const NG_MASK: u64 = 2
-const NG_GW: u64 = 3
-const NG_MAC0: u64 = 4
-const NG_MAC1: u64 = 5
-const NG_IN: u64 = 6
-const NG_OUT: u64 = 7
-
-const NG_STATE: u64 = 8
-
-//     22 NETZ  K3 BDF 0900 L 1 ABL 0 IP 169.254.10.1
-const NG_DHCPST: u64 = 9
-const NG_DHCPTRY: u64 = 12
-
-const NG_LINK: u64 = 13
-const NG_SPEED: u64 = 14
-const NG_CARDTX: u64 = 15
-const NG_CARDRX: u64 = 16
-// ROUND DELL2: THE CHIP'S OWN COUNTERS, a1 = which (see
-// `e1000.hwstat_on`). The two counters above are what the DRIVER
-// handed over; these are what the MAC says went onto and came off the
-// wire -- the only way to tell "sent but nobody answered" from "never
-// left the chip" on a machine without a serial line.
-const NG_HW: u64 = 17
-const SYS_OSUM_DHCPST: u64 = 1302
-
-// ====================================================== RUNDE NETVIEW
-const SYS_OSUM_NETVGET: u64 = 1310
-const SYS_OSUM_NETVSET: u64 = 1311
-const SYS_OSUM_NETVALLOW: u64 = 1312
 
 const NV_MODE: u64 = 0 // 0 real, 1 filtered, 2 faked, 3 none
 const NV_ALLOWN: u64 = 1
@@ -80,57 +46,6 @@ const NV_PID: u64 = 12
 const NV_FALLBACK: u64 = 13 // 0 off, 1 when-offline, 2 always
 const NV_FBVIEW: u64 = 14
 const NV_LINK: u64 = 15
-
-const SYS_OSUM_NETVFB: u64 = 1313
-
-const SYS_OSUM_CTRGET: u64 = 1330
-const SYS_OSUM_CTRSET: u64 = 1331
-const SYS_OSUM_CTRNEW: u64 = 1332
-
-const CG_MINE: u64 = 0
-const CG_STATE: u64 = 1 // C_FREE/C_SET/C_RUN/C_DEAD
-const CG_MEMLIM: u64 = 2
-const CG_MEMUSE: u64 = 3
-const CG_MEMPEAK: u64 = 4
-const CG_MEMDENY: u64 = 5
-const CG_CPUSH: u64 = 6
-const CG_CPUTICK: u64 = 7
-const CG_PROCS: u64 = 8
-const CG_PROCLIM: u64 = 9
-const CG_COUNT: u64 = 10
-const CG_CREATED: u64 = 11
-const CG_DESTROYED: u64 = 12
-const CG_ESCAPES: u64 = 13
-const CG_ROOTLEN: u64 = 14
-const CG_NAMEC: u64 = 15
-const CG_ROOTC: u64 = 16
-const CG_NETV: u64 = 17
-const CG_MAXC: u64 = 18
-
-const CS_MEMLIM: u64 = 0
-const CS_CPUSH: u64 = 1
-const CS_PROCLIM: u64 = 2
-const CS_NETV: u64 = 3
-const CS_STATE: u64 = 4
-const CS_ROOT: u64 = 5
-
-// ======================================================= ROUND NETMON
-//
-// WHO USED HOW MUCH. One number per call, the way `PSTAT` has answered
-// about the task table since round K6 -- no buffer, no pointer into the
-// kernel, nothing a program could be handed and misread.
-//
-//   NETMON(kind, index, field) -> number
-//
-//     kind 0  the scalars of the whole machine (index ignored)
-//     kind 1  a task: the six counters, its pid, whether it is alive
-//     kind 2  a socket: the live connection list `netstat` prints
-//     kind 3  one octet of the program name of a task
-//
-// READING IS ALLOWED FOR ANYBODY, exactly as with NETVGET and for the
-// same reason: a machine that will not tell the person which of their
-// own programs is using the line is not protecting anybody.
-const SYS_OSUM_NETMON: u64 = 1320
 
 // kind 0 -- the machine.
 const NM_ON: u64 = 0 // 1 = the counters are running
@@ -163,34 +78,6 @@ const NS_AGE: u64 = 13 // ticks since the slot was taken
 // that used it is still running.
 const NP_USED: u64 = 6
 
-// AND THE ONE CALL OF THIS ROUND THAT CHANGES SOMETHING.
-//
-//   NETMONROLL(program, field) -> what has been used since the last roll
-//
-// It hands out the difference and moves the watermark in the same
-// breath, so that `/bin/netstat -w` can add it to today's line in
-// `/var/net/usage` and nothing is counted twice or lost. ROOT ONLY, and
-// that is not decoration: a program that could roll its own counters
-// could empty them, and the history would then say it used nothing.
-const SYS_OSUM_NETMONROLL: u64 = 1321
-const SYS_OSUM_EBPFATTACH: u64 = 1406
-const SYS_OSUM_EBPFMAP: u64 = 1407
-const SYS_OSUM_EBPFSTAT: u64 = 1408
-
-// ============================================ ROUND NETMON, PART TWO
-//
-//   SHARE(what, index) -> number
-//
-// Everything the sharing of `kernel/share.fi` will tell a program:
-// whether it is on, what the shared side's address and pool are, and
-// one row per connected device. Reading is allowed for anybody, for the
-// same reason as everywhere else in this round -- the person has a
-// right to know which devices are hanging off their machine.
-//
-// SWITCHING IT ON AND OFF IS ROOT ONLY (`SH_SET`). Anything else and
-// any process could hand this machine's connection to the room.
-const SYS_OSUM_SHARE: u64 = 1322
-
 const SH_ON: u64 = 0 // 1 = the connection is being handed on
 const SH_SET: u64 = 1 // (index = 0 or 1) switch it -- euid 0
 const SH_IP: u64 = 2 // this machine's address on the shared side
@@ -207,14 +94,6 @@ const SH_NAT: u64 = 12 // records in the NAT table right now
 const SH_STAT: u64 = 13 // (index) one of `share.S_*`
 const SH_UPLINK: u64 = 14
 const SH_SHARED: u64 = 15
-
-fn wg_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
-    a2: u64) -> u64 {
-    if number == SYS_OSUM_WGGET {
-        return do_wgget(state, me, a0, a1, a2)
-    }
-    return do_wgset(state, me, a0, a1, a2)
-}
 
 fn do_wgget(state: u64, me: u64, field: u64, ptr: u64, len: u64) -> u64 {
     if field == WG_READY {
@@ -381,8 +260,6 @@ fn do_wgset(state: u64, me: u64, field: u64, ptr: u64, n: u64) -> u64 {
     }
     return sysuser.neg(errno.E_INVAL)
 }
-
-const SYS_OSUM_WGGET: u64 = 1950
 
 // wgget
 const WG_READY: u64 = 0
@@ -1053,192 +930,6 @@ fn ctr_admin(state: u64, me: u64) -> bool {
     return sched.tget(state, me, sched.T_EUID) == 0
 }
 
-fn do_ctrget(state: u64, me: u64, field: u64, nr: u64, c: u64) -> u64 {
-    if field == CG_MINE {
-        return ctr.ctr_of(state, me)
-    }
-    if field == CG_COUNT {
-        return ctr.count(state)
-    }
-    if field == CG_CREATED {
-        return ctr.created(state)
-    }
-    if field == CG_DESTROYED {
-        return ctr.destroyed(state)
-    }
-    if field == CG_ESCAPES {
-        return ctr.escapes(state)
-    }
-    if field == CG_MAXC {
-        return ctr.MAX_CTR
-    }
-    var i: u64 = nr
-    if i == 0 {
-        i = ctr.ctr_of(state, me)
-    }
-    if i == 0 || i >= ctr.MAX_CTR {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    let mein: u64 = ctr.ctr_of(state, me)
-    if mein != ctr.HOST && mein != i {
-        return sysuser.neg(errno.E_PERM)
-    }
-    if field == CG_STATE {
-        return ctr.state_of(state, i)
-    }
-    if field == CG_MEMLIM {
-        return ctr.mem_limit(state, i)
-    }
-    if field == CG_MEMUSE {
-        return ctr.mem_used(state, i)
-    }
-    if field == CG_MEMPEAK {
-        return ctr.mem_peak(state, i)
-    }
-    if field == CG_MEMDENY {
-        return ctr.mem_denials(state, i)
-    }
-    if field == CG_CPUSH {
-        return ctr.cpu_share(state, i)
-    }
-    if field == CG_CPUTICK {
-        return ctr.cpu_ticks(state, i)
-    }
-    if field == CG_PROCS {
-        return ctr.procs_of(state, i)
-    }
-    if field == CG_PROCLIM {
-        return ctr.procs_limit(state, i)
-    }
-    if field == CG_ROOTLEN {
-        return ctr.root_len(state, i)
-    }
-    if field == CG_NETV {
-        return ctr.netview_of(state, i)
-    }
-    if field == CG_NAMEC {
-        return ctr.name_at(state, i, c)
-    }
-    if field == CG_ROOTC {
-        return ctr.root_at(state, i, c)
-    }
-    return sysuser.neg(errno.E_INVAL)
-}
-
-fn do_ctrnew(state: u64, me: u64, name: u64, len: u64) -> u64 {
-    if !ctr_admin(state, me) {
-        return sysuser.neg(errno.E_PERM)
-    }
-    let i: u64 = ctr.alloc(state)
-    if i == 0 {
-        return sysuser.neg(errno.E_NOSPC)
-    }
-    if name != 0 {
-        let buf: u64 = sysuser.nameb(state)
-        let n: u64 = sysuser.fetch_name(state, me, name, buf, ctr.NAME_MAX)
-        if !errno.is_error(n) {
-            ctr.name_set(state, i, buf)
-        }
-    }
-    return i
-}
-
-fn do_ctrset(state: u64, me: u64, nr: u64, field: u64, value: u64) -> u64 {
-    if !ctr_admin(state, me) {
-        return sysuser.neg(errno.E_PERM)
-    }
-    if nr == 0 || nr >= ctr.MAX_CTR {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    if !ctr.exists(state, nr) {
-        return sysuser.neg(errno.E_SRCH)
-    }
-    if field == CS_MEMLIM {
-        if !ctr.may_limit(state, nr, value) {
-            ctr.note_escape(state)
-            return sysuser.neg(errno.E_PERM)
-        }
-        ctr.mem_limit_set(state, nr, value)
-        return 0
-    }
-    if field == CS_CPUSH {
-        if !ctr.cpu_share_set(state, nr, value) {
-            return sysuser.neg(errno.E_INVAL)
-        }
-        return 0
-    }
-    if field == CS_PROCLIM {
-        ctr.procs_limit_set(state, nr, value)
-        return 0
-    }
-    if field == CS_NETV {
-        if value > netview.V_LAST {
-            return sysuser.neg(errno.E_INVAL)
-        }
-        ctr.netview_set(state, nr, value)
-        return 0
-    }
-    if field == CS_STATE {
-        if value > ctr.C_DEAD {
-            return sysuser.neg(errno.E_INVAL)
-        }
-        if value == ctr.C_FREE {
-            if ctr.procs_of(state, nr) != 0 {
-                return sysuser.neg(errno.E_BUSY)
-            }
-            ctr.free_slot(state, nr)
-            return 0
-        }
-        ctr.set_state(state, nr, value)
-        return 0
-    }
-    if field == CS_ROOT {
-        let buf: u64 = sysuser.nameb(state)
-        let n: u64 = sysuser.fetch_name(state, me, value, buf, ctr.ROOT_MAX)
-        if errno.is_error(n) {
-            return n
-        }
-        if !ctr.may_reroot(state, nr, buf) {
-            ctr.note_escape(state)
-            return sysuser.neg(errno.E_PERM)
-        }
-        if !ctr.root_set(state, nr, buf) {
-            return sysuser.neg(errno.E_INVAL)
-        }
-        return 0
-    }
-    return sysuser.neg(errno.E_INVAL)
-}
-
-fn do_ctrenter(state: u64, me: u64, nr: u64) -> u64 {
-    if !ctr_admin(state, me) {
-        return sysuser.neg(errno.E_PERM)
-    }
-    if nr == 0 || nr >= ctr.MAX_CTR {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    if !ctr.alive(state, nr) {
-        return sysuser.neg(errno.E_SRCH)
-    }
-    if ctr.root_len(state, nr) == 0 {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    let lim: u64 = ctr.procs_limit(state, nr)
-    if lim != 0 {
-        if ctr.procs_of(state, nr) >= lim {
-            return sysuser.neg(errno.E_AGAIN)
-        }
-    }
-    ctr.set_ctr(state, me, nr)
-    ctr.set_state(state, nr, ctr.C_RUN)
-    let v: u64 = ctr.netview_of(state, nr)
-    if v != 0 {
-        netview.set_view(state, me, v)
-    }
-    uio.reset(state, me)
-    return 0
-}
-
 fn do_netvfb(state: u64, me: u64, want: u64) -> u64 {
     if sched.tget(state, me, sched.T_EUID) != 0 {
         return sysuser.neg(errno.E_PERM)
@@ -1612,219 +1303,6 @@ fn do_ebpf_prog(state: u64, me: u64, slot: u64, field: u64) -> u64 {
         return ebpfhook.attached(state, ebpfhook.K_SOCK)
     }
     return sysuser.neg(errno.E_INVAL)
-}
-
-fn net_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
-    a2: u64) -> u64 {
-    // ======================================================= RUNDE O-EBPF
-    if number == sysconst.SYS_OSUM_EBPFLOAD {
-        return do_ebpf_load(state, me, a0, a1, a2)
-    }
-    if number == SYS_OSUM_EBPFATTACH {
-        return do_ebpf_attach(state, me, a0, a1, a2)
-    }
-    if number == SYS_OSUM_EBPFMAP {
-        return do_ebpf_map(state, me, a0, a1, a2)
-    }
-    if number == SYS_OSUM_EBPFSTAT {
-        return do_ebpf_stat(state, me, a0)
-    }
-    if number == sysconst.SYS_OSUM_EBPFPROG {
-        return do_ebpf_prog(state, me, a0, a1)
-    }
-    // ======================================================= ROUND NETMON
-    if number == SYS_OSUM_NETMON {
-        return do_netmon(state, me, a0, a1, a2)
-    }
-    if number == SYS_OSUM_SHARE {
-        return do_share(state, me, a0, a1)
-    }
-    if number == SYS_OSUM_NETMONROLL {
-        if sched.tget(state, me, sched.T_EUID) != 0 {
-            return sysuser.neg(errno.E_PERM)
-        }
-        if a0 >= netmon.NPROG || a1 >= netmon.T_FIELDS {
-            return sysuser.neg(errno.E_INVAL)
-        }
-        return netmon.roll(state, a0, a1)
-    }
-    // ================================================= RUNDE O-CONTAINER
-    if number == SYS_OSUM_CTRGET {
-        return do_ctrget(state, me, a0, a1, a2)
-    }
-    if number == SYS_OSUM_CTRSET {
-        return do_ctrset(state, me, a0, a1, a2)
-    }
-    if number == SYS_OSUM_CTRNEW {
-        return do_ctrnew(state, me, a0, a1)
-    }
-    if number == sysconst.SYS_OSUM_CTRENTER {
-        return do_ctrenter(state, me, a0)
-    }
-    // ====================================================== RUNDE NETVIEW
-    if number == SYS_OSUM_NETVFB {
-        return do_netvfb(state, me, a0)
-    }
-    if number == SYS_OSUM_NETVGET {
-        return do_netvget(state, me, a0, a1)
-    }
-    if number == SYS_OSUM_NETVSET {
-        return do_netvset(state, me, a0, a1)
-    }
-    if number == SYS_OSUM_NETVALLOW {
-        return do_netvallow(state, me, a0, a1, a2)
-    }
-    if number == sysconst.SYS_OSUM_NETGET {
-        let v: u64 = netview.view_of(state, me)
-        if v == netview.V_NONE {
-            if a0 == NG_READY {
-                return 0
-            }
-            if a0 == NG_STATE {
-                return netview.NS_NOCARRIER
-            }
-            return errno.neg(errno.E_NODEV)
-        }
-        if v == netview.V_FAKED {
-            if a0 == NG_READY {
-                return 1
-            }
-            if a0 == NG_IP {
-                return netview.FAKE_IP
-            }
-            if a0 == NG_MASK {
-                return netview.FAKE_MASK
-            }
-            if a0 == NG_GW {
-                return netview.FAKE_GW
-            }
-            if a0 == NG_MAC0 {
-                return netview.FAKE_MAC0
-            }
-            if a0 == NG_MAC1 {
-                return netview.FAKE_MAC1
-            }
-            if a0 == NG_IN || a0 == NG_OUT {
-                return 0
-            }
-            if a0 == NG_STATE {
-                return netview.NS_ONLINE
-            }
-            if a0 == NG_LINK {
-                return 1
-            }
-            if a0 == NG_SPEED {
-                return 0
-            }
-            if a0 == NG_CARDTX || a0 == NG_CARDRX {
-                return 0
-            }
-            return errno.neg(errno.E_INVAL)
-        }
-        if a0 == NG_READY {
-            if inet.ready(state) {
-                return 1
-            }
-            return 0
-        }
-        if a0 == NG_STATE {
-            return netview.link_state(state)
-        }
-        if a0 == NG_LINK {
-            if inet.carrier(state) {
-                return 1
-            }
-            return 0
-        }
-        if a0 == NG_HW {
-            return inet.hwstat(state, a1)
-        }
-        if a0 == NG_SPEED {
-            return inet.link_speed(state)
-        }
-        if !inet.ready(state) {
-            return errno.neg(errno.E_NODEV)
-        }
-        if a0 == NG_IP {
-            return inet.ip(state)
-        }
-        if a0 == NG_MASK {
-            return inet.mask(state)
-        }
-        if a0 == NG_GW {
-            return inet.gw(state)
-        }
-        if a0 == NG_MAC0 {
-            return (inet.mac_at(state, 0) << 24) | (inet.mac_at(state, 1) << 16)
-                | (inet.mac_at(state, 2) << 8) | inet.mac_at(state, 3)
-        }
-        if a0 == NG_MAC1 {
-            return (inet.mac_at(state, 4) << 8) | inet.mac_at(state, 5)
-        }
-        if a0 == NG_IN {
-            return inet.frames_in(state)
-        }
-        if a0 == NG_OUT {
-            return inet.frames_out(state)
-        }
-        if a0 == NG_CARDTX {
-            return inet.card_octets(state, 0)
-        }
-        if a0 == NG_CARDRX {
-            return inet.card_octets(state, 1)
-        }
-        if a0 >= NG_DHCPST && a0 <= NG_DHCPTRY {
-            return inet.dhcp_get(a0 - NG_DHCPST)
-        }
-        return errno.neg(errno.E_INVAL)
-    }
-    if number == SYS_OSUM_DHCPST {
-        if !perm.is_root(state, me) {
-            return errno.neg(errno.E_PERM)
-        }
-        if a0 > 6 {
-            return errno.neg(errno.E_INVAL)
-        }
-        inet.dhcp_set(a0, a1)
-        return 0
-    }
-    if number != SYS_OSUM_NETSET {
-        return sysuser.neg(errno.E_NOSYS)
-    }
-    if !perm.is_root(state, me) {
-        return errno.neg(errno.E_PERM)
-    }
-    if !inet.ready(state) {
-        return errno.neg(errno.E_NODEV)
-    }
-    if a0 == 0 {
-        if a1 != 0 || (a2 & 0xFFFFFFFF) != 0 {
-            return errno.neg(errno.E_INVAL)
-        }
-        if !inet.readdr(state, 0, 0, 0, 0, 0, 0) {
-            return errno.neg(errno.E_IO)
-        }
-        return 0
-    }
-    var praefix: u64 = 0
-    var bit: u64 = 32
-    var seen_zero: bool = false
-    while bit > 0 {
-        bit = bit - 1
-        if ((a1 >> bit) & 1) != 0 {
-            if seen_zero {
-                return errno.neg(errno.E_INVAL)
-            }
-            praefix = praefix + 1
-        } else {
-            seen_zero = true
-        }
-    }
-    if !inet.readdr(state, (a0 >> 24) & 255, (a0 >> 16) & 255,
-        (a0 >> 8) & 255, a0 & 255, praefix, a2 & 0xFFFFFFFF) {
-        return errno.neg(errno.E_IO)
-    }
-    return 0
 }
 
 // ============================================================ RUNDE K13

@@ -15,11 +15,13 @@ import ipc.handle
 import arch.x86_64.hv
 import pwr.pmon
 import sched.time
+import net.netview
 import bus.pcidbg
 import drv.net.iwl_dbg
 import net.wlan_reload
 import net.wlan_knobs
 import ipc.perm
+import sched.ctr
 import sched.origin
 import apprights.policy
 import klog
@@ -27,34 +29,13 @@ import diag.crash
 import pwr.pwr
 import pwr.batt
 import acpi.acpiev
-import usb.usb
-import block.wechsel
-import drv.snd.codecstat
-import sys.sysconst
 import sys.sysuser
-import sys.sysfile
-import sys.sysproc
+import sys.sysnet
 
 export {
-    codec_call, do_cpustat, do_dbg, do_hotkey, do_klog, do_krach, do_origin, do_pmon, do_session_lock, handle_call, is_k13, kbd_call, late_call, pwr_call, usb_call, vm_call, wechsel_call
+    do_cpustat, do_ctrenter, do_ctrget, do_ctrnew, do_ctrset, do_dbg, do_hotkey, do_klog, do_krach, do_origin, do_pmon, do_pwrget, do_pwrset, do_pwrstr, do_session_lock, do_vm_create, do_vm_stat, objinfo, vm_error, vm_of
 }
 
-const SYS_VM_RUN: u64 = 1501
-const SYS_VM_STAT: u64 = 1502
-const SYS_VM_KILL: u64 = 1503
-const HND_VERSION: u64 = 2200
-const HND_FDH: u64 = 2201
-const HND_RIGHTS: u64 = 2202
-const HND_BEGIN: u64 = 2203
-const HND_OBJECT: u64 = 2204
-const HND_CANCEL: u64 = 2205 // (token) -> 0
-const HND_END: u64 = 2206
-const HND_STATE: u64 = 2207
-const HND_DUP: u64 = 2208
-const HND_PASS: u64 = 2209
-const HND_COUNT: u64 = 2210
-const HND_OBJINFO: u64 = 2211
-const HND_MAXNR: u64 = 2211
 const OG_GET: u64 = 0
 const OG_SET: u64 = 1
 const OG_RGET: u64 = 3
@@ -65,67 +46,37 @@ const OG_RSET: u64 = 2
 //   ORIGIN(2, ...) above a registered ceiling -> -EPERM
 const OG_CSET: u64 = 4
 const OG_CGET: u64 = 5
+
+const CG_MINE: u64 = 0
+const CG_STATE: u64 = 1 // C_FREE/C_SET/C_RUN/C_DEAD
+const CG_MEMLIM: u64 = 2
+const CG_MEMUSE: u64 = 3
+const CG_MEMPEAK: u64 = 4
+const CG_MEMDENY: u64 = 5
+const CG_CPUSH: u64 = 6
+const CG_CPUTICK: u64 = 7
+const CG_PROCS: u64 = 8
+const CG_PROCLIM: u64 = 9
+const CG_COUNT: u64 = 10
+const CG_CREATED: u64 = 11
+const CG_DESTROYED: u64 = 12
+const CG_ESCAPES: u64 = 13
+const CG_ROOTLEN: u64 = 14
+const CG_NAMEC: u64 = 15
+const CG_ROOTC: u64 = 16
+const CG_NETV: u64 = 17
+const CG_MAXC: u64 = 18
+
+const CS_MEMLIM: u64 = 0
+const CS_CPUSH: u64 = 1
+const CS_PROCLIM: u64 = 2
+const CS_NETV: u64 = 3
+const CS_STATE: u64 = 4
+const CS_ROOT: u64 = 5
 const HK_SEQ_Q: u64 = 0
 const HK_KEY_Q: u64 = 1
 const HK_NS_Q: u64 = 2
 const HK_DOWN_Q: u64 = 3
-
-// ---------------------------------------------------------- RUNDE K13
-const SYS_ACCESS: u64 = 21
-const SYS_CHMOD: u64 = 90
-const SYS_FCHMOD: u64 = 91
-const SYS_CHOWN: u64 = 92
-const SYS_FCHOWN: u64 = 93
-const SYS_LCHOWN: u64 = 94
-const SYS_UMASK: u64 = 95
-const SYS_GETUID: u64 = 102
-const SYS_GETGID: u64 = 104
-const SYS_SETUID: u64 = 105
-const SYS_SETGID: u64 = 106
-const SYS_GETEUID: u64 = 107
-const SYS_GETEGID: u64 = 108
-const SYS_SETREUID: u64 = 113
-const SYS_SETREGID: u64 = 114
-const SYS_SETRESUID: u64 = 117
-const SYS_GETRESUID: u64 = 118
-const SYS_SETRESGID: u64 = 119
-const SYS_GETRESGID: u64 = 120
-const SYS_REBOOT: u64 = 169
-const SYS_FCHOWNAT: u64 = 260
-const SYS_FCHMODAT: u64 = 268
-const SYS_FACCESSAT: u64 = 269
-const SYS_SENDFILE: u64 = 40
-const SYS_MEMBARRIER: u64 = 324
-const SYS_FACCESSAT2: u64 = 439
-
-const SYS_OSUM_USERINFO: u64 = 1600
-// Bring the SATA (AHCI) disk up on demand: 0 = nothing found, else the size in blocks.
-// Any user; called by the installer when it opens, so /dev/sda exists on
-// every boot entry without the `sata` word (r343).
-const SYS_OSUM_DISKUP: u64 = 1601
-
-// ============================================= RUNDE MULTIUSER
-const SYS_GETGROUPS: u64 = 115
-const SYS_SETGROUPS: u64 = 116
-const SYS_OSUM_MUSTAT: u64 = 1200
-
-const SYS_OSUM_USBSTAT: u64 = 1701
-const SYS_OSUM_USBPULL: u64 = 1702
-const WX_COUNT: u64 = 0
-const WX_DEV: u64 = 1
-const WX_MNT: u64 = 2
-const WX_BLOCKS: u64 = 3
-const WX_PATHCH: u64 = 4
-const WX_EJECT: u64 = 5
-const WX_EVENTS: u64 = 6
-const WX_KOMMT: u64 = 7
-const WX_GEHT: u64 = 8
-const WX_AUS: u64 = 9
-const SYS_OSUM_PWRSET: u64 = 1751
-const KB_GET: u64 = 0
-const KB_SET: u64 = 1
-const KB_COUNT: u64 = 2
-const KB_SWITCH: u64 = 3
 
 const KL_SEQ: u64 = 0
 const KL_FIRST: u64 = 1
@@ -232,268 +183,6 @@ const PS_BLANK: u64 = 2
 const PS_BLANKAFTER: u64 = 3
 // L-005..L-007 gate only: lid | pct<<8 | state<<16 | mains<<24 into the fake laptop (needs `evfake`)
 const PS_INJECT: u64 = 4
-const CDC_FRAME: u64 = 0
-const CDC_REJECT: u64 = 1
-const CDC_SEEN: u64 = 2
-const CDC_GET: u64 = 3
-const CDC_RESET: u64 = 4
-const CDG_FRAMES: u64 = 0
-const CDG_REJECTS: u64 = 1
-const CDG_LASTERR: u64 = 2
-const CDG_W: u64 = 3
-const CDG_H: u64 = 4
-const CDG_PROFILE: u64 = 5
-const CDG_MB: u64 = 6
-
-fn codec_call(state: u64, was: u64, a1: u64, a2: u64, a3: u64) -> u64 {
-    if was == CDC_FRAME {
-        codecstat.cd_frame(state)
-        return 0
-    }
-    if was == CDC_REJECT {
-        codecstat.cd_reject(state, a1)
-        return 0
-    }
-    if was == CDC_SEEN {
-        codecstat.cd_seen(state, a1, a2, a3, 0)
-        return 0
-    }
-    if was == CDC_RESET {
-        codecstat.cd_reset(state)
-        return 0
-    }
-    if was == CDC_GET {
-        if a1 == CDG_FRAMES { return codecstat.cd_frames(state) }
-        if a1 == CDG_REJECTS { return codecstat.cd_rejects(state) }
-        if a1 == CDG_LASTERR { return codecstat.cd_lasterr(state) }
-        if a1 == CDG_W { return codecstat.cd_w(state) }
-        if a1 == CDG_H { return codecstat.cd_h(state) }
-        if a1 == CDG_PROFILE { return codecstat.cd_profile(state) }
-        if a1 == CDG_MB { return codecstat.cd_mb(state) }
-        return sysuser.neg(errno.E_INVAL)
-    }
-    return sysuser.neg(errno.E_INVAL)
-}
-
-fn usb_call(state: u64, number: u64, a0: u64) -> u64 {
-    if number == SYS_OSUM_USBSTAT {
-        return usb.stat(state, a0)
-    }
-    if number == SYS_OSUM_USBPULL {
-        usb.unplug_now(state)
-        return usb.unplugs(state)
-    }
-    return sysuser.neg(errno.E_NOSYS)
-}
-
-fn wechsel_call(state: u64, a0: u64, a1: u64, a2: u64) -> u64 {
-    if a0 == WX_COUNT {
-        return wechsel.anzahl(state)
-    }
-    if a0 == WX_EVENTS {
-        return wechsel.ereignisse(state)
-    }
-    if a0 == WX_KOMMT {
-        return wechsel.angesteckt(state)
-    }
-    if a0 == WX_GEHT {
-        return wechsel.abgezogen(state)
-    }
-    if a0 == WX_AUS {
-        return wechsel.ausgeworfen(state)
-    }
-    if a1 >= wechsel.MAX_TRAEGER {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    if a0 == WX_DEV {
-        return wechsel.traeger_dev(state, a1)
-    }
-    if a0 == WX_MNT {
-        return wechsel.traeger_mnt(state, a1)
-    }
-    if a0 == WX_BLOCKS {
-        return wechsel.traeger_bloecke(state, a1)
-    }
-    if a0 == WX_PATHCH {
-        let p: u64 = wechsel.traeger_pfad(state, a1)
-        if p == 0 || a2 >= 16 {
-            return 0
-        }
-        return kstate.get8(p + a2)
-    }
-    if a0 == WX_EJECT {
-        return wechsel.auswerfen(state, a1)
-    }
-    return sysuser.neg(errno.E_INVAL)
-}
-
-fn late_call(state: u64, me: u64, number: u64, frame: u64) -> u64 {
-    let a0: u64 = sysuser.fget(frame, sysconst.F_RDI)
-    let a1: u64 = sysuser.fget(frame, sysconst.F_RSI)
-    let a2: u64 = sysuser.fget(frame, sysconst.F_RDX)
-    let a3: u64 = sysuser.fget(frame, sysconst.F_R10)
-    // ROUND A11Y-2: the tree, through the same seam as the WIG calls.
-    if number >= sysconst.AX_BASE && number <= sysconst.AX_MAXNR {
-        return gfx.sys_ax(state, me, number, a0, a1, a2)
-    }
-    if number >= sysconst.WIG_BASE && number <= sysconst.WIG_MAXNR {
-        return gfx.sys_wig(state, me, number, a0, a1, a2, a3,
-            sysuser.fget(frame, sysconst.F_R8))
-    }
-    return k13_call(state, me, number, a0, a1, a2, a3)
-}
-
-fn is_k13(number: u64) -> bool {
-    if number == SYS_ACCESS || number == SYS_UMASK || number == SYS_REBOOT {
-        return true
-    }
-    if number >= SYS_CHMOD && number <= SYS_LCHOWN {
-        return true
-    }
-    if number >= SYS_GETUID && number <= SYS_GETEGID {
-        return true
-    }
-    if number >= SYS_SETREUID && number <= SYS_GETRESGID {
-        return true
-    }
-    if number == SYS_FCHOWNAT || number == SYS_FCHMODAT
-        || number == SYS_FACCESSAT {
-        return true
-    }
-    if number == SYS_SENDFILE || number == SYS_MEMBARRIER
-        || number == SYS_FACCESSAT2 {
-        return true
-    }
-    if number == SYS_GETGROUPS || number == SYS_SETGROUPS {
-        return true
-    }
-    if number == SYS_OSUM_MUSTAT {
-        return true
-    }
-    if number == SYS_OSUM_DISKUP {
-        return true
-    }
-    return number == SYS_OSUM_USERINFO
-}
-
-fn k13_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
-    a3: u64) -> u64 {
-    if number == SYS_GETUID {
-        return sysproc.do_getid(state, me, sched.T_UID)
-    }
-    if number == SYS_GETEUID {
-        return sysproc.do_getid(state, me, sched.T_EUID)
-    }
-    if number == SYS_GETGID {
-        return sysproc.do_getid(state, me, sched.T_GID)
-    }
-    if number == SYS_GETEGID {
-        return sysproc.do_getid(state, me, sched.T_EGID)
-    }
-    if number == SYS_SETUID {
-        return sysproc.do_setuid(state, me, a0)
-    }
-    if number == SYS_SETGID {
-        return sysproc.do_setgid(state, me, a0)
-    }
-    if number == SYS_SETREUID {
-        return sysproc.do_setre(state, me, a0, a1, sched.T_UID, sched.T_EUID,
-            sched.T_SUID)
-    }
-    if number == SYS_SETREGID {
-        return sysproc.do_setre(state, me, a0, a1, sched.T_GID, sched.T_EGID,
-            sched.T_SGID)
-    }
-    if number == SYS_SETRESUID {
-        return sysproc.do_setres(state, me, a0, a1, a2, sched.T_UID, sched.T_EUID,
-            sched.T_SUID)
-    }
-    if number == SYS_SETRESGID {
-        return sysproc.do_setres(state, me, a0, a1, a2, sched.T_GID, sched.T_EGID,
-            sched.T_SGID)
-    }
-    if number == SYS_GETRESUID {
-        return sysproc.do_getres(state, me, a0, a1, a2, sched.T_UID, sched.T_EUID,
-            sched.T_SUID)
-    }
-    if number == SYS_GETRESGID {
-        return sysproc.do_getres(state, me, a0, a1, a2, sched.T_GID, sched.T_EGID,
-            sched.T_SGID)
-    }
-    if number == SYS_UMASK {
-        return sysproc.do_umask(state, me, a0)
-    }
-    if number == SYS_CHMOD {
-        return sysfile.do_chmod(state, me, a0, a1)
-    }
-    if number == SYS_FCHMOD {
-        return sysfile.do_fchmod(state, me, a0, a1)
-    }
-    if number == SYS_FCHMODAT {
-        let e1: u64 = sysfile.at_enter1(state, me, a0, a1)
-        if errno.is_error(e1) {
-            return e1
-        }
-        let r1: u64 = sysfile.do_chmod(state, me, a1, a2)
-        uio.set_atbase(state, me, 0)
-        return r1
-    }
-    if number == SYS_CHOWN || number == SYS_LCHOWN {
-        return sysfile.do_chown(state, me, a0, a1, a2)
-    }
-    if number == SYS_FCHOWN {
-        return sysfile.do_fchown(state, me, a0, a1, a2)
-    }
-    if number == SYS_FCHOWNAT {
-        let e2: u64 = sysfile.at_enter1(state, me, a0, a1)
-        if errno.is_error(e2) {
-            return e2
-        }
-        let r2: u64 = sysfile.do_chown(state, me, a1, a2, a3)
-        uio.set_atbase(state, me, 0)
-        return r2
-    }
-    if number == SYS_ACCESS {
-        return sysfile.do_access(state, me, a0, a1)
-    }
-    if number == SYS_FACCESSAT || number == SYS_FACCESSAT2 {
-        let e3: u64 = sysfile.at_enter1(state, me, a0, a1)
-        if errno.is_error(e3) {
-            return e3
-        }
-        let r3: u64 = sysfile.do_access(state, me, a1, a2)
-        uio.set_atbase(state, me, 0)
-        return r3
-    }
-    if number == SYS_SENDFILE {
-        return sysuser.neg(errno.E_INVAL)
-    }
-    if number == SYS_MEMBARRIER {
-        if a0 == 0 {
-            return 0
-        }
-        return sysuser.neg(errno.E_INVAL)
-    }
-    if number == SYS_REBOOT {
-        return sysproc.do_reboot(state, me, a0)
-    }
-    if number == SYS_OSUM_USERINFO {
-        return sysproc.do_userinfo(state, me, a0)
-    }
-    if number == SYS_OSUM_DISKUP {
-        return sysfile.do_diskup(state, me)
-    }
-    if number == SYS_GETGROUPS {
-        return sysproc.do_getgroups(state, me, a0, a1)
-    }
-    if number == SYS_SETGROUPS {
-        return sysproc.do_setgroups(state, me, a0, a1)
-    }
-    if number == SYS_OSUM_MUSTAT {
-        return sysproc.do_mustat(state, me, a0)
-    }
-    return sysuser.neg(errno.E_NOSYS)
-}
 
 fn do_session_lock(state: u64, me: u64, op: u64, arg: u64) -> u64 {
     let own_pid: u64 = sched.tget(state, me, sched.T_PID)
@@ -963,17 +652,6 @@ fn do_pmon(state: u64, me: u64, kind: u64, index: u64, field: u64) -> u64 {
     return sysuser.neg(errno.E_INVAL)
 }
 
-fn pwr_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
-    a2: u64) -> u64 {
-    if number == sysconst.SYS_OSUM_PWRGET {
-        return do_pwrget(state, a0)
-    }
-    if number == SYS_OSUM_PWRSET {
-        return do_pwrset(state, me, a0, a1)
-    }
-    return do_pwrstr(state, me, a0, a1, a2)
-}
-
 // ==================================================== RUNDE DISPLAY
 
 fn do_pwrget(state: u64, field: u64) -> u64 {
@@ -1278,95 +956,6 @@ fn do_pwrstr(state: u64, me: u64, which: u64, dst: u64, len: u64) -> u64 {
     return n
 }
 
-fn handle_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
-    a2: u64, a3: u64) -> u64 {
-    if number > HND_MAXNR {
-        return handle.err(handle.E_INVALID)
-    }
-    if number == HND_VERSION {
-        return 1
-    }
-    if number == HND_COUNT {
-        return handle.used(state, file.owner(state, me))
-    }
-    if number == HND_FDH {
-        return file.fd_handle(state, me, a0)
-    }
-    if number == HND_RIGHTS {
-        if file.fd_handle(state, me, a0) == handle.HANDLE_NONE {
-            return handle.err(handle.E_BADHANDLE)
-        }
-        return file.fd_rights(state, me, a0)
-    }
-    if number == HND_BEGIN {
-        return handle.req_begin(state, me, a0, a1 & handle.R_ALL)
-    }
-    if number == HND_OBJECT {
-        if handle.req_owner(state, a0) != me {
-            return handle.err(handle.E_BADHANDLE)
-        }
-        return handle.req_object(state, a0)
-    }
-    if number == HND_STATE {
-        if handle.req_owner(state, a0) != me {
-            return handle.err(handle.E_BADHANDLE)
-        }
-        return handle.req_state(state, a0)
-    }
-    if number == HND_CANCEL {
-        if !handle.req_cancel(state, me, a0) {
-            return handle.err(handle.E_BADHANDLE)
-        }
-        return 0
-    }
-    if number == HND_END {
-        if handle.req_owner(state, a0) != me {
-            return handle.err(handle.E_BADHANDLE)
-        }
-        let settle_idx: u64 = handle.req_end(state, a0)
-        if settle_idx == 0 {
-            return 0
-        }
-        file.open_settle(state, settle_idx - 1)
-        return 1
-    }
-    if number == HND_DUP {
-        let of: u64 = sysuser.of_of(state, me, a0)
-        if of >= file.MAX_OPEN {
-            return handle.err(handle.E_BADHANDLE)
-        }
-        let nfd: u64 = file.fd_alloc(state, me, 0)
-        if nfd >= file.MAX_FD {
-            return handle.err(handle.E_EXHAUSTED)
-        }
-        let got: u64 = file.fd_pass(state, me, me, a0, a1, nfd)
-        if got >= file.MAX_FD {
-            return handle.err(handle.E_RIGHTS)
-        }
-        return got
-    }
-    if number == HND_PASS {
-        let target: u64 = sched.find_pid(state, a0)
-        if target >= kstate.MAX_TASKS {
-            return handle.err(handle.E_NOTFOUND)
-        }
-        let got: u64 = file.fd_pass(state, me, target, a1, a2, a3)
-        if got >= file.MAX_FD {
-            return handle.err(handle.E_RIGHTS)
-        }
-        return got
-    }
-    if number == HND_OBJINFO {
-        if !kstate.mode_on(state, kstate.M_HANDLE) {
-            if !kstate.mode_on(state, kstate.M_ASYNC) {
-                return handle.err(handle.E_UNSUPPORTED_HND)
-            }
-        }
-        return objinfo(state, me, a0, a1)
-    }
-    return handle.err(handle.E_INVALID)
-}
-
 fn objinfo(state: u64, me: u64, was: u64, arg: u64) -> u64 {
     if was == 0 {
         return handle.objects_used(state)
@@ -1405,26 +994,6 @@ fn objinfo(state: u64, me: u64, was: u64, arg: u64) -> u64 {
         return handle.inflight_on(state, handle.OK_FILE, arg)
     }
     return handle.err(handle.E_INVALID)
-}
-
-// ====================================================== RUNDE DESKTOP
-fn kbd_call(state: u64, was: u64, value: u64) -> u64 {
-    if was == KB_GET {
-        return kbd.layout(state)
-    }
-    if was == KB_COUNT {
-        return kbd.LAYOUTS
-    }
-    if was == KB_SWITCH {
-        return kbd.switches(state)
-    }
-    if was == KB_SET {
-        if kbd.set_layout(state, value) {
-            return 0
-        }
-        return errno.neg(errno.E_INVAL)
-    }
-    return errno.neg(errno.E_INVAL)
 }
 
 // AB-003. GET is open to everyone -- the label is not a secret, it is the
@@ -1516,6 +1085,192 @@ fn do_origin(state: u64, me: u64, op: u64, a1: u64, a2: u64) -> u64 {
     return sysuser.neg(errno.E_INVAL)
 }
 
+fn do_ctrget(state: u64, me: u64, field: u64, nr: u64, c: u64) -> u64 {
+    if field == CG_MINE {
+        return ctr.ctr_of(state, me)
+    }
+    if field == CG_COUNT {
+        return ctr.count(state)
+    }
+    if field == CG_CREATED {
+        return ctr.created(state)
+    }
+    if field == CG_DESTROYED {
+        return ctr.destroyed(state)
+    }
+    if field == CG_ESCAPES {
+        return ctr.escapes(state)
+    }
+    if field == CG_MAXC {
+        return ctr.MAX_CTR
+    }
+    var i: u64 = nr
+    if i == 0 {
+        i = ctr.ctr_of(state, me)
+    }
+    if i == 0 || i >= ctr.MAX_CTR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let mein: u64 = ctr.ctr_of(state, me)
+    if mein != ctr.HOST && mein != i {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if field == CG_STATE {
+        return ctr.state_of(state, i)
+    }
+    if field == CG_MEMLIM {
+        return ctr.mem_limit(state, i)
+    }
+    if field == CG_MEMUSE {
+        return ctr.mem_used(state, i)
+    }
+    if field == CG_MEMPEAK {
+        return ctr.mem_peak(state, i)
+    }
+    if field == CG_MEMDENY {
+        return ctr.mem_denials(state, i)
+    }
+    if field == CG_CPUSH {
+        return ctr.cpu_share(state, i)
+    }
+    if field == CG_CPUTICK {
+        return ctr.cpu_ticks(state, i)
+    }
+    if field == CG_PROCS {
+        return ctr.procs_of(state, i)
+    }
+    if field == CG_PROCLIM {
+        return ctr.procs_limit(state, i)
+    }
+    if field == CG_ROOTLEN {
+        return ctr.root_len(state, i)
+    }
+    if field == CG_NETV {
+        return ctr.netview_of(state, i)
+    }
+    if field == CG_NAMEC {
+        return ctr.name_at(state, i, c)
+    }
+    if field == CG_ROOTC {
+        return ctr.root_at(state, i, c)
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ctrnew(state: u64, me: u64, name: u64, len: u64) -> u64 {
+    if !sysnet.ctr_admin(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    let i: u64 = ctr.alloc(state)
+    if i == 0 {
+        return sysuser.neg(errno.E_NOSPC)
+    }
+    if name != 0 {
+        let buf: u64 = sysuser.nameb(state)
+        let n: u64 = sysuser.fetch_name(state, me, name, buf, ctr.NAME_MAX)
+        if !errno.is_error(n) {
+            ctr.name_set(state, i, buf)
+        }
+    }
+    return i
+}
+
+fn do_ctrset(state: u64, me: u64, nr: u64, field: u64, value: u64) -> u64 {
+    if !sysnet.ctr_admin(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if nr == 0 || nr >= ctr.MAX_CTR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !ctr.exists(state, nr) {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if field == CS_MEMLIM {
+        if !ctr.may_limit(state, nr, value) {
+            ctr.note_escape(state)
+            return sysuser.neg(errno.E_PERM)
+        }
+        ctr.mem_limit_set(state, nr, value)
+        return 0
+    }
+    if field == CS_CPUSH {
+        if !ctr.cpu_share_set(state, nr, value) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    if field == CS_PROCLIM {
+        ctr.procs_limit_set(state, nr, value)
+        return 0
+    }
+    if field == CS_NETV {
+        if value > netview.V_LAST {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        ctr.netview_set(state, nr, value)
+        return 0
+    }
+    if field == CS_STATE {
+        if value > ctr.C_DEAD {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        if value == ctr.C_FREE {
+            if ctr.procs_of(state, nr) != 0 {
+                return sysuser.neg(errno.E_BUSY)
+            }
+            ctr.free_slot(state, nr)
+            return 0
+        }
+        ctr.set_state(state, nr, value)
+        return 0
+    }
+    if field == CS_ROOT {
+        let buf: u64 = sysuser.nameb(state)
+        let n: u64 = sysuser.fetch_name(state, me, value, buf, ctr.ROOT_MAX)
+        if errno.is_error(n) {
+            return n
+        }
+        if !ctr.may_reroot(state, nr, buf) {
+            ctr.note_escape(state)
+            return sysuser.neg(errno.E_PERM)
+        }
+        if !ctr.root_set(state, nr, buf) {
+            return sysuser.neg(errno.E_INVAL)
+        }
+        return 0
+    }
+    return sysuser.neg(errno.E_INVAL)
+}
+
+fn do_ctrenter(state: u64, me: u64, nr: u64) -> u64 {
+    if !sysnet.ctr_admin(state, me) {
+        return sysuser.neg(errno.E_PERM)
+    }
+    if nr == 0 || nr >= ctr.MAX_CTR {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !ctr.alive(state, nr) {
+        return sysuser.neg(errno.E_SRCH)
+    }
+    if ctr.root_len(state, nr) == 0 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    let lim: u64 = ctr.procs_limit(state, nr)
+    if lim != 0 {
+        if ctr.procs_of(state, nr) >= lim {
+            return sysuser.neg(errno.E_AGAIN)
+        }
+    }
+    ctr.set_ctr(state, me, nr)
+    ctr.set_state(state, nr, ctr.C_RUN)
+    let v: u64 = ctr.netview_of(state, nr)
+    if v != 0 {
+        netview.set_view(state, me, v)
+    }
+    uio.reset(state, me)
+    return 0
+}
+
 fn do_hotkey(state: u64, what: u64) -> u64 {
     if what == HK_SEQ_Q {
         return kbd.hotkey_seq(state)
@@ -1562,39 +1317,6 @@ fn vm_error(r: u64) -> u64 {
         return cap.err(cap.E_RIGHTS)
     }
     return cap.err(cap.E_BADHANDLE)
-}
-
-fn vm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64) -> u64 {
-    if number == sysconst.SYS_VM_CREATE {
-        return do_vm_create(state, me, a0, a1)
-    }
-    if number == SYS_VM_RUN {
-        let s: u64 = vm_of(state, me, a0, cap.R_WRITE)
-        if s >= hv.MAX_VMS {
-            return vm_error(s)
-        }
-        return hv.vm_run(state, s)
-    }
-    if number == SYS_VM_STAT {
-        return do_vm_stat(state, me, a0, a1)
-    }
-    if number == SYS_VM_KILL {
-        let s: u64 = vm_of(state, me, a0, cap.R_MANAGE)
-        if s >= hv.MAX_VMS {
-            return vm_error(s)
-        }
-        hv.vm_destroy(state, s)
-        cap.close(state, me, a0)
-        return 0
-    }
-    if number == sysconst.SYS_VM_VALUE {
-        let s: u64 = vm_of(state, me, a0, cap.R_READ)
-        if s >= hv.MAX_VMS {
-            return vm_error(s)
-        }
-        return hv.value_of(state, a1)
-    }
-    return cap.err(cap.E_INVALID)
 }
 
 fn do_vm_create(state: u64, me: u64, guest: u64, want: u64) -> u64 {

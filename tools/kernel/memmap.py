@@ -138,8 +138,8 @@ BEREICHE = [
     ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_PAGED * SHM_PAGES_MAX * 8"),
     # COMPOSITOR S3: who maps which shared object (the reference of a mapping is given back by munmap and by the end of the task)
     ("UMAP",       "unixsock.fi", "UMAP_OFF",    "UMAP_MAX * UMAP_BYTES"),
-    ("WLSCRATCH",  "sys.fi",      "WL_SCRATCH",  "0x1000"),
-    ("WLPATH",     "sys.fi",      "WL_PATH",     "0x1000"),
+    ("WLSCRATCH",  "sysconst.fi", "WL_SCRATCH",  "0x1000"),
+    ("WLPATH",     "sysconst.fi", "WL_PATH",     "0x1000"),
     ("OFS3",       "kstate.fi", "OFS3_OFF",       "OFS3_MAX"),
     ("MODE",       "kstate.fi", "MODE_OFF",       "MODE_MAX"),
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
@@ -410,7 +410,7 @@ def main():
               "hidrep.fi", "hidin.fi", "i2chid.fi",
               # RUNDE GRAFIK-1 -- der Software-Rasterer.
               "r3dsoft.fi",
-              "unixsock.fi", "sys.fi"):
+              "unixsock.fi", "sys.fi", "sysconst.fi"):
         p = None
         for stamm, verz, namen in os.walk(kdir):
             verz[:] = [v for v in verz if v not in ("user", "app")]
