@@ -9,7 +9,7 @@ three buttons carry a symbol in the middle of their cell, is the corner round, a
 
 The numbers come from the line `wmd: chrome-geo focused own_strip x y ow oh border title_h cap_w scale radius title frame text pad grad close`;
 the colours are 0xRRGGBB as decimals. A window that paints its own strip (own_strip = 1, the file manager's tabs) has no server title bar or text:
-only its buttons, corner and top edge are checked. Prints OK / FAIL lines; the exit code is the number of failures."""
+only its buttons, corner and top edge are checked. own_strip = 2: the server composes a tab strip (the terminal) instead of a title text. Prints OK / FAIL lines; the exit code is the number of failures."""
 import os
 import sys
 
@@ -76,7 +76,7 @@ def main():
             run += 1
         else:
             break
-    if not strip:
+    if strip != 1:
         check(abs(run - barh) <= 1, "the title bar is %d rows of the title colour at its middle (the table says %d)" % (run, barh))
     # 2. the rounded corner: the outer corner pixel is not the frame colour (a square corner would be)
     if rad >= 4:
@@ -111,6 +111,8 @@ def main():
         for xx in range(tx0, tx1):
             if not occluded(xx, yy) and not occluded(xm, yy) and dist(P[xx, yy], P[xm, yy]) > 80:
                 ink.append((xx, yy))
+    if strip == 2:
+        check(len(ink) >= 30, "the server tab strip: %d ink pixels between the padding and the buttons" % len(ink))
     if not strip:
         check(len(ink) >= 30, "the title text: %d ink pixels between the padding and the buttons" % len(ink))
     if ink and not strip:
