@@ -109,19 +109,19 @@ has "$TMPD/hup.txt" "kernel: done" "der Kern laeuft nach dem Aufsetzen normal we
 echo "== 2. CONTROLS: without the word, without device, without codec =="
 rc=$(lauf off "osum nokbd nosched noproc nofs" "$HDADEV")
 same "ohne das Wort 'audio' beendet sich der Kern normal" 21 "$rc"
-has "$TMPD/off.txt" "aud: aus (kein Wort)" "ohne das Wort passiert NICHTS"
+has "$TMPD/off.txt" "aud: off (no word)" "ohne das Wort passiert NICHTS"
 sz=$(stat -c%s "$TMPD/off.wav" 2>/dev/null || echo 0)
 num "und die Tondatei bleibt leer (nur der Kopf)" "$sz" le 64
 
 rc=$(lauf noaud "osum nokbd nosched noproc nofs audio noaudio audsay" "$HDADEV")
 same "GEGENPROBE noaudio: der Kern beendet sich normal" 21 "$rc"
-has "$TMPD/noaud.txt" "aud: aus (kein Wort)" "noaudio hebt audio auf"
+has "$TMPD/noaud.txt" "aud: off (no word)" "noaudio hebt audio auf"
 
 rc=$(lauf nodev "osum nokbd nosched noproc nofs audio audsay" "")
 same "ZUSAGE (f): ohne Tonkarte beendet sich der Kern NORMAL" 21 "$rc"
 has "$TMPD/nodev.txt" "hda: no device 04:03" "HDA sagt klar, dass kein Geraet da ist"
 has "$TMPD/nodev.txt" "ac97: no device 04:01" "AC97 sagt es auch"
-has "$TMPD/nodev.txt" "aud: kein Geraet, why2" "und die Schicht gibt eine ZAHL heraus (2 = kein Geraet)"
+has "$TMPD/nodev.txt" "aud: no device, why2" "und die Schicht gibt eine ZAHL heraus (2 = kein Geraet)"
 has "$TMPD/nodev.txt" "kernel: done" "das System laeuft danach ganz normal weiter"
 
 echo "== 3. PROMISE (a): THE SINE IS RECOMPUTED =="

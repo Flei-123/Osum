@@ -99,7 +99,7 @@ assert e["Subject"] == "Grüße aus Wien", e["Subject"]
 assert e["From"] == "justin@example.org" and e["To"] == "Max <max@example.org>"
 assert e.get_content().replace("\r\n", "\n") == "Hallo Max\n.Punkt am Anfang\nEnde\n", repr(e.get_content())
 e2 = email.message_from_bytes(m2.split(b"\r\n", 2)[2], policy=email.policy.default)
-assert e2["Subject"] == "Zweite" and e2.get_content().strip() == "nur eine Zeile"
+assert e2["Subject"] == "Zweite" and e2.get_content().strip() == "only one line"
 assert b"\n" not in m1.replace(b"\r\n", b""), "bare LF in message 1"
 PY
         else

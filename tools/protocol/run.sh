@@ -202,7 +202,7 @@ hasber=$(grep -aoE '/var/crash/[0-9]+\.txt' "$TMPD/panikdisk.txt" | tail -1)
 
 lauf_platte "$K0" "osum $QUIET script=absturz;exit" \
     "$TMPD/nachher.txt" "$TMPD/disk.img"
-has "$TMPD/nachher.txt" "absturz: ein Bericht vom letzten Start liegt vor" \
+has "$TMPD/nachher.txt" "crash: a report from the last boot is present" \
     "(c) der Kern findet die Marke des letzten Laufs wieder"
 has "$TMPD/nachher.txt" "A REPORT FROM THE LAST START" \
     "(c) /bin/absturz meldet ihn dem Benutzer"

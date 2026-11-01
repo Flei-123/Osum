@@ -565,7 +565,7 @@ hasnot "$TMPD/ohne.txt" "wclick:" "und kein Fenster in Ring 3"
 has "$TMPD/ohne.txt" "fb: console mirrored to screen" \
     "die Textkonsole aus Runde K7 spiegelt wie vorher"
 foto "$K0" "gfx wm wmhold nomouse $GRUND" "$TMPD/nm.txt" "$TMPD/nm.ppm"
-has "$TMPD/nm.txt" "mouse: kein Zeiger" "mit 'nomouse' gibt es kein Zeigegeraet"
+has "$TMPD/nm.txt" "mouse: no pointer" "mit 'nomouse' gibt es kein Zeigegeraet"
 has "$TMPD/nm.txt" "cursor=0" "und der Server malt keinen"
 schau_nicht "im Bild steht an der Zeigerstelle KEIN Zeiger" \
     pixel "$TMPD/nm.ppm" 400 301 255 255 255

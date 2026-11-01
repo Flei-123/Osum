@@ -58,7 +58,7 @@ d = email.utils.parsedate_to_datetime(e["Date"]).timestamp()
 assert abs(d - time.time()) < 600, ("Date off", e["Date"])
 assert e["Message-ID"].endswith(".osum@osum.lan>"), e["Message-ID"]
 e2 = email.message_from_bytes(m2.split(b"\r\n", 2)[2], policy=email.policy.default)
-assert e2["Subject"] == "Zweite" and e2.get_content().strip() == "nur eine Zeile"
+assert e2["Subject"] == "Zweite" and e2.get_content().strip() == "only one line"
 assert b"\n" not in m1.replace(b"\r\n", b""), "bare LF in message 1"
 PY
     else

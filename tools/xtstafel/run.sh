@@ -29,7 +29,7 @@ if [ "$rc" = 0 ]; then
 else
     bad "the board acceptance failed"
 fi
-W=$(grep -oE '200 Sektoren abwechselnd, Fuellungen: [0-9]+' "$TMPD/tafel.txt" | grep -oE '[0-9]+$')
+W=$(grep -oE '200 sectors alternating, fills: [0-9]+' "$TMPD/tafel.txt" | grep -oE '[0-9]+$')
 if [ "${W:-x}" = 0 ]; then
     ok "NO refilling when switching between two carriers (fills=0)"
 else
@@ -60,7 +60,7 @@ sed -i 's/^const SLOTS: usize = 4$/const SLOTS: usize = 1/' "$GLIB/crypto/xts.fi
 if grep -q '^const SLOTS: usize = 1$' "$GLIB/crypto/xts.fi" && \
    FIRNLIB="$GLIB" $FIRNC tools/xtstafel/board.fi -o "$TMPD/g1" 2>/dev/null; then
     "$TMPD/g1" > "$TMPD/g1.txt" 2>&1
-    G=$(grep -oE '200 Sektoren abwechselnd, Fuellungen: [0-9]+' "$TMPD/g1.txt" | grep -oE '[0-9]+$')
+    G=$(grep -oE '200 sectors alternating, fills: [0-9]+' "$TMPD/g1.txt" | grep -oE '[0-9]+$')
     if [ "${G:-0}" -gt 0 ]; then
         ok "with ONE slot it refills at every switch (fills=$G) -- the measurement bites"
     else
