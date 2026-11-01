@@ -329,7 +329,44 @@ def check_sw_group():
     ok(swc[1] == "0", "wrong group key is dropped (%s)" % swc[1])
 
 
+def check_sw_tx():
+    print("== software data TX with firmware-held keys (wlswtx) ==")
+    from cryptography.hazmat.primitives.ciphers.aead import AESCCM
+    out = run(["swtx"])
+    c = cmds(out)
+    ids = [x[0] for x in c]
+    tx = [x for x in c if x[0] == 0x1C]
+    ok(ids.count(0x17) == 2, "wlswtx: keys still loaded into the firmware (%d ADD_STA_KEY)" % ids.count(0x17))
+    ok(len(tx) == 1, "wlswtx: one data frame")
+    t = tx[0]
+    ln = le(t, 4, 2)
+    base = 4 + 56
+    ok(t[4 + 17] == 0 and t[4 + 20:4 + 36] == bytes(16), "wlswtx: TX_CMD sec_ctl 0, no key in the command")
+    ok(ln == 56 and t[base + 1] == 0x41, "wlswtx: frame grew by CCMP header + MIC (%d), protected bit set" % ln)
+    ok(t[base + 24:base + 32] == bytes([1, 0, 0, 0x20, 0, 0, 0, 0]), "wlswtx: CCMP header carries PN 1 and the ExtIV bit")
+    hdr = bytearray(t[base:base + 24])
+    plain = bytes([0xAA, 0xAA, 3, 0, 0, 0, 8, 0, 0x11]) + bytes(6) + bytes([0x22])
+    aad = bytes([0x08, 0x41]) + bytes(hdr[4:22]) + bytes([hdr[22] & 0x0F, 0])
+    nonce = bytes([0]) + bytes(hdr[10:16]) + bytes([0, 0, 0, 0, 0, 1])
+    want = AESCCM(bytes([0x55] * 16), tag_length=8).encrypt(nonce, plain, aad)
+    ok(t[base + 32:base + 56] == want, "wlswtx: ciphertext and MIC match an independent AES-CCM")
+    base_out = run(["hwc"])
+    bt = [x for x in cmds(base_out) if x[0] == 0x1C][0]
+    ok(bt[4 + 17] == 2, "wlhwc without wlswtx still uses firmware encryption")
+
+
+def check_tx_response():
+    print("== TX response decode ==")
+    out = run(["txresp"])
+    l = [x for x in out if x.startswith("txr ")][0].split()
+    ok(l[1] == "0" and l[2:5] == ["2", "1", "1"], "two responses counted, one ok, one failed (%s)" % " ".join(l[1:5]))
+    ok(l[5] == "130" and l[6] == "130" and l[7] == "3", "last status 0x82, first bad status 0x82, failure_frame 3 (%s)" % " ".join(l[5:8]))
+    ok(l[8] == "16397" and l[9] == "296" and l[10] == "2", "rate 0x400d, media time 296, queue 2 (%s)" % " ".join(l[8:11]))
+
+
 check_variants()
+check_sw_tx()
+check_tx_response()
 check_group_filter()
 check_rx_status()
 check_sw_group()

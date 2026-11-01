@@ -31,6 +31,8 @@ mut 's/const KEY_INFO_M2: u64 = 0x010A/const KEY_INFO_M2: u64 = 0x010B/' "messag
 mut 's/iwl_le.st8(out, 81 + i, mic\[i as usize\] as u64)/iwl_le.st8(out, 82 + i, mic[i as usize] as u64)/' "MIC position" mgmt.fi
 mut 's/iwl_le.st16(out, 26, 1)/iwl_le.st16(out, 26, 2)/' "auth sequence number" mgmt.fi
 mut 's/rate, STA_AP, sec,/rate, STA_AUX, sec,/' "TX station id" iwl_ops.fi
+mut 's/pn\[(5 - i) as usize\]/pn[i as usize]/' "software TX packet number byte order" iwl_ops.fi
+mut 's/const OFF_STATUS: u64 = 40/const OFF_STATUS: u64 = 38/' "TX response status offset" iwl_txresp.fi
 mut 's/(\*o).rssi = 0 - (best as i64)/(*o).rssi = (best as i64)/' "RSSI sign" iwl_ops.fi
 mut 's/ \&\& fw_uid + 1 != (\*o).scan_uid//' "scan complete uid off by one from the firmware" iwl_ops.fi
 mut 's/if fw_uid != (\*o).scan_uid \&\& fw_uid + 1 != (\*o).scan_uid { return }//' "scan complete uid not checked" iwl_ops.fi
