@@ -1440,7 +1440,7 @@ num "und genau eine in Ring 0 loest sie auf" \
 CC=$(grep -rac '^fn corner_cov(' --include=*.fi kernel/ lib/ module/ pkg/ \
      2>/dev/null | awk -F: '{ n += $2 } END { print n+0 }')
 num "der Eckenabtaster steht GENAU EINMAL im Baum (ausser vendor/)" "$CC" eq 1
-same "und zwar in lib/ecke.fi, wo beide Ringe ihn uebersetzen" "lib/ecke.fi" \
+same "und zwar in lib/corner.fi, wo beide Ringe ihn uebersetzen" "lib/corner.fi" \
     "$(grep -rla '^fn corner_cov(' --include=*.fi kernel/ lib/ module/ pkg/ \
        2>/dev/null | head -1)"
 #
@@ -2010,12 +2010,12 @@ NC=$(python3 tools/themestore/namecheck.py "$TMPD/setv/desktop.png" \
      "$TMPD/setv/serial.txt" assets/themes "$TMPD/namenloch.png" 2>&1)
 printf '%s\n' "$NC" | sed 's/^/        /'
 num "gemalte Kachelnamen (genau die gewaehlte Vorlage)" \
-    "$(printf '%s' "$NC" | grep -oE 'gemalt=[0-9]+' | cut -d= -f2)" \
+    "$(printf '%s' "$NC" | grep -oE 'painted=[0-9]+' | cut -d= -f2)" \
     eq 1
 num "Kachelnamen, die fehlen (alle anderen Vorlagen stehen nur im Auswahlfeld)" \
-    "$(printf '%s' "$NC" | grep -oE "fehlt=[0-9]+" | cut -d= -f2)" \
+    "$(printf '%s' "$NC" | grep -oE "missing=[0-9]+" | cut -d= -f2)" \
     eq "$((NPRESET - 1))"
-for z in gekuerzt ohnetinte; do
+for z in shortened noink; do
     num "Kachelnamen, die $z sind" \
         "$(printf '%s' "$NC" | grep -oE "$z=[0-9]+" | cut -d= -f2)" eq 0
 done
@@ -2023,7 +2023,7 @@ NL=$(python3 tools/themestore/namecheck.py "$TMPD/namenloch.png" \
      "$TMPD/setv/serial.txt" assets/themes 2>&1)
 echo "        GEGENPROBE: $(printf '%s' "$NL" | head -1)"
 num "GEGENPROBE: ein uebermaltes 'r' wird gefunden" \
-    "$(printf '%s' "$NL" | grep -oE 'ohnetinte=[0-9]+' | cut -d= -f2)" ge 1
+    "$(printf '%s' "$NL" | grep -oE 'noink=[0-9]+' | cut -d= -f2)" ge 1
 
 echo
 #
