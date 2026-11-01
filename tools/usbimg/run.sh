@@ -31,44 +31,44 @@ done
 KVM=()
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 
-echo "== 1. das Abbild bauen =="
+echo "== 1. build the image =="
 if bash tools/usbimg/build.sh "$IMGDIR" > "$TMPD/build.txt" 2>&1; then
     ok "tools/usbimg/build.sh laeuft durch"
     sed 's/^/       /' "$TMPD/build.txt"
 else
-    bad "das Abbild laesst sich nicht bauen"
+    bad "the image cannot be built"
     sed 's/^/       /' "$TMPD/build.txt" | tail -20
     echo "USBIMG: $pass bestanden, $fail gescheitert"
     exit 1
 fi
 
-echo "== 2. was in der Datei wirklich steht =="
+echo "== 2. what is really in the file =="
 if sgdisk --print "$IMG" > "$TMPD/gpt.txt" 2>&1; then
-    grep -q 'EF00' "$TMPD/gpt.txt" && ok "GPT: Partition 1 ist eine EFI-Partition (EF00)" \
-        || bad "keine EFI-Partition in der Tafel"
+    grep -q 'EF00' "$TMPD/gpt.txt" && ok "GPT: partition 1 is an EFI partition (EF00)" \
+        || bad "no EFI partition in the table"
     n=$(grep -cE '^ +[0-9]+ ' "$TMPD/gpt.txt")
     is "Partitionen in der Tafel" "$n" "2"
 else
-    bad "sgdisk kann die Tafel nicht lesen"
+    bad "sgdisk cannot read the table"
 fi
 if dd if="$IMG" bs=512 count=4 status=none | grep -qa 'LIMINE'; then
-    ok "der BIOS-Startteil von Limine steht im MBR-Bereich"
+    ok "the BIOS boot part of Limine is in the MBR area"
 else
-    bad "im MBR-Bereich steht kein Limine"
+    bad "no Limine in the MBR area"
 fi
 for f in ::/EFI/BOOT/BOOTX64.EFI ::/limine.conf ::/osum.mb ::/root.img \
          ::/limine-bios.sys; do
     if mdir -i "$IMGDIR/esp.img" "$f" >/dev/null 2>&1; then
-        ok "auf der EFI-Partition liegt $f"
+        ok "$f is on the EFI partition"
     else
-        bad "auf der EFI-Partition fehlt $f"
+        bad "$f is missing from the EFI partition"
     fi
 done
 
 echo "== 3. echte Umlaute in locale/de/messages =="
 u=$(grep -cP '[äöüßÄÖÜ]' locale/de/messages)
 if [ "${u:-0}" -gt 0 ]; then
-    ok "locale/de/messages: $u Zeilen mit echten UTF-8-Umlauten"
+    ok "locale/de/messages: $u lines with real UTF-8 umlauts"
 else
     bad "locale/de/messages enthaelt keinen einzigen echten Umlaut"
 fi
@@ -86,7 +86,7 @@ set -- $zeichen
 if [ "$3" -eq $(( $2 + $1 )) ]; then
     ok "Oktettrechnung stimmt: $1 Zusatzoktette, $2 Zeichen, $3 Oktette ($2 + $1)"
 else
-    bad "Oktettrechnung: $2 Zeichen, $3 Oktette, $1 Zusatzoktette -- geht nicht auf"
+    bad "octet count: $2 characters, $3 octets, $1 extra octets -- does not add up"
 fi
 
 # ------------------------------------------------------------- Laeufe
@@ -104,7 +104,7 @@ lauf() { # name zusatzargumente...
     # branch alike. The copy of the stick gets a limine.conf with exactly
     # the entry from the shipped file -- same kernel, same words -- as
     # its only entry, timeout 0. The stick itself stays untouched.
-    diag_conf "$TMPD/$name.img" || bad "$name: Diagnose-Eintrag nicht in die Kopie geschrieben"
+    diag_conf "$TMPD/$name.img" || bad "$name: diagnostic entry not written into the copy"
     local mon="$TMPD/$name.mon"
     rm -f "$mon"
     timeout 200 qemu-system-x86_64 "${KVM[@]}" -m 2048 \
@@ -183,12 +183,12 @@ warte_auf() { # datei muster sekunden
     return 1
 }
 
-echo "== 4. BIOS: dieselbe Datei, der Weg ueber den MBR =="
+echo "== 4. BIOS: the same file, the way via the MBR =="
 lauf bios -device ide-hd,drive=stick
 if grep -qa 'firn kernel' "$TMPD/bios.txt"; then
-    ok "der Kern startet unter BIOS von dem Abbild"
+    ok "the kernel boots from the image under BIOS"
 else
-    bad "unter BIOS startet der Kern nicht"
+    bad "the kernel does not boot under BIOS"
     tail -20 "$TMPD/bios.txt" | sed 's/^/       /'
 fi
 for m in 'hwdiag: firmware=' 'hwdiag: cpu vendor=' 'hwdiag: pci devices=' \
@@ -199,137 +199,137 @@ done
 fw=$(grep -aoE 'firmware=(BIOS|UEFI)' "$TMPD/bios.txt" | head -1 | sed 's/.*=//')
 is "BIOS-Lauf: erkannte Firmware" "${fw:-?}" "BIOS"
 if grep -qa 'ANGEHALTEN' "$TMPD/bios.txt"; then
-    ok "der Diagnose-Eintrag haelt an, statt abzuschalten"
+    ok "the diagnostic entry halts instead of powering off"
 else
-    bad "der Diagnose-Eintrag haelt nicht an"
+    bad "the diagnostic entry does not halt"
 fi
 if grep -qa 'kernel: done' "$TMPD/bios.txt"; then
-    bad "GEGENPROBE: der Lauf lief trotz hwdiagstop bis zum Ende durch"
+    bad "CONTROL: the run went through to the end despite hwdiagstop"
 else
-    ok "GEGENPROBE: nach dem Anhalten kommt kein 'kernel: done' mehr"
+    ok "CONTROL: after halting no 'kernel: done' mehr"
 fi
 
-echo "== 5. UEFI: dieselbe Datei, der Weg ueber BOOTX64.EFI =="
+echo "== 5. UEFI: the same file, the way via BOOTX64.EFI =="
 if [ -n "$OVMF_CODE" ]; then
     cp -f "$OVMF_VARS" "$TMPD/vars.fd" 2>/dev/null
     lauf uefi -device ide-hd,drive=stick \
         -drive "if=pflash,format=raw,unit=0,readonly=on,file=$OVMF_CODE" \
         -drive "if=pflash,format=raw,unit=1,file=$TMPD/vars.fd"
     if grep -qa 'firn kernel' "$TMPD/uefi.txt"; then
-        ok "derselbe Kern startet unter UEFI (OVMF)"
+        ok "the same kernel boots under UEFI (OVMF)"
     else
-        bad "unter UEFI startet der Kern nicht"
+        bad "the kernel does not boot under UEFI"
         tail -25 "$TMPD/uefi.txt" | sed 's/^/       /'
     fi
     grep -qa 'Cannot use text mode with UEFI' "$TMPD/uefi.txt" \
-        && bad "der Lader verlangt einen Textmodus -- Bit 2 im Multiboot-Kopf fehlt" \
+        && bad "the loader demands a text mode -- bit 2 in the multiboot header is missing" \
         || ok "kein 'Cannot use text mode with UEFI' -- der Rahmenpuffer kommt von der Firmware"
     fwu=$(grep -aoE 'firmware=(BIOS|UEFI)' "$TMPD/uefi.txt" | head -1 | sed 's/.*=//')
     is "UEFI-Lauf: erkannte Firmware" "${fwu:-?}" "UEFI"
     src=$(grep -aoE 'hwdiag: fb [0-9]+x[0-9]+' "$TMPD/uefi.txt" | head -1)
-    [ -n "$src" ] && ok "UEFI: die Firmware hat einen Rahmenpuffer gesetzt ($src)" \
-        || bad "UEFI: kein Rahmenpuffer im Bericht"
+    [ -n "$src" ] && ok "UEFI: the firmware set a framebuffer ($src)" \
+        || bad "UEFI: no framebuffer in the report"
 else
-    bad "OVMF liegt nicht auf diesem Rechner -- der UEFI-Lauf faellt aus"
+    bad "OVMF is not on this machine -- the UEFI run is skipped"
 fi
 
 echo "== 6. Gegenprobe: anderer Plattencontroller, andere Netzkarte =="
 lauf ahci -device ahci,id=ahci0 -device ide-hd,bus=ahci0.0,drive=stick \
      -device e1000,netdev=n0 -netdev user,id=n0
 if grep -qa 'hwdiag: disk AHCI' "$TMPD/ahci.txt"; then
-    ok "mit -device ahci meldet die Diagnose AHCI"
+    ok "with -device ahci the diagnostics report AHCI"
 else
-    bad "mit -device ahci meldet die Diagnose kein AHCI"
+    bad "with -device ahci the diagnostics report no AHCI"
     grep -a 'hwdiag: disk' "$TMPD/ahci.txt" | sed 's/^/       /'
 fi
 if grep -qa 'hwdiag: disk IDE' "$TMPD/bios.txt"; then
-    ok "GEGENPROBE: derselbe Bericht meldete mit -device ide-hd noch IDE"
+    ok "CONTROL: the same report with -device ide-hd still reported IDE"
 else
-    bad "GEGENPROBE: der IDE-Lauf meldete kein IDE -- die Zeile ist eine Konstante"
+    bad "CONTROL: the IDE run reported no IDE -- the line is a constant"
 fi
 if grep -qa 'netdev: c0=e1000' "$TMPD/ahci.txt"; then
-    ok "netdev waehlt fuer die Intel-Karte den e1000-Treiber"
+    ok "netdev picks the e1000 driver for the Intel card"
 else
-    bad "netdev nennt den Treiber der Intel-Karte nicht"
+    bad "netdev does not name the driver of the Intel card"
     grep -a 'netdev:' "$TMPD/ahci.txt" | sed 's/^/       /'
 fi
 
 lauf virtio -device ide-hd,drive=stick \
      -device virtio-net-pci,netdev=n0 -netdev user,id=n0
 if grep -qa 'netdev: c0=virtio-net' "$TMPD/virtio.txt"; then
-    ok "und fuer die virtio-Karte den virtio-Treiber -- zwei Karten, zwei Antworten"
+    ok "and the virtio driver for the virtio card -- two cards, two answers"
 else
-    bad "netdev nennt fuer virtio nicht virtio-net"
+    bad "netdev does not name virtio-net for virtio"
     grep -a 'netdev:' "$TMPD/virtio.txt" | sed 's/^/       /'
 fi
 #
 lauf fremd -device ide-hd,drive=stick \
      -device ne2k_pci,netdev=n0 -netdev user,id=n0
 if grep -qa 'netdev: no driver for' "$TMPD/fremd.txt"; then
-    ok "eine fremde Karte (ne2k_pci) wird als 'no driver for' gemeldet: $(grep -ao 'no driver for.*' "$TMPD/fremd.txt" | head -1)"
+    ok "a foreign card (ne2k_pci) is reported as 'no driver for' gemeldet: $(grep -ao 'no driver for.*' "$TMPD/fremd.txt" | head -1)"
 else
-    bad "eine fremde Karte wird nicht als 'no driver for' gemeldet"
+    bad "a foreign card is not reported as 'no driver for' gemeldet"
     grep -a 'netdev:' "$TMPD/fremd.txt" | sed 's/^/       /'
 fi
 if grep -qa 'RTL8029 (ne2000)' "$TMPD/fremd.txt"; then
-    ok "und sie wird beim NAMEN genannt, nicht nur bei der Nummer"
+    ok "and it is named by NAME, not only by number"
 else
-    bad "die fremde Karte wird nicht beim Namen genannt"
+    bad "the foreign card is not named by name"
 fi
 lauf gefahren -device ide-hd,drive=stick \
      -device rtl8139,netdev=n0 -netdev user,id=n0
 if grep -qa 'netdev: c0=r8169' "$TMPD/gefahren.txt"; then
-    ok "GEGENPROBE: derselbe rtl8139 wird als r8169 GEFAHREN, ist also keine fremde Karte mehr"
+    ok "CONTROL: the same rtl8139 is DRIVEN as r8169, so it is no longer a foreign card"
 else
-    bad "GEGENPROBE: der rtl8139 wird nicht als r8169 gefahren"
+    bad "CONTROL: the rtl8139 is not driven as r8169"
     grep -a 'netdev:' "$TMPD/gefahren.txt" | sed 's/^/       /'
 fi
 if grep -qa 'ANGEHALTEN' "$TMPD/fremd.txt"; then
-    ok "und der Kern laeuft nach der unbekannten Karte bis zum Ende des Berichts"
+    ok "and the kernel runs to the end of the report after the unknown card"
 else
-    bad "der Kern kommt nach der unbekannten Karte nicht mehr bis zum Ende"
+    bad "the kernel no longer reaches the end after the unknown card"
 fi
 
-echo "== 7. keine Platte, keine Karte -- und trotzdem ein Bericht =="
+echo "== 7. no disk, no card -- and still a report =="
 #
 lauf_direkt leer "hwdiag hwdiagstop gfx nopci nokbd nosched noproc nofs noring3"
 if grep -qa 'hwdiag: pci=NO DEVICE' "$TMPD/leer.txt"; then
-    ok "ohne Bus sagt der Bericht das, statt still zu haengen"
+    ok "without a bus the report says so instead of hanging silently"
 else
-    bad "ohne Bus fehlt die Meldung"
+    bad "without a bus the message is missing"
     grep -a 'hwdiag: pci' "$TMPD/leer.txt" | sed 's/^/       /' | head -3
 fi
 if grep -qa 'hwdiag: disk=NONE' "$TMPD/leer.txt"; then
-    ok "und ohne Plattencontroller ebenso"
+    ok "and likewise without a disk controller"
 else
-    bad "ohne Plattencontroller fehlt die Meldung"
+    bad "without a disk controller the message is missing"
     grep -a 'hwdiag: disk' "$TMPD/leer.txt" | sed 's/^/       /'
 fi
 if grep -qa 'hwdiag: net=NO CARD' "$TMPD/leer.txt"; then
-    ok "und ohne Netzkarte auch"
+    ok "and without a network card too"
 else
-    bad "ohne Netzkarte fehlt die Meldung"
+    bad "without a network card the message is missing"
     grep -a 'hwdiag: net' "$TMPD/leer.txt" | sed 's/^/       /'
 fi
 if grep -qa 'ANGEHALTEN' "$TMPD/leer.txt"; then
-    ok "und der Bericht ist trotzdem vollstaendig"
+    ok "and the report is complete anyway"
 else
-    bad "der Bericht bricht ab, wenn nichts gefunden wird"
+    bad "the report aborts when nothing is found"
 fi
 lauf_direkt mitbus "hwdiag hwdiagstop gfx nokbd nosched noproc nofs noring3"
 if grep -qa 'hwdiag: disk IDE' "$TMPD/mitbus.txt"; then
     ok "GEGENPROBE: dieselbe Maschine MIT Bus meldet ihren IDE-Controller"
 else
-    bad "GEGENPROBE: die Maschine mit Bus meldet keinen Controller"
+    bad "CONTROL: the machine with a bus reports no controller"
     grep -a 'hwdiag: disk' "$TMPD/mitbus.txt" | sed 's/^/       /'
 fi
 if grep -qa 'hwdiag: net=NO CARD' "$TMPD/mitbus.txt"; then
-    ok "und ohne Netzkarte (aber mit Bus) sagt sie auch das"
+    ok "and without a network card (but with a bus) it says that too"
 else
-    bad "die Maschine ohne Netzkarte meldet das nicht"
+    bad "the machine without a network card does not report it"
 fi
 
-echo "== 8. der Schreibtisch, auf deutsch, mit Umlauten im BILD =="
+echo "== 8. the desktop, in German, with umlauts in the FRAME =="
 #
 DESKARGS="modfs osum gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs lang=de"
 rm -f "$TMPD/desk.txt" "$TMPD/desk.ppm" "$TMPD/desk.sock"
@@ -360,36 +360,36 @@ python3 tools/gfx/screenshot.py "$TMPD/desk.sock" "$TMPD/desk2.ppm" 30 \
 kill "$qpid" 2>/dev/null; wait "$qpid" 2>/dev/null
 
 if grep -qa 'osum: from module' "$TMPD/desk.txt"; then
-    ok "die Wurzel kommt aus dem Boot-Modul -- kein Plattentreiber noetig"
+    ok "the root comes from the boot module -- no disk driver needed"
 else
-    bad "die Wurzel kommt nicht aus dem Modul"
+    bad "the root does not come from the module"
     grep -a 'osum:' "$TMPD/desk.txt" | sed 's/^/       /' | head -5
 fi
 if grep -qa 'glyphs=' "$TMPD/desk.txt"; then
-    ok "die Schriften kommen aus dem Abbild: $(grep -aoE 'glyphs=[0-9]+' "$TMPD/desk.txt" | head -1)"
+    ok "the fonts come from the image: $(grep -aoE 'glyphs=[0-9]+' "$TMPD/desk.txt" | head -1)"
 else
-    bad "keine Schrift geladen"
+    bad "no font loaded"
 fi
 # r145: THE SOCIAL LAYER IS ON THE STICK -- the session (kgui.desk_start) starts the
 # service and the Melder when /bin/social exists, and says so on the serial line.
 if grep -qaE 'desk: social pid=[1-9]' "$TMPD/desk.txt" && grep -qaE 'desk: melder pid=[1-9]' "$TMPD/desk.txt"; then
-    ok "die Sitzung startet Social-Dienst und Melder ($(grep -aoE 'desk: (social|melder) pid=[0-9]+' "$TMPD/desk.txt" | tr '\n' ' '))"
+    ok "the session starts the social service and notifier ($(grep -aoE 'desk: (social|melder) pid=[0-9]+' "$TMPD/desk.txt" | tr '\n' ' '))"
 else
     bad "kein 'desk: social pid=' / 'desk: melder pid=' -- social + melder fehlen im Abbild"
 fi
 grep -qaE 'desk: (social|melder) (ended|respawn)' "$TMPD/desk.txt" \
-    && bad "Social-Dienst oder Melder ist gleich nach dem Start wieder zu Ende" \
-    || ok "Social-Dienst und Melder laufen (kein Ende, kein Neustart im Lauf)"
+    && bad "social service or notifier ends right after the start" \
+    || ok "social service and notifier run (no end, no restart during the run)"
 if grep -qa 'launcher: name' "$TMPD/desk.txt"; then
     if grep -qa 'launcher: name \[Suchen\]' "$TMPD/desk.txt"; then
-        ok "der Starter nennt sich 'Suchen' -- deutsch, aus /usr/share/locale/de"
+        ok "the starter calls itself 'Suchen' -- deutsch, aus /usr/share/locale/de"
     else
-        bad "der Starter ist nicht deutsch: $(grep -a 'launcher: name' "$TMPD/desk.txt" | tail -1)"
+        bad "the starter is not German: $(grep -a 'launcher: name' "$TMPD/desk.txt" | tail -1)"
     fi
 fi
 
 if [ -s "$TMPD/desk.ppm" ]; then
-    ok "ein Bildschirmfoto ist entstanden ($(stat -c%s "$TMPD/desk.ppm") Oktette)"
+    ok "a screenshot was taken ($(stat -c%s "$TMPD/desk.ppm") Oktette)"
     finde() { # was text [--nicht]
         local was=$1 text=$2; shift 2
         local aus rc
@@ -408,7 +408,7 @@ if [ -s "$TMPD/desk.ppm" ]; then
     python3 -c "
 from PIL import Image
 Image.open('$TMPD/desk.ppm').save('$TMPD/desk.png')
-" 2>/dev/null && ok "und liegt als $TMPD/desk.png"
+" 2>/dev/null && ok "and is at $TMPD/desk.png"
 else
     bad "kein Bildschirmfoto"
     tail -10 "$TMPD/shot.txt" | sed 's/^/       /'

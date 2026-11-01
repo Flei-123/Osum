@@ -15,7 +15,7 @@ is()  { if [ "${2:-}" = "$3" ]; then ok "$1: $2"; else bad "$1: '${2:-}', erwart
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 num() { local n=$1 v=${2:-} o=$3 w=$4
-    if [ -z "$v" ]; then bad "$n: keine Zahl (erwartet $o $w)"; return; fi
+    if [ -z "$v" ]; then bad "$n: not a number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, erwartet $o $w"; fi
 }
 kv() { grep -aoE "^konto: $2 = .*" "$1" 2>/dev/null | tail -1 | sed 's/^konto: [a-z_]* = //'; }
@@ -47,14 +47,14 @@ aufraeumen() {
 trap aufraeumen EXIT
 
 ip netns del "$NS" 2>/dev/null
-ip netns add "$NS" 2>/dev/null || { echo "KONTO: uebersprungen, keine Netzraeume"; exit 0; }
+ip netns add "$NS" 2>/dev/null || { echo "ACCOUNT: skipped, no network rooms"; exit 0; }
 ip netns del "$NS" 2>/dev/null
 
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 
 # ======================================================================
-echo "== 0. die Trennung: Anbieterwissen bleibt im Ruecken =="
+echo "== 0. the separation: provider knowledge stays in the back =="
 # ======================================================================
 python3 tools/account/split.py . --zahlen > "$TMPD/tr.txt" 2>&1
 TRRC=$?
@@ -76,24 +76,24 @@ open(p, "w", encoding="utf-8").write(s)
 PY
 python3 tools/account/split.py "$TMPD/kaputt" > "$TMPD/tr2.txt" 2>&1
 if [ $? -ne 0 ] && grep -q VERSTOSS "$TMPD/tr2.txt"; then
-    ok "Gegenprobe: EIN if mit einem Anbieternamen im allgemeinen Teil faellt auf"
+    ok "control: ONE if with a provider name in the generic part is noticed"
 else
-    bad "Gegenprobe: der Verstoss wurde NICHT gefunden"
+    bad "control: the violation was NOT found"
 fi
 
 # ======================================================================
-echo "== 1. das Programm baut und passt =="
+echo "== 1. the program builds and fits =="
 # ======================================================================
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if FIRNLIB="$ROOT/lib" "$FIRNC" -c --profile=app \
         -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
-    ok "firnc --profile=app: konto.fi mit std.net, std.json, tls.tls, tls.x509"
+    ok "firnc --profile=app: konto.fi with std.net, std.json, tls.tls, tls.x509"
 else
-    bad "konto.fi uebersetzt nicht"; head -20 "$TMPD/cc.log" | sed 's/^/        /'
+    bad "konto.fi does not compile"; head -20 "$TMPD/cc.log" | sed 's/^/        /'
     echo "KONTO: $pass passed, $fail failed"; exit 1
 fi
 undef=$(nm -u "$TMPD/konto.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "keine einzige undefinierte Marke -- kein crt.s, keine libc" \
+[ -z "$undef" ] && ok "not a single undefined mark -- no crt.s, no libc" \
                 || bad "undefiniert: $undef"
 ld -T kernel/user/user.ld -o "$TMPD/konto.elf" "$TMPD/konto.o" 2>"$TMPD/ld.err" \
     && ok "ld mit kernel/user/user.ld" \
@@ -109,7 +109,7 @@ ZEILEN=$(wc -l kernel/app/account.fi kernel/app/anbieter.fi kernel/app/knetz.fi 
 hin "Quelltext dieser Runde in kernel/app/: $ZEILEN Zeilen"
 
 # ======================================================================
-echo "== 2. der Sprachkatalog: jeder Schluessel in beiden Dateien =="
+echo "== 2. the language catalog: every key in both files =="
 # ======================================================================
 python3 - "$ROOT" > "$TMPD/keys.txt" 2>&1 <<'PY'
 import re, sys, os
@@ -153,9 +153,9 @@ if grep -aE '^konto\.' locale/de/messages | grep -qE 'ue[a-z]|ae[a-z]|oe[a-z]|ss
     hin "Hinweis: pruefe die deutschen Konto-Zeilen auf Umschrift"
 fi
 if grep -aE '^konto\.' locale/de/messages | grep -q 'ä\|ö\|ü\|ß'; then
-    ok "die deutschen Konto-Texte tragen ECHTE Umlaute"
+    ok "the German account texts carry REAL umlauts"
 else
-    bad "die deutschen Konto-Texte haben keinen einzigen Umlaut"
+    bad "the German account texts have not a single umlaut"
 fi
 TABS_DE=$(grep -a '^settings.tabs' locale/de/messages | sed 's/^[^=]*=//' | grep -o '\\n' | wc -l)
 TABS_LINES=$(grep -ac '^settings.tabs' locale/de/messages)
@@ -166,12 +166,12 @@ echo "== 3. der Aufbau: Kern, Userland, Zertifikat, Attrappe =="
 # ======================================================================
 HWNET_BLOCKS=16384 HWNET_PROGS="sh ls cat echo settings" bash tools/hwnet/build.sh "$TMPD/s0" 0 \
     > "$TMPD/b0.txt" 2>&1 \
-    || { bad "der Kern baut nicht"; tail -8 "$TMPD/b0.txt" | sed 's/^/        /'
+    || { bad "the kernel does not build"; tail -8 "$TMPD/b0.txt" | sed 's/^/        /'
          echo "KONTO: $pass passed, $fail failed"; exit 1; }
-ok "Kern und Userland gebaut (mit /bin/settings, dem neunten Reiter)"
+ok "kernel and userland built (with /bin/settings, the ninth tab)"
 K="$TMPD/s0/k.mb"
 python3 tools/hwnet/mkcerts.py "$TMPD/certs" konto.test > "$TMPD/certs.txt" 2>&1 \
-    && ok "die Testzertifikate kommen aus Pythons cryptography, nicht aus diesem Baum" \
+    && ok "the test certificates come from Python cryptography, not from this tree" \
     || bad "mkcerts.py schlug fehl"
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c"
 
@@ -188,7 +188,7 @@ open(sys.argv[1], "w", encoding="utf-8").write(
     "eigen1\nkennung\tlokal\nsalz\t%s\nrunden\t8192\nnachweis\t%s\n"
     "subjekt\tlokal-1\nanzeige\tLokal\n" % (salz.hex(), pruef.hex()))
 PY
-ok "der Ordner-Ruecken hat ein Konto, dessen PBKDF2 der WIRT gerechnet hat"
+ok "the folder back end has an account whose PBKDF2 the HOST computed"
 
 abbild() { # <ziel>
     python3 tools/osum/mkfs.py build "$1" 24576 \
@@ -278,7 +278,7 @@ N="konto.test"
 } > "$TMPD/konten.conf"
 
 # ======================================================================
-echo "== 4. anmelden an allen drei Ruecken, ueber TLS 1.3 =="
+echo "== 4. log in at all three back ends, over TLS 1.3 =="
 # ======================================================================
 netz_auf
 server_auf
@@ -295,13 +295,13 @@ done
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=xoffi --kennung=mfa@example.test --bereich=alpha < /pw_gut" "$TMPD/o_x0.txt"
 is "xoffi ohne zweiten Faktor" "$(kv "$TMPD/o_x0.txt" stand)" "zweitfaktor"
 TEMP=$(kv "$TMPD/o_x0.txt" zwischen)
-[ -n "$TEMP" ] && ok "ein temp_token kam zurueck (${#TEMP} Zeichen)" \
+[ -n "$TEMP" ] && ok "a temp_token came back (${#TEMP} characters)" \
                 || bad "kein temp_token"
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=xoffi --kennung=mfa@example.test --bereich=alpha --zwischen=$TEMP --code=123456 < /leer" "$TMPD/o_x1.txt"
 is "xoffi mit dem zweiten Faktor" "$(kv "$TMPD/o_x1.txt" stand)" "ok"
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=xoffi --kennung=mfa@example.test --bereich=alpha --zwischen=$TEMP --code=123456 < /leer" "$TMPD/o_x2.txt"
 is "dasselbe temp_token ein zweites Mal" "$(kv "$TMPD/o_x2.txt" stand)" "abgelaufen"
-ok "  (ein Zwischentoken ist einmal gueltig -- danach ist es weg)"
+ok "  (an intermediate token is valid once -- afterwards it is gone)"
 
 # --- jarvis
 lauf "$TMPD/d1.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_j1.txt"
@@ -315,7 +315,7 @@ server_zu
 netz_zu
 lauf_ohne_netz "$TMPD/d1.img" "konto anmelden --anbieter=eigen --ziel=datei:///eigen --kennung=lokal < /pw_gut" "$TMPD/o_e2.txt"
 is "eigen als ORDNER, OHNE JEDES NETZ" "$(kv "$TMPD/o_e2.txt" stand)" "ok"
-ok "  (PBKDF2 im Gast stimmt mit dem des Wirts ueberein -- sonst waere es 'falsch')"
+ok "  (PBKDF2 in the guest matches the host's -- otherwise it would be 'falsch')"
 netz_auf
 server_auf
 
@@ -323,15 +323,15 @@ lauf "$TMPD/d1.img" "konto liste" "$TMPD/o_li.txt"
 num "Konten nach vier Anmeldungen" "$(kv "$TMPD/o_li.txt" konten)" ge 4
 
 # ======================================================================
-echo "== 5. das Token liegt NIE im Klartext auf der Platte =="
+echo "== 5. the token is NEVER in plain text on the disk =="
 # ======================================================================
 cp "$TMPD/d1.img" "$TMPD/d5.img"
 lauf "$TMPD/d5.img" "konto uebergabe --kennung=$JKEN" "$TMPD/o_ub.txt"
 TOK=$(kv "$TMPD/o_ub.txt" zugriff)
 if [ -n "$TOK" ] && [ ${#TOK} -gt 40 ]; then
-    ok "die Uebergabe an SYNC nennt das Token (${#TOK} Zeichen)"
+    ok "the handover to SYNC names the token (${#TOK} characters)"
 else
-    bad "die Uebergabe nennt kein Token"
+    bad "the handover names no token"
 fi
 has "$TMPD/o_ub.txt" "konto: datenort = " "die Uebergabe nennt den Datenort"
 has "$TMPD/o_ub.txt" "konto: subjekt = " "die Uebergabe nennt das Subjekt"
@@ -342,16 +342,16 @@ fi
 SPFAD="/state/session/konto/$JKEN"
 python3 tools/osum/mkfs.py where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo.txt" 2>&1
 if grep -qa "^where " "$TMPD/wo.txt"; then
-    ok "die Sitzungsdatei liegt im Abbild: $(cat "$TMPD/wo.txt")"
+    ok "the session file is in the image: $(cat "$TMPD/wo.txt")"
     BLK=$(grep -oE 'first=[0-9]+' "$TMPD/wo.txt" | cut -d= -f2)
     python3 tools/osum/mkfs.py cat "$TMPD/d5.img" "$SPFAD" > "$TMPD/siegel.bin" 2>/dev/null
     if head -c4 "$TMPD/siegel.bin" | grep -qa "OKS1"; then
-        ok "und sie ist GESIEGELT (Kopf OKS1, $(stat -c%s "$TMPD/siegel.bin") Oktette)"
+        ok "and it is SEALED (header OKS1, $(stat -c%s "$TMPD/siegel.bin") Oktette)"
     else
-        bad "die Sitzungsdatei traegt kein Siegel"
+        bad "the session file carries no seal"
     fi
 else
-    bad "die Sitzungsdatei fehlt: $(cat "$TMPD/wo.txt")"
+    bad "the session file is missing: $(cat "$TMPD/wo.txt")"
     BLK=""
 fi
 
@@ -364,17 +364,17 @@ python3 tools/osum/mkfs.py cat "$TMPD/dk.img" "/state/session/konto/$KKEN" \
     > "$TMPD/kk_roh.bin" 2>/dev/null
 KTOK=$(tr -d '\0' < "$TMPD/kk_roh.bin" | head -c 400)
 if [ -n "$KTOK" ] && [ ${#KTOK} -gt 40 ]; then
-    ok "Gegenprobe klartext: die Sitzungsdatei ist roher Text (${#KTOK} Zeichen)"
+    ok "control plaintext: the session file is raw text (${#KTOK} characters)"
     KT=$(grep -c -aF -- "$KTOK" "$TMPD/dk.img" 2>/dev/null || true)
     num "Gegenprobe klartext: dasselbe Token IM ABBILD gefunden" "${KT:-0}" ge 1
     hasnot "$TMPD/kk_roh.bin" "OKS1" "  und ohne jedes Siegel davor"
-    ok "  (also misst Abschnitt 5 wirklich das Siegel und nicht das Nichts)"
+    ok "  (so section 5 really measures the seal and not nothing)"
 else
-    bad "Gegenprobe klartext: kein Token zu suchen"
+    bad "control plaintext: no token to search for"
 fi
 
 # ======================================================================
-echo "== 6. Neustart, Abmelden, und das Merkmal ist WIRKLICH weg =="
+echo "== 6. reboot, log out, and the mark is REALLY gone =="
 # ======================================================================
 lauf "$TMPD/d5.img" "konto status --ohne-netz --kennung=$JKEN" "$TMPD/o_st.txt"
 is "die Sitzung ueberlebt den Neustart" "$(kv "$TMPD/o_st.txt" sitzung)" "1"
@@ -382,8 +382,8 @@ lauf "$TMPD/d5.img" "konto abmelden --kennung=$JKEN" "$TMPD/o_ab.txt"
 is "abgemeldet" "$(kv "$TMPD/o_ab.txt" abgemeldet)" "1"
 python3 tools/osum/mkfs.py where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo2.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo2.txt" \
-    && ok "die Sitzungsdatei ist aus dem Verzeichnis verschwunden" \
-    || bad "die Sitzungsdatei steht noch da: $(cat "$TMPD/wo2.txt")"
+    && ok "the session file has vanished from the directory" \
+    || bad "the session file is still there: $(cat "$TMPD/wo2.txt")"
 if [ -n "${BLK:-}" ]; then
     python3 - "$TMPD/d5.img" "$BLK" > "$TMPD/blk.txt" <<'PY'
 import sys
@@ -401,10 +401,10 @@ PY
     num "und der Block ist ueberschrieben (Oktette != 0)" "$NN" le 64
 fi
 lauf "$TMPD/d5.img" "konto liste" "$TMPD/o_li2.txt"
-ok "die Kontenliste nach dem Abmelden: $(kv "$TMPD/o_li2.txt" konten) Eintraege"
+ok "the account list after logout: $(kv "$TMPD/o_li2.txt" konten) Eintraege"
 
 # ======================================================================
-echo "== 7. keine ambienten Kekse, das Token als Bearer =="
+echo "== 7. no ambient cookies, the token as bearer =="
 # ======================================================================
 python3 - "$TMPD/protokoll.jsonl" > "$TMPD/kopf.txt" <<'PY'
 import json, sys
@@ -441,7 +441,7 @@ for z in open(sys.argv[1], encoding="utf-8"):
 print("keks=%d" % n)
 PY
 num "Gegenprobe keks: jetzt geht einer hinaus" "$(grep -oE 'keks=[0-9]+' "$TMPD/kopf2.txt" | cut -d= -f2)" ge 1
-ok "  (also misst Abschnitt 7 wirklich die Kopfzeilen)"
+ok "  (so section 7 really measures the header lines)"
 
 # ======================================================================
 echo "== 8. falsches Kennwort, und zwanzig davon =="
@@ -474,13 +474,13 @@ A=$(kv "$TMPD/o_g1.txt" stand)
 lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_schlecht" "$TMPD/o_g2.txt"
 B=$(kv "$TMPD/o_g2.txt" stand)
 if [ "$A" = "$B" ]; then
-    ok "unbekannter Name und falsches Kennwort geben DIESELBE Antwort ($A)"
+    ok "unknown name and wrong password give the SAME answer ($A)"
 else
-    bad "die Antwort verraet, ob es das Konto gibt: '$A' gegen '$B'"
+    bad "the answer reveals whether the account exists: '$A' gegen '$B'"
 fi
 
 # ======================================================================
-echo "== 9. zwei Organisationen, dieselbe Anschrift =="
+echo "== 9. two organisations, the same address =="
 # ======================================================================
 abbild "$TMPD/d9.img" || true
 lauf "$TMPD/d9.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.test < /pw_gut" "$TMPD/o_m0.txt"
@@ -493,9 +493,9 @@ K2=$(kv "$TMPD/o_m2.txt" kennung)
 S1=$(kv "$TMPD/o_m1.txt" subjekt)
 S2=$(kv "$TMPD/o_m2.txt" subjekt)
 if [ -n "$K1" ] && [ -n "$K2" ] && [ "$K1" != "$K2" ]; then
-    ok "zwei Konten, zwei Kennungen: $K1 gegen $K2"
+    ok "two accounts, two identifiers: $K1 versus $K2"
 else
-    bad "die beiden Mandanten fallen auf dieselbe Kennung: '$K1' / '$K2'"
+    bad "the two tenants fall onto the same identifier: '$K1' / '$K2'"
 fi
 is "und zwei verschiedene Subjekte" "$([ "$S1" != "$S2" ] && echo ja)" "ja"
 lauf "$TMPD/d9.img" "konto liste" "$TMPD/o_m3.txt"
@@ -505,9 +505,9 @@ lauf "$TMPD/d9.img" "konto uebergabe --kennung=$K2" "$TMPD/o_m5.txt"
 T1T=$(kv "$TMPD/o_m4.txt" zugriff)
 T2T=$(kv "$TMPD/o_m5.txt" zugriff)
 if [ -n "$T1T" ] && [ "$T1T" != "$T2T" ]; then
-    ok "jedes Konto hat sein eigenes Token"
+    ok "every account has its own token"
 else
-    bad "beide Konten teilen sich ein Token"
+    bad "both accounts share a token"
 fi
 B1=$(kv "$TMPD/o_m4.txt" bereich)
 B2=$(kv "$TMPD/o_m5.txt" bereich)
@@ -522,13 +522,13 @@ KB1=$(kv "$TMPD/o_m6.txt" kennung)
 BB1=$(kv "$TMPD/o_m6.txt" bereich)
 is "Gegenprobe einemandant: der Mandant faellt aus der Kennung" "$BB1" ""
 if [ "$KB1" != "$K1" ]; then
-    ok "  und die Kennung ist damit eine andere als mit Mandant"
+    ok "  and the identifier is therefore different from the one with tenant"
 else
-    bad "  die Kennung aendert sich nicht -- der Mandant ging nie ein"
+    bad "  the identifier does not change -- the tenant never went in"
 fi
 
 # ======================================================================
-echo "== 10. erneuern, und was passiert, wenn der Server nein sagt =="
+echo "== 10. renew, and what happens when the server says no =="
 # ======================================================================
 server_zu
 server_auf --access-sekunden 3600
@@ -542,9 +542,9 @@ is "die Erneuerung war faellig" "$(kv "$TMPD/o_r2.txt" erneuern_faellig)" "1"
 is "und sie ist passiert" "$(kv "$TMPD/o_r2.txt" erneuert)" "1"
 AB2=$(kv "$TMPD/o_r2.txt" ablauf)
 if [ -n "$AB1" ] && [ -n "$AB2" ] && [ "$AB2" -ge "$AB1" ] 2>/dev/null; then
-    ok "der neue Ablauf ist nicht frueher als der alte ($AB1 -> $AB2)"
+    ok "the new expiry is not earlier than the old ($AB1 -> $AB2)"
 else
-    bad "der Ablauf ging zurueck: $AB1 -> $AB2"
+    bad "the expiry went backwards: $AB1 -> $AB2"
 fi
 
 server_zu
@@ -555,12 +555,12 @@ lauf "$TMPD/da.img" "konto liste" "$TMPD/o_r4.txt"
 is "der KONTOEINTRAG bleibt (kein Datenverlust)" "$(kv "$TMPD/o_r4.txt" konten)" "1"
 python3 tools/osum/mkfs.py where "$TMPD/da.img" "/state/session/konto/$RK" > "$TMPD/wo4.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo4.txt" \
-    && ok "und das Token ist weg" || bad "das Token liegt noch da"
+    && ok "and the token is gone" || bad "the token is still there"
 server_zu
 server_auf
 
 # ======================================================================
-echo "== 11. KEIN NETZ -- die wichtigste Zusage der Runde =="
+echo "== 11. NO NETWORK -- the most important promise of the round =="
 # ======================================================================
 abbild "$TMPD/dn.img" || true
 lauf "$TMPD/dn.img" "konto anmelden --anbieter=jarvis --kennung=justin < /pw_gut" "$TMPD/o_n0.txt"
@@ -573,8 +573,8 @@ lauf_ohne_netz "$TMPD/dn.img" "konto liste" "$TMPD/o_n2.txt"
 is "OHNE NETZ: die Kontenliste steht" "$(kv "$TMPD/o_n2.txt" konten)" "1"
 lauf_ohne_netz "$TMPD/dn.img" "konto uebergabe --kennung=$NK" "$TMPD/o_n3.txt"
 NT=$(kv "$TMPD/o_n3.txt" zugriff)
-[ -n "$NT" ] && ok "OHNE NETZ: die Uebergabe an SYNC liefert das Token" \
-             || bad "OHNE NETZ: die Uebergabe liefert nichts"
+[ -n "$NT" ] && ok "WITHOUT NETWORK: the handover to SYNC delivers the token" \
+             || bad "WITHOUT NETWORK: the handover delivers nothing"
 lauf_ohne_netz "$TMPD/dn.img" "konto anmelden --anbieter=jarvis --kennung=zweiter < /pw_gut" "$TMPD/o_n4.txt"
 is "OHNE NETZ: eine NEUE Anmeldung schlaegt klar fehl" "$(kv "$TMPD/o_n4.txt" stand)" "keinnetz"
 has "$TMPD/o_n4.txt" "konto: text = " "und sie sagt WARUM, aus dem Sprachkatalog"
@@ -584,7 +584,7 @@ lauf_ohne_netz "$TMPD/dn.img" "ls /bin" "$TMPD/o_n6.txt"
 has "$TMPD/o_n6.txt" "konto" "OHNE NETZ: das System selbst laeuft weiter (ls /bin)"
 
 # ======================================================================
-echo "== 11b. ein faules Zertifikat ist NICHT \"kein Netz\" =="
+echo "== 11b. a lazy certificate is NOT \"kein Netz\" =="
 server_zu
 server_auf_zert "$TMPD/certs/rogue.pem" "$TMPD/certs/rogue.key"
 abbild "$TMPD/dt.img" || true
@@ -597,7 +597,7 @@ server_zu
 server_auf
 
 # ======================================================================
-echo "== 11c. die Befehlszeile: zwei Schreibweisen, und acht Woerter =="
+echo "== 11c. the command line: two spellings, and eight words =="
 MAXA=$(grep -oE 'argv: \[u64; [0-9]+\]' kernel/user/sh.fi | grep -oE '[0-9]+' | tail -1)
 is "die Shell nimmt so viele Woerter" "$MAXA" "64"
 abbild "$TMPD/dw.img" || true
@@ -610,12 +610,12 @@ W2=$(kv "$TMPD/o_w2.txt" kennung)
 is "und sie fuehrt zur GLEICHEN Kennung wie die angehaengte" "$W2" "$W1"
 lauf "$TMPD/dw2.img" "konto anmelden --anbieter xoffi --ziel $Z --name $N --kennung mfa@example.test --bereich alpha --code 1 < /pw_gut" "$TMPD/o_w3.txt"
 if grep -qa "too many arguments" "$TMPD/o_w3.txt"; then
-    bad "die lange Form (elf Woerter) faellt durch -- proc.MAX_ARGS/Shell sind 64 (r716)"
+    bad "the long form (eleven words) fails -- proc.MAX_ARGS/shell are 64 (r716)"
 else
-    ok "die lange Form (elf Woerter) kommt durch (Limit seit r716: 64)"
+    ok "the long form (eleven words) gets through (limit since r716: 64)"
 fi
 grep -qa "^jarvis ziel=" "$TMPD/konten.conf" \
-    && ok "/etc/konten.conf traegt die Adresse, kein Geheimnis" \
+    && ok "/etc/konten.conf carries the address, no secret" \
     || bad "/etc/konten.conf fehlt"
 hasnot "$TMPD/konten.conf" "richtig" "in /etc/konten.conf steht kein Kennwort"
 
@@ -631,7 +631,7 @@ python3 tools/osum/mkfs.py where "$TMPD/dm.img" "/state/session/konto" > "$TMPD/
 hin "  /state/session/konto: $(head -1 "$TMPD/wo5.txt")"
 lauf "$TMPD/dm.img" "konto --kaputt=claimcheck anmelden --anbieter=xoffi --kennung=chef@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ms3.txt"
 is "Gegenprobe claimcheck: jetzt geht sie durch" "$(kv "$TMPD/o_ms3.txt" stand)" "ok"
-ok "  (also misst Abschnitt 12 die Weigerung und nicht einen Zufall)"
+ok "  (so section 12 measures the refusal and not a coincidence)"
 
 # is_admin / nexus_core_access
 abbild "$TMPD/dm2.img" || true
@@ -639,14 +639,14 @@ lauf "$TMPD/dm2.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.te
 is "ein Token mit is_admin und nexus_core_access wird angenommen" "$(kv "$TMPD/o_ad.txt" stand)" "ok"
 python3 tools/osum/mkfs.py where "$TMPD/dm2.img" "/etc/konto.rechte" > "$TMPD/wo6.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo6.txt" \
-    && ok "und es entsteht KEINE lokale Berechtigung (/etc/konto.rechte gibt es nicht)" \
-    || bad "eine lokale Berechtigung ist entstanden: $(cat "$TMPD/wo6.txt")"
+    && ok "and NO local permission arises (/etc/konto.rechte does not exist)" \
+    || bad "a local permission arose: $(cat "$TMPD/wo6.txt")"
 python3 tools/osum/mkfs.py cat "$TMPD/dm2.img" /etc/konten > "$TMPD/konten.txt" 2>/dev/null
 if grep -qai 'admin\|nexus\|root' "$TMPD/konten.txt"; then
     if grep -qa 'adminmensch' "$TMPD/konten.txt" && ! grep -qa 'is_admin\|nexus' "$TMPD/konten.txt"; then
-        ok "/etc/konten traegt den Anzeigenamen und keinen Anspruch"
+        ok "/etc/konten carries the display name and no claim"
     else
-        bad "/etc/konten traegt einen fremden Anspruch: $(cat "$TMPD/konten.txt")"
+        bad "/etc/konten carries a foreign claim: $(cat "$TMPD/konten.txt")"
     fi
 else
     ok "/etc/konten traegt keinen fremden Anspruch"
@@ -657,25 +657,25 @@ abbild "$TMPD/dm3.img" || true
 lauf "$TMPD/dm3.img" "konto --kaputt=rechte anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ad2.txt"
 python3 tools/osum/mkfs.py where "$TMPD/dm3.img" "/etc/konto.rechte" > "$TMPD/wo7.txt" 2>&1
 grep -qa "^where " "$TMPD/wo7.txt" \
-    && ok "Gegenprobe rechte: jetzt entsteht die Berechtigung -- der Test greift" \
-    || bad "Gegenprobe rechte: es entsteht nichts, der Test misst nichts"
+    && ok "control rights: now the permission arises -- the test works" \
+    || bad "control rights: nothing arises, the test measures nothing"
 
 # ======================================================================
-echo "== 13. der Katalog, im laufenden System =="
+echo "== 13. the catalog, in the running system =="
 # ======================================================================
 lauf "$TMPD/d1.img" "konto --text=konto.state.offline" "$TMPD/o_t1.txt"
 SOLL=$(grep -a '^konto.state.offline' locale/de/messages | sed 's/^[^=]*= //')
 IST=$(grep -av '^konto:' "$TMPD/o_t1.txt" | grep -a 'Verbindung\|connection' | head -1 | tr -d '\r')
 if [ -n "$IST" ] && [ "$IST" = "$SOLL" ]; then
-    ok "der Text kommt aus dem Katalog, in der Sprache aus /etc/locale.conf"
+    ok "the text comes from the catalog, in the language from /etc/locale.conf"
 else
     hin "gelesen: '$IST'"
     hin "Datei:   '$SOLL'"
-    bad "der Katalogtext stimmt nicht mit der Datei ueberein"
+    bad "the catalog text does not match the file"
 fi
 
 # ======================================================================
-echo "== 14. DAS PRINZIP: alles ohne Konto =="
+echo "== 14. THE PRINCIPLE: everything without an account =="
 abbild "$TMPD/dp.img" || true
 lauf_ohne_netz "$TMPD/dp.img" "echo hallo > /probe.txt;cat /probe.txt;ls /bin;konto liste;konto status" "$TMPD/o_p1.txt"
 has "$TMPD/o_p1.txt" "hallo" "ohne jedes Konto: schreiben und lesen geht"
@@ -683,11 +683,11 @@ is "ohne jedes Konto: Konten" "$(kv "$TMPD/o_p1.txt" konten)" "0"
 is "ohne jedes Konto: konto status endet sauber" "$(kv "$TMPD/o_p1.txt" stand)" "ok"
 python3 tools/osum/mkfs.py where "$TMPD/dp.img" "/etc/konten" > "$TMPD/wo8.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo8.txt" \
-    && ok "und es ist keine einzige Kontodatei entstanden" \
-    || bad "eine Kontodatei ist ohne Anmeldung entstanden"
+    && ok "and not a single account file arose" \
+    || bad "an account file arose without login"
 python3 tools/osum/mkfs.py where "$TMPD/dp.img" "/device/kontoschluessel" > "$TMPD/wo9.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo9.txt" \
-    && ok "und auch kein Siegelschluessel -- nichts davon entsteht auf Vorrat" \
+    && ok "and no seal key either -- none of it arises in advance" \
     || hin "der Siegelschluessel entstand ohne Anmeldung: $(cat "$TMPD/wo9.txt")"
 
 # ======================================================================
@@ -713,15 +713,15 @@ done
 for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off konto.ui.book.ok \
          konto.ui.book.offline konto.ui.book.refused konto.ui.book.noscope konto.ui.book.failed; do
     D=$(grep -a "^$K = " locale/de/messages | sed 's/^[^=]*= //'); E=$(grep -a "^$K = " locale/en/messages | sed 's/^[^=]*= //')
-    if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "Meldung $K fehlt oder ist unuebersetzt"; fi
+    if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "message $K is missing or untranslated"; fi
     num "Schluessel $K wird von der Seite benutzt" "$(( $(grep -c "\"$K\\\\0" $SF) + $(grep -c -F -w "$K" kernel/user/settings.d/builtin.settings) ))" ge 1
 done
 HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/anb_fleitec.fi)
 num "Scope-fehlt erkennt die Seite am gleichen Schluessel wie der Ruecken" "$((HS * HB))" ge 1
 if grep -ai '^konto\.ui\.book' locale/de/messages locale/en/messages | grep -aqi 'fleitec\|xoffi\|jarvis'; then
-    bad "ein Anbietername steht in den neuen Meldungen"
+    bad "a provider name is in the new messages"
 else
-    ok "die neuen Meldungen nennen keinen Anbieter (Adressbuch, nicht Dienst)"
+    ok "the new messages name no provider (address book, not service)"
 fi
 SEG=$(sed -n '/^fn book_same/,/^fn accounts_read/p' $SF | sed 's#/bin/socfleitec##')
 if printf '%s' "$SEG" | grep -qi 'fleitec\|xoffi\|jarvis'; then bad "Anbietername in book_key/book_state"; else ok "book_key/book_state kennen keinen Anbieter"; fi

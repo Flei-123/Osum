@@ -33,16 +33,16 @@ PROGS="sh ls cat echo hello hwid shat backup key bsect"
 
 # ============================================================ 1. bauen
 
-echo "== 1. bauen: der Kern, die Programme, die Speicherkarte =="
+echo "== 1. build: the kernel, the programs, the memory card =="
 
 bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
-    && ok "firnc0 baut den Kern mit hwid" \
-    || { bad "firnc0 baut den Kern nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -10; }
+    && ok "firnc0 builds the kernel with hwid" \
+    || { bad "firnc0 does not build the kernel"; sed 's/^/        /' "$TMPD/b0.txt" | head -10; }
 [ -f "$TMPD/k0.img" ] || { echo "TRESOR: $pass passed, $((fail+1)) failed"; exit 1; }
 
 bash tools/vault/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bprog.txt" 2>&1 \
     && ok "firnc0 baut $(echo $PROGS | wc -w) Programme in Ring 3" \
-    || { bad "firnc0 baut nicht alle Programme"; sed 's/^/        /' "$TMPD/bprog.txt" | head -12; }
+    || { bad "firnc0 does not build all programs"; sed 's/^/        /' "$TMPD/bprog.txt" | head -12; }
 
 undef=""
 for p in hwid backup key shat; do
@@ -50,7 +50,7 @@ for p in hwid backup key shat; do
     u=$(nm -u "$TMPD/bin/$p.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "kein neues Programm hat ein undefiniertes Symbol" \
+[ -z "$undef" ] && ok "no new program has an undefined symbol" \
                || bad "undefinierte Symbole:$undef"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
@@ -59,18 +59,18 @@ else
     bad "der Kartenpruefer schlaegt an"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 grep -q '"HWID_OFF"' tools/kernel/memmap.py \
-    && ok "der Bereich dieser Runde (0x5A000..0x5C000) steht in der Karte" \
+    && ok "the range of this round (0x5A000..0x5C000) is in the map" \
     || bad "HWID_OFF fehlt in tools/kernel/memmap.py"
 
 mkdir -p "$TMPD/kbad"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kbad/" \; )
 sed -i 's/^const HWID_OFF: u64 = 0x72000/const HWID_OFF: u64 = 0x71000/' "$TMPD/kbad/lib/kstate.fi"
 grep -q '^const HWID_OFF: u64 = 0x71000' "$TMPD/kbad/lib/kstate.fi" \
-    || bad "die Gegenprobe konnte HWID_OFF gar nicht verschieben"
+    || bad "the control run could not move HWID_OFF at all"
 if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
-    bad "GEGENPROBE: HWID auf 0x71000 (auf SHARE) faellt NICHT auf"
+    bad "CONTROL: HWID at 0x71000 (on SHARE) is NOT noticed"
 else
-    ok "GEGENPROBE: HWID auf 0x59000 kollidiert mit BATT und faellt auf"
+    ok "CONTROL: HWID at 0x59000 collides with BATT and is noticed"
 fi
 
 lauf() {
@@ -106,7 +106,7 @@ python3 tools/osum/mkfs.py build "$TMPD/dsha.img" $BLOCKS /bin/ /t/ /proc/ /dev/
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/shat="$TMPD/bin/shat.elf" \
     /t/sha.sh="$TMPD/t_sha.sh" > "$TMPD/mkfs-sha.txt" 2>&1 \
-    && ok "mkfs.py baut das Abbild fuer die Hashmessung" \
+    && ok "mkfs.py builds the image for the hash measurement" \
     || bad "mkfs.py fehlgeschlagen"
 rc=$(lauf sha "$TMPD/dsha.img" "osum vfs nokbd script=sh /t/sha.sh;exit")
 is "der Hashlauf endet ordentlich" "$rc" "21"
@@ -130,22 +130,22 @@ done
 g4=$(grep -a '^sha4: ' "$TMPD/sha.txt" | sed 's/^sha4: //')
 g5=$(grep -a '^sha5: ' "$TMPD/sha.txt" | sed 's/^sha5: //')
 [ -n "$g4" ] && [ "$g4" = "$g5" ] \
-    && ok "1000 Oktette am Stueck und in sieben ungleichen Stuecken: derselbe Hash" \
-    || bad "der Strom liefert einen anderen Hash als der Einzelaufruf"
+    && ok "1000 octets in one piece and in seven uneven pieces: same hash" \
+    || bad "the stream yields a different hash than the single call"
 
 # =============================== 3. SMBIOS: Kernel gegen zweite Umsetzung
 
-echo "== 3. SMBIOS: der Kernel gegen eine zweite, unabhaengige Umsetzung =="
+echo "== 3. SMBIOS: the kernel against a second, independent implementation =="
 
 python3 tools/vault/dump.py "$TMPD/k0.img" "$TMPD/mem.bin" "$TMPD/dumprun.txt" \
     > "$TMPD/dump.log" 2>&1 \
-    && ok "der Wirt holt sich 0x0..0x100000 ueber den QEMU-Monitor" \
-    || { bad "pmemsave ueber den Monitor fehlgeschlagen"; sed 's/^/        /' "$TMPD/dump.log" | head -6; }
+    && ok "the host fetches 0x0..0x100000 through the QEMU monitor" \
+    || { bad "pmemsave through the monitor failed"; sed 's/^/        /' "$TMPD/dump.log" | head -6; }
 
 if [ -s "$TMPD/mem.bin" ]; then
     python3 tools/vault/smbios.py "$TMPD/mem.bin" > "$TMPD/soll.txt" 2>&1 \
-        && ok "die zweite Umsetzung entschluesselt die Tabelle" \
-        || { bad "smbios.py kommt nicht durch"; sed 's/^/        /' "$TMPD/soll.txt" | head -6; }
+        && ok "the second implementation decodes the table" \
+        || { bad "smbios.py does not get through"; sed 's/^/        /' "$TMPD/soll.txt" | head -6; }
 fi
 
 rc=$(kernlauf hwraw "hwid nokbd nosched noproc nofs noring3")
@@ -156,7 +156,7 @@ for feld in entry table tlen count; do
     got=$(grep -a "^hwid: $feld=" "$TMPD/hwraw.txt" | tail -1 | sed "s/^hwid: $feld=//")
     want=$(grep -a "^$feld=" "$TMPD/soll.txt" | tail -1 | sed "s/^$feld=//")
     if [ -n "$got" ] && [ "$got" = "$want" ]; then
-        ok "SMBIOS $feld: Kernel und Python sagen $got"
+        ok "SMBIOS $feld: kernel and Python say $got"
     else
         bad "SMBIOS $feld: Kernel '$got', Python '$want'"
     fi
@@ -177,7 +177,7 @@ hat "$TMPD/koeder.txt" "koeder_pruefsumme=falsch" "und seine Pruefsumme stimmt N
 is "der Kernel hat GENAU EINEN Einstiegspunkt angenommen" \
    "$(grep -a '^hwid: tried=' "$TMPD/hwraw.txt" | tail -1 | sed 's/^hwid: tried=//')" "1"
 
-echo "== 4. dieselbe Maschine, zwei Firmwares: was SMBIOS wirklich wert ist =="
+echo "== 4. same machine, two firmwares: what SMBIOS is really worth =="
 
 is "ohne -smbios ist die Seriennummer LEER" \
    "$(grep -a '^hwid: sys_ser=' "$TMPD/hwraw.txt" | tail -1 | sed 's/^hwid: sys_ser=//')" "(empty)"
@@ -231,7 +231,7 @@ is "die MAC-Adresse kommt aus dem Treiber" \
 is "GEGENPROBE: ohne Karte gibt es keine MAC" \
    "$(grep -a '^hwid: mac_ok=' "$TMPD/hwraw.txt" | tail -1 | sed 's/^hwid: mac_ok=//')" "0"
 
-echo "== 5. der EFI-Weg, gegen eine von Hand gebaute Systemtafel =="
+echo "== 5. the EFI path, against a hand-built system table =="
 
 rc=$(kernlauf hwefi "hwid hwidefi nokbd nosched noproc nofs noring3" "${SMB1[@]}")
 is "der EFI-Lauf endet ordentlich" "$rc" "21"
@@ -247,7 +247,7 @@ is "GEGENPROBE: eine Tafel mit nur einem FREMDEN GUID gibt nichts her" \
    "$(grep -a '^hwidefi: decoy=' "$TMPD/hwefi.txt" | tail -1 | sed 's/^hwidefi: decoy=//')" "1"
 nicht "$TMPD/hwraw.txt" "hwidefi:" "GEGENPROBE: ohne das Wort hwidefi wird der Pfad nie betreten"
 
-echo "== 6. /proc/hwid, der Fingerabdruck und was ihn NICHT aendert =="
+echo "== 6. /proc/hwid, the fingerprint and what does NOT change it =="
 
 cat > "$TMPD/t_hwid.sh" <<'EOS'
 cat /proc/hwid
@@ -264,7 +264,7 @@ mkimg_hwid() { # ziel
         /bin/hwid="$TMPD/bin/hwid.elf" /t/hwid.sh="$TMPD/t_hwid.sh" \
         > /dev/null 2>&1
 }
-mkimg_hwid "$TMPD/dh1.img" && ok "mkfs.py baut das Abbild fuer /proc/hwid" \
+mkimg_hwid "$TMPD/dh1.img" && ok "mkfs.py builds the image for /proc/hwid" \
     || bad "mkfs.py fehlgeschlagen"
 mkimg_hwid "$TMPD/dh2.img"
 
@@ -302,18 +302,18 @@ is "eine NEUE PLATTE aendert den Fingerabdruck nicht" "$FP2" "$FP1"
 rc=$(lauf hwp3 "$TMPD/dh1.img" "osum vfs nokbd script=sh /t/hwid.sh;exit" "${SMB2[@]}")
 FP3=$(fingerabdruck "$TMPD/hwp3.txt")
 if [ -n "$FP3" ] && [ "$FP3" != "$FP1" ]; then
-    ok "eine ANDERE Maschine hat einen anderen Fingerabdruck"
+    ok "a DIFFERENT machine has a different fingerprint"
 else
-    bad "zwei verschiedene Maschinen haben denselben Fingerabdruck ($FP3)"
+    bad "two different machines have the same fingerprint ($FP3)"
 fi
 
 rc=$(lauf hwp4 "$TMPD/dh1.img" "osum vfs nokbd script=sh /t/hwid.sh;exit")
 hat "$TMPD/hwp4.txt" "system_serial: " "ohne -smbios bleibt die Seriennummer leer"
 q=$(grep -a '^sources: ' "$TMPD/hwp4.txt" | tail -1 | sed 's/^sources: //')
-[ "${q:-0}" -le 2 ] && ok "und der Fingerabdruck stuetzt sich auf hoechstens zwei Quellen (${q:-0})" \
-                    || bad "unerwartet viele Quellen ohne Firmwareangaben: $q"
+[ "${q:-0}" -le 2 ] && ok "and the fingerprint relies on at most two sources (${q:-0})" \
+                    || bad "unexpectedly many sources without firmware data: $q"
 
-echo "== 7. die Sicherung: doppelt, inkrementell, und Oktett fuer Oktett zurueck =="
+echo "== 7. the backup: twice, incremental, and octet for octet back =="
 
 python3 - "$TMPD" <<'PY'
 import os, sys
@@ -376,7 +376,7 @@ is "und null Oktette" "$R2_WR" "0"
 is "obwohl er denselben Baum GANZ gelesen hat" "$R2_RD" "$R1_RD"
 
 R1_MS=$(feld RUN1 "ms"); R2_MS=$(feld RUN2 "ms")
-ok "Zeit: erster Lauf ${R1_MS} ms, zweiter Lauf ${R2_MS} ms (Zeitgeber 100 Hz, also 10 ms Aufloesung)"
+ok "time: first run ${R1_MS} ms, second run ${R2_MS} ms (timer 100 Hz, so 10 ms resolution)"
 
 is "verify prueft 9 Bloecke" "$(feld VERIFY 'chunks checked')" "9"
 is "und findet nichts Kaputtes" "$(feld VERIFY corrupt)" "0"
@@ -387,8 +387,8 @@ is "wiederhergestellt: 25491 Oktette" "$(feld RESTORE 'restored bytes')" "25491"
 abschnitt LIST | grep -qa '^s1$' && ok "backup list nennt s1" || bad "backup list nennt s1 nicht"
 abschnitt LIST | grep -qa '^s2$' && ok "backup list nennt s2" || bad "backup list nennt s2 nicht"
 abschnitt GETBAD | grep -qa 'no such path' \
-    && ok "backup get auf einen Pfad, den es nicht gibt, ist ein FEHLER" \
-    || bad "backup get auf einen unbekannten Pfad meldet keinen Fehler"
+    && ok "backup get on a path that does not exist is an ERROR" \
+    || bad "backup get on an unknown path reports no error"
 
 python3 - "$TMPD/live-backup.img" > "$TMPD/vergleich.txt" 2>&1 <<'PY'
 import subprocess, sys
@@ -416,7 +416,7 @@ sed 's/^/        /' "$TMPD/vergleich.txt" | grep -v 'verglichen=' | head -6
 is "der wiederhergestellte Baum ist OKTETT FUER OKTETT der alte (6 Eintraege)" \
    "$(grep -a '^verglichen=' "$TMPD/vergleich.txt")" "verglichen=6 gleich=6"
 
-echo "== 8. die ehrliche Grenze: dieselben acht Oktette, hinten und vorne =="
+echo "== 8. the honest limit: the same eight octets, at the back and at the front =="
 
 python3 - "$TMPD" <<'PY'
 import sys
@@ -451,7 +451,7 @@ python3 tools/osum/mkfs.py build "$TMPD/dshift.img" $BLOCKS \
     /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
     /one/a.bin="$TMPD/base.bin" /oneapp/a.bin="$TMPD/app.bin" \
     /onepre/a.bin="$TMPD/pre.bin" /t/shift.sh="$TMPD/t_shift.sh" \
-    > /dev/null 2>&1 && ok "mkfs.py baut die drei Fassungen derselben Datei" \
+    > /dev/null 2>&1 && ok "mkfs.py builds the three versions of the same file" \
     || bad "mkfs.py fehlgeschlagen"
 
 rc=$(lauf shift "$TMPD/dshift.img" "osum vfs nokbd script=sh /t/shift.sh;exit")
@@ -467,7 +467,7 @@ is "das sind 10248 von 10248 Oktetten, also alles" "$(sfeld B2 'written bytes')"
 
 # ======================================= 9. verify findet echten Schaden
 
-echo "== 9. ein gekipptes Oktett in der Packdatei, von aussen =="
+echo "== 9. a flipped octet in the pack file, from outside =="
 
 cp "$TMPD/live-shift.img" "$TMPD/kaputt.img"
 python3 tools/vault/corrupt.py "$TMPD/kaputt.img" /sa/PACK 100 > "$TMPD/kaputt.txt" 2>&1 \
@@ -506,7 +506,7 @@ is "GEGENPROBE: im heilen Speicher desselben Laufs findet es keinen" \
 
 # ================================ 10. die Schluesselverwaltung
 
-echo "== 10. die Schluesselverwaltung: PBKDF2 gegen hashlib, und der Rundlauf =="
+echo "== 10. key management: PBKDF2 against hashlib, and the round trip =="
 
 cat > "$TMPD/t_key.sh" <<'EOS'
 echo ==KDF==
@@ -529,7 +529,7 @@ python3 tools/osum/mkfs.py build "$TMPD/dkey.img" $BLOCKS /bin/ /t/ /proc/ /dev/
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/key="$TMPD/bin/key.elf" \
     /t/key.sh="$TMPD/t_key.sh" > /dev/null 2>&1 \
-    && ok "mkfs.py baut das Abbild fuer die Schluesselmessung" || bad "mkfs.py fehlgeschlagen"
+    && ok "mkfs.py builds the image for the key measurement" || bad "mkfs.py fehlgeschlagen"
 
 rc=$(lauf key "$TMPD/dkey.img" "osum vfs nokbd script=sh /t/key.sh;exit")
 is "der Schluessellauf endet ordentlich" "$rc" "21"
@@ -547,7 +547,7 @@ while [ $i -le 3 ]; do
     got=$(grep -a '^dk: ' "$K" | sed -n "${i}p" | sed 's/^dk: //')
     want=$(sed -n "${i}p" "$TMPD/kdf-soll.txt")
     if [ -n "$got" ] && [ "$got" = "$want" ]; then
-        ok "PBKDF2-HMAC-SHA256 Fall $i (64 Oktette, zwei Bloecke) stimmt mit hashlib"
+        ok "PBKDF2-HMAC-SHA256 case $i (64 octets, two blocks) matches hashlib"
     else
         bad "PBKDF2 Fall $i: '$got' statt '$want'"
     fi
@@ -556,25 +556,25 @@ done
 
 FP_INIT=$(sed -n '/^==INIT==/,/^==OPEN==/p' "$K" | grep -a '^key sha256: ' | tail -1 | sed 's/^key sha256: //')
 FP_OPEN=$(sed -n '/^==OPEN==/,/^==WRONG==/p' "$K" | grep -a '^key sha256: ' | tail -1 | sed 's/^key sha256: //')
-[ ${#FP_INIT} -eq 64 ] && ok "init erzeugt einen Schluessel und nennt seinen Fingerabdruck" \
+[ ${#FP_INIT} -eq 64 ] && ok "init creates a key and names its fingerprint" \
                        || bad "init nennt keinen Fingerabdruck"
 is "open mit dem richtigen Passwort gibt DENSELBEN Schluessel zurueck" "$FP_OPEN" "$FP_INIT"
 sed -n '/^==WRONG==/,/^==ERASE==/p' "$K" | grep -qa 'wrong passphrase' \
-    && ok "ein falsches Passwort wird abgewiesen (die Marke wird VOR dem Auspacken geprueft)" \
-    || bad "ein falsches Passwort wird nicht abgewiesen"
+    && ok "a wrong password is rejected (the mark is checked BEFORE unwrapping)" \
+    || bad "a wrong password is not rejected"
 sed -n '/^==WRONG==/,/^==ERASE==/p' "$K" | grep -qa '^key sha256: ' \
-    && bad "bei falschem Passwort kommt trotzdem ein Schluessel heraus" \
-    || ok "und dabei kommt KEIN Schluessel heraus"
+    && bad "with a wrong password a key still comes out" \
+    || ok "and no key comes out with it"
 ERMS=$(sed -n '/^==ERASE==/,/^==AFTER==/p' "$K" | grep -a '^erase ms: ' | tail -1 | sed 's/^erase ms: //')
-[ -n "$ERMS" ] && ok "crypto erase gemessen: ${ERMS} ms" || bad "erase meldet keine Zeit"
+[ -n "$ERMS" ] && ok "crypto erase gemessen: ${ERMS} ms" || bad "erase reports no time"
 sed -n '/^==AFTER==/,/^==END==/p' "$K" | grep -qa 'cannot read' \
-    && ok "nach erase ist der Schluessel weg -- open findet nichts mehr" \
-    || bad "nach erase laesst sich der Schluessel noch oeffnen"
+    && ok "after erase the key is gone -- open finds nothing any more" \
+    || bad "after erase the key can still be opened"
 
 if grep -qa '^key: [0-9a-f]\{64\}$' "$K"; then
-    bad "der Schluessel steht im Klartext in der Ausgabe"
+    bad "the key appears in plain text in the output"
 else
-    ok "GEGENPROBE: der Schluessel selbst steht nirgends in der Ausgabe"
+    ok "CONTROL: the key itself appears nowhere in the output"
 fi
 
 echo "== 11. verwaiste Pakete: sichern, Baum wegwerfen, wiederherstellen =="
@@ -643,7 +643,7 @@ python3 tools/osum/mkfs.py build "$TMPD/dorph.img" $BLOCKS \
     /t/ORPHANS="$TMPD/ORPHANS" /t/EMPTY="$TMPD/EMPTY" \
     /t/BADSHAPE="$TMPD/BADSHAPE" /t/MISSING="$TMPD/MISSING" \
     /t/orph.sh="$TMPD/t_orph.sh" > "$TMPD/mkfs-orph.txt" 2>&1 \
-    && ok "mkfs.py baut den Baum mit einem verwaisten und einem erreichbaren Paket" \
+    && ok "mkfs.py builds the tree with an orphaned and a reachable package" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-orph.txt" | head -6; }
 
 rc=$(lauf orph "$TMPD/dorph.img" "osum vfs nokbd script=sh /t/orph.sh;exit")
@@ -665,39 +665,39 @@ if [ -n "$BASEB" ] && [ -n "$WITHB" ] && [ "$BASEB" -gt 0 ] 2>/dev/null; then
     is "die Differenz ist genau das, was die verwaisten Oktette ausmachen" \
        "$DIFF" "$ORPHB"
     ok "PREIS DER AUSNAHME: $BASEB -> $WITHB Oktette, +$DIFF (+$PCT %)"
-    echo "        (ohne Verwaiste $BASEB, mit $WITHB, Aufschlag $DIFF Oktette = $PCT %)"
+    echo "        (without orphans $BASEB, with $WITHB, surcharge $DIFF octets = $PCT %)"
 else
-    bad "die Oktettzahlen des Verwaisten-Laufs fehlen"
+    bad "the octet counts of the orphan run are missing"
 fi
 
 SNAP=$(sed -n '/^==SNAP==/,/^==END==/p' "$O")
 echo "$SNAP" | grep -qa "/store/$ORPH/start" \
-    && ok "der Schnappschuss nennt das VERWAISTE Paket" \
-    || bad "der Schnappschuss nennt das verwaiste Paket nicht"
+    && ok "the snapshot names the ORPHANED package" \
+    || bad "the snapshot does not name the orphaned package"
 echo "$SNAP" | grep -qa "$REACH" \
-    && bad "das ERREICHBARE Paket steht im Schnappschuss und darf nicht" \
-    || ok "GEGENPROBE: das ERREICHBARE Paket steht NICHT im Schnappschuss"
+    && bad "the REACHABLE package is in the snapshot and must not be" \
+    || ok "CONTROL: the REACHABLE package is NOT in the snapshot"
 echo "$SNAP" | grep -qa "cache" \
-    && bad "cache steht im Schnappschuss und darf nie" \
-    || ok "GEGENPROBE: cache steht NICHT im Schnappschuss"
+    && bad "cache is in the snapshot and never may be" \
+    || ok "CONTROL: cache is NOT in the snapshot"
 echo "$SNAP" | grep -qa "/state/doc.txt" \
-    && ok "die Benutzerdaten stehen drin -- Regel 1" \
-    || bad "die Benutzerdaten fehlen im Schnappschuss"
+    && ok "the user data is in -- rule 1" \
+    || bad "the user data is missing from the snapshot"
 
 # LAUTE FEHLER, beide.
 sed -n '/^==BADSHAPE==/,/^==MISSING==/p' "$O" | grep -qa 'not a lower case hex store name' \
-    && ok "eine Zeile, die kein Speichername ist, ist ein LAUTER Fehler (kein Pfad-Ausbruch)" \
+    && ok "a line that is not a store name is a LOUD error (no path escape)" \
     || bad "'../../etc/passwd' in der Liste wird nicht abgewiesen"
 sed -n '/^==MISSING==/,/^==SNAP==/p' "$O" | grep -qa 'orphan is not in the store' \
-    && ok "ein verwaister Eintrag, den es nicht gibt, ist ein LAUTER Fehler" \
-    || bad "ein fehlender verwaister Eintrag wird stillschweigend uebergangen"
+    && ok "an orphaned entry that does not exist is a LOUD error" \
+    || bad "a missing orphaned entry is silently skipped"
 
 for f in PACK INDEX S-b1; do
     python3 tools/osum/mkfs.py cat "$TMPD/live-orph.img" "/sb/$f" > "$TMPD/sb-$f" 2>/dev/null \
-        || bad "der Wirt kann /sb/$f nicht aus dem Abbild lesen"
+        || bad "the host cannot read /sb/$f from the image"
 done
-[ -s "$TMPD/sb-PACK" ] && ok "der Wirt holt PACK, INDEX und den Schnappschuss aus dem Abbild" \
-                       || bad "PACK ist leer"
+[ -s "$TMPD/sb-PACK" ] && ok "the host fetches PACK, INDEX and the snapshot from the image" \
+                       || bad "PACK is empty"
 
 cat > "$TMPD/t_orphr.sh" <<EOS
 echo ==RESTORE==
@@ -715,18 +715,18 @@ python3 tools/osum/mkfs.py build "$TMPD/dorphr.img" $BLOCKS \
     /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
     /sb/PACK="$TMPD/sb-PACK" /sb/INDEX="$TMPD/sb-INDEX" /sb/S-b1="$TMPD/sb-S-b1" \
     /t/orphr.sh="$TMPD/t_orphr.sh" > "$TMPD/mkfs-orphr.txt" 2>&1 \
-    && ok "der zweite Rechner hat NUR den Speicher -- keinen Baum, kein Paket" \
-    || { bad "mkfs.py baut das zweite Abbild nicht"; sed 's/^/        /' "$TMPD/mkfs-orphr.txt" | head -6; }
+    && ok "the second machine has ONLY the store -- no tree, no package" \
+    || { bad "mkfs.py does not build the second image"; sed 's/^/        /' "$TMPD/mkfs-orphr.txt" | head -6; }
 
 rc=$(lauf orphr "$TMPD/dorphr.img" "osum vfs nokbd script=sh /t/orphr.sh;exit")
 is "der Wiederherstellungs-Lauf endet ordentlich" "$rc" "21"
 R="$TMPD/orphr.txt"
 sed -n '/^==VERIFY==/,/^==RUN==/p' "$R" | grep -qa '^corrupt: 0$' \
-    && ok "der Speicher des zweiten Rechners ist heil (corrupt: 0)" \
-    || bad "verify meldet Schaden im uebertragenen Speicher"
+    && ok "the store of the second machine is intact (corrupt: 0)" \
+    || bad "verify reports damage in the transferred store"
 sed -n '/^==RUN==/,/^==END==/p' "$R" | grep -qa 'hello' \
-    && ok "DAS WIEDERHERGESTELLTE PAKET LAEUFT -- also sind die Rechtebits mitgekommen" \
-    || { bad "das wiederhergestellte Paket laeuft nicht"; \
+    && ok "THE RESTORED PACKAGE RUNS -- so the permission bits came along" \
+    || { bad "the restored package does not run"; \
          sed -n '/^==RUN==/,/^==END==/p' "$R" | sed 's/^/        /' | head -4; }
 
 python3 - "$TMPD/live-orphr.img" "$TMPD/orph-start" "$ORPH" > "$TMPD/orphcmp.txt" 2>&1 <<'PY2'
@@ -740,10 +740,10 @@ print("original=%d wieder=%d gleich=%s" % (len(want), len(got), got == want))
 PY2
 cat "$TMPD/orphcmp.txt" | sed 's/^/        /'
 grep -qa 'gleich=True' "$TMPD/orphcmp.txt" \
-    && ok "das verwaiste Paket ist OKTETT FUER OKTETT wieder da, aus dem Abbild gelesen" \
-    || bad "das wiederhergestellte verwaiste Paket ist NICHT oktettgleich"
+    && ok "the orphaned package is back OCTET FOR OCTET, read from the image" \
+    || bad "the restored orphaned package is NOT octet-identical"
 
-echo "== 12. Deduplizierung, Zuwachs und der Rueckweg =="
+echo "== 12. deduplication, growth and the way back =="
 
 python3 - "$TMPD" <<'PY2'
 import sys, os
@@ -838,8 +838,8 @@ is "und das ist genau, was er gelesen hat -- ein letzter Block wird NICHT auf 40
 is "ZWEITER LAUF SCHREIBT NULL OKTETTE" "$W2" "0"
 is "und liest dabei trotzdem alles wieder" "$R2" "$R1"
 ok "ZAHLEN: 1. Lauf $W1 Oktette in ${T1} ms, 2. Lauf $W2 Oktette in ${T2} ms"
-echo "        (der Faktor ist kein Verhaeltnis, sondern eine Null:"
-echo "         $W1 -> $W2 Oktette bei gleichem Lesen von $R1)"
+echo "        (the factor is not a ratio but a zero:"
+echo "         $W1 -> $W2 octets at the same read of $R1)"
 
 W3=$(mfeld RUN3 'written bytes'); N3=$(mfeld RUN3 'new chunks')
 is "EIN Oktett in b.bin geaendert: genau EIN neuer Block" "$N3" "1"
@@ -851,13 +851,13 @@ fi
 
 # ---- 4. DER RUECKWEG -----------------------------------------------------
 sed -n '/^==GET==/,/^==REST==/p' "$M" | grep -qa 'backup:' \
-    && bad "backup get meldet einen Fehler" \
-    || ok "backup get holt die einzelne Datei ohne Fehler (die Oktette werden unten verglichen)"
+    && bad "backup get reports an error" \
+    || ok "backup get fetches the single file without error (the octets are compared below)"
 is "der ganze Baum kommt zurueck: die Wurzel und sub" "$(mfeld REST 'restored dirs')" "2"
 is "und 3 Dateien" "$(mfeld REST 'restored files')" "3"
 is "und 44384 Oktette" "$(mfeld REST 'restored bytes')" "44384"
 sed -n '/^==LIST==/,/^==ABBRUCH==/p' "$M" | grep -qa '^r1$' \
-    && ok "backup list nennt die drei Sicherungen" || bad "backup list nennt r1 nicht"
+    && ok "backup list names the three backups" || bad "backup list nennt r1 nicht"
 
 python3 - "$TMPD/live-mess.img" "$TMPD" > "$TMPD/messcmp.txt" 2>&1 <<'PY2'
 import subprocess, sys
@@ -883,27 +883,27 @@ is "aus dem Abbild geprueft: jede Datei OKTETT FUER OKTETT (3 Dateien + 1 einzel
 
 # ---- 5. EIN ABGEBROCHENER LAUF HINTERLAESST NICHTS -----------------------
 sed -n '/^==ABBRUCH==/,/^==NACHABBRUCH==/p' "$M" | grep -qa 'could not be completed' \
-    && ok "ein Lauf, der scheitert, sagt es" \
+    && ok "a run that fails says so" \
     || bad "der gescheiterte Lauf meldet nichts"
 sed -n '/^==NACHABBRUCH==/,/^==RESTABBRUCH==/p' "$M" | grep -qa '^k1$' \
-    && bad "die abgebrochene Sicherung k1 wird aufgelistet -- sie sieht aus wie eine fertige" \
-    || ok "danach steht KEINE Sicherung im Speicher -- kein halbes Backup"
+    && bad "the aborted backup k1 is listed -- it looks like a finished one" \
+    || ok "afterwards NO backup is in the store -- no half backup"
 sed -n '/^==RESTABBRUCH==/,/^==END==/p' "$M" | grep -qa 'no such snapshot' \
-    && ok "und wiederherstellen laesst sich daraus auch nichts" \
-    || bad "aus dem abgebrochenen Lauf laesst sich etwas wiederherstellen"
+    && ok "and nothing can be restored from it either" \
+    || bad "something can be restored from the aborted run"
 
 python3 tools/osum/mkfs.py list "$TMPD/live-mess.img" > "$TMPD/mess.ls" 2>&1
 grep -qE '/st4/S-' "$TMPD/mess.ls" \
-    && bad "im Abbild liegt eine S-Datei aus dem abgebrochenen Lauf" \
-    || ok "GEGENPROBE im Abbild: /st4 hat keine S-Datei"
+    && bad "the image holds an S file from the aborted run" \
+    || ok "CONTROL in the image: /st4 has no S file"
 grep -qE '/st4/T-' "$TMPD/mess.ls" \
-    && bad "die halbfertige T-Datei ist liegengeblieben" \
-    || ok "GEGENPROBE im Abbild: die halbfertige T-Datei ist weggeraeumt"
+    && bad "the half-finished T file was left behind" \
+    || ok "CONTROL in the image: the half-finished T file is cleaned up"
 
-echo "== 13a. ChaCha20 und die Ableitung gegen RFC 8439 und hashlib =="
+echo "== 13a. ChaCha20 and the derivation against RFC 8439 and hashlib =="
 
 python3 tools/vault/vectors.py > "$TMPD/vec.txt" 2>&1 \
-    && ok "der Wirt rechnet die Vektoren nach (cryptography + hashlib)" \
+    && ok "the host recomputes the vectors (cryptography + hashlib)" \
     || { bad "vectors.py laeuft nicht"; sed 's/^/        /' "$TMPD/vec.txt" | head -6; }
 
 cat > "$TMPD/t_sec1.sh" <<'EOS'
@@ -913,7 +913,7 @@ python3 tools/osum/mkfs.py build "$TMPD/dsec1.img" $BLOCKS /bin/ /t/ /proc/ /dev
     /bin/sh="$TMPD/bin/sh.elf" /bin/echo="$TMPD/bin/echo.elf" \
     /bin/bsect="$TMPD/bin/bsect.elf" /t/s.sh="$TMPD/t_sec1.sh" \
     > "$TMPD/mkfs-sec1.txt" 2>&1 \
-    && ok "mkfs.py baut das Abbild fuer die Vektoren" \
+    && ok "mkfs.py builds the image for the vectors" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-sec1.txt" | head -6; }
 
 rc=$(lauf sec1 "$TMPD/dsec1.img" "osum vfs nokbd script=sh /t/s.sh;exit")
@@ -943,7 +943,7 @@ is "sl5 gegengerechnet auf dem Wirt" "$(wv sl5name)" "$(wv sl5name)"
 
 # ---------------------------------------------------------------------------
 
-echo "== 13b. drei Klassen in einer echten Sicherung =="
+echo "== 13b. three classes in a real backup =="
 
 python3 - "$TMPD" <<'PY2'
 import os, sys
@@ -1044,7 +1044,7 @@ python3 tools/osum/mkfs.py build "$TMPD/dsec2.img" $BLOCKS \
     /dup/y/gleich.bin="$TMPD/dup/y/gleich.bin" \
     /dup/z/gleich.bin="$TMPD/dup/z/gleich.bin" \
     /t/s.sh="$TMPD/t_sec2.sh" > "$TMPD/mkfs-sec2.txt" 2>&1 \
-    && ok "mkfs.py baut den Sicherungssatz mit allen drei Klassen" \
+    && ok "mkfs.py builds the backup set with all three classes" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs-sec2.txt" | head -8; }
 
 rc=$(lauf sec2 "$TMPD/dsec2.img" "osum vfs nokbd script=sh /t/s.sh;exit")
@@ -1153,9 +1153,9 @@ is "der Tresorblock in B ist 4112 Oktette gross -- 4096 + 16 Oktette Marke" \
    "$(vl /sB/)" "4112"
 is "und die Marke MARK-VAULT-SECRET-BANK-PW steht NICHT darin" "$(vb /sB/)" "0"
 is "in C ebenso" "$(vb /sC/)" "0"
-ok "ROHINHALT des Tresorblocks in B, erste 48 Oktette:"
+ok "RAW CONTENT of the vault block in B, first 48 octets:"
 echo "        $(grep -a '^vaulthex /sB/' "$TMPD/grep.txt" | awk '{print $3}')"
-ok "derselbe Tresor in C, anderes Hauptsalz, also ANDERE Oktette:"
+ok "the same vault in C, different master salt, so DIFFERENT octets:"
 echo "        $(grep -a '^vaulthex /sC/' "$TMPD/grep.txt" | awk '{print $3}')"
 is "GEGENPROBE: derselbe Klartext, zwei Speicher, ZWEI verschiedene Geheimtexte" \
    "$([ "$(grep -a '^vaulthex /sB/' "$TMPD/grep.txt" | awk '{print $3}')" = \
@@ -1166,24 +1166,24 @@ is "EHRLICH: der PFAD /secrets/vault.kdbx steht auch in C im KLARTEXT" \
    "$(grep -a '^pathleak' "$TMPD/grep.txt" | awk '{print $2}')" "1"
 
 sab BRESTNOM | grep -qa 'carries secrets' \
-    && ok "ohne -m sagt das Wiederherstellen KLAR, dass Geheimnisse drin sind" \
-    || bad "ohne -m wird still weitergemacht"
+    && ok "without -m the restore says CLEARLY that secrets are inside" \
+    || bad "without -m it silently carries on"
 sab BRESTNOM | grep -qa 'restored files' \
-    && bad "ohne -m meldet der Lauf trotzdem einen Erfolg" \
-    || ok "und meldet KEINEN Erfolg -- kein stilles Ueberspringen"
+    && bad "without -m the run still reports success" \
+    || ok "and reports NO success -- no silent skipping"
 sab BREST | grep -qa 'restored files' \
-    && ok "mit -m kommt der Baum zurueck" \
-    || bad "mit -m kommt der Baum NICHT zurueck"
+    && ok "with -m the tree comes back" \
+    || bad "with -m the tree does NOT come back"
 
 sab CWRONGP | grep -qa 'wrong store password' \
-    && ok "ein falsches Speicherpasswort wird benannt" \
-    || bad "ein falsches Speicherpasswort wird nicht benannt"
+    && ok "a wrong store password is named" \
+    || bad "a wrong store password is not named"
 sab CWRONGM | grep -qa 'wrong master password' \
-    && ok "ein falsches Hauptpasswort wird benannt" \
-    || bad "ein falsches Hauptpasswort wird nicht benannt"
+    && ok "a wrong master password is named" \
+    || bad "a wrong master password is not named"
 sab CVERIFYNOP | grep -qa 'this store is encrypted' \
-    && ok "verify ohne Passwort sagt, dass der Speicher verschluesselt ist" \
-    || bad "verify ohne Passwort meldet den verschluesselten Speicher nicht"
+    && ok "verify without password says the store is encrypted" \
+    || bad "verify without password does not report the encrypted store"
 is "verify mit beiden Passwoertern: nichts kaputt" "$(sfeld CVERIFY corrupt)" "0"
 is "verify mit beiden Passwoertern: nichts ungeprueft" "$(sfeld CVERIFY unchecked)" "0"
 
@@ -1221,7 +1221,7 @@ is "wiederhergestellt und OKTETT FUER OKTETT gleich (6 Paare), Klasse (c) fehlt 
 
 # ---------------------------------------------------------------------------
 
-echo "== 13c. was die Verschluesselung kostet -- und was sie NICHT kostet =="
+echo "== 13c. what the encryption costs -- and what it does NOT cost =="
 
 DA_CH=$(sfeld DEDUPA 'chunks');  DA_NEW=$(sfeld DEDUPA 'new chunks')
 DA_WR=$(sfeld DEDUPA 'written bytes'); DA_RD=$(sfeld DEDUPA 'read bytes')
@@ -1239,10 +1239,10 @@ is "MIT: 8224 Oktette -- 16 Oktette Marke je Block, sonst nichts" "$DB_WR" "8224
 is "und gelesen wurde beidesmal dasselbe" "$DB_RD" "$DA_RD"
 is "zweiter Lauf OHNE: null neue Bloecke" "$(sfeld DEDUPA2 'new chunks')" "0"
 is "zweiter Lauf MIT: AUCH null neue Bloecke" "$(sfeld DEDUPB2 'new chunks')" "0"
-ok "ZAHLEN: ohne $DA_WR Oktette in ${DA_MS} ms, mit $DB_WR Oktette in ${DB_MS} ms"
+ok "NUMBERS: without $DA_WR octets in ${DA_MS} ms, with $DB_WR octets in ${DB_MS} ms"
 if [ -n "$DA_WR" ] && [ -n "$DB_WR" ] && [ "$DA_WR" -gt 0 ] 2>/dev/null; then
     PCT=$(awk -v a="$DA_WR" -v b="$DB_WR" 'BEGIN{printf "%.2f", (b-a)*100.0/a}')
-    ok "AUFSCHLAG der Verschluesselung auf dem Datentraeger: ${PCT} %"
+    ok "SURCHARGE of the encryption on the data carrier: ${PCT} %"
 fi
 
 # ============================================================= Schluss

@@ -52,10 +52,10 @@ titel "0. bauen -- Kern UND Abbild aus DEMSELBEN Baum"
 # ==================================================================
 #
 if [ -n "${SCHNELL:-}" ] && [ -f "$BAU/osum.mb" ] && [ -f "$BAU/root.img" ]; then
-    echo "   (SCHNELL: vorhandenes $BAU wird benutzt)"
+    echo "   (QUICK: existing $BAU is used)"
 else
     bash tools/usbimg/build.sh "$BAU" > "$OUT/bau.log" 2>&1 || {
-        tail -20 "$OUT/bau.log"; echo "== der Bau ist fehlgeschlagen"; exit 1; }
+        tail -20 "$OUT/bau.log"; echo "== the build failed"; exit 1; }
 fi
 [ -f "$BAU/osum.mb" ] && ok "Kern gebaut ($(stat -c%s "$BAU/osum.mb") Oktette)" \
     || bad "kein Kern"
@@ -63,9 +63,9 @@ fi
     || bad "kein Wurzelabbild"
 python3 tools/osum/mkfs.py list "$BAU/root.img" 2>/dev/null > "$OUT/liste.txt"
 grep -q '^/bin/installer ' "$OUT/liste.txt" \
-    && ok "/bin/installer liegt im Abbild" || bad "/bin/installer fehlt im Abbild"
+    && ok "/bin/installer is in the image" || bad "/bin/installer is missing from the image"
 grep -q '^/apps/installer.osp/start' "$OUT/liste.txt" \
-    && ok "das Buendel liegt im Abbild (steht im Menue)" || bad "Buendel fehlt"
+    && ok "the bundle is in the image (listed in the menu)" || bad "Buendel fehlt"
 
 rm -f "$ZIEL"
 truncate -s "${ZIEL_MIB}M" "$ZIEL"
@@ -105,20 +105,20 @@ sleep 5
 if schuss "$SOCK" "$SHOTS/20-fenster.png"; then
     t=$(tinte "$SHOTS/20-fenster.png")
     if [ "$t" -ge 5 ]; then
-        ok "das Installationsfenster steht (Bild: ${t} % Tinte)"
+        ok "the installer window is up (frame: ${t} % ink)"
     else
-        bad "der Schirm ist fast leer (${t} % Tinte) -- 20-fenster.png"
+        bad "the screen is almost empty (${t} % ink) -- 20-fenster.png"
     fi
 else
-    bad "kein Foto vom Fenster"
+    bad "no photo of the window"
 fi
 
 n=$(grep -ac 'installer: rect' "$SER" 2>/dev/null || echo 0)
-[ "${n:-0}" -ge 5 ] && ok "das Fenster meldet $n Bedienelemente" \
-    || bad "nur ${n:-0} Bedienelemente gemeldet"
+[ "${n:-0}" -ge 5 ] && ok "the window reports $n controls" \
+    || bad "only ${n:-0} controls reported"
 grep -qa 'installer: disk /dev/hda' "$SER" \
-    && ok "die Platte wurde gefunden und aufgelistet" \
-    || bad "die Platte steht nicht in der Liste"
+    && ok "the disk was found and listed" \
+    || bad "the disk is not in the list"
 
 i=0
 while [ $i -lt 3000 ]; do
@@ -130,43 +130,43 @@ sleep 3
 schuss "$SOCK" "$SHOTS/30-fertig.png" || true
 
 if grep -qa 'installer: done' "$SER"; then
-    ok "die Installation meldet sich fertig"
+    ok "the installation reports done"
 else
-    bad "die Installation ist nicht fertig geworden"
+    bad "the installation did not finish"
     grep -aE 'installer:' "$SER" | tail -5 | sed 's/^/        /'
 fi
 esp=$(grep -aoE 'installer: esp=/dev/[a-z0-9]+' "$SER" | head -1 | sed 's/.*esp=//')
 if [ "$esp" = "/dev/hda1" ]; then
-    ok "die EFI-Partition wurde aus dem Ziel gebaut: $esp"
+    ok "the EFI partition was built from the target: $esp"
 else
     bad "falsche oder fehlende EFI-Partition: '${esp:-keine}'"
 fi
 st=$(grep -aoE 'installer: step=[0-9]+' "$SER" | sed 's/.*=//' | sort -un | tr '\n' ' ')
-echo "        Schritte auf der Leitung: $st"
-case "$st" in *1*2*3*4*5*) ok "alle fuenf Schritte gemeldet" ;;
-                        *) bad "nicht alle Schritte gemeldet: $st" ;; esac
+echo "        steps on the wire: $st"
+case "$st" in *1*2*3*4*5*) ok "all five steps reported" ;;
+                        *) bad "not all steps reported: $st" ;; esac
 
 # ==================================================================
 titel "4. die Maschine aus"
 # ==================================================================
 kill "$QP" 2>/dev/null; wait "$QP" 2>/dev/null
 sleep 1
-pgrep -f "file=$ZIEL" > /dev/null && bad "es laeuft noch eine Maschine auf der Platte" \
-    || ok "die Maschine ist aus"
+pgrep -f "file=$ZIEL" > /dev/null && bad "a machine is still running on the disk" \
+    || ok "the machine is off"
 
 titel "4b. was der Wirt auf der Platte findet"
 sgdisk -p "$ZIEL" > "$OUT/gpt.txt" 2>&1
-grep -q 'EF00' "$OUT/gpt.txt" && ok "eine EFI-Partition steht in der Tafel" \
+grep -q 'EF00' "$OUT/gpt.txt" && ok "an EFI partition is in the table" \
     || bad "keine EFI-Partition"
-grep -qE 'OSUM' "$OUT/gpt.txt" && ok "die Wurzelpartition steht in der Tafel" \
+grep -qE 'OSUM' "$OUT/gpt.txt" && ok "the root partition is in the table" \
     || bad "keine Wurzelpartition"
 mdir -i "$ZIEL@@1048576" ::/EFI/BOOT > "$OUT/esp.txt" 2>&1
-grep -qi 'BOOTX64' "$OUT/esp.txt" && ok "der Bootlader liegt auf der EFI-Partition" \
+grep -qi 'BOOTX64' "$OUT/esp.txt" && ok "the bootloader is on the EFI partition" \
     || bad "kein BOOTX64.EFI"
 mdir -i "$ZIEL@@1048576" :: > "$OUT/esp2.txt" 2>&1
-grep -qi 'osum' "$OUT/esp2.txt" && ok "der Kern liegt auf der EFI-Partition" \
-    || bad "kein Kern auf der EFI-Partition"
-grep -qi 'limine' "$OUT/esp2.txt" && ok "die Startdatei liegt daneben" \
+grep -qi 'osum' "$OUT/esp2.txt" && ok "the kernel is on the EFI partition" \
+    || bad "no kernel on the EFI partition"
+grep -qi 'limine' "$OUT/esp2.txt" && ok "the startup file is next to it" \
     || bad "keine limine.conf"
 
 # ==================================================================
@@ -250,9 +250,9 @@ platte_lauf start "" 400
 rc=$?
 #
 if [ -s "$OUT/start.txt" ]; then
-    ok "die Platte startet und laeuft (ein Schreibtisch endet nicht von selbst)"
+    ok "the disk boots and runs (a desktop does not end by itself)"
 else
-    bad "von der Platte kam keine einzige Zeile (Code $rc)"
+    bad "not a single line came from the disk (code $rc)"
 fi
 if [ -s "$SHOTS/40-von-der-platte.png" ]; then
     t=$(tinte "$SHOTS/40-von-der-platte.png")
@@ -260,30 +260,30 @@ if [ -s "$SHOTS/40-von-der-platte.png" ]; then
     # first picture is the LOGIN SCREEN (little ink: a small dialog on a light
     # screen), the desktop comes after the password -- test 7c types it
     if [ "$t" -ge 2 ]; then
-        ok "BILD: der Anmeldeschirm von der Platte (${t} % Tinte)"
+        ok "FRAME: the login screen from the disk (${t} % ink)"
     else
-        bad "der Schirm von der Platte ist fast leer (${t} % Tinte)"
+        bad "the screen from the disk is almost empty (${t} % ink)"
     fi
 else
-    bad "kein Bild vom Schreibtisch auf der Platte"
+    bad "no frame of the desktop on the disk"
 fi
 if grep -qaE '(osum|wm): rootpart=|rootsel: (ahci|ide|nvme)[a-z]* -- WURZEL' "$OUT/start.txt"; then
-    ok "der Kern findet seine Wurzel auf der Platte: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=[0-9]+' "$OUT/start.txt" | head -1)"
+    ok "the kernel finds its root on the disk: $(grep -aoE 'rootpart=[0-9]+ +first=[0-9]+ +blocks=[0-9]+|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=[0-9]+' "$OUT/start.txt" | head -1)"
 else
-    bad "der Kern findet keine Wurzelpartition"
+    bad "the kernel finds no root partition"
 fi
 if grep -qaE '(osum|wm): mount=1' "$OUT/start.txt"; then
-    ok "die Wurzel ist eingehaengt"
+    ok "the root is mounted"
 else
-    bad "die Wurzel ist nicht eingehaengt"
+    bad "the root is not mounted"
 fi
 if grep -qaE 'desk: start /bin/(desktop|glogi)|glogin: (bereit|rect)' "$OUT/start.txt"; then
-    ok "die Oberflaeche (Anmeldeschirm bzw. Schreibtisch) startet von der Platte"
+    ok "the surface (login screen or desktop) starts from the disk"
 else
-    bad "kein Schreibtisch -- die Oberflaeche kommt nicht hoch"
+    bad "no desktop -- the surface does not come up"
 fi
 grep -qa 'from module' "$OUT/start.txt" \
-    && bad "es lief doch ueber ein Boot-Modul -- dann ist nichts bewiesen" \
+    && bad "it ran through a boot module after all -- then nothing is proven" \
     || ok "GEGENPROBE: 'from module' kommt nicht vor -- es war kein Stick im Spiel"
 
 # the installer's own limine.conf, kept for step 7c (the next steps overwrite it with scripts)
@@ -299,20 +299,20 @@ platte_lauf schreib "echo hallo-von-der-platte >/beweis.txt;cat /beweis.txt;sync
 rc=$?
 #
 if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
-    ok "der Schreiblauf ist durchgelaufen (Code $rc)"
+    ok "the write run completed (code $rc)"
 else
-    bad "der Schreiblauf endete mit Code $rc"
+    bad "the write run ended with code $rc"
 fi
 #
 if grep -qa 'sh: ready' "$OUT/schreib.txt"; then
-    ok "die Shell auf der Platte ist gelaufen"
+    ok "the shell on the disk ran"
 else
-    bad "auf der Platte lief keine Shell -- das Skript wurde nie abgearbeitet"
+    bad "no shell ran on the disk -- the script was never executed"
 fi
 if grep -va '^mb: ' "$OUT/schreib.txt" | grep -qa 'hallo-von-der-platte'; then
-    ok "die Datei wurde angelegt und gelesen"
+    ok "the file was created and read"
 else
-    bad "die Datei liess sich nicht anlegen"
+    bad "the file could not be created"
 fi
 
 # ==================================================================
@@ -321,14 +321,14 @@ titel "7. NEU STARTEN -- und die Datei muss noch da sein"
 platte_lauf wieder "cat /beweis.txt;exit" 300
 rc=$?
 if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
-    ok "der zweite Start ist durchgelaufen (Code $rc)"
+    ok "the second boot completed (code $rc)"
 else
-    bad "der zweite Start endete mit Code $rc"
+    bad "the second boot ended with code $rc"
 fi
 if grep -va '^mb: ' "$OUT/wieder.txt" | grep -qa 'hallo-von-der-platte'; then
-    ok "DIE DATEI HAT DEN NEUSTART UEBERLEBT -- das ist der Punkt der Runde"
+    ok "THE FILE SURVIVED THE REBOOT -- that is the point of the round"
 else
-    bad "die Datei ist nach dem Neustart weg"
+    bad "the file is gone after the reboot"
     tail -5 "$OUT/wieder.txt" | sed 's/^/        /'
 fi
 
@@ -340,9 +340,9 @@ titel "7a. DAS EIGENE KONTO (r172) -- der Installer legt es an"
 platte_lauf konto "echo ==PASSWD;cat /etc/passwd;echo ==SHADOW;cat /etc/shadow;echo ==GROUP;cat /etc/group;echo ==AUTOLOGIN;ls /etc;echo ==USERS;ls /users;echo ==ENDE;exit" 300
 rc=$?
 if [ "$rc" = 21 ] || [ "$rc" = 0 ]; then
-    ok "der Kontolauf ist durchgelaufen (Code $rc)"
+    ok "the account run completed (code $rc)"
 else
-    bad "der Kontolauf endete mit Code $rc"
+    bad "the account run ended with code $rc"
 fi
 python3 - "$OUT/konto.txt" "geheim123" > "$OUT/konto-py.txt" 2>&1 <<'PYEOF2'
 import sys, hashlib, binascii, re
@@ -378,14 +378,14 @@ print("ok7" if 'abnahme' in ut and 'live' not in ut else "bad7 users %r" % users
 print("ok8" if 'autologin' not in auto.split() and 'passwd' in auto.split() else "bad8 autologin still there or no listing: %r" % auto[:200])
 PYEOF2
 cat "$OUT/konto-py.txt" | sed 's/^/        /'
-grep -q '^ok1' "$OUT/konto-py.txt" && ok "/etc/passwd: genau root und abnahme (die Konten des Sticks sind weg)" || bad "/etc/passwd stimmt nicht"
-grep -q '^ok2' "$OUT/konto-py.txt" && ok "abnahme hat uid/gid 1000 und Heimordner /users/abnahme" || bad "uid/gid/Heimordner falsch"
-grep -q '^ok3' "$OUT/konto-py.txt" && ok "root ist gesperrt (!)" || bad "root nicht gesperrt"
-grep -q '^ok4' "$OUT/konto-py.txt" && ok "der Hash gehoert zum gewaehlten Passwort (PBKDF2, von Python nachgerechnet)" || bad "Hash passt nicht zum Passwort"
-grep -q '^ok5' "$OUT/konto-py.txt" && ok "GEGENPROBE: ein falsches Passwort und die Standardpasswoerter live/startkennwort passen NICHT" || bad "ein falsches Passwort passt"
-grep -q '^ok6' "$OUT/konto-py.txt" && ok "/etc/group kennt abnahme" || bad "/etc/group ohne abnahme"
-grep -q '^ok7' "$OUT/konto-py.txt" && ok "/users/abnahme liegt da, /users/live nicht" || bad "Heimordner falsch"
-grep -q '^ok8' "$OUT/konto-py.txt" && ok "kein /etc/autologin auf der installierten Platte" || bad "/etc/autologin liegt noch da"
+grep -q '^ok1' "$OUT/konto-py.txt" && ok "/etc/passwd: exactly root and abnahme (the stick accounts are gone)" || bad "/etc/passwd stimmt nicht"
+grep -q '^ok2' "$OUT/konto-py.txt" && ok "abnahme has uid/gid 1000 and home folder /users/abnahme" || bad "uid/gid/Heimordner falsch"
+grep -q '^ok3' "$OUT/konto-py.txt" && ok "root is locked (!)" || bad "root not locked"
+grep -q '^ok4' "$OUT/konto-py.txt" && ok "the hash belongs to the chosen password (PBKDF2, recomputed by Python)" || bad "hash does not match the password"
+grep -q '^ok5' "$OUT/konto-py.txt" && ok "CONTROL: a wrong password and the default passwords live/startkennwort do NOT match" || bad "a wrong password matches"
+grep -q '^ok6' "$OUT/konto-py.txt" && ok "/etc/group kennt abnahme" || bad "/etc/group without abnahme"
+grep -q '^ok7' "$OUT/konto-py.txt" && ok "/users/abnahme is there, /users/live is not" || bad "Heimordner falsch"
+grep -q '^ok8' "$OUT/konto-py.txt" && ok "no /etc/autologin on the installed disk" || bad "/etc/autologin is still there"
 
 # ==================================================================
 titel "7c. MIT DEM NEUEN KONTO ANMELDEN -- am echten Anmeldeschirm"
@@ -438,11 +438,11 @@ login_lauf() { # name keys...
 }
 if command -v socat >/dev/null 2>&1; then
     login_lauf login-ok g e h e i m 1 2 3 ret
-    grep -aq 'glogin: bereit' "$OUT/login-ok.txt" && ok "der Anmeldeschirm kommt (kein Autologin auf der installierten Platte)" || bad "kein Anmeldeschirm"
-    grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "Anmeldung mit dem neuen Konto und dem gewaehlten Passwort klappt" || bad "Anmeldung mit dem neuen Konto: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
-    grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "die Sitzung laeuft als uid 1000" || bad "uid 1000 fehlt"
+    grep -aq 'glogin: bereit' "$OUT/login-ok.txt" && ok "the login screen appears (no autologin on the installed disk)" || bad "kein Anmeldeschirm"
+    grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "login with the new account and the chosen password works" || bad "login with the new account: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
+    grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "the session runs as uid 1000" || bad "uid 1000 fehlt"
     login_lauf login-bad f a l s c h 9 9 9 ret
-    grep -aq 'glogin: abgewiesen' "$OUT/login-bad.txt" && ok "GEGENPROBE: ein falsches Passwort wird abgewiesen" || bad "falsches Passwort nicht abgewiesen"
+    grep -aq 'glogin: abgewiesen' "$OUT/login-bad.txt" && ok "CONTROL: a wrong password is rejected" || bad "wrong password not rejected"
     grep -aq 'glogin: angemeldet als' "$OUT/login-bad.txt" && bad "GEGENPROBE: trotzdem angemeldet" || ok "GEGENPROBE: niemand angemeldet"
 else
     echo "   (socat fehlt: 7c uebersprungen)"
@@ -458,22 +458,22 @@ SIG1=$(grep -aoE '^sig [0-9a-f]{128}' "$OUT/jarvis1.txt" | head -1 | awk '{print
 if [ -n "$PUB1" ] && [ -n "$SIG1" ]; then
     ok "Lauf 1: Ed25519-Paar angelegt (pub ${PUB1:0:16}...)"
 else
-    bad "Lauf 1: jsig hat keinen Schluessel/keine Unterschrift geliefert"
+    bad "run 1: jsig delivered no key/no signature"
     tail -6 "$OUT/jarvis1.txt" | sed 's/^/        /'
 fi
 
 platte_lauf jarvis2 "jsig init;jsig verify $PUB1 $NACHRICHT $SIG1;exit" 300
 PUB2=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis2.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB1" ] && [ "$PUB2" = "$PUB1" ]; then
-    ok "O-009: NACH DEM NEUSTART DERSELBE oeffentliche Teil -- kein zweites Koppeln"
+    ok "O-009: AFTER THE REBOOT THE SAME public part -- no second pairing"
 else
-    bad "O-009: der Schluessel hat den Neustart nicht ueberlebt (vorher ${PUB1:-?}, nachher ${PUB2:-?})"
+    bad "O-009: the key did not survive the reboot (before ${PUB1:-?}, after ${PUB2:-?})"
     tail -6 "$OUT/jarvis2.txt" | sed 's/^/        /'
 fi
 if grep -qa '^yes$' "$OUT/jarvis2.txt"; then
-    ok "O-009: eine Unterschrift VON VOR dem Neustart verifiziert weiterhin"
+    ok "O-009: a signature FROM BEFORE the reboot still verifies"
 else
-    bad "O-009: die alte Unterschrift verifiziert nach dem Neustart nicht"
+    bad "O-009: the old signature does not verify after the reboot"
     tail -6 "$OUT/jarvis2.txt" | sed 's/^/        /'
 fi
 
@@ -496,27 +496,27 @@ except InvalidSignature:
     print("GEGENPROBE-GUT")
 PYFREMD
         if grep -qa '^GUT$' "$OUT/fremd.txt"; then
-            ok "O-009: fremdes Werkzeug (python-cryptography) rechnet die ueberlebende Unterschrift nach"
+            ok "O-009: a foreign tool (python-cryptography) recomputes the surviving signature"
         else
             bad "O-009: python-cryptography verwirft die Unterschrift"
             sed 's/^/        /' "$OUT/fremd.txt" | head -4
         fi
         if grep -qa '^GEGENPROBE-GUT$' "$OUT/fremd.txt"; then
-            ok "GEGENPROBE: ueber eine andere Nachricht faellt sie durch"
+            ok "CONTROL: it fails for a different message"
         else
-            bad "GEGENPROBE: die Unterschrift passt auch auf eine andere Nachricht"
+            bad "CONTROL: the signature also fits a different message"
         fi
     else
-        echo "  [ -- ] python-cryptography fehlt: die fremde Gegenrechnung entfaellt"
+        echo "  [ -- ] python-cryptography missing: the foreign cross-check is skipped"
     fi
 fi
 
 platte_lauf jarvis3 "rm /etc/jarvis/device.key;jsig init;exit" 300
 PUB3=$(grep -aoE '^pub [0-9a-f]{64}' "$OUT/jarvis3.txt" | head -1 | awk '{print $2}')
 if [ -n "$PUB3" ] && [ -n "$PUB1" ] && [ "$PUB3" != "$PUB1" ]; then
-    ok "GEGENPROBE: nach dem Zuruecksetzen ist er WEG und ein neuer entsteht (pub ${PUB3:0:16}...)"
+    ok "CONTROL: after the reset it is GONE and a new one appears (pub ${PUB3:0:16}...)"
 else
-    bad "GEGENPROBE: nach dem Loeschen kam derselbe Schluessel wieder (${PUB3:-?}) -- dann liest jsig ihn nicht aus der Datei"
+    bad "CONTROL: after deleting, the same key came back (${PUB3:-?}) -- then jsig does not read it from the file"
     tail -6 "$OUT/jarvis3.txt" | sed 's/^/        /'
 fi
 
@@ -542,13 +542,13 @@ PYEOF
     platte_lauf kaputt "" 240
     ZIEL="$ZIEL_ALT"
     if grep -qaE '(osum|wm): mount=1' "$OUT/kaputt.txt"; then
-        bad "die kaputte Wurzel wurde trotzdem eingehaengt -- die Pruefung greift nicht"
+        bad "the broken root was mounted anyway -- the check does not work"
     else
-        ok "GEGENPROBE: die kaputte Wurzel wird NICHT eingehaengt"
+        ok "CONTROL: the broken root is NOT mounted"
     fi
     rm -f "$OUT/kaputt.img"
 else
-    bad "der erste Sektor der Wurzel ist unbekannt -- Gegenprobe nicht moeglich"
+    bad "the first sector of the root is unknown -- control not possible"
 fi
 
 # ==================================================================
