@@ -35,7 +35,7 @@ def load_opk():
     return m
 
 
-def fremd(pk, msg, sig):
+def foreign(pk, msg, sig):
     try:
         from nacl.signing import VerifyKey
         from nacl.exceptions import BadSignatureError
@@ -71,11 +71,11 @@ def main():
         sig = m.ed25519_sign(sk, roh)
         with open(pfad + ".sig", "wb") as f:
             f.write(sig)
-        eigen = m.ed25519_verify(pk, roh, sig)
-        changed = fremd(pk, roh, sig)
-        if not eigen or changed is False:
+        own = m.ed25519_verify(pk, roh, sig)
+        changed = foreign(pk, roh, sig)
+        if not own or changed is False:
             raise SystemExit("signpak: die eigene Signatur wird nicht "
-                             "anerkannt (eigen=%s fremd=%s)" % (eigen, changed))
+                             "anerkannt (eigen=%s fremd=%s)" % (own, changed))
         print("   signiert  %-40s %d Oktette, %s..."
               % (os.path.basename(pfad), len(roh), sig.hex()[:16]))
     return 0

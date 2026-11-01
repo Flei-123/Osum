@@ -135,13 +135,13 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
         gesamt = os.path.getsize(datei)
         von = 0
-        teil = False
+        part = False
         r = None if NORANGE else self.headers.get("Range")
         if r and r.startswith("bytes="):
-            stueck = r[6:].split("-")[0].strip()
-            if stueck.isdigit():
-                von = int(stueck)
-                teil = von > 0 and von < gesamt
+            chunk = r[6:].split("-")[0].strip()
+            if chunk.isdigit():
+                von = int(chunk)
+                part = von > 0 and von < gesamt
                 if von >= gesamt:
                     protokoll("416", name, "von", von, "von", gesamt)
                     self.send_response(416)
@@ -152,10 +152,10 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
         laenge = gesamt - von
         limit = ABBRUCH.get(name, ABBRUCH.get(os.path.basename(name)))
-        self.send_response(206 if teil else 200)
+        self.send_response(206 if part else 200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(laenge))
-        if teil:
+        if part:
             self.send_header("Content-Range",
                              "bytes %d-%d/%d" % (von, gesamt - 1, gesamt))
         self.send_header("Accept-Ranges", "bytes")
@@ -168,17 +168,17 @@ class Hand(http.server.BaseHTTPRequestHandler):
         with open(datei, "rb") as f:
             f.seek(von)
             while geschrieben < laenge:
-                stelle = von + geschrieben
-                if kgrenze is not None and stelle >= kgrenze:
-                    protokoll("KURZ", name, "bei", stelle,
+                pos_2 = von + geschrieben
+                if kgrenze is not None and pos_2 >= kgrenze:
+                    protokoll("KURZ", name, "bei", pos_2,
                               "nach", geschrieben,
                               "von", laenge, "angekuendigt")
                     COUNTER["oktette"] += geschrieben
                     if EINMAL:
                         GETAN.set()
                     return
-                if limit is not None and stelle >= limit:
-                    protokoll("ABBRUCH", name, "bei", stelle,
+                if limit is not None and pos_2 >= limit:
+                    protokoll("ABBRUCH", name, "bei", pos_2,
                               "nach", geschrieben,
                               "von", laenge, "angekuendigt")
                     COUNTER["oktette"] += geschrieben
@@ -186,13 +186,13 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     if EINMAL:
                         GETAN.set()
                     return
-                stueck = 4096
+                chunk = 4096
                 if limit is not None:
-                    stueck = min(stueck, limit - stelle)
+                    chunk = min(chunk, limit - pos_2)
                 if kgrenze is not None:
-                    stueck = min(stueck, kgrenze - stelle)
-                stueck = min(stueck, laenge - geschrieben)
-                b = f.read(stueck)
+                    chunk = min(chunk, kgrenze - pos_2)
+                chunk = min(chunk, laenge - geschrieben)
+                b = f.read(chunk)
                 if not b:
                     break
                 try:
@@ -202,7 +202,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     return
                 geschrieben += len(b)
         COUNTER["oktette"] += geschrieben
-        protokoll("200" if not teil else "206", name, "von", von,
+        protokoll("200" if not part else "206", name, "von", von,
                   "laenge", geschrieben, "gesamt", gesamt)
         if EINMAL:
             GETAN.set()

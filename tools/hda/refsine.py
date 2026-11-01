@@ -90,16 +90,16 @@ def main():
     if lo > 0:
         lo = lo - 1
     n = min(len(refl), len(links) - lo)
-    schlecht = 0
+    bad = 0
     maxd = 0
     for i in range(n):
         dd = abs(links[lo + i] - refl[i])
         if dd != 0:
-            schlecht += 1
+            bad += 1
             if dd > maxd:
                 maxd = dd
     print("verglichen=%d ungleich=%d maxdiff=%d ab=%d"
-          % (n, schlecht, maxd, lo))
+          % (n, bad, maxd, lo))
 
 
 if __name__ == "__main__":

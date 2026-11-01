@@ -3,7 +3,7 @@ random.seed(42)
 data=open('/tmp/cm/i_klein.264','rb').read()
 n_ok=0; n_exc=0; n_crash=0
 arten={}
-def lauf(d, name):
+def run_2(d, name):
     global n_ok,n_exc,n_crash
     try:
         R.decode_stream(d)
@@ -17,20 +17,20 @@ def lauf(d, name):
         n_crash+=1
         print("UNERWARTET",type(e).__name__,e,"bei",name)
 for k in range(1,30):
-    lauf(data[:len(data)*k//60], "abgeschnitten %d"%k)
+    run_2(data[:len(data)*k//60], "abgeschnitten %d"%k)
 for i in range(150):
     b=bytearray(data)
     p=random.randrange(len(b))
     b[p]^=1<<random.randrange(8)
-    lauf(bytes(b), "kipp %d"%i)
+    run_2(bytes(b), "kipp %d"%i)
 for i in range(60):
     b=bytearray(data)
     p=random.randrange(max(1,len(b)-40))
     for k in range(random.randint(1,40)):
         if p+k<len(b): b[p+k]=random.randrange(256)
-    lauf(bytes(b), "muell %d"%i)
+    run_2(bytes(b), "muell %d"%i)
 for d in [b'', b'\x00\x00\x01', b'\x00\x00\x01\x67', b'\xff'*100,
           b'\x00\x00\x01\x67\xff\xff\xff\xff', b'\x00'*1000]:
-    lauf(d, "sonder")
+    run_2(d, "sonder")
 print("durchgelaufen %d, sauber abgewiesen %d, ABSTURZ %d"%(n_ok,n_exc,n_crash))
 print("Ausnahmearten:",arten)

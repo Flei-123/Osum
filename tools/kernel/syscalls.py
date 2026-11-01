@@ -9,9 +9,9 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(os.path.dirname(HIER))
 
 def _finde(name):
-    for stamm, verz, namen in os.walk(os.path.join(WURZEL, "kernel")):
+    for stamm, verz, names_2 in os.walk(os.path.join(WURZEL, "kernel")):
         verz[:] = [d for d in verz if d not in ("user", "app")]
-        if name in namen:
+        if name in names_2:
             return os.path.relpath(os.path.join(stamm, name), WURZEL)
     return os.path.join("kernel", name)
 
@@ -44,14 +44,14 @@ def without_exceptions(tab):
 
 
 def check_2(wurzel):
-    fehler = []
+    error = []
     kp = os.path.join(wurzel, KERN)
     lp = os.path.join(wurzel, LIBC)
     for p in (kp, lp):
         if not os.path.exists(p):
-            fehler.append("Datei fehlt: %s" % p)
-    if fehler:
-        return fehler, {}, {}
+            error.append("Datei fehlt: %s" % p)
+    if error:
+        return error, {}, {}
     kern = lies(kp)
     libc = lies(lp)
 
@@ -63,24 +63,24 @@ def check_2(wurzel):
         for v in sorted(nach_num):
             wer = nach_num[v]
             if len(wer) > 1:
-                fehler.append(
+                error.append(
                     "%s: die Nummer %d ist %d mal vergeben -- %s"
                     % (datei, v, len(wer),
                        ", ".join("%s (Zeile %d)" % (n, z) for n, z in wer)))
 
     for n in sorted(set(without_exceptions(kern)) & set(without_exceptions(libc))):
         if kern[n][0] != libc[n][0]:
-            fehler.append(
+            error.append(
                 "%s trägt im Kernel %d (Zeile %d) und in der libc %d (Zeile %d)"
                 % (n, kern[n][0], kern[n][1], libc[n][0], libc[n][1]))
 
     only_libc = sorted(set(without_exceptions(libc)) - set(without_exceptions(kern)))
     for n in only_libc:
-        fehler.append(
+        error.append(
             "%s steht in der libc (%d), aber der Kernel kennt ihn nicht"
             % (n, libc[n][0]))
 
-    return fehler, kern, libc
+    return error, kern, libc
 
 
 def belegt(kern, libc):
@@ -142,7 +142,7 @@ def main():
             print("  %d..%d (%d Nummern)" % (a, b, b - a + 1))
         return 0
 
-    fehler, kern, libc = check_2(wurzel)
+    error, kern, libc = check_2(wurzel)
 
     if args and args[0] == "--frei":
         von = int(args[1]) if len(args) > 1 else 1000
@@ -154,22 +154,22 @@ def main():
         return 0
 
     if args and args[0] == "--liste":
-        alle = {}
+        all_ = {}
         for n, (v, _) in kern.items():
-            alle.setdefault(v, []).append("kernel:" + n)
+            all_.setdefault(v, []).append("kernel:" + n)
         for n, (v, _) in libc.items():
-            alle.setdefault(v, []).append("libc:" + n)
-        for v in sorted(alle):
-            print("%6d  %s" % (v, " ".join(sorted(alle[v]))))
+            all_.setdefault(v, []).append("libc:" + n)
+        for v in sorted(all_):
+            print("%6d  %s" % (v, " ".join(sorted(all_[v]))))
         return 0
 
     n_kern = len(without_exceptions(kern))
     n_libc = len(without_exceptions(libc))
-    if fehler:
-        for f in fehler:
+    if error:
+        for f in error:
             print("KOLLISION: %s" % f)
         print("syscalls: %d in the kernel, %d in libc, %d ERRORS"
-              % (n_kern, n_libc, len(fehler)))
+              % (n_kern, n_libc, len(error)))
         return 1
     print("syscalls: %d in the kernel, %d in libc, %d common, "
           "keine Nummer doppelt, kein Name mit zwei Nummern"

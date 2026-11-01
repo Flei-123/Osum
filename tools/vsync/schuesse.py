@@ -77,10 +77,10 @@ def main():
     geschossen = 0
     for i in range(n):
         say(s, "mouse_move %d %d" % (schritt, schritt // 2))
-        ziel = os.path.join(folder, "s%03d.ppm" % i)
-        if os.path.exists(ziel):
-            os.unlink(ziel)
-        say(s, 'screendump %s' % ziel)
+        target = os.path.join(folder, "s%03d.ppm" % i)
+        if os.path.exists(target):
+            os.unlink(target)
+        say(s, 'screendump %s' % target)
         time.sleep(0.02)
         geschossen += 1
 
@@ -89,33 +89,33 @@ def main():
 
     gut = 0
     for i in range(geschossen):
-        ziel = os.path.join(folder, "s%03d.ppm" % i)
+        target = os.path.join(folder, "s%03d.ppm" % i)
         letzte = -1
         for _ in range(50):
             try:
-                jetzt = os.path.getsize(ziel)
+                now = os.path.getsize(target)
             except OSError:
-                jetzt = -1
-            if jetzt > 0 and jetzt == letzte:
+                now = -1
+            if now > 0 and now == letzte:
                 break
-            letzte = jetzt
+            letzte = now
             time.sleep(0.02)
         try:
-            with open(ziel, "rb") as f:
-                kopf = f.read(64)
-            if not kopf.startswith(b"P6"):
-                os.unlink(ziel)
+            with open(target, "rb") as f:
+                header = f.read(64)
+            if not header.startswith(b"P6"):
+                os.unlink(target)
                 continue
-            teile = kopf.split()
-            w, h = int(teile[1]), int(teile[2])
-            versprochen = len(b" ".join(teile[:4])) + 1 + w * h * 3
-            if os.path.getsize(ziel) + 8 < versprochen:
-                os.unlink(ziel)
+            parts = header.split()
+            w, h = int(parts[1]), int(parts[2])
+            versprochen = len(b" ".join(parts[:4])) + 1 + w * h * 3
+            if os.path.getsize(target) + 8 < versprochen:
+                os.unlink(target)
                 continue
             gut += 1
         except (OSError, ValueError, IndexError):
             try:
-                os.unlink(ziel)
+                os.unlink(target)
             except OSError:
                 pass
     print("schuesse=%d brauchbar=%d" % (geschossen, gut))

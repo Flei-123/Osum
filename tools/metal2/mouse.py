@@ -101,16 +101,16 @@ class Qmp:
             {"type": "key", "data": {"down": down,
                                      "key": {"type": "qcode", "data": qcode}}}])
 
-    def screendump(self, ziel):
-        if os.path.exists(ziel):
-            os.unlink(ziel)
-        a = self.cmd("screendump", filename=ziel)
+    def screendump(self, target):
+        if os.path.exists(target):
+            os.unlink(target)
+        a = self.cmd("screendump", filename=target)
         alt = -1
         eq = 0
         bis = time.time() + 20
         while time.time() < bis:
-            if os.path.exists(ziel):
-                n = os.path.getsize(ziel)
+            if os.path.exists(target):
+                n = os.path.getsize(target)
                 if n == alt and n > 0:
                     eq += 1
                     if eq >= 3:
@@ -172,9 +172,9 @@ def main():
     for i in range(n_soll):
         t = i * dt
         soll = t0 + t
-        jetzt = time.perf_counter()
-        if soll > jetzt:
-            time.sleep(soll - jetzt)
+        now = time.perf_counter()
+        if soll > now:
+            time.sleep(soll - now)
         tx = cx + ax * math.sin(2 * math.pi * t / Tx)
         ty = cy + ay * math.sin(2 * math.pi * t / Ty)
         dx = int(round(tx - px))

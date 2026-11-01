@@ -21,22 +21,22 @@ def pfad():
             capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return ALT
-    ablage = os.path.join(os.path.expanduser("~"), ".cache", "osum")
-    ziel = os.path.join(ablage, "opk-%s.py" % blob[:12])
-    if not os.path.isfile(ziel):
+    clipboard = os.path.join(os.path.expanduser("~"), ".cache", "osum")
+    target = os.path.join(clipboard, "opk-%s.py" % blob[:12])
+    if not os.path.isfile(target):
         try:
             inhalt = subprocess.run(["git", "-C", REPO, "cat-file", "blob",
                                      blob], capture_output=True,
                                     check=True).stdout
         except (OSError, subprocess.CalledProcessError):
             return ALT
-        os.makedirs(ablage, exist_ok=True)
-        tmp = "%s.%d" % (ziel, os.getpid())
+        os.makedirs(clipboard, exist_ok=True)
+        tmp = "%s.%d" % (target, os.getpid())
         with open(tmp, "wb") as f:
             f.write(inhalt)
         os.chmod(tmp, 0o755)
-        os.replace(tmp, ziel)
-    return ziel
+        os.replace(tmp, target)
+    return target
 
 
 if __name__ == "__main__":

@@ -60,12 +60,12 @@ def main(argv):
     except ImportError:
         print("sheet: Pillow is not there")
         return 1
-    namen = iconmod.ZUSTAENDE + iconmod.MERKMALE + iconmod.SYSTEM
+    names = iconmod.ZUSTAENDE + iconmod.MERKMALE + iconmod.SYSTEM
     bloecke = []
     for schema in ("dark", "light"):
         farben = iconmod.SCHEMEN[schema]
         eins = []
-        for n in namen:
+        for n in names:
             eins.append(bild(n, farben))
         breite = AIR + sum(max(w, w * BIG) + AIR for w, _, _ in eins)
         height_2 = AIR + 16 + AIR + 16 * BIG + AIR
@@ -96,7 +96,7 @@ def main(argv):
         y += b.height
     blatt.save(argv[1])
     print("sheet: %s  %dx%d, %d characters, light and dark"
-          % (argv[1], breite, height_2, len(namen)))
+          % (argv[1], breite, height_2, len(names)))
     return 0
 
 

@@ -225,7 +225,7 @@ def main(argv):
     print("translit: KEYW=%d VALW=%d SLOTS=%d FILE_MAX=%d INFO_READ=%d"
           % (g["KEYW"], g["VALW"], g["SLOTS"], g["FILE_MAX"], g["INFO_READ"]))
 
-    fehler = []
+    error = []
     eng = []
     umlaute = 0
     geprueft = 0
@@ -252,7 +252,7 @@ def main(argv):
             else:
                 continue
             for stamm, ersatz in treffer:
-                fehler.append("%s:%d  %-14s -> %-14s | %s"
+                error.append("%s:%d  %-14s -> %-14s | %s"
                               % (rel, nr, stamm, ersatz, zeile.strip()[:56]))
         if len(open(pfad, "rb").read()) >= g["FILE_MAX"]:
             eng.append("%s  %d Oktette >= FILE_MAX %d"
@@ -284,7 +284,7 @@ def main(argv):
                     for stamm, ersatz in t:
                         soll = soll.replace(stamm, ersatz)
                     if soll not in woerter:
-                        fehler.append(
+                        error.append(
                             "%s:%d  keys= hat '%s', aber nicht '%s' "
                             "-- die Umlautform gehoert DANEBEN, nicht "
                             "statt dessen" % (rel, nr, w, soll))
@@ -293,19 +293,19 @@ def main(argv):
                 continue
             geprueft += 1
             for stamm, ersatz in finde(zeile.split("=", 1)[1]):
-                fehler.append("%s:%d  %-14s -> %-14s | %s"
+                error.append("%s:%d  %-14s -> %-14s | %s"
                               % (rel, nr, stamm, ersatz, zeile.strip()[:56]))
 
     print("translit: geprueft=%d umschrift=%d eng=%d umlaute=%d"
-          % (geprueft, len(fehler), len(eng), umlaute))
-    for z in fehler:
+          % (geprueft, len(error), len(eng), umlaute))
+    for z in error:
         print("    UMSCHRIFT  " + z)
     for z in eng:
         print("    ZU ENG     " + z)
     if zaehle:
         print("translit: echte Umlautzeichen in locale/de + assets/apps: %d"
               % umlaute)
-    if fehler:
+    if error:
         return 1
     if eng:
         return 2

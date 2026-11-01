@@ -130,15 +130,15 @@ def main(argv):
     for nr, taste in enumerate(keys_2, 1):
         vorher = zeilen(seriell)
         s.sendall(("sendkey %s\n" % taste).encode())
-        anfang = time.time()
-        ende = anfang + zeit
+        begin = time.time()
+        ende = begin + zeit
         angekommen = False
         while time.time() < ende:
             if zeilen(seriell) > vorher:
                 angekommen = True
                 break
             time.sleep(0.02)
-        dur = time.time() - anfang
+        dur = time.time() - begin
         if angekommen:
             print("keys: %2d/%d  %-10s arrived after %.2fs"
                   % (nr, len(keys_2), taste, dur))

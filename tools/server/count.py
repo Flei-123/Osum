@@ -66,8 +66,8 @@ def without_importe(text):
 
 
 def zaehle(wurzel):
-    je_datei = collections.Counter()
-    namen = collections.Counter()
+    je_file = collections.Counter()
+    names = collections.Counter()
     for pfad, _, dateien in os.walk(wurzel):
         for d in sorted(dateien):
             if not d.endswith(".fi") or d in OWN:
@@ -78,10 +78,10 @@ def zaehle(wurzel):
             foreign = set(re.findall(r"^\s*import\s+(?!(?:gfx|ui|drv)\.)[A-Za-z0-9_.]+\.([A-Za-z0-9_]+)", roh, re.M))
             treffer = [t for t in MUSTER.findall(without_importe(without_kommentare(roh))) if t[0] not in foreign]
             if treffer:
-                je_datei[os.path.relpath(p, wurzel)] = len(treffer)
+                je_file[os.path.relpath(p, wurzel)] = len(treffer)
                 for a, b in treffer:
-                    namen[a + "." + b] += 1
-    return je_datei, namen
+                    names[a + "." + b] += 1
+    return je_file, names
 
 
 def main():
@@ -92,14 +92,14 @@ def main():
     if not os.path.isdir(wurzel):
         print(-1)
         return 1
-    je_datei, namen = zaehle(wurzel)
+    je_file, names = zaehle(wurzel)
     if "--je-datei" in sys.argv:
-        for k, v in je_datei.most_common():
+        for k, v in je_file.most_common():
             print("  %-26s %d" % (k, v))
         print("  SUMME %d Stellen, %d verschiedene Funktionen, in %d Dateien"
-              % (sum(je_datei.values()), len(namen), len(je_datei)))
+              % (sum(je_file.values()), len(names), len(je_file)))
     else:
-        print(sum(je_datei.values()))
+        print(sum(je_file.values()))
     return 0
 
 

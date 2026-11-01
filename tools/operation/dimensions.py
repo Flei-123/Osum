@@ -28,9 +28,9 @@ def einmal(datei, profil_app=False):
         if os.path.abspath(os.path.join(ROOT, wo)) != os.path.abspath(datei):
             continue
         z = zeilen[zl - 1]
-        neu = re.sub(r"\[u8;\s*%d\]" % soll, "[u8; %d]" % ist, z, count=1)
-        if neu != z:
-            zeilen[zl - 1] = neu
+        new = re.sub(r"\[u8;\s*%d\]" % soll, "[u8; %d]" % ist, z, count=1)
+        if new != z:
+            zeilen[zl - 1] = new
             n += 1
     if n:
         open(datei, "w").write("\n".join(zeilen))

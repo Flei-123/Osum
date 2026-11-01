@@ -22,9 +22,9 @@ def rohr(a, b):
                 pass
 
 
-def bedienen(k, ziel):
+def bedienen(k, target_2):
     try:
-        z = socket.create_connection(ziel, timeout=20)
+        z = socket.create_connection(target_2, timeout=20)
     except Exception as e:
         sys.stderr.write("weiter: %s\n" % e)
         try:

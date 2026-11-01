@@ -111,13 +111,13 @@ def main(argv):
     wurzel = os.environ.get('OSUM_ROOT', '.')
     schief = []
     geprueft = 0
-    for datei, namen, breite, wozu in COLUMNS:
+    for datei, names, breite, wozu in COLUMNS:
         pfad = os.path.join(wurzel, datei)
         if not os.path.exists(pfad):
             schief.append('%s fehlt' % datei)
             continue
         k = ketten(pfad)
-        for schl in namen:
+        for schl in names:
             n = schl[1]
             if schl not in k:
                 schief.append('%s: die Kette %s in fn %s gibt es nicht mehr'

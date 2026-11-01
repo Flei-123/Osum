@@ -176,13 +176,13 @@ def main():
                     surface += check(p, True)
                 else:
                     rest += check(p, False)
-    for pfad, nr, wort, text in surface:
-        print("%s:%d: '%s' in \"%s\"" % (pfad, nr, wort, text[:70]))
+    for pfad, nr, word, text in surface:
+        print("%s:%d: '%s' in \"%s\"" % (pfad, nr, word, text[:70]))
     print("gefunden: %d" % len(surface))
     print("not in the catalog, but counted (own windows and"
           " uebersetzt): %d" % len(rest))
-    for pfad, nr, wort, text in rest:
-        print("    %s:%d: '%s'" % (pfad, nr, wort))
+    for pfad, nr, word, text in rest:
+        print("    %s:%d: '%s'" % (pfad, nr, word))
     return 1 if surface else 0
 
 

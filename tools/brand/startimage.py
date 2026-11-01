@@ -25,7 +25,7 @@ def worte(im):
 
 def main():
     quelle = sys.argv[1] if len(sys.argv) > 1 else "assets/marke"
-    ziel = sys.argv[2] if len(sys.argv) > 2 else "kernel/user/brand_start.fi"
+    target = sys.argv[2] if len(sys.argv) > 2 else "kernel/user/brand_start.fi"
     t = []
     t.append("// SPDX-License-Identifier: GPL-2.0-only\n")
     t.append("// kernel/user/brand_start.fi -- ERZEUGT, NICHT VON HAND\n")
@@ -68,8 +68,8 @@ def main():
         t.append("    if n == %d {\n        return b%d[(i) as usize]\n    }\n"
                  % (n, n))
     t.append("    return 0\n}\n")
-    open(ziel, "w").write("".join(t))
-    print("%s geschrieben (%d Groessen)" % (ziel, len(GROESSEN)))
+    open(target, "w").write("".join(t))
+    print("%s geschrieben (%d Groessen)" % (target, len(GROESSEN)))
 
 
 main()

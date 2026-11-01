@@ -51,7 +51,7 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    ziel = argv[1]
+    target = argv[1]
     hoehe, x0, x1, zoom = 28, 0, 530, 2
     vx0, vx1 = 300, 1100
     paare = []
@@ -77,8 +77,8 @@ def main(argv):
         font = ImageFont.load_default()
     breite = (x1 - x0) * zoom
     zeile = hoehe * zoom
-    kopf = 20
-    aus = Image.new("RGB", (breite, (kopf + zeile + 8) * len(paare) + 4),
+    header = 20
+    aus = Image.new("RGB", (breite, (header + zeile + 8) * len(paare) + 4),
                     (255, 255, 255))
     mal = ImageDraw.Draw(aus)
     y = 4
@@ -90,13 +90,13 @@ def main(argv):
         streifen = streifen.resize((breite, zeile), Image.NEAREST)
         mal.text((2, y), "%s   --   var %d, %d Farben" % (text, var, farben),
                  fill=(16, 16, 16), font=font)
-        aus.paste(streifen, (0, y + kopf))
-        mal.rectangle([0, y + kopf, breite - 1, y + kopf + zeile - 1],
+        aus.paste(streifen, (0, y + header))
+        mal.rectangle([0, y + header, breite - 1, y + header + zeile - 1],
                       outline=(160, 160, 168))
-        y = y + kopf + zeile + 8
-    aus.save(ziel)
+        y = y + header + zeile + 8
+    aus.save(target)
     print("leistenvergleich: %s %dx%d aus %d Aufnahmen"
-          % (ziel, aus.size[0], aus.size[1], len(paare)))
+          % (target, aus.size[0], aus.size[1], len(paare)))
     return 0
 
 

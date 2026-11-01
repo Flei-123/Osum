@@ -16,9 +16,9 @@ def kernmodule():
 
 def durchsuche():
     ziele = {}
-    for stamm, verz, namen in os.walk(WURZEL):
+    for stamm, verz, names in os.walk(WURZEL):
         verz[:] = [d for d in verz if d not in (".git", "kernel", "docs", "vendor")]
-        for n in namen:
+        for n in names:
             if not n.endswith((".sh", ".py", ".yml", ".yaml", ".mk")) and n != "Makefile":
                 continue
             p = os.path.join(stamm, n)

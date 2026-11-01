@@ -9,19 +9,19 @@ MUSTER = re.compile(r"kernel/([a-z0-9_]+)\.fi")
 
 
 def ort_von(name):
-    for stamm, verz, namen in os.walk(os.path.join(WURZEL, "kernel")):
+    for stamm, verz, names in os.walk(os.path.join(WURZEL, "kernel")):
         verz[:] = [d for d in verz if d not in ("user", "app")]
-        if name + ".fi" in namen:
+        if name + ".fi" in names:
             p = os.path.join(stamm, name + ".fi")
             return os.path.relpath(p, WURZEL)
     return None
 
 
 def dateien():
-    for stamm, verz, namen in os.walk(WURZEL):
+    for stamm, verz, names in os.walk(WURZEL):
         verz[:] = [d for d in verz
                    if d not in (".git", "kernel", "vendor", "docs", "lib")]
-        for n in namen:
+        for n in names:
             if n.endswith((".sh", ".py")) or n == "test.sh":
                 p = os.path.join(stamm, n)
                 rel = os.path.relpath(p, WURZEL)
@@ -60,11 +60,11 @@ def main():
                     return m.group(0)
                 if name not in cache:
                     cache[name] = ort_von(name)
-                neu = cache[name]
-                if not neu or neu == alt:
+                new = cache[name]
+                if not new or new == alt:
                     return m.group(0)
                 geaendert = True
-                return neu
+                return new
 
             new_z = MUSTER.sub(ersetze, z)
             if new_z != z:
@@ -79,8 +79,8 @@ def main():
             if not trocken:
                 with open(p, "w", encoding="utf-8") as f:
                     f.write("\n".join(zeilen))
-    wort = "waeren zu richten" if trocken else "gerichtet"
-    print("%d Zeilen in %d Dateien %s" % (n_lines, n_dateien, wort))
+    word = "waeren zu richten" if trocken else "gerichtet"
+    print("%d Zeilen in %d Dateien %s" % (n_lines, n_dateien, word))
     return 0
 
 

@@ -19,10 +19,10 @@ def feld(name, values, typ='u64', je=16, kommentar=None):
     z('static mut %s: [%s; %d] = [' % (name, typ, len(values)))
     zeile = '   '
     for i, v in enumerate(values):
-        stueck = ' %d,' % v if i < len(values)-1 else ' %d]' % v
-        if len(zeile) + len(stueck) > 76:
+        chunk = ' %d,' % v if i < len(values)-1 else ' %d]' % v
+        if len(zeile) + len(chunk) > 76:
             z(zeile); zeile = '   '
-        zeile += stueck
+        zeile += chunk
     z(zeile)
     z()
 

@@ -18,7 +18,7 @@ WINZ = re.compile(
 
 
 def frei_bis(roh, title, y0, y1, x0):
-    eigen = None
+    own = None
     fenster = []
     for m in WINZ.finditer(roh):
         e = dict(z=int(m.group(1)), hidden=m.group(3) != b"0",
@@ -27,12 +27,12 @@ def frei_bis(roh, title, y0, y1, x0):
                  t=m.group(9).decode("utf-8", "replace"))
         fenster.append(e)
         if e["t"] == title and not e["hidden"]:
-            eigen = e
-    if eigen is None:
+            own = e
+    if own is None:
         return None
     limit = None
     for e in fenster:
-        if e["hidden"] or e["z"] <= eigen["z"] or e is eigen:
+        if e["hidden"] or e["z"] <= own["z"] or e is own:
             continue
         ex0 = e["x"] - (BORDER if e["deco"] else 0)
         ey0 = e["y"] - (TITLE if e["deco"] else 0)
@@ -129,33 +129,33 @@ def grundfarben(ppm, x0, y0, x1, y1):
     return vg, hg
 
 
-def term_check(serial, ppm, text, zeile, spalte, tol, zeichen):
+def term_check(serial, ppm, text, zeile, column, tol, char):
     roh = open(serial, "rb").read()
     g = gitter(roh)
     if g is None:
         print("umlaut: [%s] no `wm: termgitter` line in the capture"
-              % zeichen)
+              % char)
         return 1
     x0, y0, cw, chh, asc, px = g
-    ax = x0 + spalte * cw
+    ax = x0 + column * cw
     ay = y0 + zeile * chh + asc
     farben = grundfarben(ppm, ax, ay - asc, ax + len(text) * cw, ay + 4)
     if farben is None:
         print("umlaut: [%s] line %d cannot be found in the image"
-              % (zeichen, zeile))
+              % (char, zeile))
         return 1
     vg, hg = farben
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py", "tgrid", ppm,
          "assets/osum-mono.ttf", str(px), str(x0), str(y0),
-         str(cw), str(chh), str(zeile), str(spalte)]
+         str(cw), str(chh), str(zeile), str(column)]
         + [str(v) for v in vg] + [str(v) for v in hg] + [text, tol],
         capture_output=True, text=True)
-    kopf = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
+    header = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
     print("umlaut: [%s] termgitter zeile=%d spalte=%d x=%d y=%d "
           "fg=%02x%02x%02x bg=%02x%02x%02x tol=%s -- %s"
-          % (zeichen, zeile, spalte, ax, ay, vg[0], vg[1], vg[2],
-             hg[0], hg[1], hg[2], tol, kopf))
+          % (char, zeile, column, ax, ay, vg[0], vg[1], vg[2],
+             hg[0], hg[1], hg[2], tol, header))
     for z in r.stdout.strip().split("\n")[1:]:
         print("        " + z)
     return r.returncode
@@ -173,29 +173,29 @@ def main(argv):
     argv = [x for x in argv if x != "--ink"]
     if argv[2].startswith("--gitter="):
         text = argv[3]
-        zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
-        if not zeichen:
+        char = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
+        if not char:
             print("umlaut: %r traegt gar keinen Umlaut" % text)
             return 2
-        zeile, spalte = (int(v) for v in argv[2].split("=", 1)[1].split(","))
-        return term_check(argv[0], argv[1], text, zeile, spalte,
-                            argv[4] if len(argv) > 4 else "0", zeichen)
+        zeile, column = (int(v) for v in argv[2].split("=", 1)[1].split(","))
+        return term_check(argv[0], argv[1], text, zeile, column,
+                            argv[4] if len(argv) > 4 else "0", char)
     serial, ppm, title, text = argv[0], argv[1], argv[2], argv[3]
     tol = argv[4] if len(argv) > 4 else "0"
-    zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
-    if not zeichen:
+    char = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
+    if not char:
         print("umlaut: %r traegt gar keinen Umlaut" % text)
         return 2
     roh = open(serial, "rb").read()
 
     w = fenster(roh, title)
     if w is None:
-        print("umlaut: [%s] no visible window '%s'" % (zeichen, title))
+        print("umlaut: [%s] no visible window '%s'" % (char, title))
         return 1
     wx, wy, ww, wh, deco = w
     t = gemalt(roh, text)
     if t is None:
-        print("umlaut: [%s] '%s' wurde nicht gemalt" % (zeichen, text[:40]))
+        print("umlaut: [%s] '%s' wurde nicht gemalt" % (char, text[:40]))
         return 1
     kind, tx, tb, fg, bg, px = t
 
@@ -215,7 +215,7 @@ def main(argv):
     if tx + breite > ww:
         print("umlaut: [%s] '%s' laeuft von x=%d bis %d aus einem Fenster "
               "heraus, das %d breit ist -- nicht messbar"
-              % (zeichen, text[:30], tx, tx + breite, ww))
+              % (char, text[:30], tx, tx + breite, ww))
         return 1
 
     up = 20
@@ -228,7 +228,7 @@ def main(argv):
                 break
         if not sicht.strip() or not any(c in "äöüÄÖÜß" for c in sicht):
             print("umlaut: [%s] '%s' ist ab x=%d verdeckt -- vom Umlaut "
-                  "ist nichts zu sehen" % (zeichen, text[:30], limit))
+                  "ist nichts zu sehen" % (char, text[:30], limit))
             return 1
         if sicht != text:
             print("        verdeckt ab x=%d -- gemessen wird '%s'"
@@ -241,9 +241,9 @@ def main(argv):
          "fui:assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
         capture_output=True, text=True)
-    kopf = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
+    header = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
     print("umlaut: [%s] kind=%d %s x=%d y=%d tol=%s -- %s"
-          % (zeichen, kind, title, ax, ay, tol, kopf))
+          % (char, kind, title, ax, ay, tol, header))
     for z in r.stdout.strip().split("\n")[1:]:
         print("        " + z)
     return r.returncode

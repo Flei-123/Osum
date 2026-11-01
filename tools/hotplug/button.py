@@ -123,17 +123,17 @@ try:
     say("%d gemeldete Bedienelemente" % len(rects))
 
     zid = re.findall(r"explorer: ausknopf id=(\d+)", txt)
-    ziel = None
+    target = None
     if zid:
         for r in rects:
             if r[0] == zid[-1]:
-                ziel = r
+                target = r
         say("Auswurfknopf gemeldet als id=%s" % zid[-1])
-    if ziel is None:
+    if target is None:
         say("the eject button number is not in the capture")
         raise SystemExit(1)
 
-    _id, _k, rx, ry, rw, rh = ziel
+    _id, _k, rx, ry, rw, rh = target
     cx = wx + int(rx) + int(rw) // 2
     cy = wy + int(ry) + int(rh) // 2
     say("Klick auf GEMELDETE Koordinaten: (%d,%d) "

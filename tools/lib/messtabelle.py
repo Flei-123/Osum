@@ -51,7 +51,7 @@ def lies(pfad):
     return ab, gesamt, bilanz
 
 
-def kurz(titel, name):
+def short(titel, name):
     """Die Abschnittsnummer und ein paar Worte."""
     m = re.match(r'^(\d+)\.\s*(.{0,42})', titel)
     if not m:
@@ -66,13 +66,13 @@ def main():
     a, a_s, a_b = lies(sys.argv[1])
     b, b_s, b_b = lies(sys.argv[2])
 
-    namen = list(a.keys()) + [n for n in b if n not in a]
+    names = list(a.keys()) + [n for n in b if n not in a]
 
     print("| Abschnitt | TCG | KVM | Faktor | TCG-Ergebnis | KVM-Ergebnis |")
     print("|---|---:|---:|---:|---|---|")
     sum_a = sum_b = 0
     rot = []
-    for n in namen:
+    for n in names:
         ea, eb = a.get(n), b.get(n)
         ta = f"{ea['ms']/1000:.1f} s" if ea else "--"
         tb = f"{eb['ms']/1000:.1f} s" if eb else "--"
@@ -94,7 +94,7 @@ def main():
             acc = f" ({e['accel']})" if e["accel"] not in ("kvm", "tcg", "?") else ""
             return f"{mark}, {z}{acc}"
 
-        titel = kurz((ea or eb)["titel"], n)
+        titel = short((ea or eb)["titel"], n)
         print(f"| {titel} (`{n}`) | {ta} | {tb} | {fak} | {erg(ea)} | {erg(eb)} |")
         if ea and eb and ea["ok"] and not eb["ok"]:
             rot.append(n)

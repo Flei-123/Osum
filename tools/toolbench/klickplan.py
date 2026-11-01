@@ -283,19 +283,19 @@ def main(argv):
         return 0
 
     if was in ("zeile", "pid", "pidvon"):
-        ziel = argv[3]
+        target = argv[3]
         block = last_block(zeilen)
         treffer = None
         for z in block:
             m = LINE.search(z)
             if not m:
                 continue
-            if was == "pid" and m.group(2) == ziel:
+            if was == "pid" and m.group(2) == target:
                 treffer = m
-            if was in ("zeile", "pidvon") and m.group(14).strip() == ziel:
+            if was in ("zeile", "pidvon") and m.group(14).strip() == target:
                 treffer = m
         if treffer is None:
-            raise SystemExit("klickplan: '%s' steht nicht in der Liste" % ziel)
+            raise SystemExit("klickplan: '%s' steht nicht in der Liste" % target)
         if was == "pidvon":
             print(treffer.group(2))
             return 0

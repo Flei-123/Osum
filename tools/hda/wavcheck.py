@@ -59,22 +59,22 @@ def main():
     print("nutz=%d ab=%d" % (len(seg), lo))
 
     luecken = []
-    lauf = 0
+    run = 0
     start = 0
     for i, v in enumerate(seg):
         if v == 0:
-            if lauf == 0:
+            if run == 0:
                 start = i
-            lauf += 1
+            run += 1
         else:
-            if lauf > a.schwelle:
-                luecken.append((start, lauf))
-            lauf = 0
+            if run > a.schwelle:
+                luecken.append((start, run))
+            run = 0
     still = sum(x[1] for x in luecken)
     print("gaps=%d still=%d" % (len(luecken), still))
 
     rest = 0
-    if a.luecke_still and luecken:
+    if a.gap_still and luecken:
         for i in range(len(luecken) - 1):
             e = luecken[i][0] + luecken[i][1]
             s2 = luecken[i + 1][0]
@@ -85,7 +85,7 @@ def main():
     print("max=%d min=%d" % (max(seg), min(seg)))
     q = sum(v * v for v in seg) // max(1, len(seg))
     print("rms=%d" % int(math.isqrt(q)))
-    if a.nur_rms:
+    if a.only_rms:
         return 0
 
     anf = 0
@@ -93,22 +93,22 @@ def main():
         anf = luecken[-1][0] + luecken[-1][1]
         if anf + 8192 > len(seg):
             anf = 0
-    stueck = seg[anf:anf + 8192]
-    if len(stueck) < 2048:
-        stueck = seg[:8192]
+    chunk = seg[anf:anf + 8192]
+    if len(chunk) < 2048:
+        chunk = seg[:8192]
     best = (0, 0.0)
     f = max(20, a.hz - 40)
     while f <= a.hz + 40:
-        p = goertzel(stueck, fr, f)
+        p = goertzel(chunk, fr, f)
         if p > best[1]:
             best = (f, p)
         f += 1
     print("peak_hz=%d peak_p=%d" % (best[0], int(best[1])))
-    print("p1=%d" % int(goertzel(stueck, fr, a.hz)))
+    print("p1=%d" % int(goertzel(chunk, fr, a.hz)))
     if a.zweite:
-        print("p2=%d" % int(goertzel(stueck, fr, a.zweite)))
+        print("p2=%d" % int(goertzel(chunk, fr, a.zweite)))
         mitte = (a.hz + a.zweite) // 2
-        print("pmitte=%d" % int(goertzel(stueck, fr, mitte)))
+        print("pmitte=%d" % int(goertzel(chunk, fr, mitte)))
     else:
         print("p2=0")
     return 0

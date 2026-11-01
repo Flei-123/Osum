@@ -61,29 +61,29 @@ def mix8(a, b, al, ia):
     return (a * ia + b * al + 127) // 255
 
 
-def blend(alt, neu, a):
+def blend(alt, new_2, a):
     if a <= 0:
         return alt
     if a >= 255:
-        return neu
+        return new_2
     ia = 255 - a
-    return tuple(mix8(alt[i], neu[i], a, ia) for i in range(3))
+    return tuple(mix8(alt[i], new_2[i], a, ia) for i in range(3))
 
 
 def bright(c):
     return (c[0] * 299 + c[1] * 587 + c[2] * 114) // 1000
 
 
-def glass_mix(alt, neu, key, alpha, schleier=SCHLEIER):
+def glass_mix(alt, new_2, key, alpha, schleier=SCHLEIER):
     """Die Rechnung aus kernel/ui/wm.fi, hier ein zweites Mal."""
     if alpha >= 100:
-        return neu
-    d = min(sum(abs(neu[i] - key[i]) for i in range(3)), VOLL)
+        return new_2
+    d = min(sum(abs(new_2[i] - key[i]) for i in range(3)), VOLL)
     a = alpha + (100 - alpha) * d // VOLL
     dl = abs(bright(alt) - bright(key))
     if schleier > 0 and dl > schleier:
         a = max(a, 100 - schleier * 100 // dl)
-    return blend(alt, neu, a * 255 // 100)
+    return blend(alt, new_2, a * 255 // 100)
 
 
 def rechteck(im, x0, x1, y0, y1):
@@ -149,11 +149,11 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
     im = Image.open(bild).convert("RGB")
     roh = open(serial, "rb").read().decode("latin1")
     schnitt = roh.rfind(marke)
-    schwanz = roh[schnitt:] if schnitt >= 0 else roh
+    tail_2 = roh[schnitt:] if schnitt >= 0 else roh
     f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
     zeilen = []
-    for ln in schwanz.splitlines():
+    for ln in tail_2.splitlines():
         m = FENSTERTEXT.search(ln)
         if m:
             zeilen.append(m)
@@ -167,7 +167,7 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
         if int(m.group(1)) != win or not m.group(10).strip():
             continue
         letzte[(m.group(2), m.group(10))] = m
-    schlecht = None
+    bad_2 = None
     n = 0
     aus = []
     for m in letzte.values():
@@ -211,13 +211,13 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
         k = kontrast(fg, kand[0][0])
         n += 1
         aus.append((k, m.group(10)[:28], kand[0][0]))
-        if schlecht is None or k < schlecht[0]:
-            schlecht = (k, m.group(10)[:28], kand[0][0], len(kand))
+        if bad_2 is None or k < bad_2[0]:
+            bad_2 = (k, m.group(10)[:28], kand[0][0], len(kand))
     aus.sort()
     print("fenster win=%d beschriftungen=%d schlechteste %d "
           "text='%s' grund=%02x%02x%02x kandidaten=%d"
-          % (win, n, int(schlecht[0] * 100), schlecht[1],
-             schlecht[2][0], schlecht[2][1], schlecht[2][2], schlecht[3]))
+          % (win, n, int(bad_2[0] * 100), bad_2[1],
+             bad_2[2][0], bad_2[2][1], bad_2[2][2], bad_2[3]))
     for k, t, g in aus[:3]:
         print("        %6.2f  '%s' auf %02x%02x%02x" % (k, t, g[0], g[1], g[2]))
     return 0
@@ -297,12 +297,12 @@ def main(argv):
         for f in str(opt["felder"]).split(";"):
             if not f.strip():
                 continue
-            teile = f.split(",")
-            fx, fb, ftw = (int(v) for v in teile[:3])
+            parts = f.split(",")
+            fx, fb, ftw = (int(v) for v in parts[:3])
             y0 = bar_y + fb - asc
             y1 = bar_y + fb + bottom - 1
             erlaubt.append((fx, y0, fx + ftw, y1,
-                            hex2rgb(teile[3]) if len(teile) > 3 else None))
+                            hex2rgb(parts[3]) if len(parts) > 3 else None))
         pts = [p for p in pts
                if any(a <= p[0] <= c and b <= p[1] <= d
                       for a, b, c, d, _f in erlaubt)]
@@ -447,7 +447,7 @@ def main(argv):
 
     if cmd == "kontrast" and opt.get("_felder"):
         vor = hex2rgb(rest[1])
-        schlecht = None
+        bad_2 = None
         zeile = []
         for (a, b, cc, d, ffg) in opt["_felder"]:
             fg = ffg if ffg else vor
@@ -481,9 +481,9 @@ def main(argv):
             g, anz = kand[0]
             k = kontrast(fg, g)
             zeile.append("x%d=%d" % (a, int(k * 100)))
-            if schlecht is None or k < schlecht[0]:
-                schlecht = (k, g, anz, ges, fg, len(kand))
-        k, g, anz, ges, fg, nk = schlecht
+            if bad_2 is None or k < bad_2[0]:
+                bad_2 = (k, g, anz, ges, fg, len(kand))
+        k, g, anz, ges, fg, nk = bad_2
         print("kontrast %d grund=%02x%02x%02x anteil=%d fg=%02x%02x%02x "
               "kandidaten=%d felder=%d %s"
               % (int(k * 100), g[0], g[1], g[2], 100 * anz // max(ges, 1),

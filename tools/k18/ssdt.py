@@ -120,7 +120,7 @@ def build(a):
         body += name_op("_PSR", aml_int(a.netz))
         out += device("ADP0", body)
 
-    if not a.keine_zone:
+    if not a.no_zone:
         body = name_op("_TMP", aml_int(a.temp))
         body += name_op("_CRT", aml_int(3732))
         out += thermal_zone("TZ00", body)

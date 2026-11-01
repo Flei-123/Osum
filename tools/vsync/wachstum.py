@@ -64,24 +64,24 @@ def ppm_read(pfad):
     return w, h, roh[i:i + w * h * 3]
 
 
-def nahe(px, ziel):
-    return (abs(px[0] - ziel[0]) <= NAH
-            and abs(px[1] - ziel[1]) <= NAH
-            and abs(px[2] - ziel[2]) <= NAH)
+def nahe(px, target):
+    return (abs(px[0] - target[0]) <= NAH
+            and abs(px[1] - target[1]) <= NAH
+            and abs(px[2] - target[2]) <= NAH)
 
 
 def count(pfad):
     w, h, dat = ppm_read(pfad)
-    flaeche = 0
+    area = 0
     gemischt = 0
     for k in range(0, len(dat) - 2, 3):
         px = (dat[k], dat[k + 1], dat[k + 2])
         if nahe(px, FRAME) or nahe(px, AREA):
-            flaeche += 1
+            area += 1
             if px != FRAME and px != AREA:
                 gemischt += 1
     _ = (w, h)
-    return flaeche, gemischt
+    return area, gemischt
 
 
 def main():

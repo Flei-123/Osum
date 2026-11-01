@@ -61,7 +61,7 @@ def main(argv):
     w, h, roh = ppm(screen)
     sw, sh, bild = symmod.zurueck(sym)
     deckend = 0
-    falsch = 0
+    wrong = 0
     for r in range(min(bh, sh)):
         for c in range(min(bw, sw)):
             soll = bild[r][c]
@@ -70,7 +70,7 @@ def main(argv):
             deckend += 1
             px, py = x + c, y + r
             if px >= w or py >= h:
-                falsch += 1
+                wrong += 1
                 continue
             at = (py * w + px) * 3
             ist = (roh[at] << 16) | (roh[at + 1] << 8) | roh[at + 2]
@@ -78,12 +78,12 @@ def main(argv):
                     abs(((soll >> 8) & 255) - roh[at + 1]),
                     abs((soll & 255) - roh[at + 2]))
             if d > tol:
-                falsch += 1
+                wrong += 1
     if deckend == 0:
         print("the symbol has no opaque pixel")
         return 1
-    if falsch:
-        print("wrong %d of %d opaque" % (falsch, deckend))
+    if wrong:
+        print("wrong %d of %d opaque" % (wrong, deckend))
         return 1
     print("%d opaque pixels, all equal" % deckend)
     return 0

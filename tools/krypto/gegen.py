@@ -243,17 +243,17 @@ def cmd_roh(pfad):
     for pat, name in sig.items():
         print("roh: sig %s = %d" % (name, daten.count(pat)))
 
-    leer = 0
+    empty = 0
     ents = []
     for i in range(n):
         s = daten[i * SECTOR:(i + 1) * SECTOR]
         if s == b"\0" * SECTOR:
-            leer += 1
+            empty += 1
             continue
         c = collections.Counter(s)
         ln = len(s)
         ents.append(-sum(v / ln * math.log2(v / ln) for v in c.values()))
-    print("roh: leer=%d beschrieben=%d" % (leer, len(ents)))
+    print("roh: leer=%d beschrieben=%d" % (empty, len(ents)))
     if ents:
         print("raw: entropy_min=%.3f mean=%.3f below7=%d"
               % (min(ents), sum(ents) / len(ents),
@@ -275,7 +275,7 @@ def cmd_vektoren(orakel):
         return r.stdout.strip().split("\n")
 
     gesamt_gut = 0
-    gesamt_alle = 0
+    gesamt_all = 0
 
     fr, soll = [], []
     for mlen in (0, 1, 2, 63, 64, 65, 127, 128, 129, 200, 1000):
@@ -295,7 +295,7 @@ def cmd_vektoren(orakel):
     gut = sum(1 for a, b in zip(ist, soll) if a == b)
     print("blake2b %d/%d" % (gut, len(soll)))
     gesamt_gut += gut
-    gesamt_alle += len(soll)
+    gesamt_all += len(soll)
 
     fr, soll = [], []
     faelle = []
@@ -312,10 +312,10 @@ def cmd_vektoren(orakel):
         (b"pw", b"saltsalt", 2, 32, 2, 32, "I"),
         (b"pw", b"saltsalt", 3, 64, 4, 32, "D"),
     ]
-    wort = {"ID": "argon2id", "I": "argon2i", "D": "argon2d"}
+    word = {"ID": "argon2id", "I": "argon2i", "D": "argon2d"}
     for pw, salt, t, m, p, n, ty in faelle:
         fr.append("%s %s %s %d %d %d %d"
-                  % (wort[ty], pw.hex() if pw else "-", salt.hex(),
+                  % (word[ty], pw.hex() if pw else "-", salt.hex(),
                      t, m, p, n))
         soll.append(argon2ll.hash_secret_raw(
             secret=pw, salt=salt, time_cost=t, memory_cost=m,
@@ -325,7 +325,7 @@ def cmd_vektoren(orakel):
     gut = sum(1 for a, b in zip(ist, soll) if a == b)
     print("argon2 %d/%d" % (gut, len(soll)))
     gesamt_gut += gut
-    gesamt_alle += len(soll)
+    gesamt_all += len(soll)
 
     fr, soll = [], []
     for n in (16, 32, 48, 512, 4096):
@@ -350,9 +350,9 @@ def cmd_vektoren(orakel):
     gut = sum(1 for a, b in zip(ist, soll) if a == b)
     print("xts %d/%d" % (gut, len(soll)))
     gesamt_gut += gut
-    gesamt_alle += len(soll)
+    gesamt_all += len(soll)
 
-    schlecht = [
+    bad = [
         "xtsenc %s %s %s" % (("11" * 32 + "11" * 32), "00" * 16, "00" * 16),
         "xtsenc %s %s %s" % ("00" * 32 + "11" * 32, "00" * 16, "00" * 8),
         "xtsenc %s %s %s" % ("00" * 32, "00" * 16, "00" * 16),
@@ -360,14 +360,14 @@ def cmd_vektoren(orakel):
         "argon2id 4142 %s 1 8 4 32" % ("41" * 16),
         "quatsch 00",
     ]
-    ist = frag(schlecht)
+    ist = frag(bad)
     gut = sum(1 for z in ist if z.strip() == "FAIL")
-    print("negativ %d/%d" % (gut, len(schlecht)))
+    print("negativ %d/%d" % (gut, len(bad)))
     gesamt_gut += gut
-    gesamt_alle += len(schlecht)
+    gesamt_all += len(bad)
 
-    print("gesamt %d/%d" % (gesamt_gut, gesamt_alle))
-    return 0 if gesamt_gut == gesamt_alle else 1
+    print("gesamt %d/%d" % (gesamt_gut, gesamt_all))
+    return 0 if gesamt_gut == gesamt_all else 1
 
 
 PER_BLOCK = SECTOR // 8

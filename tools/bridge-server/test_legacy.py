@@ -11,7 +11,7 @@ def chk(name, cond, extra=""):
     if cond: ok += 1; print("OK   ", name)
     else: bad += 1; print("FAIL ", name, extra)
 
-env = dict(os.environ, BRUECKE_TOT_S="3", BRUECKE_WAECHTER_S="0.4", BRIDGE_JOB_TTL_S_2="4", BRIDGE_BUSY_GRACE_S_2="7")
+env = dict(os.environ, BRIDGE_TOT_S="3", BRIDGE_WAECHTER_S="0.4", BRIDGE_JOB_TTL_S_2="4", BRIDGE_BUSY_GRACE_S_2="7")
 def start():
     return subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_server.py"), "--port", str(PORT), "--bind", "127.0.0.1", "--wurzel", W],
                             env=env, stderr=open(W + "/log.txt", "a"), stdout=subprocess.DEVNULL)
@@ -37,8 +37,8 @@ class Dev:
         self.pub = self.k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
         self.kennung = "osum-" + self.pub[:12]
         self.sid = secrets.token_hex(8)
-    def send(self, kopf, nutz=b""):
-        body = (kopf + " " + str(len(nutz))).encode() + b"\n" + nutz
+    def send(self, header_2, nutz=b""):
+        body = (header_2 + " " + str(len(nutz))).encode() + b"\n" + nutz
         r = urllib.request.Request(URL + "/bruecke/draht", data=body, headers={"X-Draht": self.sid})
         return urllib.request.urlopen(r, timeout=10).read()
     def prepair(self):
@@ -50,7 +50,7 @@ class Dev:
         ford = a[1]
         sig = self.k.sign(bytes.fromhex(ford)).hex()
         return self.send("beweis " + sig).decode().split()[0]
-    def puls(self):
+    def pulse(self):
         return self.send("puls")
 
 def warum(d):
@@ -72,7 +72,7 @@ def wait_state(d, want, t=12):
 
 d = Dev(); d.prepair()
 chk("login ok", d.login() == "willkommen")
-for _ in range(3): d.puls(); time.sleep(0.2)
+for _ in range(3): d.pulse(); time.sleep(0.2)
 chk("online", warum(d)["zustand"] == "online")
 chk("silent -> stumm", wait_state(d, "stumm", 10))
 wait_event(d, "SILENT"); w = warum(d)
@@ -83,7 +83,7 @@ chk("verbunden false in /geraete", [g for g in api("/bruecke/geraete")["geraete"
 chk("relogin", d.login() == "willkommen")
 chk("event NEW SESSION", any("NEW SESSION" in e[1] for e in warum(d)["ereignisse"]))
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "befehl", "ziel": "sleep 99"})
-a = d.puls().decode()
+a = d.pulse().decode()
 chk("job handed out", a.startswith("auftrag "), a[:40])
 chk("busy after silence > TOT_S", wait_state(d, "beschaeftigt", 8))
 chk("BUSY event", wait_event(d, "BUSY"))
@@ -96,7 +96,7 @@ chk("stumm names the unanswered job", "unanswered" in " ".join(e[1] for e in w["
 
 d.login()
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "liste", "ziel": "/"})
-a = d.puls().decode().split()
+a = d.pulse().decode().split()
 d.send("fertig %s ok" % a[1], b"x")
 w = warum(d)
 chk("job done recorded", w["letzter_auftrag"]["status"] == "ok" and w["laufender_auftrag"] is None, w["letzter_auftrag"])
@@ -108,7 +108,7 @@ api("/bruecke/auftrag", {"geraet": d.kennung, "art": "system"})
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "system", "ttl_s": 0})
 time.sleep(5)
 d.login()
-r = d.puls().decode()
+r = d.pulse().decode()
 chk("stale job dropped, ttl_s 0 job survives", r.startswith("auftrag ") and warum(d)["offene_auftraege"] == 0
     and any("JOB DROPPED" in e[1] for e in warum(d)["ereignisse"]), (r[:30], warum(d)["ereignisse"][-3:]))
 
@@ -137,7 +137,7 @@ chk("after restart: last contact survives", w.get("letzter_kontakt_utc") is not 
 chk("after restart: MAC survives", w.get("mac") == "11:22:33:44:55:66", w.get("mac"))
 chk("after restart: SERVER RESTARTED event", any("SERVER RESTARTED" in e[1] for e in w["ereignisse"]), w["ereignisse"][-3:])
 chk("after restart: not reported online", w["zustand"] != "online")
-chk("old marke -> device is told to log in again", d.puls().startswith(b"weg "))
+chk("old marke -> device is told to log in again", d.pulse().startswith(b"weg "))
 chk("fresh login after restart works", d.login() == "willkommen")
 chk("FIRST SESSION event", any("FIRST SESSION" in e[1] for e in warum(d)["ereignisse"]))
 srv.terminate(); srv.wait(5)

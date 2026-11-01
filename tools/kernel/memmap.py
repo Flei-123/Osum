@@ -484,7 +484,7 @@ def main():
             continue
         a0 = value(dateien["kstate.fi"], name + "_OFF")
         e0 = a0 + value(dateien["kstate.fi"], name + "_MAX")
-        teile = []
+        parts = []
         for file, k, n in items:
             if file not in dateien or k not in dateien[file]:
                 errors.append("%s:%s is missing -- the %s map is stale"
@@ -495,12 +495,12 @@ def main():
                 errors.append(
                     "%s:%s 0x%X..0x%X liegt AUSSERHALB von %s 0x%X..0x%X"
                     % (file, k, a, a + n, name, a0, e0))
-            teile.append((a, a + n, file, k))
-        teile.sort()
-        for i in range(len(teile)):
-            a1, e1, d1, k1 = teile[i]
-            for j in range(i + 1, len(teile)):
-                a2, e2, d2, k2 = teile[j]
+            parts.append((a, a + n, file, k))
+        parts.sort()
+        for i in range(len(parts)):
+            a1, e1, d1, k1 = parts[i]
+            for j in range(i + 1, len(parts)):
+                a2, e2, d2, k2 = parts[j]
                 if a2 >= e1:
                     break
                 errors.append(
@@ -510,7 +510,7 @@ def main():
         if laut:
             print("  ---- breakdown of %s ----" % name)
             vorx = a0
-            for a, e, dd, kk in teile:
+            for a, e, dd, kk in parts:
                 if a > vorx:
                     print("       ---- free 0x%05X..0x%05X" % (vorx, a))
                 print("  0x%05X..0x%05X  %s:%s" % (a, e, dd, kk))

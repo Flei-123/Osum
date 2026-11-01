@@ -53,11 +53,11 @@ def window_aus_serial(pfad):
     return sorted(set(re.findall(r"^(\w+): ready", t, re.M)))
 
 
-def main(lauf, beleg):
+def main(run_2, beleg):
     os.makedirs(beleg, exist_ok=True)
     zeilen = []
     vorher = {}
-    for d in sorted(glob.glob(os.path.join(lauf, "*/"))):
+    for d in sorted(glob.glob(os.path.join(run_2, "*/"))):
         tag = os.path.basename(d.rstrip("/"))
         ready = window_aus_serial(os.path.join(d, "serial.txt"))
         for ppm in sorted(glob.glob(os.path.join(d, "*.ppm"))):
@@ -79,7 +79,7 @@ def main(lauf, beleg):
             zeilen.append(
                 f"| `{tag}` | `{base}` | {w}×{h} | **{bs:+.1f}** | "
                 f"{flaechen} | {', '.join(ready) or '—'}{eq} |")
-    kopf = ("# BEFUND — Abnahme MERGE-10\n\n"
+    header = ("# BEFUND — Abnahme MERGE-10\n\n"
             "Je Bild: die Auflösung, der gemessene **Blaustich B−R** "
             "(flächengewichtet über die sechs häufigsten Flächenfarben; "
             "0 = neutrales Grau, positiv = blaustichig), die drei größten "
@@ -92,7 +92,7 @@ def main(lauf, beleg):
             "| Lauf | Bild | Größe | B−R | größte Flächen | `ready` im Lauf |\n"
             "|---|---|---|---|---|---|\n")
     open(os.path.join(beleg, "BEFUND.md"), "w", encoding="utf-8").write(
-        kopf + "\n".join(zeilen) + "\n")
+        header + "\n".join(zeilen) + "\n")
     print(f"{len(zeilen)} images, FINDING.md written to {beleg}")
     return 0
 

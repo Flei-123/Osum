@@ -66,28 +66,28 @@ def lies(pfad):
     zeilen = []
     for roh in open(pfad, encoding="ascii").read().splitlines():
         if roh.startswith("#"):
-            teil = roh[1:].strip()
-            if "=" in teil:
-                zeichen, _, wert = teil.partition("=")
-                zeichen = zeichen.strip()
-                wert = wert.strip()
-                if len(zeichen) != 1:
+            part = roh[1:].strip()
+            if "=" in part:
+                char, _, value = part.partition("=")
+                char = char.strip()
+                value = value.strip()
+                if len(char) != 1:
                     raise SystemExit(
-                        "symbol: '%s' ist kein einzelnes Zeichen" % zeichen)
-                if not wert:
-                    palette[zeichen] = None
-                elif wert.startswith("@"):
-                    name = wert[1:]
+                        "symbol: '%s' ist kein einzelnes Zeichen" % char)
+                if not value:
+                    palette[char] = None
+                elif value.startswith("@"):
+                    name = value[1:]
                     if name not in ROLLEN:
                         raise SystemExit(
                             "symbol: '@%s' ist keine Rolle (%s)"
                             % (name, ", ".join(sorted(ROLLEN))))
-                    palette[zeichen] = ("rolle", ROLLEN[name])
+                    palette[char] = ("rolle", ROLLEN[name])
                 else:
-                    if len(wert) != 6:
+                    if len(value) != 6:
                         raise SystemExit(
-                            "symbol: '%s' sind nicht sechs Hexziffern" % wert)
-                    palette[zeichen] = int(wert, 16)
+                            "symbol: '%s' sind nicht sechs Hexziffern" % value)
+                    palette[char] = int(value, 16)
             continue
         if roh.strip() == "":
             continue
@@ -170,13 +170,13 @@ def main(argv):
             print("symbol: %dx%d in the image, %dx%d in the drawing"
                   % (w, h, len(zeilen[0]), len(zeilen)))
             return 1
-        falsch = 0
+        wrong = 0
         for y in range(h):
             for x in range(w):
                 if bild[y][x] != palette[zeilen[y][x]]:
-                    falsch += 1
-        if falsch:
-            print("symbol: %d of %d pixels different" % (falsch, w * h))
+                    wrong += 1
+        if wrong:
+            print("symbol: %d of %d pixels different" % (wrong, w * h))
             return 1
         print("symbol: %dx%d, %d pixels, all equal" % (w, h, w * h))
         return 0

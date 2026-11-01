@@ -115,15 +115,15 @@ def main(argv):
         print("ERROR: the area is (almost) one colour -- there is no curve")
         return 1
 
-    zaehler = {}
+    counter = {}
     for y in range(gy + 2, gy + gh - 2):
         for x in range(gx + 2, gx + gw - 2, 3):
             c = bild.at(cx + x, cy + y)
             if c:
-                zaehler[c] = zaehler.get(c, 0) + 1
-    grund = max(zaehler, key=zaehler.get)
+                counter[c] = counter.get(c, 0) + 1
+    grund = max(counter, key=counter.get)
     print("Grundfarbe %s (%d von %d Punkten)"
-          % (grund, zaehler[grund], sum(zaehler.values())))
+          % (grund, counter[grund], sum(counter.values())))
 
     if not values_2:
         print("no gcpu values (did the program run without `melde`?)")

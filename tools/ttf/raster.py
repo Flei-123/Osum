@@ -166,15 +166,15 @@ class Ttf:
     def kern(self, g1, g2):
         if self.kern_off == 0:
             return 0
-        schluessel = (g1 << 16) | g2
+        key_2 = (g1 << 16) | g2
         lo, hi = 0, self.kern_paare
         while lo < hi:
             m = (lo + hi) // 2
             p = self.kern_off + m * 6
             k = (u16(self.d, p) << 16) | u16(self.d, p + 2)
-            if k == schluessel:
+            if k == key_2:
                 return s16(self.d, p + 4)
-            if k < schluessel:
+            if k < key_2:
                 lo = m + 1
             else:
                 hi = m
@@ -238,11 +238,11 @@ class Ttf:
                 p += 2
             ys.append(y)
         aus = []
-        anfang = 0
+        begin = 0
         for e in enden:
             aus.append([(xs[i], ys[i], (flags[i] & 1) != 0)
-                        for i in range(anfang, e + 1)])
-            anfang = e + 1
+                        for i in range(begin, e + 1)])
+            begin = e + 1
         return aus
 
     def _composite(self, g, tiefe):
@@ -419,14 +419,14 @@ def raster_kern(f, gid, px):
                 continue
             schnitte.sort(key=lambda s: s[0])
             wind = 0
-            anfang = 0
+            begin = 0
             for (xs, dz) in schnitte:
                 vorher = wind
                 wind += dz
                 if vorher == 0 and wind != 0:
-                    anfang = xs
+                    begin = xs
                 elif vorher != 0 and wind == 0:
-                    j0 = (anfang - 8 + 15) >> 4
+                    j0 = (begin - 8 + 15) >> 4
                     j1 = (xs - 8 + 15) >> 4
                     if j0 < bx0 * 4:
                         j0 = bx0 * 4
@@ -536,7 +536,7 @@ def vergleich(pfad_ttf, mitschnitt):
         return 1
     stufen = " .:-=+*#%@"
     schriften = {}
-    schlecht = []
+    bad = []
     geprueft = 0
     tinte = 0
     for (c, px, w, h, left, top, adv, sm, zeilen) in faelle:
@@ -550,25 +550,25 @@ def vergleich(pfad_ttf, mitschnitt):
         if (g.w, g.h, g.links, g.oben, g.adv26) != (int(w), int(h),
                                                     int(left), int(top),
                                                     int(adv)):
-            schlecht.append("%s Masse: Kern %sx%s l=%s t=%s a=%s, "
+            bad.append("%s Masse: Kern %sx%s l=%s t=%s a=%s, "
                             "Wirt %dx%d l=%d t=%d a=%d"
                             % (name, w, h, left, top, adv, g.w, g.h,
                                g.links, g.oben, g.adv26))
             continue
         if summe(g) != int(sm):
-            schlecht.append("%s Pruefsumme: Kern %s, Wirt %d"
+            bad.append("%s Pruefsumme: Kern %s, Wirt %d"
                             % (name, sm, summe(g)))
             continue
         soll = [ "".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]
                          for x in range(g.w)) for y in range(g.h) ]
         ist = re.findall(r"ttfrow \d+ \|(.*)\|", zeilen)
         if ist != soll:
-            schlecht.append("%s Bildzeilen weichen ab" % name)
+            bad.append("%s Bildzeilen weichen ab" % name)
     print("%d Glyphen, %d Tintenpunkte: %d abweichend"
-          % (geprueft, tinte, len(schlecht)))
-    for z in schlecht[:8]:
+          % (geprueft, tinte, len(bad)))
+    for z in bad[:8]:
         print("    " + z)
-    return 1 if schlecht else 0
+    return 1 if bad else 0
 
 
 

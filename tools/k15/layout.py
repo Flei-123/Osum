@@ -55,17 +55,17 @@ def main():
     mind = int(sys.argv[5]) if len(sys.argv) > 5 else 8
     vertical = [int(v) for v in sys.argv[6].split(",")] if len(sys.argv) > 6 else []
     r = rechtecke(pfad, marke)
-    fehler = []
+    error = []
     if len(r) < mind:
-        fehler.append("only %d rectangles reported, %d expected"
+        error.append("only %d rectangles reported, %d expected"
                       % (len(r), mind))
     for (i, k, x, y, w, h) in r:
         if w == 0 or h == 0:
-            fehler.append("id=%d has no area: %dx%d" % (i, w, h))
+            error.append("id=%d has no area: %dx%d" % (i, w, h))
         if i >= 50:
             continue
         if x + w > bw or y + h > bh:
-            fehler.append("id=%d lies outside: (%d,%d) %dx%d, "
+            error.append("id=%d lies outside: (%d,%d) %dx%d, "
                           "window %dx%d" % (i, x, y, w, h, bw, bh))
     for a in range(len(r)):
         for b in range(a + 1, len(r)):
@@ -73,7 +73,7 @@ def main():
             (ib, _kb, xb, yb, wb, hb) = r[b]
             if xa < xb + wb and xb < xa + wa and \
                ya < yb + hb and yb < ya + ha:
-                fehler.append("id=%d and id=%d overlap: "
+                error.append("id=%d and id=%d overlap: "
                               "(%d,%d %dx%d) / (%d,%d %dx%d)"
                               % (ia, ib, xa, ya, wa, ha, xb, yb, wb, hb))
     columns = {}
@@ -86,15 +86,15 @@ def main():
             continue
         nach_id = [y for (i, y) in sorted(liste)]
         if nach_id != sorted(nach_id):
-            fehler.append("at x=%d the order is upside down: %s"
+            error.append("at x=%d the order is upside down: %s"
                           % (x, nach_id))
     ys = dict((i, y) for (i, _k, _x, y, _w, _h) in r)
     chain = [ys[i] for i in vertical if i in ys]
     if len(chain) != len(vertical) or chain != sorted(chain):
-        fehler.append("vertical order %s is wrong: %s"
+        error.append("vertical order %s is wrong: %s"
                       % (vertical, chain))
-    if fehler:
-        for f in fehler:
+    if error:
+        for f in error:
             print(f)
         return 1
     print("%d rectangles, all inside window %dx%d, no overlap, "

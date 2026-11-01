@@ -59,12 +59,12 @@ def num(s):
     return int(s, 0)
 
 
-def teile(ratios):
+def parts(ratios):
     return ratios & 0xFF, (ratios >> 8) & 0xFF, (ratios >> 16) & 0xFF
 
 
 def perfctl(ratios, prof):
-    lo, basis, hi = teile(ratios)
+    lo, basis, hi = parts(ratios)
     r = {SPAREN: lo, MITTE: basis, LEISTUNG: hi}[prof]
     w = (r & 0xFF) << 8
     if prof == SPAREN:
@@ -73,7 +73,7 @@ def perfctl(ratios, prof):
 
 
 def hwp(ratios, prof):
-    lo, basis, hi = teile(ratios)
+    lo, basis, hi = parts(ratios)
     if prof == SPAREN:
         return lo | (basis << 8) | (255 << 24)
     if prof == MITTE:

@@ -153,9 +153,9 @@ def raster(rechtecke, n=4):
     gut = ges = 0
     schuldige = {}
     for quelle, _art, x, y, w, h in rechtecke:
-        for wert, name in ((x, "x"), (y, "y"), (w, "w"), (h, "h")):
+        for value, name in ((x, "x"), (y, "y"), (w, "w"), (h, "h")):
             ges += 1
-            if wert % n == 0:
+            if value % n == 0:
                 gut += 1
             else:
                 schuldige[quelle] = schuldige.get(quelle, 0) + 1

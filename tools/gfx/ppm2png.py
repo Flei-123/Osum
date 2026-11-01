@@ -44,10 +44,10 @@ def ppm_read(pfad):
             while at < len(roh) and roh[at:at + 1] != b"\n":
                 at += 1
             continue
-        anfang = at
+        begin = at
         while at < len(roh) and not roh[at:at + 1].isspace():
             at += 1
-        felder.append(int(roh[anfang:at]))
+        felder.append(int(roh[begin:at]))
     at += 1
     b, h, up = felder
     if up != 255:
@@ -59,7 +59,7 @@ def ppm_read(pfad):
     return b, h, daten
 
 
-def stueck(art, nutz):
+def chunk(art, nutz):
     return (struct.pack(">I", len(nutz)) + art + nutz
             + struct.pack(">I", zlib.crc32(art + nutz) & 0xFFFFFFFF))
 
@@ -77,13 +77,13 @@ def main(argv):
         zeilen.append(1)
         zeilen += z[:3]
         vorher = memoryview(z)[:-3]
-        jetzt = memoryview(z)[3:]
-        zeilen += bytes((a - c) & 255 for a, c in zip(jetzt, vorher))
+        now = memoryview(z)[3:]
+        zeilen += bytes((a - c) & 255 for a, c in zip(now, vorher))
 
     png = b"\x89PNG\r\n\x1a\n"
-    png += stueck(b"IHDR", struct.pack(">IIBBBBB", b, h, 8, 2, 0, 0, 0))
-    png += stueck(b"IDAT", zlib.compress(bytes(zeilen), 9))
-    png += stueck(b"IEND", b"")
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", b, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(zeilen), 9))
+    png += chunk(b"IEND", b"")
     with open(argv[2], "wb") as f:
         f.write(png)
     print("ppm2png: %dx%d -> %s (%d Oktette)"

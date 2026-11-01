@@ -57,7 +57,7 @@ def protokoll(*w):
 
 
 def name_read(b, at):
-    teile = []
+    parts = []
     i = at
     spr = 0
     while True:
@@ -70,23 +70,23 @@ def name_read(b, at):
         if c & 0xC0 == 0xC0:
             if spr > 4:
                 return None, None
-            ziel = ((c & 0x3F) << 8) | b[i + 1]
+            target_2 = ((c & 0x3F) << 8) | b[i + 1]
             if spr == 0:
                 ende = i + 2
-            i = ziel
+            i = target_2
             spr += 1
             continue
-        teile.append(b[i + 1:i + 1 + c])
+        parts.append(b[i + 1:i + 1 + c])
         i += 1 + c
     if spr:
-        return b".".join(teile), ende
-    return b".".join(teile), i
+        return b".".join(parts), ende
+    return b".".join(parts), i
 
 
 def reply_build(ask, txid, qende, name, qtyp, broken_case=False,
-                  txid_wrong=False, tc=False, klein=False):
+                  txid_wrong=False, tc=False, small=False):
     q = bytearray(ask[:qende])
-    if klein:
+    if small:
         for i in range(12, qende):
             if 65 <= q[i] <= 90:
                 q[i] += 32
@@ -110,8 +110,8 @@ def reply_build(ask, txid, qende, name, qtyp, broken_case=False,
               + socket.inet_aton(ip))
     elif qtyp != 1:
         an = 0
-    kopf = struct.pack(">HHHHHH", header_id, fl, 1, an, 0, 0)
-    return bytes(kopf) + bytes(q[12:]) + rd
+    header = struct.pack(">HHHHHH", header_id, fl, 1, an, 0, 0)
+    return bytes(header) + bytes(q[12:]) + rd
 
 
 def bedienen(sock, daten, herkunft):
@@ -141,12 +141,12 @@ def bedienen(sock, daten, herkunft):
                                   broken_case=True)
                 sock.sendto(p, herkunft)
             elif art == "port":
-                falsch = dict(EINTRAEGE)
+                wrong = dict(EINTRAEGE)
                 echt = EINTRAEGE.get(kn)
                 if echt:
                     EINTRAEGE[kn] = "6.6.6.6"
                 p = reply_build(daten, txid, qende, name, qtyp)
-                EINTRAEGE.update(falsch)
+                EINTRAEGE.update(wrong)
                 s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s2.bind(("", 0))
                 s2.sendto(p, herkunft)
@@ -155,7 +155,7 @@ def bedienen(sock, daten, herkunft):
         time.sleep(0.01)
 
     p = reply_build(daten, txid, qende, name, qtyp, tc=(kn in TC),
-                      klein=(BOESE == "klein"))
+                      small=(BOESE == "klein"))
     sock.sendto(p, herkunft)
     COUNTER["antworten"] += 1
 

@@ -78,13 +78,13 @@ def ppm(pfad):
     return w, h, d[at:]
 
 
-def pruefe(w, h, pixel, kacheln, oben, rand=2):
+def check(w, h, pixel, kacheln, oben, rand=2):
     """kacheln: Liste (tx, ty, tw, th). Gibt (fehler, meldungen)."""
-    fehler = []
+    error = []
     meld = []
     for t, (tx, ty, tw, th) in enumerate(kacheln):
         if tx < 0 or ty < 0 or tx + tw > w or ty + th > h:
-            fehler.append("Kachel %d: %d,%d %dx%d liegt nicht auf dem Schirm"
+            error.append("Kachel %d: %d,%d %dx%d liegt nicht auf dem Schirm"
                           % (t, tx, ty, tw, th))
             continue
         zaehl = {}
@@ -109,11 +109,11 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
             zeilen.append((y, n_in))
 
         if right >= tx + tw - rand - 2:
-            fehler.append("Kachel %d: Inhalt bis x=%d, die Kachel endet "
+            error.append("Kachel %d: Inhalt bis x=%d, die Kachel endet "
                           "bei %d -- die Beschriftung laeuft ueber"
                           % (t, right, tx + tw - 1))
         if links <= tx + rand:
-            fehler.append("Kachel %d: Inhalt ab x=%d, die Kachel faengt "
+            error.append("Kachel %d: Inhalt ab x=%d, die Kachel faengt "
                           "bei %d an" % (t, links, tx))
 
         bloecke = []
@@ -127,18 +127,18 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
         if anf is not None:
             bloecke.append((anf, zeilen[-1][0]))
         if len(bloecke) < 1 or len(bloecke) > 3:
-            fehler.append("Kachel %d: %d Textbloecke -- %s"
+            error.append("Kachel %d: %d Textbloecke -- %s"
                           % (t, len(bloecke), bloecke))
         else:
             for i in range(len(bloecke) - 1):
                 gap_2 = bloecke[i + 1][0] - bloecke[i][1] - 1
                 if gap_2 < 2:
-                    fehler.append("Kachel %d: nur %d Reihen zwischen %s "
+                    error.append("Kachel %d: nur %d Reihen zwischen %s "
                                   "und %s -- die Zeilen kleben"
                                   % (t, gap_2, bloecke[i], bloecke[i + 1]))
         meld.append("kachel %d: x %d..%d von %d..%d, Bloecke %s"
                     % (t, links, right, tx, tx + tw - 1, bloecke))
-    return fehler, meld
+    return error, meld
 
 
 def main(argv):
@@ -155,11 +155,11 @@ def main(argv):
             at = (y * w + x) * 3
             return (roh[at], roh[at + 1], roh[at + 2])
 
-        fehler, meld = pruefe(w, h, pixel, rects, oben, rand)
+        error, meld = check(w, h, pixel, rects, oben, rand)
         for m in meld:
             print(m)
-        if fehler:
-            for f in fehler:
+        if error:
+            for f in error:
                 print("FALSCH " + f)
             return 1
         print("ok %d tiles, nothing overflows and nothing sticks" % len(rects))
@@ -186,11 +186,11 @@ def main(argv):
         tx = px + pad + (t % 2) * (tw + gap)
         ty = py + pad + (t // 2) * (th + gap)
         kacheln.append((tx, ty, tw, th))
-    fehler, meld = pruefe(w, h, pixel, kacheln, oben)
+    error, meld = check(w, h, pixel, kacheln, oben)
     for m in meld:
         print(m)
-    if fehler:
-        for f in fehler:
+    if error:
+        for f in error:
             print("FALSCH " + f)
         return 1
     print("ok %d tiles, nothing overflows and nothing sticks" % n)

@@ -80,9 +80,9 @@ class Bild:
             self.blocks = self.geraet
         if not (0 < self.itable < self.data <= self.blocks):
             self.data = min(max(self.itable + 1, 2), self.blocks)
-        passt = max(1, (self.data - self.itable)) * self.ipb
-        if self.inodes > passt:
-            self.inodes = passt
+        fits = max(1, (self.data - self.itable)) * self.ipb
+        if self.inodes > fits:
+            self.inodes = fits
         self.xin = 0
         self.xit = 0
         self.xbm = 0
@@ -216,11 +216,11 @@ class Bild:
             pos = off + len(aus)
             b = self.datenblock(ino, pos // BS)
             inb = pos % BS
-            stueck = min(BS - inb, n - len(aus))
+            chunk = min(BS - inb, n - len(aus))
             if b == 0:
-                aus += bytes(stueck)
+                aus += bytes(chunk)
             else:
-                aus += self.blk(b)[inb:inb + stueck]
+                aus += self.blk(b)[inb:inb + chunk]
         return bytes(aus)
 
     def eintraege(self, ino):
@@ -238,12 +238,12 @@ class Bild:
 
     def finde(self, pfad):
         ino = self.root
-        for teil in pfad.strip("/").split("/"):
-            if not teil:
+        for part in pfad.strip("/").split("/"):
+            if not part:
                 continue
             gefunden = 0
             for kind, name in self.eintraege(ino):
-                if name == teil:
+                if name == part:
                     gefunden = kind
                     break
             if not gefunden:
@@ -264,11 +264,11 @@ def struktur(bild):
     if not (bild.bmstart < bild.itable < bild.data < bild.blocks):
         befunde.append("Bereiche nicht in der Reihenfolge "
                        "Karte<Tabelle<Daten<Ende")
-    gesehen = bytearray(bild.blocks)
+    seen = bytearray(bild.blocks)
     for b in range(min(bild.data, bild.blocks)):
-        gesehen[b] = 1
+        seen[b] = 1
     for b in range(bild.hole_lo, min(bild.hole_hi, bild.blocks)):
-        gesehen[b] = 1
+        seen[b] = 1
     for ino in range(1, bild.total_inodes() + 1):
         art = bild.ig(ino, mkfs.I_TYPE)
         if art == 0:
@@ -282,31 +282,31 @@ def struktur(bild):
         for p in bild.bloecke(ino):
             if not bild.valid(p):
                 z["ausser"] += 1
-            elif gesehen[p]:
+            elif seen[p]:
                 z["doppelt"] += 1
             else:
-                gesehen[p] = 1
+                seen[p] = 1
                 z["bloecke"] += 1
     for b in range(bild.data, bild.blocks):
         if bild.hole_lo <= b < bild.hole_hi:
             continue
         bit = bild.bit(b)
-        if bit and not gesehen[b]:
+        if bit and not seen[b]:
             z["verloren"] += 1
-        if not bit and gesehen[b]:
+        if not bit and seen[b]:
             z["fehlend"] += 1
     besucht = set()
-    stapel = [bild.root]
+    stack = [bild.root]
     besucht.add(bild.root)
-    while stapel:
-        d = stapel.pop()
+    while stack:
+        d = stack.pop()
         for kind, name in bild.eintraege(d):
             if kind > bild.total_inodes() or bild.ig(kind, mkfs.I_TYPE) == 0:
                 z["totlinks"] += 1
             elif bild.ig(kind, mkfs.I_TYPE) == mkfs.T_DIR:
                 if kind not in besucht:
                     besucht.add(kind)
-                    stapel.append(kind)
+                    stack.append(kind)
                 elif name not in (".", ".."):
                     z["kreise"] += 1
     for k in ("ausser", "doppelt", "badtype", "verloren", "fehlend",
@@ -404,13 +404,13 @@ def inhalt(bild):
             befunde.append("/d/%d ist %d statt %d Oktette" % (k, sz, soll))
             continue
         roh = bild.lies(ino, 0, sz)
-        schlecht = -1
+        bad = -1
         for i in range(sz):
             if roh[i] != muster(k + 1000000, i):
-                schlecht = i
+                bad = i
                 break
-        if schlecht >= 0:
-            befunde.append("/d/%d: Oktett %d falsch" % (k, schlecht))
+        if bad >= 0:
+            befunde.append("/d/%d: Oktett %d falsch" % (k, bad))
             continue
         m = bild.ig(ino, mkfs.I_MODE) & 0o7777
         if m != 0o600 + (k % 8):

@@ -92,15 +92,15 @@ class Mon:
         self.leeren()
 
 
-def keys_for(zeichen):
-    if zeichen in EINFACH:
-        return [EINFACH[zeichen]]
-    if zeichen in SHIFT:
-        return ["shift-" + SHIFT[zeichen]]
-    if zeichen.isdigit() or (zeichen.isalpha() and zeichen.islower()):
-        return [zeichen]
-    if zeichen.isalpha() and zeichen.isupper():
-        return ["shift-" + zeichen.lower()]
+def keys_for(char):
+    if char in EINFACH:
+        return [EINFACH[char]]
+    if char in SHIFT:
+        return ["shift-" + SHIFT[char]]
+    if char.isdigit() or (char.isalpha() and char.islower()):
+        return [char]
+    if char.isalpha() and char.isupper():
+        return ["shift-" + char.lower()]
     return []
 
 
@@ -133,19 +133,19 @@ def main():
         z = roh.strip()
         if not z or z.startswith("#"):
             continue
-        teile = z.split()
-        cmd = teile[0]
+        parts = z.split()
+        cmd = parts[0]
         if cmd == "stecke":
-            ident, datei = teile[1], teile[2]
+            ident, datei = parts[1], parts[2]
             m.tu("drive_add 0 id=%s,if=none,file=%s,format=raw" % (ident, datei))
             m.tu("device_add usb-storage,id=dev%s,drive=%s" % (ident, ident))
             print("   stecke %s (%s)" % (ident, datei))
         elif cmd == "ziehe":
-            ident = teile[1]
+            ident = parts[1]
             m.tu("device_del dev%s" % ident)
             print("   ziehe %s" % ident)
         elif cmd == "warte":
-            time.sleep(float(teile[1]))
+            time.sleep(float(parts[1]))
         elif cmd == "aufzeile":
             muster = z.split(None, 1)[1]
             if wait_auf(seriell, muster):
@@ -155,29 +155,29 @@ def main():
                 print("   NOT SEEN (60 s): %s" % muster)
                 n_bad += 1
         elif cmd == "foto":
-            ziel = teile[1]
-            m.tu("screendump %s" % ziel)
+            target = parts[1]
+            m.tu("screendump %s" % target)
             bis = time.time() + 20.0
             letzte = -1
             while time.time() < bis:
                 try:
-                    jetzt = os.path.getsize(ziel)
+                    now = os.path.getsize(target)
                 except OSError:
-                    jetzt = -1
-                if jetzt > 0 and jetzt == letzte:
+                    now = -1
+                if now > 0 and now == letzte:
                     break
-                letzte = jetzt
+                letzte = now
                 time.sleep(0.25)
             print("   foto %s (%s Oktette)"
-                  % (ziel, os.path.getsize(ziel) if os.path.exists(ziel) else "keine"))
+                  % (target, os.path.getsize(target) if os.path.exists(target) else "keine"))
         elif cmd == "taste":
-            m.tu("sendkey %s" % teile[1])
+            m.tu("sendkey %s" % parts[1])
         elif cmd == "text":
             for c in z.split(None, 1)[1]:
                 for t in keys_for(c):
                     m.tu("sendkey %s" % t)
         elif cmd == "maus":
-            m.tu("mouse_move %s %s" % (teile[1], teile[2]))
+            m.tu("mouse_move %s %s" % (parts[1], parts[2]))
         elif cmd == "klick":
             m.tu("mouse_button 1")
             time.sleep(0.15)

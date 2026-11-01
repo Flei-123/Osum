@@ -4,15 +4,15 @@ import sys, os, re
 def lies(p):
     return open(p, encoding='utf-8', errors='surrogateescape').read()
 
-def schreib(p, s):
+def write_2(p, s):
     open(p, 'w', encoding='utf-8', errors='surrogateescape').write(s)
 
-def ersetze(s, alt, neu, wo):
+def ersetze(s, alt, new, wo):
     n = s.count(alt)
     if n != 1:
         print('MUSTER %dx in %s: %r' % (n, wo, alt[:70]), file=sys.stderr)
         sys.exit(1)
-    return s.replace(alt, neu)
+    return s.replace(alt, new)
 
 EXT = '''
 // ==================== RUNDE CERTUS-AUF-OSUM: DIE TUER ALS `extern fn`
@@ -38,14 +38,14 @@ extern fn osum_aio_submit(op: u64, fd: u64, buf: u64, len: u64,
 '''
 
 
-def profil_weg(s, wo):
+def profil_gone(s, wo):
     if 'profile kernel\n' in s:
         s = s.replace('profile kernel\n', '// (profile kernel -- entfernt von tools/certus/entkern.py)\n', 1)
     return s
 
 
 def kcall(s):
-    s = profil_weg(s, 'kcall')
+    s = profil_gone(s, 'kcall')
     s = ersetze(s, '''fn sys0(number: u64) -> u64 {
     return asm("syscall", out("rax"), in("rax") number, clobber("rcx"),
         clobber("r11"), clobber("memory"))
@@ -105,7 +105,7 @@ def kcall(s):
 
 
 def wlibc(s):
-    s = profil_weg(s, 'wlibc')
+    s = profil_gone(s, 'wlibc')
     s = re.sub(r'fn sys5\(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64\) -> u64 \{\n    return asm\([^}]*?\n\}',
                '''fn sys5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
     return osum_sys5(number, a0, a1, a2, a3, a4)
@@ -131,7 +131,7 @@ def wlibc(s):
 
 
 def schlicht(s, name='?'):
-    s = profil_weg(s, name)
+    s = profil_gone(s, name)
     if name == 'ulib.fi':
         s = re.sub(r'fn bus5\(op: u64, a1: u64, a2: u64, a3: u64, a4: u64\) -> u64 \{\n    return asm\([^}]*?\n\}',
                    '''fn bus5(op: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
@@ -151,23 +151,23 @@ def main():
     bau = sys.argv[1]
     for name, fn in (('libc/kcall.fi', kcall), ('wlibc.fi', wlibc)):
         p = os.path.join(bau, name)
-        schreib(p, fn(lies(p)))
+        write_2(p, fn(lies(p)))
         print('entkernt', name)
     for name in ('ulib.fi', 'wlib.fi', 'icons.fi', 'utf8.fi'):
         p = os.path.join(bau, name)
         if os.path.exists(p):
-            schreib(p, schlicht(lies(p), name))
+            write_2(p, schlicht(lies(p), name))
     done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi')
     for f in sorted(os.listdir(bau)):
         p = os.path.join(bau, f)
         if f.endswith('.fi') and f not in done and not os.path.islink(p) and os.path.isfile(p) \
                 and f not in ('certus_main.fi',):
-            schreib(p, schlicht(lies(p), f))
+            write_2(p, schlicht(lies(p), f))
     d = os.path.join(bau, 'libc')
     for f in sorted(os.listdir(d)):
         if f.endswith('.fi') and f != 'kcall.fi':
             p = os.path.join(d, f)
-            schreib(p, schlicht(lies(p)))
+            write_2(p, schlicht(lies(p)))
     print('fertig')
 
 

@@ -47,8 +47,8 @@ def saetze(wurzel):
                             if UMLAUT.search(t):
                                 aus.append((os.path.relpath(p, wurzel),
                                             nr, t))
-    for unter in ("locale/de", ):
-        p0 = os.path.join(wurzel, unter)
+    for under in ("locale/de", ):
+        p0 = os.path.join(wurzel, under)
         if not os.path.isdir(p0):
             continue
         for f in sorted(os.listdir(p0)):
@@ -93,11 +93,11 @@ def phrasen(satz):
         return set()
     aus = set()
     for n in range(2, min(len(woerter), 5) + 1):
-        teil = woerter[:n]
-        if not any(UMLAUT.search(w) for w in teil):
+        part = woerter[:n]
+        if not any(UMLAUT.search(w) for w in part):
             continue
-        p = ruecklauf(" ".join(teil))
-        if p != " ".join(teil) and len(p) >= 10:
+        p = ruecklauf(" ".join(part))
+        if p != " ".join(part) and len(p) >= 10:
             aus.add(p)
             q = p.rstrip(":;,.!?")
             if q != p and len(q) >= 10:

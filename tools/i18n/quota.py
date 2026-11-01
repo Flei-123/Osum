@@ -9,20 +9,20 @@ KEYW = 48
 
 def lies(pfad):
     aus = {}
-    fehler = []
+    error = []
     for nr, zeile in enumerate(open(pfad, encoding="utf-8"), 1):
         z = zeile.rstrip("\n")
         if not z.strip() or z.lstrip().startswith("#"):
             continue
         if "=" not in z:
-            fehler.append((nr, z))
+            error.append((nr, z))
             continue
         k, v = z.split("=", 1)
         k = k.strip()
         if v.startswith(" "):
             v = v[1:]
         aus[k] = v
-    return aus, fehler
+    return aus, error
 
 
 def main():
@@ -31,7 +31,7 @@ def main():
     if not en:
         print("no source language under %s/en/messages" % wurzel)
         return 1
-    schlecht = 0
+    bad = 0
     zeilen = []
     codes = sorted(d for d in os.listdir(wurzel)
                    if os.path.isdir(os.path.join(wurzel, d)) and d != "en")
@@ -39,7 +39,7 @@ def main():
         p = os.path.join(wurzel, code, "messages")
         if not os.path.exists(p):
             continue
-        de, fehler = lies(p)
+        de, error = lies(p)
         fehlt = [k for k in en if k not in de]
         zuviel = [k for k in de if k not in en]
         eq = [k for k in de if k in en and de[k] == en[k]]
@@ -52,10 +52,10 @@ def main():
             zeilen.append("    fehlt in %s: %s" % (code, k))
         for k in zuviel:
             zeilen.append("    UNBEKANNT in %s: %s" % (code, k))
-            schlecht += 1
-        for nr, z in fehler:
+            bad += 1
+        for nr, z in error:
             zeilen.append("    kaputte Zeile %s:%d: %s" % (p, nr, z))
-            schlecht += 1
+            bad += 1
         for k, v in sorted(de.items()):
             roh = v.replace("\\n", "\n").replace("\\t", "\t") \
                    .replace("\\\\", "\\")
@@ -63,23 +63,23 @@ def main():
             if n + 1 > VALW:
                 zeilen.append("    ZU LANG (%d von %d Oktetten): %s = %s"
                               % (n, VALW - 1, k, v))
-                schlecht += 1
+                bad += 1
         for k in de:
             if len(k) + 1 > KEYW:
                 zeilen.append("    SCHLUESSEL ZU LANG (%d von %d): %s"
                               % (len(k), KEYW - 1, k))
-                schlecht += 1
+                bad += 1
     for nr, z in error_en:
         zeilen.append("    kaputte Zeile en:%d: %s" % (nr, z))
-        schlecht += 1
+        bad += 1
     lang_en = max((len(v.encode("utf-8")) for v in en.values()), default=0)
-    kopf = ("Englisch: %d Schluessel, laengster Text %d Oktette, "
+    header_2 = ("Englisch: %d Schluessel, laengster Text %d Oktette, "
             "laengster Schluessel %d"
             % (len(en), lang_en, max(len(k) for k in en)))
-    print(kopf)
+    print(header_2)
     for z in zeilen:
         print(z)
-    return 1 if schlecht else 0
+    return 1 if bad else 0
 
 
 sys.exit(main())

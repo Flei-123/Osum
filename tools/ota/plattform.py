@@ -6,7 +6,7 @@ ELF_MASCHINE = {62: "x86_64", 183: "aarch64"}
 WOERTER = ("osum-x86_64", "osum-aarch64", "osum-any")
 
 
-def teile(roh):
+def parts_2(roh):
     if len(roh) < 64 or roh[0:8] != b"OPKG0001":
         raise ValueError("not an OPKG file (Kennung fehlt)")
     ml, dl = struct.unpack_from("<QQ", roh, 8)
@@ -58,7 +58,7 @@ def aus_meta(meta):
 
 
 def plattform_von_roh(roh, name="?"):
-    meta, daten = teile(roh)
+    meta, daten = parts_2(roh)
     p = aus_meta(meta)
     if p is not None:
         if p not in WOERTER:

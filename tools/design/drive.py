@@ -363,25 +363,25 @@ class Fahrer:
         return False
 
     def foto(self, name, frist=30.0):
-        ziel = os.path.join(self.out, name + ".ppm")
-        if os.path.exists(ziel):
-            os.unlink(ziel)
-        self.cmd("screendump %s" % ziel)
+        target = os.path.join(self.out, name + ".ppm")
+        if os.path.exists(target):
+            os.unlink(target)
+        self.cmd("screendump %s" % target)
         letzte, ruhig = -1, 0
         bis = time.time() + frist
         while time.time() < bis:
             time.sleep(0.15)
             try:
-                jetzt = os.path.getsize(ziel)
+                now = os.path.getsize(target)
             except OSError:
                 continue
-            if jetzt == letzte and jetzt > 0:
+            if now == letzte and now > 0:
                 ruhig += 1
                 if ruhig >= 3:
-                    print("foto %s %d Oktette" % (name, jetzt))
+                    print("foto %s %d Oktette" % (name, now))
                     return True
             else:
-                ruhig, letzte = 0, jetzt
+                ruhig, letzte = 0, now
         print("foto %s FEHLGESCHLAGEN" % name)
         return False
 
@@ -421,15 +421,15 @@ class Fahrer:
             while time.time() < bis:
                 time.sleep(0.1)
                 try:
-                    jetzt = os.path.getsize(pth)
+                    now = os.path.getsize(pth)
                 except OSError:
                     continue
-                if jetzt == letzte and jetzt > 0:
+                if now == letzte and now > 0:
                     ruhig += 1
                     if ruhig >= 2:
                         break
                 else:
-                    ruhig, letzte = 0, jetzt
+                    ruhig, letzte = 0, now
             else:
                 print("serie %s FAILED at %s" % (name, pth))
                 self.leeren()
@@ -522,13 +522,13 @@ class Fahrer:
             fen = []
             k = t.rfind("wm: fenliste")
             tt = t[k:] if k >= 0 else t
-            letzter = []
+            last_2 = []
             for m in re.finditer(r"wm: fen i=(\d+) id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) lay=\d+ "
                                  r"fl=(\d+) z=(\d+) [^\n]*? bar=(\d+) capw=(\d+) fr=(\d+)", tt):
                 x_, y_, w_, h_, fl_, z_, bar_, capw_, fr_ = (int(v) for v in m.groups()[1:])
                 if fl_ & 1 == 0:
-                    letzter.append((x_, y_, w_, h_, z_, bar_, capw_, fr_))
-            fen = letzter
+                    last_2.append((x_, y_, w_, h_, z_, bar_, capw_, fr_))
+            fen = last_2
             if not fen:
                 return None
             x, y, w, h, z, bar, capw, fr = max(fen, key=lambda r: r[4])
@@ -580,8 +580,8 @@ class Fahrer:
             return (int(g.group(1)) + int(m.group(1)), int(g.group(2)) + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name in ("qstm", "qsset"):
-            wort = "tm" if name == "qstm" else "set"
-            m = letzte(r"qs: zeile %s y=(\d+) h=(\d+)" % wort)
+            word_2 = "tm" if name == "qstm" else "set"
+            m = letzte(r"qs: zeile %s y=(\d+) h=(\d+)" % word_2)
             g = letzte(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
                 return None
@@ -596,27 +596,27 @@ class Fahrer:
         gm = letzte(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
         if name.startswith("pin") and not name[3:].isdigit():
-            wort = name[3:]
-            alle = list(re.finditer(
-                r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % wort, t))
-            if not alle or tb is None:
+            word_2 = name[3:]
+            all_ = list(re.finditer(
+                r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word_2, t))
+            if not all_ or tb is None:
                 return None
-            m = alle[-1]
+            m = all_[-1]
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("pin") and name[3:].isdigit():
             k = int(name[3:])
-            alle = list(re.finditer(
+            all_ = list(re.finditer(
                 r"taskbar: pin (\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t))
-            if not alle:
+            if not all_:
                 return None
-            letzter = alle[-1].group(1)
+            last_2 = all_[-1].group(1)
             n = 1
-            for m2 in reversed(alle[:-1]):
-                if m2.group(1) == letzter:
+            for m2 in reversed(all_[:-1]):
+                if m2.group(1) == last_2:
                     break
                 n += 1
-            letzten = alle[-n:]
+            letzten = all_[-n:]
             if k >= len(letzten):
                 return None
             m = letzten[k]
@@ -778,10 +778,10 @@ class Fahrer:
             ax, ay = int(m.group(5)), int(m.group(6))
             o = (ax - int(m.group(1)), ay - int(m.group(2)))
             x, y = int(m.group(1)), int(m.group(2))
-            reiter = 11
-            bx = x + (w * (2 * n + 1)) // (2 * reiter)
-            return (o[0] + bx - w // (2 * reiter), o[1] + y,
-                    w // reiter, h)
+            tab = 11
+            bx = x + (w * (2 * n + 1)) // (2 * tab)
+            return (o[0] + bx - w // (2 * tab), o[1] + y,
+                    w // tab, h)
         if name.startswith("srect"):
             k = name[5:]
             ms = letzte(r"settings: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % k)
@@ -802,8 +802,8 @@ class Fahrer:
             if m is None or z is None or o is None:
                 return None
             zh = int(z.group(1))
-            kopf = int(z.group(2)) if z.group(2) else zh + 4
-            y0 = int(m.group(2)) + kopf + 2 + n * zh
+            header = int(z.group(2)) if z.group(2) else zh + 4
+            y0 = int(m.group(2)) + header + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
         if name.startswith("fkante"):
             n = int(name[6:])
@@ -903,22 +903,22 @@ def main():
     sock, serial, out, buch = sys.argv[1:5]
     os.makedirs(out, exist_ok=True)
     f = Fahrer(sock, serial, out)
-    fehler = 0
+    error = 0
     base_gap = float(os.environ.get("DRIVE_TIPPE_GAP", "0.12"))
     tippe_gap = base_gap
     for roh in open(buch, encoding="utf-8"):
         z = roh.strip()
         if not z or z.startswith("#"):
             continue
-        teile = z.split(None, 1)
-        b = teile[0]
-        arg = teile[1].strip() if len(teile) > 1 else ""
+        parts_2 = z.split(None, 1)
+        b = parts_2[0]
+        arg = parts_2[1].strip() if len(parts_2) > 1 else ""
         if b == "killstarter":
             pids = re.findall(r"launcher: pid=(\d+)",
                               open(serial, errors="replace").read())
             if not pids:
                 print("killstarter: no launcher pid on the serial line")
-                fehler += 1
+                error += 1
                 continue
             b = "tippe"
             arg = "kill %s" % pids[-1]
@@ -928,7 +928,7 @@ def main():
                               open(serial, errors="replace").read())
             if not pids:
                 print("killlast: no started program on the serial line")
-                fehler += 1
+                error += 1
                 continue
             b = "tippe"
             arg = "kill %s" % pids[-1]
@@ -944,14 +944,14 @@ def main():
             ok = f.warteneu(muster, float(st[1]) if len(st) > 1 else 25.0)
             print("warteneu %s -> %s (%.2f s)" % (muster, "da" if ok else "NICHT DA", time.time() - t0))
             if not ok:
-                fehler += 1
+                error += 1
         elif b in ("warteauf", "warteaufmuss"):
             st = arg.split("||")
             muster = st[0].strip().strip("'\"")
             ok = f.warteauf(muster, float(st[1]) if len(st) > 1 else 25.0)
             print("warteauf %s -> %s" % (muster, "da" if ok else "NICHT DA"))
             if not ok:
-                fehler += 1
+                error += 1
                 if b == "warteaufmuss":
                     print("ABBRUCH: %s ist Voraussetzung" % muster)
                     break
@@ -965,7 +965,7 @@ def main():
             r = f.rechteck(arg)
             if r is None:
                 print("halteauf %s: kein Rechteck gemeldet" % arg)
-                fehler += 1
+                error += 1
             else:
                 f.fahre_nahe(r[0] + r[2] // 2, r[1] + r[3] // 2)
                 time.sleep(0.35)
@@ -999,7 +999,7 @@ def main():
             r = f.rechteck(arg)
             if r is None:
                 print("fahreauf %s -> KEIN RECHTECK GEMELDET" % arg)
-                fehler += 1
+                error += 1
                 continue
             x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             f.fahre_nahe(x, y)
@@ -1025,7 +1025,7 @@ def main():
                 tries += 1
             if r is None:
                 print("klicksuche %s -> KEIN RECHTECK GEMELDET" % name)
-                fehler += 1
+                error += 1
                 continue
             x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             print("klicksuche %s -> %d,%d  (rect %d,%d %dx%d, %d scrolls)" % (name, x, y, r[0], r[1], r[2], r[3], tries))
@@ -1039,7 +1039,7 @@ def main():
                 r = f.rechteck(arg)
             if r is None:
                 print("klickauf %s -> KEIN RECHTECK GEMELDET" % arg)
-                fehler += 1
+                error += 1
                 continue
             x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             print("klickauf %s -> %d,%d  (rect %d,%d %dx%d)"
@@ -1063,7 +1063,7 @@ def main():
             ra, rb = f.rechteck(t[0]), f.rechteck(t[1])
             if ra is None or rb is None:
                 print("ziehauf %s -> KEIN RECHTECK GEMELDET" % arg)
-                fehler += 1
+                error += 1
                 continue
             xa, ya = ra[0] + ra[2] // 2, ra[1] + ra[3] // 2
             xb, yb = rb[0] + rb[2] // 2, rb[1] + rb[3] // 2
@@ -1074,7 +1074,7 @@ def main():
             ra = f.rechteck(t[0])
             if ra is None:
                 print("ziehnach %s -> KEIN RECHTECK GEMELDET" % arg)
-                fehler += 1
+                error += 1
                 continue
             dx, dy = (int(v) for v in t[1].split(","))
             xa, ya = ra[0] + ra[2] // 2, ra[1] + ra[3] // 2
@@ -1087,12 +1087,12 @@ def main():
         elif b == "ziehkante":
             t = arg.split()
             wid = int(t[0])
-            kante = t[1]
+            edge = t[1]
             dx, dy = (int(v) for v in t[2].split(","))
             g = f.fenstergeom(wid)
             if g is None:
                 print("ziehkante %d -> KEINE GEOMETRIE gemeldet" % wid)
-                fehler += 1
+                error += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
             lx = wx
@@ -1101,26 +1101,26 @@ def main():
             uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
-            stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
+            pos_2 = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
                       "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
                       "lu": (lx, uy), "ru": (rx, uy)}
-            if kante not in stelle:
-                print("ziehkante: unbekannte Kante %s" % kante)
-                fehler += 1
+            if edge not in pos_2:
+                print("ziehkante: unbekannte Kante %s" % edge)
+                error += 1
                 continue
-            x0, y0 = stelle[kante]
+            x0, y0 = pos_2[edge]
             f.ziehe(x0, y0, x0 + dx, y0 + dy)
             print("dragedge id=%d %s from %d,%d by %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
-                  % (wid, kante, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
+                  % (wid, edge, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
         elif b == "fahrekante":
             t = arg.split()
             wid = int(t[0])
-            kante = t[1]
+            edge = t[1]
             g = f.fenstergeom(wid)
             if g is None:
                 print("fahrekante %d -> KEINE GEOMETRIE gemeldet" % wid)
-                fehler += 1
+                error += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
             lx = wx
@@ -1129,28 +1129,28 @@ def main():
             uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
-            stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
+            pos_2 = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
                       "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
                       "lu": (lx, uy), "ru": (rx, uy), "mitte": (mx, my),
                       "titel": (wx + bo + ww // 4, wy + bo + (ti - bo) // 2),
                       "aussen": (wx + ww + 2 * bo + 40 if wx + ww + 2 * bo + 40 < 1800 else max(wx - 40, 2), my)}
-            x0, y0 = stelle[kante]
+            x0, y0 = pos_2[edge]
             f.fahre(x0, y0)
-            print("fahrekante id=%d %s -> %d,%d" % (wid, kante, x0, y0))
+            print("fahrekante id=%d %s -> %d,%d" % (wid, edge, x0, y0))
         elif b == "kappe":
             t = arg.split()
             if t[0] == "fokus":
                 wid = f.fokus_id()
                 if wid is None:
                     print("kappe fokus -> KEIN FOKUS gemeldet")
-                    fehler += 1
+                    error += 1
                     continue
             else:
                 wid = int(t[0])
             g = f.fenstergeom(wid)
             if g is None:
                 print("kappe %d -> KEINE GEOMETRIE gemeldet" % wid)
-                fehler += 1
+                error += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
             tx = lies(f.serial)
@@ -1159,7 +1159,7 @@ def main():
                 pass
             if cm is None:
                 print("cap %d -> NO DIMENSIONS reported" % wid)
-                fehler += 1
+                error += 1
                 continue
             bar, capw, fr = (int(cm.group(i)) for i in (1, 2, 3))
             n = {"min": 0, "max": 1, "close": 2}[t[1]]
@@ -1174,7 +1174,7 @@ def main():
                 wid = f.fokus_id()
                 if wid is None:
                     print("ziehtitel fokus -> KEIN FOKUS gemeldet")
-                    fehler += 1
+                    error += 1
                     continue
             else:
                 wid = int(t[0])
@@ -1182,7 +1182,7 @@ def main():
             g = f.fenstergeom(wid)
             if g is None:
                 print("ziehtitel %d -> KEINE GEOMETRIE gemeldet" % wid)
-                fehler += 1
+                error += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
             x0 = wx + bo + ww // 2
@@ -1198,7 +1198,7 @@ def main():
                 r = f.rechteck(arg)
                 if r is None:
                     print("klicknah %s -> KEIN RECHTECK GEMELDET" % arg)
-                    fehler += 1
+                    error += 1
                     continue
                 x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             f.klick_nahe(x, y)
@@ -1208,7 +1208,7 @@ def main():
             r = f.rechteck(t[0])
             if r is None:
                 print("ziehemitte %s -> KEIN RECHTECK GEMELDET" % t[0])
-                fehler += 1
+                error += 1
                 continue
             dx, dy = (int(v) for v in t[1].split(","))
             x0, y0 = r[0] + r[2] // 2, r[1] + r[3] // 2
@@ -1220,7 +1220,7 @@ def main():
             r = f.rechteck(t[0])
             if r is None:
                 print("zieheauf %s -> KEIN RECHTECK GEMELDET" % t[0])
-                fehler += 1
+                error += 1
                 continue
             dx, dy = (int(v) for v in t[1].split(","))
             x0, y0 = r[0] + r[2] - 2, r[1] + r[3] - 2
@@ -1237,7 +1237,7 @@ def main():
             g = f.fenstergeom(wid)
             if g is None:
                 print("schleppfoto %d -> NO GEOMETRY reported" % wid)
-                fehler += 1
+                error += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
             print("schleppfoto: geom %d,%d %dx%d bo=%d ti=%d" % (wx, wy, ww, wh, bo, ti))
@@ -1253,7 +1253,7 @@ def main():
             g = f.fenstergeom(wid)
             if g is None:
                 print("schleppschnell %d -> NO GEOMETRY reported" % wid)
-                fehler += 1
+                error += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
             x0, y0 = wx + bo + ww // 3, wy + ti // 2
@@ -1278,7 +1278,7 @@ def main():
             r = f.rechteck(t[0])
             if r is None:
                 print("ziehfoto %s -> KEIN RECHTECK GEMELDET" % t[0])
-                fehler += 1
+                error += 1
                 continue
             dx = int(t[1])
             x0 = r[0] + r[2] // 2
@@ -1291,7 +1291,7 @@ def main():
             r = f.rechteck(t[0])
             if r is None:
                 print("ziehspurnah %s -> KEIN RECHTECK GEMELDET" % t[0])
-                fehler += 1
+                error += 1
                 continue
             p0, p1 = (int(v) for v in t[1].split(","))
             y = r[1] + r[3] // 2
@@ -1306,7 +1306,7 @@ def main():
             if r0 is None or r1 is None:
                 print("ziehvon %s -> KEIN RECHTECK GEMELDET (%s=%s %s=%s)"
                       % (arg, t[0], r0, t[1], r1))
-                fehler += 1
+                error += 1
                 continue
             x0, y0 = r0[0] + r0[2] // 2, r0[1] + r0[3] // 2
             x1, y1 = r1[0] + r1[2] // 2, r1[1] + r1[3] // 2
@@ -1321,7 +1321,7 @@ def main():
                 r0 = f.rechteck(t[0])
                 if r0 is None:
                     print("ziehhalt %s -> KEIN RECHTECK GEMELDET" % t[0])
-                    fehler += 1
+                    error += 1
                     continue
                 x0, y0 = r0[0] + r0[2] // 2, r0[1] + r0[3] // 2
             x1, y1 = (int(v) for v in t[1].split(","))
@@ -1336,7 +1336,7 @@ def main():
             r = f.rechteck(t[0])
             if r is None:
                 print("ziehespur %s -> KEIN RECHTECK GEMELDET" % t[0])
-                fehler += 1
+                error += 1
                 continue
             p0, p1 = (int(v) for v in t[1].split(","))
             y = r[1] + r[3] // 2
@@ -1352,11 +1352,11 @@ def main():
                 print("extern rc=%d %s" % (rc.returncode, (rc.stdout + rc.stderr).strip()[:200]))
             except subprocess.TimeoutExpired:
                 print("extern TIMEOUT: %s" % arg)
-                fehler += 1
+                error += 1
         elif b == "taste":
             f.taste(arg)
         elif b == "tippe":
-            namen = {" ": "spc", "-": "minus", ".": "dot",
+            names_2 = {" ": "spc", "-": "minus", ".": "dot",
                      ",": "comma", "/": "slash", "_": "shift-minus",
                      ":": "shift-semicolon", ";": "semicolon",
                      "=": "equal", "+": "shift-equal", "?": "shift-slash",
@@ -1364,7 +1364,7 @@ def main():
             if any(arg[i] == arg[i + 1] for i in range(len(arg) - 1)):
                 tippe_gap = max(tippe_gap, 0.4)
             for ch in arg:
-                f.taste(namen.get(ch, "shift-" + ch.lower() if ch.isalpha() and ch.isupper() else ch))
+                f.taste(names_2.get(ch, "shift-" + ch.lower() if ch.isalpha() and ch.isupper() else ch))
                 time.sleep(tippe_gap)
             tippe_gap = base_gap
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))
@@ -1373,16 +1373,16 @@ def main():
                 sf.write("%d\t%.1f\t%s\n" % (len(lies(f.serial)), time.time(), arg))
         elif b == "foto":
             if not f.foto(arg):
-                fehler += 1
+                error += 1
         elif b == "serie":
             sp = arg.split()
             sm, sn, snm = sp[0], sp[1], sp[2]
             if not f.serie(sm, int(sn), snm, pace_ms=int(sp[3]) if len(sp) > 3 else 0):
-                fehler += 1
+                error += 1
         else:
             print("unbekannter Befehl: %s" % z)
-            fehler += 1
-    print("drehbuch fertig, fehler=%d" % fehler)
+            error += 1
+    print("drehbuch fertig, fehler=%d" % error)
     return 0
 
 

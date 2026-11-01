@@ -42,7 +42,7 @@ class Screen:
         self.zellen.pop(0)
         self.zellen.append([' '] * self.w)
 
-    def zeichen(self, c):
+    def char(self, c):
         if self.x >= self.w:
             self.x = 0
             self.y += 1
@@ -68,7 +68,7 @@ class Screen:
         elif o == 9:
             n = 8 - (self.x & 7)
             for _ in range(n):
-                self.zeichen(' ')
+                self.char(' ')
 
     def wische(self, y0, x0, y1, x1):
         y = y0
@@ -126,7 +126,7 @@ class Screen:
                 elif o in (8, 9, 10, 13):
                     self.steuer(o)
                 elif 32 <= o <= 126:
-                    self.zeichen(chr(o))
+                    self.char(chr(o))
             elif self.state == 1:
                 if o == 91:
                     self.state = 2

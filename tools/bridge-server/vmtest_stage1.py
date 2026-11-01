@@ -17,9 +17,9 @@ def api(path, obj=None):
 def warum():
     g = api("/bruecke/warum?geraet=" + DEV)["geraete"]
     return g[0] if g else {}
-def job(art, wert="", ziel="", timeout=60):
+def job(art, value_2="", ziel="", timeout=60):
     t0 = time.time()
-    r = api("/bruecke/auftrag", {"geraet": DEV, "art": art, "wert": wert, "ziel": ziel, "ttl_s": 300})
+    r = api("/bruecke/auftrag", {"geraet": DEV, "art": art, "wert": value_2, "ziel": ziel, "ttl_s": 300})
     aid = r["id"]
     end = time.time() + timeout
     while time.time() < end:

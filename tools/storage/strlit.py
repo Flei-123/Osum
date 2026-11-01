@@ -55,7 +55,7 @@ def main(argv):
         if not m:
             aus.append(z)
             continue
-        kopf, will, lit, schwanz = (m.group(1), int(m.group(2)),
+        header, will, lit, tail = (m.group(1), int(m.group(2)),
                                     m.group(3), m.group(4))
         ist = oktette(lit)
         if ist > will:
@@ -65,7 +65,7 @@ def main(argv):
         if ist == will:
             aus.append(z)
             continue
-        aus.append('%s"%s"%s' % (kopf, lit + "\\0" * (will - ist), schwanz))
+        aus.append('%s"%s"%s' % (header, lit + "\\0" * (will - ist), tail))
         geaendert += 1
     for nr, ist, will, lit in zu_lang:
         print("%s:%d: %d octets, but [u8; %d] -- too long: %s"

@@ -182,9 +182,9 @@ class Fs:
     def _deck(self, b):
         noetig = (b + 1) * BS
         if len(self.d) < noetig:
-            neu = max(noetig, len(self.d) * 2, len(self.d) + (1 << 20))
-            neu = min(neu, self.blocks * BS)
-            self.d.extend(bytes(neu - len(self.d)))
+            new = max(noetig, len(self.d) * 2, len(self.d) + (1 << 20))
+            new = min(new, self.blocks * BS)
+            self.d.extend(bytes(new - len(self.d)))
 
     @property
     def directs(self):
@@ -464,16 +464,16 @@ class Fs:
             c = self._dc = {}
         got = c.get(dirino)
         if got is None:
-            namen = {}
+            names = {}
             frei = None
             n = self.dir_entries(dirino)
             for i in range(n):
                 ino, name = self.entry(dirino, i)
                 if ino:
-                    namen[name] = ino
+                    names[name] = ino
                 elif frei is None:
                     frei = i
-            got = c[dirino] = [namen, n if frei is None else frei]
+            got = c[dirino] = [names, n if frei is None else frei]
         return got
 
     def dir_find(self, dirino, name):
@@ -856,8 +856,8 @@ def main(argv):
             if len(parts) > 2 and parts[2] != "":
                 gid = int(parts[2])
         if "->" in spec:
-            pfad, _, ziel = spec.partition("->")
-            fs.symlink(pfad, ziel)
+            pfad, _, target_2 = spec.partition("->")
+            fs.symlink(pfad, target_2)
             continue
         if spec.endswith("/"):
             fs.mkdir(spec[:-1], 0o755 if mode is None else mode, uid, gid)

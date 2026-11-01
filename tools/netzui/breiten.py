@@ -26,7 +26,7 @@ def lies(pfad):
                 aus[m.group(1)] = m.group(2)
     return aus
 
-def pruef(pfad):
+def check(pfad):
     k = lies(pfad)
     fehlt = [n for n in ("heading", "linkspeed", "down", "up", "total",
                          "rtt", "unknown", "connected", "disconnected",
@@ -55,25 +55,25 @@ def pruef(pfad):
     zeilen.append(("Antwortzeit/Zahl", g("rtt") + VALUES["ms"], LEFT))
     zeilen.append(("Fussnote", g("note"), RIGHT))
 
-    schlecht = 0
+    bad = 0
     for name, text, limit in zeilen:
         w = breite(text)
         state = "ok      "
         if w > limit:
             state = "ZU BREIT"
-            schlecht += 1
+            bad += 1
         print("  %s %4d/%d  %-26s %s" % (state, w, limit, name, text))
-    return schlecht
+    return bad
 
 def main():
     pfade = sys.argv[1:] or ["locale/de/messages", "locale/en/messages"]
-    schlecht = 0
+    bad = 0
     for p in pfade:
         print("== %s ==" % p)
-        schlecht += pruef(p)
+        bad += check(p)
     print()
-    if schlecht:
-        print("WIDTHS: %d row(s) overflow their column" % schlecht)
+    if bad:
+        print("WIDTHS: %d row(s) overflow their column" % bad)
         return 1
     print("WIDTHS: all rows fit their column")
     return 0

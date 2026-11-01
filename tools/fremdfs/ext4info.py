@@ -94,8 +94,8 @@ class Ext4:
         noetig -- lineare Eintraege reichen, htree-Verzeichnisse haben
         dieselben linearen Bloecke darunter."""
         ino = 2
-        for teil in [t for t in pfad.split('/') if t]:
-            ino = self._entry(ino, teil)
+        for part in [t for t in pfad.split('/') if t]:
+            ino = self._entry(ino, part)
             if ino is None:
                 return None
         return ino
@@ -126,7 +126,7 @@ class Ext4:
                 yield from self._blatt(self.block(lo | (hi << 32)))
 
     def _entry(self, dir_ino, name):
-        ziel = name.encode()
+        target = name.encode()
         for b in self._bloecke_von(dir_ino):
             daten = self.block(b)
             off = 0
@@ -134,7 +134,7 @@ class Ext4:
                 ino, rec, nlen, _ = struct.unpack_from('<IHBB', daten, off)
                 if rec < 8:
                     break
-                if ino and daten[off + 8:off + 8 + nlen] == ziel:
+                if ino and daten[off + 8:off + 8 + nlen] == target:
                     return ino
                 off += rec
         return None

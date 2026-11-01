@@ -84,14 +84,14 @@ def bloecke(pfad):
 
 
 def index_names(speicher):
-    namen = set()
+    names = set()
     p = os.path.join(speicher, "INDEX")
     if not os.path.exists(p):
-        return namen
+        return names
     for z in open(p, "rb").read().split(b"\n"):
         if len(z) >= 64:
-            namen.add(z[:64].decode("ascii", "replace").lower())
-    return namen
+            names.add(z[:64].decode("ascii", "replace").lower())
+    return names
 
 
 def main():
@@ -110,16 +110,16 @@ def main():
             modus.append(a)
 
     marke = b"GEHEIMNIS-4711"
-    alle = b""
+    all_ = b""
     dateien = []
     for f in sorted(os.listdir(speicher)):
         p = os.path.join(speicher, f)
         if os.path.isfile(p):
             dateien.append(f)
-            alle += open(p, "rb").read()
+            all_ += open(p, "rb").read()
     print("  the memory: %s, %d octets together"
-          % (", ".join(dateien), len(alle)))
-    eq("(b) der Klartext steht NICHT im Speicher", marke in alle, False)
+          % (", ".join(dateien), len(all_)))
+    eq("(b) der Klartext steht NICHT im Speicher", marke in all_, False)
     eq("(b) und auch nicht als Dateiname",
            any(marke.decode() in f for f in dateien), False)
     imbaum = False
@@ -128,13 +128,13 @@ def main():
             if marke in open(os.path.join(wurzel, f), "rb").read():
                 imbaum = True
     eq("(b) GEGENPROBE: im Klartextbaum steht sie sehr wohl", imbaum, True)
-    namen = index_names(speicher)
-    eq("(b) der Index hat Namen", len(namen) > 0, True)
+    names = index_names(speicher)
+    eq("(b) der Index hat Namen", len(names) > 0, True)
 
-    kopf = os.path.join(speicher, "KOPF")
+    header = os.path.join(speicher, "KOPF")
     felder = {}
-    if os.path.exists(kopf):
-        for z in open(kopf, "rb").read().split(b"\n"):
+    if os.path.exists(header):
+        for z in open(header, "rb").read().split(b"\n"):
             t = z.split()
             if len(t) == 2:
                 felder[t[0].decode("ascii", "replace")] = t[1].decode(
@@ -162,7 +162,7 @@ def main():
         t = 0
         for f in dateien:
             for b in bloecke(f):
-                if hashlib.sha256(b).hexdigest() in namen:
+                if hashlib.sha256(b).hexdigest() in names:
                     t += 1
                     break
         return t
@@ -171,7 +171,7 @@ def main():
         t = 0
         for f in dateien:
             for b in bloecke(f):
-                if pyhmac.new(KN, b, hashlib.sha256).hexdigest() in namen:
+                if pyhmac.new(KN, b, hashlib.sha256).hexdigest() in names:
                     t += 1
                     break
         return t
@@ -199,7 +199,7 @@ def main():
            t, len(habe))
     eq("(c) und haette die fremden Dateien NICHT gemeldet", tn, 0)
 
-    n_bloecke = len(namen)
+    n_bloecke = len(names)
     groessen = set()
     idx = os.path.join(speicher, "INDEX")
     if os.path.exists(idx):

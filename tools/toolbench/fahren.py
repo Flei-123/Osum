@@ -110,26 +110,26 @@ class Monitor:
             self.cmd("sendkey %s" % keys.get(ch, ch), 0.15)
         time.sleep(0.6)
 
-    def foto(self, ziel, frist=25.0):
-        if os.path.exists(ziel):
-            os.unlink(ziel)
-        self.cmd("screendump %s" % ziel, 0.2)
+    def foto(self, target, frist=25.0):
+        if os.path.exists(target):
+            os.unlink(target)
+        self.cmd("screendump %s" % target, 0.2)
         letzte = -1
         ruhig = 0
         bis = time.time() + frist
         while time.time() < bis:
             time.sleep(0.15)
             try:
-                jetzt = os.path.getsize(ziel)
+                now = os.path.getsize(target)
             except OSError:
                 continue
-            if jetzt == letzte and jetzt > 0:
+            if now == letzte and now > 0:
                 ruhig += 1
                 if ruhig >= 3:
-                    return jetzt
+                    return now
             else:
                 ruhig = 0
-            letzte = jetzt
+            letzte = now
         return 0
 
 
@@ -144,9 +144,9 @@ def target_einmal(serial, worte):
 def target_get(serial, worte, frist=12.0):
     bis = time.time() + frist
     while True:
-        p, fehler = target_einmal(serial, worte)
+        p, error = target_einmal(serial, worte)
         if p is not None or time.time() >= bis:
-            return p, fehler
+            return p, error
         time.sleep(0.5)
 
 
@@ -178,45 +178,45 @@ def main(argv):
         z = roh.strip()
         if not z or z.startswith("#"):
             continue
-        teile = z.split()
-        was = teile[0]
+        parts = z.split()
+        was = parts[0]
         if was == "warte":
-            time.sleep(float(teile[1]))
+            time.sleep(float(parts[1]))
         elif was == "warteauf":
-            ok = wait_auf(serial, teile[1], int(teile[2]), float(teile[3]))
-            print("plan: warteauf %s >=%s -> %s" % (teile[1], teile[2], "ok" if ok else "TIMEOUT"))
+            ok = wait_auf(serial, parts[1], int(parts[2]), float(parts[3]))
+            print("plan: warteauf %s >=%s -> %s" % (parts[1], parts[2], "ok" if ok else "TIMEOUT"))
         elif was == "marke":
-            print("plan: %s" % " ".join(teile[1:]))
+            print("plan: %s" % " ".join(parts[1:]))
         elif was == "klick":
-            x, y = (int(v) for v in teile[1].split(","))
+            x, y = (int(v) for v in parts[1].split(","))
             m.klick(x, y)
             print("plan: klick %d,%d" % (x, y))
         elif was in ("ziel", "rziel"):
-            p, fehler = target_get(serial, teile[1:])
+            p, error = target_get(serial, parts[1:])
             if p is None:
                 print("plan: TARGET NOT FOUND: %s -- %s"
-                      % (" ".join(teile[1:]), fehler))
+                      % (" ".join(parts[1:]), error))
             else:
                 x, y = (int(v) for v in p.split(","))
                 if was == "rziel":
                     m.rklick(x, y)
                 else:
                     m.klick(x, y)
-                print("plan: %s %s -> %d,%d" % (was, " ".join(teile[1:]), x, y))
+                print("plan: %s %s -> %d,%d" % (was, " ".join(parts[1:]), x, y))
         elif was == "rklick":
-            x, y = (int(v) for v in teile[1].split(","))
+            x, y = (int(v) for v in parts[1].split(","))
             m.rklick(x, y)
             print("plan: rklick %d,%d" % (x, y))
         elif was == "tippe":
-            m.tippe(teile[1])
-            print("plan: tippe %s" % teile[1])
+            m.tippe(parts[1])
+            print("plan: tippe %s" % parts[1])
         elif was == "taste":
-            m.cmd("sendkey %s" % teile[1], 0.2)
+            m.cmd("sendkey %s" % parts[1], 0.2)
             time.sleep(0.5)
-            print("plan: taste %s" % teile[1])
+            print("plan: taste %s" % parts[1])
         elif was == "foto":
-            n = m.foto(os.path.join(out, teile[1] + ".ppm"))
-            print("plan: foto %s (%d Oktette)" % (teile[1], n))
+            n = m.foto(os.path.join(out, parts[1] + ".ppm"))
+            print("plan: foto %s (%d Oktette)" % (parts[1], n))
         else:
             print("plan: unbekannter Schritt '%s'" % was)
         sys.stdout.flush()

@@ -129,17 +129,17 @@ def check_color(bild, r, g, bl, n, ramp):
         if (r, g, bl) == (qb, qg, qr) and qr != qb:
             rot = qn
             break
-    kurz = bild.split("/")[-1]
+    short = bild.split("/")[-1]
     if rot:
-        print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
+        print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  = {rot} MIT VERTAUSCHTEM R UND B")
         BEFUND["vertauscht"] += 1
         BEFUND["fehler"] += 1
     elif bd <= 6:
-        print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
+        print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  = {nm}  OK")
     else:
-        print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
+        print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
               f"  naechste Stufe {nm} +{bd} -- in keiner Rampe")
 
 
@@ -156,7 +156,7 @@ def main():
 
     print(f"== FARBTON GEGEN {scheme}.scheme ({mode}) ==")
     print()
-    fehler = 0
+    error = 0
     vertauscht = 0
     for b in bilder:
         im = Image.open(b).convert("RGB")
@@ -179,19 +179,19 @@ def main():
             if (r, g, bl) == (qb, qg, qr) and qr != qb:
                 rot = qn
                 break
-        kurz = b.split("/")[-1]
+        short = b.split("/")[-1]
         if rot:
-            print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
+            print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d})"
                   f"  = {rot} MIT VERTAUSCHTEM R UND B")
             vertauscht += 1
-            fehler += 1
+            error += 1
         elif bd <= 6:
-            print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
+            print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d})"
                   f"  = {nm} (Abweichung {bd})  OK")
         else:
-            print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
+            print(f"  {short:26s} RGB({r:3d},{g:3d},{bl:3d})"
                   f"  naechste Stufe {nm} +{bd} -- IN KEINER RAMPE")
-            fehler += 1
+            error += 1
 
     print()
     print("== DER AKZENT ==")
@@ -209,14 +209,14 @@ def main():
                     if abs(q[0] - soll[0]) + abs(q[1] - soll[1]) \
                             + abs(q[2] - soll[2]) <= 8:
                         c[q] += 1
-            kurz = b.split("/")[-1]
+            short = b.split("/")[-1]
             if c:
                 (ar, ag, ab), an = c.most_common(1)[0]
-                print(f"  {kurz:26s} RGB({ar:3d},{ag:3d},{ab:3d})"
+                print(f"  {short:26s} RGB({ar:3d},{ag:3d},{ab:3d})"
                       f" {an:6d} Punkte  OK")
             elif aufgehellt(px, w, h, soll) is not None:
                 t, gf = aufgehellt(px, w, h, soll)
-                print(f"  {kurz:26s} RGB{gf} = accent at {t*100:.0f} %"
+                print(f"  {short:26s} RGB{gf} = accent at {t*100:.0f} %"
                       f" gegen Weiss gemischt  OK")
             else:
                 gedreht = (soll[2], soll[1], soll[0])
@@ -228,14 +228,14 @@ def main():
                                 + abs(q[2] - gedreht[2]) <= 8:
                             c2 += 1
                 if c2 > 20:
-                    print(f"  {kurz:26s} AKZENT VERTAUSCHT:"
+                    print(f"  {short:26s} AKZENT VERTAUSCHT:"
                           f" RGB{gedreht} {c2} Punkte")
-                    fehler += 1
+                    error += 1
                     vertauscht += 1
                 else:
-                    print(f"  {kurz:26s} no accent in the image")
+                    print(f"  {short:26s} no accent in the image")
 
-    fehler += BEFUND["fehler"]
+    error += BEFUND["fehler"]
     vertauscht += BEFUND["vertauscht"]
     print()
     if vertauscht:
@@ -246,8 +246,8 @@ def main():
         print("kernel/user/fuib.fi (`kanal_dreh`) -- and ONLY there, because")
         print("paint/canvas.fi is the shared library.")
         return 1
-    if fehler:
-        print(f"HUE FAILED: {fehler} area(s) in no ramp.")
+    if error:
+        print(f"HUE FAILED: {error} area(s) in no ramp.")
         return 1
     print("FARBTON PASSED.")
     return 0

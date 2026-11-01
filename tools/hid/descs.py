@@ -302,11 +302,11 @@ BROKEN = [
 
 
 
-def bitset(buf, bit, wert, n=1):
+def bitset(buf, bit, value_2, n=1):
     """Ein Feld von n Bit ab `bit` setzen -- HID packt von der
     niedrigsten Stelle aus."""
     for k in range(n):
-        if (wert >> k) & 1:
+        if (value_2 >> k) & 1:
             buf[bit // 8 + (bit % 8 + k) // 8] |= 1 << ((bit % 8 + k) % 8)
     return buf
 
@@ -488,9 +488,9 @@ BERICHTE = [
 
 
 def i2c_res(adr, hz=400000, quelle=b"\\_SB.PCI0.I2C1\0"):
-    kopf = bytes([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01])
+    header = bytes([0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01])
     tdl = (6).to_bytes(2, "little")
-    rest = kopf + tdl + hz.to_bytes(4, "little") \
+    rest = header + tdl + hz.to_bytes(4, "little") \
         + adr.to_bytes(2, "little") + quelle
     return bytes([0x8E]) + len(rest).to_bytes(2, "little") + rest
 
@@ -509,12 +509,12 @@ def acpi_table(adressen, sig=b"DSDT"):
     koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])
     koerper += i2c_res(adressen[1], quelle=b"\\_SB.PCI0.I2C0\0")
     koerper += i2c_res(adressen[0])
-    kopf = bytearray(36)
-    kopf[0:4] = sig
-    kopf[4:8] = (36 + len(koerper)).to_bytes(4, "little")
-    kopf[8] = 2
-    kopf[10:16] = b"OSUMHD"
-    t = bytes(kopf) + bytes(koerper)
+    header = bytearray(36)
+    header[0:4] = sig
+    header[4:8] = (36 + len(koerper)).to_bytes(4, "little")
+    header[8] = 2
+    header[10:16] = b"OSUMHD"
+    t = bytes(header) + bytes(koerper)
     t = bytearray(t)
     t[9] = (-sum(t)) & 0xFF
     return bytes(t)
@@ -600,16 +600,16 @@ def zerlege(d):
     """(kopf, felder).  Bricht bei einer kaputten Beschreibung mit einer
     Fehlernummer ab -- und laesst stehen, was bis dahin erkannt wurde,
     genau wie kernel/drv/hid/hidrep.fi."""
-    kopf = {"ok": 0, "err": 0, "errat": 0, "felder": 0, "rids": 0, "hasid": 0,
+    header = {"ok": 0, "err": 0, "errat": 0, "felder": 0, "rids": 0, "hasid": 0,
             "top": 0, "art": 0, "bits": 0, "posten": 0, "tiefe": 0,
             "len": len(d), "ridtab": []}
     felder = []
     if len(d) == 0 or len(d) > 1024:
-        kopf["err"] = E_EMPTY
-        return kopf, felder
+        header["err"] = E_EMPTY
+        return header, felder
 
     gl = [0] * 10
-    stapel = []
+    stack = []
     ul, umin, umax, bereich = [], 0, 0, False
     rids = []
     p, tiefe, maxd, n = 0, 0, 0, 0
@@ -625,11 +625,11 @@ def zerlege(d):
         return len(rids) - 1
 
     def raus():
-        kopf["felder"] = len(felder)
-        kopf["rids"] = len(rids)
-        kopf["top"] = top
-        kopf["bits"] = rids[0][1] if rids else 0
-        kopf["ridtab"] = rids
+        header["felder"] = len(felder)
+        header["rids"] = len(rids)
+        header["top"] = top
+        header["bits"] = rids[0][1] if rids else 0
+        header["ridtab"] = rids
 
     try:
         while p < len(d):
@@ -668,17 +668,17 @@ def zerlege(d):
                     if data == 0 or data > 255:
                         raise Error(E_SIZE, start)
                     gl[8] = data
-                    kopf["hasid"] = 1
+                    header["hasid"] = 1
                 elif btag == 9:
                     gl[9] = data
                 elif btag == 10:
-                    if len(stapel) >= MAX_PUSH:
+                    if len(stack) >= MAX_PUSH:
                         raise Error(E_PUSH, start)
-                    stapel.append(list(gl))
+                    stack.append(list(gl))
                 elif btag == 11:
-                    if not stapel:
+                    if not stack:
                         raise Error(E_PUSH, start)
-                    gl = stapel.pop()
+                    gl = stack.pop()
 
             elif btype == 2:
                 if btag == 0:
@@ -737,17 +737,17 @@ def zerlege(d):
         if tiefe != 0:
             raise Error(E_NEST, len(d))
     except Error as f:
-        kopf["err"] = f.code
-        kopf["errat"] = f.pos
+        header["err"] = f.code
+        header["errat"] = f.pos
         raus()
-        return kopf, felder
+        return header, felder
 
-    kopf["ok"] = 1
+    header["ok"] = 1
     raus()
-    kopf["art"] = karte
-    kopf["posten"] = n
-    kopf["tiefe"] = maxd
-    return kopf, felder
+    header["art"] = karte
+    header["posten"] = n
+    header["tiefe"] = maxd
+    return header, felder
 
 
 
@@ -799,9 +799,9 @@ def firn():
     a("// Der Name, acht Zeichen in EINEM Wort -- so bleibt die Meldung")
     a("// lesbar, ohne dass eine Zeichenkettentabelle noetig waere.")
     a("fn name_of(i: u64) -> u64 {")
-    namen = ["0x%016X" % int.from_bytes((nm + "        ")[:8].encode("ascii"),
+    names_2 = ["0x%016X" % int.from_bytes((nm + "        ")[:8].encode("ascii"),
                                         "little") for nm, _ in ALL]
-    a("    var t: [u64; %d] = [%s]" % (len(ALL), ", ".join(namen)))
+    a("    var t: [u64; %d] = [%s]" % (len(ALL), ", ".join(names_2)))
     a("    if i >= N {")
     a("        return 0")
     a("    }")
@@ -847,8 +847,8 @@ def firn():
     a("fn word(i: u64) -> u64 {")
     a("    var t: [u64; %d] = [" % len(worte))
     for k in range(0, len(worte), 4):
-        stueck = ", ".join("0x%016X" % w for w in worte[k:k + 4])
-        a("        %s%s" % (stueck, "," if k + 4 < len(worte) else ""))
+        chunk = ", ".join("0x%016X" % w for w in worte[k:k + 4])
+        a("        %s%s" % (chunk, "," if k + 4 < len(worte) else ""))
     a("    ]")
     a("    if i >= NW {")
     a("        return 0")
@@ -1042,14 +1042,14 @@ def main():
     elif was == "felder":
         print("\n".join(field_lines()))
     elif was == "fehler":
-        schlecht = 0
+        bad = 0
         for nm, d, e in BROKEN:
             k, _ = zerlege(d)
             gut = (e == k["err"] and k["ok"] == 0)
-            schlecht += 0 if gut else 1
+            bad += 0 if gut else 1
             print("%-10s erwartet=%2d bekommen=%2d %s"
                   % (nm, e, k["err"], "ok" if gut else "FALSCH"))
-        return 1 if schlecht else 0
+        return 1 if bad else 0
     else:
         print(__doc__)
         return 1

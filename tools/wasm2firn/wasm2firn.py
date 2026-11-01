@@ -87,7 +87,7 @@ class Module:
         self.code = []
         self.data = []
         self.n_import_funcs = 0
-        self.namen = {}
+        self.names = {}
         self.read_2()
 
     def read_2(self):
@@ -98,8 +98,8 @@ class Module:
         while at < len(b):
             l = Leser(b, at)
             sid = l.u8()
-            groesse = l.uleb()
-            ende = l.at + groesse
+            size = l.uleb()
+            ende = l.at + size
             self.sektion(sid, Leser(b, l.at), ende)
             at = ende
 
@@ -181,8 +181,8 @@ class Module:
                         self.elemente.append((off, [l.uleb() for _ in range(n)]))
         elif sid == 10:
             for _ in range(l.uleb()):
-                groesse = l.uleb()
-                bis = l.at + groesse
+                size = l.uleb()
+                bis = l.at + size
                 lok = []
                 for _ in range(l.uleb()):
                     anz = l.uleb()
@@ -216,7 +216,7 @@ class Module:
                         if u == 1:
                             for _ in range(l.uleb()):
                                 idx = l.uleb()
-                                self.namen[idx] = l.name()
+                                self.names[idx] = l.name()
                         l.at = bis
             except Exception:
                 pass
@@ -341,8 +341,8 @@ def _ueberlesen(l, op):
 TURM_KENNUNG = 1000000
 
 
-def _in_dispatch_body(stapel, marke):
-    for x in reversed(stapel):
+def _in_dispatch_body(stack, marke):
+    for x in reversed(stack):
         if x.art == 'turm':
             return x.turm_brand == marke
         if x.art == 'loop' or (x.art == 'block' and x.loop):
@@ -350,8 +350,8 @@ def _in_dispatch_body(stapel, marke):
     return False
 
 
-def _dispatch_without_loop(stapel):
-    for x in reversed(stapel):
+def _dispatch_without_loop(stack):
+    for x in reversed(stack):
         if x.art == 'turm':
             return x.turm_brand
         if x.art == 'loop' or (x.art == 'block' and x.loop):
@@ -441,11 +441,11 @@ class Erzeuger:
         self.res = res
         self.fi = fi
 
-        kopf = 'fn %s(%s)%s {' % (
+        header = 'fn %s(%s)%s {' % (
             self.fname(fi),
             ', '.join('p%d: u64' % i for i in range(len(par))),
             ' -> u64' if res else '')
-        self.w(kopf)
+        self.w(header)
 
         for i in range(len(par)):
             self.w('    var l%d: u64 = p%d' % (i, i))
@@ -488,7 +488,7 @@ class Erzeuger:
         m = self.m
         l = Leser(code)
         sp = 0
-        stapel = [Block('func', 0, 0, res, 0)]
+        stack = [Block('func', 0, 0, res, 0)]
         self.marke = 0
         tiefe = 1
         unerreichbar = False
@@ -497,11 +497,11 @@ class Erzeuger:
             op = l.u8()
 
             if op == 0x0B:
-                b = stapel.pop()
+                b = stack.pop()
                 if b.art == 'func':
                     break
                 if b.art == 'turm':
-                    self.turm_ende(b, tiefe, stapel)
+                    self.turm_ende(b, tiefe, stack)
                     sp = b.stack_ein + len(b.res)
                     unerreichbar = False
                     continue
@@ -511,7 +511,7 @@ class Erzeuger:
                         self.e(tiefe, 'break')
                     self.e(tiefe - 1, '}')
                     if b.loop:
-                        self.nach_block(b, tiefe - 1, stapel)
+                        self.nach_block(b, tiefe - 1, stack)
                 else:
                     self.e(tiefe - 1, '}')
                 sp = b.stack_ein + len(b.res)
@@ -519,7 +519,7 @@ class Erzeuger:
                 continue
 
             if op == 0x05:
-                b = stapel[-1]
+                b = stack[-1]
                 b.hat_else = True
                 self.e(tiefe - 1, '} else {')
                 sp = b.stack_ein
@@ -531,7 +531,7 @@ class Erzeuger:
                 count_2, danach, arten = turm_messen(code, l.at - 1)
                 if count_2 > TURM_LIMIT or (count_2 >= 3 and tiefe >= TIEFE_DECKEL):
                     sp = self.turm_erzeugen(l, code, count_2, danach, sp,
-                                            stapel, tiefe, arten)
+                                            stack, tiefe, arten)
                     tiefe += 1
                     continue
                 l.at = remember
@@ -557,7 +557,7 @@ class Erzeuger:
                         self.e(tiefe - 1, '{')
                 sp += len(bpar)
                 b.stack_ein = sp - len(bpar)
-                stapel.append(b)
+                stack.append(b)
                 tiefe += 1
                 continue
 
@@ -565,7 +565,7 @@ class Erzeuger:
                 self.ueberspringen(l, op)
                 continue
 
-            sp, unerreichbar = self.cmd(l, op, sp, stapel, tiefe)
+            sp, unerreichbar = self.cmd(l, op, sp, stack, tiefe)
 
         if res:
             if sp >= 1:
@@ -573,12 +573,12 @@ class Erzeuger:
             else:
                 self.e(0, 'return 0')
 
-    def nach_block(self, b, tiefe, stapel=None):
+    def nach_block(self, b, tiefe, stack=None):
         if not self.br_benutzt:
             return
         umschliesst = False
-        if stapel is not None:
-            for x in stapel:
+        if stack is not None:
+            for x in stack:
                 if x.art == 'loop' or (x.art == 'block' and x.loop) \
                         or x.art == 'turm':
                     umschliesst = True
@@ -596,7 +596,7 @@ class Erzeuger:
                 self.e(tiefe + 2, 'return')
             self.e(tiefe + 1, '}')
         else:
-            umg = stapel[-1] if stapel else None
+            umg = stack[-1] if stack else None
             if umg is not None and umg.art == 'loop':
                 self.e(tiefe + 1, 'if br_ziel == %d {' % target_tiefe)
                 self.e(tiefe + 2, 'br_ziel = -1')
@@ -608,7 +608,7 @@ class Erzeuger:
                 self.e(tiefe + 1, '}')
                 self.e(tiefe, '}')
                 return
-            m = _dispatch_without_loop(stapel) if stapel is not None else None
+            m = _dispatch_without_loop(stack) if stack is not None else None
             if m is not None:
                 self.e(tiefe + 1, 'if br_ziel == %d {' % target_tiefe)
                 self.e(tiefe + 2, 'br_ziel = -1')
@@ -625,7 +625,7 @@ class Erzeuger:
                        % target_tiefe)
         self.e(tiefe, '}')
 
-    def cmd(self, l, op, sp, stapel, tiefe):
+    def cmd(self, l, op, sp, stack, tiefe):
         m = self.m
         E = lambda s: self.e(tiefe - 1, s)
         M32 = '4294967295'
@@ -647,8 +647,8 @@ class Erzeuger:
             if op == 0x0D:
                 sp -= 1
                 bed = self.sv(sp)
-            ziel = stapel[len(stapel) - 1 - lab]
-            self.sprung(ziel, stapel, tiefe, bed, sp)
+            target = stack[len(stack) - 1 - lab]
+            self.sprung(target, stack, tiefe, bed, sp)
             return sp, (op == 0x0C)
         if op == 0x0E:
             n = l.uleb()
@@ -658,11 +658,11 @@ class Erzeuger:
             wahl = self.sv(sp)
             for i, lab in enumerate(ziele):
                 E('if %s == %d {' % (wahl, i))
-                z = stapel[len(stapel) - 1 - lab]
-                self.sprung(z, stapel, tiefe + 1, None, sp)
+                z = stack[len(stack) - 1 - lab]
+                self.sprung(z, stack, tiefe + 1, None, sp)
                 E('}')
-            z = stapel[len(stapel) - 1 - sonst]
-            self.sprung(z, stapel, tiefe, None, sp)
+            z = stack[len(stack) - 1 - sonst]
+            self.sprung(z, stack, tiefe, None, sp)
             return sp, True
 
         if op == 0x10:
@@ -670,12 +670,12 @@ class Erzeuger:
             par, res = m.typ_von(fi)
             sp -= len(par)
             args = ', '.join(self.sv(sp + i) for i in range(len(par)))
-            ziel = self.rufname(fi)
+            target = self.rufname(fi)
             if res:
-                E('%s = %s(%s)' % (self.sv(sp), ziel, args))
+                E('%s = %s(%s)' % (self.sv(sp), target, args))
                 sp += 1
             else:
-                E('%s(%s)' % (ziel, args))
+                E('%s(%s)' % (target, args))
             return sp, False
         if op == 0x11:
             ti = l.uleb()
@@ -778,37 +778,37 @@ class Erzeuger:
 
         raise Error('opcode 0x%02x' % op)
 
-    def sprung(self, ziel, stapel, tiefe, bed, sp):
+    def sprung(self, target, stack, tiefe, bed, sp):
         E = lambda s: self.e(tiefe - 1, s)
-        innen = stapel[-1]
+        innen = stack[-1]
         if bed is not None:
             E('if %s != 0 {' % bed)
             tiefe += 1
             E = lambda s: self.e(tiefe - 1, s)
-        if ziel.art == 'turm':
-            E('fall%d = %d' % (ziel.turm_brand,
-                               0 if ziel.turm_loop else ziel.turm_fall))
-            if _in_dispatch_body(stapel, ziel.turm_brand):
+        if target.art == 'turm':
+            E('fall%d = %d' % (target.turm_brand,
+                               0 if target.turm_loop else target.turm_fall))
+            if _in_dispatch_body(stack, target.turm_brand):
                 E('continue')
             else:
                 self.br_benutzt = True
-                E('br_ziel = %d' % (TURM_KENNUNG + ziel.turm_brand))
+                E('br_ziel = %d' % (TURM_KENNUNG + target.turm_brand))
                 E('break')
-        elif ziel.art == 'func':
+        elif target.art == 'func':
             if self.res:
                 E('return %s' % self.sv(sp - 1))
             else:
                 E('return')
-        elif ziel is innen and ziel.art == 'loop':
+        elif target is innen and target.art == 'loop':
             E('continue')
-        elif ziel is innen and ziel.loop:
+        elif target is innen and target.loop:
             E('break')
         else:
             self.br_benutzt = True
-            if ziel.art == 'loop':
-                E('br_ziel = %d' % ziel.tiefe)
+            if target.art == 'loop':
+                E('br_ziel = %d' % target.tiefe)
             else:
-                E('br_ziel = %d' % ziel.tiefe)
+                E('br_ziel = %d' % target.tiefe)
             E('break')
         if bed is not None:
             tiefe -= 1
@@ -1001,7 +1001,7 @@ class Erzeuger:
         if op == 0xC4: return ein('sext32_64(%s)' % x)
         return None
 
-    def turm_erzeugen(self, l, code, count_2, danach, sp, stapel, tiefe, arten=None):
+    def turm_erzeugen(self, l, code, count_2, danach, sp, stack, tiefe, arten=None):
         self.br_benutzt = True
         self.im_turm = True
         self.turm_faelle = count_2
@@ -1018,16 +1018,16 @@ class Erzeuger:
             b.turm_brand = marke
             b.turm_fall = count_2 - k
             b.turm_loop = bool(arten[k]) if arten else False
-            stapel.append(b)
+            stack.append(b)
         l.at = danach
         return sp
 
-    def turm_ende(self, b, tiefe, stapel):
+    def turm_ende(self, b, tiefe, stack):
         self.e(tiefe + 1, 'fall%d = %d' % (b.turm_brand, b.turm_fall))
         self.e(tiefe + 1, 'continue')
         self.e(tiefe, '}')
         self.e(tiefe, 'if fall%d == %d {' % (b.turm_brand, b.turm_fall))
-        noch = [x for x in stapel if x.art == 'turm'
+        noch = [x for x in stack if x.art == 'turm'
                 and x.turm_brand == b.turm_brand]
         if not noch:
             self.e(tiefe + 1, 'break')
@@ -1137,14 +1137,14 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
     o.append('')
 
     o.append('// ================================= Die Importe (WASI)')
-    gesehen = set()
+    seen = set()
     for fi, (mod, nam, art, ti) in enumerate(m.importe):
         if art != 'func':
             continue
         nm = 'imp_%s' % secure(nam)
-        if nm in gesehen:
+        if nm in seen:
             continue
-        gesehen.add(nm)
+        seen.add(nm)
         par, res = m.typen[ti]
         args = ', '.join('a%d: u64' % i for i in range(len(par)))
         o.append('fn %s(%s)%s {' % (nm, args, ' -> u64' if res else ''))
@@ -1242,14 +1242,14 @@ def table_erzeugen(m, indirekte_typen=()):
         for idx, f in sorted(eintraege):
             if f < m.n_import_funcs:
                 mod, nam, art, mti = m.importe[f]
-                ziel = 'imp_%s' % secure(nam)
+                target = 'imp_%s' % secure(nam)
             else:
-                ziel = 'f%d' % f
+                target = 'f%d' % f
             if res:
-                o.append('    if idx == %d { return %s(%s) }' % (idx, ziel, ruf_args))
+                o.append('    if idx == %d { return %s(%s) }' % (idx, target, ruf_args))
             else:
                 o.append('    if idx == %d {' % idx)
-                o.append('        %s(%s)' % (ziel, ruf_args))
+                o.append('        %s(%s)' % (target, ruf_args))
                 o.append('        return')
                 o.append('    }')
         o.append('    tab_falle(idx)')
@@ -1277,8 +1277,8 @@ def start_erzeugen(m, name):
             continue
         o.append('static mut DATA%d: [u8; %d] = [' % (k, len(b)))
         for z in range(0, len(b), 32):
-            stueck = ', '.join(str(c) for c in b[z:z + 32])
-            o.append('    %s,' % stueck)
+            chunk = ', '.join(str(c) for c in b[z:z + 32])
+            o.append('    %s,' % chunk)
         o.append(']')
         o.append('')
     o.append('fn data_legen() {')
@@ -1324,10 +1324,10 @@ def start_erzeugen(m, name):
     o.append('    data_legen()')
     if m.start is not None:
         o.append('    f%d()' % m.start)
-    ziel = m.exporte.get('_start')
-    if ziel and ziel[0] == 0:
-        par, res = m.typ_von(ziel[1])
-        ruf = 'f%d()' % ziel[1]
+    target = m.exporte.get('_start')
+    if target and target[0] == 0:
+        par, res = m.typ_von(target[1])
+        ruf = 'f%d()' % target[1]
         if res:
             o.append('    let rc: u64 = %s' % ruf)
             o.append('    return rc as i32')

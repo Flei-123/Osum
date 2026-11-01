@@ -28,12 +28,12 @@ class FlachErzeuger:
 
         self.stuecke = {}
         self.n_chunk = 0
-        self.jetzt = self.neues_chunk()
+        self.now = self.neues_chunk()
 
         self.gebraucht = set()
 
         ende_funk = self.reservieren()
-        self.stapel = [Ebene('func', 0, ende_funk, 0, res)]
+        self.stack = [Ebene('func', 0, ende_funk, 0, res)]
 
         l = Leser(code)
         sp = 0
@@ -43,7 +43,7 @@ class FlachErzeuger:
             op = l.u8()
 
             if op == 0x0B:
-                b = self.stapel.pop()
+                b = self.stack.pop()
                 if b.art == 'func':
                     if not unerreichbar:
                         self.spring(b.ende)
@@ -59,7 +59,7 @@ class FlachErzeuger:
                 continue
 
             if op == 0x05:
-                b = self.stapel[-1]
+                b = self.stack[-1]
                 b.hat_else = True
                 if not unerreichbar:
                     self.spring(b.ende)
@@ -101,7 +101,7 @@ class FlachErzeuger:
                     e = Ebene('block', begin, ende, sp, bres)
                     self.set_chunk(begin)
                 sp += len(bpar)
-                self.stapel.append(e)
+                self.stack.append(e)
                 unerreichbar = False
                 continue
 
@@ -120,12 +120,12 @@ class FlachErzeuger:
                 if op == 0x0D:
                     sp -= 1
                     bed = erz.sv(sp)
-                ziel = self.stapel[len(self.stapel) - 1 - lab]
+                target = self.stack[len(self.stack) - 1 - lab]
                 if bed is None:
-                    self.br(ziel, sp)
+                    self.br(target, sp)
                     unerreichbar = True
                 else:
-                    self.br_bedingt(ziel, sp, bed)
+                    self.br_bedingt(target, sp, bed)
                 continue
 
             if op == 0x0E:
@@ -155,58 +155,58 @@ class FlachErzeuger:
     def set_chunk(self, nr):
         if nr not in self.stuecke:
             self.stuecke[nr] = []
-        self.jetzt = nr
+        self.now = nr
 
     def z(self, s):
-        self.stuecke[self.jetzt].append(s)
+        self.stuecke[self.now].append(s)
 
     def spring(self, nr):
         self.gebraucht.add(nr)
         self.z('fall = %d' % nr)
         self.z('continue')
 
-    def zielnummer(self, ziel):
-        if ziel.art == 'loop':
-            return ziel.begin
-        return ziel.ende
+    def zielnummer(self, target):
+        if target.art == 'loop':
+            return target.begin
+        return target.ende
 
-    def value_pan(self, ziel, sp):
-        if ziel.art == 'func':
+    def value_pan(self, target, sp):
+        if target.art == 'func':
             return
-        if not ziel.res:
+        if not target.res:
             return
-        if ziel.art == 'loop':
+        if target.art == 'loop':
             return
-        n = len(ziel.res)
+        n = len(target.res)
         for i in range(n):
             von = sp - n + i
-            nach = ziel.sp_ein + i
+            nach = target.sp_ein + i
             if von != nach:
                 self.z('%s = %s' % (self.erz.sv(nach), self.erz.sv(von)))
 
-    def br(self, ziel, sp):
-        if ziel.art == 'func':
+    def br(self, target, sp):
+        if target.art == 'func':
             self.rueckgabe(sp)
             return
-        self.value_pan(ziel, sp)
-        self.spring(self.zielnummer(ziel))
+        self.value_pan(target, sp)
+        self.spring(self.zielnummer(target))
 
-    def br_bedingt(self, ziel, sp, bed):
+    def br_bedingt(self, target, sp, bed):
         next_ = self.reservieren()
         self.gebraucht.add(next_)
-        if ziel.art == 'func':
+        if target.art == 'func':
             self.z('if %s != 0 {' % bed)
             self.rueckgabe_eingerueckt(sp, '    ')
             self.z('}')
             return
-        nr = self.zielnummer(ziel)
+        nr = self.zielnummer(target)
         self.gebraucht.add(nr)
         schiebe = []
-        if ziel.res and ziel.art != 'loop':
-            n = len(ziel.res)
+        if target.res and target.art != 'loop':
+            n = len(target.res)
             for i in range(n):
                 von = sp - n + i
-                nach = ziel.sp_ein + i
+                nach = target.sp_ein + i
                 if von != nach:
                     schiebe.append('%s = %s'
                                    % (self.erz.sv(nach), self.erz.sv(von)))
@@ -222,26 +222,26 @@ class FlachErzeuger:
 
     def br_table(self, wahl, ziele, sonst, sp):
         for i, lab in enumerate(ziele):
-            ziel = self.stapel[len(self.stapel) - 1 - lab]
+            target = self.stack[len(self.stack) - 1 - lab]
             self.z('if %s == %d {' % (wahl, i))
-            if ziel.art == 'func':
+            if target.art == 'func':
                 self.rueckgabe_eingerueckt(sp, '    ')
             else:
-                if ziel.res and ziel.art != 'loop':
-                    n = len(ziel.res)
+                if target.res and target.art != 'loop':
+                    n = len(target.res)
                     for k in range(n):
                         von = sp - n + k
-                        nach = ziel.sp_ein + k
+                        nach = target.sp_ein + k
                         if von != nach:
                             self.z('    %s = %s'
                                    % (self.erz.sv(nach), self.erz.sv(von)))
-                nr = self.zielnummer(ziel)
+                nr = self.zielnummer(target)
                 self.gebraucht.add(nr)
                 self.z('    fall = %d' % nr)
                 self.z('    continue')
             self.z('}')
-        ziel = self.stapel[len(self.stapel) - 1 - sonst]
-        self.br(ziel, sp)
+        target = self.stack[len(self.stack) - 1 - sonst]
+        self.br(target, sp)
 
     def rueckgabe(self, sp):
         if self.res:
@@ -278,7 +278,7 @@ class FlachErzeuger:
         return sp2, unerr
 
     def stack_fallback(self):
-        return self.stapel
+        return self.stack
 
     def ausgeben(self):
         o = []

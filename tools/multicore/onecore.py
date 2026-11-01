@@ -74,7 +74,7 @@ def main(argv):
             if nur and d != nur:
                 continue
             pfad = os.path.join(wurzel, d)
-            kurz = os.path.relpath(pfad, WURZEL)
+            short = os.path.relpath(pfad, WURZEL)
             roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
             zweite = [(z, page, buffer2(z))
                       for z, page in BASISZUGRIFF.findall(roh)]
@@ -88,14 +88,14 @@ def main(argv):
                                          for k in muster.findall(text)]
                 if not treffer:
                     continue
-                eintrag = (kurz, fn, sorted(set(treffer)))
-                if (kurz, fn) in MITWISSEN:
-                    mitwissen.append(eintrag)
+                entry = (short, fn, sorted(set(treffer)))
+                if (short, fn) in MITWISSEN:
+                    mitwissen.append(entry)
                     continue
                 if LOCK.search(text) or d in RUHIG:
-                    gesperrt.append(eintrag)
+                    gesperrt.append(entry)
                 else:
-                    offen.append(eintrag)
+                    offen.append(entry)
 
     if liste:
         print("== LOCKED: the buffer is used under a lock ==")

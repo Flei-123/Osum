@@ -100,12 +100,12 @@ UMZUG_COMMIT = {
 }
 
 
-def names_beim_umzug(ziel):
+def names_beim_umzug(target):
     """Die Funktionsnamen, die ZIEL beim Umzug schon hatte."""
-    c = UMZUG_COMMIT.get(ziel)
+    c = UMZUG_COMMIT.get(target)
     if not c:
         return set()
-    roh = subprocess.run(["git", "show", "%s:%s" % (c, ziel)],
+    roh = subprocess.run(["git", "show", "%s:%s" % (c, target)],
                          capture_output=True)
     if roh.returncode != 0:
         return set()
@@ -117,18 +117,18 @@ def main():
         print(__doc__)
         return 2
     basis = sys.argv[1]
-    schlecht = 0
-    for alt, neu, praefixe, new_names in UMZUEGE:
-        beim_umzug = names_beim_umzug(neu)
+    bad = 0
+    for alt, new, praefixe, new_names in UMZUEGE:
+        beim_umzug = names_beim_umzug(new)
         spaeter = 0
         roh = subprocess.run(["git", "show", "%s:%s" % (basis, alt)],
                              capture_output=True)
         if roh.returncode != 0:
-            print("  %s: %s does not exist in %s" % (neu, alt, basis))
-            schlecht += 1
+            print("  %s: %s does not exist in %s" % (new, alt, basis))
+            bad += 1
             continue
         A = funktionen(roh.stdout.decode("utf8", "replace"))
-        with open(neu, "rb") as f:
+        with open(new, "rb") as f:
             B = funktionen(f.read().decode("utf8", "replace"))
         eq = 0
         gone = 0
@@ -152,7 +152,7 @@ def main():
                 abweichend.append((name, "weicht ab"))
         ganz = len(B) - gone
         print("  %-22s %d of %d functions identical to %s"
-              % (neu.split("/")[-1], eq, ganz, alt.split("/")[-1]))
+              % (new.split("/")[-1], eq, ganz, alt.split("/")[-1]))
         if spaeter:
             print("      (%d functions exist only AFTER the move"
                   " entstanden und gehoeren nicht dazu)" % spaeter)
@@ -162,8 +162,8 @@ def main():
                 print("      %s: %s -- ERLAUBT: %s" % (name, warum, grund))
                 continue
             print("      %s: %s" % (name, warum))
-            schlecht += 1
-    return 1 if schlecht else 0
+            bad += 1
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

@@ -100,41 +100,41 @@ FORMEN = [
 
 
 def _schnitt(p1, p2, p3, p4):
-    def kreuz(o, a, b):
+    def cross(o, a, b):
         return ((a[0] - o[0]) * (b[1] - o[1])
                 - (a[1] - o[1]) * (b[0] - o[0]))
-    d1 = kreuz(p3, p4, p1)
-    d2 = kreuz(p3, p4, p2)
-    d3 = kreuz(p1, p2, p3)
-    d4 = kreuz(p1, p2, p4)
+    d1 = cross(p3, p4, p1)
+    d2 = cross(p3, p4, p2)
+    d3 = cross(p1, p2, p3)
+    d4 = cross(p1, p2, p4)
     return ((d1 > 1e-9 and d2 < -1e-9) or (d1 < -1e-9 and d2 > 1e-9)) and \
            ((d3 > 1e-9 and d4 < -1e-9) or (d3 < -1e-9 and d4 > 1e-9))
 
 
 def check(name, hot, pts):
-    fehler = []
+    error = []
     n = len(pts)
     if n < 3:
-        fehler.append("weniger als drei Ecken")
+        error.append("weniger als drei Ecken")
     for (x, y) in pts:
         if x < -0.01 or y < -0.01 or x > G + 0.01 or y > G + 0.01:
-            fehler.append("Ecke ausserhalb des Rasters: %.2f,%.2f" % (x, y))
+            error.append("Ecke ausserhalb des Rasters: %.2f,%.2f" % (x, y))
     for i in range(n):
         for j in range(i + 1, n):
             if j == i or (i == 0 and j == n - 1) or j == i + 1:
                 continue
             if _schnitt(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n]):
-                fehler.append("Kanten %d und %d kreuzen sich" % (i, j))
+                error.append("Kanten %d und %d kreuzen sich" % (i, j))
     a = 0.0
     for i in range(n):
         x1, y1 = pts[i]
         x2, y2 = pts[(i + 1) % n]
         a = a + (x1 * y2 - x2 * y1)
     if abs(a) < 1.0:
-        fehler.append("Flaeche ist null")
+        error.append("Flaeche ist null")
     if not (0 <= hot[0] <= G and 0 <= hot[1] <= G):
-        fehler.append("Griffpunkt ausserhalb")
-    return fehler, abs(a) / 2.0
+        error.append("Griffpunkt ausserhalb")
+    return error, abs(a) / 2.0
 
 
 def in_(pts, x, y):
@@ -151,17 +151,17 @@ def in_(pts, x, y):
     return ja
 
 
-def male(pts, groesse=24):
+def male(pts, size=24):
     S = 3
     zeilen = []
-    for r in range(groesse):
+    for r in range(size):
         z = ""
-        for c in range(groesse):
+        for c in range(size):
             t = 0
             for sy in range(S):
                 for sx in range(S):
-                    x = (c + (sx + 0.5) / S) * G / groesse
-                    y = (r + (sy + 0.5) / S) * G / groesse
+                    x = (c + (sx + 0.5) / S) * G / size
+                    y = (r + (sy + 0.5) / S) * G / size
                     if in_(pts, x, y):
                         t = t + 1
             if t == S * S:
@@ -177,27 +177,27 @@ def male(pts, groesse=24):
 
 
 def board():
-    kopf = []
+    header = []
     daten = []
     for (name, hot, pts) in FORMEN:
-        kopf.append((len(daten), len(pts),
+        header.append((len(daten), len(pts),
                      int(round(hot[0] * 4)), int(round(hot[1] * 4))))
         for (x, y) in pts:
             daten.append(int(round(x * 4)))
             daten.append(int(round(y * 4)))
-    return kopf, daten
+    return header, daten
 
 
 def esc(bs):
     return "".join("\\x%02x" % b for b in bs)
 
 
-def bauen(ziel):
-    kopf, daten = board()
+def bauen(target):
+    header, daten = board()
     for b in daten:
         assert 0 <= b <= 255, b
     kb = []
-    for (off, n, hx, hy) in kopf:
+    for (off, n, hx, hy) in header:
         assert off % 2 == 0
         assert off // 2 < 256 and n < 256
         kb += [off // 2, n, hx, hy]
@@ -208,28 +208,28 @@ def bauen(ziel):
     s = s.replace("@@PUNKTE@@", esc(daten))
     s = s.replace("@@PUNKTEN@@", str(len(daten)))
     s = s.replace("@@FORMEN@@", str(len(FORMEN)))
-    open(ziel, "w", encoding="utf-8").write(s)
+    open(target, "w", encoding="utf-8").write(s)
     print("%s geschrieben: %d Formen, %d Ecken, %d Oktette Tafel"
-          % (ziel, len(FORMEN), len(daten) // 2, len(kb) + len(daten)))
+          % (target, len(FORMEN), len(daten) // 2, len(kb) + len(daten)))
 
 
 def main():
-    schlecht = 0
+    bad = 0
     for (name, hot, pts) in FORMEN:
-        fehler, area = check(name, hot, pts)
+        error, area = check(name, hot, pts)
         print("== %s: %d Ecken, Flaeche %.1f Einheiten, Griff %.1f,%.1f"
               % (name, len(pts), area, hot[0], hot[1]))
         for z in male(pts, 24):
             print("   |" + z + "|")
-        for f in fehler:
+        for f in error:
             print("   FEHLER: " + f)
-            schlecht += 1
+            bad += 1
     if "--bauen" in sys.argv:
-        ziel = os.path.join(os.path.dirname(__file__), "..", "..",
+        target = os.path.join(os.path.dirname(__file__), "..", "..",
                             "kernel", "zeiger.fi")
-        bauen(os.path.normpath(ziel))
-    if schlecht:
-        print("%d Fehler" % schlecht)
+        bauen(os.path.normpath(target))
+    if bad:
+        print("%d Fehler" % bad)
         return 1
     print("all %d shapes pass the checks" % len(FORMEN))
     return 0

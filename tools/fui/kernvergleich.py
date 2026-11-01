@@ -90,7 +90,7 @@ def zeig(p, d, name):
 
 def main():
     alt = "--alt" in sys.argv
-    zeichen = [
+    char = [
         ("Minimieren",       fui_minimize, lambda d, sb, sk: wm_alt_min(d, sb)),
         ("Maximieren",       fui_maximize, lambda d, sb, sk: wm_alt_max(d, sb)),
         ("Wiederherstellen", fui_restore,  wm_alt_restore),
@@ -104,12 +104,12 @@ def main():
     print("what the old, self-painted version would have done differently.")
     print()
     print(f"{'uisc':>4} {'d':>3} {'sb':>3} | {'Char':<17} "
-          f"{'Points':>7} | {'neu!=fUi':>9} {'alt!=fUi':>9}")
+          f"{'Points':>7} | {'new!=fUi':>9} {'alt!=fUi':>9}")
     print("-" * 72)
     schlimm = 0
     for sk in (1, 2, 3, 4):
         d, sb = 10 * sk, sk
-        for name, ff, wf in zeichen:
+        for name, ff, wf in char:
             f = ff(d, sb)
             a = wf(d, sb, sk)
             d_new = 0

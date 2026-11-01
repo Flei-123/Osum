@@ -84,14 +84,14 @@ _BUF = re.compile(r'\[u8;\s*(\d+)\]')
 
 def loese(text):
     aus = []
-    neu = text
+    new = text
     for asc, uml in FALLBACK:
         if asc == uml:
             continue
-        if asc in neu:
-            neu = neu.replace(asc, uml)
+        if asc in new:
+            new = new.replace(asc, uml)
             aus.append((asc, uml))
-    return neu, aus
+    return new, aus
 
 
 def stellen(wurzel):
@@ -128,23 +128,23 @@ def bearbeite(pfad, zeilennummern, schreibe):
                 return '"' + new_inhalt + '"'
             return m.group(0)
 
-        neu = _STR.sub(ersetze_str, alt)
+        new = _STR.sub(ersetze_str, alt)
         if not funde:
             continue
         m_alt = _STR.search(alt)
-        m_new = _STR.search(neu)
+        m_new = _STR.search(new)
         if m_alt and m_new:
             d = len(m_new.group(1).encode("utf-8")) \
                 - len(m_alt.group(1).encode("utf-8"))
             if d:
-                mb = _BUF.search(neu)
+                mb = _BUF.search(new)
                 if mb:
-                    neu = (neu[:mb.start(1)] + str(int(mb.group(1)) + d)
-                           + neu[mb.end(1):])
-        if neu != alt:
-            zeilen[nr - 1] = neu
+                    new = (new[:mb.start(1)] + str(int(mb.group(1)) + d)
+                           + new[mb.end(1):])
+        if new != alt:
+            zeilen[nr - 1] = new
             geaendert += 1
-            bericht.append((nr, alt.strip(), neu.strip()))
+            bericht.append((nr, alt.strip(), new.strip()))
     if geaendert and schreibe:
         with open(pfad, "w", encoding="utf-8") as f:
             f.write("\n".join(zeilen))
@@ -154,11 +154,11 @@ def bearbeite(pfad, zeilennummern, schreibe):
 def main(argv):
     schreibe = "--schreibe" in argv
     wurzel = os.environ.get("OSUM_ROOT", ".")
-    ziel = [a for a in argv[1:] if not a.startswith("--")]
+    target = [a for a in argv[1:] if not a.startswith("--")]
     karte = stellen(wurzel)
-    if ziel:
+    if target:
         karte = {d: n for d, n in karte.items()
-                 if any(d.endswith(z) or z in d for z in ziel)}
+                 if any(d.endswith(z) or z in d for z in target)}
     ges = 0
     for datei in sorted(karte):
         pfad = os.path.join(wurzel, datei)

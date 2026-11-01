@@ -215,16 +215,16 @@ def randbreite(d):
     return mit
 
 
-FEHLER = []
+ERROR = []
 LINES = []
 
 
-def pruef(name, ist, soll, tol, einheit=""):
+def check_2(name, ist, soll, tol, einheit=""):
     ok = abs(ist - soll) <= tol
     LINES.append("  %-46s ist %8.2f%s  soll %8.2f  tol %.2f  %s"
                   % (name, ist, einheit, soll, tol, "OK" if ok else "FEHLER"))
     if not ok:
-        FEHLER.append(name)
+        ERROR.append(name)
     return ok
 
 
@@ -237,9 +237,9 @@ def main():
         p = Path()
         rechteck(p, 0, 0, w * EINS, h * EINS)
         d = rastern(p)
-        pruef("Rechteck %dx%d Flaeche" % (w, h), area_2(d), w * h,
+        check_2("Rechteck %dx%d Flaeche" % (w, h), area_2(d), w * h,
               0.01, " px")
-        pruef("Rechteck %dx%d Loecher" % (w, h), loecher(d), 0, 0)
+        check_2("Rechteck %dx%d Loecher" % (w, h), loecher(d), 0, 0)
 
     print("\n[2] Circle: area against pi*r^2, symmetry, no hole")
     for r in [4, 8, 16, 32, 48]:
@@ -247,12 +247,12 @@ def main():
         ellipse(p, r * EINS, r * EINS, r * EINS, r * EINS)
         d = rastern(p)
         soll = math.pi * r * r
-        pruef("Kreis r=%d Flaeche" % r, area_2(d), soll, soll * 0.015, " px")
-        pruef("Kreis r=%d Symmetrie links/rechts" % r, sym_lr(d), 0, SYM_TOL)
-        pruef("Kreis r=%d Symmetrie oben/unten" % r, sym_ud(d), 0, SYM_TOL)
-        pruef("Kreis r=%d Loecher" % r, loecher(d), 0, 0)
+        check_2("Kreis r=%d Flaeche" % r, area_2(d), soll, soll * 0.015, " px")
+        check_2("Kreis r=%d Symmetrie links/rechts" % r, sym_lr(d), 0, SYM_TOL)
+        check_2("Kreis r=%d Symmetrie oben/unten" % r, sym_ud(d), 0, SYM_TOL)
+        check_2("Kreis r=%d Loecher" % r, loecher(d), 0, 0)
         without = 2 * r - randbreite(d)
-        pruef("Kreis r=%d Zeilen ohne Saum" % r, without, 0.0,
+        check_2("Kreis r=%d Zeilen ohne Saum" % r, without, 0.0,
               2.0 + r / 6.0, " Zeilen")
 
     print("\n[3] Ellipse: area against pi*rx*ry")
@@ -261,9 +261,9 @@ def main():
         ellipse(p, rx * EINS, ry * EINS, rx * EINS, ry * EINS)
         d = rastern(p)
         soll = math.pi * rx * ry
-        pruef("Ellipse %dx%d Flaeche" % (rx, ry), area_2(d), soll,
+        check_2("Ellipse %dx%d Flaeche" % (rx, ry), area_2(d), soll,
               soll * 0.02, " px")
-        pruef("Ellipse %dx%d Symmetrie l/r" % (rx, ry), sym_lr(d), 0,
+        check_2("Ellipse %dx%d Symmetrie l/r" % (rx, ry), sym_lr(d), 0,
               2 * SYM_TOL)
 
     print("\n[4] Rundeck: Flaeche = w*h - (4-pi)*r^2")
@@ -272,11 +272,11 @@ def main():
         rundeck(p, 0, 0, w * EINS, h * EINS, r * EINS)
         d = rastern(p)
         soll = w * h - (4 - math.pi) * r * r
-        pruef("Rundeck %dx%d r=%d Flaeche" % (w, h, r), area_2(d), soll,
+        check_2("Rundeck %dx%d r=%d Flaeche" % (w, h, r), area_2(d), soll,
               soll * 0.02, " px")
-        pruef("Rundeck %dx%d r=%d Symmetrie l/r" % (w, h, r), sym_lr(d), 0, SYM_TOL)
-        pruef("Rundeck %dx%d r=%d Symmetrie o/u" % (w, h, r), sym_ud(d), 0, SYM_TOL)
-        pruef("Rundeck %dx%d r=%d Loecher" % (w, h, r), loecher(d), 0, 0)
+        check_2("Rundeck %dx%d r=%d Symmetrie l/r" % (w, h, r), sym_lr(d), 0, SYM_TOL)
+        check_2("Rundeck %dx%d r=%d Symmetrie o/u" % (w, h, r), sym_ud(d), 0, SYM_TOL)
+        check_2("Rundeck %dx%d r=%d Loecher" % (w, h, r), loecher(d), 0, 0)
 
     p = Path()
     rundeck(p, 0, 0, 48 * EINS, 48 * EINS, 24 * EINS)
@@ -284,7 +284,7 @@ def main():
     p = Path()
     ellipse(p, 24 * EINS, 24 * EINS, 24 * EINS, 24 * EINS)
     a2 = area_2(rastern(p))
-    pruef("Rundeck r=w/2 ist der Kreis", abs(a1 - a2), 0, 1.0, " px")
+    check_2("Rundeck r=w/2 ist der Kreis", abs(a1 - a2), 0, 1.0, " px")
 
     print("\n[5] Target size: rasterised twice is four times the area")
     for r in [8, 16]:
@@ -295,7 +295,7 @@ def main():
         r2 = r * 2
         ellipse(p, r2 * EINS, r2 * EINS, r2 * EINS, r2 * EINS)
         a2 = area_2(rastern(p))
-        pruef("Kreis r=%d -> r=%d Flaechenverhaeltnis" % (r, r2),
+        check_2("Kreis r=%d -> r=%d Flaechenverhaeltnis" % (r, r2),
               a2 / a1, 4.0, 0.06)
 
     print("\n[6] Subpixel: an edge shifted by half a point")
@@ -305,7 +305,7 @@ def main():
     p = Path()
     rechteck(p, EINS // 2, 0, 10 * EINS, 10 * EINS)
     a2 = area_2(rastern(p))
-    pruef("Rechteck um 1/2 px versetzt: gleiche Flaeche", abs(a1 - a2),
+    check_2("Rechteck um 1/2 px versetzt: gleiche Flaeche", abs(a1 - a2),
           0, 0.6, " px")
 
     print("\n[7] Fuellregeln: Ring, innen hohl")
@@ -316,9 +316,9 @@ def main():
     d_eo = rastern(p, 1)
     soll_nz = math.pi * 30 * 30
     soll_eo = math.pi * (30 * 30 - 15 * 15)
-    pruef("Nichtnull: voller Kreis", area_2(d_nz), soll_nz,
+    check_2("Nichtnull: voller Kreis", area_2(d_nz), soll_nz,
           soll_nz * 0.02, " px")
-    pruef("Gerade-Ungerade: Ring mit Loch", area_2(d_eo), soll_eo,
+    check_2("Gerade-Ungerade: Ring mit Loch", area_2(d_eo), soll_eo,
           soll_eo * 0.02, " px")
 
     print("\n[8] Strokes: two strokes in ONE path (the cross)")
@@ -358,7 +358,7 @@ def main():
     p = Path()
     stroke(p, [(0, 0), (20 * EINS, 0)], EINS)
     a1 = area_2(rastern(p))
-    pruef("Ein waagerechter Strich 20x2", a1, 40.0, 2.0, " px")
+    check_2("Ein waagerechter Strich 20x2", a1, 40.0, 2.0, " px")
 
     p = Path()
     d = 20 * EINS
@@ -366,7 +366,7 @@ def main():
     stroke(p, [(d, 0), (0, d)], EINS)
     dk = rastern(p)
     soll = 2 * (20 * 1.4142 * 2) - 8
-    pruef("Kreuz aus zwei Strichen: Flaeche", area_2(dk), soll,
+    check_2("Kreuz aus zwei Strichen: Flaeche", area_2(dk), soll,
           soll * 0.12, " px")
     def sym_lr_kern(d):
         buf, w, h = d[0], d[1], d[2]
@@ -376,13 +376,13 @@ def main():
                 m = max(m, abs(buf[y * w + x] - buf[y * w + (w - 1 - x)]))
         return m
 
-    pruef("Kreuz: Symmetrie l/r (ohne Spitzen)", sym_lr_kern(dk), 0,
+    check_2("Kreuz: Symmetrie l/r (ohne Spitzen)", sym_lr_kern(dk), 0,
           SYM_TOL)
-    pruef("Kreuz: Symmetrie oben/unten", sym_ud(dk), 0, SYM_TOL)
+    check_2("Kreuz: Symmetrie oben/unten", sym_ud(dk), 0, SYM_TOL)
     p = Path()
     stroke(p, [(0, 0), (d, d)], EINS)
     a_einer = area_2(rastern(p))
-    pruef("Ein Strich ist halb so viel wie zwei", area_2(dk) / a_einer,
+    check_2("Ein Strich ist halb so viel wie zwei", area_2(dk) / a_einer,
           2.0, 0.25)
 
     print("\n" + "=" * 78)
@@ -390,9 +390,9 @@ def main():
         print(z)
     print("=" * 78)
     n = len(LINES)
-    if FEHLER:
-        print("ERGEBNIS: %d von %d Pruefungen FEHLGESCHLAGEN" % (len(FEHLER), n))
-        for f in FEHLER:
+    if ERROR:
+        print("ERGEBNIS: %d von %d Pruefungen FEHLGESCHLAGEN" % (len(ERROR), n))
+        for f in ERROR:
             print("   - " + f)
         return 1
     print("RESULT: all %d checks passed" % n)

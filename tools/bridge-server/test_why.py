@@ -37,8 +37,8 @@ class Dev:
         self.pub = self.k.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
         self.device_id = "osum-" + self.pub[:12]
         self.sid = secrets.token_hex(8)
-    def send(self, kopf, nutz=b""):
-        body = (kopf + " " + str(len(nutz))).encode() + b"\n" + nutz
+    def send(self, header_2, nutz=b""):
+        body = (header_2 + " " + str(len(nutz))).encode() + b"\n" + nutz
         r = urllib.request.Request(URL + "/bridge/wire", data=body, headers={"X-Bridge-Wire": self.sid})
         return urllib.request.urlopen(r, timeout=10).read()
     def prepair(self):
@@ -50,7 +50,7 @@ class Dev:
         ford = a[1]
         sig = self.k.sign(bytes.fromhex(ford)).hex()
         return self.send("proof " + sig).decode().split()[0]
-    def puls(self):
+    def pulse(self):
         return self.send("poll")
 
 def why(d):
@@ -72,7 +72,7 @@ def wait_state(d, want, t=12):
 
 d = Dev(); d.prepair()
 chk("login ok", d.login() == "welcome")
-for _ in range(3): d.puls(); time.sleep(0.2)
+for _ in range(3): d.pulse(); time.sleep(0.2)
 chk("online", why(d)["state"] == "online")
 chk("silent -> stumm", wait_state(d, "silent", 10))
 wait_event(d, "SILENT"); w = why(d)
@@ -83,7 +83,7 @@ chk("verbunden false in /geraete", [g for g in api("/bridge/devices")["devices"]
 chk("relogin", d.login() == "welcome")
 chk("event NEW SESSION", any("NEW SESSION" in e[1] for e in why(d)["events"]))
 api("/bridge/job", {"device": d.device_id, "kind": "run", "target": "sleep 99"})
-a = d.puls().decode()
+a = d.pulse().decode()
 chk("job handed out", a.startswith("job "), a[:40])
 chk("busy after silence > TOT_S", wait_state(d, "busy", 8))
 chk("BUSY event", wait_event(d, "BUSY"))
@@ -96,7 +96,7 @@ chk("stumm names the unanswered job", "unanswered" in " ".join(e[1] for e in w["
 
 d.login()
 api("/bridge/job", {"device": d.device_id, "kind": "list", "target": "/"})
-a = d.puls().decode().split()
+a = d.pulse().decode().split()
 d.send("done %s ok" % a[1], b"x")
 w = why(d)
 chk("job done recorded", w["last_job"]["status"] == "ok" and w["running_job"] is None, w["last_job"])
@@ -108,7 +108,7 @@ api("/bridge/job", {"device": d.device_id, "kind": "system"})
 api("/bridge/job", {"device": d.device_id, "kind": "system", "ttl_s": 0})
 time.sleep(5)
 d.login()
-r = d.puls().decode()
+r = d.pulse().decode()
 chk("stale job dropped, ttl_s 0 job survives", r.startswith("job ") and why(d)["open_jobs"] == 0
     and any("JOB DROPPED" in e[1] for e in why(d)["events"]), (r[:30], why(d)["events"][-3:]))
 
@@ -137,7 +137,7 @@ chk("after restart: last contact survives", w.get("last_contact_utc") is not Non
 chk("after restart: MAC survives", w.get("mac") == "11:22:33:44:55:66", w.get("mac"))
 chk("after restart: SERVER RESTARTED event", any("SERVER RESTARTED" in e[1] for e in w["events"]), w["events"][-3:])
 chk("after restart: not reported online", w["state"] != "online")
-chk("old marke -> device is told to log in again", d.puls().startswith(b"drop "))
+chk("old marke -> device is told to log in again", d.pulse().startswith(b"drop "))
 chk("fresh login after restart works", d.login() == "welcome")
 chk("FIRST SESSION event", any("FIRST SESSION" in e[1] for e in why(d)["events"]))
 srv.terminate(); srv.wait(5)

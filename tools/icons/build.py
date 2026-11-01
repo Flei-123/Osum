@@ -81,42 +81,42 @@ def map_lesen(pfad):
             raise SystemExit("icons.map:%d: no '=' in '%s'" % (nr, roh))
         name, _, rest = zeile.partition("=")
         name = name.strip()
-        teile = rest.split()
-        if len(teile) != 2:
+        parts = rest.split()
+        if len(parts) != 2:
             raise SystemExit(
                 "icons.map:%d: expected two words after '=', got %d"
-                % (nr, len(teile)))
+                % (nr, len(parts)))
         if name in nach_name:
             raise SystemExit("icons.map:%d: '%s' is defined twice" % (nr, name))
-        if teile[0] == "alias":
-            ziel = nach_name.get(teile[1])
-            if ziel is None:
+        if parts[0] == "alias":
+            target = nach_name.get(parts[1])
+            if target is None:
                 raise SystemExit(
-                    "icons.map:%d: alias to unknown name '%s'" % (nr, teile[1]))
-            e = Eintrag(name, ziel.cp, None)
-            e.alias_von = ziel.name
+                    "icons.map:%d: alias to unknown name '%s'" % (nr, parts[1]))
+            e = Eintrag(name, target.cp, None)
+            e.alias_von = target.name
         else:
             try:
-                cp = int(teile[0], 16)
+                cp = int(parts[0], 16)
             except ValueError:
                 raise SystemExit(
                     "icons.map:%d: '%s' is not a hex code point"
-                    % (nr, teile[0]))
+                    % (nr, parts[0]))
             if not (0xE000 <= cp <= 0xF8FF):
                 raise SystemExit(
                     "icons.map:%d: %04X is outside the private use area "
                     "E000..F8FF" % (nr, cp))
-            e = Eintrag(name, cp, teile[1])
+            e = Eintrag(name, cp, parts[1])
         liste.append(e)
         nach_name[name] = e
-    gesehen = {}
+    seen = {}
     for e in liste:
         if e.alias_von is None:
-            if e.cp in gesehen:
+            if e.cp in seen:
                 raise SystemExit(
                     "icons.map: %04X is used by both '%s' and '%s'"
-                    % (e.cp, gesehen[e.cp], e.name))
-            gesehen[e.cp] = e.name
+                    % (e.cp, seen[e.cp], e.name))
+            seen[e.cp] = e.name
     return liste, nach_name
 
 
@@ -130,7 +130,7 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     v = schnitt.Vorlage(src_pfad)
     voll = v.cmap()
 
-    zeichen = {}
+    char = {}
     fehlend = []
     for e in echte:
         satz = info.get(e.quelle)
@@ -142,7 +142,7 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
         if not gid:
             fehlend.append((e.name, e.quelle))
             continue
-        zeichen[e.cp] = gid
+        char[e.cp] = gid
     if fehlend:
         for name, quelle in fehlend:
             print("build: %s -- no glyph '%s' in the source font"
@@ -150,37 +150,37 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
         raise SystemExit(1)
 
     behalten = [0]
-    for gid in zeichen.values():
+    for gid in char.values():
         if gid not in behalten:
             behalten.append(gid)
     offen = list(behalten)
     zusammengesetzt = 0
     while offen:
         g = offen.pop()
-        teile = schnitt.komponenten(v.glyph_bytes(g))
-        if teile:
+        parts = schnitt.komponenten(v.glyph_bytes(g))
+        if parts:
             zusammengesetzt += 1
-        for k in teile:
+        for k in parts:
             if k not in behalten:
                 behalten.append(k)
                 offen.append(k)
     behalten.sort()
-    karte = {alt: neu for neu, alt in enumerate(behalten)}
+    karte = {alt: new for new, alt in enumerate(behalten)}
 
     glyf = bytearray()
-    versatz = []
+    offset = []
     for alt in behalten:
-        versatz.append(len(glyf))
+        offset.append(len(glyf))
         roh = v.glyph_bytes(alt)
         if roh and schnitt.s16(roh, 0) < 0:
             roh = schnitt.komponenten_neu(roh, karte)
         glyf += schnitt.pad4(roh)
-    versatz.append(len(glyf))
-    lang = versatz[-1] > 0x1FFFE
+    offset.append(len(glyf))
+    lang = offset[-1] > 0x1FFFE
     if lang:
-        loca = b"".join(struct.pack(">I", o) for o in versatz)
+        loca = b"".join(struct.pack(">I", o) for o in offset)
     else:
-        loca = b"".join(struct.pack(">H", o // 2) for o in versatz)
+        loca = b"".join(struct.pack(">H", o // 2) for o in offset)
 
     hmtx = b"".join(struct.pack(">Hh", *v.metric(alt)) for alt in behalten)
 
@@ -193,7 +193,7 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     struct.pack_into(">H", maxp, 4, len(behalten))
 
     tabellen = {
-        "cmap": schnitt.cmap4({c: karte[g] for c, g in zeichen.items()}),
+        "cmap": schnitt.cmap4({c: karte[g] for c, g in char.items()}),
         "glyf": bytes(glyf),
         "head": bytes(head),
         "hhea": bytes(hhea),
@@ -207,12 +207,12 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     suchbereich = 16
     while suchbereich * 2 <= n * 16:
         suchbereich *= 2
-    eintrag = 0
+    entry = 0
     x = suchbereich // 16
     while x > 1:
-        eintrag += 1
+        entry += 1
         x //= 2
-    kopf = struct.pack(">IHHHH", 0x00010000, n, suchbereich, eintrag,
+    header = struct.pack(">IHHHH", 0x00010000, n, suchbereich, entry,
                        n * 16 - suchbereich)
     pos = 12 + 16 * n
     verz = b""
@@ -223,12 +223,12 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
                             pos, len(d))
         koerper += schnitt.pad4(d)
         pos += len(schnitt.pad4(d))
-    datei = bytearray(kopf + verz + koerper)
-    pruef = (0xB1B0AFBA - schnitt.summe(bytes(datei))) & 0xFFFFFFFF
+    datei = bytearray(header + verz + koerper)
+    check = (0xB1B0AFBA - schnitt.summe(bytes(datei))) & 0xFFFFFFFF
     for i, m in enumerate(marken):
         if m == "head":
             hoff = schnitt.u32(datei, 12 + 16 * i + 8)
-            struct.pack_into(">I", datei, hoff + 8, pruef)
+            struct.pack_into(">I", datei, hoff + 8, check)
 
     os.makedirs(os.path.dirname(out_pfad), exist_ok=True)
     open(out_pfad, "wb").write(bytes(datei))
@@ -255,10 +255,10 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
 
 def firn_name(name):
     """icon.network.no-internet -> NETWORK_NO_INTERNET."""
-    kurz = name
-    if kurz.startswith("icon."):
-        kurz = kurz[5:]
-    return kurz.replace(".", "_").replace("-", "_").upper()
+    short = name
+    if short.startswith("icon."):
+        short = short[5:]
+    return short.replace(".", "_").replace("-", "_").upper()
 
 
 def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
@@ -298,9 +298,9 @@ def ids_schreiben(pfad, liste, echte, gross, quelle_gross, v):
     z.append("")
     z.append("export {")
     z.append("    COUNT, FIRST, LAST, UPM,")
-    namen = [firn_name(e.name) for e in liste]
-    for i in range(0, len(namen), 4):
-        z.append("    " + ", ".join(namen[i:i + 4]) + ",")
+    names = [firn_name(e.name) for e in liste]
+    for i in range(0, len(names), 4):
+        z.append("    " + ", ".join(names[i:i + 4]) + ",")
     z.append("    is_icon, index_of, at_index")
     z.append("}")
     z.append("")

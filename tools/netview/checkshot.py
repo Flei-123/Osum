@@ -71,10 +71,10 @@ def main(argv):
     palette, zeilen = symmod.lies(zeichnung)
     w, h, roh = ppm(screen)
     deckend = 0
-    falsch = 0
+    wrong = 0
     for r, zeile in enumerate(zeilen):
-        for c, zeichen in enumerate(zeile):
-            soll = palette[zeichen]
+        for c, char in enumerate(zeile):
+            soll = palette[char]
             if soll is None:
                 continue
             if isinstance(soll, tuple):
@@ -82,21 +82,21 @@ def main(argv):
             deckend += 1
             px, py = x + c, y + r
             if px >= w or py >= h:
-                falsch += 1
+                wrong += 1
                 continue
             at = (py * w + px) * 3
             if (roh[at] != ((soll >> 16) & 255)
                     or roh[at + 1] != ((soll >> 8) & 255)
                     or roh[at + 2] != (soll & 255)):
-                falsch += 1
+                wrong += 1
     if nicht:
-        if falsch * 4 >= deckend:
-            print("ok not there: %d of %d different" % (falsch, deckend))
+        if wrong * 4 >= deckend:
+            print("ok not there: %d of %d different" % (wrong, deckend))
             return 0
-        print("there, but should not be: only %d of %d different" % (falsch, deckend))
+        print("there, but should not be: only %d of %d different" % (wrong, deckend))
         return 1
-    if falsch:
-        print("wrong %d of %d" % (falsch, deckend))
+    if wrong:
+        print("wrong %d of %d" % (wrong, deckend))
         return 1
     print("ok %d of %d equal" % (deckend, deckend))
     return 0

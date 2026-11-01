@@ -142,6 +142,39 @@ def scan(files):
     return names, strings, alltok
 
 
+DYN_CALLS = {"getattr", "setattr", "hasattr", "delattr", "namedtuple", "NamedTuple", "dest", "metavar", "globals", "locals", "vars", "TypedDict", "make_dataclass", "Struct", "fromkeys"}
+
+
+def protected_files(files, names):
+    prot = set()
+    for f in files:
+        try:
+            src, toks = tokens(os.path.join(ROOT, f))
+        except Exception:
+            continue
+        dyn = any(t.type == tokenize.NAME and t.string in ("exec", "eval", "compile", "__dict__", "importlib", "__import__") for t in toks) or any(t.type == tokenize.OP and t.string == "**" and toks[k - 1].string in ("(", ",", "{") for k, t in enumerate(toks) if k)
+        for i, t in enumerate(toks):
+            if t.type != tokenize.STRING:
+                continue
+            s = t.string
+            m = re.match(r"^([A-Za-z]*)(\"\"\"|'''|\"|')", s)
+            isf = m and "f" in m.group(1).lower()
+            body = s[m.end():-len(m.group(2))] if m else s
+            near = {x.string for x in toks[max(0, i - 6):i] if x.type == tokenize.NAME}
+            for n in names:
+                if n in prot or n not in body:
+                    continue
+                dash = n.replace("_", "-")
+                if re.search(r"(?<![A-Za-z0-9_-])--?(%s|%s)(?![A-Za-z0-9_])" % (re.escape(n), re.escape(dash)), body) and body.lstrip().startswith("-"):
+                    prot.add(n)
+                elif not isf and (("%(" + n + ")") in body or ("{" + n + "}") in body or ("{" + n + ":") in body or ("{" + n + "!") in body):
+                    prot.add(n)
+                elif body.strip() == n or n in body.split():
+                    if dyn or (near & DYN_CALLS):
+                        prot.add(n)
+    return prot
+
+
 def protected(names, strings):
     prot = set()
     blob = "\n".join(strings)
@@ -158,7 +191,7 @@ def protected(names, strings):
     return prot
 
 
-def build_map(names, alltok, prot):
+def build_map(names, alltok, prot, fl=None):
     mapping = {}
     used = set(alltok)
     for n in sorted(names):
@@ -240,14 +273,30 @@ def plan(files):
         by_dir.setdefault(os.path.dirname(f), []).append(f)
     shared = foreign_modules(files)
     shared_names = set()
+    import ast
     for f in shared:
         try:
-            _, toks = tokens(os.path.join(ROOT, f))
+            tree = ast.parse(open(os.path.join(ROOT, f), encoding="utf-8").read())
         except Exception:
             continue
-        for t in toks:
-            if t.type == tokenize.NAME:
-                shared_names.add(t.string)
+        for node in tree.body:
+            for sub in ast.walk(node) if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else [node]:
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
+                    shared_names.add(sub.id)
+                elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    shared_names.add(sub.name)
+                elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                    for al in sub.names:
+                        shared_names.add((al.asname or al.name).split(".")[0])
+        for sub in ast.walk(tree):
+            if isinstance(sub, ast.Attribute):
+                shared_names.add(sub.attr)
+            elif isinstance(sub, ast.arg):
+                shared_names.add(sub.arg)
+            elif isinstance(sub, ast.keyword) and sub.arg:
+                shared_names.add(sub.arg)
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                shared_names.add(sub.name)
     return by_dir, shared_names
 
 
@@ -256,6 +305,9 @@ def main():
     only = [a for a in sys.argv[1:] if not a.startswith("--")]
     files = tracked_py()
     by_dir, shared_names = plan(files)
+    if os.environ.get("PYRN_GLOBAL"):
+        by_dir = {"": files}
+        shared_names = set()
     for k, v in EXTRA_SEG.items():
         SEG.setdefault(k, v)
         count.GERMAN.add(k)
@@ -267,7 +319,7 @@ def main():
             continue
         fl = [f for f in fl if os.path.exists(os.path.join(ROOT, f))]
         names, strings, alltok = scan(fl)
-        prot = protected(names, strings) | (set(names) & shared_names)
+        prot = protected_files(fl, names) | (set(names) & shared_names)
         mapping = build_map(names, alltok, prot)
         total += len(mapping)
         allmap[d] = mapping

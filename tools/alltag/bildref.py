@@ -76,12 +76,12 @@ def gast(text, name):
     at = text.find(marke)
     if at < 0:
         return None
-    teil = text[at:at + 1200]
-    m = re.search(r"viewer: art=(\w+) w=(\d+) h=(\d+)", teil)
+    part = text[at:at + 1200]
+    m = re.search(r"viewer: art=(\w+) w=(\d+) h=(\d+)", part)
     if not m:
         return None
-    s = re.search(r"viewer: summe (\d+) w=(\d+) h=(\d+)", teil)
-    p = re.findall(r" (\d+),(\d+)=([0-9a-f]{6})", teil)
+    s = re.search(r"viewer: summe (\d+) w=(\d+) h=(\d+)", part)
+    p = re.findall(r" (\d+),(\d+)=([0-9a-f]{6})", part)
     if not s or len(p) < 5:
         return None
     return dict(art=m.group(1), w=int(m.group(2)), h=int(m.group(3)),
@@ -94,9 +94,9 @@ def kanaele(v):
 
 
 def vergleich(g, w, name):
-    fehler = []
+    error = []
     if (g["w"], g["h"]) != (w["w"], w["h"]):
-        fehler.append("Groesse %dx%d statt %dx%d"
+        error.append("Groesse %dx%d statt %dx%d"
                       % (g["w"], g["h"], w["w"], w["h"]))
     verlustfrei = w["art"] in ("png", "bmp")
     punktweise = verlustfrei or w.get("voll", True)
@@ -105,22 +105,22 @@ def vergleich(g, w, name):
         d = abs(g[k] - w[k])
         if verlustfrei:
             if d != 0:
-                fehler.append("%s %d statt %d" % (k, g[k], w[k]))
+                error.append("%s %d statt %d" % (k, g[k], w[k]))
         elif d > n:
-            fehler.append("%s %d statt %d (%.2f je Bildpunkt)"
+            error.append("%s %d statt %d (%.2f je Bildpunkt)"
                           % (k, g[k], w[k], d / max(1, n)))
     for (gx, gy, gv), (wx, wy, wv) in ([] if not punktweise
                                        else zip(g["punkte"], w["punkte"])):
         if (gx, gy) != (wx, wy):
-            fehler.append("Bildpunkt %d,%d statt %d,%d" % (gx, gy, wx, wy))
+            error.append("Bildpunkt %d,%d statt %d,%d" % (gx, gy, wx, wy))
             continue
         gk, wk = kanaele(gv), kanaele(wv)
         d = max(abs(a - b) for a, b in zip(gk, wk))
         if (verlustfrei and d != 0) or (not verlustfrei and d > 3):
-            fehler.append("Bildpunkt %d,%d: %06x statt %06x"
+            error.append("Bildpunkt %d,%d: %06x statt %06x"
                           % (gx, gy, gv, wv))
-    if fehler:
-        print("  FAIL  %-16s %s" % (name, "; ".join(fehler[:3])))
+    if error:
+        print("  FAIL  %-16s %s" % (name, "; ".join(error[:3])))
         return False
     wie = "Summen und fuenf Bildpunkte"
     if not punktweise:
@@ -140,22 +140,22 @@ def main(argv):
         return 0
     text = open(argv[2], "rb").read().decode("latin1")
     gut = 0
-    schlecht = 0
+    bad_2 = 0
     for pfad in argv[3:]:
         name = pfad.split("/")[-1]
         w = nums(pfad)
         g = gast(text, name)
         if g is None:
             print("  FAIL  %-16s the guest said nothing" % name)
-            schlecht += 1
+            bad_2 += 1
             continue
         if vergleich(g, w, name):
             gut += 1
         else:
-            schlecht += 1
+            bad_2 += 1
     print("bildref: %d of %d images match Pillow"
-          % (gut, gut + schlecht))
-    return 0 if schlecht == 0 else 1
+          % (gut, gut + bad_2))
+    return 0 if bad_2 == 0 else 1
 
 
 if __name__ == "__main__":

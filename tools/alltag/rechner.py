@@ -71,7 +71,7 @@ def nach_python(a: str) -> str:
     return p
 
 
-def wert(a: str) -> float:
+def value(a: str) -> float:
     return float(eval(nach_python(a), {"__builtins__": {}}, UMGEBUNG))
 
 
@@ -84,14 +84,14 @@ def eq(gast: float, wirt: float) -> bool:
     return d <= SCHRANKE * max(1.0, abs(wirt))
 
 
-def skript(ziel: str) -> int:
+def skript(target: str) -> int:
     zeilen = ["# von tools/alltag/rechner.py erzeugt"]
     for i, a in enumerate(ausdruecke()):
         zeilen.append("echo AUSDRUCK-%d" % i)
         zeilen.append("calc -e %s" % a)
     zeilen.append("echo AUSDRUECKE-FERTIG")
-    open(ziel, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
-    print("%d Ausdruecke nach %s" % (len(ausdruecke()), ziel))
+    open(target, "w", encoding="utf-8").write("\n".join(zeilen) + "\n")
+    print("%d Ausdruecke nach %s" % (len(ausdruecke()), target))
     return 0
 
 
@@ -100,7 +100,7 @@ def pruefen(serial: str) -> int:
     zeilen = text.split("\n")
     aus = ausdruecke()
     gut = 0
-    schlecht = 0
+    bad_2 = 0
     for i, a in enumerate(aus):
         marke = "AUSDRUCK-%d" % i
         reply = None
@@ -113,27 +113,27 @@ def pruefen(serial: str) -> int:
                     reply = s
                     break
                 break
-        soll = wert(a)
+        soll = value(a)
         if reply is None:
             print("  FAIL  %-22s no answer in the guest (expected %.12g)"
                   % (a, soll))
-            schlecht += 1
+            bad_2 += 1
             continue
         try:
             ist = float(reply)
         except ValueError:
             print("  FAIL  %-22s Gast sagt '%s' (soll %.12g)"
                   % (a, reply, soll))
-            schlecht += 1
+            bad_2 += 1
             continue
         if eq(ist, soll):
             print("  OK    %-22s %s" % (a, reply))
             gut += 1
         else:
             print("  FAIL  %-22s Gast %s, Python %.12g" % (a, reply, soll))
-            schlecht += 1
+            bad_2 += 1
     print("calc: %d of %d match Python" % (gut, len(aus)))
-    return 0 if schlecht == 0 else 1
+    return 0 if bad_2 == 0 else 1
 
 
 def main(argv):

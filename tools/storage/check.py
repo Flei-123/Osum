@@ -59,23 +59,23 @@ def main(argv):
 
     geprueft = 0
     falsch = 0
-    ohne_soll = 0
+    without_soll = 0
     dritt = 0
     zeilen = []
 
     for m in PROBE.finditer(roh):
-        pfad, idx, lauf, ikb, lkb, ok = m.group(1), int(m.group(2)), \
+        pfad, idx, run, ikb, lkb, ok = m.group(1), int(m.group(2)), \
             int(m.group(3)), int(m.group(4)), int(m.group(5)), int(m.group(6))
         geprueft += 1
-        gut = idx == lauf and ikb == lkb and ok == 1
+        gut = idx == run and ikb == lkb and ok == 1
         s = soll.get(pfad)
         anmerkung = ""
         if pfad == "/":
             anmerkung = "(Wurzel: nur Index gegen Durchlauf, s. Kopf)"
-            ohne_soll += 1
+            without_soll += 1
         elif s is None:
             anmerkung = "(kein Sollwert)"
-            ohne_soll += 1
+            without_soll += 1
         else:
             dritt += 1
             if idx != s[0] or ikb != s[1]:
@@ -84,7 +84,7 @@ def main(argv):
         if not gut:
             falsch += 1
         zeilen.append("  %-24s idx=%-8d lauf=%-8d kb=%-6d %s %s"
-                      % (pfad, idx, lauf, ikb, "OK " if gut else "FALSCH",
+                      % (pfad, idx, run, ikb, "OK " if gut else "FALSCH",
                          anmerkung))
 
     print("check: %d directories from the guest, of which %d also against the "

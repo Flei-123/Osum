@@ -73,10 +73,10 @@ def symbole(elf):
         raise SystemExit("nm ist fehlgeschlagen: " + aus.stderr.strip())
     roh = []
     for zeile in aus.stdout.splitlines():
-        teile = zeile.split()
-        if len(teile) != 3:
+        parts = zeile.split()
+        if len(parts) != 3:
             continue
-        adr, art, name = teile
+        adr, art, name = parts
         if art not in ("T", "t"):
             continue
         roh.append((int(adr, 16), lesbar(name)))
@@ -119,15 +119,15 @@ def zeilen(elf):
         return []
     roh = []
     for zeile in aus.stdout.splitlines():
-        teile = zeile.split()
-        if len(teile) < 3 or not teile[2].startswith("0x"):
+        parts = zeile.split()
+        if len(parts) < 3 or not parts[2].startswith("0x"):
             continue
         try:
-            nr = int(teile[1])
-            adr = int(teile[2], 16)
+            nr = int(parts[1])
+            adr = int(parts[2], 16)
         except ValueError:
             continue
-        roh.append((adr, teile[0], nr))
+        roh.append((adr, parts[0], nr))
     roh.sort()
     raus = []
     for adr, datei, nr in roh:
@@ -234,15 +234,15 @@ def blob(syms, lns):
     fassen 1048575 Zeilen; die laengste Datei dieses Baums hat 10216.
     Zwoelf Bits fassen 4096 Dateien; es sind 113.
     """
-    namen = bytearray(b"\0")
+    names_2 = bytearray(b"\0")
     nvers = {}
 
     def leg_ab(s):
         b = s.encode("utf-8", "replace") + b"\0"
         if b in nvers:
             return nvers[b]
-        p = len(namen)
-        namen.extend(b)
+        p = len(names_2)
+        names_2.extend(b)
         nvers[b] = p
         return p
 
@@ -286,20 +286,20 @@ def blob(syms, lns):
     o_sadr = HDR
     o_snam = o_sadr + len(sym_adr)
     o_str = o_snam + len(sym_nam)
-    o_zeil = ausrichten(o_str + len(namen))
+    o_zeil = ausrichten(o_str + len(names_2))
     o_lstr = o_zeil + len(zeil)
     o_dver = ausrichten(o_lstr + len(zstrom))
     o_dstr = o_dver + len(dat_ver)
 
     lo = syms[0][0] if syms else 0
     hi = syms[-1][0] if syms else 0
-    kopf = struct.pack("<13Q", MAGIC, len(syms), len(lns), o_sadr, o_snam,
+    header = struct.pack("<13Q", MAGIC, len(syms), len(lns), o_sadr, o_snam,
                        o_str, o_zeil, o_dver, len(dateien), o_dstr, lo, hi, o_lstr)
-    assert len(kopf) == HDR
-    b = bytearray(kopf)
+    assert len(header) == HDR
+    b = bytearray(header)
     b += sym_adr
     b += sym_nam
-    b += namen
+    b += names_2
     while len(b) < o_zeil:
         b.append(0)
     b += zeil
@@ -327,8 +327,8 @@ def write_s(pfad, daten, syms, lns):
         f.write("    .globl osym_tab\n")
         f.write("osym_tab:\n")
         for i in range(0, len(daten), 32):
-            stueck = daten[i:i + 32]
-            f.write("    .byte " + ",".join(str(x) for x in stueck) + "\n")
+            chunk = daten[i:i + 32]
+            f.write("    .byte " + ",".join(str(x) for x in chunk) + "\n")
 
 
 def main():

@@ -101,7 +101,7 @@ def main():
     lo = linux_offsets(lin)
     ok_ = unsere_konstanten(our)
 
-    fehler = []
+    error = []
     print("=" * 66)
     print("r8169.fi, Zweig VAR_8125, gegen Linux r8169_main.c")
     print("=" * 66)
@@ -111,23 +111,23 @@ def main():
         u = ok_.get(unser)
         l = lo.get(lname)
         if u is None:
-            fehler.append("%s steht nicht in r8169.fi" % unser)
+            error.append("%s steht nicht in r8169.fi" % unser)
             print("   %-16s MISSING in the source" % unser)
             continue
         if l is None:
-            fehler.append("%s (%s) nicht in Linux gefunden" % (unser, lname))
+            error.append("%s (%s) nicht in Linux gefunden" % (unser, lname))
             print("   %-16s 0x%-6x  %-22s NICHT IN LINUX GEFUNDEN"
                   % (unser, u, lname))
             continue
         gut = (u == l)
         if not gut:
-            fehler.append("%s = 0x%x, Linux %s = 0x%x" % (unser, u, lname, l))
+            error.append("%s = 0x%x, Linux %s = 0x%x" % (unser, u, lname, l))
         print("   %-16s 0x%-6x  %-22s 0x%-6x  %s"
               % (unser, u, lname, l, "ok" if gut else "WIDERSPRUCH"))
 
     print()
     print("WIDTH AND VALUE -- this is where the error was")
-    for fn, konst, breite, wert, beleg in ZUGRIFFE:
+    for fn, konst, breite, value, beleg in ZUGRIFFE:
         zs = unsere_zugriffe(our, fn, konst)
         if not zs:
             print("   %-14s %-14s no access found (function "
@@ -136,12 +136,12 @@ def main():
         for b, w in zs:
             gut = (b == breite)
             wv = ok_.get(w, w) if w is not None else None
-            if wert is not None and w is not None:
-                gut = gut and (wv == wert)
+            if value is not None and w is not None:
+                gut = gut and (wv == value)
             if not gut:
-                fehler.append("%s: %s wird mit %d Bit / Wert %s "
+                error.append("%s: %s wird mit %d Bit / Wert %s "
                               "geschrieben, Linux: %d Bit / %s"
-                              % (fn, konst, b, wv, breite, wert))
+                              % (fn, konst, b, wv, breite, value))
             print("   %-14s %-14s %2d Bit  Wert %-8s %s"
                   % (fn, konst, b, ("--" if wv is None else wv),
                      "ok" if gut else "WIDERSPRUCH"))
@@ -156,9 +156,9 @@ def main():
                 print("        " + zeile.strip())
 
     print()
-    if fehler:
-        print("ERGEBNIS: WIDERLEGT (%d)" % len(fehler))
-        for f in fehler:
+    if error:
+        print("ERGEBNIS: WIDERLEGT (%d)" % len(error))
+        for f in error:
             print("   " + f)
         return 1
     print("ERGEBNIS: nichts widerlegt.")

@@ -104,7 +104,7 @@ def main(argv):
     texte = []
     epoche = {}
     ep_von = {}
-    marke_von = {}
+    brand_von = {}
     for ln in open(ser, "rb").read().decode("utf-8", "replace").splitlines():
         m = WIN.match(ln.strip())
         if m:
@@ -121,28 +121,28 @@ def main(argv):
             texte.append(m)
             ep_von[id(m)] = epoche.get((m.group(9), m.group(10)), 0)
             mm = re.match(r"^taskbar: text (\w+) ", ln.strip())
-            marke_von[id(m)] = mm.group(1) if mm else ""
+            brand_von[id(m)] = mm.group(1) if mm else ""
     if not texte:
         print("check: NO text message in the capture -- nothing to check")
         return 1
 
-    letzte_ep = {}
+    last_ep = {}
     for m in texte:
         o = (m.group(9), m.group(10))
-        letzte_ep[o] = max(letzte_ep.get(o, 0), ep_von[id(m)])
+        last_ep[o] = max(last_ep.get(o, 0), ep_von[id(m)])
     texte = [m for m in texte
-             if ep_von[id(m)] == letzte_ep[(m.group(9), m.group(10))]]
+             if ep_von[id(m)] == last_ep[(m.group(9), m.group(10))]]
     bad = 0
     seen = 0
     kaesten = {}
-    leiste = wins.get("Taskleiste", (0, 0, W, H))
+    taskbar = wins.get("Taskleiste", (0, 0, W, H))
     letzte = {}
     for n_, m in enumerate(texte):
         k = (m.group(1), m.group(2), m.group(9), m.group(10),
              m.group(4), m.group(5))
         letzte[k] = (n_, m)
     def leistenschluessel(m):
-        mk = marke_von.get(id(m), "")
+        mk = brand_von.get(id(m), "")
         if mk and mk != "button":
             return mk
         return "button:" + m.group(11)
@@ -168,7 +168,7 @@ def main(argv):
             ox, oy = int(m.group(9)), int(m.group(10))
             ww, wh = W - ox, H - oy
         elif quelle == "taskbar":
-            ox, oy, ww, wh = leiste
+            ox, oy, ww, wh = taskbar
         else:
             ox, oy, ww, wh = 0, 0, W, H
         x0 = max(0, ox + x)

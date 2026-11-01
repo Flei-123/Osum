@@ -30,7 +30,7 @@ def main(argv):
         return ino
 
     alt = zeig("/data/alpha.txt")
-    neu = zeig("/data/bilder/alpha.txt")
+    new = zeig("/data/bilder/alpha.txt")
     zeig("/data/notizen")
     zeig("/data/beta.txt")
 
@@ -39,13 +39,13 @@ def main(argv):
             vorher = int(argv[2])
         except ValueError:
             vorher = 0
-        if neu and vorher and neu == vorher:
-            print("inode gleich %d" % neu)
-        elif neu and vorher:
-            print("inode anders %d %d" % (vorher, neu))
+        if new and vorher and new == vorher:
+            print("inode gleich %d" % new)
+        elif new and vorher:
+            print("inode anders %d %d" % (vorher, new))
 
-    if neu:
-        roh = b.lies(neu, 0, b.ig(neu, mkfs.I_SIZE))
+    if new:
+        roh = b.lies(new, 0, b.ig(new, mkfs.I_SIZE))
         txt = roh.decode("latin-1").strip()
         if txt == "eins":
             print("inhalt ok %s" % txt)

@@ -54,8 +54,8 @@ class Wire:
         return f, self.oktette(laenge)
 
     def sende(self, felder, nutz=b""):
-        kopf = " ".join(felder) + " " + str(len(nutz)) + "\n"
-        self.s.sendall(kopf.encode() + nutz)
+        header = " ".join(felder) + " " + str(len(nutz)) + "\n"
+        self.s.sendall(header.encode() + nutz)
 
 
 KIND_WIRE = {"lies": "read", "schreib": "write", "liste": "list", "befehl": "run",
@@ -97,8 +97,8 @@ def main():
 
     log = open(a.aus, "w")
 
-    def say(*teile):
-        log.write(" ".join(str(t) for t in teile) + "\n")
+    def say(*parts):
+        log.write(" ".join(str(t) for t in parts) + "\n")
         log.flush()
 
     auftraege = []
@@ -107,10 +107,10 @@ def main():
             zeile = zeile.rstrip("\n")
             if not zeile or zeile.startswith("#"):
                 continue
-            teile = zeile.split("|")
-            while len(teile) < 3:
-                teile.append("")
-            auftraege.append((teile[0], teile[1], teile[2]))
+            parts = zeile.split("|")
+            while len(parts) < 3:
+                parts.append("")
+            auftraege.append((parts[0], parts[1], parts[2]))
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3

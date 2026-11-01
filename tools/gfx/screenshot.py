@@ -25,11 +25,11 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    sock, ziel = sys.argv[1], sys.argv[2]
+    sock, target = sys.argv[1], sys.argv[2]
     frist = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 
-    if os.path.exists(ziel):
-        os.unlink(ziel)
+    if os.path.exists(target):
+        os.unlink(target)
 
     s = None
     bis = time.time() + frist
@@ -52,7 +52,7 @@ def main():
             s.recv(65536)
         except OSError:
             pass
-        s.sendall(("screendump %s\n" % ziel).encode())
+        s.sendall(("screendump %s\n" % target).encode())
 
         letzte = -1
         ruhig = 0
@@ -60,17 +60,17 @@ def main():
         while time.time() < bis:
             time.sleep(0.15)
             try:
-                jetzt = os.path.getsize(ziel)
+                now = os.path.getsize(target)
             except OSError:
                 continue
-            if jetzt == letzte and jetzt > 0:
+            if now == letzte and now > 0:
                 ruhig += 1
                 if ruhig >= 3:
-                    print("%d Oktette" % jetzt)
+                    print("%d Oktette" % now)
                     return 0
             else:
                 ruhig = 0
-                letzte = jetzt
+                letzte = now
         print("the screenshot was not finished")
         return 1
     finally:

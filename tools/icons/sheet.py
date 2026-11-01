@@ -73,9 +73,9 @@ class Bild:
         if x < 0 or y < 0 or x >= self.w or y >= self.h or a == 0:
             return
         alt = self.hole(x, y)
-        neu = tuple((alt[i] * (255 - a) + rgb[i] * a + 127) // 255
+        new = tuple((alt[i] * (255 - a) + rgb[i] * a + 127) // 255
                     for i in range(3))
-        self.punkt(x, y, neu)
+        self.punkt(x, y, new)
 
     def rechteck(self, x, y, w, h, rgb):
         for r in range(h):
@@ -93,8 +93,8 @@ class Bild:
             return (struct.pack(">I", len(nutz)) + marke + nutz
                     + struct.pack(">I", zlib.crc32(marke + nutz) & 0xFFFFFFFF))
 
-        kopf = struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0)
-        datei = (b"\x89PNG\r\n\x1a\n" + block(b"IHDR", kopf)
+        header = struct.pack(">IIBBBBB", self.w, self.h, 8, 2, 0, 0, 0)
+        datei = (b"\x89PNG\r\n\x1a\n" + block(b"IHDR", header)
                  + block(b"IDAT", zlib.compress(bytes(roh), 9))
                  + block(b"IEND", b""))
         open(pfad, "wb").write(datei)
@@ -166,9 +166,9 @@ def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
     zellw = 300
     zeilh = max(sizes) + 8
     rand = 16
-    kopf = 34
+    header = 34
     w = rand * 2 + zellw * columns
-    h = kopf + rand + je * zeilh
+    h = header + rand + je * zeilh
     b = Bild(w, h, bg)
     text_paint(b, tfont, 15, rand, rand + 12, title, fg)
     x0 = rand
@@ -176,12 +176,12 @@ def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
         sp = i // je
         ze = i % je
         cx = x0 + sp * zellw
-        cy = kopf + ze * zeilh
+        cy = header + ze * zeilh
         for px in sizes:
             glyphe_paint(b, ifont, cp, px, cx, cy + (max(sizes) - px) // 2, fg)
             cx += px + 6
-        kurz = name[5:] if name.startswith("icon.") else name
-        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, kurz, dim)
+        short = name[5:] if name.startswith("icon.") else name
+        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, short, dim)
     return b
 
 

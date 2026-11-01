@@ -63,7 +63,7 @@ def main():
     s.settimeout(0.2)
 
     buffer = bytearray()
-    fehler = []
+    error = []
     frist = 40.0
 
     def read_2(bis):
@@ -97,18 +97,18 @@ def main():
             buffer.extend(d)
         return False
 
-    for art, wert in schritte:
+    for art, value in schritte:
         if art == "--frist":
-            frist = float(wert)
+            frist = float(value)
         elif art == "--erwarte":
-            if wait_auf(wert, frist):
-                print("   erwartet und bekommen: %s" % wert)
+            if wait_auf(value, frist):
+                print("   erwartet und bekommen: %s" % value)
             else:
-                fehler.append(wert)
-                print("   AUSGEBLIEBEN: %s" % wert)
+                error.append(value)
+                print("   AUSGEBLIEBEN: %s" % value)
                 break
         elif art == "--sende":
-            zeile = wert.replace("\\n", "\n").replace("\\t", "\t")
+            zeile = value.replace("\\n", "\n").replace("\\t", "\t")
             zeile = zeile.replace("\\003", "\003").replace("\\004", "\004")
             zeile = zeile.replace("\\025", "\025").replace("\\010", "\010")
             zeile = zeile.replace("\\033", "\033")
@@ -116,7 +116,7 @@ def main():
                 s.send(bytes([ch]))
                 time.sleep(0.002)
         elif art == "--roh":
-            s.send(bytes(int(x) for x in wert.split(",")))
+            s.send(bytes(int(x) for x in value.split(",")))
 
     read_2(1.0)
     with open(log, "wb") as f:
@@ -125,7 +125,7 @@ def main():
         s.close()
     except OSError:
         pass
-    if fehler:
+    if error:
         return 1
     return 0
 

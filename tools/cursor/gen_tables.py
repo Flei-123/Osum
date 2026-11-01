@@ -4,9 +4,9 @@ import os, re, sys
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "wm"))
 import zeiger2
-kopf, daten = zeiger2.board()
+header, daten = zeiger2.board()
 kb = []
-for (off, n, hx, hy) in kopf:
+for (off, n, hx, hy) in header:
     assert off % 2 == 0 and off // 2 < 256 and n < 256
     kb += [off // 2, n, hx, hy]
 assert all(0 <= b <= 255 for b in daten)

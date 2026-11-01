@@ -87,9 +87,9 @@ def main(argv):
     bild, serial, themes = argv[1], argv[2], argv[3]
     roh = open(serial, "rb").read().decode("latin1")
     schnitt = roh.rfind("settings: rect name=waa ")
-    schwanz = roh[schnitt:] if schnitt >= 0 else roh
+    tail_2 = roh[schnitt:] if schnitt >= 0 else roh
     gemalt = {}
-    for ln in schwanz.splitlines():
+    for ln in tail_2.splitlines():
         m = LINE.search(ln)
         if m:
             gemalt[m.group(11)] = m
@@ -122,10 +122,10 @@ def main(argv):
         loch.save(argv[4])
 
     fehlt = [n for n in soll if n not in gemalt]
-    kurz = [n for n, m in gemalt.items()
+    short = [n for n, m in gemalt.items()
             if m.group(9) != m.group(10)
             or len(n.encode("latin1")) != int(m.group(10))]
-    leer = []
+    empty_2 = []
     for name, m in sorted(gemalt.items()):
         if name not in soll:
             continue
@@ -146,15 +146,15 @@ def main(argv):
                     if df < db:
                         tinte += 1
             if tinte < 2:
-                leer.append("%s: '%s' bei x=%d hat %d Tintenpunkte"
+                empty_2.append("%s: '%s' bei x=%d hat %d Tintenpunkte"
                             % (name, chr(c), gx, tinte))
     print("names painted=%d expected=%d missing=%d shortened=%d noink=%d"
-          % (len(gemalt), len(soll), len(fehlt), len(kurz), len(leer)))
+          % (len(gemalt), len(soll), len(fehlt), len(short), len(empty_2)))
     for z in fehlt[:5]:
         print("    fehlt: %s" % z)
-    for z in kurz[:5]:
+    for z in short[:5]:
         print("    gekuerzt: %s" % z)
-    for z in leer[:5]:
+    for z in empty_2[:5]:
         print("    %s" % z)
     return 0
 

@@ -20,8 +20,8 @@ def lies(pfad):
 def sammle():
     module = {}
     kollisionen = []
-    for stamm, _, namen in os.walk(KERN):
-        for n in sorted(namen):
+    for stamm, _, names in os.walk(KERN):
+        for n in sorted(names):
             if not n.endswith(".fi"):
                 continue
             pfad = os.path.join(stamm, n)
@@ -50,34 +50,34 @@ def tarjan(knoten, kanten):
     index = {}
     tief = {}
     aufstapel = set()
-    stapel = []
+    stack = []
     ergebnis = []
-    zaehler = [0]
+    counter = [0]
     for start in knoten:
         if start in index:
             continue
         arbeit = [(start, iter(kanten.get(start, ())))]
-        index[start] = tief[start] = zaehler[0]
-        zaehler[0] += 1
-        stapel.append(start)
+        index[start] = tief[start] = counter[0]
+        counter[0] += 1
+        stack.append(start)
         aufstapel.add(start)
         while arbeit:
             k, it = arbeit[-1]
-            fortschritt = False
+            progress = False
             for n in it:
                 if n not in knoten:
                     continue
                 if n not in index:
-                    index[n] = tief[n] = zaehler[0]
-                    zaehler[0] += 1
-                    stapel.append(n)
+                    index[n] = tief[n] = counter[0]
+                    counter[0] += 1
+                    stack.append(n)
                     aufstapel.add(n)
                     arbeit.append((n, iter(kanten.get(n, ()))))
-                    fortschritt = True
+                    progress = True
                     break
                 if n in aufstapel:
                     tief[k] = min(tief[k], index[n])
-            if fortschritt:
+            if progress:
                 continue
             arbeit.pop()
             if arbeit:
@@ -86,7 +86,7 @@ def tarjan(knoten, kanten):
             if tief[k] == index[k]:
                 komp = []
                 while True:
-                    w = stapel.pop()
+                    w = stack.pop()
                     aufstapel.discard(w)
                     komp.append(w)
                     if w == k:
@@ -125,8 +125,8 @@ def pruefe_regel(module, zuord, rang):
         vs = zuord.get(name)
         if vs is None:
             continue
-        for ziel in ang["importe"]:
-            zs = zuord.get(ziel)
+        for target in ang["importe"]:
+            zs = zuord.get(target)
             if zs is None:
                 continue
             rv = rang.get(vs)
@@ -136,7 +136,7 @@ def pruefe_regel(module, zuord, rang):
             if rz <= rv:
                 halten += 1
             else:
-                brueche.append((name, vs, ziel, zs))
+                brueche.append((name, vs, target, zs))
     return halten, brueche
 
 

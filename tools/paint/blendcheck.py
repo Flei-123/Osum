@@ -54,16 +54,16 @@ def messen(schritt):
 
 
 def randbedingungen():
-    schlecht = []
+    bad = []
     for name, f in FASSUNGEN:
         for v in range(256):
             if f(v, 0, 0) != v:
-                schlecht.append("%s: a=0 aendert dst=%d" % (name, v))
+                bad.append("%s: a=0 aendert dst=%d" % (name, v))
                 break
             if f(0, v, 255) != v:
-                schlecht.append("%s: a=255 liefert src=%d nicht" % (name, v))
+                bad.append("%s: a=255 liefert src=%d nicht" % (name, v))
                 break
-    return schlecht
+    return bad
 
 
 QUELLEN = [
@@ -100,7 +100,7 @@ def quellen_check():
 def main():
     schnell = "--schnell" in sys.argv
     schritt = 7 if schnell else 1
-    fehler = 0
+    error = 0
     zusagen = 0
 
     erg = messen(schritt)
@@ -108,28 +108,28 @@ def main():
     print("PAINT-BLEND: %d Tripel (a, src, dst)%s"
           % (gesamt, "  [--schnell: jedes 7. a]" if schnell else ""))
     for name, _ in FASSUNGEN:
-        mx, summe, falsch, n = erg[name]
+        mx, summe, wrong, n = erg[name]
         print("   %s  max=%d  mittel=%.6f  falsch=%d (%.3f%%)"
-              % (name, mx, summe / float(n), falsch, 100.0 * falsch / n))
+              % (name, mx, summe / float(n), wrong, 100.0 * wrong / n))
 
-    mx, summe, falsch, n = erg[FASSUNGEN[0][0]]
-    if mx == 1 and falsch > n * 4 // 10:
+    mx, summe, wrong, n = erg[FASSUNGEN[0][0]]
+    if mx == 1 and wrong > n * 4 // 10:
         print("  OK    truncation: error 1 on %.2f%% of all triples"
-              % (100.0 * falsch / n))
+              % (100.0 * wrong / n))
         zusagen += 1
     else:
         print("  FAIL  truncation should be off by 1 on ~48%% of the triples "
-              "danebenliegen, ist: %d auf %.2f%%" % (mx, 100.0 * falsch / n))
-        fehler += 1
+              "danebenliegen, ist: %d auf %.2f%%" % (mx, 100.0 * wrong / n))
+        error += 1
 
     for name in ("(num+127)/255 (Python)  ", "(t+(t>>8))>>8 verworfen "):
-        mx, summe, falsch, n = erg[name]
-        if mx == 0 and falsch == 0:
+        mx, summe, wrong, n = erg[name]
+        if mx == 0 and wrong == 0:
             print("  OK    %s is exact on all %d triples" % (name, n))
             zusagen += 1
         else:
-            print("  FAIL  %s: max=%d, %d falsch" % (name, mx, falsch))
-            fehler += 1
+            print("  FAIL  %s: max=%d, %d falsch" % (name, mx, wrong))
+            error += 1
 
     ungleich = 0
     for a in range(0, 256, schritt):
@@ -144,17 +144,17 @@ def main():
     else:
         print("  FAIL  kernel and host differ on %d triples"
               % ungleich)
-        fehler += 1
+        error += 1
 
-    schlecht = randbedingungen()
-    if not schlecht:
+    bad = randbedingungen()
+    if not bad:
         print("  OK    a=0 leaves the background and a=255 gives the new "
               "Farbe -- bei allen drei Fassungen")
         zusagen += 1
     else:
-        for z in schlecht:
+        for z in bad:
             print("  FAIL  %s" % z)
-        fehler += 1
+        error += 1
 
     if "--quellen" in sys.argv:
         fehlt = quellen_check()
@@ -165,10 +165,10 @@ def main():
         else:
             for z in fehlt:
                 print("  FAIL  %s" % z)
-            fehler += 1
+            error += 1
 
-    print("PAINT-BLEND: %d Zusagen, %d Fehler" % (zusagen, fehler))
-    return 1 if fehler else 0
+    print("PAINT-BLEND: %d Zusagen, %d Fehler" % (zusagen, error))
+    return 1 if error else 0
 
 
 if __name__ == "__main__":

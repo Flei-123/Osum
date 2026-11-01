@@ -32,8 +32,8 @@ def laengen(pfad):
         if not m:
             continue
         name = m.group(1)
-        wert = int(m.group(2), 0)
-        if wert % 8 != 0:
+        value = int(m.group(2), 0)
+        if value % 8 != 0:
             continue
         kommentar = m.group(3) or ""
         n = 8
@@ -43,12 +43,12 @@ def laengen(pfad):
             n = int(w.group(1)) * 8
         elif o:
             n = int(o.group(1))
-        schluessel = (datei, name)
-        if schluessel in LEN_AUS:
-            k = LEN_AUS[schluessel]
+        key_2 = (datei, name)
+        if key_2 in LEN_AUS:
+            k = LEN_AUS[key_2]
             if k in konst:
                 n = konst[k] * 8
-        aus.append((name, wert, n, nr))
+        aus.append((name, value, n, nr))
     return aus
 
 
@@ -71,21 +71,21 @@ def main():
         dateien = sorted(os.path.join(kdir, f)
                          for f in os.listdir(kdir) if f.endswith(".fi"))
     gesamt = 0
-    schlecht = 0
+    bad = 0
     for p in dateien:
         eintraege, treffer = check(p)
         gesamt += len(eintraege)
         rel = os.path.relpath(p, WURZEL)
         for (an, aw, al, az, bn, bw, bl, bz) in treffer:
-            schlecht += 1
+            bad += 1
             print("  FAIL  %s: %s (0x%X, %d octets, line %d) and "
                   "%s (0x%X, %d Oktette, Zeile %d) ueberschneiden sich"
                   % (rel, an, aw, al, az, bn, bw, bl, bz))
     print("PAINT-SKALARE: %d Skalare in %d Dateien, %d Ueberschneidungen"
-          % (gesamt, len(dateien), schlecht))
-    if schlecht == 0:
+          % (gesamt, len(dateien), bad))
+    if bad == 0:
         print("  OK    no two scalars of a file lie on top of each other")
-    return 1 if schlecht else 0
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

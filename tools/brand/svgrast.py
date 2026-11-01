@@ -55,8 +55,8 @@ def path_points(d, tol=0.2):
     if len(akt)>1: konturen.append(akt)
     return konturen
 
-def rastern(pfade, groesse, vb, ss=4):
-    W=H=groesse
+def rastern(pfade, size_2, vb, ss=4):
+    W=H=size_2
     vx,vy,vw,vh = vb
     acc=[[None]*(W) for _ in range(H)]
     for konturen, color in pfade:
@@ -143,19 +143,19 @@ def load_svg(p):
     s=open(p).read()
     vb=[float(x) for x in re.search(r'viewBox="([^"]*)"',s).group(1).split()]
     pfade=[]
-    stapel=[(1,0,0,1,0,0)]
+    stack=[(1,0,0,1,0,0)]
     fuell=[(0,0,0)]
     for m in re.finditer(r'<g([^>]*)>|</g>|<path([^>]*)/?>', s):
         tag=m.group(0)
         if tag.startswith('</g'):
-            if len(stapel)>1: stapel.pop(); fuell.pop()
+            if len(stack)>1: stack.pop(); fuell.pop()
             continue
         if tag.startswith('<g'):
             at=m.group(1)
             tm=re.search(r'transform="([^"]*)"',at)
-            cur=stapel[-1]
+            cur=stack[-1]
             if tm: cur=_mat(cur,_parse_tf(tm.group(1)))
-            stapel.append(cur)
+            stack.append(cur)
             fm=re.search(r'fill="#([0-9A-Fa-f]{6})"',at)
             if fm:
                 h=fm.group(1); fuell.append((int(h[0:2],16),int(h[2:4],16),int(h[4:6],16)))
@@ -165,7 +165,7 @@ def load_svg(p):
         at=m.group(2) or ''
         dm=re.search(r'd="([^"]*)"',at)
         if not dm: continue
-        cur=stapel[-1]
+        cur=stack[-1]
         tm=re.search(r'transform="([^"]*)"',at)
         if tm: cur=_mat(cur,_parse_tf(tm.group(1)))
         fm=re.search(r'fill="#([0-9A-Fa-f]{6})"',at)
@@ -205,8 +205,8 @@ if __name__ == '__main__':
     pf, vb = signet_pfade(svg)
     for g in (16, 24, 32, 48, 64):
         d = rastern(pf, g, vb, ss=4)
-        ziel = os.path.join(out, 'start-%d.png' % g)
-        _png(d, g, g, ziel)
+        target = os.path.join(out, 'start-%d.png' % g)
+        _png(d, g, g, target)
         voll = sum(1 for i in range(3, len(d), 4) if d[i] >= 243)
         kant = sum(1 for i in range(3, len(d), 4) if 12 < d[i] < 243)
-        print('%s  deckend=%d kantenpunkte=%d' % (ziel, voll, kant))
+        print('%s  deckend=%d kantenpunkte=%d' % (target, voll, kant))

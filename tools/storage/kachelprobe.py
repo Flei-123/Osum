@@ -66,7 +66,7 @@ def main(argv):
     W, H, px = ppm(argv[1])
     txt = open(argv[2], "rb").read().decode("latin-1")
 
-    def farbe(x, y):
+    def color(x, y):
         if x < 0 or y < 0 or x >= W or y >= H:
             return -1
         o = (y * W + x) * 3
@@ -81,7 +81,7 @@ def main(argv):
 
     treffer = None
     for ox, oy in VERSAETZE:
-        if all(farbe(x + w // 2 + ox, y + h // 2 + oy) == f
+        if all(color(x + w // 2 + ox, y + h // 2 + oy) == f
                for _i, x, y, w, h, f, _n in kacheln):
             treffer = (ox, oy)
             break
@@ -90,32 +90,32 @@ def main(argv):
               "Farbe haben" % len(kacheln))
         for _i, x, y, w, h, f, n in kacheln:
             print("  %-10s reported %06X, in image %06X"
-                  % (n, f, farbe(x + w // 2 + 42, y + h // 2 + 62)))
+                  % (n, f, color(x + w // 2 + 42, y + h // 2 + 62)))
         return 1
     ox, oy = treffer
     print("tile probe: %d tiles, offset of the window content %d,%d"
           % (len(kacheln), ox, oy))
 
-    schlecht = 0
+    bad = 0
     breiten = []
     for _i, x, y, w, h, f, n in kacheln:
         mitte = x + w // 2 + ox
         gemessen = 0
         for k in (4, 5, 6, 7):
             yy = y + h * k // 9 + oy
-            if farbe(mitte, yy) != f:
+            if color(mitte, yy) != f:
                 continue
             li = mitte
-            while farbe(li - 1, yy) == f:
+            while color(li - 1, yy) == f:
                 li -= 1
             re_ = mitte
-            while farbe(re_ + 1, yy) == f:
+            while color(re_ + 1, yy) == f:
                 re_ += 1
             gemessen = max(gemessen, re_ - li + 1)
         breiten.append((n, w, gemessen))
         gut = abs(gemessen - w) <= 4
         if not gut:
-            schlecht += 1
+            bad += 1
         print("  %-10s reported w=%-5d in image %-5d %s"
               % (n, w, gemessen, "" if gut else "<-- ABWEICHUNG"))
 
@@ -123,8 +123,8 @@ def main(argv):
                   for k in range(len(breiten) - 1))
     print("tile probe: the widths fall with the share: %s"
           % ("ja" if fallend else "NEIN"))
-    if schlecht or not fallend:
-        print("kachelprobe: %d Kacheln stimmen nicht" % schlecht)
+    if bad or not fallend:
+        print("kachelprobe: %d Kacheln stimmen nicht" % bad)
         return 1
     print("tile probe: all tiles have in the image the width that the "
           "Programm gemeldet hat")

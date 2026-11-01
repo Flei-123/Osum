@@ -39,20 +39,20 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    ziel = None
+    target = None
     for ln in open(argv[2], "rb").read().decode("utf-8", "replace").splitlines():
         m = WIN.match(ln.strip())
         if m and m.group(3) == "1" and m.group(8) == "1":
-            ziel = dict(x=int(m.group(4)), y=int(m.group(5)),
+            target = dict(x=int(m.group(4)), y=int(m.group(5)),
                         ow=int(m.group(9)), t=m.group(11))
-    if ziel is None:
+    if target is None:
         print("no sharp window with decoration in the capture")
         return 1
-    x = ziel["x"] + BORDER + 4
-    y = ziel["y"] + BORDER
-    w = ziel["ow"] - 2 * BORDER - CAP_N * CAP_W - 8
+    x = target["x"] + BORDER + 4
+    y = target["y"] + BORDER
+    w = target["ow"] - 2 * BORDER - CAP_N * CAP_W - 8
     h = TITLE_H - 1 - BORDER
-    print("titel '%s' band %d,%d %dx%d" % (ziel["t"], x, y, w, h))
+    print("titel '%s' band %d,%d %dx%d" % (target["t"], x, y, w, h))
     return contrast.band(argv[1], x, y, w, h, 12)
 
 

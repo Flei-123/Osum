@@ -40,13 +40,13 @@ def uebersetzen():
         return []
     out = []
     for src in sorted(glob.glob(os.path.join(asl, "*.asl"))):
-        ziel = src[:-4] + ".aml"
+        target = src[:-4] + ".aml"
         r = subprocess.run(["iasl", "-p", src[:-4], src],
                            capture_output=True, text=True)
-        if r.returncode != 0 or not os.path.exists(ziel):
+        if r.returncode != 0 or not os.path.exists(target):
             print("WARNUNG: iasl scheiterte an %s" % os.path.basename(src))
             continue
-        out.append(ziel)
+        out.append(target)
     return out
 
 
@@ -86,10 +86,10 @@ def main(argv):
         for op, n in count.items():
             gesamt[op] = gesamt.get(op, 0) + n
         schlimm |= set(fehlt)
-        kurz = os.path.basename(t)
+        short = os.path.basename(t)
         deck = 100 * len(set(count) & can) // max(1, len(count))
         print("%-22s %3d verschiedene Opcodes, Abdeckung %3d%%%s"
-              % (kurz, len(count), deck,
+              % (short, len(count), deck,
                  "" if not fehlt else "   FEHLT: " +
                  ", ".join(disasm.op_text(o) for o in fehlt)))
         wichtig = [n for n, k, e in names

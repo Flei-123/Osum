@@ -151,13 +151,13 @@ def funktion_in_text(elf: bytes, endung: str):
         link = struct.unpack_from("<I", elf, sh + 40)[0]
         stro = struct.unpack_from("<Q", elf, shoff + link * shent + 24)[0]
         for e in range(so, so + sz, 24):
-            nm, info, _o, shndx, wert, groesse = struct.unpack_from(
+            nm, info, _o, shndx, value, size = struct.unpack_from(
                 "<IBBHQQ", elf, e)
             if (info & 0xF) not in (0, 2) or shndx != text_i:
                 continue
             name = elf[stro + nm:elf.index(b"\0", stro + nm)].decode()
             if name.endswith(endung):
-                return wert, groesse
+                return value, size
     return None
 
 
@@ -169,10 +169,10 @@ def bauen(argv):
     seedpfad = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "verify.seed")
     kein_sig = False
-    sig_dreh = False
-    nutz_dreh = -1
-    kennung_kaputt = False
-    text_dreh = 0
+    sig_rot = False
+    nutz_rot = -1
+    kennung_broken = False
+    text_rot = 0
     i = 2
     while i < len(argv):
         a = argv[i]
@@ -185,13 +185,13 @@ def bauen(argv):
         elif a == "--kein-sig":
             kein_sig = True; i += 1
         elif a == "--sig-dreh":
-            sig_dreh = True; i += 1
+            sig_rot = True; i += 1
         elif a == "--nutz-dreh":
-            nutz_dreh = int(argv[i + 1]); i += 2
+            nutz_rot = int(argv[i + 1]); i += 2
         elif a == "--kennung":
-            kennung_kaputt = True; i += 1
+            kennung_broken = True; i += 1
         elif a == "--text-dreh":
-            text_dreh = int(argv[i + 1]); i += 2
+            text_rot = int(argv[i + 1]); i += 2
         else:
             sys.exit("mkomod: unbekannte Option " + a)
 
@@ -201,42 +201,42 @@ def bauen(argv):
 
     nutz = bytearray(strip_debug(ein))
 
-    if text_dreh > 0:
+    if text_rot > 0:
         off, laenge = text_bereich(bytes(nutz))
-        anfang = off + laenge // 2
-        ziel = (funktion_in_text(bytes(nutz), "ps2m__init_inner")
+        begin = off + laenge // 2
+        target = (funktion_in_text(bytes(nutz), "ps2m__init_inner")
                 or funktion_in_text(bytes(nutz), "ps2m__init"))
-        if ziel is not None:
-            fwert, fgroesse = ziel
-            anfang = off + fwert + (min(16, max(fgroesse // 2, 1)) if fgroesse else 16)
-        for k in range(text_dreh):
-            nutz[anfang + k] = 0xCC
+        if target is not None:
+            fwert, fgroesse = target
+            begin = off + fwert + (min(16, max(fgroesse // 2, 1)) if fgroesse else 16)
+        for k in range(text_rot):
+            nutz[begin + k] = 0xCC
 
     nb = bytes(nutz)
-    kopf = bytearray(HDR)
-    kopf[0:8] = KENNUNG
-    struct.pack_into("<I", kopf, 8, FORMAT)
-    struct.pack_into("<I", kopf, 12, abi)
-    struct.pack_into("<Q", kopf, 16, len(nb))
-    struct.pack_into("<Q", kopf, 24, 0)
+    header = bytearray(HDR)
+    header[0:8] = KENNUNG
+    struct.pack_into("<I", header, 8, FORMAT)
+    struct.pack_into("<I", header, 12, abi)
+    struct.pack_into("<Q", header, 16, len(nb))
+    struct.pack_into("<Q", header, 24, 0)
     nb_name = name.encode()[:31]
-    kopf[32:32 + len(nb_name)] = nb_name
+    header[32:32 + len(nb_name)] = nb_name
 
-    msg = bytes(kopf) + nb
+    msg = bytes(header) + nb
     sig = bytearray(ed25519_sign(seed, msg))
 
-    if nutz_dreh >= 0:
+    if nutz_rot >= 0:
         nb = bytearray(nb)
-        nb[nutz_dreh] ^= 0xFF
+        nb[nutz_rot] ^= 0xFF
         nb = bytes(nb)
     if kein_sig:
         sig = bytearray(SIGLEN)
-    if sig_dreh:
+    if sig_rot:
         sig[0] ^= 0x01
-    if kennung_kaputt:
-        kopf[0] = 0x58
+    if kennung_broken:
+        header[0] = 0x58
 
-    daten = bytes(kopf) + nb + bytes(sig)
+    daten = bytes(header) + nb + bytes(sig)
     open(aus, "wb").write(daten)
     print("%s (%d Oktette: Kopf %d, Nutzlast %d, Signatur %d), abi=%d, "
           "name=%s, sha256=%s"

@@ -141,11 +141,11 @@ def bund_read(bund):
 
 def meta_aus_opk(pfad):
     with open(pfad, "rb") as f:
-        kopf = f.read(64)
-        if kopf[:8] != b"OPKG0001":
+        header = f.read(64)
+        if header[:8] != b"OPKG0001":
             raise SystemExit("veroeffentlichen: %s ist not an OPKG file"
                              % pfad)
-        ml = int.from_bytes(kopf[8:16], "little")
+        ml = int.from_bytes(header[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
     name = fassung = None
     for z in meta.split("\n"):
@@ -218,13 +218,13 @@ def dir_text(fassung, gen, kette, gesperrt, pakete):
     return ("\n".join(z) + "\n").encode("ascii")
 
 
-def verknuepfen(quelle, ziel):
-    if os.path.exists(ziel):
-        os.remove(ziel)
+def verknuepfen(quelle, target_2):
+    if os.path.exists(target_2):
+        os.remove(target_2)
     try:
-        os.link(quelle, ziel)
+        os.link(quelle, target_2)
     except OSError:
-        shutil.copy2(quelle, ziel)
+        shutil.copy2(quelle, target_2)
 
 
 def current_set(aus, register, gesperrt):
@@ -244,7 +244,7 @@ def current_set(aus, register, gesperrt):
 
 
 def bauen(aus, stand, bund, notiz, sperren, feste_version=None,
-          signierer="haupt", kette_kaputt=False):
+          signierer="haupt", chain_broken=False):
     os.makedirs(os.path.join(aus, "pakete"), exist_ok=True)
     os.makedirs(os.path.join(aus, "v"), exist_ok=True)
 
@@ -298,7 +298,7 @@ def bauen(aus, stand, bund, notiz, sperren, feste_version=None,
     sperrliste = sorted(set(gesperrt_read(aus)) | set(sperren))
     gesperrt_write(aus, sperrliste)
     kette = [dict(k) for k in b["kette"]]
-    if kette_kaputt and kette:
+    if chain_broken and kette:
         sig = bytearray(bytes.fromhex(kette[-1]["sig"]))
         sig[0] ^= 1
         kette[-1]["sig"] = bytes(sig).hex()

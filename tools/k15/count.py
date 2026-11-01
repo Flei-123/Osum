@@ -17,9 +17,9 @@ import sys
 
 def load(pfad):
     d = open(pfad, "rb").read()
-    teile = []
+    parts_2 = []
     i = 0
-    while len(teile) < 4:
+    while len(parts_2) < 4:
         while d[i:i + 1] in b" \t\r\n":
             i += 1
         if d[i:i + 1] == b"#":
@@ -29,12 +29,12 @@ def load(pfad):
         j = i
         while d[j:j + 1] not in b" \t\r\n":
             j += 1
-        teile.append(d[i:j])
+        parts_2.append(d[i:j])
         i = j
     i += 1
-    if teile[0] != b"P6":
-        raise SystemExit("not a P6 PPM: %s" % teile[0])
-    return int(teile[1]), int(teile[2]), d[i:]
+    if parts_2[0] != b"P6":
+        raise SystemExit("not a P6 PPM: %s" % parts_2[0])
+    return int(parts_2[1]), int(parts_2[2]), d[i:]
 
 
 def main():
@@ -43,13 +43,13 @@ def main():
         return 2
     ppm = sys.argv[1]
     x0, y0, w, h = (int(v) for v in sys.argv[2:6])
-    ziel = tuple(int(v) for v in sys.argv[6:9])
+    target = tuple(int(v) for v in sys.argv[6:9])
     W, H, px = load(ppm)
     n = 0
     for y in range(y0, min(y0 + h, H)):
         for x in range(x0, min(x0 + w, W)):
             o = (y * W + x) * 3
-            if (px[o], px[o + 1], px[o + 2]) == ziel:
+            if (px[o], px[o + 1], px[o + 2]) == target:
                 n += 1
     print(n)
     return 0

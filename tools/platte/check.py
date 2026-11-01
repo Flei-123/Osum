@@ -23,10 +23,10 @@ def main(low, serial, full):
     roh = open(serial, "rb").read().decode("latin1")
     marke = "settings: rect name=waa "
     schnitt = roh.rfind(marke)
-    schwanz = roh[schnitt:] if schnitt >= 0 else roh
+    tail = roh[schnitt:] if schnitt >= 0 else roh
     f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
-    zeilen = [m for m in (gc.FENSTERTEXT.search(ln) for ln in schwanz.splitlines()) if m]
+    zeilen = [m for m in (gc.FENSTERTEXT.search(ln) for ln in tail.splitlines()) if m]
     if not zeilen:
         print("disk NO caption in the recording")
         return 1

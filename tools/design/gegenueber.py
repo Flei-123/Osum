@@ -36,7 +36,7 @@ def load_2(d, name):
     return None
 
 
-def paar(a, b, titel, ziel):
+def paar(a, b, titel, target):
     if a is None or b is None:
         return False
     w = a.size[0] + b.size[0] + 3 * RAND
@@ -48,7 +48,7 @@ def paar(a, b, titel, ziel):
     d.text((RAND, 8), "%s -- VORHER (classic)" % titel, fill=(244, 244, 245))
     d.text((2 * RAND + a.size[0], 8), "%s -- NACHHER (osum)" % titel,
            fill=(134, 239, 172))
-    im.save(ziel)
+    im.save(target)
     return True
 
 

@@ -41,7 +41,7 @@ FOLDER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
           "chrom", "eisen"]
 
 
-def namen(n):
+def names(n):
     """Die Namen, in der Reihenfolge, in der sie angelegt werden --
     dieselbe Aufteilung wie in tools/k15/bigfs.py, damit die beiden
     Abbilder vergleichbar bleiben."""
@@ -63,11 +63,11 @@ def groessen(n, budget):
     aus = [0] * n
     kand = list(range(0, n, 13))
     roh = []
-    wert = 65536
+    value = 65536
     for k in range(len(kand)):
-        roh.append(wert)
-        if wert > 64:
-            wert = wert * 88 // 100
+        roh.append(value)
+        if value > 64:
+            value = value * 88 // 100
     summe = sum(roh)
     for k, i in enumerate(kand):
         aus[i] = max(1, roh[k] * budget // summe)
@@ -84,17 +84,17 @@ def main(argv):
     inhalt = os.path.join(arbeit, "inhalt")
     os.makedirs(inhalt, exist_ok=True)
 
-    liste = namen(n)
+    liste = names(n)
     sz = groessen(n, budget)
 
     zeilen = ["--inodes=4096", "/data/"]
-    gesehen = set()
+    seen = set()
     for pfad, _ in liste:
-        teile = pfad.strip("/").split("/")
-        for k in range(1, len(teile) + 1):
-            p = "/" + "/".join(teile[:k]) + "/"
-            if p not in gesehen:
-                gesehen.add(p)
+        parts = pfad.strip("/").split("/")
+        for k in range(1, len(parts) + 1):
+            p = "/" + "/".join(parts[:k]) + "/"
+            if p not in seen:
+                seen.add(p)
                 if p != "/data/":
                     zeilen.append(p)
 
@@ -115,9 +115,9 @@ def main(argv):
     dat = {}
 
     def add_2(p, o):
-        teile = p.strip("/").split("/")
-        for k in range(0, len(teile) + 1):
-            d = "/" + "/".join(teile[:k])
+        parts = p.strip("/").split("/")
+        for k in range(0, len(parts) + 1):
+            d = "/" + "/".join(parts[:k])
             if d == "":
                 d = "/"
             if len(d) > 1 and d.endswith("/"):
@@ -128,7 +128,7 @@ def main(argv):
 
     for i, (pfad, _name) in enumerate(liste):
         add_2(pfad, sz[i])
-    for d in sorted(gesehen):
+    for d in sorted(seen):
         dd = d if len(d) == 1 else d.rstrip("/")
         okt.setdefault(dd, 0)
         kb.setdefault(dd, 0)
@@ -144,7 +144,7 @@ def main(argv):
     mit = sum(1 for x in sz if x > 0)
     print("tree: %d files (%d with content), %d folders, %d octets, "
           "%d KiB-Bloecke"
-          % (n, mit, len(gesehen), okt["/data"], kb["/data"]))
+          % (n, mit, len(seen), okt["/data"], kb["/data"]))
     return 0
 
 

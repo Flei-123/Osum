@@ -38,9 +38,9 @@ def ist_clipboard():
 
 def all_dateien():
     aus = {}
-    for stamm, verz, namen in os.walk(KERN):
+    for stamm, verz, names_2 in os.walk(KERN):
         verz[:] = [d for d in verz if d not in ("user", "app")]
-        for n in namen:
+        for n in names_2:
             if n.endswith(".fi"):
                 rel = os.path.relpath(os.path.join(stamm, n), KERN)
                 d = os.path.dirname(rel)
@@ -55,32 +55,32 @@ def vergleiche():
     for m, d in flach.items():
         if m in soll and m not in ist:
             ist[m] = d
-    passt, falsch, ohne_soll, fehlt = [], [], [], []
+    fits, wrong, without_soll, fehlt = [], [], [], []
     for m, d in sorted(ist.items()):
         s = soll.get(m)
         if s is None:
-            ohne_soll.append((m, d))
+            without_soll.append((m, d))
         elif s == d:
-            passt.append((m, d))
+            fits.append((m, d))
         else:
-            falsch.append((m, d, s))
+            wrong.append((m, d, s))
     for m in sorted(soll):
         if m not in ist and m not in flach:
             fehlt.append(m)
-    return passt, falsch, ohne_soll, soll, ist, fehlt
+    return fits, wrong, without_soll, soll, ist, fehlt
 
 
 def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
-    passt, falsch, ohne_soll, soll, ist, fehlt = vergleiche()
+    fits, wrong, without_soll, soll, ist, fehlt = vergleiche()
 
     if modus == "--fehlend":
-        for m, d in ohne_soll:
+        for m, d in without_soll:
             print("%s (liegt in %s)" % (m, d))
         return 0
 
     if modus == "--offen":
-        for m, d, s in falsch:
+        for m, d, s in wrong:
             print("%s %s %s" % (m, d, s))
         return 0
 
@@ -90,20 +90,20 @@ def main():
             return 1
         print("filing: %d files in the right place, %d in the wrong one, "
               "%d ohne Soll, %d vermisst"
-              % (len(passt), len(falsch), len(ohne_soll), len(fehlt)))
-        for m, d, s in falsch:
+              % (len(fits), len(wrong), len(without_soll), len(fehlt)))
+        for m, d, s in wrong:
             print("  WRONG  %s is in '%s', soll nach '%s'" % (m, d, s))
-        for m, d in ohne_soll:
+        for m, d in without_soll:
             print("  NO TARGET  %s (is in '%s')" % (m, d))
         for m in fehlt:
             print("  MISSING  %s is in the target, but is nowhere" % m)
-        return 1 if (falsch or ohne_soll or fehlt) else 0
+        return 1 if (wrong or without_soll or fehlt) else 0
 
     print("== ABLAGE ==")
     print("Soll-Eintraege: %d, Kerndateien: %d" % (len(soll), len(ist)))
-    print("am richtigen Ort: %d" % len(passt))
-    print("am falschen Ort : %d" % len(falsch))
-    print("without target  : %d" % len(ohne_soll))
+    print("am richtigen Ort: %d" % len(fits))
+    print("am falschen Ort : %d" % len(wrong))
+    print("without target  : %d" % len(without_soll))
     print()
     nach = {}
     for m, d in ist.items():
@@ -111,15 +111,15 @@ def main():
     print("-- Ist-Verteilung --")
     for d, c in sorted(nach.items(), key=lambda kv: (-kv[1], kv[0])):
         print("  %-12s %3d" % (d, c))
-    if falsch:
+    if wrong:
         print()
         print("-- noch umzuziehen --")
-        for m, d, s in falsch:
+        for m, d, s in wrong:
             print("  %-12s %s -> %s" % (m, d, s))
-    if ohne_soll:
+    if without_soll:
         print()
         print("-- without target entry --")
-        for m, d in ohne_soll:
+        for m, d in without_soll:
             print("  %-12s (%s)" % (m, d))
     return 0
 

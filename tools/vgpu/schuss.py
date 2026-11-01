@@ -20,12 +20,12 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    sock, ziel = sys.argv[1], sys.argv[2]
+    sock, target = sys.argv[1], sys.argv[2]
     frist = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
     geraet = sys.argv[4] if len(sys.argv) > 4 else ""
 
-    if os.path.exists(ziel):
-        os.unlink(ziel)
+    if os.path.exists(target):
+        os.unlink(target)
     s = None
     bis = time.time() + frist
     while time.time() < bis:
@@ -45,7 +45,7 @@ def main():
         s.recv(65536)
     except OSError:
         pass
-    cmd = "screendump %s" % ziel
+    cmd = "screendump %s" % target
     if geraet:
         cmd += " %s" % geraet
     s.sendall((cmd + "\n").encode())
@@ -53,7 +53,7 @@ def main():
     bis = time.time() + frist
     while time.time() < bis:
         try:
-            g = os.path.getsize(ziel)
+            g = os.path.getsize(target)
         except OSError:
             g = -1
         if g > 0 and g == letzte:
@@ -64,10 +64,10 @@ def main():
         s.close()
     except OSError:
         pass
-    if not os.path.exists(ziel) or os.path.getsize(ziel) == 0:
+    if not os.path.exists(target) or os.path.getsize(target) == 0:
         print("no image written")
         return 1
-    print("%s (%d Oktette)" % (ziel, os.path.getsize(ziel)))
+    print("%s (%d Oktette)" % (target, os.path.getsize(target)))
     return 0
 
 

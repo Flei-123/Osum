@@ -76,15 +76,15 @@ VORGABE = "latin"
 def bereiche_lesen(text):
     """"20-7E,A0-FF" -> [(0x20, 0x7E), (0xA0, 0xFF)].  Auch "FFFD" allein."""
     aus = []
-    for stueck in text.split(","):
-        stueck = stueck.strip()
-        if not stueck:
+    for chunk in text.split(","):
+        chunk = chunk.strip()
+        if not chunk:
             continue
-        if "-" in stueck:
-            a, b = stueck.split("-", 1)
+        if "-" in chunk:
+            a, b = chunk.split("-", 1)
             aus.append((int(a, 16), int(b, 16)))
         else:
-            v = int(stueck, 16)
+            v = int(chunk, 16)
             aus.append((v, v))
     return aus
 
@@ -292,35 +292,35 @@ def summe(b):
 
 def cmap4(paare):
     """Format 4, ein Segment je zusammenhaengendem Block plus 0xFFFF."""
-    zeichen = sorted(paare)
+    char = sorted(paare)
     segmente = []
     i = 0
-    while i < len(zeichen):
-        a = zeichen[i]
+    while i < len(char):
+        a = char[i]
         j = i
-        while (j + 1 < len(zeichen) and zeichen[j + 1] == zeichen[j] + 1
-               and paare[zeichen[j + 1]] == paare[zeichen[j]] + 1):
+        while (j + 1 < len(char) and char[j + 1] == char[j] + 1
+               and paare[char[j + 1]] == paare[char[j]] + 1):
             j += 1
-        segmente.append((a, zeichen[j], (paare[a] - a) & 0xFFFF))
+        segmente.append((a, char[j], (paare[a] - a) & 0xFFFF))
         i = j + 1
     segmente.append((0xFFFF, 0xFFFF, 1))
     n = len(segmente)
     suchbereich = 2
     while suchbereich * 2 <= n * 2:
         suchbereich *= 2
-    eintrag = 0
+    entry = 0
     v = suchbereich // 2
     while v > 1:
-        eintrag += 1
+        entry += 1
         v //= 2
-    kopf = struct.pack(">HHHHHHH", 4, 16 + n * 8, 0, n * 2, suchbereich,
-                       eintrag, n * 2 - suchbereich)
+    header = struct.pack(">HHHHHHH", 4, 16 + n * 8, 0, n * 2, suchbereich,
+                       entry, n * 2 - suchbereich)
     enden = b"".join(struct.pack(">H", s[1]) for s in segmente)
     anfaenge = b"".join(struct.pack(">H", s[0]) for s in segmente)
     deltas = b"".join(struct.pack(">H", s[2]) for s in segmente)
     bereiche = b"\x00\x00" * n
-    unter = kopf + enden + b"\x00\x00" + anfaenge + deltas + bereiche
-    return struct.pack(">HHHHI", 0, 1, 3, 1, 12) + unter
+    under = header + enden + b"\x00\x00" + anfaenge + deltas + bereiche
+    return struct.pack(">HHHHI", 0, 1, 3, 1, 12) + under
 
 
 def kern0_bauen(paare):
@@ -331,24 +331,24 @@ def kern0_bauen(paare):
     suchbereich = 6
     while suchbereich * 2 <= n * 6:
         suchbereich *= 2
-    eintrag = 0
+    entry = 0
     v = suchbereich // 6
     while v > 1:
-        eintrag += 1
+        entry += 1
         v //= 2
-    koerper = struct.pack(">HHHH", n, suchbereich, eintrag,
+    koerper = struct.pack(">HHHH", n, suchbereich, entry,
                           n * 6 - suchbereich)
     for li, re in liste:
         koerper += struct.pack(">HHh", li, re, paare[(li, re)])
-    unter = struct.pack(">HHH", 0, 14 + len(koerper), 0x0001) + koerper
-    return struct.pack(">HH", 0, 1) + unter
+    under = struct.pack(">HHH", 0, 14 + len(koerper), 0x0001) + koerper
+    return struct.pack(">HH", 0, 1) + under
 
 
 def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    quelle, ziel = argv[1], argv[2]
+    quelle, target = argv[1], argv[2]
     rest = argv[3:]
     if rest and rest[0] == "--set":
         if rest[1] not in SAETZE:
@@ -368,13 +368,13 @@ def main(argv):
     voll = v.cmap()
 
     behalten = [0]
-    zeichen = {}
+    char = {}
     for erst, letzt in bereiche:
         for c in range(erst, letzt + 1):
             g = voll.get(c)
             if g is None:
                 continue
-            zeichen[c] = g
+            char[c] = g
             if g not in behalten:
                 behalten.append(g)
     offen = list(behalten)
@@ -385,22 +385,22 @@ def main(argv):
                 behalten.append(k)
                 offen.append(k)
     behalten.sort()
-    karte = {alt: neu for neu, alt in enumerate(behalten)}
+    karte = {alt: new for new, alt in enumerate(behalten)}
 
     glyf = bytearray()
-    versatz = []
+    offset = []
     for alt in behalten:
-        versatz.append(len(glyf))
+        offset.append(len(glyf))
         roh = v.glyph_bytes(alt)
         if roh and s16(roh, 0) < 0:
             roh = komponenten_neu(roh, karte)
         glyf += pad4(roh)
-    versatz.append(len(glyf))
-    lang = versatz[-1] > 0x1FFFE
+    offset.append(len(glyf))
+    lang = offset[-1] > 0x1FFFE
     if lang:
-        loca = b"".join(struct.pack(">I", o) for o in versatz)
+        loca = b"".join(struct.pack(">I", o) for o in offset)
     else:
-        loca = b"".join(struct.pack(">H", o // 2) for o in versatz)
+        loca = b"".join(struct.pack(">H", o // 2) for o in offset)
 
     hmtx = b"".join(struct.pack(">Hh", *v.metric(alt)) for alt in behalten)
 
@@ -413,7 +413,7 @@ def main(argv):
     struct.pack_into(">H", maxp, 4, len(behalten))
 
     tabellen = {
-        "cmap": cmap4({c: karte[g] for c, g in zeichen.items()}),
+        "cmap": cmap4({c: karte[g] for c, g in char.items()}),
         "glyf": bytes(glyf),
         "head": bytes(head),
         "hhea": bytes(hhea),
@@ -432,12 +432,12 @@ def main(argv):
     suchbereich = 16
     while suchbereich * 2 <= n * 16:
         suchbereich *= 2
-    eintrag = 0
+    entry = 0
     x = suchbereich // 16
     while x > 1:
-        eintrag += 1
+        entry += 1
         x //= 2
-    kopf = struct.pack(">IHHHH", 0x00010000, n, suchbereich, eintrag,
+    header = struct.pack(">IHHHH", 0x00010000, n, suchbereich, entry,
                        n * 16 - suchbereich)
     pos = 12 + 16 * n
     verz = b""
@@ -448,17 +448,17 @@ def main(argv):
                             len(d))
         koerper += pad4(d)
         pos += len(pad4(d))
-    datei = bytearray(kopf + verz + koerper)
-    pruef = (0xB1B0AFBA - summe(bytes(datei))) & 0xFFFFFFFF
+    datei = bytearray(header + verz + koerper)
+    check = (0xB1B0AFBA - summe(bytes(datei))) & 0xFFFFFFFF
     for i, m in enumerate(marken):
         if m == "head":
             hoff = u32(datei, 12 + 16 * i + 8)
-            struct.pack_into(">I", datei, hoff + 8, pruef)
+            struct.pack_into(">I", datei, hoff + 8, check)
 
-    open(ziel, "wb").write(bytes(datei))
+    open(target, "wb").write(bytes(datei))
     print("%s: %d Glyphen, %d Zeichen, %d Oktette (%s), upm=%d, "
           "asc=%d desc=%d gap=%d, kern=%d Paare"
-          % (ziel, len(behalten), len(zeichen), len(datei),
+          % (target, len(behalten), len(char), len(datei),
              ", ".join(marken), v.upm, v.ascent, v.descent, v.gap, len(kp)))
     return 0
 

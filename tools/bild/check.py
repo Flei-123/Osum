@@ -84,33 +84,33 @@ def main(argv):
         print(__doc__)
         return 2
     quelldir, holdir = argv[1], argv[2]
-    schlecht = 0
+    bad = 0
     for name, quelle, art, q in FAELLE:
         hp = os.path.join(holdir, name)
         qp = os.path.join(quelldir, quelle)
         if not os.path.exists(hp) or os.path.getsize(hp) == 0:
             print("FAIL  %-12s the file did not come from the image" % name)
-            schlecht += 1
+            bad += 1
             continue
         try:
             mein = Image.open(hp)
             mein.load()
         except Exception as e:
             print("FAIL  %-12s Pillow cannot open it: %s" % (name, e))
-            schlecht += 1
+            bad += 1
             continue
         orig = Image.open(qp)
         orig.seek(0)
         if mein.size != orig.size:
             print("FAIL  %-12s dimensions %s instead of %s"
                   % (name, mein.size, orig.size))
-            schlecht += 1
+            bad += 1
             continue
         fmt = (mein.format or "?").lower()
         if fmt != art:
             print("FAIL  %-12s Pillow nennt es %s, erwartet %s"
                   % (name, fmt, art))
-            schlecht += 1
+            bad += 1
             continue
         pm, po = punkte(mein), punkte(orig)
         worst, mittel, nz, n = abstand(pm, po)
@@ -123,7 +123,7 @@ def main(argv):
                 print("FAIL  %-12s PNG is NOT lossless: maxdiff=%d, "
                       "%d von %d Bildpunkten weichen ab"
                       % (name, worst, nz, n))
-                schlecht += 1
+                bad += 1
             continue
         b = io.BytesIO()
         orig.convert("RGB").save(b, "JPEG", quality=q, subsampling=0)
@@ -142,18 +142,18 @@ def main(argv):
         if meingr > libgr * GROESSE_FAKTOR:
             schlimm.append("Datei %d gegen %d Oktette (Faktor %.2f)"
                            % (meingr, libgr, meingr / max(1, libgr)))
-        kopf = ("%-12s %dx%d JPEG q%d: gegen das Original maxdiff=%d "
+        header = ("%-12s %dx%d JPEG q%d: gegen das Original maxdiff=%d "
                 "mittel=%.2f | libjpeg selbst maxdiff=%d mittel=%.2f | "
                 "gegen libjpeg maxdiff=%d mittel=%.2f | %d gegen %d Oktette"
                 % (name, mein.size[0], mein.size[1], q, worst, mittel,
                    lw, lm, vw, vm, meingr, libgr))
         if schlimm:
-            print("FAIL  " + kopf + " -- " + "; ".join(schlimm))
-            schlecht += 1
+            print("FAIL  " + header + " -- " + "; ".join(schlimm))
+            bad += 1
         else:
-            print("OK    " + kopf)
-    print("pruefen: %d Faelle, %d schlecht" % (len(FAELLE), schlecht))
-    return 0 if schlecht == 0 else 1
+            print("OK    " + header)
+    print("pruefen: %d Faelle, %d schlecht" % (len(FAELLE), bad))
+    return 0 if bad == 0 else 1
 
 
 if __name__ == "__main__":

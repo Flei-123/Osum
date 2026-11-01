@@ -56,14 +56,14 @@ def raster_s(f, gid, px, S):
                 continue
             schnitte.sort(key=lambda t: t[0])
             wind = 0
-            anfang = 0
+            begin = 0
             for (xs, dz) in schnitte:
                 vorher = wind
                 wind += dz
                 if vorher == 0 and wind != 0:
-                    anfang = xs
+                    begin = xs
                 elif vorher != 0 and wind == 0:
-                    j0 = -((-(anfang - halb)) // schritt)
+                    j0 = -((-(begin - halb)) // schritt)
                     j1 = -((-(xs - halb)) // schritt)
                     if j0 < bx0 * S:
                         j0 = bx0 * S
@@ -137,9 +137,9 @@ def abweichung(aw, ah, af, bw, bh, bf):
                     n += 1
             if n == 0:
                 continue
-            wert = (summe / float(n), groesst, dx, dy)
-            if bestes is None or wert[0] < bestes[0]:
-                bestes = wert
+            value = (summe / float(n), groesst, dx, dy)
+            if bestes is None or value[0] < bestes[0]:
+                bestes = value
     return bestes
 
 
@@ -171,7 +171,7 @@ def main():
               "Vergleich gegen FreeType nicht.")
 
     zusagen = 0
-    fehler = 0
+    error = 0
     all_stufen = []
     all_edges = []
     all_d = []
@@ -234,7 +234,7 @@ def main():
     else:
         print("  FAIL  a glyph has only %d coverage levels -- that is "
               "eine Bitmaske" % min(all_stufen))
-        fehler += 1
+        error += 1
 
     if min(all_edges) >= 3:
         print("  OK    every edge carries at least three levels "
@@ -243,7 +243,7 @@ def main():
         zusagen += 1
     else:
         print("  FAIL  an edge carries only %d levels" % min(all_edges))
-        fehler += 1
+        error += 1
 
     if HAT_PIL:
         md = sum(all_d) / float(len(all_d))
@@ -258,7 +258,7 @@ def main():
         else:
             print("  FAIL  |d| against FreeType %.2f of 255 -- that is "
                   "kein Hinting mehr, das ist ein anderes Zeichen" % md)
-            fehler += 1
+            error += 1
 
     if dichte:
         print("PAINT-AA: Abtastdichte gegen %dx%d (Referenz, %d Stufen)"
@@ -283,10 +283,10 @@ def main():
                 zusagen += 1
             else:
                 print("  FAIL  4x4 is off by %.3f of 255" % v4)
-                fehler += 1
+                error += 1
 
-    print("PAINT-AA: %d Zusagen, %d Fehler" % (zusagen, fehler))
-    return 1 if fehler else 0
+    print("PAINT-AA: %d Zusagen, %d Fehler" % (zusagen, error))
+    return 1 if error else 0
 
 
 if __name__ == "__main__":

@@ -414,7 +414,7 @@ def _run(pic, x0, y, schritt, n, bg, tol):
 def linien_probe(pic, texts, ox, oy, ww, asc, desc):
     """Wie viele Beschriftungen auf einer waagerechten Linie liegen."""
     treffer = 0
-    schlecht = []
+    bad_2 = []
     for t in texts:
         x = ox + t["x"]
         y0 = oy + t["base"] - asc
@@ -435,14 +435,14 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
             if right is None or right != links:
                 continue
             treffer += 1
-            schlecht.append(
+            bad_2.append(
                 "LINIE  '%s' bei %d,%d steht auf einer Linie der Farbe "
                 "%02x%02x%02x (Zeile y=%d, %d Bildpunkte links und rechts "
                 "einfarbig)"
                 % (t["t"][:32], x, oy + t["base"], links[0], links[1],
                    links[2], y, LINE_RUN))
             break
-    return treffer, schlecht
+    return treffer, bad_2
 
 
 def taskbar_messen(pic, serial, asc, desc):
@@ -455,9 +455,9 @@ def taskbar_messen(pic, serial, asc, desc):
     if bar is None:
         return 0, 0, 0, 0, 0, ["LEISTE keine `taskbar: STEHT`-Zeile "
                                "im Mitschnitt -- uitrace aus?"]
-    schlecht = []
+    bad_2 = []
     boxes = []
-    leer = 0
+    empty_2 = 0
     for t in sorted(texts, key=lambda t: t["x"]):
         x = bar["x"] + t["x"]
         y0 = bar["y"] + t["base"] - asc
@@ -468,8 +468,8 @@ def taskbar_messen(pic, serial, asc, desc):
             bg = rgb(t["bg"])
         box = inkbox(pic, x, y0, min(x1, bar["x"] + bar["w"]), y1, bg, 10)
         if box is None:
-            leer += 1
-            schlecht.append(
+            empty_2 += 1
+            bad_2.append(
                 "LEISTE EMPTY  '%s' (%s) at %d,%d w=%d: no pixel differs "
                 "from the measured ground %02x%02x%02x"
                 % (t["t"][:32], t["kind"], x, bar["y"] + t["base"],
@@ -481,27 +481,27 @@ def taskbar_messen(pic, serial, asc, desc):
         if (x < bar["x"] or x1 > bar["x"] + bar["w"]
                 or b[1] < bar["y"] or b[3] >= bar["y"] + bar["h"]):
             ab += 1
-            schlecht.append("LEISTE CUT    '%s' at %d..%d (ink %s) leaves "
+            bad_2.append("LEISTE CUT    '%s' at %d..%d (ink %s) leaves "
                             "the bar %d,%d %dx%d"
                             % (name[:32], x, x1, b[:4], bar["x"], bar["y"],
                                bar["w"], bar["h"]))
     for t in texts:
-        eigen = None
+        own = None
         for rx, ry, rw, rh in rechtecke:
             if (rw > 0 and t["x"] >= rx and t["x"] < rx + rw
                     and t["base"] > ry and t["base"] <= ry + rh):
-                if eigen is None or rw < eigen[2]:
-                    eigen = (rx, ry, rw, rh)
-        if eigen is None:
+                if own is None or rw < own[2]:
+                    own = (rx, ry, rw, rh)
+        if own is None:
             continue
-        if t["x"] + t["tw"] > eigen[0] + eigen[2]:
+        if t["x"] + t["tw"] > own[0] + own[2]:
             ab += 1
-            schlecht.append(
+            bad_2.append(
                 "LEISTE CUT    '%s' meldet x=%d tw=%d und reicht damit "
                 "%d Bildpunkte ueber sein Bedienelement %d,%d %dx%d hinaus"
                 % (t["t"][:24], t["x"], t["tw"],
-                   t["x"] + t["tw"] - eigen[0] - eigen[2],
-                   eigen[0], eigen[1], eigen[2], eigen[3]))
+                   t["x"] + t["tw"] - own[0] - own[2],
+                   own[0], own[1], own[2], own[3]))
     over_2 = 0
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
@@ -511,10 +511,10 @@ def taskbar_messen(pic, serial, asc, desc):
             if not (a[5] & b[5]):
                 continue
             over_2 += 1
-            schlecht.append("LEISTE OVER   '%s' %s and '%s' %s"
+            bad_2.append("LEISTE OVER   '%s' %s and '%s' %s"
                             % (boxes[i][0][:24], a[:4],
                                boxes[j][0][:24], b[:4]))
-    return len(texts), len(boxes), leer, ab, over_2, schlecht
+    return len(texts), len(boxes), empty_2, ab, over_2, bad_2
 
 
 def main(argv):
@@ -658,7 +658,7 @@ def main(argv):
              kueber))
     for line in bad[:30]:
         print("  " + line)
-    schlecht = 0
+    bad_2 = 0
     if leiste:
         bn, bm, bleer, bab, bueber, bbad = taskbar_messen(
             pic, argv[2], asc, desc)
@@ -666,13 +666,13 @@ def main(argv):
               "overlapping %d" % (bn, bm, bleer, bab, bueber))
         for line in bbad[:30]:
             print("  " + line)
-        schlecht = bleer + bab + bueber
+        bad_2 = bleer + bab + bueber
     if linien:
-        schlecht = schlecht + line_2
+        bad_2 = bad_2 + line_2
     if knoepfe:
-        schlecht = schlecht + kohne + kueber
+        bad_2 = bad_2 + kohne + kueber
     return 0 if (empty == 0 and cut == 0 and over == 0
-                 and schlecht == 0) else 1
+                 and bad_2 == 0) else 1
 
 
 if __name__ == "__main__":

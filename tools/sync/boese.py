@@ -46,7 +46,7 @@ def rueckschritt(sp, alt):
     return "die alte, ECHT versiegelte Wurzel wieder eingespielt"
 
 
-def fremd(sp):
+def foreign(sp):
     idx = load(sp, "INDEX").split(b"\n")
     eintraege = [z.split(b"\t") for z in idx if z.count(b"\t") == 2]
     if len(eintraege) < 2:
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     elif was == "rueckschritt":
         print(rueckschritt(sp, sys.argv[3]))
     elif was == "fremd":
-        print(fremd(sp))
+        print(foreign(sp))
     elif was == "gross":
         print(gross(sp))
     elif was == "wurzelluege":

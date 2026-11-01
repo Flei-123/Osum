@@ -49,15 +49,15 @@ def messen(px, w, h, bx, by, bw, bh, name):
         return False
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
     links = min(xs) - bx
-    rechts = (bx + bw - 1) - max(xs)
+    right = (bx + bw - 1) - max(xs)
     oben = min(ys) - by
     unten = (by + bh - 1) - max(ys)
-    dx = abs(links - rechts)
+    dx = abs(links - right)
     dy = abs(oben - unten)
     ok = dx <= 1 and dy <= 1
     print("  %-14s Knopf %dx%d   links %3d rechts %3d (Diff %d)   "
           "oben %3d unten %3d (Diff %d)   %s"
-          % (name, bw, bh, links, rechts, dx, oben, unten, dy,
+          % (name, bw, bh, links, right, dx, oben, unten, dy,
              "MITTIG" if ok else "NICHT MITTIG"))
     return ok
 

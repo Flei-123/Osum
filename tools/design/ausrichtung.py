@@ -54,24 +54,24 @@ def columns(m):
 
 def buendel(voll, luecke):
     out = []
-    lauf = None
+    run_2 = None
     leer = 0
     for x, v in enumerate(voll):
         if v:
-            if lauf is None:
-                lauf = [x, x]
+            if run_2 is None:
+                run_2 = [x, x]
             else:
-                lauf[1] = x
+                run_2[1] = x
             leer = 0
         else:
-            if lauf is not None:
+            if run_2 is not None:
                 leer += 1
                 if leer >= luecke:
-                    out.append((lauf[0], lauf[1]))
-                    lauf = None
+                    out.append((run_2[0], run_2[1]))
+                    run_2 = None
                     leer = 0
-    if lauf is not None:
-        out.append((lauf[0], lauf[1]))
+    if run_2 is not None:
+        out.append((run_2[0], run_2[1]))
     return out
 
 
@@ -116,11 +116,11 @@ def field_messen(px, x0, y0, w, h, name, args):
     }
 
 
-def bericht(r, args, fehler):
+def bericht(r, args, error):
     if r["leer"]:
         print("  %-14s FIELD EMPTY (no pixel stands out from the background)"
               % r["name"])
-        fehler.append("%s: leer" % r["name"])
+        error.append("%s: leer" % r["name"])
         return
     x0, y0, w, h = r["feld"]
     print("  %-14s field %dx%d at %d,%d   background %s"
@@ -130,12 +130,12 @@ def bericht(r, args, fehler):
     if abs(r["links"] - r["rechts"]) > args.tol:
         print("               VERLETZT waagrecht: %d gegen %d"
               % (r["links"], r["rechts"]))
-        fehler.append("%s: waagrecht %d/%d"
+        error.append("%s: waagrecht %d/%d"
                       % (r["name"], r["links"], r["rechts"]))
     if abs(r["oben"] - r["unten"]) > args.tol:
         print("               VERLETZT senkrecht: %d gegen %d"
               % (r["oben"], r["unten"]))
-        fehler.append("%s: senkrecht %d/%d"
+        error.append("%s: senkrecht %d/%d"
                       % (r["name"], r["oben"], r["unten"]))
     s, t = r["sym"], r["txt"]
     if s:
@@ -149,7 +149,7 @@ def bericht(r, args, fehler):
             print("               VIOLATED share: %d%% does not lie"
                   " zwischen %d%% und %d%%"
                   % (anteil, args.min_anteil, args.max_anteil))
-            fehler.append("%s: anteil %d%%" % (r["name"], anteil))
+            error.append("%s: anteil %d%%" % (r["name"], anteil))
     if t:
         print("               Text  %dx%d bei +%d,+%d  Mitte y %.1f"
               % (t[2] - t[0] + 1, t[3] - t[1] + 1, t[0], t[1],
@@ -162,7 +162,7 @@ def bericht(r, args, fehler):
               "  Unterschied %.1f" % (ms, mt, d))
         if d > args.tol:
             print("               VERLETZT mitte: %.1f Punkte" % d)
-            fehler.append("%s: mitte %.1f" % (r["name"], d))
+            error.append("%s: mitte %.1f" % (r["name"], d))
         abstand = t[0] - s[2] - 1
         print("               Abstand Symbol->Text %d" % abstand)
 
@@ -172,17 +172,17 @@ def lines_find(px, x0, y0, w, h, args):
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
     voll = [any(m[y][x] for x in range(w)) for y in range(h)]
     out = []
-    lauf = None
+    run_2 = None
     for y, v in enumerate(voll):
-        if v and lauf is None:
-            lauf = [y, y]
+        if v and run_2 is None:
+            run_2 = [y, y]
         elif v:
-            lauf[1] = y
-        elif lauf is not None:
-            out.append((lauf[0], lauf[1]))
-            lauf = None
-    if lauf is not None:
-        out.append((lauf[0], lauf[1]))
+            run_2[1] = y
+        elif run_2 is not None:
+            out.append((run_2[0], run_2[1]))
+            run_2 = None
+    if run_2 is not None:
+        out.append((run_2[0], run_2[1]))
     zus = []
     for (a, b) in out:
         if zus and a - zus[-1][1] <= args.zeilenluecke:
@@ -221,7 +221,7 @@ def main():
     im = Image.open(args.bild).convert("RGB")
     px = im.load()
     print("BILD %s  %dx%d" % (args.bild, im.width, im.height))
-    fehler = []
+    error = []
 
     felder = []
     for f in args.feld:
@@ -242,21 +242,21 @@ def main():
         if hoehen and max(hoehen) - min(hoehen) > 1:
             print("  VIOLATED: the rows differ in height:"
                   " %d bis %d" % (min(hoehen), max(hoehen)))
-            fehler.append("zeilenhoehe %d..%d" % (min(hoehen), max(hoehen)))
+            error.append("zeilenhoehe %d..%d" % (min(hoehen), max(hoehen)))
 
     print("FELDER")
     for (x, y, w, h, name) in felder:
         if x < 0 or y < 0 or x + w > im.width or y + h > im.height:
             print("  %-14s lies outside the image" % name)
-            fehler.append("%s: ausserhalb" % name)
+            error.append("%s: ausserhalb" % name)
             continue
-        bericht(field_messen(px, x, y, w, h, name, args), args, fehler)
+        bericht(field_messen(px, x, y, w, h, name, args), args, error)
 
     print("ERGEBNIS %d Felder, %d Verletzungen"
-          % (len(felder), len(fehler)))
-    for f in fehler:
+          % (len(felder), len(error)))
+    for f in error:
         print("  - " + f)
-    if fehler and not args.nur_messen:
+    if error and not args.only_messen:
         return 1
     return 0
 

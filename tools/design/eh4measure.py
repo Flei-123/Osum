@@ -71,7 +71,7 @@ def kasten_der_tinte(im, cx, cy, r, tol=40):
     return (x0 + min(xs), y0 + min(ys), x0 + max(xs), y0 + max(ys)), bg, n
 
 
-def lupe(quelle, ziel, box, factor=6):
+def lupe(quelle, target, box, factor=6):
     im = Image.open(quelle).convert("RGB")
     x0, y0, x1, y1 = box
     x0 = max(0, x0)
@@ -81,8 +81,8 @@ def lupe(quelle, ziel, box, factor=6):
     aus = im.crop((x0, y0, x1, y1))
     aus = aus.resize((aus.width * factor, aus.height * factor),
                      Image.NEAREST)
-    aus.save(ziel)
-    return ziel
+    aus.save(target)
+    return target
 
 
 def unterschied(a, b):
@@ -129,20 +129,20 @@ def part_taskbar(out, name, uisc):
     else:
         print("          gehalten (%d, Abweichung %d)" % (bh, bh - soll))
     print("  SYMBOLS in the bar (from `taskbar: sym`)")
-    gesehen = {}
+    seen = {}
     for m in re.finditer(r"taskbar: sym btn=(\d+) app=(\S*) w=(\d+)"
                          r" gemalt=(\d+) knopf=(\d+)", t):
-        gesehen[int(m.group(1))] = (m.group(2), int(m.group(3)),
+        seen[int(m.group(1))] = (m.group(2), int(m.group(3)),
                                     int(m.group(4)), int(m.group(5)))
-    if not gesehen:
+    if not seen:
         print("    none reported (no window in the bar?)")
-    for i in sorted(gesehen):
-        app, w, gem, knopf = gesehen[i]
-        pro = gem * 100 // knopf if knopf else 0
+    for i in sorted(seen):
+        app, w, gem, button = seen[i]
+        pro = gem * 100 // button if button else 0
         marke = "ok" if 55 <= pro <= 75 else "VERLETZT"
         print("    btn %d %-14s Datei %d, gemalt %d, Knopf %d"
               "  ->  %d%% der Knopfhoehe  %s"
-              % (i, app, w, gem, knopf, pro, marke))
+              % (i, app, w, gem, button, pro, marke))
     felder = {}
     for m in re.finditer(r"taskbar: btn i=(\d+) id=\d+ x=(-?\d+) y=(-?\d+)"
                          r" w=(\d+) h=(\d+)", t):
@@ -240,9 +240,9 @@ def part_cursor(out):
         print("                 %d verschiedene Toene im Zeigerkasten"
               " (Bitmaske: 2)   %s"
               % (toene, "geglaettet" if toene > 8 else "VERLETZT: hart"))
-        ziel = os.path.join(bd, "lupe-01-zeiger.png")
-        lupe(p, ziel, (k[0] - 4, k[1] - 4, k[2] + 5, k[3] + 5), 8)
-        print("                 Lupe: %s" % ziel)
+        target = os.path.join(bd, "lupe-01-zeiger.png")
+        lupe(p, target, (k[0] - 4, k[1] - 4, k[2] + 5, k[3] + 5), 8)
+        print("                 Lupe: %s" % target)
 
 
 def main():

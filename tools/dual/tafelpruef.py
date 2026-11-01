@@ -12,12 +12,12 @@ def le(b, off, n):
 
 class Befund:
     def __init__(self):
-        self.fehler = []
+        self.error = []
         self.parts = []
-        self.kopf = {}
+        self.header = {}
 
     def bad(self, s):
-        self.fehler.append(s)
+        self.error.append(s)
 
 
 def kopf_lesen(f, lba, b: Befund, name):
@@ -95,8 +95,8 @@ def main():
 
     with open(pfad, "rb") as f:
         f.seek(0, 2)
-        groesse = f.tell()
-        sekt = groesse // BS
+        size = f.tell()
+        sekt = size // BS
 
         f.seek(0)
         mbr = f.read(BS)
@@ -112,7 +112,7 @@ def main():
         parts = []
         if prim:
             parts = board_check(f, prim, b, "primaer")
-            b.kopf = prim
+            b.header = prim
         if sich:
             board_check(f, sich, b, "sicherung")
 
@@ -134,27 +134,27 @@ def main():
     if als_json:
         print(json.dumps({
             "sektoren": sekt,
-            "fehler": b.fehler,
+            "fehler": b.error,
             "partitionen": b.parts,
         }, indent=2))
     else:
         print(f"== {pfad}  ({sekt} Sektoren)")
-        if b.kopf:
-            k = b.kopf
-            print(f"   benutzbar {k['erste']}..{k['letzte']}, Tafel bei {k['tafel']}, "
-                  f"{k['anzahl']} Eintraege zu {k['esize']}")
+        if b.header:
+            k = b.header
+            print(f"   benutzbar {k['first']}..{k['letzte']}, Tafel bei {k['board']}, "
+                  f"{k['count']} Eintraege zu {k['esize']}")
         for p in b.parts:
             gr = (p["ende"] - p["start"] + 1) * BS // (1024 * 1024)
             print(f"   {p['nr']:>3}  {p['start']:>9}..{p['ende']:<9} {gr:>6} MiB  "
                   f"{p['typ']}  {p['name']}")
-        if b.fehler:
+        if b.error:
             print("   FEHLER:")
-            for e in b.fehler:
+            for e in b.error:
                 print(f"     - {e}")
         else:
             print("   both headers and both table sums are fine")
 
-    return 1 if b.fehler else 0
+    return 1 if b.error else 0
 
 
 if __name__ == "__main__":

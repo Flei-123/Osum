@@ -51,27 +51,27 @@ def b64u(b):
 
 
 def jwt(payload):
-    kopf = b64u(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
+    header = b64u(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
     body = b64u(json.dumps(payload).encode())
-    daten = (kopf + "." + body).encode()
+    daten = (header + "." + body).encode()
     sig = b64u(hmac.new(SECRET, daten, hashlib.sha256).digest())
-    return kopf + "." + body + "." + sig
+    return header + "." + body + "." + sig
 
 
 def jwt_read(tok):
     try:
-        teile = tok.split(".")
-        roh = teile[1] + "=" * (-len(teile[1]) % 4)
+        parts = tok.split(".")
+        roh = parts[1] + "=" * (-len(parts[1]) % 4)
         return json.loads(base64.urlsafe_b64decode(roh))
     except Exception:
         return None
 
 
-def protokoll(eintrag):
+def protokoll(entry):
     pfad = os.path.join(state["verzeichnis"], "protokoll.jsonl")
     with state["sperre"]:
         with open(pfad, "a", encoding="utf-8") as f:
-            f.write(json.dumps(eintrag) + "\n")
+            f.write(json.dumps(entry) + "\n")
 
 
 class Griff(BaseHTTPRequestHandler):
@@ -128,9 +128,9 @@ class Griff(BaseHTTPRequestHandler):
             tok = self._bearer()
             if not tok:
                 cookie = self.headers.get("Cookie") or ""
-                for teil in cookie.split(";"):
-                    if teil.strip().startswith("fleitec_session="):
-                        tok = teil.strip()[16:]
+                for part in cookie.split(";"):
+                    if part.strip().startswith("fleitec_session="):
+                        tok = part.strip()[16:]
             an = jwt_read(tok or "")
             if not an or (tok in state["gesperrt"]):
                 return self._reply(401, {"error": "Nicht angemeldet"})
@@ -175,10 +175,10 @@ class Griff(BaseHTTPRequestHandler):
         return self._reply(404, {"fehler": "unbekannt"})
 
     def bremse(self, kennung):
-        jetzt = time.time()
+        now = time.time()
         with state["sperre"]:
             liste = [t for t in state["fehlversuche"].get(kennung, [])
-                     if jetzt - t < 60]
+                     if now - t < 60]
             state["fehlversuche"][kennung] = liste
             return len(liste) >= 10
 
@@ -220,21 +220,21 @@ class Griff(BaseHTTPRequestHandler):
         return self.xoffi_session(kennung, org, account)
 
     def xoffi_session(self, kennung, org, account):
-        jetzt = int(time.time())
+        now = int(time.time())
         claims = {
             "id": account["id"], "email": kennung,
             "username": account["username"], "organisation": org,
             "menu_group_id": 1, "is_admin": bool(account.get("is_admin")),
             "nexus_core_access": bool(account.get("nexus")),
             "nexus_developer": False, "type": "access",
-            "iat": jetzt, "exp": jetzt + state["access_sekunden"],
+            "iat": now, "exp": now + state["access_sekunden"],
         }
         if account.get("master"):
             claims["master_session"] = True
         zugriff = jwt(claims)
         erneuerung = jwt({"id": account["id"], "organisation": org,
-                          "type": "refresh", "iat": jetzt,
-                          "exp": jetzt + 2592000})
+                          "type": "refresh", "iat": now,
+                          "exp": now + 2592000})
         reply = {"success": True, "data": {
             "user": {"id": account["id"], "email": kennung,
                      "username": account["username"]},
@@ -246,11 +246,11 @@ class Griff(BaseHTTPRequestHandler):
 
     def xoffi_mfa(self, b):
         temp = b.get("temp_token") or ""
-        eintrag = state["temp"].get(temp)
-        if not eintrag:
+        entry = state["temp"].get(temp)
+        if not entry:
             return self._reply(410, {"success": False,
                                        "detail": "temp_token unbekannt"})
-        kennung, org, ablauf = eintrag
+        kennung, org, ablauf = entry
         if time.time() > ablauf:
             del state["temp"][temp]
             return self._reply(410, {"success": False,
@@ -288,9 +288,9 @@ class Griff(BaseHTTPRequestHandler):
             self.fehlschlag("jarvis:" + name)
             return self._reply(401, {
                 "error": "Falscher Benutzername oder Passwort"})
-        jetzt = int(time.time())
-        tok = jwt({"uid": "u_" + name, "name": name, "iat": jetzt,
-                   "exp": jetzt + state["access_sekunden"]})
+        now = int(time.time())
+        tok = jwt({"uid": "u_" + name, "name": name, "iat": now,
+                   "exp": now + state["access_sekunden"]})
         return self._reply(200, {"username": name, "token": tok},
                              kekse=["fleitec_session=%s; HttpOnly; Path=/"
                                     % tok])
@@ -299,15 +299,15 @@ class Griff(BaseHTTPRequestHandler):
         kennung = b.get("kennung") or ""
         if JARVIS.get(kennung) != (b.get("geheim") or ""):
             return self._reply(401, {"fehler": "falsch"})
-        jetzt = int(time.time())
-        tok = jwt({"uid": "e_" + kennung, "type": "access", "iat": jetzt,
-                   "exp": jetzt + state["access_sekunden"]})
-        erneu = jwt({"uid": "e_" + kennung, "type": "refresh", "iat": jetzt,
-                     "exp": jetzt + 2592000})
+        now = int(time.time())
+        tok = jwt({"uid": "e_" + kennung, "type": "access", "iat": now,
+                   "exp": now + state["access_sekunden"]})
+        erneu = jwt({"uid": "e_" + kennung, "type": "refresh", "iat": now,
+                     "exp": now + 2592000})
         return self._reply(200, {
             "subjekt": "e_" + kennung, "anzeige": kennung,
             "zugriff": tok, "erneuerung": erneu,
-            "ablauf": jetzt + state["access_sekunden"],
+            "ablauf": now + state["access_sekunden"],
             "datenort": "eigen"})
 
     def own_refresh(self, b):
@@ -316,13 +316,13 @@ class Griff(BaseHTTPRequestHandler):
         an = jwt_read(b.get("erneuerung") or "")
         if not an:
             return self._reply(401, {"fehler": "kein Token"})
-        jetzt = int(time.time())
-        tok = jwt({"uid": an.get("uid"), "type": "access", "iat": jetzt,
-                   "exp": jetzt + 604800})
+        now = int(time.time())
+        tok = jwt({"uid": an.get("uid"), "type": "access", "iat": now,
+                   "exp": now + 604800})
         return self._reply(200, {
             "subjekt": an.get("uid"), "anzeige": an.get("uid"),
             "zugriff": tok, "erneuerung": b.get("erneuerung"),
-            "ablauf": jetzt + 604800, "datenort": "eigen"})
+            "ablauf": now + 604800, "datenort": "eigen"})
 
 
 def main():
@@ -337,7 +337,7 @@ def main():
     a = ap.parse_args()
     state["verzeichnis"] = a.verzeichnis
     state["refresh_verweigern"] = a.refresh_verweigern
-    state["access_sekunden"] = a.access_sekunden
+    state["access_sekunden"] = a.access_secs
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Griff)
     if not a.kein_tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

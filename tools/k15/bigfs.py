@@ -40,7 +40,7 @@ FOLDER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
           "chrom", "eisen"]
 
 
-def namen(n):
+def names(n):
     """Die Namen, in der Reihenfolge, in der sie angelegt werden."""
     aus = []
     for i in range(n):
@@ -58,16 +58,16 @@ def main(argv):
     arbeit = argv[1]
     n = int(argv[2]) if len(argv) > 2 else 4000
     os.makedirs(arbeit, exist_ok=True)
-    liste = namen(n)
+    liste = names(n)
 
     zeilen = ["--inodes=4096", "/data/"]
-    gesehen = set()
+    seen = set()
     for pfad, _ in liste:
-        teile = pfad.strip("/").split("/")
-        for k in range(1, len(teile) + 1):
-            p = "/" + "/".join(teile[:k]) + "/"
-            if p not in gesehen:
-                gesehen.add(p)
+        parts_2 = pfad.strip("/").split("/")
+        for k in range(1, len(parts_2) + 1):
+            p = "/" + "/".join(parts_2[:k]) + "/"
+            if p not in seen:
+                seen.add(p)
                 if p != "/data/":
                     zeilen.append(p)
     for pfad, name in liste:
@@ -79,15 +79,15 @@ def main(argv):
         for pfad, name in liste:
             f.write("%s/%s\n" % (pfad, name))
 
-    alle = [name for _, name in liste]
-    alle += [p.strip("/").split("/")[-1] for p in sorted(gesehen)]
-    alle += ["data"]
+    all_ = [name for _, name in liste]
+    all_ += [p.strip("/").split("/")[-1] for p in sorted(seen)]
+    all_ += ["data"]
     with open(os.path.join(arbeit, "erwartet"), "w") as f:
         for w in WOERTER:
             f.write("%s %d\n"
-                    % (w, sum(1 for x in alle if w.lower() in x.lower())))
+                    % (w, sum(1 for x in all_ if w.lower() in x.lower())))
     print("big: %d files, %d folders, %d names"
-          % (n, len(gesehen), len(alle)))
+          % (n, len(seen), len(all_)))
     return 0
 
 

@@ -58,9 +58,9 @@ def belegte(wurzel):
         if "=" not in zeile:
             continue
         name, _, rest = zeile.partition("=")
-        teile = rest.split()
-        if len(teile) == 2 and teile[0] != "alias":
-            aus[int(teile[0], 16)] = name.strip()
+        parts = rest.split()
+        if len(parts) == 2 and parts[0] != "alias":
+            aus[int(parts[0], 16)] = name.strip()
     return aus
 
 
@@ -100,7 +100,7 @@ def without_kommentare(text):
     i = 0
     n = len(text)
     in_text = False
-    zeichen = ''
+    char = ''
     while i < n:
         c = text[i]
         if in_text:
@@ -109,14 +109,14 @@ def without_kommentare(text):
                 aus.append(text[i + 1])
                 i += 2
                 continue
-            if c == zeichen:
+            if c == char:
                 in_text = False
             aus.append(c)
             i += 1
             continue
         if c in '"\'':
             in_text = True
-            zeichen = c
+            char = c
             aus.append(c)
             i += 1
             continue
@@ -172,10 +172,10 @@ def main(argv):
         rel = os.path.relpath(voll, wurzel)
         text = without_kommentare(
             open(voll, encoding="utf-8", errors="replace").read())
-        for zeile, art, wert in treffer(text, karte):
+        for zeile, art, value in treffer(text, karte):
             n += 1
             print("rawcp: %s:%d: raw code point (%s) U+%04X -- write %s"
-                  % (rel, zeile, art, wert, karte[wert]))
+                  % (rel, zeile, art, value, karte[value]))
 
     print("rawcp: %d raw code points in %d files of drawing code, "
           "%d code points given away"

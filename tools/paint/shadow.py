@@ -72,7 +72,7 @@ def schatten(argv):
     print("   Unterschied:   %s" % " ".join("%3d" % d for d in diff))
 
     zusagen = 0
-    fehler = 0
+    error = 0
     dunkler = sum(1 for d in diff if d > 0)
     if dunkler >= 3 and min(diff) >= 0:
         print("  OK    %d pixels are darker than without shadow, "
@@ -81,7 +81,7 @@ def schatten(argv):
     else:
         print("  FAIL  %d dunkler, kleinster Unterschied %d"
               % (dunkler, min(diff)))
-        fehler += 1
+        error += 1
     innen = diff[:dunkler] if dunkler else []
     monoton = all(innen[i] >= innen[i + 1] for i in range(len(innen) - 1))
     if monoton and innen:
@@ -90,7 +90,7 @@ def schatten(argv):
         zusagen += 1
     else:
         print("  FAIL  the difference is not monotonic: %s" % innen)
-        fehler += 1
+        error += 1
     if dunkler <= reach + 1 and (len(diff) > dunkler and diff[-1] == 0):
         print("  OK    it ends after %d pixels (reach=%d) -- "
               "dahinter ist das Bild unveraendert" % (dunkler, reach))
@@ -98,9 +98,9 @@ def schatten(argv):
     else:
         print("  FAIL  er reicht %d Bildpunkte weit, erwartet hoechstens "
               "%d" % (dunkler, reach + 1))
-        fehler += 1
-    print("PAINT-SCHATTEN: %d Zusagen, %d Fehler" % (zusagen, fehler))
-    return 1 if fehler else 0
+        error += 1
+    print("PAINT-SCHATTEN: %d Zusagen, %d Fehler" % (zusagen, error))
+    return 1 if error else 0
 
 
 def ecke(argv):
@@ -140,7 +140,7 @@ def ecke(argv):
     print("   with  radius: %d blended pixels  (frame %s, background %s)"
           % (nb, rb, gb))
     zusagen = 0
-    fehler = 0
+    error = 0
     if nb > na:
         print("  OK    the round corner carries %d blended pixels "
               "mehr als die eckige" % (nb - na))
@@ -148,7 +148,7 @@ def ecke(argv):
     else:
         print("  FAIL  the round corner does not carry more blended "
               "Bildpunkte als die eckige (%d gegen %d)" % (nb, na))
-        fehler += 1
+        error += 1
     if na * 4 < r * r:
         print("  OK    CONTROL: the square corner is blended to less than "
               "einem Viertel gemischt (%d von %d)" % (na, r * r))
@@ -156,9 +156,9 @@ def ecke(argv):
     else:
         print("  FAIL  CONTROL: the square corner is blended too "
               "(%d von %d)" % (na, r * r))
-        fehler += 1
-    print("PAINT-ECKE: %d Zusagen, %d Fehler" % (zusagen, fehler))
-    return 1 if fehler else 0
+        error += 1
+    print("PAINT-ECKE: %d Zusagen, %d Fehler" % (zusagen, error))
+    return 1 if error else 0
 
 
 def vergleich(argv):

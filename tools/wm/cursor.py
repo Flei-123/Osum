@@ -12,12 +12,12 @@ SILHOUETTE = [
 ]
 
 
-def leer():
+def empty():
     return [[0] * W for _ in range(H)]
 
 
 def silhouette():
-    s = leer()
+    s = empty()
     for y, (a, b) in enumerate(SILHOUETTE):
         for x in range(a, b + 1):
             s[y][x] = 1
@@ -25,7 +25,7 @@ def silhouette():
 
 
 def erodiert(sil):
-    b = leer()
+    b = empty()
     for y in range(H):
         for x in range(W):
             if not sil[y][x]:
@@ -81,7 +81,7 @@ def lies(pfad):
 
 
 def gitter(um, inn):
-    sil, body = leer(), leer()
+    sil, body = empty(), empty()
     for y in range(H):
         for x in range(W):
             bit = 1 << (11 - x)
@@ -113,11 +113,11 @@ def bloecke(reihe):
 
 
 def check(sil, body):
-    fehler = []
+    error = []
     for y in range(H):
         for x in range(W):
             if body[y][x] and not sil[y][x]:
-                fehler.append("(e) Fuellpunkt %d,%d liegt nicht in der Silhouette" % (x, y))
+                error.append("(e) Fuellpunkt %d,%d liegt nicht in der Silhouette" % (x, y))
     start = None
     n = 0
     for y in range(H):
@@ -127,21 +127,21 @@ def check(sil, body):
                 if start is None:
                     start = (x, y)
     if n == 0:
-        fehler.append("(a) die Fuellung ist leer")
+        error.append("(a) die Fuellung ist leer")
     else:
-        gesehen = {start}
-        stapel = [start]
-        while stapel:
-            x, y = stapel.pop()
+        seen = {start}
+        stack = [start]
+        while stack:
+            x, y = stack.pop()
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = x + dx, y + dy
                 if 0 <= nx < W and 0 <= ny < H and body[ny][nx] \
-                        and (nx, ny) not in gesehen:
-                    gesehen.add((nx, ny))
-                    stapel.append((nx, ny))
-        if len(gesehen) != n:
-            fehler.append("(a) die Fuellung zerfaellt: %d von %d Punkten "
-                          "haengen zusammen" % (len(gesehen), n))
+                        and (nx, ny) not in seen:
+                    seen.add((nx, ny))
+                    stack.append((nx, ny))
+        if len(seen) != n:
+            error.append("(a) die Fuellung zerfaellt: %d von %d Punkten "
+                          "haengen zusammen" % (len(seen), n))
     for y in range(H):
         for x in range(W):
             if not body[y][x]:
@@ -149,16 +149,16 @@ def check(sil, body):
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, ny = x + dx, y + dy
                 if nx < 0 or ny < 0 or nx >= W or ny >= H:
-                    fehler.append("(b) Fuellpunkt %d,%d liegt am Bildrand"
+                    error.append("(b) Fuellpunkt %d,%d liegt am Bildrand"
                                   % (x, y))
                 elif not sil[ny][nx]:
-                    fehler.append("(b) Fuellpunkt %d,%d hat bei %d,%d den "
+                    error.append("(b) Fuellpunkt %d,%d hat bei %d,%d den "
                                   "Hintergrund" % (x, y, nx, ny))
     for y in range(H):
         for was, g in (("Fuellung", body), ("Silhouette", sil)):
             b = bloecke(g[y])
             if b > 1:
-                fehler.append("(c) Zeile %d: die %s hat %d getrennte Bloecke"
+                error.append("(c) Zeile %d: die %s hat %d getrennte Bloecke"
                               % (y, was, b))
     for y in range(H):
         for x in range(W):
@@ -170,10 +170,10 @@ def check(sil, body):
                 if 0 <= nx < W and 0 <= ny < H and sil[ny][nx]:
                     nachbarn += 1
             if nachbarn == 0:
-                fehler.append("(d) %d,%d steht allein" % (x, y))
+                error.append("(d) %d,%d steht allein" % (x, y))
     if not sil[0][0]:
-        fehler.append("(f) auf 0,0 -- dem Griffpunkt -- ist nichts")
-    return fehler
+        error.append("(f) auf 0,0 -- dem Griffpunkt -- ist nichts")
+    return error
 
 
 def main():
@@ -194,11 +194,11 @@ def main():
     print("  THE POINTER AS IT IS PAINTED (# fill, . edge):")
     for z in bild(sil, body):
         print(z)
-    fehler = check(sil, body)
-    for f in fehler:
+    error = check(sil, body)
+    for f in error:
         print("  FALL  " + f)
-    if fehler:
-        print("  ZEIGER: %d Beanstandungen" % len(fehler))
+    if error:
+        print("  ZEIGER: %d Beanstandungen" % len(error))
         return 1
     print("  ZEIGER: 6 Pruefungen, 0 Beanstandungen")
     return 0

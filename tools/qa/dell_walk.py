@@ -354,7 +354,7 @@ def write_protocol(out, res, summary):
     ok = sum(1 for r in res if r["status"] == "OK")
     bad = sum(1 for r in res if r["status"] == "FEHLER")
     skip = sum(1 for r in res if r["status"] == "SKIP")
-    summary.update(ok=ok, fehler=bad, skip=skip, total=len(res))
+    summary.update(ok=ok, error_2=bad, skip=skip, total=len(res))
     with open(os.path.join(out, "protokoll.json"), "w") as f:
         json.dump(dict(summary=summary, results=res, only_dell=[dict(id=k, what=v) for k, v in ONLY_DELL]), f,
                   indent=1, default=str)
@@ -416,13 +416,13 @@ class Bridge:
                 return bool(alive), json.dumps(g)[:200]
         return False, "device %s is not registered at the bridge" % self.device
 
-    def job(self, art, ziel="", wert="", wait=True, timeout=60):
+    def job(self, art, target="", value="", wait=True, timeout=60):
         if self.dry:
-            self.log.append((art, ziel, wert))
-            print("  [dry] %s %s %s" % (art, ziel, wert[:60]))
+            self.log.append((art, target, value))
+            print("  [dry] %s %s %s" % (art, target, value[:60]))
             return 200, "", b""
         st, _, body = self._req("POST", "/bruecke/auftrag",
-                                dict(geraet=self.device, art=art, ziel=ziel, wert=wert, ttl_s=120))
+                                dict(geraet=self.device, art=art, target=target, value=value, ttl_s=120))
         if st != 200:
             return st, "", body
         aid = json.loads(body)["id"]

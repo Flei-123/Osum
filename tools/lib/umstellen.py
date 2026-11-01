@@ -19,8 +19,8 @@ CD_RE = re.compile(r'^cd "\$\(dirname "\$0"\)/\.\./\.\."\s*$')
 
 def laeufer():
     txt = (ROOT / "test.sh").read_text(errors="replace")
-    namen = re.findall(r"^\s+((?:tools|tests)/[a-z0-9]+/[a-z]+\.sh)\s", txt, re.M)
-    return sorted(set(namen))
+    names = re.findall(r"^\s+((?:tools|tests)/[a-z0-9]+/[a-z]+\.sh)\s", txt, re.M)
+    return sorted(set(names))
 
 
 def umstellen(pfad: Path, pruefen: bool):

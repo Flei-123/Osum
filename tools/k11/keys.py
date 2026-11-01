@@ -124,32 +124,32 @@ def main():
         pass
     for k in seq:
         if k.startswith('foto:'):
-            ziel = k[5:]
-            if os.path.exists(ziel):
-                os.unlink(ziel)
+            target = k[5:]
+            if os.path.exists(target):
+                os.unlink(target)
             time.sleep(1.2)
             try:
                 with open(wait, 'rb') as f:
-                    open(ziel + '.ser', 'wb').write(f.read())
+                    open(target + '.ser', 'wb').write(f.read())
             except OSError:
                 pass
-            s.sendall(("screendump %s\n" % ziel).encode())
+            s.sendall(("screendump %s\n" % target).encode())
             letzte = -1
             ruhig = 0
             bis2 = time.time() + 20
             while time.time() < bis2:
                 time.sleep(0.15)
                 try:
-                    jetzt = os.path.getsize(ziel)
+                    now = os.path.getsize(target)
                 except OSError:
                     continue
-                if jetzt == letzte and jetzt > 0:
+                if now == letzte and now > 0:
                     ruhig += 1
                     if ruhig >= 3:
                         break
                 else:
                     ruhig = 0
-                    letzte = jetzt
+                    letzte = now
             try:
                 s.recv(65536)
             except OSError:
@@ -163,12 +163,12 @@ def main():
             while True:
                 time.sleep(0.4)
                 try:
-                    jetzt = os.path.getsize(wait)
+                    now = os.path.getsize(wait)
                 except OSError:
                     break
-                if jetzt == letzte:
+                if now == letzte:
                     break
-                letzte = jetzt
+                letzte = now
             continue
         if k.startswith('nowait:'):
             s.sendall(("sendkey %s\n" % k[7:]).encode())

@@ -33,7 +33,7 @@ def lies(p):
         return f.read().decode("latin1")
 
 
-def alle(txt, muster):
+def all_(txt, muster):
     return [m for m in re.finditer(muster, txt)]
 
 
@@ -42,10 +42,10 @@ def main():
         print(__doc__)
         return 2
     txt = lies(sys.argv[1])
-    fehler = 0
+    error = 0
 
     print("== THE GROOVE AS THE CONTROL CENTER REPORTS IT ==")
-    trace = alle(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
+    trace = all_(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
     if not trace:
         print("  NO groove reported -- the control center was never open")
         return 1
@@ -55,7 +55,7 @@ def main():
     print()
     print("== WHAT THE SLIDER COMPUTES FROM THE POINTER POSITION ==")
     gerechnet = [(int(m.group(1)), int(m.group(2)))
-                 for m in alle(txt, r"qs: bright to =(\d+) rc=(-?\d+)")]
+                 for m in all_(txt, r"qs: bright to =(\d+) rc=(-?\d+)")]
     if gerechnet:
         vs = sorted({v for v, _ in gerechnet})
         rcs = sorted({rc for _, rc in gerechnet})
@@ -66,7 +66,7 @@ def main():
             print("      really computes, it is not a painted handle")
         else:
             print("  FEHLT: immer derselbe Wert")
-            fehler += 1
+            error += 1
         if rcs == [-19]:
             print("  NOTE: the kernel does NOT accept it (-19 = ENODEV).")
             print("      kernel/sys/sysgui.fi do_dispset verlangt vmode.ready();")
@@ -74,11 +74,11 @@ def main():
             print("      That is the environment and not a fault of the UI.")
     else:
         print("  no computation reported -- the slider was never touched")
-        fehler += 1
+        error += 1
 
     print()
     print("== THE VALUE THE PANEL READS WHEN PAINTING ==")
-    values = [int(m.group(1)) for m in alle(txt, r"qs: bright is=(\d+)")]
+    values = [int(m.group(1)) for m in all_(txt, r"qs: bright is=(\d+)")]
     seq = []
     for w in values:
         if not seq or seq[-1] != w:
@@ -93,13 +93,13 @@ def main():
         print(f"  verschiedene Werte: {len(set(seq))}")
         if len(set(seq)) < 2:
             print("  FEHLT: immer derselbe Wert")
-            fehler += 1
+            error += 1
         else:
             print("  OK  the value follows the mouse -- no painted handle")
 
     print()
     print("== DIE LAUTSTAERKE ==")
-    vol = [int(m.group(1)) for m in alle(txt, r"qs: vol ist=(\d+)")]
+    vol = [int(m.group(1)) for m in all_(txt, r"qs: vol ist=(\d+)")]
     if vol:
         print(f"  gemeldet: {sorted(set(vol))}  (letzter {vol[-1]})")
     else:
@@ -107,10 +107,10 @@ def main():
 
     print()
     print("== DID fUi PAINT? (taskbar report) ==")
-    fui = alle(txt, r"fui=(\d+) fuix=(\d+)")
+    fui = all_(txt, r"fui=(\d+) fuix=(\d+)")
     if not fui:
         print("  NO counter on the wire -- unknown")
-        fehler += 1
+        error += 1
     else:
         ok, no = fui[-1].groups()
         ok, no = int(ok), int(no)
@@ -119,13 +119,13 @@ def main():
               f"   ({anteil:.1f} % durch fUi)")
         if ok == 0:
             print("  MISSING: fUi painted NOTHING -- the bridge is not running")
-            fehler += 1
+            error += 1
         else:
             print("  OK  the areas on screen come from fUi")
 
     print()
-    if fehler:
-        print(f"REGLER-PRUEFUNG FEHLGESCHLAGEN ({fehler})")
+    if error:
+        print(f"REGLER-PRUEFUNG FEHLGESCHLAGEN ({error})")
         return 1
     print("REGLER-PRUEFUNG PASSED.")
     return 0

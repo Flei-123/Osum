@@ -12,37 +12,37 @@ from erhebung import IMPORT_RE, lies  # noqa: E402
 
 def huelle(wurzeldatei):
     basis = os.path.dirname(wurzeldatei)
-    gesehen = set()
-    stapel = [wurzeldatei]
-    while stapel:
-        p = stapel.pop()
+    seen = set()
+    stack_2 = [wurzeldatei]
+    while stack_2:
+        p = stack_2.pop()
         rp = os.path.realpath(p)
-        if rp in gesehen or not os.path.exists(p):
+        if rp in seen or not os.path.exists(p):
             continue
-        gesehen.add(rp)
-        eigen = os.path.dirname(p)
+        seen.add(rp)
+        own_2 = os.path.dirname(p)
         for z in lies(p).splitlines():
             m = IMPORT_RE.match(z)
             if not m:
                 continue
-            teile = m.group(1).split(".")
-            kand = os.path.join(eigen, *teile) + ".fi"
+            parts_2 = m.group(1).split(".")
+            kand = os.path.join(own_2, *parts_2) + ".fi"
             if not os.path.exists(kand):
-                kand = os.path.join(basis, *teile) + ".fi"
+                kand = os.path.join(basis, *parts_2) + ".fi"
             if os.path.exists(kand):
-                stapel.append(kand)
-    return {os.path.relpath(p, KERN) for p in gesehen}
+                stack_2.append(kand)
+    return {os.path.relpath(p, KERN) for p in seen}
 
 
 def main():
     kern = huelle(os.path.join(KERN, "kmain.fi"))
     uprog = huelle(os.path.join(KERN, "uprog.fi"))
-    alle = set()
-    for stamm, _, namen in os.walk(KERN):
-        for n in namen:
+    all_ = set()
+    for stamm, _, names_2 in os.walk(KERN):
+        for n in names_2:
             if n.endswith(".fi"):
-                alle.add(os.path.relpath(os.path.join(stamm, n), KERN))
-    aussen = alle - kern - uprog
+                all_.add(os.path.relpath(os.path.join(stamm, n), KERN))
+    aussen = all_ - kern - uprog
 
     if len(sys.argv) > 2 and sys.argv[1] == "--liste":
         menge = {"kern": kern, "uprog": uprog, "aussen": aussen}[sys.argv[2]]
@@ -56,7 +56,7 @@ def main():
             s += lies(os.path.join(KERN, p)).count("\n")
         return s
 
-    print("files under kernel/ total    : %3d  (%d lines)" % (len(alle), zeilen(alle)))
+    print("files under kernel/ total    : %3d  (%d lines)" % (len(all_), zeilen(all_)))
     print("  KERN  (ab kmain.fi)        : %3d  (%d Zeilen)" % (len(kern), zeilen(kern)))
     print("  UPROG (ab uprog.fi)        : %3d  (%d Zeilen)" % (len(uprog), zeilen(uprog)))
     print("  OUTSIDE (not in the image) : %3d  (%d lines)" % (len(aussen), zeilen(aussen)))

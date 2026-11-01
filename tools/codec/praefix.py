@@ -19,17 +19,17 @@ def felder(pfad):
 
 def check(name, lens, bits):
     codes = [(l, b) for l, b in zip(lens, bits) if l > 0]
-    schlecht = 0
+    bad_2 = 0
     for i in range(len(codes)):
         for j in range(i + 1, len(codes)):
             l1, b1 = codes[i]
             l2, b2 = codes[j]
             if l1 <= l2:
-                if (b2 >> (l2 - l1)) == b1: schlecht += 1
+                if (b2 >> (l2 - l1)) == b1: bad_2 += 1
             else:
-                if (b1 >> (l1 - l2)) == b2: schlecht += 1
+                if (b1 >> (l1 - l2)) == b2: bad_2 += 1
     kraft = sum(2.0 ** -l for l, _ in codes)
-    return len(codes), schlecht, kraft
+    return len(codes), bad_2, kraft
 
 def main():
     F = felder(SOURCE)
@@ -53,17 +53,17 @@ def main():
         tafeln.append(("run_before zl=%d" % (i+1),
                        F['RUN_LEN'][i*16:(i+1)*16],
                        F['RUN_BITS'][i*16:(i+1)*16]))
-    fehler = 0
+    error = 0
     ncodes = 0
     for name, lens, bits in tafeln:
-        n, schlecht, kraft = check(name, lens, bits)
+        n, bad_2, kraft = check(name, lens, bits)
         ncodes += n
-        if schlecht or kraft > 1.0000001:
-            fehler += 1
+        if bad_2 or kraft > 1.0000001:
+            error += 1
             print("  MEHRDEUTIG %-28s %3d Codes, %d Kollisionen, Kraft %.6f"
-                  % (name, n, schlecht, kraft))
-    if fehler:
-        print("%d of %d tables are ambiguous" % (fehler, len(tafeln)))
+                  % (name, n, bad_2, kraft))
+    if error:
+        print("%d of %d tables are ambiguous" % (error, len(tafeln)))
         return 1
     print("%d tables, %d codes, 0 prefix collisions, all Kraft sums <= 1"
           % (len(tafeln), ncodes))

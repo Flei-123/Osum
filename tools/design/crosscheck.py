@@ -54,14 +54,14 @@ if __name__ == '__main__':
     print("CROSS CHECK -- do the two strokes of the X overlap?")
     print()
     print("%-30s %8s %10s %s" % ("Fall", "bedeckt", "mehrfach", "Urteil"))
-    fehler = 0
+    error = 0
     for sk in (1, 2, 3):
         d = 10 * sk
         sb = 3 * sk / 2.0
         ges, mehr = messen(d, sb, True)
         urteil = "SAUBER" if mehr == 0 else "DOPPELT GEZEICHNET"
         if mehr > 0:
-            fehler += 1
+            error += 1
         print("%-30s %8d %10d %s"
               % ("X, zwei Striche (uisc=%d)" % sk, ges, mehr, urteil))
     print()
@@ -73,7 +73,7 @@ if __name__ == '__main__':
               % ("Gegenprobe: EIN Strich (uisc=%d)" % sk, ges, mehr,
                  "SAUBER" if mehr == 0 else "DOPPELT"))
     print()
-    if fehler:
+    if error:
         print("FINDING: the X is covered MULTIPLE times at the crossing.")
         print("        That is exactly what Justin sees as a fat extra bar.")
         sys.exit(1)

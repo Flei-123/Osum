@@ -114,8 +114,8 @@ def main(argv):
     g = felder[0][2]
     zeilen = [sum(1 for c in row if dunkel(c, grund)) for row in g]
     voll = [i for i, n in enumerate(zeilen) if n >= 9]
-    leer = [i for i, n in enumerate(zeilen) if n == 0]
-    if len(voll) == 1 and len(leer) == 9:
+    empty = [i for i, n in enumerate(zeilen) if n == 0]
+    if len(voll) == 1 and len(empty) == 9:
         print("min: stroke ok  (row %d full, nine empty)" % voll[0])
     else:
         print("min: NO stroke -- rows %s" % zeilen)
@@ -142,13 +142,13 @@ def main(argv):
     reason2 = cnt2.most_common(1)[0][0]
     dia = sum(1 for k in range(10) if dunkel(g[k][k], reason2)) \
         + sum(1 for k in range(10) if dunkel(g[k][9 - k], reason2))
-    kante = sum(1 for k in range(2, 8)
+    edge = sum(1 for k in range(2, 8)
                 if dunkel(g[0][k], reason2) or dunkel(g[9][k], reason2))
-    if dia >= 18 and kante == 0:
+    if dia >= 18 and edge == 0:
         print("close: cross ok  (%d of 20 diagonal points, %d edge points)"
-              % (dia, kante))
+              % (dia, edge))
     else:
-        print("close: NO cross -- diagonals %d, edges %d" % (dia, kante))
+        print("close: NO cross -- diagonals %d, edges %d" % (dia, edge))
         bad += 1
 
     fx = bx + 2 * CAP_W

@@ -82,10 +82,10 @@ def schema_read(pfad):
         k, _, v = roh.partition("=")
         values[k.strip()] = int(v.strip(), 16)
     aus = {}
-    for rolle, schluessel in FILE_NAME.items():
-        if schluessel not in values:
-            raise SystemExit("icons: %s hat kein %s=" % (pfad, schluessel))
-        aus[rolle] = values[schluessel]
+    for rolle, key_2 in FILE_NAME.items():
+        if key_2 not in values:
+            raise SystemExit("icons: %s hat kein %s=" % (pfad, key_2))
+        aus[rolle] = values[key_2]
     return aus
 
 
@@ -160,7 +160,7 @@ def bitreihen(name):
 
 
 def check_gestaltung(say_2=True):
-    fehler = 0
+    error = 0
 
     def say(t):
         if say_2:
@@ -171,7 +171,7 @@ def check_gestaltung(say_2=True):
         for rolle in ("ink", "dim", "accent", "warn"):
             k = contrast(s[rolle], s["panel"])
             gut = k >= MIN_CONTRAST
-            fehler += 0 if gut else 1
+            error += 0 if gut else 1
             say("  %-5s %-7s %5.2f:1  %s"
                 % (sn, rolle, k, "ok" if gut else "ZU WENIG"))
 
@@ -185,13 +185,13 @@ def check_gestaltung(say_2=True):
                 b, wb, hb = risse[gruppe[j]]
                 if (wa, ha) != (wb, hb):
                     say("  %s and %s are not the same size" % (gruppe[i], gruppe[j]))
-                    fehler += 1
+                    error += 1
                     continue
                 u = len(a | b)
                 d = len(a ^ b)
                 pz = 100 * d // u if u else 0
                 gut = pz >= MIN_UNTERSCHIED
-                fehler += 0 if gut else 1
+                error += 0 if gut else 1
                 say("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
                     % (gruppe[i].split("-", 1)[1], gruppe[j].split("-", 1)[1], d, u, pz,
                        "ok" if gut else "ZU AEHNLICH"))
@@ -202,19 +202,19 @@ def check_gestaltung(say_2=True):
         b, wb, hb = schattenriss(b_n)
         if (wa, ha) != (wb, hb):
             say("  %s and %s are not the same size" % (a_n, b_n))
-            fehler += 1
+            error += 1
             continue
         u = len(a | b)
         d = len(a ^ b)
         pz = 100 * d // u if u else 0
         gut = pz >= MIN_UNTERSCHIED
-        fehler += 0 if gut else 1
+        error += 0 if gut else 1
         say("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
             % (a_n, b_n, d, u, pz, "ok" if gut else "ZU AEHNLICH"))
-    return fehler
+    return error
 
 
-def masse():
+def dims():
     """Groesse und Deckung je Zeichen -- die Zahlen fuer die Doku."""
     aus = []
     for n in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
@@ -302,12 +302,12 @@ def kernquelle():
     }
 
 
-def bauen(ziel):
-    os.makedirs(ziel, exist_ok=True)
+def bauen(target):
+    os.makedirs(target, exist_ok=True)
     n = 0
     for name in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
         d = symmod.baue(zeichnung(name))
-        with open(os.path.join(ziel, name), "wb") as f:
+        with open(os.path.join(target, name), "wb") as f:
             f.write(d)
         n += 1
     return n
@@ -324,12 +324,12 @@ def main(argv):
         print("icons: %s geschrieben" % argv[2])
         return 0
     if len(argv) >= 2 and argv[1] == "masse":
-        for n, w, h, deck, ganz in masse():
+        for n, w, h, deck, ganz in dims():
             print("%-18s %2dx%-2d  %3d von %3d eingefaerbt = %d%%"
                   % (n, w, h, deck, ganz, 100 * deck // ganz))
         return 0
     if len(argv) >= 2 and argv[1] == "pruefe":
-        fehler = check_gestaltung()
+        error = check_gestaltung()
         kdatei = os.path.join(WURZEL, "..", "kernel", "net", "netmark.fi")
         if "--kern" in argv:
             kdatei = argv[argv.index("--kern") + 1]
@@ -340,14 +340,14 @@ def main(argv):
             ist = None
         if ist is None:
             print("== %s fehlt ==" % kdatei)
-            fehler += 1
+            error += 1
         elif ist != soll:
             print("== %s deviates from the drawing ==" % kdatei)
-            fehler += 1
+            error += 1
         else:
             print("== %s matches the drawing octet for octet ==" % kdatei)
-        print("icons: %d Beanstandungen" % fehler)
-        return 1 if fehler else 0
+        print("icons: %d Beanstandungen" % error)
+        return 1 if error else 0
     print(__doc__)
     return 2
 

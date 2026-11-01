@@ -108,9 +108,9 @@ FAELLE = ["kennung", "inodes", "bloecke", "bereiche", "zeigerkreis",
           "leerkarte", "muell", "jmuell"]
 
 
-def mach(fall, grund, ziel):
-    shutil.copyfile(grund, ziel)
-    r = Roh(ziel)
+def mach(fall, grund, target):
+    shutil.copyfile(grund, target)
+    r = Roh(target)
     if fall == "kennung":
         r.s(mkfs.SB["MAGIC"], 0xDEADBEEFDEADBEEF)
     elif fall == "inodes":
@@ -128,12 +128,12 @@ def mach(fall, grund, ziel):
         r.inode_set(2, mkfs.I_INDIRECT, b)
         r.inode_set(2, mkfs.I_SIZE, 1 << 20)
     elif fall == "verzkreis":
-        bild = _image(ziel)
+        bild = _image(target)
         binino = bild.finde("/bin")
         bild.f.close()
         _dir_add(r, binino, "hoch", 1)
     elif fall == "selbstverz":
-        bild = _image(ziel)
+        bild = _image(target)
         binino = bild.finde("/bin")
         bild.f.close()
         _dir_add(r, binino, "ich", binino)
@@ -143,7 +143,7 @@ def mach(fall, grund, ziel):
     elif fall == "wildzeiger":
         r.inode_set(2, mkfs.I_DIRECT, r.g(mkfs.SB["BLOCKS"]) + 1000)
     elif fall == "totlink":
-        bild = _image(ziel)
+        bild = _image(target)
         binino = bild.finde("/bin")
         bild.f.close()
         _dir_add(r, binino, "nirgends", r.g(mkfs.SB["INODES"]) - 1)
@@ -167,7 +167,7 @@ def mach(fall, grund, ziel):
     else:
         raise SystemExit("kaputt: unbekannter Fall %s" % fall)
     r.zu()
-    return ziel
+    return target
 
 
 def _image(pfad):
@@ -194,7 +194,7 @@ def _frei(r):
     raise SystemExit("kaputt: kein freier Block")
 
 
-def _dir_add(r, dirino, name, ziel):
+def _dir_add(r, dirino, name, target):
     """Einen Eintrag ans Ende eines Verzeichnisses haengen, roh.
 
     Ein Eintrag der Fassung 3 ist 264 Oktette lang und geht deshalb
@@ -205,7 +205,7 @@ def _dir_add(r, dirino, name, ziel):
     dirent = r.dirent
     sz = r.inode_get(dirino, mkfs.I_SIZE)
     roh = bytearray(dirent)
-    struct.pack_into("<Q", roh, 0, ziel)
+    struct.pack_into("<Q", roh, 0, target)
     nm = name.encode("latin-1")[:dirent - 9] + b"\0"
     roh[8:8 + len(nm)] = nm
     geschrieben = 0
