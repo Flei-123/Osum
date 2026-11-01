@@ -16,7 +16,6 @@
 #   (3) the COUNTER-PROOF `nochrome=1`: wmd leaves a magenta hole where the chrome goes and still judges it: the judge MUST see thousands of pixels.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-. tools/comp/known_diff.sh
 D=$(mktemp -d)
 trap 'rm -rf "$D"' EXIT
 pass=0; fail=0
@@ -66,7 +65,6 @@ S="$D/chr/serial.txt"
 grep -a '^wmd:' "$S" | sed 's/^/        /' | head -60
 grep -aq '^wmd: ready screen=' "$S" && ok "wmd found the screen and the window table page" || bad "wmd did not start ($(grep -a '^wmd:' "$S" | head -2 | tr '\n' ' '))"
 read N CM CS DS UM < <(stats "$S")
-OUT=$(outside_known "$S")
 US_BUDGET=8000
 [ "$(awk '{ print ($1 > 12) }' /proc/loadavg)" = 1 ] && US_BUDGET=16000
 CHW=$(maxkv "$S" chrome); CHP=$(maxkv "$S" chromepx); TXP=$(maxkv "$S" titlepx); CPP=$(maxkv "$S" capspx)
@@ -76,7 +74,7 @@ echo "        cycles=$N max_area=$CM compared_sum=$CS differ_sum=$DS compose_us_
 [ "${CHP:-0}" -ge 20000 ] && ok "the chrome wrote $CHP pixels in one cycle" || bad "the chrome wrote only ${CHP:-0} pixels"
 [ "${TXP:-0}" -ge 60 ] && ok "the title text wrote $TXP pixels" || bad "the title text wrote only ${TXP:-0} pixels"
 [ "${CPP:-0}" -ge 60 ] && ok "the caption symbols wrote $CPP pixels" || bad "the caption symbols wrote only ${CPP:-0} pixels"
-[ "${CS:-0}" -gt 0 ] && [ "${OUT:-1}" = 0 ] && ok "$CS pixels judged over all cycles, $DS differ from the kernel's picture, none outside the known box $KNOWN_BOX_X0,$KNOWN_BOX_Y0..$KNOWN_BOX_X1,$KNOWN_BOX_Y1" || bad "differing pixels: ${DS:-?} of ${CS:-0}"
+[ "${CS:-0}" -gt 0 ] && [ "${DS:-1}" = 0 ] && ok "$CS pixels judged over all cycles, $DS differ from the kernel's picture" || bad "differing pixels: ${DS:-?} of ${CS:-0}"
 [ "${UM:-99999}" -le "$US_BUDGET" ] && ok "composing a frame in ring 3 took ${UM} us (median of the cycles) (budget $US_BUDGET)" || bad "composing took ${UM:-?} us, median (budget $US_BUDGET)"
 
 # every window that had its chrome composed prints its geometry; the picture must show each of them (the terminal's own title bar, the file manager's
@@ -113,7 +111,7 @@ if [ -n "$GEO" ]; then
     HV=$(maxkv "$S2" hover)
     echo "        cycles=$N2 compared_sum=$CS2 differ_sum=$DS2 hover_code_max=$HV pointer=$CXP,$CYP"
     [ "${HV:-0}" -ge 1 ] && ok "the chrome page carried a hovered button (code $HV)" || bad "no cycle saw a hovered button"
-    [ "${CS2:-0}" -gt 0 ] && [ "$(outside_known "$S2")" = 0 ] && ok "hover: $CS2 pixels judged, $DS2 differ, none outside the known box" || bad "hover: differing pixels: ${DS2:-?} of ${CS2:-0}"
+    [ "${CS2:-0}" -gt 0 ] && [ "${DS2:-1}" = 0 ] && ok "hover: $CS2 pixels judged, $DS2 differ" || bad "hover: differing pixels: ${DS2:-?} of ${CS2:-0}"
     GEO2=$(grep -a '^wmd: chrome-geo 1 ' "$S2" | tail -n 1 | cut -d' ' -f3-)
     if [ -n "$GEO2" ] && [ -s "$D/hov/s.ppm" ]; then
         PTR="$CXP,$CYP" python3 tools/comp/chrome_check.py "$D/hov/s.ppm" $GEO2 hover > "$D/pic2.txt" 2>&1 && ok "hover: the PICTURE shows the red close button and the other symbols" || bad "hover: the picture is wrong"
