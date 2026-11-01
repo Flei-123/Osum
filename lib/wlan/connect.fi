@@ -45,7 +45,7 @@ import wlan.ccmp
 import wlan.state
 
 export {
-    Session, session_new,
+    Session, session_new, rx_key,
     suchlauf_beginnen, beacon_aufnehmen, net_count, net_ssid_len,
     net_ssid_get, net_channel_of, net_security_of, net_rssi_of,
     net_choose, chosen_of, auth_angenommen, assoz_angenommen,
@@ -460,31 +460,32 @@ fn data_send(s: *mut Session, g: *mut device.Device,
     return device.send(g, puffer, n as usize)
 }
 
+fn rx_key(s: *mut Session, p: u64) -> u64 {
+    if (ld8(p, 4) & 1) == 0 { return (&(*s).ptk[32]) as u64 }
+    if (*s).gtk_len < 16 { return 0 }
+    return (&(*s).gtk[0]) as u64
+}
+
 fn data_receive(s: *mut Session, g: *mut device.Device,
-    puffer: u64, pmax: usize, aus: u64, ausmax: usize) -> i64 {
-    let n: i64 = device.receive(g, puffer, pmax)
+    buf: u64, bufmax: usize, out: u64, outmax: usize) -> i64 {
+    let n: i64 = device.receive(g, buf, bufmax)
     if n <= 0 { return n }
     if !state.darf_daten(&(*s).lauf) {
-        // Vor dem Handschlag gibt es keine Nutzdaten. Ein Rahmen, der
-        // trotzdem kommt, wird verworfen und nicht ausgepackt.
         (*s).fehler = F_ZUSTAND
         return -1
     }
     if device.kann_ccmp_von(g) {
         var i: usize = 0
-        while i < (n as usize) && i < ausmax {
-            st8(aus, i, ld8(puffer, i))
+        while i < (n as usize) && i < outmax {
+            st8(out, i, ld8(buf, i))
             i = i + 1
         }
         return n
     }
-    var tk: u64 = (&(*s).ptk[32]) as u64
-    if (ld8(puffer, 4) & 1) != 0 {
-        if (*s).gtk_len < 16 { return -1 }
-        tk = (&(*s).gtk[0]) as u64
-    }
-    let m: i64 = ccmp.unprotect(tk, puffer,
-        n as usize, aus, ausmax)
+    let tk: u64 = rx_key(s, buf)
+    if tk == 0 { return -1 }
+    let m: i64 = ccmp.unprotect(tk, buf,
+        n as usize, out, outmax)
     if m < 0 {
         (*s).fehler = F_CCMP
         return -1

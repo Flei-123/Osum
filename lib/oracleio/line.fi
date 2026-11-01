@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+
+export { out_char, out_text, out_num, out_signed, out_bit, out_hex, out_line, hex_field, num_field, each_line, FIELD_CAP }
+
+const FIELD_CAP: usize = 4096
+const OUT_CAP: usize = 10000
+
+static mut ol_buf: [u8; 10000] = [0; 10000]
+static mut ol_len: usize = 0
+
+fn out_char(c: u64) {
+    if ol_len < OUT_CAP {
+        ol_buf[ol_len] = (c & 255) as u8
+        ol_len = ol_len + 1
+    }
+}
+
+fn out_text(w: str) {
+    var i: usize = 0
+    while i < w.n {
+        out_char(rt.ld8(w.p as u64, i) as u64)
+        i = i + 1
+    }
+}
+
+fn out_num(v: u64) {
+    if v >= 10 { out_num(v / 10) }
+    out_char(48 + (v % 10))
+}
+
+fn out_signed(v: i64) {
+    if v < 0 {
+        out_char(45)
+        out_num((0 - v) as u64)
+    } else {
+        out_num(v as u64)
+    }
+}
+
+fn out_bit(v: bool) {
+    if v { out_char(49) } else { out_char(48) }
+}
+
+fn out_hex(p: u64, n: usize) {
+    if n == 0 {
+        out_char(45)
+        return
+    }
+    let d: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        out_char(d[(v >> 4) as usize] as u64)
+        out_char(d[(v & 15) as usize] as u64)
+        i = i + 1
+    }
+}
+
+fn out_line() {
+    io.print_line_bytes((&ol_buf[0]) as u64, ol_len)
+    ol_len = 0
+}
+
+fn hex_digit(c: u64) -> i64 {
+    if c >= 48 && c <= 57 { return (c - 48) as i64 }
+    if c >= 97 && c <= 102 { return (c - 87) as i64 }
+    if c >= 65 && c <= 70 { return (c - 55) as i64 }
+    return -1
+}
+
+fn hex_field(line: u64, len: usize, at: *mut usize, dst: u64) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    while i < len && rt.ld8(line, i) != 32 as u8 { i = i + 1 }
+    *at = i
+    let n: usize = i - start
+    if n == 0 { return -1 }
+    if n == 1 && rt.ld8(line, start) == 45 as u8 { return 0 }
+    if n % 2 != 0 || n / 2 > FIELD_CAP { return -1 }
+    var o: usize = 0
+    while o < n / 2 {
+        let hi: i64 = hex_digit(rt.ld8(line, start + o * 2) as u64)
+        let lo: i64 = hex_digit(rt.ld8(line, start + o * 2 + 1) as u64)
+        if hi < 0 || lo < 0 { return -1 }
+        rt.st8(dst, o, ((hi * 16 + lo) & 255) as u8)
+        o = o + 1
+    }
+    return (n / 2) as i64
+}
+
+fn num_field(line: u64, len: usize, at: *mut usize) -> i64 {
+    var i: usize = *at
+    while i < len && rt.ld8(line, i) == 32 as u8 { i = i + 1 }
+    let start: usize = i
+    var v: i64 = 0
+    while i < len && rt.ld8(line, i) >= 48 as u8 && rt.ld8(line, i) <= 57 as u8 {
+        v = v * 10 + ((rt.ld8(line, i) as i64) - 48)
+        i = i + 1
+    }
+    if i == start { return -1 }
+    *at = i
+    return v
+}
+
+fn each_line(handler: fn(u64, usize)) -> bool {
+    var inp: rt.Buf = rt.buf_new()
+    if !rt.read_stdin(&inp) { return false }
+    let p: u64 = rt.buf_ptr(&inp)
+    let n: usize = rt.buf_len(&inp)
+    var at: usize = 0
+    while at < n {
+        var e: usize = at
+        while e < n && rt.ld8(p, e) != 10 as u8 { e = e + 1 }
+        var len: usize = e - at
+        while len > 0 && rt.ld8(p, at + len - 1) == 13 as u8 { len = len - 1 }
+        if len > 0 { handler(p + at as u64, len) }
+        at = e + 1
+    }
+    rt.buf_free(&inp)
+    return true
+}

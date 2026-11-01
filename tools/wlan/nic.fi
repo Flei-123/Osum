@@ -1,0 +1,185 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import oracleio.line
+import wlan.connect
+import wlan.ccmp
+import wlan.ethconv
+import knet.wlan_net
+
+static mut nb_in: [u8; 4096] = [0; 4096]
+static mut nb_out: [u8; 4096] = [0; 4096]
+static mut nb_eth: [u8; 4096] = [0; 4096]
+static mut nb_mac: [u8; 6] = [0; 6]
+static mut nb_bssid: [u8; 6] = [0; 6]
+static mut nb_session: u64 = 0
+
+fn session() -> *mut connect.Session { return nb_session as *mut connect.Session }
+
+fn keys_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let s: *mut connect.Session = session()
+    let t: i64 = line.hex_field(p, len, &at, (&nb_in[0]) as u64)
+    let g: i64 = line.hex_field(p, len, &at, (&nb_in[16]) as u64)
+    if t != 16 {
+        line.out_text("K bad")
+        line.out_line()
+        return
+    }
+    var i: usize = 0
+    while i < 16 {
+        (*s).ptk[32 + i] = nb_in[i]
+        (*s).gtk[i] = nb_in[16 + i]
+        i = i + 1
+    }
+    if g == 16 { (*s).gtk_len = 16 } else { (*s).gtk_len = 0 }
+    line.out_text("K ok")
+    line.out_line()
+}
+
+fn mac_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let m: i64 = line.hex_field(p, len, &at, (&nb_mac[0]) as u64)
+    line.out_text("M ok=")
+    line.out_bit(m == 6)
+    line.out_line()
+}
+
+fn key_name(s: *mut connect.Session, tk: u64) -> str {
+    if tk == 0 { return "none" }
+    if tk == (&(*s).ptk[32]) as u64 { return "ptk" }
+    if tk == (&(*s).gtk[0]) as u64 { return "gtk" }
+    return "other"
+}
+
+fn rx_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let s: *mut connect.Session = session()
+    let n: i64 = line.hex_field(p, len, &at, (&nb_in[0]) as u64)
+    line.out_text("R")
+    if n <= 0 {
+        line.out_text(" bad")
+        line.out_line()
+        return
+    }
+    let tk: u64 = connect.rx_key(s, (&nb_in[0]) as u64)
+    line.out_text(" key=")
+    line.out_text(key_name(s, tk))
+    var m: i64 = -1
+    if tk != 0 {
+        m = ccmp.unprotect(tk, (&nb_in[0]) as u64, n as usize, (&nb_out[0]) as u64, 4096)
+    }
+    line.out_text(" m=")
+    line.out_signed(m)
+    var echo: bool = false
+    if m > 0 { echo = ethconv.from_self((&nb_out[0]) as u64, m as u64, (&nb_mac[0]) as u64) }
+    line.out_text(" self=")
+    line.out_bit(echo)
+    var e: i64 = -1
+    if m > 0 && !echo {
+        e = ethconv.wlan_to_eth((&nb_out[0]) as u64, m as u64, (&nb_eth[0]) as u64, 1536)
+    }
+    line.out_text(" eth=")
+    if e > 0 { line.out_hex((&nb_eth[0]) as u64, e as usize) } else { line.out_char(45) }
+    line.out_line()
+}
+
+fn self_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let n: i64 = line.hex_field(p, len, &at, (&nb_in[0]) as u64)
+    var r: bool = false
+    if n > 0 { r = ethconv.from_self((&nb_in[0]) as u64, n as u64, (&nb_mac[0]) as u64) }
+    line.out_text("F self=")
+    line.out_bit(r)
+    line.out_line()
+}
+
+fn tx_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let n: i64 = line.hex_field(p, len, &at, (&nb_in[0]) as u64)
+    let b: i64 = line.hex_field(p, len, &at, (&nb_bssid[0]) as u64)
+    var r: i64 = -1
+    if n > 0 && b == 6 {
+        r = ethconv.eth_to_wlan((&nb_in[0]) as u64, n as u64, (&nb_out[0]) as u64, 4096, (&nb_bssid[0]) as u64)
+    }
+    line.out_text("T out=")
+    if r > 0 { line.out_hex((&nb_out[0]) as u64, r as usize) } else { line.out_char(45) }
+    line.out_line()
+}
+
+fn link_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let v: i64 = line.num_field(p, len, &at)
+    wlan_net.set_link(v == 1)
+    line.out_text("L ok")
+    line.out_line()
+}
+
+fn depth_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let v: i64 = line.num_field(p, len, &at)
+    if v > 0 { wlan_net.set_rx_depth(v as u64) }
+    line.out_text("D ok")
+    line.out_line()
+}
+
+fn offer_cmd(p: u64, len: usize) {
+    var at: usize = 1
+    let n: i64 = line.hex_field(p, len, &at, (&nb_in[0]) as u64)
+    var r: bool = false
+    if n > 0 { r = wlan_net.rx_offer((&nb_in[0]) as u64, n as u64) }
+    line.out_text("O ok=")
+    line.out_bit(r)
+    line.out_line()
+}
+
+fn take_cmd() {
+    var frame: u64 = 0
+    var slot: u64 = 0
+    let n: u64 = wlan_net.rx_take_on(0, 0, &frame, &slot)
+    line.out_text("G n=")
+    line.out_num(n)
+    line.out_text(" data=")
+    if n > 0 {
+        line.out_hex(frame, n as usize)
+        wlan_net.rx_recycle_on(0, 0, slot)
+    } else {
+        line.out_char(45)
+    }
+    line.out_line()
+}
+
+fn stat_cmd() {
+    line.out_text("S queued=")
+    line.out_num(wlan_net.rx_queued())
+    line.out_text(" drops=")
+    line.out_num(wlan_net.rx_drops())
+    line.out_text(" free=")
+    line.out_bit(wlan_net.rx_free())
+    line.out_text(" poll=")
+    line.out_bit(wlan_net.poll_on(0, 0))
+    line.out_line()
+}
+
+fn run_line(p: u64, len: usize) {
+    let c: u8 = rt.ld8(p, 0)
+    if c == 75 as u8 { keys_cmd(p, len); return }
+    if c == 77 as u8 { mac_cmd(p, len); return }
+    if c == 82 as u8 { rx_cmd(p, len); return }
+    if c == 70 as u8 { self_cmd(p, len); return }
+    if c == 84 as u8 { tx_cmd(p, len); return }
+    if c == 76 as u8 { link_cmd(p, len); return }
+    if c == 68 as u8 { depth_cmd(p, len); return }
+    if c == 79 as u8 { offer_cmd(p, len); return }
+    if c == 71 as u8 { take_cmd(); return }
+    if c == 83 as u8 { stat_cmd(); return }
+    line.out_text("unknown command")
+    line.out_line()
+}
+
+#[allow_escape]
+fn main() -> i32 {
+    var s: connect.Session = connect.session_new()
+    nb_session = (&s) as u64
+    if !line.each_line(run_line) { return 1 }
+    return 0
+}

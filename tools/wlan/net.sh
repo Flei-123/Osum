@@ -71,6 +71,7 @@ C="$T/c.klar"
 has "$C" 'fakeap: m4 ok' "link up (handshake done)"
 has "$C" 'auto=up rc=0' "autostart up"
 has "$C" 'fakeap: arp' "ARP request for the gateway reached the AP"
+has "$C" 'fakeap: echo' "AP mirrors the ARP broadcast (group key) in the same burst as the reply"
 has "$C" 'fakeap: icmp' "ICMP echo reached the AP"
 awk '/==WAITED==/{f=1} /==PING1==/{f=0} f' "$C" > "$T/p1.txt"
 grep -aqE 'octets from 192\.168\.77\.1' "$T/p1.txt" && ok "ping gateway answered" || { bad "ping gateway not answered"; head -12 "$T/p1.txt"; }
