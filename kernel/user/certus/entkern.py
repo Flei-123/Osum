@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-# entkern.py -- DIE OSUM-FENSTERSCHICHT FUER DAS PROFIL `app`.
-#
-# wlib/wlibc/ulib/libc sind `profile kernel` (Inline-Assembler erlaubt,
-# `syscall` verboten); Certus ist `profile app` (umgekehrt). Das Profil
-# haengt an der WURZELDATEI -- ein Programm, das beides bindet, gibt es
-# also nicht, solange irgendwo `asm(...)` steht. Dieses Skript macht aus
-# den Quellen des Systems Kopien OHNE asm: jeder Assembler-Block wird
-# durch den Aufruf einer `extern fn` ersetzt, und dahinter liegen die
-# acht Befehlsfolgen in kernel/user/sysstub.s.
-#
-# Es ist eine MECHANISCHE Umformung mit Kontrolle: findet ein Muster
-# nicht genau einmal, bricht das Skript ab. Eine stille Teilumformung
-# waere schlimmer als keine.
 import sys, os, re
 
 def lies(p):
@@ -52,10 +39,6 @@ extern fn osum_aio_submit(op: u64, fd: u64, buf: u64, len: u64,
 
 
 def profil_weg(s, wo):
-    # `profile kernel` in der ersten Zeile einer importierten Datei ist
-    # unter einer app-Wurzel harmlos (prof.rs) -- aber die Datei bekommt
-    # hier ohnehin einen neuen Kopf, und der Name des Profils in einer
-    # Kopie, die gerade entkernt wurde, waere eine Luege.
     if 'profile kernel\n' in s:
         s = s.replace('profile kernel\n', '// (profile kernel -- entfernt von tools/certus/entkern.py)\n', 1)
     return s
@@ -174,14 +157,12 @@ def main():
         p = os.path.join(bau, name)
         if os.path.exists(p):
             schreib(p, schlicht(lies(p), name))
-    # the other copied Osum modules (fuiglyph, fuib, ecke, ...): profile only
     done = ('libc', 'ulib.fi', 'wlib.fi', 'wlibc.fi', 'icons.fi', 'utf8.fi')
     for f in sorted(os.listdir(bau)):
         p = os.path.join(bau, f)
         if f.endswith('.fi') and f not in done and not os.path.islink(p) and os.path.isfile(p) \
                 and f not in ('certus_main.fi',):
             schreib(p, schlicht(lies(p), f))
-    # der Rest der libc: nur das Profil
     d = os.path.join(bau, 'libc')
     for f in sorted(os.listdir(d)):
         if f.endswith('.fi') and f != 'kcall.fi':
