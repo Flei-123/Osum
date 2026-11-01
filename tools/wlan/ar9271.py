@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wlan/ar9271.py -- independent check of the AR9271 host test.
-
-Runs the Firn test (tools/wlan/ar9271.fi, built as argv[1]) with a blob on
-stdin and re-derives every logged wire frame with struct.pack from the
-layouts in the Linux ath9k sources (htc_hst.h / wmi.h / hif_usb.c).
-The Firn code and this script share no code, so a wrong byte order or a
-wrong field offset shows up as a mismatch, not as two equal mistakes.
-
-usage: ar9271.py <binary> <blob> [--real]
-exit 0 = all OK. Prints OK/FAIL lines like the other wlan sections.
-"""
 import hashlib
 import struct
 import subprocess

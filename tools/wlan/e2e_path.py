@@ -1,35 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wlan/weg.py -- der ganze Weg, und was passiert, wenn jemand
-unterwegs luegt.
-
-======================================================================
-WARUM ES DIESE DATEI GIBT: T4 AUS docs/WLAN.md
-======================================================================
-
-`docs/WLAN.md` Abschnitt 7 sagt ueber diese Runde selbst:
-
-    T4 -- `verbinden.fi` ist gegen keinen boesartigen Verlauf
-    gemessen. Der Handschlag ist es, der Automat darunter ist es
-    erschoepfend, aber der Draht dazwischen -- die Datei, die beides
-    verbindet -- hat nur den glaeubigen Weg gesehen.
-
-Genau dort sitzen aber die drei Fehler, die `verbinden.fi` ueberhaupt
-zu verhindern versucht:
-
-  * ein Beacon wird ausgewertet, aber die Sicherheitsart nicht
-    geprueft, und der Rechner haengt sich an ein offenes Netz;
-  * der Handschlag gelingt, aber der Schluessel geht nicht ins Geraet,
-    und danach fliegt alles im Klartext;
-  * es wird ein Schluessel installiert, obwohl der Handschlag nie
-    fertig wurde.
-
-Diese Datei prueft jeden davon, indem sie luegt.
-
-DIE ZAHL, AUF DIE ES ANKOMMT, ist `skeys` -- wie viele Schluessel
-wirklich im GERAET liegen. Nicht, was ein Merker sagt, sondern was
-unten angekommen ist. In jedem boesen Fall muss sie NULL sein.
-"""
 
 import binascii
 import os
@@ -77,8 +47,6 @@ def felder(antwort):
 
 
 # ---------------------------------------------------------------------
-# Ein Beacon bauen. Die Sicherheitsart steckt im RSN-Element, und genau
-# damit wird gleich gelogen.
 # ---------------------------------------------------------------------
 
 def beacon_bauen(ssid, kanal=6, rsn=True, bssid=b'\x02\x00\x00\x00\x00\x00'):
@@ -91,14 +59,12 @@ def beacon_bauen(ssid, kanal=6, rsn=True, bssid=b'\x02\x00\x00\x00\x00\x00'):
     ies += bytes([1, 8]) + b'\x82\x84\x8b\x96\x24\x30\x48\x6c'
     ies += bytes([3, 1, kanal])
     if rsn:
-        # RSN: CCMP als Paar- und Gruppenchiffre, AKM PSK
         ies += u('30140100000fac040100000fac040100000fac020000')
     return kopf + fest + ies
 
 
 def handschlag_bauen(pmk, aa, spa, snonce, gtk=b'\x11' * 16,
                      kaputt=None):
-    """Baut Nachricht 1 und 3 so, wie ein Zugangspunkt sie schickt."""
     anonce = b'\x33' * 32
     ptk = ptk_ableiten(pmk, aa, spa, anonce, snonce)
     kck, kek = ptk[0:16], ptk[16:32]
@@ -109,7 +75,6 @@ def handschlag_bauen(pmk, aa, spa, snonce, gtk=b'\x11' * 16,
     verpackt = aes_wrap(kek, kd)
     m3 = eapol_bauen(0x13CA, 16, 2, anonce, 0, verpackt)
     if kaputt == 'mic':
-        # MIC bleibt null -- ein Fremder, der den Schluessel nicht hat
         pass
     else:
         m3, _ = eapol_mic_setzen(m3, kck, False)
@@ -118,7 +83,7 @@ def handschlag_bauen(pmk, aa, spa, snonce, gtk=b'\x11' * 16,
 
 def main():
     if not os.path.exists(ORAKEL):
-        print("kein Orakel unter %s" % ORAKEL)
+        print("no oracle at %s" % ORAKEL)
         return 2
 
     ssid = b'OsumNetz'
@@ -128,7 +93,7 @@ def main():
     spa = b'\x02\x00\x00\x00\x01\x00'
     snonce = b'\x44' * 32
 
-    print("== der glaeubige Weg: er MUSS ganz durchgehen ==")
+    print("== the believing path: it MUST go all the way through ==")
     m1, m3, ptk, gtk = handschlag_bauen(pmk, aa, spa, snonce)
     bk = beacon_bauen(ssid, rsn=True)
     a = felder(orakel("weg %s %s %s %s %s %s %s"
@@ -137,69 +102,65 @@ def main():
     if a.get('netze') == '1' and a.get('wahl') == '1' \
             and a.get('m1') == '1' and a.get('m3') == '1' \
             and a.get('daten') == '1' and a.get('skeys') == '2':
-        ok("Suchlauf findet das Netz, Wahl geht, Nachricht 1 und 3 gehen, "
-           "und danach liegen GENAU ZWEI Schluessel im Geraet (PTK und GTK)")
+        ok("scan finds the network, choice works, messages 1 and 3 pass, "
+           "and afterwards EXACTLY TWO keys are in the device (PTK and GTK)")
     else:
-        bad("der glaeubige Weg geht nicht durch: %s" % a)
+        bad("the believing path does not go through: %s" % a)
 
-    print("== und jetzt wird gelogen (T4) ==")
+    print("== and now it lies (T4) ==")
 
-    # --- 1. Ein OFFENES Netz. Es darf gar nicht erst gewaehlt werden.
     bo = beacon_bauen(ssid, rsn=False)
     a = felder(orakel("weg %s %s %s %s %s %s %s"
                       % (h(bo), h(pmk), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
     if a.get('netze') == '1' and a.get('wahl') == '0' \
             and a.get('skeys') == '0':
-        ok("ein OFFENES Netz wird gefunden und BENANNT, aber nicht "
-           "gewaehlt -- und kein Schluessel geht ins Geraet")
+        ok("an OPEN network is found and NAMED, but not "
+           "chosen -- and no key goes into the device")
     else:
-        bad("ein offenes Netz kommt zu weit: %s" % a)
+        bad("an open network gets too far: %s" % a)
 
-    # --- 2. Nachricht 3 mit falschem Pruefwert. Ein Fremder.
     m1b, m3b, _, _ = handschlag_bauen(pmk, aa, spa, snonce, kaputt='mic')
     a = felder(orakel("weg %s %s %s %s %s %s %s"
                       % (h(bk), h(pmk), h(spa), h(aa), h(m1b),
                          h(snonce), h(m3b))))
     if a.get('m1') == '1' and a.get('m3') == '0' \
             and a.get('daten') == '0' and a.get('skeys') == '0':
-        ok("Nachricht 3 mit falschem Pruefwert: kein Schluessel im Geraet, "
-           "keine Daten erlaubt")
+        ok("message 3 with wrong check value: no key in the device, "
+           "no data allowed")
     else:
-        bad("eine Nachricht 3 mit falschem MIC kommt zu weit: %s" % a)
+        bad("a message 3 with wrong MIC gets too far: %s" % a)
 
-    # --- 3. Der falsche PMK (also das falsche Passwort).
     falsch = pmk_aus_psk(b'daspasswortistfalsch', ssid)
     a = felder(orakel("weg %s %s %s %s %s %s %s"
                       % (h(bk), h(falsch), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
     if a.get('m3') == '0' and a.get('daten') == '0' \
             and a.get('skeys') == '0':
-        ok("das falsche Passwort: der Handschlag scheitert an Nachricht 3, "
-           "kein Schluessel im Geraet")
+        ok("the wrong password: the handshake fails at message 3, "
+           "no key in the device")
     else:
-        bad("ein falsches Passwort fuehrt trotzdem zu einem Schluessel: %s" % a)
+        bad("a wrong password still leads to a key: %s" % a)
 
     # --- 4. Gar keine Nachricht 3.
     a = felder(orakel("weg %s %s %s %s %s %s -"
                       % (h(bk), h(pmk), h(spa), h(aa), h(m1), h(snonce))))
     if a.get('m1') == '1' and a.get('m3') == '0' \
             and a.get('daten') == '0' and a.get('skeys') == '0':
-        ok("Handschlag bricht nach Nachricht 1 ab: kein Schluessel, "
-           "keine Daten -- eine halbe Verbindung gibt es nicht")
+        ok("handshake aborts after message 1: no key, "
+           "no data -- there is no half connection")
     else:
-        bad("ein abgebrochener Handschlag hinterlaesst etwas: %s" % a)
+        bad("an aborted handshake leaves something behind: %s" % a)
 
-    # --- 5. Ein Beacon, das gar keines ist (ein Datenrahmen).
     kein = u('08413a01') + aa + spa + aa + u('0000') + b'\xaa' * 20
     a = felder(orakel("weg %s %s %s %s %s %s %s"
                       % (h(kein), h(pmk), h(spa), h(aa), h(m1),
                          h(snonce), h(m3))))
     if a.get('netze') == '0' and a.get('wahl') == '0' \
             and a.get('skeys') == '0':
-        ok("ein Datenrahmen als Beacon: kein Netz in der Liste, keine Wahl")
+        ok("a data frame as beacon: no network in the list, no choice")
     else:
-        bad("ein Datenrahmen wird als Netz aufgenommen: %s" % a)
+        bad("a data frame is taken as a network: %s" % a)
 
     # --- 6. Ein abgeschnittenes Beacon.
     for schnitt in (10, 20, 30, 40):
@@ -207,12 +168,12 @@ def main():
                           % (h(bk[:schnitt]), h(pmk), h(spa), h(aa),
                              h(m1), h(snonce), h(m3))))
         if a.get('skeys', 'x') != '0':
-            bad("ein auf %d Oktette gekuerztes Beacon fuehrt zu einem "
-                "Schluessel: %s" % (schnitt, a))
+            bad("a beacon truncated to %d octets leads to a "
+                "key: %s" % (schnitt, a))
             break
     else:
-        ok("Beacons auf 10, 20, 30 und 40 Oktette gekuerzt: keines fuehrt "
-           "zu einem Schluessel im Geraet")
+        ok("beacons truncated to 10, 20, 30 and 40 octets: none leads "
+           "to a key in the device")
 
     print()
     print("WEG: %d Zusagen, %d Fehler" % (gut, schlecht))

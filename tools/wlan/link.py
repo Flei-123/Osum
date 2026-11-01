@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wlan/link.py -- LW-2 wiring gate: lib/wlan/link.fi (EAPOL dispatch, group key after message 3, capability
-summary per network) against an independent Python model.
-
-usage: python3 -I tools/wlan/link.py <path to link oracle binary>
-Keys, MICs and frames come from hashlib/hmac/cryptography, never from the Firn code. Exit 0 = all checks OK.
-"""
 import hashlib
 import hmac
 import struct

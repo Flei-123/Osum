@@ -27,7 +27,6 @@ def data(n, seed):
 
 
 def build(secs):
-    """secs: list of (addr_or_separator, bytes)."""
     b = hdr() + tlv(18, u32(0x11)) + tlv(27, u32(2)) + tlv(23, u32(0x00330018))
     b += tlv(22, u32(1) + u32(0x1b8e00db) + u32(0)) + tlv(22, u32(0) + u32(0x088e10db) + u32(0x0b02909b))
     for a, d in secs:
@@ -36,7 +35,6 @@ def build(secs):
 
 
 def expected(secs, bsize, mode, phys):
-    """-> list of output lines"""
     out = []
     W = lambda off, v: out.append('W 0x%x 0x%x' % (off, v & MASK32))
     P = lambda a, v: out.append('P 0x%x 0x%x' % (a & 0xFFFFF, v & MASK32))
@@ -122,7 +120,6 @@ def expected(secs, bsize, mode, phys):
 
 
 def paging_at(secs, i):
-    """True when secs[i] lies behind the paging separator (never loaded, may be empty)."""
     return any(a == SEP_PAGING for a, d in secs[:i])
 
 
@@ -176,7 +173,6 @@ def gen(d):
 
 
 def real_secs(path, kind=19):
-    """REAL Intel ucode (not committed): TLV walk, SEC_RT (19) or SEC_INIT (20) sections incl. separators, in file order."""
     b = open(path, 'rb').read()
     if struct.unpack_from('<II', b, 0) != (0, 0x0A4C5749): raise SystemExit('not a ucode file')
     o, secs = 80, []

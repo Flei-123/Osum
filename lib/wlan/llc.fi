@@ -1,68 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// lib/wlan/llc.fi -- was ueber CCMP liegt: LLC/SNAP, IPv4, UDP, DHCP, TCP.
-//
-// ==================================================================
-// WARUM DIESE DATEI UEBERHAUPT GEBRAUCHT WIRD
-// ==================================================================
-//
-// Runde WLAN hat bis CCMP gebaut: aus einem 802.11-Kopf und einem
-// Klartext wird ein geschuetzter Rahmen. Was sie NICHT gebaut hat, ist
-// die Frage, WAS in diesem Klartext steht -- und ohne eine Antwort
-// darauf ist der Satz "Osum verbindet sich mit einem WLAN" nicht
-// pruefbar. Eine Verbindung, ueber die kein einziges Paket geht, ist
-// keine.
-//
-// Der naheliegende Weg waere gewesen, `kernel/inet.fi` zu benutzen --
-// Osum HAT einen TCP/IP-Stapel, und er ist gemessen. Das geht hier
-// aber nicht, und der Grund ist keine Meinung:
-//
-//   [gemessen] `kernel/inet.fi` importiert kstate, mem, serial,
-//   atomic, cpu, sched, netdev, errno, apic und pci. Es braucht einen
-//   Allokator, eine Uhr, eine Sperre und einen Kernel-Faden.
-//
-// Der ganze `lib/`-Baum darf davon nichts (siehe den Kopf von
-// `lib/crypto/sha256.fi`): keine `profile`-Zeile, kein `import` ausser
-// auf `lib/`, kein Allokator, kein Systemaufruf, aller Zustand beim
-// Aufrufer. Nur unter dieser Regel laesst sich derselbe Quelltext in
-// den Kern binden UND auf dem Wirt messen -- und genau das ist der
-// einzige Grund, warum diese Runde ueberhaupt etwas messen kann.
-//
-// Deshalb: eine EIGENE, sehr kleine Schicht, die genau so viel kann,
-// wie ein Rechner braucht, der sich gerade an ein WLAN gehaengt hat
-// und wissen will, ob er im Netz ist. Sie ersetzt `kernel/inet.fi`
-// NICHT und will es nicht -- sobald der Kern mit einer echten Karte
-// laeuft, gehoert der richtige Stapel darunter. Was hier steht, ist
-// die kleinste ehrliche Antwort auf "geht wirklich ein Paket durch".
-//
-// ==================================================================
-// WAS SIE KANN UND WAS AUSDRUECKLICH NICHT
-// ==================================================================
-//
-// KANN:
-//   * LLC/SNAP bauen und zerlegen (RFC 1042)
-//   * IPv4-Kopf bauen und zerlegen, Pruefsumme rechnen und PRUEFEN
-//   * UDP bauen und zerlegen, mit der Pseudokopf-Pruefsumme
-//   * DHCP: Discover/Request bauen, Offer/Ack zerlegen, Optionen lesen
-//   * TCP: SYN/ACK/PSH bauen und zerlegen -- gerade genug fuer EINE
-//     HTTP-Anfrage auf einer frisch aufgemachten Verbindung
-//
-// KANN NICHT, und das steht hier, damit es niemand annimmt:
-//   * keine Neuzusammensetzung von Bruchstuecken (IP-Fragmente)
-//   * keine Neuuebertragung, kein Zeitgeber, kein Fenster, kein
-//     Ueberlastschutz -- TCP ist hier ein GERADEAUSLAUF und kein TCP
-//   * kein ARP (im WLAN geht alles ueber den Zugangspunkt, und die
-//     Zieladresse steht im 802.11-Kopf)
-//   * kein IPv6
-//   * keine Reihenfolgeumkehr, kein Wiederzusammenbau von Stroemen
-//
-// Wer daraus einen Netzstapel macht, hat diese Liste nicht gelesen.
-//
 // ==================================================================
 // KEIN ALLOKATOR
 // ==================================================================
-//
-// Aller Zustand steht in Bloecken, die der Aufrufer haelt. Dieselbe
-// Regel wie im ganzen `lib/`-Baum.
 
 export {
     // LLC/SNAP
@@ -83,7 +21,6 @@ export {
     // TCP
     Tcp, tcp_new, tcp_build, tcp_parse,
     T_FIN, T_SYN, T_RST, T_PSH, T_ACK,
-    // HTTP, gerade so viel wie gebraucht wird
     http_get_build, http_status_of, http_body_offset
 }
 
@@ -99,11 +36,6 @@ fn st8(p: u64, i: usize, v: u8) {
     *((p + i as u64) as *mut u8) = v
 }
 
-// Alles in dieser Datei ist NETZREIHENFOLGE (hoechstwertig zuerst).
-// Es gibt hier absichtlich keine Funktion, die die andere Richtung
-// kann: jede Verdrehung ist eine Fehlerquelle, und die einzige Stelle
-// im WLAN-Baum, an der etwas verdreht liegt, ist der CCMP-Kopf --
-// dort steht eine Anmerkung daneben.
 fn be16(p: u64, i: usize) -> u64 {
     return ((ld8(p, i) as u64) << 8) | (ld8(p, i + 1) as u64)
 }
@@ -136,21 +68,9 @@ fn copy(dst: u64, src: u64, n: usize) {
 // ==================================================================
 // LLC/SNAP -- RFC 1042
 // ==================================================================
-//
-// [gemessen, 15.09.2026] Das ist nicht aus der Norm abgeschrieben,
-// sondern an den vier ECHTEN Datenrahmen aus `tools/wlan/mitschnitt.txt`
-// nachgesehen: nach dem Entschluesseln steht dort Oktett fuer Oktett
-//
 //     aa aa 03 00 00 00 08 00    (IPv4)
 //     aa aa 03 00 00 00 86 dd    (IPv6)
 //     aa aa 03 00 00 00 80 f3    (AARP)
-//
-// Also DSAP 0xAA, SSAP 0xAA, Steuerung 0x03 (unnummeriert), dann drei
-// Oktette Organisationskennung 00:00:00 und zwei Oktette EtherType.
-// Ein 802.11-Datenrahmen traegt KEINE Ethernet-Adressen in der
-// Nutzlast -- die stehen im 802.11-Kopf. Das ist der ganze
-// Unterschied zwischen Ethernet und 802.11 an dieser Stelle, und er
-// ist der Grund, warum es diese acht Oktette ueberhaupt gibt.
 
 const SNAP_LEN: usize = 8
 
@@ -170,16 +90,11 @@ fn snap_build(out: u64, ethertype: u64) -> usize {
     return SNAP_LEN
 }
 
-// Gibt den EtherType zurueck oder 0, wenn der Kopf keiner ist.
-// 0 ist als EtherType nicht vergeben, taugt also als "nein".
 fn snap_parse(p: u64, n: usize) -> u64 {
     if n < SNAP_LEN { return 0 }
     if ld8(p, 0) != 0xAA as u8 { return 0 }
     if ld8(p, 1) != 0xAA as u8 { return 0 }
     if ld8(p, 2) != 0x03 as u8 { return 0 }
-    // Die Organisationskennung MUSS 00:00:00 sein. Ein anderer Wert
-    // ist ein herstellereigenes Format (etwa 00:00:F8 fuer das alte
-    // Ethernet-Tunnelformat) und wird hier abgelehnt statt geraten.
     if ld8(p, 3) != 0 as u8 { return 0 }
     if ld8(p, 4) != 0 as u8 { return 0 }
     if ld8(p, 5) != 0 as u8 { return 0 }
@@ -189,10 +104,6 @@ fn snap_parse(p: u64, n: usize) -> u64 {
 // ==================================================================
 // DIE PRUEFSUMME, RFC 1071
 // ==================================================================
-//
-// Einerkomplement der Einerkomplementsumme aller 16-Bit-Woerter. Ein
-// ungerades letztes Oktett wird mit einer Null aufgefuellt -- aber
-// NUR fuer die Rechnung, es wird nichts an den Daten geaendert.
 
 fn sum16(p: u64, n: usize, start: u64) -> u64 {
     var s: u64 = start
@@ -204,16 +115,12 @@ fn sum16(p: u64, n: usize, start: u64) -> u64 {
     if i < n {
         s = s + ((ld8(p, i) as u64) << 8)
     }
-    // Die Uebertraege zurueckfalten, bis keiner mehr da ist.
     while (s >> 16) != 0 {
         s = (s & 0xFFFF) + (s >> 16)
     }
     return (~s) & 0xFFFF
 }
 
-// Eine Pruefsumme ueber Daten, die ihre eigene Pruefsumme schon
-// enthalten, muss 0 ergeben. Das ist die uebliche Art, sie zu pruefen,
-// und sie braucht kein Herausnehmen des Feldes.
 fn sum16_check(p: u64, n: usize, start: u64) -> bool {
     return sum16(p, n, start) == 0
 }
@@ -246,16 +153,12 @@ fn ipv4_new() -> Ipv4 {
     return i
 }
 
-// Baut einen Kopf OHNE Optionen (IHL immer 5). Die Pruefsumme wird
-// gerechnet, nicht geraten.
 fn ipv4_build(out: u64, source: u64, dest: u64, proto: u64,
     payload_len: usize, kennung: u64) -> usize {
     st8(out, 0, 0x45 as u8)          // Fassung 4, IHL 5
     st8(out, 1, 0 as u8)             // kein Dienstgueteverkehr
     put16(out, 2, (IPV4_MIN + payload_len) as u64)
     put16(out, 4, kennung)
-    // Nicht zerteilen. Diese Datei setzt nichts wieder zusammen, also
-    // darf sie auch nichts erzeugen, was zerteilt werden muesste.
     put16(out, 6, 0x4000)
     st8(out, 8, 64 as u8)            // Lebenszeit
     st8(out, 9, (proto & 255) as u8)
@@ -270,9 +173,6 @@ fn ipv4_parse(v: *mut Ipv4, p: u64, n: usize) -> bool {
     if n < IPV4_MIN { return false }
     if (ld8(p, 0) >> 4) != 4 as u8 { return false }
     let ihl: usize = ((ld8(p, 0) & 15) as usize) * 4
-    // Ein Kopf, der kuerzer ist als das Pflichtfeld oder laenger als
-    // das, was wirklich da ist, ist kaputt. Beides hier abzufangen
-    // erspart jedem Aufrufer die Rechnung.
     if ihl < IPV4_MIN { return false }
     if ihl > n { return false }
     let gesamt: usize = be16(p, 2) as usize
@@ -289,10 +189,6 @@ fn ipv4_parse(v: *mut Ipv4, p: u64, n: usize) -> bool {
     return true
 }
 
-// Der Pseudokopf aus RFC 768/793: Quelle, Ziel, Null, Protokoll,
-// Laenge. Er wird NICHT uebertragen, geht aber in die Pruefsumme ein.
-// Das ist die Stelle, an der eine UDP- oder TCP-Pruefsumme haeufig
-// falsch wird, deshalb steht sie genau einmal hier.
 fn pseudo_sum(source: u64, dest: u64, proto: u64,
     len: usize) -> u64 {
     var s: u64 = 0
@@ -326,8 +222,6 @@ fn udp_new() -> Udp {
     return u
 }
 
-// `payload` already sits behind `out` (out + 8). The caller puts it
-// dorthin, diese Funktion setzt nur den Kopf und rechnet.
 fn udp_build(out: u64, qip: u64, zip: u64, qport: u64, zport: u64,
     payload_len: usize) -> usize {
     put16(out, 0, qport)
@@ -336,9 +230,6 @@ fn udp_build(out: u64, qip: u64, zip: u64, qport: u64, zport: u64,
     put16(out, 6, 0)
     let ps: u64 = pseudo_sum(qip, zip, P_UDP, UDP_LEN + payload_len)
     var s: u64 = sum16(out, UDP_LEN + payload_len, ps)
-    // RFC 768: eine errechnete Null wird als 0xFFFF uebertragen, weil
-    // die Null "keine Pruefsumme" bedeutet. Ohne diese Zeile waere ein
-    // gueltiges Paket gelegentlich als ungeprueft markiert.
     if s == 0 { s = 0xFFFF }
     put16(out, 6, s)
     return UDP_LEN
@@ -356,7 +247,6 @@ fn udp_parse(u: *mut Udp, p: u64, n: usize, qip: u64,
     (*u).payload = p + UDP_LEN as u64
     (*u).payload_len = len - UDP_LEN
     if be16(p, 6) == 0 {
-        // Null heisst "nicht gerechnet". Das ist bei IPv4 erlaubt.
         (*u).sum_ok = true
     } else {
         let ps: u64 = pseudo_sum(qip, zip, P_UDP, len)
@@ -368,15 +258,6 @@ fn udp_parse(u: *mut Udp, p: u64, n: usize, qip: u64,
 // ==================================================================
 // DHCP -- RFC 2131 und RFC 2132
 // ==================================================================
-//
-// [gemessen] Der Zerleger ist nicht nur gegen selbst gebaute Pakete
-// gemessen, sondern gegen die ECHTEN DHCP-Pakete aus
-// `tools/wlan/mitschnitt.txt`: die Datenrahmen 0 und 1 jener
-// Aufzeichnung sind ein echter Request und ein echtes Ack eines
-// echten Zugangspunktes, verschluesselt mit WPA2. Sie werden
-// entschluesselt und hier hindurchgeschickt. Das ist eine staerkere
-// Zusage als jedes selbst gebaute Paket, weil niemand dabei zweimal
-// denselben Denkfehler machen kann.
 
 const D_DISCOVER: u64 = 1
 const D_OFFER: u64 = 2
@@ -394,20 +275,20 @@ const O_SERVER: u64 = 54
 const O_ENDE: u64 = 255
 
 const DHCP_FEST: usize = 236   // bis einschliesslich sname/file
-const DHCP_MIN: usize = 240    // + die vier Oktette Zauberzahl
+const DHCP_MIN: usize = 240
 
 struct Dhcp {
     op: u64,
     xid: u64,
-    yiaddr: u64,       // die angebotene/zugeteilte Adresse
+    yiaddr: u64,
     siaddr: u64,
     art: u64,          // Option 53
     maske: u64,        // Option 1
     tor: u64,          // Option 3
-    dns: u64,          // Option 6, der erste
+    dns: u64,
     server: u64,       // Option 54
     miete: u64,        // Option 51
-    opt: u64,          // Zeiger auf die Optionen
+    opt: u64,
     opt_len: usize
 }
 
@@ -419,8 +300,7 @@ fn dhcp_new() -> Dhcp {
     return d
 }
 
-// Der feste Teil, der bei Discover und Request gleich ist.
-fn dhcp_kopf(out: u64, xid: u64, mac: u64) {
+fn dhcp_head(out: u64, xid: u64, mac: u64) {
     var i: usize = 0
     while i < DHCP_MIN {
         st8(out, i, 0 as u8)
@@ -432,12 +312,8 @@ fn dhcp_kopf(out: u64, xid: u64, mac: u64) {
     st8(out, 3, 0 as u8)       // hops
     put32(out, 4, xid)
     put16(out, 8, 0)           // secs
-    // Rundruf-Bit NICHT gesetzt: die Antwort kommt an unsere
-    // Hardwareadresse, und im WLAN steht die im 802.11-Kopf.
     put16(out, 10, 0)
     copy(out + 28, mac, 6)     // chaddr
-    // Die Zauberzahl 99.130.83.99 -- ohne sie ist es kein DHCP,
-    // sondern das aeltere BOOTP.
     st8(out, 236, 99 as u8)
     st8(out, 237, 130 as u8)
     st8(out, 238, 83 as u8)
@@ -445,7 +321,7 @@ fn dhcp_kopf(out: u64, xid: u64, mac: u64) {
 }
 
 fn dhcp_discover_build(out: u64, xid: u64, mac: u64) -> usize {
-    dhcp_kopf(out, xid, mac)
+    dhcp_head(out, xid, mac)
     var at: usize = DHCP_MIN
     st8(out, at, O_ART as u8)
     st8(out, at + 1, 1 as u8)
@@ -465,7 +341,7 @@ fn dhcp_discover_build(out: u64, xid: u64, mac: u64) -> usize {
 
 fn dhcp_request_build(out: u64, xid: u64, mac: u64, angefragt: u64,
     server: u64) -> usize {
-    dhcp_kopf(out, xid, mac)
+    dhcp_head(out, xid, mac)
     var at: usize = DHCP_MIN
     st8(out, at, O_ART as u8)
     st8(out, at + 1, 1 as u8)
@@ -490,27 +366,19 @@ fn dhcp_request_build(out: u64, xid: u64, mac: u64, angefragt: u64,
     return at
 }
 
-// Eine Option suchen. Rueckgabe ist die Laenge oder -1.
-//
-// DIE LAENGENPRUEFUNG IST HIER DER GANZE PUNKT. Eine Optionskette ist
-// die klassische Stelle, an der ein boesartiger Server einen Zerleger
-// ueber den Puffer hinausschickt: Option sagt Laenge 200, es sind aber
-// nur 20 Oktette da. Diese Schleife glaubt keiner Laengenangabe, ohne
-// sie gegen das zu pruefen, was wirklich vorhanden ist.
-fn dhcp_option_find(p: u64, n: usize, suche: u64, out: u64,
+fn dhcp_option_find(p: u64, n: usize, search: u64, out: u64,
     max: usize) -> i64 {
     var i: usize = 0
     while i < n {
         let t: u64 = ld8(p, i) as u64
         if t == O_ENDE { return -1 }
         if t == 0 {
-            // Fuelloktett, keine Laenge dahinter.
             i = i + 1
         } else {
             if i + 1 >= n { return -1 }
             let l: usize = ld8(p, i + 1) as usize
             if i + 2 + l > n { return -1 }
-            if t == suche {
+            if t == search {
                 var k: usize = 0
                 while k < l && k < max {
                     st8(out, k, ld8(p, i + 2 + k))
@@ -524,16 +392,15 @@ fn dhcp_option_find(p: u64, n: usize, suche: u64, out: u64,
     return -1
 }
 
-fn opt_u32(p: u64, n: usize, suche: u64) -> u64 {
+fn opt_u32(p: u64, n: usize, search: u64) -> u64 {
     var b: [u8; 8] = [0; 8]
-    let l: i64 = dhcp_option_find(p, n, suche, (&b[0]) as u64, 8)
+    let l: i64 = dhcp_option_find(p, n, search, (&b[0]) as u64, 8)
     if l < 4 || (l % 4) != 0 { return 0 }
     return be32((&b[0]) as u64, 0)
 }
 
 fn dhcp_parse(d: *mut Dhcp, p: u64, n: usize) -> bool {
     if n < DHCP_MIN { return false }
-    // Die Zauberzahl. Ohne sie ist es kein DHCP.
     if ld8(p, 236) != 99 as u8 { return false }
     if ld8(p, 237) != 130 as u8 { return false }
     if ld8(p, 238) != 83 as u8 { return false }
@@ -557,17 +424,6 @@ fn dhcp_parse(d: *mut Dhcp, p: u64, n: usize) -> bool {
     return true
 }
 
-// ==================================================================
-// TCP -- RFC 793, und nur so viel davon, wie eine Anfrage braucht
-// ==================================================================
-//
-// NOCH EINMAL, WEIL ES WICHTIG IST: das hier ist kein TCP. Es gibt
-// keine Neuuebertragung, kein Fenster ausser einer festen Zahl, keinen
-// Zeitgeber und keine Reihenfolgeumkehr. Es reicht fuer einen
-// Dreifachhandschlag und EINE Anfrage auf einer Leitung, die nichts
-// verliert -- also fuer genau das, was diese Runde misst. Der echte
-// Stapel liegt in `kernel/`.
-
 const T_FIN: u64 = 1
 const T_SYN: u64 = 2
 const T_RST: u64 = 4
@@ -583,7 +439,7 @@ struct Tcp {
     ack: u64,
     off: usize,
     flags: u64,
-    fenster: u64,
+    window: u64,
     payload: u64,
     payload_len: usize,
     sum_ok: bool
@@ -592,7 +448,7 @@ struct Tcp {
 fn tcp_new() -> Tcp {
     var t: Tcp = Tcp {
         source: 0, dest: 0, seq: 0, ack: 0, off: 0, flags: 0,
-        fenster: 0, payload: 0, payload_len: 0, sum_ok: false
+        window: 0, payload: 0, payload_len: 0, sum_ok: false
     }
     return t
 }
@@ -605,9 +461,9 @@ fn tcp_build(out: u64, qip: u64, zip: u64, qport: u64, zport: u64,
     put32(out, 8, ack)
     st8(out, 12, 0x50 as u8)      // Datenversatz 5, keine Optionen
     st8(out, 13, (flags & 255) as u8)
-    put16(out, 14, 8192)          // ein festes Fenster
+    put16(out, 14, 8192)
     put16(out, 16, 0)
-    put16(out, 18, 0)             // kein dringender Zeiger
+    put16(out, 18, 0)
     let ps: u64 = pseudo_sum(qip, zip, P_TCP, TCP_MIN + payload_len)
     put16(out, 16, sum16(out, TCP_MIN + payload_len, ps))
     return TCP_MIN
@@ -625,17 +481,13 @@ fn tcp_parse(t: *mut Tcp, p: u64, n: usize, qip: u64,
     (*t).ack = be32(p, 8)
     (*t).off = off
     (*t).flags = (ld8(p, 13) as u64) & 255
-    (*t).fenster = be16(p, 14)
+    (*t).window = be16(p, 14)
     (*t).payload = p + off as u64
     (*t).payload_len = n - off
     let ps: u64 = pseudo_sum(qip, zip, P_TCP, n)
     (*t).sum_ok = sum16_check(p, n, ps)
     return true
 }
-
-// ==================================================================
-// HTTP -- gerade so viel, dass eine Antwort nachweisbar ist
-// ==================================================================
 
 fn lit(out: u64, at: usize, w: u64) -> usize {
     var i: usize = 0
@@ -647,22 +499,16 @@ fn lit(out: u64, at: usize, w: u64) -> usize {
 }
 
 // GET <pfad> HTTP/1.0\r\nHost: <wirt>\r\n\r\n
-//
-// HTTP/1.0 und nicht 1.1: bei 1.0 schliesst der Server die Leitung,
-// wenn er fertig ist, und genau das ist das Zeichen "Antwort zu
-// Ende". Bei 1.1 muesste dafuer Content-Length oder eine
-// Stueckelung ausgewertet werden -- beides Arbeit, die diese Runde
-// nicht braucht und die ungemessen bliebe.
-fn http_get_build(out: u64, pfad: u64, pfad_len: usize, wirt: u64,
+fn http_get_build(out: u64, url_path: u64, url_path_len: usize, wirt: u64,
     wirt_len: usize) -> usize {
     var g: [u8; 5] = "GET \0"
     var at: usize = lit(out, 0, (&g[0]) as u64)
     var i: usize = 0
-    while i < pfad_len {
-        st8(out, at + i, ld8(pfad, i))
+    while i < url_path_len {
+        st8(out, at + i, ld8(url_path, i))
         i = i + 1
     }
-    at = at + pfad_len
+    at = at + url_path_len
     var h1: [u8; 18] = " HTTP/1.0\r\nHost: \0"
     at = lit(out, at, (&h1[0]) as u64)
     i = 0
@@ -676,7 +522,6 @@ fn http_get_build(out: u64, pfad: u64, pfad_len: usize, wirt: u64,
     return at
 }
 
-// Die Zahl aus "HTTP/1.x NNN ...". 0 heisst: keine HTTP-Antwort.
 fn http_status_of(p: u64, n: usize) -> u64 {
     if n < 12 { return 0 }
     if ld8(p, 0) != 72 as u8 { return 0 }   // H
@@ -684,7 +529,6 @@ fn http_status_of(p: u64, n: usize) -> u64 {
     if ld8(p, 2) != 84 as u8 { return 0 }   // T
     if ld8(p, 3) != 80 as u8 { return 0 }   // P
     if ld8(p, 4) != 47 as u8 { return 0 }   // /
-    // Die Zahl steht hinter dem ersten Leerzeichen.
     var i: usize = 5
     while i < n && ld8(p, i) != 32 as u8 { i = i + 1 }
     if i >= n { return 0 }
@@ -702,7 +546,6 @@ fn http_status_of(p: u64, n: usize) -> u64 {
     return v
 }
 
-// Wo der Rumpf anfaengt: nach der Leerzeile. -1, wenn es keine gibt.
 fn http_body_offset(p: u64, n: usize) -> i64 {
     var i: usize = 0
     while i + 3 < n {

@@ -413,10 +413,10 @@ lauf "49. der Puffer, der bei knappem Speicher schweigt -- und der Aufrufer, der
      tools/hardening/run.sh haertung '^HAERTUNG: |^  OK    |^  FEHL  |^     fall='
 #
 lauf "47. WLAN ohne eine einzige Karte: 802.11, WPA2/WPA3 und CCMP gegen die Normen und gegen eine echte Aufzeichnung (tools/wlan/run.sh, Runde WLAN)" \
-     tools/wlan/run.sh wlan '^WLAN: |^WLAN-FUZZ: |^== |^  OK    (QEMU |tools/wlan/orakel|das Orakel lehnt|die Aufzeichnung liegt|SHA-1 gegen|HMAC-SHA1 gegen|PRF-SHA1, IEEE|PBKDF2-SHA1, RFC|PMK aus|AES gegen OpenSSL|AES-CMAC, RFC|Key Wrap, RFC|AES-CCM|IEEE Std 802\.11|Beacon 1|die Ketten|EAPOL-Rahmen|PTK aus dem echten|Pruefwert von Nachricht|Gruppenschluessel aus|DIE GANZE KETTE|mit einem TK|ueber ALLE|die richtige Folge|und hat den Schluessel|alle [0-9]+ Verstuemmelungen|Nachricht 3 zweimal|ERSCHOEPFEND|der Fehlerzustand|alle [0-9]+ Abschnitte|ein RSN-Element|EAPOL: alle|[0-9]+ verstuemmelte Rahmen|jede der [0-9]+|von den [0-9]+|valgrind ueber|keine WLAN-PCI|SAE ist NICHT|TKIP und WEP|die Runde in Zeilen|PTK mit KDF-SHA256|beide Seiten)'
+     tools/wlan/run.sh wlan '^WLAN: |^WLAN-FUZZ: |^== |^  OK    |^  FAIL  '
 #
 lauf "50. WLAN gegen ein ZWEITES Programm: 4-Wege-Handschlag gegen einen unabhaengigen Authenticator, die Naht zum Blech, der USB-Stick beim Namen (tools/wlan/run2.sh, Runde WLAN-2)" \
-     tools/wlan/run2.sh wlan2 '^WLAN2: |^== |^  OK    (tools/wlan/orakel|die Gegenstelle|PMK aus|Pruefwert von|Schluesseldaten von|[0-9]+ vollstaendige|in jedem Lauf|Nachricht 3 mit|Schluesseldaten OHNE|Automat: |die Naht|ein Geraet OHNE|alle [0-9]+ USB|kernel/usb\.fi|SAE ist NICHT|kein USB-WLAN|die neuen Dateien)'
+     tools/wlan/run2.sh wlan2 '^WLAN2: |^== |^  OK    |^  FAIL  '
 
 lauf "51. der echte Standby: S3 schlafen und aufwachen, Geraete und Speicher danach (tools/s3/run.sh, K-004)" \
      tools/s3/run.sh s3 '^S3: |^== |^  OK    (QEMU meldet|zurueck|APIC|PCI|ACPI-Modus|Arbeitsspeicher|Pruefsumme|zwei verschiedene|Zeitgeber|und kommt NICHT|Ladesegmente|Grafikmodus|die Rueckstellung|Gegenprobe s3nobild|8042|das Programm bittet|INNERHALB des Systemaufrufs|kehrt nach dem Wecken|die Shell fuehrt)'

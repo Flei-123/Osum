@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Verwendung:  bash tools/wlan/run2.sh [--schnell]
+# Usage:  bash tools/wlan/run2.sh [--quick]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -8,7 +8,7 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 OUT=${OUT:-/tmp/wlan2-run}
 mkdir -p "$OUT" .probe
-SCHNELL=${1:-}
+QUICK=${1:-}
 
 pass=0
 fail=0
@@ -16,28 +16,28 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 LAEUFE=40
-if [ "$SCHNELL" = "--schnell" ]; then LAEUFE=8; fi
+if [ "$QUICK" = "--quick" ]; then LAEUFE=8; fi
 
 # =====================================================================
 echo "== 1. der Messplatz =="
 # =====================================================================
 
 $FIRNC tools/wlan/oracle.fi -o .probe/worakel 2> "$OUT/orakel.err" \
-    && ok "tools/wlan/oracle.fi baut gegen lib/crypto/, lib/wlan/ und die neuen Dateien" \
+    && ok "tools/wlan/oracle.fi builds against lib/crypto/, lib/wlan/ and the new files" \
     || { bad "tools/wlan/oracle.fi cannot be built"; head -20 "$OUT/orakel.err"; }
 
 if [ ! -x .probe/worakel ]; then
-    echo "WLAN2: ohne Orakel geht nichts weiter."
+    echo "WLAN2: nothing goes on without the oracle."
     echo "WLAN2: $pass Zusagen, $((fail+1)) FEHLER"
     exit 1
 fi
 
 python3 -c 'import cryptography' 2>/dev/null \
-    && ok "die Gegenstelle hat ihre Kryptobibliothek (python-cryptography = OpenSSL, NICHT lib/crypto/)" \
-    || bad "python3-cryptography fehlt -- ohne sie kann die Gegenstelle nicht unabhaengig rechnen"
+    && ok "the peer has its crypto library (python-cryptography = OpenSSL, NOT lib/crypto/)" \
+    || bad "python3-cryptography missing -- without it the peer cannot compute independently"
 
 # =====================================================================
-echo "== 2. die Gegenstelle eicht sich an einer ECHTEN Aufzeichnung =="
+echo "== 2. the peer calibrates itself on a REAL capture =="
 # =====================================================================
 #
 
@@ -53,7 +53,7 @@ if [ "$EF" != "0" ]; then
 fi
 
 # =====================================================================
-echo "== 3. Osums Supplicant gegen die Gegenstelle (S2 und S4) =="
+echo "== 3. Osum's supplicant against the peer (S2 and S4) =="
 # =====================================================================
 
 ORAKEL=./.probe/worakel python3 tools/wlan/handschlag.py \
@@ -65,7 +65,7 @@ pass=$((pass+HG))
 fail=$((fail+HF))
 
 # =====================================================================
-echo "== 4. die Naht zum Blech =="
+echo "== 4. the seam to the hardware =="
 # =====================================================================
 #
 
@@ -73,26 +73,26 @@ R=$(printf 'geraet 08413a01aabbccddeeff112233445566778899aa0000cafebabe\n' \
     | ./.probe/worakel)
 case "$R" in
   "vorher=1 gesd=26 empf=26 same=1 ztx=1 zrx=1")
-    ok "die Naht: ein Rahmen geht durch die Tafel und kommt UNVERAENDERT zurueck, die Zaehler stimmen" ;;
+    ok "the seam: a frame goes through the board and comes back UNCHANGED, the counters match" ;;
   *)
-    bad "die Naht liefert '$R' statt der erwarteten Zeile" ;;
+    bad "the seam returns '$R' instead of the expected line" ;;
 esac
 case "$R" in
   vorher=1*)
-    ok "ein Geraet OHNE Tafel gibt -1, statt in einen Nullzeiger zu springen" ;;
+    ok "a device WITHOUT a board returns -1 instead of jumping through a null pointer" ;;
   *)
-    bad "ein Geraet ohne Tafel tut etwas anderes als abzulehnen" ;;
+    bad "a device without a board does something other than refuse" ;;
 esac
 
 # =====================================================================
-echo "== 4b. der ganze Weg, und was passiert, wenn jemand luegt (T4) =="
+echo "== 4b. the whole path, and what happens when someone lies (T4) =="
 # =====================================================================
 #
 
-ORAKEL=./.probe/worakel python3 tools/wlan/weg.py > "$OUT/weg.txt" 2>&1
-grep -E '^  (OK|FAIL)' "$OUT/weg.txt" || true
-WG=$(grep -c '^  OK' "$OUT/weg.txt" || true)
-WF=$(grep -c '^  FAIL' "$OUT/weg.txt" || true)
+ORAKEL=./.probe/worakel python3 tools/wlan/e2e_path.py > "$OUT/e2e_path.txt" 2>&1
+grep -E '^  (OK|FAIL)' "$OUT/e2e_path.txt" || true
+WG=$(grep -c '^  OK' "$OUT/e2e_path.txt" || true)
+WF=$(grep -c '^  FAIL' "$OUT/e2e_path.txt" || true)
 pass=$((pass+WG))
 fail=$((fail+WF))
 
@@ -118,7 +118,6 @@ FAELLE = [
     (0x148F, 0x5370, "Ralink",   "Ralink RT5370"),
     (0x0CF3, 0x9271, "Atheros",  "Atheros AR9271"),
     (0x0A5C, 0xBD1D, "Broadcom", "Broadcom BCM43xx"),
-    # und die Gegenprobe: was es nicht gibt, bleibt unbekannt
     (0x1234, 0x5678, "unbekannt", "WLAN-Stick (?)"),
     (0x0BDA, 0x0001, "unbekannt", "WLAN-Stick (?)"),
 ]
@@ -137,21 +136,21 @@ PY
 CG=$(sed -n 's/^GUT \([0-9]*\) von \([0-9]*\)/\1 \2/p' "$OUT/chip.txt")
 set -- $CG
 if [ "${1:-0}" = "${2:-1}" ]; then
-    ok "alle $1 USB-Nummern ergeben die richtige Familie UND den richtigen Klarnamen (und was es nicht gibt, bleibt unbekannt)"
+    ok "all $1 USB ids give the right family AND the right plain name (and what does not exist stays unknown)"
 else
-    bad "nur ${1:-0} von ${2:-?} USB-Nummern stimmen"
+    bad "only ${1:-0} of ${2:-?} USB ids match"
     grep '^FAIL' "$OUT/chip.txt" | head -10
 fi
 
 if bash tools/structure/srcview.sh kernel/usb/usb.fi | grep -q 'wifi-usb: '; then
-    ok "kernel/usb/usb.fi meldet einen erkannten Stick als 'wifi-usb: <Name> (<vid>:<pid>), kein Treiber'"
+    ok "kernel/usb/usb.fi reports a recognized stick as 'wifi-usb: <Name> (<vid>:<pid>), kein Treiber'"
 else
-    bad "die Meldezeile fehlt in kernel/usb/usb.fi"
+    bad "the report line is missing in kernel/usb/usb.fi"
 fi
 if bash tools/structure/srcview.sh kernel/usb/usb.fi | grep -q 'DRV_WLAN\|wlan_start'; then
-    bad "kernel/usb/usb.fi bindet einen WLAN-Treiber, den es nicht gibt"
+    bad "kernel/usb/usb.fi binds a WLAN driver that does not exist"
 else
-    ok "kernel/usb/usb.fi bindet KEINEN WLAN-Treiber: die Zeile benennt, sie behauptet nicht"
+    ok "kernel/usb/usb.fi binds NO WLAN driver: the line names, it does not claim"
 fi
 
 # =====================================================================
@@ -167,25 +166,25 @@ pass=$((pass+PG))
 fail=$((fail+PF))
 
 # =====================================================================
-echo "== 6. was diese Runde NICHT kann, gemessen =="
+echo "== 6. what this round can NOT do, measured =="
 # =====================================================================
 
 if grep -rqn 'fn sae_\|dragonfly\|hunting' --include=*.fi lib/wlan/ 2>/dev/null; then
-    bad "SAE ist angefangen worden, ohne dass es Testvektoren gibt"
+    bad "SAE was started without any test vectors"
 else
-    ok "SAE ist NICHT gebaut -- Begruendung in docs/WLAN.md"
+    ok "SAE is NOT built -- rationale in docs/WLAN.md"
 fi
 
 KOMMENTARFREI=$({ cat lib/wlan/*.fi; bash tools/structure/srcview.sh kernel/usb/usb.fi; } 2>/dev/null | sed 's|//.*||')
 if printf '%s' "$KOMMENTARFREI" | grep -q 'fn fw_download\|fn firmware_laden\|DRV_WLAN'; then
-    bad "irgendwo wird WLAN-Firmware geladen -- dann gibt es einen Treiber, den docs/WLAN.md nicht kennt"
+    bad "WLAN firmware is loaded somewhere -- so there is a driver docs/WLAN.md does not know"
 else
-    ok "kein USB-WLAN-Treiber und keine Firmware im Quelltext: es wird benannt, nicht behauptet"
+    ok "no USB WLAN driver and no firmware in the source: it is named, not claimed"
 fi
 
 Z=$(cat lib/wlan/device.fi lib/wlan/testdevice.fi lib/wlan/connect.fi \
         lib/wlan/usbchip.fi kernel/user/wlan.fi 2>/dev/null | wc -l)
-ok "die neuen Dateien dieser Runde in Zeilen: $Z in lib/wlan/ und kernel/user/wlan.fi"
+ok "the new files of this round in lines: $Z in lib/wlan/ and kernel/user/wlan.fi"
 
 echo
 echo "WLAN2: $pass Zusagen, $fail Fehler"

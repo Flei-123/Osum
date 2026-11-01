@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wlan/lw2.py -- LW-2 gate: group key rekey (lib/wlan/groupkey.fi) against an independent Python model.
-
-usage: python3 -I tools/wlan/lw2.py <path to lw2 oracle binary>
-Frames are built with hashlib/hmac and `cryptography` (RFC 3394 key wrap, AES-CMAC), never with the Firn code.
-Exit 0 = all checks OK.
-"""
 import hashlib
 import hmac
 import struct

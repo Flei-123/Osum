@@ -1,54 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wlan/vollweg.py -- DER GANZE WEG, UND WO ER ABBRICHT.
-
-======================================================================
-WAS DIESE DATEI MISST UND WARUM SIE GEBRAUCHT WURDE
-======================================================================
-
-`tools/wlan/weg.py` (Runde WLAN-2) misst den Weg bis zu dem Punkt, an
-dem die Schluessel im Geraet liegen. Das ist die Haelfte der Frage.
-Die andere Haelfte ist die, die ein Mensch meint, wenn er sagt "der
-Rechner ist im WLAN":
-
-  * Geht ein VERSCHLUESSELTES Datenpaket hinaus -- und ist es wirklich
-    verschluesselt, also mit gesetztem Geschuetzt-Bit?
-  * Kommt eines ZURUECK, das sich mit demselben Schluessel oeffnen
-    laesst?
-  * Bekommt der Rechner eine ADRESSE (DHCP)?
-  * Kommt auf eine Anfrage eine ANTWORT (HTTP)?
-
-Erst wenn das durchlaeuft, ist alles ausser dem Treiber bewiesen.
-
-======================================================================
-WAS DIESE DATEI AUSDRUECKLICH NICHT BEHAUPTET
-======================================================================
-
-**Sie behauptet NICHT, dass Osum sich mit einem WLAN verbindet.** Die
-Gegenseite ist `tools/wlan/gegenstelle.py` und nicht die Luft; das
-Geraet ist `lib/wlan/testdevice.fi` und keine Karte.
-`docs/RUNDE-WLAN3.md` Abschnitt 1 rechnet vor, dass es auf diesem
-Rechner keine Karte gibt und keine geben kann.
-
-Was sie behauptet, ist genau das hier: **alles oberhalb der Naht ist
-gemessen.** Am Tag, an dem eine Karte kommt, ist die offene Frage nur
-noch der Treiber -- und nicht zusaetzlich die Frage, ob der Rest
-zusammenpasst.
-
-======================================================================
-DIE GEGENPROBEN SIND DER EIGENTLICHE INHALT
-======================================================================
-
-Eine Abnahme, die immer gruen ist, misst nichts. Deshalb ist der
-groessere Teil dieser Datei damit beschaeftigt, den Weg ABSICHTLICH
-kaputtzumachen und nachzusehen, dass er dann WIRKLICH abbricht -- und
-zwar sauber, ohne Absturz und ohne dass ein Schluessel oder ein
-Datenpaket durchkommt.
-
-Die Zahl, auf die es dabei ankommt, ist wie in `weg.py` `skeys`: wie
-viele Schluessel wirklich im GERAET liegen. Nicht, was ein Merker
-sagt.
-"""
 
 import os
 import subprocess
@@ -97,8 +48,6 @@ def felder(antwort):
 
 
 # ---------------------------------------------------------------------
-# Der Aufbau. Er ist bei jedem Fall derselbe -- nur EINE Zutat wird
-# jeweils gefaelscht, damit klar ist, woran es lag.
 # ---------------------------------------------------------------------
 
 SSID = b'OsumNetz'
@@ -127,26 +76,8 @@ def zeile_bauen(beacon, pmk, m1, m3, ein, dhcp, http):
 def lauf(pw=PW, beacon=None, kaputt=None, tk_falsch=False,
          ohne_m3=False, pn_wiederholt=False, http_kaputt=False,
          dhcp_fremd=False):
-    """Einen ganzen Durchlauf fahren und die Felder zurueckgeben.
-
-    `pw` ist das Passwort, das OSUM benutzt. Der ZUGANGSPUNKT benutzt
-    immer das richtige (PW).
-
-    DAS IST DER UNTERSCHIED, DER DIE GEGENPROBE ERST ZU EINER MACHT,
-    und der erste Anlauf dieser Datei hat ihn nicht gemacht: dort
-    wurde der ganze Handschlag AUS dem falschen Passwort gebaut --
-    also rechneten beide Seiten mit demselben falschen PMK, waren sich
-    einig, und der Weg lief zu Recht durch. Gemessen wurde damit
-    nichts ausser der eigenen Rechenart.
-
-    Ein falsches Passwort heisst: der Zugangspunkt bleibt bei seinem,
-    und NUR Osum rechnet mit einem anderen. Genau dann muss der
-    Pruefwert von Nachricht 3 durchfallen.
-    """
-    # Die Nachrichten des Zugangspunktes -- immer mit dem RICHTIGEN
     # Passwort gebaut.
     pmk_echt, m1, m3, ptk = aufbau(pw=PW, kaputt=kaputt)
-    # Und das, womit Osum rechnet.
     pmk = pmk_aus_psk(pw, SSID)
     tk = ptk[32:48]
     if tk_falsch:
@@ -156,15 +87,11 @@ def lauf(pw=PW, beacon=None, kaputt=None, tk_falsch=False,
         beacon = beacon_bauen(SSID, rsn=True)
     ein = ap.echo()
     if pn_wiederholt:
-        # Dieselbe Paketnummer ein zweites Mal -- der Zaehler wird
         # zurueckgedreht.
         ap.pn = 1
         ein = ap.echo()
     dh = ap.dhcp_antwort(XID)
     if dhcp_fremd:
-        # Eine DHCP-Antwort, die mit einem FREMDEN Schluessel
-        # verschluesselt ist -- also von jemandem, der den Handschlag
-        # nicht gefuehrt hat.
         fremd = Zugangspunkt(bytes(16), AA, SPA)
         dh = fremd.dhcp_antwort(XID)
     ht = ap.http_antwort(status=b'200 OK')
@@ -177,7 +104,7 @@ def lauf(pw=PW, beacon=None, kaputt=None, tk_falsch=False,
 
 def main():
     if not os.path.exists(ORAKEL):
-        print("kein Orakel unter %s" % ORAKEL)
+        print("no oracle at %s" % ORAKEL)
         return 2
 
     # =================================================================
@@ -186,55 +113,55 @@ def main():
     a = lauf()
 
     if a.get('netze') == '1':
-        ok("SCHRITT 1 -- Suchlauf: der Zugangspunkt wird gefunden "
-           "(1 Netz in der Liste)")
+        ok("STEP 1 -- scan: the access point is found "
+           "(1 network in the list)")
     else:
-        bad("Suchlauf findet den Zugangspunkt nicht: %s" % a)
+        bad("scan does not find the access point: %s" % a)
 
     if a.get('wahl') == '1' and a.get('kanal') == '6':
-        ok("SCHRITT 2 -- Netzwahl: das Netz wird gewaehlt und das Geraet "
-           "auf Kanal 6 gestellt (der Kanal aus dem Beacon)")
+        ok("STEP 2 -- network choice: the network is chosen and the device "
+           "set to channel 6 (the channel from the beacon)")
     else:
-        bad("Netzwahl oder Kanal falsch: %s" % a)
+        bad("network choice or channel wrong: %s" % a)
 
     if a.get('m1') == '1':
-        ok("SCHRITT 3 -- Handschlag Nachricht 1: der PTK wird aus PMK, "
+        ok("STEP 3 -- handshake message 1: the PTK is derived from PMK, "
            "beiden Adressen und beiden Zufallszahlen abgeleitet")
     else:
-        bad("Nachricht 1 geht nicht durch: %s" % a)
+        bad("message 1 does not go through: %s" % a)
 
     if a.get('m3') == '1' and a.get('skeys') == '2':
-        ok("SCHRITT 4 -- Handschlag Nachricht 3: Pruefwert stimmt, GTK "
-           "ausgepackt, und GENAU ZWEI Schluessel liegen im Geraet "
+        ok("STEP 4 -- handshake message 3: check value matches, GTK "
+           "unwrapped, and EXACTLY TWO keys are in the device "
            "(PTK und GTK)")
     else:
-        bad("Nachricht 3 oder die Schluessel stimmen nicht: %s" % a)
+        bad("message 3 or the keys do not match: %s" % a)
 
     if a.get('darf') == '1':
-        ok("SCHRITT 5 -- der Automat steht auf VERBUNDEN und erlaubt "
-           "Daten (darf_daten)")
+        ok("STEP 5 -- the state machine is CONNECTED and allows "
+           "data (may_pass_data)")
     else:
-        bad("der Automat erlaubt keine Daten: %s" % a)
+        bad("the state machine allows no data: %s" % a)
 
     if int(a.get('tx', '-1')) > 0 and a.get('gesch') == '1':
-        ok("SCHRITT 6 -- ein Datenpaket geht HINAUS: %s Oktette, und das "
-           "Geschuetzt-Bit ist gesetzt (es ist wirklich verschluesselt, "
-           "nicht nur behauptet)" % a['tx'])
+        ok("STEP 6 -- a data packet goes OUT: %s octets, and the "
+           "protected bit is set (it is really encrypted, "
+           "not just claimed)" % a['tx'])
     else:
-        bad("das Datenpaket geht nicht verschluesselt hinaus: %s" % a)
+        bad("the data packet does not go out encrypted: %s" % a)
 
     if int(a.get('rx', '-1')) > 0 and a.get('et') == '2048':
-        ok("SCHRITT 7 -- ein Datenpaket kommt HEREIN: %s Oktette, mit "
-           "demselben Schluessel geoeffnet, LLC/SNAP sagt EtherType "
+        ok("STEP 7 -- a data packet comes IN: %s octets, with "
+           "opened with the same key, LLC/SNAP says EtherType "
            "0x0800 (IPv4)" % a['rx'])
     else:
-        bad("das hereinkommende Datenpaket geht nicht auf: %s" % a)
+        bad("the incoming data packet does not open: %s" % a)
 
     if a.get('dart') == '5' and a.get('ip') == str(ip2i('192.168.0.50')):
-        ok("SCHRITT 8 -- DHCP: die Antwort ist ein ACK (Art 5) und traegt "
+        ok("STEP 8 -- DHCP: the answer is an ACK (type 5) and carries "
            "die Adresse 192.168.0.50")
     else:
-        bad("DHCP bringt keine Adresse: %s" % a)
+        bad("DHCP brings no address: %s" % a)
 
     if a.get('maske') == str(ip2i('255.255.255.0')) \
             and a.get('tor') == str(ip2i('192.168.0.1')):
@@ -244,91 +171,80 @@ def main():
         bad("Maske oder Tor fehlen: %s" % a)
 
     if a.get('http') == '200' and int(a.get('rumpf', '-1')) > 0:
-        ok("SCHRITT 9 -- HTTP: eine Anfrage wird mit 200 beantwortet, der "
-           "Rumpf beginnt bei Oktett %s" % a['rumpf'])
+        ok("STEP 9 -- HTTP: a request is answered with 200, the "
+           "body starts at octet %s" % a['rumpf'])
     else:
-        bad("HTTP kommt nicht an: %s" % a)
+        bad("HTTP does not arrive: %s" % a)
 
     if a.get('grund') == '0':
-        ok("der ganze Weg laeuft OHNE einen einzigen Fehlergrund durch "
+        ok("the whole path runs through WITHOUT a single failure reason "
            "(grund=0)")
     else:
-        bad("es bleibt ein Fehlergrund stehen: %s" % a)
+        bad("a failure reason remains: %s" % a)
 
     # =================================================================
     print()
     print("== 2. DIE GEGENPROBEN: hier MUSS der Weg abbrechen ==")
     # =================================================================
 
-    # --- 1. Das falsche Passwort.
     a = lauf(pw=b'daspasswortistfalsch')
     if a.get('m3') == '0' and a.get('skeys') == '0' \
             and a.get('darf') == '0' and a.get('dhcp') == '0' \
             and a.get('http') == '0':
-        ok("FALSCHES PASSWORT: der Handschlag scheitert an Nachricht 3, "
-           "KEIN Schluessel im Geraet, kein Datenpaket, kein DHCP, "
-           "kein HTTP")
+        ok("WRONG PASSWORD: the handshake fails at message 3, "
+           "NO key in the device, no data packet, no DHCP, "
+           "no HTTP")
     else:
-        bad("ein falsches Passwort kommt zu weit: %s" % a)
+        bad("a wrong password gets too far: %s" % a)
 
-    # --- 2. Ein beschaedigter Handschlag (Nachricht 3 mit falschem MIC).
     a = lauf(kaputt='mic')
     if a.get('m1') == '1' and a.get('m3') == '0' \
             and a.get('skeys') == '0' and a.get('darf') == '0':
-        ok("BESCHAEDIGTER HANDSCHLAG (Nachricht 3 ohne gueltigen "
-           "Pruefwert): sauberer Abbruch, kein Schluessel, kein Absturz")
+        ok("DAMAGED HANDSHAKE (message 3 without a valid "
+           "check value): clean abort, no key, no crash")
     else:
-        bad("ein beschaedigter Handschlag hinterlaesst etwas: %s" % a)
+        bad("a damaged handshake leaves something behind: %s" % a)
 
     # --- 3. Gar keine Nachricht 3.
     a = lauf(ohne_m3=True)
     if a.get('m1') == '1' and a.get('m3') == '0' \
             and a.get('skeys') == '0' and a.get('dhcp') == '0':
-        ok("HANDSCHLAG BRICHT NACH NACHRICHT 1 AB: kein Schluessel, "
-           "keine Adresse -- eine halbe Verbindung gibt es nicht")
+        ok("HANDSHAKE ABORTS AFTER MESSAGE 1: no key, "
+           "no address -- there is no half connection")
     else:
-        bad("ein abgebrochener Handschlag kommt zu weit: %s" % a)
+        bad("an aborted handshake gets too far: %s" % a)
 
-    # --- 4. Ein offenes Netz.
     a = lauf(beacon=beacon_bauen(SSID, rsn=False))
     if a.get('netze') == '1' and a.get('wahl') == '0' \
             and a.get('skeys') == '0' and a.get('darf') == '0':
-        ok("OFFENES NETZ: es wird gefunden und BENANNT, aber nicht "
+        ok("OPEN NETWORK: it is found and NAMED, but not "
            "gewaehlt -- und nichts geht darueber")
     else:
-        bad("ein offenes Netz kommt zu weit: %s" % a)
+        bad("an open network gets too far: %s" % a)
 
-    # --- 5. Die Antworten sind mit einem FREMDEN Schluessel gebaut.
     #
-    # Das ist der Fall, um den es bei CCMP eigentlich geht: jemand
-    # sendet auf demselben Kanal und gibt sich als der Zugangspunkt
-    # aus, hat aber den Handschlag nicht gefuehrt.
     a = lauf(tk_falsch=True)
     if int(a.get('rx', '0')) <= 0 and a.get('dhcp') == '0' \
             and a.get('http') == '0':
-        ok("FREMDER SCHLUESSEL: der Handschlag gelingt, aber die Rahmen "
-           "eines Fremden gehen NICHT auf -- kein DHCP, kein HTTP")
+        ok("FOREIGN KEY: the handshake succeeds, but the frames "
+           "of a stranger do NOT open -- no DHCP, no HTTP")
     else:
-        bad("Rahmen mit einem fremden Schluessel kommen durch: %s" % a)
+        bad("frames with a foreign key get through: %s" % a)
 
-    # --- 6. Eine DHCP-Antwort von einem Fremden.
     a = lauf(dhcp_fremd=True)
     if a.get('dhcp') == '0' and a.get('ip') == '0':
-        ok("FREMDE DHCP-ANTWORT: sie ist mit einem anderen Schluessel "
-           "verschluesselt und wird verworfen -- KEINE Adresse")
+        ok("FOREIGN DHCP ANSWER: it is encrypted with another key "
+           "and is dropped -- NO address")
     else:
-        bad("eine fremde DHCP-Antwort bringt eine Adresse: %s" % a)
+        bad("a foreign DHCP answer brings an address: %s" % a)
 
-    # --- 7. Eine HTTP-Antwort, die keine 200 ist.
     #
-    # Gegenprobe zur Gegenprobe: `http=200` darf nicht deshalb
-    # dastehen, weil dort IMMER 200 steht.
     a = lauf(http_kaputt=True)
     if a.get('http') == '500':
-        ok("EINE ANDERE HTTP-ANTWORT wird auch als andere gelesen (500 "
-           "statt 200) -- das Feld ist nicht fest verdrahtet")
+        ok("A DIFFERENT HTTP ANSWER is also read as different (500 "
+           "instead of 200) -- the field is not hard-wired")
     else:
-        bad("der HTTP-Status wird nicht wirklich gelesen: %s" % a)
+        bad("the HTTP status is not really read: %s" % a)
 
     # --- 8. Verstuemmelte Beacons.
     beacon = beacon_bauen(SSID, rsn=True)
@@ -339,15 +255,13 @@ def main():
             schlimm = (schnitt, a)
             break
     if schlimm is None:
-        ok("ACHT VERSTUEMMELTE BEACONS (auf 8..44 Oktette gekuerzt): "
-           "keines fuehrt zu einem Schluessel oder zu einer Adresse")
+        ok("EIGHT MUTILATED BEACONS (truncated to 8..44 octets): "
+           "none leads to a key or to an address")
     else:
-        bad("ein auf %d Oktette gekuerztes Beacon kommt zu weit: %s"
+        bad("a beacon truncated to %d octets gets too far: %s"
             % schlimm)
 
-    # --- 9. Jedes einzelne Oktett der DHCP-Antwort kippen.
     #
-    # Das ist die Zusage, die CCMP wirklich gibt: KEINE Aenderung am
     # Schluesseltext darf unbemerkt durchgehen.
     pmk, m1, m3, ptk = aufbau()
     ap = Zugangspunkt(ptk[32:48], AA, SPA)
@@ -356,8 +270,6 @@ def main():
     ht = ap.http_antwort()
     durch = 0
     geprueft = 0
-    # Der 802.11-Kopf (24) und der CCMP-Kopf (8) sind nicht
-    # verschluesselt; gekippt wird der Schluesseltext dahinter.
     for i in range(32, len(echt)):
         kaputt = bytearray(echt)
         kaputt[i] ^= 0x01
@@ -367,14 +279,13 @@ def main():
         if b.get('dhcp') != '0':
             durch += 1
     if durch == 0:
-        ok("JEDES EINZELNE OKTETT der DHCP-Antwort gekippt (%d Faelle): "
-           "KEINES geht durch, keine Adresse wird uebernommen"
+        ok("EVERY SINGLE OCTET of the DHCP answer flipped (%d cases): "
+           "NONE gets through, no address is taken"
            % geprueft)
     else:
-        bad("%d von %d gekippten DHCP-Antworten kommen durch"
+        bad("%d of %d flipped DHCP answers get through"
             % (durch, geprueft))
 
-    # --- 10. Der Rahmen wird gekuerzt.
     durch = 0
     geprueft = 0
     for schnitt in range(24, len(echt), 7):
@@ -384,28 +295,19 @@ def main():
         if b.get('dhcp') != '0':
             durch += 1
     if durch == 0:
-        ok("DIE DHCP-ANTWORT AN %d STELLEN ABGESCHNITTEN: keine davon "
-           "bringt eine Adresse" % geprueft)
+        ok("THE DHCP ANSWER TRUNCATED AT %d POINTS: none of them "
+           "brings an address" % geprueft)
     else:
-        bad("%d von %d abgeschnittenen Antworten kommen durch"
+        bad("%d of %d truncated answers get through"
             % (durch, geprueft))
 
     # =================================================================
     print()
-    print("== 3. GEGEN DIE ECHTE AUFZEICHNUNG: Pakete, die niemand "
-          "fuer Osum gebaut hat ==")
+    print("== 3. AGAINST THE REAL CAPTURE: packets nobody "
+          "built for Osum ==")
     # =================================================================
     #
-    # Das ist die staerkste Zusage, die diese Runde geben kann, und
-    # der Grund ist der aus dem Kopf von `gegenstelle.py`: gegen den
-    # eigenen systematischen Denkfehler hilft kein Selbstvergleich.
-    # `tools/wlan/mitschnitt.txt` haelt Rahmen aus `wpa-Induction.pcap`
-    # fest -- einer Aufzeichnung eines echten WPA2-Netzes, die es seit
-    # Jahren gibt und die niemand mit Blick auf Osum gebaut hat.
     #
-    # [gemessen, 15.09.2026] Zwei der vier verschluesselten Rahmen
-    # darin sind ein echter DHCP-Austausch. Sie werden mit dem
-    # Schluessel aus dem echten Handschlag geoeffnet und durch
     # `lib/wlan/llc.fi` geschickt.
     mitschnitt = os.path.join(HIER, 'mitschnitt.txt')
     if not os.path.exists(mitschnitt):
@@ -436,10 +338,10 @@ def main():
                 and b.get('udpsum') == '1' and b.get('dart') == '3' \
                 and b.get('qport') == '68' and b.get('zport') == '67':
             ok("ECHTER DHCP-REQUEST aus wpa-Induction.pcap: LLC/SNAP, "
-               "IPv4- UND UDP-Pruefsumme stimmen, es ist ein Request "
+               "IPv4 AND UDP checksums match, it is a request "
                "(Art 3) von Port 68 an 67")
         else:
-            bad("der echte DHCP-Request wird falsch gelesen: %s" % b)
+            bad("the real DHCP request is read wrongly: %s" % b)
 
         # --- das echte DHCP-Ack
         pt = ccmp_oeffnen(tk_e, daten[1])
@@ -450,30 +352,29 @@ def main():
                 and b.get('tor') == str(ip2i('192.168.0.1')) \
                 and b.get('server') == str(ip2i('192.168.0.1')) \
                 and b.get('miete') == '86400':
-            ok("ECHTES DHCP-ACK aus derselben Aufzeichnung: Adresse "
+            ok("REAL DHCP ACK from the same capture: address "
                "192.168.0.50, Maske 255.255.255.0, Tor und Server "
-               "192.168.0.1, Mietdauer 86400 s -- Oktett fuer Oktett "
-               "das, was damals wirklich auf dem Draht stand")
+               "192.168.0.1, lease 86400 s -- octet for octet "
+               "what really was on the wire back then")
         else:
-            bad("das echte DHCP-Ack wird falsch gelesen: %s" % b)
+            bad("the real DHCP ack is read wrongly: %s" % b)
 
         if b.get('ipsum') == '1' and b.get('udpsum') == '1':
-            ok("beide Pruefsummen des echten Ack rechnen auf null auf "
-               "-- die Pruefsummenrechnung stimmt gegen fremde Pakete")
+            ok("both checksums of the real ack sum to zero "
+               "-- the checksum computation holds against foreign packets")
         else:
-            bad("die Pruefsummen des echten Ack stimmen nicht: %s" % b)
+            bad("the checksums of the real ack do not match: %s" % b)
 
-        # --- Gegenprobe: ein gekipptes Oktett MUSS die Pruefsumme
         #     brechen. Sonst prueft sie nichts.
         kaputt = bytearray(pt)
-        kaputt[20] ^= 0x01        # irgendwo im IP-Kopf
+        kaputt[20] ^= 0x01
         b2 = felder(orakel("ipdhcp %s" % h(bytes(kaputt))))
         if b2.get('ipsum') == '0':
-            ok("ein einziges gekipptes Oktett im IP-Kopf des echten "
-               "Pakets bricht die Pruefsumme -- sie wird wirklich "
-               "gerechnet und nicht nur gemeldet")
+            ok("a single flipped octet in the IP header of the real "
+               "packet breaks the checksum -- it is really "
+               "computed and not just reported")
         else:
-            bad("eine gekippte IP-Pruefsumme faellt nicht auf: %s" % b2)
+            bad("a flipped IP checksum goes unnoticed: %s" % b2)
 
     print()
     print("VOLLWEG: %d Zusagen, %d Fehler" % (gut, schlecht))

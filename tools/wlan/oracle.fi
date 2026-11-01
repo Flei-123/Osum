@@ -1,59 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// tools/wlan/orakel.fi -- die Rechnung der Runde WLAN, auf dem WIRT.
-//
-// ==================================================================
-// WARUM ES DIESES PROGRAMM GIBT
-// ==================================================================
-//
-// QEMU hat kein 802.11-Geraet. Gemessen, auf dieser Maschine:
-//
 //     $ qemu-system-x86_64 -device help | grep -icE 'wifi|802\.11|iwl'
 //     2
 //     267:name "athlon-v1-x86_64-cpu"
 //     268:name "athlon-x86_64-cpu"
-//
-// Es gibt also keinen Weg, eine WLAN-Karte zu emulieren, und damit
-// keinen Weg, in QEMU auch nur einen einzigen 802.11-Rahmen zu
-// erzeugen. Das ist in `docs/WLAN-BEFUND.md` Abschnitt 5 ausgefuehrt.
-//
-// Ein 802.11-Rahmen ist aber eine Folge von Oktetten, und ob er richtig
-// zerlegt wird, haengt an keiner Karte. Genau dafuer haben die Runden
-// TUNNEL und UPDATE das Werkzeug gebaut, das hier wieder benutzt wird:
-// ein Programm in Firn, das auf Linux laeuft, DIESELBEN `lib/`-Dateien
-// bindet, die der Kern spaeter binden wird, eine Zeile liest und eine
-// Zeile antwortet.
-//
-//   sha1     <msghex|->                          20 Oktette
-//   hmacsha1 <keyhex> <msghex|->                 20 Oktette
-//   prf      <keyhex> <labelhex> <datahex|-> <n> n Oktette
-//   pbkdf2   <pwhex> <salthex> <iters> <n>       n Oktette
-//   aesenc   <keyhex> <blockhex>                 16 Oktette
-//   aesdec   <keyhex> <blockhex>                 16 Oktette
-//   cmac     <keyhex> <msghex|->                 16 Oktette
-//   wrap     <kekhex> <plainhex>                 n+8 Oktette
-//   unwrap   <kekhex> <cipherhex>                n-8 Oktette / FAIL
-//   ccmenc   <key> <nonce> <aad|-> <plain|-> <M> C||T
-//   ccmdec   <key> <nonce> <aad|-> <ct> <M>      P / FAIL
-//   ccmpenc  <tk> <pn> <frame>                   geschuetzte MPDU
-//   ccmpdec  <tk> <mpdu>                         Kopf||Klartext / FAIL
-//   beacon   <frame>                             Zeile mit Feldern
-//   ies      <frame>                             Kennungen und Laengen
-//   kanal    <freq>                              Kanalnummer / FAIL
-//   freq     <kanal> <band>                      MHz / FAIL
-//   etsi     <band> <kanal>                      Zeile mit der Regel
-//   ptk      <pmk> <aa> <spa> <anonce> <snonce> <akm> <n>
-//   mic      <kck> <eapol> <akm>                 16 Oktette
-//   eapol    <frame>                             Zeile mit Feldern
-//   gtk      <kek> <keydata>                     ausgepackter GTK
-//   automat  <folge>                             Endzustand und Grund
-//   pmk      <pwhex> <ssidhex>                   32 Oktette
-//   ipdhcp   <klartext ab LLC/SNAP>       Zeile mit IP/UDP/DHCP\n//   vollweg  <beacon> <pmk> <spa> <aa> <m1> <snonce> <m3>
-//            <datenrahmen> <dhcpantwort> <httpantwort>
-//            -> der GANZE Ablauf, Schritt fuer Schritt mit Zahlen
-//
-// `-` steht fuer die leere Zeichenkette. `FAIL` heisst: die Eingabe
-// wurde abgelehnt. Genau das ist bei der Haelfte der Faelle die
-// richtige Antwort, und ein Orakel, das nie FAIL sagt, misst nichts.
 import std.rt
 import std.io
 import crypto.sha1
@@ -185,8 +133,6 @@ fn fail() {
     io.print_line_bytes((&m[0]) as u64, 4)
 }
 
-// ---- ein kleiner Textbauer fuer die Antwortzeilen mit Feldern ----
-
 fn tch(c: u64) {
     if tlen < 4090 {
         txtb[tlen] = (c & 255) as u8
@@ -238,18 +184,6 @@ fn temit() {
     tlen = 0
 }
 
-
-// ==================================================================
-// RUNDE WLAN-3: einen gewoehnlichen Datenrahmen bauen
-// ==================================================================
-//
-// Ein 802.11-Datenrahmen ToDS (an den Zugangspunkt) mit LLC/SNAP und
-// einem IPv4/UDP-Paket darin. Der Inhalt ist absichtlich klein und
-// fest: es geht nicht darum, was drinsteht, sondern darum, dass er
-// verschluesselt hinausgeht und die Gegenstelle ihn oeffnen kann.
-//
-// Die Adressen stehen nach 802.11-2016 9.2.4.7.2 fuer ToDS=1 so:
-//   A1 = BSSID (der Zugangspunkt), A2 = Sender, A3 = Ziel.
 fn data_frame_build(out: u64, spa: u64, aa: u64, payload: usize) -> usize {
     // FC: Typ Daten (2), Untertyp 0, ToDS gesetzt
     rt.st8(out, 0, 8 as u8)
@@ -267,8 +201,6 @@ fn data_frame_build(out: u64, spa: u64, aa: u64, payload: usize) -> usize {
     rt.st8(out, 23, 0 as u8)
     let koerper: u64 = out + 24
     llc.snap_build(koerper, llc.ET_IPV4)
-    // Ein UDP-Paket von 0.0.0.0:68 an 255.255.255.255:67 -- also
-    // genau die Form, die ein DHCP-Discover hat.
     let ipl: usize = llc.ipv4_build(koerper + 8, 0, 0xFFFFFFFF,
         llc.P_UDP, 8 + payload, 1)
     var k: usize = 0
@@ -475,7 +407,7 @@ fn run_line(line: u64, len: usize) {
         tbit(b.ssid_verborgen)
         var lk: [u8; 8] = " kanal=\0"
         tlit((&lk[0]) as u64)
-        tnum(b.kanal)
+        tnum(b.chan)
         var lb: [u8; 7] = " band=\0"
         tlit((&lb[0]) as u64)
         tnum(b.band)
@@ -517,14 +449,14 @@ fn run_line(line: u64, len: usize) {
             erst = false
             tnum(it.id)
             tch(58)
-            tnum(it.laenge as u64)
+            tnum(it.length as u64)
         }
-        if it.kaputt {
+        if it.broken {
             if !erst { tch(32) }
             var kk: [u8; 7] = "KAPUTT\0"
             tlit((&kk[0]) as u64)
         }
-        if erst && !it.kaputt {
+        if erst && !it.broken {
             var lr: [u8; 5] = "LEER\0"
             tlit((&lr[0]) as u64)
         }
@@ -572,13 +504,13 @@ fn run_line(line: u64, len: usize) {
         tbit(r.dfs)
         var lin: [u8; 8] = " innen=\0"
         tlit((&lin[0]) as u64)
-        tbit(r.nur_innen)
+        tbit(r.indoor_only)
         var lp2: [u8; 9] = " passiv=\0"
         tlit((&lp2[0]) as u64)
-        tbit(r.nur_passiv)
+        tbit(r.passive_only)
         var lsd: [u8; 9] = " senden=\0"
         tlit((&lsd[0]) as u64)
-        tbit(channel.darf_senden(b as u64, kn as u64))
+        tbit(channel.may_send(b as u64, kn as u64))
         var lak: [u8; 9] = " aktiv=\0\0"
         tlit((&lak[0]) as u64)
         tbit(channel.may_active_find(b as u64, kn as u64))
@@ -620,12 +552,12 @@ fn run_line(line: u64, len: usize) {
         let n: i64 = wpa.key_data_unwrap(p0, kl as usize,
             p1, dl as usize, p2, CAP)
         if n < 0 { fail(); return }
-        var nummer: u64 = 0
-        let g: i64 = wpa.gtk_find(p2, n as usize, po, CAP, &nummer)
+        var number: u64 = 0
+        let g: i64 = wpa.gtk_find(p2, n as usize, po, CAP, &number)
         if g < 0 { fail(); return }
         thex(po, g as usize)
         tch(32)
-        tnum(nummer)
+        tnum(number)
         temit()
         return
     }
@@ -664,7 +596,7 @@ fn run_line(line: u64, len: usize) {
         tbit(e.data_encrypted)
         var lrc: [u8; 5] = " rc=\0"
         tlit((&lrc[0]) as u64)
-        tnum(e.zaehler_lo)
+        tnum(e.counter_lo)
         var ldl: [u8; 7] = " dlen=\0"
         tlit((&ldl[0]) as u64)
         tnum(e.data_len as u64)
@@ -684,38 +616,30 @@ fn run_line(line: u64, len: usize) {
         }
         var lz2: [u8; 3] = "z=\0"
         tlit((&lz2[0]) as u64)
-        tnum(z.zustand)
+        tnum(z.machine_state)
         var lgr: [u8; 8] = " grund=\0"
         tlit((&lgr[0]) as u64)
-        tnum(z.grund)
+        tnum(z.reason)
         var lvb: [u8; 10] = " verbund=\0"
         tlit((&lvb[0]) as u64)
         tbit(state.verbunden(&z))
         var ldd: [u8; 8] = " daten=\0"
         tlit((&ldd[0]) as u64)
-        tbit(state.darf_daten(&z))
+        tbit(state.may_pass_data(&z))
         var lii: [u8; 8] = " inst=\0\0"
         tlit((&lii[0]) as u64)
         tnum(z.installationen)
         temit()
         return
     }
-    // ---- RUNDE WLAN-2: der USB-Stick, an seiner Nummer erkannt ----
-    //
     //   usbchip <vid> <pid>   ->  <familie> <klarname>
-    //
-    // Damit laesst sich die Tabelle aus lib/wlan/usbchip.fi auf dem
-    // WIRT ablaufen, obwohl hier kein Stick steckt. Sie ist der
-    // einzige Weg, auf dem wir erfahren, welcher Chip in Justins
-    // Rechner sitzt -- und ein Tippfehler in einer der vierzig
-    // Nummern faellt sonst erst am echten Blech auf.
     var wuc: [u8; 8] = "usbchip\0"
     if word_is(line, len, &at, (&wuc[0]) as u64) {
         let vid: i64 = field_num(line, len, &at)
         let pid: i64 = field_num(line, len, &at)
         if vid < 0 || pid < 0 { fail(); return }
         var nb: [u8; 40] = [0; 40]
-        let fam: u64 = usbchip.familie(vid as u64, pid as u64)
+        let fam: u64 = usbchip.family(vid as u64, pid as u64)
         usbchip.family_name_get(fam, (&nb[0]) as u64)
         var i: usize = 0
         while nb[i] != 0 as u8 { tch(nb[i] as u64); i = i + 1 }
@@ -728,22 +652,12 @@ fn run_line(line: u64, len: usize) {
         return
     }
 
-    // ---- RUNDE WLAN-2: die Naht und das Geraet dahinter ----
-    //
-    //   geraet <rahmenhex>  ->  Zeile mit den Zaehlern
-    //
-    // Ein Rahmen geht durch die Tafel hinein und wieder heraus. Das
-    // misst, was `lib/wlan/geraet.fi` zusagt: dass ein Rahmen
-    // unveraendert durchkommt, dass die Zaehler stimmen und dass ein
-    // Geraet OHNE Tafel nicht in einen Nullzeiger springt.
     var wgr: [u8; 7] = "geraet\0"
     if word_is(line, len, &at, (&wgr[0]) as u64) {
         let fl: i64 = field_hex(line, len, &at, p0)
         if fl < 0 { fail(); return }
         var pr: testdevice.Check = testdevice.check_new()
         var gg: device.Device = device.device_new()
-        // Ein frisches Geraet MUSS ablehnen -- vor der Tafel gibt es
-        // kein Senden.
         let vorher: i64 = device.send(&gg, p0, fl as usize)
         if !testdevice.anhaengen(&gg, &pr, false) { fail(); return }
         let sent: i64 = device.send(&gg, p0, fl as usize)
@@ -778,16 +692,6 @@ fn run_line(line: u64, len: usize) {
         return
     }
 
-    // ---- RUNDE WLAN-2: der ganze Weg als Vorgang ----
-    //
-    //   weg <beaconhex> <pmkhex> <spa> <aa> <m1hex> <snonce> <m3hex>
-    //       -> Zeile mit dem Stand
-    //
-    // Das misst `lib/wlan/verbinden.fi`: Suchlauf, Netzwahl (mit der
-    // Abweisung unsicherer Netze!), Nachricht 1, Nachricht 3, die
-    // Schluessel im Geraet. Wer hier eine der Zutaten faelscht, sieht
-    // in der Antwort, dass NICHTS installiert wurde -- das ist der
-    // Punkt der Uebung.
     var wwg: [u8; 4] = "weg\0"
     if word_is(line, len, &at, (&wwg[0]) as u64) {
         let bl: i64 = field_hex(line, len, &at, p0)
@@ -817,13 +721,10 @@ fn run_line(line: u64, len: usize) {
         let gefunden: bool = connect.beacon_aufnehmen(&si, p0,
             bl as usize, 0 - 40)
         let n_netze: usize = connect.net_count(&si)
-        // Netz 0 waehlen. Ist es kein WPA2/WPA3, MUSS das scheitern.
         let gewaehlt: bool = connect.net_choose(&si, &gg, 0)
         var m1ok: i64 = 0 - 1
         var m3ok: bool = false
         if gewaehlt {
-            // Auth und Assoz gehoeren dazwischen -- ohne sie laesst
-            // der Automat keine EAPOL-Nachricht durch.
             connect.auth_angenommen(&si, true)
             connect.assoz_angenommen(&si, true)
             m1ok = connect.nachricht1_behandeln(&si, &gg, p4,
@@ -848,8 +749,6 @@ fn run_line(line: u64, len: usize) {
         var ld: [u8; 8] = " daten=\0"
         tlit((&ld[0]) as u64)
         tbit(connect.may_data(&si))
-        // Das ist die Zahl, auf die es ankommt: wie viele Schluessel
-        // wirklich im GERAET liegen.
         var lk: [u8; 8] = " skeys=\0"
         tlit((&lk[0]) as u64)
         tnum(testdevice.key_count(&pr) as u64)
@@ -860,17 +759,6 @@ fn run_line(line: u64, len: usize) {
         return
     }
 
-    // ---- RUNDE WLAN-3: ein Klartextpaket durch die Schicht ueber CCMP ----
-    //
-    //   ipdhcp <klartext ab LLC/SNAP>  -> Zeile mit den Feldern
-    //
-    // Das ist der Befehl, mit dem die ECHTEN DHCP-Pakete aus
-    // `tools/wlan/mitschnitt.txt` gemessen werden: sie werden mit dem
-    // echten Schluessel geoeffnet und hier hindurchgeschickt. Ein
-    // Zerleger, der nur gegen selbst gebaute Pakete gemessen ist, ist
-    // gegen den eigenen Denkfehler blind -- diese Pakete hat ein
-    // fremder Zugangspunkt gebaut, vor Jahren, ohne von Osum zu
-    // wissen.
     var wid: [u8; 7] = "ipdhcp\0"
     if word_is(line, len, &at, (&wid[0]) as u64) {
         let nl: i64 = field_hex(line, len, &at, p0)
@@ -978,24 +866,8 @@ fn run_line(line: u64, len: usize) {
         return
     }
 
-    // ---- RUNDE WLAN-3: DER VOLLE ABLAUF ALS EIN VORGANG ----
-    //
     //   vollweg <beacon> <pmk> <spa> <aa> <m1> <snonce> <m3>
     //           <datenrahmen> <dhcpantwort> <httpantwort>
-    //
-    // Das ist die Zusage, um die es in dieser Runde geht. `weg` hoert
-    // auf, sobald die Schluessel im Geraet liegen -- und genau dort
-    // fangen die Fragen an, die ein Mensch meint, wenn er sagt "der
-    // Rechner ist im WLAN":
-    //
-    //   * Geht ein VERSCHLUESSELTES Datenpaket hinaus, und kommt eines
-    //     zurueck, das sich mit demselben Schluessel oeffnen laesst?
-    //   * Bekommt der Rechner eine ADRESSE (DHCP)?
-    //   * Kommt auf eine HTTP-Anfrage eine ANTWORT?
-    //
-    // Jeder dieser Schritte steht in der Antwortzeile mit einer
-    // eigenen Zahl. Wer eine Zutat faelscht, sieht in derselben Zeile,
-    // wo der Weg abbricht -- und dass danach NICHTS mehr passiert.
     var wvw: [u8; 8] = "vollweg\0"
     if word_is(line, len, &at, (&wvw[0]) as u64) {
         let bl: i64 = field_hex(line, len, &at, p0)
@@ -1012,10 +884,6 @@ fn run_line(line: u64, len: usize) {
         let nl: i64 = field_hex(line, len, &at, (&sn[0]) as u64)
         let tl: i64 = field_hex(line, len, &at, (&m3[0]) as u64)
         if nl != 32 || tl < 0 { fail(); return }
-        // Die drei Antworten des Zugangspunktes. Sie sind schon
-        // VERSCHLUESSELT -- gebaut hat sie `tools/wlan/gegenstelle.py`
-        // mit ihrer eigenen Kryptobibliothek. Dass sie sich hier
-        // oeffnen lassen, ist der Punkt.
         var ein: [u8; 2048] = [0; 2048]
         var dha: [u8; 2048] = [0; 2048]
         var hta: [u8; 2048] = [0; 2048]
@@ -1025,10 +893,6 @@ fn run_line(line: u64, len: usize) {
 
         var pr: testdevice.Check = testdevice.check_new()
         var gg: device.Device = device.device_new()
-        // `kann_ccmp` ist FALSCH: das simulierte Geraet rechnet nicht
-        // selbst, also rechnet `lib/wlan/ccmp.fi`. Das ist mit Absicht
-        // der schwerere der beiden Wege -- er misst unsere eigene
-        // Verschluesselung statt die einer Karte, die es nicht gibt.
         if !testdevice.anhaengen(&gg, &pr, false) { fail(); return }
         device.addr_set(&gg, p2)
         var si: connect.Session = connect.session_new()
@@ -1043,7 +907,7 @@ fn run_line(line: u64, len: usize) {
 
         // ---- 2. Netzwahl ----
         let gewaehlt: bool = connect.net_choose(&si, &gg, 0)
-        let kanal: u64 = testdevice.kanal_gesetzt(&pr)
+        let chan: u64 = testdevice.chan_set(&pr)
 
         // ---- 3./4. Auth, Assoz, Handschlag ----
         var m1ok: i64 = 0 - 1
@@ -1062,32 +926,21 @@ fn run_line(line: u64, len: usize) {
         let may: bool = connect.may_data(&si)
 
         // ---- 5. EIN VERSCHLUESSELTES DATENPAKET HINAUS ----
-        //
-        // Ein gewoehnlicher Datenrahmen an den Zugangspunkt, mit
-        // LLC/SNAP und einem IPv4/UDP-Paket darin. Er geht durch
-        // `verbinden.daten_senden`, wird also von `ccmp.fi`
-        // verschluesselt -- und genau der Rahmen, der dabei
-        // herauskommt, wird gleich von der Gegenstelle geoeffnet.
         var raus: [u8; 2048] = [0; 2048]
         var tx: [u8; 2048] = [0; 2048]
-        var gesendet: i64 = 0 - 1
+        var sent_ret: i64 = 0 - 1
         if may {
-            testdevice.beide_leeren(&pr)
+            testdevice.clear_both(&pr)
             let rl: usize = data_frame_build((&raus[0]) as u64,
                 p2, p3, 7)
-            gesendet = connect.data_send(&si, &gg,
+            sent_ret = connect.data_send(&si, &gg,
                 (&raus[0]) as u64, rl, (&tx[0]) as u64, 2048)
         }
-        // Was wirklich im Geraet gelandet ist -- nicht was ein Merker
-        // behauptet.
         var ges: [u8; 2048] = [0; 2048]
         var gesl: i64 = 0 - 1
-        if gesendet > 0 {
+        if sent_ret > 0 {
             gesl = testdevice.sent_get(&pr, 0, (&ges[0]) as u64, 2048)
         }
-        // Ist er ueberhaupt verschluesselt? Ein Rahmen, bei dem das
-        // Geschuetzt-Bit fehlt, waere Klartext auf der Luft -- die
-        // Luecke, gegen die `verbinden.fi` gebaut wurde.
         var geschuetzt: bool = false
         if gesl > 14 {
             let fcv: u64 = frame.fc((&ges[0]) as u64, gesl as usize)
@@ -1099,7 +952,7 @@ fn run_line(line: u64, len: usize) {
         var hn: i64 = 0 - 1
         var et: u64 = 0
         if may && el > 0 {
-            testdevice.einspeisen_leeren(&pr)
+            testdevice.inject_clear(&pr)
             testdevice.einspeisen(&pr, (&ein[0]) as u64, el as usize)
             var roh: [u8; 2048] = [0; 2048]
             hn = connect.data_receive(&si, &gg, (&roh[0]) as u64,
@@ -1115,17 +968,13 @@ fn run_line(line: u64, len: usize) {
         }
 
         // ---- 7. DHCP ----
-        //
-        // Die Antwort des Zugangspunktes kommt verschluesselt herein,
-        // wird geoeffnet, und aus ihr faellt eine Adresse. Das ist der
-        // Schritt, nach dem ein Mensch sagt "ich bin im Netz".
-        var adresse: u64 = 0
+        var address: u64 = 0
         var maske: u64 = 0
         var tor: u64 = 0
         var dart: u64 = 0
         var dhcp_ok: bool = false
         if may && dl > 0 {
-            testdevice.einspeisen_leeren(&pr)
+            testdevice.inject_clear(&pr)
             testdevice.einspeisen(&pr, (&dha[0]) as u64, dl as usize)
             var roh2: [u8; 2048] = [0; 2048]
             var kl2: [u8; 2048] = [0; 2048]
@@ -1149,7 +998,7 @@ fn run_line(line: u64, len: usize) {
                                         if llc.dhcp_parse(&dh, ud.payload,
                                             ud.payload_len) {
                                             dart = dh.art
-                                            adresse = dh.yiaddr
+                                            address = dh.yiaddr
                                             maske = dh.maske
                                             tor = dh.tor
                                             dhcp_ok = dh.art == llc.D_ACK
@@ -1166,9 +1015,9 @@ fn run_line(line: u64, len: usize) {
 
         // ---- 8. HTTP ----
         var status: u64 = 0
-        var rumpf: i64 = 0 - 1
+        var body: i64 = 0 - 1
         if dhcp_ok && hl > 0 {
-            testdevice.einspeisen_leeren(&pr)
+            testdevice.inject_clear(&pr)
             testdevice.einspeisen(&pr, (&hta[0]) as u64, hl as usize)
             var roh3: [u8; 2048] = [0; 2048]
             var kl3: [u8; 2048] = [0; 2048]
@@ -1190,7 +1039,7 @@ fn run_line(line: u64, len: usize) {
                                     if tc.sum_ok {
                                         status = llc.http_status_of(
                                             tc.payload, tc.payload_len)
-                                        rumpf = llc.http_body_offset(
+                                        body = llc.http_body_offset(
                                             tc.payload, tc.payload_len)
                                     }
                                 }
@@ -1201,7 +1050,6 @@ fn run_line(line: u64, len: usize) {
             }
         }
 
-        // ---- die Antwortzeile: jeder Schritt eine eigene Zahl ----
         var f1: [u8; 8] = "netze=\0\0"
         tlit((&f1[0]) as u64)
         tnum(n_netze as u64)
@@ -1210,7 +1058,7 @@ fn run_line(line: u64, len: usize) {
         tbit(gewaehlt)
         var f3: [u8; 8] = " kanal=\0"
         tlit((&f3[0]) as u64)
-        tnum(kanal)
+        tnum(chan)
         var f4: [u8; 6] = " m1=\0\0"
         tlit((&f4[0]) as u64)
         tbit(m1ok > 0)
@@ -1225,7 +1073,7 @@ fn run_line(line: u64, len: usize) {
         tbit(may)
         var f8: [u8; 8] = " tx=\0\0\0\0"
         tlit((&f8[0]) as u64)
-        tsnum(gesendet)
+        tsnum(sent_ret)
         var f9: [u8; 8] = " gesch=\0"
         tlit((&f9[0]) as u64)
         tbit(geschuetzt)
@@ -1240,7 +1088,7 @@ fn run_line(line: u64, len: usize) {
         tnum(dart)
         var fd: [u8; 6] = " ip=\0\0"
         tlit((&fd[0]) as u64)
-        tnum(adresse)
+        tnum(address)
         var fe: [u8; 8] = " maske=\0"
         tlit((&fe[0]) as u64)
         tnum(maske)
@@ -1255,7 +1103,7 @@ fn run_line(line: u64, len: usize) {
         tnum(status)
         var fi: [u8; 8] = " rumpf=\0"
         tlit((&fi[0]) as u64)
-        tsnum(rumpf)
+        tsnum(body)
         var fj: [u8; 8] = " grund=\0"
         tlit((&fj[0]) as u64)
         tnum(connect.reason_from(&si))

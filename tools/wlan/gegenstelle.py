@@ -1,109 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wlan/gegenstelle.py -- ein ZWEITES Programm auf der anderen
-Seite des Handschlags.
-
-======================================================================
-WARUM ES DIESE DATEI GIBT: SCHWACHSTELLE S2 AUS docs/WLAN-BEFUND.md
-======================================================================
-
-Die Runde WLAN hat ihren eigenen Befund so geschlossen:
-
-    S2 -- Der 4-Wege-Handschlag ist gegen sich selbst und gegen die
-    Normvektoren der Primitiven gemessen, NICHT gegen einen echten
-    Zugangspunkt. PRF und PBKDF2 stimmen oktettgleich mit hostapds
-    Vektoren; dass die richtigen Oktette in der richtigen Reihenfolge
-    in die PRF gehen, folgt aus dem Text der Norm und nicht aus einer
-    Messung gegen ein zweites Programm.
-
-Das ist die ehrlichste Zeile des ganzen Befundes und zugleich die
-teuerste. Ein Supplicant, der nur gegen sich selbst geprueft wird, ist
-gegen einen SYSTEMATISCHEN Denkfehler blind: wer beim Ableiten des PTK
-zweimal dieselbe falsche Reihenfolge annimmt -- einmal beim Bauen,
-einmal beim Pruefen --, bekommt zwei Mal dasselbe falsche Ergebnis und
-sieht gruen. Genau dieser Fehlerklasse ist mit Selbstvergleich nicht
-beizukommen.
-
-Diese Datei ist die Antwort darauf. Sie ist ein VOLLSTAENDIGER
-WPA2-PSK-AUTHENTICATOR -- also die Gegenseite, der Zugangspunkt --,
-geschrieben in Python, unabhaengig von Osums Quelltext, mit einer
-anderen Kryptobibliothek darunter (`cryptography` bzw. `hashlib`, also
-OpenSSL) und von einem anderen Text abgeleitet: IEEE Std 802.11-2016
-Abschnitt 12.7. Sie teilt mit `lib/wlan/wpa.fi` KEINE EINZIGE ZEILE.
-
-Wenn Osums Supplicant und dieses Programm sich auf denselben PTK
-einigen, sich gegenseitig die Pruefwerte bestaetigen und am Ende
-Nutzdaten austauschen, die die jeweils andere Seite entschluesseln
-kann, dann ist das eine Aussage, die kein Selbstvergleich liefern
-kann.
-
-======================================================================
-WARUM NICHT hostapd
-======================================================================
-
-Der Auftrag dieser Runde sagte: gegen hostapd messen. Das waere die
-erste Wahl, und es wurde ernsthaft versucht. Der Befund, gemessen auf
-DIESEM Rechner am 06.09.2026, steht hier, damit niemand ihn ein
-zweites Mal erarbeiten muss:
-
-  * `hostapd` 2.10 und `wpa_supplicant` sind aus Debian installierbar
-    und wurden installiert. Sie laufen.
-  * Debian baut beide OHNE `CONFIG_TESTING_OPTIONS`. Damit fehlen
-    genau die Befehle, mit denen man einen Handschlag ohne Funk
-    einspeisen koennte:
-
-        $ hostapd_cli EAPOL_RX ...        -> Unknown command 'EAPOL_RX'
-        $ hostapd_cli MGMT_RX_PROCESS ... -> Unknown command
-        $ hostapd_cli DATA_TEST_CONFIG 1  -> Unknown command
-
-  * `hostapd -d driver=none` laeuft bis `AP-ENABLED`, leitet PSK, GMK
-    und GTK ab -- aber ohne die obigen Befehle kommt kein Rahmen
-    hinein und keiner heraus.
-  * `hostapd driver=wired` auf einem veth-Paar laeuft ebenfalls bis
-    `AP-ENABLED` und EMPFAENGT ueber AF_PACKET echte EAPOL-Rahmen
-    (nachgewiesen im Mitschnitt). Er verarbeitet sie aber nicht:
-
-        IEEE 802.1X: Ignore STA - 802.1X not enabled or forced for WPS
-
-    Der `wired`-Treiber ist in hostapd fest auf 802.1X/EAP verdrahtet;
-    die WPA-PSK-Zustandsmaschine haengt nicht daran. `NEW_STA` meldet
-    eine Station an, startet aber keinen 4-Wege-Handschlag.
-  * `wpa_supplicant -D wired` spiegelbildlich:
-        WPA: drop TX EAPOL in non-IEEE 802.1X mode
-  * `mac80211_hwsim` gibt es nicht: der Kern dieses Rechners
-    (7.0.14-5-pve, ein Proxmox-Kern in einem LXC-Behaelter) hat
-    ueberhaupt kein `drivers/net/wireless/`. `/dev/net/tun` fehlt
-    ebenfalls -- dieselbe Wand, an die Runde K8 schon gelaufen ist
-    (siehe den Kopf von `tools/net/bridge.c`).
-
-Ein hostapd ohne Testschalter und ohne Funkgeraet ist also kein
-Handschlagpartner. Die Wahl stand damit zwischen "hostapd selbst
-uebersetzen" und "die Gegenseite selbst schreiben". Diese Datei ist die
-zweite Wahl, und sie ist aus einem Grund die bessere: sie ist ein paar
-hundert Zeilen, sie ist lesbar, sie steht im Baum, und sie kann
-ABSICHTLICH FALSCH SPIELEN. Der letzte Punkt ist der wichtigste --
-siehe `--boese` weiter unten. Ein echter Zugangspunkt haelt sich an die
-Norm; ein Angreifer nicht, und die interessanten Fehler eines
-Supplicanten liegen dort.
-
-Was diese Datei damit NICHT behauptet: dass Osum sich mit einem echten
-Zugangspunkt verbindet. Das braucht eine Karte. Sie behauptet, dass
-Osums Rechnung mit der eines zweiten, unabhaengigen Programms
-uebereinstimmt -- und das ist genau so viel, wie ohne Karte zu holen
-ist.
-
-======================================================================
-DER MASSSTAB HINTER DEM MASSSTAB
-======================================================================
-
-Ein selbst geschriebener Massstab ist erst dann einer, wenn er selbst
-geeicht ist. Diese Datei eicht sich an der ECHTEN AUFZEICHNUNG, die
-schon in `tools/wlan/mitschnitt.txt` liegt: aus dem Netz `Coherer` mit
-dem Passwort `Induction` rechnet sie PMK, PTK und die Pruefwerte der
-Nachrichten 2, 3 und 4 nach und vergleicht sie mit dem, was 2007
-wirklich auf dem Draht stand. Erst wenn das stimmt, darf sie Osum
-pruefen. Das ist `--selbsttest`, und `run.sh` faehrt ihn ZUERST.
-"""
 
 import binascii
 import hashlib
@@ -113,8 +9,6 @@ import struct
 import sys
 
 # ---------------------------------------------------------------------
-# Krypto. Bewusst aus einer ANDEREN Quelle als lib/crypto/: hashlib und
-# `cryptography` sind OpenSSL. Nichts hier ruft Osum-Quelltext auf.
 # ---------------------------------------------------------------------
 
 try:
@@ -134,7 +28,6 @@ def u(s):
 
 
 def prf_sha1(key, label, data, nbits):
-    """IEEE 802.11i 8.5.1.1 -- PRF-n ueber HMAC-SHA1."""
     n = (nbits + 7) // 8
     out = b''
     i = 0
@@ -146,7 +39,6 @@ def prf_sha1(key, label, data, nbits):
 
 
 def kdf_sha256(key, label, data, nbits):
-    """IEEE 802.11-2016 12.7.1.2 -- KDF-Hash-Length, hier SHA-256."""
     n = (nbits + 7) // 8
     out = b''
     i = 1
@@ -158,18 +50,10 @@ def kdf_sha256(key, label, data, nbits):
 
 
 def pmk_aus_psk(passwort, ssid):
-    """PBKDF2-HMAC-SHA1, 4096 Runden, 32 Oktette (802.11i H.4)."""
     return hashlib.pbkdf2_hmac('sha1', passwort, ssid, 4096, 32)
 
 
 def ptk_ableiten(pmk, aa, spa, anonce, snonce, sha256=False, n=48):
-    """PTK = PRF(PMK, "Pairwise key expansion", min||max||min||max).
-
-    IEEE 802.11-2016 12.7.1.3. Die kleinere Adresse und die kleinere
-    Zufallszahl kommen ZUERST -- genau die Stelle, an der ein
-    Selbstvergleich blind ist, weil beide Seiten denselben Fehler
-    machen wuerden.
-    """
     da = min(aa, spa) + max(aa, spa)
     dn = min(anonce, snonce) + max(anonce, snonce)
     if sha256:
@@ -178,7 +62,6 @@ def ptk_ableiten(pmk, aa, spa, anonce, snonce, sha256=False, n=48):
 
 
 def aes_cmac(key, msg):
-    """RFC 4493, gebraucht fuer den MIC der SHA-256-AKM."""
     if not HAVE_CRYPTO:
         raise RuntimeError("cryptography fehlt")
 
@@ -213,7 +96,6 @@ def aes_cmac(key, msg):
 
 
 def aes_wrap(kek, plain):
-    """RFC 3394 Key Wrap."""
     if not HAVE_CRYPTO:
         raise RuntimeError("cryptography fehlt")
 
@@ -264,17 +146,6 @@ MIC_VERSATZ = 4 + 1 + 2 + 2 + 8 + 32 + 16 + 8 + 8   # = 81
 
 def eapol_bauen(key_info, key_len, replay, nonce, keyrsc, keydata,
                 mic=None, iv=b'\x00' * 16, ver=2, deskriptor=2):
-    """Setzt einen EAPOL-Key-Rahmen zusammen. `mic=None` heisst: das
-    Feld bleibt null -- so wird es fuer die MIC-Rechnung gebraucht.
-
-    DAS ERSTE OKTETT DES RUMPFES IST DIE BESCHREIBUNGSART, und sie ist
-    2 (RSN, also WPA2/WPA3) bzw. 254 (das alte WPA) -- NICHT 3. Der
-    erste Anlauf dieser Datei schrieb 3 hinein, weil daneben im
-    EAPOL-KOPF die 3 fuer 'EAPOL-Key' steht; zwei verschiedene Zahlen
-    an benachbarten Stellen, beide mit dem Wert 3 im Kopf. Osums
-    `eapol_zerlege` hat es gemerkt und den Rahmen abgelehnt -- zu
-    Recht, denn 3 ist keine gueltige Beschreibungsart.
-    """
     body = struct.pack('!BHH', deskriptor, key_info, key_len)
     body += struct.pack('!Q', replay)
     body += nonce
@@ -288,8 +159,6 @@ def eapol_bauen(key_info, key_len, replay, nonce, keyrsc, keydata,
 
 
 def eapol_mic_setzen(frame, kck, sha256=False):
-    """Rechnet den MIC ueber den GANZEN Rahmen mit MIC-Feld null und
-    setzt ihn ein. Genau die Reihenfolge aus 12.7.2."""
     null = frame[:MIC_VERSATZ] + b'\x00' * 16 + frame[MIC_VERSATZ + 16:]
     if sha256:
         m = aes_cmac(kck, null)[:16]
@@ -305,16 +174,14 @@ def eapol_mic_pruefen(frame, kck, sha256=False):
 
 
 def eapol_zerlegen(frame):
-    """Zerlegt einen EAPOL-Key-Rahmen in ein Woerterbuch. Bewusst
-    streng: was nicht passt, wirft."""
     if len(frame) < 4:
-        raise ValueError("zu kurz fuer den EAPOL-Kopf")
+        raise ValueError("too short for the EAPOL header")
     ver, typ, blen = struct.unpack('!BBH', frame[:4])
     if typ != 3:
-        raise ValueError("kein EAPOL-Key (Typ %d)" % typ)
+        raise ValueError("not an EAPOL key (type %d)" % typ)
     b = frame[4:4 + blen]
     if len(b) < 95:
-        raise ValueError("EAPOL-Key-Rumpf zu kurz: %d" % len(b))
+        raise ValueError("EAPOL key body too short: %d" % len(b))
     d = {}
     d['ver'] = ver
     d['desc'] = b[0]
@@ -338,7 +205,6 @@ def eapol_zerlegen(frame):
 
 
 def gtk_kde(gtk, idx=1):
-    """Das GTK-KDE aus 802.11-2016 12.7.2, Tabelle 12-8."""
     inner = bytes([idx & 3, 0]) + gtk
     return bytes([0xDD, len(inner) + 4, 0x00, 0x0F, 0xAC, 0x01]) + inner
 
@@ -348,15 +214,6 @@ def gtk_kde(gtk, idx=1):
 # ---------------------------------------------------------------------
 
 def kopf_laenge(hdr):
-    """Dieselbe Rechnung wie `kopf_laenge` in lib/wlan/frame.fi.
-
-    Sie steht hier nachgebaut und nicht geraten, weil der erste Anlauf
-    dieser Datei genau daran gescheitert ist: beim Vektor M.6.4 ist
-    FC = 0x4808, also Untertyp 0 (ein GEWOEHNLICHER Datenrahmen) mit
-    gesetztem ORDNUNGSBIT -- und nicht, wie zuerst angenommen, ein
-    QoS-Rahmen. Der Kopf ist deshalb 24 Oktette lang und `f8ba` ist
-    schon Nutzlast.
-    """
     fc = struct.unpack('<H', hdr[0:2])[0]
     typ = (fc >> 2) & 3
     untertyp = (fc >> 4) & 15
@@ -368,8 +225,6 @@ def kopf_laenge(hdr):
             l += 6
         if qos:
             l += 2
-    # Das Ordnungsbit heisst nur bei Verwaltungs- und QoS-Datenrahmen
-    # "HT-Control" (vier Oktette); bei Daten ohne QoS heisst es
     # "streng geordnet" und fuegt nichts hinzu.
     if fc & 0x8000:
         if typ == 0 or (typ == 2 and qos):
@@ -378,40 +233,19 @@ def kopf_laenge(hdr):
 
 
 def ccmp_nonce(a2, pn, prio=0):
-    """Nonce = Kennzeichen || A2 || PN, die PN HOECHSTWERTIG ZUERST.
-
-    Die Reihenfolge ist ueberall in dieser Datei dieselbe wie in
-    `lib/wlan/ccmp.fi` und wie die Norm sie in ihren Vektoren druckt
-    ("PN: b5 03 97 76 e7 0c"): pn[0] ist PN5. Sie wird NICHT gedreht --
-    gedreht wird nur im CCMP-KOPF, und das passiert in `ccmp_kopf`.
-    Der erste Anlauf dieser Datei drehte sie hier zusaetzlich um und
-    bekam damit gegen den Vektor M.6.4 einen anderen Geheimtext.
-    """
     return bytes([prio & 0x0F]) + a2 + pn
 
 
 def ccmp_aad(hdr):
-    """AAD nach IEEE 802.11-2016 12.5.3.3.3.
-
-    Die maskierten Felder sind genau die, die ein Vermittler unterwegs
-    aendern darf. Zwei Stellen, an denen der erste Anlauf dieser Datei
-    danebenlag und `lib/wlan/ccmp.fi` recht hatte:
-
-      * Es sind DREI Adressen (18 Oktette, A1||A2||A3), nicht zwei.
-      * Die Untertyp-Maske ~0x0070 gilt nur fuer Datenrahmen; bei
-        einem QoS-Rahmen faellt zusaetzlich das Ordnungsbit weg.
-
-    Beides ist mit dem Vektor IEEE Std 802.11-2012 M.6.4 nachgemessen.
-    """
     fc = struct.unpack('<H', hdr[0:2])[0]
     typ = (fc >> 2) & 3
     untertyp = (fc >> 4) & 15
     qos = (typ == 2) and (untertyp & 8) != 0
     adr4 = (fc & 0x0300) == 0x0300
     if typ == 2:
-        fc &= ~0x0070      # die Untertyp-Bits, nur bei Daten
+        fc &= ~0x0070
         if qos:
-            fc &= ~0x8000  # das Ordnungsbit, nur bei QoS
+            fc &= ~0x8000
     fc &= ~0x0800          # Wiederholung
     fc &= ~0x1000          # Stromsparen
     fc &= ~0x2000          # mehr Daten
@@ -429,15 +263,11 @@ def ccmp_aad(hdr):
 
 
 def ccmp_kopf(pn, keyid=0):
-    """Der 8-Oktett-CCMP-Kopf. Die Reihenfolge ist der Fehler, den die
-    Runde WLAN beim ersten Lauf gemacht hat -- pn[0] ist PN5."""
     return bytes([pn[5], pn[4], 0x00, 0x20 | ((keyid & 3) << 6),
                   pn[3], pn[2], pn[1], pn[0]])
 
 
 def _prio_aus(hdr):
-    """Die Verkehrsklasse steht im QoS-Feld des Kopfes -- sie wird
-    nicht geraten."""
     fc = struct.unpack('<H', hdr[0:2])[0]
     typ = (fc >> 2) & 3
     untertyp = (fc >> 4) & 15
@@ -476,16 +306,9 @@ def ccmp_oeffnen(tk, mpdu, hlen=None, prio=None):
 
 
 # ---------------------------------------------------------------------
-# Der Authenticator als Zustandsmaschine.
 # ---------------------------------------------------------------------
 
 class Authenticator:
-    """Die AP-Seite eines WPA2-PSK-Handschlags.
-
-    `boese` laesst ihn absichtlich von der Norm abweichen -- das ist
-    der Teil, den ein echter Zugangspunkt NICHT kann und der die
-    interessanten Fehler eines Supplicanten findet.
-    """
 
     def __init__(self, ssid, passwort, aa, spa, sha256=False,
                  gtk=None, anonce=None, boese=None):
@@ -503,7 +326,6 @@ class Authenticator:
         self.rsn_ie = u('30140100000fac040100000fac04'
                         '0100000fac' + ('06' if sha256 else '02') + '0000')
 
-    # -- die Teile des PTK, nach 12.7.1.3 --
     @property
     def kck(self):
         return self.ptk[0:16]
@@ -517,28 +339,26 @@ class Authenticator:
         return self.ptk[32:48]
 
     def nachricht1(self):
-        """A -> S: ANonce, kein MIC."""
         ki = 0x008A if not self.sha256 else 0x008B
         return eapol_bauen(ki, 16, self.replay, self.anonce, 0, b'')
 
     def nachricht2_pruefen(self, frame):
         d = eapol_zerlegen(frame)
         if not d['mic_gesetzt']:
-            raise ValueError("Nachricht 2 ohne MIC")
+            raise ValueError("message 2 without MIC")
         if d['replay'] != self.replay:
-            raise ValueError("Nachricht 2 mit falschem Replay-Zaehler: "
+            raise ValueError("message 2 with wrong replay counter: "
                              "%d statt %d" % (d['replay'], self.replay))
         self.snonce = d['nonce']
         self.ptk = ptk_ableiten(self.pmk, self.aa, self.spa,
                                 self.anonce, self.snonce, self.sha256)
         ok, ist, soll = eapol_mic_pruefen(frame, self.kck, self.sha256)
         if not ok:
-            raise ValueError("MIC von Nachricht 2 falsch: %s statt %s"
+            raise ValueError("MIC of message 2 wrong: %s instead of %s"
                              % (h(ist), h(soll)))
         return d
 
     def nachricht3(self):
-        """A -> S: GTK verpackt, MIC, Install-Bit."""
         self.replay += 1
         kd = self.rsn_ie + gtk_kde(self.gtk, 1)
         while len(kd) % 8:
@@ -557,16 +377,15 @@ class Authenticator:
     def nachricht4_pruefen(self, frame):
         d = eapol_zerlegen(frame)
         if d['replay'] != self.replay:
-            raise ValueError("Nachricht 4 mit falschem Replay-Zaehler")
+            raise ValueError("message 4 with wrong replay counter")
         ok, ist, soll = eapol_mic_pruefen(frame, self.kck, self.sha256)
         if not ok:
-            raise ValueError("MIC von Nachricht 4 falsch: %s statt %s"
+            raise ValueError("MIC of message 4 wrong: %s instead of %s"
                              % (h(ist), h(soll)))
         return d
 
 
 # ---------------------------------------------------------------------
-# Selbsttest: der Massstab eicht sich an der ECHTEN Aufzeichnung.
 # ---------------------------------------------------------------------
 
 def lade_mitschnitt(pfad):
@@ -589,8 +408,6 @@ def lade_mitschnitt(pfad):
 
 
 def selbsttest(pfad):
-    """Rechnet die echte Aufzeichnung nach. Erst wenn das stimmt, ist
-    dieses Programm ein Massstab."""
     m = lade_mitschnitt(pfad)
     fehler = 0
     gut = 0
@@ -625,43 +442,30 @@ def selbsttest(pfad):
     ptk = ptk_ableiten(pmk, aa, spa, anonce, snonce)
     kck = ptk[0:16]
 
-    # Der eigentliche Punkt: die Pruefwerte, die 2007 auf dem Draht
     # standen, muessen sich nachrechnen lassen.
     for name, fr in (("2", e2), ("3", e3), ("4", e4)):
         ok, ist, soll = eapol_mic_pruefen(fr, kck)
-        pruef("Pruefwert von Nachricht %s stimmt mit dem echten Draht" % name,
+        pruef("check value of message %s matches the real wire" % name,
               h(ist), h(soll))
 
-    # Der Gruppenschluessel aus Nachricht 3.
     d3 = eapol_zerlegen(e3)
     kek = ptk[16:32]
     kd = aes_unwrap(kek, d3['keydata'])
     if kd is None:
         fehler += 1
-        print("  FAIL  Schluesseldaten von Nachricht 3 lassen sich nicht auspacken")
+        print("  FAIL  key data of message 3 cannot be unwrapped")
     else:
         gut += 1
-        print("  OK    Schluesseldaten von Nachricht 3 ausgepackt (%d Oktette)"
+        print("  OK    key data of message 3 unwrapped (%d octets)"
               % len(kd))
 
     return gut, fehler
 
 
 # =====================================================================
-# RUNDE WLAN-3: DER ZUGANGSPUNKT, DER WIRKLICH ANTWORTET
 # =====================================================================
 #
-# Bis hierher war diese Datei die Gegenseite des HANDSCHLAGS. Was
-# Runde WLAN-3 braucht, ist die Gegenseite des VERKEHRS: ein Programm,
-# das sich wie ein Zugangspunkt UND wie das Netz dahinter verhaelt --
-# es nimmt einen verschluesselten Rahmen entgegen, oeffnet ihn, sieht
-# nach, was drinsteht, und baut eine verschluesselte Antwort.
 #
-# Warum das hier steht und nicht in Firn: es ist die GEGENSEITE. Eine
-# Gegenseite, die denselben Quelltext benutzt wie die Seite, die sie
-# pruefen soll, misst nichts. Alles hier rechnet mit `struct` und
-# `cryptography` (OpenSSL) und teilt mit `lib/wlan/llc.fi` keine
-# einzige Zeile -- genauso, wie `Authenticator` mit `lib/wlan/wpa.fi`
 # keine teilt.
 
 
@@ -672,7 +476,6 @@ def ip2i(s):
 
 
 def sum16(daten, start=0):
-    """Pruefsumme nach RFC 1071. Unabhaengig von llc.fi gerechnet."""
     s = start
     i = 0
     while i + 1 < len(daten):
@@ -734,8 +537,6 @@ def tcp_bauen(qip, zip_, qport, zport, seq, ack, flags, nutz=b''):
 
 def dhcp_ack_bauen(xid, mac, angeboten, server, maske, tor, dns,
                    miete=86400, art=5):
-    """Ein DHCP-Ack (oder Offer, wenn art=2) wie ein echter Server ihn
-    schickt. Die Feldnamen sind die aus RFC 2131."""
     b = bytearray(240)
     b[0] = 2           # op: Antwort
     b[1] = 1           # htype: Ethernet
@@ -763,25 +564,9 @@ def snap(ethertype=0x0800):
 
 def datenkopf(bssid, ziel, quelle, fromds=True, seq=0,
               geschuetzt=False):
-    """Ein 802.11-Datenrahmen VOM Zugangspunkt (FromDS=1).
-
-    Adressen nach 802.11-2016 9.2.4.7.2 fuer FromDS=1:
-      A1 = Empfaenger, A2 = BSSID, A3 = urspruenglicher Absender.
-    """
-    # DAS GESCHUETZT-BIT (0x4000) GEHOERT IN DEN KOPF, DER WIRKLICH
     # GESENDET WIRD.
     #
-    # [gemessen, 15.09.2026] Der erste Anlauf dieser Funktion liess es
-    # weg, weil `ccmp_aad` es ohnehin setzt -- die AAD und damit der
-    # Pruefwert waren also richtig. Der Rahmen ging trotzdem nicht auf:
-    # `lib/wlan/ccmp.fi` prueft den Kopf, wie er DASTEHT, und ein
-    # Rahmen ohne Geschuetzt-Bit ist fuer ihn Klartext. Osums
-    # `ccmp.fi` macht es in `protect` richtig (es setzt `f | 16384`),
-    # und der Vergleich der beiden Ausgaben unterschied sich in genau
-    # einem Oktett: 0842 gegen 0802.
     #
-    # Ein echter Zugangspunkt setzt das Bit. Diese Gegenstelle tut es
-    # jetzt auch -- sonst misst sie einen Fall, den es auf der Luft
     # nicht gibt.
     fc = 0x0208 if fromds else 0x0108
     if geschuetzt:
@@ -791,13 +576,6 @@ def datenkopf(bssid, ziel, quelle, fromds=True, seq=0,
 
 
 class Zugangspunkt:
-    """Der Zugangspunkt UND das Netz dahinter.
-
-    Er haelt den TK aus dem Handschlag und baut damit genau die
-    Rahmen, die ein Klient sehen wuerde: eine DHCP-Antwort, eine
-    HTTP-Antwort, ein Echo. Die Paketnummer zaehlt er selbst hoch --
-    ein Zugangspunkt, der sie wiederholte, waere selbst kaputt.
-    """
 
     def __init__(self, tk, bssid, klient, ip_server='192.168.0.1',
                  ip_klient='192.168.0.50', maske='255.255.255.0'):
@@ -815,7 +593,6 @@ class Zugangspunkt:
         return bytes([0, 0, 0, 0, (p >> 8) & 255, p & 255])
 
     def _rahmen(self, nutzlast_ip, seq=0):
-        """Ein verschluesselter Datenrahmen an den Klienten."""
         hdr = datenkopf(self.bssid, self.klient, self.bssid, True, seq,
                         geschuetzt=True)
         klar = snap(0x0800) + nutzlast_ip
@@ -840,15 +617,11 @@ class Zugangspunkt:
                                        6, t, 3), seq)
 
     def echo(self, nutz=b'ABCDEFG', seq=0):
-        """Ein UDP-Paket zurueck -- der einfachste Beweis, dass ein
-        Datenpaket in beide Richtungen geht."""
         u = udp_bauen(self.server, self.klient_ip, 67, 68, nutz)
         return self._rahmen(ipv4_bauen(self.server, self.klient_ip,
                                        17, u, 4), seq)
 
     def oeffnen(self, mpdu):
-        """Einen Rahmen des Klienten oeffnen. Wirft, wenn der
-        Pruefwert nicht stimmt -- und genau das ist erwuenscht."""
         return ccmp_oeffnen(self.tk, mpdu)
 
 
@@ -857,7 +630,7 @@ def main():
         i = sys.argv.index('--selbsttest')
         pfad = sys.argv[i + 1] if len(sys.argv) > i + 1 else \
             os.path.join(os.path.dirname(__file__), 'mitschnitt.txt')
-        print("== die Gegenstelle eicht sich an der echten Aufzeichnung ==")
+        print("== the peer calibrates itself on the real capture ==")
         gut, fehler = selbsttest(pfad)
         print("GEGENSTELLE-SELBSTTEST: %d Zusagen, %d Fehler" % (gut, fehler))
         return 1 if fehler else 0
