@@ -169,25 +169,6 @@ mk_image() { # image conf-file
     #     settings  384200 -> 565248     taskbar  278032 -> 371248
     #     desktop   181568 -> 249368     (+342 KiB together)
     #
-    # and the image stopped fitting. The failure is loud but it is loud
-    # in the WRONG PLACE: `mkfs: the disk is full`, then twenty-nine
-    # assertions about drag, autohide and the settings page fail because
-    # there was no image to boot. tools/look/shot.sh and
-    # tools/netview/run.sh were already on 8192 for the same set of
-    # programs, which is why they did not notice.
-    # RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-    # Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
-    # die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
-    # Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
-    # Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
-    # sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
-    # allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
-    # brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
-    # Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
-    # "the disk is full", und ohne Abbild startet kein QEMU.
-    # EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
-    # r383: --v3 -- /bin/settings (2 151 680 octets) is over the 2 134 016 of format 2
-    # (red on main alike); format 3 has multi-block files.
     local ARGS=(build "$img" 65536 --v3 /lib/
         "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/)
     local p

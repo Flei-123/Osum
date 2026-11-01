@@ -4,12 +4,6 @@
 #
 #   lupe.py <ansicht> <x> <y> <b> <h> [zoom] [ziel.png]
 #
-# Der Vergleich in gegenueber.py zeigt zwei ganze Bildschirme
-# nebeneinander.  Bei 1920x1080 auf einer Bildschirmbreite ist ein
-# Radius von 12 Bildpunkten drei Bildpunkte gross -- man sieht ihn
-# nicht, man glaubt ihn.  Dieses Werkzeug schneidet DIESELBE Stelle aus
-# beiden Aufnahmen und vergroessert sie, damit die Ecke, der Schatten
-# und die Kantenglaettung SICHTBAR werden und nicht behauptet bleiben.
 import sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,8 +15,6 @@ SHOTS = os.path.join(ROOT, ".design2-shots")
 def lies_ppm(p):
     with open(p, "rb") as f:
         d = f.read()
-    # P6, Weiss/Hoehe, Maxwert -- der Kopf ist ASCII und durch
-    # Leerraum getrennt, Kommentare mit '#'.
     felder = []
     i = 0
     while len(felder) < 4:

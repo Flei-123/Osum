@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/hellduster.sh -- ZIEHT DER DUNKLE MODUS UEBERALL MIT?
 #
 #   bash tools/design/hellduster.sh [kern.mb] [wurzel.img] [ausgabe]
 #
-# Justins Frage: "aendert der dunkle Modus auch die Farbe des
-# Suchfensters?" Die Antwort darf keine Meinung sein. Dieser Laeufer
-# faehrt DIESELBE Ansichtsfolge zweimal -- einmal mode=light, einmal
-# mode=dark -- und legt beide Abzuege nebeneinander. Gemessen wird
-# danach mit tools/design/dunkelmess.py: mittlere Helligkeit je
-# Flaeche. Bleibt eine Flaeche in beiden Laeufen gleich hell, ist sie
-# NICHT umgestellt.
 #
-# Aufgenommen werden: Schreibtisch, Suchfenster (zu und getippt),
-# Kontrollzentrum, Einstellungsfenster, Taskleiste.
-# Alles in 3440x1440.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 KERN=${1:-/tmp/final-img/osum.mb}
@@ -27,7 +16,6 @@ lauf() {
     local W="$AUS/$modus"
     mkdir -p "$W"
     cp "$WURZEL" "$W/disk.img"
-    # /etc/theme.conf im Abbild auf den gewuenschten Modus stellen
     python3 tools/osum/mkfs.py cat "$W/disk.img" /etc/theme.conf \
         > "$W/theme.conf" 2>/dev/null || true
     sed -i "s/^mode=.*/mode=$modus/" "$W/theme.conf"

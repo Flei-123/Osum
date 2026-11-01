@@ -14,7 +14,7 @@ Vergleich mit Rauschen darin.
 Also: EIN Start, EINE Verbindung zum QEMU-Monitor, und ein Drehbuch,
 das dazwischen klickt, tippt und fotografiert.
 
-Befehle im Drehbuch (eine Zeile je Befehl, `#` ist eine Anmerkung):
+Befehle im Drehbuch (one line per command, a leading hash starts a note):
 
     warte <sekunden>            anhalten
     warteauf <regex> [|| frist] warten, bis der regex in serial.txt steht
@@ -136,37 +136,10 @@ class Fahrer:
         time.sleep(0.06)
         self.leeren()
 
-    # --- der Zeiger.  `mouse_move` ist RELATIV (PS/2 kennt nichts
-    # anderes), und ein Paket traegt neun Bit je Achse.  Also: erst in
-    # die linke obere Ecke, wo der Anschlag die Vorgeschichte loescht,
-    # dann in Schritten unter 128 heraus.  Dieselbe Route wie
-    # tools/themestore/click.py, nur dass die Verbindung stehen bleibt.
-    # ================================================== RUNDE MERGE-10
-    # ACHT SCHRITTE REICHEN NUR BIS 960 BILDPUNKTE.
     #
-    # Hier standen acht Bewegungen um -120, also -960 in jede Richtung.
-    # Der Zeiger wird an der Bildschirmkante angehalten, deshalb ist
-    # "weit genug nach links oben" dasselbe wie "in der Ecke" -- aber
-    # eben nur, solange der Schirm nicht groesser ist als 960.
     #
-    # Auf 1280x800 geht das auf (-960 < -800). Auf 2560x1440 NICHT:
-    # der Zeiger bleibt 1440-960 = 480 Bildpunkte ueber dem oberen Rand
-    # stehen, und JEDE Fahrt danach ist um genau diesen Betrag
-    # verschoben.
     #
-    # GEMESSEN (Abnahme dieser Runde, 2560x1440):
-    #   taskbar: click x=40 y=36  hits=start   <- der erste Klick sitzt
-    #   taskbar: click x=40 y=71  hits=none    <- alle weiteren nicht
-    # Der zweite Klick auf Start kam nie an, das Startmenue blieb zu,
-    # und die Klicks auf seine Zeilen gingen ins Leere -- der
-    # Dateimanager startete nicht, und `03-explorer` zeigte den
-    # Schreibtisch. Das sah aus wie ein Fehler der Oberflaeche bei
-    # hoher Aufloesung und war einer des Fahrers.
     #
-    # Genug ist: mehr Schritte, als der groesste denkbare Schirm hoch
-    # ist. 32 x 120 = 3840 traegt 4K in beiden Richtungen; die
-    # Bewegungen kosten je einen Monitorumlauf und laufen nur einmal je
-    # Klick.
     ECKSCHRITTE = 32
 
     def ecke(self):
@@ -184,20 +157,8 @@ class Fahrer:
             dy -= sy
         self.x, self.y = x, y
 
-    # ==================================== RUNDE ECHTHARDWARE-5
-    # `nahe=True` -- OHNE DEN UMWEG UEBER DIE ECKE.
     #
-    # `fahre` faehrt IMMER erst nach 0,0 und von dort zum Ziel; anders
-    # laesst sich mit relativen PS/2-Bewegungen nicht absolut zielen.
-    # Fuer das Kontrollzentrum ist dieser Umweg toedlich: es pollt den
-    # Zeiger und schliesst, sobald eine Taste AUSSERHALB heruntergeht
-    # -- und schon der Weg durch die Ecke reicht, damit es sich fuer
-    # ueberfluessig haelt (`qs: closed by outside`, gemessen in genau
-    # diesem Lauf).
     #
-    # Mit `nahe` wird vom ZULETZT bekannten Punkt aus relativ gefahren.
-    # Das setzt voraus, dass die Buchfuehrung stimmt -- sie tut es,
-    # solange nur diese Klasse den Zeiger bewegt.
     def klick_nahe(self, x, y, mal=1, taste=1, halten=0.05):
         dx, dy = x - self.x, y - self.y
         while dx or dy:
@@ -225,8 +186,6 @@ class Fahrer:
         self.x, self.y = x, y
         time.sleep(0.6)
 
-    # RUNDE ECHTHARDWARE-5: ziehen vom zuletzt bekannten Punkt aus,
-    # ohne den Umweg ueber 0,0. Begruendung siehe `klick_nahe`.
     def ziehe_nahe(self, x0, y0, x1, y1, schritte=8):
         dx, dy = x0 - self.x, y0 - self.y
         while dx or dy:
@@ -257,11 +216,6 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
-    # ============================================== RUNDE ANHEFTEN
-    # ZIEHEN MIT EINEM FOTO MITTENDRIN. Ohne das gibt es kein Bild vom
-    # ZUSTAND WAEHREND des Zugs -- und genau das ist der Beleg dafuer,
-    # dass die Luecke mitwandert. Vorher und nachher zu fotografieren
-    # beweist nur das Ergebnis, nicht die Bewegung.
     def ziehe_mit_foto(self, x0, y0, x1, y1, name, schritte=8):
         self.fahre(x0, y0)
         time.sleep(0.35)
@@ -282,7 +236,6 @@ class Fahrer:
             cx, cy = zx, zy
             time.sleep(0.15)
             if k == halt and name:
-                # Die Taste bleibt gedrueckt: das Bild zeigt den Zug.
                 time.sleep(0.6)
                 self.foto(name)
         self.x, self.y = cx, cy
@@ -335,23 +288,8 @@ class Fahrer:
         time.sleep(0.35)
         for i in range(mal):
             self.cmd("mouse_button %d" % taste)
-            # RUNDE EXPLORER-2, GEMESSEN: DER DOPPELKLICK WAR ZU LANGSAM.
             #
-            # `wlib.on_down` nimmt zwei Klicks als Doppelklick, wenn
-            # zwischen ihnen WENIGER ALS 100 TICKS liegen -- der Ticker
-            # laeuft mit 100 Hz, das ist also eine Sekunde. Der Abstand
-            # hier war 0.05 + 0.12 + 0.05 = 0.22 s, und trotzdem hat der
-            # Gast 109 Ticks gemessen (`wlib: klick r=0 dop=0 dt=109`):
-            # jedes `self.cmd` schickt ueber den Monitor und WARTET auf
-            # die Antwort, und unter TCG kostet dieser Umlauf ein
-            # Vielfaches der Schlafzeit. Der Doppelklick fiel damit
-            # knapp aus dem Fenster, und ein Doppelklick auf einen
-            # Ordner tat nichts -- was wie ein Fehler des Programms
-            # aussah und keiner war.
             #
-            # Also: zwischen den zwei Klicks eines Doppelklicks wird
-            # NICHT geschlafen. Die Umlaufzeit des Monitors ist schon
-            # mehr Abstand, als ein Mensch je erzeugt.
             if mal == 1:
                 time.sleep(0.05)
             self.cmd("mouse_button 0")
@@ -360,27 +298,9 @@ class Fahrer:
     # ============================================ RUNDE ECHTHARDWARE-3
     # ZIEHEN: DRUECKEN, IN SCHRITTEN FAHREN, LOSLASSEN.
     #
-    # Zwei Befunde dieser Runde lassen sich mit `klick` gar nicht
-    # pruefen, weil sie eine BEWEGUNG BEI GEDRUECKTER TASTE verlangen:
-    # die Fenstergroesse (`wm.fi` `S_SIZING`) und der Helligkeitsregler
-    # (`qs.fi`, seit dieser Runde `EV_MOVE`). Ein Sprung von A nach B
-    # waere kein Ziehen -- der Server sieht dann EINE Bewegung, und
-    # genau die hat vorher auch schon funktioniert. Also in Schritten,
-    # damit wirklich mehrere `EV_MOVE` entstehen.
     def ziehe(self, x0, y0, x1, y1, schritte=8):
-        # ======================================== RUNDE ECHTHARDWARE-3
-        # WAEHREND DES ZIEHENS DARF DER ZEIGER NICHT UEBER DIE ECKE.
         #
-        # `fahre` faehrt IMMER erst nach 0,0 (`ecke`) und von dort zum
-        # Ziel -- absolut positionieren geht ueber `mouse_move` nur so.
-        # Beim ZIEHEN ist das toedlich: die gedrueckte Taste wandert
-        # mit, das Kontrollzentrum sieht einen Druck bei 0,0 und
-        # schliesst sich voellig zu Recht (`qs: closed by outside`).
-        # Es sah aus, als taete der Regler nichts -- der Fehler lag im
-        # LAEUFER, und er hat mich drei Laeufe gekostet.
         #
-        # Also: zum Startpunkt absolut fahren, druecken, und ab da nur
-        # noch RELATIV bewegen.
         self.fahre(x0, y0)
         time.sleep(0.35)
         self.cmd("mouse_button 1")
@@ -463,10 +383,6 @@ class Fahrer:
             time.sleep(0.2)
         return False
 
-    # --- das Foto.  `screendump` kehrt zurueck, BEVOR die Datei fertig
-    # ist; gewartet wird, bis die Groesse steht.  (tools/gfx/screenshot.py
-    # hat das herausgefunden, hier steht es noch einmal, weil diese
-    # Verbindung nicht neu aufgebaut wird.)
     def foto(self, name, frist=30.0):
         ziel = os.path.join(self.out, name + ".ppm")
         if os.path.exists(ziel):
@@ -601,11 +517,6 @@ class Fahrer:
         self._chrome = (frame, frame + bar + 1)
         return self._chrome
 
-    # RUNDE ECHTHARDWARE-5: die Geometrie EINES Fensters, so wie der
-    # Server sie zuletzt gemeldet hat. Rahmen und Titelhoehe stehen
-    # nicht in der Zeile -- sie sind BORDER/TITLE_H mal der
-    # Vervielfachung, und die liest sich aus der Leistenhoehe ab
-    # (`taskbar: geom ... h=`): 40 heisst 1, 80 heisst 2.
     def fenstergeom(self, wid):
         t = lies(self.serial)
         m = None
@@ -616,8 +527,6 @@ class Fahrer:
         if m is None:
             return None
         x, y, w, h = (int(m.group(i)) for i in (1, 2, 3, 4))
-        # 64-Bit-Zweierkomplement: der Server meldet negative Werte
-        # als sehr grosse Zahlen.
         if x > (1 << 63):
             x -= (1 << 64)
         if y > (1 << 63):
@@ -631,13 +540,7 @@ class Fahrer:
         b, th = self.chrome()
         return (x, y, w, h, b * sk, th * sk)
 
-    # RUNDE FENSTER: WELCHES FENSTER HAT DEN FOKUS.
     #
-    # Die Kennungen werden zur Laufzeit vergeben (7, 11, ...) und
-    # aendern sich mit jedem Lauf -- eine ins Drehbuch getippte Zahl
-    # ist deshalb falsch, sobald ein Programm mehr startet. F11 wirkt
-    # auf das Fenster mit dem Fokus, also muss das Drehbuch dasselbe
-    # Fenster greifen koennen. `wm: fokus id=<neu> vor=<alt>`.
     def fokus_id(self):
         t = lies(self.serial)
         m = None
@@ -656,37 +559,6 @@ class Fahrer:
                 pass
             return m
 
-        # DIE LEISTE MELDET IN IHREN EIGENEN KOORDINATEN.  `taskbar:
-        # start x=4 y=3` ist die Ecke IM Fenster der Leiste, und das
-        # Fenster steht bei `taskbar: geom x=0 y=772`.  Der erste
-        # Versuch dieser Runde hat die beiden verwechselt und auf
-        # (19,14) geklickt -- oben links auf den Schreibtisch.  Genau
-        # deshalb steht hier eine Umrechnung und keine Zahl.
-        # ==================================== RUNDE ECHTHARDWARE-3
-        # `hellspur` -- die Rinne des Helligkeitsreglers, so wie das
-        # Kontrollzentrum sie SELBST meldet:
-        #     qs: hell spur von=898 bis=1266 ym=592
-        # Damit muss niemand mehr PAD/GAP/TOP2/ZH nachrechnen. Ich habe
-        # genau das in dieser Runde zweimal getan und zweimal
-        # danebengegriffen -- beide Male lag der Griff ausserhalb des
-        # Panels, das sich daraufhin voellig zu Recht schloss.
-        # ==================================== RUNDE ECHTHARDWARE-5
-        # `qstm` und `qsset` -- die zwei Knopfzeilen des
-        # Kontrollzentrums, so wie es sie SELBST meldet:
-        #     qs: zeile tm y=987 h=32
-        # Grund siehe qs.fi: `qs: text ... y=321` ist die Grundlinie
-        # der Schrift und nicht das Feld; wer darauf klickt, trifft
-        # daneben.
-        # RUNDE ECHT: `qskachel<N>` -- die Kachel mit der NUMMER N,
-        # so wie das Kontrollzentrum sie selbst meldet. Der Platz in
-        # der Reihe ist nicht die Nummer (`tile_of`), deshalb wird
-        # nicht gerechnet, sondern gelesen.
-        # r402: `start_<Name>` -- a tile (pinned or recommended) of the Windows 11 start menu, as
-        # the launcher reports it: `launcher: tile i=100 x=28 y=100 w=100 h=88  name=[Editor]` in
-        # the coordinates of the menu window, which stands at `launcher: geom`.
-        # r402: `cap_min`, `cap_max`, `cap_close` -- the caption buttons of the top-most framed
-        # window of the last F12 dump (`wm: fen ... bar= capw= fr=`), the rectangle of the button
-        # (position of the window + frame, bar high, `capw` wide).
         if name in ("cap_min", "cap_max", "cap_close"):
             fen = []
             # only the LAST dump counts (it starts at `wm: fenliste`), hidden windows (flag 1) do not
@@ -705,10 +577,6 @@ class Fahrer:
             ow = w + 2 * fr
             n = {"cap_min": 0, "cap_max": 1, "cap_close": 2}[name]
             return (x + ow - fr - 3 * capw + n * capw, y + fr, capw, bar)
-        # `start_alle`, `start_zurueck`, `start_power`, `start_feld`: the buttons and the field of the
-        # Windows 11 start menu (`launcher: rect id=5 / 6 / 4 / 1`). The launcher has NO frame, so
-        # the origin is its `geom` as it stands (`lrect<N>` adds a frame and a title bar: it was
-        # made for the old list, whose rows are tall enough to forgive 22 points).
         if name in ("start_alle", "start_zurueck", "start_power", "start_feld"):
             n_ = {"start_alle": 5, "start_zurueck": 6, "start_power": 4, "start_feld": 1}[name]
             m = letzte(r"launcher: rect id=%d kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n_)
@@ -769,23 +637,11 @@ class Fahrer:
             return (x0, ym - 4, x1 - x0, 8)
         gm = letzte(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
-        # ============================================ RUNDE ANHEFTEN
-        # `pin0`..`pin5` -- die ANGEHEFTETEN Knoepfe, so wie die Leiste
-        # sie selbst meldet:
-        #     taskbar: pin certus x=96 y=8 w=64 h=64 sym=1 laeuft=0
-        # Der Name im Drehbuch ist die STELLE und nicht das Programm,
-        # weil die Stelle genau das ist, was diese Runde veraendert.
         if name.startswith("pin") and not name[3:].isdigit():
-            # RUNDE O-NETZUI: EINEN ANGEHEFTETEN KNOPF BEIM NAMEN.
             #
-            # `pin0`..`pin5` verlangen die NUMMER, und die verschiebt
-            # sich, sobald jemand einen Anhefter dazunimmt oder
-            # wegnimmt. Der Name verschiebt sich nicht:
             #
             #     taskbar: pin settings x=172 y=4 w=32 h=32 ...
             #
-            # Damit sagt ein Drehbuch "mach die Einstellungen auf" und
-            # nicht "klick auf den vierten Knopf von links".
             wort = name[3:]
             alle = list(re.finditer(
                 r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % wort, t))
@@ -800,12 +656,6 @@ class Fahrer:
                 r"taskbar: pin (\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t))
             if not alle:
                 return None
-            # NUR DER LETZTE ANSTRICH ZAEHLT. Die Leiste meldet diese
-            # Zeilen bei JEDEM Anstrich neu; davor stehen dieselben
-            # Namen mit den Koordinaten von vorher, und nach einem
-            # Ziehen sind das die FALSCHEN. Wie viele Anhefter es gibt,
-            # sagt der Abstand zwischen zwei Vorkommen desselben
-            # Namens -- gezaehlt wird vom Ende her.
             letzter = alle[-1].group(1)
             n = 1
             for m2 in reversed(alle[:-1]):
@@ -824,10 +674,6 @@ class Fahrer:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
-        # RUNDE SYSTEMBUS: die Glocke und die FENSTERKNOEPFE der Leiste.
-        # Ohne den Fensterknopf gibt es keinen Weg, ein Fenster
-        # anzuklicken, das der Schreibtisch selbst gestartet hat -- und
-        # ohne den keinen Weg, im Terminal etwas zu tippen.
         if name == "chevron":
             m = letzte(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
@@ -884,10 +730,6 @@ class Fahrer:
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("fmbar"):
-            # Eintrag <N> der Menueleiste des Dateimanagers.  Seit FUI-ALL
-            # F-8 meldet jeder Titel sein eigenes Rechteck
-            # (`explorer: rect id=<N> kind=7`); die Leiste als Ganzes
-            # gibt es nicht mehr.
             n = int(name[5:])
             m = letzte(r"explorer: rect id=%d kind=7 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % n)
@@ -916,10 +758,6 @@ class Fahrer:
             zh = (int(m.group(4)) - 4) // int(m.group(5))
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("emenue"):
-            # Die Zeile <N> des offenen Kontextmenues des Dateimanagers.
-            # Es meldet Ecke und Hoehe des MENUEFENSTERS
-            # (`explorer: menurect wx= wy= wh=`); die Zeilenhoehe ist
-            # die des Systems (`launcher: rows ... zh=`), sonst 20.
             n = int(name[6:])
             m = letzte(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+)(?: zh=(\d+))?")
             if m is None:
@@ -927,26 +765,11 @@ class Fahrer:
             zh = int(m.group(4)) if m.group(4) else 20
             return (int(m.group(1)) + 8, int(m.group(2)) + 4 + n * zh, 90, zh)
         if name == "qsalle":
-            # Die unterste Zeile des Kontrollzentrums ("Alle
-            # Einstellungen").  Das Feld meldet nur seine eigene Ecke
-            # (`qs: open x= y= w= h=`); die Zeile darin steht als
-            # Konstante in kernel/user/qs.fi -- PAD=10, FH=22, und sie
-            # sitzt unten, also H - PAD - FH.
-            # r837: the Windows-11 control centre has no "All settings" row any more; the
-            # footer carries a gear button (`qs: zeile set y= x= h=`, absolute screen
-            # position, square h x h). Prefer it; the old row stays as the fallback.
             g = letzte(r"qs: zeile set y=(\d+) x=(\d+) h=(\d+)")
             if g is not None:
                 return (int(g.group(2)), int(g.group(1)), int(g.group(3)), int(g.group(3)))
             m = letzte(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
-                # RUNDE O-NETZUI: `qs: open` kommt nur, wenn das
-                # Kontrollzentrum ueber die LEISTE geoeffnet wurde;
-                # `qs: geo` meldet dasselbe Rechteck und kommt immer
-                # (kernel/user/qs.fi). Ohne diesen Rueckfall endete
-                # jedes Drehbuch, das ueber das Kontrollzentrum in die
-                # Einstellungen will, mit "KEIN RECHTECK GEMELDET" --
-                # und fotografierte dreimal den Schreibtisch.
                 m = letzte(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
                 return None
@@ -990,11 +813,6 @@ class Fahrer:
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("lzeile"):
             n = int(name[6:])
-            # RUNDE ECHT: `]` am Ende erzwingen, wenn die Zeile aus dem
-            # Terminalfenster kommt (`wm: termzeile 14 [launcher: ...]`).
-            # Ohne das passt auch eine ABGESCHNITTENE Zeile, und dann
-            # wird stillschweigend eine aeltere Messung benutzt -- der
-            # Klick landet auf der Stelle von vorhin.
             m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)\]")
             if m is None:
                 m = letzte(r"launcher: rect id=2 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -1006,28 +824,9 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)) + n * zh,
                     int(m.group(3)), zh)
         if name.startswith("sreiter"):
-            # RUNDE O-NETZUI: EINEN BESTIMMTEN REITER DER EINSTELLUNGEN.
             #
-            # `srectwaa` trifft die Reiterleiste, aber immer in ihrer
-            # MITTE -- und die Mitte der Leiste ist der sechste von elf
-            # Reitern. Ein Drehbuch, das "geh auf Netz" sagen will,
-            # konnte es bis hierher nicht sagen.
             #
-            # Gerechnet aus dem, was das Programm selbst meldet: die
-            # Reiterleiste ist Widget 0 und heisst deshalb `waa`
-            # (`rects_alle` in settings.fi vergibt die Namen der Reihe
-            # nach). Ihre Breite durch die Zahl der Reiter ist eine
-            # Reiterbreite; die Mitte des n-ten liegt bei (n + 0,5)
-            # davon. Die Zahl der Reiter steht als `R_ANZ` in
-            # settings.fi und wird hier nicht geraten, sondern aus der
-            # gemeldeten Reiterzeile gezaehlt.
             n = int(name[7:])
-            # `ax`/`ay` SIND SCHON BILDSCHIRMKOORDINATEN. `rect_say` in
-            # settings.fi haengt sie ausdruecklich an ("UND DIE LAGE AUF
-            # DEM SCHIRM, IN DEMSELBEN SATZ") -- und das ist hier der
-            # einzige gangbare Weg: `settings: geom` gibt es nicht, also
-            # findet `self.fenster("settings")` nichts und der Klick
-            # kam nie zustande ("KEIN RECHTECK GEMELDET").
             m = letzte(r"settings: rect name=waa x=(\d+) y=(\d+) "
                        r"w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)")
             if m is None:
@@ -1038,8 +837,6 @@ class Fahrer:
             x, y = int(m.group(1)), int(m.group(2))
             reiter = 11
             bx = x + (w * (2 * n + 1)) // (2 * reiter)
-            # Ein Rechteck von einer Reiterbreite um diese Mitte herum,
-            # damit `klickauf` wie ueberall sonst die Mitte nimmt.
             return (o[0] + bx - w // (2 * reiter), o[1] + y,
                     w // reiter, h)
         if name.startswith("srect"):
@@ -1055,18 +852,7 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("ftabzeile"):
-            # RUNDE EXPLORER-2: EINE BESTIMMTE ZEILE DER DATEITABELLE.
-            # Ohne sie kann ein Drehbuch nur die MITTE der Tabelle
-            # treffen (`klickauf ftab`), und welche Zeile da liegt,
-            # haengt daran, wie viele Dateien der Ordner hat -- ein
-            # Test, der "geh in den ersten Ordner" sagen will, koennte
-            # es nicht sagen.
             #
-            # Gerechnet aus dem, was das Programm SELBST meldet: `kopf=`
-            # ist die Grundlinie der Kopfzeile und `zh=` die
-            # Zeilenhoehe (`explorer: rows ... zh= kopf=`). Die erste
-            # Datenzeile faengt eine Kopfhoehe unter dem Tabellenrand an
-            # -- dieselbe Rechnung wie `wlib.row_under`, nur andersherum.
             n = int(name[9:])
             m = letzte(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -1075,8 +861,6 @@ class Fahrer:
             if m is None or z is None or o is None:
                 return None
             zh = int(z.group(1))
-            # Die Kopfzeile der Szenentabelle ist `kopfh` hoch (28), dazu
-            # der Rand von 2; danach beginnt Zeile 0.
             kopf = int(z.group(2)) if z.group(2) else zh + 4
             y0 = int(m.group(2)) + kopf + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
@@ -1093,12 +877,6 @@ class Fahrer:
             ex = int(sp.group(n + 2)) - 10
             return (o[0] + ex, o[1] + int(m.group(2)) + 14, 0, 0)
         if name in ("ftab", "fbaum"):
-            # RUNDE EXPLORER-2: DIE TABELLE UND DIE SEITENLEISTE, OHNE
-            # IHRE NUMMER ZU KENNEN. `frect<N>` verlangt die Widgetzahl,
-            # und die verschiebt sich mit jedem Bedienelement, das
-            # dazukommt (die Brosamenleiste sind allein zwoelf). Die ART
-            # verschiebt sich nicht: kind=6 ist die Tabelle, kind=5 eine
-            # Liste (`wlib.K_TABLE` / `K_LIST`).
             art = 6 if name == "ftab" else 5
             m = letzte(r"explorer: rect id=\d+ kind=%d "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % art)
@@ -1245,12 +1023,6 @@ def main():
                 fehler += 1
         elif b in ("warteauf", "warteaufmuss"):
             st = arg.split("||")
-            # Die Anfuehrungszeichen gehoeren der Lesbarkeit des
-            # Drehbuchs und nicht dem regulaeren Ausdruck.  Der erste
-            # Lauf dieser Runde hat nach `'launcher: ready'` MIT
-            # Hochkommas gesucht, nie etwas gefunden und trotzdem
-            # weitergeklickt -- und das Ergebnis war ein zweites
-            # Startmenue statt eines Dateimanagers.
             muster = st[0].strip().strip("'\"")
             ok = f.warteauf(muster, float(st[1]) if len(st) > 1 else 25.0)
             print("warteauf %s -> %s" % (muster, "da" if ok else "NICHT DA"))
@@ -1260,17 +1032,6 @@ def main():
                     # gate precondition failed (e.g. a typed key was lost): stop the script, the wrapper retries
                     print("ABBRUCH: %s ist Voraussetzung" % muster)
                     break
-        # RUNDE EXPLORER-2, GEMESSEN: DIE RECHTE TASTE IST 2 UND NICHT 4.
-        # `mouse_button` des QEMU-Monitors legt links auf Bit 0, RECHTS
-        # auf Bit 1 und die Mitte auf Bit 2 -- dieselbe Reihenfolge, die
-        # `kernel/ps2m.fi` liefert und die `wlib.on_down` mit `btn & 2`
-        # prueft. Hier stand 4, also die MITTLERE Taste: jedes `rklick`
-        # dieses Laeufers ging als Mittelklick durch, kein Kontextmenue
-        # klappte auf, und das Bild 31-kontextmenue.png zeigte deshalb
-        # keines -- ein Fehler des Laeufers, nicht des Programms.
-        # r402: `halte x,y` presses the left button on the spot and KEEPS it down (a held caption
-        # button is painted darker), `loslassen` lets it go (the button then acts, if the pointer
-        # is still on it).
         elif b == "halte":
             x, y = (int(v) for v in arg.split(","))
             f.fahre(x, y)
@@ -1378,34 +1139,14 @@ def main():
                 f.klick_nahe(x, y, 1, 1, 0.15)
             else:
                 f.klick(x, y, 2 if b == "doppelauf" else 1)
-        # RUNDE ECHTHARDWARE-3: `ziehe <x0>,<y0> <x1>,<y1>` und
-        # `zieheauf <name> <dx>,<dy>` -- die Bewegung bei gedrueckter
-        # Taste, ohne die sich weder die Fenstergroesse noch ein
-        # Schieberegler pruefen laesst.
         elif b == "ziehe":
             t = arg.split()
             x0, y0 = (int(v) for v in t[0].split(","))
             x1, y1 = (int(v) for v in t[1].split(","))
             f.ziehe(x0, y0, x1, y1)
             print("ziehe %d,%d -> %d,%d" % (x0, y0, x1, y1))
-        # ==================================== RUNDE ECHTHARDWARE-5
-        # `ziehkante <id> <kante> <dx>,<dy>` -- an einer KANTE des
-        # Fensters <id> ziehen, die Stelle aus der zuletzt gemeldeten
-        # Geometrie gerechnet.
         #
-        # WARUM NICHT MIT ZAHLEN AUS DEM DREHBUCH. Justins Befund D
-        # betrifft alle vier Kanten und alle vier Ecken; die Greifzone
-        # ist `GRIP0 * uiscale` = 8 bzw. 16 Bildpunkte breit. Wer sie
-        # mit getippten Zahlen sucht, trifft nach dem ERSTEN Ziehen
-        # daneben, weil das Fenster dann woanders steht -- genau das ist
-        # mir in dieser Runde zweimal passiert und hat zwei Laeufe
-        # gekostet. Hier wird die Stelle JEDES MAL neu aus
-        # `wm: fen ... x= y= w= h=` gerechnet.
         #
-        # Kanten: l r o u  und die Ecken lo ro lu ru.
-        # FreeViewer gate: `ziehauf <name> <name>` drags (button held, relative steps) from the middle of one reported
-        # rectangle / `fvptAxB` point to another; `monitor <hmp command>` sends a raw QEMU monitor command
-        # (e.g. `mouse_move 0 0 -1` = wheel).
         elif b == "ziehauf":
             t = arg.split()
             ra, rb = f.rechteck(t[0]), f.rechteck(t[1])
@@ -1445,8 +1186,6 @@ def main():
                 fehler += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
-            # Die Arbeitsflaeche liegt bei (wx+bo, wy+ti); die
-            # Greifzone ist der Rand darum. In die MITTE der Zone.
             lx = wx                      # the outermost pixel (r402: not `bo - 2`, which is outside for a frame of 1)
             rx = wx + ww + 2 * bo - 1
             oy = wy + 1
@@ -1462,7 +1201,7 @@ def main():
                 continue
             x0, y0 = stelle[kante]
             f.ziehe(x0, y0, x0 + dx, y0 + dy)
-            print("ziehkante id=%d %s von %d,%d um %d,%d "
+            print("dragedge id=%d %s from %d,%d by %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
                   % (wid, kante, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
         # 04.10.2026 (Dell): `fahrekante <id> <kante>` -- only HOVER at the grip
@@ -1492,20 +1231,7 @@ def main():
             x0, y0 = stelle[kante]
             f.fahre(x0, y0)
             print("fahrekante id=%d %s -> %d,%d" % (wid, kante, x0, y0))
-        # ==================================== RUNDE FENSTER
-        # `ziehtitel <id> <dx>,<dy>` -- das Fenster <id> an seiner
-        # TITELLEISTE um dx/dy verschieben.
         #
-        # WARUM NICHT `ziehe` MIT ZAHLEN. Justins Frage ist, ob ein
-        # Fenster UNTER die Leiste rutschen darf. Das laesst sich nur
-        # messen, wenn man das Fenster gezielt so weit nach unten
-        # zieht, dass seine Unterkante die Leiste ueberschreitet --
-        # und wo es vorher stand, weiss nur der Server. Getippte
-        # Zahlen treffen nach dem ersten Ziehen daneben, genau wie bei
-        # `ziehkante`. Die Greifstelle ist die MITTE der Titelleiste.
-        # r454: `kappe <id> min|max|close` -- press one of the three caption buttons of window <id> (the server's, over the
-        # client strip as well as in its own title bar). The geometry is the one `wm: fen` reported plus the chrome measures
-        # (`bar=`, `capw=`, `fr=` of the `wm: geom`-style line), so it hits what the server drew.
         elif b == "kappe":
             t = arg.split()
             if t[0] == "fokus":
@@ -1527,7 +1253,7 @@ def main():
             for cm in re.finditer(r" bar=(\d+) capw=(\d+) fr=(\d+)", tx):
                 pass
             if cm is None:
-                print("kappe %d -> KEINE MASSE gemeldet" % wid)
+                print("cap %d -> NO DIMENSIONS reported" % wid)
                 fehler += 1
                 continue
             bar, capw, fr = (int(cm.group(i)) for i in (1, 2, 3))
@@ -1557,12 +1283,9 @@ def main():
             x0 = wx + bo + ww // 2
             y0 = wy + ti // 2
             f.ziehe(x0, y0, x0 + dx, y0 + dy)
-            print("ziehtitel id=%d von %d,%d um %d,%d "
+            print("dragtitle id=%d from %d,%d by %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
                   % (wid, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
-        # RUNDE ECHTHARDWARE-5: klicken OHNE den Weg ueber die Ecke.
-        # Fuer alles, was sich bei einem Druck daneben schliesst --
-        # also fuer das Kontrollzentrum.
         elif b == "klicknah":
             if "," in arg:
                 x, y = (int(v) for v in arg.split(","))
@@ -1587,7 +1310,7 @@ def main():
             dx, dy = (int(v) for v in t[1].split(","))
             x0, y0 = r[0] + r[2] // 2, r[1] + r[3] // 2
             f.ziehe(x0, y0, x0 + dx, y0 + dy)
-            print("ziehemitte %s -> von %d,%d um %d,%d  (rect %d,%d %dx%d)"
+            print("dragmid %s -> from %d,%d by %d,%d  (rect %d,%d %dx%d)"
                   % (t[0], x0, y0, dx, dy, r[0], r[1], r[2], r[3]))
         elif b == "zieheauf":
             t = arg.split()
@@ -1597,28 +1320,10 @@ def main():
                 fehler += 1
                 continue
             dx, dy = (int(v) for v in t[1].split(","))
-            # DIE UNTERE RECHTE ECKE des gemeldeten Rechtecks, zwei
-            # Punkte hinein -- das ist der Griff.
             x0, y0 = r[0] + r[2] - 2, r[1] + r[3] - 2
             f.ziehe(x0, y0, x0 + dx, y0 + dy)
-            print("zieheauf %s -> von %d,%d um %d,%d  (rect %d,%d %dx%d)"
+            print("dragopen %s -> from %d,%d by %d,%d  (rect %d,%d %dx%d)"
                   % (t[0], x0, y0, dx, dy, r[0], r[1], r[2], r[3]))
-        # RUNDE ECHTHARDWARE-3: `ziehespur <name> <von%>,<bis%>` --
-        # entlang eines gemeldeten Rechtecks ziehen, in Prozent seiner
-        # Breite. Fuer Schieberegler: die Zahlen bleiben richtig, auch
-        # wenn sich das Panel verschiebt oder die Aufloesung wechselt.
-        # RUNDE ECHTHARDWARE-5: ziehen OHNE den Weg ueber die Ecke --
-        # dasselbe wie `klicknah`, nur mit gedrueckter Taste. Fuer die
-        # zwei Regler im Kontrollzentrum, das sich sonst unterwegs
-        # schliesst.
-        # ============================================ RUNDE ANHEFTEN
-        # `ziehfoto <rechteck> <dx> <bildname>` -- das Rechteck an
-        # seiner MITTE greifen, um dx BILDPUNKTE waagerecht ziehen und
-        # mittendrin fotografieren. In Punkten, nicht in Prozent: eine
-        # Verschiebung um "zwei Plaetze" ist eine Strecke und kein
-        # Anteil der Knopfbreite.
-        # W-DRAG: `schleppfoto <window id> <dx>,<dy> <steps> <prefix>`: grab the title bar of the window, drag in steps with a picture
-        # after each, release; prints `schleppfoto: <picture> <pointer x> <pointer y> <phase>` per picture.
         elif b == "schleppfoto":
             t = arg.split()
             wid = int(t[0])
@@ -1695,21 +1400,8 @@ def main():
             x1 = r[0] + r[2] * p1 // 100
             f.ziehe_nahe(x0, y, x1, y)
             print("ziehspurnah %s -> %d,%d nach %d,%d" % (t[0], x0, y, x1, y))
-        # ============================================= RUNDE CLIP-2
-        # `ziehvon <quelle> <ziel>` -- von der MITTE eines gemeldeten
-        # Rechtecks in die MITTE eines zweiten ziehen.
         #
-        # Das ist die Bewegung, die Drag-and-Drop ausmacht, und sie
-        # liess sich mit keinem der vorhandenen Befehle ausdruecken:
-        # `zieheauf` greift die Ecke und zieht um einen VERSATZ,
-        # `ziehespur` bleibt in EINEM Rechteck. Hier sind Anfang und
-        # Ende zwei verschiedene gemeldete Kaesten -- Zeile 3 der
-        # Tabelle auf Zeile 0 der Tabelle, Datei auf Ordner.
         #
-        # Beide Rechtecke werden ERST JETZT gelesen, aus der zuletzt
-        # gemeldeten Lage: die Tabelle rollt und das Fenster wandert,
-        # und eine ins Drehbuch getippte Zahl waere nach dem ersten
-        # Ordnerwechsel falsch.
         elif b == "ziehvon":
             t = arg.split()
             r0 = f.rechteck(t[0])
@@ -1768,21 +1460,9 @@ def main():
                 fehler += 1
         elif b == "taste":
             f.taste(arg)
-        # RUNDE ECHTHARDWARE-4: `tippe <wort>` -- ein Wort Zeichen fuer
-        # Zeichen. Zum Pruefen des Suchfeldes im Startmenue braucht es
-        # das: `taste t`, `taste e`, `taste r`, `taste m` untereinander
-        # zu schreiben ist dieselbe Sache, nur unleserlich, und bei
-        # einem Tippfehler im Drehbuch faellt es niemandem auf.
         elif b == "tippe":
-            # RUNDE ECHTHARDWARE-5: der Doppelpunkt und die uebrigen
-            # Zeichen einer URL. Ohne sie fiel aus
-            # `https://example.com/` still `https//example.com/` --
-            # `fetch` hat das voellig zu Recht abgelehnt, und es sah
-            # aus wie ein Netzfehler.
             namen = {" ": "spc", "-": "minus", ".": "dot",
                      ",": "comma", "/": "slash", "_": "shift-minus",
-                     # US-Belegung (`lang=en`, so faehrt der Stick):
-                     # der Doppelpunkt liegt auf Umschalt+Semikolon.
                      ":": "shift-semicolon", ";": "semicolon",
                      "=": "equal", "+": "shift-equal", "?": "shift-slash",
                      "&": "shift-7", "%": "shift-5", "@": "shift-2"}

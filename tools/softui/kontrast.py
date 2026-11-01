@@ -99,7 +99,7 @@ def band(path, x, y, w, h, minpx):
         if r > br:
             best, bn, br = c, n, r
     if best is None:
-        print("kontrast: KEINE SCHRIFT gefunden -- grund #%02x%02x%02x "
+        print("contrast: NO TEXT found -- background #%02x%02x%02x "
               "auf %d von %d Bildpunkten" % (grund + (gn, w * h)))
         return 1
     print("kontrast: schrift #%02x%02x%02x (%d px)  grund #%02x%02x%02x "

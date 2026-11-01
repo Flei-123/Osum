@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/kreuzmess.py -- DAS X AUS EINEM ECHTEN ABZUG, ZEILE FUER ZEILE.
 #
 #   python3 tools/design/kreuzmess.py <schirm.ppm> [x_rechte_kante]
 #
-# Der Boss hat die Bilder nachgemessen und in der ersten und letzten
-# Zeile des Kreuzes rechts einen Bildpunkt vermisst (n=3 statt 4).
-# Dieses Werkzeug macht genau diese Messung nachvollziehbar: es sucht
-# den Schliessknopf im Abzug, zaehlt je Zeile die Strichpunkte und
-# sagt, ob alle vier Enden gleich sind.
 #
-# Es misst am ECHTEN Bild -- dem, das der Kern bei 3440x1440 gemalt
-# hat -- und nicht an einem Nachbau in Python.
 import sys
 
 
@@ -45,7 +37,6 @@ if __name__ == '__main__':
         return (px[i], px[i + 1], px[i + 2])
 
     hg = f(5, 5)
-    # Rechte Fensterkante in der Titelleiste finden.
     ytop = None
     for y in range(0, h // 2):
         if sum(1 for x in range(w // 4, 3 * w // 4, 8) if f(x, y) != hg) > 50:
@@ -62,22 +53,19 @@ if __name__ == '__main__':
         xr = int(sys.argv[2])
     print("Fenster: Titelleiste y=%d, rechte Kante x=%d" % (ytop, xr))
 
-    # Der Schliessknopf ist der aeusserste rechts. Sein Feld grob
-    # abstecken und die HELLEN Punkte (Strichfarbe) zaehlen: die
-    # Knopfflaeche ist dunkel, der Strich hell.
     feld_x0, feld_x1 = xr - 60, xr - 5
     feld_y0, feld_y1 = ytop + 4, ytop + 52
     hell = []
     for y in range(feld_y0, feld_y1):
         for x in range(feld_x0, feld_x1):
             r, g, b = f(x, y)
-            if r + g + b > 330:          # deutlich heller als die Flaeche
+            if r + g + b > 330:
                 hell.append((x, y))
     if not hell:
         raise SystemExit("kein Strich gefunden -- Feld falsch abgesteckt")
     xs = sorted(set(p[0] for p in hell))
     ys = sorted(set(p[1] for p in hell))
-    print("Kreuz sitzt bei x %d..%d, y %d..%d  (%d x %d)"
+    print("cross sits at x %d..%d, y %d..%d  (%d x %d)"
           % (xs[0], xs[-1], ys[0], ys[-1], xs[-1] - xs[0] + 1,
              ys[-1] - ys[0] + 1))
     print()

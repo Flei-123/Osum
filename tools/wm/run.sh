@@ -1,71 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/wm/run.sh -- DER BEWEIS, DASS OSUM EINE OBERFLAECHE HAT.
 #
-# Runde K7 gab Osum einen Bildschirm: 800x600, eine Textkonsole darauf,
-# /dev/fb fuer Ring 3.  Sie endete mit einem zugegebenen Mangel, und der
-# steht woertlich in `kernel/fb.fi`: "Zwei Zeichner auf einer Flaeche
-# vertragen sich, solange sie verschiedene Zeilen nehmen.  Ein
-# Fenstersystem waere die Antwort darauf und ist nicht diese Runde."
 #
-# Diese Runde ist es, und sie hat drei Teile: ein ZEIGEGERAET
-# (`kernel/ps2m.fi`), einen FENSTERSERVER (`kernel/wm.fi`) und einen
-# TRUETYPE-RASTERER (`kernel/ttf.fi`).
 #
-# WAS HIER GEMESSEN WIRD, UND WARUM ES SO GEMESSEN WERDEN MUSS.
 #
-# Ein Fensterserver, der nie eine Maus gesehen hat, ist keiner.  Also
-# werden ueber den QEMU-Monitor echte Mausbewegungen, echte Klicks und
-# echte Tastendruecke in die laufende Maschine eingespeist
-# (`tools/wm/monitor.py`), und danach wird ein Bildschirmfoto gemacht und
-# MASCHINELL nachgerechnet (`tools/gfx/checkshot.py`).
 #
-# Und fuer den Text gilt die Lehre aus Runde K7B, die dieser Runde
-# ausdruecklich mitgegeben wurde: dort schien Text zu 87 Prozent zu
-# stimmen, waehrend in Wahrheit JEDER BUCHSTABE fehlte -- die 87 Prozent
-# waren schwarzer Hintergrund.  Hier wird deshalb nicht Flaeche gegen
-# Flaeche gerechnet, sondern JE ZEICHEN die gesetzten Bildpunkte gegen
-# eine zweite, unabhaengige Rasterung desselben Umrisses
-# (`tools/ttf/raster.py`) -- und ein Zeichen, das im Bild KEINE Tinte
-# hat, laesst die Zusage fallen, egal wie viel Hintergrund stimmt.
 #
 # Die Abschnitte:
 #
-#   1. BAUEN. Beide Uebersetzer bauen denselben Kernel.
-#   2. DIE SPEICHERKARTE VON kdata. Drei neue Bereiche (MOUSE, WM, TTF)
-#      in den beiden Luecken, die Runde K7B als frei ausgewiesen hat --
-#      und der Kollisionspruefer rechnet nach.
-#   3. DIE SCHRIFTEN. `tools/ttf/subset.py` schneidet sie aus DejaVu
-#      zusammen; das Ergebnis liegt in `assets/` und wird hier
-#      REPRODUZIERT und Oktett fuer Oktett verglichen.
-#   4. DER RASTERER. Der Kernel gibt acht Glyphen als Text und als
-#      Pruefsumme aus; `tools/ttf/raster.py` rastert dieselben selbst.
-#      Zwei Fassungen desselben Algorithmus, in zwei Sprachen.
-#   5. DAS ZEIGEGERAET. Aufsetzen ueber den 8042, die Kennung, der
-#      Selbsttest -- und die Zahlen darueber, auf welchem Weg die
-#      Oktette wirklich ankamen.
-#   6. DER FENSTERSERVER. Sein Selbsttest, und dann das FOTO: liegt das
-#      Fenster, wo es liegen soll, und verdeckt das obere das untere?
-#   7. DER TEXT IM FENSTER, bildpunktgenau gegen die zweite Fassung des
-#      Rasterers -- Zeichenraster und freier Text mit Unterschneidung.
-#   8. DIE MAUS. Bewegungen und Klicks von aussen: landet der Zeiger, wo
-#      er soll, und kommt der Klick beim RICHTIGEN Fenster an, mit den
-#      richtigen Ortskoordinaten?
-#   9. VERSCHIEBEN UND SCHLIESSEN mit der Maus.
-#  10. DER EINGABEFOKUS, und die Gegenprobe `nofocus`.
-#  11. DIE ZEITEN. Zusammensetzen mit und ohne Bereichsverfolgung,
-#      Rasterung mit und ohne Zwischenspeicher.
-#  12. DIE SHELL IM TERMINALFENSTER.
-#  13. DIE GEGENPROBEN. Ohne `wm` gibt es nichts davon, und die Runden
-#      52 bis K9 messen Zeile fuer Zeile, was sie vorher gemessen haben.
 #
 # Verwendung:  bash tools/wm/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
-# RUNDE MARKE: der Produktname kommt aus `marke.conf` (geschlagen von
-# OSUM_MARKE_*), nicht aus dieser Datei. Eine Zusage auf einen fest
-# getippten Namen waere nach der ersten Umbenennung eine Zusage auf
-# etwas, das es nicht mehr gibt -- sie ginge auf und pruefte nichts.
 . tools/lib/marke.sh
 marke_laden . || exit 1
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -82,7 +28,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op erwartet
     local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl gefunden (erwartet $op $want)"; return; fi
+    if [ -z "$wert" ]; then bad "$name: no number found (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -98,34 +44,24 @@ schau() { local name=$1; shift
 schau_nicht() { local name=$1; shift
     local aus rc
     aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
-    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi
+    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- passed: $aus"; fi
 }
 zahl() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+' | tail -1; }
 zahl2() { grep -aoE "$2" "$1" | tail -1 | grep -oE '[0-9]+' | tail -1; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "WM: skipped, qemu-system-x86_64 ist nicht da"
+    echo "WM: skipped, qemu-system-x86_64 is missing"
     exit 0
 fi
 
 # --------------------------------------------------------------- Laeufe
 #
-# Jeder Lauf bekommt eine EIGENE Kopie des Abbilds -- die Schriften
-# liegen darauf, und ein Lauf, der schreibt, darf den naechsten nicht
-# aendern.
 
 DISK="$TMPD/disk.img"
 GRUND="nokbd nosched noproc nofs"
 
-# RUNDE SCHIRM-ECHT: DIESE MASCHINE HAT KEINE TAFEL.
 #
-# Seit Runde SCHIRM liest der Kern den EDID-Block und nimmt die
-# Aufloesung, die der Bildschirm nennt. QEMUs `-vga std` nennt ab Werk
-# 1280x800. Dieser Laeufer misst aber die EINGEBAUTE VORGABE und die
-# Modussetzung (800x600, pitch=3200, cols=100 rows=37) -- also wird die
-# Tafel hier abgeschaltet. Wer den EDID-Weg messen will, findet ihn in
-# tools/display/run.sh Abschnitt 4 und in tools/customres/run.sh.
 VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
 
 # r389: the default mode of the VM is 1280x800 now, this runner's arithmetic (the pointer in the
@@ -179,143 +115,93 @@ foto() { # abbild kommandozeile ausgabe ppm [monitorbefehle]
     return 0
 }
 
-echo "== 1. bauen: derselbe Kernel aus beiden Uebersetzern =="
+echo "== 1. build: the same kernel from both compilers =="
 for s in 0 1; do
     if bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/b$s.log" 2>&1; then
         ok "firnc$s: Kernel gebaut ($(stat -c%s "$TMPD/k$s.mb") Oktette)"
     else
-        bad "firnc$s: der Kernel laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/b$s.log" | head -12
     fi
 done
 K0="$TMPD/k0.mb"
 [ -f "$K0" ] || { echo "WM: $pass passed, $((fail + 1)) failed"; exit 1; }
 
-echo "== 2. die Speicherkarte von kdata: drei neue Bereiche =="
-# Runde K7 legte den Zeichensatz auf eine Seite, die Runde K9 schon
-# hatte, und beide Zweige waren fuer sich gruen.  Seit K7B rechnet ein
-# Programm die Karte nach; diese Runde traegt drei Bereiche ein und
-# haelt sich daran.
+echo "== 2. the memory map of kdata: three new regions =="
 kart=$(python3 tools/kernel/memmap.py kernel 2>&1)
-if [ $? -eq 0 ]; then ok "die Speicherkarte von kdata: $kart"
-else bad "die Speicherkarte von kdata kollidiert"; echo "$kart" | sed 's/^/        /'; fi
-# RUNDE MERGE-2: DIESE DREI ZUSAGEN HABEN NIE DIE KARTE GEPRUEFT.
-# Hier stand `memmap.py ... -v 2>/dev/null | grep -q ...` in einem Skript
-# mit `set -o pipefail`. `grep -q` steigt beim ERSTEN Treffer sofort aus
-# und schliesst das Rohr; Python bekommt beim Leeren seines Puffers ein
-# EPIPE, meldet "BrokenPipeError" nach stderr -- wo `2>/dev/null` es
-# verschluckt -- und endet mit 120. Mit `pipefail` ist 120 der Wert der
-# ganzen Roehre, also war die Bedingung FALSCH, obwohl der Bereich
-# dastand. Gemessen: `pipeline rc=120`.
+if [ $? -eq 0 ]; then ok "the memory map of kdata: $kart"
+else bad "the memory map of kdata collides"; echo "$kart" | sed 's/^/        /'; fi
 #
-# Ob es auffiel, haengte an einem Wettrennen zwischen Pythons letztem
-# Schreibvorgang und dem Ausstieg von grep -- und damit daran, wie lang
-# die Ausgabe ist. Sie war jahrelang kurz genug. Runde MERGE-2 hat fuenf
-# Bereiche (HANDLE) dazugelegt, und ab da verlor Python das Rennen
-# zuverlaessig: drei gruene Zusagen wurden ueber Nacht rot, ohne dass an
-# der Speicherkarte irgendetwas falsch war (`memmap.py` selbst meldet in
-# derselben Zeile darueber 0 Kollisionen).
 #
-# Die Ausgabe wird jetzt EINMAL geholt und danach im Speicher durchsucht.
-# Kein Rohr, kein Wettrennen, und der Rueckgabewert von memmap.py wird
-# ausdruecklich geprueft, statt still verlorenzugehen.
 kartv=$(python3 tools/kernel/memmap.py kernel -v 2>/dev/null)
 if [ $? -ne 0 ]; then
     bad "memmap.py -v ist fehlgeschlagen"
 fi
 for b in MOUSE WM TTF; do
     if grep -q " $b  *kstate.fi:" <<< "$kartv"; then
-        ok "der Bereich $b steht in der Karte"
+        ok "the region $b is in the map"
     else
-        bad "der Bereich $b steht NICHT in der Karte"
+        bad "the region $b is NOT in the map"
     fi
 done
-# Und die Gegenprobe zum Pruefer: legt man WM auf die Seite des
-# Rahmenpuffers, MUSS er anschlagen.
-# RUNDE ARM: die Kopie braucht `kernel/arch/x86_64/` mit -- `hv.fi` liegt
-# seit dem Trennschnitt dort, und ohne sie stirbt der Kartenpruefer an
-# einem KeyError statt die Kollision zu melden, die hier gemessen wird.
-# RUNDE GRUNDLINIE-2 (A-021): siehe tools/gfx/run.sh -- die Kopie
-# spiegelt den BAUM. Ein flaches `cp kernel/*.fi` liess `lib/kstate.fi`
-# und `gfx/fb.fi` weg; der Pruefer starb an einem KeyError, statt die
-# Kollision zu finden, die hier gemessen wird.
 GG="$TMPD/kernel-gg"; mkdir -p "$GG"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GG/" \; )
 sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/lib/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
-    ok "mit WM_OFF auf 0x3C000 findet der Pruefer die Kollision mit FB"
+    ok "with WM_OFF at 0x3C000 the checker finds the collision with FB"
 else
-    bad "der Kollisionspruefer findet die neue Kollision NICHT: $gg"
+    bad "the collision checker does NOT find the new collision: $gg"
 fi
-# DIE VEKTORTABELLE, und sie steht hier, weil diese Runde denselben
-# Fehler eine Ebene hoeher gemacht hat: `VEC_MOUSE` bekam die 44, und 44
-# ist seit Runde K2 der NVMe-Regler.  Die Weiche in `trap.fi` ist eine
-# Kette von `if`s -- die Maus stand davor, und die Abschlussmeldungen des
-# Reglers gingen an den Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in
-# JEDEM Lauf, auch ohne das Wort `wm`.  Gefunden hat es Abschnitt 6 von
-# `./test.sh`.  Ab jetzt findet es ein Programm.
 vt=$(printf '%s\n' "$kartv" | grep -A9 'die Vektortabelle' | tail -8 | tr -s ' ' | sed 's/^ //' | tr '\n' ' ')
 if python3 tools/kernel/memmap.py kernel >/dev/null 2>&1; then
-    ok "die Vektortabelle ist ueberschneidungsfrei ($vt)"
+    ok "the vector table has no overlaps ($vt)"
 else
     bad "die Vektortabelle kollidiert"
 fi
-# RUNDE ARM: die Kopie muss auch das Maschinenverzeichnis mitnehmen --
-# `trap.fi` liegt seit dem Trennschnitt unter arch/x86_64/.
-# RUNDE GRUNDLINIE-2 (A-021): dieselbe Ursache wie beim
-# Kollisionspruefer oben -- die Kopie spiegelt den BAUM. Ein flaches
-# `cp kernel/*.fi` liess `lib/kstate.fi` weg, und der Pruefer starb an
-# `KeyError: 'kstate.fi'`, statt die Vektorkollision zu melden.
 GV="$TMPD/kernel-gv"; mkdir -p "$GV"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GV/" \; )
 sed -i 's/^const VEC_MOUSE: u64 = 46/const VEC_MOUSE: u64 = 44/' "$GV/arch/x86_64/trap.fi"
 gv=$(python3 tools/kernel/memmap.py "$GV" 2>&1)
 if [ $? -ne 0 ] && printf '%s' "$gv" | grep -q 'Vektor 44 haben zwei Namen'; then
-    ok "mit VEC_MOUSE zurueck auf 44 findet der Pruefer die Kollision mit VEC_NVME"
+    ok "with VEC_MOUSE back at 44 the checker finds the collision with VEC_NVME"
 else
-    bad "der Vektorpruefer findet den Fehler dieser Runde NICHT: $gv"
+    bad "the vector checker does NOT find this round's bug: $gv"
 fi
 
-echo "== 3. die Schriften: reproduzierbar aus DejaVu geschnitten =="
+echo "== 3. the fonts: reproducibly cut from DejaVu =="
 DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
 for f in mono sans; do
-    [ -f "assets/osum-$f.ttf" ] && ok "assets/osum-$f.ttf liegt im Baum ($(stat -c%s assets/osum-$f.ttf) Oktette)" \
+    [ -f "assets/osum-$f.ttf" ] && ok "assets/osum-$f.ttf is in the tree ($(stat -c%s assets/osum-$f.ttf) octets)" \
         || bad "assets/osum-$f.ttf fehlt"
 done
 if [ -f "$DEJAVU/DejaVuSansMono.ttf" ]; then
     python3 tools/ttf/subset.py "$DEJAVU/DejaVuSansMono.ttf" "$TMPD/mono.ttf" >/dev/null 2>&1
     cmp -s "$TMPD/mono.ttf" assets/osum-mono.ttf \
-        && ok "osum-mono.ttf entsteht Oktett fuer Oktett neu aus DejaVu Sans Mono" \
-        || bad "osum-mono.ttf laesst sich nicht reproduzieren"
+        && ok "osum-mono.ttf is rebuilt octet by octet from DejaVu Sans Mono" \
+        || bad "osum-mono.ttf cannot be reproduced"
 else
-    echo "        (DejaVu liegt nicht unter $DEJAVU -- Schnitt nicht nachgerechnet)"
+    echo "        (DejaVu is not under $DEJAVU -- cut not recomputed)"
 fi
 # r399 (design audit): the proportional faces are Inter (SIL OFL), cut by tools/design/mkfont.py
 if [ -f assets/src/Inter-Regular.ttf ] && python3 -c "import fontTools, uharfbuzz" 2>/dev/null; then
     python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/sans.ttf" assets/src/osum-sans.cps >/dev/null 2>&1
     python3 tools/design/mkfont.py assets/src/Inter-SemiBold.ttf "$TMPD/sansb.ttf" assets/src/osum-sans.cps >/dev/null 2>&1
     cmp -s "$TMPD/sans.ttf" assets/osum-sans.ttf \
-        && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus Inter Regular" \
-        || bad "osum-sans.ttf laesst sich nicht reproduzieren"
+        && ok "osum-sans.ttf is rebuilt octet by octet from Inter Regular" \
+        || bad "osum-sans.ttf cannot be reproduced"
     cmp -s "$TMPD/sansb.ttf" assets/osum-sans-bold.ttf \
-        && ok "osum-sans-bold.ttf entsteht Oktett fuer Oktett neu aus Inter SemiBold" \
-        || bad "osum-sans-bold.ttf laesst sich nicht reproduzieren"
+        && ok "osum-sans-bold.ttf is rebuilt octet by octet from Inter SemiBold" \
+        || bad "osum-sans-bold.ttf cannot be reproduced"
 else
-    echo "        (Inter-Quelle oder fontTools/uharfbuzz fehlen -- Schnitt nicht nachgerechnet)"
+    echo "        (Inter source or fontTools/uharfbuzz missing -- cut not recomputed)"
 fi
 info=$(python3 tools/ttf/raster.py info assets/osum-sans.ttf)
 echo "        $info"
 case "$info" in
-    *"kern="0*) bad "die Antiqua hat keine Unterschneidungspaare" ;;
-    *"kern="*) ok "die Antiqua traegt eine kern-Tabelle: ${info##*kern=}" ;;
+    *"kern="0*) bad "the roman face has no kerning pairs" ;;
+    *"kern="*) ok "the roman face carries a kern table: ${info##*kern=}" ;;
 esac
-# Und das Abbild, auf dem sie liegen.  Sie kommen VON DER PLATTE -- ein
-# Zeichensatzleser, der seinen Zeichensatz im Kernelabbild traegt, liest
-# keinen.
-# Und die Shell dazu, als eigenstaendige ELF-Datei -- so, wie Runde K6
-# sie baut (`tools/userland/run.sh`): crt.s davor, `kernel/user/user.ld`
-# als Linkerskript.
 gebaut=1
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || gebaut=0
 for p in sh echo uname; do
@@ -325,31 +211,26 @@ for p in sh echo uname; do
         || { gebaut=0; sed 's/^/        /' "$TMPD/$p.log" | head -4; }
 done
 [ "$gebaut" = 1 ] && ok "/bin/sh, /bin/echo und /bin/uname gebaut ($(stat -c%s "$TMPD/sh.elf" 2>/dev/null) Oktette fuer die Shell)" \
-    || bad "die Programme fuer das Terminalfenster lassen sich nicht bauen"
+    || bad "the programs for the terminal window cannot be built"
 python3 tools/osum/mkfs.py build "$DISK" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     /bin/ /bin/sh="$TMPD/sh.elf" /bin/echo="$TMPD/echo.elf" \
     /bin/uname="$TMPD/uname.elf" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py baut ein Abbild mit beiden Schriften und der Shell" \
+    && ok "mkfs.py builds an image with both fonts and the shell" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
-echo "== 4. der Rasterer: Kernel gegen Wirt, Oktett fuer Oktett =="
-# Der Kernel gibt acht Glyphen als Text und als Pruefsumme ueber die
-# ROHEN Deckungswerte aus; `raster.py` rastert dieselben selbst.  Das ist
-# die staerkste Zusage ueber den Rasterer, die es ohne ein Bild gibt.
+echo "== 4. the rasteriser: kernel against host, octet by octet =="
 lauf "$K0" "gfx wm ttfdump $GRUND" "$TMPD/dump.txt"
 rc=$?
 num "der Kern beendet sich sauber" "$rc" eq 21
 has "$TMPD/dump.txt" "ttfglyph c=86" "der Kern gibt seine Glyphen aus"
 v=$(python3 tools/ttf/raster.py vergleich assets/osum-mono.ttf "$TMPD/dump.txt" 2>&1)
-if [ $? -eq 0 ]; then ok "beide Rasterer sind sich einig ($v)"
-else bad "die beiden Rasterer gehen auseinander"; echo "$v" | sed 's/^/        /'; fi
-# Die Gegenprobe zum Vergleich selbst: gegen die ANDERE Schrift darf er
-# nicht aufgehen -- sonst prueft er nichts.
+if [ $? -eq 0 ]; then ok "both rasterisers agree ($v)"
+else bad "the two rasterisers diverge"; echo "$v" | sed 's/^/        /'; fi
 if python3 tools/ttf/raster.py vergleich assets/osum-sans.ttf "$TMPD/dump.txt" >/dev/null 2>&1; then
-    bad "der Vergleich geht auch gegen die falsche Schrift auf"
+    bad "the comparison also works against the wrong font"
 else
-    ok "gegen die Antiqua geht derselbe Vergleich NICHT auf"
+    ok "against the roman face the same comparison does NOT work"
 fi
 st=$(zahl "$TMPD/dump.txt" 'ttf: mono.*selftest [0-9]+')
 num "die Zusagen des Schriftlesers ueber sich selbst (mono)" "$st" eq 12
@@ -360,15 +241,13 @@ num "Zeichenpaare, die wirklich unterschnitten werden" "$kp" gt 20
 km=$(grep -aoE 'ttf: mono.*kern=[0-9]+' "$TMPD/dump.txt" | grep -oE 'kern=[0-9]+' | grep -oE '[0-9]+')
 num "und die Festbreitenschrift hat keine (sie braucht keine)" "$km" eq 0
 
-echo "== 5. das Zeigegeraet: PS/2 am zweiten Anschluss des 8042 =="
+echo "== 5. the pointing device: PS/2 on the second port of the 8042 =="
 ms=$(zahl "$TMPD/dump.txt" 'mouse: id=[0-9]+')
 num "die Kennung nach dem Radgriff (3 = mit Rad, vier Oktette je Paket)" "$ms" eq 3
 mst=$(zahl "$TMPD/dump.txt" 'mouse: .*selftest [0-9]+')
 num "die Zusagen des Treibers ueber sich selbst" "$mst" eq 13
-# Der Eintrag der Umleitungstabelle steht im Bericht am Ende eines
-# Laufes mit `wmhold` -- er wird in Abschnitt 6 geholt.
 
-echo "== 6. der Fensterserver: Selbsttest und das Foto =="
+echo "== 6. the window server: self-test and the photo =="
 foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/w.txt" "$TMPD/w.ppm"
 num "der Kern beendet sich sauber" "$RC" eq 21
 has "$TMPD/w.txt" "wm: hold" "der Kern haelt fuer das Foto still"
@@ -384,25 +263,17 @@ has "$TMPD/w.txt" "wm: term win=0  cols=56  rows=20  cell=10x19" \
 wn=$(zahl2 "$TMPD/w.txt" 'wm: windows=[0-9]+')
 num "zwei Fenster: das Terminal und die Anwendung aus Ring 3" "$wn" eq 2
 schau "das Foto ist 800x600" size "$TMPD/w.ppm" 800 600
-# DIE GEOMETRIE: der Rahmen des Fensters aus Ring 3 liegt auf den
-# Bildpunkt da, wo der Server ihn fuehrt -- 264x174 bei (420,330), und
-# einen Bildpunkt daneben ist er NICHT.
 schau "der Rahmen des Fensters aus Ring 3 liegt bildpunktgenau" \
     rect "$TMPD/w.ppm" 420 330 264 174 76 154 232
-# DIE STAPELREIHENFOLGE: an einer Stelle, die BEIDE Fenster bedecken,
-# gewinnt das obere.  Das ist die ganze Zusage in einem Rechteck.
-# Die Flaeche, die RING 3 in sein Fenster gemalt hat (0x101820), an einer
-# Stelle, an der darunter das Terminalfenster liegt.
 schau "an der Ueberschneidung steht das OBERE Fenster" \
     area "$TMPD/w.ppm" 430 353 100 6 16 24 32
 schau_nicht "und NICHT die Flaeche des unteren" \
     area "$TMPD/w.ppm" 430 353 100 6 16 20 26
 schau "der Hintergrund neben den Fenstern gehoert dem Server" \
     area "$TMPD/w.ppm" 700 60 80 80 30 42 56
-# Der Zeiger: die Spitze steht in der Mitte, und der Umriss ist schwarz.
 gsi=$(grep -aoE 'gsi=0x[0-9a-f]+' "$TMPD/w.txt" | head -1 | sed 's/.*=//')
 if [ "$gsi" = "0x2e" ]; then
-    ok "der Eintrag der Umleitungstabelle fuer GSI 12: $gsi (Vektor 46, nicht maskiert)"
+    ok "the redirection table entry for GSI 12: $gsi (vector 46, not masked)"
 else
     bad "GSI 12 zeigt '$gsi' statt 0x2e"
 fi
@@ -416,23 +287,13 @@ schau_nicht "die Spitze des Zeigers steht in der Bildmitte (dort ist nicht mehr 
 schau "und zwei Bildpunkte tiefer ist die Textmarke schwarz gefuellt (Zeiger ueber dem Terminalraster)" \
     pixel "$TMPD/w.ppm" 398 301 0 0 0
 
-echo "== 7. der Text im Fenster, bildpunktgenau gegen den zweiten Rasterer =="
-# NICHT Flaeche gegen Flaeche.  Je Zeichen die gesetzten Bildpunkte, und
-# ein Zeichen ohne Tinte laesst die Zusage fallen -- die Lehre aus K7B.
+echo "== 7. the text in the window, pixel-exact against the second rasteriser =="
 schau "Zeile 0 des Terminalfensters" \
     tgrid "$TMPD/w.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
     224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 schau "Zeile 1 des Terminalfensters" \
     tgrid "$TMPD/w.ppm" assets/osum-mono.ttf 16 26 62 10 19 1 0 \
     224 230 236 16 20 26 "abcdefghijklm ABCDEFGHIJK +-*/"
-# Der Titel in der Antiqua, mit Laufweite und Unterschneidung -- eine
-# Festbreitenrechnung ginge hier NICHT auf.
-# ROUND FUI-KERNTEXT: the titles are fUi ink now (tools/ttf/raster.py
-# follows the kernel), `tkette` because fUi's exact coverage lets the
-# outlines of 'K'/'l' and their neighbours touch -- the line is built
-# letter on letter, tolerance stays 0. The titles sit 5 px further right
-# than this runner said (the title inset grew; red on main before this
-# round, measured on the screenshot: 0 wrong at x+5, 2 or more elsewhere).
 schau "der Titel des Fensters aus Ring 3, mit Unterschneidung" \
     tchain "$TMPD/w.ppm" assets/osum-sans.ttf 15 432 348 255 255 255 \
     28 78 126 "Klick mich"
@@ -443,20 +304,13 @@ schau "der Titel des Terminalfensters, unbeleuchtet" \
 schau_nicht "GEGENPROBE: der Titel ist NICHT mehr die alte Kern-Tinte" \
     tchain "$TMPD/w.ppm" kern:assets/osum-sans.ttf 15 36 55 144 156 168 \
     44 56 72 "Terminal -- sh"
-# IST ES WIRKLICH EINE KANTENGLAETTUNG?  Eine Rasterung ohne Glaettung
-# haette KEINE Zwischenstufe und ginge durch alles oben hindurch.
 schau "der Text ist wirklich kantengeglaettet" \
     smooth "$TMPD/w.ppm" 26 62 280 20 224 230 236 16 20 26 100
-# Und die Gegenprobe zum Pruefer: an einer Stelle, an der kein Text
-# steht, findet er keinen.
 schau_nicht "wo kein Text steht, geht dieselbe Rechnung NICHT auf" \
     tgrid "$TMPD/w.ppm" assets/osum-mono.ttf 16 26 62 10 19 8 0 \
     224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 
-echo "== 8. die Maus: Bewegung und Klick von aussen in die Maschine =="
-# Erst in die linke obere Ecke (der Anschlag loescht die Vorgeschichte),
-# dann in Schritten unter 128 an eine Stelle, die sich AUSRECHNEN laesst:
-# 0 + 4*100 + 100 = 500 waagerecht, 0 + 4*100 = 400 senkrecht.
+echo "== 8. the mouse: movement and click from outside into the machine =="
 cat > "$TMPD/klick.mon" <<'EOF'
 mouse_move -120 -120
 mouse_move -120 -120
@@ -484,21 +338,15 @@ pk=$(grep -aoE 'packets=[0-9]+' "$TMPD/k.txt" | tail -1 | grep -oE '[0-9]+')
 num "Pakete, die der Treiber zusammengesetzt hat" "$pk" eq 15
 dr=$(grep -aoE 'drops=[0-9]+' "$TMPD/k.txt" | tail -1 | grep -oE '[0-9]+')
 num "und KEIN Oktett, das er wegwerfen musste" "$dr" eq 0
-# DIE ZUSAGE: der Klick kommt beim RICHTIGEN Fenster an, und mit seinen
-# ORTSKOORDINATEN.  (500,400) auf dem Schirm ist (78,48) im Fenster aus
-# Ring 3 -- 500 - 420 - 2 und 400 - 330 - 22.
 has "$TMPD/k.txt" "wclick: down 78,48" \
     "der Klick kommt in Ring 3 an, mit den Koordinaten IM Fenster"
-# Und was die Anwendung daraufhin gemalt hat, steht im Foto -- genau da.
 schau "der Fleck, den Ring 3 auf den Klick hin gemalt hat" \
     area "$TMPD/k.ppm" 500 400 8 8 255 192 32
 schau_nicht "und einen Bildpunkt daneben ist er nicht" \
     pixel "$TMPD/k.ppm" 499 400 255 192 32
-# Die Gegenprobe: OHNE Klick gibt es den Fleck nicht.
 schau_nicht "ohne Klick ist der Fleck NICHT da" \
     area "$TMPD/w.ppm" 500 400 8 8 255 192 32
 hasnot "$TMPD/w.txt" "wclick: down" "und in Ring 3 kommt dann auch nichts an"
-# Und ein Klick auf den HINTERGRUND geht an kein Fenster.
 cat > "$TMPD/leer.mon" <<'EOF'
 mouse_move -120 -120
 mouse_move -120 -120
@@ -521,9 +369,7 @@ hasnot "$TMPD/l.txt" "wclick: down" \
 lx=$(grep -aoE 'wminput: x=[0-9]+' "$TMPD/l.txt" | tail -1 | grep -oE '[0-9]+')
 num "der Zeiger stand dabei rechts unten, neben beiden Fenstern" "$lx" eq 720
 
-echo "== 9. verschieben und schliessen -- mit der Maus =="
-# Die Titelleiste des Fensters aus Ring 3 liegt bei y = 330..351; ein
-# Druck darauf und eine Bewegung verschieben es.
+echo "== 9. move and close -- with the mouse =="
 cat > "$TMPD/zieh.mon" <<'EOF'
 mouse_move -120 -120
 mouse_move -120 -120
@@ -545,9 +391,6 @@ mouse_move 100 100
 EOF
 foto "$K0" "gfx wm wmhold $GRUND" "$TMPD/z.txt" "$TMPD/z.ppm" "$TMPD/zieh.mon"
 num "der Kern beendet sich sauber" "$RC" eq 21
-# Gedrueckt bei (460,340) -- das ist 40 waagerecht und 10 senkrecht
-# innerhalb des Fensters --, dann 120 nach links oben: das Fenster steht
-# jetzt bei (300,210).
 schau "das Fenster steht nach dem Ziehen an der neuen Stelle" \
     rect "$TMPD/z.ppm" 300 210 264 174 76 154 232
 schau_nicht "und an der alten NICHT mehr" \
@@ -555,8 +398,6 @@ schau_nicht "und an der alten NICHT mehr" \
 schau "der Titel ist mitgewandert, bildpunktgenau" \
     tchain "$TMPD/z.ppm" assets/osum-sans.ttf 15 312 228 255 255 255 \
     28 78 126 "Klick mich"
-# Und das Schliessfeld: es sitzt rechts oben im Rahmen.  Nach dem
-# Verschieben liegt es bei (300 + 264 - 2 - 14 - 3, 210 + 4) = (545,214).
 cat > "$TMPD/zu.mon" <<'EOF'
 mouse_move -120 -120
 mouse_move -120 -120
@@ -582,8 +423,6 @@ wnv=$(grep -aoE 'wmafter: n=[0-9]+' "$TMPD/w.txt" | tail -1 | sed 's/.*=//')
 num "ohne den Klick bleiben es zwei" "$wnv" eq 2
 schau_nicht "der Rahmen des geschlossenen Fensters ist weg" \
     rect "$TMPD/c.ppm" 420 330 264 174 76 154 232
-# UND DAS IST DIE ZUSAGE UEBER DIE WIEDERHERSTELLUNG: da, wo das Fenster
-# war, steht jetzt wieder das, was darunter lag -- kein Gespenst.
 schau "wo das Fenster war, steht wieder der Hintergrund des Servers" \
     area "$TMPD/c.ppm" 600 460 60 40 30 42 56
 schau "und wo es das Terminalfenster verdeckte, steht wieder dessen Flaeche" \
@@ -602,8 +441,6 @@ k1=$(grep -aoE 'keys1=[0-9]+' "$TMPD/t.txt" | tail -1 | sed 's/.*=//')
 num "die vier Tasten kommen beim Fenster MIT dem Fokus an" "$k1" eq 4
 num "und beim anderen kommt KEINE an" "$k0" eq 0
 has "$TMPD/t.txt" "wclick: key 111" "Ring 3 sieht das gedrueckte Zeichen"
-# DIE GEGENPROBE, und sie ist der Grund, warum die Zeile darueber etwas
-# wert ist: mit `nofocus` geht jede Taste an JEDES Fenster.
 foto "$K0" "gfx wm wmhold nofocus $GRUND" "$TMPD/nf.txt" "$TMPD/nf.ppm" \
     "$TMPD/tasten.mon"
 n0=$(grep -aoE 'keys0=[0-9]+' "$TMPD/nf.txt" | tail -1 | sed 's/.*=//')
@@ -628,13 +465,10 @@ num "dieselben aus dem Zwischenspeicher (us)" "$warm" gt 0
 # the factor depends on the host, "worth it" is what is asked
 num "und der Speicher lohnt sich (Faktor mal 100)" \
     "$((kalt * 100 / (warm > 0 ? warm : 1)))" gt 500
-# DIE GEGENPROBE ZUR MESSUNG: mit `nodirty` gibt es keine
-# Bereichsverfolgung -- dann MUSS der kleine Fall so teuer werden wie der
-# grosse.  Ohne diese Zeile misst die Zahl darueber nichts.
 lauf "$K0" "gfx wm nodirty ttfdump $GRUND" "$TMPD/nd.txt"
 nvoll=$(grep -a 'wmbench: compose' "$TMPD/nd.txt" | grep -oE 'full=[0-9]+' | grep -oE '[0-9]+')
 nklein=$(grep -a 'wmbench: compose' "$TMPD/nd.txt" | grep -oE 'small=[0-9]+' | grep -oE '[0-9]+')
-echo "        ohne Bereichsverfolgung: full=$nvoll us  small=$nklein us"
+echo "        without region tracking: full=$nvoll us  small=$nklein us"
 if [ -n "$nklein" ] && [ -n "$klein" ] && [ "$nklein" -gt $((klein * 3)) ]; then
     ok "mit 'nodirty' kostet der kleine Bereich das Vielfache ($nklein statt $klein us)"
 else
@@ -642,16 +476,7 @@ else
 fi
 has "$TMPD/nd.txt" "dirty=0" "und der Lauf sagt selbst, dass sie aus ist"
 
-echo "== 12. die Shell im Terminalfenster =="
-# Die Zeilendisziplin aus Runde K9 ist ausdruecklich so gebaut, dass das
-# ANZEIGEGERAET austauschbar ist (`tty.SINK_SCREEN`).  Diese Runde traegt
-# sich dort ein: SINK_WINDOW schreibt in ein Fenster -- UND weiter auf
-# die serielle Leitung, damit der Mitschnitt die Grundwahrheit bleibt.
-# KEIN `osum` auf der Zeile, und das ist wichtig: die Kommandozeile
-# traegt EIN Skript, und es gehoert der Shell im Fenster.  `wmshell`
-# haelt deshalb die Shell aus Runde K1 und die aus Runde K6 zurueck --
-# sonst liest die erste das Skript weg und im Fenster steht eine leere
-# Eingabezeile (gemessen, genau so passiert).
+echo "== 12. the shell in the terminal window =="
 foto "$K0" "gfx wm wmhold wmshell script=uname;echo hallo-fenster;exit $GRUND" \
     "$TMPD/sh.txt" "$TMPD/sh.ppm"
 num "der Kern beendet sich sauber" "$RC" eq 21
@@ -659,16 +484,10 @@ has "$TMPD/sh.txt" "sh: ready, osum" "die Shell von der Platte ist gestartet"
 has "$TMPD/sh.txt" "hallo-fenster" "die Shell hat geschrieben (seriell)"
 she=$(grep -aoE 'wm: sh exit=[0-9]+' "$TMPD/sh.txt" | grep -oE '[0-9]+$')
 num "und sich sauber beendet" "$she" eq 0
-# Und dasselbe steht IM FENSTER, bildpunktgenau.  Die Zeilen 0 und 1
-# gehoeren dem Kernbanner; ab Zeile 2 schreibt die Shell.
 schau "die Kopfzeile des Terminalfensters steht im Bild" \
     tgrid "$TMPD/sh.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
     224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
 if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
-    # WELCHE Rasterzeile die Ausgabe traegt, haengt daran, wie viele
-    # Zeilen die Shell vorher geschrieben hat.  Also wird sie GESUCHT:
-    # die erste Zeile, in der die Zusage aufgeht -- und wenn sie in
-    # keiner aufgeht, faellt sie.
     gefunden=""
     for z in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
         if aus=$(python3 tools/gfx/checkshot.py tgrid "$TMPD/sh.ppm" \
@@ -678,9 +497,9 @@ if grep -qa 'hallo-fenster' "$TMPD/sh.txt"; then
         fi
     done
     if [ -n "$gefunden" ]; then
-        ok "die Ausgabe der Shell steht bildpunktgenau in Zeile $gefunden des Fensters ($aus)"
+        ok "the output of the shell is pixel-exact in row $gefunden of the window ($aus)"
     else
-        bad "die Ausgabe der Shell steht in keiner Zeile des Fensters"
+        bad "the output of the shell is in no row of the window"
     fi
 fi
 
@@ -735,7 +554,7 @@ fi
 # The serial record is untouched: the window echo never goes onto the line.
 hasnot "$TMPD/le.txt" "xyzq" "and the serial line carries no echo of it"
 
-echo "== 13. DIE GEGENPROBEN: ohne 'wm' aendert sich nichts =="
+echo "== 13. THE CONTROLS: without 'wm' aendert sich nichts =="
 lauf "$K0" "gfx $GRUND" "$TMPD/ohne.txt"
 rc=$?
 num "der Kern beendet sich sauber" "$rc" eq 21
@@ -743,10 +562,8 @@ has "$TMPD/ohne.txt" "wm: skipped" "ohne das Wort 'wm' faengt der Server gar nic
 hasnot "$TMPD/ohne.txt" "ttf: mono" "kein Zeichensatz wird gelesen"
 hasnot "$TMPD/ohne.txt" "mouse: id=" "kein Zeigegeraet wird aufgesetzt"
 hasnot "$TMPD/ohne.txt" "wclick:" "und kein Fenster in Ring 3"
-# Und die Textkonsole aus Runde K7 tut wieder, was sie immer tat.
 has "$TMPD/ohne.txt" "fb: console mirrored to screen" \
     "die Textkonsole aus Runde K7 spiegelt wie vorher"
-# `nomouse`: der Server laeuft, der Zeiger fehlt.
 foto "$K0" "gfx wm wmhold nomouse $GRUND" "$TMPD/nm.txt" "$TMPD/nm.ppm"
 has "$TMPD/nm.txt" "mouse: kein Zeiger" "mit 'nomouse' gibt es kein Zeigegeraet"
 has "$TMPD/nm.txt" "cursor=0" "und der Server malt keinen"
@@ -755,8 +572,6 @@ schau_nicht "im Bild steht an der Zeigerstelle KEIN Zeiger" \
 schau "das Terminalfenster steht trotzdem da" \
     tgrid "$TMPD/nm.ppm" assets/osum-mono.ttf 16 26 62 10 19 0 0 \
     224 230 236 16 20 26 "$MARKE_PRODUKT K10 WM 0123"
-# `nompoll`: NUR die Unterbrechung.  Die Zahl dahinter ist der ehrliche
-# Befund dieser Runde ueber QEMUs 8042 -- siehe docs/ROUNDK10.md.
 foto "$K0" "gfx wm wmhold nompoll $GRUND" "$TMPD/np.txt" "$TMPD/np.ppm" \
     "$TMPD/klick.mon"
 nppk=$(grep -aoE 'packets=[0-9]+' "$TMPD/np.txt" | tail -1 | sed 's/.*=//')
@@ -767,29 +582,20 @@ num "und der Zeiger landet an derselben Stelle" "$npx" eq 740
 num "abgefragt wurde dabei kein einziges Mal" "$nppo" eq 0
 has "$TMPD/np.txt" "wclick: down 78,48" \
     "auch der Klick kommt ueber die Unterbrechung allein an"
-# UND DIE ZAHL, DIE DEN RUECKFALL BEGRUENDET: im Regellauf wird BEIDES
-# benutzt, und wie viel auf welchem Weg kam, steht da.
 npi=$(grep -aoE 'irqs=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*=//')
 npp=$(grep -aoE 'polls=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*=//')
 nps=$(grep -aoE 'spurious=[0-9]+' "$TMPD/k.txt" | tail -1 | sed 's/.*=//')
-echo "        im Regellauf: irqs=$npi  davon leer=$nps  abgefragt=$npp"
+echo "        in the regular run: irqs=$npi  of them empty=$nps  polled=$npp"
 num "im Regellauf kommen Oktette auf BEIDEN Wegen an (Unterbrechungen)" \
     "$npi" gt 0
 
-# ================= RUNDE BLECH-HID: DER ZEIGER, ALS BILD UND NICHT ALS ZAHL
 #
-# Justin hat den Zeiger auf echtem Blech fotografiert: ein Dreieck, eine
-# Luecke, zwei Stummel. Der Fehler stand in achtzehn von Hand
-# geschriebenen Bitmasken, und KEINE Zusage dieses Laeufers hat ihn
-# gesehen -- weil keine ihn ansehen konnte. Jetzt malt
-# `tools/wm/zeiger.py` die Masken als ASCII-Bild und rechnet sechs
-# Zusagen nach.
 echo
 echo "== 18. der Mauszeiger (Runde BLECH-HID) =="
 if python3 tools/wm/zeiger.py kernel/ui/wm/wmcursor.fi > "$TMPD/zeiger.txt" 2>&1; then
-    ok "der Zeiger ist ein Pfeil: $(tail -1 "$TMPD/zeiger.txt" | sed 's/^ *//')"
+    ok "the pointer is an arrow: $(tail -1 "$TMPD/zeiger.txt" | sed 's/^ *//')"
 else
-    bad "der Zeiger ist kein Pfeil"
+    bad "the pointer is not an arrow"
 fi
 sed 's/^/       /' "$TMPD/zeiger.txt"
 

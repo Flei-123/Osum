@@ -54,4 +54,4 @@ for res in 1280x800 2560x1440; do
         drehbuch=tools/design/dlg.txt
   done
 done
-echo "== fertig, Bilder unter $OUT =="
+echo "== done, images under $OUT =="

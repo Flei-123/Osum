@@ -66,7 +66,7 @@ mkdir -p "$BUILDD" "$OUT"
 newer=$(find kernel tools/build-kernel.sh -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
 if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ] || [ -n "${WZREBUILD:-}" ]; then
     ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
-        || { echo "FEHLGESCHLAGEN: der Kern baut nicht"; tail -20 "$BUILDD/k.log"; exit 1; }
+        || { echo "FAIL: the kernel does not build"; tail -20 "$BUILDD/k.log"; exit 1; }
 fi
 echo "kern $(stat -c%s "$BUILDD/k0.mb") Oktette"
 

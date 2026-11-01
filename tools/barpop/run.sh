@@ -10,22 +10,6 @@
 # shrunk with WM_SIZE, moved with WM_MOVE, shown and hidden with WS_HIDDEN --
 # on the bar's scene host (windows 2 and 3; 1 is the quick settings).
 #
-# What this measures, on the machine of the stick (tools/design/eh6.sh):
-#   1. hover over the clock: after the delay `wlib: tip [<text>]` with
-#      its x, y, w, h stands on the serial line, the picture differs from the
-#      one without the bubble inside exactly that rectangle, and the text of
-#      the bubble is in it (ink in the rectangle)
-#   2. the pointer leaves: the bubble is gone (`wlib: tip zu`, the rectangle
-#      is the same as before the hover again)
-#   3. `notify hello toast` in the terminal: `taskbar: toast [hello toast]`
-#      with x, y, w, h; the rectangle shows the plate, the stripe on its left
-#      and the text; after the toast's four seconds it is gone again
-#   4. NO `kein Platz` line (neither bubble nor toast was refused), and the bar
-#      did not say it has no host
-#   COUNTER-PROOF: the same rectangle in the pictures WITHOUT the bubble
-#   (before the hover, after the pointer left) is the wallpaper: the bubble's
-#   plate, line and text are what differs in `01-tip` -- not the wallpaper's
-#   pattern.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)

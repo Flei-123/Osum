@@ -37,9 +37,6 @@ import sys
 
 RAHMEN = (0x2E, 0x6F, 0xD9)
 FLAECHE = (0xE8, 0xEE, 0xF7)
-# Wie weit ein Bildpunkt von der reinen Farbe abweichen darf, um noch
-# als "dieses Fenster" zu gelten. Waehrend der Mischung liegt er
-# zwischen Fensterfarbe und Hintergrund, also grosszuegig.
 NAH = 40
 
 

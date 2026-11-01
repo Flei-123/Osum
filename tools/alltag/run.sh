@@ -17,7 +17,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "${wert:-}" ]; then bad "$name: keine Zahl (erwartet $op $want)"; return; fi
+    if [ -z "${wert:-}" ]; then bad "$name: no number (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -25,11 +25,11 @@ hat()    { grep -qaF "$2" "$1" 2>/dev/null && ok "$3" || bad "$3 -- '$2' fehlt";
 hatnicht() { grep -qaF "$2" "$1" 2>/dev/null && bad "$3 -- '$2' steht da" || ok "$3"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "ALLTAG: uebersprungen, qemu-system-x86_64 ist nicht da"
+    echo "ALLTAG: skipped, qemu-system-x86_64 is missing"
     exit 0
 fi
 python3 -c "import PIL" 2>/dev/null || {
-    echo "ALLTAG: uebersprungen, Pillow fehlt (die Bildabnahme braucht es)"
+    echo "ALLTAG: skipped, Pillow is missing (the image check needs it)"
     exit 0
 }
 
@@ -42,12 +42,12 @@ if bash "$B" "$OUT/b0" script='echo bereit;exit' \
        > "$OUT/bauen.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kernel ' "$OUT/bauen.log" | head -1))"
 else
-    bad "der Bau ging nicht"; tail -20 "$OUT/bauen.log"; exit 1
+    bad "the build failed"; tail -20 "$OUT/bauen.log"; exit 1
 fi
 
 # ---------------------------------------------------------- 2. Rechner
 echo
-echo "== 2. der Rechner gegen Python =="
+echo "== 2. the calculator against Python =="
 python3 tools/alltag/rechner.py skript "$OUT/pruef.sh" > "$OUT/skript.log"
 bash "$B" "$OUT/rech" script='sh /pruef.sh;calc -e 2++;exit' \
     progs="calc sh echo ls cat" xfile=/pruef.sh="$OUT/pruef.sh" \
@@ -112,8 +112,8 @@ assert "pk/a.txt" in n and "pk/u/c.txt" in n, n
 assert z.read("pk/a.txt").startswith(b"# /etc/theme.conf")
 print(len(n))
 PY
-then ok "das Archiv des Gastes: Pythons zipfile liest es ($(stat -c%s "$OUT/eigen.zip") Oktette)"
-else bad "das Archiv des Gastes ist fuer Python kaputt"; fi
+then ok "the guest's archive: Python's zipfile reads it ($(stat -c%s "$OUT/eigen.zip") Oktette)"
+else bad "the guest's archive is broken for Python"; fi
 
 # ------------------------------------------------------- 4. Papierkorb
 echo
@@ -147,9 +147,9 @@ bash "$B" "$OUT/ex1" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,deb
 hat "$OUT/ex1/serial.txt" "explorer: tat 3 n=1 rc=0" "Entf im Dateimanager: in den Korb"
 if python3 tools/osum/mkfs.py list "$OUT/ex1/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb/1.info'; then
-    ok "und im Korb liegt Eintrag 1 mit seiner Infodatei"
+    ok "and the trash holds entry 1 with its info file"
 else
-    bad "im Korb liegt nichts"
+    bad "the trash is empty"
 fi
 bash "$B" "$OUT/ex2" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,debug" \
     mon="sendkey shift-delete" mon="sendkey ret" \
@@ -158,14 +158,14 @@ bash "$B" "$OUT/ex2" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,deb
 hat "$OUT/ex2/serial.txt" "explorer: tat 5 n=1 rc=0" "Umschalt+Entf: endgueltig"
 if python3 tools/osum/mkfs.py list "$OUT/ex2/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb'; then
-    bad "Gegenprobe: Umschalt+Entf hat trotzdem in den Korb gelegt"
+    bad "control: Shift+Delete moved it to the trash anyway"
 else
-    ok "Gegenprobe: kein Papierkorb entstanden -- es war wirklich endgueltig"
+    ok "control: no trash was created -- it really was permanent"
 fi
 
 # ----------------------------------------------------------- 5. Bilder
 echo
-echo "== 5. die Bilder gegen Pillow =="
+echo "== 5. the images against Pillow =="
 python3 - "$OUT" <<'PY'
 import sys
 from PIL import Image
@@ -245,7 +245,7 @@ hat "$OUT/snipv/serial.txt" "viewer: art=png w=1280 h=800" \
     "der Bildbetrachter macht das PNG des Ausschnittwerkzeugs auf"
 if python3 tools/alltag/bildref.py pruefen "$OUT/snipv/serial.txt" \
        "$OUT/schnipsel.png" > "$OUT/snipref.txt" 2>&1; then
-    ok "und liest daraus Zahl fuer Zahl dasselbe wie Pillow"
+    ok "and reads the same numbers from it as Pillow"
 else
     bad "$(tail -1 "$OUT/snipref.txt")"
 fi
@@ -290,7 +290,7 @@ hat "$OUT/sp3/serial.txt" "sperre: Leerlauf abgelaufen, sperre" \
 
 # ------------------------------------------------------------- 8. Laden
 echo
-echo "== 8. der Laden: sechs Pakete, signiert, eingespielt =="
+echo "== 8. the store: six packages, signed, installed =="
 OPK_ALLTAG=$(python3 tools/lib/opkpfad.py)
 if [ -f "$OPK_ALLTAG" ]; then
     bash tools/loader/build.sh "$OUT/laden" > "$OUT/laden-bau.log" 2>&1
@@ -367,12 +367,12 @@ Image.open(sys.argv[1] + "/storeg/desktop.ppm").convert("RGB").save(
 PY
     ok "Bild: .alltag-shots/store-installiert.png"
 else
-    bad "opk.py fehlt ($OPK_ALLTAG) -- der Laden laesst sich nicht messen"
+    bad "opk.py is missing ($OPK_ALLTAG) -- the store cannot be measured"
 fi
 
 # ------------------------------------------------- 9. die Bilder, gemessen
 echo
-echo "== 9. je ein Bild, und jedes wird gemessen =="
+echo "== 9. one image each, and each is measured =="
 schuss() { # name wigapp fenster-x,y [extra-args...]
     local name=$1 app=$2 wxy=$3
     shift 3
@@ -383,7 +383,7 @@ schuss() { # name wigapp fenster-x,y [extra-args...]
         extra="wigapp=$app" progs="$PROGS" "$@" \
         > "$OUT/s-$name.log" 2>&1
     if [ ! -s "$OUT/s-$name/desktop.ppm" ]; then
-        bad "$name: kein Bild entstanden"
+        bad "$name: no image was produced"
         return
     fi
     python3 - "$OUT/s-$name/desktop.ppm" "$SHOTS/$name.png" <<'PY'
@@ -418,7 +418,7 @@ schuss lock /bin/lock 0,0 xfile=/etc/shadow="$OUT/shadow"
 
 # ------------------------------------------------------- 10. die Regeln
 echo
-echo "== 10. die Regeln dieser Runde =="
+echo "== 10. the rules of this round =="
 Z=0
 for f in calc trashbin viewer snip lock korb bild jpeg zip; do
     n=$(grep -ac 'wlibc\.\(px\|rect\|rrect\|frame\|frame3\|hline\|vline\|text\|glyph\|blit\|rring\|divider\|drop_shadow\)(' \
@@ -436,7 +436,7 @@ if [ -n "${ALLTAG_THEMESTORE:-}" ]; then
     num "themestore: gruen" "$TP" ge 81
     num "themestore: rot" "$TF" eq 0
 else
-    echo "  -- tools/themestore/run.sh laeuft nur mit ALLTAG_THEMESTORE=1 mit"
+    echo "  -- tools/themestore/run.sh only runs with ALLTAG_THEMESTORE=1 "
 fi
 
 echo

@@ -1,35 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/paint/blendcheck.py -- DIE MISCHUNG, GEGEN DIE EXAKTE RECHNUNG.
 #
-# Runde PAINT hat in diesem Baum VIER Fassungen derselben Zeile
-# gefunden -- src-over, ganzzahlig, acht Bit je Kanal:
 #
-#     kernel/fb.fi           (neu in dieser Runde)
-#     kernel/wm.fi           `blend`
-#     kernel/user/wlibc.fi   `blend`
-#     tools/gfx/checkshot.py `mische`   -- der Pruefer auf dem Wirt
 #
-# und eine fuenfte, die schon immer anders rundete:
 #
 #     tools/icons/sheet.py   `mische`   -- mit `+ 127`
 #
-# Das ist genau die Sorte Doppelung, die niemand bemerkt, solange die
-# Abweichung eins ist: ein Bildschirmfoto wird mit Toleranz geprueft,
-# und eine Toleranz verdeckt einen systematischen Fehler.
 #
-# DIESES SKRIPT MISST DEN FEHLER, statt ihn zu vermuten. Es rechnet ALLE
-# 256 * 256 * 256 = 16 777 216 Tripel (a, src, dst) durch, fuer jede
-# Fassung, und haelt sie gegen die exakte, kaufmaennisch gerundete
-# Rechnung.
 #
-#   ./tools/paint/blendcheck.py            -- die Messung, alle Tripel
-#   ./tools/paint/blendcheck.py --schnell  -- jedes 7. a, fuer den Laeufer
-#   ./tools/paint/blendcheck.py --quellen  -- prueft zusaetzlich, dass in
-#                                             den fuenf Dateien wirklich
-#                                             die neue Zeile steht
 #
-# Beendigungscode 0 = alle Zusagen gehalten.
 import os
 import sys
 
@@ -156,35 +135,25 @@ def main():
         print("   %s  max=%d  mittel=%.6f  falsch=%d (%.3f%%)"
               % (name, mx, summe / float(n), falsch, 100.0 * falsch / n))
 
-    # ZUSAGE 1: die alte Fassung liegt WIRKLICH daneben, und zwar nicht
-    # an einem Sonderfall, sondern auf fast der Haelfte aller Tripel.
     mx, summe, falsch, n = erg[FASSUNGEN[0][0]]
     if mx == 1 and falsch > n * 4 // 10:
-        print("  OK    abschneiden: Fehler 1 auf %.2f%% aller Tripel"
+        print("  OK    truncation: error 1 on %.2f%% of all triples"
               % (100.0 * falsch / n))
         zusagen += 1
     else:
-        print("  FAIL  abschneiden sollte auf ~48%% der Tripel um 1 "
+        print("  FAIL  truncation should be off by 1 on ~48%% of the triples "
               "danebenliegen, ist: %d auf %.2f%%" % (mx, 100.0 * falsch / n))
         fehler += 1
 
-    # ZUSAGE 2 und 3: beide neuen Fassungen sind EXAKT, nicht "besser".
     for name in ("(num+127)/255 (Python)  ", "(t+(t>>8))>>8 verworfen "):
         mx, summe, falsch, n = erg[name]
         if mx == 0 and falsch == 0:
-            print("  OK    %s ist auf allen %d Tripeln exakt" % (name, n))
+            print("  OK    %s is exact on all %d triples" % (name, n))
             zusagen += 1
         else:
             print("  FAIL  %s: max=%d, %d falsch" % (name, mx, falsch))
             fehler += 1
 
-    # ZUSAGE 4: Kern und Wirt rechnen BILDPUNKTGLEICH. Das ist die
-    # eigentliche Zusage dieser Datei -- ohne sie kann kein
-    # Bildschirmfoto den Kern widerlegen.
-    # Kern UND Wirt rechnen seit PAINT beide `(num + 127) / 255`; die
-    # Zusage ist trotzdem nicht leer, denn sie haelt zusaetzlich die
-    # verworfene, schiebende Fassung dagegen -- waere die je wieder
-    # eingebaut, muesste sie bildpunktgleich sein.
     ungleich = 0
     for a in range(0, 256, schritt):
         for src in range(256):
@@ -192,18 +161,18 @@ def main():
                 if schieben(dst, src, a) != plus127(dst, src, a):
                     ungleich += 1
     if ungleich == 0:
-        print("  OK    Kern und Wirt liefern auf allen %d Tripeln "
+        print("  OK    kernel and host deliver on all %d triples "
               "DENSELBEN Wert" % gesamt)
         zusagen += 1
     else:
-        print("  FAIL  Kern und Wirt unterscheiden sich auf %d Tripeln"
+        print("  FAIL  kernel and host differ on %d triples"
               % ungleich)
         fehler += 1
 
     # ZUSAGE 5: die Raender.
     schlecht = randbedingungen()
     if not schlecht:
-        print("  OK    a=0 laesst den Grund und a=255 gibt die neue "
+        print("  OK    a=0 leaves the background and a=255 gives the new "
               "Farbe -- bei allen drei Fassungen")
         zusagen += 1
     else:
@@ -211,11 +180,10 @@ def main():
             print("  FAIL  %s" % z)
         fehler += 1
 
-    # ZUSAGE 6: und die Zeile steht wirklich in allen fuenf Dateien.
     if "--quellen" in sys.argv:
         fehlt = quellen_pruefen()
         if not fehlt:
-            print("  OK    alle %d Fundstellen tragen dieselbe Rundung"
+            print("  OK    all %d occurrences carry the same rounding"
                   % len(QUELLEN))
             zusagen += 1
         else:

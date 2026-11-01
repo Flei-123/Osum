@@ -17,7 +17,7 @@ zahl() { grep -aoE "$2" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+' | tail -1
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "VSYNC: skipped, qemu-system-x86_64 ist nicht da"
+    echo "VSYNC: skipped, qemu-system-x86_64 is missing"
     exit 0
 fi
 
@@ -25,7 +25,7 @@ echo "== 1. bauen =="
 if bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/b.log" 2>&1; then
     ok "Kernel gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)"
 else
-    bad "der Kernel laesst sich nicht bauen"
+    bad "the kernel cannot be built"
     sed 's/^/        /' "$TMPD/b.log" | head -12
     echo "VSYNC: $pass passed, $fail failed"; exit 1
 fi
@@ -51,7 +51,7 @@ ruhe() { # extra ausgabe [sekunden]
     return 0
 }
 
-echo "== 2. die Zerreissprobe: drei Stufen =="
+echo "== 2. the tear test: three stages =="
 ruhe "nopresent noflip" "$TMPD/r0.txt"
 R0=$(zahl "$TMPD/r0.txt" 'risse=[0-9]+')
 L0=$(zahl "$TMPD/r0.txt" 'liest=[0-9]+')
@@ -66,31 +66,31 @@ L2=$(zahl "$TMPD/r2.txt" 'liest=[0-9]+')
 F2=$(zahl "$TMPD/r2.txt" 'flips=[0-9]+')
 FL=$(zahl "$TMPD/r2.txt" 'flip=[0-9]+')
 
-echo "        ohne alles      liest=${L0:-?}  risse=${R0:-?}"
-echo "        nur sammeln     liest=${L1:-?}  risse=${R1:-?}  comp=${C1:-?} pres=${P1:-?}"
+echo "        without anything  reads=${L0:-?}  tears=${R0:-?}"
+echo "        collect only      reads=${L1:-?}  tears=${R1:-?}  comp=${C1:-?} pres=${P1:-?}"
 echo "        + Seitenwechsel liest=${L2:-?}  risse=${R2:-?}  flips=${F2:-?}"
 
 [ "${R0:-0}" -gt 0 ] 2>/dev/null \
-    && ok "ohne Bildgrenze reisst es ($R0 zerrissene Ablesungen) -- die Probe kann anschlagen" \
-    || bad "ohne Bildgrenze KEIN Riss gefunden -- die Zerreissprobe misst nichts"
+    && ok "without a frame limit it tears ($R0 torn readings) -- the test can trigger" \
+    || bad "NO tear found without a frame limit -- the tear test measures nothing"
 
 [ "${L2:-0}" -gt 50000 ] 2>/dev/null \
-    && ok "der Ableser hat dicht gelesen ($L2 Ablesungen)" \
-    || bad "zu wenige Ablesungen ($L2) -- die Probe traefe die Uebertragung nicht"
+    && ok "the reader read densely ($L2 readings)" \
+    || bad "too few readings ($L2) -- the test would not hit the transfer"
 
 [ "${R1:-0}" -gt 0 ] 2>/dev/null \
-    && ok "Sammeln allein beseitigt das Reissen NICHT ($R1) -- der Seitenwechsel ist noetig" \
-    || echo "    hinweis -- Sammeln allein ergab risse=$R1 (auf dieser Maschine)"
+    && ok "collecting alone does NOT remove the tearing ($R1) -- the page flip is needed" \
+    || echo "    note -- collecting alone gave tears=$R1 (on this machine)"
 
 if [ "${FL:-0}" = "1" ]; then
     [ "${R2:-1}" -eq 0 ] 2>/dev/null \
         && ok "MIT Seitenwechsel: 0 Risse in $L2 Ablesungen" \
-        || bad "mit Seitenwechsel immer noch $R2 Risse"
+        || bad "with page flip still $R2 tears"
 else
-    bad "die Seitenumschaltung kam nicht zustande (flip=$FL)"
+    bad "the page switch did not happen (flip=$FL)"
 fi
 
-echo "== 3. die Bildzeit bleibt unter 16 ms =="
+echo "== 3. the frame time stays under 16 ms =="
 for RES in 1280x800 1920x1080; do
     cp -f "$TMPD/disk.img" "$TMPD/live.img"
     timeout 150 $QEMU_X86 -kernel "$K" -m 512 \
@@ -128,22 +128,22 @@ FR0=$(zahl "$TMPD/a0.txt" 'frames=[0-9]+')
 W0=$(grep -a 'wm: wins n=' "$TMPD/a0.txt" | tail -1)
 
 echo "        mit Bewegung  anim=${A1:-?} frames=${FR1:-?}"
-echo "        ohne (noanim) anim=${A0:-?} frames=${FR0:-?}"
+echo "        without (noanim) anim=${A0:-?} frames=${FR0:-?}"
 
 [ "${A1:-0}" -ge 2 ] 2>/dev/null \
-    && ok "zwei Bewegungen gelaufen (Oeffnen und Schliessen)" \
-    || bad "es gab keine zwei Bewegungen (anim=$A1)"
+    && ok "two movements ran (open and close)" \
+    || bad "there were not two movements (anim=$A1)"
 [ "${FR1:-0}" -ge 10 ] 2>/dev/null \
-    && ok "$FR1 Zwischenbilder -- die Bewegung hat wirklich Stufen" \
-    || bad "nur ${FR1:-0} Zwischenbilder -- das ist ein Sprung"
+    && ok "$FR1 intermediate frames -- the movement really has steps" \
+    || bad "only ${FR1:-0} intermediate frames -- that is a jump"
 [ "${FR0:-1}" -eq 0 ] 2>/dev/null \
     && ok "GEGENPROBE noanim: kein einziges Zwischenbild" \
-    || bad "mit noanim gab es trotzdem $FR0 Zwischenbilder"
+    || bad "with noanim there were intermediate frames anyway: $FR0"
 echo "$W0" | grep -q 'n=1' \
     && ok "GEGENPROBE noanim: derselbe Endzustand ($W0)" \
-    || bad "mit noanim endet es anders: $W0"
+    || bad "with noanim it ends differently: $W0"
 
-echo "== 5. die Sparsamkeit der Runde UHRWERK bleibt =="
+echo "== 5. the frugality of round UHRWERK remains =="
 cp -f "$TMPD/disk.img" "$TMPD/live.img"
 timeout 150 $QEMU_X86 -kernel "$K" -m 256 \
     -append "gfx wm wmhold wighalt=10 $GRUND" \
@@ -157,19 +157,19 @@ UP=$(grep -a 'wm: composites=' "$TMPD/u.txt" | tail -1)
 if [ -n "$UC" ] && [ -n "$UH" ] && [ "$UH" -gt 0 ] 2>/dev/null; then
     RATE=$((UC / UH))
     [ "$RATE" -le 20 ] \
-        && ok "ohne Eingabe ${RATE} Zeichnungen je Sekunde ($UC in ${UH}s) -- sparsam wie vorher" \
-        || bad "ohne Eingabe ${RATE}/s -- die Sparsamkeit ist dahin"
+        && ok "without input ${RATE} draws per second ($UC in ${UH}s) -- frugal as before" \
+        || bad "without input ${RATE}/s -- the frugality is gone"
 else
-    bad "die Rate liess sich nicht ablesen"
+    bad "the rate could not be read"
 fi
 echo "        $UP"
 
-echo "== 6. die Gegenprobe: ohne die Woerter aendert sich nichts =="
+echo "== 6. the control: without the words nothing changes =="
 V0=$(zahl "$TMPD/u.txt" 'vsync=[0-9]+')
 P0=$(zahl "$TMPD/u.txt" 'pres=[0-9]+')
 [ "${V0:-1}" -eq 0 ] 2>/dev/null && [ "${P0:-1}" -eq 0 ] 2>/dev/null \
-    && ok "ohne das Wort vsync: keine Bildgrenze, keine Uebertragung ueber sie (vsync=$V0 pres=$P0)" \
-    || bad "ohne das Wort war die Bildgrenze trotzdem an (vsync=$V0 pres=$P0)"
+    && ok "without the word vsync: no frame limit, no transfer over it (vsync=$V0 pres=$P0)" \
+    || bad "without the word the frame limit was on anyway (vsync=$V0 pres=$P0)"
 
 echo "VSYNC: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

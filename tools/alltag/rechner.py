@@ -49,7 +49,6 @@ def ausdruecke():
 
 def nach_python(a: str) -> str:
     p = a.replace("^", "**")
-    # `n!` -- die Fakultaet steht hinter ihrem Wert, in Python davor.
     while True:
         m = re.search(r"(\d+(?:\.\d+)?|\))\s*!", p)
         if not m:
@@ -116,7 +115,7 @@ def pruefen(serial: str) -> int:
                 break
         soll = wert(a)
         if antwort is None:
-            print("  FAIL  %-22s keine Antwort im Gast (soll %.12g)"
+            print("  FAIL  %-22s no answer in the guest (expected %.12g)"
                   % (a, soll))
             schlecht += 1
             continue
@@ -133,7 +132,7 @@ def pruefen(serial: str) -> int:
         else:
             print("  FAIL  %-22s Gast %s, Python %.12g" % (a, antwort, soll))
             schlecht += 1
-    print("rechner: %d von %d stimmen mit Python ueberein" % (gut, len(aus)))
+    print("calc: %d of %d match Python" % (gut, len(aus)))
     return 0 if schlecht == 0 else 1
 
 

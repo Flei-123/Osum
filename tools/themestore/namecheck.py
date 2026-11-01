@@ -57,10 +57,6 @@ import fuiraster                                   # noqa: E402
 
 from PIL import Image                              # noqa: E402
 
-# Die Schrift und die Groesse der Oberflaeche: `wlibc.F_UI` ist
-# assets/osum-sans.ttf, `wlibc.px_ui()` ist PX_UI0 = 15 bei
-# Vervielfachung 1 -- die Groesse, mit der jeder Lauf dieser Abnahme
-# faehrt.
 SCHRIFT = "assets/osum-sans.ttf"
 PX_UI = 15
 
@@ -90,10 +86,6 @@ def main(argv):
         return 2
     bild, serial, themes = argv[1], argv[2], argv[3]
     roh = open(serial, "rb").read().decode("latin1")
-    # Der Stand ZUM ZEITPUNKT DER AUFNAHME: alles nach dem letzten
-    # vollstaendigen Bericht der Rechtecke. Dieselbe Regel wie in
-    # shotcheck.py, und aus demselben Grund -- ein Mitschnitt traegt
-    # jeden Anstrich, die Aufnahme zeigt den letzten.
     schnitt = roh.rfind("settings: rect name=waa ")
     schwanz = roh[schnitt:] if schnitt >= 0 else roh
     gemalt = {}
@@ -113,8 +105,6 @@ def main(argv):
     s = fuiraster.Schrift(SCHRIFT, PX_UI)
 
     if len(argv) > 4:
-        # DAS LOCHBILD: die erste Glyphe 'r' der ersten Kachel, die eine
-        # hat, mit der Flaechenfarbe ihrer Kachel uebermalt.
         loch = im.copy()
         gemacht = False
         for name, m in sorted(gemalt.items()):
@@ -133,9 +123,6 @@ def main(argv):
         loch.save(argv[4])
 
     fehlt = [n for n in soll if n not in gemalt]
-    # GEKUERZT heisst hier dreierlei zugleich, und alle drei muessen
-    # gelten: das Programm hat so viele Oktette gemalt, wie es gemeldet
-    # hat (`nq == nv`), und so viele, wie der Name hat.
     kurz = [n for n, m in gemalt.items()
             if m.group(9) != m.group(10)
             or len(n.encode("latin1")) != int(m.group(10))]
@@ -149,9 +136,6 @@ def main(argv):
             tinte = 0
             for j in range(g.h):
                 for i in range(g.w):
-                    # Nur die VOLL gedeckten Bildpunkte der Glyphe: die
-                    # Raender sind Mischtoene und haengen an dem, was
-                    # unter ihnen lag.
                     if g.a[j * g.w + i] < 128:
                         continue
                     X, Y = gx + i, gy + j
@@ -165,7 +149,7 @@ def main(argv):
             if tinte < 2:
                 leer.append("%s: '%s' bei x=%d hat %d Tintenpunkte"
                             % (name, chr(c), gx, tinte))
-    print("namen gemalt=%d soll=%d fehlt=%d gekuerzt=%d ohnetinte=%d"
+    print("names painted=%d expected=%d missing=%d shortened=%d noink=%d"
           % (len(gemalt), len(soll), len(fehlt), len(kurz), len(leer)))
     for z in fehlt[:5]:
         print("    fehlt: %s" % z)

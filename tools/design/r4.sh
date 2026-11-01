@@ -1,27 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/r4.sh -- JUSTINS FRAGE: KANN MAN IM SUCHFENSTER ETWAS AUSFUEHREN?
 #
 #   bash tools/design/r4.sh [kern.mb] [wurzel.img] [ausgabe]
 #
-# Sechs Schritte, jeder einzeln belegt, alles in 3440x1440:
 #
-#   1. Suchfenster ueber die SUPER-TASTE oeffnen
-#   2. tippen -- kommt der Text an und filtert die Liste?
-#   3. Treffer mit der MAUS anklicken -> startet das Programm?
-#   4. Suchfenster ueber KLICK AUFS LOGO oeffnen
-#   5. Treffer mit PFEILTASTEN + ENTER waehlen -> startet das Programm?
-#   6. steht danach wirklich ein Fenster des gestarteten Programms da?
 #
-# GEFAHREN WIRD MIT tools/design/drive.py, und das ist der Punkt:
-# `mouse_move` im QEMU-Monitor ist RELATIV. Ein selbstgebauter Aufruf
-# `mouse_move 450 984` bewegt den Zeiger um 450/984 Bildpunkte WEITER,
-# er setzt ihn nicht dorthin. Mein erster Anlauf zu R4 hat genau das
-# falsch gemacht und "mouse: packets=0" gemessen -- ein Fehler des
-# Fahrers, kein Befund ueber Justins System. `drive.py` faehrt erst
-# in die Ecke (32 Schritte, traegt 4K) und von dort heraus, und es
-# rechnet die Trefferflaeche aus der Zeile, die das PROGRAMM selbst
-# gemeldet hat (`launcher: rect ...`).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 KERN=${1:-/tmp/final-img/osum.mb}
@@ -45,7 +28,6 @@ taste i
 taste t
 warte 3
 foto 02-getippt
-# --- 3. TREFFER MIT DER MAUS ---
 klickauf lzeile0
 warte 5
 foto 03-nach-mausklick
@@ -84,10 +66,10 @@ bad(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 echo
 grep -qa 'launcher: ready' "$W/serial.txt" && ok "Starter laeuft" || bad "Starter fehlt"
 grep -qa 'mouse: id=.*packets=[1-9]' "$W/serial.txt" \
-    && ok "die Maus liefert Pakete ($(grep -ao 'packets=[0-9]*' "$W/serial.txt" | tail -1))" \
-    || bad "mouse packets=0 -- der Fahrer erreicht die Maus nicht"
+    && ok "the mouse delivers packets ($(grep -ao 'packets=[0-9]*' "$W/serial.txt" | tail -1))" \
+    || bad "mouse packets=0 -- the driver does not reach the mouse"
 grep -qa 'launcher: suche \[edit\]' "$W/serial.txt" \
-    && ok "Tippen filtert die Liste ($(grep -a 'launcher: suche \[edit\]' "$W/serial.txt" | tail -1 | grep -o 'treffer=[0-9]*'))" \
+    && ok "typing filters the list ($(grep -a 'launcher: suche \[edit\]' "$W/serial.txt" | tail -1 | grep -o 'treffer=[0-9]*'))" \
     || bad "Tippen filtert nicht"
 grep -qa 'launcher: start' "$W/serial.txt" \
     && ok "MAUSKLICK startet: $(grep -a 'launcher: start' "$W/serial.txt" | tail -1)" \

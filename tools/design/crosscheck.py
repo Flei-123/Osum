@@ -1,32 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/crosscheck.py -- IST DAS X DOPPELT GEZEICHNET?
 #
-# Justins Foto vom 10.09. 18:39: das Schliesskreuz ist zerfranst, mit
-# einem fetten schraegen Zusatzbalken. Minimieren (ein Strich) und
-# Maximieren (ein Kasten) sind sauber. Der Unterschied steht in
-# kernel/wm.fi, cg_bauen:
 #
-#     MIN:  nach/linie, strichen(0)                  -- EIN Strich
-#     MAX:  cg_kasten -> strichen(1)                 -- EIN Zug
-#     X:    nach/linie, strichen(0)                  -- Strich 1
-#           nach/linie, strichen(0)                  -- Strich 2  <---
 #
-# `strichen` legt die UMRISSE des Strichs in den Pfad. Zwei Aufrufe
-# heissen zwei Umrisse im SELBEN Pfad, und `rastern(NICHTNULL)` fuellt
-# nach der Nichtnull-Regel: wo sich die beiden Umrisse ueberlappen --
-# in der Mitte des Kreuzes und an den vier Enden -- addieren sich die
-# Umlaufzahlen, statt sich aufzuheben.
 #
-# DIESES WERKZEUG MISST DAS, ohne den Kern zu booten: es baut dieselben
-# zwei Faelle in Python nach (dieselbe Geometrie, dieselbe Regel) und
-# zaehlt die Bildpunkte, die MEHR ALS EINMAL bedeckt werden.
 #
-#   ein sauberes X:  jeder Bildpunkt hoechstens einmal -> 0
-#   ein doppeltes X: die Kreuzungsflaeche zaehlt doppelt -> > 0
 #
-# Kein Ersatz fuer den Screenshot, sondern die schnelle Vorprobe: sie
-# sagt in einer Sekunde, ob der Verdacht ueberhaupt stimmt.
 import sys
 
 EINS = 64  # dieselbe Festkommaeinheit wie vektor.EINS (Annahme, s.u.)
@@ -85,7 +64,7 @@ def messen(d, sb, zwei):
 
 
 if __name__ == '__main__':
-    print("KREUZPRUEF -- ueberlappen sich die zwei Striche des X?")
+    print("CROSS CHECK -- do the two strokes of the X overlap?")
     print()
     print("%-30s %8s %10s %s" % ("Fall", "bedeckt", "mehrfach", "Urteil"))
     fehler = 0
@@ -108,7 +87,7 @@ if __name__ == '__main__':
                  "SAUBER" if mehr == 0 else "DOPPELT"))
     print()
     if fehler:
-        print("BEFUND: das X wird an der Kreuzung MEHRFACH bedeckt.")
-        print("        Genau das sieht Justin als fetten Zusatzbalken.")
+        print("FINDING: the X is covered MULTIPLE times at the crossing.")
+        print("        That is exactly what Justin sees as a fat extra bar.")
         sys.exit(1)
     print("BEFUND: keine Mehrfachbedeckung.")

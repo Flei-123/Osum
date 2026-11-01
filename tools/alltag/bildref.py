@@ -146,14 +146,14 @@ def main(argv):
         w = zahlen(pfad)
         g = gast(text, name)
         if g is None:
-            print("  FAIL  %-16s der Gast hat nichts gesagt" % name)
+            print("  FAIL  %-16s the guest said nothing" % name)
             schlecht += 1
             continue
         if vergleich(g, w, name):
             gut += 1
         else:
             schlecht += 1
-    print("bildref: %d von %d Bildern stimmen mit Pillow ueberein"
+    print("bildref: %d of %d images match Pillow"
           % (gut, gut + schlecht))
     return 0 if schlecht == 0 else 1
 

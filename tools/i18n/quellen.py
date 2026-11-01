@@ -55,8 +55,6 @@ STR = re.compile(r'"(?:\\.|[^"\\])*"')
 VERGL = re.compile(r'(?:streq|text\.equal|str_eq|gleich)\s*\(')
 TRACE = re.compile(r'(?:^|[^A-Za-z_0-9.])(?:'
                    r'(?:ulib\.)?'
-                   # RUNDE MERGE-2: `h_claim` gibt den Namen einer
-                   # Zusage auf die serielle Leitung aus.
                    r'(?:say|sayn|sayu|say_line|kv|sag|sagn|sagt|kvs|kvt'
                    r'|h_claim)'
                    r'|serial\.[a-z_0-9]+'
@@ -71,15 +69,7 @@ def inhalt_von(roh):
     return s
 
 
-# RUNDE MERGE-2: EIN PFAD IST KEIN SATZ.
 #
-# `opk` meldet "opk: /system/schluessel.pub is not 32 octets long".
-# Darin steckt `schluessel` -- aber als DATEINAME auf der Platte, und
-# der heisst so, wie er heisst. Wer ihn umschreibt, findet die Datei
-# nicht mehr. Vor der Suche nach Umschrift werden absolute Pfade
-# deshalb ausgeblendet; alles andere im selben Satz wird weiter
-# geprueft (`kein vertrauter Schluessel:` faellt also NACH wie vor auf,
-# und ist auch gefallen).
 PFAD = re.compile(r'(?<![A-Za-z0-9_])/[A-Za-z0-9_./+-]+')
 
 
@@ -98,7 +88,7 @@ def sieht_aus_wie_name(t):
     if k.startswith(('/', '-', '.')):
         return True
     if ' ' not in k and (k.endswith('=') or '.' in k or '/' in k):
-        return t == k          # mit Rand ist es ein Feld, kein Name
+        return t == k
     
     if ' ' not in k and k.isupper() and len(k) > 1:
         return True
@@ -140,13 +130,6 @@ def funde(wurzel):
                     continue
                 kl = klasse(name, inhalt, zeilen, nr, code, fenster, kern,
                             fest)
-                # `// DRAHT: <wer liest es>` am Ende der Zeile: die Kette
-                # ist ein Wort eines Formats oder Protokolls (Feldname,
-                # Gruss, signierter Text), das ein ANDERES Programm Oktett
-                # fuer Oktett erwartet. Runde ROTABSCHNITTE 5 hat zehn
-                # solche Ketten "entschriftet" und damit die Bruecke, die
-                # OTA-Schluesselkette und die Papierkorb-Infodatei
-                # gebrochen. Eine DRAHT-Kette ist keine Umschrift.
                 draht = DRAHT.search(z) is not None
                 if draht:
                     kl = 'MARKE'
@@ -217,17 +200,9 @@ def klasse(name, inhalt, zeilen, nr, code, fenster, kern, fest):
     for z in benutzt:
         if VERGL.search(z):
             return 'MARKE'
-    # Der NAME eines Messwerts: erstes Argument eines Paar-Ausgebers
-    # (`sag(n_gross, geschrieben)` -> "grossdatei 2621440"). Das ist ein
-    # Feldname im Mitschnitt und kein Satz auf dem Schirm.
     feld = False
     if name != '-':
         wieerst = re.compile(
-            # RUNDE MERGE-2: `h_claim` dazu. Der Selbsttest in
-            # kernel/uprog.fi (Runde HANDLE) gibt seinen ersten
-            # Parameter als Namen der Zusage auf die serielle
-            # Leitung aus ("  [ ok ] auftrag-laeuft") -- dasselbe
-            # Muster wie `sag`/`kv`, nur mit anderem Namen.
             r'(?:sag|sagn|kv|kvs|kvt|say_line|h_claim)\s*\(\s*\(?\s*&%s\s*\['
             % re.escape(name))
         feld = any(wieerst.search(z) for z in benutzt)
@@ -259,7 +234,7 @@ def marken(wurzel):
     n = 0
     for r in funde(wurzel):
         if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('draht'):
-            continue                      # DRAHT: niemand tippt das
+            continue
         pfad = os.path.join(wurzel, r['datei'])
         txt = open(pfad, encoding='utf-8').read()
         zeilen = txt.split('\n')
@@ -267,12 +242,11 @@ def marken(wurzel):
                         zeilen[r['zeile'] - 1]) is not None
         benutzt = stellen(zeilen, r['name'], r['zeile'], fest)
         if not any(VERGL.search(z) for z in benutzt):
-            continue                      # wird nicht getippt
+            continue
         n += 1
         soll = r['inhalt']
         for stamm, ersatz in translit.finde(soll):
             soll = soll.replace(stamm, ersatz)
-        # Steht die Umlautform als eigene Kette in derselben Datei?
         gefunden = None
         for nr, z in enumerate(zeilen, 1):
             if z.lstrip().startswith('//'):
@@ -298,8 +272,6 @@ def main(argv):
     wurzel = os.environ.get('OSUM_ROOT', '.')
     alle = '--alle' in argv
     if '--streng' in argv:
-        # DER MODUS FUER DIE ABNAHME: rot, sobald EINE sichtbare
-        # deutsche Zeichenkette Umschrift traegt.
         f = funde(wurzel)
         s = [r for r in f if r['klasse'] == 'SICHTBAR']
         print('quellen: %d Umschriften, davon %d SICHTBAR'
@@ -312,7 +284,7 @@ def main(argv):
         return 1 if s else 0
     if '--marken' in argv:
         n, klagen = marken(wurzel)
-        print('marken: %d getippte Marken mit Umschrift, %d ohne '
+        print('marks: %d typed marks with transliteration, %d without '
               'Umlautform' % (n, len(klagen)))
         for k in klagen:
             print('    FEHLT  ' + k)

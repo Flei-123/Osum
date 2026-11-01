@@ -77,9 +77,6 @@ def at(px, W, x, y):
     return (px[o], px[o + 1], px[o + 2])
 
 
-# `wlib:` meldet ax/ay (Runde SOFTUI); `taskbar:` nicht -- die Leiste
-# ist EIN Fenster, und ihr Ursprung steht in der `wm: win`-Zeile mit dem
-# Titel [Taskleiste].  Beide Wege enden bei einem absoluten Ursprung.
 TEXT = re.compile(
     r"^(wlib|taskbar): text (?:win=(\d+) kind=(\d+) )?(?:\w+ )?"
     r"x=(-?\d+) base=(-?\d+) fg=(\d+) bg=(\d+)(?: tw=(\d+))?"
@@ -126,7 +123,7 @@ def main(argv):
             mm = re.match(r"^taskbar: text (\w+) ", ln.strip())
             marke_von[id(m)] = mm.group(1) if mm else ""
     if not texte:
-        print("pruef: KEINE Textmeldung im Mitschnitt -- nichts zu pruefen")
+        print("check: NO text message in the capture -- nothing to check")
         return 1
 
     # keep, per window origin, only the texts of the LAST batch (see MARK)
@@ -179,9 +176,6 @@ def main(argv):
         if not txt.strip():
             continue
         seen += 1
-        # Die Meldungen sind FENSTERLOKAL. Ohne den Ursprung des
-        # Fensters zeigt jede Pruefung an die falsche Stelle -- genau
-        # das hat in Runde LOOK eine Messung wertlos gemacht.
         if m.group(9) is not None:
             ox, oy = int(m.group(9)), int(m.group(10))
             ww, wh = W - ox, H - oy
@@ -216,23 +210,13 @@ def main(argv):
                 if 0 <= rand < W and at(px, W, rand, yy) == want:
                     traf += 1
             if traf:
-                print("ABGESCHNITTEN win=%s x=%d tw=%d ueber w=%d "
+                print("CLIPPED win=%s x=%d tw=%d over w=%d "
                       "(%d Randpunkte in Schriftfarbe) t=%s"
                       % (wid, x, tw, ww, traf, txt))
                 bad += 1
         if tw:
-            # DIESELBE BESCHRIFTUNG ZWEIMAL IST KEINE UEBERLAPPUNG.
             #
-            # Ein Bild entsteht aus mehreren Bildaufbauten -- die
-            # Oberflaeche malt beim Start, nach dem Thema, nach dem
-            # Strut. Jede Beschriftung steht deshalb mehrfach im
-            # Mitschnitt, an genau derselben Stelle. Die erste Fassung
-            # dieses Pruefers hat elf davon als "ueberlappend" gemeldet
-            # und dabei jedes Mal einen Text mit SICH SELBST verglichen.
-            # Ein Pruefer, der sich selbst anzeigt, ist Rauschen.
             #
-            # Also: Schluessel aus Ort UND Text; wer schon dasteht,
-            # kommt nicht noch einmal hinein.
             key = (ox, oy)
             kaesten.setdefault(key, {})[(x, base, txt)] = (
                 x, base - asc, x + tw, base + 4, txt)

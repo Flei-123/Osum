@@ -41,11 +41,6 @@ import sys
 
 W, H = 12, 18
 
-# Die Silhouette dieser Runde: Spitze oben links auf (0,0), ein Dreieck
-# bis Zeile 10, danach ein Schwanz, der nach rechts unten lehnt und
-# schmaler wird.  Je Zeile GENAU EIN Bereich -- das ist Bedingung (c),
-# und sie ist der Grund, warum der Schwanz des klassischen X11-Pfeils
-# (zwei Beine mit einer Kerbe dazwischen) hier nicht nachgebaut wird.
 SILHOUETTE = [
     (0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (0, 5), (0, 6), (0, 7),
     (0, 8), (0, 9), (0, 9), (0, 7), (1, 7), (2, 7), (3, 7), (3, 7),
@@ -114,12 +109,12 @@ def lies(pfad):
         m = re.search(r'var %s: \[u8; \d+\] = b"((?:\\x[0-9a-fA-F]{2})+)"'
                       % name, q)
         if not m:
-            print("  FALL  %s steht nicht in %s" % (name, pfad))
+            print("  CASE  %s is not in %s" % (name, pfad))
             return None
         okt = [int(t, 16) for t in re.findall(r'\\x([0-9a-fA-F]{2})',
                                               m.group(1))]
         if len(okt) < H * 2:
-            print("  FALL  %s hat nur %d Oktette, gebraucht werden %d"
+            print("  CASE  %s has only %d octets, %d needed"
                   % (name, len(okt), H * 2))
             return None
         raus[name] = [(okt[i * 2] << 8) | okt[i * 2 + 1] for i in range(H)]
@@ -160,14 +155,10 @@ def bloecke(reihe):
 
 def pruefe(sil, body):
     fehler = []
-    # (e) Fuellung und Rand ueberschneiden sich nicht -- per Bauart der
-    #     Masken schon so, aber ein von Hand geschriebener Quelltext darf
-    #     das verletzen.
     for y in range(H):
         for x in range(W):
             if body[y][x] and not sil[y][x]:
                 fehler.append("(e) Fuellpunkt %d,%d liegt nicht in der Silhouette" % (x, y))
-    # (a) EINE zusammenhaengende Flaeche
     start = None
     n = 0
     for y in range(H):
@@ -192,7 +183,6 @@ def pruefe(sil, body):
         if len(gesehen) != n:
             fehler.append("(a) die Fuellung zerfaellt: %d von %d Punkten "
                           "haengen zusammen" % (len(gesehen), n))
-    # (b) jeder Fuellpunkt ist rundherum gedeckt
     for y in range(H):
         for x in range(W):
             if not body[y][x]:
@@ -205,7 +195,6 @@ def pruefe(sil, body):
                 elif not sil[ny][nx]:
                     fehler.append("(b) Fuellpunkt %d,%d hat bei %d,%d den "
                                   "Hintergrund" % (x, y, nx, ny))
-    # (c) keine Zeile mit zwei Bloecken
     for y in range(H):
         for was, g in (("Fuellung", body), ("Silhouette", sil)):
             b = bloecke(g[y])
@@ -224,7 +213,6 @@ def pruefe(sil, body):
                     nachbarn += 1
             if nachbarn == 0:
                 fehler.append("(d) %d,%d steht allein" % (x, y))
-    # (f) die Spitze sitzt auf dem Griffpunkt
     if not sil[0][0]:
         fehler.append("(f) auf 0,0 -- dem Griffpunkt -- ist nichts")
     return fehler
@@ -245,7 +233,7 @@ def main():
     if m is None:
         return 1
     sil, body = gitter(m["umriss"], m["innen"])
-    print("  DER ZEIGER, WIE ER GEMALT WIRD (# Fuellung, . Rand):")
+    print("  THE POINTER AS IT IS PAINTED (# fill, . edge):")
     for z in bild(sil, body):
         print(z)
     fehler = pruefe(sil, body)

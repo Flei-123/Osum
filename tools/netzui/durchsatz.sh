@@ -39,7 +39,7 @@ bad() { echo "  FAIL $*"; fail=$((fail+1)); }
 note(){ echo "       $*"; }
 num() { # text wert op soll
     local t=$1 v=$2 op=$3 s=$4
-    if [ -z "$v" ]; then bad "$t: keine Zahl gefunden"; return; fi
+    if [ -z "$v" ]; then bad "$t: no number found"; return; fi
     if [ "$v" -"$op" "$s" ] 2>/dev/null; then ok "$t: $v"; else bad "$t: $v (erwartet $op $s)"; fi
 }
 
@@ -48,7 +48,7 @@ for t in qemu-system-x86_64 ip gcc python3; do
 done
 ip netns del "$NS" 2>/dev/null
 if ! ip netns add "$NS" 2>/dev/null; then
-    echo "NETZUI-DURCHSATZ: uebersprungen, Netzraeume gehen hier nicht"
+    echo "NETZUI-THROUGHPUT: skipped, network namespaces do not work here"
     exit 0
 fi
 ip netns del "$NS" 2>/dev/null
@@ -61,7 +61,7 @@ done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 
 "$FIRNC" kernel/kmain.fi -o "$TMPD/k0.o" >"$TMPD/e0" 2>&1 \
-    || { bad "der Kern uebersetzt nicht"; sed 's/^/        /' "$TMPD/e0" | head -10; \
+    || { bad "the kernel does not compile"; sed 's/^/        /' "$TMPD/e0" | head -10; \
          echo "NETZUI-DURCHSATZ: $pass passed, $((fail)) failed"; exit 1; }
 "$FIRNC" kernel/uprog.fi -o "$TMPD/u0.o" >>"$TMPD/e0" 2>&1 || bad "uprog.fi"
 ld -n -T "$LDSCRIPT" \
@@ -76,7 +76,7 @@ ld -n -T "$LDSCRIPT" \
     "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k0.o" "$TMPD/u0.o" 2>"$TMPD/ld.err" \
     || { bad "ld scheitert am Kern"; sed 's/^/        /' "$TMPD/ld.err" | head -5; }
 objcopy -O elf32-i386 "$TMPD/k0.elf" "$TMPD/k0.mb" 2>/dev/null
-[ -s "$TMPD/k0.mb" ] && ok "der Kern ist gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
+[ -s "$TMPD/k0.mb" ] && ok "the kernel is built ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
     || { bad "kein Kernabbild"; echo "NETZUI-DURCHSATZ: $pass passed, $fail failed"; exit 1; }
 
 for p in $PROGS; do
@@ -95,11 +95,11 @@ SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 SPEC="$SPEC /var/ /var/net/ /etc/"
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
-    > "$TMPD/mkfs.txt" 2>&1 && ok "ein Abbild mit /bin/netmeter" \
+    > "$TMPD/mkfs.txt" 2>&1 && ok "an image with /bin/netmeter" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 
 gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
-    && ok "die Bruecke zum Draht ist gebaut" \
+    && ok "the bridge to the wire is built" \
     || bad "tools/net/bridge.c uebersetzt nicht"
 
 # --------------------------------------------------------------- Draht
@@ -130,13 +130,6 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(len(BODY)))
         self.end_headers()
-        # /langsam TROEPFELT: derselbe Inhalt, aber ueber rund fuenf
-        # Sekunden verteilt. Das ist der Lauf, in dem die MESSUNG und der
-        # DOWNLOAD gleichzeitig laufen -- und damit der einzige, in dem
-        # sich zeigen laesst, dass die Rate waehrend der Last steigt und
-        # danach faellt. Bei voller Geschwindigkeit ist ein Megaoktett
-        # ueber diesen Draht in unter einer Sekunde durch und faellt
-        # komplett in eine einzige Messzeile.
         if self.path.endswith("langsam"):
             stueck = len(BODY) // 10
             for i in range(10):
@@ -172,7 +165,7 @@ BASE="nokbd nosched noproc nofs noring3"
 NETARGS="nic nip=$OSUM_IP/24 ngw=$HOST_IP"
 
 # =====================================================================
-echo "== 2. die Zaehler unter echter Last =="
+echo "== 2. the counters under real load =="
 wire_up; bridge_up; srv_up
 cp "$TMPD/disk.img" "$TMPD/live.img"
 #
@@ -190,13 +183,13 @@ srv_down; bridge_down; wire_down
 
 R="$TMPD/lauf.txt"
 if [ ! -s "$R" ]; then
-    bad "die Maschine hat nichts auf die serielle Leitung geschrieben"
+    bad "the machine wrote nothing to the serial line"
     echo "NETZUI-DURCHSATZ: $pass passed, $fail failed"; exit 1
 fi
 Q="$TMPD/ruhe.txt"
 echo "-- LAUF A (Ruhe), /bin/netmeter --"
 grep -a '^netmeter:' "$Q" | sed 's/^/       /'
-echo "-- LAUF B (nach dem Download), /bin/netmeter --"
+echo "-- RUN B (after the download), /bin/netmeter --"
 grep -a '^netmeter:' "$R" | sed 's/^/       /'
 
 nA=$(grep -ac '^netmeter: t=' "$Q")
@@ -222,7 +215,7 @@ fi
 
 maxlast=$(grep -a '^netmeter: done' "$R" | grep -aoE 'maxr=[0-9]+' | cut -d= -f2)
 if [ -n "${maxlast:-}" ] && [ "${maxlast:-0}" -gt 20000 ]; then
-    ok "Zusage 2 -- Spitzenrate unter Last: $maxlast Oktette/s"
+    ok "promise 2 -- peak rate under load: $maxlast octets/s"
     if [ "${maxruhe:-0}" -lt 100 ]; then rv=$maxlast; else rv=$(( maxlast / (maxruhe + 1) )); fi
     num "Zusage 2b -- Spitze zu Ruhe" "$rv" gt 10
 else
@@ -237,7 +230,7 @@ letzte=$(grep -a '^netmeter: t=' "$R" | tail -1 | grep -aoE 'rrx=[0-9]+' | cut -
 num "Zusage 3 -- am Ende von Lauf B wieder in Ruhe" "${letzte:-}" lt 20000
 
 # =====================================================================
-echo "== 2c. die Rate WAEHREND der Last -- der troepfelnde Download =="
+echo "== 2c. the rate DURING the load -- the trickling download =="
 wire_up; bridge_up; srv_up
 cp "$TMPD/disk.img" "$TMPD/live.img"
 qemu_bg "osum $BASE $NETARGS nsvc=0 nwait=0 script=wget -q http://$HOST_IP:8000/langsam &;netmeter 10;exit" \
@@ -246,7 +239,7 @@ wait "$QPID" 2>/dev/null; QPID=""
 srv_down; bridge_down; wire_down
 
 W="$TMPD/waehrend.txt"
-echo "-- LAUF C (Messung WAEHREND des Downloads) --"
+echo "-- RUN C (measurement DURING the download) --"
 grep -a '^netmeter:' "$W" | sed 's/^/       /'
 
 bewegt=$(grep -a '^netmeter: t=' "$W" | grep -aoE 'rrx=[0-9]+' | cut -d= -f2 \
@@ -257,22 +250,22 @@ num "Zusage 2b -- Spitzenrate waehrend der Last" "${maxw:-}" gt 50000
 spaet=$(grep -a '^netmeter: t=' "$W" | tail -2 | grep -aoE 'rrx=[0-9]+' \
         | cut -d= -f2 | sort -n | tail -1)
 if [ -n "${spaet:-}" ] && [ -n "${maxw:-}" ] && [ "$spaet" -lt "$maxw" ]; then
-    ok "Zusage 3b -- die Rate am Ende ($spaet) liegt unter der Spitze ($maxw)"
+    ok "promise 3b -- the rate at the end ($spaet) is below the peak ($maxw)"
 else
-    bad "Zusage 3b -- die Rate faellt nicht: Ende $spaet, Spitze $maxw"
+    bad "promise 3b -- the rate does not fall: end $spaet, peak $maxw"
 fi
 drxw=$(grep -a '^netmeter: done' "$W" | grep -aoE 'drx=[0-9]+' | cut -d= -f2)
 num "Zusage 4c -- waehrend der Messung bewegte Oktette" "${drxw:-}" ge "$(( BODY / 3 ))"
 
-echo "== 3. Traeger und Verbindungsrate, wie die Seite sie zeigt =="
+echo "== 3. carrier and link rate, as the page shows them =="
 link=$(grep -a '^netmeter: start' "$R" | grep -aoE 'link=[0-9]+' | cut -d= -f2)
 spd=$(grep -a '^netmeter: start' "$R" | grep -aoE 'speed=[0-9]+' | cut -d= -f2)
 num "der Traeger steht (NG_LINK)" "${link:-}" eq 1
 if [ "${spd:-0}" = 0 ]; then
-    ok "die Verbindungsrate ist 0 = unbekannt -- virtio ohne SPEED_DUPLEX,"
+    ok "the link rate is 0 = unknown -- virtio without SPEED_DUPLEX,"
     note "und die Oberflaeche schreibt dafuer das Wort 'unbekannt' hin."
 else
-    ok "die Karte meldet eine Verbindungsrate: $spd Mbit/s"
+    ok "the card reports a link rate: $spd Mbit/s"
 fi
 
 echo

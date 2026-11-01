@@ -14,7 +14,7 @@ bad() { echo "  FAIL  $*"; FAIL=$((FAIL+1)); }
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
-echo "== 1. die Rechnung: src-over gegen die exakte Rechnung =="
+echo "== 1. the computation: src-over against the exact computation =="
 if out=$(python3 tools/paint/blendcheck.py --schnell --quellen 2>&1); then
     echo "$out" | sed 's/^/     /'
     n=$(echo "$out" | grep -c '^  OK')
@@ -24,13 +24,13 @@ else
     bad "blendcheck.py ist fehlgeschlagen"
 fi
 
-echo "== 2. die Kosten: im Kern und nativ =="
+echo "== 2. the cost: in the kernel and native =="
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "PAINT: uebersprungen, qemu-system-x86_64 ist nicht da"
+    echo "PAINT: skipped, qemu-system-x86_64 is missing"
     exit 0
 fi
 if ! bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k.log" 2>&1; then
-    bad "der Kernel baut nicht"; sed 's/^/        /' "$TMPD/k.log" | tail -20
+    bad "the kernel does not build"; sed 's/^/        /' "$TMPD/k.log" | tail -20
     echo "PAINT: $PASS bestanden, $FAIL fehlgeschlagen"; exit 1
 fi
 ok "der Kernel baut ($(stat -c%s "$TMPD/k0.mb") Oktette)"
@@ -62,9 +62,9 @@ for f in std big; do
             bad "$1x$2: $bl gemischte Bildpunkte, erwartet $(( px * 4 ))"
         fi
         if [ -n "$fa" ] && [ -n "$fi_" ] && [ "$fa" -gt "$fi_" ]; then
-            ok "$1x$2: gemischt kostet mehr als opak ($fa gegen $fi_ Takte)"
+            ok "$1x$2: blended costs more than opaque ($fa against $fi_ cycles)"
         else
-            bad "$1x$2: die Messung ist nicht plausibel ($fa gegen $fi_)"
+            bad "$1x$2: the measurement is not plausible ($fa against $fi_)"
         fi
     else
         bad "$f: paintbench hat nichts gemeldet"
@@ -73,28 +73,28 @@ done
 
 if cc -O2 -o "$TMPD/native" tools/paint/native.c 2>"$TMPD/cc.err"; then
     "$TMPD/native" | sed 's/^/     /'
-    ok "dieselbe Rechnung nativ gemessen -- der Faktor der Rechnung, "\
+    ok "the same computation measured natively -- the factor of the computation, "\
 "nicht der des Emulators"
 else
     bad "tools/paint/native.c uebersetzt nicht"
     sed 's/^/        /' "$TMPD/cc.err" | head -5
 fi
 
-echo "== 3. die vierzehn Zusagen im Kern =="
+echo "== 3. the fourteen promises in the kernel =="
 z=$(grep -a 'paint: selftest' "$TMPD/std.txt" | head -1)
 echo "     ${z:-(nichts gemeldet)}"
 if echo "$z" | grep -q 'gezaehlt=14 of 14'; then
     ok "fb.selftest3: 14 von 14"
 else
-    bad "fb.selftest3 haelt nicht alle vierzehn Zusagen"
+    bad "fb.selftest3 does not keep all fourteen promises"
 fi
 if echo "$z" | grep -q '  ok$'; then
-    ok "und der Zaehler der gemischten Bildpunkte stimmt"
+    ok "and the counter of the blended pixels is right"
 else
-    bad "der Zaehler der gemischten Bildpunkte stimmt nicht"
+    bad "the counter of the blended pixels is wrong"
 fi
 
-echo "== 4. die Kantenglaettung der Glyphen =="
+echo "== 4. the anti-aliasing of the glyphs =="
 if out=$(python3 tools/paint/aacheck.py 2>&1); then
     echo "$out" | tail -12 | sed 's/^/     /'
     n=$(echo "$out" | grep -c '^  OK')
@@ -106,16 +106,16 @@ else
     PASS=$((PASS+n)); FAIL=$((FAIL+m))
 fi
 
-echo "== 5. zwei Runden auf derselben Adresse =="
+echo "== 5. two rounds at the same address =="
 if out=$(python3 tools/paint/scalars.py 2>&1); then
     echo "$out" | tail -2 | sed 's/^/     /'
-    ok "keine zwei Skalare einer Kerneldatei liegen aufeinander"
+    ok "no two scalars of a kernel file lie on top of each other"
 else
     echo "$out" | tail -15 | sed 's/^/     /'
     bad "Skalare ueberschneiden sich"
 fi
 
-echo "== 6. dieselben Nummern an drei Stellen =="
+echo "== 6. the same numbers in three places =="
 # WM_FORM und WM_APP
 for n in 2115 2116; do
     grep -qE "= $n( |$)" kernel/sys/sys.fi && ok "Aufrufnummer $n steht in kernel/sys/sys.fi" \
@@ -125,7 +125,7 @@ maxnr=$(grep -oE 'const WM_MAXNR: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0
 hoch=$(grep -oE '^const WM_[A-Z_]+: u64 = 21[0-9][0-9]' kernel/sys/sys.fi \
     | grep -v WM_MAXNR | grep -oE '[0-9]+$' | sort -n | tail -1)
 if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${hoch:-x}" ]; then
-    ok "WM_MAXNR=$maxnr ist die hoechste Aufrufnummer des Fensterservers (>= 2126)"
+    ok "WM_MAXNR=$maxnr is the highest call number of the window server (>= 2126)"
 else
     bad "WM_MAXNR='$maxnr' passt nicht zu den Aufrufen (hoechste gefunden: '$hoch', erwartet >= 2126)"
 fi
@@ -133,37 +133,37 @@ for f in kernel/ui/wm.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
     a=$(grep -cE '(FM|WF)_RADIUS: u64 = 0' "$f")
     b=$(grep -cE '(FM|WF)_SHADOW_C: u64 = 3' "$f")
     if [ "$a" = 1 ] && [ "$b" = 1 ]; then
-        ok "$f numeriert die Formsteckplaetze 0..3 gleich"
+        ok "$f numbers the shape slots 0..3 the same"
     else
-        bad "$f numeriert die Formsteckplaetze anders"
+        bad "$f numbers the shape slots differently"
     fi
 done
 sa=$(grep -c 'const WL_BYTES: u64 = 128' kernel/sys/sys.fi)
 sb=$(grep -c 'const WL_BYTES: u64 = 128' kernel/user/wlibc.fi)
 if [ "$sa" = 1 ] && [ "$sb" = 1 ]; then
-    ok "der Satz von WM_LIST ist auf beiden Seiten 128 Oktette lang"
+    ok "the WM_LIST record is 128 octets long on both sides"
 else
-    bad "WL_BYTES laeuft zwischen Kern und Bibliothek auseinander"
+    bad "WL_BYTES diverges between kernel and library"
 fi
 ka=$(grep -c 'const APP_LEN: u64 = 24' kernel/ui/wm/wmcore.fi)
 kb=$(grep -c 'const APP_LEN: u64 = 24' kernel/user/wlibc.fi)
 if [ "$ka" = 1 ] && [ "$kb" = 1 ]; then
-    ok "und der Buendelname ist auf beiden Seiten 24 Oktette lang"
+    ok "and the bundle name is 24 octets long on both sides"
 else
     bad "APP_LEN laeuft auseinander"
 fi
 
-echo "== 7. das Bild: modern gegen classic =="
+echo "== 7. the image: modern against classic =="
 SH="$TMPD/shots"
 if ! LOOKBUILD="$TMPD/build" bash tools/look/shot.sh "$SH/modern" \
         shape=modern scheme=day mode=light shadow=on extra='einst nostart' > "$TMPD/m.log" 2>&1; then
-    bad "der Lauf auf shape=modern ist fehlgeschlagen"
+    bad "the run on shape=modern failed"
     tail -5 "$TMPD/m.log" | sed 's/^/        /'
 else
     ok "shape=modern gebootet und fotografiert"
     if ! LOOKBUILD="$TMPD/build" bash tools/look/shot.sh "$SH/classic" \
             shape=classic scheme=day mode=light shadow=on extra='einst nostart' > "$TMPD/c.log" 2>&1; then
-        bad "der Lauf auf shape=classic ist fehlgeschlagen"
+        bad "the run on shape=classic failed"
     else
         ok "shape=classic gebootet und fotografiert"
     fi
@@ -173,7 +173,7 @@ else
     Y=$(echo "$R" | sed -n 's/.* y=\(-\?[0-9]*\) .*/\1/p')
     OW=$(echo "$R" | sed -n 's/.* ow=\([0-9]*\) .*/\1/p')
     OH=$(echo "$R" | sed -n 's/.* oh=\([0-9]*\) .*/\1/p')
-    echo "     das gemessene Fenster: x=$X y=$Y ow=$OW oh=$OH"
+    echo "     the measured window: x=$X y=$Y ow=$OW oh=$OH"
     if [ -n "$X" ] && [ -s "$SH/modern/desktop.ppm" ]; then
         for was in schatten ecke; do
             if [ "$was" = schatten ]; then
@@ -189,26 +189,26 @@ else
             FAIL=$((FAIL+$(echo "$out" | grep -c '^  FAIL')))
         done
     else
-        bad "kein Bild und kein gemeldetes Fenster"
+        bad "no image and no reported window"
     fi
     ns=$(grep -ac 'taskbar: sym btn=' "$TMPD/m.log")
     if [ "$ns" -gt 0 ]; then
         grep -a 'taskbar: sym btn=' "$TMPD/m.log" | sort -u | sed 's/^/     /'
         leer=$(grep -a 'taskbar: sym btn=' "$TMPD/m.log" | grep -c 'ink=0')
         if [ "$leer" = 0 ]; then
-            ok "$ns Symbole in Taskleisten-Knoepfen, jedes mit Tinte"
+            ok "$ns symbols in taskbar buttons, each with ink"
         else
-            bad "$leer Symbole ohne einen einzigen eingefaerbten Bildpunkt"
+            bad "$leer symbols without a single coloured pixel"
         fi
     else
-        bad "die Taskleiste meldet kein einziges Programmsymbol"
+        bad "the taskbar reports not a single program symbol"
     fi
     #
     FN=$(grep -aoE 'form n=[0-9]+' "$TMPD/m.log" | tail -1 | grep -oE '[0-9]+')
     if [ "${FN:-0}" -ge 4 ]; then
-        ok "die Taskleiste hat alle vier Formwerte an den Server gegeben (form n=$FN)"
+        ok "the taskbar passed all four shape values to the server (form n=$FN)"
     else
-        bad "form_push hat nicht alle vier Werte durchgebracht (form n=${FN:-fehlt})"
+        bad "form_push did not get all four values through (form n=${FN:-missing})"
     fi
 fi
 

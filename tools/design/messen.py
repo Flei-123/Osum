@@ -110,10 +110,6 @@ RE_GEOM = re.compile(r"(\w+): geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 RE_SHAPE = re.compile(
     r"shape file=(\w+) name=(\w+) id=(\d+) keys=(\d+) ctrl_h=(\d+)")
 
-# Welche Arten von Widgets kann man anfassen?  `wlib.NK_*`:
-# 2 Knopf, 3 Kaestchen, 4 Eingabefeld, 5 Liste, 6 Tabelle, 7 Reiter,
-# 9 Auswahl.  1 ist eine Beschriftung und 8 ein Trenner -- die zaehlen
-# hier nicht mit, weil man sie nicht trifft.
 FASSBAR = {2, 3, 4, 5, 6, 7, 9}
 
 
@@ -343,7 +339,7 @@ def main():
     erg["raster4_gut"], erg["raster4_ges"], erg["raster4_prozent"] = gut, ges, p
 
     zk = klickflaechen(rechtecke)
-    print("2. klickflaechen: %d von %d fassbaren Elementen unter 32 px"
+    print("2. click areas: %d of %d graspable elements under 32 px"
           % (len(zk), sum(1 for r in rechtecke if r[1] in FASSBAR)))
     hoehen = sorted({r[5] for r in rechtecke if r[1] in FASSBAR})
     print("     Hoehen: %s" % (", ".join(str(v) for v in hoehen) or "-"))
@@ -352,7 +348,7 @@ def main():
 
     if zh and font:
         v = zh[-1] * 100 // font[0]
-        print("3. listenzeile:   %d px bei %d px Schrift = %.2f"
+        print("3. list row:   %d px at %d px font = %.2f"
               % (zh[-1], font[0], v / 100.0))
         erg["zeilenhoehe"], erg["zh_faktor"] = zh[-1], v / 100.0
     else:
@@ -366,7 +362,6 @@ def main():
         e = {}
         n, stark = hauptfarben(b)
         e["farben"], e["farben_stark"] = n, stark
-        # Die Ecke und der Schatten des Fensters, das dieses Bild zeigt.
         eig = pfad[:-4] + ".serial"
         g2 = geom
         if os.path.exists(eig):
@@ -386,13 +381,6 @@ def main():
                 prog = k
                 break
         if prog and prog in g2:
-            # DIE ECKE UND DER SCHATTEN GEHOEREN DEM FENSTER UND NICHT
-            # SEINER MALFLAECHE.  Ein Programm meldet mit `geom` das
-            # Rechteck, in das es MALT; der Rahmen (2) und die
-            # Titelleiste (22) liegen darum herum, und die runde Ecke
-            # und der Schatten sind Sache des Zusammensetzers.  Der
-            # erste Lauf dieser Runde hat den Schatten INNERHALB des
-            # Fensters gesucht und ueberall 0 gefunden.
             gx, gy, gw, gh = g2[prog]
             gx = gx - 2 if gx >= 2 else 0
             gy = gy - 22 if gy >= 22 else 0
@@ -405,7 +393,6 @@ def main():
             s = schatten(b, gx, gy, gw, gh)
             if s:
                 e["schatten"] = s
-        # Die Beschriftungen dieses Bildes und nicht die aller Bilder.
         if os.path.exists(eig):
             _r2, t2, _f2, _z2, _g2, _s2 = sammle(eig)
         else:

@@ -14,7 +14,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "${wert:-}" ]; then bad "$name: keine Zahl (erwartet $op $want)"; return; fi
+    if [ -z "${wert:-}" ]; then bad "$name: no number (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -41,7 +41,7 @@ echo "== 1. bauen =="
 if bash tools/themestore/build.sh "$TMPD/b0" script='theme where;exit' \
        > "$TMPD/build.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kernel ' "$TMPD/build.log" | head -1))"
-    ok "die Platte steht ($(grep -a '^disk ' "$TMPD/build.log" | head -1))"
+    ok "the disk is ready ($(grep -a '^disk ' "$TMPD/build.log" | head -1))"
 else
     bad "tools/themestore/build.sh fehlgeschlagen"
     tail -20 "$TMPD/build.log"
@@ -50,7 +50,7 @@ fi
 
 # --------------------------------------------------- 2. die Vorlagendateien
 echo
-echo "== 2. die Vorlagen als Dateien: elf Schluessel und kein zwoelfter =="
+echo "== 2. the templates as files: eleven keys and no twelfth =="
 num "mitgelieferte Vorlagen" "$NPRESET" ge 8
 KEYS_BAD=0
 KEYS_MISS=0
@@ -112,7 +112,7 @@ num "beide Modi kommen vor" "$MODES" ge 2
 num "und mehrere Akzentfarben" "$ACCENTS" ge 4
 
 echo
-echo "== 3. dieselben Kontraste, im System und auf dem Wirt gerechnet =="
+echo "== 3. the same contrasts, computed in the system and on the host =="
 bash tools/themestore/build.sh "$TMPD/list" script='theme list;exit' \
     > "$TMPD/list.log" 2>&1
 L="$TMPD/list/serial.txt"
@@ -122,7 +122,7 @@ AGREE=0; DISAGREE=0
 for p in $PRESETS; do
     line=$(grep -a "theme: preset id=$p " "$L" | tail -1)
     if [ -z "$line" ]; then
-        echo "        $p: keine Zeile im Gast"; DISAGREE=$((DISAGREE+1)); continue
+        echo "        $p: no line in the guest"; DISAGREE=$((DISAGREE+1)); continue
     fi
     gtxt=$(printf '%s' "$line" | grep -oE ' txt=[0-9]+' | grep -oE '[0-9]+')
     gmin=$(printf '%s' "$line" | grep -oE ' min=[0-9]+' | grep -oE '[0-9]+')
@@ -152,7 +152,7 @@ done < <(grep -a 'theme: pair i=' "$S" | sed -E 's/.*i=([0-9]+) fg=([a-z-]+) bg=
 num "und jede der siebzehn stimmt mit dem Modell ueberein" "$PD" eq 0
 
 echo
-echo "== 4. keine Vorlage unter ihrer Latte -- und die Gegenprobe =="
+echo "== 4. no template below its bar -- and the control =="
 LOW=0; UNDER=0
 for p in $PRESETS; do
     line=$(grep -a "theme: preset id=$p " "$L" | tail -1)
@@ -215,7 +215,7 @@ same "und der Wirt rechnet dieselbe Zahl" "$fmin" "${gmin:-}"
 
 # --------------------------------------------------------- 5. anwenden
 echo
-echo "== 5. anwenden: ein Aufruf, zwei Dateien, und der naechste Start zeigt es =="
+echo "== 5. apply: one call, two files, and the next start shows it =="
 bash tools/themestore/build.sh "$TMPD/ap" script='theme apply studio;exit' \
     keep=yes > "$TMPD/ap.log" 2>&1
 A="$TMPD/ap/serial.txt"
@@ -239,7 +239,7 @@ same "und ontop auch nicht" "1" \
     "$(grep -a '^ontop=' "$TMPD/taskbar.conf" | cut -d= -f2)"
 
 echo
-echo "== 6. eine eigene Vorlage: sichern, ausgeben, einlesen, neu starten =="
+echo "== 6. a custom template: save, output, read in, restart =="
 bash tools/themestore/build.sh "$TMPD/save" keep=yes \
     script='theme apply terminal;theme save meins Meins;theme export meins /meins.otheme;theme list;exit' \
     > "$TMPD/save.log" 2>&1
@@ -249,7 +249,7 @@ has "$SV" "theme: exported meins" "und in eine Datei ausgegeben"
 python3 tools/osum/mkfs.py cat "$TMPD/save/disk.img" /meins.otheme \
     > "$TMPD/meins.otheme" 2>/dev/null
 num "die ausgegebene Datei hat Inhalt" "$(stat -c%s "$TMPD/meins.otheme" 2>/dev/null || echo 0)" gt 40
-ok "und sie ist lesbarer Text: $(grep -acE '^[a-z]+=' "$TMPD/meins.otheme") Zeilen key=value, \
+ok "and it is readable text: $(grep -acE '^[a-z]+=' "$TMPD/meins.otheme") Zeilen key=value, \
 $(grep -acv '[[:print:]]' "$TMPD/meins.otheme" || true) unlesbare Zeilen"
 same "sie traegt das Schema der laufenden Erscheinung" "night" \
     "$(grep -a '^scheme=' "$TMPD/meins.otheme" | cut -d= -f2)"
@@ -277,7 +277,7 @@ same "und liegt danach im eigenen Ablageort" "local" \
 
 # ------------------------------------------------------------- 7. das Konto
 echo
-echo "== 7. das Konto ist Komfort, nie Bedingung =="
+echo "== 7. the account is a convenience, never a condition =="
 bash tools/themestore/build.sh "$TMPD/acc" \
     script='theme where;theme apply papier;theme save meins Meins;theme link;theme restore;theme list;exit' \
     > "$TMPD/acc.log" 2>&1
@@ -334,7 +334,7 @@ znbad=$(grep -a 'theme: preset id=zahl ' "$ZN" | tail -1 | grep -oE ' bad=[0-9]+
 num "GEGENPROBE: ein Wert, der keine Zahl ist, wird GEZAEHLT" "${znbad:-0}" eq 2
 
 echo
-echo "== 8. die Seite Darstellung passt ins Fenster -- alle Seiten =="
+echo "== 8. the Appearance page fits the window -- all pages =="
 bash tools/themestore/build.sh "$TMPD/set" extra='einst' uitrace=yes keep=yes \
     > "$TMPD/set.log" 2>&1
 SE="$TMPD/set/serial.txt"
@@ -392,11 +392,6 @@ inner = int(sys.argv[1])
 n = 0
 for path in sys.argv[2:]:
     txt = open(path, 'rb').read().decode('latin1')
-    # NUR die Zeilen von `settings` selbst. Die Zeile des FENSTERS
-    # (name=win) sieht genauso aus, ist aber das Fenster und nicht sein
-    # Inhalt -- sie gegen die INNENhoehe zu halten misst das Fenster
-    # gegen sich selbst und ist immer rot. Jeder ANDERE Name wird
-    # gemessen, auch `kartel`/`karter` und die Sachnamen.
     for m in re.finditer(
             r'settings: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)', txt):
         if m.group(1) == 'win':
@@ -427,27 +422,16 @@ for path in sys.argv[2:]:
     for m in RE.finditer(txt):
         r = (m.group(1), int(m.group(2)), int(m.group(3)),
              int(m.group(4)), int(m.group(5)))
-        # RUNDE GLAS (fix-r3-2): die Karten sind Karten UND Rechtecke.
-        # Bis hierher wurden sie nur als Untergrund gefuehrt und selbst
-        # nie gegen die Fensterbreite gehalten -- und der Namensfilter
-        # daneben hat ausserdem `edge`, `size`, `autohide`, `ontop` und
-        # `apply` verschluckt. Gemessen wird ab jetzt jeder Name ausser
-        # `win`; dass eine Karte nicht gegen sich selbst gemessen wird,
-        # besorgt der Vergleich weiter unten.
         if r[0] in ('kartel', 'karter'):
             karten[r[0]] = r
         if r[0] != 'win':
             rects.append(r)
     for (nm, x, y, w, h) in rects:
         if x + w > innen:
-            print("        breit: %s in %s endet bei %d, das Fenster ist %d "
+            print("        width: %s in %s ends at %d, the window is %d "
                   "breit" % (nm, path.split('/')[-2], x + w, innen),
                   file=sys.stderr)
             n += 1
-        # Auf welcher Karte liegt es? Die, deren Rechteck seine Mitte
-        # enthaelt. Widgets ueber beiden Spalten (Reiterleiste,
-        # Statuszeile) liegen auf keiner und werden nur gegen das
-        # Fenster gemessen.
         mx, my = x + w // 2, y + h // 2
         for k in karten.values():
             if k[1] == x and k[2] == y and k[3] == w and k[4] == h:
@@ -455,7 +439,7 @@ for path in sys.argv[2:]:
             if not (k[1] <= mx < k[1] + k[3] and k[2] <= my < k[2] + k[4]):
                 continue
             if x < k[1] or x + w > k[1] + k[3]:
-                print("        karte: %s in %s liegt bei %d..%d, die Karte %s "
+                print("        card: %s in %s lies at %d..%d, the card %s "
                       "bei %d..%d" % (nm, path.split('/')[-2], x, x + w, k[0],
                                       k[1], k[1] + k[3]), file=sys.stderr)
                 n += 1
@@ -520,30 +504,20 @@ for m in re.finditer(r'wlib: tab i=(\d+) x=\d+ y=\d+ w=(\d+) h=(\d+)'
     tabs[int(m.group(1))] = (int(m.group(4)), int(m.group(5)),
                              int(m.group(2)), int(m.group(3)))
 if not tabs:
-    print('999 keine tab-zeile'); raise SystemExit
+    print('999 no tab row'); raise SystemExit
 unten = max(t[1] + t[3] for t in tabs.values())
 im = Image.open(sys.argv[2]).convert('RGB')
-# Die drei untersten Zeilen der Reiterzeile: dort lag die untere Kante
-# des Fokusrings, und dort standen die Reste. Gezaehlt wird nicht in
-# Bildpunkten, sondern in REITERN -- in wie vielen der gemeldeten
-# Rechtecke ueberhaupt Akzentfarbe liegt. Ein Ring um den aktiven
-# Reiter faerbt genau einen; ein Ring um die ganze Leiste faerbt alle,
-# und ein von Karten zerschnittener Ring faerbt ein paar davon. Mehr
-# als einer ist ein Rest.
 betroffen = []
 for i, (tx, ty, tw, th) in sorted(tabs.items()):
     n = 0
     for y in range(unten - 3, unten):
         for x in range(tx, tx + tw):
             p = im.getpixel((x, y))
-            # Kraeftiges Blau: der Akzent (37,99,235) und der
-            # Fokusring (18,49,117) erfuellen beides, jeder Grund und
-            # jede graue Trennlinie dieser Themen keines von beiden.
             if p[2] > p[0] + 60 and p[2] > 110:
                 n += 1
     if n > 2:
         betroffen.append('%d:%d' % (i, n))
-print(len(betroffen), 'reiter mit Akzent in den untersten Zeilen',
+print(len(betroffen), 'tab with accent in the bottom rows',
       ','.join(betroffen[:6]))
 PY
 )
@@ -552,7 +526,7 @@ num "hoechstens EIN Reiter traegt Akzentfarbe an seiner Unterkante ($STRICH)" \
 
 # --------------------------------------------------------- 9. die Bilder
 echo
-echo "== 9. ein Bild je Vorlage =="
+echo "== 9. one image per template =="
 SHOTN=0
 #
 for p in $PRESETS; do
@@ -562,15 +536,15 @@ for p in $PRESETS; do
         cp "$TMPD/s-$p/desktop.png" "$SHOTS/$p.png"
         SHOTN=$((SHOTN+1))
     else
-        echo "        $p: kein Bild"
+        echo "        $p: no image"
     fi
 done
 num "Bildschirmfotos nach $SHOTS" "$SHOTN" eq "$NPRESET"
 cp "$TMPD/set/desktop.png" "$SHOTS/settings-darstellung.png" 2>/dev/null
 cp "$TMPD/setv/desktop.png" "$SHOTS/settings-vorlagen.png" 2>/dev/null
 [ -s "$SHOTS/settings-vorlagen.png" ] \
-    && ok "und die Seite Vorlagen mit den zehn Kacheln" \
-    || bad "die Seite Vorlagen wurde nicht aufgenommen"
+    && ok "and the Templates page with the ten tiles" \
+    || bad "the Templates page was not captured"
 TL=$(grep -a 'settings: tiles n=' "$TMPD/setv/serial.txt" | tail -1 | grep -oE 'shown=[0-9]+' | cut -d= -f2)
 num "und sie zeigt zehn Kacheln" "${TL:-0}" eq 10
 TDIFF=$(python3 - "$TMPD/setv/serial.txt" <<'PY'
@@ -639,7 +613,7 @@ for m in re.finditer(r"wlib: kachelbalken x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
     if (x < kx + ein or x + w > kx + kw - ein
             or y < ky + 4 or y + h > ky + kh - 4):
         schlecht += 1
-        print("        Balken %d,%d %dx%d schneidet die Kachel %d,%d %dx%d "
+        print("        bar %d,%d %dx%d cuts the tile %d,%d %dx%d "
               "(ein=%d)" % (x, y, w, h, kx, ky, kw, kh, ein))
 print("%d %d" % (n, schlecht))
 PYB
@@ -667,7 +641,7 @@ num "GEGENPROBE: ein Balken auf der Kachelkante wird gefunden" "$BGEG" eq 1
 
 # ------------------------------------------------- 10. die Bilder MESSEN
 echo
-echo "== 10. die Bilder werden gemessen, nicht angeschaut =="
+echo "== 10. the images are measured, not looked at =="
 WX=$(grep -ao 'name=win x=[0-9]*' "$SE" | tail -1 | cut -d= -f3)
 WY=$(grep -ao 'name=win x=[0-9]* y=[0-9]*' "$SE" | tail -1 | grep -oE 'y=[0-9]+' | cut -d= -f2)
 WW=$(grep -ao 'name=win x=[0-9]* y=[0-9]* w=[0-9]*' "$SE" | tail -1 | grep -oE 'w=[0-9]+' | cut -d= -f2)
@@ -711,7 +685,7 @@ for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=', txt):
     ist[int(m.group(1))] = (int(m.group(2)), int(m.group(3)))
 n = 0
 if len(ist) > len(want) or len(ist) < 8:
-    print("        %d Reiter gemeldet, %d in der Sprachdatei"
+    print("        %d tabs reported, %d in the language file"
           % (len(ist), len(want)), file=sys.stderr)
     n += 1
 for i, w in enumerate(want):
@@ -726,9 +700,6 @@ num "Reiter, deren gemeldete Laenge nicht zu ihrem Namen passt" "${TABNV:-99}" e
 #
 TABKURZ=$(python3 - "$SE" <<'PY'
 import re, sys
-# DER LETZTE BERICHT JE REITER GILT. Die Leiste malt sich mehrfach neu
-# (Themenwechsel, erster Aufbau); die Zeilen zu zaehlen statt der
-# Reiter haengt die Zahl an die Zahl der Neuzeichnungen.
 ist = {}
 txt = open(sys.argv[1], 'rb').read().decode('utf-8', 'replace')
 for m in re.finditer(r'wlib: tab i=(\d+) .* nq=(\d+) nv=(\d+) t=', txt):
@@ -748,7 +719,7 @@ for m in re.finditer(r'wlib: tab i=(\d+) x=\d+ y=(\d+) ', txt):
 print(len(set(ist.values())))
 PYZ
 )
-echo "        verschiedene Zeilen der Reiterleiste: ${TABZEIL:-?}"
+echo "        different rows of the tab bar: ${TABZEIL:-?}"
 # two rows at the width of this window in English, three in German (the rows are
 # filled by MEASURED width now): what is asserted is that the bar wrapped
 num "und die Reiterleiste hat dafuer mehrere Zeilen (sie bricht um, sie schneidet nicht)" "${TABZEIL:-0}" ge 2
@@ -878,7 +849,7 @@ num "und hat keinen einzigen Mischton -- da ist nichts zu glaetten" "${W0:-99}" 
 RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
      "$TMPD/rad24/serial.txt" | awk -F'[= ]' '$8 >= 400' | tail -1)
 if [ -z "${RH:-}" ]; then
-    echo "        (keine Rahmenzeile, rad24 wird einmal wiederholt)"
+    echo "        (no frame row, rad24 is repeated once)"
     bash tools/themestore/build.sh "$TMPD/rad24" extra='einst' uitrace=yes \
         keep=yes radius=24 > "$TMPD/rad24.log" 2>&1
     RH=$(grep -ao 'wm: rahmen x=[0-9]* y=[0-9]* w=[0-9]* h=[0-9]* r=[0-9]*' \
@@ -936,7 +907,6 @@ for nm in sorted(gesehen):
     x, y, bw, bh = gesehen[nm]
     if not w:
         break
-    # dieselbe Umrechnung wie in Abschnitt 10: Rahmen und Titelzeile
     print(nm, int(w[-1][0]) + 2 + x, int(w[-1][1]) + 22 + y, bw, bh)
 PYK2
 )
@@ -961,10 +931,6 @@ num "und es sind ueberhaupt Karten gemessen worden" "$KARTN" ge 2
 
 python3 - "$TMPD/bunt.osym" <<'BUNTPY'
 import struct, sys
-# Dasselbe Format und dieselbe Groesse wie `wallpaper=hell` in
-# tools/themestore/build.sh (OSYM, 120x90, BGRA), nur mit zwei
-# kraeftigen Farben gleicher Helligkeit. Ein Schachbrett von zwoelf
-# Bildpunkten, das der Schreibtisch auf rund achtzig dehnt.
 w, h = 120, 90
 a, b = (255, 178, 104), (200, 245, 255)
 px = bytearray()
@@ -1001,7 +967,7 @@ num "bei 70 %% streut er" "${V70:-0}" gt 0
 num "und bei 40 %% mehr als bei 70 %%" "${V40:-0}" gt "${V70:-0}"
 #
 VQ=$(( ${V40:-0} * 100 / (${V70:-1} + 1) ))
-echo "        Streuung 40 %% gegen 70 %%: ${VQ} von Hundert (Deckel 400)"
+echo "        spread 40 %% against 70 %%: ${VQ} per hundred (cap 400)"
 num "die Streuung bei 40 %% ist mindestens das 3,5-fache der bei 70 %% (x100)" \
     "$VQ" ge 350
 num "und sie ueberschreitet den Deckel der Blendgleichung nicht (x100)" \
@@ -1030,7 +996,7 @@ same "und der Server meldet genau die Reglerstellung als Soll" "40" \
     "$(printf '%s' "$GL40" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
 #
 echo
-echo "== 11b2. der Textschild der Leiste =="
+echo "== 11b2. the text badge of the bar =="
 SCH=$(grep -a 'taskbar: schild ' "$TMPD/al40/serial.txt" | tail -1)
 SCH100=$(grep -a 'taskbar: schild ' "$TMPD/al100/serial.txt" | tail -1)
 echo "        40 %%: $SCH"
@@ -1085,7 +1051,7 @@ FG0=$(python3 tools/themestore/glascheck.py var "$TMPD/grob0/desktop.png" \
       | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
 FG16=$(python3 tools/themestore/glascheck.py var "$TMPD/grob16/desktop.png" \
        | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
-echo "        grobes Muster, dunkles Schema: var $VG0 ($FG0 Farben) ohne," \
+echo "        coarse pattern, dark scheme: var $VG0 ($FG0 colours) without," \
      "var $VG16 ($FG16 Farben) mit Milchglas 16"
 num "grobes Muster: die Streuung sinkt auch dort (gegen $VG0 ohne)" \
     "${VG16:-999999}" lt "${VG0:-0}"
@@ -1122,7 +1088,7 @@ VF0=$(python3 tools/themestore/glascheck.py var "$TMPD/fein0/desktop.png" \
       | grep -oE '^var [0-9]+' | cut -d' ' -f2)
 VF16=$(python3 tools/themestore/glascheck.py var "$TMPD/fein16/desktop.png" \
        | grep -oE '^var [0-9]+' | cut -d' ' -f2)
-echo "        feines Muster: var $VF0 ohne, var $VF16 mit Milchglas 16"
+echo "        fine pattern: var $VF0 without, var $VF16 with frosted glass 16"
 num "feines Muster: die Streuung sinkt unter dem Weichzeichner" \
     "${VF16:-999999}" lt "${VF0:-0}"
 VERL=$(python3 - "$TMPD/fein16/desktop.png" "$TMPD/fein0/desktop.png" <<'PYV2'
@@ -1136,12 +1102,6 @@ for p in sys.argv[1:3]:
     y = h - 28 + 14                      # die Mitte des Leistenstreifens
     zeile = [G.hell(im.getpixel((x, y))) for x in range(300, 1100)]
     stufen = len(set(zeile))
-    # WIE LANG DER VERLAUF IST: das laengste Stueck der Zeile, auf dem
-    # sich die Helligkeit von Bildpunkt zu Bildpunkt um hoechstens acht
-    # Stufen aendert (also kein harter Rand) und ueber das Ganze um
-    # mindestens zehn (also nicht einfach eine flache Flaeche). Eine
-    # Kachel mit weicher Naht hat kein solches Stueck: innen ist sie
-    # flach, aussen springt sie.
     lang = 0
     i = 0
     for j in range(1, len(zeile) + 1):
@@ -1156,7 +1116,7 @@ for p in sys.argv[1:3]:
     print("%d %d" % (stufen, lang))
 PYV2
 )
-echo "        Leistenzeile (Vollbild): mit/ohne Milchglas -> $(printf '%s' "$VERL" | tr '\n' '|')"
+echo "        bar row (fullscreen): with/without frosted glass -> $(printf '%s' "$VERL" | tr '\n' '|')"
 VSTUF=$(printf '%s\n' "$VERL" | sed -n 1p | cut -d' ' -f1)
 VWEG=$(printf '%s\n' "$VERL" | sed -n 1p | cut -d' ' -f2)
 VSTUF0=$(printf '%s\n' "$VERL" | sed -n 2p | cut -d' ' -f1)
@@ -1202,7 +1162,7 @@ for p in sys.argv[1:]:
 PYV
 )
 LVW=$(printf '%s\n' "$LVV" | tr '\n' ' ')
-echo "        var im Bild 12: $LVW"
+echo "        var in image 12: $LVW"
 same "und die erste Zahl im Bild ist die gemessene Streuung bei 100 %" \
     "${V100:-x}" "$(printf '%s\n' "$LVV" | sed -n 1p)"
 same "und die zweite die bei 70 %" \
@@ -1252,7 +1212,7 @@ if [ "${GLN:-0}" -ge 2 ]; then
     num "und dabei wiederverwendet statt neu gerechnet" \
         "$(printf '%s' "$GLC" | cut -d/ -f1)" ge 1
 else
-    echo "  ----  NICHT GEMESSEN: der Streifen wurde in diesem Lauf nur einmal gebraucht (cache $GLC) -- zu wenige Bilder unter QEMU/TCG"
+    echo "  ----  NOT MEASURED: the strip was used only once in this run (cache $GLC) -- too few images under QEMU/TCG"
 fi
 
 for b in 16 2; do
@@ -1345,7 +1305,7 @@ bash tools/themestore/build.sh "$TMPD/dunkelmod" scheme=midnight mode=dark \
 cp "$TMPD/dunkelmod/desktop.png" "$SHOTS/glas-dunkel-40.png" 2>/dev/null
 DV=$(python3 tools/themestore/glascheck.py var "$SHOTS/glas-dunkel-40.png")
 DA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkelmod/serial.txt" | tail -1)
-echo "        dunkles Schema auf dunklem Bild: $DV"
+echo "        dark scheme on dark image: $DV"
 echo "        $DA"
 num "bei 40 %% ueber dem dunklen Bild traegt der Leistengrund das Muster (Farben)" \
     "$(printf '%s' "$DV" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)" ge 2
@@ -1363,7 +1323,7 @@ echo "        $DK"
 num "und die Leistenschrift haelt dabei ihre 4,5:1 (x100)" \
     "$(printf '%s' "$DK" | grep -oE '^kontrast [0-9]+' | cut -d' ' -f2)" ge 450
 HA=$(grep -a 'wm: glas alpha_soll=' "$TMPD/dunkel/serial.txt" | tail -1)
-echo "        GEGENPROBE, helle Leiste auf demselben Bild: $HA"
+echo "        CONTROL, light bar on the same image: $HA"
 num "GEGENPROBE: dort hebt der Schleier die Deckkraft ueber die Reglerstellung" \
     "$(printf '%s' "$HA" | grep -oE 'alpha_ist=[0-9]+' | cut -d= -f2)" gt \
     "$(printf '%s' "$HA" | grep -oE 'alpha_soll=[0-9]+' | cut -d= -f2)"
@@ -1375,12 +1335,6 @@ num "die Einstellungsseite fuehrt das WIRKSAME Alpha neben dem Regler" \
 
 python3 - "$TMPD/dunkel2.osym" <<'WALL2'
 import struct, sys
-# Ein ZWEITES dunkles Muster, und absichtlich anders gebaut als das
-# von build.sh: senkrechte Streifen von acht Bildpunkten statt eines
-# Schachbretts von zwoelf, und zwei Farben, die nicht in dieselbe
-# Richtung von Weiss weg liegen (ein tiefes Blaugruen und ein sehr
-# dunkles Rot). Dasselbe Muster zweimal zu messen ist eine Messung,
-# nicht zwei.
 w, h = 120, 90
 a, b = (0x08, 0x2A, 0x24), (0x2E, 0x0A, 0x12)
 px = bytearray()
@@ -1422,12 +1376,12 @@ for d in dunkel dblur dunkel2; do
     VZ=$(python3 tools/themestore/glascheck.py var "$TMPD/$d/desktop.png")
     FAB=$(printf '%s' "$VZ" | grep -oE 'farben [0-9]+' | cut -d' ' -f2)
     VAR=$(printf '%s' "$VZ" | grep -oE '^var [0-9]+' | cut -d' ' -f2)
-    echo "        $d: soll=${SOLL:-?} ist=${IST:-?} $VZ"
+    echo "        $d: expected=${SOLL:-?} actual=${IST:-?} $VZ"
     same "$d: der Lauf meldet die Reglerstellung, die er bekommen hat" \
         "40" "${SOLL:-}"
     #
     if [ "${VAR:-0}" -gt 100 ] 2>/dev/null; then
-        ok "$d: das Bild scheint unter der Leiste durch (var $VAR, $FAB Gruende)"
+        ok "$d: the image shows through under the bar (var $VAR, $FAB reasons)"
     else
         num "$d: die Leiste ist praktisch deckend, also ist die Anhebung gemeldet" \
             "${IST:-0}" gt "${SOLL:-100}"
@@ -1581,7 +1535,7 @@ OVH=$(( ${VORY:-${ZWY:-3}} + ${ZWH:-0} + 24 - ${LEIY:-772} ))
 [ "$OVH" -gt "${LEIH:-28}" ] && OVH=${LEIH:-28}
 UEB=$(( OVH * ${ZWW:-0} ))
 [ "$UEB" -lt 0 ] && UEB=0
-echo "        Fenster ${ZWW:-?}x${ZWH:-?} bei y=${ZWY:-?} (vor dem Klemmen y=${VORY:-${ZWY:-?}}), Leiste ab y=${LEIY:-?}"
+echo "        window ${ZWW:-?}x${ZWH:-?} at y=${ZWY:-?} (before clamping y=${VORY:-${ZWY:-?}}), bar from y=${LEIY:-?}"
 num "das Fenster reicht wirklich unter die Leiste (Bildpunkte Ueberlappung)" \
     "$UEB" ge 1000
 #
@@ -1605,8 +1559,8 @@ num "und abgeschnittene" \
     "$(printf '%s' "$ZOUT" | grep -oE ' cut [0-9]+' | grep -oE '[0-9]+')" eq 0
 cp "$TMPD/zug1/desktop.png" "$SHOTS/glas-zug-unter-die-leiste.png" 2>/dev/null
 [ -s "$SHOTS/glas-zug-unter-die-leiste.png" ] \
-    && ok "und die Aufnahme dazu liegt in $SHOTS" \
-    || bad "die Aufnahme des Zuges fehlt"
+    && ok "and the capture for it is in $SHOTS" \
+    || bad "the capture of the move is missing"
 #
 mkdir -p "$GSHOTS"
 cp "$TMPD/zug/desktop.png" \
@@ -1614,8 +1568,8 @@ cp "$TMPD/zug/desktop.png" \
 cp "$TMPD/zug1/desktop.png" \
    "$GSHOTS/19-zug-unter-die-leiste-neu.png" 2>/dev/null
 [ -s "$GSHOTS/19-zug-unter-die-leiste-neu.png" ] \
-    && ok "und der Zug ohne Rueckweg als eigene Aufnahme (19)" \
-    || bad "die Aufnahme des Zuges ohne Rueckweg fehlt"
+    && ok "and the move without a way back as its own capture (19)" \
+    || bad "the capture of the move without a way back is missing"
 
 # ---- 11f3. (fix-r4-2, CHANGED 04.10.2026 for the Dell) THE END POSITION
 #            KEEPS A HANDLE -- THE WINDOW MAY STICK OUT.
@@ -1634,15 +1588,15 @@ cp "$TMPD/zug1/desktop.png" \
 # visible" is no longer a promise of the window server.
 #
 echo
-echo "== 11f3. die Endlage behaelt einen Griff (das Fenster darf ueberstehen) =="
+echo "== 11f3. the end position keeps a handle (the window may overhang) =="
 bash tools/themestore/build.sh "$TMPD/zug2" extra='einst' tbalpha=70 blur=0 \
     wallpaper=hell uitrace=yes keep=yes click="400,10>600,600" \
     > "$TMPD/zug2.log" 2>&1
 cp "$TMPD/zug2/desktop.png" \
    "$GSHOTS/22-zug-endlage-unter-der-leiste.png" 2>/dev/null
 [ -s "$GSHOTS/22-zug-endlage-unter-der-leiste.png" ] \
-    && ok "und die Endlage des weiten Zuges als eigene Aufnahme (22)" \
-    || bad "die Aufnahme der Endlage unter der Leiste fehlt"
+    && ok "and the end position of the wide move as its own capture (22)" \
+    || bad "the capture of the end position under the bar is missing"
 for z in zug1 zug2; do
     GA=$(grep -a 'wm: abgelegt ' "$TMPD/$z/serial.txt" | tail -1)
     echo "        $z: ${GA:-KEINE Endlage gemeldet}"
@@ -1706,7 +1660,7 @@ GSHOT=0
 for s in glas-radius-0 glas-radius-12 glas-radius-24 glas-alpha-100 \
          glas-alpha-70 glas-alpha-40 glas-milchglas \
          glas-milchglas-grob; do
-    [ -s "$SHOTS/$s.png" ] && GSHOT=$((GSHOT+1)) || echo "        $s: kein Bild"
+    [ -s "$SHOTS/$s.png" ] && GSHOT=$((GSHOT+1)) || echo "        $s: no image"
 done
 num "die acht Aufnahmen der Runde GLAS" "$GSHOT" eq 8
 GBAD=0
@@ -1727,7 +1681,7 @@ num "und in keiner von ihnen eine leere, abgeschnittene oder ueberlappende Besch
     "$GBAD" eq 0
 
 echo
-echo "== 12. Nachtrag: der Umlaut im Terminal und die gemessene Leiste =="
+echo "== 12. addendum: the umlaut in the terminal and the measured bar =="
 
 TLOG="$TMPD/al100/serial.txt"
 TPPM="$TMPD/al100/desktop.ppm"
@@ -1753,7 +1707,7 @@ if python3 tools/gfx/checkshot.py tgrid "$TPPM" assets/osum-mono.ttf \
         $UFG $UBG 'KEIN EINZIGES GERT!' 0 >/dev/null 2>&1; then
     bad "GEGENPROBE: 'GERT!' und 'GERÄT!' sind fuer den Rasterer dasselbe"
 else
-    ok "GEGENPROBE: die alte, verstuemmelte Zeile passt NICHT mehr"
+    ok "CONTROL: the old, mangled line does NOT fit any more"
 fi
 
 BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --leiste 2>&1 \
@@ -1770,13 +1724,13 @@ num "und keine ragt aus ihrem Bedienelement heraus" "${BC:-9}" eq 0
 num "und keine ueberlappt eine andere" "${BO:-9}" eq 0
 BT=$(grep -aE '^taskbar: btn i=0 ' "$TLOG" | tail -1 | sed -E 's/.* t=//')
 if [ -n "$BT" ]; then
-    ok "der Fensterknopf der Leiste traegt den Fenstertitel: $BT"
+    ok "the window button of the bar carries the window title: $BT"
 else
-    bad "der Fensterknopf der Leiste ist titellos (nur Symbol)"
+    bad "the window button of the bar has no title (symbol only)"
 fi
 
 echo
-echo "== 11h. keine Beschriftung steht auf einer Rahmenlinie =="
+echo "== 11h. no label sits on a frame line =="
 for pair in "set:Darstellung" "setv:Vorlagen"; do
     d=${pair%%:*}; nm=${pair##*:}
     LO=$(python3 tools/themestore/shotcheck.py "$TMPD/$d/desktop.ppm" \
@@ -1818,7 +1772,7 @@ num "GEGENPROBE: eine gemalte Linie durch die Schrift wird gefunden" \
     "${GL:-0}" ge 1
 
 echo
-echo "== 11i. der Strich unter dem Leistenknopf folgt der Schrift =="
+echo "== 11i. the line under the bar button follows the text =="
 PI=$(python3 - "$TLOG" <<'PYP'
 import re
 import sys
@@ -1831,8 +1785,6 @@ txts = {}
 for m in re.finditer(r'taskbar: text button x=(\d+) base=\d+ fg=\d+'
                      r' bg=\d+ tw=(\d+) t=', txt):
     txts[int(m.group(1))] = int(m.group(2))
-# Der schmale Strich (10 Bildpunkte) sagt "laeuft" und gehoert keinem
-# Wort; gemessen wird der BREITE unter dem vorderen Fenster.
 breit = [(i, v) for i, v in pil.items() if v[1] != 10]
 schlecht = []
 for i, (px, pw, tx, tw) in breit:
@@ -1852,7 +1804,7 @@ num "und Striche, die nicht auf der gemessenen Textbreite sitzen" \
     "$(printf '%s' "$PI" | cut -d' ' -f2)" eq 0
 
 echo
-echo "== 11j. das durchsichtige Fenster bleibt lesbar =="
+echo "== 11j. the transparent window stays readable =="
 bash tools/themestore/build.sh "$TMPD/winal" extra='einst' winalpha=55 \
     wallpaper=hell uitrace=yes keep=yes > "$TMPD/winal.log" 2>&1
 WF=$(python3 tools/themestore/glascheck.py fenster \
@@ -1871,9 +1823,6 @@ import sys
 from PIL import Image
 a = Image.open(sys.argv[1]).convert("RGB")
 b = Image.open(sys.argv[2]).convert("RGB")
-# Nur die Flaeche des Einstellungsfensters, und nur jede dritte Zeile
-# und Spalte: gezaehlt wird, OB sich die Mischung auswirkt, nicht wie
-# schnell dieses Skript ist.
 n = 0
 for y in range(40, 560, 3):
     for x in range(30, 770, 3):
@@ -1924,7 +1873,7 @@ for f in empty cut overlapping; do
 done
 
 echo
-echo "== 11j2. jeder gemeldete Knopf zeigt einen Umriss =="
+echo "== 11j2. every reported button shows an outline =="
 #
 for pair in "set:Darstellung" "winal:durchsichtig" "setv:Vorlagen"; do
     d=${pair%%:*}; nm=${pair##*:}
@@ -1947,7 +1896,6 @@ sys.path.insert(0, 'tools/themestore')
 import shotcheck as S
 pic = S.Pic(sys.argv[1])
 texts, wins, font = S.parse(sys.argv[2])
-# Dasselbe Fenster wie in `main`: das mit den meisten Beschriftungen.
 zaehl = {}
 for t in texts:
     zaehl[t["win"]] = zaehl.get(t["win"], 0) + 1
@@ -1961,10 +1909,6 @@ else:
 roh = open(sys.argv[2], "rb").read().decode("latin1")
 schnitt = roh.rfind("settings: rect name=waa ")
 tail = roh[schnitt:] if schnitt >= 0 else roh
-# Jeder Knopf, in dem eine Beschriftung steht, wird so schmal gerechnet, dass
-# sie zehn Bildpunkte UEBERSTEHT (r368: die Knoepfe der Szenenseite sind breit
-# und ihre Schrift steht in der Mitte -- zwanzig Bildpunkte weniger Breite
-# liessen sie, wo sie war, im Knopf). Alles andere bleibt unveraendert.
 def enger(m):
     x, y, w, h, r, ax, ay = (int(g) for g in m.groups())
     for t in texts:
@@ -1996,16 +1940,9 @@ tail = roh[schnitt:] if schnitt >= 0 else roh
 pic = S.Pic(sys.argv[1])
 for m in S.KNOPF.finditer(tail):
     x, y, bw, bh, r, ax, ay = (int(g) for g in m.groups())
-    # Die Farbe der Karte daneben, und damit alles ausser der Schrift
-    # uebermalen: uebrig bleibt ein Knopf ohne Flaeche und ohne Rand.
     grund = pic.at(ax - 8, ay + bh // 2)
     if grund is None:
         continue
-    # DESIGN-REGEL 02.10.2026: ein Hauptknopf traegt die Akzentfarbe, und
-    # die liegt mehr als 90 von der Karte entfernt -- nach der alten Regel
-    # galt seine ganze Flaeche als "Schrift" und blieb stehen. Darum wird
-    # auch die FLAECHENFARBE des Knopfes (die haeufigste Farbe in seinem
-    # Rechteck) uebermalt; die Schrift bleibt.
     from collections import Counter
     cnt = Counter()
     for j in range(0, bh):
@@ -2032,7 +1969,7 @@ KG=$(python3 tools/themestore/shotcheck.py "$TMPD/flach.ppm" \
 num "GEGENPROBE: ein flach uebermalter Knopf wird gefunden" "${KG:-0}" ge 1
 
 echo
-echo "== 11k. die Vorschaukachel: eine Form, und der Name ist ganz da =="
+echo "== 11k. the preview tile: one shape, and the name is fully there =="
 KINNEN=0
 KZAHL=0
 while read -r kx ky kw kh; do
@@ -2095,7 +2032,7 @@ GESAMT=$((pass + fail))
 echo "THEMESTORE: $pass passed, $fail failed ($GESAMT Zusagen geprueft," \
      "Mindestzahl $MINDEST)"
 if [ "$GESAMT" -lt "$MINDEST" ]; then
-    echo "THEMESTORE: ABGEBROCHEN -- nur $GESAMT Zusagen geprueft," \
+    echo "THEMESTORE: ABORTED -- only $GESAMT promises checked," \
          "das ist kein gruener Lauf"
     exit 1
 fi

@@ -21,16 +21,13 @@ steht in den Aufnahmen der Runde.
 """
 import sys
 
-# ----------------------------------------------------------------- fUi
-# Nachgerechnet aus vendor/firn/lib/fui/core.fi. Jede Funktion traegt
-# die Zeilennummer, aus der sie stammt.
 
 def fui_close(d, sb):                       # core.fi cap_close
     if d == 0 or sb == 0 or sb > d:
         return set()
     kn = d - (sb - 1)
-    breit = kn + sb - 1                     # k laeuft UND t geht rechts
-    hoch = kn                               # nur k laeuft
+    breit = kn + sb - 1
+    hoch = kn
     ox = (d - breit) // 2 if d > breit else 0
     oy = (d - hoch) // 2 if d > hoch else 0
     p = set()
@@ -75,8 +72,6 @@ def fui_minimize(d, sb):                    # core.fi cap_minimize
         oy = oy - sb // 2 if oy >= sb // 2 else 0
     return {(x, oy + t) for x in range(d) for t in range(sb)}
 
-# ------------------------------------------------- die ALTE wm-Fassung
-# kernel/wm.fi `cap_glyph` vor dieser Runde, Commit db81a63.
 
 def wm_alt_close(d, sb):
     kn = d - (sb - 1)
@@ -121,12 +116,12 @@ def main():
         ("Wiederherstellen", fui_restore,  wm_alt_restore),
         ("Schliessen",       fui_close,    lambda d, sb, sk: wm_alt_close(d, sb)),
     ]
-    print("DER KERN MALT JETZT MIT fui.core -- die Form kommt aus EINER Datei.")
+    print("THE KERNEL NOW PAINTS WITH fui.core -- the shape comes from ONE file.")
     print()
-    print("Nach der Umstellung ruft kernel/ui/wm.fi `cap_glyph` die Routinen aus")
-    print("vendor/firn/lib/fui/core.fi auf. Die erste Spalte ist deshalb per")
-    print("Bauart null: es IST derselbe Quelltext. Die zweite Spalte zeigt,")
-    print("was die alte, selbstgemalte Fassung anders gemacht haette.")
+    print("After the switch kernel/ui/wm.fi `cap_glyph` calls the routines from")
+    print("vendor/firn/lib/fui/core.fi. The first column is therefore by")
+    print("construction zero: it IS the same source. The second column shows")
+    print("what the old, self-painted version would have done differently.")
     print()
     print(f"{'uisc':>4} {'d':>3} {'sb':>3} | {'Zeichen':<17} "
           f"{'Punkte':>7} | {'neu!=fUi':>9} {'alt!=fUi':>9}")
@@ -143,13 +138,13 @@ def main():
             print(f"{sk:>4} {d:>3} {sb:>3} | {name:<17} {len(f):>7} | "
                   f"{d_neu:>9} {d_alt:>9}")
     print("-" * 72)
-    print(f"groesste Abweichung der ALTEN Fassung: {schlimm} Bildpunkte")
+    print(f"largest deviation of the OLD version: {schlimm} pixels")
     print()
     if schlimm:
-        print("DAS WAR DER FEHLER: das Kreuz der alten Fassung rechnete EINE")
-        print("Verschiebung fuer beide Achsen, obwohl Breite (kn + sb - 1) und")
-        print("Hoehe (kn) verschieden sind. Bei uisc 1 und 2 faellt das nicht")
-        print("auf -- ab uisc 3 klebt das Kreuz oben.")
+        print("THAT WAS THE BUG: the cross of the old version computed ONE")
+        print("offset for both axes, although width (kn + sb - 1) and")
+        print("height (kn) differ. At uisc 1 and 2 it is not")
+        print("noticeable -- from uisc 3 the cross sticks to the top.")
     if alt:
         for sk in (2, 3):
             d, sb = 10 * sk, sk

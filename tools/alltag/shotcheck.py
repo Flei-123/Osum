@@ -89,25 +89,11 @@ class Pic(object):
 # ------------------------------------------------------------------ the log
 TEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
-    # RUNDE MERGE-2: FELDWEISE, NICHT IN EINER FESTEN REIHENFOLGE.
-    # Runde SOFTUI haengt hinter `tw=` noch `ax=`/`ay=` an; mit dem
-    # alten Muster passte danach KEINE einzige Zeile mehr, und dieses
-    # Werkzeug meldete "texts 0 measured 0" -- also 0 statt >= 12
-    # gemessener Beschriftungen, ohne dass am Bild irgendetwas fehlte.
-    # Dieselbe Stelle hat STATUS-SOFTUI.md fuer tools/look/run.sh und
-    # tools/look/umlaut.py berichtigt und diese hier uebersehen.
     r" tw=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
 
-# RUNDE THEMESTORE: WO DAS FENSTER STEHT, gesagt von dem Fenster.
-# Bis hierher nahm dieses Werkzeug fuer jedes Fenster ausser dem der
-# Einstellungen 0,0 an -- und mass damit Stellen des Schreibtischs
-# statt Beschriftungen. `cx`/`cy` ist der Ursprung der MALFLAECHE, in
-# denselben Koordinaten wie die Aufnahme.
 WINRE = re.compile(
     r"wlib: win id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) cx=(\d+) cy=(\d+)")
 
-# ... und wie hoch eine Zeile ist. Geraten wurde 16 hinauf und 6
-# hinunter; die Bibliothek sagt es jetzt selbst.
 FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
 
@@ -116,15 +102,6 @@ def parse(path, marke="settings: rect name=waa "):
     # everything after the LAST full rectangle report is the page that
     # is on the screen now
     #
-    # RUNDE WERKZEUGE: DIE MARKE IST EIN ARGUMENT GEWORDEN.
-    # Sie stand hier als eine Zeichenkette aus /bin/settings, und damit
-    # konnte dieser Pruefer genau EIN Programm messen. Jedes andere
-    # bekam ALLE je gemalten Texte auf einmal vorgelegt -- und ein
-    # Programm mit einer Beschriftung, die sich jede Sekunde aendert
-    # (der Aufgabenverwalter zeigt die Auslastung), meldete damit
-    # dreiundzwanzig Ueberlappungen einer Zeile mit sich selbst zu
-    # frueheren Zeitpunkten. Der Standard bleibt der von Runde
-    # THEMESTORE, damit die Aufrufe dort unveraendert weiterlaufen.
     cut = body.rfind(marke)
     tail = body[cut:] if cut >= 0 else body
     out = []
@@ -136,9 +113,6 @@ def parse(path, marke="settings: rect name=waa "):
                         x=int(m.group(3)), base=int(m.group(4)),
                         fg=int(m.group(5)), bg=int(m.group(6)),
                         tw=int(m.group(7)), t=m.group(8)))
-    # Die Fensterzeilen stehen am ANFANG des Laufs (ein Fenster wird
-    # einmal angelegt), also aus dem ganzen Text und nicht aus dem
-    # Schwanz. Die letzte Meldung je Fenster gilt.
     wins = {}
     for m in WINRE.finditer(body):
         wins[int(m.group(1))] = dict(x=int(m.group(2)), y=int(m.group(3)),
@@ -225,12 +199,9 @@ def main(argv):
         last[(t["kind"], t["t"])] = t
     texts = list(last.values())
 
-    # DER URSPRUNG KOMMT AUS DER FENSTERZEILE, wenn es eine gibt --
-    # `--window=` bleibt der Vorrang fuer den, der es besser weiss.
     if not forced and want_win in wins:
         w = wins[want_win]
         ox, oy, ww, wh = w["cx"], w["cy"], w["w"], w["h"]
-    # Die gemessenen Zahlen der Schrift, nicht die geratenen.
     asc, desc = font if font else (16, 6)
     bad = []
     boxes = []
@@ -240,11 +211,6 @@ def main(argv):
         y0 = oy + t["base"] - asc
         y1 = oy + t["base"] + desc
         x1 = x + t["tw"]
-        # AUF DIE MALFLAECHE BESCHNITTEN. Ein Text, dessen gemeldete
-        # Breite ueber den Fensterrand hinausreicht, holte sonst die
-        # Farbe des RAHMENS als "Tinte" herein -- und der Rahmen ist
-        # nicht sein Text. Dass er zu breit ist, sagt der Vergleich
-        # weiter unten, und zwar als das, was es ist.
         box = inkbox(pic, x, y0, min(x1, ox + ww), y1, rgb(t["bg"]), 10)
         if box is None:
             empty += 1
@@ -263,8 +229,6 @@ def main(argv):
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
             a, b = boxes[i][1], boxes[j][1]
-            # erst der billige Kasten, dann die teure Wahrheit: nur
-            # gemeinsame PUNKTE sind eine Ueberlappung.
             if a[0] > b[2] or b[0] > a[2] or a[1] > b[3] or b[1] > a[3]:
                 continue
             if not (a[5] & b[5]):

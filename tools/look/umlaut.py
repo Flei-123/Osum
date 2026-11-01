@@ -47,8 +47,6 @@ WIN = re.compile(
     rb"wm: win nr=\d+ id=\d+ z=\d+ layer=\d+ hidden=(\d+) deco=(\d+) "
     rb"x=(\d+) y=(\d+) w=(\d+) h=(\d+).*?t=\[([^\]]*)\]")
 
-# RUNDE MERGE-2: DIE GANZE TAFEL, MIT z UND LAGE -- fuer die Frage, was
-# UEBER dem gemessenen Fenster liegt. Siehe `frei_bis`.
 WINZ = re.compile(
     rb"wm: win nr=\d+ id=\d+ z=(\d+) layer=(\d+) hidden=(\d+) deco=(\d+) "
     rb"x=(\d+) y=(\d+) w=(\d+) h=(\d+).*?t=\[([^\]]*)\]")
@@ -87,7 +85,6 @@ def frei_bis(roh, titel, y0, y1, x0):
     for e in fenster:
         if e["hidden"] or e["z"] <= eigen["z"] or e is eigen:
             continue
-        # der AEUSSERE Kasten, Rahmen und Titelleiste eingeschlossen
         ex0 = e["x"] - (BORDER if e["deco"] else 0)
         ey0 = e["y"] - (TITLE if e["deco"] else 0)
         ex1 = e["x"] + e["w"] + (BORDER if e["deco"] else 0)
@@ -119,7 +116,7 @@ def fenster(roh, titel):
     if treffer is None:
         return None
     if treffer.group(1) != b"0":
-        return None          # verborgen -- da steht nichts auf dem Bild
+        return None
     return (int(treffer.group(3)), int(treffer.group(4)),
             int(treffer.group(5)), int(treffer.group(6)),
             treffer.group(2) == b"1")
@@ -155,20 +152,12 @@ def gemalt(roh, text):
     anderes Programm zerschnitten hat, traegt ihren Anfang trotzdem.
     """
     roh = bis_zum_foto(roh)
-    # RUNDE SOFTUI: zwischen `bg=` und `t=` darf stehen, was spaetere
-    # Runden dort anfuegen (`tw=` aus THEMESTORE, `ax=`/`ay=` aus
-    # SOFTUI). Die Zusage haengt am ANKER -- dem erwarteten Text -- und
-    # nicht an der Reihenfolge der Felder davor. Vorher hat sie an der
-    # Reihenfolge gehangen und ist beim naechsten Feld umgefallen.
     pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)(?: [a-z]+=\d+)* t="
            + re.escape(text.encode("utf-8")))
     treffer = list(re.finditer(pat, roh))
     if not treffer:
         return None
     m = treffer[-1]
-    # A-031: `px=` steht nur an der zweiten Zeile einer zweizeiligen
-    # Listenzeile (`wlib: text2`, kleinere Schrift). Ohne das Feld ist
-    # es die UI-Groesse 15 wie bisher.
     px = re.search(rb" px=(\d+) t=", m.group(0))
     return tuple(int(m.group(i)) for i in range(1, 6)) + (
         int(px.group(1)) if px else 15,)
@@ -178,23 +167,8 @@ def rgb(v):
     return [str((v >> 16) & 255), str((v >> 8) & 255), str(v & 255)]
 
 
-# ================================================ RUNDE GLAS (nachtrag)
-# DERSELBE PRUEFER FUER EINE ZEILE IM TERMINALFENSTER.
 #
-# Der Anlass: auf jeder Aufnahme der Runde GLAS stand
-# "KEIN EINZIGES GERT!" -- `wm.term_putc` hat die zwei Oktette des Ä
-# verschluckt. Kein Werkzeug dieses Baums konnte das melden: dieses
-# hier misst nur, was Ring 3 ueber `wlib: text` meldet, und das
-# Terminal malt durch den KERN, Zelle fuer Zelle, in der
-# Festbreitenschrift.
 #
-# `--gitter` misst genau diesen Fall. Die Lage kommt NICHT aus einer
-# Rechnung dieses Programms, sondern aus der Zeile, die der Kern selbst
-# druckt (`wm: termgitter win= x= y= cellw= cellh= asc= px=`): Spalte c
-# beginnt bei x + c * cellw, die Grundlinie der Zeile r liegt bei
-# y + r * cellh + asc. Gerechnet wird dann von `checkshot.py tgrid`,
-# demselben zweiten Rasterer, den tools/wm/run.sh seit Runde K10
-# benutzt.
 GITTER = re.compile(
     rb"wm: termgitter win=(\d+) x=(\d+) y=(\d+) cellw=(\d+) cellh=(\d+)"
     rb" asc=(\d+) px=(\d+)")
@@ -254,7 +228,7 @@ def term_pruefen(serial, ppm, text, zeile, spalte, tol, zeichen):
     roh = open(serial, "rb").read()
     g = gitter(roh)
     if g is None:
-        print("umlaut: [%s] keine `wm: termgitter`-Zeile im Mitschnitt"
+        print("umlaut: [%s] no `wm: termgitter` line in the capture"
               % zeichen)
         return 1
     x0, y0, cw, chh, asc, px = g
@@ -262,7 +236,7 @@ def term_pruefen(serial, ppm, text, zeile, spalte, tol, zeichen):
     ay = y0 + zeile * chh + asc
     farben = grundfarben(ppm, ax, ay - asc, ax + len(text) * cw, ay + 4)
     if farben is None:
-        print("umlaut: [%s] die Zeile %d ist im Bild nicht zu finden"
+        print("umlaut: [%s] line %d cannot be found in the image"
               % (zeichen, zeile))
         return 1
     vg, hg = farben
@@ -294,8 +268,6 @@ def main(argv):
     # the tolerant per-glyph proof `checkshot tink` instead of `ttext`.
     ink = "--ink" in argv
     argv = [x for x in argv if x != "--ink"]
-    # `--gitter=zeile,spalte` steht an der Stelle des Fenstertitels:
-    # eine Terminalzeile hat keinen, sie hat ein Raster.
     if argv[2].startswith("--gitter="):
         text = argv[3]
         zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
@@ -315,7 +287,7 @@ def main(argv):
 
     w = fenster(roh, titel)
     if w is None:
-        print("umlaut: [%s] kein sichtbares Fenster '%s'" % (zeichen, titel))
+        print("umlaut: [%s] no visible window '%s'" % (zeichen, titel))
         return 1
     wx, wy, ww, wh, deco = w
     t = gemalt(roh, text)
@@ -336,16 +308,7 @@ def main(argv):
             iy -= int(sm[-1])
     ax, ay = ix + tx, iy + tb
 
-    # EIN TEXT, DER UEBER SEIN FENSTER HINAUSRAGT, IST NICHT MESSBAR.
-    # Nicht weil der Rasterer irrt, sondern weil dort das NAECHSTE
-    # Fenster steht und dessen Bildpunkte im Bild stehen.
     #
-    # Das ist kein gedachter Fall: im Aufbau mit vier Fenstern ist der
-    # Dateimanager 396 breit, seine Spalte "Größe" faengt bei x=368 an
-    # und ist 44 breit. Geprueft man stumpf, meldet der Rasterer 72
-    # falsche Bildpunkte und man sucht den Fehler in der Schrift. Der
-    # Anfang allein reicht als Pruefung nicht -- es ist das ENDE, das
-    # hinausragt.
     sys.path.insert(0, os.path.join("tools", "ttf"))
     import raster
     schrift = raster.Schrift("assets/osum-sans.ttf", px)
@@ -357,8 +320,6 @@ def main(argv):
               % (zeichen, text[:30], tx, tx + breite, ww))
         return 1
 
-    # NUR DER SICHTBARE TEIL. `frei_bis` sagt, wo das naechste Fenster
-    # anfaengt; alles ab dort steht nicht auf dem Bild.
     hoch = 20
     grenze = frei_bis(roh, titel, ay - hoch, ay + 6, ax)
     if grenze is not None:

@@ -24,7 +24,7 @@ die linke obere Ecke -- dort haelt der Anschlag, und die Vorgeschichte
 ist geloescht -- und danach mit Schritten unter 128 an die Stelle, die
 er meint.  Von da an ist der Ort eine Rechnung und keine Hoffnung.
 
-Zeilen, die mit `#` anfangen, sind Anmerkungen.  `warte <sekunden>`
+Lines starting with a hash are notes.  `warte <sekunden>`
 haelt zwischendurch an.
 """
 import socket
@@ -77,9 +77,6 @@ def main():
                 s.recv(65536)
             except OSError:
                 pass
-        # Der Maschine Zeit lassen, das Letzte zu verarbeiten, BEVOR
-        # fotografiert wird -- sonst misst das Foto einen Zustand, den es
-        # noch gar nicht gibt.
         time.sleep(0.6)
     finally:
         try:

@@ -1,25 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/screen/boot.sh -- EIN Start, EIN Foto, EIN Mitschnitt.
 #
 #   bash tools/screen/boot.sh <name> <ausgabeverzeichnis> <sekunden> \
 #        <bios|uefi|kernel> <xres> <yres> [weitere qemu-worte...]
 #
-# Der Laeufer der Runde SCHIRM braucht immer dasselbe: eine Maschine
-# starten, warten, ein Bildschirmfoto ueber den QEMU-Monitor holen, den
-# seriellen Mitschnitt behalten, abschiessen. Das steht hier EINMAL,
-# damit die Zahlen aus verschiedenen Abschnitten vergleichbar sind.
 #
-#   bios    das USB-Abbild ueber den MBR-Weg (Limine bios-install)
-#   uefi    dasselbe Abbild ueber OVMF und /EFI/BOOT/BOOTX64.EFI
-#   kernel  qemu -kernel mit dem Multiboot-Abbild (kein Lader, VBE-Weg)
 #
-# $IMG    Pfad des USB-Abbilds (bios/uefi)
-# $KERN   Pfad des Multiboot-Kerns (kernel)
-# $APPEND Befehlszeile (nur kernel)
-# $DISK   Plattenabbild (nur kernel)
-# $VGAMEM Bildspeicher der Karte in MiB (Vorgabe 64)
-# $MARKE  Stichwort im Mitschnitt, auf das gewartet wird
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -73,9 +59,6 @@ case "$ART" in
 esac
 PID=$!
 
-# Warten: entweder bis das Stichwort im Mitschnitt steht ($MARKE) oder
-# die Frist ab ist. Eine feste Frist allein macht die Messung von der
-# Last des Wirts abhaengig.
 i=0
 N=$(python3 -c "print(int($WAIT*10))")
 getroffen=0
@@ -97,6 +80,6 @@ if [ -f "$PPM" ]; then
     head -2 "$PPM" | tr '\n' ' '
     echo " <- $PPM  (marke=$getroffen)"
 else
-    echo "KEIN FOTO fuer $NAME"
+    echo "NO PHOTO for $NAME"
 fi
 exit 0

@@ -28,31 +28,8 @@ import os
 import re
 import sys
 
-# DIE BEKANNTEN UEBERSCHNEIDUNGEN.  Sie sind alle vom selben Bauplan:
-# ein BREITER Schalter und eine Verfeinerung davon (`usb` und
-# `usbhold`, `disp` und `dispbench`, `nic` und `nicnoirq`).  Dort ist
-# das GEWOLLT -- wer `usbhold` schreibt, will USB.  Der Fall `usb` /
-# `nousb` ist derselbe und in kmain.fi seit Runde K17 ausdruecklich
-# beschrieben: BEIDE Bits werden gesetzt und `usb.stage` sieht beide an.
 #
-# Was hier NICHT stehen darf, ist der Fall, in den Runde HID gelaufen
-# ist: ein ABSCHALTER, der in einem fremden Wort steckt und dort etwas
-# ganz anderes ausschaltet (`nohid` in `nohidrep`).  Wer ein neues Wort
-# einfuehrt, das hier auftaucht, muss sich das ueberlegen und es
-# eintragen -- oder das Wort umbenennen, so wie diese Runde es getan hat.
 BEKANNT = {
-    # RUNDE BLECH-ECHT.  Acht Einschluesse, die erst durch das
-    # Zusammenfuehren entstanden sind -- alle acht vom erlaubten
-    # Bauplan "breiter Schalter + Verfeinerung", keiner davon ein
-    # ABSCHALTER in einem fremden Wort:
-    #   disp*   `vmode.fi` sucht diese vier mit `find_word`, also MIT
-    #           Wortgrenze -- der Einschluss kann dort gar nicht
-    #           zuschlagen.  Sie stehen hier trotzdem, weil worte.py
-    #           den ganzen Baum prueft und nicht den Finder kennt.
-    #   ehcitest / nicself / nictab  brauchen den breiten Schalter
-    #           wirklich: wer die Selbstpruefung des Netztreibers
-    #           fahren will, will den Treiber.  Dieselbe Lage wie bei
-    #           `nic`/`nicintx`, das seit Runde K17 hier steht.
     ("disp", "dispeigen"), ("disp", "dispeigenbad"),
     ("disp", "dispeigenfrist"),
     ("dispeigen", "dispeigenbad"), ("dispeigen", "dispeigenfrist"),
@@ -68,33 +45,10 @@ BEKANNT = {
     ("share", "noshare"),
     ("usb", "nousb"), ("usb", "usbhold"), ("usb", "usbnoirq"),
     ("usb", "usbpoll"), ("usb", "usbstick"),
-    # RUNDE BLECH-HID.  Zwei weitere Verfeinerungen von `usb`, und
-    # beide vom erlaubten Bauplan -- wer den USB-Bericht stehen lassen
-    # (`usbstop`) oder die Uebernahme pruefen (`usbleg`) will, will
-    # USB.  Kein Abschalter, keiner von beiden hebt etwas Fremdes auf.
     ("usb", "usbstop"), ("usb", "usbleg"),
-    # RUNDE ROTABSCHNITTE.  Vier Einschluesse, die durch das
-    # Zusammenfuehren der fuenf Runden entstanden sind.  Jeder einzeln
-    # nachgesehen, keiner ist der gefaehrliche Fall:
     #
-    #   audio / noaudio   Derselbe Bauplan wie `usb`/`nousb` und
-    #       `share`/`noshare`, und kmain.fi sagt es woertlich:
-    #       "`noaudio` loescht kein Bit, es setzt ein zweites, und
-    #       `audio_stage` sieht beide an -- ein Schalter, den sein
-    #       eigenes Argument aufhebt, ist keiner."  Wer `noaudio`
-    #       schreibt, setzt also BEIDE Bits, und das ist gewollt.
     #
-    #   flip / noflip     Dasselbe, nachgerechnet in fb.fi:985:
-    #       `if want(state, M_FLIP) && !want(state, M_NOFLIP)`.
-    #       Beide Bits werden angesehen, die Gegenprobe gewinnt.
     #
-    #   self / blkself, self / nicself   KEIN Einschluss im Betrieb.
-    #       `self` ist gar kein Moduswort, sondern ein PFADSEGMENT in
-    #       procfs.fi:1207, und es wird mit `streq` verglichen --
-    #       exakte Gleichheit auf einem Segment, nicht `find` auf der
-    #       ganzen Befehlszeile.  `/proc/self` kann in `blkself` oder
-    #       `nicself` nicht zuschlagen; die beiden stehen ausserdem in
-    #       anderen Dateien (kmain.fi, hw.fi) und meinen etwas anderes.
     ("audio", "noaudio"),
     ("flip", "noflip"),
     ("self", "blkself"), ("self", "nicself"),
@@ -104,11 +58,6 @@ BEKANNT = {
 def main():
     kdir = sys.argv[1] if len(sys.argv) > 1 else "kernel"
     worte = {}
-    # RUNDE O-STRUKTUR: der Kern liegt in Schichten. Ein glob auf
-    # `kernel/*.fi` sah nach dem Umzug nur noch die Haelfte der
-    # Moduswoerter (66 statt 127) -- und ein Pruefer, der die Haelfte
-    # nicht sieht, findet auch die Ueberschneidungen nicht, die dort
-    # liegen. Gesucht wird darum der ganze Baum, ohne user/ und app/.
     def _alle(d):
         aus = []
         for stamm, verz, namen in os.walk(d):
@@ -132,18 +81,15 @@ def main():
                     print("  FALL  %-10s steckt in %-10s (%s / %s)"
                           % (a, b, worte[a][0], worte[b][0]))
                     schlecht += 1
-    # Und andersherum: verschwindet ein bekanntes Paar, gehoert es aus
-    # der Liste heraus -- sonst deckt sie irgendwann etwas zu, das gar
-    # nicht mehr da ist.
     tot = BEKANNT - gefunden
     for a, b in sorted(tot):
-        print("  HINWEIS %s/%s steht in BEKANNT, gibt es aber nicht mehr"
+        print("  NOTE %s/%s is in KNOWN, but no longer exists"
               % (a, b))
     if schlecht:
-        print("  %d NEUE Ueberschneidungen unter %d Moduswoertern"
+        print("  %d NEW overlaps among %d mode words"
               % (schlecht, len(worte)))
         return 1
-    print("  ok    %d Moduswoerter, %d bekannte Ueberschneidungen, keine neue"
+    print("  ok    %d mode words, %d known overlaps, none new"
           % (len(worte), len(gefunden)))
     return 0
 

@@ -45,9 +45,6 @@ def chunk(typ, data):
 
 def main(src, dst):
     w, h, px = read_ppm(src)
-    # Filtertyp 0 je Zeile -- PNG verlangt das Byte, und "keine
-    # Vorhersage" ist bei einem Bildschirmfoto mit grossen einfarbigen
-    # Flaechen kaum schlechter als die klugen Filter.
     raw = b"".join(b"\x00" + px[y * w * 3:(y + 1) * w * 3] for y in range(h))
     png = (b"\x89PNG\r\n\x1a\n"
            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))

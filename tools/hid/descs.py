@@ -35,7 +35,7 @@ Aufruf:
     python3 tools/hid/descs.py firn   > kernel/drv/hid/hidtest.fi
     python3 tools/hid/descs.py kopf              # Erwartung, Zeile je Geraet
     python3 tools/hid/descs.py felder            # Erwartung, Zeile je Feld
-    python3 tools/hid/descs.py fehler            # die kaputten, mit Nummer
+    python3 tools/hid/descs.py fehler            (the broken ones, with number)
 """
 import sys
 
@@ -241,7 +241,6 @@ CONSUMER = bytes([
     0xC0,              # End Collection
 ])
 
-# 6. Tastatur ohne Anschlagsgrenze (NKRO)
 KBD_NKRO = bytes([
     0x05, 0x01,        # Usage Page (Generic Desktop)
     0x09, 0x06,        # Usage (Keyboard)
@@ -271,9 +270,6 @@ GUT = [
     ("nkro", KBD_NKRO),
 ]
 
-# ----------------------------------------------------------------------
-# DIE KAPUTTEN.  Jede ist auf GENAU EINE Art kaputt, und zu jeder gehoert
-# die Fehlernummer aus kernel/hidrep.fi, die dabei herauskommen MUSS.
 
 E_OK, E_TRUNC, E_NEST, E_FIELDS, E_RIDS = 0, 1, 2, 3, 4
 E_PUSH, E_SIZE, E_USAGE, E_LONG, E_EMPTY, E_BIG = 5, 6, 7, 8, 9, 10
@@ -281,42 +277,31 @@ E_PUSH, E_SIZE, E_USAGE, E_LONG, E_EMPTY, E_BIG = 5, 6, 7, 8, 9, 10
 KAPUTT = [
     # mitten in einem Posten abgeschnitten
     ("abgeschn", KBD_BOOT[:41], E_TRUNC),
-    # der letzte Posten verspricht zwei Datenoktette und hat keins
     ("kopfleer", KBD_BOOT[:62] + bytes([0x26]), E_TRUNC),
-    # Sammlung nie geschlossen (das schliessende C0 fehlt)
     ("offen", KBD_BOOT[:-1], E_NEST),
-    # Sammlungsende ohne Sammlung
     ("endeohne", bytes([0xC0]), E_NEST),
     # neun Sammlungen tief -- MAX_DEPTH ist acht
     ("zutief", bytes([0x05, 0x01, 0x09, 0x06] + [0xA1, 0x01] * 9), E_NEST),
-    # Holen ohne Ablegen
     ("popleer", bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0xB4, 0xC0]),
      E_PUSH),
-    # Berichtsgroesse 255 -- ueber 32 Bit rechnet dieser Kernel nicht
     ("gr255", bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
                      0x75, 0xFF, 0x95, 0x01, 0x81, 0x02, 0xC0]), E_SIZE),
-    # Berichtsnummer 0 gibt es nicht
     ("ridnull", bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
                        0x85, 0x00, 0xC0]), E_SIZE),
-    # ein Bericht von 8 * 1024 Bit passt in keinen Puffer
     ("zugross", bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01,
                        0x75, 0x08, 0x96, 0x00, 0x04,
                        0x81, 0x02, 0xC0]), E_BIG),
-    # ein LANGER Posten -- es gibt bis heute keinen vergebenen
     ("langpost", bytes([0x05, 0x01, 0xFE, 0x02, 0x00, 0x00, 0x00, 0xC0]),
      E_LONG),
     # leer
     ("leer", b"", E_EMPTY),
-    # mehr Felder als die Tabelle fasst
     ("vielfeld",
      bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x75, 0x01, 0x95, 0x01]
            + [0x09, 0x30, 0x81, 0x02] * 65 + [0xC0]), E_FIELDS),
-    # mehr Berichtsnummern als die Tabelle fasst (MAX_RIDS ist 16)
     ("vielrid",
      bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x75, 0x08, 0x95, 0x01]
            + sum([[0x85, i + 1, 0x09, 0x30, 0x81, 0x02] for i in range(17)], [])
            + [0xC0]), E_RIDS),
-    # mehr lokale Gebraeuche als Platz (MAX_USAGES ist 32)
     ("vielgeb",
      bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01] + [0x09, 0x30] * 33
            + [0x75, 0x01, 0x95, 0x01, 0x81, 0x02, 0xC0]), E_USAGE),
@@ -324,11 +309,6 @@ KAPUTT = [
 
 
 
-# ----------------------------------------------------------------------
-# DIE BERICHTE.  Zu den Beschreibungen gehoeren Berichte -- sonst ist der
-# Zerleger eine Uebung ohne Gegenstand.  Jeder Bericht hier ist VON HAND
-# gebaut, mit der Bitlage aus der Beschreibung daneben, damit sich
-# nachrechnen laesst, was herauskommen MUSS.
 
 
 def bitset(buf, bit, wert, n=1):
@@ -383,7 +363,7 @@ def ptp(finger, knopf=0, zeit=0):
     for k, f in enumerate(finger[:5]):
         cid, x, y = f[0], f[1], f[2]
         conf = f[3] if len(f) > 3 else 1   # 0 = "palm" (not confident)
-        o = 8 + k * 40          # +8, weil Oktett 0 die Nummer ist
+        o = 8 + k * 40
         bitset(b, o + 0, conf)  # Zuversicht
         bitset(b, o + 1, 1)     # Spitzenschalter
         bitset(b, o + 4, cid, 4)
@@ -400,31 +380,18 @@ def bootmaus(knoepfe, dx, dy):
     return bytes([knoepfe & 7, dx & 0xFF, dy & 0xFF])
 
 
-# (Beschreibung, Bericht, Bemerkung).  Die Reihenfolge IST der Test:
-# ein Touchpad wird aus zwei aufeinanderfolgenden Berichten gelesen.
 BERICHTE = [
-    # --- (c) MEHR ALS SECHS TASTEN GLEICHZEITIG.
-    #     Acht Buchstaben (a..h = Gebrauch 4..11) in EINEM Bericht.
-    #     Im Boot-Protokoll gibt es dafuer nur sechs Plaetze.
     (5, nkro([], [4, 5, 6, 7, 8, 9, 10, 11]), "acht Tasten"),
-    #     zwei mehr, und Umschalt dazu: elf gleichzeitig
     (5, nkro([0xE1], [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]), "elf mit Umschalt"),
     #     alles los
     (5, nkro([], []), "alles losgelassen"),
-    #     die Super-Taste allein -- der Latch von kbd.fi
     (5, nkro([0xE3], []), "Super gedrueckt"),
-    #     SUPER PLUS BUCHSTABE. Das ist der Regressionstest (d): in
-    #     kbd.fi wird das GELATCHT und NICHT ins Fenster geliefert --
-    #     "A hotkey has no window, that is what makes it global".
-    #     Erwartet: eine Zeile `hk: super+a` und KEIN `key: a`.
     (5, nkro([0xE3], [4]), "Super+a"),
     (5, nkro([0xE3], []), "Super+a los"),
     (5, nkro([], []), "Super losgelassen"),
-    # --- die Boot-Tastatur, ueber DENSELBEN Weg
     (0, bootkbd([], [4]), "boot: a"),
     (0, bootkbd([0xE1], [4]), "boot: Umschalt+a"),
     (0, bootkbd([], []), "boot: los"),
-    #     UEBERLAUF: sechs Plaetze mit 0x01 heisst "zu viele Tasten"
     (0, bootkbd([], [1, 1, 1, 1, 1, 1]), "boot: Ueberlauf"),
     #     r157 (H-001): three keys in ONE report, slots in the order they
     #     went down: x z y. The bitmap used to give x y z.
@@ -433,11 +400,8 @@ BERICHTE = [
     #     r157: modifiers and a key in ONE report: modifiers first.
     (0, bootkbd([0xE1, 0xE0], [4]), "boot: Strg+Umschalt+a"),
     (0, bootkbd([], []), "boot: Strg+Umschalt los"),
-    # --- die Boot-Maus
     (1, bootmaus(1, 10, 250), "maus: links, +10, -6"),
     (1, bootmaus(0, 0, 0), "maus: losgelassen"),
-    # --- (f) DAS PRAEZISIONS-TOUCHPAD
-    #     erster Bericht: nur merken, NICHT bewegen
     (3, ptp([(1, 1000, 800)]), "pad: aufsetzen"),
     #     +300 Einheiten in x.  Teiler 3616/1024 = 3 -> 100 Bildpunkte
     (3, ptp([(1, 1300, 800)]), "pad: +300x -> +100px"),
@@ -446,9 +410,7 @@ BERICHTE = [
     #     Knopf gedrueckt
     (3, ptp([(1, 1300, 950)], knopf=1), "pad: klick"),
     (3, ptp([(1, 1300, 950)], knopf=0), "pad: klick los"),
-    #     zweiter Finger dazu: der Bericht setzt nur neu auf
     (3, ptp([(1, 1300, 950), (2, 1800, 950)]), "pad: zwei Finger"),
-    #     beide 120 Einheiten nach unten: EINE Radrastung
     (3, ptp([(1, 1300, 1070), (2, 1800, 1070)]), "pad: rollen"),
     #     abheben
     (3, ptp([]), "pad: abheben"),
@@ -552,28 +514,8 @@ BERICHTE = [
 
 
 
-# ----------------------------------------------------------------------
-# EINE ACPI-TABELLE MIT ZWEI I2C-GERAETEN, gebaut nach der Spezifikation.
 #
-# Der Ersatzweg in kernel/i2chid.fi sucht in DSDT und SSDT nach dem
-# Oktettmuster einer I2C-Verbindung.  Ob er das richtig tut, laesst sich
-# ohne ein Brett mit LPSS-I2C nur so pruefen: eine Tabelle bauen, in der
-# GENAU BEKANNT ist, was drinsteht, und nachsehen, ob er genau das
-# findet -- und nicht mehr.
 #
-# I2C Serial Bus Connection Resource Descriptor (ACPI 6.x, 6.4.3.8.2.1):
-#     +0   0x8E        grosser Typ, Serial Bus Connection
-#     +1   Laenge, 2 Oktett (alles NACH diesen drei)
-#     +3   Revision (0x01)
-#     +4   Index der Ressourcenquelle
-#     +5   Bustyp (0x01 = I2C)
-#     +6   allgemeine Merker
-#     +7   typabhaengige Merker, 2 Oktett
-#     +9   typabhaengige Revision
-#     +10  Laenge der Typdaten, 2 Oktett (6 bei I2C)
-#     +12  Verbindungsgeschwindigkeit, 4 Oktett
-#     +16  SKLAVENADRESSE, 2 Oktett
-#     +18  Name der Ressourcenquelle, mit abschliessender Null
 
 
 def i2c_res(adr, hz=400000, quelle=b"\\_SB.PCI0.I2C1\0"):
@@ -593,19 +535,17 @@ def acpi_tabelle(adressen, sig=b"DSDT"):
     koerper += bytes([0x5B, 0x82, 0x30, 0x44, 0x45, 0x56, 0x30])  # Device(DEV0)
     koerper += bytes([0x08, 0x5F, 0x48, 0x49, 0x44])              # Name(_HID
     koerper += (0x500CD041).to_bytes(4, "little")                 # EisaId PNP0C50
-    koerper += bytes([0x8E, 0x00, 0x00, 0xFF])   # ein 0x8E, das KEINES ist
+    koerper += bytes([0x8E, 0x00, 0x00, 0xFF])
     koerper += i2c_res(adressen[0])
-    koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])  # noch ein Koeder
+    koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])
     koerper += i2c_res(adressen[1], quelle=b"\\_SB.PCI0.I2C0\0")
-    koerper += i2c_res(adressen[0])   # DIESELBE noch einmal -- darf nicht
-    #                                    doppelt in die Liste
+    koerper += i2c_res(adressen[0])
     kopf = bytearray(36)
     kopf[0:4] = sig
     kopf[4:8] = (36 + len(koerper)).to_bytes(4, "little")
     kopf[8] = 2
     kopf[10:16] = b"OSUMHD"
     t = bytes(kopf) + bytes(koerper)
-    # Pruefsumme, damit die Tabelle auch als echte durchginge
     t = bytearray(t)
     t[9] = (-sum(t)) & 0xFF
     return bytes(t)
@@ -615,8 +555,6 @@ I2C_ADRESSEN = [0x2C, 0x15]
 ACPI_BLOB = acpi_tabelle(I2C_ADRESSEN)
 
 
-# ----------------------------------------------------------------------
-# DER ZWEITE ZERLEGER.  Aus der Spezifikation, nicht aus hidrep.fi.
 
 FL_CONST, FL_VAR = 1, 2
 KIND_IN, KIND_OUT, KIND_FEAT = 1, 2, 3

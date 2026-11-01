@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/r5.sh -- R5: LAEUFT ETWAS UNTER DIE TASKLEISTE?
 #
 #   bash tools/design/r5.sh [kern.mb] [wurzel.img] [ausgabe]
 #
-# Justin: "search programs overlapped mit der taskbar und das soll
-# nicht sein, sondern wie bei windows drueber sein."
 #
-# Gemessen werden ZWEI Zahlen und ihr Abstand, nicht der Eindruck:
 #
 #   Unterkante des Suchfensters   (launcher: geom y= + h=)
 #   Oberkante der Taskleiste      (Schirmhoehe - taskbar: conf height=)
 #
-# Dasselbe fuer ein MAXIMIERTES Fenster: auch das darf nicht unter die
-# Leiste laufen. Beides in 3440x1440, Justins Aufloesung.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 KERN=${1:-/tmp/r5b-k.mb}
@@ -65,7 +59,7 @@ SH = 1440
 m = re.search(r'launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)', t)
 c = re.search(r'taskbar: conf edge=\d+ ename=\w+ height=(\d+)', t)
 if not m or not c:
-    print("  konnte die Zahlen nicht lesen"); sys.exit(1)
+    print("  could not read the numbers"); sys.exit(1)
 x, y, w, h = (int(v) for v in m.groups())
 bar = int(c.group(1))
 ok = SH - bar
@@ -77,12 +71,12 @@ print()
 if unten > ok:
     print("  ERGEBNIS: ragt %d Bildpunkte IN die Taskleiste   FAIL" % (unten - ok))
     sys.exit(1)
-print("  ERGEBNIS: %d Bildpunkte Abstand ueber der Taskleiste   OK" % (ok - unten))
+print("  RESULT: %d pixels gap above the taskbar   OK" % (ok - unten))
 PY
 E=$?
 
 echo
-echo "== deckt irgendetwas die Taskleiste zu? (Bildpunkte im Leistenband) =="
+echo "== does anything cover the taskbar? (pixels in the bar band) =="
 python3 - "$W/01-suchfenster.ppm" <<'PY'
 import sys
 p = sys.argv[1]
@@ -99,8 +93,6 @@ while len(tok) < 3:
 i += 1
 w, h, _ = tok
 px = d[i:]
-# Die Leiste ist das unterste Band. Wie viele verschiedene Farben
-# stehen dort? Ein zugedecktes Stueck brachte die Farben des Menues mit.
 for band, name in ((80, "unterste 80 Zeilen (Leiste)"),):
     s = set()
     for y in range(h - band, h, 2):

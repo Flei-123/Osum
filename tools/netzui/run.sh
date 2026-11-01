@@ -16,7 +16,7 @@ fail=0
 ok()  { echo "  ok   $*"; pass=$((pass+1)); }
 bad() { echo "  FAIL $*"; fail=$((fail+1)); }
 
-echo "== 1. ist die geprueft Kopie noch dieselbe wie das Programm? =="
+echo "== 1. is the checked copy still the same as the program? =="
 
 rumpf() { # datei funktion
     awk -v f="fn $2(" '
@@ -32,9 +32,9 @@ for fn in rate_aus rate_an append_amount zehntel_an; do
     if [ -z "$a" ]; then
         bad "$fn: in kernel/user/settings.fi nicht gefunden"
     elif [ "$a" = "$b" ]; then
-        ok "$fn ist in beiden Dateien Zeichen fuer Zeichen dieselbe"
+        ok "$fn is the same character for character in both files"
     else
-        bad "$fn ist AUSEINANDERGELAUFEN -- die Kopie prueft etwas anderes"
+        bad "$fn HAS DIVERGED -- the copy checks something else"
         diff <(echo "$a") <(echo "$b") | head -10 | sed 's/^/        /'
     fi
 done
@@ -49,21 +49,21 @@ for fn in glatt_ein glatt_tx glatt_rx; do
     fi
 done
 
-echo "== 2. die Gegenprobe der Gegenprobe =="
+echo "== 2. the control of the control =="
 cp tools/netzui/logik.fi "$TMPD/kaputt.fi"
 sed -i 's|return (fresh - alt) \* 100 / dt|return (fresh - alt) * 99 / dt|' "$TMPD/kaputt.fi"
 a=$(rumpf kernel/user/settings.fi rate_aus)
 b=$(rumpf "$TMPD/kaputt.fi" rate_aus)
 if [ "$a" != "$b" ]; then
-    ok "ein veraenderter Rumpf wird erkannt (100 -> 99)"
+    ok "a changed body is detected (100 -> 99)"
 else
-    bad "der Vergleich schlaegt NICHT an -- er prueft nichts"
+    bad "the comparison does NOT trigger -- it checks nothing"
 fi
 
-echo "== 3. die Rechnungen selbst =="
+echo "== 3. the computations themselves =="
 if ! FIRNLIB="$FIRNLIB_TEST" "$FIRNC" --profile=app tools/netzui/logik.fi \
         -o "$TMPD/logik" > "$TMPD/build.log" 2>&1; then
-    bad "tools/netzui/logik.fi laesst sich nicht uebersetzen"
+    bad "tools/netzui/logik.fi cannot be compiled"
     sed 's/^/        /' "$TMPD/build.log" | head -15
 else
     ok "tools/netzui/logik.fi uebersetzt"
@@ -75,11 +75,11 @@ else
     pass=$((pass + ${n_ok:-0}))
     fail=$((fail + ${n_bad:-0}))
     if [ "$rc" != 0 ] && [ "${n_bad:-0}" = 0 ]; then
-        bad "das Pruefprogramm endete mit $rc, meldet aber keinen Fehlschlag"
+        bad "the test program ended with $rc, but reports no failure"
     fi
 fi
 
-echo "== 4. uebersetzt das Programm, in das die Rechnung gehoert? =="
+echo "== 4. does the program the computation belongs in compile? =="
 if "$FIRNC" -c --profile=app kernel/user/settings.fi -o "$TMPD/settings.o" \
         > "$TMPD/set.log" 2>&1; then
     ok "kernel/user/settings.fi uebersetzt"
@@ -101,30 +101,30 @@ for k in $(grep -o 'settings\.net\.[a-z.]*' kernel/user/settings.fi | sort -u); 
     fi
 done
 if [ "$kn" -gt 0 ]; then
-    ok "$kn Schluessel, alle in locale/de und locale/en"
+    ok "$kn keys, all in locale/de and locale/en"
 else
-    bad "keine Schluessel gefunden -- der Test misst nichts"
+    bad "no keys found -- the test measures nothing"
 fi
 
-echo "== 6. passen die Texte in ihre Spalte? =="
+echo "== 6. do the texts fit their column? =="
 if python3 tools/netzui/breiten.py > "$TMPD/breiten.txt" 2>&1; then
-    ok "alle Zeilen der Netzseite passen in ihre Spalte"
+    ok "all rows of the network page fit their column"
     sed 's/^/  /' "$TMPD/breiten.txt" | grep -a 'ok  ' | tail -3
 else
-    bad "Zeilen der Netzseite laufen aus ihrer Spalte"
+    bad "rows of the network page overflow their column"
     sed 's/^/        /' "$TMPD/breiten.txt" | grep -a 'ZU BREIT'
 fi
 
-echo "== 7. passen die Tafelspalten zu ihrer Tafel? =="
+echo "== 7. do the table columns fit their table? =="
 for tafel in c_nprog c_nconn; do
     summe=$(grep -a "static mut $tafel" kernel/user/settings.fi \
             | sed 's/.*= "//; s/".*//' \
             | grep -aoE '[0-9]+' \
             | awk '{s += $1} END {print s+0}')
     if [ -n "$summe" ] && [ "$summe" -le 428 ]; then
-        ok "$tafel: Spalten zusammen $summe von 428 Bildpunkten"
+        ok "$tafel: columns total $summe of 428 pixels"
     else
-        bad "$tafel: Spalten zusammen $summe -- die Tafel hat 428"
+        bad "$tafel: columns total $summe -- the table has 428"
     fi
 done
 

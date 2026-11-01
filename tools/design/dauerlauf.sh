@@ -1,28 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/dauerlauf.sh -- ZWANZIG LAEUFE MIT VIER KERNEN.
 #
 #   bash tools/design/dauerlauf.sh [anzahl] [smp]
 #
-# Die Zusage dieser Runde lautet: die Bewegungen laufen auf vier Kernen
-# ohne Panik.  Ein Lauf beweist das nicht -- eine Verschraenkung, die
-# nur in einem von zwanzig Faellen ungluecklich ausgeht, ist genau die
-# Art Fehler, die eine Animation mitbringt: sie fasst STAENDIG dieselben
-# Felder an, waehrend der Zeitgeber weiterlaeuft.
 #
-# Gezaehlt wird, was der Kernel selbst meldet:
-#   * QEMU-Beendigungscode 21 = der Kernel hat sich selbst beendet
-#   * die Zeile `kernel: done` auf der seriellen Leitung
-#   * KEINE Zeile mit PANIC/EXCEPTION/#PF/#GP/#DF
 #
-# EIN FEHLER, DEN DIESES SKRIPT SELBST GEMACHT HAT, UND WARUM ER HIER
-# STEHT.  Die erste Fassung pruefte auf den Code 43 -- (21<<1)|1, also
-# das, was `isa-debug-exit` auf den Bus legt.  Was bei `timeout` ankommt,
-# ist aber 21.  Damit hat sie einen vollstaendig sauberen Lauf als
-# Fehlschlag gemeldet.  Eine Messung, die das Gute als schlecht meldet,
-# ist genauso wertlos wie eine, die das Schlechte durchwinkt -- und sie
-# ist gefaehrlicher, weil sie zu einer "Behebung" von etwas fuehrt, das
-# nie kaputt war.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -71,5 +53,5 @@ for i in $(seq 1 "$N"); do
     rm -f "$d/disk.img"
 done
 echo
-echo "== $ok von $N ohne Panik, $bad Fehlschlaege =="
+echo "== $ok of $N without panic, $bad failures =="
 [ "$bad" = 0 ]

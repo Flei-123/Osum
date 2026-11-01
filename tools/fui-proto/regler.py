@@ -44,22 +44,16 @@ def main():
     txt = lies(sys.argv[1])
     fehler = 0
 
-    print("== DIE RINNE, WIE DAS KONTROLLZENTRUM SIE MELDET ==")
+    print("== THE GROOVE AS THE CONTROL CENTER REPORTS IT ==")
     spur = alle(txt, r"qs: hell spur von=(\d+) bis=(\d+) ym=(\d+)")
     if not spur:
-        print("  KEINE Rinne gemeldet -- das Kontrollzentrum war nie offen")
+        print("  NO groove reported -- the control center was never open")
         return 1
     v, b, ym = spur[-1].groups()
-    print(f"  Helligkeit: von x={v} bis x={b}, Mitte y={ym}")
+    print(f"  Brightness: from x={v} to x={b}, middle y={ym}")
 
     print()
-    print("== WAS DER REGLER AUS DER ZEIGERSTELLE RECHNET ==")
-    # DIE RICHTIGE ZEILE. `qs: hell ist=` ist der Wert, den das Panel
-    # beim MALEN abliest -- er kommt aus dem Kern und bleibt stehen,
-    # solange der Kern ihn nicht annimmt. Was der Regler aus der Maus
-    # RECHNET, steht in `qs: hell auf =<v> rc=<rc>`: v ist der Wert,
-    # rc die Antwort des Kerns (0 = angenommen, -19 = ENODEV, kein
-    # Anzeigegeraet).
+    print("== WHAT THE SLIDER COMPUTES FROM THE POINTER POSITION ==")
     gerechnet = [(int(m.group(1)), int(m.group(2)))
                  for m in alle(txt, r"qs: hell auf =(\d+) rc=(-?\d+)")]
     if gerechnet:
@@ -68,25 +62,23 @@ def main():
         print(f"  {len(gerechnet)} Zuege, {len(vs)} verschiedene Werte: {vs}")
         print(f"  Antworten des Kerns: {rcs}")
         if len(vs) >= 2:
-            print("  OK  die Zeigerstelle bestimmt den Wert -- der Regler")
-            print("      rechnet wirklich, es ist kein gemalter Griff")
+            print("  OK  the pointer position determines the value -- the slider")
+            print("      really computes, it is not a painted handle")
         else:
             print("  FEHLT: immer derselbe Wert")
             fehler += 1
         if rcs == [-19]:
-            print("  HINWEIS: der Kern nimmt ihn NICHT an (-19 = ENODEV).")
+            print("  NOTE: the kernel does NOT accept it (-19 = ENODEV).")
             print("      kernel/sys/sysgui.fi do_dispset verlangt vmode.ready();")
-            print("      QEMUs einfacher Rahmenpuffer hat kein Anzeigegeraet.")
-            print("      Das ist die Umgebung und kein Fehler der Oberflaeche.")
+            print("      QEMU's simple framebuffer has no display device.")
+            print("      That is the environment and not a fault of the UI.")
     else:
-        print("  keine Rechnung gemeldet -- der Regler wurde nie beruehrt")
+        print("  no computation reported -- the slider was never touched")
         fehler += 1
 
     print()
-    print("== DER WERT, DEN DAS PANEL BEIM MALEN ABLIEST ==")
+    print("== THE VALUE THE PANEL READS WHEN PAINTING ==")
     werte = [int(m.group(1)) for m in alle(txt, r"qs: hell ist=(\d+)")]
-    # Aufeinanderfolgende Wiederholungen zusammenfassen: das
-    # Kontrollzentrum malt sich oefter neu als es sich aendert.
     folge = []
     for w in werte:
         if not folge or folge[-1] != w:
@@ -94,8 +86,8 @@ def main():
     print(f"  gemeldete Werte in Reihenfolge: {folge}")
     if len(folge) < 2:
         print("  unveraendert -- erwartbar, solange der Kern ENODEV sagt:")
-        print("  das Panel liest den Wert beim Malen aus dem Kern, und der")
-        print("  hat ihn nicht uebernommen. Was die Oberflaeche tut, steht")
+        print("  the panel reads the value from the kernel when painting, and it")
+        print("  did not take it over. What the UI does is shown")
         print("  im Abschnitt darueber.")
     else:
         print(f"  verschiedene Werte: {len(set(folge))}")
@@ -103,7 +95,7 @@ def main():
             print("  FEHLT: immer derselbe Wert")
             fehler += 1
         else:
-            print("  OK  der Wert folgt der Maus -- kein gemalter Griff")
+            print("  OK  the value follows the mouse -- no painted handle")
 
     print()
     print("== DIE LAUTSTAERKE ==")
@@ -114,10 +106,10 @@ def main():
         print("  nicht gemeldet")
 
     print()
-    print("== HAT fUi GEMALT? (Bericht der Taskleiste) ==")
+    print("== DID fUi PAINT? (taskbar report) ==")
     fui = alle(txt, r"fui=(\d+) fuix=(\d+)")
     if not fui:
-        print("  KEIN Zaehler auf der Leitung -- unbekannt")
+        print("  NO counter on the wire -- unknown")
         fehler += 1
     else:
         ok, no = fui[-1].groups()
@@ -126,10 +118,10 @@ def main():
         print(f"  von fUi gemalt: {ok}   zurueckgefallen: {no}"
               f"   ({anteil:.1f} % durch fUi)")
         if ok == 0:
-            print("  FEHLT: fUi hat NICHTS gemalt -- die Bruecke laeuft nicht")
+            print("  MISSING: fUi painted NOTHING -- the bridge is not running")
             fehler += 1
         else:
-            print("  OK  die Flaechen auf dem Bildschirm kommen aus fUi")
+            print("  OK  the areas on screen come from fUi")
 
     print()
     if fehler:

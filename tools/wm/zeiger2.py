@@ -32,21 +32,9 @@ Rueckgabe 0, wenn jede Form die Pruefungen haelt.
 import os
 import sys
 
-# Das Entwurfsraster.  24 ist die Zielgroesse bei Vervielfachung 1 --
-# also ist eine Entwurfseinheit dort genau ein Bildpunkt, und die
-# Zahlen unten lassen sich ohne Umrechnung lesen.
 G = 24.0
 
-# Die Formen.  Reihenfolge IST die Nummerierung, auf die sich
-# kernel/wm.fi und kernel/user/wlibc.fi stuetzen:
-#   0 Pfeil, 1 Textmarke, 2 Hand, 3 Breite, 4 Hoehe,
-#   5 Diagonale NW-SO, 6 Diagonale NO-SW, 7 Verschieben, 8 Warten,
-#   9 Verboten (Ring mit Schraegstrich, EIN einfacher Umriss)
-#   10 Kopie (Plus, drag and drop mit Ctrl), 11 Ziel (Pfeil nach unten, drag and drop verschieben)
 #
-# Je Form: (Name, Griffpunkt, Umriss).  Der Griffpunkt ist die Stelle
-# im Entwurfsraster, die auf der Mausposition liegt -- beim Pfeil die
-# Spitze, bei allen anderen die Mitte.
 NAMEN = ["pfeil", "text", "hand", "breite", "hoehe",
          "diag1", "diag2", "kreuz", "warten", "verboten", "kopie", "ziel"]
 
@@ -62,28 +50,13 @@ def _dreh(pts, grad, cx=12.0, cy=12.0):
     return out
 
 
-# --- 0 PFEIL ------------------------------------------------------
-# Die Spitze liegt auf (0,0); die Kerbe zwischen Kopf und Schwanz ist
-# EINE Ecke und keine Luecke (das war der Fehler der Runde BLECH-HID).
-# Der Umriss ist um zwei Einheiten nach rechts unten geschoben, und
-# der Griffpunkt liegt genau auf der Spitze (2,2). Das ist kein
-# Schoenheitsgriff: die weisse Aussenlinie ist 1,33 Einheiten stark,
-# und ohne diesen Rand waere sie an der Spitze und an der linken Kante
-# ABGESCHNITTEN -- der Pfeil haette dort einen dunklen Rand und
-# sonst einen weissen.
 PFEIL = [(2.0, 2.0), (2.0, 19.0), (6.2, 15.0), (8.9, 21.4),
          (11.6, 20.2), (8.9, 14.0), (13.6, 14.0)]
 
-# --- 1 TEXTMARKE --------------------------------------------------
-# Ein I-Balken mit Serifen: ohne sie ist er ueber senkrechten Kanten
-# (Fensterrand, Tabellengitter) nicht zu erkennen.
 TEXT = [(8.5, 3.5), (15.5, 3.5), (15.5, 5.1), (12.9, 5.1),
         (12.9, 18.9), (15.5, 18.9), (15.5, 20.5), (8.5, 20.5),
         (8.5, 18.9), (11.1, 18.9), (11.1, 5.1), (8.5, 5.1)]
 
-# --- 2 HAND -------------------------------------------------------
-# Ein zeigender Zeigefinger und die Faust darunter, als EIN Umriss.
-# Der Griffpunkt liegt an der Fingerspitze, wie bei jedem System.
 HAND_ROH = [(8.0, 2.5), (10.6, 2.5), (11.4, 3.4), (11.4, 11.4),
         (12.6, 10.6), (15.0, 10.6), (15.8, 11.4),
         (16.4, 10.9), (18.4, 10.9), (19.2, 11.7),
@@ -92,9 +65,6 @@ HAND_ROH = [(8.0, 2.5), (10.6, 2.5), (11.4, 3.4), (11.4, 11.4),
         (9.6, 18.6), (5.6, 14.6), (5.6, 12.9), (7.0, 12.2),
         (8.0, 12.6)]
 
-# Um eine Einheit nach links: die Faust reichte bis 22,0, und die
-# 1,33 Einheiten Aussenlinie waeren am rechten Rand des Feldes
-# abgeschnitten worden.
 HAND = [(x - 1.0, y) for (x, y) in HAND_ROH]
 
 # --- 3 BREITE (Doppelpfeil waagrecht) -----------------------------
@@ -198,16 +168,12 @@ def pruefe(name, hot, pts):
     for (x, y) in pts:
         if x < -0.01 or y < -0.01 or x > G + 0.01 or y > G + 0.01:
             fehler.append("Ecke ausserhalb des Rasters: %.2f,%.2f" % (x, y))
-    # Kein Paar nicht benachbarter Kanten darf sich schneiden -- ein
-    # Umriss, der sich selbst kreuzt, hat kein Inneres, und die
-    # Fuellung des Kerns waere Zufall.
     for i in range(n):
         for j in range(i + 1, n):
             if j == i or (i == 0 and j == n - 1) or j == i + 1:
                 continue
             if _schnitt(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n]):
                 fehler.append("Kanten %d und %d kreuzen sich" % (i, j))
-    # Flaeche > 0 und Umlaufsinn im Uhrzeigersinn (y nach unten)
     a = 0.0
     for i in range(n):
         x1, y1 = pts[i]
@@ -215,7 +181,6 @@ def pruefe(name, hot, pts):
         a = a + (x1 * y2 - x2 * y1)
     if abs(a) < 1.0:
         fehler.append("Flaeche ist null")
-    # Der Griffpunkt muss im Raster liegen.
     if not (0 <= hot[0] <= G and 0 <= hot[1] <= G):
         fehler.append("Griffpunkt ausserhalb")
     return fehler, abs(a) / 2.0
@@ -282,9 +247,6 @@ def bauen(ziel):
     kopf, daten = tafel()
     for b in daten:
         assert 0 <= b <= 255, b
-    # Kopf: je Form vier Oktette -- Versatz/2 (Ecke), Eckenzahl,
-    # Griff x, Griff y.  Der Versatz zaehlt ECKEN und nicht Oktette,
-    # damit er in ein Oktett passt.
     kb = []
     for (off, n, hx, hy) in kopf:
         assert off % 2 == 0
@@ -320,7 +282,7 @@ def main():
     if schlecht:
         print("%d Fehler" % schlecht)
         return 1
-    print("alle %d Formen halten die Pruefungen" % len(FORMEN))
+    print("all %d shapes pass the checks" % len(FORMEN))
     return 0
 
 

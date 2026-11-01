@@ -48,8 +48,6 @@ import re
 import subprocess
 import sys
 
-# Die Umschriften, die aufzuloesen sind. Laengster Stamm zuerst, damit
-# "groesser" nicht als "oe" in der Mitte zerfaellt.
 ERSATZ = [
     ("Oberflaeche", "Oberfläche"), ("oberflaeche", "oberfläche"),
     ("Bloecke", "Blöcke"), ("bloecke", "blöcke"),
@@ -73,7 +71,7 @@ ERSATZ = [
     ("ueber", "über"), ("Ueber", "Über"),
     ("pruef", "prüf"), ("Pruef", "Prüf"),
     ("fuer", "für"), ("Fuer", "Für"),
-    ("muss", "muss"),  # unveraendert, steht nur der Vollstaendigkeit halber
+    ("muss", "muss"),
     ("oeffn", "öffn"), ("Oeffn", "Öffn"),
     ("loesch", "lösch"), ("Loesch", "Lösch"),
     ("aufloes", "auflös"), ("Aufloes", "Auflös"),
@@ -99,7 +97,6 @@ ERSATZ = [
     ("Ausfuehr", "Ausführ"), ("ausfuehr", "ausführ"),
     ("uebernehmen", "übernehmen"), ("Uebernehmen", "Übernehmen"),
     ("uebergabe", "übergabe"), ("Uebergabe", "Übergabe"),
-    # ZWEITE RUNDE: die Staemme, die nach dem ersten Lauf uebrigblieben.
     ("hoechstens", "höchstens"), ("Hoechstens", "Höchstens"),
     ("hoech", "höch"), ("Hoech", "Höch"),
     ("laeuft", "läuft"), ("Laeuft", "Läuft"),
@@ -166,7 +163,6 @@ def bearbeite(pfad, zeilennummern, schreibe):
         if nr < 1 or nr > len(zeilen):
             continue
         alt = zeilen[nr - 1]
-        # Nur INNERHALB von Zeichenketten ersetzen.
         funde = []
 
         def ersetze_str(m):
@@ -181,7 +177,6 @@ def bearbeite(pfad, zeilennummern, schreibe):
         neu = _STR.sub(ersetze_str, alt)
         if not funde:
             continue
-        # Puffergroesse neu rechnen, falls die Zeile eine hat.
         m_alt = _STR.search(alt)
         m_neu = _STR.search(neu)
         if m_alt and m_neu:

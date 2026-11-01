@@ -114,10 +114,6 @@ class Monitor:
         if os.path.exists(ziel):
             os.unlink(ziel)
         self.cmd("screendump %s" % ziel, 0.2)
-        # `screendump` kehrt zurueck, BEVOR die Datei fertig ist. Also
-        # warten, bis die Groesse sich nicht mehr aendert -- ein halb
-        # geschriebenes PPM verliert jeden Vergleich, und zwar ohne
-        # Hinweis darauf, warum.
         letzte = -1
         ruhig = 0
         bis = time.time() + frist
@@ -198,7 +194,7 @@ def main(argv):
         elif was in ("ziel", "rziel"):
             p, fehler = ziel_holen(serial, teile[1:])
             if p is None:
-                print("plan: ZIEL NICHT GEFUNDEN: %s -- %s"
+                print("plan: TARGET NOT FOUND: %s -- %s"
                       % (" ".join(teile[1:]), fehler))
             else:
                 x, y = (int(v) for v in p.split(","))

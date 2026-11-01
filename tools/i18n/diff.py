@@ -1,21 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/i18n/diff.py -- WIE VERSCHIEDEN SIND ZWEI BILDSCHIRMFOTOS?
 #
 #   python3 tools/i18n/diff.py <a.ppm> <b.ppm> [x y w h]
 #
-# Gibt eine Zeile aus: "<n> von <ganz> Bildpunkten verschieden (<p>%)".
 #
-# WOZU. Runde I18N behauptet, dass derselbe Bildschirm auf Englisch und
-# auf Deutsch ANDERS aussieht. Alle anderen Messungen dieser Runde
-# koennten stimmen -- der Mitschnitt, die Schluesselzahl, die
-# bildpunktgenaue Pruefung EINER Zeile -- und der Schirm trotzdem
-# zweimal gleich sein, etwa weil beide Fotos aus demselben Lauf stammen.
-# Diese Zahl schliesst das aus.
 #
-# Umgekehrt ist sie auch eine Obergrenze: waeren die Bilder zu 90%
-# verschieden, waere nicht die Sprache gewechselt, sondern etwas anderes
-# kaputt.
 import sys
 
 
@@ -23,8 +12,6 @@ def lies(pfad):
     d = open(pfad, "rb").read()
     if d[:2] != b"P6":
         raise SystemExit("%s ist kein P6-PPM" % pfad)
-    # Kopf: P6, Breite, Hoehe, Maximalwert -- durch Leerraum getrennt,
-    # Kommentare mit '#'.
     felder = []
     i = 2
     while len(felder) < 3:

@@ -50,10 +50,10 @@ def blaustich(px, w, h):
     FLAECHEN -- und um den geht es, wenn jemand sagt "das Grau ist blau".
 
     UND DIE AKZENTFARBE ZAEHLT NICHT MIT. Sie ist mit Absicht bunt:
-    `#8b5cf6` hat B-R = +107, `#ad84f3` (ihre helle Stufe) +70. Ein
+    accent 8b5cf6 has B-R = +107, ad84f3 (its light step) +70. Ein
     Fenster mit einer markierten Zeile bekaeme dadurch einen
     "Blaustich" von +6,6, obwohl seine drei groessten Flaechen
-    #09090b/#18181b/#27272a sind -- also +2/+3. Gemessen am
+    09090b/18181b/27272a are -- also +2/+3. Gemessen am
     Dateimanager im Dunkelmodus, 2560x1440: die 3,4 Prozent Akzent
     haben das Mittel von +2,9 auf +6,6 gehoben.
 
@@ -131,7 +131,7 @@ def main(lauf, beleg):
             "|---|---|---|---|---|---|\n")
     open(os.path.join(beleg, "BEFUND.md"), "w", encoding="utf-8").write(
         kopf + "\n".join(zeilen) + "\n")
-    print(f"{len(zeilen)} Bilder, BEFUND.md geschrieben nach {beleg}")
+    print(f"{len(zeilen)} images, FINDING.md written to {beleg}")
     return 0
 
 

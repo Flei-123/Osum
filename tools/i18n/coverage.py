@@ -217,10 +217,6 @@ def main():
         miss = sorted(k for k, v in c["probe"].items() if not v)
         print("   probe of the characters a German surface needs: %s" %
               ("all present" if not miss else "MISSING " + " ".join(miss)))
-        # EINE ZEILE FUER DEN TESTLAEUFER. Die Ausgabe darueber ist fuer
-        # Menschen -- ein Laeufer, der sie mit `grep -A1` zerlegt, bricht
-        # beim naechsten Wort, das sich aendert. Diese Zeile ist der
-        # Vertrag: ein Name, ein Gleichheitszeichen, eine Zahl.
         def hab(name):
             for b in c["blocks"]:
                 if b["block"].startswith(name):

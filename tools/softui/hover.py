@@ -27,9 +27,6 @@ def go(x, y):
         out.append("mouse_move %d %d" % (sx, sy))
         dx -= sx
         dy -= sy
-    # Ein letzter Ruettler um NULL: das Ereignis kommt trotzdem an, und
-    # ohne ein Ereignis nach dem letzten Schritt hat der Server keinen
-    # Anlass, den Ueberfahr-Zustand nachzurechnen.
     out.append("warte 1")
     return out
 

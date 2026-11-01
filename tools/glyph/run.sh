@@ -20,41 +20,41 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 zahl() { # name wert op soll
     local name=$1 wert=$2 op=$3 soll=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl (wollte $op $soll)"; return; fi
+    if [ -z "$wert" ]; then bad "$name: no number (wanted $op $want)"; return; fi
     if [ "$wert" -"$op" "$soll" ] 2>/dev/null; then ok "$name: $wert"
-    else bad "$name: $wert, wollte $op $soll"; fi
+    else bad "$name: $val, wanted $op $want"; fi
 }
 
-echo "== 1. an der Quelle: wer holt die Buehne, und woher =="
+echo "== 1. at the source: who fetches the stage, and from where =="
 ROH=$(grep 'base(state) + STAGE_OFF' kernel/ui/wig.fi | grep -vc '^[[:space:]]*//')
 zahl "Stellen im CODE, die die geteilte Buehne noch direkt nehmen" "$ROH" eq 1
 grep -q 'fn stage_of' kernel/ui/wig.fi \
-    && ok "wig.stage_of gibt es" || bad "wig.stage_of fehlt"
+    && ok "wig.stage_of exists" || bad "wig.stage_of fehlt"
 for f in blit glyph_into; do
     n=$(awk "/^fn $f\(/,/^}/" kernel/ui/wig.fi | grep -c 'stage_of(state)')
-    if [ "$n" -ge 1 ]; then ok "wig.$f holt die Buehne ueber stage_of"
-    else bad "wig.$f holt die Buehne NICHT ueber stage_of"; fi
+    if [ "$n" -ge 1 ]; then ok "wig.$f fetches the stage via stage_of"
+    else bad "wig.$f does NOT fetch the stage via stage_of"; fi
 done
 grep -q 'kstate.WIGST_OFF + k \* STAGE_MAX' kernel/ui/wig.fi \
-    && ok "stage_of rechnet mit der Kernnummer (WIGST_OFF + k * STAGE_MAX)" \
+    && ok "stage_of computes with the core number (WIGST_OFF + k * STAGE_MAX)" \
     || bad "stage_of rechnet nicht je Kern"
 if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'table_on('; then
     ok "ttf.glyph nimmt die Tafelsperre"
-else bad "ttf.glyph nimmt die Tafelsperre nicht"; fi
+else bad "ttf.glyph does not take the table lock"; fi
 if awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi \
    | grep -qE 'irq_(ack|aus)\(\)' \
    && awk '/^fn glyph\(/,/^}/' kernel/gfx/ttf.fi | grep -q 'irq_an('; then
-    ok "und haelt dabei die Unterbrechungen an (die Kennung ist eine Kernnummer)"
-else bad "ttf.glyph haelt die Unterbrechungen nicht an"; fi
+    ok "and stops interrupts while doing so (the tag is a core number)"
+else bad "ttf.glyph does not stop interrupts"; fi
 if awk '/^fn gload\(/,/^}/' kernel/user/wlibc.fi | grep -q 'gw > GMAX'; then
-    ok "wlibc.gload prueft den Kopf, bevor es 'gw * gh' rechnet"
-else bad "wlibc.gload prueft den Kopf nicht"; fi
+    ok "wlibc.gload checks the header before it 'gw * gh' rechnet"
+else bad "wlibc.gload does not check the header"; fi
 
 echo
 echo "== 2. bauen: Kern, Programme, Platte =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
+    || { bad "the kernel does not build"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
          echo "GLYPHE: $pass bestanden, $fail gescheitert"; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit taskmgr"
@@ -70,7 +70,7 @@ for p in $PROGS; do
     strip --strip-all "$TMPD/$p.elf"
 done
 [ "$bauen_ok" = 1 ] && ok "die $(echo $PROGS | wc -w) Programme bauen" \
-    || { bad "die Programme bauen nicht"
+    || { bad "the programs do not build"
          echo "GLYPHE: $pass bestanden, $fail gescheitert"; exit 1; }
 
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 || bad "tree.py faellt"
@@ -83,7 +83,7 @@ ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "die Platte steht ($(stat -c%s "$TMPD/disk.img") Oktette)" \
+    && ok "the disk is ready ($(stat -c%s "$TMPD/disk.img") Oktette)" \
     || { bad "mkfs.py faellt"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 
 rennen() { # name smp extra
@@ -105,7 +105,7 @@ r_zeichen() { grep -a '^smp: zeichenrennen   c0' "$1" 2>/dev/null | tail -1 \
     | grep -oE 'zeichen=[0-9]+' | sed 's/.*=//' | sort -un | wc -l; }
 
 echo
-echo "== 3. der Nachweis: alle Kerne zeichnen im selben Augenblick =="
+echo "== 3. the proof: all cores draw at the same instant =="
 for n in 4 8; do
     rennen "n$n" "$n" "glyphrace"
     L="$TMPD/r-n$n.txt"
@@ -115,7 +115,7 @@ for n in 4 8; do
 done
 
 echo
-echo "== 4. GEGENPROBE 1: glyphblind -- EINE Buehne, wie in MERGE-6 =="
+echo "== 4. CONTROL 1: glyphblind -- ONE stage, as in MERGE-6 =="
 for n in 4 8; do
     rennen "b$n" "$n" "glyphblind"
     L="$TMPD/r-b$n.txt"
@@ -124,30 +124,30 @@ for n in 4 8; do
 done
 
 echo
-echo "== 5. GEGENPROBE 2: glyphtafelfrei -- der Glyphenspeicher ohne Sperre =="
+echo "== 5. CONTROL 2: glyphtafelfrei -- the glyph store without lock =="
 rennen tf 4 "glyphrace glyphtafelfrei"
 TFF=$(r_fehl "$TMPD/r-tf.txt")
 if grep -qa '^panic:' "$TMPD/r-tf.txt"; then
-    ok "ohne die Tafelsperre stirbt der KERN: $(grep -a '^panic:' "$TMPD/r-tf.txt" | head -1 | cut -c1-72)"
+    ok "without the table lock the KERNEL dies: $(grep -a '^panic:' "$TMPD/r-tf.txt" | head -1 | cut -c1-72)"
 elif grep -qaE 'kernel/gfx/ttf\.fi:[0-9]+:[0-9]+[[:space:]]*$' "$TMPD/r-tf.txt"; then
     # several cores panic at once and their letters interleave on the
     # serial line ("ppanaicni:c ..."), so '^panic:' is not found -- the
     # source position of the panic still stands on its own line
-    ok "ohne die Tafelsperre stirbt der KERN (Panik mehrerer Kerne, verschraenkt): $(grep -aoE 'kernel/gfx/ttf\.fi:[0-9]+:[0-9]+[[:space:]]*$' "$TMPD/r-tf.txt" | head -1 | tr -d "\r")"
+    ok "without the table lock the KERNEL dies (panic of several cores, interleaved): $(grep -aoE 'kernel/gfx/ttf\.fi:[0-9]+:[0-9]+[[:space:]]*$' "$TMPD/r-tf.txt" | head -1 | tr -d "\r")"
 elif [ -n "$TFF" ] && [ "$TFF" -ge 1 ]; then
-    ok "ohne die Tafelsperre: $TFF Abweichungen"
+    ok "without the table lock: $TFF deviations"
 elif grep -qa 'grace font=' "$TMPD/r-tf.txt" \
      && [ -z "$TFF" ] && ! grep -qa '^kernel: done' "$TMPD/r-tf.txt"; then
     # four cores panicking in the same instant interleave EVERY letter,
     # even the source position is shredded -- but the race started and the
     # kernel reached neither its result line nor 'kernel: done'
-    ok "ohne die Tafelsperre stirbt der KERN mitten im Rennen (kein Ergebnis, kein 'kernel: done')"
+    ok "without the table lock the KERNEL dies in the middle of the race (no result, no 'kernel: done')"
 else
-    bad "ohne die Tafelsperre passiert NICHTS -- dann misst sie auch nichts (LAEUFE=$LAEUFE)"
+    bad "without the table lock NOTHING happens -- then it measures nothing either (LAEUFE=$LAEUFE)"
 fi
 
 echo
-echo "== 6. DIE MESSUNG, DIE ENTSCHIEDEN HAT: je Kern gegen eine Sperre =="
+echo "== 6. THE MEASUREMENT THAT DECIDED: per core against one lock =="
 for n in 4 8; do
     rennen "s$n" "$n" "glyphrace glyphsperre"
     L="$TMPD/r-s$n.txt"
@@ -191,7 +191,7 @@ serie() { # praefix smp extra -> "panics laeufe zeilen starts"
 }
 
 echo
-echo "== 7. der Fall, der die Runde ausgeloest hat: $LAEUFE Laeufe je Kernzahl =="
+echo "== 7. the case that triggered the round: $LAEUFE runs per core count =="
 for n in 4 8; do
     read -r P L Z S <<<"$(serie "f$n" "$n" "")"
     printf '        -smp %s: %s Laeufe, %s mit Panic, %s Meldezeilen, %s mal gestartet\n' \
@@ -207,26 +207,26 @@ read -r P L Z S <<<"$(serie gb4 4 "glyphblind")"
 printf '        -smp 4 glyphblind: %s Laeufe, %s mit Panic/Ausnahme, %s Meldezeilen\n' \
     "$L" "$P" "$Z"
 if [ "$P" -ge 1 ]; then
-    ok "mit EINER Buehne bricht es weiterhin: $P von $L Laeufen"
+    ok "with ONE stage it still breaks: $P of $L runs"
 else
     printf '  ZAHL  mit EINER Buehne im Schreibtischlauf diesmal kein Bruch (0 von %s) -- Zufall, siehe Abschnitt 4/5\n' "$L"
 fi
 
 echo
-echo "== 9. die Ein-Kern-Reste, an der Quelle gezaehlt =="
+echo "== 9. the single-core leftovers, counted at the source =="
 EK_SOLL=${EK_SOLL:-67}
 ekz=$(python3 tools/multicore/onecore.py)
 echo "        $ekz"
 ek=$(echo "$ekz" | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
-    ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"
+    ok "functions with a data-side buffer without a lock word: $ek (contract: at most $EK_SOLL)"
 else
-    bad "Ein-Kern-Reste: $ek, Vertrag ist hoechstens $EK_SOLL"
+    bad "single-core leftovers: $ek, contract is at most $EK_SOLL"
 fi
 if echo "$ekz" | grep -q 'wig.fi'; then
-    bad "wig.fi steht wieder in der offenen Liste"
+    bad "wig.fi is back in the open list"
 else
-    ok "wig.fi steht NICHT mehr in der offenen Liste"
+    ok "wig.fi is NO longer in the open list"
 fi
 
 echo

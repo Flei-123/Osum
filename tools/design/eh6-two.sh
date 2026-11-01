@@ -66,7 +66,7 @@ bash vendor/firn/fetch-firnc.sh > "$BUILDD/fetch.log" 2>&1 || {
 newer=$(find kernel tools/build-kernel.sh -newer "$BUILDD/k0.mb" -print -quit 2>/dev/null || true)
 if [ ! -s "$BUILDD/k0.mb" ] || [ -n "$newer" ] || [ -n "${DESIGNREBUILD:-}" ]; then
     ./tools/build-kernel.sh "$BUILDD/k0.mb" > "$BUILDD/k.log" 2>&1 \
-        || { echo "FEHLGESCHLAGEN: der Kern baut nicht"; tail -25 "$BUILDD/k.log"; exit 1; }
+        || { echo "FAIL: the kernel does not build"; tail -25 "$BUILDD/k.log"; exit 1; }
 fi
 echo "kernel $(stat -c%s "$BUILDD/k0.mb") Oktette"
 
@@ -77,7 +77,7 @@ fi
 USERNEW=$(ls -t kernel/user/*.fi 2>/dev/null | head -1)
 GEBAUT=""
 for p in $progs; do
-    [ -f "kernel/user/$p.fi" ] || { echo "   (uebersprungen, keine Quelle: $p)"; continue; }
+    [ -f "kernel/user/$p.fi" ] || { echo "   (skipped, no source: $p)"; continue; }
     if [ -s "$BUILDD/$p.elf" ] && [ -z "${DESIGNREBUILD:-}" ] \
        && [ "$BUILDD/$p.elf" -nt "kernel/user/$p.fi" ] \
        && [ -n "$USERNEW" ] && [ "$BUILDD/$p.elf" -nt "$USERNEW" ]; then
@@ -241,7 +241,7 @@ while [ $i -lt 3000 ]; do
     sleep 0.15; i=$((i+1))
 done
 if ! grep -qaE 'launcher: ready|taskbar: ready|wm: dauer' "$OUT/serial.txt" 2>/dev/null; then
-    echo "FEHLGESCHLAGEN: der Schreibtisch ist nie hochgekommen"
+    echo "FAIL: the desktop never came up"
     tail -25 "$OUT/serial.txt" 2>/dev/null
 fi
 

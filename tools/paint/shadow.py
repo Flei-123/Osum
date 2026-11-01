@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/paint/shadow.py -- DER SCHATTEN UND DIE ECKE, AUS DEM BILD GELESEN.
 #
-# Die Regel dieser Runde ist die von Runde LOOK, eine Ebene tiefer:
-# EINE AUSSAGE UEBER DEN BILDSCHIRM IST EINE AUSSAGE UEBER BILDPUNKTE,
-# und sie ist nur etwas wert, wenn die Bildpunkte gezaehlt wurden.
-# Nicht "das Fenster hat jetzt einen weichen Schatten" -- sondern
-# "links neben dem Fenster bei y=240 liegen sechs Bildpunkte, deren
-# Helligkeit von 231 auf 244 STEIGT, monoton, und ohne den Schatten
-# stehen dort sechsmal 247."
 #
-# UND ES WIRD IMMER GEGEN DEN LAUF GEMESSEN, DER ES NICHT HAT.
 #
-# Die erste Fassung dieses Skripts las EINE Zeile aus EINEM Bild, fand
-# links neben dem Fenster sieben Helligkeitsstufen und meldete gruen.
-# Dieselben sieben Stufen standen im ALTEN Bild -- was sie gemessen
-# hatte, war der Verlauf des Schreibtischhintergrunds.  Eine Messung,
-# die nicht durchfallen kann, ist keine.  Also braucht jede Zusage hier
-# ZWEI Bilder: `modern` und `classic`, gleiche Maschine, gleiches
-# Fenster, ein Wort Unterschied auf der Platte.
 #
-#   ./tools/paint/shadow.py schatten <ohne.ppm> <mit.ppm> <x> <y> <w> <h>
-#                                    [--reach N]
-#       Rechts neben dem Fenster: wie viele Bildpunkte in `mit` DUNKLER
-#       sind als in `ohne`, wie weit das reicht, und ob der Unterschied
-#       zum Fenster hin monoton waechst.
 #
-#   ./tools/paint/shadow.py ecke <ohne.ppm> <mit.ppm> <x> <y> [--r N]
-#       Das Eckquadrat: wie viele Bildpunkte darin eine Farbe tragen,
-#       die WEDER die des Rahmens NOCH die des Grundes ist -- also
-#       wirklich gemischt wurden.  In `ohne` muessen es null sein.
 #
-#   ./tools/paint/shadow.py vergleich <ohne.ppm> <mit.ppm> <x> <y> <w> <h>
-#       Beide Laeufe gegeneinander: wie viele Bildpunkte sich
-#       unterscheiden und wo.  Das ist die Gegenprobe -- ohne sie
-#       koennte der "Schatten" der Schreibtischhintergrund sein.
 import os
 import sys
 
@@ -87,11 +58,6 @@ def schatten(argv):
     if (wa, ha) != (wb, hb):
         print("  FAIL  verschiedene Bildgroessen")
         return 1
-    # RECHTS neben dem Fenster und nicht links: links kann ein anderes
-    # Fenster liegen, dessen Inhalt sich zwischen zwei Laeufen ohnehin
-    # unterscheidet (eine Shell schreibt eine Uhrzeit).  Rechts vom
-    # obersten Fenster liegt der Schreibtisch, und der ist in beiden
-    # Laeufen derselbe -- ausser dort, wo der Schatten liegt.
     zy = y + h0 // 2
     rand = x + w0
     print("PAINT-SCHATTEN: Fenster %d,%d %dx%d  Zeile y=%d  "
@@ -103,7 +69,7 @@ def schatten(argv):
         pb = punkt(B, wb, hb, rand + k, zy)
         ov.append(None if pa is None else hell(pa))
         mv.append(None if pb is None else hell(pb))
-    print("   ohne Schatten: %s"
+    print("   without shadow: %s"
           % " ".join("--" if v is None else "%3d" % v for v in ov))
     print("   mit  Schatten: %s"
           % " ".join("--" if v is None else "%3d" % v for v in mv))
@@ -113,31 +79,26 @@ def schatten(argv):
 
     zusagen = 0
     fehler = 0
-    # 1. Es gibt ueberhaupt einen Unterschied, und er ist DUNKLER.
     dunkler = sum(1 for d in diff if d > 0)
     if dunkler >= 3 and min(diff) >= 0:
-        print("  OK    %d Bildpunkte sind dunkler als ohne Schatten, "
+        print("  OK    %d pixels are darker than without shadow, "
               "und keiner ist heller" % dunkler)
         zusagen += 1
     else:
         print("  FAIL  %d dunkler, kleinster Unterschied %d"
               % (dunkler, min(diff)))
         fehler += 1
-    # 2. Er wird zum Fenster hin STAERKER -- ein Schatten, der nach
-    #    aussen zunimmt, ist keiner.
     innen = diff[:dunkler] if dunkler else []
     monoton = all(innen[i] >= innen[i + 1] for i in range(len(innen) - 1))
     if monoton and innen:
-        print("  OK    der Unterschied faellt nach aussen monoton "
+        print("  OK    the difference falls off monotonically towards the outside "
               "(%d bis %d Helligkeitsstufen)" % (innen[0], innen[-1]))
         zusagen += 1
     else:
-        print("  FAIL  der Unterschied ist nicht monoton: %s" % innen)
+        print("  FAIL  the difference is not monotonic: %s" % innen)
         fehler += 1
-    # 3. Und er hoert auf. Ein Schatten, der bis zum Bildrand reicht,
-    #    ist ein Farbfehler.
     if dunkler <= reach + 1 and (len(diff) > dunkler and diff[-1] == 0):
-        print("  OK    er endet nach %d Bildpunkten (reach=%d) -- "
+        print("  OK    it ends after %d pixels (reach=%d) -- "
               "dahinter ist das Bild unveraendert" % (dunkler, reach))
         zusagen += 1
     else:
@@ -179,30 +140,27 @@ def ecke(argv):
 
     na, ra, ga = gemischt(A, wa, ha)
     nb, rb, gb = gemischt(B, wb, hb)
-    print("PAINT-ECKE: Eckquadrat %dx%d bei %d,%d" % (r, r, x, y))
-    print("   ohne Radius: %d gemischte Bildpunkte  (Rahmen %s, Grund %s)"
+    print("PAINT-CORNER: corner square %dx%d at %d,%d" % (r, r, x, y))
+    print("   without radius: %d blended pixels  (frame %s, background %s)"
           % (na, ra, ga))
-    print("   mit  Radius: %d gemischte Bildpunkte  (Rahmen %s, Grund %s)"
+    print("   with  radius: %d blended pixels  (frame %s, background %s)"
           % (nb, rb, gb))
     zusagen = 0
     fehler = 0
     if nb > na:
-        print("  OK    die runde Ecke traegt %d gemischte Bildpunkte "
+        print("  OK    the round corner carries %d blended pixels "
               "mehr als die eckige" % (nb - na))
         zusagen += 1
     else:
-        print("  FAIL  die runde Ecke traegt nicht mehr gemischte "
+        print("  FAIL  the round corner does not carry more blended "
               "Bildpunkte als die eckige (%d gegen %d)" % (nb, na))
         fehler += 1
-    # DIE GEGENPROBE, und sie steht hier und nicht im Laeufer: `classic`
-    # sagt Radius 0. Traegt sie trotzdem gemischte Bildpunkte, misst die
-    # Zusage darueber nichts.
     if na * 4 < r * r:
-        print("  OK    GEGENPROBE: die eckige Ecke ist zu weniger als "
+        print("  OK    CONTROL: the square corner is blended to less than "
               "einem Viertel gemischt (%d von %d)" % (na, r * r))
         zusagen += 1
     else:
-        print("  FAIL  GEGENPROBE: auch die eckige Ecke ist gemischt "
+        print("  FAIL  CONTROL: the square corner is blended too "
               "(%d von %d)" % (na, r * r))
         fehler += 1
     print("PAINT-ECKE: %d Zusagen, %d Fehler" % (zusagen, fehler))
@@ -218,9 +176,6 @@ def vergleich(argv):
         print("  FAIL  verschiedene Bildgroessen: %dx%d gegen %dx%d"
               % (wa, ha, wb, hb))
         return 1
-    # Nur der RAND um das Fenster, nicht das Fenster selbst: dort steht
-    # der Inhalt der Anwendung, und der darf sich aus hundert Gruenden
-    # unterscheiden.
     reach = 8
     anders = 0
     gesamt = 0
@@ -231,14 +186,14 @@ def vergleich(argv):
             gesamt += 1
             if punkt(ba, wa, ha, xx, yy) != punkt(bb, wb, hb, xx, yy):
                 anders += 1
-    print("PAINT-VERGLEICH: Rand um %d,%d %dx%d (%d Bildpunkte breit)"
+    print("PAINT-COMPARE: edge around %d,%d %dx%d (%d pixels wide)"
           % (x, y, w0, h0, reach))
-    print("   %d von %d Bildpunkten unterscheiden sich (%.1f%%)"
+    print("   %d of %d pixels differ (%.1f%%)"
           % (anders, gesamt, 100.0 * anders / gesamt if gesamt else 0))
     if anders > 0:
-        print("  OK    der Rand ist nachweislich ein anderer")
+        print("  OK    the edge is demonstrably a different one")
         return 0
-    print("  FAIL  die beiden Laeufe malen denselben Rand -- der "
+    print("  FAIL  the two runs paint the same edge -- the "
           "Schatten ist nicht da")
     return 1
 

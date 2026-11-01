@@ -132,30 +132,29 @@ def teil_leiste(out, name, uisc):
     print("LAUF %s   (erwartete Vervielfachung %d)" % (name, uisc))
     print("=" * 68)
     if not t:
-        print("  keine serielle Ausgabe -- der Lauf ist nicht gelaufen")
+        print("  no serial output -- the run did not run")
         return
     m = letzte(t, r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
     if not m:
-        print("  die Leiste hat keine Geometrie gemeldet")
+        print("  the bar reported no geometry")
         return
     bx, by, bw, bh = (int(m.group(i)) for i in (2, 3, 4, 5))
     soll = 40 * uisc
     print("  LEISTE  x=%d y=%d %dx%d" % (bx, by, bw, bh))
     print("          Regel: Leistenhoehe = 40 * uiscale = %d" % soll)
     if abs(bh - soll) > 6:
-        print("          VERLETZT: %d statt %d -- der Lauf hat NICHT mit"
+        print("          VIOLATED: %d instead of %d -- the run did NOT"
               " Vervielfachung %d gerendert" % (bh, soll, uisc))
     else:
         print("          gehalten (%d, Abweichung %d)" % (bh, bh - soll))
-    # Die Symbole: gemalte Kantenlaenge gegen Knopfhoehe.
-    print("  SYMBOLE in der Leiste (aus `taskbar: sym`)")
+    print("  SYMBOLS in the bar (from `taskbar: sym`)")
     gesehen = {}
     for m in re.finditer(r"taskbar: sym btn=(\d+) app=(\S*) w=(\d+)"
                          r" gemalt=(\d+) knopf=(\d+)", t):
         gesehen[int(m.group(1))] = (m.group(2), int(m.group(3)),
                                     int(m.group(4)), int(m.group(5)))
     if not gesehen:
-        print("    keine gemeldet (kein Fenster in der Leiste?)")
+        print("    none reported (no window in the bar?)")
     for i in sorted(gesehen):
         app, w, gem, knopf = gesehen[i]
         pro = gem * 100 // knopf if knopf else 0
@@ -163,8 +162,6 @@ def teil_leiste(out, name, uisc):
         print("    btn %d %-14s Datei %d, gemalt %d, Knopf %d"
               "  ->  %d%% der Knopfhoehe  %s"
               % (i, app, w, gem, knopf, pro, marke))
-    # Die Klickfelder aus derselben Leitung, und darauf die
-    # Ausrichtungspruefung -- das Werkzeug aus Punkt 6.
     felder = {}
     for m in re.finditer(r"taskbar: btn i=(\d+) id=\d+ x=(-?\d+) y=(-?\d+)"
                          r" w=(\d+) h=(\d+)", t):
@@ -173,10 +170,6 @@ def teil_leiste(out, name, uisc):
     if felder and os.path.exists(bild):
         args = [sys.executable, os.path.join(HIER, "ausrichtung.py"), bild,
                 "--nur-messen", "--rand-unten", str(4 * uisc)]
-        # Die Leiste meldet ihre Klickfelder in IHREN Koordinaten (der
-        # Ursprung ist ihre linke obere Ecke); das Bild hat die des
-        # Bildschirms. Also der Versatz der Leiste dazu -- dieselbe
-        # Rechnung, die `drive.py` fuer `klickauf` macht.
         for i in sorted(felder):
             x, y, w, h = felder[i]
             args.append("--feld")
@@ -191,7 +184,6 @@ def teil_leiste(out, name, uisc):
         r = subprocess.run(args, capture_output=True, text=True)
         for z in r.stdout.splitlines():
             print("    " + z)
-    # Der Blaustich, auf jedem Bild dieses Laufes.
     print("  BLAUSTICH B-R der Flaechenfarben (Windows/GNOME dunkel: 0,"
           " KDE: +6, Slate: +27)")
     for p in sorted(glob.glob(os.path.join(bd, "*.png"))):
@@ -211,7 +203,7 @@ def teil_menue(out):
     bd = os.path.join(out, "bilder", "menue-2560")
     print("")
     print("=" * 68)
-    print("STARTMENUE -- erscheint es nur auf Verlangen?")
+    print("START MENU -- does it appear only on demand?")
     print("=" * 68)
     folge = ["01-ohne-menue", "02-super-offen", "03-escape-weg",
              "04-logo-offen", "05-klick-daneben-weg"]
@@ -229,11 +221,11 @@ def teil_menue(out):
         n, k = r
         soll_offen = folge[i] in ("02-super-offen", "04-logo-offen")
         ok = (n > 20000) if soll_offen else (n < 20000)
-        print("  %-22s %8d Bildpunkte anders als 01   Kasten %s   %s"
+        print("  %-22s %8d pixels differ from 01   box %s   %s"
               % (folge[i], n, k, "erwartet" if ok else "VERLETZT"))
-    print("  Lesart: 02 und 04 muessen sich STARK von 01 unterscheiden"
+    print("  reading: 02 and 04 must differ STRONGLY from 01"
           " (das Menue steht da),")
-    print("          03 und 05 fast gar nicht (es ist wieder weg).")
+    print("          03 and 05 hardly at all (it is gone again).")
 
 
 def teil_zeiger(out):
@@ -252,22 +244,16 @@ def teil_zeiger(out):
         im = Image.open(p).convert("RGB")
         k, bg, n = kasten_der_tinte(im, wo[0], wo[1], 70)
         if k is None:
-            print("  %s: an %s steht nichts -- kein Zeiger im Bild"
+            print("  %s: nothing at %s -- no pointer in the image"
                   % (name, wo))
             continue
         w = k[2] - k[0] + 1
         h = k[3] - k[1] + 1
-        # Das FELD ist 24 * uiscale gross; der Pfeil FUELLT es nicht
-        # aus (er ist im Entwurfsraster 13,6 breit und 21,4 hoch, plus
-        # 1,33 Aussenlinie auf jeder Seite). Erwartet wird also rund
-        # 16 x 24 Entwurfseinheiten mal Vervielfachung.
         soll_w = 16 * uisc
         soll_h = 24 * uisc
         print("  %-14s Zeigertinte %dx%d Bildpunkte bei %d,%d"
               "  (Feld %d, Pfeil erwartet rund %dx%d)"
               % (name, w, h, k[0], k[1], 24 * uisc, soll_w, soll_h))
-        # Kantenglaettung: wie viele VERSCHIEDENE Toene der Zeiger hat.
-        # Eine Bitmaske hat zwei. Mit Glaettung sind es Dutzende.
         aus = im.crop((k[0], k[1], k[2] + 1, k[3] + 1))
         toene = len(aus.getcolors(maxcolors=1 << 24) or [])
         print("                 %d verschiedene Toene im Zeigerkasten"

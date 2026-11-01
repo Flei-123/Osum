@@ -52,7 +52,7 @@ else
     bad "classic bootet nicht"
 fi
 
-echo "== B. die Formdatei wird GANZ gelesen =="
+echo "== B. the shape file is read COMPLETELY =="
 if shot B shape=modern scheme=day mode=light keep=yes shadow=on extra='einst nostart wigapp=/bin/explorer'; then
     K=$(val "$TMPD/B/serial.txt" 'shape file=modern name=Modern id=1 keys=[0-9]+')
     is "Marken aus modern.shape" "${K:-0}" "24"
@@ -68,7 +68,7 @@ else
     bad "modern bootet nicht"
 fi
 
-echo "== C. der Schatten: Maske gegen Ringe gegen keinen =="
+echo "== C. the shadow: mask against rings against none =="
 if [ -s "$TMPD/B/serial.txt" ]; then
     L=$(grep -a 'wmbench2: maske' "$TMPD/B/serial.txt" | tail -1)
     R=$(grep -a 'wmbench2: ringe' "$TMPD/B/serial.txt" | tail -1)
@@ -85,12 +85,12 @@ if [ -s "$TMPD/B/serial.txt" ]; then
         MK=$((MU - OU)); RK=$((RU - OU))
         echo "        Schatten kostet: Maske ${MK} us, Ringe ${RK} us"
         if [ "$MK" -lt "$RK" ]; then
-            ok "die Maske ist billiger als die Ringe ($MK < $RK us)"
+            ok "the mask is cheaper than the rings ($MK < $RK us)"
         else
-            bad "die Maske ist NICHT billiger ($MK gegen $RK us)"
+            bad "the mask is NOT cheaper ($MK against $RK us)"
         fi
     else
-        bad "keine Zeitmessung im Mitschnitt"
+        bad "no timing in the capture"
     fi
     if [ -n "$MA" ] && [ -n "$RA" ]; then
         le "Eckabtastungen je Bild mit der Maske" "$MA" "$((RA / 4))"
@@ -100,7 +100,7 @@ if [ -s "$TMPD/B/serial.txt" ]; then
     ge "und sie wurde ueberhaupt gebaut" "${SB:-0}" "1"
 fi
 
-echo "== D. die drei Schaltflaechen, und der rote Knopf =="
+echo "== D. the three buttons, and the red one =="
 # TWO PICTURES, because the pointer cannot be on the close button and off it at
 # once: D0 has no pointer on the bar (the three SHAPES: stroke, square, cross),
 # D has it on the close button (the HOVER state: red face, white cross).
@@ -116,22 +116,22 @@ if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hove
         "$TMPD/D/serial.txt" > "$TMPD/D.hover" 2>&1
     { cat "$TMPD/D0.knopf"; grep -a '^hover:' "$TMPD/D.hover"; } > "$TMPD/D.knopf"
     cat "$TMPD/D.knopf" | sed 's/^/        /'
-    grep -q 'min: strich ok' "$TMPD/D.knopf" \
-        && ok "Minimieren ist ein waagerechter Strich" \
-        || bad "Minimieren ist kein Strich"
-    grep -q 'max: quadrat ok' "$TMPD/D.knopf" \
-        && ok "Maximieren ist ein Quadrat" || bad "Maximieren ist kein Quadrat"
-    grep -q 'close: kreuz ok' "$TMPD/D.knopf" \
-        && ok "Schliessen ist ein Kreuz" || bad "Schliessen ist kein Kreuz"
-    grep -q 'hover: rot ok' "$TMPD/D.knopf" \
-        && ok "der ueberfahrene Schliessen-Knopf ist rot mit weissem Kreuz" \
-        || bad "der Ueberfahr-Zustand fehlt"
-    grep -q 'macos: keine kreise' "$TMPD/D.knopf" \
-        && ok "und es sind KEINE drei bunten Kreise" \
+    grep -q 'min: stroke ok' "$TMPD/D.knopf" \
+        && ok "Minimise is a horizontal stroke" \
+        || bad "Minimise is not a stroke"
+    grep -q 'max: square ok' "$TMPD/D.knopf" \
+        && ok "Maximise is a square" || bad "Maximise is not a square"
+    grep -q 'close: cross ok' "$TMPD/D.knopf" \
+        && ok "Close is a cross" || bad "Close is not a cross"
+    grep -q 'hover: red ok' "$TMPD/D.knopf" \
+        && ok "the hovered close button is red with a white cross" \
+        || bad "the hover state is missing"
+    grep -q 'macos: no circles' "$TMPD/D.knopf" \
+        && ok "and there are NO three coloured circles" \
         || bad "da sind bunte Kreise"
 fi
 
-echo "== E. der Fokus, ohne eine knallige Farbe =="
+echo "== E. the focus, without a loud colour =="
 # The focused window has to stand far enough from the screen edge for its shadow
 # to be measured (fokus.py skips x < 24): the Settings window opens at x=20, so
 # this picture has the file manager as the only extra window (it gets the focus).
@@ -143,19 +143,19 @@ if shot E0 shape=modern scheme=day mode=light keep=yes shadow=on extra='nostart 
     IT=$(grep -E '^inaktiv ' "$TMPD/E.txt" | grep -oE 'tiefe=[0-9]+' | grep -oE '[0-9]+')
     if [ -n "$AT" ] && [ -n "$IT" ] && [ "$IT" -gt 0 ]; then
         if [ "$AT" -gt "$((IT * 3 / 2))" ]; then
-            ok "der Schatten des scharfen Fensters ist mindestens 1,5-mal so tief ($AT gegen $IT)"
+            ok "the shadow of the sharp window is at least 1.5 times as deep ($AT against $IT)"
         else
-            bad "die beiden Schatten sind zu aehnlich ($AT gegen $IT)"
+            bad "the two shadows are too similar ($AT against $IT)"
         fi
     else
-        bad "keine zwei Schatten gemessen"
+        bad "no two shadows measured"
     fi
     grep -q 'titel: kein akzent' "$TMPD/E.txt" \
-        && ok "und keine Titelleiste traegt den Akzent" \
-        || bad "eine Titelleiste ist immer noch akzentfarben"
+        && ok "and no title bar carries the accent" \
+        || bad "a title bar is still accent-coloured"
 fi
 
-echo "== F. der Kontrast =="
+echo "== F. the contrast =="
 #
 for v in "day light 516" "night dark 1236"; do
     set -- $v
@@ -174,7 +174,7 @@ for v in "day light 516" "night dark 1236"; do
     fi
 done
 
-echo "== G. die Bilder werden gemessen =="
+echo "== G. the images are measured =="
 for d in B D F-day F-night; do
     if [ -s "$TMPD/$d/desktop.ppm" ]; then
         python3 tools/softui/check.py "$TMPD/$d/desktop.ppm" \
@@ -182,7 +182,7 @@ for d in B D F-day F-night; do
         R=$?
         tail -1 "$TMPD/$d.pruef" | sed 's/^/        /'
         if [ $R -eq 0 ]; then
-            ok "$d: keine leere, abgeschnittene oder ueberlappende Beschriftung"
+            ok "$d: no empty, clipped or overlapping label"
         else
             bad "$d: Beanstandungen"
             head -8 "$TMPD/$d.pruef" | sed 's/^/          /'

@@ -1,56 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/brand/startimage.py -- RUNDE STARTKNOPF: DAS LOGO IN DEN KERN.
 #
-# WARUM NICHT UEBER DIE SYMBOLSCHRIFT. Die Symbole dieses Systems sind
-# eine SCHRIFT (assets/icons/icons.map -> tools/icons/build.py ->
-# assets/osum-icons.ttf). Ein Zeichen einer Schrift hat GENAU EINEN
-# Deckungsgrad je Bildpunkt und keine Farbe: der Zeichner gibt die
-# Farbe an, die Schrift die Form. Justins Startzeichen ist dreifarbig
-# (schwarzer Ring, weisser Kreis, hellblauer Diamant) -- das laesst
-# sich in einer Schrift nicht darstellen, ohne es in drei Zeichen zu
-# zerlegen und dreimal uebereinanderzumalen. Drei Zeichen, die nur
-# zusammen ein Bild ergeben, sind ein Bild und keine Schrift.
 #
-# WARUM NICHT ALS DATEI IM ABBILD. Die Leiste soll ihren Knopf malen
-# koennen, BEVOR irgendein Dateisystem eingehaengt ist -- auf Justins
-# Brett ist genau das mehrfach schiefgegangen ("taskbar: icons=" und
-# dann nichts mehr). Ein Knopf, dessen Bild von einem Dateizugriff
-# abhaengt, ist ein Knopf, der manchmal leer ist.
 #
-# ALSO: die Bildpunkte werden hier zu Firn-Quelltext, kommen mit dem
-# Programm in den Binaerbaum und haengen an nichts. Je Bildpunkt EIN
-# Wort 0xAARRGGBB.
 #
 #   python3 tools/brand/startimage.py assets/marke kernel/user/brand_start.fi
 
 import sys
 from PIL import Image
 
-# ============================================== RUNDE ECHTHARDWARE-4
-# FUENF GROESSEN UND NICHT MEHR DREI -- WEIL DIE LEISTE GROESSER IST
-# ALS 32.
 #
-# Justin zu den Bildern aus ECHTHARDWARE-3: "links unten ein rundes,
-# stark verpixeltes Symbol", und die Frage, ob das ueberhaupt sein
-# Logo sei. Es IST sein Logo (assets/marke/start-quelle.png, gebaut
-# aus osum-vorlage-justin.jpg) -- es war nur nie in der Groesse da,
-# in der es gebraucht wird.
 #
-# GEMESSEN: `marke_start.breit()` kannte 16, 24 und 32. Auf Justins
-# Schirm ist der Startknopf 64 Bildpunkte hoch, `marke_malen` nimmt
-# also die 32er und VERVIELFACHT sie ganzzahlig auf 64. Ein Ring von
-# einem Bildpunkt Staerke wird dabei zu einem Ring von zwei -- und
-# runde Kanten werden zu Treppen. Genau das ist die "Verpixelung".
 #
-# Dabei liegen die scharfen Vorlagen seit jeher daneben:
-# assets/marke/start-48.png und start-64.png, aus derselben Quelle
-# mit LANCZOS gerastert. Sie waren nur nie in dieser Liste.
 #
-# Ab hier wird jede Groesse, die es als eigene Datei gibt, auch
-# eingebacken, und `breit()` waehlt die groesste, die hineinpasst.
-# Damit wird das Logo in ZIELGROESSE gerastert und nicht mehr
-# hochskaliert -- was der Auftrag woertlich verlangt.
 GROESSEN = [16, 24, 32, 48, 64]
 
 

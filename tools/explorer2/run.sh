@@ -21,7 +21,7 @@ letzte() { grep -aoE "$2" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+$'; }
 groesste() { grep -aoE "$2" "$1" 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "EXPLORER-2: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "EXPLORER-2: skipped, qemu-system-x86_64 is missing"; exit 0
 fi
 python3 -c "import PIL" 2>/dev/null || {
     echo "EXPLORER-2: uebersprungen, Pillow fehlt"; exit 0; }
@@ -46,7 +46,7 @@ for m in expmodell exporte expakt expdlg fileop; do
     rm -f "$stub"
 done
 
-echo "== 2. der Katalog (de und en) =="
+echo "== 2. the catalog (de and en) =="
 python3 - "$ROOT" "$OUT" <<'PY'
 import re, sys, os
 root, out = sys.argv[1], sys.argv[2]
@@ -61,36 +61,36 @@ open(os.path.join(out, "katalog.txt"), "w").write(
 PY
 kde=$(grep -oE '^de [0-9]+' "$OUT/katalog.txt" | grep -oE '[0-9]+')
 [ "${kde:-0}" -ge 60 ] && ok "Katalog: $kde Schluessel explorer.*" \
-    || bad "Katalog: nur ${kde:-0} Schluessel"
+    || bad "catalog: only ${kde:-0} keys"
 grep -q 'nur_de \[\]' "$OUT/katalog.txt" \
-    && ok "jeder deutsche Schluessel hat einen englischen" \
+    && ok "every German key has an English one" \
     || { bad "Schluessel fehlen in en"; grep nur_de "$OUT/katalog.txt"; }
 grep -q 'nur_en \[\]' "$OUT/katalog.txt" \
-    && ok "jeder englische Schluessel hat einen deutschen" \
+    && ok "every English key has a German one" \
     || { bad "Schluessel fehlen in de"; grep nur_en "$OUT/katalog.txt"; }
 
 echo "== 3. Quelltext: Punkte 2, 11, 12 =="
 if grep -qE '^\s*static mut t_(zur|vor|auf):' kernel/user/explorer.fi; then
-    bad "Punkt 12: die Textzeichen < > ^ stehen noch im Quelltext"
+    bad "item 12: the text characters < > ^ are still in the source"
 else
-    ok "Punkt 12: die Textzeichen < > ^ sind weg"
+    ok "item 12: the text characters < > ^ are gone"
 fi
 grep -qE 'fuiscene\.icon_button\([a-z]+, icons\.NAV_BACK' kernel/user/explorer.fi \
     && ok "Punkt 12: die Werkzeugleiste ruft icon_button(NAV_BACK)" \
-    || bad "Punkt 12: keine Symbolknoepfe in der Werkzeugleiste"
+    || bad "item 12: no symbol buttons in the toolbar"
 
 grep -qE 'io\.rename' kernel/user/expakt.fi \
     && ok "Punkt 2: umbenennen ruft io.rename" \
-    || bad "Punkt 2: kein io.rename -- es wird noch kopiert und geloescht"
+    || bad "item 2: no io.rename -- it still copies and deletes"
 if grep -qE '^fn umbenennen\(' kernel/user/explorer.fi; then
-    bad "Punkt 2: die alte Funktion umbenennen() steht noch in explorer.fi"
+    bad "item 2: the old function umbenennen() is still in explorer.fi"
 else
-    ok "Punkt 2: die alte Funktion umbenennen() ist weg"
+    ok "item 2: the old function umbenennen() is gone"
 fi
 if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
-    bad "Punkt 2: explorer.fi fasst Dateien noch selbst an"
+    bad "item 2: explorer.fi still touches files itself"
 else
-    ok "Punkt 2: explorer.fi fasst keine Datei mehr selbst an"
+    ok "item 2: explorer.fi no longer touches any file itself"
 fi
 
 me=$(grep -oE '^const MAXENT: u64 = [0-9]+' kernel/user/expmodell.fi | grep -oE '[0-9]+$')
@@ -100,12 +100,12 @@ hi=$(grep -oE '^const CAP: u64 = [0-9]+' lib/nav/stack.fi | grep -oE '[0-9]+$')
 [ "${nb:-0}" -ge 256 ]  && ok "Punkt 11: NAMEB = $nb"  || bad "Punkt 11: NAMEB = ${nb:-0}"
 [ "${hi:-0}" -ge 32 ]   && ok "Punkt 11: Historie = $hi" || bad "Punkt 11: Historie = ${hi:-0}"
 w4=$(grep -cE 'if welches == 4 \{' kernel/user/explorer.fi)
-[ "$w4" -le 1 ] && ok "Punkt 11: der doppelte Zweig ist aufgeloest ($w4 Vorkommen)" \
+[ "$w4" -le 1 ] && ok "item 11: the duplicate branch is resolved ($w4 occurrences)" \
     || bad "Punkt 11: 'if welches == 4' steht $w4 mal da, der zweite ist tot"
 
 grep -qE 'fn error_key' kernel/user/expakt.fi \
-    && ok "Punkt 8: es gibt eine Zuordnung Fehlercode -> Katalogtext" \
-    || bad "Punkt 8: keine Zuordnung Fehlercode -> Text"
+    && ok "item 8: there is a mapping error code -> catalog text" \
+    || bad "item 8: no mapping error code -> text"
 
 # ------------------------------------------------------------ 4. der Lauf
 echo "== 4. der Lauf =="
@@ -122,10 +122,6 @@ foto 11-auswahl
 # --- KOPIEREN (Punkt 1)
 taste ctrl-c
 warte 3
-# --- IN DEN UNTERORDNER `bilder` (Zeile 0 der Tabelle, sie steht oben,
-#     weil Verzeichnisse immer zuerst sortiert werden) und DORT
-#     einfuegen. Im SELBEN Ordner waere Strg+V zu Recht -EINVAL:
-#     `expakt.in_sich` legt keinen Ordner in sich selbst.
 doppelauf ftabzeile0
 warteauf explorer: cd /data/bilder || 60
 warte 4
@@ -153,7 +149,6 @@ warte 4
 foto 15-versteckt
 taste ctrl-h
 warte 3
-# --- DIE PFADLEISTE ALS TEXTFELD, Strg+L (Punkt 6)
 taste ctrl-l
 warte 4
 foto 16-pfadfeld
@@ -168,9 +163,6 @@ warte 2
 taste f2
 warte 5
 foto 17-umbenennen
-# Der Dialog steht mit dem alten Namen im Feld und dem Text markiert;
-# ein angehaengtes `9` macht daraus einen anderen Namen, die
-# Eingabetaste fuehrt es aus. ERST DANN hat Strg+Z etwas zu tun.
 taste 9
 warte 2
 taste ret
@@ -178,12 +170,6 @@ warteauf explorer: rename rc=0 || 60
 warte 4
 # --- RUECKGAENGIG, Strg+Z (Punkt 9)
 #
-# GEMESSEN: `sendkey ctrl-z` kam im Gast als `^Y` an. Die Platte ist
-# auf die deutsche Belegung gestellt (`/etc/locale.conf` lang=de), und
-# dort sind Y und Z vertauscht -- das ist das Z, das QWERTZ seinen
-# Namen gibt (kernel/kbd.fi::de_plain). QEMUs `sendkey` benennt die
-# Taste nach ihrer AMERIKANISCHEN Beschriftung, also ist die Taste,
-# die im Gast ein Z gibt, fuer QEMU das `y`.
 taste ctrl-y
 warte 4
 foto 18-ende
@@ -197,22 +183,22 @@ bash tools/design/capture.sh "$OUT/lauf" res="$RES" uitrace=yes lang=de \
     > "$OUT/lauf.log" 2>&1
 S="$OUT/lauf/serial.txt"
 if [ ! -s "$S" ]; then
-    echo "FEHLGESCHLAGEN: keine serielle Ausgabe"; tail -20 "$OUT/lauf.log"; exit 1
+    echo "FAIL: no serial output"; tail -20 "$OUT/lauf.log"; exit 1
 fi
-grep -qa 'wm: hold' "$S" && ok "der Fensterserver kam bis 'wm: hold'" \
-    || bad "der Fensterserver kam nie bis 'wm: hold'"
+grep -qa 'wm: hold' "$S" && ok "the window server got as far as 'wm: hold'" \
+    || bad "the window server never got as far as 'wm: hold'"
 hat "$S" 'explorer: ready' "der Dateimanager ist hochgekommen"
 
-echo "== 5. die Pflichtpunkte an der seriellen Leitung =="
+echo "== 5. the mandatory items on the serial line =="
 
 hat "$S" 'explorer: zeit mtime=[0-9]+' "Punkt 5: die Zeiten werden gelesen"
 mit=$(letzte "$S" 'explorer: zeit mtime=[0-9]+ mit=[0-9]+')
 von=$(grep -aoE 'explorer: zeit [^ ]+ mit=[0-9]+ von=[0-9]+' "$S" | tail -1 \
       | grep -oE 'von=[0-9]+' | grep -oE '[0-9]+')
 if [ "${mit:-0}" -gt 0 ] 2>/dev/null; then
-    ok "Punkt 5: $mit von ${von:-?} Eintraegen tragen eine ECHTE Zeit"
+    ok "item 5: $mit of ${von:-?} entries carry a REAL time"
 else
-    bad "Punkt 5: kein Eintrag hat eine Zeit -- die Spalte zeigt weiter '--'"
+    bad "item 5: no entry has a time -- the column still shows '--'"
 fi
 hat "$S" 'tzoff=[0-9]+' "Punkt 5: der Ortszeitversatz aus /etc/time.conf"
 
@@ -222,8 +208,8 @@ hat "$S" 'explorer: modell n=[0-9]+ blob=[0-9]+ ueberlauf=0' \
 
 orte=$(groesste "$S" 'explorer: orte n=[0-9]+')
 [ "${orte:-0}" -ge 4 ] 2>/dev/null \
-    && ok "Punkt 6: $orte Orte in der Seitenleiste" \
-    || bad "Punkt 6: nur ${orte:-0} Orte in der Seitenleiste"
+    && ok "item 6: $orte places in the sidebar" \
+    || bad "item 6: only ${orte:-0} places in the sidebar"
 hat "$S" 'explorer: krume n=[0-9]+' "Punkt 6: die Brosamenleiste ist gebaut"
 hat "$S" 'explorer: krume n=[0-9]+ feld=1' \
     "Punkt 6: Strg+L macht aus der Leiste ein Textfeld"
@@ -231,14 +217,14 @@ hat "$S" 'explorer: krume n=[0-9]+ feld=1' \
 # --- Punkt 3: die Mehrfachauswahl.
 aus=$(groesste "$S" 'explorer: sel n=[0-9]+')
 [ "${aus:-0}" -ge 2 ] 2>/dev/null \
-    && ok "Punkt 3: Strg+A hat $aus Zeilen markiert" \
-    || bad "Punkt 3: hoechstens ${aus:-0} Zeilen markiert -- Strg+A greift nicht"
+    && ok "item 3: Ctrl+A selected $aus rows" \
+    || bad "item 3: at most ${aus:-0} rows selected -- Ctrl+A does not work"
 
 # --- Punkt 1: die Zwischenablage.
 clipn=$(groesste "$S" 'explorer: clip n=[0-9]+')
 [ "${clipn:-0}" -ge 1 ] 2>/dev/null \
-    && ok "Punkt 1: Strg+C legte $clipn Pfade in die Ablage" \
-    || bad "Punkt 1: die Ablage blieb leer -- Strg+C greift nicht"
+    && ok "item 1: Ctrl+C put $clipn paths into the clipboard" \
+    || bad "item 1: the clipboard stayed empty -- Ctrl+C does not work"
 hat "$S" 'explorer: paste n=[0-9]+' "Punkt 1: Strg+V hat eingefuegt"
 
 hat "$S" 'explorer: dlgrect' "Punkt 2: F2 macht den Umbenennen-Dialog auf"
@@ -272,7 +258,7 @@ for f in "$OUT/lauf"/*.png; do
     [ -e "$f" ] || continue
     n=$((n+1)); cp "$f" "$SHOTS/"
 done
-[ "$n" -ge 6 ] && ok "$n Aufnahmen entstanden" || bad "nur $n Aufnahmen"
+[ "$n" -ge 6 ] && ok "$n Aufnahmen entstanden" || bad "only $n shots"
 
 for f in "$OUT/lauf"/*.png; do
     [ -e "$f" ] || continue

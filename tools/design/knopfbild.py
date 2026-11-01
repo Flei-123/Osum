@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/knopfbild.py -- DIE DREI FENSTERKNOEPFE, STARK VERGROESSERT.
 #
-# Justins Foto vom 10.09. 18:39 zeigt ein zerfranstes Schliesskreuz mit
-# einem fetten schraegen Zusatzbalken. Dieses Werkzeug malt GENAU die
-# Geometrie, die kernel/wm.fi `cap_glyph` malt -- einmal in der alten
-# Vektorfassung (zwei `strichen`-Aufrufe, Nichtnull-Regel) und einmal in
-# der zurueckgebauten Direktfassung -- und schreibt beides als PNG,
-# zwanzigfach vergroessert, mit Gitter.
 #
-# WARUM NACHGEBAUT UND NICHT AUS DEM KERN GEHOLT: um die zwei Fassungen
-# NEBENEINANDER zu sehen, muesste man zwei Kerne bauen, zweimal booten
-# und zweimal denselben Bildausschnitt treffen. Die Geometrie ist
-# dieselbe (10*sk Bildpunkte, Strichstaerke sk bzw. 3*sk/2), und der
-# Unterschied, um den es geht -- deckt sich Farbe MEHRFACH oder nicht --
-# haengt allein an der Regel, nicht am Kern.
 import sys, zlib, struct
 
 SK = 2  # Justins Skalierung auf 3440x1440 (Tafelzeile: S2)
@@ -57,11 +44,6 @@ def deckung_direkt(k):
                 f[y][t] = 1
                 f[y][D - 1 - t] = 1
     else:
-        # NACHTRAG: dieselbe Ausrichtung wie kernel/wm.fi nach der
-        # Korrektur -- Kasten der Kantenlaenge kn = D-(sb-1), mittig,
-        # zweite Diagonale nach LINKS verbreitert. Vorher lief die
-        # Verbreiterung beider Diagonalen nach rechts aus dem Kasten
-        # heraus, und in der ersten/letzten Zeile fehlte ein Punkt.
         kn = D - (sb - 1)
         off = (D - (kn + sb - 1)) // 2
         for k in range(kn):
@@ -124,7 +106,6 @@ def malen(pfad, felder, titel):
                     r, g, b = 220, 30, 30      # DOPPELT GEDECKT
                 for dy in range(ZOOM):
                     for dx in range(ZOOM):
-                        # duennes Gitter, damit man Bildpunkte zaehlen kann
                         if dx == 0 or dy == 0:
                             rr, gg, bb = (r + 90) // 2, (g + 90) // 2, (b + 90) // 2
                         else:

@@ -93,11 +93,9 @@ def main(argv):
             werte = [int(v) for v in m.group(1).split()]
             reports.append(werte)
     if g is None:
-        print("keine graph-Zeile im Mitschnitt")
+        print("no graph line in the capture")
         return 1
     gx, gy, gw, gh, n, hist, p0x, p0y, pnx, pny = (int(v) for v in g.groups())
-    # Fensterkoordinaten -> Schirmkoordinaten. Der Ursprung der
-    # Arbeitsflaeche steht in der Spur der Bibliothek.
     cx, cy = wx + 2, wy + 22
     for z in txt:
         m = re.search(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
@@ -115,10 +113,9 @@ def main(argv):
     print("Flaeche %dx%d an (%d,%d): %d verschiedene Farben"
           % (gw, gh, cx + gx, cy + gy, len(farben)))
     if len(farben) < 3:
-        print("FEHLER: die Flaeche ist (fast) einfarbig -- da ist keine Kurve")
+        print("ERROR: the area is (almost) one colour -- there is no curve")
         return 1
 
-    # ---- der Grund: die haeufigste Farbe der Flaeche
     zaehler = {}
     for y in range(gy + 2, gy + gh - 2):
         for x in range(gx + 2, gx + gw - 2, 3):
@@ -131,7 +128,7 @@ def main(argv):
 
     # ---- 2. die Punkte
     if not werte:
-        print("keine gcpu-Werte (lief das Programm ohne `melde`?)")
+        print("no gcpu values (did the program run without `melde`?)")
         return 1
     # The program reports after every picture it paints, and the shot of the run is taken at some moment of that
     # sequence -- a few samples before the last report is normal. The picture must show ONE of the reported states:
@@ -175,19 +172,18 @@ def main(argv):
         gg = graphs[n]
         p0x, pnx = int(gg.group(7)), int(gg.group(9))
         gx, gy, gw, gh = (int(gg.group(k)) for k in (1, 2, 3, 4))
-    print("Messpunkte %d: im Bild gefunden %d, daneben %d"
+    print("measuring points %d: found in the image %d, beside it %d"
           % (n, treffer, daneben))
-    # Die Enden, die das Programm selbst als Bildpunktstelle gemeldet hat
     e0 = gx + 1
     en = gx + 1 + ((n - 1) * (gw - 3) // (n - 1) if n > 1 else 0)
     print("Enden: gemeldet p0x=%d pnx=%d, nachgerechnet %d und %d"
           % (p0x, pnx, e0, en))
     if p0x != e0 or pnx != en:
-        print("FEHLER: die Abbildung des Laeufers und die des Programms "
+        print("ERROR: the mapping of the runner and that of the program "
               "laufen auseinander")
         return 1
     if treffer * 4 < n * 3:
-        print("FEHLER: weniger als drei Viertel der Messpunkte stehen im Bild")
+        print("ERROR: fewer than three quarters of the measuring points are in the image")
         return 1
     return 0
 

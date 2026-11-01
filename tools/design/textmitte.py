@@ -1,23 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/textmitte.py -- SITZT DIE BESCHRIFTUNG MITTIG IM KNOPF?
 #
 #   python3 tools/design/textmitte.py <schirm.ppm> <x> <y> <w> <h> [name]
 #
-# Justin und der Boss sagen: der Text sitzt nicht in der Mitte. Das
-# laesst sich zaehlen statt schaetzen. Das Werkzeug bekommt das
-# Knopfrechteck (aus der Zeile, die das Programm selbst meldet --
-# `launcher: rect ...`, `taskbar: btn ...`) und misst:
 #
-#   linker Rand  = Abstand von der Knopfkante bis zum ersten Textpunkt
-#   rechter Rand = Abstand vom letzten Textpunkt bis zur Knopfkante
-#   oberer/unterer Rand ebenso
 #
-# Mittig heisst: links == rechts und oben == unten, jeweils +/- 1
-# Bildpunkt (bei ungerader Differenz geht einer nicht auf).
 #
-# "Text" ist alles, was sich deutlich von der HAEUFIGSTEN Farbe im
-# Rechteck abhebt -- die haeufigste Farbe ist die Knopfflaeche.
 import sys
 
 
@@ -63,7 +51,7 @@ def messen(px, w, h, bx, by, bw, bh, name):
            for x in range(bx, min(bx + bw, w))
            if anders(f(x, y))]
     if not pts:
-        print("  %-14s kein Text/Symbol im Knopf gefunden" % name)
+        print("  %-14s no text/symbol found in the button" % name)
         return False
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
     links = min(xs) - bx

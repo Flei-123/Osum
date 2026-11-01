@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# Rastert die SVG-Pfade des Signets in Zielgroesse -- dieselbe Regel wie
-# kernel/vektor.fi: Kanten aus Bezier-Unterteilung, nonzero-Fuellregel,
-# 4x4 Ueberabtastung.
 import re, sys
 
 def toks(d):
@@ -189,29 +186,8 @@ def lade_svg(p):
     return pfade, vb
 
 
-# ============================================================ RUNDE VEKTOR
-# WOZU DIESE DATEI. Das Startzeichen lag als 832x1248-JPEG-FOTO im Baum
-# (assets/marke/osum-vorlage-justin.jpg) und wurde daraus mit LANCZOS auf
-# 16/24/32/48/64 verkleinert. Ein Foto hat keine Kanten, sondern
-# Uebergaenge samt JPEG-Ringen -- deshalb sah der Knopf auf Justins
-# Schirm auch dann noch grob aus, als die Groessen endlich stimmten.
 #
-# Die ECHTE Vektorfassung desselben Zeichens liegt in einem anderen Baum
-# (assets/marke/osum-signet-*.svg im OrientOS-Ablegen, "FESTGELEGT
-# (Runde 5)", mit potrace aus derselben Vorlage gewonnen): 12 Pfade,
-# reine kubische Beziers, drei Markenfarben. Daraus wird hier in
-# ZIELGROESSE gerastert -- mit derselben Regel wie kernel/vektor.fi
-# (Bezier-Unterteilung nach Sehnenlaenge, nonzero-Fuellregel, 4x4
-# Ueberabtastung).
 #
-# GEMESSEN, harte Farbspruenge zwischen Nachbarpunkten (weniger ist
-# glatter) gegen weiche Uebergaenge:
-#     Groesse | alt (aus dem Foto) | neu (aus den Pfaden)
-#       32    | 214 hart / 152 weich |  25 hart / 102 weich
-#       48    | 392 / 219            |  41 / 156
-#       64    | 609 / 295            |  58 / 207
-# Bei 64 sind das 90 Prozent weniger harte Spruenge. Das ist der
-# Unterschied zwischen "gerastert" und "hochgezogen".
 #
 #   python3 tools/brand/svgrast.py <signet.svg> <ausgabeordner>
 

@@ -1,25 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/dunkelmess.py -- ZIEHT DER DUNKLE MODUS WIRKLICH MIT?
 #
 #   python3 tools/design/dunkelmess.py <hell.ppm> <dunkel.ppm> [name]
 #
-# Justins Frage war: "aendert der dunkle Modus auch die Farbe des
-# Suchfensters?" Eine Behauptung genuegt dafuer nicht. Dieses Werkzeug
-# vergleicht ZWEI Abzuege derselben Ansicht -- einmal hell, einmal
-# dunkel -- und misst je Flaeche die mittlere Helligkeit.
 #
-#   Y = 0,299 R + 0,587 G + 0,114 B    (die uebliche Gewichtung; das
-#                                       Auge sieht Gruen am hellsten)
 #
-# Eine Flaeche, die im dunklen Modus MITZIEHT, wird deutlich dunkler.
-# Eine, die gleich hell bleibt, ist NICHT umgestellt -- und genau die
-# will der Boss benannt haben.
 #
-# Untersucht werden nicht nur Mittelwerte ueber das ganze Bild (die
-# verwischen alles), sondern ein RASTER aus Kacheln. So faellt auch
-# eine einzelne Flaeche auf, die stehengeblieben ist, waehrend der
-# Rest umschaltet.
 import sys
 
 
@@ -71,8 +57,6 @@ if __name__ == '__main__':
     print("  ganzes Bild      hell %6.1f   dunkel %6.1f   Differenz %+7.1f  %s"
           % (gh, gd, gd - gh, "OK" if gd < gh - 20 else "<-- ZIEHT NICHT MIT"))
 
-    # Das Raster: 8 x 6 Kacheln. Eine Kachel, die hell bleibt, waehrend
-    # der Rest dunkel wird, ist der gesuchte Fehler.
     KX, KY = 8, 6
     stehen = []
     print()
@@ -91,9 +75,9 @@ if __name__ == '__main__':
 
     print()
     if stehen:
-        print("  FLAECHEN, DIE NICHT MITZIEHEN (hell geblieben):")
+        print("  AREAS THAT DO NOT FOLLOW (stayed light):")
         for kx, ky, a, b in stehen:
             print("    Kachel x%d y%d   hell %5.1f -> dunkel %5.1f  (%+.1f)"
                   % (kx, ky, a, b, b - a))
         sys.exit(1)
-    print("  jede Kachel wird im dunklen Modus dunkler -- nichts stehengeblieben")
+    print("  every tile gets darker in dark mode -- nothing left behind")

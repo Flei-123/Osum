@@ -30,7 +30,7 @@ etc_von() {
 a_etc=$(etc_von "$ABBILD")
 s_etc=$(etc_von "$STAND")
 
-echo "== /etc IM ABBILD UND IM PRUEFSTAND =="
+echo "== /etc IN THE IMAGE AND IN THE TEST BENCH =="
 fehlt=""
 for d in $a_etc; do
     if ! echo "$s_etc" | grep -qx "$d"; then
@@ -45,7 +45,7 @@ done
 if [ -n "$fehlt" ]; then
     printf '%s' "$fehlt"
 else
-    echo "  gleich (ausser den $(echo $NUR_ABBILD | wc -w) begruendeten Ausnahmen)"
+    echo "  equal (except the $(echo $NUR_ABBILD | wc -w) justified exceptions)"
 fi
 
 quellen_von() {
@@ -57,7 +57,7 @@ a_q=$(quellen_von "$ABBILD")
 s_q=$(quellen_von "$STAND")
 
 echo
-echo "== QUELLEN AUS assets/ UND locale/ =="
+echo "== SOURCES FROM assets/ AND locale/ =="
 fehlt2=""
 for q in $a_q; do
     if ! echo "$s_q" | grep -qx "$q"; then
@@ -75,11 +75,11 @@ done
 if [ -n "$fehlt2" ]; then
     printf '%s' "$fehlt2"
 else
-    echo "  gleich (ausser den begruendeten Ausnahmen)"
+    echo "  equal (except the justified exceptions)"
 fi
 
 echo
-echo "== SYMBOLE (netview): ANZAHL, NICHT NUR VORHANDENSEIN =="
+echo "== SYMBOLS (netview): COUNT, NOT ONLY PRESENCE =="
 symbole_von() {
     sed 's/#.*//' "$1" \
         | grep -oP 'state-[a-z]+|mark-[a-z]+|sys-[a-z]+|tile-[a-z]+' \
@@ -90,12 +90,12 @@ s_n=$(symbole_von "$STAND" | wc -l)
 if [ "${a_n:-0}" -eq 0 ] && [ "${s_n:-0}" -eq 0 ]; then
     a_n=$(ls assets/netview/ 2>/dev/null | wc -l)
     s_n=$a_n
-    echo "  beide Skripte bauen die Liste zur Laufzeit; im Baum: $a_n Dateien"
+    echo "  both scripts build the list at run time; in the tree: $a_n files"
 else
     echo "  Abbild $a_n, Pruefstand $s_n"
     if [ "$a_n" != "$s_n" ]; then
-        echo "  UNTERSCHIEDLICH -- genau der Fehler aus Runde ECHT-2"
-        echo "  nur im Abbild:"
+        echo "  DIFFERENT -- exactly the bug from round ECHT-2"
+        echo "  only in the image:"
         comm -23 <(symbole_von "$ABBILD") <(symbole_von "$STAND") \
             | sed 's/^/    /'
         fehler=$((fehler + 1))
@@ -103,7 +103,7 @@ else
 fi
 
 echo
-echo "== DIE MARKE: IST DAS ERZEUGTE BILD AKTUELL? =="
+echo "== THE BRAND: IS THE GENERATED IMAGE CURRENT? =="
 GEN=kernel/user/brand_start.fi
 if [ ! -f "$GEN" ]; then
     echo "  $GEN fehlt"
@@ -118,7 +118,7 @@ else
         [ "$png" -nt "$GEN" ] && neuer+=" $(basename "$png")"
     done
     if [ -n "$neuer" ]; then
-        echo "  NEUER ALS DAS ERZEUGTE BILD:$neuer"
+        echo "  NEWER THAN THE GENERATED IMAGE:$neuer"
         echo "  -> python3 tools/brand/startimage.py assets/marke $GEN"
         fehler=$((fehler + 1))
     else
@@ -127,7 +127,7 @@ else
             | grep -oP 'start-\K[0-9]+' | sort -n | tr '\n' ' ')
         echo "  eingebackene Groessen: $groessen"
         echo "  Dateien in assets/marke: $dateien"
-        echo "  marke_start.fi ist aktuell"
+        echo "  marke_start.fi is current"
     fi
 fi
 
@@ -135,13 +135,13 @@ echo
 if [ $fehler -gt 0 ]; then
     echo "BESTUECKUNG FEHLGESCHLAGEN ($fehler Befund(e))."
     echo
-    echo "Der Pruefstand misst dann etwas anderes, als der Nutzer bootet --"
-    echo "und ein Bildschirmfoto sagt nicht, dass eine Datei fehlt. Es"
-    echo "zeigt ein Ersatzzeichen, und das sieht aus wie Absicht."
+    echo "The test bench then measures something other than what the user boots --"
+    echo "and a screenshot does not say that a file is missing. It"
+    echo "shows a replacement glyph, and that looks intentional."
     echo
-    echo "Abhilfe: die Datei in tools/look/shot.sh nachtragen, oder -- wenn"
-    echo "sie dort zu Recht fehlt -- mit BEGRUENDUNG in NUR_ABBILD bzw."
-    echo "NUR_STAND in diesem Skript."
+    echo "Remedy: add the file to tools/look/shot.sh, or -- if"
+    echo "it is rightly missing there -- with a JUSTIFICATION in NUR_ABBILD or"
+    echo "NUR_STAND in this script."
     exit 1
 fi
 echo "BESTUECKUNG PASSED."

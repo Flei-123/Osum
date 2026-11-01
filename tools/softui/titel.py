@@ -46,10 +46,8 @@ def main(argv):
             ziel = dict(x=int(m.group(4)), y=int(m.group(5)),
                         ow=int(m.group(9)), t=m.group(11))
     if ziel is None:
-        print("kein scharfes Fenster mit Schmuck im Mitschnitt")
+        print("no sharp window with decoration in the capture")
         return 1
-    # Nur der Teil mit der Beschriftung: hinter dem Netzzeichen, vor den
-    # drei Schaltflaechen.
     x = ziel["x"] + BORDER + 4
     y = ziel["y"] + BORDER
     w = ziel["ow"] - 2 * BORDER - CAP_N * CAP_W - 8

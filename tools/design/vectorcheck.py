@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/vectorcheck.py -- DER SELBSTTEST DES UNTERBAUS.
 #
-# Warum es das gibt: der Zeiger ist in einer frueheren Runde zerfallen,
-# und niemand hat es gemerkt, weil kein Test die FORM geprueft hat --
-# nur, dass etwas gemalt wurde. Dieser Test prueft die Form.
 #
-# Er rastert jede Grundform in mehreren Groessen und bei jeder
-# Vervielfachung und prueft gegen Sollwerte, die aus der Geometrie
-# kommen und nicht aus einem frueheren Lauf:
 #
-#   Flaeche      gegen die Formel (Kreis pi r^2, Rechteck w*h,
-#                Rundeck w*h - (4-pi) r^2), Toleranz in Prozent
-#   Symmetrie    links/rechts und oben/unten spiegelgleich
-#   Randbreite   der Kantensaum ueberall gleich breit
-#   Loecher      kein unbedeckter Bildpunkt mitten in der Flaeche
 #
-# Der Test laeuft NICHT im Kernel, sondern rechnet dieselbe Arithmetik
-# in Python nach -- 26.6 Festkomma, dieselbe Kurvenzerlegung, dieselbe
-# 4x4-Unterabtastung. Weicht das Bild des Kernels davon ab, ist einer
-# von beiden falsch, und beide stehen nebeneinander im Bericht.
 import sys
 import math
 
@@ -192,24 +176,9 @@ def flaeche(d):
     return sum(d[0]) / 255.0
 
 
-# Die Toleranz der Spiegelpruefung: EINE Deckungsstufe.
 #
-# Gemessen, nicht gewaehlt. Die Rasterung hat 4x4 Unterabtastung, also
-# 17 Stufen; eine Stufe ist 255/16 = 15.9, aufgerundet 16. Kleiner als
-# eine Stufe kann ein Unterschied nicht sein, ohne null zu sein.
 #
-# Woher der Rest kommt: die Spannenregel zaehlt eine Abtastspalte,
-# wenn ihr Mittelpunkt im Abschnitt [a,b) liegt -- halboffen. Faellt
-# eine Kante EXAKT auf einen Abtastpunkt (bei Kreisen 3.12 % der
-# Kanten), zaehlt er links dazu und rechts nicht. Das ist die uebliche
-# und flaechentreue Regel; sie durch Runden zu ersetzen wurde gemessen
-# und macht die Sache schlechter (4694 statt 296 unsymmetrische Faelle
-# von 5000).
 #
-# In Zahlen am fertigen Bild: senkrecht 0 Abweichung, waagerecht
-# hoechstens 16 von 255 auf 0.9 bis 4.7 Prozent der Punktpaare. Das
-# ist eine Stufe von siebzehn und liegt unter dem, was ein Auge auf
-# einer Kante sieht -- die Kante selbst hat 17 Stufen.
 SYM_TOL = 16
 
 
@@ -280,11 +249,11 @@ def pruef(name, ist, soll, tol, einheit=""):
 
 
 def main():
-    print("VEKTOR-SELBSTTEST -- Grundformen gegen Sollwerte aus der Geometrie")
+    print("VECTOR SELF-TEST -- basic shapes against target values from the geometry")
     print("=" * 78)
 
     # ---------------------------------------------------------- RECHTECK
-    print("\n[1] Rechteck: Flaeche exakt, keine Kantenglaettung noetig")
+    print("\n[1] Rectangle: area exact, no anti-aliasing needed")
     for (w, h) in [(10, 10), (33, 17), (64, 64), (7, 100)]:
         p = Pfad()
         rechteck(p, 0, 0, w * EINS, h * EINS)
@@ -294,38 +263,22 @@ def main():
         pruef("Rechteck %dx%d Loecher" % (w, h), loecher(d), 0, 0)
 
     # ------------------------------------------------------------- KREIS
-    print("\n[2] Kreis: Flaeche gegen pi*r^2, Symmetrie, kein Loch")
+    print("\n[2] Circle: area against pi*r^2, symmetry, no hole")
     for r in [4, 8, 16, 32, 48]:
         p = Pfad()
         ellipse(p, r * EINS, r * EINS, r * EINS, r * EINS)
         d = rastern(p)
         soll = math.pi * r * r
-        # Toleranz 1.5 % -- die Bezierzerlegung liegt minimal innerhalb
-        # des echten Kreises, und die 4x4-Abtastung rundet je Bildpunkt.
         pruef("Kreis r=%d Flaeche" % r, flaeche(d), soll, soll * 0.015, " px")
         pruef("Kreis r=%d Symmetrie links/rechts" % r, sym_lr(d), 0, SYM_TOL)
         pruef("Kreis r=%d Symmetrie oben/unten" % r, sym_ud(d), 0, SYM_TOL)
         pruef("Kreis r=%d Loecher" % r, loecher(d), 0, 0)
-        # Nicht jede Zeile MUSS einen Saum haben. Am Aequator steht
-        # die Kante senkrecht und faellt auf die Bildpunktgrenze; dort
-        # waere ein Saum falsch. Je groesser der Radius, desto mehr
-        # solche Zeilen gibt es (gemessen: r=16 -> 2, r=32 -> 4,
-        # r=48 -> 8). Was hier wirklich zaehlt: der Saum darf nicht
-        # WEITFLAECHIG fehlen, sonst ist die Form eine Treppe. Die
-        # Schranke ist deshalb ein Anteil, kein fester Wert.
-        # Zeilen OHNE Saum sind die am Aequator, wo die Kante
-        # senkrecht steht und auf die Bildpunktgrenze faellt. Gemessen
-        # ueber r = 4..64: 2, 2, 2, 4, 8, 8 -- das waechst mit dem
-        # Radius, weil der Bogen dort ueber mehr Zeilen flach laeuft.
-        # Die Schranke bildet das ab: hoechstens 2 + r/6 solche Zeilen.
-        # Fiele der Saum darueber hinaus weg, waere die Kante eine
-        # Treppe -- genau der Fehler, den diese Runde abschafft.
         ohne = 2 * r - randbreite(d)
         pruef("Kreis r=%d Zeilen ohne Saum" % r, ohne, 0.0,
               2.0 + r / 6.0, " Zeilen")
 
     # ----------------------------------------------------------- ELLIPSE
-    print("\n[3] Ellipse: Flaeche gegen pi*rx*ry")
+    print("\n[3] Ellipse: area against pi*rx*ry")
     for (rx, ry) in [(20, 10), (8, 30), (40, 12)]:
         p = Pfad()
         ellipse(p, rx * EINS, ry * EINS, rx * EINS, ry * EINS)
@@ -333,10 +286,6 @@ def main():
         soll = math.pi * rx * ry
         pruef("Ellipse %dx%d Flaeche" % (rx, ry), flaeche(d), soll,
               soll * 0.02, " px")
-        # Bei stark gestreckten Ellipsen liegt die Abweichung bei zwei
-        # Stufen statt einer: die Kante ist dort so flach, dass zwei
-        # benachbarte Abtastspalten in denselben Bildpunkt fallen.
-        # Gemessen: 8x30 kommt auf 32, alle anderen auf 16.
         pruef("Ellipse %dx%d Symmetrie l/r" % (rx, ry), sym_lr(d), 0,
               2 * SYM_TOL)
 
@@ -353,7 +302,6 @@ def main():
         pruef("Rundeck %dx%d r=%d Symmetrie o/u" % (w, h, r), sym_ud(d), 0, SYM_TOL)
         pruef("Rundeck %dx%d r=%d Loecher" % (w, h, r), loecher(d), 0, 0)
 
-    # r == halbe Seite muss der Kreis sein
     p = Pfad()
     rundeck(p, 0, 0, 48 * EINS, 48 * EINS, 24 * EINS)
     a1 = flaeche(rastern(p))
@@ -363,7 +311,7 @@ def main():
     pruef("Rundeck r=w/2 ist der Kreis", abs(a1 - a2), 0, 1.0, " px")
 
     # ----------------------------------------------- SKALIERUNG / GROESSE
-    print("\n[5] Zielgroesse: doppelt gerastert ist viermal die Flaeche")
+    print("\n[5] Target size: rasterised twice is four times the area")
     for r in [8, 16]:
         p = Pfad()
         ellipse(p, r * EINS, r * EINS, r * EINS, r * EINS)
@@ -376,7 +324,7 @@ def main():
               a2 / a1, 4.0, 0.06)
 
     # ------------------------------------------ HALBE BILDPUNKTE (Lage)
-    print("\n[6] Unterpixel: eine um einen halben Punkt versetzte Kante")
+    print("\n[6] Subpixel: an edge shifted by half a point")
     p = Pfad()
     rechteck(p, 0, 0, 10 * EINS, 10 * EINS)
     a1 = flaeche(rastern(p))
@@ -390,8 +338,6 @@ def main():
     print("\n[7] Fuellregeln: Ring, innen hohl")
     p = Pfad()
     ellipse(p, 32 * EINS, 32 * EINS, 30 * EINS, 30 * EINS)
-    # Der innere Kreis in derselben Richtung: bei Nichtnull bleibt er
-    # gefuellt, bei Gerade-Ungerade wird er zum Loch.
     ellipse(p, 32 * EINS, 32 * EINS, 15 * EINS, 15 * EINS)
     d_nz = rastern(p, 0)
     d_eo = rastern(p, 1)
@@ -403,7 +349,7 @@ def main():
           soll_eo * 0.02, " px")
 
     # ---------------------------------------------------- STRICHE
-    print("\n[8] Striche: zwei Striche in EINEM Pfad (das Kreuz)")
+    print("\n[8] Strokes: two strokes in ONE path (the cross)")
 
     def wurzel(v):
         if v <= 0:
@@ -439,35 +385,20 @@ def main():
                 p.linie(bx + nx, by + ny)
         p.zu()
 
-    # EIN Strich: Flaeche = Laenge * Breite (plus die Enden)
     p = Pfad()
     strich(p, [(0, 0), (20 * EINS, 0)], EINS)
     a1 = flaeche(rastern(p))
     pruef("Ein waagerechter Strich 20x2", a1, 40.0, 2.0, " px")
 
-    # ZWEI Striche: das Kreuz. Beide muessen da sein.
     #
-    # DIESE PRUEFUNG GAB ES ZUERST NICHT, und genau dieser Fehler ist
-    # durchgerutscht: `strichen` rief `pfad_neu`, das auch die KANTEN
-    # loescht. Der erste Strich verschwand, und im Bild stand
-    # stattdessen ein Balken quer ueber den Knopf. Sichtbar wurde es
-    # erst auf dem 2560er Beleg.
     p = Pfad()
     d = 20 * EINS
     strich(p, [(0, 0), (d, d)], EINS)
     strich(p, [(d, 0), (0, d)], EINS)
     dk = rastern(p)
-    # Zwei Diagonalen der Laenge 20*sqrt(2) mal Breite 2, minus die
-    # Ueberschneidung in der Mitte.
     soll = 2 * (20 * 1.4142 * 2) - 8
     pruef("Kreuz aus zwei Strichen: Flaeche", flaeche(dk), soll,
           soll * 0.12, " px")
-    # Die Spiegelpruefung laesst die aeussersten zwei Reihen aus.
-    # GEMESSEN warum: die Abweichung sitzt AUSSCHLIESSLICH in den vier
-    # Strichspitzen (128 gegen 80 auf je einem Punkt). Ein stumpfes
-    # Ende trifft unter 45 Grad das Bildpunktraster an beiden Enden
-    # verschieden; im Rumpf des Kreuzes sind es null Abweichungen bei
-    # null groesster Differenz.
     def sym_lr_kern(d):
         buf, w, h = d[0], d[1], d[2]
         m = 0
@@ -479,9 +410,6 @@ def main():
     pruef("Kreuz: Symmetrie l/r (ohne Spitzen)", sym_lr_kern(dk), 0,
           SYM_TOL)
     pruef("Kreuz: Symmetrie oben/unten", sym_ud(dk), 0, SYM_TOL)
-    # Und die Gegenprobe, die den Fehler benennt: OHNE den zweiten
-    # Strich muss die Flaeche halb so gross sein. War der erste
-    # verlorengegangen, waeren beide gleich.
     p = Pfad()
     strich(p, [(0, 0), (d, d)], EINS)
     a_einer = flaeche(rastern(p))
@@ -498,7 +426,7 @@ def main():
         for f in FEHLER:
             print("   - " + f)
         return 1
-    print("ERGEBNIS: alle %d Pruefungen bestanden" % n)
+    print("RESULT: all %d checks passed" % n)
     return 0
 
 

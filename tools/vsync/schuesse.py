@@ -67,42 +67,29 @@ def main():
     except OSError:
         pass
 
-    # 1. in die Ecke, damit der Ort danach eine Rechnung ist
     for _ in range(8):
         sagen(s, "mouse_move -120 -120")
-    # 2. auf die Titelleiste des Fensters. Es steht bei x=24 y=40 und
-    #    ist 564 breit; die Leiste liegt bei y=40..64. Also in die Mitte
-    #    der Leiste: (24+280, 40+12) = (304, 52).
     sagen(s, "mouse_move 120 52")
     sagen(s, "mouse_move 120 0")
     sagen(s, "mouse_move 64 0")
-    # 3. Taste runter -- ab hier zieht das Fenster mit
     sagen(s, "mouse_button 1")
 
     geschossen = 0
     for i in range(n):
-        # Erst bewegen, dann SOFORT fotografieren. Kein Warten auf Ruhe.
         sagen(s, "mouse_move %d %d" % (schritt, schritt // 2))
         ziel = os.path.join(ordner, "s%03d.ppm" % i)
         if os.path.exists(ziel):
             os.unlink(ziel)
         sagen(s, 'screendump %s' % ziel)
-        # Dem Schreiben ein wenig Zeit geben, aber NICHT auf Ruhe
-        # warten -- sonst misst man genau den Zustand, den man nicht
-        # sucht. Die Datei wird unten auf Vollstaendigkeit geprueft.
         time.sleep(0.02)
         geschossen += 1
 
     sagen(s, "mouse_button 0")
     time.sleep(0.5)
 
-    # Halbe Dateien wegwerfen: ein PPM, das kuerzer ist als sein Kopf
-    # verspricht, ist kein Beweis fuer Reissen, sondern fuer einen
-    # zu frueh gelesenen Puffer.
     gut = 0
     for i in range(geschossen):
         ziel = os.path.join(ordner, "s%03d.ppm" % i)
-        # Auf eine Groesse warten, die sich nicht mehr aendert.
         letzte = -1
         for _ in range(50):
             try:

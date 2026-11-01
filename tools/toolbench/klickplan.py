@@ -40,12 +40,6 @@ ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
                    r"(uid=\d+ thr=\d+ prio=\d+ dr=\d+ dw=\d+ drate=\d+) "
                    r"(ntx=\d+ nrx=\d+|net=-) gpu=(\S+) y=(\d+) "
                    r"name=(.*)$")
-# Die Spur der Bibliothek traegt seit Runde SOFTUI zwei Felder mehr
-# (`ax=`, `ay=`, der Ursprung der Arbeitsflaeche). Wer sie nicht
-# zulaesst, findet den Ja-Knopf nicht -- und es sieht aus, als haette
-# die Nachfrage keinen.
-# FUI-ALL: the question is an overlay of the SAME window now (fuiscene's
-# dialog), and the program says where its first button stands.
 DLGOK = re.compile(r"taskmgr: dialog ok x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TBGEOM = re.compile(r"taskbar: geom edge=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -81,11 +75,6 @@ def letzter_block(zeilen):
     """Der letzte VOLLSTAENDIGE Block. Ein halb geschriebener Block am
     Ende des Mitschnitts (die Maschine wurde mittendrin abgeraeumt)
     haette Zeilen ohne Kopf."""
-    # UND NUR BLOECKE NACH DER LETZTEN SORTIERUNG. Ein Klick in die
-    # Kopfzeile stellt die Liste um; ein Block von davor beschreibt eine
-    # Reihenfolge, die es nicht mehr gibt, und die Zeile darunter gehoert
-    # dann einem anderen Prozess. GEMESSEN: der Laeufer waehlte den
-    # Schreibtisch statt des Starters, weil er eine Zeile zu tief traf.
     ab = 0
     for i, z in enumerate(zeilen):
         if "taskmgr: sortiert " in z:
@@ -111,10 +100,6 @@ def main(argv):
         return 2
     zeilen = lies(argv[1])
     was = argv[2]
-    # DAS FENSTER WIRD ERST GEHOLT, WENN ES GEBRAUCHT WIRD. Die Ziele des
-    # Kontrollzentrums liegen in der Taskleiste und im Panel -- beides
-    # sind Fenster, die keine Widget-Spur schreiben, und ein Laeufer, der
-    # hier abbricht, weil ein UNBETEILIGTES Fenster fehlt, misst nichts.
     if was in ("diskbtn", "diskrow", "disknav"):
         pat = {"diskbtn": r"disks: btn verb=(\S+) cx=(\d+) cy=(\d+)",
                "diskrow": r"disks: row p=(\d+) cx=(\d+) cy=(\d+)",
@@ -136,10 +121,6 @@ def main(argv):
         x, y, w, h, cx, cy = fenster(zeilen)
 
     if was == "qsfeld":
-        # Die Ecke der Taskleiste, in der die Symbole stehen -- ein Klick
-        # dorthin oeffnet die Schnelleinstellungen (Runde NETVIEW,
-        # dritter Nachtrag). Die Leiste meldet beides: wo SIE steht und
-        # wo das Feld IN ihr liegt.
         g = None
         f = None
         for z in zeilen:
@@ -157,11 +138,6 @@ def main(argv):
         return 0
 
     if was == "kachel":
-        # Eine Kachel des Kontrollzentrums: ihre MITTE. Seit die Kacheln der
-        # Szenenbaum legt (05.10.2026) rechnet niemand mehr 180 x 74 und zehn
-        # Bildpunkte Symbolabstand nach -- das Panel meldet sein Rechteck
-        # (`qs: open x y`, Ursprung auf dem Schirm) und jede Kachel mit
-        # Nummer, Stelle und Groesse IM Panel (`qs: kachel n= x= y= w= h=`).
         t = argv[3]
         o = None
         k = None
@@ -185,11 +161,6 @@ def main(argv):
         return 0
 
     if was in ("qszeile1", "qszeile2"):
-        # Die zwei Verknuepfungszeilen am Fuss des Panels. Ihre Lage
-        # steht im Quelltext von qs.fi als L1Y/L2Y; hier wird sie aus dem
-        # gemeldeten Panelrechteck und der Hoehe zurueckgerechnet -- die
-        # Zeilen sind die letzten beiden, je 22 hoch, mit 8 Abstand und
-        # 10 Rand darunter.
         o = None
         for z in zeilen:
             m = QSOPEN.search(z)

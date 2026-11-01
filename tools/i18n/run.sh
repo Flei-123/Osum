@@ -24,7 +24,7 @@ schau() { local was=$1; shift
     if [ $? = 0 ]; then ok "$was: $aus"; else bad "$was: $aus"; fi; }
 schau_nicht() { local was=$1; shift
     local aus; aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1)
-    if [ $? = 0 ]; then bad "$was -- es steht doch da"; else ok "$was"; fi; }
+    if [ $? = 0 ]; then bad "$was -- it is there after all"; else ok "$was"; fi; }
 
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
     echo "I18N: uebersprungen, qemu-system-x86_64 fehlt"; exit 0; }
@@ -41,7 +41,7 @@ ZEILE="gfx wm wig desk einst nostart wmhold wiglong nokbd nosched noproc nofs"
 
 # ===================================================== 1. die Schriften
 
-echo "== 1. die Schriften: mehr als ASCII, und weiter reproduzierbar =="
+echo "== 1. the fonts: more than ASCII, and still reproducible =="
 
 python3 tools/i18n/coverage.py "$SANS" "$MONO" > "$TMPD/deckung.txt" 2>&1
 cov() { grep -a "i18n-coverage: file=assets/osum-$1.ttf" "$TMPD/deckung.txt" \
@@ -65,9 +65,9 @@ if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
     am=$(grep -a 'i18n-coverage' "$TMPD/altd.txt" | grep -oE ' missing=[0-9]+' | sed 's/.*=//')
     is "GEGENPROBE: der alte Ausschnitt (--set ascii) bildet nur ab" "$az" "95"
     if [ "${am:-0}" -gt 0 ]; then
-        ok "GEGENPROBE: und ihm fehlen $am der Zeichen, die eine deutsche Oberflaeche braucht"
+        ok "CONTROL: and it lacks $am of the characters a German UI needs"
     else
-        bad "GEGENPROBE: dem alten Ausschnitt fehlt angeblich nichts"
+        bad "CONTROL: the old subset allegedly lacks nothing"
     fi
     python3 tools/ttf/subset.py "$DEJAVU/DejaVuSans.ttf" "$TMPD/neu.ttf" \
         >/dev/null 2>&1
@@ -79,21 +79,21 @@ if [ -f "$DEJAVU/DejaVuSans.ttf" ]; then
         python3 tools/design/mkfont.py assets/src/Inter-Regular.ttf "$TMPD/inter.ttf" assets/src/osum-sans.cps \
             >/dev/null 2>&1
         cmp -s "$TMPD/inter.ttf" "$SANS" \
-            && ok "osum-sans.ttf entsteht Oktett fuer Oktett neu aus Inter Regular" \
-            || bad "osum-sans.ttf laesst sich nicht reproduzieren"
+            && ok "osum-sans.ttf is rebuilt octet by octet from Inter Regular" \
+            || bad "osum-sans.ttf cannot be reproduced"
     else
-        echo "        (Inter-Quelle oder fontTools/uharfbuzz fehlen -- Schnitt nicht nachgerechnet)"
+        echo "        (Inter source or fontTools/uharfbuzz missing -- cut not recomputed)"
     fi
     cmp -s "$TMPD/neum.ttf" "$MONO" \
-        && ok "osum-mono.ttf entsteht Oktett fuer Oktett neu aus DejaVu Sans Mono" \
-        || bad "osum-mono.ttf laesst sich nicht reproduzieren"
+        && ok "osum-mono.ttf is rebuilt octet by octet from DejaVu Sans Mono" \
+        || bad "osum-mono.ttf cannot be reproduced"
 else
-    echo "        (DejaVu liegt nicht unter $DEJAVU -- Schnitt nicht nachgerechnet)"
+    echo "        (DejaVu is not under $DEJAVU -- cut not recomputed)"
 fi
 
 # ============================================== 2. kein deutscher Text
 
-echo "== 2. im Quelltext steht kein deutscher Oberflaechentext mehr =="
+echo "== 2. no German UI text left in the source =="
 
 python3 tools/i18n/scan.py > "$TMPD/scan.txt" 2>&1
 rc=$?
@@ -105,9 +105,9 @@ cp kernel/user/desktop.fi "$TMPD/schlecht/kernel/user/"
 printf 'static mut x: [u8; 12] = "Uebernehmen\\0"\n' \
     >> "$TMPD/schlecht/kernel/user/desktop.fi"
 if python3 tools/i18n/scan.py "$TMPD/schlecht" > "$TMPD/scanbad.txt" 2>&1; then
-    bad "GEGENPROBE: der Pruefer uebersieht einen eingebauten deutschen Text"
+    bad "CONTROL: the checker overlooks a built-in German text"
 else
-    ok "GEGENPROBE: ein eingebauter deutscher Text FAELLT auf ($(grep -oE 'gefunden: [0-9]+' "$TMPD/scanbad.txt"))"
+    ok "CONTROL: a built-in German text IS NOTICED ($(grep -oE 'gefunden: [0-9]+' "$TMPD/scanbad.txt"))"
 fi
 
 # ==================================================== 3. der Katalog
@@ -115,21 +115,21 @@ fi
 echo "== 3. die Sprachdateien =="
 
 for l in en de; do
-    [ -f "locale/$l/messages" ] && ok "locale/$l/messages liegt im Baum" \
+    [ -f "locale/$l/messages" ] && ok "locale/$l/messages is in the tree" \
         || bad "locale/$l/messages fehlt"
 done
 python3 tools/i18n/quota.py > "$TMPD/quota.txt" 2>&1 \
     && ok "$(head -1 "$TMPD/quota.txt")" \
-    || { bad "die Abdeckung laesst sich nicht rechnen"; cat "$TMPD/quota.txt"; }
+    || { bad "the coverage cannot be computed"; cat "$TMPD/quota.txt"; }
 sed 's/^/        /' "$TMPD/quota.txt" | tail -n +2
 
 python3 tools/i18n/translit.py --zaehle > "$TMPD/translit.txt" 2>&1
 TRC=$?
 sed 's/^/        /' "$TMPD/translit.txt"
 if [ "$TRC" = 0 ]; then
-    ok "keine Umschrift in locale/de und in den Buendel-Beschriftungen"
+    ok "no transliteration in locale/de and in the bundle labels"
 elif [ "$TRC" = 2 ]; then
-    bad "ein Text passt nicht mehr in seinen Puffer (siehe ZU ENG)"
+    bad "a text no longer fits its buffer (see ZU ENG)"
 else
     bad "Umschrift gefunden, wo ein Umlaut hingehoert"
 fi
@@ -137,7 +137,7 @@ TU=$(grep -oE 'umlaute=[0-9]+' "$TMPD/translit.txt" | tail -1 | cut -d= -f2)
 if [ "${TU:-0}" -ge 50 ]; then
     ok "echte Umlautzeichen in den deutschen Texten: $TU"
 else
-    bad "nur $TU echte Umlautzeichen -- das ist zu wenig fuer Deutsch"
+    bad "only $TU real umlaut characters -- too few for German"
 fi
 
 rm -rf "$TMPD/tw"
@@ -148,27 +148,27 @@ printf 'name=Editor\ninfo=Text schreiben und aendern\n' \
     > "$TMPD/tw/assets/apps/x.osp/INFO"
 if OSUM_ROOT="$TMPD/tw" python3 tools/i18n/translit.py \
         > "$TMPD/translit-neg.txt" 2>&1; then
-    bad "die Umschrift-Pruefung bleibt gruen, wenn die Umschrift zurueckkommt"
+    bad "the transliteration check stays green when the transliteration returns"
 else
     NF=$(grep -oE 'umschrift=[0-9]+' "$TMPD/translit-neg.txt" | cut -d= -f2)
     if [ "${NF:-0}" -ge 2 ]; then
         ok "Gegenprobe: zurueckgeschriebene Umschrift wird rot ($NF Funde)"
     else
-        bad "Gegenprobe: nur $NF Funde, erwartet mindestens 2"
+        bad "control: only $NF findings, expected at least 2"
     fi
 fi
 
-echo "== 4. bauen: Kern, sechs Programme, zwei Abbilder =="
+echo "== 4. build: kernel, six programs, two images =="
 
 bash tools/i18n/build.sh "$TMPD/en" > "$TMPD/build-en.txt" 2>&1 \
-    && ok "das englische Abbild steht" \
-    || { bad "das Abbild laesst sich nicht bauen"; tail -20 "$TMPD/build-en.txt"; exit 1; }
+    && ok "the English image is ready" \
+    || { bad "the image cannot be built"; tail -20 "$TMPD/build-en.txt"; exit 1; }
 sed 's/^/        /' "$TMPD/build-en.txt"
 LANG_SET=de bash tools/i18n/build.sh "$TMPD/de" > "$TMPD/build-de.txt" 2>&1 \
-    && ok "das deutsche Abbild steht" \
-    || { bad "das deutsche Abbild laesst sich nicht bauen"; exit 1; }
+    && ok "the German image is ready" \
+    || { bad "the German image cannot be built"; exit 1; }
 
-echo "== 5. Ring 3: der Dekodierer, der Katalog, die Tastatur =="
+echo "== 5. ring 3: the decoder, the catalog, the keyboard =="
 
 cp "$TMPD/en/disk.img" "$TMPD/t.img"
 timeout 180 $QEMU_X86 -kernel "$TMPD/en/k.mb" -m 256 \
@@ -184,7 +184,7 @@ grep -a '^i18n: bad' "$TMPD/i18nt.txt" | sed 's/^/        /'
 
 # ================================================ 6. der Bildschirm
 
-echo "== 6. derselbe Bildschirm auf Englisch und auf Deutsch =="
+echo "== 6. the same screen in English and in German =="
 
 lauf() { # verzeichnis name [monitordatei]
     local d=$1 n=$2 mon=${3:-}
@@ -212,9 +212,9 @@ lauf() { # verzeichnis name [monitordatei]
 
 lauf "$TMPD/en" en
 lauf "$TMPD/de" de
-[ -s "$TMPD/en/en.ppm" ] && ok "das englische Bildschirmfoto steht ($(stat -c%s "$TMPD/en/en.ppm") Oktette)" \
+[ -s "$TMPD/en/en.ppm" ] && ok "the English screenshot is ready ($(stat -c%s "$TMPD/en/en.ppm") Oktette)" \
     || { bad "kein englisches Bildschirmfoto"; }
-[ -s "$TMPD/de/de.ppm" ] && ok "das deutsche Bildschirmfoto steht" \
+[ -s "$TMPD/de/de.ppm" ] && ok "the German screenshot is ready" \
     || bad "kein deutsches Bildschirmfoto"
 
 feld() { # datei id was
@@ -230,8 +230,8 @@ is "das Statusfeld auf Englisch"    "$(text_von "$EF" 42)" "ready"
 is "und auf Deutsch"                "$(text_von "$DF" 42)" "bereit"
 
 case "$(text_von "$DF" 1)" in
-    *"/etc/schemas"*) ok "der deutsche Text nennt den Pfad UNVERAENDERT: $(text_von "$DF" 1)" ;;
-    *) bad "der Pfad wurde uebersetzt: $(text_von "$DF" 1)" ;;
+    *"/etc/schemas"*) ok "the German text names the path UNCHANGED: $(text_von "$DF" 1)" ;;
+    *) bad "the path was translated: $(text_von "$DF" 1)" ;;
 esac
 hasnot "$DF" "/etc/schemata" "und kein Pfad wurde eingedeutscht"
 
@@ -253,17 +253,17 @@ schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
 
 has "$EF" "taskbar: text net" "die Taskleiste meldet ihr Netzfeld"
 grep -a 'taskbar: text net' "$EF" | tail -1 | grep -q 'no network' \
-    && ok "auf Englisch: no network" || bad "die Taskleiste ist nicht englisch"
+    && ok "auf Englisch: no network" || bad "the taskbar is not English"
 grep -a 'taskbar: text net' "$DF" | tail -1 | grep -q 'kein Netz' \
-    && ok "auf Deutsch: kein Netz" || bad "die Taskleiste ist nicht deutsch"
+    && ok "in German: kein Netz" || bad "the taskbar is not German"
 
 d=$(python3 tools/i18n/diff.py "$TMPD/en/en.ppm" "$TMPD/de/de.ppm" 2>&1)
 case "$d" in
-    0*) bad "die beiden Bildschirmfotos sind IDENTISCH" ;;
-    *)  ok "die beiden Bildschirmfotos unterscheiden sich: $d" ;;
+    0*) bad "the two screenshots are IDENTICAL" ;;
+    *)  ok "the two screenshots differ: $d" ;;
 esac
 
-echo "== 7. die Sprache wechseln -- mit der Maus, in EINEM Lauf =="
+echo "== 7. switching the language -- with the mouse, in ONE run =="
 
 lauf "$TMPD/en" vor
 rfeld() { grep -a "settings: reiter nr=$1" "$2" | tail -1 \
@@ -273,7 +273,7 @@ ry=$(rfeld 5 "$TMPD/en/vor.txt" y)
 rw=$(rfeld 5 "$TMPD/en/vor.txt" w)
 rh=$(rfeld 5 "$TMPD/en/vor.txt" h)
 if [ -z "${rx:-}" ]; then
-    bad "das Programm meldet die Lage seiner Reiter nicht"
+    bad "the program does not report the position of its tabs"
 else
     ok "der Reiter 'Language' liegt bei x=$rx y=$ry w=$rw h=$rh"
     TX=$((CX + rx + rw / 2)); TY=$((CY + ry + rh / 2))
@@ -290,9 +290,9 @@ else
     bx=$(zeile_von "$TMPD/en/tab.txt" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
     bb=$(zeile_von "$TMPD/en/tab.txt" 2 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
     if [ -z "${cx:-}" ] || [ -z "${bx:-}" ]; then
-        bad "die Sprachseite meldet kein Auswahlfeld oder keinen Knopf"
+        bad "the language page reports no selection field or no button"
     else
-        ok "das Auswahlfeld liegt bei x=$cx base=$cb, der Knopf bei x=$bx base=$bb"
+        ok "the selection field is at x=$cx base=$cb, the button at x=$bx base=$bb"
         python3 tools/i18n/mouse.py "$TX" "$TY" \
             $((CX + cx + 30)) $((CY + cb - 6)) \
             $((CX + bx + 10)) $((CY + bb - 6)) \
@@ -300,16 +300,16 @@ else
         lauf "$TMPD/en" wechsel "$TMPD/klick3.mon"
         W="$TMPD/en/wechsel.txt"
         if grep -qa 't=Übernehmen' "$W"; then
-            ok "NACH DEN DREI KLICKS STEHT DIE OBERFLAECHE AUF DEUTSCH -- ohne Neustart"
+            ok "AFTER THE THREE CLICKS THE UI IS IN GERMAN -- without a restart"
         else
-            bad "die Oberflaeche ist nach dem Klick nicht deutsch"
+            bad "the UI is not German after the click"
             grep -a 'settings: feld' "$W" | tail -8 | sed 's/^/        /'
         fi
         has "$W" "t=Sprache gewechselt: de" "und das Statusfeld sagt es"
         if grep -a 'taskbar: text net' "$W" | tail -1 | grep -q 'kein Netz'; then
-            ok "und die TASKLEISTE, ein ANDERER Prozess, zieht mit: kein Netz statt no network"
+            ok "and the TASKBAR, a DIFFERENT process, follows: 'kein Netz' instead of 'no network'"
         else
-            bad "die Taskleiste bleibt englisch: $(grep -a 'taskbar: text net' "$W" | tail -1)"
+            bad "the taskbar stays English: $(grep -a 'taskbar: text net' "$W" | tail -1)"
         fi
         # BILDPUNKTGENAU, in DEMSELBEN Lauf, in dem vorher Englisch stand.
         wx=$(zeile_von "$W" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
@@ -329,14 +329,14 @@ else
         python3 tools/osum/mkfs.py list "$TMPD/en/live-wechsel.img" \
             > "$TMPD/liste.txt" 2>/dev/null
         grep -q '^/etc/locale' "$TMPD/liste.txt" \
-            && bad "die Sprache liegt unter /etc/ -- sie gehoert dem Benutzer" \
-            || ok "und NICHT unter /etc/ -- die Sprache gehoert dem Benutzer"
+            && bad "the language is under /etc/ -- it belongs to the user" \
+            || ok "and NOT under /etc/ -- the language belongs to the user"
     fi
 fi
 
 # ================================================= 8. was es kostet
 
-echo "== 8. was die UTF-8-Dekodierung das Zeichnen kostet =="
+echo "== 8. what UTF-8 decoding costs when drawing =="
 
 grep -a '^i18n: draw' "$TMPD/en/en.txt" | sed 's/^/        /'
 alt=$(grep -aoE 'i18n: draw ascii us=[0-9]+' "$TMPD/en/en.txt" | tail -1 \
@@ -351,18 +351,18 @@ if [ -n "${alt:-}" ] && [ -n "${neu:-}" ] && [ "$alt" -gt 0 ]; then
     proz=$(( ad * 100 / alt ))
     vz="+"; [ "$d" -lt 0 ] && vz="-"
     if [ "$proz" -lt 15 ]; then
-        ok "1000 Zeilen zu 40 Zeichen: ${alt} us oktettweise, ${neu} us zeichenweise (${vz}${proz}%, im Rauschen)"
-        ok "je Zeile: $(( alt / 1000 )) us gegen $(( neu / 1000 )) us -- und das Holen der 40 Glyphen kostet $(( gl / 1000 )) us"
+        ok "1000 lines of 40 characters: ${alt} us octet by octet, ${neu} us character by character (${vz}${proz}%, in the noise)"
+        ok "per line: $(( alt / 1000 )) us against $(( neu / 1000 )) us -- and fetching the 40 glyphs costs $(( gl / 1000 )) us"
     else
-        bad "die Dekodierung kostet ${vz}${proz}% -- das ist spuerbar"
+        bad "decoding costs ${vz}${proz}% -- that is noticeable"
     fi
 else
-    bad "der Kernel meldet die Kosten nicht"
+    bad "the kernel does not report the cost"
 fi
 
 # ============================================ 9. die alten Messungen
 
-echo "== 9. was vorher gruen war, ist es noch =="
+echo "== 9. what was green before still is =="
 
 #     tools/wm/run.sh    99 erfuellt, 4 gescheitert
 #     tools/k15/run.sh  249 erfuellt, 2 gescheitert

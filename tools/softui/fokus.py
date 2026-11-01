@@ -72,14 +72,7 @@ def main(argv):
         o = (y * W + x) * 3
         return (px[o], px[o + 1], px[o + 2])
 
-    # DER ABSTAND JE KANAL UND NICHT DER MITTELWERT.
     #
-    # Der Mittelwert war die erste Fassung und sie hat im dunklen Schema
-    # `tiefe=0` gemeldet, obwohl der Schatten da war: der Schreibtisch
-    # ist dort (2, 6, 23) und der tiefste Schattenpunkt (2, 5, 17) --
-    # ein Viertel des Blaukanals, und nach Division durch drei zwei
-    # Stufen, die in der Rundung verschwinden. Ein Mass, das den
-    # gesuchten Unterschied durch drei teilt, ist das falsche Mass.
     def abstand(a, b):
         return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
 
@@ -91,22 +84,14 @@ def main(argv):
                              fok=int(m.group(8)), ow=int(m.group(9)),
                              oh=int(m.group(10)), t=m.group(11)))
     if len(wins) < 2:
-        print("weniger als zwei geschmueckte Fenster -- nichts zu vergleichen")
+        print("fewer than two decorated windows -- nothing to compare")
         return 1
     bad = 0
     for w in wins:
         x0 = w["x"]
         if x0 < 24:
-            print("%s: zu nah am Rand, uebersprungen" % w["t"])
+            print("%s: too close to the edge, skipped" % w["t"])
             continue
-        # EINE ZEILE MIT RUHIGEM UNTERGRUND, und nicht einfach die
-        # Mitte.  Die erste Fassung nahm die Mittelzeile und meldete
-        # fuer das scharfe Fenster tiefe=0 -- links davon lag das ANDERE
-        # Fenster, und die Stelle, an der sie den ungestoerten Grund
-        # abgelesen hat, war dessen Beschriftung.  Also wird eine Zeile
-        # gesucht, in der die acht Punkte 20 bis 13 links des Fensters
-        # ALLE GLEICH sind; nur dort ist "der Grund" eine Zahl und keine
-        # Vermutung.  Ueber alle solchen Zeilen wird der Median genommen.
         tiefen = []
         weiten = []
         gruende = []
@@ -128,7 +113,7 @@ def main(argv):
             weiten.append(wt)
             gruende.append(grund)
         if not tiefen:
-            print("%s: keine Zeile mit ruhigem Untergrund gefunden" % w["t"])
+            print("%s: no row with a calm background found" % w["t"])
             bad += 1
             continue
         tiefen.sort()
@@ -142,7 +127,6 @@ def main(argv):
               "#%02x%02x%02x, %d Zeilen)"
               % (art, w["t"], w["x"], w["y"], tiefe, weite, grund[0],
                  grund[1], grund[2], len(tiefen)))
-        # Und der Balken.
         cnt = Counter()
         for j in range(w["y"] + BORDER, w["y"] + TITLE_H - 1):
             for i in range(w["x"] + BORDER, w["x"] + w["ow"] - BORDER):
@@ -155,7 +139,7 @@ def main(argv):
                   % (w["t"], c[0], c[1], c[2], spread))
             bad += 1
         else:
-            print("titel: kein akzent -- '%s' #%02x%02x%02x, spanne %d "
+            print("title: no accent -- '%s' #%02x%02x%02x, spanne %d "
                   "auf %d punkten" % (w["t"], c[0], c[1], c[2], spread, n))
     return 1 if bad else 0
 

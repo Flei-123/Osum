@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/screen/build.sh -- Kern, Programme und ein Plattenabbild fuer die
-# Fotos der Runde SCHIRM.
 #
 #   bash tools/screen/build.sh <arbeitsverzeichnis>
 #
-# Danach liegen dort:  k0.mb  (Multiboot-Kern, Stufe 0)
-#                      disk.img (OFS mit /bin, /lib, /etc, /apps)
 #
-# Das ist derselbe Satz Programme, den tools/desktop/run.sh baut. Er
-# steht hier noch einmal, weil die Runde SCHIRM dieselbe Platte in
-# mehreren Aufloesungen fotografiert und der Aufbau dann nicht in der
-# Mitte eines fremden Laeufers stehen darf.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

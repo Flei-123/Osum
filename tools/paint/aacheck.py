@@ -1,41 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/paint/aacheck.py -- WIE GUT IST DIE KANTENGLAETTUNG WIRKLICH?
 #
-# DIE FRAGE, DIE DIESE RUNDE GESTELLT BEKAM, lautete: warum sieht das
-# hier nicht aus wie Windows 11?  Eine der Antworten war "es gibt keine
-# Kantenglaettung".  Das ist fuer die GLYPHEN falsch -- `kernel/ttf.fi`
-# rastert seit Runde K10 mit 4x4-Unterabtastung -- und fuer die
-# KANTEN DES FENSTERSERVERS richtig gewesen.  Beide Behauptungen sind
-# hier nachgemessen statt geglaubt.
 #
-# WOGEGEN GEMESSEN WIRD.  `tools/ttf/raster.py` ist die zweite Fassung
-# des Kernel-Rasterers, ganzzahlig und Zeile fuer Zeile gleich; sie ist
-# die Fassung, gegen die alle Bildschirmfotos dieses Projekts gerechnet
-# werden.  Als DRITTE, unabhaengige Instanz steht hier FreeType (ueber
-# Pillow), also der Rasterer, den Linux, Android und jeder Browser
-# benutzen.  FreeType rechnet die EXAKTE Flaechendeckung; das ist die
-# Referenz, gegen die "4x4 Unterabtastung" eine Naeherung ist.
 #
-# WAS AUSGEWIESEN WIRD, je Zeichen und Groesse:
 #
-#   stufen    wie viele VERSCHIEDENE Deckungswerte im Zeichen vorkommen.
-#             Ohne Glaettung sind es zwei (0 und 255).  Mit 4x4
-#             Unterabtastung koennen es siebzehn sein, mit 8x8
-#             fuenfundsechzig.
-#   kante     dasselbe, aber nur entlang EINER senkrechten Bildzeile
-#             durch die Schraege des Zeichens -- die Zahl, die man im
-#             Bild sieht.
-#   |d|       mittlere Abweichung je Bildpunkt gegen FreeType, in
-#             Deckungsstufen 0..255, ueber die beste Ausrichtung der
-#             beiden Bilder (+-2 Bildpunkte gesucht).
-#   max       die groesste Abweichung eines einzelnen Bildpunktes.
 #
 #   ./tools/paint/aacheck.py [ttf] [--px 11,13,16,24] [--zeichen ABC]
 #
-# Ohne Pillow laeuft die Haelfte: die Stufenzaehlung braucht FreeType
-# nicht, der Vergleich schon.  Das Skript sagt dann, was es nicht messen
-# konnte, statt gruen zu melden.
 import os
 import sys
 
@@ -43,7 +14,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.normpath(os.path.join(HIER, "..", ".."))
 sys.path.insert(0, os.path.join(WURZEL, "tools", "ttf"))
 
-import raster  # noqa: E402  -- die zweite Fassung des Kernel-Rasterers
+import raster
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -55,18 +26,7 @@ except Exception:
 # ---------------------------------------------------------------- der
 # EIGENE, EINSTELLBARE RASTERER.
 #
-# `tools/ttf/raster.py` rastert mit 4x4 Unterabtastung, genau wie
-# `kernel/ttf.fi`.  Um zu MESSEN, wie weit vier mal vier von der
-# Wahrheit entfernt sind, braucht es dieselbe Rechnung mit einer
-# beliebigen Abtastdichte -- sonst vergleicht man zwei Rasterer, die
-# sich in zehn Dingen unterscheiden (Kurvenzerlegung, Randkiste,
-# Hinting), und weiss hinterher nicht, welches davon die Abweichung war.
 #
-# Diese Funktion ist Zeile fuer Zeile `raster.raster`, nur mit S statt
-# der festen 4.  S muss 64 teilen (4, 8, 16, 32), damit die Abtastpunkte
-# ganzzahlig auf dem 26.6-Raster liegen.  S = 32 ist mit 1025 Stufen so
-# nah an der exakten Flaechendeckung, dass der Rest im Rauschen liegt --
-# das ist hier die Referenz.
 def raster_s(f, gid, px, S):
     schritt = 64 // S
     halb = schritt // 2
@@ -237,7 +197,7 @@ def main():
     print("PAINT-AA: %s, %d Oktette" % (os.path.relpath(pfad, WURZEL),
                                         len(daten)))
     if not HAT_PIL:
-        print("   Pillow fehlt -- die Stufen werden gezaehlt, der "
+        print("   Pillow is missing -- the levels are counted, the "
               "Vergleich gegen FreeType nicht.")
 
     zusagen = 0
@@ -271,10 +231,6 @@ def main():
                 alle_max.append(groesst)
                 zeile += ("  |d|=%6.2f  max=%3d  (versatz %+d,%+d)"
                           % (mittel, groesst, dx, dy))
-            # DIE EIGENTLICHE MESSUNG DER NAEHERUNG: dieselbe Rechnung,
-            # nur dichter abgetastet.  Randkiste und Kurvenzerlegung
-            # sind identisch, also ist der Unterschied AUSSCHLIESSLICH
-            # die Abtastdichte.
             gid = s.f.glyph_of(ord(c))
             rw, rh, _, _, rf = raster_s(s.f, gid, px, REF)
             for S in DICHTEN:
@@ -292,7 +248,7 @@ def main():
 
     n = len(alle_stufen)
     if n == 0:
-        print("PAINT-AA: kein Zeichen mit Umriss geprueft")
+        print("PAINT-AA: no glyph with an outline checked")
         return 1
     m_st = sum(alle_stufen) / float(n)
     m_ka = sum(alle_kanten) / float(n)
@@ -301,26 +257,22 @@ def main():
           % (n, min(alle_stufen), m_st, max(alle_stufen),
              min(alle_kanten), m_ka, max(alle_kanten)))
 
-    # ZUSAGE 1: es gibt ueberhaupt Graustufen.  Ohne Glaettung waeren es
-    # zwei -- Tinte und Grund.
     if min(alle_stufen) > 2:
-        print("  OK    jedes Zeichen hat mehr als zwei Deckungsstufen "
+        print("  OK    every glyph has more than two coverage levels "
               "(kleinstes: %d)" % min(alle_stufen))
         zusagen += 1
     else:
-        print("  FAIL  ein Zeichen hat nur %d Deckungsstufen -- das ist "
+        print("  FAIL  a glyph has only %d coverage levels -- that is "
               "eine Bitmaske" % min(alle_stufen))
         fehler += 1
 
-    # ZUSAGE 2: und zwar auch ENTLANG EINER KANTE, nicht nur irgendwo im
-    # Zeichen.  Das ist die Zahl, die man sieht.
     if min(alle_kanten) >= 3:
-        print("  OK    jede Kante traegt mindestens drei Stufen "
+        print("  OK    every edge carries at least three levels "
               "(kleinste: %d, mittlere: %.1f)"
               % (min(alle_kanten), m_ka))
         zusagen += 1
     else:
-        print("  FAIL  eine Kante traegt nur %d Stufen" % min(alle_kanten))
+        print("  FAIL  an edge carries only %d levels" % min(alle_kanten))
         fehler += 1
 
     if HAT_PIL:
@@ -328,29 +280,17 @@ def main():
         print("PAINT-AA: gegen FreeType  |d| mittel=%.2f  "
               "schlechtestes Zeichen=%.2f  groesster Einzelfehler=%d"
               % (md, max(alle_d), max(alle_max)))
-        # ZUSAGE 3, UND SIE IST BEWUSST WEIT.  Der Vergleich gegen
-        # FreeType misst NICHT die Abtastung: FreeType HINTET (es zieht
-        # die Stamme auf das Bildpunktraster) und zerlegt die Kurven
-        # anders.  Wie klein der Anteil der Abtastung wirklich ist,
-        # steht weiter unten -- 1.3 Prozent.  Diese Zusage hier prueft
-        # deshalb nur, dass ueberhaupt DASSELBE ZEICHEN gerastert wurde:
-        # bei einem verrutschten Glyphenindex oder einer falschen
-        # Skalierung stiege die Zahl sofort ueber 60.
         #
-        # Eine Schranke, die man nicht begruendet, ist eine Zahl, die
-        # beim naechsten Fehlschlag hochgesetzt wird.
         if md < 45.0:
-            print("  OK    dasselbe Zeichen wie FreeType, |d| = %.2f von "
+            print("  OK    the same glyph as FreeType, |d| = %.2f of "
                   "255 (%.2f Prozent, ueberwiegend Hinting)"
                   % (md, 100.0 * md / 255.0))
             zusagen += 1
         else:
-            print("  FAIL  |d| gegen FreeType %.2f von 255 -- das ist "
+            print("  FAIL  |d| against FreeType %.2f of 255 -- that is "
                   "kein Hinting mehr, das ist ein anderes Zeichen" % md)
             fehler += 1
 
-    # ---------------------------------------------------------------
-    # DIE ABTASTDICHTE, GEGEN 32x32 GEMESSEN.
     if dichte:
         print("PAINT-AA: Abtastdichte gegen %dx%d (Referenz, %d Stufen)"
               % (REF, REF, REF * REF + 1))
@@ -363,20 +303,17 @@ def main():
         if 4 in dichte and 8 in dichte:
             v4 = dichte[4][0] / float(dichte[4][1])
             v8 = dichte[8][0] / float(dichte[8][1])
-            print("   8x8 ist %.2f mal genauer als 4x4" % (v4 / v8 if v8 else 0))
+            print("   8x8 is %.2f times more accurate than 4x4" % (v4 / v8 if v8 else 0))
 
         if 4 in dichte:
             v4 = dichte[4][0] / float(dichte[4][1])
-            # ZUSAGE 4: DIE NAEHERUNG SELBST.  Hier ist FreeType nicht
-            # im Weg: dieselbe Randkiste, dieselbe Kurvenzerlegung, nur
-            # dichter abgetastet.  Was uebrigbleibt, IST die Abtastung.
             if v4 < 5.0:
-                print("  OK    4x4 liegt %.3f von 255 (%.3f Prozent) von "
+                print("  OK    4x4 is %.3f of 255 (%.3f percent) from "
                       "der exakten Flaechendeckung entfernt"
                       % (v4, 100.0 * v4 / 255.0))
                 zusagen += 1
             else:
-                print("  FAIL  4x4 liegt %.3f von 255 daneben" % v4)
+                print("  FAIL  4x4 is off by %.3f of 255" % v4)
                 fehler += 1
 
     print("PAINT-AA: %d Zusagen, %d Fehler" % (zusagen, fehler))

@@ -36,27 +36,19 @@ import os
 import re
 import sys
 
-# Die malenden Routinen des Zeichenkerns.  Diese Liste ist die
-# Definition von "malt selbst".
 MAL = [
     "px", "rect", "hline", "vline", "frame", "frame3", "rrect", "rframe",
     "rring", "drop_shadow", "shadow_edge", "divider", "text_at",
     "draw_glyph",
 ]
-# Messen, nicht malen.
 MESS = [
     "text_w", "text_h", "ascent_of", "glyph_w", "mono_cell", "fit",
     "px_ui", "px_mono", "icon_small", "icon_menu", "icon_taskbar",
     "icon_large", "surf_w", "surf_rows", "screen_w", "screen_h",
     "mouse_x", "mouse_y", "mouse_btn", "band_y", "ui_scale", "metric",
     "theme", "sem", "shade", "blend", "get", "grid", "sp",
-    # `aa_pixels` liest den Zaehler der kantengeglaetteten Bildpunkte
-    # aus.  Er MALT nicht -- er ist die Messung, mit der diese Runde
-    # belegt, dass ueberhaupt geglaettet wird.  Ihn als Malaufruf zu
-    # zaehlen hiesse, das Messgeraet als Farbe zu zaehlen.
     "aa_pixels",
 ]
-# Pruefstaende: sie MUESSEN den Kern direkt aufrufen, das ist ihr Zweck.
 PRUEFSTAND = {"icont.fi", "themetest.fi", "wlibt.fi"}
 KERN = {"wlib.fi", "wlibc.fi"}
 
@@ -85,10 +77,6 @@ def scan(pfad):
     return mal
 
 
-# Eine Zahl gilt nur als Farbe, wenn sie ARGUMENT eines malenden
-# Aufrufs ist.  `& 0xFFFFFF` ist eine Maske, `runden < 4000000` eine
-# Schleifengrenze, und beide standen in der ersten Fassung dieser
-# Zaehlung als "feste Farbe" in der Tabelle.
 RE_MAL_CALL = re.compile(
     r"\bwlibc?\.(" + "|".join(
         ["px", "rect", "hline", "vline", "frame", "frame3", "rrect",
@@ -97,13 +85,10 @@ RE_MAL_CALL = re.compile(
          "mal_flaeche", "mal_tafel", "mal_trenner", "mal_text",
          "mal_balken", "mal_punkt", "mal_rahmen", "mal_linie",
          "mal_kante3",
-         # Runde ENGLISCH hat die mal_*-Helfer umbenannt; ohne die neuen
-         # Namen zaehlte diese Tafel 38 Aufrufe (wlib.draw_*) nicht mit.
          "draw_area", "draw_board", "draw_separator", "draw_text",
          "draw_bar", "draw_point", "draw_frame", "draw_line",
          "draw_edge3"]) + r")\s*\(")
 RE_ZAHL = re.compile(r"\b(0x[0-9a-fA-F]{6,8}|\d{5,8})\b")
-# Eine Bitmaske ist keine Farbe: `x & 0xFFFFFF`.
 RE_MASKE = re.compile(r"[&|^]\s*(0x[0-9a-fA-F]+|\d+)\s*$")
 
 
@@ -118,8 +103,6 @@ def farben(pfad):
             continue
         for m in RE_ZAHL.finditer(code):
             v = m.group(1)
-            # Steht unmittelbar davor ein &, | oder ^, ist es eine
-            # Maske und keine Farbe.
             vor = code[: m.start()].rstrip()
             if vor.endswith("&") or vor.endswith("|") or vor.endswith("^"):
                 continue
@@ -160,7 +143,7 @@ def main():
     print("-" * 46)
     print("Summe (Programme):      %d Zeichenaufrufe, %d feste Farbwerte"
           % (ergebnis["summe"], ergebnis["farben"]))
-    print("Summe (Pruefstaende):   %d  (erlaubt: sie pruefen den Kern)"
+    print("sum (test benches):   %d  (allowed: they test the kernel)"
           % ergebnis["pruefstand"])
 
     if "--json" in sys.argv:

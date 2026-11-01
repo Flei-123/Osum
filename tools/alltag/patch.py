@@ -23,7 +23,7 @@ def main():
     neu = open(neu_p, "rb").read().decode("utf-8", "surrogateescape")
     n = text.count(alt)
     if n != 1:
-        print("patch.py: %s: das alte Stueck kommt %d-mal vor, nicht einmal" % (pfad, n))
+        print("patch.py: %s: the old piece occurs %d times, not once" % (pfad, n))
         return 1
     text = text.replace(alt, neu, 1)
     open(pfad, "wb").write(text.encode("utf-8", "surrogateescape"))

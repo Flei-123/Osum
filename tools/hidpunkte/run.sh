@@ -1,22 +1,8 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# tools/hidpunkte/run.sh -- DIE ABNAHME DER RUNDE HIDPUNKTE.
 #
-# WAS DIESE RUNDE GEFUNDEN HAT, und es ist nachgestellt und nicht
-# behauptet: auf Justins Brett haengen an hc0 ein USB-Stick und ein
-# HID OHNE Boot-Protokoll (Kingston 0951:16df, class=03:00:00), an hc1
-# seine Tastatur und seine Maus. `usb.stage` behielt bis zu dieser
-# Runde den ERSTEN Regler, an dem IRGENDEIN Eingabegeraet hing -- also
-# hc0, mit einem Geraet, das keine Taste liefert. hc1 wurde nie
-# aufgesetzt, und deshalb war die Eingabe im Schreibtisch tot, obwohl
-# die USB-Diagnose fuer BEIDE Regler gruen meldete.
 #
-# QEMUs `usb-tablet` ist derselbe Fall wie die Kingston: HID, class
-# 03:00:00, kein Boot-Protokoll. Damit ist Justins Aufstellung
-# nachstellbar, und der Unterschied vorher/nachher ist eine Zahl:
-#   vorher   ta=0 lo=0 bew=0   (gemessen)
-#   nachher  ta=3 lo=3 bew=5   (gemessen)
 #
 # Verwendung:  bash tools/hidpunkte/run.sh
 set -uo pipefail
@@ -38,17 +24,17 @@ gt()  { if [ -n "$2" ] && [ -n "$3" ] && [ "$2" -gt "$3" ] 2>/dev/null
 hat() { grep -qa -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "HIDPUNKTE: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "HIDPUNKTE: skipped, qemu-system-x86_64 is missing"; exit 0
 fi
 if ! qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci'; then
-    echo "HIDPUNKTE: uebersprungen, dieses QEMU kennt qemu-xhci nicht"; exit 0
+    echo "HIDPUNKTE: skipped, this QEMU does not know qemu-xhci"; exit 0
 fi
 
 echo "== 1. bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh faellt"; exit 1; }
 bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
+    || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
@@ -63,17 +49,6 @@ for p in $PROGS; do
 done
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1
 printf '# taskbar.conf\nedge=0\nheight=28\nwidth=100\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
-# RUNDE BAUFEHLER (14.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Gleiche Ursache wie in K15, NETVIEW und GLYPHE: Runde GRUNDLINIE hat
-# die Laeufer -- zu Recht -- auf `--profile=app` umgestellt, weil die
-# Programme mit Oberflaeche seit Runde 31 `profile app` in ihrer ersten
-# Zeile tragen. Das Profil `app` bringt Firns volle Laufzeit mit, und
-# sechs der dreizehn Programme dieses Abbilds sind solche. /bin/explorer
-# allein ist damit 1623040 statt 907360 Oktette; die dreizehn zusammen
-# brauchen rund 16285 Bloecke, und 16384 sind es mit Schriften,
-# Buendeln, Baum, Bitmap und Inode-Tafel nicht mehr. `mkfs.py` sagte
-# "the disk is full", und ohne Abbild startet kein QEMU.
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`).
 ARGS=(build "$TMPD/root.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
@@ -81,18 +56,15 @@ ARGS+=("/bin/files@/bin/explorer" /etc/ "/etc/theme=$TMPD/baum/theme" "/etc/task
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "das Wurzelabbild steht" || bad "mkfs.py faellt"
+    && ok "the root image is ready" || bad "mkfs.py faellt"
 
 dd if=/dev/zero of="$TMPD/stick.img" bs=1M count=8 2>/dev/null
 
-# JUSTINS AUFSTELLUNG: Stick + HID-ohne-Boot an hc0, Tastatur+Maus an hc1.
 JUSTIN="-device qemu-xhci,id=x0 \
  -drive if=none,id=stk,format=raw,file=$TMPD/stick.img \
  -device usb-storage,bus=x0.0,drive=stk \
  -device usb-tablet,bus=x0.0 \
  -device nec-usb-xhci,id=x1 -device usb-kbd,bus=x1.0 -device usb-mouse,bus=x1.0"
-# UMGEKEHRT: die Eingabe am ERSTEN Regler. Muss genauso gehen -- sonst
-# waere aus einer festen Wahl nur eine andere feste Wahl geworden.
 UMGEKEHRT="-device qemu-xhci,id=x0 -device usb-kbd,bus=x0.0 -device usb-mouse,bus=x0.0 \
  -device nec-usb-xhci,id=x1 -device usb-tablet,bus=x1.0"
 
@@ -141,7 +113,7 @@ feld() { grep -a 'eingabe: ber=' "$1" | tail -1 | sed -n "s/.*[ :]$2=\([0-9]*\).
 BASE="modfs osum gfx wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs"
 
 echo
-echo "== 2. JUSTINS AUFSTELLUNG: die Eingabe haengt am ZWEITEN Regler =="
+echo "== 2. JUSTIN'S SETUP: the input hangs on the SECOND controller =="
 lauf justin "$JUSTIN" "$BASE" 120
 hat "$TMPD/justin.txt" 'usb: wahl' "die Wahl steht im Bericht (usb: wahl ...)"
 W=$(grep -a '^usb: wahl' "$TMPD/justin.txt" | tail -1)
@@ -159,8 +131,8 @@ gt "der Fensterserver holt sie ab (wm=)"     "$(feld "$TMPD/justin.txt" wm)"  0
 
 echo
 echo "== 3. GEGENPROBE: dieselbe Aufstellung UMGEKEHRT =="
-echo "   Eingabe am ERSTEN Regler, das schwache HID am zweiten. Ohne"
-echo "   diese Probe waere aus einer festen Wahl nur eine andere geworden."
+echo "   input on the FIRST controller, the weak HID on the second. Without"
+echo "   this probe a fixed choice would only have become another one."
 lauf umgek "$UMGEKEHRT" "$BASE" 120
 W2=$(grep -a '^usb: wahl' "$TMPD/umgek.txt" | tail -1)
 echo "        $W2"
@@ -169,18 +141,14 @@ gt "und die Tasten kommen genauso an" "$(feld "$TMPD/umgek.txt" ta)" 0
 gt "und die Maus auch"                "$(feld "$TMPD/umgek.txt" bew)" 0
 
 echo
-echo "== 4. DER ULTRAWIDE-SCHIRM: Leiste, Zeiger, Messleiste =="
-echo "   Justins Huawei ist breiter als alles, was hier je lief. Auf"
-echo "   1280x800 sind alle drei Fehler unsichtbar."
+echo "== 4. THE ULTRAWIDE SCREEN: bar, pointer, measuring bar =="
+echo "   Justin's Huawei is wider than anything that ever ran here. At"
+echo "   1280x800 all three faults are invisible."
 SHOTS=docs/shots/hidpunkte
 mkdir -p "$SHOTS"
 cat > "$TMPD/befehle-still" <<'EOM'
 warte 6.0
 EOM
-# WARUM HIER NICHTS EINGESPEIST WIRD: dieser Lauf misst das BILD, nicht
-# die Eingabe. Wer die Maus bewegt, sucht den Zeiger danach an einer
-# Stelle, die niemand kennt; ohne Bewegung steht er in der Bildmitte,
-# und dort wird er geschnitten und angeschaut.
 BEFEHLE="$TMPD/befehle-still" SHOT="$TMPD/uw.ppm" lauf uw \
     "-device qemu-xhci,id=x0 -device usb-kbd,bus=x0.0 -device usb-mouse,bus=x0.0" \
     "modfs osum gfx fbres=3440x1440 wm wig desk wmshell wmdauer usb hidgen nosched noproc nofs" \
@@ -206,7 +174,6 @@ best=[(x,y) for y in range(h//2-120,h//2+120) for x in range(w//2-120,w//2+120)
 if best:
     xs2=[q[0] for q in best]; ys2=[q[1] for q in best]
     print("ZEIGER %d %d"%(max(xs2)-min(xs2)+1, max(ys2)-min(ys2)+1))
-    # DER PFEIL ALS BILD -- Justins Abnahme: anschauen, nicht rechnen.
     x0,y0=min(xs2)-2,min(ys2)-2
     out=[]
     for yy in range(y0,min(y0+40,h)):
@@ -221,22 +188,22 @@ else:
 PY
     L0=$(sed -n 's/^LEISTE \([0-9-]*\) .*/\1/p' "$TMPD/bild.txt")
     L1=$(sed -n 's/^LEISTE [0-9-]* \([0-9-]*\)/\1/p' "$TMPD/bild.txt")
-    echo "        Leiste im BILD: x $L0 .. $L1 von 3440"
+    echo "        bar in the IMAGE: x $L0 .. $L1 of 3440"
     gt "die Leiste ist im BILD breiter als 3000 Bildpunkte" "$((L1 - L0))" 3000
     G=$(sed -n 's/^MESSLEISTE \([0-9]*\)/\1/p' "$TMPD/bild.txt")
     gt "die Messleiste steht oben im BILD (gruene Punkte)" "$G" 20
     ZW=$(sed -n 's/^ZEIGER \([0-9]*\) .*/\1/p' "$TMPD/bild.txt")
     ZH=$(sed -n 's/^ZEIGER [0-9]* \([0-9]*\)/\1/p' "$TMPD/bild.txt")
-    echo "        Zeiger im BILD: ${ZW}x${ZH}"
+    echo "        pointer in the IMAGE: ${ZW}x${ZH}"
     gt "der Zeiger waechst mit der Tafel (breiter als 12)" "$ZW" 12
     gt "und hoeher als 18"                                 "$ZH" 18
     if [ -f "$SHOTS/zeiger.txt" ]; then
         echo
-        echo "   DER PFEIL, aus dem echten Bildschirmfoto geschnitten:"
+        echo "   THE ARROW, cut out of the real screenshot:"
         sed 's/^/        /' "$SHOTS/zeiger.txt"
     fi
 else
-    bad "kein Bildschirmfoto -- ist socat da?"
+    bad "no screenshot -- is socat there?"
 fi
 
 echo

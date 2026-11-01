@@ -25,7 +25,7 @@ WIE OHNE FEHLALARM. Ein Laeufer redet in zwei Sprachen zugleich: er
 sucht nach Zeichenketten UND beschreibt auf Deutsch, was er tut --
 
     num "Eintraege, die aus tiling.conf gelesen wurden" "$bd" eq "$soll"
-    bad "vfsall aendert nichts an der Zahl der Verrichtungen"
+    bad "vfsall does not change the number of operations"
 
 Das sind BESCHREIBUNGEN. Sie duerfen ASCII bleiben (docs/I18N.md nimmt
 die Abnahmesprache aus), und ein Pruefer, der sie anmeckert, wird beim
@@ -56,8 +56,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import translit  # noqa: E402
 
-# Rueckwaerts: aus "Größe" wieder "Groesse". Laengste Umlautform zuerst,
-# sonst frisst "größ" das laengere "größt".
 _RUECK = {}
 for _a, _u in translit.STAEMME:
     _RUECK.setdefault(_u, _a)
@@ -67,11 +65,8 @@ _RUECK_RE = re.compile("|".join(
 UMLAUT = re.compile(r'[äöüÄÖÜß]')
 STR = re.compile(r'"((?:\\.|[^"\\])*)"')
 
-# Wo Abnahmen stehen. Die Laeufer sind Shell, ein paar Pruefer Python.
 LAEUFER_ENDUNG = (".sh", ".py")
 LAEUFER_ORT = ("tools", "tests")
-# Sich selbst und die Werkzeuge dieser Runde nicht lesen: sie fuehren
-# beide Schreibungen absichtlich nebeneinander.
 AUS = ("tools/i18n/", "tools/umlaut/", "tools/look/umlaut.py")
 
 
@@ -155,7 +150,6 @@ def phrasen(satz):
     if len(woerter) < 2:
         return set()
     aus = set()
-    # Immer beim Praefix anfangen, sonst faellt die Verankerung weg.
     for n in range(2, min(len(woerter), 5) + 1):
         teil = woerter[:n]
         if not any(UMLAUT.search(w) for w in teil):
@@ -163,10 +157,6 @@ def phrasen(satz):
         p = ruecklauf(" ".join(teil))
         if p != " ".join(teil) and len(p) >= 10:
             aus.add(p)
-            # RUNDE ROADMAP-3: auch ohne Satzzeichen am Ende. "ota: das
-            # ist kein Schlüssel: quelle ..." ergab nur die Phrase mit
-            # Doppelpunkt, und `tools/ota/run.sh` suchte sie ohne --
-            # 0 Funde, obwohl der Laeufer veraltet war.
             q = p.rstrip(":;,.!?")
             if q != p and len(q) >= 10:
                 aus.add(q)
@@ -218,7 +208,7 @@ def main(argv):
     if not nur_zahlen:
         for rel, nr, phrase, qd, qn, qs in funde:
             print("VERALTET  %s:%d sucht %r" % (rel, nr, phrase))
-            print("          der Text heisst seit %s:%d %r" % (qd, qn, qs))
+            print("          the text has been called %r since %s:%d" % (qd, qn, qs))
     print("erwartung: %d Saetze mit Umlaut, %d Phrasen, %d Laeufer, "
           "%d veraltete Erwartungen" % (n_s, n_p, n_l, len(funde)))
     return 1 if funde else 0

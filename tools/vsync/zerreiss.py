@@ -47,7 +47,6 @@ Rueckgabe 0, wenn NICHTS zerrissen war, sonst 1.
 """
 import sys
 
-# Die acht Signaturfarben aus `wm.sig_colour`, als (r, g, b).
 SIG = {
     (0xFF, 0x00, 0x00): 0,
     (0x00, 0xFF, 0x00): 1,
@@ -58,8 +57,6 @@ SIG = {
     (0xFF, 0x80, 0x00): 6,
     (0xFF, 0xFF, 0xFF): 7,
 }
-# Ein Streifen zaehlt erst ab dieser Breite. Schmaler ist ein Zufall aus
-# dem Fensterinhalt -- ein Programm darf rot malen.
 MIN_BREIT = 40
 
 
@@ -83,7 +80,7 @@ def ppm_lesen(pfad):
             j += 1
         felder.append(int(roh[i:j]))
         i = j
-    i += 1  # das eine Trennzeichen nach <max>
+    i += 1
     w, h, _mx = felder
     return w, h, roh[i:i + w * h * 3]
 
@@ -130,9 +127,6 @@ def bild_pruefen(pfad):
         ks = set(t[1] for t in treffer)
         if len(ys) < 2:
             continue
-        # Nur wenn es wirklich ZWEI getrennte Baender sind (oben und
-        # unten am Fenster) -- sonst ist es eine einzelne farbige
-        # Flaeche und kein Fensterpaar.
         luecke = False
         for a, b in zip(ys, ys[1:]):
             if b - a > 8:

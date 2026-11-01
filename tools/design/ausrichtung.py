@@ -131,15 +131,7 @@ def buendel(voll, luecke):
 def feld_messen(px, x0, y0, w, h, name, args):
     bg = grund(px, x0, y0, w, h)
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
-    # RUNDE ECHTHARDWARE-4: DIE PILLE IST KEIN INHALT.
     #
-    # Ein Fensterknopf der Taskleiste traegt an seiner unteren Kante
-    # einen drei Punkte hohen Balken -- er sagt "dieses Fenster laeuft"
-    # bzw. "es ist vorne" (`taskbar.pill`). Er gehoert absichtlich AN
-    # DIE KANTE und nicht in die Mitte; ohne diese Zeilen zaehlte die
-    # Pruefung ihn als Inhalt und meldete jedes Mal "unten 0" gegen
-    # "oben 11". Das waere ein Fehlalarm ueber ein Bauteil, das genau
-    # dort richtig sitzt.
     for r in range(max(0, h - args.rand_unten), h):
         for c in range(w):
             m[r][c] = 0
@@ -158,8 +150,6 @@ def feld_messen(px, x0, y0, w, h, name, args):
         sym = kasten(m, bs[0][0], bs[0][1] + 1)
         txt = kasten(m, bs[1][0], bs[-1][1] + 1)
     elif len(bs) == 1:
-        # Nur EIN Buendel: entweder nur ein Symbol oder nur Text. Ein
-        # Symbol ist annaehernd quadratisch, Text ist breiter als hoch.
         k = kasten(m, bs[0][0], bs[0][1] + 1)
         if (k[2] - k[0] + 1) <= (k[3] - k[1] + 1) * 2:
             sym = k
@@ -182,14 +172,14 @@ def feld_messen(px, x0, y0, w, h, name, args):
 
 def bericht(r, args, fehler):
     if r["leer"]:
-        print("  %-14s FELD LEER (kein Bildpunkt hebt sich vom Grund ab)"
+        print("  %-14s FIELD EMPTY (no pixel stands out from the background)"
               % r["name"])
         fehler.append("%s: leer" % r["name"])
         return
     x0, y0, w, h = r["feld"]
-    print("  %-14s Feld %dx%d bei %d,%d   Grund %s"
+    print("  %-14s field %dx%d at %d,%d   background %s"
           % (r["name"], w, h, x0, y0, r["grund"]))
-    print("               Abstand links %d rechts %d oben %d unten %d"
+    print("               gap left %d right %d top %d bottom %d"
           % (r["links"], r["rechts"], r["oben"], r["unten"]))
     if abs(r["links"] - r["rechts"]) > args.tol:
         print("               VERLETZT waagrecht: %d gegen %d"
@@ -210,7 +200,7 @@ def bericht(r, args, fehler):
               " (%d%% der Feldhoehe)"
               % (sw, sh, s[0], s[1], (s[1] + s[3]) / 2.0, anteil))
         if anteil < args.min_anteil or anteil > args.max_anteil:
-            print("               VERLETZT anteil: %d%% liegt nicht"
+            print("               VIOLATED share: %d%% does not lie"
                   " zwischen %d%% und %d%%"
                   % (anteil, args.min_anteil, args.max_anteil))
             fehler.append("%s: anteil %d%%" % (r["name"], anteil))
@@ -251,8 +241,6 @@ def zeilen_finden(px, x0, y0, w, h, args):
             lauf = None
     if lauf is not None:
         out.append((lauf[0], lauf[1]))
-    # Zeilen, die naeher als `--zeilenluecke` beieinander liegen,
-    # gehoeren zusammen (ein Buchstabe mit Unterlaenge reisst sonst ab).
     zus = []
     for (a, b) in out:
         if zus and a - zus[-1][1] <= args.zeilenluecke:
@@ -304,20 +292,20 @@ def main():
     if args.zeilen:
         x, y, w, h = [int(v) for v in args.zeilen.split(",")]
         zs = zeilen_finden(px, x, y, w, h, args)
-        print("ZEILEN im Bereich %d,%d %dx%d: %d gefunden"
+        print("ROWS in area %d,%d %dx%d: %d found"
               % (x, y, w, h, len(zs)))
         hoehen = [zh for (_, zh) in zs]
         for k, (zy, zh) in enumerate(zs):
             felder.append((x, zy, w, zh, "zeile%d" % k))
         if hoehen and max(hoehen) - min(hoehen) > 1:
-            print("  VERLETZT: die Zeilen sind unterschiedlich hoch:"
+            print("  VIOLATED: the rows differ in height:"
                   " %d bis %d" % (min(hoehen), max(hoehen)))
             fehler.append("zeilenhoehe %d..%d" % (min(hoehen), max(hoehen)))
 
     print("FELDER")
     for (x, y, w, h, name) in felder:
         if x < 0 or y < 0 or x + w > im.width or y + h > im.height:
-            print("  %-14s liegt ausserhalb des Bildes" % name)
+            print("  %-14s lies outside the image" % name)
             fehler.append("%s: ausserhalb" % name)
             continue
         bericht(feld_messen(px, x, y, w, h, name, args), args, fehler)

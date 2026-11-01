@@ -1,22 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/acceptance3440.sh -- DIE ABNAHME, IN JUSTINS AUFLOESUNG.
 #
 #   bash tools/design/acceptance3440.sh [kern.mb] [wurzel.img] [ausgabe]
 #
-# DAUERREGEL SEIT DEM 10.09.: jeder Pruefstandslauf faehrt 3440x1440.
-# Ein Lauf in 1920x1080 zaehlt als NICHT GELAUFEN. Der Grund steht in
-# kernel/fb.fi: 3440x1440x4 sind 18,9 MiB und passten nicht in acht
-# Fensterplaetze zu 2 MiB. Der Kern starb VOR der Oberflaeche, und
-# weil der Pruefstand kleiner fuhr, war monatelang alles gruen,
-# waehrend Justin keine Taskleiste hatte.
 #
-# Diese Abnahme belegt vier Dinge, die vor jeder Auslieferung stimmen
-# muessen:
-#   1. kein Absturz
-#   2. desktop, taskbar und launcher laufen
-#   3. jarvisd startet VON SELBST (Bootwort `jarvis` im Haupteintrag)
-#   4. und bringt einen sechsstelligen Kopplungscode auf den Schirm
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 KERN=${1:-/tmp/r3-k.mb}
@@ -24,14 +11,13 @@ WURZEL=${2:-/tmp/final-img/root.img}
 W=${3:-/tmp/abnahme3440}
 rm -rf "$W"; mkdir -p "$W"
 [ -s "$KERN" ] || { echo "kein Kern: $KERN"; exit 1; }
-[ -s "$WURZEL" ] || { echo "keine Wurzel: $WURZEL"; exit 1; }
+[ -s "$WURZEL" ] || { echo "no root: $WURZEL"; exit 1; }
 cp "$WURZEL" "$W/disk.img"
 
 pass=0; fail=0
 ok(){ pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-# Die Befehlszeile des Sticks, minus modfs (die Wurzel kommt per -drive).
 APPEND="osum gfx disp fbres=3440x1440 wm wig desk wmshell wmdauer tafel herz"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=en usb hidgen modfs"
 APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis"
@@ -66,23 +52,23 @@ grep -a 'jarvisd:' "$W/serial.txt" | head -6 | sed 's/^/   /'
 echo
 
 n=$(grep -acE "ABSTURZ|EXCEPTION" "$W/serial.txt" 2>/dev/null | head -1); n=${n:-0}
-[ "$n" -eq 0 ] && ok "kein Absturz bei 3440x1440" || bad "$n Absturzzeilen"
+[ "$n" -eq 0 ] && ok "no crash at 3440x1440" || bad "$n Absturzzeilen"
 grep -qa 'huge=10' "$W/serial.txt" \
-    && ok "alle zehn Kacheln abgebildet (kein Streifenbetrieb)" \
-    || bad "der Bildspeicher haengt nicht am Stueck"
+    && ok "all ten tiles rendered (no strip mode)" \
+    || bad "the framebuffer is not hanging on one piece"
 for p in desktop taskbar launcher; do
     grep -qa "desk: start /bin/$p" "$W/serial.txt" \
         && ok "$p laeuft" || bad "$p laeuft NICHT"
 done
 grep -qa 'desk: start /bin/jarvisd' "$W/serial.txt" \
-    && ok "jarvisd startet VON SELBST" || bad "jarvisd startet nicht"
+    && ok "jarvisd starts BY ITSELF" || bad "jarvisd startet nicht"
 HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
 if [ -n "$HEX" ]; then
     CODE=$(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)
     if [ "${#CODE}" -eq 6 ]; then
-        ok "sechsstelliger Kopplungscode am Schirm: $CODE"
+        ok "six-digit pairing code on screen: $CODE"
     else
-        bad "Code hat ${#CODE} Stellen: $CODE"
+        bad "code has ${#CODE} digits: $CODE"
     fi
 else
     bad "kein Kopplungscode"

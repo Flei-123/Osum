@@ -49,12 +49,6 @@ import os
 import re
 import sys
 
-# ------------------------------------------------------------------
-# Staemme, die es im Deutschen NUR als Umschrift gibt -> was hingehoert.
-# Bewusst NICHT dabei: muss, dass, Fluss, Schloss, Prozess, Adresse,
-# Klasse, Masse, Messung, Wasser, besser, Kongress, Interesse -- alles
-# richtig geschrieben, alles mit "ss", und kein Fall fuer diese Liste.
-# ------------------------------------------------------------------
 STAEMME = [
     ("aendern",      "ändern"),
     ("aendert",      "ändert"),
@@ -156,7 +150,6 @@ STAEMME = [
     ("ausfuehr",     "ausführ"),
     ("Ausfuehr",     "Ausführ"),
     ("durchfuehr",   "durchführ"),
-    # ---- Runde UMLAUT2: was der Quelltext noch trug ----------------
     ("liess",        "ließ"),
     ("Liess",        "Ließ"),
     ("hiess",        "hieß"),
@@ -231,15 +224,13 @@ STAEMME = [
     ("gefuell",      "gefüll"),
     ("schluess",     "schlüss"),
     ("Schluess",     "Schlüss"),
-    ("Umschrift-x",  "Umschrift-x"),  # nie ein Treffer, haelt die Liste stabil
+    ("Umschrift-x",  "Umschrift-x"),
 ]
 STAEMME = [s for s in STAEMME if s[0] != "Umschrift-x"]
-# Laengste zuerst, damit "Vorgetaeusch" vor "taeusch" greift.
 _ORD = sorted(STAEMME, key=lambda s: len(s[0]), reverse=True)
 _RE = re.compile("|".join(re.escape(s[0]) for s in _ORD))
 _ERSATZ = dict(STAEMME)
 
-# Was in Anfuehrungszeichen steht, ist ein ZITAT.
 _ZITAT = re.compile(r'"[^"]*"')
 
 
@@ -254,11 +245,6 @@ def finde(text, zitate_zaehlen=True):
     return aus
 
 
-# ------------------------------------------------------------------
-# Die Puffergrenzen, die diese Texte tragen -- aus dem Quelltext
-# gelesen, nicht abgeschrieben. Eine abgeschriebene Zahl ist genau die
-# Zahl, die beim naechsten Mal nicht mitwandert.
-# ------------------------------------------------------------------
 def grenzen(wurzel):
     msg = open(os.path.join(wurzel, "kernel/user/msg.fi"),
                encoding="utf-8").read()
@@ -297,7 +283,6 @@ def main(argv):
             umlaute += sum(1 for c in zeile if c in "äöüÄÖÜß")
             ist_komm = zeile.lstrip().startswith("#")
             if ist_komm:
-                # Ein Kommentar darf die Umschrift ZITIEREN, nicht benutzen.
                 treffer = finde(zeile, zitate_zaehlen=False)
             elif "=" in zeile:
                 geprueft += 1
@@ -332,11 +317,6 @@ def main(argv):
                        % (rel, len(roh), g["INFO_READ"]))
         for nr, zeile in enumerate(roh.decode("utf-8").split("\n"), 1):
             umlaute += sum(1 for c in zeile if c in "äöüÄÖÜß")
-            # DIE SUCHWOERTER SIND EINE AUSNAHME, UND SIE HAT EINE REGEL.
-            # In `keys=` ist ASCII GEWOLLT: wer "menue" tippt, weil seine
-            # Tastatur kein "ü" hat, soll den Starter finden. Aber wer
-            # "menü" tippt, auch -- deshalb muss die Umlautform DANEBEN
-            # stehen und nicht STATT dessen. Genau das wird hier geprueft.
             if zeile.startswith("keys="):
                 woerter = [w.strip() for w in
                            zeile.split("=", 1)[1].split(",")]

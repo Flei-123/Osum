@@ -55,7 +55,7 @@ def main(argv):
     W1, H1, a = ppm(argv[1])
     W2, H2, b = ppm(argv[2])
     if (W1, H1) != (W2, H2):
-        print("gleich: verschiedene Groesse %dx%d gegen %dx%d"
+        print("same: different size %dx%d against %dx%d"
               % (W1, H1, W2, H2))
         return 1
     aus = None
@@ -64,7 +64,6 @@ def main(argv):
         if v == "--karte":
             aus = argv[3 + i + 1]
         if v == "--zeit":
-            # Die Uhr rechts in der Leiste: x ab 740, unterste 28 Zeilen.
             aussen.append(("die Uhr", (740, H1 - 28, W1, H1)))
         if v == "--ausser":
             x, y, w, h = (int(t) for t in argv[3 + i + 1].split(","))
@@ -97,18 +96,18 @@ def main(argv):
                 karte[o + 1] = 0
                 karte[o + 2] = 0
     if n == 0:
-        print("gleich: unterschiedlich 0 von %d Bildpunkten -- IDENTISCH"
+        print("same: differs in 0 of %d pixels -- IDENTICAL"
               % (W1 * H1))
     else:
-        print("gleich: unterschiedlich %d von %d Bildpunkten (%.3f%%), "
+        print("same: differs in %d of %d pixels (%.3f%%), "
               "groesste Abweichung %d, Rechteck %d,%d bis %d,%d"
               % (n, W1 * H1, 100.0 * n / (W1 * H1), mx, x0, y0, x1, y1))
     for nm, r in aussen:
-        print("gleich: ausgenommen (%s) %d,%d bis %d,%d" % ((nm,) + r))
+        print("same: excluded (%s) %d,%d to %d,%d" % ((nm,) + r))
     if aus and karte is not None:
         from PIL import Image
         Image.frombytes("RGB", (W1, H1), bytes(karte)).save(aus)
-        print("gleich: Karte nach %s" % aus)
+        print("same: map to %s" % aus)
     return 1 if n else 0
 
 

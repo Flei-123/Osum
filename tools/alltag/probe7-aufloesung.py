@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# tools/alltag/probe7-aufloesung.py -- RUNDE ALLTAG: die Probe-Aufloesung der
-# Konflikte alltag -> merge7 (8c31a08), wie in STATUS-ALLTAG.md beschrieben.
-# Aufruf: python3 tools/alltag/probe7-aufloesung.py <wegwerf-worktree>
-# NACH `git merge --no-commit --no-ff alltag` dort. Danach fehlen noch zwei
-# schliessende Klammern in kernel/user/wlib.fi (on_down K_LEINWAND, on_up
-# LE_UP) -- siehe Bericht. Wegwerf-Werkzeug, kein Teil der Abnahme.
 """Probe-Aufloesung der sechs Konfliktdateien alltag -> merge7 (WEGWERF-Baum).
 
 Regeln je (Datei, Konfliktnummer):
@@ -90,7 +84,6 @@ def resolve(path, rules):
 
 for p, r in RULES.items():
     resolve(p, r)
-# lock.fi hat keine Konfliktmarken, aber die Nummer
 lp = os.path.join(ROOT, "kernel/user/lock.fi")
 t = open(lp, encoding="utf-8").read()
 n = t.count("const SYS_SPERRE: u64 = 1850")

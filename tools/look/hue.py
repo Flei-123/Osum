@@ -92,7 +92,6 @@ def aufgehellt(px, w, h, soll):
     for y in range(0, h, 2):
         for x in range(0, w, 2):
             r, g, b = px[x, y]
-            # bunt, und in der Richtung des Sollakzents
             if max(r, g, b) - min(r, g, b) < 40:
                 continue
             if (g > r) != (sg > sr) or (g > b) != (sg > sb):
@@ -115,7 +114,6 @@ def aufgehellt(px, w, h, soll):
     return sum(ts) / len(ts), (r, g, b)
 
 
-# Zaehler der Befunde, von `pruefe_farbe` gefuellt.
 BEFUND = {"fehler": 0, "vertauscht": 0}
 
 
@@ -162,21 +160,8 @@ def main():
     vertauscht = 0
     for b in bilder:
         im = Image.open(b).convert("RGB")
-        # ================================================ RUNDE 32
-        # ALLE GROSSEN FLAECHEN, NICHT NUR DIE GROESSTE.
         #
-        # Der erste Anlauf sah nur die haeufigste Farbe -- und liess
-        # damit genau das Bild durch, um dessen Fehler es geht:
-        # in dunkel-05-kontrollzentrum.png ist (2,6,23) die haeufigste
-        # (der Schreibtisch, richtig), und der braune (59,41,30) steht
-        # auf Platz ZWEI mit 41.907 Punkten. Eine Pruefung, die nur die
-        # Nummer eins ansieht, findet einen Fehler nicht, der ein
-        # Drittel des Bildes einnimmt.
         #
-        # Also: jede Farbe, die mehr als ein Prozent der Punkte
-        # ausmacht. Darunter liegen Kanten und Text, die von der
-        # Glaettung Zwischenwerte bekommen und in keiner Rampe stehen
-        # koennen.
         w0, h0 = im.size
         ganz = (w0 // 2) * (h0 // 2)
         for (r, g, bl), n in haupt_farben(im, 12):
@@ -185,15 +170,12 @@ def main():
             pruefe_farbe(b, r, g, bl, n, ramp)
         continue
         (r, g, bl), n = haupt_farben(im, 1)[0]
-        # Die naechste Stufe der Rampe.
         best, bd = None, 10 ** 9
         for nm, (sr, sg, sb) in ramp.items():
             d = abs(r - sr) + abs(g - sg) + abs(bl - sb)
             if d < bd:
                 bd, best = d, (nm, sr, sg, sb)
         nm, sr, sg, sb = best
-        # UND: ist sie die UMKEHRUNG einer Stufe? Das ist der Fehler,
-        # um den es hier geht.
         dreh = None
         for qn, (qr, qg, qb) in ramp.items():
             if (r, g, bl) == (qb, qg, qr) and qr != qb:
@@ -213,8 +195,6 @@ def main():
                   f"  naechste Stufe {nm} +{bd} -- IN KEINER RAMPE")
             fehler += 1
 
-    # Der Akzent, getrennt: er ist die einzige laute Farbe und faellt
-    # bei einer Umkehr am meisten auf (2563eb -> eb6325, ein Orange).
     print()
     print("== DER AKZENT ==")
     soll = ramp.get("accent")
@@ -237,25 +217,11 @@ def main():
                 print(f"  {kurz:26s} RGB({ar:3d},{ag:3d},{ab:3d})"
                       f" {an:6d} Punkte  OK")
             elif aufgehellt(px, w, h, soll) is not None:
-                # DER AKZENT DARF AUFGEHELLT SEIN, und das ist kein
-                # Schlupfloch: `night.scheme` sagt im Dateikopf, dass
-                # 22c55e die 3:1-Regel gegen eine helle Flaeche
-                # verfehlt und die Semantik deshalb die erzeugte Rampe
-                # weiterlaeuft. Gemessen im dunklen Abbild:
-                # RGB(117,219,155) -- das ist 22c55e zu 38 % gegen
-                # Weiss gemischt, mit GLEICHEM Faktor in allen drei
-                # Kanaelen (0.376/0.379/0.379).
                 #
-                # Genau dieser gleiche Faktor ist der Beweis, dass es
-                # eine Aufhellung und keine Verwechslung ist: eine
-                # Kanalumkehr ergibt in den drei Kanaelen drei
-                # VERSCHIEDENE Faktoren. Deshalb wird der Faktor
-                # geprueft und nicht nur die Aehnlichkeit.
                 t, gf = aufgehellt(px, w, h, soll)
-                print(f"  {kurz:26s} RGB{gf} = Akzent zu {t*100:.0f} %"
+                print(f"  {kurz:26s} RGB{gf} = accent at {t*100:.0f} %"
                       f" gegen Weiss gemischt  OK")
             else:
-                # Kommt der Akzent VERTAUSCHT vor?
                 gedreht = (soll[2], soll[1], soll[0])
                 c2 = 0
                 for y in range(0, h, 2):
@@ -270,21 +236,21 @@ def main():
                     fehler += 1
                     vertauscht += 1
                 else:
-                    print(f"  {kurz:26s} kein Akzent im Bild")
+                    print(f"  {kurz:26s} no accent in the image")
 
     fehler += BEFUND["fehler"]
     vertauscht += BEFUND["vertauscht"]
     print()
     if vertauscht:
         print(f"FARBTON FEHLGESCHLAGEN: {vertauscht}x R und B vertauscht.")
-        print("Das ist der Fehler aus Runde 31: paint/canvas.fi legt R,G,B,A")
-        print("ab, wlibc.px schreibt ein u32 (auf x86 also B,G,R,A). Beide")
-        print("malen in dieselbe Flaeche. Umgerechnet wird in")
-        print("kernel/user/fuib.fi (`kanal_dreh`) -- und NUR dort, weil")
-        print("paint/canvas.fi die gemeinsame Bibliothek ist.")
+        print("That is the bug from round 31: paint/canvas.fi stores R,G,B,A")
+        print("in that order, wlibc.px writes a u32 (so B,G,R,A on x86). Both")
+        print("paint into the same area. The conversion happens in")
+        print("kernel/user/fuib.fi (`kanal_dreh`) -- and ONLY there, because")
+        print("paint/canvas.fi is the shared library.")
         return 1
     if fehler:
-        print(f"FARBTON FEHLGESCHLAGEN: {fehler} Flaeche(n) in keiner Rampe.")
+        print(f"HUE FAILED: {fehler} area(s) in no ramp.")
         return 1
     print("FARBTON PASSED.")
     return 0

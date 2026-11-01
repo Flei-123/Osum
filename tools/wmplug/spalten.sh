@@ -1,32 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/wmplug/spalten.sh -- STEHEN DIE SPALTEN VON /bin/wmplug?
 #
-# Die Jury hat an der Oberflaeche von /bin/wmplug drei Dinge gefunden,
-# und alle drei sind Sehfehler und keine Abstuerze: der Tabellenkopf
-# stand neben seinen Werten, die Statuszeile riss mitten im Wort, und bei
-# `info` klebte `Leistentext13` zusammen. Genau darum wird hier NICHT der
-# Quelltext gelesen, sondern EIN WIRKLICH GEBOOTETER KERN FOTOGRAFIERT
-# und das Foto nachgerechnet:
 #
-#   * `checkshot.py tgrid` haelt jede Glyphe gegen den Rasterer -- also
-#     steht hier nicht "da ist Text", sondern "in Zeile Z ab Spalte S
-#     steht genau dieses Wort". Faellt eine Ueberschrift um eine Stelle,
-#     faellt die Zusage.
-#   * Kopf und Wert werden AN DERSELBEN ENDSPALTE gemessen: `Rechte`
-#     endet auf Spalte 18, `0x807` endet auf Spalte 18. Das ist der
-#     Beweis, dass beide aus denselben Breitenkonstanten kommen
-#     (SP_NR/SP_NAME/SP_HEX/SP_LIEGT/SP_VERL in kernel/user/wmplug.fi).
-#   * ZWEI Plugins sind gleichzeitig angemeldet (/bin/plugpaar startet
-#     pluguhr UND plugregel) -- eine einzige Datenzeile liesse sich mit
-#     jeder falschen Breite hinbiegen.
 #
-# Nebenbei entsteht das Bild der Verwaltung fuer .gauntlet-shots
-# (09-wmplug-verwaltung.png) neu, denn das alte zeigt genau die Fehler
-# von oben.
 #
-# Gebrauch: bash tools/wmplug/spalten.sh      (SPALTEN_KEEP=1 behaelt
-#           das Arbeitsverzeichnis mit Mitschnitten und PPMs)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -46,7 +23,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "SPALTEN: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "SPALTEN: skipped, qemu-system-x86_64 is missing"; exit 0
 fi
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "firnc fehlt"; exit 1; }
 
@@ -54,7 +31,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "firnc fehlt"; exit 1; }
 echo "== 1. bauen =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     && ok "Kernel gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kernel baut nicht"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
+    || { bad "the kernel does not build"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
          echo; echo "SPALTEN: $pass bestanden, $fail gescheitert"; exit 1; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s assembliert nicht"
 PROGS="desktop taskbar launcher calc sh pluguhr plugregel plugpaar wmplug"
@@ -67,7 +44,7 @@ done
 ok "$(echo $PROGS | wc -w) Programme gebaut"
 
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
-    && ok "der Verzeichnisbaum steht" || bad "tools/k15/tree.py fehlgeschlagen"
+    && ok "the directory tree is ready" || bad "tools/k15/tree.py fehlgeschlagen"
 ARGS=(build "$TMPD/disk.img" 32768 /lib/
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/)
 for p in $PROGS; do
@@ -77,7 +54,7 @@ ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme"
     "/etc/wmplug.conf=etc/wmplug.conf" "/etc/wmregeln.conf=etc/wmregeln.conf")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "das Abbild ist gebaut" \
+    && ok "the image is built" \
     || { bad "mkfs.py fehlgeschlagen"; head -5 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 
 # ------------------------------------------------------------ 2. laufen
@@ -110,69 +87,43 @@ lauf() { # name zusatz marke
     rm -f "$sock"
     tr -d '\000' < "$out" > "$TMPD/$name.clean"
     local rc; rc=$(cat "$TMPD/$name.rc")
-    [ "$rc" = 21 ] && ok "$name: der Kern beendet sich sauber (21)" \
+    [ "$rc" = 21 ] && ok "$name: the kernel exits cleanly (21)" \
         || bad "$name: Exitcode $rc statt 21"
-    [ -s "$TMPD/$name.ppm" ] && ok "$name: das Foto steht ($(stat -c%s "$TMPD/$name.ppm") Oktette)" \
-        || bad "$name: kein Foto"
+    [ -s "$TMPD/$name.ppm" ] && ok "$name: the photo exists ($(stat -c%s "$TMPD/$name.ppm") Oktette)" \
+        || bad "$name: no photo"
 }
 
-echo "== 2. zwei Plugins gleichzeitig, dann 'wmplug list' und 'wmplug info' =="
-# FOTOGRAFIERT WIRD, WENN DIE TABELLE AUF DER LEITUNG STEHT -- nicht bei
-# `wm: hold`. Das steht dort, lange bevor ueberhaupt ein Plugin lebt, und
-# ein Foto vom leeren Schreibtisch belegt ueber Spalten nichts.
+echo "== 2. two plugins at the same time, then 'wmplug list' und 'wmplug info' =="
 lauf paar "wigapp=/bin/plugpaar" 'Nr Name'
 P="$TMPD/paar.clean"
 has "$P" "wmplug: reg uhr" "das Widget ist angemeldet"
 has "$P" "wmplug: reg regel" "die Regel-Engine ist angemeldet"
-# ZWEI IN DER TAFEL, vom KERN gezaehlt -- nicht vom Laeufer.
 z=$(grep -aoE 'Plugins [0-9]+ von [0-9]+' "$P" | tail -1 | grep -oE '[0-9]+' | head -1)
-[ "${z:-0}" -ge 2 ] && ok "die Tafel zaehlt $z Plugins (zwei Datenzeilen unter dem Kopf)" \
-    || bad "die Tafel zaehlt '$z' Plugins -- fuer die Spaltenprobe braucht es zwei"
-# DIE STATUSZEILE IST ZWEI ZEILEN, JEDE UNTER 40 ZEICHEN. Vorher war es
-# eine von 55, und der Fensterserver bricht am RAND und nicht am Wort:
-# auf dem alten Bild 09 riss sie mitten in `Flaeche  0`.
+[ "${z:-0}" -ge 2 ] && ok "the table counts $z plugins (two data rows under the header)" \
+    || bad "the table counts '$z' Plugins -- fuer die Spaltenprobe braucht es zwei"
 lang=$(grep -aoE 'wmplug: abi=[0-9]+  Plugins [0-9]+ von [0-9]+' "$P" | tail -1)
 [ -n "$lang" ] && [ "${#lang}" -le 40 ] \
     && ok "erste Statuszeile '$lang' ist ${#lang} Zeichen lang (<= 40)" \
-    || bad "erste Statuszeile passt nicht in 40 Zeichen ('$lang')"
+    || bad "first status line does not fit in 40 characters ('$lang')"
 zwei=$(grep -aoE '  Frist [0-9]+ Ticks  Area [0-9]+' "$P" | tail -1)
 [ -n "$zwei" ] && [ "${#zwei}" -le 40 ] \
     && ok "zweite Statuszeile '$zwei' ist ${#zwei} Zeichen lang (<= 40)" \
-    || bad "die Statuszeile ist nicht umgebrochen ('$zwei')"
+    || bad "the status line is not wrapped ('$zwei')"
 
-echo "== 3. die Beschriftungen von 'info' =="
-# DAS TRENNZEICHEN, an dem die Jury haengengeblieben ist: vorher stand
-# dort `Leistentext13`, jetzt ein Leerzeichen zwischen Wort und Zahl.
+echo "== 3. the labels of 'info' =="
 grep -qaE '  Leistentext +[0-9]+' "$P" \
-    && ok "bei 'info' steht ein Trennzeichen zwischen Leistentext und Zahl" \
+    && ok "bei 'info' there is a separator between bar text and number" \
     || bad "'Leistentext' und die Zahl kleben wieder zusammen"
-# UND ALLE BESCHRIFTUNGEN AUF EINER BREITE: jeder Wert beginnt auf
-# derselben Spalte, gemessen am Text, den der Kern ausgegeben hat.
 spalten=$(grep -aoE '^  (Name|Platz|Rechte|Maske|liegt|verloren|eingelegt|abgeholt|Grund|Leistentext) +[^ ]' "$P" \
     | sed 's/.$//' | awk '{ print length($0) }' | sort -u | tr '\n' ' ')
 if [ "$(echo $spalten | wc -w)" = 1 ]; then
-    ok "alle Beschriftungen von 'info' sind ${spalten% } Zeichen breit -- eine Spalte"
+    ok "all labels of 'info' are ${spalten% } characters wide -- one column"
 else
-    bad "die Beschriftungen von 'info' haben verschiedene Breiten: $spalten"
+    bad "the labels of 'info' have different widths: $spalten"
 fi
 
-# ------------------------------------- 4. der Spaltenstand IM BILD
-echo "== 4. der Spaltenstand, am Foto nachgerechnet =="
-# Das Terminalfenster des Schreibtisches: Raster 10x19 ab (26,62),
-# Schrift osum-mono 16 px. DIE FARBEN SIND NACHGEMESSEN UND NICHT VON
-# tools/wm/run.sh abgeschrieben: dort steht 224,230,236 auf 16,20,26, das
-# ist das Terminal des nackten Fensterservers. Der Schreibtisch nimmt
-# sein Thema aus /etc/theme und malt 248,250,252 auf 18,24,32 -- mit den
-# geborgten Zahlen war jede Glyphe "falsch", obwohl sie richtig stand.
+echo "== 4. the column position, recomputed from the photo =="
 #
-# A-032: DER URSPRUNG DES RASTERS WIRD AUS DER FENSTERLAGE GERECHNET und
-# nicht mehr als 26,62 festgeschrieben. 26,62 war die Innenecke eines
-# Terminals, das bei 24,40 lag. Seit plugregel beim Start laeuft, greift
-# die Regel `titel=Terminal kacheln` aus /etc/wmregeln.conf, und das
-# Terminal liegt bei 0,0 -- der Kopf stand bildpunktgenau im Foto, nur
-# 24 Punkte links und 40 Punkte hoeher, als der Laeufer suchte. Die Lage
-# meldet der Fensterserver selbst (`wm: win ... t=[Terminal`), Rand und
-# Titelleiste kommen aus kernel/ui/wm.fi (BORDER0, TITLE_H0).
 WIN=$(grep -aE '^wm: win .* t=\[Terminal' "$P" | tail -1)
 WX=$(printf '%s' "$WIN" | grep -oE ' x=[0-9]+' | head -1 | grep -oE '[0-9]+')
 WY=$(printf '%s' "$WIN" | grep -oE ' y=[0-9]+' | head -1 | grep -oE '[0-9]+')
@@ -180,10 +131,10 @@ RAND=$(grep -aoE '^const BORDER0: u64 = [0-9]+' kernel/ui/wm.fi | grep -oE '[0-9
 TITEL=$(grep -aoE '^const TITLE_H0: u64 = [0-9]+' kernel/ui/wm.fi | grep -oE '[0-9]+$')
 if [ -n "$WX" ] && [ -n "$WY" ] && [ -n "$RAND" ] && [ -n "$TITEL" ]; then
     GX=$((WX + RAND)); GY=$((WY + TITEL))
-    ok "das Terminal liegt laut Fensterserver bei $WX,$WY -- Raster ab $GX,$GY"
+    ok "the terminal is at $WX,$WY according to the window server -- grid from $GX,$GY"
 else
     GX=26; GY=62
-    bad "keine Fensterlage des Terminals im Mitschnitt (x='$WX' y='$WY' Rand='$RAND' Titel='$TITEL')"
+    bad "no window position of the terminal in the capture (x='$WX' y='$WY' Rand='$RAND' Titel='$TITEL')"
 fi
 GRID=(assets/osum-mono.ttf 16 "$GX" "$GY" 10 19)
 VG=(248 250 252); HG=(18 24 32)
@@ -191,8 +142,6 @@ tgrid() { # ppm zeile spalte text
     python3 tools/gfx/checkshot.py tgrid "$1" "${GRID[@]}" "$2" "$3" \
         "${VG[@]}" "${HG[@]}" "$4" 2>&1
 }
-# Die Rasterzeile des Kopfes wird GESUCHT und nicht geraten: welche sie
-# traegt, haengt daran, wie viel vorher geschrieben wurde.
 kopf=""
 for z in $(seq 0 23); do
     if tgrid "$TMPD/paar.ppm" "$z" 2 "Nr Name" > "$TMPD/t.txt" 2>&1; then
@@ -200,11 +149,7 @@ for z in $(seq 0 23); do
     fi
 done
 if [ -n "$kopf" ]; then
-    ok "der Tabellenkopf steht bildpunktgenau in Rasterzeile $kopf ($(cat "$TMPD/t.txt"))"
-    # GEGENPROBE: mit dem alten, festen Ursprung 26,62 darf der Kopf in
-    # KEINER Zeile stehen -- sonst saehe tgrid Text, wo keiner ist, und
-    # der gerechnete Ursprung oben bewiese nichts. (Liegt das Terminal
-    # zufaellig wieder bei 24,40, ist die Probe gegenstandslos.)
+    ok "the table header is pixel-exact in grid row $kopf ($(cat "$TMPD/t.txt"))"
     if [ "$GX,$GY" != "26,62" ]; then
         alt=0
         for z in $(seq 0 23); do
@@ -212,23 +157,13 @@ if [ -n "$kopf" ]; then
                 assets/osum-mono.ttf 16 26 62 10 19 "$z" 2 "${VG[@]}" "${HG[@]}" \
                 "Nr Name" >/dev/null 2>&1 && alt=$((alt + 1))
         done
-        [ "$alt" = 0 ] && ok "GEGENPROBE: am alten Ursprung 26,62 steht der Kopf in keiner Zeile" \
+        [ "$alt" = 0 ] && ok "CONTROL: at the old origin 26,62 the header is in no row" \
             || bad "GEGENPROBE: am alten Ursprung 26,62 'steht' der Kopf $alt mal"
     fi
 else
-    bad "im Foto ist kein Tabellenkopf zu finden"
+    bad "no table header can be found in the photo"
 fi
 
-# EIN PAAR JE SPALTE: Ueberschrift und Wert stehen auf DERSELBEN
-# Endspalte. Geprueft wird die Anfangsspalte, und weil tgrid die Laenge
-# jeder Zeichenkette kennt, ist damit auch das Ende festgenagelt.
-#   Spalte   Kopf ab   Wert ab   Endspalte
-#   Nr        2         3         3
-#   Name      5         5        13
-#   Rechte   13        14        18
-#   Maske    20        20        24
-#   liegt    26        30        30
-#   verloren 32        39        39
 paar_probe() { # zeileKopf zeileWert kopfSpalte kopfText wertSpalte wertText name
     local zk=$1 zw=$2 sk=$3 tk=$4 sw=$5 tw=$6 nm=$7
     local a b
@@ -236,14 +171,11 @@ paar_probe() { # zeileKopf zeileWert kopfSpalte kopfText wertSpalte wertText nam
         && b=$(tgrid "$TMPD/paar.ppm" "$zw" "$sw" "$tw"); then
         ok "$nm: Kopf '$tk' ab Spalte $sk, Wert '$tw' ab Spalte $sw -- dieselbe Endspalte"
     else
-        bad "$nm: Kopf oder Wert steht nicht dort, wo die Breiten es sagen ($a / $b)"
+        bad "$nm: header or value is not where the widths say ($a / $b)"
     fi
 }
 if [ -n "$kopf" ]; then
     d1=$((kopf + 1))
-    # WELCHES Plugin auf Platz 0 steht und mit welchen Rechten, sagt der
-    # KERN und nicht dieser Laeufer -- gelesen aus der Leitung desselben
-    # Laufs und dann im Bild gesucht.
     zeile0=$(grep -aoE '^ +0 [a-z]+ +0x[0-9A-F]+ 0x[0-9A-F]+' "$P" | tail -1)
     n0=$(echo "$zeile0" | awk '{print $2}')
     r0=$(echo "$zeile0" | awk '{print $3}')
@@ -255,8 +187,6 @@ if [ -n "$kopf" ]; then
         paar_probe "$kopf" "$d1" 5 "Name" 5 "$n0" "Name"
         paar_probe "$kopf" "$d1" 26 "liegt" 30 "0" "liegt"
         paar_probe "$kopf" "$d1" 32 "verloren" 39 "0" "verloren"
-        # UND DIE ZWEITE DATENZEILE, damit die Probe nicht an einer
-        # einzigen Zeile haengt.
         zeile1=$(grep -aoE '^ +1 [a-z]+ +0x[0-9A-F]+ 0x[0-9A-F]+' "$P" | tail -1)
         n1=$(echo "$zeile1" | awk '{print $2}')
         r1=$(echo "$zeile1" | awk '{print $3}')
@@ -264,22 +194,22 @@ if [ -n "$kopf" ]; then
             paar_probe "$kopf" "$((kopf + 2))" 5 "Name" 5 "$n1" "Name (Platz 1)"
             paar_probe "$kopf" "$((kopf + 2))" 13 "Rechte" 14 "$r1" "Rechte (Platz 1)"
         else
-            bad "in der Leitung steht keine zweite Datenzeile"
+            bad "there is no second data row on the line"
         fi
     else
-        bad "in der Leitung steht keine Datenzeile mit Namen, Rechten und Maske"
+        bad "there is no data row with name, rights and mask on the line"
     fi
 fi
 
 # ------------------------------------------------------- 5. die Bilder
 echo "== 5. die Bilder ablegen =="
 wandel() { # ppm ziel
-    [ -s "$1" ] || { bad "$1 fehlt -- kein Bild"; return 1; }
+    [ -s "$1" ] || { bad "$1 is missing -- no image"; return 1; }
     if python3 tools/gfx/ppm2png.py "$1" "$2" > /dev/null 2>&1 \
         || python3 -c "from PIL import Image; Image.open('$1').save('$2')" 2>/dev/null; then
         ok "$2 liegt ab ($(stat -c%s "$2") Oktette)"
     else
-        cp -f "$1" "${2%.png}.ppm"; ok "${2%.png}.ppm liegt ab (kein PNG-Wandler da)"
+        cp -f "$1" "${2%.png}.ppm"; ok "${2%.png}.ppm is stored (no PNG converter there)"
     fi
 }
 wandel "$TMPD/paar.ppm" "$SHOTS/spalten-zwei-plugins.png"

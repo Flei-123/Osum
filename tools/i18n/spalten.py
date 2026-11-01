@@ -48,22 +48,13 @@ DEKL = re.compile(
     r'\s*:\s*\[u8;\s*(\d+)\s*\]\s*=\s*"((?:\\.|[^"\\])*)"')
 FN = re.compile(r'^(?:pub\s+)?fn\s+([A-Za-z_0-9]+)')
 
-# ------------------------------------------------------------------
-# DIE SPALTEN DIESES BAUMS. Datei, Namen, Breite in ZEICHEN, wofuer.
 #
-# Sie stehen hier ausgeschrieben und werden nicht geraten. Eine Heuristik
-# ("alles, was auf ein Leerzeichen endet") findet auch `":  min  "` und
-# `" von "` und meckert an Stellen, an denen gar keine Spalte ist -- ein
-# Pruefer, der Unsinn meldet, wird abgeschaltet. Wer eine Spalte
-# HINZUFUEGT, traegt sie hier ein; wer eine bricht, wird rot.
-# ------------------------------------------------------------------
 SPALTEN = [
     ("kernel/user/power.fi",
      [("zeig_profil", "s_p"), ("zeig_akku", "s_a"), ("zeig_akku", "s_net"),
       ("zeig_akku", "s_mod"), ("zeig_waerme", "s_t")], 9,
      "/bin/power setzt Profil/Akku/Netz/Modell/Wärme untereinander"),
     ("kernel/user/vpn.fi",
-     # Runde ENGLISCH hat `zeigen` in `show` umbenannt.
      [("show", "s_peer"), ("show", "s_hs"), ("show", "s_port"),
       ("show", "s_kill"), ("show", "s_koct")], 15,
      "/bin/vpn setzt Gegenstellen/Handschläge/Port/Notaus/verworfen "
@@ -216,15 +207,10 @@ def main(argv):
     for rel, nr, name, N, roh in alle_ketten(wurzel):
         nk += 1
         b = oktette(roh)
-        # NUR EINE FRAGE, UND SIE IST DIE RICHTIGE: passt das Literal
-        # genau in seinen Puffer? Ob danach eine Null steht, ist KEINE
-        # allgemeine Regel dieses Baums -- `wlibc` legt Schluessel ohne
-        # Abschluss ab und liest sie mit einer Laenge, und `launcher`
-        # kopiert seine sechs Striche mit `while j < 6`.
         if b != N:
             eng.append('%s:%d  %s: das Literal ist %d Oktette, der Puffer '
                        '%d' % (rel, nr, name, b, N))
-    print('puffer:  %d Zeichenketten, %d passen nicht' % (nk, len(eng)))
+    print('buffer:  %d strings, %d do not fit' % (nk, len(eng)))
     for z in eng:
         print('    ZU ENG  ' + z)
     if schief:

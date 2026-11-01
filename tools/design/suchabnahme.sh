@@ -1,27 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/suchabnahme.sh -- R4: KANN JUSTIN IM SUCHFENSTER ETWAS AUSFUEHREN?
 #
 #   bash tools/design/suchabnahme.sh [kern.mb] [wurzel.img] [ausgabe]
 #
-# Justins Frage, woertlich: "kann man im Suchfenster jetzt herumklicken
-# und etwas ausfuehren?" Diese Abnahme beantwortet sie in SECHS
-# einzeln belegten Schritten, jeder mit eigenem Abzug:
 #
-#   1. Suchfenster ueber die SUPER-TASTE oeffnen
-#   2. Suchfenster ueber KLICK AUFS LOGO oeffnen
-#   3. tippen -- kommt der Text ins Feld an?
-#   4. Trefferliste erscheint und ist gefiltert
-#   5. Treffer mit der MAUS anklicken -> Programm startet
-#   6. Treffer mit PFEILTASTEN + ENTER waehlen -> Programm startet
 #
-# ALLES IN 3440x1440, Justins Aufloesung. Ein Lauf in 1280x800 sagt
-# ueber sein Brett nichts aus -- das ist die Lektion des
-# Framebuffer-Fundes.
 #
-# Gesteuert wird ueber den QEMU-Monitor (sendkey/mouse_move/mouse_button),
-# also ueber dieselben Wege, die ein Mensch benutzt: echte Tastenanschlaege
-# und echte Mausklicks, keine Abkuerzung im Programm.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 KERN=${1:-/tmp/r3-k.mb}
@@ -29,7 +13,7 @@ WURZEL=${2:-/tmp/final-img/root.img}
 W=${3:-/tmp/suchabnahme}
 rm -rf "$W"; mkdir -p "$W"
 [ -s "$KERN" ] || { echo "kein Kern: $KERN"; exit 1; }
-[ -s "$WURZEL" ] || { echo "keine Wurzel: $WURZEL"; exit 1; }
+[ -s "$WURZEL" ] || { echo "no root: $WURZEL"; exit 1; }
 cp "$WURZEL" "$W/disk.img"
 
 pass=0; fail=0
@@ -68,10 +52,6 @@ for k in e d i t; do mon "sendkey $k" 0.4; done
 sleep 2
 schuss 02-getippt
 
-# --- 5. TREFFER MIT DER MAUS ------------------------------------------
-# Die Liste steht unter dem Feld. Der erste Treffer liegt etwa auf
-# einem Drittel der Fensterhoehe; die genaue Stelle liest der
-# Auswerter spaeter aus dem Abzug.
 mon "mouse_move 450 1010" 1
 mon "mouse_button 1" 1
 mon "mouse_button 0" 3
@@ -80,7 +60,6 @@ schuss 03-maus-geklickt
 sleep 3
 schuss 04-nach-klick
 
-# --- 2. KLICK AUFS LOGO (Startknopf unten links) ----------------------
 mon "sendkey esc" 2
 mon "mouse_move 44 1400" 1
 mon "mouse_button 1" 1
@@ -109,16 +88,16 @@ n=$(grep -acE "ABSTURZ|EXCEPTION" "$W/serial.txt" 2>/dev/null | head -1); n=${n:
 grep -qa 'desk: start /bin/launcher' "$W/serial.txt" \
     && ok "der Starter laeuft ueberhaupt" || bad "kein Starter"
 grep -qa 'launcher: apps=' "$W/serial.txt" \
-    && ok "der Starter hat Programme gefunden ($(grep -ao 'apps=[0-9]*' "$W/serial.txt" | tail -1))" \
-    || bad "der Starter kennt keine Programme"
+    && ok "the launcher found programs ($(grep -ao 'apps=[0-9]*' "$W/serial.txt" | tail -1))" \
+    || bad "the launcher knows no programs"
 # Getippt?
 grep -qa 'launcher: suche\|launcher: filter\|launcher: name' "$W/serial.txt" \
-    && ok "der Starter hat auf Eingabe reagiert" || bad "keine Reaktion auf Eingabe"
+    && ok "the launcher reacted to input" || bad "no reaction to input"
 # Gestartet?
 if grep -qa 'launcher: starten\|launcher: exec\|SYS_EXEC' "$W/serial.txt"; then
-    ok "ein Treffer wurde AUSGEFUEHRT"
+    ok "a hit was EXECUTED"
 else
-    bad "kein Treffer wurde ausgefuehrt"
+    bad "no hit was executed"
 fi
 ls "$W"/*.ppm >/dev/null 2>&1 && ok "$(ls "$W"/*.ppm | wc -l) Abzuege abgelegt" || bad "keine Abzuege"
 

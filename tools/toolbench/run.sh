@@ -15,7 +15,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "${wert:-}" ]; then bad "$name: keine Zahl (erwartet $op $want)"; return; fi
+    if [ -z "${wert:-}" ]; then bad "$name: no number (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -25,7 +25,7 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' ist da" || ok "$3"; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "WERKZEUGE: uebersprungen, qemu-system-x86_64 ist nicht da"
+    echo "TOOLS: skipped, qemu-system-x86_64 is missing"
     exit 0
 fi
 
@@ -59,7 +59,7 @@ if bash tools/toolbench/build.sh "$TMPD/b1" desk=yes \
        app=/bin/taskmgr,melde,takt,500 wait=14 last=400 extra="wighalt=120" \
        plan="$TMPD/plan1.txt" > "$TMPD/b1.log" 2>&1; then
     ok "Kern und Programme gebaut ($(grep -a '^kern ' "$TMPD/b1.log" | head -1))"
-    ok "die Platte steht ($(grep -a '^platte ' "$TMPD/b1.log" | head -1))"
+    ok "the disk is ready ($(grep -a '^platte ' "$TMPD/b1.log" | head -1))"
 else
     bad "tools/toolbench/build.sh fehlgeschlagen"
     tail -20 "$TMPD/b1.log"
@@ -71,7 +71,7 @@ has "$S1" "name=[Aufgabenverwaltung]" "und er steht im Startmenue (/apps/taskmgr
 
 # ================================================ 2. die neuen Kennzahlen
 echo
-echo "== 2. die Kennzahlen, die es vor dieser Runde nicht gab =="
+echo "== 2. the metrics that did not exist before this round =="
 NC=$(grep -aoE 'taskmgr: kern n=[0-9]+' "$S1" | sed 's/.*=//' | sort -un | wc -l)
 num "Kerne, ueber die der Kern einzeln Auskunft gibt" "$NC" ge 2
 BAD=$(grep -a 'taskmgr: kern n=' "$S1" | sed -E 's/.*ticks=([0-9]+) idle=([0-9]+).*/\1 \2/' \
@@ -89,7 +89,7 @@ KERNE=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*kern=([0-9]+).*/\1/' | sort
 num "verschiedene Kerne, auf denen Prozesse zuletzt liefen" "$KERNE" ge 2
 
 echo
-echo "== 3. dieselben Zahlen wie /bin/ps -- zwei Wege, eine Wahrheit =="
+echo "== 3. the same numbers as /bin/ps -- two ways, one truth =="
 bash tools/toolbench/build.sh "$TMPD/b2" script='ps;exit' wait=1 last=120 \
     > "$TMPD/b2.log" 2>&1
 S2="$TMPD/b2/serial.txt"
@@ -98,10 +98,10 @@ num "/bin/ps meldet Zeilen" "$PSN" gt 0
 TMPIDS=$(grep -a 'taskmgr: zeile' "$S1" | grep -oE ' pid=[0-9]+' | sed 's/.*=//' | sort -un | wc -l)
 num "der Aufgabenverwalter kennt so viele Prozesse wie die Tafel Plaetze hat" "$TMPIDS" ge 5
 ZUST=$(grep -a 'taskmgr: zeile' "$S1" | sed -E 's/.*st=([0-9]+).*/\1/' | sort -un | tr '\n' ' ')
-ok "die vorkommenden Zustandsnummern: $ZUST (dieselben wie sched.S_*)"
+ok "the state numbers that occur: $ZUST (the same as sched.S_*)"
 
 echo
-echo "== 4. jedes Rechteck liegt im Fenster, jede Beschriftung hat Tinte =="
+echo "== 4. every rectangle lies in the window, every label has ink =="
 for try in 1 2 3; do
     rm -rf "$TMPD/b0"
     bash tools/toolbench/build.sh "$TMPD/b0" app=/bin/taskmgr,melde,takt,300 \
@@ -140,12 +140,12 @@ num "gemessene Beschriftungen im Bild" "${GEM:-0}" ge 3
     num "abgeschnittene Beschriftungen" "${AB:-9}" eq 0
     num "einander ueberlappende Beschriftungen" "${UEB:-9}" eq 0
 else
-    bad "kein Bildschirmfoto der Liste"
+    bad "no screenshot of the list"
 fi
 
 # ================================================= 5. sortieren und waehlen
 echo
-echo "== 5. sortieren und waehlen mit der Maus =="
+echo "== 5. sorting and selecting with the mouse =="
 has "$S1" "taskmgr: sortiert spalte=0" "ein Klick in die Kopfzeile sortiert nach Namen"
 has "$S1" "taskmgr: wahl pid=" "ein Klick auf eine Zeile waehlt einen Prozess"
 python3 - "$S1" > "$TMPD/sortcheck.txt" 2>&1 <<'PY'
@@ -166,23 +166,23 @@ for z in txt[n:]:
     groups.setdefault(m.group(2), []).append(m.group(3).strip())
 namen = [x for g in groups.values() for x in g]
 if len(namen) < 3:
-    print("zu wenige Zeilen"); raise SystemExit(1)
+    print("too few rows"); raise SystemExit(1)
 sortiert = all(g == sorted(g, reverse=True) for g in groups.values())
 print("zeilen=%d gruppen=%d absteigend=%s %s" % (len(namen), len(groups), sortiert, namen))
 raise SystemExit(0 if sortiert else 1)
 PY
-if [ $? -eq 0 ]; then ok "und die Zeilen stehen danach wirklich nach Namen ($(cat "$TMPD/sortcheck.txt"))"
-else bad "die Reihenfolge nach dem Sortieren stimmt nicht: $(cat "$TMPD/sortcheck.txt")"; fi
+if [ $? -eq 0 ]; then ok "and the rows are then really in name order ($(cat "$TMPD/sortcheck.txt"))"
+else bad "the order after sorting is wrong: $(cat "$TMPD/sortcheck.txt")"; fi
 
 # ============================================== 6. Beenden beendet wirklich
 echo
-echo "== 6. der Knopf beendet wirklich einen Prozess =="
+echo "== 6. the button really ends a process =="
 has "$S1" "taskmgr: frage pid=" "der Knopf fragt nach, statt sofort zu toeten"
 KPID=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | grep -oE 'pid=[0-9]+' | sed 's/.*=//')
 KRC=$(grep -a 'taskmgr: beende pid=' "$S1" | head -1 | sed -E 's/.*rc=(-?[0-9]+).*/\1/')
 LPID=$(grep -a 'taskmgr: zeile' "$S1" | grep 'name=launcher' | head -1 | grep -oE ' pid=[0-9]+' | sed 's/.*=//')
-if [ "${KPID:-x}" = "${LPID:-y}" ]; then ok "und es war der Starter (pid $KPID)"
-else bad "beendet wurde pid ${KPID:-?}, gemeint war der Starter (pid ${LPID:-?})"; fi
+if [ "${KPID:-x}" = "${LPID:-y}" ]; then ok "and it was the launcher (pid $KPID)"
+else bad "pid ${KPID:-?} was ended, the launcher was meant (pid ${LPID:-?})"; fi
 num "der Aufruf SYS_KILL kam durch (rc)" "${KRC:-1}" eq 0
 if [ -n "${KPID:-}" ]; then
     VOR=$(grep -a "taskmgr: beende" -B 200 "$S1" | grep -a "pid=$KPID " | grep -aoE 'st=[0-9]+' | tail -1 | cut -d= -f2)
@@ -194,7 +194,7 @@ if [ -n "${KPID:-}" ]; then
 fi
 
 echo
-echo "== 7. der Verlaufsgraph ist gemalt und nicht behauptet =="
+echo "== 7. the history graph is painted and not claimed =="
 # r443: the history graph lives on the PERFORMANCE page (a sidebar of pages since this round); the program is
 # started on that page with the word `performance`.
 bash tools/toolbench/build.sh "$TMPD/b4" app=/bin/taskmgr,melde,takt,300,performance \
@@ -207,17 +207,17 @@ if [ -n "$G" ]; then
         20,16 > "$TMPD/graph.txt" 2>&1
     RC=$?
     sed 's/^/        /' "$TMPD/graph.txt"
-    if [ $RC -eq 0 ]; then ok "und die Kurve steht im Bild, wo er sie gemeldet hat"
-    else bad "die Kurve steht nicht dort, wo sie gemeldet wurde"; fi
+    if [ $RC -eq 0 ]; then ok "and the curve is in the image where it reported it"
+    else bad "the curve is not where it was reported"; fi
 else
-    bad "das Programm hat keinen Graphen gemeldet"
+    bad "the program reported no graph"
 fi
 # the pages: the sidebar names four, and each of the other three page bodies is reported
 has "$S4" "taskmgr: graph x=" "die Leistungsseite zeigt den Graphen"
 
 # =================================================== 7b. the Bench page (r1214)
 echo
-echo "== 7b. die Bench-Seite zeigt /proc/bench =="
+echo "== 7b. the bench page shows /proc/bench =="
 # `taskmgr bench` opens on the Bench page: /proc/bench as a read-only two-column table. The report lists every row.
 bash tools/toolbench/build.sh "$TMPD/b5" app=/bin/taskmgr,melde,takt,300,bench \
     wait=10 last=140 shot=bench > "$TMPD/b5.log" 2>&1
@@ -265,8 +265,6 @@ d = sys.argv[1]
 def mittel(p):
     im = Image.open(os.path.join(d, p)).convert("RGB")
     px = im.load()
-    # Die Mitte des Panels und die Mitte des Schreibtischs -- zwei
-    # Stellen, die beide vom Schema abhaengen.
     stellen = [(1000, 700), (640, 400), (300, 200)]
     return sum(sum(px[x, y]) for x, y in stellen) / (3.0 * len(stellen))
 h = mittel("q01_offen.ppm")
@@ -274,10 +272,10 @@ d2 = mittel("q02_dunkel.ppm")
 print("hell=%.0f dunkel=%.0f" % (h, d2))
 raise SystemExit(0 if d2 < h - 40 else 1)
 PY
-    if [ $? -eq 0 ]; then ok "und das Bild danach ist wirklich dunkler ($(cat "$TMPD/dunkel.txt"))"
-    else bad "das Bild wurde nicht dunkler: $(cat "$TMPD/dunkel.txt")"; fi
+    if [ $? -eq 0 ]; then ok "and the image afterwards is really darker ($(cat "$TMPD/dunkel.txt"))"
+    else bad "the image did not get darker: $(cat "$TMPD/dunkel.txt")"; fi
 else
-    bad "die zwei Bilder des Kontrollzentrums fehlen"
+    bad "the two control center images are missing"
 fi
 
 # ------------------------------------------------------------- die Bilder

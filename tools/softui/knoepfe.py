@@ -83,7 +83,7 @@ def main(argv):
                              oh=int(m.group(9)), t=m.group(10)))
     fok = [w for w in wins if w["fok"] == 1 and w["ow"] > 200]
     if not fok:
-        print("kein scharfes Fenster im Mitschnitt")
+        print("no sharp window in the capture")
         return 1
     w = fok[-1]
     bx = w["x"] + w["ow"] - BORDER - CAP_N * CAP_W
@@ -105,22 +105,20 @@ def main(argv):
                 + abs(c[2] - grund[2])) > 90
 
     bad = 0
-    # der Grund ist die haeufigste Farbe des ersten Feldes
     cnt = Counter()
     for row in felder[0][2]:
         for c in row:
             cnt[c] += 1
     grund = cnt.most_common(1)[0][0]
 
-    # --- MIN: eine volle Zeile, sonst nichts
     g = felder[0][2]
     zeilen = [sum(1 for c in row if dunkel(c, grund)) for row in g]
     voll = [i for i, n in enumerate(zeilen) if n >= 9]
     leer = [i for i, n in enumerate(zeilen) if n == 0]
     if len(voll) == 1 and len(leer) == 9:
-        print("min: strich ok  (zeile %d voll, neun leer)" % voll[0])
+        print("min: stroke ok  (row %d full, nine empty)" % voll[0])
     else:
-        print("min: KEIN strich -- zeilen %s" % zeilen)
+        print("min: NO stroke -- rows %s" % zeilen)
         bad += 1
 
     # --- MAX: Rand voll, Mitte leer
@@ -132,13 +130,11 @@ def main(argv):
     mitte = sum(1 for j in range(1, 9) for i in range(1, 9)
                 if dunkel(g[j][i], grund))
     if rand >= 32 and mitte == 0:
-        print("max: quadrat ok  (rand %d von 36, inneres %d)" % (rand, mitte))
+        print("max: square ok  (edge %d of 36, interior %d)" % (rand, mitte))
     else:
-        print("max: KEIN quadrat -- rand %d, inneres %d" % (rand, mitte))
+        print("max: NO square -- edge %d, interior %d" % (rand, mitte))
         bad += 1
 
-    # --- CLOSE: zwei Diagonalen. Der Grund ist hier ein anderer, wenn
-    #     der Knopf ueberfahren wird -- also eigener Zaehler.
     gx, gy, g = felder[2]
     cnt2 = Counter()
     for row in g:
@@ -150,13 +146,12 @@ def main(argv):
     kante = sum(1 for k in range(2, 8)
                 if dunkel(g[0][k], grund2) or dunkel(g[9][k], grund2))
     if dia >= 18 and kante == 0:
-        print("close: kreuz ok  (%d von 20 Diagonalpunkten, %d Kantenpunkte)"
+        print("close: cross ok  (%d of 20 diagonal points, %d edge points)"
               % (dia, kante))
     else:
-        print("close: KEIN kreuz -- diagonalen %d, kanten %d" % (dia, kante))
+        print("close: NO cross -- diagonals %d, edges %d" % (dia, kante))
         bad += 1
 
-    # --- HOVER: die Flaeche des Schliessen-Knopfes ist rot
     fx = bx + 2 * CAP_W
     flaeche = Counter()
     for j in range(by, by + h):
@@ -168,25 +163,16 @@ def main(argv):
     if rot:
         hell = sum(1 for k in range(10)
                    if sum(g[k][k]) > sum(haupt) + 150)
-        print("hover: rot ok  flaeche #%02x%02x%02x auf %d von %d punkten, "
+        print("hover: red ok  area #%02x%02x%02x on %d of %d points, "
               "kreuz hell auf %d von 10" % (r, gg, b, hn, CAP_W * h, hell))
         if hell < 6:
-            print("hover: aber das Kreuz ist NICHT hell genug")
+            print("hover: but the cross is NOT bright enough")
             bad += 1
     else:
-        print("hover: die Flaeche ist NICHT rot (#%02x%02x%02x auf %d punkten)"
+        print("hover: the area is NOT red (#%02x%02x%02x on %d points)"
               % (r, gg, b, hn))
         bad += 1
 
-    # --- MACOS-GEGENPROBE: keine drei gesaettigten Kreise nebeneinander
-    # ES GEHT UM DEN FARBTON UND NICHT UM DIE FARBE. Die erste Fassung
-    # hat gesaettigte Farben in Wuerfel von 32 Stufen einsortiert und
-    # dann fuenf "Gruppen" gefunden -- alle fuenf waren das ROT des
-    # ueberfahrenen Schliessen-Knopfes samt seiner Kantenglaettung. Ein
-    # roter Knopf ist aber genau das, was diese Runde bauen SOLL; der
-    # macOS-Stil ist ROT UND GELB UND GRUEN NEBENEINANDER. Also wird
-    # nach FAMILIEN gezaehlt, sechs zu sechzig Grad, und mehr als eine
-    # ist der Verdacht.
     fam = {}
     for j in range(by, by + h):
         for i in range(w["x"], w["x"] + w["ow"]):
@@ -205,10 +191,10 @@ def main(argv):
                 fam[int(hue // 60)] = fam.get(int(hue // 60), 0) + 1
     stark = [k for k, n in fam.items() if n >= 40]
     if len(stark) <= 1:
-        print("macos: keine kreise  (%d Farbfamilie(n) mit mehr als 40 "
+        print("macos: no circles  (%d colour family(ies) with more than 40 "
               "Punkten im Balken: %s)" % (len(stark), sorted(stark)))
     else:
-        print("macos: VERDACHT -- %d Farbfamilien im Balken: %s"
+        print("macos: SUSPICION -- %d colour families in the bar: %s"
               % (len(stark), sorted((k, fam[k]) for k in stark)))
         bad += 1
     return 1 if bad else 0

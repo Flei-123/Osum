@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/knopfzoom.py -- DIE FENSTERKNOEPFE AUS EINEM ECHTEN FOTO.
 #
-#   python3 tools/design/knopfzoom.py <bild.ppm> <aus.png> [zoom]
 #
-# Sucht in einem Bildschirmfoto die Titelleiste des obersten Fensters,
-# schneidet die rechte Ecke mit den drei Knoepfen heraus und schreibt
-# sie vergroessert als PNG. Damit sieht man, was Justin sieht -- und
-# zwar aus DEM Bild, das der Kern wirklich gemalt hat, nicht aus einem
-# Nachbau.
 #
-# Zusaetzlich zaehlt es, wie viele verschiedene Farbwerte im
-# Kreuz-Bereich vorkommen. Ein sauber gezeichnetes Kreuz kennt zwei:
-# Knopfflaeche und Strichfarbe (plus Kantenglaettung, wenn sie an ist).
-# Ein doppelt gedecktes Kreuz hat an der Kreuzung einen DRITTEN,
-# dunkleren Wert -- der fette Zusatzbalken auf Justins Foto.
 import sys, zlib, struct
 
 
@@ -77,9 +65,6 @@ if __name__ == '__main__':
     zoom = int(sys.argv[3]) if len(sys.argv) > 3 else 12
     w, h, px = ppm_lesen(src)
 
-    # Die Knoepfe sitzen rechts oben im obersten Fenster. Statt zu
-    # raten, wird die oberste Zeile gesucht, in der sich in der rechten
-    # Bildhaelfte ueberhaupt etwas vom Hintergrund abhebt.
     def farbe(x, y):
         i = (y * w + x) * 3
         return (px[i], px[i + 1], px[i + 2])
@@ -93,7 +78,6 @@ if __name__ == '__main__':
             break
     if y0 is None:
         y0 = 0
-    # Rechte Ecke: die letzten 260 Bildpunkte, ab der gefundenen Zeile.
     bw, bh = 260, 80
     x0 = max(0, w - bw - 20)
     ow, oh, out = ausschnitt(w, h, px, x0, y0, bw, bh, zoom)
@@ -101,8 +85,6 @@ if __name__ == '__main__':
     print("%s -> %s  (Ausschnitt %d,%d %dx%d, Zoom %d)"
           % (src.split('/')[-1], dst, x0, y0, bw, bh, zoom))
 
-    # Wie viele deutlich verschiedene Farbwerte? Ein doppelt gedecktes
-    # Kreuz bringt einen zusaetzlichen, dunkleren Ton mit.
     zaehl = {}
     for y in range(y0, min(h, y0 + bh)):
         for x in range(x0, min(w, x0 + bw)):

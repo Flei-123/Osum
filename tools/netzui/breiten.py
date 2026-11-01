@@ -40,14 +40,9 @@ import re
 
 # Gemessen an `wlib: text ... tw=`, siehe Kopf.
 PPC = 291 / 38
-# Die linke Spalte: 300 Punkte breit, der Text faengt bei 16 an.
 LINKS = 300 - 16
-# Die Fussnote steht in der rechten Spalte (460 breit, Einzug 16).
 RECHTS = 460 - 16
 
-# Die laengsten Werte, die die Formatierung erzeugen kann.
-# `rate_an` endet bei "1023,9 GiB/s", `menge_an` bei "1023,9 GiB",
-# `mbit_an` bei "1000 Mbit/s" bzw. dem Wort fuer unbekannt.
 WERTE = {
     "rate": "1023,9 GiB/s",
     "menge": "1023,9 GiB",
@@ -80,7 +75,6 @@ def pruef(pfad):
     def g(n):
         return k["settings.net." + n]
 
-    # Jede Zeile der linken Spalte im schlimmsten Fall.
     zeilen = []
     for z in ("connected", "disconnected", "noaddr", "noroute"):
         zeilen.append(("Zustand/" + z, g("heading") + g(z), LINKS))
@@ -95,7 +89,6 @@ def pruef(pfad):
     for z in ("rttnone", "rttwait"):
         zeilen.append(("Antwortzeit/" + z, g("rtt") + g(z), LINKS))
     zeilen.append(("Antwortzeit/Zahl", g("rtt") + WERTE["ms"], LINKS))
-    # Und die Fussnote in der rechten Spalte.
     zeilen.append(("Fussnote", g("note"), RECHTS))
 
     schlecht = 0
@@ -116,9 +109,9 @@ def main():
         schlecht += pruef(p)
     print()
     if schlecht:
-        print("BREITEN: %d Zeile(n) laufen aus ihrer Spalte" % schlecht)
+        print("WIDTHS: %d row(s) overflow their column" % schlecht)
         return 1
-    print("BREITEN: alle Zeilen passen in ihre Spalte")
+    print("WIDTHS: all rows fit their column")
     return 0
 
 if __name__ == "__main__":

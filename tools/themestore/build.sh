@@ -202,13 +202,6 @@ printf '# /etc/theme.conf\nscheme=%s\nmode=%s\naccent=%s\nshape=%s\nlight_start=
 [ -n "$radius" ]   && printf 'radius=%s\n' "$radius" >> "$OUT/theme.conf"
 [ -n "$tbalpha" ]  && printf 'taskbar_alpha=%s\n' "$tbalpha" >> "$OUT/theme.conf"
 [ -n "$winalpha" ] && printf 'window_alpha=%s\n' "$winalpha" >> "$OUT/theme.conf"
-# ZUSAMMENFUEHRUNG BLUR+GLAS: DIE ZEILE HEISST `blur=`.
-# In der VORLAGENDATEI heisst der Schluessel weiter `taskbar_blur` (so
-# steht er in allen zehn Vorlagen und so prueft ihn Abschnitt 2); in
-# /etc/theme.conf heisst er `blur`, denn das ist der Schluessel des
-# EINEN Weichzeichners dieses Systems, und nur den liest `wlibc`.
-# Stuende hier weiter `taskbar_blur=`, bekaeme jeder Lauf dieser
-# Abnahme ein Milchglas von 0, egal was er bestellt hat.
 [ -n "$blur" ]     && printf 'blur=%s\n' "$blur" >> "$OUT/theme.conf"
 # W-S: the master switch defaults to `subtle` (nearly opaque); this gate judges the slider-driven pipeline, so it runs in `strong`
 printf 'transparency=strong\n' >> "$OUT/theme.conf"
@@ -227,20 +220,7 @@ printf '%s\n' de > "$OUT/userlocale"
 
 # RUNDE GLAS (fix-r3-2): 32768 BLOECKE STATT 16384, also 16 statt 8 MiB.
 #
-# Die zehn Programme dieser Platte wiegen zusammen 7,6 MiB, dazu die
-# drei Schriften (102 KiB) und -- nur in den Laeufen dieser Runde --
-# ein Hintergrundbild von 43 KiB. Damit lief `mkfs.py` mit
-# "mkfs: the disk is full" an die Wand, und zwar AUSGERECHNET in den
-# Laeufen mit `wallpaper=`, also in genau denen, die Transparenz
-# ueberhaupt belegen koennen. Eine Platte, die nur ohne das
-# Hintergrundbild reicht, misst die Runde nicht.
 #
-# 32768 ist keine neue Zahl, sondern die, mit der tools/look/shot.sh,
-# tools/entry/run.sh und tools/wmplug/*.sh seit Runden bauen. Das
-# Abbild ist duenn belegt: die Datei waechst nur um das, was wirklich
-# darin steht.
-# --v3: the default format holds 2 134 016 octets per file at most, and the
-# file manager is about to pass that (the multi-window layer of the host)
 ARGS=(build "$OUT/disk.img" 32768 --v3 --inodes=512 /lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
@@ -364,21 +344,9 @@ if [ "$account" = yes ]; then
     ARGS+=(/users/ "/users/$user/" "/users/$user/config/"
            "/users/$user/config/locale=$OUT/userlocale@0644")
 fi
-# THE APPLICATION BUNDLES, but only those whose program is really on
-# this disk. `editor.osp` points at /bin/edit and `widgets.osp` at
-# /bin/widgetdemo; neither is in the program list of this round, and
-# mkfs.py stops with "gibt es nicht" -- rightly.
 rm -rf "$OUT/apps"
 cp -a assets/apps "$OUT/apps"
-# RUNDE WERKZEUGE: NICHT MEHR ZWEI NAMEN, SONDERN DIE REGEL DAHINTER.
 #
-# Hier standen `editor.osp` und `widgets.osp`, weil ihre Programme
-# (/bin/edit, /bin/widgetdemo) nicht in der Programmliste dieser Runde
-# stehen und `mkfs.py` dann mit "gibt es nicht" abbricht. Die naechste
-# Runde, die ein Programm mit Buendel dazulegt, laeuft in dieselbe Wand
-# -- diese hier ist es (taskmgr.osp), und statt einen dritten Namen
-# einzutragen wird jetzt gefragt: liegt das Programm, auf das
-# `start.txt` zeigt, ueberhaupt auf DIESER Platte?
 for b in "$OUT/apps"/*.osp; do
     [ -d "$b" ] || continue
     ziel=$(grep -avE '^\s*#' "$b/start.txt" 2>/dev/null | grep -aoE '/bin/[a-z0-9]+' | head -1)

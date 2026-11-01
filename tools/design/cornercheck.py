@@ -1,18 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/cornercheck.py -- LIEGT FUELLFARBE AUSSERHALB DES RADIUS?
 #
-# Justins Befund von echter Hardware: hinter der abgerundeten Flaeche
-# (Tooltip, Kontrollzentrum) ist ein RECHTECK sichtbar. Das ist keine
-# Geschmacksfrage, das ist nachrechenbar:
 #
-#   Eine Flaeche mit Eckradius r darf in ihren vier Eckquadraten
-#   (r x r) KEINEN Bildpunkt ihrer Fuellfarbe haben, dessen Abstand
-#   vom Eckmittelpunkt groesser als r ist.
 #
-# Dieses Werkzeug findet die Flaeche selbst (groesster zusammenhaengender
-# Block einer Farbe), bestimmt ihren Radius aus dem Bild und zaehlt die
-# Punkte, die ausserhalb liegen. Ausgabe: Zahlen, keine Meinung.
 import sys, struct, zlib
 from collections import Counter
 
@@ -67,19 +57,14 @@ def flaechen(px,w,h,minflaeche=2000):
                 if px[y][x]==farbe: xs.append(x);ys.append(y)
         if not xs: continue
         bx0,by0,bx1,by1=min(xs),min(ys),max(xs),max(ys)
-        # Nur echte KAESTEN: die Farbe muss den Rahmen weitgehend
-        # ausfuellen. Ein Farbverlauf auf dem Schreibtisch belegt zwar
-        # eine grosse Flaeche, fuellt seinen Rahmen aber nur duenn.
         flaeche=(bx1-bx0+1)*(by1-by0+1)
         if flaeche==0 or len(xs)*100//flaeche < 60: continue
-        # und der Schreibtisch selbst (fast das ganze Bild) faellt weg
         if flaeche > w*h*70//100: continue
         out.append((farbe,bx0,by0,bx1,by1,len(xs)))
     return out
 
 def eckpruef(px,w,h,farbe,x0,y0,x1,y1,rmax=32):
     """Radius aus dem Bild bestimmen und Ausreisser zaehlen."""
-    # Radius: wie weit ist die Fuellung in der obersten Zeile eingerueckt?
     obere=[x for x in range(x0,x1+1) if px[y0][x]==farbe]
     if not obere: return None
     r=obere[0]-x0

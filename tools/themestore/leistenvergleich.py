@@ -88,12 +88,6 @@ def main(argv):
         var, farben = var_von(im, hoehe, vx0, vx1)
         streifen = im.crop((x0, h - hoehe, min(x1, w), h))
         streifen = streifen.resize((breite, zeile), Image.NEAREST)
-        # Die Beschriftung traegt BEIDES: wofuer der Streifen steht und
-        # was an ihm gemessen wurde. `var` ist die Streuung der
-        # Helligkeit unter der Leiste (mal hundert), `farben` die Zahl
-        # der verschiedenen Farben darin: 1 ist eine deckende Flaeche,
-        # zwei sind ein durchscheinendes Schachbrett, und ein
-        # Weichzeichner macht daraus viele.
         mal.text((2, y), "%s   --   var %d, %d Farben" % (text, var, farben),
                  fill=(16, 16, 16), font=font)
         aus.paste(streifen, (0, y + kopf))

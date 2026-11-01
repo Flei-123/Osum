@@ -4,21 +4,7 @@
 #
 #   python3 tools/i18n/quota.py [locale-verzeichnis]
 #
-# Englisch ist die Quellsprache: locale/en/messages legt fest, welche
-# Schluessel es gibt. Jede andere Sprache wird dagegen gehalten:
 #
-#   * Wieviele der englischen Schluessel sie hat (die Abdeckung).
-#   * Welche ihr FEHLEN -- sie erscheinen zur Laufzeit auf Englisch,
-#     was richtig ist und trotzdem gezaehlt gehoert.
-#   * Welche sie ZUSAETZLICH hat -- die kann sie nicht brauchen, es gibt
-#     keinen englischen Text, fuer den sie einspringen koennten. Genau
-#     das zaehlt `msg.unknown()` auch zur Laufzeit.
-#   * Wieviele ihrer Texte mit dem englischen IDENTISCH sind. Das ist
-#     kein Fehler -- "Start", "Name:", "us\nde" und "800 x 600" sind in
-#     beiden Sprachen dasselbe --, aber es ist die Zahl, an der man
-#     sieht, ob jemand eine Datei kopiert und nicht uebersetzt hat.
-#   * Und die LAENGSTEN Texte, weil `msg.fi` einen Platz von VALW
-#     Oktetten je Schluessel hat und ein laengerer abgeschnitten wird.
 import os
 import sys
 
@@ -38,9 +24,6 @@ def lies(pfad):
             continue
         k, v = z.split("=", 1)
         k = k.strip()
-        # Genau EIN Leerzeichen vorne wird geschluckt, hinten keines --
-        # dieselbe Regel wie in msg.parse, weil "Adresse: " mit Absicht
-        # auf einem Leerzeichen endet.
         if v.startswith(" "):
             v = v[1:]
         aus[k] = v
@@ -51,7 +34,7 @@ def main():
     wurzel = sys.argv[1] if len(sys.argv) > 1 else "locale"
     en, fehler_en = lies(os.path.join(wurzel, "en", "messages"))
     if not en:
-        print("keine Quellsprache unter %s/en/messages" % wurzel)
+        print("no source language under %s/en/messages" % wurzel)
         return 1
     schlecht = 0
     zeilen = []
