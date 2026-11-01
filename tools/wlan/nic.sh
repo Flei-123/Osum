@@ -28,7 +28,11 @@ mut 's/^    return true$/    return false/' "echo filter off" wlan/ethconv.fi
 mut 's/ld8(frame, 16 + i)/ld8(frame, 10 + i)/' "echo source taken from a2" wlan/ethconv.fi
 mut '/(iwl_le.ld8(frame, 1) & 0x03) != FC_FROMDS/d' "echo filter ignores the DS bits" wlan/ethconv.fi
 mut '/(iwl_le.ld8(frame, 4) & 1) == 0 { return false }/d' "echo filter ignores the group bit" wlan/ethconv.fi
-mut 's/static mut wn_rx_depth: u64 = 8/static mut wn_rx_depth: u64 = 1/' "single receive slot" knet/wlan_net.fi
+mut 's/static mut wn_rx_depth: u64 = 64/static mut wn_rx_depth: u64 = 8/' "receive ring back to 8 frames" knet/wlan_net.fi
+mut 's/static mut wn_rx_depth: u64 = 64/static mut wn_rx_depth: u64 = 1/' "single receive slot" knet/wlan_net.fi
+mut 's/if legacy { return rx_free() }/if legacy { return true }/' "legacy mode ignores a busy ring" knet/wlan_net.fi
+mut 's/if now_sec == wn_live_sec { return false }/if now_sec == wn_live_sec { return true }/' "full ring read on every pump" knet/wlan_net.fi
+mut 's/    wn_live_sec = now_sec/    wn_live_sec = wn_live_sec/' "liveness read not rate limited" knet/wlan_net.fi
 mut 's/if rx_queued() != 0 { wn_rx_tail = wn_rx_tail + 1 }/if rx_queued() != 0 { wn_rx_tail = wn_rx_tail }/' "recycle does not advance" knet/wlan_net.fi
 mut 's/wn_rx_drop = wn_rx_drop + 1/wn_rx_drop = wn_rx_drop/' "drops not counted" knet/wlan_net.fi
 mut 's/wn_rx_tail = wn_rx_head$/wn_rx_tail = wn_rx_tail/' "link down keeps stale frames" knet/wlan_net.fi

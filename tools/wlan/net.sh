@@ -20,7 +20,7 @@ SNAP_SEC=${WLANNET_SNAP_SEC:-6}
 mkdir -p "$T/blobs" "$T/bin"
 python3 -I tools/iwlfh/ref.py gen "$T/blobs" || { bad "reference generator"; exit 1; }
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
-bash tools/sync/build.sh "$T/bin" 0 sh echo cat sleep ping > "$T/b.txt" 2>&1 \
+bash tools/sync/build.sh "$T/bin" 0 sh echo cat sleep ping burn > "$T/b.txt" 2>&1 \
     && ok "programs build" || { bad "programs build"; tail "$T/b.txt"; echo "WLANNET: $pass ok, $fail fail"; exit 1; }
 ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 \
     && ok "kernel builds" || { bad "kernel build"; tail -30 "$T/k.txt"; echo "WLANNET: $pass ok, $fail fail"; exit 1; }
@@ -41,14 +41,34 @@ make_script() { # target
     } > "$T/s.sh"
 }
 make_script 192.168.77.1
+{
+    echo 'echo ==START=='
+    i=0
+    while [ "$i" -lt "$SNAPS" ]; do echo "sleep $SNAP_SEC"; i=$((i+1)); done
+    echo 'echo ==WAITED=='
+    echo 'ping -c 1 192.168.77.1'
+    echo 'cat /proc/wlan'
+    echo 'echo ==BEFORE=='
+    echo 'burn 1500 &'
+    echo 'burn 1500 &'
+    echo 'ping -c 1 -s 150 192.168.77.1'
+    echo 'echo ==BURST=='
+    echo 'sleep 4'
+    echo 'cat /proc/wlan'
+    echo 'echo ==AFTER=='
+    echo 'ping -c 1 -s 150 192.168.77.1'
+    echo 'sleep 4'
+    echo 'cat /proc/wlan'
+    echo 'echo ==END=='
+} > "$T/sg.sh"
 
 image() {
-    local n=$1 conf=${2:-}
+    local n=$1 conf=${2:-} script=${3:-s.sh}
     local extra=()
     [ -n "$conf" ] && extra=("/etc/wlan.conf=$conf")
     python3 tools/osum/mkfs.py build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
-        /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" \
-        "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
+        /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/burn="$T/bin/burn.elf" \
+        "/t/s.sh=$T/$script" "$FWPATH=$T/blobs/v7.bin" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
         || { tail -3 "$T/$n.mkfs"; return 1; }
 }
 run() {
@@ -62,6 +82,7 @@ run() {
 }
 
 printf 'ssid OrientFake\npsk orient-fake-pw1\n' > "$T/good.conf"
+image g "$T/good.conf" sg.sh || { bad "image g"; exit 1; }
 for n in c e f; do image $n "$T/good.conf" || { bad "image $n"; exit 1; }; done
 image d || { bad "image d"; exit 1; }
 
@@ -97,6 +118,26 @@ has "$F" 'auto=up rc=0' "control: autostart up"
 has "$F" 'stack wired=1 uplink=0' "control: uplink stays on the e1000"
 awk '/==WAITED==/{f=1} /==PING1==/{f=0} f' "$F" > "$T/p3.txt"
 grep -aqE 'octets from 192\.168\.77\.1' "$T/p3.txt" && bad "control: ping answered without uplink_prefer" || ok "control: no ping reply without uplink_prefer"
+
+echo "-- G: burst of 24 echo replies in one go: the stack receive ring must not drop frames"
+run g "iwlfhtest iwlfhbind nic"
+G="$T/g.klar"
+has "$G" 'auto=up rc=0' "burst: autostart up" 
+awk '/==WAITED==/{f=1} /==BEFORE==/{f=0} f' "$G" > "$T/g0.txt"
+awk '/==BEFORE==/{f=1} /==BURST==/{f=0} f' "$G" > "$T/g1.txt"
+awk '/==BURST==/{f=1} /==AFTER==/{f=0} f' "$G" > "$T/g2.txt"
+awk '/==AFTER==/{f=1} /==END==/{f=0} f' "$G" > "$T/g3.txt"
+field() { grep -aoE "$2=[0-9]+" "$1" | head -1 | cut -d= -f2; }
+R0=$(field "$T/g0.txt" rx); D0=$(field "$T/g0.txt" drop)
+R1=$(field "$T/g2.txt" rx); D1=$(field "$T/g2.txt" drop)
+R2=$(field "$T/g3.txt" rx); D2=$(field "$T/g3.txt" drop)
+echo "  rx/drop: warmup ${R0:-?}/${D0:-?} after burst 1 ${R1:-?}/${D1:-?} after burst 2 ${R2:-?}/${D2:-?}"
+[ -n "$R0" ] && [ -n "$R1" ] && [ $((R1 - R0)) -ge 24 ] && ok "burst 1: all 24 replies reached the stack" || bad "burst 1: fewer than 24 replies reached the stack"
+[ -n "$D1" ] && [ "$D1" -eq "${D0:-0}" ] && ok "burst 1: no frame dropped by the receive ring" || bad "burst 1: receive ring dropped frames"
+[ -n "$R2" ] && [ -n "$R1" ] && [ $((R2 - R1)) -ge 24 ] && ok "burst 2: all 24 replies reached the stack" || bad "burst 2: fewer than 24 replies reached the stack"
+[ -n "$D2" ] && [ "$D2" -eq "${D0:-0}" ] && ok "burst 2: no frame dropped by the receive ring" || bad "burst 2: receive ring dropped frames"
+has "$G" 'fakeap: icmp' "burst: AP saw the echo request"
+has "$G" '==END==' "burst: system keeps running"
 
 echo "-- D: no conf: no stack on wlan0, ping cannot succeed"
 run d "iwlfhtest iwlfhbind nic"

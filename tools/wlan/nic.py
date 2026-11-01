@@ -119,9 +119,11 @@ def check_frames(binary):
 
 
 def check_ring(binary):
-    frames = [bytes([0x10 + i]) * (60 + i) for i in range(10)]
+    frames = [bytes([0x10 + i]) * (60 + i) for i in range(24)]
     lines = ["L 1"] + ["O " + f.hex() for f in frames[:3]] + ["S"] + ["G"] * 4
-    lines += ["O " + f.hex() for f in frames[:9]] + ["S"] + ["G"] * 8 + ["S"]
+    lines += ["O " + f.hex() for f in frames] + ["S"] + ["G"] * 24 + ["S"]
+    lines += ["D 8"] + ["O " + f.hex() for f in frames[:9]] + ["S", "A 5 0", "A 5 0", "A 6 0", "A 6 1"]
+    lines += ["G"] * 8 + ["S", "A 7 1", "A 7 0"]
     lines += ["D 1", "O " + frames[0].hex(), "O " + frames[1].hex(), "S", "G", "G"]
     lines += ["D 8", "O " + frames[2].hex(), "O " + frames[3].hex(), "L 0", "L 1", "S"]
     out = run(binary, lines)
@@ -135,13 +137,22 @@ def check_ring(binary):
     ok(got == ["G n=%d data=%s" % (len(f), f.hex()) for f in frames[:3]], "frames come out in arrival order")
     ok(out[8] == "G n=0 data=-", "ring empty after 3 takes")
     i = 9
-    ok(out[i:i + 8] == ["O ok=1"] * 8 and out[i + 8] == "O ok=0", "9th frame of a burst is refused when 8 are queued")
-    ok(out[i + 9] == "S queued=8 drops=1 free=0 poll=1", "overflow counted as drop, ring reports full")
-    i = i + 10
+    ok(out[i:i + 24] == ["O ok=1"] * 24, "burst of 24 frames while the stack is not draining: all accepted")
+    ok(out[i + 24] == "S queued=24 drops=0 free=1 poll=1", "24 frames queued, no drop, ring still free")
+    i = i + 25
+    ok(out[i:i + 24] == ["G n=%d data=%s" % (len(f), f.hex()) for f in frames], "24 queued frames come out in order")
+    ok(out[i + 24] == "S queued=0 drops=0 free=1 poll=0", "ring empty and free again")
+    i = i + 25
+    ok(out[i] == "D ok", "depth 8 selected")
+    ok(out[i + 1:i + 9] == ["O ok=1"] * 8 and out[i + 9] == "O ok=0", "9th frame is refused when 8 are queued")
+    ok(out[i + 10] == "S queued=8 drops=1 free=0 poll=1", "overflow counted as drop, ring reports full")
+    ok(out[i + 11:i + 15] == ["A ok=1", "A ok=0", "A ok=1", "A ok=0"], "full ring: one liveness read per second, none in legacy mode")
+    i = i + 15
     ok(out[i:i + 8] == ["G n=%d data=%s" % (len(f), f.hex()) for f in frames[:8]], "8 queued frames come out in order")
-    ok(out[i + 8] == "S queued=0 drops=1 free=1 poll=0", "ring empty and free again")
-    i = i + 9
-    ok(out[i + 1] == "O ok=1" and out[i + 2] == "O ok=0", "depth 1: second frame refused (old single-slot behaviour)")
+    ok(out[i + 8] == "S queued=0 drops=1 free=1 poll=0", "ring empty and free again after the overflow")
+    ok(out[i + 9:i + 11] == ["A ok=1", "A ok=1"], "free ring: reads allowed in both modes")
+    i = i + 11
+    ok(out[i] == "D ok" and out[i + 1] == "O ok=1" and out[i + 2] == "O ok=0", "depth 1: second frame refused (old single-slot behaviour)")
     ok(out[i + 3] == "S queued=1 drops=2 free=0 poll=1", "depth 1: drop counted")
     ok(out[i + 4] == "G n=%d data=%s" % (len(frames[0]), frames[0].hex()) and out[i + 5] == "G n=0 data=-", "depth 1: first frame kept")
     i = i + 6
