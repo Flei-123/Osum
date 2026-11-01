@@ -33,7 +33,7 @@ GRUND="nokbd nosched noproc nofs"
 echo "== 1. bauen =="
 bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1 \
     && ok "der Kern ist gebaut" \
-    || { bad "der Kern laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
+    || { bad "the kernel cannot be built"; sed 's/^/        /' "$TMPD/b0.log" | head -12; exit 1; }
 
 PROGS="explorer launcher locate sh echo ls cat edit widgetdemo"
 mkdir -p "$TMPD/bin"

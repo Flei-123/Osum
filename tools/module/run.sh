@@ -12,7 +12,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local name=$1 value=$2 op=$3 want=$4
-    if [ -z "$value" ]; then bad "$name: keine Zahl gefunden (erwartet $op $want)"; return; fi
+    if [ -z "$value" ]; then bad "$name: no number found (expected $op $want)"; return; fi
     if [ "$value" -"$op" "$want" ] 2>/dev/null; then ok "$name: $value"
     else bad "$name: $value, erwartet $op $want"; fi
 }
@@ -24,27 +24,27 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------- 1. bauen
-echo "== 1. bauen: zwei Kerne aus einem Quelltext, ein Modul aus derselben Treiberdatei =="
+echo "== 1. build: two kernels from one source, a module from the same driver file =="
 
 bash tools/build-kernel.sh "$TMPD/k-fest" > "$TMPD/b1.txt" 2>&1 \
     && ok "Kern MIT ps2m.fi ($(stat -c%s "$TMPD/k-fest") Oktette)" \
     || { bad "Kern mit ps2m"; sed 's/^/        /' "$TMPD/b1.txt" | head -5; }
 bash tools/build-kernel.sh "$TMPD/k-modul" --ohne-ps2m > "$TMPD/b2.txt" 2>&1 \
-    && ok "Kern OHNE ps2m.fi ($(stat -c%s "$TMPD/k-modul") Oktette)" \
-    || { bad "Kern ohne ps2m"; sed 's/^/        /' "$TMPD/b2.txt" | head -5; }
+    && ok "kernel WITHOUT ps2m.fi ($(stat -c%s "$TMPD/k-modul") Oktette)" \
+    || { bad "kernel without ps2m"; sed 's/^/        /' "$TMPD/b2.txt" | head -5; }
 
 nm "$TMPD/k-fest.elf" > "$TMPD/nm-fest.txt" 2>/dev/null
 nm "$TMPD/k-modul.elf" > "$TMPD/nm-modul.txt" 2>/dev/null
 if grep -c 'ps2m__consume' "$TMPD/nm-fest.txt" >/dev/null 2>&1 \
    && [ "$(grep -c 'ps2m__consume' "$TMPD/nm-fest.txt")" -gt 0 ]; then
-    ok "ps2m.consume steht im gewoehnlichen Abbild"
+    ok "ps2m.consume is in the ordinary image"
 else
-    bad "ps2m.consume fehlt im gewoehnlichen Abbild"
+    bad "ps2m.consume is missing in the ordinary image"
 fi
 if [ "$(grep -c 'ps2m__consume' "$TMPD/nm-modul.txt")" -gt 0 ]; then
-    bad "ps2m.consume steht noch im Abbild mit --ohne-ps2m"
+    bad "ps2m.consume is still in the image with --ohne-ps2m"
 else
-    ok "ps2m.consume ist mit --ohne-ps2m NICHT im Abbild (kein toter Zweig, keine Zeile)"
+    ok "ps2m.consume is NOT in the image with --ohne-ps2m (no dead branch, no line)"
 fi
 
 bash tools/module/build.sh "$TMPD/ps2maus.omod" --name ps2maus --abi 1 \
@@ -52,11 +52,11 @@ bash tools/module/build.sh "$TMPD/ps2maus.omod" --name ps2maus --abi 1 \
     && ok "Modul gebaut ($(stat -c%s "$TMPD/ps2maus.omod") Oktette)" \
     || { bad "Modulbau"; sed 's/^/        /' "$TMPD/mb.txt" | head -8; }
 UNDEF=$(grep -o 'undefinierte Symbole:.*' "$TMPD/mb.txt" | sed 's/undefinierte Symbole: //')
-echo "        offene Namen im Modul: $UNDEF"
+echo "        open names in the module: $UNDEF"
 for n in k_abi k_bind k_dec k_puts kdata osum_panic; do
-    case " $UNDEF " in *" $n "*) ;; *) bad "Modul verlangt $n nicht mehr?" ;; esac
+    case " $UNDEF " in *" $n "*) ;; *) bad "does the module no longer require $n?" ;; esac
 done
-ok "das Modul verlangt genau die sechs Namen, die kernel/lib/ksym.fi anbietet"
+ok "the module requires exactly the six names that kernel/lib/ksym.fi offers"
 
 bash tools/module/build.sh "$TMPD/m-abi.omod"  --name ps2maus --abi 2 >/dev/null 2>&1
 bash tools/module/build.sh "$TMPD/m-sig.omod"  --name ps2maus --abi 1 --sig-dreh >/dev/null 2>&1
@@ -83,7 +83,7 @@ mkdisk() { # name omod-datei
 mkdisk gut "$TMPD/ps2maus.omod"
 mkdisk leer ""
 for f in abi sig nutz kenn text fremd; do mkdisk "$f" "$TMPD/m-$f.omod"; done
-ok "acht OFS-Abbilder mit je einer /lib/ps2maus.omod (bzw. keiner)"
+ok "eight OFS images with one /lib/ps2maus.omod each (or none)"
 
 # ------------------------------------------------------------- der Laeufer
 #
@@ -116,7 +116,7 @@ zwert() { grep -a 'modul: sigok=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-
 nwert() { grep -a 'modul: nach init=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-9]+$'; }
 
 # ------------------------------------------------- 2. die Ausfuhrtafel
-echo "== 2. die Ausfuhrtafel des Kerns: dieselben Zahlen, die nm nennt =="
+echo "== 2. the export table of the kernel: the same numbers nm reports =="
 lauf "$TMPD/k-modul" "$TMPD/d-gut.img" "modul modulaus $QUIET" "$TMPD/l-gut.txt"
 num "der Lauf endet sauber" "$RC" eq 21
 num "Symbole in der Tafel" "$(wert "$TMPD/l-gut.txt" 'modul: syms=[0-9]+')" eq 14
@@ -154,7 +154,7 @@ PYEOF
 num "Adressen, die mit nm uebereinstimmen" "$(wert "$TMPD/nm.txt" 'gleich=[0-9]+')" eq 14
 grep -q ABWEICHUNG "$TMPD/nm.txt" && sed 's/^/        /' "$TMPD/nm.txt" | head -5
 
-echo "== 3. ohne Modul fehlt das Geraet =="
+echo "== 3. without the module the device is missing =="
 lauf "$TMPD/k-modul" "$TMPD/d-leer.img" "modul $QUIET" "$TMPD/l-leer.txt"
 num "der Lauf endet sauber" "$RC" eq 21
 has "$TMPD/l-leer.txt" "modul: laden=datei-fehlt" "keine Moduldatei -> Grund 'datei-fehlt'"
@@ -162,7 +162,7 @@ has "$TMPD/l-leer.txt" "modul: vor init=0 present=0" "vor dem Laden: kein Zeigeg
 has "$TMPD/l-leer.txt" "modul: nach init=0 present=0" "und danach immer noch keins"
 has "$TMPD/l-leer.txt" "modul: ende" "der Kern lebt und kommt bis ans Ende des Abschnitts"
 
-echo "== 4. mit Modul ist es da, und es bewegt sich wirklich =="
+echo "== 4. with the module it is there, and it really moves =="
 has "$TMPD/l-gut.txt" "modul: vor init=0 present=0" "vor dem Laden: kein Zeigegeraet"
 has "$TMPD/l-gut.txt" "modul: laden=ok" "das Modul wird angenommen"
 has "$TMPD/l-gut.txt" "ps2maus: eingetragen 37" "modul_init lief IM KERN und trug 37 Adressen ein"
@@ -181,14 +181,14 @@ MOV=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'mov=[0-9]+' 
 num "gezaehlte Bewegungen" "$MOV" ge 3
 
 # --------------------------------------------------- 5. Entladen
-echo "== 5. entladen, und die Rahmen kommen zurueck =="
+echo "== 5. unloaded, and the frames come back =="
 has "$TMPD/l-gut.txt" "ps2maus: entladen" "modul_exit lief"
 has "$TMPD/l-gut.txt" "modul: entladen=1 present=0" "nach dem Entladen: wieder kein Zeigegeraet"
 FREI=$(grep -a 'modul: frei=' "$TMPD/l-gut.txt" | head -1)
 A=$(echo "$FREI" | grep -oE 'frei=[0-9]+' | grep -oE '[0-9]+')
 B=$(echo "$FREI" | sed 's/.*=//')
 if [ -n "$A" ] && [ "$A" = "$B" ]; then
-    ok "freie Rahmen nachher = vorher ($A) -- der Lader verliert keinen"
+    ok "free frames afterwards = before ($A) -- the loader loses none"
 else
     bad "freie Rahmen: nachher=$A, vorher=$B"
 fi
@@ -197,11 +197,11 @@ num "Pakete nach dem Entladen (der Stummel zaehlt nichts mehr)" "$LETZT" eq 0
 has "$TMPD/l-gut.txt" "modul: ende" "der Kern lebt nach dem Entladen weiter"
 
 # ------------------------------------------------ 6. die sechs Abweisungen
-echo "== 6. sechs Arten, falsch zu liegen -- sechs Abweisungen, ein lebender Kern =="
+echo "== 6. six ways to be wrong -- six rejections, a living kernel =="
 pruefe_abweisung() { # name grund
     local n=$1 g=$2
     lauf "$TMPD/k-modul" "$TMPD/d-$n.img" "modul $QUIET" "$TMPD/l-$n.txt"
-    if [ "$RC" != 21 ]; then bad "$n: rc=$RC statt 21 -- der Kern hat es nicht ueberlebt"; return; fi
+    if [ "$RC" != 21 ]; then bad "$n: rc=$RC instead of 21 -- the kernel did not survive it"; return; fi
     has "$TMPD/l-$n.txt" "modul: laden=$g" "$n -> Grund '$g'"
     has "$TMPD/l-$n.txt" "modul: nach init=0 present=0" "$n: kein Geraet danach"
     hasnot "$TMPD/l-$n.txt" "ps2maus: eingetragen" "$n: modul_init ist NICHT gelaufen"
@@ -216,18 +216,18 @@ num "fremd: es wurden schon Relokationen angewandt" "$(zwert "$TMPD/l-fremd.txt"
 num "fremd: aber KEIN Platz in der Treibertafel" "$(zwert "$TMPD/l-fremd.txt" 'plaetze=[0-9]+')" eq 0
 
 # ---------------------------------------------------- 7. die Grenze
-echo "== 7. die gemessene GRENZE: ein signiertes, kaputtes Modul in Ring 0 =="
+echo "== 7. the measured LIMIT: a signed, broken module in ring 0 =="
 lauf "$TMPD/k-modul" "$TMPD/d-text.img" "modul $QUIET" "$TMPD/l-text.txt"
 has "$TMPD/l-text.txt" "modul: laden=ok" "das Modul kommt durch alle drei Riegel -- es IST richtig signiert"
 if [ "$RC" = 63 ]; then
-    ok "und danach steht die Maschine (rc=63, Ausnahme) -- SO IST RING 0, und das ist gemessen"
+    ok "and afterwards the machine stops (rc=63, exception) -- THAT IS RING 0, and it is measured"
 elif [ "$RC" = 21 ]; then
-    bad "rc=21: der verdorbene Programmtext hat nichts ausgeloest -- die Gegenprobe misst nichts"
+    bad "rc=21: the corrupted program text triggered nothing -- the negative test measures nothing"
 else
     bad "rc=$RC, erwartet 63"
 fi
 grep -qa 'EXCEPTION' "$TMPD/l-text.txt" \
-    && ok "der Kern sagt, WORAN er gestorben ist ($(grep -ao 'EXCEPTION [0-9]* #[A-Z]*' "$TMPD/l-text.txt" | head -1))" \
+    && ok "the kernel says WHAT it died of ($(grep -ao 'EXCEPTION [0-9]* #[A-Z]*' "$TMPD/l-text.txt" | head -1))" \
     || bad "kein Ausnahmebericht"
 
 # ---------------------------------------------------------- 8. was es kostet
@@ -235,14 +235,14 @@ echo "== 8. was es kostet =="
 A=$(stat -c%s "$TMPD/k-fest"); B=$(stat -c%s "$TMPD/k-modul")
 M=$(stat -c%s "$TMPD/ps2maus.omod")
 echo "        Kern mit ps2m.fi      $A Oktette"
-echo "        Kern ohne ps2m.fi     $B Oktette   (Differenz $((A-B)))"
-echo "        das Modul             $M Oktette"
+echo "        kernel without ps2m.fi     $B octets   (difference $((A-B)))"
+echo "        the module                 $M octets"
 echo "        davon Abbild im RAM   $(zwert "$TMPD/l-gut.txt" 'bytes=[0-9]+') Oktette in $(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+') Rahmen"
 num "der Kern ohne den Treiber ist kleiner" "$((A-B))" gt 0
 num "das Modul ist groesser als das, was aus dem Kern verschwand" "$M" gt "$((A-B))"
 
 # ------------------------------------------------------- 9. beide Stufen
-echo "== 9. beide Uebersetzerstufen: ein Modul von firnc0 unter einem Kern von firnc1 =="
+echo "== 9. both compiler stages: a module from firnc0 under a kernel from firnc1 =="
 if bash tools/build-kernel.sh "$TMPD/k1-modul" --ohne-ps2m --stufe 1 \
         > "$TMPD/b3.txt" 2>&1; then
     ok "Kern mit firnc1 gebaut"
@@ -252,18 +252,18 @@ if bash tools/build-kernel.sh "$TMPD/k1-modul" --ohne-ps2m --stufe 1 \
     has "$TMPD/l-s1.txt" "modul: nach init=1 present=1" "und das Geraet ist da"
     has "$TMPD/l-s1.txt" "ps2maus: entladen" "und es laesst sich entladen"
 else
-    bad "firnc1 baut den Kern nicht"
+    bad "firnc1 does not build the kernel"
     sed 's/^/        /' "$TMPD/b3.txt" | head -5
 fi
 
 # ------------------------------------------------- 10. die Auslieferung
-echo "== 10. der ganze Weg: .omod -> .opk -> Speicher -> Platte -> Kern =="
+echo "== 10. the whole path: .omod -> .opk -> store -> disk -> kernel =="
 OPK=${OPK:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
 STORE=${STORE:-/root/orientstore/werkzeug/store}
 if [ -f "$OPK" ] && [ -f "$STORE" ]; then
     bash tools/module/paket.sh "$TMPD/pak" > "$TMPD/pak.txt" 2>&1
     if grep -q 'Ergebnis    in Ordnung' "$TMPD/pak.txt"; then
-        ok "der Speicherkatalog prueft sich selbst durch (store verify --tief)"
+        ok "the store catalog verifies itself (store verify --tief)"
     else
         bad "store verify"
         sed 's/^/        /' "$TMPD/pak.txt" | tail -12
@@ -273,12 +273,12 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
     rm -rf "$W"; mkdir -p "$W"
     if python3 "$OPK" installieren --wurzel "$W" \
             "$TMPD/pak/ps2maus-1.0.0.opk" > "$TMPD/inst.txt" 2>&1; then
-        ok "opk installiert das Paket in einen Wurzelbaum"
+        ok "opk installs the package into a root tree"
         INST=$(ls "$W"/apps/ps2maus.*/lib/ps2maus.omod 2>/dev/null | head -1)
         if [ -n "$INST" ] && cmp -s "$INST" "$TMPD/pak/ps2maus.omod"; then
-            ok "die installierte Datei ist OKTETT FUER OKTETT das gebaute .omod"
+            ok "the installed file is OCTET FOR OCTET the built .omod"
         else
-            bad "die installierte Datei weicht ab"
+            bad "the installed file differs"
         fi
         SPEC=""
         for x in $(cd "$W" && find . -type d | sed 's|^\./||' | grep -v '^\.$' | sort); do
@@ -289,8 +289,8 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
         done
         python3 tools/osum/mkfs.py build "$TMPD/d-opk.img" 2048 $SPEC \
             > "$TMPD/mkopk.txt" 2>&1 \
-            && ok "eine Platte aus dem installierten Baum" \
-            || bad "mkfs auf dem installierten Baum"
+            && ok "a disk from the installed tree" \
+            || bad "mkfs on the installed tree"
         lauf "$TMPD/k-modul" "$TMPD/d-opk.img" "modul modulaus $QUIET" \
             "$TMPD/l-opk.txt"
         num "der Lauf endet sauber" "$RC" eq 21
@@ -305,11 +305,11 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
         sed 's/^/        /' "$TMPD/inst.txt" | head -6
     fi
 else
-    echo "        opk.py oder werkzeug/store fehlt -- Abschnitt 10 uebersprungen"
+    echo "        opk.py or werkzeug/store missing -- section 10 skipped"
 fi
 
 # ------------------------------------------ 11. K-014: die Sperrliste
-echo "== 11. K-014: die Sperrliste -- ein signierter Treiber laesst sich zuruecknehmen =="
+echo "== 11. K-014: the blocklist -- a signed driver can be revoked =="
 SP="tools/module/mksperre.py"
 python3 "$SP" "$TMPD/sp-fremd"  "$TMPD/m-abi.omod" >/dev/null 2>&1
 python3 "$SP" "$TMPD/sp-drin"   "$TMPD/m-abi.omod" "$TMPD/ps2maus.omod" >/dev/null 2>&1

@@ -21,7 +21,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { # name wert op erwartet
     local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl gefunden (erwartet $op $want)"; return; fi
+    if [ -z "$wert" ]; then bad "$name: no number found (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -37,7 +37,7 @@ fi
 echo "== 1. bauen =="
 bash tools/build-kernel.sh "$TMPD/k.mb" >"$TMPD/build.txt" 2>&1 \
     && ok "Kern gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kern laesst sich nicht bauen"; tail -8 "$TMPD/build.txt" | sed 's/^/        /';
+    || { bad "the kernel cannot be built"; tail -8 "$TMPD/build.txt" | sed 's/^/        /';
          echo "FSROBUST: $pass bestanden, $fail gescheitert"; exit 1; }
 export FSR_KERNEL="$TMPD/k.mb"
 

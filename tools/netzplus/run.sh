@@ -27,7 +27,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() {
     local t=$1 v=$2 op=$3 w=$4
-    if [ -z "$v" ]; then bad "$t: keine Zahl gefunden (erwartet $op $w)"; return; fi
+    if [ -z "$v" ]; then bad "$t: no number found (expected $op $w)"; return; fi
     case "$op" in
         eq) [ "$v" -eq "$w" ] && ok "$t: $v" || bad "$t: $v, erwartet $w";;
         ge) [ "$v" -ge "$w" ] && ok "$t: $v" || bad "$t: $v, erwartet >= $w";;

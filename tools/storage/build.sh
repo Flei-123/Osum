@@ -12,7 +12,7 @@ PROGS="storage du sh echo ls cat locate"
 binname() { if [[ $1 == storage ]]; then echo speicher; else echo "$1"; fi; }
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
-    echo "== der Kern laesst sich nicht bauen"; tail -30 "$OUT/k.log"; exit 1; }
+    echo "== the kernel cannot be built"; tail -30 "$OUT/k.log"; exit 1; }
 echo "   kern      $(stat -c%s "$OUT/k.mb") Oktette"
 
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1

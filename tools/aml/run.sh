@@ -36,7 +36,7 @@ gleich() { # beschreibung soll ist
     if [ "$2" = "$3" ]; then ok "$1 ($3)"; else bad "$1 -- soll '$2', ist '$3'"; fi
 }
 num() { # beschreibung wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }

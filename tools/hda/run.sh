@@ -22,7 +22,7 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op erwartet
     local name=$1 v=$2 op=$3 want=$4
-    if [ -z "$v" ]; then bad "$name: keine Zahl gefunden (erwartet $op $want)"; return; fi
+    if [ -z "$v" ]; then bad "$name: no number found (expected $op $want)"; return; fi
     if [ "$v" -"$op" "$want" ] 2>/dev/null; then ok "$name: $v"
     else bad "$name: $v, erwartet $op $want"; fi
 }

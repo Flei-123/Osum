@@ -19,7 +19,7 @@ bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
 
 if [ ! -s "$OUT/k.mb" ] || [ -n "${LADEN_KERN_NEU:-}" ]; then
     bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
-        echo "== der Kern laesst sich nicht bauen"; tail -30 "$OUT/k.log"; exit 1; }
+        echo "== the kernel cannot be built"; tail -30 "$OUT/k.log"; exit 1; }
 fi
 echo "   kern      $(stat -c%s "$OUT/k.mb") Oktette"
 

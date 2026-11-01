@@ -69,7 +69,7 @@ echo "== 1. bauen und gegenlesen =="
 KERN="$TMPD/k.mb"
 ./tools/build-kernel.sh "$KERN" > "$TMPD/build.log" 2>&1 \
     && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
-    || { bad "der Kern laesst sich nicht bauen"; tail -8 "$TMPD/build.log"; exit 1; }
+    || { bad "the kernel cannot be built"; tail -8 "$TMPD/build.log"; exit 1; }
 
 MM=$(python3 tools/kernel/memmap.py 2>&1 | tail -1)
 note "$MM"

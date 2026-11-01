@@ -118,7 +118,7 @@ bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
     || fehler "der Uebersetzer laesst sich nicht bauen"
 ph fetch-firnc
 bash tools/build-kernel.sh "$OUT/osum.mb" --stufe "$STUFE" > "$OUT/k.log" 2>&1 \
-    || { tail -20 "$OUT/k.log" >&2; fehler "der Kern laesst sich nicht bauen"; }
+    || { tail -20 "$OUT/k.log" >&2; fehler "the kernel cannot be built"; }
 sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 
 #     python3 tools/osum/mkfs.py list <wurzel.img>

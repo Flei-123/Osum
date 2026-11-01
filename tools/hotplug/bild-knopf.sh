@@ -23,7 +23,7 @@ echo "== bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     [ -x "$FIRNC" ] || { echo "kein firnc"; exit 1; }; }
 ./tools/build-kernel.sh "$ARB/k.mb" > "$ARB/build.log" 2>&1 \
-    || { echo "der Kern laesst sich nicht bauen"; tail -5 "$ARB/build.log"; exit 1; }
+    || { echo "the kernel cannot be built"; tail -5 "$ARB/build.log"; exit 1; }
 echo "  Kern: $(stat -c%s "$ARB/k.mb") Oktette"
 
 as --64 -o "$ARB/crt.o" kernel/user/crt.s 2>/dev/null

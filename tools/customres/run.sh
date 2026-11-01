@@ -22,7 +22,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -106,7 +106,7 @@ echo "== 2. bauen =="
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || { echo "as scheitert"; exit 1; }
 rc=0
 bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k0.log" 2>&1 || {
-    bad "der Kern laesst sich nicht bauen"; tail -8 "$TMPD/k0.log" | sed 's/^/        /'; rc=1; }
+    bad "the kernel cannot be built"; tail -8 "$TMPD/k0.log" | sed 's/^/        /'; rc=1; }
 for p in $PROGS; do
     "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; head -6 "$TMPD/$p.err"; rc=1; continue; }

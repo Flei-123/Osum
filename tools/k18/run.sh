@@ -25,7 +25,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -71,7 +71,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-echo "== 1. der Nummernvorrat, die Karte von kdata und die Register =="
+echo "== 1. the number pool, the kdata map and the registers =="
 
 check() { # name soll grund
     local got; got=$(number_in kernel/sys/sys.fi "SYS_$1")
@@ -85,9 +85,9 @@ check OSUM_PWRSTR 1752 "der Block dieser Runde"
 for n in PWRGET PWRSET PWRSTR; do
     v=$(number_in kernel/sys/sys.fi "SYS_OSUM_$n")
     if [ "${v:-0}" -ge 1750 ] && [ "${v:-0}" -le 1799 ]; then
-        ok "SYS_OSUM_$n liegt im Vorrat 1750..1799: $v"
+        ok "SYS_OSUM_$n lies in the pool 1750..1799: $v"
     else
-        bad "SYS_OSUM_$n = ${v:-fehlt} liegt AUSSERHALB von 1750..1799"
+        bad "SYS_OSUM_$n = ${v:-missing} lies OUTSIDE 1750..1799"
     fi
 done
 
@@ -103,9 +103,9 @@ fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+:
               -e '^kernel/user/qs.fi' -e '^kernel/user/modeapply.fi' -e '^kernel/user/launcher.fi' -e '^kernel/user/powerd.fi' || true)
 #
 if [ -z "$fremd" ]; then
-    ok "keine AUFRUFNUMMER aus 1750..1799 steht ausserhalb der Dateien dieser Runde"
+    ok "no CALL NUMBER from 1750..1799 lies outside the files of this round"
 else
-    bad "Aufrufnummern aus 1750..1799 stehen auch in: $(echo $fremd | tr '\n' ' ')"
+    bad "call numbers from 1750..1799 also appear in: $(echo $fremd | tr '\n' ' ')"
 fi
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 17(5[0-9]|[6-9][0-9])' kernel/sys/sys.fi | wc -l | tr -d ' ')
 gleich "in kernel/sys/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
@@ -119,13 +119,13 @@ kd_fi=$(grep -aE '^const KDATA_SIZE' kernel/lib/kstate.fi | sed 's/.*= //')
 kd_s=$(grep -aE '\.set KDATA_SIZE' kernel/arch/x86_64/boot.s | sed -E 's/.*KDATA_SIZE, *(0[xX][0-9A-Fa-f]+|[0-9]+).*/\1/')
 gleich "KDATA_SIZE in kstate.fi und boot.s ist dieselbe Zahl" "$kd_fi" "$kd_s"
 if [ "$(hexdez "${kd_fi:-0}")" -ge "$(hexdez 0x60000)" ]; then
-    ok "kdata reicht ueber den Vorrat dieser Runde hinaus: $kd_fi"
+    ok "kdata reaches beyond the pool of this round: $kd_fi"
 else
-    bad "kdata ist zu klein fuer 0x58000..0x60000: $kd_fi"
+    bad "kdata is too small for 0x58000..0x60000: $kd_fi"
 fi
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
+    ok "the kdata memory map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -8
@@ -147,12 +147,12 @@ gleich "IA32_MISC_ENABLE Bit 16 (SpeedStep Enable)" "65536" "$me"
 
 # ==================================================== 2. bauen
 
-echo "== 2. der Kern und die Programme =="
+echo "== 2. the kernel and the programs =="
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || { echo "as scheitert"; exit 1; }
 rc=0
 bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k0.log" 2>&1 || {
-    bad "der Kern laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/k0.log" | tail -8; rc=1; }
+    bad "the kernel cannot be built"; sed 's/^/        /' "$TMPD/k0.log" | tail -8; rc=1; }
 for p in $PROGS; do
     "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; head -6 "$TMPD/$p.err"; rc=1; continue; }
@@ -160,8 +160,8 @@ for p in $PROGS; do
         "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bad "ld scheitert an $p"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
-[ "$rc" = 0 ] && ok "der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
-[ -f "$TMPD/k0.mb" ] || { echo "K18: ohne Kern geht nichts weiter"; echo "K18: $pass passed, $((fail+1)) failed"; exit 1; }
+[ "$rc" = 0 ] && ok "the kernel and $(echo $PROGS | wc -w) programs are built"
+[ -f "$TMPD/k0.mb" ] || { echo "K18: nothing goes on without the kernel"; echo "K18: $pass passed, $((fail+1)) failed"; exit 1; }
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then
     ok "firnc1 baut diese Runde auch (der Uebersetzer in Firn)"
@@ -172,10 +172,10 @@ fi
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/$p.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
-    > "$TMPD/mkfs.log" 2>&1 && ok "die Platte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    > "$TMPD/mkfs.log" 2>&1 && ok "the disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || bad "mkfs.py scheitert"
 
-echo "== 3. die ACPI-Tabellen, die dieser Testlauf vorgibt =="
+echo "== 3. the ACPI tables this test run specifies =="
 
 mk_ssdt() { # name [argumente...]
     local n=$1; shift
@@ -231,7 +231,7 @@ lauf_bild() { # name kommandozeile
 
 GRUND="nokbd noproc nofs"
 
-echo "== 4. die drei Profile: drei Schreibvorgaenge, drei Register =="
+echo "== 4. the three profiles: three writes, three registers =="
 
 RC=$(lauf profile "$GRUND pwr" akku)
 num "der Lauf endet sauber (21 = der Kernel hat sich selbst beendet)" "$RC" eq 21
@@ -242,7 +242,7 @@ num "CPUID hat etwas gefunden (caps)" "${caps:-0}" gt 0
 ratios=$(uw "$P" ratios)
 num "die Taktstufen sind gesetzt" "${ratios:-0}" gt 0
 orig=$(uw "$P" miscorig)
-if [ -z "$orig" ]; then bad "miscorig fehlt -- ohne den Anfangswert ist keine Zusage moeglich"; fi
+if [ -z "$orig" ]; then bad "miscorig is missing -- without the initial value no promise is possible"; fi
 
 for i in 0 1 2; do
     sagt "$P" "setrc$i" "0" "das Profil $i liess sich setzen"
@@ -257,15 +257,15 @@ done
 m0=$(uw "$P" miscback0); m1=$(uw "$P" miscback1); m2=$(uw "$P" miscback2)
 if [ -n "$m0" ] && [ -n "$m1" ] && [ -n "$m2" ] \
    && [ "$m0" != "$m1" ] && [ "$m1" != "$m2" ] && [ "$m0" != "$m2" ]; then
-    ok "dieselbe Stelle, dreimal gelesen, DREI VERSCHIEDENE Werte: $m0 / $m1 / $m2"
+    ok "the same place, read three times, THREE DIFFERENT values: $m0 / $m1 / $m2"
 else
-    bad "IA32_MISC_ENABLE liest sich nicht dreimal verschieden: '$m0' '$m1' '$m2'"
+    bad "IA32_MISC_ENABLE does not read three different values: '$m0' '$m1' '$m2'"
 fi
 p0=$(uw "$P" perfctl0); p1=$(uw "$P" perfctl1); p2=$(uw "$P" perfctl2)
 if [ -n "$p0" ] && [ "$p0" != "$p1" ] && [ "$p1" != "$p2" ] && [ "$p0" != "$p2" ]; then
     ok "IA32_PERF_CTL bekommt drei verschiedene Woerter: $p0 / $p1 / $p2"
 else
-    bad "IA32_PERF_CTL bekommt nicht drei verschiedene Woerter: '$p0' '$p1' '$p2'"
+    bad "IA32_PERF_CTL does not get three different words: '$p0' '$p1' '$p2'"
 fi
 
 bit38=274877906944
@@ -299,13 +299,13 @@ sagt "$P" "hwpreq0" "0" "und folglich wird IA32_HWP_REQUEST nie beschrieben"
 for i in 0 1 2; do
     a=$(soll hwp "${ratios:-0}" "$i")
     if [ -n "$a" ] && [ "$a" -gt 0 ]; then
-        ok "die HWP-Kodierung fuer Profil $i ist berechenbar: $a (NUR die Kodierung, nicht die Wirkung)"
+        ok "the HWP encoding for profile $i is computable: $a (ONLY the encoding, not the effect)"
     else
-        bad "die HWP-Kodierung fuer Profil $i ergibt nichts"
+        bad "the HWP encoding for profile $i yields nothing"
     fi
 done
 
-echo "== 5. der Ruhezustand: benutzt der Leerlaufpfad wirklich mwait? =="
+echo "== 5. idle: does the idle path really use mwait? =="
 
 mi=$(uw "$P" mwaits_idle); hi=$(uw "$P" hlts_idle); ii=$(uw "$P" idleruns_idle)
 ml=$(uw "$P" mwaits_load); il=$(uw "$P" idleruns_load)
@@ -315,9 +315,9 @@ gleich "kein einziger Rueckfall auf hlt, solange mwait geht" "0" "${hi:-fehlt}"
 gleich "jeder Durchlauf ging in mwait" "${ii:-x}" "${mi:-y}"
 num "waehrend ein Programm RECHNET laeuft er fast nie" "${il:-99}" lt 5
 if [ -n "$ii" ] && [ -n "$il" ] && [ "$ii" -gt $((il + 20)) ]; then
-    ok "schlafend $ii Durchlaeufe gegen rechnend $il -- der Unterschied kommt aus der Maschine"
+    ok "sleeping $ii iterations against computing $il -- the difference comes from the machine"
 else
-    bad "kein Unterschied zwischen schlafend ($ii) und rechnend ($il)"
+    bad "no difference between sleeping ($ii) and computing ($il)"
 fi
 sagt "$P" "mwaithint" "0" "der mwait-Hinweis ist C1 (CPUID Blatt 5 EDX = 0: nichts Tieferes angeboten)"
 sagt "$P" "cstate" "1" "und der Kernel behauptet auch nichts Tieferes"
@@ -342,7 +342,7 @@ gleich "qemu64 meldet KEIN MONITOR (CPUID.01H:ECX Bit 3)" "0" "$mon"
 gleich "und dann geht der Kernel auch nicht hinein" "0" "$(uw "$M" mwaits_idle)"
 num "sondern faellt auf hlt zurueck" "$(uw "$M" hlts_idle)" gt 20
 
-echo "== 6. der Akku: die Zahlen kommen aus der Tabelle, nicht aus dem Programm =="
+echo "== 6. the battery: the numbers come from the table, not from the program =="
 
 soll_feld() { sed -E "s/.*$2=([0-9-]+).*/\1/" "$TMPD/$1.soll"; }
 
@@ -366,7 +366,7 @@ sagt "$L" "batstate" "2" "der Zustand sagt 'laedt'"
 sagt "$L" "ac" "1" "und das Netzteil ist angesteckt"
 pz1=$(uw "$P" percent); pz2=$(uw "$L" percent)
 if [ -n "$pz1" ] && [ "$pz1" != "$pz2" ]; then
-    ok "zwei Tabellen, zwei Ladestaende: $pz1% gegen $pz2%"
+    ok "two tables, two charge levels: $pz1% against $pz2%"
 else
     bad "beide Tabellen ergeben denselben Ladestand ('$pz1'/'$pz2') -- dann misst das nichts"
 fi
@@ -394,7 +394,7 @@ sagt "$O" "batpresent" "0" "GEGENPROBE: SSDT ohne Akku -> kein Akku"
 sagt "$O" "acok" "1" "aber das Netzteil steht drin und wird gefunden"
 sagt "$O" "tempok" "1" "und die Thermalzone auch"
 
-echo "== 7. die Temperatur und die Drosselung =="
+echo "== 7. temperature and throttling =="
 
 sagt "$P" "tempok" "1" "es gibt eine Temperatur"
 sagt "$P" "tzraw" "3032" "und zwar die rohe Zahl aus _TMP (Zehntelkelvin)"
@@ -417,7 +417,7 @@ ksagt "$P" "tjmax" "0" "IA32_TEMPERATURE_TARGET ist auf diesem Wirt 0 (keine Sch
 dts=$(python3 -c "print(1 if (int('${caps:-0}') & 4) else 0)" 2>/dev/null)
 gleich "und CPUID meldet auch keinen digitalen Temperatursensor" "0" "$dts"
 
-echo "== 8. der Bildschirm, im BILD gemessen und an einer ausgerechneten Stelle =="
+echo "== 8. the screen, measured in the PICTURE and at a computed spot =="
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "  (uebersprungen, python3 fehlt)"
@@ -450,13 +450,13 @@ else
 
     h=$(punkt "$TMPD/hell.ppm" 120 120); d=$(punkt "$TMPD/dunkel.ppm" 120 120)
     if [ -n "$h" ] && [ "$h" != "$d" ]; then
-        ok "dasselbe Pruefbild, ein Wort Unterschied, zwei Farben: '$h' gegen '$d'"
+        ok "the same test picture, one word of difference, two colors: '$h' gegen '$d'"
     else
         bad "beide Bilder zeigen dasselbe ('$h'/'$d') -- dann regelt nichts"
     fi
 fi
 
-echo "== 9. /bin/power: dieselben Zahlen, aus Ring 3 ueber die Platte =="
+echo "== 9. /bin/power: the same numbers, from ring 3 over the disk =="
 
 RC=$(lauf shell "osum nokbd nosched noproc pwr script=power roh;power;power leistung;power" akku)
 num "der Lauf mit /bin/power endet sauber" "$RC" eq 21
@@ -467,7 +467,7 @@ for f in percent minutes batremain batfull batrate temp tzraw caps ratios; do
     a=$(kw "$S" "$f"); b=$(pw "$S" "$f")
     a=$(hexdez "${a:-0}"); b=$(hexdez "${b:-0}")
     if [ -z "$(kw "$S" "$f")" ] || [ -z "$(pw "$S" "$f")" ]; then
-        bad "$f: einer der beiden Wege sagt gar nichts (Kernel '$(kw "$S" "$f")', Ring 3 '$(pw "$S" "$f")')"
+        bad "$f: one of the two paths says nothing at all (kernel '$(kw "$S" "$f")', Ring 3 '$(pw "$S" "$f")')"
     else
         gleich "$f: Kernelmeldung und /bin/power sagen dasselbe" "$a" "$b"
     fi
@@ -482,10 +482,10 @@ hat "$S" "Heat:" "sie nennt die Temperatur"
 hat "$S" "Ruhe:" "sie nennt den Ruhezustand"
 hat "$S" "power: now on Höchstleistung" "das Umschalten meldet sich"
 hat "$S" "Profil:  Höchstleistung" "und danach steht wirklich Hoechstleistung da"
-if grep -qa '75%' "$S"; then ok "der Ladestand steht als Zahl da (75%)"
-else bad "der Ladestand 75% steht nicht in der Uebersicht"; fi
-if grep -qaE '\[#+\.*\]' "$S"; then ok "und als Balken"
-else bad "der Balken fehlt"; fi
+if grep -qa '75%' "$S"; then ok "the charge level shows as a number (75%)"
+else bad "the charge level 75% is not in the overview"; fi
+if grep -qaE '\[#+\.*\]' "$S"; then ok "and as a bar"
+else bad "the bar is missing"; fi
 
 RC=$(lauf shellaus "osum nokbd nosched noproc nopwr script=power" akku)
 SA="$TMPD/shellaus.txt"
@@ -494,7 +494,7 @@ hat_nicht "$SA" "Profil:" "und zeigt kein Profil"
 hat_nicht "$SA" "Akku:" "und keinen Akku"
 hat "$SA" "pwr: skipped" "der Kernel sagt es ebenfalls"
 
-echo "== 10. die Schnittstelle weist ab, was sie abweisen muss =="
+echo "== 10. the interface rejects what it must reject =="
 
 sagt "$P" "applies" "$(uw "$P" applies)" "die Zahl der Anwendungen wird gefuehrt"
 ap=$(uw "$P" applies); sw=$(uw "$P" switches)

@@ -53,7 +53,7 @@ echo "== 1. bauen: Kern, Programme, Wurzelplatte, zwei Sticks =="
 KERN="$ARB/k.mb"
 ./tools/build-kernel.sh "$KERN" > "$ARB/build.log" 2>&1 \
     && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
-    || { bad "der Kern laesst sich nicht bauen"; tail -5 "$ARB/build.log"; exit 1; }
+    || { bad "the kernel cannot be built"; tail -5 "$ARB/build.log"; exit 1; }
 
 as --64 -o "$ARB/crt.o" kernel/user/crt.s 2>/dev/null
 MK=""

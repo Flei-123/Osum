@@ -21,7 +21,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -72,7 +72,7 @@ done
 
 # ---------------------------------------------------------- 1. die Nummern
 
-echo "== 1. die Nummern, die Karte von kdata und die Zahlenvorraete =="
+echo "== 1. the numbers, the kdata map and the number pools =="
 check() { # name soll grund
     local got
     got=$(number_in kernel/sys/sys.fi "SYS_$1")
@@ -86,16 +86,16 @@ check OSUM_MNTSTAT 1700 "der Block dieser Runde"
 
 mnt_nr=$(number_in kernel/sys/sys.fi "SYS_OSUM_MNTSTAT")
 if [ "${mnt_nr:-0}" -ge 1700 ] && [ "${mnt_nr:-0}" -le 1799 ]; then
-    ok "die eigene Aufrufnummer liegt im Vorrat 1700..1799: $mnt_nr"
+    ok "the own call number lies in the pool 1700..1799: $mnt_nr"
 else
-    bad "die eigene Aufrufnummer $mnt_nr liegt AUSSERHALB von 1700..1799"
+    bad "the own call number $mnt_nr lies OUTSIDE 1700..1799"
 fi
 kfile=$(number_in kernel/fs/file.fi "K_VFILE")
 kdir=$(number_in kernel/fs/file.fi "K_VDIR")
 gleich "die Deskriptorarten dieser Runde sind 12 und 13" "12 13" "$kfile $kdir"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
+    ok "the kdata memory map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -8
@@ -105,23 +105,23 @@ for r in K14_OFF FAT_OFF PROCFS_OFF; do
     v=$(grep -aE "^const $r: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi | head -1 | grep -oE '0x[0-9A-Fa-f]+')
     d=$((v))
     if [ "$d" -ge $((0x43000)) ] && [ "$d" -lt $((0x46000)) ]; then
-        ok "$r = $v liegt im zugeteilten Bereich 0x43000..0x46000"
+        ok "$r = $v lies in the allotted range 0x43000..0x46000"
     else
-        bad "$r = ${v:-fehlt} liegt AUSSERHALB von 0x43000..0x46000"
+        bad "$r = ${v:-missing} lies OUTSIDE 0x43000..0x46000"
     fi
 done
 mkdir -p "$TMPD/kollision"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kollision/" \; )
 sed -i 's/^const PROCFS_OFF: u64 = 0x45000$/const PROCFS_OFF: u64 = 0x3C000/' "$TMPD/kollision/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kollision" > "$TMPD/karte2.txt" 2>&1; then
-    bad "GEGENPROBE: PROCFS_OFF auf 0x3C000 (= FB_OFF) und der Pruefer schweigt"
+    bad "NEGATIVE: PROCFS_OFF at 0x3C000 (= FB_OFF) and the checker stays silent"
 else
-    ok "GEGENPROBE: PROCFS_OFF auf FB_OFF gelegt -- der Kartenpruefer schlaegt an"
+    ok "NEGATIVE: PROCFS_OFF set to FB_OFF -- the map checker fires"
 fi
 
 # --------------------------------------------------------------- 2. bauen
 
-echo "== 2. bauen: der Kern und der Werkzeugkasten, aus beiden Uebersetzern =="
+echo "== 2. build: the kernel and the toolbox, from both compilers =="
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s cannot be assembled"
 
 baue_stufe() { # 0 | 1
@@ -147,14 +147,14 @@ baue_stufe() { # 0 | 1
     return $rc
 }
 baue_stufe 0 || { echo "K14: $pass passed, $((fail+1)) failed"; exit 1; }
-ok "firnc0: der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
+ok "firnc0: the kernel and $(echo $PROGS | wc -w) programs are built"
 if baue_stufe 1; then
     ok "firnc1: the same from the compiler written in Firn"
 else
     bad "firnc1 does not build this round"
 fi
 
-echo "== 3. die Tafel der Verrichtungen ist eine Tafel von ZEIGERN =="
+echo "== 3. the operations table is a table of POINTERS =="
 indirekt0=$(objdump -d "$TMPD/k0.mb.elf" 2>/dev/null | grep -cE 'call.*\*')
 num "indirekte Aufrufe im Kern (firnc0)" "$indirekt0" ge 9
 if [ -f "$TMPD/k1.mb.elf" ]; then
@@ -164,7 +164,7 @@ fi
 for f in node_for v_readdir v_attr v_read v_write v_create v_unlink v_rename v_trunc; do
     n=$(objdump -d "$TMPD/k0.mb.elf" --disassemble="_F0.vfs__$f" 2>/dev/null \
         | grep -cE 'call.*\*')
-    if [ "${n:-0}" -ge 1 ]; then ok "vfs.$f ruft ueber einen Zeiger ($n)"
+    if [ "${n:-0}" -ge 1 ]; then ok "vfs.$f calls through a pointer ($n)"
     else bad "vfs.$f enthaelt keinen indirekten Aufruf"; fi
 done
 aussen=$(grep -acE '(^|[^a-z_])fs\.[a-z_]+\(' kernel/fs/vfs.fi)
@@ -172,11 +172,11 @@ num "Aufrufe von fs.* (OFS) in kernel/fs/vfs.fi" "$aussen" eq 0
 neun=$(grep -acE '^    (lookup|readdir|attr|read|write|create|unlink|rename|trunc): fn' kernel/fs/vfsops.fi)
 num "Verrichtungen in der Tafel von vfsops.fi" "$neun" eq 9
 
-echo "== 4. die Abbilder: FAT32 von mkfs.vfat, Partitionen von sfdisk/sgdisk =="
+echo "== 4. the images: FAT32 from mkfs.vfat, partitions from sfdisk/sgdisk =="
 FAT="$TMPD/fat.img"
 dd if=/dev/zero of="$FAT" bs=1M count=64 status=none
 mkfs.vfat -F 32 -s 1 -n OSUMTEST "$FAT" >/dev/null 2>"$TMPD/mkfs.err" \
-    && ok "mkfs.vfat hat ein FAT32 angelegt (64 MiB, 1 Sektor je Verband)" \
+    && ok "mkfs.vfat created a FAT32 (64 MiB, 1 sector per cluster)" \
     || bad "mkfs.vfat scheitert: $(head -2 "$TMPD/mkfs.err")"
 
 printf 'hallo aus linux\n' > "$TMPD/hello.txt"
@@ -188,13 +188,13 @@ mcopy -i "$FAT" "$TMPD/lang.txt" ::einsehrlangername.txt
 mmd -i "$FAT" ::unter
 mcopy -i "$FAT" "$TMPD/hello.txt" ::unter/tief.txt
 mdir -i "$FAT" :: > "$TMPD/mdir0.txt" 2>&1 \
-    && ok "mcopy/mmd haben vier Dateien und ein Verzeichnis hineingelegt" \
+    && ok "mcopy/mmd put four files and a directory in" \
     || bad "mcopy scheitert"
 
 MBR="$TMPD/mbr.img"
 dd if=/dev/zero of="$MBR" bs=1M count=80 status=none
 printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$MBR" >/dev/null 2>&1 \
-    && ok "sfdisk hat eine MBR-Tafel geschrieben (Typ 0x0C, FAT32 LBA)" \
+    && ok "sfdisk wrote an MBR table (type 0x0C, FAT32 LBA)" \
     || bad "sfdisk scheitert"
 dd if="$FAT" of="$MBR" bs=512 seek=2048 conv=notrunc status=none
 
@@ -202,12 +202,12 @@ GPT="$TMPD/gpt.img"
 if command -v sgdisk >/dev/null 2>&1; then
     dd if=/dev/zero of="$GPT" bs=1M count=80 status=none
     sgdisk -o -n 1:2048:+70M -t 1:0700 -c 1:OSUMFAT "$GPT" >/dev/null 2>&1 \
-        && ok "sgdisk hat eine GPT geschrieben (Microsoft basic data)" \
+        && ok "sgdisk wrote a GPT (Microsoft basic data)" \
         || bad "sgdisk scheitert"
     dd if="$FAT" of="$GPT" bs=512 seek=2048 conv=notrunc status=none
 else
     GPT=""
-    echo "  (sgdisk fehlt -- der GPT-Teil wird uebersprungen)"
+    echo "  (sgdisk missing -- the GPT part is skipped)"
 fi
 
 MKARGS=""
@@ -236,7 +236,7 @@ lauf() { # name kernel wurzel zweite kommandozeile [zeitlimit]
 
 # ------------------------------------- 5. der Regellauf, MBR
 
-echo "== 5. der Regellauf: vier Dateisysteme nebeneinander (MBR) =="
+echo "== 5. the main run: four file systems side by side (MBR) =="
 rc=$(lauf haupt "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs script=k14")
 num "der Kernel beendet sich selbst (21)" "$rc" eq 21
 H="$TMPD/haupt.txt"
@@ -274,7 +274,7 @@ sagt "$H" cmdline_len 4 "/proc/<pid>/cmdline ist 'k14' plus Null"
 sagt "$H" null_read 0 "/dev/null liest null Oktette"
 sagt "$H" null_write 64 "/dev/null schluckt alles"
 sagt "$H" zero_all_zero 1 "/dev/zero liefert Nullen"
-sagt "$H" hdb_boot_ok 1 "/dev/hdb liefert den Bootsatz mit 0x55 0xAA"
+sagt "$H" hdb_boot_ok 1 "/dev/hdb delivers the boot sector with 0x55 0xAA"
 sagt "$H" hdb_size 83886080 "/dev/hdb ist 80 MiB gross (lseek SEEK_END)"
 sagt "$H" hdb_mode 1 "/dev/hdb meldet sich als BLOCKgeraet"
 sagt "$H" null_mode 1 "/dev/null meldet sich als ZEICHENgeraet"
@@ -284,7 +284,7 @@ sagt "$H" proc_unlink_err 1 "in /proc loeschen: -EPERM"
 sagt "$H" dev_create_err 1 "in /dev anlegen: -EPERM"
 sagt "$H" xdev_rename 18 "umbenennen ueber eine Einhaengegrenze: -EXDEV"
 sagt "$H" fat_renam 0 "umbenennen INNERHALB von FAT32 geht"
-sagt "$H" fat_renam_ok 0 "und der neue Name ist da"
+sagt "$H" fat_renam_ok 0 "and the new name is there"
 sagt "$H" fat_write_back 0 "und wieder zurueck"
 sagt "$H" done 1 "das Messprogramm ist bis zum Ende gekommen"
 
@@ -307,7 +307,7 @@ num "Verrichtungen ueber die Ops-Tafel" "${ops:-0}" ge 40
 gleich "jede angestossene Verrichtung kam beim Treiber an ($ops)" "$ops" "$ind"
 num "ueberquerte Einhaengegrenzen" "${cross:-0}" ge 10
 
-echo "== 6. FAT32 gegen mkfs.vfat, mcopy, mdir und fsck.fat =="
+echo "== 6. FAT32 against mkfs.vfat, mcopy, mdir and fsck.fat =="
 rc=$(lauf lesen "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs script=cp /mnt/hello.txt /a.txt;cp /mnt/blob.bin /b.bin;cp /mnt/unter/tief.txt /c.txt;cp /mnt/einsehrlangername.txt /d.txt;ls /mnt")
 num "der Lesefall beendet sich selbst" "$rc" eq 21
@@ -356,12 +356,12 @@ if command -v fsck.fat >/dev/null 2>&1; then
     hat "$TMPD/fsck2.txt" "Free cluster summary" \
         "GEGENPROBE: ohne umount meldet fsck die nicht nachgefuehrte Zahl"
 else
-    echo "  (fsck.fat fehlt -- das Urteil des fremden Pruefers entfaellt)"
+    echo "  (fsck.fat missing -- the verdict of the foreign checker is dropped)"
 fi
 
 # ------------------------------------------------- 7. MBR, GPT und Bruch
 
-echo "== 7. die Partitionstafel: MBR, GPT und ein umgedrehtes Bit =="
+echo "== 7. the partition table: MBR, GPT and a flipped bit =="
 if [ -n "$GPT" ]; then
     rc=$(lauf gpt "$TMPD/k0.mb" "$TMPD/root.img" "$GPT" \
         "osum nokbd vfs script=cat /mnt/hello.txt")
@@ -409,7 +409,7 @@ hat "$TMPD/keineplatte.txt" "k14: mounts=4" "ohne zweite Platte: vier Einhaengun
 
 # ------------------------------------------------ 8. die Gegenproben
 
-echo "== 8. die Gegenproben: ohne die Schicht bricht jede Zusage weg =="
+echo "== 8. the negative tests: without the layer every promise breaks =="
 rc=$(lauf novfs "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs novfs script=k14")
 num "der novfs-Lauf beendet sich selbst" "$rc" eq 21
@@ -420,7 +420,7 @@ sagt "$TMPD/novfs.txt" fat_type 0 "GEGENPROBE novfs: kein FAT32"
 sagt "$TMPD/novfs.txt" proc_type 0 "GEGENPROBE novfs: kein /proc"
 sagt "$TMPD/novfs.txt" dev_type 0 "GEGENPROBE novfs: kein /dev"
 sagt "$TMPD/novfs.txt" st_dev_different 0 "GEGENPROBE novfs: keine zweite Platte im Namensraum"
-sagt "$TMPD/novfs.txt" hdb_boot_ok 0 "GEGENPROBE novfs: /dev/hdb gibt es nicht"
+sagt "$TMPD/novfs.txt" hdb_boot_ok 0 "NEGATIVE novfs: /dev/hdb does not exist"
 sagt "$TMPD/novfs.txt" done 1 "und das Messprogramm laeuft trotzdem durch"
 hat "$TMPD/novfs.txt" "osum: bin" "GEGENPROBE novfs: OFS traegt weiter das Userland"
 
@@ -443,12 +443,12 @@ hat_nicht "$TMPD/mdirro.txt" "darfnicht" "GEGENPROBE fatro: die Datei entsteht N
 hat_nicht "$TMPD/mdirro.txt" "auchnicht" "GEGENPROBE fatro: das Verzeichnis entsteht NICHT"
 hat "$TMPD/mdirro.txt" "hello" "GEGENPROBE fatro: und die alte Datei ist noch da"
 if cmp -s "$MBR" "$TMPD/live2-fatro.img"; then
-    ok "GEGENPROBE fatro: die Platte ist Oktett fuer Oktett unveraendert"
+    ok "NEGATIVE fatro: the disk is unchanged octet for octet"
 else
-    bad "GEGENPROBE fatro: die Platte hat sich geaendert"
+    bad "NEGATIVE fatro: the disk changed"
 fi
 
-echo "== 9. OFS ist ein NUTZER der Schicht, kein Sonderfall daneben =="
+echo "== 9. OFS is a USER of the layer, no special case beside it =="
 ARBEIT="script=ls /bin;mkdir /neu;echo eins > /neu/a.txt;cat /neu/a.txt;cp /neu/a.txt /neu/b.txt;cat /neu/b.txt;ls /neu;rm /neu/a.txt;ls /neu;wc /neu/b.txt;grep eins /neu/b.txt"
 rc=$(lauf ofsdirekt "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs $ARBEIT")
 num "der gerade Weg beendet sich selbst" "$rc" eq 21
@@ -466,12 +466,12 @@ dateien_gleich "und die Wurzelplatte danach, Oktett fuer Oktett" \
 o1=$(grep -a -m1 '^k14: mounts=' "$TMPD/ofsdirekt.txt" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 o2=$(grep -a -m1 '^k14: mounts=' "$TMPD/ofsvfs.txt" | grep -oE 'ops=[0-9]+' | grep -oE '[0-9]+')
 if [ "${o2:-0}" -gt "${o1:-0}" ]; then
-    ok "mit vfsall gehen mehr Verrichtungen ueber die Tafel ($o1 -> $o2)"
+    ok "with vfsall more operations go through the table ($o1 -> $o2)"
 else
-    bad "vfsall aendert nichts an der Zahl der Verrichtungen ($o1 -> $o2)"
+    bad "vfsall changes nothing in the number of operations ($o1 -> $o2)"
 fi
 
-echo "== 10. /proc gegen SYS_OSUM_PSTAT: zwei Wege, dieselben Zahlen =="
+echo "== 10. /proc against SYS_OSUM_PSTAT: two paths, the same numbers =="
 rc=$(lauf pstat "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs script=ps;cat /proc/1/stat;cat /proc/2/stat")
 num "der Vergleichslauf beendet sich selbst" "$rc" eq 21
@@ -489,7 +489,7 @@ for pid in 1 2; do
             "$ps_pid" "$pr_pid"
         gleich "Aufgabe $pid: dieselbe Eltern-Pid in beiden" "$ps_ppid" "$pr_ppid"
     else
-        bad "der Vergleich ps <-> /proc/$pid/stat: eine der beiden Zeilen fehlt"
+        bad "the comparison ps <-> /proc/$pid/stat: one of the two lines is missing"
     fi
 done
 hat "$TMPD/pstat.clean" "boot" "/proc/1/stat nennt die Art der Aufgabe"

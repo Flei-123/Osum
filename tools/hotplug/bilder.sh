@@ -16,7 +16,7 @@ PROGS="explorer sh echo ls cat edit launcher locate eject"
 
 echo "== bauen =="
 ./tools/build-kernel.sh "$ARB/k.mb" > "$ARB/build.log" 2>&1 \
-    || { echo "der Kern laesst sich nicht bauen"; tail -5 "$ARB/build.log"; exit 1; }
+    || { echo "the kernel cannot be built"; tail -5 "$ARB/build.log"; exit 1; }
 echo "  Kern: $(stat -c%s "$ARB/k.mb") Oktette"
 
 as --64 -o "$ARB/crt.o" kernel/user/crt.s 2>/dev/null

@@ -16,7 +16,7 @@ num() { # name wert op soll
 }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "SERVER: skipped, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "SERVER: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 
 TMPD=$(mktemp -d)
@@ -30,13 +30,13 @@ elif [ -w /dev/kvm ]; then
     ACCEL="-accel kvm -cpu host"
 fi
 
-echo "== 1. der Bauschalter: gui=on und gui=off =="
+echo "== 1. the build switch: gui=on and gui=off =="
 
 bash tools/build-kernel.sh "$TMPD/gui.mb" --gui on > "$TMPD/gui.log" 2>&1 \
-    && ok "der Bau mit Bildschirm laeuft durch" \
+    && ok "the build with a screen goes through" \
     || { bad "gui=on laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/gui.log" | head -10; }
 bash tools/build-kernel.sh "$TMPD/srv.mb" --gui off > "$TMPD/srv.log" 2>&1 \
-    && ok "der Bau OHNE Bildschirm laeuft durch" \
+    && ok "the build WITHOUT a screen goes through" \
     || { bad "gui=off laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/srv.log" | head -20; }
 
 if [ -f "$TMPD/gui.mb" ] && [ -f "$TMPD/srv.mb" ]; then
@@ -62,27 +62,27 @@ if [ -f "$TMPD/gui.mb.elf" ] && [ -f "$TMPD/srv.mb.elf" ]; then
     done
     echo "        Symbole der Oberflaeche: gui=$gsum  srv=$ssum"
     [ -z "$schlecht" ] \
-        && ok "im Serverabbild steht KEINE Funktion der elf Grafikdateien ($gsum im GUI-Bau, 0 hier)" \
-        || bad "die Symboltafel sagt etwas anderes:$schlecht"
+        && ok "the server image contains NO function of the eleven graphics files ($gsum in the GUI build, 0 here)" \
+        || bad "the symbol table says otherwise:$schlecht"
     ng=$(nm "$TMPD/gui.mb.elf" | grep -c "_F0\.gfx__")
     ns=$(nm "$TMPD/srv.mb.elf" | grep -c "_F0\.gfx__")
     [ "$ng" = "$ns" ] && [ "$ng" -gt 20 ] \
-        && ok "die Naht selbst steht in beiden, mit derselben Zahl Symbole: $ng" \
-        || bad "die Naht ist verschieden breit: gui=$ng srv=$ns"
+        && ok "the seam itself is in both, with the same number of symbols: $ng" \
+        || bad "the seam has a different width: gui=$ng srv=$ns"
     treffer=""
     for w in vmode glyph raster focus cursor; do
         strings -a "$TMPD/srv.mb" | grep -v "gpu_hw_cursor\|ax__focus_node\|ax.focus_node" | grep -qa -- "$w" && treffer="$treffer $w"
         grep -qa -- "$w" "$TMPD/gui.mb" || bad "'$w' fehlt schon im GUI-Abbild -- der Pruefer misst nichts"
     done
     [ -z "$treffer" ] \
-        && ok "GEGENPROBE an den Daten: keines der fuenf Woerter der Oberflaeche steht im Serverabbild" \
-        || bad "im Serverabbild stehen noch Daten der Oberflaeche:$treffer"
+        && ok "NEGATIVE on the data: none of the five words of the surface is in the server image" \
+        || bad "the server image still contains surface data:$treffer"
 fi
 
-echo "== 2. der Schnitt: wer im Kernel noch auf Grafik zugreift =="
+echo "== 2. the cut: who in the kernel still touches graphics =="
 
 N=$(python3 tools/server/count.py kernel)
-echo "        Stellen ausserhalb von kernel/gfx/gfx.fi: $N"
+echo "        places outside kernel/gfx/gfx.fi: $N"
 num "kein Modul ausser der Naht greift noch auf die Grafik zu" "$N" eq 0
 python3 tools/server/count.py kernel --je-datei | sed 's/^/        /'
 
@@ -90,19 +90,19 @@ BASIS=${SERVERBUILD_BASIS:-5d2550c}
 if git rev-parse --verify -q "$BASIS" >/dev/null 2>&1; then
     if python3 tools/server/moved.py "$BASIS" > "$TMPD/moved.txt" 2>&1; then
         sed 's/^/      /' "$TMPD/moved.txt"
-        ok "der Umzug nach kgui.fi/sysgui.fi/kutil.fi ist ZEICHENGLEICH mit $BASIS"
+        ok "the move to kgui.fi/sysgui.fi/kutil.fi is CHARACTER-IDENTICAL with $BASIS"
     else
         sed 's/^/      /' "$TMPD/moved.txt"
-        bad "der Umzug hat den Code veraendert -- siehe oben"
+        bad "the move changed the code -- see above"
     fi
 else
-    echo "        ($BASIS ist hier nicht da -- der Vergleich entfaellt)"
+    echo "        ($BASIS is not here -- the comparison is dropped)"
 fi
 
-echo "== 3. das Serverabbild bootet bis zur Shell auf der Leitung =="
+echo "== 3. the server image boots to the shell on the line =="
 
 SERVER_INIT=off bash tools/server/build.sh "$TMPD/s" > "$TMPD/build.txt" 2>&1 \
-    && ok "tools/server/build.sh: Kern, Userland und Platte" \
+    && ok "tools/server/build.sh: kernel, userland and disk" \
     || { bad "tools/server/build.sh"; sed 's/^/        /' "$TMPD/build.txt" | head -20; }
 sed 's/^/        /' "$TMPD/build.txt"
 
@@ -140,17 +140,17 @@ lauf shell "osum console=ttyS0" \
     --erwarte 'total' \
     --sende 'exit\n' \
     --erwarte 'sh: bye' \
-    && ok "die Shell antwortet ueber die serielle Leitung, sechs Befehle" \
-    || bad "die Shell antwortet nicht ueber die serielle Leitung"
+    && ok "the shell answers over the serial line, six commands" \
+    || bad "the shell does not answer over the serial line"
 sed 's/^/        | /' "$TMPD/shell.log" | grep -aE 'osum\$|hallo-vom-server|Kein Bildschirm' | head -12
 
 for w in 'hallo-vom-server' 'Kein Bildschirm, eine Leitung'; do
     grep -qa -- "$w" "$TMPD/shell.log" \
-        && ok "die Antwort auf der Leitung enthaelt: $w" \
-        || bad "die Antwort auf der Leitung enthaelt NICHT: $w"
+        && ok "the answer on the line contains: $w" \
+        || bad "the answer on the line does NOT contain: $w"
 done
 
-echo "== 4. die Zeilendisziplin auf der Leitung =="
+echo "== 4. line discipline on the line =="
 
 lauf edit "osum console=ttyS0" \
     --frist 60 \
@@ -161,17 +161,17 @@ lauf edit "osum console=ttyS0" \
     --erwarte 'geblieben' \
     --sende 'exit\n' \
     --erwarte 'sh: bye' \
-    && ok "Rueckschritt und STRG-U wirken auf der seriellen Leitung" \
-    || bad "die Zeilenbearbeitung wirkt auf der Leitung nicht"
+    && ok "backspace and CTRL-U work on the serial line" \
+    || bad "line editing does not work on the line"
 if grep -qa 'ABXC' "$TMPD/edit.log"; then
-    bad "der Rueckschritt hat NICHT gewirkt -- ABXC steht im Mitschnitt"
+    bad "backspace did NOT work -- ABXC is in the capture"
 else
-    ok "GEGENPROBE: ABXC steht NICHT im Mitschnitt"
+    ok "NEGATIVE: ABXC is NOT in the capture"
 fi
 if grep -qa 'weg-damit: ' "$TMPD/edit.log"; then
-    bad "STRG-U hat die Zeile nicht verworfen -- sie wurde ausgefuehrt"
+    bad "CTRL-U did not discard the line -- it was executed"
 else
-    ok "STRG-U hat die Zeile verworfen: sie wurde getippt und nie ausgefuehrt"
+    ok "CTRL-U discarded the line: it was typed and never executed"
 fi
 
 echo "== 5. die Gegenproben =="
@@ -182,13 +182,13 @@ lauf ohne "osum" \
     --sende 'echo darf-nicht-ankommen\n' \
     --erwarte 'sh: bye'
 if grep -qa 'darf-nicht-ankommen' "$TMPD/ohne.log"; then
-    bad "GEGENPROBE ohne console=: die Leitung hoert trotzdem"
+    bad "NEGATIVE without console=: the line listens anyway"
 else
-    ok "GEGENPROBE ohne console=ttyS0: nichts von der Leitung kommt an"
+    ok "NEGATIVE without console=ttyS0: nothing arrives from the line"
 fi
 grep -qa 'sercon: off' "$TMPD/ohne.log" \
-    && ok "und der Kernel sagt es: sercon: off" \
-    || bad "der Kernel meldet die serielle Konsole nicht als aus"
+    && ok "and the kernel says so: sercon: off" \
+    || bad "the kernel does not report the serial console as off"
 
 lauf noirq "osum console=ttyS0 noserirq" \
     --frist 60 \
@@ -197,12 +197,12 @@ lauf noirq "osum console=ttyS0 noserirq" \
     --erwarte 'ueber-die-abfrage' \
     --sende 'exit\n' \
     --erwarte 'sh: bye' \
-    && ok "GEGENPROBE noserirq: es kommt an, aber ueber den Abfrageweg" \
-    || bad "GEGENPROBE noserirq: es kommt gar nichts mehr an"
+    && ok "NEGATIVE noserirq: it arrives, but over the polling path" \
+    || bad "NEGATIVE noserirq: nothing arrives anymore"
 IRQS=$(grep -a 'sercon:' "$TMPD/noirq.log" | tail -1 | sed 's/.*irqs=\([0-9]*\).*/\1/')
 [ "${IRQS:-x}" = 0 ] \
-    && ok "und der Zaehler beweist es: sercon: irqs=0" \
-    || bad "mit noserirq stehen trotzdem $IRQS Unterbrechungen im Zaehler"
+    && ok "and the counter proves it: sercon: irqs=0" \
+    || bad "with noserirq $IRQS interrupts are in the counter anyway"
 IRQ2=$(grep -a 'sercon:' "$TMPD/shell.log" | tail -1 | sed 's/.*irqs=\([0-9]*\).*/\1/')
 num "im Regellauf kommen die Oktette ueber den Vektor" "${IRQ2:-0}" gt 0
 RX=$(grep -a 'sercon:' "$TMPD/shell.log" | tail -1 | sed 's/.*rx=\([0-9]*\).*/\1/')
@@ -210,7 +210,7 @@ num "empfangene Oktette im Regellauf" "${RX:-0}" gt 40
 DROPS=$(grep -a 'sercon:' "$TMPD/shell.log" | tail -1 | sed 's/.*drops=\([0-9]*\).*/\1/')
 num "kein Oktett ging verloren, weil kein Terminal da war" "${DROPS:-1}" eq 0
 
-echo "== 6. das Abbild, in Zahlen =="
+echo "== 6. the image, in numbers =="
 if [ -f "$TMPD/gui.mb" ] && [ -f "$TMPD/srv.mb" ]; then
     echo "        srvbench: gui=$(stat -c%s "$TMPD/gui.mb") srv=$(stat -c%s "$TMPD/srv.mb") delta=$((A - B)) promille=$P"
 fi

@@ -73,7 +73,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 \
 if bash tools/build-kernel.sh "$TMPD/k0.mb" --stufe 0 > "$TMPD/b0.log" 2>&1; then
     ok "der Kern ist gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)"
 else
-    bad "der Kern laesst sich nicht bauen"
+    bad "the kernel cannot be built"
     sed 's/^/        /' "$TMPD/b0.log" | head -12
     echo "AVX: $pass passed, $fail failed"
     exit 1

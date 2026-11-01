@@ -49,7 +49,7 @@ echo "== 1. bauen: Kern, Programme, Wurzelplatte =="
 KERN="$TMPD/k.mb"
 ./tools/build-kernel.sh "$KERN" > "$TMPD/build.log" 2>&1 \
     && ok "der Kern steht ($(stat -c%s "$KERN") Oktette)" \
-    || { bad "der Kern laesst sich nicht bauen"; tail -20 "$TMPD/build.log"; exit 1; }
+    || { bad "the kernel cannot be built"; tail -20 "$TMPD/build.log"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 MK=""

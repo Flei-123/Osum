@@ -29,7 +29,7 @@ bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
 CC=${FIRNC:-vendor/firn/bin/firnc}
 
 bash tools/build-kernel.sh "$OUT/k.mb" --gui "$GUI" > "$OUT/k.log" 2>&1 || {
-    echo "== der Kern laesst sich nicht bauen"; tail -30 "$OUT/k.log"; exit 1; }
+    echo "== the kernel cannot be built"; tail -30 "$OUT/k.log"; exit 1; }
 
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 rc=0
