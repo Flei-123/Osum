@@ -41,6 +41,50 @@ def qualify(text, own, defmod, localset, violations, item):
         out.append(TOKEN.sub(sub, seg))
     return "".join(out)
 
+EXPORT = re.compile(r"^export \{(.*?)\n\}\n", re.S | re.M)
+
+
+def split_top(s):
+    out = []
+    depth = 0
+    cur = ""
+    for ch in s:
+        if ch in "([<":
+            depth += 1
+        elif ch in ")]>":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def make_wrapper(item_lines, mod):
+    text = "\n".join(item_lines).lstrip()
+    m = re.match(r"fn (\w+)\((.*?)\)\s*(?:->\s*(.*?))?\s*\{", text, re.S)
+    if not m:
+        return None
+    name, params, ret = m.group(1), m.group(2), m.group(3)
+    names = []
+    for prm in split_top(re.sub(r"\s+", " ", params)):
+        names.append(prm.split(":")[0].strip())
+    call = "%s.%s(%s)" % (mod, name, ", ".join(names))
+    head = "fn %s(%s)" % (name, re.sub(r"\s+", " ", params))
+    if ret:
+        return "%s -> %s {\n    return %s\n}" % (head, ret.strip(), call)
+    return "%s {\n    %s\n}" % (head, call)
+
+
+def make_const_alias(item_lines, mod):
+    m = re.match(r"const (\w+)\s*:\s*([^=]+?)\s*=", "\n".join(item_lines).lstrip())
+    if not m:
+        return None
+    return "const %s: %s = %s.%s" % (m.group(1), m.group(2), mod, m.group(1))
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -52,6 +96,7 @@ def main():
     ap.add_argument("--import-prefix", required=True)
     ap.add_argument("--base", default="base")
     ap.add_argument("--map", required=True)
+    ap.add_argument("--wrap", action="store_true")
     ap.add_argument("--apply", action="store_true")
     a = ap.parse_args()
     plan = json.load(open(a.plan))
@@ -116,6 +161,8 @@ def main():
     for n in by:
         members.setdefault(place[n], []).append(n)
     sizes = {}
+    em = EXPORT.search("\n".join(header) + "\n")
+    exported = [x.strip() for x in em.group(1).replace("\n", " ").split(",") if x.strip()] if em else []
     for mod, ns in sorted(members.items(), key=lambda x: rank[x[0]]):
         ns.sort(key=lambda n: by[n]["start"])
         parts = []
@@ -126,6 +173,15 @@ def main():
             locs = {x or y for x, y in LOCALS.findall(code_text(txt))}
             q = qualify(txt, mod, place, locs - {n}, violations, n)
             parts.append(q)
+        if mod == "main" and a.wrap:
+            for n in exported:
+                if n in by and place[n] != "main":
+                    seg_lines = lines[by[n]["head"]:by[n]["end"]]
+                    w = make_wrapper(seg_lines, place[n]) if by[n]["kind"] == "fn" else make_const_alias(seg_lines, place[n])
+                    if w is None:
+                        print("NO WRAPPER", n)
+                    else:
+                        parts.append(w)
         body = "\n\n".join(parts) + "\n"
         refs = set(re.findall(r"(?<![.\w])([A-Za-z_]\w*)\.", code_text(body)))
         mod_refs = sorted(r for r in refs if r in members and r != mod and r != "main")

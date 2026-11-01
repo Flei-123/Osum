@@ -1,0 +1,2417 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import paint.canvas
+import fui.control
+import fui.flex
+import fuiapp
+import fuied
+import plat.fuiwirt
+import fui.navkit
+import fui.navnum
+import fui.painter
+import fui.render
+import fui.scene
+import fui.sheet
+import fui.style
+import symvar
+import fui.textbuf
+import fui.theme
+import fui.transform
+import fui.uiimage
+import ulib
+import fui.widget
+import wlib
+import wlibc
+import fuiscene.fsbase
+import fuiscene.fscore
+import fuiscene.fsctl
+
+const KEY_DRAG: u64 = 4294967291
+
+static mut ct_trail: [u64; 8] = [0 as u64; 8]
+
+static mut ct_font: [u64; 8] = [0 as u64; 8]
+
+fn draw_strip(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    var rgb: u64 = wlibc.theme_live(wlibc.C_TITLEBAR_OFF_BG)
+    if fsbase.st_foc {
+        rgb = wlibc.theme_live(wlibc.C_TITLEBAR_BG)
+    }
+    let col: u32 = (((rgb & 255) << 16) | (rgb & 65280) | ((rgb >> 16) & 255)) as u32
+    painter.round_rect(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
+        widget.w_h(e), 0.0, col | 4278190080 as u32)
+}
+
+fn draw_entry(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let i: usize = scene.scene_node_of(fscore.sc(), e)
+    let k: u64 = fscore.slot_of_node(i)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    if fsbase.gl_plate_on {
+        var gst: u64 = 0
+        if widget.w_is_focus(e) {
+            gst = 8
+        }
+        if widget.w_is_hover(e) {
+            gst = gst | 2
+        }
+        let gf: fn(u64, u64, u64, u64, u64) = *fscore.gl_plate_slot()
+        gf(widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64, widget.w_h(e) as u64, gst)
+        fuiapp.field_glass(true)
+        fuiapp.field(widget.w_x(e) as u64, widget.w_y(e) as u64,
+            widget.w_w(e) as u64, widget.w_h(e) as u64, fscore.ebuf(k),
+            fsbase.ENTRY_CAP as usize, fsbase.S.s_ecar[(k) as usize], widget.w_is_focus(e),
+            fsbase.S.s_esecret[(k) as usize], false, fsbase.S.s_caret_on, false)
+        fuiapp.field_glass(false)
+        return
+    }
+    if fsbase.S.s_esecret[(k) as usize] {
+
+        fuiapp.field(widget.w_x(e) as u64, widget.w_y(e) as u64,
+            widget.w_w(e) as u64, widget.w_h(e) as u64, fscore.ebuf(k),
+            fsbase.ENTRY_CAP as usize, fsbase.S.s_ecar[(k) as usize], widget.w_is_focus(e),
+            true, false, fsbase.S.s_caret_on, false)
+        return
+    }
+    var tb: textbuf.TextBuf = textbuf.tb_new()
+    textbuf.tb_init(&tb, fscore.ebuf(k), fsbase.ENTRY_CAP as usize)
+    textbuf.tb_set_len(&tb, ulib.length(fscore.ebuf(k)) as usize)
+    textbuf.tb_set_range(&tb, fsbase.S.s_ecar[(k) as usize], fsbase.S.s_ecar[(k) as usize])
+    fuiapp.field_paint(e, &tb, fsbase.S.s_caret_on)
+
+    if k < 8 && fsbase.en_hint[(k) as usize] != 0 && ulib.length(fscore.ebuf(k)) == 0 {
+        let h: u64 = widget.w_h(e) as u64
+        var ty: u64 = widget.w_y(e) as u64
+        if h > fscore.sp(24) {
+            ty = ty + (h - fscore.sp(24)) / 2
+        }
+        var tw: u64 = 0
+        if widget.w_w(e) as u64 > fscore.sp(28) {
+            tw = widget.w_w(e) as u64 - fscore.sp(28)
+        }
+        fscore.text_tok(widget.w_x(e) as u64 + fscore.sp(14), ty, tw,
+            fsbase.en_hint[(k) as usize], style.TOK_TEXT_MUTED)
+    }
+}
+
+fn memo_text(key: u64) -> u64 {
+    if key != fsbase.S.s_mkey {
+        return 0
+    }
+    return fscore.mbuf()
+}
+
+fn memo_set(key: u64, text: u64) {
+    fsbase.S.s_mkey = key
+    var m: u64 = ulib.length(text)
+    if m > fsbase.MEMO_CAP - 1 {
+        m = fsbase.MEMO_CAP - 1
+    }
+    var j: u64 = 0
+    while j < m {
+        __mmio_write8((fscore.mbuf() + j) as *mut u8, __mmio_read8((text + j) as *mut u8))
+        j = j + 1
+    }
+    __mmio_write8((fscore.mbuf() + m) as *mut u8, 0 as u8)
+    fsbase.S.s_mcar = m as usize
+    fsbase.S.s_mtop = 0
+    fscore.touch()
+}
+
+fn memo_lines() -> u64 {
+    var n: u64 = 1
+    var i: u64 = 0
+    while __mmio_read8((fscore.mbuf() + i) as *mut u8) != 0 as u8 {
+        if __mmio_read8((fscore.mbuf() + i) as *mut u8) == 10 as u8 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn memo_line_start(l: u64) -> u64 {
+    var i: u64 = 0
+    var cur: u64 = 0
+    while cur < l {
+        let c: u8 = __mmio_read8((fscore.mbuf() + i) as *mut u8)
+        if c == 0 as u8 {
+            return i
+        }
+        if c == 10 as u8 {
+            cur = cur + 1
+        }
+        i = i + 1
+    }
+    return i
+}
+
+fn memo_line_len(st: u64) -> u64 {
+    var n: u64 = 0
+    while true {
+        let c: u8 = __mmio_read8((fscore.mbuf() + st + n) as *mut u8)
+        if c == 0 as u8 || c == 10 as u8 {
+            break
+        }
+        n = n + 1
+    }
+    return n
+}
+
+fn memo_caret_line() -> u64 {
+    var l: u64 = 0
+    var i: u64 = 0
+    while i < fsbase.S.s_mcar as u64 {
+        if __mmio_read8((fscore.mbuf() + i) as *mut u8) == 10 as u8 {
+            l = l + 1
+        }
+        i = i + 1
+    }
+    return l
+}
+
+fn memo_visible(h: u64) -> u64 {
+    if h < fscore.sp(12) + fscore.MEMO_LH() {
+        return 1
+    }
+    return (h - fscore.sp(12)) / fscore.MEMO_LH()
+}
+
+fn memo_reveal(h: u64) {
+    let l: u64 = memo_caret_line()
+    let vis: u64 = memo_visible(h)
+    if l < fsbase.S.s_mtop {
+        fsbase.S.s_mtop = l
+    }
+    if l >= fsbase.S.s_mtop + vis {
+        fsbase.S.s_mtop = l + 1 - vis
+    }
+}
+
+fn memo_goto(l: u64, col: u64) {
+    let st: u64 = memo_line_start(l)
+    var ln: u64 = memo_line_len(st)
+    var c: u64 = col
+    if c > ln {
+        c = ln
+    }
+    while c > 0 && c < ln
+        && (__mmio_read8((fscore.mbuf() + st + c) as *mut u8) & 192 as u8) == 128 as u8 {
+        c = c - 1
+    }
+    fsbase.S.s_mcar = (st + c) as usize
+}
+
+fn memo_key(key: u64, h: u64) {
+    let l: u64 = memo_caret_line()
+    let st: u64 = memo_line_start(l)
+    let col: u64 = (fsbase.S.s_mcar as u64) - st
+    if key == wlib.KEY_ENTER {
+        let n: u64 = ulib.length(fscore.mbuf())
+        if n + 1 < fsbase.MEMO_CAP {
+            var i: u64 = n
+            while i > fsbase.S.s_mcar as u64 {
+                __mmio_write8((fscore.mbuf() + i) as *mut u8,
+                    __mmio_read8((fscore.mbuf() + i - 1) as *mut u8))
+                i = i - 1
+            }
+            __mmio_write8((fscore.mbuf() + fsbase.S.s_mcar as u64) as *mut u8, 10 as u8)
+            __mmio_write8((fscore.mbuf() + n + 1) as *mut u8, 0 as u8)
+            fsbase.S.s_mcar = fsbase.S.s_mcar + 1
+        }
+    } else if key == wlib.KEY_UP {
+        if l > 0 {
+            memo_goto(l - 1, col)
+        }
+    } else if key == wlib.KEY_DOWN {
+        if l + 1 < memo_lines() {
+            memo_goto(l + 1, col)
+        }
+    } else if key == wlib.KEY_HOME {
+        fsbase.S.s_mcar = st as usize
+    } else if key == wlib.KEY_END {
+        fsbase.S.s_mcar = (st + memo_line_len(st)) as usize
+    } else {
+        fuiapp.edit(fscore.mbuf(), (fsbase.MEMO_CAP - 1) as usize, (&fsbase.S.s_mcar) as *mut usize, key, false)
+    }
+    memo_reveal(h)
+    fsbase.S.s_caret_on = true
+    fsbase.S.s_caret_t = fuiapp.now_ms()
+    fscore.touch()
+}
+
+fn draw_memo(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, fscore.rf(),
+        (*t).field | 4278190080 as u32)
+    let focus: bool = widget.w_is_focus(e)
+    var ring: u32 = (*t).border_col
+    if focus {
+        ring = (*t).accent
+    }
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, fscore.rf(), 1.0,
+        ring | 4278190080 as u32)
+    let vis: u64 = memo_visible(h)
+    let nln: u64 = memo_lines()
+    let cl: u64 = memo_caret_line()
+    var r: u64 = 0
+    while r < vis && fsbase.S.s_mtop + r < nln {
+        let l: u64 = fsbase.S.s_mtop + r
+        let st: u64 = memo_line_start(l)
+        var n: u64 = memo_line_len(st)
+        if n > 318 {
+            n = 318
+        }
+        var j: u64 = 0
+        while j < n {
+            __mmio_write8(((&fsbase.S.s_mline[0 as usize]) as u64 + j) as *mut u8,
+                __mmio_read8((fscore.mbuf() + st + j) as *mut u8))
+            j = j + 1
+        }
+        __mmio_write8(((&fsbase.S.s_mline[0 as usize]) as u64 + n) as *mut u8, 0 as u8)
+
+        var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+        let ly: u64 = y + fscore.sp(6) + r * fscore.MEMO_LH()
+        widget.w_place(&fe, x as f64, ly as f64, w as f64, fscore.MEMO_LH() as f64)
+        let px: f64 = render.field_px(c, &fe)
+        let x0: f64 = render.field_text_x0(c, &fe)
+        var top: f64 = 0.0
+        var lh: f64 = 0.0
+        let by: f64 = render.field_line(c, &fe, &top, &lh)
+        if n > 0 {
+            let _tw: f64 = painter.text(z, x0, by, (w as f64) - (x0 - (x as f64)) - 6.0,
+                px, (*t).text | 4278190080 as u32,
+                (&fsbase.S.s_mline[0 as usize]) as u64, n as usize, painter.TEXT_L)
+        }
+        if focus && l == cl && fsbase.S.s_caret_on {
+            let cc: u64 = (fsbase.S.s_mcar as u64) - st
+            var fm: render.FieldMeas = render.field_meas_new(c, &fe)
+            let cx: f64 = x0 + render.field_meas((&fm) as u64,
+                (&fsbase.S.s_mline[0 as usize]) as u64, cc as usize)
+            painter.caret_bar(z, cx, top, lh, 1.0,
+                (*t).text | 4278190080 as u32)
+        }
+        r = r + 1
+    }
+}
+
+fn memo(parent: usize, key: u64, w: u64, h: u64, text: u64) -> usize {
+    let i: usize = scene.scene_add(fscore.sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return fsbase.NONE
+    }
+    scene.node_set_widget_kind(fscore.sc(), i, widget.KIND_TEXTBOX)
+    scene.node_set_size(fscore.sc(), i, w as f64, h as f64)
+    scene.node_set_draw(fscore.sc(), i, 0, draw_memo)
+    scene.node_set_id(fscore.sc(), i, key as u32)
+    if fsbase.S.s_mkey != key {
+        if text != 0 {
+            memo_set(key, text)
+        } else {
+            memo_set(key, (&fsbase.s_empty[0 as usize]) as u64)
+        }
+    }
+    fsbase.S.s_mnode = i
+    return i
+}
+
+fn memo_click(x: u64, y: u64) {
+    let i: usize = fsbase.S.s_mnode
+    if i == fsbase.NONE || i >= scene.scene_count(fscore.sc()) || x < fscore.node_x(i)
+        || x >= fscore.node_x(i) + fscore.node_w(i) || y < fscore.node_y(i)
+        || y >= fscore.node_y(i) + fscore.node_h(i) {
+        return
+    }
+    let c: *mut render.Ctx = fuiapp.ctx()
+    var rel: u64 = 0
+    if y > fscore.node_y(i) + fscore.sp(6) {
+        rel = (y - fscore.node_y(i) - fscore.sp(6)) / fscore.MEMO_LH()
+    }
+    var l: u64 = fsbase.S.s_mtop + rel
+    let nl: u64 = memo_lines()
+    if l >= nl {
+        l = nl - 1
+    }
+    let st: u64 = memo_line_start(l)
+    let n: u64 = memo_line_len(st)
+    var fe: widget.Widget = widget.widget_new(widget.KIND_TEXTBOX)
+    widget.w_place(&fe, fscore.node_x(i) as f64, fscore.node_y(i) as f64, fscore.node_w(i) as f64,
+        fscore.MEMO_LH() as f64)
+    var fm: render.FieldMeas = render.field_meas_new(c, &fe)
+    let rx: f64 = (x as f64) - render.field_text_x0(c, &fe)
+    var j: u64 = 0
+    while j < n && j < 318 {
+        __mmio_write8(((&fsbase.S.s_mline[0 as usize]) as u64 + j) as *mut u8,
+            __mmio_read8((fscore.mbuf() + st + j) as *mut u8))
+        j = j + 1
+    }
+    var best: u64 = 0
+    var bestd: f64 = rx
+    if bestd < 0.0 {
+        bestd = 0.0 - bestd
+    }
+    var bi: u64 = 1
+    while bi <= j {
+        let atb: bool = bi == j
+            || (__mmio_read8((fscore.mbuf() + st + bi) as *mut u8) & 192 as u8) != 128 as u8
+        if atb {
+            let wv: f64 = render.field_meas((&fm) as u64,
+                (&fsbase.S.s_mline[0 as usize]) as u64, bi as usize)
+            var dv: f64 = wv - rx
+            if dv < 0.0 {
+                dv = 0.0 - dv
+            }
+            if dv < bestd {
+                bestd = dv
+                best = bi
+            }
+        }
+        bi = bi + 1
+    }
+    fsbase.S.s_mcar = (st + best) as usize
+    fsbase.S.s_caret_on = true
+    fsbase.S.s_caret_t = fuiapp.now_ms()
+    fscore.touch()
+}
+
+fn hover_reapply(w: *mut fuiwirt.Host) {
+    if fsbase.hov_in && control.panel_hot(fuiwirt.host_panel(w)) == control.NOBODY {
+        let _h: u32 = fuiwirt.host_pointer_move(w, fsbase.S.s_mx as f64, fsbase.S.s_my as f64)
+    }
+}
+
+fn button(parent: usize, text: u64, key: u64) -> usize {
+    let i: usize = scene.scene_add(fscore.sc(), parent, scene.N_WIDGET)
+    if i != scene.SCENE_NONE {
+        scene.node_set_widget_kind(fscore.sc(), i, widget.KIND_BUTTON)
+        scene.node_set_text(fscore.sc(), i, text, ulib.length(text) as usize)
+        scene.node_set_id(fscore.sc(), i, key as u32)
+        scene.node_set_draw(fscore.sc(), i, 0, draw_btn_plate)
+        scene.node_set_ink(fscore.sc(), i, 2.0)
+    }
+    return i
+}
+
+const PLATE_HOT_A: u64 = 18
+
+const PLATE_DOWN_A: u64 = 36
+
+fn hover_plate(x: u64, y: u64, w: u64, h: u64, st: u64) {
+    if (st & fsbase.TS_OFF) != 0 {
+        return
+    }
+    var a: u64 = 0
+    if (st & fsbase.TS_DOWN) != 0 {
+        a = PLATE_DOWN_A
+    } else if (st & fsbase.TS_HOT) != 0 {
+        a = PLATE_HOT_A
+    }
+    if a == 0 {
+        return
+    }
+    var r: u64 = fscore.rb_px()
+    if r * 2 > h {
+        r = h / 2
+    }
+    let col: u32 = (fscore.role_col(fsbase.R_TEXT) & 16777215 as u32) | ((a << 24) as u32)
+    painter.round_rect(render.ctx_painter(fuiapp.ctx()), x as f64, y as f64, w as f64, h as f64, r as f64, col)
+}
+
+fn draw_btn_plate(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    hover_plate(widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64, fscore.plate_state(e))
+}
+
+fn button_main(parent: usize, text: u64, key: u64) -> usize {
+    let i: usize = button(parent, text, key)
+    if i != fsbase.NONE {
+        let e: *mut widget.Widget = scene.node_widget(fscore.sc(), i)
+        widget.w_set_selected(e, true)
+
+        let _r: usize = sheet.sheet_rule(fscore.sh(), sheet.sel_id(key as u32),
+            style.style_set_fg(style.style_new(),
+                style.color_token(style.TOK_TEXT_ON_ACCENT)))
+        if fsbase.S.s_nhaupt < 8 {
+            fsbase.S.s_haupt[(fsbase.S.s_nhaupt) as usize] = key
+            fsbase.S.s_nhaupt = fsbase.S.s_nhaupt + 1
+        }
+    }
+    return i
+}
+
+fn draw_strip_tab(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if widget.w_is_selected(e) || widget.w_is_disabled(e) {
+        render.draw_widget(c, e)
+        return
+    }
+    let m: *mut theme.Theme = render.ctx_theme(c)
+    let fo: *mut theme.Shape = theme.theme_shape(m)
+    let sz: *mut style.StyleSet = widget.w_styleset(e)
+    let s: *mut style.Style = style.styleset_base(sz)
+    if ((*s).set_mask & style.SF_BG) == 0 as u32 {
+        *s = style.style_set_bg(*s, style.color_transparent())
+        style.styleset_set_override(sz, style.STATE_HOVER,
+            style.override_set_bg(style.override_new(),
+                style.color_token(style.TOK_BUTTON_HOVER)))
+    }
+    render.draw_base(c, e)
+    let padx: f64 = render.len_of(c, (*fo).pad_x)
+    var l: widget.Widget = widget.widget_new(widget.KIND_LABEL)
+    widget.w_place(&l, widget.w_x(e) + padx, widget.w_y(e), widget.w_w(e) - 2.0 * padx, widget.w_h(e))
+    widget.w_set_text(&l, widget.w_text(e), widget.w_text_len(e))
+    let ls: *mut style.Style = widget.w_style(&l)
+    *ls = style.style_set_align(*ls, style.ALIGN_CENTER)
+    *ls = style.style_set_pad(*ls, 0, 0)
+    *ls = style.style_set_fg(*ls, style.color_token(style.TOK_TEXT_ON_ACCENT))
+    widget.w_set_focus(&l, false)
+    render.draw_text(c, &l)
+    render.draw_focus_ring(c, e)
+}
+
+fn flat(i: usize) {
+    if i != fsbase.NONE {
+        scene.node_set_widget_kind(fscore.sc(), i, widget.KIND_TAB)
+    }
+}
+
+fn draw_ibtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let p: u64 = widget.w_text(e)
+    let n: usize = widget.w_text_len(e)
+    widget.w_set_text(e, p, 0 as usize)
+    render.draw_widget(c, e)
+    widget.w_set_text(e, p, n)
+    hover_plate(widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64, fscore.plate_state(e))
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    var col: u32 = (*t).text
+    if ud == 1 {
+        col = (*t).text_on_accent
+    }
+    if widget.w_is_disabled(e) {
+        col = (*t).text_disabled
+    }
+    let bw: u64 = widget.w_w(e) as u64
+    let bh: u64 = widget.w_h(e) as u64
+
+    var sz: u64 = fscore.sp(18)
+    if sz > bw {
+        sz = bw
+    }
+    if sz > bh {
+        sz = bh
+    }
+    fuiapp.glyph(widget.w_value(e) as u64, (widget.w_x(e) as u64) + (bw - sz) / 2,
+        (widget.w_y(e) as u64) + (bh - sz) / 2, sz, col | 4278190080 as u32)
+}
+
+fn icon_button(parent: usize, cp: u64, label: u64, key: u64) -> usize {
+    let i: usize = button(parent, label, key)
+    if i != fsbase.NONE {
+        widget.w_set_value(scene.node_widget(fscore.sc(), i), cp as i64)
+        if fsbase.acc_ink {
+            scene.node_set_draw(fscore.sc(), i, 1, draw_ibtn)
+        } else {
+            scene.node_set_draw(fscore.sc(), i, 0, draw_ibtn)
+        }
+    }
+    return i
+}
+
+fn draw_link(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let s: u64 = fscore.sp(1)
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    hover_plate(x, y, w, h, fscore.plate_state(e))
+    fscore.text_role(x + fsbase.LINK_PAD * s, y + h / 2 + 5 * s, fscore.sat_sub(w, 2 * fsbase.LINK_PAD * s), widget.w_text(e), fsbase.LINK_TEXT * s, false, fsbase.R_TEXT)
+    if widget.w_is_focus(e) {
+        render.draw_focus_ring(c, e)
+    }
+}
+
+fn icon_link(parent: usize, cp: u64, label: u64, key: u64, w: u64, h: u64) -> usize {
+    let i: usize = icon_button(parent, cp, label, key)
+    if i != fsbase.NONE {
+        flat(i)
+        fsctl.set_size(i, w, h)
+    }
+    return i
+}
+
+const TS_ON: u64 = 1
+
+const TS_FOCUS: u64 = 8
+
+static mut tile_cbmem: [u8; 8] = [0 as u8; 8]
+
+fn tile_slot() -> *mut fn(u64, u64, u64, u64, u64, u64) {
+    return ((&tile_cbmem[0 as usize]) as u64) as *mut fn(u64, u64, u64, u64, u64, u64)
+}
+
+fn draw_tilebtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let p: u64 = widget.w_text(e)
+    let n: usize = widget.w_text_len(e)
+    widget.w_set_text(e, p, 0 as usize)
+    render.draw_widget(c, e)
+    widget.w_set_text(e, p, n)
+    var st: u64 = 0
+    if widget.w_is_selected(e) {
+        st = st | TS_ON
+    }
+    if widget.w_is_hover(e) {
+        st = st | fsbase.TS_HOT
+    }
+    if widget.w_is_active(e) {
+        st = st | fsbase.TS_DOWN
+    }
+    if widget.w_is_focus(e) {
+        st = st | TS_FOCUS
+    }
+    if widget.w_is_disabled(e) {
+        st = st | fsbase.TS_OFF
+    }
+    let f: fn(u64, u64, u64, u64, u64, u64) = *tile_slot()
+    f(ud, widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64, st)
+}
+
+fn draw_glasstile(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    var st: u64 = 0
+    if widget.w_is_selected(e) {
+        st = st | TS_ON
+    }
+    if widget.w_is_hover(e) {
+        st = st | fsbase.TS_HOT
+    }
+    if widget.w_is_active(e) {
+        st = st | fsbase.TS_DOWN
+    }
+    if widget.w_is_focus(e) {
+        st = st | TS_FOCUS
+    }
+    if widget.w_is_disabled(e) {
+        st = st | fsbase.TS_OFF
+    }
+    let f: fn(u64, u64, u64, u64, u64, u64) = *tile_slot()
+    f(ud, widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64, st)
+}
+
+fn flat_tile(parent: usize, key: u64, name: u64, w: u64, h: u64, on: bool, ud: u64,
+    cb: fn(u64, u64, u64, u64, u64, u64)) -> usize {
+    let i: usize = button(parent, name, key)
+    if i != fsbase.NONE {
+        scene.node_set_size(fscore.sc(), i, w as f64, h as f64)
+        widget.w_set_selected(scene.node_widget(fscore.sc(), i), on)
+        scene.node_set_draw(fscore.sc(), i, ud, draw_glasstile)
+        let _c: bool = scene.node_add_class(fscore.sc(), i, fsbase.FLAT_CLS)
+        *tile_slot() = cb
+        fscore.ensure_flat_rules()
+    }
+    return i
+}
+
+fn tile(parent: usize, key: u64, name: u64, w: u64, h: u64, on: bool, ud: u64,
+    cb: fn(u64, u64, u64, u64, u64, u64)) -> usize {
+    let i: usize = button(parent, name, key)
+    if i != fsbase.NONE {
+        scene.node_set_size(fscore.sc(), i, w as f64, h as f64)
+        widget.w_set_selected(scene.node_widget(fscore.sc(), i), on)
+        scene.node_set_draw(fscore.sc(), i, ud, draw_tilebtn)
+        *tile_slot() = cb
+    }
+    return i
+}
+
+fn icon_at(word: u64, x: u64, y: u64, size: u64, txt: u64) {
+    if word == 0 || size == 0 {
+        return
+    }
+    let z: *mut painter.Painter = render.ctx_painter(fuiapp.ctx())
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    if (word & wlib.ICON_TAG) != 0 {
+        var c0: u32 = (*t).text | 4278190080 as u32
+        if (word & 72057594037927936) != 0 {
+            c0 = fscore.tint_col(word)
+        }
+        fuiapp.glyph(word & 65535, x, y, size, c0)
+        return
+    }
+    if wlib.is_image_pub(word) {
+        let src: u64 = symvar.pick(word, size)
+        let iw: u64 = __mmio_read32((src + 4) as *mut u32) as u64
+        let ih: u64 = __mmio_read32((src + 8) as *mut u32) as u64
+        if iw == 0 || ih == 0 || iw > 128 || ih > 128 {
+            return
+        }
+        var dw: u64 = size
+        var dh: u64 = size
+        var ox: u64 = 0
+        var oy: u64 = 0
+        if iw < 32 || ih < 32 {
+
+            var k: u64 = size / iw
+            let ky: u64 = size / ih
+            if ky < k {
+                k = ky
+            }
+            if k == 0 {
+                k = 1
+            }
+            dw = iw * k
+            dh = ih * k
+            if size > dw {
+                ox = (size - dw) / 2
+            }
+            if size > dh {
+                oy = (size - dh) / 2
+            }
+        }
+        var im: uiimage.Image = uiimage.image_wrap(src + 12, iw as usize, ih as usize, 0)
+        uiimage.image_draw_rect(z, &im, (x + ox) as f64, (y + oy) as f64, dw as f64, dh as f64,
+            0 as u32)
+        return
+    }
+
+    let rgb: u32 = (((word & 255) << 16) | (word & 65280) | ((word >> 16) & 255)) as u32
+    painter.round_rect(z, x as f64, y as f64, size as f64, size as f64, fscore.rb(),
+        rgb | 4278190080 as u32)
+    if txt != 0 {
+        var one: [u8; 2] = [0 as u8; 2]
+        one[0 as usize] = __mmio_read8(txt as *mut u8)
+        if one[0 as usize] != 0 as u8 {
+            fscore.text_tok(x + size / 2 - fscore.sp(4), y + (size - fscore.sp(24)) / 2, size, (&one[0 as usize]) as u64,
+                style.TOK_TEXT_ON_ACCENT)
+        }
+    }
+}
+
+fn draw_ftile(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    var st: u64 = 0
+    if widget.w_is_hover(e) {
+        st = st | fsbase.TS_HOT
+    }
+    if widget.w_is_active(e) {
+        st = st | fsbase.TS_DOWN
+    }
+    if widget.w_is_focus(e) {
+        st = st | TS_FOCUS
+    }
+    hover_plate(widget.w_x(e) as u64 + fscore.sp(1), widget.w_y(e) as u64 + fscore.sp(1),
+        widget.w_w(e) as u64 - 2 * fscore.sp(1), widget.w_h(e) as u64 - 2 * fscore.sp(1), st)
+    let f: fn(u64, u64, u64, u64, u64, u64) = *tile_slot()
+    f(ud, widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64, st)
+}
+
+fn draw_prog(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    let x: f64 = widget.w_x(e)
+    let y: f64 = widget.w_y(e)
+    let w: f64 = widget.w_w(e)
+    let h: f64 = widget.w_h(e)
+    painter.round_rect(z, x, y, w, h, fscore.rpill(h), (*t).field | 4278190080 as u32)
+    var pct: i64 = widget.w_value(e)
+    if pct > 100 {
+        pct = 100
+    }
+    if pct > 0 {
+        var fw: f64 = w * (pct as f64) / 100.0
+        if fw < h {
+            fw = h
+        }
+        painter.round_rect(z, x, y, fw, h, fscore.rpill(h), (*t).accent | 4278190080 as u32)
+    }
+    painter.round_ring(z, x, y, w, h, fscore.rpill(h), 1.0, (*t).border_col | 4278190080 as u32)
+}
+
+fn ct_at(x: u64, y: u64) -> u64 {
+    var k: u64 = 0
+    while k < fsbase.S.s_ct_n {
+        let i: usize = fsbase.S.s_ct_node[(k) as usize]
+        if i != fsbase.NONE && x >= fscore.node_x(i) && x < fscore.node_x(i) + fscore.node_w(i)
+            && y >= fscore.node_y(i) && y < fscore.node_y(i) + fscore.node_h(i) {
+            return k
+        }
+        k = k + 1
+    }
+    return fsbase.NO_SLOT
+}
+
+const CT_MAX: u64 = 8
+
+fn draw_lbtn(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+
+    let p: u64 = fsbase.cb_lab[(ud - 2) as usize]
+    render.draw_widget(c, e)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    var col: u32 = (*t).text
+    if widget.w_is_disabled(e) {
+        col = (*t).text_disabled
+    }
+    let bw: u64 = widget.w_w(e) as u64
+    let bh: u64 = widget.w_h(e) as u64
+    let sz: u64 = fscore.sp(18)
+    let gx: u64 = (widget.w_x(e) as u64) + fscore.sp(8)
+    fuiapp.glyph(widget.w_value(e) as u64, gx, (widget.w_y(e) as u64) + (bh - sz) / 2, sz, col | 4278190080 as u32)
+    let lx: u64 = gx + sz + fscore.sp(6)
+    let lw: u64 = (widget.w_x(e) as u64) + bw - lx
+    fuiapp.label(lx, (widget.w_y(e) as u64) + (bh - 24) / 2, lw, p)
+}
+
+fn table_heads(key: u64, arr: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_heads[(k) as usize] = arr
+    fscore.touch()
+}
+
+fn table_indent(key: u64, arr: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_indent[(k) as usize] = arr
+    fscore.touch()
+}
+
+fn table_align_right(key: u64, col: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || col >= fsbase.CT_COLS {
+        return
+    }
+    if on {
+        fsbase.S.s_ct_ral[(k) as usize] = fsbase.S.s_ct_ral[(k) as usize] | (1 << col)
+    } else {
+        fsbase.S.s_ct_ral[(k) as usize] = fsbase.S.s_ct_ral[(k) as usize] & ((1 << col) ^ 4294967295)
+    }
+    fscore.touch()
+}
+
+fn table_hover(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_hv[(k) as usize] = on
+}
+
+fn hover_set(x: u64, y: u64) {
+    var nk: u64 = fsbase.NO_SLOT
+    var nr: u64 = fsbase.HEAD_ROW
+    let k: u64 = ct_at(x, y)
+    if k != fsbase.NO_SLOT && fsbase.S.s_ct_hv[(k) as usize] {
+        let r: u64 = table_row_at(fsbase.S.s_ct_key[(k) as usize], x, y)
+        if r != fsbase.HEAD_ROW && !fscore.row_head(k, r) {
+            nk = k
+            nr = r
+        }
+    }
+
+    var sk: u64 = 0
+    var sr: u64 = 0
+    if nk != fsbase.NO_SLOT {
+        sk = nk + 1
+        sr = nr + 1
+    }
+    if sk != fsbase.S.s_ct_hk || sr != fsbase.S.s_ct_hr {
+        fsbase.S.s_ct_hk = sk
+        fsbase.S.s_ct_hr = sr
+        fscore.touch()
+    }
+}
+
+fn icon_col(k: u64) -> u64 {
+    if fsbase.S.s_ct_rh[(k) as usize] >= 44 * fsbase.S.s_S {
+        return 46 * fsbase.S.s_S
+    }
+    return fscore.ICON_W()
+}
+
+fn ct_slot(key: u64) -> u64 {
+    var k: u64 = 0
+    while k < fsbase.S.s_ct_n {
+        if fsbase.S.s_ct_key[(k) as usize] == key {
+            return k
+        }
+        k = k + 1
+    }
+    return fsbase.NO_SLOT
+}
+
+fn ct_slot_of_node(i: usize) -> u64 {
+    var k: u64 = 0
+    while k < fsbase.S.s_ct_n {
+        if fsbase.S.s_ct_node[(k) as usize] == i {
+            return k
+        }
+        k = k + 1
+    }
+    return fsbase.NO_SLOT
+}
+
+fn ct_get_slot(k: u64) -> *mut fn(u64, u64) -> u64 {
+    return (((&fsbase.S.s_ct_get[0 as usize]) as u64) + k * 8) as *mut fn(u64, u64) -> u64
+}
+
+fn ct_text(k: u64, row: u64, col: u64) -> u64 {
+    if fsbase.S.s_ct_blob[(k) as usize] != 0 {
+        if fsbase.S.s_ct_plain[(k) as usize] {
+            if row == fsbase.HEAD_ROW {
+                return (&fsbase.s_empty[0 as usize]) as u64
+            }
+            return fsctl.blob_cell(fsbase.S.s_ct_blob[(k) as usize], row, col)
+        }
+        if row == fsbase.HEAD_ROW {
+            return fsctl.blob_cell(fsbase.S.s_ct_blob[(k) as usize], 0, col)
+        }
+        return fsctl.blob_cell(fsbase.S.s_ct_blob[(k) as usize], row + 1, col)
+    }
+    let f: fn(u64, u64) -> u64 = *ct_get_slot(k)
+    return f(row, col)
+}
+
+fn ct_visible(k: u64, h: u64) -> u64 {
+    var hh: u64 = h
+    if fsbase.S.s_ct_head[(k) as usize] {
+        hh = h - fscore.HEAD_H()
+    }
+    return hh / fsbase.S.s_ct_rh[(k) as usize]
+}
+
+fn ct_reveal(k: u64, h: u64) {
+    let vis: u64 = ct_visible(k, h)
+    if vis == 0 {
+        return
+    }
+    if fsbase.S.s_ct_sel[(k) as usize] < fsbase.S.s_ct_top[(k) as usize] {
+        fsbase.S.s_ct_top[(k) as usize] = fsbase.S.s_ct_sel[(k) as usize]
+    }
+    if fsbase.S.s_ct_sel[(k) as usize] >= fsbase.S.s_ct_top[(k) as usize] + vis {
+        fsbase.S.s_ct_top[(k) as usize] = fsbase.S.s_ct_sel[(k) as usize] + 1 - vis
+    }
+}
+
+fn draw_ct(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let i: usize = scene.scene_node_of(fscore.sc(), e)
+    let k: u64 = ct_slot_of_node(i)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, fscore.rf(),
+        (*t).field | 4278190080 as u32)
+    var by: u64 = y + 2
+    if fsbase.S.s_ct_head[(k) as usize] {
+        painter.round_rect(z, (x + 1) as f64, (y + 1) as f64, (w - 2) as f64,
+            fscore.HEAD_H() as f64, fscore.rless(fscore.rp(), 1.0), (*t).button | 4278190080 as u32)
+        var cx: u64 = x
+        var col: u64 = 0
+        while col < fsbase.S.s_ct_cols[(k) as usize] {
+
+            var hoff: u64 = 0
+            if col == 0 && fsbase.S.s_ct_icons[(k) as usize] != 0 {
+                hoff = icon_col(k)
+            }
+            var hxr: u64 = cx + fscore.sp(10) + hoff
+
+            var hav: u64 = 1
+            if fscore.colw_of(k, col, w) > fscore.sp(12) + hoff {
+                hav = fscore.colw_of(k, col, w) - fscore.sp(12) - hoff
+            }
+            if fsbase.S.s_ct_exact[(k) as usize] {
+                var hx0: u64 = cx + fscore.sp(10) + hoff
+                if ((fsbase.S.s_ct_ral[(k) as usize] >> col) & 1) != 0 {
+                    let htw: u64 = wlibc.text_w(wlibc.F_UI, fscore.sp(15), ct_text(k, fsbase.HEAD_ROW, col),
+                        ulib.length(ct_text(k, fsbase.HEAD_ROW, col)))
+                    if fscore.colw_of(k, col, w) > fscore.sp(14) + htw + hoff {
+                        hx0 = cx + fscore.colw_of(k, col, w) - fscore.sp(14) - htw
+                    }
+                }
+                hxr = hx0
+                fscore.two_text(hx0, fscore.mid_base(y, fscore.HEAD_H(), fscore.sp(15)), hav,
+                    ct_text(k, fsbase.HEAD_ROW, col), fscore.sp(15), false,
+                    (*t).text_muted | 4278190080 as u32)
+            } else {
+                fscore.text_tok(cx + fscore.sp(10) + hoff, y + (fscore.HEAD_H() - fscore.sp(24)) / 2 - fscore.sp(1),
+                    hav,
+                    ct_text(k, fsbase.HEAD_ROW, col), style.TOK_TEXT_MUTED)
+            }
+            if fscore.trace_on() {
+
+                let hpx: u64 = wlibc.px_ui()
+                let hasc: u64 = wlibc.ascent_of(wlibc.F_UI, hpx)
+                var hbase: u64 = y + (fscore.HEAD_H() - fscore.sp(24)) / 2 + (fscore.sp(24) + hasc) / 2
+                if fsbase.S.s_ct_exact[(k) as usize] {
+                    hbase = fscore.mid_base(y, fscore.HEAD_H(), fscore.sp(15))
+                }
+                fscore.say_text2(hxr, hbase, (*t).text_muted, (*t).button,
+                    hpx, ct_text(k, fsbase.HEAD_ROW, col))
+            }
+            cx = cx + fscore.colw_of(k, col, w)
+            col = col + 1
+        }
+        by = y + fscore.HEAD_H() + 2
+    }
+    let vis: u64 = ct_visible(k, h)
+    let rh: u64 = fsbase.S.s_ct_rh[(k) as usize]
+    var anybit: bool = false
+    if fsbase.S.s_ct_multi[(k) as usize] {
+        anybit = fscore.ctb_count(k) > 0
+    }
+    var r: u64 = 0
+    while r < vis && fsbase.S.s_ct_top[(k) as usize] + r < fsbase.S.s_ct_rows[(k) as usize] {
+        let ri: u64 = fsbase.S.s_ct_top[(k) as usize] + r
+        if fscore.row_head(k, ri) {
+
+            let hy0: u64 = by + r * rh
+            let hp: u64 = fscore.sp(13)
+            fscore.two_text(x + fscore.sp(12), navnum.mid_base(hy0 + fscore.sp(8), rh - fscore.sp(8), hp),
+                fscore.room_of(w, fscore.sp(24)), ct_text(k, ri, 0), hp, true, (*t).text_muted | 4278190080 as u32)
+            r = r + 1
+            continue
+        }
+        var on: bool = ri == fsbase.S.s_ct_sel[(k) as usize]
+        if fsbase.S.s_ct_multi[(k) as usize] && anybit {
+            on = fscore.ctb(k, ri)
+        }
+        let ry: u64 = by + r * rh
+        if on {
+            painter.round_rect(z, (x + fscore.sp(4)) as f64, ry as f64,
+                (w - fscore.sp(8)) as f64, rh as f64, fscore.rb(),
+                (*t).selection | 4278190080 as u32)
+            fscore.sel_bar(z, x + fscore.sp(4), ry, rh)
+        } else if fsbase.S.s_ct_hk == k + 1 && fsbase.S.s_ct_hr == ri + 1 {
+
+            painter.round_rect(z, (x + fscore.sp(4)) as f64, ry as f64,
+                (w - fscore.sp(8)) as f64, rh as f64, fscore.rb(), (*t).button_hover | 4278190080 as u32)
+        }
+        if fsbase.heat_k != 0 && ct_slot(fsbase.heat_k) == k && ri < 64 && (!on || fsbase.heat_bar_on) {
+            var hx: u64 = x
+            var hc: u64 = 0
+            while hc < fsbase.S.s_ct_cols[(k) as usize] {
+                let hw: u64 = fscore.colw_of(k, hc, w)
+                var hj: u64 = 2
+                if hc == fsbase.heat_c0 {
+                    hj = 0
+                } else if hc == fsbase.heat_c1 {
+                    hj = 1
+                }
+                if hj < 2 && fsbase.heat_v[(ri * 2 + hj) as usize] > 0 && fsbase.heat_bar_on {
+
+                    var bv: u64 = fsbase.heat_v[(ri * 2 + hj) as usize] - 1
+                    if bv > 1000 {
+                        bv = 1000
+                    }
+                    let bx: u64 = hx + fscore.sp(10)
+                    var bwid: u64 = 0
+                    if hw > fscore.sp(20) {
+                        bwid = hw - fscore.sp(20)
+                    }
+                    let by: u64 = ry + rh - fscore.sp(11)
+                    painter.round_rect(z, bx as f64, by as f64, bwid as f64, fscore.sp(6) as f64, fscore.spf(3.0),
+                        ((*t).border_col & 16777215 as u32) | 4278190080 as u32)
+                    var fw: u64 = bwid * bv / 1000
+                    if bv > 0 && fw < fscore.sp(6) {
+                        fw = fscore.sp(6)
+                    }
+                    if fw > 0 {
+
+                        var fc: u32 = (*t).accent
+                        if bv >= 900 {
+                            fc = (*t).err_col
+                        }
+                        painter.round_rect(z, bx as f64, by as f64, fw as f64, fscore.sp(6) as f64, fscore.spf(3.0),
+                            (fc & 16777215 as u32) | 4278190080 as u32)
+                    }
+                } else if hj < 2 && fsbase.heat_v[(ri * 2 + hj) as usize] > 0 {
+                    var hv: u64 = fsbase.heat_v[(ri * 2 + hj) as usize]
+                    if hv > 1000 {
+                        hv = 1000
+                    }
+                    let al: u64 = 20 + hv * 90 / 1000
+                    painter.round_rect(z, (hx + fscore.sp(4)) as f64, (ry + fscore.sp(2)) as f64,
+                        (hw - fscore.sp(8)) as f64, (rh - fscore.sp(4)) as f64, fscore.spf(4.0),
+                        ((*t).accent & 16777215 as u32) | ((al as u32) << 24))
+                }
+                hx = hx + hw
+                hc = hc + 1
+            }
+        }
+        var tok: u32 = style.TOK_TEXT
+        var tok2: u32 = style.TOK_TEXT_MUTED
+        if on {
+            tok = style.TOK_SELECTION_TEXT
+            tok2 = style.TOK_SELECTION_TEXT
+        }
+        var ix: u64 = 0
+        if fsbase.S.s_ct_icons[(k) as usize] != 0 {
+            let word: u64 = __mmio_read64((fsbase.S.s_ct_icons[(k) as usize] + ri * 8) as *mut u64)
+            let lvx: u64 = fscore.row_level(k, ri) * fscore.sp(16)
+            fsbase.row_tile_px = ct_font[(k) as usize] >> 32
+            fscore.row_icon(word, x + fscore.sp(8) + lvx, ry, rh, ct_text(k, ri, 0), on)
+            fsbase.row_tile_px = 0
+            ix = icon_col(k) + lvx
+        }
+        if fsbase.S.s_ct_two[(k) as usize] {
+
+            var c1: u32 = (*t).text
+            var c2: u32 = (*t).text_muted
+            if on {
+                c1 = (*t).selection_text
+                c2 = c1
+            }
+            fscore.two_text(x + fscore.sp(10) + ix, ry + fscore.sp(20), fscore.room_of(w, fscore.sp(22) + ix), ct_text(k, ri, 0), fscore.sp(15),
+                true, c1 | 4278190080 as u32)
+            fscore.two_text(x + fscore.sp(10) + ix, ry + fscore.sp(46), fscore.room_of(w, fscore.sp(22) + ix), ct_text(k, ri, 1), fscore.sp(12),
+                false, c2 | 4278190080 as u32)
+            if fscore.trace_on() {
+
+                var bg2: u32 = (*t).field
+                if on {
+                    bg2 = (*t).selection
+                }
+                fscore.say_text2(x + fscore.sp(10) + ix, ry + fscore.sp(46), c2, bg2, fscore.sp(12),
+                    ct_text(k, ri, 1))
+            }
+        } else {
+            var cx2: u64 = x
+            var col2: u64 = 0
+            while col2 < fsbase.S.s_ct_cols[(k) as usize] {
+                let cw: u64 = fscore.colw_of(k, col2, w)
+                var off: u64 = 0
+                if col2 == 0 {
+                    off = ix
+                }
+                if fsbase.S.s_ct_exact[(k) as usize] {
+                    var cc: u32 = (*t).text
+                    if on {
+                        cc = (*t).selection_text
+                    } else if col2 > 0 {
+                        cc = (*t).text_muted
+                    }
+                    var fs: u64 = fscore.sp(15)
+                    if ct_font[(k) as usize] != 0 {
+                        fs = fscore.sp(ct_font[(k) as usize] & 65535)
+                        if col2 > 0 {
+                            fs = fscore.sp((ct_font[(k) as usize] >> 16) & 65535)
+                        }
+                    }
+                    var shift: u64 = 0
+                    if ct_trail[(k) as usize] != 0 && col2 == fsbase.S.s_ct_cols[(k) as usize] - 1 {
+                        let tw: u64 = __mmio_read64((ct_trail[(k) as usize] + ri * 8) as *mut u64)
+                        if tw != 0 {
+                            shift = fscore.sp(26)
+                            fuiapp.glyph(tw & 65535, x + w - fscore.sp(28), ry + (rh - fscore.sp(14)) / 2, fscore.sp(14), (*t).text | 4278190080 as u32)
+                        }
+                    }
+                    var avail: u64 = 1
+                    if cw > fscore.sp(12) + off + shift {
+                        avail = cw - fscore.sp(12) - off - shift
+                    }
+                    let cp: u64 = fscore.fit_cell(ct_text(k, ri, col2), avail, fs)
+                    var tx: u64 = cx2 + fscore.sp(10) + off
+                    var clipw: u64 = avail
+                    if ((fsbase.S.s_ct_ral[(k) as usize] >> col2) & 1) != 0 {
+                        let tw2: u64 = wlibc.text_w(wlibc.F_UI, fs, cp, ulib.length(cp))
+                        if cw > fscore.sp(14) + shift + tw2 + off {
+                            tx = cx2 + cw - fscore.sp(14) - shift - tw2
+                            clipw = tw2 + fscore.sp(14)
+                        }
+                    }
+                    fscore.two_text(tx, fscore.mid_base(ry, rh, fs), clipw,
+                        cp, fs, false,
+                        cc | 4278190080 as u32)
+                } else {
+                    var plain_w: u64 = 1
+                    if cw > fscore.sp(12) + off {
+                        plain_w = cw - fscore.sp(12) - off
+                    }
+                    fscore.text_tok(cx2 + fscore.sp(10) + off, ry + fscore.tpad(rh) - fscore.sp(1), plain_w,
+                        ct_text(k, ri, col2), tok)
+                }
+                cx2 = cx2 + cw
+                col2 = col2 + 1
+            }
+        }
+        r = r + 1
+    }
+
+    if fsbase.S.s_hov_k == k && fsbase.S.s_hov_row != fsbase.HEAD_ROW && fsbase.S.s_hov_row >= fsbase.S.s_ct_top[(k) as usize]
+        && fsbase.S.s_hov_row < fsbase.S.s_ct_top[(k) as usize] + vis {
+        painter.round_ring(z, (x + fscore.sp(4)) as f64,
+            (by + (fsbase.S.s_hov_row - fsbase.S.s_ct_top[(k) as usize]) * rh) as f64,
+            (w - fscore.sp(8)) as f64, rh as f64, fscore.rb(), fscore.spf(2.0), (*t).accent | 4278190080 as u32)
+    }
+
+    let nrows: u64 = fsbase.S.s_ct_rows[(k) as usize]
+    if nrows > vis && vis > 0 {
+        let hot: bool = fsbase.S.s_ct_hk == k + 1 || fsbase.S.s_ct_sbk == k
+        navkit.paint_thumb(z, x as f64, by as f64, w as f64, (vis * rh) as f64, nrows, vis,
+            fsbase.S.s_ct_top[(k) as usize], fsbase.S.s_S as f64,
+            ((*t).text_muted & 16777215 as u32) | 2566914048 as u32, hot)
+    }
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, fscore.rf(), 1.0,
+        (*t).border_col | 4278190080 as u32)
+}
+
+fn table_two(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_two[(k) as usize] = on
+    if on {
+        fsbase.S.s_ct_rh[(k) as usize] = fscore.ROW2_H()
+    } else {
+        fsbase.S.s_ct_rh[(k) as usize] = fscore.ROW_H()
+    }
+    fscore.touch()
+}
+
+fn table_text_x(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return 0
+    }
+    var ix: u64 = 0
+    if fsbase.S.s_ct_icons[(k) as usize] != 0 {
+        ix = icon_col(k)
+    }
+    return fscore.node_x(fsbase.S.s_ct_node[(k) as usize]) + fscore.sp(10) + ix
+}
+
+fn table_row_h(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return 0
+    }
+    return fsbase.S.s_ct_rh[(k) as usize]
+}
+
+fn table_row_top(key: u64, row: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return 0
+    }
+    var by: u64 = fscore.node_y(fsbase.S.s_ct_node[(k) as usize]) + 2
+    if fsbase.S.s_ct_head[(k) as usize] {
+        by = by + fscore.HEAD_H()
+    }
+    return by + (row - fsbase.S.s_ct_top[(k) as usize]) * fsbase.S.s_ct_rh[(k) as usize]
+}
+
+fn table_base(key: u64, row: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT && !fsbase.S.s_ct_two[(k) as usize] && fsbase.S.s_ct_exact[(k) as usize] {
+
+        return fscore.mid_base(table_row_top(key, row), fsbase.S.s_ct_rh[(k) as usize], fscore.sp(15))
+    }
+    return table_row_top(key, row) + fscore.sp(20)
+}
+
+fn table_head_base(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return 0
+    }
+    return fscore.mid_base(fscore.node_y(fsbase.S.s_ct_node[(k) as usize]), fscore.HEAD_H(), fscore.sp(15))
+}
+
+fn table_icon_x(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return 0
+    }
+
+    if fsbase.S.s_ct_rh[(k) as usize] >= 44 * fsbase.S.s_S {
+        return fscore.node_x(fsbase.S.s_ct_node[(k) as usize]) + fscore.sp(13)
+    }
+    return fscore.node_x(fsbase.S.s_ct_node[(k) as usize]) + fscore.sp(12)
+}
+
+fn table_icon_y(key: u64, row: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT && fsbase.S.s_ct_rh[(k) as usize] >= 44 * fsbase.S.s_S {
+        return table_row_top(key, row) + fscore.sat_sub(table_row_h(key), fscore.sp(32)) / 2
+    }
+    return table_row_top(key, row) + fscore.sat_sub(table_row_h(key), fscore.sp(22)) / 2 + fscore.sp(3)
+}
+
+fn table_rgb(which: u64) -> u64 {
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    if which == 1 {
+        return fscore.rgb_of((*t).text)
+    }
+    if which == 2 {
+        return fscore.rgb_of((*t).text_muted)
+    }
+    if which == 3 {
+        return fscore.rgb_of((*t).selection)
+    }
+    if which == 4 {
+        return fscore.rgb_of((*t).selection_text)
+    }
+    if which == 5 {
+
+        return fscore.rgb_of((*t).button)
+    }
+    return fscore.rgb_of((*t).field)
+}
+
+fn table_below_rows(key: u64, x: u64, y: u64) -> bool {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return false
+    }
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    if x < fscore.node_x(i) || x >= fscore.node_x(i) + fscore.node_w(i) || y < fscore.node_y(i) || y >= fscore.node_y(i) + fscore.node_h(i) {
+        return false
+    }
+    var by: u64 = fscore.node_y(i) + 2
+    if fsbase.S.s_ct_head[(k) as usize] {
+        by = by + fscore.HEAD_H()
+    }
+    if y < by {
+        return false
+    }
+    return fsbase.S.s_ct_top[(k) as usize] + (y - by) / fsbase.S.s_ct_rh[(k) as usize] >= fsbase.S.s_ct_rows[(k) as usize]
+}
+
+fn table_row_at(key: u64, x: u64, y: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return fsbase.HEAD_ROW
+    }
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    if x < fscore.node_x(i) || x >= fscore.node_x(i) + fscore.node_w(i) || y < fscore.node_y(i)
+        || y >= fscore.node_y(i) + fscore.node_h(i) {
+        return fsbase.HEAD_ROW
+    }
+    var by: u64 = fscore.node_y(i) + 2
+    if fsbase.S.s_ct_head[(k) as usize] {
+        by = by + fscore.HEAD_H()
+    }
+    if y < by {
+        return fsbase.HEAD_ROW
+    }
+    let row: u64 = fsbase.S.s_ct_top[(k) as usize] + (y - by) / fsbase.S.s_ct_rh[(k) as usize]
+    if row >= fsbase.S.s_ct_rows[(k) as usize] {
+        return fsbase.HEAD_ROW
+    }
+    return row
+}
+
+fn table_row_height(key: u64, h: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_two[(k) as usize] {
+        return
+    }
+    fsbase.S.s_ct_rh[(k) as usize] = fscore.sp(h)
+    fscore.touch()
+}
+
+fn table_icons(key: u64, arr: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_icons[(k) as usize] = arr
+    fscore.touch()
+}
+
+fn table(parent: usize, key: u64, w: u64, h: u64, cols: u64, head: bool,
+    rows: u64, get: fn(u64, u64) -> u64) -> usize {
+    let i: usize = scene.scene_add(fscore.sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return fsbase.NONE
+    }
+    scene.node_set_widget_kind(fscore.sc(), i, widget.KIND_LIST)
+    scene.node_set_size(fscore.sc(), i, w as f64, h as f64)
+    scene.node_set_draw(fscore.sc(), i, 0, draw_ct)
+    scene.node_set_id(fscore.sc(), i, key as u32)
+    var k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT && fsbase.S.s_ct_n < CT_MAX {
+        k = fsbase.S.s_ct_n
+        fsbase.S.s_ct_n = fsbase.S.s_ct_n + 1
+        fsbase.S.s_ct_key[(k) as usize] = key
+        fsbase.S.s_ct_top[(k) as usize] = 0
+        fsbase.S.s_ct_sel[(k) as usize] = 0
+        fsbase.S.s_ct_rh[(k) as usize] = fscore.ROW_H()
+        fsbase.S.s_ct_two[(k) as usize] = false
+        fsbase.S.s_ct_icons[(k) as usize] = 0
+        var c: u64 = 0
+        while c < fsbase.CT_COLS && w > 2 {
+            fsbase.S.s_ct_colw[(k * fsbase.CT_COLS + c) as usize] = (fscore.sp(w) - 2) / cols
+            c = c + 1
+        }
+    }
+    if k == fsbase.NO_SLOT {
+        return i
+    }
+    if fsbase.S.s_ct_colw[(k * fsbase.CT_COLS) as usize] == 0 && w > 2 {
+        var c2: u64 = 0
+        while c2 < fsbase.CT_COLS {
+            fsbase.S.s_ct_colw[(k * fsbase.CT_COLS + c2) as usize] = (fscore.sp(w) - 2) / cols
+            c2 = c2 + 1
+        }
+    }
+    fsbase.S.s_ct_node[(k) as usize] = i
+    fsbase.S.s_ct_rows[(k) as usize] = rows
+    fsbase.S.s_ct_cols[(k) as usize] = cols
+    fsbase.S.s_ct_head[(k) as usize] = head
+    *ct_get_slot(k) = get
+    if fsbase.S.s_ct_sel[(k) as usize] >= rows && rows > 0
+        && fsbase.S.s_ct_sel[(k) as usize] != fsbase.HEAD_ROW {
+        fsbase.S.s_ct_sel[(k) as usize] = rows - 1
+    }
+    return i
+}
+
+fn table_prep(key: u64) {
+    if ct_slot(key) == fsbase.NO_SLOT && fsbase.S.s_ct_n < CT_MAX {
+        let k: u64 = fsbase.S.s_ct_n
+        fsbase.S.s_ct_n = fsbase.S.s_ct_n + 1
+        fsbase.S.s_ct_key[(k) as usize] = key
+        fsbase.S.s_ct_top[(k) as usize] = 0
+        fsbase.S.s_ct_sel[(k) as usize] = 0
+        fsbase.S.s_ct_rh[(k) as usize] = fscore.ROW_H()
+        fsbase.S.s_ct_two[(k) as usize] = false
+        fsbase.S.s_ct_icons[(k) as usize] = 0
+    }
+}
+
+fn table_set_rows(key: u64, rows: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_rows[(k) as usize] = rows
+    if rows == 0 {
+        fsbase.S.s_ct_sel[(k) as usize] = 0
+    } else if fsbase.S.s_ct_sel[(k) as usize] >= rows
+        && fsbase.S.s_ct_sel[(k) as usize] != fsbase.HEAD_ROW {
+        fsbase.S.s_ct_sel[(k) as usize] = rows - 1
+    }
+    fscore.touch()
+}
+
+fn table_sel(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return 0
+    }
+    return fsbase.S.s_ct_sel[(k) as usize]
+}
+
+fn table_set_sel(key: u64, row: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_sel[(k) as usize] = row
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+
+    if i != fsbase.NONE && row != fsbase.HEAD_ROW {
+        ct_reveal(k, fscore.node_h(i))
+    }
+    fscore.touch()
+}
+
+fn table_colw(key: u64, col: u64, w: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || col >= fsbase.CT_COLS {
+        return
+    }
+    fsbase.S.s_ct_colw[(k * fsbase.CT_COLS + col) as usize] = fscore.sp(w)
+    fscore.touch()
+}
+
+fn table_head_col() -> u64 {
+    let c: u64 = fsbase.S.s_ct_headcol
+    fsbase.S.s_ct_headcol = 4294967295
+    return c
+}
+
+static mut rs_on: [u8; 8] = [0 as u8; 8]
+
+fn table_resize_seq() -> u64 {
+    return fsbase.rs_seq
+}
+
+fn table_resizable(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    if on {
+        rs_on[(k) as usize] = 1 as u8
+    } else {
+        rs_on[(k) as usize] = 0 as u8
+    }
+}
+
+fn table_colw_get(key: u64, col: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || col >= fsbase.CT_COLS {
+        return 0
+    }
+    return fsbase.S.s_ct_colw[(k * fsbase.CT_COLS + col) as usize] / fsbase.S.s_S
+}
+
+fn ct_edge_at(x: u64, y: u64) -> bool {
+    let k: u64 = ct_at(x, y)
+    if k == fsbase.NO_SLOT || rs_on[(k) as usize] == 0 as u8 || !fsbase.S.s_ct_head[(k) as usize] {
+        return false
+    }
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    if y >= fscore.node_y(i) + fscore.HEAD_H() + 2 {
+        return false
+    }
+    var cx: u64 = fscore.node_x(i)
+    var col: u64 = 0
+    while col + 1 < fsbase.S.s_ct_cols[(k) as usize] {
+        let cw: u64 = fscore.colw_of(k, col, fscore.node_w(i))
+        if x + fscore.sp(4) >= cx + cw && x <= cx + cw + fscore.sp(4) {
+            return true
+        }
+        cx = cx + cw
+        col = col + 1
+    }
+    return false
+}
+
+fn ct_press(k: u64, x: u64, y: u64, btn: u64) -> u64 {
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    let nx: u64 = fscore.node_x(i)
+    let ny: u64 = fscore.node_y(i)
+    let nh: u64 = fscore.node_h(i)
+    var by: u64 = ny + 2
+
+    if fsbase.S.s_ct_rows[(k) as usize] > ct_visible(k, nh)
+        && x + fscore.SB_W() + fscore.sp(6) >= nx + fscore.node_w(i) && y >= ny + fscore.sp(2) {
+        var hy: u64 = ny + 2
+        if fsbase.S.s_ct_head[(k) as usize] {
+            hy = ny + fscore.HEAD_H() + 2
+        }
+        if y >= hy {
+            fsbase.S.s_ct_sbk = k
+            ct_sb_set(k, y)
+            return 0
+        }
+    }
+    if fsbase.S.s_ct_head[(k) as usize] {
+        if y < ny + fscore.HEAD_H() + 2 {
+            var cx: u64 = nx
+            var col: u64 = 0
+            while col < fsbase.S.s_ct_cols[(k) as usize] {
+                let cw: u64 = fscore.colw_of(k, col, fscore.node_w(i))
+
+                if col + 1 < fsbase.S.s_ct_cols[(k) as usize] && rs_on[(k) as usize] != 0 as u8
+                    && x + fscore.sp(4) >= cx + cw && x <= cx + cw + fscore.sp(4) {
+                    fsbase.rs_k = k
+                    fsbase.rs_col = col
+                    fsbase.rs_x0 = x
+                    fsbase.rs_w0 = cw
+                    fsbase.rs_w1 = fscore.colw_of(k, col + 1, fscore.node_w(i))
+
+                    var cc: u64 = 0
+                    while cc < fsbase.S.s_ct_cols[(k) as usize] {
+                        fsbase.S.s_ct_colw[(k * fsbase.CT_COLS + cc) as usize] = fscore.colw_of(k, cc, fscore.node_w(i))
+                        cc = cc + 1
+                    }
+                    return 0
+                }
+                if x >= cx && x < cx + cw {
+                    fsbase.S.s_ct_headcol = col
+                    return fsbase.S.s_ct_key[(k) as usize]
+                }
+                cx = cx + cw
+                col = col + 1
+            }
+            return 0
+        }
+        by = ny + fscore.HEAD_H() + 2
+    }
+    if y < by {
+        return 0
+    }
+    let rhp: u64 = fsbase.S.s_ct_rh[(k) as usize]
+    let row: u64 = fsbase.S.s_ct_top[(k) as usize] + (y - by) / rhp
+    if (y - by) / rhp >= ct_visible(k, nh) || row >= fsbase.S.s_ct_rows[(k) as usize] {
+        return 0
+    }
+    if fscore.row_head(k, row) {
+        return 0
+    }
+    let now: u64 = fuiapp.now_ms()
+    var act: u64 = 0
+    if row == fsbase.S.s_ct_last_row && now < fsbase.S.s_ct_last_t + 1000 {
+        act = fsbase.S.s_ct_key[(k) as usize]
+    }
+    if fsbase.S.s_ct_one[(k) as usize] {
+        act = fsbase.S.s_ct_key[(k) as usize]
+        fsbase.S.s_ct_headcol = 4294967295
+    }
+    if fsbase.S.s_ct_multi[(k) as usize] {
+        if (btn & 16) != 0 {
+
+            fscore.ctb_set(k, row, !fscore.ctb(k, row))
+            fsbase.S.s_ct_anch[(k) as usize] = row
+            act = 0
+        } else if (btn & 8) != 0 {
+
+            fscore.ctb_range(k, fsbase.S.s_ct_anch[(k) as usize], row)
+            act = 0
+        } else {
+
+            if !fscore.ctb(k, row) || fscore.ctb_count(k) < 2 {
+                fscore.ctb_clear(k)
+                fscore.ctb_set(k, row, true)
+            }
+            fsbase.S.s_ct_anch[(k) as usize] = row
+        }
+    }
+    if fsbase.S.s_ct_multi[(k) as usize] || fsbase.S.s_ct_dragon[(k) as usize] {
+        fsbase.S.s_ct_dn = k
+        fsbase.S.s_ct_dnrow = row
+        fsbase.S.s_ct_dragged = false
+    }
+    fsbase.S.s_ct_last_row = row
+    fsbase.S.s_ct_last_t = now
+    fsbase.S.s_ct_sel[(k) as usize] = row
+    fscore.touch()
+    return act
+}
+
+fn ct_sb_set(k: u64, y: u64) {
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    if i == fsbase.NONE {
+        return
+    }
+    var by: u64 = fscore.node_y(i) + 2
+    if fsbase.S.s_ct_head[(k) as usize] {
+        by = fscore.node_y(i) + fscore.HEAD_H() + 2
+    }
+    let vis: u64 = ct_visible(k, fscore.node_h(i))
+    let rows: u64 = fsbase.S.s_ct_rows[(k) as usize]
+    if rows <= vis || vis == 0 {
+        return
+    }
+    let th: u64 = vis * fsbase.S.s_ct_rh[(k) as usize]
+    var rel: u64 = 0
+    if y > by {
+        rel = y - by
+    }
+    if rel > th {
+        rel = th
+    }
+    var top: u64 = (rel * (rows - vis) + th / 2) / th
+    if top > rows - vis {
+        top = rows - vis
+    }
+    fsbase.S.s_ct_top[(k) as usize] = top
+    fscore.touch()
+}
+
+fn ct_move(x: u64, y: u64, btn: u64) -> u64 {
+    if fsbase.rs_k != fsbase.NO_SLOT {
+        if (btn & 1) == 0 {
+            fscore.rs_end()
+        } else {
+            fscore.rs_drag(x)
+        }
+        return 0
+    }
+    if fsbase.S.s_ct_sbk != fsbase.NO_SLOT {
+        if (btn & 1) == 0 {
+            fsbase.S.s_ct_sbk = fsbase.NO_SLOT
+        } else {
+            ct_sb_set(fsbase.S.s_ct_sbk, y)
+        }
+        return 0
+    }
+    let k: u64 = fsbase.S.s_ct_dn
+    if k == fsbase.NO_SLOT {
+        return 0
+    }
+    if (btn & 1) == 0 {
+        fsbase.S.s_ct_dn = fsbase.NO_SLOT
+        return 0
+    }
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    let rows: u64 = fsbase.S.s_ct_rows[(k) as usize]
+    if i == fsbase.NONE || rows == 0 {
+        return 0
+    }
+    var by: u64 = fscore.node_y(i) + 2
+    if fsbase.S.s_ct_head[(k) as usize] {
+        by = fscore.node_y(i) + fscore.HEAD_H() + 2
+    }
+    let vis: u64 = ct_visible(k, fscore.node_h(i))
+    var row: u64 = fsbase.S.s_ct_top[(k) as usize]
+    if y >= by && vis > 0 {
+        let rr: u64 = (y - by) / fsbase.S.s_ct_rh[(k) as usize]
+        if rr >= vis {
+
+            if fsbase.S.s_ct_top[(k) as usize] + vis < rows && !fsbase.S.s_ct_dragged {
+                fsbase.S.s_ct_top[(k) as usize] = fsbase.S.s_ct_top[(k) as usize] + 1
+            }
+            row = fsbase.S.s_ct_top[(k) as usize] + vis - 1
+        } else {
+            row = fsbase.S.s_ct_top[(k) as usize] + rr
+        }
+    } else if fsbase.S.s_ct_top[(k) as usize] > 0 && !fsbase.S.s_ct_dragged {
+        fsbase.S.s_ct_top[(k) as usize] = fsbase.S.s_ct_top[(k) as usize] - 1
+        row = fsbase.S.s_ct_top[(k) as usize]
+    }
+    if row >= rows {
+        row = rows - 1
+    }
+    if row == fsbase.S.s_ct_sel[(k) as usize] && !fsbase.S.s_ct_dragged {
+        return 0
+    }
+    if fsbase.S.s_ct_dragon[(k) as usize] {
+        if !fsbase.S.s_ct_dragged {
+            fsbase.S.s_ct_dragged = true
+            fsbase.S.s_drag_key = fsbase.S.s_ct_key[(k) as usize]
+            fsbase.S.s_drag_row = fsbase.S.s_ct_dnrow
+            fsbase.S.s_mx = x
+            fsbase.S.s_my = y
+            return KEY_DRAG
+        }
+        return 0
+    }
+    if fsbase.S.s_ct_multi[(k) as usize] {
+        fscore.ctb_range(k, fsbase.S.s_ct_anch[(k) as usize], row)
+        fsbase.S.s_ct_sel[(k) as usize] = row
+        fsbase.S.s_ct_frames = fsbase.S.s_ct_frames + 1
+        fscore.touch()
+    }
+    return 0
+}
+
+fn ct_hover(x: u64, y: u64) {
+    var nk: u64 = fsbase.NO_SLOT
+    var nr: u64 = fsbase.HEAD_ROW
+    let k: u64 = ct_at(x, y)
+    if k != fsbase.NO_SLOT && fsbase.S.s_ct_dfset[(k) as usize] {
+        let r: u64 = table_row_at(fsbase.S.s_ct_key[(k) as usize], x, y)
+        if r != fsbase.HEAD_ROW {
+            let f: fn(u64) -> bool = *(((&fsbase.S.s_ct_df[0 as usize]) as u64 + k * 8) as *mut fn(u64) -> bool)
+            if f(r) {
+                nk = k
+                nr = r
+            }
+        }
+    }
+    if nk != fsbase.S.s_hov_k || nr != fsbase.S.s_hov_row {
+        fsbase.S.s_hov_k = nk
+        fsbase.S.s_hov_row = nr
+        fscore.touch()
+    }
+}
+
+fn ct_key(k: u64, key: u64) -> u64 {
+    let i: usize = fsbase.S.s_ct_node[(k) as usize]
+    let rows: u64 = fsbase.S.s_ct_rows[(k) as usize]
+    let vis: u64 = ct_visible(k, fscore.node_h(i))
+    var sel: u64 = fsbase.S.s_ct_sel[(k) as usize]
+    if key == wlib.KEY_ENTER {
+        return fsbase.S.s_ct_key[(k) as usize]
+    }
+    if rows == 0 {
+        return 0
+    }
+    if sel >= rows {
+
+        if key == wlib.KEY_DOWN || key == wlib.KEY_HOME || key == wlib.KEY_PGDN {
+            sel = 0
+        } else if key == wlib.KEY_UP || key == wlib.KEY_END || key == wlib.KEY_PGUP {
+            sel = rows - 1
+        }
+    } else if key == wlib.KEY_DOWN && sel + 1 < rows {
+        sel = sel + 1
+    } else if key == wlib.KEY_UP && sel > 0 {
+        sel = sel - 1
+    } else if key == wlib.KEY_PGDN {
+        sel = sel + vis
+        if sel >= rows {
+            sel = rows - 1
+        }
+    } else if key == wlib.KEY_PGUP {
+        if sel > vis {
+            sel = sel - vis
+        } else {
+            sel = 0
+        }
+    } else if key == wlib.KEY_HOME {
+        sel = 0
+    } else if key == wlib.KEY_END {
+        sel = rows - 1
+    }
+    if sel < rows && fscore.row_head(k, sel) {
+        sel = fscore.skip_head(k, sel, rows, key == wlib.KEY_UP || key == wlib.KEY_PGUP || key == wlib.KEY_HOME)
+    }
+    if sel != fsbase.S.s_ct_sel[(k) as usize] {
+        fsbase.S.s_ct_sel[(k) as usize] = sel
+        if fsbase.S.s_ct_multi[(k) as usize] {
+            if wlib.key_shift() {
+                fscore.ctb_range(k, fsbase.S.s_ct_anch[(k) as usize], sel)
+            } else {
+                fscore.ctb_clear(k)
+                fscore.ctb_set(k, sel, true)
+                fsbase.S.s_ct_anch[(k) as usize] = sel
+            }
+        }
+        ct_reveal(k, fscore.node_h(i))
+        fscore.touch()
+        if fsbase.S.s_ct_one[(k) as usize] && !fsbase.S.s_ct_kq[(k) as usize] {
+            fsbase.S.s_ct_headcol = 4294967295
+            return fsbase.S.s_ct_key[(k) as usize]
+        }
+    }
+    return 0
+}
+
+fn toggle_lines(p: u64, room: u64, out: u64) -> u64 {
+    var buf: [u8; 200] = [0 as u8; 200]
+    var n: u64 = ulib.length(p)
+    if n > 190 {
+        n = 190
+    }
+    var k: u64 = 0
+    while k < n {
+        buf[(k) as usize] = __mmio_read8((p + k) as *mut u8)
+        k = k + 1
+    }
+    buf[(n) as usize] = 0 as u8
+    let b0: u64 = (&buf[0 as usize]) as u64
+    var lines: u64 = 0
+    var at: u64 = 0
+    while at < n && lines < 3 {
+
+        var cut: u64 = n
+        if lines < 2 && fscore.text_width(b0 + at, fscore.sp(13)) > room {
+            var best: u64 = 0
+            var q: u64 = at
+            while q < n {
+                if buf[(q) as usize] == 32 as u8 {
+                    buf[(q) as usize] = 0 as u8
+                    let fits: bool = fscore.text_width(b0 + at, fscore.sp(13)) <= room
+                    buf[(q) as usize] = 32 as u8
+                    if fits {
+                        best = q
+                    }
+                }
+                q = q + 1
+            }
+            if best == 0 {
+
+                q = at
+                while q < n && buf[(q) as usize] != 32 as u8 {
+                    q = q + 1
+                }
+                best = q
+            }
+            cut = best
+        }
+        let o: u64 = lines * 80
+        var m: u64 = 0
+        while m < cut - at && m < 79 {
+            __mmio_write8((out + o + m) as *mut u8, buf[(at + m) as usize])
+            m = m + 1
+        }
+        __mmio_write8((out + o + m) as *mut u8, 0 as u8)
+        lines = lines + 1
+        at = cut
+        if at < n && buf[(at) as usize] == 32 as u8 {
+            at = at + 1
+        }
+    }
+    return lines
+}
+
+fn draw_toggle(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let on: bool = widget.w_value(e) != 0
+
+    fscore.cv_rect(x, y, w, h, fsbase.R_SURFACE)
+    let tw: u64 = fscore.sp(36)
+    let th: u64 = fscore.sp(18)
+    let tx: u64 = x + fscore.sat_sub(w, tw + fscore.sp(4))
+    let ty: u64 = y + (h - th) / 2
+    if on {
+        fscore.cv_round(tx, ty, tw, th, th / 2, fsbase.R_ACCENT)
+    } else {
+        fscore.cv_round(tx, ty, tw, th, th / 2, fsbase.R_BORDER)
+        fscore.cv_round(tx + 1, ty + 1, tw - 2, th - 2, th / 2, fsbase.R_SURFACE)
+    }
+    let kd: u64 = th - fscore.sp(8)
+    var kx: u64 = tx + fscore.sp(4)
+    if on {
+        kx = tx + tw - fscore.sp(4) - kd
+    }
+    if on {
+        fscore.cv_round_rgb(kx, ty + fscore.sp(4), kd, kd, kd / 2, 16777215)
+    } else {
+        fscore.cv_round(kx, ty + fscore.sp(4), kd, kd, kd / 2, fsbase.R_MUTED)
+    }
+    if widget.w_is_focus(e) {
+        fscore.cv_ring(tx - 2, ty - 2, tw + 4, th + 4, (th + 4) / 2, fsbase.R_ACCENT)
+    }
+    if ud == 1 {
+
+        var ls: [u8; 240] = [0 as u8; 240]
+        let lp: u64 = (&ls[0 as usize]) as u64
+        let room: u64 = fscore.sat_sub(w, tw + fscore.sp(16))
+        let nl: u64 = toggle_lines(widget.w_text(e), room, lp)
+        var base: u64 = y + h / 2 + fscore.sp(5) - (nl - 1) * fscore.sp(7)
+        var li: u64 = 0
+        while li < nl {
+            fscore.text_role(x + fscore.sp(4), base, room, lp + li * 80, fscore.sp(13), false, fsbase.R_TEXT)
+            base = base + fscore.sp(14)
+            li = li + 1
+        }
+        return
+    }
+    fscore.text_role(x + fscore.sp(4), y + h / 2 + fscore.sp(5), fscore.sat_sub(w, tw + fscore.sp(16)), widget.w_text(e), fscore.sp(13), false, fsbase.R_TEXT)
+}
+
+fn button_fit(i: usize, text: u64, w: u64) {
+    if i == fsbase.NONE {
+        return
+    }
+    if fsbase.tg_room == 0 {
+        scene.node_set_size(fscore.sc(), i, w as f64, 28.0)
+        return
+    }
+    var avail: u64 = w
+    if w == 0 || w > fsbase.tg_room {
+        avail = fsbase.tg_room
+    }
+
+    if fscore.text_width(text, fscore.sp(15)) > fscore.sp(avail) - fscore.sp(19) {
+        scene.node_set_text_wrap(fscore.sc(), i, 2)
+        scene.node_set_size(fscore.sc(), i, w as f64, 46.0)
+    } else {
+        scene.node_set_size(fscore.sc(), i, w as f64, 28.0)
+    }
+}
+
+fn toggle(parent: usize, text: u64, key: u64, on: bool) -> usize {
+    let i: usize = fsctl.check(parent, text, key, on)
+    if i != fsbase.NONE {
+        var wrapped: bool = false
+        var lines: u64 = 1
+        if fsbase.tg_room > 0 {
+
+            let room: u64 = fscore.sp(fsbase.tg_room) - fscore.sp(36) - fscore.sp(16)
+            let tw0: u64 = fscore.text_width(text, fscore.sp(13))
+            if tw0 > room {
+                wrapped = true
+                lines = (tw0 + room - 1) / room + 1
+                if lines > 3 {
+                    lines = 3
+                }
+            }
+        }
+        if wrapped {
+            scene.node_set_draw(fscore.sc(), i, 1, draw_toggle)
+            scene.node_set_text_wrap(fscore.sc(), i, lines as usize)
+            scene.node_set_size(fscore.sc(), i, 0.0, (14 * lines + 14) as f64)
+        } else {
+            scene.node_set_draw(fscore.sc(), i, 0, draw_toggle)
+            scene.node_set_size(fscore.sc(), i, 0.0, 28.0)
+        }
+    }
+    return i
+}
+
+fn draw_segment(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let x: u64 = widget.w_x(e) as u64
+    let y: u64 = widget.w_y(e) as u64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let i: u64 = ud % 256
+    let sel: u64 = (ud / 256) % 256
+    let on: bool = i == sel
+    let r: u64 = fscore.sp(6)
+    var role: u64 = fsbase.R_TEXT
+    if on {
+        fscore.cv_round(x, y, w, h, r, fsbase.R_ACCENT)
+        role = fsbase.R_ONFILL
+    } else {
+        fscore.cv_round(x, y, w, h, r, R_FIELD)
+        fscore.cv_ring(x, y, w, h, r, fsbase.R_BORDER)
+        if widget.w_is_hover(e) {
+            fscore.cv_round_a(x, y, w, h, r, 16777215, 30)
+        }
+    }
+    if widget.w_is_focus(e) {
+        fscore.cv_ring(x - 2, y - 2, w + 4, h + 4, r + 1, fsbase.R_ACCENT)
+    }
+    let nm: u64 = widget.w_text(e)
+    let tw: u64 = fscore.text_width(nm, fscore.sp(13))
+    var tx: u64 = x
+    if w > tw {
+        tx = x + (w - tw) / 2
+    }
+    fscore.text_role(tx, y + h / 2 + fscore.sp(5), w, nm, fscore.sp(13), on, role)
+}
+
+fn table_blob(parent: usize, key: u64, w: u64, h: u64, cols: u64,
+    blob: u64) -> usize {
+    let i: usize = table(parent, key, w, h, cols, true, fsctl.blob_rows(blob), fscore.no_get)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        fsbase.S.s_ct_blob[(k) as usize] = blob
+        fsbase.S.s_ct_rows[(k) as usize] = fsctl.blob_rows(blob)
+        if fsbase.S.s_ct_sel[(k) as usize] >= fsbase.S.s_ct_rows[(k) as usize]
+            && fsbase.S.s_ct_sel[(k) as usize] != fsbase.HEAD_ROW {
+            fsbase.S.s_ct_sel[(k) as usize] = 0
+        }
+    }
+    return i
+}
+
+fn table_list(parent: usize, key: u64, w: u64, h: u64, cols: u64,
+    blob: u64) -> usize {
+    let n: u64 = fsctl.blob_lines(blob)
+    let i: usize = table(parent, key, w, h, cols, false, n, fscore.no_get)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        fsbase.S.s_ct_blob[(k) as usize] = blob
+        fsbase.S.s_ct_plain[(k) as usize] = true
+        fsbase.S.s_ct_rows[(k) as usize] = n
+        if fsbase.S.s_ct_sel[(k) as usize] >= n && fsbase.S.s_ct_sel[(k) as usize] != fsbase.HEAD_ROW {
+            if n > 0 {
+                fsbase.S.s_ct_sel[(k) as usize] = n - 1
+            } else {
+                fsbase.S.s_ct_sel[(k) as usize] = 0
+            }
+        }
+    }
+    return i
+}
+
+fn table_set_blob(key: u64, blob: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_blob[(k) as usize] = blob
+    var n: u64 = fsctl.blob_rows(blob)
+    if fsbase.S.s_ct_plain[(k) as usize] {
+        n = fsctl.blob_lines(blob)
+    }
+    table_set_rows(key, n)
+}
+
+fn table_single(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_one[(k) as usize] = on
+}
+
+fn table_click_only(key: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_one[(k) as usize] = on
+    fsbase.S.s_ct_kq[(k) as usize] = on
+}
+
+fn table_exact(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        fsbase.S.s_ct_exact[(k) as usize] = on
+    }
+}
+
+fn table_trail(key: u64, arr: u64) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        ct_trail[(k) as usize] = arr
+        fscore.touch()
+    }
+}
+
+fn table_font(key: u64, name_px: u64, quiet_px: u64, icon_px: u64) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        ct_font[(k) as usize] = name_px | (quiet_px << 16) | (icon_px << 32)
+        fscore.touch()
+    }
+}
+
+fn table_own(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        fsbase.S.s_ct_own[(k) as usize] = on
+    }
+}
+
+fn table_multi(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        fsbase.S.s_ct_multi[(k) as usize] = on
+    }
+}
+
+fn table_drag(key: u64, on: bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        fsbase.S.s_ct_dragon[(k) as usize] = on
+    }
+}
+
+fn table_drop_filter(key: u64, f: fn(u64) -> bool) {
+    table_prep(key)
+    let k: u64 = ct_slot(key)
+    if k != fsbase.NO_SLOT {
+        *(((&fsbase.S.s_ct_df[0 as usize]) as u64 + k * 8) as *mut fn(u64) -> bool) = f
+        fsbase.S.s_ct_dfset[(k) as usize] = true
+    }
+}
+
+fn table_sel_has(key: u64, row: u64) -> bool {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return false
+    }
+    return fscore.ctb(k, row)
+}
+
+fn table_sel_num(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return 0
+    }
+    return fscore.ctb_count(k)
+}
+
+fn table_sel_all(key: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fscore.ctb_clear(k)
+    var r: u64 = 0
+    while r < fsbase.S.s_ct_rows[(k) as usize] && r < 4096 {
+        fscore.ctb_set(k, r, true)
+        r = r + 1
+    }
+    fscore.touch()
+}
+
+fn table_sel_none(key: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fscore.ctb_clear(k)
+    fscore.touch()
+}
+
+fn table_sel_set(key: u64, row: u64, on: bool) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fscore.ctb_set(k, row, on)
+    fscore.touch()
+}
+
+fn table_anchor(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return 0
+    }
+    return fsbase.S.s_ct_anch[(k) as usize]
+}
+
+fn table_frames() -> u64 {
+    return fsbase.S.s_ct_frames
+}
+
+fn table_top(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return 0
+    }
+    return fsbase.S.s_ct_top[(k) as usize]
+}
+
+fn table_set_top(key: u64, top: u64) {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    fsbase.S.s_ct_top[(k) as usize] = top
+    fscore.touch()
+}
+
+fn table_visible(key: u64) -> u64 {
+    let k: u64 = ct_slot(key)
+    if k == fsbase.NO_SLOT || fsbase.S.s_ct_node[(k) as usize] == fsbase.NONE {
+        return 0
+    }
+    return ct_visible(k, fscore.node_h(fsbase.S.s_ct_node[(k) as usize]))
+}
+
+const R_FIELD: u64 = 0
+
+const CV_MAX: u64 = 12
+
+fn draw_cv(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let i: usize = scene.scene_node_of(fscore.sc(), e)
+    var k: u64 = 0
+    while k < fsbase.S.s_cv_n {
+        if fsbase.S.s_cv_node[(k) as usize] == i {
+            let f: fn(u64, u64, u64, u64) = *fscore.cv_fn_slot(k)
+            f(widget.w_x(e) as u64, widget.w_y(e) as u64,
+                widget.w_w(e) as u64, widget.w_h(e) as u64)
+            return
+        }
+        k = k + 1
+    }
+}
+
+fn canvas(parent: usize, key: u64, w: u64, h: u64,
+    draw: fn(u64, u64, u64, u64)) -> usize {
+    let i: usize = scene.scene_add(fscore.sc(), parent, scene.N_WIDGET)
+    if i == scene.SCENE_NONE {
+        return fsbase.NONE
+    }
+    scene.node_set_widget_kind(fscore.sc(), i, widget.KIND_LABEL)
+    scene.node_set_size(fscore.sc(), i, w as f64, h as f64)
+    scene.node_set_draw(fscore.sc(), i, 0, draw_cv)
+    scene.node_set_id(fscore.sc(), i, key as u32)
+    if fsbase.S.s_cv_n < CV_MAX {
+        fsbase.S.s_cv_node[(fsbase.S.s_cv_n) as usize] = i
+        *fscore.cv_fn_slot(fsbase.S.s_cv_n) = draw
+        fsbase.S.s_cv_n = fsbase.S.s_cv_n + 1
+    }
+    return i
+}
+
+fn draw_c2(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let f: fn(u64, u64, u64, u64, u64) = *fsctl.c2_slot()
+    f(ud, widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64,
+        widget.w_h(e) as u64)
+}
+
+fn card_rp() -> f64 {
+    if fsbase.card_px != 0 {
+        return fscore.spf(fsbase.card_px as f64)
+    }
+    return fscore.rp()
+}
+
+fn draw_card(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
+        widget.w_h(e), card_rp(), (*t).surface_raised | 4278190080 as u32)
+    painter.round_ring(z, widget.w_x(e), widget.w_y(e), widget.w_w(e),
+        widget.w_h(e), card_rp(), 1.0, (*t).border_col | 4278190080 as u32)
+}
+
+fn draw_glasscard(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let gf: fn(u64, u64, u64, u64, u64) = *fscore.gl_plate_slot()
+    gf(widget.w_x(e) as u64, widget.w_y(e) as u64, widget.w_w(e) as u64, widget.w_h(e) as u64, 0)
+}
+
+fn card(parent: usize) -> usize {
+    let i: usize = scene.scene_box(fscore.sc(), parent, 0 as u32, flex.FLEX_COLUMN,
+        flex.JUSTIFY_START, flex.AL_STRETCH)
+    if i != scene.SCENE_NONE {
+        if fsbase.gl_plate_on {
+            scene.node_set_draw(fscore.sc(), i, 0, draw_glasscard)
+        } else {
+            scene.node_set_draw(fscore.sc(), i, 0, draw_card)
+        }
+        if fsbase.S.s_dense {
+            scene.node_set_padding(fscore.sc(), i, 10, 8, 10, 8)
+            scene.node_set_gap(fscore.sc(), i, 4, 4)
+        } else {
+            scene.node_set_padding(fscore.sc(), i, 12, 10, 12, 10)
+            scene.node_set_gap(fscore.sc(), i, 8, 8)
+        }
+    }
+    return i
+}
+
+fn draw_im(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let i: usize = scene.scene_node_of(fscore.sc(), e)
+    let k: u64 = fsctl.im_slot_of_node(i)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    let x: i64 = widget.w_x(e) as i64
+    let y: i64 = widget.w_y(e) as i64
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    let z: *mut painter.Painter = render.ctx_painter(c)
+    let t: *mut theme.Colors = theme.theme_colors(fuiapp.theme())
+    painter.round_rect(z, x as f64, y as f64, w as f64, h as f64, fscore.rf(),
+        (*t).field | 4278190080 as u32)
+    let px: u64 = fsbase.S.s_im_px[(k) as usize]
+    if px != 0 && fsbase.S.s_im_w[(k) as usize] != 0 && fsbase.S.s_im_h[(k) as usize] != 0 {
+        let zw: u64 = fsctl.im_turned_w(k) * fsbase.S.s_im_zoom[(k) as usize] / 100
+        let zh: u64 = fsctl.im_turned_h(k) * fsbase.S.s_im_zoom[(k) as usize] / 100
+        if zw > 0 && zh > 0 {
+            let ox: i64 = x + ((w as i64) - (zw as i64)) / 2 + fsbase.S.s_im_ox[(k) as usize]
+            let oy: i64 = y + ((h as i64) - (zh as i64)) / 2 + fsbase.S.s_im_oy[(k) as usize]
+            let cv: *mut canvas.Canvas = painter.painter_canvas(z)
+            let pushed: bool = canvas.clip_push_rect(cv, x as f64, y as f64,
+                (x + w as i64) as f64, (y + h as i64) as f64)
+            var im: uiimage.Image = uiimage.image_wrap(px,
+                fsbase.S.s_im_w[(k) as usize] as usize, fsbase.S.s_im_h[(k) as usize] as usize, 0)
+            let q: u64 = fsbase.S.s_im_turn[(k) as usize] & 3
+            if q == 0 {
+                uiimage.image_draw_rect(z, &im, ox as f64, oy as f64,
+                    zw as f64, zh as f64, 0 as u32)
+            } else {
+                let iw: u64 = fsbase.S.s_im_w[(k) as usize]
+                let ih: u64 = fsbase.S.s_im_h[(k) as usize]
+                var bw: f64 = iw as f64
+                var bh: f64 = ih as f64
+                if q == 1 || q == 3 {
+                    bw = ih as f64
+                    bh = iw as f64
+                }
+                var xf: transform.Xform = transform.xf_new()
+                transform.xf_translate(&xf, ox as f64, oy as f64)
+                transform.xf_scale(&xf, (zw as f64) / bw, (zh as f64) / bh, 0.0, 0.0)
+                if q == 1 {
+                    transform.xf_translate(&xf, ih as f64, 0.0)
+                } else if q == 2 {
+                    transform.xf_translate(&xf, iw as f64, ih as f64)
+                } else {
+                    transform.xf_translate(&xf, 0.0, iw as f64)
+                }
+                transform.xf_rotate(&xf, (q * 90) as f64)
+                transform.tf_draw_image(z, &xf, &im, 0.0, 0.0, iw as f64,
+                    ih as f64, 1.0)
+            }
+            if pushed {
+                canvas.clip_pop(cv)
+            }
+        }
+    }
+    if fsbase.S.s_im_sp[(k) as usize] && px != 0 {
+        let zw2: u64 = fsctl.im_turned_w(k) * fsbase.S.s_im_zoom[(k) as usize] / 100
+        let zh2: u64 = fsctl.im_turned_h(k) * fsbase.S.s_im_zoom[(k) as usize] / 100
+        let ox2: i64 = x + ((w as i64) - (zw2 as i64)) / 2 + fsbase.S.s_im_ox[(k) as usize]
+        let oy2: i64 = y + ((h as i64) - (zh2 as i64)) / 2 + fsbase.S.s_im_oy[(k) as usize]
+        let zm: u64 = fsbase.S.s_im_zoom[(k) as usize]
+        let fx0: i64 = ox2 + ((fsbase.S.s_im_a0[(k) as usize] * zm / 100) as i64)
+        let fy0: i64 = oy2 + ((fsbase.S.s_im_b0[(k) as usize] * zm / 100) as i64)
+        let fw: u64 = (fsbase.S.s_im_a1[(k) as usize] - fsbase.S.s_im_a0[(k) as usize] + 1) * zm / 100
+        let fh: u64 = (fsbase.S.s_im_b1[(k) as usize] - fsbase.S.s_im_b0[(k) as usize] + 1) * zm / 100
+        painter.round_ring(z, fx0 as f64, fy0 as f64, (fw + 2) as f64,
+            (fh + 2) as f64, 0.0, 2.0, (*t).accent | 4278190080 as u32)
+    }
+    painter.round_ring(z, x as f64, y as f64, w as f64, h as f64, fscore.rf(), 1.0,
+        (*t).border_col | 4278190080 as u32)
+}
+
+fn draw_ed(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    if fscore.off_canvas(e) {
+        return
+    }
+    let i: usize = scene.scene_node_of(fscore.sc(), e)
+    let k: u64 = fsctl.ed_slot_of_node(i)
+    if k == fsbase.NO_SLOT {
+        return
+    }
+    let t: u64 = fsbase.S.s_ed_t[(k) as usize]
+    let w: u64 = widget.w_w(e) as u64
+    let h: u64 = widget.w_h(e) as u64
+    fuied.ed_size(t, w, h)
+    fuied.ed_paint(t, widget.w_x(e) as u64, widget.w_y(e) as u64, w, h,
+        widget.w_is_focus(e), fsbase.S.s_caret_on)
+}
+
+fn draw_ghost(ud: u64, c: *mut render.Ctx, e: *mut widget.Widget) {
+    let _u: u64 = ud
+}
+
+fn canvas_px() -> u64 {
+    return fuiapp.px()
+}
