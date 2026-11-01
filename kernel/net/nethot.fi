@@ -1,0 +1,113 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import serial
+import net.netdev
+import net.netsvc
+import net.inet
+import net.wlan_link
+import net.wlan_auto
+import diag.hw
+
+export { step, STEP_TICKS }
+
+const STEP_TICKS: u64 = 25
+
+static mut nh_next: u64 = 0
+static mut nh_gen: u64 = 0
+
+fn say_card(state: u64, text: u64, c: u64) {
+    var s_c: [u8; 7] = " card=\0"
+    var s_k: [u8; 7] = " kind=\0"
+    serial.puts(text)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(c)
+    serial.puts((&s_k[0]) as u64)
+    netdev.print_kind(netdev.kind_on(state, c))
+    serial.nl()
+}
+
+fn link_local(state: u64) -> u64 {
+    let a: u64 = netdev.mac_at(state, 4) | 1
+    let b: u64 = netdev.mac_at(state, 5) | 1
+    return (169 << 24) | (254 << 16) | ((a & 0xFE) << 8) | b
+}
+
+fn readdress(state: u64, c: u64) {
+    var ip: u64 = 0
+    var prefix: u64 = 16
+    var gw: u64 = 0
+    if netdev.kind_on(state, c) == netdev.KIND_WLAN && wlan_link.wired() {
+        ip = wlan_auto.lease_ip()
+        prefix = wlan_link.prefix_of(wlan_auto.lease_mask())
+        gw = wlan_auto.lease_gateway()
+        if inet.ip(state) == ip {
+            return
+        }
+    } else {
+        ip = link_local(state)
+    }
+    let _r: bool = inet.readdr(state, (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, prefix, gw)
+}
+
+fn stage_first(state: u64) {
+    if hw.net_ip(state) == 0 {
+        hw.net_set(state, link_local(state), 16, 0)
+    }
+    netsvc.stage(state)
+}
+
+fn attached(state: u64) {
+    var s_a: [u8; 24] = "nethot: usbnet attached\0"
+    let c: u64 = netdev.card_of_kind(state, netdev.KIND_USBNET)
+    if c >= netdev.MAX_CARDS {
+        return
+    }
+    let _ok: bool = netdev.init_on(state, c, true, true)
+    say_card(state, (&s_a[0]) as u64, c)
+    netdev.uplink_prefer(state, netdev.KIND_USBNET)
+}
+
+fn detached(state: u64) {
+    var s_d: [u8; 24] = "nethot: usbnet detached\0"
+    serial.puts((&s_d[0]) as u64)
+    serial.nl()
+    if netdev.uplink_kind() == netdev.KIND_USBNET {
+        netdev.uplink_prefer(state, netdev.KIND_NONE)
+    }
+}
+
+fn step(state: u64) {
+    let t: u64 = kstate.get(state, kstate.TICKS)
+    if t < nh_next {
+        return
+    }
+    nh_next = t + STEP_TICKS
+    let ev: u64 = netdev.sync_cards(state)
+    if ev == netdev.SYNC_ADDED {
+        attached(state)
+    }
+    if ev == netdev.SYNC_REMOVED {
+        detached(state)
+    }
+    let _c: bool = netdev.uplink_refresh(state)
+    let g: u64 = netdev.uplink_gen()
+    if g == nh_gen && ev == netdev.SYNC_NONE {
+        return
+    }
+    let changed: bool = g != nh_gen
+    nh_gen = g
+    let u: u64 = netdev.uplink(state)
+    if !inet.ready(state) {
+        if ev == netdev.SYNC_ADDED {
+            stage_first(state)
+        }
+        return
+    }
+    if changed {
+        var s_u: [u8; 15] = "nethot: uplink\0"
+        say_card(state, (&s_u[0]) as u64, u)
+        readdress(state, u)
+    }
+}

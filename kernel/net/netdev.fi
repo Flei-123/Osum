@@ -56,7 +56,8 @@ import net.wlan_net
 
 export {
     resume_cards, kill_cards, probe, late_usb, kind_on, print_kind, MAX_CARDS,
-    KIND_NONE, KIND_VIRTIO, KIND_E1000, KIND_R8169, KIND_I219, KIND_USBNET, KIND_WLAN, wlan_late, uplink, uplink_prefer, card_of_kind,
+    KIND_NONE, KIND_VIRTIO, KIND_E1000, KIND_R8169, KIND_I219, KIND_USBNET, KIND_WLAN, wlan_late, uplink, uplink_prefer, uplink_kind, uplink_refresh, uplink_gen, card_of_kind,
+    sync_cards, probed, SYNC_NONE, SYNC_ADDED, SYNC_REMOVED,
     MAX_CARDS, IRQ_CARDS, polled_on,
     driver_for, reason_for, print_table, selftest, print_inventory,
     rx_errors, oversize, rx_overflow,
@@ -121,6 +122,13 @@ const CLASS_NET: u64 = 0x02
 const SUB_ETHERNET: u64 = 0x00
 
 static mut nd_uplink_kind: u64 = 0
+static mut nd_uplink_card: u64 = 0
+static mut nd_uplink_gen: u64 = 0
+static mut nd_usb_slot: u64 = 0
+
+const SYNC_NONE: u64 = 0
+const SYNC_ADDED: u64 = 1
+const SYNC_REMOVED: u64 = 2
 
 fn card_of_kind(state: u64, k: u64) -> u64 {
     var c: u64 = 0
@@ -131,13 +139,104 @@ fn card_of_kind(state: u64, k: u64) -> u64 {
     return MAX_CARDS
 }
 
-fn uplink_prefer(k: u64) { nd_uplink_kind = k }
+fn probed(state: u64) -> bool {
+    return kstate.get(state, kstate.NETDEV_OFF + S_PROBED) != 0
+}
 
-fn uplink(state: u64) -> u64 {
-    if nd_uplink_kind == KIND_NONE { return 0 }
-    let c: u64 = card_of_kind(state, nd_uplink_kind)
-    if c >= MAX_CARDS { return 0 }
-    return c
+fn free_slot(state: u64) -> u64 {
+    return card_of_kind(state, KIND_NONE)
+}
+
+fn uplink_kind() -> u64 { return nd_uplink_kind }
+
+fn uplink_gen() -> u64 { return nd_uplink_gen }
+
+fn uplink_prefer(state: u64, k: u64) {
+    nd_uplink_kind = k
+    let _c: bool = uplink_refresh(state)
+}
+
+fn uplink(state: u64) -> u64 { return nd_uplink_card }
+
+fn alive(state: u64, c: u64) -> bool {
+    if kind_on(state, c) == KIND_NONE { return false }
+    return ready_on(state, c) && link_up_on(state, c)
+}
+
+fn is_pci_kind(k: u64) -> bool {
+    return k == KIND_VIRTIO || k == KIND_E1000 || k == KIND_I219 || k == KIND_R8169
+}
+
+fn first_alive(state: u64, tier: u64) -> u64 {
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        let k: u64 = kind_on(state, c)
+        var hit: bool = false
+        if tier == 0 { hit = is_pci_kind(k) }
+        if tier == 1 { hit = k == KIND_USBNET }
+        if tier == 2 { hit = k == KIND_WLAN }
+        if hit && alive(state, c) { return c }
+        c = c + 1
+    }
+    return MAX_CARDS
+}
+
+fn choose_uplink(state: u64) -> u64 {
+    if nd_uplink_kind != KIND_NONE {
+        let p: u64 = card_of_kind(state, nd_uplink_kind)
+        if p < MAX_CARDS && alive(state, p) { return p }
+    }
+    var tier: u64 = 0
+    while tier < 3 {
+        let c: u64 = first_alive(state, tier)
+        if c < MAX_CARDS { return c }
+        tier = tier + 1
+    }
+    if kind_on(state, nd_uplink_card) != KIND_NONE { return nd_uplink_card }
+    var c: u64 = 0
+    while c < MAX_CARDS {
+        if kind_on(state, c) != KIND_NONE { return c }
+        c = c + 1
+    }
+    return 0
+}
+
+fn uplink_refresh(state: u64) -> bool {
+    let c: u64 = choose_uplink(state)
+    if c == nd_uplink_card { return false }
+    nd_uplink_card = c
+    nd_uplink_gen = nd_uplink_gen + 1
+    return true
+}
+
+fn set_card(state: u64, c: u64, k: u64) {
+    kstate.set(state, sc(c, S_KIND), k)
+    kstate.set(state, sc(c, S_UNIT), 0)
+    kstate.set(state, sc(c, S_PCI), pci.MAX_DEV)
+}
+
+fn sync_cards(state: u64) -> u64 {
+    if kstate.get(state, kstate.NETDEV_OFF + S_PROBED) == 0 { return SYNC_NONE }
+    let c: u64 = card_of_kind(state, KIND_USBNET)
+    if usbnet.exists(state) {
+        let slot: u64 = usbnet.owner_slot(state)
+        if c < MAX_CARDS {
+            if slot == nd_usb_slot { return SYNC_NONE }
+            nd_usb_slot = slot
+            return SYNC_ADDED
+        }
+        let f: u64 = free_slot(state)
+        if f >= MAX_CARDS { return SYNC_NONE }
+        set_card(state, f, KIND_USBNET)
+        nd_usb_slot = slot
+        return SYNC_ADDED
+    }
+    if c < MAX_CARDS {
+        set_card(state, c, KIND_NONE)
+        nd_usb_slot = 0
+        return SYNC_REMOVED
+    }
+    return SYNC_NONE
 }
 
 fn sc(c: u64, off: u64) -> u64 {
@@ -280,6 +379,7 @@ fn probe(state: u64) {
     // L-015: a USB CDC-ECM function that usb.fi has already brought up is a
     // card like any other (no PCI place, polled).
     if usbnet.exists(state) && cards < MAX_CARDS {
+        nd_usb_slot = usbnet.owner_slot(state)
         kstate.set(state, sc(cards, S_KIND), KIND_USBNET)
         kstate.set(state, sc(cards, S_UNIT), 0)
         kstate.set(state, sc(cards, S_PCI), pci.MAX_DEV)
@@ -291,22 +391,20 @@ fn probe(state: u64) {
         kstate.set(state, sc(cards, S_PCI), pci.MAX_DEV)
         wlan_net.mark_registered()
     }
+    if nd_uplink_kind != KIND_NONE {
+        let _r: bool = uplink_refresh(state)
+    }
 }
 
 fn wlan_late(state: u64) -> bool {
     if !wlan_net.exists(state) || wlan_net.registered() {
         return false
     }
-    var cards: u64 = 0
-    while cards < MAX_CARDS && kind_on(state, cards) != KIND_NONE {
-        cards = cards + 1
-    }
+    let cards: u64 = free_slot(state)
     if cards >= MAX_CARDS {
         return false
     }
-    kstate.set(state, sc(cards, S_KIND), KIND_WLAN)
-    kstate.set(state, sc(cards, S_UNIT), 0)
-    kstate.set(state, sc(cards, S_PCI), pci.MAX_DEV)
+    set_card(state, cards, KIND_WLAN)
     wlan_net.mark_registered()
     return true
 }

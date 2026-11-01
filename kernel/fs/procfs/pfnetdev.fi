@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import net.netdev
+import fs.procfs.pfproc
+
+export { make }
+
+fn w_col(state: u64, at: u64, v: u64) -> u64 {
+    let p: u64 = pfproc.w_ch(state, at, 32)
+    return pfproc.w_num(state, p, v)
+}
+
+fn w_zeros(state: u64, at: u64, n: u64) -> u64 {
+    var p: u64 = at
+    var z: u64 = 0
+    while z < n {
+        p = w_col(state, p, 0)
+        z = z + 1
+    }
+    return p
+}
+
+fn w_name(state: u64, at: u64, k: u64, eth_index: u64) -> u64 {
+    var s_eth: [u8; 6] = "  eth\0"
+    var s_usb: [u8; 6] = "  usb\0"
+    var s_wlan: [u8; 7] = "  wlan\0"
+    var p: u64 = at
+    if k == netdev.KIND_WLAN {
+        p = pfproc.w_str(state, p, (&s_wlan[0]) as u64)
+        p = pfproc.w_num(state, p, 0)
+    } else if k == netdev.KIND_USBNET {
+        p = pfproc.w_str(state, p, (&s_usb[0]) as u64)
+        p = pfproc.w_num(state, p, 0)
+    } else {
+        p = pfproc.w_str(state, p, (&s_eth[0]) as u64)
+        p = pfproc.w_num(state, p, eth_index)
+    }
+    return pfproc.w_ch(state, p, 58)
+}
+
+fn w_card(state: u64, at: u64, c: u64, eth_index: u64) -> u64 {
+    var p: u64 = w_name(state, at, netdev.kind_on(state, c), eth_index)
+    p = w_col(state, p, netdev.rx_octets_on(state, c))
+    p = w_col(state, p, netdev.rx_frames_on(state, c))
+    p = w_zeros(state, p, 6)
+    p = w_col(state, p, netdev.tx_octets_on(state, c))
+    p = w_col(state, p, netdev.tx_frames_on(state, c))
+    p = w_col(state, p, 0)
+    p = w_col(state, p, netdev.tx_drops_on(state, c))
+    p = w_zeros(state, p, 4)
+    return pfproc.w_nl(state, p)
+}
+
+fn make(state: u64) -> u64 {
+    var h1: [u8; 58] = "Inter-|   Receive                            |  Transmit\n\0"
+    var h2: [u8; 118] = " face |bytes packets errs drop fifo frame compressed multicast|bytes packets errs drop fifo colls carrier compressed\n\0"
+    var p: u64 = pfproc.w_str(state, 0, (&h1[0]) as u64)
+    p = pfproc.w_str(state, p, (&h2[0]) as u64)
+    if !netdev.probed(state) {
+        return p
+    }
+    var eth: u64 = 0
+    var c: u64 = 0
+    while c < netdev.MAX_CARDS {
+        let k: u64 = netdev.kind_on(state, c)
+        if k != netdev.KIND_NONE && netdev.present_on(state, c) {
+            p = w_card(state, p, c, eth)
+            if k != netdev.KIND_WLAN && k != netdev.KIND_USBNET {
+                eth = eth + 1
+            }
+        }
+        c = c + 1
+    }
+    return p
+}
