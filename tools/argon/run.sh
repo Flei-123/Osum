@@ -27,10 +27,10 @@ for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
     fi
 done
 
-echo "== 1. die Speicherkarte und die zugeteilten Nummern =="
+echo "== 1. the memory map and the assigned numbers =="
 
 if python3 tools/kernel/memmap.py kernel >"$TMPD/map.txt" 2>&1; then
-    ok "die kdata-Karte ist ueberschneidungsfrei (memmap.py)"
+    ok "the kdata map is overlap-free (memmap.py)"
     info "$(tail -1 "$TMPD/map.txt")"
 else
     bad "memmap.py meldet eine Kollision"
@@ -42,48 +42,48 @@ grep -q 'ARGON_OFF' tools/kernel/memmap.py \
     || bad "ARGON fehlt in tools/kernel/memmap.py"
 
 grep -q 'const ARGON_OFF: u64 = 0x126000' kernel/lib/kstate.fi \
-    && ok "der kdata-Bereich liegt auf 0x126000 wie zugeteilt" \
-    || bad "ARGON_OFF steht nicht auf 0x126000"
+    && ok "the kdata range is at 0x126000 as assigned" \
+    || bad "ARGON_OFF is not at 0x126000"
 grep -q 'const ARGON_MAX: u64 = 0x1000' kernel/lib/kstate.fi \
-    && ok "und ist EINE Seite gross wie zugeteilt" \
-    || bad "ARGON_MAX ist nicht 0x1000"
+    && ok "and is ONE page in size as assigned" \
+    || bad "ARGON_MAX is not 0x1000"
 grep -q 'const M_NOARGONPAR: u64 = 1040' kernel/lib/kstate.fi \
-    && ok "die Modusindizes fangen bei 1040 an wie zugeteilt" \
-    || bad "M_NOARGONPAR steht nicht auf 1040"
+    && ok "the mode indices start at 1040 as assigned" \
+    || bad "M_NOARGONPAR is not at 1040"
 hoch=$(grep -oE 'const M_[A-Z0-9]+: u64 = 104[0-9]' kernel/lib/kstate.fi \
     | grep -oE '104[0-9]' | sort -n | tail -1)
 [[ -n $hoch && $hoch -le 1049 ]] \
-    && ok "kein Modusindex dieser Runde oberhalb von 1049 (hoechster: $hoch)" \
-    || bad "ein Modusindex liegt ausserhalb von 1040..1049"
+    && ok "no mode index of this round above 1049 (highest: $hoch)" \
+    || bad "a mode index is outside 1040..1049"
 mw=$(grep -oE 'const MODE_WORDS: u64 = [0-9]+' kernel/lib/kstate.fi | grep -oE '[0-9]+$')
 [[ -n $mw ]] && [[ $((mw * 64)) -gt 1049 ]] \
     && ok "der Modusvektor traegt Index 1049 (MODE_WORDS=$mw -> $((mw*64)) Bits)" \
-    || bad "der Modusvektor ist zu kurz fuer 1049"
+    || bad "the mode vector is too short for 1049"
 
 echo "== 2. der Bau =="
 
 if $FIRNC tools/krypto/orakel.fi -o "$TMPD/orakel" 2>"$TMPD/o.err"; then
-    ok "das Orakel uebersetzt (dieselben lib/crypto-Dateien wie der Kern)"
+    ok "the oracle compiles (the same lib/crypto files as the kernel)"
 else
-    bad "das Orakel uebersetzt nicht"
+    bad "the oracle does not compile"
     tail -5 "$TMPD/o.err"
 fi
 
 if $FIRNC tools/argon/kreis.fi -o "$TMPD/kreis" 2>"$TMPD/k.err"; then
     ok "die SHA-Kreisprobe uebersetzt"
 else
-    bad "die SHA-Kreisprobe uebersetzt nicht"
+    bad "the SHA round-trip check does not compile"
     tail -5 "$TMPD/k.err"
 fi
 
 if timeout 900 bash tools/build-kernel.sh "$TMPD/k0.mb" >"$TMPD/b.log" 2>&1; then
     ok "der Kern baut"
 else
-    bad "der Kern baut nicht"
+    bad "the kernel does not build"
     tail -8 "$TMPD/b.log"
 fi
 
-echo "== 3. Argon2 gegen die Referenzumsetzung (RFC 9106) =="
+echo "== 3. Argon2 against the reference implementation (RFC 9106) =="
 
 if "$PY" -c 'import argon2.low_level' 2>/dev/null && [ -x "$TMPD/orakel" ]; then
     "$PY" - "$TMPD/orakel" >"$TMPD/arg.txt" 2>&1 <<'PYEOF'
@@ -129,8 +129,8 @@ for ty in ("ID", "I", "D"):
 print("breite %d/%d" % (gut, ges))
 PYEOF
     grep -q '^RFC9106 ja' "$TMPD/arg.txt" \
-        && ok "der RFC-9106-Vektor mit t=3/m=32/p=4 stimmt (die Spuren werden richtig zusammengesetzt)" \
-        || bad "der RFC-9106-Vektor mit p=4 stimmt NICHT -- $(grep '^RFC9106' "$TMPD/arg.txt")"
+        && ok "the RFC 9106 vector with t=3/m=32/p=4 matches (the lanes are assembled correctly)" \
+        || bad "the RFC 9106 vector with p=4 does NOT match -- $(grep '^RFC9106' "$TMPD/arg.txt")"
     br=$(grep -oE '^breite [0-9]+/[0-9]+' "$TMPD/arg.txt" | cut -d' ' -f2)
     if [[ -n $br && ${br%/*} == ${br#*/} ]]; then
         ok "Argon2id/i/d gegen argon2-cffi: $br"
@@ -140,7 +140,7 @@ PYEOF
     if "$PY" tools/krypto/gegen.py vektoren "$TMPD/orakel" >"$TMPD/vek.txt" 2>&1; then
         ges=$(grep -oE 'gesamt [0-9]+/[0-9]+' "$TMPD/vek.txt" | cut -d' ' -f2)
         [[ -n $ges && ${ges%/*} == ${ges#*/} ]] \
-            && ok "die ganze Kryptokette gegen hashlib/OpenSSL/argon2-cffi: $ges" \
+            && ok "the whole crypto chain against hashlib/OpenSSL/argon2-cffi: $ges" \
             || bad "die Kryptokette weicht ab: $ges"
     else
         bad "gegen.py vektoren scheitert"
@@ -151,12 +151,12 @@ else
     info "  /root/.krypto-venv/bin/pip install argon2-cffi cryptography"
 fi
 
-echo "== 4. eine BESTEHENDE Platte: mit dem ALTEN Code angelegt, mit dem NEUEN auf =="
+echo "== 4. an EXISTING disk: created with the OLD code, opened with the NEW =="
 
 BLOCKS=8192
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ >"$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht" \
+    && ok "the root disk is there" \
     || bad "mkfs.py scheitert"
 
 lauf() { # name abbild kommandozeile [smp] [zeitlimit]
@@ -172,15 +172,15 @@ cp --sparse=always "$TMPD/root.img" "$TMPD/alt.img"
 KP="kryptot=1 kryptom=64 kryptop=4"
 lauf alt1 "$TMPD/alt.img" "osum nopwr kryptoneu noargonpar kryptopw=geheim $KP" 1
 grep -q 'krypto: neu=1' "$TMPD/alt1.txt" \
-    && ok "die Platte wird mit dem SERIELLEN Weg angelegt (noargonpar, ein Kern)" \
-    || bad "das Anlegen mit dem seriellen Weg scheitert"
+    && ok "the disk is created with the SERIAL path (noargonpar, one core)" \
+    || bad "creating with the serial path fails"
 
 lauf alt2 "$TMPD/alt.img" "osum nopwr kryptoauf kryptopw=geheim" 4
 grep -q 'auf=1' "$TMPD/alt2.txt" \
-    && ok "und der PARALLELE Weg macht sie wieder auf -- die Zusage dieser Runde" \
-    || bad "die bestehende Platte geht mit dem parallelen Weg NICHT auf"
+    && ok "and the PARALLEL path opens it again -- the promise of this round" \
+    || bad "the existing disk does NOT open with the parallel path"
 grep -q 'osum: mount=1' "$TMPD/alt2.txt" \
-    && ok "das Dateisystem darauf haengt ein" \
+    && ok "the file system on it mounts" \
     || bad "mount scheitert"
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/par.img"
@@ -192,10 +192,10 @@ grep -q 'auf=1' "$TMPD/par2.txt" \
 
 lauf fal "$TMPD/alt.img" "osum nopwr kryptoauf kryptofalsch kryptopw=geheim" 4
 grep -q 'auf=0' "$TMPD/fal.txt" \
-    && ok "die falsche Passphrase wird weiter abgewiesen (auf=0)" \
-    || bad "eine falsche Passphrase kommt durch"
+    && ok "the wrong passphrase is still rejected (open=0)" \
+    || bad "a wrong passphrase gets through"
 
-echo "== 5. laufen die Spuren wirklich auf mehreren Kernen? =="
+echo "== 5. do the lanes really run on several cores? =="
 
 kerne_von() { grep -oE 'argon: par=[0-9]+ +spur=[0-9]+ +kerne=[0-9]+' "$1" \
     | grep -oE 'kerne=[0-9]+' | cut -d= -f2 | tail -1; }
@@ -203,17 +203,17 @@ par_von() { grep -oE 'argon: par=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
 
 p4=$(par_von "$TMPD/alt2.txt")
 [[ ${p4:-0} == 1 ]] \
-    && ok "der parallele Weg wird wirklich gegangen (par=1)" \
-    || bad "par=$p4 -- der parallele Weg greift nicht"
+    && ok "the parallel path is really taken (par=1)" \
+    || bad "par=$p4 -- the parallel path does not take effect"
 
-info "an den kleinen Abnahmeparametern (t=1, m=64 KiB) ist kerne=$(kerne_von "$TMPD/alt2.txt") -- ein Segment ist dort 4 Bloecke gross"
+info "with the small acceptance parameters (t=1, m=64 KiB) cores=$(kerne_von "$TMPD/alt2.txt") -- ein Segment ist dort 4 Bloecke gross"
 
 ps=$(par_von "$TMPD/par2.txt")
 [[ ${ps:-9} == 0 ]] \
-    && ok "GEGENPROBE: mit noargonpar ist par=0 (der Schalter wirkt wirklich)" \
+    && ok "CONTROL: with noargonpar par=0 (the switch really works)" \
     || bad "noargonpar schaltet nicht ab (par=$ps)"
 
-echo "== 6. SHA-NI: Kreisprobe, FIPS 180-4, und der Rueckfall ECHT gefahren =="
+echo "== 6. SHA-NI: round-trip check, FIPS 180-4, and the fallback REALLY driven =="
 
 if [[ -x "$TMPD/kreis" ]]; then
     kz=$("$TMPD/kreis" 2>&1 | head -1)
@@ -222,7 +222,7 @@ if [[ -x "$TMPD/kreis" ]]; then
     ungl=$(echo "$kz" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
     fae=$(echo "$kz" | grep -oE 'faelle=[0-9]+' | cut -d= -f2)
     [[ ${ungl:-1} == 0 && ${fae:-0} -gt 1000 ]] \
-        && ok "beide SHA-256-Wege liefern dasselbe ueber $fae Laengen (0 ungleich)" \
+        && ok "both SHA-256 paths yield the same over $fae lengths (0 unequal)" \
         || bad "die SHA-Wege weichen ab: $kz"
     [[ $kh == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ]] \
         && ok "FIPS 180-4 'abc' ueber den schnellen Weg" \
@@ -250,30 +250,30 @@ kreis_ok() { # datei
 }
 
 grep -q 'shani: have=1  used=1' "$TMPD/sh_host.txt" \
-    && ok "auf einer CPU MIT SHA-NI ist der schnelle Weg scharf (have=1 used=1)" \
-    || bad "SHA-NI greift auf -cpu host nicht: $(grep -o 'shani: .*' "$TMPD/sh_host.txt" | head -1)"
+    && ok "on a CPU WITH SHA-NI the fast path is armed (have=1 used=1)" \
+    || bad "SHA-NI does not take effect on -cpu host: $(grep -o 'shani: .*' "$TMPD/sh_host.txt" | head -1)"
 kreis_ok "$TMPD/sh_host.txt" \
-    && ok "und die Kreisprobe in Ring 0 ist sauber (ungl=0)" \
+    && ok "and the round-trip check in ring 0 is clean (unequal=0)" \
     || bad "die Kreisprobe in Ring 0 weicht ab"
 
 grep -q 'shani: have=1  used=0' "$TMPD/sh_off.txt" \
-    && ok "GEGENPROBE von Hand: noshani nimmt den schnellen Weg heraus (used=0)" \
+    && ok "CONTROL by hand: noshani takes the fast path out (used=0)" \
     || bad "noshani wirkt nicht"
 kreis_ok "$TMPD/sh_off.txt" \
-    && ok "und auch dann rechnen beide Wege dasselbe" \
-    || bad "ohne SHA-NI weicht die Kreisprobe ab"
+    && ok "and even then both paths compute the same" \
+    || bad "without SHA-NI the round-trip check deviates"
 
 grep -q 'shani: have=0  used=0' "$TMPD/sh_q.txt" \
-    && ok "RUECKFALL ECHT GEFAHREN: -cpu qemu64 hat kein SHA-NI (have=0), kein #UD" \
-    || bad "auf -cpu qemu64 stimmt der Befund nicht: $(grep -o 'shani: .*' "$TMPD/sh_q.txt" | head -1)"
+    && ok "FALLBACK REALLY DRIVEN: -cpu qemu64 has no SHA-NI (have=0), no #UD" \
+    || bad "on -cpu qemu64 the finding does not match: $(grep -o 'shani: .*' "$TMPD/sh_q.txt" | head -1)"
 grep -q 'kernel: done' "$TMPD/sh_q.txt" \
-    && ok "und der Kern laeuft dort bis zum Ende durch" \
-    || bad "der Kern stirbt auf einer CPU ohne SHA-NI"
+    && ok "and the kernel runs through to the end there" \
+    || bad "the kernel dies on a CPU without SHA-NI"
 grep -q 'auf=1' "$TMPD/sh_q.txt" \
-    && ok "und macht die Platte auch dort auf" \
-    || bad "ohne SHA-NI geht die Platte nicht auf"
+    && ok "and opens the disk there too" \
+    || bad "without SHA-NI the disk does not open"
 
-echo "== 7. das Tempo, seriell gegen parallel, auf DERSELBEN Maschine =="
+echo "== 7. the speed, serial against parallel, on the SAME machine =="
 
 takte_von() { grep -oE 'takte=[0-9]+' "$1" | cut -d= -f2 | tail -1; }
 
@@ -289,11 +289,11 @@ if [[ -n $ts && -n $tp && $tp -gt 0 ]]; then
     info "Argon2 (t=2, m=32 MiB, p=4): seriell $ts Takte, parallel $tp Takte auf $kp Kernen"
     info "Faktor $((fak / 100)),$(printf '%02d' $((fak % 100)))"
     [[ $fak -ge 150 ]] \
-        && ok "der parallele Weg ist mindestens Faktor 1,5 schneller (gemessen: $((fak/100)),$(printf '%02d' $((fak%100))))" \
-        || bad "der Gewinn ist zu klein: Faktor $((fak/100)),$(printf '%02d' $((fak%100)))"
+        && ok "the parallel path is at least factor 1.5 faster (measured: $((fak/100)),$(printf '%02d' $((fak%100))))" \
+        || bad "the gain is too small: factor $((fak/100)),$(printf '%02d' $((fak%100)))"
     [[ ${kp:-0} -ge 2 ]] \
-        && ok "und die Spuren rechnen dabei wirklich auf mehreren Kernen (kerne=$kp)" \
-        || bad "kerne=$kp -- bei den Vorgabeparametern laeuft alles auf einem Kern"
+        && ok "and the lanes really compute on several cores (cores=$kp)" \
+        || bad "cores=$kp -- with the default parameters everything runs on one core"
 else
     bad "keine Taktzahlen gemessen (ts=$ts tp=$tp)"
 fi
@@ -301,13 +301,13 @@ fi
 echo "== 8. die Nachbarn =="
 
 if [[ $SCHNELL == 1 ]]; then
-    info "OSUM_ARGON_SCHNELL=1 -- die Nachbar-Abnahmen uebersprungen"
+    info "OSUM_ARGON_SCHNELL=1 -- the neighbour acceptances skipped"
 else
     if bash tools/krypto/run.sh >"$TMPD/kr.txt" 2>&1; then
         z=$(grep -oE 'KRYPTO: [0-9]+ bestanden, [0-9]+ gescheitert' "$TMPD/kr.txt" | tail -1)
         info "$z"
         echo "$z" | grep -q ', 0 gescheitert' \
-            && ok "die Abnahme der Runde KRYPTO ist weiter gruen ($z)" \
+            && ok "the acceptance of round KRYPTO is still green ($z)" \
             || bad "KRYPTO ist rot: $z"
     else
         bad "tools/krypto/run.sh scheitert"
@@ -317,7 +317,7 @@ else
         z=$(grep -oE 'AESNI: [0-9]+ bestanden, [0-9]+ gescheitert' "$TMPD/ae.txt" | tail -1)
         info "$z"
         echo "$z" | grep -q ', 0 gescheitert' \
-            && ok "die Abnahme der Runde AESNI ist weiter gruen ($z)" \
+            && ok "the acceptance of round AESNI is still green ($z)" \
             || bad "AESNI ist rot: $z"
     else
         bad "tools/aesni/run.sh scheitert"

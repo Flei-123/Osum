@@ -27,7 +27,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -47,11 +47,11 @@ gleiche_datei() { # name a b mindestzeilen
     na=$(wc -l < "$2" 2>/dev/null || echo 0)
     nb=$(wc -l < "$3" 2>/dev/null || echo 0)
     if [ "${na:-0}" -lt "$4" ] || [ "${nb:-0}" -lt "$4" ]; then
-        bad "$1 -- eine Seite ist zu kurz ($na und $nb Zeilen, mindestens $4)"
+        bad "$1 -- one side is too short ($na and $nb lines, at least $4)"
         return
     fi
     if cmp -s "$2" "$3"; then
-        ok "$1 ($na Zeilen, Oktett fuer Oktett)"
+        ok "$1 ($na lines, octet for octet)"
     else
         bad "$1"
         diff "$2" "$3" | head -8 | sed 's/^/        /'
@@ -79,7 +79,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 if ! qemu-system-x86_64 -device help 2>&1 | grep -q 'qemu-xhci'; then
-    echo "K17: uebersprungen, dieses QEMU kennt qemu-xhci nicht"
+    echo "K17: skipped, this QEMU does not know qemu-xhci"
     exit 0
 fi
 for w in mkfs.vfat mcopy mdir mtype sfdisk; do
@@ -89,19 +89,19 @@ for w in mkfs.vfat mcopy mdir mtype sfdisk; do
     }
 done
 
-echo "== 1. die Nummern, die Vektoren und die Karte von kdata =="
+echo "== 1. the numbers, the vectors and the map of kdata =="
 
 for n in 1701 1702; do
-    grep -qE "= $n( |$)" "$K_SYS" && ok "die Aufrufnummer $n steht in $K_SYS" \
-        || bad "die Aufrufnummer $n fehlt in $K_SYS"
+    grep -qE "= $n( |$)" "$K_SYS" && ok "the call number $n is in $K_SYS" \
+        || bad "the call number $n is missing from $K_SYS"
 done
 stat_nr=$(number_in "$K_SYS" "SYS_OSUM_USBSTAT")
 pull_nr=$(number_in "$K_SYS" "SYS_OSUM_USBPULL")
 for v in "$stat_nr" "$pull_nr"; do
     if [ "${v:-0}" -ge 1701 ] && [ "${v:-0}" -le 1749 ]; then
-        ok "die Nummer $v liegt im zugeteilten Vorrat 1701..1749"
+        ok "the number $v is in the assigned pool 1701..1749"
     else
-        bad "die Nummer ${v:-fehlt} liegt AUSSERHALB von 1701..1749"
+        bad "the number ${v:-missing} is OUTSIDE 1701..1749"
     fi
 done
 doppelt=$(grep -rn "u64 = 170[12]$" kernel/ lib/ 2>/dev/null \
@@ -109,14 +109,14 @@ doppelt=$(grep -rn "u64 = 170[12]$" kernel/ lib/ 2>/dev/null \
 num "andere Verwendungen der Nummern 1701/1702 im Baum" "${doppelt:-0}" eq 0
 
 grep -q 'const VEC_XHCI: u64 = 43' kernel/arch/x86_64/trap.fi \
-    && ok "der Meldevektor des Reglers ist 43 (kernel/arch/x86_64/trap.fi)" \
-    || bad "VEC_XHCI ist nicht 43 in kernel/arch/x86_64/trap.fi"
+    && ok "the notification vector of the controller is 43 (kernel/arch/x86_64/trap.fi)" \
+    || bad "VEC_XHCI is not 43 in kernel/arch/x86_64/trap.fi"
 grep -q 'const VEC_XHCI: u64 = 43' "$K_XHCI" \
-    && ok "und dieselbe Zahl steht im Treiber" \
-    || bad "VEC_XHCI in $K_XHCI passt nicht"
+    && ok "and the same number is in the driver" \
+    || bad "VEC_XHCI in $K_XHCI does not match"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
+    ok "the memory map of kdata: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
@@ -136,9 +136,9 @@ kopie_kernel() { # ziel
 GG="$TMPD/kernel-gg"; kopie_kernel "$GG"
 ende17=$(( $(printf '%d' "$k17off") + $(printf '%d' "$k17max") ))
 if [ "$ende17" -le "$(printf '%d' "$a")" ]; then
-    ok "der Vorrat dieser Runde endet bei $(printf '0x%X' "$ende17"), KDATA_SIZE ist $a"
+    ok "the pool of this round ends at $(printf '0x%X' "$ende17"), KDATA_SIZE ist $a"
 else
-    bad "der Vorrat endet bei $(printf '0x%X' "$ende17"), KDATA_SIZE ist nur $a"
+    bad "the pool ends at $(printf '0x%X' "$ende17"), KDATA_SIZE ist nur $a"
 fi
 
 # ---------------------------------------------------- der Modusvektor
@@ -147,9 +147,9 @@ for n in M_USB M_NOUSB M_USBPOLL M_NOHID M_NOMSC M_UNPLUG M_NOUSBIRQ \
          M_USBSTICK M_USBHOLD; do
     v=$(number_in "$K_KSTATE" "$n")
     if [ -n "${v:-}" ] && [ "$v" -ge 384 ] && [ "$v" -le 447 ]; then
-        ok "$n liegt in Wort 6 des Modusvektors (Index $v)"
+        ok "$n is in word 6 of the mode vector (index $v)"
     else
-        bad "$n hat den Index ${v:-fehlt}, erwartet 384..447 (Wort 6)"
+        bad "$n has the index ${v:-missing}, expected 384..447 (word 6)"
     fi
 done
 masken=$(grep -rac 'kstate\.MODE) &\|& kstate\.M_' \
@@ -160,49 +160,49 @@ num "Stellen im Kernel, die den Modus noch als MASKE lesen" "${masken:-1}" eq 0
 kopie_kernel "$GG"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 321/' "$GG/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg3.txt" 2>&1; then
-    bad "GEGENPROBE: M_USB auf den Index von M_PWR gelegt und der Pruefer schweigt"
+    bad "CONTROL: M_USB placed on the index of M_PWR and the checker is silent"
 else
-    ok "GEGENPROBE: zwei Modusnamen auf einem Index -- der Pruefer schlaegt an"
+    ok "CONTROL: two mode names on one index -- the checker raises the alarm"
 fi
 kopie_kernel "$GG"
 sed -i 's/^const M_USB: u64 = 384/const M_USB: u64 = 140737488355328/' "$GG/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg4.txt" 2>&1; then
-    bad "GEGENPROBE: eine alte Maske als Modusindex und der Pruefer schweigt"
+    bad "CONTROL: an old mask as mode index and the checker is silent"
 else
-    ok "GEGENPROBE: eine vergessene Maske (1<<47) hinter dem Vektor -- der Pruefer schlaegt an"
+    ok "CONTROL: a forgotten mask (1<<47) behind the vector -- the checker raises the alarm"
 fi
 
 kopie_kernel "$GG"
 sed -i 's/^const EVT_OFF: u64 = 0x52000/const EVT_OFF: u64 = 0x56000/' "$GG/drv/usb/xhci.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg.txt" 2>&1; then
-    bad "GEGENPROBE: EVT_OFF auf 0x56000 (die Geraetesaetze) gelegt und der Pruefer schweigt"
+    bad "CONTROL: EVT_OFF placed at 0x56000 (the device sets) and the checker is silent"
 else
-    ok "GEGENPROBE: ein Ring ausserhalb des Vorrats -- der Kartenpruefer schlaegt an"
+    ok "CONTROL: a ring outside the pool -- the map checker raises the alarm"
 fi
 kopie_kernel "$GG"
 sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb/usb.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
-    bad "GEGENPROBE: DESC_OFF auf die Uebertragungsringe gelegt, Pruefer schweigt"
+    bad "CONTROL: DESC_OFF placed on the transfer rings, checker is silent"
 else
-    ok "GEGENPROBE: zwei Stuecke des USB-Bereichs uebereinander -- der Pruefer schlaegt an"
+    ok "CONTROL: two pieces of the USB area on top of each other -- the checker raises the alarm"
 fi
 
 for f in fs.fi fat.fi vfs.fi ofs.fi part.fi; do
     n=$(grep -acE '(^|[^a-z_])usb\.' "kernel/$f" 2>/dev/null || true)
-    if [ "${n:-0}" -eq 0 ]; then ok "kernel/$f ruft kein usb.* -- die Blockschicht traegt es"
+    if [ "${n:-0}" -eq 0 ]; then ok "kernel/$f calls no usb.* -- the block layer carries it"
     else bad "kernel/$f ruft usb.* ($n mal)"; fi
 done
 
 # ================================================================ 2. bauen
 
-echo "== 2. bauen: der Kern und die Programme, aus beiden Uebersetzern =="
+echo "== 2. build: the kernel and the programs, from both compilers =="
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
-    || bad "crt.s laesst sich nicht assemblieren"
+    || bad "crt.s cannot be assembled"
 baue() { # stufe
     local s=$1 cc p rc=0
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/k$s.log" 2>&1 || {
-        bad "firnc$s: der Kern laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/k$s.log" | head -12
         return 1
     }
@@ -223,9 +223,9 @@ baue() { # stufe
 baue 0 || { echo "K17: $pass passed, $((fail+1)) failed"; exit 1; }
 ok "firnc0: der Kern ($(stat -c%s "$TMPD/k0.mb") Oktette) und $(echo $PROGS | wc -w) Programme"
 if baue 1; then
-    ok "firnc1: dasselbe aus dem Uebersetzer, der in Firn geschrieben ist"
+    ok "firnc1: the same from the compiler written in Firn"
 else
-    bad "firnc1 baut diese Runde nicht"
+    bad "firnc1 does not build this round"
 fi
 zeilen=$(cat "$K_XHCI" "$K_USB" | wc -l)
 num "Zeilen Treiber, die diese Runde geschrieben hat" "$zeilen" gt 1200
@@ -235,20 +235,20 @@ MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ /usb/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
-    && ok "die Wurzelplatte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    && ok "the root disk is there: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
 printf 'von linux auf den stick\n' > "$TMPD/host.txt"
 dd if=/dev/zero of="$TMPD/fat.img" bs=1M count=48 status=none
 mkfs.vfat -F 32 -s 1 -n USBSTICK "$TMPD/fat.img" >/dev/null 2>&1 \
-    && ok "mkfs.vfat hat ein FAT32 fuer den Stick angelegt" \
+    && ok "mkfs.vfat created a FAT32 for the stick" \
     || bad "mkfs.vfat scheitert"
 mcopy -i "$TMPD/fat.img" "$TMPD/host.txt" ::host.txt \
     && ok "mcopy hat host.txt hineingelegt (24 Oktette)" \
     || bad "mcopy scheitert"
 dd if=/dev/zero of="$TMPD/stick.img" bs=1M count=64 status=none
 printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$TMPD/stick.img" >/dev/null 2>&1 \
-    && ok "sfdisk hat eine MBR-Tafel geschrieben (Typ 0x0C, FAT32 LBA)" \
+    && ok "sfdisk wrote an MBR table (type 0x0C, FAT32 LBA)" \
     || bad "sfdisk scheitert"
 dd if="$TMPD/fat.img" of="$TMPD/stick.img" bs=512 seek=2048 conv=notrunc status=none
 
@@ -332,7 +332,7 @@ tastenlauf() { # name kernel kommandozeile marke -- tasten... -- qemu-args...
     RC=$(cat "$TMPD/$name.rc" 2>/dev/null || echo 99)
 }
 
-echo "== 3. der Regler: ueber PCI gefunden, aufgesetzt, Meldungen =="
+echo "== 3. the controller: found via PCI, set up, notifications =="
 rc=$(lauf_stick hc "$TMPD/k0.mb" "usb nokbd nosched noproc nofs" \
     "${XHCI[@]}" "${KBD[@]}" "${MOUSE[@]}")
 num "der Kern beendet sich selbst (21)" "$rc" eq 21
@@ -372,7 +372,7 @@ hat_nicht "$TMPD/ohne.txt" "usb: xhci" "und setzt den Regler NICHT auf"
 
 # ============================================ 4. die Aufzaehlung
 
-echo "== 4. die Aufzaehlung: drei Geraete, an ihrer Klasse erkannt =="
+echo "== 4. the enumeration: three devices, recognised by their class =="
 hat "$H" "class=03:01:01 driver=kbd" "die Tastatur, an Klasse 03:01:01 (HID/Boot/Tastatur)"
 hat "$H" "class=03:01:02 driver=mouse" "die Maus, an Klasse 03:01:02 (HID/Boot/Maus)"
 hat "$H" "class=08:06:50 driver=msc" "der Stick, an Klasse 08:06:50 (Massenspeicher/SCSI/BOT)"
@@ -400,7 +400,7 @@ hat "$TMPD/nomsc.txt" "driver=kbd" "aber die Tastatur wird weiter angenommen"
 
 # ================================= 5. DIE TASTATUR, ZWEIMAL DERSELBE TEST
 
-echo "== 5. die Tastatur: derselbe Test ueber USB und ueber PS/2 =="
+echo "== 5. the keyboard: the same test over USB and over PS/2 =="
 TASTEN=(text:"echo hallo" ret warte:0.8 text:"echo zwei drei" ret warte:0.8 text:exit ret warte:0.8)
 
 tastenlauf kbdusb "$TMPD/k0.mb" "osum usb nosched noproc" "osum: bin " \
@@ -428,11 +428,11 @@ schale "$TMPD/kbdps2.txt" > "$TMPD/kbdps2.sh"
 gleiche_datei "DIESELBE SHELL-SITZUNG, Oktett fuer Oktett" \
     "$TMPD/kbdusb.sh" "$TMPD/kbdps2.sh" 8
 grep -qa '^hallo$' "$TMPD/kbdusb.sh" \
-    && ok "und darin steht wirklich, was getippt wurde ('hallo')" \
+    && ok "and it really contains what was typed ('hallo')" \
     || { bad "'hallo' steht nicht im Mitschnitt des USB-Laufs"
          head -12 "$TMPD/kbdusb.sh" | sed 's/^/        /'; }
 grep -qa '^zwei drei$' "$TMPD/kbdusb.sh" \
-    && ok "und die zweite Zeile, mit einem Leerzeichen darin" \
+    && ok "and the second line, with a space in it" \
     || bad "'zwei drei' fehlt"
 
 # 26.09.2026 (Dell 9020): THE NUMERIC KEYPAD AND THE ISO KEY, over USB and
@@ -467,11 +467,11 @@ kn=${kn:-0}
 kvoll=$(uz "$TMPD/kbdusb.txt" keys)
 kvoll=${kvoll:-31}
 [ "$kn" -lt "$((kvoll / 2))" ] \
-    && ok "GEGENPROBE usbnoirq: der maskierte Vektor traegt die Eingabe nicht -- $kn statt $kvoll Tasten (nur was der Wachhund nachholt)" \
-    || bad "GEGENPROBE usbnoirq: $kn Tasten kamen durch, bei $kvoll im vollen Lauf -- der maskierte Vektor traegt die Eingabe doch"
+    && ok "CONTROL usbnoirq: the masked vector does not carry the input -- $kn instead of $kvoll keys (only what the watchdog catches up)" \
+    || bad "CONTROL usbnoirq: $kn keys got through, with $kvoll in the full run -- the masked vector carries the input after all"
 grep -qa '^hallo$' "$TMPD/kbdnoirq.txt" \
-    && bad "GEGENPROBE usbnoirq: die Shell hat trotzdem etwas getippt bekommen" \
-    || ok "GEGENPROBE usbnoirq: die Shell bekommt kein Zeichen"
+    && bad "CONTROL usbnoirq: the shell still got something typed" \
+    || ok "CONTROL usbnoirq: the shell gets no character"
 
 : > "$TMPD/leer.mon"
 mauslauf kbdpoll "$TMPD/k0.mb" \
@@ -484,7 +484,7 @@ num "GEGENPROBE usbpoll: Ereignisse trotzdem geholt" \
 
 # ==================================================== 6. die Maus
 
-echo "== 6. die Maus: zehn Bewegungen und ein Klick, auf den Punkt =="
+echo "== 6. the mouse: ten movements and a click, on the dot =="
 M="$TMPD/maus.mon"
 {
     for i in 1 2 3 4 5 6 7 8; do echo "mouse_move -100 -100"; echo "warte 0.25"; done
@@ -515,7 +515,7 @@ num "GEGENPROBE: PS/2-Pakete ohne Maus am Bus" "$(uz "$TMPD/mausohne.txt" mpkt)"
 
 # ============================================ 7. der Stick
 
-echo "== 7. der Stick: eingehaengt, gelesen, beschrieben -- von aussen geprueft =="
+echo "== 7. the stick: mounted, read, written -- checked from outside =="
 rc=$(lauf_stick stick "$TMPD/k0.mb" \
     "osum usb usbstick vfs nokbd nosched noproc script=k17" "${XHCI[@]}")
 num "der Sticklauf beendet sich selbst (21)" "$rc" eq 21
@@ -529,7 +529,7 @@ sagt "$S" msc 1 "Ring 3 sieht den Stick"
 sagt "$S" bsize 512 "und seine Blockgroesse"
 sagt "$S" blocks 131072 "und seine Groesse in Bloecken (64 MiB)"
 sagt "$S" hostlen 24 "die Datei des WIRTS ist 24 Oktette lang"
-sagt "$S" hostok 1 "und ihr Inhalt stimmt Oktett fuer Oktett"
+sagt "$S" hostok 1 "and its content matches octet for octet"
 sagt "$S" wrote 14 "Osum schreibt 14 Oktette auf den Stick"
 sagt "$S" reread 14 "und liest sie unmittelbar danach wieder"
 sagt "$S" devdiff 1 "Stick und Wurzel haben zwei verschiedene st_dev"
@@ -542,7 +542,7 @@ if [ -s "$TMPD/vonaussen.txt" ]; then
     gleiche_datei "WAS OSUM SCHRIEB, LIEST MTOOLS AUF DEM WIRT WIEDER" \
         "$TMPD/soll.txt" "$TMPD/vonaussen.txt" 1
 else
-    bad "mtools findet ::neu.txt nicht im Abbild des Sticks"
+    bad "mtools does not find ::neu.txt in the image of the stick"
 fi
 mdir -i "$TMPD/live2-stick.img@@1048576" :: > "$TMPD/mdir.txt" 2>&1
 hat "$TMPD/mdir.txt" "host" "und host.txt liegt unveraendert daneben"
@@ -550,7 +550,7 @@ if command -v fsck.fat >/dev/null 2>&1; then
     dd if="$TMPD/live2-stick.img" of="$TMPD/nach.part" bs=512 skip=2048 \
         status=none
     if fsck.fat -n "$TMPD/nach.part" > "$TMPD/fsck.txt" 2>&1; then
-        ok "fsck.fat: das Dateisystem ist nach Osums Schreibzugriff noch eines"
+        ok "fsck.fat: the file system is still one after Osum's write access"
     else
         bad "fsck.fat meckert"; head -6 "$TMPD/fsck.txt" | sed 's/^/        /'
     fi
@@ -576,23 +576,23 @@ devA=$(devzeile "$TMPD/ohnestick.txt")
 if [ -z "$devA" ]; then
     bad "GEGENPROBE: `ls /dev` hat gar nichts ausgegeben"
 elif printf '%s' "$devA" | grep -qE '(^| )usb( |$)'; then
-    bad "GEGENPROBE: /dev/usb steht im Verzeichnis, obwohl kein Stick da ist"
+    bad "CONTROL: /dev/usb is in the directory although no stick is there"
 else
-    ok "GEGENPROBE: /dev/usb steht NICHT im Verzeichnis ($devA)"
+    ok "CONTROL: /dev/usb is NOT in the directory ($devA)"
 fi
 rc=$(lauf_stick mitstick "$TMPD/k0.mb" \
     "osum usb vfs nokbd nosched noproc script=ls /dev" "${XHCI[@]}")
 num "der Lauf MIT Stick beendet sich sauber" "$rc" eq 21
 devB=$(devzeile "$TMPD/mitstick.txt")
 if printf '%s' "$devB" | grep -qE '(^| )usb( |$)'; then
-    ok "mit Stick steht /dev/usb im Verzeichnis ($devB)"
+    ok "with a stick /dev/usb is in the directory ($devB)"
 else
-    bad "mit Stick fehlt /dev/usb im Verzeichnis: $devB"
+    bad "with a stick /dev/usb is missing from the directory: $devB"
 fi
 
 # ================================== 8. abziehen im Betrieb
 
-echo "== 8. abziehen im Betrieb: ENODEV, und der Kern laeuft weiter =="
+echo "== 8. unplug during operation: ENODEV, and the kernel keeps running =="
 sagt "$S" openfd 1 "vor dem Abziehen ist ein Deskriptor auf dem Stick offen"
 sagt "$S" pull 1 "das Geraet wird abgezogen, WAEHREND er offen ist"
 sagt "$S" afterread 19 "lesen auf dem OFFENEN Deskriptor: -ENODEV (19)"
@@ -618,10 +618,10 @@ hat_nicht "$TMPD/nopull.txt" "usb: unplug port=" "GEGENPROBE: und nichts wird ab
 num "Anstecken im Betrieb im Regellauf (darf nicht anschlagen)" \
     "$(uz "$H" hotplugs)" eq 0
 grep -qa 'usb.unplug_check' kernel/arch/x86_64/trap.fi \
-    && ok "der Zeitgeber sieht wirklich nach (kernel/arch/x86_64/trap.fi)" \
-    || bad "im Zeitgeber steht kein Blick auf die Anschluesse"
+    && ok "the timer really looks (kernel/arch/x86_64/trap.fi)" \
+    || bad "the timer has no look at the ports"
 
-echo "== 9. dasselbe aus dem Uebersetzer, der in Firn geschrieben ist =="
+echo "== 9. the same from the compiler written in Firn =="
 if [ -f "$TMPD/k1.mb" ]; then
     rc=$(lauf_stick stick1 "$TMPD/k1.mb" \
         "osum usb usbstick vfs nokbd nosched noproc script=k17" "${XHCI[@]}")
@@ -632,7 +632,7 @@ if [ -f "$TMPD/k1.mb" ]; then
         else bad "firnc1: $f = ${b:-fehlt}, firnc0 sagte ${a:-fehlt}"; fi
     done
 else
-    bad "firnc1 hat keinen Kern gebaut -- elf Zusagen fallen aus"
+    bad "firnc1 built no kernel -- eleven promises fall away"
 fi
 
 echo

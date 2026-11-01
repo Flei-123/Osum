@@ -37,7 +37,7 @@ hat()  { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hat_nicht() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da, sollte nicht" \
               || ok "$3"; }
 zahl() { local n=$1 v=$2 o=$3 w=$4
-    if [ -z "${v:-}" ]; then bad "$n: keine Zahl (erwartet $o $w)"; return; fi
+    if [ -z "${v:-}" ]; then bad "$n: no number (expected $o $w)"; return; fi
     if [ "$v" -"$o" "$w" ] 2>/dev/null; then ok "$n: $v"; else bad "$n: $v, erwartet $o $w"; fi
 }
 
@@ -53,7 +53,7 @@ ip netns del "$NS" 2>/dev/null
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 
 # =====================================================================
-echo "== 1. bauen: zwei Profile, ein Abbild =="
+echo "== 1. build: two profiles, one image =="
 # =====================================================================
 export FIRNLIB="$ROOT/lib"
 if vendor/firn/bin/firnc -c --profile=app -o "$TMPD/jd.o" \
@@ -64,14 +64,14 @@ else
     echo "BRIDGE: $pass bestanden, $fail durchgefallen"; exit 1
 fi
 undef=$(nm -u "$TMPD/jd.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "kein undefinierter Name -- weder crt.s noch libc noetig" \
+[ -z "$undef" ] && ok "no undefined name -- neither crt.s nor libc needed" \
                 || bad "undefiniert: $undef"
 
 export FIRNLIB="$ROOT/lib"
 for p in jsig jarvisctl; do
     if vendor/firn/bin/firnc -c -o "$TMPD/$p.o" "kernel/user/$p.fi" \
             > "$TMPD/cc-$p.log" 2>&1; then
-        ok "firnc profile kernel: $p.fi gegen lib/ (Ed25519 aus Runde UPDATE)"
+        ok "firnc profile kernel: $p.fi against lib/ (Ed25519 from round UPDATE)"
     else
         bad "$p.fi uebersetzt nicht"; head -8 "$TMPD/cc-$p.log" | sed 's/^/        /'
     fi
@@ -85,15 +85,15 @@ fn main(start: u64) -> i32 { return 0 }
 FIEND
 if FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
         -o "$TMPD/beides.o" "$TMPD/beides.fi" > "$TMPD/beides.log" 2>&1; then
-    bad "TLS und crypto.ed25519 gehen ploetzlich in EINEM Programm -- die Begruendung in jsig.fi stimmt nicht mehr"
+    bad "TLS and crypto.ed25519 suddenly work in ONE program -- the reasoning in jsig.fi is no longer true"
 else
     grep -qa "sha512" "$TMPD/beides.log" \
         && ok "die Namenskollision 'sha512' ist real -- die Trennung jsig/jarvisd hat ihren Grund" \
-        || ok "TLS + crypto.ed25519 in einem Programm scheitert (anderer Grund, siehe $TMPD/beides.log)"
+        || ok "TLS + crypto.ed25519 in one program fails (another reason, see $TMPD/beides.log)"
 fi
 
 if ! bash tools/bridge/build.sh "$TMPD/w0" 0 > "$TMPD/b0.txt" 2>&1; then
-    bad "das Abbild baut nicht"; tail -12 "$TMPD/b0.txt" | sed 's/^/        /'
+    bad "the image does not build"; tail -12 "$TMPD/b0.txt" | sed 's/^/        /'
     echo "BRIDGE: $pass bestanden, $fail durchgefallen"; exit 1
 fi
 ok "$(cat "$TMPD/b0.txt")"
@@ -110,17 +110,17 @@ note "Quelltext dieser Runde: $ZEILEN Zeilen in drei Dateien"
 if grep -q -- '--gui' tools/build-kernel.sh 2>/dev/null; then
     if ./tools/build-kernel.sh "$TMPD/srv.img" --stufe 0 --gui off \
             > "$TMPD/srv.log" 2>&1; then
-        ok "der GUI-lose Serverbau steht weiter (--gui off)"
+        ok "the GUI-less server build still stands (--gui off)"
     else
-        bad "der GUI-lose Serverbau ist kaputt"; tail -8 "$TMPD/srv.log" | sed 's/^/        /'
+        bad "the GUI-less server build is broken"; tail -8 "$TMPD/srv.log" | sed 's/^/        /'
     fi
 fi
 
 # =====================================================================
-echo "== 2. die Rechteliste, ohne jedes Netz =="
+echo "== 2. the permission list, without any network =="
 # =====================================================================
 python3 tools/hwnet/mkcerts.py "$TMPD/certs" jarvis.test > "$TMPD/certs.txt" 2>&1 \
-    && ok "die Testzertifikate kommen aus Pythons cryptography, nicht aus diesem Repo" \
+    && ok "the test certificates come from Python's cryptography, not from this repo" \
     || { bad "mkcerts.py fehlgeschlagen"; cat "$TMPD/certs.txt"; }
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c uebersetzt nicht"
 
@@ -164,7 +164,7 @@ abbild() { # <abbild> <conf> [zusatzspezifikationen...]
         "/etc/jarvis/permissions.conf=$conf" \
         "/etc/ssl/roots.pem=$TMPD/certs/ca.pem" \
         "$@" > "$TMPD/mkfs.txt" 2>&1 \
-        || { bad "mkfs fuer $img"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
+        || { bad "mkfs for $img"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 }
 
 echo "hallo aus osum" > "$TMPD/gruss.txt"
@@ -243,7 +243,7 @@ lauf_mit_netz() { # <abbild> <skript> <ausgabe> [zeitgrenze]   ($EXTRA = weitere
 }
 
 # =====================================================================
-echo "== 3. + 4. die Anmeldung und die sechs Auftragsarten =="
+echo "== 3. + 4. login and the six job types =="
 # =====================================================================
 cat > "$TMPD/auf-gut.txt" <<'AUF'
 system||
@@ -283,26 +283,26 @@ hat "$G.1.bin" "fassung" "system nennt die Fassung des Kerns"
 hat "$G.1.bin" "speicher_alle" "system nennt den Speicher"
 hat "$G.1.bin" "platte_bloecke" "system nennt die Platte"
 
-[ "$(status_von 2)" = ok ] && ok "schreib: die Datei wurde angelegt" || bad "schreib: $(antwort 2)"
-[ "$(status_von 3)" = ok ] && ok "lies: und wieder gelesen" || bad "lies: $(antwort 3)"
+[ "$(status_von 2)" = ok ] && ok "write: the file was created" || bad "schreib: $(antwort 2)"
+[ "$(status_von 3)" = ok ] && ok "read: and read again" || bad "lies: $(antwort 3)"
 if [ -f "$G.3.bin" ] && [ "$(cat "$G.3.bin")" = "Hallo, JUSTITIN" ]; then
-    ok "lies: OKTETT FUER OKTETT dasselbe, was schreib hineingelegt hat"
+    ok "read: OCTET FOR OCTET the same as write put in"
 else
     bad "lies: '$(cat "$G.3.bin" 2>/dev/null)' statt 'Hallo, JUSTITIN'"
 fi
-[ "$(status_von 4)" = ok ] && ok "lies: auch die Rechteliste selbst (sie steht darin)" \
+[ "$(status_von 4)" = ok ] && ok "read: also the permission list itself (it is in there)" \
                            || bad "lies rechte.conf: $(antwort 4)"
-[ "$(status_von 5)" = ok ] && ok "liste: das Verzeichnis" || bad "liste: $(antwort 5)"
+[ "$(status_von 5)" = ok ] && ok "list: the directory" || bad "liste: $(antwort 5)"
 hat "$G.5.bin" "neu.txt" "liste: die eben geschriebene Datei steht darin"
 [ "$(status_von 6)" = ok ] && ok "befehl: /bin/echo lief" || bad "befehl: $(antwort 6)"
 hat "$G.6.bin" "eins zwei" "befehl: und seine Ausgabe kam zurueck"
 hat "$G.6.bin" "ende 0" "befehl: mit seinem Beendigungscode"
-[ "$(status_von 7)" = nein ] && ok 'foto: abgelehnt, weil bildschirmfoto = nein' \
+[ "$(status_von 7)" = nein ] && ok 'photo: rejected because screenshot = no' \
                              || bad "foto: $(antwort 7)"
 hat "$F" "jarvisd: connections 1" "genau eine Verbindung"
 hat "$F" "jarvisd: jobs 7" "sieben Auftraege gezaehlt"
 
-echo "   -- das Protokoll unter /var/log/jarvisd.log"
+echo "   -- the log under /var/log/jarvisd.log"
 hat "$F" "service started" "der Start steht im Protokoll"
 hat "$F" "session signed-in" "die Anmeldung steht im Protokoll"
 hat "$F" "system ok" 'ein erledigter Auftrag steht mit ok im Protokoll'
@@ -337,9 +337,9 @@ grund_von()  { cat "$G.$1.bin" 2>/dev/null; }
 pruefe_nein() { # <nr> <art> <stichwort>
     if [ "$(status_von "$1")" = nein ]; then
         if grep -qaF "$3" "$G.$1.bin" 2>/dev/null; then
-            ok "$2: abgelehnt, und der Grund sagt warum ($(grund_von "$1" | head -c 60))"
+            ok "$2: rejected, and the reason says why ($(grund_von "$1" | head -c 60))"
         else
-            bad "$2: abgelehnt, aber ohne '$3': $(grund_von "$1")"
+            bad "$2: rejected, but without '$3': $(grund_von "$1")"
         fi
     else
         bad "$2: NICHT abgelehnt (Status '$(status_von "$1")')"
@@ -357,8 +357,8 @@ pruefe_nein 8 "lies auf den Schluessel" '`read`'
 hat_nicht "$F" "NIE" "und NICHTS ist passiert: /var/jarvis/darfnicht.txt gibt es nicht"
 for a in system read write list run screenshot; do
     grep -qa "^[0-9-]* [0-9:]* $a REJECTED" "$F" \
-        && ok "$a: die Ablehnung steht im Protokoll" \
-        || bad "$a: keine Ablehnungszeile im Protokoll"
+        && ok "$a: the rejection is in the log" \
+        || bad "$a: no rejection line in the log"
 done
 hat "$F" "jarvisd: rejected 8" "acht Ablehnungen gezaehlt"
 
@@ -373,9 +373,9 @@ for fall in expired wrong rogue; do
     draht_zu
     Z="$TMPD/rz-$fall.txt"
     if grep -qa "jarvisd: TLS handshake failed" "$Z"; then
-        ok "$fall: der Handschlag wird abgelehnt, Grund $(grep -a 'Handschlag ist gescheitert' "$Z" | head -1 | sed 's/.*Grund //')"
+        ok "$fall: the handshake is rejected, reason $(grep -a 'Handschlag ist gescheitert' "$Z" | head -1 | sed 's/.*Grund //')"
     else
-        bad "$fall: der Handschlag wurde NICHT abgelehnt"
+        bad "$fall: the handshake was NOT rejected"
     fi
     hat_nicht "$Z" "jarvisd: signed in" "$fall: und es wurde sich NICHT angemeldet"
     hat "$Z" "tls REJECTED" "$fall: die Ablehnung steht im Protokoll"
@@ -396,7 +396,7 @@ hat "$TMPD/rz-leer.txt" "no root store" "leerer Speicher: der Helfer sagt es lau
 hat_nicht "$TMPD/rz-leer.txt" "jarvisd: signed in" "leerer Speicher: und meldet sich NICHT an"
 
 # =====================================================================
-echo "== 7. ZUSAGE (c): Kopplung ohne Bestaetigung am Geraet =="
+echo "== 7. PROMISE (c): pairing without confirmation on the device =="
 # =====================================================================
 CODE=$(python3 -c 'import secrets;print("%06d" % secrets.randbelow(1000000))')
 cat > "$TMPD/auf-kurz.txt" <<'AUF'
@@ -413,7 +413,7 @@ hat "$TMPD/r3.txt" "pairing REJECTED" "und die Ablehnung steht auf der Konsole"
 hat "$TMPD/r3.txt" "pairing rejected" "sie steht auch im Protokoll"
 hat_nicht "$TMPD/g3.log" "ANGEMELDET" "und der Server hat KEINE angemeldete Sitzung gesehen"
 
-echo "   -- und jetzt mit Bestaetigung, damit die Ablehnung etwas bedeutet"
+echo "   -- and now with confirmation, so the rejection means something"
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g4.log" --kopplung "$CODE" --kopplung-hex --verbindungen 2
 lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl pair $CODE;jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r4.txt" 200
@@ -423,7 +423,7 @@ hat "$TMPD/r4.txt" "Pairing confirmed" "jarvisctl pair nimmt den Code an, den de
 hat "$TMPD/g4.log" "ANGEMELDET" "beim zweiten Anlauf ist die Kopplung durch"
 hat "$TMPD/r4.txt" "pairing confirmed" "und sie steht im Protokoll"
 
-echo "   -- der echte Server schickt den Code als Hex der Ziffern: der Mensch sieht und tippt die Ziffern"
+echo "   -- the real server sends the code as hex of the digits: the human sees and types the digits"
 HEXCODE=$(python3 -c 'import sys;print(sys.argv[1].encode().hex())' "$CODE")
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g5.log" --kopplung "$CODE" --kopplung-hex --verbindungen 2
@@ -435,7 +435,7 @@ hat_nicht "$TMPD/r5.txt" "PAIRING CODE $HEXCODE" "und nicht der Hex-Text"
 hat "$TMPD/r5.txt" "jarvisctl pair $CODE" "der Hinweis nennt die Ziffern"
 hat "$TMPD/r5.txt" "Pairing confirmed" "jarvisctl pair mit den Ziffern wird angenommen"
 hat "$TMPD/g5.log" "ANGEMELDET" "und die Kopplung ist durch (der Server bekam den Hex-Code zurueck)"
-echo "   -- der Hex-Text wird ebenfalls akzeptiert (alte Anzeige)"
+echo "   -- the hex text is accepted as well (old display)"
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/g6.log" --kopplung "$CODE" --kopplung-hex --verbindungen 2
 lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 20000;jarvisctl pair $HEXCODE;jarvisd -1 -t 30000;jarvisctl log 10;exit" "$TMPD/r6.txt" 200
@@ -453,7 +453,7 @@ hat "$TMPD/r7.txt" "does not match" "falsche Ziffern: jarvisctl lehnt ab"
 hat "$TMPD/g7.log" "KOPPLUNG-ABGELEHNT" "und der Server sieht eine Ablehnung"
 hat_nicht "$TMPD/g7.log" "ANGEMELDET" "es gibt keine Sitzung"
 
-echo "   -- GEGENPROBE: ein Code, den niemand angefragt hat"
+echo "   -- CONTROL: a code nobody requested"
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisctl pair 424242;exit" "$TMPD/r4b.txt"
 hat "$TMPD/r4b.txt" "No pairing request" "jarvisctl weigert sich, eine Kopplung zu bestaetigen, die es nicht gibt"
 
@@ -473,7 +473,7 @@ hat_nicht "$TMPD/rw1.txt" "jarvisctl pair $CODE" "web: kein lokales Bestaetigen 
 hat "$TMPD/gw1.log" "KOPPLUNG-WEB 3 hello" "web: das Geraet fragt alle paar Sekunden neu (3 Anfragen)"
 hat "$TMPD/gw1.log" "ANGEMELDET" "web: nach der Freigabe im Web ist es angemeldet"
 hat "$TMPD/rw1.txt" "pairing: ok" "web: /var/jarvis/state sagt ok"
-echo "   -- Anzeige waehrend das Geraet wartet"
+echo "   -- display while the device waits"
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/gw2.log" --kopplung "$CODE" --kopplung-hex --kopplung-web -2
 lauf_mit_netz "$TMPD/web.img" "jarvisd -1 -t 20000;jarvisctl status;exit" "$TMPD/rw2.txt" 150
@@ -483,7 +483,7 @@ hat "$TMPD/rw2.txt" "WAITING -- enter this code in the JARVIS web UI" "web: jarv
 hat "$TMPD/rw2.txt" "##" "web: in Blockziffern"
 hat "$TMPD/rw2.txt" "> Devices" "web: mit dem Ort der Eingabe"
 hat_nicht "$TMPD/gw2.log" "ANGEMELDET" "web: ohne Freigabe keine Sitzung"
-echo "   -- GEGENPROBE: Modus device verlangt weiter die Bestaetigung am Geraet"
+echo "   -- CONTROL: mode device still demands the confirmation on the device"
 draht_auf
 gegenstelle_an good "$TMPD/auf-kurz.txt" "$TMPD/gw3.log" --kopplung "$CODE" --kopplung-hex --kopplung-web 3
 lauf_mit_netz "$TMPD/nonet.img" "jarvisd -1 -t 30000;exit" "$TMPD/rw3.txt" 150
@@ -533,20 +533,20 @@ lauf_mit_netz "$TMPD/gross.img" "jarvisd -1 -t 60000;exit" "$TMPD/r6.txt" 220
 gegenstelle_aus
 draht_zu
 G="$TMPD/g6.log"
-[ "$(status_von 1)" = nein ] && ok "lies: eine Datei ueber max_datei wird abgelehnt statt eingelesen" \
+[ "$(status_von 1)" = nein ] && ok "read: a file above max_datei is rejected instead of read in" \
                              || bad "lies gross: $(grep -a '^ANTWORT 1 ' "$G")"
 hat "$G.1.bin" "larger than max_file" "und der Grund nennt die Grenze"
-[ "$(status_von 2)" = nein ] && ok "schreib: eine Nutzlast ueber max_datei wird abgelehnt" \
+[ "$(status_von 2)" = nein ] && ok "write: a payload above max_datei is rejected" \
                              || bad "schreib gross: $(grep -a '^ANTWORT 2 ' "$G")"
 L3=$(grep -a "^ANTWORT 3 " "$G" | awk '{print $5}')
 if [ -n "$L3" ] && [ "$L3" -le 4200 ]; then
-    ok "befehl: 20000 Oktette Ausgabe kommen auf $L3 gekuerzt (max_ausgabe 4096)"
+    ok "command: 20000 octets of output are cut to $L3 (max_ausgabe 4096)"
 else
-    bad "befehl: die Ausgabe wurde nicht gekuerzt ($L3 Oktette)"
+    bad "command: the output was not cut ($L3 octets)"
 fi
 hat "$G.3.bin" "truncated, max_output reached" "und die Kuerzung steht in der Antwort statt sie zu verschweigen"
-[ "$(status_von 4)" = ok ] && ok "und danach laeuft der Helfer weiter (die kleine Datei kommt)" \
-                           || bad "nach den Grenzfaellen antwortet er nicht mehr"
+[ "$(status_von 4)" = ok ] && ok "and afterwards the helper keeps running (the small file arrives)" \
+                           || bad "after the edge cases it no longer answers"
 
 echo "== 9b. command_flag_allowed: options per command =="
 sed 's|command_allowed = /bin/echo|command_allowed = /bin/echo\ncommand_flag_allowed = /bin/echo -n|' \
@@ -616,7 +616,7 @@ G="$TMPD/g9e.log"
 [ "$(status_von 3)" = ok ] && ok "counter-proof: without command_sub_allowed any subcommand passes" || bad "counter-proof: $(grep -a '^ANTWORT 3 ' "$G")"
 
 # =====================================================================
-echo "== 10. ZUSAGE (f): kein Netz beim Start =="
+echo "== 10. PROMISE (f): no network at start =="
 lauf_und_miss() { # <abbild> <skript> <ausgabe> <sekunden>
     local copy="$TMPD/live-miss.img"
     cp "$1" "$copy"
@@ -672,10 +672,10 @@ CPU_MS=$(( CPU_TICKS * 1000 / HZ ))
 note "QEMU auf dem Wirt: $CPU_MS ms Rechenzeit in $WALL_MS ms Laufzeit"
 
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisd -n;jarvisd -n;jarvisd -n;exit" "$TMPD/r7b.txt"
-ok "GEGENPROBE gelaufen: derselbe Kern mit Arbeit statt Warten"
+ok "CONTROL run: the same kernel with work instead of waiting"
 
 # =====================================================================
-echo "== 11. ZUSAGE (g): der private Schluessel, und wer ihn lesen darf =="
+echo "== 11. PROMISE (g): the private key, and who may read it =="
 # =====================================================================
 lauf_ohne_netz "$TMPD/nonet.img" "jsig init;jarvisctl status;jsig sign 00112233;chmod 644 /etc/jarvis/device.key;jsig sign 00112233;exit" "$TMPD/r8.txt"
 F="$TMPD/r8.txt"
@@ -705,7 +705,7 @@ PYEOF
 hat "$TMPD/verify.txt" "GUT" "python-cryptography rechnet die Unterschrift von /bin/jsig nach"
 hat "$TMPD/verify.txt" "GEGENPROBE-GUT" "GEGENPROBE: ueber ein anderes Oktett faellt sie durch"
 
-echo "   -- und der Kern sagt nein, nicht dieses Programm (HND_DUP, Runde HANDLE)"
+echo "   -- and the kernel says no, not this program (HND_DUP, round HANDLE)"
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisd -p;exit" "$TMPD/r9.txt"
 F="$TMPD/r9.txt"
 hat "$F" "probe: hat_schreibrecht nein" "der beschnittene Deskriptor hat R_WRITE nicht mehr"
@@ -717,7 +717,7 @@ note "Rechtebitfeld vorher $ROFF, nachher $RENG (R_READ|R_INSPECT|R_SEEK = 2081)
 zahl "die Rechte des beschnittenen Deskriptors" "${RENG:-0}" eq 2081
 
 # =====================================================================
-echo "== 12. das Bildschirmfoto: zwei Schloesser, und der Schein gilt einmal =="
+echo "== 12. the screenshot: two locks, and the pass is valid once =="
 # =====================================================================
 mach_conf "$TMPD/foto.conf" no yes yes \
     "read          = /var/jarvis/" \
@@ -735,8 +735,8 @@ lauf_mit_netz "$TMPD/foto.img" "jarvisd -1 -t 40000;exit" "$TMPD/r10.txt" 180
 gegenstelle_aus
 draht_zu
 G="$TMPD/g7.log"
-[ "$(status_von 1)" = nein ] && ok "ohne Schein: abgelehnt, obwohl die Rechteliste es erlaubt" \
-                             || bad "ohne Schein kam ein Bild: $(grep -a '^ANTWORT 1 ' "$G")"
+[ "$(status_von 1)" = nein ] && ok "without pass: rejected, although the permission list allows it" \
+                             || bad "without pass a picture came: $(grep -a '^ANTWORT 1 ' "$G")"
 hat "$G.1.bin" "no screenshot permit" "und der Grund nennt den fehlenden Schein"
 
 draht_auf
@@ -773,26 +773,26 @@ print("PNG-GUT %dx%d stuecke=%s roh=%d gepackt=%d" %
       (w, h, ",".join(stuecke), len(roh), len(idat)))
 PYEOF
     if grep -qa "PNG-GUT" "$TMPD/png.txt"; then
-        ok "mit Schein: ein PNG, von Pythons zlib nachgerechnet -- $(cat "$TMPD/png.txt")"
+        ok "with pass: a PNG, recomputed by Python's zlib -- $(cat "$TMPD/png.txt")"
         note "Groesse des Bildschirmfotos: $PNGL Oktette"
     else
-        bad "die Antwort ist kein gueltiges PNG: $(head -3 "$TMPD/png.txt")"
+        bad "the answer is not a valid PNG: $(head -3 "$TMPD/png.txt")"
     fi
     [ "$(status_von 2)" = nein ] \
-        && ok "DER SCHEIN GILT EINMAL: das zweite Foto wird abgelehnt" \
-        || bad "das zweite Foto kam auch noch -- der Schein wird nicht verbraucht"
+        && ok "THE PASS IS VALID ONCE: the second photo is rejected" \
+        || bad "the second photo came too -- the pass is not consumed"
 elif grep -qa "screen size\|framebuffer" "$G.1.bin" 2>/dev/null; then
-    ok "mit Schein: dieser Kern gibt Ring 3 keine Bildschirmmasse, und der Helfer sagt genau das"
+    ok "with pass: this kernel gives ring 3 no screen dimensions, and the helper says exactly that"
     note "KEIN BILD VOM ECHTEN BILDSCHIRM GEMESSEN -- siehe docs/BRIDGE.md."
-    [ "$(status_von 2)" = nein ] && ok "und das zweite Foto scheitert ebenfalls" \
-                                 || bad "das zweite Foto haette auch scheitern muessen"
+    [ "$(status_von 2)" = nein ] && ok "and the second photo fails as well" \
+                                 || bad "the second photo should have failed too"
 else
-    bad "foto mit Schein: $(grep -a '^ANTWORT 1 ' "$G") -- $(head -c 120 "$G.1.bin" 2>/dev/null)"
+    bad "photo with pass: $(grep -a '^ANTWORT 1 ' "$G") -- $(head -c 120 "$G.1.bin" 2>/dev/null)"
 fi
 hat "$F" "screenshot " "das Foto steht im Protokoll -- heimlich geht es nicht"
 EXTRA=""
 
-echo "   -- der PNG-Kodierer selbst, mit einem gerechneten Bild"
+echo "   -- the PNG encoder itself, with a computed picture"
 lauf_ohne_netz "$TMPD/foto.img" "jarvisd -b;exit" "$TMPD/r13.txt"
 tr -d '\000' < "$TMPD/r13.txt" | grep -a '^bild ' | head -1 | awk '{print $2}' > "$TMPD/bild.hex"
 if [ -s "$TMPD/bild.hex" ]; then
@@ -833,10 +833,10 @@ PYEOF
         ok "der PNG-Kodierer: $(cat "$TMPD/bild.txt")"
         note "Groesse dieses Bildes: $(( $(wc -c < "$TMPD/bild.hex") / 2 )) Oktette"
     else
-        bad "das erzeugte PNG ist nicht in Ordnung: $(head -3 "$TMPD/bild.txt")"
+        bad "the generated PNG is not OK: $(head -3 "$TMPD/bild.txt")"
     fi
 else
-    bad "jarvisd -b hat kein Bild geliefert"
+    bad "jarvisd -b delivered no picture"
 fi
 
 # =====================================================================
@@ -856,7 +856,7 @@ hat "$F" "jarvisd: jobs 3" "drei Auftraege in einer Sitzung"
 ANZ=$(grep -ac "^ANTWORT " "$TMPD/g9.log")
 zahl "Antworten, die die Gegenstelle bekommen hat" "$ANZ" eq 3
 
-echo "   -- die Zahlen dieser Runde"
+echo "   -- the numbers of this round"
 note "Quelltext:            $ZEILEN Zeilen (jarvisd.fi, jsig.fi, jarvisctl.fi)"
 note "/bin/jarvisd:         $JDSZ Oktette (TLS 1.3, X.509, DEFLATE, das Protokoll)"
 note "/bin/jsig:            $JSSZ Oktette (Ed25519 + SHA-512 + Montgomery)"

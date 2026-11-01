@@ -24,7 +24,7 @@ echo "== 0. das Werkzeug =="
 for t in musl-gcc "$QEMU_X86" readelf; do
     command -v "$t" >/dev/null 2>&1 || { echo "DYNLADER: $t fehlt, uebersprungen"; exit 0; }
 done
-ok "musl-gcc, qemu und readelf sind da"
+ok "musl-gcc, qemu and readelf are there"
 [ ${#KVM[@]} -gt 0 ] && ok "KVM wird benutzt (-accel kvm -cpu host)" \
                      || weg "kein /dev/kvm -- der Lauf geht unter TCG und ist langsamer"
 
@@ -45,12 +45,12 @@ PY
 if grep -q 'FALSCH 0$' "$TMPD/texte.txt"; then
     ok "$(grep -o 'GEPRUEFT [0-9]*' "$TMPD/texte.txt") Textkonstanten, alle so lang wie ihr Feld"
 else
-    bad "eine Textkonstante passt nicht in ihr Feld -- firnc1 braeche STILL ab"
+    bad "a text constant does not fit its field -- firnc1 would abort SILENTLY"
     sed 's/^/        /' "$TMPD/texte.txt"
 fi
 
 # ============================================================ 2.
-echo "== 2. die Zielprogramme, dynamisch gegen musl gebaut =="
+echo "== 2. the target programs, built dynamically against musl =="
 cat > "$TMPD/hello.c" <<'C'
 #include <stdio.h>
 int main(int argc, char **argv) {
@@ -64,20 +64,20 @@ musl-gcc -O2 -o "$TMPD/hello_dyn" "$TMPD/hello.c" 2>"$TMPD/cc.err" \
 
 IPATH=$(readelf -lW "$TMPD/hello_dyn" 2>/dev/null \
         | sed -n 's/.*Requesting program interpreter: \(.*\)\]/\1/p')
-[ -n "$IPATH" ] && ok "hello_dyn hat ein PT_INTERP: $IPATH" \
-                || bad "hello_dyn hat KEIN PT_INTERP -- es waere statisch"
+[ -n "$IPATH" ] && ok "hello_dyn has a PT_INTERP: $IPATH" \
+                || bad "hello_dyn has NO PT_INTERP -- it would be static"
 readelf -hW "$TMPD/hello_dyn" 2>/dev/null | grep -q 'Type:.*DYN' \
-    && ok "hello_dyn ist ET_DYN (PIE)" || bad "hello_dyn ist nicht ET_DYN"
+    && ok "hello_dyn ist ET_DYN (PIE)" || bad "hello_dyn is not ET_DYN"
 
 LDSO=${LDSO:-/lib/ld-musl-x86_64.so.1}
 if [ -r "$LDSO" ]; then
     LDREAL=$(readlink -f "$LDSO")
-    ok "der Interpreter liegt vor: $LDREAL ($(stat -c%s "$LDREAL") Oktette)"
+    ok "the interpreter is present: $LDREAL ($(stat -c%s "$LDREAL") Oktette)"
     readelf -hW "$LDREAL" | grep -q 'Type:.*DYN' \
-        && ok "und er ist selbst ein ET_DYN -- deshalb musste read_header geoeffnet werden" \
-        || bad "der Interpreter ist kein ET_DYN"
+        && ok "and it is itself an ET_DYN -- that is why read_header had to be opened up" \
+        || bad "the interpreter is not an ET_DYN"
 else
-    bad "kein Interpreter unter $LDSO"
+    bad "no interpreter at $LDSO"
 fi
 
 # dlopen/dlsym, Stufe 3.
@@ -100,7 +100,7 @@ BBDYN=${BBDYN:-/root/bbdyn/busybox}
 BB_DA=0
 if [ -x "$BBDYN" ] && readelf -lW "$BBDYN" 2>/dev/null | grep -q 'program interpreter'; then
     BB_DA=1
-    ok "busybox dynamisch liegt vor: $BBDYN ($(stat -c%s "$BBDYN") Oktette)"
+    ok "dynamic busybox is present: $BBDYN ($(stat -c%s "$BBDYN") Oktette)"
 else
     weg "kein dynamisches busybox (BBDYN=...) -- Stufe 2 wird uebersprungen"
 fi
@@ -108,16 +108,16 @@ fi
 # ============================================================ 3.
 echo "== 3. der Kernel =="
 if bash tools/build-kernel.sh "$TMPD/k.mb" --stufe 1 > "$TMPD/k.log" 2>&1; then
-    ok "der Kernel ist gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)"
+    ok "the kernel is built ($(stat -c%s "$TMPD/k.mb") Oktette)"
 else
-    bad "der Kernel baut NICHT (Meldung unten -- bei firnc1 oft LEER,"
-    echo "        und dann ist es meist eine Textkonstante, die nicht in ihr Feld passt)"
+    bad "the kernel does NOT build (message below -- with firnc1 often EMPTY,"
+    echo "        and then it is usually a text constant that does not fit its field)"
     sed 's/^/        /' "$TMPD/k.log" | tail -12
     echo "DYNLADER: $pass bestanden, $fail gescheitert"
     exit 1
 fi
 
-echo "== 3b. die Programme des Userlands =="
+echo "== 3b. the userland programs =="
 PROGS=${PROGS:-"sh ls cat echo"}
 export FIRNLIB="$ROOT/lib"
 FIRNC="$ROOT/vendor/firn/bin/firnc1"
@@ -201,20 +201,20 @@ run_disk() { # append out
 QUIET="nokbd nosched noproc nofs"
 
 # ============================================================ 5.
-echo "== 5. STUFE 1: ein dynamisch gelinktes Programm laeuft =="
+echo "== 5. STAGE 1: a dynamically linked program runs =="
 run_disk "osum $QUIET script=hello_dyn;exit" "$TMPD/s1.txt"
 sed '/^mb: flags=/d' "$TMPD/s1.txt" > "$TMPD/s1.rein" 2>/dev/null
 if grep -q 'hallo dynamisch' "$TMPD/s1.rein" 2>/dev/null; then
-    ok "STUFE 1 GEFALLEN: hello_dyn hat seine Zeile gedruckt"
+    ok "STAGE 1 PASSED: hello_dyn printed its line"
 else
-    bad "STUFE 1: keine Ausgabe von hello_dyn"
-    echo "        --- was der Kern gesagt hat:"
+    bad "STAGE 1: no output from hello_dyn"
+    echo "        --- what the kernel said:"
     grep -iE 'elf:|refused|reason|vector|panic|#PF|#GP' "$TMPD/s1.txt" 2>/dev/null \
         | sed 's/^/        /' | head -12
 fi
 
 # ============================================================ 6.
-echo "== 6. STUFE 2: busybox, zehn Applets, Oktett fuer Oktett =="
+echo "== 6. STAGE 2: busybox, ten applets, octet for octet =="
 if [ "$BB_DA" = 1 ]; then
     cat > "$TMPD/bbskript" <<'S'
 /bin/busybox echo hallo-echo
@@ -249,9 +249,9 @@ S
             esac
             sed '/^mb: flags=/d' "$TMPD/bb-$name.txt" > "$TMPD/bb-$name.rein"
             if grep -qF "$erste" "$TMPD/bb-$name.rein" 2>/dev/null; then
-                ok "busybox $name -- Ausgabe wie auf dem Wirt ($erste)"
+                ok "busybox $name -- output as on the host ($erste)"
             else
-                bad "busybox $name -- Ausgabe fehlt oder weicht ab (erwartet: $erste)"
+                bad "busybox $name -- output missing or differs (expected: $erste)"
             fi
         else
             weg "busybox $name -- der Wirt liefert nichts zum Vergleichen"
@@ -264,16 +264,16 @@ S
         grep -qw "$n" "$TMPD/bb-ls.rein" || lsfehlt="$lsfehlt $n"
     done
     [ -z "$lsfehlt" ] \
-        && ok "busybox ls -- nennt jede Datei, die in /bin dieses Abbilds liegt" \
-        || bad "busybox ls -- diese Namen fehlen in der Ausgabe:$lsfehlt"
+        && ok "busybox ls -- names every file that is in /bin of this image" \
+        || bad "busybox ls -- these names are missing from the output:$lsfehlt"
 
     run_disk "osum $QUIET script=busybox env;exit" "$TMPD/bb-env.txt"
     sed '/^mb: flags=/d' "$TMPD/bb-env.txt" > "$TMPD/bb-env.rein"
     if grep -qiE 'panic|vector=|elf: refused' "$TMPD/bb-env.rein"; then
-        bad "busybox env -- der Lauf ist abgebrochen"
+        bad "busybox env -- the run aborted"
         grep -iE 'panic|vector=|elf: refused' "$TMPD/bb-env.rein" | sed 's/^/        /' | head -4
     else
-        ok "busybox env -- laeuft und endet ohne Absturz (envp kommt vom neuen Stapel)"
+        ok "busybox env -- runs and ends without crash (envp comes from the new stack)"
     fi
 else
     weg "STUFE 2 uebersprungen (kein dynamisches busybox)"
@@ -287,7 +287,7 @@ if [ -x "$TMPD/dltest" ]; then
     if grep -q 'dlsym ok' "$TMPD/s3.rein" 2>/dev/null; then
         ok "STUFE 3 GEFALLEN: dlopen(0)+dlsym(\"puts\") hat gearbeitet"
     else
-        bad "STUFE 3: dlopen/dlsym nicht gelaufen"
+        bad "STAGE 3: dlopen/dlsym did not run"
         grep -iE 'elf:|refused|dlopen|dlsym|vector' "$TMPD/s3.txt" 2>/dev/null \
             | sed 's/^/        /' | head -8
     fi
@@ -300,13 +300,13 @@ echo "== 8. die Gegenproben =="
 run_disk "osum $QUIET script=badinterp;exit" "$TMPD/g1.txt"
 rc=$?
 if [ $rc -eq 124 ]; then
-    bad "ein fehlender Interpreter HAENGT die Maschine (Zeitueberschreitung)"
+    bad "a missing interpreter HANGS the machine (timeout)"
 elif grep -qiE 'interpreter missing|reason 26' "$TMPD/g1.txt" 2>/dev/null; then
-    ok "ein fehlender Interpreter wird mit Grund 26 abgelehnt, die Maschine laeuft"
+    ok "a missing interpreter is rejected with reason 26, the machine runs"
 elif grep -qiE 'refused|not found|No such' "$TMPD/g1.txt" 2>/dev/null; then
-    ok "ein fehlender Interpreter wird abgelehnt (Meldung, kein Haenger)"
+    ok "a missing interpreter is rejected (message, no hang)"
 else
-    bad "ein fehlender Interpreter gibt keine erkennbare Ablehnung"
+    bad "a missing interpreter gives no recognisable rejection"
     grep -iE 'elf:|reason|vector' "$TMPD/g1.txt" | sed 's/^/        /' | head -6
 fi
 
@@ -314,20 +314,20 @@ fi
 run_disk "osum $QUIET script=chaininterp;exit" "$TMPD/g2.txt"
 rc=$?
 if [ $rc -eq 124 ]; then
-    bad "eine Interpreter-Kette HAENGT die Maschine"
+    bad "an interpreter chain HANGS the machine"
 elif grep -qiE 'interpreter chained|reason 27' "$TMPD/g2.txt" 2>/dev/null; then
-    ok "ein Interpreter mit eigenem PT_INTERP wird mit Grund 27 abgewiesen"
+    ok "an interpreter with its own PT_INTERP is rejected with reason 27"
 elif grep -qiE 'refused' "$TMPD/g2.txt" 2>/dev/null; then
-    ok "ein Interpreter mit eigenem PT_INTERP wird abgewiesen"
+    ok "an interpreter with its own PT_INTERP is rejected"
 else
-    bad "eine Interpreter-Kette wird nicht erkennbar abgewiesen"
+    bad "an interpreter chain is not recognisably rejected"
     grep -iE 'elf:|reason|vector' "$TMPD/g2.txt" | sed 's/^/        /' | head -6
 fi
 
 run_disk "osum $QUIET script=echo statisch-lebt;exit" "$TMPD/g3.txt"
 sed '/^mb: flags=/d' "$TMPD/g3.txt" > "$TMPD/g3.rein" 2>/dev/null
 if grep -q 'statisch-lebt' "$TMPD/g3.rein" 2>/dev/null; then
-    ok "die statisch gebundenen Programme laufen unveraendert weiter"
+    ok "the statically linked programs keep running unchanged"
 else
     weg "kein /bin/echo im Abbild -- der statische Fall wurde hier nicht gemessen"
 fi
@@ -335,9 +335,9 @@ fi
 echo "== 9. Modularitaet: abschaltbar und separat ausgeliefert =="
 
 if grep -q 'ld-musl' tools/usbimg/build.sh 2>/dev/null; then
-    bad "tools/usbimg/build.sh nennt ld-musl -- der Interpreter waere im Grundabbild"
+    bad "tools/usbimg/build.sh names ld-musl -- the interpreter would be in the base image"
 else
-    ok "das Standardabbild (tools/usbimg/build.sh) nennt weder ld-musl noch busybox"
+    ok "the standard image (tools/usbimg/build.sh) names neither ld-musl nor busybox"
 fi
 
 OPKPY=${OPKPY:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/../lib/opkpfad.py")}   # A-025: der alte Ordner war ein Arbeitsbaum
@@ -349,9 +349,9 @@ if [ -r "$OPKPY" ]; then
         || cp tools/dynlader/paket/linux-abi.rezept "$TMPD/opk/linux-abi.rezept"
     if python3 "$OPKPY" bauen "$TMPD/opk/linux-abi.rezept" \
             -o "$TMPD/opk/linux-abi.opk" > "$TMPD/opk/bau1.txt" 2>&1; then
-        ok "das Paket linux-abi baut ($(stat -c%s "$TMPD/opk/linux-abi.opk") Oktette)"
+        ok "the package linux-abi builds ($(stat -c%s "$TMPD/opk/linux-abi.opk") Oktette)"
     else
-        bad "das Paket linux-abi baut nicht"
+        bad "the package linux-abi does not build"
         sed 's/^/        /' "$TMPD/opk/bau1.txt" | head -4
     fi
     rm -rf "$TMPD/wurzel"; mkdir -p "$TMPD/wurzel"
@@ -361,9 +361,9 @@ if [ -r "$OPKPY" ]; then
         python3 "$OPKPY" pruefen --wurzel "$TMPD/wurzel" 2>&1 \
             | grep -q '0 kaputt' \
             && ok "und opk verify findet nichts Kaputtes" \
-            || bad "opk verify beanstandet den Baum"
+            || bad "opk verify complains about the tree"
     else
-        bad "linux-abi laesst sich nicht installieren"
+        bad "linux-abi cannot be installed"
         sed 's/^/        /' "$TMPD/opk/inst.txt" | head -4
     fi
 else
@@ -378,7 +378,7 @@ SPEC3="$SPEC3 /bin/hello_dyn=$TMPD/hello_dyn /etc/pruef.txt=$TMPD/pruef.txt"
 [ "$BB_DA" = 1 ] && SPEC3="$SPEC3 /bin/busybox=$BBDYN"
 if python3 tools/osum/mkfs.py build "$TMPD/paket.img" $BLOCKS $SPEC3 \
         > "$TMPD/mkfs3.txt" 2>&1; then
-    ok "Abbild in Paketform gebaut (Datei unter /apps, /lib/... als Verweis)"
+    ok "image in package form built (file under /apps, /lib/... as link)"
     cp -f "$TMPD/paket.img" "$TMPD/live.img"
     timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
         -append "osum $QUIET script=hello_dyn;exit" \
@@ -387,10 +387,10 @@ if python3 tools/osum/mkfs.py build "$TMPD/paket.img" $BLOCKS $SPEC3 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
     sed '/^mb: flags=/d' "$TMPD/p1.txt" > "$TMPD/p1.rein"
     grep -q 'hallo dynamisch' "$TMPD/p1.rein" \
-        && ok "ein dynamisches Programm laeuft, wenn der Lader AUS DEM PAKET kommt" \
-        || bad "ueber den Paketverweis laeuft es nicht"
+        && ok "a dynamic program runs when the loader comes FROM THE PACKAGE" \
+        || bad "it does not run via the package link"
 else
-    bad "das Abbild in Paketform laesst sich nicht bauen"
+    bad "the image in package form cannot be built"
     sed 's/^/        /' "$TMPD/mkfs3.txt" | head -5
 fi
 
@@ -408,11 +408,11 @@ timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
 prc=$?
 sed '/^mb: flags=/d' "$TMPD/p2.txt" > "$TMPD/p2.rein"
 if [ $prc -eq 124 ]; then
-    bad "ohne das Paket HAENGT die Maschine"
+    bad "without the package the machine HANGS"
 elif grep -qiE 'interpreter missing|reason 26' "$TMPD/p2.rein"; then
-    ok "ohne das Paket: Grund 26, sauber abgelehnt, die Maschine laeuft"
+    ok "without the package: reason 26, cleanly rejected, the machine runs"
 else
-    bad "ohne das Paket gibt es keine erkennbare Ablehnung"
+    bad "without the package there is no recognisable rejection"
 fi
 
 cp -f "$TMPD/ohne.img" "$TMPD/live.img"
@@ -423,8 +423,8 @@ timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 sed '/^mb: flags=/d' "$TMPD/p3.txt" > "$TMPD/p3.rein"
 grep -q 'ohne-paket-lebt' "$TMPD/p3.rein" \
-    && ok "ein System OHNE das Paket ist nicht kaputt -- Osum-Programme laufen" \
-    || bad "ohne das Paket laufen auch die eigenen Programme nicht"
+    && ok "a system WITHOUT the package is not broken -- Osum programs run" \
+    || bad "without the package the own programs do not run either"
 
 echo
 echo "DYNLADER: $pass bestanden, $fail gescheitert, $skip uebersprungen"
