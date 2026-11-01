@@ -1,0 +1,915 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import libc.dns
+import std.net
+import pairstate
+import std.rt
+import tls.tls
+import tls.x509
+import jarvisd.jdbase
+import jarvisd.jdcmd
+
+const PAIR_TTL_S: u64 = 600
+
+const PAIR_REASK_MS: u64 = 3000
+
+const MAXNUTZ: usize = 1048576
+
+const NG_READY: i64 = 0
+
+const NG_IP: i64 = 1
+
+const NG_MASK: i64 = 2
+
+const NG_GW: i64 = 3
+
+static mut z_auftraege: u64 = 0
+
+const POLL_MAX_MS: u64 = 5000
+
+const POLL_TRIES: u64 = 3
+
+fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
+    var prog: [u8; 10] = "/bin/jsig\0"
+    var ptr: [u64; 4] = [0; 4]
+    ptr[0] = (&prog[0]) as u64
+    ptr[1] = a1
+    ptr[2] = a2
+    ptr[3] = 0
+    let target: i64 = jdcmd.sys_open((&jdbase.k_arbeit[0]) as u64,
+        jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 384)
+    if target < 0 {
+        return false
+    }
+    let kind: i64 = syscall(jdbase.S_FORK, 0, 0, 0, 0, 0, 0)
+    if kind < 0 {
+        jdcmd.sys_close(target)
+        return false
+    }
+    if kind == 0 {
+        syscall(jdbase.S_DUP2, target, 1, 0, 0, 0, 0)
+        jdcmd.sys_close(target)
+        syscall(jdbase.S_EXECVE, ptr[0] as i64, (&ptr[0]) as i64, 0, 0, 0, 0)
+        rt.finish(127)
+    }
+    jdcmd.sys_close(target)
+    var status: i32 = 0
+    if jdcmd.wait_child(kind, &status) {
+        return false
+    }
+    if (status & 127) != 0 || ((status >> 8) & 255) != 0 {
+        return false
+    }
+    rt.buf_clear(aus)
+    if !rt.read_file((&jdbase.k_arbeit[0]) as u64, aus) {
+        return false
+    }
+    return true
+}
+
+fn sign_in(d: *mut jdbase.Wire) -> u64 {
+    var hallo: rt.Buf = rt.buf_new()
+    var h: [u8; 16] = "osum-bridge 1\0\0\0"
+    rt.buf_push_bytes(&hallo, (&h[0]) as u64, 13)
+    let okh: bool = jdcmd.sende(d, &hallo, 0, 0 as usize)
+    rt.buf_free(&hallo)
+    if !okh {
+        return 2
+    }
+    var id: rt.Buf = rt.buf_new()
+    var w_aus: [u8; 5] = "init\0"
+    if !jsig_rufen((&w_aus[0]) as u64, 0, &id) {
+        rt.buf_free(&id)
+        jdcmd.say("jarvisd: /bin/jsig returned no key (run `jsig init`)\n")
+        return 1
+    }
+    var pv: usize = 0
+    var pb: usize = 0
+    if !jdcmd.after_space(&id, &pv, &pb) {
+        rt.buf_free(&id)
+        return 1
+    }
+    var pubhex: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&pubhex, id.ptr + pv as u64, pb - pv)
+    rt.buf_free(&id)
+    if (*d).https {
+        var kl: usize = pubhex.len
+        if kl > 24 {
+            kl = 24 as usize
+        }
+        jdbase.k_sidlen = jdcmd.hinein((&jdbase.k_sid[0]) as u64, 40 as usize, pubhex.ptr, kl)
+    }
+    if !jdcmd.word_send(d, "hello", pubhex.ptr, pubhex.len) {
+        rt.buf_free(&pubhex)
+        return 2
+    }
+    var pair_t0: u64 = 0
+    var pair_last: [u8; 24] = [0; 24]
+    var pair_last_n: usize = 0
+
+    var line: rt.Buf = rt.buf_new()
+    var f: jdbase.Felder = jdbase.Felder { off: [0; 10], len: [0; 10], n: 0 }
+    var ergebnis: u64 = 2
+    while true {
+        if !jdcmd.wire_line(d, &line) {
+            ergebnis = 2
+            break
+        }
+        jdcmd.zerlege(line.ptr, line.len, &f)
+        if f.n == 0 {
+            continue
+        }
+        let wp: u64 = line.ptr + f.off[0] as u64
+        let wn: usize = f.len[0]
+        var w_challenge: [u8; 10] = "challenge\0"
+        var w_welcome: [u8; 8] = "welcome\0"
+        var w_drop: [u8; 5] = "drop\0"
+        var w_pairing: [u8; 15] = "pairing-needed\0"
+        if jdcmd.ist(wp, wn, (&w_challenge[0]) as u64) && f.n >= 2 {
+            var nonce: [u8; 260] = [0; 260]
+            let nn: usize = jdcmd.hinein((&nonce[0]) as u64, 260 as usize,
+                line.ptr + f.off[1] as u64, f.len[1])
+            var w_sig: [u8; 5] = "sign\0"
+            var sigb: rt.Buf = rt.buf_new()
+            if !jsig_rufen((&w_sig[0]) as u64, (&nonce[0]) as u64, &sigb) {
+                rt.buf_free(&sigb)
+                jdcmd.say("jarvisd: /bin/jsig did not sign\n")
+                ergebnis = 1
+                break
+            }
+            var sv: usize = 0
+            var sb: usize = 0
+            if !jdcmd.after_space(&sigb, &sv, &sb) {
+                rt.buf_free(&sigb)
+                ergebnis = 1
+                break
+            }
+            let ok: bool = jdcmd.word_send(d, "proof",
+                sigb.ptr + sv as u64, sb - sv)
+            rt.buf_free(&sigb)
+            if !ok {
+                ergebnis = 2
+                break
+            }
+        } else if jdcmd.ist(wp, wn, (&w_pairing[0]) as u64) && f.n >= 2 {
+            let cp: u64 = line.ptr + f.off[1] as u64
+            let cn: usize = f.len[1]
+            var shown: rt.Buf = rt.buf_new()
+            var sp: u64 = cp
+            var sn: usize = cn
+            if jdcmd.hex_out(cp, cn, &shown) && shown.len > 0 && jdcmd.printable_text(shown.ptr, shown.len) {
+                sp = shown.ptr
+                sn = shown.len
+            }
+            if jdbase.k_pair_web {
+                var left: u64 = PAIR_TTL_S
+                if pair_t0 == 0 {
+                    pair_t0 = jdcmd.now_ms()
+                } else {
+                    let waited: u64 = (jdcmd.now_ms() - pair_t0) / 1000
+                    if waited >= PAIR_TTL_S {
+                        left = 0
+                    } else {
+                        left = PAIR_TTL_S - waited
+                    }
+                }
+                if left == 0 {
+                    pairstate.write_none()
+                    jdcmd.say("jarvisd: pairing code expired -- nobody entered it in the web UI\n")
+                    jdbase.z_abgelehnt = jdbase.z_abgelehnt + 1
+                    rt.buf_free(&shown)
+                    ergebnis = 1
+                    break
+                }
+                if !jdcmd.eq((&pair_last[0]) as u64, pair_last_n, sp, sn) {
+                    jdcmd.say("jarvisd: PAIRING CODE ")
+                    jdcmd.say_octets(sp, sn)
+                    jdcmd.say("\n         Enter it in the JARVIS web UI (Devices)\n")
+                    pair_last_n = jdcmd.hinein((&pair_last[0]) as u64, 24 as usize, sp, sn)
+                    var p_code: [u8; 20] = "/var/jarvis/pairing\0"
+                    rt.write_file((&p_code[0]) as u64, sp, sn)
+                }
+                pairstate.write_waiting(sp, sn, left)
+                rt.buf_free(&shown)
+                jdcmd.schlafe_ms(PAIR_REASK_MS)
+                jdcmd.keepalive()
+                if !jdcmd.word_send(d, "hello", pubhex.ptr, pubhex.len) {
+                    ergebnis = 2
+                    break
+                }
+                continue
+            }
+            jdcmd.say("jarvisd: PAIRING CODE ")
+            jdcmd.say_octets(sp, sn)
+            jdcmd.say("\n         Confirm on THIS device with: jarvisctl pair ")
+            jdcmd.say_octets(sp, sn)
+            jdcmd.say("\n")
+            pairstate.write_confirm(sp, sn)
+            let confirmed: bool = jdcmd.kopplung_bestaetigt(sp, sn)
+            rt.buf_free(&shown)
+            if confirmed {
+                if !jdcmd.word_send(d, "pair", cp, cn) {
+                    ergebnis = 2
+                    break
+                }
+                var a1: [u8; 8] = "pairing\0"
+                jdcmd.notiere((&a1[0]) as u64, 7, "confirmed", cp, cn)
+            } else {
+                jdcmd.word_send(d, "pair-rejected", 0, 0 as usize)
+                var a2: [u8; 8] = "pairing\0"
+                var g: [u8; 28] = "not confirmed on the device\0"
+                jdcmd.notiere((&a2[0]) as u64, 7, "rejected", (&g[0]) as u64, 27)
+                jdbase.z_abgelehnt = jdbase.z_abgelehnt + 1
+                jdcmd.say("jarvisd: pairing REJECTED -- nobody confirmed it on this device\n")
+                ergebnis = 1
+                break
+            }
+        } else if jdcmd.ist(wp, wn, (&w_welcome[0]) as u64) {
+            pairstate.write_ok()
+            if pair_t0 != 0 {
+                var p_gone: [u8; 20] = "/var/jarvis/pairing\0"
+                jdcmd.sys_unlink((&p_gone[0]) as u64)
+            }
+            ergebnis = 0
+            break
+        } else if jdcmd.ist(wp, wn, (&w_drop[0]) as u64) {
+            jdcmd.say("jarvisd: the server rejected the sign-in\n")
+            ergebnis = 1
+            break
+        }
+    }
+    rt.buf_free(&line)
+    rt.buf_free(&pubhex)
+    return ergebnis
+}
+
+fn bediene(d: *mut jdbase.Wire) -> bool {
+    var line: rt.Buf = rt.buf_new()
+    var nutz: rt.Buf = rt.buf_new()
+    var aus: rt.Buf = rt.buf_new()
+    var arg1: rt.Buf = rt.buf_new()
+    var f: jdbase.Felder = jdbase.Felder { off: [0; 10], len: [0; 10], n: 0 }
+    var clean: bool = true
+    var ruhe: u64 = 0
+    while true {
+        if (*d).https && (*d).at >= (*d).puf.len {
+            if ruhe > 0 {
+                jdcmd.schlafe_ms(ruhe)
+                jdcmd.keepalive()
+            }
+            var versuche: u64 = 0
+            var sent_ok: bool = false
+            while versuche < POLL_TRIES && !sent_ok {
+                if versuche > 0 {
+                    jdcmd.say_if_loud("jarvisd: poll failed, trying again\n")
+                    jdcmd.schlafe_ms(1000 << (versuche - 1))
+                }
+                sent_ok = jdcmd.word_send(d, "poll", 0, 0 as usize)
+                versuche = versuche + 1
+            }
+            if !sent_ok {
+                clean = false
+                break
+            }
+            if (*d).at >= (*d).puf.len {
+                if ruhe == 0 {
+                    ruhe = 250
+                } else {
+                    ruhe = ruhe * 2
+                }
+                if ruhe > POLL_MAX_MS {
+                    ruhe = POLL_MAX_MS
+                }
+                continue
+            }
+            ruhe = 0
+        }
+        if !jdcmd.wire_line(d, &line) {
+            clean = false
+            break
+        }
+        jdcmd.zerlege(line.ptr, line.len, &f)
+        if f.n == 0 {
+            continue
+        }
+        let wp: u64 = line.ptr + f.off[0] as u64
+        let wn: usize = f.len[0]
+        var w_bye: [u8; 4] = "bye\0"
+        var w_job: [u8; 4] = "job\0"
+        var w_drop: [u8; 5] = "drop\0"
+        if jdcmd.ist(wp, wn, (&w_bye[0]) as u64) {
+            break
+        }
+        if jdcmd.ist(wp, wn, (&w_drop[0]) as u64) {
+            jdcmd.say("jarvisd: the server ended the session\n")
+            clean = false
+            break
+        }
+        if !jdcmd.ist(wp, wn, (&w_job[0]) as u64) {
+            continue
+        }
+        if f.n < 4 {
+            continue
+        }
+        let length: usize = jdcmd.num_from(line.ptr + f.off[f.n - 1] as u64,
+            f.len[f.n - 1]) as usize
+        if length > MAXNUTZ {
+            jdcmd.say("jarvisd: payload over the hard limit -- stopping\n")
+            var a: [u8; 8] = "request\0"
+            var g: [u8; 28] = "payload over the hard limit\0"
+            jdcmd.notiere((&a[0]) as u64, 7, "REJECTED", (&g[0]) as u64, 27)
+            jdbase.z_abgelehnt = jdbase.z_abgelehnt + 1
+            clean = false
+            break
+        }
+        if !jdcmd.wire_bytes(d, length, &nutz) {
+            clean = false
+            break
+        }
+        jdcmd.conf_read()
+        z_auftraege = z_auftraege + 1
+
+        let idp: u64 = line.ptr + f.off[1] as u64
+        let idn: usize = f.len[1]
+        let artp: u64 = line.ptr + f.off[2] as u64
+        let artn: usize = f.len[2]
+        rt.buf_clear(&arg1)
+        if f.n >= 5 {
+            jdcmd.hex_out(line.ptr + f.off[3] as u64, f.len[3], &arg1)
+        }
+        var w_sys: [u8; 7] = "system\0"
+        var e_read: [u8; 5] = "read\0"
+        var e_write: [u8; 6] = "write\0"
+        var e_list: [u8; 5] = "list\0"
+        var e_run: [u8; 4] = "run\0"
+        var e_shot: [u8; 11] = "screenshot\0"
+        var e_input: [u8; 6] = "input\0"
+        var gut: bool = false
+        if jdcmd.ist(artp, artn, (&w_sys[0]) as u64) {
+            gut = jdcmd.do_system(&aus)
+        } else if jdcmd.ist(artp, artn, (&e_read[0]) as u64) {
+            gut = jdcmd.do_read(arg1.ptr, arg1.len, &aus)
+        } else if jdcmd.ist(artp, artn, (&e_write[0]) as u64) {
+            gut = jdcmd.do_write(arg1.ptr, arg1.len, &nutz, &aus)
+        } else if jdcmd.ist(artp, artn, (&e_list[0]) as u64) {
+            gut = jdcmd.do_list(arg1.ptr, arg1.len, &aus)
+        } else if jdcmd.ist(artp, artn, (&e_run[0]) as u64) {
+            gut = jdcmd.do_cmd(arg1.ptr, arg1.len, &aus)
+        } else if jdcmd.ist(artp, artn, (&e_shot[0]) as u64) {
+            gut = jdcmd.do_screenshot(&aus)
+        } else if jdcmd.ist(artp, artn, (&e_input[0]) as u64) {
+            gut = jdcmd.do_input(arg1.ptr, arg1.len, &aus)
+        } else {
+            gut = jdcmd.ablehnen(&aus, "unknown request kind")
+        }
+        if gut && aus.len > jdbase.RESULT_CAP {
+            gut = jdcmd.ablehnen(&aus, "result larger than the wire limit")
+        }
+        if gut {
+            jdcmd.notiere(artp, artn, "ok", arg1.ptr, arg1.len)
+        } else {
+            jdcmd.notiere(artp, artn, "REJECTED", aus.ptr, aus.len)
+        }
+        var head: rt.Buf = rt.buf_new()
+        var w_done: [u8; 5] = "done\0"
+        rt.buf_push_bytes(&head, (&w_done[0]) as u64, 4)
+        rt.buf_push(&head, 32 as u8)
+        rt.buf_push_bytes(&head, idp, idn)
+        rt.buf_push(&head, 32 as u8)
+        if gut {
+            var s_ok: [u8; 3] = "ok\0"
+            rt.buf_push_bytes(&head, (&s_ok[0]) as u64, 2)
+        } else {
+            var s_failed: [u8; 7] = "failed\0"
+            rt.buf_push_bytes(&head, (&s_failed[0]) as u64, 6)
+        }
+        let okk: bool = jdcmd.sende(d, &head, aus.ptr, aus.len)
+        rt.buf_free(&head)
+        if !okk {
+            clean = false
+            break
+        }
+    }
+    rt.buf_free(&line)
+    rt.buf_free(&nutz)
+    rt.buf_free(&aus)
+    rt.buf_free(&arg1)
+    return clean
+}
+
+#[allow_escape]
+fn eine_runde_https() -> u64 {
+    if jdbase.k_ip == 0 as u32 {
+        var wirt: [u8; 100] = [0; 100]
+        let wn: usize = jdcmd.hinein((&wirt[0]) as u64, 100 as usize,
+            (&jdbase.k_name[0]) as u64, jdbase.k_namelen)
+        let _rc: u64 = dns.conf_load()
+        let a4: u64 = dns.resolve_a((&wirt[0]) as u64)
+        if a4 == 0 {
+            jdcmd.say("jarvisd: cannot resolve the name\n")
+            return 2
+        }
+        jdbase.k_ip = a4 as u32
+        jdbase.k_port = 443 as u32
+        jdcmd.say("jarvisd: ")
+        show_ip("", jdbase.k_ip as u64)
+    }
+
+    var d: jdbase.Wire = jdcmd.wire_new_https()
+    var erg: u64 = 2
+    let an: u64 = sign_in(&d)
+    if an == 0 {
+        jdcmd.say("jarvisd: signed in\n")
+        var a: [u8; 8] = "session\0"
+        jdcmd.notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        jdbase.z_sitzungen = jdbase.z_sitzungen + 1
+        jdbase.k_session_ms = jdcmd.now_ms()
+        jdbase.k_wire = (&d) as u64
+        jdcmd.sende_info(&d)
+        if bediene(&d) {
+            erg = 0
+        } else {
+            erg = 2
+        }
+        jdbase.k_wire = 0 as u64
+    } else {
+        erg = an
+    }
+    jdcmd.wire_gone(&d)
+    if erg == 2 {
+        jdbase.k_ip = 0 as u32
+    }
+    return erg
+}
+
+fn eine_runde() -> u64 {
+    if jdbase.k_https {
+        return eine_runde_https()
+    }
+    var schief: bool = false
+    var c: net.Conn = net.connect_tcp(jdbase.k_ip, jdbase.k_port as u16)
+    catch | e | jdcmd.fail_conn(&schief)
+    if schief {
+        jdcmd.say_if_loud("jarvisd: no connection\n")
+        return 2
+    }
+    let okt: bool = net.set_timeout(&c, 30000 as u64) catch false
+
+    var storebuf: rt.Buf = rt.buf_new()
+    var store: x509.Store = x509.store_new()
+    var wurzeln: usize = 0
+    if rt.read_file((&jdbase.k_wurzeln[0]) as u64, &storebuf) {
+        wurzeln = x509.store_load_pem(&store, storebuf.ptr, storebuf.len)
+    }
+    if wurzeln == 0 {
+        jdcmd.say("jarvisd: no root store -- nothing is trusted\n")
+    }
+    var t: tls.Tls = tls.tls_new()
+    let oki: bool = tls.tls_init(&t, &c, &store, (&jdbase.k_name[0]) as u64,
+        jdbase.k_namelen, jdcmd.now_s())
+    var hschief: bool = false
+    let okh: bool = tls.tls_handshake(&t) catch | e | jdcmd.fail_bool(&hschief)
+    if hschief || !tls.tls_established(&t) {
+        jdcmd.say("jarvisd: TLS handshake failed, reason ")
+        jdcmd.say_num(tls.tls_verify_reason(&t) as u64)
+        jdcmd.say("\n")
+        var a: [u8; 4] = "tls\0"
+        var g: [u8; 27] = "certificate not accepted\0\0\0"
+        jdcmd.notiere((&a[0]) as u64, 3, "REJECTED", (&g[0]) as u64, 24)
+        tls.tls_free(&t)
+        net.close(&c)
+        rt.buf_free(&storebuf)
+        x509.store_free(&store)
+        return 2
+    }
+    jdbase.z_verbindungen = jdbase.z_verbindungen + 1
+    jdcmd.say("jarvisd: connected, cipher ")
+    jdcmd.say_num(tls.tls_suite(&t) as u64)
+    jdcmd.say(", certificates ")
+    jdcmd.say_num(tls.tls_peer_cert_count(&t) as u64)
+    jdcmd.say("\n")
+
+    var d: jdbase.Wire = jdcmd.wire_new(&t)
+    var erg: u64 = 2
+    let an: u64 = sign_in(&d)
+    if an == 0 {
+        jdcmd.say("jarvisd: signed in\n")
+        var a: [u8; 8] = "session\0"
+        jdcmd.notiere((&a[0]) as u64, 7, "signed-in", 0, 0 as usize)
+        jdbase.z_sitzungen = jdbase.z_sitzungen + 1
+        jdbase.k_session_ms = jdcmd.now_ms()
+        if bediene(&d) {
+            erg = 0
+        } else {
+            erg = 2
+        }
+    } else {
+        erg = an
+    }
+    jdcmd.wire_gone(&d)
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    net.close(&c)
+    rt.buf_free(&storebuf)
+    x509.store_free(&store)
+    return erg
+}
+
+fn mach_verzeichnisse() {
+    var v1: [u8; 5] = "/var\0"
+    var v2: [u8; 12] = "/var/jarvis\0"
+    var v3: [u8; 9] = "/var/log\0"
+    var v4: [u8; 5] = "/etc\0"
+    var v5: [u8; 12] = "/etc/jarvis\0"
+    jdcmd.sys_mkdir((&v1[0]) as u64)
+    jdcmd.sys_mkdir((&v2[0]) as u64)
+    jdcmd.sys_mkdir((&v3[0]) as u64)
+    jdcmd.sys_mkdir((&v4[0]) as u64)
+    jdcmd.sys_mkdir((&v5[0]) as u64)
+}
+
+fn probe() -> i32 {
+    var name: [u8; 32] = "/var/jarvis/probe.txt\0\0\0\0\0\0\0\0\0\0\0"
+    let a: i64 = jdcmd.sys_open((&name[0]) as u64, jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
+    if a < 0 {
+        jdcmd.say("probe: the file cannot be created\n")
+        return 1
+    }
+    var text: [u8; 6] = "hallo\0"
+    jdcmd.sys_write(a, (&text[0]) as u64, 5 as usize)
+    jdcmd.sys_close(a)
+    let fd: i64 = jdcmd.sys_open((&name[0]) as u64, 2, 0)
+    if fd < 0 {
+        jdcmd.say("probe: the file cannot be opened\n")
+        return 1
+    }
+    jdcmd.say("probe: rechte_offen ")
+    jdcmd.say_num(jdcmd.hnd_rechte(fd) as u64)
+    jdcmd.say("\n")
+    let eng: i64 = jdcmd.hnd_dup(fd, jdbase.R_READ | jdbase.R_INSPECT | jdbase.R_SEEK)
+    if eng < 0 {
+        jdcmd.say("probe: HND_DUP ging nicht\n")
+        jdcmd.sys_close(fd)
+        return 1
+    }
+    jdcmd.sys_close(fd)
+    let rr: i64 = jdcmd.hnd_rechte(eng)
+    jdcmd.say("probe: rechte_eng ")
+    jdcmd.say_num(rr as u64)
+    jdcmd.say("\n")
+    jdcmd.say("probe: hat_schreibrecht ")
+    if (rr & jdbase.R_WRITE) != 0 {
+        jdcmd.say("ja")
+    } else {
+        jdcmd.say("nein")
+    }
+    jdcmd.say("\n")
+    var fresh: [u8; 6] = "boese\0"
+    let w: i64 = jdcmd.sys_write(eng, (&fresh[0]) as u64, 5 as usize)
+    jdcmd.say("probe: schreibversuch ")
+    if w < 0 {
+        jdcmd.say("abgewiesen ")
+        jdcmd.say_num((0 - w) as u64)
+    } else {
+        jdcmd.say("DURCHGELASSEN ")
+        jdcmd.say_num(w as u64)
+    }
+    jdcmd.say("\n")
+    var chunk: [u8; 16] = [0; 16]
+    let r: i64 = jdcmd.sys_read(eng, (&chunk[0]) as u64, 16 as usize)
+    jdcmd.say("probe: gelesen ")
+    if r > 0 {
+        jdcmd.say_num(r as u64)
+        jdcmd.say(" ")
+        jdcmd.say_octets((&chunk[0]) as u64, r as usize)
+    } else {
+        jdcmd.say_num(0)
+    }
+    jdcmd.say("\n")
+    jdcmd.sys_close(eng)
+    return 0
+}
+
+fn screen() -> i32 {
+    jdcmd.say("schirm: shot ")
+    jdcmd.say_num(syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_READY, 0, 0, 0, 0) as u64)
+    jdcmd.say(" shotw ")
+    jdcmd.say_num(syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_WIDTH, 0, 0, 0, 0) as u64)
+    jdcmd.say(" shoth ")
+    jdcmd.say_num(syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_HEIGHT, 0, 0, 0, 0) as u64)
+    jdcmd.say(" w ")
+    jdcmd.say_num(syscall(jdbase.S_WIGSCREEN, jdbase.WS_W, 0, 0, 0, 0, 0) as u64)
+    jdcmd.say(" h ")
+    jdcmd.say_num(syscall(jdbase.S_WIGSCREEN, jdbase.WS_H, 0, 0, 0, 0, 0) as u64)
+    jdcmd.say(" pitch ")
+    jdcmd.say_num(syscall(jdbase.S_DISPGET, jdbase.DG_PITCH, 0, 0, 0, 0, 0) as u64)
+    jdcmd.say(" bpp ")
+    jdcmd.say_num(syscall(jdbase.S_DISPGET, jdbase.DG_BPP, 0, 0, 0, 0, 0) as u64)
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = jdcmd.sys_open((&fbname[0]) as u64, 0, 0)
+    jdcmd.say(" devfb ")
+    jdcmd.say_num(fd as u64)
+    if fd >= 0 {
+        jdcmd.sys_close(fd)
+    }
+    jdcmd.say("\n")
+    return 0
+}
+
+fn ppm_over_kernel(path: u64, w: i64, h: i64) -> i32 {
+    let rb: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_ROWBYTES, 0, 0, 0, 0)
+    var zpc: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_CHUNKROWS, 0, 0, 0, 0)
+    if rb <= 0 {
+        jdcmd.say("jarvisd: the kernel reports no line pitch\n")
+        return 2
+    }
+    if zpc <= 0 {
+        zpc = 1
+    }
+    let out: i64 = jdcmd.sys_open(path, jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
+    if out < 0 {
+        jdcmd.say("jarvisd: cannot create the target file\n")
+        return 2
+    }
+    let arm: i64 = syscall(jdbase.S_SHOT, jdbase.SH_ARM, 0, 0, 0, 0, 0)
+    if arm < 0 {
+        jdcmd.sys_close(out)
+        jdcmd.say("jarvisd: the kernel issues no permit (SH_ARM rejected)\n")
+        return 2
+    }
+    var head: rt.Buf = rt.buf_new()
+    var p6: [u8; 4] = "P6\n\0"
+    rt.buf_push_bytes(&head, (&p6[0]) as u64, 3)
+    rt.buf_push_dec_u64(&head, w as u64)
+    rt.buf_push(&head, 32 as u8)
+    rt.buf_push_dec_u64(&head, h as u64)
+    rt.buf_push(&head, 10 as u8)
+    var m255: [u8; 5] = "255\n\0"
+    rt.buf_push_bytes(&head, (&m255[0]) as u64, 4)
+    let _hk: i64 = jdcmd.sys_write(out, head.ptr, head.len)
+    rt.buf_free(&head)
+    let line: usize = rb as usize
+    let bandzeilen: usize = zpc as usize
+    var band: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&band, bandzeilen * line)
+    rt.buf_set_len(&band, bandzeilen * line)
+    var y: usize = 0
+    var schief: bool = false
+    while y < (h as usize) {
+        var will: usize = bandzeilen
+        if y + will > (h as usize) {
+            will = (h as usize) - y
+        }
+        let n: i64 = syscall(jdbase.S_SHOT, jdbase.SH_GRAB, band.ptr as i64,
+            (will * line) as i64, 0, 0, 0)
+        if n <= 0 {
+            schief = true
+            break
+        }
+        var ab: usize = 0
+        while ab < (n as usize) {
+            let gw: i64 = jdcmd.sys_write(out, band.ptr + ab as u64, (n as usize) - ab)
+            if gw <= 0 {
+                schief = true
+                break
+            }
+            ab = ab + (gw as usize)
+        }
+        if schief {
+            break
+        }
+        y = y + ((n as usize) / line)
+    }
+    rt.buf_free(&band)
+    jdcmd.sys_close(out)
+    if schief {
+        syscall(jdbase.S_SHOT, jdbase.SH_DROP, 0, 0, 0, 0, 0)
+        jdcmd.say("jarvisd: the kernel returned an incomplete image\n")
+        return 2
+    }
+    jdcmd.say("jarvisd: screenshot written (kernel permit), ")
+    jdcmd.say_num(w as u64)
+    jdcmd.say("x")
+    jdcmd.say_num(h as u64)
+    jdcmd.say("\n")
+    return 0
+}
+
+fn photo_file(path: u64) -> i32 {
+    var w: i64 = 0
+    var h: i64 = 0
+    let ready: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_READY, 0, 0, 0, 0)
+    var via_kernel: bool = false
+    if ready > 0 {
+        w = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_WIDTH, 0, 0, 0, 0)
+        h = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_HEIGHT, 0, 0, 0, 0)
+        via_kernel = w > 0 && h > 0
+    }
+    if !via_kernel {
+        w = syscall(jdbase.S_WIGSCREEN, jdbase.WS_W, 0, 0, 0, 0, 0)
+        h = syscall(jdbase.S_WIGSCREEN, jdbase.WS_H, 0, 0, 0, 0, 0)
+    }
+    if w <= 0 || h <= 0 {
+        jdcmd.say("jarvisd: no screen size -- is the window server running?\n")
+        return 2
+    }
+    if via_kernel {
+        return ppm_over_kernel(path, w, h)
+    }
+    var pitch: i64 = syscall(jdbase.S_DISPGET, jdbase.DG_PITCH, 0, 0, 0, 0, 0)
+    var bpp: i64 = syscall(jdbase.S_DISPGET, jdbase.DG_BPP, 0, 0, 0, 0, 0)
+    if bpp <= 0 {
+        bpp = 32
+    }
+    if pitch <= 0 {
+        pitch = w * (bpp / 8)
+    }
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = jdcmd.sys_open((&fbname[0]) as u64, 0, 0)
+    if fd < 0 {
+        jdcmd.say("jarvisd: cannot open /dev/fb\n")
+        return 2
+    }
+    let out: i64 = jdcmd.sys_open(path, jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
+    if out < 0 {
+        jdcmd.sys_close(fd)
+        jdcmd.say("jarvisd: cannot create the target file\n")
+        return 2
+    }
+    var head: rt.Buf = rt.buf_new()
+    var p6: [u8; 4] = "P6\n\0"
+    rt.buf_push_bytes(&head, (&p6[0]) as u64, 3)
+    rt.buf_push_dec_u64(&head, w as u64)
+    rt.buf_push(&head, 32 as u8)
+    rt.buf_push_dec_u64(&head, h as u64)
+    rt.buf_push(&head, 10 as u8)
+    var m255: [u8; 5] = "255\n\0"
+    rt.buf_push_bytes(&head, (&m255[0]) as u64, 4)
+    let _hk: i64 = jdcmd.sys_write(out, head.ptr, head.len)
+    rt.buf_free(&head)
+    let width: usize = w as usize
+    let line: usize = pitch as usize
+    var zpuf: rt.Buf = rt.buf_new()
+    var apuf: rt.Buf = rt.buf_new()
+    if !rt.buf_reserve(&zpuf, line) || !rt.buf_reserve(&apuf, width * 3) {
+        rt.buf_free(&zpuf)
+        rt.buf_free(&apuf)
+        jdcmd.sys_close(fd)
+        jdcmd.say("jarvisd: out of memory for the line buffers\n")
+        return 2
+    }
+    rt.buf_set_len(&zpuf, line)
+    rt.buf_set_len(&apuf, width * 3)
+    var y: usize = 0
+    var schief: bool = false
+    while y < (h as usize) {
+        var da: usize = 0
+        while da < line {
+            let n: i64 = jdcmd.sys_read(fd, zpuf.ptr + da as u64, line - da)
+            if n <= 0 {
+                schief = true
+                break
+            }
+            da = da + (n as usize)
+        }
+        if schief {
+            break
+        }
+        var x: usize = 0
+        while x < width {
+            let off: usize = x * ((bpp / 8) as usize)
+            rt.st8(apuf.ptr, x * 3, rt.ld8(zpuf.ptr, off + 2))
+            rt.st8(apuf.ptr, x * 3 + 1, rt.ld8(zpuf.ptr, off + 1))
+            rt.st8(apuf.ptr, x * 3 + 2, rt.ld8(zpuf.ptr, off))
+            x = x + 1
+        }
+        let _wz: i64 = jdcmd.sys_write(out, apuf.ptr, width * 3)
+        y = y + 1
+    }
+    rt.buf_free(&zpuf)
+    rt.buf_free(&apuf)
+    jdcmd.sys_close(fd)
+    jdcmd.sys_close(out)
+    if schief {
+        jdcmd.say("jarvisd: /dev/fb ends in the middle of the image\n")
+        return 2
+    }
+    jdcmd.say("jarvisd: foto ")
+    jdcmd.say_num(w as u64)
+    jdcmd.say("x")
+    jdcmd.say_num(h as u64)
+    jdcmd.say(" ppm ")
+    jdcmd.say_num((15 + width * 3 * (h as usize)) as u64)
+    jdcmd.say(" oktette\n")
+    return 0
+}
+
+fn show_ip(name: str, v: u64) {
+    jdcmd.say(name)
+    jdcmd.say_num((v >> 24) & 255)
+    jdcmd.say(".")
+    jdcmd.say_num((v >> 16) & 255)
+    jdcmd.say(".")
+    jdcmd.say_num((v >> 8) & 255)
+    jdcmd.say(".")
+    jdcmd.say_num(v & 255)
+    jdcmd.say("\n")
+}
+
+fn diagnose() -> i32 {
+    jdcmd.say("jarvisd: --- startup check ---\n")
+    let ready: i64 = syscall(jdbase.S_NETGET, NG_READY, 0, 0, 0, 0, 0)
+    jdcmd.say("1 network stack   ")
+    if ready == 1 {
+        jdcmd.say("YES\n")
+    } else {
+        jdcmd.say("NO -- kernel runs without `nic`, or there is no driver for the chip\n")
+    }
+    let ip: u64 = syscall(jdbase.S_NETGET, NG_IP, 0, 0, 0, 0, 0) as u64
+    let mask: u64 = syscall(jdbase.S_NETGET, NG_MASK, 0, 0, 0, 0, 0) as u64
+    let gw: u64 = syscall(jdbase.S_NETGET, NG_GW, 0, 0, 0, 0, 0) as u64
+    show_ip("2 adresse        ", ip)
+    show_ip("  maske          ", mask)
+    show_ip("3 tor            ", gw)
+    if ip == 0 {
+        jdcmd.say("  -> no address. Run `dhcp` or set nip= on the kernel line.\n")
+    } else if ((ip >> 24) & 255) == 169 && ((ip >> 16) & 255) == 254 {
+        jdcmd.say("  -> this is the fixed link-local address from the kernel line.\n")
+        jdcmd.say("     DHCP got nothing. Without a gateway there is no way out.\n")
+    }
+    if gw == 0 {
+        jdcmd.say("  -> NO GATEWAY. Everything outside the local network is unreachable.\n")
+    }
+    jdcmd.say("4 permissions     ")
+    if jdcmd.conf_read() {
+        jdcmd.say("read: ")
+        jdcmd.say_octets((&jdbase.konfpfad[0]) as u64, rt.c_length((&jdbase.konfpfad[0]) as u64))
+        jdcmd.say("\n")
+        jdcmd.say("  server         ")
+        if jdbase.k_https {
+            jdcmd.say("https://")
+            rt.write_everything(1, (&jdbase.k_name[0]) as u64, jdbase.k_namelen)
+            rt.write_everything(1, (&jdbase.k_path[0]) as u64, jdbase.k_pfadlen)
+            jdcmd.say("\n")
+        } else if jdbase.k_ip == 0 as u32 {
+            jdcmd.say("MISSING -- without `server = a.b.c.d:port` the service does not start\n")
+        } else {
+            show_ip("", jdbase.k_ip as u64)
+        }
+        jdcmd.say("  commands       ")
+        if jdbase.k_befehle {
+            jdcmd.say("yes\n")
+        } else {
+            jdcmd.say("no\n")
+        }
+        jdcmd.say("  screenshot     ")
+        if jdbase.k_photo {
+            jdcmd.say("yes\n")
+        } else {
+            jdcmd.say("no\n")
+        }
+        jdcmd.say("  sysinfo        ")
+        if jdbase.k_system {
+            jdcmd.say("yes\n")
+        } else {
+            jdcmd.say("no\n")
+        }
+    } else {
+        jdcmd.say("MISSING\n")
+    }
+    var kp: [u8; 24] = "/etc/jarvis/device.key\0\0"
+    let kfd: i64 = jdcmd.sys_open((&kp[0]) as u64, 0, 0)
+    jdcmd.say("5 device key      ")
+    if kfd >= 0 {
+        jdcmd.say("present\n")
+        jdcmd.sys_close(kfd)
+    } else {
+        jdcmd.say("MISSING -- created on first start (`jsig init`)\n")
+    }
+    var wp: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    let wfd: i64 = jdcmd.sys_open((&wp[0]) as u64, 0, 0)
+    jdcmd.say("6 roots           ")
+    if wfd >= 0 {
+        jdcmd.say("present\n")
+        jdcmd.sys_close(wfd)
+    } else {
+        jdcmd.say("MISSING -- every TLS connection will be refused\n")
+    }
+    let _s: i32 = screen()
+    jdcmd.say("jarvisd: --- end ---\n")
+    return 0
+}
+
+fn bericht() {
+    jdcmd.say("jarvisd: connections ")
+    jdcmd.say_num(jdbase.z_verbindungen)
+    jdcmd.say("\njarvisd: jobs ")
+    jdcmd.say_num(z_auftraege)
+    jdcmd.say("\njarvisd: rejected ")
+    jdcmd.say_num(jdbase.z_abgelehnt)
+    jdcmd.say("\njarvisd: wait_ms ")
+    jdcmd.say_num(jdbase.z_wartems)
+    jdcmd.say("\njarvisd: calls_while_waiting ")
+    jdcmd.say_num(jdbase.z_warteaufrufe)
+    jdcmd.say("\n")
+}

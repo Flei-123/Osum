@@ -1,0 +1,2037 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import pngfit.fit
+import std.io
+import std.net
+import pngfit.png
+import std.rt
+import tls.tls
+import tls.x509
+import jarvisd.jdbase
+
+const MAXLISTE: usize = 64
+
+const MAXZEILE: usize = 4096
+
+const MAXFELD: usize = 10
+
+const S_READ: i64 = 0
+
+const S_WRITE: i64 = 1
+
+const S_OPEN: i64 = 2
+
+const S_CLOSE: i64 = 3
+
+const S_NANOSLEEP: i64 = 35
+
+const S_PRCTL: i64 = 157
+
+const PR_SERVICE_WATCH: i64 = 0x4F535701
+
+const SERVICE_WATCH_S: i64 = 120
+
+const WRITE_CHUNK: usize = 65536
+
+const S_ORIGIN: i64 = 1990
+
+const S_WAIT4: i64 = 61
+
+const S_KILL: i64 = 62
+
+const WNOHANG: i64 = 1
+
+const S_MKDIR: i64 = 83
+
+const S_UNLINK: i64 = 87
+
+const S_GETDENTS64: i64 = 217
+
+const S_CLOCK: i64 = 228
+
+const S_SYSINFO: i64 = 1002
+
+const SI_FRAMES: i64 = 14
+
+const SHOT_TRIES: i64 = 4
+
+const GRAB_OK: i32 = 0
+
+const GRAB_NO_PERMIT: i32 = 1
+
+const GRAB_INCOMPLETE: i32 = 2
+
+const SHOT_SETTLE_MS: u64 = 120
+
+const S_TIPP: i64 = 1843
+
+const TI_ARM: i64 = 1
+
+const TI_INFO: i64 = 0
+
+const TQ_LOCKED: i64 = 9
+
+const TI_DROP: i64 = 2
+
+const TI_KEY: i64 = 3
+
+const TI_MOVE: i64 = 4
+
+const TI_BUTTON: i64 = 5
+
+const TI_SCAN: i64 = 6
+
+const S_HNDRIGHTS: i64 = 2202
+
+const S_HNDDUP: i64 = 2208
+
+const O_APPEND: i64 = 1024
+
+const O_DIRECTORY: i64 = 65536
+
+const I_UPTIME: i64 = 1
+
+const I_FRAMES_FREE: i64 = 2
+
+const I_FRAMES_ALL: i64 = 3
+
+const I_BLOCKS: i64 = 4
+
+const I_BFREE: i64 = 5
+
+const I_TASKS: i64 = 9
+
+const I_VERSION: i64 = 11
+
+const I_YEAR: i64 = 12
+
+static mut k_protokoll: [u8; 128] = [0; 128]
+
+static mut k_cert: [u8; 128] = [0; 128]
+
+static mut k_tipp: bool = false
+
+static mut k_max_output: usize = 65536
+
+static mut k_command_ms: u64 = 60000
+
+static mut k_max_file: usize = 262144
+
+static mut l_read: [u8; 8192] = [0; 8192]
+
+static mut l_write: [u8; 8192] = [0; 8192]
+
+static mut l_auflisten: [u8; 8192] = [0; 8192]
+
+static mut l_command: [u8; 8192] = [0; 8192]
+
+static mut l_flag: [u8; 8192] = [0; 8192]
+
+static mut n_flag: usize = 0
+
+static mut l_sub: [u8; 8192] = [0; 8192]
+
+static mut n_sub: usize = 0
+
+static mut k_lebt_ms: u64 = 0
+
+static mut k_alive_ms: u64 = 0
+
+static mut k_watchdog_ms: u64 = 600000
+
+const LEBT_MS: u64 = 20000
+
+const NG_MAC0: i64 = 4
+
+const NG_MAC1: i64 = 5
+
+fn sys_open(path: u64, flags: i64, mode: i64) -> i64 {
+    return syscall(S_OPEN, path as i64, flags, mode, 0, 0, 0)
+}
+
+fn sys_close(fd: i64) -> i64 {
+    return syscall(S_CLOSE, fd, 0, 0, 0, 0, 0)
+}
+
+fn sys_read(fd: i64, p: u64, n: usize) -> i64 {
+    return syscall(S_READ, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sys_write(fd: i64, p: u64, n: usize) -> i64 {
+    return syscall(S_WRITE, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sys_mkdir(path: u64) -> i64 {
+    return syscall(S_MKDIR, path as i64, 493, 0, 0, 0, 0)
+}
+
+fn sys_unlink(path: u64) -> i64 {
+    return syscall(S_UNLINK, path as i64, 0, 0, 0, 0, 0)
+}
+
+fn sys_getdents(fd: i64, p: u64, n: usize) -> i64 {
+    return syscall(S_GETDENTS64, fd, p as i64, n as i64, 0, 0, 0)
+}
+
+fn sysinfo(was: i64) -> i64 {
+    return syscall(S_SYSINFO, was, 0, 0, 0, 0, 0)
+}
+
+fn hnd_dup(fd: i64, maske: i64) -> i64 {
+    return syscall(S_HNDDUP, fd, maske, 0, 0, 0, 0)
+}
+
+fn hnd_rechte(fd: i64) -> i64 {
+    return syscall(S_HNDRIGHTS, fd, 0, 0, 0, 0, 0)
+}
+
+fn schlafe_ms(ms: u64) {
+    var rest: u64 = ms
+    while rest > 0 {
+        var part: u64 = rest
+        if part > 30000 {
+            part = 30000
+        }
+        var ts: [i64; 2] = [0; 2]
+        ts[0] = (part / 1000) as i64
+        ts[1] = ((part % 1000) * 1000000) as i64
+        syscall(S_NANOSLEEP, (&ts[0]) as i64, 0, 0, 0, 0, 0)
+        rest = rest - part
+    }
+}
+
+const COMMAND_MS: u64 = 60000
+
+fn wait_child(kind: i64, st: *mut i32) -> bool {
+    let t0: u64 = now_ms()
+    while now_ms() - t0 < k_command_ms {
+        let r: i64 = syscall(S_WAIT4, kind, st as i64, WNOHANG, 0, 0, 0)
+        if r == kind || r < 0 {
+            return false
+        }
+        schlafe_ms(50)
+        keepalive()
+    }
+    syscall(S_KILL, kind, 9, 0, 0, 0, 0)
+    let k0: u64 = now_ms()
+    while now_ms() - k0 < 10000 {
+        let r: i64 = syscall(S_WAIT4, kind, st as i64, WNOHANG, 0, 0, 0)
+        if r == kind || r < 0 {
+            return true
+        }
+        schlafe_ms(50)
+    }
+    say("jarvisd: killed command did not end within 10 s -- left behind\n")
+    return true
+}
+
+fn keepalive() {
+    if jdbase.k_wire == 0 as u64 {
+        return
+    }
+    let t: u64 = now_ms()
+    if t - k_lebt_ms < LEBT_MS {
+        return
+    }
+    k_lebt_ms = t
+    let d: *mut jdbase.Wire = jdbase.k_wire as *mut jdbase.Wire
+    if !(*d).https {
+        return
+    }
+    let _k: bool = word_send(d, "alive", 0, 0 as usize)
+}
+
+fn alive_write() {
+    var name: [u8; 18] = "/var/jarvis/alive\0"
+    let fd: i64 = sys_open((&name[0]) as u64, jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
+    if fd < 0 {
+        return
+    }
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, now_ms())
+    rt.buf_push(&b, 10 as u8)
+    sys_write(fd, b.ptr, b.len)
+    sys_close(fd)
+    rt.buf_free(&b)
+}
+
+fn alive_read() -> u64 {
+    var name: [u8; 18] = "/var/jarvis/alive\0"
+    var b: rt.Buf = rt.buf_new()
+    var v: u64 = 0
+    if rt.read_file((&name[0]) as u64, &b) {
+        v = num_from(b.ptr, b.len)
+    }
+    rt.buf_free(&b)
+    return v
+}
+
+fn gut_gemeldet() {
+    let t: u64 = now_ms()
+    jdbase.k_ok_ms = t
+    k_lebt_ms = t
+    var iv: u64 = k_watchdog_ms / 4
+    if iv > 30000 {
+        iv = 30000
+    }
+    if k_alive_ms == 0 || t - k_alive_ms >= iv {
+        k_alive_ms = t
+        alive_write()
+    }
+}
+
+fn sende_info(d: *mut jdbase.Wire) {
+    let m0: u64 = syscall(jdbase.S_NETGET, NG_MAC0, 0, 0, 0, 0, 0) as u64
+    let m1: u64 = syscall(jdbase.S_NETGET, NG_MAC1, 0, 0, 0, 0, 0) as u64
+    var m: [u8; 6] = [0; 6]
+    m[0] = ((m0 >> 24) & 255) as u8
+    m[1] = ((m0 >> 16) & 255) as u8
+    m[2] = ((m0 >> 8) & 255) as u8
+    m[3] = (m0 & 255) as u8
+    m[4] = ((m1 >> 8) & 255) as u8
+    m[5] = (m1 & 255) as u8
+    if m0 == 0 && m1 == 0 {
+        return
+    }
+    var nutz: rt.Buf = rt.buf_new()
+    var pre: [u8; 5] = "mac=\0"
+    rt.buf_push_bytes(&nutz, (&pre[0]) as u64, 4)
+    hex_an(&nutz, (&m[0]) as u64, 6)
+    var head: rt.Buf = rt.buf_new()
+    var w: [u8; 5] = "info\0"
+    rt.buf_push_bytes(&head, (&w[0]) as u64, 4)
+    let _i: bool = sende(d, &head, nutz.ptr, nutz.len)
+    rt.buf_free(&head)
+    rt.buf_free(&nutz)
+}
+
+fn zu_still(t0: u64) -> bool {
+    if k_watchdog_ms == 0 {
+        return false
+    }
+    let t: u64 = now_ms()
+    var last: u64 = alive_read()
+    if last > t || last < t0 {
+        last = t0
+    }
+    return t - last > k_watchdog_ms
+}
+
+fn supervise() -> bool {
+    var wait: u64 = 2000
+    say("jarvisd: supervisor started\n")
+    syscall(S_PRCTL, PR_SERVICE_WATCH, SERVICE_WATCH_S, 0, 0, 0, 0)
+    while true {
+        let t0: u64 = now_ms()
+        let kind: i64 = syscall(jdbase.S_FORK, 0, 0, 0, 0, 0, 0)
+        if kind == 0 {
+            return true
+        }
+        if kind < 0 {
+            say("jarvisd: supervisor: fork refused, trying again in 10 s\n")
+            schlafe_ms(10000)
+            continue
+        }
+        var status: i32 = 0
+        var reason: u64 = 0
+        while reason == 0 {
+            let r: i64 = syscall(S_WAIT4, kind, (&status) as i64, WNOHANG, 0, 0, 0)
+            if r == kind || r < 0 {
+                reason = 1
+                break
+            }
+            schlafe_ms(5000)
+            if zu_still(t0) {
+                say("jarvisd: supervisor: worker silent too long -- killing it\n")
+                syscall(S_KILL, kind, 9, 0, 0, 0, 0)
+                var k0: u64 = now_ms()
+                while now_ms() - k0 < 10000 {
+                    let r2: i64 = syscall(S_WAIT4, kind, (&status) as i64, WNOHANG, 0, 0, 0)
+                    if r2 == kind || r2 < 0 {
+                        break
+                    }
+                    schlafe_ms(100)
+                }
+                reason = 2
+            }
+        }
+        var a: [u8; 11] = "supervisor\0"
+        if reason == 2 {
+            notiere((&a[0]) as u64, 10, "WORKER-KILLED-SILENT", 0, 0 as usize)
+        } else {
+            notiere((&a[0]) as u64, 10, "WORKER-ENDED", 0, 0 as usize)
+        }
+        if now_ms() - t0 > 120000 {
+            wait = 2000
+        } else {
+            wait = wait * 2
+            if wait > 60000 {
+                wait = 60000
+            }
+        }
+        say("jarvisd: supervisor: restarting the worker\n")
+        schlafe_ms(wait)
+    }
+    return false
+}
+
+fn other_service_running() -> bool {
+    let me: i64 = syscall(S_GETPID_NF, 0, 0, 0, 0, 0, 0)
+    var i: i64 = 0
+    while i < 64 {
+        let st: i64 = syscall(S_PSTAT_NF, i, 0, 0, 0, 0, 0)
+        if st > 0 && st != 5 {
+            let n0: i64 = syscall(S_PSTAT_NF, i, 10, 0, 0, 0, 0)
+            if n0 == 0x006473697672616a {
+                let pid: i64 = syscall(S_PSTAT_NF, i, 1, 0, 0, 0, 0)
+                if pid != me {
+                    return true
+                }
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn now_ms() -> u64 {
+    let v: i64 = sysinfo(I_UPTIME)
+    if v < 0 {
+        return 0
+    }
+    return v as u64
+}
+
+fn now_s() -> u64 {
+    var ts: [i64; 2] = [0; 2]
+    syscall(S_CLOCK, 0, (&ts[0]) as i64, 0, 0, 0, 0)
+    return ts[0] as u64
+}
+
+fn hexz(v: u64) -> u8 {
+    if v < 10 {
+        return (48 + v) as u8
+    }
+    return (87 + v) as u8
+}
+
+fn hexwert(c: u8) -> u64 {
+    let v: u64 = c as u64
+    if v >= 48 && v <= 57 {
+        return v - 48
+    }
+    if v >= 97 && v <= 102 {
+        return v - 87
+    }
+    if v >= 65 && v <= 70 {
+        return v - 55
+    }
+    return 256
+}
+
+fn hex_an(b: *mut rt.Buf, p: u64, n: usize) {
+    var i: usize = 0
+    while i < n {
+        let v: u64 = rt.ld8(p, i) as u64
+        rt.buf_push(b, hexz((v >> 4) & 15))
+        rt.buf_push(b, hexz(v & 15))
+        i = i + 1
+    }
+}
+
+fn hex_out(p: u64, n: usize, out: *mut rt.Buf) -> bool {
+    if (n & 1) != 0 {
+        return false
+    }
+    var i: usize = 0
+    while i < n / 2 {
+        let hi: u64 = hexwert(rt.ld8(p, i * 2))
+        let lo: u64 = hexwert(rt.ld8(p, i * 2 + 1))
+        if hi > 15 || lo > 15 {
+            return false
+        }
+        rt.buf_push(out, ((hi << 4) | lo) as u8)
+        i = i + 1
+    }
+    return true
+}
+
+fn eq(a: u64, an: usize, b: u64, bn: usize) -> bool {
+    if an != bn {
+        return false
+    }
+    var i: usize = 0
+    while i < an {
+        if rt.ld8(a, i) != rt.ld8(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn ist(p: u64, n: usize, s: u64) -> bool {
+    return eq(p, n, s, rt.c_length(s))
+}
+
+fn num_from(p: u64, n: usize) -> u64 {
+    var v: u64 = 0
+    var i: usize = 0
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c < 48 || c > 57 {
+            return v
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn hinein(target: u64, max: usize, p: u64, n: usize) -> usize {
+    var k: usize = n
+    if k > max - 1 {
+        k = max - 1
+    }
+    rt.mem_copy(target, p, k)
+    rt.st8(target, k, 0 as u8)
+    return k
+}
+
+fn say(s: str) {
+    io.print(s)
+}
+
+fn say_if_loud(s: str) {
+    if jdbase.laut {
+        io.print(s)
+    }
+}
+
+fn say_num(v: u64) {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_dec_u64(&b, v)
+    rt.write_everything(1, b.ptr, b.len)
+    rt.buf_free(&b)
+}
+
+fn say_octets(p: u64, n: usize) {
+    rt.write_everything(1, p, n)
+}
+
+fn list_add(field: u64, n: *mut usize, p: u64, len: usize) {
+    if *n >= MAXLISTE {
+        say("jarvisd: permission list full -- an entry was DROPPED\n")
+        return
+    }
+    hinein(field + (*n * jdbase.MAXPFAD) as u64, jdbase.MAXPFAD, p, len)
+    *n = *n + 1
+}
+
+fn list_path(field: u64, i: usize) -> u64 {
+    return field + (i * jdbase.MAXPFAD) as u64
+}
+
+fn yes_is(p: u64, n: usize) -> bool {
+    var w: [u8; 4] = "yes\0"
+    return ist(p, n, (&w[0]) as u64)
+}
+
+fn addr_read(p: u64, n: usize) -> bool {
+    var part: u64 = 0
+    var value: u64 = 0
+    var adr: u32 = 0 as u32
+    var i: usize = 0
+    var hatte: bool = false
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c >= 48 && c <= 57 {
+            value = value * 10 + (c - 48)
+            hatte = true
+        } else if c == 46 {
+            if !hatte || value > 255 || part >= 3 {
+                return false
+            }
+            adr = (adr << 8) | (value as u32)
+            part = part + 1
+            value = 0
+            hatte = false
+        } else if c == 58 {
+            if !hatte || value > 255 || part != 3 {
+                return false
+            }
+            adr = (adr << 8) | (value as u32)
+            part = 4
+            value = 0
+            hatte = false
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    if part != 4 || !hatte || value == 0 || value > 65535 {
+        return false
+    }
+    jdbase.k_ip = adr
+    jdbase.k_port = value as u32
+    return true
+}
+
+fn conf_clear() {
+    jdbase.k_https = false
+    jdbase.k_pair_web = false
+    var dp: [u8; 16] = "/bridge/wire\0\0\0\0"
+    jdbase.k_pfadlen = hinein((&jdbase.k_path[0]) as u64, 96, (&dp[0]) as u64, 12)
+    jdbase.k_befehle = false
+    jdbase.k_photo = false
+    jdbase.k_system = false
+    jdbase.n_read = 0
+    jdbase.n_write = 0
+    jdbase.n_auflisten = 0
+    jdbase.n_command = 0
+    n_flag = 0
+    n_sub = 0
+    k_max_output = 65536
+    k_max_file = 262144
+    k_command_ms = COMMAND_MS
+    k_watchdog_ms = 600000
+    var p1: [u8; 22] = "/var/log/jarvisd.log\0\0"
+    hinein((&k_protokoll[0]) as u64, jdbase.MAXPFAD, (&p1[0]) as u64, 20)
+    var p2: [u8; 23] = "/var/jarvis/output.txt\0"
+    hinein((&jdbase.k_arbeit[0]) as u64, jdbase.MAXPFAD, (&p2[0]) as u64, 22)
+    var p3: [u8; 31] = "/var/jarvis/screenshot-permit\0\0"
+    hinein((&k_cert[0]) as u64, jdbase.MAXPFAD, (&p3[0]) as u64, 29)
+    var p4: [u8; 20] = "/etc/ssl/roots.pem\0\0"
+    hinein((&jdbase.k_wurzeln[0]) as u64, jdbase.MAXPFAD, (&p4[0]) as u64, 18)
+}
+
+fn conf_read() -> bool {
+    conf_clear()
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&jdbase.konfpfad[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var s_server: [u8; 7] = "server\0"
+    var s_gone: [u8; 10] = "transport\0"
+    var s_path: [u8; 5] = "path\0"
+    var s_name: [u8; 11] = "servername\0"
+    var s_wurzeln: [u8; 6] = "roots\0"
+    var s_befehle: [u8; 9] = "commands\0"
+    var s_berl: [u8; 16] = "command_allowed\0"
+    var s_flag: [u8; 21] = "command_flag_allowed\0"
+    var s_sub: [u8; 20] = "command_sub_allowed\0"
+    var s_read: [u8; 5] = "read\0"
+    var s_schr: [u8; 6] = "write\0"
+    var s_aufl: [u8; 6] = "list\0\0"
+    var s_photo: [u8; 11] = "screenshot\0"
+    var s_sys: [u8; 8] = "sysinfo\0"
+    var s_tipp: [u8; 6] = "input\0"
+    var s_maxa: [u8; 11] = "max_output\0"
+    var s_maxd: [u8; 9] = "max_file\0"
+    var s_cto: [u8; 16] = "command_timeout\0"
+    var s_wdg: [u8; 9] = "watchdog\0"
+    var s_prot: [u8; 4] = "log\0"
+    var s_arb: [u8; 10] = "work_file\0"
+    var s_sch: [u8; 12] = "permit_file\0"
+    var s_pair: [u8; 8] = "pairing\0"
+
+    var at: usize = 0
+    while at < b.len {
+        var ende: usize = at
+        while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
+            ende = ende + 1
+        }
+        var von: usize = at
+        var bis: usize = ende
+        var k: usize = von
+        while k < bis {
+            if rt.ld8(b.ptr, k) == 35 as u8 {
+                bis = k
+                break
+            }
+            k = k + 1
+        }
+        var eq: usize = von
+        var hat_eq: bool = false
+        while eq < bis {
+            if rt.ld8(b.ptr, eq) == 61 as u8 {
+                hat_eq = true
+                break
+            }
+            eq = eq + 1
+        }
+        if hat_eq {
+            var sv: usize = von
+            var sb: usize = eq
+            while sv < sb && rt.ld8(b.ptr, sv) <= 32 as u8 {
+                sv = sv + 1
+            }
+            while sb > sv && rt.ld8(b.ptr, sb - 1) <= 32 as u8 {
+                sb = sb - 1
+            }
+            var wv: usize = eq + 1
+            var wb: usize = bis
+            while wv < wb && rt.ld8(b.ptr, wv) <= 32 as u8 {
+                wv = wv + 1
+            }
+            while wb > wv && rt.ld8(b.ptr, wb - 1) <= 32 as u8 {
+                wb = wb - 1
+            }
+            let sp: u64 = b.ptr + sv as u64
+            let sl: usize = sb - sv
+            let wp: u64 = b.ptr + wv as u64
+            let wl: usize = wb - wv
+            if sl > 0 {
+                if ist(sp, sl, (&s_server[0]) as u64) {
+                    addr_read(wp, wl)
+                } else if ist(sp, sl, (&s_gone[0]) as u64) {
+                    var w_https: [u8; 6] = "https\0"
+                    jdbase.k_https = ist(wp, wl, (&w_https[0]) as u64)
+                } else if ist(sp, sl, (&s_path[0]) as u64) {
+                    jdbase.k_pfadlen = hinein((&jdbase.k_path[0]) as u64, 96, wp, wl)
+                    var old_path: [u8; 15] = "/bruecke/draht\0"
+                    if ist((&jdbase.k_path[0]) as u64, jdbase.k_pfadlen, (&old_path[0]) as u64) {
+                        var cur_path: [u8; 13] = "/bridge/wire\0"
+                        jdbase.k_pfadlen = hinein((&jdbase.k_path[0]) as u64, 96, (&cur_path[0]) as u64, 12)
+                    }
+                } else if ist(sp, sl, (&s_pair[0]) as u64) {
+                    var w_web: [u8; 4] = "web\0"
+                    jdbase.k_pair_web = ist(wp, wl, (&w_web[0]) as u64)
+                } else if ist(sp, sl, (&s_name[0]) as u64) {
+                    jdbase.k_namelen = hinein((&jdbase.k_name[0]) as u64, 96, wp, wl)
+                } else if ist(sp, sl, (&s_wurzeln[0]) as u64) {
+                    hinein((&jdbase.k_wurzeln[0]) as u64, jdbase.MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_prot[0]) as u64) {
+                    hinein((&k_protokoll[0]) as u64, jdbase.MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_arb[0]) as u64) {
+                    hinein((&jdbase.k_arbeit[0]) as u64, jdbase.MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_sch[0]) as u64) {
+                    hinein((&k_cert[0]) as u64, jdbase.MAXPFAD, wp, wl)
+                } else if ist(sp, sl, (&s_befehle[0]) as u64) {
+                    jdbase.k_befehle = yes_is(wp, wl)
+                } else if ist(sp, sl, (&s_photo[0]) as u64) {
+                    jdbase.k_photo = yes_is(wp, wl)
+                } else if ist(sp, sl, (&s_sys[0]) as u64) {
+                    jdbase.k_system = yes_is(wp, wl)
+                } else if ist(sp, sl, (&s_tipp[0]) as u64) {
+                    k_tipp = yes_is(wp, wl)
+                } else if ist(sp, sl, (&s_maxa[0]) as u64) {
+                    k_max_output = num_from(wp, wl) as usize
+                } else if ist(sp, sl, (&s_maxd[0]) as u64) {
+                    k_max_file = num_from(wp, wl) as usize
+                } else if ist(sp, sl, (&s_cto[0]) as u64) {
+                    let sec: u64 = num_from(wp, wl)
+                    if sec >= 5 && sec <= 3600 {
+                        k_command_ms = sec * 1000
+                    }
+                } else if ist(sp, sl, (&s_wdg[0]) as u64) {
+                    let wsec: u64 = num_from(wp, wl)
+                    if wsec == 0 || (wsec >= 20 && wsec <= 86400) {
+                        k_watchdog_ms = wsec * 1000
+                    }
+                } else if ist(sp, sl, (&s_read[0]) as u64) {
+                    list_add((&l_read[0]) as u64, &jdbase.n_read, wp, wl)
+                } else if ist(sp, sl, (&s_schr[0]) as u64) {
+                    list_add((&l_write[0]) as u64, &jdbase.n_write, wp, wl)
+                } else if ist(sp, sl, (&s_aufl[0]) as u64) {
+                    list_add((&l_auflisten[0]) as u64, &jdbase.n_auflisten, wp, wl)
+                } else if ist(sp, sl, (&s_berl[0]) as u64) {
+                    list_add((&l_command[0]) as u64, &jdbase.n_command, wp, wl)
+                } else if ist(sp, sl, (&s_flag[0]) as u64) {
+                    list_add((&l_flag[0]) as u64, &n_flag, wp, wl)
+                } else if ist(sp, sl, (&s_sub[0]) as u64) {
+                    list_add((&l_sub[0]) as u64, &n_sub, wp, wl)
+                }
+            }
+        }
+        at = ende + 1
+    }
+    rt.buf_free(&b)
+    return true
+}
+
+fn path_clean(p: u64, n: usize) -> bool {
+    if n == 0 || n >= jdbase.MAXPFAD {
+        return false
+    }
+    if rt.ld8(p, 0) != 47 as u8 {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        let c: u8 = rt.ld8(p, i)
+        if c == 0 as u8 || c == 10 as u8 || c == 13 as u8 {
+            return false
+        }
+        if c < 32 as u8 {
+            return false
+        }
+        if i + 1 < n && c == 47 as u8 && rt.ld8(p, i + 1) == 47 as u8 {
+            return false
+        }
+        i = i + 1
+    }
+    var von: usize = 0
+    while von < n {
+        var bis: usize = von
+        while bis < n && rt.ld8(p, bis) != 47 as u8 {
+            bis = bis + 1
+        }
+        if bis - von == 2 && rt.ld8(p, von) == 46 as u8
+            && rt.ld8(p, von + 1) == 46 as u8 {
+            return false
+        }
+        von = bis + 1
+    }
+    return true
+}
+
+fn fits_entry(e: u64, p: u64, n: usize) -> bool {
+    let el: usize = rt.c_length(e)
+    if el == 0 {
+        return false
+    }
+    if rt.ld8(e, el - 1) == 47 as u8 {
+        if n < el {
+            return false
+        }
+        return eq(e, el, p, el)
+    }
+    return eq(e, el, p, n)
+}
+
+fn in_list(field: u64, count: usize, p: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < count {
+        if fits_entry(list_path(field, i), p, n) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn two(b: *mut rt.Buf, v: u64) {
+    if v < 10 {
+        rt.buf_push(b, 48 as u8)
+    }
+    rt.buf_push_dec_u64(b, v)
+}
+
+fn zeitstempel(b: *mut rt.Buf) {
+    let j: i64 = sysinfo(I_YEAR)
+    if j < 0 {
+        rt.buf_push_dec_u64(b, now_ms())
+        return
+    }
+    rt.buf_push_dec_u64(b, j as u64)
+    rt.buf_push(b, 45 as u8)
+    two(b, sysinfo(I_YEAR + 1) as u64)
+    rt.buf_push(b, 45 as u8)
+    two(b, sysinfo(I_YEAR + 2) as u64)
+    rt.buf_push(b, 32 as u8)
+    two(b, sysinfo(I_YEAR + 3) as u64)
+    rt.buf_push(b, 58 as u8)
+    two(b, sysinfo(I_YEAR + 4) as u64)
+    rt.buf_push(b, 58 as u8)
+    two(b, sysinfo(I_YEAR + 5) as u64)
+}
+
+fn notiere(art: u64, artn: usize, erg: str, det: u64, detn: usize) {
+    var b: rt.Buf = rt.buf_new()
+    zeitstempel(&b)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_bytes(&b, art, artn)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_bytes(&b, erg.p as u64, erg.n)
+    if detn > 0 {
+        rt.buf_push(&b, 32 as u8)
+        rt.buf_push_bytes(&b, det, detn)
+    }
+    rt.buf_push(&b, 10 as u8)
+    let fd: i64 = sys_open((&k_protokoll[0]) as u64,
+        jdbase.O_WRONLY | jdbase.O_CREAT | O_APPEND, 384)
+    if fd >= 0 {
+        sys_write(fd, b.ptr, b.len)
+        sys_close(fd)
+    }
+    if jdbase.laut {
+        rt.write_everything(1, b.ptr, b.len)
+    }
+    rt.buf_free(&b)
+}
+
+fn wire_new(t: *mut tls.Tls) -> jdbase.Wire {
+    return jdbase.Wire { t: t as u64, puf: rt.buf_new(), at: 0, tot: false,
+        https: false, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
+}
+
+fn wire_new_https() -> jdbase.Wire {
+    return jdbase.Wire { t: 0, puf: rt.buf_new(), at: 0, tot: false,
+        https: true, aus: rt.buf_new(), store: x509.store_new(), store_ok: false }
+}
+
+fn http_request(req: *mut rt.Buf, rumpfn: usize) {
+    var m: [u8; 6] = "POST \0"
+    rt.buf_push_bytes(req, (&m[0]) as u64, 5)
+    rt.buf_push_bytes(req, (&jdbase.k_path[0]) as u64, jdbase.k_pfadlen)
+    var v: [u8; 18] = " HTTP/1.1\r\nHost: \0"
+    rt.buf_push_bytes(req, (&v[0]) as u64, 17)
+    rt.buf_push_bytes(req, (&jdbase.k_name[0]) as u64, jdbase.k_namelen)
+    var x: [u8; 18] = "\r\nX-Bridge-Wire: \0"
+    rt.buf_push_bytes(req, (&x[0]) as u64, 17)
+    rt.buf_push_bytes(req, (&jdbase.k_sid[0]) as u64, jdbase.k_sidlen)
+    var l: [u8; 19] = "\r\nContent-Length: \0"
+    rt.buf_push_bytes(req, (&l[0]) as u64, 18)
+    rt.buf_push_dec_u64(req, rumpfn as u64)
+    var e: [u8; 46] = "\r\nConnection: close\r\nUser-Agent: osum-jarvisd\0"
+    rt.buf_push_bytes(req, (&e[0]) as u64, 45)
+    var crlf: [u8; 5] = "\r\n\r\n\0"
+    rt.buf_push_bytes(req, (&crlf[0]) as u64, 4)
+}
+
+fn http_number(p: u64, n: usize) -> u64 {
+    if n < 12 {
+        return 0
+    }
+    var i: usize = 0
+    while i < n && rt.ld8(p, i) != 32 as u8 {
+        i = i + 1
+    }
+    i = i + 1
+    var v: u64 = 0
+    var z: usize = 0
+    while i < n && z < 3 {
+        let c: u8 = rt.ld8(p, i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return 0
+        }
+        v = v * 10 + ((c - 48 as u8) as u64)
+        i = i + 1
+        z = z + 1
+    }
+    return v
+}
+
+fn http_body_from(p: u64, n: usize) -> usize {
+    var i: usize = 0
+    while i + 3 < n {
+        if rt.ld8(p, i) == 13 as u8 && rt.ld8(p, i + 1) == 10 as u8
+            && rt.ld8(p, i + 2) == 13 as u8 && rt.ld8(p, i + 3) == 10 as u8 {
+            return i + 4
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn https_wechsel(d: *mut jdbase.Wire, body: u64, rumpfn: usize) -> bool {
+    var schief: bool = false
+    var c: net.Conn = net.connect_tcp(jdbase.k_ip, jdbase.k_port as u16)
+    catch | e | fail_conn(&schief)
+    if schief {
+        say_if_loud("jarvisd: no connection\n")
+        return false
+    }
+    let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
+
+    if !(*d).store_ok {
+        var storebuf: rt.Buf = rt.buf_new()
+        var wurzeln: usize = 0
+        if rt.read_file((&jdbase.k_wurzeln[0]) as u64, &storebuf) {
+            wurzeln = x509.store_load_pem(&(*d).store, storebuf.ptr, storebuf.len)
+        }
+        rt.buf_free(&storebuf)
+        if wurzeln == 0 {
+            say("jarvisd: no root store -- nothing is trusted\n")
+            net.close(&c)
+            return false
+        }
+        (*d).store_ok = true
+    }
+    var t: tls.Tls = tls.tls_new()
+    let oki: bool = tls.tls_init(&t, &c, &(*d).store, (&jdbase.k_name[0]) as u64,
+        jdbase.k_namelen, now_s())
+    var hschief: bool = false
+    let okh: bool = tls.tls_handshake(&t) catch | e | fail_bool(&hschief)
+    if hschief || !tls.tls_established(&t) {
+        say("jarvisd: TLS handshake failed, reason ")
+        say_num(tls.tls_verify_reason(&t) as u64)
+        say("\n")
+        tls.tls_free(&t)
+        net.close(&c)
+        return false
+    }
+
+    var req: rt.Buf = rt.buf_new()
+    http_request(&req, rumpfn)
+    if rumpfn > 0 {
+        rt.buf_push_bytes(&req, body, rumpfn)
+    }
+    var werr: bool = false
+    let okw: bool = tls.tls_write(&t, req.ptr, req.len)
+    catch | e | fail_bool(&werr)
+    rt.buf_free(&req)
+    if werr {
+        tls.tls_close(&t)
+        tls.tls_free(&t)
+        net.close(&c)
+        return false
+    }
+
+    var roh: rt.Buf = rt.buf_new()
+    var chunk: [u8; 4096] = [0; 4096]
+    while true {
+        var rerr: bool = false
+        let n: usize = tls.tls_read(&t, (&chunk[0]) as u64, 4096 as usize)
+        catch | e | fail_len(&rerr)
+        if rerr || n == 0 {
+            break
+        }
+        rt.buf_push_bytes(&roh, (&chunk[0]) as u64, n)
+    }
+    tls.tls_close(&t)
+    tls.tls_free(&t)
+    net.close(&c)
+
+    let code: u64 = http_number(roh.ptr, roh.len)
+    if code != 200 {
+        say("jarvisd: server answered ")
+        say_num(code)
+        say("\n")
+        rt.buf_free(&roh)
+        return false
+    }
+    let ab: usize = http_body_from(roh.ptr, roh.len)
+    if ab < roh.len {
+        rt.buf_push_bytes(&(*d).puf, roh.ptr + ab as u64, roh.len - ab)
+    }
+    rt.buf_free(&roh)
+    gut_gemeldet()
+    return true
+}
+
+fn wire_gone(d: *mut jdbase.Wire) {
+    rt.buf_free(&(*d).puf)
+    rt.buf_free(&(*d).aus)
+    x509.store_free(&(*d).store)
+    (*d).store_ok = false
+}
+
+fn wire_trim(d: *mut jdbase.Wire) {
+    if (*d).at == 0 {
+        return
+    }
+    let rest: usize = (*d).puf.len - (*d).at
+    if rest > 0 {
+        rt.mem_copy((*d).puf.ptr, (*d).puf.ptr + (*d).at as u64, rest)
+    }
+    rt.buf_set_len(&(*d).puf, rest)
+    (*d).at = 0
+}
+
+fn wire_fill(d: *mut jdbase.Wire) -> bool {
+    if (*d).tot {
+        return false
+    }
+    if (*d).https {
+        return false
+    }
+    var chunk: [u8; 4096] = [0; 4096]
+    var schief: bool = false
+    let n: usize = tls.tls_read((*d).t as *mut tls.Tls,
+        (&chunk[0]) as u64, 4096 as usize)
+    catch | e | fail_len(&schief)
+    if schief || n == 0 {
+        (*d).tot = true
+        return false
+    }
+    rt.buf_push_bytes(&(*d).puf, (&chunk[0]) as u64, n)
+    return true
+}
+
+fn fail_len(schief: *mut bool) -> usize {
+    *schief = true
+    return 0 as usize
+}
+
+fn fail_bool(schief: *mut bool) -> bool {
+    *schief = true
+    return false
+}
+
+fn wire_line(d: *mut jdbase.Wire, aus: *mut rt.Buf) -> bool {
+    rt.buf_clear(aus)
+    while true {
+        var i: usize = (*d).at
+        while i < (*d).puf.len {
+            if rt.ld8((*d).puf.ptr, i) == 10 as u8 {
+                let n: usize = i - (*d).at
+                if n > MAXZEILE {
+                    (*d).tot = true
+                    return false
+                }
+                rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, n)
+                (*d).at = i + 1
+                wire_trim(d)
+                return true
+            }
+            i = i + 1
+        }
+        if (*d).puf.len - (*d).at > MAXZEILE {
+            (*d).tot = true
+            return false
+        }
+        if !wire_fill(d) {
+            return false
+        }
+    }
+    return false
+}
+
+fn wire_bytes(d: *mut jdbase.Wire, n: usize, aus: *mut rt.Buf) -> bool {
+    rt.buf_clear(aus)
+    var missing: usize = n
+    while missing > 0 {
+        let da: usize = (*d).puf.len - (*d).at
+        if da == 0 {
+            if !wire_fill(d) {
+                return false
+            }
+            continue
+        }
+        var k: usize = da
+        if k > missing {
+            k = missing
+        }
+        rt.buf_push_bytes(aus, (*d).puf.ptr + (*d).at as u64, k)
+        (*d).at = (*d).at + k
+        missing = missing - k
+        wire_trim(d)
+    }
+    return true
+}
+
+fn wire_write(d: *mut jdbase.Wire, p: u64, n: usize) -> bool {
+    if (*d).tot {
+        return false
+    }
+    if (*d).https {
+        rt.buf_clear(&(*d).puf)
+        (*d).at = 0
+        if !https_wechsel(d, p, n) {
+            (*d).tot = true
+            return false
+        }
+        return true
+    }
+    var schief: bool = false
+    let ok: bool = tls.tls_write((*d).t as *mut tls.Tls, p, n)
+    catch | e | fail_bool(&schief)
+    if schief {
+        (*d).tot = true
+        return false
+    }
+    return true
+}
+
+fn sende(d: *mut jdbase.Wire, head: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&b, (*head).ptr, (*head).len)
+    rt.buf_push(&b, 32 as u8)
+    rt.buf_push_dec_u64(&b, nutzn as u64)
+    rt.buf_push(&b, 10 as u8)
+    if nutzn > 0 {
+        rt.buf_push_bytes(&b, nutz, nutzn)
+    }
+    let ok: bool = wire_write(d, b.ptr, b.len)
+    rt.buf_free(&b)
+    return ok
+}
+
+fn zerlege(p: u64, n: usize, f: *mut jdbase.Felder) {
+    (*f).n = 0
+    var i: usize = 0
+    while i < n && (*f).n < MAXFELD {
+        while i < n && rt.ld8(p, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        let von: usize = i
+        while i < n && rt.ld8(p, i) != 32 as u8 {
+            i = i + 1
+        }
+        (*f).off[(*f).n] = von
+        (*f).len[(*f).n] = i - von
+        (*f).n = (*f).n + 1
+    }
+}
+
+fn ablehnen(aus: *mut rt.Buf, reason: str) -> bool {
+    rt.buf_clear(aus)
+    rt.buf_push_bytes(aus, reason.p as u64, reason.n)
+    jdbase.z_abgelehnt = jdbase.z_abgelehnt + 1
+    return false
+}
+
+fn line_num(aus: *mut rt.Buf, name: u64, v: u64) {
+    rt.buf_push_bytes(aus, name, rt.c_length(name))
+    rt.buf_push(aus, 32 as u8)
+    rt.buf_push_dec_u64(aus, v)
+    rt.buf_push(aus, 10 as u8)
+}
+
+fn do_system(aus: *mut rt.Buf) -> bool {
+    if !jdbase.k_system {
+        return ablehnen(aus, "sysinfo is not allowed in permissions.conf")
+    }
+    rt.buf_clear(aus)
+    var n1: [u8; 8] = "fassung\0"
+    var n2: [u8; 12] = "laufzeit_ms\0"
+    var n3: [u8; 14] = "speicher_alle\0"
+    var n4: [u8; 14] = "speicher_frei\0"
+    var n5: [u8; 15] = "platte_bloecke\0"
+    var n6: [u8; 12] = "platte_frei\0"
+    var n7: [u8; 9] = "aufgaben\0"
+    var n8: [u8; 15] = "systemaufrufe\0\0"
+    var n9: [u8; 6] = "kerne\0"
+    line_num(aus, (&n1[0]) as u64, sysinfo(I_VERSION) as u64)
+    line_num(aus, (&n2[0]) as u64, sysinfo(I_UPTIME) as u64)
+    line_num(aus, (&n3[0]) as u64, (sysinfo(I_FRAMES_ALL) as u64) * 4096)
+    line_num(aus, (&n4[0]) as u64, (sysinfo(I_FRAMES_FREE) as u64) * 4096)
+    line_num(aus, (&n5[0]) as u64, sysinfo(I_BLOCKS) as u64)
+    line_num(aus, (&n6[0]) as u64, sysinfo(I_BFREE) as u64)
+    line_num(aus, (&n7[0]) as u64, sysinfo(I_TASKS) as u64)
+    line_num(aus, (&n8[0]) as u64, sysinfo(jdbase.I_SYSCALLS) as u64)
+    line_num(aus, (&n9[0]) as u64, 1)
+    var nz: [u8; 5] = "zeit\0"
+    rt.buf_push_bytes(aus, (&nz[0]) as u64, 4)
+    rt.buf_push(aus, 32 as u8)
+    zeitstempel(aus)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
+fn tight_make(fd: i64, maske: i64, aus: *mut rt.Buf) -> i64 {
+    let enger: i64 = hnd_dup(fd, maske)
+    if enger < 0 {
+        sys_close(fd)
+        ablehnen(aus, "cannot restrict the descriptor (HND_DUP)")
+        return -1
+    }
+    sys_close(fd)
+    return enger
+}
+
+fn do_read(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+    if !path_clean(path, pn) {
+        return ablehnen(aus, "not a clean absolute path")
+    }
+    if !in_list((&l_read[0]) as u64, jdbase.n_read, path, pn) {
+        return ablehnen(aus, "path not allowed by `read` in /etc/jarvis/permissions.conf")
+    }
+    var name: [u8; 128] = [0; 128]
+    hinein((&name[0]) as u64, jdbase.MAXPFAD, path, pn)
+    let roh: i64 = sys_open((&name[0]) as u64, 0, 0)
+    if roh < 0 {
+        return ablehnen(aus, "cannot open the file")
+    }
+    let fd: i64 = tight_make(roh, jdbase.R_READ | jdbase.R_INSPECT | jdbase.R_SEEK, aus)
+    if fd < 0 {
+        return false
+    }
+    rt.buf_clear(aus)
+    var chunk: [u8; 4096] = [0; 4096]
+    var zuviel: bool = false
+    while true {
+        let n: i64 = sys_read(fd, (&chunk[0]) as u64, 4096 as usize)
+        if n <= 0 {
+            break
+        }
+        if (*aus).len + (n as usize) > k_max_file {
+            zuviel = true
+            break
+        }
+        rt.buf_push_bytes(aus, (&chunk[0]) as u64, n as usize)
+    }
+    sys_close(fd)
+    if zuviel {
+        return ablehnen(aus, "file is larger than max_file")
+    }
+    return true
+}
+
+fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
+    aus: *mut rt.Buf) -> bool {
+    if !path_clean(path, pn) {
+        return ablehnen(aus, "not a clean absolute path")
+    }
+    if !in_list((&l_write[0]) as u64, jdbase.n_write, path, pn) {
+        return ablehnen(aus, "path not allowed by `write` in /etc/jarvis/permissions.conf")
+    }
+    if (*nutz).len > k_max_file {
+        return ablehnen(aus, "content is larger than max_file")
+    }
+    var name: [u8; 128] = [0; 128]
+    hinein((&name[0]) as u64, jdbase.MAXPFAD, path, pn)
+    let roh: i64 = sys_open((&name[0]) as u64,
+        jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
+    if roh < 0 {
+        return ablehnen(aus, "cannot create the file")
+    }
+    let fd: i64 = tight_make(roh, jdbase.R_WRITE | jdbase.R_INSPECT | jdbase.R_SEEK, aus)
+    if fd < 0 {
+        return false
+    }
+    var getan: usize = 0
+    var schief: bool = false
+    while getan < (*nutz).len {
+        var take: usize = (*nutz).len - getan
+        if take > WRITE_CHUNK {
+            take = WRITE_CHUNK
+        }
+        let n: i64 = sys_write(fd, (*nutz).ptr + getan as u64, take)
+        if n <= 0 {
+            schief = true
+            break
+        }
+        getan = getan + (n as usize)
+    }
+    sys_close(fd)
+    if schief {
+        return ablehnen(aus, "write failed halfway")
+    }
+    rt.buf_clear(aus)
+    var t: [u8; 10] = "oktette \0\0"
+    rt.buf_push_bytes(aus, (&t[0]) as u64, 8)
+    rt.buf_push_dec_u64(aus, getan as u64)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
+fn do_list(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
+    if !path_clean(path, pn) {
+        return ablehnen(aus, "not a clean absolute path")
+    }
+    if !in_list((&l_auflisten[0]) as u64, jdbase.n_auflisten, path, pn) {
+        return ablehnen(aus, "directory not allowed by `list` in /etc/jarvis/permissions.conf")
+    }
+    var name: [u8; 128] = [0; 128]
+    hinein((&name[0]) as u64, jdbase.MAXPFAD, path, pn)
+    let fd: i64 = sys_open((&name[0]) as u64, O_DIRECTORY, 0)
+    if fd < 0 {
+        return ablehnen(aus, "cannot open the directory")
+    }
+    rt.buf_clear(aus)
+    var satz: [u8; 4096] = [0; 4096]
+    while true {
+        let n: i64 = sys_getdents(fd, (&satz[0]) as u64, 4096 as usize)
+        if n <= 0 {
+            break
+        }
+        var at: usize = 0
+        while at < (n as usize) {
+            let basis: u64 = (&satz[0]) as u64 + at as u64
+            let reclen: usize = rt.ld16(basis, 8) as usize
+            if reclen == 0 {
+                break
+            }
+            let art: u8 = rt.ld8(basis, 18)
+            if art == 4 as u8 {
+                rt.buf_push(aus, 100 as u8)
+            } else {
+                rt.buf_push(aus, 45 as u8)
+            }
+            rt.buf_push(aus, 32 as u8)
+            var k: usize = 19
+            while k < reclen && rt.ld8(basis, k) != 0 as u8 {
+                rt.buf_push(aus, rt.ld8(basis, k))
+                k = k + 1
+            }
+            rt.buf_push(aus, 10 as u8)
+            if (*aus).len > k_max_output {
+                sys_close(fd)
+                return ablehnen(aus, "listing is longer than max_output")
+            }
+            at = at + reclen
+        }
+    }
+    sys_close(fd)
+    return true
+}
+
+fn arg_count(p: u64, n: usize) -> usize {
+    var z: usize = 0
+    var i: usize = 0
+    while i < n {
+        while i < n && rt.ld8(p, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= n {
+            break
+        }
+        z = z + 1
+        while i < n && rt.ld8(p, i) != 32 as u8 {
+            i = i + 1
+        }
+    }
+    return z
+}
+
+static mut k_nf_ps: [u8; 9] = "/bin/ps\0\0"
+
+static mut k_nf_kill: [u8; 11] = "/bin/kill\0\0"
+
+static mut k_nf_reboot: [u8; 13] = "/bin/reboot\0\0"
+
+const S_SYNC_NF: i64 = 162
+
+const S_REBOOT_NF: i64 = 169
+
+const S_PSTAT_NF: i64 = 1003
+
+const S_GETPID_NF: i64 = 39
+
+fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.Buf) -> bool {
+    rt.buf_clear(aus)
+    var head: [u8; 7] = "ende \0\0"
+    rt.buf_push_bytes(aus, (&head[0]) as u64, 5)
+    if fits_entry((&k_nf_ps[0]) as u64, prog, pn) {
+        rt.buf_push_dec_u64(aus, 0)
+        rt.buf_push(aus, 10 as u8)
+        var i: u64 = 0
+        while i < 64 {
+            let st: i64 = syscall(S_PSTAT_NF, i as i64, 0, 0, 0, 0, 0)
+            if st > 0 {
+                rt.buf_push_dec_u64(aus, syscall(S_PSTAT_NF, i as i64, 1, 0, 0, 0, 0) as u64)
+                rt.buf_push(aus, 32 as u8)
+                rt.buf_push_dec_u64(aus, syscall(S_PSTAT_NF, i as i64, 2, 0, 0, 0, 0) as u64)
+                rt.buf_push(aus, 32 as u8)
+                rt.buf_push_dec_u64(aus, st as u64)
+                rt.buf_push(aus, 10 as u8)
+            }
+            i = i + 1
+        }
+        return true
+    }
+    if fits_entry((&k_nf_kill[0]) as u64, prog, pn) {
+        var bad: u64 = 0
+        if a1 != 0 {
+            if syscall(S_KILL, num_from(a1, rt.c_length(a1)) as i64, 9, 0, 0, 0, 0) < 0 {
+                bad = bad + 1
+            }
+        }
+        if a2 != 0 {
+            if syscall(S_KILL, num_from(a2, rt.c_length(a2)) as i64, 9, 0, 0, 0, 0) < 0 {
+                bad = bad + 1
+            }
+        }
+        if a3 != 0 {
+            if syscall(S_KILL, num_from(a3, rt.c_length(a3)) as i64, 9, 0, 0, 0, 0) < 0 {
+                bad = bad + 1
+            }
+        }
+        rt.buf_push_dec_u64(aus, bad)
+        rt.buf_push(aus, 10 as u8)
+        return true
+    }
+    if fits_entry((&k_nf_reboot[0]) as u64, prog, pn) {
+        syscall(S_SYNC_NF, 0, 0, 0, 0, 0, 0)
+        syscall(S_REBOOT_NF, 0x01234567, 0, 0, 0, 0, 0)
+        return false
+    }
+    return false
+}
+
+fn rules_for(field: u64, count: usize, prog: u64, pn: usize) -> bool {
+    var i: usize = 0
+    while i < count {
+        let e: u64 = list_path(field, i)
+        if rt.c_length(e) > pn && rt.ld8(e, pn) == 32 as u8 && eq(e, pn, prog, pn) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn flags_denied(line: u64, zn: usize, prog: u64, pn: usize) -> bool {
+    if !rules_for((&l_flag[0]) as u64, n_flag, prog, pn) {
+        return false
+    }
+    var i: usize = pn
+    while i < zn {
+        while i < zn && rt.ld8(line, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= zn {
+            break
+        }
+        let von: usize = i
+        while i < zn && rt.ld8(line, i) != 32 as u8 {
+            i = i + 1
+        }
+        let wn: usize = i - von
+        if rt.ld8(line, von) != 45 as u8 {
+            continue
+        }
+        if pn + 1 + wn >= jdbase.MAXPFAD {
+            return true
+        }
+        var key: [u8; 128] = [0; 128]
+        var k: usize = 0
+        while k < pn {
+            key[k] = rt.ld8(prog, k)
+            k = k + 1
+        }
+        key[pn] = 32 as u8
+        k = 0
+        while k < wn {
+            key[pn + 1 + k] = rt.ld8(line, von + k)
+            k = k + 1
+        }
+        if !in_list((&l_flag[0]) as u64, n_flag, (&key[0]) as u64, pn + 1 + wn) {
+            return true
+        }
+    }
+    return false
+}
+
+fn sub_denied(line: u64, zn: usize, prog: u64, pn: usize) -> bool {
+    if !rules_for((&l_sub[0]) as u64, n_sub, prog, pn) {
+        return false
+    }
+    var i: usize = pn
+    while i < zn {
+        while i < zn && rt.ld8(line, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= zn {
+            break
+        }
+        let von: usize = i
+        while i < zn && rt.ld8(line, i) != 32 as u8 {
+            i = i + 1
+        }
+        let wn: usize = i - von
+        if rt.ld8(line, von) == 45 as u8 {
+            continue
+        }
+        if pn + 1 + wn >= jdbase.MAXPFAD {
+            return true
+        }
+        var key: [u8; 128] = [0; 128]
+        var k: usize = 0
+        while k < pn {
+            key[k] = rt.ld8(prog, k)
+            k = k + 1
+        }
+        key[pn] = 32 as u8
+        k = 0
+        while k < wn {
+            key[pn + 1 + k] = rt.ld8(line, von + k)
+            k = k + 1
+        }
+        return !in_list((&l_sub[0]) as u64, n_sub, (&key[0]) as u64, pn + 1 + wn)
+    }
+    return true
+}
+
+fn do_cmd(line: u64, zn: usize, aus: *mut rt.Buf) -> bool {
+    if !jdbase.k_befehle {
+        return ablehnen(aus, "`commands = no` in /etc/jarvis/permissions.conf")
+    }
+    var i: usize = 0
+    while i < zn && rt.ld8(line, i) == 32 as u8 {
+        i = i + 1
+    }
+    let pvon: usize = i
+    while i < zn && rt.ld8(line, i) != 32 as u8 {
+        i = i + 1
+    }
+    let pn: usize = i - pvon
+    if pn == 0 {
+        return ablehnen(aus, "empty command")
+    }
+    let prog: u64 = line + pvon as u64
+    if !path_clean(prog, pn) {
+        return ablehnen(aus, "the program must be given with its full path")
+    }
+    if !in_list((&l_command[0]) as u64, jdbase.n_command, prog, pn) {
+        return ablehnen(aus, "program not allowed by `command_allowed` in /etc/jarvis/permissions.conf")
+    }
+    if flags_denied(line, zn, prog, pn) {
+        return ablehnen(aus, "option not allowed by `command_flag_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
+    }
+    if sub_denied(line, zn, prog, pn) {
+        return ablehnen(aus, "subcommand not allowed by `command_sub_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
+    }
+    let anz: usize = arg_count(line, zn)
+    if anz > 6 {
+        return ablehnen(aus, "at most six words per command")
+    }
+    var worte: rt.Buf = rt.buf_new()
+    var cur_ptr: [u64; 8] = [0; 8]
+    var wz: usize = 0
+    var starts: [usize; 8] = [0; 8]
+    i = 0
+    while i < zn && wz < 7 {
+        while i < zn && rt.ld8(line, i) == 32 as u8 {
+            i = i + 1
+        }
+        if i >= zn {
+            break
+        }
+        starts[wz] = worte.len
+        while i < zn && rt.ld8(line, i) != 32 as u8 {
+            rt.buf_push(&worte, rt.ld8(line, i))
+            i = i + 1
+        }
+        rt.buf_push(&worte, 0 as u8)
+        wz = wz + 1
+    }
+    var q: usize = 0
+    while q < wz {
+        cur_ptr[q] = worte.ptr + starts[q] as u64
+        q = q + 1
+    }
+    cur_ptr[wz] = 0
+
+    let target: i64 = sys_open((&jdbase.k_arbeit[0]) as u64,
+        jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 384)
+    if target < 0 {
+        rt.buf_free(&worte)
+        return ablehnen(aus, "cannot create the work file")
+    }
+    let kind: i64 = syscall(jdbase.S_FORK, 0, 0, 0, 0, 0, 0)
+    if kind < 0 {
+        sys_close(target)
+        if nofork_builtin(prog, pn, cur_ptr[1], cur_ptr[2], cur_ptr[3], aus) {
+            rt.buf_free(&worte)
+            return true
+        }
+        rt.buf_free(&worte)
+        return ablehnen(aus, "fork failed (task table full) -- allowed without fork: /bin/ps, /bin/kill <pid>, /bin/reboot")
+    }
+    if kind == 0 {
+        syscall(jdbase.S_DUP2, target, 1, 0, 0, 0, 0)
+        syscall(jdbase.S_DUP2, target, 2, 0, 0, 0, 0)
+        sys_close(target)
+        var lbl: [u8; 7] = "jarvis\0"
+        let og: i64 = syscall(S_ORIGIN, 1, (&lbl[0]) as i64, 6, 0, 0, 0)
+        if og != 0 && og != -1 {
+            rt.finish(126)
+        }
+        syscall(jdbase.S_EXECVE, cur_ptr[0] as i64, (&cur_ptr[0]) as i64, 0, 0, 0, 0)
+        rt.finish(127)
+    }
+    sys_close(target)
+    var status: i32 = 0
+    let killed: bool = wait_child(kind, &status)
+    rt.buf_free(&worte)
+    var code: u64 = 255
+    if (status & 127) == 0 {
+        code = ((status >> 8) & 255) as u64
+    }
+    if killed {
+        code = 124
+    }
+
+    rt.buf_clear(aus)
+    var head: [u8; 7] = "ende \0\0"
+    rt.buf_push_bytes(aus, (&head[0]) as u64, 5)
+    rt.buf_push_dec_u64(aus, code)
+    rt.buf_push(aus, 10 as u8)
+    let fd: i64 = sys_open((&jdbase.k_arbeit[0]) as u64, 0, 0)
+    if fd >= 0 {
+        var chunk: [u8; 4096] = [0; 4096]
+        var gekuerzt: bool = false
+        while true {
+            let n: i64 = sys_read(fd, (&chunk[0]) as u64, 4096 as usize)
+            if n <= 0 {
+                break
+            }
+            var k: usize = n as usize
+            if (*aus).len + k > k_max_output {
+                k = k_max_output - (*aus).len
+                gekuerzt = true
+            }
+            if k > 0 {
+                rt.buf_push_bytes(aus, (&chunk[0]) as u64, k)
+            }
+            if gekuerzt {
+                break
+            }
+        }
+        sys_close(fd)
+        if gekuerzt {
+            var g: [u8; 41] = "\n-- truncated, max_output reached --\n\0\0\0\0"
+            rt.buf_push_bytes(aus, (&g[0]) as u64, 37)
+        }
+    }
+    return true
+}
+
+fn cert_check(aus: *mut rt.Buf) -> bool {
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&k_cert[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return ablehnen(aus, "no screenshot permit -- run `jarvisctl screenshot` on this device")
+    }
+    var ende: usize = 0
+    while ende < b.len && rt.ld8(b.ptr, ende) != 10 as u8 {
+        ende = ende + 1
+    }
+    let deadline: u64 = num_from(b.ptr, ende)
+    rt.buf_free(&b)
+    let nun: u64 = now_s()
+    if deadline == 0 || nun > deadline {
+        sys_unlink((&k_cert[0]) as u64)
+        return ablehnen(aus, "the screenshot permit has expired")
+    }
+    sys_unlink((&k_cert[0]) as u64)
+    return true
+}
+
+fn grab_image(roh: *mut rt.Buf, height: usize, line: usize, zpc: i64) -> i32 {
+    let arm: i64 = syscall(jdbase.S_SHOT, jdbase.SH_ARM, 0, 0, 0, 0, 0)
+    if arm < 0 {
+        return GRAB_NO_PERMIT
+    }
+    let bandzeilen: usize = zpc as usize
+    var band: rt.Buf = rt.buf_new()
+    rt.buf_reserve(&band, bandzeilen * line)
+    rt.buf_set_len(&band, bandzeilen * line)
+    rt.buf_clear(roh)
+    var y: usize = 0
+    var schief: bool = false
+    while y < height {
+        var will: usize = bandzeilen
+        if y + will > height {
+            will = height - y
+        }
+        let n: i64 = syscall(jdbase.S_SHOT, jdbase.SH_GRAB, band.ptr as i64,
+            (will * line) as i64, 0, 0, 0)
+        if n <= 0 {
+            schief = true
+            break
+        }
+        let kam: usize = (n as usize) / line
+        if kam == 0 {
+            schief = true
+            break
+        }
+        var i: usize = 0
+        while i < kam {
+            rt.buf_push(roh, 0 as u8)
+            rt.buf_push_bytes(roh, band.ptr + (i * line) as u64, line)
+            i = i + 1
+        }
+        y = y + kam
+    }
+    rt.buf_free(&band)
+    if schief {
+        syscall(jdbase.S_SHOT, jdbase.SH_DROP, 0, 0, 0, 0, 0)
+        return GRAB_INCOMPLETE
+    }
+    return GRAB_OK
+}
+
+fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
+    let w: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_WIDTH, 0, 0, 0, 0)
+    let h: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_HEIGHT, 0, 0, 0, 0)
+    let rb: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_ROWBYTES, 0, 0, 0, 0)
+    var zpc: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_CHUNKROWS, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 || rb <= 0 {
+        return ablehnen(aus, "the kernel reports no screen size")
+    }
+    if zpc <= 0 {
+        zpc = 1
+    }
+    var roh: rt.Buf = rt.buf_new()
+    var tries: i64 = 0
+    var stable: bool = false
+    while tries < SHOT_TRIES && !stable {
+        let f0: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, SI_FRAMES, 0, 0, 0, 0)
+        let got: i32 = grab_image(&roh, h as usize, rb as usize, zpc)
+        if got == GRAB_NO_PERMIT {
+            rt.buf_free(&roh)
+            return ablehnen(aus, "the kernel issues no permit (SH_ARM rejected)")
+        }
+        if got != GRAB_OK {
+            rt.buf_free(&roh)
+            return ablehnen(aus, "the kernel returned an incomplete image")
+        }
+        let f1: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, SI_FRAMES, 0, 0, 0, 0)
+        tries = tries + 1
+        if f0 < 0 || f0 == f1 {
+            stable = true
+        } else {
+            schlafe_ms(SHOT_SETTLE_MS)
+        }
+    }
+    let gut: bool = fit.encode_within(aus, w as usize, h as usize, &roh, jdbase.RESULT_CAP)
+    rt.buf_free(&roh)
+    if !gut {
+        return ablehnen(aus, "PNG encoding failed")
+    }
+    return true
+}
+
+fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
+    if !k_tipp {
+        return ablehnen(aus, "`input = no` in /etc/jarvis/permissions.conf")
+    }
+    let cert: i64 = syscall(S_TIPP, TI_ARM, 0, 0, 0, 0, 0)
+    if cert < 0 {
+        if syscall(S_TIPP, TI_INFO, TQ_LOCKED, 0, 0, 0, 0) == 1 {
+            return ablehnen(aus, "emergency stop engaged on the device (Win+Esc / jarvisctl input off)")
+        }
+        return ablehnen(aus, "this kernel has no input call (built without the bridge) or the taskbar is not running")
+    }
+    var f: jdbase.Felder = jdbase.Felder { off: [0; 10], len: [0; 10], n: 0 }
+    zerlege(p, n, &f)
+    if f.n < 2 {
+        syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+        return ablehnen(aus, "input needs: key <code> <mods> | mouse <x> <y> | click <mask> <down>")
+    }
+    var w_key: [u8; 4] = "key\0"
+    var w_mouse: [u8; 6] = "mouse\0"
+    var w_click: [u8; 6] = "click\0"
+    var w_scan: [u8; 5] = "scan\0"
+    let wp: u64 = p + f.off[0] as u64
+    let wn: usize = f.len[0]
+    var a: u64 = 0
+    var b: u64 = 0
+    if f.n >= 2 {
+        a = num_from(p + f.off[1] as u64, f.len[1])
+    }
+    if f.n >= 3 {
+        b = num_from(p + f.off[2] as u64, f.len[2])
+    }
+    var erg: i64 = -1
+    if ist(wp, wn, (&w_key[0]) as u64) {
+        erg = syscall(S_TIPP, TI_KEY, a as i64, b as i64, 0, 0, 0)
+    } else if ist(wp, wn, (&w_mouse[0]) as u64) {
+        erg = syscall(S_TIPP, TI_MOVE, a as i64, b as i64, 0, 0, 0)
+    } else if ist(wp, wn, (&w_click[0]) as u64) {
+        erg = syscall(S_TIPP, TI_BUTTON, a as i64, b as i64, 0, 0, 0)
+    } else if ist(wp, wn, (&w_scan[0]) as u64) {
+        var k: usize = 1
+        erg = 0
+        while k < f.n && erg >= 0 {
+            let c: u64 = num_from(p + f.off[k] as u64, f.len[k])
+            erg = syscall(S_TIPP, TI_SCAN, c as i64, 0, 0, 0, 0)
+            k = k + 1
+        }
+    } else {
+        syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+        return ablehnen(aus, "unknown input kind -- key, mouse, click or scan")
+    }
+    syscall(S_TIPP, TI_DROP, 0, 0, 0, 0, 0)
+    if erg < 0 {
+        return ablehnen(aus, "the kernel rejected the input")
+    }
+    var s_ok: [u8; 12] = "eingespeist\0"
+    rt.buf_push_bytes(aus, (&s_ok[0]) as u64, 11)
+    rt.buf_push(aus, 10 as u8)
+    return true
+}
+
+fn do_screenshot(aus: *mut rt.Buf) -> bool {
+    if !jdbase.k_photo {
+        return ablehnen(aus, "`screenshot = no` in /etc/jarvis/permissions.conf")
+    }
+    if !cert_check(aus) {
+        return false
+    }
+    let ready: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_READY, 0, 0, 0, 0)
+    if ready >= 0 {
+        if ready == 0 {
+            return ablehnen(aus, "the kernel has the screenshot call but no image (no framebuffer / no 32-bit mode)")
+        }
+        return photo_over_kernel(aus)
+    }
+    let w: i64 = syscall(jdbase.S_WIGSCREEN, jdbase.WS_W, 0, 0, 0, 0, 0)
+    let h: i64 = syscall(jdbase.S_WIGSCREEN, jdbase.WS_H, 0, 0, 0, 0, 0)
+    if w <= 0 || h <= 0 {
+        return ablehnen(aus, "no screen size in ring 3: SYS_OSUM_SHOT missing and the window server is not running")
+    }
+    var pitch: i64 = syscall(jdbase.S_DISPGET, jdbase.DG_PITCH, 0, 0, 0, 0, 0)
+    var bpp: i64 = syscall(jdbase.S_DISPGET, jdbase.DG_BPP, 0, 0, 0, 0, 0)
+    if bpp <= 0 {
+        bpp = 32
+    }
+    if pitch <= 0 {
+        pitch = w * (bpp / 8)
+    }
+    var fbname: [u8; 8] = "/dev/fb\0"
+    let fd: i64 = sys_open((&fbname[0]) as u64, 0, 0)
+    if fd < 0 {
+        return ablehnen(aus, "cannot open /dev/fb")
+    }
+    let width: usize = w as usize
+    let height: usize = h as usize
+    let line: usize = pitch as usize
+    var roh: rt.Buf = rt.buf_new()
+    var zpuf: rt.Buf = rt.buf_new()
+    if !rt.buf_reserve(&zpuf, line) {
+        rt.buf_free(&zpuf)
+        rt.buf_free(&roh)
+        sys_close(fd)
+        return ablehnen(aus, "out of memory for the line buffer")
+    }
+    rt.buf_set_len(&zpuf, line)
+    var y: usize = 0
+    var schief: bool = false
+    while y < height {
+        var da: usize = 0
+        while da < line {
+            let n: i64 = sys_read(fd, zpuf.ptr + da as u64, line - da)
+            if n <= 0 {
+                schief = true
+                break
+            }
+            da = da + (n as usize)
+        }
+        if schief {
+            break
+        }
+        rt.buf_push(&roh, 0 as u8)
+        var x: usize = 0
+        while x < width {
+            let off: usize = x * ((bpp / 8) as usize)
+            rt.buf_push(&roh, rt.ld8(zpuf.ptr, off + 2))
+            rt.buf_push(&roh, rt.ld8(zpuf.ptr, off + 1))
+            rt.buf_push(&roh, rt.ld8(zpuf.ptr, off))
+            x = x + 1
+        }
+        y = y + 1
+    }
+    sys_close(fd)
+    rt.buf_free(&zpuf)
+    if schief {
+        rt.buf_free(&roh)
+        return ablehnen(aus, "cannot read the whole framebuffer")
+    }
+    let gut: bool = fit.encode_within(aus, width, height, &roh, jdbase.RESULT_CAP)
+    rt.buf_free(&roh)
+    if !gut {
+        return ablehnen(aus, "PNG encoding failed")
+    }
+    return true
+}
+
+fn bildprobe() -> i32 {
+    let width: usize = 64
+    let height: usize = 48
+    var roh: rt.Buf = rt.buf_new()
+    var y: usize = 0
+    while y < height {
+        rt.buf_push(&roh, 0 as u8)
+        var x: usize = 0
+        while x < width {
+            rt.buf_push(&roh, (x * 4) as u8)
+            rt.buf_push(&roh, (y * 5) as u8)
+            rt.buf_push(&roh, ((x + y) * 2) as u8)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    var aus: rt.Buf = rt.buf_new()
+    let gut: bool = png.encode(&aus, width, height, &roh)
+    rt.buf_free(&roh)
+    if !gut {
+        say("bild: gescheitert\n")
+        return 1
+    }
+    say("bild ")
+    var hx: rt.Buf = rt.buf_new()
+    hex_an(&hx, aus.ptr, aus.len)
+    say_octets(hx.ptr, hx.len)
+    say("\n")
+    say("bildlaenge ")
+    say_num(aus.len as u64)
+    say("\n")
+    rt.buf_free(&hx)
+    rt.buf_free(&aus)
+    return 0
+}
+
+fn after_space(b: *mut rt.Buf, von: *mut usize, bis: *mut usize) -> bool {
+    var i: usize = 0
+    while i < (*b).len && rt.ld8((*b).ptr, i) != 32 as u8 {
+        i = i + 1
+    }
+    if i >= (*b).len {
+        return false
+    }
+    i = i + 1
+    let a: usize = i
+    while i < (*b).len && rt.ld8((*b).ptr, i) > 32 as u8 {
+        i = i + 1
+    }
+    if i == a {
+        return false
+    }
+    *von = a
+    *bis = i
+    return true
+}
+
+fn printable_text(p: u64, n: usize) -> bool {
+    var i: usize = 0
+    while i < n {
+        let c: u64 = rt.ld8(p, i) as u64
+        if c < 33 || c > 126 {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn kopplung_dateien(codep: u64, coden: usize, jap: u64) -> bool {
+    var path_code: [u8; 20] = "/var/jarvis/pairing\0"
+    var path_yes: [u8; 23] = "/var/jarvis/pairing-ok\0"
+    hinein(jap, jdbase.MAXPFAD, (&path_yes[0]) as u64, 22)
+    rt.write_file((&path_code[0]) as u64, codep, coden)
+    return true
+}
+
+fn kopplung_bestaetigt(codep: u64, coden: usize) -> bool {
+    var jap: [u8; 128] = [0; 128]
+    kopplung_dateien(codep, coden, (&jap[0]) as u64)
+    var b: rt.Buf = rt.buf_new()
+    if !rt.read_file((&jap[0]) as u64, &b) {
+        rt.buf_free(&b)
+        return false
+    }
+    var n: usize = b.len
+    while n > 0 && rt.ld8(b.ptr, n - 1) <= 32 as u8 {
+        n = n - 1
+    }
+    let gut: bool = eq(b.ptr, n, codep, coden)
+    rt.buf_free(&b)
+    return gut
+}
+
+fn word_send(d: *mut jdbase.Wire, w: str, arg: u64, argn: usize) -> bool {
+    var head: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&head, w.p as u64, w.n)
+    if argn > 0 {
+        rt.buf_push(&head, 32 as u8)
+        rt.buf_push_bytes(&head, arg, argn)
+    }
+    let ok: bool = sende(d, &head, 0, 0 as usize)
+    rt.buf_free(&head)
+    return ok
+}
+
+fn fail_conn(schief: *mut bool) -> net.Conn {
+    *schief = true
+    return net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
+}

@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import drv.usb.chdiag
+import lib.kstate
+import drv.usb.usbdiag
+import drv.usb.xhci
+import usb.usb.usbbase
+import usb.usb.usbbind
+import usb.usb.usbdev
+
+const S_PEND: u64 = 0x128
+
+const S_HUBDUE: u64 = 0xD8
+
+const S_HUBTRY: u64 = 0xE0
+
+const S_HUBHITS: u64 = 0xE8
+
+const HUB_TRY_MAX: u64 = 48
+
+const S_WACHN: u64 = 0x168
+
+const S_WIEDERN: u64 = 0x170 // neu bestueckte stumme Endpunkte
+
+const D_WACH: u64 = 312
+
+const D_STUMM: u64 = 320
+
+const D_AGAIN: u64 = 328
+
+const WATCH_LIMIT: u64 = 20
+
+const AGAIN_MAX: u64 = 3
+
+// ------------------------------------------------------ abziehen
+
+fn unplug_check(state: u64) {
+    if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
+        return
+    }
+    let n: u64 = xhci.ports(state)
+    var p: u64 = 1
+    while p <= n {
+        if xhci.port_has_change(state, p) {
+            xhci.port_clear_changes(state, p)
+            let now: bool = xhci.port_connected(state, p)
+            if usbdev.was_there(state, p) && !now {
+                usbbind.gone(state, p)
+            } else if !usbdev.was_there(state, p) && now {
+                usbdev.s(state, usbbase.S_HOTPLUGS, usbdev.g(state, usbbase.S_HOTPLUGS) + 1)
+                usbdev.mark(state, p)
+                usbbind.attach(state, p)
+            }
+        }
+        p = p + 1
+    }
+}
+
+fn hub_rescan(state: u64) {
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
+            if usbdev.dg(state, d, usbbase.D_PORTS) == 0 {
+                if usbdev.g(state, S_HUBTRY) < HUB_TRY_MAX {
+                    usbdev.s(state, S_HUBTRY, usbdev.g(state, S_HUBTRY) + 1)
+                    usbbind.hub_start(state, d)
+                }
+            } else {
+                hub_rescan_ports(state, d)
+            }
+        }
+        d = d + 1
+    }
+}
+
+fn hub_rescan_ports(state: u64, d: u64) {
+    let n: u64 = usbdev.dg(state, d, usbbase.D_PORTS)
+    let hidx: u64 = usbdiag.info(xhci.unit(state), usbdiag.I_HUBS) - 1
+    var p: u64 = 1
+    while p <= n {
+        if usbbind.hub_child_present(state, d, p) {
+            let live: u64 = usbbind.hub_port_read(state, d, p)
+            if live != usbbase.HUB_STATUS_ERR && (live & 1) == 0 {
+                if (live & (1 << 16)) != 0 {
+                    usbbind.hub_feature(state, d, false, usbbase.PF_C_CONNECTION, p)
+                }
+                usbbind.hub_child_gone(state, d, p)
+            }
+        }
+        if !usbbind.hub_child_present(state, d, p) && usbdev.g(state, S_HUBTRY) < HUB_TRY_MAX {
+            let st: u64 = usbbind.hub_port_status(state, d, p)
+            if (st & (1 << 16)) != 0 {
+                usbbind.hub_feature(state, d, false, usbbase.PF_C_CONNECTION, p)
+            }
+            if (st & 1) != 0 {
+                usbdev.s(state, S_HUBTRY, usbdev.g(state, S_HUBTRY) + 1)
+                usbdev.s(state, S_HUBHITS, usbdev.g(state, S_HUBHITS) + 1)
+                usbbind.hub_probe_port(state, d, p, hidx, st)
+            }
+        }
+        p = p + 1
+    }
+}
+
+fn port_watch(state: u64) {
+    if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
+        return
+    }
+    if kstate.mode_on(state, kstate.M_USBSAFE) {
+        return
+    }
+    let n: u64 = xhci.ports(state)
+    let due: u64 = usbdiag.timed_due(kstate.get(state, kstate.TICKS))
+    if due != 0 {
+        usbdev.usbdiag_snap_all(state, xhci.unit(state), due)
+    }
+    var rescan: bool = usbdiag.rescan_due(kstate.get(state, kstate.TICKS))
+    if kstate.mode_on(state, kstate.M_NOUSBRESCAN) {
+        rescan = false
+    }
+    if rescan && usbdev.g(state, usbbase.S_HUBS) != 0 {
+        usbdev.s(state, S_HUBDUE, 1)
+    }
+    var p: u64 = 1
+    while p <= n && p < 64 {
+        if rescan && xhci.port_connected(state, p) && !usbdev.was_there(state, p) {
+            usbdev.s(state, S_PEND, usbdev.g(state, S_PEND) | (1 << p))
+        }
+        if xhci.port_has_change(state, p) {
+            usbdiag.event(p, xhci.portsc(state, p))
+            usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PSC, p, xhci.portsc(state, p))
+            xhci.port_clear_changes(state, p)
+            usbdev.s(state, S_PEND, usbdev.g(state, S_PEND) | (1 << p))
+            usbdev.s(state, usbbase.S_PENDN, usbdev.g(state, usbbase.S_PENDN) + 1)
+        }
+        p = p + 1
+    }
+}
+
+fn silence_check(state: u64) {
+    if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
+        return
+    }
+    var still: bool = false
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_INTDCI) != 0 {
+            let now: u64 = usbdev.dg(state, d, usbbase.D_REPS)
+            if now == usbdev.dg(state, d, D_WACH) {
+                still = true
+            }
+            usbdev.ds(state, d, D_WACH, now)
+        }
+        d = d + 1
+    }
+    if still {
+        usbdev.s(state, S_WACHN, usbdev.g(state, S_WACHN) + 1)
+        xhci.drain(state)
+        usbbind.service(state)
+    }
+    var e: u64 = 0
+    while e < usbbase.MAX_DEV {
+        if usbdev.dg(state, e, usbbase.D_USED) != 0 && usbdev.dg(state, e, usbbase.D_INTDCI) != 0
+            && usbdev.dg(state, e, usbbase.D_REPS) == 0 {
+            usbdev.ds(state, e, D_STUMM, usbdev.dg(state, e, D_STUMM) + 1)
+            if usbdev.dg(state, e, D_STUMM) >= WATCH_LIMIT
+                && usbdev.dg(state, e, D_AGAIN) < AGAIN_MAX {
+                if usbbind.refill(state, e) {
+                    usbdev.ds(state, e, D_AGAIN, usbdev.dg(state, e, D_AGAIN) + 1)
+                    usbdev.ds(state, e, D_STUMM, 0)
+                    usbdev.s(state, S_WIEDERN, usbdev.g(state, S_WIEDERN) + 1)
+                }
+            }
+        } else {
+            usbdev.ds(state, e, D_STUMM, 0)
+        }
+        e = e + 1
+    }
+}
+
+fn wiedern(state: u64) -> u64 {
+    return usbdev.g(state, S_WIEDERN)
+}
+
+fn wachen(state: u64) -> u64 {
+    return usbdev.g(state, S_WACHN)
+}
+
+fn hotplug_work(state: u64) {
+    if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
+        return
+    }
+    let is_open: u64 = usbdev.g(state, S_PEND)
+    let hubdue: u64 = usbdev.g(state, S_HUBDUE)
+    if is_open == 0 && hubdue == 0 {
+        return
+    }
+    usbdev.s(state, S_PEND, 0)
+    usbdev.s(state, S_HUBDUE, 0)
+    if is_open != 0 {
+        chdiag.bump(state, chdiag.F_PASSES)
+    }
+    usbdev.s(state, usbbase.S_BUSY, 1)
+    let n: u64 = xhci.ports(state)
+    var p: u64 = 1
+    while p <= n && p < 64 {
+        if (is_open & (1 << p)) != 0 {
+            let now: bool = xhci.port_connected(state, p)
+            if usbdev.was_there(state, p) && !now {
+                usbbind.gone(state, p)
+            } else if !usbdev.was_there(state, p) && now {
+                usbdev.s(state, usbbase.S_HOTPLUGS, usbdev.g(state, usbbase.S_HOTPLUGS) + 1)
+                usbdev.mark(state, p)
+                usbbind.attach(state, p)
+            }
+        }
+        p = p + 1
+    }
+    if hubdue != 0 {
+        hub_rescan(state)
+    }
+    usbdev.s(state, usbbase.S_BUSY, 0)
+}
+
+// ===================================================== DD-12: AFTER S3
+// The controller lost its state: set it up again and enumerate again --
+// the same `versuch` the first start used on the controller it kept
+// (keyboard, mouse, sticks come back as new devices). False if there was
+// no controller up before.
+fn resume(state: u64) -> bool {
+    if !usbdev.ready(state) {
+        return false
+    }
+    let armed: bool = !kstate.mode_on(state, kstate.M_NOUSBIRQ)
+    let _p: u64 = usbbind.versuch(state, usbdev.g(state, usbbase.S_CHOICE), armed)
+    return usbdev.ready(state)
+}

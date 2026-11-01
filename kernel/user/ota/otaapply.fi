@@ -1,0 +1,1856 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import bootconf
+import inflate
+import otagrow
+import sha
+import ulib
+import ota.otabase
+import ota.otacmd
+
+static mut S_USE1: [u8; 26] = "ota search | show | apply\0"
+
+static mut S_USE2: [u8; 73] = "ota confirm | rollback | watchdog | service | system search|apply|status\0"
+
+static mut C_SUCH: [u8; 7] = "search\0"
+
+static mut C_SHOW: [u8; 5] = "show\0"
+
+static mut C_HOL: [u8; 6] = "fetch\0"
+
+static mut C_EIN: [u8; 6] = "apply\0"
+
+static mut C_BEST: [u8; 8] = "confirm\0"
+
+static mut C_ZUR: [u8; 9] = "rollback\0"
+
+static mut C_WACH: [u8; 9] = "watchdog\0"
+
+static mut C_DIEN: [u8; 8] = "service\0"
+
+static mut C_BOOT: [u8; 5] = "boot\0"
+
+static mut N_DESK: [u8; 8] = "desktop\0"
+
+static mut N_GLOG: [u8; 7] = "glogin\0"
+
+static mut S_BGUT: [u8; 43] = "ota: start healthy, trial confirmed after \0"
+
+static mut S_BNEU: [u8; 77] = "ota: start NOT healthy within the grace period -- restart, the kernel counts\0"
+
+static mut C_EINS: [u8; 9] = "settings\0"
+
+static mut C_SET: [u8; 4] = "set\0"
+
+static mut W_TRUE: [u8; 5] = "true\0"
+
+static mut K_START: [u8; 7] = "start=\0"
+
+static mut W_JA: [u8; 3] = "ja\0"
+
+static mut A_ERP: [u8; 6] = "trial\0"
+
+static mut A_OK: [u8; 3] = "ok\0"
+
+static mut S_DIENST: [u8; 24] = "ota: service, interval \0"
+
+static mut S_DAUS: [u8; 29] = "ota: automatic search is OFF\0"
+
+fn cmd_bestaetigen() -> u64 {
+    let rc: u64 = otacmd.opk_ruf((&A_ERP[0 as usize]) as u64, (&A_OK[0 as usize]) as u64,
+        0, 0, 3)
+    if rc == 0 {
+        otacmd.stand_write((&otabase.W_PH_RUHE[0 as usize]) as u64)
+    }
+    su_finish()
+    return rc
+}
+
+const SYS_CHMOD: u64 = 90
+
+fn cmd_boot(extra: u64) -> u64 {
+    otacmd.conf_load()
+    if otacmd.in_erprobung() {
+        let gesund: u64 = otacmd.conf_num((&otabase.K_GESUND[0 as usize]) as u64, 60)
+        var timeout: u64 = otacmd.conf_num((&otabase.K_TIMEOUT[0 as usize]) as u64, 120)
+        if timeout <= gesund {
+            timeout = gesund + 60
+        }
+        var s: u64 = 0
+        var gut: bool = false
+        while s < timeout && !gut {
+            ulib.sleep_ms(1000)
+            s = s + 1
+            if s >= gesund && otacmd.in_erprobung()
+                && (otacmd.name_laeuft((&N_DESK[0 as usize]) as u64)
+                    || otacmd.name_laeuft((&N_GLOG[0 as usize]) as u64)
+                    || (extra != 0 && otacmd.name_laeuft(extra))) {
+                gut = true
+            }
+            if !otacmd.in_erprobung() {
+                return cmd_dienst(0)
+            }
+        }
+        if !gut {
+            ulib.say((&S_BNEU[0 as usize]) as u64)
+            ulib.nl()
+            ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+            ulib.sys(otabase.SYS_REBOOT, otabase.RB_RESTART, 0, 0)
+            return 1
+        }
+        otacmd.sagn((&S_BGUT[0 as usize]) as u64, s)
+        cmd_bestaetigen()
+    }
+    return cmd_dienst(0)
+}
+
+fn cmd_dienst(rounds: u64) -> u64 {
+    otacmd.conf_load()
+    var auto: [u8; 16] = [0 as u8; 16]
+    let hat: bool = otacmd.conf_value((&otabase.K_AUTO[0 as usize]) as u64,
+        (&auto[0 as usize]) as u64, 16)
+    let spacing: u64 = otacmd.conf_num((&otabase.K_ABST[0 as usize]) as u64, 3600)
+    // DEFAULT ON (decision of the owner, 02.10.2026): a missing `auto=`
+    // key means automatic updates are ON; only an explicit value other
+    // than ja/true (nein, false, ...) switches the service off.
+    if (hat && !(ulib.streq((&auto[0 as usize]) as u64,
+        (&W_JA[0 as usize]) as u64) || ulib.streq((&auto[0 as usize]) as u64,
+        (&W_TRUE[0 as usize]) as u64))) || spacing == 0 {
+        ulib.say((&S_DAUS[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    otacmd.sagn((&S_DIENST[0 as usize]) as u64, spacing)
+    // system check: at the first round (right after boot + START seconds) and then every
+    // `sysabstand=` seconds (default 21600 = 6 h). The test entry `ota service <n>` does it
+    // only with the extra word `system` (`ota service 1 system`), so the package tests stay as they were.
+    var sys_gap: u64 = otacmd.conf_num((&K_SYSABST[0 as usize]) as u64, 21600)
+    var sys_on: bool = sys_gap != 0
+    if rounds != 0 {
+        sys_on = sys_on && dienst_sys
+    }
+    var sys_left: u64 = 0
+    var keep_going: bool = true
+    var gelaufen: u64 = 0
+    var fehlversuche: u64 = 0
+    // w-disklag: the first search comes START seconds after the service
+    // starts (default 180, `start=` in /etc/ota.conf). Right after boot the
+    // disk is busy with login, desktop and service starts; on a rotating
+    // disk the search (TLS, fetch spawn = binary load from disk, sntp)
+    // competed with them and made the login unusable. Only the real
+    // service (rounds == 0) waits; the test entry `ota service <n>` does not.
+    if rounds == 0 {
+        let verz: u64 = otacmd.conf_num((&K_START[0 as usize]) as u64, 180)
+        var v: u64 = 0
+        while v < verz {
+            ulib.sleep_ms(1000)
+            v = v + 1
+        }
+    }
+    while keep_going {
+        let vorher: bool = otacmd.clock_unsynced()
+        if vorher {
+            otacmd.sntp_run()
+        }
+        var fr: u64 = otacmd.cmd_find()
+        if fr != 0 && otabase.find_missing != 0 && !vorher && otacmd.clock_unsynced() && otacmd.sntp_run() {
+            fr = otacmd.cmd_find()
+        }
+        if fr == 0 && !otacmd.in_erprobung() {
+            otacmd.cmd_einspielen()
+        }
+        if sys_on && sys_left == 0 {
+            // the feed answered (newer = 0, current = 1): next look in `sysabstand`;
+            // an error (offline, clock) is retried with the next round of the service
+            let sr: u64 = su_auto_check()
+            if sr <= 1 {
+                sys_left = sys_gap
+            }
+        }
+        gelaufen = gelaufen + 1
+        if rounds != 0 && gelaufen >= rounds {
+            return 0
+        }
+        // O-002: after a failed fetch (network/clock not ready right after
+        // boot) look again in 30 s, at most 20 times (10 minutes), then fall
+        // back to the normal `abstand`.
+        var wait: u64 = spacing
+        if otabase.find_missing != 0 && fehlversuche < 20 {
+            // w-disklag: backoff 30, 60, 120, 240 s ... (was a fixed 30 s,
+            // i.e. a TLS search + fetch spawn every 30 s while offline),
+            // never longer than `abstand`.
+            wait = 30
+            var k: u64 = 0
+            while k < fehlversuche && k < 4 {
+                wait = wait * 2
+                k = k + 1
+            }
+            if spacing < wait {
+                wait = spacing
+            }
+            fehlversuche = fehlversuche + 1
+        } else {
+            fehlversuche = 0
+        }
+        var s: u64 = 0
+        while s < wait {
+            ulib.sleep_ms(1000)
+            s = s + 1
+        }
+        if sys_left > wait {
+            sys_left = sys_left - wait
+        } else {
+            sys_left = 0
+        }
+    }
+    return 0
+}
+
+static mut C_SU_SYSTEM: [u8; 7] = "system\0"
+
+static mut K_SYSABST: [u8; 12] = "sysabstand=\0"
+
+static mut P_SU_NOTIFIED: [u8; 21] = "/system/sys.notified\0"
+
+static mut S_SU_TOAST: [u8; 32] = "System update available: build \0"
+
+static mut dienst_sys: bool = false
+
+static mut P_SU_PEND: [u8; 19] = "/system/SYSPENDING\0"
+
+static mut P_SU_OSVER: [u8; 15] = "/etc/osversion\0"
+
+static mut P_SU_MNT: [u8; 8] = "/sysesp\0"
+
+static mut P_SU_CONF: [u8; 20] = "/sysesp/limine.conf\0"
+
+static mut P_SU_NEW: [u8; 18] = "/sysesp/limine.nw\0"
+
+// 32 KiB copy buffer: one write call per 64 sectors instead of one per 8
+static mut SU_BIG: [u8; 32768] = [0 as u8; 32768]
+
+static mut P_SU_KB: [u8; 128] = [0 as u8; 128]
+
+static mut P_SU_KA: [u8; 128] = [0 as u8; 128]
+
+static mut S_SU_LEAF_A: [u8; 9] = "/osum.mb\0"
+
+static mut S_SU_LEAF_B: [u8; 11] = "/osum-b.mb\0"
+
+static mut P_PROCVER: [u8; 14] = "/proc/version\0"
+
+static mut D_SU_HDA1: [u8; 10] = "/dev/hda1\0"
+
+static mut D_SU_SDA1: [u8; 10] = "/dev/sda1\0"
+
+static mut D_SU_NVME1: [u8; 12] = "/dev/nvme01\0"
+
+static mut T_SU_VFAT: [u8; 5] = "vfat\0"
+
+static mut W_SU_DEF2B: [u8; 17] = "default_entry: 2\0"
+
+static mut W_SU_APPLIED: [u8; 8] = "applied\0"
+
+static mut W_SU_AVAIL: [u8; 10] = "available\0"
+
+static mut W_SU_STAGEDW: [u8; 7] = "staged\0"
+
+static mut W_SU_FAILW: [u8; 7] = "failed\0"
+
+static mut W_SU_BUILD: [u8; 8] = " build \0"
+
+static mut W_SU_PC: [u8; 8] = "commit=\0"
+
+static mut W_SU_PN: [u8; 7] = "count=\0"
+
+static mut W_SU_PS: [u8; 5] = "sha=\0"
+
+static mut W_SU_ERPG: [u8; 5] = "gen=\0"
+
+static mut W_SU_ERPV: [u8; 6] = " vor=\0"
+
+static mut W_SU_ERPT: [u8; 12] = " v=00 ok=0\n\0"
+
+static mut W_SU_RESTART: [u8; 8] = "restart\0"
+
+static mut S_SU_NEW: [u8; 25] = "system: update available\0"
+
+static mut S_SU_STAGED: [u8; 45] = "system: staged in slot B, restart to install\0"
+
+static mut S_SU_PROMO: [u8; 52] = "system: new kernel confirmed and promoted to slot A\0"
+
+static mut S_SU_LIVE: [u8; 49] = "system: applied, no restart needed (same kernel)\0"
+
+static mut S_SU_SHREST: [u8; 34] = "system: shell program restarted: \0"
+
+static mut N_SH_TASKBAR: [u8; 8] = "taskbar\0"
+
+static mut N_SH_LAUNCHER: [u8; 9] = "launcher\0"
+
+static mut S_SU_FAILED: [u8; 53] = "system: trial kernel was rolled back, update dropped\0"
+
+static mut S_SU_ROOTN: [u8; 65] = "system: root image entry ignored (module-root layout is stage 2)\0"
+
+static mut S_SU_PEND: [u8; 32] = "system: pending trial of build \0"
+
+static mut S_SU_NOPEND: [u8; 26] = "system: no update pending\0"
+
+static mut S_SU_RESTARTING: [u8; 19] = "system: restarting\0"
+
+static mut E_SU_TRIAL: [u8; 61] = "ota: a trial is running or pending, confirm or restart first\0"
+
+static mut E_SU_ESP: [u8; 58] = "ota: cannot mount the ESP (partition 1 of the boot disk)?\0"
+
+static mut E_SU_LAYOUT: [u8; 38] = "ota: unsupported limine.conf layout: \0"
+
+static mut E_SU_WHY_SIZE: [u8; 24] = "file too large or empty\0"
+
+static mut E_SU_WHY_ENTRY: [u8; 25] = "no top-level first entry\0"
+
+static mut E_SU_WHY_PATH: [u8; 40] = "first entry has no path boot():/osum.mb\0"
+
+static mut E_SU_WHY_DEF: [u8; 23] = "default_entry is not 1\0"
+
+static mut E_SU_WHY_BPOS: [u8; 32] = "entry B is not the second entry\0"
+
+static mut P_SU_AST: [u8; 18] = "/system/sys.apply\0"
+
+static mut P_SU_ALOG: [u8; 21] = "/system/sys.applylog\0"
+
+static mut W_SU_BG: [u8; 3] = "bg\0"
+
+static mut W_SU_ARUN: [u8; 14] = "state=running\0"
+
+static mut W_SU_ARUNL: [u8; 15] = "state=running\n\0"
+
+static mut W_SU_ADONE: [u8; 12] = "state=done\n\0"
+
+static mut W_SU_AFAIL: [u8; 14] = "state=failed\n\0"
+
+static mut S_SU_BGGO: [u8; 66] = "system: apply started in the background, watch: ota system status\0"
+
+static mut S_SU_BGBUSY: [u8; 65] = "system: an apply is already running (state in /system/sys.apply)\0"
+
+static mut S_SU_ASTATE: [u8; 15] = "system: apply \0"
+
+static mut S_SU_ALOGH: [u8; 19] = "system: apply log:\0"
+
+static mut su_bg: bool = false
+
+static mut W_SU_APID: [u8; 19] = "state=running pid=\0"
+
+static mut W_SU_FORCE: [u8; 6] = "force\0"
+
+static mut S_SU_STALE: [u8; 64] = "system: the previous apply died, its running state was released\0"
+
+static mut S_SU_STALENOTE: [u8; 80] = "system: apply state is stale (the task is gone), use: ota system apply bg force\0"
+
+static mut E_SU_BGFORK: [u8; 42] = "ota: could not start the background apply\0"
+
+static mut SU_CIN: [u8; 24576] = [0 as u8; 24576]
+
+static mut SU_COUT: [u8; 28672] = [0 as u8; 28672]
+
+static mut E_SU_CONFW: [u8; 33] = "ota: could not write limine.conf\0"
+
+static mut E_SU_ERP: [u8; 37] = "ota: could not arm the trial counter\0"
+
+static mut E_SU_PENDW: [u8; 40] = "ota: could not write /system/SYSPENDING\0"
+
+static mut E_SU_KGET: [u8; 37] = "ota: kernel download or check failed\0"
+
+static mut SYSB2: [u8; 6144] = [0 as u8; 6144]
+
+static mut SU_L_OFILE: [u8; 14] = "sysfile\tfile\t\0"
+
+static mut SU_L_GZ: [u8; 7] = "sysgz\t\0"
+
+static mut SU_R_KERNEL2: [u8; 7] = "kernel\0"
+
+static mut P_BIN: [u8; 5] = "/bin\0"
+
+static mut P_SU_NEWD: [u8; 12] = "/system/new\0"
+
+static mut P_SU_OLDD: [u8; 12] = "/system/old\0"
+
+static mut P_SU_OVL: [u8; 15] = "/system/SYSOVL\0"
+
+static mut E_SU_OVLGET: [u8; 45] = "ota: overlay file download or check failed: \0"
+
+static mut E_SU_OVLSPACE: [u8; 49] = "ota: not enough free space for the overlay files\0"
+
+static mut E_SU_OVLBAD: [u8; 42] = "ota: bad overlay entry in the signed list\0"
+
+static mut E_SU_GZ: [u8; 26] = "ota: gunzip failed, code \0"
+
+static mut E_SU_UNPACK: [u8; 46] = "ota: unpacked file has the wrong size or hash\0"
+
+static mut E_SU_OVLSW: [u8; 53] = "ota: overlay install failed, previous files restored\0"
+
+static mut S_SU_OVLN: [u8; 33] = "system: overlay files verified: \0"
+
+static mut S_SU_OVLREST: [u8; 56] = "system: overlay restored (previous /bin files are back)\0"
+
+static mut S_SU_OVLDROP: [u8; 26] = "system: overlay committed\0"
+
+static mut W_SU_TAB: [u8; 2] = "\t\0"
+
+static mut OVLJ: [u8; 8192] = [0 as u8; 8192]
+
+static mut P_AL_APPS: [u8; 7] = "/apps/\0"
+
+static mut P_AL_ETC: [u8; 6] = "/etc/\0"
+
+static mut P_AL_USR: [u8; 12] = "/usr/share/\0"
+
+static mut P_AL_LIB: [u8; 6] = "/lib/\0"
+
+static mut P_AL_BIN: [u8; 6] = "/bin/\0"
+
+static mut P_AL_START: [u8; 7] = "/start\0"
+
+static mut SU_L_LINK: [u8; 9] = "syslink\t\0"
+
+static mut SU_LDST: [u8; 64] = [0 as u8; 64]
+
+static mut SU_LTGT: [u8; 64] = [0 as u8; 64]
+
+static mut SU_PA: [u8; 160] = [0 as u8; 160]
+
+static mut SU_PB: [u8; 160] = [0 as u8; 160]
+
+static mut SU_PC: [u8; 160] = [0 as u8; 160]
+
+static mut SU_OHEX: [u8; 72] = [0 as u8; 72]
+
+static mut SU_OSRV: [u8; 128] = [0 as u8; 128]
+
+static mut SU_ONAME: [u8; 136] = [0 as u8; 136]
+
+static mut SU_GHEX: [u8; 72] = [0 as u8; 72]
+
+static mut SU_GFILE: [u8; 128] = [0 as u8; 128]
+
+static mut su_glen: u64 = 0
+
+static mut su_olen: u64 = 0
+
+static mut P_ROOTSCTL: [u8; 14] = "/bin/rootsctl\0"
+
+static mut P_ROOTS_NEW: [u8; 22] = "/system/new/roots.pem\0"
+
+static mut A_APPLY: [u8; 6] = "apply\0"
+
+static mut E_SU_ROOTS: [u8; 63] = "ota: trust roots not updated (download, check or apply failed)\0"
+
+static mut S_SU_ROOTS: [u8; 28] = "system: trust roots updated\0"
+
+const NOTFOUND: u64 = 0xFFFFFFFFFFFFFFFF
+
+fn cmd_sys_find() -> u64 {
+    let r: u64 = otacmd.su_check(true)
+    if r == 0 {
+        ulib.say((&S_SU_NEW[0 as usize]) as u64)
+        ulib.nl()
+        otacmd.su_notes_show()
+        otacmd.su_stand_write((&W_SU_AVAIL[0 as usize]) as u64)
+    }
+    return r
+}
+
+// PERIODIC SYSTEM CHECK (service `ota service`): quiet check of the SYSTEM feed; when a newer
+// build exists its changelog is fetched (sys.notes), sys.stand says `available`, and ONE
+// notification per build number is posted (the bell + toast of the bar). Nothing is installed.
+// Returns 0 when a newer build is offered.
+fn su_auto_check() -> u64 {
+    if otacmd.in_erprobung() || su_pending() {
+        return 1 // a trial is running: the next look comes after it is decided
+    }
+    otabase.su_quiet = true
+    let r: u64 = otacmd.su_check(false)
+    if r == 0 {
+        otacmd.su_notes_show()
+        otacmd.su_stand_write((&W_SU_AVAIL[0 as usize]) as u64)
+        if otacmd.num9_read((&P_SU_NOTIFIED[0 as usize]) as u64) != otabase.su_count {
+            var tb: [u8; 96] = [0 as u8; 96]
+            let tp: u64 = (&tb[0 as usize]) as u64
+            ulib.strcpy(tp, (&S_SU_TOAST[0 as usize]) as u64)
+            otacmd.num_at(tp, otabase.su_count)
+            let _n: u64 = ulib.noti_post(1, tp, ulib.length(tp))
+            otacmd.num9_write((&P_SU_NOTIFIED[0 as usize]) as u64, otabase.su_count)
+        }
+    }
+    otabase.su_quiet = false
+    return r
+}
+
+// ------------------------------------------------ the ESP side
+// Mount one candidate device on the ESP mount point; it only counts when the loader
+// config is on it (a different FAT volume must not be taken for the ESP).
+fn su_esp_try(dev: u64) -> bool {
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+    let m: u64 = ulib.sys4(ulib.SYS_VMOUNT, dev, (&P_SU_MNT[0 as usize]) as u64,
+        (&T_SU_VFAT[0 as usize]) as u64, 0)
+    if ulib.bad(m) {
+        return false
+    }
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_CONF[0 as usize]) as u64, 0, 0)
+    if ulib.bad(f) {
+        ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+// The ESP is partition 1 of the boot disk: IDE (hda), AHCI (sda) or NVMe.
+fn su_paths_set(dir: u64) {
+    var w: u64 = ulib.strcpy((&P_SU_KA[0 as usize]) as u64, (&P_SU_MNT[0 as usize]) as u64)
+    w = w + ulib.strcpy((&P_SU_KA[0 as usize]) as u64 + w, dir)
+    ulib.strcpy((&P_SU_KA[0 as usize]) as u64 + w, (&S_SU_LEAF_A[0 as usize]) as u64)
+    var v: u64 = ulib.strcpy((&P_SU_KB[0 as usize]) as u64, (&P_SU_MNT[0 as usize]) as u64)
+    v = v + ulib.strcpy((&P_SU_KB[0 as usize]) as u64 + v, dir)
+    ulib.strcpy((&P_SU_KB[0 as usize]) as u64 + v, (&S_SU_LEAF_B[0 as usize]) as u64)
+}
+
+fn su_paths_resolve() {
+    let a: u64 = (&SU_CIN[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_CONF[0 as usize]) as u64, a, 24000)
+    if n != 0xFFFFFFFFFFFFFFFF && n != 0 && n < 24000 {
+        otacmd.p8(a + n, 0)
+        if bootconf.resolve(a, n) {
+            su_paths_set(bootconf.kernel_dir())
+            return
+        }
+    }
+    var empty: [u8; 2] = "\0\0"
+    su_paths_set((&empty[0 as usize]) as u64)
+}
+
+fn su_esp_open() -> bool {
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+    // order matters: mounting /dev/hda1 on a machine without an IDE disk stalls for minutes
+    let ok: bool = su_esp_try((&D_SU_SDA1[0 as usize]) as u64)
+        || su_esp_try((&D_SU_NVME1[0 as usize]) as u64)
+        || su_esp_try((&D_SU_HDA1[0 as usize]) as u64)
+    if ok {
+        su_paths_resolve()
+    }
+    return ok
+}
+
+fn su_esp_close() {
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.sys(ulib.SYS_UMOUNT2, (&P_SU_MNT[0 as usize]) as u64, 0, 0)
+}
+
+// limine.conf -> `default_entry: 2` and an entry B (copy of the first entry) right behind
+// the first entry; every other byte stays as it was. Logic: bootconf.fi.
+fn su_conf_arm() -> bool {
+    let a: u64 = (&SU_CIN[0 as usize]) as u64
+    let b: u64 = (&SU_COUT[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_CONF[0 as usize]) as u64, a, 24000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 || n >= 24000 {
+        otacmd.err((&E_SU_LAYOUT[0 as usize]) as u64, (&E_SU_WHY_SIZE[0 as usize]) as u64)
+        return false
+    }
+    otacmd.p8(a + n, 0)
+    let r: u64 = bootconf.arm(a, n, b, 28000)
+    if r != bootconf.R_OK {
+        var why: u64 = (&E_SU_WHY_ENTRY[0 as usize]) as u64
+        if r == bootconf.R_NO_PATH {
+            why = (&E_SU_WHY_PATH[0 as usize]) as u64
+        } else if r == bootconf.R_DEFAULT {
+            why = (&E_SU_WHY_DEF[0 as usize]) as u64
+        } else if r == bootconf.R_B_PLACE {
+            why = (&E_SU_WHY_BPOS[0 as usize]) as u64
+        } else if r == bootconf.R_FULL {
+            why = (&E_SU_WHY_SIZE[0 as usize]) as u64
+        }
+        otacmd.err((&E_SU_LAYOUT[0 as usize]) as u64, why)
+        return false
+    }
+    let w: u64 = bootconf.new_len()
+    if !otacmd.file_write((&P_SU_NEW[0 as usize]) as u64, b, w) {
+        otacmd.err((&E_SU_CONFW[0 as usize]) as u64, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if otacmd.size((&P_SU_NEW[0 as usize]) as u64) != w {
+        otacmd.remove((&P_SU_NEW[0 as usize]) as u64)
+        otacmd.err((&E_SU_CONFW[0 as usize]) as u64, 0)
+        return false
+    }
+    otacmd.remove((&P_SU_CONF[0 as usize]) as u64)
+    let rr: u64 = ulib.sys(ulib.SYS_RENAME, (&P_SU_NEW[0 as usize]) as u64,
+        (&P_SU_CONF[0 as usize]) as u64, 0)
+    if ulib.bad(rr) {
+        otacmd.file_write((&P_SU_CONF[0 as usize]) as u64, b, w)
+        otacmd.remove((&P_SU_NEW[0 as usize]) as u64)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return otacmd.size((&P_SU_CONF[0 as usize]) as u64) == w
+}
+
+// ONE byte: `default_entry: 2` -> `default_entry: 1` (same size, one sector).
+fn su_conf_unarm() -> bool {
+    let a: u64 = (&SU_CIN[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_CONF[0 as usize]) as u64, a, 24000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 || n >= 24000 {
+        return false
+    }
+    otacmd.p8(a + n, 0)
+    let d: u64 = otacmd.su_find_line(a, n, (&W_SU_DEF2B[0 as usize]) as u64)
+    if d == 0 {
+        return false
+    }
+    let off: u64 = (d - a) + 15
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_CONF[0 as usize]) as u64, ulib.O_RDWR, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_SEEK, fd, off, ulib.SEEK_SET)
+    var one: [u8; 2] = "1\0"
+    let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&one[0 as usize]) as u64, 1)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return !ulib.bad(w) && w == 1
+}
+
+fn su_copy(src: u64, dst: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    var good: bool = true
+    var going: bool = true
+    while going {
+        let r: u64 = ulib.sys(ulib.SYS_READ, a, (&SU_BIG[0 as usize]) as u64, 32768)
+        if ulib.bad(r) {
+            good = false
+            going = false
+        } else if r == 0 {
+            going = false
+        } else {
+            var o: u64 = 0
+            while o < r && good {
+                let w: u64 = ulib.sys(ulib.SYS_WRITE, b,
+                    (&SU_BIG[0 as usize]) as u64 + o, r - o)
+                if ulib.bad(w) || w == 0 {
+                    good = false
+                } else {
+                    o = o + w
+                }
+            }
+            if !good {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return good
+}
+
+fn su_erp_arm() -> bool {
+    var g: [u8; 12] = [0 as u8; 12]
+    let n: u64 = otacmd.file_read((&otabase.P_AKT[0 as usize]) as u64, (&g[0 as usize]) as u64, 11)
+    var cur: u64 = 0
+    if n == 0xFFFFFFFFFFFFFFFF || n < 8 {
+        // generation 0 image: ab_boot's rollback rewrites /system/AKTUELL in place and
+        // needs the file to exist (else "ERPROBUNG nicht schreibbar", no rollback)
+        if !otacmd.num9_write((&otabase.P_AKT[0 as usize]) as u64, 0) {
+            return false
+        }
+    }
+    if n != 0xFFFFFFFFFFFFFFFF && n >= 8 {
+        var i: u64 = 0
+        while i < 8 {
+            let ch: u64 = g[i as usize] as u64
+            if ch >= 48 && ch <= 57 {
+                cur = cur * 10 + (ch - 48)
+            }
+            i = i + 1
+        }
+    }
+    let o: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    otacmd.p8(o, 0)
+    ulib.strcat(o, (&W_SU_ERPG[0 as usize]) as u64)
+    var d: [u8; 12] = [0 as u8; 12]
+    var rest: u64 = cur
+    var k: u64 = 8
+    while k > 0 {
+        k = k - 1
+        d[k as usize] = (48 + (rest % 10)) as u8
+        rest = rest / 10
+    }
+    d[8 as usize] = 0 as u8
+    ulib.strcat(o, (&d[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_ERPV[0 as usize]) as u64)
+    ulib.strcat(o, (&d[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_ERPT[0 as usize]) as u64)
+    if otacmd.len(o) != otabase.ERP_LEN {
+        return false
+    }
+    return otacmd.commit_write((&otabase.P_ERP[0 as usize]) as u64, o, otabase.ERP_LEN)
+}
+
+fn su_pend_write() -> bool {
+    let o: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    otacmd.p8(o, 0)
+    ulib.strcat(o, (&W_SU_PN[0 as usize]) as u64)
+    otacmd.num_at(o, otabase.su_count)
+    ulib.strcat(o, (&otabase.W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_PC[0 as usize]) as u64)
+    ulib.strcat(o, (&otabase.SU_COMMIT[0 as usize]) as u64)
+    ulib.strcat(o, (&otabase.W_SU_NL[0 as usize]) as u64)
+    ulib.strcat(o, (&W_SU_PS[0 as usize]) as u64)
+    ulib.strcat(o, (&otabase.SU_KHEX[0 as usize]) as u64)
+    ulib.strcat(o, (&otabase.W_SU_NL[0 as usize]) as u64)
+    return otacmd.file_write((&P_SU_PEND[0 as usize]) as u64, o, otacmd.len(o))
+}
+
+fn su_pending() -> bool {
+    let n: u64 = otacmd.file_read((&P_SU_PEND[0 as usize]) as u64, (&otabase.SYSB3[0 as usize]) as u64, 8)
+    return n != 0xFFFFFFFFFFFFFFFF && n > 0
+}
+
+// ------------------------------------------------ /bin overlay (selfupdate stage 2, r1245)
+//
+// The signed list carries, besides the kernel, one line per system file:
+//     sysfile <TAB> file <TAB> sha256 <TAB> octets <TAB> <server file> <TAB> <name in /bin>
+// and optionally a gzip alternate (r1246):
+//     sysgz <TAB> <name | kernel> <TAB> sha256(gz) <TAB> octets(gz) <TAB> <server file>.gz
+// Flow: every file is fetched (hash + length checked, gz unpacked by the streaming gunzip) into
+// /system/new/<name> BEFORE anything on the system changes. Then the journal /system/SYSOVL lists
+// the names ("1name" = a file with that name existed in /bin, "0name" = new file), each old file
+// moves to /system/old/<name> and the new one is renamed into /bin (rename never overwrites in
+// this VFS, so it is old -> /system/old first, then new -> /bin). The journal is the truth after
+// a power cut: restore puts every old file back, drop deletes the backups. Restore runs when the
+// trial is lost (su_finish), drop when the kernel is promoted.
+fn su_exists(pth: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, pth, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+fn su_join(out: u64, dir: u64, name: u64) {
+    ulib.strcpy(out, dir)
+    otacmd.slash(out)
+    ulib.strcat(out, name)
+}
+
+// Letters, digits, `.`, `-`, `_`; no leading dot; at most 60. The name ends up in a path.
+fn su_path_ok(pn: u64) -> bool {
+    let n: u64 = otacmd.len(pn)
+    if n < 6 || n > 60 {
+        return false
+    }
+    let allowed: bool = otacmd.su_prefix(pn, (&P_AL_APPS[0 as usize]) as u64)
+        || otacmd.su_prefix(pn, (&P_AL_ETC[0 as usize]) as u64)
+        || otacmd.su_prefix(pn, (&P_AL_USR[0 as usize]) as u64)
+        || otacmd.su_prefix(pn, (&P_AL_LIB[0 as usize]) as u64)
+    if !allowed {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = otacmd.g8(pn + i)
+        let good: bool = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+            || c == 46 || c == 45 || c == 95 || c == 47
+        if !good {
+            return false
+        }
+        if i + 1 < n {
+            let d: u64 = otacmd.g8(pn + i + 1)
+            if (c == 46 && d == 46) || (c == 47 && d == 47) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return otacmd.g8(pn + n - 1) != 47
+}
+
+fn su_name_ok(pn: u64) -> bool {
+    if otacmd.g8(pn) == 47 {
+        return su_path_ok(pn)
+    }
+    let n: u64 = otacmd.len(pn)
+    if n == 0 || n > 60 || otacmd.g8(pn) == 46 {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        let c: u64 = otacmd.g8(pn + i)
+        let good: bool = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+            || c == 46 || c == 45 || c == 95
+        if !good {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn su_dest(out: u64, nm: u64) {
+    if otacmd.g8(nm) == 47 {
+        ulib.strcpy(out, nm)
+    } else {
+        su_join(out, (&P_BIN[0 as usize]) as u64, nm)
+    }
+}
+
+fn su_flat(out: u64, dir: u64, nm: u64) {
+    if otacmd.g8(nm) != 47 {
+        su_join(out, dir, nm)
+        return
+    }
+    ulib.strcpy(out, dir)
+    otacmd.slash(out)
+    var o: u64 = otacmd.len(out)
+    var i: u64 = 1
+    while otacmd.g8(nm + i) != 0 {
+        var c: u64 = otacmd.g8(nm + i)
+        if c == 47 {
+            c = 64
+        }
+        otacmd.p8(out + o, c)
+        o = o + 1
+        i = i + 1
+    }
+    otacmd.p8(out + o, 0)
+}
+
+fn su_is_exec(nm: u64) -> bool {
+    if otacmd.g8(nm) != 47 {
+        return true
+    }
+    let n: u64 = otacmd.len(nm)
+    return n > 6 && ulib.streq(nm + n - 6, (&P_AL_START[0 as usize]) as u64)
+}
+
+fn su_mkparents(pth: u64) {
+    var i: u64 = 1
+    while otacmd.g8(pth + i) != 0 {
+        if otacmd.g8(pth + i) == 47 {
+            otacmd.p8(pth + i, 0)
+            ulib.sys(ulib.SYS_MKDIR, pth, 0, 0)
+            otacmd.p8(pth + i, 47)
+        }
+        i = i + 1
+    }
+}
+
+fn su_link_ok(dst: u64, tgt: u64) -> bool {
+    if otacmd.g8(dst) != 47 || !su_path_ok(dst) {
+        return false
+    }
+    if !otacmd.su_prefix(tgt, (&P_AL_BIN[0 as usize]) as u64) {
+        return false
+    }
+    return su_name_ok(tgt + 5) && otacmd.g8(tgt + 5) != 47
+}
+
+fn su_link_line(k: u64) -> u64 {
+    let f: u64 = otacmd.line_from((&SU_L_LINK[0 as usize]) as u64, 8, k)
+    if f == 0 {
+        return 0
+    }
+    let e: u64 = (&otabase.VZ[0 as usize]) as u64 + otabase.vz_len
+    otacmd.p8((&SU_LDST[0 as usize]) as u64, 0)
+    otacmd.p8((&SU_LTGT[0 as usize]) as u64, 0)
+    otacmd.field(f, e, 0, (&SU_LDST[0 as usize]) as u64, 60)
+    otacmd.field(f, e, 1, (&SU_LTGT[0 as usize]) as u64, 60)
+    return 1
+}
+
+// The sysgz line for `key` (a /bin name or `kernel`) -> SU_GHEX / su_glen / SU_GFILE.
+fn su_gz_find(key: u64) -> bool {
+    let e: u64 = (&otabase.VZ[0 as usize]) as u64 + otabase.vz_len
+    var k: u64 = 0
+    var more: bool = true
+    while more {
+        let z: u64 = otacmd.line_from((&SU_L_GZ[0 as usize]) as u64, 6, k)
+        if z == 0 {
+            more = false
+        } else {
+            if otacmd.field(z, e, 0, (&otabase.FIELD2[0 as usize]) as u64, 64)
+                && ulib.streq((&otabase.FIELD2[0 as usize]) as u64, key) {
+                otacmd.field(z, e, 1, (&SU_GHEX[0 as usize]) as u64, 70)
+                otacmd.field(z, e, 2, (&otabase.SU_TMP[0 as usize]) as u64, 20)
+                su_glen = ulib.to_num((&otabase.SU_TMP[0 as usize]) as u64)
+                otacmd.field(z, e, 3, (&SU_GFILE[0 as usize]) as u64, 120)
+                return otacmd.len((&SU_GHEX[0 as usize]) as u64) == 64 && su_glen > 0
+                    && otacmd.g8((&SU_GFILE[0 as usize]) as u64) != 0
+            }
+            k = k + 1
+        }
+    }
+    return false
+}
+
+// gunzip the file `src` into `dst` (streaming, constant memory). false = refused (CRC, format, I/O).
+fn su_gunzip(src: u64, dst: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    let r: u64 = inflate.gunzip_fd(a, b)
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    if r != inflate.E_OK {
+        otacmd.sagn((&E_SU_GZ[0 as usize]) as u64, r)
+        ulib.sys(ulib.SYS_UNLINK, dst, 0, 0)
+        return false
+    }
+    return true
+}
+
+// One verified item (kernel or overlay file) into `dst`: the gz alternate when the list has one,
+// else the raw file. Length + SHA-256 of the FINAL file are checked in both cases.
+fn su_fetch_item(key: u64, srv: u64, olen: u64, ohex: u64, dst: u64) -> bool {
+    if su_gz_find(key) {
+        otacmd.remove(dst)
+        otacmd.tmp_path((&otabase.TARGET[0 as usize]) as u64, (&SU_GFILE[0 as usize]) as u64)
+        var good: bool = otacmd.get_into((&SU_GFILE[0 as usize]) as u64, su_glen, (&SU_GHEX[0 as usize]) as u64)
+        if good {
+            good = su_gunzip((&otabase.TARGET[0 as usize]) as u64, dst)
+        }
+        otacmd.remove((&otabase.TARGET[0 as usize]) as u64)
+        if !good {
+            otacmd.remove(dst)
+            return false
+        }
+        var fine: bool = otacmd.size(dst) == olen
+        if fine {
+            fine = otacmd.hash_file(dst, (&otabase.HASH[0 as usize]) as u64)
+        }
+        if fine {
+            sha.hex_out((&otabase.HASH[0 as usize]) as u64, 32, (&otabase.HEX[0 as usize]) as u64)
+            fine = ulib.strneq((&otabase.HEX[0 as usize]) as u64, ohex, 64)
+        }
+        if !fine {
+            otacmd.err((&E_SU_UNPACK[0 as usize]) as u64, 0)
+            otacmd.remove(dst)
+            return false
+        }
+        return true
+    }
+    ulib.strcpy((&otabase.TARGET[0 as usize]) as u64, dst)
+    return otacmd.get_into(srv, olen, ohex)
+}
+
+// Fills SU_OHEX / su_olen / SU_OSRV / SU_ONAME from the k-th `sysfile file` line; false = no more.
+fn su_ovl_line(k: u64) -> u64 {
+    let f: u64 = otacmd.line_from((&SU_L_OFILE[0 as usize]) as u64, 13, k)
+    if f == 0 {
+        return 0
+    }
+    let e: u64 = (&otabase.VZ[0 as usize]) as u64 + otabase.vz_len
+    otacmd.p8((&SU_OHEX[0 as usize]) as u64, 0)
+    otacmd.p8((&SU_OSRV[0 as usize]) as u64, 0)
+    otacmd.p8((&SU_ONAME[0 as usize]) as u64, 0)
+    otacmd.field(f, e, 0, (&SU_OHEX[0 as usize]) as u64, 70)
+    otacmd.field(f, e, 1, (&otabase.SU_TMP[0 as usize]) as u64, 20)
+    su_olen = ulib.to_num((&otabase.SU_TMP[0 as usize]) as u64)
+    otacmd.field(f, e, 2, (&SU_OSRV[0 as usize]) as u64, 120)
+    otacmd.field(f, e, 3, (&SU_ONAME[0 as usize]) as u64, 60)
+    return 1
+}
+
+fn su_ovl_clean_new() {
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
+            su_flat((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            otacmd.remove((&SU_PA[0 as usize]) as u64)
+        }
+        k = k + 1
+    }
+}
+
+// Fetch + verify every overlay file into /system/new. Nothing else on the system is touched.
+fn su_ovl_stage() -> bool {
+    // Free-space precheck from the signed sizes: staging + backups need about 2x the final sizes.
+    var total: u64 = 0
+    var q: u64 = 0
+    while su_ovl_line(q) != 0 {
+        total = total + su_olen
+        q = q + 1
+    }
+    if total != 0 {
+        let fr: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BFREE, 0, 0) * ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
+        if fr < total * 2 + otabase.SPACE_SLACK {
+            otacmd.err((&E_SU_OVLSPACE[0 as usize]) as u64, 0)
+            return false
+        }
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_NEWD[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_OLDD[0 as usize]) as u64, 0, 0)
+    var k: u64 = 0
+    var good: bool = true
+    while good && su_ovl_line(k) != 0 {
+        if !su_name_ok((&SU_ONAME[0 as usize]) as u64)
+            || otacmd.len((&SU_OHEX[0 as usize]) as u64) != 64 || su_olen == 0
+            || otacmd.g8((&SU_OSRV[0 as usize]) as u64) == 0 {
+            otacmd.err((&E_SU_OVLBAD[0 as usize]) as u64, 0)
+            good = false
+        } else {
+            su_flat((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            if !su_fetch_item((&SU_ONAME[0 as usize]) as u64, (&SU_OSRV[0 as usize]) as u64,
+                su_olen, (&SU_OHEX[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64) {
+                otacmd.err((&E_SU_OVLGET[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
+                good = false
+            } else {
+                // the fetched file is created without the execute bit; /bin entries must stay runnable (0755)
+                var mode: u64 = 420
+                if su_is_exec((&SU_ONAME[0 as usize]) as u64) {
+                    mode = 493
+                }
+                ulib.sys(SYS_CHMOD, (&SU_PA[0 as usize]) as u64, mode, 0)
+            }
+        }
+        k = k + 1
+    }
+    var q2: u64 = 0
+    while good && su_link_line(q2) != 0 {
+        if !su_link_ok((&SU_LDST[0 as usize]) as u64, (&SU_LTGT[0 as usize]) as u64) {
+            otacmd.err((&E_SU_OVLBAD[0 as usize]) as u64, 0)
+            good = false
+        }
+        q2 = q2 + 1
+    }
+    if !good {
+        su_ovl_clean_new()
+    }
+    return good
+}
+
+// Journal: "<1|0><name>\n" per file (1 = a /bin file with that name exists now).
+fn su_ovl_journal() -> bool {
+    let j: u64 = (&OVLJ[0 as usize]) as u64
+    otacmd.p8(j, 0)
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        if otacmd.len(j) + otacmd.len((&SU_ONAME[0 as usize]) as u64) + 3 > 7900 {
+            return false
+        }
+        su_dest((&SU_PC[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
+        var d: [u8; 2] = "0\0"
+        if su_exists((&SU_PC[0 as usize]) as u64) {
+            d[0 as usize] = 49 as u8
+        }
+        ulib.strcat(j, (&d[0 as usize]) as u64)
+        ulib.strcat(j, (&SU_ONAME[0 as usize]) as u64)
+        ulib.strcat(j, (&otabase.W_SU_NL[0 as usize]) as u64)
+        k = k + 1
+    }
+    var lk: u64 = 0
+    while su_link_line(lk) != 0 {
+        if otacmd.len(j) + 140 > 7900 {
+            return false
+        }
+        var d2: [u8; 2] = "N\0"
+        if su_exists((&SU_LDST[0 as usize]) as u64) {
+            d2[0 as usize] = 76 as u8
+        }
+        ulib.strcat(j, (&d2[0 as usize]) as u64)
+        ulib.strcat(j, (&SU_LDST[0 as usize]) as u64)
+        ulib.strcat(j, (&W_SU_TAB[0 as usize]) as u64)
+        ulib.strcat(j, (&SU_LTGT[0 as usize]) as u64)
+        ulib.strcat(j, (&otabase.W_SU_NL[0 as usize]) as u64)
+        lk = lk + 1
+    }
+    return otacmd.file_write((&P_SU_OVL[0 as usize]) as u64, j, otacmd.len(j))
+}
+
+// Walk the journal. op 1 = swap in, 2 = restore, 3 = drop the backups. false = a step failed.
+fn su_ovl_each(op: u64) -> bool {
+    let j: u64 = (&OVLJ[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_OVL[0 as usize]) as u64, j, 8000)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return true
+    }
+    otacmd.p8(j + n, 0)
+    var i: u64 = 0
+    var good: bool = true
+    while i < n && good {
+        let had: u64 = otacmd.g8(j + i)
+        var m: u64 = 0
+        i = i + 1
+        while i < n && otacmd.g8(j + i) != 10 && m < 130 {
+            otacmd.p8((&SU_ONAME[0 as usize]) as u64 + m, otacmd.g8(j + i))
+            m = m + 1
+            i = i + 1
+        }
+        otacmd.p8((&SU_ONAME[0 as usize]) as u64 + m, 0)
+        while i < n && otacmd.g8(j + i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+        if had == 76 || had == 78 {
+            var t: u64 = 0
+            while otacmd.g8((&SU_ONAME[0 as usize]) as u64 + t) != 0 && otacmd.g8((&SU_ONAME[0 as usize]) as u64 + t) != 9 {
+                t = t + 1
+            }
+            if otacmd.g8((&SU_ONAME[0 as usize]) as u64 + t) == 9 {
+                otacmd.p8((&SU_ONAME[0 as usize]) as u64 + t, 0)
+                ulib.strcpy((&SU_PA[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
+                ulib.strcpy((&SU_PB[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64 + t + 1)
+                if su_link_ok((&SU_PA[0 as usize]) as u64, (&SU_PB[0 as usize]) as u64) {
+                    if op == 1 {
+                        su_mkparents((&SU_PA[0 as usize]) as u64)
+                        otacmd.remove((&SU_PA[0 as usize]) as u64)
+                        ulib.sys(ulib.SYS_LINK, (&SU_PB[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64, 0)
+                    } else if op == 2 {
+                        otacmd.remove((&SU_PA[0 as usize]) as u64)
+                        if had == 76 {
+                            ulib.sys(ulib.SYS_LINK, (&SU_PB[0 as usize]) as u64, (&SU_PA[0 as usize]) as u64, 0)
+                        }
+                    }
+                }
+            }
+        } else if su_name_ok((&SU_ONAME[0 as usize]) as u64) {
+            su_flat((&SU_PA[0 as usize]) as u64, (&P_SU_NEWD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            su_flat((&SU_PB[0 as usize]) as u64, (&P_SU_OLDD[0 as usize]) as u64,
+                (&SU_ONAME[0 as usize]) as u64)
+            su_dest((&SU_PC[0 as usize]) as u64, (&SU_ONAME[0 as usize]) as u64)
+            let pa: u64 = (&SU_PA[0 as usize]) as u64
+            let pb: u64 = (&SU_PB[0 as usize]) as u64
+            let pc: u64 = (&SU_PC[0 as usize]) as u64
+            if op == 1 {
+                su_mkparents(pc)
+                if had == 49 {
+                    otacmd.remove(pb)
+                    if ulib.bad(ulib.sys(ulib.SYS_RENAME, pc, pb, 0)) {
+                        good = false
+                    }
+                }
+                if good && ulib.bad(ulib.sys(ulib.SYS_RENAME, pa, pc, 0)) {
+                    good = false
+                }
+            } else if op == 2 {
+                if had == 49 {
+                    if su_exists(pb) {
+                        otacmd.remove(pc)
+                        ulib.sys(ulib.SYS_RENAME, pb, pc, 0)
+                    }
+                } else if !su_exists(pa) {
+                    otacmd.remove(pc)
+                }
+                otacmd.remove(pa)
+            } else {
+                otacmd.remove(pb)
+                otacmd.remove(pa)
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return good
+}
+
+fn su_ovl_swap() -> bool {
+    if !su_ovl_journal() {
+        return false
+    }
+    return su_ovl_each(1)
+}
+
+// Put the previous /bin files back (trial lost, install failed, power cut) and forget the journal.
+// Returns true when there was something to restore.
+fn su_ovl_restore() -> bool {
+    if !su_exists((&P_SU_OVL[0 as usize]) as u64) {
+        return false
+    }
+    su_ovl_each(2)
+    otacmd.remove((&P_SU_OVL[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_SU_OVLREST[0 as usize]) as u64)
+    ulib.nl()
+    return true
+}
+
+// The new kernel is promoted: the overlay is final, the backups go.
+fn su_ovl_drop() {
+    if !su_exists((&P_SU_OVL[0 as usize]) as u64) {
+        return
+    }
+    su_ovl_each(3)
+    otacmd.remove((&P_SU_OVL[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_SU_OVLDROP[0 as usize]) as u64)
+    ulib.nl()
+}
+
+// The kernel into slot B: gz alternate when listed. Hash + length of the final file are checked.
+fn su_kernel_get() -> bool {
+    return su_fetch_item((&SU_R_KERNEL2[0 as usize]) as u64, (&otabase.SU_KFILE[0 as usize]) as u64,
+        otabase.su_klen, (&otabase.SU_KHEX[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
+}
+
+// ------------------------------------------------ live apply (UPD-3) + shell restart (UPD-2)
+// Is the kernel the signed list offers byte-identical to the one in slot A (length + SHA-256)?
+fn su_kernel_same() -> bool {
+    if otacmd.size((&P_SU_KA[0 as usize]) as u64) != otabase.su_klen {
+        return false
+    }
+    if !otacmd.hash_file((&P_SU_KA[0 as usize]) as u64, (&otabase.HASH[0 as usize]) as u64) {
+        return false
+    }
+    sha.hex_out((&otabase.HASH[0 as usize]) as u64, 32, (&otabase.HEX[0 as usize]) as u64)
+    return ulib.strneq((&otabase.HEX[0 as usize]) as u64, (&otabase.SU_KHEX[0 as usize]) as u64, 64)
+}
+
+// End every running task whose program name is `nm`; the shell supervisor starts a fresh one from
+// the new file. Returns how many were ended.
+fn su_kill_named(nm: u64) -> u64 {
+    var ended: u64 = 0
+    var i: u64 = 0
+    while i < 128 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+            let n1: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0)
+            if !ulib.bad(n0) {
+                var tn: [u8; 17] = [0 as u8; 17]
+                var k: u64 = 0
+                while k < 8 {
+                    tn[k as usize] = ((n0 >> (k * 8)) & 255) as u8
+                    tn[(k + 8) as usize] = ((n1 >> (k * 8)) & 255) as u8
+                    k = k + 1
+                }
+                if ulib.streq((&tn[0 as usize]) as u64, nm) {
+                    let pid: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+                    if !ulib.bad(ulib.sys(ulib.SYS_KILL, pid, 137, 0)) {
+                        ended = ended + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return ended
+}
+
+// After a live overlay: every swapped file that is a supervised shell program (taskbar, launcher)
+// has its running instance ended. Other programs keep running from the old file (their ELF was
+// copied at start) and the next start takes the new one.
+fn su_ovl_restart_shell() {
+    var k: u64 = 0
+    while su_ovl_line(k) != 0 {
+        var hit: u64 = 0
+        if ulib.streq((&SU_ONAME[0 as usize]) as u64, (&N_SH_TASKBAR[0 as usize]) as u64) {
+            hit = su_kill_named((&N_SH_TASKBAR[0 as usize]) as u64)
+            if hit > 0 {
+                otacmd.sagt((&S_SU_SHREST[0 as usize]) as u64, (&N_SH_TASKBAR[0 as usize]) as u64)
+            }
+        } else if ulib.streq((&SU_ONAME[0 as usize]) as u64, (&N_SH_LAUNCHER[0 as usize]) as u64) {
+            hit = su_kill_named((&N_SH_LAUNCHER[0 as usize]) as u64)
+            if hit > 0 {
+                otacmd.sagt((&S_SU_SHREST[0 as usize]) as u64, (&N_SH_LAUNCHER[0 as usize]) as u64)
+            }
+        }
+        k = k + 1
+    }
+}
+
+// Same kernel: swap the overlay in, restart the changed shell programs, bump the version. No
+// trial, no ESP change, no reboot. A power cut before the journal is dropped leaves the journal
+// without a pending note: the next `ota system confirm` puts the old files back (su_finish).
+fn su_apply_live() -> u64 {
+    su_esp_close()
+    if otabase.su_nfiles > 0 {
+        if !su_ovl_stage() {
+            return 1
+        }
+        otacmd.sagn((&S_SU_OVLN[0 as usize]) as u64, otabase.su_nfiles)
+        if !su_ovl_swap() {
+            su_ovl_restore()
+            return otacmd.err((&E_SU_OVLSW[0 as usize]) as u64, 0)
+        }
+        su_ovl_restart_shell()
+        su_ovl_drop()
+    }
+    otacmd.num9_write((&otabase.P_SU_VER[0 as usize]) as u64, otabase.su_count)
+    otacmd.su_stand_write((&W_SU_APPLIED[0 as usize]) as u64)
+    ulib.say((&S_SU_LIVE[0 as usize]) as u64)
+    ulib.nl()
+    return 0
+}
+
+// The signed trust-root bundle (`sysfile roots`): fetched + hash-checked into /system/new, then
+// handed to `rootsctl apply` (parses every block, keeps only valid roots, atomic replace, .prev
+// stays). Independent of the kernel trial; any failure leaves /etc/ssl/roots.pem untouched.
+fn su_roots_apply() {
+    if otabase.su_rolen == 0 {
+        return
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_SU_NEWD[0 as usize]) as u64, 0, 0)
+    let dst: u64 = (&P_ROOTS_NEW[0 as usize]) as u64
+    otacmd.remove(dst)
+    var good: bool = otacmd.len((&otabase.SU_ROHEX[0 as usize]) as u64) == 64
+        && otacmd.g8((&otabase.SU_ROFILE[0 as usize]) as u64) != 0
+    if good {
+        good = su_fetch_item((&otabase.SU_R_ROOTS[0 as usize]) as u64, (&otabase.SU_ROFILE[0 as usize]) as u64,
+            otabase.su_rolen, (&otabase.SU_ROHEX[0 as usize]) as u64, dst)
+    }
+    if good {
+        otabase.ARGV[0 as usize] = (&P_ROOTSCTL[0 as usize]) as u64
+        otabase.ARGV[1 as usize] = (&A_APPLY[0 as usize]) as u64
+        otabase.ARGV[2 as usize] = dst
+        let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&P_ROOTSCTL[0 as usize]) as u64,
+            (&otabase.ARGV[0 as usize]) as u64, 3)
+        good = !ulib.bad(pid) && ulib.wait_code(pid) == 0
+    }
+    otacmd.remove(dst)
+    if good {
+        ulib.say((&S_SU_ROOTS[0 as usize]) as u64)
+        ulib.nl()
+    } else {
+        otacmd.err((&E_SU_ROOTS[0 as usize]) as u64, 0)
+    }
+}
+
+// ------------------------------------------------ apply
+fn cmd_sys_apply(restart: bool) -> u64 {
+    otabase.last_err[0 as usize] = 0 as u8
+    let r: u64 = sys_apply_steps(restart)
+    if r != 0 && otabase.last_err[0 as usize] != 0 as u8 {
+        otacmd.su_stand_write((&W_SU_FAILW[0 as usize]) as u64)
+    }
+    return r
+}
+
+fn sys_apply_steps(restart: bool) -> u64 {
+    if otacmd.in_erprobung() || su_pending() {
+        return otacmd.err((&E_SU_TRIAL[0 as usize]) as u64, 0)
+    }
+    let r: u64 = otacmd.su_check(true)
+    if r != 0 {
+        return r
+    }
+    if otabase.su_root {
+        ulib.say((&S_SU_ROOTN[0 as usize]) as u64)
+        ulib.nl()
+    }
+    otacmd.su_notes_show()
+    su_roots_apply()
+    if su_running_is((&otabase.SU_COMMIT[0 as usize]) as u64) {
+        return su_apply_live()
+    }
+    if !su_esp_open() {
+        return otacmd.err((&E_SU_ESP[0 as usize]) as u64, 0)
+    }
+    // UPD-3: the offered kernel is the one in slot A already -> overlay only, no restart
+    if su_kernel_same() {
+        return su_apply_live()
+    }
+    // /bin overlay first (small, staged under /system/new; nothing on the system changes yet)
+    if otabase.su_nfiles > 0 {
+        if !su_ovl_stage() {
+            su_esp_close()
+            return 1
+        }
+        otacmd.sagn((&S_SU_OVLN[0 as usize]) as u64, otabase.su_nfiles)
+    }
+    // the kernel goes straight onto the ESP as slot B (hash + length checked)
+    if !su_kernel_get() {
+        otacmd.remove((&P_SU_KB[0 as usize]) as u64)
+        if otabase.su_nfiles > 0 {
+            su_ovl_clean_new()
+        }
+        su_esp_close()
+        return otacmd.err((&E_SU_KGET[0 as usize]) as u64, 0)
+    }
+    // order: pending note, trial counter, THEN the boot menu (the switch last)
+    if !su_pend_write() {
+        otacmd.remove((&P_SU_KB[0 as usize]) as u64)
+        if otabase.su_nfiles > 0 {
+            su_ovl_clean_new()
+        }
+        su_esp_close()
+        return otacmd.err((&E_SU_PENDW[0 as usize]) as u64, 0)
+    }
+    if !su_erp_arm() {
+        otacmd.remove((&P_SU_KB[0 as usize]) as u64)
+        otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
+        if otabase.su_nfiles > 0 {
+            su_ovl_clean_new()
+        }
+        su_esp_close()
+        return otacmd.err((&E_SU_ERP[0 as usize]) as u64, 0)
+    }
+    // swap the overlay in right before the boot menu switch (restored when anything fails)
+    if otabase.su_nfiles > 0 {
+        if !su_ovl_swap() {
+            su_ovl_restore()
+            otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
+            otacmd.remove((&otabase.P_ERP[0 as usize]) as u64)
+            otacmd.remove((&P_SU_KB[0 as usize]) as u64)
+            su_esp_close()
+            return otacmd.err((&E_SU_OVLSW[0 as usize]) as u64, 0)
+        }
+    }
+    if !su_conf_arm() {
+        otacmd.remove((&P_SU_KB[0 as usize]) as u64)
+        su_ovl_restore()
+        otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
+        otacmd.remove((&otabase.P_ERP[0 as usize]) as u64)
+        su_esp_close()
+        return 1
+    }
+    su_esp_close()
+    otacmd.su_stand_write((&W_SU_STAGEDW[0 as usize]) as u64)
+    ulib.say((&S_SU_STAGED[0 as usize]) as u64)
+    ulib.nl()
+    if restart {
+        ulib.say((&S_SU_RESTARTING[0 as usize]) as u64)
+        ulib.nl()
+        if su_bg {
+            su_astate_write((&W_SU_ADONE[0 as usize]) as u64)
+        }
+        ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+        ulib.sleep_ms(500)
+        ulib.sys(otabase.SYS_REBOOT, otabase.RB_RESTART, 0, 0)
+    }
+    return 0
+}
+
+// ------------------------------------------------ confirm / promote
+// Does the running kernel carry the commit `c` (7 hex chars, `/proc/version`)?
+fn su_running_is(c: u64) -> bool {
+    let a: u64 = (&otabase.SYSB[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_PROCVER[0 as usize]) as u64, a, 200)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        return false
+    }
+    otacmd.p8(a + n, 0)
+    let i: u64 = ulib.find(a, (&W_SU_BUILD[0 as usize]) as u64)
+    if i == NOTFOUND {
+        return false
+    }
+    return ulib.strneq(a + i + 7, c, 7)
+}
+
+// 0 = nothing pending, 1 = promoted, 2 = dropped (rolled back / failed)
+fn su_finish() -> u64 {
+    let a: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_PEND[0 as usize]) as u64, a, 300)
+    if n == 0xFFFFFFFFFFFFFFFF || n == 0 {
+        // a journal without a pending note is a half-done apply: put the old files back
+        su_ovl_restore()
+        return 0
+    }
+    otacmd.p8(a + n, 0)
+    var cnt: u64 = 0
+    var com: [u8; 16] = [0 as u8; 16]
+    var shav: [u8; 72] = [0 as u8; 72]
+    let ic: u64 = ulib.find(a, (&W_SU_PN[0 as usize]) as u64)
+    let ik: u64 = ulib.find(a, (&W_SU_PC[0 as usize]) as u64)
+    let is: u64 = ulib.find(a, (&W_SU_PS[0 as usize]) as u64)
+    if ic == NOTFOUND || ik == NOTFOUND || is == NOTFOUND {
+        otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
+        su_ovl_restore()
+        return 2
+    }
+    cnt = ulib.to_num(a + ic + 6)
+    var j: u64 = 0
+    while j < 7 {
+        com[j as usize] = otacmd.g8(a + ik + 7 + j) as u8
+        j = j + 1
+    }
+    j = 0
+    while j < 64 {
+        shav[j as usize] = otacmd.g8(a + is + 4 + j) as u8
+        j = j + 1
+    }
+    var promote: bool = false
+    var flipped: bool = false
+    let running: bool = su_running_is((&com[0 as usize]) as u64)
+    if running && su_esp_open() {
+        // `default_entry` no longer 2 = ab.esp_flip put the loader back on A: trial lost
+        let c: u64 = (&SU_CIN[0 as usize]) as u64
+        let m: u64 = otacmd.file_read((&P_SU_CONF[0 as usize]) as u64, c, 24000)
+        if m != 0xFFFFFFFFFFFFFFFF && m > 0 && m < 24000 {
+            otacmd.p8(c + m, 0)
+            if otacmd.su_find_line(c, m, (&W_SU_DEF2B[0 as usize]) as u64) != 0 {
+                promote = true
+            } else {
+                flipped = true
+            }
+        }
+        if promote {
+            promote = false
+            if otacmd.hash_file((&P_SU_KB[0 as usize]) as u64, (&otabase.HASH[0 as usize]) as u64) {
+                sha.hex_out((&otabase.HASH[0 as usize]) as u64, 32, (&otabase.HEX[0 as usize]) as u64)
+                if ulib.strneq((&otabase.HEX[0 as usize]) as u64, (&shav[0 as usize]) as u64, 64)
+                    && su_copy((&P_SU_KB[0 as usize]) as u64, (&P_SU_KA[0 as usize]) as u64) {
+                    if otacmd.hash_file((&P_SU_KA[0 as usize]) as u64, (&otabase.HASH[0 as usize]) as u64) {
+                        sha.hex_out((&otabase.HASH[0 as usize]) as u64, 32, (&otabase.HEX[0 as usize]) as u64)
+                        if ulib.strneq((&otabase.HEX[0 as usize]) as u64, (&shav[0 as usize]) as u64, 64) {
+                            promote = su_conf_unarm()
+                        }
+                    }
+                }
+            }
+        }
+        su_esp_close()
+    }
+    if promote {
+        otacmd.num9_write((&otabase.P_SU_VER[0 as usize]) as u64, cnt)
+        otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
+        su_ovl_drop()
+        otabase.su_count = cnt
+        otacmd.su_stand_write((&otabase.W_SU_CUR[0 as usize]) as u64)
+        ulib.say((&S_SU_PROMO[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    // The trial is lost when the running kernel is not the new one (the loader
+    // went back to A and A booted) or ab.esp_flip already reset default_entry.
+    // A promotion that only failed halfway (power cut, full ESP) keeps the pending
+    // note: slot B still runs and the next confirm retries.
+    if !running || flipped {
+        otacmd.remove((&P_SU_PEND[0 as usize]) as u64)
+        su_ovl_restore()
+        otacmd.su_stand_write((&W_SU_FAILW[0 as usize]) as u64)
+        ulib.say((&S_SU_FAILED[0 as usize]) as u64)
+        ulib.nl()
+        return 2
+    }
+    return 0
+}
+
+fn su_astate_write(t: u64) {
+    otacmd.file_write((&P_SU_AST[0 as usize]) as u64, t, otacmd.len(t))
+}
+
+fn su_task_alive(pid: u64) -> bool {
+    let me: u64 = ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+    if pid == 0 || pid == me {
+        return false
+    }
+    var i: u64 = 0
+    while i < 128 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 && st != 5 {
+            if ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0) == pid {
+                let n0: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0, 0)
+                let n1: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME1, 0)
+                return n0 == 0x61746f && n1 == 0
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn su_bg_pid() -> u64 {
+    let a: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 19 {
+        return 0
+    }
+    otacmd.p8(a + n, 0)
+    if !otacmd.su_prefix(a, (&W_SU_APID[0 as usize]) as u64) {
+        return 0
+    }
+    var v: u64 = 0
+    var i: u64 = 18
+    while i < n {
+        let ch: u64 = otacmd.g8(a + i)
+        if ch < 48 || ch > 57 {
+            return v
+        }
+        v = v * 10 + (ch - 48)
+        i = i + 1
+    }
+    return v
+}
+
+fn su_bg_marked() -> bool {
+    let a: u64 = (&otabase.SYSB3[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 13 {
+        return false
+    }
+    otacmd.p8(a + n, 0)
+    return otacmd.su_prefix(a, (&W_SU_ARUN[0 as usize]) as u64)
+}
+
+fn su_bg_running() -> bool {
+    if !su_bg_marked() {
+        return false
+    }
+    let pid: u64 = su_bg_pid()
+    if pid == 0 {
+        return true
+    }
+    return su_task_alive(pid)
+}
+
+fn su_astate_write_pid() {
+    var b: [u8; 48] = [0 as u8; 48]
+    ulib.strcat((&b[0 as usize]) as u64, (&W_SU_APID[0 as usize]) as u64)
+    otacmd.num_at((&b[0 as usize]) as u64, ulib.sys(ulib.SYS_GETPID, 0, 0, 0))
+    ulib.strcat((&b[0 as usize]) as u64, (&otabase.W_SU_NL[0 as usize]) as u64)
+    su_astate_write((&b[0 as usize]) as u64)
+}
+
+fn cmd_sys_detached(restart: bool, force: bool) -> u64 {
+    if su_bg_marked() {
+        if su_bg_running() && !force {
+            ulib.say((&S_SU_BGBUSY[0 as usize]) as u64)
+            ulib.nl()
+            return 1
+        }
+        ulib.say((&S_SU_STALE[0 as usize]) as u64)
+        ulib.nl()
+    }
+    su_astate_write((&W_SU_ARUNL[0 as usize]) as u64)
+    let child: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if ulib.bad(child) {
+        su_astate_write((&W_SU_AFAIL[0 as usize]) as u64)
+        return otacmd.err((&E_SU_BGFORK[0 as usize]) as u64, 0)
+    }
+    if child != 0 {
+        ulib.say((&S_SU_BGGO[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    su_astate_write_pid()
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SU_ALOG[0 as usize]) as u64, ulib.O_MAKE, 0)
+    ulib.sys(ulib.SYS_CLOSE, 0, 0, 0)
+    if !ulib.bad(fd) {
+        ulib.sys(ulib.SYS_DUP2, fd, 1, 0)
+        ulib.sys(ulib.SYS_DUP2, fd, 2, 0)
+        ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    }
+    su_bg = true
+    let r: u64 = cmd_sys_apply(restart)
+    if r == 0 {
+        su_astate_write((&W_SU_ADONE[0 as usize]) as u64)
+    } else {
+        su_astate_write((&W_SU_AFAIL[0 as usize]) as u64)
+    }
+    return r
+}
+
+fn su_apply_report() {
+    let a: u64 = (&SYSB2[0 as usize]) as u64
+    let n: u64 = otacmd.file_read((&P_SU_AST[0 as usize]) as u64, a, 60)
+    if n == 0xFFFFFFFFFFFFFFFF || n < 7 {
+        return
+    }
+    otacmd.p8(a + n, 0)
+    ulib.say((&S_SU_ASTATE[0 as usize]) as u64)
+    ulib.say(a + 6)
+    if su_bg_marked() && !su_bg_running() {
+        ulib.say((&S_SU_STALENOTE[0 as usize]) as u64)
+        ulib.nl()
+    }
+    let m: u64 = otacmd.file_read((&P_SU_ALOG[0 as usize]) as u64, a, 900)
+    if m != 0xFFFFFFFFFFFFFFFF && m > 0 {
+        otacmd.p8(a + m, 0)
+        ulib.say((&S_SU_ALOGH[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say(a)
+    }
+}
+
+fn cmd_sys_status() -> u64 {
+    otacmd.sagn((&otabase.S_SU_HERE[0 as usize]) as u64, otacmd.num9_read((&otabase.P_SU_VER[0 as usize]) as u64))
+    let n: u64 = otacmd.file_read((&P_SU_OSVER[0 as usize]) as u64, (&otabase.SYSB[0 as usize]) as u64, 200)
+    if n != 0xFFFFFFFFFFFFFFFF && n > 0 {
+        otacmd.p8((&otabase.SYSB[0 as usize]) as u64 + n, 0)
+        ulib.say((&otabase.SYSB[0 as usize]) as u64)
+    }
+    let m: u64 = otacmd.file_read((&P_SU_PEND[0 as usize]) as u64, (&otabase.SYSB3[0 as usize]) as u64, 300)
+    if m != 0xFFFFFFFFFFFFFFFF && m > 0 {
+        otacmd.p8((&otabase.SYSB3[0 as usize]) as u64 + m, 0)
+        ulib.say((&S_SU_PEND[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&otabase.SYSB3[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_SU_NOPEND[0 as usize]) as u64)
+        ulib.nl()
+    }
+    su_apply_report()
+    return 0
+}
+
+static mut S_ESP_NONE: [u8; 16] = "esp: none found\0"
+
+static mut S_ESP_OK: [u8; 13] = "esp: mounted\0"
+
+static mut S_ESP_CONF: [u8; 24] = "esp: limine.conf bytes \0"
+
+static mut S_ESP_KA: [u8; 21] = "esp: osum.mb sha256 \0"
+
+static mut S_ESP_KB: [u8; 23] = "esp: osum-b.mb sha256 \0"
+
+static mut S_ESP_ABSENT: [u8; 7] = "absent\0"
+
+static mut C_SU_ESP: [u8; 4] = "esp\0"
+
+static mut C_SU_GROW: [u8; 5] = "grow\0"
+
+fn su_esp_hash_line(label: u64, path: u64) {
+    ulib.say(label)
+    if otacmd.hash_file(path, (&otabase.HASH[0 as usize]) as u64) {
+        sha.hex_out((&otabase.HASH[0 as usize]) as u64, 32, (&otabase.HEX[0 as usize]) as u64)
+        ulib.say((&otabase.HEX[0 as usize]) as u64)
+    } else {
+        ulib.say((&S_ESP_ABSENT[0 as usize]) as u64)
+    }
+    ulib.nl()
+}
+
+fn cmd_sys_esp() -> u64 {
+    if !su_esp_open() {
+        ulib.say((&S_ESP_NONE[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&S_ESP_OK[0 as usize]) as u64)
+    ulib.nl()
+    otacmd.sagn((&S_ESP_CONF[0 as usize]) as u64, otacmd.size((&P_SU_CONF[0 as usize]) as u64))
+    su_esp_hash_line((&S_ESP_KA[0 as usize]) as u64, (&P_SU_KA[0 as usize]) as u64)
+    su_esp_hash_line((&S_ESP_KB[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
+    su_esp_close()
+    return 0
+}
+
+fn cmd_sys(args: u64, argc: u64) -> u64 {
+    if argc < 3 {
+        return cmd_sys_status()
+    }
+    let sub: u64 = ulib.arg_at(args, 2)
+    if ulib.streq(sub, (&C_SUCH[0 as usize]) as u64) {
+        return cmd_sys_find()
+    }
+    if ulib.streq(sub, (&C_EIN[0 as usize]) as u64) {
+        var rs: bool = false
+        var bg: bool = false
+        var force: bool = false
+        var k: u64 = 3
+        while k < argc {
+            if ulib.streq(ulib.arg_at(args, k), (&W_SU_RESTART[0 as usize]) as u64) {
+                rs = true
+            }
+            if ulib.streq(ulib.arg_at(args, k), (&W_SU_BG[0 as usize]) as u64) {
+                bg = true
+            }
+            if ulib.streq(ulib.arg_at(args, k), (&W_SU_FORCE[0 as usize]) as u64) {
+                force = true
+            }
+            k = k + 1
+        }
+        if bg {
+            return cmd_sys_detached(rs, force)
+        }
+        return cmd_sys_apply(rs)
+    }
+    if ulib.streq(sub, (&C_SU_ESP[0 as usize]) as u64) {
+        return cmd_sys_esp()
+    }
+    if ulib.streq(sub, (&C_SU_GROW[0 as usize]) as u64) {
+        return otagrow.run(args, argc, 3)
+    }
+    if ulib.streq(sub, (&C_BEST[0 as usize]) as u64) {
+        su_finish()
+        return 0
+    }
+    return cmd_sys_status()
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    if argc < 2 {
+        ulib.say((&S_USE1[0 as usize]) as u64)
+        ulib.nl()
+        ulib.say((&S_USE2[0 as usize]) as u64)
+        ulib.nl()
+        return 0
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    if ulib.streq(cmd, (&C_SU_SYSTEM[0 as usize]) as u64) {
+        return cmd_sys(args, argc)
+    }
+    if ulib.streq(cmd, (&C_HOL[0 as usize]) as u64) && argc >= 4 {
+        return otacmd.cmd_fetch(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    if ulib.streq(cmd, (&C_SHOW[0 as usize]) as u64) {
+        return otacmd.cmd_show()
+    }
+    if ulib.streq(cmd, (&C_SUCH[0 as usize]) as u64) {
+        return otacmd.cmd_find()
+    }
+    if ulib.streq(cmd, (&C_EIN[0 as usize]) as u64) {
+        return otacmd.cmd_einspielen()
+    }
+    if ulib.streq(cmd, (&C_BEST[0 as usize]) as u64) {
+        return cmd_bestaetigen()
+    }
+    if ulib.streq(cmd, (&C_ZUR[0 as usize]) as u64)
+        || ulib.streq(cmd, (&otabase.A_ZUR[0 as usize]) as u64) {
+        return otacmd.cmd_back()
+    }
+    if ulib.streq(cmd, (&C_WACH[0 as usize]) as u64) {
+        var a: u64 = 0
+        if argc >= 3 {
+            a = ulib.arg_at(args, 2)
+        }
+        return otacmd.cmd_wachhund(a)
+    }
+    if ulib.streq(cmd, (&C_DIEN[0 as usize]) as u64) {
+        var rn: u64 = 0
+        if argc >= 3 {
+            rn = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        if argc >= 4 && ulib.streq(ulib.arg_at(args, 3), (&C_SU_SYSTEM[0 as usize]) as u64) {
+            dienst_sys = true
+        }
+        return cmd_dienst(rn)
+    }
+    if ulib.streq(cmd, (&C_BOOT[0 as usize]) as u64) {
+        var extra: u64 = 0
+        if argc >= 3 {
+            extra = ulib.arg_at(args, 2)
+        }
+        return cmd_boot(extra)
+    }
+    if ulib.streq(cmd, (&C_EINS[0 as usize]) as u64) {
+        return otacmd.cmd_settings()
+    }
+    if ulib.streq(cmd, (&C_SET[0 as usize]) as u64) {
+        if argc < 4 {
+            return otacmd.err((&otabase.E_ESCHL[0 as usize]) as u64, 0)
+        }
+        return otacmd.cmd_einstellen(ulib.arg_at(args, 2), ulib.arg_at(args, 3))
+    }
+    ulib.say((&S_USE1[0 as usize]) as u64)
+    ulib.nl()
+    return 1
+}

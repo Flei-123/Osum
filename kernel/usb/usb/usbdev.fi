@@ -1,0 +1,2010 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import usbnet.ax88772_drv
+import drv.bt.btusb
+import usbnet.ch397
+import drv.usb.chdiag
+import drv.hid.hidin
+import drv.hid.hidmode
+import drv.hid.hidrep
+import touchev.inmode
+import drv.hid.inreg
+import lib.kstate
+import usbnet.ncm
+import touchev.quirk
+import usbnet.rndis
+import serial
+import wlan.usbchip
+import drv.usb.usbdiag
+import drv.net.usbnet
+import drv.usb.xhci
+import usb.usb.usbbase
+
+const REPORT_OFF: u64 = 0x56200
+
+const S_PKT: u64 = 0xD0
+
+const D_INTLEN: u64 = 104
+
+const D_PREV: u64 = 120
+
+const D_RDLEN: u64 = 176
+
+const D_ROHW: u64 = 296
+
+const D_ROHN: u64 = 304
+
+const S_CHDEV: u64 = 0x1B8 // device index + 1 of the WCH dongle (0 = none)
+
+const S_CHSTEP: u64 = 0x1C8 // bring-up step reached | result << 8 (1 ok, 2 failed)
+
+const S_ISOA: u64 = 0x1F8 // dci | iface << 8 | alt << 16 | binterval << 24 | wMaxPacketSize << 32 (0 = none found)
+
+const ISO_BUF_OFF: u64 = 0x56A00 // 8 packet buffers of 192 bytes (48 kHz, 16 bit, stereo, 1 ms)
+
+const ISO_BUFS: u64 = 8
+
+const ISO_PKT: u64 = 192
+
+const ISO_TDS: u64 = 200
+
+const CLS_CDC: u64 = 2
+
+const D_MACSTR: u64 = 360 // ECM: string index of the MAC address
+
+const D_DATAIF: u64 = 368 // ECM: number of the data interface (union descriptor)
+
+const D_DATAALT: u64 = 376 // ECM: alternate setting that carries the bulk pipes
+
+const CLS_HID: u64 = 3
+
+const CLS_MSC: u64 = 8
+
+const CLS_HUB: u64 = 9
+
+fn g(state: u64, off: u64) -> u64 {
+    return kstate.get(state + usbbase.USCAL_OFF, off)
+}
+
+fn s(state: u64, off: u64, v: u64) {
+    kstate.set(state + usbbase.USCAL_OFF, off, v)
+}
+
+fn dev_at(state: u64, i: u64) -> u64 {
+    return state + usbbase.UDEV_OFF + i * usbbase.DEV_BYTES
+}
+
+fn dg(state: u64, i: u64, f: u64) -> u64 {
+    return __mmio_read64((dev_at(state, i) + f) as *mut u64)
+}
+
+fn ds(state: u64, i: u64, f: u64, v: u64) {
+    __mmio_write64((dev_at(state, i) + f) as *mut u64, v)
+}
+
+fn ready(state: u64) -> bool {
+    return g(state, usbbase.S_READY) != 0
+}
+
+fn count(state: u64) -> u64 {
+    return g(state, usbbase.S_NDEV)
+}
+
+fn keys(state: u64) -> u64 {
+    return g(state, usbbase.S_KEYS)
+}
+
+fn reports(state: u64) -> u64 {
+    return g(state, usbbase.S_REPORTS)
+}
+
+fn enums(state: u64) -> u64 {
+    return g(state, usbbase.S_ENUMS)
+}
+
+fn hotplugs(state: u64) -> u64 {
+    return g(state, usbbase.S_HOTPLUGS)
+}
+
+fn unplugs(state: u64) -> u64 {
+    return g(state, usbbase.S_UNPLUGS)
+}
+
+fn have_kbd(state: u64) -> bool {
+    return g(state, usbbase.S_KBD) != 0
+}
+
+fn have_mouse(state: u64) -> bool {
+    return g(state, usbbase.S_MOUSE) != 0
+}
+
+fn msc_errors(state: u64) -> u64 {
+    return g(state, usbbase.S_MSCERR)
+}
+
+fn msc_ios(state: u64) -> u64 {
+    return g(state, usbbase.S_MSCIO)
+}
+
+fn msc_gen(state: u64) -> u64 {
+    return g(state, usbbase.S_MSCGEN)
+}
+
+fn msc_gone(state: u64) -> u64 {
+    return g(state, usbbase.S_MSCWEG)
+}
+
+fn b8(p: u64, i: u64) -> u64 {
+    return kstate.get8(p + i)
+}
+
+fn b16(p: u64, i: u64) -> u64 {
+    return b8(p, i) | (b8(p, i + 1) << 8)
+}
+
+fn wr32(at: u64, v: u64) {
+    __mmio_write32(at as *mut u32, (v & 0xFFFFFFFF) as u32)
+}
+
+fn zero(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n / 8 {
+        __mmio_write64((p + i * 8) as *mut u64, 0)
+        i = i + 1
+    }
+}
+
+fn yes(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn usbdiag_snap_all(state: u64, h: u64, kind: u64) {
+    let n: u64 = xhci.ports(state)
+    var p: u64 = 1
+    while p <= n && p <= usbdiag.MAX_PORT {
+        usbdiag.snap(h, kind, p, xhci.portsc(state, p))
+        p = p + 1
+    }
+}
+
+fn usbdiag_open(state: u64, h: u64) {
+    usbdiag.set_info(h, usbdiag.I_STATE, 1)
+    usbdiag.set_info(h, usbdiag.I_PORTS, xhci.ports(state))
+    usbdiag.set_info(h, usbdiag.I_SLOTS, xhci.slots(state))
+    usbdiag.set_info(h, usbdiag.I_BDF, xhci.bdf(state))
+    var p: u64 = 1
+    while p <= xhci.ports(state) && p <= usbdiag.MAX_PORT {
+        usbdiag.set_proto(h, p, xhci.port_major(state, p))
+        p = p + 1
+    }
+    usbdiag_snap_all(state, h, usbdiag.SNAP_PRE)
+}
+
+fn usbdiag_close(state: u64, h: u64) {
+    usbdiag_snap_all(state, h, usbdiag.SNAP_FINAL)
+    usbdiag.set_info(h, usbdiag.I_STS, xhci.usbsts_raw(state))
+    usbdiag.set_info(h, usbdiag.I_CMDS, xhci.cmds(state))
+    usbdiag.set_info(h, usbdiag.I_EVENTS, xhci.events(state))
+    usbdiag.set_info(h, usbdiag.I_ERRORS, xhci.errors(state))
+    usbdiag.set_info(h, usbdiag.I_NDEV, g(state, usbbase.S_NDEV))
+    usbdiag.set_info(h, usbdiag.I_RESETFAIL, xhci.reset_fails(state))
+    var pend: u64 = 0
+    var p: u64 = 1
+    while p <= xhci.ports(state) {
+        if xhci.port_link_pending(state, p) {
+            pend = pend + 1
+        }
+        p = p + 1
+    }
+    usbdiag.set_info(h, usbdiag.I_PENDING, pend)
+}
+
+fn tr(state: u64, step: u64, v: u64) {
+    usbdiag.step(step, v)
+    if !kstate.mode_on(state, kstate.M_USBTRACE) {
+        return
+    }
+    var t_hd: [u8; 9] = "usb: t \0\0"
+    serial.puts((&t_hd[0]) as u64)
+    serial.dec(step)
+    serial.put(32 as u8)
+    serial.dec(v)
+    serial.nl()
+}
+
+// Diagnostic line for one input device: "usb: t probe <dev> st=<ep state> deq=<ctrl ring pos> enq=<our pos> ps=<portsc>".
+static mut probe_n: u64 = 0
+
+fn probe(state: u64) {
+    if probe_n >= 12 || !kstate.mode_on(state, kstate.M_USBTRACE) {
+        return
+    }
+    probe_n = probe_n + 1
+    var t_p: [u8; 14] = "usb: t probe \0"
+    var t_s: [u8; 5] = " st=\0"
+    var t_d: [u8; 6] = " deq=\0"
+    var t_e: [u8; 6] = " seq=\0"
+    var t_c: [u8; 5] = " ps=\0"
+    var t_x: [u8; 6] = " sts=\0"
+    if g(state, usbbase.S_READY) == 0 {
+        return
+    }
+    var d: u64 = 0
+    while d < 2 {
+        let slot: u64 = dg(state, d, usbbase.D_SLOT)
+        let dci: u64 = dg(state, d, usbbase.D_INTDCI)
+        if slot != 0 && dci != 0 {
+            let i: u64 = xhci.ep_find(state, slot, dci)
+            serial.puts((&t_p[0]) as u64)
+            serial.dec(d)
+            serial.puts((&t_s[0]) as u64)
+            serial.dec(xhci.ep_state(state, slot, dci))
+            serial.puts((&t_d[0]) as u64)
+            let dq: u64 = xhci.ep_deq(state, slot, dci) & 0xFFFFFFFE
+            let rg: u64 = xhci.ep_ring(state, i)
+            if dq >= rg {
+                serial.dec(dq - rg)
+            } else {
+                serial.dec(99999)
+            }
+            serial.puts((&t_e[0]) as u64)
+            serial.dec(xhci.ep_seq(state, i))
+            serial.puts((&t_c[0]) as u64)
+            serial.dec(xhci.portsc(state, dg(state, d, usbbase.D_PORT)))
+            serial.puts((&t_x[0]) as u64)
+            serial.dec(xhci.usbsts(state))
+            serial.nl()
+        }
+        d = d + 1
+    }
+}
+
+// Word `usbstall`: send one control request the device must STALL (unknown standard request 0x7E), report whether endpoint 0 is
+// left Halted, then send a valid request (SET_IDLE). A driver without the Halted recovery times out on the second one.
+// Line: `usb: stalltest r1=<100+rc> halted=<0|1> r2=<100+rc>` -- good = r1 below 100, halted=0, r2 >= 100.
+fn stall_test(state: u64) {
+    var t_a: [u8; 19] = "usb: stalltest r1=\0"
+    var t_b: [u8; 9] = " halted=\0"
+    var t_c: [u8; 5] = " r2=\0"
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        if dg(state, d, usbbase.D_USED) != 0 && dg(state, d, usbbase.D_SLOT) != 0 {
+            let slot: u64 = dg(state, d, usbbase.D_SLOT)
+            let r1: i64 = xhci.control(state, slot, 0x00, 0x7E, 0, 0, 0, 0, false)
+            var h: u64 = 0
+            if xhci.ep_halted(state, slot, 1) {
+                h = 1
+            }
+            let r2: i64 = xhci.control(state, slot, 0x21, 0x0A, 0, dg(state, d, usbbase.D_IFACE), 0, 0, false)
+            serial.puts((&t_a[0]) as u64)
+            serial.dec((r1 + 100) as u64)
+            serial.puts((&t_b[0]) as u64)
+            serial.dec(h)
+            serial.puts((&t_c[0]) as u64)
+            serial.dec((r2 + 100) as u64)
+            serial.nl()
+            return
+        }
+        d = d + 1
+    }
+}
+
+fn mark(state: u64, p: u64) {
+    s(state, usbbase.S_ATTACHED, g(state, usbbase.S_ATTACHED) | (1 << (p & 63)))
+}
+
+fn unmark(state: u64, p: u64) {
+    s(state, usbbase.S_ATTACHED, g(state, usbbase.S_ATTACHED) & (~(1 << (p & 63))))
+}
+
+fn was_there(state: u64, p: u64) -> bool {
+    return (g(state, usbbase.S_ATTACHED) & (1 << (p & 63))) != 0
+}
+
+fn alloc_dev(state: u64) -> u64 {
+    var i: u64 = 0
+    while i < usbbase.MAX_DEV {
+        if dg(state, i, usbbase.D_USED) == 0 {
+            zero(dev_at(state, i), usbbase.DEV_BYTES)
+            ds(state, i, usbbase.D_USED, 1)
+            return i
+        }
+        i = i + 1
+    }
+    s(state, usbbase.S_NOPLATZ, g(state, usbbase.S_NOPLATZ) + 1)
+    return usbbase.MAX_DEV
+}
+
+fn mps0_of(speed: u64) -> u64 {
+    if speed == 3 {
+        return 64 // hohe Geschwindigkeit
+    }
+    if speed >= 4 {
+        return 512 // Super und darueber
+    }
+    return 8
+}
+
+static mut q_usb: [u8; 4] = "usb\0"
+
+fn lq() -> u64 {
+    return (&q_usb[0]) as u64
+}
+
+fn slot_owned(state: u64, slot: u64) -> bool {
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        if dg(state, d, usbbase.D_USED) != 0 && dg(state, d, usbbase.D_SLOT) == slot {
+            return true
+        }
+        d = d + 1
+    }
+    return false
+}
+
+fn net_reclaim(state: u64) {
+    let owner: u64 = usbnet.owner_slot(state)
+    if owner != 0 && !slot_owned(state, owner) {
+        usbnet.unplug_slot(state, owner)
+    }
+}
+
+//     usb: ... id=0bda:8812 cls=ff:ff:ff drv=none
+//     wifi-usb: Realtek RTL8812AU (0bda:8812), kein Treiber
+fn wlan_report(vid: u64, pid: u64) {
+    if !usbchip.ist_wlan_stick(vid, pid) {
+        return
+    }
+    var s_w: [u8; 11] = "wifi-usb: \0"
+    var s_k: [u8; 16] = "), kein Treiber\0"
+    var name: [u8; 32] = [0; 32]
+    usbchip.name_get(vid, pid, (&name[0]) as u64)
+    serial.puts((&s_w[0]) as u64)
+    serial.puts((&name[0]) as u64)
+    serial.put(32 as u8)
+    serial.put(40 as u8)
+    hex4(vid)
+    serial.put(58 as u8)
+    hex4(pid)
+    serial.puts((&s_k[0]) as u64)
+    serial.nl()
+}
+
+fn points(state: u64) -> u64 {
+    var p: u64 = 0
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        if dg(state, d, usbbase.D_USED) != 0 {
+            let k: u64 = dg(state, d, usbbase.D_DRIVER)
+            let boot: bool = dg(state, d, usbbase.D_SUB) == 1
+                && (dg(state, d, usbbase.D_PROTO) == 1 || dg(state, d, usbbase.D_PROTO) == 2)
+            if k == usbbase.DRV_KBD || k == usbbase.DRV_MOUSE {
+                if boot {
+                    p = p + 8
+                } else {
+                    p = p + 3
+                }
+            } else if k == usbbase.DRV_HIDGEN {
+                p = p + 1
+            } else if k == usbbase.DRV_CH336 || k == usbbase.DRV_ECM || k == usbbase.DRV_NCM || k == usbbase.DRV_RNDIS || k == usbbase.DRV_AX88772
+                || k == usbbase.DRV_AX88179 || k == usbbase.DRV_RTL8153 {
+                p = p + 2
+            }
+        }
+        d = d + 1
+    }
+    return p
+}
+
+fn pkt_get(state: u64, u: u64) -> u64 {
+    if u >= usbbase.MAX_HC_PKT {
+        return 0
+    }
+    return g(state, S_PKT + u * 8)
+}
+
+fn pkt_set(state: u64, u: u64, v: u64) {
+    if u < usbbase.MAX_HC_PKT {
+        s(state, S_PKT + u * 8, v)
+    }
+}
+
+fn choice(state: u64) -> u64 {
+    return g(state, usbbase.S_CHOICE)
+}
+
+fn hex2(v: u64) {
+    var i: u64 = 2
+    while i > 0 {
+        i = i - 1
+        let x: u64 = (v >> (i * 4)) & 15
+        if x < 10 {
+            serial.put((48 + x) as u8)
+        } else {
+            serial.put((87 + x) as u8)
+        }
+    }
+}
+
+fn hex4(v: u64) {
+    hex2(v >> 8)
+    hex2(v & 0xFF)
+}
+
+fn drv_name(k: u64) {
+    var s_k: [u8; 4] = "kbd\0"
+    var s_m: [u8; 6] = "mouse\0"
+    var s_s: [u8; 4] = "msc\0"
+    var s_n: [u8; 5] = "none\0"
+    var s_g: [u8; 7] = "hidgen\0"
+    var s_h: [u8; 4] = "hub\0"
+    var s_e: [u8; 4] = "ecm\0"
+    var s_r: [u8; 6] = "rndis\0"
+    var s_i: [u8; 5] = "isoc\0"
+    var s_c: [u8; 4] = "ncm\0"
+    var s_w: [u8; 6] = "ch336\0"
+    var s_bt: [u8; 6] = "btusb\0"
+    var s_ax: [u8; 8] = "ax88772\0"
+    var s_a9: [u8; 8] = "ax88179\0"
+    var s_rt: [u8; 8] = "rtl8153\0"
+    if k == usbbase.DRV_AX88179 {
+        serial.puts((&s_a9[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_BT {
+        serial.puts((&s_bt[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_RTL8153 {
+        serial.puts((&s_rt[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_CH336 {
+        serial.puts((&s_w[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_AX88772 {
+        serial.puts((&s_ax[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_ISOTEST {
+        serial.puts((&s_i[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_NCM {
+        serial.puts((&s_c[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_ECM {
+        serial.puts((&s_e[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_RNDIS {
+        serial.puts((&s_r[0]) as u64)
+        return
+    }
+    if k == usbbase.DRV_KBD {
+        serial.puts((&s_k[0]) as u64)
+    } else if k == usbbase.DRV_MOUSE {
+        serial.puts((&s_m[0]) as u64)
+    } else if k == usbbase.DRV_MSC {
+        serial.puts((&s_s[0]) as u64)
+    } else if k == usbbase.DRV_HIDGEN {
+        serial.puts((&s_g[0]) as u64)
+    } else if k == usbbase.DRV_HUB {
+        serial.puts((&s_h[0]) as u64)
+    } else {
+        serial.puts((&s_n[0]) as u64)
+    }
+}
+
+fn address(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let dc: u64 = xhci.devctx(state, slot)
+    zero(dc, 1024)
+    xhci.dcbaa_set(state, slot, dc)
+    let ep0: u64 = xhci.ep_open(state, slot, 1)
+    if ep0 >= xhci.MAX_EP {
+        return false
+    }
+    build_slot(state, d, 1)
+    build_ep0(state, d, ep0)
+    let ic: u64 = xhci.in_control(state)
+    wr32(ic, 0) // nichts fallen lassen
+    wr32(ic + 4, 3) // Steckplatz und Endpunkt 0 aufnehmen
+    if xhci.address_device(state, slot, false) != xhci.CC_SUCCESS {
+        return false
+    }
+    return true
+}
+
+fn build_slot(state: u64, d: u64, entries: u64) {
+    let sc: u64 = xhci.in_slot(state)
+    zero(sc, xhci.ctx_size(state))
+    var dw0: u64 = (dg(state, d, usbbase.D_ROUTE) & 0xFFFFF)
+        | (dg(state, d, usbbase.D_SPEED) << 20) | (entries << 27)
+    if dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
+        dw0 = dw0 | (1 << 26)
+    }
+    var dw1: u64 = (dg(state, d, usbbase.D_PORT) & 0xFF) << 16
+    if dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
+        dw1 = dw1 | ((dg(state, d, usbbase.D_PORTS) & 0xFF) << 24)
+    }
+    let dw2: u64 = (dg(state, d, usbbase.D_TTSLOT) & 0xFF)
+        | ((dg(state, d, usbbase.D_TTPORT) & 0xFF) << 8)
+    wr32(sc, dw0)
+    wr32(sc + 4, dw1)
+    wr32(sc + 8, dw2)
+    wr32(sc + 12, 0)
+}
+
+fn build_ep0(state: u64, d: u64, i: u64) {
+    let ec: u64 = xhci.in_ep(state, 1)
+    zero(ec, xhci.ctx_size(state))
+    wr32(ec, 0)
+    wr32(ec + 4, (3 << 1) | (4 << 3) | (dg(state, d, usbbase.D_MPS0) << 16))
+    __mmio_write64((ec + 8) as *mut u64, xhci.ep_ring(state, i) | 1)
+    wr32(ec + 16, 8)
+}
+
+const CH_INT_OPEN: u64 = 0x100000000
+
+const CH_INT_FAILED: u64 = 0x200000000
+
+fn ch_int_info(state: u64) -> u64 {
+    let v: u64 = g(state, usbbase.S_CHINT)
+    if (v & CH_INT_OPEN) == 0 {
+        return 0
+    }
+    return v & 0xFFFFFFFF
+}
+
+fn ch_int_wanted(state: u64, d: u64) -> bool {
+    if dg(state, d, usbbase.D_DRIVER) != usbbase.DRV_CH336 || kstate.mode_on(state, kstate.M_NOCHINTR) {
+        return false
+    }
+    let v: u64 = g(state, usbbase.S_CHINT)
+    if (v & CH_INT_FAILED) != 0 {
+        return false
+    }
+    return (v & 255) != 0 && ((v >> 8) & 0xFFFF) != 0
+}
+
+const CH_ALT_SCAN: u64 = 0x10000
+
+const CH_SETIF_SENT: u64 = 0x20000
+
+const CH_SETIF_FAIL: u64 = 0x40000
+
+const ALT_ANY_VENDOR: u64 = 0x100
+
+fn alt_group_ok(mask: u64, cls: u64, iface: u64, want: u64) -> bool {
+    if mask != 3 {
+        return false
+    }
+    if want == ALT_ANY_VENDOR {
+        return cls == 0xFF
+    }
+    return iface == want
+}
+
+fn alt_find(buf: u64, total: u64, want: u64) -> u64 {
+    var at: u64 = 0
+    var mask: u64 = 0
+    var iface: u64 = 0
+    var alt: u64 = 0
+    var cls: u64 = 0
+    var have: bool = false
+    var found: u64 = 0
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                if have && found == 0 && alt_group_ok(mask, cls, iface, want) {
+                    found = iface | (alt << 8) | CH_ALT_SCAN
+                }
+                have = true
+                mask = 0
+                iface = b8(buf, at + 2)
+                alt = b8(buf, at + 3)
+                cls = b8(buf, at + 5)
+            } else if kind == 5 && len >= 7 && have {
+                if (b8(buf, at + 3) & 3) == 2 {
+                    if (b8(buf, at + 2) & 0x80) != 0 {
+                        mask = mask | 1
+                    } else {
+                        mask = mask | 2
+                    }
+                }
+            }
+            at = at + len
+        }
+    }
+    if have && found == 0 && alt_group_ok(mask, cls, iface, want) {
+        found = iface | (alt << 8) | CH_ALT_SCAN
+    }
+    return found
+}
+
+fn alt_take(state: u64, d: u64, buf: u64, total: u64, iface: u64, alt: u64) {
+    ds(state, d, usbbase.D_INTDCI, 0)
+    ds(state, d, usbbase.D_INDCI, 0)
+    ds(state, d, usbbase.D_OUTDCI, 0)
+    var at: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                mine = b8(buf, at + 2) == iface && b8(buf, at + 3) == alt
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+fn ch_alt(state: u64, d: u64, buf: u64, total: u64) {
+    s(state, usbbase.S_CHSET, 0)
+    ds(state, d, D_DATAALT, 0)
+    if kstate.mode_on(state, kstate.M_NOCHALT) {
+        return
+    }
+    if dg(state, d, usbbase.D_INDCI) != 0 && dg(state, d, usbbase.D_OUTDCI) != 0 {
+        return
+    }
+    var found: u64 = alt_find(buf, total, dg(state, d, usbbase.D_IFACE))
+    if found == 0 {
+        found = alt_find(buf, total, ALT_ANY_VENDOR)
+    }
+    if found == 0 {
+        return
+    }
+    let iface: u64 = found & 0xFF
+    let alt: u64 = (found >> 8) & 0xFF
+    alt_take(state, d, buf, total, iface, alt)
+    ds(state, d, usbbase.D_IFACE, iface)
+    ds(state, d, D_DATAALT, alt)
+    s(state, usbbase.S_CHSET, CH_ALT_SCAN | (alt << 8))
+}
+
+fn ch_set_interface(state: u64, d: u64, slot: u64) {
+    if kstate.mode_on(state, kstate.M_NOSETIF) {
+        return
+    }
+    let rc: i64 = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+        dg(state, d, usbbase.D_IFACE), 0, 0, false)
+    var v: u64 = g(state, usbbase.S_CHSET) | CH_SETIF_SENT
+    if rc < 0 {
+        v = v | CH_SETIF_FAIL | (((0 - rc) as u64 & 0xFF) << 24)
+    }
+    s(state, usbbase.S_CHSET, v)
+    xhci.udelay(state, 10000)
+}
+
+const CK_PRESENT: u64 = 0
+
+const CK_VID: u64 = 1
+
+const CK_PID: u64 = 2
+
+const CK_SPEED: u64 = 3
+
+const CK_ROUTE: u64 = 4
+
+const CK_NCFG: u64 = 5
+
+const CK_CFG: u64 = 6
+
+const CK_RC: u64 = 7
+
+const CK_CLASS: u64 = 8
+
+const CK_SUB: u64 = 9
+
+const CK_PROTO: u64 = 10
+
+const CK_IFACE: u64 = 11
+
+const CK_INDCI: u64 = 12
+
+const CK_OUTDCI: u64 = 13
+
+const CK_INT: u64 = 14
+
+const CK_BULKMPS: u64 = 15
+
+const CK_STEP: u64 = 16
+
+const CK_RESULT: u64 = 17
+
+const CK_SET: u64 = 18
+
+const CK_ALT: u64 = 19
+
+const CK_ALTSCAN: u64 = 20
+
+const CK_SETIF: u64 = 21
+
+const CK_LIVE: u64 = 22
+
+fn ch_diag(state: u64, key: u64) -> u64 {
+    let dv: u64 = g(state, S_CHDEV)
+    if key == CK_PRESENT { return dv }
+    if dv == 0 { return 0 }
+    let d: u64 = dv - 1
+    if key == CK_VID { return dg(state, d, usbbase.D_VID) }
+    if key == CK_PID { return dg(state, d, usbbase.D_PID) }
+    if key == CK_SPEED { return dg(state, d, usbbase.D_SPEED) }
+    if key == CK_ROUTE { return dg(state, d, usbbase.D_ROUTE) }
+    if key == CK_NCFG { return dg(state, d, usbbase.D_NCFG) }
+    if key == CK_CFG { return dg(state, d, usbbase.D_CONFIG) }
+    if key == CK_RC { return g(state, usbbase.S_CHRC) }
+    if key == CK_CLASS { return dg(state, d, usbbase.D_CLASS) }
+    if key == CK_SUB { return dg(state, d, usbbase.D_SUB) }
+    if key == CK_PROTO { return dg(state, d, usbbase.D_PROTO) }
+    if key == CK_IFACE { return dg(state, d, usbbase.D_IFACE) }
+    if key == CK_INDCI { return dg(state, d, usbbase.D_INDCI) }
+    if key == CK_OUTDCI { return dg(state, d, usbbase.D_OUTDCI) }
+    if key == CK_INT { return g(state, usbbase.S_CHINT) }
+    if key == CK_BULKMPS { return dg(state, d, usbbase.D_BULKMPS) }
+    if key == CK_STEP { return g(state, S_CHSTEP) & 255 }
+    if key == CK_RESULT { return (g(state, S_CHSTEP) >> 8) & 255 }
+    if key == CK_SET { return g(state, usbbase.S_CHSET) & 1 }
+    if key == CK_ALT { return dg(state, d, D_DATAALT) }
+    if key == CK_ALTSCAN { return (g(state, usbbase.S_CHSET) >> 16) & 1 }
+    if key == CK_LIVE {
+        if dg(state, d, usbbase.D_USED) != 0 && dg(state, d, usbbase.D_VID) != 0 { return 1 }
+        return 2
+    }
+    if key == CK_SETIF {
+        let v: u64 = g(state, usbbase.S_CHSET)
+        if (v & CH_SETIF_SENT) == 0 { return 0 }
+        if (v & CH_SETIF_FAIL) == 0 { return 1 }
+        return 2 + ((v >> 24) & 0xFF)
+    }
+    return 0
+}
+
+// ======================================================= RUNDE HIDWEG
+//
+// WELCHE SCHNITTSTELLE EINES GERAETS GENOMMEN WIRD.
+fn iface_rang(state: u64, cls: u64, sub: u64, pro: u64) -> u64 {
+    if !wanted(state, cls, sub, pro) {
+        return 0
+    }
+    if cls == CLS_HUB {
+        return 5
+    }
+    if cls == CLS_HID && sub == 1 && pro == 1 {
+        return 4
+    }
+    if cls == CLS_HID && sub == 1 && pro == 2 {
+        return 3
+    }
+    if cls == CLS_MSC {
+        return 2
+    }
+    return 1
+}
+
+fn best_rang(state: u64, buf: u64, total: u64) -> u64 {
+    var at: u64 = 0
+    var best: u64 = 0
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        // TOCTOU audit F-05: a descriptor must lie inside the buffer (bLength is chosen by the device)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if b8(buf, at + 1) == 4 && len >= 9 && b8(buf, at + 3) == 0 {
+                let r: u64 = iface_rang(state, b8(buf, at + 5),
+                    b8(buf, at + 6), b8(buf, at + 7))
+                if r > best {
+                    best = r
+                }
+            }
+            at = at + len
+        }
+    }
+    return best
+}
+
+fn rangtest(state: u64) -> u64 {
+    let buf: u64 = state + usbbase.DESC_OFF
+    zero(buf, 64)
+    var i: u64 = 0
+    var q: [u8; 59] = [
+        9 as u8, 2 as u8, 59 as u8, 0 as u8, 2 as u8, 1 as u8, 0 as u8,
+        0x80 as u8, 50 as u8,
+        // Schnittstelle 0: HID, kein Boot-Protokoll
+        9 as u8, 4 as u8, 0 as u8, 0 as u8, 1 as u8, 3 as u8, 0 as u8,
+        0 as u8, 0 as u8,
+        9 as u8, 0x21 as u8, 0x11 as u8, 1 as u8, 0 as u8, 1 as u8,
+        0x22 as u8, 52 as u8, 0 as u8,
+        7 as u8, 5 as u8, 0x81 as u8, 3 as u8, 8 as u8, 0 as u8, 10 as u8,
+        // Schnittstelle 1: die Boot-Tastatur
+        9 as u8, 4 as u8, 1 as u8, 0 as u8, 1 as u8, 3 as u8, 1 as u8,
+        1 as u8, 0 as u8,
+        9 as u8, 0x21 as u8, 0x11 as u8, 1 as u8, 0 as u8, 1 as u8,
+        0x22 as u8, 63 as u8, 0 as u8,
+        7 as u8, 5 as u8, 0x82 as u8, 3 as u8, 8 as u8, 0 as u8, 10 as u8
+    ]
+    while i < 59 {
+        __mmio_write8((buf + i) as *mut u8, q[i as usize])
+        i = i + 1
+    }
+    var n: u64 = 0
+    if best_rang(state, buf, 59) == 4 {
+        n = n + 1
+    }
+    if iface_rang(state, CLS_HID, 1, 2) == 3 {
+        n = n + 1
+    }
+    if iface_rang(state, CLS_MSC, 6, 0x50) == 2 {
+        n = n + 1
+    }
+    zero(state + usbbase.UDEV_OFF, usbbase.DEV_BYTES)
+    parse(state, 0, buf, 59)
+    if dg(state, 0, usbbase.D_IFACE) == 1 {
+        n = n + 1
+    }
+    if dg(state, 0, D_RDLEN) == 63 && dg(state, 0, usbbase.D_PROTO) == 1 {
+        n = n + 1
+    }
+    if dg(state, 0, usbbase.D_INTDCI) == 5 {
+        n = n + 1
+    }
+    zero(state + usbbase.UDEV_OFF, usbbase.DEV_BYTES)
+    return n
+}
+
+fn rangtest_max() -> u64 {
+    return 6
+}
+
+fn parse(state: u64, d: u64, buf: u64, total: u64) {
+    var at: u64 = 0
+    var mine: bool = false
+    var picked: bool = false
+    let target: u64 = best_rang(state, buf, total)
+    if target == 0 {
+        return
+    }
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        // TOCTOU audit F-05: a descriptor must lie inside the buffer (bLength is chosen by the device)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                mine = false
+                if !picked && b8(buf, at + 3) == 0 {
+                    let cls: u64 = b8(buf, at + 5)
+                    let sub: u64 = b8(buf, at + 6)
+                    let pro: u64 = b8(buf, at + 7)
+                    if iface_rang(state, cls, sub, pro) == target {
+                        ds(state, d, usbbase.D_CLASS, cls)
+                        ds(state, d, usbbase.D_SUB, sub)
+                        ds(state, d, usbbase.D_PROTO, pro)
+                        ds(state, d, usbbase.D_IFACE, b8(buf, at + 2))
+                        ds(state, d, usbbase.D_DRIVER, driver_for(cls, sub, pro))
+                        mine = true
+                        picked = true
+                    }
+                }
+            } else if kind == 0x21 && len >= 9 && mine {
+                var k: u64 = 0
+                let nd: u64 = b8(buf, at + 5)
+                while k < nd && 6 + k * 3 + 2 < len {
+                    if b8(buf, at + 6 + k * 3) == 0x22 {
+                        ds(state, d, D_RDLEN, b16(buf, at + 7 + k * 3))
+                        k = nd
+                    } else {
+                        k = k + 1
+                    }
+                }
+            } else if kind == 0x24 && len >= 4 && mine {
+                // CDC functional descriptors of the ECM control interface:
+                // 0x06 union (slave interface = data interface), 0x0F
+                // ethernet networking (MAC address string index).
+                let sub: u64 = b8(buf, at + 2)
+                if sub == 6 && len >= 5 {
+                    ds(state, d, D_DATAIF, b8(buf, at + 4))
+                }
+                if sub == 0x0F && len >= 13 {
+                    ds(state, d, D_MACSTR, b8(buf, at + 3))
+                }
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+// ECM: the bulk pipes live in an ALTERNATE setting (>= 1) of the data
+// interface, which `parse` skips. Find it, take its endpoints, and forget the
+// notification endpoint of the control interface (not used by the driver).
+fn ecm_data(state: u64, d: u64, buf: u64, total: u64) {
+    ds(state, d, usbbase.D_INTDCI, 0)
+    ds(state, d, usbbase.D_INDCI, 0)
+    ds(state, d, usbbase.D_OUTDCI, 0)
+    var at: u64 = 0
+    var mine: bool = false
+    let dif: u64 = dg(state, d, D_DATAIF)
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                mine = b8(buf, at + 2) == dif && b8(buf, at + 3) != 0
+                    && b8(buf, at + 5) == 0x0A && dg(state, d, usbbase.D_INDCI) == 0
+                if mine {
+                    ds(state, d, D_DATAALT, b8(buf, at + 3))
+                }
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+fn wanted(state: u64, cls: u64, sub: u64, pro: u64) -> bool {
+    if cls == CLS_HUB {
+        return !kstate.mode_on(state, kstate.M_NOHUB)
+    }
+    if cls == CLS_HID {
+        if g(state, usbbase.S_NOHID) != 0 {
+            return false
+        }
+        if sub == 1 && (pro == 1 || pro == 2) {
+            return true
+        }
+        return g(state, usbbase.S_GEN) != 0
+    }
+    if cls == CLS_MSC {
+        if g(state, usbbase.S_NOMSC) != 0 {
+            return false
+        }
+        return sub == 6 && pro == 0x50
+    }
+    // r813: audio control interface (class 01, subclass 01), test bed only.
+    if cls == 1 && sub == 1 {
+        return g(state, usbbase.S_ISOOK) != 0
+    }
+    if cls == CLS_CDC {
+        if sub == 2 && pro == 0xFF {
+            return g(state, usbbase.S_RNDISOK) != 0
+        }
+        // r811: CDC-NCM (subclass 0D) is a last resort like RNDIS: only in pass 2.
+        if sub == 0x0D {
+            return g(state, usbbase.S_RNDISOK) != 0
+        }
+        return sub == 6 && g(state, usbbase.S_NOECM) == 0
+    }
+    if cls == 0xE0 && sub == 1 && pro == 1 {
+        return true
+    }
+    // r811: RNDIS control interface of Android (E0/01/03) and of Windows-compatible gadgets (EF/04/01).
+    if (cls == 0xE0 && sub == 1 && pro == 3) || (cls == 0xEF && sub == 4 && pro == 1) {
+        return g(state, usbbase.S_RNDISOK) != 0
+    }
+    if cls == 0xFF && g(state, usbbase.S_AXOK) != 0 {
+        return true
+    }
+    if cls == 0xFF && sub == 0xFF && pro == 0xFF {
+        return g(state, usbbase.S_CHOK) != 0
+    }
+    return false
+}
+
+fn driver_for(cls: u64, sub: u64, pro: u64) -> u64 {
+    if cls == CLS_HUB {
+        return usbbase.DRV_HUB
+    }
+    if cls == CLS_HID && sub == 1 && pro == 1 {
+        return usbbase.DRV_KBD
+    }
+    if cls == CLS_HID && sub == 1 && pro == 2 {
+        return usbbase.DRV_MOUSE
+    }
+    if cls == CLS_HID {
+        return usbbase.DRV_HIDGEN
+    }
+    if cls == CLS_MSC {
+        return usbbase.DRV_MSC
+    }
+    if cls == 1 && sub == 1 {
+        return usbbase.DRV_ISOTEST
+    }
+    if cls == CLS_CDC && sub == 6 {
+        return usbbase.DRV_ECM
+    }
+    if cls == CLS_CDC && sub == 0x0D {
+        return usbbase.DRV_NCM
+    }
+    if (cls == CLS_CDC && sub == 2 && pro == 0xFF) || (cls == 0xE0 && sub == 1 && pro == 3)
+        || (cls == 0xEF && sub == 4 && pro == 1) {
+        return usbbase.DRV_RNDIS
+    }
+    if cls == 0xE0 && sub == 1 && pro == 1 {
+        return usbbase.DRV_BT
+    }
+    if cls == 0xFF {
+        return usbbase.DRV_CH336
+    }
+    return usbbase.DRV_NONE
+}
+
+fn take_ep(state: u64, d: u64, buf: u64, at: u64) {
+    let addr: u64 = b8(buf, at + 2)
+    let attrs: u64 = b8(buf, at + 3) & 3
+    let mps: u64 = b16(buf, at + 4) & 0x7FF
+    let ivl: u64 = b8(buf, at + 6)
+    let num: u64 = addr & 0xF
+    var dci: u64 = num * 2
+    if (addr & 0x80) != 0 {
+        dci = dci + 1
+    }
+    if attrs == 3 && (addr & 0x80) != 0 && dg(state, d, usbbase.D_INTDCI) == 0 {
+        ds(state, d, usbbase.D_INTDCI, dci)
+        ds(state, d, usbbase.D_INTMPS, mps)
+        ds(state, d, usbbase.D_INTIVL, ivl)
+        var want: u64 = mps
+        if want > 64 {
+            want = 64
+        }
+        ds(state, d, D_INTLEN, want)
+        return
+    }
+    if attrs == 2 {
+        ds(state, d, usbbase.D_BULKMPS, mps)
+        if (addr & 0x80) != 0 {
+            if dg(state, d, usbbase.D_INDCI) == 0 {
+                ds(state, d, usbbase.D_INDCI, dci)
+            }
+        } else {
+            if dg(state, d, usbbase.D_OUTDCI) == 0 {
+                ds(state, d, usbbase.D_OUTDCI, dci)
+            }
+        }
+    }
+}
+
+fn build_ep(state: u64, dci: u64, art: u64, mps: u64, ivl: u64, ring: u64,
+    avg: u64) {
+    let ec: u64 = xhci.in_ep(state, dci)
+    zero(ec, xhci.ctx_size(state))
+    wr32(ec, ivl << 16)
+    wr32(ec + 4, (3 << 1) | (art << 3) | (mps << 16))
+    __mmio_write64((ec + 8) as *mut u64, ring | 1)
+    var esit: u64 = 0
+    if art == 7 {
+        esit = mps << 16
+    }
+    wr32(ec + 16, avg | esit)
+}
+
+fn interval_of(speed: u64, binterval: u64) -> u64 {
+    if speed >= 3 {
+        if binterval == 0 {
+            return 0
+        }
+        var v: u64 = binterval - 1
+        if v > 15 {
+            v = 15
+        }
+        return v
+    }
+    var ms: u64 = binterval
+    if ms == 0 {
+        ms = 1
+    }
+    var n: u64 = 3
+    while n < 10 && (1 << (n - 3)) < ms {
+        n = n + 1
+    }
+    return n
+}
+
+fn endpoints(state: u64, d: u64) -> bool {
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    var top: u64 = 1
+    var add: u64 = 1
+    let ic: u64 = xhci.in_control(state)
+    zero(xhci.in_ep(state, 1), 31 * xhci.ctx_size(state))
+
+    let idci: u64 = dg(state, d, usbbase.D_INTDCI)
+    if idci != 0 {
+        let i: u64 = xhci.ep_open(state, slot, idci)
+        if i >= xhci.MAX_EP {
+            return false
+        }
+        build_ep(state, idci, 7, dg(state, d, usbbase.D_INTMPS),
+            interval_of(dg(state, d, usbbase.D_SPEED), dg(state, d, usbbase.D_INTIVL)),
+            xhci.ep_ring(state, i), dg(state, d, usbbase.D_INTMPS))
+        add = add | (1 << idci)
+        if idci > top {
+            top = idci
+        }
+    }
+    let indci: u64 = dg(state, d, usbbase.D_INDCI)
+    if indci != 0 {
+        let i: u64 = xhci.ep_open(state, slot, indci)
+        if i >= xhci.MAX_EP {
+            return false
+        }
+        build_ep(state, indci, 6, dg(state, d, usbbase.D_BULKMPS), 0,
+            xhci.ep_ring(state, i), 512)
+        add = add | (1 << indci)
+        if indci > top {
+            top = indci
+        }
+    }
+    let outdci: u64 = dg(state, d, usbbase.D_OUTDCI)
+    if outdci != 0 {
+        let i: u64 = xhci.ep_open(state, slot, outdci)
+        if i >= xhci.MAX_EP {
+            return false
+        }
+        build_ep(state, outdci, 2, dg(state, d, usbbase.D_BULKMPS), 0,
+            xhci.ep_ring(state, i), 512)
+        add = add | (1 << outdci)
+        if outdci > top {
+            top = outdci
+        }
+    }
+    // r813: the isochronous endpoint of the test driver.
+    if dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_ISOTEST && g(state, S_ISOA) != 0 {
+        let a: u64 = g(state, S_ISOA)
+        let adci: u64 = a & 0xFF
+        let i: u64 = xhci.isoc_open(state, slot, adci, false, dg(state, d, usbbase.D_SPEED),
+            (a >> 32) & 0xFFFF, 0, 0, (a >> 24) & 0xFF)
+        if i >= xhci.MAX_EP || !xhci.isoc_fill_ctx(state, slot, adci) {
+            return false
+        }
+        add = add | (1 << adci)
+        if adci > top {
+            top = adci
+        }
+    }
+    if ch_int_wanted(state, d) {
+        let cv: u64 = g(state, usbbase.S_CHINT)
+        let cdci: u64 = cv & 255
+        let ci: u64 = xhci.ep_open(state, slot, cdci)
+        if ci < xhci.MAX_EP {
+            let cmps: u64 = (cv >> 8) & 0xFFFF
+            build_ep(state, cdci, 7, cmps, interval_of(dg(state, d, usbbase.D_SPEED), (cv >> 24) & 255),
+                xhci.ep_ring(state, ci), cmps)
+            add = add | (1 << cdci)
+            if cdci > top {
+                top = cdci
+            }
+            s(state, usbbase.S_CHINT, cv | CH_INT_OPEN)
+        }
+    }
+    build_slot(state, d, top)
+    wr32(ic, 0)
+    wr32(ic + 4, add)
+    let crc: u64 = xhci.configure_endpoint(state, slot)
+    if crc != xhci.CC_SUCCESS && (g(state, usbbase.S_CHINT) & CH_INT_OPEN) != 0 {
+        s(state, usbbase.S_CHINT, (g(state, usbbase.S_CHINT) & 0xFFFFFFFF) | CH_INT_FAILED)
+        return endpoints(state, d)
+    }
+    return crc == xhci.CC_SUCCESS
+}
+
+fn drop_dev(state: u64, d: u64) {
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    if slot != 0 {
+        xhci.forget_slot(state, slot)
+        xhci.slot_disable(state, slot)
+        xhci.dcbaa_set(state, slot, 0)
+    }
+    zero(dev_at(state, d), usbbase.DEV_BYTES)
+}
+
+// ------------------------------------------------------- die Zuordnung
+
+fn dev_suitable(state: u64, e: u64) -> bool {
+    if e == 0 {
+        return false
+    }
+    let d: u64 = e - 1
+    if d >= usbbase.MAX_DEV {
+        return false
+    }
+    return dg(state, d, usbbase.D_USED) != 0 && dg(state, d, usbbase.D_INTDCI) != 0
+}
+
+fn kbd_suitable(state: u64) -> bool {
+    return dev_suitable(state, g(state, usbbase.S_KBD))
+}
+
+fn mouse_works(state: u64) -> bool {
+    return dev_suitable(state, g(state, usbbase.S_MOUSE))
+}
+
+// ============================================================ r813: isoc test bed
+//
+// Scan the configuration for the first audio STREAMING interface (class 01,
+// subclass 02) alternate setting >= 1 that has an isochronous OUT endpoint, and
+// remember it packed in S_ISOA. QEMU `usb-audio` offers exactly that (alt 1,
+// 192 bytes per 1 ms frame, full speed).
+fn iso_data(state: u64, d: u64, buf: u64, total: u64) {
+    s(state, S_ISOA, 0)
+    var at: u64 = 0
+    var iface: u64 = 0
+    var alt: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                iface = b8(buf, at + 2)
+                alt = b8(buf, at + 3)
+                mine = b8(buf, at + 5) == 1 && b8(buf, at + 6) == 2 && alt != 0
+                    && g(state, S_ISOA) == 0
+            } else if kind == 5 && len >= 7 && mine {
+                let addr: u64 = b8(buf, at + 2)
+                if (b8(buf, at + 3) & 3) == 1 && (addr & 0x80) == 0 {
+                    let dci: u64 = (addr & 0xF) * 2
+                    s(state, S_ISOA, dci | (iface << 8) | (alt << 16)
+                        | (b8(buf, at + 6) << 24) | (b16(buf, at + 4) << 32))
+                    mine = false
+                }
+            }
+            at = at + len
+        }
+    }
+}
+
+// Fill one packet buffer with a 1 kHz square wave (48 frames per period, 16 bit stereo).
+fn iso_fill(state: u64, n: u64) {
+    let p: u64 = state + ISO_BUF_OFF + (n % ISO_BUFS) * ISO_PKT
+    var f: u64 = 0
+    while f < 48 {
+        var v: u64 = 0x1F40
+        if f >= 24 {
+            v = 0xE0C0
+        }
+        wr32(p + f * 4, v | (v << 16))
+        f = f + 1
+    }
+}
+
+// Select the streaming alt setting, then feed ISO_TDS TDs (one per frame) and
+// count what the controller reports. One status line on the serial port.
+fn iso_start(state: u64, d: u64) {
+    var s_head: [u8; 16] = "usb: isoc alt=\0\0"
+    var s_fail: [u8; 18] = "usb: isoc failed\0\0"
+    var s_q: [u8; 9] = " queued=\0"
+    var s_e: [u8; 9] = " events=\0"
+    var s_b: [u8; 8] = " bytes=\0"
+    var s_u: [u8; 8] = " under=\0"
+    var s_m: [u8; 9] = " missed=\0"
+    var s_x: [u8; 6] = " err=\0"
+    var s_mps: [u8; 6] = " mps=\0"
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let a: u64 = g(state, S_ISOA)
+    if a == 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    let dci: u64 = a & 0xFF
+    if xhci.control(state, slot, 0x01, 0x0B, (a >> 16) & 0xFF, (a >> 8) & 0xFF,
+        0, 0, false) < 0 {
+        serial.puts((&s_fail[0]) as u64)
+        serial.nl()
+        return
+    }
+    var n: u64 = 0
+    var spin: u64 = 0
+    while n < ISO_BUFS {
+        iso_fill(state, n)
+        if xhci.isoc_queue(state, slot, dci, state + ISO_BUF_OFF + n * ISO_PKT, ISO_PKT) {
+            n = n + 1
+        } else {
+            n = ISO_BUFS
+        }
+    }
+    n = xhci.isoc_stat(state, slot, dci, xhci.ISO_QUEUED)
+    while spin < 4000 && xhci.isoc_stat(state, slot, dci, xhci.ISO_EVENTS) < ISO_TDS {
+        xhci.drain(state)
+        while n < ISO_TDS && xhci.isoc_pending(state, slot, dci) < ISO_BUFS {
+            iso_fill(state, n)
+            if !xhci.isoc_queue(state, slot, dci, state + ISO_BUF_OFF + (n % ISO_BUFS) * ISO_PKT, ISO_PKT) {
+                break
+            }
+            n = n + 1
+        }
+        xhci.udelay(state, 500)
+        spin = spin + 1
+    }
+    xhci.drain(state)
+    serial.puts((&s_head[0]) as u64)
+    serial.dec((a >> 16) & 0xFF)
+    serial.puts((&s_mps[0]) as u64)
+    serial.dec((a >> 32) & 0x7FF)
+    serial.puts((&s_q[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_QUEUED))
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_EVENTS))
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_BYTES))
+    serial.puts((&s_u[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_UNDER))
+    serial.puts((&s_m[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_MISSED))
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(xhci.isoc_stat(state, slot, dci, xhci.ISO_ERR))
+    serial.nl()
+}
+
+// L-015: bring a CDC-ECM function up. MAC from the string descriptor,
+// SET_INTERFACE to the data alternate setting, then hand the slot and the
+// bulk endpoints to the network driver.
+fn ecm_start(state: u64, d: u64) {
+    var s_ok: [u8; 17] = "usb: ecm mac=ok\0\0"
+    var s_bad: [u8; 17] = "usb: ecm failed \0"
+    var s_mac: [u8; 10] = "usb: ecm \0"
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let buf: u64 = state + usbbase.DESC_OFF
+    zero(buf, 64)
+    let n: i64 = xhci.control(state, slot, 0x80, usbbase.REQ_GET_DESCRIPTOR,
+        (3 << 8) | dg(state, d, D_MACSTR), 0x0409, 64, buf, true)
+    var macb: u64 = state + usbbase.DESC_OFF + 128
+    zero(macb, 8)
+    if n < 26 || dg(state, d, D_MACSTR) == 0
+        || !rndis.cdc_mac_from_string(buf, n as u64, macb) {
+        serial.puts((&s_bad[0]) as u64)
+        serial.puts((&s_mac[0]) as u64)
+        serial.nl()
+        return
+    }
+    if xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+        dg(state, d, D_DATAIF), 0, 0, false) < 0 {
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+        return
+    }
+    var mac: u64 = 0
+    var i: u64 = 0
+    while i < 6 {
+        mac = mac | (b8(macb, i) << (i * 8))
+        i = i + 1
+    }
+    if !usbnet.attach(state, slot, dg(state, d, usbbase.D_INDCI), dg(state, d, usbbase.D_OUTDCI),
+        dg(state, d, usbbase.D_BULKMPS), mac) {
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    hex2(mac & 0xFF)
+    var k: u64 = 1
+    while k < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+    serial.nl()
+}
+
+// r811: RNDIS. The bulk pipes live in the DATA interface (class 0A), normally in alternate setting 0 (QEMU, Android);
+// an alternate setting >= 1 is taken when that is where the pipes are. The data interface comes from the union
+// descriptor, else it is the interface behind the control interface. The notification endpoint is not used
+// (responses are fetched by polling GET_ENCAPSULATED_RESPONSE).
+fn rndis_data(state: u64, d: u64, buf: u64, total: u64) {
+    ds(state, d, usbbase.D_INTDCI, 0)
+    ds(state, d, usbbase.D_INDCI, 0)
+    ds(state, d, usbbase.D_OUTDCI, 0)
+    ds(state, d, D_DATAALT, 0)
+    var dif: u64 = dg(state, d, D_DATAIF)
+    if dif == 0 {
+        dif = dg(state, d, usbbase.D_IFACE) + 1
+    }
+    ds(state, d, D_DATAIF, dif)
+    var at: u64 = 0
+    var mine: bool = false
+    while at + 2 <= total {
+        let len: u64 = b8(buf, at)
+        let kind: u64 = b8(buf, at + 1)
+        if len < 2 || at + len > total {
+            at = total
+        } else {
+            if kind == 4 && len >= 9 {
+                mine = b8(buf, at + 2) == dif && b8(buf, at + 5) == 0x0A
+                    && dg(state, d, usbbase.D_INDCI) == 0 && b8(buf, at + 4) >= 2
+                if mine {
+                    ds(state, d, D_DATAALT, b8(buf, at + 3))
+                }
+            } else if kind == 5 && len >= 7 && mine {
+                take_ep(state, d, buf, at)
+            }
+            at = at + len
+        }
+    }
+}
+
+// One RNDIS control exchange: SEND_ENCAPSULATED_COMMAND with `n` bytes at `cmd`, then poll
+// GET_ENCAPSULATED_RESPONSE until the answer of type `want` (completion type) arrives. Indications and
+// keepalives in between are skipped. Returns the answer length (0 = none/invalid); the answer is at `rsp`.
+fn rndis_exchange(state: u64, d: u64, cmd: u64, n: u64, rsp: u64, want: u64) -> u64 {
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let iface: u64 = dg(state, d, usbbase.D_IFACE)
+    if xhci.control(state, slot, 0x21, 0x00, 0, iface, n, cmd, false) < 0 {
+        return 0
+    }
+    var tries: u64 = 0
+    while tries < 64 {
+        zero(rsp, 128)
+        let got: i64 = xhci.control(state, slot, 0xA1, 0x01, 0, iface, 128, rsp, true)
+        if got >= 12 && rndis.msg_type(rsp, got as u64) == want {
+            return rndis.msg_len(rsp, got as u64)
+        }
+        tries = tries + 1
+    }
+    return 0
+}
+
+// r811: bring an RNDIS function up: INITIALIZE, QUERY permanent MAC, SET packet filter, then hand the slot and
+// the bulk pipes to the network driver (mode RNDIS).
+fn rndis_start(state: u64, d: u64) {
+    var s_bad: [u8; 19] = "usb: rndis failed \0"
+    var s_mac: [u8; 12] = "usb: rndis \0"
+    var s_step: [u8; 7] = "step=\0\0"
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let cmd: u64 = state + usbbase.DESC_OFF
+    let rsp: u64 = state + usbbase.DESC_OFF + 192
+    var step: u64 = 0
+    zero(cmd, 160)
+    var n: u64 = rndis.build_init(cmd, 1, 2048)
+    var l: u64 = rndis_exchange(state, d, cmd, n, rsp, rndis.MSG_INIT_C)
+    step = 1
+    var ok: bool = l != 0 && rndis.init_c_ok(rsp, l)
+    if ok {
+        step = 2
+        zero(cmd, 64)
+        n = rndis.build_query(cmd, 2, rndis.OID_802_3_PERMANENT_ADDRESS)
+        l = rndis_exchange(state, d, cmd, n, rsp, rndis.MSG_QUERY_C)
+        ok = l != 0 && rndis.query_c_info_len(rsp, l) == 6
+    }
+    var mac: u64 = 0
+    if ok {
+        let off: u64 = rndis.query_c_info_off(rsp, l)
+        var i: u64 = 0
+        while i < 6 {
+            mac = mac | (b8(rsp, off + i) << (i * 8))
+            i = i + 1
+        }
+        step = 3
+        zero(cmd, 64)
+        n = rndis.build_set_filter(cmd, 3,
+            rndis.FILTER_DIRECTED | rndis.FILTER_MULTICAST | rndis.FILTER_BROADCAST)
+        l = rndis_exchange(state, d, cmd, n, rsp, rndis.MSG_SET_C)
+        ok = l != 0 && rndis.msg_status(rsp, l) == rndis.STATUS_SUCCESS
+    }
+    if ok && dg(state, d, D_DATAALT) != 0 {
+        step = 4
+        ok = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+            dg(state, d, D_DATAIF), 0, 0, false) >= 0
+    }
+    if ok {
+        step = 5
+        ok = usbnet.attach_rndis(state, slot, dg(state, d, usbbase.D_INDCI), dg(state, d, usbbase.D_OUTDCI),
+            dg(state, d, usbbase.D_BULKMPS), mac, dg(state, d, usbbase.D_IFACE))
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    hex2(mac & 0xFF)
+    var k: u64 = 1
+    while k < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+    serial.nl()
+}
+
+// LW-1a: bring a WCH CH336-family dongle up. Vendor control reads (lib/usbnet/ch397.fi: REQ_INFO, REQ_READ_REG)
+// give the chip info and the MAC; the bulk pipes come from the interface descriptor (`parse`). HYPOTHESIS: the
+// register map is from one out-of-tree driver and not yet confirmed on a real chip, so nothing is written to the chip.
+// Serial lines: `usb: ch336 info=<8 octets>`, `usb: ch336 <mac>`, or `usb: ch336 failed step=N` (1 info, 2 mac, 3 attach).
+fn bt_start(state: u64, d: u64) {
+    let dci: u64 = dg(state, d, usbbase.D_INTDCI)
+    ds(state, d, usbbase.D_INTDCI, 0)
+    if dci == 0 {
+        return
+    }
+    let _ok: bool = btusb.attach(state, dg(state, d, usbbase.D_SLOT), dci)
+}
+
+fn ch336_start(state: u64, d: u64) {
+    var s_bad: [u8; 18] = "usb: ch336 failed\0"
+    var s_step: [u8; 7] = "step=\0\0"
+    var s_inf: [u8; 17] = "usb: ch336 info=\0"
+    var s_mac: [u8; 11] = "usb: ch336\0"
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let buf: u64 = state + usbbase.DESC_OFF
+    var step: u64 = 1
+    s(state, S_CHDEV, d + 1)
+    s(state, S_CHSTEP, 1)
+    chdiag.bump(state, chdiag.F_STARTS)
+    chdiag.set64(state, chdiag.F_START, dg(state, d, usbbase.D_INDCI) | (dg(state, d, usbbase.D_OUTDCI) << 8)
+        | ((g(state, usbbase.S_CHINT) & 255) << 16) | (dg(state, d, usbbase.D_BULKMPS) << 24)
+        | (dg(state, d, usbbase.D_IFACE) << 40) | (dg(state, d, D_DATAALT) << 48) | (dg(state, d, usbbase.D_CONFIG) << 56))
+    chdiag.set64(state, chdiag.F_REC, (d + 1) | (slot << 8) | (dg(state, d, usbbase.D_SPEED) << 16))
+    ch_set_interface(state, d, slot)
+    zero(buf, 64)
+    var ok: bool = xhci.control(state, slot, 0xC0, ch397.REQ_INFO, 0, 0, 8, buf, true) >= 8
+    xhci.udelay(state, 10000)
+    var fwver: u64 = 0
+    if ok {
+        fwver = b8(buf, 2)
+        serial.puts((&s_inf[0]) as u64)
+        var k: u64 = 0
+        while k < 8 {
+            hex2(b8(buf, k))
+            k = k + 1
+        }
+        serial.nl()
+        step = 2
+        s(state, S_CHSTEP, 2)
+        zero(buf, 64)
+        let lo: u64 = ch397.REG_MAC_L
+        ok = xhci.control(state, slot, 0xC0, ch397.REQ_READ_REG, lo & 0xFFFF, lo >> 16, 4, buf, true) >= 4
+        xhci.udelay(state, 10000)
+        if ok {
+            let hi: u64 = ch397.REG_MAC_H
+            ok = xhci.control(state, slot, 0xC0, ch397.REQ_READ_REG, hi & 0xFFFF, hi >> 16, 2, buf + 8, true) >= 2
+            xhci.udelay(state, 10000)
+        }
+    }
+    var mac: u64 = 0
+    if ok {
+        var i: u64 = 0
+        while i < 4 {
+            mac = mac | (b8(buf, i) << (i * 8))
+            i = i + 1
+        }
+        mac = mac | (b8(buf, 8) << 32) | (b8(buf, 9) << 40)
+        ok = mac != 0 && (mac & 1) == 0
+    }
+    if ok {
+        step = 3
+        s(state, S_CHSTEP, 3)
+        ok = usbnet.attach_ch336(state, slot, dg(state, d, usbbase.D_INDCI), dg(state, d, usbbase.D_OUTDCI),
+            dg(state, d, usbbase.D_BULKMPS), mac)
+    }
+    if ok {
+        step = 4
+        s(state, S_CHSTEP, 4)
+        ok = usbnet.ch_bringup(state, fwver, ch_int_info(state))
+    }
+    if ok {
+        s(state, S_CHSTEP, 4 | (1 << 8))
+    } else {
+        s(state, S_CHSTEP, step | (2 << 8))
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    serial.put(32 as u8)
+    hex2(mac & 0xFF)
+    var q: u64 = 1
+    while q < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (q * 8)) & 0xFF)
+        q = q + 1
+    }
+    serial.nl()
+}
+
+fn ax_ctl(state: u64, slot: u64, bm: u64, req: u64, value: u64, index: u64, len: u64, buf: u64) -> i64 {
+    return xhci.control(state, slot, bm, req, value, index, len, buf, bm >= 0x80)
+}
+
+fn ax_delay(state: u64, us: u64) {
+    xhci.udelay(state, us)
+}
+
+// r1607: bring an ASIX AX88772/772B dongle up (lib/usbnet/ax88772_drv.fi sequence, host gate tools/ax88772drv with a fake device).
+// Serial lines: `usb: ax88772 <mac>` or `usb: ax88772 failed step=N` (1 phy .. 8 rx on, 9 MAC implausible, 10 attach).
+fn ax88772_start(state: u64, d: u64) {
+    var s_bad: [u8; 20] = "usb: ax88772 failed\0"
+    var s_step: [u8; 7] = "step=\0\0"
+    var s_mac: [u8; 13] = "usb: ax88772\0"
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    var step: u64 = 0
+    let mac: u64 = ax88772_drv.bringup(state, slot, ax_ctl, ax_delay, state + usbbase.DESC_OFF, &step)
+    var ok: bool = mac != 0
+    if ok {
+        step = 10
+        ok = usbnet.attach_ax88772(state, slot, dg(state, d, usbbase.D_INDCI), dg(state, d, usbbase.D_OUTDCI), dg(state, d, usbbase.D_BULKMPS), mac)
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.put(32 as u8)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    serial.put(32 as u8)
+    hex2(mac & 0xFF)
+    var q: u64 = 1
+    while q < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (q * 8)) & 0xFF)
+        q = q + 1
+    }
+    serial.nl()
+}
+
+// r811: bring a CDC-NCM function up (NTB16, no CRC): MAC from the string descriptor, GET_NTB_PARAMETERS,
+// SET_NTB_INPUT_SIZE (2048: the RX buffer of the network driver), SET_INTERFACE to the data alternate setting,
+// then hand the slot, the bulk pipes and the device's TX framing rules to the network driver (mode NCM).
+// Failure prints `usb: ncm failed step=N` (1 MAC, 2 parameters, 3 input size, 4 interface, 5 attach).
+fn ncm_start(state: u64, d: u64) {
+    var s_bad: [u8; 16] = "usb: ncm failed\0"
+    var s_step: [u8; 7] = "step=\0\0"
+    var s_mac: [u8; 9] = "usb: ncm\0"
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let iface: u64 = dg(state, d, usbbase.D_IFACE)
+    let buf: u64 = state + usbbase.DESC_OFF
+    var step: u64 = 1
+    zero(buf, 64)
+    let n: i64 = xhci.control(state, slot, 0x80, usbbase.REQ_GET_DESCRIPTOR,
+        (3 << 8) | dg(state, d, D_MACSTR), 0x0409, 64, buf, true)
+    var macb: u64 = state + usbbase.DESC_OFF + 128
+    zero(macb, 8)
+    var ok: bool = n >= 26 && dg(state, d, D_MACSTR) != 0
+        && rndis.cdc_mac_from_string(buf, n as u64, macb)
+    let par: u64 = state + usbbase.DESC_OFF + 192
+    if ok {
+        step = 2
+        zero(par, 32)
+        let got: i64 = xhci.control(state, slot, ncm.REQT_GET, ncm.REQ_GET_NTB_PARAMETERS, 0, iface,
+            ncm.PARAMS_LEN, par, true)
+        ok = got >= 28 && ncm.params_ok(par, got as u64) && ncm.params_supports_ntb16(par)
+    }
+    if ok {
+        step = 3
+        // A device may refuse this request; its default input size could then exceed our buffer, which the
+        // host controller truncates (babble error, counted and dropped) instead of overflowing.
+        let sz: u64 = state + usbbase.DESC_OFF + 160
+        zero(sz, 8)
+        let m: u64 = ncm.build_set_input_size(sz, 2048)
+        xhci.control(state, slot, ncm.REQT_SET, ncm.REQ_SET_NTB_INPUT_SIZE, 0, iface, m, sz, false)
+        step = 4
+        ok = xhci.control(state, slot, 0x01, 0x0B, dg(state, d, D_DATAALT),
+            dg(state, d, D_DATAIF), 0, 0, false) >= 0
+    }
+    var mac: u64 = 0
+    if ok {
+        step = 5
+        var i: u64 = 0
+        while i < 6 {
+            mac = mac | (b8(macb, i) << (i * 8))
+            i = i + 1
+        }
+        ok = usbnet.attach_ncm(state, slot, dg(state, d, usbbase.D_INDCI), dg(state, d, usbbase.D_OUTDCI),
+            dg(state, d, usbbase.D_BULKMPS), mac, ncm.params_out_div(par), ncm.params_out_rem(par),
+            ncm.params_out_align(par), ncm.params_out_max(par))
+    }
+    if !ok {
+        serial.puts((&s_bad[0]) as u64)
+        serial.put(32 as u8)
+        serial.puts((&s_step[0]) as u64)
+        serial.dec(step)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_mac[0]) as u64)
+    serial.put(32 as u8)
+    hex2(mac & 0xFF)
+    var k: u64 = 1
+    while k < 6 {
+        serial.put(58 as u8)
+        hex2((mac >> (k * 8)) & 0xFF)
+        k = k + 1
+    }
+    serial.nl()
+}
+
+// ------------------------------------------------------------ HID
+
+fn hid_start(state: u64, d: u64) {
+    tr(state, 20, d)
+    let slot: u64 = dg(state, d, usbbase.D_SLOT)
+    let iface: u64 = dg(state, d, usbbase.D_IFACE)
+    // RUNDE HID: ZUERST DIE BERICHTSBESCHREIBUNG VERSUCHEN.
+    var generisch: bool = false
+    if g(state, usbbase.S_GEN) != 0 && d < hidrep.USB_DEV_MAX {
+        generisch = hid_descriptor(state, d, slot, iface)
+    }
+    ds(state, d, usbbase.D_GENERIC, 0)
+    tr(state, 21, yes(generisch))
+    if generisch {
+        ds(state, d, usbbase.D_GENERIC, 1)
+        s(state, usbbase.S_GENDEV, g(state, usbbase.S_GENDEV) + 1)
+        // SET_PROTOCOL 1 = Berichtsprotokoll.
+        let r1: i64 = xhci.control(state, slot, 0x21, 0x0B, 1, iface, 0, 0, false)
+        tr(state, 22, (r1 + 100) as u64)
+        tr(state, 28, xhci.ep_code(state, xhci.ep_find(state, slot, 1)))
+        let r2: i64 = xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
+        tr(state, 23, (r2 + 100) as u64)
+        hid_claim(state, d)
+        tr(state, 24, dg(state, d, usbbase.D_DRIVER))
+        ds(state, d, D_PREV, 0)
+        let i2: u64 = xhci.ep_find(state, slot, dg(state, d, usbbase.D_INTDCI))
+        if i2 < xhci.MAX_EP {
+            ds(state, d, usbbase.D_SEQ, xhci.ep_seq(state, i2))
+            ring_fresh(d)
+        }
+        tr(state, 25, d)
+        arm(state, d)
+        tr(state, 26, d)
+        return
+    }
+    if dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HIDGEN {
+        ds(state, d, usbbase.D_DRIVER, usbbase.DRV_NONE)
+        return
+    }
+    // SET_PROTOCOL 0 = Boot. Klasse, Schnittstelle, Wirt an Geraet.
+    xhci.control(state, slot, 0x21, 0x0B, 0, iface, 0, 0, false)
+    xhci.control(state, slot, 0x21, 0x0A, 0, iface, 0, 0, false)
+    ds(state, d, D_PREV, 0)
+    let i: u64 = xhci.ep_find(state, slot, dg(state, d, usbbase.D_INTDCI))
+    if i < xhci.MAX_EP {
+        ds(state, d, usbbase.D_SEQ, xhci.ep_seq(state, i))
+        ring_fresh(d)
+    }
+    arm(state, d)
+}
+
+fn hid_descriptor(state: u64, d: u64, slot: u64, iface: u64) -> bool {
+    let n: u64 = dg(state, d, D_RDLEN)
+    if n == 0 || n > hidrep.RAW_MAX {
+        s(state, usbbase.S_RDFAIL, g(state, usbbase.S_RDFAIL) + 1)
+        return false
+    }
+    let dst: u64 = hidrep.raw_of(state, d)
+    zero(dst, n)
+    if xhci.control(state, slot, 0x81, usbbase.REQ_GET_DESCRIPTOR,
+        (0x22 << 8), iface, n, dst, true) < (n as i64) {
+        s(state, usbbase.S_RDFAIL, g(state, usbbase.S_RDFAIL) + 1)
+        return false
+    }
+    s(state, usbbase.S_RDLEN, n)
+    if hidrep.parse(state, d, dst, n) != hidrep.E_OK {
+        s(state, usbbase.S_RDFAIL, g(state, usbbase.S_RDFAIL) + 1)
+        return false
+    }
+    hidrep.say(state, d)
+    let _q: u64 = inreg.register(d, quirk.B_USB, dg(state, d, usbbase.D_VID), dg(state, d, usbbase.D_PID))
+    hid_set_modes(state, d, slot, iface)
+    return true
+}
+
+fn hid_set_modes(state: u64, d: u64, slot: u64, iface: u64) {
+    if (hidrep.kind(state, d) & (hidrep.K_PAD | hidrep.K_TOUCH)) == 0 {
+        return
+    }
+    let n: u64 = hidmode.plan(state, d)
+    let p: u64 = state + usbbase.HUB_OFF + 0x60
+    var i: u64 = 0
+    while i < n {
+        let rid: u64 = hidmode.rid_at(i)
+        kstate.set8(p, rid as u8)
+        let plen: u64 = hidmode.build(state, d, i, p + 1)
+        if plen > 0 {
+            let _r: i64 = xhci.control(state, slot, 0x21, usbbase.REQ_SET_REPORT, inmode.usb_wvalue(rid), iface, plen + 1, p, false)
+        }
+        i = i + 1
+    }
+}
+
+fn hid_claim(state: u64, d: u64) {
+    let art: u64 = hidrep.kind(state, d)
+    if (art & hidrep.K_KBD) != 0 {
+        ds(state, d, usbbase.D_DRIVER, usbbase.DRV_KBD)
+        if g(state, usbbase.S_KBD) == 0 {
+            s(state, usbbase.S_KBD, d + 1)
+        }
+        return
+    }
+    if (art & (hidrep.K_MOUSE | hidrep.K_PAD | hidrep.K_TOUCH | hidrep.K_PEN)) != 0 {
+        ds(state, d, usbbase.D_DRIVER, usbbase.DRV_MOUSE)
+        if g(state, usbbase.S_MOUSE) == 0 {
+            s(state, usbbase.S_MOUSE, d + 1)
+        }
+        return
+    }
+    ds(state, d, usbbase.D_DRIVER, usbbase.DRV_HIDGEN)
+}
+
+fn arm(state: u64, d: u64) {
+    ds(state, d, usbbase.D_ARMS, dg(state, d, usbbase.D_ARMS) + 1)
+    if d < usbbase.MAX_DEV {
+        ring_out[d as usize] = ring_out[d as usize] + 1
+        if ring_out[d as usize] > ring_peak {
+            ring_peak = ring_out[d as usize]
+        }
+    }
+    xhci.int_queue(state, dg(state, d, usbbase.D_SLOT), dg(state, d, usbbase.D_INTDCI),
+        report_buf(state, d), dg(state, d, D_INTLEN))
+}
+
+fn raw_remember(state: u64, d: u64) {
+    let b: u64 = report_buf(state, d)
+    var w: u64 = 0
+    var k: u64 = 0
+    while k < 8 {
+        w = w | ((kstate.get8(b + k) as u64) << (k * 8))
+        k = k + 1
+    }
+    if w != 0 {
+        ds(state, d, D_ROHW, w)
+        ds(state, d, D_ROHN, dg(state, d, D_ROHN) + 1)
+    }
+}
+
+fn dev_rohw(state: u64, d: u64) -> u64 {
+    if d >= usbbase.MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_ROHW)
+}
+
+fn dev_rohn(state: u64, d: u64) -> u64 {
+    if d >= usbbase.MAX_DEV {
+        return 0
+    }
+    return dg(state, d, D_ROHN)
+}
+
+fn report_buf(state: u64, d: u64) -> u64 {
+    return state + REPORT_OFF + d * 64
+}
+
+fn seq_jump_say(state: u64, d: u64, i: u64, seq: u64) {
+    var m0: [u8; 20] = "usb: seq jump dev=\0\0"
+    var m1: [u8; 6] = " was=\0"
+    var m2: [u8; 5] = " now\0"
+    var m3: [u8; 7] = " arms=\0"
+    var m4: [u8; 7] = " reps=\0"
+    var m5: [u8; 7] = " last=\0"
+    var m6: [u8; 7] = " prev=\0"
+    var m7: [u8; 6] = " enq=\0"
+    serial.puts((&m0[0]) as u64)
+    serial.dec(d)
+    serial.puts((&m1[0]) as u64)
+    serial.dec(dg(state, d, usbbase.D_SEQ))
+    serial.puts((&m2[0]) as u64)
+    serial.dec(seq)
+    serial.puts((&m3[0]) as u64)
+    serial.dec(dg(state, d, usbbase.D_ARMS))
+    serial.puts((&m4[0]) as u64)
+    serial.dec(dg(state, d, usbbase.D_REPS))
+    serial.puts((&m5[0]) as u64)
+    serial.dec(xhci.ep_last_ptrs(i, 0))
+    serial.puts((&m6[0]) as u64)
+    serial.dec(xhci.ep_last_ptrs(i, 1))
+    serial.puts((&m7[0]) as u64)
+    serial.dec(xhci.ep_enq(state, i))
+    serial.nl()
+}
+
+static mut ring_out: [u64; 4] = [0 as u64; 4]
+
+static mut ring_peak: u64 = 0
+
+fn ring_done(d: u64, n: u64) {
+    if d >= usbbase.MAX_DEV {
+        return
+    }
+    if ring_out[d as usize] > n {
+        ring_out[d as usize] = ring_out[d as usize] - n
+    } else {
+        ring_out[d as usize] = 0
+    }
+}
+
+fn ring_fresh(d: u64) {
+    if d < usbbase.MAX_DEV {
+        ring_out[d as usize] = 0
+    }
+}
+
+fn ring_peak_get() -> u64 {
+    return ring_peak
+}
+
+fn service_cpus() -> u64 {
+    return usbbase.svc_cpus
+}
+
+fn service_skips() -> u64 {
+    return usbbase.svc_skips
+}
+
+fn service_seq_jumps() -> u64 {
+    return usbbase.seq_jumps
+}
+
+fn deliver(state: u64, d: u64) {
+    if dg(state, d, usbbase.D_GENERIC) == 1 {
+        hidin.report(state, d, report_buf(state, d), dg(state, d, D_INTLEN))
+        return
+    }
+    if dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_KBD {
+        kbd_report(state, d)
+        return
+    }
+    if dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_MOUSE {
+        mouse_report(state, d)
+    }
+}
+
+fn kbd_report(state: u64, d: u64) {
+    let before: u64 = hidin.keys(state)
+    hidin.kbd_report_boot(state, d, report_buf(state, d))
+    s(state, usbbase.S_KEYS, g(state, usbbase.S_KEYS) + (hidin.keys(state) - before))
+}
+
+fn hid_keys(state: u64) -> u64 {
+    return hidin.keys(state)
+}
+
+fn hid_los(state: u64) -> u64 {
+    return hidin.releases(state)
+}
+
+fn hid_bew(state: u64) -> u64 {
+    return hidin.moves(state)
+}
+
+fn press(state: u64, u: u64) {
+    hidin.press(state, u)
+    s(state, usbbase.S_KEYS, g(state, usbbase.S_KEYS) + 1)
+}
+
+fn mouse_report(state: u64, d: u64) {
+    hidin.mouse_report_boot(state, d, report_buf(state, d),
+        dg(state, d, D_INTLEN))
+    s(state, usbbase.S_MOVES, g(state, usbbase.S_MOVES) + 1)
+}

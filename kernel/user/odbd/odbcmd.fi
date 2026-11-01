@@ -1,0 +1,1507 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import libc.errno
+import libc.io
+import keymap.kbdnames
+import pngenc
+import libc.proc
+import libc.text
+import ulib
+import odbd.odbbase
+import odbd.odbio
+
+const QUIET_MS: u64 = 3000
+
+const SLEEPY_MS: u64 = 5
+
+const DEEP_MS: u64 = 20        // after DEEP_AFTER_MS of silence (the host sends the wake preamble after 8 s, pause 50 ms) poll every 20 ms
+
+const DEEP_AFTER_MS: u64 = 8500
+
+const REQMAX: u64 = 8192
+
+const F_RETRY: u64 = 1
+
+fn cmd_push(id: u64, tp: u64, tl: u64) {
+    if !odbio.tget_str(tp, tl, odbio.s_path(), odbio.addr_path(), 600) {
+        odbio.reply_err(id, odbio.s_earg(), odbio.s_needpath())
+        return
+    }
+    let want_size: u64 = odbio.tget_num(tp, tl, odbio.s_size(), odbbase.NONE)
+    var wantsha: [u8; 65] = [0 as u8; 65]
+    let have_sha: bool = odbio.tget_str(tp, tl, odbio.s_sha256(), (&wantsha[0 as usize]) as u64, 65)
+    let fd: u64 = io.create(odbio.addr_path())
+    if errno.failed(fd) {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_cantcreate())
+        return
+    }
+    var next: u64 = 0
+    var acked: u64 = 0
+    var ending: bool = false
+    var failed: u64 = 0
+    while !ending {
+        let n: u64 = odbio.wait_frame(10000)
+        if n == 0 {
+            failed = 1
+            ending = true
+        } else {
+            let b: u64 = odbio.addr_rb()
+            let ty: u64 = odbio.rd8(b + 5)
+            let fid: u64 = odbio.rd32(b + 8)
+            let plen: u64 = odbio.rd32(b + 12)
+            if ty == odbbase.T_DATA && fid == id && plen >= 9 && odbio.rd8(b + odbbase.HDRLEN) == 3 {
+                let off: u64 = odbio.rd64(b + odbbase.HDRLEN + 1)
+                let cnt: u64 = plen - 9
+                if off == next {
+                    let w: u64 = io.write_all(fd, b + odbbase.HDRLEN + 9, cnt)
+                    if errno.failed(w) {
+                        failed = 2
+                        ending = true
+                    } else {
+                        next = next + cnt
+                        // ACK every in-order frame (20 octets): at the UART's ~17 KiB/s one 30 KB frame took longer
+                        // than the host's 2 s ack timer, which then rewound the stream for nothing.
+                        odbio.send_ack(id, next)
+                        acked = next
+                    }
+                } else {
+                    odbio.send_ack(id, next)
+                    acked = next
+                }
+            } else if ty == odbbase.T_END && fid == id && plen >= 1 && odbio.rd8(b + odbbase.HDRLEN) == 3 {
+                ending = true
+            } else if ty == odbbase.T_PING {
+                odbio.send_frame(odbbase.T_PONG, 0, fid, b + odbbase.HDRLEN, plen)
+            } else if ty == odbbase.T_CANCEL && fid == id {
+                failed = 3
+                ending = true
+            } else if ty == odbbase.T_REQ {
+                // a new session started: the host that was pushing is gone. Leave the REQ in the buffer for the main loop.
+                failed = 4
+                ending = true
+            }
+            if failed != 4 {
+                odbio.drop_bytes(n)
+            }
+        }
+    }
+    io.close(fd)
+    if failed == 4 {
+        return
+    }
+    if failed == 1 {
+        odbio.reply_err(id, odbio.s_etimeout(), odbio.s_pushwait())
+        return
+    }
+    if failed == 3 {
+        odbio.reply_err(id, odbio.s_ecancel(), odbio.s_cancelled())
+        return
+    }
+    if failed != 0 {
+        odbio.reply_err(id, odbio.s_eio(), odbio.s_writefail())
+        return
+    }
+    odbio.send_ack(id, next)
+    if !odbio.hash_file(odbio.addr_path()) {
+        odbio.reply_err(id, odbio.s_eio(), odbio.s_readback())
+        return
+    }
+    odbio.hexdump(odbio.addr_dig(), 32, odbio.addr_hex())
+    if want_size != odbbase.NONE && want_size != odbbase.g_size {
+        odbio.reply_err(id, odbio.s_ecrc(), odbio.s_sizemismatch())
+        return
+    }
+    if have_sha && !odbio.same_str((&wantsha[0 as usize]) as u64, 64, odbio.addr_hex()) {
+        odbio.reply_err(id, odbio.s_ecrc(), odbio.s_shamismatch())
+        return
+    }
+    odbio.p_reset()
+    odbio.p_num(odbio.s_size(), odbbase.g_size)
+    odbio.p_str(odbio.s_sha256(), odbio.addr_hex())
+    odbio.p_num(odbio.s_crc32(), odbbase.g_crc)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+fn send_file_chunk(id: u64, fd: u64, off: u64, size: u64) -> u64 {
+    var n: u64 = size - off
+    if n > odbbase.CHUNK {
+        n = odbbase.CHUNK
+    }
+    io.seek(fd, off, 0)
+    let got: u64 = io.read(fd, odbio.addr_io() + 9, n)
+    if errno.failed(got) || got == 0 {
+        return 0
+    }
+    // payload: 3 | off u64 | bytes  -- built in tb through send_frame, copy first
+    odbio.wr8(odbio.addr_io(), 3)
+    odbio.wr64(odbio.addr_io() + 1, off)
+    odbio.send_frame(odbbase.T_DATA, 0, id, odbio.addr_io(), 9 + got)
+    return got
+}
+
+fn cmd_pull(id: u64, tp: u64, tl: u64) {
+    if !odbio.tget_str(tp, tl, odbio.s_path(), odbio.addr_path(), 600) {
+        odbio.reply_err(id, odbio.s_earg(), odbio.s_needpath())
+        return
+    }
+    pull_file(id, tp, tl)
+}
+
+// Send the file named in addr_path() on stream 3 (go-back-N); shared by pull and crashdump get.
+fn pull_file(id: u64, tp: u64, tl: u64) {
+    if !odbio.hash_file(odbio.addr_path()) {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_cantopen())
+        return
+    }
+    let size: u64 = odbbase.g_size
+    let crcv: u64 = odbbase.g_crc
+    odbio.hexdump(odbio.addr_dig(), 32, odbio.addr_hex())
+    var sha_hex: [u8; 65] = [0 as u8; 65]
+    odbio.copy_bytes((&sha_hex[0 as usize]) as u64, odbio.addr_hex(), 65)
+    let fd: u64 = io.open(odbio.addr_path(), 0)
+    if errno.failed(fd) {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_cantopen())
+        return
+    }
+    var sent: u64 = odbio.tget_num(tp, tl, odbio.s_offset(), 0)
+    var acked: u64 = sent
+    var tries: u64 = 0
+    var failed: u64 = 0
+    var end_sent: bool = false
+    var one: [u8; 1] = [0 as u8; 1]
+    one[0 as usize] = 3
+    while acked < size && failed == 0 {
+        // fill the window
+        while sent < size && sent - acked < odbbase.WINDOW {
+            let n: u64 = send_file_chunk(id, fd, sent, size)
+            if n == 0 {
+                failed = 1
+                sent = size
+            } else {
+                sent = sent + n
+            }
+        }
+        // END goes out right behind the last data frame (the host ACKs on END). Waiting for the last ACK first stalled
+        // small pulls: the host only ACKs a full window or a short frame, and the resends came ~1 s apart.
+        if failed == 0 && sent >= size && !end_sent {
+            odbio.send_frame(odbbase.T_END, 0, id, (&one[0 as usize]) as u64, 1)
+            end_sent = true
+        }
+        if failed == 0 {
+            let f: u64 = odbio.wait_frame(2000)
+            if f == 0 {
+                tries = tries + 1
+                if tries > 5 {
+                    failed = 2
+                } else {
+                    sent = acked
+                    end_sent = false
+                }
+            } else {
+                let b: u64 = odbio.addr_rb()
+                let ty: u64 = odbio.rd8(b + 5)
+                if ty == odbbase.T_ACK && odbio.rd32(b + 8) == id && odbio.rd32(b + 12) >= 9 {
+                    let nx: u64 = odbio.rd64(b + odbbase.HDRLEN + 1)
+                    tries = 0
+                    if nx > acked {
+                        acked = nx
+                    }
+                    if nx < sent {
+                        sent = nx
+                        end_sent = false
+                    }
+                    if acked > sent {
+                        sent = acked
+                    }
+                } else if ty == odbbase.T_CANCEL && odbio.rd32(b + 8) == id {
+                    failed = 3
+                } else if ty == odbbase.T_REQ {
+                    failed = 4 // the host is gone and a new session starts: leave its REQ for the main loop
+                } else if ty == odbbase.T_PING {
+                    odbio.send_frame(odbbase.T_PONG, 0, odbio.rd32(b + 8), b + odbbase.HDRLEN, odbio.rd32(b + 12))
+                }
+                if failed != 4 {
+                    odbio.drop_bytes(f)
+                }
+            }
+        }
+    }
+    io.close(fd)
+    if failed == 4 {
+        return
+    }
+    if failed == 2 {
+        odbio.reply_err(id, odbio.s_etimeout(), odbio.s_pullwait())
+        return
+    }
+    if failed == 3 {
+        odbio.reply_err(id, odbio.s_ecancel(), odbio.s_cancelled())
+        return
+    }
+    if failed != 0 {
+        odbio.reply_err(id, odbio.s_eio(), odbio.s_readfail())
+        return
+    }
+    if !end_sent {
+        odbio.send_frame(odbbase.T_END, 0, id, (&one[0 as usize]) as u64, 1)
+    }
+    odbio.p_reset()
+    odbio.p_num(odbio.s_size(), size)
+    odbio.p_str(odbio.s_sha256(), (&sha_hex[0 as usize]) as u64)
+    odbio.p_num(odbio.s_crc32(), crcv)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+// ---- ps / logs / power
+
+fn cmd_ps(id: u64, tp: u64, tl: u64) {
+    var line: [u8; 160] = [0 as u8; 160]
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < 64 {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if st != 0 && !ulib.bad(st) {
+            let l: u64 = (&line[0 as usize]) as u64
+            var n: u64 = text.digits(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0), l, false)
+            odbio.wr8(l + n, 9)
+            n = n + 1
+            n = n + text.digits(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PPID, 0), l + n, false)
+            odbio.wr8(l + n, 9)
+            n = n + 1
+            n = n + text.digits(st, l + n, false)
+            odbio.wr8(l + n, 9)
+            n = n + 1
+            n = n + text.digits(ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PAGES, 0) * 4, l + n, false)
+            odbio.wr8(l + n, 9)
+            n = n + 1
+            var k: u64 = 0
+            while k < 2 {
+                let w: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_NAME0 + k, 0)
+                var j: u64 = 0
+                while j < 8 {
+                    let ch: u64 = (w >> (8 * j)) & 255
+                    if ch >= 32 && ch < 127 {
+                        odbio.wr8(l + n, ch)
+                        n = n + 1
+                    }
+                    j = j + 1
+                }
+                k = k + 1
+            }
+            odbio.wr8(l + n, 10)
+            n = n + 1
+            odbio.send_data(1, l, n, id)
+            count = count + 1
+        }
+        i = i + 1
+    }
+    odbio.send_end(1, id)
+    odbio.p_reset()
+    odbio.p_num(odbio.s_count(), count)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+fn cmd_kill(id: u64, tp: u64, tl: u64) {
+    let pid: u64 = odbio.tget_num(tp, tl, odbio.s_pid(), 0)
+    let sig: u64 = odbio.tget_num(tp, tl, odbio.s_sig(), 15)
+    if pid == 0 {
+        odbio.reply_err(id, odbio.s_earg(), odbio.s_needpid())
+        return
+    }
+    let r: u64 = ulib.sys(ulib.SYS_KILL, pid, sig, 0)
+    if ulib.bad(r) {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_nosuchpid())
+        return
+    }
+    odbio.p_reset()
+    odbio.p_num(odbio.s_ok(), 1)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+fn klog_count_lines(fd: u64) -> u64 {
+    io.seek(fd, 0, 0)
+    var lines: u64 = 0
+    var going: bool = true
+    var total: u64 = 0
+    while going {
+        let n: u64 = io.read(fd, odbio.addr_io(), 8192)
+        if errno.failed(n) || n == 0 || total > 4000000 {
+            going = false
+        } else {
+            var i: u64 = 0
+            while i < n {
+                if odbio.rd8(odbio.addr_io() + i) == 10 {
+                    lines = lines + 1
+                }
+                i = i + 1
+            }
+            total = total + n
+        }
+    }
+    return lines
+}
+
+fn cmd_logs(id: u64, tp: u64, tl: u64) {
+    let fd: u64 = io.open(odbio.s_devklog(), 0)
+    if errno.failed(fd) {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_noklog())
+        return
+    }
+    // tail: skip everything but the last `lines` lines (the ring is a few hundred lines, two passes are cheap)
+    let want: u64 = odbio.tget_num(tp, tl, odbio.s_lines(), 200)
+    let all: u64 = klog_count_lines(fd)
+    var skip: u64 = 0
+    if all > want {
+        skip = all - want
+    }
+    io.seek(fd, 0, 0)
+    var total: u64 = 0
+    var going: bool = true
+    var seen: u64 = 0
+    while going {
+        let n: u64 = io.read(fd, odbio.addr_io(), 8192)
+        if errno.failed(n) || n == 0 || total > 4000000 {
+            going = false
+        } else {
+            var start: u64 = 0
+            if seen < skip {
+                var i: u64 = 0
+                while i < n && seen < skip {
+                    if odbio.rd8(odbio.addr_io() + i) == 10 {
+                        seen = seen + 1
+                        start = i + 1
+                    }
+                    i = i + 1
+                }
+                if seen < skip {
+                    start = n
+                }
+            }
+            if start < n {
+                odbio.send_data(5, odbio.addr_io() + start, n - start, id)
+                total = total + (n - start)
+            }
+        }
+    }
+    io.close(fd)
+    odbio.send_end(5, id)
+    odbio.p_reset()
+    odbio.p_num(odbio.s_bytes(), total)
+    odbio.p_num(odbio.s_lines(), all - skip)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+// ---- shot (PNG of the compositor's picture; kernel/ui/shot.fi hands out the pixels against a one-shot permit)
+
+const SYS_OSUM_SHOT: u64 = 1841
+
+const SYS_OSUM_TIPP: u64 = 1843
+
+const SH_INFO: u64 = 0
+
+const SH_ARM: u64 = 1
+
+const SH_GRAB: u64 = 2
+
+const SH_DROP: u64 = 4
+
+const SI_READY: u64 = 0
+
+const SI_WIDTH: u64 = 1
+
+const SI_HEIGHT: u64 = 2
+
+const SI_ROWBYTES: u64 = 3
+
+const TI_INFO: u64 = 0
+
+const TI_ARM: u64 = 1
+
+const TI_DROP: u64 = 2
+
+const TI_MOVE: u64 = 4
+
+const TI_BUTTON: u64 = 5
+
+const TI_SCAN: u64 = 6
+
+const TQ_USED: u64 = 2
+
+const TQ_LOCKED: u64 = 9
+
+const TQ_KEYFOR: u64 = 11
+
+const BANDMAX: u64 = 65536
+
+const SHOT_DEFAULT_SCALE: u64 = 50
+
+static mut band: [u8; 65536] = [0 as u8; 65536]
+
+static mut rowbuf: [u8; 15360] = [0 as u8; 15360]
+
+static mut g_sw: u64 = 0
+
+static mut g_sh: u64 = 0
+
+static mut g_dw: u64 = 0
+
+static mut g_dh: u64 = 0
+
+// Test picture (`pattern=1`): flat gradient, checker, noise, repeated rows. tools/odb/run.sh redraws it in Python
+// and compares every pixel, so the encoder is checked without a screen.
+fn pat_pixel(x: u64, y: u64, w: u64, h: u64) -> u64 {
+    var r: u64 = 0
+    var g: u64 = 0
+    var b: u64 = 0
+    if y * 4 < h {
+        r = x * 255 / w
+        g = y * 255 / h
+        b = 128
+    } else if y * 2 < h {
+        if (((x >> 4) + (y >> 4)) & 1) == 0 {
+            r = 30
+            g = 60
+            b = 90
+        } else {
+            r = 200
+            g = 200
+            b = 200
+        }
+    } else if y * 4 < 3 * h {
+        let hs: u64 = ((x * 73856093) ^ (y * 19349663)) & 0xFFFFFF
+        r = hs & 255
+        g = (hs >> 8) & 255
+        b = (hs >> 16) & 255
+    } else {
+        r = (x * 3) & 255
+        g = (x >> 2) & 255
+        b = 77
+    }
+    return (r << 16) | (g << 8) | b
+}
+
+// 0 = ok, 1 = no screen, 2 = permit refused, 3 = grab failed, 4 = output buffer full, 5 = bad size
+fn shot_run(pat: bool, scale: u64) -> u64 {
+    var w: u64 = 320
+    var h: u64 = 200
+    var rbytes: u64 = 960
+    if !pat {
+        if ulib.sys(SYS_OSUM_SHOT, SH_INFO, SI_READY, 0) != 1 {
+            return 1
+        }
+        w = ulib.sys(SYS_OSUM_SHOT, SH_INFO, SI_WIDTH, 0)
+        h = ulib.sys(SYS_OSUM_SHOT, SH_INFO, SI_HEIGHT, 0)
+        rbytes = ulib.sys(SYS_OSUM_SHOT, SH_INFO, SI_ROWBYTES, 0)
+        if ulib.bad(w) || ulib.bad(h) || ulib.bad(rbytes) || w == 0 || h == 0 || rbytes < w * 3 {
+            return 1
+        }
+    }
+    var dw: u64 = w * scale / 100
+    var dh: u64 = h * scale / 100
+    if dw < 1 {
+        dw = 1
+    }
+    if dh < 1 {
+        dh = 1
+    }
+    g_sw = w
+    g_sh = h
+    g_dw = dw
+    g_dh = dh
+    if !pngenc.begin(dw, dh) {
+        return 5
+    }
+    var dy: u64 = 0
+    let rowp: u64 = (&rowbuf[0 as usize]) as u64
+    if pat {
+        while dy < dh {
+            let sy: u64 = dy * h / dh
+            var dx: u64 = 0
+            while dx < dw {
+                let c: u64 = pat_pixel(dx * w / dw, sy, w, h)
+                odbio.wr8(rowp + dx * 3, c >> 16)
+                odbio.wr8(rowp + dx * 3 + 1, c >> 8)
+                odbio.wr8(rowp + dx * 3 + 2, c)
+                dx = dx + 1
+            }
+            if !pngenc.row(rowp) {
+                return 4
+            }
+            dy = dy + 1
+        }
+    } else {
+        let arm: u64 = ulib.sys(SYS_OSUM_SHOT, SH_ARM, 0, 0)
+        if ulib.bad(arm) {
+            return 2
+        }
+        let bandp: u64 = (&band[0 as usize]) as u64
+        var sy_row: u64 = 0
+        while sy_row < h {
+            let n: u64 = ulib.sys(SYS_OSUM_SHOT, SH_GRAB, bandp, BANDMAX)
+            if ulib.bad(n) || n < rbytes {
+                ulib.sys(SYS_OSUM_SHOT, SH_DROP, 0, 0)
+                return 3
+            }
+            let got: u64 = n / rbytes
+            var r: u64 = 0
+            while r < got {
+                while dy < dh && dy * h / dh == sy_row + r {
+                    var dx: u64 = 0
+                    let srow: u64 = bandp + r * rbytes
+                    while dx < dw {
+                        let sp: u64 = srow + (dx * w / dw) * 3
+                        odbio.wr8(rowp + dx * 3, odbio.rd8(sp))
+                        odbio.wr8(rowp + dx * 3 + 1, odbio.rd8(sp + 1))
+                        odbio.wr8(rowp + dx * 3 + 2, odbio.rd8(sp + 2))
+                        dx = dx + 1
+                    }
+                    if !pngenc.row(rowp) {
+                        ulib.sys(SYS_OSUM_SHOT, SH_DROP, 0, 0)
+                        return 4
+                    }
+                    dy = dy + 1
+                }
+                r = r + 1
+            }
+            sy_row = sy_row + got
+        }
+    }
+    if dy != dh {
+        return 3
+    }
+    return 0
+}
+
+fn cmd_shot(id: u64, tp: u64, tl: u64) {
+    if odbio.tget_str(tp, tl, odbio.s_format(), odbio.addr_tmp(), 16) && !odbio.same_str(odbio.addr_tmp(), text.length(odbio.addr_tmp()), odbio.s_png()) {
+        odbio.reply_err(id, odbio.s_eunsup(), odbio.s_onlypng())
+        return
+    }
+    var scale: u64 = odbio.tget_num(tp, tl, odbio.s_scale(), SHOT_DEFAULT_SCALE)
+    if scale < 5 {
+        scale = 5
+    }
+    if scale > 100 {
+        scale = 100
+    }
+    let pat: bool = odbio.tget_num(tp, tl, odbio.s_pattern(), 0) != 0
+    pngenc.set_quant(odbio.tget_num(tp, tl, odbio.s_quant(), 0))
+    odbbase.cancelled = 0
+    var rc: u64 = 4
+    var going: bool = true
+    while going {
+        rc = shot_run(pat, scale)
+        if rc == 4 && scale > 6 {
+            scale = scale / 2 // a photographic desktop does not fit the buffer: halve until it does
+        } else {
+            going = false
+        }
+    }
+    if rc == 1 {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_noscreen())
+        return
+    }
+    if rc == 2 {
+        odbio.reply_err(id, odbio.s_eacces(), odbio.s_shotarm())
+        return
+    }
+    if rc != 0 {
+        odbio.reply_err(id, odbio.s_eio(), odbio.s_shotfail())
+        return
+    }
+    let total: u64 = pngenc.finish()
+    if total == 0 {
+        odbio.reply_err(id, odbio.s_elimit(), odbio.s_shotfull())
+        return
+    }
+    var off: u64 = 0
+    var alive: bool = true
+    while off < total && alive {
+        var n: u64 = total - off
+        if n > odbbase.CHUNK {
+            n = odbbase.CHUNK
+        }
+        alive = odbio.send_data(4, pngenc.data() + off, n, id)
+        off = off + n
+        odbio.check_cancel(id)
+        if odbbase.cancelled != 0 {
+            odbio.reply_err(id, odbio.s_ecancel(), odbio.s_cancelled())
+            return
+        }
+    }
+    if !alive {
+        return
+    }
+    odbio.send_end(4, id)
+    odbio.p_reset()
+    odbio.p_num(odbio.s_w(), g_dw)
+    odbio.p_num(odbio.s_h(), g_dh)
+    odbio.p_num(odbio.s_srcw(), g_sw)
+    odbio.p_num(odbio.s_srch(), g_sh)
+    odbio.p_str(odbio.s_format(), odbio.s_png())
+    odbio.p_num(odbio.s_bytes(), total)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+// ---- input (key / text / mouse through the bridge permit, SYS_OSUM_TIPP; keys are PS/2 set-1 scancodes)
+
+static mut g_inp_n: u64 = 0
+
+fn inj(what: u64, a1: u64, a2: u64) -> bool {
+    let r: u64 = ulib.sys(SYS_OSUM_TIPP, what, a1, a2)
+    return !ulib.bad(r)
+}
+
+// A permit allows 200 strokes; take a fresh one (root may) before it runs dry.
+fn inp_budget() {
+    let used: u64 = ulib.sys(SYS_OSUM_TIPP, TI_INFO, TQ_USED, 0)
+    if !ulib.bad(used) && used > 180 {
+        inj(TI_ARM, 0, 0)
+    }
+}
+
+// bit 8 of code = extended key (E0 prefix)
+fn scan_down(code: u64) -> bool {
+    inp_budget()
+    if (code & 0x100) != 0 {
+        if !inj(TI_SCAN, 0xE0, 0) {
+            return false
+        }
+    }
+    g_inp_n = g_inp_n + 1
+    return inj(TI_SCAN, code & 0xFF, 0)
+}
+
+fn scan_up(code: u64) -> bool {
+    if (code & 0x100) != 0 {
+        if !inj(TI_SCAN, 0xE0, 0) {
+            return false
+        }
+    }
+    g_inp_n = g_inp_n + 1
+    return inj(TI_SCAN, (code & 0xFF) | 0x80, 0)
+}
+
+// US-layout scancode of one ASCII character; bit 9 = needs Shift; 0 = unknown.
+fn char_code(c0: u64) -> u64 {
+    var c: u64 = c0
+    var shift: u64 = 0
+    if c >= 65 && c <= 90 {
+        c = c + 32
+        shift = 0x200
+    }
+    if c >= 97 && c <= 122 {
+        // a b c d e f g h i j k l m n o p q r s t u v w x y z
+        let p: u64 = c - 97
+        var t: [u8; 26] = [0 as u8; 26]
+        t[0] = 0x1E
+        t[1] = 0x30
+        t[2] = 0x2E
+        t[3] = 0x20
+        t[4] = 0x12
+        t[5] = 0x21
+        t[6] = 0x22
+        t[7] = 0x23
+        t[8] = 0x17
+        t[9] = 0x24
+        t[10] = 0x25
+        t[11] = 0x26
+        t[12] = 0x32
+        t[13] = 0x31
+        t[14] = 0x18
+        t[15] = 0x19
+        t[16] = 0x10
+        t[17] = 0x13
+        t[18] = 0x1F
+        t[19] = 0x14
+        t[20] = 0x16
+        t[21] = 0x2F
+        t[22] = 0x11
+        t[23] = 0x2D
+        t[24] = 0x15
+        t[25] = 0x2C
+        return (t[p as usize] as u64) | shift
+    }
+    if c >= 49 && c <= 57 {
+        return 0x02 + (c - 49) // 1..9
+    }
+    if c == 48 {
+        return 0x0B
+    }
+    if c == 32 {
+        return 0x39
+    }
+    if c == 10 || c == 13 {
+        return 0x1C
+    }
+    if c == 9 {
+        return 0x0F
+    }
+    if c == 45 {
+        return 0x0C
+    }
+    if c == 61 {
+        return 0x0D
+    }
+    if c == 91 {
+        return 0x1A
+    }
+    if c == 93 {
+        return 0x1B
+    }
+    if c == 59 {
+        return 0x27
+    }
+    if c == 39 {
+        return 0x28
+    }
+    if c == 96 {
+        return 0x29
+    }
+    if c == 92 {
+        return 0x2B
+    }
+    if c == 44 {
+        return 0x33
+    }
+    if c == 46 {
+        return 0x34
+    }
+    if c == 47 {
+        return 0x35
+    }
+    // shifted symbols
+    if c == 33 {
+        return 0x202
+    }
+    if c == 64 {
+        return 0x203
+    }
+    if c == 35 {
+        return 0x204
+    }
+    if c == 36 {
+        return 0x205
+    }
+    if c == 37 {
+        return 0x206
+    }
+    if c == 94 {
+        return 0x207
+    }
+    if c == 38 {
+        return 0x208
+    }
+    if c == 42 {
+        return 0x209
+    }
+    if c == 40 {
+        return 0x20A
+    }
+    if c == 41 {
+        return 0x20B
+    }
+    if c == 95 {
+        return 0x20C
+    }
+    if c == 43 {
+        return 0x20D
+    }
+    if c == 123 {
+        return 0x21A
+    }
+    if c == 125 {
+        return 0x21B
+    }
+    if c == 58 {
+        return 0x227
+    }
+    if c == 34 {
+        return 0x228
+    }
+    if c == 126 {
+        return 0x229
+    }
+    if c == 124 {
+        return 0x22B
+    }
+    if c == 60 {
+        return 0x233
+    }
+    if c == 62 {
+        return 0x234
+    }
+    if c == 63 {
+        return 0x235
+    }
+    return 0
+}
+
+// `layout=` of an input text request: a name (us de uk fr es it ru) -> its number + 1 (kernel TQ_KEYFOR wants that in the
+// top byte); `auto` or absent -> 0 = the layout the guest runs now.
+fn layout_arg(tp: u64, tl: u64) -> u64 {
+    let v: u64 = odbio.tget(tp, tl, odbio.s_layout())
+    if odbbase.g_vlen < 2 || odbbase.g_vlen >= kbdnames.NAME_LEN {
+        return 0
+    }
+    var word: [u8; 9] = [0 as u8; 9]
+    var i: u64 = 0
+    while i < odbbase.g_vlen {
+        word[i as usize] = lower(odbio.rd8(v + i)) as u8
+        i = i + 1
+    }
+    let lay: u64 = kbdnames.id_of((&word[0 as usize]) as u64)
+    if lay == kbdnames.NONE {
+        return 0
+    }
+    return lay + 1
+}
+
+// Scancode (+0x200 Shift, +0x400 AltGr) that types code point `cp`; 0 = not typable. Space, Enter and Tab are the same on
+// every layout; everything else is asked from the kernel (TQ_KEYFOR), so the text comes out right on the layout the guest
+// keyboard runs now (DEU on the desktop image), or on `lay1 - 1` when the request named one. A kernel without the query
+// (-ENOSYS/-EINVAL) falls back to the US table for ASCII.
+fn layout_code(lay1: u64, cp: u64) -> u64 {
+    if cp == 32 || cp == 10 || cp == 13 || cp == 9 {
+        return char_code(cp)
+    }
+    let r: u64 = ulib.sys(SYS_OSUM_TIPP, TI_INFO, TQ_KEYFOR, cp | (lay1 << 24))
+    if !ulib.bad(r) {
+        return r
+    }
+    if cp < 128 {
+        return char_code(cp)
+    }
+    return 0
+}
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+// name equals the lower-case ASCII word w (case-insensitive)
+fn name_is(p: u64, n: u64, w: u64) -> bool {
+    if n != text.length(w) {
+        return false
+    }
+    var i: u64 = 0
+    while i < n {
+        if lower(odbio.rd8(p + i)) != odbio.rd8(w + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Key name -> code (bit 8 = extended, bit 9 = Shift needed); 0 = unknown.
+fn key_code(p: u64, n: u64) -> u64 {
+    if n == 1 {
+        return char_code(odbio.rd8(p))
+    }
+    if name_is(p, n, odbio.s_k_enter()) || name_is(p, n, odbio.s_k_return()) {
+        return 0x1C
+    }
+    if name_is(p, n, odbio.s_k_esc()) || name_is(p, n, odbio.s_k_escape()) {
+        return 0x01
+    }
+    if name_is(p, n, odbio.s_k_tab()) {
+        return 0x0F
+    }
+    if name_is(p, n, odbio.s_k_backspace()) {
+        return 0x0E
+    }
+    if name_is(p, n, odbio.s_k_space()) {
+        return 0x39
+    }
+    if name_is(p, n, odbio.s_k_delete()) || name_is(p, n, odbio.s_k_del()) {
+        return 0x153
+    }
+    if name_is(p, n, odbio.s_k_insert()) {
+        return 0x152
+    }
+    if name_is(p, n, odbio.s_up()) {
+        return 0x148
+    }
+    if name_is(p, n, odbio.s_down()) {
+        return 0x150
+    }
+    if name_is(p, n, odbio.s_left()) {
+        return 0x14B
+    }
+    if name_is(p, n, odbio.s_right()) {
+        return 0x14D
+    }
+    if name_is(p, n, odbio.s_k_home()) {
+        return 0x147
+    }
+    if name_is(p, n, odbio.s_k_end()) {
+        return 0x14F
+    }
+    if name_is(p, n, odbio.s_k_pageup()) {
+        return 0x149
+    }
+    if name_is(p, n, odbio.s_k_pagedown()) {
+        return 0x151
+    }
+    if (n == 2 || n == 3) && lower(odbio.rd8(p)) == 102 {
+        // F1..F12
+        var f: u64 = 0
+        var i: u64 = 1
+        while i < n {
+            let d: u64 = odbio.rd8(p + i)
+            if d < 48 || d > 57 {
+                return 0
+            }
+            f = f * 10 + (d - 48)
+            i = i + 1
+        }
+        if f >= 1 && f <= 10 {
+            return 0x3A + f
+        }
+        if f == 11 {
+            return 0x57
+        }
+        if f == 12 {
+            return 0x58
+        }
+    }
+    return 0
+}
+
+// modifier words "ctrl+shift+alt+super" -> down codes in order; returns a bit set 1=ctrl 2=shift 4=alt 8=super
+fn mods_parse(tp: u64, tl: u64) -> u64 {
+    let v: u64 = odbio.tget(tp, tl, odbio.s_mods())
+    if odbbase.g_vlen == odbbase.NONE {
+        return 0
+    }
+    var set: u64 = 0
+    var start: u64 = 0
+    var i: u64 = 0
+    while i <= odbbase.g_vlen {
+        var cut: bool = i == odbbase.g_vlen
+        if !cut {
+            let ch: u64 = odbio.rd8(v + i)
+            cut = ch == 43 || ch == 44 || ch == 32
+        }
+        if cut {
+            let n: u64 = i - start
+            if name_is(v + start, n, odbio.s_m_ctrl()) || name_is(v + start, n, odbio.s_m_control()) {
+                set = set | 1
+            } else if name_is(v + start, n, odbio.s_m_shift()) {
+                set = set | 2
+            } else if name_is(v + start, n, odbio.s_m_alt()) {
+                set = set | 4
+            } else if name_is(v + start, n, odbio.s_m_super()) || name_is(v + start, n, odbio.s_m_win()) {
+                set = set | 8
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return set
+}
+
+fn mods_down(set: u64) -> bool {
+    var ok: bool = true
+    if (set & 1) != 0 {
+        ok = ok && scan_down(0x1D)
+    }
+    if (set & 2) != 0 {
+        ok = ok && scan_down(0x2A)
+    }
+    if (set & 4) != 0 {
+        ok = ok && scan_down(0x38)
+    }
+    if (set & 8) != 0 {
+        ok = ok && scan_down(0x15B)
+    }
+    return ok
+}
+
+fn mods_up(set: u64) -> bool {
+    var ok: bool = true
+    if (set & 8) != 0 {
+        ok = ok && scan_up(0x15B)
+    }
+    if (set & 4) != 0 {
+        ok = ok && scan_up(0x38)
+    }
+    if (set & 2) != 0 {
+        ok = ok && scan_up(0x2A)
+    }
+    if (set & 1) != 0 {
+        ok = ok && scan_up(0x1D)
+    }
+    return ok
+}
+
+fn btn_mask(tp: u64, tl: u64) -> u64 {
+    let v: u64 = odbio.tget(tp, tl, odbio.s_button())
+    if odbbase.g_vlen == odbbase.NONE {
+        return 1
+    }
+    if name_is(v, odbbase.g_vlen, odbio.s_right()) {
+        return 2
+    }
+    if name_is(v, odbbase.g_vlen, odbio.s_middle()) {
+        return 4
+    }
+    return 1
+}
+
+fn cmd_input(id: u64, tp: u64, tl: u64) {
+    // kind
+    var kind: u64 = 0 // 1 key, 2 text, 3 mouse, 4 scroll
+    let kv: u64 = odbio.tget(tp, tl, odbio.s_kind())
+    if odbbase.g_vlen == odbbase.NONE || name_is(kv, odbbase.g_vlen, odbio.s_key()) {
+        kind = 1
+    } else if name_is(kv, odbbase.g_vlen, odbio.s_text()) {
+        kind = 2
+    } else if name_is(kv, odbbase.g_vlen, odbio.s_mouse()) {
+        kind = 3
+    } else if name_is(kv, odbbase.g_vlen, odbio.s_scroll()) {
+        kind = 4
+    }
+    if kind == 0 {
+        odbio.reply_err(id, odbio.s_earg(), odbio.s_badkind())
+        return
+    }
+    if kind == 4 {
+        odbio.reply_err(id, odbio.s_eunsup(), odbio.s_noscroll())
+        return
+    }
+    let arm: u64 = ulib.sys(SYS_OSUM_TIPP, TI_ARM, 0, 0)
+    if ulib.bad(arm) {
+        if ulib.sys(SYS_OSUM_TIPP, TI_INFO, TQ_LOCKED, 0) == 1 {
+            odbio.reply_err(id, odbio.s_eacces(), odbio.s_inplocked())
+        } else {
+            odbio.reply_err(id, odbio.s_eacces(), odbio.s_noinput())
+        }
+        return
+    }
+    g_inp_n = 0
+    var ok: bool = true
+    var bad_arg: bool = false
+    if kind == 1 {
+        let kp: u64 = odbio.tget(tp, tl, odbio.s_key())
+        let kl: u64 = odbbase.g_vlen
+        let code: u64 = key_code(kp, kl)
+        if odbbase.g_vlen == odbbase.NONE || code == 0 {
+            bad_arg = true
+        } else {
+            var mods: u64 = mods_parse(tp, tl)
+            if (code & 0x200) != 0 {
+                mods = mods | 2
+            }
+            var act: u64 = 0 // 0 press, 1 down, 2 up
+            let av: u64 = odbio.tget(tp, tl, odbio.s_action())
+            if odbbase.g_vlen != odbbase.NONE {
+                if name_is(av, odbbase.g_vlen, odbio.s_down()) {
+                    act = 1
+                } else if name_is(av, odbbase.g_vlen, odbio.s_up()) {
+                    act = 2
+                }
+            }
+            if act != 2 {
+                ok = mods_down(mods) && scan_down(code & 0x1FF)
+            }
+            if ok && act != 1 {
+                ok = scan_up(code & 0x1FF)
+                if ok {
+                    ok = mods_up(mods)
+                }
+            }
+        }
+    } else if kind == 2 {
+        let xp: u64 = odbio.tget(tp, tl, odbio.s_text())
+        let xl: u64 = odbbase.g_vlen
+        let has_text: bool = odbbase.g_vlen != odbbase.NONE // tget_num below resets g_vlen when delay_ms is absent
+        let delay: u64 = odbio.tget_num(tp, tl, odbio.s_delay(), 0)
+        if !has_text {
+            bad_arg = true
+        } else {
+            let lay1: u64 = layout_arg(tp, tl)
+            var i: u64 = 0
+            while i < xl && ok && !bad_arg {
+                // UTF-8 -> code point (2 and 3 octet forms; anything else is not typable)
+                var cp: u64 = odbio.rd8(xp + i)
+                var used: u64 = 1
+                if cp >= 0xC0 && cp < 0xE0 && i + 1 < xl {
+                    cp = ((cp & 0x1F) << 6) | (odbio.rd8(xp + i + 1) & 0x3F)
+                    used = 2
+                } else if cp >= 0xE0 && cp < 0xF0 && i + 2 < xl {
+                    cp = ((cp & 0x0F) << 12) | ((odbio.rd8(xp + i + 1) & 0x3F) << 6) | (odbio.rd8(xp + i + 2) & 0x3F)
+                    used = 3
+                } else if cp >= 0x80 {
+                    cp = 0
+                }
+                let c: u64 = layout_code(lay1, cp)
+                if c == 0 {
+                    bad_arg = true
+                } else {
+                    var sh: u64 = 0
+                    if (c & 0x200) != 0 {
+                        sh = 2
+                    }
+                    let ag: bool = (c & 0x400) != 0
+                    ok = mods_down(sh)
+                    if ok && ag {
+                        ok = scan_down(0x138)
+                    }
+                    ok = ok && scan_down(c & 0x1FF) && scan_up(c & 0x1FF)
+                    if ag {
+                        ok = ok && scan_up(0x138)
+                    }
+                    ok = ok && mods_up(sh)
+                    if delay > 0 {
+                        if delay > 1000 {
+                            ulib.sleep_ms(1000)
+                        } else {
+                            ulib.sleep_ms(delay)
+                        }
+                    }
+                }
+                i = i + used
+            }
+        }
+    } else {
+        // mouse: absolute position (x,y), optional button action
+        let xv: u64 = odbio.tget(tp, tl, odbio.s_x())
+        let has_x: bool = odbbase.g_vlen != odbbase.NONE
+        let yv: u64 = odbio.tget(tp, tl, odbio.s_y())
+        let has_y: bool = odbbase.g_vlen != odbbase.NONE
+        if odbio.tget(tp, tl, odbio.s_dx()) != 0 || odbio.tget(tp, tl, odbio.s_dy()) != 0 {
+            ulib.sys(SYS_OSUM_TIPP, TI_DROP, 0, 0)
+            odbio.reply_err(id, odbio.s_eunsup(), odbio.s_noscroll())
+            return
+        }
+        if has_x && has_y {
+            ok = inj(TI_MOVE, odbio.tget_num(tp, tl, odbio.s_x(), 0), odbio.tget_num(tp, tl, odbio.s_y(), 0))
+            g_inp_n = g_inp_n + 1
+        }
+        let mask: u64 = btn_mask(tp, tl)
+        var act: u64 = 0 // 0 move only/click default, 1 click, 2 dblclick, 3 down, 4 up
+        let av: u64 = odbio.tget(tp, tl, odbio.s_action())
+        if odbbase.g_vlen != odbbase.NONE {
+            if name_is(av, odbbase.g_vlen, odbio.s_click()) {
+                act = 1
+            } else if name_is(av, odbbase.g_vlen, odbio.s_dblclick()) {
+                act = 2
+            } else if name_is(av, odbbase.g_vlen, odbio.s_down()) {
+                act = 3
+            } else if name_is(av, odbbase.g_vlen, odbio.s_up()) {
+                act = 4
+            }
+        } else if odbio.tget(tp, tl, odbio.s_button()) != 0 {
+            act = 1
+        }
+        var rep: u64 = 0
+        if act == 1 {
+            rep = 1
+        } else if act == 2 {
+            rep = 2
+        }
+        var k: u64 = 0
+        while k < rep && ok {
+            ok = inj(TI_BUTTON, mask, 1)
+            ulib.sleep_ms(30)
+            ok = ok && inj(TI_BUTTON, mask, 0)
+            g_inp_n = g_inp_n + 2
+            if k + 1 < rep {
+                ulib.sleep_ms(60)
+            }
+            k = k + 1
+        }
+        if act == 3 {
+            ok = inj(TI_BUTTON, mask, 1)
+            g_inp_n = g_inp_n + 1
+        }
+        if act == 4 {
+            ok = inj(TI_BUTTON, mask, 0)
+            g_inp_n = g_inp_n + 1
+        }
+        if !has_x && !has_y && act == 0 {
+            bad_arg = true
+        }
+    }
+    ulib.sys(SYS_OSUM_TIPP, TI_DROP, 0, 0)
+    if bad_arg {
+        odbio.reply_err(id, odbio.s_earg(), odbio.s_badinput())
+        return
+    }
+    if !ok {
+        odbio.reply_err(id, odbio.s_eio(), odbio.s_inrejected())
+        return
+    }
+    odbio.p_reset()
+    odbio.p_num(odbio.s_ok(), 1)
+    odbio.p_num(odbio.s_n(), g_inp_n)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+// ---- crashdump (reports the kernel writes to /var/crash/<seconds>.txt; id = file name)
+
+fn crash_path(id_p: u64, id_n: u64) -> bool {
+    if id_n == 0 || id_n > 60 || odbio.has_slash(id_p, id_n) || odbio.rd8(id_p) == 46 {
+        return false
+    }
+    let d: u64 = odbio.s_crashdir()
+    let dl: u64 = text.length(d)
+    odbio.copy_bytes(odbio.addr_path(), d, dl)
+    odbio.copy_bytes(odbio.addr_path() + dl, id_p, id_n)
+    odbio.wr8(odbio.addr_path() + dl + id_n, 0)
+    return true
+}
+
+fn cmd_crashdump(id: u64, tp: u64, tl: u64) {
+    var op: u64 = 0 // 0 list, 1 get, 2 clear
+    let ov: u64 = odbio.tget(tp, tl, odbio.s_op())
+    if odbbase.g_vlen != odbbase.NONE {
+        if name_is(ov, odbbase.g_vlen, odbio.s_get()) {
+            op = 1
+        } else if name_is(ov, odbbase.g_vlen, odbio.s_clear()) {
+            op = 2
+        } else if !name_is(ov, odbbase.g_vlen, odbio.s_list()) {
+            odbio.reply_err(id, odbio.s_earg(), odbio.s_badkind())
+            return
+        }
+    }
+    if op == 0 {
+        var ent: [u8; 512] = [0 as u8; 512]
+        var line: [u8; 200] = [0 as u8; 200]
+        let ep: u64 = (&ent[0 as usize]) as u64
+        let lp: u64 = (&line[0 as usize]) as u64
+        let fd: u64 = io.dir_open(odbio.s_crashroot())
+        var count: u64 = 0
+        if !errno.failed(fd) {
+            var more: bool = true
+            while more {
+                let m: u64 = io.dir_read(fd, ep, 512)
+                if m == 0 || ulib.bad(m) {
+                    more = false
+                } else {
+                    var at: u64 = 0
+                    while at < m {
+                        let rec: u64 = ep + at
+                        let name: u64 = io.dir_name(rec)
+                        let nl: u64 = text.length(name)
+                        if nl > 0 && odbio.rd8(name) != 46 && !odbio.same_str(name, nl, odbio.s_crashmark()) && crash_path(name, nl) && odbio.hash_file(odbio.addr_path()) {
+                            // id size time summary
+                            odbio.copy_bytes(lp, name, nl)
+                            var k: u64 = nl
+                            odbio.wr8(lp + k, 32)
+                            k = k + 1
+                            k = k + text.digits(odbbase.g_size, lp + k, false)
+                            odbio.wr8(lp + k, 32)
+                            k = k + 1
+                            k = k + text.digits(ulib.to_num(name), lp + k, false)
+                            odbio.wr8(lp + k, 32)
+                            k = k + 1
+                            let f2: u64 = io.open(odbio.addr_path(), 0)
+                            if !errno.failed(f2) {
+                                let r: u64 = io.read(f2, odbio.addr_tmp(), 120)
+                                io.close(f2)
+                                if !errno.failed(r) {
+                                    var j: u64 = 0
+                                    while j < r && odbio.rd8(odbio.addr_tmp() + j) != 10 {
+                                        odbio.wr8(lp + k, odbio.rd8(odbio.addr_tmp() + j))
+                                        k = k + 1
+                                        j = j + 1
+                                    }
+                                }
+                            }
+                            odbio.wr8(lp + k, 10)
+                            k = k + 1
+                            odbio.send_data(1, lp, k, id)
+                            count = count + 1
+                        }
+                        at = at + io.dir_reclen(rec)
+                    }
+                }
+            }
+            io.close(fd)
+        }
+        odbio.send_end(1, id)
+        odbio.p_reset()
+        odbio.p_num(odbio.s_count(), count)
+        odbio.send_final(odbbase.T_RESP, id)
+        return
+    }
+    let ip: u64 = odbio.tget(tp, tl, odbio.s_id())
+    let il: u64 = odbbase.g_vlen
+    if odbbase.g_vlen == odbbase.NONE || !crash_path(ip, il) {
+        odbio.reply_err(id, odbio.s_earg(), odbio.s_badid())
+        return
+    }
+    if op == 1 {
+        pull_file(id, tp, tl)
+        return
+    }
+    if errno.failed(io.unlink(odbio.addr_path())) {
+        odbio.reply_err(id, odbio.s_enoent(), odbio.s_nocrash())
+        return
+    }
+    odbio.p_reset()
+    odbio.p_num(odbio.s_ok(), 1)
+    odbio.send_final(odbbase.T_RESP, id)
+}
+
+// ---- power
+
+fn cmd_power(id: u64, tp: u64, tl: u64, reboot: bool) {
+    odbio.p_reset()
+    odbio.p_num(odbio.s_ok(), 1)
+    odbio.send_final(odbbase.T_RESP, id)
+    ulib.sleep_ms(200)
+    let kid: u64 = proc.split()
+    if kid == 0 {
+        var argv: [u64; 3] = [0 as u64; 3]
+        if reboot {
+            argv[0 as usize] = odbio.s_binreboot()
+            argv[1 as usize] = odbio.s_dashf()
+            ulib.sys(59, odbio.s_binreboot(), (&argv[0 as usize]) as u64, 0)
+        } else {
+            argv[0 as usize] = odbio.s_binshutdown()
+            argv[1 as usize] = 0
+            ulib.sys(59, odbio.s_binshutdown(), (&argv[0 as usize]) as u64, 0)
+        }
+        proc.leave(127)
+    }
+}
+
+// ------------------------------------------------------------ dispatch
+
+fn allowed(name: u64) -> bool {
+    return true
+}
+
+fn handle_req(id: u64, flags: u64, n: u64) {
+    // payload copy: nested receives would overwrite rb
+    let b: u64 = odbio.addr_rb()
+    let plen: u64 = odbio.rd32(b + 12)
+    if plen > REQMAX || plen < 1 {
+        odbio.reply_err(id, odbio.s_elimit(), odbio.s_toobig())
+        return
+    }
+    odbio.copy_bytes(odbio.addr_req(), b + odbbase.HDRLEN, plen)
+    odbio.drop_bytes(n)
+    let q: u64 = odbio.addr_req()
+    let cl: u64 = odbio.rd8(q)
+    if 1 + cl > plen {
+        odbio.reply_err(id, odbio.s_eproto(), odbio.s_badreq())
+        return
+    }
+    let tp: u64 = q + 1 + cl
+    let tl: u64 = plen - 1 - cl
+    let cmd: u64 = q + 1
+    if id == odbbase.lastid && (flags & F_RETRY) != 0 {
+        // idempotent retry: answer from the cache, never run twice
+        odbio.send_frame(odbbase.lasttype, 0, id, (&odbbase.lastbuf[0 as usize]) as u64, odbbase.lastlen)
+        return
+    }
+    if odbio.same_str(cmd, cl, odbio.s_hello()) {
+        odbio.cmd_hello(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_auth_cmd()) {
+        odbio.cmd_auth(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_ping()) {
+        odbio.p_reset()
+        odbio.p_num(odbio.s_ok(), 1)
+        odbio.send_final(odbbase.T_RESP, id)
+    } else if odbbase.authed == 0 {
+        odbio.reply_err(id, odbio.s_eauth(), odbio.s_notauth())
+    } else if odbio.same_str(cmd, cl, odbio.s_info()) {
+        odbio.cmd_info(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_exec()) {
+        odbio.cmd_exec(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_shell()) {
+        odbio.cmd_shell(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_push()) {
+        cmd_push(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_pull()) {
+        cmd_pull(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_ps()) {
+        cmd_ps(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_kill()) {
+        cmd_kill(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_logs()) {
+        cmd_logs(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_shot()) {
+        cmd_shot(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_input()) {
+        cmd_input(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_crashdump()) {
+        cmd_crashdump(id, tp, tl)
+    } else if odbio.same_str(cmd, cl, odbio.s_reboot()) {
+        cmd_power(id, tp, tl, true)
+    } else if odbio.same_str(cmd, cl, odbio.s_shutdown()) {
+        cmd_power(id, tp, tl, false)
+    } else {
+        odbio.reply_err(id, odbio.s_eunsup(), odbio.s_unknowncmd())
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    odbio.crc_init()
+    if !odbio.conf_enabled() {
+        ulib.say(odbio.s_disabled())
+        ulib.nl()
+        return 0
+    }
+    odbbase.dev = io.open(odbio.s_devodb(), 2)
+    if errno.failed(odbbase.dev) {
+        ulib.say(odbio.s_nodev())
+        ulib.nl()
+        return 1
+    }
+    odbio.load_token()
+    ulib.say(odbio.s_ready())
+    ulib.nl()
+    var idle: u64 = 0
+    while true {
+        let n: u64 = odbio.have_frame()
+        if n == 0 {
+            let got: u64 = odbio.fill()
+            if got == 0 {
+                odbio.stale_check()
+                idle = idle + 1
+                if odbio.mono_ms() -% odbbase.g_last_rx > QUIET_MS && odbbase.rlen == 0 {
+                    // Nothing for QUIET_MS: poll slowly so the agent costs next to no CPU. The host sends a wake
+                    // preamble (zero octets + pause) before a frame after silence, see docs/ODB.md.
+                    if odbio.mono_ms() -% odbbase.g_last_rx > DEEP_AFTER_MS {
+                        ulib.sleep_ms(DEEP_MS)
+                    } else {
+                        ulib.sleep_ms(SLEEPY_MS)
+                    }
+                } else if idle > 200 {
+                    ulib.sys(ulib.SYS_YIELD, 0, 0, 0)
+                    idle = 0
+                }
+            } else {
+                idle = 0
+            }
+        } else {
+            let b: u64 = odbio.addr_rb()
+            let ty: u64 = odbio.rd8(b + 5)
+            let id: u64 = odbio.rd32(b + 8)
+            let fl: u64 = odbio.rd16(b + 6)
+            if ty == odbbase.T_REQ {
+                handle_req(id, fl, n)
+                odbbase.g_last_rx = odbio.mono_ms()
+            } else if ty == odbbase.T_PING {
+                odbio.send_frame(odbbase.T_PONG, 0, id, b + odbbase.HDRLEN, odbio.rd32(b + 12))
+                odbio.drop_bytes(n)
+            } else if ty == odbbase.T_PONG || ty == odbbase.T_DATA || ty == odbbase.T_END || ty == odbbase.T_ACK || ty == odbbase.T_CANCEL {
+                odbio.drop_bytes(n)
+            } else {
+                odbio.reply_err(id, odbio.s_eunsup(), odbio.s_unknowntype())
+                odbio.drop_bytes(n)
+            }
+        }
+    }
+    return 0
+}
