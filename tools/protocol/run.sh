@@ -22,7 +22,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { # name value op expected
     local name=$1 value=$2 op=$3 want=$4
-    if [ -z "$value" ]; then bad "$name: keine Zahl gefunden (erwartet $op $want)"; return; fi
+    if [ -z "$value" ]; then bad "$name: no number found (expected $op $want)"; return; fi
     if [ "$value" -"$op" "$want" ] 2>/dev/null; then ok "$name: $value"
     else bad "$name: $value, erwartet $op $want"; fi
 }
@@ -59,10 +59,10 @@ lauf_platte() { # abbild kommandozeile ausgabe platte
     lauf "$1" "$2" "$3" -drive "file=$4,format=raw,if=ide,index=0"
 }
 
-echo "== 1. bauen: Kernel mit Symboltabelle, und die drei neuen Programme =="
+echo "== 1. build: kernel with symbol table, and the three new programs =="
 bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/build.log" 2>&1 \
     && ok "Kernel gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)" \
-    || { bad "der Kernel laesst sich nicht bauen"
+    || { bad "the kernel cannot be built"
          sed 's/^/        /' "$TMPD/build.log" | head -15
          echo "PROTOKOLL: $pass passed, $fail failed"; exit 1; }
 K0="$TMPD/k0.mb"
@@ -74,16 +74,16 @@ num "Quellzeilen-Eintraege im Abbild" "$n" gt 20000
 
 bash tools/build-kernel.sh "$TMPD/knosym.mb" --ohne-symbole \
     > "$TMPD/build2.log" 2>&1 \
-    && ok "--ohne-symbole baut ebenfalls" || bad "--ohne-symbole baut nicht"
+    && ok "--ohne-symbole builds as well" || bad "--ohne-symbole does not build"
 if [ -f "$TMPD/knosym.mb" ]; then
     a=$(stat -c%s "$K0"); b=$(stat -c%s "$TMPD/knosym.mb")
-    echo "        Preis der Tabellen: $((a - b)) Oktette ($a gegen $b)"
+    echo "        price of the tables: $((a - b)) octets ($a against $b)"
     num "die Tabellen kosten wirklich Platz" "$((a - b))" gt 100000
 fi
 
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
-        || bad "$f.s laesst sich nicht assemblieren"
+        || bad "$f.s cannot be assembled"
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 for p in $PROGS; do
@@ -92,34 +92,34 @@ for p in $PROGS; do
         || { bad "$q.fi uebersetzt nicht"; sed 's/^/        /' "$TMPD/e$p" | head -6; }
     ld -T "$ULD" --defsym=USER_ENTRY="_F0.u_start" \
         -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null \
-        || bad "$p laesst sich nicht binden"
+        || bad "$p cannot be linked"
 done
-[ -f "$TMPD/log.elf" ] && ok "/bin/log, /bin/absturz und /bin/krach gebaut" \
+[ -f "$TMPD/log.elf" ] && ok "/bin/log, /bin/absturz and /bin/krach built" \
                        || bad "die neuen Programme fehlen"
 
 kn=$(grep -aoE 'const SYS_OSUM_KLOG: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
 un=$(grep -aoE 'const SYS_KLOG: u64 = [0-9]+' kernel/user/ulib.fi | grep -oE '[0-9]+$')
 [ "$kn" = "$un" ] && [ -n "$kn" ] \
-    && ok "SYS_KLOG ist im Kern und in ulib dieselbe Nummer ($kn)" \
+    && ok "SYS_KLOG is the same number in the kernel and in ulib ($kn)" \
     || bad "SYS_KLOG: Kern=$kn ulib=$un"
 kn=$(grep -aoE 'const SYS_OSUM_KRACH: u64 = [0-9]+' kernel/sys/sys.fi | grep -oE '[0-9]+$')
 un=$(grep -aoE 'const SYS_KRACH: u64 = [0-9]+' kernel/user/ulib.fi | grep -oE '[0-9]+$')
 [ "$kn" = "$un" ] && [ -n "$kn" ] \
-    && ok "SYS_KRACH ist im Kern und in ulib dieselbe Nummer ($kn)" \
+    && ok "SYS_KRACH is the same number in the kernel and in ulib ($kn)" \
     || bad "SYS_KRACH: Kern=$kn ulib=$un"
 
 python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1
 has "$TMPD/map.txt" "0 collisions" "die Speicherkarte von kdata bleibt kollisionsfrei"
 KDS=$(sed -n 's/^const KDATA_SIZE: u64 = \(0x[0-9A-Fa-f]*\).*/\1/p' kernel/lib/kstate.fi | head -1)
 grep -q "$KDS" "$TMPD/map.txt" \
-    && ok "kdata ist $KDS gross (der Ring braucht 64 KiB am Stueck)" \
-    || bad "kdata hat nicht die erwartete Groesse ($KDS)"
+    && ok "kdata is $KDS large (the ring needs 64 KiB contiguous)" \
+    || bad "kdata does not have the expected size ($KDS)"
 a=$(grep -aoE 'KDATA_SIZE, 0x[0-9A-F]+' kernel/arch/x86_64/boot.s | head -1 | grep -oE '0x[0-9A-F]+')
 b=$(grep -aoE 'const KDATA_SIZE: u64 = 0x[0-9A-F]+' kernel/lib/kstate.fi | grep -oE '0x[0-9A-F]+')
-[ "$a" = "$b" ] && ok "KDATA_SIZE steht in boot.s und kstate.fi gleich ($a)" \
+[ "$a" = "$b" ] && ok "KDATA_SIZE is the same in boot.s and kstate.fi ($a)" \
                 || bad "KDATA_SIZE: boot.s=$a kstate.fi=$b"
 
-echo "== 2. (a) vier Kerne, zehntausend Zeilen jeder, ein Ring =="
+echo "== 2. (a) four cores, ten thousand lines each, one ring =="
 lauf "$K0" "nokbd nosched noproc nofs noring3 logall lograce" \
     "$TMPD/race.txt" -smp 4
 if grep -qa 'smp: lograce' "$TMPD/race.txt"; then
@@ -136,7 +136,7 @@ if grep -qa 'smp: lograce' "$TMPD/race.txt"; then
     num "Zeilen, die der Ring ueberschrieben hat (40000 - 510)" "$ro" eq 39490
     num "verschraenkte Eintraege (Kopf und Text von verschiedenen Kernen)" "$kp" eq 0
 else
-    bad "der Lauf mit vier Kernen hat keine lograce-Zeile geliefert"
+    bad "the four-core run delivered no lograce line"
     tail -5 "$TMPD/race.txt" | sed 's/^/        /'
 fi
 
@@ -150,24 +150,24 @@ if [ -n "$ms" ]; then
     else
         num "eine Million ausgefilterte Aufrufe in Millisekunden (TCG, nur Schranke gegen Ausreisser)" \
             "$ms" lt 1000
-        echo "        (die Abnahmeschwelle 100 ms gilt fuer KVM; hier lief TCG)"
+        echo "        (the acceptance threshold of 100 ms applies to KVM; this ran on TCG)"
     fi
 else
-    bad "keine Messung des schnellen Weges gefunden"
+    bad "no measurement of the fast path found"
 fi
 
-echo "== 4. das Protokoll im Betrieb: Quellen, Stufen, /proc und /dev =="
+echo "== 4. the log in operation: sources, levels, /proc and /dev =="
 lauf "$K0" "nokbd nosched noproc noring3 logdebug" "$TMPD/dbg.txt"
 n=$(grep -ac ' [DIWE] ' "$TMPD/dbg.txt")
 num "Protokollzeilen auf der seriellen Leitung mit logdebug" "$n" ge 1
 grep -qaE '\[ *[0-9]+\] [0-9]+/[0-9]+ [DIWE] [a-z]+ *: ' "$TMPD/dbg.txt" \
-    && ok "das Format stimmt: [zeit] kern/pid stufe quelle: text" \
-    || bad "keine Zeile im vereinbarten Format"
+    && ok "the format is right: [time] core/pid level source: text" \
+    || bad "no line in the agreed format"
 lauf "$K0" "nokbd nosched noproc nofs noring3 logquiet" "$TMPD/quiet.txt"
 n2=$(grep -ac ' [DI] ' "$TMPD/quiet.txt")
 num "debug/info-Zeilen mit logquiet (die Schwelle muss wirken)" "${n2:-0}" eq 0
 
-echo "== 5. die Platte, die Programme darauf und der Neustart =="
+echo "== 5. the disk, the programs on it and the restart =="
 printf 'protokoll\n' > "$TMPD/readme.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
@@ -187,18 +187,18 @@ has "$TMPD/r3.txt" "user fault" "(d) der Nullzeiger in Ring 3 wurde als Benutzer
 has "$TMPD/r3.txt" "process killed" "(d) das Programm ist gestorben"
 has "$TMPD/r3.txt" "WEITERLAEUFT" "(d) das System laeuft danach weiter"
 hasber=$(grep -aoE '/var/crash/[0-9]+\.txt' "$TMPD/r3.txt" | head -1)
-[ -n "$hasber" ] && ok "(d) ein Bericht wurde abgelegt: $hasber" \
-                 || bad "(d) es wurde kein Bericht abgelegt"
+[ -n "$hasber" ] && ok "(d) a report was stored: $hasber" \
+                 || bad "(d) no report was stored"
 grep -qa 'absturz: bericht' "$TMPD/r3.txt" \
-    && ok "(d) der Kern sagt, was aus dem Bericht geworden ist" \
-    || bad "(d) der Kern schweigt ueber den Bericht"
+    && ok "(d) the kernel says what became of the report" \
+    || bad "(d) the kernel is silent about the report"
 
 lauf_platte "$K0" "osum $QUIET logall krach script=krach kern;exit" \
     "$TMPD/panikdisk.txt" "$TMPD/disk.img"
 has "$TMPD/panikdisk.txt" "*** EXCEPTION" "(c) die erzwungene Kernel-Panik hat stattgefunden"
 hasber=$(grep -aoE '/var/crash/[0-9]+\.txt' "$TMPD/panikdisk.txt" | tail -1)
-[ -n "$hasber" ] && ok "(c) der Kern hat trotz Panik einen Bericht abgelegt: $hasber" \
-                 || bad "(c) bei der Panik wurde kein Bericht abgelegt"
+[ -n "$hasber" ] && ok "(c) the kernel stored a report despite the panic: $hasber" \
+                 || bad "(c) no report was stored on the panic"
 
 lauf_platte "$K0" "osum $QUIET script=absturz;exit" \
     "$TMPD/nachher.txt" "$TMPD/disk.img"
@@ -219,15 +219,15 @@ lauf_platte "$K0" "osum $QUIET logall script=log -z;log -p HALLOWELT;log -n 4;ex
 has "$TMPD/werkzeug.txt" "zeilen:" "/bin/log -z zeigt die Zahlen des Rings"
 has "$TMPD/werkzeug.txt" "HALLOWELT" "/bin/log -p schreibt eine Zeile in den Ring"
 grep -qa 'prog *: HALLOWELT' "$TMPD/werkzeug.txt" \
-    && ok "die geschriebene Zeile steht als Quelle 'prog' im Ring" \
-    || bad "die geschriebene Zeile taucht nicht als Protokollzeile auf"
+    && ok "the written line shows as source 'prog' im Ring" \
+    || bad "the written line does not appear as a log line"
 lauf_platte "$K0" "osum $QUIET logall script=cat /proc/klog;exit" \
     "$TMPD/proc.txt" "$TMPD/disk.img"
 has "$TMPD/proc.txt" "# klog" "/proc/klog liefert einen Kopf mit den Zahlen"
 lauf_platte "$K0" "osum $QUIET logall script=cat /dev/klog;exit" \
     "$TMPD/dev.txt" "$TMPD/disk.img"
 grep -qaE '\[ *[0-9]+\] [0-9]+/[0-9]+ [DIWE] ' "$TMPD/dev.txt" \
-    && ok "/dev/klog liefert dieselben Zeilen im selben Format" \
+    && ok "/dev/klog delivers the same lines in the same format" \
     || bad "/dev/klog liefert nichts Lesbares"
 
 lauf_platte "$K0" "osum $QUIET script=krach kern;echo LEBTNOCH;exit" \
@@ -235,7 +235,7 @@ lauf_platte "$K0" "osum $QUIET script=krach kern;echo LEBTNOCH;exit" \
 has "$TMPD/riegel.txt" "LEBTNOCH" \
     "ohne 'krach' auf der Kernel-Befehlszeile lehnt der Aufruf 1861 ab"
 
-echo "== 5b. K-011: der Bericht ueberlebt den warmen Neustart im Speicher =="
+echo "== 5b. K-011: the report survives the warm restart in memory =="
 #
 lauf_platte "$K0" "osum $QUIET logall krach script=krach kernfs;exit" \
     "$TMPD/kalt1.txt" "$TMPD/disk.img"
@@ -268,24 +268,24 @@ warte_halt() { # wie viele 'kernel halted'
     return 1
 }
 if warte_halt 1; then
-    ok "K-011 warm: erste Panik, Maschine steht"
+    ok "K-011 warm: first panic, machine halted"
     python3 - "$wsock" <<'PY'
 import socket, sys, time
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.3)
 s.recv(4096); s.sendall(b"system_reset\n"); time.sleep(0.5); s.close()
 PY
-    warte_halt 2 && ok "K-011 warm: nach dem Reset gestartet und erneut angehalten" \
-        || bad "K-011 warm: nach dem Reset kein zweiter Lauf"
+    warte_halt 2 && ok "K-011 warm: started after the reset and halted again" \
+        || bad "K-011 warm: no second run after the reset"
 else
-    bad "K-011 warm: die erste Panik kam nicht"
+    bad "K-011 warm: the first panic did not come"
 fi
 kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null; rm -f "$wsock"
 awk '/kernel halted/ { n++; next } n == 1' "$TMPD/warm.txt" > "$TMPD/warm2.txt"
 has "$TMPD/warm2.txt" "absturz: report rescued from memory" \
     "K-011 warm: der zweite Start findet den Bericht im Speicher"
 grep -qaE 'absturz: bericht +/var/crash/[0-9]+\.txt +geschrieben' "$TMPD/warm2.txt" \
-    && ok "K-011 warm: und legt ihn als Datei unter /var/crash ab" \
-    || bad "K-011 warm: der gerettete Bericht wurde nicht abgelegt"
+    && ok "K-011 warm: and stores it as a file under /var/crash" \
+    || bad "K-011 warm: the rescued report was not stored"
 has "$TMPD/warm2.txt" "ABSTURZBERICHT (KERN)" "K-011 warm: /bin/absturz zeigt ihn als Kernbericht"
 has "$TMPD/warm2.txt" "Bestellung, art 2" "K-011 warm: und es ist der Bericht DIESER Panik (art 2 im Protokollteil)"
 
@@ -313,11 +313,11 @@ wait "$qpid" 2>/dev/null
 rm -f "$sock"
 
 if [ -s "$TMPD/panik.ppm" ]; then
-    ok "ein Bildschirmfoto der Panik liegt vor ($(stat -c%s "$TMPD/panik.ppm") Oktette)"
+    ok "a screenshot of the panic exists ($(stat -c%s "$TMPD/panik.ppm") Oktette)"
     python3 tools/protocol/schirmtext.py "$TMPD/panik.ppm" kernel/gfx/font.fi \
         > "$TMPD/schirm.txt" 2>"$TMPD/schirm.err"
     if [ -s "$TMPD/schirm.txt" ]; then
-        echo "        --- was auf dem Schirm steht:"
+        echo "        --- what is on the screen:"
         sed 's/^/        | /' "$TMPD/schirm.txt" | head -32
         has "$TMPD/schirm.txt" "KERNEL-PANIK" "(b) der Schirm sagt, was los ist"
         has "$TMPD/schirm.txt" "#PF" "(b) der Schirm nennt die Ausnahme beim Namen"
@@ -336,11 +336,11 @@ if [ -s "$TMPD/panik.ppm" ]; then
         num "(b) Zeilen mit unlesbaren Zellen (die Glyphen muessen exakt passen)" \
             "${n:-0}" le 1
     else
-        bad "(b) aus dem Bildschirmfoto liess sich kein Text lesen"
+        bad "(b) no text could be read from the screenshot"
         sed 's/^/        /' "$TMPD/schirm.err" | head -5
     fi
 else
-    bad "(b) es kam kein Bildschirmfoto zustande"
+    bad "(b) no screenshot was produced"
     sed 's/^/        /' "$TMPD/schuss.txt" | head -5
 fi
 has "$TMPD/panik.txt" "*** EXCEPTION" "(b) dieselbe Panik steht auch auf der Leitung"
@@ -365,7 +365,7 @@ num "GEGENPROBE: der Scan meldet Eintraege, die keine Rufer sind (Altlast)" "${a
 has "$TMPD/panik.txt" "die letzten Protokollzeilen" \
     "(b) die letzten Protokollzeilen stehen auch auf der Leitung"
 
-echo "== 7. dass die Umstellung der Treiber wirklich stattgefunden hat =="
+echo "== 7. that the driver switch really took place =="
 n=0
 for f in nvme xhci usb ahci e1000 fs; do
     q=$(find kernel -name "$f.fi" -print -quit)

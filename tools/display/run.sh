@@ -23,7 +23,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden (erwartet $3 $4)"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found (expected $3 $4)"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -41,23 +41,23 @@ schau() { local name=$1; shift; local aus rc
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
 schau_nicht() { local name=$1; shift; local aus rc
     aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
-    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi; }
+    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- passed: $aus"; fi; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "DISPLAY: skipped, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "DISPLAY: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 
 # ============================================== 1. die Quellen
 
-echo "== 1. die Quellen: zwei Dateien, eine Wahrheit =="
+echo "== 1. the sources: two files, one truth =="
 
 for r in VBE_INDEX VBE_DATA VBE_ID VBE_XRES VBE_YRES VBE_BPP VBE_ENABLE \
          VBE_BANK VBE_VWIDTH VBE_VHEIGHT VBE_XOFF VBE_YOFF \
          VBE_DISABLED VBE_ENABLED VBE_LFB VBE_ID_LO VBE_ID_HI; do
     a=$(grep -aE "^const $r: (u16|u64) = " kernel/gfx/fb.fi | sed 's/.*= //; s/ *\/\/.*//')
     b=$(grep -aE "^const $r: (u16|u64) = " kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
-    if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht in fb.fi und vmode.fi gleich ($a)"
+    if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r is the same in fb.fi and vmode.fi ($a)"
     else bad "$r: fb.fi='$a', vmode.fi='$b'"; fi
 done
 v64=$(grep -aE '^const VBE_VRAM64K' kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
@@ -65,9 +65,9 @@ gleich "VBE_VIDEO_MEMORY_64K ist Index 10 (0x0A)" "10" "$v64"
 
 d1=$(grep -aE '^const DISP_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
 d2=$(grep -aE '^const DLUT_OFF' kernel/lib/kstate.fi | sed 's/.*= //')
-[ -n "$d1" ] && ok "die kdata-Seite des Modustreibers steht in kstate.fi: $d1" \
+[ -n "$d1" ] && ok "the kdata side of the mode driver is in kstate.fi: $d1" \
              || bad "DISP_OFF fehlt in kernel/lib/kstate.fi"
-[ -n "$d2" ] && ok "die kdata-Seite der Nachschlagetabelle steht daneben: $d2" \
+[ -n "$d2" ] && ok "the kdata side of the lookup table is next to it: $d2" \
              || bad "DLUT_OFF fehlt in kernel/lib/kstate.fi"
 gleich "und sie folgt unmittelbar auf den Modustreiber" \
     "$(printf '0x%X' $(( $d1 + 0x1000 )))" "$(printf '0x%X' $(( $d2 )))"
@@ -75,24 +75,24 @@ fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]'
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/user/dispctl.fi' \
               -e '^kernel/user/settings.fi' -e '^kernel/user/qs.fi' \
               -e '^kernel/user/snip.fi' -e '^kernel/user/wmd.fi' || true)
-[ -z "$fremd" ] && ok "keine Aufrufnummer aus 1810..1819 steht ausserhalb der Dateien dieser Runde" \
-                || bad "Aufrufnummern aus 1810..1819 stehen auch in: $(echo $fremd | tr '\n' ' ')"
+[ -z "$fremd" ] && ok "no call number from 1810..1819 lies outside the files of this round" \
+                || bad "call numbers from 1810..1819 also appear in: $(echo $fremd | tr '\n' ' ')"
 eigen=$(grep -ahE '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/sys/sys.fi | wc -l | tr -d ' ')
 gleich "in kernel/sys/sys.fi stehen genau drei Nummern aus dem Vorrat" "3" "$eigen"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
+    ok "the kdata memory map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 
 # ============================================== 2. bauen
 
-echo "== 2. der Kern und die Programme =="
+echo "== 2. the kernel and the programs =="
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || { echo "as scheitert"; exit 1; }
 rc=0
 bash tools/build-kernel.sh "$TMPD/k0.mb" > "$TMPD/k0.log" 2>&1 || {
-    bad "der Kern laesst sich nicht bauen"; tail -8 "$TMPD/k0.log" | sed 's/^/        /'; rc=1; }
+    bad "the kernel cannot be built"; tail -8 "$TMPD/k0.log" | sed 's/^/        /'; rc=1; }
 for p in $PROGS; do
     "$FIRNC" "kernel/user/$p.fi" -o "$TMPD/$p.o" > "$TMPD/$p.err" 2>&1 || {
         bad "firnc uebersetzt $p.fi nicht"; head -6 "$TMPD/$p.err"; rc=1; continue; }
@@ -100,8 +100,8 @@ for p in $PROGS; do
         "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bad "ld scheitert an $p"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
-[ "$rc" = 0 ] && ok "der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
-[ -f "$TMPD/k0.mb" ] || { echo "DISPLAY: ohne Kern geht nichts weiter"; echo "DISPLAY: $pass passed, $((fail+1)) failed"; exit 1; }
+[ "$rc" = 0 ] && ok "the kernel and $(echo $PROGS | wc -w) programs are built"
+[ -f "$TMPD/k0.mb" ] || { echo "DISPLAY: nothing goes on without the kernel"; echo "DISPLAY: $pass passed, $((fail+1)) failed"; exit 1; }
 
 UPROF=""; UCRT="$TMPD/crt.o"
 grep -qa '^profile app' kernel/user/settings.fi && { UPROF=--profile=app; UCRT=""; }
@@ -109,10 +109,10 @@ if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.er
     && ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/eins.elf" \
         $UCRT "$TMPD/eins.o" 2>/dev/null; then
     u=$(nm -u "$TMPD/eins.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-    [ -z "$u" ] && ok "das Einstellungen-Programm mit der neuen Bildschirmseite baut frei" \
+    [ -z "$u" ] && ok "the settings program with the new display page builds cleanly" \
                 || bad "settings.elf hat undefinierte Symbole: $u"
 else
-    bad "settings.fi laesst sich nicht bauen"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
+    bad "settings.fi cannot be built"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
 fi
 for f in locale/de/messages locale/en/messages; do
     hat_nicht "$f" "kann dieser Kernel ihn nicht wechseln" \
@@ -127,7 +127,7 @@ hat kernel/user/settings.fi "SYS_DISPSET" \
     "das Einstellungen-Programm ruft wirklich den Kernel und schreibt keine Datei mehr"
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then
-    ok "firnc1 baut diese Runde auch (der Uebersetzer in Firn)"
+    ok "firnc1 builds this round too (the compiler in Firn)"
 else
     bad "firnc1 does not build this round"; tail -5 "$TMPD/k1.log" | sed 's/^/        /'
 fi
@@ -135,7 +135,7 @@ fi
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/$p.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
-    > "$TMPD/mkfs.log" 2>&1 && ok "die Platte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    > "$TMPD/mkfs.log" 2>&1 && ok "the disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || bad "mkfs.py scheitert"
 
 # --------------------------------------------------------------- Laeufe
@@ -199,7 +199,7 @@ anz=$(grep -a -m1 '^disp: modes ' "$L" | sed 's/.*modes //' | tr -d '\r\000')
 num "die Liste ist laenger als die zwei Konstanten von Runde K7" "$anz" gt 2
 num "und kuerzer als die Kandidatenliste -- es wurde wirklich ausgesiebt" "$anz" lt "$probed"
 ref=$(kw "$L" refused); tb=$(kw "$L" toobig); um=$(kw "$L" unmappable)
-ok "gefragt $probed · aufgenommen $anz · Register abgelehnt $ref · zu gross fuer den Bildspeicher $tb · nicht abbildbar $um"
+ok "asked $probed · accepted $anz · register rejected $ref · too large for the frame buffer $tb · not mappable $um"
 s=$((anz + ref + tb + um))
 gleich "die vier Zahlen gehen auf" "$probed" "$s"
 hat "$L" "disp:   800x600x 32" "800x600 steht in der Liste (was Runde K7 konnte)"
@@ -218,17 +218,17 @@ gleich "und die dreizehn aus Runde K7 stehen unveraendert" "13" "$st1"
 
 # ============================================== 4. EDID
 
-echo "== 4. EDID: was der Bildschirm ueber sich sagt =="
+echo "== 4. EDID: what the screen says about itself =="
 rc=$(VGA_STD="-vga std" lauf edid "gfx disp dispedid $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 E="$TMPD/edid.txt"
 if grep -qa '^disp: edid ok' "$E"; then
-    ok "ein gueltiger EDID-Block wurde gelesen (Kennung und Pruefsumme stimmen)"
+    ok "a valid EDID block was read (id and checksum are right)"
     hat "$E" "ven=RHT" "der Hersteller steht drin -- QEMU meldet sich als RHT (Red Hat)"
     hat "$E" "mod=QEMU Monitor" "und der Modellname"
     nat=$(grep -ao 'nat=[0-9]*x[0-9]*' "$E" | head -1 | sed 's/nat=//')
-    [ -n "$nat" ] && ok "die native Aufloesung aus dem ersten Zeitlagensatz: $nat" \
-                  || bad "keine native Aufloesung im EDID-Block"
+    [ -n "$nat" ] && ok "the native resolution from the first timing set: $nat" \
+                  || bad "no native resolution in the EDID block"
     roh=$(grep -a -m1 '^disp: edid 0x' "$E" | sed 's/^disp: edid //' | tr -d '\r\000')
     python3 - "$roh" <<'PY' > "$TMPD/edid.chk" 2>&1
 import sys, re
@@ -242,17 +242,17 @@ w = b[56] | ((b[58] >> 4) << 8)
 h = b[59] | ((b[61] >> 4) << 8)
 print(f"{ven} {w}x{h} version {b[18]}.{b[19]}")
 PY
-    if [ $? -eq 0 ]; then ok "der rohe Block rechnet nach: $(cat "$TMPD/edid.chk")"
-    else bad "der rohe EDID-Block geht nicht auf: $(cat "$TMPD/edid.chk")"; fi
+    if [ $? -eq 0 ]; then ok "the raw block checks out: $(cat "$TMPD/edid.chk")"
+    else bad "the raw EDID block does not add up: $(cat "$TMPD/edid.chk")"; fi
 else
     why=$(kw "$E" why)
-    ok "kein EDID-Block auf dieser Maschine, Grund $why -- der Rueckfall auf die Modusliste traegt"
+    ok "no EDID block on this machine, reason $why -- the fallback to the mode list holds"
     num "und die Liste traegt ihn wirklich" "$(grep -a -m1 '^disp: modes ' "$E" | sed 's/.*modes //')" gt 2
 fi
 
 # ============================================== 5. der Wechsel
 
-echo "== 5. der Wechsel zur Laufzeit, im Bild =="
+echo "== 5. the switch at run time, in the picture =="
 
 foto vorher "gfx disp nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
@@ -266,12 +266,12 @@ num "der Lauf endet sauber" "$RC" eq 21
 N="$TMPD/nachher.txt"
 hat "$N" "fb: 800x600x32" "der Kernel startet in 800x600"
 sw=$(grep -a -m1 '^disp: switch 800x600 -> 1024x768' "$N")
-[ -n "$sw" ] && ok "der Wechsel ist im Mitschnitt: $sw" || bad "kein Wechsel gemeldet"
+[ -n "$sw" ] && ok "the switch is in the recording: $sw" || bad "kein Wechsel gemeldet"
 rcsw=$(echo "$sw" | grep -ao 'rc=[0-9]*' | sed 's/rc=//')
 gleich "der Wechsel meldet Erfolg" "0" "$rcsw"
 us=$(echo "$sw" | grep -ao 'us=[0-9]*' | sed 's/us=//')
 [ -n "$us" ] && ok "er hat $us Mikrosekunden gedauert (Registersatz, Neuabbildung, Zweitpuffer, Neuzeichnen)" \
-             || bad "keine Zeit gemessen"
+             || bad "no time measured"
 schau "NACHHER: das Foto ist 1024x768 -- der Modus wurde WIRKLICH gewechselt" \
     size "$TMPD/nachher.ppm" 1024 768
 schau "NACHHER: das Pruefbild ist neu gezeichnet, Feld 1 ist wieder rot" \
@@ -295,12 +295,12 @@ schau "ZURUECK: und das Pruefbild steht wieder da" \
 
 # ============================================== 6. der Fehlerfall
 
-echo "== 6. der Fehlerfall: kein schwarzer Bildschirm =="
+echo "== 6. the failure case: no black screen =="
 foto schlecht "gfx disp dispbad nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber -- der abgelehnte Modus haelt den Kernel NICHT an" "$RC" eq 21
 S="$TMPD/schlecht.txt"
 sb=$(grep -a -m1 '^disp: switch 800x600 -> 4096x4096' "$S")
-[ -n "$sb" ] && ok "der Versuch steht im Mitschnitt: $sb" || bad "kein Versuch gemeldet"
+[ -n "$sb" ] && ok "the attempt is in the recording: $sb" || bad "kein Versuch gemeldet"
 rcb=$(echo "$sb" | grep -ao 'rc=[0-9]*' | sed 's/rc=//')
 num "er wird abgelehnt (2 = der Modus steht in keiner Liste)" "$rcb" eq 2
 hat "$S" "panel=800x600" "und die Tafel ist danach unveraendert"
@@ -318,7 +318,7 @@ schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
 
 # ============================================== 7. die Frist
 
-echo "== 7. die Bestaetigungsfrage: wer nichts sagt, bekommt den alten Modus =="
+echo "== 7. the confirmation question: whoever says nothing gets the old mode =="
 rc=$(lauf frist "gfx disp dispconfirm $GRUND" 260)
 num "der Lauf endet sauber" "$rc" eq 21
 F="$TMPD/frist.txt"
@@ -333,15 +333,15 @@ a2=$(echo "$cf2" | grep -ao 'after=[0-9]*' | sed 's/after=//')
 gleich "nach Ablauf ist die Frist weg" "0" "$p2"
 gleich "und der Kernel hat von SELBST zurueckgeschaltet" "1" "$a2"
 case "$cf2" in
-    *panel=800x600*) ok "die Tafel steht wieder auf dem alten Modus" ;;
-    *) bad "die Tafel steht nicht wieder auf 800x600: $cf2" ;;
+    *panel=800x600*) ok "the table is back on the old mode" ;;
+    *) bad "the table is not back on 800x600: $cf2" ;;
 esac
 rv=$(grep -a -m1 '^disp: sw=' "$F" | grep -ao 'rev=[0-9]*' | sed 's/rev=//')
 num "der Zaehler der Rueckkehren steht" "$rv" ge 1
 
 # ============================================== 8. die Drehung
 
-echo "== 8. die Drehung: im Bild und nicht nur in der Zahl =="
+echo "== 8. the rotation: in the picture and not only in the number =="
 foto dreh "gfx disp disprot nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber" "$RC" eq 21
 D="$TMPD/dreh.txt"
@@ -358,7 +358,7 @@ schau_nicht "und links oben, wo es UNGEDREHT laege, ist es nicht" \
 
 # ============================================== 9. die Kosten
 
-echo "== 9. die Kosten des Umrechnens, gemessen =="
+echo "== 9. the cost of the conversion, measured =="
 rc=$(lauf kosten "gfx disp dispbench $GRUND" 260)
 num "der Lauf endet sauber" "$rc" eq 21
 B="$TMPD/kosten.txt"
@@ -375,11 +375,11 @@ num "die Nachschlagetabelle kostet mehr als der schnelle Weg" "$d_lu" gt "$d_fl"
 num "eine TEXTZEILE durch die Tabelle kostet deutlich weniger als ein volles Bild" \
     "$d_ln" lt "$((d_lu / 4))"
 num "die Vierteldrehung kostet ein volles Bild" "$d_ro" gt 0
-ok "je Bildpunkt: flush $((d_fl * 1000 / px)) ns · Tabelle $((d_lu * 1000 / px)) ns · Drehung $((d_ro * 1000 / px)) ns (QEMU/TCG, kein KVM)"
+ok "per pixel: flush $((d_fl * 1000 / px)) ns · table $((d_lu * 1000 / px)) ns · rotation $((d_ro * 1000 / px)) ns (QEMU/TCG, no KVM)"
 
 # ============================================== 10. Ring 3
 
-echo "== 10. dieselben Zahlen aus Ring 3, ueber 1800..1802 =="
+echo "== 10. the same numbers from ring 3, via 1800..1802 =="
 rc=$(VGA_STD="-vga std" lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl test;dispctl raw")
 num "der Lauf mit /bin/dispctl endet sauber" "$rc" eq 21
 R="$TMPD/ring3.txt"
@@ -389,9 +389,9 @@ gleich "die Zusagen aus Ring 3" "12" "$t3"
 wig=$(grep -aE '^const WIG_BASE' kernel/sys/sys.fi | sed 's/.*= //')
 dg=$(grep -aE '^const SYS_OSUM_DISPGET' kernel/sys/sys.fi | sed 's/.*= //')
 if [ "$dg" -gt "$((wig + 9))" ]; then
-    ok "die Aufrufnummern dieser Runde ($dg..) liegen hinter dem Block der Widgets ($wig..$((wig+9)))"
+    ok "the call numbers of this round ($dg..) lie behind the widget block ($wig..$((wig+9)))"
 else
-    bad "die Aufrufnummern kollidieren mit WIG_BASE: disp=$dg, wig=$wig"
+    bad "the call numbers collide with WIG_BASE: disp=$dg, wig=$wig"
 fi
 
 for f in vram:vram maplimit:maplimit probed:probed refused:refused toobig:toobig; do
@@ -430,7 +430,7 @@ gleich "und der Kernel hat die Bestaetigung gezaehlt" "1" "$(uwl "$R2" confirms)
 
 # ============================================== 11. die Gegenprobe
 
-echo "== 11. DIE GEGENPROBE: derselbe Kernel ohne das Wort 'disp' =="
+echo "== 11. THE NEGATIVE TEST: the same kernel without the word'disp' =="
 rc=$(lauf ohne "gfx $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 O="$TMPD/ohne.txt"
