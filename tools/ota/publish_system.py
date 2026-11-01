@@ -50,7 +50,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import veroeffentlichen as vf  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import marke
+import brand
 
 PATH_OK = re.compile(r"/(apps|etc|usr/share|lib)/[A-Za-z0-9._/-]+")
 
@@ -151,7 +151,7 @@ def main():
     nname = "CHANGES-%d.txt" % count
     open(os.path.join(out, nname), "wb").write(ntext)
     lines = ["system\t%d\t%s\t%s\t%s" % (count, commit, opt["--min-from"],
-                                          opt["--name"] or marke.PRODUKT),
+                                          opt["--name"] or brand.PRODUKT),
              "sysfile\tkernel\t%s\t%d\t%s" % (khash, len(data), kname),
              "sysfile\tnotes\t%s\t%d\t%s" % (hashlib.sha256(ntext).hexdigest(),
                                              len(ntext), nname)]
