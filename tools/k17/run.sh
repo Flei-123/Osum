@@ -517,7 +517,7 @@ num "GEGENPROBE: PS/2-Pakete ohne Maus am Bus" "$(uz "$TMPD/mausohne.txt" mpkt)"
 
 echo "== 7. the stick: mounted, read, written -- checked from outside =="
 rc=$(lauf_stick stick "$TMPD/k0.mb" \
-    "osum usb usbstick vfs nokbd nosched noproc script=k17" "${XHCI[@]}")
+    "osum usb usbstick vfs nokbd nosched noproc nowlock script=k17" "${XHCI[@]}")
 num "der Sticklauf beendet sich selbst (21)" "$rc" eq 21
 S="$TMPD/stick.txt"
 hat "$S" "usb: msc blocks=" "der Treiber hat READ CAPACITY gestellt"
@@ -624,7 +624,7 @@ grep -qa 'usb.port_watch' kernel/arch/x86_64/trap.fi \
 echo "== 9. the same from the compiler written in Firn =="
 if [ -f "$TMPD/k1.mb" ]; then
     rc=$(lauf_stick stick1 "$TMPD/k1.mb" \
-        "osum usb usbstick vfs nokbd nosched noproc script=k17" "${XHCI[@]}")
+        "osum usb usbstick vfs nokbd nosched noproc nowlock script=k17" "${XHCI[@]}")
     num "firnc1: der Sticklauf beendet sich selbst" "$rc" eq 21
     for f in ready msc bsize blocks hostok wrote reread afterread afteropen done; do
         a=$(wert "$S" "$f"); b=$(wert "$TMPD/stick1.txt" "$f")
