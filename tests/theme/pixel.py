@@ -45,14 +45,6 @@ def main():
         n = c.get(col, 0)
         print("%06x %d" % (int(want, 16), n))
         return 0 if n > 0 else 1
-    # RUNDE FARBE (15.09.2026), A-023: der ANTEIL einer Marke, nicht ihr
-    # Rang. Ein Rang sagt nichts ueber die Oberflaeche, solange ein
-    # Verlauf beliebig viele Zwischenstufen zwischen die Marken schiebt
-    # -- siehe die Rechnung in tests/theme/run.sh, Abschnitt 9.
-    #
-    # ZEHNTELPROZENT UND NICHT PROZENT, weil `sh` nur ganze Zahlen
-    # vergleicht und 7,9 % sonst zu "7" wuerde; die Schwelle 3 % laege
-    # dann bei "3" und 3,4 % waere nicht von 3,0 % zu unterscheiden.
     if args and args[0] == "--share":
         want = args[1].lower().lstrip("#")
         col = (int(want[0:2], 16), int(want[2:4], 16), int(want[4:6], 16))

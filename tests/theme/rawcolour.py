@@ -146,14 +146,6 @@ ALLOWED_FN = {
         # (`zerreiss.py:50`), so these values are a CONTRACT BETWEEN TWO
         # PROGRAMS -- the same kind of shared constant as a packet
         # header, and the comment above the function already says why
-        # they are eight saturated tones: "ein Foto wird maschinell
-        # gelesen und ein Unterschied von eins waere keiner."
-        #
-        # A theme token here would break tearing detection outright: the
-        # eight would stop being far apart, and in a dark scheme several
-        # would collapse onto near-identical greys. `sig_nr` also maps
-        # the colour BACK to its number, which only works while the
-        # mapping is fixed.
         "fn sig_colour",
         # ---------------------------------------------- A-022, reason 2
         # 0xFFFFFF HERE IS AN OPACITY, NOT A COLOUR.
@@ -163,8 +155,6 @@ ALLOWED_FN = {
         # later, by `cap_glyph`, from the server's theme. White is the
         # neutral element of that multiplication -- writing a token in
         # here would apply the theme TWICE. The comment above the
-        # function states this ("Die Farbe ist 0xFFFFFF und nicht die
-        # echte: der Puffer haelt DECKUNGEN").
         "fn cg_mal",
         # ---------------------------------------------- A-022, reason 3
         # THE MEASUREMENT BOARD DELIBERATELY IGNORES THE THEME.
@@ -179,11 +169,6 @@ ALLOWED_FN = {
         # exactly the machine it gets used on. Black ground with green /
         # red / white / yellow ink is chosen for the CAMERA, not for
         # taste, and `mess_ampel` uses green-vs-red as a MEANING
-        # ("hier kam etwas an" / "hier nicht").
-        #
-        # Binding this board to the token system would make the one
-        # instrument that has to work when the token system is wrong
-        # depend on the token system being right.
         "fn measure_reason",
         "fn messzeile",
         "fn mess_gruen",

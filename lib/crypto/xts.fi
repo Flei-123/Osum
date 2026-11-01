@@ -1,108 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // lib/crypto/xts.fi -- XTS-AES (IEEE 1619-2007, NIST SP 800-38E),
 // Runde KRYPTO.
-//
-// ================================== WARUM XTS UND NICHT CBC MIT ESSIV
-//
-// Eine Platte ist kein Datenstrom. Sie hat Sektoren, die einzeln und in
-// beliebiger Reihenfolge gelesen und ueberschrieben werden, und sie hat
-// keinen Platz fuer einen Pruefwert je Sektor -- 512 Oktette Klartext
-// muessen in 512 Oktetten Geheimtext liegen. Daraus folgt alles:
-//
-//   * KEINE AUTHENTIFIZIERUNG IST MOEGLICH. Ohne Platz fuer ein Etikett
-//     gibt es keinen. XTS erkennt keine Veraenderung, und diese Datei
-//     behauptet das auch nicht. Was XTS leistet, ist Vertraulichkeit;
-//     wer Manipulation erkennen will, braucht dm-integrity daneben.
-//     DAS STEHT AUCH SO IN docs/RUNDE-KRYPTO.md unter den roten Punkten.
-//   * DER TWEAK MUSS AUS DER SEKTORNUMMER KOMMEN. Zwei Sektoren mit
-//     demselben Klartext duerfen nicht denselben Geheimtext haben --
-//     sonst sieht ein Angreifer, welche Bloecke gleich sind.
-//
-// CBC-ESSIV leistet das auch, hat aber zwei bekannte Schwaechen, die XTS
-// nicht hat: es ist anfaellig fuer das Kippen von Bits im Vorgaenger-
-// block (ein geaendertes Oktett verdirbt den naechsten Block
-// KONTROLLIERT), und es verraet ueber Wasserzeichen-Angriffe mehr, als
-// es soll. XTS ist seit 2007 die Norm fuer genau diesen Zweck und das,
-// was LUKS2, BitLocker und FileVault benutzen. Deshalb XTS.
-//
 // ============================================== WIE XTS RECHNET
-//
-// Der Schluessel ist DOPPELT so lang wie der der Chiffre: XTS-AES-256
-// nimmt 64 Oktette und zerlegt sie in zwei AES-256-Schluessel.
-//
-//   k1 (Oktette 0..31)   verschluesselt die Daten
-//   k2 (Oktette 32..63)  verschluesselt die Sektornummer zum Tweak
-//
-// DASS DIE BEIDEN VERSCHIEDEN SEIN MUESSEN, ist kein Schmuck: waeren sie
-// gleich, liesse sich der Tweak aus dem Geheimtext zurueckrechnen. Diese
-// Datei LEHNT einen Schluessel ab, dessen Haelften gleich sind (FIPS
-// 140-2 IG A.9 verlangt genau diese Pruefung).
-//
 // Dann, je Sektor:
-//
-//   T = AES-k2(Sektornummer als 128-Bit-Zahl, little endian)
-//   fuer jeden 16-Oktett-Block j:
-//       C = AES-k1(P xor T) xor T
-//       T = T * alpha         (Multiplikation im Koerper GF(2^128))
-//
-// `alpha` ist das Element x, und die Multiplikation damit ist eine
-// Verschiebung um ein Bit nach links plus, wenn oben ein Bit
-// herausfaellt, ein XOR mit 0x87 auf das unterste Oktett. Das
-// Modulpolynom ist x^128 + x^7 + x^2 + x + 1.
-//
-// DIE FALLE, UND SIE HAT DIESES PROJEKT SCHON EINMAL GEKOSTET: XTS ist
-// LITTLE ENDIAN -- die Sektornummer, der Tweak und die Verschiebung.
-// AES selbst ist big endian. Wer die Verschiebung als
-// Big-Endian-Schieberei schreibt, bekommt einen Geheimtext, der stabil
-// ist, zufaellig aussieht und den OpenSSL nicht entschluesselt. Genau
-// dafuer gibt es `tools/krypto/vektoren.py`: es haelt DIESE Datei gegen
-// Pythons `cryptography` (OpenSSL darunter) und gegen die Vektoren des
-// IEEE-1619-Ausschusses, in BEIDE Richtungen.
-//
 // ========================================= DER RESTBLOCK (ciphertext stealing)
-//
-// XTS kann Laengen, die kein Vielfaches von 16 sind, ueber
-// "ciphertext stealing" (CTS). Ein Sektor ist IMMER ein Vielfaches von
-// 16 (512, 4096), und diese Datei baut CTS trotzdem ein -- nicht aus
-// Vollstaendigkeit, sondern weil die Vektoren des IEEE-Ausschusses
-// (Vektor 15 bis 19) genau diese Laengen pruefen, und weil eine
-// Umsetzung, die bei 17 Oktetten etwas anderes rechnet als OpenSSL,
-// auch bei 512 nicht geglaubt werden sollte.
-//
-// Wie `aes.fi` und `sha256.fi`: KEINE `profile`-Zeile, KEIN `import`
-// ausser der Chiffre, kein Allokator, kein Systemaufruf, aller Zustand
-// beim Aufrufer.
-//
 // ======================================== RUNDE AESNI (K-020): DAS TEMPO
-//
-// Diese Datei rechnete mit 0,544 MiB/s -- ein Sektor 898 us, ein
-// Megaoktett zwei Sekunden. Davon waren 812 us die Chiffre
-// (32 Bloecke * 25,4 us), gemessen mit `aesbench`, und nicht die
-// Tweak-Rechnung hier.
-//
-// `sector_encrypt`/`sector_decrypt` nehmen deshalb jetzt den Weg ueber
-// `lib/crypto/aesni.fi`, WENN die Maschine AES-NI hat (`cpuid` Blatt 1,
-// ECX Bit 25). Hat sie es nicht, rechnet Zeile fuer Zeile weiter, was
-// vorher hier stand. BEIDE WEGE MUESSEN OKTETT FUER OKTETT DASSELBE
-// LIEFERN -- `tools/aesni/run.sh` haelt sie gegeneinander, ueber die
-// Vektoren des IEEE-1619-Ausschusses und ueber Zufallsdaten.
-//
-// `encrypt`/`decrypt` (die allgemeine Form mit Ciphertext Stealing)
-// bleiben ABSICHTLICH auf dem Tabellenweg: sie tragen die krummen
-// Laengen, sie laufen nicht je Sektor, und der schnelle Weg brauchte
-// dort einen zweiten CTS-Zweig, den niemand benutzt. Wer sie mit
-// glatter Laenge ruft, bekommt dasselbe Ergebnis wie vorher.
 
 import crypto.aes
 import crypto.aesni
 
 export {
     encrypt, decrypt, sector_encrypt, sector_decrypt,
-    forget, use_aesni, aesni_on, fuellungen, tafel_von, tafel_len,
+    forget, use_aesni, aesni_on, fuellungen, table_start, table_length,
     KEY_BYTES, BLOCK
 }
 
-// XTS-AES-256: zwei Schluessel zu 32 Oktetten.
 const KEY_BYTES: usize = 64
 const BLOCK: usize = 16
 
@@ -114,10 +26,6 @@ fn st8(p: u64, i: usize, v: u8) {
     *((p + i as u64) as *mut u8) = v
 }
 
-// Die beiden Haelften duerfen nicht gleich sein (FIPS 140-2 IG A.9).
-// Der Vergleich laeuft ueber ALLE Oktette und bricht nicht beim ersten
-// Unterschied ab -- ein frueher Abbruch waere ein Zeitkanal, auch wenn
-// er hier nur einen Schluessel gegen sich selbst haelt.
 fn halves_equal(key: u64) -> bool {
     var diff: u64 = 0
     var i: usize = 0
@@ -128,13 +36,6 @@ fn halves_equal(key: u64) -> bool {
     return diff == 0
 }
 
-// Multiplikation des Tweaks mit alpha = x im Koerper GF(2^128),
-// LITTLE ENDIAN: Oktett 0 traegt die niedrigsten Bits.
-//
-// Eine Verschiebung um ein Bit nach links ueber 16 Oktette, wobei das
-// oberste Bit jedes Oktetts in das naechsthoehere wandert. Faellt aus
-// Oktett 15 ein Bit heraus, wird 0x87 auf Oktett 0 gerechnet -- das ist
-// die Reduktion modulo x^128 + x^7 + x^2 + x + 1.
 fn gf_mul_alpha(t: *mut [u8; 16]) {
     var carry: u64 = 0
     var i: usize = 0
@@ -149,8 +50,6 @@ fn gf_mul_alpha(t: *mut [u8; 16]) {
     }
 }
 
-// Ein Block: C = AES-k1(P xor T) xor T. `enc` waehlt die Richtung --
-// beim Entschluesseln steht an derselben Stelle die Umkehrung.
 fn block_op(k1: *mut aes.Key, t: *mut [u8; 16], inp: u64, out: u64,
     enc: bool) {
     var x: [u8; 16] = [0 as u8; 16]
@@ -172,64 +71,14 @@ fn block_op(k1: *mut aes.Key, t: *mut [u8; 16], inp: u64, out: u64,
     }
 }
 
-// Der Tweak aus 16 Oktetten: T = AES-k2(tweak).
 fn make_tweak(k2: *mut aes.Key, tweak: u64, t: *mut [u8; 16]) {
     aes.encrypt_block(k2, tweak, (t as u64))
 }
 
-
 // ============================ RUNDE KLEINKRAM2 (K-022): DIE SCHLUESSELTAFEL
-//
-// GEMESSEN IN RUNDE AESNI, und es war deren Ueberraschung: nachdem die
-// Chiffre schnell war, kostete ein Sektor immer noch 16 us -- und davon
-// waren 1,9 us die Rechnung und 12,4 us der SCHLUESSELPLAN. `key_set`
-// ist die Tabellenfassung (6218 ns), und `sector_encrypt` rief sie
-// ZWEIMAL je Sektor, fuer k1 und k2. Bei einer Platte, die Sektor um
-// Sektor mit DEMSELBEN Schluessel liest, ist das reine Arbeit fuer den
-// Papierkorb.
-//
-// RUNDE AESNI HIELT DESHALB GENAU EINEN PLATZ. Das trug, solange es
-// genau einen verschluesselten Traeger gab. Bei ZWEIEN nebeneinander
-// -- Wurzelplatte und ein zweiter Datentraeger -- fiel der Speicher bei
-// JEDEM Wechsel um: Sektor von A, Sektor von B, Sektor von A, und jedes
-// Mal 12,4 us Neufuellen. Das ist der Fall, den K-022 aufgemacht hat.
-//
-// DESHALB EINE TAFEL STATT EINES PLATZES: SLOTS Eintraege, jeder mit
-// seinem eigenen Schluessel und seinen eigenen Plaenen. Zwei Traeger
-// nebeneinander treffen damit beide, und der Wechsel kostet NICHTS
-// mehr. Vier Plaetze, weil vier Traeger mehr sind, als dieses System
-// gleichzeitig offen hat, und weil jeder Platz 784 Oktette kostet
-// (64 Schluessel + 3 * 240 Plan) -- die ganze Tafel 3136 Oktette.
-//
-// WIE VERDRAENGT WIRD: reihum (`naechster`). Kein LRU-Zaehler, denn der
-// waere ein Seitenkanal ueber die Zugriffsfolge und traegt bei vier
-// Plaetzen nichts ein, was der Reihum-Weg nicht auch traegt.
-//
-// ZWEI DINGE, DIE DIESE RUNDE NICHT VERLIEREN DARF, und beide standen
-// so schon in RUNDE AESNI:
-//
-//   1. `forget` LOESCHT ALLE EINTRAEGE, nicht nur einen. `krypto.lock_down`
-//      ruft es; bliebe auch nur ein Plan stehen, laege nach dem
-//      Zusperren noch ein Schluessel im Speicher, waehrend `CRY_KEY`
-//      schon genullt ist -- und `lock_down` waere eine Luege. Die
-//      Schleife unten geht deshalb ueber ALLE Plaetze und nullt
-//      Schluessel UND Plaene.
-//   2. DER VERGLEICH LAEUFT UEBER ALLE 64 OKTETTE und bricht nicht beim
-//      ersten Unterschied ab -- ein frueher Abbruch waere ein Zeitkanal
-//      ueber den Schluessel. Dieselbe Regel wie in `halves_equal`. Auch
-//      die SUCHE ueber die Tafel bricht nicht ab: sie sieht sich JEDEN
-//      Platz an und merkt sich den Treffer, statt beim ersten
-//      `return` herauszuspringen.
-//
-// EIN SCHLUESSEL IM SPEICHER IST EIN SCHLUESSEL IM SPEICHER. Das ist
-// kein neues Leck -- der Kern haelt den Hauptschluessel ohnehin in
-// `kstate`, solange die Platte offen ist (docs/RUNDE-KRYPTO.md
-// Abschnitt 5). `forget` loescht ihn trotzdem, und `krypto.lock_down`
-// ruft es: wer die Platte zusperrt, soll nicht hier eine Kopie
-// zuruecklassen.
 const SLOTS: usize = 4
 
-struct Platz {
+struct Slot {
     key: [u8; 64],
     enc: aesni.Enc,
     dec: aesni.Dec,
@@ -237,7 +86,7 @@ struct Platz {
     voll: bool
 }
 
-static mut tafel: [Platz; 4] = [Platz {
+static mut table: [Slot; 4] = [Slot {
     key: [0; 64],
     enc: aesni.Enc { rk: [0; 240], nr: 0, ok: false },
     dec: aesni.Dec { rk: [0; 240], nr: 0, ok: false },
@@ -245,38 +94,22 @@ static mut tafel: [Platz; 4] = [Platz {
     voll: false
 }; 4]
 
-// Wohin der naechste neue Schluessel kommt. Reihum.
 static mut naechster: usize = 0
 
-// Der Platz, auf dem der zuletzt gesuchte Schluessel steht. `sector_*`
-// holt ihn sich nach `cache_hit`/`cache_fill` von hier, statt ihn ein
-// zweites Mal zu suchen.
 static mut treffer: usize = 0
 
-// WIE OFT NEU GEFUELLT WURDE. Das ist die Zahl, an der K-022 gemessen
-// wird: zwei Traeger abwechselnd, und diese Zahl darf nach dem
-// Aufwaermen NICHT mehr steigen.
 static mut z_fuellungen: u64 = 0
 
 fn fuellungen() -> u64 {
     return z_fuellungen
 }
 
-// WO DIE TAFEL LIEGT. Nur fuer die Abnahme: `tools/xtstafel/loeschen.fi`
-// sieht damit NACH, ob nach `forget()` wirklich nichts mehr dasteht --
-// die Frage, die Runde AESNI ausdruecklich offen gelassen hat. Eine
-// Probe, die die Adresse raet, misst nichts.
-fn tafel_von() -> u64 {
-    return (&tafel[0]) as u64
+fn table_start() -> u64 {
+    return (&table[0]) as u64
 }
 
-fn tafel_len() -> u64 {
-    // NICHT GERATEN, sondern aus den echten Adressen: der Abstand
-    // zweier Plaetze ist die Groesse eines Platzes samt jeder
-    // Auffuellung, die der Uebersetzer einzieht. Ein fest
-    // hingeschriebenes 784 waere eine Annahme ueber das Feld-Layout,
-    // und eine falsche Annahme liesse die Abnahme am Plan vorbeisuchen.
-    let schritt: u64 = (&tafel[1]) as u64 - (&tafel[0]) as u64
+fn table_length() -> u64 {
+    let schritt: u64 = (&table[1]) as u64 - (&table[0]) as u64
     return (SLOTS as u64) * schritt
 }
 
@@ -286,31 +119,29 @@ fn forget() {
     while s < SLOTS {
         var i: usize = 0
         while i < 64 {
-            tafel[s].key[i] = 0
+            table[s].key[i] = 0
             i = i + 1
         }
         i = 0
         while i < 240 {
-            tafel[s].enc.rk[i] = 0
-            tafel[s].dec.rk[i] = 0
-            tafel[s].tk2.rk[i] = 0
+            table[s].enc.rk[i] = 0
+            table[s].dec.rk[i] = 0
+            table[s].tk2.rk[i] = 0
             i = i + 1
         }
-        tafel[s].enc.ok = false
-        tafel[s].dec.ok = false
-        tafel[s].tk2.ok = false
-        tafel[s].enc.nr = 0
-        tafel[s].dec.nr = 0
-        tafel[s].tk2.nr = 0
-        tafel[s].voll = false
+        table[s].enc.ok = false
+        table[s].dec.ok = false
+        table[s].tk2.ok = false
+        table[s].enc.nr = 0
+        table[s].dec.nr = 0
+        table[s].tk2.nr = 0
+        table[s].voll = false
         s = s + 1
     }
     naechster = 0
     treffer = 0
 }
 
-// Steht dieser Schluessel schon in der Tafel? Ohne fruehen Abbruch --
-// weder im Vergleich der 64 Oktette noch ueber die Plaetze.
 fn cache_hit(key: u64) -> bool {
     var gefunden: bool = false
     var wo: usize = 0
@@ -319,10 +150,10 @@ fn cache_hit(key: u64) -> bool {
         var diff: u64 = 0
         var i: usize = 0
         while i < 64 {
-            diff = diff | ((tafel[s].key[i] as u64) ^ (ld8(key, i) as u64))
+            diff = diff | ((table[s].key[i] as u64) ^ (ld8(key, i) as u64))
             i = i + 1
         }
-        if tafel[s].voll && diff == 0 && !gefunden {
+        if table[s].voll && diff == 0 && !gefunden {
             gefunden = true
             wo = s
         }
@@ -334,9 +165,6 @@ fn cache_hit(key: u64) -> bool {
     return gefunden
 }
 
-// Die Plaene fuer diesen Schluessel bereitlegen. `false` heisst: der
-// Schluessel taugt nicht (falsche Haelften), und der Aufrufer muss
-// abbrechen -- nicht etwa auf den langsamen Weg gehen.
 fn cache_fill(key: u64) -> bool {
     var k1: aes.Key = aes.key_new()
     var k2: aes.Key = aes.key_new()
@@ -347,52 +175,34 @@ fn cache_fill(key: u64) -> bool {
         return false
     }
     let s: usize = naechster
-    tafel[s].enc = aesni.enc_from((&k1.rk[0]) as u64, k1.nr)
-    tafel[s].dec = aesni.dec_from((&k1.rk[0]) as u64, k1.nr)
-    tafel[s].tk2 = aesni.enc_from((&k2.rk[0]) as u64, k2.nr)
+    table[s].enc = aesni.enc_from((&k1.rk[0]) as u64, k1.nr)
+    table[s].dec = aesni.dec_from((&k1.rk[0]) as u64, k1.nr)
+    table[s].tk2 = aesni.enc_from((&k2.rk[0]) as u64, k2.nr)
     var i: usize = 0
     while i < 64 {
-        tafel[s].key[i] = ld8(key, i)
+        table[s].key[i] = ld8(key, i)
         i = i + 1
     }
-    tafel[s].voll = true
+    table[s].voll = true
     treffer = s
     naechster = (s + 1) % SLOTS
     z_fuellungen = z_fuellungen + 1
     return true
 }
 
-
-// ==================================== RUNDE AESNI: DER SCHALTER VON AUSSEN
-//
-// `xts.fi` kennt `kstate` NICHT und darf es nicht kennen -- dieselbe
-// Datei laeuft im Kern, in einem Ring-3-Programm und im Orakel auf dem
-// Wirt. Der Kern muss den schnellen Weg aber abschalten koennen
-// (Kernwort `noaesni`, die Gegenprobe), und das Orakel auch
-// (`OSUM_NOAESNI` im Abnahmelauf).
-//
-// Deshalb ein schlichter Schalter, den der Aufrufer setzt:
-//   0 = noch nicht gefragt (dann entscheidet `cpuid`)
-//   1 = AES-NI benutzen, wenn die Maschine es hat
-//   2 = NICHT benutzen, auch wenn die Maschine es hat
-//
-// Voreingestellt ist 0, also: es bleibt bei dem, was `cpuid` sagt. Wer
-// nichts tut, bekommt den schnellen Weg.
-static mut ni_wahl: u64 = 0
+static mut ni_select: u64 = 0
 
 fn use_aesni(on: bool) {
     if on {
-        ni_wahl = 1
+        ni_select = 1
     } else {
-        ni_wahl = 2
+        ni_select = 2
     }
-    // Die Plaene gehoeren zum Weg, nicht zum Schluessel: wer umschaltet,
-    // faengt von vorne an.
     forget()
 }
 
 fn aesni_on() -> bool {
-    if ni_wahl == 2 {
+    if ni_select == 2 {
         return false
     }
     return aesni.usable()
@@ -400,8 +210,6 @@ fn aesni_on() -> bool {
 
 // ------------------------------------------------------- die Schnittstelle
 
-// `key` sind 64 Oktette, `tweak` 16 Oktette (die Sektornummer little
-// endian, aufgefuellt), `n` mindestens 16.
 fn encrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
     if n < BLOCK { return false }
     if halves_equal(key) { return false }
@@ -414,8 +222,6 @@ fn encrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
 
     let voll: usize = n / BLOCK
     let rest: usize = n % BLOCK
-    // Bei einem Rest bleibt der VORLETZTE volle Block dem Stehlen
-    // vorbehalten und wird unten gesondert behandelt.
     var ganz: usize = voll
     if rest != 0 { ganz = voll - 1 }
 
@@ -429,10 +235,6 @@ fn encrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
     if rest == 0 {
         return true
     }
-    // CTS, IEEE 1619 5.3.2: der vorletzte Block wird verschluesselt,
-    // seine ersten `rest` Oktette werden der letzte Geheimtextblock,
-    // und der Rest wird mit dem Schwanz des Klartextes zu einem vollen
-    // Block zusammengesetzt, der an die Stelle des vorletzten kommt.
     let pp: u64 = inp + (ganz * BLOCK) as u64
     let po: u64 = out + (ganz * BLOCK) as u64
     var cc: [u8; 16] = [0 as u8; 16]
@@ -482,9 +284,6 @@ fn decrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
     if rest == 0 {
         return true
     }
-    // Beim Entschluesseln mit CTS werden die beiden letzten Tweaks
-    // VERTAUSCHT gebraucht: der vorletzte Block ist mit dem SPAETEREN
-    // Tweak verschluesselt worden.
     var t2: [u8; 16] = [0 as u8; 16]
     var i: usize = 0
     while i < 16 {
@@ -515,10 +314,6 @@ fn decrypt(key: u64, tweak: u64, inp: u64, out: u64, n: usize) -> bool {
     return true
 }
 
-// ------------------------------------------- der Tweak aus der Sektornummer
-//
-// Die uebliche Form: die Nummer als 128-Bit-Zahl LITTLE ENDIAN. Das ist
-// genau das, was `dm-crypt` mit `plain64` tut und was LUKS benutzt.
 fn sector_tweak(sector: u64, t: *mut [u8; 16]) {
     var i: usize = 0
     while i < 8 {
@@ -535,21 +330,16 @@ fn sector_encrypt(key: u64, sector: u64, inp: u64, out: u64,
     n: usize) -> bool {
     var tw: [u8; 16] = [0 as u8; 16]
     sector_tweak(sector, &tw)
-    // DER SCHNELLE WEG, wenn die Maschine ihn hat und die Laenge glatt
-    // ist. Sonst faellt es auf die Zeile darunter zurueck, und die ist
-    // dieselbe wie vor dieser Runde.
     if n % BLOCK == 0 && aesni_on() {
         if halves_equal(key) { return false }
         if !cache_hit(key) {
             if !cache_fill(key) { return false }
         }
-        // Der Tweak T = AES-k2(Sektornummer) kommt ueber DENSELBEN
-        // schnellen Weg -- ein Block, einmal je Sektor.
         var t: [u8; 16] = [0 as u8; 16]
-        if !aesni.encrypt_block(&tafel[treffer].tk2, (&tw[0]) as u64, (&t[0]) as u64) {
+        if !aesni.encrypt_block(&table[treffer].tk2, (&tw[0]) as u64, (&t[0]) as u64) {
             return false
         }
-        return aesni.xts_sector_encrypt(&tafel[treffer].enc, &t, inp, out, n)
+        return aesni.xts_sector_encrypt(&table[treffer].enc, &t, inp, out, n)
     }
     return encrypt(key, (&tw[0]) as u64, inp, out, n)
 }
@@ -563,14 +353,11 @@ fn sector_decrypt(key: u64, sector: u64, inp: u64, out: u64,
         if !cache_hit(key) {
             if !cache_fill(key) { return false }
         }
-        // DER TWEAK WIRD VERSCHLUESSELT, auch beim Entschluesseln --
-        // T = AES-k2(Sektornummer) ist in beide Richtungen dasselbe.
-        // Wer hier `dec_from` nimmt, bekommt stabilen Unsinn.
         var t: [u8; 16] = [0 as u8; 16]
-        if !aesni.encrypt_block(&tafel[treffer].tk2, (&tw[0]) as u64, (&t[0]) as u64) {
+        if !aesni.encrypt_block(&table[treffer].tk2, (&tw[0]) as u64, (&t[0]) as u64) {
             return false
         }
-        return aesni.xts_sector_decrypt(&tafel[treffer].dec, &t, inp, out, n)
+        return aesni.xts_sector_decrypt(&table[treffer].dec, &t, inp, out, n)
     }
     return decrypt(key, (&tw[0]) as u64, inp, out, n)
 }

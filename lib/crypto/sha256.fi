@@ -1,57 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // lib/crypto/sha256.fi -- SHA-256 (FIPS 180-4), Runde SSHD.
-//
-// WARUM ES DIESE DATEI GIBT, obwohl SHA-256 in diesem Baum schon ZWEIMAL
-// steht. Beide vorhandenen Fassungen sind Ring-3-PROGRAMMBIBLIOTHEKEN
-// mit `profile kernel` und `import ulib`:
-//
-//   * `kernel/user/pw.fi` -- rechnet richtig, aber `if len > 256 {
-//     return false }`. Fuer ein Passwort genug, fuer einen
-//     Schluesselaustausch nicht.
-//   * `kernel/user/sha.fi` -- stroemend, aber der Zustand ist eine
-//     MODULVARIABLE. Ein einziger Hash zur Zeit. Der Austauschhash H
-//     eines SSH-Handschlags wird ueber neun Felder gefuellt, waehrend
-//     nebenher der Fingerabdruck des Wirtsschluessels und die sechs
-//     Schluesselableitungen K1/K2 gerechnet werden -- das sind mehrere
-//     Rechnungen, die einander ueberlappen.
-//
-// Diese Datei ist die dritte und die einzige, die unter `lib/crypto`
-// liegt: KEINE `profile`-Zeile, KEIN `import`, kein Allokator, kein
-// Systemaufruf, Zustand beim AUFRUFER. Damit gilt fuer sie dieselbe
-// Regel wie fuer `blake2s.fi` und `sha512.fi` -- sie laesst sich in den
-// Kern, in ein Ring-3-Programm und in einen Testlaeufer auf dem Wirt
-// binden, ohne dass eine Zeile sich aendert.
-//
-// DIE ZWEI ALTEN BLEIBEN STEHEN. Sie werden von `pw`, `opk`, `backup`,
-// `bstore` und `hwid` benutzt und sind gegen Pythons `hashlib` gemessen;
-// sie hier zu loeschen waere ein Umbau von fuenf Programmen in einer
-// Runde, die SSH baut. Was dieser Baum jetzt hat, ist eine SHA-256, die
-// man ueberall hinbinden kann -- die Zusammenlegung ist eine eigene
-// Aufgabe und steht so in STATUS-SSHD.md.
-//
 // ============================================================ DIE RECHNUNG
-//
-// SHA-256 ist ein 32-Bit-Verfahren, Firns `u64` ist 64 Bit. JEDE
-// Rechnung endet deshalb auf `& M32`, und jede Addition benutzt Firns
-// AUSDRUECKLICHEN Ueberlaufoperator `+%`. Ein einzelnes fehlendes `& M32`
-// erzeugt einen Hash, der stabil ist, zufaellig aussieht und mit nichts
-// auf der Welt uebereinstimmt -- deshalb wird diese Datei nicht
-// geglaubt, sondern GEMESSEN: `tools/sshd/vectors.py` schickt dieselben
-// Eingaben durch Pythons `hashlib` und vergleicht Ziffer fuer Ziffer.
-//
 // ==================================================================== EHRLICH
-//
-// S1 NICHT KONSTANTZEITIG IN DER LAENGE. Die Zahl der Runden ist die
-//    Zahl der Bloecke, also die Nachrichtenlaenge -- in jeder Benutzung
-//    hier oeffentlich. Innerhalb einer Runde gibt es keinen Sprung und
-//    keine Adresse, die vom INHALT abhaengt.
-// S2 KEIN SHA-224. Dieselbe Kompressionsfunktion mit anderen
-//    Anfangswerten und abgeschnittener Ausgabe. Niemand hier braucht
-//    sie, und ein ungemessener Pfad ist eine Last.
 
 export { Sha256, sha256_new, begin, update, finish, hash,
     hmac, DIGEST, BLOCK,
-    // RUNDE ARGON (K-021): der schnelle Weg und sein Schalter.
     use_shani, shani_on }
 
 import crypto.shani
@@ -76,8 +29,6 @@ fn st8(p: u64, i: usize, v: u8) {
     *((p + i as u64) as *mut u8) = v
 }
 
-// Rechtsrotation im 32-Bit-Wort. Der Schiebebetrag nach links muss
-// maskiert werden, sonst stehen oberhalb von Bit 31 Reste.
 fn rotr(x: u64, n: u64) -> u64 {
     return ((x >> n) | (x << (32 - n))) & M32
 }
@@ -87,8 +38,6 @@ fn sha256_new() -> Sha256 {
         nlo: 0, nhi: 0 }
 }
 
-// FIPS 180-4 5.3.3: die ersten 32 Bit der Nachkommastellen der
-// Quadratwurzeln der ersten acht Primzahlen.
 fn begin(s: *mut Sha256) {
     (*s).h[0] = 0x6A09E667
     (*s).h[1] = 0xBB67AE85
@@ -103,8 +52,6 @@ fn begin(s: *mut Sha256) {
     (*s).nhi = 0
 }
 
-// FIPS 180-4 4.2.2: die ersten 32 Bit der Nachkommastellen der
-// Kubikwurzeln der ersten vierundsechzig Primzahlen.
 fn kconst(i: usize) -> u64 {
     let k: [u64; 64] = [
     0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
@@ -127,32 +74,18 @@ fn kconst(i: usize) -> u64 {
     return k[i]
 }
 
-// Ein Block von 64 Oktetten, FIPS 180-4 6.2.2.
-// ============================================ RUNDE ARGON (K-021)
-//
-// DER SCHNELLE WEG UND SEINE GEGENPROBE.
-//
-// `shani.hash_blocks` rechnet dieselbe Verdichtung auf den Befehlen
-// SHA256RNDS2/SHA256MSG1/SHA256MSG2. Ob sie benutzt wird, entscheidet
-// NICHT diese Datei allein: `usable()` fragt `cpuid`, und
-// `use_shani(false)` nimmt den Weg von Hand heraus.
-//
-// Der Schalter ist kein Schmuck. Ohne ihn liesse sich "beide Wege
-// rechnen dasselbe" nur auf einer Maschine OHNE SHA-NI pruefen -- und
-// damit nirgends, wo gerade gemessen wird. Dieselbe Begruendung wie bei
-// `xts.use_aesni` aus Runde AESNI.
-static mut ni_wahl: u64 = 0
+static mut ni_select: u64 = 0
 
 fn use_shani(on: bool) {
     if on {
-        ni_wahl = 1
+        ni_select = 1
     } else {
-        ni_wahl = 2
+        ni_select = 2
     }
 }
 
 fn shani_on() -> bool {
-    if ni_wahl == 2 {
+    if ni_select == 2 {
         return false
     }
     return shani.usable()
@@ -160,9 +93,6 @@ fn shani_on() -> bool {
 
 fn compress(s: *mut Sha256, p: u64) {
     if shani_on() {
-        // EIN Block ueber die Maschinenbefehle. Der Zustand liegt in
-        // `h` genau so, wie `shani.hash_blocks` ihn erwartet: acht
-        // u64, von denen je nur die unteren 32 Bit belegt sind.
         shani.hash_blocks((&(*s).h[0]) as u64, p, 1)
         return
     }
@@ -246,9 +176,6 @@ fn update(s: *mut Sha256, p: u64, n: usize) {
     }
 }
 
-// FIPS 180-4 5.1.1: ein Einsbit, dann Nullen, dann die Laenge in BIT als
-// 64-Bit-Zahl mit dem hoechstwertigen Oktett zuerst, so dass die Summe
-// ein Vielfaches von 64 Oktetten ist.
 fn finish(s: *mut Sha256, out: u64) {
     let lo: u64 = ((*s).nlo << 3)
     var pad: [u8; 1] = [128 as u8]
@@ -276,7 +203,6 @@ fn finish(s: *mut Sha256, out: u64) {
     }
 }
 
-// Die drei Aufrufe darueber hinter einem Namen.
 fn hash(p: u64, n: usize, out: u64) {
     var s: Sha256 = sha256_new()
     begin(&s)
@@ -284,11 +210,6 @@ fn hash(p: u64, n: usize, out: u64) {
     finish(&s, out)
 }
 
-// HMAC-SHA-256 (RFC 2104). Steht hier und nicht bei den Aufrufern, weil
-// die Konstruktion genau EINE Stelle hat, an der man sie falsch machen
-// kann -- ein Schluessel, der laenger ist als der Block, wird ERST
-// gehasht und DANN aufgefuellt -- und diese Stelle soll einmal
-// dastehen. Gemessen gegen Pythons `hmac`.
 fn hmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) {
     var k: [u8; 64] = [0 as u8; 64]
     if klen > BLOCK {

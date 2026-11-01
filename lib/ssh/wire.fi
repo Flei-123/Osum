@@ -1,43 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// lib/ssh/wire.fi -- die Datentypen von SSH-2 (RFC 4251 Abschnitt 5),
-// Runde SSHD.
-//
-// SSH hat sechs Typen auf dem Draht, und vier davon sind eine Zeile:
-//
-//     byte        ein Oktett
-//     boolean     ein Oktett, 0 oder 1 (alles ausser 0 IST wahr)
-//     uint32      vier Oktette, hoechstwertiges zuerst
-//     uint64      acht Oktette, hoechstwertiges zuerst
-//     string      uint32 Laenge, dann so viele Oktette. BINAER, nicht
-//                 nullterminiert -- ein Passwort mit einem Nulloktett
-//                 darin ist ein gueltiger String.
-//     mpint       eine ganze Zahl mit Vorzeichen, als string: das
-//                 hoechstwertige Oktett zuerst, MINIMAL (keine
-//                 fuehrenden Nullen), und wenn das oberste Bit gesetzt
-//                 ist, ein zusaetzliches 0x00 davor. Die Null ist der
-//                 LEERE String.
-//     name-list   ein string, dessen Inhalt durch Kommata getrennte
-//                 US-ASCII-Namen sind.
-//
-// DER TEIL, DEN MAN FALSCH MACHT, IST DER MPINT. Ohne das fuehrende
-// 0x00 wird der gemeinsame Schluessel K als NEGATIVE Zahl gelesen, der
-// Austauschhash H stimmt nicht mehr ueberein, und der Klient bricht mit
-// „incorrect signature" ab -- in etwa jeder zweiten Verbindung, weil das
-// oberste Bit von K in der Haelfte aller Faelle gesetzt ist. Ein Fehler,
-// der zur Haelfte funktioniert, ist schlimmer als einer, der nie
-// funktioniert.
-//
-// DIESE DATEI HAT KEINE `profile`-ZEILE UND KEINEN `import`. Sie wird
-// von `kernel/user/sshd.fi` (Ring 3 auf Osum) UND von
-// `tools/sshd/oracle.fi` (Linux, gegen Python gemessen) gebunden --
-// dieselben Oktette auf beiden Seiten, sonst misst der Test etwas
-// anderes als der Server tut.
-//
-// EIN PUFFER MERKT SICH, DASS ER UEBERGELAUFEN IST (`bad`), statt bei
-// jedem Schreibvorgang einen Fehler zurueckzugeben. Der Aufrufer baut
-// ein Paket aus dreissig Feldern und prueft EINMAL am Ende. Ein
-// uebergelaufener Puffer liefert beim Lesen nur noch Nullen -- ein halb
-// gefuelltes Paket geht so nie hinaus.
 
 export {
     Buf, buf_write, buf_read, buf_reset,
@@ -51,9 +11,9 @@ export {
 struct Buf {
     p: u64,
     cap: usize,
-    len: usize,  // wie viel drin steht
-    at: usize,   // wo der Leser steht
-    bad: bool,   // ein Ueberlauf oder ein Unterlauf ist passiert
+    len: usize,
+    at: usize,
+    bad: bool,
 }
 
 fn ld8(p: u64, i: usize) -> u8 {
@@ -64,12 +24,10 @@ fn st8(p: u64, i: usize, v: u8) {
     *((p + i as u64) as *mut u8) = v
 }
 
-// Ein leerer Puffer ueber Speicher, den der Aufrufer besitzt.
 fn buf_write(p: u64, cap: usize) -> Buf {
     return Buf { p: p, cap: cap, len: 0, at: 0, bad: false }
 }
 
-// Ein Puffer ueber `n` Oktette, die schon dastehen.
 fn buf_read(p: u64, n: usize) -> Buf {
     return Buf { p: p, cap: n, len: n, at: 0, bad: false }
 }
@@ -116,19 +74,15 @@ fn wbytes(b: *mut Buf, src: u64, n: usize) {
     (*b).len = (*b).len + n
 }
 
-// `string`: die Laenge, dann die Oktette.
 fn wstring(b: *mut Buf, src: u64, n: usize) {
     w32(b, n as u64)
     wbytes(b, src, n)
 }
 
-// Dasselbe fuer einen nullterminierten Text -- die haeufigste Form im
-// Quelltext, weil Firns Zeichenketten so aussehen.
 fn wtext(b: *mut Buf, z: u64) {
     wstring(b, z, text_len(z))
 }
 
-// Eine name-list ist ein string; das Komma steht schon im Text.
 fn wname(b: *mut Buf, z: u64) {
     wtext(b, z)
 }
@@ -141,14 +95,6 @@ fn wbool(b: *mut Buf, v: bool) {
     }
 }
 
-// DER MPINT. `src` sind `n` Oktette einer VORZEICHENLOSEN Zahl,
-// hoechstwertiges zuerst.
-//
-//   * fuehrende Nulloktette fallen weg (RFC 4251: „unnecessary leading
-//     bytes with the value 0 or 255 MUST NOT be included"),
-//   * ist die Zahl null, ist der String LEER,
-//   * ist das oberste Bit des ersten uebrigen Oktetts gesetzt, kommt ein
-//     0x00 davor -- sonst waere die Zahl negativ.
 fn wmpint(b: *mut Buf, src: u64, n: usize) {
     var start: usize = 0
     while start < n && ld8(src, start) == 0 as u8 {
@@ -216,10 +162,6 @@ fn r64(b: *mut Buf) -> u64 {
     return (hi << 32) | lo
 }
 
-// Ein `string`: die Adresse SEINER OKTETTE IM PUFFER kommt zurueck, die
-// Laenge steht danach in `*np`. Es wird NICHT kopiert -- der Aufrufer
-// liest aus dem Paketpuffer, solange er ihn haelt. Eine Laenge, die
-// nicht mehr in den Puffer passt, setzt `bad` und liefert 0.
 fn rstring(b: *mut Buf, np: *mut usize) -> u64 {
     *np = 0
     let n: u64 = r32(b)
@@ -273,8 +215,6 @@ fn text_len(z: u64) -> usize {
     return n
 }
 
-// `n` Oktette bei `p` gegen einen nullterminierten Text. Die Laenge muss
-// GENAU stimmen -- „ssh-ed25519" darf nicht auf „ssh-ed25519xyz" passen.
 fn same_text(p: u64, n: usize, z: u64) -> bool {
     if text_len(z) != n {
         return false
@@ -308,15 +248,11 @@ fn copy_bytes(dst: u64, src: u64, n: usize) {
     }
 }
 
-// Steht `z` als GANZER Name in der durch Kommata getrennten Liste bei
-// `p` (Laenge `n`)? „curve25519-sha256" darf nicht auf
-// „curve25519-sha256@libssh.org" passen und umgekehrt.
 fn list_has(p: u64, n: usize, z: u64) -> bool {
     let m: usize = text_len(z)
     var i: usize = 0
     var found: bool = false
     while i <= n && !found {
-        // ein Name geht von `i` bis zum naechsten Komma oder zum Ende
         var j: usize = i
         while j < n && ld8(p, j) != 44 as u8 {
             j = j + 1
@@ -340,16 +276,7 @@ fn list_has(p: u64, n: usize, z: u64) -> bool {
 }
 
 // ------------------------------------------------------------- Base64
-//
-// FUER `~/.ssh/authorized_keys` UND FUER DEN FINGERABDRUCK. Das
-// Standardformat einer Schluesseldatei ist
-//
 //     ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... kommentar
-//
-// und der mittlere Teil ist der Schluessel-Blob in Base64 (RFC 4648).
-// Ohne einen Dekodierer muesste der Mensch seine Schluessel umbauen --
-// und der Auftrag dieser Runde sagt ausdruecklich, dass vorhandene
-// Schluessel ohne Umbau funktionieren sollen.
 
 fn b64val(c: u64) -> i64 {
     if c >= 65 && c <= 90 {
@@ -370,10 +297,6 @@ fn b64val(c: u64) -> i64 {
     return 0 - 1
 }
 
-// Dekodiert `n` Oktette Base64 nach `out`. Rueckgabe: die Zahl der
-// Oktette, oder 0xFFFFFFFFFFFFFFFF bei einem Zeichen, das nicht
-// hineingehoert, oder wenn `outcap` nicht reicht. WEISSRAUM WIRD
-// UEBERGANGEN, `=` beendet.
 fn b64_decode(src: u64, n: usize, out: u64, outcap: usize) -> u64 {
     var acc: u64 = 0
     var bits: u64 = 0
@@ -413,10 +336,6 @@ fn b64_decode(src: u64, n: usize, out: u64, outcap: usize) -> u64 {
     return o as u64
 }
 
-// Kodiert `n` Oktette nach Base64. `pad` = true haengt `=` an, bis die
-// Laenge durch vier teilbar ist. Der Fingerabdruck von OpenSSH
-// (`SHA256:...`) ist OHNE Auffuellung -- deshalb der Schalter.
-// Rueckgabe: die Zahl der geschriebenen Zeichen.
 fn b64_encode(src: u64, n: usize, out: u64, pad: bool) -> usize {
     var tab: [u8; 65] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\0"
@@ -458,7 +377,6 @@ fn b64_encode(src: u64, n: usize, out: u64, pad: bool) -> usize {
     return o
 }
 
-// Kleingeschriebene Hexadezimalziffern, zwei je Oktett.
 fn hex_out(src: u64, n: usize, out: u64) {
     var tab: [u8; 17] = "0123456789abcdef\0"
     var i: usize = 0

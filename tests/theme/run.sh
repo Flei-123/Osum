@@ -14,7 +14,7 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local name=$1 wert=$2 op=$3 want=$4
-    if [ -z "$wert" ]; then bad "$name: keine Zahl (erwartet $op $want)"; return; fi
+    if [ -z "$wert" ]; then bad "$name: no number (expected $op $want)"; return; fi
     if [ "$wert" -"$op" "$want" ] 2>/dev/null; then ok "$name: $wert"
     else bad "$name: $wert, erwartet $op $want"; fi
 }
@@ -24,14 +24,14 @@ feld() { grep -a "^$2 " "$1" | head -1 | awk "{print \$$3}"; }
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1 || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "THEME: uebersprungen, qemu-system-x86_64 ist nicht da"
+    echo "THEME: skipped, qemu-system-x86_64 is missing"
     exit 0
 fi
 
 SCHEMES="day paper night midnight contrast"
 
 # ---------------------------------------------------------------- 1. bauen
-echo "== 1. bauen"
+echo "== 1. build"
 if bash tests/theme/build.sh "$TMPD" > "$TMPD/build.log" 2>&1; then
     ok "Kernel und Programme gebaut ($(grep -c Oktette "$TMPD/build.log") Stueck)"
 else
@@ -73,7 +73,7 @@ foto() { # name abbild kommandozeile [marke]
 }
 
 echo
-echo "== 2. keine Farbe im Zeichencode"
+echo "== 2. no colour in the drawing code"
 aus=$(python3 tests/theme/rawcolour.py . 2>&1)
 roh=$(echo "$aus" | awk '/^rawcolour:/ {print $7}')
 mrk=$(echo "$aus" | awk '/^rawcolour:/ {print $5}')
@@ -91,20 +91,20 @@ if [ -n "$VOR" ]; then
         | awk '/^rawcolour:/ {print $7}')
     num "derselbe Pruefer auf dem Stand vor der Runde" "$vorn" ge 1
 else
-    bad "der Stand vor der Runde liess sich nicht finden"
+    bad "the state before the round could not be found"
 fi
 
 # ------------------------------------------------ 3. die sRGB-Kennlinie
 echo
-echo "== 3. die sRGB-Kennlinie, drei Mal gerechnet"
+echo "== 3. the sRGB curve, computed three times"
 lauf srgb "osum nokbd nosched noproc nofs script=themetest srgb"
 grep -a '^SRGB ' "$TMPD/srgb.txt" | awk '{print $2, $3}' > "$TMPD/srgb.os"
 python3 tools/theme/model.py srgb > "$TMPD/srgb.py"
 num "der Kernel meldet 256 Werte" "$(wc -l < "$TMPD/srgb.os")" eq 256
 if diff -q "$TMPD/srgb.os" "$TMPD/srgb.py" >/dev/null; then
-    ok "alle 256 stimmen mit tools/theme/model.py ueberein"
+    ok "all 256 match tools/theme/model.py"
 else
-    bad "Osum und model.py sind sich uneinig: $(diff "$TMPD/srgb.os" "$TMPD/srgb.py" | head -4 | tr '\n' ' ')"
+    bad "Osum and model.py disagree: $(diff "$TMPD/srgb.os" "$TMPD/srgb.py" | head -4 | tr '\n' ' ')"
 fi
 python3 - "$TMPD/srgb.os" <<'PYEOF' > "$TMPD/srgb.err"
 import sys
@@ -124,14 +124,14 @@ PYEOF
 werr=$(awk '{print $1}' "$TMPD/srgb.err")
 wat=$(awk '{print $2}' "$TMPD/srgb.err")
 if python3 -c "import sys; sys.exit(0 if float('$werr') < 1e-5 else 1)"; then
-    ok "groesster Abstand zur WCAG-Formel: $werr (bei c=$wat)"
+    ok "largest distance to the WCAG formula: $werr (at c=$wat)"
 else
-    bad "groesster Abstand zur WCAG-Formel: $werr (bei c=$wat)"
+    bad "largest distance to the WCAG formula: $werr (at c=$wat)"
 fi
 
 # ------------------------------------------- 4. + 5. Marken und Kontraste
 echo
-echo "== 4. die drei Ebenen, fuenf Schemata, hell und dunkel"
+echo "== 4. the three layers, five schemes, light and dark"
 for s in $SCHEMES; do
     lauf "s-$s" "osum nokbd nosched noproc nofs script=themetest scheme $s" 400
     for m in light dark; do
@@ -166,7 +166,7 @@ for s in $SCHEMES; do
 done
 
 echo
-echo "== 5. die Kontrasttabelle"
+echo "== 5. the contrast table"
 for s in $SCHEMES; do
     for m in light dark; do
         python3 tools/theme/model.py contrast "assets/schemes/$s.scheme" $m \
@@ -176,7 +176,7 @@ for s in $SCHEMES; do
         awk '{print $1, $2, $6}' "$TMPD/con-$s-$m.txt" \
             > "$TMPD/conpy-$s-$m.txt"
         if diff -q "$TMPD/conos-$s-$m.txt" "$TMPD/conpy-$s-$m.txt" >/dev/null; then
-            ok "$s/$m: 25 Kontrastverhaeltnisse stimmen mit dem Modell"
+            ok "$s/$m: 25 contrast ratios match the model"
         else
             bad "$s/$m Kontrast: $(diff "$TMPD/conos-$s-$m.txt" "$TMPD/conpy-$s-$m.txt" | head -3 | tr '\n' ' ')"
         fi
@@ -188,14 +188,14 @@ for s in $SCHEMES; do
                 "$TMPD/con-$s-$m.txt")
             ok "$s/$m: jede Paarung erfuellt WCAG, schlechteste $kl"
         else
-            bad "$s/$m: $durch Paarungen unter der Schwelle -- $schlecht"
+            bad "$s/$m: $durch pairs below the threshold -- $schlecht"
         fi
     done
 done
 
 # ---------------------------------------------------- 6. die Akzentfarbe
 echo
-echo "== 5b. die Fuellregel (Widget mit Rand != Fuellfarbe des Untergrunds)"
+echo "== 5b. the fill rule (widget with border != fill colour of the background)"
 for s in $SCHEMES; do
     for m in light dark; do
         python3 tools/theme/model.py fill "assets/schemes/$s.scheme" $m \
@@ -206,7 +206,7 @@ for s in $SCHEMES; do
         if [ "$zu" -eq 0 ] && [ "$n" -gt 0 ]; then
             ok "$s/$m: $n Fuellpaarungen, kleinster Abstand $kl"
         else
-            bad "$s/$m: $zu von $n Fuellpaarungen gleich dem Untergrund -- $(awk '$4 == 0 {printf "%s/%s ", $1, $2}' "$TMPD/fill-$s-$m.txt")"
+            bad "$s/$m: $zu of $n fill pairs equal the background -- $(awk '$4 == 0 {printf "%s/%s ", $1, $2}' "$TMPD/fill-$s-$m.txt")"
         fi
     done
 done
@@ -217,7 +217,7 @@ flach=$(awk '$4 == 0' "$TMPD/fill-flat.txt" | wc -l)
 num "Gegenprobe: ein Schema ohne Stufen verletzt die Regel (Paarungen)" "$flach" gt 0
 
 echo
-echo "== 6. die Akzentfarbe und was die Oberflaeche darueber sagt"
+echo "== 6. the accent colour and what the surface says about it"
 GUT="2563eb 7c3aed a16207"
 SCHLECHT="ffff00 22c55e ffffff"
 lauf accgut "osum nokbd nosched noproc nofs script=themetest accent day $GUT" 500
@@ -246,7 +246,7 @@ for a in $SCHLECHT; do
     rt=$(echo "$zeile" | awk '{print $7}')
     ru=$(echo "$zeile" | awk '{print $8}')
     if [ "$exakt" = "0" ] && [ "$verschoben" -ge 1 ] 2>/dev/null; then
-        ok "#$gewuenscht hell: verschoben auf #$wirklich ($verschoben Stufen), danach $rt / $ru"
+        ok "#$gewuenscht light: shifted to #$wirklich ($verschoben steps), then $rt / $ru"
     else
         bad "#$gewuenscht hell: haette anschlagen muessen (exakt=$exakt bewegt=$verschoben)"
     fi
@@ -256,7 +256,7 @@ for a in $SCHLECHT; do
 done
 
 echo
-echo "== 7. kein Fenster halb hell und halb dunkel"
+echo "== 7. no window half light and half dark"
 lauf latch "osum nokbd nosched noproc nofs script=themetest latch"
 vor=$(feld "$TMPD/latch.txt" L_BEFORE 2)
 innen=$(feld "$TMPD/latch.txt" L_INNER 2)
@@ -265,32 +265,32 @@ stale=$(feld "$TMPD/latch.txt" L_STALE 2)
 frisch=$(feld "$TMPD/latch.txt" L_FRESH 2)
 fstale=$(grep -a '^L_FRESH ' "$TMPD/latch.txt" | awk '{print $3}')
 if [ "$vor" = "$innen" ]; then
-    ok "die Farbe bleibt im laufenden Bild dieselbe ($vor)"
+    ok "the colour stays the same within the running frame ($vor)"
 else
-    bad "das Bild hat mitten drin die Farbe gewechselt: $vor -> $innen"
+    bad "the frame changed colour midway: $vor -> $innen"
 fi
 if [ "$danach" != "$vor" ]; then
-    ok "GEGENPROBE: die lebende Bank hat sich sehr wohl geaendert ($danach)"
+    ok "CONTROL: the live bank did change ($danach)"
 else
-    bad "die lebende Bank hat sich nicht geaendert -- der Test prueft nichts"
+    bad "the live bank did not change -- the test checks nothing"
 fi
 num "das Bild meldet sich danach als veraltet" "$stale" eq 1
 if [ "$frisch" = "$danach" ] && [ "$fstale" = "0" ]; then
-    ok "das naechste Bild rastet frisch ein ($frisch, nicht veraltet)"
+    ok "the next frame latches fresh ($frisch, not stale)"
 else
-    bad "das naechste Bild rastet nicht frisch ein ($frisch/$fstale)"
+    bad "the next frame does not latch fresh ($frisch/$fstale)"
 fi
 
 # ------------------------------------------------------------ 8. Zeiten
 echo
-echo "== 8. die Zeiten"
+echo "== 8. the timings"
 lauf zeit "osum nokbd nosched noproc nofs script=themetest time" 600
 tres=$(feld "$TMPD/zeit.txt" T_RESOLVE 2)
 tload=$(feld "$TMPD/zeit.txt" T_RELOAD 2)
 tpoll=$(feld "$TMPD/zeit.txt" T_POLL 2)
 ok "aufloesen (Rampen, Bindung, Kontrastsuche, veroeffentlichen): $((tres / 1000)) us"
-ok "nachsehen im Ruhezustand (eine Datei lesen und vergleichen): $((tpoll / 1000)) us"
-ok "vollstaendig neu laden (drei Dateien und aufloesen): $((tload / 1000)) us"
+ok "check at idle (read one file and compare): $((tpoll / 1000)) us"
+ok "full reload (three files and resolve): $((tload / 1000)) us"
 num "aufloesen bleibt unter einer Millisekunde" "$tres" lt 1000000
 
 foto gui "$TMPD/disk.img" \
@@ -307,22 +307,22 @@ gbase=$(echo "$gbsl" | awk '{print $3}')
 for v in gsw gdet gpnt gpx gall gbase; do
     eval "x=\$$v"
     case "$x" in
-        ''|*[!0-9]*) bad "themetest hat keine brauchbare Zeile fuer $v geliefert"; eval "$v=0";;
+        ''|*[!0-9]*) bad "themetest returned no usable line for $v"; eval "$v=0";;
     esac
 done
 num "Umschaltvorgaenge im laufenden Schreibtisch" "$gsw" ge 15
 ok "erkennen, schnellster Lauf: $((gdet / 1000)) us"
-ok "neu malen, schnellster Lauf: $((gpnt / 1000)) us fuer $gpx von $gall Bildpunkten"
-ok "GEGENPROBE: ein gewoehnliches Vollbild ohne Themenwechsel: $((gbase / 1000)) us"
+ok "repaint, fastest run: $((gpnt / 1000)) us for $gpx of $gall pixels"
+ok "CONTROL: an ordinary full frame without a theme switch: $((gbase / 1000)) us"
 if [ "$gbase" -gt 0 ] && [ "$gpnt" -lt $((gbase * 3)) ]; then
-    ok "das Umschalten liegt in der Groessenordnung eines Vollbilds"
+    ok "switching is on the order of a full frame"
 else
-    bad "das Umschalten kostet $gpnt ns gegen $gbase ns fuer ein Vollbild"
+    bad "switching costs $gpnt ns against $gbase ns for a full frame"
 fi
 
 # ------------------------------------------------------------ 9. Bilder
 echo
-echo "== 9. sieben Bildschirme, drei Zeilen Unterschied"
+echo "== 9. seven screens, three lines of difference"
 #
 #   Schema     surface        Punkte   Anteil   Rang
 #   light      #f8fafc         80879    7,9 %     4
@@ -340,7 +340,7 @@ shot() { # name schema modus akzent
     local name=$1 sch=$2 mod=$3 akz=$4
     bash tests/theme/image.sh "$TMPD" "$sch" "$mod" "$akz" \
         "$TMPD/img-$name.img" > /dev/null 2>&1 || {
-        bad "$name: das Abbild liess sich nicht bauen"; return; }
+        bad "$name: the image could not be built"; return; }
     foto "shot-$name" "$TMPD/img-$name.img" \
         "gfx wm wmhold desk einst themeshot nokbd nosched noproc nofs" \
         "themetest: gui ready"
@@ -355,25 +355,25 @@ shot() { # name schema modus akzent
     anteil=$(python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" \
         --share "$want" 2>/dev/null)
     if [ -z "$anteil" ]; then
-        bad "$name: der Anteil von #$want liess sich nicht messen"
+        bad "$name: the share of #$want could not be measured"
     elif [ "$anteil" -ge 30 ]; then
         ok "$name: surface (#$want) traegt $anteil/10 % des Bildes (top3 $top3)"
     else
-        bad "$name: surface (#$want) traegt nur $anteil/10 % -- top3 $top3"
+        bad "$name: surface (#$want) carries only $anteil/10 % -- top3 $top3"
     fi
     #
     local hoch
     hoch=$(awk -F= '/^contrast=/ {print $2}' "assets/schemes/$sch.scheme")
     if [ "$hoch" = "high" ]; then
         if [ "$want" = "$sunk" ]; then
-            ok "$name: surface und surface-sunken sind beide #$want (contrast=high, so gewollt)"
+            ok "$name: surface und surface-sunken are both #$want (contrast=high, intended)"
         else
             bad "$name: contrast=high, aber surface #$want != surface-sunken #$sunk"
         fi
     elif [ "$want" = "$sunk" ]; then
-        bad "$name: surface und surface-sunken sind beide #$want"
+        bad "$name: surface und surface-sunken are both #$want"
     else
-        ok "$name: surface #$want und surface-sunken #$sunk sind verschieden"
+        ok "$name: surface #$want und surface-sunken #$sunk differ"
     fi
 }
 shot light    day      light ""
@@ -396,20 +396,20 @@ for v in "light day light" "green day light 22c55e" \
     erwartet=$(akzent_von "$2" "$3" "${4:-}")
     if python3 tests/theme/pixel.py "$TMPD/shot-$name.ppm" --has "$erwartet" \
         >/dev/null 2>&1; then
-        ok "$name: die aufgeloeste Akzentmarke #$erwartet steht im Bild"
+        ok "$name: the resolved accent mark #$erwartet is in the image"
     else
-        bad "$name: #$erwartet steht NICHT im Bild"
+        bad "$name: #$erwartet is NOT in the image"
     fi
 done
 
 # ------------------------------------------------------- 10. Gegenproben
 echo
-echo "== 10. die Gegenproben"
+echo "== 10. the control runs"
 python3 tools/osum/mkfs.py build "$TMPD/leer.img" 4096 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ "/bin/themetest=$TMPD/themetest.elf" "/bin/sh=$TMPD/sh.elf" \
     "/bin/echo=$TMPD/echo.elf" "/bin/ls=$TMPD/ls.elf" \
-    > "$TMPD/mkfs-leer.log" 2>&1 || bad "das leere Abbild liess sich nicht bauen"
+    > "$TMPD/mkfs-leer.log" 2>&1 || bad "the empty image could not be built"
 cp -f "$TMPD/leer.img" "$TMPD/live-leer.img"
 timeout 200 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs script=themetest" \
@@ -420,9 +420,9 @@ lk=$(grep -a '^SCHEME ' "$TMPD/leer.txt" | head -1 | awk '{print $3}')
 lb=$(grep -a '^PRIM 0 ' "$TMPD/leer.txt" | head -1 | awk '{print $3}')
 num "ohne /etc/theme.conf werden 0 Schemaschluessel gelesen" "$lk" eq 0
 if [ "$lb" = "ffffff" ]; then
-    ok "und die eingebaute Rampe steht (neutral0 = ffffff)"
+    ok "and the built-in ramp is present (neutral0 = ffffff)"
 else
-    bad "die eingebaute Rampe fehlt: neutral0 = $lb"
+    bad "the built-in ramp is missing: neutral0 = $lb"
 fi
 
 mkdir -p "$TMPD/kaputt"
@@ -444,7 +444,7 @@ ARGS=(build "$TMPD/kaputt.img" 4096 /lib/
       /etc/ "/etc/theme.conf=$TMPD/theme-broken.conf@0644"
       /etc/schemas/ "/etc/schemas/broken=$TMPD/kaputt/broken@0644")
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs-kaputt.log" 2>&1 \
-    || bad "das kaputte Abbild liess sich nicht bauen"
+    || bad "the broken image could not be built"
 cp -f "$TMPD/kaputt.img" "$TMPD/live-kaputt.img"
 timeout 200 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs script=themetest" \
@@ -458,9 +458,9 @@ num "und 4 werden als unverstanden GEZAEHLT" "$kb" eq 4
 n0=$(grep -a '^PRIM 0 ' "$TMPD/kaputt.txt" | head -1 | awk '{print $3}')
 n1=$(grep -a '^PRIM 1 ' "$TMPD/kaputt.txt" | head -1 | awk '{print $3}')
 if [ "$n0" = "ffffff" ] && [ "$n1" = "f8fafc" ]; then
-    ok "was die Datei nicht setzt, behaelt den eingebauten Wert"
+    ok "what the file does not set keeps the built-in value"
 else
-    bad "die eingebauten Werte wurden zerstoert: $n0 / $n1"
+    bad "the built-in values were destroyed: $n0 / $n1"
 fi
 
 p1=$(grep -a '^G_STALE ' "$TMPD/gui.txt" | awk '{print $3}')
@@ -468,6 +468,6 @@ num "Nachsehen im laufenden Betrieb (ohne Aenderung ohne Wirkung)" "$p1" ge 20
 
 echo
 echo "=================================================================="
-printf "THEME: %d bestanden, %d durchgefallen\n" "$pass" "$fail"
+printf "THEME: %d passed, %d failed\n" "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
 exit 0

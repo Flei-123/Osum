@@ -1,45 +1,3 @@
-// SPDX-License-Identifier: MIT
-// lib/libc/dnswire.fi -- RUNDE BETRIEB: DNS (RFC 1035) als reine
-// Oktettarbeit, ohne einen einzigen Systemaufruf.
-//
-// WARUM DIESE DATEI VON DER STECKDOSE GETRENNT IST. Eine Antwort aus dem
-// Netz ist der klassische feindliche Eingang: sie kommt von einem
-// Fremden, der Zerteiler laeuft BEVOR irgendetwas geprueft ist, und das
-// Format hat KOMPRESSIONSZEIGER -- ein Name darf sagen "der Rest von mir
-// steht an Stelle N", und N darf rueckwaerts, vorwaerts oder auf sich
-// selbst zeigen. Ein Zerteiler, der ihnen naiv folgt, dreht sich auf
-// einer Nachricht von vier Oktetten fuer immer im Kreis. An genau dieser
-// Stelle sterben selbstgebaute Aufloeser reihenweise.
-//
-// Weil hier kein Systemaufruf steht, laesst sich JEDE dieser Fallen
-// PRUEFEN, ohne ein Paket zu schicken: `tools/operation/wire.sh` fuettert
-// den Zerteiler mit von Hand gebauten Nachrichten (Zeigerschleife,
-// Zeiger nach vorn, Zeiger auf sich selbst, 300 Oktett langer Name,
-// abgeschnittene Marke, rdlength ueber das Ende hinaus) und sieht nach,
-// dass er NEIN sagt statt zu haengen.
-//
-// DIE DREI SCHRANKEN BEI DER NAMENSKOMPRESSION, und es sind wirklich
-// drei, weil jede einzelne allein zu wenig ist:
-//
-//   1. Ein Zeiger muss STRIKT RUECKWAERTS zeigen (Ziel < Stelle des
-//      Zeigers). Damit ist eine Schleife unmoeglich, denn jeder Sprung
-//      geht echt nach unten und unten ist die 0.
-//   2. Hoechstens MAX_JUMPS Spruenge. Die Rueckwaertsregel ALLEIN laesst
-//      in einer Nachricht von 64 KiB noch eine Kette von 16000
-//      Einzelschritten zu -- richtig beantwortet und trotzdem eine
-//      Rechenlast, die ein Fremder bestimmt.
-//   3. Der zusammengesetzte Name bleibt unter MAX_NAME (255, RFC 1035
-//      2.3.4), jede Marke unter 64. Sonst schreibt eine Kette gueltiger
-//      Rueckwaertszeiger einen beliebig langen Namen in einen Puffer,
-//      dessen Groesse der Empfaenger festgelegt hat.
-//
-// WAS HIER NICHT DRIN IST, und das ist Absicht: kein DNSSEC, kein DoT,
-// kein DoH, kein Zwischenspeicher, kein IDNA. Ein Name wird gefragt, wie
-// er dasteht. Die Antwort ist so weit vertraut, wie der Nameserver
-// vertraut ist -- was eine gefaelschte Antwort wertlos macht, ist die
-// ZERTIFIKATSPRUEFUNG in `fetch`, und die ist die eigentliche
-// Verteidigung. Steht so in `docs/RUNDE-BETRIEB.md`, Abschnitt "was noch
-// fehlt".
 
 export {
     q_build, q_qlen, ans_check, case_only,
@@ -63,26 +21,19 @@ const MAX_LABEL: u64 = 63
 const MAX_JUMPS: u64 = 8
 const MAX_CHASE: u64 = 8
 
-// Die Antworten dieses Moduls. Sie sind ABSICHTLICH feiner als
-// "geklappt / nicht geklappt": ein Aufloeser, der NXDOMAIN und
-// "Nameserver antwortet nicht" gleich behandelt, laesst den Aufrufer
-// endlos wiederholen, wo es nichts zu holen gibt.
 const R_OK: u64 = 0
-const R_FORMAT: u64 = 1 // die Antwort widerspricht RFC 1035
-const R_NXDOMAIN: u64 = 2 // den Namen gibt es nicht
-const R_NODATA: u64 = 3 // den Namen gibt es, diesen Satz nicht
+const R_FORMAT: u64 = 1
+const R_NXDOMAIN: u64 = 2
+const R_NODATA: u64 = 3
 const R_SERVFAIL: u64 = 4
 const R_REFUSED: u64 = 5
-const R_TRUNC: u64 = 6 // TC-Bit: die Antwort passte nicht in ein Paket
-const R_MISMATCH: u64 = 7 // Kennung oder Frage stimmen nicht
-const R_LOOP: u64 = 8 // Zeigerschleife oder zu viele Spruenge
+const R_TRUNC: u64 = 6
+const R_MISMATCH: u64 = 7
+const R_LOOP: u64 = 8
 const R_TOOLONG: u64 = 9 // Name ueber 255
-const R_NOTQUERY: u64 = 10 // QR-Bit fehlt, oder ein fremder Opcode
-const R_BADNAME: u64 = 11 // der gefragte Name ist keiner
+const R_NOTQUERY: u64 = 10
+const R_BADNAME: u64 = 11
 
-// Was die letzte gepruefte Antwort enthielt. Kein Ergebnis-Verbund, weil
-// eine Firn-Funktion hoechstens sechs Argumente nimmt und der Aufrufer
-// sonst Zeiger auf Zeiger reichen muesste.
 static mut L_RCODE: u64 = 0
 static mut L_AN: u64 = 0
 static mut L_CN: u64 = 0
@@ -115,10 +66,6 @@ fn ld32(p: u64, i: u64) -> u64 {
     return (ld16(p, i) << 16) | ld16(p, i + 2)
 }
 
-// Nur ASCII. DNS vergleicht Namen ohne Ruecksicht auf Gross- und
-// Kleinschreibung (RFC 1035 2.3.3) und ZWAR NUR FUER A-Z -- ein Oktett
-// ueber 127 ist in einem Namen ohnehin nichts, was dieser Aufloeser
-// annimmt.
 fn lower(c: u64) -> u64 {
     if c >= 65 && c <= 90 {
         return c + 32
@@ -141,19 +88,6 @@ fn slen(p: u64) -> u64 {
 }
 
 // ------------------------------------------------------- die Anfrage
-//
-// EIN NAME AUF DER LEITUNG ist eine Folge von Marken, jede mit ihrer
-// Laenge davor, abgeschlossen von einer Null. `a.b` wird zu
-// 1 'a' 1 'b' 0.
-//
-// DIE 0x20-KODIERUNG (draft-vixie-dnsext-dns0x20): jeder Buchstabe wird
-// GEWUERFELT gross oder klein geschrieben. Der Nameserver muss den Namen
-// in der Frage seiner Antwort UNVERAENDERT zuruecksenden, also traegt
-// jeder Buchstabe ein zusaetzliches Bit Zufall, das ein Faelscher, der
-// die Leitung nicht sieht, raten muss. Bei `pkg.example.org` sind das 15
-// Buchstaben = 15 Bit obendrauf, zusaetzlich zu 16 Bit Kennung und ~16
-// Bit Quellport. `rnd` sind 32 Zufallsoktette; Buchstabe i nimmt Bit
-// (i & 7) aus Oktett ((i >> 3) & 31).
 fn q_build(buf: u64, cap: u64, txid: u64, name: u64, qtype: u64,
     rnd: u64) -> u64 {
     let nl: u64 = slen(name)
@@ -165,8 +99,6 @@ fn q_build(buf: u64, cap: u64, txid: u64, name: u64, qtype: u64,
     }
     st8(buf, 0, (txid >> 8) & 255)
     st8(buf, 1, txid & 255)
-    // 0x0100: RD (Rekursion erwuenscht). Kein AD, kein CD -- dieser
-    // Aufloeser wertet DNSSEC nicht aus und tut auch nicht so.
     st8(buf, 2, 1)
     st8(buf, 3, 0)
     st8(buf, 4, 0)
@@ -179,7 +111,6 @@ fn q_build(buf: u64, cap: u64, txid: u64, name: u64, qtype: u64,
     var at: u64 = HDR
     var pos: u64 = 0
     var letter: u64 = 0
-    // Ein abschliessender Punkt ist erlaubt und bedeutet dasselbe.
     var ende: u64 = nl
     if ld8(name, ende - 1) == 46 {
         ende = ende - 1
@@ -194,7 +125,7 @@ fn q_build(buf: u64, cap: u64, txid: u64, name: u64, qtype: u64,
         }
         let ll: u64 = e - pos
         if ll == 0 || ll > MAX_LABEL {
-            return 0 // leere Marke: `a..b`, oder eine Marke ueber 63
+            return 0
         }
         st8(buf, at, ll)
         at = at + 1
@@ -202,7 +133,7 @@ fn q_build(buf: u64, cap: u64, txid: u64, name: u64, qtype: u64,
         while k < ll {
             var c: u64 = ld8(name, pos + k)
             if c < 33 || c > 126 {
-                return 0 // Steuerzeichen, Leerraum, oder nicht ASCII
+                return 0
             }
             if is_alpha(c) {
                 let bit: u64 = (ld8(rnd, (letter >> 3) & 31)
@@ -233,7 +164,6 @@ fn q_build(buf: u64, cap: u64, txid: u64, name: u64, qtype: u64,
     return at
 }
 
-// Die Laenge des Fragenteils einer selbst gebauten Anfrage.
 fn q_qlen(qlen: u64) -> u64 {
     if qlen < HDR {
         return 0
@@ -243,9 +173,6 @@ fn q_qlen(qlen: u64) -> u64 {
 
 // -------------------------------------------------------- die Namen
 
-// Das Ende des Namens, der AN `at` STEHT -- also die Stelle, an der
-// TYPE beginnt. Ein Zeiger beendet den Namen nach zwei Oktetten, gleich
-// wohin er zeigt. 0 heisst: die Nachricht ist kaputt.
 fn name_end(msg: u64, len: u64, at: u64) -> u64 {
     var i: u64 = at
     while i < len {
@@ -260,22 +187,18 @@ fn name_end(msg: u64, len: u64, at: u64) -> u64 {
             return i + 2
         }
         if (c & 192) != 0 {
-            return 0 // 0b01 und 0b10 sind reserviert (RFC 1035 4.1.4)
+            return 0
         }
         i = i + 1 + c
     }
     return 0
 }
 
-// Den Namen an `at` als Text nach `out` schreiben, mit Punkten und
-// abschliessender Null. Gibt die Textlaenge zurueck, oder 0 bei jedem
-// Verstoss gegen die drei Schranken. Kleingeschrieben, damit der
-// Vergleich unten kein zweites Mal umwandeln muss.
 fn name_at(msg: u64, len: u64, at: u64, out: u64, outmax: u64) -> u64 {
     var i: u64 = at
     var n: u64 = 0
     var jumps: u64 = 0
-    var grenze: u64 = at // ab hier muss der naechste Zeiger STRIKT drunter
+    var limit: u64 = at
     while true {
         if i >= len {
             return 0
@@ -283,8 +206,6 @@ fn name_at(msg: u64, len: u64, at: u64, out: u64, outmax: u64) -> u64 {
         let c: u64 = ld8(msg, i)
         if c == 0 {
             if n == 0 {
-                // die Wurzel: als "." geschrieben, damit sie nicht mit
-                // dem Fehlerwert 0 zusammenfaellt
                 if outmax < 2 {
                     return 0
                 }
@@ -299,31 +220,28 @@ fn name_at(msg: u64, len: u64, at: u64, out: u64, outmax: u64) -> u64 {
             if i + 1 >= len {
                 return 0
             }
-            let ziel: u64 = ((c & 63) << 8) | ld8(msg, i + 1)
+            let target: u64 = ((c & 63) << 8) | ld8(msg, i + 1)
             // SCHRANKE 1: strikt rueckwaerts.
-            if ziel >= grenze {
+            if target >= limit {
                 return 0
             }
-            // SCHRANKE 2: die Spruenge sind gezaehlt.
             jumps = jumps + 1
             if jumps > MAX_JUMPS {
                 return 0
             }
-            grenze = ziel
-            i = ziel
+            limit = target
+            i = target
             continue
         }
         if (c & 192) != 0 {
             return 0
         }
         if i + 1 + c > len {
-            return 0 // die Marke reicht ueber das Ende der Nachricht
+            return 0
         }
         if c > MAX_LABEL {
             return 0
         }
-        // SCHRANKE 3: der zusammengesetzte Name bleibt unter 255 und
-        // passt in den Puffer des Aufrufers.
         if n + c + 2 > outmax || n + c + 1 > MAX_NAME {
             return 0
         }
@@ -390,15 +308,6 @@ fn case_only(msg: u64, len: u64, q: u64, qlen: u64) -> bool {
 }
 
 // -------------------------------------------------------- die Antwort
-//
-// `ans_check` bekommt die Antwort UND die Anfrage, die geschickt wurde,
-// und vergleicht den Fragenteil OKTETT FUER OKTETT. Das ist die Stelle,
-// an der die 0x20-Kodierung wirkt: ein Faelscher muesste jeden
-// Buchstaben in der richtigen Schreibweise treffen. Und es ist zugleich
-// die einzige Art, "das ist die Antwort auf MEINE Frage" zu sagen, ohne
-// dem Namen in der Antwort zu glauben, bevor er geprueft ist.
-//
-// `out` nimmt 4 Oktett (A) oder 16 (AAAA). Rueckgabe: einer der R_*.
 fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
     out: u64) -> u64 {
     L_RCODE = 0
@@ -415,7 +324,7 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
     }
     let fl: u64 = ld16(msg, 2)
     if (fl & 0x8000) == 0 {
-        return R_NOTQUERY // kein QR-Bit: das ist eine FRAGE, keine Antwort
+        return R_NOTQUERY
     }
     if ((fl >> 11) & 15) != 0 {
         return R_NOTQUERY // fremder Opcode
@@ -423,7 +332,6 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
     if (fl & 0x0400) != 0 { L_AA = 1 }
     if (fl & 0x0200) != 0 { L_TC = 1 }
     L_RCODE = fl & 15
-    // Der Fragenteil MUSS oktettgleich zurueckkommen.
     if ld16(msg, 4) != 1 {
         return R_MISMATCH
     }
@@ -438,7 +346,6 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
         }
         i = i + 1
     }
-    // Erst JETZT darf der Antwortcode etwas bedeuten.
     if L_TC == 1 {
         return R_TRUNC
     }
@@ -459,7 +366,6 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
     if an == 0 {
         return R_NODATA
     }
-    // Der Name, dem wir gerade folgen: zuerst der gefragte.
     if name_at(q, qlen, HDR, (&CUR[0 as usize]) as u64, 264) == 0 {
         return R_BADNAME
     }
@@ -468,7 +374,7 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
         var at: u64 = HDR + ql
         var k: u64 = 0
         var gefunden: bool = false
-        var weiter: bool = false
+        var more: bool = false
         while k < an {
             let ne: u64 = name_end(msg, len, at)
             if ne == 0 {
@@ -486,7 +392,7 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
             let rl: u64 = ld16(msg, ne + 8)
             let rd: u64 = ne + 10
             if rd + rl > len {
-                return R_FORMAT // rdlength ueber das Ende hinaus
+                return R_FORMAT
             }
             if kls == C_IN
                 && text_eq((&OWN[0 as usize]) as u64,
@@ -514,7 +420,7 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
                         return R_LOOP
                     }
                     L_CN = L_CN + 1
-                    weiter = true
+                    more = true
                     break
                 }
             }
@@ -524,10 +430,10 @@ fn ans_check(msg: u64, len: u64, q: u64, qlen: u64, want: u64,
         if gefunden {
             return R_OK
         }
-        if !weiter {
+        if !more {
             return R_NODATA
         }
         chase = chase + 1
     }
-    return R_LOOP // eine CNAME-Kette ohne Ende
+    return R_LOOP
 }

@@ -12,7 +12,7 @@ mkdir -p "$OUT"
 PROGS="themetest explorer launcher taskbar desktop settings sh echo ls cat"
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
-    echo "== der Kern laesst sich nicht bauen"; tail -20 "$OUT/k.log"; exit 1; }
+    echo "== the kernel could not be built"; tail -20 "$OUT/k.log"; exit 1; }
 echo "   kern      $(stat -c%s "$OUT/k.mb") Oktette"
 
 as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
@@ -45,10 +45,6 @@ python3 tools/k15/tree.py "$OUT/baum" > /dev/null || exit 1
 cat > "$OUT/theme.conf" <<'EOF'
 # /etc/theme.conf -- welches Schema, welcher Modus, welche Akzentfarbe.
 #
-# Das Schema liegt unter /etc/schemas/ und liefert die ROHEN Rampen.
-# Der Modus entscheidet, welche der Bindungen der semantischen Ebene
-# darauf gelegt wird: light, dark, oder auto nach der Tageszeit.
-# Ist accent leer, gilt die Akzentfarbe des Schemas.
 scheme=day
 mode=auto
 accent=
@@ -56,8 +52,6 @@ light_start=07:00
 dark_start=19:00
 EOF
 cat > "$OUT/time.conf" <<'EOF'
-# Minuten, um die die ANZEIGE gegen UTC verschoben wird. Die
-# Hardware-Uhr laeuft auf UTC und dieser Kernel kann sie nicht stellen.
 offset=120
 EOF
 
