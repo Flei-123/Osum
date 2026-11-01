@@ -277,7 +277,7 @@ U="$TMPD/u.txt"
 has "$U" "tiling: tiling mode is running" "das Programm sieht den Kachelbetrieb"
 has "$U" "Fenster: 2 von 48" "es nennt die Zahl der Fenster und die Obergrenze"
 has "$U" "Aufbau:  split" "es nennt den Modus des Containers"
-has "$U" "Invariante: hält" "und es laesst den Kern die Invariante NACHRECHNEN"
+has "$U" "invariant: holds" "und es laesst den Kern die Invariante NACHRECHNEN"
 has "$U" "$soll tiling: Einträge gelesen" \
     "es liest /users/osum/config/tiling.conf und schiebt sie in den Kern"
 has "$U" "mod+h  focus-left" "es liest die Belegung wieder heraus"
