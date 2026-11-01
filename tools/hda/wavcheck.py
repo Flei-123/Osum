@@ -18,7 +18,7 @@ def goertzel(seg, fr, f):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("datei")
+    ap.add_argument("file")
     ap.add_argument("--hz", type=int, default=440)
     ap.add_argument("--zweite", type=int, default=0)
     ap.add_argument("--rate", type=int, default=0)

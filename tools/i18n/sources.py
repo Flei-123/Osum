@@ -90,7 +90,7 @@ def funde(root):
                 wire = WIRE.search(z) is not None
                 if wire:
                     kl = 'MARKE'
-                aus.append(dict(file_2=rel, line=nr, klasse=kl, name=name,
+                aus.append(dict(file=rel, line=nr, klasse=kl, name=name,
                                 wire=wire,
                                 width_2=width_2, inhalt=inhalt, roh=roh,
                                 stamm=[s for s, _ in
@@ -165,12 +165,12 @@ def marken(root):
     for r in funde(root):
         if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('draht'):
             continue
-        path_2 = os.path.join(root, r['datei'])
+        path_2 = os.path.join(root, r['file'])
         txt = open(path_2, encoding='utf-8').read()
         rows = txt.split('\n')
         fest = re.match(r'^\s*(?:static|const)\b',
-                        rows[r['zeile'] - 1]) is not None
-        benutzt = ask(rows, r['name'], r['zeile'], fest)
+                        rows[r['line'] - 1]) is not None
+        benutzt = ask(rows, r['name'], r['line'], fest)
         if not any(VERGL.search(z) for z in benutzt):
             continue
         n += 1
@@ -188,13 +188,13 @@ def marken(root):
         if gefunden is None:
             klagen.append('%s:%d  %s = %r  -- es gibt keine Kette %r, '
                           'also nimmt das Programm die Umlautform nicht an'
-                          % (r['datei'], r['zeile'], r['name'],
+                          % (r['file'], r['line'], r['name'],
                              r['inhalt'], soll))
             continue
         zw = ask(rows, gefunden, 0, True)
         if not any(VERGL.search(z) for z in zw):
             klagen.append('%s  %s = %r steht da, wird aber mit nichts '
-                          'verglichen' % (r['datei'], gefunden, soll))
+                          'verglichen' % (r['file'], gefunden, soll))
     return n, klagen
 
 
@@ -208,7 +208,7 @@ def main(argv):
               % (len(f), len(s)))
         for r in s:
             print('    UMSCHRIFT  %s:%d  %-12s %-11s %s'
-                  % (r['datei'], r['zeile'], r['name'],
+                  % (r['file'], r['line'], r['name'],
                      '/'.join(r['stamm']),
                      r['inhalt'].replace('\n', '\\n')[:60]))
         return 1 if s else 0
@@ -232,7 +232,7 @@ def main(argv):
         if not everything and r['klasse'] != 'SICHTBAR':
             continue
         print('  %-11s %-26s %5d  %-12s %-11s %s'
-              % (r['klasse'], r['datei'], r['zeile'], r['name'],
+              % (r['klasse'], r['file'], r['line'], r['name'],
                  '/'.join(r['stamm']),
                  r['inhalt'].replace('\n', '\\n').replace('\t', '\\t')[:60]))
     return 0
