@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+
+export { u_start }
+
+const SCRIPT_MAX: u64 = 2000
+const WORD_MAX: u64 = 64
+const ARGV_MAX: u64 = 8
+
+static mut script_buf: [u8; 2048] = [0 as u8; 2048]
+static mut line_buf: [u8; 160] = [0 as u8; 160]
+static mut word_buf: [u8; 512] = [0 as u8; 512]
+static mut argv: [u64; 8] = [0 as u64; 8]
+
+fn load_script() -> u64 {
+    var path: [u8; 20] = "/etc/vuihost.script\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var len: u64 = 0
+    var more: bool = true
+    while more && len < SCRIPT_MAX {
+        let got: u64 = ulib.sys(ulib.SYS_READ, fd, (&script_buf[0 as usize]) as u64 + len, SCRIPT_MAX - len)
+        if ulib.bad(got) || got == 0 {
+            more = false
+        } else {
+            len = len + got
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return len
+}
+
+fn split_line() -> u64 {
+    let line: u64 = (&line_buf[0 as usize]) as u64
+    let words: u64 = (&word_buf[0 as usize]) as u64
+    var argc: u64 = 0
+    var at: u64 = 0
+    var more: bool = true
+    while more && argc < ARGV_MAX {
+        let next: u64 = ulib.word(line, at, words + argc * WORD_MAX, WORD_MAX)
+        if next == at {
+            more = false
+        } else {
+            at = next
+            argc = argc + 1
+        }
+    }
+    return argc
+}
+
+fn word_at(n: u64) -> u64 {
+    return (&word_buf[0 as usize]) as u64 + n * WORD_MAX
+}
+
+fn report(rc: u64) {
+    var s_head: [u8; 14] = "vuihost: run \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    ulib.say((&s_head[0 as usize]) as u64)
+    ulib.say(word_at(0))
+    ulib.say((&s_rc[0 as usize]) as u64)
+    ulib.sayu(rc)
+    ulib.nl()
+}
+
+fn run_line() {
+    var w_sleep: [u8; 6] = "sleep\0"
+    var w_bg: [u8; 2] = "&\0"
+    let argc: u64 = split_line()
+    if argc == 0 {
+        return
+    }
+    if ulib.streq(word_at(0), (&w_sleep[0 as usize]) as u64) {
+        let _s: u64 = ulib.sleep_ms(ulib.to_num(word_at(1)))
+        return
+    }
+    var background: bool = false
+    var n: u64 = argc
+    if ulib.streq(word_at(argc - 1), (&w_bg[0 as usize]) as u64) {
+        background = true
+        n = argc - 1
+    }
+    var i: u64 = 0
+    while i < n {
+        argv[(i) as usize] = word_at(i)
+        i = i + 1
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, word_at(0), (&argv[0 as usize]) as u64, n)
+    if ulib.bad(pid) {
+        report(255)
+        return
+    }
+    if background {
+        var s_bg: [u8; 13] = "vuihost: bg \0"
+        var s_pid: [u8; 6] = " pid=\0"
+        ulib.say((&s_bg[0 as usize]) as u64)
+        ulib.say(word_at(0))
+        ulib.say((&s_pid[0 as usize]) as u64)
+        ulib.sayu(pid)
+        ulib.nl()
+    } else {
+        report(ulib.wait_code(pid))
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    let len: u64 = load_script()
+    var i: u64 = 0
+    while i < len {
+        var n: u64 = 0
+        while i < len && script_buf[(i) as usize] != 10 as u8 {
+            if n < 150 {
+                line_buf[(n) as usize] = script_buf[(i) as usize]
+                n = n + 1
+            }
+            i = i + 1
+        }
+        i = i + 1
+        line_buf[(n) as usize] = 0 as u8
+        run_line()
+    }
+    return 0
+}
+
+fn main() -> i32 {
+    return u_start(ulib.ARGS_BASE) as i32
+}

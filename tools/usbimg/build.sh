@@ -941,7 +941,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /bin/social /bin/soclocal /bin/melder /bin/freunde /bin/partyrun /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol /bin/osk /apps/osk.osp/start /apps/osk.osp/INFO /apps/osk.osp/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /apps/charmap.osp/symbol /bin/xclip /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /apps/cliphist.osp/symbol \
 /users/$KONTO/ /users/$KONTO/config/"
 [ "$IMAGE_PROFILE" = public ] && PFLICHT="$PFLICHT /etc/autologin"
-PFLICHT="$PFLICHT /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
+PFLICHT="$PFLICHT /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
 python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \

@@ -43,12 +43,20 @@ for l in de en; do
 done
 grep -q 'vaultprompt vaultui' tools/usbimg/build.sh && ok "usbimg PROGS has vaultui" || bad "usbimg PROGS"
 grep -q '/bin/vaultprompt /bin/vaultui' tools/usbimg/build.sh && ok "usbimg PFLICHT has vaultui" || bad "usbimg PFLICHT"
-[ "$(grep -hE '^[[:space:]]*//' kernel/user/vaultui.fi kernel/user/vaultcall.fi tools/vaultui/run.sh | grep -vc SPDX)" = 0 ] && ok "no comments in the new modules" || bad "comments in the new modules"
+[ "$(grep -hE '^[[:space:]]*//' kernel/user/vaultui.fi kernel/user/vaultcall.fi kernel/user/expvault.fi kernel/user/vuihost.fi tools/vaultui/run.sh | grep -vc SPDX)" = 0 ] && ok "no comments in the new modules" || bad "comments in the new modules"
 python3 -I -c "
 import re,sys
 s=open('kernel/user/vaultui.fi',encoding='utf-8').read()
 sys.exit(1 if re.search(r'\b(Falsch|Tresor|Fehler)\b',s) else 0)" && ok "vaultui source is English" || bad "German text in vaultui.fi"
 
+for f in start.txt INFO symbol.osym symbol.svg symbol44.osym symbol64.osym; do
+    [ -s assets/apps/vault.osp/$f ] || bad "bundle file missing: $f"
+done
+[ "$(grep -v '^#' assets/apps/vault.osp/start.txt | head -1)" = /bin/vaultui ] && ok "start menu bundle vault.osp starts /bin/vaultui" || bad "vault.osp start.txt"
+grep -q '^name=Vault$' assets/apps/vault.osp/INFO && ! grep -q '^menu=hidden' assets/apps/vault.osp/INFO && ok "bundle is listed in the start menu (not hidden)" || bad "vault.osp INFO"
+grep -q '/apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol' tools/usbimg/build.sh && ok "usbimg PFLICHT has the vault bundle" || bad "usbimg PFLICHT bundle"
+grep -q 'import expvault' kernel/user/explorer/expnav.fi && grep -q 'expvault.is_vault_dir(full)' kernel/user/explorer/expnav.fi && grep -q '/bin/vaultui' kernel/user/expvault.fi && ok "explorer opens the vault window for the /secrets folder" || bad "explorer vault hook"
+sed 's/expvault.is_vault_dir(full)/false/' kernel/user/explorer/expnav.fi | grep -q 'expvault.is_vault_dir(full)' && bad "COUNTER-PROOF: hook removal not detected" || ok "COUNTER-PROOF: without the call the hook check turns red"
 printf 'root:x:0:0:root:/:/bin/sh\njustin:x:1000:1000:Justin:/:/bin/sh\n' > "$TMPD/passwd"
 printf 'root:x:0:\njustin:x:1000:\n' > "$TMPD/group"
 printf 'kib=64\npasses=1\nlanes=1\n' > "$TMPD/kdf"
