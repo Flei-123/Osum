@@ -21,7 +21,7 @@ import re
 import sys
 
 ALLGEMEIN = [
-    "kernel/app/anbieter.fi",
+    "kernel/app/provider.fi",
     "kernel/app/knetz.fi",
     "kernel/app/kspeicher.fi",
     "kernel/app/ksiegel.fi",
@@ -32,8 +32,8 @@ ALLGEMEIN = [
     "kernel/app/account.fi",
 ]
 
-RUECKEN = ["kernel/app/anb_jarvis.fi", "kernel/app/anb_xoffi.fi",
-           "kernel/app/anb_eigen.fi", "kernel/app/anb_fleitec.fi"]
+RUECKEN = ["kernel/app/prov_jarvis.fi", "kernel/app/prov_xoffi.fi",
+           "kernel/app/prov_own.fi", "kernel/app/prov_fleitec.fi"]
 
 WOERTER = ["xoffi", "jarvis", "fleitec", "nexus"]
 

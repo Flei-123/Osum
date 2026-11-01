@@ -101,10 +101,10 @@ ld -T kernel/user/user.ld -o "$TMPD/konto.elf" "$TMPD/konto.o" 2>"$TMPD/ld.err" 
 strip --strip-all "$TMPD/konto.elf" 2>/dev/null
 SZ=$(stat -c%s "$TMPD/konto.elf" 2>/dev/null)
 num "das Programm auf der Platte, in Oktetten" "$SZ" le 2500000
-ZEILEN=$(wc -l kernel/app/account.fi kernel/app/anbieter.fi kernel/app/knetz.fi \
+ZEILEN=$(wc -l kernel/app/account.fi kernel/app/provider.fi kernel/app/knetz.fi \
     kernel/app/kspeicher.fi kernel/app/ksiegel.fi kernel/app/kjson.fi \
-    kernel/app/kmsg.fi kernel/app/kgegen.fi kernel/app/anb_jarvis.fi \
-    kernel/app/anb_xoffi.fi kernel/app/anb_eigen.fi kernel/app/anb_fleitec.fi \
+    kernel/app/kmsg.fi kernel/app/kgegen.fi kernel/app/prov_jarvis.fi \
+    kernel/app/prov_xoffi.fi kernel/app/prov_own.fi kernel/app/prov_fleitec.fi \
     kernel/app/kjwt.fi kernel/app/ked25519.fi kernel/app/kbig.fi kernel/app/ksha512.fi | tail -1 | awk '{print $1}')
 hin "Quelltext dieser Runde in kernel/app/: $ZEILEN Zeilen"
 
@@ -716,7 +716,7 @@ for K in konto.ui.book konto.ui.book.state konto.ui.book.on konto.ui.book.off ko
     if [ -n "$D" ] && [ -n "$E" ] && [ "$D" != "$E" ]; then ok "Meldung $K: de + en, verschieden"; else bad "message $K is missing or untranslated"; fi
     num "Schluessel $K wird von der Seite benutzt" "$(( $(grep -c "\"$K\\\\0" $SF) + $(grep -c -F -w "$K" kernel/user/settings.d/builtin.settings) ))" ge 1
 done
-HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/anb_fleitec.fi)
+HS=$(grep -c '"konto.hint.noscope' $SF); HB=$(grep -c '"konto.hint.noscope' kernel/app/prov_fleitec.fi)
 num "Scope-fehlt erkennt die Seite am gleichen Schluessel wie der Ruecken" "$((HS * HB))" ge 1
 if grep -ai '^konto\.ui\.book' locale/de/messages locale/en/messages | grep -aqi 'fleitec\|xoffi\|jarvis'; then
     bad "a provider name is in the new messages"

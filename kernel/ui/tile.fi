@@ -1,63 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/tile.fi -- Runde TILING: DER FENSTERBAUM.
-//
-// Bis hierher schwebten die Fenster frei. Runde K10 gab ihnen eine
-// Stapelreihenfolge, einen Eingabefokus und eine Bereichsverfolgung;
-// wohin ein Fenster gelegt wird, entschied der, der es anlegte. Das ist
-// der Zustand, den jedes Fenstersystem am Anfang hat, und es ist der
-// Zustand, in dem man mit acht Fenstern nicht arbeiten kann.
-//
-// WARUM EIN BAUM UND KEINE VORLAGEN. Windows 11 hat "Snap Layouts":
-// eine Handvoll fester Bilder -- zwei Haelften, drei Spalten, vier
-// Viertel -- und wer ein fuenftes Fenster hat, faellt aus dem Schema.
-// Die Vorlage ist eine Aufzaehlung, und eine Aufzaehlung hat ein Ende.
-// i3, sway und bspwm machen es umgekehrt: sie fuehren einen BAUM.
-// Blaetter sind Fenster, innere Knoten sind Aufteilungen, und jede
-// Anordnung, die man malen kann, ist ein Baum -- die zwei Haelften und
-// die vier Viertel sind Sonderfaelle davon und keine eigene Bauart.
-// Genau das ist hier gebaut: die Windows-artige Schnellablage
-// (`snap`, weiter unten) ist ein Aufruf, der einen bestimmten Baum
-// HERSTELLT, und nicht ein zweites System daneben.
-//
-// WAS VON WEM UEBERNOMMEN IST, und was nicht, steht in docs/TILING.md.
-// Die kurze Fassung: die CONTAINER-MODI (`split`, `tabbed`, `stacked`)
-// und der n-aere Baum sind von i3/sway; das DREHEN, das SPIEGELN und
-// das AUSBALANCIEREN sind von bspwm; die automatische Teilungsrichtung
-// nach dem Seitenverhaeltnis ist bspwms `automatic scheme`.
-//
-// WO ES LIEGT UND WARUM HIER. Der Fensterserver dieses Systems laeuft
-// im Kernel (`kernel/wm.fi` sagt im Kopf, warum: es fehlt geteilter
-// Speicher zwischen Prozessen). Die Layout-RECHNUNG gehoert deshalb
-// neben ihn. Sie steht in einer EIGENEN Datei und nicht in `wm.fi`,
-// weil sie von Fenstern nichts weiss: dieses Modul kennt Rechtecke,
-// Knoten und eine Zahl je Blatt (`client`). Wer diese Zahl deutet, ist
-// `wm.fi`. Damit laesst sich der Baum gegen sich selbst pruefen, ohne
-// dass ein Bildschirm da ist -- und genau das tut der Zufallstest mit
-// zehntausend Operationen.
-//
-// DIE BEDIENUNG GEHOERT NICHT HIERHER. Menue, Einstellungen und die
-// Ausgabe der Tastenbelegung stehen in Ring 3 (`kernel/user/tiling.fi`).
-// Was hier steht, ist die TABELLE der Belegung und ihr Leser -- Daten,
-// keine Oberflaeche -- und die Datei, aus der sie kommt, liegt unter
-// /users/<name>/config/tiling.conf und nicht im Quelltext.
-//
-// KEINE REKURSION. Alle Durchlaeufe dieses Moduls sind schleifend, ueber
-// `dfs_next`/`dfs_skip` (Vorordnung ohne Stapel, ueber die Elternzeiger).
-// Der Grund ist gemessen und steht in `kernel/sys.fi`: der Kernstapel
-// ist 16 KiB gross und war in Runde K13 bis auf 112 Oktette voll. Ein
-// Baum aus 48 Blaettern kann 48 tief werden -- eine rekursive Neurechnung
-// des Layouts waere ein Stapelueberlauf, der wie ein Fehler im
-// Fensterserver aussieht.
-//
-// DIE ARITHMETIK. Verhaeltnisse sind KEINE Bildpunkte, sondern Anteile
-// in FRAC_ONE-Schritten. FRAC_ONE ist 720720 und das ist keine Laune:
-// 720720 = 2^4*3^2*5*7*11*13 ist durch JEDE Zahl von 1 bis 16 teilbar,
-// also ist "alle Kinder gleich gross" fuer bis zu sechzehn Kinder eine
-// EXAKTE Aufteilung und keine gerundete. Beim Umrechnen in Bildpunkte
-// bekommt das LETZTE Kind den Rest (`end = total` statt gerechnet) --
-// damit ist die Summe der Kinder exakt der Elternknoten, in jedem Fall,
-// ohne Luecke und ohne Ueberlappung. Das ist die Zusage, die der
-// Zufallstest nach jeder einzelnen Operation nachrechnet.
 
 profile kernel
 
@@ -95,26 +36,20 @@ export {
     A_TILE_TOGGLE, A_NEXT_WIN, A_MAX, A_FULL, A_SAY, A_CLOSE_WIN, KEY_F4
 }
 
-// ------------------------------------------------------- die Zahlen
 
 const NODE_BYTES: u64 = 128
 const MAX_NODES: u64 = 96
-// EIN BAUM MIT N BLAETTERN HAT HOECHSTENS 2N-1 KNOTEN -- jeder innere
-// Knoten hat mindestens zwei Kinder, sonst faellt er beim Schliessen
-// sofort zusammen. 96 Knoten tragen also 48 Blaetter, und das 49.
-// Fenster bekommt eine ABSAGE statt eines stillen Ueberlaufs.
 const MAX_LEAVES: u64 = 48
-const NONE: u64 = 255 // kein Knoten. Absichtlich nicht MAX_NODES: eine
-// Zahl, die auch nach einem Rechenfehler kein gueltiger Platz ist.
+const NONE: u64 = 255
 
-const N_OFF: u64 = 0x200 // die Knotentafel, Versatz in kstate.TILE_OFF
+const N_OFF: u64 = 0x200
 const BIND_OFF: u64 = 0x3200
 const BIND_BYTES: u64 = 64
 const MAX_BINDS: u64 = 56
 
 const FRAC_ONE: u64 = 720720
-const MIN_FRAC: u64 = 36036 // FRAC_ONE / 20, die kleinste Spalte
-const BAR_H: u64 = 22 // eine Reiterzeile, so hoch wie wm.TITLE_H
+const MIN_FRAC: u64 = 36036
+const BAR_H: u64 = 22
 
 const K_LEAF: u64 = 0
 const K_BOX: u64 = 1
@@ -123,8 +58,8 @@ const LAY_SPLIT: u64 = 0
 const LAY_TABBED: u64 = 1
 const LAY_STACKED: u64 = 2
 
-const DIR_H: u64 = 0 // Kinder nebeneinander, von links nach rechts
-const DIR_V: u64 = 1 // Kinder untereinander, von oben nach unten
+const DIR_H: u64 = 0
+const DIR_V: u64 = 1
 
 const D_LEFT: u64 = 0
 const D_RIGHT: u64 = 1
@@ -144,21 +79,13 @@ const MOD_OLD: u64 = 1
 const MOD_SHIFT: u64 = 2
 const MOD_CTRL: u64 = 4
 
-// Tasten, die kein Zeichen sind. Sie liegen ueber 0x80, damit sie mit
-// keinem Oktett der Tastaturtabelle zusammenfallen.
 const KEY_LEFT: u64 = 0x81
 const KEY_RIGHT: u64 = 0x82
 const KEY_UP: u64 = 0x83
 const KEY_DOWN: u64 = 0x84
-// RUNDE VOLLBILD: dieselbe Zahl wie `kbd.KEY_F11`. Sie steht hier ein
-// zweites Mal, weil die Bindungstabelle den Tastaturtreiber nicht
-// importiert -- genau wie die vier Pfeiltasten darueber.
 const KEY_F11: u64 = 0x8B
-// RUNDE FENSTER: die Messtaste, dieselbe Zahl wie `kbd.KEY_F12`.
 const KEY_F12: u64 = 0x8C
 
-// die Handlungen. Die Nummern sind Teil der Schnittstelle nach Ring 3
-// und stehen genauso in `kernel/user/tiling.fi`.
 const A_NONE: u64 = 0
 const A_FOCUS_LEFT: u64 = 1
 const A_FOCUS_RIGHT: u64 = 2
@@ -189,71 +116,38 @@ const A_SNAP_TR: u64 = 26
 const A_SNAP_BL: u64 = 27
 const A_SNAP_BR: u64 = 28
 const A_TILE_TOGGLE: u64 = 29
-// ===================================================== RUNDE TUERSCHLOSS
-//
-// ALT+TAB -- DER FENSTERWECHSEL, DEN ES IN DIESEM SYSTEM NIE GAB.
-//
-// GEMESSEN (Runde DURCHKLICK, Punkt 4.3/8): Alt+Tab aenderte 0,21 % der
-// Bildpunkte (nur den Herzschlag), und `focus=1` stand ueber 137
-// Meldungen still. Der Grund ist NICHT eine fehlende Bindung: die Taste
-// kam bis in `tile.bind_lookup` und fand dort nichts, weil es die
-// HANDLUNG nicht gab. Die acht Richtungshandlungen oben (`focus-left`
-// und Geschwister) laufen alle ueber den KACHELBAUM -- sie fragen
-// `dir_search` nach dem Nachbarn IM BAUM und geben `false` zurueck,
-// sobald das Fenster gar nicht darin haengt (`W_NODE == 0`). Genau das
-// ist der Normalfall auf diesem Schreibtisch: die Fenster schweben.
-//
-// Alt+Tab ist deshalb die erste Handlung, die den Baum NICHT braucht.
-// Sie geht der Reihe nach durch die sichtbaren Fenster des
-// Fensterservers -- die Umsetzung steht in `wm.fi` (`tile_action`), weil
-// nur der Fensterserver seine Fensterliste kennt.
 const A_NEXT_WIN: u64 = 30
 const A_MAX: u64 = 31
 
-// ================================================== RUNDE VOLLBILD
-// F11. Wie A_NEXT_WIN braucht diese Handlung den Baum NICHT -- sie
-// betrifft EIN Fenster und wird deshalb in `wm.fi` (`tile_action`)
-// ausgefuehrt, wo die Fensterliste liegt.
 const A_FULL: u64 = 32
 
-// ================================================== RUNDE FENSTER
-// F12: die ganze Fensterliste auf die Leitung. Veraendert NICHTS --
-// sie ist ein Messgeraet, kein Befehl. Ohne sie schweigt die
-// Geometrie unter `nopuls`, mit dem jeder Aufnahmelauf faehrt.
 const A_SAY: u64 = 33
 
-// r402: ALT+F4. The window with the focus is closed THE WAY ITS CLOSE BUTTON CLOSES IT (event
-// E_CLOSE, then the close motion) -- only a window with a frame and on the normal layer: the
-// desktop, the bar and the start menu have no close button and no Alt+F4 either. `A_CLOSE`
-// (the tiling action `close`) is the older, immediate one and stays as it was.
 const A_CLOSE_WIN: u64 = 34
-// the hot-key code of F4 (kbd.old_key), the same number as `kbd.KEY_F4`
 const KEY_F4: u64 = 0x8D
 
-// die Felder eines Knotens
 const N_USED: u64 = 0x00
-const N_PARENT: u64 = 0x08 // Knoten + 1, 0 = keiner (die Wurzel)
-const N_FIRST: u64 = 0x10 // erstes Kind + 1
+const N_PARENT: u64 = 0x08
+const N_FIRST: u64 = 0x10
 const N_LAST: u64 = 0x18
-const N_NEXT: u64 = 0x20 // naechstes Geschwister + 1
+const N_NEXT: u64 = 0x20
 const N_PREV: u64 = 0x28
 const N_KIND: u64 = 0x30
 const N_LAYOUT: u64 = 0x38
 const N_DIR: u64 = 0x40
-const N_FRAC: u64 = 0x48 // Anteil AM ELTERN, in FRAC_ONE-Schritten
-const N_CLIENT: u64 = 0x50 // Fenster + 1, 0 = ein Blatt ohne Fenster
+const N_FRAC: u64 = 0x48
+const N_CLIENT: u64 = 0x50
 const N_X: u64 = 0x58
 const N_Y: u64 = 0x60
 const N_W: u64 = 0x68
 const N_H: u64 = 0x70
-const N_ACTIVE: u64 = 0x78 // bei tabbed/stacked: sichtbares Kind + 1
+const N_ACTIVE: u64 = 0x78
 
-// die Skalare
 const S_READY: u64 = 0x00
-const S_ROOT: u64 = 0x08 // Knoten + 1
+const S_ROOT: u64 = 0x08
 const S_USED: u64 = 0x10
 const S_LEAVES: u64 = 0x18
-const S_FOCUS: u64 = 0x20 // Blatt + 1
+const S_FOCUS: u64 = 0x20
 const S_AX: u64 = 0x28
 const S_AY: u64 = 0x30
 const S_AW: u64 = 0x38
@@ -265,22 +159,18 @@ const S_INSERTS: u64 = 0x60
 const S_REMOVES: u64 = 0x68
 const S_OPS: u64 = 0x70
 const S_PEAK: u64 = 0x78
-const S_LAX: u64 = 0x80 // der Bereich der letzten Aenderung
+const S_LAX: u64 = 0x80
 const S_LAY: u64 = 0x88
 const S_LAW: u64 = 0x90
 const S_LAH: u64 = 0x98
-const S_NOSUB: u64 = 0xA0 // GEGENPROBE: immer die ganze Flaeche melden
-const S_NEXTSPLIT: u64 = 0xA8 // 0 = nach Seitenverhaeltnis, 1 = H, 2 = V
+const S_NOSUB: u64 = 0xA0
+const S_NEXTSPLIT: u64 = 0xA8
 const S_BINDS: u64 = 0xB0
 const S_SEED: u64 = 0xB8
 const S_SPLITS: u64 = 0xC0
 const S_COLLAPSES: u64 = 0xC8
-// Welche Zusage des Selbsttests NICHT gehalten hat -- ein Bit je Zusage.
-// Eine Zahl statt 'zweiundzwanzig von vierundzwanzig': man will wissen,
-// WELCHE zwei.
 const S_FAIL: u64 = 0xD0
 
-// ------------------------------------------------------- die Zugriffe
 
 fn tg(state: u64, off: u64) -> u64 {
     return kstate.get(state + kstate.TILE_OFF, off)
@@ -529,7 +419,6 @@ fn n_children(state: u64, n: u64) -> u64 {
     return k
 }
 
-// ------------------------------------------------------------- Start
 
 fn init(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     if w == 0 || h == 0 {
@@ -564,39 +453,8 @@ fn init(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     ts(state, S_COLLAPSES, 0)
     ts(state, S_SEED, 0x2545F4914F6CDD1D)
     mark(state, x, y, w, h)
-    // ================================================ RUNDE TUERSCHLOSS
-    //
-    // ALT+TAB GILT AUCH OHNE tiling.conf, und das ist hier der ganze
-    // Punkt.
-    //
-    // GEMESSEN beim Bau dieser Runde: das Wurzelabbild des Sticks
-    // enthaelt `/users/root/config/locale` und sonst nichts unter
-    // `/users` -- KEINE `tiling.conf`. Die Belegung kommt aber
-    // ausschliesslich aus Ring 3 (`/bin/tiling` liest die Datei und
-    // schiebt den Text mit `SYS_TILECONF` herueber, sysgui.do_tileconf).
-    // Ohne Datei wird nie eine Bindung angelegt, `bind_lookup` gibt
-    // A_NONE, und Alt+Tab tut nichts -- auf dem Stick genau der Befund
-    // 4.3 aus Runde DURCHKLICK, obwohl die Handlung existiert.
-    //
-    // Eine Voreinstellung IM KERN ist die einzige Stelle, die ein
-    // Abbild ohne Konfigurationsdatei erreicht. Sie belegt Platz 0 und
-    // steht damit VOR allem, was `bind_parse` spaeter nachlegt; wer
-    // `bind mod+tab ...` in seine tiling.conf schreibt, bekommt einen
-    // zweiten Eintrag, und `bind_lookup` nimmt den ersten Treffer --
-    // deshalb wird beim Einlesen einer Datei zuerst `bind_reset`
-    // gerufen (kernel/user/tiling.fi), und die Vorgabe verschwindet
-    // mit. Wer nichts konfiguriert, behaelt Alt+Tab.
-    //
-    // NUR DIESE EINE: die acht Richtungskuerzel gehoeren zum
-    // Kachelmodus, der standardmaessig aus ist. Alt+Tab ist die
-    // Fensterumschaltung, die jedes System der Welt hat.
     bind_reset(state)
     let _b: bool = bind_add(state, 9, MOD_OLD, A_NEXT_WIN, 0, 0, 0)
-    // RUNDE VOLLBILD: F11 OHNE MODIFIKATOR, aus demselben Grund wie
-    // Alt+Tab eine Zeile darueber -- eine Voreinstellung IM KERN ist
-    // die einzige, die ein Abbild ohne Konfigurationsdatei erreicht.
-    // Wer `bind f11 fullscreen` in seine tiling.conf schreibt, bekommt
-    // einen zweiten Eintrag; `bind_reset` raeumt beide weg.
     let _b2: bool = bind_add(state, KEY_F11, 0, A_FULL, 0, 0, 0)
     let _b3: bool = bind_add(state, KEY_F12, 0, A_SAY, 0, 0, 0)
     let _b4: bool = bind_add(state, KEY_F4, MOD_OLD, A_CLOSE_WIN, 0, 0, 0)
@@ -604,11 +462,6 @@ fn init(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     return true
 }
 
-// DIE FLAECHE AENDERN -- der Weg, auf dem ein Wechsel der
-// Bildschirmaufloesung ueberlebt wird. Der Baum wird NEU AUSGEMESSEN und
-// nicht neu aufgebaut: Struktur, Verhaeltnisse und Modi bleiben, nur die
-// Bildpunkte darunter sind andere. Genau das verlangt die Runde DISPLAY,
-// die die Aufloesung zur Laufzeit umstellt.
 fn set_area(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     if !ready(state) || w == 0 || h == 0 {
         return false
@@ -645,7 +498,6 @@ fn mark_node(state: u64, n: u64) {
     mark(state, n_x(state, n), n_y(state, n), n_w(state, n), n_h(state, n))
 }
 
-// -------------------------------------------------- Knoten holen/geben
 
 fn alloc(state: u64) -> u64 {
     var i: u64 = 0
@@ -688,7 +540,6 @@ fn free_nodes(state: u64) -> u64 {
     return MAX_NODES - tg(state, S_USED)
 }
 
-// ------------------------------------------------- die Kinderlisten
 
 fn append(state: u64, p: u64, c: u64) {
     nset(state, c, N_PARENT, p + 1)
@@ -707,7 +558,6 @@ fn append(state: u64, p: u64, c: u64) {
     }
 }
 
-// `c` VOR `at` einhaengen. `at` muss ein Kind von `p` sein.
 fn insert_before(state: u64, p: u64, c: u64, at: u64) {
     nset(state, c, N_PARENT, p + 1)
     let pv: u64 = n_prev(state, at)
@@ -780,12 +630,6 @@ fn unlink(state: u64, c: u64) {
     nset(state, c, N_PREV, 0)
 }
 
-// DIE ANTEILE EINES KNOTENS AUF FRAC_ONE ZIEHEN. Sie werden gebraucht,
-// sobald ein Kind dazukommt oder verschwindet -- ohne das waere die
-// Summe der Kinder nicht mehr der Elternknoten, und genau daraus
-// entstehen die Luecken, die es hier nicht geben darf. Das LETZTE Kind
-// bekommt den Rest; damit stimmt die Summe exakt, auch wenn die Division
-// es nicht tut.
 fn normalize(state: u64, p: u64) {
     let k: u64 = n_children(state, p)
     if k == 0 {
@@ -824,13 +668,6 @@ fn normalize(state: u64, p: u64) {
     }
 }
 
-// --------------------------------------- der Durchlauf ohne Rekursion
-//
-// Vorordnung: erst der Knoten, dann seine Kinder. `dfs_next` geht zum
-// naechsten Knoten der Vorordnung INNERHALB des Teilbaums von `top`,
-// `dfs_skip` ueberspringt den Teilbaum von `n` (fuer Reiter, deren
-// Inhalt nicht sichtbar ist). Beide brauchen keinen Stapel -- der Weg
-// nach oben steht in den Elternzeigern.
 
 fn dfs_next(state: u64, n: u64, top: u64) -> u64 {
     let f: u64 = n_first(state, n)
@@ -867,8 +704,6 @@ fn depth_of(state: u64, n: u64) -> u64 {
     return d
 }
 
-// Das erste Blatt eines Teilbaums, das WIRKLICH ZU SEHEN ist: bei
-// `split` das erste Kind, bei `tabbed`/`stacked` das aktive.
 fn first_leaf(state: u64, n: u64) -> u64 {
     var c: u64 = n
     var guard: u64 = 0
@@ -894,8 +729,6 @@ fn first_leaf(state: u64, n: u64) -> u64 {
     return NONE
 }
 
-// Ist dieser Knoten sichtbar? Jeder Vorfahr, der Reiter oder Stapel ist,
-// muss den Weg dorthin als aktives Kind fuehren.
 fn visible(state: u64, n: u64) -> bool {
     var c: u64 = n
     var guard: u64 = 0
@@ -932,9 +765,6 @@ fn set_focus(state: u64, n: u64) {
     show(state, n)
 }
 
-// Diesen Knoten in allen Reiter-/Stapelcontainern ueber ihm nach vorn
-// holen. Ohne das kann der Fokus auf einem Fenster liegen, das hinter
-// einem Reiter steht -- man tippt in etwas, das man nicht sieht.
 fn show(state: u64, n: u64) {
     var c: u64 = n
     var guard: u64 = 0
@@ -967,12 +797,6 @@ fn node_of_client(state: u64, client: u64) -> u64 {
     return NONE
 }
 
-// ------------------------------------------------- die Neuberechnung
-//
-// EIN DURCHLAUF IN VORORDNUNG, und jeder Container verteilt die
-// Rechtecke SEINER KINDER. Damit ist das Rechteck eines Knotens schon
-// gesetzt, wenn er selbst an die Reihe kommt -- und es braucht keinen
-// Stapel und keine Rekursion.
 
 fn bar_of(state: u64, n: u64) -> u64 {
     if ng(state, n, N_KIND) == K_LEAF {
@@ -998,9 +822,6 @@ fn bar_of(state: u64, n: u64) -> u64 {
     return bt
 }
 
-// Das Rechteck des i-ten Reiters (tabbed) beziehungsweise der i-ten
-// Titelzeile (stacked). Der LETZTE bekommt den Rest -- dieselbe Regel
-// wie bei den Anteilen, damit die Zeile bildpunktgenau aufgeht.
 fn tab_x(state: u64, n: u64, idx: u64) -> u64 {
     let x: u64 = ng(state, n, N_X)
     if ng(state, n, N_LAYOUT) == LAY_STACKED {
@@ -1139,34 +960,12 @@ fn relayout(state: u64) -> u64 {
     return seen
 }
 
-// ------------------------------------------------------ die Zusicherung
-//
-// NACH JEDER OPERATION MUSS DER BAUM DIE FLAECHE EXAKT KACHELN: keine
-// Luecke, keine Ueberlappung, die Summe der Kinder ist der Elternknoten.
-// Geprueft wird das ZWEIMAL und auf zwei verschiedenen Wegen, weil eine
-// Pruefung, die denselben Rechenweg nimmt wie die Sache, die sie prueft,
-// nichts prueft:
-//
-//   1. OERTLICH, an jedem Container: liegen die Kinder luecken- und
-//      ueberlappungsfrei aneinander, faengt das erste am Rand des
-//      Elternknotens an und hoert das letzte an seinem anderen Rand auf?
-//      Gilt das an jedem Container, dann kachelt der ganze Baum -- das
-//      ist Induktion ueber die Tiefe und braucht keine Liste von
-//      Rechtecken.
-//   2. UEBER DIE FLAECHE: die Summe der Flaechen aller SICHTBAREN
-//      Blaetter und aller Reiterzeilen muss die Flaeche der Wurzel sein.
-//      Diese Zahl entsteht auf einem anderen Weg als (1) und faellt
-//      auch dann, wenn zwei Fehler sich oertlich aufheben.
-//
-// Dazu kommt die Buchhaltung: erreichbare Knoten = belegte Knoten (kein
-// Leck), Blaetterzahl stimmt, Elternzeiger zeigen zurueck, Anteile
-// summieren sich auf FRAC_ONE.
 
 fn check_box(state: u64, n: u64) -> u64 {
     var v: u64 = 0
     let k: u64 = n_children(state, n)
     if k == 0 {
-        return 1 // ein Container ohne Kinder darf es nicht geben
+        return 1
     }
     let x: u64 = ng(state, n, N_X)
     let y: u64 = ng(state, n, N_Y)
@@ -1201,7 +1000,6 @@ fn check_box(state: u64, n: u64) -> u64 {
             }
             c2 = n_next(state, c2)
         }
-        // die Reiterzeilen selbst muessen den Balken exakt fuellen
         var idx: u64 = 0
         var deckung: u64 = 0
         while idx < k {
@@ -1261,8 +1059,6 @@ fn check_box(state: u64, n: u64) -> u64 {
     return v
 }
 
-// Die gemalte Flaeche: sichtbare Blaetter und Reiterzeilen. Teilbaeume
-// hinter einem Reiter werden UEBERSPRUNGEN -- sie sind nicht zu sehen.
 fn painted(state: u64) -> u64 {
     let r: u64 = root(state)
     if r == NONE {
@@ -1330,7 +1126,7 @@ fn check(state: u64) -> u64 {
         n = dfs_next(state, n, r)
     }
     if guard > MAX_NODES + 1 {
-        return v + 1 // ein Kreis im Baum
+        return v + 1
     }
     if erreichbar != tg(state, S_USED) {
         v = v + 1
@@ -1351,7 +1147,6 @@ fn check(state: u64) -> u64 {
     return v
 }
 
-// -------------------------------------------- einfuegen und entfernen
 
 fn make_leaf(state: u64, client: u64) -> u64 {
     let n: u64 = alloc(state)
@@ -1377,17 +1172,6 @@ fn make_box(state: u64, dir: u64) -> u64 {
     return n
 }
 
-// EINEN ABGEHAENGTEN TEILBAUM NEBEN EIN ZIEL HAENGEN. Das ist die eine
-// Stelle, an der Fenster in den Baum kommen -- neue (`insert_at`),
-// verschobene (`move_dir`), fallengelassene (die Maus in `wm.fi`) und
-// die Schnellablage (`snap`) gehen alle hier durch. Zwei Faelle:
-//
-//   * Das Ziel liegt schon in einem Container, der in die RICHTIGE
-//     Richtung teilt -- dann wird der Teilbaum GESCHWISTER und das Ziel
-//     gibt die Haelfte seines Anteils ab. (So macht es i3.)
-//   * Sonst wird das Ziel EINGEWICKELT: aus dem Blatt wird ein innerer
-//     Knoten mit zwei Kindern. (So macht es bspwm, und so steht es im
-//     Auftrag dieser Runde.)
 fn graft(state: u64, sub: u64, target: u64, side: u64) -> bool {
     if sub >= MAX_NODES || target >= MAX_NODES {
         return false
@@ -1459,11 +1243,6 @@ fn attach_at(state: u64, sub: u64, target: u64, side: u64) -> bool {
     return true
 }
 
-// Die Richtung, in die ein neues Fenster geht. Ohne Vorgabe entscheidet
-// das SEITENVERHAELTNIS -- ein breites Blatt wird senkrecht geteilt, ein
-// hohes waagerecht. Das ist bspwms `automatic scheme` und der Grund,
-// warum acht Fenster ohne Zutun eine brauchbare Spirale ergeben statt
-// acht Streifen von 100 Bildpunkten.
 fn auto_side(state: u64, target: u64) -> u64 {
     if tg(state, S_NEXTSPLIT) == 1 {
         return D_RIGHT
@@ -1488,9 +1267,6 @@ fn insert_at(state: u64, target: u64, side: u64, client: u64) -> u64 {
         return NONE
     }
     ts(state, S_OPS, tg(state, S_OPS) + 1)
-    // EIN NEUES FENSTER IN EINEM REITERCONTAINER WIRD EIN NEUER REITER
-    // und teilt nicht. Alles andere waere ein Reitercontainer, der beim
-    // zweiten Fenster aufhoert, einer zu sein.
     let p: u64 = n_parent(state, target)
     var alsreiter: bool = false
     if p != NONE {
@@ -1528,9 +1304,6 @@ fn insert_at(state: u64, target: u64, side: u64, client: u64) -> u64 {
         release(state, nl2)
         return NONE
     }
-    // NUR DER BETROFFENE TEILBAUM. Das Rechteck, das sich aendert, ist
-    // das des geteilten Blattes -- nicht der Bildschirm. `notiledirty`
-    // schaltet genau diese Zeile ab, damit die Zahl etwas bedeutet.
     let np: u64 = n_parent(state, nl2)
     if np == NONE {
         mark(state, rx, ry, rw, rh)
@@ -1578,9 +1351,6 @@ fn insert(state: u64, client: u64) -> u64 {
     return insert_at(state, t, auto_side(state, t), client)
 }
 
-// Ein Container mit genau einem Kind faellt zusammen: das Kind nimmt
-// seinen Platz und seinen Anteil. LUECKEN GIBT ES DAMIT NIE -- das ist
-// dieselbe Zusage wie beim Schliessen eines Fensters in i3.
 fn collapse(state: u64, q: u64) {
     let c: u64 = n_first(state, q)
     if c == NONE {
@@ -1692,9 +1462,9 @@ fn remove(state: u64, n: u64) -> bool {
     }
     ts(state, S_OPS, tg(state, S_OPS) + 1)
     let f: u64 = focus(state)
-    var fokus_weg: bool = false
+    var focus_lost: bool = false
     if f != NONE {
-        fokus_weg = in_subtree(state, f, n)
+        focus_lost = in_subtree(state, f, n)
     }
     detach(state, n)
     free_subtree(state, n)
@@ -1703,7 +1473,7 @@ fn remove(state: u64, n: u64) -> bool {
     if r == NONE {
         ts(state, S_FOCUS, 0)
     } else {
-        if fokus_weg || focus(state) == NONE {
+        if focus_lost || focus(state) == NONE {
             let l: u64 = first_leaf(state, r)
             if l == NONE {
                 ts(state, S_FOCUS, 0)
@@ -1716,10 +1486,7 @@ fn remove(state: u64, n: u64) -> bool {
     return true
 }
 
-// ------------------------------------------- die Griffe an dem Baum
 
-// Der Container, den eine Handlung meint: bei einem Blatt ist das sein
-// Elternknoten -- ein Blatt hat keinen Modus und keine Richtung.
 fn box_of(state: u64, n: u64) -> u64 {
     if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
         return NONE
@@ -1730,11 +1497,6 @@ fn box_of(state: u64, n: u64) -> u64 {
     return n_parent(state, n)
 }
 
-// DER MODUS EINES CONTAINERS -- der Teil, den Windows gar nicht hat.
-// `split` teilt die Flaeche, `tabbed` legt die Kinder als Reiter
-// uebereinander und zeigt eines, `stacked` stellt sie als Titelzeilen
-// untereinander. Die Fenster merken davon NICHTS: sie bekommen ein
-// Rechteck, wie vorher auch.
 fn set_layout(state: u64, n: u64, lay: u64) -> bool {
     if lay > LAY_STACKED {
         return false
@@ -1790,11 +1552,6 @@ fn toggle_dir(state: u64, n: u64) -> bool {
     return set_dir(state, b, DIR_H)
 }
 
-// GROESSE AENDERN HEISST: DAS VERHAELTNIS AM INNEREN KNOTEN VERSCHIEBEN.
-// Nicht "dieses Fenster wird 30 Bildpunkte breiter" -- der Nachbar gibt
-// genau so viel ab, wie dieser bekommt, und alle Nachfahren rechnen neu.
-// Deshalb ueberlebt eine Groessenaenderung auch einen Wechsel der
-// Bildschirmaufloesung: sie steht als Anteil da und nicht als Bildpunkt.
 fn resize_at(state: u64, n: u64, delta: i64) -> bool {
     if n >= MAX_NODES || ng(state, n, N_USED) == 0 || delta == 0 {
         return false
@@ -1826,10 +1583,6 @@ fn resize_at(state: u64, n: u64, delta: i64) -> bool {
     return true
 }
 
-// AUSBALANCIEREN: alle Kinder gleich gross. Mit FRAC_ONE = 720720 ist
-// das fuer bis zu sechzehn Kinder EXAKT und nicht gerundet -- 720720 ist
-// durch jede Zahl von 1 bis 16 teilbar. Darueber bekommt das letzte Kind
-// den Rest, und das steht hier, damit niemand die Zahl fuer Zufall haelt.
 fn balance(state: u64, n: u64) -> bool {
     var top: u64 = n
     if top == NONE || top >= MAX_NODES || ng(state, top, N_USED) == 0 {
@@ -1885,12 +1638,6 @@ fn reverse_children(state: u64, n: u64) {
     nset(state, n, N_LAST, f)
 }
 
-// DREHEN UM EINE VIERTELDREHUNG IM UHRZEIGERSINN, wie bspwm es kann.
-// Die Regel ist keine Erfindung, sie faellt aus der Drehung selbst: bei
-// einer Vierteldrehung im Uhrzeigersinn wird aus der linken Kante die
-// obere. Ein waagerechter Container (links, rechts) wird also senkrecht
-// und BEHAELT die Reihenfolge; ein senkrechter (oben, unten) wird
-// waagerecht und KEHRT sie um -- aus oben wird rechts.
 fn rot90(state: u64, top: u64) {
     var c: u64 = top
     var guard: u64 = 0
@@ -1930,8 +1677,6 @@ fn rotate(state: u64, n: u64, quarters: u64) -> bool {
     return true
 }
 
-// SPIEGELN: Achse 0 dreht links und rechts um, Achse 1 oben und unten.
-// Auch das ist bspwm; in i3 gibt es dafuer keinen Befehl.
 fn mirror(state: u64, n: u64, axis: u64) -> bool {
     var top: u64 = n
     if top == NONE || top >= MAX_NODES || ng(state, top, N_USED) == 0 {
@@ -1961,15 +1706,6 @@ fn mirror(state: u64, n: u64, axis: u64) -> bool {
     return true
 }
 
-// ------------------------------------ der Fokus in eine Himmelsrichtung
-//
-// GEOMETRISCH UND NICHT UEBER DIE REIHENFOLGE. "Das Fenster links von
-// diesem" ist eine Aussage ueber Rechtecke auf dem Schirm; wer sie ueber
-// die Kinderliste beantwortet, springt bei drei Ebenen Verschachtelung
-// dorthin, wo nichts ist. Gesucht wird deshalb unter ALLEN sichtbaren
-// Blaettern das mit dem kleinsten Abstand in der gefragten Richtung --
-// und Blaetter, die sich quer dazu gar nicht ueberschneiden, kommen erst
-// danach.
 fn overlaps(a0: u64, a1: u64, b0: u64, b1: u64) -> bool {
     if a1 <= b0 {
         return false
@@ -2002,7 +1738,7 @@ fn dir_search(state: u64, from: u64, d: u64) -> u64 {
     var i: u64 = 0
     while i < MAX_NODES {
         var nimm: bool = false
-        var wert: u64 = 0
+        var value: u64 = 0
         if ng(state, i, N_USED) != 0 && ng(state, i, N_KIND) == K_LEAF {
             if i != from && visible(state, i) {
                 let x: u64 = ng(state, i, N_X)
@@ -2016,7 +1752,7 @@ fn dir_search(state: u64, from: u64, d: u64) -> u64 {
                         nimm = true
                         lueck = fx - (x + w)
                         quer = overlaps(y, y + h, fy, fy + fh)
-                        wert = lueck * 4096 + absdiff(y + h / 2, fcy)
+                        value = lueck * 4096 + absdiff(y + h / 2, fcy)
                     }
                 }
                 if d == D_RIGHT {
@@ -2024,7 +1760,7 @@ fn dir_search(state: u64, from: u64, d: u64) -> u64 {
                         nimm = true
                         lueck = x - (fx + fw)
                         quer = overlaps(y, y + h, fy, fy + fh)
-                        wert = lueck * 4096 + absdiff(y + h / 2, fcy)
+                        value = lueck * 4096 + absdiff(y + h / 2, fcy)
                     }
                 }
                 if d == D_UP {
@@ -2032,7 +1768,7 @@ fn dir_search(state: u64, from: u64, d: u64) -> u64 {
                         nimm = true
                         lueck = fy - (y + h)
                         quer = overlaps(x, x + w, fx, fx + fw)
-                        wert = lueck * 4096 + absdiff(x + w / 2, fcx)
+                        value = lueck * 4096 + absdiff(x + w / 2, fcx)
                     }
                 }
                 if d == D_DOWN {
@@ -2040,18 +1776,18 @@ fn dir_search(state: u64, from: u64, d: u64) -> u64 {
                         nimm = true
                         lueck = y - (fy + fh)
                         quer = overlaps(x, x + w, fx, fx + fw)
-                        wert = lueck * 4096 + absdiff(x + w / 2, fcx)
+                        value = lueck * 4096 + absdiff(x + w / 2, fcx)
                     }
                 }
                 if nimm && !quer {
-                    wert = wert + 0x10000000
+                    value = value + 0x10000000
                 }
             }
         }
         if nimm {
-            if best == NONE || wert < bestwert {
+            if best == NONE || value < bestwert {
                 best = i
-                bestwert = wert
+                bestwert = value
             }
         }
         i = i + 1
@@ -2059,31 +1795,22 @@ fn dir_search(state: u64, from: u64, d: u64) -> u64 {
     return best
 }
 
-// EIN FENSTER VERSCHIEBEN HEISST: DEN KNOTEN IM BAUM UMHAENGEN. Nicht
-// seine Koordinaten aendern -- die rechnet der Baum aus. Gesucht wird
-// das Blatt in der gefragten Richtung; der Knoten wird abgehaengt (was
-// seinen alten Container zusammenfallen laesst, falls er allein
-// zurueckbleibt) und neben dem Ziel wieder eingehaengt.
 fn move_dir(state: u64, n: u64, d: u64) -> bool {
     if n >= MAX_NODES || ng(state, n, N_USED) == 0 {
         return false
     }
-    let ziel: u64 = dir_search(state, n, d)
-    if ziel == NONE {
+    let dest: u64 = dir_search(state, n, d)
+    if dest == NONE {
         return false
     }
     ts(state, S_OPS, tg(state, S_OPS) + 1)
-    // Der Bereich, der sich aendert: die alte Umgebung und die neue
-    // zusammen. Bei einem Verschieben ist das ehrlicherweise mehr als
-    // ein Teilbaum -- deshalb steht hier die Vereinigung und nicht die
-    // kleinere der beiden Zahlen.
     var p1: u64 = n_parent(state, n)
     if p1 == NONE {
         p1 = n
     }
-    var p2: u64 = n_parent(state, ziel)
+    var p2: u64 = n_parent(state, dest)
     if p2 == NONE {
-        p2 = ziel
+        p2 = dest
     }
     let x0: u64 = umin(ng(state, p1, N_X), ng(state, p2, N_X))
     let y0: u64 = umin(ng(state, p1, N_Y), ng(state, p2, N_Y))
@@ -2092,11 +1819,11 @@ fn move_dir(state: u64, n: u64, d: u64) -> bool {
     let y1: u64 = umax(ng(state, p1, N_Y) + ng(state, p1, N_H),
         ng(state, p2, N_Y) + ng(state, p2, N_H))
     detach(state, n)
-    if ng(state, ziel, N_USED) == 0 {
+    if ng(state, dest, N_USED) == 0 {
         return false
     }
     var page: u64 = d
-    if !graft(state, n, ziel, page) {
+    if !graft(state, n, dest, page) {
         return false
     }
     mark(state, x0, y0, x1 - x0, y1 - y0)
@@ -2120,21 +1847,6 @@ fn umax(a: u64, b: u64) -> u64 {
     return b
 }
 
-// -------------------------------------------------- die Schnellablage
-//
-// HALB LINKS, HALB RECHTS, EIN VIERTEL -- das, was Windows als "Snap
-// Layouts" verkauft. Hier ist es KEIN zweites System: jeder dieser
-// Griffe stellt einen bestimmten BAUM her und laesst danach alles
-// weiterlaufen wie vorher. Man kann in eine geschnappte Haelfte
-// hineinteilen, sie zu Reitern machen und sie drehen -- bei Windows
-// endet die Vorlage genau hier.
-//
-// Die Haelfte ist der einfache Fall: Wurzel wird ein Container, das
-// Fenster ist das eine Kind und der GANZE bisherige Baum das andere.
-// Das Viertel braucht einen Partner fuer die zweite Ebene und nimmt
-// dafuer das erste Kind der alten Wurzel. Gibt es keinen (der Rest ist
-// ein einzelnes Fenster), wird daraus ehrlich eine Haelfte, und der
-// Rueckgabewert sagt es.
 fn snap(state: u64, leaf: u64, where: u64) -> bool {
     if leaf >= MAX_NODES || ng(state, leaf, N_USED) == 0 {
         return false
@@ -2200,7 +1912,6 @@ fn snap(state: u64, leaf: u64, where: u64) -> bool {
             tg(state, S_AH))
         return geviertelt
     }
-    // das Viertel: einen Partner aus der alten Wurzel holen
     let partner: u64 = n_first(state, rest)
     detach(state, partner)
     let rest2: u64 = root(state)
@@ -2213,13 +1924,13 @@ fn snap(state: u64, leaf: u64, where: u64) -> bool {
         relayout(state)
         return false
     }
-    let oben: bool = w == SNAP_TL || w == SNAP_TR
-    let links: bool = w == SNAP_TL || w == SNAP_BL
+    let top_side: bool = w == SNAP_TL || w == SNAP_TR
+    let left: bool = w == SNAP_TL || w == SNAP_BL
     let col: u64 = make_box(state, DIR_V)
     let hb: u64 = make_box(state, DIR_H)
     nset(state, leaf, N_FRAC, halb)
     nset(state, partner, N_FRAC, FRAC_ONE - halb)
-    if oben {
+    if top_side {
         append(state, col, leaf)
         append(state, col, partner)
     } else {
@@ -2232,7 +1943,7 @@ fn snap(state: u64, leaf: u64, where: u64) -> bool {
     ts(state, S_ROOT, hb + 1)
     nset(state, hb, N_PARENT, 0)
     nset(state, hb, N_FRAC, FRAC_ONE)
-    if links {
+    if left {
         append(state, hb, col)
         append(state, hb, rest2)
     } else {
@@ -2247,17 +1958,6 @@ fn snap(state: u64, leaf: u64, where: u64) -> bool {
     return true
 }
 
-// ---------------------------------------------------- der Zufallstest
-//
-// ZEHNTAUSEND ZUFAELLIGE OPERATIONEN, und nach JEDER wird die Invariante
-// nachgerechnet. Das ist der einzige Weg, auf dem man einem Baum
-// glaubt: die Faelle, an denen so etwas bricht, sind nicht die, die man
-// von Hand hinschreibt (zwei Fenster teilen, eines schliessen), sondern
-// die, auf die man nicht kommt -- ein Container, der beim Schliessen des
-// vorletzten Kindes zusammenfaellt, WAEHREND er der aktive Reiter seines
-// Elternknotens ist, und dessen Anteil dabei an den falschen Nachbarn
-// geht. Der Generator ist festgenagelt (derselbe Startwert, dieselbe
-// Folge), damit ein Fehler wiederholbar ist.
 fn rnd(state: u64) -> u64 {
     var x: u64 = tg(state, S_SEED)
     if x == 0 {
@@ -2355,8 +2055,6 @@ fn fuzz(state: u64, rounds: u64) -> u64 {
                 snap(state, f, (r >> 8) % 8)
             }
         }
-        // DER FOKUS DARF NICHT INS LEERE ZEIGEN -- auch das ist Teil der
-        // Invariante und faellt sonst erst beim naechsten Tastendruck auf.
         let nf: u64 = focus(state)
         if nf != NONE {
             if ng(state, nf, N_USED) == 0 {
@@ -2369,29 +2067,12 @@ fn fuzz(state: u64, rounds: u64) -> u64 {
     return viol
 }
 
-// ------------------------------------------------- die Tastenbelegung
-//
-// SIE STEHT NICHT IM QUELLTEXT. Was hier liegt, ist eine TABELLE und
-// ein Leser dafuer; die Zeilen kommen aus /users/<name>/config/tiling.conf
-// und werden von `kernel/user/tiling.fi` (Ring 3) oder beim Hochlauf von
-// `kmain` hereingereicht. Wer die Datei aendert und neu laedt, hat eine
-// andere Belegung, ohne den Kernel anzufassen -- das ist die Zusage.
-//
-// Das Format ist das von i3, auf das Noetige eingedampft:
-//
-//     # eine Bemerkung
-//     bind mod+h focus-left
-//     bind mod+shift+l move-right
-//     bind mod+w layout-tabbed
-//
-// `mod` ist die Alt-Taste (kstate.KB_ALT). Namen von Tasten, die kein
-// Zeichen sind: left, right, up, down, return, space, tab.
 
 const B_USED: u64 = 0x00
 const B_KEY: u64 = 0x08
 const B_MODS: u64 = 0x10
 const B_ACT: u64 = 0x18
-const B_NAME: u64 = 0x20 // 32 Oktette
+const B_NAME: u64 = 0x20
 
 fn bat(state: u64, i: u64) -> u64 {
     return state + kstate.TILE_OFF + BIND_OFF + i * BIND_BYTES
@@ -2657,9 +2338,6 @@ fn action_of(p: u64, a: u64, b: u64) -> u64 {
     return action_of2(p, a, b)
 }
 
-// Der zweite Teil der Namen. Getrennt, weil `firnc` jedem Zwischenwert
-// jedes Zweiges einen eigenen Platz auf dem Stapel gibt -- dieselbe
-// Ueberlegung, die in `kernel/sys.fi` hinter `k13_call` steht.
 fn action_of2(p: u64, a: u64, b: u64) -> u64 {
     var m1: [u8; 10] = "snap-left\0"
     var m2: [u8; 11] = "snap-right\0"
@@ -2670,10 +2348,6 @@ fn action_of2(p: u64, a: u64, b: u64) -> u64 {
     var m7: [u8; 16] = "snap-bottomleft\0"
     var m8: [u8; 17] = "snap-bottomright\0"
     var m9: [u8; 14] = "tiling-toggle\0"
-    // RUNDE TUERSCHLOSS: der Name zu A_NEXT_WIN. Er heisst `next-window`
-    // und nicht `alt-tab`, weil in dieser Datei HANDLUNGEN benannt
-    // werden und keine Tasten -- welche Taste sie ausloest, steht in
-    // tiling.conf und darf dort jeder aendern.
     var m10: [u8; 12] = "next-window\0"
     if eqs(p, a, b, (&m1[0]) as u64, 9) {
         return A_SNAP_LEFT
@@ -2798,12 +2472,6 @@ fn bind_parse(state: u64, p: u64, n: u64) -> u64 {
     return tg(state, S_BINDS)
 }
 
-// ------------------------------------------------------------ Zusagen
-//
-// Die letzte davon ist die wichtigste: sie bricht den Baum ABSICHTLICH
-// und verlangt, dass `check` es merkt. Eine Pruefung, die nicht fallen
-// kann, prueft nichts -- das ist die Lehre aus Runde K7B, eine Ebene
-// hoeher.
 fn failbits(state: u64) -> u64 {
     return tg(state, S_FAIL)
 }
@@ -2818,36 +2486,27 @@ fn selftest(state: u64) -> u64 {
     if !init(state, 0, 0, 800, 600) {
         return 0
     }
-    // 1. Ein leerer Baum hat keine Wurzel und keine Verletzung.
     if root(state) == NONE && check(state) == 0 {
         n = n + 1
     pass_ok(state, 1)}
-    // 2. Das erste Fenster bekommt die ganze Flaeche.
     let a: u64 = insert(state, 1)
     if a != NONE && n_w(state, a) == 800 && n_h(state, a) == 600 {
         n = n + 1
     pass_ok(state, 2)}
-    // 3. Das zweite TEILT das erste: aus dem Blatt wird ein innerer
-    //    Knoten mit zwei Kindern.
     let b: u64 = insert(state, 2)
     if b != NONE && n_parent(state, a) != NONE {
         if n_parent(state, a) == n_parent(state, b) {
             n = n + 1
         pass_ok(state, 3)}
     }
-    // 4. Und zwar bildpunktgenau in zwei Haelften, ohne Luecke.
     if n_w(state, a) == 400 && n_w(state, b) == 400 {
         if n_x(state, a) == 0 && n_x(state, b) == 400 {
             n = n + 1
         pass_ok(state, 4)}
     }
-    // 5. Die Invariante haelt.
     if check(state) == 0 {
         n = n + 1
     pass_ok(state, 5)}
-    // 6. NUR DER TEILBAUM WIRD SCHMUTZIG. Das dritte Fenster teilt das
-    //    zweite -- der gemeldete Bereich ist dessen Rechteck und NICHT
-    //    der Bildschirm. `notiledirty` dreht genau das um.
     set_focus(state, b)
     let c: u64 = insert(state, 3)
     if c != NONE {
@@ -2857,14 +2516,10 @@ fn selftest(state: u64) -> u64 {
             pass_ok(state, 6)}
         }
     }
-    // 7. Schliessen laesst den Container zusammenfallen: der Nachbar
-    //    bekommt den ganzen Platz, und es bleibt KEINE Luecke.
     remove(state, c)
     if n_w(state, b) == 400 && n_h(state, b) == 600 && check(state) == 0 {
         n = n + 1
     pass_ok(state, 7)}
-    // 8. Reiter: beide Kinder bekommen DASSELBE Rechteck, und darueber
-    //    liegt eine Reiterzeile.
     set_layout(state, a, LAY_TABBED)
     let p: u64 = n_parent(state, a)
     if p != NONE && n_layout(state, p) == LAY_TABBED {
@@ -2874,7 +2529,6 @@ fn selftest(state: u64) -> u64 {
             pass_ok(state, 8)}
         }
     }
-    // 9. Von zwei Reitern ist genau EINER zu sehen.
     var sichtbar: u64 = 0
     if visible(state, a) {
         sichtbar = sichtbar + 1
@@ -2885,37 +2539,29 @@ fn selftest(state: u64) -> u64 {
     if sichtbar == 1 && check(state) == 0 {
         n = n + 1
     pass_ok(state, 9)}
-    // 10. Stapel: zwei Titelzeilen statt einer, und die Flaeche geht auf.
     set_layout(state, a, LAY_STACKED)
     if n_y(state, a) == BAR_H * 2 && check(state) == 0 {
         n = n + 1
     pass_ok(state, 10)}
-    // 11. Zurueck auf Teilung, und die Fenster merken davon nichts.
     set_layout(state, a, LAY_SPLIT)
     if n_w(state, a) == 400 && n_w(state, b) == 400 && check(state) == 0 {
         n = n + 1
     pass_ok(state, 11)}
-    // 12. Der Fokus geht GEOMETRISCH nach rechts, nicht der Reihe nach.
     if dir_search(state, a, D_RIGHT) == b && dir_search(state, b, D_LEFT) == a {
         if dir_search(state, a, D_LEFT) == NONE {
             n = n + 1
         pass_ok(state, 12)}
     }
-    // 13. Verschieben haengt den Knoten um: aus (a,b) wird (b,a).
     if move_dir(state, a, D_RIGHT) {
         if n_x(state, b) == 0 && n_x(state, a) == 400 && check(state) == 0 {
             n = n + 1
         pass_ok(state, 13)}
     }
-    // 14. Die Teilungsrichtung umschalten: nebeneinander wird
-    //     uebereinander.
     if toggle_dir(state, a) {
         if n_h(state, a) == 300 && n_w(state, a) == 800 && check(state) == 0 {
             n = n + 1
         pass_ok(state, 14)}
     }
-    // 15. Drehen: eine Vierteldrehung macht daraus wieder nebeneinander,
-    //     und aus oben wird rechts.
     let obenwar: u64 = n_client(state, first_leaf(state, root(state)))
     rotate(state, root(state), 1)
     let linksnun: u64 = n_client(state, first_leaf(state, root(state)))
@@ -2924,8 +2570,6 @@ fn selftest(state: u64) -> u64 {
             n = n + 1
         pass_ok(state, 15)}
     }
-    // 16. Spiegeln kehrt die Reihenfolge um -- zweimal ist wieder wie
-    //     vorher.
     let before: u64 = n_client(state, first_leaf(state, root(state)))
     mirror(state, root(state), 0)
     let move_to: u64 = n_client(state, first_leaf(state, root(state)))
@@ -2933,32 +2577,24 @@ fn selftest(state: u64) -> u64 {
     if before != move_to && n_client(state, first_leaf(state, root(state))) == before {
         n = n + 1
     pass_ok(state, 16)}
-    // 17. Groesse aendern verschiebt das VERHAELTNIS, und die Summe
-    //     bleibt exakt der Elternknoten.
     let first: u64 = n_first(state, root(state))
     if resize_at(state, first, 72072) {
         if n_w(state, first) == 480 && check(state) == 0 {
             n = n + 1
         pass_ok(state, 17)}
     }
-    // 18. Ausbalancieren macht sie wieder gleich -- EXAKT, weil 720720
-    //     durch zwei teilbar ist.
     balance(state, root(state))
     if n_frac(state, first) == FRAC_ONE / 2 && n_w(state, first) == 400 {
         n = n + 1
     pass_ok(state, 18)}
-    // 19. EIN WECHSEL DER BILDSCHIRMAUFLOESUNG WIRD UEBERLEBT: derselbe
-    //     Baum, neu ausgemessen. Das verlangt die Runde DISPLAY.
-    let knoten_vorher: u64 = nodes(state)
+    let node_before: u64 = nodes(state)
     set_area(state, 0, 0, 1024, 768)
-    if nodes(state) == knoten_vorher && n_w(state, first) == 512 {
+    if nodes(state) == node_before && n_w(state, first) == 512 {
         if check(state) == 0 {
             n = n + 1
         pass_ok(state, 19)}
     }
     set_area(state, 0, 0, 800, 600)
-    // 20. Die Schnellablage ist ein Sonderfall des Baumes: halb links
-    //     sind genau 400x600 bei (0,0).
     let l: u64 = first_leaf(state, root(state))
     snap(state, l, SNAP_LEFT)
     if n_x(state, l) == 0 && n_w(state, l) == 400 && n_h(state, l) == 600 {
@@ -2966,8 +2602,6 @@ fn selftest(state: u64) -> u64 {
             n = n + 1
         pass_ok(state, 20)}
     }
-    // 21. Und ein Viertel oben links ist 400x300 bei (0,0) -- dafuer
-    //     braucht es drei Fenster, sonst gibt es keinen Partner.
     insert(state, 4)
     insert(state, 5)
     let q: u64 = node_of_client(state, 4)
@@ -2982,8 +2616,6 @@ fn selftest(state: u64) -> u64 {
             }
         }
     }
-    // 22. Die Obergrenze ist BENANNT und wird eingehalten: das 49.
-    //     Fenster bekommt eine Absage, keinen stillen Ueberlauf.
     var k: u64 = 0
     var abgelehnt: bool = false
     while k < MAX_LEAVES + 4 {
@@ -2995,9 +2627,6 @@ fn selftest(state: u64) -> u64 {
     if abgelehnt && leaves(state) == MAX_LEAVES && check(state) == 0 {
         n = n + 1
     pass_ok(state, 22)}
-    // 23. DIE GEGENPROBE ZUR PRUEFUNG SELBST. Ein Rechteck wird um
-    //     einen Bildpunkt verstellt; findet `check` das nicht, prueft es
-    //     nichts.
     let opfer: u64 = first_leaf(state, root(state))
     let wide: u64 = n_w(state, opfer)
     nset(state, opfer, N_W, wide + 1)
@@ -3006,7 +2635,6 @@ fn selftest(state: u64) -> u64 {
     pass_ok(state, 23)}
     nset(state, opfer, N_W, wide)
     relayout(state)
-    // 24. Die Tastenbelegung kommt aus TEXT und nicht aus dem Quelltext.
     var conf: [u8; 57] = "# test\nbind mod+h focus-left\nbind mod+shift+l move-right\0"
     if bind_parse(state, (&conf[0]) as u64, 56) == 2 {
         if bind_lookup(state, 104, MOD_OLD) == A_FOCUS_LEFT {
@@ -3017,15 +2645,6 @@ fn selftest(state: u64) -> u64 {
             }
         }
     }
-    // 25. RUNDE TUERSCHLOSS: ALT+TAB IST OHNE JEDE DATEI BELEGT.
-    //
-    //     Die Zusage, die auf dem Stick zaehlt. `init` legt die
-    //     Vorgabe an; ein Abbild ohne tiling.conf -- und genau so eines
-    //     baut tools/usbimg/build.sh -- hat Alt+Tab trotzdem. Geprueft
-    //     wird gegen einen FRISCHEN `init`, weil Punkt 24 die Belegung
-    //     eben durch eine eigene Datei ersetzt hat: das ist das
-    //     Verhalten, das dort zugesagt wird, und hier ist der Beweis,
-    //     dass es sich nach einem Neuanfang wieder einstellt.
     if init(state, 0, 0, 800, 600) {
         if bind_lookup(state, 9, MOD_OLD) == A_NEXT_WIN {
             if bind_lookup(state, 9, 0) == A_NONE {

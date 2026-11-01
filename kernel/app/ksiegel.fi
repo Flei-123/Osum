@@ -1,47 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/ksiegel.fi -- RUNDE KONTO: das Siegel ueber einem Token.
-//
-// ================================================= WAS HIER GESIEGELT WIRD
-//
-// Ein Zugriffstoken von Xoffi laeuft SIEBEN TAGE. Ein Erneuerungstoken
-// dreissig. Beide sind Klartext-Ausweise: wer die Oktette hat, ist der
-// Nutzer -- kein Passwort noetig, kein zweiter Faktor. Solche Oktette
-// offen auf eine Geraeteplatte zu schreiben heisst, das Konto an die
-// Platte zu heften. Genau davor warnt der Auftrag dieser Runde, und
-// genau das tut diese Datei nicht.
-//
-// ============================================================ DIE ZWEI KEYS
-//
-//     GERAETESCHLUESSEL   32 Oktette aus `getrandom`, in
-//                         /device/kontoschluessel, Rechte 0600.
-//                         Er entsteht auf DIESEM Geraet und verlaesst es
-//                         nie: /device ist in `kernel/user/bsec.fi`
-//                         Klasse NIE -- keine Sicherung nimmt ihn mit.
-//     SIEGELSCHLUESSEL    HMAC-SHA256(Geraeteschluessel, Marke || Salz)
-//                         je Datei frisch, weil das Salz frisch ist.
-//
-// Verschluesselt wird mit ChaCha20, beglaubigt mit HMAC-SHA256 UEBER DEN
-// SCHLUESSELTEXT (encrypt-then-MAC). Das ist dieselbe Bauform, die
-// `kernel/user/bsec.fi` fuer die Sicherung benutzt, und sie ist hier
-// aus demselben Grund richtig: dieser Baum hat keinen beglaubigten
-// Verschluessler (Firns AES kann kein GCM, siehe kernel/user/key.fi),
-// also wird die Beglaubigung danebengestellt statt weggelassen.
-//
-// DAS SALZ IST JE DATEI FRISCH. Ein ChaCha20-Strom, der zweimal mit
-// demselben Schluessel und derselben Nonce laeuft, ist ein Zweizeitpad
-// -- zwei Token, die sich zu einem bekannten Wert XORen. `siegeln`
-// zieht immer ein neues Salz; es gibt hier keinen Weg, eines
-// wiederzuverwenden.
-//
-// ================================================== WAS DAS NICHT LEISTET
-//
-// S1 WER root IST, KANN DEN GERAETESCHLUESSEL LESEN. Dieses System hat
-//    keinen Schluesselbund im Kern und kein TPM. Das Siegel schuetzt
-//    gegen die AUSGEBAUTE PLATTE und gegen jeden Blick in ein
-//    Abbild -- nicht gegen root auf dem laufenden Geraet.
-// S2 DAS TOKEN STEHT WAEHREND DER BENUTZUNG IM SPEICHER. Es gibt keinen
-//    Weg, das zu vermeiden, solange ein Programm es senden muss.
-// S3 DIE KRYPTOGRAFIE IST NICHT GEPRUEFT (docs/REALHW.md).
 
 import std.rt
 import std.crypto.hmac
@@ -54,7 +11,7 @@ export {
     HEADER, SALZ, BRAND,
 }
 
-const HEADER: usize = 4        // "OKS1"
+const HEADER: usize = 4
 const SALZ: usize = 16
 const BRAND: usize = 32
 const SCHL: usize = 32
@@ -65,15 +22,10 @@ const SYS_CLOSE: i64 = 3
 const SYS_MKDIR: i64 = 83
 const SYS_UNLINK: i64 = 87
 
-// O_WRONLY | O_CREAT | O_TRUNC
 const WRITE: i64 = 577
 
-// ----------------------------------------------------- Dateien mit Rechten
-//
-// `rt.write_file` legt mit 0644 an. Ein Geheimnis mit 0644 ist keines,
-// also geht dieser Weg an ihm vorbei und uebergibt den Modus selbst.
-fn file_write_0600(pfad: u64, p: u64, n: usize) -> bool {
-    let fd: i64 = syscall(SYS_OPEN, pfad as i64, WRITE, 384, 0, 0, 0)
+fn file_write_0600(path: u64, p: u64, n: usize) -> bool {
+    let fd: i64 = syscall(SYS_OPEN, path as i64, WRITE, 384, 0, 0, 0)
     if fd < 0 {
         return false
     }
@@ -91,19 +43,17 @@ fn file_write_0600(pfad: u64, p: u64, n: usize) -> bool {
     return true
 }
 
-fn dir(pfad: u64) -> bool {
-    let r: i64 = syscall(SYS_MKDIR, pfad as i64, 448, 0, 0, 0, 0)
-    // -EEXIST ist kein Fehler: das Verzeichnis soll DA SEIN, nicht NEU.
+fn dir(path: u64) -> bool {
+    let r: i64 = syscall(SYS_MKDIR, path as i64, 448, 0, 0, 0, 0)
     return r >= 0 || r == -17
 }
 
-// -------------------------------------------------- der Geraeteschluessel
 
 fn key_get(aus: u64) -> bool {
-    var pfad: [u8; 26] = "/device/kontoschluessel\0\0\0"
+    var path: [u8; 26] = "/device/kontoschluessel\0\0\0"
     var dev: [u8; 8] = "/device\0"
     var b: rt.Buf = rt.buf_new()
-    if rt.read_file((&pfad[0]) as u64, &b) {
+    if rt.read_file((&path[0]) as u64, &b) {
         if b.len >= SCHL {
             rt.mem_copy(aus, b.ptr, SCHL)
             rt.buf_free(&b)
@@ -111,26 +61,23 @@ fn key_get(aus: u64) -> bool {
         }
     }
     rt.buf_free(&b)
-    // Es gibt ihn noch nicht -- also entsteht er jetzt, auf DIESEM
-    // Geraet, aus `getrandom`. Ein Schluessel, der aus etwas Ableitbarem
-    // entstuende (Seriennummer, Uhrzeit), waere kein Schluessel.
-    var neu: [u8; 32] = [0; 32]
-    if !random.random_bytes((&neu[0]) as u64, SCHL) {
+    var fresh: [u8; 32] = [0; 32]
+    if !random.random_bytes((&fresh[0]) as u64, SCHL) {
         return false
     }
     let _v: bool = dir((&dev[0]) as u64)
-    if !file_write_0600((&pfad[0]) as u64, (&neu[0]) as u64, SCHL) {
+    if !file_write_0600((&path[0]) as u64, (&fresh[0]) as u64, SCHL) {
         return false
     }
-    rt.mem_copy(aus, (&neu[0]) as u64, SCHL)
+    rt.mem_copy(aus, (&fresh[0]) as u64, SCHL)
     return true
 }
 
-fn ableiten(dev: u64, marke: u64, ml: usize, salz: u64, aus: u64) {
+fn ableiten(dev: u64, brand: u64, ml: usize, salz: u64, aus: u64) {
     var msg: [u8; 64] = [0; 64]
     var i: usize = 0
     while i < ml && i < 40 {
-        rt.st8((&msg[0]) as u64, i, rt.ld8(marke, i))
+        rt.st8((&msg[0]) as u64, i, rt.ld8(brand, i))
         i = i + 1
     }
     var k: usize = 0
@@ -141,7 +88,6 @@ fn ableiten(dev: u64, marke: u64, ml: usize, salz: u64, aus: u64) {
     hmac.hmac_sha256(dev, SCHL, (&msg[0]) as u64, i + SALZ, aus)
 }
 
-// ---------------------------------------------------------------- siegeln
 
 fn siegeln(klar: u64, n: usize, aus: *mut rt.Buf) -> bool {
     var dev: [u8; 32] = [0; 32]
@@ -164,8 +110,6 @@ fn siegeln(klar: u64, n: usize, aus: *mut rt.Buf) -> bool {
     var kt: rt.Buf = rt.buf_new()
     rt.buf_reserve(&kt, n)
     rt.buf_set_len(&kt, n)
-    // Die Nonce sind die ersten zwoelf Oktette des Salzes -- frisch je
-    // Datei, weil das Salz frisch ist.
     chacha.chacha20((&ks[0]) as u64, (&salz[0]) as u64, 0 as u32, klar, n,
         kt.ptr)
 
@@ -185,9 +129,6 @@ fn siegeln(klar: u64, n: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// `false` heisst: die Marke stimmt nicht, das Salz fehlt, oder der
-// Geraeteschluessel ist ein anderer. In JEDEM dieser Faelle bleibt `aus`
-// leer -- ein halb entsiegeltes Token waere schlimmer als keines.
 fn open(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     if n < HEADER + SALZ + BRAND {
         return false
@@ -214,9 +155,6 @@ fn open(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     ableiten((&dev[0]) as u64, (&m_m[0]) as u64, 23, salz, (&ms[0]) as u64)
     var tag: [u8; 32] = [0; 32]
     hmac.hmac_sha256((&ms[0]) as u64, SCHL, p, n - BRAND, (&tag[0]) as u64)
-    // ZEITGLEICHER VERGLEICH. `hmac_equal` vergleicht ohne Abbruch beim
-    // ersten Unterschied; ein `while ... break` waere hier eine Uhr, an
-    // der ein Angreifer die Marke ablesen kann.
     if !hmac.hmac_equal((&tag[0]) as u64, p + (n - BRAND) as u64, BRAND) {
         return false
     }
@@ -230,32 +168,19 @@ fn open(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// ------------------------------------------------------- wirklich loeschen
-//
-// `unlink` nimmt den NAMEN weg. Die Oktette bleiben da, wo sie waren,
-// bis jemand anders den Block bekommt -- in einem Plattenabbild sind sie
-// danach mit `grep` zu finden. Abschnitt (a) des Auftrags verlangt, dass
-// nach dem Abmelden im ABBILD nichts mehr steht, also wird vorher
-// UEBERSCHRIEBEN: erst mit Nullen, dann der Name weg.
-//
-// EHRLICH: das gilt fuer ein Dateisystem, das an dieselbe Stelle
-// schreibt. OFS tut das (kein Journal, das den alten Block aufhebt, und
-// keine Kopie-beim-Schreiben-Semantik); ein Flash-Baustein mit
-// Verschleissausgleich koennte den alten Block trotzdem behalten, und
-// gegen den hilft nur, dass das Token gesiegelt war.
-fn secure_delete(pfad: u64) -> bool {
+fn secure_delete(path: u64) -> bool {
     var b: rt.Buf = rt.buf_new()
-    if rt.read_file(pfad, &b) {
+    if rt.read_file(path, &b) {
         var nullen: rt.Buf = rt.buf_new()
         var i: usize = 0
         while i < b.len {
             rt.buf_push(&nullen, 0 as u8)
             i = i + 1
         }
-        let _w: bool = file_write_0600(pfad, nullen.ptr, nullen.len)
+        let _w: bool = file_write_0600(path, nullen.ptr, nullen.len)
         rt.buf_free(&nullen)
     }
     rt.buf_free(&b)
-    let r: i64 = syscall(SYS_UNLINK, pfad as i64, 0, 0, 0, 0, 0)
+    let r: i64 = syscall(SYS_UNLINK, path as i64, 0, 0, 0, 0, 0)
     return r >= 0
 }

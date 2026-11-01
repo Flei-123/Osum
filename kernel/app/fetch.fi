@@ -1,73 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/fetch.fi -- round HWNET: a page over HTTPS, from ring 3.
-//
-//     fetch [-n name] [-r roots] [-o file] [-b von] [-a] [-v] [-k] <url>
-//
-//     url    http://<ipv4>[:port]/path   or   https://<ipv4>[:port]/path
-//     -n     the name the CERTIFICATE has to carry, and the SNI that is
-//            sent. Needed because there is NO RESOLVER in this system:
-//            the address is a number and the name is a separate thing.
-//            Without it the address itself is used as the name, which a
-//            normal certificate does not carry -- so the connection is
-//            refused, and that is the correct answer.
-//     -r     the trust store, default /etc/ssl/roots.pem
-//     -o     write the body to a file instead of to the output
-//     -b     RUNDE OTA: begin at this octet. Sends `Range: bytes=<n>-`
-//            and expects `206 Partial Content`. A `-b` greater than zero
-//            APPENDS to the file of -o by itself -- that is what resuming
-//            means, and Osum's `exec` takes eight arguments (proc.fi,
-//            MAX_ARGS), so a separate flag for it would not fit next to
-//            -q -o <file> -n <name> <url>.
-//     -a     append to the file of -o even without -b.
-//     -q     only the report lines, no body on the output. RUNDE OTA:
-//            THIS IS NOW THE DEFAULT, and `-v` is what turns the body
-//            back on. The reason is a number and not a taste: Osum's
-//            `exec` takes EIGHT arguments (kernel/proc.fi, MAX_ARGS), and
-//            a resuming download needs `-o <file> -n <name> -b <von>
-//            <url>` -- that is eight WITH the program name and nine with
-//            a `-q` in front. The flag stays accepted so that every
-//            caller written before this round keeps working.
-//     -v     print the first 240 octets of the body, the way this
-//            program did by default until round OTA
-//     -k     NO CERTIFICATE CHECK. Prints a warning line and is refused
-//            unless it is spelled out. It exists so that the difference
-//            between "checked" and "not checked" is measurable, not so
-//            that anybody uses it.
-//
-// WHY THIS FILE IS NOT IN kernel/user/. Every program under
-// `kernel/user/` is `profile kernel`: freestanding, no runtime, no
-// allocator, `ulib` and `libc` and nothing else. That is the right shape
-// for `ls` and it cannot carry TLS -- the record layer alone needs a
-// heap and buffers that grow. This program is built with `--profile=app`
-// against the FULL Firn library out of `vendor/firn/lib`, the same one
-// the browser of round B5 uses, and it runs in ring 3 on Osum
-// unchanged. That works for one reason, and it is worth writing down:
-//
-//   OSUM'S SYSTEM CALLS CARRY LINUX'S NUMBERS (round K4), including the
-//   socket family (41 socket, 42 connect, 44 sendto, 45 recvfrom, 3
-//   close), 9 mmap, 12 brk, 228 clock_gettime and 318 getrandom -- and
-//   Firn's `std.rt`/`std.net` issue exactly those numbers through the
-//   `syscall` intrinsic. Osum's argument block (kernel/elf.fi,
-//   `write_args`) has Linux's shape too: argc, then the pointers, then a
-//   zero. So `fn main(start: u64)` finds its arguments where it expects
-//   them, and Firn's own `_start` (which puts `rsp` into `rdi`) is the
-//   entry point -- `kernel/user/crt.s` is not linked in at all.
-//
-// WHAT IS BORROWED AND WHAT IS NEW. Everything below the socket is
-// vendored Firn (`vendor/firn/COMMIT`, round B5): `lib/tls/tls.fi` (TLS
-// 1.3 record layer, key schedule, handshake), `lib/tls/x509.fi`
-// (certificate parsing and chain verification), `lib/std/crypto/*`
-// (X25519, AES-GCM, ChaCha20-Poly1305, SHA-256/384/512, HKDF, RSA,
-// ECDSA). This file is the program around them: a URL, a store, a
-// request, a report.
-//
-// THIS CRYPTOGRAPHY HAS NOT BEEN AUDITED. It was measured against
-// OpenSSL and Python's `cryptography` (647 primitive cases, 49 of them
-// counter-checks that must fail; 18 handshake cases against `openssl
-// s_server`), which is far more than nothing and far less than an audit.
-// It is not constant-time in every path. Do not put anything behind it
-// that would hurt if it were read. docs/REALHW.md says the same thing in
-// the same words.
 
 import std.io
 import std.rt
@@ -79,16 +10,6 @@ import tls.roots
 import tls.clockgate
 import net.httpfile
 import net.httpsink
-// RUNDE BETRIEB: DERSELBE AUFLOESER WIE IN `/bin/ota`, und das ist kein
-// Zufall, sondern der Grund, warum er in `lib/libc/` liegt und nicht in
-// einem der beiden Programme. `libc/dns.fi` und `libc/dnswire.fi`
-// benutzen nur `syscall` und rohe Oktette -- damit uebersetzen sie
-// SOWOHL unter `profile kernel` (das ist `/bin/ota`) ALS AUCH unter
-// `--profile=app` (das ist diese Datei). Es gibt keine zweite Umsetzung,
-// die auseinanderlaufen koennte. Dafuer baut `tools/install/build.sh`
-// die Apps seit dieser Runde mit `FIRNLIB=<repo>/lib` statt
-// `vendor/firn/lib`; `std.*` und `tls.*` findet der Uebersetzer
-// weiterhin ueber `<Verzeichnis des Uebersetzers>/../lib`.
 import libc.dns
 
 const CHUNK: usize = 4096
@@ -138,10 +59,6 @@ fn text_line(out: *mut rt.Buf, key: str, p: u64, n: usize) {
     emit(out)
 }
 
-// ---------------------------------------------------------- the reason
-//
-// A refusal that only says "it failed" is a refusal nobody can act on.
-// These are the ten answers `x509.verify_chain` can give.
 fn reason(out: *mut rt.Buf, r: u32) {
     if r == x509.V_OK {
         io.print("fetch: verify OK\n")
@@ -191,26 +108,6 @@ fn reason(out: *mut rt.Buf, r: u32) {
 }
 
 
-// ------------------------------------------------- RUNDE OTA: die Datei
-//
-// WAS `-o` SCHREIBT, und bis zu dieser Runde war es falsch: geschrieben
-// wurde `body` -- die GANZE Antwort, Kopfzeilen eingeschlossen. Fuer die
-// Messung von Runde HWNET spielte das keine Rolle (dort wurde `-o` nicht
-// benutzt, gemessen wurde der Streuwert des Rumpfes auf der Ausgabe);
-// fuer ein Update ist es der Unterschied zwischen einem Paket und einer
-// Datei, die mit `HTTP/1.0 200 OK` anfaengt. Seit dieser Runde schreibt
-// `-o` GENAU DEN RUMPF, ausgepackt, wenn er in Stuecken kam.
-//
-// UND ES KANN ANHAENGEN. Ein Download, dem die Leitung abgerissen ist,
-// hinterlaesst ein Bruchstueck. `-b <von>` holt den Rest ab dem Oktett
-// `von`, `-a` haengt ihn an das Bruchstueck an. Das ist die
-// Wiederaufnahme, und sie braucht auf dieser Seite genau diese zwei
-// Zeilen -- die Arbeit steckt darin, dass der Aufrufer den Streuwert
-// des GANZEN Ergebnisses prueft und nicht den der beiden Haelften.
-// Die Nummer der Antwort: die drei Ziffern hinter `HTTP/1.x `. Ein
-// Aufrufer, der wiederaufnimmt, muss 206 von 200 unterscheiden koennen --
-// eine Gegenstelle, die `Range` nicht kann, schickt 200 und den GANZEN
-// Rumpf, und wer den anhaengt, hat die Datei doppelt.
 fn status_code(p: u64, n: usize) -> u64 {
     var i: usize = 0
     while i < n && rt.ld8(p, i) != 32 as u8 {
@@ -231,7 +128,6 @@ fn status_code(p: u64, n: usize) -> u64 {
     return v
 }
 
-// Eine Dezimalzahl aus dem Argument, ohne Vorzeichen.
 fn parse_dec_u64(p: u64, n: usize) -> u64 {
     var v: u64 = 0
     var i: usize = 0
@@ -246,7 +142,6 @@ fn parse_dec_u64(p: u64, n: usize) -> u64 {
     return v
 }
 
-// ------------------------------------------------------------ the URL
 
 fn parse_u32(p: u64, from: usize, to: usize) -> u32 {
     var v: u32 = 0
@@ -262,9 +157,6 @@ fn parse_u32(p: u64, from: usize, to: usize) -> u32 {
     return v
 }
 
-// The four numbers of an IPv4 address, out of `p[from..to)`. Returns
-// false when it is not four numbers -- a NAME lands here and has to be
-// refused with a sentence, not resolved into something wrong.
 fn parse_ip(p: u64, from: usize, to: usize, out: *mut u32) -> bool {
     var parts: [u32; 4] = [0; 4]
     var k: usize = 0
@@ -340,35 +232,35 @@ fn main(start: u64) -> i32 {
         let n: usize = rt.c_length(a)
         if n == 2 && rt.ld8(a, 0) == 45 as u8 {
             let c: u8 = rt.ld8(a, 1)
-            if c == 110 as u8 { // -n
+            if c == 110 as u8 {
                 i = i + 1
                 if i < argc {
                     name = rt.arg_ptr(start, i)
                     namelen = rt.c_length(name)
                 }
-            } else if c == 114 as u8 { // -r
+            } else if c == 114 as u8 {
                 i = i + 1
                 if i < argc {
                     roots = rt.arg_ptr(start, i)
                 }
-            } else if c == 111 as u8 { // -o
+            } else if c == 111 as u8 {
                 i = i + 1
                 if i < argc {
                     outfile = rt.arg_ptr(start, i)
                 }
-            } else if c == 98 as u8 { // -b
+            } else if c == 98 as u8 {
                 i = i + 1
                 if i < argc {
                     let z: u64 = rt.arg_ptr(start, i)
                     von = parse_dec_u64(z, rt.c_length(z))
                 }
-            } else if c == 97 as u8 { // -a
+            } else if c == 97 as u8 {
                 anhaengen = true
-            } else if c == 113 as u8 { // -q
+            } else if c == 113 as u8 {
                 quiet = true
-            } else if c == 118 as u8 { // -v
+            } else if c == 118 as u8 {
                 quiet = false
-            } else if c == 107 as u8 { // -k
+            } else if c == 107 as u8 {
                 insecure = true
             }
         } else {
@@ -395,7 +287,6 @@ fn main(start: u64) -> i32 {
         io.print("fetch: the url has to start with http:// or https://\n")
         return 2
     }
-    // host[:port]/path
     var hostend: usize = at
     while hostend < urllen && rt.ld8(url, hostend) != 47 as u8
         && rt.ld8(url, hostend) != 58 as u8 {
@@ -418,21 +309,9 @@ fn main(start: u64) -> i32 {
     var hb: [u8; 256] = [0; 256]
     var aufgeloest: bool = false
     if !parse_ip(url, at, hostend, &addr) {
-        // RUNDE BETRIEB: EIN NAME STATT EINER ADRESSE.
-        //
-        // Bis zu dieser Runde stand hier eine Absage und der Satz "there
-        // is no resolver in this system". Es gibt jetzt einen, und er
-        // steht in `lib/libc/dns.fi`.
-        //
-        // WICHTIG FUER DIE SICHERHEIT: der Name aus der URL wird damit
-        // AUCH der Name, den das Zertifikat tragen muss (unten, `name ==
-        // 0`). Eine Aufloesung, die die Adresse aendert, aendert also
-        // NICHT, gegen welchen Namen geprueft wird -- ein untergeschobener
-        // DNS-Eintrag bringt einen Angreifer nur an eine Verbindung, die
-        // an der Kettenpruefung scheitert.
         let hl: usize = hostend - at
         if hl == 0 || hl > 254 {
-            io.print("fetch: der Name in der URL ist keiner\n")
+            io.print("fetch: the name in the URL is not a host name\n")
             return 2
         }
         var hi: usize = 0
@@ -444,7 +323,7 @@ fn main(start: u64) -> i32 {
         __mmio_write8((((&hb[0]) as u64) + hl as u64) as *mut u8, 0 as u8)
         let a4: u64 = dns.resolve_a((&hb[0]) as u64)
         if a4 == 0 {
-            io.print("fetch: der Name lässt sich nicht auflösen: ")
+            io.print("fetch: cannot resolve the name: ")
             io.print_bytes((&hb[0]) as u64, hl)
             io.print("\n")
             return 1
@@ -456,9 +335,6 @@ fn main(start: u64) -> i32 {
         num_line(&out, "fetch: aufgeloest ", addr as u64)
     }
     if name == 0 {
-        // No name given: the address itself is what the certificate would
-        // have to carry. Almost none do, so this ends in a refusal -- on
-        // purpose, and with a sentence that says which one.
         name = url + at as u64
         namelen = hostend - at
     }
@@ -470,7 +346,6 @@ fn main(start: u64) -> i32 {
         pathlen = 1
     }
 
-    // ------------------------------------------------------ the socket
     var bad: bool = false
     var c: net.Conn = net.connect_tcp(addr, port as u16)
     catch | e | fail_conn(&bad)
@@ -535,7 +410,6 @@ fn main(start: u64) -> i32 {
     return 0
 }
 
-// --------------------------------------------------------- over TLS
 
 fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, dest: *mut httpfile.Dest,
     name: u64, namelen: usize, path: u64, pathlen: usize, roots: u64,
@@ -572,9 +446,6 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, dest: *mut httpfile.Dest,
         num_line(out, "fetch: roots ", 0)
     }
     if insecure {
-        // A store with nothing in it and a client that goes on anyway.
-        // The line is printed so that no measurement can mistake this run
-        // for a checked one.
         io.print("fetch: WARNING -k, the certificate is NOT checked\n")
     }
 
@@ -630,12 +501,6 @@ fn over_tls(c: *mut net.Conn, out: *mut rt.Buf, dest: *mut httpfile.Dest,
     return 0
 }
 
-// ------------------------------------------------------- without TLS
-//
-// The same program over plain HTTP, so that the DIFFERENCE between the
-// two is one word in the url and not a second program. It is also what
-// makes the round's measurement honest: the same octets, once in the
-// clear and once through the record layer.
 fn plain(c: *mut net.Conn, out: *mut rt.Buf, dest: *mut httpfile.Dest,
     name: u64, namelen: usize, path: u64, pathlen: usize, von: u64) -> i32 {
     var req: rt.Buf = rt.buf_new()
@@ -669,18 +534,8 @@ fn request(req: *mut rt.Buf, name: u64, namelen: usize, path: u64,
     rt.buf_push_bytes(req, (&h[0]) as u64, 17)
     rt.buf_push_bytes(req, name, namelen)
     var tail: [u8; 46] = "\r\nConnection: close\r\nUser-Agent: osum-fetch\r\n\0"
-    // 45 AND NOT 44. It was 44 for one run, which cut the last newline
-    // off the User-Agent line: `openssl s_server -www` answered anyway,
-    // the real web did not -- example.com waited for a header block that
-    // never ended and the body came back as zero octets. A length
-    // literal that is one short is invisible in every test that talks to
-    // something forgiving.
     rt.buf_push_bytes(req, (&tail[0]) as u64, 45)
     var crlf: [u8; 3] = "\r\n\0"
-    // RUNDE OTA: die Wiederaufnahme. `Range: bytes=<von>-` heisst "ab
-    // diesem Oktett bis zum Ende". Bei `von == 0` wird die Zeile NICHT
-    // geschrieben -- eine Gegenstelle, die kein `Range` kann, soll fuer
-    // den Normalfall gar nicht erst danach gefragt werden.
     if von > 0 {
         var rg: [u8; 16] = "Range: bytes=\0\0\0"
         rt.buf_push_bytes(req, (&rg[0]) as u64, 13)
@@ -701,7 +556,3 @@ fn fail_len(bad: *mut bool) -> usize {
     return 0 as usize
 }
 
-// CLOCK_REALTIME, because a certificate's validity is calendar time and
-// not uptime. Osum reads the CMOS clock once at boot (kernel/time.fi)
-// and counts on from there, so this is the machine's real date -- which
-// is exactly what decides whether a certificate is expired.

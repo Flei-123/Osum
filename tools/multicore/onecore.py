@@ -83,7 +83,7 @@ PUFFER = re.compile(
 
 SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
                     r"|serial\.zeile_an\("
-                    r"|buehne_an\(|buehne_wenn_|table_on\(|stage_of\(")
+                    r"|stage_on\(|stage_if_|table_on\(|stage_of\(")
 
 BASISZUGRIFF = re.compile(
     r"fn (\w+)\(state: u64\) -> u64 \{\s*\n\s*return state \+ kstate\.(\w+_OFF)")

@@ -1,53 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/anb_jarvis.fi -- RUNDE KONTO: der Ruecken fuer den
-// JARVIS-Server.
-//
-// Alles, was dieses System ueber JARVIS weiss, steht hier. Gelesen aus
-// dem laufenden Dienst (`/root/jarvis/server.js`, `/root/jarvis/lib/
-// auth.js`), nicht aus einer Beschreibung:
-//
-//   POST /api/login   { "username": ..., "password": ... }
-//                     -> 200 { "username": ..., "token": <JWT> }
-//                     -> 401 { "error": ... }
-//                     -> 429 { "error": ... } mit `Retry-After`
-//                     Passwoerter liegen dort als scrypt; das ist
-//                     Sache des Servers, dieses Geraet sieht davon
-//                     nichts.
-//   POST /api/logout  -> 200 { "ok": true }
-//   GET  /api/me      -> 200 { "username", "admin", "deviceToken", ... }
-//
-// ================================================= DREI EHRLICHE GRENZEN
-//
-// J1 KEIN `Authorization: Bearer`. `authReq()` liest den Sitzungskeks
-//    ODER `?token=` in der Anschrift -- eine Kopfzeile liest es nicht.
-//    Ein Token in der ANSCHRIFT landet in jedem Zugriffsprotokoll und
-//    in jedem Verlauf; das ist der schlechteste der drei Wege. Also
-//    schickt dieser Ruecken BEIDES: die Kopfzeile (fuer den Tag, an dem
-//    der Server sie liest) und einen AUSDRUECKLICH hier gebauten Keks.
-//    Das ist kein ambienter Keks: es gibt kein Glas, aus dem er kaeme,
-//    er wird fuer genau diesen einen Aufruf hingeschrieben. Im Bericht
-//    steht das als Bitte an den Betreiber.
-//
-// J2 KEIN ERNEUERN. Der Server stellt EIN Token aus, dreissig Tage, und
-//    hat keinen Weg, es zu erneuern. `erneuern` sagt deshalb ehrlich
-//    S_ABGELAUFEN mit einem Hinweis, statt einen Endpunkt zu erfinden,
-//    den es nicht gibt -- der Nutzer meldet sich neu an.
-//
-// J3 `logout` LOESCHT NUR DEN KEKS. Das ausgestellte JWT bleibt bis zu
-//    seinem `exp` gueltig; es gibt keine Sperrliste. Das Geraet loescht
-//    seine Sitzung trotzdem -- lokal ist sie dann weg --, und der
-//    Bericht sagt, was das fuer ein gestohlenes Token bedeutet.
-//
-// `deviceToken` aus `/api/me` wird NICHT genommen. Er ist der Schluessel
-// zur Fernsteuerung eines Rechners; ein Anmeldevorgang, der ihn
-// nebenbei einsammelt, waere eine Rechteausweitung durch Bequemlichkeit.
 
 import std.rt
 import std.io
 import std.str
 import knetz
 import kjson
-import anbieter
+import provider
 
 export { push }
 
@@ -65,7 +23,7 @@ static mut f_exp: [u8; 4] = "exp\0"
 static mut f_uid: [u8; 4] = "uid\0"
 static mut f_name: [u8; 5] = "name\0"
 
-static mut k_keks: [u8; 17] = "fleitec_session=\0"
+static mut k_cookie: [u8; 17] = "fleitec_session=\0"
 
 static mut h_kein_erneuern: [u8; 26] = "konto.hint.no_refresh\0\0\0\0\0"
 static mut h_form: [u8; 20] = "konto.hint.badjson\0\0"
@@ -73,14 +31,9 @@ static mut h_status: [u8; 21] = "konto.hint.badstatus\0"
 
 static mut nm: [u8; 7] = "jarvis\0"
 
-fn push() -> anbieter.Push {
-    return anbieter.Push { name: (&nm[0]) as u64, sign_in: do_sign_in,
+fn push() -> provider.Push {
+    return provider.Push { name: (&nm[0]) as u64, sign_in: do_sign_in,
         erneuern: erneuern, sign_out: do_sign_out,
-        // RUNDE ROTABSCHNITTE: das FELD heisst `pruefen`
-        // (anbieter.fi:131), die Funktion hier heisst `check`.
-        // Eine Umbenennung hat den Feldnamen im Literal
-        // mitgenommen; seitdem: "struct anbieter__Push has no
-        // field check" und "is missing the field pruefen".
         validate: check, hand_over: hand_over }
 }
 
@@ -89,31 +42,28 @@ fn fail_bool(b: *mut bool) -> bool {
     return false
 }
 
-fn target_from(z: *mut anbieter.Access, zl: *mut knetz.Target) -> bool {
+fn target_from(z: *mut provider.Access, zl: *mut knetz.Target) -> bool {
     return knetz.target_read((*z).endpoint, rt.c_length((*z).endpoint),
         (*z).zielname, (*z).wurzeln, zl)
 }
 
-fn hinweis(s: *mut anbieter.Session, k: u64) {
+fn hinweis(s: *mut provider.Session, k: u64) {
     rt.buf_clear(&(*s).hinweis)
     rt.buf_push_bytes(&(*s).hinweis, k, rt.c_length(k))
 }
 
 fn net_state(a: *mut knetz.Reply) -> u32 {
     if (*a).fail_code == knetz.F_TLS {
-        return anbieter.S_TLS
+        return provider.S_TLS
     }
     if (*a).fail_code == knetz.F_KEINNETZ || (*a).fail_code == knetz.F_READ
         || (*a).fail_code == knetz.F_DNS {
-        return anbieter.S_KEINNETZ
+        return provider.S_KEINNETZ
     }
-    return anbieter.S_ERROR
+    return provider.S_ERROR
 }
 
-// Der Rumpf des JWT: `uid`, `name`, `exp`. Ohne Signaturpruefung, aus
-// demselben Grund wie beim anderen Ruecken -- das Geheimnis liegt beim
-// Server. Genommen wird daraus nur, was ein KONTO ausmacht.
-fn body_read(tok: u64, tl: usize, s: *mut anbieter.Session) {
+fn body_read(tok: u64, tl: usize, s: *mut provider.Session) {
     var p1: usize = 0
     while p1 < tl && rt.ld8(tok, p1) != 46 as u8 {
         p1 = p1 + 1
@@ -131,11 +81,11 @@ fn body_read(tok: u64, tl: usize, s: *mut anbieter.Session) {
         return
     }
     var d: kjson.Json = kjson.json_new()
-    var kaputt: bool = false
+    var broken: bool = false
     if !kjson.json_parse(&d, roh.ptr, roh.len) {
-        kaputt = true
+        broken = true
     }
-    if !kaputt && kjson.json_valid(&d) {
+    if !broken && kjson.json_valid(&d) {
         let w: u32 = kjson.json_root(&d)
         var da: bool = false
         let ex: i64 = kjson.int(&d, w, (&f_exp[0]) as u64, &da)
@@ -161,20 +111,20 @@ fn body_read(tok: u64, tl: usize, s: *mut anbieter.Session) {
     rt.buf_free(&roh)
 }
 
-fn do_sign_in(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
-    anbieter.clear_session(s)
+fn do_sign_in(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
+    provider.clear_session(s)
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
-        (*s).stand = anbieter.S_ERROR
+        (*s).stand = provider.S_ERROR
         hinweis(s, (&h_status[0]) as u64)
         return (*s).stand
     }
     var koerper: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.writer_new(&koerper)
+    var w: kjson.Writer = kjson.writer_new(&koerper)
     kjson.field(&w, (&f_username[0]) as u64, (*z).kennung,
         rt.c_length((*z).kennung))
-    kjson.field(&w, (&f_password[0]) as u64, (*z).geheim,
-        rt.c_length((*z).geheim))
+    kjson.field(&w, (&f_password[0]) as u64, (*z).secret,
+        rt.c_length((*z).secret))
     kjson.field_free(&w)
     var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
@@ -188,29 +138,29 @@ fn do_sign_in(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     }
     if a.code == 429 as u32 {
         knetz.reply_free(&a)
-        (*s).stand = anbieter.S_GEBREMST
+        (*s).stand = provider.S_GEBREMST
         return (*s).stand
     }
     if a.code == 401 as u32 {
         knetz.reply_free(&a)
-        (*s).stand = anbieter.S_WRONG
+        (*s).stand = provider.S_WRONG
         return (*s).stand
     }
     if a.code != 200 as u32 {
         knetz.reply_free(&a)
-        (*s).stand = anbieter.S_ERROR
+        (*s).stand = provider.S_ERROR
         hinweis(s, (&h_status[0]) as u64)
         return (*s).stand
     }
     var d: kjson.Json = kjson.json_new()
-    var kaputt: bool = false
+    var broken: bool = false
     if !kjson.json_parse(&d, a.koerper.ptr, a.koerper.len) {
-        kaputt = true
+        broken = true
     }
-    if kaputt || !kjson.json_valid(&d) {
+    if broken || !kjson.json_valid(&d) {
         kjson.json_free(&d)
         knetz.reply_free(&a)
-        (*s).stand = anbieter.S_ERROR
+        (*s).stand = provider.S_ERROR
         hinweis(s, (&h_form[0]) as u64)
         return (*s).stand
     }
@@ -218,7 +168,7 @@ fn do_sign_in(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
     if !kjson.text(&d, wz, (&f_token[0]) as u64, &(*s).zugriff) {
         kjson.json_free(&d)
         knetz.reply_free(&a)
-        (*s).stand = anbieter.S_ERROR
+        (*s).stand = provider.S_ERROR
         hinweis(s, (&h_form[0]) as u64)
         return (*s).stand
     }
@@ -231,78 +181,72 @@ fn do_sign_in(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
         rt.buf_push_bytes(&(*s).subjekt, (*s).anzeige.ptr,
             (*s).anzeige.len)
     }
-    // Dieser Anbieter kennt keine Mandanten: `bereich` bleibt leer, und
-    // das ist eine Aussage und kein Versaeumnis.
     rt.buf_push_bytes(&(*s).datenort, (*z).endpoint, rt.c_length((*z).endpoint))
-    (*s).stand = anbieter.S_OK
+    (*s).stand = provider.S_OK
     return (*s).stand
 }
 
-fn erneuern(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
-    // J2: es gibt keinen Weg. Eine Erfindung waere hier schlimmer als
-    // die Wahrheit -- der Nutzer meldet sich neu an, und er erfaehrt
-    // warum.
+fn erneuern(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
     hinweis(s, (&h_kein_erneuern[0]) as u64)
-    (*s).stand = anbieter.S_ABGELAUFEN
+    (*s).stand = provider.S_ABGELAUFEN
     return (*s).stand
 }
 
-fn build_cookie(z: *mut anbieter.Access, aus: *mut rt.Buf) {
-    rt.buf_push_bytes(aus, (&k_keks[0]) as u64, 16)
+fn build_cookie(z: *mut provider.Access, aus: *mut rt.Buf) {
+    rt.buf_push_bytes(aus, (&k_cookie[0]) as u64, 16)
     rt.buf_push_bytes(aus, (*z).zugriff, rt.c_length((*z).zugriff))
 }
 
-fn do_sign_out(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
+fn do_sign_out(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
-        (*s).stand = anbieter.S_ERROR
+        (*s).stand = provider.S_ERROR
         return (*s).stand
     }
-    var keks: rt.Buf = rt.buf_new()
-    build_cookie(z, &keks)
+    var cookie: rt.Buf = rt.buf_new()
+    build_cookie(z, &cookie)
     var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_post[0]) as u64, 4,
         (&p_logout[0]) as u64, 11, 0, 0, (*z).zugriff,
-        rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
-    var stand: u32 = anbieter.S_OK
+        rt.c_length((*z).zugriff), cookie.ptr, cookie.len, &a)
+    var stand: u32 = provider.S_OK
     if !da {
         stand = net_state(&a)
     } else if a.code != 200 as u32 {
-        stand = anbieter.S_ERROR
+        stand = provider.S_ERROR
     }
     knetz.reply_free(&a)
-    rt.buf_free(&keks)
+    rt.buf_free(&cookie)
     (*s).stand = stand
     return stand
 }
 
-// no hand-over for this back end (konto --exchange)
-fn hand_over(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
-    return anbieter.S_ERROR
+fn hand_over(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
+    return provider.S_ERROR
 }
 
-fn check(z: *mut anbieter.Access, s: *mut anbieter.Session) -> u32 {
+fn check(z: *mut provider.Access, s: *mut provider.Session) -> u32 {
     var zl: knetz.Target = knetz.target_new()
     if !target_from(z, &zl) {
-        (*s).stand = anbieter.S_ERROR
+        (*s).stand = provider.S_ERROR
         return (*s).stand
     }
-    var keks: rt.Buf = rt.buf_new()
-    build_cookie(z, &keks)
+    var cookie: rt.Buf = rt.buf_new()
+    build_cookie(z, &cookie)
     var a: knetz.Reply = knetz.reply_new()
     let da: bool = knetz.sende(&zl, (&m_get[0]) as u64, 3,
         (&p_me[0]) as u64, 7, 0, 0, (*z).zugriff,
-        rt.c_length((*z).zugriff), keks.ptr, keks.len, &a)
-    var stand: u32 = anbieter.S_OK
+        rt.c_length((*z).zugriff), cookie.ptr, cookie.len, &a)
+    var stand: u32 = provider.S_OK
     if !da {
         stand = net_state(&a)
     } else if a.code == 401 as u32 {
-        stand = anbieter.S_ABGELAUFEN
+        stand = provider.S_ABGELAUFEN
     } else if a.code != 200 as u32 {
-        stand = anbieter.S_ERROR
+        stand = provider.S_ERROR
     }
     knetz.reply_free(&a)
-    rt.buf_free(&keks)
+    rt.buf_free(&cookie)
     (*s).stand = stand
     return stand
 }

@@ -1,31 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/jmlink.fi -- W-MINI2: the network half of JARVIS Mini (kernel/user/jarvismini.fi).
-//
-//   jmlink            runs in the background, started by the Mini when it cannot reach it
-//
-// WHY A SECOND PROGRAM. The Mini is a fUi window whose loop must never block. TLS (lib/tls) is blocking: a handshake takes up to
-// seconds, a read waits for the record. So the connection to the JARVIS server lives HERE, and the Mini talks to this program with
-// small text datagrams over local (AF_UNIX, SOCK_DGRAM) sockets by path: /tmp/jmini.sock (the Mini listens) and /tmp/jmlink.sock
-// (this program listens). One datagram = one message, nothing to frame.
-//
-//   Mini -> jmlink                          jmlink -> Mini
-//   HELLO                                   S <status text>      status line (offline / login needed / online / ...)
-//   LOGIN <user> <password>                 R <text>             one line of the answer
-//   LOGOUT                                  E <text>             error from the server
-//   MSG <text>
-//   UP <path> <text>   file as attachment (png/jpg = image)
-//   NEW                new chat
-//
-// THE SERVER (public/mini.html is the model): POST /api/login {"username","password"} -> {"token"}; then WebSocket
-// wss://<host>/?role=ui&dev=<id>&token=<token>; messages are JSON text frames: {"type":"message","text",...,"images":[{"mediaType",
-// "data"(base64)}],"files":[...]} out; "token" (content), "done", "error", "system", "conversation", "info" in.
-//
-// THE LOGIN is typed ONCE in the Mini (/login name password). The PASSWORD IS NEVER STORED: it is used for the one POST and then
-// overwritten. What stays is the session token (valid 30 days on the server), in /etc/jarvismini.login with mode 0600
-// ("user" line, "token" line). `LOGOUT` deletes it. Nothing about the account is in the image.
-//
-// The certificate is checked against /etc/ssl/roots.pem for the NAME in /etc/jarvismini.conf (`server jarvis.fleitec.com`);
-// an optional `ip a.b.c.d` skips DNS (the gate), `port N` (default 443), `roots <path>`. No `server` line -> the default.
 
 import std.io
 import std.rt
@@ -41,12 +14,11 @@ const SYS_OPEN2: i64 = 2
 const SYS_CLOSE2: i64 = 3
 const SYS_POLL: i64 = 7
 const SYS_UNLINK2: i64 = 87
-const O_WRITE_TRUNC: i64 = 577 // O_WRONLY | O_CREAT | O_TRUNC
-const MODE_SECRET: i64 = 384 // 0600
+const O_WRITE_TRUNC: i64 = 577
+const MODE_SECRET: i64 = 384
 const CMDCAP: usize = 3000
 const MSGCAP: u64 = 4000000
 
-// ------------------------------------------------------------------ state
 static mut CONF_HOST: [u8; 96] = [0; 96]
 static mut CONF_ROOTS: [u8; 96] = [0; 96]
 static mut conf_hostlen: usize = 0
@@ -59,14 +31,14 @@ static mut TOKEN: [u8; 600] = [0; 600]
 static mut have_token: bool = false
 static mut PASS: [u8; 128] = [0; 128]
 static mut have_pass: bool = false
-static mut login_dead: bool = false // the server said no: wait for a new /login
+static mut login_dead: bool = false
 
 static mut CMD: [u8; 3008] = [0; 3008]
 static mut LOCAL_FD: i64 = -1
 static mut CID: [u8; 80] = [0; 80]
 static mut cid_len: usize = 0
-static mut G_T: u64 = 0 // *mut tls.Tls while a WebSocket session runs, else 0
-static mut G_W: u64 = 0 // *mut ws.Ws
+static mut G_T: u64 = 0
+static mut G_W: u64 = 0
 static mut online: bool = false
 static mut ACC: [u8; 2048] = [0; 2048]
 static mut acc_n: usize = 0
@@ -75,7 +47,6 @@ static mut last_status_n: usize = 0
 static mut seq: u64 = 0
 static mut logout_req: bool = false
 
-// ------------------------------------------------------------------ small helpers
 fn say(s: str) {
     if debug_on {
         io.print("jmlink: ")
@@ -100,12 +71,10 @@ fn push_str(b: *mut rt.Buf, s: str) {
     rt.buf_push_bytes(b, s.p as u64, s.n as usize)
 }
 
-// JSON text is built from bytes: no quote or backslash inside a Firn literal
 fn q(b: *mut rt.Buf) {
     rt.buf_push(b, 34 as u8)
 }
 
-// "k":
 fn kq(b: *mut rt.Buf, k: str) {
     q(b)
     push_str(b, k)
@@ -113,7 +82,6 @@ fn kq(b: *mut rt.Buf, k: str) {
     rt.buf_push(b, 58 as u8)
 }
 
-// "k":"v",
 fn kvs(b: *mut rt.Buf, k: str, v: str) {
     kq(b, k)
     q(b)
@@ -160,7 +128,6 @@ fn random_into(p: u64, n: u64) {
     syscall(318, p as i64, n as i64, 0, 0, 0, 0)
 }
 
-// does the text at p (n octets) start with the str?
 fn starts(p: u64, n: usize, s: str) -> bool {
     if n < (s.n as usize) {
         return false
@@ -175,7 +142,6 @@ fn starts(p: u64, n: usize, s: str) -> bool {
     return true
 }
 
-// index just after the first occurrence of the str in p[0..n), or n + 1 when absent
 fn find_after(p: u64, n: usize, s: str) -> usize {
     var i: usize = 0
     let m: usize = s.n as usize
@@ -192,8 +158,6 @@ fn find_after(p: u64, n: usize, s: str) -> usize {
     return n + 1
 }
 
-// ------------------------------------------------------------------ JSON
-// append one UTF-8 code point
 fn utf8_push(b: *mut rt.Buf, cp: u64) {
     if cp < 128 {
         rt.buf_push(b, cp as u8)
@@ -233,7 +197,6 @@ fn hex4(p: u64, at: usize, n: usize) -> u64 {
         + hexv(rt.ld8(p, at + 2) as u64) * 16 + hexv(rt.ld8(p, at + 3) as u64)
 }
 
-// decode the JSON string that starts at p[at] (just after the opening quote) into out; returns the index after the closing quote
 fn json_unescape(p: u64, n: usize, at: usize, out: *mut rt.Buf) -> usize {
     var i: usize = at
     while i < n {
@@ -249,7 +212,6 @@ fn json_unescape(p: u64, n: usize, at: usize, out: *mut rt.Buf) -> usize {
             } else if d == 116 {
                 rt.buf_push(out, 32 as u8)
             } else if d == 114 {
-                // dropped
             } else if d == 117 {
                 var cp: u64 = hex4(p, i, n)
                 i = i + 4
@@ -272,7 +234,6 @@ fn json_unescape(p: u64, n: usize, at: usize, out: *mut rt.Buf) -> usize {
     return n
 }
 
-// the string value of "key":"..." (first occurrence) -> out; false when absent
 fn json_get(p: u64, n: usize, key: str, out: *mut rt.Buf) -> bool {
     var pat: rt.Buf = rt.buf_new()
     kq(&pat, key)
@@ -299,7 +260,6 @@ fn json_get(p: u64, n: usize, key: str, out: *mut rt.Buf) -> bool {
     return true
 }
 
-// append p[0..n) as JSON string content (no quotes)
 fn json_push(b: *mut rt.Buf, p: u64, n: usize) {
     var i: usize = 0
     while i < n {
@@ -325,7 +285,6 @@ fn json_push(b: *mut rt.Buf, p: u64, n: usize) {
     }
 }
 
-// ------------------------------------------------------------------ the local socket (datagrams to the Mini)
 fn local_alive(path: u64) -> bool {
     let pf: i64 = syscall(41, 1, 2, 0, 0, 0, 0)
     if pf < 0 {
@@ -371,7 +330,6 @@ fn local_open() -> bool {
     return true
 }
 
-// one datagram to the Mini: "<tag> <text>"
 fn tell(tag: u8, p: u64, n: usize) {
     if LOCAL_FD < 0 {
         return
@@ -411,7 +369,6 @@ fn set_status(s: str) {
     say(s)
 }
 
-// ------------------------------------------------------------------ files
 fn secret_write(path: u64, p: u64, n: usize) -> bool {
     let fd: i64 = syscall(SYS_OPEN2, path as i64, O_WRITE_TRUNC, MODE_SECRET, 0, 0, 0)
     if fd < 0 {
@@ -422,7 +379,6 @@ fn secret_write(path: u64, p: u64, n: usize) -> bool {
     return ok
 }
 
-// /etc/jarvismini.login : line 1 = user, line 2 = token
 fn login_load() {
     var path: [u8; 22] = "/etc/jarvismini.login\0"
     var b: rt.Buf = rt.buf_new()
@@ -474,7 +430,6 @@ fn login_forget() {
     TOKEN[0 as usize] = 0 as u8
 }
 
-// /etc/jarvismini.conf : server <name> | ip <a.b.c.d> | port <n> | roots <path> | debug
 fn conf_load() {
     var pz: [u8; 21] = "/etc/jarvismini.conf\0"
     var dbg: [u8; 22] = "/etc/jarvismini.debug\0"
@@ -560,8 +515,6 @@ fn conf_load() {
     rt.buf_free(&b)
 }
 
-// ------------------------------------------------------------------ TLS connection
-// resolve + connect + handshake. 0 = ok, else a short reason code (1 dns, 2 tcp, 3 roots, 4 handshake)
 fn open_tls(c: *mut net.Conn, t: *mut tls.Tls, store: *mut x509.Store) -> u64 {
     var addr: u32 = conf_ip
     if addr == 0 as u32 {
@@ -653,7 +606,6 @@ fn tls_recv(t: *mut tls.Tls, p: u64, cap: usize) -> usize {
     return n
 }
 
-// POST /api/login with the typed name + password. 0 = token stored, else: 1 network, 2 refused (401/403/429...), 3 answer without token
 fn do_login() -> u64 {
     var c: net.Conn = net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
     var t: tls.Tls = tls.tls_new()
@@ -696,7 +648,6 @@ fn do_login() -> u64 {
     crlf(&req)
     rt.buf_push_bytes(&req, body.ptr, body.len)
     let sent: bool = tls_send(&t, req.ptr, req.len)
-    // overwrite the secrets at once
     var z: usize = 0
     while z < body.len {
         __mmio_write8((body.ptr + z as u64) as *mut u8, 0 as u8)
@@ -754,7 +705,6 @@ fn do_login() -> u64 {
     return 0
 }
 
-// ------------------------------------------------------------------ the chat session
 static mut MSGBUF: [u8; 262144] = [0; 262144]
 static mut OUTF: [u8; 1100] = [0; 1100]
 
@@ -811,7 +761,6 @@ fn next_msgid(b: *mut rt.Buf) {
     rt.buf_push_dec_u64(b, seq)
 }
 
-// MSG <text>   /   UP <path> <text>
 fn send_chat(text: u64, tn: usize, path: u64, pn: usize) {
     if !online {
         tell_s(69 as u8, "not connected")
@@ -857,7 +806,6 @@ fn send_chat(text: u64, tn: usize, path: u64, pn: usize) {
             rt.buf_free(&o)
             return
         }
-        // the name: after the last '/'
         var nm: usize = 0
         var q: usize = 0
         while q < pn {
@@ -914,7 +862,6 @@ fn send_chat(text: u64, tn: usize, path: u64, pn: usize) {
     }
 }
 
-// lines of the answer: everything up to a newline goes out at once, the rest waits for "done"
 fn acc_push(p: u64, n: usize) {
     var i: usize = 0
     while i < n {
@@ -953,14 +900,12 @@ fn flush_acc(all: bool) {
     }
 }
 
-// one complete text message from the server
 fn on_server_json(p: u64, n: usize) {
     var ty: rt.Buf = rt.buf_new()
     if !json_get(p, n, "type", &ty) {
         rt.buf_free(&ty)
         return
     }
-    // a message of another chat is not for us
     var cidm: rt.Buf = rt.buf_new()
     var other: bool = false
     if json_get(p, n, "cid", &cidm) && cid_len > 0 && cidm.len > 0 {
@@ -991,7 +936,6 @@ fn on_server_json(p: u64, n: usize) {
         }
         rt.buf_free(&idb)
     } else if other {
-        // not ours
     } else if starts(ty.ptr, ty.len, "token") {
         var cb: rt.Buf = rt.buf_new()
         if json_get(p, n, "content", &cb) {
@@ -1014,7 +958,6 @@ fn on_server_json(p: u64, n: usize) {
         }
         rt.buf_free(&sb)
     } else if starts(ty.ptr, ty.len, "confirm_request") {
-        // the Mini has no dialog yet: refuse, say so
         var idb: rt.Buf = rt.buf_new()
         if json_get(p, n, "id", &idb) {
             var o: rt.Buf = rt.buf_new()
@@ -1039,8 +982,6 @@ fn on_server_json(p: u64, n: usize) {
     rt.buf_free(&ty)
 }
 
-// ------------------------------------------------------------------ commands from the Mini
-// returns true when the session must end (logout)
 fn on_command(n: usize) -> bool {
     let p: u64 = (&CMD[0]) as u64
     if starts(p, n, "HELLO") {
@@ -1055,7 +996,6 @@ fn on_command(n: usize) -> bool {
         logout_req = true
         return true
     } else if starts(p, n, "LOGIN ") {
-        // LOGIN <user> <password...>
         var k: usize = 0
         var i: usize = 6
         while i < n && rt.ld8(p, i) > 32 as u8 && k < 60 {
@@ -1072,7 +1012,6 @@ fn on_command(n: usize) -> bool {
             i = i + 1
         }
         PASS[m] = 0 as u8
-        // clear the datagram copy of the password
         var z: usize = 6
         while z < n {
             CMD[z] = 0 as u8
@@ -1102,7 +1041,6 @@ fn on_command(n: usize) -> bool {
     return false
 }
 
-// poll the local socket (and the TCP socket when fd >= 0); returns bit 1 = local readable, bit 2 = tcp readable
 fn wait_io(tcp_fd: i64, ms: u64) -> u64 {
     var pfd: [u32; 4] = [0 as u32; 4]
     var nf: u64 = 0
@@ -1127,7 +1065,6 @@ fn wait_io(tcp_fd: i64, ms: u64) -> u64 {
     return res
 }
 
-// one command from the local socket; true = end the session
 fn local_step() -> bool {
     let r: i64 = syscall(45, LOCAL_FD, (&CMD[0]) as i64, 3000, 0, 0, 0)
     if r <= 0 {
@@ -1137,7 +1074,6 @@ fn local_step() -> bool {
     return on_command(r as usize)
 }
 
-// connect the WebSocket and run until it ends. returns: 0 = ended / dropped (retry), 1 = token refused, 2 = end for a command, 3 = network
 #[allow_escape]
 fn session() -> u64 {
     var c: net.Conn = net.Conn { fd: -1, err: 0, peer: 0 as u32, peer_port: 0 as u16 }
@@ -1155,7 +1091,6 @@ fn session() -> u64 {
         }
         return 3
     }
-    // upgrade
     var rnd: [u8; 16] = [0; 16]
     random_into((&rnd[0]) as u64, 16)
     var key: [u8; 32] = [0; 32]
@@ -1210,11 +1145,9 @@ fn session() -> u64 {
     var last_ping: u64 = now_ms()
     var dead: bool = false
     var chunk: [u8; 16400] = [0; 16400]
-    // the bytes that came behind the header
     var have: u64 = hn as u64
     var feedp: u64 = (&head[0]) as u64
     while !dead {
-        // feed what we have
         while off < have {
             let used: u64 = ws.feed(&w, feedp + off, have - off)
             off = off + used

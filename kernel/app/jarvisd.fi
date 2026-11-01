@@ -1,17 +1,3 @@
-//     jarvisd [-c datei] [-1] [-t ms] [-v] [-n]
-// ====================================================================
-// DIE ANMELDUNG
-// ====================================================================
-//   Helfer -> Server        Server -> Helfer
-//   -----------------       ----------------------------
-//   osum-bruecke 1 0        frage <noncehex> 0
-//   ich <pubhex> 0          kopplung-noetig <codehex> 0
-//   beweis <sighex> 0       willkommen 0
-//   kopplung <codehex> 0    weg <grundhex> 0
-//   kopplung-abgelehnt 0    auftrag <id> <art> <a1hex> <a2hex> <laenge>
-//   fertig <id> <ok|nein> <laenge>
-//   puls 0                  tschuess 0
-// AUFTRAGSARTEN: befehl, lies, schreib, liste, foto, system.
 
 import std.io
 import std.rt
@@ -23,14 +9,11 @@ import tls.x509
 import libc.dns
 import pairstate
 
-// ====================================================================
-// ZAHLEN
-// ====================================================================
 
 const PAIR_TTL_S: u64 = 600
 const PAIR_REASK_MS: u64 = 3000
 const MAXPFAD: usize = 128
-const MAXLISTE: usize = 64 // entries per list (was 32: the 33rd command_allowed -- /bin/act -- was silently dropped; was 6 before)
+const MAXLISTE: usize = 64
 const MAXBEFEHLE: usize = 8
 const MAXZEILE: usize = 4096
 const MAXFELD: usize = 10
@@ -53,10 +36,6 @@ const SERVICE_WATCH_S: i64 = 120
 const WRITE_CHUNK: usize = 65536
 const S_FORK: i64 = 57
 const S_EXECVE: i64 = 59
-// AB-003: the kernel's origin label (kernel/sched/origin.fi). Every
-// command Jarvis runs is marked `jarvis` BEFORE it is exec'ed; the label
-// is sticky, so the action bus sees Jarvis even if the command says
-// `--as user`.
 const S_ORIGIN: i64 = 1990
 const S_WAIT4: i64 = 61
 const S_KILL: i64 = 62
@@ -68,13 +47,11 @@ const S_GETDENTS64: i64 = 217
 const S_CLOCK: i64 = 228
 const S_CHMOD: i64 = 90
 
-// Osums eigene Nummern.
 const S_SYSINFO: i64 = 1002
 const S_WIGSCREEN: i64 = 1805
 const S_DISPGET: i64 = 1810
 const S_SHOT: i64 = 1841
 
-// Die fuenf Handlungen (kernel/sys.fi, SH_*).
 const SH_INFO: i64 = 0
 const SH_ARM: i64 = 1
 const SH_GRAB: i64 = 2
@@ -112,7 +89,6 @@ const O_TRUNC: i64 = 512
 const O_APPEND: i64 = 1024
 const O_DIRECTORY: i64 = 65536
 
-// Felder von SYS_OSUM_SYSINFO (kernel/uio.fi).
 const I_UPTIME: i64 = 1
 const I_FRAMES_FREE: i64 = 2
 const I_FRAMES_ALL: i64 = 3
@@ -129,15 +105,11 @@ const NG_IP: i64 = 1
 const NG_MASK: i64 = 2
 const NG_GW: i64 = 3
 
-// Bildschirm.
 const WS_W: i64 = 0
 const WS_H: i64 = 1
 const DG_PITCH: i64 = 30
 const DG_BPP: i64 = 31
 
-// ====================================================================
-// DER ZUSTAND
-// ====================================================================
 
 static mut k_ip: u32 = 0 as u32
 static mut k_port: u32 = 0 as u32
@@ -159,8 +131,6 @@ static mut k_photo: bool = false
 static mut k_system: bool = false
 static mut k_tipp: bool = false
 static mut k_max_output: usize = 65536
-// `command_timeout = <seconds>`: how long one `befehl` may run before it is
-// killed (default 60; an update that fetches 40 MB needs minutes).
 static mut k_command_ms: u64 = 60000
 static mut k_max_file: usize = 262144
 
@@ -186,51 +156,21 @@ static mut z_verbindungen: u64 = 0
 static mut z_wartems: u64 = 0
 static mut z_warteaufrufe: u64 = 0
 
-// ==================================================== 08.10.2026: DELL STABILITY
-// Idle cost and reconnect time of the https transport (tools/stab/net.sh).
-//
-// Over 443 every message is its own TCP connection and TLS handshake, and an
-// idle device sends a `puls` for every one of them. The wait between two polls
-// used to grow 250 ms -> 2 s and stay there: one handshake every 2 s, for ever
-// (measured in the VM: see docs/DELL-STABILITY.md). Now it grows to POLL_MAX_MS.
-// A job (or an answer that is not empty) sets it back to zero at once.
 const POLL_MAX_MS: u64 = 5000
-// A poll that fails (connection refused, reset, timeout, a 5xx) does not end the
-// session: the https transport has no connection to lose, the session lives on
-// the server (token, 12 h). Retry a few times before signing in again.
 const POLL_TRIES: u64 = 3
-// A session that lasted at least this long was a good one: its end is a
-// transient event, and the first retry comes after 250 ms again -- not after
-// the 30 s a long-forgotten earlier failure left in the back-off.
 const GOOD_SESSION_MS: u64 = 30000
 static mut z_sitzungen: u64 = 0
 static mut k_session_ms: u64 = 0
 
-// ==================================================== 05.10.2026: WHY OFFLINE
-// The Dell vanished from the bridge on 04.10.2026 at 16:00 UTC without a
-// trace: no goodbye, no error. Three holes were found in this client:
-//   1. While a `befehl` runs (up to command_timeout, 1200 s on the Dell) the
-//      helper does not poll, so the server sees a silent device. Now a
-//      keepalive (`lebt`) goes out every LEBT_MS from inside the wait loop.
-//   2. The resolved address was kept for the whole run: a changed DNS answer
-//      was never noticed. Now a failed round forgets it.
-//   3. NOTHING restarts the helper if it dies: the kernel starts it once
-//      (desk_start). Now the service forks a worker and restarts it when it
-//      ends, or when it has had no good contact for `watchdog` seconds
-//      (default 600, 0 = off) -- judged from /var/jarvis/alive, which the
-//      worker rewrites after every good exchange (at most every 30 s).
-static mut k_wire: u64 = 0        // the wire of the running session, 0 = none
-static mut k_lebt_ms: u64 = 0      // uptime ms of the last keepalive or exchange
-static mut k_ok_ms: u64 = 0        // uptime ms of the last good exchange with the server
-static mut k_alive_ms: u64 = 0     // when /var/jarvis/alive was written last
+static mut k_wire: u64 = 0
+static mut k_lebt_ms: u64 = 0
+static mut k_ok_ms: u64 = 0
+static mut k_alive_ms: u64 = 0
 static mut k_watchdog_ms: u64 = 600000
 const LEBT_MS: u64 = 20000
 const NG_MAC0: i64 = 4
 const NG_MAC1: i64 = 5
 
-// ====================================================================
-// SYSTEMAUFRUFE, DUENN UMWICKELT
-// ====================================================================
 
 fn sys_open(path: u64, flags: i64, mode: i64) -> i64 {
     return syscall(S_OPEN, path as i64, flags, mode, 0, 0, 0)
@@ -287,11 +227,6 @@ fn schlafe_ms(ms: u64) {
     }
 }
 
-// A command gets COMMAND_MS to finish. Before this, jarvisd waited on the
-// child with a plain wait4 -- one `cat` on a file that never ends (the
-// Dell, `cat /proc/mounts`) and the device was gone from the bridge until
-// someone pressed the power button. Returns true when the child had to be
-// killed; `*st` holds the status either way.
 const COMMAND_MS: u64 = 60000
 
 fn wait_child(kind: i64, st: *mut i32) -> bool {
@@ -305,11 +240,6 @@ fn wait_child(kind: i64, st: *mut i32) -> bool {
         keepalive()
     }
     syscall(S_KILL, kind, 9, 0, 0, 0, 0)
-    // Do NOT wait without a limit for the killed child. A child stuck in
-    // the kernel (a long USB write on the Dell, 27.09.2026) may take a
-    // long time to see the kill, and a blocking wait4 here froze the whole
-    // helper: the Dell stayed up but never came back to the bridge. Give it
-    // 10 s, then leave it as a zombie and go back to serving.
     let k0: u64 = now_ms()
     while now_ms() - k0 < 10000 {
         let r: i64 = syscall(S_WAIT4, kind, st as i64, WNOHANG, 0, 0, 0)
@@ -322,13 +252,7 @@ fn wait_child(kind: i64, st: *mut i32) -> bool {
     return true
 }
 
-// ---------------------------------------------------- 05.10.2026: keepalive etc.
 
-// Tell the server we are alive while a command runs. Only over 443 (the raw
-// TLS wire stays open and the server sees the traffic anyway). The answer to
-// `lebt` is empty, so nothing is read; if it fails, the next try comes after
-// LEBT_MS. A server that does not know `lebt` answers `weg`, which ends the
-// session after the command -- the server was updated before this client.
 fn keepalive() {
     if k_wire == 0 as u64 {
         return
@@ -370,7 +294,6 @@ fn alive_read() -> u64 {
     return v
 }
 
-// One good exchange with the server happened.
 fn gut_gemeldet() {
     let t: u64 = now_ms()
     k_ok_ms = t
@@ -385,8 +308,6 @@ fn gut_gemeldet() {
     }
 }
 
-// Tell the server what only this machine knows: the MAC of its network card
-// (the server needs it for Wake-on-LAN). `info mac=aabbccddeeff` as payload.
 fn sende_info(d: *mut Wire) {
     let m0: u64 = syscall(S_NETGET, NG_MAC0, 0, 0, 0, 0, 0) as u64
     let m1: u64 = syscall(S_NETGET, NG_MAC1, 0, 0, 0, 0, 0) as u64
@@ -412,7 +333,6 @@ fn sende_info(d: *mut Wire) {
     rt.buf_free(&nutz)
 }
 
-// The worker has had no good contact for longer than `watchdog`?
 fn zu_still(t0: u64) -> bool {
     if k_watchdog_ms == 0 {
         return false
@@ -425,8 +345,6 @@ fn zu_still(t0: u64) -> bool {
     return t - last > k_watchdog_ms
 }
 
-// The service: fork a worker, wait for it, start a new one when it ends or
-// has gone silent. Returns true IN THE WORKER; the parent never returns.
 fn supervise() -> bool {
     var wait: u64 = 2000
     say("jarvisd: supervisor started\n")
@@ -485,10 +403,6 @@ fn supervise() -> bool {
     return false
 }
 
-// Is another task called `jarvisd` alive (not a corpse)? The supervisor and its worker are both called
-// `jarvisd` -- they are ours or one earlier service's; this runs before the first fork, so every task of
-// that name other than this one is another service. P_NAME0 holds the first eight octets of the name
-// ("jarvisd" and a zero, little endian).
 fn other_service_running() -> bool {
     let me: i64 = syscall(S_GETPID_NF, 0, 0, 0, 0, 0, 0)
     var i: i64 = 0
@@ -522,9 +436,6 @@ fn now_s() -> u64 {
     return ts[0] as u64
 }
 
-// ====================================================================
-// HEX UND TEXT
-// ====================================================================
 
 fn hexz(v: u64) -> u8 {
     if v < 10 {
@@ -637,9 +548,6 @@ fn say_octets(p: u64, n: usize) {
     rt.write_everything(1, p, n)
 }
 
-// ====================================================================
-// DIE RECHTELISTE
-// ====================================================================
 
 fn list_add(field: u64, n: *mut usize, p: u64, len: usize) {
     if *n >= MAXLISTE {
@@ -670,7 +578,7 @@ fn addr_read(p: u64, n: usize) -> bool {
         if c >= 48 && c <= 57 {
             value = value * 10 + (c - 48)
             hatte = true
-        } else if c == 46 { // '.'
+        } else if c == 46 {
             if !hatte || value > 255 || part >= 3 {
                 return false
             }
@@ -678,7 +586,7 @@ fn addr_read(p: u64, n: usize) -> bool {
             part = part + 1
             value = 0
             hatte = false
-        } else if c == 58 { // ':'
+        } else if c == 58 {
             if !hatte || value > 255 || part != 3 {
                 return false
             }
@@ -766,7 +674,6 @@ fn conf_read() -> bool {
         }
         var von: usize = at
         var bis: usize = ende
-        // Kommentar ab '#'.
         var k: usize = von
         while k < bis {
             if rt.ld8(b.ptr, k) == 35 as u8 {
@@ -775,7 +682,6 @@ fn conf_read() -> bool {
             }
             k = k + 1
         }
-        // Am Gleichheitszeichen trennen.
         var eq: usize = von
         var hat_eq: bool = false
         while eq < bis {
@@ -810,7 +716,6 @@ fn conf_read() -> bool {
                 if ist(sp, sl, (&s_server[0]) as u64) {
                     addr_read(wp, wl)
                 } else if ist(sp, sl, (&s_gone[0]) as u64) {
-                    // `weg = https` -- alles andere heisst: roher Port.
                     var w_https: [u8; 6] = "https\0"
                     k_https = ist(wp, wl, (&w_https[0]) as u64)
                 } else if ist(sp, sl, (&s_path[0]) as u64) {
@@ -876,15 +781,12 @@ fn conf_read() -> bool {
     return true
 }
 
-// ====================================================================
-// PFADE
-// ====================================================================
 
 fn path_clean(p: u64, n: usize) -> bool {
     if n == 0 || n >= MAXPFAD {
         return false
     }
-    if rt.ld8(p, 0) != 47 as u8 { // '/'
+    if rt.ld8(p, 0) != 47 as u8 {
         return false
     }
     var i: usize = 0
@@ -998,9 +900,6 @@ struct Wire {
     tot: bool,
     https: bool,
     aus: rt.Buf,
-    // DELL STABILITY: the root store is read and parsed ONCE per session, not for
-    // every poll (a poll is a connection of its own, one every few seconds for
-    // ever). Freed in `wire_gone`.
     store: x509.Store,
     store_ok: bool,
 }
@@ -1079,11 +978,6 @@ fn https_wechsel(d: *mut Wire, body: u64, rumpfn: usize) -> bool {
     }
     let okt: bool = net.set_timeout(&c, 60000 as u64) catch false
 
-    // The store is parsed once per session (DELL STABILITY, see `Wire`). Before
-    // that it was built for every request and had to be freed on every way out
-    // (27.09.2026: it never was, the helper's heap grew with each request and
-    // after a few hundred reading the root file failed with "no root store").
-    // Now it lives and dies with the session: `wire_gone` frees it.
     if !(*d).store_ok {
         var storebuf: rt.Buf = rt.buf_new()
         var wurzeln: usize = 0
@@ -1298,7 +1192,6 @@ fn sende(d: *mut Wire, head: *mut rt.Buf, nutz: u64, nutzn: usize) -> bool {
     return ok
 }
 
-// ------------------------------------------------------ Zeilen zerlegen
 
 struct Felder {
     off: [usize; 10],
@@ -1326,9 +1219,6 @@ fn zerlege(p: u64, n: usize, f: *mut Felder) {
     }
 }
 
-// ====================================================================
-// DIE AUFTRAEGE
-// ====================================================================
 
 fn ablehnen(aus: *mut rt.Buf, reason: str) -> bool {
     rt.buf_clear(aus)
@@ -1337,7 +1227,6 @@ fn ablehnen(aus: *mut rt.Buf, reason: str) -> bool {
     return false
 }
 
-// ------------------------------------------------------------ system
 
 fn line_num(aus: *mut rt.Buf, name: u64, v: u64) {
     rt.buf_push_bytes(aus, name, rt.c_length(name))
@@ -1355,7 +1244,7 @@ fn do_system(aus: *mut rt.Buf) -> bool {
     var n2: [u8; 12] = "laufzeit_ms\0"
     var n3: [u8; 14] = "speicher_alle\0"
     var n4: [u8; 14] = "speicher_frei\0"
-    var n5: [u8; 15] = "platte_bloecke\0"  // DRAHT: Feldname, tools/bridge/run.sh
+    var n5: [u8; 15] = "platte_bloecke\0"
     var n6: [u8; 12] = "platte_frei\0"
     var n7: [u8; 9] = "aufgaben\0"
     var n8: [u8; 15] = "systemaufrufe\0\0"
@@ -1377,7 +1266,6 @@ fn do_system(aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// -------------------------------------------------------------- lies
 
 fn tight_make(fd: i64, maske: i64, aus: *mut rt.Buf) -> i64 {
     let enger: i64 = hnd_dup(fd, maske)
@@ -1428,7 +1316,6 @@ fn do_read(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// ----------------------------------------------------------- schreib
 
 fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
     aus: *mut rt.Buf) -> bool {
@@ -1478,7 +1365,6 @@ fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
     return true
 }
 
-// ------------------------------------------------------------- liste
 
 fn do_list(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     if !path_clean(path, pn) {
@@ -1508,11 +1394,10 @@ fn do_list(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
                 break
             }
             let art: u8 = rt.ld8(basis, 18)
-            // 4 = Verzeichnis, 8 = gewoehnliche Datei (Linux' DT_*).
             if art == 4 as u8 {
-                rt.buf_push(aus, 100 as u8) // 'd'
+                rt.buf_push(aus, 100 as u8)
             } else {
-                rt.buf_push(aus, 45 as u8) // '-'
+                rt.buf_push(aus, 45 as u8)
             }
             rt.buf_push(aus, 32 as u8)
             var k: usize = 19
@@ -1532,7 +1417,6 @@ fn do_list(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// ------------------------------------------------------------ befehl
 
 fn arg_count(p: u64, n: usize) -> usize {
     var z: usize = 0
@@ -1560,10 +1444,6 @@ const S_REBOOT_NF: i64 = 169
 const S_PSTAT_NF: i64 = 1003
 const S_GETPID_NF: i64 = 39
 
-// r346: the three commands that work without a child process (fork refused
-// because the task table is full). `worte` holds the words; word 0 is the
-// program, the rest are its arguments (already checked against
-// `command_allowed` by the caller). Returns true when it answered.
 fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.Buf) -> bool {
     rt.buf_clear(aus)
     var head: [u8; 7] = "ende \0\0"
@@ -1608,7 +1488,6 @@ fn nofork_builtin(prog: u64, pn: usize, a1: u64, a2: u64, a3: u64, aus: *mut rt.
         return true
     }
     if fits_entry((&k_nf_reboot[0]) as u64, prog, pn) {
-        // The answer cannot be sent after this; the bridge sees the line drop.
         syscall(S_SYNC_NF, 0, 0, 0, 0, 0, 0)
         syscall(S_REBOOT_NF, 0x01234567, 0, 0, 0, 0, 0)
         return false
@@ -1779,8 +1658,6 @@ fn do_cmd(line: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     let kind: i64 = syscall(S_FORK, 0, 0, 0, 0, 0, 0)
     if kind < 0 {
         sys_close(target)
-        // r346: a full task table (no fork) must not lock the owner out. These
-        // three need no child: look at the table, end a program, restart.
         if nofork_builtin(prog, pn, cur_ptr[1], cur_ptr[2], cur_ptr[3], aus) {
             rt.buf_free(&worte)
             return true
@@ -1792,9 +1669,6 @@ fn do_cmd(line: u64, zn: usize, aus: *mut rt.Buf) -> bool {
         syscall(S_DUP2, target, 1, 0, 0, 0, 0)
         syscall(S_DUP2, target, 2, 0, 0, 0, 0)
         sys_close(target)
-        // AB-003: mark the child. -EPERM (1) = it already carries a label
-        // (jarvisd itself was started by an app) -- that one is at least
-        // as narrow, so it is kept. Any other failure: do not run at all.
         var lbl: [u8; 7] = "jarvis\0"
         let og: i64 = syscall(S_ORIGIN, 1, (&lbl[0]) as i64, 6, 0, 0, 0)
         if og != 0 && og != -1 {
@@ -1850,7 +1724,6 @@ fn do_cmd(line: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// -------------------------------------------------------------- foto
 
 fn cert_check(aus: *mut rt.Buf) -> bool {
     var b: rt.Buf = rt.buf_new()
@@ -1958,9 +1831,6 @@ fn photo_over_kernel(aus: *mut rt.Buf) -> bool {
     return true
 }
 
-// ====================================================================
-// RUNDE BRUECKE: EINGABE EINSPEISEN
-// ====================================================================
 fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     if !k_tipp {
         return ablehnen(aus, "`input = no` in /etc/jarvis/permissions.conf")
@@ -2000,8 +1870,6 @@ fn do_input(p: u64, n: usize, aus: *mut rt.Buf) -> bool {
     } else if ist(wp, wn, (&w_click[0]) as u64) {
         erg = syscall(S_TIPP, TI_BUTTON, a as i64, b as i64, 0, 0, 0)
     } else if ist(wp, wn, (&w_scan[0]) as u64) {
-        // scan <c1> [<c2> ...]: several set-1 codes in one job, so a
-        // whole word costs one round trip instead of two per letter.
         var k: usize = 1
         erg = 0
         while k < f.n && erg >= 0 {
@@ -2143,9 +2011,6 @@ fn bildprobe() -> i32 {
     return 0
 }
 
-// ====================================================================
-// DER SCHLUESSELHALTER
-// ====================================================================
 
 fn jsig_rufen(a1: u64, a2: u64, aus: *mut rt.Buf) -> bool {
     var prog: [u8; 10] = "/bin/jsig\0"
@@ -2206,9 +2071,6 @@ fn after_space(b: *mut rt.Buf, von: *mut usize, bis: *mut usize) -> bool {
     return true
 }
 
-// ====================================================================
-// DIE KOPPLUNG
-// ====================================================================
 
 fn printable_text(p: u64, n: usize) -> bool {
     var i: usize = 0
@@ -2247,9 +2109,6 @@ fn kopplung_bestaetigt(codep: u64, coden: usize) -> bool {
     return gut
 }
 
-// ====================================================================
-// DIE ANMELDUNG
-// ====================================================================
 
 fn word_send(d: *mut Wire, w: str, arg: u64, argn: usize) -> bool {
     var head: rt.Buf = rt.buf_new()
@@ -2263,17 +2122,15 @@ fn word_send(d: *mut Wire, w: str, arg: u64, argn: usize) -> bool {
     return ok
 }
 
-// 0 = angemeldet, 1 = abgelehnt, 2 = Verbindung weg.
 fn sign_in(d: *mut Wire) -> u64 {
     var hallo: rt.Buf = rt.buf_new()
-    var h: [u8; 16] = "osum-bridge 1\0\0\0"  // DRAHT: bridge greeting
+    var h: [u8; 16] = "osum-bridge 1\0\0\0"
     rt.buf_push_bytes(&hallo, (&h[0]) as u64, 13)
     let okh: bool = sende(d, &hallo, 0, 0 as usize)
     rt.buf_free(&hallo)
     if !okh {
         return 2
     }
-    // Wer ich bin.
     var id: rt.Buf = rt.buf_new()
     var w_aus: [u8; 5] = "init\0"
     if !jsig_rufen((&w_aus[0]) as u64, 0, &id) {
@@ -2441,9 +2298,6 @@ fn sign_in(d: *mut Wire) -> u64 {
     return ergebnis
 }
 
-// ====================================================================
-// DIE AUFTRAGSSCHLEIFE
-// ====================================================================
 
 fn bediene(d: *mut Wire) -> bool {
     var line: rt.Buf = rt.buf_new()
@@ -2454,10 +2308,6 @@ fn bediene(d: *mut Wire) -> bool {
     var clean: bool = true
     var ruhe: u64 = 0
     while true {
-        // Over 443 nothing arrives on its own: every message is one
-        // POST. When the read buffer is empty, ask for work with
-        // `puls`. An empty answer means "nothing to do" -- wait a bit
-        // and ask again, instead of dropping the session.
         if (*d).https && (*d).at >= (*d).puf.len {
             if ruhe > 0 {
                 schlafe_ms(ruhe)
@@ -2507,8 +2357,6 @@ fn bediene(d: *mut Wire) -> bool {
             break
         }
         if ist(wp, wn, (&w_drop[0]) as u64) {
-            // Server dropped the session (token expired, device
-            // blocked). Sign in again in a fresh round.
             say("jarvisd: the server ended the session\n")
             clean = false
             break
@@ -2516,7 +2364,6 @@ fn bediene(d: *mut Wire) -> bool {
         if !ist(wp, wn, (&w_job[0]) as u64) {
             continue
         }
-        // auftrag <id> <art> <a1hex> <a2hex> <laenge>
         if f.n < 4 {
             continue
         }
@@ -2606,9 +2453,6 @@ fn bediene(d: *mut Wire) -> bool {
     return clean
 }
 
-// ====================================================================
-// EINE VERBINDUNG
-// ====================================================================
 
 fn fail_conn(schief: *mut bool) -> net.Conn {
     *schief = true
@@ -2621,12 +2465,6 @@ fn eine_runde_https() -> u64 {
         var wirt: [u8; 100] = [0; 100]
         let wn: usize = hinein((&wirt[0]) as u64, 100 as usize,
             (&k_name[0]) as u64, k_namelen)
-        // Re-read /etc/resolv.conf on EVERY attempt. At boot jarvisd
-        // starts next to /bin/dhcp and usually before the lease: the
-        // first lookup found no nameserver, the resolver remembered
-        // that forever, and the helper printed "cannot resolve the
-        // name" until someone started it again by hand (Dell 9020,
-        // 27.09.2026 -- the auto-started helper never came online).
         let _rc: u64 = dns.conf_load()
         let a4: u64 = dns.resolve_a((&wirt[0]) as u64)
         if a4 == 0 {
@@ -2660,8 +2498,6 @@ fn eine_runde_https() -> u64 {
         erg = an
     }
     wire_gone(&d)
-    // A failed round forgets the address: the next one asks the DNS again
-    // (before, a changed answer was never noticed).
     if erg == 2 {
         k_ip = 0 as u32
     }
@@ -2741,9 +2577,6 @@ fn eine_runde() -> u64 {
     return erg
 }
 
-// ====================================================================
-// DAS PROGRAMM
-// ====================================================================
 
 fn mach_verzeichnisse() {
     var v1: [u8; 5] = "/var\0"
@@ -2768,7 +2601,6 @@ fn probe() -> i32 {
     var text: [u8; 6] = "hallo\0"
     sys_write(a, (&text[0]) as u64, 5 as usize)
     sys_close(a)
-    // 2 = O_RDWR: beide Rechte im Handle.
     let fd: i64 = sys_open((&name[0]) as u64, 2, 0)
     if fd < 0 {
         say("probe: the file cannot be opened\n")
@@ -2847,7 +2679,6 @@ fn screen() -> i32 {
     return 0
 }
 
-//     jarvisd -f /var/jarvis/schirm.ppm
 fn ppm_over_kernel(path: u64, w: i64, h: i64) -> i32 {
     let rb: i64 = syscall(S_SHOT, SH_INFO, SI_ROWBYTES, 0, 0, 0, 0)
     var zpc: i64 = syscall(S_SHOT, SH_INFO, SI_CHUNKROWS, 0, 0, 0, 0)
@@ -2968,7 +2799,6 @@ fn photo_file(path: u64) -> i32 {
         say("jarvisd: cannot create the target file\n")
         return 2
     }
-    // Der Kopf.
     var head: rt.Buf = rt.buf_new()
     var p6: [u8; 4] = "P6\n\0"
     rt.buf_push_bytes(&head, (&p6[0]) as u64, 3)
@@ -2984,7 +2814,6 @@ fn photo_file(path: u64) -> i32 {
     let line: usize = pitch as usize
     var zpuf: rt.Buf = rt.buf_new()
     var apuf: rt.Buf = rt.buf_new()
-    // RUNDE HAERTUNG-2: beide Puffer, bevor irgendetwas hineingeht.
     if !rt.buf_reserve(&zpuf, line) || !rt.buf_reserve(&apuf, width * 3) {
         rt.buf_free(&zpuf)
         rt.buf_free(&apuf)
@@ -3038,7 +2867,6 @@ fn photo_file(path: u64) -> i32 {
     return 0
 }
 
-//     jarvisd -d
 fn show_ip(name: str, v: u64) {
     say(name)
     say_num((v >> 24) & 255)
@@ -3053,7 +2881,6 @@ fn show_ip(name: str, v: u64) {
 
 fn diagnose() -> i32 {
     say("jarvisd: --- startup check ---\n")
-    // 1. Der Stapel.
     let ready: i64 = syscall(S_NETGET, NG_READY, 0, 0, 0, 0, 0)
     say("1 network stack   ")
     if ready == 1 {
@@ -3061,7 +2888,6 @@ fn diagnose() -> i32 {
     } else {
         say("NO -- kernel runs without `nic`, or there is no driver for the chip\n")
     }
-    // 2. Adresse, Maske, Tor.
     let ip: u64 = syscall(S_NETGET, NG_IP, 0, 0, 0, 0, 0) as u64
     let mask: u64 = syscall(S_NETGET, NG_MASK, 0, 0, 0, 0, 0) as u64
     let gw: u64 = syscall(S_NETGET, NG_GW, 0, 0, 0, 0, 0) as u64
@@ -3077,7 +2903,6 @@ fn diagnose() -> i32 {
     if gw == 0 {
         say("  -> NO GATEWAY. Everything outside the local network is unreachable.\n")
     }
-    // 4. Die Rechteliste.
     say("4 permissions     ")
     if conf_read() {
         say("read: ")
@@ -3115,7 +2940,6 @@ fn diagnose() -> i32 {
     } else {
         say("MISSING\n")
     }
-    // 5. Der Ausweis.
     var kp: [u8; 24] = "/etc/jarvis/device.key\0\0"
     let kfd: i64 = sys_open((&kp[0]) as u64, 0, 0)
     say("5 device key      ")
@@ -3125,7 +2949,6 @@ fn diagnose() -> i32 {
     } else {
         say("MISSING -- created on first start (`jsig init`)\n")
     }
-    // 6. Die Wurzelzertifikate.
     var wp: [u8; 20] = "/etc/ssl/roots.pem\0\0"
     let wfd: i64 = sys_open((&wp[0]) as u64, 0, 0)
     say("6 roots           ")
@@ -3135,7 +2958,6 @@ fn diagnose() -> i32 {
     } else {
         say("MISSING -- every TLS connection will be refused\n")
     }
-    // 7. Der Bildschirm.
     let _s: i32 = screen()
     say("jarvisd: --- end ---\n")
     return 0
@@ -3169,39 +2991,39 @@ fn main(start: u64) -> i32 {
         let n: usize = rt.c_length(a)
         if n == 2 && rt.ld8(a, 0) == 45 as u8 {
             let c: u8 = rt.ld8(a, 1)
-            if c == 99 as u8 { // -c
+            if c == 99 as u8 {
                 i = i + 1
                 if i < argc {
                     let q: u64 = rt.arg_ptr(start, i)
                     hinein((&konfpfad[0]) as u64, MAXPFAD, q, rt.c_length(q))
                 }
-            } else if c == 116 as u8 { // -t
+            } else if c == 116 as u8 {
                 i = i + 1
                 if i < argc {
                     let q: u64 = rt.arg_ptr(start, i)
                     deadline = num_from(q, rt.c_length(q))
                 }
-            } else if c == 49 as u8 { // -1
+            } else if c == 49 as u8 {
                 einmal = true
-            } else if c == 118 as u8 { // -v
+            } else if c == 118 as u8 {
                 laut = true
-            } else if c == 110 as u8 { // -n
+            } else if c == 110 as u8 {
                 nurlesen = true
-            } else if c == 112 as u8 { // -p
+            } else if c == 112 as u8 {
                 mach_verzeichnisse()
                 return probe()
-            } else if c == 115 as u8 { // -s
+            } else if c == 115 as u8 {
                 return screen()
-            } else if c == 100 as u8 { // -d
+            } else if c == 100 as u8 {
                 return diagnose()
-            } else if c == 102 as u8 { // -f
+            } else if c == 102 as u8 {
                 i = i + 1
                 if i < argc {
                     return photo_file(rt.arg_ptr(start, i))
                 }
                 say("jarvisd -f needs a file name\n")
                 return 2
-            } else if c == 98 as u8 { // -b
+            } else if c == 98 as u8 {
                 return bildprobe()
             }
         }
@@ -3209,14 +3031,6 @@ fn main(start: u64) -> i32 {
     }
 
     mach_verzeichnisse()
-    // DECISION (r-svclog2): a missing permission list, or one without a server line, is a CONFIGURATION error and
-    // the process EXITS with 2 -- it does not wait for the file to appear. Reasons: (1) nothing is allowed without
-    // the list, so a waiting process would be a service that does nothing and hides why; (2) the desktop watch
-    // (kgui.jarvis_watch) restarts the helper with back-off 5, 10, 20 ... 60 s, so a list that is put in place later
-    // is picked up within a minute; (3) the exit leaves the reason on the serial line and in the log.
-    // NOTE: it once looked as if the process never exited ("stays SLEEP/READY"). It did exit; its pid was handed out
-    // again (the launcher got it) and the watch looked at the wrong task. Fixed in the watch (program name check),
-    // tested by tools/svclog/respawn.sh section 2.
     if !conf_read() {
         say("jarvisd: /etc/jarvis/permissions.conf missing -- nothing is allowed\n")
         return 2
@@ -3261,15 +3075,11 @@ fn main(start: u64) -> i32 {
         return 2
     }
 
-    // r(jarvisd-single): NO SECOND SERVICE. The kernel starts the helper at boot (boot word `jarvis`);
-    // somebody who types `jarvisd` afterwards used to get a second supervisor and a second sign-in on
-    // the same key (the server saw two sessions fight). Only a start WITHOUT flags is a service start.
     if argc == 1 && deadline == 0 && other_service_running() {
         say("jarvisd: already running -- not starting a second one\n")
         return 0
     }
 
-    // Normal service start (no flags) over 443: run as supervisor + worker.
     if k_https && argc == 1 && deadline == 0 {
         if !supervise() {
             return 0
@@ -3289,10 +3099,6 @@ fn main(start: u64) -> i32 {
         }
         let sitz0: u64 = z_sitzungen
         let erg: u64 = eine_runde()
-        // DELL STABILITY: the back-off belongs to FAILURES in a row. A session
-        // that was signed in and ran for GOOD_SESSION_MS or more ended by a blip
-        // of the network: the first retry comes after 250 ms, not after the
-        // 30 s that an old failure had left in `warte`.
         if z_sitzungen > sitz0 && now_ms() - k_session_ms >= GOOD_SESSION_MS {
             wait = 250
         }

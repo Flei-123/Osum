@@ -1,60 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/wm.fi -- Runde K10: der Fensterserver.
-//
-// Runde K7 gab Osum einen Bildschirm: 800x600 Bildpunkte, eine
-// Textkonsole darauf, und `/dev/fb` fuer Ring 3. Sie endete mit einem
-// zugegebenen Mangel, und der steht woertlich in `kernel/fb.fi`:
-//
-//     "Der Preis ist benannt: die Konsole uebertraegt ihre geaenderten
-//      Zeilen aus dem Zweitpuffer und uebermalt dabei, was ein Programm
-//      in dieselben Zeilen gelegt hat. Zwei Zeichner auf einer Flaeche
-//      vertragen sich, solange sie verschiedene Zeilen nehmen. Ein
-//      Fenstersystem waere die Antwort darauf und ist nicht diese Runde."
-//
-// Diese Runde ist es.
-//
-// WAS EIN FENSTERSERVER WIRKLICH IST, und es sind vier Dinge:
-//
-//   1. EINE FLAECHE JE ANWENDUNG. Ein Fenster ist ein Speicherbereich,
-//      den die Anwendung bemalt und den der Server auf den Schirm
-//      zusammensetzt. Die Anwendung sieht den Bildschirm NICHT; sie
-//      sieht ihr Rechteck, und sie kann nicht danebenschreiben.
-//   2. EINE STAPELREIHENFOLGE. Fenster verdecken einander, und wer oben
-//      liegt, gewinnt. Das entscheidet der Server, nicht der Zeichner.
-//   3. EIN EINGABEFOKUS. Genau EIN Fenster bekommt die Tastatur. Ohne
-//      das tippt man in alle Fenster gleichzeitig -- die Gegenprobe
-//      `nofocus` schaltet es ab und muss den Test zum Einsturz bringen.
-//   4. NUR DAS NEUE MALEN. Ein Zeiger, der ueber den Schirm faehrt,
-//      aendert zwei kleine Rechtecke. Wer dafuer 1,9 MB neu
-//      zusammensetzt, hat eine Oberflaeche, die man nicht bedienen kann.
-//      Die Bereichsverfolgung ist deshalb keine Feinheit, sondern das,
-//      was den Unterschied ausmacht -- gemessen in docs/ROUNDK10.md,
-//      und `nodirty` schaltet sie ab, damit die Zahl etwas bedeutet.
-//
-// WO DER SERVER LAEUFT. Im Kernel. Das ist eine Entscheidung und keine
-// Bequemlichkeit, und sie gehoert benannt: ein Fensterserver in Ring 3
-// braucht eine Nachrichtenschicht, die Speicher zwischen Prozessen
-// TEILT (der Fensterpuffer muss in zwei Adressraeumen liegen), und die
-// hat dieser Kernel nicht -- `mmap` kennt anonyme Seiten und den
-// Rahmenpuffer, sonst nichts. Ihn hierhin zu legen kostet den Schutz
-// zwischen Server und Anwendung; er kostet NICHT den Schutz zwischen den
-// Anwendungen, und das ist der, um den es beim Fenstern geht. Der Weg
-// nach Ring 3 fuehrt ueber ein Speicherobjekt, das zwei Prozesse
-// abbilden koennen; das ist die naechste Runde und steht so in der Doku.
-//
-// WIE ANWENDUNGEN MIT IHM REDEN: ueber HANDLES aus `kernel/cap.fi`, wie
-// die Aufgabe es verlangt, und nicht ueber einen zweiten Weg. Ein
-// Fenster ist ein `K_CHANNEL` mit Rechten; wer es nicht hat, hat kein
-// Fenster. `R_WRITE` malt, `R_READ` holt Ereignisse, `R_MANAGE`
-// verschiebt und schliesst. Ein Handle aus einem anderen Prozess faellt
-// am Wuerfelwert der Tabelle, und ein geschlossenes faellt an der
-// Generation -- beides hat Runde K6 gebaut und wird hier nur benutzt.
-//
-// DIE ARITHMETIK-FALLE. Fensterkoordinaten werden negativ, sobald ein
-// Fenster ueber den linken Rand geschoben wird, und Ueberschneidungen
-// sind Differenzen von Differenzen. Dieses Modul rechnet Rechtecke
-// deshalb in `i64` und schneidet ERST beim Zeichnen auf den Bildschirm
-// zurecht. Wo ein Bitmuster gemeint ist (Farben), steht `u64`.
 
 profile kernel
 
@@ -63,25 +7,19 @@ import lib.brand
 import mm.mem
 import gfx.font
 import gfx.fb
-// RUNDE MESSTAFEL: die Fensterliste geht auf die serielle Leitung.
 import serial
-// RUNDE NETVIEW, NACHTRAG: die einzigen zwei Zeilen, die diese Runde
-// in den Fensterserver legt. `netview` sagt, welche Netzsicht der
-// Besitzer eines Fensters hat, `netmark` traegt das Zeichen dafuer.
 import net.netview
 import net.netmark
 import gfx.ttf
 import utf8
-import appicon // ROUND W-ICON: the fallback tile of a program without a symbol (lib/appicon.fi)
-// RUNDE GLAS: die Eckendeckung kommt aus lib/ecke.fi -- derselben
-// Quelle, aus der Ring 3 sie uebersetzt.
-import ecke
+import appicon
+import corner
 import drv.hid.ps2m
-import drv.hid.kbd // W-INPUTHANG: kbd.rescue (watchdog look at the keyboard byte)
-import drv.hid.ptrcfg // W-E: the debug.fps switch
+import drv.hid.kbd
+import drv.hid.ptrcfg
 import bus.slots
-import bus.bus // W-DND: the drag slot (a drag runs while the slot holds a payload)
-import sched.time // RUNDE ALLTAG: der Leerlaufzaehler der Sperre
+import bus.bus
+import sched.time
 import arch.arch
 import ui.tile
 import ui.wm.wmlayout
@@ -136,21 +74,18 @@ import ui.pixelguard
 import gfx.cursor
 import drv.gpu.vgpu
 import drv.gpu.vmsvga
-import drv.gpu.beam // W-VBLANK: hold a copy back until the raster is out of its way (Intel pipe scan-line counter)
+import drv.gpu.beam
 import lib.vektor
 import drv.snd.audio
-// RUNDE KERN-FUI: die freistehende Haelfte von fUi. `profile kernel`
-// in Zeile 1, keine Speicheranforderung, kein Syscall, kein Fliesskomma
-// -- sie darf hier stehen, und genau dafuer wurde sie geschrieben.
 import fui.core
 import fui.region
-import fui.comp // docs/COMPOSITOR.md S2: the row loops (copy, mix, blur line) live in lib/fui/comp.fi
-import fui.backlum // W-WINOPTS S4: sRGB -> linear luminance table (Q16) for the brightness behind a window
-import sched.sched // docs/COMPOSITOR.md S5: the compositor's wake-up (poll_kick_one / poll_sleep) and the watchdog's look at its task
-import fs.unixsock // docs/COMPOSITOR.md S3: a window buffer may be a shared memory object (memfd) the client paints into
+import fui.comp
+import fui.backlum
+import sched.sched
+import fs.unixsock
 
 export {
-    sperre_an, lock_space, darf,
+    lock_on, lock_space, allowed,
     trust_ask, trust_poll, trust_cancel,
     init, compose, dirty_x0, dirty_y0,
     dirty_x1, dirty_y1,
@@ -497,7 +432,7 @@ fn text(state: u64, i: u64, f: u64, px: u64, x: i64, y: i64, p: u64,
     return wmdraw.text(state, i, f, px, x, y, p, n, color)
 }
 
-fn darf(state: u64, i: u64) -> bool {
+fn allowed(state: u64, i: u64) -> bool {
     return wmgate.input_allowed(state, i)
 }
 
@@ -505,7 +440,7 @@ fn lock_space(state: u64) -> u64 {
     return wmgate.lock_space(state)
 }
 
-fn sperre_an(state: u64) -> bool {
+fn lock_on(state: u64) -> bool {
     return wmgate.lock_active(state)
 }
 
@@ -650,13 +585,8 @@ fn win_deco(state: u64, i: u64) -> bool {
     return wmcore.win_deco(state, i)
 }
 
-const EV_OFF: u64 = 0x4000 // (unused since the DELL ROUND: the event rings are at kstate.EVR_OFF)
-// Ein Tick sind zehn Millisekunden, weil `time.TICK_HZ` 100 ist. Die
-// Zahl steht hier als Konstante und nicht als Division im Quelltext,
-// damit ein Takt von 250 Hz an EINER Stelle nachgezogen wird.
+const EV_OFF: u64 = 0x4000
 const MS_PRO_TICK: u64 = 10
-// Die beiden Prueffarben des Selbsttests. Sie faerben nichts, was ein
-// Mensch sieht: sie werden geschrieben und wieder gelesen.
 const PROBE_IN: u64 = 0x0000FF00
 const PROBE_OUT: u64 = 0x00FF0000
 
@@ -669,10 +599,6 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
     if i == wmlayout.DK_DESK {
         wmlayout.ss(state, wmlayout.S_DESK, wmbase.deco(state, wmlayout.DK_DESK))
     }
-    // EIN TERMINALFENSTER, DAS SCHON OFFEN IST, ZIEHT MIT. Seine
-    // beiden Farben stehen im Fenster und nicht im Server, weil jedes
-    // Terminal seine eigenen haben darf; wer nur die Voreinstellung
-    // aendert, aendert sonst nur die Fenster, die es noch nicht gibt.
     if i == wmlayout.DK_TERM_FG || i == wmlayout.DK_TERM_BG {
         var k: u64 = 0
         while k < wmbase.MAX_WIN {
@@ -681,29 +607,6 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
                     wmlayout.wsv(state, k, wmlayout.W_FG, wmbase.deco(state, wmlayout.DK_TERM_FG))
                 } else {
                     wmlayout.wsv(state, k, wmlayout.W_BG, wmbase.deco(state, wmlayout.DK_TERM_BG))
-                    // ==================================== RUNDE FARBE
-                    // DIE NEUE FARBE MUSS AUCH GEMALT WERDEN.
-                    //
-                    // Hier wurde bis zu dieser Runde NUR `W_BG`
-                    // gesetzt. Das ist die Farbe, mit der das Terminal
-                    // KUENFTIG loescht -- die Bildpunkte, die schon im
-                    // Puffer stehen, behalten die alte. Ein Terminal,
-                    // das beim Start des Systems entsteht (der
-                    // Schreibtisch macht genau das) und dessen Flaeche
-                    // sich danach nicht mehr ganz erneuert, bleibt
-                    // deshalb fuer immer in der eingebauten Farbe.
-                    //
-                    // GEMESSEN (1280x800, mode=dark, dieser Runde):
-                    // #10141a auf 20,4 Prozent der Bildflaeche,
-                    // Blaustich B-R = +10, waehrend der Rest des
-                    // Schirms schon auf der neutralen Rampe stand
-                    // (#18181b, B-R = +3). Genau das Fenster, von dem
-                    // Justin sagt, es sei "immer noch blau".
-                    //
-                    // Der Reihenfolge wegen ist das kein Sonderfall,
-                    // sondern die Regel: die Leiste schickt ihre elf
-                    // Farben, WENN sie laeuft -- und das ist immer
-                    // NACH dem ersten Fenster.
                     wmdraw.fill(state, k, 0, 0, wmlayout.wg(state, k, wmlayout.W_W),
                         wmlayout.wg(state, k, wmlayout.W_H), wmbase.deco(state, wmlayout.DK_TERM_BG))
                     wmterm.term_redraw(state, k)
@@ -716,14 +619,6 @@ fn set_deco_colour(state: u64, i: u64, v: u64) -> bool {
     return true
 }
 
-// DIE GEGENPROBE ZU DIESER RUNDE, und sie ist der einzige Grund, warum
-// `ring_round` und der alte Schattenweg stehenbleiben duerfen.
-//
-// Ein "vorher/nachher" aus ZWEI Laeufen ist zwei Maschinen: anderer
-// Wirt, andere Last, anderer Zeitgeber. Mit diesem Schalter laufen
-// beide Fassungen in EINEM Bild nacheinander, auf demselben Fenster
-// und mit demselben Zaehler -- und der Unterschied ist dann wirklich
-// der Unterschied.
 fn set_shadow_old(state: u64, on: bool) {
     if on {
         wmlayout.ss(state, wmlayout.S_SHOLD, 1)
@@ -736,17 +631,14 @@ fn deco_writes(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_DECON)
 }
 
-// W-X1: every frame that reached the card (composes + pointer-only blits); the desktop loop compares it to see "something was painted".
 fn frames_total(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_COMPOSITES) + wmcompose.lj_cp_n
 }
 
-// W-X1: the pointer / key path is hot (input in the last LJ_ACTIVE_US); the quiet backoff of the desktop loop never applies then.
 fn input_hot(state: u64) -> bool {
     return wmlatency.lj_active(state)
 }
 
-// RUNDE MESSTAFEL -- die fuenf Stufen, von aussen lesbar.
 fn evpush(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_EVPUSH)
 }
@@ -763,9 +655,6 @@ fn evdrops(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_EVDROP)
 }
 
-// RUNDE BLECH2: zusammengefasste Bewegungen und Ereignisse an das
-// abholerlose Terminal des Kerns -- beides KEIN Verlust, beides eine
-// Zahl auf Tafelzeile 4 bzw. in `wm: fen`.
 fn evkoal(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_EVKOAL)
 }
@@ -795,12 +684,6 @@ fn win_flags(state: u64, i: u64) -> u64 {
     return wmlayout.wg(state, i, wmlayout.W_FLAGS)
 }
 
-// DAS FENSTER DER TASKLEISTE, ohne dass der Kern die Leiste kennen muss:
-// das oberste benutzte Fenster auf der Ebene L_TOP. Genau dorthin legt
-// `taskbar.fi` sich (`WS_LAYER = L_TOP`), und sonst nichts.
-// RUNDE LEISTE: NICHT MEHR FUER DIE LEISTE BENUTZEN -- dafuer gibt es
-// `panel_win`. Diese hier liefert das oberste Fenster der obersten
-// Ebene, was seit dem Startmenue etwas anderes ist.
 fn top_layer_win(state: u64) -> u64 {
     var z: u64 = wmlayout.gs(state, wmlayout.S_COUNT)
     while z > 0 {
@@ -862,7 +745,6 @@ fn win_id(state: u64, i: u64) -> u64 {
     return wmlayout.wg(state, i, wmlayout.W_ID)
 }
 
-// r454: the program declares the empty part of its strip: [x0, x1) in client coordinates (0, 0 = none)
 fn set_strip_drag(state: u64, i: u64, x0: u64, x1: u64) -> bool {
     if !wmtitle.cap_client(state, i) {
         return false
@@ -871,13 +753,10 @@ fn set_strip_drag(state: u64, i: u64, x0: u64, x1: u64) -> bool {
     return true
 }
 
-// r454: switch the client strip on or off. The buffer grows (shrinks) by the strip height so that the OUTER size of the window
-// stays what it was; the program gets an E_RESIZE with the new size and lays itself out again.
 fn set_cap_client(state: u64, i: u64, on: bool) -> bool {
     if !wmbase.valid(state, i) || !wmbase.deko(state, i) {
         return false
     }
-    // the counter-proof of tools/tabstrip: the server says no, the program keeps its old layout
     if on && fb.nostrip_an(state) {
         return false
     }
@@ -910,8 +789,6 @@ fn set_cap_client(state: u64, i: u64, on: bool) -> bool {
     return true
 }
 
-// Die Adresse des Titels IM KERNEL. Nur `sys.fi` benutzt sie, um ihn
-// nach Ring 3 zu kopieren -- die Taskleiste braucht Namen.
 fn win_title(state: u64, i: u64) -> u64 {
     if i >= wmbase.MAX_WIN {
         return 0
@@ -919,9 +796,6 @@ fn win_title(state: u64, i: u64) -> u64 {
     return state + wmlayout.wat(i) + wmlayout.W_TITLE
 }
 
-// Das Fenster mit dieser Nummer. Die Taskleiste kennt FREMDE Fenster
-// nur ueber ihre Nummer -- ein Handle bekommt sie nicht, und ein Platz
-// in der Tafel waere eine Zahl, die sich unter ihr aendert.
 fn by_id(state: u64, id: u64) -> u64 {
     var i: u64 = 0
     while i < wmbase.MAX_WIN {
@@ -965,7 +839,6 @@ fn set_nomin(state: u64, on: bool) {
     }
 }
 
-// ------------------------------------------------------------- Start
 
 fn hook_create(state: u64, i: u64) {
     if wmlayout.gs(state, wmlayout.S_TILE) != 0 {
@@ -1054,9 +927,6 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     }
     wmlayout.ss(state, wmlayout.S_HIDES, 0)
     wmlayout.ss(state, wmlayout.S_SHOWS, 0)
-    // ADDENDUM TASKBAR: before the first strut the work area IS the
-    // screen. `recalc_work` reads S_SW and S_SH, so it has to run after
-    // both are set -- they are, twelve lines above this one.
     wmlayout.ss(state, wmlayout.S_NOSTRUT, 0)
     wmlayout.ss(state, wmlayout.S_STRUTS, 0)
     wmlayout.ss(state, wmlayout.S_WORKCALC, 0)
@@ -1073,22 +943,12 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     wmlayout.ss(state, wmlayout.S_HOTS, 0)
     wmlayout.ss(state, wmlayout.S_ACTS, 0)
     wmlayout.ss(state, wmlayout.S_READY, 1)
-    // RUNDE TILING: der Baum bekommt dieselbe Flaeche wie der Schirm.
-    // Er ist erst einmal LEER und schaltet nichts um -- ohne das Wort
-    // `tile` verhaelt sich der Fensterserver wie vorher.
     tile.init(state, 0, 0, w, h)
-    // RUNDE WMPLUGIN: die Plugintafel. Ohne das Wort `wmplug` (und mit
-    // `plugaus` erst recht) bleibt sie ZU -- dann weist `plug_call`
-    // jede Anmeldung mit E_UNSUPPORTED ab und dieser Fensterserver
-    // verhaelt sich Zeile fuer Zeile wie vor der Runde.
     wmplug.init(state)
     if !kstate.mode_on(state, kstate.M_WMPLUG)
         || kstate.mode_on(state, kstate.M_PLUGAUS) {
         wmplug.set_ready(state, false)
     }
-    // RUNDE GLAS: der Selbsttest der Mischung und des Weichzeichners.
-    // Er steht HIER und nicht in `selftest`, weil der dort mitten in
-    // einer Zeile laeuft, die `kgui` schreibt -- siehe `fokus_still`.
     wmglass.glastest_say(state)
     wmglass.damagetest_say(state)
     wmlayout.ss(state, wmlayout.S_GLASSGEN, 1)
@@ -1102,9 +962,6 @@ fn init(state: u64, w: u64, h: u64, nodirty: bool, nofocus: bool) -> bool {
     wmlayout.ss(state, wmlayout.S_GLLAST, 0)
     wmlayout.ss(state, wmlayout.S_GLSAY, 0)
     wmglass.set_noglasgrow(state, fb.glasgrow_aus(state))
-    // Die Gegenprobe meldet sich von selbst: ein Lauf, in dem die Regel
-    // abgeschaltet ist, muss das in seiner eigenen Ausgabe sagen und
-    // nicht nur auf der Befehlszeile.
     if wmlayout.gs(state, wmlayout.S_NOGROW) != 0 {
         wmbase.schlieren_say(state)
     }
@@ -1137,16 +994,6 @@ fn dirty_y1(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_DY1)
 }
 
-// ============================================ RUNDE BLECHFUENF
-// DAS OBERSTE FENSTER ZUMACHEN -- GENAU SO WIE DAS KREUZ.
-//
-// Kein zweiter Weg neben `on_mouse`, sondern DIESELBEN ZWEI ZEILEN:
-// erst das Ereignis in den Ring des Fensters, dann `destroy`. Waere es
-// ein anderer Weg, waere die Gegenprobe wertlos.
-// DIE MITTE DES SCHLIESSKREUZES eines Fensters, gepackt (x << 32) | y.
-// Damit kann die Gegenprobe wirklich DORTHIN klicken, wo Justin
-// geklickt hat -- und nicht einen zweiten Schliessweg neben dem Kreuz
-// benutzen, der die Haelfte der Arbeit auslaesst.
 fn cross_point(state: u64, i: u64) -> u64 {
     if !wmbase.valid(state, i) {
         return 0
@@ -1161,12 +1008,6 @@ fn cross_point(state: u64, i: u64) -> u64 {
     return ((bx as u64) << 32) | (by as u64)
 }
 
-// TEST BED for `hdtest` / `hdhot` (tools/wmheads): windows and struts on two heads, printed as `hd:` lines.
-// Needs an extended desktop (vgpuextend with two heads). With `hot` it also unplugs head 1 and plugs it back.
-// r828: edge docking on head 1 (floating halves): right/top/bottom of head 1, a seam edge (no docking), a drop
-// in the middle (no docking). Needs the docking switch on; restored afterwards.
-// r804 TEST BED for `hwheeltest`: horizontal wheel steps to the window under a point (event type + notches in the
-// window ring), a miss over the empty desktop, and 3-finger swipes as window switch. Prints `hw:` lines.
 static mut hw_out: [u64; 2] = [0 as u64; 2]
 
 fn hw_drain(state: u64, i: u64) {
@@ -1242,26 +1083,21 @@ fn hw_demo(state: u64) {
     hw_drain(state, wb)
     wminput.wh_seen = ps2m.wheel(state)
     wminput.hwh_seen = ps2m.hwheel(state)
-    // two steps right over window a: ONE event, c = 2
     ps2m.hwheel_add(state, 1)
     ps2m.hwheel_add(state, 1)
     wminput.hwheel_out(state, 150, 150)
     hw_say_ev(state, wa, (&g_r[0]) as u64)
-    // one step left: c = 0xFFFF (-1)
     ps2m.hwheel_add(state, 0 - 1)
     wminput.hwheel_out(state, 150, 150)
     hw_say_ev(state, wa, (&g_l[0]) as u64)
-    // over the gap between the windows: the sum is taken, nobody gets an event
     ps2m.hwheel_add(state, 1)
     wminput.hwheel_out(state, 370, 150)
     hw_say_ev(state, wa, (&g_g[0]) as u64)
     hw_say_ev(state, wb, (&g_g[0]) as u64)
-    // over window b: b gets it, a does not
     ps2m.hwheel_add(state, 1)
     wminput.hwheel_out(state, 500, 150)
     hw_say_ev(state, wb, (&g_b[0]) as u64)
     hw_say_ev(state, wa, (&g_a2[0]) as u64)
-    // swipes: with two windows left = the other window, right = back, 2 fingers and up = nothing
     wmcore.raise_win(state, wa)
     wmcore.set_focus(state, wa)
     let m1: bool = wmswitchctl.swipe_do(state, 1, 3)
@@ -1274,12 +1110,6 @@ fn hw_demo(state: u64) {
     hw_say_sw(state, (&g_s4[0]) as u64, m4, wmbase.focus(state), wa, wb)
 }
 
-// RUNDE ECHTHARDWARE-1: das Fenster sagt, ob es die Tastatur will.
-//
-// Wird es JETZT gesetzt und das Fenster liegt schon oben und ist
-// sichtbar, bekommt es den Fokus sofort -- sonst muesste man es erst
-// noch einmal anklicken, und genau dieser zweite Klick war der Punkt,
-// an dem Justins Startmenue "nichts tut" aussah.
 fn set_keys(state: u64, i: u64, an: bool) {
     if !wmbase.valid(state, i) {
         return
@@ -1298,12 +1128,7 @@ fn pl_on(state: u64) -> bool {
     return wmlayout.gs(state, wmlayout.S_PL_ON) != 0
 }
 
-// ------------------------------------------------- das Zusammensetzen
 
-// Der Zeiger. Achtzehn Zeilen zu zwoelf Bildpunkten, als zwei
-// Bitmasken je Zeile: Umriss und Fuellung. Warum von Hand und nicht als
-// Bilddatei: es sind 72 Oktette, und ein Zeiger, der aus einer Datei
-// kommt, fehlt genau dann, wenn man ihn zum Suchen des Fehlers braucht.
 const CUR_W: u64 = 12
 
 fn anims(state: u64) -> u64 {
@@ -1322,11 +1147,6 @@ fn set_before_win(state: u64, v: u64) {
     wmlayout.ss(state, wmlayout.S_VWIN, v)
 }
 
-// WIE VIELE TASTEN BEI DIESEM FENSTER ANGEKOMMEN SIND. Die Zahl ist die
-// Gegenprobe zum Eingabefokus: mit Fokus MUSS sie beim unbeteiligten
-// Fenster null sein, mit `nofocus` MUSS sie es nicht sein. Ohne diese
-// zwei Zahlen waere "die Taste geht an das richtige Fenster" eine
-// Behauptung ueber etwas, das man im Bild nicht sieht.
 fn win_keys(state: u64, i: u64) -> u64 {
     if i >= wmbase.MAX_WIN {
         return 0
@@ -1346,16 +1166,6 @@ fn hits_seen(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_HITS)
 }
 
-// DIE VORFUEHRUNG FASST AN UND LAESST LOS -- ueber dieselben zwei
-// Wege wie der Zeiger.
-//
-// Sie stehen hier und nicht in `kgui.fi`, weil `S_DRAG`, `S_DRAGX`
-// und `S_DRAGY` diesem Modul gehoeren. Ein zweiter Ort, der sie
-// setzt, waere ein zweiter Ort, an dem der Zustand des Ziehens
-// falsch sein kann -- und genau daran ist die Oeffnungsbewegung des
-// Startmenues in der vorigen Runde gescheitert.
-// Die wahre Lage, oeffentlich -- fuer die Vorfuehrung, die sie in
-// die serielle Leitung schreibt. `win_x`/`win_y` sind modulintern.
 fn win_x_pub(state: u64, i: u64) -> i64 {
     return wmbase.win_x(state, i)
 }
@@ -1372,7 +1182,6 @@ fn set_blur_cache(state: u64, on: bool) {
     }
 }
 
-// ---------------------------------------------------------- die Ableser
 fn blurs(state: u64) -> u64 {
     return wmlayout.gs(state, wmlayout.S_BLURS)
 }
@@ -1384,22 +1193,18 @@ fn ev_waiting(state: u64, i: u64) -> u64 {
     return wmlayout.wg(state, i, wmlayout.W_EHEAD) - wmlayout.wg(state, i, wmlayout.W_ETAIL)
 }
 
-// Holt ein Ereignis. `out` bekommt zwei Achtoktettworte: Art und Daten.
 fn ev_pop(state: u64, i: u64, out: u64) -> bool {
     if ev_waiting(state, i) == 0 {
         return false
     }
-    let schwanz: u64 = wmlayout.wg(state, i, wmlayout.W_ETAIL)
-    let p: u64 = wmevent.ev_at(state, i, schwanz)
+    let tail: u64 = wmlayout.wg(state, i, wmlayout.W_ETAIL)
+    let p: u64 = wmevent.ev_at(state, i, tail)
     kstate.set(out, 0, kstate.get(p, 0))
     kstate.set(out, 8, kstate.get(p, 8))
     if kstate.get(p, 0) == wmlayout.E_MOVE {
         frameprof.hover_pop()
     }
-    wmlayout.wsv(state, i, wmlayout.W_ETAIL, schwanz + 1)
-    // RUNDE MESSTAFEL, Stufe 4b: und hier holt es ein Programm ab.
-    // Diese Zeile ist der einzige Beleg dafuer, dass ueberhaupt noch
-    // ein Ring-3-Prozess laeuft.
+    wmlayout.wsv(state, i, wmlayout.W_ETAIL, tail + 1)
     wmlayout.ss(state, wmlayout.S_EVPOP, wmlayout.gs(state, wmlayout.S_EVPOP) + 1)
     return true
 }
@@ -1416,8 +1221,6 @@ fn dnd_ncancel_pub() -> u64 {
     return wmkeys.dh_ncancel
 }
 
-// `ax: mag ...` on the serial line: where the panel and the cut-out are,
-// so a test checks the PICTURE against the kernel's own numbers.
 fn say_mag(state: u64) {
     var s_a: [u8; 12] = "ax: mag px=\0"
     var s_b: [u8; 5] = " sx=\0"
@@ -1445,5 +1248,5 @@ fn say_mag(state: u64) {
     serial.hex(wmbase.deco(state, wmlayout.DK_TITLE_ON))
     serial.nl()
 }
-const CV_DRAWN: u64 = 12 // key of the text the overlay drew last
-const CV_DRAWS: u64 = 15 // overlay paints since boot
+const CV_DRAWN: u64 = 12
+const CV_DRAWS: u64 = 15

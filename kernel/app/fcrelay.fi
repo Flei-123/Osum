@@ -1,34 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/fcrelay.fi -- A FIRNCHAT DEVICE ON ORIENTOS: the relay
-// protocol and the end-to-end sealing, as much as the Fleitec provider of
-// the social layer (kernel/app/socfleitec.fi) needs to chat.
-//
-// This file is FirnChat's wire and crypto, read out of its sources
-// (FirnChat src/proto.fi, src/e2e.fi, src/geraet.fi, docs/E2E-GERAETE.md)
-// and written again for this tree -- nothing in here is Fleitec's address
-// book or any other provider's. What it does:
-//
-//   THE DEVICE     an x25519 key pair of its own (secret || public, 128
-//                  hex in a file of mode 0600). The account learns it by
-//                  the pairing code (T_DIR "buch=1"), never by a key
-//                  typed in by hand.
-//   THE RELAY      a TCP connection: T_HELLO (my key) -> T_WELCOME
-//                  (challenge 32 || relay key 32) -> T_AUTH HMAC-SHA256(
-//                  x25519(my secret, relay key), challenge) -> T_OK. The
-//                  relay key is pinned on first use (the caller keeps it).
-//   A MESSAGE      sealed per device: x25519(mine, theirs) -> HKDF-SHA256
-//                  (salt "FIRNCHAT-v1-session", info lo || hi || direction)
-//                  -> ChaCha20-Poly1305, nonce 0000 || seq, aad sender ||
-//                  target || seq. The sequence number is the frame's.
-//   OWN DEVICES    get an own-device copy (F_SYNC): 1 || the key the
-//                  message was addressed to || the text.
-//   THE BOX        T_FETCH "8 octets wanted" -> T_MSG ... T_END; the
-//                  relay moves its cursor by what it handed over.
-//   THE DIRECTORY  T_DIR "buch=1" / "zugang=1" / "fc=<hex>" -> T_DIRR JSON
-//                  (answered by the address book behind the relay).
-//
-// NOT HERE (and said so): channels, pictures, read marks going out,
-// the key backup. A read mark that comes in is recognised and dropped.
 
 import std.rt
 import std.net
@@ -78,7 +48,6 @@ const F_SYNC: u8 = 32
 const SYNC_HEAD: usize = 33
 const TAG_LEN: usize = 16
 
-// ------------------------------------------------------------ small tools
 
 fn hexd(v: u8) -> u8 {
     if v < 10 as u8 {
@@ -169,10 +138,7 @@ fn key_less(a: u64, b: u64) -> bool {
     return false
 }
 
-// ------------------------------------------------------------- the device
 
-// secret (32) || public (32) out of the key file (128 hex), or a fresh
-// pair written there with mode 0600. False: no randomness, no file.
 fn key_load_or_create(path: u64, out64: u64) -> bool {
     var h: [u8; 130] = [0; 130]
     let fd: i64 = syscall(2, path as i64, 0, 0, 0, 0, 0)
@@ -192,7 +158,6 @@ fn key_load_or_create(path: u64, out64: u64) -> bool {
     }
     hex_encode(out64, 64, (&h[0]) as u64)
     h[128] = 10 as u8
-    // O_WRONLY | O_CREAT | O_EXCL, 0600
     let wf: i64 = syscall(2, path as i64, 1 | 64 | 128, 384, 0, 0, 0)
     if wf < 0 {
         return false
@@ -206,7 +171,6 @@ fn key_hex_pub(k64: u64, out64: u64) {
     hex_encode(k64 + 32, 32, out64)
 }
 
-// ------------------------------------------------------------- a session
 
 struct Sess {
     tx: [u8; 32],
@@ -239,7 +203,7 @@ fn sess_init(s: *mut Sess, my_sec: u64, my_pub: u64, their: u64) -> bool {
         dtx = 1 as u8
         drx = 2 as u8
     } else if !key_less(their, my_pub) {
-        dtx = 1 as u8 // the session with oneself
+        dtx = 1 as u8
         drx = 1 as u8
     }
     var salt: [u8; 19] = "FIRNCHAT-v1-session"
@@ -278,7 +242,6 @@ fn nonce_aad(sender: u64, target: u64, seq: u64, nonce: u64, aad: u64) {
     }
 }
 
-// n octets -> n + 16 at out
 fn seal(s: *mut Sess, sender: u64, target: u64, seq: u64, p: u64, n: usize,
     out: u64) {
     var nonce: [u8; 12] = [0; 12]
@@ -288,7 +251,6 @@ fn seal(s: *mut Sess, sender: u64, target: u64, seq: u64, p: u64, n: usize,
         72, p, n, out)
 }
 
-// n octets of ciphertext -> n - 16 at out; false = forged
 fn open_sealed(s: *mut Sess, sender: u64, target: u64, seq: u64, ct: u64,
     n: usize, out: u64) -> bool {
     if n < TAG_LEN {
@@ -301,7 +263,6 @@ fn open_sealed(s: *mut Sess, sender: u64, target: u64, seq: u64, ct: u64,
         (&aad[0]) as u64, 72, ct, n, out)
 }
 
-// 1 || anchor || text into out (n + SYNC_HEAD)
 fn sync_wrap(anchor: u64, p: u64, n: usize, out: u64) -> usize {
     rt.st8(out, 0, 1 as u8)
     var i: usize = 0
@@ -317,12 +278,11 @@ fn sync_wrap(anchor: u64, p: u64, n: usize, out: u64) -> usize {
     return n + SYNC_HEAD
 }
 
-// ------------------------------------------------------------ the relay
 
 struct Relay {
     conn: net.Conn,
     open: bool,
-    key: [u8; 64], // secret || public
+    key: [u8; 64],
     srv: [u8; 32],
     hdr: [u8; 90],
     body: rt.Buf,
@@ -405,7 +365,6 @@ fn read_full(r: *mut Relay, p: u64, n: usize) -> bool {
     return true
 }
 
-// one frame: the header into hdr, the payload into body. The kind, or -1.
 fn read_frame(r: *mut Relay) -> i32 {
     let hp: u64 = (&(*r).hdr[0]) as u64
     if !read_full(r, hp, HDR_LEN) {
@@ -434,9 +393,6 @@ fn frame_rest(r: *mut Relay) -> i32 {
     return rt.ld8(hp, 3) as i32
 }
 
-// Connects and proves the key. `pin` (32 octets or 0): the relay key it
-// must have. -1 no connection, -2 no handshake, -3 a different relay key
-// than the pinned one, -4 the proof was refused; 0 open.
 fn relay_open(r: *mut Relay, addr: u32, port: u16, pin: u64) -> i32 {
     var bad: bool = false
     (*r).conn = net.connect_tcp(addr, port) catch bad_conn(&bad)
@@ -499,8 +455,6 @@ fn relay_close(r: *mut Relay) {
     }
 }
 
-// A directory question ("buch=1", "zugang=1", "fc=<64 hex>"): the JSON
-// answer into out. False: no answer (T_ERR, no directory).
 fn relay_dir(r: *mut Relay, q: u64, qn: usize, out: *mut rt.Buf) -> bool {
     rt.buf_clear(out)
     if !write_frame(r, T_DIR, 0 as u8, 0 as u64, now_unix(), 0 as u64, q, qn) {
@@ -513,9 +467,6 @@ fn relay_dir(r: *mut Relay, q: u64, qn: usize, out: *mut rt.Buf) -> bool {
     return true
 }
 
-// One sealed message to one device: sealed with the session to `target`
-// under sequence number `seq` (spent by the caller BEFORE this), `xflags`
-// added to F_ENC. True: the relay stored it (T_ACK).
 fn relay_send(r: *mut Relay, target: u64, seq: u64, xflags: u8, stamp: u64,
     p: u64, n: usize) -> bool {
     var s: Sess = Sess { tx: [0; 32], rx: [0; 32], ok: false }
@@ -534,9 +485,6 @@ fn relay_send(r: *mut Relay, target: u64, seq: u64, xflags: u8, stamp: u64,
     return read_frame(r) == T_ACK as i32
 }
 
-// What is new in the own box, at most `want` frames, appended to `out` as
-// whole frames (header + payload, each carries its own length). The
-// count, or -1.
 fn relay_fetch(r: *mut Relay, want: usize, out: *mut rt.Buf) -> i32 {
     var head: [u8; 8] = [0; 8]
     var i: usize = 0
@@ -566,7 +514,6 @@ fn relay_fetch(r: *mut Relay, want: usize, out: *mut rt.Buf) -> i32 {
     return got
 }
 
-// ------------------------------------------------------ the live session
 
 fn watch_ping(r: *mut Relay) -> bool {
     var st: rt.Buf = rt.buf_new()
@@ -667,7 +614,6 @@ fn relay_watch_poll(r: *mut Relay, out: *mut rt.Buf) -> i32 {
     return got
 }
 
-// ------------------------------------------------ reading a stored frame
 
 fn fr_kind(f: u64) -> u8 {
     return rt.ld8(f, 3)

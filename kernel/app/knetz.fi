@@ -1,49 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/knetz.fi -- RUNDE KONTO: eine HTTP-Anfrage, mit Kopfzeilen,
-// die der Aufrufer AUSDRUECKLICH hinschreibt.
-//
-// ====================================================== WARUM NICHT net.http
-//
-// Dieser Baum hat einen fertigen HTTP-Klienten: `vendor/firn/lib/net/
-// http.fi`, mit Umleitungen, Zwischenspeicher, gzip -- und mit einem
-// KEKSGLAS (`net/httpstate.fi`, `client_jar`). Genau das ist der Grund,
-// aus dem er hier nicht benutzt wird.
-//
-// Die Auflage dieser Runde lautet: NIEMALS AMBIENTE KEKSE. Ein Klient
-// mit einem Keksglas haengt Kekse von selbst an -- er tut es richtig,
-// nach Feld und Pfad, und genau deshalb kann man es ihm nicht ansehen.
-// Eine Zusage der Form "dieses Programm schickt nie einen Keks, den es
-// nicht selbst hingeschrieben hat" ist mit einem Keksglas im Bauch
-// nicht mehr beweisbar, sondern nur noch behauptbar.
-//
-// DIESE DATEI HAT KEIN KEKSGLAS. Sie hat auch keinen Zwischenspeicher
-// und folgt keiner Umleitung. Was in der Anfrage steht, hat der
-// Aufrufer hingeschrieben, Zeile fuer Zeile. `tools/account/run.sh`
-// Abschnitt 5 haelt die Kopfzeilen, die die Attrappe WIRKLICH empfangen
-// hat, gegen diese Zusage -- und die Gegenprobe `keks` schreibt eine
-// hinein und muss auffallen.
-//
-// Der zweite Grund ist kleiner und trotzdem echt: `http.fi` kann keine
-// eigene Kopfzeile setzen. `Authorization: Bearer ...` ist die
-// EINZIGE Art, ein Token ausdruecklich zu tragen, und sie geht dort
-// nicht.
-//
-// ================================================== WAS ES NICHT KANN
-//
-// N1 (r34: superseded) A target may now also carry a NAME
-//    (`https://id.example:8443`). It is resolved on the first `sende`/`send_raw`
-//    through `libc.dns` (A record, IPv4), with a time limit from
-//    /etc/resolv.conf and a small cache (60 s). The NAME
-//    stays certificate name, SNI and Host header -- the resolution only changes
-//    WHERE the connection goes, never what is verified against. An IPv4
-//    literal works as before. No IPv6 (A records only).
-// N2 KEINE UMLEITUNG. Eine Anmeldung, die umgeleitet wird, ist eine
-//    Anmeldung an einem anderen Ort als dem, den der Nutzer eingetragen
-//    hat. Das ist keine Bequemlichkeit, das ist ein Angriff.
-// N3 KEIN KEEP-ALIVE. `Connection: close`, eine Anfrage je Verbindung.
-// N4 DIE KRYPTOGRAFIE IST NICHT GEPRUEFT. Es ist Firns TLS 1.3 aus
-//    Runde B5, dasselbe wie in `fetch.fi`; docs/REALHW.md sagt dazu,
-//    was zu sagen ist.
 
 import std.io
 import std.rt
@@ -57,73 +12,67 @@ export {
     Target, Reply,
     target_new, target_read, target_resolve, reply_new, reply_free, reply_clear,
     sende, sende_form, send_raw, header_find,
-    F_OK, F_KEINNETZ, F_TLS, F_FORM, F_ADRESSE, F_SENDEN, F_READ, F_DNS,
+    F_OK, F_KEINNETZ, F_TLS, F_FORM, F_ADDRESS, F_SEND, F_READ, F_DNS,
     last_check,
 }
 
 const F_OK: u32 = 0
-const F_KEINNETZ: u32 = 1      // die Verbindung kam nicht zustande
-const F_TLS: u32 = 2           // Handschlag oder Zertifikat abgelehnt
-const F_FORM: u32 = 3          // die Antwort ist kein HTTP
-const F_ADRESSE: u32 = 4       // die Anschrift ist keine Zahl
-const F_SENDEN: u32 = 5
+const F_KEINNETZ: u32 = 1
+const F_TLS: u32 = 2
+const F_FORM: u32 = 3
+const F_ADDRESS: u32 = 4
+const F_SEND: u32 = 5
 const F_READ: u32 = 6
-const F_DNS: u32 = 7           // the NAME in the target does not resolve
+const F_DNS: u32 = 7
 
 const HAPPEN: usize = 4096
 
-// Die letzte Zertifikatsbegruendung, damit ein Bericht sie nennen kann,
-// ohne dass jeder Aufrufer eine Ausgabevariable durchreicht.
-static mut pruefung: u32 = 0
+static mut check: u32 = 0
 
 fn last_check() -> u32 {
-    return pruefung
+    return check
 }
 
-// Ein ZIEL ist eine Anschrift, ein Name und die Frage, ob TLS.
-// Alle Zeiger zeigen auf Text, der den Aufruf ueberlebt (Argumente oder
-// ein Puffer des Aufrufers) -- diese Datei kopiert nichts davon.
 struct Target {
     adr: u32,
     port: u16,
-    sicher: bool,
+    safe: bool,
     name: u64,
     namelen: usize,
     wurzeln: u64,
-    host: u64,        // r34: the host text of the URL when it is a NAME, else 0
+    host: u64,
     hostlen: usize,
 }
 
 struct Reply {
     code: u32,
     fail_code: u32,
-    kopf: rt.Buf,
+    head: rt.Buf,
     koerper: rt.Buf,
 }
 
 fn target_new() -> Target {
-    return Target { adr: 0 as u32, port: 0 as u16, sicher: false, name: 0,
+    return Target { adr: 0 as u32, port: 0 as u16, safe: false, name: 0,
         namelen: 0, wurzeln: 0, host: 0, hostlen: 0 }
 }
 
 fn reply_new() -> Reply {
-    return Reply { code: 0 as u32, fail_code: F_OK, kopf: rt.buf_new(),
+    return Reply { code: 0 as u32, fail_code: F_OK, head: rt.buf_new(),
         koerper: rt.buf_new() }
 }
 
 fn reply_free(a: *mut Reply) {
-    rt.buf_free(&(*a).kopf)
+    rt.buf_free(&(*a).head)
     rt.buf_free(&(*a).koerper)
 }
 
 fn reply_clear(a: *mut Reply) {
     (*a).code = 0 as u32
     (*a).fail_code = F_OK
-    rt.buf_clear(&(*a).kopf)
+    rt.buf_clear(&(*a).head)
     rt.buf_clear(&(*a).koerper)
 }
 
-// ---------------------------------------------------------- die Anschrift
 
 fn ist_ziffer(c: u8) -> bool {
     return c >= 48 as u8 && c <= 57 as u8
@@ -144,7 +93,7 @@ fn num(p: u64, von: usize, bis: usize) -> u32 {
 }
 
 fn four_nums(p: u64, von: usize, bis: usize, aus: *mut u32) -> bool {
-    var teil: [u32; 4] = [0; 4]
+    var part: [u32; 4] = [0; 4]
     var k: usize = 0
     var v: u32 = 0
     var ziffern: usize = 0
@@ -155,7 +104,7 @@ fn four_nums(p: u64, von: usize, bis: usize, aus: *mut u32) -> bool {
             if ziffern == 0 || k >= 3 {
                 return false
             }
-            teil[k] = v
+            part[k] = v
             k = k + 1
             v = 0
             ziffern = 0
@@ -174,13 +123,13 @@ fn four_nums(p: u64, von: usize, bis: usize, aus: *mut u32) -> bool {
     if k != 3 || ziffern == 0 {
         return false
     }
-    teil[3] = v
-    *aus = net.ipv4(teil[0] as u8, teil[1] as u8, teil[2] as u8,
-        teil[3] as u8)
+    part[3] = v
+    *aus = net.ipv4(part[0] as u8, part[1] as u8, part[2] as u8,
+        part[3] as u8)
     return true
 }
 
-fn beginnt(p: u64, n: usize, q: u64) -> bool {
+fn starts(p: u64, n: usize, q: u64) -> bool {
     var i: usize = 0
     while true {
         let c: u8 = rt.ld8(q, i)
@@ -198,20 +147,16 @@ fn beginnt(p: u64, n: usize, q: u64) -> bool {
     return false
 }
 
-// `https://10.9.0.1:8443` -- SCHEMA, ZAHL, Anschluss. Ein Pfad am Ende
-// wird ueberlesen: ein Ziel ist ein Ort, der Pfad gehoert zum Aufruf.
-// `name` ist der Name fuer Zertifikat und SNI; ist er 0, wird die Zahl
-// genommen, und das endet fast immer in einer Ablehnung -- richtigerweise.
 fn target_read(url: u64, urllen: usize, name: u64, wurzeln: u64,
     z: *mut Target) -> bool {
     var s_s: [u8; 9] = "https://\0"
     var s_p: [u8; 8] = "http://\0"
     var ab: usize = 0
-    var sicher: bool = false
-    if beginnt(url, urllen, (&s_s[0]) as u64) {
-        sicher = true
+    var safe: bool = false
+    if starts(url, urllen, (&s_s[0]) as u64) {
+        safe = true
         ab = 8
-    } else if beginnt(url, urllen, (&s_p[0]) as u64) {
+    } else if starts(url, urllen, (&s_p[0]) as u64) {
         ab = 7
     } else {
         return false
@@ -222,7 +167,7 @@ fn target_read(url: u64, urllen: usize, name: u64, wurzeln: u64,
         ende = ende + 1
     }
     var port: u32 = 80
-    if sicher {
+    if safe {
         port = 443
     }
     if ende < urllen && rt.ld8(url, ende) == 58 as u8 {
@@ -236,7 +181,6 @@ fn target_read(url: u64, urllen: usize, name: u64, wurzeln: u64,
     (*z).host = 0
     (*z).hostlen = 0
     if !four_nums(url, ab, ende, &adr) {
-        // r34: not an IPv4 literal -- a NAME, resolved later (`sende`).
         if !host_ok(url, ab, ende) {
             return false
         }
@@ -245,7 +189,7 @@ fn target_read(url: u64, urllen: usize, name: u64, wurzeln: u64,
     }
     (*z).adr = adr
     (*z).port = port as u16
-    (*z).sicher = sicher
+    (*z).safe = safe
     (*z).wurzeln = wurzeln
     if name != 0 {
         (*z).name = name
@@ -258,13 +202,6 @@ fn target_read(url: u64, urllen: usize, name: u64, wurzeln: u64,
 }
 
 
-// ------------------------------------------------------- r34: the NAME
-//
-// A host that is not four numbers must be a plain DNS name: letters,
-// digits, `-`, `_`, `.`; labels of 1..63 octets; at most 253 octets in all.
-// Anything that is only digits and dots is a BROKEN number (`10.9.0`,
-// `300.1.1.1`) and stays refused -- it must never go to the resolver.
-// `[::1]`, `a b`, user-info (`u@h`) and the like are refused as well.
 fn host_ok(p: u64, von: usize, bis: usize) -> bool {
     let n: usize = bis - von
     if n == 0 || n > 253 {
@@ -306,9 +243,6 @@ fn host_ok(p: u64, von: usize, bis: usize) -> bool {
     return true
 }
 
-// A tiny cache so that a polling loop (`--wait`) and the two calls of one
-// run ask the DNS once. 4 slots, names up to 63 octets, 60 s. FAILURES are
-// never cached (a retry must ask again).
 const DC_SLOTS: usize = 4
 const DC_NAME: usize = 64
 const DC_TTL: u64 = 60
@@ -328,7 +262,6 @@ fn dc_find(p: u64, n: usize, now_s: u64) -> u32 {
             var same: bool = true
             var i: usize = 0
             while i < n {
-                // names are compared without regard to the case
                 var a: u8 = rt.ld8(p, i)
                 var b: u8 = dc_name[k * DC_NAME + i]
                 if a >= 65 as u8 && a <= 90 as u8 { a = a + 32 as u8 }
@@ -365,10 +298,6 @@ fn dc_put(p: u64, n: usize, adr: u32, now_s: u64) {
     dc_time[k] = now_s
 }
 
-// Make the target connectable. Literal: nothing to do. Name: cache, else ask
-// the resolver (A record, timeouts from /etc/resolv.conf). The answer only
-// fills `adr`; `name` (certificate, SNI, Host) stays what it was.
-// false -> the caller sets F_DNS.
 fn target_resolve(z: *mut Target) -> bool {
     if (*z).adr != 0 as u32 {
         return true
@@ -398,13 +327,12 @@ fn target_resolve(z: *mut Target) -> bool {
     return true
 }
 
-// Shared first step of `sende` / `send_raw`: an address, or the reason why not.
 fn target_ready(z: *mut Target, a: *mut Reply) -> bool {
     if (*z).adr != 0 as u32 {
         return true
     }
     if (*z).host == 0 {
-        (*a).fail_code = F_ADRESSE
+        (*a).fail_code = F_ADDRESS
         return false
     }
     if !target_resolve(z) {
@@ -414,13 +342,9 @@ fn target_ready(z: *mut Target, a: *mut Reply) -> bool {
     return true
 }
 
-// ------------------------------------------------------------- die Anfrage
-//
-// JEDE Kopfzeile steht hier, und es gibt genau eine Stelle, an der eine
-// entsteht. Wer eine sucht, die nicht hier steht, findet keine.
 fn anfrage(req: *mut rt.Buf, z: *mut Target, methode: u64, ml: usize,
-    req_path: u64, pl: usize, koerper: u64, kl: usize, traeger: u64,
-    tl: usize, keks: u64, kkl: usize) {
+    req_path: u64, pl: usize, koerper: u64, kl: usize, carrier: u64,
+    tl: usize, cookie: u64, kkl: usize) {
     var sp: [u8; 2] = " \0"
     var ver: [u8; 11] = " HTTP/1.1\r\0"
     var nl: [u8; 3] = "\r\n\0"
@@ -433,7 +357,7 @@ fn anfrage(req: *mut rt.Buf, z: *mut Target, methode: u64, ml: usize,
     var h_cform: [u8; 49] = "Content-Type: application/x-www-form-urlencoded\r\0"
     var h_clen: [u8; 17] = "Content-Length: \0"
     var h_auth: [u8; 23] = "Authorization: Bearer \0"
-    var h_keks: [u8; 9] = "Cookie: \0"
+    var h_cookie: [u8; 9] = "Cookie: \0"
 
     rt.buf_push_bytes(req, methode, ml)
     rt.buf_push_bytes(req, (&sp[0]) as u64, 1)
@@ -454,25 +378,18 @@ fn anfrage(req: *mut rt.Buf, z: *mut Target, methode: u64, ml: usize,
     rt.buf_push_bytes(req, (&h_con[0]) as u64, 18)
     rt.buf_push(req, 10 as u8)
 
-    // DER TRAEGER. Das ist der ausdrueckliche Weg, ein Token zu tragen,
-    // und der einzige, den der Xoffi-Ruecken benutzt.
-    if traeger != 0 && tl > 0 {
+    if carrier != 0 && tl > 0 {
         rt.buf_push_bytes(req, (&h_auth[0]) as u64, 22)
-        rt.buf_push_bytes(req, traeger, tl)
+        rt.buf_push_bytes(req, carrier, tl)
         rt.buf_push_bytes(req, (&nl[0]) as u64, 2)
     }
-    // DER KEKS. Er entsteht NUR, wenn ein Ruecken ihn ausdruecklich
-    // uebergibt -- es gibt kein Glas, aus dem er von selbst kommen
-    // koennte. Der JARVIS-Ruecken braucht ihn, weil dieser Server
-    // `Authorization` nicht liest (siehe kernel/app/anb_jarvis.fi).
-    if keks != 0 && kkl > 0 {
-        rt.buf_push_bytes(req, (&h_keks[0]) as u64, 8)
-        rt.buf_push_bytes(req, keks, kkl)
+    if cookie != 0 && kkl > 0 {
+        rt.buf_push_bytes(req, (&h_cookie[0]) as u64, 8)
+        rt.buf_push_bytes(req, cookie, kkl)
         rt.buf_push_bytes(req, (&nl[0]) as u64, 2)
     }
     if kl > 0 {
         if form_body {
-            // 47 octets + CR, then the LF
             rt.buf_push_bytes(req, (&h_cform[0]) as u64, 48)
         } else {
             rt.buf_push_bytes(req, (&h_ctyp[0]) as u64, 31)
@@ -488,7 +405,6 @@ fn anfrage(req: *mut rt.Buf, z: *mut Target, methode: u64, ml: usize,
     }
 }
 
-// ------------------------------------------------------------ die Antwort
 
 fn ist_hex(c: u8) -> bool {
     if c >= 48 as u8 && c <= 57 as u8 { return true }
@@ -517,16 +433,16 @@ fn word_in(p: u64, n: usize, w: u64, wn: usize) -> bool {
     var i: usize = 0
     while i + wn <= n {
         var k: usize = 0
-        var gleich: bool = true
+        var equal: bool = true
         while k < wn {
             if small(rt.ld8(p, i + k)) != small(rt.ld8(w, k)) {
-                gleich = false
+                equal = false
                 k = wn
             } else {
                 k = k + 1
             }
         }
-        if gleich {
+        if equal {
             return true
         }
         i = i + 1
@@ -534,15 +450,11 @@ fn word_in(p: u64, n: usize, w: u64, wn: usize) -> bool {
     return false
 }
 
-// Der Wert einer Kopfzeile, ohne fuehrende Leerzeichen. `-1` heisst:
-// die Zeile gibt es nicht. Der Name wird ohne Ruecksicht auf
-// Gross- und Kleinschreibung gesucht, so will es RFC 9110.
-fn header_find(kopf: *mut rt.Buf, name: u64, nl: usize,
+fn header_find(head: *mut rt.Buf, name: u64, nl: usize,
     aus: *mut rt.Buf) -> bool {
-    let p: u64 = (*kopf).ptr
-    let n: usize = (*kopf).len
+    let p: u64 = (*head).ptr
+    let n: usize = (*head).len
     var i: usize = 0
-    // die Statuszeile ueberspringen
     while i < n && rt.ld8(p, i) != 10 as u8 {
         i = i + 1
     }
@@ -552,20 +464,20 @@ fn header_find(kopf: *mut rt.Buf, name: u64, nl: usize,
         while zeilenende < n && rt.ld8(p, zeilenende) != 10 as u8 {
             zeilenende = zeilenende + 1
         }
-        var passt: bool = false
+        var fits: bool = false
         if i + nl + 1 <= zeilenende && rt.ld8(p, i + nl) == 58 as u8 {
             var k: usize = 0
-            passt = true
+            fits = true
             while k < nl {
                 if small(rt.ld8(p, i + k)) != small(rt.ld8(name, k)) {
-                    passt = false
+                    fits = false
                     k = nl
                 } else {
                     k = k + 1
                 }
             }
         }
-        if passt {
+        if fits {
             var v: usize = i + nl + 1
             while v < zeilenende && (rt.ld8(p, v) == 32 as u8
                 || rt.ld8(p, v) == 9 as u8) {
@@ -617,7 +529,6 @@ fn entstuecken(q: u64, n: usize, aus: *mut rt.Buf) -> bool {
     return false
 }
 
-// Rohes HTTP in Kopf und Koerper zerlegen und den Zahlencode holen.
 fn zerlegen(roh: *mut rt.Buf, a: *mut Reply) -> bool {
     let p: u64 = (*roh).ptr
     let n: usize = (*roh).len
@@ -625,7 +536,7 @@ fn zerlegen(roh: *mut rt.Buf, a: *mut Reply) -> bool {
         return false
     }
     var h: [u8; 6] = "HTTP/\0"
-    if !beginnt(p, n, (&h[0]) as u64) {
+    if !starts(p, n, (&h[0]) as u64) {
         return false
     }
     var i: usize = 5
@@ -648,7 +559,7 @@ fn zerlegen(roh: *mut rt.Buf, a: *mut Reply) -> bool {
     if !da {
         return false
     }
-    rt.buf_push_bytes(&(*a).kopf, p, trenn + 2)
+    rt.buf_push_bytes(&(*a).head, p, trenn + 2)
     let kab: usize = trenn + 4
     let klen: usize = n - kab
     var w: [u8; 8] = "chunked\0"
@@ -662,7 +573,6 @@ fn zerlegen(roh: *mut rt.Buf, a: *mut Reply) -> bool {
     return true
 }
 
-// --------------------------------------------------------------- senden
 
 fn bad_conn(b: *mut bool) -> net.Conn {
     *b = true
@@ -680,45 +590,40 @@ fn now_secs() -> u64 {
     return ts[0] as u64
 }
 
-// RFC 6749/8628 endpoints want `application/x-www-form-urlencoded`. The
-// body is built by the caller; this only switches the Content-Type of the
-// ONE request that `sende_form` makes (reset right after it).
 static mut form_body: bool = false
 
 fn sende_form(z: *mut Target, methode: u64, ml: usize, req_path: u64, pl: usize,
-    koerper: u64, kl: usize, traeger: u64, tl: usize, a: *mut Reply) -> bool {
+    koerper: u64, kl: usize, carrier: u64, tl: usize, a: *mut Reply) -> bool {
     form_body = true
-    let r: bool = sende(z, methode, ml, req_path, pl, koerper, kl, traeger, tl,
+    let r: bool = sende(z, methode, ml, req_path, pl, koerper, kl, carrier, tl,
         0, 0, a)
     form_body = false
     return r
 }
 
-// Die eine Anfrage. `true` heisst: eine HTTP-Antwort ist angekommen --
-// NICHT, dass ihr Code 200 war. Das entscheidet der Aufrufer.
 fn sende(z: *mut Target, methode: u64, ml: usize, req_path: u64, pl: usize,
-    koerper: u64, kl: usize, traeger: u64, tl: usize, keks: u64,
+    koerper: u64, kl: usize, carrier: u64, tl: usize, cookie: u64,
     kkl: usize, a: *mut Reply) -> bool {
     reply_clear(a)
-    pruefung = 0
+    check = 0
     if !target_ready(z, a) {
         return false
     }
-    var schlecht: bool = false
+    var bad: bool = false
     var c: net.Conn = net.connect_tcp((*z).adr, (*z).port)
-    catch | e | bad_conn(&schlecht)
-    if schlecht {
+    catch | e | bad_conn(&bad)
+    if bad {
         (*a).fail_code = F_KEINNETZ
         return false
     }
     let _z: bool = net.set_timeout(&c, 20000 as u64) catch false
 
     var req: rt.Buf = rt.buf_new()
-    anfrage(&req, z, methode, ml, req_path, pl, koerper, kl, traeger, tl,
-        keks, kkl)
+    anfrage(&req, z, methode, ml, req_path, pl, koerper, kl, carrier, tl,
+        cookie, kkl)
     var roh: rt.Buf = rt.buf_new()
     var ok: bool = false
-    if (*z).sicher {
+    if (*z).safe {
         ok = over_tls(&c, z, &req, &roh, a)
     } else {
         ok = open(&c, &req, &roh, a)
@@ -738,29 +643,23 @@ fn sende(z: *mut Target, methode: u64, ml: usize, req_path: u64, pl: usize,
     return true
 }
 
-// ROUND ROADMAP-5 (K-008): a request the CALLER built completely --
-// request line, every header, the body. `sende` writes its own
-// `Content-Type: application/json`; IPP needs `application/ipp` and a
-// binary body, so `kernel/app/drucke.fi` builds the request itself and
-// hands it over here. Connection, TLS, reading and parsing are the same
-// code as in `sende` -- no second HTTP client.
 fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Reply) -> bool {
     reply_clear(a)
-    pruefung = 0
+    check = 0
     if !target_ready(z, a) {
         return false
     }
-    var schlecht: bool = false
+    var bad: bool = false
     var c: net.Conn = net.connect_tcp((*z).adr, (*z).port)
-    catch | e | bad_conn(&schlecht)
-    if schlecht {
+    catch | e | bad_conn(&bad)
+    if bad {
         (*a).fail_code = F_KEINNETZ
         return false
     }
     let _z: bool = net.set_timeout(&c, 20000 as u64) catch false
     var roh: rt.Buf = rt.buf_new()
     var ok: bool = false
-    if (*z).sicher {
+    if (*z).safe {
         ok = over_tls(&c, z, req, &roh, a)
     } else {
         ok = open(&c, req, &roh, a)
@@ -781,48 +680,40 @@ fn send_raw(z: *mut Target, req: *mut rt.Buf, a: *mut Reply) -> bool {
 
 fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     roh: *mut rt.Buf, a: *mut Reply) -> bool {
-    var speicher: rt.Buf = rt.buf_new()
-    var laden: x509.Store = x509.store_new()
+    var storage: rt.Buf = rt.buf_new()
+    var load: x509.Store = x509.store_new()
     var vorgabe: [u8; 20] = "/etc/ssl/roots.pem\0\0"
     var wp: u64 = (*z).wurzeln
     if wp == 0 {
         wp = (&vorgabe[0]) as u64
     }
-    if rt.read_file(wp, &speicher) {
-        // RUNDE ROTABSCHNITTE: `storage` GIBT ES HIER NICHT.
-        // Der Puffer heisst vier Zeilen weiter oben `speicher`
-        // (`var speicher: rt.Buf`), und `rt.read_file` fuellt genau
-        // den. Die Umbenennung der Runde ENGLISCH ETAPPE 7 hat die
-        // beiden BENUTZUNGEN mitgenommen, die DEKLARATION aber nicht
-        // -- seitdem sagt der Uebersetzer zweimal
-        // "unknown name 'storage'", und kernel/app/account.fi liess
-        // sich gar nicht mehr uebersetzen (es importiert knetz).
-        let _n: usize = x509.store_load_pem(&laden, speicher.ptr,
-            speicher.len)
+    if rt.read_file(wp, &storage) {
+        let _n: usize = x509.store_load_pem(&load, storage.ptr,
+            storage.len)
     }
     var t: tls.Tls = tls.tls_new()
-    let _i: bool = tls.tls_init(&t, c, &laden, (*z).name, (*z).namelen,
+    let _i: bool = tls.tls_init(&t, c, &load, (*z).name, (*z).namelen,
         now_secs())
     var mist: bool = false
     var berichte: rt.Buf = rt.buf_new()
     let _h: bool = tls.tls_handshake(&t)
     catch | e | tls.tls_fail_into(&berichte, e, &mist)
-    pruefung = tls.tls_verify_reason(&t)
+    check = tls.tls_verify_reason(&t)
     if mist {
         (*a).fail_code = F_TLS
         rt.buf_free(&berichte)
-        rt.buf_free(&speicher)
+        rt.buf_free(&storage)
         return false
     }
     var wfehl: bool = false
     let _w: bool = tls.tls_write(&t, (*req).ptr, (*req).len)
     catch | e | tls.tls_fail_into(&berichte, e, &wfehl)
     if wfehl {
-        (*a).fail_code = F_SENDEN
+        (*a).fail_code = F_SEND
         tls.tls_close(&t)
         tls.tls_free(&t)
         rt.buf_free(&berichte)
-        rt.buf_free(&speicher)
+        rt.buf_free(&storage)
         return false
     }
     var happen: [u8; 4096] = [0; 4096]
@@ -841,7 +732,7 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     tls.tls_close(&t)
     tls.tls_free(&t)
     rt.buf_free(&berichte)
-    rt.buf_free(&speicher)
+    rt.buf_free(&storage)
     if (*roh).len == 0 {
         (*a).fail_code = F_READ
         return false
@@ -849,14 +740,6 @@ fn over_tls(c: *mut net.Conn, z: *mut Target, req: *mut rt.Buf,
     return true
 }
 
-// ROUND ROADMAP-5 (K-008): IS THE ANSWER COMPLETE? Up to this round
-// both readers below read until the server closed the connection. A
-// server that keeps the connection open in spite of `Connection: close`
-// -- CUPS' `ippeveprinter` does exactly that -- then costs the full
-// 20-second timeout per request. HTTP/1.1 says when a message ends
-// (RFC 9112, 6.3): after `Content-Length` octets of body, or after the
-// last chunk. Without either, the end of the connection is the end, as
-// before.
 fn complete(roh: *mut rt.Buf) -> bool {
     let p: u64 = (*roh).ptr
     let n: usize = (*roh).len
@@ -877,15 +760,14 @@ fn complete(roh: *mut rt.Buf) -> bool {
     let kab: usize = trenn + 4
     var w: [u8; 8] = "chunked\0"
     if word_in(p, trenn, (&w[0]) as u64, 7) {
-        // the last chunk: "0\r\n\r\n" at the very end
         return n >= kab + 5 && rt.ld8(p, n - 5) == 48 as u8
             && rt.ld8(p, n - 4) == 13 as u8 && rt.ld8(p, n - 3) == 10 as u8
             && rt.ld8(p, n - 2) == 13 as u8 && rt.ld8(p, n - 1) == 10 as u8
     }
-    var kopf: rt.Buf = rt.Buf { ptr: p, len: trenn + 2, cap: trenn + 2 }
+    var head: rt.Buf = rt.Buf { ptr: p, len: trenn + 2, cap: trenn + 2 }
     var cl: [u8; 15] = "content-length\0"
     var v: rt.Buf = rt.buf_new()
-    if !header_find(&kopf, (&cl[0]) as u64, 14, &v) {
+    if !header_find(&head, (&cl[0]) as u64, 14, &v) {
         rt.buf_free(&v)
         return false
     }
@@ -900,7 +782,7 @@ fn open(c: *mut net.Conn, req: *mut rt.Buf, roh: *mut rt.Buf,
     let _w: usize = net.write_all(c, (*req).ptr, (*req).len)
     catch bad_len(&wfehl)
     if wfehl {
-        (*a).fail_code = F_SENDEN
+        (*a).fail_code = F_SEND
         return false
     }
     var happen: [u8; 4096] = [0; 4096]

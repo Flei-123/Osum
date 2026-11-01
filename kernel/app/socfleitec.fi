@@ -1,95 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/app/socfleitec.fi -- THE FLEITEC PROVIDER OF THE SOCIAL LAYER.
-//
-// One provider behind the provider interface of `/bin/social`
-// (docs/SOCIAL.md). It speaks for the device's Fleitec account to
-// fleikontakte (the address book of FirnChat / chat.fleitec.com) with a
-// DEVICE ACCESS TOKEN ("fkz1.<uid>.<64 hex>", or fkt1/fkm1 alike, made in the profile or with
-// POST /api/kontakte/zugang). That token can read the book, set status
-// and activity and ask/accept/decline/end friendships -- nothing that
-// changes who the person is. The service never sees the provider's
-// protocol; it runs this program and reads lines.
-//
-// THE PROVIDER INTERFACE, version 1 (the same for every provider):
-//
-//     socfleitec v1 hello
-//     socfleitec v1 contacts
-//     socfleitec v1 search <text>
-//     socfleitec v1 relation <request|accept|decline|withdraw|remove> <id>
-//     socfleitec v1 presence <online|away|dnd|invisible> [text ...]
-//     socfleitec v1 activity [-j] [name ...]     (no name = clear; -j: friends may join)
-//     socfleitec v1 alive
-//     socfleitec v1 games                        (the list of games -> /etc/social/games.tsv, see GAMES)
-//     socfleitec v1 login [token <fkz1|fkm1|fkt1...>]      (pair this device, see LOGIN)
-//     socfleitec v1 send <id> <text ...>         (end to end, see CHAT)
-//     socfleitec v1 inbox                        (what came since the last call)
-//     socfleitec v1 invite <id> <invite|join> <target|-> <name ...>
-//     socfleitec v1 invites
-//     socfleitec v1 answer <invite id> <yes|no> [target]
-//
-// The service passes `-c<conf>` (one word) right after `v1` when /etc/social/
-// providers names a configuration -- ONE line there is ONE ACCOUNT, so two
-// Fleitec accounts are two lines with two files; nothing in here assumes
-// there is only one.
-//
-// Output, one item per line, fields separated by TAB:
-//
-//     provider fleitec 1                          (hello)
-//     caps contacts search relation presence activity alive
-//     c <id> <relation> <presence> <name> <handle> <status text> <activity> <since_s> <chat> <joinable 0|1>
-//     m <id> <unix time> <in|out> <text>          (inbox)
-//     i <invite id> <id> <in|out> <invite|join> <open|accepted|declined> <age_s> <target> <name>
-//     pair <code> <valid_s>                       (login: type the code into the account)
-//     account <id> <name>                         (login done / hello)
-//     ok <n>             the last line when it worked
-//     err <code> <text>  the last line when not; code = offline | denied | bad | http
-//
-// Exit code: 0 ok, 1 err, 2 offline, 3 denied, 4 pending (login shows a
-// code to type in). relation is
-// friend|incoming|outgoing|blocked|none, presence online|away|dnd|
-// offline|unknown -- social v1's words (FirnChat src/social/fleitec.fi
-// says the same for the web page).
-//
-// The configuration, /etc/social/fleitec.conf, one field per line:
-//
-//     url=https://<ipv4>[:port]     where fleikontakte answers /api/kontakte
-//     name=chat.fleitec.com         what the certificate must carry (SNI)
-//     roots=/etc/ssl/roots.pem      the trust store
-//     token=fkz1|fkt1.<uid>.<64 hex> the device access token (fkm1 too)
-//     relay=<host>:<port>           the FirnChat relay (chat and pairing); host is
-//                                   an IPv4 number or a DNS name (A record, r126)
-//
-// Next to it, named after it: <conf>.key (this device's x25519 key, 0600),
-// <conf>.pin (the relay's key, pinned on first use), <conf>.seq (the next
-// sequence number -- spent BEFORE a frame goes out, a nonce is never used
-// twice), <conf>.seen (the replay window per sender).
-//
-// LOGIN. `login` makes the device key if there is none and asks the relay
-// ("zugang=1"). Not paired yet: the address book answers with an eight
-// digit code, printed as `pair`, exit 4 -- the person types it into her
-// profile ("Gerät hinzufügen"). Asked again after that, the answer carries
-// a device access token made FOR THIS KEY; it is written into the
-// configuration and `account` is printed. `login token <fkz1...>` takes a
-// token made by hand in the profile instead (no chat then until paired).
-//
-// CHAT. A message is sealed for every device of the person (their keys
-// come with the book, only where she may be written to) and as an
-// own-device copy for this account's other devices, so the browser shows
-// what was written here. `inbox` fetches the own box from the relay and
-// opens what it can: from a person in the book an `in` line, an own
-// device's copy an `out` line; read marks and strangers are dropped.
-//
-// GAMES. `games` asks fleikontakte for its list of games ("GET
-// /api/kontakte/spiele?os=l": the rows for OrientOS' program names, a server
-// that does not know `os` sends all rows) and writes /etc/social/games.tsv --
-// the file the Melder (/bin/melder) matches the running programs against.
-// Only rows the Melder can use are kept: os `l`, an executable, a name and
-// optional command-line text (column 4, r146: SYS_PSTAT carries the command
-// line, the Melder checks it); the icon column goes. Prints `ok <n>` (n = rows written). The service runs it from time to
-// time (caps `games`).
-//
-// NO FLOATING POINT anywhere (kernel/app/kjson.fi says why: ring 3 has
-// no SSE here), NO COOKIES (kernel/app/knetz.fi says why).
 
 import std.io
 import std.rt
@@ -104,7 +13,6 @@ const S_WRITE: i64 = 1
 const S_OPEN: i64 = 2
 const S_CLOSE: i64 = 3
 
-// ------------------------------------------------------------ small tools
 
 fn out(p: u64, n: usize) {
     syscall(S_WRITE, 1, p as i64, n as i64, 0, 0, 0)
@@ -118,7 +26,6 @@ fn outb(b: *mut rt.Buf) {
     out((*b).ptr, (*b).len)
 }
 
-// a field of a contact line: TAB and line ends become spaces
 fn field(b: *mut rt.Buf, p: u64, n: usize) {
     rt.buf_push(b, 9 as u8)
     var i: usize = 0
@@ -161,9 +68,6 @@ fn eqn(p: u64, n: usize, s: str) -> bool {
     return true
 }
 
-// the token family of fleikontakte: fkz1 (device), fkm1 (reporter), fkt1
-// (scope presets; r51). All three look like "<tag>.<uid>.<64 hex>"; the
-// server checks scopes, the device only needs the shape.
 fn token_tag_ok(p: u64) -> bool {
     return eqn(p, 5, "fkz1.") || eqn(p, 5, "fkm1.") || eqn(p, 5, "fkt1.")
 }
@@ -201,7 +105,6 @@ fn read_file(path: u64, into: *mut rt.Buf) -> bool {
     return true
 }
 
-// ------------------------------------------------------ the configuration
 
 struct Conf {
     url: rt.Buf,
@@ -211,8 +114,6 @@ struct Conf {
     relay: rt.Buf,
 }
 
-// "key=value" lines; every value gets a terminating zero (knetz wants
-// C strings for name and roots)
 fn conf_value(p: u64, n: usize, key: str, into: *mut rt.Buf) {
     var i: usize = 0
     while i < n {
@@ -234,7 +135,7 @@ fn conf_value(p: u64, n: usize, key: str, into: *mut rt.Buf) {
     rt.buf_push(into, 0 as u8)
 }
 
-static mut g_conf: u64 = 0 // -c <file>, for a test on the host
+static mut g_conf: u64 = 0
 
 fn conf_read(c: *mut Conf) -> bool {
     var f: rt.Buf = rt.buf_new()
@@ -261,10 +162,7 @@ fn conf_read(c: *mut Conf) -> bool {
     return (*c).url.len > 1 && (*c).token.len > 1
 }
 
-// --------------------------------------------------------------- one call
 
-// A request to fleikontakte. Returns 0 (200), 2 (no connection), 3 (the
-// token was refused), 1 (anything else; the code is in (*a).code).
 fn call(c: *mut Conf, method: str, path: u64, pn: usize, body: u64, bn: usize,
     a: *mut knetz.Reply) -> i32 {
     var z: knetz.Target = knetz.target_new()
@@ -276,7 +174,6 @@ fn call(c: *mut Conf, method: str, path: u64, pn: usize, body: u64, bn: usize,
         &z) {
         return 1
     }
-    // the path of the URL (a prefix like /x) goes in front of the call
     var full: rt.Buf = rt.buf_new()
     var i: usize = 0
     var slashes: usize = 0
@@ -329,7 +226,6 @@ fn failed(r: i32, a: *mut knetz.Reply) -> i32 {
     return 1
 }
 
-// ---------------------------------------------------------------- words
 
 fn relation_word(p: u64, n: usize) -> str {
     if eqn(p, n, "freunde") {
@@ -363,7 +259,6 @@ fn presence_word(p: u64, n: usize) -> str {
     return "unknown"
 }
 
-// the string at obj.key (empty when missing)
 fn txt(d: *mut kjson.Json, obj: u32, key: str, into: *mut rt.Buf) {
     rt.buf_clear(into)
     var k: [u8; 24] = [0; 24]
@@ -380,10 +275,9 @@ fn sub(d: *mut kjson.Json, obj: u32, key: str) -> u32 {
     return kjson.json_get_c(d, obj, (&k[0]) as u64)
 }
 
-// One item of /liste or /suche as a contact line.
 fn contact_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
     var v: rt.Buf = rt.buf_new()
-    rt.buf_push(b, 99 as u8) // 'c'
+    rt.buf_push(b, 99 as u8)
     txt(d, it, "konto", &v)
     if v.len == 0 {
         txt(d, it, "id", &v)
@@ -406,7 +300,7 @@ fn contact_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
     field(b, v.ptr, v.len)
     txt(d, pr, "status_text", &v)
     field(b, v.ptr, v.len)
-    let ak: u32 = sub(d, pr, "aktivitaet")  // DRAHT: JSON key of the server
+    let ak: u32 = sub(d, pr, "aktivitaet")
     txt(d, ak, "name", &v)
     field(b, v.ptr, v.len)
     rt.buf_clear(&v)
@@ -421,9 +315,8 @@ fn contact_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
     }
     rt.buf_push_dec_u64(&v, secs as u64)
     field(b, v.ptr, v.len)
-    // the FirnChat key of the person (the chat goes there, E2E)
     rt.buf_clear(&v)
-    let gs: u32 = sub(d, it, "geraete")  // DRAHT: JSON key of the server
+    let gs: u32 = sub(d, it, "geraete")
     if gs != kjson.JSON_NONE && kjson.json_kind(d, gs) == kjson.JSON_ARRAY {
         var g: u32 = kjson.json_child(d, gs)
         var art: rt.Buf = rt.buf_new()
@@ -450,7 +343,6 @@ fn contact_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
     rt.buf_free(&v)
 }
 
-// the "items" of an answer as contact lines
 fn items_out(a: *mut knetz.Reply) -> i32 {
     var d: kjson.Json = kjson.json_new()
     if !kjson.json_parse(&d, (*a).koerper.ptr, (*a).koerper.len) {
@@ -477,7 +369,6 @@ fn items_out(a: *mut knetz.Reply) -> i32 {
     return 0
 }
 
-// the words from argument `from` on, joined with spaces
 fn rest_of(args: *mut rt.Buf, n: usize, from: usize, into: *mut rt.Buf) {
     var i: usize = from
     while i < n {
@@ -490,7 +381,6 @@ fn rest_of(args: *mut rt.Buf, n: usize, from: usize, into: *mut rt.Buf) {
     }
 }
 
-// ------------------------------------------------------------- the verbs
 
 fn v_contacts(c: *mut Conf) -> i32 {
     var a: knetz.Reply = knetz.reply_new()
@@ -569,7 +459,7 @@ fn v_relation(c: *mut Conf, verb: u64, id: u64) -> i32 {
         return fin(1, "bad", "relation: request|accept|decline|withdraw|remove")
     }
     var body: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var w: kjson.Writer = kjson.writer_new(&body)
     var k: [u8; 6] = "konto\0"
     kjson.field(&w, (&k[0]) as u64, id, rt.c_length(id))
     kjson.field_free(&w)
@@ -592,7 +482,7 @@ fn v_presence(c: *mut Conf, state: u64, text: *mut rt.Buf) -> i32 {
         return fin(1, "bad", "presence: online|away|dnd|invisible")
     }
     var body: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var w: kjson.Writer = kjson.writer_new(&body)
     var k1: [u8; 7] = "status\0"
     var k2: [u8; 12] = "status_text\0"
     kjson.field(&w, (&k1[0]) as u64, st.p as u64, st.n)
@@ -605,7 +495,7 @@ fn v_presence(c: *mut Conf, state: u64, text: *mut rt.Buf) -> i32 {
 
 fn v_activity(c: *mut Conf, name: *mut rt.Buf, join: bool) -> i32 {
     var body: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var w: kjson.Writer = kjson.writer_new(&body)
     var k: [u8; 6] = "spiel\0"
     kjson.field(&w, (&k[0]) as u64, (*name).ptr, (*name).len)
     kjson.field_free(&w)
@@ -625,9 +515,7 @@ fn v_alive(c: *mut Conf) -> i32 {
     return r
 }
 
-// ------------------------------------------------------------------ GAMES
 
-// the first TAB in p[from..end), or end
 fn tab_at(p: u64, from: usize, end: usize) -> usize {
     var i: usize = from
     while i < end && rt.ld8(p, i) != 9 as u8 {
@@ -636,7 +524,6 @@ fn tab_at(p: u64, from: usize, end: usize) -> usize {
     return i
 }
 
-// one list row p[0..end) -> "l<TAB>exe<TAB>name[<TAB>text]<LF>" in o, when the Melder can use it
 fn game_row(p: u64, end: usize, o: *mut rt.Buf) -> bool {
     let t1: usize = tab_at(p, 0, end)
     if t1 != 1 || end < 6 || rt.ld8(p, 0) != 108 as u8 {
@@ -652,7 +539,6 @@ fn game_row(p: u64, end: usize, o: *mut rt.Buf) -> bool {
     }
     var row_end: usize = t3
     if t3 < end {
-        // column 4 = command-line text (r146: the kernel tells the command line now); column 5 (icon) goes
         let t4: usize = tab_at(p, t3 + 1, end)
         if t4 - (t3 + 1) > 60 {
             return false
@@ -697,7 +583,6 @@ fn v_games(c: *mut Conf) -> i32 {
         i = e2 + 1
     }
     knetz.reply_free(&a)
-    // world-readable: the Melder runs as another user than the service
     let ok: bool = write_file_mode("/etc/social/games.tsv\0".p as u64, o.ptr, o.len, 420)
     rt.buf_free(&o)
     if !ok {
@@ -712,12 +597,10 @@ fn v_games(c: *mut Conf) -> i32 {
     return 0
 }
 
-// ---------------------------------------------------------- the arguments
 
 static mut g_args: u64 = 0
 static mut g_shift: usize = 0
 
-// argument i, counted as if there were no "-c <file>"
 fn arg(i: usize) -> u64 {
     if i >= 2 {
         return rt.arg_ptr(g_args, i + g_shift)
@@ -734,7 +617,6 @@ fn main(start: u64) -> i32 {
         n = n - 2
     } else if n >= 3 && eqn(rt.arg_ptr(start, 2), 2, "-c")
         && rt.c_length(rt.arg_ptr(start, 2)) > 2 {
-        // "-c<conf>" in one word -- what the service passes (exec takes 8)
         g_conf = rt.arg_ptr(start, 2) + 2
         g_shift = 1
         n = n - 1
@@ -830,10 +712,7 @@ fn main(start: u64) -> i32 {
     return fin(1, "bad", "unknown verb")
 }
 
-// ================================================================ LOGIN,
-// CHAT AND INVITES (Fleitec All-in-One r35/r36; docs/SOCIAL.md)
 
-// `,"key":true` into a JSON object that is already closed
 fn raw_bool(b: *mut rt.Buf, key: str, v: bool) {
     if (*b).len > 0 && rt.ld8((*b).ptr, (*b).len - 1) == 125 as u8 {
         (*b).len = (*b).len - 1
@@ -852,7 +731,6 @@ fn raw_bool(b: *mut rt.Buf, key: str, v: bool) {
     rt.buf_push(b, 125 as u8)
 }
 
-// the configuration's path (C string)
 fn conf_path() -> u64 {
     if g_conf != 0 {
         return g_conf
@@ -860,7 +738,6 @@ fn conf_path() -> u64 {
     return "/etc/social/fleitec.conf\0".p as u64
 }
 
-// "<conf><suffix>\0" into b
 fn side(b: *mut rt.Buf, suffix: str) {
     rt.buf_clear(b)
     let p: u64 = conf_path()
@@ -873,7 +750,6 @@ fn write_all_file(path: u64, p: u64, n: usize) -> bool {
     return write_file_mode(path, p, n, 384)
 }
 
-// O_WRONLY | O_CREAT | O_TRUNC with the mode (384 = 0600, 420 = 0644)
 fn write_file_mode(path: u64, p: u64, n: usize, mode: i64) -> bool {
     let fd: i64 = syscall(S_OPEN, path as i64, 1 | 64 | 512, mode, 0, 0, 0)
     if fd < 0 {
@@ -892,7 +768,6 @@ fn write_file_mode(path: u64, p: u64, n: usize, mode: i64) -> bool {
     return true
 }
 
-// the configuration with `key=value` set (the line replaced or added)
 fn conf_set(key: str, v: u64, vn: usize) -> bool {
     var f: rt.Buf = rt.buf_new()
     let _r: bool = read_file(conf_path(), &f)
@@ -932,7 +807,6 @@ fn conf_set(key: str, v: u64, vn: usize) -> bool {
     return ok
 }
 
-// "account <uid>" out of the token's middle part (no network)
 fn account_line(c: *mut Conf) {
     let tp: u64 = (*c).token.ptr
     let tn: usize = (*c).token.len
@@ -961,7 +835,6 @@ fn digits_at(p: u64, n: usize, at: *mut usize) -> u64 {
     return v
 }
 
-// relay=a.b.c.d:port (a number)
 fn relay_ipv4(c: *mut Conf, addr: *mut u32, port: *mut u16) -> bool {
     let p: u64 = (*c).relay.ptr
     if (*c).relay.len <= 1 {
@@ -999,10 +872,6 @@ fn relay_ipv4(c: *mut Conf, addr: *mut u32, port: *mut u16) -> bool {
     return true
 }
 
-// relay=name:port (r34/r126): the host is a DNS name, resolved like ziel=/url=
-// (knetz.target_resolve -> libc.dns.resolve_a, IPv4 only, 4-slot 60 s cache).
-// 0 resolved, 1 not a valid name:port (a broken number such as 10.9.0 never
-// goes to the resolver), 2 the name does not resolve.
 fn relay_name(c: *mut Conf, addr: *mut u32, port: *mut u16) -> i32 {
     let p: u64 = (*c).relay.ptr
     if (*c).relay.len <= 1 {
@@ -1043,7 +912,6 @@ fn relay_name(c: *mut Conf, addr: *mut u32, port: *mut u16) -> i32 {
     return 0
 }
 
-// 0 ready, 1 not configured / not valid, 2 the name does not resolve
 fn relay_addr(c: *mut Conf, addr: *mut u32, port: *mut u16) -> i32 {
     if relay_ipv4(c, addr, port) {
         return 0
@@ -1051,7 +919,6 @@ fn relay_addr(c: *mut Conf, addr: *mut u32, port: *mut u16) -> i32 {
     return relay_name(c, addr, port)
 }
 
-// the device key (secret || public), made on first use
 fn device_key(k64: u64) -> bool {
     var kp: rt.Buf = rt.buf_new()
     side(&kp, ".key")
@@ -1060,8 +927,6 @@ fn device_key(k64: u64) -> bool {
     return ok
 }
 
-// Connects to the relay with the device key; the relay's key is pinned on
-// first use. 0 open, else the exit code to give (2 offline, 1 other).
 fn relay_up(c: *mut Conf, r: *mut fcrelay.Relay) -> i32 {
     var addr: u32 = 0
     var port: u16 = 0
@@ -1124,12 +989,6 @@ fn v_login_token(c: *mut Conf, tok: u64) -> i32 {
     return fin(0, "", "")
 }
 
-// `login broker <JWT>` (r115b): a device that signed in at the broker (konto,
-// anb_fleitec, device flow, scope fleitec.account) holds an EdDSA access
-// token. The address book wants fkt1.<account>.<64 hex>. firnchat-web swaps
-// the one for the other (POST /api/kontakte/zugang-broker, the broker token
-// as Bearer). The JWT is only ever used as the Bearer header: never printed,
-// never logged, never written to the configuration (only the fkt1 is).
 fn jwt_shape_ok(p: u64) -> bool {
     let n: usize = rt.c_length(p)
     if n < 20 || n > 3900 {
@@ -1159,7 +1018,6 @@ fn v_login_broker(c: *mut Conf, jwt: u64) -> i32 {
     if (*c).url.len <= 1 {
         return fin(3, "denied", "no configuration with url= (the address book to swap at)")
     }
-    // the JWT goes in as the one bearer of this single call, in memory only
     let n: usize = rt.c_length(jwt)
     rt.buf_clear(&(*c).token)
     rt.buf_push_bytes(&(*c).token, jwt, n)
@@ -1167,7 +1025,6 @@ fn v_login_broker(c: *mut Conf, jwt: u64) -> i32 {
     var a: knetz.Reply = knetz.reply_new()
     let r: i32 = call(c, "POST", "/api/kontakte/zugang-broker".p as u64, 27,
         "{}".p as u64, 2, &a)
-    // wipe our copy of the JWT right away
     var w: usize = 0
     while w < (*c).token.len {
         rt.st8((*c).token.ptr, w, 0 as u8)
@@ -1194,8 +1051,6 @@ fn v_login_broker(c: *mut Conf, jwt: u64) -> i32 {
     txt(&d, kjson.json_root(&d), "token", &v)
     kjson.json_free(&d)
     knetz.reply_free(&a)
-    // only the fkt1 the swap is documented to return; same shape as
-    // `login token` wants
     if v.len < 6 + 64 + 1 || !eqn(v.ptr, 5, "fkt1.") || !token_tag_ok(v.ptr) {
         rt.buf_free(&v)
         return fin(1, "bad", "no fkt1 token in the answer")
@@ -1212,9 +1067,6 @@ fn v_login_broker(c: *mut Conf, jwt: u64) -> i32 {
     return fin(0, "", "")
 }
 
-// `login broker -f <file>`: the JWT out of a file (the shell of the device
-// cuts a line at 255 octets, a JWT is longer; and a file keeps it out of the
-// argument list). Trailing blanks and line ends are cut.
 fn v_login_broker_file(c: *mut Conf, path: u64) -> i32 {
     var f: rt.Buf = rt.buf_new()
     if !read_file(path, &f) {
@@ -1239,8 +1091,6 @@ fn v_login_broker_file(c: *mut Conf, path: u64) -> i32 {
     return r
 }
 
-// `login broker -s`: the JWT from stdin (what `konto anmelden --exchange`
-// pipes in). First line only; the buffer is wiped after the call.
 fn v_login_broker_stdin(c: *mut Conf) -> i32 {
     var f: rt.Buf = rt.buf_new()
     var chunk: [u8; 512] = [0; 512]
@@ -1322,7 +1172,7 @@ fn v_login(c: *mut Conf) -> i32 {
     rt.buf_push_bytes(&b, v.ptr + 4, 4)
     rt.buf_push(&b, 9 as u8)
     var da: bool = false
-    var kgl: [u8; 8] = "gueltig\0"  // DRAHT: JSON key of the server
+    var kgl: [u8; 8] = "gueltig\0"
     var secs: i64 = kjson.int(&d, root, (&kgl[0]) as u64, &da)
     if secs < 0 {
         secs = 0
@@ -1333,7 +1183,6 @@ fn v_login(c: *mut Conf) -> i32 {
     return fin(4, "pending", "type the code into the profile: Gerät hinzufügen")
 }
 
-// a field without the leading TAB
 fn field2(b: *mut rt.Buf, p: u64, n: usize) {
     var i: usize = 0
     while i < n {
@@ -1346,17 +1195,14 @@ fn field2(b: *mut rt.Buf, p: u64, n: usize) {
     }
 }
 
-// ---------------------------------------------------- whose key is whose
 
 const KEYS_MAX: usize = 256
 
-// Every FirnChat key the book shows (the devices of the people) with the
-// account it belongs to; and the own account's keys out of the profile.
 struct Keys {
-    k: rt.Buf, // 32 octets each
-    who: rt.Buf, // the account, zero-terminated, 96 octets each
+    k: rt.Buf,
+    who: rt.Buf,
     n: usize,
-    own: rt.Buf, // 32 octets each
+    own: rt.Buf,
     on: usize,
     uid: [u8; 96],
 }
@@ -1396,7 +1242,6 @@ fn key_eq(a: u64, b: u64) -> bool {
     return true
 }
 
-// the account of key, or 0
 fn keys_who(ks: *mut Keys, key: u64) -> u64 {
     var i: usize = 0
     while i < (*ks).n {
@@ -1419,11 +1264,9 @@ fn keys_own(ks: *mut Keys, key: u64) -> bool {
     return false
 }
 
-// the devices ("geraete": [{art, wert}]) of a JSON object: fc keys
-// (and fa, the retired ones, when `alt` -- still an address of the person)
 fn each_key(d: *mut kjson.Json, obj: u32, alt: bool, ks: *mut Keys, who: u64,
     wn: usize, own: bool) {
-    let gs: u32 = sub(d, obj, "geraete")  // DRAHT: JSON key of the server
+    let gs: u32 = sub(d, obj, "geraete")
     if gs == kjson.JSON_NONE || kjson.json_kind(d, gs) != kjson.JSON_ARRAY {
         return
     }
@@ -1452,7 +1295,6 @@ fn each_key(d: *mut kjson.Json, obj: u32, alt: bool, ks: *mut Keys, who: u64,
     rt.buf_free(&w)
 }
 
-// The book and the own profile into `ks`. 0, or the exit code given.
 fn keys_load(c: *mut Conf, ks: *mut Keys, alt: bool) -> i32 {
     var a: knetz.Reply = knetz.reply_new()
     let r: i32 = call(c, "GET", "/api/kontakte/liste".p as u64, 19, 0, 0, &a)
@@ -1504,10 +1346,7 @@ fn keys_load(c: *mut Conf, ks: *mut Keys, alt: bool) -> i32 {
     return 0
 }
 
-// --------------------------------------------------- sequence numbers
 
-// `k` numbers, spent at once: the file says the next one afterwards.
-// 0 = could not be written (then nothing may be sealed).
 fn seq_take(k: u64) -> u64 {
     var sp: rt.Buf = rt.buf_new()
     side(&sp, ".seq")
@@ -1533,7 +1372,6 @@ fn seq_take(k: u64) -> u64 {
     return next
 }
 
-// ----------------------------------------------------------------- send
 
 fn v_send(c: *mut Conf, id: u64, text: *mut rt.Buf) -> i32 {
     if (*text).len == 0 || (*text).len > 4000 {
@@ -1545,7 +1383,6 @@ fn v_send(c: *mut Conf, id: u64, text: *mut rt.Buf) -> i32 {
         return kl
     }
     let idn: usize = rt.c_length(id)
-    // the person's devices
     var tg: rt.Buf = rt.buf_new()
     var tn: usize = 0
     var i: usize = 0
@@ -1633,12 +1470,11 @@ fn rt_eq(a: u64, b: u64, n: usize) -> bool {
     return true
 }
 
-// ------------------------------------------------ the replay window
 
 const SEEN_MAX: usize = 64
 
 struct Seen {
-    k: [u8; 2048], // SEEN_MAX * 32
+    k: [u8; 2048],
     top: [u64; 64],
     mask: [u64; 64],
     n: usize,
@@ -1693,8 +1529,6 @@ fn seen_save(s: *mut Seen) {
     rt.buf_free(&o)
 }
 
-// Fresh? Then it is marked. A sender never seen: fresh, and a slot is
-// made for it (the oldest slot goes when all are taken).
 fn seen_take(s: *mut Seen, key: u64, seq: u64) -> bool {
     var i: usize = 0
     while i < (*s).n {
@@ -1721,7 +1555,6 @@ fn seen_take(s: *mut Seen, key: u64, seq: u64) -> bool {
     }
     var slot: usize = (*s).n
     if slot >= SEEN_MAX {
-        // the oldest goes: shift everything down by one
         var j: usize = 0
         while j + 1 < SEEN_MAX {
             var q: usize = 0
@@ -1747,7 +1580,6 @@ fn seen_take(s: *mut Seen, key: u64, seq: u64) -> bool {
     return true
 }
 
-// ---------------------------------------------------------------- inbox
 
 fn m_line(b: *mut rt.Buf, who: u64, stamp: u64, dir: str, p: u64, n: usize) {
     rt.buf_push_bytes(b, "m\t".p as u64, 2)
@@ -1778,7 +1610,7 @@ fn open_frames(raw: *mut rt.Buf, ks: *mut Keys, sec: u64, mine: u64, sn: *mut Se
         let own: bool = keys_own(ks, snd) || key_eq(snd, mine)
         let who: u64 = keys_who(ks, snd)
         if !own && who == 0 {
-            *dropped = *dropped + 1 // somebody not in the book
+            *dropped = *dropped + 1
             continue
         }
         var s: fcrelay.Sess = fcrelay.Sess { tx: [0; 32], rx: [0; 32], ok: false }
@@ -1797,7 +1629,6 @@ fn open_frames(raw: *mut rt.Buf, ks: *mut Keys, sec: u64, mine: u64, sn: *mut Se
         }
         let tn: usize = pn - 16
         if own {
-            // an own device's copy: 1 || anchor || text; 2 = a read mark
             if (fl & fcrelay.F_SYNC) != 0 as u8 && tn > fcrelay.SYNC_HEAD
                 && rt.ld8(pl.ptr, 0) == 1 as u8 {
                 let anc: u64 = keys_who(ks, pl.ptr + 1)
@@ -1812,7 +1643,7 @@ fn open_frames(raw: *mut rt.Buf, ks: *mut Keys, sec: u64, mine: u64, sn: *mut Se
                 *dropped = *dropped + 1
             }
         } else if (fl & fcrelay.F_SYNC) != 0 as u8 {
-            *dropped = *dropped + 1 // only my own devices speak for me
+            *dropped = *dropped + 1
         } else {
             m_line(out, who, fcrelay.fr_stamp(f), "in", pl.ptr, tn)
             *lines = *lines + 1
@@ -1974,7 +1805,6 @@ fn v_watch(c: *mut Conf) -> i32 {
     return code
 }
 
-// -------------------------------------------------------------- invites
 
 fn state_word(p: u64, n: usize) -> str {
     if eqn(p, n, "angenommen") {
@@ -1986,10 +1816,9 @@ fn state_word(p: u64, n: usize) -> str {
     return "open"
 }
 
-// {"id","konto","richtung","art","name","status","ziel","alter_s"} as i line
 fn i_line(d: *mut kjson.Json, it: u32, b: *mut rt.Buf) {
     var v: rt.Buf = rt.buf_new()
-    rt.buf_push(b, 105 as u8) // 'i'
+    rt.buf_push(b, 105 as u8)
     txt(d, it, "id", &v)
     field(b, v.ptr, v.len)
     txt(d, it, "konto", &v)
@@ -2068,7 +1897,7 @@ fn v_invite(c: *mut Conf, id: u64, kind: u64, target: u64, name: *mut rt.Buf) ->
         return fin(1, "bad", "invite: invite|join")
     }
     var body: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var w: kjson.Writer = kjson.writer_new(&body)
     var k1: [u8; 6] = "konto\0"
     var k2: [u8; 4] = "art\0"
     var k3: [u8; 5] = "name\0"
@@ -2108,7 +1937,7 @@ fn v_answer(c: *mut Conf, inv: u64, yn: u64, target: u64) -> i32 {
         return fin(1, "bad", "answer: yes|no")
     }
     var body: rt.Buf = rt.buf_new()
-    var w: kjson.Schreiber = kjson.writer_new(&body)
+    var w: kjson.Writer = kjson.writer_new(&body)
     var k1: [u8; 3] = "id\0"
     var k2: [u8; 5] = "ziel\0"
     kjson.field(&w, (&k1[0]) as u64, inv, rt.c_length(inv))
