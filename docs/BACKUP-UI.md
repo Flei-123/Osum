@@ -92,6 +92,16 @@ it twice. This is not a novel design; it is the one that works.
     S-sicherung2       another one, sharing all of PACK
 ```
 
+A file with more than 256 blocks continues on `+` lines, so no snapshot
+line grows past ~17 KiB and restore and verify read a file of any size
+block by block:
+
+```
+/big.bin    100644  6291456  <256 hashes comma separated>
++<256 more hashes>
++<the rest>
+```
+
 A snapshot reads like this:
 
 ```
@@ -198,8 +208,8 @@ possible time.
   insert at the front and every block after it is new. Measured at its
   worst in `docs/THEFT.md` § 6. Content-defined chunking is the fix and
   is not in this round.
-* **At most 1024 distinct blocks per run** (4 MiB of distinct data), and
-  directory nesting at most 8 deep. The program says so and fails rather
+* **At most 16384 distinct blocks per run** (64 MiB of distinct data; the
+  index is a hash table), and directory nesting at most 8 deep. The program says so and fails rather
   than writing a store it cannot describe.
 
 ### When the disk fills up
