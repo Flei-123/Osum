@@ -180,7 +180,7 @@ else
     ok "CONTROL: a ring outside the pool -- the map checker raises the alarm"
 fi
 kopie_kernel "$GG"
-sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb/usb.fi"
+sed -i 's/^const DESC_OFF: u64 = 0x56000/const DESC_OFF: u64 = 0x55000/' "$GG/usb/usb/usbbase.fi"
 if python3 tools/kernel/memmap.py "$GG" > "$TMPD/karte-gg2.txt" 2>&1; then
     bad "CONTROL: DESC_OFF placed on the transfer rings, checker is silent"
 else

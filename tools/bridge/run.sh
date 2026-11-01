@@ -103,7 +103,7 @@ JSSZ=$(stat -c%s "$TMPD/w0/jsig.elf")
 zahl "jarvisd auf der Platte, in Oktetten" "$JDSZ" le 2400000
 zahl "jsig auf der Platte, in Oktetten" "$JSSZ" le 400000
 
-ZEILEN=$(cat kernel/app/jarvisd.fi kernel/user/jsig.fi \
+ZEILEN=$(bash tools/structure/srcview.sh kernel/app/jarvisd.fi kernel/user/jsig.fi \
     kernel/user/jarvisctl.fi | wc -l)
 note "Quelltext dieser Runde: $ZEILEN Zeilen in drei Dateien"
 

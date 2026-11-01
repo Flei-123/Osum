@@ -142,7 +142,7 @@ fi
 drahtumlaut() { grep -rnE --include='*.fi' '"[^"]*[äöüÄÖÜß][^"]*".*//[[:space:]]*DRAHT' "$1" | wc -l; }
 is "DRAHT-Ketten mit Umlaut (Formatwoerter muessen ASCII bleiben)" "$(drahtumlaut kernel)" "0"
 k3="$TMPD/kopie3"; mkdir -p "$k3"
-sed 's|"osum-bridge 1|"osum-brücke 1|' kernel/app/jarvisd.fi > "$k3/jarvisd.fi"
+bash tools/structure/srcview.sh kernel/app/jarvisd.fi | sed 's|"osum-bridge 1|"osum-brücke 1|' > "$k3/jarvisd.fi"
 is "GEGENPROBE der Bruecken-Gruss mit Umlaut wird gefunden" "$(drahtumlaut "$k3")" "1"
 DN=$(grep -rcE --include='*.fi' '//[[:space:]]*DRAHT' kernel | awk -F: '{s+=$2} END{print s+0}')
 if [ "$DN" -ge 13 ]; then ok "WIRE marks in the kernel: $DN"; else bad "WIRE marks in the kernel: $DN, expected >= 13"; fi

@@ -107,7 +107,7 @@ bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
 
 vendor/firn/bin/firnc kernel/user/ota.fi -o "$OUT/ota-probe.o" \
     2> "$OUT/ota-cc.log" \
-    && ok "kernel/user/ota.fi builds ($(grep -c . kernel/user/ota.fi) lines, profile kernel, no heap)" \
+    && ok "kernel/user/ota.fi builds ($(bash tools/structure/srcview.sh kernel/user/ota.fi | grep -c .) lines, profile kernel, no heap)" \
     || { bad "ota.fi baut nicht"; head -20 "$OUT/ota-cc.log"; }
 
 #   error: cannot read 'kernel/app/libc/dns.fi': No such file or directory
@@ -590,7 +590,7 @@ printf '   %-52s %s\n' "/bin/fetch (TLS 1.3, X.509, RSA, ECDSA, Ed25519 nein)" "
 printf '   %-52s %s\n' "/bin/ota" "$OSZ Oktett"
 printf '   %-52s %s\n' "Bloecke frei -- nach Fassung 1 / nach Fassung 2" \
     "$(echo "$BASISBL" | awk '{print $2}') / $GENBL"
-printf '   %-52s %s\n' "Zeilen: kernel/user/ota.fi" "$(grep -c . kernel/user/ota.fi)"
+printf '   %-52s %s\n' "Zeilen: kernel/user/ota.fi" "$(bash tools/structure/srcview.sh kernel/user/ota.fi | grep -c .)"
 printf '   %-52s %s\n' "Zeilen: tools/ota/ (server, verzeichnis, mkcerts, pakete, run)" \
     "$(cat tools/ota/*.py tools/ota/*.sh | grep -c .)"
 

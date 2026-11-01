@@ -27,8 +27,8 @@ echo "== 1. config files =="
 chk() { # <file> <expected input value>
     local f=$1 want=$2
     python3 - "$f" "$want" <<'PY'
-import re, sys
-src = open("kernel/app/jarvisd.fi", encoding="latin-1").read()
+import re, subprocess, sys
+src = subprocess.check_output(["bash", "tools/structure/srcview.sh", "kernel/app/jarvisd.fi"]).decode("latin-1")
 keys = set(re.findall(r'var s_\w+: \[u8; \d+\] = "(\w+)\\0', src))
 bad = []; inp = None
 for l in open(sys.argv[1], encoding="utf-8"):

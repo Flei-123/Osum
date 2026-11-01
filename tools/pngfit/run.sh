@@ -53,7 +53,7 @@ else
 fi
 
 echo "== 3. jarvisd wiring and wire limit =="
-cap=$(sed -n 's/^const RESULT_CAP: usize = \([0-9]*\)$/\1/p' kernel/app/jarvisd.fi)
+cap=$(sed -n 's/^const RESULT_CAP: usize = \([0-9]*\)$/\1/p' <(bash tools/structure/srcview.sh kernel/app/jarvisd.fi))
 limit=$(python3 -I - <<'PY'
 import re
 s = open('tools/bridge-server/bridge_server.py').read()
@@ -66,9 +66,9 @@ if [ -n "$cap" ] && [ "$limit" -gt 0 ] && [ $((cap + 4096)) -le "$limit" ]; then
 else
     bad "RESULT_CAP '$cap' does not fit MAX_JOB_BODY '$limit'"
 fi
-n=$(grep -c 'fit.encode_within(.*RESULT_CAP)' kernel/app/jarvisd.fi)
+n=$(grep -c 'fit.encode_within(.*RESULT_CAP)' <(bash tools/structure/srcview.sh kernel/app/jarvisd.fi))
 [ "$n" = 2 ] && ok "both screenshot paths go through encode_within" || bad "encode_within used $n times, expected 2"
-grep -q 'aus.len > RESULT_CAP' kernel/app/jarvisd.fi && ok "every result is guarded against the wire limit" || bad "no generic result guard"
+grep -q 'aus.len > RESULT_CAP' <(bash tools/structure/srcview.sh kernel/app/jarvisd.fi) && ok "every result is guarded against the wire limit" || bad "no generic result guard"
 if vendor/firn/bin/firnc -c --profile=app -o "$D/jarvisd.o" kernel/app/jarvisd.fi > "$D/jd.log" 2>&1; then
     ok "jarvisd builds"
 else

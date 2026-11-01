@@ -79,7 +79,7 @@ echo
 # C. DER PAIRING CODE
 # ------------------------------------------------------------------
 echo "== C. PAIRING CODE: is it shown, and for how long? =="
-grep -na --text -n 'kopplung' kernel/app/jarvisd.fi | head -3 | sed 's/^/   /'
+bash tools/structure/srcview.sh kernel/app/jarvisd.fi | grep -na --text -n 'kopplung' | head -3 | sed 's/^/   /'
 echo "   (Anzeige: /var/jarvis/pairing + Konsole, siehe jarvisd.fi Kopf)"
 echo
 

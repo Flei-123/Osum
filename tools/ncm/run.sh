@@ -98,7 +98,7 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
 fi
 # r811: the driver exists (no QEMU model, so the wiring is checked statically; the framing is covered above).
 # usb.fi binds class 02/0D as a LAST RESORT (same pass as RNDIS), runs the NCM bring-up and hands over to usbnet.fi (mode 2).
-U=kernel/usb/usb.fi; N=kernel/drv/net/usbnet.fi
+U="$T/usb.fi"; bash tools/structure/srcview.sh kernel/usb/usb.fi > "$U"; N=kernel/drv/net/usbnet.fi
 chk() { # description file regex
     if grep -qE "$3" "$2"; then ok "$1"; else bad "$1"; fi
 }

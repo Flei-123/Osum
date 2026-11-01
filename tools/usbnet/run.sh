@@ -90,14 +90,14 @@ if command -v qemu-system-x86_64 >/dev/null 2>&1; then
         && ok "QEMU has usb-net (RNDIS + CDC for the later end-to-end test)" \
         || bad "QEMU has no usb-net"
 fi
-if [ -f kernel/drv/net/usbnet.fi ] && grep -q 'DRV_ECM' kernel/usb/usb.fi \
+if [ -f kernel/drv/net/usbnet.fi ] && grep -q 'DRV_ECM' <(bash tools/structure/srcview.sh kernel/usb/usb.fi) \
     && grep -q 'KIND_USBNET' kernel/net/netdev.fi; then
     ok "kernel has the CDC-ECM driver (end-to-end gate: tools/usbnet/qemu.sh)"
 else
     bad "kernel CDC-ECM driver is missing (kernel/drv/net/usbnet.fi, DRV_ECM, KIND_USBNET)"
 fi
 # RNDIS driver (r811): the kernel binds RNDIS (DRV_RNDIS) and the end-to-end gate exists
-if [ -f tools/usbrndis/run.sh ] && grep -q 'DRV_RNDIS' kernel/usb/usb.fi \
+if [ -f tools/usbrndis/run.sh ] && grep -q 'DRV_RNDIS' <(bash tools/structure/srcview.sh kernel/usb/usb.fi) \
     && grep -q 'attach_rndis' kernel/drv/net/usbnet.fi; then
     ok "kernel has the RNDIS driver (end-to-end gate: tools/usbrndis/run.sh)"
 else
