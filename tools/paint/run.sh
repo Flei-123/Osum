@@ -129,7 +129,7 @@ if [ -n "${maxnr:-}" ] && [ "$maxnr" -ge 2126 ] && [ "$maxnr" = "${hoch:-x}" ]; 
 else
     bad "WM_MAXNR='$maxnr' passt nicht zu den Aufrufen (hoechste gefunden: '$hoch', erwartet >= 2126)"
 fi
-for f in kernel/ui/wm.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
+for f in kernel/ui/wm/wmlayout.fi kernel/sys/sys.fi kernel/user/wlibc.fi; do
     a=$(grep -cE '(FM|WF)_RADIUS: u64 = 0' "$f")
     b=$(grep -cE '(FM|WF)_SHADOW_C: u64 = 3' "$f")
     if [ "$a" = 1 ] && [ "$b" = 1 ]; then
