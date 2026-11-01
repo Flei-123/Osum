@@ -36,7 +36,7 @@ is() { # name ist soll
 
 num() { # name wert op erwartet
     local name=$1 value=$2 op=$3 want=$4
-    if [ -z "$value" ]; then bad "$name: keine Zahl (erwartet $op $want)"; return; fi
+    if [ -z "$value" ]; then bad "$name: no number (expected $op $want)"; return; fi
     if [ "$value" -"$op" "$want" ] 2>/dev/null; then ok "$name: $value"
     else bad "$name: $value, erwartet $op $want"; fi
 }
@@ -54,30 +54,30 @@ else
 fi
 
 # =====================================================================
-echo "== 1. die Bausteine gegen ihre RFCs (auf dem Wirt) =="
+echo "== 1. the building blocks against their RFCs (on the host) =="
 # =====================================================================
 mkdir -p .probe
 if $FIRNC tools/sshd/oracle.fi -o .probe/sshoracle 2>"$TMPD/e"; then
-    ok "tools/sshd/oracle.fi baut gegen lib/crypto/ und lib/ssh/"
+    ok "tools/sshd/oracle.fi builds against lib/crypto/ and lib/ssh/"
 else
-    bad "das Orakel baut nicht"; head -8 "$TMPD/e" | sed 's/^/        /'
+    bad "the oracle does not build"; head -8 "$TMPD/e" | sed 's/^/        /'
 fi
 if [ -x .probe/sshoracle ]; then
     if python3 tools/sshd/vectors.py > "$TMPD/vec.txt" 2>&1; then
         ok "$(tail -1 "$TMPD/vec.txt")"
         grep -E '^  ' "$TMPD/vec.txt" | sed 's/^/     /'
     else
-        bad "die Testvektoren sind durchgefallen"
+        bad "the test vectors failed"
         tail -25 "$TMPD/vec.txt" | sed 's/^/        /'
     fi
 fi
 
 # =====================================================================
-echo "== 2. bauen: der Kern, $(echo $PROGS | wc -w) Programme, drei Abbilder =="
+echo "== 2. build: the kernel, $(echo $PROGS | wc -w) programs, three images =="
 # =====================================================================
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>/dev/null \
-        || bad "$f.s laesst sich nicht assemblieren"
+        || bad "$f.s cannot be assembled"
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 
@@ -86,7 +86,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     [ -x "$cc" ] || return 1
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
-        || { bad "firnc$s uebersetzt den Kern nicht"
+        || { bad "firnc$s does not compile the kernel"
              sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     "$cc" kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt uprog.fi nicht"; return 1; }
@@ -101,7 +101,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
         "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/u$s.o" \
         2>"$TMPD/ld$s.err" \
-        || { bad "firnc$s: ld ist am Kern gescheitert"; return 1; }
+        || { bad "firnc$s: ld failed on the kernel"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
     for p in $PROGS; do
         "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
@@ -117,13 +117,13 @@ build_stage() { # 0 = firnc0, 1 = firnc1
 build_stage 0 || { echo "SSHD: $pass passed, $fail failed"; exit 1; }
 ok "firnc0: Kern + $(echo $PROGS | wc -w) Programme"
 if build_stage 1; then
-    ok "firnc1: dasselbe, aus dem in Firn geschriebenen Uebersetzer"
+    ok "firnc1: the same, from the compiler written in Firn"
 else
     note "firnc1 hat nicht gebaut -- gemessen wird mit firnc0"
 fi
 
 undef=$(nm -u "$TMPD/sshd0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "/sbin/sshd hat keinen undefinierten Namen" \
+[ -z "$undef" ] && ok "/sbin/sshd has no undefined name" \
                 || bad "undefinierte Namen in sshd: $undef"
 note "/sbin/sshd: $(stat -c%s "$TMPD/sshd0.elf") Oktette"
 
@@ -172,12 +172,12 @@ DATA="/d/data.txt=$TMPD/data.txt@644:0:0 /d/blob.bin=$TMPD/blob.bin@644:0:0"
 
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS \
     $DIRS $SPEC $ETC $AK $DATA > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py baut das Abbild MIT ~/.ssh/authorized_keys" \
+    && ok "mkfs.py builds the image WITH ~/.ssh/authorized_keys" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 python3 tools/osum/mkfs.py build "$TMPD/nokeys.img" $BLOCKS \
     $DIRS $SPEC $ETC $DATA >/dev/null 2>&1 \
-    && ok "und ein zweites OHNE sie (die Gegenprobe zu Abschnitt 4)" \
-    || bad "das zweite Abbild ist nicht entstanden"
+    && ok "and a second one WITHOUT it (the control for section 4)" \
+    || bad "the second image was not created"
 
 QPID=""
 SER=""
@@ -226,15 +226,15 @@ as_pw() { # benutzer passwort befehl...
 }
 
 # =====================================================================
-echo "== 3. der Wirtsschluessel: erzeugt, dauerhaft, und was OpenSSH dazu sagt ($ACCELNAME) =="
+echo "== 3. the host key: created, persistent, and what OpenSSH says ($ACCELNAME) =="
 # =====================================================================
 cp "$TMPD/disk.img" "$TMPD/live.img"
 T0=$(date +%s%N)
 if start_osum "$TMPD/live.img" "$TMPD/run1.txt" "$FWPORT"; then
     T1=$(date +%s%N)
-    ok "der Dienst lauscht auf Anschluss 22 (nach $(( (T1-T0)/1000000 )) ms, mit $ACCELNAME)"
+    ok "the service listens on port 22 (after $(( (T1-T0)/1000000 )) ms, with $ACCELNAME)"
 else
-    bad "sshd hat nicht angefangen zu lauschen"
+    bad "sshd did not start listening"
     tr -d '\000' < "$TMPD/run1.txt" 2>/dev/null | tail -12 | sed 's/^/        /'
     stop_osum
     echo "SSHD: $pass passed, $fail failed"
@@ -242,16 +242,16 @@ else
 fi
 F="$TMPD/run1.txt"
 grep -qa 'sshd: generating a host key' "$F" \
-    && ok "es gab noch keinen Wirtsschluessel -- er wurde beim ersten Start erzeugt" \
-    || bad "die Zeile ueber die Erzeugung fehlt"
+    && ok "there was no host key yet -- it was created at the first start" \
+    || bad "the line about the creation is missing"
 FP1=$(grep -a -m1 'sshd: host key SHA256:' "$F" | sed 's/.*SHA256://')
 [ -n "$FP1" ] && ok "sshd nennt seinen Fingerabdruck: SHA256:$FP1" \
-              || bad "kein Fingerabdruck auf der Konsole"
+              || bad "no fingerprint on the console"
 
 ssh-keyscan -t ed25519 -T 45 -p "$FWPORT" 127.0.0.1 \
     > "$TMPD/scan.txt" 2>"$TMPD/scan.err"
 if [ -s "$TMPD/scan.txt" ]; then
-    ok "ssh-keyscan holt den Wirtsschluessel ueber das Protokoll"
+    ok "ssh-keyscan fetches the host key over the protocol"
     FP2=$(ssh-keygen -lf "$TMPD/scan.txt" 2>/dev/null | awk '{print $2}' \
           | sed 's/^SHA256://')
     is "ssh-keygen rechnet denselben Fingerabdruck" "$FP2" "$FP1"
@@ -264,9 +264,9 @@ else
 fi
 
 # =====================================================================
-echo "== 4. der ECHTE ssh-Klient: anmelden, arbeiten, Daten =="
+echo "== 4. the REAL ssh client: log in, work, data =="
 # =====================================================================
-echo "   -- Anmeldung mit Schluessel aus ~/.ssh/authorized_keys"
+echo "   -- login with a key from ~/.ssh/authorized_keys"
 out=$(as_key 'echo HALLO; whoami; id' 2>"$TMPD/e1"); rc=$?
 num "ssh mit Schluessel kommt durch (Beendigungscode)" "$rc" eq 0
 is "die Ausgabe des Fernbefehls, Zeile 1" "$(echo "$out" | sed -n 1p)" "HALLO"
@@ -276,10 +276,10 @@ is "...Zeile 3: die Kennungen aus /etc/passwd" \
    "$(echo "$out" | sed -n 3p)" \
    "uid=1000(justin) gid=1000 euid=1000(justin) egid=1000"
 grep -qa 'sshd: publickey accepted' "$F" \
-    && ok "und der Server hat es als publickey-Anmeldung verbucht" \
+    && ok "and the server booked it as a publickey login" \
     || bad "die Zeile 'publickey accepted' fehlt"
 
-echo "   -- die ausgehandelten Verfahren, aus der Sicht des Klienten"
+echo "   -- the negotiated methods, from the client's point of view"
 timeout 300 ssh -vv -p "$FWPORT" $SSHO $KEYOPT -o PasswordAuthentication=no \
     justin@127.0.0.1 true > /dev/null 2>"$TMPD/verb.txt"
 kexline=$(grep -a -m1 'debug1: kex: algorithm:' "$TMPD/verb.txt" \
@@ -293,12 +293,12 @@ is "der Klient sagt: Wirtsschluessel" "$hostline" "ssh-ed25519"
 is "der Klient sagt: Chiffre server->client" "$encline" \
    "chacha20-poly1305@openssh.com"
 if grep -qa 'resetting send seqnr' "$TMPD/verb.txt"; then
-    ok "strict kex (die Gegenmassnahme gegen Terrapin) wurde ausgehandelt"
+    ok "strict kex (the countermeasure against Terrapin) was negotiated"
 else
     note "dieser Klient bietet kein strict kex an -- dann bleibt es aus"
 fi
 
-echo "   -- Anmeldung mit Passwort gegen /etc/shadow"
+echo "   -- login with a password against /etc/shadow"
 out=$(as_pw justin geheim12 'echo PWOK; whoami' 2>"$TMPD/e2"); rc=$?
 num "ssh mit Passwort kommt durch" "$rc" eq 0
 is "die Ausgabe" "$(echo "$out" | sed -n 1p)" "PWOK"
@@ -312,7 +312,7 @@ num "ssh gibt den Code des Fernbefehls zurueck" "$?" eq 7
 as_key 'true' >/dev/null 2>&1
 num "und 0 fuer einen Befehl, der gelingt" "$?" eq 0
 
-echo "   -- eine Datei durch die Verbindung, SHA-256 auf beiden Seiten"
+echo "   -- a file through the connection, SHA-256 on both sides"
 TL0=$(date +%s%N)
 as_key 'true' >/dev/null 2>&1
 TL1=$(date +%s%N)
@@ -334,33 +334,33 @@ note "$NETTO ms fuer die Nutzdaten, also rund $(( $(stat -c%s "$TMPD/blob.bin") 
 num "die Uebertragung ist schneller als 1000 Oktette/s" \
     "$(( $(stat -c%s "$TMPD/blob.bin") * 1000 / NETTO ))" ge 1000
 
-echo "   -- eine Shell: ueber Rohre und an einem Pseudoterminal"
+echo "   -- a shell: over pipes and on a pseudo-terminal"
 printf 'echo S1\nls /d\nexit\n' | timeout 300 ssh -p "$FWPORT" $SSHO -T \
     $KEYOPT justin@127.0.0.1 > "$TMPD/shell.txt" 2>&1
 num "die Shell-Sitzung (ssh -T) endet ordentlich" "$?" eq 0
-grep -qa '^S1' "$TMPD/shell.txt" && ok "die Shell hat den ersten Befehl ausgefuehrt" \
+grep -qa '^S1' "$TMPD/shell.txt" && ok "the shell executed the first command" \
                                 || bad "'S1' fehlt in der Shell-Sitzung"
-grep -qa 'blob.bin' "$TMPD/shell.txt" && ok "und den zweiten (ls /d)" \
+grep -qa 'blob.bin' "$TMPD/shell.txt" && ok "and the second (ls /d)" \
                                       || bad "'ls /d' hat nichts geliefert"
-grep -qa 'sh: ready' "$TMPD/shell.txt" && ok "es war wirklich /bin/sh und kein Nachbau" \
-                                       || bad "die Begruessung von /bin/sh fehlt"
+grep -qa 'sh: ready' "$TMPD/shell.txt" && ok "it really was /bin/sh and not a replica" \
+                                       || bad "the greeting of /bin/sh is missing"
 printf 'echo P1\nexit\n' | timeout 300 ssh -p "$FWPORT" $SSHO -tt \
     $KEYOPT justin@127.0.0.1 > "$TMPD/pty.txt" 2>&1
 num "die Sitzung am Pseudoterminal (ssh -tt) endet ordentlich" "$?" eq 0
-grep -qa 'P1' "$TMPD/pty.txt" && ok "sie hat den Befehl ausgefuehrt" \
+grep -qa 'P1' "$TMPD/pty.txt" && ok "it executed the command" \
                              || bad "'P1' fehlt in der pty-Sitzung"
 if grep -qa $'\r' "$TMPD/pty.txt"; then
-    ok "die Zeilenenden tragen CR -- die Zeilendisziplin des Terminals war dran"
+    ok "the line endings carry CR -- the terminal line discipline was at work"
 else
-    bad "kein CR in der pty-Sitzung: da war kein Pseudoterminal"
+    bad "no CR in the pty session: there was no pseudo-terminal"
 fi
 if grep -qa $'\r' "$TMPD/shell.txt"; then
-    bad "die Rohr-Sitzung hat CR -- dann war die Unterscheidung keine"
+    bad "the pipe session has CR -- then the distinction was none"
 else
-    ok "und die Rohr-Sitzung hat keines (der Gegenbeweis zum vorigen)"
+    ok "and the pipe session has none (the counter-proof of the previous)"
 fi
 
-echo "   -- zwei Verbindungen GLEICHZEITIG"
+echo "   -- two connections AT THE SAME TIME"
 ( as_key 'echo EINS; sleep 2; echo EINSB' > "$TMPD/p1.txt" 2>&1
   echo $? > "$TMPD/p1.rc" ) &
 P1=$!
@@ -375,7 +375,7 @@ is "und beide haben ihre eigene Ausgabe bekommen" \
    "EINS EINSB ZWEI ZWEIB "
 
 # =====================================================================
-echo "== 5. die Gegenproben: was ABGELEHNT werden muss =="
+echo "== 5. the controls: what must be REJECTED =="
 # =====================================================================
 timeout 120 ssh -p "$FWPORT" $SSHO $BADKEY -o PasswordAuthentication=no \
     -o PreferredAuthentications=publickey justin@127.0.0.1 'echo DARFNICHT' \
@@ -383,25 +383,25 @@ timeout 120 ssh -p "$FWPORT" $SSHO $BADKEY -o PasswordAuthentication=no \
 rc=$?
 num "ein FREMDER Schluessel wird abgelehnt (ssh-Code)" "$rc" ne 0
 grep -qa 'DARFNICHT' "$TMPD/bad1.txt" \
-    && bad "der Befehl lief TROTZDEM -- das waere ein offener Server" \
-    || ok "und der Befehl ist nicht gelaufen"
+    && bad "the command ran ANYWAY -- that would be an open server" \
+    || ok "and the command did not run"
 grep -qa 'Permission denied' "$TMPD/bad1.txt" \
-    && ok "ssh nennt den Grund: Permission denied" \
+    && ok "ssh names the reason: Permission denied" \
     || note "ssh sagt: $(tail -1 "$TMPD/bad1.txt")"
 
 as_pw justin falsch99 'echo DARFNICHT' > "$TMPD/bad2.txt" 2>&1
 rc=$?
 num "ein falsches PASSWORT wird abgelehnt" "$rc" ne 0
 grep -qa 'DARFNICHT' "$TMPD/bad2.txt" \
-    && bad "der Befehl lief trotz falschem Passwort" \
-    || ok "und der Befehl ist nicht gelaufen"
+    && bad "the command ran despite the wrong password" \
+    || ok "and the command did not run"
 
 as_pw niemand egal 'echo DARFNICHT' > "$TMPD/bad3.txt" 2>&1
 rc=$?
 num "ein unbekannter Benutzername wird abgelehnt" "$rc" ne 0
 grep -qa 'DARFNICHT' "$TMPD/bad3.txt" \
-    && bad "ein Name, den /etc/passwd nicht kennt, kam durch" \
-    || ok "ein Name, den /etc/passwd nicht kennt, kommt nicht durch"
+    && bad "a name that /etc/passwd does not know got through" \
+    || ok "a name that /etc/passwd does not know does not get through"
 
 timeout 120 ssh -p "$FWPORT" $SSHO $KEYOPT -o Ciphers=aes128-ctr \
     justin@127.0.0.1 true > "$TMPD/bad4.txt" 2>&1
@@ -412,17 +412,17 @@ timeout 120 ssh -p "$FWPORT" $SSHO $KEYOPT \
 num "ein Klient ohne gemeinsamen Schluesselaustausch ebenso" "$?" ne 0
 
 # =====================================================================
-echo "== 6. als DIENST, und der Weg ueber init =="
+echo "== 6. as a SERVICE, and the way via init =="
 # =====================================================================
 grep -qa 'init: dienste=2' "$F" \
-    && ok "init hat /etc/inittab gelesen und zwei Dienste gefunden" \
-    || bad "init hat die Dienste nicht gefunden"
+    && ok "init read /etc/inittab and found two services" \
+    || bad "init did not find the services"
 out=$(as_pw root rootpass 'cat /run/svc.state' 2>/dev/null)
 if echo "$out" | grep -qa '^sshd running'; then
-    ok "und /run/svc.state fuehrt sshd als laufenden Dienst"
+    ok "and /run/svc.state lists sshd as a running service"
     note "$(echo "$out" | tr '\n' ' ')"
 else
-    bad "sshd steht nicht als laufender Dienst in /run/svc.state"
+    bad "sshd is not listed as a running service in /run/svc.state"
     note "$(echo "$out" | tr '\n' ' ')"
 fi
 starts=$(echo "$out" | awk '/^sshd /{print $4}')
@@ -437,7 +437,7 @@ authms=$(grep -a 'sshd: ms vkx a' "$F" | awk '{print $7}' | sort -n | tail -1)
 note "langsamster Schluesselaustausch: ${kexms:-?} ms, langsamste Anmeldung: ${authms:-?} ms"
 
 # =====================================================================
-echo "== 7. das Herunterfahren, und der Kern lebt noch =="
+echo "== 7. shutdown, and the kernel is still alive =="
 # =====================================================================
 as_pw root rootpass 'svc shutdown' > "$TMPD/down.txt" 2>&1
 i=0
@@ -455,20 +455,20 @@ else
     ok "'svc shutdown' aus der Ferne hat das System heruntergefahren (QEMU-Code $QRC)"
 fi
 if grep -qa 'EXCEPTION' "$F"; then
-    bad "im Lauf steht eine Ausnahme"
+    bad "an exception is in the run"
     grep -a -m3 'EXCEPTION' "$F" | sed 's/^/        /'
 else
-    ok "kein einziger Prozessorfehler im ganzen Lauf"
+    ok "not a single processor fault in the whole run"
 fi
 
 # =====================================================================
 echo "== 8. der ZWEITE Start: derselbe Wirtsschluessel =="
 if start_osum "$TMPD/live.img" "$TMPD/run2.txt" "$FWPORT"; then
-    ok "der Dienst laeuft wieder"
+    ok "the service runs again"
     G="$TMPD/run2.txt"
     grep -qa 'sshd: generating a host key' "$G" \
-        && bad "er hat einen NEUEN Schluessel erzeugt -- dann war er nicht dauerhaft" \
-        || ok "und hat KEINEN neuen Schluessel erzeugt"
+        && bad "it created a NEW key -- then it was not persistent" \
+        || ok "and created NO new key"
     FP3=$(grep -a -m1 'sshd: host key SHA256:' "$G" | sed 's/.*SHA256://')
     is "derselbe Fingerabdruck wie beim ersten Start" "$FP3" "$FP1"
     out=$(as_key 'echo ZWEITERSTART' 2>/dev/null)
@@ -480,19 +480,19 @@ if start_osum "$TMPD/live.img" "$TMPD/run2.txt" "$FWPORT"; then
               | sed 's/^SHA256://')
         is "ssh-keygen -lf auf der .pub-Datei AUF DER PLATTE" "$FP4" "$FP1"
     else
-        bad "/etc/ssh/ssh_host_ed25519.pub steht nicht auf der Platte"
+        bad "/etc/ssh/ssh_host_ed25519.pub is not on the disk"
     fi
     as_pw root rootpass 'svc shutdown' >/dev/null 2>&1
     i=0
     while [ $i -lt 100 ]; do kill -0 "$QPID" 2>/dev/null || break; sleep 0.2; i=$((i+1)); done
     stop_osum
 else
-    bad "der zweite Start ist nicht hochgekommen"
+    bad "the second boot did not come up"
     stop_osum
 fi
 
 # =====================================================================
-echo "== 9. OHNE authorized_keys: derselbe Schluessel wird abgelehnt =="
+echo "== 9. WITHOUT authorized_keys: the same key is rejected =="
 cp "$TMPD/nokeys.img" "$TMPD/live2.img"
 if start_osum "$TMPD/live2.img" "$TMPD/run3.txt" "$FWPORT"; then
     timeout 120 ssh -p "$FWPORT" $SSHO $KEYOPT -o PasswordAuthentication=no \
@@ -500,8 +500,8 @@ if start_osum "$TMPD/live2.img" "$TMPD/run3.txt" "$FWPORT"; then
         > "$TMPD/nk.txt" 2>&1
     num "derselbe Schluessel OHNE authorized_keys: abgelehnt" "$?" ne 0
     grep -qa 'DARFNICHT' "$TMPD/nk.txt" \
-        && bad "er kam trotzdem durch -- dann wird die Datei gar nicht gelesen" \
-        || ok "und der Befehl ist nicht gelaufen"
+        && bad "it got through anyway -- then the file is not read at all" \
+        || ok "and the command did not run"
     out=$(as_pw justin geheim12 'echo NURPASSWORT' 2>/dev/null)
     is "das Passwort geht auf demselben Abbild weiter" "$out" "NURPASSWORT"
     as_pw root rootpass 'svc shutdown' >/dev/null 2>&1
@@ -509,7 +509,7 @@ if start_osum "$TMPD/live2.img" "$TMPD/run3.txt" "$FWPORT"; then
     while [ $i -lt 100 ]; do kill -0 "$QPID" 2>/dev/null || break; sleep 0.2; i=$((i+1)); done
     stop_osum
 else
-    bad "das Abbild ohne Schluesseldatei ist nicht hochgekommen"
+    bad "the image without a key file did not come up"
     stop_osum
 fi
 

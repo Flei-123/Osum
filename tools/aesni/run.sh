@@ -21,10 +21,10 @@ gleich() { # name ist soll
     if [[ "$2" == "$3" ]]; then ok "$1: $2"; else bad "$1: $2 -- erwartet $3"; fi
 }
 
-echo "== 1. die Speicherkarte und die zugeteilten Nummern =="
+echo "== 1. the memory map and the assigned numbers =="
 
 if python3 tools/kernel/memmap.py kernel >"$TMPD/map.txt" 2>&1; then
-    ok "die kdata-Karte ist ueberschneidungsfrei (memmap.py)"
+    ok "the kdata map is overlap-free (memmap.py)"
     info "$(tail -1 "$TMPD/map.txt")"
 else
     bad "memmap.py meldet eine Kollision"
@@ -36,51 +36,51 @@ grep -q 'AESNI_OFF' tools/kernel/memmap.py \
     || bad "AESNI fehlt in tools/kernel/memmap.py"
 
 grep -q 'const AESNI_OFF: u64 = 0x120000' kernel/lib/kstate.fi \
-    && ok "der kdata-Bereich liegt auf 0x120000 wie zugeteilt" \
-    || bad "AESNI_OFF steht nicht auf 0x120000"
+    && ok "the kdata range is at 0x120000 as assigned" \
+    || bad "AESNI_OFF is not at 0x120000"
 grep -q 'const AESNI_MAX: u64 = 0x1000' kernel/lib/kstate.fi \
-    && ok "und ist EINE Seite gross wie zugeteilt" \
-    || bad "AESNI_MAX ist nicht 0x1000"
+    && ok "and is ONE page in size as assigned" \
+    || bad "AESNI_MAX is not 0x1000"
 grep -q 'const M_NOAESNI: u64 = 1010' kernel/lib/kstate.fi \
-    && ok "die Modusindizes fangen bei 1010 an wie zugeteilt" \
-    || bad "M_NOAESNI steht nicht auf 1010"
+    && ok "the mode indices start at 1010 as assigned" \
+    || bad "M_NOAESNI is not at 1010"
 hoch=$(grep -oE 'const M_[A-Z]+: u64 = 101[0-9]' kernel/lib/kstate.fi \
     | grep -oE '101[0-9]' | sort -n | tail -1)
 [[ -n $hoch && $hoch -le 1019 ]] \
-    && ok "kein Modusindex dieser Runde oberhalb von 1019 (hoechster: $hoch)" \
-    || bad "ein Modusindex liegt ausserhalb von 1010..1019"
+    && ok "no mode index of this round above 1019 (highest: $hoch)" \
+    || bad "a mode index is outside 1010..1019"
 
 echo "== 2. der Bau =="
 
 if $FIRNC tools/krypto/orakel.fi -o "$TMPD/orakel" 2>"$TMPD/o.err"; then
-    ok "das Orakel uebersetzt (dieselben lib/crypto-Dateien wie der Kern)"
+    ok "the oracle compiles (the same lib/crypto files as the kernel)"
 else
-    bad "das Orakel uebersetzt nicht"
+    bad "the oracle does not compile"
     tail -5 "$TMPD/o.err"
 fi
 
 if $FIRNC tools/aesni/kreis.fi -o "$TMPD/kreis" 2>"$TMPD/k.err"; then
     ok "die Kreisprobe uebersetzt"
 else
-    bad "die Kreisprobe uebersetzt nicht"
+    bad "the round-trip check does not compile"
     tail -5 "$TMPD/k.err"
 fi
 
 if timeout 900 bash tools/build-kernel.sh "$TMPD/k0.mb" >"$TMPD/b.log" 2>&1; then
     ok "der Kern baut"
 else
-    bad "der Kern baut nicht"
+    bad "the kernel does not build"
     tail -8 "$TMPD/b.log"
 fi
 
-echo "== 3. die Kreisprobe: Tabelle gegen Befehle, Oktett fuer Oktett =="
+echo "== 3. the round-trip check: table against instructions, octet for octet =="
 
 if [[ -x "$TMPD/kreis" ]]; then
     kr=$("$TMPD/kreis" 2>&1 | tail -1)
     info "$kr"
     if [[ $kr == *"aesni=0"* ]]; then
-        info "diese Maschine hat kein AES-NI -- die Kreisprobe entfaellt"
-        ok "auf einer Maschine ohne AES-NI ist die Tabelle der einzige Weg"
+        info "this machine has no AES-NI -- the round-trip check is skipped"
+        ok "on a machine without AES-NI the table is the only way"
     else
         ungl=$(echo "$kr" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
         glei=$(echo "$kr" | grep -oE 'gleich=[0-9]+' | head -1 | cut -d= -f2)
@@ -91,7 +91,7 @@ if [[ -x "$TMPD/kreis" ]]; then
     fi
 fi
 
-echo "== 4. gegen fremde Augen: OpenSSL und FIPS 197 =="
+echo "== 4. against foreign eyes: OpenSSL and FIPS 197 =="
 
 python3 - "$TMPD" <<'PY' >"$TMPD/vek.txt" 2>&1
 import os, random, subprocess, sys
@@ -154,7 +154,7 @@ PY
 vz=$(cat "$TMPD/vek.txt")
 info "$vz"
 if [[ $vz == *"SKIP"* ]]; then
-    info "python3-cryptography fehlt -- die Gegenprobe gegen OpenSSL entfaellt"
+    info "python3-cryptography is missing -- the control against OpenSSL is skipped"
 else
     ossl=$(echo "$vz" | grep -oE 'openssl_abweichungen=[0-9]+' | cut -d= -f2)
     wegd=$(echo "$vz" | grep -oE 'wegunterschiede=[0-9]+' | cut -d= -f2)
@@ -164,7 +164,7 @@ else
     gleich "Abweichungen beim Entschluesseln fremden Geheimtextes" "$rueck" "0"
 fi
 
-echo "== 5. der Rueckfallweg, auf einer CPU OHNE AES-NI =="
+echo "== 5. the fallback, on a CPU WITHOUT AES-NI =="
 
 if command -v qemu-x86_64 >/dev/null 2>&1; then
     KEY=$(python3 -c "print('00'*32+'11'*32)")
@@ -173,27 +173,27 @@ if command -v qemu-x86_64 >/dev/null 2>&1; then
     "$TMPD/orakel" < "$TMPD/f.in" > "$TMPD/f.host" 2>/dev/null
     if timeout 120 qemu-x86_64 -cpu qemu64 "$TMPD/orakel" \
             < "$TMPD/f.in" > "$TMPD/f.noaes" 2>"$TMPD/f.err"; then
-        ok "dieselbe Binaerdatei laeuft auf einer CPU ohne AES-NI (kein #UD)"
+        ok "the same binary runs on a CPU without AES-NI (no #UD)"
     else
-        bad "die Binaerdatei stirbt auf einer CPU ohne AES-NI"
+        bad "the binary dies on a CPU without AES-NI"
         tail -3 "$TMPD/f.err"
     fi
     if diff -q "$TMPD/f.host" "$TMPD/f.noaes" >/dev/null 2>&1; then
-        ok "und liefert Oktett fuer Oktett dasselbe -- beide Wege lesen dieselbe Platte"
+        ok "and yields the same octet for octet -- both ways read the same disk"
     else
         bad "der Rueckfallweg liefert etwas anderes"
     fi
     if timeout 60 qemu-x86_64 -cpu Westmere "$TMPD/orakel" \
             < "$TMPD/f.in" >/dev/null 2>&1; then
-        ok "auf -cpu Westmere (dem ersten mit AES-NI, 2010) laeuft es ebenfalls"
+        ok "on -cpu Westmere (the first with AES-NI, 2010) it runs as well"
     else
-        bad "auf -cpu Westmere laeuft es nicht"
+        bad "on -cpu Westmere it does not run"
     fi
 else
-    info "qemu-x86_64 fehlt -- der Rueckfallweg wird nur im Kern gemessen"
+    info "qemu-x86_64 is missing -- the fallback is only measured in the kernel"
 fi
 
-echo "== 6. im Kern: die Kreisprobe in Ring 0 =="
+echo "== 6. in the kernel: the round-trip check in ring 0 =="
 
 kern_lauf() { # name cpu append zeitlimit
     local name=$1 cpu=$2 app=$3 t=${4:-200}
@@ -207,49 +207,49 @@ kern_lauf() { # name cpu append zeitlimit
 if [[ -f "$TMPD/k0.mb" ]]; then
     kern_lauf mit max "osum nopwr aestest aesbench" 200
     zeile=$(grep -E '^aesni: have=' "$TMPD/mit.txt" 2>/dev/null | head -1)
-    info "${zeile:-keine aesni-Zeile}"
+    info "${zeile:-no aesni line}"
     if [[ $zeile == *"have=1"* ]]; then
         [[ $zeile == *"used=1"* ]] \
-            && ok "auf -cpu max ist der schnelle Weg scharf (used=1)" \
-            || bad "AES-NI ist da, wird aber nicht benutzt: $zeile"
+            && ok "on -cpu max the fast path is armed (used=1)" \
+            || bad "AES-NI is there but not used: $zeile"
         kz=$(grep -E '^aesni: gleich=' "$TMPD/mit.txt" | head -1)
-        info "${kz:-keine Kreisprobe-Zeile}"
+        info "${kz:-no round-trip line}"
         ung=$(echo "$kz" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
         gleich "die Kreisprobe im Kern, ungleiche Bloecke" "${ung:-keine}" "0"
     else
-        info "diese QEMU-CPU meldet kein AES-NI -- Abschnitt entfaellt"
+        info "this QEMU CPU reports no AES-NI -- section skipped"
     fi
     grep -q '^kernel: done' "$TMPD/mit.txt" 2>/dev/null \
-        && ok "der Kern laeuft mit AES-NI bis zum Ende durch" \
-        || bad "der Kern kommt mit AES-NI nicht bis 'kernel: done'"
+        && ok "the kernel runs through to the end with AES-NI" \
+        || bad "the kernel does not reach the end with AES-NI: 'kernel: done'"
 
     kern_lauf ohne max "osum nopwr aestest aesbench noaesni" 380
     zo=$(grep -E '^aesni: have=' "$TMPD/ohne.txt" 2>/dev/null | head -1)
-    info "${zo:-keine aesni-Zeile}"
+    info "${zo:-no aesni line}"
     [[ $zo == *"used=0"* ]] \
-        && ok "GEGENPROBE: noaesni nimmt den schnellen Weg wirklich heraus" \
+        && ok "CONTROL: noaesni really takes the fast path out" \
         || bad "noaesni wirkt nicht: $zo"
     grep -q '^kernel: done' "$TMPD/ohne.txt" 2>/dev/null \
-        && ok "und der Kern laeuft auf der Tabelle ebenso durch" \
-        || bad "der Kern stirbt auf dem Tabellenweg"
+        && ok "and the kernel runs through on the table likewise" \
+        || bad "the kernel dies on the table path"
 
     kern_lauf keine "qemu64,-aes" "osum nopwr aestest aesbench" 380
     zk=$(grep -E '^aesni: have=' "$TMPD/keine.txt" 2>/dev/null | head -1)
-    info "${zk:-keine aesni-Zeile}"
+    info "${zk:-no aesni line}"
     if [[ $zk == *"have=0"* ]]; then
-        ok "auf -cpu qemu64,-aes erkennt der Kern, dass AES-NI fehlt"
+        ok "on -cpu qemu64,-aes the kernel detects that AES-NI is missing"
         [[ $zk == *"used=0"* ]] \
-            && ok "und faellt auf die Tabelle zurueck statt #UD zu sterben" \
-            || bad "AES-NI fehlt, wird aber benutzt -- das ist ein #UD"
+            && ok "and falls back to the table instead of dying with #UD" \
+            || bad "AES-NI is missing but is used -- that is a #UD"
     else
-        bad "auf -cpu qemu64,-aes meldet der Kern trotzdem AES-NI: $zk"
+        bad "on -cpu qemu64,-aes the kernel reports AES-NI anyway: $zk"
     fi
     grep -q '^kernel: done' "$TMPD/keine.txt" 2>/dev/null \
-        && ok "der Kern laeuft auf einer CPU ohne AES-NI bis zum Ende durch" \
-        || bad "der Kern stirbt auf einer CPU ohne AES-NI"
+        && ok "the kernel runs through to the end on a CPU without AES-NI" \
+        || bad "the kernel dies on a CPU without AES-NI"
 fi
 
-echo "== 7. das Tempo, auf derselben Maschine =="
+echo "== 7. the speed, on the same machine =="
 
 if [[ -x "$TMPD/orakel" ]]; then
     KEY=$(python3 -c "print('00'*32+'11'*32)")
@@ -265,7 +265,7 @@ if [[ -x "$TMPD/orakel" ]]; then
 import sys
 v = [int(x) for x in open(sys.argv[1]).read().split() if x != "ok"]
 if len(v) < 4:
-    print("zu wenige Messwerte"); raise SystemExit
+    print("too few measurements"); raise SystemExit
 def mibs(ns, n): return n / (ns / 1e9) / 1048576
 print("512 B : AES-NI %8.2f us (%7.2f MiB/s)  Tabelle %9.2f us (%5.2f MiB/s)  Faktor %.0f"
       % (v[0]/1000, mibs(v[0], 512), v[2]/1000, mibs(v[2], 512), v[2]/v[0]))
@@ -281,49 +281,49 @@ PY
     fak=$(grep -oE '^FAKTOR512 [0-9]+' "$TMPD/t.txt" | awk '{print $2}')
     mib=$(grep -oE '^MIBS512 [0-9.]+' "$TMPD/t.txt" | awk '{print $2}')
     if [[ -n ${fak:-} ]] && [[ $fak -ge 20 ]]; then
-        ok "der schnelle Weg ist mindestens 20-mal so schnell (Faktor $fak)"
+        ok "the fast path is at least 20 times as fast (factor $fak)"
     else
-        bad "der Gewinn ist zu klein: Faktor ${fak:-?}"
+        bad "the gain is too small: factor ${fak:-?}"
     fi
     if [[ -n ${mib:-} ]] && python3 -c "import sys; sys.exit(0 if float('$mib') >= 20 else 1)"; then
         ok "XTS schafft mindestens 20 MiB/s je Sektor ($mib MiB/s)"
     else
-        bad "XTS bleibt unter 20 MiB/s: ${mib:-?}"
+        bad "XTS stays below 20 MiB/s: ${mib:-?}"
     fi
 
     tm=$(grep -oE 'takt512=[0-9]+' "$TMPD/mit.txt" 2>/dev/null | head -1 | cut -d= -f2)
     to=$(grep -oE 'takt512=[0-9]+' "$TMPD/ohne.txt" 2>/dev/null | head -1 | cut -d= -f2)
     if [[ -n ${tm:-} && -n ${to:-} && ${tm:-0} -gt 0 ]]; then
-        info "im Kern: $tm Takte je Sektor mit AES-NI, $to ohne -- Faktor $((to / tm))"
+        info "in the kernel: $tm cycles per sector with AES-NI, $to without -- factor $((to / tm))"
         [[ $((to / tm)) -ge 20 ]] \
-            && ok "auch im Kern mindestens Faktor 20 (gemessen: $((to / tm)))" \
-            || bad "im Kern nur Faktor $((to / tm))"
+            && ok "in the kernel also at least factor 20 (measured: $((to / tm)))" \
+            || bad "in the kernel only factor $((to / tm))"
     fi
 fi
 
 echo "== 8. die Nachbarn an derselben lib/crypto/aes.fi =="
 
 if [[ $SCHNELL == 1 ]]; then
-    info "OSUM_AESNI_SCHNELL=1 -- krypto und wlan werden nicht mitgefahren"
+    info "OSUM_AESNI_SCHNELL=1 -- crypto and wlan are not run along"
 else
     if timeout 2400 bash tools/krypto/run.sh >"$TMPD/kr.log" 2>&1; then
         kl=$(grep -E '^KRYPTO: ' "$TMPD/kr.log" | tail -1)
         info "$kl"
         [[ $kl == *" 0 gescheitert"* ]] \
-            && ok "die Abnahme der Plattenverschluesselung bleibt gruen" \
-            || bad "die krypto-Abnahme ist rot: $kl"
+            && ok "the disk encryption acceptance stays green" \
+            || bad "the crypto acceptance is red: $kl"
     else
-        bad "tools/krypto/run.sh laeuft nicht durch"
+        bad "tools/krypto/run.sh does not run through"
         tail -5 "$TMPD/kr.log"
     fi
     if timeout 2400 bash tools/wlan/run.sh >"$TMPD/wl.log" 2>&1; then
         wl=$(grep -E '^WLAN: ' "$TMPD/wl.log" | tail -1)
         info "$wl"
         [[ $wl == *" 0 Fehler"* ]] \
-            && ok "die WLAN-Abnahme bleibt gruen (dieselbe aes.fi)" \
-            || bad "die WLAN-Abnahme ist rot: $wl"
+            && ok "the WLAN acceptance stays green (the same aes.fi)" \
+            || bad "the WLAN acceptance is red: $wl"
     else
-        bad "tools/wlan/run.sh laeuft nicht durch"
+        bad "tools/wlan/run.sh does not run through"
         tail -5 "$TMPD/wl.log"
     fi
 fi

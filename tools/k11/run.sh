@@ -38,7 +38,7 @@ dateien_gleich() { # name sollDatei istDatei
     fi
 }
 num() { # name wert op soll
-    if [ -z "${2:-}" ]; then bad "$1: keine Zahl gefunden"; return; fi
+    if [ -z "${2:-}" ]; then bad "$1: no number found"; return; fi
     if [ "$2" -"$3" "$4" ] 2>/dev/null; then ok "$1: $2"
     else bad "$1: $2, erwartet $3 $4"; fi
 }
@@ -53,14 +53,14 @@ fi
 
 # ------------------------------------------------------------- 1. bauen
 
-echo "== 1. bauen: der Kern und der Werkzeugkasten, aus beiden Uebersetzern =="
-as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s laesst sich nicht assemblieren"
+echo "== 1. build: the kernel and the toolbox, from both compilers =="
+as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s cannot be assembled"
 
 baue_stufe() { # 0 | 1
     local s=$1 cc p rc=0
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     bash tools/build-kernel.sh "$TMPD/k$s.mb" --stufe "$s" > "$TMPD/k$s.log" 2>&1 || {
-        bad "firnc$s: der Kern laesst sich nicht bauen"
+        bad "firnc$s: the kernel cannot be built"
         sed 's/^/        /' "$TMPD/k$s.log" | head -12
         return 1
     }
@@ -80,11 +80,11 @@ baue_stufe() { # 0 | 1
 }
 
 baue_stufe 0 || { echo "K11: $pass passed, $((fail+1)) failed"; exit 1; }
-ok "firnc0: der Kern und $(echo $K11 $BASIS | wc -w) Programme sind gebaut"
+ok "firnc0: the kernel and $(echo $K11 $BASIS | wc -w) programs are built"
 if baue_stufe 1; then
-    ok "firnc1: dasselbe aus dem Uebersetzer, der in Firn geschrieben ist"
+    ok "firnc1: the same from the compiler written in Firn"
 else
-    bad "firnc1 hat den Werkzeugkasten nicht gebaut"
+    bad "firnc1 did not build the toolbox"
 fi
 
 undef=""
@@ -92,7 +92,7 @@ for p in $K11; do
     u=$(nm -u "$TMPD/${p}0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "kein Werkzeug dieser Runde hat ein undefiniertes Symbol" \
+[ -z "$undef" ] && ok "no tool of this round has an undefined symbol" \
                || bad "undefinierte Symbole:$undef"
 
 groesstes=0
@@ -104,7 +104,7 @@ num "das groesste Programm, gegen die 2135552 Oktette einer Datei" "$groesstes" 
 
 # ------------------------------------------------------- 2. die Abbilder
 
-echo "== 2. die Abbilder: Werkzeuge, Vorlagen und Skripte =="
+echo "== 2. the images: tools, templates and scripts =="
 mkdir -p "$TMPD/fix"
 printf 'alpha\nbeta\ngamma\n'                       > "$TMPD/fix/drei.txt"
 printf 'a\na\nb\nb\nb\nc\n'                         > "$TMPD/fix/dup.txt"
@@ -317,7 +317,7 @@ CASES="/t/find.sh=$TMPD/t_find.sh /t/text.sh=$TMPD/t_text.sh
 
 python3 tools/osum/mkfs.py build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $DATA $CASES \
     > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py hat ein Abbild von $BLOCKS Bloecken mit dem Werkzeugkasten gebaut" \
+    && ok "mkfs.py built an image of $BLOCKS blocks with the toolbox" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 n=$(python3 tools/osum/mkfs.py list "$TMPD/d0.img" | grep -c '^/bin/[a-z]')
 num "Programme auf der Platte" "$n" ge 30
@@ -343,11 +343,11 @@ skript() { # name skriptdatei
     lauf "$TMPD/d0.img" "$1" "osum nokbd nosched noproc nofs noring3 script=sh $2;exit"
 }
 
-echo "== 3. jedes Werkzeug gegen sein Linux-Gegenstueck, Oktett fuer Oktett =="
+echo "== 3. every tool against its Linux counterpart, octet for octet =="
 F="$TMPD/fix"
 
 skript find /t/find.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "find-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "find run: the kernel ends itself (21)" \
                  || bad "find-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/find.txt" > "$TMPD/find.ist"
 ( cd "$TMPD" || exit
@@ -361,7 +361,7 @@ dateien_gleich "find: -type f, -name, alles, -maxdepth, -empty, -type d wie GNU"
     "$TMPD/find.soll" "$TMPD/find.ist"
 
 skript text /t/text.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "Text-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "text run: the kernel ends itself (21)" \
                  || bad "Text-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/text.txt" > "$TMPD/text.ist"
 {
@@ -390,7 +390,7 @@ dateien_gleich "sed, cut, tr, basename, dirname, seq, which wie GNU" \
     "$TMPD/text.soll" "$TMPD/text.ist"
 
 skript diff /t/diff.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "diff-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "diff run: the kernel ends itself (21)" \
                  || bad "diff-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/diff.txt" > "$TMPD/diff.ist"
 {
@@ -403,7 +403,7 @@ dateien_gleich "diff -u: Kopfzeilen, @@-Bloecke und Umfeld wie GNU" \
     "$TMPD/diff.soll" "$TMPD/diff.ist"
 
 skript werk /t/werk.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "Werkzeug-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "tool run: the kernel ends itself (21)" \
                  || bad "Werkzeug-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/werk.txt" > "$TMPD/werk.ist"
 du_soll() { # verzeichnis anzeigename
@@ -417,7 +417,7 @@ du_soll() { # verzeichnis anzeigename
 {
     printf '1\t/b/unter/tief\n2\t/b/unter\n3\t/b\n'
     printf '3\t/b\n'
-    echo "VOR eins zwei drei"
+    echo "BEFORE one two three"
     echo "P 1 2"
     echo "P 3 4"
     echo "tee-test"
@@ -428,17 +428,17 @@ head -n 10 "$TMPD/werk.ist" > "$TMPD/werk.ist9"
 dateien_gleich "du, xargs, tee und mount sagen, was sie sollen" \
     "$TMPD/werk.soll" "$TMPD/werk.ist9"
 grep -qaE '^  blocks [0-9]+  free [0-9]+  inodes [0-9]+$' "$TMPD/werk.txt" \
-    && ok "mount nennt Bloecke, freie Bloecke und Inodes aus dem Superblock" \
-    || bad "mount: die Zahlenzeile fehlt"
+    && ok "mount names blocks, free blocks and inodes from the superblock" \
+    || bad "mount: the number line is missing"
 grep -qaE '^up +[0-9]+  tasks [0-9]+  calls [0-9]+  frames [0-9]+/[0-9]+$' "$TMPD/werk.txt" \
-    && ok "top: die Kopfzeile kommt aus SYS_OSUM_SYSINFO" \
+    && ok "top: the header line comes from SYS_OSUM_SYSINFO" \
     || { bad "top: keine Kopfzeile"; grep -a '^up ' "$TMPD/werk.txt" | head -2 | sed 's/^/        /'; }
 
 # ------------------------------------------------------- 4. die Fehler
 
-echo "== 4. was kaputt ist, wird gesagt: Fehlerfaelle und Randfaelle =="
+echo "== 4. what is broken gets said: error cases and edge cases =="
 skript fehler /t/fehler.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "Fehler-Lauf: der Kern lebt danach noch (21)" \
+[ "$rc" -eq 21 ] && ok "error run: the kernel is still alive afterwards (21)" \
                  || bad "Fehler-Lauf: Beendigungscode $rc, erwartet 21"
 E="$TMPD/fehler.txt"
 for paar in "cut=1" "sed=2" "diff=2" "find=1" "du=1" "tar=2" "gunzip=1" "sedverz=2"; do
@@ -454,9 +454,9 @@ hat "$E" "xxxx" "cut -c auf einer Zeile von 900 Zeichen"
 
 # ------------------------------------------------------- 5. die Shell
 
-echo "== 5. die Shell ist eine Sprache: if, while, for, case, Funktionen =="
+echo "== 5. the shell is a language: if, while, for, case, functions =="
 skript sh /t/sh.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "Shell-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "shell run: the kernel ends itself (21)" \
                  || bad "Shell-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/sh.txt" > "$TMPD/sh.ist"
 cat > "$TMPD/sh.soll" <<'WANT'
@@ -485,9 +485,9 @@ WANT
 dateien_gleich "if/elif/else, test, while, for, case, Funktionen, shift, export" \
     "$TMPD/sh.soll" "$TMPD/sh.ist"
 
-echo "== 6. tar und gzip gegen die echten: in beide Richtungen =="
+echo "== 6. tar and gzip against the real ones: both directions =="
 skript pack /t/pack.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "Pack-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "pack run: the kernel ends itself (21)" \
                  || bad "Pack-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/pack.txt" > "$TMPD/pack.ist"
 {
@@ -502,26 +502,26 @@ dateien_gleich "tar -tf nennt denselben Baum, gzip/gunzip geben dieselbe Laenge"
 
 python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/eigen.tar > "$TMPD/eigen.tar" 2>/dev/null
 if [ -s "$TMPD/eigen.tar" ]; then
-    ok "das Archiv liegt auf der Platte ($(stat -c%s "$TMPD/eigen.tar") Oktette)"
+    ok "the archive is on the disk ($(stat -c%s "$TMPD/eigen.tar") Oktette)"
     mkdir -p "$TMPD/aus1"
     if tar xf "$TMPD/eigen.tar" -C "$TMPD/aus1" 2>"$TMPD/tar1.err"; then
-        ok "GNU tar packt aus, was Osum gepackt hat"
+        ok "GNU tar unpacks what Osum packed"
         if diff -r "$TMPD/baum" "$TMPD/aus1/b" > "$TMPD/tar1.diff" 2>&1; then
-            ok "und der Baum ist danach Datei fuer Datei derselbe"
+            ok "and the tree is afterwards the same file by file"
         else
-            bad "der ausgepackte Baum weicht ab"
+            bad "the unpacked tree differs"
             head -6 "$TMPD/tar1.diff" | sed 's/^/        /'
         fi
     else
-        bad "GNU tar kann das Archiv nicht lesen"
+        bad "GNU tar cannot read the archive"
         head -4 "$TMPD/tar1.err" | sed 's/^/        /'
     fi
     tar tvf "$TMPD/eigen.tar" > "$TMPD/tar1.list" 2>/dev/null
     grep -qa '^drwxr-xr-x' "$TMPD/tar1.list" \
-        && ok "GNU tar liest die Rechte 0755 des Verzeichniseintrags" \
-        || { bad "die Verzeichnisrechte im Archiv stimmen nicht"; head -3 "$TMPD/tar1.list" | sed 's/^/        /'; }
+        && ok "GNU tar reads the permissions 0755 of the directory entry" \
+        || { bad "the directory permissions in the archive are wrong"; head -3 "$TMPD/tar1.list" | sed 's/^/        /'; }
 else
-    bad "auf der Platte liegt kein /w/eigen.tar"
+    bad "no /w/eigen.tar on the disk"
 fi
 
 python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/eigen.gz > "$TMPD/eigen.gz" 2>/dev/null
@@ -532,11 +532,11 @@ if [ -s "$TMPD/eigen.gz" ]; then
         z=$(stat -c%s "$TMPD/eigen.gz"); o=$(stat -c%s "$F/gross.txt")
         num "und es ist wirklich kleiner geworden ($o -> $z)" "$z" lt "$o"
     else
-        bad "GNU gunzip kann den Strom nicht lesen"
+        bad "GNU gunzip cannot read the stream"
         head -3 "$TMPD/gz1.err" | sed 's/^/        /'
     fi
 else
-    bad "auf der Platte liegt kein /w/eigen.gz"
+    bad "no /w/eigen.gz on the disk"
 fi
 python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/bin.gz > "$TMPD/bin.gz" 2>/dev/null
 if [ -s "$TMPD/bin.gz" ]; then
@@ -548,7 +548,7 @@ if [ -s "$TMPD/bin.gz" ]; then
     num "unkomprimierbare Daten wachsen um weniger als ein Prozent" \
         "$z" lt 2100
 else
-    bad "auf der Platte liegt kein /w/bin.gz"
+    bad "no /w/bin.gz on the disk"
 fi
 
 tar --format=ustar -cf "$TMPD/gnu.tar" -C "$TMPD" baum 2>/dev/null
@@ -567,10 +567,10 @@ SCRIPT
 python3 tools/osum/mkfs.py build "$TMPD/d1.img" $BLOCKS $DIRS $SPEC $DATA \
     "/d/gnu.tar=$TMPD/gnu.tar" "/d/gnu.gz=$TMPD/gnu.gz" \
     "/t/ein.sh=$TMPD/t_ein.sh" > "$TMPD/mkfs1.txt" 2>&1 \
-    && ok "ein zweites Abbild mit den Archiven des WIRTS darauf" \
-    || { bad "mkfs fuer das zweite Abbild fehlgeschlagen"; head -3 "$TMPD/mkfs1.txt" | sed 's/^/        /'; }
+    && ok "a second image with the archives of the HOST on it" \
+    || { bad "mkfs for the second image failed"; head -3 "$TMPD/mkfs1.txt" | sed 's/^/        /'; }
 lauf "$TMPD/d1.img" ein "osum nokbd nosched noproc nofs noring3 script=sh /t/ein.sh;exit"; rc=$?
-[ "$rc" -eq 21 ] && ok "Einlese-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "read-in run: the kernel ends itself (21)" \
                  || bad "Einlese-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/ein.txt" > "$TMPD/ein.ist"
 {
@@ -584,9 +584,9 @@ dateien_gleich "Osums tar und gunzip lesen, was GNU geschrieben hat" \
 
 # ------------------------------------------------------- 7. patch
 
-echo "== 7. patch: was diff erzeugt, wieder einspielen -- und GNU dazwischen =="
+echo "== 7. patch: apply what diff produces -- with GNU in between =="
 skript patch /t/patch.sh; rc=$?
-[ "$rc" -eq 21 ] && ok "patch-Lauf: der Kern beendet sich selbst (21)" \
+[ "$rc" -eq 21 ] && ok "patch run: the kernel ends itself (21)" \
                  || bad "patch-Lauf: Beendigungscode $rc, erwartet 21"
 block "$TMPD/patch.txt" > "$TMPD/patch.ist"
 { echo "patch=0"; cat "$F/neu.txt"; } > "$TMPD/patch.soll"
@@ -604,11 +604,11 @@ if [ -s "$TMPD/osum.diff" ]; then
         dateien_gleich "GNU patch spielt ein, was Osums diff erzeugt hat" \
             "$F/neu.txt" "$TMPD/gnu-ziel.txt"
     else
-        bad "GNU patch kann die Differenz nicht einspielen"
+        bad "GNU patch cannot apply the difference"
         head -4 "$TMPD/p.err" | sed 's/^/        /'
     fi
 else
-    bad "auf der Platte liegt keine /w/d.diff"
+    bad "no /w/d.diff on the disk"
 fi
 
 diff -u --label /w/g.txt --label /w/g.txt "$F/alt.txt" "$F/neu.txt" > "$TMPD/gnu.diff"
@@ -630,7 +630,7 @@ dateien_gleich "Osums patch spielt ein, was GNUs diff erzeugt hat" \
 
 # ------------------------------------------------------- 8. DER EDITOR
 
-echo "== 8. der Editor, wirklich bedient: Tasten ueber den QEMU-Monitor =="
+echo "== 8. the editor, really operated: keys through the QEMU monitor =="
 
 VGA_STD=${VGA_STD:-"-vga std -global VGA.edid=off"}
 
@@ -660,10 +660,10 @@ tipp_lauf edA "$TMPD/d0.img" \
     "osum gfx nosched noproc nofs noring3 script=edit /e/e1.txt" \
     "edit: ready" \
     ctrl-e text:" Welt" shift-1 ctrl-o warte:0.6 "foto:$TMPD/edA.ppm" ctrl-x
-[ "$RC" -eq 21 ] && ok "Editor-Lauf A: der Kern beendet sich selbst (21)" \
+[ "$RC" -eq 21 ] && ok "editor run A: the kernel ends itself (21)" \
                  || { bad "Editor-Lauf A: Beendigungscode $RC"; tail -4 "$TMPD/edA.tasten" | sed 's/^/        /'; }
 grep -qa 'edit: ready' "$TMPD/edA.txt" \
-    && ok "der Editor meldet sich auf der seriellen Leitung" \
+    && ok "the editor reports on the serial line" \
     || bad "'edit: ready' fehlt im Mitschnitt"
 python3 tools/osum/mkfs.py cat "$TMPD/nach-edA.img" /e/e1.txt > "$TMPD/edA.ist" 2>/dev/null
 printf 'hallo Welt!\nwelt\n' > "$TMPD/edA.soll"
@@ -674,17 +674,17 @@ VTQ="$TMPD/edA.ppm.ser"
 [ -s "$VTQ" ] || VTQ="$TMPD/edA.txt"
 python3 tools/k11/vt.py "$VTQ" 24 80 --ab 'edit: ready' > "$TMPD/edA.vt" 2>&1
 grep -qa 'hallo Welt!' "$TMPD/edA.vt" \
-    && ok "auf der seriellen Leitung steht die geaenderte Zeile im Textfeld" \
-    || { bad "der Text steht nicht auf dem seriellen Schirm"; head -6 "$TMPD/edA.vt" | sed 's/^/        /'; }
+    && ok "the changed line is in the text field on the serial line" \
+    || { bad "the text is not on the serial screen"; head -6 "$TMPD/edA.vt" | sed 's/^/        /'; }
 grep -qaE '^ +edit +/e/e1\.txt' "$TMPD/edA.vt" \
-    && ok "und darueber der Kopfbalken mit dem Dateinamen" \
-    || { bad "der Kopfbalken fehlt"; head -3 "$TMPD/edA.vt" | sed 's/^/        /'; }
+    && ok "and above it the header bar with the file name" \
+    || { bad "the header bar is missing"; head -3 "$TMPD/edA.vt" | sed 's/^/        /'; }
 grep -qa '\^O Write' "$TMPD/edA.vt" \
-    && ok "und unten die Tastenzeile" \
-    || bad "die Tastenzeile fehlt"
+    && ok "and below the key line" \
+    || bad "the key line is missing"
 
 if [ -s "$TMPD/edA.ppm" ]; then
-    ok "das Bildschirmfoto steht ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
+    ok "the screenshot exists ($(stat -c%s "$TMPD/edA.ppm") Oktette)"
     python3 tools/gfx/checkshot.py read "$TMPD/edA.ppm" kernel/gfx/font.fi \
         > "$TMPD/edA.schirm" 2>&1
     sed -n 's/^ *[0-9]\+ |\(.*\)|$/\1/p' "$TMPD/edA.schirm" | sed 's/ *$//' \
@@ -693,12 +693,12 @@ if [ -s "$TMPD/edA.ppm" ]; then
         grep -v '^ *$' "$TMPD/edA.schirm" | sed 's/ *$//' > "$TMPD/edA.schirm.txt"
     fi
     grep -qa 'hallo Welt!' "$TMPD/edA.schirm.txt" \
-        && ok "AUF DEM BILDSCHIRM steht dieselbe Zeile -- aus dem Foto gelesen" \
-        || { bad "die Zeile steht nicht auf dem Bildschirm"
+        && ok "ON THE SCREEN is the same line -- read from the photo" \
+        || { bad "the line is not on the screen"
              head -8 "$TMPD/edA.schirm.txt" | sed 's/^/        /'; }
     grep -qa 'Write' "$TMPD/edA.schirm.txt" \
-        && ok "und die Tastenzeile steht auch dort" \
-        || bad "die Tastenzeile fehlt auf dem Bildschirm"
+        && ok "and the key line is there too" \
+        || bad "the key line is missing on the screen"
     grep -av '^$' "$TMPD/edA.vt" | sed 's/ *$//' | sort > "$TMPD/edA.a"
     grep -av '^$' "$TMPD/edA.schirm.txt" | sed 's/ *$//' | sort > "$TMPD/edA.b"
     gemeinsam=$(comm -12 "$TMPD/edA.a" "$TMPD/edA.b" | wc -l)
@@ -706,7 +706,7 @@ if [ -s "$TMPD/edA.ppm" ]; then
     num "Zeilen, die auf BEIDEN Wegen gleich stehen (von $davon)" \
         "$gemeinsam" ge 3
 else
-    bad "es kam kein Bildschirmfoto zustande"
+    bad "no screenshot was produced"
     tail -4 "$TMPD/edA.tasten" | sed 's/^/        /'
 fi
 
@@ -716,7 +716,7 @@ tipp_lauf edB "$TMPD/d0.img" \
     end ret text:"neu" home text:"A" \
     down home delete end backspace \
     ctrl-o ctrl-x
-[ "$RC" -eq 21 ] && ok "Editor-Lauf B (ohne Bildschirm): Beendigungscode 21" \
+[ "$RC" -eq 21 ] && ok "editor run B (without screen): exit code 21" \
                  || bad "Editor-Lauf B: Beendigungscode $RC"
 python3 tools/osum/mkfs.py cat "$TMPD/nach-edB.img" /e/e2.txt > "$TMPD/edB.ist" 2>/dev/null
 printf 'eins\nAneu\nwe\ndrei\nvier\nfuenf\n' > "$TMPD/edB.soll"
@@ -773,7 +773,7 @@ dateien_gleich "900 Zeichen, ans Ende gesprungen, angehaengt, gesichert" \
 
 # ------------------------------------------------------- 9. Gegenproben
 
-echo "== 9. Gegenproben: was NICHT passieren darf =="
+echo "== 9. controls: what must NOT happen =="
 
 tipp_lauf gegA "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e1.txt" \
@@ -821,20 +821,20 @@ fi
 
 python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1 \
     && ok "$(tail -1 "$TMPD/karte.txt")" \
-    || { bad "die Speicherkarte von kdata hat Kollisionen"; tail -6 "$TMPD/karte.txt" | sed 's/^/        /'; }
+    || { bad "the memory map of kdata has collisions"; tail -6 "$TMPD/karte.txt" | sed 's/^/        /'; }
 grep -qa 'K11' tools/kernel/memmap.py \
-    && ok "und der Bereich dieser Runde steht in der Karte" \
+    && ok "and the range of this round is in the map" \
     || bad "K11_OFF fehlt in tools/kernel/memmap.py"
 
 n=$(grep -aoE '^const SYS_OSUM_(SETENV|MOUNT): u64 = 14[0-9][0-9]' kernel/sys/sys.fi | wc -l)
 num "eigene Aufrufnummern im Block 1400..1499" "$n" eq 2
 grep -qa '1400..1499   RUNDE K11' kernel/sys/sys.fi \
-    && ok "der Block ist in der Karte von sys.fi eingetragen" \
-    || bad "der Block 1400..1499 fehlt in der Karte von sys.fi"
+    && ok "the block is entered in the map of sys.fi" \
+    || bad "the block 1400..1499 is missing from the map of sys.fi"
 doppelt=$(grep -aoE '^const SYS_[A-Z0-9_]+: u64 = [0-9]+' kernel/sys/sys.fi \
     | grep -v 'SYS_MARK\|SYS_LEAVE' \
     | awk '{print $NF}' | sort | uniq -d | tr '\n' ' ')
-[ -z "$doppelt" ] && ok "keine Aufrufnummer ist zweimal vergeben" \
+[ -z "$doppelt" ] && ok "no call number is assigned twice" \
                   || bad "doppelte Aufrufnummern: $doppelt"
 
 cat > "$TMPD/t_env.sh" <<'SCRIPT'
@@ -874,7 +874,7 @@ python3 tools/osum/mkfs.py build "$TMPD/d4.img" $BLOCKS $DIRS $SPEC $DATA \
     "/t/leck.sh=$TMPD/t_leck.sh" > /dev/null 2>&1
 lauf "$TMPD/d4.img" leck "osum nokbd nosched noproc nofs noring3 script=sh /t/leck.sh;exit" >/dev/null
 RCL=$?
-[ "$RCL" -eq 21 ] && ok "Leck-Lauf: der Kern beendet sich selbst (21)" \
+[ "$RCL" -eq 21 ] && ok "leak run: the kernel ends itself (21)" \
                   || bad "Leck-Lauf: Beendigungscode $RCL"
 grep -qa 'frames' "$TMPD/leck.txt" && frames_ok=1 || frames_ok=0
 vorher=$(grep -aoE 'frames [0-9]+' "$TMPD/leck.txt" | head -1 | grep -oE '[0-9]+')
@@ -888,7 +888,7 @@ else
     if [ -n "$v" ] && [ -n "$n2" ]; then
         gleich "die freien Bloecke der Platte sind vorher und nachher dieselben" "$v" "$n2"
     else
-        ok "df meldet keine Rahmenzahl -- nichts zu vergleichen"
+        ok "df reports no frame count -- nothing to compare"
     fi
 fi
 

@@ -50,11 +50,11 @@ fi
 
 # ------------------------------------------------------------- 1. bauen
 
-echo "== 1. bauen, die Speicherkarte und DIE AUFRUFNUMMERN =="
+echo "== 1. build, the memory map and THE CALL NUMBERS =="
 
 bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
-    && ok "firnc0 baut den Kern mit Betretungsrecht und Zusatzgruppen" \
-    || { bad "firnc0 baut den Kern nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -12; }
+    && ok "firnc0 builds the kernel with traverse permission and supplementary groups" \
+    || { bad "firnc0 does not build the kernel"; sed 's/^/        /' "$TMPD/b0.txt" | head -12; }
 [ -f "$TMPD/k0.img" ] || { echo "MULTIUSER: $pass passed, $((fail+1)) failed"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s uebersetzt nicht"
@@ -69,14 +69,14 @@ for p in $PROGS; do
     strip --strip-all "$TMPD/$p.elf"
 done
 [ "$rc" = 0 ] && ok "firnc0 baut $(echo $PROGS | wc -w) Programme in Ring 3" \
-              || bad "nicht alle Programme gebaut"
+              || bad "not all programs built"
 
 undef=""
 for p in mut login su passwd id; do
     u=$(nm -u "$TMPD/$p.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "kein Programm dieser Runde hat ein undefiniertes Symbol" \
+[ -z "$undef" ] && ok "no program of this round has an undefined symbol" \
                || bad "undefinierte Symbole:$undef"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
@@ -85,7 +85,7 @@ else
     bad "der Kartenpruefer schlaegt an"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 grep -q '"MU"' tools/kernel/memmap.py \
-    && ok "der Bereich dieser Runde (MU_OFF) steht in der Speicherkarte" \
+    && ok "the range of this round (MU_OFF) is in the memory map" \
     || bad "MU_OFF fehlt in tools/kernel/memmap.py"
 
 if python3 tools/kernel/syscalls.py > "$TMPD/sys.txt" 2>&1; then
@@ -98,7 +98,7 @@ for n in "SYS_GETGROUPS 115" "SYS_SETGROUPS 116" "SYS_OSUM_MUSTAT 1200"; do
     a=$(grep -oE "^const $1: u64 = [0-9]+" kernel/sys/sys.fi | grep -oE '[0-9]+$')
     b=$(grep -oE "^const $1: u64 = [0-9]+" lib/libc/kcall.fi | grep -oE '[0-9]+$')
     if [ "$a" = "$2" ] && [ "$b" = "$2" ]; then
-        ok "$1 = $2 im Kernel UND in der libc"
+        ok "$1 = $2 in the kernel AND in libc"
     else
         bad "$1: Kernel '$a', libc '$b', erwartet '$2'"
     fi
@@ -110,13 +110,13 @@ cp tools/kernel/syscalls.py "$TMPD/kol/tools/kernel/"
 sed -i 's/^const SYS_OSUM_MUSTAT: u64 = 1200/const SYS_OSUM_MUSTAT: u64 = 1320/' \
     "$TMPD/kol/kernel/sys/sys.fi"
 grep -q '^const SYS_OSUM_MUSTAT: u64 = 1320' "$TMPD/kol/kernel/sys/sys.fi" \
-    || bad "die Gegenprobe konnte MUSTAT gar nicht auf 1320 legen"
+    || bad "the control could not place MUSTAT at 1320 at all"
 if python3 "$TMPD/kol/tools/kernel/syscalls.py" > "$TMPD/kol.txt" 2>&1; then
-    bad "GEGENPROBE: zweimal 1320 faellt NICHT auf -- der Waechter ist wertlos"
+    bad "CONTROL: twice 1320 is NOT noticed -- the guard is worthless"
 else
     grep -q '1320 ist 2 mal vergeben' "$TMPD/kol.txt" \
-        && ok "GEGENPROBE: zweimal 1320 -- genau der Fehler von Runde MERGE -- faellt auf" \
-        || bad "GEGENPROBE faellt, aber anders: $(head -1 "$TMPD/kol.txt")"
+        && ok "CONTROL: twice 1320 -- exactly the error of round MERGE -- is noticed" \
+        || bad "CONTROL fails, but differently: $(head -1 "$TMPD/kol.txt")"
 fi
 
 # ------------------------------------------------------- 2. die Abbilder
@@ -125,7 +125,7 @@ echo "== 2. die Abbilder: /etc/passwd, /etc/group, /etc/shadow, /etc/login.conf 
 
 ITERS=$(grep -oE '^const KOSTEN: u64 = [0-9]+' kernel/user/pw.fi | grep -oE '[0-9]+$')
 if [ -n "$ITERS" ]; then
-    ok "der Kostenfaktor steht als Zahl im Quelltext (pw.fi KOSTEN = $ITERS)"
+    ok "the cost factor is a number in the source (pw.fi KOSTEN = $ITERS)"
 else
     bad "KOSTEN fehlt in kernel/user/pw.fi"; ITERS=8192
 fi
@@ -249,7 +249,7 @@ DATA="/t/pw.txt=$TMPD/pw.txt@644:0:0 /t/neu.txt=$TMPD/neu.txt@644:0:0
 
 python3 tools/osum/mkfs.py build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab@644:0:0" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py baut das Abbild dieser Runde" \
+    && ok "mkfs.py builds the image of this round" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -6; }
 python3 tools/osum/mkfs.py build "$TMPD/dl.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab-login@644:0:0" \
@@ -258,7 +258,7 @@ python3 tools/osum/mkfs.py build "$TMPD/df.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab-login@644:0:0" \
     "/etc/login.conf=$TMPD/login.conf.schnell@644:0:0" >/dev/null 2>&1
 { [ -f "$TMPD/dl.img" ] && [ -f "$TMPD/df.img" ]; } \
-    && ok "und zwei Anmeldeabbilder, die sich NUR in /etc/login.conf unterscheiden" \
+    && ok "and two login images that differ ONLY in /etc/login.conf" \
     || bad "die Anmeldeabbilder fehlen"
 
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /etc/group)
@@ -305,9 +305,9 @@ run_tcg() {
 
 BASIS="nokbd nosched noproc nofs noring3 vfs"
 
-echo "== 3. der Kostenfaktor, GEMESSEN (nicht abgeschrieben) =="
+echo "== 3. the cost factor, MEASURED (not copied) =="
 if [ "$KVM" = 1 ]; then
-    ok "/dev/kvm ist da -- die rechenlastigen Laeufe gehen auf die ECHTE CPU"
+    ok "/dev/kvm is there -- the compute-heavy runs go on the REAL CPU"
 else
     hin "kein /dev/kvm: alles laeuft unter TCG, also langsamer"
 fi
@@ -321,9 +321,9 @@ us4096=$(mval "$F" us 2)
 us8192=$(mval "$F" us 3)
 ps=$(mval "$F" rundenps 3)
 if [ -n "${us8192:-}" ] && [ "${us8192:-0}" -gt 100000 ]; then
-    ok "EINE Pruefung mit $ITERS Runden braucht messbar Zeit: ${us8192} us"
+    ok "ONE check with $ITERS rounds takes measurable time: ${us8192} us"
 else
-    bad "die Pruefung dauert keine messbare Zeit (${us8192:-?} us)"
+    bad "the check takes no measurable time (${us8192:-?} us)"
 fi
 #
 #     Runden     us      Runden/s
@@ -337,14 +337,14 @@ fi
 if [ -n "${us1024:-}" ] && [ "${us1024:-0}" -gt 0 ] && [ -n "${us4096:-}" ]; then
     v=$(( us4096 * 100 / us1024 ))
     if [ "$v" -ge 300 ] && [ "$v" -le 500 ]; then
-        ok "viermal so viele Runden kosten viermal so viel Zeit (${v}/100, 1024 gegen 4096) -- die Zahl WIRKT"
+        ok "four times as many rounds cost four times as much time (${v}/100, 1024 against 4096) -- the number WORKS"
     else
-        bad "das Verhaeltnis stimmt nicht: ${us1024} us zu ${us4096} us (${v}/100)"
-        echo "        alle mut-Zeilen dieses Laufs:"
+        bad "the ratio is wrong: ${us1024} us to ${us4096} us (${v}/100)"
+        echo "        all mut lines of this run:"
         grep -aoE "mut: [a-z]+=-?[0-9]+" "$F" | sed "s/^/          /"
     fi
 else
-    bad "die Messung mit 2048 Runden fehlt"
+    bad "the measurement with 2048 rounds is missing"
 fi
 [ -n "${ps:-}" ] && hin "gemessen: ${ps} PBKDF2-Runden je Sekunde in Ring 3"
 hin "daraus folgt der Kostenfaktor $ITERS in kernel/user/pw.fi"
@@ -357,15 +357,15 @@ rc=$RC
     ustcg=$(mval "$G" us 2)
     if [ -n "${ustcg:-}" ] && [ "${us8192:-0}" -gt 0 ]; then
         f=$(( ustcg * 10 / us8192 ))
-        ok "und braucht dort ${ustcg} us statt ${us8192} us -- KVM ist ${f}/10 mal schneller"
+        ok "and takes ${ustcg} us there instead of ${us8192} us -- KVM is ${f}/10 times faster"
     else
-        bad "die TCG-Messung fehlt"
+        bad "the TCG measurement is missing"
     fi
 fi
 
 # --------------------------------------------- 4. Rechte, root und justin
 
-echo "== 4. dieselben Dateien, einmal als root und einmal als justin =="
+echo "== 4. the same files, once as root and once as justin =="
 
 run_case root "$TMPD/d0.img" "osum $BASIS murun script=sh /t/alsroot.sh"
 rc=$RC
@@ -383,7 +383,7 @@ hasnot "$J" "NUR-ROOT" "justin liest sie NICHT"
 has "$R" "FUER-ALLE" "root liest die Datei mit 0o644"
 has "$J" "FUER-ALLE" "und justin auch -- der Unterschied sind allein die Rechtebits"
 
-echo "== 5. DAS BETRETUNGSRECHT: derselbe Inhalt, zwei Wege =="
+echo "== 5. TRAVERSE PERMISSION: the same content, two ways =="
 is "root kommt durch das offene Verzeichnis" "$(mval "$R" pfadauf)" "1"
 is "root kommt auch durch das verschlossene (root darf alles)" "$(mval "$R" pfadzu)" "1"
 is "justin kommt durch das offene Verzeichnis" "$(mval "$J" pfadauf)" "1"
@@ -394,10 +394,10 @@ has "$J" "DAS-IST-OFFEN" "durch /auf/tief dagegen schon -- derselbe Text, andere
 hasnot "$J" "cat: /geheim/inhalt.txt" "und die EINE Ebene (/geheim, 0o700) hielt schon vor dieser Runde"
 w=$(muval "$J" walks)
 wd=$(muval "$J" walkdeny)
-if [ "${w:-0}" -gt 10 ]; then ok "der Kern hat $w Pfade auf das Betretungsrecht geprueft"
-else bad "nur ${w:-0} Pfadpruefungen -- da laeuft niemand"; fi
+if [ "${w:-0}" -gt 10 ]; then ok "the kernel checked $w paths for traverse permission"
+else bad "only ${w:-0} path checks -- nobody is running there"; fi
 if [ "${wd:-0}" -gt 0 ]; then ok "und $wd davon abgelehnt"
-else bad "keine einzige Ablehnung -- die Pfadpruefung sagt immer ja"; fi
+else bad "not a single rejection -- the path check always says yes"; fi
 
 run_case nowalk "$TMPD/d0.img" "osum $BASIS murun nowalk script=sh /t/alsjustin.sh"
 rc=$RC
@@ -407,8 +407,8 @@ is "GEGENPROBE nowalk: justin kommt jetzt an /zu/tief/inhalt.txt heran" \
 has "$N" "DAS-IST-GEHEIM" "GEGENPROBE nowalk: der Inhalt steht wirklich da -- das war der Zustand VOR dieser Runde"
 wd=$(muval "$N" walkdeny)
 if [ "${wd:-0}" -gt 0 ]; then
-    ok "und der Zaehler steht trotzdem bei $wd -- gezaehlt wird, nur nicht gewirkt"
-else bad "mit nowalk wird nicht einmal mehr gezaehlt"; fi
+    ok "and the counter is still at $wd -- it counts, but has no effect"
+else bad "with nowalk it does not even count any more"; fi
 
 echo "== 6. ZUSATZGRUPPEN: /etc/group, getgroups, setgroups =="
 is "root hat keine Zusatzgruppen (die Bootaufgabe erbt keine)" \
@@ -422,8 +422,8 @@ is "setgroups als GEWOEHNLICHER Benutzer ist -EPERM und nicht 0" \
    "$(mval "$J" setgrps)" "-1"
 is "als root gelingt es" "$(mval "$R" setgrps)" "0"
 g=$(muval "$J" grphits)
-if [ "${g:-0}" -gt 0 ]; then ok "$g Zugriffe wurden von einer NEBENgruppe erlaubt"
-else bad "keine Nebengruppe hat je gegriffen"; fi
+if [ "${g:-0}" -gt 0 ]; then ok "$g accesses were allowed by a SUPPLEMENTARY group"
+else bad "no supplementary group ever took effect"; fi
 
 run_case nogroups "$TMPD/d0.img" "osum $BASIS murun nogroups script=sh /t/alsjustin.sh"
 rc=$RC
@@ -433,13 +433,13 @@ is "GEGENPROBE nogroups: dieselbe Datei bleibt fuer justin zu" \
 is "und die Liste steht trotzdem da -- gesetzt wird, nur nicht beachtet" \
    "$(mval "$NG" ngrps)" "1"
 
-echo "== 7. setuid VON justin AUF root =="
+echo "== 7. setuid FROM justin TO root =="
 is "justin ist justin" "$(mval "$J" uid)" "1000"
 is "setuid(0) ist -EPERM und nicht 0" "$(mval "$J" setroot)" "-1"
 is "setgid(0) ebenso" "$(mval "$J" setgroot)" "-1"
 is "GEGENPROBE: als root gelingt dasselbe setuid(0)" "$(mval "$R" setroot)" "0"
 
-echo "== 8. die Rechte ueber die VFS-Schicht (/dev, /proc) =="
+echo "== 8. the permissions via the VFS layer (/dev, /proc) =="
 run_case dev "$TMPD/d0.img" "osum $BASIS murun script=sh /t/dev.sh"
 rc=$RC
 D="$TMPD/dev.txt"
@@ -450,15 +450,15 @@ is "root darf es (0o644 root)" "$(mval "$D" devwrite 2)" "1"
 is "justin darf /dev/null beschreiben (0o666)" "$(mval "$D" nullwrite 1)" "1"
 is "und /proc/meminfo lesen (0o444)" "$(mval "$D" procread 1)" "1"
 n=$(muval "$D" nodechk)
-if [ "${n:-0}" -gt 0 ]; then ok "$n Rechtefragen gingen ueber die VFS-Schicht"
-else bad "die VFS-Schicht hat nie gefragt"; fi
+if [ "${n:-0}" -gt 0 ]; then ok "$n permission questions went through the VFS layer"
+else bad "the VFS layer never asked"; fi
 
-echo "== 9. chmod und chown wirken -- nachgelesen AUS DEM ABBILD =="
+echo "== 9. chmod and chown take effect -- read back FROM THE IMAGE =="
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/live-kdf.img" /w/kopie.txt)
 is "chmod 640 und chown justin:projekt stehen im Inode" \
    "$m" "/w/kopie.txt 640 1000 2000"
 
-echo "== 10. die Anmeldung: richtig, falsch, und wie lange sie wartet =="
+echo "== 10. the login: right, wrong, and how long it waits =="
 run_case login "$TMPD/dl.img" \
     "osum $BASIS script=justin;geheim12;id;whoami;exit"
 rc=$RC
@@ -488,9 +488,9 @@ is "nach dem dritten wieder doppelt" "${w3:-fehlt}" "4000"
 g1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 1p | grep -oE '[0-9]+')
 g3=$(grep -aoE 'login: gewartet [0-9]+ ms' "$B" | sed -n 3p | grep -oE '[0-9]+')
 if [ -n "${g1:-}" ] && [ "${g1:-0}" -ge 900 ]; then
-    ok "und die Uhr DER MASCHINE bestaetigt es: gefordert 1000 ms, wirklich gewartet ${g1} ms (untere Schranke -- unter KVM zaehlt sie auch die Zeit mit, in der die vCPU nicht lief)"
+    ok "and the clock OF THE MACHINE confirms it: requested 1000 ms, actually waited ${g1} ms (lower bound -- under KVM it also counts the time the vCPU did not run)"
 else
-    bad "login sagt 1000 ms und hat ${g1:-0} ms gewartet -- da hat niemand geschlafen"
+    bad "login says 1000 ms and waited ${g1:-0} ms -- nobody slept there"
 fi
 if [ -n "${g3:-}" ] && [ "${g3:-0}" -ge 3600 ]; then
     ok "beim dritten Mal: gefordert 4000 ms, wirklich gewartet ${g3} ms"
@@ -499,9 +499,9 @@ else
 fi
 d=$(( BADDAUER - OKDAUER ))
 if [ "$d" -ge 6000 ]; then
-    ok "und der ganze Lauf dauert entsprechend laenger: ${BADDAUER} ms gegen ${OKDAUER} ms"
+    ok "and the whole run takes correspondingly longer: ${BADDAUER} ms against ${OKDAUER} ms"
 else
-    bad "drei Fehlversuche dauerten nur ${d} ms laenger (${BADDAUER} gegen ${OKDAUER})"
+    bad "three failed attempts took only ${d} ms longer (${BADDAUER} against ${OKDAUER})"
 fi
 
 run_case loginfast "$TMPD/df.img" \
@@ -516,14 +516,14 @@ is "und beim dritten Mal 800 -- dieselbe Verdopplung, andere Basis" "${f3:-fehlt
 #
 h1=$(grep -aoE 'login: gewartet [0-9]+ ms' "$S" | sed -n 1p | grep -oE '[0-9]+')
 if [ -n "${h1:-}" ] && [ "${h1:-0}" -ge 180 ]; then
-    ok "und die Uhr der Maschine bestaetigt: gefordert 200 ms, wirklich gewartet ${h1} ms"
+    ok "and the clock of the machine confirms: requested 200 ms, actually waited ${h1} ms"
 else
-    bad "mit verzoegerung_ms=200 wurden nur ${h1:-0} ms gewartet"
+    bad "with verzoegerung_ms=200 only ${h1:-0} ms were waited"
 fi
 d=$(( BADDAUER - FASTDAUER ))
 hin "der ganze Lauf: ${FASTDAUER} ms gegen ${BADDAUER} ms, also ${d} ms kuerzer"
 
-echo "== 11. passwd: ueber eine Zwischendatei, /etc/shadow bleibt 0o600 root =="
+echo "== 11. passwd: via an intermediate file, /etc/shadow stays 0o600 root =="
 run_case pw "$TMPD/d0.img" "osum $BASIS script=sh /t/passwd.sh"
 rc=$RC
 P="$TMPD/pw.txt"
@@ -538,7 +538,7 @@ for l in raw.decode("latin1").splitlines():
     if len(f) > 1 and f[0] == "justin":
         rec = f[1]
 if not rec.startswith("$osum1$"):
-    print("kein osum1-Eintrag: %r" % rec[:40]); raise SystemExit
+    print("no osum1 entry: %r" % rec[:40]); raise SystemExit
 _, _, it, salt, dk = rec.split("$", 4)
 neu = binascii.hexlify(hashlib.pbkdf2_hmac(
     "sha256", b"neuneu77", binascii.unhexlify(salt), int(it), 32)).decode()
@@ -551,27 +551,27 @@ print("neu %s" % ("stimmt" if dk == neu else "STIMMT NICHT"))
 print("alt %s" % ("stimmt" if dk == alt else "stimmt nicht"))
 PY
 grep -q '^keinklartext' "$TMPD/pwcheck.txt" \
-    && ok "das Passwort steht NICHT im Klartext in /etc/shadow" \
-    || bad "das Passwort steht im Klartext in /etc/shadow"
+    && ok "the password is NOT in plain text in /etc/shadow" \
+    || bad "the password is in plain text in /etc/shadow"
 grep -q "^runden $ITERS$" "$TMPD/pwcheck.txt" \
-    && ok "der neue Eintrag traegt den Kostenfaktor dieser Runde ($ITERS)" \
-    || bad "die Rundenzahl passt nicht: $(grep '^runden' "$TMPD/pwcheck.txt" || true)"
+    && ok "the new entry carries the cost factor of this round ($ITERS)" \
+    || bad "the round count does not match: $(grep '^runden' "$TMPD/pwcheck.txt" || true)"
 grep -q '^salzlaenge 8' "$TMPD/pwcheck.txt" \
-    && ok "und acht Oktette Salz aus getrandom" \
-    || bad "die Salzlaenge stimmt nicht"
+    && ok "and eight octets of salt from getrandom" \
+    || bad "the salt length is wrong"
 grep -q '^neu stimmt' "$TMPD/pwcheck.txt" \
-    && ok "PYTHON rechnet denselben Wert -- es ist wirklich PBKDF2-HMAC-SHA256" \
-    || bad "Python kommt auf einen anderen Wert"
+    && ok "PYTHON computes the same value -- it really is PBKDF2-HMAC-SHA256" \
+    || bad "Python arrives at a different value"
 grep -q '^alt stimmt nicht' "$TMPD/pwcheck.txt" \
-    && ok "GEGENPROBE: aus dem ALTEN Passwort kommt ein anderer Wert" \
-    || bad "altes und neues Passwort ergeben denselben Wert"
+    && ok "CONTROL: the OLD password gives a different value" \
+    || bad "old and new password give the same value"
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/live-pw.img" /etc/shadow)
 is "und /etc/shadow gehoert weiter root und traegt 0o600" "$m" "/etc/shadow 600 0 0"
 python3 tools/osum/mkfs.py list "$TMPD/live-pw.img" > "$TMPD/liste.txt" 2>&1
 if grep -q 'shadow.neu\|shadow.alt' "$TMPD/liste.txt"; then
-    bad "eine Zwischendatei liegt noch da: $(grep -o 'shadow\.[a-z]*' "$TMPD/liste.txt" | tr '\n' ' ')"
+    bad "an intermediate file is still there: $(grep -o 'shadow\.[a-z]*' "$TMPD/liste.txt" | tr '\n' ' ')"
 else
-    ok "keine Zwischendatei bleibt liegen -- die vier Schritte gehen auf"
+    ok "no intermediate file is left behind -- the four steps add up"
 fi
 
 echo
