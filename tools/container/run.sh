@@ -63,7 +63,7 @@ for p in $PROGS; do
         MK="$MK /bin/$p=$TMPD/$p"
         gebaut=$((gebaut+1))
     else
-        bad "$p laesst sich nicht bauen"
+        bad "$p cannot be built"
         grep -E '^error' "$TMPD/$p.log" | head -3 | sed 's/^/        /'
     fi
 done

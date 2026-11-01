@@ -56,7 +56,7 @@ for stufe in 0 1; do
     echo "== Stufe $stufe: firnc$stufe =="
     IMG="$TMPD/osum$stufe.mb"
     if ! bash tools/build-kernel.sh "$IMG" --stufe "$stufe" > "$TMPD/build$stufe.log" 2>&1; then
-        bad "firnc$stufe: der Kernel laesst sich nicht bauen"
+        bad "firnc$stufe: der Kernel cannot be built"
         sed 's/^/        /' "$TMPD/build$stufe.log" | head -10
         continue
     fi

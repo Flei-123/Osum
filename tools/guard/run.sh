@@ -64,7 +64,7 @@ for p in $PROGS; do
         && ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" \
              -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>>"$TMPD/u$p.log" \
         && strip --strip-all "$TMPD/$p.elf" \
-        || { bad "$p laesst sich nicht bauen"; ubau=0; }
+        || { bad "$p cannot be built"; ubau=0; }
 done
 [ "$ubau" = 1 ] && ok "$(echo $PROGS | wc -w) unprivilegierte Programme gebaut"
 

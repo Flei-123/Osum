@@ -73,7 +73,7 @@ else
 fi
 
 # =====================================================================
-echo "== 1. die Nummer: 7, einmal, in beiden Tafeln =="
+echo "== 1. the number: 7, once, in both tables =="
 # =====================================================================
 kn=$(number_in kernel/sys/sys.fi SYS_POLL)
 ln=$(number_in lib/libc/kcall.fi SYS_POLL)
@@ -90,10 +90,10 @@ dup_in() { # datei
         | awk '{c[$1]=c[$1]" "$2; n[$1]++} END {for (k in n) if (n[k]>1) print k":"c[k]}'
 }
 kdup=$(dup_in kernel/sys/sys.fi)
-[ -z "$kdup" ] && ok "kernel/sys/sys.fi: keine Systemaufrufnummer ist zweimal vergeben" \
+[ -z "$kdup" ] && ok "kernel/sys/sys.fi: no system call number is assigned twice" \
                || { bad "kernel/sys/sys.fi: doppelt vergebene Nummern"; echo "$kdup" | sed 's/^/        /'; }
 ldup=$(dup_in lib/libc/kcall.fi)
-[ -z "$ldup" ] && ok "lib/libc/kcall.fi: keine Nummer ist zweimal vergeben" \
+[ -z "$ldup" ] && ok "lib/libc/kcall.fi: no number is assigned twice" \
                || { bad "lib/libc/kcall.fi: doppelt vergebene Nummern"; echo "$ldup" | sed 's/^/        /'; }
 
 diffs=0
@@ -114,17 +114,17 @@ for pair in "POLLIN 1" "POLLPRI 2" "POLLOUT 4" "POLLERR 8" "POLLHUP 16" "POLLNVA
 done
 
 if grep -aqE "^const SYS_(SELECT|EPOLL)" kernel/sys/sys.fi; then
-    bad "es steht ploetzlich select/epoll in der Tafel -- diese Runde hat das nicht gebaut"
+    bad "select/epoll suddenly appear in the table -- this round did not build that"
 else
-    ok "kein select und kein epoll vorgetaeuscht (nur poll ist da)"
+    ok "no select and no epoll faked (only poll is there)"
 fi
 
 # =====================================================================
-echo "== 2. bauen: Kernel, libc, /bin/pollt und /bin/pollbr =="
+echo "== 2. build: kernel, libc, /bin/pollt and /bin/pollbr =="
 # =====================================================================
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
-        || bad "$f.s laesst sich nicht assemblieren"
+        || bad "$f.s cannot be assembled"
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 
@@ -133,7 +133,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     [ -x "$cc" ] || return 1
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
-        || { bad "firnc$s uebersetzt den Kernel nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
+        || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     "$cc" kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt uprog.fi nicht"; return 1; }
     ld -n -T "$LDSCRIPT" \
@@ -146,7 +146,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=USER_MAIN="_F$s.u_enter" \
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
         "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
-        || { bad "firnc$s: ld ist am Kernel gescheitert"; return 1; }
+        || { bad "firnc$s: ld failed on the kernel"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
     for p in $PROGS; do
         "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
@@ -161,13 +161,13 @@ build_stage() { # 0 = firnc0, 1 = firnc1
 build_stage 0 || { echo "POLL: $pass bestanden, $fail durchgefallen"; exit 1; }
 ok "firnc0: Kernel + $(echo $PROGS | wc -w) Programme"
 if build_stage 1; then
-    ok "firnc1: dasselbe, aus dem in Firn geschriebenen Uebersetzer"
+    ok "firnc1: the same, from the compiler written in Firn"
 else
     note "firnc1 hat nicht gebaut -- die Messungen unten laufen mit firnc0"
 fi
 
 undef=$(nm -u "$TMPD/pollt0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$undef" ] && ok "/bin/pollt hat keinen undefinierten Namen -- die libc ist vollstaendig" \
+[ -z "$undef" ] && ok "/bin/pollt has no undefined name -- libc is complete" \
                 || bad "undefinierte Namen in pollt: $undef"
 undef=$(nm -u "$TMPD/pollbr0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
 [ -z "$undef" ] && ok "/bin/pollbr ebenso" || bad "undefinierte Namen in pollbr: $undef"
@@ -175,7 +175,7 @@ undef=$(nm -u "$TMPD/pollbr0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py hat ein OFS-Abbild mit dem Userland dieser Runde gebaut" \
+    && ok "mkfs.py built an OFS image with the userland of this round" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 run_disk() { # abbild anhang ausgabe
@@ -191,18 +191,18 @@ run_disk() { # abbild anhang ausgabe
 QUIET="nokbd nosched noproc nofs noring3"
 
 # =====================================================================
-echo "== 3. jede Zusage von poll, im laufenden Kernel ($ACCELNAME) =="
+echo "== 3. every promise of poll, in the running kernel ($ACCELNAME) =="
 # =====================================================================
 T0=$(date +%s%N)
 run_disk "$TMPD/k0.mb" "osum $QUIET script=pollt;exit" "$TMPD/run0.txt"
 rc=$?
 T1=$(date +%s%N)
 F="$TMPD/run0.txt"
-[ "$rc" -eq 21 ] && ok "der Kernel hat selbst Schluss gemacht (Beendigungscode 21)" \
+[ "$rc" -eq 21 ] && ok "the kernel shut itself down (exit code 21)" \
                  || { bad "QEMU-Beendigungscode $rc, erwartet 21"; tail -8 "$F" | tr -d '\000' | sed 's/^/        /'; }
 note "Laufzeit dieses Abschnitts: $(( (T1-T0)/1000000 )) ms mit $ACCELNAME"
 
-echo "   -- zwei Rohre, eines beschrieben"
+echo "   -- two pipes, one written"
 say "$F" two_ret 1  "poll meldet GENAU EINEN bereiten Deskriptor"
 say "$F" two_re0 1  "und zwar das beschriebene Rohr: POLLIN"
 say "$F" two_re1 0  "das andere Rohr meldet nichts"
@@ -220,7 +220,7 @@ say "$F" out_gone_re 8   "kein Leser mehr ist POLLERR -- ungefragt"
 say "$F" neg_fd_ret 0    "ein negativer Deskriptor wird uebergangen und zaehlt nicht"
 say "$F" neg_fd_re 0     "und seine revents sind null"
 
-echo "   -- was kein Rohr ist"
+echo "   -- what is not a pipe"
 say "$F" nval_ret 1      "ein Deskriptor, der nicht offen ist, ist ein Ereignis"
 say "$F" nval_re 32      "und es ist POLLNVAL -- kein Fehler des ganzen Aufrufs (POSIX)"
 say "$F" file_re 5       "eine gewoehnliche Datei ist immer bereit (POLLIN|POLLOUT = 5)"
@@ -230,14 +230,14 @@ say "$F" err_nfds -22    "mehr Deskriptoren als erlaubt: -EINVAL"
 say "$F" err_null -14    "ein Nullzeiger mit nfds > 0: -EFAULT"
 say "$F" err_kern -14    "ein Zeiger in den Kern: -EFAULT"
 
-echo "   -- der Zeitablauf misst die Zeit"
+echo "   -- the timeout measures time"
 say "$F" tmo_ret 0       "nichts wurde bereit: 0, kein Fehler"
 between "poll(300 ms) hat wirklich mindestens 300 ms gewartet (Gast-Uhr: Untergrenze 10 % darunter)" "$(value_of "$F" tmo_ms)" 270 340
 say "$F" tmo0_ret 0      "Zeitablauf 0: nachsehen und sofort zurueck"
 between "und das kostet keine messbare Zeit" "$(value_of "$F" tmo0_ms)" 0 20
 between "poll(0 Deskriptoren, 200 ms) ist ein sauberer Schlaf" "$(value_of "$F" tmo_nofd_ms)" 180 240
 
-echo "   -- wer wartet, rechnet nicht (die Zusage dieser Runde)"
+echo "   -- whoever waits does not compute (the promise of this round)"
 say "$F" blk_ret 1 "das Kind hat nach 1,2 s geschrieben, und poll ist aufgewacht"
 say "$F" blk_got 5 "und die Oktette waren wirklich da"
 between "poll(OHNE Frist) kam nach der Zeit des Kindes zurueck" "$(value_of "$F" blk_ms)" 1150 1500
@@ -253,23 +253,23 @@ fi
 between "und die Warteschleife hat dieselbe Zeit gebraucht (sonst waere der Vergleich schief)" \
     "$(value_of "$F" busy_ms)" 1190 1500
 
-echo "   -- ein Signal holt einen Wartenden zurueck"
+echo "   -- a signal brings a waiter back"
 say "$F" sig_act 0 "SIGUSR1 hat eine Routine bekommen"
 say "$F" sig_ret -4 "poll(OHNE Frist) endet an einem Signal mit -EINTR"
 between "und zwar nach der Zeit des Signals, nicht spaeter" "$(value_of "$F" sig_ms)" 290 500
 
-echo "   -- die Bauform der Bruecke, ohne Draht"
+echo "   -- the build shape of the bridge, without a wire"
 say "$F" mix_ret 1    "poll ueber Netzseite und Kindkanal meldet den Kindkanal"
 say "$F" mix_child 17 "der Kindkanal: POLLIN und POLLHUP (17)"
 say "$F" mix_hup 16   "nach dem Ende des Kindes bleibt POLLHUP stehen"
 n=$(value_of "$F" lines)
 num "Messzeilen, die /bin/pollt gedruckt hat" "${n:-0}" ge 33
 
-grep -aq "kernel: done" "$F" && ok "der Kernel ist nach allen Faellen noch am Leben" \
+grep -aq "kernel: done" "$F" && ok "the kernel is still alive after all cases" \
                              || bad "'kernel: done' fehlt -- der Kernel hat den Lauf nicht ueberstanden"
 
 # =====================================================================
-echo "== 4. die Bruecke selbst: /bin/pollbr am Draht =="
+echo "== 4. the bridge itself: /bin/pollbr on the wire =="
 if ! command -v nc >/dev/null 2>&1; then
     note 'Abschnitt 4: uebersprungen, nc fehlt'
 else
@@ -293,19 +293,19 @@ else
         sleep 0.2
     done
     if [ "$listening" = 1 ]; then
-        ok "pollbr lauscht auf $OSUM_IP:9100 (nach rund $(( i * 200 )) ms)"
+        ok "pollbr listens on $OSUM_IP:9100 (after about $(( i * 200 )) ms)"
         sleep 0.5
         printf 'hallo welt\n' | timeout 30 nc -q 3 -w 10 127.0.0.1 $FWPORT > "$TMPD/nc.out" 2>&1
         ncrc=$?
         wait "$QPID" 2>/dev/null; QPID=""
         jrc=$(cat "$JF.rc" 2>/dev/null)
-        [ "$jrc" = 21 ] && ok "der Kernel hat auch diesen Lauf selbst beendet (21)" \
+        [ "$jrc" = 21 ] && ok "the kernel ended this run itself too (21)" \
                         || bad "QEMU-Beendigungscode ${jrc:-keiner}, erwartet 21"
         num "nc kam durch (Beendigungscode)" "$ncrc" eq 0
         if grep -aq 'osum: hallo welt' "$TMPD/nc.out"; then
-            ok "die Antwort des Helfers kam beim Wirt an: 'osum: hallo welt'"
+            ok "the answer of the helper arrived at the host: 'osum: hallo welt'"
         else
-            bad "die Antwort kam nicht beim Wirt an"; sed 's/^/        /' "$TMPD/nc.out" | head -4
+            bad "the answer did not arrive at the host"; sed 's/^/        /' "$TMPD/nc.out" | head -4
         fi
         v=$(jvalue_of "$JF" accepted);    num "angenommene Verbindungen"          "${v:-0}" eq 1
         v=$(jvalue_of "$JF" net_lines);   num "Zeilen aus dem Netz bedient"       "${v:-0}" ge 1
@@ -316,13 +316,13 @@ else
         num "Durchlaeufe der einen Schleife (eine Warteschleife haette Hunderte)" "${v:-999}" le 12
         v=$(jvalue_of "$JF" first)
         if [ "$v" = 1 ] || [ "$v" = 2 ]; then
-            ok "beide Quellen wurden bedient, in der Reihenfolge, in der sie kamen (first=$v)"
+            ok "both sources were served, in the order in which they came (first=$v)"
         else
-            bad "keine der beiden Quellen war zuerst da (first=${v:-fehlt})"
+            bad "neither source was first (first=${v:-missing})"
         fi
     else
         kill "$QPID" 2>/dev/null; QPID=""
-        bad "pollbr hat nicht angefangen zu lauschen"
+        bad "pollbr did not start listening"
         tail -6 "$JF" 2>/dev/null | tr -d '\000' | sed 's/^/        /'
     fi
 fi

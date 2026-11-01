@@ -15,7 +15,7 @@ CLI=${CLI:-"sh ls cat echo edit cp mv rm mkdir rmdir touch head tail wc grep sor
 APPS=${APPS:-"fetch"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
-    echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
+    echo "== firnc cannot be built"; tail -20 "$OUT/firnc.log"; exit 1; }
 
 if [ ! -s "$OUT/k.mb" ] || [ -n "${LADEN_KERN_NEU:-}" ]; then
     bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
@@ -73,7 +73,7 @@ if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
             > "$OUT/certus.log" 2>&1; then
         echo "   browser   certus ($(stat -c%s "$OUT/bin/certus") Oktette)"
     else
-        echo "== certus laesst sich nicht bauen:"
+        echo "== certus cannot be built:"
         tail -12 "$OUT/certus.log"
     fi
 else

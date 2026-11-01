@@ -32,7 +32,7 @@ mkdir -p .probe
 vendor/firn/bin/firnc tools/update/oracle.fi -o .probe/uoracle \
     2> "$OUT/oracle.err" \
     && ok "tools/update/oracle.fi baut gegen lib/crypto/ (dieselben Dateien wie der Kern)" \
-    || { bad "tools/update/oracle.fi laesst sich nicht bauen"; head -20 "$OUT/oracle.err"; }
+    || { bad "tools/update/oracle.fi cannot be built"; head -20 "$OUT/oracle.err"; }
 
 ARGV=()
 [ "$SCHNELL" = "--schnell" ] && ARGV=(--quick)

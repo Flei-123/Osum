@@ -24,7 +24,7 @@ echo "== 1. der Messplatz =="
 
 $FIRNC tools/wlan/oracle.fi -o .probe/worakel 2> "$OUT/orakel.err" \
     && ok "tools/wlan/oracle.fi baut gegen lib/crypto/, lib/wlan/ und die neuen Dateien" \
-    || { bad "tools/wlan/oracle.fi laesst sich nicht bauen"; head -20 "$OUT/orakel.err"; }
+    || { bad "tools/wlan/oracle.fi cannot be built"; head -20 "$OUT/orakel.err"; }
 
 if [ ! -x .probe/worakel ]; then
     echo "WLAN2: ohne Orakel geht nichts weiter."

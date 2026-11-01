@@ -4,8 +4,8 @@
 #
 set -uo pipefail
 SELBST=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)
-cd "$SELBST/../.." || { echo "== der Baum ist von $SELBST aus nicht erreichbar" >&2; exit 1; }
-[ -f tools/osum/mkfs.py ] || { echo "== $(pwd) ist nicht der Osum-Baum" >&2; exit 1; }
+cd "$SELBST/../.." || { echo "== the tree is not reachable from $SELBST" >&2; exit 1; }
+[ -f tools/osum/mkfs.py ] || { echo "== $(pwd) is not the Osum tree" >&2; exit 1; }
 WURZEL=$(pwd)
 mkdir -p "$WURZEL/.logind-mess"
 
@@ -22,9 +22,9 @@ kopf() { echo; echo "== $*"; }
 if [ ! -f "$BUILD/osum.mb" ] || [ ! -f "$BUILD/root.img" ]; then
     kopf "0. bauen"
     bash tools/usbimg/build.sh "$BUILD" > "$WURZEL/.logind-mess/bau.log" 2>&1 \
-        || { tail -20 "$WURZEL/.logind-mess/bau.log"; bad "der Bau ist fehlgeschlagen"; \
+        || { tail -20 "$WURZEL/.logind-mess/bau.log"; bad "the build failed"; \
              echo; echo "LOGIND: $OK bestanden, $FAIL gescheitert"; exit 1; }
-    ok "Kern und Wurzel gebaut"
+    ok "kernel and root built"
 else
     kopf "0. das vorhandene Bauverzeichnis wird benutzt"
     info "$BUILD ($(stat -c%s "$BUILD/osum.mb") Oktette Kern)"
@@ -40,7 +40,7 @@ for f in /bin/glogin /bin/lock /bin/login /bin/passwd /bin/su \
     if grep -qE "(^|[[:space:]])${f}([[:space:]]|\$)" "$LISTE"; then
         ok "im Abbild: $f"
     else
-        bad "FEHLT im Abbild: $f"
+        bad "MISSING in the image: $f"
     fi
 done
 
@@ -49,7 +49,7 @@ if echo "$SHAD" | grep -q '\$osum1\$'; then
     ok "/etc/shadow traegt \$osum1\$-Eintraege (PBKDF2)"
     info "$(echo "$SHAD" | wc -l) Zeilen, Runden $(echo "$SHAD" | sed -n 's/.*\$osum1\$\([0-9]*\)\$.*/\1/p' | head -1)"
 else
-    bad "/etc/shadow hat keine \$osum1\$-Eintraege"
+    bad "/etc/shadow has no \$osum1\$ entries"
 fi
 if grep -aq 'startkennwort' "$BUILD/root.img"; then
     bad "GEGENPROBE: 'startkennwort' steht im KLARTEXT im Abbild"
@@ -75,12 +75,12 @@ for d in /users/justin/ /users/justin/config/; do
     if grep -qE "(^|[[:space:]])${d}([[:space:]]|\$)" "$LISTE"; then
         ok "im Abbild: $d"
     else
-        bad "FEHLT im Abbild: $d"
+        bad "MISSING in the image: $d"
     fi
 done
 M=$(python3 tools/osum/mkfs.py meta "$BUILD/root.img" /users/justin 2>/dev/null)
 if [ "$M" = "/users/justin 700 1000 1000" ]; then
-    ok "es gehoert justin und nur ihm: $M"
+    ok "it belongs to justin and only to him: $M"
 else
     bad "Rechte/Eigentum falsch: '$M' (erwartet '/users/justin 700 1000 1000')"
 fi
@@ -93,7 +93,7 @@ fi
 MR=$(python3 tools/osum/mkfs.py meta "$BUILD/root.img" /users/root 2>/dev/null)
 case "$MR" in
     *" 0 0") ok "GEGENPROBE: /users/root gehoert weiter root ($MR)" ;;
-    *)       bad "GEGENPROBE: /users/root gehoert nicht mehr root ($MR)" ;;
+    *)       bad "NEGATIVE: /users/root no longer belongs to root ($MR)" ;;
 esac
 
 BEL="$WURZEL/belege/logind"
@@ -128,16 +128,16 @@ T3=$(lauf anmelden 100 "anmeldung" \
      s t a r t k e n n w o r t ret @45 '#foto:desktop' meta_l @60 '#foto:menu')
 if [ -f "$T3" ]; then
     grep -qa 'anmeldung vor schreibtisch' "$T3" \
-        && ok "der Kern startet die Anmeldung vor dem Schreibtisch" \
+        && ok "the kernel starts the login before the desktop" \
         || bad "'anmeldung vor schreibtisch' steht nicht im Bericht"
     grep -qaE 'glogin: bereit' "$T3" \
-        && ok "der Anmeldeschirm ist bereit" \
+        && ok "the login screen is ready" \
         || bad "'glogin: bereit' fehlt"
     grep -qa 'glogin: angemeldet als justin' "$T3" \
         && ok "angemeldet als justin" \
         || bad "'glogin: angemeldet als justin' fehlt"
     if grep -qa 'glogin: uid=1000' "$T3"; then
-        ok "der Schreibtisch laeuft unter uid=1000 und NICHT als root"
+        ok "the desktop runs under uid=1000 and NOT as root"
     else
         bad "'glogin: uid=1000' fehlt -- der Schreibtisch waere weiter root"
         info "$(grep -a 'glogin: uid' "$T3" | head -2)"
@@ -148,17 +148,17 @@ if [ -f "$T3" ]; then
         && ok "Startmenue: the footer user is justin after the sign-in (not root)" \
         || bad "'launcher: uid=1000 user=justin' fehlt -- das Startmenue behielte 'root' (r1059)"
     grep -qaE 'glogin: desktop pid=[0-9]+' "$T3" \
-        && ok "und er hat den Schreibtisch gestartet" \
+        && ok "and it started the desktop" \
         || bad "'glogin: desktop pid=' fehlt"
     if [ -f "$BEL/anmelden-desktop.png" ]; then
         TI=$(tinte "$BEL/anmelden-desktop.png")
         if [ -n "$TI" ] && [ "$TI" -ge 20 ]; then
-            ok "BILD: der Schreibtisch steht ($TI % Tinte)"
+            ok "PICTURE: the desktop is there ($TI % ink)"
         else
-            bad "BILD: der Schirm ist fast leer (${TI:-?} % Tinte)"
+            bad "PICTURE: the screen is almost empty (${TI:-?} % ink)"
         fi
     else
-        bad "BILD: kein Bild vom Schreibtisch entstanden"
+        bad "PICTURE: no picture of the desktop was produced"
     fi
 else
     bad "Abschnitt 3: kein Bericht entstanden"
@@ -170,23 +170,23 @@ T4=$(lauf falsch 55 "anmeldung" \
      f a l s c h ret @30 '#foto:abgewiesen')
 if [ -f "$T4" ]; then
     grep -qa 'glogin: abgewiesen' "$T4" \
-        && ok "das falsche Kennwort wurde abgewiesen" \
+        && ok "the wrong password was rejected" \
         || bad "'glogin: abgewiesen' fehlt"
     W=$(sed -n 's/.*glogin: gewartet \([0-9]*\) ms.*/\1/p' "$T4" | head -1)
     if [ -n "$W" ] && [ "$W" -ge 1000 ]; then
         ok "und danach mindestens 1000 ms gewartet (gemessen: $W ms)"
     else
-        bad "die Verzoegerung fehlt oder ist zu kurz (gemessen: '${W:-keine}')"
+        bad "the delay is missing or too short (measured: '${W:-keine}')"
     fi
     if grep -qa 'glogin: angemeldet' "$T4"; then
-        bad "nach einem falschen Kennwort wurde trotzdem angemeldet"
+        bad "after a wrong password the login happened anyway"
     else
         ok "GEGENPROBE: kein 'angemeldet' -- kein Weg an der Anmeldung vorbei"
     fi
     if grep -qaE 'startkennwort|osumroot' "$T4"; then
-        bad "ein Kennwort steht im seriellen Mitschnitt"
+        bad "a password is in the serial capture"
     else
-        ok "GEGENPROBE: kein Kennwort im seriellen Mitschnitt"
+        ok "NEGATIVE: no password in the serial capture"
     fi
 else
     bad "Abschnitt 4: kein Bericht entstanden"
@@ -202,33 +202,33 @@ if grep -qE "(^|[[:space:]])/etc/uitrace([[:space:]]|\$)" "$LISTE"; then
         done < <(grep '^  OK    ' "$AB")
         grep -E '^ABMELDEN:' "$AB" | sed 's/^/        /'
     else
-        bad "pruef/abmelden.py ist gefallen"
+        bad "pruef/abmelden.py failed"
         grep -E '^  (OK|FAIL)|^ABMELDEN:' "$AB" | tail -16 | sed 's/^/        /'
     fi
 else
-    bad "das Abbild hat kein /etc/uitrace -- mit UITRACE=1 bauen"
-    info "ohne den Schalter meldet die Oberflaeche nichts (build.sh:792)"
+    bad "the image has no /etc/uitrace -- build with UITRACE=1"
+    info "without the switch the surface reports nothing (build.sh:792)"
 fi
 
 kopf "6. GEGENPROBE: ohne 'anmeldung' ist der alte Weg unveraendert"
 T6=$(lauf ohne 45 "" @10 '#foto:direkt')
 if [ -f "$T6" ]; then
     grep -qa 'desk: OHNE anmeldung' "$T6" \
-        && ok "ohne das Wort meldet der Kern den alten Weg" \
+        && ok "without the word the kernel reports the old path" \
         || bad "'desk: OHNE anmeldung' fehlt"
     grep -qaE 'desk: start /bin/desktop' "$T6" \
-        && ok "und startet den Schreibtisch direkt" \
+        && ok "and starts the desktop directly" \
         || bad "'desk: start /bin/desktop' fehlt"
     if grep -qaE 'start /bin/glogin|glogin: bereit' "$T6"; then
-        bad "ohne das Wort lief trotzdem glogin"
+        bad "without the word glogin ran anyway"
         info "$(grep -aE 'start /bin/glogin|glogin: bereit' "$T6" | head -2)"
     else
-        ok "GEGENPROBE: glogin wurde nicht gestartet (kein 'start /bin/glogin')"
+        ok "NEGATIVE: glogin was not started (no 'start /bin/glogin')"
     fi
     if grep -qa 'abmelden:' "$T6"; then
-        bad "ohne Sitzung lief trotzdem eine Abmeldung"
+        bad "without a session a logout ran anyway"
     else
-        ok "GEGENPROBE: keine Abmeldung ohne Sitzung"
+        ok "NEGATIVE: no logout without a session"
     fi
 else
     bad "Abschnitt 6: kein Bericht entstanden"

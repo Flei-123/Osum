@@ -43,7 +43,7 @@ fi
 
 $FIRNC tools/wlan/oracle.fi -o .probe/worakel 2> "$OUT/orakel.err" \
     && ok "tools/wlan/oracle.fi baut gegen lib/crypto/ und lib/wlan/ (dieselben Dateien wie der Kern)" \
-    || { bad "tools/wlan/oracle.fi laesst sich nicht bauen"; head -20 "$OUT/orakel.err"; }
+    || { bad "tools/wlan/oracle.fi cannot be built"; head -20 "$OUT/orakel.err"; }
 
 if [ ! -x .probe/worakel ]; then
     echo "WLAN: ohne Orakel geht nichts weiter."
@@ -159,7 +159,7 @@ open('$SYN', 'wb').write(bytes(r.randrange(256) for _ in range(9000)))"
     pass=$((pass + AP))
     fail=$((fail + AF))
 else
-    bad "tools/wlan/ar9271.fi laesst sich nicht bauen"
+    bad "tools/wlan/ar9271.fi cannot be built"
     head -20 "$OUT/ar9271.err"
 fi
 

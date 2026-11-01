@@ -25,7 +25,7 @@ PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc grep sort
 APPS=${APPS:-"fetch wasm prim rootsctl nettest"}
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
-    echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
+    echo "== firnc cannot be built"; tail -20 "$OUT/firnc.log"; exit 1; }
 
 bash tools/build-kernel.sh "$OUT/k.mb" > "$OUT/k.log" 2>&1 || {
     echo "== the kernel cannot be built"; tail -30 "$OUT/k.log"; exit 1; }

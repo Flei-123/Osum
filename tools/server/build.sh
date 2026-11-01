@@ -25,7 +25,7 @@ init svc sshd dhcp ctr ota backup sntp host dnswt reboot shutdown"}
 mkdir -p "$OUT/bin"
 
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
-    echo "== firnc laesst sich nicht bauen"; tail -20 "$OUT/firnc.log"; exit 1; }
+    echo "== firnc cannot be built"; tail -20 "$OUT/firnc.log"; exit 1; }
 CC=${FIRNC:-vendor/firn/bin/firnc}
 
 bash tools/build-kernel.sh "$OUT/k.mb" --gui "$GUI" > "$OUT/k.log" 2>&1 || {

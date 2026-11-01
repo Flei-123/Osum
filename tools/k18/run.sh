@@ -164,7 +164,7 @@ done
 [ -f "$TMPD/k0.mb" ] || { echo "K18: nothing goes on without the kernel"; echo "K18: $pass passed, $((fail+1)) failed"; exit 1; }
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then
-    ok "firnc1 baut diese Runde auch (der Uebersetzer in Firn)"
+    ok "firnc1 builds this round too (the compiler in Firn)"
 else
     bad "firnc1 does not build this round"; tail -5 "$TMPD/k1.log" | sed 's/^/        /'
 fi

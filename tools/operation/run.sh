@@ -91,18 +91,18 @@ for p in host dnswt ota opk dhcp; do
 done
 FIRNLIB="$ROOT/lib" $CC -c --profile=app -o "$W/fetch.o" kernel/app/fetch.fi \
     2> "$W/fetch.err" \
-    && ok "kernel/app/fetch.fi baut MIT dem Aufloeser (FIRNLIB=<repo>/lib)" \
+    && ok "kernel/app/fetch.fi builds WITH the resolver (FIRNLIB=<repo>/lib)" \
     || { bad "fetch.fi baut nicht"; head -8 "$W/fetch.err"; }
-ok "der Aufloeser ist EINE Umsetzung fuer beide Bauarten: $(grep -c . lib/libc/dnswire.fi) + $(grep -c . lib/libc/dns.fi) Zeilen"
+ok "the resolver is ONE implementation for both build kinds: $(grep -c . lib/libc/dnswire.fi) + $(grep -c . lib/libc/dns.fi) lines"
 for p in host dnswt; do
     bash tools/operation/wirt.sh "$p" "$W" > /dev/null 2>&1 \
-        && ok "/bin/$p auch fuer den Wirt gebaut ($(stat -c%s "$W/$p") Oktett)" \
-        || bad "$p fuer den Wirt"
+        && ok "/bin/$p also built for the host ($(stat -c%s "$W/$p") Oktett)" \
+        || bad "$p for the host"
 done
 
 # =====================================================================
 echo
-echo "== 2. das Format: neunzehn feindliche Nachrichten, ohne ein Paket =="
+echo "== 2. the format: nineteen hostile messages, without a packet =="
 # =====================================================================
 timeout 60 "$W/dnswt" > "$W/dnswt.txt" 2>&1
 DRC=$?
@@ -115,7 +115,7 @@ gleich "dnswt HAENGT NICHT (Zeitgrenze 60 s)" "$([ $DRC -eq 124 ] && echo haengt
 
 # =====================================================================
 echo
-echo "== 3. der Aufloeser gegen dig -- echte Namen, echter Nameserver =="
+echo "== 3. the resolver against dig -- real names, a real name server =="
 # =====================================================================
 DIGSRV=${BETRIEB_DIGSRV:-1.1.1.1}
 timeout 400 python3 tools/operation/dnsvergleich.py "$W/host" --server "$DIGSRV" \
@@ -128,7 +128,7 @@ gleich "gegen dig gleich" "${VG:-0}" "21"
 
 # =====================================================================
 echo
-echo "== 4. keine fest eingebaute Nameserver-Adresse =="
+echo "== 4. no hard-wired name server address =="
 # =====================================================================
 for a in '8\.8\.8\.8' '1\.1\.1\.1' '9\.9\.9\.9' '8\.8\.4\.4'; do
     N=$(grep -c "$a" lib/libc/dns.fi lib/libc/dnswire.fi kernel/user/host.fi \
@@ -136,15 +136,15 @@ for a in '8\.8\.8\.8' '1\.1\.1\.1' '9\.9\.9\.9' '8\.8\.4\.4'; do
     gleich "$(echo "$a" | tr -d '\\') im Quelltext des Aufloesers" "$N" "0"
 done
 grep -q 'fallback' lib/libc/dns.fi \
-    && ok "der Rueckfall ist eine ZEILE IN /etc/resolv.conf (sichtbar, abschaltbar)" \
+    && ok "the fallback is a LINE IN /etc/resolv.conf (visible, switchable)" \
     || bad "kein sichtbarer Rueckfall"
 grep -q 'k_fb' kernel/user/dhcp.fi \
-    && ok "und /bin/dhcp laesst ihn stehen, wenn es die Datei neu schreibt" \
+    && ok "and /bin/dhcp leaves it in place when it rewrites the file" \
     || bad "dhcp ueberschreibt den Rueckfall"
 
 # =====================================================================
 echo
-echo "== 5. Kennung und Quellport sind wirklich gewuerfelt =="
+echo "== 5. the id and the source port are really randomized =="
 # =====================================================================
 nsd || bad "dnsdienst startet nicht"
 : > "$W/rnd.txt"
@@ -158,14 +158,14 @@ PMAX=$(grep -a '^  port' "$W/rnd.txt" | awk '{print $2}' | sort -n | tail -1)
 gleich "20 Laeufe, verschiedene Quellports" "$PN" "20"
 gleich "20 Laeufe, verschiedene Kennungen" "$TN" "20"
 [ "${PMIN:-0}" -ge 1024 ] && ok "kleinster Quellport $PMIN (>= 1024)" \
-    || bad "Quellport $PMIN unter 1024"
-ok "Spannweite der Quellports $PMIN..$PMAX -- Osums Kern vergaebe ohne bind 40000+(zaehler & 4095)"
+    || bad "source port $PMIN below 1024"
+ok "span of source ports $PMIN..$PMAX -- the Osum kernel would assign 40000+(counter & 4095) without bind"
 GUT=$(grep -ac '^10\.0\.2\.2$' "$W/rnd.txt")
 gleich "und 20 richtige Antworten" "$GUT" "20"
 
 # =====================================================================
 echo
-echo "== 6. der Faelscher: Koeder vor der richtigen Antwort =="
+echo "== 6. the forger: decoys before the right answer =="
 # =====================================================================
 for art in txid port case alle; do
     nsd --boese "$art" --koeder 6 || bad "dnsdienst ($art)"
@@ -198,7 +198,7 @@ gleich "ein Nameserver, den es nicht gibt -> TIMEOUT" \
 
 # =====================================================================
 echo
-echo "== 7. die Serverseite: Register, Vorrat, Archiv =="
+echo "== 7. the server side: register, stock, archive =="
 # =====================================================================
 python3 tools/ota/veroeffentlichen.py "$OUT/aus" --zeigen > "$W/reg.txt"
 sed -n 's/^/        /p' "$W/reg.txt"
@@ -208,7 +208,7 @@ VORRAT=$(ls "$OUT/aus/pakete" | grep -c '\.opk$')
 gleich "der Vorrat ist inhaltsadressiert: verschiedene Pakete" "$VORRAT" "3"
 LINKS=$(stat -c%h "$OUT/aus/v/2/hallo-2.opk")
 [ "${LINKS:-1}" -ge 2 ] \
-    && ok "eine Fassung vorzuhalten kostet KEINE Kopie ($LINKS harte Verknuepfungen)" \
+    && ok "keeping a version in stock costs NO copy ($LINKS hard links)" \
     || bad "v/2 haelt eine eigene Kopie"
 python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
     --bund "$OUT/bund.json" --fassung 2 > "$W/zurueck.txt" 2>&1
@@ -230,13 +230,13 @@ os.makedirs(ak)
 for d in sorted(os.listdir(os.path.join(aus, "v", "4"))):
     os.link(os.path.join(aus, "v", "4", d), os.path.join(ak, d))
 PY
-ok "aktuell wieder auf Fassung 4 gesetzt"
+ok "set back to version 4 as current"
 
 # =====================================================================
 echo
 echo "== 8. der Schluesselbund =="
 # =====================================================================
-grep -q 'geheim' "$OUT/bund.json" && ok "der Bund ist eine Datei und laesst sich sichern" \
+grep -q 'geheim' "$OUT/bund.json" && ok "the bundle is a file and can be backed up" \
     || bad "kein Bund"
 python3 -c "
 import json,base64,sys
@@ -244,27 +244,27 @@ d=json.load(open('$OUT/bund.json'))
 sk=base64.b64decode(d['haupt']['huelle']['geheim'])
 roh=open('$OUT/geheim.key','rb').read()
 sys.exit(0 if roh not in sk and d['haupt']['huelle']['kdf']=='scrypt' else 1)" \
-    && ok "der geheime Schluessel steht NICHT im Klartext darin (scrypt + ChaCha20-Poly1305)" \
-    || bad "der geheime Schluessel liegt im Klartext"
+    && ok "the secret key is NOT in clear text in it (scrypt + ChaCha20-Poly1305)" \
+    || bad "the secret key is in clear text"
 OSUM_SIGN_PASS=falsch python3 tools/ota/schluesselbund.py "$OUT/bund.json" \
     signieren /etc/hostname -o "$W/x.sig" > "$W/pass.txt" 2>&1
 gleich "mit falscher Passphrase wird nicht signiert" \
     "$([ -s "$W/x.sig" ] && echo signiert || echo nein)" "nein"
-grep -q 'InvalidTag\|schluesselbund' "$W/pass.txt" && ok "und es steht ein Grund da" || bad "kein Grund"
+grep -q 'InvalidTag\|schluesselbund' "$W/pass.txt" && ok "and a reason is given" || bad "kein Grund"
 HP=$(python3 -c "import json;print(json.load(open('$OUT/bund.json'))['haupt']['pub'])")
 EP=$(python3 -c "import json;print(json.load(open('$OUT/bund.json'))['ersatz']['pub'])")
-[ "$HP" != "$EP" ] && ok "Haupt- und Ersatzschluessel sind verschieden" || bad "gleicher Schluessel"
+[ "$HP" != "$EP" ] && ok "the main and spare keys are different" || bad "gleicher Schluessel"
 gleich "der Ersatzschluessel liegt im Abbild" \
     "$(python3 -c "print(open('$OUT/ersatz.pub','rb').read().hex())")" "$EP"
 
 if [ "$OHNEQEMU" = 1 ]; then
-    echo; echo "== BETRIEB (ohne QEMU): $pass gruen, $fail rot"; exit $((fail>0))
+    echo; echo "== OPERATION (without QEMU): $pass green, $fail red"; exit $((fail>0))
 fi
 [ -s "$OUT/basis.img" ] || { echo "== $OUT/basis.img fehlt -- erst vorbereiten.sh"; exit 1; }
 
 # =====================================================================
 echo
-echo "== 10. auf Osum: DHCP schreibt /etc/resolv.conf, und ein echter Name =="
+echo "== 10. on Osum: DHCP writes /etc/resolv.conf, and a real name =="
 frisch
 rc=$(lauf dhcp1 "dhcp einmal;cat /etc/resolv.conf;host -v example.com;host -c;exit")
 gleich "die Maschine kommt hoch" "$rc" "21"
@@ -274,7 +274,7 @@ hat "$OUT/dhcp1.txt" "nameserver 10.0.2.3" "mit dem Nameserver aus Option 6"
 GIP=$(grep -aoE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "$OUT/dhcp1.txt" | tail -1)
 DIGSET=$(dig +short A example.com | grep -E '^[0-9.]+$' | tr '\n' ' ')
 if [ -n "$GIP" ] && echo " $DIGSET " | grep -q " $GIP "; then
-    ok "example.com auf Osum = $GIP, und dig auf dem Wirt nennt es auch ($DIGSET)"
+    ok "example.com on Osum = $GIP, and dig on the host names it too ($DIGSET)"
 else
     bad "example.com auf Osum = '$GIP', dig nennt '$DIGSET'"
 fi
@@ -282,7 +282,7 @@ hat "$OUT/dhcp1.txt" "  port   " "und der Quellport wurde gemeldet"
 
 # =====================================================================
 echo
-echo "== 11. auf Osum: ota holt ein Update ueber einen NAMEN =="
+echo "== 11. on Osum: ota fetches an update via a NAME =="
 # =====================================================================
 NSD_ADR=127.0.0.1 nsd || bad "dnsdienst"
 dienst "$OUT/aus" || bad "Gegenstelle"
@@ -294,8 +294,8 @@ hat "$OUT/name1.txt" "fetch: aufgeloest" "fetch hat den Namen AUFGELOEST"
 hat "$OUT/name1.txt" "fetch: verify OK" "und die Zertifikatskette GEPRUEFT -- gegen denselben Namen"
 hat "$OUT/name1.txt" "ota: version there 1" "das VERZEICHNIS der Fassung 1 kam an"
 hatnicht "$OUT/name1.txt" "opk: installed" "suchen installiert nichts"
-grep -qa "FRAGE $NAME" "$OUT/nsd.log" && ok "der Nameserver hat die Frage wirklich gesehen" \
-    || bad "keine DNS-Frage angekommen"
+grep -qa "FRAGE $NAME" "$OUT/nsd.log" && ok "the name server really saw the question" \
+    || bad "no DNS question arrived"
 
 rc=$(lauf name2 "ota apply;sh /start.sh;ota show;exit")
 gleich "einspielen ueber den Namen" "$rc" "21"
@@ -307,7 +307,7 @@ cp -f "$OUT/ziel.img" "$OUT/f1.img"
 
 # =====================================================================
 echo
-echo "== 12. drei Fassungen zurueck -- und wieder aktuell =="
+echo "== 12. three versions back -- and current again =="
 # =====================================================================
 rc=$(lauf drei1 "ota set quelle https://$NAME:$PORT/aktuell;ota show;ota search;exit")
 hat "$OUT/drei1.txt" "ota: version here 1" "das Geraet steht auf Fassung 1"
@@ -327,7 +327,7 @@ cp -f "$OUT/ziel.img" "$OUT/f4.img"
 
 # =====================================================================
 echo
-echo "== 12b. weitere Auslieferungen fuer die Gegenproben =="
+echo "== 12b. more deliveries for the negative tests =="
 # =====================================================================
 mach() { # <ziel-notiz> <schalter...>
     rm -f "$OUT/stand"/*.opk
@@ -347,11 +347,11 @@ rm -f "$OUT/stand"/*.opk; cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
 OSUM_SIGN_PASS=fremd1 OSUM_ERSATZ_PASS=fremd2 \
     python3 tools/ota/veroeffentlichen.py "$OUT/fremdaus" --stand "$OUT/stand" \
     --bund "$OUT/fremd.json" --fassung 9 --notiz fremd 2>&1 | grep -v signiert
-ok "Auslieferungen 5..9 und eine mit einem FREMDEN Schluessel stehen"
+ok "deliveries 5..9 and one with a FOREIGN key are in place"
 
 # =====================================================================
 echo
-echo "== 13. die Gegenproben zur Schluesselverwaltung =="
+echo "== 13. the negative tests for the key management =="
 # =====================================================================
 gp=0
 gpok=0

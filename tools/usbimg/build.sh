@@ -115,7 +115,7 @@ done
 # ============================================================ 1. Kern
 : > "$OUT/phases.log"; ph start
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 \
-    || fehler "der Uebersetzer laesst sich nicht bauen"
+    || fehler "der Uebersetzer cannot be built"
 ph fetch-firnc
 bash tools/build-kernel.sh "$OUT/osum.mb" --stufe "$STUFE" > "$OUT/k.log" 2>&1 \
     || { tail -20 "$OUT/k.log" >&2; fehler "the kernel cannot be built"; }

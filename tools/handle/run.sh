@@ -57,7 +57,7 @@ echo "== 1. bauen =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
-        || { bad "$f.s laesst sich nicht assemblieren"; }
+        || { bad "$f.s cannot be assembled"; }
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null
 

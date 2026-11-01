@@ -46,7 +46,7 @@ echo "== 1. bauen: Kernel mit dem geflickten Stack =="
 if nzp_build; then
     ok "firnc0: Kernel + Netzdienst gebaut ($(stat -c%s "$TMPD/k0.mb") Oktette)"
 else
-    bad "der Kernel laesst sich nicht bauen"
+    bad "der Kernel cannot be built"
     echo "NETZPLUS: $pass passed, $fail failed"
     exit 1
 fi

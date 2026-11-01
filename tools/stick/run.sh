@@ -45,7 +45,7 @@ else
         ok "tools/usbimg/build.sh laeuft durch"
         sed 's/^/       /' "$TMPD/build.txt"
     else
-        bad "das Abbild laesst sich nicht bauen"
+        bad "das Abbild cannot be built"
         tail -20 "$TMPD/build.txt" | sed 's/^/       /'
         echo "STICK: $pass bestanden, $fail gescheitert"; exit 1
     fi
@@ -104,7 +104,7 @@ if mkfs.vfat -F 32 -s 1 -n OSUMPROBE "$FAT" > "$TMPD/probefs.txt" 2>&1 \
     dd if="$FAT" of="$TMPD/probe.img" bs=512 seek=2048 conv=notrunc status=none
     ok "die zweite Platte traegt /rechte.conf und /ca.pem (FAT32 auf einer MBR-Partition)"
 else
-    bad "die zweite Platte laesst sich nicht bauen"
+    bad "die zweite Platte cannot be built"
     tail -5 "$TMPD/probefs.txt" | sed 's/^/       /'
 fi
 

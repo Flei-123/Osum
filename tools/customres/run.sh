@@ -44,7 +44,7 @@ schau() { local name=$1; shift; local aus rc
     if [ "$rc" -eq 0 ]; then ok "$name ($aus)"; else bad "$name -- $aus"; fi; }
 schau_nicht() { local name=$1; shift; local aus rc
     aus=$(python3 tools/gfx/checkshot.py "$@" 2>&1); rc=$?
-    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- ging durch: $aus"; fi; }
+    if [ "$rc" -ne 0 ]; then ok "$name ($aus)"; else bad "$name -- passed: $aus"; fi; }
 
 behalte() { # ppm zielname
     mkdir -p "$SHOTS"
@@ -54,18 +54,18 @@ behalte() { # ppm zielname
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschlagen"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "CUSTOMRES: skipped, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "CUSTOMRES: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
 #
 ACCEL="${QEMU_X86#qemu-system-x86_64 }"
 
-echo "== 1. die Quellen: zwei Dateien, eine Legende =="
+echo "== 1. the sources: two files, one legend =="
 
 for r in CW_OK CW_REGS CW_VRAM CW_LIMIT CW_DEPTH CW_UNSINN CW_NOCARD; do
     a=$(grep -aE "^const $r: u64 = " kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
     b=$(grep -aE "^const $r: u64 = " kernel/user/dispctl.fi | sed 's/.*= //; s/ *\/\/.*//')
-    if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r steht im Kern und in Ring 3 gleich ($a)"
+    if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r is the same in the kernel and in ring 3 ($a)"
     else bad "$r: vmode.fi='$a', dispctl.fi='$b'"; fi
 done
 gleich "Grund 1 heisst hier wie dort 'die Register haben abgelehnt'" "1" \
@@ -93,11 +93,11 @@ print(n - 1)   # die abschliessende Null gehoert nicht zum Satz
 PY
 )
 gleich "die Satzbreite von /system/BILDMODUS stimmt mit ihrem Muster ueberein" "$sl" "$must"
-if [ "$sl" -lt 512 ]; then ok "und sie geht in EINEN Datenblock ($sl < 512)"
-else bad "der Satz ist laenger als ein Datenblock: $sl"; fi
+if [ "$sl" -lt 512 ]; then ok "and it fits in ONE data block ($sl < 512)"
+else bad "the sentence is longer than a data block: $sl"; fi
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
-    ok "die Speicherkarte von kdata: $(tail -1 "$TMPD/karte.txt")"
+    ok "the kdata memory map: $(tail -1 "$TMPD/karte.txt")"
 else
     bad "tools/kernel/memmap.py meldet Kollisionen"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
@@ -114,8 +114,8 @@ for p in $PROGS; do
         "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null || { bad "ld scheitert an $p"; rc=1; continue; }
     strip --strip-all "$TMPD/$p.elf"
 done
-[ "$rc" = 0 ] && ok "der Kern und $(echo $PROGS | wc -w) Programme sind gebaut"
-[ -f "$TMPD/k0.mb" ] || { echo "CUSTOMRES: ohne Kern geht nichts weiter"; exit 1; }
+[ "$rc" = 0 ] && ok "the kernel and $(echo $PROGS | wc -w) programs are built"
+[ -f "$TMPD/k0.mb" ] || { echo "CUSTOMRES: nothing goes on without the kernel"; exit 1; }
 
 UPROF=""; UCRT="$TMPD/crt.o"
 grep -qa '^profile app' kernel/user/settings.fi && { UPROF=--profile=app; UCRT=""; }
@@ -123,10 +123,10 @@ if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.er
     && ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/eins.elf" \
         $UCRT "$TMPD/eins.o" 2>/dev/null; then
     u=$(nm -u "$TMPD/eins.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-    [ -z "$u" ] && ok "das Bedienfeld mit den drei Eingabefeldern baut frei" \
+    [ -z "$u" ] && ok "the control panel with the three input fields builds cleanly" \
                 || bad "settings.elf hat undefinierte Symbole: $u"
 else
-    bad "settings.fi laesst sich nicht bauen"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
+    bad "settings.fi cannot be built"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
 fi
 hat kernel/user/settings.fi "DS_CUSTOM" \
     "das Bedienfeld ruft wirklich den neuen Aufruf und baut keine Liste nach"
@@ -134,7 +134,7 @@ hat kernel/user/settings.fi "DG_CUSTNUM" \
     "und es holt die ZAHL aus dem Kern, statt eine eigene zu rechnen"
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then
-    ok "firnc1 baut diese Runde auch (der Uebersetzer in Firn)"
+    ok "firnc1 builds this round too (the compiler in Firn)"
 else
     bad "firnc1 does not build this round"; tail -5 "$TMPD/k1.log" | sed 's/^/        /'
 fi
@@ -142,7 +142,7 @@ fi
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/$p.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
-    > "$TMPD/mkfs.log" 2>&1 && ok "die Platte steht: $(tail -1 "$TMPD/mkfs.log")" \
+    > "$TMPD/mkfs.log" 2>&1 && ok "the disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || bad "mkfs.py scheitert"
 
 GRUND="nokbd nosched noproc nofs noring3"
@@ -192,12 +192,12 @@ lauf_platte() { # name kommandozeile abbild
 
 # ============================================== 3. eine eigene Aufloesung
 
-echo "== 3. eine eigene Aufloesung -- und zwar im Bild =="
+echo "== 3. a custom resolution -- in the picture =="
 
 if grep -aq '(1400 << 16)' kernel/gfx/vmode.fi; then
-    bad "1400x1050 steht in der Kandidatenliste -- dann ist es keine EIGENE Aufloesung"
+    bad "1400x1050 is in the candidate list -- then it is not a CUSTOM resolution"
 else
-    ok "1400x1050 steht in KEINER Kandidatenliste von vmode.fi (vorher unerreichbar)"
+    ok "1400x1050 is in NO candidate list of vmode.fi (unreachable before)"
 fi
 
 foto eigen "gfx disp dispeigen nocursor fbtest fbhold $GRUND"
@@ -222,7 +222,7 @@ gleich "und die neun eigenen dieser Runde" "9" \
     "$(grep -ao 'disp: custom selftest [0-9]*' "$E" | head -1 | grep -o '[0-9]*$')"
 behalte "$TMPD/eigen.ppm" eigen-1400x1050
 
-echo "== 4. abgelehnt -- aber MIT Schranke und MIT Zahl =="
+echo "== 4. rejected -- but WITH a limit and WITH a number =="
 VGA_STD="-device VGA,edid=off,vgamem_mb=64" \
     foto schranken "gfx disp dispeigenbad nocursor fbtest fbhold $GRUND"
 num "der Lauf endet sauber -- eine abgelehnte Zahl haelt den Kernel NICHT an" "$RC" eq 21
@@ -261,7 +261,7 @@ schau_nicht "ein schwarzer Schirm haette hier kein Rot" \
     area "$TMPD/schranken.ppm" 0 0 100 100 0 0 0
 behalte "$TMPD/schranken.ppm" abgelehnt-800x600
 
-echo "== 4b. dieselbe Zahl an eine KLEINERE Karte =="
+echo "== 4b. the same number on a SMALLER card =="
 rc=$(lauf klein "gfx disp dispeigenbad $GRUND" 180 "-device VGA,edid=off,vgamem_mb=8")
 num "der Lauf endet sauber" "$rc" eq 21
 K="$TMPD/klein.txt"
@@ -269,9 +269,9 @@ gleich "die kleinere Karte meldet 8 MiB" "8388608" "$(ew "$K" 1 vram)"
 gleich "und JETZT ist der Bildspeicher der Grund (2 statt 3)" "2" "$(ew "$K" 1 why)"
 gleich "die Zahl ist unveraendert das, was das Bild braucht" "33177600" "$(ew "$K" 1 num)"
 gleich "der Fehlerwert nach aussen ist E_VRAM (7)" "7" "$(ew "$K" 1 rc)"
-ok "eine Begruendung, die sich mit der Maschine aendert, ist eine Messung"
+ok "a reason that changes with the machine is a measurement"
 
-echo "== 5. die Frist laeuft ohne JEDES Zutun ab =="
+echo "== 5. the deadline expires without ANY action =="
 cp -f "$TMPD/root.img" "$TMPD/frist.img"
 rc=$(lauf_platte frist \
     "osum gfx disp nokbd nosched noproc script=dispctl custom 1400 1050;sleep 22;dispctl raw" \
@@ -307,7 +307,7 @@ behalte "$TMPD/zurueck.ppm" nach-der-frist-800x600
 
 # ============================================== 6. der Neustart
 
-echo "== 6. ein bestaetigter Modus ueberlebt den Neustart =="
+echo "== 6. a confirmed mode survives the restart =="
 cp -f "$TMPD/root.img" "$TMPD/dauer.img"
 
 rc=$(lauf_platte s1 \
@@ -340,7 +340,7 @@ S4="$TMPD/s4.txt"
 hat "$S4" "disp: save aufgebraucht" "jetzt sind die drei Versuche verbraucht"
 hat "$S4" "(Startmodus bleibt)" "und der Kernel sagt, was er stattdessen tut"
 gleich "die Tafel steht auf dem SICHEREN Startmodus" "800" "$(uwl "$S4" panelw)"
-ok "das ist der Rueckfall: er kostet nichts, weil er nichts tut"
+ok "that is the fallback: it costs nothing because it does nothing"
 
 rc=$(lauf_platte s5 "osum gfx disp nokbd nosched noproc script=dispctl raw" "$TMPD/dauer.img")
 num "START 5 endet sauber" "$rc" eq 21
@@ -363,7 +363,7 @@ gleich "... und 'Behalten' hat ihn wieder auf null gesetzt" "0" "$(uwl "$T2" sav
 
 # ============================================== 7. Ring 3
 
-echo "== 7. die Zusagen aus Ring 3, und der Satz, den ein Mensch liest =="
+echo "== 7. the promises from ring 3, and the sentence a human reads =="
 cp -f "$TMPD/root.img" "$TMPD/r3.img"
 rc=$(lauf_platte ring3 "osum gfx disp nokbd nosched noproc script=dispctl testc" "$TMPD/r3.img")
 num "der Lauf endet sauber" "$rc" eq 21
@@ -393,7 +393,7 @@ hat "$U" "height 200 .. 8192" "fuer beide Richtungen"
 
 # ============================================== 8. die Gegenprobe
 
-echo "== 8. DIE GEGENPROBE: derselbe Kern ohne das Wort 'disp' =="
+echo "== 8. THE NEGATIVE TEST: the same kernel without the word 'disp' =="
 rc=$(lauf ohne "gfx dispeigen dispeigenbad $GRUND")
 num "der Lauf endet sauber" "$rc" eq 21
 O="$TMPD/ohne.txt"
@@ -412,7 +412,7 @@ gleich "und der neue Grund ist ein Strich und keine Null" "-" "$(uw "$O3" custwh
 gleich "auch die Zahl" "-" "$(uw "$O3" custnum)"
 gleich "auch der gespeicherte Modus" "-" "$(uw "$O3" saveok)"
 
-echo "== 9. wo die Grenze wirklich liegt =="
+echo "== 9. where the limit really lies =="
 rc=$(lauf gross "gfx disp $GRUND" 180 "-device VGA,edid=off,vgamem_mb=64")
 num "der Lauf endet sauber" "$rc" eq 21
 G="$TMPD/gross.txt"
@@ -424,14 +424,14 @@ num "der Lauf endet sauber" "$rc" eq 21
 K16="$TMPD/klein16.txt"
 gleich "mit 16 MiB war es noch die Karte, die ablehnte" "1" \
     "$(grep -a '^disp: out   3840x2160' "$K16" | grep -ao 'reason=[0-9]*' | sed 's/reason=//')"
-ok "derselbe Kern, dieselbe Zeile, zwei Gruende -- die Schranken sind unabhaengig gemessen"
+ok "the same kernel, the same line, two reasons -- the limits are measured independently"
 ka=$(grep -a -m1 '^disp: kacheln' "$K16")
-[ -n "$ka" ] && ok "die Belegung der Fensterplaetze: $ka" || bad "keine Belegung gemeldet"
+[ -n "$ka" ] && ok "the allocation of the window slots: $ka" || bad "keine Belegung gemeldet"
 gleich "sechzehn Plaetze zu 2 MiB sind 32 MiB Fenster" "16" \
     "$(echo "$ka" | grep -ao 'alle=[0-9]*' | sed 's/.*=//')"
 num "und davon traegt der laengste zusammenhaengende Bereich weniger" \
     "$(echo "$ka" | grep -ao 'laufmax=[0-9]*' | sed 's/.*=//')" lt 16
-ok "die Differenz sind der lokale APIC und der I/O-APIC -- zwei Plaetze fuer je 4 KiB Register"
+ok "the difference is the local APIC and the I/O-APIC -- two slots of 4 KiB registers each"
 
 echo
 echo "CUSTOMRES: $pass passed, $fail failed"

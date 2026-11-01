@@ -67,7 +67,7 @@ fi
 
 K="$TMPD/osum.mb"
 bash tools/build-kernel.sh "$K" >/dev/null 2>&1 || {
-    echo "AML: der Kernel laesst sich nicht bauen"; exit 1; }
+    echo "AML: the kernel cannot be built"; exit 1; }
 
 lauf() { # append out [qemu-args...]
     local append=$1 out=$2
@@ -78,26 +78,26 @@ lauf() { # append out [qemu-args...]
     echo $? > "$out.rc"
 }
 
-echo "== 1. die Zahlen, die Karte und die Modusbits =="
+echo "== 1. the numbers, the map and the mode bits =="
 
 if python3 tools/kernel/memmap.py kernel >/dev/null 2>&1; then
-    ok "die kdata-Karte ist ueberschneidungsfrei (memmap.py)"
+    ok "the kdata map is overlap-free (memmap.py)"
 else
     bad "memmap.py meldet eine Kollision"
     python3 tools/kernel/memmap.py kernel -v 2>&1 | tail -5
 fi
 grep -q 'AML_OFF' tools/kernel/memmap.py \
-    && ok "der Bereich AML_OFF steht in der Speicherkarte" \
+    && ok "the range AML_OFF is in the memory map" \
     || bad "AML_OFF fehlt in tools/kernel/memmap.py"
 
 fremd=$(grep -rn --include='*.fi' -E '^const M_[A-Z0-9_]+: u64 = 7(7[2-9]|80)' kernel/ \
         | grep -vE 'M_(AML|AMLDUMP|NOAML|AMLBAD|AMLLOOP|AMLDEEP|AMLLEAK|AMLPRT|AMLWRONG)' || true)
-[ -z "$fremd" ] && ok "die Modusbits 772..780 gehoeren nur dieser Runde" \
-                || { bad "fremde Modusbits im Vorrat dieser Runde"; echo "$fremd"; }
+[ -z "$fremd" ] && ok "the mode bits 772..780 belong to this round only" \
+                || { bad "foreign mode bits in the pool of this round"; echo "$fremd"; }
 
 grep -rq --include='*.fi' -E '^const M_ASYNC: u64 = 704' kernel/ \
     && ok "Wort 11 Bit 0 gehoert wieder Runde ASYNC (M_ASYNC)" \
-    || bad "M_ASYNC steht nicht mehr auf 704 -- die Verschiebung stimmt nicht"
+    || bad "M_ASYNC is no longer at 704 -- the shift is wrong"
 
 stack=$(grep -A20 '^kernel_stack_bottom:' kernel/arch/x86_64/boot.s \
         | grep -m1 '\.skip' | sed 's/.*\.skip *//')
@@ -107,7 +107,7 @@ num "die Stapelwache liegt unter dem halben Stapel" \
     "$(( stack / 2 - limit ))" ge 0
 
 echo
-echo "== 2. der Namensraum -- gegen eine zweite, unabhaengige Fassung =="
+echo "== 2. the namespace -- against a second, independent implementation =="
 
 lauf "osum aml amldump nopwr" "$TMPD/dump.txt"
 gleich "der Lauf mit amldump endet sauber" "21" "$(cat "$TMPD/dump.txt.rc")"
@@ -133,9 +133,9 @@ print("tabellen=%d" % n)
 PYEOF
 
 if [ -f "$TMPD/DSDT.bin" ]; then
-    ok "die DSDT ist vollstaendig ueber die Leitung gekommen ($(stat -c%s "$TMPD/DSDT.bin") Oktette)"
+    ok "the DSDT arrived completely over the wire ($(stat -c%s "$TMPD/DSDT.bin") Oktette)"
 else
-    bad "die DSDT kam nicht vollstaendig an"
+    bad "the DSDT did not arrive completely"
 fi
 
 lauf "osum aml nopwr" "$TMPD/ok.txt"
@@ -177,9 +177,9 @@ PY2
         > "$TMPD/knamen.txt"
     unterschied=$(comm -3 "$TMPD/tabnamen.txt" "$TMPD/knamen.txt" | wc -l)
     if [ "$unterschied" = "0" ]; then
-        ok "die NAMEN stimmen Zeichen fuer Zeichen ueberein ($(wc -l < "$TMPD/knamen.txt") Stueck)"
+        ok "the NAMES match character for character ($(wc -l < "$TMPD/knamen.txt") Stueck)"
     else
-        bad "$unterschied Namen unterscheiden sich"
+        bad "$unterschied names differ"
         comm -3 "$TMPD/tabnamen.txt" "$TMPD/knamen.txt" | head -10 | sed 's/^/        /'
     fi
 
@@ -188,11 +188,11 @@ PY2
         if awk -v n="$n" '$1==n{f=1} END{exit !f}' "$TMPD/ns.txt"; then
             ok "der Namensraum enthaelt $n"
         else
-            bad "im Namensraum fehlt $n"
+            bad "$n is missing in the namespace"
         fi
     done
 else
-    bad "ohne DSDT kein Vergleich"
+    bad "without a DSDT no comparison"
 fi
 
 echo
@@ -243,7 +243,7 @@ if [ -f "$TMPD/DSDT.bin" ]; then
 fi
 
 echo
-echo "== 4. _PRT -- die Leitung aus der Firmware statt aus 0x3C =="
+echo "== 4. _PRT -- the line from the firmware instead of from 0x3C =="
 
 sagt "$TMPD/ok.txt" prtok 1 "_PRT wurde ausgewertet"
 sagt "$TMPD/ok.txt" routes 128 "die Routentafel hat einen Eintrag je Steckplatz und Stift"
@@ -265,14 +265,14 @@ gsi=$(echo "$zeile" | sed -n 's/.* aml=\([0-9]*\).*/\1/p')
 gleich "00:03.0 Stift A liegt laut _PRT auf GSI 11" "11" "${gsi:-fehlt}"
 
 echo
-echo "== 5. DIE ZUSAGE: der Unterbrechungsvektor kommt wirklich an =="
+echo "== 5. THE PROMISE: the interrupt vector really arrives =="
 
 if [ "$(id -u)" != "0" ] || ! command -v ip >/dev/null 2>&1; then
-    echo "  (uebersprungen: dieser Abschnitt braucht root und ip(8))"
+    echo "  (skipped: this section needs root and ip(8))"
 else
     gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null \
-        && ok "tools/net/bridge.c: die Leitung nach draussen ist gebaut" \
-        || bad "bridge.c laesst sich nicht uebersetzen"
+        && ok "tools/net/bridge.c: the line to the outside is built" \
+        || bad "bridge.c cannot be compiled"
 
     ip netns del "$NS" 2>/dev/null
     ip link del "$V0" 2>/dev/null
@@ -326,7 +326,7 @@ else
 fi
 
 echo
-echo "== 6. kaputtes AML -- definierter Fehler und Rueckfall =="
+echo "== 6. broken AML -- defined error and fallback =="
 
 lauf "osum aml amlbad nopwr" "$TMPD/bad.txt"
 gleich "die Maschine faehrt trotz kaputter DSDT fertig hoch" "21" "$(cat "$TMPD/bad.txt.rc")"
@@ -336,10 +336,10 @@ num "es gibt einen DEFINIERTEN Fehler (nicht 0)" "${e:-0}" ge 1
 sagt "$TMPD/bad.txt" prtok 0 "_PRT wurde NICHT fuer gueltig erklaert"
 sagt "$TMPD/bad.txt" routes 0 "die Routentafel bleibt leer"
 grep -qa 'aml: gsi 00:03.0 pin=1 aml=999 line=11' "$TMPD/bad.txt" \
-    && ok "der Rueckfall auf das Interrupt-Line-Register greift (line=11)" \
-    || bad "der Rueckfall greift nicht"
+    && ok "the fallback to the interrupt line register takes hold (line=11)" \
+    || bad "the fallback does not take hold"
 grep -qa 'EXCEPTION' "$TMPD/bad.txt" \
-    && bad "es gab eine Prozessorausnahme" \
+    && bad "there was a processor exception" \
     || ok "keine Prozessorausnahme"
 
 lauf "osum noaml nopwr" "$TMPD/no.txt"
@@ -347,7 +347,7 @@ gleich "ohne Interpreter (noaml) laeuft die Maschine wie vorher" "21" "$(cat "$T
 hat "$TMPD/no.txt" "aml: abgestellt" "noaml schaltet den Interpreter wirklich ab"
 
 echo
-echo "== 7. eine Schleife, die nicht endet =="
+echo "== 7. a loop that does not end =="
 
 lauf "osum aml amlloop nopwr" "$TMPD/loop.txt"
 gleich "die Maschine bleibt nicht stehen" "21" "$(cat "$TMPD/loop.txt.rc")"
@@ -356,7 +356,7 @@ gleich "die Schrittgrenze greift (ERR_BUDGET = 7)" "7" "${l:-fehlt}"
 sagt "$TMPD/loop.txt" routes 128 "und _PRT ist davon unberuehrt"
 
 echo
-echo "== 8. Rekursion bis zur Grenze =="
+echo "== 8. recursion up to the limit =="
 
 lauf "osum aml amldeep nopwr" "$TMPD/deep.txt"
 gleich "die Maschine bleibt nicht stehen" "21" "$(cat "$TMPD/deep.txt.rc")"
@@ -364,8 +364,8 @@ d=$(grep -a -o -m1 'aml: deep err=[0-9]*' "$TMPD/deep.txt" | sed 's/.*=//')
 gleich "die Tiefengrenze greift (ERR_DEPTH = 6)" "6" "${d:-fehlt}"
 hat "$TMPD/deep.txt" "kernel: done" "der Kernel kommt bis zum Ende"
 grep -qa 'EXCEPTION' "$TMPD/deep.txt" \
-    && bad "es gab eine Prozessorausnahme" \
-    || ok "kein Stapelueberlauf, keine Ausnahme"
+    && bad "there was a processor exception" \
+    || ok "no stack overflow, no exception"
 
 echo
 echo "== 9. kein Leck =="
@@ -374,7 +374,7 @@ lauf "osum aml amlleak nopwr" "$TMPD/leak.txt"
 v=$(grep -a -o -m1 'vorher=[0-9]*' "$TMPD/leak.txt" | sed 's/.*=//')
 n=$(grep -a -o -m1 'nachher=[0-9]*' "$TMPD/leak.txt" | sed 's/.*=//')
 if [ -z "${v:-}" ] || [ -z "${n:-}" ]; then
-    bad "die Rahmenzahlen fehlen in der Ausgabe"
+    bad "the frame counts are missing in the output"
 else
     gleich "nach dem Verwerfen des Namensraums sind alle Rahmen zurueck" "$v" "$n"
     num "der Namensraum hat wirklich Rahmen gekostet" "$v" ge 64

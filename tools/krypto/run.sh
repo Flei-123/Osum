@@ -120,7 +120,7 @@ mkdir -p .probe
 if $FIRNC tools/krypto/orakel.fi -o .probe/korakel 2> "$TMPD/orakel.err"; then
     ok "tools/krypto/orakel.fi baut gegen lib/crypto/ (dieselben Dateien wie der Kern)"
 else
-    bad "tools/krypto/orakel.fi laesst sich nicht bauen"
+    bad "tools/krypto/orakel.fi cannot be built"
     sed 's/^/        /' "$TMPD/orakel.err" | head -20
     echo "KRYPTO: $pass bestanden, $fail gescheitert"; exit 1
 fi

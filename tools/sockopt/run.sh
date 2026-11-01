@@ -84,7 +84,7 @@ echo "== 2. bauen: Kernel, libc, /bin/sockt =="
 # =====================================================================
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
-        || bad "$f.s laesst sich nicht assemblieren"
+        || bad "$f.s cannot be assembled"
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s"
 

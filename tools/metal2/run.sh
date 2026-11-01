@@ -48,7 +48,7 @@ if [ -z "$KERN" ]; then
     if bash tools/usbimg/build.sh "$TMPD/bau" > "$TMPD/build.txt" 2>&1; then
         ok "tools/usbimg/build.sh laeuft durch (Kern, Wurzel, limine.conf)"
     else
-        bad "das Abbild laesst sich nicht bauen"
+        bad "das Abbild cannot be built"
         tail -20 "$TMPD/build.txt"
         echo "BLECH2: $pass bestanden, $fail gescheitert"
         exit 1

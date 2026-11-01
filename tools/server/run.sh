@@ -34,10 +34,10 @@ echo "== 1. the build switch: gui=on and gui=off =="
 
 bash tools/build-kernel.sh "$TMPD/gui.mb" --gui on > "$TMPD/gui.log" 2>&1 \
     && ok "the build with a screen goes through" \
-    || { bad "gui=on laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/gui.log" | head -10; }
+    || { bad "gui=on cannot be built"; sed 's/^/        /' "$TMPD/gui.log" | head -10; }
 bash tools/build-kernel.sh "$TMPD/srv.mb" --gui off > "$TMPD/srv.log" 2>&1 \
     && ok "the build WITHOUT a screen goes through" \
-    || { bad "gui=off laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/srv.log" | head -20; }
+    || { bad "gui=off cannot be built"; sed 's/^/        /' "$TMPD/srv.log" | head -20; }
 
 if [ -f "$TMPD/gui.mb" ] && [ -f "$TMPD/srv.mb" ]; then
     A=$(stat -c%s "$TMPD/gui.mb")
