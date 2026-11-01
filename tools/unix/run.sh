@@ -57,13 +57,13 @@ number_in() { # file name
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 fehlt: $FIRNC"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "UNIX: skipped, qemu-system-x86_64 ist nicht da"
+    echo "UNIX: skipped, qemu-system-x86_64 is not there"
     exit 0
 fi
 
 # ------------------------------------------------------------- Abschnitt 1
 
-echo "== 1. die Nummern, und die Karte, wer welchen Bereich hat =="
+echo "== 1. the numbers, and the map of who owns which range =="
 check() { # name expected
     local got
     got=$(number_in kernel/sys/sys.fi "SYS_$1")
@@ -92,8 +92,8 @@ lo=$(echo "$own" | head -1); hi=$(echo "$own" | tail -1)
 num "die kleinste Nummer, die Runde K9 selbst erfunden hat" "${lo:-0}" ge 1100
 num "und die groesste" "${hi:-0}" le 1199
 grep -q '1100\.\.1199   RUNDE K9' kernel/sys/sys.fi \
-    && ok "die Bereichskarte steht oben in sys.fi" \
-    || bad "die Bereichskarte fehlt in sys.fi"
+    && ok "the range map is at the top of sys.fi" \
+    || bad "the range map is missing in sys.fi"
 clash=0
 for n in 13 14 15 16 34 37 56 62 96 109 111 112 121 127 201 202 228 229 230 234 318; do
     if [ "$n" -ge 41 ] && [ "$n" -le 55 ]; then clash=$((clash+1)); fi
@@ -102,16 +102,16 @@ num "Nummern von K9, die im Socket-Block 41..55 von K8 liegen" "$clash" eq 0
 
 # ------------------------------------------------------------- Abschnitt 2
 
-echo "== 2. bauen: der Kernel, das Userland und das messende Programm =="
+echo "== 2. build: the kernel, the userland and the measuring program =="
 for f in boot isr switch smp hv; do
     as --64 -o "$TMPD/$f.o" "kernel/arch/x86_64/$f.s" 2>"$TMPD/as.err" \
-        || { bad "$f.s laesst sich nicht assemblieren"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
+        || { bad "$f.s cannot be assembled"; sed 's/^/        /' "$TMPD/as.err" | head -5; }
 done
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/ascrt.err" \
-    && ok "crt.s assembliert (mit den Behandlungsroutinen von Runde K9)" \
+    && ok "crt.s assembles (with the handlers of round K9)" \
     || { bad "crt.s"; sed 's/^/        /' "$TMPD/ascrt.err" | head -5; }
 nm "$TMPD/crt.o" | grep -q 'T osum_sighandler' \
-    && ok "crt.s stellt osum_sighandler bereit -- die Adresse, die Firn nicht nennen kann" \
+    && ok "crt.s provides osum_sighandler -- the address Firn cannot name" \
     || bad "osum_sighandler fehlt in crt.o"
 
 build_stage() { # 0 = firnc0, 1 = firnc1
@@ -119,7 +119,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     [ -x "$cc" ] || return 1
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
-        || { bad "firnc$s uebersetzt den Kernel nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
+        || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     "$cc" kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt uprog.fi nicht"; return 1; }
     ld -n -T kernel/kernel.ld \
@@ -134,7 +134,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
         || { bad "firnc$s: ld am Kernel gescheitert"; grep -v 'GNU-stack\|RWX\|deprecated' "$TMPD/ld$s.err" | sed 's/^/        /' | head -5; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
-    ok "firnc$s: der Kernel ist gebunden und ein Multiboot-Abbild"
+    ok "firnc$s: the kernel is linked and a Multiboot image"
     local p
     for p in $PROGS; do
         "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
@@ -150,13 +150,13 @@ build_stage() { # 0 = firnc0, 1 = firnc1
 build_stage 0 || { echo "UNIX: $pass passed, $fail failed"; exit 1; }
 
 u=$(nm -u "$TMPD/unix0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-[ -z "$u" ] && ok "/bin/unix hat kein undefiniertes Symbol" \
+[ -z "$u" ] && ok "/bin/unix has no undefined symbol" \
             || bad "/bin/unix hat undefinierte Symbole: $u"
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py hat ein OFS-Abbild von $BLOCKS Bloecken gebaut" \
+    && ok "mkfs.py built an OFS image of $BLOCKS blocks" \
     || { bad "mkfs.py gescheitert"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 run_disk() { # image append out
@@ -172,11 +172,11 @@ QUIET="nokbd nosched noproc nofs noring3"
 
 # ------------------------------------------------------------- Abschnitt 3
 
-echo "== 3. der Lauf: achtundfuenfzig Messungen aus Ring 3 =="
+echo "== 3. the run: fifty-eight measurements from ring 3 =="
 run_disk "$TMPD/k0.mb" "osum unix $QUIET script=unix;exit" "$TMPD/run.txt"
 rc=$?
 F="$TMPD/run.txt"
-[ "$rc" -eq 21 ] && ok "der Kernel hat sich selbst beendet (exit 21)" \
+[ "$rc" -eq 21 ] && ok "the kernel ended itself (exit 21)" \
                  || { bad "QEMU-Beendigungscode $rc, erwartet 21"; tail -8 "$F" | tr -d '\000' | sed 's/^/        /'; }
 
 echo "   -- Signale: abfangen, blockieren, ueberhoeren"
@@ -189,14 +189,14 @@ say "$F" "pending" 1 "ein blockiertes Signal WARTET -- es geht nicht verloren"
 say "$F" "after unblock" 1 "und kommt in dem Augenblick an, in dem es freigegeben wird"
 say "$F" "ignore" 0 "ein ueberhoertes Signal kommt nie an"
 
-echo "   -- und jede Art, falsch zu liegen"
+echo "   -- and every way to be wrong"
 say "$F" "act kill" -22 "SIGKILL laesst sich nicht abfangen: -EINVAL"
 say "$F" "act zero" -22 "Signal 0 gibt es nicht: -EINVAL"
 say "$F" "act big" -22 "Signal 64 gibt es nicht: -EINVAL"
 say "$F" "kill srch" -3 "ein Prozess, den es nicht gibt: -ESRCH"
 say "$F" "kill probe" 0 "kill(pid, 0) schickt nichts und sagt, dass es ihn gibt"
 
-echo "   -- das Standardverhalten, und SIGCHLD"
+echo "   -- the default behavior, and SIGCHLD"
 say "$F" "term code" 143 "ein Kind stirbt an SIGTERM mit 128 + 15"
 say "$F" "kill code" 137 "SIGKILL laesst sich auch mit Routine nicht abfangen: 128 + 9"
 say "$F" "chld" 1 "der Elternteil bekommt SIGCHLD, wenn ein Kind endet"
@@ -208,7 +208,7 @@ say "$F" "stop frozen" 1 "und SEINE RECHENZEIT STEHT STILL -- ein Schlaefer taet
 say "$F" "cont state" 1 "SIGCONT holt ihn zurueck"
 say "$F" "cont moves" 1 "und die Rechenzeit laeuft weiter"
 
-echo "   -- eine Ausnahme des Prozessors ist ein Signal"
+echo "   -- a processor exception is a signal"
 say "$F" "segv caught" 51 "ein Zugriff auf die Null wird SIGSEGV und landet in Ring 3 (40 + 11)"
 say "$F" "segv code" 142 "ohne Routine bleibt der Code von Runde 62: 128 + Vektor 14"
 say "$F" "fpe caught" 48 "geteilt durch null wird SIGFPE (40 + 8)"
@@ -232,7 +232,7 @@ say "$F" "pty to master" 6 "und in der anderen Richtung ebenso"
 say "$F" "pty raw" 1 "im rohen Modus kommt ein einzelnes Zeichen ohne Zeilenende durch"
 say "$F" "pty ctlc" 1 "ein Oktett 3 auf der Steuerseite ist ein SIGINT, kein Zeichen"
 
-echo "   -- STRG-C, STRG-Z und der Hintergrund: die Auftragssteuerung"
+echo "   -- CTRL-C, CTRL-Z and the background: job control"
 say "$F" "job grp" 0 "setpgid(0,0) macht aus dem Kind seine eigene Prozessgruppe"
 say "$F" "job ctlc" 130 "STRG-C BEENDET DEN VORDERGRUNDPROZESS WIRKLICH: 128 + SIGINT"
 say "$F" "job tstp" 7 "STRG-Z haelt ihn an statt ihn zu beenden"
@@ -261,22 +261,22 @@ lines=$(value_of "$F" lines)
 seen=$(grep -ac '^unix: .* = ' "$F")
 num "Messungen, die das Programm gezaehlt hat" "${lines:-0}" ge 55
 if [ -n "$lines" ] && [ "$seen" = "$((lines + 1))" ]; then
-    ok "jede gezaehlte Zeile ist wirklich ueber die serielle Leitung gekommen ($seen)"
+    ok "every counted line really arrived over the serial line ($seen)"
 else
-    bad "das Programm zaehlte ${lines:-0} Zeilen, angekommen sind $seen"
+    bad "the program counted ${lines:-0} lines, $seen arrived"
 fi
 if grep -aq 'osum\$ unix' "$F" && grep -aq 'sh: bye' "$F"; then
-    ok "die Shell hat das Programm von der Platte gestartet, auf es gewartet und danach selbst geendet"
+    ok "the shell started the program from disk, waited for it and then ended itself"
 else
-    bad "die Shell hat das Programm nicht sauber gestartet oder nicht geendet"
+    bad "the shell did not start the program cleanly or did not end"
 fi
 if grep -aq '\*\*\* EXCEPTION' "$F"; then
-    bad "eine unbehandelte Ausnahme in einem Lauf, der drei davon absichtlich ausloest"
+    bad "an unhandled exception in a run that deliberately triggers three of them"
 else
-    ok "keine unbehandelte Ausnahme -- die drei provozierten wurden zu Signalen"
+    ok "no unhandled exception -- the three provoked ones became signals"
 fi
 grep -aq 'kernel: done' "$F" \
-    && ok "der Kernel ist nach alldem bis zum Ende gekommen" \
+    && ok "the kernel made it to the end after all that" \
     || bad "'kernel: done' fehlt"
 
 # ------------------------------------------------------------- Abschnitt 4
@@ -285,7 +285,7 @@ echo "== 4. GEGENPROBE 'nosig': ohne Zustellung bleibt der Zaehler bei null =="
 run_disk "$TMPD/k0.mb" "osum unix nosig $QUIET script=unix probe;exit" "$TMPD/nosig.txt"
 rc=$?
 N="$TMPD/nosig.txt"
-[ "$rc" -eq 21 ] && ok "der Lauf ohne Zustellung endet von selbst (exit 21)" \
+[ "$rc" -eq 21 ] && ok "the run without delivery ends by itself (exit 21)" \
                  || bad "nosig: QEMU-Beendigungscode $rc"
 say "$N" "caught" 0 "ohne Zustellung faengt niemand etwas ab"
 say "$N" "count" 0 "und sechs abgeschickte Signale zaehlen null"
@@ -293,9 +293,9 @@ say "$N" "after unblock" 0 "auch die Freigabe holt nichts nach"
 say "$N" "pending" 1 "ABER DAS BIT STEHT -- abgeschickt wurde sehr wohl etwas"
 p_on=$(value_of "$TMPD/run.txt" "count"); p_off=$(value_of "$N" "count")
 if [ "$p_on" = "6" ] && [ "$p_off" = "0" ]; then
-    ok "derselbe Code, ein Wort auf der Kommandozeile: 6 gegen 0"
+    ok "the same code, one word on the command line: 6 against 0"
 else
-    bad "die Gegenprobe unterscheidet nicht: $p_on gegen $p_off"
+    bad "the negative test does not distinguish: $p_on against $p_off"
 fi
 
 # ------------------------------------------------------------- Abschnitt 5
@@ -304,7 +304,7 @@ echo "== 5. GEGENPROBE 'fixedrand': die statistische Pruefung MUSS durchfallen =
 run_disk "$TMPD/k0.mb" "osum unix fixedrand $QUIET script=unix probe;exit" "$TMPD/fixed.txt"
 rc=$?
 X="$TMPD/fixed.txt"
-[ "$rc" -eq 21 ] && ok "der Lauf mit festverdrahtetem Zufall endet von selbst (exit 21)" \
+[ "$rc" -eq 21 ] && ok "the run with hard-wired randomness ends by itself (exit 21)" \
                  || bad "fixedrand: QEMU-Beendigungscode $rc"
 chi=$(value_of "$X" "random chi")
 num "Chi-Quadrat mit festverdrahtetem Oktett (die Pruefung muss durchfallen)" "${chi:-0}" ge 100000
@@ -312,14 +312,14 @@ say "$X" "random diff" 0 "und zwei Puffer hintereinander sind Oktett fuer Oktett
 say "$X" "random got" 1024 "geliefert wird trotzdem, worum gebeten wurde -- nur eben Unsinn"
 bits=$(value_of "$X" "random bits")
 if [ -n "$bits" ] && [ "$bits" -ge 450 ] && [ "$bits" -le 550 ]; then
-    ok "und die Bitverteilung allein haette ihn durchgewinkt ($bits) -- deshalb gibt es zwei Pruefungen"
+    ok "and the bit distribution alone would have waved it through ($bits) -- hence two checks"
 else
-    bad "die Bitverteilung des festen Stroms: $bits"
+    bad "the bit distribution of the fixed stream: $bits"
 fi
 
 # ------------------------------------------------------------- Abschnitt 6
 
-echo "== 6. drei Neustarts, drei verschiedene Saaten =="
+echo "== 6. three restarts, three different seeds =="
 seeds=""
 for i in 1 2 3; do
     run_disk "$TMPD/k0.mb" "osum unix $QUIET script=exit" "$TMPD/seed$i.txt"
@@ -335,9 +335,9 @@ hw=$(grep -a -m1 '^rand: seed=' "$TMPD/seed1.txt" | grep -oE 'hw=[0-9]+' | cut -
 stirs=$(grep -a -m1 '^rand: seed=' "$TMPD/seed1.txt" | grep -oE 'stirs=[0-9]+' | cut -d= -f2)
 num "Ereignisse, die bis zum Saeen in den Sammler gingen" "${stirs:-0}" ge 20
 if [ "${hw:-0}" = "0" ]; then
-    ok "ohne RDSEED/RDRAND auf dieser Maschine -- die Entropie kommt allein aus dem Flattern (hw=0)"
+    ok "without RDSEED/RDRAND on this machine -- the entropy comes from jitter alone (hw=0)"
 else
-    ok "die Rauschquelle des Prozessors war da und ist mit eingegangen (hw=$hw)"
+    ok "the processor noise source was there and went in (hw=$hw)"
 fi
 tsc=$(grep -a -m1 '^time: tsc=' "$TMPD/seed1.txt" | grep -oE 'tsc=[0-9]+' | cut -d= -f2)
 num "die gemessene Taktfrequenz des Zyklenzaehlers (kHz)" "${tsc:-0}" ge 100000

@@ -31,7 +31,7 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
 hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' steht da und sollte nicht" || ok "$3"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "OOM: uebersprungen, qemu-system-x86_64 ist nicht da"
+    echo "OOM: skipped, qemu-system-x86_64 is not there"
     exit 0
 fi
 bash vendor/firn/fetch-firnc.sh >/dev/null || {
@@ -43,7 +43,7 @@ SANS=assets/osum-sans.ttf
 echo "== 1. der Kern baut =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/b.log" 2>&1 \
     && ok "Kern gebaut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; sed 's/^/        /' "$TMPD/b.log" | head -12
+    || { bad "the kernel does not build"; sed 's/^/        /' "$TMPD/b.log" | head -12
          echo "OOM: $pass bestanden, $fail gescheitert"; exit 1; }
 
 run() { # name ram worte
@@ -59,11 +59,11 @@ run() { # name ram worte
 zahl() { grep -a -m1 "^$2" "$1" | sed "s/^$2//" | grep -oaE '[0-9]+' | head -1; }
 
 echo
-echo "== 2. ein Fresser OHNE Auswahl (nooom): ehrliche Absage statt Freeze =="
+echo "== 2. a hog WITHOUT selection (nooom): an honest refusal instead of a freeze =="
 run eins 128 "memhog nooom"; RC=$?
 F="$TMPD/eins.txt"
-[ "$RC" -eq 21 ] && ok "der Kern hat sich selbst beendet (QEMU-Code 21)" \
-    || bad "QEMU-Code $RC, erwartet 21 -- das sieht nach Einfrieren aus"
+[ "$RC" -eq 21 ] && ok "the kernel ended itself (QEMU code 21)" \
+    || bad "QEMU code $RC, expected 21 -- this looks like a freeze"
 has "$F" 'kernel: done' "der Kern erreicht sein Ende"
 has "$F" 'speicherdruck: lebt=1' "das System lebt nach dem Notfall"
 has "$F" 'hog: fail=' "der Fresser bekam eine ehrliche Absage"
@@ -73,13 +73,13 @@ num "nooom: niemand wurde beendet" "$(zahl "$F" 'speicherdruck: kills=')" eq 0
 VOR=$(zahl "$F" 'speicherdruck: frei=')
 NACH=$(zahl "$F" 'speicherdruck: nach=')
 if [ -n "$VOR" ] && [ "$VOR" = "$NACH" ]; then
-    ok "jeder Rahmen ist zurueck: $VOR vorher, $NACH nachher"
+    ok "every frame is back: $VOR before, $NACH after"
 else
-    bad "Rahmen verloren: $VOR vorher, $NACH nachher"
+    bad "frames lost: $VOR before, $NACH after"
 fi
 
 echo
-echo "== 3. die Reserve greift, und die Auswahl trifft =="
+echo "== 3. the reserve takes hold, and the selection hits =="
 run ohne 128 "memhog nooom noreserve"
 G="$TMPD/ohne.txt"
 num "Gegenprobe noreserve: die Reserve ist leer" \
@@ -87,15 +87,15 @@ num "Gegenprobe noreserve: die Reserve ist leer" \
 MIT=$(grep -a -m1 '^hog: fail=' "$F" | grep -oaE '[0-9]+')
 OHNE=$(grep -a -m1 '^hog: fail=' "$G" | grep -oaE '[0-9]+')
 if [ -n "$MIT" ] && [ -n "$OHNE" ] && [ "$OHNE" -gt "$MIT" ]; then
-    ok "ohne Reserve frisst er weiter: $OHNE statt $MIT KiB"
+    ok "without the reserve it keeps eating: $OHNE instead of $MIT KiB"
 else
-    bad "die Reserve macht keinen Unterschied: $MIT mit, $OHNE ohne"
+    bad "the reserve makes no difference: $MIT with, $OHNE without"
 fi
 
 run oom 128 memhog; RC=$?
 O="$TMPD/oom.txt"
-[ "$RC" -eq 21 ] && ok "mit Auswahl: der Kern beendet sich selbst (21)" \
-    || bad "mit Auswahl: QEMU-Code $RC, erwartet 21"
+[ "$RC" -eq 21 ] && ok "with selection: the kernel ends itself (21)" \
+    || bad "with selection: QEMU code $RC, expected 21"
 RES=$(zahl "$O" 'speicherdruck: res=')
 HITS=$(zahl "$O" 'speicherdruck: hits=')
 num "die Reserve steht" "$RES" ge 64
@@ -109,8 +109,8 @@ hasnot "$O" 'hog: ende' "der Getroffene rechnet NICHT weiter"
 VOR=$(zahl "$O" 'speicherdruck: frei=')
 NACH=$(zahl "$O" 'speicherdruck: nach=')
 [ -n "$VOR" ] && [ "$VOR" = "$NACH" ] \
-    && ok "auch nach dem Beenden ist jeder Rahmen zurueck: $VOR" \
-    || bad "nach dem Beenden fehlen Rahmen: $VOR vorher, $NACH nachher"
+    && ok "even after the kill every frame is back: $VOR" \
+    || bad "frames are missing after the kill: $VOR before, $NACH after"
 
 echo
 echo "== 4. die harten Faelle =="
@@ -123,9 +123,9 @@ num "drei Fresser: mindestens einer beendet" \
 VOR3=$(zahl "$D" 'speicherdruck: frei=')
 NACH3=$(zahl "$D" 'speicherdruck: nach=')
 if [ "$VOR3" = "$NACH3" ]; then
-    ok "drei Fresser: jeder Rahmen ist zurueck ($VOR3)"
+    ok "three hogs: every frame is back ($VOR3)"
 else
-    bad "drei Fresser: Rahmen verloren -- $VOR3 vorher, $NACH3 nachher"
+    bad "three hogs: frames lost -- $VOR3 before, $NACH3 after"
 fi
 has "$D" 'kernel: done' "der Kern arbeitet nach dem Notfall weiter"
 
@@ -153,20 +153,20 @@ d = open(sys.argv[1], 'rb').read()
 sys.exit(0 if b'A' * 64 in d else 1)
 PY
     then
-        ok "die Datei ist danach vollstaendig und heil (64 mal 'A' im Abbild)"
+        ok "the file is complete and intact afterwards (64 times 'A' im Abbild)"
     else
         if grep -qa 'hogwrite: wrote=64' "$W"; then
-            bad "die Datei wurde geschrieben, steht aber nicht heil im Abbild"
+            bad "the file was written but is not intact in the image"
         else
-            ok "der Fresser kam nicht bis zum Schreiben -- nichts zu verlieren"
+            ok "the hog did not get as far as writing -- nothing to lose"
         fi
     fi
 else
-    bad "das Abbild fuer den Schreibfall liess sich nicht bauen"
+    bad "the image for the write case could not be built"
 fi
 
 echo
-echo "== 5. DIE ABNAHME: Schreibtisch, Fresser, und wer ueberlebt =="
+echo "== 5. THE ACCEPTANCE: desktop, hogs, and who survives =="
 #
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
     || bad "crt.s cannot be assembled"
@@ -186,9 +186,9 @@ for p in $PROGS; do
 done
 
 if [ "$BUILT" = 1 ]; then
-    ok "die Programme des Schreibtischs sind gebaut"
+    ok "the desktop programs are built"
     python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
-        && ok "der Verzeichnisbaum steht" || bad "tools/k15/tree.py scheiterte"
+        && ok "the directory tree is ready" || bad "tools/k15/tree.py scheiterte"
     printf 'unten\n28\n0\n0\n1\n' > "$TMPD/tb.conf"
 
     ARGS=(build "$TMPD/disk.img" 32768 /lib/
@@ -199,7 +199,7 @@ if [ "$BUILT" = 1 ]; then
         < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
     python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-        && ok "das Abbild ist gebaut" \
+        && ok "the image is built" \
         || { bad "mkfs.py scheiterte"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 
     if [ -f "$TMPD/disk.img" ]; then
@@ -237,7 +237,7 @@ if [ "$BUILT" = 1 ]; then
         GUI=$(grep -a '^desk: start ' "$S" | grep -oaE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
         OPFER=$(grep -a '^oom: kill ' "$S" | grep -oaE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
         if [ -z "$OPFER" ]; then
-            bad "die Auswahl hat niemanden beendet -- der Notfall blieb unbehandelt"
+            bad "the selection killed nobody -- the emergency stayed unhandled"
         else
             TREFFER=""
             for o in $OPFER; do
@@ -246,9 +246,9 @@ if [ "$BUILT" = 1 ]; then
                 done
             done
             if [ -z "$TREFFER" ]; then
-                ok "getroffen hat es nur die Fresser ($(echo $OPFER | tr '\n' ' ')) -- die Oberflaeche ($(echo $GUI | tr '\n' ' ')) lebt"
+                ok "only the hogs were hit ($(echo $OPFER | tr '\n' ' ')) -- die Oberflaeche ($(echo $GUI | tr '\n' ' ')) lebt"
             else
-                bad "die Auswahl hat die Oberflaeche getroffen:$TREFFER"
+                bad "the selection hit the surface:$TREFFER"
             fi
         fi
 
@@ -256,7 +256,7 @@ if [ "$BUILT" = 1 ]; then
         has "$S" 't=[Taskbar]' "das Fenster der Taskleiste steht noch"
 
         has "$S" 'wm: hold' "der Fensterserver dreht nach dem Notfall weiter"
-        [ "$DRC" -eq 21 ] && ok "der Lauf endet sauber (QEMU-Code 21)" \
+        [ "$DRC" -eq 21 ] && ok "the run ends cleanly (QEMU code 21)" \
             || bad "QEMU-Code $DRC, erwartet 21"
 
         if [ -s "$SHOTS/oom-desktop.ppm" ]; then
@@ -285,10 +285,10 @@ Image.open('$SHOTS/oom-desktop.ppm').save('$SHOTS/oom-desktop.png', optimize=Tru
                 rm -f "$SHOTS/oom-desktop.ppm"
                 ok "Bild: $SHOTS/oom-desktop.png"
             else
-                ok "Bild: $SHOTS/oom-desktop.ppm (PIL fehlt, kein PNG)"
+                ok "Image: $SHOTS/oom-desktop.ppm (PIL missing, no PNG)"
             fi
         else
-            bad "es ist kein Bild entstanden"
+            bad "no image was produced"
         fi
     fi
 fi

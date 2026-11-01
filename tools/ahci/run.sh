@@ -39,15 +39,15 @@ hin "QEMU: $(qemu-system-x86_64 --version | head -1)"
 # ------------------------------------------------------------ der Kernel
 
 bash tools/build-kernel.sh "$TMPD/osum.mb" --stufe 0 >/dev/null 2>&1 \
-    || { echo "AHCI: der Kernel liess sich nicht bauen"; exit 1; }
+    || { echo "AHCI: the kernel could not be built"; exit 1; }
 if [ -s "$TMPD/osum.mb" ]; then
-    ok "der Kernel ist gebaut ($(stat -c%s "$TMPD/osum.mb") Oktette, Stufe 0)"
+    ok "the kernel is built ($(stat -c%s "$TMPD/osum.mb") Oktette, Stufe 0)"
 else
-    bad "der Kernel fehlt"
+    bad "the kernel is missing"
 fi
 
 if python3 tools/kernel/memmap.py >"$TMPD/map.txt" 2>&1; then
-    ok "die Speicherkarte von kdata ist kollisionsfrei -- $(cat "$TMPD/map.txt")"
+    ok "the kdata memory map is collision-free -- $(cat "$TMPD/map.txt")"
 else
     bad "die Speicherkarte kollidiert"
     sed 's/^/          /' "$TMPD/map.txt" | head -10
@@ -90,7 +90,7 @@ gruen() { # NAME BESCHREIBUNG
         grep -a -A6 'EXCEPTION' "$log" | head -8 | sed 's/^/          /'
     fi
     if grep -qa 'EXCEPTION' "$log"; then
-        bad "$was: eine Ausnahme im Lauf -- $(grep -a -m1 'EXCEPTION' "$log")"
+        bad "$was: an exception in the run -- $(grep -a -m1 'EXCEPTION' "$log")"
     else
         ok "$was: keine einzige Ausnahme"
     fi
@@ -111,12 +111,12 @@ zahl() { # BESCHREIBUNG IST OP SOLL
     if [ "$ist" "-$op" "$soll" ] 2>/dev/null; then
         ok "$was: $ist"
     else
-        bad "$was: $ist, erwartet $op $soll"
+        bad "$was: $ist, expected $op $soll"
     fi
 }
 
 echo
-echo "== 1. der Controller wird auf dem BUS gefunden, nicht im Kernel =="
+echo "== 1. the controller is found on the BUS, not in the kernel =="
 
 bild a
 mapfile -t AARGS < <(platte a)
@@ -124,9 +124,9 @@ lauf a q35 "ahci" "${AARGS[@]}"
 gruen a "1.1 q35 mit AHCI-Controller und einer Platte"
 
 if grep -qa '^pci: .*class=01:06:01 ahci' "$TMPD/a.txt"; then
-    ok "1.2 die PCI-Liste zeigt die Klasse 01:06:01 -- $(grep -a -m1 'class=01:06:01' "$TMPD/a.txt")"
+    ok "1.2 the PCI list shows class 01:06:01 -- $(grep -a -m1 'class=01:06:01' "$TMPD/a.txt")"
 else
-    bad "1.2 kein Geraet der Klasse 01:06:01 in der PCI-Liste"
+    bad "1.2 no device of class 01:06:01 in the PCI list"
 fi
 
 BLK=$(feld a '^ahci: blocks=' blocks)
@@ -141,7 +141,7 @@ zahl "1.6 der Controller meldet seine Befehlsplaetze" "$SLT" ge 1
 zahl "1.7 das Busmaster-Bit steht" "$BM" eq 1
 
 echo
-echo "== 2. Lesen und Schreiben gegen bekannte Daten =="
+echo "== 2. reading and writing against known data =="
 
 W1=$(feld a '^ahci: one ' wr); R1=$(feld a '^ahci: one ' rd)
 P1=$(feld a '^ahci: one ' pre); S1=$(feld a '^ahci: one ' same)
@@ -166,7 +166,7 @@ zahl "2.10 und es waren wirklich Befehle unterwegs" "$CMD" ge 60
 zahl "2.11 keine abgelaufene Zeitschranke" "$DEAD" eq 0
 
 echo
-echo "== 3. dasselbe Dateisystem darauf, ohne eine geaenderte Zeile in fs.fi =="
+echo "== 3. the same file system on it, without a changed line in fs.fi =="
 
 FMT=$(grep -a -m1 '^ahci: format ' "$TMPD/a.txt" | sed -n 's/^ahci: format \([0-9]*\).*/\1/p')
 MNT=$(feld a '^ahci: format ' mount)
@@ -179,18 +179,18 @@ zahl "3.3 30 Oktette geschrieben" "$WR" eq 30
 zahl "3.4 30 Oktette gelesen" "$RD" eq 30
 zahl "3.5 und es sind dieselben" "$SM" eq 1
 if grep -qa '^ahci: list .*sata\.txt' "$TMPD/a.txt"; then
-    ok "3.6 die Datei steht im Verzeichnis -- $(grep -a -m1 '^ahci: list' "$TMPD/a.txt")"
+    ok "3.6 the file is in the directory -- $(grep -a -m1 '^ahci: list' "$TMPD/a.txt")"
 else
-    bad "3.6 die Datei steht nicht im Verzeichnis"
+    bad "3.6 the file is not in the directory"
 fi
 
 echo
-echo "== 4. der WIRT liest das Abbild nach: hier ist der Kernel nicht mehr sein eigener Zeuge =="
+echo "== 4. the HOST re-reads the image: here the kernel is no longer its own witness =="
 
 if grep -qa 'ahci wrote this line over DMA' "$TMPD/a.img"; then
-    ok "4.1 der Text des Dateisystems steht wirklich in der Datei auf DIESEM Rechner"
+    ok "4.1 the text of the file system is really in the file on THIS machine"
 else
-    bad "4.1 der Text steht nicht im Abbild -- es wurde nichts geschrieben"
+    bad "4.1 the text is not in the image -- nothing was written"
 fi
 
 # Sektor 4096: 512 mal 0x5A und nichts anderes.
@@ -212,21 +212,21 @@ leer=$(dd if="$TMPD/a.img" bs=512 skip=5008 count=1 2>/dev/null \
 zahl "4.4 der Sektor DAHINTER (5008) ist unberuehrt" "$leer" eq 0
 
 echo
-echo "== 5. Gegenprobe: ein AHCI-Controller OHNE Platte =="
+echo "== 5. negative test: an AHCI controller WITHOUT a disk =="
 
 lauf c q35 "ahci" -device "ahci,id=a0"
 gruen c "5.1 der Lauf ohne Platte"
 if grep -qa '^ahci: init failed' "$TMPD/c.txt"; then
-    ok "5.2 der Treiber sagt, dass er nichts gefunden hat -- $(grep -a -m1 '^ahci:' "$TMPD/c.txt")"
+    ok "5.2 the driver says it found nothing -- $(grep -a -m1 '^ahci:' "$TMPD/c.txt")"
 else
-    bad "5.2 der Treiber hat eine Platte erfunden -- $(grep -a -m1 '^ahci:' "$TMPD/c.txt")"
+    bad "5.2 the driver invented a disk -- $(grep -a -m1 '^ahci:' "$TMPD/c.txt")"
 fi
 WHY=$(feld c '^ahci: init failed' why)
 zahl "5.3 und zwar an der richtigen Stelle (kein Port mit ATA-Kennung)" "$WHY" eq 8
 if grep -qa '^ahci: blocks=' "$TMPD/c.txt"; then
-    bad "5.4 es wurde trotzdem eine Groesse gemeldet"
+    bad "5.4 a size was reported anyway"
 else
-    ok "5.4 es wird KEINE Groesse gemeldet"
+    ok "5.4 NO size is reported"
 fi
 
 echo
@@ -236,18 +236,18 @@ bild e
 lauf e pc "ahci" -drive "file=$TMPD/e.img,format=raw,if=ide,index=0"
 gruen e "6.1 der Lauf auf einer Maschine ohne AHCI"
 if grep -qa '^ahci: mode=ide' "$TMPD/e.txt"; then
-    ok "6.2 der Treiber erkennt den IDE-Modus und sagt, was zu tun ist -- $(grep -a -m1 '^ahci:' "$TMPD/e.txt")"
+    ok "6.2 the driver recognizes IDE mode and says what to do -- $(grep -a -m1 '^ahci:' "$TMPD/e.txt")"
 else
-    bad "6.2 der Treiber scheitert stumm statt den IDE-Modus zu melden -- $(grep -a -m1 '^ahci:' "$TMPD/e.txt")"
+    bad "6.2 the driver fails silently instead of reporting IDE mode -- $(grep -a -m1 '^ahci:' "$TMPD/e.txt")"
 fi
 if grep -qa '^pci: .*class=01:01' "$TMPD/e.txt"; then
-    ok "6.3 und der Bus bestaetigt es: Klasse 01:01 -- $(grep -a -m1 'class=01:01' "$TMPD/e.txt")"
+    ok "6.3 and the bus confirms it: class 01:01 -- $(grep -a -m1 'class=01:01' "$TMPD/e.txt")"
 else
-    bad "6.3 kein IDE-Geraet in der PCI-Liste -- dann sagt 6.2 nichts"
+    bad "6.3 no IDE device in the PCI list -- then 6.2 says nothing"
 fi
 
 echo
-echo "== 7. Gegenprobe: OHNE Busmaster-Bit -- der Beweis, dass es DMA war =="
+echo "== 7. negative test: WITHOUT the bus master bit -- the proof that it was DMA =="
 
 bild f
 mapfile -t FARGS < <(platte f)
@@ -267,16 +267,16 @@ zahl "7.7 und das Geraet gilt danach als weg statt die Maschine anzuhalten" "$FA
 FFMT=$(grep -a -m1 '^ahci: format ' "$TMPD/f.txt" | sed -n 's/^ahci: format \([0-9]*\).*/\1/p')
 zahl "7.8 das Dateisystem laesst sich nicht anlegen" "$FFMT" eq 0
 if grep -qa 'over DMA' "$TMPD/f.img"; then
-    bad "7.9 im Abbild steht trotzdem etwas -- dann war es kein DMA"
+    bad "7.9 something is in the image anyway -- then it was not DMA"
 else
-    ok "7.9 das Abbild auf dem Wirt ist LEER geblieben"
+    ok "7.9 the image on the host stayed EMPTY"
 fi
 n0=$(dd if="$TMPD/f.img" bs=512 skip=4096 count=1 2>/dev/null \
      | od -An -v -t x1 | tr -s ' ' '\n' | grep -c -v '^00$\|^$')
 zahl "7.10 auch Sektor 4096 ist unberuehrt" "$n0" eq 0
 
 echo
-echo "== 8. die Gegenrichtung: derselbe Lauf unter TCG =="
+echo "== 8. the opposite direction: the same run under TCG =="
 
 if [ "$ACC" = tcg ]; then
     hin "8.x uebersprungen -- der ganze Abschnitt lief schon unter TCG"
@@ -296,9 +296,9 @@ else
     zahl "8.3 acht Sektoren stimmen auch unter TCG" "$TN" eq 1
     zahl "8.4 kein Fehler unter TCG" "$TE" eq 0
     if grep -qa 'ahci wrote this line over DMA' "$TMPD/t.img"; then
-        ok "8.5 und das Abbild traegt den Text auch dort"
+        ok "8.5 and the image carries the text there too"
     else
-        bad "8.5 das Abbild ist unter TCG leer geblieben"
+        bad "8.5 the image stayed empty under TCG"
     fi
 fi
 

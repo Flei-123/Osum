@@ -24,10 +24,10 @@ zahl() { # name wert op soll
     local name=$1 wert=$2 op=$3 soll=$4
     if [ -z "$wert" ]; then bad "$name: keine Zahl gefunden (wollte $op $soll)"; return; fi
     if [ "$wert" -"$op" "$soll" ] 2>/dev/null; then ok "$name: $wert"
-    else bad "$name: $wert, wollte $op $soll"; fi
+    else bad "$name: $wert, wanted $op $soll"; fi
 }
 
-echo "== 1. die Zahlen, die auf beiden Seiten gleich sein muessen =="
+echo "== 1. the numbers that must be equal on both sides =="
 for paar in "CPU_SYSRSP:C_SYSRSP" "CPU_KSTACK:C_KSTACK" "CPU_SYSCALLS:C_SYSCALLS"; do
     a=${paar%%:*}; b=${paar##*:}
     va=$(grep -aoE "\.set $a, *[0-9]+" kernel/arch/x86_64/isr.s | grep -oE '[0-9]+' | head -1)
@@ -36,18 +36,18 @@ for paar in "CPU_SYSRSP:C_SYSRSP" "CPU_KSTACK:C_KSTACK" "CPU_SYSCALLS:C_SYSCALLS
     else bad "isr.s $a='$va' gegen cpu.fi $b='$vb'"; fi
 done
 grep -qa 'incq %gs:CPU_SYSCALLS' kernel/arch/x86_64/isr.s \
-    && ok "syscall_entry zaehlt ueber die GS-Basis mit (der Beweis je Kern)" \
+    && ok "syscall_entry counts via the GS base (the proof per core)" \
     || bad "in syscall_entry fehlt 'incq %gs:CPU_SYSCALLS'"
 
 echo
-echo "== 2. der Riegel steht im CODE und nicht im Kommentar =="
+echo "== 2. the latch is in the CODE and not in a comment =="
 grep -qa '^fn ring3_allowed' kernel/sched/sched.fi \
     && ok "sched.ring3_allowed exists" || bad "sched.ring3_allowed is missing"
 grep -qa 'ring3_allowed(state, i, me)' kernel/sched/sched.fi \
-    && ok "die Auswahl des Ablaufplaners ruft ihn wirklich" \
+    && ok "the scheduler selection really calls it" \
     || bad "ring3_allowed is NOT called in the pick -- exactly the BLECHKERN bug"
 grep -qa 'gs_ready(state, me)' kernel/sched/sched.fi \
-    && ok "und er fragt die GEPRUEFTE GS-Basis ab" \
+    && ok "and it asks the CHECKED GS base" \
     || bad "ring3_allowed does not check the GS base"
 # `gs_good` is a fixed array of eight. If MAX_CPUS grows without it,
 # `gs_ready` says "no" for every core from the ninth on -- ring 3
@@ -58,7 +58,7 @@ if [ -n "$mc" ] && [ "$mc" = "$gg" ]; then ok "kstate.MAX_CPUS = sched.gs_good =
 else bad "MAX_CPUS=$mc, but gs_good holds $gg -- cores above it would never get ring 3"; fi
 
 echo
-echo "== 3. kein geteilter Blockpuffer ohne die Sperre L_FS =="
+echo "== 3. no shared block buffer without the lock L_FS =="
 py=$(python3 - <<'PYEOF'
 import re
 s=open("kernel/fs/fs.fi","rb").read().decode("utf-8","surrogateescape")
@@ -100,16 +100,16 @@ nfun=$(echo "$py" | awk '{print $1}')
 nroh=$(echo "$py" | awk '{print $2}')
 leck=$(echo "$py" | awk '{print $3}')
 if [ "$leck" = "-" ]; then
-    ok "$nfun Funktionen in fs.fi, $nroh fassen Bloecke an -- jeder Weg nach draussen geht durch enter()"
+    ok "$nfun functions in fs.fi, $nroh touch blocks -- every way out goes through enter()"
 else
-    bad "diese Wege erreichen einen geteilten Puffer OHNE L_FS: $leck"
+    bad "these paths reach a shared buffer WITHOUT L_FS: $leck"
 fi
 
 echo
-echo "== 4. der Kern und die Schreibtischplatte =="
+echo "== 4. the kernel and the desktop disk =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; tail -12 "$TMPD/k.log" | sed 's/^/        /'; \
+    || { bad "the kernel does not build"; tail -12 "$TMPD/k.log" | sed 's/^/        /'; \
          echo "VIELKERN: $pass bestanden, $fail gescheitert"; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
@@ -124,9 +124,9 @@ for p in $PROGS; do
     strip --strip-all "$TMPD/$p.elf"
 done
 if [ "$bauen_ok" = 1 ]; then
-    ok "die $(echo $PROGS | wc -w) Programme des Schreibtischs bauen"
+    ok "the $(echo $PROGS | wc -w) desktop programs build"
 else
-    bad "die Programme bauen nicht"
+    bad "the programs do not build"
     echo "VIELKERN: $pass bestanden, $fail gescheitert"; exit 1
 fi
 
@@ -140,7 +140,7 @@ ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "die Platte steht ($(stat -c%s "$TMPD/disk.img") Oktette)" \
+    && ok "the disk is ready ($(stat -c%s "$TMPD/disk.img") Oktette)" \
     || { bad "mkfs.py faellt"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 
 BASE="gfx wm wig desk wmhold wiglong nokbd nosched noproc nofs tafel einst"
@@ -177,7 +177,7 @@ w_exc()  { grep -ac '^\*\*\* EXCEPTION\|^absturz:  0' "$1"; }
 w_pid0() { grep -ac '^desk: start .* pid=0' "$1"; }
 
 echo
-echo "== 5. vier Kerne, Ring 3 auf allen (r3alle) =="
+echo "== 5. four cores, ring 3 on all (r3alle) =="
 lauf a4 4 r3alle
 L=$TMPD/a4.txt
 zahl "R3W (Kerne ohne eigene GS-Basis)" "$(w_r3w $L)" eq 0
@@ -188,8 +188,8 @@ zahl "abw (Summe der Kernzaehler gegen kstate.SYSCALLS)" "$(w_abw $L)" eq 0
 zahl "Programmstarts mit pid=0" "$(w_pid0 $L)" eq 0
 zahl "Ausnahmen" "$(w_exc $L)" eq 0
 grep -qa '^desk: start /bin/settings  pid=[1-9]' $L \
-    && ok "auch das vierte Programm (/bin/settings) kommt hoch" \
-    || bad "/bin/settings kommt nicht hoch -- genau der Fehler der Vorrunde"
+    && ok "the fourth program too (/bin/settings) comes up" \
+    || bad "/bin/settings does not come up -- exactly the bug of the previous round"
 grep -a '^r3: procs' $L | tail -1 | sed 's/^/        /'
 grep -a '^r3: syscalls' $L | tail -1 | sed 's/^/        /'
 
@@ -206,7 +206,7 @@ zahl "Ausnahmen" "$(w_exc $L)" eq 0
 grep -a '^r3: syscalls' $L | tail -1 | sed 's/^/        /'
 
 echo
-echo "== 7. GEGENPROBE zur Messung: dieselbe Platte mit r3eins (Ring 3 nur auf Kern 0) =="
+echo "== 7. NEGATIVE to the measurement: the same disk with r3eins (ring 3 only on core 0) =="
 lauf n4 4 "r3eins"
 L=$TMPD/n4.txt
 zahl "R3K muss 1 sein" "$(w_r3k $L)" eq 1
@@ -216,7 +216,7 @@ zahl "Ausnahmen" "$(w_exc $L)" eq 0
 grep -a '^r3: syscalls' $L | tail -1 | sed 's/^/        /'
 
 echo
-echo "== 8. GEGENPROBE zum Riegel, Haelfte 1: gsluege -- er MUSS halten =="
+echo "== 8. NEGATIVE to the latch, half 1: gsluege -- it MUST hold =="
 lauf g4 4 "r3alle gsluege"
 L=$TMPD/g4.txt
 zahl "R3W muss GROESSER null werden (die Luege wird gesehen)" "$(w_r3w $L)" ge 1
@@ -226,20 +226,20 @@ zahl "nur Kern 0 bekommt Systemaufrufe" "$(w_scpu $L)" eq 1
 grep -a "$TAFEL23" $L | tail -1 | sed 's/^/        /'
 
 echo
-echo "== 9. GEGENPROBE zum Riegel, Haelfte 2: gsluege r3blind -- er MUSS brechen =="
+echo "== 9. NEGATIVE to the latch, half 2: gsluege r3blind -- it MUST break =="
 lauf b4 4 "r3alle gsluege r3blind" 200
 L=$TMPD/b4.txt
 if [ "$(w_exc $L)" -ge 1 ]; then
-    ok "ohne den Riegel bricht die Maschine wieder -- er ist es, der sie haelt"
+    ok "without the latch the machine breaks again -- it is what holds it"
     grep -a '^absturz:  [0-6] ' $L | head -7 | sed 's/^/        /'
 else
-    bad "ohne den Riegel passiert NICHTS -- dann misst Abschnitt 8 nicht den Riegel"
+    bad "without the latch NOTHING happens -- then section 8 does not measure the latch"
 fi
-grep -qa 'ART 3' $L && ok "und zwar in einer Aufgabe der Gattung 3 (K_USER, also Ring 3)" \
-    || bad "der Bruch trifft keine Ring-3-Aufgabe -- dann ist es ein anderer Fehler"
+grep -qa 'ART 3' $L && ok "and in a task of kind 3 (K_USER, so ring 3)" \
+    || bad "the break hits no ring 3 task -- then it is a different bug"
 
 echo
-echo "== 10. RUNDE MERGE-6: der Inodepuffer, auf mehreren Kernen ERZWUNGEN =="
+echo "== 10. ROUND MERGE-6: the inode buffer, FORCED on several cores =="
 fsrace() { # name  smp  extra
     local name=$1 smp=$2 extra=$3
     cp -f "$TMPD/disk.img" "$TMPD/fsr-$name.img"
@@ -262,29 +262,29 @@ if [ -s "$L" ]; then
     zahl "Kerne mit je EIGENEM Inodeblock" "$(w_inos $L)" ge 2
     zahl "Abweichungen MIT der Sperre" "$(w_fehl $L)" eq 0
 else
-    bad "kein Mitschnitt des fsrace-Laufs"
+    bad "no capture of the fsrace run"
 fi
 
 echo
-echo "== 11. GEGENPROBE dazu: fsblind -- ohne die Sperre MUSS es brechen =="
+echo "== 11. NEGATIVE to that: fsblind -- without the lock it MUST break =="
 fsrace ohne 4 "fsblind"
 L=$TMPD/fsr-ohne.txt
 if [ -s "$L" ]; then
     grep -a '^smp: fsrace' $L | sed 's/^/        /'
     zahl "Abweichungen OHNE die Sperre" "$(w_fehl $L)" ge 1
 else
-    bad "kein Mitschnitt des fsblind-Laufs"
+    bad "no capture of the fsblind run"
 fi
 
 echo
-echo "== 12. RUNDE MERGE-6: die uebrigen Ein-Kern-Reste, an der Quelle gezaehlt =="
+echo "== 12. ROUND MERGE-6: the remaining single-core leftovers, counted at the source =="
 #
 EK_SOLL=${EK_SOLL:-67}
 ek=$(python3 tools/multicore/onecore.py | sed -n 's/.*offen=\([0-9]*\).*/\1/p')
 if [ -n "$ek" ] && [ "$ek" -le "$EK_SOLL" ] 2>/dev/null; then
-    ok "Funktionen mit einem Puffer der Datenseite ohne Sperrwort: $ek (Vertrag: hoechstens $EK_SOLL)"
+    ok "functions with a data-page buffer without a lock word: $ek (contract: at most $EK_SOLL)"
 else
-    bad "Ein-Kern-Reste: $ek, Vertrag ist hoechstens $EK_SOLL -- neue Stelle? Dann in docs/RUNDE-MERGE6.md eintragen"
+    bad "single-core leftovers: $ek, contract is at most $EK_SOLL -- new place? Then enter it in docs/RUNDE-MERGE6.md"
 fi
 python3 tools/multicore/onecore.py | sed 's/^/        /'
 
