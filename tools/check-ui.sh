@@ -36,12 +36,12 @@ for f in kernel/user/*.fi; do
     done
     [[ $ok == 1 ]] && continue
 
-    n=$(grep -acE "$ROH" "$f" 2>/dev/null || true)
+    n=$(grep -acE "$ROH" <(bash tools/structure/srcview.sh "$f") 2>/dev/null || true)
     if [[ ${n:-0} -gt 0 ]]; then
         fehler=$((fehler + 1))
         treffer+="  $f: $n rohe Mal-Aufrufe (malt sich sein Element selbst)"$'\n'
         if [[ ${1:-} == --liste ]]; then
-            grep -anE "$ROH" "$f" | head -10 | sed 's/^/      /'
+            grep -anE "$ROH" <(bash tools/structure/srcview.sh "$f") | head -10 | sed 's/^/      /'
         fi
     fi
 done
@@ -55,7 +55,7 @@ for f in kernel/user/*.fi; do
     [[ $ok == 1 ]] && continue
     # r442: the gallery parts (lib/fui/navnum, navkit, cmdbar, region) are LIBRARY code for programs -- sizes, geometry, the command
     # bar's model, r71: grid = integer geometry of a tile grid, no widgets (Store); L-006: traypower = state + tooltip text of the battery item (powerd status), no widgets -- not a second surface; backlum = luminance/text-colour decider (integers, W-WINOPTS S4) shared by the window server, jarvismini and programs, paints nothing; lockidle = the seven idle-lock choices of Settings (seconds table), paints nothing; every other fUi module stays the host's business
-    n=$(grep -aE '^import fui\.' "$f" 2>/dev/null | grep -avE '^import fui\.(navnum|navkit|cmdbar|region|tokens|grid|traypower|backlum|lockidle)$' | grep -ac . || true)
+    n=$(grep -aE '^import fui\.' <(bash tools/structure/srcview.sh "$f") 2>/dev/null | grep -avE '^import fui\.(navnum|navkit|cmdbar|region|tokens|grid|traypower|backlum|lockidle)$' | grep -ac . || true)
     if [[ ${n:-0} -gt 0 ]]; then
         fehler=$((fehler + 1))
         treffer+="  $f: greift direkt auf fUi zu (eigene Oberflaeche daneben)"$'\n'
