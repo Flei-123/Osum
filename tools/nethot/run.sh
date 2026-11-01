@@ -33,7 +33,7 @@ run() { # name kernel script pci(1|0) plan
     local name=$1 kimg=$2 script=$3 pci=$4 plan=$5 eth=""
     [ "$pci" = 1 ] && eth="-netdev user,id=n0,net=10.0.2.0/24 -device e1000,netdev=n0"
     timeout 200 qemu-system-x86_64 -accel $ACC -kernel "$kimg" -m 256 -nodefaults \
-        -append "osum nokbd nosched nofs noring3 usb usbhold usbpoll nic rndisonly nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
+        -append "osum vfs nokbd nosched noring3 usb usbhold usbpoll nic rndisonly nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$name.txt" -display none -no-reboot \
         -monitor "unix:$T/$name.mon,server,nowait" -pidfile "$T/$name.pid" \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \

@@ -62,7 +62,7 @@ run() {
 }
 
 printf 'ssid OrientFake\npsk orient-fake-pw1\n' > "$T/good.conf"
-image c "$T/good.conf" || { bad "image c"; exit 1; }
+for n in c e f; do image $n "$T/good.conf" || { bad "image $n"; exit 1; }; done
 image d || { bad "image d"; exit 1; }
 
 echo "-- C: wlan0 up on the fake AP: ARP + ICMP echo through the stack"
