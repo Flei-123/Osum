@@ -617,7 +617,7 @@ hat_nicht "$TMPD/nopull.txt" "usb: unplug port=" "GEGENPROBE: und nichts wird ab
 
 num "Anstecken im Betrieb im Regellauf (darf nicht anschlagen)" \
     "$(uz "$H" hotplugs)" eq 0
-grep -qa 'usb.unplug_check' kernel/arch/x86_64/trap.fi \
+grep -qa 'usb.port_watch' kernel/arch/x86_64/trap.fi \
     && ok "the timer really looks (kernel/arch/x86_64/trap.fi)" \
     || bad "the timer has no look at the ports"
 
