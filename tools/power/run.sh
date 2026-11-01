@@ -49,8 +49,8 @@ done
 grep -q 'powerd' tools/usbimg/build.sh && ok "powerd is in the image program list" || bad "powerd missing in tools/usbimg/build.sh"
 grep -q '/bin/powerd' kernel/user/glogin.fi && ok "glogin starts powerd" || bad "glogin does not start powerd"
 echo "== 4. kernel entries =="
-grep -qa 'const PS_BLANKAFTER' kernel/sys/sys.fi && grep -qa 'fn set_blank_after' kernel/pwr/pwr.fi && ok "PS_BLANKAFTER / pwr.set_blank_after" || bad "PS_BLANKAFTER missing"
-grep -qa 'const PS_INJECT' kernel/sys/sys.fi && grep -q 'fn inject' kernel/acpi/acpiev.fi && ok "PS_INJECT / acpiev.inject" || bad "PS_INJECT missing"
+grep -qa 'const PS_BLANKAFTER' kernel/sys/syssvc.fi && grep -qa 'fn set_blank_after' kernel/pwr/pwr.fi && ok "PS_BLANKAFTER / pwr.set_blank_after" || bad "PS_BLANKAFTER missing"
+grep -qa 'const PS_INJECT' kernel/sys/syssvc.fi && grep -q 'fn inject' kernel/acpi/acpiev.fi && ok "PS_INJECT / acpiev.inject" || bad "PS_INJECT missing"
 
 if [ -z "${POWER_HOST_ONLY:-}" ]; then
 echo "== 5. QEMU: fake laptop, powerd, lid / mains / battery / idle timer =="

@@ -30,7 +30,7 @@ mutant "missing cap argument" kernel/bus/drvstore.fi 'fs.entry_at(state, dir, i,
 mutant "cap below entry size" kernel/bus/drvstore.fi 'const ENT_BYTES: u64 = 264' 'const ENT_BYTES: u64 = 32'
 mutant "entry max too small" kernel/fs/fs.fi 'const ENTRY_MAX: u64 = 264' 'const ENTRY_MAX: u64 = 32'
 mutant "no runtime guard" kernel/fs/fs.fi 'if dirent_size(state) > cap {' 'if dirent_size(state) > 4096 {'
-mutant "name page overflow" kernel/sys/sys.fi 'NB_FSTYPE - NB_ENT)' '1024)'
+mutant "name page overflow" kernel/sys/sysfile.fi 'NB_FSTYPE - NB_ENT)' '1024)'
 mutant "mount accepts any entry size" kernel/fs/fs.fi 'dent < DIRENT || dent > ENTRY_MAX ||' 'dent < DIRENT || dent > BS ||'
 mutant "mount refusal removed" kernel/fs/fs.fi 'if dent > ENTRY_MAX && dent <= BS {' 'if dent > 99999 && dent <= BS {'
 echo "ENTBUF: $pass passed, $fail failed"

@@ -33,7 +33,7 @@ if [ "$n_static" = 0 ]; then
 else
     bad "kernel/bus/bus.fi hat $n_static globale Variablen"
 fi
-if sed -n '/^fn do_bus/,/^}/p' kernel/sys/sys.fi | grep -q 'state + kstate\.'; then
+if sed -n '/^fn do_bus/,/^}/p' kernel/sys/sysbus.fi | grep -q 'state + kstate\.'; then
     bad "sys.do_bus fasst einen kdata-Puffer an"
 else
     ok "sys.do_bus kopiert in seinen eigenen Stapelrahmen"
