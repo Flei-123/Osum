@@ -46,7 +46,7 @@ run() { # name kernel script pci(1|0) plan
     tr -cd '\11\12\15\40-\176' < "$T/$name.txt" > "$T/$name.klar"
     [ -n "${NETHOT_KEEP:-}" ] && cp "$T/$name.klar" "$NETHOT_KEEP/$name.klar"
 }
-plan_ok() { [ "$(cat "$T/$1.mrc")" = 0 ] && ok "$1: monitor plan" || { bad "$1: monitor plan rc=$(cat "$T/$1.mrc")"; tail -2 "$T/$1.mon.txt"; }; }
+plan_ok() { [ "$(cat "$T/$1.mrc")" = 0 ] && ok "$1: monitor plan" || { bad "$1: monitor plan rc=$(cat "$T/$1.mrc")"; grep -a "NOT SEEN" "$T/$1.mon.txt"; tail -1 "$T/$1.mon.txt"; }; }
 common() {
     grep -aq '==ALIVE==' "$T/$1.klar" && ok "$1: script reached the end" || bad "$1: script did not finish"
     grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/$1.klar" && bad "$1: panic/exception" || ok "$1: no panic/exception"
