@@ -14,6 +14,7 @@ import wlan.iwl_mvm_sta
 import wlan.iwl_mvm_te
 import wlan.iwl_mvm_tx
 import wlan.iwl_mvm_txq
+import wlan.regtrace
 
 export {
     Mvm, Transport, mvm_new, ops_attach, ops_setup, ops_scan_start, ops_scan_state,
@@ -714,6 +715,24 @@ fn parse_scan_done(o: *mut Mvm, n: usize) {
     }
 }
 
+const RT_MGMT: u64 = 2
+const RT_DATA_CLEAR: u64 = 3
+const RT_PROT_RAW: u64 = 4
+const RT_SW_OK: u64 = 5
+const RT_SW_FAIL: u64 = 6
+const RT_DROP_MIC: u64 = 7
+const RT_DROP_RAW: u64 = 8
+const RT_DEC_OK: u64 = 9
+const FC0_BEACON: u64 = 0x80
+const FC0_PROBE_RESP: u64 = 0x50
+
+fn trace_rx(out: u64, fcv: u64, status: u64, bytes: u64, reason: u64) {
+    if !regtrace.is_on() { return }
+    let b0: u64 = iwl_le.ld8(out, 0)
+    if reason == RT_MGMT && (b0 == FC0_BEACON || b0 == FC0_PROBE_RESP) { return }
+    regtrace.rec_rxs(fcv, status, bytes, reason, (iwl_le.ld8(out, 8) << 8) | iwl_le.ld8(out, 9))
+}
+
 fn rx_mpdu(o: *mut Mvm, out: u64, bytes: u64, a: u64, h: u64, n: u64) -> i64 {
     rxs_add(o, RXS_MPDU)
     var status: u64 = 0
@@ -729,17 +748,20 @@ fn rx_mpdu(o: *mut Mvm, out: u64, bytes: u64, a: u64, h: u64, n: u64) -> i64 {
     if (status & 1) == 0 { rxs_add(o, RXS_BAD_CRC) }
     if frame.art(fcv) != frame.KIND_DATA {
         rxs_add(o, RXS_MGMT)
+        trace_rx(out, fcv, status, bytes, RT_MGMT)
         return bytes as i64
     }
     rxs_add(o, RXS_DATA)
     if (iwl_le.ld8(out, 4) & 1) != 0 { rxs_add(o, RXS_GROUP) }
     if !frame.geschuetzt(fcv) {
         rxs_add(o, RXS_DELIVERED)
+        trace_rx(out, fcv, status, bytes, RT_DATA_CLEAR)
         return bytes as i64
     }
     rxs_add(o, RXS_PROT)
     if !(quirk_on(o, iwl_fwcaps.Q_HWC) && (*o).ptk_set) {
         rxs_add(o, RXS_DELIVERED)
+        trace_rx(out, fcv, status, bytes, RT_PROT_RAW)
         return bytes as i64
     }
     if quirk_on(o, iwl_fwcaps.Q_SWGRP) && !iwl_mvm_crypt.rx_hw_decrypted(status) {
@@ -747,21 +769,26 @@ fn rx_mpdu(o: *mut Mvm, out: u64, bytes: u64, a: u64, h: u64, n: u64) -> i64 {
         if sw > 0 {
             rxs_add(o, RXS_SW_GROUP_OK)
             rxs_add(o, RXS_DELIVERED)
+            trace_rx(out, fcv, status, bytes, RT_SW_OK)
             return sw
         }
         rxs_add(o, RXS_SW_GROUP_FAIL)
+        trace_rx(out, fcv, status, bytes, RT_SW_FAIL)
     }
     let v: u64 = iwl_mvm_crypt.rx_verdict(out, bytes, status)
     if v == iwl_mvm_crypt.RX_DROP_MIC {
         rxs_add(o, RXS_DROP_MIC)
+        trace_rx(out, fcv, status, bytes, RT_DROP_MIC)
         return -2
     }
     if v == iwl_mvm_crypt.RX_DROP_RAW {
         rxs_add(o, RXS_DROP_RAW)
+        trace_rx(out, fcv, status, bytes, RT_DROP_RAW)
         return -2
     }
     rxs_add(o, RXS_DEC_OK)
     rxs_add(o, RXS_DELIVERED)
+    trace_rx(out, fcv, status, bytes, RT_DEC_OK)
     return iwl_mvm_crypt.rx_unprotect(out, bytes) as i64
 }
 

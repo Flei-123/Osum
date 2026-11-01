@@ -4,8 +4,8 @@ import wlan.iwl_w
 
 export {
     enable, disable, set_host_reserve, is_on, set_clock, record_count, first_seq, slots_cap,
-    rec_reg, rec_host, rec_dma, rec_irq, size, read,
-    K_R32, K_W32, K_HCMD, K_RX, K_DMA, K_IRQ, K_HDATA
+    rec_reg, rec_host, rec_dma, rec_irq, rec_rxs, size, read,
+    K_R32, K_W32, K_HCMD, K_RX, K_DMA, K_IRQ, K_HDATA, K_RXS
 }
 
 const SLOT: u64 = 32
@@ -17,6 +17,10 @@ const K_RX: u64 = 3
 const K_DMA: u64 = 4
 const K_IRQ: u64 = 5
 const K_HDATA: u64 = 6
+const K_RXS: u64 = 7
+const HDATA_CAP: u64 = 448
+const RX_CMD_PHY: u64 = 0xC0
+const RX_CMD_MPDU: u64 = 0xC1
 const K_DATA: u64 = 255
 const S_CSR: u64 = 0
 const S_HOST: u64 = 1
@@ -24,11 +28,11 @@ const S_DMA: u64 = 2
 const HCMD_CAP: u64 = 256
 const RX_CAP: u64 = 64
 const HDR_LEN: u64 = 4
-const LINE_CAP: u64 = 768
+const LINE_CAP: u64 = 1024
 const CSR_INT: u64 = 8
 
 
-static mut KIND_NAMES: [u8; 35] = "r32\0w32\0hcmd\0rx\0dma_desc\0irq\0hdata\0"
+static mut KIND_NAMES: [u8; 39] = "r32\0w32\0hcmd\0rx\0dma_desc\0irq\0hdata\0rxs\0"
 static mut SPACE_NAMES: [u8; 13] = "csr\0host\0dma\0"
 static mut D_KEY: [u8; 3] = "d=\0"
 static mut V_KEY: [u8; 3] = "v=\0"
@@ -166,8 +170,10 @@ fn rec_dma(index: u64, addr: u64, len: u64, queue: u64) {
 
 fn rec_host(kind: u64, pkt: u64, total: u64) {
     if total < HDR_LEN { return }
+    if kind == K_RX && (iwl_le.ld8(pkt, 0) == RX_CMD_PHY || iwl_le.ld8(pkt, 0) == RX_CMD_MPDU) { return }
     var cap: u64 = RX_CAP
-    if kind == K_HCMD || kind == K_HDATA { cap = HCMD_CAP }
+    if kind == K_HCMD { cap = HCMD_CAP }
+    if kind == K_HDATA { cap = HDATA_CAP }
     let plen: u64 = total - HDR_LEN
     var keep: u64 = plen
     if keep > cap { keep = cap }
@@ -187,6 +193,12 @@ fn rec_host(kind: u64, pkt: u64, total: u64) {
         i = i + 1
     }
     tr_head = tr_head + 1 + nd
+    tr_seq = tr_seq + 1
+}
+
+fn rec_rxs(fc: u64, status: u64, len: u64, reason: u64, tail: u64) {
+    stamp(slot_at(tr_head), K_RXS, S_HOST, tail, fc, status, len, reason)
+    tr_head = tr_head + 1
     tr_seq = tr_seq + 1
 }
 
@@ -287,7 +299,7 @@ fn fmt_header(w: *mut iwl_w.W) {
 
 
 fn walk(off: u64, dst: u64, len: u64) -> u64 {
-    var line: [u8; 768] = [0 as u8; 768]
+    var line: [u8; 1024] = [0 as u8; 1024]
     var pos: u64 = 0
     var out: u64 = 0
     var w: iwl_w.W = iwl_w.W { a: (&line[0]) as u64, cap: LINE_CAP, n: 0 }
