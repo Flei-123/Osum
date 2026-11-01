@@ -3,7 +3,7 @@ import wlan.iwl_le
 import wlan.iwl_w
 
 export {
-    enable, disable, is_on, set_clock, record_count, first_seq, slots_cap,
+    enable, disable, set_host_reserve, is_on, set_clock, record_count, first_seq, slots_cap,
     rec_reg, rec_host, rec_dma, rec_irq, size, read,
     K_R32, K_W32, K_HCMD, K_RX, K_DMA, K_IRQ, K_HDATA
 }
@@ -42,6 +42,7 @@ static mut FS_KEY: [u8; 12] = " first_seq=\0"
 static mut REC_KEY: [u8; 10] = " records=\0"
 static mut CAP_KEY: [u8; 12] = " cap_slots=\0"
 static mut tr_on: u64 = 0
+static mut tr_reserve: u64 = 0
 static mut tr_base: u64 = 0
 static mut tr_slots: u64 = 0
 static mut tr_head: u64 = 0
@@ -67,6 +68,14 @@ fn enable(base: u64, bytes: u64) -> bool {
 }
 
 fn disable() { tr_on = 0 }
+
+fn set_host_reserve(on: bool) {
+    if on { tr_reserve = 1 } else { tr_reserve = 0 }
+}
+
+fn csr_full() -> bool {
+    return tr_reserve != 0 && tr_head >= tr_slots / 2
+}
 
 fn slots_cap() -> u64 { return tr_slots }
 
@@ -130,6 +139,7 @@ fn repeats_prev(kind: u64, off: u64, val: u64) -> bool {
 }
 
 fn rec_reg(kind: u64, off: u64, val: u64) {
+    if csr_full() { return }
     if repeats_prev(kind, off, val) { return }
     stamp(slot_at(tr_head), kind, S_CSR, 0, off, val, 0, 0)
     tr_head = tr_head + 1
@@ -137,6 +147,7 @@ fn rec_reg(kind: u64, off: u64, val: u64) {
 }
 
 fn rec_irq(cause: u64) {
+    if csr_full() { return }
     if tr_head != 0 {
         let p: u64 = slot_at(tr_head - 1)
         if iwl_le.ld8(p, 4) == K_IRQ && iwl_le.ld32(p, 20) == cause && bump(p) { return }
@@ -147,6 +158,7 @@ fn rec_irq(cause: u64) {
 }
 
 fn rec_dma(index: u64, addr: u64, len: u64, queue: u64) {
+    if csr_full() { return }
     stamp(slot_at(tr_head), K_DMA, S_DMA, queue, index, addr & 0xFFFFFFFF, addr >> 32, len)
     tr_head = tr_head + 1
     tr_seq = tr_seq + 1
