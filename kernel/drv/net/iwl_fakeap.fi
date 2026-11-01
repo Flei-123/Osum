@@ -82,6 +82,10 @@ static mut ft_cport: u64 = 0
 static mut ft_rcv: u64 = 0
 static mut ft_sent: u64 = 0
 static mut ft_acked: u64 = 0
+static mut ft_hold: u64 = 0
+static mut fa_drop_mode: u64 = 0
+static mut fa_discovers: u64 = 0
+static mut fa_lease: u64 = 0
 
 fn say(msg: u64) {
     serial.puts(msg)
@@ -92,13 +96,18 @@ fn stat(i: u64) -> u64 { return fa_stats[(i & 15) as usize] }
 
 fn bump(i: u64) { fa_stats[(i & 15) as usize] = fa_stats[(i & 15) as usize] + 1 }
 
-fn set_drop(on: u64) { fa_drop_arm = on }
+fn set_drop(on: u64) {
+    fa_drop_arm = on
+    fa_drop_mode = on
+}
 
 fn reset() {
     fa_state = ST_IDLE
     fa_deaf = 0
     fa_resp_n = 0
     fa_nonce_seq = 0
+    fa_lease = iwl_fakeap_frames.LEASE_IP
+    fa_discovers = 0
     var i: u64 = 0
     while i < 8 {
         fa_stats[i as usize] = 0
@@ -299,7 +308,7 @@ fn send_dhcp(kind: u64, xid: u64) {
     let o: u64 = (&fa_out[0]) as u64
     let hl: u64 = iwl_fakeap_frames.data_head_from_ds(o, sta_addr(), bssid_addr())
     llc.snap_build(o + hl, llc.ET_IPV4)
-    let dl: u64 = iwl_fakeap_frames.dhcp_reply_build(o + 60, kind, xid, sta_addr())
+    let dl: u64 = iwl_fakeap_frames.dhcp_reply_build(o + 60, kind, xid, sta_addr(), fa_lease)
     llc.udp_build(o + 52, iwl_fakeap_frames.AP_IP, 0xFFFFFFFF, 67, 68, dl as usize)
     llc.ipv4_build(o + 32, iwl_fakeap_frames.AP_IP, 0xFFFFFFFF, llc.P_UDP, (8 + dl) as usize, 7)
     send_protected(o, 60 + dl)
@@ -368,7 +377,7 @@ fn send_seg(flags: u64, seq: u64, off: u64, n: u64) {
 fn tcp_pump(want_ack: bool) {
     let total: u64 = iwl_fakeap_frames.stream_total()
     var sent_now: u64 = 0
-    if ft_req != 0 {
+    if ft_req != 0 && ft_hold == 0 {
         while ft_sent < total && ft_sent - ft_acked < TCP_WINDOW && sent_now < TCP_BURST {
             var n: u64 = total - ft_sent
             if n > TCP_SEG { n = TCP_SEG }
@@ -395,6 +404,7 @@ fn on_tcp(ip: *mut llc.Ipv4) {
     if (t.flags & 2) != 0 {
         ft_on = 1
         ft_req = 0
+        ft_hold = 0
         ft_fin = 0
         ft_cip = (*ip).source
         ft_cport = t.source
@@ -418,6 +428,7 @@ fn on_tcp(ip: *mut llc.Ipv4) {
         if t.seq == ft_rcv {
             ft_rcv = (ft_rcv + t.payload_len as u64) & 0xFFFFFFFF
             ft_req = 1
+            if t.payload_len >= 9 && iwl_le.ld8(t.payload, 4) == 47 && iwl_le.ld8(t.payload, 5) == 104 && iwl_le.ld8(t.payload, 6) == 111 && iwl_le.ld8(t.payload, 7) == 108 && iwl_le.ld8(t.payload, 8) == 100 { ft_hold = 1 }
         }
     }
     if (t.flags & 1) != 0 && t.seq + t.payload_len as u64 == ft_rcv {
@@ -460,6 +471,9 @@ fn on_ip(p: u64, n: u64) {
     var dh: llc.Dhcp = llc.dhcp_new()
     if !llc.dhcp_parse(&dh, ud.payload, ud.payload_len) { return }
     if dh.art == llc.D_DISCOVER {
+        fa_discovers = fa_discovers + 1
+        fa_lease = iwl_fakeap_frames.LEASE_IP
+        if fa_drop_mode != 0 && (fa_discovers & 1) == 0 { fa_lease = iwl_fakeap_frames.LEASE_IP_ALT }
         bump(STAT_DISCOVER)
         say((&fa_msg_disc[0]) as u64)
         send_dhcp(llc.D_OFFER, dh.xid)
