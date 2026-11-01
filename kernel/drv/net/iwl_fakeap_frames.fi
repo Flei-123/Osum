@@ -6,7 +6,7 @@ import wlan.llc
 
 export {
     net_count, net_secure, net_channel, net_energy, net_ssid_len, bssid_set, beacon_build, auth_reply_build,
-    assoc_reply_build, data_head_from_ds, rsn_ie, dhcp_reply_build, copy6, same6, arp_reply_build, broadcast_echo_build, icmp_reply_build, ICMP_MAX,
+    assoc_reply_build, data_head_from_ds, rsn_ie, dhcp_reply_build, copy6, same6, arp_reply_build, broadcast_echo_build, icmp_reply_build, dns_reply_build, tcp_segment_build, stream_total, HTTP_BODY, ICMP_MAX, DNS_MAX, DNS_ANSWER_IP,
     AP_IP, LEASE_IP, LEASE_MASK, PASS_LEN, pass_ptr, ssid_ptr, RSN_IE_LEN, GTK_KDE_LEN
 }
 
@@ -217,6 +217,11 @@ fn dhcp_reply_build(out: u64, kind: u64, xid: u64, chaddr: u64) -> u64 {
 }
 
 const ICMP_MAX: u64 = 400
+const DNS_MAX: u64 = 256
+const HTTP_HDR_LEN: u64 = 19
+const HTTP_BODY: u64 = 131072
+static mut fr_http: [u8; 16] = "HTTP/1.0 200 OK\0"
+const DNS_ANSWER_IP: u64 = 0x5DB8D822
 
 fn put16(out: u64, at: u64, v: u64) {
     iwl_le.st8(out, at, v >> 8)
@@ -265,4 +270,50 @@ fn icmp_reply_build(out: u64, sta: u64, bssid: u64, dst_ip: u64, req: u64, n: u6
     put16(ic, 2, llc.sum16(ic, n as usize, 0))
     llc.ipv4_build(out + hl + 8, AP_IP, dst_ip, llc.P_ICMP, n as usize, 9)
     return hl + 8 + 20 + n
+}
+
+fn dns_reply_build(out: u64, sta: u64, bssid: u64, dst_ip: u64, dst_port: u64, q: u64, qn: u64, want_a: bool) -> u64 {
+    let hl: u64 = data_head_from_ds(out, sta, bssid)
+    llc.snap_build(out + hl, llc.ET_IPV4)
+    let d: u64 = out + hl + 8 + 20 + 8
+    iwl_le.copy(d, q, qn)
+    iwl_le.st8(d, 2, 0x81)
+    iwl_le.st8(d, 3, 0x80)
+    var dl: u64 = qn
+    if want_a {
+        put16(d, 6, 1)
+        put16(d, dl, 0xC00C)
+        put16(d, dl + 2, 1)
+        put16(d, dl + 4, 1)
+        put_be32(d, dl + 6, 60)
+        put16(d, dl + 10, 4)
+        put_be32(d, dl + 12, DNS_ANSWER_IP)
+        dl = dl + 16
+    }
+    llc.udp_build(out + hl + 8 + 20, AP_IP, dst_ip, 53, dst_port, dl as usize)
+    llc.ipv4_build(out + hl + 8, AP_IP, dst_ip, llc.P_UDP, (8 + dl) as usize, 11)
+    return hl + 8 + 20 + 8 + dl
+}
+
+fn stream_total() -> u64 { return HTTP_HDR_LEN + HTTP_BODY }
+
+fn stream_byte(i: u64) -> u64 {
+    if i < 15 { return iwl_le.ld8((&fr_http[0]) as u64, i) }
+    if i == 15 || i == 17 { return 13 }
+    if i == 16 || i == 18 { return 10 }
+    return (((i - HTTP_HDR_LEN) * 7 + 3) & 255)
+}
+
+fn tcp_segment_build(out: u64, sta: u64, bssid: u64, dst_ip: u64, dport: u64, seq: u64, ack: u64, flags: u64, off: u64, n: u64) -> u64 {
+    let hl: u64 = data_head_from_ds(out, sta, bssid)
+    llc.snap_build(out + hl, llc.ET_IPV4)
+    let tc: u64 = out + hl + 8 + 20
+    var k: u64 = 0
+    while k < n {
+        iwl_le.st8(tc, 20 + k, stream_byte(off + k))
+        k = k + 1
+    }
+    llc.tcp_build(tc, AP_IP, dst_ip, 80, dport, seq, ack, flags, n as usize)
+    llc.ipv4_build(out + hl + 8, AP_IP, dst_ip, llc.P_TCP, (20 + n) as usize, 13)
+    return hl + 8 + 20 + 20 + n
 }

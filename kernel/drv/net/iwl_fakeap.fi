@@ -10,7 +10,7 @@ import wlan.ccmp
 import crypto.aes
 import drv.net.iwl_fakeap_frames
 
-export { reset, set_drop, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA, STAT_ARP, STAT_ICMP }
+export { reset, set_drop, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA, STAT_ARP, STAT_ICMP, STAT_DNS, STAT_TCP }
 
 const SLOT: u64 = 512
 const SLOTS: u64 = 32
@@ -33,6 +33,12 @@ const STAT_REQUEST: u64 = 6
 const STAT_DATA: u64 = 7
 const STAT_ARP: u64 = 8
 const STAT_ICMP: u64 = 9
+const STAT_DNS: u64 = 10
+const STAT_TCP: u64 = 11
+const TCP_ISN: u64 = 1000
+const TCP_SEG: u64 = 400
+const TCP_WINDOW: u64 = 6400
+const TCP_BURST: u64 = 16
 
 static mut fa_state: u64 = 0
 static mut fa_drop_arm: u64 = 0
@@ -66,6 +72,16 @@ static mut fa_msg_req: [u8; 16] = "fakeap: request\0"
 static mut fa_msg_arp: [u8; 12] = "fakeap: arp\0"
 static mut fa_msg_echo: [u8; 14] = "fakeap: echo\0\0"
 static mut fa_msg_icmp: [u8; 13] = "fakeap: icmp\0"
+static mut fa_msg_dns: [u8; 12] = "fakeap: dns\0"
+static mut fa_msg_tcp: [u8; 12] = "fakeap: tcp\0"
+static mut ft_on: u64 = 0
+static mut ft_req: u64 = 0
+static mut ft_fin: u64 = 0
+static mut ft_cip: u64 = 0
+static mut ft_cport: u64 = 0
+static mut ft_rcv: u64 = 0
+static mut ft_sent: u64 = 0
+static mut ft_acked: u64 = 0
 
 fn say(msg: u64) {
     serial.puts(msg)
@@ -327,6 +343,90 @@ fn on_icmp(ip: *mut llc.Ipv4) {
     }
 }
 
+fn on_dns(ip: *mut llc.Ipv4, ud: *mut llc.Udp) {
+    let n: u64 = (*ud).payload_len as u64
+    if n < 17 || n > iwl_fakeap_frames.DNS_MAX { return }
+    let q: u64 = (*ud).payload
+    if (iwl_le.ld8(q, 2) & 0x80) != 0 { return }
+    if ld_be16(q, 4) != 1 { return }
+    var at: u64 = 12
+    while at < n && iwl_le.ld8(q, at) != 0 { at = at + iwl_le.ld8(q, at) + 1 }
+    if at + 5 > n { return }
+    let qtype: u64 = ld_be16(q, at + 1)
+    bump(STAT_DNS)
+    say((&fa_msg_dns[0]) as u64)
+    let o: u64 = (&fa_out[0]) as u64
+    let len: u64 = iwl_fakeap_frames.dns_reply_build(o, sta_addr(), bssid_addr(), (*ip).source, (*ud).source, q, at + 5, qtype == 1)
+    send_protected(o, len)
+}
+
+fn send_seg(flags: u64, seq: u64, off: u64, n: u64) {
+    let o: u64 = (&fa_out[0]) as u64
+    send_protected(o, iwl_fakeap_frames.tcp_segment_build(o, sta_addr(), bssid_addr(), ft_cip, ft_cport, seq, ft_rcv, flags, off, n))
+}
+
+fn tcp_pump(want_ack: bool) {
+    let total: u64 = iwl_fakeap_frames.stream_total()
+    var sent_now: u64 = 0
+    if ft_req != 0 {
+        while ft_sent < total && ft_sent - ft_acked < TCP_WINDOW && sent_now < TCP_BURST {
+            var n: u64 = total - ft_sent
+            if n > TCP_SEG { n = TCP_SEG }
+            send_seg(0x18, TCP_ISN + 1 + ft_sent, ft_sent, n)
+            ft_sent = ft_sent + n
+            sent_now = sent_now + 1
+        }
+        if ft_sent == total && ft_acked == total && ft_fin == 0 {
+            send_seg(0x11, TCP_ISN + 1 + total, 0, 0)
+            ft_fin = 1
+            sent_now = sent_now + 1
+        }
+    }
+    if want_ack && sent_now == 0 {
+        send_seg(0x10, TCP_ISN + 1 + ft_sent + ft_fin, 0, 0)
+    }
+}
+
+fn on_tcp(ip: *mut llc.Ipv4) {
+    if (*ip).dest != iwl_fakeap_frames.AP_IP { return }
+    var t: llc.Tcp = llc.tcp_new()
+    if !llc.tcp_parse(&t, (*ip).payload, (*ip).payload_len, (*ip).source, (*ip).dest) { return }
+    if !t.sum_ok || t.dest != 80 { return }
+    if (t.flags & 2) != 0 {
+        ft_on = 1
+        ft_req = 0
+        ft_fin = 0
+        ft_cip = (*ip).source
+        ft_cport = t.source
+        ft_rcv = (t.seq + 1) & 0xFFFFFFFF
+        ft_sent = 0
+        ft_acked = 0
+        bump(STAT_TCP)
+        say((&fa_msg_tcp[0]) as u64)
+        send_seg(0x12, TCP_ISN, 0, 0)
+        return
+    }
+    if ft_on == 0 || t.source != ft_cport || (*ip).source != ft_cip { return }
+    var need_ack: bool = false
+    if (t.flags & 16) != 0 && t.ack > TCP_ISN + 1 {
+        var a: u64 = t.ack - TCP_ISN - 1
+        if a > ft_sent { a = ft_sent }
+        if a > ft_acked { ft_acked = a }
+    }
+    if t.payload_len > 0 {
+        need_ack = true
+        if t.seq == ft_rcv {
+            ft_rcv = (ft_rcv + t.payload_len as u64) & 0xFFFFFFFF
+            ft_req = 1
+        }
+    }
+    if (t.flags & 1) != 0 && t.seq + t.payload_len as u64 == ft_rcv {
+        ft_rcv = (ft_rcv + 1) & 0xFFFFFFFF
+        need_ack = true
+    }
+    tcp_pump(need_ack)
+}
+
 fn on_ip(p: u64, n: u64) {
     let hl: i64 = frame.header_len(p, n as usize)
     if hl < 0 { return }
@@ -345,9 +445,17 @@ fn on_ip(p: u64, n: u64) {
         on_icmp(&ip)
         return
     }
+    if ip.proto == llc.P_TCP {
+        on_tcp(&ip)
+        return
+    }
     if ip.proto != llc.P_UDP { return }
     var ud: llc.Udp = llc.udp_new()
     if !llc.udp_parse(&ud, ip.payload, ip.payload_len, ip.source, ip.dest) { return }
+    if ud.dest == 53 && ip.dest == iwl_fakeap_frames.AP_IP {
+        on_dns(&ip, &ud)
+        return
+    }
     if ud.dest != 67 { return }
     var dh: llc.Dhcp = llc.dhcp_new()
     if !llc.dhcp_parse(&dh, ud.payload, ud.payload_len) { return }
