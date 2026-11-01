@@ -143,7 +143,7 @@ def main():
         imps = ["import " + e for e in ext] + ["import %s.%s" % (a.import_prefix, m) for m in mr]
         if imps:
             text += "\n".join(imps) + "\n\n"
-        text += body
+        text += re.sub(r'__include_str\("(?!\.\./)', '__include_str("../', body)
         modfiles[mod] = text
     mr, ext, body = modfiles["main"] if "main" in modfiles else ([], [], "")
     orig_text = "\n".join(lines[items[0]["start"]:])

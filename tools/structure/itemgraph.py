@@ -10,6 +10,7 @@ from firnlex import spans  # noqa: E402
 
 ITEM = re.compile(r"^(?:export\s+)?(fn|static|const|struct|type)\s+(?:mut\s+)?([A-Za-z_]\w*)")
 IDENT = re.compile(r"(?<![.\w])[A-Za-z_]\w*")
+LOCALS = re.compile(r"\b(?:let|var|for)\s+(?:mut\s+)?([A-Za-z_]\w*)|\b([A-Za-z_]\w*)\s*:(?!:)")
 
 
 def code_only(text):
@@ -48,6 +49,7 @@ def with_refs(lines, items):
         txt = code_only("\n".join(lines[it["start"]:it["end"]]))
         used = set(IDENT.findall(txt)) & names
         used.discard(it["name"])
+        used -= {x or y for x, y in LOCALS.findall(txt)}
         it["uses"] = used
     return items
 
