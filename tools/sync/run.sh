@@ -39,19 +39,19 @@ echo "== 1. bauen =="
 # =====================================================================
 mkdir -p .probe
 if $FIRNC tools/sync/oracle.fi -o .probe/syncoracle 2>"$TMPD/e"; then
-    ok "tools/sync/oracle.fi baut gegen lib/crypto/ und lib/sync/"
+    ok "tools/sync/oracle.fi builds against lib/crypto/ and lib/sync/"
 else
-    bad "das Orakel baut nicht"; head -12 "$TMPD/e" | sed 's/^/        /'
+    bad "the oracle does not build"; head -12 "$TMPD/e" | sed 's/^/        /'
 fi
 
 bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
     && ok "firnc0 baut den Kern" \
-    || { bad "firnc0 baut den Kern nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -12; }
+    || { bad "firnc0 does not build the kernel"; sed 's/^/        /' "$TMPD/b0.txt" | head -12; }
 [ -f "$TMPD/k0.img" ] || { echo "SYNC: $pass passed, $((fail+1)) failed"; exit 1; }
 
 bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/bprog.txt" 2>&1 \
     && ok "firnc0 baut $(echo $PROGS | wc -w) Programme in Ring 3" \
-    || { bad "firnc0 baut nicht alle Programme"
+    || { bad "firnc0 does not build all programs"
          sed 's/^/        /' "$TMPD/bprog.txt" | head -14; }
 [ -f "$TMPD/bin/sync.elf" ] || { echo "SYNC: $pass passed, $((fail+1)) failed"; exit 1; }
 
@@ -60,7 +60,7 @@ for p in sync vault; do
     u=$(nm -u "$TMPD/bin/$p.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "weder /bin/sync noch /bin/vault hat einen undefinierten Namen" \
+[ -z "$undef" ] && ok "neither /bin/sync nor /bin/vault has an undefined name" \
                || bad "undefinierte Namen:$undef"
 note "/bin/sync: $(stat -c%s "$TMPD/bin/sync.elf") Oktette, /bin/vault: $(stat -c%s "$TMPD/bin/vault.elf") Oktette"
 
@@ -72,13 +72,13 @@ else
 fi
 
 # =====================================================================
-echo "== 2. die Bausteine gegen ihre Normen (auf dem Wirt) =="
+echo "== 2. the building blocks against their standards (on the host) =="
 # =====================================================================
 if python3 tools/sync/vectors.py > "$TMPD/vec.txt" 2>&1; then
     grep -E '^  ' "$TMPD/vec.txt" | sed 's/^/     /'
     ok "$(tail -1 "$TMPD/vec.txt")"
 else
-    bad "die Testvektoren sind durchgefallen"
+    bad "the test vectors failed"
     tail -25 "$TMPD/vec.txt" | sed 's/^/        /'
 fi
 
@@ -131,7 +131,7 @@ lauf() { # <abbild> <name>  -> Beendigungscode
 klar() { tr -cd '\11\12\15\40-\176' < "$TMPD/$1.txt" | grep -v '^elf:'; }
 
 # =====================================================================
-echo "== 3. (a) zwei Systeme, ein Konto =="
+echo "== 3. (a) two systems, one account =="
 # =====================================================================
 PASS=geheimeslosungswort
 NP=256   # scrypt N fuer den Testlauf -- die Begruendung steht in kbund.fi B2
@@ -175,8 +175,8 @@ is "A schreibt Generation 1" "$A_GEN" "1"
 
 hol "$TMPD/A.img" /store "$TMPD/store1"
 hol "$TMPD/A.img" /konto "$TMPD/kontoA"
-[ -f "$TMPD/store1/PACK" ] && ok "der Speicher hat PACK, INDEX und ROOT" \
-                           || bad "der Speicher ist unvollstaendig"
+[ -f "$TMPD/store1/PACK" ] && ok "the store has PACK, INDEX and ROOT" \
+                           || bad "the store is incomplete"
 note "Speicher: PACK $(stat -c%s "$TMPD/store1/PACK" 2>/dev/null) Oktette, INDEX $(stat -c%s "$TMPD/store1/INDEX" 2>/dev/null), ROOT $(stat -c%s "$TMPD/store1/ROOT" 2>/dev/null)"
 
 mkdir -p "$TMPD/kontoB"
@@ -190,7 +190,7 @@ ls /daten
 echo ==END==
 EOS
 geraet "$TMPD/B.img" "$TMPD/sB.sh" "$TMPD/kontoB" "$TMPD/store1" "$TMPD/leer" - \
-    && ok "mkfs.py baut Geraet B (nur KOPF und Speicher, kein ZAEHLER)" \
+    && ok "mkfs.py builds device B (only HEAD and store, no COUNTER)" \
     || bad "mkfs.py fehlgeschlagen"
 rc=$(lauf "$TMPD/B.img" B)
 is "Geraet B endet ordentlich" "$rc" "21"
@@ -199,8 +199,8 @@ B_RUNTER=$(feld "$TMPD/B.txt" heruntergel)
 B_EINST=$(feld "$TMPD/B.txt" einstellungen)
 is "B holt 4 Dokumente herunter" "$B_RUNTER" "4"
 [ -n "$B_EINST" ] && [ "$B_EINST" -gt 0 ] \
-    && ok "und EINST kommt ueber den Einstellungsweg: $B_EINST Schluessel gemischt" \
-    || bad "B hat keine Einstellung gemischt: '$B_EINST'"
+    && ok "and SETTINGS arrive through the settings path: $B_EINST keys merged" \
+    || bad "B merged no setting: '$B_EINST'"
 is "B meldet fertig" "$(klar B | grep -c '^fertig')" "1"
 
 hol "$TMPD/B.img" /daten "$TMPD/datenB"
@@ -219,7 +219,7 @@ note "darunter gross.bin mit 200000 Oktetten -- 49 Bloecke, deren Namen als eige
 note "verglichen wurde aus dem Plattenabbild, nicht aus der seriellen Leitung"
 
 # =====================================================================
-echo "== 4./5. (b) der Server sieht nichts, (c) der Wiedererkennungsangriff =="
+echo "== 4./5. (b) the server sees nothing, (c) the recognition attack =="
 # =====================================================================
 cp "$TMPD/kontoA/KOPF" "$TMPD/store1/KOPF"   # der Angreifer darf den Kopf haben
 if python3 tools/sync/schnueffel.py "$TMPD/store1" "$TMPD/daten" "$PASS" \
@@ -231,12 +231,12 @@ if python3 tools/sync/schnueffel.py "$TMPD/store1" "$TMPD/daten" "$PASS" \
     ok "$(tail -1 "$TMPD/schn.txt")"
 else
     sed 's/^/     /' "$TMPD/schn.txt"
-    bad "der Schnueffler hat etwas gefunden"
+    bad "the snooper found something"
 fi
 rm -f "$TMPD/store1/KOPF"
 
 # =====================================================================
-echo "== 6. (d) falsche Passphrase, und der Weg zurueck =="
+echo "== 6. (d) wrong passphrase, and the way back =="
 # =====================================================================
 cat > "$TMPD/sD.sh" <<EOS
 echo ==FALSCH==
@@ -257,23 +257,23 @@ is "der Passphrasenlauf endet ordentlich" "$rc" "21"
 klar D > "$TMPD/D.log"
 absch() { sed -n "/^==$1==/,/^==/p" "$TMPD/D.log"; }
 absch FALSCH | grep -qa 'wrong passphrase' \
-    && ok "(d) eine falsche Passphrase wird abgewiesen" \
-    || bad "(d) eine falsche Passphrase wird NICHT abgewiesen"
+    && ok "(d) a wrong passphrase is rejected" \
+    || bad "(d) a wrong passphrase is NOT rejected"
 absch FALSCH | grep -qa 'fertig' \
     && bad "(d) der Abgleich lief trotzdem" \
-    || ok "(d) und es wird NICHTS abgeglichen"
+    || ok "(d) and NOTHING is synchronised"
 absch FASTRICHTIG | grep -qa 'wrong passphrase' \
-    && ok "(d) ein einziges Zeichen daneben reicht" \
-    || bad "(d) eine fast richtige Passphrase kam durch"
+    && ok "(d) a single wrong character is enough" \
+    || bad "(d) an almost correct passphrase got through"
 absch CODE | grep -qa 'konto: auf' \
-    && ok "(d) der Wiederherstellungscode holt den Zugang zurueck" \
-    || bad "(d) der Wiederherstellungscode wirkt nicht"
+    && ok "(d) the recovery code restores access" \
+    || bad "(d) the recovery code has no effect"
 absch CODEFALSCH | grep -qa 'not valid' \
-    && ok "(d) ein erfundener Code wird abgewiesen" \
-    || bad "(d) ein erfundener Code kam durch"
+    && ok "(d) an invented code is rejected" \
+    || bad "(d) an invented code got through"
 absch RICHTIG | grep -qa 'konto: auf' \
-    && ok "(d) und die richtige Passphrase geht weiterhin" \
-    || bad "(d) die richtige Passphrase geht nicht mehr"
+    && ok "(d) and the correct passphrase still works" \
+    || bad "(d) the correct passphrase no longer works"
 nicht "$TMPD/D.log" "GEHEIMNIS-4711" "(d) kein Teilklartext im ganzen Lauf"
 
 # =====================================================================
@@ -295,9 +295,9 @@ boese_lauf() { # <was> <erwarteter text> <name> [extra]
     lauf "$TMPD/E-$nm.img" "E-$nm" > /dev/null
     klar "E-$nm" > "$TMPD/E-$nm.log"
     if grep -qa "$erw" "$TMPD/E-$nm.log"; then
-        ok "(e) $was wird erkannt und abgelehnt"
+        ok "(e) $was is detected and rejected"
     else
-        bad "(e) $was wird NICHT erkannt"
+        bad "(e) $was is NOT detected"
         grep -a 'sync:\|fehler\|fertig' "$TMPD/E-$nm.log" | head -4 | sed 's/^/        /'
     fi
 }
@@ -314,9 +314,9 @@ geraet "$TMPD/E-rueck.img" "$TMPD/sE.sh" "$TMPD/kontoR" "$TMPD/sb-rueck" "$TMPD/
 lauf "$TMPD/E-rueck.img" E-rueck > /dev/null
 klar E-rueck > "$TMPD/E-rueck.log"
 if grep -qa 'ROLLBACK' "$TMPD/E-rueck.log"; then
-    ok "(e) DER RUECKSCHRITT wird erkannt (Zaehler 9, Speicher bietet 1)"
+    ok "(e) THE ROLLBACK is detected (counter 9, store offers 1)"
 else
-    bad "(e) DER RUECKSCHRITT wird NICHT erkannt -- ein Server kann alte Daten unterschieben"
+    bad "(e) DER RUECKSCHRITT is NOT detected -- ein Server kann alte Daten unterschieben"
     grep -a 'sync:\|generation' "$TMPD/E-rueck.log" | head -4 | sed 's/^/        /'
 fi
 rm -rf "$TMPD/kontoR2"; cp -r "$TMPD/kontoA" "$TMPD/kontoR2"
@@ -325,8 +325,8 @@ geraet "$TMPD/E-ok.img" "$TMPD/sE.sh" "$TMPD/kontoR2" "$TMPD/store1" "$TMPD/leer
 lauf "$TMPD/E-ok.img" E-ok > /dev/null
 klar E-ok > "$TMPD/E-ok.log"
 grep -qa 'fertig' "$TMPD/E-ok.log" \
-    && ok "(e) GEGENPROBE: mit passendem Zaehler laeuft derselbe Speicher durch" \
-    || bad "(e) GEGENPROBE: auch der heile Speicher wird abgelehnt"
+    && ok "(e) CONTROL: with a matching counter the same store passes" \
+    || bad "(e) CONTROL: even the intact store is rejected"
 
 # =====================================================================
 echo "== 8. (f) Abbruch mitten im Abgleich, 30 mal =="
@@ -360,8 +360,8 @@ tv1=$(date +%s%N)
 F_VOLL=$(( (tv1 - tv0) / 1000000 ))
 klar Fv > "$TMPD/Fv.log"
 grep -qa '^==END==' "$TMPD/Fv.log" \
-    && ok "(f) der ungestoerte Vergleichslauf kommt durch: $F_VOLL ms" \
-    || bad "(f) schon der ungestoerte Lauf kommt nicht durch"
+    && ok "(f) the undisturbed reference run passes: $F_VOLL ms" \
+    || bad "(f) even the undisturbed run does not pass"
 [ "$F_VOLL" -lt 1500 ] && F_VOLL=1500
 rm -f "$TMPD/Fv.img"
 
@@ -414,15 +414,15 @@ is "(f) 30 Abbrueche gefahren" "$n" "30"
 num_ge=$gefunden
 note "$num_ge davon hatten schon eine Wurzel auf der Platte, $konten ein Konto"
 [ "$num_ge" -ge 1 ] \
-    && ok "(f) $num_ge Abbrueche lagen NACH dem Schreiben der Wurzel" \
-    || bad "(f) kein einziger Abbruch traf die Wurzel -- (f) misst die falsche Stelle"
+    && ok "(f) $num_ge aborts came AFTER writing the root" \
+    || bad "(f) no single abort hit the root -- (f) measures the wrong spot"
 is "(f) KEINE halbe Wurzel, in keinem der 30 Faelle" "$halbe" "0"
 [ "$kills" -ge 15 ] \
-    && ok "(f) die Abbrueche trafen wirklich mitten hinein: $kills von 30" \
-    || bad "(f) nur $kills von 30 Laeufen liefen ueberhaupt noch -- das Fenster passt nicht"
+    && ok "(f) the aborts really hit the middle: $kills von 30" \
+    || bad "(f) only $kills of 30 runs were still running at all -- the window does not fit"
 [ "$konten" -ge 1 ] \
-    && ok "(f) mindestens ein abgebrochener Lauf hatte schon ein Konto: $konten" \
-    || bad "(f) kein einziger Abbruch hat es bis zum Konto geschafft"
+    && ok "(f) at least one aborted run already had an account: $konten" \
+    || bad "(f) no single abort reached the account"
 if [ -n "$letztes" ]; then
     cp "$TMPD/Flast.img" "$TMPD/F.img"
     note "weitergefahren wird Lauf $letztes"
@@ -440,8 +440,8 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     rc=$(lauf "$TMPD/F2.img" F2)
     klar F2 > "$TMPD/F2.log"
     grep -qa 'fertig' "$TMPD/F2.log" \
-        && ok "(f) nach dem Abbruch nimmt der Abgleich wieder auf und wird fertig" \
-        || bad "(f) nach dem Abbruch kommt der Abgleich nicht mehr durch"
+        && ok "(f) after the abort the sync resumes and finishes" \
+        || bad "(f) after the abort the sync no longer completes"
     hol "$TMPD/F2.img" /store "$TMPD/storeF2"
     mkdir -p "$TMPD/kontoF2"; cp "$TMPD/kontoF/KOPF" "$TMPD/kontoF2/KOPF"
     geraet "$TMPD/F3.img" "$TMPD/sB.sh" "$TMPD/kontoF2" "$TMPD/storeF2" "$TMPD/leer" -
@@ -475,7 +475,7 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     note "vom abgebrochenen zweiten Abgleich kamen $hin von 6 Kopien ganz an"
     is "(f) und KEINE davon kam halb an" "$kaputt" "0"
 else
-    bad "(f) nach den Abbruechen gibt es kein Konto mehr"
+    bad "(f) after the aborts there is no account any more"
 fi
 
 # =====================================================================
@@ -500,22 +500,22 @@ SYNC_TIMEOUT=900 lauf "$TMPD/V.img" V > /dev/null
 klar V > "$TMPD/V.log"
 grep -qa '^fertig' "$TMPD/V.log" \
     && bad "der volle Datentraeger meldet trotzdem fertig" \
-    || ok "ein voller Datentraeger meldet NICHT fertig"
+    || ok "a full disk does NOT report done"
 grep -qa '^sync: fehler' "$TMPD/V.log" \
-    && ok "sondern einen Fehler: $(grep -a '^sync: fehler' "$TMPD/V.log" | tail -1)" \
-    || bad "und er meldet auch keinen Fehler -- der Abbruch ist still"
+    && ok "but an error: $(grep -a '^sync: fehler' "$TMPD/V.log" | tail -1)" \
+    || bad "and it reports no error either -- the abort is silent"
 grep -qa '^sync: bei:' "$TMPD/V.log" \
-    && ok "und er nennt die Datei, an der es riss: $(grep -a '^sync: bei:' "$TMPD/V.log" | tail -1 | sed 's/^sync: bei:  *//')" \
-    || bad "aber nicht, WO es riss"
+    && ok "and it names the file where it broke: $(grep -a '^sync: bei:' "$TMPD/V.log" | tail -1 | sed 's/^sync: bei:  *//')" \
+    || bad "but not WHERE it broke"
 is "und er schreibt KEINE Wurzel (Generation bleibt 0)" \
    "$(feld "$TMPD/V.txt" generation)" "0"
 hol "$TMPD/V.img" /store "$TMPD/storeV"
 [ -f "$TMPD/storeV/ROOT" ] \
-    && bad "es liegt trotzdem eine Wurzel im Speicher" \
-    || ok "im Speicher liegt keine Wurzel, nur Oktette, auf die niemand zeigt"
+    && bad "there is still a root in the store" \
+    || ok "there is no root in the store, only octets nobody points to"
 
 # =====================================================================
-echo "== 9. (g) der Konflikt =="
+echo "== 9. (g) the conflict =="
 cat > "$TMPD/sG1.sh" <<EOS
 echo ==AB1==
 sync abgleich /konto /daten $PASS
@@ -529,8 +529,8 @@ geraet "$TMPD/G1.img" "$TMPD/sG1.sh" "$TMPD/kontoB" "$TMPD/store1" "$TMPD/leer" 
 lauf "$TMPD/G1.img" G1 > /dev/null
 klar G1 > "$TMPD/G1.log"
 hol "$TMPD/G1.img" /store "$TMPD/store2"
-grep -qa 'fertig' "$TMPD/G1.log" && ok "(g) B aendert a.txt und laedt hoch" \
-                                 || bad "(g) B kommt nicht durch"
+grep -qa 'fertig' "$TMPD/G1.log" && ok "(g) B changes a.txt and uploads" \
+                                 || bad "(g) B does not get through"
 
 cat > "$TMPD/sG2.sh" <<EOS
 echo ==AENDERN==
@@ -554,19 +554,19 @@ G_KONF=$(feld "$TMPD/G2.txt" konflikte)
 is "(g) A meldet genau einen Konflikt" "$G_KONF" "1"
 hol "$TMPD/G2.img" /daten "$TMPD/datenG"
 [ -f "$TMPD/datenG/a.txt.konflikt" ] \
-    && ok "(g) die fremde Fassung liegt als a.txt.konflikt daneben" \
-    || bad "(g) es gibt keine zweite Fassung -- etwas ist still verloren gegangen"
+    && ok "(g) the foreign version lies next to it as a.txt.konflikt" \
+    || bad "(g) there is no second version -- something was silently lost"
 if [ -f "$TMPD/datenG/a.txt" ] && [ -f "$TMPD/datenG/a.txt.konflikt" ]; then
     x=$(cat "$TMPD/datenG/a.txt"); y=$(cat "$TMPD/datenG/a.txt.konflikt")
     is "(g) die eigene Fassung ist geblieben" "$x" "VON-A"
     is "(g) und die fremde ist auch da" "$y" "VON-B"
 fi
 sed -n '/^==KONF==/,/^==A==/p' "$TMPD/G2.log" | grep -qa '/a.txt' \
-    && ok "(g) sync konflikte nennt den Pfad" \
-    || bad "(g) sync konflikte nennt den Pfad nicht"
+    && ok "(g) sync konflikte names the path" \
+    || bad "(g) sync konflikte names the path nicht"
 
 # =====================================================================
-echo "== 10. (h) der Tresor =="
+echo "== 10. (h) the vault =="
 # =====================================================================
 cat > "$TMPD/sH.sh" <<EOS
 echo ==OHNE==
@@ -598,31 +598,31 @@ rc=$(lauf "$TMPD/H.img" H)
 klar H > "$TMPD/H.log"
 habs() { sed -n "/^==$1==/,/^==/p" "$TMPD/H.log"; }
 habs OHNE | grep -qa 'no open session' \
-    && ok "(h) ohne Sitzung gibt es kein Geheimnis" \
-    || bad "(h) ohne Sitzung kam etwas heraus"
-habs AUF | grep -qa 'vault: open' && ok "(h) der Tresor geht mit der Passphrase auf" \
-                                  || bad "(h) der Tresor geht nicht auf"
-habs LEGEN | grep -qa 'vault: stored' && ok "(h) ein Geheimnis laesst sich ablegen" \
+    && ok "(h) without a session there is no secret" \
+    || bad "(h) without a session something came out"
+habs AUF | grep -qa 'vault: open' && ok "(h) the vault opens with the passphrase" \
+                                  || bad "(h) the vault does not open"
+habs LEGEN | grep -qa 'vault: stored' && ok "(h) a secret can be stored" \
                                || bad "(h) das Ablegen scheitert"
 habs GIB | grep -qa 'GEHEIMNIS-4711' \
-    && ok "(h) und mit offener Sitzung wieder herausholen" \
-    || bad "(h) das Geheimnis kommt nicht zurueck"
+    && ok "(h) and retrieved again with an open session" \
+    || bad "(h) the secret does not come back"
 habs NACHZU | grep -qa 'no open session' \
     && ok "(h) nach 'vault close' ist er zu" \
     || bad "(h) nach 'vault close' ist er NICHT zu"
 habs FALSCHPASS | grep -qa 'wrong passphrase' \
-    && ok "(h) eine falsche Passphrase oeffnet den Tresor nicht" \
-    || bad "(h) eine falsche Passphrase oeffnete den Tresor"
+    && ok "(h) a wrong passphrase does not open the vault" \
+    || bad "(h) a wrong passphrase opened the vault"
 habs NACHFRIST | grep -qa 'timeout has expired' \
-    && ok "(h) nach der Frist ist der Tresor von selbst zu" \
-    || bad "(h) die Frist wirkt nicht"
+    && ok "(h) after the timeout the vault closes by itself" \
+    || bad "(h) the timeout has no effect"
 hol "$TMPD/H.img" /tresor "$TMPD/tresorH"
 found=0
 for f in "$TMPD/tresorH"/*; do
     [ -f "$f" ] && grep -qaF "GEHEIMNIS-4711" "$f" && found=$((found+1))
 done
 is "(h) der Klartext steht in KEINER Datei des Tresors" "$found" "0"
-[ -f "$TMPD/tresorH/G-bank" ] && ok "(h) das Geheimnis liegt als G-bank da (versiegelt)" \
+[ -f "$TMPD/tresorH/G-bank" ] && ok "(h) the secret lies there as G-bank (sealed)" \
                              || bad "(h) G-bank fehlt"
 
 hol "$TMPD/H.img" /tresor "$TMPD/tresorH2"
@@ -635,14 +635,14 @@ geraet "$TMPD/H2.img" "$TMPD/sH2.sh" "$TMPD/kontoA" "$TMPD/store1" "$TMPD/leer" 
 lauf "$TMPD/H2.img" H2 > /dev/null
 klar H2 > "$TMPD/H2.log"
 if grep -qa 'no right\|no open session\|timeout' "$TMPD/H2.log"; then
-    ok "(h) ohne den Sitzungsschluessel in /system kommt kein Geheimnis heraus"
+    ok "(h) without the session key in /system no secret comes out"
 else
-    bad "(h) ohne Sitzungsschluessel kam ein Geheimnis heraus"
+    bad "(h) without a session key a secret came out"
 fi
 nicht "$TMPD/H2.log" "GEHEIMNIS-4711" "(h) und der Klartext steht auch nicht im Protokoll"
 
 # =====================================================================
-echo "== 11. (i) ohne Konto geht alles weiter =="
+echo "== 11. (i) without an account everything continues =="
 # =====================================================================
 cat > "$TMPD/sI.sh" <<'EOS'
 echo ==KEINKONTO==
@@ -665,17 +665,17 @@ rc=$(lauf "$TMPD/I.img" I)
 klar I > "$TMPD/I.log"
 is "(i) der Lauf ohne Konto endet ordentlich" "$rc" "21"
 sed -n '/^==KEINKONTO==/,/^==ARBEIT==/p' "$TMPD/I.log" | grep -qa 'no such account' \
-    && ok "(i) ohne Konto sagt sync das klar und tut sonst nichts" \
-    || bad "(i) ohne Konto passiert etwas Unerwartetes"
+    && ok "(i) without an account sync says so clearly and does nothing else" \
+    || bad "(i) without an account something unexpected happens"
 sed -n '/^==ARBEIT==/,/^==BACKUP==/p' "$TMPD/I.log" | grep -qa 'hallo' \
-    && ok "(i) und das System arbeitet ganz normal weiter" \
-    || bad "(i) das System arbeitet nicht weiter"
+    && ok "(i) and the system keeps working normally" \
+    || bad "(i) the system does not keep working"
 sed -n '/^==BACKUP==/,/^==END==/p' "$TMPD/I.log" | grep -qa 'restored files' \
-    && ok "(i) die Sicherung der Runde TRESOR ist unveraendert benutzbar" \
-    || bad "(i) die Sicherung ist kaputt gegangen"
+    && ok "(i) the backup of round VAULT is still usable unchanged" \
+    || bad "(i) the backup broke"
 
 # =====================================================================
-echo "== 12. (j) vier absichtlich kaputte Fassungen =="
+echo "== 12. (j) four deliberately broken versions =="
 mkdir -p "$TMPD/kaputt"
 
 cp lib/sync/chain.fi "$TMPD/kaputt/kette.fi.orig"
@@ -707,7 +707,7 @@ PY
 )
     is "(j1) GEGENPROBE: mit dem blanken SHA-256 geht der Angriff auf" "$r" "JA"
 else
-    bad "(j1) die kaputte Fassung baut nicht -- die Gegenprobe misst nichts"
+    bad "(j1) the broken version does not build -- the control measures nothing"
 fi
 
 python3 - "$TMPD" <<'PYX'
@@ -737,7 +737,7 @@ assert t.count(alt_k) == 2, t.count(alt_k)
 open(d + "/kaputt/kette-losgeloest.fi", "w").write(t.replace(alt_k, neu_k))
 PYX
 if cmp -s "$TMPD/kaputt/kette-ohneaad.fi" lib/sync/chain.fi; then
-    bad "(j2) die kaputte Fassung ist mit dem Original identisch -- sie misst nichts"
+    bad "(j2) the broken version is identical to the original -- it measures nothing"
 else
     cp -a lib "$TMPD/lib-ohneaad"
     cp "$TMPD/kaputt/kette-ohneaad.fi" "$TMPD/lib-ohneaad/sync/chain.fi"
@@ -777,7 +777,7 @@ PYX
         note "das AAD allein traegt die Bindung NICHT: Schluessel und Nonce tun es."
         note "Erst wenn auch die weg sind (LOS), geht ein Block unter fremdem Namen auf."
     else
-        bad "(j2) die kaputten Fassungen bauen nicht (ohneaad=$b1 losgeloest=$b2)"
+        bad "(j2) the broken versions do not build (ohneaad=$b1 losgeloest=$b2)"
     fi
 fi
 
@@ -792,17 +792,17 @@ if ! cmp -s "$TMPD/kaputt/sync-ohneschutz.fi" kernel/user/sync.fi; then
         lauf "$TMPD/J3.img" J3 > /dev/null
         klar J3 > "$TMPD/J3.log"
         if grep -qa 'ROLLBACK' "$TMPD/J3.log"; then
-            bad "(j3) auch ohne Schutz wird der Rueckschritt gemeldet -- der Test misst ihn nicht"
+            bad "(j3) even without protection the rollback is reported -- the test does not measure it"
         else
-            ok "(j3) GEGENPROBE: ohne den Zaehlervergleich geht der Rueckschritt durch"
+            ok "(j3) CONTROL: without the counter comparison the rollback passes"
         fi
         cp "$TMPD/bin/sync.elf.sicher" "$TMPD/bin/sync.elf"
     else
-        bad "(j3) die kaputte Fassung baut nicht"
+        bad "(j3) the broken version does not build"
     fi
     rm -rf "$TMPD/usrc-j3"
 else
-    bad "(j3) der Schnitt hat nichts geaendert -- die Gegenprobe misst nichts"
+    bad "(j3) the cut changed nothing -- the control measures nothing"
 fi
 
 rm -rf "$TMPD/usrc-j4"; cp -a kernel/user "$TMPD/usrc-j4"
@@ -833,21 +833,21 @@ EOS
         klar J4a > "$TMPD/J4a.log"
         j4dat=$(feld "$TMPD/J4a.txt" dateien)
         if grep -qa '^fertig' "$TMPD/J4a.log" && [ "$j4dat" = "4" ]; then
-            ok "(j4) GEGENPROBE: mit dem alten 700-Oktett-Feld faellt gross.bin still aus dem Abgleich -- $j4dat statt 5 Dateien, und der Lauf meldet trotzdem fertig"
+            ok "(j4) CONTROL: with the old 700-octet field gross.bin silently drops out of the sync -- $j4dat instead of 5 files, and the run still reports done"
         else
-            bad "(j4) die alte Fassung verhaelt sich nicht wie erwartet: dateien=$j4dat, fertig=$(grep -ca '^fertig' "$TMPD/J4a.log")"
+            bad "(j4) the old version does not behave as expected: dateien=$j4dat, fertig=$(grep -ca '^fertig' "$TMPD/J4a.log")"
         fi
         cp "$TMPD/bin/sync.elf.sicher" "$TMPD/bin/sync.elf"
     else
-        bad "(j4) die kaputte Fassung baut nicht"
+        bad "(j4) the broken version does not build"
     fi
     rm -rf "$TMPD/usrc-j4"
 else
-    bad "(j4) der Rueckbau hat nichts geaendert -- die Gegenprobe misst nichts"
+    bad "(j4) the revert changed nothing -- the control measures nothing"
 fi
 
 # =====================================================================
-echo "== 12b. der voreingestellte Preis der Schluesselableitung =="
+echo "== 12b. the default cost of the key derivation =="
 cat > "$TMPD/sP.sh" <<EOS
 echo ==VOR==
 date -u
@@ -872,14 +872,14 @@ PROGS=$PROGS_ALT
 SYNC_TIMEOUT=900 lauf "$TMPD/P.img" P > /dev/null
 klar P > "$TMPD/P.log"
 grep -qa '^konto: auf' "$TMPD/P.log" \
-    && ok "der VOREINGESTELLTE Preis (N=4096, r=8, 4 MiB) legt ein Konto an" \
-    || bad "der voreingestellte Preis legt KEIN Konto an -- die Voreinstellung ist kaputt"
+    && ok "the DEFAULT cost (N=4096, r=8, 4 MiB) creates an account" \
+    || bad "the default cost creates NO account -- the default is broken"
 grep -qa '^vault: open' "$TMPD/P.log" \
-    && ok "und der Tresor geht damit auf" \
-    || bad "und der Tresor geht damit NICHT auf"
+    && ok "and the vault opens with it" \
+    || bad "and the vault does NOT open with it"
 sed -n '/^==ZUVIEL==/,$p' "$TMPD/P.log" | grep -qa 'fehler' \
-    && ok "GEGENPROBE: N=16384 (16 MiB) scheitert -- die Arena hat 6 MiB" \
-    || bad "N=16384 kam durch -- dann stimmt die Grenze im Kopf von kbund.fi nicht"
+    && ok "CONTROL: N=16384 (16 MiB) fails -- the arena has 6 MiB" \
+    || bad "N=16384 got through -- then the limit in the header of kbund.fi is wrong"
 python3 - "$TMPD/P.log" <<'PYT'
 import re, sys
 marke = None; letzte = None; namen = ["sync neu", "vault new", "vault open"]
@@ -924,8 +924,8 @@ SYNC_TIMEOUT=1800 lauf "$TMPD/M.img" M > /dev/null
 t1=$(date +%s%N)
 klar M > "$TMPD/M.log"
 grep -qa '^==END==' "$TMPD/M.log" \
-    && ok "der Messlauf ist wirklich bis zum Ende gekommen" \
-    || bad "der Messlauf ist nicht fertig geworden -- die Zahlen unten sind wertlos"
+    && ok "the measurement run really reached the end" \
+    || bad "the measurement run did not finish -- the numbers below are worthless"
 M_GESAMT=$(( (t1 - t0) / 1000000 ))
 M_BLK=$(feld_n "$TMPD/M.txt" bloecke 1)
 M_NEU1=$(feld_n "$TMPD/M.txt" neubloecke 1)
@@ -940,13 +940,13 @@ note "alle drei Laeufe samt Anlegen des Kontos und Systemstart: $M_GESAMT ms (ac
 is "der Messlauf meldet dreimal fertig" "$(grep -ca '^fertig' "$TMPD/M.log")" "3"
 is "der volle Abgleich sieht alle 20 Dateien" "$(feld_n "$TMPD/M.txt" dateien 1)" "20"
 [ -n "$M_BLK" ] && [ "$M_BLK" -ge 300 ] \
-    && ok "der volle Abgleich sieht alle Bloecke: $M_BLK (260 Daten + 40 Namensketten + Verzeichnis)" \
-    || bad "der volle Abgleich sieht nur $M_BLK Bloecke -- erwartet werden 302"
+    && ok "the full sync sees all blocks: $M_BLK (260 data + 40 name chains + directory)" \
+    || bad "the full sync sees only $M_BLK blocks -- 302 expected"
 is "und er legt jeden davon neu ab" "$M_NEU1" "$M_BLK"
 is "der zweite Lauf schreibt NULL neue Bloecke" "$M_NEU2" "0"
 [ -n "$M_NEU3" ] && [ "$M_NEU3" -le 3 ] \
-    && ok "eine kleine Aenderung kostet $M_NEU3 neue Bloecke, nicht $M_NEU1" \
-    || bad "eine kleine Aenderung kostet $M_NEU3 Bloecke"
+    && ok "a small change costs $M_NEU3 new blocks, not $M_NEU1" \
+    || bad "a small change costs $M_NEU3 blocks"
 
 hol "$TMPD/M.img" /store "$TMPD/storeM"
 M_KLAR=$(du -sb "$TMPD/mess" | cut -f1)
@@ -958,10 +958,10 @@ if [ "$M_KLAR" -gt 0 ] && [ "$M_PACK" -gt 0 ]; then
     note "Klartext $M_KLAR Oktette -> Speicher $M_PACK (PACK) + $M_IDX (INDEX) = Mehraufwand ${proz} %"
     note "davon Siegel ${sieg} % je Block; der Rest ist das Auffuellen auf 4096 und das Verzeichnis"
     awk "BEGIN{exit !($M_PACK+$M_IDX > $M_KLAR)}" \
-        && ok "der Speicher ist groesser als der Klartext, wie er muss" \
-        || bad "der Speicher ist KLEINER als der Klartext -- da stimmt eine Zahl nicht"
+        && ok "the store is larger than the plaintext, as it must be" \
+        || bad "the store is SMALLER than the plaintext -- a number is wrong"
 else
-    bad "der Mehraufwand laesst sich nicht rechnen: Klartext $M_KLAR, PACK $M_PACK"
+    bad "the overhead cannot be computed: plaintext $M_KLAR, PACK $M_PACK"
 fi
 
 M_S1=$(feld_n "$TMPD/M.txt" sekunden 1)
@@ -996,9 +996,9 @@ is "die Schluesselableitung: vier Stufen gemessen (auf dem Wirt, firnc0)" \
 python3 - <<'PY'
 n = 10000
 zeile = 64 + 1 + 9 + 1 + 4 + 1     # name TAB offset TAB laenge NL
-print("  Blockindex bei 10 000 Dateien (je ein Block): %d Oktette = %.1f KiB"
+print("  Block index for 10 000 files (one block each): %d octets = %.1f KiB"
       % (n * zeile, n * zeile / 1024.0))
-print("  im Speicher (32 Oktette Name + 2 x 8 Zahl je Block): %d KiB"
+print("  in the store (32 octets name + 2 x 8 number per block): %d KiB"
       % (n * 48 // 1024))
 PY
 note "gerechnet aus dem Format, dessen Zeilen oben gemessen wurden"
