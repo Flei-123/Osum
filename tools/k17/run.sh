@@ -238,7 +238,7 @@ python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
     && ok "the root disk is there: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
 
-printf 'von linux auf den stick\n' > "$TMPD/host.txt"
+printf 'from linux to stick\n' > "$TMPD/host.txt"
 dd if=/dev/zero of="$TMPD/fat.img" bs=1M count=48 status=none
 mkfs.vfat -F 32 -s 1 -n USBSTICK "$TMPD/fat.img" >/dev/null 2>&1 \
     && ok "mkfs.vfat created a FAT32 for the stick" \
@@ -563,7 +563,7 @@ rc=$(lauf_stick shellmount "$TMPD/k0.mb" \
     "${XHCI[@]}")
 num "der Lauf mit mount aus der Shell beendet sich selbst" "$rc" eq 21
 hat "$TMPD/shellmount.txt" "host.txt" "/bin/mount haengt /dev/usb0 ein und ls sieht die Datei"
-hat "$TMPD/shellmount.txt" "von linux auf den stick" "und cat liest sie"
+hat "$TMPD/shellmount.txt" "from linux to stick" "und cat liest sie"
 
 rc=$(lauf ohnestick "$TMPD/k0.mb" \
     "osum usb vfs nokbd nosched noproc script=ls /dev" \
@@ -612,7 +612,7 @@ rc=$(lauf_stick nopull "$TMPD/k0.mb" \
     "osum usb usbstick vfs nokbd nosched noproc script=wc /usb/host.txt;cat /usb/host.txt" \
     "${XHCI[@]}")
 num "GEGENPROBE ohne Abziehen: der Kern beendet sich sauber" "$rc" eq 21
-hat "$TMPD/nopull.txt" "von linux auf den stick" "GEGENPROBE: ohne Abziehen liest derselbe Pfad die Datei"
+hat "$TMPD/nopull.txt" "from linux to stick" "GEGENPROBE: ohne Abziehen liest derselbe Pfad die Datei"
 hat_nicht "$TMPD/nopull.txt" "usb: unplug port=" "GEGENPROBE: und nichts wird abgezogen"
 
 num "Anstecken im Betrieb im Regellauf (darf nicht anschlagen)" \

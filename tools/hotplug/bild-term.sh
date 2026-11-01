@@ -49,7 +49,7 @@ start=2048, type=c
 SF
 dd if=/dev/zero of="$ARB/stick.part" bs=1M count=46 status=none
 mkfs.vfat -F32 -n OSUMSTICK "$ARB/stick.part" >/dev/null 2>&1
-printf 'von linux auf den stick\n' > "$ARB/host.txt"
+printf 'from linux to stick\n' > "$ARB/host.txt"
 mcopy -i "$ARB/stick.part" "$ARB/host.txt" ::host.txt
 dd if="$ARB/stick.part" of="$ARB/stick.img" bs=512 seek=2048 conv=notrunc status=none
 rm -f "$ARB/stick.part"

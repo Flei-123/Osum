@@ -348,7 +348,7 @@ F="$TMPD/init.txt"
 is "die Maschine faehrt ueber ACPI herunter (QEMU beendet sich mit 0)" "$rc" "0"
 has "$F" "osum: pid1 init" "der Kern startet /sbin/init und nicht die Shell"
 has "$F" "init: dienste=2" "init liest /etc/inittab und findet zwei Dienste"
-hasnot "$F" "init: ich bin nicht der Prozess 1" "init IST der Prozess 1"
+hasnot "$F" "init: I am not process 1" "init IST der Prozess 1"
 is "und der Kern sagt es auch" "$(val "$F" 'init=[0-9]+')" "1"
 first=$(grep -aoE '^blink running [0-9]+ [0-9]+' "$F" | sed -n '1p' | awk '{print $4}')
 later=$(grep -aoE '^blink running [0-9]+ [0-9]+' "$F" | sed -n '2p' | awk '{print $4}')

@@ -391,9 +391,9 @@ G=$(grep -a -c 'k16: fopen_c = 42' "$TMPD/open.txt" 2>/dev/null || true)
 num "und der Beendigungscode des uebersetzten Programms kommt durch (42)" "${G:-0}" ge 1
 K=$(grep -a -c 'k16: fopen_c = 70' "$TMPD/open.txt" 2>/dev/null || true)
 num "GEGENPROBE: eine .fi, die NICHT uebersetzt, endet mit 70 statt mit 0" "${K:-0}" ge 1
-hat "$TMPD/open.txt" "firun: der Übersetzer lehnt ab, Code 1" \
+hat "$TMPD/open.txt" "firun: the compiler refuses, code 1" \
     "GEGENPROBE: und der Nutzer LIEST, warum -- der Grund steht auf dem Schirm"
-hat "$TMPD/open.txt" "im Quelltext steht ein Fehler" \
+hat "$TMPD/open.txt" "error in the source" \
     "GEGENPROBE: und zwar als Satz und nicht als nackte Zahl"
 fi
 

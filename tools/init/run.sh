@@ -217,7 +217,7 @@ is "und der Kern sagt es auch" "$(val "$F" 'init=[0-9]+')" "1"
 has "$F" "init: wurzel=1" "init hat die Wurzel nachgeprueft und sie steht"
 has "$F" "init: ziel=konsole" "das Ziel kommt aus /etc/ziel"
 has "$F" "init: dienste=9" "init liest /etc/inittab und findet neun Dienste"
-hasnot "$F" "init: ich bin nicht der Prozess 1" "init IST der Prozess 1"
+hasnot "$F" "init: I am not process 1" "init IST der Prozess 1"
 
 echo "-- 3a. respawn: der Dienst, der wiederkommt"
 first=$(sp "$F" blink 4 head)

@@ -269,7 +269,7 @@ eval bash "$B" "$OUT/sp1" kbd=yes uitrace=yes warten=8 extra=\"wigapp=/bin/lock\
     progs=\"lock desktop taskbar launcher theme sh echo ls cat\" \
     xfile=/etc/shadow="$OUT/shadow" $MON > "$OUT/sp1.log" 2>&1
 S=$OUT/sp1/serial.txt
-hat "$S" "sperre: falsches Kennwort, bleibt zu" \
+hat "$S" "lock: wrong password, stays shut" \
     "falsches Kennwort: die Sperre bleibt stehen"
 hat "$S" "sperre: aufgesperrt" "richtiges Kennwort: sie geht auf"
 bash "$B" "$OUT/sp2" warten=10 extra="wigapp=/bin/lock,-absturz" \

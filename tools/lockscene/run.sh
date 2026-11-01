@@ -61,13 +61,13 @@ hat "$S" "t=Entsperren" "the main button is a named node"
 echo "== wrong, then right =="
 run t2 /bin/lock f a l s c h ret g e h e i m 1 2 ret
 S=$OUT/t2/serial.txt
-hat "$S" "sperre: falsches Kennwort, bleibt zu" "wrong password: the lock stays"
+hat "$S" "lock: wrong password, stays shut" "wrong password: the lock stays"
 hat "$S" "sperre: aufgesperrt" "right password: it opens"
 
 echo "== counter-proof: only wrong passwords =="
 run t3 /bin/lock f a l s c h ret x y z ret
 S=$OUT/t3/serial.txt
-hat "$S" "sperre: falsches Kennwort, bleibt zu" "wrong password refused"
+hat "$S" "lock: wrong password, stays shut" "wrong password refused"
 hatnicht "$S" "sperre: aufgesperrt" "COUNTER-PROOF: wrong passwords never unlock"
 
 echo "== the eye (Tab, Enter) does not unlock =="
@@ -80,7 +80,7 @@ echo "== keys that pile up: a slow guest (TCG) gets 'falsch' Enter 'geheim12' En
 # the program heard of the Enter: one attempt with "falschgeheim12", never open.
 OSUM_ACCEL=tcg run t6 /bin/lock f a l s c h ret g e h e i m 1 2 ret
 S=$OUT/t6/serial.txt
-hat "$S" "sperre: falsches Kennwort, bleibt zu" "burst: the first attempt is refused"
+hat "$S" "lock: wrong password, stays shut" "burst: the first attempt is refused"
 hat "$S" "sperre: aufgesperrt" "burst: the second attempt (typed behind the first Enter) opens it"
 
 echo "== a crash locks, never unlocks =="

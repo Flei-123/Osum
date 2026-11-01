@@ -378,9 +378,9 @@ echo "== 6. Stufe 5: der Weg aus Ring 3 =="
           | grep -oE '[0-9]+$')
     num "6 der Befund ist V_BACKJUMP (1), also der Rueckwaertssprung" \
         "${BEF:-0}" eq 1
-    has "$RC3" "ebpfctl: der Prüfer nimmt es an" \
+    has "$RC3" "ebpfctl: the verifier accepts it" \
         "6 ein gueltiges Programm wird angenommen"
-    has "$RC3" "ebpfctl: hängt am Eingang an" \
+    has "$RC3" "ebpfctl: attached at ingress" \
         "6 und Ring 3 haengt es an den Haken"
     LD=$(grep -aoE 'geladen +=[0-9 ]+' "$RC3" | tail -1 | grep -oE '[0-9]+$')
     num "6 ebpfctl liest die Zaehler des Kerns (geladen)" "${LD:-0}" ge 1
