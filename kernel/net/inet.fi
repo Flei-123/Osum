@@ -35,7 +35,7 @@ export {
     sock_nonblock, sock_set_nonblock, sock_tmo, sock_set_tmo, TMO_MASK,
     SK_FREE, SK_TCP, SK_UDP, SK_ICMP, SOCK_MAX,
     SF_LISTEN, SF_NONBLOCK, SF_CONNECTED, SF_KEEPALIVE,
-    sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT
+    sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT, sock_stale
 , dhcp_set, dhcp_get}
 
 const S_STACK: u64 = 0x300
@@ -125,6 +125,10 @@ const QUIET_US: u64 = 3000000
 const QUIET_TICKS: u64 = 5
 
 const FRAME_CAP: u64 = 1600
+
+const H_MASK: u64 = 0xFFFFFFFF
+
+static mut in_epoch: u64 = 0
 
 fn sc(off: u64) -> u64 {
     return pci.K2_SCALARS + off
@@ -428,6 +432,10 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     } else if prefix > 0 {
         netmask = ((0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF) as u32
     }
+    if (own as u64) == ip(state) && (netmask as u64) == mask(state)
+        && (gateway & 0xFFFFFFFF) == gw(state) {
+        return true
+    }
     var seed: u64 = apic.tsc()
     if seed == 0 {
         seed = 20260827
@@ -439,8 +447,85 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     kstate.set(state, sc(S_IP), own as u64)
     kstate.set(state, sc(S_MASK), netmask as u64)
     kstate.set(state, sc(S_GW), gateway)
+    in_epoch = (in_epoch + 1) & H_MASK
+    let rebound: u64 = rebind_all(state)
+    let stale: u64 = stale_count(state)
+    let ep: u64 = in_epoch
     drop_lock(state, flags)
+    say_epoch(ep, rebound, stale)
     return true
+}
+
+fn rebind_one(state: u64, i: u64) -> i32 {
+    let port: u16 = (kstate.get(state, so_at(i) + SO_PORT) & 0xFFFF) as u16
+    let k: u64 = sock_kind(state, i)
+    if k == SK_UDP {
+        return stack.udp_bind(st(state), port)
+    }
+    if k == SK_TCP && (sock_flags(state, i) & SF_LISTEN) != 0 {
+        return stack.net_listen(st(state), port)
+    }
+    return -1
+}
+
+fn rebind_all(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < SOCK_MAX {
+        if kstate.get(state, so_at(i) + SO_H) != NOHANDLE {
+            let h: i32 = rebind_one(state, i)
+            if h >= 0 {
+                h_store(state, i, h as u64, in_epoch)
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn stale_count(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < SOCK_MAX {
+        if sock_stale(state, i) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn say_epoch(ep: u64, rebound: u64, stale: u64) {
+    var s_e: [u8; 20] = "inet: readdr epoch=\0"
+    var s_r: [u8; 10] = " rebound=\0"
+    var s_s: [u8; 8] = " stale=\0"
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(ep)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(rebound)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(stale)
+    serial.nl()
+}
+
+fn h_store(state: u64, i: u64, h: u64, ep: u64) {
+    kstate.set(state, so_at(i) + SO_H, (h & H_MASK) | (ep << 32))
+}
+
+fn sock_stale(state: u64, i: u64) -> bool {
+    if i >= SOCK_MAX {
+        return false
+    }
+    let raw: u64 = kstate.get(state, so_at(i) + SO_H)
+    return raw != NOHANDLE && (raw >> 32) != in_epoch
+}
+
+fn gone_or(state: u64, i: u64, e: u64) -> u64 {
+    if sock_stale(state, i) {
+        return errno.neg(errno.E_CONNRESET)
+    }
+    return errno.neg(e)
 }
 
 fn rx_snapshot(state: u64, src: u64, n: u64) -> u64 {
@@ -828,7 +913,11 @@ fn sock_handle(state: u64, i: u64) -> u64 {
     if i >= SOCK_MAX {
         return NOHANDLE
     }
-    return kstate.get(state, so_at(i) + SO_H)
+    let raw: u64 = kstate.get(state, so_at(i) + SO_H)
+    if raw == NOHANDLE || (raw >> 32) != in_epoch {
+        return NOHANDLE
+    }
+    return raw & H_MASK
 }
 
 fn sock_flags(state: u64, i: u64) -> u64 {
@@ -923,11 +1012,12 @@ fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
     if k == SK_UDP {
         let flags: u64 = hold(state)
         let h: i32 = stack.udp_bind(st(state), (port & 0xFFFF) as u16)
+        let ep: u64 = in_epoch
         drop_lock(state, flags)
         if h < 0 {
             return errno.neg(errno.E_ADDRINUSE)
         }
-        kstate.set(state, so_at(i) + SO_H, h as u64)
+        h_store(state, i, h as u64, ep)
     }
     kstate.set(state, so_at(i) + SO_PORT, port)
     netmon.sset(state, i, netmon.S_LPORT, port)
@@ -944,11 +1034,12 @@ fn sock_listen(state: u64, i: u64, backlog: u64) -> u64 {
     }
     let flags: u64 = hold(state)
     let h: i32 = stack.net_listen(st(state), (port & 0xFFFF) as u16)
+    let ep: u64 = in_epoch
     drop_lock(state, flags)
     if h < 0 {
         return errno.neg(errno.E_ADDRINUSE)
     }
-    kstate.set(state, so_at(i) + SO_H, h as u64)
+    h_store(state, i, h as u64, ep)
     kstate.set(state, so_at(i) + SO_FLAGS, sock_flags(state, i) | SF_LISTEN)
     return 0
 }
@@ -963,6 +1054,7 @@ fn sock_accept(state: u64, i: u64) -> u64 {
     }
     let flags: u64 = hold(state)
     let h: i32 = stack.net_accept(st(state), l as i32)
+    let ep: u64 = in_epoch
     drop_lock(state, flags)
     if h < 0 {
         return errno.neg(errno.E_AGAIN)
@@ -974,7 +1066,7 @@ fn sock_accept(state: u64, i: u64) -> u64 {
         drop_lock(state, f2)
         return errno.neg(errno.E_NFILE)
     }
-    kstate.set(state, so_at(n) + SO_H, h as u64)
+    h_store(state, n, h as u64, ep)
     kstate.set(state, so_at(n) + SO_FLAGS, SF_CONNECTED | (sock_flags(state, i) & KA_MASK))
     ka_apply(state, n)
     let f3: u64 = hold(state)
@@ -1067,17 +1159,18 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
             sock_flags(state, i) | SF_CONNECTED)
         return 0
     }
-    if sock_handle(state, i) != NOHANDLE {
+    if kstate.get(state, so_at(i) + SO_H) != NOHANDLE {
         return errno.neg(errno.E_ISCONN)
     }
     let flags: u64 = hold(state)
     let h: i32 = stack.net_connect(st(state), (addr & 0xFFFFFFFF) as u32,
         (port & 0xFFFF) as u16, now_us(state))
+    let ep: u64 = in_epoch
     drop_lock(state, flags)
     if h < 0 {
         return errno.neg(errno.E_NFILE)
     }
-    kstate.set(state, so_at(i) + SO_H, h as u64)
+    h_store(state, i, h as u64, ep)
     ka_apply(state, i)
     let f2: u64 = hold(state)
     let t: *mut tcp.Tcp = stack.net_tcp(st(state))
@@ -1105,6 +1198,9 @@ fn sock_state(state: u64, i: u64) -> u64 {
 }
 
 fn sock_error(state: u64, i: u64) -> u64 {
+    if sock_stale(state, i) {
+        return errno.E_CONNRESET
+    }
     let h: u64 = sock_handle(state, i)
     if sock_kind(state, i) != SK_TCP || h == NOHANDLE {
         return 0
@@ -1183,6 +1279,9 @@ fn sock_hup(state: u64, i: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return 0
     }
+    if sock_stale(state, i) {
+        return 1
+    }
     let h: u64 = sock_handle(state, i)
     if h == NOHANDLE {
         return 0
@@ -1207,7 +1306,7 @@ fn sock_send(state: u64, i: u64, src: u64, n: u64) -> u64 {
     if k == SK_TCP {
         let h: u64 = sock_handle(state, i)
         if h == NOHANDLE {
-            return errno.neg(errno.E_NOTCONN)
+            return gone_or(state, i, errno.E_NOTCONN)
         }
         let e: u64 = sock_error(state, i)
         if e != 0 {
@@ -1236,7 +1335,7 @@ fn sock_recv(state: u64, i: u64, dst: u64, n: u64) -> u64 {
     }
     let h: u64 = sock_handle(state, i)
     if h == NOHANDLE {
-        return errno.neg(errno.E_NOTCONN)
+        return gone_or(state, i, errno.E_NOTCONN)
     }
     let flags: u64 = hold(state)
     let got: usize = stack.net_recv(st(state), h as i32, dst as *mut u8,
@@ -1320,7 +1419,7 @@ fn sock_recvfrom(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
     }
     let h: u64 = sock_handle(state, i)
     if h == NOHANDLE {
-        return errno.neg(errno.E_INVAL)
+        return gone_or(state, i, errno.E_INVAL)
     }
     var fip: u32 = 0
     var fport: u16 = 0

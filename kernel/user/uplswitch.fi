@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.net
+
+export { u_start }
+
+const SYS_NETGET: u64 = 1300
+const SYS_NETSET: u64 = 1301
+const NG_IP: u64 = 1
+const NG_MASK: u64 = 2
+const NG_GW: u64 = 3
+const CAP: u64 = 2048
+const UDP_TRIES: u64 = 40
+
+fn report(tag: u64, v: u64) {
+    ulib.say(tag)
+    ulib.sayn(v)
+    ulib.nl()
+}
+
+fn report_rc(tag: u64, r: u64) {
+    var s_err: [u8; 8] = " errno=\0"
+    ulib.say(tag)
+    if ulib.bad(r) {
+        ulib.say((&s_err[0]) as u64)
+        ulib.sayn(0 -% r)
+    } else {
+        ulib.sayn(r)
+    }
+    ulib.nl()
+}
+
+fn netget(what: u64) -> u64 {
+    return ulib.sys(SYS_NETGET, what, 0, 0)
+}
+
+fn open_conn(peer: u64, port: u64, req: u64, n: u64) -> u64 {
+    let fd: u64 = net.tcp_socket()
+    if ulib.bad(fd) {
+        return fd
+    }
+    let c: u64 = net.connect_to(fd, peer, port)
+    if ulib.bad(c) {
+        net.close(fd)
+        return c
+    }
+    let w: u64 = net.send_all(fd, req, n)
+    if ulib.bad(w) {
+        net.close(fd)
+        return w
+    }
+    return fd
+}
+
+fn byte_sum(p: u64, n: u64) -> u64 {
+    var s: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        s = s + __mmio_read8((p + k) as *mut u8) as u64
+        k = k + 1
+    }
+    return s
+}
+
+fn udp_echo(fd: u64, peer: u64, port: u64) -> u64 {
+    var s_ping: [u8; 8] = "UDPECHO\0"
+    var buf: [u8; 64] = [0 as u8; 64]
+    var from: u64 = 0
+    let w: u64 = net.sendto_ip(fd, (&s_ping[0]) as u64, 7, peer, port)
+    if ulib.bad(w) {
+        return w
+    }
+    var t: u64 = 0
+    var last: u64 = 0
+    while t < UDP_TRIES {
+        let r: u64 = net.recvfrom_ip(fd, (&buf[0]) as u64, 64, &from)
+        if !ulib.bad(r) && r > 0 {
+            return r
+        }
+        last = r
+        ulib.sleep_ms(100)
+        t = t + 1
+    }
+    return last
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_use: [u8; 45] = "usage: uplswitch <server-ip> <port> <new-ip>\0"
+    var s_hold: [u8; 6] = "HOLD\n\0"
+    var s_ping: [u8; 6] = "PING\n\0"
+    var s_big: [u8; 5] = "BIG\n\0"
+    var s_c1: [u8; 23] = "uplswitch: conn1 open=\0"
+    var s_same: [u8; 35] = "uplswitch: same-address netset rc=\0"
+    var s_alive: [u8; 49] = "uplswitch: conn1 after same-address netset recv=\0"
+    var s_udp0: [u8; 23] = "uplswitch: udp before=\0"
+    var s_wait: [u8; 22] = "uplswitch: readdr rc=\0"
+    var s_ip: [u8; 24] = "uplswitch: address now=\0"
+    var s_c2: [u8; 23] = "uplswitch: conn2 open=\0"
+    var s_r1: [u8; 29] = "uplswitch: stale conn1 recv=\0"
+    var s_s1: [u8; 29] = "uplswitch: stale conn1 send=\0"
+    var s_cl: [u8; 25] = "uplswitch: conn1 closed=\0"
+    var s_n2: [u8; 24] = "uplswitch: conn2 bytes=\0"
+    var s_sum: [u8; 22] = "uplswitch: conn2 sum=\0"
+    var s_udp1: [u8; 22] = "uplswitch: udp after=\0"
+    var s_done: [u8; 16] = "uplswitch: done\0"
+    var buf: [u8; 2048] = [0 as u8; 2048]
+
+    if ulib.arg_count(args) < 4 {
+        ulib.say((&s_use[0]) as u64)
+        ulib.nl()
+        return 2
+    }
+    let peer: u64 = net.parse_ip(ulib.arg_at(args, 1))
+    let port: u64 = ulib.to_num(ulib.arg_at(args, 2))
+    let fresh: u64 = net.parse_ip(ulib.arg_at(args, 3))
+
+    let u: u64 = net.socket(net.AF_INET, net.SOCK_DGRAM | net.SOCK_NONBLOCK, 0)
+    let _b: u64 = net.bind_port(u, port + 1)
+    report_rc((&s_udp0[0]) as u64, udp_echo(u, peer, port + 1))
+
+    let c1: u64 = open_conn(peer, port, (&s_hold[0]) as u64, 5)
+    report_rc((&s_c1[0]) as u64, c1)
+    if ulib.bad(c1) {
+        return 1
+    }
+    let _g: u64 = net.recv_some(c1, (&buf[0]) as u64, 1)
+
+    let mask: u64 = netget(NG_MASK)
+    let gw: u64 = netget(NG_GW)
+    report_rc((&s_same[0]) as u64, ulib.sys(SYS_NETSET, netget(NG_IP), mask, gw))
+    let _p: u64 = net.send_all(c1, (&s_ping[0]) as u64, 5)
+    report_rc((&s_alive[0]) as u64, net.recv_some(c1, (&buf[0]) as u64, 1))
+
+    report_rc((&s_wait[0]) as u64, ulib.sys(SYS_NETSET, fresh, mask, gw))
+    report((&s_ip[0]) as u64, netget(NG_IP))
+
+    let c2: u64 = open_conn(peer, port, (&s_big[0]) as u64, 4)
+    report_rc((&s_c2[0]) as u64, c2)
+    if ulib.bad(c2) {
+        return 1
+    }
+    var total: u64 = 0
+    var sum: u64 = 0
+    let first: u64 = net.recv_some(c2, (&buf[0]) as u64, CAP)
+    if !ulib.bad(first) {
+        total = first
+        sum = byte_sum((&buf[0]) as u64, first)
+    }
+    report_rc((&s_r1[0]) as u64, net.recv_some(c1, (&buf[0]) as u64, CAP))
+    report_rc((&s_s1[0]) as u64, net.send_all(c1, (&s_ping[0]) as u64, 5))
+    report_rc((&s_cl[0]) as u64, net.close(c1))
+    var going: bool = !ulib.bad(first) && first > 0
+    while going {
+        let r: u64 = net.recv_some(c2, (&buf[0]) as u64, CAP)
+        if ulib.bad(r) || r == 0 {
+            going = false
+        } else {
+            total = total + r
+            sum = sum + byte_sum((&buf[0]) as u64, r)
+        }
+    }
+    net.close(c2)
+    report((&s_n2[0]) as u64, total)
+    report((&s_sum[0]) as u64, sum)
+    report_rc((&s_udp1[0]) as u64, udp_echo(u, peer, port + 1))
+    net.close(u)
+    ulib.say((&s_done[0]) as u64)
+    ulib.nl()
+    return 0
+}
