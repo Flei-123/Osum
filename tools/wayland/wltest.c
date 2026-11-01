@@ -154,7 +154,7 @@ int main(int argc, char **argv, char **envp)
 
     long ls2 = sysc(SYS_socket, AF_UNIX, SOCK_STREAM, 0, 0, 0, 0);
     long r2 = sysc(SYS_bind, ls2, (long)&sa, sizeof(sa), 0, 0, 0);
-    ok("GEGENPROBE: derselbe Pfad zweimal wird abgewiesen", r2 < 0);
+    ok("CONTROL RUN: the same path twice is rejected", r2 < 0);
     sysc(SYS_close, ls2, 0, 0, 0, 0, 0);
 
     r = sysc(SYS_listen, ls, 4, 0, 0, 0, 0);
@@ -165,7 +165,7 @@ int main(int argc, char **argv, char **envp)
     setpath(&nowhere, "/tmp/wl-gibt-es-nicht");
     long cs0 = sysc(SYS_socket, AF_UNIX, SOCK_STREAM, 0, 0, 0, 0);
     long rc0 = sysc(SYS_connect, cs0, (long)&nowhere, sizeof(nowhere), 0, 0, 0);
-    ok("connect auf einen toten Pfad scheitert (haengt nicht)", rc0 < 0);
+    ok("connect to a dead path fails (does not hang)", rc0 < 0);
     sysc(SYS_close, cs0, 0, 0, 0, 0, 0);
 
     outs("\n4. memfd + MAP_SHARED\n");
@@ -185,7 +185,7 @@ int main(int argc, char **argv, char **envp)
         int sauber = 1;
         for (long i = 0; i < SHM_BYTES / 4; i++)
             if (p[i] != 0) { sauber = 0; break; }
-        ok("frischer geteilter Speicher ist genullt", sauber);
+        ok("fresh shared memory is zeroed", sauber);
         p[0] = 0xCAFEBABEu;
         p[1] = 0x12345678u;
         okv("zurueckgelesen", (long)p[0], (long)0xCAFEBABEu);
@@ -280,12 +280,12 @@ int main(int argc, char **argv, char **envp)
            rcm->cmsg_level == SOL_SOCKET && rcm->cmsg_type == SCM_RIGHTS);
 
         int nfd = *(int *)(rcbuf + sizeof(struct cmsghdr));
-        ok("der Deskriptor ist gueltig", nfd > 2);
+        ok("the descriptor is valid", nfd > 2);
 
         if (nfd > 2) {
             long na = sysc(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE,
                            MAP_SHARED, nfd, 0);
-            ok("mmap auf den GEERBTEN Deskriptor gelingt", na > 0);
+            ok("mmap on the INHERITED descriptor succeeds", na > 0);
             if (na > 0) {
                 volatile unsigned int *np = (volatile unsigned int *)na;
                 okv("was das Kind schrieb, steht hier",
@@ -323,7 +323,7 @@ int main(int argc, char **argv, char **envp)
         *(short *)((char *)&pfd[0] + 4) = 4; // POLLOUT
         *(short *)((char *)&pfd[0] + 6) = 0;
         long pr = sysc(SYS_poll, (long)pfd, 1, 0, 0, 0, 0);
-        ok("poll(POLLOUT) meldet den Socket als schreibbar", pr == 1);
+        ok("poll(POLLOUT) reports the socket as writable", pr == 1);
     }
 
     long st = 0;

@@ -199,7 +199,7 @@ def main():
     print()
     print("-- die 15 groessten Dateien --")
     for n, m in sorted(module.items(), key=lambda kv: -kv[1]["zeilen"])[:15]:
-        print("  %-14s %6d Zeilen  ein:%3d aus:%3d  %s"
+        print("  %-14s %6d lines  in:%3d out:%3d  %s"
               % (n, m["zeilen"], ein[n], len(m["importe"]), m["pfad"]))
     print()
     print("-- die 15 meistgerufenen Module --")
@@ -218,7 +218,7 @@ def main():
         for v, vs, z, zs in brueche[:40]:
             print("    BRUCH %s (%s) -> %s (%s)" % (v, vs, z, zs))
     else:
-        print("-- Schichtregel: noch keine Zuordnung --")
+        print("-- layer rule: no assignment yet --")
     return 0
 
 

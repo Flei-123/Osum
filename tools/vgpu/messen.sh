@@ -38,9 +38,9 @@ lauf() { # name qemu-grafikargumente...
 }
 
 VGPU_EXTRA=${VGPU_EXTRA:-}
-echo "== Messung ueber $SEK Sekunden, Zeigerstrom 60 Hz =="
+echo "== measurement over $SEK seconds, pointer stream 60 Hz =="
 lauf vga  -vga std
 lauf vgpu -vga std -device virtio-gpu-pci
 
 echo
-echo "Die vollen Mitschnitte liegen unter /tmp/vgpu-*.txt"
+echo "The full recordings are under /tmp/vgpu-*.txt"

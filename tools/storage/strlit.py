@@ -68,7 +68,7 @@ def main(argv):
         aus.append('%s"%s"%s' % (kopf, lit + "\\0" * (will - ist), schwanz))
         geaendert += 1
     for nr, ist, will, lit in zu_lang:
-        print("%s:%d: %d Oktette, aber [u8; %d] -- zu lang: %s"
+        print("%s:%d: %d octets, but [u8; %d] -- too long: %s"
               % (pfad, nr, ist, will, lit), file=sys.stderr)
     if zu_lang:
         return 1

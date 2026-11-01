@@ -60,12 +60,12 @@ def main():
             s += lies(os.path.join(KERN, p)).count("\n")
         return s
 
-    print("Dateien unter kernel/ gesamt : %3d  (%d Zeilen)" % (len(alle), zeilen(alle)))
+    print("files under kernel/ total    : %3d  (%d lines)" % (len(alle), zeilen(alle)))
     print("  KERN  (ab kmain.fi)        : %3d  (%d Zeilen)" % (len(kern), zeilen(kern)))
     print("  UPROG (ab uprog.fi)        : %3d  (%d Zeilen)" % (len(uprog), zeilen(uprog)))
-    print("  AUSSEN (nicht im Abbild)   : %3d  (%d Zeilen)" % (len(aussen), zeilen(aussen)))
+    print("  OUTSIDE (not in the image) : %3d  (%d lines)" % (len(aussen), zeilen(aussen)))
     print()
-    print("AUSSEN nach Ordner:")
+    print("OUTSIDE by folder:")
     nach = {}
     for p in aussen:
         d = os.path.dirname(p) or "(kernel/)"

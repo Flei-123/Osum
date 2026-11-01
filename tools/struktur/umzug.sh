@@ -16,12 +16,12 @@ for MODUL in "$@"; do
     QUELLE=$(find kernel -path kernel/user -prune -o -path kernel/app -prune -o \
         -name "$MODUL.fi" -type f -print | head -1)
     if [[ -z $QUELLE ]]; then
-        echo "umzug: $MODUL.fi liegt nirgends unter kernel/" >&2
+        echo "move: $MODUL.fi is nowhere under kernel/" >&2
         exit 1
     fi
     ZIELPFAD="kernel/$ZIEL/$MODUL.fi"
     if [[ $QUELLE == "$ZIELPFAD" ]]; then
-        echo "  $MODUL liegt schon in $ZIEL/"
+        echo "  $MODUL is already in $ZIEL/"
         continue
     fi
     git mv "$QUELLE" "$ZIELPFAD" || exit 1
@@ -31,7 +31,7 @@ for MODUL in "$@"; do
             -name "$MODUL$SUFFIX.fi" -type f -print | head -1)
         if [[ -n $GEGEN ]]; then
             git mv "$GEGEN" "kernel/$ZIEL/$MODUL$SUFFIX.fi" || exit 1
-            echo "  (Gegenfassung $MODUL$SUFFIX.fi zieht mit)"
+            echo "  (counterpart $MODUL$SUFFIX.fi moves along)"
         fi
     done
 

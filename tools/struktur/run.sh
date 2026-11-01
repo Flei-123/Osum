@@ -6,15 +6,15 @@ DECKEL=47
 FEHLER=0
 
 # ---------------------------------------------------------------- 1. Ablage
-echo "== 1. die Ablage: liegt jede Datei an ihrem Platz? =="
+echo "== 1. the filing: is every file in its place? =="
 A=$(python3 tools/structure/filing.py --pruefen 2>&1)
 ARC=$?
 echo "$A" | head -40
 if (( ARC != 0 )); then
-    echo "ROT: die Ablage weicht ab."
+    echo "RED: the filing deviates."
     FEHLER=1
 else
-    echo "GRUEN: jede Kerndatei liegt in ihrer Schicht."
+    echo "GREEN: every kernel file is in its layer."
 fi
 
 # -------------------------------------------------------------- 2. Richtung
@@ -25,23 +25,23 @@ echo "$AUSGABE" | head -60
 BRUECHE=$(echo "$AUSGABE" | sed -n 's/^Schichtregel: [0-9]* Kanten halten, \([0-9]*\) brechen$/\1/p')
 HALTEN=$(echo "$AUSGABE" | sed -n 's/^Schichtregel: \([0-9]*\) Kanten halten.*$/\1/p')
 if [[ -z $BRUECHE ]]; then
-    echo "FEHLER: die Erhebung hat keine Zahl geliefert"
+    echo "ERROR: the survey delivered no number"
     exit 1
 fi
 echo
 echo "halten: $HALTEN   brechen: $BRUECHE   Deckel: $DECKEL"
 if (( BRUECHE > DECKEL )); then
-    echo "ROT: $((BRUECHE - DECKEL)) Bruch/Brueche MEHR als der Deckel erlaubt."
+    echo "RED: $((BRUECHE - DECKEL)) break(s) MORE than the cap allows."
     FEHLER=1
 elif (( BRUECHE < DECKEL )); then
-    echo "GRUEN -- und besser als der Deckel."
-    echo "     Bitte DECKEL in diesem Skript auf $BRUECHE senken."
+    echo "GREEN -- and better than the cap."
+    echo "     Please lower DECKEL in this script to $BRUECHE."
 else
-    echo "GRUEN -- genau auf dem Deckel."
+    echo "GREEN -- exactly at the cap."
 fi
 
 echo
-echo "== 3. Gegenprobe A: merkt die Ablagepruefung einen falschen Ort? =="
+echo "== 3. control run A: does the filing check notice a wrong place? =="
 PROBE=$(mktemp -d)
 trap 'rm -rf "$PROBE"' EXIT
 cp -a kernel "$PROBE/kernel" || exit 1
@@ -57,19 +57,19 @@ NACHHER=$(cd "$PROBE" && python3 tools/structure/filing.py --pruefen 2>&1 |
           sed -n 's/^Ablage: [0-9]* Dateien am richtigen Ort, \([0-9]*\) am falschen.*$/\1/p')
 echo "ahci.fi kuenstlich nach kernel/ zurueckgelegt: vorher $VORHER, nachher $NACHHER"
 if [[ -z $VORHER || -z $NACHHER ]]; then
-    echo "ROT: die Gegenprobe konnte nicht messen."
+    echo "RED: the control run could not measure."
     FEHLER=1
 elif (( NACHHER > VORHER )); then
     echo "GRUEN: die Ablagepruefung schlaegt an ($VORHER -> $NACHHER)."
 else
-    echo "ROT: der falsche Ort wurde NICHT bemerkt."
+    echo "RED: the wrong place was NOT noticed."
     FEHLER=1
 fi
 mv "$PROBE/kernel/ahci.fi" "$PROBE/kernel/drv/blk/ahci.fi" 2>/dev/null
 
 # ----------------------------------------------- 4. Gegenprobe der Richtung
 echo
-echo "== 4. Gegenprobe B: merkt die Richtungspruefung einen Regelbruch? =="
+echo "== 4. control run B: does the direction check notice a rule break? =="
 RVOR=$(cd "$PROBE" && python3 tools/struktur/erhebung.py --pruefen 2>&1 |
        sed -n 's/^Schichtregel: [0-9]* Kanten halten, \([0-9]*\) brechen$/\1/p')
 sed -i '0,/^import /s//import ui.wm\nimport /' "$PROBE/kernel/drv/blk/ahci.fi" || exit 1
@@ -77,12 +77,12 @@ RNACH=$(cd "$PROBE" && python3 tools/struktur/erhebung.py --pruefen 2>&1 |
         sed -n 's/^Schichtregel: [0-9]* Kanten halten, \([0-9]*\) brechen$/\1/p')
 echo "kuenstlicher Bruch in drv/blk/ahci.fi: vorher $RVOR, nachher $RNACH"
 if [[ -z $RVOR || -z $RNACH ]]; then
-    echo "ROT: die Gegenprobe konnte nicht messen."
+    echo "RED: the control run could not measure."
     FEHLER=1
 elif (( RNACH > RVOR )); then
     echo "GRUEN: die Richtungspruefung schlaegt an ($RVOR -> $RNACH)."
 else
-    echo "ROT: der eingebaute Bruch wurde NICHT bemerkt."
+    echo "RED: the built-in break was NOT noticed."
     FEHLER=1
 fi
 

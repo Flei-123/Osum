@@ -46,7 +46,7 @@ done < <(find kernel -path kernel/user -prune -o -path kernel/app -prune -o \
          -name '*.fi' -type f -print)
 
 if [[ $TROCKEN == 1 ]]; then
-    echo "trocken: $ZEILEN Zeilen in $GEAENDERT Dateien waeren zu richten"
+    echo "dry run: $ZEILEN lines in $GEAENDERT files would need fixing"
 else
     echo "gerichtet: $ZEILEN import-Zeilen in $GEAENDERT Dateien"
 fi

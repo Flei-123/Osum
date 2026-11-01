@@ -553,7 +553,7 @@ def vergleich(pfad_ttf, mitschnitt):
         r"left=(-?\d+)\s+top=(-?\d+)\s+adv=(\d+)\s+sum=(\d+)"
         r"((?:\s*\nttfrow \d+ \|.*\|)*)", roh)
     if not faelle:
-        print("keine ttfglyph-Ausgabe im Mitschnitt")
+        print("no ttfglyph output in the recording")
         return 1
     stufen = " .:-=+*#%@"
     schriften = {}
@@ -607,7 +607,7 @@ def main(argv):
     if cmd == "glyphe":
         s = Schrift(argv[2], int(argv[3]))
         g = s.glyphe(ord(argv[4]))
-        print("%dx%d links=%d oben=%d adv=%d/64 gesetzt=%d"
+        print("%dx%d left=%d top=%d adv=%d/64 set=%d"
               % (g.w, g.h, g.links, g.oben, g.adv26, g.gesetzt()))
         stufen = " .:-=+*#%@"
         for y in range(g.h):

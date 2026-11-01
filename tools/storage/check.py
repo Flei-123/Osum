@@ -88,33 +88,33 @@ def main(argv):
                       % (pfad, idx, lauf, ikb, "OK " if gut else "FALSCH",
                          anmerkung))
 
-    print("pruefen: %d Verzeichnisse aus dem Gast, davon %d auch gegen die "
+    print("check: %d directories from the guest, of which %d also against the "
           "Arithmetik des Wirts" % (geprueft, dritt))
     for z in zeilen:
         print(z)
 
     for m in FERTIG.finditer(roh):
         g, f = int(m.group(1)), int(m.group(2))
-        print("pruefen: der Gast sagt geprueft=%d falsch=%d" % (g, f))
+        print("check: the guest says checked=%d wrong=%d" % (g, f))
         if f != 0:
             falsch += f
         if g != geprueft:
-            print("pruefen: ACHTUNG -- der Gast zaehlt %d Proben, hier "
+            print("check: NOTE -- the guest counts %d probes, here "
                   "kommen %d an" % (g, geprueft))
             falsch += 1
 
     if geprueft == 0:
-        print("pruefen: KEINE EINZIGE PROBE in der Ausgabe -- der Lauf ist "
+        print("check: NOT A SINGLE PROBE in the output -- the run is "
               "nicht durchgekommen")
         return 1
     if dritt == 0:
-        print("pruefen: keine Probe gegen den Wirt -- die Sollwerte passen "
+        print("check: no probe against the host -- the expected values fit "
               "zu keinem Pfad")
         return 1
     if falsch:
         print("pruefen: %d FALSCH" % falsch)
         return 1
-    print("pruefen: alle %d Verzeichnisse Oktett fuer Oktett gleich "
+    print("check: all %d directories identical octet for octet "
           "(Index = Durchlauf = Wirt)" % geprueft)
     return 0
 

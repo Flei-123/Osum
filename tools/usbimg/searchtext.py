@@ -179,7 +179,7 @@ def main(argv):
         return 2
     e = suche(bild, voll, rand, tol)
     if e is None:
-        print("die Zeile ist groesser als das Bild")
+        print("the line is larger than the image")
         return 2
     x, y, at, ag, p, nv, ng = e
     wie = ("'%s' bei x=%d Grundlinie=%d: %d%% der %d Tintenpunkte, "
@@ -187,14 +187,14 @@ def main(argv):
            (text, x, y, round(at * 100), nv, round(ag * 100), ng))
     if nicht:
         if p >= mind:
-            print("GEFUNDEN, obwohl es NICHT dastehen darf -- %s" % wie)
+            print("FOUND although it must NOT be there -- %s" % wie)
             return 1
-        print("nicht gefunden (bester Wert %d%%) -- %s" % (round(p * 100), wie))
+        print("not found (best value %d%%) -- %s" % (round(p * 100), wie))
         return 0
     if p >= mind:
         print(wie)
         return 0
-    print("NICHT gefunden (bester Wert %d%%) -- %s" % (round(p * 100), wie))
+    print("NOT found (best value %d%%) -- %s" % (round(p * 100), wie))
     return 1
 
 

@@ -25,7 +25,7 @@ feld() { grep -aoE "(^|[^a-z])$3=[0-9]+" <(grep -aF "$2" "$1" | tail -1) \
          | tail -1 | sed 's/.*=//'; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "SPEICHER: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "STORAGE: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 bash vendor/firn/fetch-firnc.sh >/dev/null || {
     echo "vendor/firn/fetch-firnc.sh fehlgeschlagen"; exit 1; }
@@ -73,8 +73,8 @@ foto() { # name kommandozeile [marke]
     return 0
 }
 
-echo "== 1. Zeit: der Index gegen den vollstaendigen Durchlauf"
-echo "   (auf gross.img, viertausend Dateien -- das dauert Minuten)"
+echo "== 1. time: the index against the complete walk"
+echo "   (on gross.img, four thousand files -- this takes minutes)"
 lauf zeit 'du -m /data' gross.img
 IUS=$(feld "$TMPD/zeit.txt" "du: index [/data]" us10)
 WUS=$(feld "$TMPD/zeit.txt" "du: durchlauf [/data]" us)
@@ -95,7 +95,7 @@ else
     bad "Zeiten fehlen (Index '$IUS', Durchlauf '$WUS')"
 fi
 
-echo "== 2. Richtigkeit: dieselbe Frage auf einem Abbild MIT Inhalt"
+echo "== 2. correctness: the same question on an image WITH content"
 lauf mess 'du -m /data'
 MOKT=$(feld "$TMPD/mess.txt" "du: index [/data]" okt)
 MWOKT=$(feld "$TMPD/mess.txt" "du: durchlauf [/data]" okt)
@@ -103,11 +103,11 @@ SOLL=$(awk '$1=="/data"{print $2}' "$TMPD/baum/soll")
 num "die Summe ist nicht null" "${MOKT:-0}" gt 0
 if [ "${MOKT:-x}" = "${MWOKT:-y}" ]; then ok "Index = Durchlauf: $MOKT Oktette"
 else bad "Index $MOKT, Durchlauf $MWOKT"; fi
-if [ "${MOKT:-x}" = "${SOLL:-y}" ]; then ok "und der Wirt rechnet dasselbe: $SOLL"
-else bad "der Wirt sagt $SOLL, der Gast $MOKT"; fi
+if [ "${MOKT:-x}" = "${SOLL:-y}" ]; then ok "and the host computes the same: $SOLL"
+else bad "the host says $SOLL, the guest $MOKT"; fi
 has "$TMPD/mess.txt" "oktok=1" "die Gegenprobe des Gastes selbst"
 
-echo "== 3. JEDES Verzeichnis, Oktett fuer Oktett, gegen drei Zahlen"
+echo "== 3. EVERY directory, octet for octet, against three numbers"
 lauf probe 'du -p'
 if python3 tools/storage/check.py "$TMPD/baum/soll" "$TMPD/probe.txt" \
         > "$TMPD/pruefen.log" 2>&1; then
@@ -117,7 +117,7 @@ else
 fi
 sed 's/^/     /' "$TMPD/pruefen.log"
 
-echo "== 4. Das Journal muss WACHSTUM mitbekommen (nicht nur neue Namen)"
+echo "== 4. The journal must pick up GROWTH (not only new names)"
 lauf schreib 'du -w'
 has "$TMPD/schreib.txt" "du: schreib" "die Schreibprobe ist gelaufen"
 num "kein Satz ist verlorengegangen" "$(feld "$TMPD/schreib.txt" 'du: schreib nachgezogen' lost)" eq 0
@@ -128,15 +128,15 @@ num "die nachgezogene Summe stimmt" \
 num "und nach dem Loeschen steht wieder der alte Stand da" \
     "$(feld "$TMPD/schreib.txt" 'du: schreib weg' ok)" eq 1
 
-echo "== 5. Gegenprobe: ohne Nachziehen MUSS die Zahl falsch werden"
+echo "== 5. control run: without catching up the number MUST become wrong"
 lauf schreibW 'du -W'
 WOK=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' ok)
 WNACH=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' nachher)
 WERW=$(feld "$TMPD/schreibW.txt" 'du: schreib nachgezogen' erwartet)
 if [ "${WOK:-1}" = "0" ] && [ "${WNACH:-0}" != "${WERW:-0}" ]; then
-    ok "ohne Journal steht die Summe daneben ($WNACH statt $WERW) -- also zog vorher wirklich das Journal"
+    ok "without journal the sum is off ($WNACH instead of $WERW) -- so the journal really caught up before"
 else
-    bad "ohne Journal stimmte trotzdem alles (ok=$WOK, $WNACH gegen $WERW): dann misst die Probe nichts"
+    bad "without journal everything was still right (ok=$WOK, $WNACH against $WERW): then the probe measures nothing"
 fi
 
 echo "== 6. Die Oberflaeche"
@@ -147,7 +147,7 @@ has "$TMPD/ruhe.txt" "k15: start /bin/speicher" "/bin/speicher kommt VON DER PLA
 has "$TMPD/ruhe.txt" "speicher: kachel" "es hat seine Kacheln gerechnet"
 SOKT=$(feld "$TMPD/ruhe.txt" "speicher: cd /data" okt)
 if [ "${SOKT:-x}" = "${SOLL:-y}" ]; then
-    ok "die Oberflaeche zeigt dieselbe Zahl wie du und wie der Wirt: $SOKT"
+    ok "the surface shows the same number as you and as the host: $SOKT"
 else
     bad "die Oberflaeche sagt '$SOKT', du und der Wirt sagen '$SOLL'"
 fi
@@ -155,9 +155,9 @@ ZSUM=$(grep -aoE '^speicher: zeile i=[0-9]+ okt=[0-9]+' "$TMPD/ruhe.txt" \
        | grep -oE 'okt=[0-9]+' | sed 's/okt=//' \
        | awk '{s+=$1} END{print s+0}')
 if [ "${ZSUM:-0}" = "${SOKT:-x}" ]; then
-    ok "die Zeilen summieren sich auf die Gesamtsumme: $ZSUM"
+    ok "the rows add up to the total: $ZSUM"
 else
-    bad "die Zeilen ergeben $ZSUM, oben steht $SOKT"
+    bad "the rows give $ZSUM, the top says $SOKT"
 fi
 has "$TMPD/ruhe.txt" "speicher: probe" "die Oberflaeche rechnet sich selbst gegen"
 num "und zwar richtig" "$(feld "$TMPD/ruhe.txt" 'speicher: probe' ok)" eq 1
@@ -170,26 +170,26 @@ if [ -s "$TMPD/ruhe.ppm" ]; then
             "$TMPD/ruhe.txt" > "$TMPD/kachel.log" 2>&1; then
         ok "$(tail -1 "$TMPD/kachel.log")"
     else
-        bad "die Treemap im Bild: $(tail -2 "$TMPD/kachel.log" | tr '\n' ' ')"
+        bad "the treemap in the image: $(tail -2 "$TMPD/kachel.log" | tr '\n' ' ')"
     fi
     sed 's/^/     /' "$TMPD/kachel.log"
 else
     bad "kein Bildschirmfoto entstanden"
 fi
 
-echo "== 7. Gegenprobe: dieselbe Oberflaeche ohne Index"
+echo "== 7. control run: the same surface without index"
 foto ohne "gfx wm wig wigspeicher wignoidx wmhold wiglong $GRUND" \
     '^speicher: (ready|cd)'
 OOKT=$(feld "$TMPD/ohne.txt" "speicher: cd" okt)
 if [ "${OOKT:-0}" = "0" ]; then
-    ok "ohne Index zeigt die Oberflaeche null -- sie erfindet nichts"
+    ok "without index the surface shows zero -- it invents nothing"
 else
-    bad "ohne Index steht dort '$OOKT': woher?"
+    bad "without index it says '$OOKT': woher?"
 fi
 if grep -qa "speicher: kachel" "$TMPD/ohne.txt"; then
-    bad "ohne Index werden trotzdem Kacheln gemalt -- aus welchen Anteilen?"
+    bad "without index tiles are painted anyway -- from which shares?"
 else
-    ok "ohne Index verschwinden die Kacheln"
+    ok "without index the tiles disappear"
 fi
 [ -s "$TMPD/ohne.ppm" ] && { python3 tools/gfx/ppm2png.py "$TMPD/ohne.ppm" \
     "$SHOTS/speicher-ohne-index.png" >/dev/null 2>&1 || \

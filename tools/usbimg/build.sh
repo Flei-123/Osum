@@ -273,12 +273,12 @@ if [ -n "$FIRNQ" ]; then
         gebaut="$gebaut firnc"
         sagen "uebersetzer $(stat -c%s "$OUT/firnc.elf") Oktette (firnc aus $FIRNQ)"
     else
-        echo "== firnc laesst sich nicht fuer Osum bauen" >&2
+        echo "== firnc cannot be built for Osum" >&2
         head -8 "$OUT/firnc-osum.err" >&2
         fehler "der Uebersetzer laesst sich nicht fuer den Stick bauen"
     fi
 else
-    echo "== HINWEIS: kein Firn-Baum gefunden, /bin/firnc fehlt im Abbild" >&2
+    echo "== NOTE: no Firn tree found, /bin/firnc is missing in the image" >&2
 fi
 
 ph firnc-osum-done
@@ -403,7 +403,7 @@ sagen "akzent      #${T_ACC_EFF:-??} (aus ${T_ACC_HER}) -- das ist die Farbe, di
 
 cat > "$OUT/netlauf.sh" <<'EOFNL'
 echo "=================================================="
-echo "  OSUM NETZ-SELBSTLAUF -- ohne Tastatur, ohne Maus"
+echo "  OSUM NETWORK SELF-RUN -- without keyboard, without mouse"
 echo "=================================================="
 echo "-- 1. Adresse holen (dhcp)"
 dhcp
@@ -413,10 +413,10 @@ echo "-- 3. Namen aufloesen: store.fleitec.com"
 host store.fleitec.com
 echo "-- 4. holen: https://store.fleitec.com/index.json"
 fetch https://store.fleitec.com/index.json
-echo "-- 5. nach einer neuen Fassung sehen"
+echo "-- 5. look for a new version"
 ota search
 echo "=================================================="
-echo "  ENDE DES NETZ-SELBSTLAUFS"
+echo "  END OF THE NETWORK SELF-RUN"
 echo "=================================================="
 EOFNL
 # ===================================================== RUNDE ECHTHARDWARE-2
@@ -567,7 +567,7 @@ fi
 if [ "${UIBLINK:-0}" = "1" ]; then
     : > "$OUT/uiblink"
     ARGS+=("/etc/uiblink=$OUT/uiblink")
-    echo "   uiblink    AN -- die Einfuegemarke blinkt auch im Messlauf"
+    echo "   uiblink    ON -- the insertion mark blinks in the measuring run too"
 fi
 ARGS+=(/etc/schemas/)
 for s_ in assets/schemes/*.scheme; do
@@ -750,7 +750,7 @@ for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
         gebaut="$gebaut ${mziel##*/}"
         sagen "mitbringsel $(stat -c%s "$mpfad") Oktette  $mziel aus $mpfad"
     elif [ -n "$mpfad" ]; then
-        echo "== HINWEIS: $mvar=$mpfad ist leer oder fehlt -- $mziel bleibt weg" >&2
+        echo "== NOTE: $mvar=$mpfad is empty or missing -- $mziel is left out" >&2
     fi
 done
 # PROOF STONES (optional): STONES=<dir> from tools/unterbau/build-stones.sh (python3, lib/python312.zip, lib/os.pyc, lib/ext/*.so, curl, git).
@@ -949,7 +949,7 @@ python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
 fehlt=0
 for f in $PFLICHT; do
     grep -qE "(^|[[:space:]])${f}([[:space:]]|\$)" "$OUT/liste.txt" || {
-        echo "== FEHLT IM ABBILD: $f" >&2; fehlt=$((fehlt + 1)); }
+        echo "== MISSING IN THE IMAGE: $f" >&2; fehlt=$((fehlt + 1)); }
 done
 [ "$fehlt" = 0 ] || fehler "$fehlt Pflichtdatei(en) fehlen im Abbild"
 sagen "geprueft    $(echo $PFLICHT | wc -w) Pflichtpfade im fertigen Dateisystem"

@@ -43,5 +43,5 @@ time.sleep(0.6)
 s.sendall(b"sendkey ret\n")
 time.sleep(0.4)
 s.close()
-print("menu: %d x runter, dann Eingabe (nach %.1fs, Abstand %.1fs)"
+print("menu: %d x down, then enter (after %.1fs, interval %.1fs)"
       % (n, warte, abstand))

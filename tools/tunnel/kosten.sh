@@ -13,19 +13,19 @@ note(){ printf '  --    %s\n' "$*"; }
 
 command -v qemu-system-x86_64 >/dev/null || { echo "qemu fehlt"; exit 0; }
 
-echo "== was der Tunnel kostet, wenn keiner laeuft =="
+echo "== what the tunnel costs when none is running =="
 
 export TMPDIR="$TMPD"
 ./tools/build-kernel.sh "$TMPD/mit.mb"  >/dev/null 2>&1 || { echo "Bau mit fehlgeschlagen"; exit 1; }
-./tools/build-kernel.sh "$TMPD/ohne.mb" --ohne-tunnel >/dev/null 2>&1 || { echo "Bau ohne fehlgeschlagen"; exit 1; }
+./tools/build-kernel.sh "$TMPD/ohne.mb" --ohne-tunnel >/dev/null 2>&1 || { echo "build without failed"; exit 1; }
 S_MIT=$(stat -c%s "$TMPD/mit.mb"); S_OHNE=$(stat -c%s "$TMPD/ohne.mb")
 DIFF=$((S_MIT - S_OHNE))
 PCT=$(python3 -c "print('%.1f' % (100.0*$DIFF/$S_MIT))")
 note "Abbild mit Tunnel  $S_MIT Oktette"
 note "Abbild ohne Tunnel $S_OHNE Oktette"
 [ "$DIFF" -gt 0 ] \
-    && ok "der Tunnel kostet $DIFF Oktette Abbild ($PCT %) -- und --ohne-tunnel nimmt sie ganz weg" \
-    || bad "das Abbild ohne Tunnel ist nicht kleiner ($DIFF)"
+    && ok "the tunnel costs $DIFF octets of image ($PCT %) -- and --ohne-tunnel removes them entirely" \
+    || bad "the image without tunnel is not smaller ($DIFF)"
 
 LANG_D="$TMPD/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 mkdir -p "$LANG_D"
@@ -57,10 +57,10 @@ F_AUS=$(get "$TMPD/ram_aus.log" 'mm: frei_f='); F_AN=$(get "$TMPD/ram_an.log" 'm
 if [ -n "$F_AUS" ] && [ -n "$F_AN" ]; then
     D=$((F_AUS - F_AN)); OKT=$((D * 4096))
     note "freie Seitenrahmen am Ende: ohne wgpriv= $F_AUS, mit $F_AN"
-    ok "ein EINGERICHTETER Tunnel belegt $D Seiten ($OKT Oktette); ein nicht eingerichteter 0"
+    ok "a CONFIGURED tunnel occupies $D pages ($OKT octets); an unconfigured one 0"
     note "die 12 Skalarworte auf der K2-Seite (96 Oktette) stehen ohnehin in einer Seite, die es gibt"
 else
-    bad "die Zeile mm: frei_f= fehlt"
+    bad "the line mm: free_f= is missing"
 fi
 
 AUS_R=(); AN_R=()
@@ -81,7 +81,7 @@ print("%+.1f" % (100.0*(mb-ma)/ma if ma else 0.0))
 PY
 )
     note "Abweichung mit gegen ohne: $REL %"
-    ok "der Haken ist ein Vergleich gegen Null je Rahmen -- gemessen $REL %"
+    ok "the hook is a comparison against zero per frame -- measured $REL %"
 else
     bad "kein Durchlaufwert gemessen"
 fi

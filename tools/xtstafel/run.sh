@@ -13,11 +13,11 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-echo "== 1. die Tafel: Wechsel ohne Neufuellen =="
+echo "== 1. the board: switching without refilling =="
 if $FIRNC tools/xtstafel/board.fi -o "$TMPD/tafel" 2>"$TMPD/t.err"; then
     ok "tools/xtstafel/board.fi uebersetzt"
 else
-    bad "board.fi laesst sich nicht uebersetzen"
+    bad "board.fi cannot be compiled"
     sed 's/^/        /' "$TMPD/t.err" | head -20
     echo "XTSTAFEL: $pass bestanden, $fail gescheitert"; exit 1
 fi
@@ -25,29 +25,29 @@ fi
 rc=$?
 sed 's/^/        /' "$TMPD/tafel.txt"
 if [ "$rc" = 0 ]; then
-    ok "die Tafel-Abnahme ist gruen (fehler=0)"
+    ok "the board acceptance is green (errors=0)"
 else
-    bad "die Tafel-Abnahme ist durchgefallen"
+    bad "the board acceptance failed"
 fi
 W=$(grep -oE '200 Sektoren abwechselnd, Fuellungen: [0-9]+' "$TMPD/tafel.txt" | grep -oE '[0-9]+$')
 if [ "${W:-x}" = 0 ]; then
-    ok "KEIN Neufuellen beim Wechsel zwischen zwei Traegern (Fuellungen=0)"
+    ok "NO refilling when switching between two carriers (fills=0)"
 else
-    bad "beim Wechsel wird neu gefuellt (Fuellungen=${W:-?})"
+    bad "refilling happens when switching (fills=${W:-?})"
 fi
 
-echo "== 2. der Loeschtest: nach forget() steht nichts mehr da =="
+echo "== 2. the delete test: after forget() nothing is left =="
 if $FIRNC tools/xtstafel/delete.fi -o "$TMPD/loeschen" 2>"$TMPD/l.err"; then
     "$TMPD/loeschen" > "$TMPD/loeschen.txt" 2>&1
     rc=$?
     sed 's/^/        /' "$TMPD/loeschen.txt"
     if [ "$rc" = 0 ]; then
-        ok "nach forget() ist die ganze Tafel genullt"
+        ok "after forget() the whole board is zeroed"
     else
-        bad "nach forget() steht noch etwas in der Tafel"
+        bad "after forget() something is still on the board"
     fi
 else
-    bad "delete.fi laesst sich nicht uebersetzen"
+    bad "delete.fi cannot be compiled"
     sed 's/^/        /' "$TMPD/l.err" | head -20
 fi
 
@@ -55,23 +55,23 @@ GLIB="$TMPD/lib-gegen"
 XTS_SHA0=$(sha256sum lib/crypto/xts.fi | cut -d' ' -f1)
 rm -rf "$GLIB"; cp -a lib "$GLIB"
 
-echo "== 3. GEGENPROBE: ein Platz (der Zustand VOR dieser Runde) =="
+echo "== 3. CONTROL RUN: one slot (the state BEFORE this round) =="
 sed -i 's/^const SLOTS: usize = 4$/const SLOTS: usize = 1/' "$GLIB/crypto/xts.fi"
 if grep -q '^const SLOTS: usize = 1$' "$GLIB/crypto/xts.fi" && \
    FIRNLIB="$GLIB" $FIRNC tools/xtstafel/board.fi -o "$TMPD/g1" 2>/dev/null; then
     "$TMPD/g1" > "$TMPD/g1.txt" 2>&1
     G=$(grep -oE '200 Sektoren abwechselnd, Fuellungen: [0-9]+' "$TMPD/g1.txt" | grep -oE '[0-9]+$')
     if [ "${G:-0}" -gt 0 ]; then
-        ok "mit EINEM Platz wird bei jedem Wechsel neu gefuellt (Fuellungen=$G) -- die Messung greift"
+        ok "with ONE slot it refills at every switch (fills=$G) -- the measurement bites"
     else
-        bad "auch mit einem Platz keine Fuellung -- dann misst die Abnahme nichts"
+        bad "even with one slot no fill is seen -- then the acceptance measures nothing"
     fi
 else
-    bad "die Gegenprobe laesst sich nicht uebersetzen"
+    bad "the control run cannot be compiled"
 fi
 cp -f lib/crypto/xts.fi "$GLIB/crypto/xts.fi"
 
-echo "== 4. GEGENPROBE: forget() raeumt nur EINEN Platz =="
+echo "== 4. CONTROL RUN: forget() clears only ONE slot =="
 GLIB="$GLIB" python3 - <<'PYEOF'
 import os
 p=os.environ["GLIB"] + "/crypto/xts.fi"
@@ -87,18 +87,18 @@ if FIRNLIB="$GLIB" $FIRNC tools/xtstafel/delete.fi -o "$TMPD/g2" 2>/dev/null; th
     "$TMPD/g2" > "$TMPD/g2.txt" 2>&1
     if [ $? != 0 ]; then
         R=$(grep -oE 'Oktette ungleich 0 nach forget\(\): [0-9]+' "$TMPD/g2.txt" | grep -oE '[0-9]+$')
-        ok "ein halbes forget() wird ERWISCHT (Rest: ${R:-?} Oktette) -- der Loeschtest greift"
+        ok "a half forget() is CAUGHT (remainder: ${R:-?} octets) -- the delete test bites"
     else
-        bad "ein halbes forget() kommt durch -- der Loeschtest taugt nicht"
+        bad "a half forget() gets through -- the delete test is no good"
     fi
 else
-    bad "die Gegenprobe laesst sich nicht uebersetzen"
+    bad "the control run cannot be compiled"
 fi
 rm -rf "$GLIB"
 if [ "$(sha256sum lib/crypto/xts.fi | cut -d' ' -f1)" = "$XTS_SHA0" ]; then
-    ok "lib/crypto/xts.fi im Baum ist nach beiden Gegenproben unangetastet"
+    ok "lib/crypto/xts.fi in the tree is untouched after both control runs"
 else
-    bad "lib/crypto/xts.fi im Baum wurde veraendert"
+    bad "lib/crypto/xts.fi in the tree was changed"
 fi
 
 echo "XTSTAFEL: $pass bestanden, $fail gescheitert"

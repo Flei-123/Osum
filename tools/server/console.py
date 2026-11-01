@@ -58,7 +58,7 @@ def main():
             s = None
             time.sleep(0.05)
     if s is None:
-        print("console: die Leitung %s kommt nicht" % pfad)
+        print("console: the line %s does not come" % pfad)
         return 1
     s.settimeout(0.2)
 

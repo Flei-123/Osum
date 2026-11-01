@@ -45,7 +45,7 @@ num() { # name wert op erwartet
 
 between() { # name wert unten oben
     local name=$1 v=$2 lo=$3 hi=$4
-    if [ -z "$v" ]; then bad "$name: keine Zahl gefunden"; return; fi
+    if [ -z "$v" ]; then bad "$name: no number found"; return; fi
     if [ "$v" -ge "$lo" ] && [ "$v" -le "$hi" ]; then ok "$name: $v (erlaubt $lo..$hi)"
     else bad "$name: $v, erlaubt $lo..$hi"; fi
 }
@@ -93,7 +93,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
     if [ "$s" = 0 ]; then cc="$FIRNC"; else cc="$FC1"; fi
     [ -x "$cc" ] || return 1
     "$cc" kernel/kmain.fi -o "$TMPD/k$s.o" >"$TMPD/e$s" 2>&1 \
-        || { bad "firnc$s uebersetzt den Kernel nicht"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
+        || { bad "firnc$s does not compile the kernel"; sed 's/^/        /' "$TMPD/e$s" | head -8; return 1; }
     "$cc" kernel/uprog.fi -o "$TMPD/u$s.o" >>"$TMPD/e$s" 2>&1 \
         || { bad "firnc$s uebersetzt uprog.fi nicht"; return 1; }
     ld -n -T "$LDSCRIPT" \
@@ -106,7 +106,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
         --defsym=USER_MAIN="_F$s.u_enter" \
         -o "$TMPD/k$s.elf" "$TMPD/boot.o" "$TMPD/isr.o" "$TMPD/switch.o" \
         "$TMPD/smp.o" "$TMPD/hv.o" "$TMPD/k$s.o" "$TMPD/u$s.o" 2>"$TMPD/ld$s.err" \
-        || { bad "firnc$s: ld ist am Kernel gescheitert"; return 1; }
+        || { bad "firnc$s: ld failed on the kernel"; return 1; }
     objcopy -O elf32-i386 "$TMPD/k$s.elf" "$TMPD/k$s.mb" 2>/dev/null
     for p in $PROGS; do
         "$cc" "kernel/user/$p.fi" -o "$TMPD/$p$s.o" >"$TMPD/e$p$s" 2>&1 \
@@ -121,7 +121,7 @@ build_stage() { # 0 = firnc0, 1 = firnc1
 build_stage 0 || { echo "SOCKOPT: $pass passed, $fail failed"; exit 1; }
 ok "firnc0: Kernel + $(echo $PROGS | wc -w) Programme"
 if build_stage 1; then
-    ok "firnc1: dasselbe, aus dem in Firn geschriebenen Uebersetzer"
+    ok "firnc1: the same, from the compiler written in Firn"
 else
     note "firnc1 hat nicht gebaut -- die Messungen unten laufen mit firnc0"
 fi
@@ -132,7 +132,7 @@ undef=$(nm -u "$TMPD/sockt0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py hat ein OFS-Abbild mit dem Userland dieser Runde gebaut" \
+    && ok "mkfs.py built an OFS image with the userland of this round" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 run_disk() { # abbild anhang ausgabe

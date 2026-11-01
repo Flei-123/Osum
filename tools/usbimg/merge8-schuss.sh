@@ -42,7 +42,7 @@ echo "== Schreibtisch nach $((i/4)) s =="
 sleep 5
 echo "== Bild 1 (0 s) =="
 mon "screendump $ERG/schuss-0s.ppm" >/dev/null
-echo "== 90 s warten, KEINE Eingabe =="
+echo "== wait 90 s, NO input =="
 sleep 90
 echo "== Bild 2 (90 s) =="
 mon "screendump $ERG/schuss-90s.ppm" >/dev/null

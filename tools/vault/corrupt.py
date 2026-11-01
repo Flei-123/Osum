@@ -34,16 +34,16 @@ def main(argv):
     original = os.path.getsize(image)
     fs = mkfs.load(image)
     if fs is None:
-        print("kaputt: %s ist kein OFS-Abbild" % image)
+        print("corrupt: %s is not an OFS image" % image)
         return 1
     ino = fs.resolve(path)
     if ino is None:
-        print("kaputt: %s gibt es nicht" % path)
+        print("corrupt: %s does not exist" % path)
         return 1
     size = fs.iget(ino, mkfs.I_SIZE)
     old = fs.read_at(ino, off, 1)
     if len(old) != 1:
-        print("kaputt: Versatz %d liegt nicht in %s (Groesse %d)"
+        print("corrupt: offset %d is not in %s (size %d)"
               % (off, path, size))
         return 1
     new = bytes([old[0] ^ xor])

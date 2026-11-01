@@ -72,9 +72,9 @@ SYNC_TIMEOUT=1800 bash tools/sync/lauf.sh "$TMPD/k0.img" "$TMPD/M.img" \
     "$TMPD/M.txt" /t/s.sh > /dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/M.txt" > "$TMPD/M.log"
 
-echo "===== was das Programm gesagt hat ====="
+echo "===== what the program said ====="
 sed -n '/^==VOLL==/,/^==END==/p' "$TMPD/M.log"
-echo "===== der Speicher auf dem Wirt ====="
+echo "===== the memory on the host ====="
 hol "$TMPD/M.img" /store "$TMPD/storeM"
 ls -la "$TMPD/storeM"
 echo "PACK $(stat -c%s "$TMPD/storeM/PACK" 2>/dev/null)"

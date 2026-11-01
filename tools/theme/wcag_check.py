@@ -196,9 +196,9 @@ def run_pairs():
                  fga, ca, "OK" if oka else "ROT", mark))
     print("-" * 118)
     print("Paarungen gesamt: %d" % len(rows))
-    print("unter der Schwelle VORHER  (text-secondary = N_400 dunkel): %d"
+    print("below the threshold BEFORE  (text-secondary = N_400 dark): %d"
           % bad_before)
-    print("unter der Schwelle NACHHER (text-secondary = N_300 dunkel): %d"
+    print("below the threshold AFTER (text-secondary = N_300 dark): %d"
           % bad_after)
     return bad_after
 

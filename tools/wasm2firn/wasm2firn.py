@@ -1332,7 +1332,7 @@ def tabelle_erzeugen(m, indirekte_typen=()):
         o.append('}')
         o.append('')
     o.append('fn tab_falle(idx: u64) {')
-    o.append('    io.print("wasm: call_indirect auf einen leeren Platz\\n")')
+    o.append('    io.print("wasm: call_indirect on an empty slot\\n")')
     o.append('    rt.finish(133)')
     o.append('}')
     o.append('')
@@ -1392,7 +1392,7 @@ def start_erzeugen(m, name):
     o.append('    mem_seiten = %d' % m.mem_min)
     o.append('    mem_p = rt.heap_alloc((mem_max * 65536) as usize)')
     o.append('    if mem_p == 0 {')
-    o.append('        io.print("wasm: kein Speicher für den linearen Speicher\\n")')
+    o.append('        io.print("wasm: no memory for the linear memory\\n")')
     o.append('        return 1')
     o.append('    }')
     o.append('    rt.mem_set(mem_p, 0, (mem_max * 65536) as usize)')
@@ -1410,7 +1410,7 @@ def start_erzeugen(m, name):
             o.append('    %s' % ruf)
             o.append('    return 0')
     else:
-        o.append('    io.print("wasm: das Modul hat kein _start\\n")')
+        o.append('    io.print("wasm: the module has no _start\\n")')
         o.append('    return 1')
     o.append('}')
     return o

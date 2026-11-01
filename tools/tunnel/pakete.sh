@@ -15,7 +15,7 @@ ok()  { printf '  OK    %s\n' "$*"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n' "$*"; FAIL=$((FAIL+1)); }
 note(){ printf '  --    %s\n' "$*"; }
 
-echo "== die zwei Pakete =="
+echo "== the two packages =="
 
 [ -f "$OPK" ] || { echo "  opk.py fehlt ($OPK) -- uebersprungen"; exit 0; }
 
@@ -39,14 +39,14 @@ for prog in vpn proxy; do
     python3 "$OPK" bauen "$TMPD/$prog.rezept" -o "$TMPD/pak/$prog-1.0.0.opk" \
         > "$TMPD/$prog.bau" 2>&1 \
         && ok "$prog-1.0.0.opk gebaut, $(stat -c%s "$TMPD/pak/$prog-1.0.0.opk") Oktette" \
-        || { bad "$prog laesst sich nicht paketieren"; head -5 "$TMPD/$prog.bau"; }
+        || { bad "$prog cannot be packaged"; head -5 "$TMPD/$prog.bau"; }
 done
 
 python3 "$OPK" bauen "$TMPD/vpn.rezept" -o "$TMPD/vpn-nochmal.opk" >/dev/null 2>&1
 if cmp -s "$TMPD/pak/vpn-1.0.0.opk" "$TMPD/vpn-nochmal.opk"; then
-    ok "zweimal gebaut, Oktett fuer Oktett dasselbe Paket"
+    ok "built twice, octet for octet the same package"
 else
-    bad "zwei Laeufe ergeben verschiedene Pakete"
+    bad "two runs give different packages"
 fi
 
 WURZEL="$TMPD/wurzel"
@@ -79,7 +79,7 @@ sed "s#VPNELF#$TMPD/vpn.elf#; s#^name=vpn#name=bleibt#; s#^titel=VPN#titel=Bleib
     tools/tunnel/paket/vpn.rezept > "$TMPD/bleibt.rezept"
 python3 "$OPK" bauen "$TMPD/bleibt.rezept" -o "$TMPD/pak/bleibt.opk" >/dev/null 2>&1
 python3 "$OPK" installieren "$TMPD/pak/bleibt.opk" --wurzel "$WURZEL" >/dev/null 2>&1 \
-    && ok "ein drittes Paket 'bleibt' ist installiert und bleibt es" \
+    && ok "a third package 'bleibt' ist installiert und bleibt es" \
     || note "das dritte Paket liess sich nicht installieren"
 APPSUF=$(grep -oE 'name \+ "\.[a-z]+"' "$OPK" 2>/dev/null \
          | head -1 | grep -oE '\.[a-z]+')
@@ -95,28 +95,28 @@ for prog in vpn proxy; do
     python3 "$OPK" installieren "$TMPD/pak/$prog-1.0.0.opk" --wurzel "$WURZEL" \
         > "$TMPD/$prog.inst" 2>&1 \
         && ok "$prog installiert" \
-        || { bad "$prog laesst sich nicht installieren"; head -5 "$TMPD/$prog.inst"; }
+        || { bad "$prog cannot be installed"; head -5 "$TMPD/$prog.inst"; }
 done
 
 for prog in vpn proxy; do
     if [ -f "$WURZEL/apps/$prog$APPSUF/start" ]; then
         ok "/apps/$prog$APPSUF/start liegt da"
     else
-        bad "/apps/$prog$APPSUF/start fehlt nach der Installation"
+        bad "/apps/$prog$APPSUF/start is missing after the installation"
     fi
 done
 N_NACH_INST=$(aufnehmen "$WURZEL" | wc -l)
 note "Baum mit beiden Paketen: $N_NACH_INST Eintraege (+$((N_NACH_INST - N_VORHER)))"
 
 echo -e "socks5\t127.0.0.1\t9050" > "$WURZEL/etc/proxy.conf"
-ok "benutzt: /etc/proxy.conf geschrieben (der Rest, den ein Entfernen uebersehen koennte)"
+ok "used: /etc/proxy.conf written (the rest that a removal could overlook)"
 
 cp -a "$WURZEL" "$TMPD/wurzel-gefahr"
 python3 "$OPK" entfernen vpn --wurzel "$TMPD/wurzel-gefahr" >/dev/null 2>&1
 if [ -f "$TMPD/wurzel-gefahr/users/justin/config/vpn/daheim.conf" ]; then
-    bad "unerwartet: der Standardweg hat die Schluessel stehengelassen"
+    bad "unexpected: the default path left the keys behind"
 else
-    ok "GEGENPROBE: opk remove OHNE --behalte-daten loescht die privaten Schluessel mit"
+    ok "CONTROL RUN: opk remove WITHOUT --keep-data deletes the private keys too"
     note "     das ist in pkg/opk.py so gebaut -- und fuer ein Paket mit Schluesseln falsch herum"
 fi
 
@@ -124,12 +124,12 @@ for prog in vpn proxy; do
     python3 "$OPK" entfernen "$prog" --wurzel "$WURZEL" --behalte-daten \
         > "$TMPD/$prog.ent" 2>&1 \
         && ok "$prog entfernt (--behalte-daten)" \
-        || { bad "$prog laesst sich nicht entfernen"; head -5 "$TMPD/$prog.ent"; }
+        || { bad "$prog cannot be removed"; head -5 "$TMPD/$prog.ent"; }
 done
 
 python3 "$OPK" aufraeumen --wurzel "$WURZEL" --behalte 1 \
     > "$TMPD/aufr.log" 2>&1 \
-    && ok "opk aufraeumen: die Store-Eintraege sind eingesammelt" \
+    && ok "opk clean up: the store entries are collected" \
     || note "aufraeumen: $(head -1 "$TMPD/aufr.log")"
 
 rm -f "$WURZEL/etc/proxy.conf"
@@ -142,10 +142,10 @@ ohne_gen "$TMPD/vorher.txt"  > "$TMPD/v2.txt"
 ohne_gen "$TMPD/nachher.txt" > "$TMPD/n2.txt"
 N_VGL=$(wc -l < "$TMPD/v2.txt")
 if diff -u "$TMPD/v2.txt" "$TMPD/n2.txt" > "$TMPD/diff.txt"; then
-    ok "SPURLOS: $N_VGL Eintraege verglichen (Pfad, Art, Groesse, SHA-256), kein Unterschied"
+    ok "WITHOUT TRACE: $N_VGL entries compared (path, kind, size, SHA-256), no difference"
     note "     verglichen wurden /apps, /store und /etc -- die Orte, an denen NICHTS bleiben darf"
 else
-    bad "es sind Reste geblieben:"
+    bad "remnants were left:"
     head -24 "$TMPD/diff.txt" | sed 's/^/        /'
 fi
 G_V=$(grep -cE '^system/generations/' "$TMPD/vorher.txt")
@@ -161,18 +161,18 @@ NEU=$(sha256sum "$WURZEL/apps/bleibt$APPSUF/start" 2>/dev/null | cut -c1-16)
 if [ -n "$BLEIBT_HASH" ] && [ "$NEU" = "$BLEIBT_HASH" ]; then
     ok "das Paket 'bleibt' ist Oktett fuer Oktett unberuehrt ($NEU)"
 else
-    bad "das Entfernen der anderen hat 'bleibt' angefasst: $BLEIBT_HASH -> $NEU"
+    bad "removing the others has 'bleibt' angefasst: $BLEIBT_HASH -> $NEU"
 fi
 
 if [ -f "$WURZEL/users/justin/config/vpn/daheim.conf" ]; then
-    ok "mit --behalte-daten haben Schluessel und Profile das Entfernen ueberlebt"
+    ok "with --keep-data keys and profiles survived the removal"
 else
-    bad "auch mit --behalte-daten sind die Schluessel weg"
+    bad "even with --keep-data the keys are gone"
 fi
 
 REST=$(find "$WURZEL/store" -mindepth 1 2>/dev/null | wc -l)
 if [ "$REST" = 0 ]; then
-    ok "auch /store ist leer -- kein Eintrag, den keine Generation mehr nennt"
+    ok "/store is empty too -- no entry that no generation names any more"
 else
     note "/store haelt noch $REST Eintraege (opk aufraeumen ist ein eigener Aufruf)"
 fi

@@ -142,7 +142,7 @@ def main(argv):
             f.write("%s %d %d %d\n" % (d, okt[d], kb[d], dat[d]))
 
     mit = sum(1 for x in sz if x > 0)
-    print("baum: %d Dateien (%d mit Inhalt), %d Ordner, %d Oktette, "
+    print("tree: %d files (%d with content), %d folders, %d octets, "
           "%d KiB-Bloecke"
           % (n, mit, len(gesehen), okt["/data"], kb["/data"]))
     return 0

@@ -86,14 +86,14 @@ def main(argv):
             treffer = (ox, oy)
             break
     if treffer is None:
-        print("kachelprobe: KEIN Versatz, bei dem alle %d Kacheln ihre "
+        print("tile probe: NO offset at which all %d tiles have their "
               "Farbe haben" % len(kacheln))
         for _i, x, y, w, h, f, n in kacheln:
-            print("  %-10s gemeldet %06X, im Bild %06X"
+            print("  %-10s reported %06X, in image %06X"
                   % (n, f, farbe(x + w // 2 + 42, y + h // 2 + 62)))
         return 1
     ox, oy = treffer
-    print("kachelprobe: %d Kacheln, Versatz des Fensterinhalts %d,%d"
+    print("tile probe: %d tiles, offset of the window content %d,%d"
           % (len(kacheln), ox, oy))
 
     schlecht = 0
@@ -116,17 +116,17 @@ def main(argv):
         gut = abs(gemessen - w) <= 4
         if not gut:
             schlecht += 1
-        print("  %-10s gemeldet w=%-5d im Bild %-5d %s"
+        print("  %-10s reported w=%-5d in image %-5d %s"
               % (n, w, gemessen, "" if gut else "<-- ABWEICHUNG"))
 
     fallend = all(breiten[k][2] >= breiten[k + 1][2] - 4
                   for k in range(len(breiten) - 1))
-    print("kachelprobe: die Breiten fallen mit dem Anteil: %s"
+    print("tile probe: the widths fall with the share: %s"
           % ("ja" if fallend else "NEIN"))
     if schlecht or not fallend:
         print("kachelprobe: %d Kacheln stimmen nicht" % schlecht)
         return 1
-    print("kachelprobe: alle Kacheln haben im Bild die Breite, die das "
+    print("tile probe: all tiles have in the image the width that the "
           "Programm gemeldet hat")
     return 0
 

@@ -62,7 +62,7 @@ for p in schreibtisch leiste einstellungen explorer launcher widgetdemo \
     [ -f "$OUT/bin/$p" ] && verboten="$verboten $p"
 done
 if [ -n "$verboten" ]; then
-    echo "== auf der Serverplatte liegen Oberflaechenprogramme:$verboten"
+    echo "== UI programs are on the server disk:$verboten"
     exit 1
 fi
 

@@ -12,8 +12,8 @@ fi
 QUELLE="kernel/$MODUL.fi"
 ZIEL="kernel/$ORDNER/$MODUL.fi"
 
-[[ -f $QUELLE ]] || { echo "es gibt kein $QUELLE" >&2; exit 1; }
-[[ -e $ZIEL ]] && { echo "$ZIEL steht schon da" >&2; exit 1; }
+[[ -f $QUELLE ]] || { echo "there is no $QUELLE" >&2; exit 1; }
+[[ -e $ZIEL ]] && { echo "$ZIEL is already there" >&2; exit 1; }
 
 mkdir -p "kernel/$ORDNER"
 git mv "$QUELLE" "$ZIEL" || exit 1

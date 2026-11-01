@@ -24,7 +24,7 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 rc=0
 for p in $PROGS; do
     if ! "$CC" "kernel/user/$p.fi" -o "$OUT/$p.o" > "$OUT/$p.err" 2>&1; then
-        echo "FEHLER: firnc$STUFE uebersetzt $p.fi nicht"
+        echo "ERROR: firnc$STUFE does not compile $p.fi"
         sed 's/^/    /' "$OUT/$p.err" | head -10
         rc=1
         continue

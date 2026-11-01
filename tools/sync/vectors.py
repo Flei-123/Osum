@@ -59,14 +59,14 @@ def ask(lines):
     p = subprocess.run([ORACLE], input="\n".join(lines) + "\n",
                        capture_output=True, text=True)
     if p.returncode != 0:
-        print("  das Orakel ist gestorben, Code %d: %s"
+        print("  the oracle died, code %d: %s"
               % (p.returncode, p.stderr[:400]))
         sys.exit(1)
     out = p.stdout.split("\n")
     while out and out[-1] == "":
         out.pop()
     if len(out) != len(lines):
-        print("  das Orakel hat %d mal geantwortet auf %d Fragen"
+        print("  the oracle answered %d times to %d questions"
               % (len(out), len(lines)))
         sys.exit(1)
     return out
@@ -110,7 +110,7 @@ SALSA_OUT = ("a41f859c6608cc993b81cacb020cef05044b2181a2fd337dfd7b1c6396682f29"
 
 def t_salsa():
     gleich("salsa20/8 RFC 7914 §8", ask(["salsa " + SALSA_IN])[0], SALSA_OUT)
-    print("  Salsa20/8: der Testvektor aus RFC 7914 Abschnitt 8")
+    print("  Salsa20/8: the test vector from RFC 7914 section 8")
 
 
 # ------------------------------------------------------------- scrypt
@@ -129,7 +129,7 @@ def t_scrypt(voll):
         w = hashlib.scrypt(c[0], salt=c[1], n=c[2], r=c[3], p=c[4],
                            dklen=c[5], maxmem=1 << 26).hex()
         gleich("scrypt N=%d r=%d p=%d" % (c[2], c[3], c[4]), g, w)
-    print("  scrypt: %d Faelle, darunter DREI der vier aus RFC 7914 §12 "
+    print("  scrypt: %d cases, including THREE of the four from RFC 7914 §12 "
           "(der vierte braucht 1 GiB)" % len(faelle))
 
 
@@ -227,7 +227,7 @@ def t_kette():
            ask(["open %s %s %s" % (hx(KI), hx(os.urandom(32)), ct)])[0], "FAIL")
     ct2 = ask(["seal %s %s %s" % (hx(KI), hx(name), hx(blk))])[0]
     gleich("derselbe Klartext gibt denselben Geheimtext", ct, ct2)
-    print("  die Kette: Bund, Namen, Siegel%s"
+    print("  the chain: bundle, names, seal%s"
           % (" (gegen libsodium)" if HAT_SODIUM else " (OHNE libsodium!)"))
 
 
@@ -264,7 +264,7 @@ def t_code():
     durch = [z for z in ask(fragen) if z != "FAIL"]
     gleich("KEIN einziger Tippfehler kommt durch (%d geprueft)" % erwartet,
            len(durch), 0)
-    print("  Wiederherstellungscode: 21 Codes hin und zurueck, "
+    print("  recovery code: 21 codes back and forth, "
           "20 zufaellige und %d erschoepfende Tippfehler erkannt" % erwartet)
 
 
@@ -281,17 +281,17 @@ def t_huelle():
         gleich("falscher Einpackschluessel -> nein",
                ask(["hopen %s %s %s" % (hx(os.urandom(32)), hx(nn), h)])[0],
                "FAIL")
-    print("  die Huelle: 5 Runden, jede mit ihrer Gegenprobe")
+    print("  the envelope: 5 rounds, each with its control run")
 
 
 if __name__ == "__main__":
     random.seed(20260830)
     voll = "--kurz" not in sys.argv
     if not os.path.exists(ORACLE):
-        print("  das Orakel fehlt: %s" % ORACLE)
+        print("  the oracle is missing: %s" % ORACLE)
         sys.exit(1)
     if not HAT_SODIUM:
-        print("  ACHTUNG: PyNaCl fehlt -- das AEAD wird NICHT gegen "
+        print("  NOTE: PyNaCl is missing -- the AEAD is NOT checked against "
               "libsodium gemessen")
     t_pbkdf2()
     t_salsa()

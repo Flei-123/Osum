@@ -536,7 +536,7 @@ def main(argv):
     if len(argv) >= 4 and argv[0] == "glyphe":
         s = Schrift(argv[1], int(argv[2]))
         g = s.glyphe(ord(argv[3]))
-        print("w=%d h=%d links=%d oben=%d adv26=%d" %
+        print("w=%d h=%d left=%d top=%d adv26=%d" %
               (g.w, g.h, g.links, g.oben, g.adv26))
         for y in range(g.h):
             print("".join(" .:-=+*#%@"[min(9, g.punkt(x, y) * 10 // 256)]

@@ -117,7 +117,7 @@ lauf() {
 }
 
 # ------------------------------------------------------------ 1. build
-echo "== 1. der Kern, und kein Ladesegment unter 1 MiB =="
+echo "== 1. the kernel, and no load segment below 1 MiB =="
 bash tools/build-kernel.sh "$TMPD/k" > "$TMPD/b.txt" 2>&1 \
     && ok "Kern gebaut ($(stat -c%s "$TMPD/k") Oktette)" \
     || { bad "Kernbau"; tail -8 "$TMPD/b.txt" | sed 's/^/        /'; }
@@ -137,11 +137,11 @@ mkimg "$TMPD/k" "$TMPD/nobild.img" "gfx s3nobild nokbd nosched noproc nofs norin
 num "Platten mit Limine (BIOS) und dem Kern" "$n" eq 6
 
 # ------------------------------------------------------------ 2. one cycle
-echo "== 2. ein Zyklus: schlafen, geweckt werden, alles wieder da =="
+echo "== 2. one cycle: sleep, get woken, everything back =="
 L="$TMPD/l-eins.txt"
 lauf "$TMPD/eins.img" "$L" 1 1
 has "$L" "s3: fadt=" "die Werte stehen da (_S3 aus dem AML, FACS, PM1a)"
-case $STATUS1 in *suspended*) ok "QEMU meldet die Maschine als SCHLAFEND ($STATUS1)";;
+case $STATUS1 in *suspended*) ok "QEMU reports the machine as SLEEPING ($STATUS1)";;
     *) bad "QEMU-Zustand beim Schlafen: '$STATUS1'";; esac
 has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "zurueck: der Aufwachcode lief bis zum Ende (Stufe 4), genau einmal"
 num "Rueckgabe" "$RC" eq 21
@@ -153,29 +153,29 @@ num "PCI: Register, die der Schlaf geloescht hatte" "$(val "$L" 's3: pci' verlor
 num "PCI: danach abweichend" "$(val "$L" 's3: pci' danach-falsch)" eq 0
 SV=$(val "$L" 's3: sci' vor); SN=$(val "$L" 's3: sci' nach)
 if [ -n "$SV" ] && [ "$SV" = "$SN" ]; then ok "ACPI-Modus (SCI_EN) wie vorher: $SN"
-else bad "SCI_EN vor=$SV nach=$SN"; fi
+else bad "SCI_EN before=$SV after=$SN"; fi
 num "Arbeitsspeicher: Muster gleich" "$(val "$L" 's3: speicher' gleich)" eq 1
 S1=$(val "$L" 's3: speicher' sum); V1=$(val "$L" 's3: speicher' vor)
 if [ -n "$S1" ] && [ "$S1" = "$V1" ] && [ "$S1" != "0x0" ]; then
-    ok "Pruefsumme vorher = nachher und nicht null ($S1)"
+    ok "checksum before = after and not zero ($S1)"
 else bad "Pruefsumme $V1 -> $S1"; fi
 
 # ------------------------------------------------------------ 3. two cycles
-echo "== 3. zwei Zyklen hintereinander ($OSUM_QEMU_ACCEL) =="
+echo "== 3. two cycles in a row ($OSUM_QEMU_ACCEL) =="
 L="$TMPD/l-zwei.txt"
 lauf "$TMPD/zwei.img" "$L" 2 1
-case $STATUS2 in *suspended*) ok "auch der zweite Schlaf ist echt ($STATUS2)";;
+case $STATUS2 in *suspended*) ok "the second sleep is real too ($STATUS2)";;
     *) bad "zweiter Schlaf: '$STATUS2'";; esac
 has "$L" "s3: wach zyklus=2 woke=1 stufe=4" "zweimal zurueck"
 num "Rueckgabe" "$RC" eq 21
 A=$(val "$L" 's3: speicher' sum 1); B=$(val "$L" 's3: speicher' sum 2)
 if [ -n "$A" ] && [ -n "$B" ] && [ "$A" != "$B" ]; then
-    ok "zwei verschiedene Muster, beide gehalten ($A / $B)"
+    ok "two different patterns, both held ($A / $B)"
 else bad "Muster $A / $B"; fi
 num "Zyklus 2: PCI danach abweichend" "$(val "$L" 's3: pci' danach-falsch 2)" eq 0
 
 # ------------------------------------------------------------ 4. scheduler
-echo "== 4. mit Zeitgeber und Scheduler: die Unterbrechungen kommen wieder =="
+echo "== 4. with timer and scheduler: the interrupts come back =="
 L="$TMPD/l-sched.txt"
 lauf "$TMPD/sched.img" "$L" 1 1
 has "$L" "s3: wach zyklus=1 woke=1 stufe=4" "zurueck, mit laufendem Scheduler davor"
@@ -183,18 +183,18 @@ num "Zeitgeber-Takte in 200 ms nach dem Aufwachen (100 Hz)" "$(val "$L" 's3: tic
 num "Rueckgabe" "$RC" eq 21
 
 # ------------------------------------------------------------ 5. counter-check
-echo "== 5. Gegenprobe: vergifteter Aufwachcode -- die Maschine darf NICHT zurueckkommen =="
+echo "== 5. control run: poisoned wake code -- the machine must NOT come back =="
 L="$TMPD/l-kaputt.txt"
 lauf "$TMPD/kaputt.img" "$L" 1 0
 case $STATUS1 in *suspended*) ok "sie schlaeft genauso ($STATUS1)";;
     *) bad "Gegenprobe schlief nicht: '$STATUS1'";; esac
 hasnot "$L" "s3: wach" "und kommt NICHT zurueck -- der Rueckweg ist dieser Code und kein anderer"
-case $AFTER in *running*) ok "die Firmware hat geweckt, der Kern steht ($AFTER)";;
-    *) bad "nach dem Wecken: '$AFTER'";; esac
+case $AFTER in *running*) ok "the firmware woke it, the kernel stands ($AFTER)";;
+    *) bad "after waking: '$AFTER'";; esac
 hasnot "$L" "kernel: done" "kein Ende des Kerns"
 
 # ------------------------------------------------------------ 6. screen
-echo "== 6. mit Bildschirm: der Grafikmodus kommt zurueck =="
+echo "== 6. with screen: the graphics mode comes back =="
 for g in gfx nobild; do
     L="$TMPD/l-$g.txt"
     lauf "$TMPD/$g.img" "$L" 1 1
@@ -202,18 +202,18 @@ for g in gfx nobild; do
 done
 L="$TMPD/l-gfx.txt"
 DV=$(val "$L" 's3: bildmodus' dispi-vorher); DN=$(val "$L" 's3: bildmodus' nach-wach); DD=$(val "$L" 's3: bildmodus' danach)
-[ "$DV" = "0x41" ] && ok "vor dem Schlaf: DISPI an mit Bildspeicher ($DV)" || bad "DISPI vorher: '$DV'"
-[ "$DN" = "0x0" ] && ok "das Aufwachen hat den Grafikmodus geloescht (nach-wach=$DN) -- deshalb gibt es die Rueckstellung" \
-    || bad "nach dem Aufwachen: '$DN' (erwartet 0x0)"
-[ "$DD" = "0x41" ] && ok "und die Rueckstellung setzt ihn wieder (danach=$DD)" || bad "danach: '$DD'"
+[ "$DV" = "0x41" ] && ok "before sleep: DISPI on with framebuffer ($DV)" || bad "DISPI vorher: '$DV'"
+[ "$DN" = "0x0" ] && ok "waking cleared the graphics mode (after-wake=$DN) -- that is why the restore exists" \
+    || bad "after waking: '$DN' (erwartet 0x0)"
+[ "$DD" = "0x41" ] && ok "and the restore sets it again (afterwards=$DD)" || bad "danach: '$DD'"
 num "8042-Befehlsbyte zurueckgeschrieben" "$(val "$L" 's3: bildmodus' 8042)" eq 1
 L="$TMPD/l-nobild.txt"
 DD=$(val "$L" 's3: bildmodus' danach)
-[ "$DD" = "0x0" ] && ok "Gegenprobe s3nobild: ohne Rueckstellung bleibt er aus (danach=$DD)" \
+[ "$DD" = "0x0" ] && ok "control run s3nobild: without the restore it stays off (afterwards=$DD)" \
     || bad "Gegenprobe s3nobild: danach='$DD' (erwartet 0x0)"
 
 # ------------------------------------------------------------ 7. ring 3
-echo "== 7. aus Ring 3: /bin/standby, die Shell macht danach weiter =="
+echo "== 7. from ring 3: /bin/standby, the shell continues afterwards =="
 INST="$TMPD/inst"
 mkdir -p "$INST"
 if OUT="$INST" PROGS="sh echo sync standby" APPS="" \
@@ -252,8 +252,8 @@ if OUT="$INST" PROGS="sh echo sync standby" APPS="" \
     echo system_wakeup | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
     wait "$pid"; RC=$?
     has "$L" "standby: schlafe (S3)" "das Programm bittet um den Schlaf"
-    case $st in *suspended*) ok "die Maschine schlaeft INNERHALB des Systemaufrufs ($st)";;
-        *) bad "Zustand beim Standby aus Ring 3: '$st'";; esac
+    case $st in *suspended*) ok "the machine sleeps INSIDE the system call ($st)";;
+        *) bad "state at standby from ring 3: '$st'";; esac
     has "$L" "standby: zurueck, rc=0" "der Aufruf kehrt nach dem Wecken mit 0 zurueck"
     has "$L" "nachher" "die Shell fuehrt danach den naechsten Befehl aus"
     num "Rueckgabe" "$RC" eq 21

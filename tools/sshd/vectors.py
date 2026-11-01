@@ -48,14 +48,14 @@ def ask(lines):
     p = subprocess.run([ORACLE], input="\n".join(lines) + "\n",
                        capture_output=True, text=True)
     if p.returncode != 0:
-        print("  das Orakel ist gestorben, Code %d: %s"
+        print("  the oracle died, code %d: %s"
               % (p.returncode, p.stderr[:400]))
         sys.exit(1)
     out = p.stdout.split("\n")
     while out and out[-1] == "":
         out.pop()
     if len(out) != len(lines):
-        print("  das Orakel hat %d mal geantwortet auf %d Fragen"
+        print("  the oracle answered %d times to %d questions"
               % (len(out), len(lines)))
         sys.exit(1)
     return out
@@ -86,7 +86,7 @@ def t_sha256():
           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
     check("FIPS 448bit", a[2],
           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
-    print("  SHA-256: %d Faelle gegen hashlib und FIPS 180-4" % len(msgs))
+    print("  SHA-256: %d cases against hashlib and FIPS 180-4" % len(msgs))
 
 
 # ===================================================== 2. HMAC-SHA-256
@@ -120,7 +120,7 @@ def t_hmac():
           "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
     check("RFC4231 #6", a[5],
           "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
-    print("  HMAC-SHA-256: %d Faelle gegen hmac und RFC 4231" % len(cases))
+    print("  HMAC-SHA-256: %d cases against hmac and RFC 4231" % len(cases))
 
 
 # ===================================================== 3. mpint
@@ -182,7 +182,7 @@ def t_b64():
     check("b64d des Schluessel-Blobs", a[0], hx(blob))
     a = ask(["b64d %s" % hx(b"AAAA!AAA")])
     check("b64d lehnt ein fremdes Zeichen ab", a[0], "FAIL")
-    print("  Base64: %d Faelle hin und zurueck gegen base64" % (3 * len(cases)))
+    print("  Base64: %d cases back and forth against base64" % (3 * len(cases)))
 
 
 # ===================================================== 5. Ableitung
@@ -263,7 +263,7 @@ def t_aead():
     a = ask(q)
     for i, got in enumerate(a):
         check("seal #%d" % i, got, want[i])
-    print("  chacha20-poly1305@openssh.com: %d Pakete Oktett fuer Oktett "
+    print("  chacha20-poly1305@openssh.com: %d packets octet for octet "
           "gegen cryptography" % len(q))
 
     q = ["openp %s %d %s" % (hx(k), s, w)
@@ -271,7 +271,7 @@ def t_aead():
     a = ask(q)
     for i, got in enumerate(a):
         check("open #%d" % i, got, hx(cases[i][2]))
-    print("  ...und dieselben %d Pakete wieder aufgemacht" % len(q))
+    print("  ...and the same %d packets opened again" % len(q))
 
     q, spots = [], []
     for i, ((k, s, p, pd), w) in enumerate(zip(cases[:25], want[:25])):
@@ -288,7 +288,7 @@ def t_aead():
             fails.append("gekipptes Bit an %d wurde ANGENOMMEN" % spots[i])
     global count
     count += len(a)
-    print("  Gegenprobe: %d Pakete mit EINEM gekippten Bit, %d angenommen "
+    print("  control run: %d packets with ONE flipped bit, %d accepted "
           "(erwartet 0)" % (len(a), bad))
 
     q = ["openp %s %d %s" % (hx(k), s + 1, w)
@@ -298,7 +298,7 @@ def t_aead():
     count += len(a)
     if bad:
         fails.append("%d Pakete mit falscher Paketnummer angenommen" % bad)
-    print("  Gegenprobe: %d Pakete unter der falschen Paketnummer, %d "
+    print("  control run: %d packets under the wrong packet number, %d "
           "angenommen (erwartet 0)" % (len(a), bad))
 
 
@@ -317,7 +317,7 @@ def t_pad():
         assert p >= 4 and (1 + plen + p) % 8 == 0
         p = padc(False, plen)
         assert p >= 4 and (4 + 1 + plen + p) % 8 == 0
-    print("  Auffuellung: %d Faelle, beide Regeln (mit und ohne AEAD)"
+    print("  padding: %d cases, both rules (with and without AEAD)"
           % len(q))
 
 
@@ -342,7 +342,7 @@ def t_plain():
     for plen in list(range(0, 60)) + [500, 4000]:
         payload = bytes(rng.getrandbits(8) for _ in range(plen))
         rng.getrandbits(8 * padc(False, plen))
-    print("  Klartextpakete: %d gebaut und %d wieder gelesen" % (len(q), len(a)))
+    print("  plaintext packets: %d built and %d read back" % (len(q), len(a)))
     rng = random.Random(5)
     for i in range(len(a)):
         plen = (list(range(0, 60)) + [500, 4000])[i]
@@ -368,12 +368,12 @@ def t_list():
     a = ask(q)
     for i, got in enumerate(a):
         check("listhas #%d" % i, got, want[i])
-    print("  name-list: %d Faelle, ein Teilname darf NICHT passen" % len(q))
+    print("  name-list: %d cases, a partial name must NOT match" % len(q))
 
 
 def main():
     if not os.access(ORACLE, os.X_OK):
-        print("erst .probe/sshoracle bauen (tools/sshd/run.sh tut es)")
+        print("build .probe/sshoracle first (tools/sshd/run.sh does it)")
         return 1
     t_sha256()
     t_hmac()

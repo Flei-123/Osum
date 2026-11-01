@@ -24,7 +24,7 @@ for wat in tools/wasm2firn/pruefung/*.wat; do
     b=$(timeout 30 "$OUT/$name" 2>&1)
     if [ "$a" = "$b" ] && ! echo "$b" | grep -q FEHLER; then
         n=$(echo "$b" | grep -c OK)
-        echo "  OK    $name ($n Faelle, Deuter und AOT gleich)"
+        echo "  OK    $name ($n cases, interpreter and AOT equal)"
         gut=$((gut+1))
     else
         echo "  FEHLER $name"

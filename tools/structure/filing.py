@@ -94,24 +94,24 @@ def main():
 
     if modus == "--pruefen":
         if not soll:
-            print("KEINE Soll-Ablage (tools/structure/filing.txt) -- nichts geprueft")
+            print("NO target filing (tools/structure/filing.txt) -- nothing checked")
             return 1
-        print("Ablage: %d Dateien am richtigen Ort, %d am falschen, "
+        print("filing: %d files in the right place, %d in the wrong one, "
               "%d ohne Soll, %d vermisst"
               % (len(passt), len(falsch), len(ohne_soll), len(fehlt)))
         for m, d, s in falsch:
-            print("  FALSCH  %s liegt in '%s', soll nach '%s'" % (m, d, s))
+            print("  WRONG  %s is in '%s', soll nach '%s'" % (m, d, s))
         for m, d in ohne_soll:
-            print("  OHNE SOLL  %s (liegt in '%s')" % (m, d))
+            print("  NO TARGET  %s (is in '%s')" % (m, d))
         for m in fehlt:
-            print("  VERMISST  %s steht im Soll, liegt aber nirgends" % m)
+            print("  MISSING  %s is in the target, but is nowhere" % m)
         return 1 if (falsch or ohne_soll or fehlt) else 0
 
     print("== ABLAGE ==")
     print("Soll-Eintraege: %d, Kerndateien: %d" % (len(soll), len(ist)))
     print("am richtigen Ort: %d" % len(passt))
     print("am falschen Ort : %d" % len(falsch))
-    print("ohne Soll       : %d" % len(ohne_soll))
+    print("without target  : %d" % len(ohne_soll))
     print()
     nach = {}
     for m, d in ist.items():
@@ -126,7 +126,7 @@ def main():
             print("  %-12s %s -> %s" % (m, d, s))
     if ohne_soll:
         print()
-        print("-- ohne Soll-Eintrag --")
+        print("-- without target entry --")
         for m, d in ohne_soll:
             print("  %-12s (%s)" % (m, d))
     return 0

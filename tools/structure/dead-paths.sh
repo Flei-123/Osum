@@ -26,7 +26,7 @@ while IFS= read -r treffer; do
         continue
     fi
     echo "TOT  $datei:$zeile"
-    echo "     nennt $pfad, liegt aber ${neu:-nirgends mehr}"
+    echo "     names $pfad, but it is ${neu:-nowhere anymore}"
     GEFUNDEN=$((GEFUNDEN + 1))
 done < <(grep -rnE 'kernel/[a-z0-9_]+\.fi' tools/ test.sh 2>/dev/null |
          grep -E '^(test\.sh|tools/[^:]*\.(sh|py))' |

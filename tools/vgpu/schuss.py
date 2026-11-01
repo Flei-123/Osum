@@ -65,7 +65,7 @@ def main():
     except OSError:
         pass
     if not os.path.exists(ziel) or os.path.getsize(ziel) == 0:
-        print("kein Bild geschrieben")
+        print("no image written")
         return 1
     print("%s (%d Oktette)" % (ziel, os.path.getsize(ziel)))
     return 0

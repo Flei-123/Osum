@@ -163,7 +163,7 @@ def main(argv):
             if ord(c) not in decken[s]:
                 fehlt.append('%s U+%04X %r fehlt in %s (z. B. %s)'
                              % (herkunft, ord(c), c, s, herkunft))
-    print('schriftprobe: %d Textstellen, %d verschiedene Zeichen ueber '
+    print('font probe: %d text spots, %d different characters over '
           'ASCII, %s' % (len(text), len(gebraucht),
                          ' '.join('%s=%d' % (os.path.basename(s),
                                              len(decken[s]))

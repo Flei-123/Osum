@@ -334,7 +334,7 @@ PY
     echo "foto 03-editor"
     echo "taste ctrl-k"
     echo "warte 2"
-    echo "foto 04-editor-nach-strg-k"
+    echo "photo 04-editor-after-ctrl-k"
     echo "taste ctrl-x"
     echo "warte 2"
     echo "taste n"

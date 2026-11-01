@@ -118,7 +118,7 @@ def main():
         if os.path.isfile(p):
             dateien.append(f)
             alle += open(p, "rb").read()
-    print("  der Speicher: %s, %d Oktette zusammen"
+    print("  the memory: %s, %d octets together"
           % (", ".join(dateien), len(alle)))
     gleich("(b) der Klartext steht NICHT im Speicher", marke in alle, False)
     gleich("(b) und auch nicht als Dateiname",
@@ -142,18 +142,18 @@ def main():
                     "ascii", "replace")
     salz = bytes.fromhex(felder["salz"]) if "salz" in felder else None
     if salz is None:
-        print("  kein Salz gefunden -- (c) kann nicht gemessen werden")
+        print("  no salt found -- (c) cannot be measured")
         return 1
     pkey = hashlib.scrypt(passphrase.encode(), salt=salz, n=N, r=r, p=1,
                           dklen=32, maxmem=(128 * N * r * 2) + (1 << 22))
     mk = ask(["hopen %s %s %s" % (binascii.hexlify(pkey).decode(),
                                   felder["pnonce"], felder["phuelle"])])[0]
     if mk == "FAIL" or len(mk) != 64:
-        print("  die Huelle laesst sich nicht oeffnen -- (c) misst nichts")
+        print("  the envelope cannot be opened -- (c) measures nothing")
         return 1
     bund = ask(["bundmk %s %s" % (mk, felder["salz"])])[0]
     if bund == "FAIL" or len(bund) != 320:
-        print("  der Bund laesst sich nicht ableiten -- (c) misst nichts")
+        print("  the bundle cannot be derived -- (c) measures nothing")
         return 1
     KN = bytes.fromhex(bund[64:128])
     gleich("(c) der Schluesselbund des Besitzers stimmt mit dem KOPF ueberein",
@@ -177,7 +177,7 @@ def main():
                     break
         return t
 
-    print("  (c) der Angreifer hat %d Dateien im Verdacht, %d davon hat "
+    print("  (c) the attacker suspects %d files, %d of which "
           "der Nutzer wirklich" % (len(habe) + len(habe_nicht), len(habe)))
     gleich("(c) NAIV (blanker SHA-256): erkannte Dateien", naiv_treffer(habe), 0)
     gleich("(c) NAIV: falsch erkannte", naiv_treffer(habe_nicht), 0)

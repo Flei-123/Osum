@@ -34,6 +34,6 @@ for c in ("info block", "info qtree"):
 s.close()
 PYEOF
 wait $pid 2>/dev/null
-echo "--- was der Kern gesehen hat ---"
+echo "--- what the kernel saw ---"
 grep -a '^vgpu:' "$T/o.txt" | tail -2
 cp -f "$T/o.txt" /tmp/vgpu-schirm.txt

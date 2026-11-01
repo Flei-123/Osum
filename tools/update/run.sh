@@ -26,12 +26,12 @@ lauf() { # name skript [limit]
 }
 
 # =====================================================================
-echo "== 1. die Rechnung: SHA-512 und Ed25519 gegen ihre Normen =="
+echo "== 1. the computation: SHA-512 and Ed25519 against their standards =="
 # =====================================================================
 mkdir -p .probe
 vendor/firn/bin/firnc tools/update/oracle.fi -o .probe/uoracle \
     2> "$OUT/oracle.err" \
-    && ok "tools/update/oracle.fi baut gegen lib/crypto/ (dieselben Dateien wie der Kern)" \
+    && ok "tools/update/oracle.fi builds against lib/crypto/ (the same files as the kernel)" \
     || { bad "tools/update/oracle.fi cannot be built"; head -20 "$OUT/oracle.err"; }
 
 ARGV=()
@@ -41,18 +41,18 @@ if python3 tools/update/vectors.py "${ARGV[@]}" > "$OUT/vectors.log" 2>&1; then
     ok "$(tail -1 "$OUT/vectors.log" | sed 's/^ *//')"
 else
     sed 's/^/        /' "$OUT/vectors.log" | tail -30
-    bad "die Vektoren stimmen NICHT"
+    bad "the vectors do NOT match"
 fi
 
 # =====================================================================
 echo
-echo "== 2. das Abbild, die Platte und der erste Start =="
+echo "== 2. the image, the disk and the first start =="
 # =====================================================================
 mkdir -p "$OUT"
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak.log" 2>&1 \
-    && ok "zwei signierte Quellen gebaut" || { cat "$OUT/pak.log"; bad "pakete.sh"; }
+    && ok "two signed sources built" || { cat "$OUT/pak.log"; bad "pakete.sh"; }
 bash tools/update/pakete.sh "$OUT" > "$OUT/pak3.log" 2>&1 \
-    && ok "Fassung 3 (scheitert beim Start) und die boesen Dateien gebaut" \
+    && ok "version 3 (fails at start) and the evil files built" \
     || { cat "$OUT/pak3.log"; bad "update/pakete.sh"; }
 
 EX="/quelle3/ /boese/"
@@ -122,7 +122,7 @@ hatnicht "$OUT/sig6.txt" "opk: installed" "und es wird nichts installiert"
 
 # =====================================================================
 echo
-echo "== 4. der Erprobungszaehler: ein Update, das nicht hochkommt =="
+echo "== 4. the trial counter: an update that does not come up =="
 # =====================================================================
 #
 START='sh /start.sh;exit'
@@ -171,7 +171,7 @@ hatnicht "$OUT/gab4.txt" "zurueck auf" "es wird nie zurueckgefallen"
 
 # =====================================================================
 echo
-echo "== 5. der ganze Ablauf am Stueck =="
+echo "== 5. the whole flow in one go =="
 # =====================================================================
 cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf fluss "opk list;opk update hallo --source /quelle2;opk trial;exit")

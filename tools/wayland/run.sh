@@ -10,7 +10,7 @@ bad() { fail=$((fail+1)); echo "  FEHL $1"; }
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
-echo "== 1. der Kern und die Speicherkarte =="
+echo "== 1. the kernel and the memory map =="
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1; then
     if grep -q "0 collisions" "$TMPD/map.txt"; then
@@ -26,18 +26,18 @@ if bash tools/build-kernel.sh "$TMPD/k.elf" > "$TMPD/build.txt" 2>&1; then
     ok "der Kern baut ($(stat -c%s "$TMPD/k.elf") Oktette)"
     objcopy -O elf32-i386 "$TMPD/k.elf" "$TMPD/k.mb" 2>/dev/null
 else
-    bad "der Kern baut NICHT"
+    bad "the kernel does NOT build"
     grep -viE 'warning|^\s+\||^\s+=|note:' "$TMPD/build.txt" | tail -10 | sed 's/^/        /'
     echo "== WAYLAND: $pass bestanden, $fail gescheitert =="
     exit 1
 fi
 
 echo
-echo "== 2. der echte Client, statisch gegen musl =="
+echo "== 2. the real client, static against musl =="
 
 WLB=${WLBUILD:-/root/wl-build}
 if [ -d "$WLB/musl-root/lib" ] && [ -f "$WLB/musl-root/lib/libwayland-client.a" ]; then
-    ok "libwayland-client.a (musl, statisch) liegt vor"
+    ok "libwayland-client.a (musl, static) is present"
 else
     bad "libwayland-client.a fehlt -- siehe docs/RUNDE-WAYLAND.md, Abschnitt Bauen"
 fi
@@ -90,7 +90,7 @@ if [ -f "$TMPD/wltest" ]; then
     F="$TMPD/run.txt"
     tr -d '\000' < "$F" > "$TMPD/clean.txt" 2>/dev/null
     if grep -q "wltest fertig" "$TMPD/clean.txt"; then
-        ok "wltest ist im Kern gelaufen"
+        ok "wltest ran in the kernel"
         sed -n '/== wltest/,/wltest fertig/p' "$TMPD/clean.txt" | sed 's/^/     /'
         n_ok=$(grep -c '^  ok   ' "$TMPD/clean.txt" 2>/dev/null | tr -dc '0-9')
         n_bad=$(grep -c '^  FEHL ' "$TMPD/clean.txt" 2>/dev/null | tr -dc '0-9')
@@ -98,7 +98,7 @@ if [ -f "$TMPD/wltest" ]; then
         [ -n "$n_bad" ] || n_bad=0
         pass=$((pass + n_ok)); fail=$((fail + n_bad))
     else
-        bad "wltest hat sich nicht gemeldet (QEMU-Code $rc)"
+        bad "wltest did not report (QEMU code $rc)"
         tail -20 "$TMPD/clean.txt" 2>/dev/null | sed 's/^/        /'
     fi
 fi
@@ -110,7 +110,7 @@ if python3 tools/wayland/gen.py > "$TMPD/wlproto.fi" 2>"$TMPD/gen.txt"; then
     if cmp -s "$TMPD/wlproto.fi" kernel/user/wlproto.fi; then
         ok "wlproto.fi ist ERZEUGT: $(tail -1 "$TMPD/gen.txt")"
     else
-        bad "kernel/user/wlproto.fi weicht von dem ab, was gen.py erzeugt"
+        bad "kernel/user/wlproto.fi deviates from what gen.py produces"
     fi
 else
     bad "tools/wayland/gen.py scheitert"; sed 's/^/        /' "$TMPD/gen.txt" | head -3
@@ -132,7 +132,7 @@ if [ -f "$WLB/out/simple-shm-memfd" ]; then
 fi
 
 echo
-echo "== 5. die Bilder der Runde =="
+echo "== 5. the images of the round =="
 for b in docs/shots/wayland/stufe1-muster.png; do
     [ -s "$b" ] && ok "Bild da: $b ($(stat -c%s "$b") Oktett)" \
                 || bad "Bild fehlt: $b"
@@ -141,19 +141,19 @@ done
 echo
 echo "== 6. Modularitaet: eigener Prozess, Dienst, Paket =="
 grep -q 'wayd:grafik:off:/bin/wayd' etc/inittab.wayland 2>/dev/null \
-    && ok "Dienstzeile steht in etc/inittab.wayland (auf 'off')" \
+    && ok "service line is in etc/inittab.wayland (on 'off')" \
     || bad "keine Dienstzeile"
 [ -s pkg/rezepte/wayland.rezept ] \
     && ok "Paketrezept da: pkg/rezepte/wayland.rezept" \
     || bad "kein Paketrezept"
 grep -q 'kernel/user/wayd.fi' kernel/user/wayd.fi 2>/dev/null \
-    && ok "der Server ist ein Ring-3-Programm (kernel/user/wayd.fi)" \
+    && ok "the server is a ring-3 program (kernel/user/wayd.fi)" \
     || bad "wayd.fi fehlt"
 n=$(grep -rl 'wayd\.' kernel/*.fi kernel/user/desktop.fi \
         kernel/user/taskbar.fi kernel/user/taskbar 2>/dev/null | wc -l)
 [ "$n" -eq 0 ] \
-    && ok "GEGENPROBE: kein Kernteil und kein Schreibtischteil ruft wayd" \
-    || bad "$n Datei(en) rufen wayd -- er waere nicht abschaltbar"
+    && ok "CONTROL RUN: no kernel part and no desktop part calls wayd" \
+    || bad "$n file(s) call wayd -- it would not be switchable off"
 
 echo
 echo "== 7. keyboard, pointer, clipboard (round WAYLAND-INPUT; the acceptance on a screen is tools/wayland/input.sh) =="

@@ -126,7 +126,7 @@ def main():
         roh = subprocess.run(["git", "show", "%s:%s" % (basis, alt)],
                              capture_output=True)
         if roh.returncode != 0:
-            print("  %s: %s gibt es in %s nicht" % (neu, alt, basis))
+            print("  %s: %s does not exist in %s" % (neu, alt, basis))
             schlecht += 1
             continue
         A = funktionen(roh.stdout.decode("utf8", "replace"))
@@ -153,10 +153,10 @@ def main():
             else:
                 abweichend.append((name, "weicht ab"))
         ganz = len(B) - weg
-        print("  %-22s %d von %d Funktionen zeichengleich mit %s"
+        print("  %-22s %d of %d functions identical to %s"
               % (neu.split("/")[-1], gleich, ganz, alt.split("/")[-1]))
         if spaeter:
-            print("      (%d Funktionen sind erst NACH dem Umzug"
+            print("      (%d functions exist only AFTER the move"
                   " entstanden und gehoeren nicht dazu)" % spaeter)
         for name, warum in abweichend:
             grund = SEITHER_WEITERENTWICKELT.get(name)

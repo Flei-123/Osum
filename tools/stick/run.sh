@@ -55,26 +55,26 @@ echo "       SHA-256 $SHA"
 echo "       $(stat -c%s "$IMG") Oktette"
 
 # =====================================================================
-echo "== 2. was im Abbild wirklich liegt =="
+echo "== 2. what is really in the image =="
 # =====================================================================
 python3 tools/osum/mkfs.py list "$IMGDIR/root.img" > "$TMPD/liste.txt" 2>&1 \
-    || bad "das Wurzelabbild laesst sich nicht lesen"
+    || bad "the root image cannot be read"
 for f in /bin/ota /bin/fetch /bin/host /bin/jarvisd /bin/jsig \
          /bin/jarvisctl /bin/pollbr /bin/dhcp /bin/reboot \
          /etc/ota.conf /etc/ssl/roots.pem /etc/jarvis/permissions.conf \
          /system/schluessel.pub /system/FASSUNG /system/SCHLUESSELGEN; do
     grep -qE "(^|[[:space:]])${f}([[:space:]]|\$)" "$TMPD/liste.txt" \
-        && ok "im Abbild: $f" || bad "im Abbild FEHLT: $f"
+        && ok "im Abbild: $f" || bad "MISSING in the image: $f"
 done
 N=$(grep -oE '(^|[[:space:]])/bin/[a-z0-9_-]+' "$TMPD/liste.txt" | wc -l)
 echo "       /bin traegt $N Programme"
 
 # =====================================================================
-echo "== 3. die Gegenstelle und die zweite Platte =="
+echo "== 3. the peer and the second disk =="
 mkdir -p "$TMPD/certs"
 if python3 tools/ota/mkcerts.py "$TMPD/certs" jarvis.test 10.0.2.2 \
         > "$TMPD/certs.log" 2>&1; then
-    ok "Zertifikate des Pruefstands (eigene Wurzel, Name jarvis.test, SAN 10.0.2.2)"
+    ok "certificates of the test bench (own root, name jarvis.test, SAN 10.0.2.2)"
 else
     bad "mkcerts.py"; tail -5 "$TMPD/certs.log" | sed 's/^/       /'
 fi
@@ -102,9 +102,9 @@ if mkfs.vfat -F 32 -s 1 -n OSUMPROBE "$FAT" > "$TMPD/probefs.txt" 2>&1 \
     printf 'label: dos\nstart=2048, type=c\n' | sfdisk "$TMPD/probe.img" \
         >> "$TMPD/probefs.txt" 2>&1
     dd if="$FAT" of="$TMPD/probe.img" bs=512 seek=2048 conv=notrunc status=none
-    ok "die zweite Platte traegt /rechte.conf und /ca.pem (FAT32 auf einer MBR-Partition)"
+    ok "the second disk carries /rechte.conf and /ca.pem (FAT32 on an MBR partition)"
 else
-    bad "die zweite Platte cannot be built"
+    bad "the second disk cannot be built"
     tail -5 "$TMPD/probefs.txt" | sed 's/^/       /'
 fi
 
@@ -145,7 +145,7 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
     rm -rf "$d"; mkdir -p "$d"
     cp -f "$IMG" "$d/stick.img"
     eintrag_conf "$d/stick.img" "Command line" \
-        || bad "$name: Menueeintrag nicht in die Kopie geschrieben"
+        || bad "$name: menu entry not written into the copy"
     cp -f "$TMPD/probe.img" "$d/probe.img"
     local srvpid=""
     if [ "$mitsrv" = 1 ]; then
@@ -195,7 +195,7 @@ NETZFOLGE=("$@")
 if [ "${STICK_NUR:-}" != bruecke ]; then
 
 # =====================================================================
-echo "== 4. BIOS: vom Stick, Menueeintrag 5, und dann getippt =="
+echo "== 4. BIOS: from the stick, menu entry 5, and then typed =="
 # =====================================================================
 stick_lauf sbios bios 0 "${NETZFOLGE[@]}"
 B="$TMPD/sbios/con.log"
@@ -207,16 +207,16 @@ IPO=$(grep -aoE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' "$B" | tail -1)
 IPD=""
 command -v dig >/dev/null 2>&1 && IPD=$(dig +short "$NAME" A | grep -E '^[0-9.]+$' | head -1)
 if [ -n "$IPO" ] && [ "$IPO" = "$IPD" ]; then
-    ok "/bin/host loest $NAME auf, und dig auf dem Wirt sagt dasselbe: $IPO"
+    ok "/bin/host resolves $NAME, and dig on the host says the same: $IPO"
 else
     bad "/bin/host: '${IPO:-keine}', dig: '${IPD:-keine}'"
 fi
 hat "$B" 'fetch: verify OK' "die Let's-Encrypt-Kette wurde GEPRUEFT -- gegen die Wurzeln IM ABBILD"
 CERTS=$(grep -aoE 'fetch: certs [0-9]+' "$B" | head -1 | awk '{print $3}')
 if [ "${CERTS:-0}" -ge 3 ] 2>/dev/null; then
-    ok "und es ist eine echte Kette: $CERTS Zertifikate"
+    ok "and it is a real chain: $CERTS certificates"
 else
-    bad "nur ${CERTS:-0} Zertifikate -- das ist keine echte Kette"
+    bad "only ${CERTS:-0} certificates -- that is no real chain"
 fi
 hat "$B" 'fetch -> 0' "/bin/fetch endet mit 0 -- die Seite ist da"
 hat "$B" 'ota: version there' "ota hat das signierte VERZEICHNIS gelesen"
@@ -233,13 +233,13 @@ if [ -n "$OVMF_CODE" ] && [ -n "$OVMF_VARS" ]; then
     hat "$U" 'fetch: verify OK' "und dieselbe gepruefte Kette"
     hat "$U" 'ota: NEW VERSION available' "und dasselbe VERZEICHNIS"
 else
-    echo "       (kein OVMF -- der UEFI-Lauf entfaellt)"
+    echo "       (no OVMF -- the UEFI run is skipped)"
 fi
 
 fi   # STICK_NUR
 
 # =====================================================================
-echo "== 6. die Bruecke: jarvisd beantwortet einen Auftrag =="
+echo "== 6. the bridge: jarvisd answers a job =="
 # =====================================================================
 stick_lauf sbr bios 1 \
     --frist 150 --erwarte 'sh: ready' \
@@ -269,9 +269,9 @@ else
     bad "Auftrag 2: $(grep -a '^ANTWORT 2 ' "$G" 2>/dev/null || echo 'keine Antwort')"
 fi
 if grep -qa 'hallo-vom-stick' "$G.2.bin" 2>/dev/null; then
-    ok "und die Ausgabe des Befehls kam wirklich vom Stick: $(tr -d '\n' < "$G.2.bin")"
+    ok "and the output of the command really came from the stick: $(tr -d '\n' < "$G.2.bin")"
 else
-    bad "die Ausgabe des Befehls fehlt"
+    bad "the output of the command is missing"
 fi
 
 echo

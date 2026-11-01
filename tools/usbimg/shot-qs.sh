@@ -60,5 +60,5 @@ Image.open('$W/$n.ppm').save('$PREFIX-${n#*-}.png')
 " 2>/dev/null && echo "  $PREFIX-${n#*-}.png"
 done
 
-echo "  --- was die Oberflaeche gemeldet hat ---"
+echo "  --- what the surface reported ---"
 grep -aE '^(qs|hk|taskbar|launcher):' "$W/serial.txt" | head -25 | sed 's/^/      /'
