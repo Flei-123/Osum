@@ -143,12 +143,12 @@ else
     grep '^FAIL' "$OUT/chip.txt" | head -10
 fi
 
-if grep -q 'wifi-usb: ' kernel/usb/usb.fi; then
+if bash tools/structure/srcview.sh kernel/usb/usb.fi | grep -q 'wifi-usb: '; then
     ok "kernel/usb/usb.fi meldet einen erkannten Stick als 'wifi-usb: <Name> (<vid>:<pid>), kein Treiber'"
 else
     bad "die Meldezeile fehlt in kernel/usb/usb.fi"
 fi
-if grep -q 'DRV_WLAN\|wlan_start' kernel/usb/usb.fi; then
+if bash tools/structure/srcview.sh kernel/usb/usb.fi | grep -q 'DRV_WLAN\|wlan_start'; then
     bad "kernel/usb/usb.fi bindet einen WLAN-Treiber, den es nicht gibt"
 else
     ok "kernel/usb/usb.fi bindet KEINEN WLAN-Treiber: die Zeile benennt, sie behauptet nicht"
@@ -176,7 +176,7 @@ else
     ok "SAE ist NICHT gebaut -- Begruendung in docs/WLAN.md"
 fi
 
-KOMMENTARFREI=$(cat lib/wlan/*.fi kernel/usb/usb.fi 2>/dev/null | sed 's|//.*||')
+KOMMENTARFREI=$({ cat lib/wlan/*.fi; bash tools/structure/srcview.sh kernel/usb/usb.fi; } 2>/dev/null | sed 's|//.*||')
 if printf '%s' "$KOMMENTARFREI" | grep -q 'fn fw_download\|fn firmware_laden\|DRV_WLAN'; then
     bad "irgendwo wird WLAN-Firmware geladen -- dann gibt es einen Treiber, den docs/WLAN.md nicht kennt"
 else
