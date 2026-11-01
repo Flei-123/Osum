@@ -1,36 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/sysgui.fi -- RUNDE SERVERBUILD: DIE AUFRUFNUMMERN DER
-// OBERFLAECHE, UND NUR DIESE.
-//
-// `kernel/sys.fi` ist die Tafel, an der Ring 3 anklopft: 9051 Zeilen,
-// weit ueber hundert Nummern. 15 davon gehoerten dem Bildschirm --
-// der Fensterserver (`wm_call`, 357 Zeilen), die Widget-Naht
-// (`wig_call`), der Fensterbaum (`tile_call` und die vier `do_tile*`)
-// und der Bildmodus (`disp_call`, `do_dispget`, `do_dispset`,
-// `do_dispstr`). Sie stehen jetzt hier.
-//
-// EIN UMZUG, KEINE UMSCHREIBUNG. Die Funktionen sind Zeile fuer Zeile
-// dieselben. Was sich geaendert hat: was sie von `sys.fi` brauchen --
-// `neg`, `copy_in`, `copy_out` und ein paar Nachbarn -- heisst jetzt
-// `sys.neg` und steht drueben in der Ausfuhrliste.
-//
-// DASS DAS UEBERHAUPT GEHT, liegt an einer Eigenschaft von Firn, die
-// eine Nachmessung gezeigt hat: Modulkreise sind ERLAUBT. `sys.fi`
-// bindet `gfx.fi` ein, `gfx.fi` bindet diese Datei ein, und diese
-// Datei bindet wieder `sys.fi` ein. Der Uebersetzer nimmt das an,
-// solange keines der drei das WURZELMODUL ist (das ist `kmain.fi`, und
-// deshalb liegt der geteilte Rest von dort in `kernel/kutil.fi`).
-//
-// WAS NICHT MITGEZOGEN IST, und der Grund gehoert dazu: `/dev/fb`.
-// `open_devfb`, `fb_write`, `fb_read`, `do_lseek`, `do_fstat`,
-// `map_fd` und `do_pwrset` sind allgemeine Wege, die den Rahmenpuffer
-// als EINEN Fall unter mehreren behandeln -- ein `lseek` auf das Ende
-// einer Datei ist kein Grafikaufruf. Diese sieben fragen ueber acht
-// Weiterleitungen in `gfx.fi` nach (`fb_ready`, `fb_bytes`, ...), und
-// ohne Bildschirm sagt die erste davon `false`: dann gibt es das
-// Geraet nicht, und der Rest dieser Wege verhaelt sich wie eh und je.
-//
-// BEI gui=off WIRD DIESE DATEI NICHT UEBERSETZT.
 
 profile kernel
 
@@ -68,7 +35,6 @@ import serial
 import sys.sys
 
 export { wm_call, wig_call, tile_call, disp_call, shot_call, tipp_call, ax_call, float_check }
-
 
 // The copy page of THIS system call: one page per core for ring 3 callers,
 // the shared BLOCK_OFF for kernel tasks (see kstate.BLOCKK_OFF).
@@ -115,10 +81,6 @@ fn do_dispget(state: u64, field: u64) -> u64 {
         }
         return 0
     }
-    // OHNE ERKUNDUNG GIBT ES KEINE ZAHLEN -- dieselbe Regel wie bei der
-    // Energieschicht. Ein Kernel ohne das Wort `disp` muss auf JEDE
-    // Frage -ENODEV sagen und nicht eine Null, die wie ein Messwert
-    // aussieht. Genau das ist die Gegenprobe des Testlaufs.
     if !vmode.ready(state) {
         return sys.neg(errno.E_NODEV)
     }
@@ -281,14 +243,6 @@ fn do_dispget(state: u64, field: u64) -> u64 {
     return sys.neg(errno.E_INVAL)
 }
 
-// Die Rueckgabe des Modustreibers in eine errno-Nummer. Sie steht
-// EINMAL, weil `set_mode`, `set_custom` und der Startvorgang dieselben
-// Werte liefern -- drei Uebersetzungen waeren drei Gelegenheiten,
-// dasselbe verschieden zu nennen.
-//
-// DER GRUND GEHT DABEI VERLOREN, und deshalb gibt es DG_CUSTWHY: eine
-// errno-Nummer hat drei Buchstaben Platz fuer "die Fensterplaetze dieses
-// Kernels tragen nur 12 582 912 Oktette, dein Bild braucht 14 745 600".
 fn disp_rc(r: u64) -> u64 {
     if r == vmode.E_OK {
         return 0
@@ -314,10 +268,6 @@ fn disp_rc(r: u64) -> u64 {
     return sys.neg(errno.E_IO)
 }
 
-// WER DEN BILDSCHIRM UMSTELLT, STELLT IHN FUER ALLE UM. Es gibt einen
-// Rahmenpuffer, eine Aufloesung und eine Gammakurve; ein Programm ohne
-// Rechte duerfte sie sonst jedem anderen wegnehmen. Also dasselbe wie
-// bei `osum_pwrset`: nur der Verwalter.
 fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
     if field == sys.DS_NIGHT {
         return disp_night(state, me, v)
@@ -337,9 +287,6 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
     if sched.tget(state, me, sched.T_EUID) != 0 {
         return sys.neg(errno.E_PERM)
     }
-    // Die Frist laeuft in AUFGABENKONTEXT ab und nicht im Zeitgeber --
-    // siehe den Absatz bei `vmode.poll`. Jeder Aufruf dieser Nummer
-    // sieht nach, ob sie um ist.
     vmode.poll(state)
     if field == sys.DS_MODE {
         let w: u64 = (v >> 16) & 0xFFFF
@@ -393,20 +340,12 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
         return 0
     }
     if field == sys.DS_CUSTOM {
-        // RUNDE CUSTOMRES: DIE FREIE EINGABE. Drei Zahlen, drei
-        // Schranken, und bei Ablehnung stehen Grund und Zahl in
-        // DG_CUSTWHY/DG_CUSTNUM bereit -- der Aufrufer bekommt also
-        // beides: einen Fehlerwert, mit dem er rechnen kann, und einen
-        // Satz, den er hinschreiben kann.
         let w: u64 = (v >> 32) & 0xFFFF
         let h: u64 = (v >> 16) & 0xFFFF
         let b: u64 = v & 0xFFFF
         return disp_rc(vmode.set_custom(state, w, h, b))
     }
     if field == sys.DS_CHECK {
-        // NUR PRUEFEN. Der Bildschirm wird dabei nicht angefasst -- das
-        // ist die Voraussetzung dafuer, dass ein Bedienfeld schon
-        // WAEHREND des Tippens sagen kann, ob es gehen wird.
         let w: u64 = (v >> 32) & 0xFFFF
         let h: u64 = (v >> 16) & 0xFFFF
         let b: u64 = v & 0xFFFF
@@ -417,7 +356,6 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
         return disp_rc(vmode.why_to_e(why))
     }
     if field == sys.DS_SAVE {
-        // Den LAUFENDEN Modus auf die Platte, mit Zaehlerstand null.
         if !dispsave.remember(state, fb.panel_w(state), fb.panel_h(state),
             fb.bpp(state)) {
             return sys.neg(errno.E_IO)
@@ -425,14 +363,6 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
         return 0
     }
     if field == sys.DS_CONFIRM {
-        // BESTAETIGEN HEISST SEIT DIESER RUNDE ZWEIERLEI, und beides
-        // haengt an derselben Aussage des Benutzers -- "ich sehe diesen
-        // Bildschirm":
-        //   1. die Fuenfzehn-Sekunden-Frist ist beantwortet;
-        //   2. der Modus darf den Neustart ueberleben, und sein
-        //      Erprobungszaehler faengt wieder bei null an.
-        // Ein bestaetigter Modus, der beim naechsten Start weg waere,
-        // waere eine Bestaetigung ohne Wirkung.
         vmode.confirm(state)
         let _sp: bool = dispsave.remember(state, fb.panel_w(state),
             fb.panel_h(state), fb.bpp(state))
@@ -448,11 +378,6 @@ fn do_dispset(state: u64, me: u64, field: u64, v: u64) -> u64 {
     return sys.neg(errno.E_INVAL)
 }
 
-// Die Tabelle bauen UND sie an- oder abhaengen. Eine Kurve, die nichts
-// aendert, wird ABGEHAENGT und nicht angewandt: sonst kostete ein
-// Bildschirm in Grundstellung den langen Weg in `fb.present`, ohne dass
-// irgendetwas anders aussaehe. Das ist keine Feinheit -- der Unterschied
-// ist ein Faktor, und er steht in docs/DISPLAY.md.
 fn disp_night(state: u64, me: u64, strength: u64) -> u64 {
     if sched.tget(state, me, sched.T_EUID) != 0 {
         return sys.neg(errno.E_PERM)
@@ -499,10 +424,6 @@ fn do_dispstr(state: u64, me: u64, which: u64, dst: u64, len: u64) -> u64 {
             n = n + 1
         }
     } else if which == sys.DSTR_MODEL {
-        // `model_at` gibt 0 zurueck, wo der Name zu Ende ist. Ein
-        // Zeichen ausserhalb des druckbaren Bereichs beendet ihn
-        // ebenfalls -- ein Monitor, der Steueroktette in seinen Namen
-        // schreibt, soll keine Konsole zerlegen.
         var fertig: bool = false
         while n < 13 && !fertig {
             let c: u64 = vmode.model_at(state, n)
@@ -526,14 +447,6 @@ fn do_dispstr(state: u64, me: u64, which: u64, dst: u64, len: u64) -> u64 {
 }
 
 // ------------------------------------------------- Runde K10: Fenster
-//
-// EIN FENSTER IST EIN HANDLE. Das Objekt hinter dem Handle traegt zwei
-// Zahlen: unten den Platz in der Fenstertafel, oben die laufende Nummer
-// des Fensters. Wird ein Platz nach dem Schliessen neu vergeben, passt
-// die laufende Nummer nicht mehr -- und das alte Handle trifft das neue
-// Fenster NICHT. Das ist dieselbe Regel wie bei den Generationen der
-// Handle-Tabelle, eine Stufe tiefer, und sie ist der Grund, warum hier
-// kein Zeiger im Objekt steht.
 fn win_of(state: u64, object: u64) -> u64 {
     let i: u64 = object & 0xFF
     if !wm.valid(state, i) {
@@ -545,12 +458,6 @@ fn win_of(state: u64, object: u64) -> u64 {
     return i
 }
 
-// RUNDE DESKTOP: IST DIESER PROZESS EINE TASKLEISTE? Er ist es genau
-// dann, wenn ihm ein Fenster auf Ebene L_TOP gehoert -- und das
-// bekommt er nur als Wurzel (sys.WM_STATE, sys.WS_LAYER). Das ist die ganze
-// Rechtepruefung fuer sys.WM_LIST und sys.WM_ACT, und sie ist ABSICHTLICH so
-// klein: eine Liste aller Fenstertitel ist eine Auskunft ueber fremde
-// Prozesse, und die gibt dieser Kernel nicht jedem.
 fn is_taskbar(state: u64, me: u64) -> bool {
     var i: u64 = 0
     while i < wm.MAX_WIN {
@@ -572,16 +479,6 @@ fn is_taskbar(state: u64, me: u64) -> bool {
     return false
 }
 
-// NUR DIE LEISTE SCHMUTZIG MELDEN, NICHT DEN SCHIRM.
-//
-// Der Text eines Widgets steht in der Leiste und sonst nirgends. Bis
-// hierher hat jeder `WM_PLUG_BAR` `wm.damage_all` gerufen -- also 800 x
-// 600 Bildpunkte fuer ein Feld von etwa 90 x 22. Diese Schleife sucht
-// die Fenster, die einen Schirmrand reserviert haben (dasselbe
-// Merkmal, an dem `is_taskbar` die Leiste erkennt) und meldet genau
-// deren Rechtecke. Hoechstens MAX_WIN Durchlaeufe, keine Rekursion.
-// Findet sie keines, faellt sie auf den ganzen Schirm zurueck: lieber
-// zu viel gemalt als ein Text, den niemand sieht.
 fn damage_bar(state: u64) {
     var gefunden: bool = false
     var i: u64 = 0
@@ -600,28 +497,7 @@ fn damage_bar(state: u64) {
     }
 }
 
-// EIN SATZ AUS DER FENSTERTAFEL NACH RING 3. In einer eigenen Funktion
-// und nicht als Zweig in `wm_call`: der Rahmen von `dispatch` ist in
-// diesem Kernel schon einmal fast uebergelaufen (siehe die Begruendung
-// bei `k13_call`), und ein Zweig mit zehn Zwischenwerten kostet dort
-// Stapel, auch wenn er nie genommen wird.
-// DAS LESERECHT AUF DIE FENSTERTAFEL, ZWEITER SCHLUESSEL.
-//
-// Bis zu dieser Runde gab es genau einen: eine Taskleiste sein
-// (`is_taskbar`, also einen Schirmrand reserviert haben). Eine
-// Fensterregel-Engine muss Titel und Buendelnamen aber genauso lesen --
-// sonst kann sie "app=rechner" nicht entscheiden. Sie half sich deshalb
-// mit einem VERBORGENEN 32x16-Fenster samt Streifen von einem Punkt,
-// nur um `is_taskbar` zu genuegen. Das war eine benannte Abkuerzung und
-// es war eine schlechte: ein Plugin, das ein Fenster anlegt, um ein
-// Leserecht zu bekommen, laesst sich von aussen nicht von einem Plugin
-// unterscheiden, das ein Fenster anlegt, um darin zu malen.
-//
-// Jetzt ist der zweite Schluessel das, was er sein sollte: das RECHT
-// R_EV_WIN aus der Plugintafel. Wer Fensterereignisse sehen darf, darf
-// auch die Fenstertafel lesen -- er erfaehrt ohnehin von jedem Fenster,
-// das aufgeht. Wer das Recht NICHT hat, bekommt weiter -E_RIGHTS.
-fn darf_listen(state: u64, me: u64) -> bool {
+fn may_list(state: u64, me: u64) -> bool {
     if is_taskbar(state, me) {
         return true
     }
@@ -635,78 +511,72 @@ fn darf_listen(state: u64, me: u64) -> bool {
     return (wmplug.rights_at(state, i) & wmplug.R_EV_WIN) != 0
 }
 
-fn wm_list(state: u64, me: u64, platz: u64, aus: u64, max: u64) -> u64 {
-    if !darf_listen(state, me) {
+fn wm_list(state: u64, me: u64, slot: u64, aus: u64, max: u64) -> u64 {
+    if !may_list(state, me) {
         return cap.err(cap.E_RIGHTS)
     }
-    if platz >= wm.MAX_WIN || max < sys.WL_BYTES {
+    if slot >= wm.MAX_WIN || max < sys.WL_BYTES {
         return cap.err(cap.E_INVALID)
     }
-    return wl_fill(state, me, platz, aus, sys.WL_BYTES)
+    return wl_fill(state, me, slot, aus, sys.WL_BYTES)
 }
 
 // One record of the window table into Ring 3: WL_BYTES for the taskbar,
 // FW_BYTES (with owner and kind) for the foreign-window layer.
-fn wl_fill(state: u64, me: u64, platz: u64, aus: u64, n: u64) -> u64 {
-    let puffer: u64 = blockb(state) + 3600
+fn wl_fill(state: u64, me: u64, slot: u64, aus: u64, n: u64) -> u64 {
+    let buffer: u64 = blockb(state) + 3600
     var k: u64 = 0
     while k < n {
-        kstate.set8(puffer + k, 0 as u8)
+        kstate.set8(buffer + k, 0 as u8)
         k = k + 1
     }
     // r382 LOCK SEAL: while the screen is locked the table shows nothing
     // of the windows behind the lock (no title, no size, no owner).
-    if !wm.valid(state, platz) || !wm.darf(state, platz) || wm.tt_is_bg(state, platz) {
-        if !sys.copy_out(state, me, aus, puffer, n) {
+    if !wm.valid(state, slot) || !wm.darf(state, slot) || wm.tt_is_bg(state, slot) {
+        if !sys.copy_out(state, me, aus, buffer, n) {
             return cap.err(cap.E_INVALID)
         }
         return 0
     }
     if n >= sys.FW_BYTES {
-        kstate.set(puffer, sys.FW_OWNER,
-            sched.tget(state, wm.win_owner(state, platz), sched.T_PID))
-        kstate.set(puffer, sys.FW_KIND, wm.win_kind(state, platz))
+        kstate.set(buffer, sys.FW_OWNER,
+            sched.tget(state, wm.win_owner(state, slot), sched.T_PID))
+        kstate.set(buffer, sys.FW_KIND, wm.win_kind(state, slot))
     }
-    kstate.set(puffer, sys.WL_ID, wm.win_id(state, platz))
-    kstate.set(puffer, sys.WL_X, wm.win_x(state, platz) as u64)
-    kstate.set(puffer, sys.WL_Y, wm.win_y(state, platz) as u64)
-    kstate.set(puffer, sys.WL_W, wm.win_w(state, platz))
-    kstate.set(puffer, sys.WL_H, wm.win_h(state, platz))
-    kstate.set(puffer, sys.WL_LAYER, wm.win_layer(state, platz))
+    kstate.set(buffer, sys.WL_ID, wm.win_id(state, slot))
+    kstate.set(buffer, sys.WL_X, wm.win_x(state, slot) as u64)
+    kstate.set(buffer, sys.WL_Y, wm.win_y(state, slot) as u64)
+    kstate.set(buffer, sys.WL_W, wm.win_w(state, slot))
+    kstate.set(buffer, sys.WL_H, wm.win_h(state, slot))
+    kstate.set(buffer, sys.WL_LAYER, wm.win_layer(state, slot))
     var fl: u64 = 0
-    if wm.win_hidden(state, platz) {
+    if wm.win_hidden(state, slot) {
         fl = fl | wm.F_HIDDEN
     }
-    if !wm.win_deco(state, platz) {
+    if !wm.win_deco(state, slot) {
         fl = fl | wm.F_NODECO
     }
-    kstate.set(puffer, sys.WL_FLAGS, fl)
+    kstate.set(buffer, sys.WL_FLAGS, fl)
     var f: u64 = 0
-    if wm.focus(state) == platz {
+    if wm.focus(state) == slot {
         f = 1
     }
-    kstate.set(puffer, sys.WL_FOCUS, f)
-    // RUNDE NETVIEW: GETAEUSCHT WIRD DAS PROGRAMM, NIE DER MENSCH.
-    // Diese eine Zahl ist der ganze Unterschied zwischen einem System,
-    // das seinem Benutzer hilft, und einem, das ihn auch anluegt.
-    kstate.set(puffer, sys.WL_NETV,
-        netview.view_of(state, wm.win_owner(state, platz)))
-    let t: u64 = wm.win_title(state, platz)
+    kstate.set(buffer, sys.WL_FOCUS, f)
+    kstate.set(buffer, sys.WL_NETV,
+        netview.view_of(state, wm.win_owner(state, slot)))
+    let t: u64 = wm.win_title(state, slot)
     k = 0
     while k < 31 {
-        kstate.set8(puffer + sys.WL_TITLE + k, kstate.get8(t + k) as u8)
+        kstate.set8(buffer + sys.WL_TITLE + k, kstate.get8(t + k) as u8)
         k = k + 1
     }
-    // RUNDE PAINT: und der Buendelname daneben. Er ist leer, solange
-    // das Programm nichts gesagt hat -- die Taskleiste faellt dann auf
-    // reinen Text zurueck.
-    let ap: u64 = wm.win_app(state, platz)
+    let ap: u64 = wm.win_app(state, slot)
     k = 0
     while k < wm.APP_LEN - 1 {
-        kstate.set8(puffer + sys.WL_APP + k, kstate.get8(ap + k) as u8)
+        kstate.set8(buffer + sys.WL_APP + k, kstate.get8(ap + k) as u8)
         k = k + 1
     }
-    if !sys.copy_out(state, me, aus, puffer, n) {
+    if !sys.copy_out(state, me, aus, buffer, n) {
         return cap.err(cap.E_INVALID)
     }
     return 1
@@ -965,14 +835,11 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if (a3 & ~sys.WO_KNOWN) != 0 {
             return cap.err(cap.E_INVALID)
         }
-        // Ein Fenster anlegen. Der Titel kommt aus Ring 3 und wird
-        // KOPIERT -- der Server folgt keinem fremden Zeiger, er holt
-        // sich zweiunddreissig Oktette in seinen eigenen Puffer.
         let x: u64 = (a0 >> 16) & 0xFFFF
         let y: u64 = a0 & 0xFFFF
         let w: u64 = (a1 >> 16) & 0xFFFF
         let h: u64 = a1 & 0xFFFF
-        let titel: u64 = blockb(state) + 3072
+        let title: u64 = blockb(state) + 3072
         var k: u64 = 0
         while k < 31 {
             var c: u64 = 0
@@ -983,14 +850,14 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
                 // one fetch through the checked reader (translate() == 0 after a racing munmap must not be dereferenced)
                 c = sys.peek(state, me, a2 + k)
             }
-            kstate.set8(titel + k, c as u8)
+            kstate.set8(title + k, c as u8)
             if c == 0 {
                 k = 31
             } else {
                 k = k + 1
             }
         }
-        kstate.set8(titel + 31, 0 as u8)
+        kstate.set8(title + 31, 0 as u8)
         // COMPOSITOR S3: a fifth argument names a memfd (descriptor + 1, made with MFD_FRAMES) the window paints from. Anything that
         // does not fit (not contiguous, too small, the word `noshare`) is NOT an error: the window gets its own buffer and the client
         // finds out with WM_INFO / WI_SHARED and copies with WIG_BLIT as before.
@@ -1006,7 +873,7 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             }
         }
         let i: u64 = wm.create_ex(state, me, x as i64, y as i64, w, h,
-            a3 & 1, titel, sbase, sbytes, sidx)
+            a3 & 1, title, sbase, sbytes, sidx)
         if i >= wm.MAX_WIN {
             return cap.err(cap.E_EXHAUSTED)
         }
@@ -1031,20 +898,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if (a3 & (sys.WO_FRAMELESS | sys.WO_OPAC)) != 0 {
             wm.compose(state)
         }
-        // RUNDE OBERFLAECHE: ES WAECHST AUF. Erst JETZT -- ein Fenster,
-        // das keinen Handle bekommen hat, wird gleich wieder
-        // weggeraeumt und soll nicht vorher noch aufgehen.
         let _oa: bool = wm.open_anim(state, i)
         return hh
     }
-    // RUNDE DESKTOP: DIE BEIDEN AUFRUFE OHNE HANDLE. Sie stehen VOR der
-    // Handle-Suche, weil ihr erstes Argument keines ist -- eine
-    // Taskleiste redet ueber die Fenster ANDERER Prozesse und bekommt
-    // fuer die kein Handle. Was sie statt dessen vorweisen muss, ist ein
-    // EIGENES Fenster auf der obersten Ebene: sie muss eine Taskleiste
-    // SEIN. Eine gewoehnliche Anwendung bekommt -E_RIGHTS und sieht die
-    // Titel der anderen nicht.
-    // COMPOSITOR S3: the window table page, for anybody (geometry, order, owner -- no titles, no pixels)
     if number == sys.WM_TABLE {
         // S6b: argument 1 = the chrome page (colours, measures, hover state, titles): root only, it is the compositor's
         if a0 == 1 {
@@ -1101,12 +957,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if !wm.set_deco_colour(state, a0, a1) {
             return cap.err(cap.E_INVALID)
         }
-        // NUR SCHMUTZIG MELDEN, NICHT ZUSAMMENSETZEN. Der erste
-        // Entwurf setzte hier zusammen, und weil eine Taskleiste acht
-        // Farben hintereinander setzt, waren das acht
-        // Vollbild-Durchlaeufe im Systemaufruf -- die Maschine kam
-        // beim Starten nicht mehr durch. Der Ring des Servers setzt
-        // ohnehin sechzig Mal in der Sekunde zusammen.
         wm.damage_all(state)
         return 0
     }
@@ -1117,31 +967,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if !wm.set_form(state, a0, a1) {
             return cap.err(cap.E_INVALID)
         }
-        // Wie bei WM_DECO: NUR SCHMUTZIG MELDEN. Eine Taskleiste setzt
-        // vier Werte hintereinander, und vier Vollbild-Durchlaeufe im
-        // Systemaufruf haben diese Maschine schon einmal beim Starten
-        // stehenbleiben lassen.
-        //
-        // RUNDE GLAS / RUNDE BLUR: ES SIND JETZT ACHTZEHN PLAETZE UND
-        // NICHT NEUN -- UND HIER STEHT DESHALB KEINE ZEILE MEHR ALS
-        // VORHER.
-        //
-        // Die neuen Zahlen (die drei des Acryls, Deckkraft der Leiste,
-        // Deckkraft der Fenster, Schluesselfarbe) gehen durch genau
-        // diesen Aufruf, durch genau diese Rechtepruefung und durch
-        // genau dieses `set_form`, das sie selbst klemmt. Eine eigene
-        // Systemnummer haette eine zweite Stelle geschaffen, an der ein
-        // Programm ohne Leistenrecht haette vorbeikommen koennen --
-        // und die Rechtepruefung waere dann an zwei Orten gepflegt
-        // worden statt an einem.
         wm.damage_all(state)
         return 0
     }
-    // ============================================= RUNDE OBERFLAECHE
-    // DAS ZIEL DES MINIMIERENS. Dieselbe Rechteregel wie WM_ACT: es
-    // geht um ein FREMDES Fenster, also muss der Rufende die Leiste
-    // sein. Der Schreibtisch ist auch hier ausgenommen -- er wird nie
-    // minimiert und hat keinen Knopf.
     if number == sys.WM_MINRECT {
         if !is_taskbar(state, me) {
             return cap.err(cap.E_RIGHTS)
@@ -1168,45 +996,12 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if w >= wm.MAX_WIN {
             return cap.err(cap.E_NOTFOUND)
         }
-        // ============================================== RUNDE GRIFF
-        // WARUM DER STARTKNOPF NICHTS GESTARTET HAT.
-        //
         // Hier stand:
         //
         //     if wm.win_layer(state, w) != wm.L_NORMAL {
         //         return cap.err(cap.E_RIGHTS)
         //     }
-        //
-        // Die Absicht ist richtig und bleibt: die Leiste soll den
-        // SCHREIBTISCH nicht wegraeumen und sich SELBST nicht
-        // schliessen koennen. Der Satz sagt aber mehr, als er meint --
-        // er sperrt JEDES Fenster aus, das nicht auf der normalen
-        // Ebene liegt, und das STARTMENUE liegt mit Absicht auf L_TOP
-        // (sonst verschwindet es hinter dem naechsten Fenster).
-        //
         // GEMESSEN (1280x800, Abnahmelauf dieser Runde, serial.txt):
-        //
-        //     taskbar: click x=24 y=20 hits=start
-        //     taskbar: startmenue auf
-        //     wm: fokus id=7 vor=0        <- id 7 ist die LEISTE
-        //
-        // Jeder Klick auf Start lief in dieses `E_RIGHTS`. Die Leiste
-        // hat den Rueckgabewert nicht angesehen und trotzdem
-        // "startmenue auf" gesagt -- deshalb sah es im Mitschnitt so
-        // aus, als geschehe etwas, waehrend in Wahrheit nichts
-        // geschah: das Bild 02-startmenue.ppm war Oktett fuer Oktett
-        // dasselbe wie 01-schreibtisch.ppm.
-        //
-        // DIE REGEL, DIE WIRKLICH GEMEINT IST, nennt die zwei Faelle
-        // beim Namen statt sie ueber die Ebene zu erraten:
-        //
-        //   1. den SCHREIBTISCH nicht (L_DESK) -- er ist der Grund,
-        //      auf dem alles liegt,
-        //   2. und kein Fenster, das der LEISTE SELBST gehoert.
-        //
-        // Alles andere darf sie umschalten, auch ein L_TOP-Fenster wie
-        // das Startmenue. Ein Menue, das man aufmachen, aber nie wieder
-        // zumachen kann, ist kein Menue.
         if wm.win_layer(state, w) == wm.L_DESK {
             return cap.err(cap.E_RIGHTS)
         }
@@ -1214,53 +1009,17 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return cap.err(cap.E_RIGHTS)
         }
         if a1 == sys.WA_HIDE {
-            // RUNDE OBERFLAECHE: der Leistenknopf minimiert ueber die
-            // BEWEGUNG. `minimize_anim` setzt am Ende `set_hidden` --
-            // und sofort, wenn die Bewegung abgeschaltet ist.
             let _ma: bool = wm.minimize_anim(state, w)
         } else if a1 == sys.WA_RAISE {
             wm.set_hidden(state, w, false)
             wm.raise_win(state, w)
             wm.set_focus(state, w)
         } else if a1 == sys.WA_TOGGLE {
-            // DIE REGEL EINER TASKLEISTE, in zwei Zeilen: ist das
-            // Fenster verborgen ODER nicht das aktive, hol es nach
-            // vorn; ist es beides nicht, leg es weg.
-            //
-            // ============================================ RUNDE GRIFF
-            // ... UND DER FOKUS ZAEHLT NUR AUF DER NORMALEN EBENE.
-            //
-            // Fuer ein gewoehnliches Fenster ist "nicht das aktive"
-            // das richtige Zeichen fuer "es liegt hinten, hol es
-            // vor". Fuer das STARTMENUE ist es falsch, und zwar
-            // IMMER: es liegt auf L_TOP, also ganz vorn, und den
-            // Eingabefokus hat es nur, solange niemand anders ihn
-            // genommen hat. Ein Klick auf die Leiste nimmt ihn (die
-            // Leiste ist ein Fenster wie jedes andere).
-            //
-            // GEMESSEN, nachdem die Ebenensperre eine Zeile weiter
-            // oben gefallen war (1280x800, dieser Runde):
-            //
-            //     01-schreibtisch.ppm enthaelt #ad84f3 und #efe7fc
-            //     im Rechteck des Menues -- das Menue IST ZU SEHEN
-            //     serial: taskbar: startmenue auf ... auf
-            //
-            // Zweimal "auf" bei zwei Klicks: der erste haette
-            // schliessen muessen. `wm.focus(state) != w` war wahr,
-            // weil der Fokus auf der LEISTE lag (id=7) -- also wurde
-            // das schon offene Menue noch einmal "geoeffnet" und
-            // blieb stehen. Ein Menue, das sich nicht schliessen
-            // laesst, verdeckt danach jeden Klick dahinter.
-            //
-            // Auf L_TOP entscheidet deshalb allein, ob das Fenster
-            // VERBORGEN ist. Das ist dieselbe Frage, die ein Mensch
-            // stellt ("sehe ich es?"), und sie hat fuer ein Fenster,
-            // das immer vorn liegt, nur diese eine Antwort.
-            var offen: bool = !wm.win_hidden(state, w)
+            var is_open: bool = !wm.win_hidden(state, w)
             if wm.win_layer(state, w) == wm.L_NORMAL {
-                offen = offen && wm.focus(state) == w
+                is_open = is_open && wm.focus(state) == w
             }
-            if !offen {
+            if !is_open {
                 wm.set_hidden(state, w, false)
                 wm.raise_win(state, w)
                 wm.set_focus(state, w)
@@ -1273,20 +1032,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wm.compose(state)
         return 0
     }
-    // ============================================ RUNDE WMPLUGIN
-    // DIE NUMMERN DER ERWEITERUNGEN, 2117..2126. Sie stehen HIER, vor
-    // der Handle-Suche: ein Plugin redet ueber die Tafel und nicht
-    // ueber ein Fenster, es hat fuer diesen Weg kein Handle. Was es
-    // statt dessen vorweist, ist sein Platz in `wmplug.fi` -- und den
-    // bekommt nur, wer die richtige Fassung genannt hat.
-    //
-    // In EIGENER FUNKTION und nicht als Zweigkette hier: der Rahmen von
-    // `wm_call` ist schon jetzt gross, und der Kernstapel hat 16 KiB.
-    // COMPOSITOR S3: the numbers above WM_PLUG_GRANT (WM_SETBUF, WM_DAMAGE) belong to windows and go on to the handle lookup
     if number >= sys.WM_PLUG_REG && number <= sys.WM_PLUG_GRANT {
         return plug_call(state, me, number, a0, a1, a2, a3)
     }
-    // Alles Weitere braucht ein gueltiges Handle DIESES Prozesses.
     let slot: u64 = cap.find(state, me, a0)
     if slot >= cap.MAX_CAPS {
         return cap.err(cap.E_BADHANDLE)
@@ -1318,14 +1066,14 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if !proc.user_ok(state, me, a2, n) {
             return cap.err(cap.E_INVALID)
         }
-        let puffer: u64 = blockb(state) + 3200
-        if !sys.copy_in(state, me, puffer, a2, n) {
+        let buffer: u64 = blockb(state) + 3200
+        if !sys.copy_in(state, me, buffer, a2, n) {
             return cap.err(cap.E_INVALID)
         }
         let f: u64 = wm.font_ui(state)
         return wm.text(state, i, f, wm.px_ui(state),
             ((a1 >> 16) & 0xFFFF) as i64, (a1 & 0xFFFF) as i64,
-            puffer, n, a4) as u64
+            buffer, n, a4) as u64
     }
     if number == sys.WM_EVENT {
         if !cap.rights_contains(rights, cap.R_READ) {
@@ -1334,14 +1082,14 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if wm.ev_waiting(state, i) == 0 {
             return 0
         }
-        let puffer: u64 = blockb(state) + 3520
-        if !wm.ev_pop(state, i, puffer) {
+        let buffer: u64 = blockb(state) + 3520
+        if !wm.ev_pop(state, i, buffer) {
             return 0
         }
         if !proc.user_ok(state, me, a1, 16) {
             return cap.err(cap.E_INVALID)
         }
-        if !sys.copy_out(state, me, a1, puffer, 16) {
+        if !sys.copy_out(state, me, a1, buffer, 16) {
             return cap.err(cap.E_INVALID)
         }
         return 1
@@ -1401,20 +1149,12 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             }
             return wm.work_h(state)
         }
-        // RUNDE THEMESTORE (ueber MERGE-2 hierher): der Versatz der
-        // Malflaeche. Auf dem Zweig stand er in kernel/sys.fi, seit
-        // serverbuild steht `wm_call` hier.
         if a1 == sys.WI_INX {
             return wm.inx(state, i)
         }
         if a1 == sys.WI_INY {
             return wm.iny(state, i)
         }
-        // RUNDE GLAS (NACHTRAG): das WIRKSAME Alpha der Leiste. Es
-        // haengt nicht am Fenster, sondern am Bild darunter -- die
-        // Nummer des Fensters wird deshalb nicht benutzt, und jedes
-        // Fenster darf fragen: die Seite "Darstellung" schreibt die
-        // Zahl neben ihren Regler.
         if a1 == sys.WI_TB_ALPHA_IST {
             return wm.tb_alpha_ist(state)
         }
@@ -1523,43 +1263,9 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             return cap.err(cap.E_RIGHTS)
         }
         if a1 == sys.WS_LAYER {
-            // RUNDE ECHTHARDWARE-3: die Ebenen reichen jetzt bis L_TIP
-            // (Blase). Was darueber liegt, gibt es nicht.
             if a2 > wm.L_MAX {
                 return cap.err(cap.E_INVALID)
             }
-            // WER SICH SELBST NACH GANZ VORN LEGEN DARF, KANN JEDE
-            // OBERFLAECHE NACHBAUEN -- ein Fenster auf Ebene L_TOP
-            // liegt ueber allem, auch ueber einem Kennwortdialog.
-            // Ebene 1 darf jeder, es ist die, die er ohnehin hat.
-            //
-            // ============================================ RUNDE ANMELDUNG
-            // NACH HINTEN DARF JEDER, NACH VORN NUR DIE WURZEL.
-            //
-            // Hier stand `a2 != wm.L_NORMAL`, und damit war AUCH Ebene
-            // 0 (L_DESK, ganz hinten) der Wurzel vorbehalten. Gemessen
-            // am Abnahmelauf vom 13.09.: der Schreibtisch, nach der
-            // Anmeldung mit uid 1000 gestartet, bekam hier `E_RIGHTS`
-            // und beendete sich sofort --
-            //
-            //     desktop: keine Ebene 0 -- nicht die Wurzel?
-            //
-            // Der Schirm blieb danach leer, und die naechste PID wurde
-            // wiederverwendet. Ein Schreibtisch, der nicht als root
-            // laufen darf, ist aber genau das Ziel dieser Runde.
-            //
-            // WARUM DAS SICHER IST, und warum es fuer L_TOP NICHT gilt:
-            // die Gefahr einer Ebene ist, WAS SIE VERDECKT. L_DESK
-            // liegt hinter allem -- ein Fenster dort kann nichts
-            // ueberdecken, also auch keinen Kennwortdialog nachbauen.
-            // Das Schlimmste, was ein boesartiges Programm dort
-            // anrichtet, ist ein haesslicher Hintergrund. L_TOP (2)
-            // und alles darueber liegt UEBER dem Sperrbildschirm; das
-            // bleibt der Wurzel vorbehalten, und genau daran haengt
-            // die Zusage des Sperrbildschirms.
-            // W-WINOPTS S2: L_FLOAT (always on top, but BELOW the task bar and the lock screen) is the one upper layer an app may
-            // have -- with the right `window.float`, granted by the person like the microphone. Root may always. L_TOP and
-            // everything above stays root only.
             if a2 == wm.L_FLOAT {
                 if !perm.is_root(state, me) && !policy.label_allows(origin.at(state, me), policy.P_WINDOW_FLOAT) {
                     return cap.err(cap.E_RIGHTS)
@@ -1583,9 +1289,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
             wm.compose(state)
             return 0
         }
-        // RUNDE ECHTHARDWARE-1: "ich will die Tastatur, obwohl ich
-        // oben liege". Nur der eigene Prozess fuer sein eigenes
-        // Fenster -- `i` ist bereits geprueft.
         if a1 == sys.WS_KEYS {
             wm.set_keys(state, i, a2 != 0)
             return 0
@@ -1639,14 +1342,6 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wm.compose(state)
         return 0
     }
-    // RUNDE PAINT: WELCHEM BUENDEL DIESES FENSTER GEHOERT.
-    //
-    // Es steht HIER, hinter der Handle-Suche, und nicht bei WM_DECO und
-    // WM_FORM: die beiden reden ueber FREMDE Fenster und brauchen
-    // deshalb das Taskleisten-Recht. Dieser Aufruf benennt das EIGENE
-    // Fenster, genau wie WM_SIZE seine eigene Groesse setzt -- also
-    // reicht das Handle mit R_MANAGE, und eine gewoehnliche Anwendung
-    // darf es.
     if number == sys.WM_APP {
         if !cap.rights_contains(rights, cap.R_MANAGE) {
             return cap.err(cap.E_RIGHTS)
@@ -1654,17 +1349,17 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if a2 == 0 || a2 > wm.APP_LEN {
             return cap.err(cap.E_INVALID)
         }
-        let puffer: u64 = blockb(state) + 3760
+        let buffer: u64 = blockb(state) + 3760
         var k: u64 = 0
         while k < wm.APP_LEN {
-            kstate.set8(puffer + k, 0 as u8)
+            kstate.set8(buffer + k, 0 as u8)
             k = k + 1
         }
-        if !sys.copy_in(state, me, puffer, a1, a2) {
+        if !sys.copy_in(state, me, buffer, a1, a2) {
             return cap.err(cap.E_INVALID)
         }
-        kstate.set8(puffer + wm.APP_LEN - 1, 0 as u8)
-        if !wm.set_app(state, i, puffer) {
+        kstate.set8(buffer + wm.APP_LEN - 1, 0 as u8)
+        if !wm.set_app(state, i, buffer) {
             return cap.err(cap.E_INVALID)
         }
         return 0
@@ -1707,39 +1402,18 @@ fn wm_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         if !proc.user_ok(state, me, a1, n) {
             return cap.err(cap.E_INVALID)
         }
-        let puffer: u64 = blockb(state) + 3200
-        if !sys.copy_in(state, me, puffer, a1, n) {
+        let buffer: u64 = blockb(state) + 3200
+        if !sys.copy_in(state, me, buffer, a1, n) {
             return cap.err(cap.E_INVALID)
         }
-        return wm.term_write(state, i, puffer, n)
+        return wm.term_write(state, i, buffer, n)
     }
     return cap.err(cap.E_UNSUPPORTED)
 }
 
 // ------------------------------------------------------------ RUNDE K15
-//
-// DIE NAHT ZUR WIDGET-BIBLIOTHEK, und sie ist mit Absicht so klein, dass
-// sie auf eine Seite passt. Alles, was ein Widget ist -- ein Knopf, ein
-// Textfeld, eine Bildlaufleiste, ein Menue -- steht in
-// `kernel/user/wlib.fi`, in Ring 3. Was hier steht, kann dort nicht
-// stehen: der Rasterer, die Fensterpuffer, die Zwischenablage und das
-// Zeigerbild.
-//
-// EINE ABSICHTLICHE UNGLEICHHEIT: WIG_BLIT verlangt ein Handle mit
-// R_WRITE, die uebrigen sechs verlangen keins. Das ist keine Nachlaessig-
-// keit, sondern die Trennlinie dieser ABI: ein Fenster ist Autoritaet
-// (wer es nicht bekommen hat, malt nicht hinein), eine Glyphe ist es
-// nicht. Die Zwischenablage ist der Grenzfall, und er ist benannt: sie
-// ist SYSTEMWEIT, jeder Prozess darf lesen und schreiben, und das ist
-// genau das, was eine Zwischenablage ist. Wer das nicht will, braucht
-// einen Zwischenablagedienst mit eigenen Handles -- das ist eine Runde
-// fuer sich und steht so in docs/ROUNDK15.md.
 fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
     a3: u64, a4: u64) -> u64 {
-    // DIE DREI DES ZWEITEN NACHTRAGS STEHEN VOR DER PRUEFUNG AUF EINE
-    // OBERFLAECHE. Ein Namensindex hat mit Fenstern nichts zu tun; der
-    // Messlauf `wigidx` faehrt ohne `wm`, und ein `find` im Terminal
-    // koennte denselben Index benutzen.
     if number == sys.WIG_SCAN {
         return sys.do_scan(state, me, a0, a1, a2)
     }
@@ -1872,7 +1546,6 @@ fn wig_call(state: u64, me: u64, number: u64, a0: u64, a1: u64, a2: u64,
         wig.set_shape(state, a0)
         return 0
     }
-    // Bleibt WIG_BLIT, und der braucht ein Fenster.
     let slot: u64 = cap.find(state, me, a0)
     if slot >= cap.MAX_CAPS {
         return sys.neg(errno.E_BADF)
@@ -1918,8 +1591,6 @@ fn do_tileget(state: u64, field: u64) -> u64 {
     if field == sys.TL_MAXNODES {
         return tile.MAX_NODES
     }
-    // OHNE FENSTERSERVER GIBT ES KEINE ZAHLEN, und schon gar keine Null,
-    // die wie eine Messung aussieht -- dieselbe Regel wie bei `pwrget`.
     if !wm.ready(state) || !tile.ready(state) {
         return sys.neg(errno.E_NODEV)
     }
@@ -1997,9 +1668,6 @@ fn do_tiledo(state: u64, act: u64) -> u64 {
     return 0
 }
 
-// DIE BELEGUNG KOMMT AUS RING 3, und zwar als TEXT. Das Programm liest
-// /users/<name>/config/tiling.conf -- es weiss, wer der Benutzer ist,
-// der Kernel weiss es nicht -- und schiebt den Inhalt herueber.
 fn do_tileconf(state: u64, me: u64, text: u64, len: u64) -> u64 {
     if len == 0 || len > kstate.BLOCK_MAX {
         return sys.neg(errno.E_INVAL)
@@ -2024,42 +1692,11 @@ fn do_tilebind(state: u64, nr: u64, field: u64) -> u64 {
     return tile.bind_action(state, nr)
 }
 
-
 // =====================================================================
 // RUNDE FEEDBACK, IN DIESEN ZWEIG GEHOLT VON RUNDE BRIDGE-2:
 // DAS BILDSCHIRMFOTO.
 // =====================================================================
-//
-// WARUM DIESE DATEI UND NICHT `sys.fi`. Runde FEEDBACK hatte `do_shot`
-// in `sys.fi` stehen, und dort steht es hier NICHT -- aus zwei
-// gemessenen Gruenden:
-//
-//   1. `sys.fi` importiert in diesem Zweig weder `wm` noch `fb`. Der
-//      Fensterserver haengt an `gfx`, und genau dafuer gibt es diese
-//      Datei: sie faellt bei `gui=off` aus dem Uebersetzungsbaum
-//      (tools/server/build.sh nennt sie beim Namen). Ein
-//      Bildschirmfoto-Aufruf in `sys.fi` haette den GUI-losen Kern
-//      entweder mitgeschleppt oder gebrochen.
-//   2. `ist_leiste` -- die Rechtepruefung, auf der das Ganze steht --
-//      steht schon HIER, ein paar Zeilen weiter oben. FEEDBACK hatte
-//      sie in `sys.fi`. Sie zweimal zu haben waere genau die Art
-//      Doppelung, an der zwei Fassungen auseinanderlaufen.
-//
-// AN DER SACHE SELBST IST NICHTS GEAENDERT: dieselben fuenf Handlungen,
-// dieselben drei Schloesser, dieselben Zaehler. Nur die Nummer ist eine
-// andere (siehe `sys.SYS_OSUM_SHOT`).
 
-// DER WEG UEBER DIE TASTE. Vier Bedingungen, und der Kern prueft alle
-// vier -- ein Programm, das sich selbst freigeben koennte, waere kein
-// Schloss.
-//
-//   1. der letzte Tastendruck war Super+P (gross oder klein),
-//   2. er ist weniger als GRACE_NS her,
-//   3. diese Zaehlernummer hat noch keinen Schein bekommen,
-//   4. der Rufende besitzt das Fenster MIT DEM EINGABEFOKUS.
-//
-// Punkt 4 ist der wichtigste: ohne ihn koennte ein Programm im
-// Hintergrund die Bildschirmfoto-Taste eines anderen abfangen.
 fn shot_key_ok(state: u64, me: u64) -> bool {
     let k: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_KEY)
     if k != shot.KEY && k != shot.KEY_UPPER {
@@ -2067,10 +1704,10 @@ fn shot_key_ok(state: u64, me: u64) -> bool {
     }
     let seq: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ)
     if seq == 0 {
-        return false // es wurde ueberhaupt noch keine Taste gelatcht
+        return false
     }
     if shot.keyseq(state) == seq {
-        return false // dieser Druck hat seinen Schein schon gehabt
+        return false
     }
     let ns: u64 = kstate.get(state, kstate.K11_OFF + kstate.HK_NS)
     let now: u64 = time.mono_ns(state)
@@ -2090,7 +1727,6 @@ fn shot_key_ok(state: u64, me: u64) -> bool {
     return wm.win_owner(state, w) == me
 }
 
-// WER DARF EINEN SCHEIN AUSSTELLEN: die Taskleiste oder die Wurzel.
 fn shot_may_arm(state: u64, me: u64) -> bool {
     if sched.tget(state, me, sched.T_EUID) == 0 {
         return true
@@ -2098,22 +1734,11 @@ fn shot_may_arm(state: u64, me: u64) -> bool {
     return is_taskbar(state, me)
 }
 
-// EIN BAND BILDPUNKTE NACH RING 3.
-//
-// Die Uebersetzung Seite fuer Seite und nicht Oktett fuer Oktett: ein
-// Bild sind ueber eine Million Oktette, und `proc.translate` ist ein
-// vierstufiger Gang durch die Seitentafeln. Einmal je 4096 Oktette
-// statt einmal je Oktett ist der Unterschied zwischen Millisekunden und
-// Sekunden.
-//
-// GEPRUEFT WIRD TROTZDEM VORHER UND GANZ: `proc.user_ok` ueber den
-// vollen Bereich, und danach muss JEDE Seite wirklich uebersetzbar sein,
-// sonst bricht die Schleife mit -EFAULT ab.
 fn shot_copy(state: u64, me: u64, dst: u64, rows: u64, from: u64) -> u64 {
     let w: u64 = shot.width(state)
     var y: u64 = 0
     var at: u64 = dst
-    var page: u64 = 1 // eine Adresse, die keine Seitenanfangsadresse ist
+    var page: u64 = 1
     var phys: u64 = 0
     while y < rows {
         var x: u64 = 0
@@ -2177,8 +1802,6 @@ fn shot_head_field(state: u64, head: u64, field: u64) -> u64 {
 }
 
 fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
-    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: was gezaehlt wird,
-    //      kann nicht heimlich sein.
     if what == sys.SH_INFO {
         if a1 == sys.SI_READY {
             if shot.ready(state) {
@@ -2245,14 +1868,11 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     if !shot.ready(state) {
         return sys.neg(errno.E_NODEV)
     }
-    // ---- DEN SCHEIN AUSSTELLEN. Nur die Taskleiste oder die Wurzel.
     if what == sys.SH_ARM {
         if !shot_may_arm(state, me) {
             shot.deny(state)
             return sys.neg(errno.E_PERM)
         }
-        // Auf WEN. 0 heisst "auf mich" -- der uebliche Fall, wenn die
-        // Wurzel selbst fotografiert.
         var pid: u64 = a1
         if pid == 0 {
             pid = sched.tget(state, me, sched.T_PID)
@@ -2260,32 +1880,24 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         shot.arm(state, pid)
         return 0
     }
-    // ---- DER WEG UEBER DIE TASTE.
     if what == sys.SH_KEY {
         if !shot_key_ok(state, me) {
             shot.deny(state)
             return sys.neg(errno.E_PERM)
         }
-        // Die Zaehlernummer wird VERBRAUCHT, bevor der Schein da ist:
-        // ein zweiter Aufruf zu demselben Druck bekommt nichts mehr.
         shot.set_keyseq(state, kstate.get(state, kstate.K11_OFF + kstate.HK_SEQ))
         shot.arm(state, sched.tget(state, me, sched.T_PID))
         return 0
     }
-    // ---- DEN SCHEIN ZURUECKGEBEN. Nur der eigene.
     if what == sys.SH_DROP {
         if shot.armed(state)
             && shot.arm_pid(state) == sched.tget(state, me, sched.T_PID) {
             shot.drop(state)
             return 0
         }
-        // GEZAEHLT WIE DIE ANDEREN BEIDEN: ein Schutz, dessen
-        // Umgehungsversuche nur zum Teil auffallen, ist ein Protokoll,
-        // dem man nicht glauben kann.
         shot.deny(state)
         return sys.neg(errno.E_PERM)
     }
-    // ---- EIN BAND HOLEN.
     if what == sys.SH_GRAB {
         let mine: u64 = sched.tget(state, me, sched.T_PID)
         let from: u64 = shot.next_row(state)
@@ -2316,9 +1928,6 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         if errno.is_error(n) {
             return n
         }
-        // ERST KOPIEREN, DANN WEITERRUECKEN. Bricht das Kopieren mit
-        // -EFAULT ab, bleibt die Zeilenmarke stehen und der Rufende darf
-        // dasselbe Band mit einem richtigen Puffer noch einmal holen.
         shot.advance(state, rows)
         return n
     }
@@ -2328,16 +1937,6 @@ fn shot_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
 // ====================================================================
 // RUNDE BRUECKE: EINGABE EINSPEISEN
 // ====================================================================
-//
-// Der Zwilling von `shot_call`, und absichtlich daneben: wer die
-// Rechte des Bildschirmfotos aendert, sieht diese hier mit. Zwei
-// Rechtesysteme in zwei Dateien laufen auseinander, und das
-// schwaechere gewinnt.
-//
-// WER EINEN TIPPSCHEIN AUSSTELLEN DARF, ist dieselbe Frage wie beim
-// Foto und bekommt dieselbe Antwort (`shot_may_arm`): die Wurzel oder
-// die Taskleiste. Ein Programm, das tippen will, stellt sich den
-// Schein NICHT selbst aus.
 
 // TQ_KEYFOR: the key that types code point `cp & 0xFFFFFF` on the layout in force (or on layout `(cp >> 24) - 1` when the
 // top byte is set). The inverse of kbd.code_of, found by scanning the keys plain, with Shift, with AltGr. The bridge agent
@@ -2375,17 +1974,9 @@ fn keyfor(state: u64, arg: u64) -> u64 {
 }
 
 fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
-    // ZUERST: gibt es die Bruecke in diesem Abbild ueberhaupt? Ein
-    // Kern mit `--ohne-bruecke` sagt hier nein, und zwar mit -ENOSYS
-    // ("den Aufruf gibt es nicht") und nicht mit -EPERM ("du darfst
-    // nicht"). Die Unterscheidung ist der ganze Sinn von
-    // `kernel/tipp-aus.fi`.
     if !tip.gebaut() {
         return sys.neg(errno.E_NOSYS)
     }
-    // ---- AUSKUNFT. Ohne jedes Recht, mit Absicht: wer von aussen
-    //      tippt, soll sich nicht verstecken koennen. Die Taskleiste
-    //      fragt genau hier, ob sie ihr Zeichen zeigen muss.
     if what == sys.TI_INFO {
         if a1 == sys.TQ_ARMED {
             return tip.aktiv(state)
@@ -2444,25 +2035,6 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         return sys.neg(errno.E_INVAL)
     }
 
-    // Ohne Fensterserver gibt es nichts, worin eine Taste landen
-    // koennte. Das hier ist die zweite Haelfte dessen, was
-    // `gfx-aus.fi` sagt -- auch ein GEBAUTER Fensterserver kann noch
-    // ohne Bildschirm dastehen.
-    //
-    // DIE PRUEFUNG STEHT HIER UND NICHT VOR `TI_ARM`, und das ist
-    // gemessen und nicht Geschmack: stand sie davor, bekam ein
-    // `jarvisctl eingabe taste` im Skriptmodus (`wm: skipped`) die
-    // Antwort -ENODEV, und `jarvisctl` sagte dazu "Kein Schein: das
-    // darf nur die Wurzel oder die Taskleiste". Das ist eine FALSCHE
-    // FAEHRTE -- der Schein war nicht das Problem, der Fensterserver
-    // war es. Eine Fehlermeldung, die auf die falsche Ursache zeigt,
-    // kostet mehr Zeit als gar keine.
-    //
-    // Einen SCHEIN darf man deshalb auch ohne Fensterserver holen und
-    // zurueckgeben (das kostet nichts und aendert nichts); nur das
-    // EINSPEISEN selbst braucht ihn wirklich.
-
-    // ---- DEN SCHEIN AUSSTELLEN. Nur Leiste oder Wurzel.
     if what == sys.TI_ARM {
         if tip.locked(state) {
             tip.deny(state)
@@ -2504,9 +2076,6 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         return 0
     }
 
-    // ---- IHN ZURUECKGEBEN. Das darf, wer ihn hat -- und die Wurzel,
-    //      damit ein Mensch einen vergessenen Schein wegnehmen kann,
-    //      ohne den Prozess zu suchen.
     if what == sys.TI_DROP {
         if tip.arm_pid(state) == me
             || sched.tget(state, me, sched.T_EUID) == 0 {
@@ -2516,37 +2085,11 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         return sys.neg(errno.E_PERM)
     }
 
-    // ---- AB HIER WIRD WIRKLICH ETWAS EINGESPEIST.
-    //
-    // KEINE PRUEFUNG AUF `wm.ready` MEHR, und das ist gemessen und
-    // nicht nachgelassen. Der erste Entwurf verlangte einen laufenden
-    // Fensterserver, weil eine Taste ja "irgendwohin" muss. Der
-    // Prueflauf hat gezeigt, dass das die falsche Bedingung ist:
-    //
-    //   * `kbd.push_hot` schreibt in den Ring in `K11_OFF`, und den
-    //     legt `kbd.fi` an, nicht `wm.fi`. Er ist da, sobald der Kern
-    //     laeuft.
-    //   * `ps2m.set_pos` schreibt in `MOUSE_OFF`, ebenso.
-    //   * Das Bildschirmfoto (`shot.fi`) braucht `wm` auch nicht --
-    //     `tools/bridge/fotovergleich.sh` faehrt mit `gfx` ohne `wm`
-    //     und bekommt sein PNG.
-    //
-    // Mit der Pruefung antwortete jede Einspeisung im Prueflauf
-    // -ENODEV, und zwar auch dann, wenn Ring und Zeiger bereitstanden.
-    // Was WIRKLICH noetig ist, prueft `gfx-aus.fi`: ohne Grafik gibt
-    // es diesen Aufruf gar nicht.
-    //      Und ab hier gilt der Schein. `may_inject` prueft Frist,
-    //      Prozessnummer und die Zahl der schon verbrauchten
-    //      Anschlaege in einem.
     if !tip.may_inject(state, me) {
         tip.deny(state)
         return sys.neg(errno.E_PERM)
     }
 
-    // EINE TASTE. Sie geht in denselben Ring wie eine echte
-    // (`kbd.push_hot`), damit der Fensterserver keinen Unterschied
-    // sieht -- ein Durchklick, der einen eigenen Weg nimmt, prueft den
-    // falschen.
     if what == sys.TI_KEY {
         if a1 > 0xFF || a2 > 0xFF {
             return sys.neg(errno.E_INVAL)
@@ -2556,8 +2099,6 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         return 0
     }
 
-    // DEN ZEIGER SETZEN. `ps2m.set_pos` klemmt selbst auf den
-    // Bildschirm, also wird hier nicht ein zweites Mal gerechnet.
     if what == sys.TI_MOVE {
         if !ps2m.present(state) {
             ps2m.adopt(state, fb.width(state), fb.height(state))
@@ -2567,12 +2108,6 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
         return 0
     }
 
-    // EINEN KNOPF. Der Weg ist `usb_packet`, weil er die Knopfmaske
-    // GANZ setzt -- ein "Knopf runter" ohne die anderen beiden waere
-    // ein Loslassen, das niemand wollte.
-    // A REAL KEY: one set-1 scancode through the same function the
-    // keyboard interrupt and the USB/I2C HID path call, so the login
-    // field, the terminal and every text box see it like a typed key.
     if what == sys.TI_SCAN {
         if a1 > 0xFF {
             return sys.neg(errno.E_INVAL)
@@ -2637,22 +2172,8 @@ fn tipp_call(state: u64, me: u64, what: u64, a1: u64, a2: u64) -> u64 {
     return sys.neg(errno.E_INVAL)
 }
 
-// =============================================== RUNDE WMPLUGIN
-// DIE VERMITTLUNG DER ERWEITERUNGEN.
-//
-// ZEHN NUMMERN, UND KEINE DAVON NIMMT CODE ENTGEGEN. Was ein Plugin
-// kann, steht in dieser Funktion vollstaendig -- wer sie liest, weiss,
-// welchen Schaden ein boeswilliges Plugin anrichten kann. Bei einem
-// `.so` im Compositor-Prozess gibt es diese Liste nicht.
-//
-// DER KERN WARTET AN KEINER STELLE DIESER FUNKTION. WM_PLUG_POLL holt,
-// was daliegt, und kehrt zurueck; liegt nichts da, kehrt es mit 0
-// zurueck. Es gibt hier kein `while`, das auf Ring 3 sieht.
 fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     a2: u64, a3: u64) -> u64 {
-    // DIE FASSUNG BEANTWORTET DER KERN IMMER, auch ohne Plugintafel und
-    // ohne Anmeldung: sonst koennte ein Plugin nicht herausfinden, ob es
-    // zu diesem Kern passt, und muesste raten.
     if number == sys.WM_PLUG_INFO && a1 == sys.PL_ABI {
         return wmplug.WMP_ABI
     }
@@ -2660,19 +2181,12 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return cap.err(cap.E_UNSUPPORTED)
     }
     if number == sys.WM_PLUG_REG {
-        // Das VIERTE Argument ist die gewuenschte Frist in Ticks; 0
-        // heisst "die Vorgabe des Kerns". Ein Plugin, das mit drei
-        // Argumenten ruft (so stand es in der ersten Fassung), bekommt
-        // hier eine Null und damit genau das Verhalten von vorher.
         return do_plugreg(state, me, a0, a1, a2, a3)
     }
     if number == sys.WM_PLUG_GRANT {
         return do_pluggrant(state, me, a0, a1)
     }
     if number == sys.WM_PLUG_BARGET {
-        // NUR DIE LEISTE. Sie fragt, was die Widgets anzeigen wollen --
-        // dasselbe Muster wie WM_LIST: wer einen Schirmrand reserviert
-        // hat, ist die Leiste.
         if !is_taskbar(state, me) {
             return cap.err(cap.E_RIGHTS)
         }
@@ -2692,23 +2206,15 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
     if number == sys.WM_PLUG_INFO {
         return do_pluginfo(state, me, a0, a1)
     }
-    // Alles Weitere gilt dem EIGENEN Platz. Wer keinen hat, hat sich
-    // nicht angemeldet -- und das ist kein Rechte-, sondern ein
-    // Zustandsfehler.
     let i: u64 = wmplug.slot_of(state, me)
     if i >= wmplug.MAX_PLUG {
-        // DER ABSCHIED. Wer keinen Platz mehr hat, kann trotzdem noch
-        // EIN Ereignis haben: E_STOP, der Grund seiner Abmeldung. Nur
-        // Abholen ist erlaubt -- ein Plugin, dem die Frist oder die
-        // Rechte genommen wurden, soll den Grund erfahren und nicht
-        // ueber einen nichtssagenden E_NOTFOUND raten.
         let z: u64 = wmplug.farewell_slot(state, me)
         if z < wmplug.MAX_PLUG && number == sys.WM_PLUG_POLL {
-            let puffer2: u64 = blockb(state) + 3840
-            if wmplug.pop(state, z, puffer2) == 0 {
+            let buffer2: u64 = blockb(state) + 3840
+            if wmplug.pop(state, z, buffer2) == 0 {
                 return 0
             }
-            if !sys.copy_out(state, me, a0, puffer2, wmplug.EV_BYTES) {
+            if !sys.copy_out(state, me, a0, buffer2, wmplug.EV_BYTES) {
                 return cap.err(cap.E_INVALID)
             }
             return 1
@@ -2724,11 +2230,11 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return 0
     }
     if number == sys.WM_PLUG_POLL {
-        let puffer: u64 = blockb(state) + 3840
-        if wmplug.pop(state, i, puffer) == 0 {
+        let buffer: u64 = blockb(state) + 3840
+        if wmplug.pop(state, i, buffer) == 0 {
             return 0
         }
-        if !sys.copy_out(state, me, a0, puffer, wmplug.EV_BYTES) {
+        if !sys.copy_out(state, me, a0, buffer, wmplug.EV_BYTES) {
             return cap.err(cap.E_INVALID)
         }
         return 1
@@ -2763,28 +2269,19 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
         return 0
     }
     if number == sys.WM_PLUG_BAR {
-        let puffer: u64 = blockb(state) + 3872
+        let buffer: u64 = blockb(state) + 3872
         var n: u64 = a1
         if n > 31 {
             n = 31
         }
-        if n != 0 && !sys.copy_in(state, me, puffer, a0, n) {
+        if n != 0 && !sys.copy_in(state, me, buffer, a0, n) {
             return cap.err(cap.E_INVALID)
         }
-        // ERST FRAGEN, OB SICH ETWAS AENDERT. Gemessen: das Widget
-        // schickt seinen Text im Sekundentakt, und jeder Ruf hat den
-        // GANZEN Schirm schmutzig gemeldet -- 480000 Bildpunkte fuer
-        // eine Zahl, die sich nicht bewegt hat.
-        let gleich: bool = wmplug.bar_same(state, i, puffer, n)
-        if !wmplug.bar_set(state, i, puffer, n) {
+        let same: bool = wmplug.bar_same(state, i, buffer, n)
+        if !wmplug.bar_set(state, i, buffer, n) {
             return cap.err(cap.E_RIGHTS)
         }
-        // Die Leiste malt es beim naechsten Durchlauf -- SCHMUTZIG
-        // MELDEN, NICHT ZUSAMMENSETZEN (siehe WM_DECO, derselbe Grund).
-        // Schmutzig gemeldet wird aber nur die LEISTE und nicht der
-        // Schirm: ein Widget bekommt ein Textfeld in einer Leiste, also
-        // kostet sein Text auch nur diese Leiste.
-        if !gleich {
+        if !same {
             damage_bar(state)
         }
         return 0
@@ -2796,21 +2293,18 @@ fn plug_call(state: u64, me: u64, number: u64, a0: u64, a1: u64,
 }
 
 fn do_plugreg(state: u64, me: u64, abi: u64, name: u64, maske: u64,
-    frist: u64) -> u64 {
-    let puffer: u64 = blockb(state) + 3904
+    deadline: u64) -> u64 {
+    let buffer: u64 = blockb(state) + 3904
     var k: u64 = 0
     while k < 16 {
-        kstate.set8(puffer + k, 0 as u8)
+        kstate.set8(buffer + k, 0 as u8)
         k = k + 1
     }
-    if name != 0 && !sys.copy_in(state, me, puffer, name, 15) {
+    if name != 0 && !sys.copy_in(state, me, buffer, name, 15) {
         return cap.err(cap.E_INVALID)
     }
-    let i: u64 = wmplug.reg(state, me, abi, puffer, maske, frist)
+    let i: u64 = wmplug.reg(state, me, abi, buffer, maske, deadline)
     if i >= wmplug.MAX_PLUG {
-        // ZWEI GRUENDE, ZWEI FEHLER. Die falsche Fassung ist kein
-        // "kein Platz mehr", und ein Plugin soll den Unterschied
-        // sehen koennen, ohne zu raten.
         if abi != wmplug.WMP_ABI {
             return cap.err(cap.E_UNSUPPORTED)
         }
@@ -2819,80 +2313,36 @@ fn do_plugreg(state: u64, me: u64, abi: u64, name: u64, maske: u64,
     return i
 }
 
-// DIE GEWAEHRUNG IST ROOTS SACHE. Duerfte ein Plugin sich selbst
-// Rechte geben, waere die Rechtemaske ein Kommentar.
 fn do_pluggrant(state: u64, me: u64, name: u64, rechte: u64) -> u64 {
     if sched.tget(state, me, sched.T_EUID) != 0 {
         return cap.err(cap.E_RIGHTS)
     }
-    let puffer: u64 = blockb(state) + 3936
+    let buffer: u64 = blockb(state) + 3936
     var k: u64 = 0
     while k < 16 {
-        kstate.set8(puffer + k, 0 as u8)
+        kstate.set8(buffer + k, 0 as u8)
         k = k + 1
     }
-    if !sys.copy_in(state, me, puffer, name, 15) {
+    if !sys.copy_in(state, me, buffer, name, 15) {
         return cap.err(cap.E_INVALID)
     }
-    if !wmplug.grant(state, puffer, rechte) {
+    if !wmplug.grant(state, buffer, rechte) {
         return cap.err(cap.E_EXHAUSTED)
     }
-    // Die Frist steckt ab Bit 32 im selben Wort (siehe wmplug.grant);
-    // fuer die Frage "hat jemand abgeschaltet?" zaehlt nur die
-    // Rechtemaske darunter -- sonst waere `frist=` allein schon ein
-    // Abschalten.
-    let nur_rechte: u64 = rechte & 0xFFFFFFFF
-    // ABSCHALTEN HEISST ABSCHALTEN, nicht "beim naechsten Mal dann".
-    //
-    // GEMESSENER BEFUND: `wmplug disable uhr` schrieb bis hierher nur
-    // eine Null in die Gewaehrungstafel -- und die wird erst beim
-    // ANMELDEN gelesen (`reg`). Ein Plugin, das schon lief, lief also
-    // munter weiter, und `wmplug list` zeigte es danach unveraendert
-    // an. Auf der Leitung stand `Plugins 1 von 8` vor UND nach dem
-    // Abschalten; das war kein Schalter, sondern eine Notiz.
-    //
-    // Null Rechte ist der eindeutige Fall: wer nichts mehr darf, hat
-    // auf der Tafel nichts mehr verloren. Also wird sein Platz hier
-    // abgemeldet, mit G_USER als Grund -- damit im Protokoll ein
-    // Abschalten von Hand von einem Absturz (G_CRASH) und von einer
-    // gerissenen Frist (G_FRIST) zu unterscheiden ist.
-    //
-    // GEWARTET WIRD DABEI AUF NIEMANDEN: `unreg` legt E_STOP in den
-    // Ring und kehrt zurueck. Das Plugin erfaehrt den Grund, wenn es
-    // das naechste Mal abholt -- und wenn es nie wieder abholt, raeumt
-    // der Kehrbesen den Abschiedsplatz weg. Hoechstens MAX_PLUG (acht)
-    // Durchlaeufe, keine Rekursion.
-    if nur_rechte == 0 {
+    let rights_only: u64 = rechte & 0xFFFFFFFF
+    if rights_only == 0 {
         var i: u64 = 0
         while i < wmplug.MAX_PLUG {
-            if wmplug.valid(state, i) && namen_gleich(wmplug.name_at(state, i), puffer) {
+            if wmplug.valid(state, i) && names_equal(wmplug.name_at(state, i), buffer) {
                 wmplug.unreg(state, i, wmplug.G_USER)
             }
             i = i + 1
         }
         return 0
     }
-    // UND EINSCHALTEN HEISST AUCH EINSCHALTEN.
-    //
-    // Derselbe gemessene Befund von der anderen Seite: `wmplug enable
-    // uhr` schrieb die Rechte nur in die Gewaehrungstafel, und die
-    // liest der Kern beim ANMELDEN (`reg`). Ein Widget, das schon lief,
-    // bekam sein R_ACT_BAR also erst beim naechsten Prozessstart --
-    // "zur Laufzeit" war es damit nicht. Also werden die neuen Rechte
-    // hier auf jeden laufenden Platz dieses Namens uebertragen.
-    //
-    // KEINE ERWEITERUNG DER SCHNITTSTELLE: der Rueckgabewert bleibt 0,
-    // kein neuer Fehlercode, kein neues Feld. Das Plugin merkt es
-    // daran, dass seine naechste Handlung durchgeht -- genau so misst
-    // es tools/wmplug/run.sh am Bildpunkt nach.
     var j: u64 = 0
     while j < wmplug.MAX_PLUG {
-        if wmplug.valid(state, j) && namen_gleich(wmplug.name_at(state, j), puffer) {
-            // Gemeldet wird das nicht von hier, sondern von dem, der
-            // es merkt: das Plugin sieht seine naechste Handlung
-            // durchgehen und sagt es selbst. Eine Zeile aus `sysgui`
-            // haette dafuer `serial` in dieses Modul geholt, und der
-            // Abhaengigkeitsgraph ist wertvoller als eine Meldung.
+        if wmplug.valid(state, j) && names_equal(wmplug.name_at(state, j), buffer) {
             wmplug.set_rights(state, j, rechte)
         }
         j = j + 1
@@ -2900,10 +2350,7 @@ fn do_pluggrant(state: u64, me: u64, name: u64, rechte: u64) -> u64 {
     return 0
 }
 
-// Zwei Namen von hoechstens fuenfzehn Oktetten, auf Gleichheit. Beide
-// Seiten sind kernseitige Puffer fester Laenge -- der eine aus der
-// Plugintafel, der andere frisch genullt und aus Ring 3 gefuellt.
-fn namen_gleich(a: u64, b: u64) -> bool {
+fn names_equal(a: u64, b: u64) -> bool {
     var k: u64 = 0
     while k < 15 {
         let ca: u64 = kstate.get8(a + k) as u64
@@ -2919,85 +2366,69 @@ fn namen_gleich(a: u64, b: u64) -> bool {
     return true
 }
 
-fn do_pluginfo(state: u64, me: u64, a0: u64, feld: u64) -> u64 {
-    if feld == sys.PL_MAXPLUG {
+fn do_pluginfo(state: u64, me: u64, a0: u64, field: u64) -> u64 {
+    if field == sys.PL_MAXPLUG {
         return wmplug.MAX_PLUG
     }
-    if feld == sys.PL_PLUGS {
+    if field == sys.PL_PLUGS {
         return wmplug.plugs(state)
     }
-    if feld == sys.PL_SLOT {
+    if field == sys.PL_SLOT {
         return wmplug.slot_of(state, me)
     }
-    if feld == sys.PL_EVIN {
+    if field == sys.PL_EVIN {
         return wmplug.events_in(state)
     }
-    if feld == sys.PL_EVOUT {
+    if field == sys.PL_EVOUT {
         return wmplug.events_out(state)
     }
-    if feld == sys.PL_KICKS {
+    if field == sys.PL_KICKS {
         return wmplug.kicks(state)
     }
-    if feld == sys.PL_DENY {
+    if field == sys.PL_DENY {
         return wmplug.denials(state)
     }
-    if feld == sys.PL_FRIST {
+    if field == sys.PL_DEADLINE {
         return wmplug.timeout(state)
     }
-    if feld == sys.PL_DESK {
+    if field == sys.PL_DESK {
         return wmplug.desk_cur(state)
     }
-    // Die Arbeitsflaeche des Servers, ohne Handle und ohne Fenster:
-    // dieselben vier Zahlen, die WM_INFO einem Fensterbesitzer gibt.
-    if feld == sys.PL_WORKX {
+    if field == sys.PL_WORKX {
         return wm.work_x(state)
     }
-    if feld == sys.PL_WORKY {
+    if field == sys.PL_WORKY {
         return wm.work_y(state)
     }
-    if feld == sys.PL_WORKW {
+    if field == sys.PL_WORKW {
         return wm.work_w(state)
     }
-    if feld == sys.PL_WORKH {
+    if field == sys.PL_WORKH {
         return wm.work_h(state)
     }
-    // ZWEI ZAHLEN AUS DEM BILDTAKT, damit "kein Tempoeinbruch" eine
-    // MESSUNG ist und keine Meinung. Sie kommen nicht aus diesem Modul,
-    // sondern aus der Uhr, die `wm.compose` seit der Runde VEKTOR
-    // ohnehin fuehrt -- ein zweiter Zaehler daneben wuerde ein zweites
-    // Ergebnis liefern, und dann glaubt man keinem von beiden.
-    if feld == sys.PL_FRAMES {
+    if field == sys.PL_FRAMES {
         return wm.frame_no(state)
     }
-    if feld == sys.PL_LATUS {
-        // Der Mittelwert, nicht die Summe: eine Summe ueber eine
-        // unbekannte Zahl Bilder laesst sich zwischen zwei Laeufen
-        // nicht vergleichen. Ohne ein einziges gemessenes Bild ist die
-        // ehrliche Antwort 0 und nicht eine Division durch null.
+    if field == sys.PL_LATUS {
         let n: u64 = wm.frame_us_n(state)
         if n == 0 {
             return 0
         }
         return wm.frame_us_sum(state) / n
     }
-    // Und dieselben zwei Zahlen ROH, fuer ein Messfenster: wer sie vor
-    // und nach einer Last abliest, rechnet (sum2-sum1)/(n2-n1) und hat
-    // die mittlere Bildzeit GENAU DAZWISCHEN. Beide Felder beantwortet
-    // der Kern ohne Anmeldung -- sie sagen nichts ueber ein Plugin,
-    // sondern etwas ueber den Server.
-    if feld == sys.PL_FRSUM {
+    if field == sys.PL_FRSUM {
         return wm.frame_us_sum(state)
     }
-    if feld == sys.PL_FRN {
+    if field == sys.PL_FRN {
         return wm.frame_us_n(state)
     }
     if a0 >= wmplug.MAX_PLUG {
         return cap.err(cap.E_INVALID)
     }
-    if feld == sys.PL_GRUND {
+    if field == sys.PL_REASON {
         return wmplug.reason_at(state, a0)
     }
-    if feld == sys.PL_USED {
+    if field == sys.PL_USED {
         if wmplug.valid(state, a0) {
             return 1
         }
@@ -3006,35 +2437,28 @@ fn do_pluginfo(state: u64, me: u64, a0: u64, feld: u64) -> u64 {
     if !wmplug.valid(state, a0) {
         return cap.err(cap.E_NOTFOUND)
     }
-    if feld == sys.PL_RIGHTS {
+    if field == sys.PL_RIGHTS {
         return wmplug.rights_at(state, a0)
     }
-    if feld == sys.PL_MASK {
+    if field == sys.PL_MASK {
         return wmplug.mask_at(state, a0)
     }
-    if feld == sys.PL_PENDING {
+    if field == sys.PL_PENDING {
         return wmplug.pending(state, a0)
     }
-    if feld == sys.PL_LOST {
+    if field == sys.PL_LOST {
         return wmplug.lost_at(state, a0)
     }
-    if feld == sys.PL_BARLEN {
+    if field == sys.PL_BARLEN {
         return wmplug.bar_len(state, a0)
     }
-    // DIE FRIST DIESES EINEN PLATZES. PL_FRIST (14) bleibt die Zahl des
-    // Kerns; wer wissen will, mit WELCHER Frist ein bestimmtes Plugin
-    // angetreten ist, fragt PL_PFRIST -- zwei verschiedene Fragen,
-    // zwei Felder, sonst zeigte `wmplug list` die Frist von Platz 0 als
-    // die des ganzen Systems an.
-    if feld == sys.PL_PFRIST {
+    if field == sys.PL_PFRIST {
         return wmplug.timeout_at(state, a0)
     }
-    if feld == sys.PL_DENYS {
+    if field == sys.PL_DENYS {
         return wmplug.denys_at(state, a0)
     }
-    if feld == sys.PL_NAME {
-        // Acht Oktette als EINE Zahl -- so braucht `wmplug list` keinen
-        // Puffer und keinen zweiten Aufruf fuer den Namen.
+    if field == sys.PL_NAME {
         var v: u64 = 0
         var k: u64 = 0
         while k < 8 {
@@ -3047,18 +2471,14 @@ fn do_pluginfo(state: u64, me: u64, a0: u64, feld: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
-// DIE HANDLUNGEN. Jede prueft ihr Recht ZUERST und zaehlt die
-// Abweisung; erst danach wird etwas angefasst. Die Gegenprobe der Runde
-// haengt daran: der Fehlercode allein ist kein Beleg, der unveraenderte
-// Fensterzustand ist einer.
-fn do_plugact(state: u64, i: u64, was: u64, id: u64, wert: u64) -> u64 {
+fn do_plugact(state: u64, i: u64, was: u64, id: u64, value: u64) -> u64 {
     let rechte: u64 = wmplug.rights_at(state, i)
     if was == sys.PA_DESKGO {
         if (rechte & wmplug.R_ACT_WIN) == 0 {
             wmplug.deny(state, i)
             return cap.err(cap.E_RIGHTS)
         }
-        wmplug.desk_go(state, wert)
+        wmplug.desk_go(state, value)
         desk_anwenden(state)
         return 0
     }
@@ -3078,31 +2498,23 @@ fn do_plugact(state: u64, i: u64, was: u64, id: u64, wert: u64) -> u64 {
         return cap.err(cap.E_NOTFOUND)
     }
     if was == sys.PA_MOVE {
-        wm.move_win(state, w, ((wert >> 16) & 0xFFFF) as i64,
-            (wert & 0xFFFF) as i64)
+        wm.move_win(state, w, ((value >> 16) & 0xFFFF) as i64,
+            (value & 0xFFFF) as i64)
         return 0
     }
     if was == sys.PA_SIZE {
-        wm.resize_win(state, w, (wert >> 16) & 0xFFFF, wert & 0xFFFF)
+        wm.resize_win(state, w, (value >> 16) & 0xFFFF, value & 0xFFFF)
         return 0
     }
     if was == sys.PA_LAYER {
-        // RUNDE DREI (S-006): bis L_TOAST und nicht mehr bis L_TIP.
-        // Die Einblendung liegt eine Ebene ueber der Blase; ohne diese
-        // Zeile haette der Kern sie mit E_INVALID abgewiesen und der
-        // Toast waere auf der normalen Ebene liegengeblieben -- also
-        // unter der Taskleiste, wo ihn niemand sieht.
-        if wert > wm.L_TOAST {
+        if value > wm.L_TOAST {
             return cap.err(cap.E_INVALID)
         }
-        wm.set_layer(state, w, wert)
+        wm.set_layer(state, w, value)
         return 0
     }
     if was == sys.PA_FLOAT {
-        // SCHWEBEN HEISST: NICHT IM KACHELBAUM. Der Baum haelt die
-        // Fenster, `wm.fi` kennt den Weg hinein und hinaus -- hier wird
-        // nur gesagt, was gelten soll.
-        if wert == 0 {
+        if value == 0 {
             wm.tile_take(state, w)
         } else {
             wm.tile_release(state, w)
@@ -3110,7 +2522,7 @@ fn do_plugact(state: u64, i: u64, was: u64, id: u64, wert: u64) -> u64 {
         return 0
     }
     if was == sys.PA_DESK {
-        if !wmplug.desk_set(state, id, wert) {
+        if !wmplug.desk_set(state, id, value) {
             return cap.err(cap.E_EXHAUSTED)
         }
         desk_anwenden(state)
@@ -3123,10 +2535,6 @@ fn do_plugact(state: u64, i: u64, was: u64, id: u64, wert: u64) -> u64 {
     return cap.err(cap.E_INVALID)
 }
 
-// DIE FLAECHENZUORDNUNG AUF DIE FENSTER LEGEN. `wmplug.fi` fuehrt nur
-// die Tafel (Fenster-Id -> Flaeche); wer sie anwendet, muss an
-// F_HIDDEN heran, und das ist der Fensterserver. Eine Schleife ueber
-// die Fenstertafel, keine Rekursion.
 fn desk_anwenden(state: u64) {
     if !wmplug.desk_dirty(state) {
         return
@@ -3137,8 +2545,6 @@ fn desk_anwenden(state: u64) {
     while w < wm.MAX_WIN {
         if wm.valid(state, w) && wm.win_layer(state, w) == wm.L_NORMAL {
             let ws: u64 = wmplug.desk_of(state, wm.win_id(state, w))
-            // Flaeche 0 heisst "auf jeder Flaeche": ein Fenster, das
-            // kein Plugin je zugeordnet hat, verschwindet nicht.
             if ws != 0 {
                 wm.set_hidden(state, w, ws != cur)
             }

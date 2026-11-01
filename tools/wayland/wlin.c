@@ -46,7 +46,7 @@
 #define W 200
 #define H 120
 #define SYS_OSUM_BUS 1960
-#define SYS_OSUM_SPERRE 1870
+#define SYS_OSUM_LOCK 1870
 static time_t lock_until, idle_until;
 static long idle_a;
 
@@ -282,8 +282,8 @@ static void kb_key(void *d, struct wl_keyboard *k, uint32_t s, uint32_t t, uint3
         say("native clip_set r=%ld", r);
     }
     if (st == 1 && key == 68) { /* F10: lock the screen for 12 s (op 1 locks, op 4 makes this program the locker so that it can unlock) */
-        long r = syscall(SYS_OSUM_SPERRE, 1, 0, 0);
-        long r4 = syscall(SYS_OSUM_SPERRE, 4, 0, 0);
+        long r = syscall(SYS_OSUM_LOCK, 1, 0, 0);
+        long r4 = syscall(SYS_OSUM_LOCK, 4, 0, 0);
         lock_until = time(NULL) + 12;
         say("lock on r=%ld locker=%ld", r, r4);
     }
@@ -588,7 +588,7 @@ int main(int argc, char **argv)
             idle_until = 0;
         }
         if (lock_until && time(NULL) >= lock_until) {
-            long r = syscall(SYS_OSUM_SPERRE, 2, 0, 0);
+            long r = syscall(SYS_OSUM_LOCK, 2, 0, 0);
             lock_until = 0;
             say("lock off r=%ld", r);
         }
