@@ -1,39 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/mut.fi -- Runde MULTIUSER: der Selbsttest dieser Runde,
-// in Ring 3.
-//
-// Wie `k13t` fuer Runde K13: ein Programm, das die Zusagen dieser Runde
-// VON INNEN prueft und jede als eine Zeile meldet, die der Wirt
-// zurueckliest:
-//
-//     mut: NAME=WERT
-//
-// Der Testlaeufer haelt jeden Wert gegen eine Zahl, die er selbst
-// ausgerechnet hat -- bei den Hashwerten gegen Pythons `hashlib`, bei
-// den Rechten gegen die Regel aus dem Handbuch, bei den Zeiten gegen
-// eine untere Schranke, unter der eine Passwortpruefung nichts wert
-// waere.
-//
-// UNTERBEFEHLE
-//
-//     mut kdf <runden>     misst PBKDF2-HMAC-SHA256: wie lange EINE
-//                          Pruefung mit dieser Rundenzahl dauert.
-//                          Das ist die Messung, aus der der
-//                          Kostenfaktor dieser Runde folgt -- nicht
-//                          eine Zahl aus einer Empfehlung, sondern die
-//                          Zeit, die DIESE Maschine wirklich braucht.
-//     mut gruppen          getgroups/setgroups und was die
-//                          Zusatzgruppen an einer Datei bewirken
-//     mut pfad <datei>     das BETRETUNGSRECHT: dieselbe Datei durch
-//                          ein Verzeichnis, das der Benutzer nicht
-//                          betreten darf
-//     mut rechte <a> <b>   wie k13t, aber mit den Zusatzgruppen
-//     mut stat             die Zaehler des Kerns aus dieser Runde
-//
-// Die Uhr ist `clock_gettime(CLOCK_MONOTONIC)`. Sie kommt aus dem
-// Zyklenzaehler und nicht aus dem Zeitgeberinterrupt -- eine Messung,
-// die auf 10-Millisekunden-Schritte gerundet ist, kann eine Anmeldung
-// von 200 Millisekunden nicht von einer von 195 unterscheiden.
 
 profile kernel
 
@@ -57,7 +21,6 @@ const SYS_OSUM_MUSTAT: u64 = 1200
 const SYS_CHMOD: u64 = 90
 const SYS_STAT: u64 = 4
 
-// Was `mustat` beantwortet -- dieselben Zahlen wie in kernel/perm.fi.
 const MU_WALKS: u64 = 0
 const MU_WALKDENY: u64 = 1
 const MU_GRPHITS: u64 = 2
@@ -76,8 +39,6 @@ fn text(name: u64, v: u64) {
     tools.ob_nl()
 }
 
-// Die Uhr in Mikrosekunden. Sie laeuft ueber, wenn die Maschine 584 000
-// Jahre laeuft; bis dahin reicht ein u64.
 fn now_us() -> u64 {
     var ts: [u64; 2] = [0 as u64; 2]
     let r: u64 = ulib.sys(SYS_CLOCK_GETTIME, CLOCK_MONOTONIC,
@@ -88,19 +49,6 @@ fn now_us() -> u64 {
     return ts[0 as usize] * 1000000 + ts[1 as usize] / 1000
 }
 
-// ------------------------------------------------------------ mut kdf
-//
-// DIE MESSUNG, AUS DER DER KOSTENFAKTOR FOLGT.
-//
-// Gemessen wird nicht das Ableiten allein, sondern GENAU DAS, was eine
-// Anmeldung tut: `check_hash` auf einen fertigen Eintrag. Da steckt das
-// Zerlegen der Zeichenkette mit drin, und das ist richtig so -- die
-// Frage lautet "wie lange dauert ein Rateversuch", und ein Angreifer
-// muss dasselbe tun.
-//
-// Dreimal, und ausgegeben wird die KLEINSTE Zeit. Nicht der Mittelwert:
-// ein Ausreisser nach oben ist der Zeitgeber oder ein anderer Prozess,
-// ein Ausreisser nach unten kann es nicht geben.
 fn mess_kdf(runden: u64) -> u64 {
     var p_it: [u8; 13] = "mut: iters=\0\0"
     var p_us: [u8; 10] = "mut: us=\0\0"
@@ -133,8 +81,6 @@ fn mess_kdf(runden: u64) -> u64 {
     }
     line((&p_ok[0]) as u64, okv)
     line((&p_us[0]) as u64, best)
-    // Runden je Sekunde, ganzzahlig. Bei einer Messung von 0 gibt es
-    // keine Zahl, und dann steht auch keine da.
     var ps: u64 = 0
     if best > 0 {
         ps = runden * 1000000 / best
@@ -144,16 +90,6 @@ fn mess_kdf(runden: u64) -> u64 {
     return 0
 }
 
-// -------------------------------------------------------- mut gruppen
-//
-// Die Zusatzgruppen. Drei Fragen, und die dritte ist die einzige, die
-// wirklich etwas beweist:
-//
-//   1. Was sagt `getgroups` ueber diesen Prozess?
-//   2. Kann root sie setzen, und kann ein gewoehnlicher Benutzer es
-//      NICHT? (`setgroups` ist seit jeher root vorbehalten -- wer sich
-//      selbst eine Gruppe geben darf, hat keine Gruppen.)
-//   3. Oeffnet eine Zusatzgruppe eine Datei, die sonst zu ist?
 fn gruppen(args: u64) -> u64 {
     var p_n: [u8; 13] = "mut: ngrps=\0\0"
     var p_g: [u8; 12] = "mut: grp=\0\0\0"
@@ -174,15 +110,11 @@ fn gruppen(args: u64) -> u64 {
         i = i + 1
     }
 
-    // Setzen: root darf, sonst -EPERM. Der Rueckgabewert IST die
-    // Messung, deshalb steht er als Zahl da und nicht als Wort.
     var neu: [u64; 2] = [0 as u64; 2]
     neu[0] = 42
     neu[1] = 77
     line((&p_set[0]) as u64, ulib.sys(SYS_SETGROUPS, 2, (&neu[0]) as u64, 0))
 
-    // Und die Datei, die nur ueber eine Zusatzgruppe zu haben ist. Der
-    // Name kommt von der Kommandozeile; ohne Namen wird nichts geoeffnet.
     if ulib.arg_count(args) > 2 {
         let p: u64 = ulib.arg_at(args, 2)
         let fd: u64 = ulib.sys(ulib.SYS_OPEN, p, 0, 0)
@@ -197,16 +129,6 @@ fn gruppen(args: u64) -> u64 {
     return 0
 }
 
-// ----------------------------------------------------------- mut pfad
-//
-// DAS BETRETUNGSRECHT. Vor dieser Runde beantwortete Osum die Frage
-// "darfst du /geheim/datei.txt lesen?" ausschliesslich an
-// `datei.txt` -- das Verzeichnis `/geheim` mit 0o700 root:root wurde
-// durchquert, ohne dass jemand fragte. Wer den Namen kannte, war drin.
-//
-// Hier wird GENAU DAS gemessen: derselbe Prozess, dieselbe Datei,
-// einmal ueber einen offenen und einmal ueber einen verschlossenen
-// Weg. Die Datei selbst ist in beiden Faellen 0o644.
 fn path(args: u64) -> u64 {
     var p_ok: [u8; 15] = "mut: pfadauf=\0\0"
     var p_zu: [u8; 14] = "mut: pfadzu=\0\0"
@@ -233,18 +155,6 @@ fn path(args: u64) -> u64 {
     return 0
 }
 
-// ------------------------------------------------------------ mut dev
-//
-// DIE VFS-SCHICHT. `open_vfs` in kernel/sys.fi hatte bis zu dieser
-// Runde KEINE Rechtepruefung -- kein /dev, kein /proc und keine
-// eingehaengte Platte wurde je gefragt. Hier wird das an drei Knoten
-// gemessen, und der erste ist der, auf den es ankommt:
-//
-//   /dev/hda       0o644 root   -- lesen darf jeder, SCHREIBEN nur root.
-//                  Wer die rohe Platte beschreiben darf, braucht keine
-//                  Dateirechte mehr.
-//   /dev/null      0o666        -- schreiben darf jeder, und das soll so.
-//   /proc/meminfo  0o444        -- lesen darf jeder.
 fn geraete() -> u64 {
     var p_dw: [u8; 16] = "mut: devwrite=\0\0"
     var p_nw: [u8; 17] = "mut: nullwrite=\0\0"
@@ -253,9 +163,6 @@ fn geraete() -> u64 {
     var f_null: [u8; 10] = "/dev/null\0"
     var f_mem: [u8; 15] = "/proc/meminfo\0\0"
 
-    // O_WRONLY = 1. KEIN O_CREAT und KEIN O_TRUNC -- es soll nichts
-    // entstehen und nichts kuerzer werden, es geht nur um die Frage,
-    // ob der Kern die Tuer aufmacht.
     let h: u64 = ulib.sys(ulib.SYS_OPEN, (&f_hda[0]) as u64, 1, 0)
     var okh: u64 = 0
     if !ulib.bad(h) {
@@ -283,7 +190,6 @@ fn geraete() -> u64 {
     return 0
 }
 
-// ----------------------------------------------------------- mut stat
 fn counter() -> u64 {
     var p_w: [u8; 13] = "mut: walks=\0\0"
     var p_d: [u8; 17] = "mut: walkdeny=\0\0\0"
@@ -299,12 +205,6 @@ fn counter() -> u64 {
     return 0
 }
 
-// --------------------------------------------------------- mut setuid
-//
-// Die Zusage, die der Auftrag ausdruecklich verlangt: setuid von einem
-// gewoehnlichen Benutzer auf root MUSS scheitern. Der Rueckgabewert
-// steht als Zahl da, damit der Wirt -EPERM von 0 unterscheiden kann und
-// nicht nur "es ist etwas passiert".
 fn versuch_root() -> u64 {
     var p_u: [u8; 12] = "mut: uid=\0\0\0"
     var p_r: [u8; 15] = "mut: setroot=\0\0"

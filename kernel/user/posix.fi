@@ -1,27 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/posix.fi -- round K4: the program that measures the
-// system call table.
-//
-// Every other program on this disk exists to DO something. This one exists
-// to be measured: it makes every call the kernel has, prints the answer as
-// a line of the shape
-//
-//     posix: <name> = <number>
-//
-// and `tools/posix/run.sh` reads those lines back. That is the whole
-// design, and it has one rule behind it: EVERY CALL IS MEASURED WITH ITS
-// ERRORS. A `read` that works proves that `read` works on a good day; a
-// `read` on descriptor 77, on a directory and into a pointer that is not
-// the caller's proves that the kernel knows what it is doing on the other
-// days -- and those are the days a bug lives on.
-//
-// The error cases go through `ulib.sys` and NOT through the libc: the libc
-// turns a negative answer into -1 and an errno, which is what a program
-// wants and exactly not what a test wants. What is measured here is the
-// number the kernel really returned.
-//
-// The exit code is the number of lines it printed, so that even a run in
-// which the serial output is lost has one number left over.
 
 profile kernel
 
@@ -38,10 +14,6 @@ export { u_start }
 
 static mut lines: u64 = 0
 
-// One measurement. The name, the value, and a newline -- through the
-// BUFFERED output of the libc, which is itself one of the things under
-// test: nothing appears twice, nothing is lost, and the order is the order
-// the program wrote in.
 fn tell(name: u64, v: u64) {
     var head: [u8; 8] = "posix: \0"
     var mid: [u8; 4] = " = \0"
@@ -71,11 +43,6 @@ fn u_start(args: u64) -> u64 {
     return lines
 }
 
-// ------------------------------- RUNDE FREMDLAND: die neuen Nummern
-//
-// Jede Nummer, die diese Runde ergaenzt hat, mit einer Antwort, die
-// nachpruefbar ist -- und zu jeder eine GEGENPROBE, wo es eine gibt.
-// Eine Nummer, die nur "kein -ENOSYS" liefert, ist nicht gemessen.
 fn fremdland() {
     var n_uname: [u8; 12] = "uname sys\0\0\0"
     var n_unamem: [u8; 13] = "uname mach\0\0\0"
@@ -91,86 +58,59 @@ fn fremdland() {
     var n_lockw: [u8; 11] = "lock setzt\0"
     var n_lockg: [u8; 11] = "lock frage\0"
     var n_locku: [u8; 11] = "lock loest\0"
-    var n_lockb: [u8; 11] = "lock bloed\0"  // DRAHT: Messname, tools/posix/run.sh
+    var n_lockb: [u8; 11] = "lock bloed\0"
     var n_tid: [u8; 11] = "tid gleich\0"
 
-    // ---- uname (63): sechs Felder zu 65 Oktetten -------------------
     var uts: [u8; 390] = [0 as u8; 390]
     let ur: u64 = ulib.sys(kcall.SYS_UNAME, (&uts[0]) as u64, 0, 0)
     tell((&n_uname[0]) as u64, ur)
-    // Feld 0 faengt mit 'L' an (Linux -- die Schnittstelle, nicht der
-    // Produktname), Feld 4 mit 'x' (x86_64). Das misst, dass die Felder
-    // wirklich 65 Oktette auseinanderliegen.
     tell((&n_unamem[0]) as u64, (uts[4 * 65]) as u64)
-    // GEGENPROBE: ein Zeiger, der dem Prozess nicht gehoert.
     tell((&n_unamef[0]) as u64, ulib.sys(kcall.SYS_UNAME, 0x100000, 0, 0))
 
-    // ---- prctl (157) ----------------------------------------------
     var nm: [u8; 16] = "posix\0\0\0\0\0\0\0\0\0\0\0"
-    // PR_SET_NAME = 15: stored (RUNDE LC1: the process name is real).
     tell((&n_prctl[0]) as u64, ulib.sys(kcall.SYS_PRCTL, 15,
             (&nm[0]) as u64, 0))
-    // PR_GET_NAME = 16 (RUNDE LC1): gives back the stored name into the 16-octet buffer, returns 0.
     tell((&n_prctlg[0]) as u64, ulib.sys(kcall.SYS_PRCTL, 16,
             (&nm[0]) as u64, 0))
     tell((&n_prctlb[0]) as u64, ulib.sys(kcall.SYS_PRCTL, 999, 0, 0))
 
-    // ---- mprotect (10) --------------------------------------------
     var page: [u8; 8] = [0 as u8; 8]
     tell((&n_mprot[0]) as u64, ulib.sys(kcall.SYS_MPROTECT,
             ((&page[0]) as u64) & 0xFFFFFFFFFFFFF000, 4096, 3))
-    // GEGENPROBE: eine Adresse, die nicht auf einer Seite anfaengt.
     tell((&n_mprotb[0]) as u64, ulib.sys(kcall.SYS_MPROTECT, 1, 4096, 3))
 
-    // ---- futex (202) ----------------------------------------------
     var f: [u64; 2] = [0 as u64; 2]
     f[0] = 7
-    // FUTEX_WAKE (1|privat 128): niemand wartet, also 0 geweckt.
     tell((&n_futexa[0]) as u64, ulib.sys(kcall.SYS_FUTEX,
             (&f[0]) as u64, 129, 1))
-    // FUTEX_WAIT mit dem FALSCHEN Wert kommt sofort zurueck (-EAGAIN);
-    // das ist der Wertvergleich im Kern, und ohne ihn wuerde dieser
-    // Aufruf zehn Sekunden schlafen.
     tell((&n_futexb[0]) as u64, ulib.sys(kcall.SYS_FUTEX,
             (&f[0]) as u64, 128, 999))
-    // GEGENPROBE: eine Adresse, die nicht durch vier teilbar ist.
     tell((&n_futexc[0]) as u64, ulib.sys(kcall.SYS_FUTEX,
             ((&f[0]) as u64) + 1, 128, 7))
 
-    // ---- fcntl-Sperren (72) ---------------------------------------
-    // struct flock: l_type(2) l_whence(2) fuell(4) l_start(8) l_len(8)
     var fl: [u64; 4] = [0 as u64; 4]
     var here2: [u8; 13] = "/bin/posix\0\0\0"
     let lfd: u64 = io.open((&here2[0]) as u64, 0)
-    // F_WRLCK = 1, SEEK_SET = 0, Oktette 0..15
     fl[0] = 1
     fl[1] = 0
     fl[2] = 16
     tell((&n_lockw[0]) as u64, ulib.sys(kcall.SYS_FCNTL, lfd, 6,
             (&fl[0]) as u64))
-    // F_GETLK auf denselben Bereich: der eigene Halter steht sich nicht
-    // im Weg, also kommt F_UNLCK (2) zurueck.
     fl[0] = 1
     fl[1] = 0
     fl[2] = 16
     let gr: u64 = ulib.sys(kcall.SYS_FCNTL, lfd, 5, (&fl[0]) as u64)
     tell((&n_lockg[0]) as u64, (fl[0] & 0xFFFF))
-    // F_UNLCK = 2
     fl[0] = 2
     fl[1] = 0
     fl[2] = 16
     tell((&n_locku[0]) as u64, ulib.sys(kcall.SYS_FCNTL, lfd, 6,
             (&fl[0]) as u64))
-    // GEGENPROBE: eine Sperrart, die es nicht gibt.
     fl[0] = 99
     tell((&n_lockb[0]) as u64, ulib.sys(kcall.SYS_FCNTL, lfd, 6,
             (&fl[0]) as u64))
     io.close(lfd)
 
-    // ---- getpid == gettid, solange es nur einen Faden gibt ---------
-    // Der Unterschied entsteht erst mit `clone`; ohne Faden MUESSEN
-    // beide dieselbe Zahl geben, sonst haette die Umstellung von
-    // `getpid` auf die Fadengruppe etwas kaputtgemacht.
     let pid: u64 = ulib.sys(kcall.SYS_GETPID, 0, 0, 0)
     let tid: u64 = ulib.sys(kcall.SYS_GETTID, 0, 0, 0)
     var gleich: u64 = 0
@@ -179,8 +119,6 @@ fn fremdland() {
     }
     tell((&n_tid[0]) as u64, gleich)
 }
-
-// ------------------------------------------- open, write, read, close
 
 fn write_and_read() {
     var path: [u8; 11] = "/posix.txt\0"
@@ -200,7 +138,6 @@ fn write_and_read() {
 
     let rd: u64 = io.open((&path[0]) as u64, kcall.O_RDONLY)
     tell((&n_read[0]) as u64, io.read(rd, (&buf[0]) as u64, 32))
-    // At the end of the file a `read` gives 0 -- the end, not an error.
     tell((&n_again[0]) as u64, io.read(rd, (&buf[0]) as u64, 32))
     var same: u64 = 0
     if text.equal_n((&buf[0]) as u64, (&text_out[0]) as u64, 11) {
@@ -209,8 +146,6 @@ fn write_and_read() {
     tell((&n_same[0]) as u64, same)
     io.close(rd)
 }
-
-// --------------------------------------------------- lseek, stat, fstat
 
 fn seek_and_stat() {
     var path: [u8; 11] = "/posix.txt\0"
@@ -228,7 +163,7 @@ fn seek_and_stat() {
     let fd: u64 = io.open((&path[0]) as u64, kcall.O_RDONLY)
     tell((&n_seek[0]) as u64, io.seek(fd, 4, kcall.SEEK_SET))
     io.read(fd, (&one[0]) as u64, 1)
-    tell((&n_char[0]) as u64, (one[0]) as u64) // 'e' = 101
+    tell((&n_char[0]) as u64, (one[0]) as u64)
     tell((&n_seekc[0]) as u64, io.seek(fd, 2, kcall.SEEK_CUR))
     tell((&n_seeke[0]) as u64, io.seek(fd, 0, kcall.SEEK_END))
     tell((&n_fstat[0]) as u64, fstat_size(fd))
@@ -256,8 +191,6 @@ fn fstat_size(fd: u64) -> u64 {
     }
     return io.stat_size((&st[0]) as u64)
 }
-
-// ------------------------------------------------- getdents64, mkdir
 
 fn directories() {
     var root: [u8; 2] = "/\0"
@@ -304,15 +237,11 @@ fn directories() {
     tell((&n_found[0]) as u64, found)
     io.close(fd)
 
-    // A buffer too short for even ONE record is -EINVAL. Not a short
-    // answer: a short answer would be indistinguishable from the end.
     let fd2: u64 = io.dir_open((&root[0]) as u64)
     tell((&n_short[0]) as u64, ulib.sys(kcall.SYS_GETDENTS64, fd2,
             (&buf[0]) as u64, 8))
     io.close(fd2)
 }
-
-// -------------------------------------------------------- dup and dup2
 
 fn descriptors() {
     var path: [u8; 11] = "/posix.txt\0"
@@ -325,20 +254,14 @@ fn descriptors() {
     let fd: u64 = io.open((&path[0]) as u64, kcall.O_RDONLY)
     let copy: u64 = io.dup(fd)
     tell((&n_dup[0]) as u64, copy)
-    // THE POINT OF THE OPEN FILE TABLE: two descriptors, ONE position.
-    // Reading four octets on one moves the other one along.
     io.read(fd, (&buf[0]) as u64, 4)
     tell((&n_shared[0]) as u64, io.tell(copy))
     io.close(copy)
-    // The original still works after the copy is gone -- the entry has
-    // two references and only one of them went.
     tell((&n_dup2[0]) as u64, io.read(fd, (&buf[0]) as u64, 1))
     io.close(fd)
     tell((&n_closed[0]) as u64, ulib.sys(kcall.SYS_READ, fd,
             (&buf[0]) as u64, 1))
 }
-
-// ------------------------------------------------------- brk and mmap
 
 fn memory() {
     var n_brk: [u8; 4] = "brk\0"
@@ -376,8 +299,6 @@ fn memory() {
         grew = 1
     }
     tell((&n_grow[0]) as u64, grew)
-    // Given back and asked for again: the same block comes back, which is
-    // what says the free list really is one.
     mem.release(a)
     let b: u64 = mem.alloc(64)
     var same: u64 = 0
@@ -401,12 +322,8 @@ fn memory() {
     }
     tell((&n_mapw[0]) as u64, kept)
     tell((&n_unmap[0]) as u64, mem.unmap_pages(page, 8192))
-    // Without MAP_ANONYMOUS there is nothing to map: this system has no
-    // page cache, and it says so instead of pretending.
     tell((&n_bad[0]) as u64, kcall.map_anon(4096, 3, kcall.MAP_PRIVATE))
 }
-
-// -------------------------------------------------------------- pipes
 
 fn pipes() {
     var fds: [u64; 1] = [0 as u64; 1]
@@ -430,16 +347,12 @@ fn pipes() {
         same = 1
     }
     tell((&n_same[0]) as u64, same)
-    // A pipe cannot be seeked, and it says so with the error POSIX names.
     tell((&n_seek[0]) as u64, ulib.sys(kcall.SYS_LSEEK, rd, 0,
             kcall.SEEK_SET))
-    // The last writer gone means the READER sees the end of the input.
     io.close(wr)
     tell((&n_end[0]) as u64, io.read(rd, (&buf[0]) as u64, 16))
     io.close(rd)
 }
-
-// ------------------------------------------- fork, execve, wait4, pipe
 
 fn children() {
     var n_pid: [u8; 4] = "pid\0"
@@ -468,8 +381,6 @@ fn children() {
     }
     tell((&n_ppid[0]) as u64, parent_ok)
 
-    // 1. A CHILD THAT IS A COPY. It writes into a pipe what it sees of the
-    //    parent's memory, and leaves with a code of its own.
     io.pipe((&fds[0]) as u64)
     let rd: u64 = (fds[0]) & 0xFFFFFFFF
     let wr: u64 = (fds[0]) >> 32
@@ -495,29 +406,14 @@ fn children() {
     }
     tell((&n_seen[0]) as u64, sees)
 
-    // 2. FORK + EXECVE + WAIT4: a program off the disk, started the way
-    //    Unix starts one.
-    //
-    //    IT IS `/bin/hello` AND NOT `/bin/echo`, and the reason is round
-    //    K6: `echo` used to return the number of words it printed, so the
-    //    1 that came back proved a program had really run. A userland in
-    //    which `grep` says "found" with 0 cannot work that way, and every
-    //    tool returns 0 or 1 now. `hello` returns 40 + argc -- a number
-    //    nobody could have got by accident, which is what this line needs.
     argv[0] = (&echo[0]) as u64
     argv[1] = (&word[0]) as u64
     argv[2] = 0
     tell((&n_run[0]) as u64, proc.run((&echo[0]) as u64, (&argv[0]) as u64))
 
-    // 3. Waiting for a child that is not one.
     tell((&n_nochild[0]) as u64, ulib.sys(kcall.SYS_WAIT4, 999, 0, 0))
 }
 
-// --------------------------------------------------------- the errors
-
-// The part of the round that matters most. Every one of these is a way a
-// program can be wrong, and every one of them has to come back as a NUMBER
-// -- not as a hang, not as a dead kernel, not as a zero.
 fn errors() {
     var buf: [u8; 16] = [0 as u8; 16]
     var missing: [u8; 11] = "/nowhere.x\0"
@@ -542,26 +438,19 @@ fn errors() {
             (&missing[0]) as u64, 0, 0))
     tell((&n_badfd[0]) as u64, ulib.sys(kcall.SYS_READ, 77,
             (&buf[0]) as u64, 8))
-    // A pointer into the kernel, and a pointer of nothing.
     tell((&n_fault[0]) as u64, ulib.sys(kcall.SYS_WRITE, 1, 0x100000, 8))
     tell((&n_nil[0]) as u64, ulib.sys(kcall.SYS_OPEN, 0, 0, 0))
     tell((&n_nosys[0]) as u64, ulib.sys(999, 0, 0, 0))
-    // A directory is not a file: reading it as one is -EISDIR, opening it
-    // for writing is the same, and a file opened as a directory is
-    // -ENOTDIR.
     let dirfd: u64 = io.dir_open((&root[0]) as u64)
     tell((&n_isdir[0]) as u64, ulib.sys(kcall.SYS_READ, dirfd,
             (&buf[0]) as u64, 8))
     io.close(dirfd)
-    // A FILE opened as a directory: -ENOTDIR, and the path exists -- a
-    // missing one would answer -ENOENT and measure nothing.
     tell((&n_notdir[0]) as u64, ulib.sys(kcall.SYS_OPEN,
             (&here[0]) as u64, kcall.O_DIRECTORY, 0))
     tell((&n_wrdir[0]) as u64, ulib.sys(kcall.SYS_OPEN,
             (&root[0]) as u64, kcall.O_WRONLY, 0))
     tell((&n_unlink[0]) as u64, ulib.sys(kcall.SYS_UNLINK,
             (&root[0]) as u64, 0, 0))
-    // A position before the start of a file.
     let fd: u64 = io.open((&root[0]) as u64, kcall.O_DIRECTORY)
     tell((&n_seek[0]) as u64, ulib.sys(kcall.SYS_LSEEK, fd, 0 -% 4,
             kcall.SEEK_SET))
@@ -573,8 +462,6 @@ fn errors() {
     ts[0] = 1000
     tell((&n_sleep[0]) as u64, ulib.sys(kcall.SYS_NANOSLEEP,
             (&ts[0]) as u64, 0, 0))
-    // AND THE LIBC SIDE OF IT: the same failure, seen the way a C program
-    // sees it -- -1, and the reason in `errno`.
     let bad: u64 = io.open((&missing[0]) as u64, 0)
     var shape: u64 = 0
     if errno.failed(bad) {

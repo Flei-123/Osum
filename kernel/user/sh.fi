@@ -1,45 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/sh.fi -- round K6: a shell that is one.
-//
-// Round K1 made the shell a FILE: it read a line, split it into words and
-// started `/bin/<word>`. That was the point of that round and it was
-// enough for it. It is not a shell. A shell is the program that decides
-// WHERE a program's output goes and WHAT it reads, and round K1 had no
-// answer to either: every program wrote to the serial port and read the
-// console, because the kernel had one of each.
-//
-// What this one can do, and every one of them is measured in
-// `tools/userland/run.sh`:
-//
-//   * `cmd a b c`, and the words may be quoted: 'a b' and "a b" are one
-//     argument, and "$X" is one argument even when the value has a space
-//     in it.
-//   * `> file`, `>> file`, `< file`, `2> file`. The shell redirects
-//     ITSELF and the child is born into it (`kernel/uio.fi`,
-//     `exec` hands the three descriptors on) -- which is why redirection
-//     also works for the built-in commands, without one line for it.
-//   * `a | b | c`. THE HONEST PART: there is no `pipe()` in this kernel
-//     yet -- round K4 is building it -- so a pipe is STAGED THROUGH A
-//     FILE: `a > /tmp/sh0`, then `b < /tmp/sh0 > /tmp/sh1`, and so on.
-//     The output is the same, the two ends do not run at the same time,
-//     and a program that never ends would fill the disk instead of
-//     blocking its writer. It says so in docs/ROUNDK6.md.
-//   * `cmd &`: the child is not waited for. `wait` picks the corpses up,
-//     and `exit` waits for what is left -- a shell that left zombies
-//     behind would leak a page table per background job.
-//   * `$?`, `NAME=value`, `$NAME`, `${...}` is NOT there.
-//   * `cd`, `pwd`, `export`, `exit`, `wait` as built-in commands, because
-//     none of them can be a program: a child cannot change its parent's
-//     working directory.
-//   * A LINE EDITOR: 8 takes the last octet back, 14 (the up arrow, see
-//     `kernel/kbd.fi`) fetches the line before this one back. The
-//     kernel eats the backspace itself when the input is a keyboard; in a
-//     SCRIPT both of them arrive here, which is how the editor is
-//     measured without a person in front of the machine.
-//   * `sh /path/to/script`: the commands come out of a file, and then the
-//     shell is quiet -- no banner, no prompt, no exit code per command.
-//     Round K1's chatter is what an INTERACTIVE shell does, and
-//     `tools/osum/run.sh` still measures exactly that.
 
 profile kernel
 
@@ -49,7 +7,7 @@ export { u_start }
 
 const LINE: u64 = 256
 const MAX_TOK: u64 = 96
-const MAX_ARGS: u64 = 64 // what `exec` takes (proc.MAX_ARGS; was 8, r716)
+const MAX_ARGS: u64 = 64
 const WORD_SPACE: u64 = 768
 const NVAR: u64 = 8
 const VNAME: u64 = 16
@@ -57,8 +15,6 @@ const VVAL: u64 = 64
 const NBG: u64 = 8
 const MAX_STAGE: u64 = 4
 
-// The kinds of token. Everything that is not one of the operators is a
-// word, and a word has been through the quotes and the variables already.
 const K_WORD: u64 = 0
 const K_PIPE: u64 = 1
 const K_IN: u64 = 2
@@ -68,8 +24,6 @@ const K_ERR: u64 = 5
 const K_AMP: u64 = 6
 const K_SEMI: u64 = 7
 
-// A program on this system has no allocator. Everything the shell needs
-// while it works stands here, in the .bss the loader zeroed.
 static mut line: [u8; 256] = [0 as u8; 256]
 static mut prev: [u8; 256] = [0 as u8; 256]
 static mut words: [u8; 768] = [0 as u8; 768]
@@ -96,15 +50,6 @@ static mut scratch: [u8; 128] = [0 as u8; 128]
 static mut leaving: u64 = 0
 static mut did_run: u64 = 0
 static mut last_bg: u64 = 0
-// ROUND K4 CHANGED WHAT `close` MEANS, and this is the whole of what it
-// cost. Round K6 was written against a kernel in which the three standard
-// descriptors were a piece of per-task state and `close(1)` gave 1 back
-// to the console -- which is how this shell used to take its output back
-// after `ls > /out`. Round K4 built a real table of open files, in which
-// `close(1)` frees the slot and the next `open` gets it: the second
-// redirection of a run would have landed on descriptor 1 by accident.
-// So the shell does what every Unix shell has done since 1979 -- it keeps
-// a COPY of its own three and points them back with `dup2`.
 static mut save_in: u64 = 0
 static mut save_out: u64 = 0
 static mut save_err: u64 = 0
@@ -114,8 +59,6 @@ fn u_start(args: u64) -> u64 {
     var s_bye: [u8; 9] = "sh: bye\n\0"
     var s_nofile: [u8; 19] = "sh: cannot read \0\0\0"
 
-    // Before the script is opened, so that the copies get the low numbers
-    // and nothing that comes later can be handed one of them.
     save_in = ulib.sys(ulib.SYS_DUP, ulib.IN, 0, 0)
     save_out = ulib.sys(ulib.SYS_DUP, ulib.OUT, 0, 0)
     save_err = ulib.sys(ulib.SYS_DUP, ulib.ERR, 0, 0)
@@ -132,8 +75,6 @@ fn u_start(args: u64) -> u64 {
         }
         in_fd = fd
         interactive = 0
-        // `$0` ist das Skript, `$1` das erste Argument dahinter -- so wie
-        // ueberall.
         var k: u64 = 1
         npos = 0
         while k < ac && k - 1 < NPOS {
@@ -141,9 +82,6 @@ fn u_start(args: u64) -> u64 {
             npos = k
             k = k + 1
         }
-        // RUNDE K11: ein Skript wird als GANZES gelesen und in
-        // Anweisungen zerlegt. Nur so kann ein `if` ueber mehrere Zeilen
-        // gehen. Der interaktive Weg darunter bleibt der von Runde K1.
         let rc: u64 = run_script(in_fd)
         ulib.sys(ulib.SYS_CLOSE, in_fd, 0, 0)
         reap_all()
@@ -154,31 +92,6 @@ fn u_start(args: u64) -> u64 {
     }
     var running: bool = true
     while running {
-        // ==================================== RUNDE ECHTHARDWARE-5
-        // DIE EINGABEAUFFORDERUNG KOMMT VOR DEM LESEN, NICHT DANACH.
-        //
-        // Justins Befund B, Fotos vom 10.09.2026: das Fenster
-        // "Terminal -- sh" ist VOLLSTAENDIG LEER -- keine
-        // Eingabeaufforderung, kein Text, nichts. Die Tafel meldete
-        // dabei `sh14`, die Shell lief also.
-        //
-        // GEMESSEN mit zwei Zaehlern im Fensterserver (`wm.term_outs`
-        // und `wm.term_puts_n`, Tafel Zeile 0 `TO`/`TP`): TO 16, TP 16.
-        // Es kamen also GENAU SECHZEHN Oktette im Fenster an, und alle
-        // sechzehn wurden gemalt -- das ist `"sh: ready, osum\n"`, und
-        // danach kam NICHTS MEHR. Der Weg Shell -> tty -> Fenster ist
-        // also in Ordnung; die Shell hat nur nichts mehr geschrieben.
-        //
-        // Der Grund stand hier: `prompt()` lief ERST, NACHDEM
-        // `get_line` eine ganze Zeile gelesen hatte. Eine Shell, auf
-        // die niemand tippt, haengt aber fuer immer in `get_line` --
-        // also wurde die Eingabeaufforderung NIE geschrieben, und das
-        // Fenster blieb leer. Auf der seriellen Leitung fiel das nie
-        // auf, weil dort ein Skript eingespeist wird und jede Zeile
-        // sofort zurueckkommt.
-        //
-        // Jetzt steht sie VOR dem Lesen: das Fenster zeigt `osum$ `,
-        // sobald die Shell bereit ist -- so wie es jedes System tut.
         if interactive == 1 {
             prompt()
         }
@@ -193,10 +106,6 @@ fn u_start(args: u64) -> u64 {
             running = false
         } else {
             if interactive == 1 {
-                // Die gelesene Zeile hinter die Aufforderung, damit im
-                // Fenster steht, was getippt wurde. Der Kern echot die
-                // Tasten einer echten Tastatur nicht ins Fenster; ohne
-                // diese Zeile tippt man ins Unsichtbare.
                 ulib.say((&line[0 as usize]) as u64)
                 ulib.nl()
             }
@@ -214,9 +123,6 @@ fn u_start(args: u64) -> u64 {
             return commands
         }
     }
-    // A shell that ran a script ends with the code of the last command in
-    // it, and `exit 3` means 3. Only the interactive shell of round K1
-    // still counts its commands.
     return status
 }
 
@@ -225,19 +131,6 @@ fn prompt() {
     ulib.say((&s_p[0 as usize]) as u64)
 }
 
-// --------------------------------------------------------- the line
-
-// One line, with the two keys of a line editor in it. The kernel already
-// takes the backspace back when the input is a real keyboard
-// (`sys.keyboard_read`); everything that comes out of a FILE arrives
-// here untouched, and that is where the measurement gets at it.
-// 26.09.2026 (Dell 9020): LIVE ECHO IN THE TERMINAL WINDOW. The console
-// has ECHO off (the serial measurements), so a window showed a typed
-// line only after Enter. For the time of ONE read the shell sets the
-// terminal's ECHOWIN bit: the kernel then draws the line being edited
-// into the window only and wipes it on Enter -- the echo below prints it
-// for good, exactly as before. Cleared again right after the read, so a
-// program the shell starts (a password prompt!) never inherits it.
 const SH_IOCTL: u64 = 16
 const SH_TCGETS: u64 = 0x5401
 const SH_TCSETS: u64 = 0x5402
@@ -264,9 +157,6 @@ fn get_line(fd: u64) -> u64 {
         return ulib.EOF
     }
     var n: u64 = 0
-    // r537: a key the shell does not use arrives as ESC (0x1B) or an escape sequence (ESC [ ... final, ESC O x). Such a byte
-    // used to land in the line -- the first command after a stray ESC became `/bin/<ESC>ls` and failed with `no such file`.
-    // 0 = plain text, 1 = after ESC, 2 = inside ESC [ ..., 3 = after ESC O.
     var es: u64 = 0
     while c != 256 && c != 10 {
         var keep: bool = true
@@ -295,7 +185,6 @@ fn get_line(fd: u64) -> u64 {
             es = 1
         }
         if !keep {
-            // swallowed: part of an escape sequence
         } else if c == 8 {
             if n > 0 {
                 n = n - 1
@@ -324,8 +213,6 @@ fn get_line(fd: u64) -> u64 {
     }
     return n
 }
-
-// ------------------------------------------------------ the variables
 
 fn var_find(name: u64) -> u64 {
     var i: u64 = 0
@@ -365,8 +252,6 @@ fn var_set(name: u64, value: u64) {
     vval[(i * VVAL + k) as usize] = 0 as u8
 }
 
-// ------------------------------------------------------- the tokenizer
-
 fn ch(i: u64) -> u64 {
     if i >= LINE {
         return 0
@@ -403,11 +288,6 @@ fn is_name(c: u64) -> bool {
     return c == 95
 }
 
-// `$?` is the code of the last command, `$NAME` a variable, and a `$` in
-// front of anything else is a `$`. The value is written into the word
-// that is being built, so a variable with a space in it stays ONE
-// argument only inside quotes -- which is exactly the rule every shell
-// has, and the reason "$X" and $X are different.
 fn expand(i: u64) -> u64 {
     var name: [u8; 20] = [0 as u8; 20]
     if ch(i + 1) == 33 {
@@ -430,10 +310,6 @@ fn expand(i: u64) -> u64 {
         }
         return i + 2
     }
-    // RUNDE K11: `$#` ist die Zahl der Stellungsparameter, `$0`..`$9`
-    // sind sie selbst, und `${NAME}` ist `$NAME` mit Klammern -- das
-    // braucht man, sobald hinter dem Namen ein Buchstabe steht
-    // (`${X}abc`).
     if ch(i + 1) == 35 {
         var buf: [u8; 26] = [0 as u8; 26]
         var many: u64 = 0
@@ -512,8 +388,6 @@ fn is_break(c: u64) -> bool {
     return c == 124 || c == 60 || c == 62 || c == 38 || c == 59
 }
 
-// The whole line into tokens. Returns false when it is broken -- an
-// unterminated quote is the only way that happens.
 fn tokenize() -> bool {
     var s_quote: [u8; 26] = "sh: unterminated quote\0\0\0\0"
     ntok = 0
@@ -571,24 +445,6 @@ fn tokenize() -> bool {
                 } else if d == 34 {
                     i = i + 1
                     while ch(i) != 34 && ch(i) != 0 {
-                        // RUNDE FREMDLAND: DER RUECKSTRICH IN
-                        // ANFUEHRUNGSZEICHEN.
-                        //
-                        // GEMESSEN, bevor diese vier Zeilen standen:
-                        //     sh -c 'av "print(\"A\")"'
-                        //     argv[1] = [print(\A\)]
-                        // Der Rueckstrich blieb stehen UND das
-                        // Anfuehrungszeichen dahinter verschwand -- also
-                        // genau verkehrt herum. Der Grund: die Schleife
-                        // kannte den Rueckstrich nicht, also war er ein
-                        // Zeichen wie jedes andere, und das `"` dahinter
-                        // beendete die Zeichenkette.
-                        //
-                        // POSIX: in doppelten Anfuehrungszeichen behaelt
-                        // der Rueckstrich seine Wirkung NUR vor $ ` " \
-                        // und Zeilenende. Vor allem anderen ist er ein
-                        // gewoehnlicher Rueckstrich -- `"a\b"` ist `a\b`
-                        // und nicht `ab`.
                         if ch(i) == 92 {
                             let n: u64 = ch(i + 1)
                             if n == 36 || n == 96 || n == 34 || n == 92 {
@@ -613,16 +469,6 @@ fn tokenize() -> bool {
                 } else if d == 36 {
                     i = expand(i)
                 } else if d == 92 {
-                    // RUNDE FREMDLAND: DER RUECKSTRICH AUSSERHALB VON
-                    // ANFUEHRUNGSZEICHEN nimmt dem naechsten Zeichen
-                    // JEDE Sonderbedeutung -- auch die des Trenners.
-                    //
-                    // GEMESSEN, vorher: `av a\ b` ergab zwei Argumente
-                    // [a\] und [b]; der Rueckstrich blieb im Wort stehen
-                    // und das Leerzeichen trennte trotzdem.
-                    //
-                    // Ein Rueckstrich am Zeilenende hat nichts, was er
-                    // schuetzen koennte; er bleibt dann er selbst.
                     if ch(i + 1) == 0 {
                         put_word(92)
                         i = i + 1
@@ -646,10 +492,6 @@ fn word_at(t: u64) -> u64 {
     return (&words[(tok_at[t as usize]) as usize]) as u64
 }
 
-// ------------------------------------------------------------ running
-
-// One line: split at `;` and `&`, and run each piece. Returns false when
-// `exit` was one of them.
 fn run_line() -> bool {
     if !tokenize() {
         status = 2
@@ -677,9 +519,6 @@ fn run_line() -> bool {
     return true
 }
 
-// The temporary files a pipe is staged through. They are made when the
-// first pipe of the run needs them and not before: an image without a
-// pipe in it must look exactly the way round K1 left it.
 fn tmp_path(k: u64) -> u64 {
     var t0: [u8; 9] = "/tmp/sh0\0"
     var t1: [u8; 9] = "/tmp/sh1\0"
@@ -696,8 +535,6 @@ fn tmp_path(k: u64) -> u64 {
     return (&scratch[0 as usize]) as u64
 }
 
-// `a | b | c` between the tokens `from` and `to`. Every stage but the
-// last writes into a file that the next one reads.
 fn run_pipeline(from: u64, to: u64, bg: bool) -> bool {
     var stage_in: [u8; 128] = [0 as u8; 128]
     var stage_out: [u8; 128] = [0 as u8; 128]
@@ -749,9 +586,6 @@ fn run_pipeline(from: u64, to: u64, bg: bool) -> bool {
     return alive
 }
 
-// One command: the words are the arguments, everything after a `<`, `>`,
-// `>>` or `2>` is a file name. `pin`/`pout` are what the pipeline asks
-// for and an explicit redirection wins over them.
 fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
     var f_in: [u8; 96] = [0 as u8; 96]
     var f_out: [u8; 96] = [0 as u8; 96]
@@ -793,7 +627,6 @@ fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
         }
     }
     if argc == 0 {
-        // Only assignments, or nothing at all.
         return true
     }
     if assignments() {
@@ -815,24 +648,6 @@ fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
     let alive: bool = execute(bg)
     undo()
     if interactive == 1 && did_run == 1 {
-        // RUNDE ECHTHARDWARE-5, ZWEITER ANLAUF: `prompt()` BLEIBT HIER.
-        //
-        // Im ersten Anlauf habe ich es hier herausgenommen, weil die
-        // Aufforderung jetzt am ANFANG der Schleife steht und ich sie
-        // nicht zweimal sehen wollte. Der Pruefstand hat mich
-        // korrigiert -- `tools/userland/run.sh` liest woertlich
-        //
-        //     osum$ echo -> 0
-        //
-        // Das ist die MESSZEILE, an der zwei Zusagen dieses Systems
-        // haengen ("der Rueckgabewert eines Programms wird nach ihm
-        // gemeldet"), und das `osum$ ` davor gehoert zu ihr. Es ist
-        // KEINE zweite Eingabeaufforderung, sondern der Anfang einer
-        // Ergebniszeile, die zufaellig gleich aussieht.
-        //
-        // Doppelt steht sie deshalb trotzdem nicht: die Aufforderung
-        // am Schleifenanfang kommt VOR dem Lesen, diese hier NACH dem
-        // Ausfuehren. Dazwischen liegt immer die getippte Zeile.
         var s_arrow: [u8; 5] = " -> \0"
         prompt()
         ulib.say(argv[0 as usize])
@@ -843,9 +658,6 @@ fn run_stage(from: u64, to: u64, pin: u64, pout: u64, bg: bool) -> bool {
     return alive
 }
 
-// `NAME=value` in front of a command. A real shell would hand it to the
-// child as an environment; `exec` has none in this kernel (round K4),
-// so it is set here and stays set. docs/ROUNDK6.md says so.
 fn eq_at(w: u64) -> u64 {
     let first: u64 = (*((w) as *mut u8)) as u64
     if !is_name(first) || (first >= 48 && first <= 57) {
@@ -901,9 +713,6 @@ fn assignments() -> bool {
     return false
 }
 
-// One of the three standard descriptors onto a file, or left alone when
-// the name is empty. `>` unlinks first, which is this file system's
-// truncate; `>>` seeks to the end.
 fn redirect(fd: u64, name: u64, append: bool) -> bool {
     var s_open: [u8; 20] = "sh: cannot open \0\0\0\0"
     if *((name) as *mut u8) == 0 as u8 {
@@ -920,15 +729,9 @@ fn redirect(fd: u64, name: u64, append: bool) -> bool {
         ulib.sys(ulib.SYS_CLOSE, r, 0, 0)
         return true
     }
-    // ROUND K4'S FLAGS. Round K6 took the name away to empty the file,
-    // because the file system of round K1 could not shorten one and
-    // `open` took a boolean "make it". Both are gone: `>` is
-    // O_WRONLY|O_CREAT|O_TRUNC and `>>` is O_WRONLY|O_CREAT|O_APPEND, and
-    // the kernel puts an appending write at the end of the file itself --
-    // no seek, and no gap between the seek and the write.
     var flags: u64 = ulib.O_MAKE
     if append {
-        flags = 1089 // O_WRONLY | O_CREAT | O_APPEND
+        flags = 1089
     }
     let w: u64 = ulib.sys(ulib.SYS_OPEN, name, flags, 0)
     if ulib.bad(w) {
@@ -941,9 +744,6 @@ fn redirect(fd: u64, name: u64, append: bool) -> bool {
     return true
 }
 
-// Every redirection back to where it was. The copies made in `u_start`
-// are the "where it was" -- not the console: a shell whose own output was
-// already pointed somewhere has to go back THERE.
 fn undo() {
     if !ulib.bad(save_in) {
         ulib.sys(ulib.SYS_DUP2, save_in, 0, 0)
@@ -956,10 +756,6 @@ fn undo() {
     }
 }
 
-// `ls` means `/bin/ls`; a name with a slash in it means itself. Two
-// lines, and they are the whole of what a bigger system calls a search
-// path -- one directory, and it is named in the shell and not in the
-// kernel.
 fn make_path(cmd: u64) {
     var b_bin: [u8; 6] = "/bin/\0"
     var slash: bool = false
@@ -978,7 +774,6 @@ fn make_path(cmd: u64) {
     ulib.strncpy((&path[0 as usize]) as u64 + 5, cmd, 123)
 }
 
-// The command itself. Returns false only for `exit`.
 fn execute(bg: bool) -> bool {
     var s_no: [u8; 16] = "sh: cannot run \0"
     var s_arrow: [u8; 5] = " -> \0"
@@ -1018,8 +813,6 @@ fn execute(bg: bool) -> bool {
     return true
 }
 
-// A negative number on descriptor 2. `ulib.sayn` writes on 1, and an
-// error that went to 1 would land in the file of `cmd > file`.
 fn say_err(v: u64) {
     var buf: [u8; 26] = [0 as u8; 26]
     ulib.digits(v, (&buf[0 as usize]) as u64)
@@ -1028,11 +821,6 @@ fn say_err(v: u64) {
     ulib.eput((&nlc[0 as usize]) as u64)
 }
 
-// ---------------------------------------------------------- built-ins
-
-// The commands that cannot be programs: a child process cannot change
-// its parent's working directory, cannot set its variables and cannot
-// end it. Everything else on this system IS a program.
 fn builtin() -> bool {
     var c_cd: [u8; 3] = "cd\0"
     var c_pwd: [u8; 4] = "pwd\0"
@@ -1042,11 +830,6 @@ fn builtin() -> bool {
     var c_test: [u8; 5] = "test\0"
     var c_brk: [u8; 2] = "[\0"
     var c_shift: [u8; 6] = "shift\0"
-    // RUNDE SYSTEMBUS: `clip` -- die Zwischenablage auf der
-    // Kommandozeile. Sie ist EINGEBAUT und kein Programm unter /bin,
-    // weil sie sonst in einem Kindprozess laufen wuerde und der
-    // Screenshot "im Editor kopiert, im Terminal eingefuegt" damit
-    // zwei Prozesse mehr braeuchte, als er beweisen soll.
     var c_clip: [u8; 5] = "clip\0"
     let w: u64 = argv[0 as usize]
     if ulib.streq(w, (&c_clip[0 as usize]) as u64) {
@@ -1092,15 +875,6 @@ fn builtin() -> bool {
     return false
 }
 
-// ==================================================== RUNDE SYSTEMBUS
-//
-//   clip            zeigt, was oben liegt
-//   clip <text...>  legt den Text ab (Typ Text)
-//   clip -l         der VERLAUF, neueste zuerst, mit Besitzer-pid
-//
-// Das ist der sichtbare Teil der Zusage "Text zwischen ZWEI
-// verschiedenen Prozessen": im Editor STRG-K, hier `clip`, und was
-// erscheint, ist dasselbe.
 fn do_clip() {
     var buf: [u8; 192] = [0 as u8; 192]
     var s_l: [u8; 3] = "-l\0"
@@ -1132,7 +906,6 @@ fn do_clip() {
         return
     }
     if argc > 1 {
-        // Alle Woerter hinter `clip`, durch Leerzeichen getrennt.
         var at: u64 = 0
         var k: u64 = 1
         while k < argc && at < 190 {
@@ -1186,9 +959,6 @@ fn do_cd() {
 
 fn do_pwd() {
     var buf: [u8; 96] = [0 as u8; 96]
-    // Linux's `getcwd` counts the terminating zero, and so does this
-    // kernel now that round K6 sits on round K4's layer -- what is
-    // PRINTED is one octet less.
     let n: u64 = ulib.sys(ulib.SYS_GETCWD, (&buf[0 as usize]) as u64, 96, 0)
     if ulib.bad(n) || n == 0 {
         status = 1
@@ -1199,10 +969,6 @@ fn do_pwd() {
     status = 0
 }
 
-// `export NAME` marks a variable, `export` alone lists what is marked.
-// The mark reaches no child yet: `exec` has no environment in this
-// kernel. It is here so that the shell has the word and the round after
-// this one has somewhere to hang it.
 fn do_export() {
     var s_eq: [u8; 2] = "=\0"
     if argc == 1 {
@@ -1230,9 +996,6 @@ fn do_export() {
     status = 0
 }
 
-// Every background child that is still a corpse. A shell that walked
-// away from them would leave a page table and a kernel stack per job
-// behind, and `tools/osum/run.sh` counts exactly those frames.
 fn reap_all() {
     var s_done: [u8; 2] = "[\0"
     var s_arrow: [u8; 6] = "] -> \0"
@@ -1248,32 +1011,6 @@ fn reap_all() {
     }
     nbg = 0
 }
-
-// ================================================ RUNDE K11: das Skript
-//
-// WAS DIE SHELL AUS RUNDE K6 VORGEFUNDEN HAT -- nachgesehen und nicht
-// geraten (`kernel/user/sh.fi`, Stand f4c58d1): Roehren mit bis zu vier
-// Stufen ueber Zwischendateien, `<`, `>`, `>>`, `2>`, `;`, `&` und
-// `wait`, einfache und doppelte Anfuehrungszeichen, `$NAME`, `$?`, `$!`,
-// Zuweisungen `NAME=wert` vor einem Befehl, die eingebauten Befehle `cd`,
-// `pwd`, `exit`, `export` und `wait`, einen Zeileneditor mit Ruecktaste
-// und "die Zeile von vorhin", und `/bin/` als einzigen Suchpfad.
-//
-// WAS FEHLTE: alles, was ein Skript zu einem Programm macht. Kein `if`,
-// kein `for`, kein `while`, kein `case`, keine Funktionen, kein `test`,
-// keine Stellungsparameter. Ein Skript war eine Liste von Befehlen.
-//
-// DER ZUSCHNITT DIESER RUNDE, und er ist mit Absicht so: die Maschinerie
-// von K6 bleibt Zeile fuer Zeile stehen. Darueber liegt eine Schicht, die
-// den Text in ANWEISUNGEN zerlegt (getrennt an Zeilenende und `;`,
-// Anfuehrungszeichen zaehlen mit) und die Schluesselwoerter erkennt.
-// Alles, was kein Schluesselwort ist, geht durch `run_line` -- dieselbe
-// Funktion, dieselbe Ausgabe, dieselben Beendigungscodes wie in Runde K6.
-// Deshalb misst tools/userland/run.sh weiterhin genau das, was es gemessen
-// hat.
-//
-// EINE ANWEISUNG DARF 255 OKTETTE HABEN (`LINE`); ein Skript im Ganzen
-// 16384 und 512 Anweisungen. Was darueber liegt, wird ABGELEHNT.
 
 const SRCMAX: u64 = 16384
 const STMTS: u64 = 512
@@ -1303,21 +1040,6 @@ static mut cont_flag: u64 = 0
 static mut calls: u64 = 0
 static mut kwbuf: [u8; 32] = [0 as u8; 32]
 
-// EIN WOERTERBUCH STATT VIERZIG ZEICHENKETTEN AUF DEM STAPEL.
-//
-// Ein `var s: [u8; n] = "then\0"` INNERHALB einer Funktion legt Firn Stufe
-// 0 auf den Stapel und fuellt es bei jedem Aufruf Oktett fuer Oktett. Der
-// Ausfuehrer haette so vierzig davon, und der Vergleich waere vierzig
-// Aufrufe von `streq`. Hier steht die Liste EINMAL in `.rodata`, und
-// verglichen wird eine ZAHL. Es steht als `static mut` da und nicht als
-// `static`, obwohl niemand hineinschreibt: firnc1 (der Uebersetzer in
-// Firn) bricht bei einem unveraenderlichen `static` mit einer
-// Zeichenkette in einer Datei dieser Groesse OHNE MELDUNG mit 1 ab.
-// Siehe docs/ROUNDK11.md, Abschnitt "was am Uebersetzer aufgefallen ist".
-//
-// Das ist nicht Kosmetik: die Shell muss samt
-// dem uebrigen Userland auf eine Platte von 2 MiB passen, und
-// tools/userland/run.sh rechnet das nach.
 const W_IF: u64 = 1
 const W_THEN: u64 = 2
 const W_ELIF: u64 = 3
@@ -1341,7 +1063,6 @@ const W_CLOSE: u64 = 20
 
 static mut KWTAB: [u8; 89] = "if\0then\0elif\0else\0fi\0while\0until\0for\0do\0done\0case\0esac\0in\0return\0break\0continue\0:\0;;\0{\0}\0"
 
-// Welche Nummer dieses Wort hat, oder 0.
 fn kw_id_of(p: u64) -> u64 {
     var at: u64 = 0
     var id: u64 = 1
@@ -1365,8 +1086,6 @@ fn kw_id(i: u64) -> u64 {
     return kw_id_of(kw_of(i))
 }
 
-// ------------------------------------------------- Anweisungen schneiden
-
 fn add_stmt(from: u64, to: u64) {
     var a: u64 = from
     var b: u64 = to
@@ -1380,16 +1099,6 @@ fn add_stmt(from: u64, to: u64) {
     if b <= a || nstmt >= STMTS {
         return
     }
-    // `then`, `else` und `do` sind Schluesselwoerter, hinter denen auf
-    // derselben Zeile ein Befehl stehen darf (`if x; then echo a; fi`).
-    // Sie werden hier abgetrennt, damit der Ausfuehrer nur noch ganze
-    // Schluesselwoerter sieht.
-    //
-    // DASSELBE GILT FUER `name()` UND FUER `{`. `f() { echo a; }` steht in
-    // jedem Skript dieser Welt auf einer Zeile, und ohne diese Zeilen
-    // verschwaende der erste Befehl des Rumpfes im Kopf der Definition --
-    // still, denn nichts daran ist ein Fehler. Genau das ist beim ersten
-    // Messlauf passiert: `anzahl=$#` kam nie heraus.
     let w: u64 = word_end(a, b)
     if w - a >= 3 && src[(w - 2) as usize] == 40 as u8
     && src[(w - 1) as usize] == 41 as u8 && w < b {
@@ -1437,8 +1146,6 @@ fn lit_eq(a: u64, n: u64, p: u64) -> bool {
     return *((p + n) as *mut u8) == 0 as u8
 }
 
-// Ein Schluesselwort, hinter dem auf derselben Zeile noch ein Befehl
-// stehen darf.
 fn lead(a: u64, w: u64) -> bool {
     var buf: [u8; 32] = [0 as u8; 32]
     var n: u64 = w - a
@@ -1455,9 +1162,6 @@ fn lead(a: u64, w: u64) -> bool {
     return id == W_THEN || id == W_ELSE || id == W_DO
 }
 
-// Der ganze Text in Anweisungen. Getrennt wird an Zeilenende und an `;`,
-// aber nicht innerhalb von Anfuehrungszeichen -- `echo "a;b"` ist EINE.
-// `;;` bleibt als eigene Anweisung stehen: `case` braucht es.
 fn split_all() {
     nstmt = 0
     var i: u64 = 0
@@ -1515,8 +1219,6 @@ fn split_all() {
     }
 }
 
-// ------------------------------------------------- das erste Wort
-
 fn kw_of(i: u64) -> u64 {
     let a: u64 = sat[(i) as usize]
     let b: u64 = a + slen[(i) as usize]
@@ -1538,7 +1240,6 @@ fn kw_is(i: u64, p: u64) -> bool {
     return ulib.streq(kw_of(i), p)
 }
 
-// Alles nach dem ersten Wort dieser Anweisung.
 fn tail_of(i: u64) -> u64 {
     let a: u64 = sat[(i) as usize]
     let b: u64 = a + slen[(i) as usize]
@@ -1560,8 +1261,6 @@ fn tail_len(i: u64) -> u64 {
     return b - w
 }
 
-// ------------------------------------------------- Bloecke finden
-
 fn opener(i: u64) -> bool {
     let id: u64 = kw_id(i)
     return id == W_IF || id == W_WHILE || id == W_UNTIL || id == W_FOR
@@ -1573,8 +1272,6 @@ fn closer(i: u64) -> bool {
     return id == W_FI || id == W_DONE || id == W_ESAC
 }
 
-// Die naechste Anweisung zwischen `from` und `to`, deren erstes Wort
-// eines der drei ist -- auf DERSELBEN Verschachtelungsebene.
 fn scan_to(from: u64, to: u64, a: u64, b: u64, c: u64) -> u64 {
     var depth: u64 = 0
     var i: u64 = from
@@ -1597,9 +1294,6 @@ fn scan_to(from: u64, to: u64, a: u64, b: u64, c: u64) -> u64 {
     return to
 }
 
-// ------------------------------------------------- Anweisungen ausfuehren
-
-// Ein Stueck Rohtext als Befehlszeile. Genau der Weg von Runde K6.
 fn run_text(p: u64, n: u64) -> bool {
     var k: u64 = 0
     while k < n && k + 1 < LINE {
@@ -1618,8 +1312,6 @@ fn run_stmt(i: u64) -> bool {
         slen[(i) as usize])
 }
 
-// Nur zerlegen, nicht ausfuehren -- fuer `for` und `case`, die die Worte
-// selbst brauchen.
 fn tokenize_stmt(i: u64) -> bool {
     var k: u64 = 0
     let n: u64 = slen[(i) as usize]
@@ -1631,8 +1323,6 @@ fn tokenize_stmt(i: u64) -> bool {
     line[(k) as usize] = 0 as u8
     return tokenize()
 }
-
-// ------------------------------------------------------------- Muster
 
 fn wild(pat: u64, s: u64) -> bool {
     var p: u64 = 0
@@ -1666,8 +1356,6 @@ fn wild(pat: u64, s: u64) -> bool {
     return result
 }
 
-// ------------------------------------------------------------- test / [
-
 fn num_cmp(a: u64, op: u64, b: u64) -> bool {
     let x: u64 = ulib.to_num(a)
     let y: u64 = ulib.to_num(b)
@@ -1689,11 +1377,6 @@ fn num_cmp(a: u64, op: u64, b: u64) -> bool {
     return x >= y
 }
 
-// Dieselbe Ueberlegung wie beim Woerterbuch der Schluesselwoerter: EINE
-// Liste in `.rodata`, verglichen wird eine Zahl.
-//   1 -eq  2 -ne  3 -lt  4 -le  5 -gt  6 -ge
-//   7 -e   8 -f   9 -d  10 -r  11 -s  12 -n  13 -z
-//  14 =   15 !=  16 !
 static mut OPTAB: [u8; 52] = "-eq\0-ne\0-lt\0-le\0-gt\0-ge\0-e\0-f\0-d\0-r\0-s\0-n\0-z\0=\0!=\0!\0"
 
 fn op_id(p: u64) -> u64 {
@@ -1723,18 +1406,9 @@ fn num_op(p: u64) -> u64 {
     return 0
 }
 
-// `test` und `[` sind hier eingebaut und keine Programme. Zwei Gruende:
-// ein Prozess je Bedingung waere in einer `while`-Schleife der ganze
-// Aufwand, und `[` muesste als Dateiname `/bin/[` auf der Platte liegen,
-// wo ihn niemand vermutet. Jede Shell macht es so.
-//
-// Was es kennt: -e -f -d -r -s (Dateien), -n -z (Zeichenketten),
-// = != (Vergleich), -eq -ne -lt -le -gt -ge (Zahlen), ! davor, und ein
-// einzelnes Wort ist wahr, wenn es nicht leer ist.
 fn do_test(as_bracket: bool) -> u64 {
     var n: u64 = argc
     if as_bracket {
-        // Die schliessende Klammer gehoert nicht zur Bedingung.
         if n > 1 {
             n = n - 1
         }
@@ -1787,8 +1461,6 @@ fn do_test(as_bracket: bool) -> u64 {
     return 1
 }
 
-// ------------------------------------------------------- Funktionen
-
 fn func_find(name: u64) -> u64 {
     var i: u64 = 0
     while i < nfunc {
@@ -1814,9 +1486,6 @@ fn pos_get(k: u64) -> u64 {
     return (&pos[(k * POSLEN) as usize]) as u64
 }
 
-// ------------------------------------------------- der Ausfuehrer
-
-// Anweisungen `from`..`to`. Gibt false, wenn `exit` dabei war.
 fn exec_range(from: u64, to: u64) -> bool {
     var i: u64 = from
     while i < to && ret_flag == 0 && brk_flag == 0 && cont_flag == 0 {
@@ -1860,9 +1529,6 @@ fn exec_range(from: u64, to: u64) -> bool {
             status = 0
             i = i + 1
         } else if w != 0 {
-            // Ein Schluesselwort ohne seinen Kopf -- uebergehen statt als
-            // Befehl zu suchen. So bleibt ein halb geschriebenes Skript
-            // eine Meldung und kein `sh: cannot run fi`.
             i = i + 1
         } else if is_funcdef(i) {
             i = def_func(i, to)
@@ -1876,7 +1542,6 @@ fn exec_range(from: u64, to: u64) -> bool {
     return true
 }
 
-// Ein gewoehnlicher Befehl -- oder der Aufruf einer Funktion.
 fn run_one(i: u64) -> bool {
     if !tokenize_stmt(i) {
         status = 2
@@ -1901,8 +1566,6 @@ fn call_func(f: u64) -> bool {
         status = 2
         return true
     }
-    // Die Stellungsparameter des Aufrufers retten -- eine Funktion, die
-    // die $1 ihres Aufrufers zerstoert, ist keine.
     var k: u64 = 0
     while k < NPOS * POSLEN {
         save[(k) as usize] = pos[(k) as usize]
@@ -1931,7 +1594,6 @@ fn call_func(f: u64) -> bool {
     return alive
 }
 
-// `name()` oder `name() {`
 fn is_funcdef(i: u64) -> bool {
     let a: u64 = sat[(i) as usize]
     let b: u64 = a + slen[(i) as usize]
@@ -1959,8 +1621,6 @@ fn def_func(i: u64, to: u64) -> u64 {
         k = k + 1
     }
     fn_name[(nfunc * FNLEN + n) as usize] = 0 as u8
-    // Der Rumpf beginnt hinter der oeffnenden Klammer. Steht sie allein
-    // in der naechsten Anweisung, faengt er eine spaeter an.
     var body: u64 = i + 1
     let end: u64 = scan_to(body, to, W_CLOSE, 0, 0)
     if body < to && kw_id(body) == W_OPEN && slen[(body) as usize] == 1 {
@@ -1975,7 +1635,6 @@ fn def_func(i: u64, to: u64) -> u64 {
     return to
 }
 
-// `if` .. `then` .. [`elif` .. `then` ..] [`else` ..] `fi`
 fn do_if(i: u64, to: u64) -> u64 {
     let fi: u64 = scan_to(i + 1, to, W_FI, 0, 0)
     var head: u64 = i
@@ -1986,7 +1645,6 @@ fn do_if(i: u64, to: u64) -> u64 {
         if then_at >= fi {
             done = true
         } else {
-            // Die Bedingung: alles zwischen dem Kopf und `then`.
             if tail_len(head) > 0 {
                 if !run_text((&src[(tail_of(head)) as usize]) as u64,
                     tail_len(head)) {
@@ -2026,8 +1684,6 @@ fn do_if(i: u64, to: u64) -> u64 {
     return to
 }
 
-// `while COND` `do` .. `done` -- und `until`, das dieselbe Schleife mit
-// umgedrehter Bedingung ist.
 fn do_while(i: u64, to: u64, invert: bool) -> u64 {
     let done_at: u64 = scan_to(i + 1, to, W_DONE, 0, 0)
     let do_at: u64 = scan_to(i + 1, done_at, W_DO, 0, 0)
@@ -2068,9 +1724,6 @@ fn do_while(i: u64, to: u64, invert: bool) -> u64 {
                 going = false
             }
             rounds = rounds + 1
-            // EINE OBERGRENZE, und sie steht hier mit Absicht: eine
-            // Schleife, die nicht endet, macht aus einem Testlauf ein
-            // Zeitlimit, und ein Zeitlimit misst nichts.
             if rounds > 100000 {
                 going = false
             }
@@ -2082,7 +1735,6 @@ fn do_while(i: u64, to: u64, invert: bool) -> u64 {
     return to
 }
 
-// `for V in W...` `do` .. `done`
 fn do_for(i: u64, to: u64) -> u64 {
     var buf: [u8; 1024] = [0 as u8; 1024]
     var at: [u64; 32] = [0 as u64; 32]
@@ -2104,11 +1756,6 @@ fn do_for(i: u64, to: u64) -> u64 {
     if k < ntok && kw_id_of(word_at(k)) == W_IN {
         k = k + 1
     }
-    // DIE WORTE WERDEN AN LEERZEICHEN NOCH EINMAL ZERLEGT. `$LIST` wird
-    // in Runde K6 zu EINEM Wort, auch ohne Anfuehrungszeichen; damit
-    // `for i in $LIST` das tut, was jeder erwartet, teilt genau diese
-    // Schleife sie hier. Das ist eine ABWEICHUNG von POSIX (dort trennt
-    // die Zerlegung schon frueher) und steht in docs/ROUNDK11.md.
     var n: u64 = 0
     var used: u64 = 0
     while k < ntok && n < FORMAX {
@@ -2162,7 +1809,6 @@ fn do_for(i: u64, to: u64) -> u64 {
     return to
 }
 
-// `case W in` `MUSTER)` .. `;;` .. `esac`
 fn do_case(i: u64, to: u64) -> u64 {
     var subject: [u8; 128] = [0 as u8; 128]
     var pat: [u8; 128] = [0 as u8; 128]
@@ -2178,8 +1824,6 @@ fn do_case(i: u64, to: u64) -> u64 {
     var j: u64 = i + 1
     var hit: bool = false
     while j < esac && !hit {
-        // Eine Zweigzeile: `MUSTER)` oder `A|B)` -- und dahinter darf
-        // schon der erste Befehl stehen.
         let a: u64 = sat[(j) as usize]
         let b: u64 = a + slen[(j) as usize]
         var close: u64 = a
@@ -2198,7 +1842,6 @@ fn do_case(i: u64, to: u64) -> u64 {
         if close >= b {
             j = j + 1
         } else {
-            // Passt eines der Muster?
             var start: u64 = a
             var m: u64 = a
             var matched: bool = false
@@ -2226,7 +1869,6 @@ fn do_case(i: u64, to: u64) -> u64 {
             if matched {
                 hit = true
                 status = 0
-                // Was hinter der Klammer noch auf der Zeile steht.
                 var rest: u64 = close + 1
                 while rest < b && (src[(rest) as usize] == 32 as u8
                     || src[(rest) as usize] == 9 as u8) {
@@ -2253,8 +1895,6 @@ fn do_case(i: u64, to: u64) -> u64 {
     return to
 }
 
-// ---------------------------------------------------- ein ganzes Skript
-
 fn read_all(fd: u64) -> bool {
     nraw = 0
     var going: bool = true
@@ -2273,17 +1913,6 @@ fn read_all(fd: u64) -> bool {
     return edit_pass()
 }
 
-// DER ZEILENEDITOR AUS RUNDE K1, UNVERAENDERT -- und er steht hier, weil
-// er sonst mit dem Lesen als Ganzes verschwunden waere.
-//
-// Auf dieser Maschine sind das Oktett 8 (Ruecktaste) und das Oktett 14
-// ("die Zeile von vorhin") Tasten, und weil sie Oktette sind, kann eine
-// DATEI sie genauso enthalten. Genau daran misst Abschnitt 5 von
-// tools/userland/run.sh den Zeileneditor -- ohne einen Menschen davor.
-// Also bekommt der Text vor dem Zerlegen denselben Durchgang, den
-// `get_line` Zeichen fuer Zeichen macht: 8 nimmt das letzte Zeichen
-// zurueck, 14 setzt die vorige Zeile ein, und eine nicht leere Zeile
-// wird die neue "vorige".
 fn edit_pass() -> bool {
     var last: [u8; 256] = [0 as u8; 256]
     var cur: [u8; 256] = [0 as u8; 256]
@@ -2351,7 +1980,6 @@ fn run_script(fd: u64) -> u64 {
     return status
 }
 
-// `shift` -- die Stellungsparameter um eins nach vorn.
 fn do_shift() {
     var k: u64 = 1
     while k + 1 < npos {
@@ -2368,24 +1996,9 @@ fn do_shift() {
     status = 0
 }
 
-// RUNDE K11: `export` erreicht das Kind. Runde K6 hat die Markierung
-// gesetzt und in die Doku geschrieben, dass sie nirgends ankommt; jetzt
-// wird sie vor jedem Start in den Kernel geschoben (SYS_OSUM_SETENV), und
-// `kernel/elf.fi` legt sie dem Kind auf die Argumentseite.
-//
-// Vor JEDEM Start und nicht nur beim `export`: eine Variable, die schon
-// markiert ist und danach einen neuen Wert bekommt, soll den neuen Wert
-// weitergeben.
 fn push_env() {
     var buf: [u8; 512] = [0 as u8; 512]
     var at: u64 = 0
-    // JEDE GRENZE HIER IST HART, und das ist kein Uebereifer: die
-    // Gegenprobe `nobss` in tools/osum/run.sh startet dieses System mit
-    // einer .bss, die der Lader ABSICHTLICH nicht genullt hat. Dann steht
-    // in `nvar` das Giftmuster, und eine Schleife `while i < nvar` laeuft
-    // ueber das Feld hinaus -- die Shell endete mit
-    // "panic: index out of bounds", und der Messwert, den diese
-    // Gegenprobe eigentlich holen soll, kam nie heraus.
     var n: u64 = nvar
     if n > NVAR {
         n = NVAR

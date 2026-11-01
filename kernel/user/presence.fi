@@ -1,104 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/praesenz.fi -- RUNDE PRAESENZ: DER PRAESENZDIENST AM BUS.
-//
-//     praesenz dienst [ms]           der Dienst selbst
-//     praesenz setzen <app> <text>   eine App setzt ihren Status
-//     praesenz fokus  <app>          "in <app>" (vom Fensterserver)
-//     praesenz weg | da              abwesend / wieder da
-//     praesenz unsichtbar <an|aus>   niemand sieht mich
-//     praesenz zeigen                was steht gerade
-//
-// ====================================================================
-// WAS DAS IST, UND WAS ES NICHT IST
-// ====================================================================
-//
-// Der Auftrag sagt: "man sieht, was ein Freund gerade macht, aber halt
-// im OS integriert, mit dem OS-Konto". Das sind DREI Dinge, und sie
-// gehoeren getrennt:
-//
-//   1. WER BIN ICH  -> Runde KONTO (`/bin/konto`, drei Anbieter hinter
-//      einer Schnittstelle). Diese Runde baut das NICHT nach, sie fragt.
-//   2. WAS MACHE ICH GERADE -> DIESE DATEI. Ein Dienst am Systembus,
-//      der EINEN Statustext haelt und ihn an Abonnenten verteilt.
-//   3. WER DARF ES SEHEN -> der Freundschaftsgraph am Server. Lokal ist
-//      die Grenze der Benutzer, und die zieht der Kern (A_SAMEUID).
-//
-// DER DIENST LAEUFT AUCH OHNE KONTO. Ohne Anmeldung haelt er den Status
-// lokal, veroeffentlicht ihn auf dem Bus (Leiste und Fensterserver
-// duerfen ihn sehen) und schickt NICHTS ins Netz. Das ist die Regel aus
-// Runde KONTO, woertlich: ein Konto ist eine Bequemlichkeit, es ist nie
-// eine Bedingung.
-//
-// ====================================================================
-// WARUM EIN BUSDIENST UND KEINE DATEI IN /var/run
-// ====================================================================
-//
-// Eine Statusdatei muesste jeder, der sie lesen will, POLLEN -- und der
-// Fensterserver schreibt sie bei JEDEM Fokuswechsel. Der Bus hat genau
-// das Gegenteil: `PUB` schickt eine Kopie an JEDEN Abonnenten, und wer
-// nichts abonniert hat, wird nicht geweckt.
-//
-// Dazu kommt das, was eine Datei nicht kann und `docs/SYSTEMBUS.md`
-// "der ganze Unterschied" nennt: PID UND UID TRAEGT DER KERN EIN, nicht
-// der Absender. Ein Programm kann sich nicht als ein anderes ausgeben,
-// und dieser Dienst muss keinem Absender glauben.
-//
-// Angemeldet wird mit `A_SAMEUID`: nur derselbe Benutzer (und root)
-// darf rufen. Auf einem Mehrbenutzergeraet sieht Benutzer B damit
-// NICHT, was Benutzer A tut -- nicht weil dieses Programm hoeflich ist,
-// sondern weil der Kern die Nachricht gar nicht erst zustellt.
-//
-// ====================================================================
-// DAS PROTOKOLL: 64 OKTETTE, UND WARUM DAS REICHT
-// ====================================================================
-//
-// `bus.MSG_INLINE` ist 64. Was groesser ist, braucht ein Segment -- und
-// ein Segment fuer "spielt Certus" waeren drei Systemrufe fuer dreizehn
-// Zeichen. Also passt ein Status in 64 Oktette, nach festem Bauplan:
-//
-//     Oktett 0      Art     (P_SETZEN, P_FOKUS, ...)
-//     Oktett 1      Zustand (Z_DA, Z_WEG, Z_BESCH, Z_UNSICHT)
-//     Oktett 2      Laenge der App    (0..16)
-//     Oktett 3      Laenge des Textes (0..44)
-//     Oktett 4..19  App    ("certus", "edit", ...)
-//     Oktett 20..63 Text   ("liest xoffi.ai")
-//
-// Die App ist 16 Oktette, weil ein Dienstname am Bus auch 16 ist
-// (`bus.NAME_MAX`) -- dieselbe Grenze zweimal zu fuehren waere eine
-// Einladung fuer den Tag, an dem eine davon waechst.
-//
-// DER TEXT IST 44 OKTETTE UND NICHT LAENGER. Ein abgeschnittener Text
-// ist haesslich, ein Text, der gar nicht ankommt, ist ein Fehler --
-// also wird GEKUERZT und das Kuerzen GEZAEHLT (`z_gekuerzt`, sichtbar
-// in `praesenz zeigen`), damit es beim Messen auffaellt und nicht beim
-// Benutzer.
-//
-// ====================================================================
-// DATENSCHUTZ, UND ZWAR ALS MECHANIK
-// ====================================================================
-//
-//   (a) UNSICHTBAR IST UNSICHTBAR. Steht `z_unsicht`, verlaesst KEIN
-//       Statustext dieses Programm -- der Rahmen wird gar nicht erst
-//       gefuellt (`rahmen_bauen` kehrt vorher um). Die Abonnenten
-//       bekommen Z_UNSICHT und einen LEEREN Text. Nicht "offline
-//       vortaeuschen": ein Freund sieht "unsichtbar" und weiss damit,
-//       dass er nichts sieht. Das ist ehrlicher als eine Luege und
-//       billiger als ein zweiter Zustand, der auseinanderlaufen kann.
-//
-//   (b) DER APP-TEXT IST OPT-IN, JE APP. Eine App darf ihren Text nur
-//       setzen, wenn sie in `/etc/praesenz.conf` unter `text` steht.
-//       Sonst bleibt "in <App>" -- der Name, den der Fensterserver
-//       ohnehin kennt. Der Unterschied ist der zwischen "spielt Certus"
-//       und "liest xoffi.ai", und das zweite ist eine Aussage ueber den
-//       Menschen und nicht ueber das Programm.
-//       FEHLT DIE DATEI, DARF KEINE APP EINEN TEXT SETZEN. Wer nichts
-//       eingestellt hat, verraet nichts.
-//
-//   (c) `fokus` TRAEGT NIE EINEN TEXT. Der Fensterserver kennt den
-//       Fenstertitel, und ein Fenstertitel ist ein Dateiname, eine
-//       Netzadresse oder ein Betreff. Deshalb nimmt `P_FOKUS` den Text
-//       gar nicht erst an (`mit_text` ist dort `false`), statt sich auf
-//       die Erlaubnisliste zu verlassen.
 
 profile kernel
 
@@ -108,9 +7,6 @@ import libc.io
 
 export { u_start }
 
-// -------------------------------------------------------------- Bus
-// Thin wrappers over the bus syscall (ulib.bus5, base layer). Same calls as
-// the wlibc.bus_* helpers; a service must not import the toolkit (tools/arch).
 const BUS_REG_OP: u64 = 1
 const BUS_FIND_OP: u64 = 2
 const BUS_SEND_OP: u64 = 3
@@ -145,22 +41,19 @@ fn bus_pub(svc: u64, p: u64, n: u64) -> u64 {
 const SVC_NAMELEN: u64 = 8
 const A_SAMEUID: u64 = 1
 
-// die Arten einer Nachricht
-const P_SET: u64 = 1   // eine App setzt ihren Status
-const P_FOKUS: u64 = 2    // der Fensterserver meldet einen Wechsel
-const P_GONE: u64 = 3      // abwesend (die Eingabe schweigt)
-const P_DA: u64 = 4       // wieder da
-const P_SICHT: u64 = 5    // unsichtbar an/aus
-const P_ASK: u64 = 6    // "sag den Stand" -> der Dienst schickt PUB
-const P_EREIGNIS: u64 = 7 // der Dienst veroeffentlicht (PUB)
+const P_SET: u64 = 1
+const P_FOKUS: u64 = 2
+const P_GONE: u64 = 3
+const P_DA: u64 = 4
+const P_SICHT: u64 = 5
+const P_ASK: u64 = 6
+const P_EREIGNIS: u64 = 7
 
-// die Zustaende
 const Z_DA: u64 = 0
 const Z_GONE: u64 = 1
 const Z_BESCH: u64 = 2
 const Z_UNSICHT: u64 = 3
 
-// der Rahmen
 const R_ART: u64 = 0
 const R_ZUSTAND: u64 = 1
 const R_APPLEN: u64 = 2
@@ -171,28 +64,17 @@ const R_TXT: u64 = 20
 const R_TXTMAX: u64 = 44
 const R_BYTES: u64 = 64
 
-// -------------------------------------------------------- der Zustand
 static mut z_zustand: u64 = 0
 static mut z_app: [u8; 16] = [0 as u8; 16]
 static mut z_applen: u64 = 0
 static mut z_txt: [u8; 44] = [0 as u8; 44]
 static mut z_txtlen: u64 = 0
 static mut z_unsicht: u64 = 0
-static mut z_seit: u64 = 0     // Ticks, seit wann diese App
-static mut z_gekuerzt: u64 = 0 // wie oft ein Text nicht passte
-// KEINE DIENSTNUMMER, UND ZWAR NICHT 0. Das war der teuerste Fehler
-// dieser Runde: `bus_reg` gibt die Nummer des Dienstes zurueck, und der
-// erste angemeldete Dienst im System bekommt die **0**. Der Waechter
-// `if z_dienst == 0 { return 0 }` in `verteilen` hielt genau diesen
-// Fall fuer "noch nicht angemeldet" und kehrte um, BEVOR er
-// veroeffentlichte. Der Dienst nahm Nachrichten an (`DIAG recv art=1`),
-// tat aber nichts damit -- und `praesenz zeigen` wartete auf eine
-// Antwort, die nie kam ("der Dienst schweigt"). Ein Sentinel muss
-// ausserhalb des Wertebereichs liegen; SVC_MAX ist 64.
+static mut z_seit: u64 = 0
+static mut z_gekuerzt: u64 = 0
 const KEIN_DIENST: u64 = 0xFFFFFFFF
 static mut z_dienst: u64 = 0xFFFFFFFF
 
-// die Erlaubnisliste aus /etc/praesenz.conf
 static mut e_apps: [u8; 512] = [0 as u8; 512]
 static mut e_len: u64 = 0
 
@@ -218,14 +100,6 @@ fn ticks() -> u64 {
     return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
 }
 
-// ==================================================== DIE ERLAUBNIS
-//
-// /etc/praesenz.conf, eine Zeile je Schluessel:
-//
-//     text certus edit karte     -- diese Apps duerfen einen Text setzen
-//
-// Gelesen wird NUR die `text`-Zeile; alles andere darf darin stehen,
-// ohne dass dieses Programm es deuten muss.
 fn conf_read() {
     e_len = 0
     var pfad: [u8; 19] = "/etc/praesenz.conf\0"
@@ -270,8 +144,6 @@ fn conf_read() {
     }
 }
 
-// Steht diese App in der Erlaubnisliste? Verglichen wird ein GANZES
-// Wort -- "cert" darf nicht durchrutschen, weil "certus" erlaubt ist.
 fn darf_text(app: u64, alen: u64) -> bool {
     if alen == 0 || e_len == 0 {
         return false
@@ -316,7 +188,6 @@ fn darf_text(app: u64, alen: u64) -> bool {
     return false
 }
 
-// ==================================================== DER RAHMEN
 fn frame_build(out: u64, art: u64) {
     var i: u64 = 0
     while i < R_BYTES {
@@ -324,8 +195,6 @@ fn frame_build(out: u64, art: u64) {
         i = i + 1
     }
     st8(out, R_ART, art)
-    // (a) UNSICHTBAR IST UNSICHTBAR: hier wird umgekehrt, bevor
-    // irgendein Oktett des Textes in den Rahmen kommt.
     if z_unsicht != 0 {
         st8(out, R_ZUSTAND, Z_UNSICHT)
         return
@@ -345,13 +214,11 @@ fn frame_build(out: u64, art: u64) {
     }
 }
 
-// Den eigenen Status setzen. `txt` nur, wenn die App das darf.
 fn set(app: u64, alen0: u64, txt: u64, tlen0: u64, mit_text: bool) {
     var alen: u64 = alen0
     if alen > R_APPMAX {
         alen = R_APPMAX
     }
-    // Wechselt die App, laeuft die Uhr neu ("spielt seit").
     var anders: bool = alen != z_applen
     if !anders {
         var i: u64 = 0
@@ -389,8 +256,6 @@ fn set(app: u64, alen0: u64, txt: u64, tlen0: u64, mit_text: bool) {
     }
 }
 
-// Veroeffentlichen: jeder Abonnent bekommt eine Kopie, und der Kern
-// prueft die Rechte je Abonnent EINZELN.
 fn verteilen() -> u64 {
     if z_dienst == KEIN_DIENST {
         return 0
@@ -404,10 +269,6 @@ fn verteilen() -> u64 {
     return n
 }
 
-// Die vier Namen liegen STATISCH und nicht auf dem Stapel: diese
-// Funktion gibt einen Zeiger zurueck, und ein Zeiger in einen Rahmen,
-// der gleich verschwindet, ist ein Fehler, den der Uebersetzer hier
-// auch gemeldet hat ("the address of the local 'b' escapes").
 static mut n_da: [u8; 3] = "da\0"
 static mut n_weg: [u8; 9] = "abwesend\0"
 static mut n_besch: [u8; 13] = "beschaeftigt\0"
@@ -441,7 +302,6 @@ fn show() {
     }
     var t3: [u8; 7] = " text=\0"
     lineout.add_text((&t3[0 as usize]) as u64)
-    // (a) auch die eigene Anzeige sagt, dass nichts hinausgeht
     if z_unsicht == 0 && z_txtlen > 0 {
         lineout.add_bytes((&z_txt[0 as usize]) as u64, z_txtlen)
     }
@@ -454,14 +314,6 @@ fn show() {
     lineout.end_line()
 }
 
-// ==================================================== DER DIENST
-//
-// Anmelden, dann Nachrichten annehmen. `RECV` auf einen leeren Eingang
-// gibt sofort -5 (der Bus blockiert nicht), also wird `sched_yield`
-// gerufen und wieder gefragt -- genau das, was die drei Messprogramme
-// des Busses tun.
-// `frist` zaehlt TICKS und nicht Millisekunden: `I_TICKS` laeuft mit
-// `time.TICK_HZ` = 100 Hz, ein Tick ist also 10 ms.
 fn dienst(frist: u64) -> u64 {
     conf_read()
     z_dienst = bus_reg((&svcname[0 as usize]) as u64, SVC_NAMELEN,
@@ -487,8 +339,6 @@ fn dienst(frist: u64) -> u64 {
         if !ulib.bad(n) && n > 0 {
             let art: u64 = ld8(pp, R_ART)
             if art == P_SET || art == P_FOKUS {
-                // (c) `fokus` traegt nie einen Text -- ein Fenstertitel
-                // ist ein Dateiname, eine Adresse oder ein Betreff.
                 set(pp + R_APP, ld8(pp, R_APPLEN),
                     pp + R_TXT, ld8(pp, R_TXTLEN), art == P_SET)
                 if z_zustand == Z_GONE {
@@ -508,11 +358,6 @@ fn dienst(frist: u64) -> u64 {
                 z_unsicht = ld8(pp, R_ZUSTAND)
                 verteilen()
             }
-            // "SAG DEN STAND". Der Bus kann nur an DIENSTE senden, nicht
-            // an eine pid (docs/SYSTEMBUS.md, Tafel der Op-Woerter) --
-            // eine Antwort ist deshalb eine zweite Nachricht in die
-            // andere Richtung, und die geht hier ueber PUB an alle, die
-            // abonniert haben. Genau so fragt `praesenz zeigen`.
             if art == P_ASK {
                 verteilen()
             }
@@ -528,9 +373,6 @@ fn dienst(frist: u64) -> u64 {
     return 0
 }
 
-// Eine Nachricht AN den Dienst schicken. `setzen`/`fokus`/`weg`/`da`
-// tun nichts selbst: der Dienst ist die EINZIGE Stelle, die den Zustand
-// haelt. Zwei Programme mit je einer Wahrheit sind zwei Wahrheiten.
 fn schicken(art: u64, app: u64, txt: u64, sicht: u64) -> u64 {
     let svc: u64 = bus_find((&svcname[0 as usize]) as u64, SVC_NAMELEN)
     if ulib.bad(svc) {
@@ -582,9 +424,6 @@ fn schicken(art: u64, app: u64, txt: u64, sicht: u64) -> u64 {
     return 0
 }
 
-// Den Dienst nach dem Stand fragen: abonnieren, fragen, warten.
-// Ohne laufenden Dienst gibt es keinen Stand -- und das wird gesagt,
-// statt Nullen zu drucken.
 fn fragen() -> u64 {
     let svc: u64 = bus_find((&svcname[0 as usize]) as u64, SVC_NAMELEN)
     if ulib.bad(svc) {
@@ -593,8 +432,6 @@ fn fragen() -> u64 {
         lineout.end_line()
         return 1
     }
-    // ERST ABONNIEREN, DANN FRAGEN. Andersherum ist die Antwort
-    // vielleicht schon durch, bevor jemand zuhoert.
     if ulib.bad(bus_sub(svc)) {
         var e2: [u8; 31] = "presence: subscription refused\0"
         lineout.add_text((&e2[0 as usize]) as u64)
@@ -615,23 +452,14 @@ fn fragen() -> u64 {
         lineout.end_line()
         return 1
     }
-    // Auf die Veroeffentlichung warten. Der Bus blockiert nicht, also
-    // wird gefragt und nachgegeben -- mit einer Obergrenze, damit ein
-    // stummer Dienst diesen Aufruf nicht ewig haelt.
     var puffer: [u8; 64] = [0 as u8; 64]
     var kopf: [u64; 6] = [0 as u64; 6]
     let pp: u64 = (&puffer[0 as usize]) as u64
-    // AN DER UHR und nicht an Schleifenrunden: der Dienst ist ein
-    // anderer Prozess und muss vom Planer erst drangenommen werden.
-    // 200 Ticks = 2 s bei 100 Hz (time.TICK_HZ).
     let t0: u64 = ticks()
     while ticks() - t0 < 200 {
         let n: u64 = bus_recv(pp, R_BYTES, (&kopf[0 as usize]) as u64)
         if !ulib.bad(n) && n > 0 {
             if ld8(pp, R_ART) == P_EREIGNIS {
-                // Den empfangenen Rahmen in die eigenen Felder legen und
-                // dann drucken -- so gibt `zeigen` den Stand DES
-                // DIENSTES aus und nicht den eigenen.
                 z_zustand = ld8(pp, R_ZUSTAND)
                 z_unsicht = 0
                 if z_zustand == Z_UNSICHT {
@@ -696,14 +524,6 @@ fn u_start(args: u64) -> u64 {
         return dienst(frist)
     }
     if ulib.streq(cmd, (&c_zeigen[0 as usize]) as u64) {
-        // NICHT die eigenen Werte drucken. DAS WAR EIN FEHLER DIESER
-        // RUNDE, und die Abnahme hat ihn gefunden: `praesenz zeigen`
-        // ist ein EIGENER PROZESS mit eigenen Statics, die alle null
-        // sind. Er hat damit den Stand eines Dienstes gemeldet, den er
-        // nie gefragt hatte -- und die Zusage "zustand=unsichtbar" war
-        // rot, obwohl der Dienst recht hatte.
-        //
-        // Richtig ist: abonnieren, fragen, die Antwort abwarten.
         conf_read()
         return fragen()
     }

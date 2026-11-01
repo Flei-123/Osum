@@ -1,33 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/media.fi -- Runde DEMUX: was jeder Behaelter braucht.
-//
-// Drei Dinge liegen hier, weil MP4 und MKV sie BEIDE brauchen und zwei
-// Abschriften zwei Gelegenheiten waeren, eine falsch zu machen:
-//
-//   1. EINE QUELLE. Ein Fenster von 64 KiB ueber der Datei, mit
-//      `lseek` nachgezogen. Jeder Zugriff geht ueber eine ABSOLUTE
-//      Position, und jeder Zugriff hinter das Dateiende liefert 0 und
-//      setzt `src_eof`. Das ist der Grund, warum eine abgeschnittene
-//      Datei hier nicht abstuerzt: es gibt keinen Weg, an einem Ende
-//      vorbeizulesen, ohne dass es gemerkt wird.
-//   2. DIE ZAHLEN. Gross- und kleinendige Ganzzahlen aus dem Fenster.
-//      MP4 ist grossendig, Matroska ist es auch, WAV und die
-//      Codec-Kopfdaten darin sind kleinendig.
-//   3. DIE SPURENTAFEL. Was eine Spur ist, weiss weder MP4 noch MKV
-//      allein: es ist das, was die Anwendung darueber wissen muss --
-//      Art, Codec, Aufloesung, Abtastrate, Kanaele, Dauer, Datenmenge.
-//      Und dazu die EHRLICHE ANTWORT auf die Frage, ob dieses System
-//      den Codec dekodieren kann. Diese Antwort steht an EINER Stelle;
-//      wer sie aendert, aendert sie ueberall.
-//
-// WAS DIESES SYSTEM NICHT KANN, UND WARUM ES DAS SAGT: H.264, HEVC, AV1
-// und VP9 sind zwischen 15.000 und 150.000 Zeilen Dekodierer, und bei
-// AV1 kaeme handgeschriebener Assembler dazu, ohne den es nicht in
-// Echtzeit laeuft. Das ist recherchiert und steht mit Zahlen in
-// /root/osum-roadmap/ROADMAP.md, Block F. Ein Abspieler, der so eine
-// Datei oeffnet und ein schwarzes Fenster zeigt, luegt. Dieser hier
-// nennt den Codec, die Aufloesung, die Dauer und die Datenrate und
-// bietet an, den Ton allein abzuspielen.
 
 profile kernel
 
@@ -53,28 +23,17 @@ export {
     idx_setdur, idx_full, IDX_MAX
 }
 
-// ---------------------------------------------------------- die Quelle
-//
-// Ein Fenster, kein Abbild der ganzen Datei: ein Musikstueck von acht
-// Minuten sind 8 MiB, und ein Prozess hat 3 MiB Abbild. Das Fenster ist
-// 64 KiB gross, weil ein MP4-Kopf (`moov`) selten groesser ist und ein
-// MP3-Rahmen nie -- damit kostet ein Durchlauf durch eine Datei genau
-// einen Systemaufruf je 64 KiB.
-
 const WIN: u64 = 65536
 
 static mut f_fd: u64 = 0
 static mut f_open: u64 = 0
 static mut f_size: u64 = 0
 static mut f_win: [u8; 65536] = [0 as u8; 65536]
-static mut f_woff: u64 = 0 // Dateiposition von f_win[0]
+static mut f_woff: u64 = 0
 static mut f_wlen: u64 = 0
-static mut f_eof: u64 = 0 // wurde hinter das Ende gegriffen?
-static mut f_err: u64 = 0 // ging ein Lesen schief?
+static mut f_eof: u64 = 0
+static mut f_err: u64 = 0
 
-// Oeffnen. Rueckgabe: true, wenn die Datei da ist. Die GROESSE kommt aus
-// `lseek(END)` und nicht aus `stat`, weil dieselbe Zahl dann aus
-// derselben Quelle kommt wie jedes spaetere Lesen.
 fn src_open(path: u64) -> bool {
     src_close()
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
@@ -111,8 +70,6 @@ fn src_size() -> u64 {
     return f_size
 }
 
-// Wurde je hinter das Dateiende gegriffen? Das ist die eine Frage, die
-// ein Leser stellen muss, bevor er dem Gelesenen glaubt.
 fn src_eof() -> bool {
     return f_eof == 1
 }
@@ -121,17 +78,6 @@ fn src_bad() -> bool {
     return f_err == 1
 }
 
-// Das Fenster so schieben, dass `off` darin liegt. Fehlschlag ist kein
-// Absturz: das Fenster bleibt leer, und jeder Zugriff liefert 0.
-// DAS FENSTER FAENGT ETWAS VOR DER ANGEFRAGTEN STELLE AN, und das ist
-// keine Geschmacksfrage, sondern gemessen. Der MP3-Sucher prueft einen
-// Kandidaten bei p und den Kopf, den dieser verspricht, bei p+len (bis
-// zu 2048 weiter). Faellt p+len knapp hinter das Fenster, wird
-// nachgeladen -- und der naechste Schritt fragt wieder p+1, also wieder
-// davor. Das ist ein Pendel: zwei Nachladungen von je 64 KiB je
-// Kandidat, und eine WAV-Datei voller 0xFF-Oktette hat Tausende davon.
-// Mit acht Kibioktett Vorlauf kostet derselbe Lauf eine Nachladung
-// statt zweitausend.
 const BACK: u64 = 8192
 
 fn win_fill(want: u64) {
@@ -171,9 +117,6 @@ fn win_fill(want: u64) {
     f_wlen = got
 }
 
-// EIN Oktett an einer absoluten Position. Hinter dem Ende: 0, und
-// `src_eof` steht danach. Das ist die einzige Stelle im ganzen Modul,
-// die aus einer Datei liest -- alles andere geht hier durch.
 fn src_byte(off: u64) -> u64 {
     if off >= f_size {
         f_eof = 1
@@ -193,8 +136,6 @@ fn src_byte(off: u64) -> u64 {
     return (f_win[(off - f_woff) as usize]) as u64
 }
 
-// Ein Stueck am Stueck. Rueckgabe: wie viele Oktette wirklich kamen.
-// Weniger als verlangt heisst: die Datei ist dort zu Ende.
 fn src_bytes(off: u64, dst: u64, n: u64) -> u64 {
     var i: u64 = 0
     while i < n {
@@ -206,8 +147,6 @@ fn src_bytes(off: u64, dst: u64, n: u64) -> u64 {
     }
     return n
 }
-
-// ------------------------------------------------------------ die Zahlen
 
 fn be16(off: u64) -> u64 {
     return (src_byte(off) << 8) | src_byte(off + 1)
@@ -238,12 +177,6 @@ fn le32(off: u64) -> u64 {
 fn le64(off: u64) -> u64 {
     return le32(off) | (le32(off + 4) << 32)
 }
-
-// ------------------------------------------------------------ die Codecs
-//
-// Eine Nummer je Codec, und zwar EINE Nummerierung fuer beide Behaelter.
-// MP4 nennt AAC `mp4a`, Matroska nennt es `A_AAC`; ab hier heisst es
-// C_AAC, und die Anwendung muss keinen der beiden Namen kennen.
 
 const C_NONE: u64 = 0
 const C_H264: u64 = 1
@@ -292,8 +225,6 @@ fn codec_kind(c: u64) -> u64 {
     return K_SUB
 }
 
-// Der Name, den ein Mensch lesen soll. Keine Vierbuchstabenkennung, kein
-// `A_MPEG/L3` -- das steht in der Datei, nicht auf dem Bildschirm.
 static mut n_h264: [u8; 15] = "H.264 / AVC\0\0\0\0"
 static mut n_hevc: [u8; 15] = "H.265 / HEVC\0\0\0"
 static mut n_av1: [u8; 15] = "AV1\0\0\0\0\0\0\0\0\0\0\0\0"
@@ -350,11 +281,6 @@ fn codec_name(c: u64) -> u64 {
     return (&n_unk[0 as usize]) as u64
 }
 
-// DIE EINE STELLE, DIE JA ODER NEIN SAGT.
-//
-// Sie steht hier und nicht in der Anwendung, damit es keine zweite gibt,
-// die etwas anderes sagt. Was fehlt, fehlt mit Grund und nicht aus
-// Versehen: der Aufwand steht in ROADMAP.md, Block F.
 fn can_decode(c: u64) -> bool {
     if c == C_MP3 {
         return true
@@ -368,53 +294,34 @@ fn can_decode(c: u64) -> bool {
     return false
 }
 
-// RUNDE CODEC (P-022): H.264 KOMMT DAZU -- ABER NUR BASELINE.
-//
-// `can_decode` bekommt nur die Codec-Nummer und kann diese Frage
-// deshalb fuer H.264 gar nicht beantworten: ob dieses System den Strom
-// dekodieren kann, haengt am PROFIL. Baseline (profile_idc 66) ja,
-// Main und High nein -- `kernel/user/h264.fi` weist sie ausdruecklich
-// ab, statt ein fast richtiges Bild zu zeigen.
-//
-// Darum diese zweite Form. Wer die Spur schon hat, nimmt sie und
-// bekommt die ehrliche Antwort; `can_decode` allein bleibt fuer die
-// Codecs, bei denen das Profil nichts aendert.
-//
-// DIE 66 STEHT HIER UND IN h264.fi. Das ist eine Dopplung, und sie ist
-// bewusst: media.fi darf h264.fi nicht einbinden (es wuerde den
-// Dekodierer samt seiner 600 KiB Bildpuffer in JEDES Programm ziehen,
-// das nur wissen will, was in einer Datei steckt).
 const H264_BASELINE: u64 = 66
 
 fn can_decode_prof(c: u64, profil: u64) -> bool {
     if c == C_H264 {
-        // Baseline, und Constrained Baseline traegt dieselbe 66.
         return profil == H264_BASELINE
     }
     return can_decode(c)
 }
-
-// ------------------------------------------------------- die Spurentafel
 
 const MAXTRK: u64 = 16
 const T_FIELDS: u64 = 16
 
 const T_KIND: u64 = 0
 const T_CODEC: u64 = 1
-const T_ID: u64 = 2 // die Nummer, unter der der Behaelter sie fuehrt
+const T_ID: u64 = 2
 const T_W: u64 = 3
 const T_H: u64 = 4
-const T_RATE: u64 = 5 // Abtastrate in Hz
+const T_RATE: u64 = 5
 const T_CH: u64 = 6
 const T_BITS: u64 = 7
 const T_DUR_MS: u64 = 8
-const T_BYTES: u64 = 9 // Nutzdaten dieser Spur in Oktetten
-const T_NSAMP: u64 = 10 // Zahl der Beispiele (Rahmen)
-const T_SCALE: u64 = 11 // Zeiteinheiten je Sekunde
-const T_LANG: u64 = 12 // drei Buchstaben, gepackt
-const T_PROFILE: u64 = 13 // Codec-Unterart, wo sie zaehlt
+const T_BYTES: u64 = 9
+const T_NSAMP: u64 = 10
+const T_SCALE: u64 = 11
+const T_LANG: u64 = 12
+const T_PROFILE: u64 = 13
 
-static mut trk: [u64; 256] = [0 as u64; 256] // MAXTRK * T_FIELDS
+static mut trk: [u64; 256] = [0 as u64; 256]
 static mut ntrk: u64 = 0
 
 fn trk_reset() {
@@ -428,7 +335,7 @@ fn trk_reset() {
 
 fn trk_add(kind: u64, codec: u64, id: u64) -> u64 {
     if ntrk >= MAXTRK {
-        return MAXTRK // kein Platz mehr; der Aufrufer prueft das
+        return MAXTRK
     }
     let i: u64 = ntrk
     ntrk = ntrk + 1
@@ -456,7 +363,6 @@ fn trk_set(i: u64, field: u64, v: u64) {
     trk[(i * T_FIELDS + field) as usize] = v
 }
 
-// Die erste Spur einer Art, oder MAXTRK, wenn es keine gibt.
 fn trk_first(kind: u64) -> u64 {
     var i: u64 = 0
     while i < ntrk {
@@ -468,9 +374,6 @@ fn trk_first(kind: u64) -> u64 {
     return MAXTRK
 }
 
-// Datenrate in kbit/s, aus Nutzdaten und Dauer. Ohne Dauer: 0. Das ist
-// ABSICHTLICH gerechnet und nicht aus einem Kopffeld gelesen -- ein
-// Kopffeld kann luegen, die Summe der Beispiele nicht.
 fn trk_bitrate(i: u64) -> u64 {
     let ms: u64 = trk_get(i, T_DUR_MS)
     let by: u64 = trk_get(i, T_BYTES)
@@ -480,9 +383,6 @@ fn trk_bitrate(i: u64) -> u64 {
     return (by * 8) / ms
 }
 
-// -------------------------------------------------------- die Ausgabe
-
-// "  1  Video   H.264 / AVC   320x240  3000 ms  1234 kbit/s  KANN NICHT"
 static mut s_vid: [u8; 8] = "Video  \0"
 static mut s_aud: [u8; 8] = "Ton    \0"
 static mut s_sub: [u8; 8] = "Text   \0"
@@ -502,9 +402,6 @@ fn kind_name(k: u64) -> u64 {
     return (&s_non[0 as usize]) as u64
 }
 
-// Dauer als Sekunden mit einer Nachkommastelle -- ohne Fliesskomma,
-// denn in Ring 3 gibt es keins (`kernel/user/netstat.fi` rechnet die
-// Prozent aus demselben Grund in Oktetten).
 fn say_ms(ms: u64) {
     var s_pt: [u8; 2] = ".\0"
     var s_s: [u8; 3] = " s\0"
@@ -552,25 +449,12 @@ fn say_codec_line(i: u64) {
     ulib.nl()
 }
 
-// ------------------------------------------------------- die Beispielliste
-//
-// EINE Liste fuer beide Behaelter. MP4 rechnet sie aus fuenf Tabellen
-// aus, MKV liest sie aus den Klumpen -- danach sieht sie gleich aus, und
-// die Anwendung muss nicht wissen, woher sie kam.
-//
-// Warum 32768 und nicht "so viele wie noetig": ein Prozess hat drei
-// Mebioktett Abbild (`proc.IMAGE_BASE`..`IMAGE_END`), und diese Liste
-// kostet davon 512 KiB. 32768 Beispiele sind bei AAC (1024 je Rahmen,
-// 44,1 kHz) 12,7 Minuten und bei MP3 (1152) 14,3. Laenger geht auch --
-// dann steht `idx_full` und die Anwendung SAGT, dass sie abschneidet.
-// Eine MP3-Datei braucht diese Liste gar nicht: sie wird gestroemt.
-
 const IDX_MAX: u64 = 32768
 
 static mut i_off: [u64; 32768] = [0 as u64; 32768]
 static mut i_len: [u32; 32768] = [0 as u32; 32768]
-static mut i_tim: [u32; 32768] = [0 as u32; 32768] // Millisekunden
-static mut i_dur: [u32; 32768] = [0 as u32; 32768] // Millisekunden, 0 = unbekannt
+static mut i_tim: [u32; 32768] = [0 as u32; 32768]
+static mut i_dur: [u32; 32768] = [0 as u32; 32768]
 static mut i_n: u64 = 0
 static mut i_over: u64 = 0
 

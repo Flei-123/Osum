@@ -1,116 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/taskmgr.fi -- RUNDE WERKZEUGE: DER AUFGABENVERWALTER.
-//
-// Osum hatte `ps`, `top`, `kill`, `speicher`, `df`, `netmon` und
-// `powermon` -- sieben Programme, die alle etwas ueber die laufende
-// Maschine wissen, und alle sieben schreiben Zeilen in ein Terminal.
-// Was fehlte, ist das Fenster, das ein Mensch aufmacht, wenn etwas
-// haengt: eine Liste, in der man eine Zeile ANKLICKT, und ein Knopf,
-// der sie beendet.
-//
-// ------------------------------------------------------------------
-// DIE REGEL DIESER DATEI: KEINE ZAHL IST VON DIESEM PROGRAMM
-//
-// Dieselbe Regel wie in /bin/power und /bin/dispctl, und hier ist sie
-// wichtiger als dort, weil ein Aufgabenverwalter die Zahlen ZEIGT und
-// nicht nur meldet. Jede Zahl kommt aus demselben Systemaufruf, den
-// auch das Kommandozeilenwerkzeug daneben benutzt:
-//
-//   Prozessliste     SYS_PSTAT, ein Feld je Aufruf -- wie `/bin/ps`
-//                    und `/bin/top` seit Runde K6.
-//   Name             SYS_PMON, Art 2 -- dieselbe Quelle, aus der
-//                    `/bin/powermon` die Programmnamen nimmt. Der
-//                    Kernel setzt ihn an EINER Stelle (`elf.fi`, beim
-//                    Einsprung), also gibt es keinen zweiten Namen.
-//   Speicher         SYS_PSTAT, P_PAGES -- neu in dieser Runde, gezaehlt
-//                    aus DENSELBEN Seitentabellen, die `proc.free_space`
-//                    beim Beenden zurueckgibt.
-//   Kern             SYS_PSTAT, P_CPU -- neu, aus dem Feld, das der
-//                    Aufgabenwechsel schreibt.
-//   je Kern          SYS_CPUSTAT -- neu; `C_TICKS` gab es seit Runde K5,
-//                    `C_IDLETICKS` kam in dieser Runde dazu, weil eine
-//                    Auslastung ohne Leerlaufzaehler nicht ausrechenbar
-//                    ist.
-//   Speicher gesamt  SYS_SYSINFO, I_FRAMES_* -- wie `/bin/top`.
-//   Platte           SYS_SYSINFO, I_BLOCKS/I_BFREE/I_BSIZE -- wie
-//                    `/bin/df`.
-//   Netz             SYS_NETMON, NM_SYSTX/NM_SYSRX -- wie `/bin/netmon`.
-//   Betriebszeit     SYS_SYSINFO, I_UPTIME -- wie `/bin/top`.
-//   Beenden          SYS_KILL, genau der Aufruf aus `/bin/kill`, mit
-//                    demselben Code 137.
-//
-// WAS DIESES PROGRAMM SELBST RECHNET, sind Differenzen und Prozente:
-// die Auslastung ist (Schlaege - Leerlauf) / Schlaege zwischen ZWEI
-// Messungen, und das gehoert nach Ring 3, weil hier der Zeitpunkt
-// beider Messungen bekannt ist.
-//
-// ------------------------------------------------------------------
-// WARUM DER ANTEIL EINES PROZESSES SICH AUF DIE GANZE MASCHINE BEZIEHT
-//
-// Vier Kerne schlagen viermal in der Sekunde hundertmal; ein Prozess,
-// der einen Kern voll belegt, bekommt hundert Schlaege von vierhundert.
-// Dieses Programm zeigt 25 % und nicht 100 %, und der Grund ist die
-// Spalte darueber: die Summe der Zeilen soll die Auslastung des Kopfes
-// ergeben. `top` unter Linux zeigt die andere Zahl und muss dafuer
-// erklaeren, warum acht Prozesse zusammen 800 % haben.
-//
-// ------------------------------------------------------------------
-// DIE LEERLAUFAUFGABEN STEHEN MIT IN DER LISTE
-//
-// Genau wie in `ps`. Sie mit ihrer typischen Auslastung von 90 % zu
-// verstecken, waere die bequeme Anzeige -- und die Summe der uebrigen
-// Zeilen ergaebe dann nicht mehr die Zahl im Kopf. Wer sie sieht, sieht
-// die Maschine.
-//
-// ------------------------------------------------------------------
-// DER VERLAUFSGRAPH IST SELBST GEMALT
-//
-// Sechzig Messpunkte, zwei Kurven, gezeichnet mit `wlibc.rrect`,
-// `wlibc.px` und `wlibc.hline` in genau demselben Streifenverfahren,
-// das `wlib.flush_rect` benutzt: Streifen setzen, beschneiden, malen,
-// hinueberschieben. Es gibt keine Bibliothek dafuer und diese Runde
-// baut auch keine -- ein Graph ist eine Schleife ueber sechzig Zahlen.
-//
-// ZWEI KURVEN, DREI UNTERSCHIEDE. Farbe allein taugt nicht (dieselbe
-// Feststellung wie bei den Kacheln der Schnelleinstellungen): die
-// Prozessorkurve ist ZWEI Bildpunkte dick und durchgezogen, die
-// Speicherkurve ist einen dick und GESTRICHELT, und daneben steht in
-// Worten, welche welche ist.
-//
-// ------------------------------------------------------------------
-// DIE FARBEN KOMMEN AUS DEN ROLLEN, NIE AUS ZAHLEN
-//
-// `wlibc.theme_semantic(S_*)` und `wlibc.theme(T_*)`, kein einziger
-// Farbwert im Quelltext. Sonst waere der Dunkelmodus kaputt und die
-// Kontrastpruefung (tools/themestore/run.sh) haette recht damit.
-//
-// ------------------------------------------------------------------
-// AUFRUF
-//
-//     taskmgr                       das Fenster
-//     taskmgr takt N                Millisekunden zwischen zwei Messungen
-//     taskmgr runden N              nach N Durchlaeufen von selbst enden
-//     taskmgr melde                 jeden Durchlauf auf die serielle
-//                                   Leitung -- Kopf, Kerne, jede Zeile,
-//                                   jeder Messpunkt des Graphen
-//     taskmgr nohit                 die Gegenprobe von `wlib`: keine
-//                                   Trefferpruefung, also kein Klick
 
-// RUNDE ABBILD: PROFIL `app`, WEIL `wlib` JETZT fUi BENUTZT.
-//
-// Dieses Programm stand auf `profile kernel`, und das ging, solange
-// `wlib` nur wlibc malte. Seit Runde 31 kommen die Bedienelemente aus
-// fUi, und fUi rechnet in f64 und benutzt `std.rt` -- beides ist unter
-// `kernel` gesperrt:
-//
-//     error: the module 'std.rt' belongs to the standard library and
-//     is not available in profile 'kernel'   (fui/theme.fi:81)
-//
-// Aufgefallen ist es erst beim Bauen des USB-Abbilds: `tools/look/shot.sh`
-// baut den Taskmanager nicht mit, `tools/usbimg/build.sh` schon. Alle
-// anderen Programme mit Oberflaeche (desktop, taskbar, settings,
-// launcher, explorer, widgetdemo) stehen seit Runde 31 auf `app`; dieses
-// hier ist das letzte, das nachzieht.
 profile app
 
 import ulib
@@ -141,48 +29,18 @@ import tmnav
 
 export { u_start }
 
-// ------------------------------------------------------------- Zahlen
-
-const SLOTS: u64 = 256 // kstate.MAX_TASKS
-const MAXCPU: u64 = 8 // kstate.MAX_CPUS
+const SLOTS: u64 = 256
+const MAXCPU: u64 = 8
 const NCOL: u64 = 7
-const HIST: u64 = 60 // Messpunkte des Graphen
-const NAMEW: u64 = 24 // pmon.NAME_MAX
+const HIST: u64 = 60
+const NAMEW: u64 = 24
 
-// ==================================================== RUNDE MERGE-6
-// JEDE LAENGE HIER LIEGT AUF DEM VIERERRASTER DER RUNDE OBERFLAECHE.
-//
-// Dieses Programm ist auf einem Zweig entstanden, der die Runde
-// OBERFLAECHE nicht kannte, und hat seine Zahlen deshalb so getippt,
-// wie sie gerade passten. Beim Zusammenfuehren sind drei davon
-// aufgefallen -- 62, 82 und noch einmal 62 -- und sie sind nicht
-// harmlos: die Spaltenbreiten stehen in JEDEM Rechteck, das die
-// Tabelle meldet, und `tools/design/messen.py` zaehlt genau diese
-// Zahlen. Drei krumme Spalten in einem Fenster mit sechs Spalten
-// ziehen den Rasteranteil des ganzen Standes nach unten.
-//
-// GEMESSEN (tools/design/messen.py, siehe docs/RUNDE-MERGE6.md):
-//   62 / 4 = 15,5   82 / 4 = 20,5   -- beide daneben
-//   64 / 4 = 16     84 / 4 = 21     -- beide darauf
-//
-// Die uebrigen drei Zahlen (752, 524, 116) lagen schon richtig; sie
-// gehen jetzt trotzdem durch `wlibc.snap_up`, damit die naechste
-// Aenderung nicht wieder danebenfaellt. Eine Regel, die nur im
-// Kommentar steht, haelt genau bis zur naechsten Runde -- das ist die
-// Lehre aus BLECHKERN, eine Etage hoeher.
-// r443 (D-013): a sidebar of pages on the left (Processes, Performance, Startup, Details), the content right of it
 const BW: u64 = 960
 const BH: u64 = 580
-const NAVW: u64 = 176 // the sidebar
-const CW: u64 = 760 // BW - 16 - NAVW - 8: the width of a page
-const GH: u64 = 250 // the history graph of the performance page
-const KH: u64 = 92 // r402: Hoehe der vier Karten
-
-// Die Spalten, die keinen Text tragen, der wachsen kann. Der Name
-// bekommt, was uebrig bleibt -- so passt die Tabelle auch, wenn die
-// Design-Runde die Abstaende aendert.
-
-// ------------------------------------------------------------ Zustand
+const NAVW: u64 = 176
+const CW: u64 = 760
+const GH: u64 = 250
+const KH: u64 = 92
 
 static mut p_pid: [u64; 256] = [0 as u64; 256]
 static mut p_ppid: [u64; 256] = [0 as u64; 256]
@@ -190,15 +48,11 @@ static mut p_state: [u64; 256] = [0 as u64; 256]
 static mut p_kind: [u64; 256] = [0 as u64; 256]
 static mut p_pages: [u64; 256] = [0 as u64; 256]
 static mut p_core: [u64; 256] = [0 as u64; 256]
-static mut p_pm: [u64; 256] = [0 as u64; 256] // Anteil in Promille
+static mut p_pm: [u64; 256] = [0 as u64; 256]
 static mut p_ticks: [u64; 256] = [0 as u64; 256]
-// Der Stand der letzten Messung -- UND die Prozessnummer dazu. Ein Platz
-// der Aufgabentafel wird wiederverwendet; ohne die zweite Zahl bekaeme
-// der Nachfolger die Schlaege seines Vorgaengers als Differenz
-// gutgeschrieben und stuende eine Sekunde lang mit 90 % da.
 static mut p_last: [u64; 256] = [0 as u64; 256]
 static mut p_lastpid: [u64; 256] = [0 as u64; 256]
-static mut p_name: [u8; 3072] = [0 as u8; 3072] // SLOTS * NAMEW
+static mut p_name: [u8; 3072] = [0 as u8; 3072]
 static mut ord: [u64; 256] = [0 as u64; 256]
 static mut nlive: u64 = 0
 
@@ -220,8 +74,6 @@ static mut h_disk: [u64; 60] = [0 as u64; 60]
 static mut h_net: [u64; 60] = [0 as u64; 60]
 static mut h_n: u64 = 0
 
-// r443: THE PAGES. 0 Processes, 1 Performance, 2 Startup, 3 Details; `perf_sel` is the resource the
-// performance page shows (0 CPU, 1 memory, 2 disk, 3 network).
 static mut page: u64 = 0
 static mut perf_sel: u64 = 0
 static mut nav_blob: [u8; 400] = [0 as u8; 400]
@@ -235,7 +87,6 @@ static mut us_pg: [u64; 16] = [0 as u64; 16]
 static mut row_icons: [u64; 132] = [0 as u64; 132]
 static mut st_blob: [u8; 3072] = [0 as u8; 3072]
 static mut st_n: u64 = 0
-// r1214: the Bench page: the lines of /proc/bench as a two-column table (name, value), read-only
 static mut bn_blob: [u8; 1536] = [0 as u8; 1536]
 static mut bn_n: u64 = 0
 static mut init_buf: [u8; 2048] = [0 as u8; 2048]
@@ -246,9 +97,6 @@ static mut n_stats: usize = 4294967295
 static mut n_cores: usize = 4294967295
 static mut n_det: usize = 4294967295
 static mut net_max: u64 = 100
-// DIE ANGABE FUER DAS GRAPH-WIDGET. Fuenf Woerter, die die Bibliothek
-// bei jedem Anstrich frisch liest -- die Messreihe bleibt hier, wo sie
-// entsteht.
 static mut g_spec: [u64; 5] = [0 as u64; 5]
 
 static mut cpu_pm: u64 = 0
@@ -266,7 +114,7 @@ static mut net_ltx: u64 = 0
 static mut net_lrx: u64 = 0
 static mut net_ok: u64 = 0
 
-static mut sort_col: u64 = 2 // die Auslastung, absteigend
+static mut sort_col: u64 = 2
 static mut sort_ab: u64 = 1
 static mut sel_pid: u64 = 0
 static mut key_seen: u64 = 0
@@ -277,7 +125,6 @@ static mut blocknr: u64 = 0
 static mut blob: [u8; 8192] = [0 as u8; 8192]
 static mut cols: [u64; 7] = [0 as u64; 7]
 static mut l_sys: [u8; 160] = [0 as u8; 160]
-// r402 (D-011): the four cards of the summary: title, big number, small line (32 + 40 + 64 octets each)
 static mut kp_big: [u8; 200] = [0 as u8; 200]
 static mut kp_sub: [u8; 320] = [0 as u8; 320]
 static mut kp_pm: [u64; 4] = [0 as u64; 4]
@@ -288,13 +135,6 @@ static mut l_cores: [u8; 200] = [0 as u8; 200]
 static mut l_disk: [u8; 200] = [0 as u8; 200]
 static mut l_sel: [u8; 160] = [0 as u8; 160]
 static mut ask: [u8; 128] = [0 as u8; 128]
-
-// -------------------------------------------------- Schluessel und Worte
-//
-// KEIN DEUTSCHER TEXT IM QUELLTEXT -- Runde I18N, und
-// `tools/i18n/scan.py` rechnet es nach. Was hier steht, sind
-// SCHLUESSEL; die Woerter stehen in locale/en/messages und
-// locale/de/messages.
 
 static mut k_title: [u8; 14] = "taskmgr.title\0"
 static mut k_cols: [u8; 13] = "taskmgr.cols\0"
@@ -399,16 +239,8 @@ static mut m_gpu: [u8; 7] = " gpu=-\0"
 static mut k_d_none: [u8; 18] = "taskmgr.d.none\0\0\0\0"
 static mut t_arrow: [u8; 3] = "  \0"
 
-// WELCHEM BUENDEL DIESES FENSTER GEHOERT -- der BUENDELNAME und nicht
-// sein Pfad. Die Taskleiste haengt "/apps/" davor und ".osp/symbol"
-// dahinter (`taskbar.sym_of`); ein Pfad an dieser Stelle ergaebe
-// "/apps//apps/taskmgr.osp/start.osp/symbol", und der Knopf bliebe
-// stumm -- gemessen, der erste Lauf hatte genau das.
 static mut t_self: [u8; 8] = "taskmgr\0"
 
-// Einheiten und Trennzeichen. Keine Woerter, also kein Katalog: ein
-// Prozentzeichen ist in jeder Sprache eines, und "KiB" ist eine
-// Einheit nach IEC 80000-13 und wird nicht uebersetzt.
 static mut u_pct: [u8; 3] = " %\0"
 static mut u_sp: [u8; 2] = " \0"
 static mut u_sep: [u8; 4] = "   \0"
@@ -424,13 +256,7 @@ static mut u_ps: [u8; 3] = "/s\0"
 static mut u_arrow_up: [u8; 3] = " ^\0"
 static mut u_arrow_dn: [u8; 3] = " v\0"
 
-// Mitschnitt. Faengt mit "taskmgr: " an und geht nur auf die serielle
-// Leitung -- `tools/i18n/scan.py` laesst genau diese Form durch, und
-// ein uebersetzter Mitschnitt machte jeden Testlaeufer sprachabhaengig.
 static mut m_start: [u8; 19] = "taskmgr: start bw=\0"
-// RUNDE MERGE-6: die LAGE gehoert auch auf die Leitung. Sie stand in
-// tools/toolbench/run.sh als `--window=20,14` fest getippt -- also an
-// zwei Stellen, und eine davon war beim Zusammenfuehren falsch.
 static mut m_wx: [u8; 5] = " wx=\0"
 static mut m_wy: [u8; 5] = " wy=\0"
 static mut m_bh: [u8; 5] = " bh=\0"
@@ -526,8 +352,6 @@ static mut a_runden: [u8; 7] = "runden\0"
 static mut a_melde: [u8; 6] = "melde\0"
 static mut a_nohit: [u8; 6] = "nohit\0"
 
-// ------------------------------------------------------------ Werkzeug
-
 fn say(p: u64) {
     lineout.add_text(p)
 }
@@ -543,20 +367,6 @@ fn ptr(p: u64) -> u64 {
     return p
 }
 
-// ================= EINE ZEILE, EIN SCHREIBVORGANG ==================
-//
-// Auf dieser seriellen Leitung schreiben mehrere Prozesse gleichzeitig:
-// der Schreibtisch, die Taskleiste, der Starter und dieses Programm.
-// Wer eine Zeile aus einem Dutzend `say`-Aufrufen zusammensetzt, bekommt
-// vom Nachbarn mitten hinein geschrieben -- GEMESSEN in dieser Runde:
-//
-//     taskmgr: spalte c=launcher: geom 1 x=80 w=276
-//
-// Das ist keine Schoenheitsfrage: ein Testlaeufer, der diese Zeile
-// liest, findet die Spalte nicht und meldet einen Fehler, den es nicht
-// gibt. `kernel/user/qs.fi` hat dieselbe Lehre in Runde HAENGER
-// gezogen. Also: die ganze Zeile in einen Puffer, EIN `put`, und das
-// Zeilenende gehoert dazu.
 static mut zl: [u8; 512] = [0 as u8; 512]
 static mut zn: u64 = 0
 
@@ -593,8 +403,6 @@ fn kv(name: u64, v: u64) {
     z_kv(name, v)
 }
 
-// ------------------------------------------------------- die Messung
-
 fn pstat(i: u64, f: u64) -> u64 {
     let v: u64 = ulib.sys(ulib.SYS_PSTAT, i, f, 0)
     if ulib.bad(v) {
@@ -627,10 +435,6 @@ fn netmon(f: u64) -> u64 {
     return v
 }
 
-// Der Name eines Prozesses, Oktett fuer Oktett aus SYS_PMON, Art 2 --
-// dieselbe Quelle wie in /bin/powermon. Er steht im Kernel an genau
-// einer Stelle (`elf.fi` beim Einsprung), also kann er hier nicht von
-// dem abweichen, was wirklich laeuft.
 const SYS_PMON: u64 = 1830
 
 fn read_name(slot: u64) {
@@ -690,8 +494,6 @@ fn state_word(st: u64) -> u64 {
     return msg.get(ptr((&k_s_new[0]) as u64))
 }
 
-// EINE MESSUNG. `erste` heisst: nur den Stand holen, keine Differenz
-// bilden -- ohne einen Vorher-Wert ist jeder Prozentsatz erfunden.
 fn nt(slot: u64, f: u64) -> u64 {
     return ulib.sys(ulib.SYS_NETMON, 1, slot, f)
 }
@@ -719,9 +521,6 @@ fn sample(first: bool) {
         n = 1
     }
     ncpu = n
-    // W-SMP2: TIME-weighted. An idle application core ticks at 10 Hz, a busy one at 100 Hz, so adding up tick deltas weighted the
-    // idle cores ~10x less than their wall time. Each online core now counts with its TSC-cycle delta (kernel CS_CYC / CS_IDLECYC),
-    // the overall value is the mean over the ONLINE cores' busy shares, and an offline core is shown as "offline" (c_up = 0).
     var sum_pm: u64 = 0
     var n_on: u64 = 0
     var d_all: u64 = 0
@@ -766,7 +565,6 @@ fn sample(first: bool) {
         cpu_pm = sum_pm / n_on
     }
 
-    // Der Speicher: Rahmen, wie `top` sie zaehlt. Ein Rahmen ist 4 KiB.
     mem_all = info(ulib.I_FRAMES_ALL)
     let free: u64 = info(ulib.I_FRAMES_FREE)
     mem_used = sub(mem_all, free)
@@ -788,7 +586,6 @@ fn sample(first: bool) {
     tmgpu.refresh()
     tmfps.refresh(now_ms)
 
-    // Das Netz: dieselben zwei Zaehler, die `/bin/netmon` liest.
     net_ok = netmon(ulib.NM_ON)
     let tx: u64 = netmon(ulib.NM_SYSTX)
     let rx: u64 = netmon(ulib.NM_SYSRX)
@@ -841,12 +638,6 @@ fn sample(first: bool) {
     sortiere()
 }
 
-// -------------------------------------------------------- das Sortieren
-//
-// Einfuegesortieren ueber die Platznummern. Zweiunddreissig Zeilen
-// einmal je Sekunde -- ein schnelleres Verfahren waere hier mehr Code
-// als Nutzen.
-
 fn schluessel(s: u64) -> u64 {
     if sort_col == tmcols.C_STATE {
         return p_state[(s) as usize]
@@ -866,10 +657,6 @@ fn schluessel(s: u64) -> u64 {
     return 0
 }
 
-// Spalte 1 ist der Name, und ein Name ist keine Zahl. Der Vergleich
-// laeuft Oktett fuer Oktett; gleiche Namen entscheidet die
-// Prozessnummer, damit die Reihenfolge zwischen zwei Messungen nicht
-// springt.
 fn before(a: u64, b: u64) -> bool {
     if sort_col == tmcols.C_NAME {
         let pa: u64 = name_of(a)
@@ -915,8 +702,6 @@ fn sortiere() {
         i = i + 1
     }
 }
-
-// ------------------------------------------------------- die Textblocks
 
 fn build_head() {
     let d: u64 = (&l_sys[0]) as u64
@@ -970,9 +755,6 @@ fn build_head() {
     c = tmfmt.put_str(f, c, ptr((&u_sep[0]) as u64))
     c = tmfmt.put_str(f, c, msg.get(ptr((&k_net[0]) as u64)))
     c = tmfmt.put_str(f, c, ptr((&u_colon[0]) as u64))
-    // OHNE ZAEHLUNG KEINE ZAHL. `netmon` zaehlt nur, wenn es
-    // eingeschaltet ist -- dann steht hier ein Strich und keine Null,
-    // die wie "nichts uebertragen" aussaehe.
     if net_ok == 0 {
         c = tmfmt.put_str(f, c, ptr((&u_dash[0]) as u64))
     } else {
@@ -988,7 +770,6 @@ fn build_head() {
     c = tmfmt.put_num(f, c, nlive)
 }
 
-// r402: the same numbers for the four cards (`kp_big` / `kp_sub`, 40 and 64 octets each)
 fn build_kpi() {
     let b: u64 = (&kp_big[0]) as u64
     let q: u64 = (&kp_sub[0]) as u64
@@ -1040,12 +821,6 @@ fn build_kpi() {
     }
 }
 
-// Die Kopfzeile der Tabelle ist Zeile 0 des Blocks -- so steht die
-// Beschriftung in derselben Quelle wie die Daten. Die Pfeilspitze sagt,
-// nach welcher Spalte sortiert ist und in welche Richtung; ohne sie
-// waere die Sortierung nur an der Reihenfolge zu erraten.
-// r443: the totals sit in the header of their columns ("CPU 12,3 %", "Memory 31,0 %"), as in the Windows
-// task manager: the column you sort by says how much of the machine it adds up to.
 fn head_sum(d: u64, at: u64, col: u64) -> u64 {
     var a: u64 = at
     if col == tmcols.C_CPU {
@@ -1060,10 +835,6 @@ fn head_sum(d: u64, at: u64, col: u64) -> u64 {
     return a
 }
 
-// ROUND W-ICON: the picture of a PROGRAM row. The bundle symbol (/apps/<name>.osp/symbol) when there is one,
-// otherwise the shared letter tile (wlibc.app_icon, lib/appicon.fi) -- the same picture the bar and the start
-// menu show for that name. A small cache keyed by the process name; 0 when the cache is full (the row then keeps
-// the plain "program" glyph).
 const ICO_N: u64 = 24
 const ICO_BYTES: u64 = 44900
 static mut ico_name: [u8; 576] = [0 as u8; 576]
@@ -1116,7 +887,6 @@ fn proc_icon(name: u64) -> u64 {
     return 0
 }
 
-// The symbol of a process in the list: a program, a worker, the idle task, the kernel.
 fn kind_icon(k: u64) -> u64 {
     if k == 3 {
         return wlib.icon_tint(wlib.icon_id(icons.FILE_PROGRAM), 8141549)
@@ -1292,19 +1062,10 @@ fn build_sel() {
     a = tmfmt.put_str(d, a, ptr((&u_cl[0]) as u64))
 }
 
-// --------------------------------------------------------- der Graph
-//
-// FUI-ALL: der Graph ist ein Knoten des fUi-Szenenbaums (fuiscene.canvas)
-// und wird von DIESEM Programm gemalt -- mit den Rollenfarben des Themas
-// (Feld, Rand, Akzent, Erfolg), nie mit Zahlen. Die Stellen der Messpunkte
-// rechnen `gx_of` / `gy_of`, und die Zeile `taskmgr: graph` meldet sie.
-
 fn hist_push() {
     hist_schieben()
 }
 
-// The network load as 0..1000 of the largest rate seen so far (at least 100 KiB/s): the graph needs a
-// scale, and a fixed one would show a idle line on a fast link and a full one on a slow link.
 fn net_now() -> u64 {
     if net_ok == 0 {
         return 0
@@ -1339,12 +1100,6 @@ fn hist_schieben() {
     h_net[(HIST - 1) as usize] = net_now()
 }
 
-// Die Stelle eines Messpunktes. EINE Funktion, und der Mitschnitt
-// meldet ihr Ergebnis fuer den ersten und den letzten Punkt -- ein
-// Pruefer, der die Formel nachbaut, kann seinen Nachbau an beiden Enden
-// gegen das Original halten.
-// r443: where the history curve of the performance page puts a sample: the box is the canvas shrunk by its
-// 1-pixel frame, the samples are laid over its whole width (lib/fui/navkit.fi `paint_graph`).
 fn gx_of(gx: u64, gw: u64, i: u64) -> u64 {
     if h_n < 2 {
         return gx + 1
@@ -1356,7 +1111,6 @@ fn gy_of(gy: u64, gh: u64, v: u64) -> u64 {
     return gy + 1 + navnum.graph_y(sub(gh, 2), v)
 }
 
-// the report of a text the cards paint (the shot checker finds the text where this says it is)
 fn kpi_say(x: u64, base: u64, role: u64, txt: u64) {
     if !fuiscene.trace_on() {
         return
@@ -1372,8 +1126,6 @@ fn kpi_say(x: u64, base: u64, role: u64, txt: u64) {
     z_end()
 }
 
-// r402 (D-011): THE SUMMARY AS FOUR CARDS (CPU, memory, disk, network): a muted title, the big number,
-// a small line, and a thin bar of the load under it -- the overview first, the details below.
 fn kpi_draw(kx: u64, ky: u64, kw: u64, kh: u64) {
     let gap: u64 = 8
     let cw: u64 = sub(kw, 3 * gap) / 4
@@ -1397,7 +1149,6 @@ fn kpi_draw(kx: u64, ky: u64, kw: u64, kh: u64) {
         kp_y[(c) as usize] = ky
         fuiscene.text_role(cx + 12, ky + 66, cw - 20, (&kp_sub[0]) as u64 + c * 64, 12, false,
             fuiscene.R_MUTED)
-        // the bar: a track and the load, 0..1000
         let bx: u64 = cx + 12
         let bw: u64 = sub(cw, 24)
         fuiscene.cv_round(bx, ky + kh - 12, bw, 4, 2, fuiscene.R_BORDER)
@@ -1419,8 +1170,6 @@ fn kpi_draw(kx: u64, ky: u64, kw: u64, kh: u64) {
     }
 }
 
-// r443: the small texts of the four cards, reported like the text of a node (the picture checker measures them);
-// to be printed right after `say_texts` of the same picture.
 fn say_cards() {
     if n_kpi == fuiscene.NONE {
         return
@@ -1443,8 +1192,6 @@ fn say_cards() {
     }
 }
 
-// What the program says about the graph on the serial line: where it is
-// and which numbers are in it (tools/toolbench/graphcheck.py).
 fn draw_graph(gx: u64, gy: u64, gw: u64, gh: u64, melden: bool) {
     if !melden {
         return
@@ -1486,9 +1233,6 @@ fn draw_graph(gx: u64, gy: u64, gw: u64, gh: u64, melden: bool) {
     z_end()
 }
 
-// ------------------------------------------------------- der Mitschnitt
-
-// wlib's kinds, as the acceptance scripts know them.
 const NK_LABEL: u64 = 1
 const NK_BUTTON: u64 = 2
 const NK_TABLE: u64 = 6
@@ -1497,11 +1241,10 @@ const NK_ENTRY: u64 = 16
 
 const K_TAB: u64 = 1
 const K_KILL: u64 = 2
-const K_OVF: u64 = 30 // the "..." of the command bar
+const K_OVF: u64 = 30
 const ROW_H: u64 = 32
 const HEAD_H: u64 = 28
 
-// The nodes of the current tree (they change with every rebuild).
 static mut n_sys: usize = 0
 static mut n_core: usize = 0
 static mut n_disk: usize = 0
@@ -1528,7 +1271,6 @@ fn say_rect(n: usize, id: u64, art: u64) {
     z_end()
 }
 
-// Die Oberkante der Zeile r der Tabelle, in Fensterkoordinaten.
 fn tab_y(r: u64) -> u64 {
     if n_tab == fuiscene.NONE {
         return 0
@@ -1536,11 +1278,6 @@ fn tab_y(r: u64) -> u64 {
     return fuiscene.node_y(n_tab) + HEAD_H + 2 + r * ROW_H
 }
 
-// EIN VOLLER BLOCK. Er geht ueber die serielle Leitung, und die ist
-// 115 200 Baud: vierzig Zeilen je Sekunde sind ein Fuenftel der
-// Leitung und bremsen genau das Programm, das die Auslastung messen
-// soll. Also nur, wenn `melde` es verlangt -- und einmal am Anfang und
-// einmal am Ende, damit auch ein stiller Lauf nachzurechnen ist.
 fn bericht() {
     blocknr = blocknr + 1
     z_new(ptr((&m_block[0]) as u64))
@@ -1622,8 +1359,6 @@ fn bericht() {
     z_end()
 }
 
-// ------------------------------------------------------------ die Argumente
-
 fn arg_num(args: u64, wort: u64, standard: u64) -> u64 {
     let n: u64 = ulib.arg_count(args)
     var i: u64 = 1
@@ -1647,16 +1382,6 @@ fn arg_hat(args: u64, wort: u64) -> bool {
     }
     return false
 }
-
-// ---------------------------------------------------------------- Start
-
-// The window, described for fUi's scene tree. Everything the program
-// shows is a node; the numbers it shows are texts in static buffers that
-// `sample` and the build_* functions fill before `refresh()`.
-// ======================================================= r443 (D-013): THE PAGES
-//
-// A sidebar of four pages on the left, the page right of it. The sidebar is a one-column list of the
-// navigation kit (icons, accent bar on the chosen row); the pages are described again at every `refresh`.
 
 const K_NAV: u64 = 3
 const K_SEARCH: u64 = 12
@@ -1690,7 +1415,6 @@ fn perf_bind() {
     tmperf.set_state(h_n, perf_sel)
 }
 
-// One statistic of the performance page: a muted word and the value under it (up to four).
 fn stat_add(lab: u64, v: u64) {
     if stat_n >= 6 {
         return
@@ -1700,7 +1424,6 @@ fn stat_add(lab: u64, v: u64) {
     stat_n = stat_n + 1
 }
 
-// The values under the graph, for the chosen resource. Built into `stat_val` (4 x 64 octets).
 fn stats_make() {
     stat_n = 0
     var t: [u8; 64] = [0 as u8; 64]
@@ -1834,8 +1557,6 @@ fn perf_name() -> u64 {
     return msg.get(ptr((&k_cpu[0]) as u64))
 }
 
-// The history of the chosen resource: a card, the curve with its area, the name at the top left and the
-// number at the top right.
 fn graph_draw(gx: u64, gy: u64, gw: u64, gh: u64) {
     fuiscene.cv_round(gx, gy, gw, gh, 8, fuiscene.R_FIELD)
     var top: u64 = ptr((&u_full[0]) as u64)
@@ -1852,7 +1573,6 @@ fn graph_draw(gx: u64, gy: u64, gw: u64, gh: u64) {
         fuiscene.R_TEXT)
 }
 
-// Up to four values under the graph.
 fn stats_draw(sx: u64, sy: u64, sw: u64, sh: u64) {
     fuiscene.cv_round(sx, sy, sw, sh, 8, fuiscene.R_FIELD)
     fuiscene.cv_ring(sx, sy, sw, sh, 8, fuiscene.R_BORDER)
@@ -1868,7 +1588,6 @@ fn stats_draw(sx: u64, sy: u64, sw: u64, sh: u64) {
     }
 }
 
-// One horizontal meter: a word at the left, the track with the filled part, the number at the right.
 fn meter(x: u64, y: u64, w: u64, lab: u64, v: u64, num: u64, role: u64) {
     fuiscene.text_role(x, y + 14, 150, lab, 13, false, fuiscene.R_TEXT)
     let bx: u64 = x + 160
@@ -1887,7 +1606,6 @@ fn meter(x: u64, y: u64, w: u64, lab: u64, v: u64, num: u64, role: u64) {
     fuiscene.text_role(bx + bw + 12, y + 14, 98, num, 13, false, fuiscene.R_MUTED)
 }
 
-// Below the graph: the cores (CPU), the biggest programs (memory), the disk, the two network directions.
 fn cores_draw(cx: u64, cy: u64, cw: u64, ch: u64) {
     fuiscene.cv_round(cx, cy, cw, ch, 8, fuiscene.R_FIELD)
     fuiscene.cv_ring(cx, cy, cw, ch, 8, fuiscene.R_BORDER)
@@ -1911,7 +1629,6 @@ fn cores_draw(cx: u64, cy: u64, cw: u64, ch: u64) {
             c = c + 1
         }
     } else if perf_sel == 1 {
-        // the five programs with the most pages
         var shown: [u64; 5] = [128 as u64; 5]
         var k: u64 = 0
         var top: u64 = 1
@@ -1980,7 +1697,6 @@ fn cores_draw(cx: u64, cy: u64, cw: u64, ch: u64) {
     }
 }
 
-// The details of the chosen process: a card of word / value pairs.
 fn det_draw(dx: u64, dy: u64, dw: u64, dh: u64) {
     fuiscene.cv_round(dx, dy, dw, dh, 8, fuiscene.R_FIELD)
     fuiscene.cv_ring(dx, dy, dw, dh, 8, fuiscene.R_BORDER)
@@ -2082,7 +1798,6 @@ fn det_draw(dx: u64, dy: u64, dw: u64, dh: u64) {
     }
 }
 
-// Startup: the services of /etc/inittab, one row each (name, command, mode, status).
 fn st_load() {
     let d: u64 = (&st_blob[0]) as u64
     var a: u64 = tmfmt.put_str(d, 0, msg.get(ptr((&k_scols[0]) as u64)))
@@ -2101,14 +1816,12 @@ fn st_load() {
     __mmio_write8(((&init_buf[0]) as u64 + n) as *mut u8, 0 as u8)
     var at: u64 = 0
     while at < n && a < 2900 {
-        // one line: [at, end)
         var e: u64 = at
         while e < n && __mmio_read8(((&init_buf[0]) as u64 + e) as *mut u8) != 10 as u8 {
             e = e + 1
         }
         let first: u64 = __mmio_read8(((&init_buf[0]) as u64 + at) as *mut u8) as u64
         if e > at && first != 35 {
-            // fields name:targets:action:command[:options]
             var fs: [u64; 5] = [0 as u64; 5]
             var fe: [u64; 5] = [0 as u64; 5]
             var nf: u64 = 0
@@ -2128,7 +1841,6 @@ fn st_load() {
                 q = q + 1
             }
             if nf >= 4 {
-                // name
                 var k: u64 = fs[0 as usize]
                 while k < fe[0 as usize] && a < 2900 {
                     __mmio_write8((d + a) as *mut u8, __mmio_read8(((&init_buf[0]) as u64 + k) as *mut u8))
@@ -2136,7 +1848,6 @@ fn st_load() {
                     k = k + 1
                 }
                 a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
-                // command (the rest of the line after the third colon)
                 k = fs[3 as usize]
                 while k < fe[3 as usize] && a < 2900 {
                     __mmio_write8((d + a) as *mut u8, __mmio_read8(((&init_buf[0]) as u64 + k) as *mut u8))
@@ -2144,7 +1855,6 @@ fn st_load() {
                     k = k + 1
                 }
                 a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
-                // the mode word from the action
                 var is_off: bool = false
                 var wk: u64 = ptr((&k_m_once[0]) as u64)
                 let alen: u64 = fe[2 as usize] - fs[2 as usize]
@@ -2159,10 +1869,8 @@ fn st_load() {
                 }
                 a = tmfmt.put_str(d, a, msg.get(wk))
                 a = tmfmt.put_str(d, a, ptr((&u_tab[0]) as u64))
-                // the status: a process of that name is alive
                 var run: bool = false
                 if !is_off {
-                    // the program name: the last part of the first word of the command
                     var cs: u64 = fs[3 as usize]
                     var ce: u64 = cs
                     while ce < fe[3 as usize] && __mmio_read8(((&init_buf[0]) as u64 + ce) as *mut u8) != 32 as u8 {
@@ -2206,7 +1914,6 @@ fn st_load() {
     }
 }
 
-// Bench: /proc/bench ("name value" per line) as rows "name<TAB>value". Nothing is written; no /proc/bench = one muted sentence.
 fn bn_load() {
     let d: u64 = (&bn_blob[0]) as u64
     var a: u64 = tmfmt.put_str(d, 0, msg.get(ptr((&k_bcols[0]) as u64)))
@@ -2305,7 +2012,6 @@ fn us_report() {
     z_end()
 }
 
-// The report of the page for the acceptance run: the number of rows and every row as it stands in the table.
 fn page_report(p: u64) {
     if p == 4 {
         bn_report()
@@ -2392,9 +2098,6 @@ fn build_proc(cc: usize) {
     n_sys = n_kpi
     n_core = n_kpi
     n_disk = n_kpi
-    // r461: the command bar (an icon with the word as its tooltip and accessibility name) and the sentence of the selection in
-    // ONE row of 32 points, above the list: 8 + the cards + the bar + the gaps of 8 (the list is 36 points taller than with the
-    // old sentence line and the text button below it)
     command_row(cc)
     n_tab = fuiscene.table_blob(cc, K_TAB, CW, BH - 16 - KH - 32 - 16, NCOL, ptr((&blob[0]) as u64))
     fuiscene.table_icons(K_TAB, ptr((&row_icons[0]) as u64))
@@ -2402,7 +2105,6 @@ fn build_proc(cc: usize) {
     fuiscene.heat_key(K_TAB, tmcols.C_CPU, tmcols.C_MEM)
 }
 
-// The command bar of the pages that end a process: "End task" as an icon, and at its right the sentence about the selection.
 fn command_row(cc: usize) {
     let bar: usize = fuiscene.row(cc)
     fuiscene.set_gap(bar, 8)
@@ -2539,7 +2241,6 @@ fn build_details(cc: usize) {
 
 fn build() {
     let col: usize = fuiscene.root()
-    // the nodes of a page that is not shown
     n_kpi = fuiscene.NONE
     n_sys = fuiscene.NONE
     n_core = fuiscene.NONE
@@ -2571,7 +2272,6 @@ fn build() {
     }
 }
 
-// The place of the table's columns and the report of what is where.
 fn say_nav() {
     let nn: usize = fuiscene.node_of_key(K_NAV)
     if nn == fuiscene.NONE {
@@ -2619,7 +2319,6 @@ fn report_layout() {
     }
 }
 
-// The selected process in the table (or no row at all).
 fn show_sel() {
     let r: u64 = row_of_pid(sel_pid)
     if sel_pid != 0 && r < SLOTS {
@@ -2637,7 +2336,6 @@ fn u_start(args: u64) -> u64 {
     }
     let nohit: bool = arg_hat(args, ptr((&a_nohit[0]) as u64))
     fuiscene.set_nohit(nohit)
-    // `taskmgr performance` / `startup` / `details` opens on that page (the acceptance runs use it)
     tmpages.init()
     var ap: u64 = 1
     while ap < tmpages.COUNT {
@@ -2647,15 +2345,7 @@ fn u_start(args: u64) -> u64 {
         ap = ap + 1
     }
 
-    // DER KATALOG ZUERST, vor jedem Bedienelement: ein Knoten behaelt den
-    // Zeiger auf seinen Text, und ein Knopf, der vor dem Katalog
-    // entsteht, traegt den Schluessel statt des Wortes.
     let _mk: u64 = msg.init()
-    // ============================================ RUNDE ECHTHARDWARE-6
-    // DER MITSCHNITT IST EIN SCHALTER, UND DER SCHALTER STEHT IM
-    // NORMALBETRIEB AUS (Justins ausgelasteter Kern: ein Programm, das im
-    // Auslieferungszustand misst, misst vor allem sich selbst).
-    // `taskmgr melde` schaltet ihn ein.
     sample(true)
     hist_push()
     build_head()
@@ -2683,9 +2373,6 @@ fn u_start(args: u64) -> u64 {
         return 1
     }
     fuiscene.set_app(ptr((&t_self[0]) as u64))
-    // NACH VORN, EINMAL, BEIM OEFFNEN. Der Fensterserver hebt ein
-    // Fenster NICHT, wenn man es anklickt (Runde DESKTOP); ein Programm,
-    // das gerade gestartet wurde, gehoert aber nach vorn.
     fuiscene.raise()
     z_new(ptr((&m_start[0]) as u64))
     z_num(BW)
@@ -2747,9 +2434,6 @@ fn u_start(args: u64) -> u64 {
             gemeldet = true
         }
         if key != 0 {
-            // JEDES AUSLOESEN WIRD GEMELDET. Ohne diese Zeile ist ein
-            // Klick, der nicht ankommt, nicht von einem Klick zu
-            // unterscheiden, der ankommt und nichts bewirkt.
             z_new(ptr((&m_feuer[0]) as u64))
             z_num(key)
             z_kv(ptr((&m_art[0]) as u64), 0)
@@ -2757,7 +2441,6 @@ fn u_start(args: u64) -> u64 {
             z_end()
         }
         if key == K_NAV {
-            // a page of the sidebar was chosen
             let np: u64 = fuiscene.table_sel(K_NAV)
             if np < tmpages.COUNT && np != page {
                 tmnav.note(np)
@@ -2772,9 +2455,6 @@ fn u_start(args: u64) -> u64 {
         } else if key == K_TAB {
             let hc: u64 = fuiscene.table_head_col()
             if hc != 4294967295 {
-                // Ein Klick in die Kopfzeile: nach dieser Spalte
-                // sortieren. Dieselbe Spalte noch einmal dreht die
-                // Richtung um.
                 if hc == sort_col {
                     if sort_ab != 0 {
                         sort_ab = 0
@@ -2794,11 +2474,6 @@ fn u_start(args: u64) -> u64 {
                 z_kv(ptr((&m_ab[0]) as u64), sort_ab)
                 z_end()
             } else {
-                // EINE ZEILE WURDE ANGEKLICKT. Gemerkt wird die
-                // PROZESSNUMMER und nicht die Zeilennummer -- eine
-                // Zeilennummer zeigt nach dem naechsten Sortieren auf
-                // einen anderen Prozess, und der Knopf daneben beendet
-                // ihn.
                 let z: u64 = fuiscene.table_sel(K_TAB)
                 let zs: u64 = tmview.slot_at(z)
                 if zs != tmview.NONE {
@@ -2873,16 +2548,11 @@ fn u_start(args: u64) -> u64 {
                 fuiscene.table_set_blob(K_TAB, ptr((&blob[0]) as u64))
                 show_sel()
             }
-            // DIE MARKE VOR DEM NEUMALEN. `tools/themestore/shotcheck.py`
-            // nimmt alles NACH der letzten Marke als das Bild, das
-            // gerade steht.
             z_new(ptr((&m_neu[0]) as u64))
             z_end()
             fuiscene.refresh()
             gemeldet = false
         } else if !gemeldet && fuiscene.painted() > 0 {
-            // The picture after the last update is on the screen: say
-            // where things are and what is in the graph.
             gemeldet = true
             if melde != 0 || fuiscene.trace_on() {
                 var nm2: [u8; 8] = "taskmgr\0"
@@ -3037,7 +2707,6 @@ fn ask() {
     z_new(ptr((&m_ask[0]) as u64))
     z_num(ask_pid)
     z_end()
-    // where the answer button stands (for the click tests)
     z_new(ptr((&m_dlg[0]) as u64))
     z_num(fuiscene.dialog_ok_x())
     z_kv(ptr((&m_y[0]) as u64), fuiscene.dialog_ok_y())
@@ -3046,10 +2715,6 @@ fn ask() {
     z_end()
 }
 
-// GENAU DER AUFRUF AUS /bin/kill, mit demselben Code. 137 ist 128 + 9,
-// die Zahl, die ein System mit einem SIGKILL hinterliesse. Der Kernel
-// entscheidet, ob es erlaubt ist (`sys.kill_allowed`, Runde K13: nur
-// eigene Prozesse), und ein Fehler wird GEMELDET und nicht verschluckt.
 fn toeten() {
     let rc: u64 = ulib.sys(ulib.SYS_KILL, ask_pid, 137, 0)
     z_new(ptr((&m_kill[0]) as u64))
@@ -3061,27 +2726,6 @@ fn toeten() {
     }
 }
 
-// RUNDE ROTABSCHNITTE: DIESES `main` LAEUFT, UND ES MUSS DIE
-// ARGUMENTE WEITERGEBEN.
-//
-// Der Kommentar, der hier stand, sagte "das `main`, das nie laeuft --
-// `user.ld` springt nach `u_start`". Das stimmt fuer ein Programm, das
-// mit `kernel/user/crt.s` gebunden ist; dessen `_start` ruft
-// USER_ENTRY. Unter `profile app` stimmt es NICHT: dort bringt firnc
-// sein eigenes `_start` mit (darum darf crt.o nicht dazu, siehe
-// tools/look/shot.sh), und das endet in `call main` -- der Name steht
-// fest in lib/firnc1/codegen.fi, `--defsym=USER_ENTRY` erreicht ihn
-// nicht. Am gebauten ELF nachgesehen: Einsprung ist `_start`, sechs
-// Befehle weiter steht `call <main>`; `_F0.u_start` wird von dort nie
-// gerufen.
-//
-// `u_start(0)` warf damit den Argumentblock weg. Bei powermon waren
-// das 54 rote Zusagen (siehe ROTABSCHNITTE 11/n).
-//
-// Der Block liegt an einer FESTEN Adresse: Runde K16 legte den
-// Stapelzeiger darauf (kernel/elf.fi, `T_USTACK = proc.ARGS_BASE`),
-// und firnc's `_start` macht `mov rsp, rdi`. Jede `elf: start`-Zeile
-// dieses Systems druckt sie als `ustack=0x4007f000`.
 fn main() -> i32 {
     return u_start(ulib.ARGS_BASE) as i32
 }

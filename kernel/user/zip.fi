@@ -1,36 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/zip.fi -- Runde ALLTAG: PACKEN UND ENTPACKEN.
-//
-//   zip -c archiv.zip datei [datei ...]   packen (Ordner werden begangen)
-//   zip -x archiv.zip [zielordner]        entpacken
-//   zip -t archiv.zip                     nur aufzaehlen
-//   zip -0c archiv.zip datei              packen OHNE zu verkleinern
-//
-// WARUM ZIP UND NICHT TAR. Es gibt `tar` in diesem System, und es ist
-// das bessere Archivformat. Nur bekommt niemand ein tar geschickt: was
-// aus einem Browser, aus einer Mail und von jedem anderen Betriebssystem
-// kommt, ist ein ZIP. Ein Schreibtisch, der es nicht aufmachen kann,
-// ist am ersten Tag unbrauchbar -- das ist die ganze Begruendung.
-//
-// DER ALGORITHMUS IST SCHON DA. `kernel/user/flate.fi` (Runde GZIP)
-// kann deflate und inflate mit festen UND dynamischen Baeumen und
-// rechnet CRC-32; ein ZIP ist im Kern nichts anderes als deflate-Bloecke
-// mit Buchhaltung davor und dahinter. Hier steht also nur die
-// Buchhaltung:
-//
-//   lokaler Kopf   50 4B 03 04, je Eintrag, direkt vor den Daten
-//   Verzeichnis    50 4B 01 02, alle Eintraege noch einmal, am Ende
-//   Abschluss      50 4B 05 06, sagt, wo das Verzeichnis anfaengt
-//
-// GELESEN WIRD UEBER DAS VERZEICHNIS und nicht ueber die lokalen
-// Koepfe: ein ZIP, an das etwas angehaengt wurde, hat gueltige Daten
-// nur dort, und jedes fremde Werkzeug macht es so.
-//
-// WAS ES NICHT KANN, und es steht hier und nicht in einer Fussnote:
-// keine Verschluesselung, kein ZIP64 (also nichts ueber 4 GiB und nicht
-// mehr als 65535 Eintraege), kein bzip2/lzma/zstd als Verfahren. Trifft
-// es auf eines davon, sagt es das und bricht ab, statt Unsinn
-// auszupacken.
 
 profile kernel
 
@@ -41,11 +8,11 @@ import flate
 
 export { u_start }
 
-const ARCH_CAP: u64 = 786432 // das ganze Archiv beim Lesen
-const FILE_CAP: u64 = 262144 // eine Datei, unverpackt
-const COMP_CAP: u64 = 278528 // dieselbe Datei, verpackt (mit Luft)
-const MAXE: u64 = 256 // Eintraege
-const NAMEC: u64 = 112 // Oktette je Name
+const ARCH_CAP: u64 = 786432
+const FILE_CAP: u64 = 262144
+const COMP_CAP: u64 = 278528
+const MAXE: u64 = 256
+const NAMEC: u64 = 112
 
 static mut arch: [u8; 786432] = [0 as u8; 786432]
 static mut fbuf: [u8; 262144] = [0 as u8; 262144]
@@ -78,8 +45,6 @@ fn name_at(i: u64) -> u64 {
     return (&namen[(0) as usize]) as u64 + i * NAMEC
 }
 
-// -------------------------------------------------- Oktette und Zahlen
-
 fn ld8(p: u64, at: u64) -> u64 {
     return (*((p + at) as *mut u8)) as u64
 }
@@ -106,8 +71,6 @@ fn st32(p: u64, at: u64, v: u64) {
     st16(p, at + 2, v >> 16)
 }
 
-// ------------------------------------------------------------ schreiben
-
 fn off(p: u64, n: u64) -> bool {
     let g: u64 = io.write_all(afd, p, n)
     if ulib.bad(g) || g < n {
@@ -117,15 +80,11 @@ fn off(p: u64, n: u64) -> bool {
     return true
 }
 
-// Ein lokaler Kopf. Die Zeit steht als Null darin und nicht als
-// erfundene Zahl: dieses System hat beim Packen eine Uhr (io.now_sec),
-// aber keine Ortszeit-Zerlegung in die MS-DOS-Form, und ein falsches
-// Datum ist schlimmer als gar keines.
 fn header_local(i: u64, nlen: u64) -> bool {
     let h: u64 = (&hdr[(0) as usize]) as u64
     ulib.fill(h, 0, 30)
     st32(h, 0, 0x04034B50)
-    st16(h, 4, 20) // Fassung, die es braucht: 2.0
+    st16(h, 4, 20)
     st16(h, 6, 0)
     st16(h, 8, e_verf[(i) as usize])
     st16(h, 10, 0)
@@ -150,8 +109,6 @@ fn header_center(i: u64, nlen: u64) -> bool {
     st32(h, 20, e_csz[(i) as usize])
     st32(h, 24, e_usz[(i) as usize])
     st16(h, 28, nlen)
-    // Aussenattribute: bei einem Ordner das Verzeichnisbit, damit
-    // fremde Werkzeuge ihn als Ordner anlegen.
     if e_dir[(i) as usize] != 0 {
         st32(h, 38, 0x41FF0010)
     } else {
@@ -195,10 +152,6 @@ fn read_int(pfad_p: u64) -> u64 {
     return n
 }
 
-// Eine Datei ins Archiv. Verkleinert wird nur, wenn es sich lohnt --
-// ein schon verkleinertes Bild wird durch deflate GROESSER, und dann
-// steht es unverpackt darin (Verfahren 0), wie es jedes andere
-// Packprogramm auch macht.
 fn entry(fs_pfad: u64, name: u64, ist_dir: bool) -> bool {
     var s_gross: [u8; 24] = "zip: zu viele Einträge\0"
     var s_lang: [u8; 20] = "zip: Name zu lang: \0"
@@ -235,10 +188,6 @@ fn entry(fs_pfad: u64, name: u64, ist_dir: bool) -> bool {
     e_usz[(ne) as usize] = roh
     e_crc[(ne) as usize] = flate.crc32((&fbuf[(0) as usize]) as u64, roh)
     e_off[(ne) as usize] = apos
-    // DAS VERFAHREN JE EINTRAG, und nicht ein Schalter, der beim
-    // zentralen Verzeichnis schon wieder anders steht. Genau das war
-    // hier zuerst falsch: der lokale Kopf sagte 0, das Verzeichnis 8,
-    // und ein fremdes Werkzeug haette den Eintrag als kaputt gemeldet.
     var clen: u64 = roh
     var daten: u64 = (&fbuf[(0) as usize]) as u64
     e_verf[(ne) as usize] = 0
@@ -282,9 +231,6 @@ fn point(name: u64) -> bool {
         && *((name + 2) as *mut u8) == 0 as u8
 }
 
-// Einen Ordner begehen. Die Rekursion laeuft ueber den Pfadpuffer, der
-// waehrenddessen laenger und wieder kuerzer wird -- kein zweiter Puffer
-// je Ebene, weil dieses System keine Halde in Ring 3 hat.
 fn begehen(fs_pfad: u64, name: u64, tiefe: u64) -> bool {
     var s_tief: [u8; 29] = "zip: zu tief verschachtelt: \0"
     var slash: [u8; 2] = "/\0"
@@ -401,8 +347,6 @@ fn packen(archiv: u64, args: u64, ab: u64, argc: u64) -> u64 {
     return 0
 }
 
-// -------------------------------------------------------------- lesen
-
 static mut alen: u64 = 0
 
 fn archive_read(pfad_p: u64) -> bool {
@@ -428,8 +372,6 @@ fn archive_read(pfad_p: u64) -> bool {
     return alen > 22
 }
 
-// Den Abschlussblock suchen -- von hinten, weil hinter ihm ein
-// Kommentar stehen darf.
 fn eocd_find() -> u64 {
     let a: u64 = (&arch[(0) as usize]) as u64
     var at: u64 = alen - 22
@@ -449,7 +391,6 @@ fn eocd_find() -> u64 {
     return gefunden
 }
 
-// Die Ordner ueber einer Datei anlegen, von links nach rechts.
 fn dirs_make(p: u64) {
     var i: u64 = 1
     while *((p + i) as *mut u8) != 0 as u8 {
@@ -463,9 +404,6 @@ fn dirs_make(p: u64) {
 }
 
 fn ist_boese(name: u64) -> bool {
-    // Ein Eintrag, der mit / anfaengt oder .. enthaelt, schreibt aus
-    // dem Zielordner heraus. Das ist der aelteste Fehler beim
-    // Entpacken, und er wird hier abgelehnt und nicht repariert.
     if *((name) as *mut u8) == 47 as u8 {
         return true
     }
@@ -520,9 +458,6 @@ fn entpacken(archiv: u64, zielp: u64, nur_liste: bool) -> u64 {
             let elen: u64 = ld16(a, vz + 30)
             let klen: u64 = ld16(a, vz + 32)
             let lo: u64 = ld32(a, vz + 42)
-            // Der Name steht IM Puffer, also a + Offset. Hier stand
-            // `vz + 46` -- eine Adresse von 369, und der Prozess starb
-            // an ihr (user fault cr2=0x171).
             let nm: u64 = a + vz + 46
             var name: [u8; 256] = [0 as u8; 256]
             var n2: u64 = nlen
@@ -571,10 +506,6 @@ fn entpacken(archiv: u64, zielp: u64, nur_liste: bool) -> u64 {
                     let _r: u64 = io.make_dir(z)
                     getan = getan + 1
                 } else {
-                    // Der lokale Kopf sagt, wie lang SEIN Name und SEIN
-                    // Zusatzfeld sind; die Zahlen aus dem Verzeichnis
-                    // gelten dafuer nicht (fremde Packer schreiben in
-                    // beide Verschiedenes).
                     let lnl: u64 = ld16(a, lo + 26)
                     let lel: u64 = ld16(a, lo + 28)
                     let daten: u64 = lo + 30 + lnl + lel

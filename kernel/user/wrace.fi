@@ -1,45 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/wrace.fi -- DAILY-DRIVER: SEVERAL PROCESSES WRITE FILES AT
-// THE SAME TIME, AND EVERY OCTET IS CHECKED.
-//
-//     wrace run <dir> <procs> <kib>      start <procs> writers, wait, verify
-//     wrace child <dir> <n> <kib>        one writer (started by `run`)
-//     wrace verify <dir> <procs> <kib>   only read back and compare
-//
-// WHY IT EXISTS. Roadmap r200: on 27.09.2026 an installed system on a SATA
-// disk (QEMU q35) came up after the restart with a broken file system --
-// 128 octets from byte 16 of a sector zeroed, at random. The suspect was
-// the one copy page every file read/write call bounced its data through
-// (`kstate.BLOCK_OFF`): with ring 3 on all cores two calls filled it at the
-// same time. The fix of 27.09. gave every core its own page (`BLOCKK_OFF`),
-// and the Dell update that had been getting 512-octet pieces of
-// /etc/theme.conf written onto the stick was seen to stop. What was never
-// built is the TEST that would catch it coming back: this program, run on
-// four cores (`-smp 4 r3alle`), writes <procs> files of <kib> KiB each --
-// in parallel, with a read of another file between the writes, which is
-// the traffic that corrupted the stick -- and then every octet of every
-// file is recomputed and compared. The host does it a second time from the
-// disk image after the guest has shut down (tools/fsrobust/wrace.sh), so
-// the kernel is not its own witness.
-//
-// HONEST LIMIT (measured, 02.10.2026): the shared page was put back into the
-// kernel on purpose (a copy of this tree with `blockb` returning
-// `state + kstate.BLOCK_OFF` for every caller, i.e. the state before the fix)
-// and this test passed three rounds anyway. The file-system calls share the
-// big file-system lock, so two WRITERS never meet in the page; the race of
-// r200 needs a user of the page OUTSIDE that lock (window calls of the
-// desktop, `conout`) at the same moment, and with two console writers added
-// (tried, 8000 lines) it still did not show in three rounds. So this program
-// is an end-to-end data-integrity test of parallel writers on four cores,
-// verified from the disk image by the host -- it does NOT prove the copy-page
-// race is gone. The reproducer of 27.09. was the full desktop on `-smp 4
-// r3alle` (tools/multicore/run.sh); a negative control for r200 has to be
-// built on that.
-//
-// The pattern of octet `o` of file `n` is a function of both, so a block
-// that lands in the wrong file, a block written twice, or a block of
-// zeros or of some other file's text is a mismatch, and the first
-// mismatch is reported with file, block, offset and both values.
 profile kernel
 
 import ulib
@@ -88,7 +46,6 @@ fn p8(p: u64, v: u64) {
     __mmio_write8(p as *mut u8, (v & 255) as u8)
 }
 
-// octet `off` of file `n`
 fn pat(n: u64, off: u64) -> u64 {
     return (((off * 131) + (n * 17) + ((off >> 12) * 7)) & 255) ^ 0x5A
 }
@@ -109,7 +66,6 @@ fn path_of(dir: u64, n: u64) {
     ulib.strcat(p, (&NUM3[0 as usize]) as u64)
 }
 
-// reads up to `len` octets of a file just for the traffic
 fn side_read() {
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_SELF[0 as usize]) as u64, 0, 0)
     if ulib.bad(fd) {
@@ -146,8 +102,6 @@ fn child(dir: u64, n: u64, kib: u64) -> u64 {
             }
             done = done + w
         }
-        // the traffic that corrupted the stick: another file is read
-        // between two writes
         if j % 2 == 1 {
             side_read()
         }
@@ -157,7 +111,6 @@ fn child(dir: u64, n: u64, kib: u64) -> u64 {
     return 0
 }
 
-// compare file `n`; returns the number of bad blocks
 fn verify_one(dir: u64, n: u64, kib: u64) -> u64 {
     path_of(dir, n)
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&PATH[0 as usize]) as u64, 0, 0)
@@ -248,9 +201,6 @@ fn run(dir: u64, procs: u64, kib: u64, spam: u64) -> u64 {
     ulib.sys(ulib.SYS_MKDIR, dir, 493, 0)
     var pids: [u64; 16] = [0 as u64; 16]
     var n: u64 = 0
-    // DAILY-DRIVER (r200): `spam` > 0 starts /bin/wspam next to the
-    // writers -- the taskbar's window-list poll on another core, the one
-    // caller that used the shared copy page OUTSIDE the file-system lock.
     var spid: u64 = 0xFFFFFFFFFFFFFFFF
     if spam > 0 {
         var sargv: [u64; 4] = [0 as u64; 4]

@@ -1,40 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/mp3.fi -- Runde DEMUX: MPEG-1 Layer III, in Festkomma.
-//
-// WARUM MP3 UND NICHT AAC. Die Runde durfte einen Tondekodierer RICHTIG
-// bauen statt zwei halb. MP3 gewinnt aus drei Gruenden: (1) es ist mit
-// 3500-6000 Zeilen der kleinere der beiden (die Recherche in
-// /root/osum-research-raw.md nennt AAC-LC nicht kleiner); (2) es ist der
-// EINZIGE Codec, der in allen drei Behaeltern dieser Runde vorkommt --
-// als eigene Datei, in MP4 (`.mp3`/esds 0x6B) und in Matroska
-// (`A_MPEG/L3`); (3) eine MP3-Sammlung ist das, was auf einem Rechner
-// wirklich liegt. Was AAC kostet und warum es NICHT halb dabei ist,
-// steht in STATUS-DEMUX.md.
-//
-// KEIN FLIESSKOMMA. Ring 3 dieses Systems hat keins. Alles hier rechnet
-// in GANZEN Zahlen mit 20 Bruchbits (`mp3tab.FB`); die Tafeln erzeugt
-// `tools/demux/mktab.py`. Das ist kein Notbehelf -- libmad macht es
-// genauso, und die Genauigkeit reicht: der gemessene Fehler gegen
-// ffmpeg steht in STATUS-DEMUX.md, in Einheiten des 16-Bit-Abtastwerts.
-//
-// WAS DRIN IST: MPEG-1 Layer III, 32/44,1/48 kHz, alle vier Kanalmodi
-// (Stereo, Joint mit MS UND Intensitaet, Dual, Mono), lange und kurze
-// Bloecke samt Mischblock, das Bitreservoir, die Aliasminderung, die
-// IMDCT mit allen vier Fenstern und die Polyphasensynthese.
-//
-// WAS NICHT DRIN IST, UND WARUM: MPEG-2/2.5 Layer III (halbe und
-// viertel Abtastrate, also 8-24 kHz) braucht einen zweiten
-// Skalenfaktorpfad mit eigenen Tafeln. Musik gibt es dort praktisch
-// nicht -- 32, 44,1 und 48 kHz sind MPEG-1. Der Dekodierer ERKENNT so
-// eine Datei und sagt es, statt sie falsch zu spielen. Layer I und II
-// ebenso.
-//
-// DIE STELLE, AN DER ES SCHIEFGEHT, WENN MAN NICHT AUFPASST: das
-// BITRESERVOIR. Ein Rahmen enthaelt nicht seine eigenen Daten, sondern
-// zeigt mit `main_data_begin` bis zu 511 Oktette ZURUECK. Wer den
-// Reservoirpuffer nach dem Anhaengen und nicht davor anschneidet,
-// bekommt ein Ergebnis, das die ersten Sekunden richtig klingt und
-// danach zerfaellt.
 
 profile kernel
 
@@ -51,15 +14,13 @@ export {
     MAXIN
 }
 
-const MAXIN: u64 = 2048 // groesster Rahmen: 320 kbit/s bei 32 kHz + Fuellung
+const MAXIN: u64 = 2048
 const FB: u64 = 20
-const HALF: i64 = 524288 // 1 << (FB-1), fuer das Runden
+const HALF: i64 = 524288
 
-// -------------------------------------------------------- der Rahmenkopf
-
-static mut h_ver: u64 = 0 // 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5
-static mut h_layer: u64 = 0 // 3 = Layer III (4 - Bitfeld: 01 -> 3)
-static mut h_crc: u64 = 0 // 1 = KEINE Pruefsumme
+static mut h_ver: u64 = 0
+static mut h_layer: u64 = 0
+static mut h_crc: u64 = 0
 static mut h_bi: u64 = 0
 static mut h_si: u64 = 0
 static mut h_pad: u64 = 0
@@ -68,7 +29,6 @@ static mut h_mext: u64 = 0
 static mut h_len: u64 = 0
 static mut nch: u64 = 2
 
-// Kopf aus vier Oktetten. false = kein gueltiger Kopf.
 fn hdr_of(b0: u64, b1: u64, b2: u64, b3: u64) -> bool {
     if b0 != 0xFF {
         return false
@@ -78,22 +38,22 @@ fn hdr_of(b0: u64, b1: u64, b2: u64, b3: u64) -> bool {
     }
     let ver: u64 = (b1 >> 3) & 3
     if ver == 1 {
-        return false // reserviert
+        return false
     }
     let lay: u64 = (b1 >> 1) & 3
     if lay == 0 {
-        return false // reserviert
+        return false
     }
     let bi: u64 = (b2 >> 4) & 15
     if bi == 0 || bi == 15 {
-        return false // "frei" und "unzulaessig"
+        return false
     }
     let si: u64 = (b2 >> 2) & 3
     if si == 3 {
         return false
     }
     h_ver = ver
-    h_layer = 4 - lay // 01 -> 3 (Layer III), 10 -> 2, 11 -> 1
+    h_layer = 4 - lay
     h_crc = b1 & 1
     h_bi = bi
     h_si = si
@@ -105,10 +65,6 @@ fn hdr_of(b0: u64, b1: u64, b2: u64, b3: u64) -> bool {
     } else {
         nch = 2
     }
-    // Die Rahmenlaenge. Fuer MPEG-1 Layer III sind es 144 Abtastwerte je
-    // Oktett-Achtel, fuer MPEG-2/2.5 die Haelfte. Beide Zahlen stehen
-    // hier, damit die LAENGE stimmt, auch wenn nur MPEG-1 dekodiert wird
-    // -- sonst findet der Rahmenzaehler den naechsten Kopf nicht.
     let br: u64 = (mp3tab.l3_bitrate[(bi) as usize]) as u64
     var sr: u64 = (mp3tab.srate[(si) as usize]) as u64
     if ver == 2 {
@@ -142,17 +98,10 @@ fn mp3_framelen() -> u64 {
     return h_len
 }
 
-// Liest den Kopf an einer Dateiposition. Nur zum Suchen.
 fn mp3_hdr_at(off: u64) -> bool {
     return hdr_of(media.src_byte(off), media.src_byte(off + 1),
                   media.src_byte(off + 2), media.src_byte(off + 3))
 }
-
-// -------------------------------------------------------- die Bitleser
-//
-// Zwei Leser, weil zwei Stroeme gleichzeitig offen sind: die
-// Seiteninformation liegt IM Rahmen, die Nutzdaten im Reservoir, und
-// das Reservoir faengt weiter vorn an als der Rahmen.
 
 static mut inb: [u8; 2048] = [0 as u8; 2048]
 static mut sb_bit: u64 = 0
@@ -178,7 +127,7 @@ const RESMAX: u64 = 4096
 static mut res: [u8; 4096] = [0 as u8; 4096]
 static mut res_n: u64 = 0
 static mut mb_bit: u64 = 0
-static mut mb_end: u64 = 0 // Bitzahl im Reservoir
+static mut mb_end: u64 = 0
 static mut errs: u64 = 0
 
 fn mb_get(n: u64) -> u64 {
@@ -213,8 +162,6 @@ fn mb_bit1() -> u64 {
     return v
 }
 
-// --------------------------------------------------- die Seiteninformation
-
 static mut si_begin: u64 = 0
 static mut scfsi: [u64; 8] = [0 as u64; 8]
 static mut p23: [u64; 4] = [0 as u64; 4]
@@ -233,9 +180,8 @@ static mut sfsc: [u64; 4] = [0 as u64; 4]
 static mut c1sel: [u64; 4] = [0 as u64; 4]
 static mut cnt1: [u64; 4] = [0 as u64; 4]
 
-// Skalenfaktoren: [gr][ch][sfb] lang, [gr][ch][sfb][win] kurz.
-static mut scl: [u64; 88] = [0 as u64; 88] // 2*2*22
-static mut scs: [u64; 156] = [0 as u64; 156] // 2*2*13*3
+static mut scl: [u64; 88] = [0 as u64; 88]
+static mut scs: [u64; 156] = [0 as u64; 156]
 
 fn read_side() {
     sb_bit = 32
@@ -281,10 +227,6 @@ fn read_side() {
                     sbg[(k * 3 + r) as usize] = sb_get(3)
                     r = r + 1
                 }
-                // Die Grenzen sind hier NICHT im Strom, sie sind fest.
-                // Die Norm schreibt 7; fuer den reinen Kurzblock ist 8
-                // richtig -- das ist der bekannte Fehler in der Norm,
-                // und jeder Dekodierer, der Musik abspielt, macht es so.
                 if btype[(k) as usize] == 2 && mixed[(k) as usize] == 0 {
                     reg0[(k) as usize] = 8
                 } else {
@@ -313,8 +255,6 @@ fn read_side() {
         gr = gr + 1
     }
 }
-
-// ----------------------------------------------------- die Skalenfaktoren
 
 fn read_scf(gr: u64, ch: u64) {
     let k: u64 = gr * 2 + ch
@@ -358,8 +298,6 @@ fn read_scf(gr: u64, ch: u64) {
             }
         }
     } else {
-        // Vier Gruppen, und `scfsi` sagt je Gruppe, ob der zweite
-        // Granulat die Werte des ersten ERBT statt sie zu lesen.
         grp(gr, ch, 0, 6, s1, 0)
         grp(gr, ch, 6, 11, s1, 1)
         grp(gr, ch, 11, 16, s2, 2)
@@ -384,15 +322,11 @@ fn grp(gr: u64, ch: u64, from: u64, to: u64, slen: u64, g: u64) {
     }
 }
 
-// ------------------------------------------------------- Huffman
-
 static mut hx: i64 = 0
 static mut hy: i64 = 0
 static mut hv: i64 = 0
 static mut hw: i64 = 0
 
-// Ein Codewort aus einem der Baeume. Der Baum steht in `mp3tab.htree`:
-// zwei Zellen je Knoten, eine Zelle >= 0x8000 ist ein Blatt.
 fn huff_sym(tab: u64) -> u64 {
     var node: u64 = (mp3tab.hroot[(tab) as usize]) as u64
     if node == 0xFFFF {
@@ -462,9 +396,7 @@ fn huff_quad(tab: u64) {
     hy = y
 }
 
-// --------------------------------------------------------- die Spektren
-
-static mut xr: [i64; 1152] = [0 as i64; 1152] // 2 Kanaele x 576
+static mut xr: [i64; 1152] = [0 as i64; 1152]
 
 fn read_huffman(gr: u64, ch: u64, p2start: u64) {
     let k: u64 = gr * 2 + ch
@@ -533,7 +465,6 @@ fn read_huffman(gr: u64, ch: u64, p2start: u64) {
             pos = pos + 4
         }
     }
-    // Ein Codewort, das ueber das Ende hinausragte, gilt nicht.
     if mb_bit > bend + 1 && pos >= 4 {
         pos = pos - 4
     }
@@ -545,11 +476,9 @@ fn read_huffman(gr: u64, ch: u64, p2start: u64) {
     mb_bit = bend + 1
 }
 
-// ------------------------------------------------------ Requantisierung
-
 static mut clamps: u64 = 0
 
-const XRMAX: i64 = 67108864 // 64,0 in Q20
+const XRMAX: i64 = 67108864
 
 fn fdiv4(x: i64) -> i64 {
     if x >= 0 {
@@ -558,7 +487,6 @@ fn fdiv4(x: i64) -> i64 {
     return 0 - ((3 - x) / 4)
 }
 
-// Aus der ganzen Zahl `v` und dem Viertelexponenten `qq` den Wert in Q20.
 fn requant(v: i64, qq: i64) -> i64 {
     if v == 0 {
         return 0
@@ -571,10 +499,10 @@ fn requant(v: i64, qq: i64) -> i64 {
         a = 8206
         clamps = clamps + 1
     }
-    let p: i64 = (mp3tab.pow43[(a) as usize]) as i64 // Q14
+    let p: i64 = (mp3tab.pow43[(a) as usize]) as i64
     let q4: i64 = fdiv4(qq)
-    let r: u64 = (qq - 4 * q4) as u64 // 0..3
-    let prod: i64 = p * ((mp3tab.pow2q[(r) as usize]) as i64) // Q40
+    let r: u64 = (qq - 4 * q4) as u64
+    let prod: i64 = p * ((mp3tab.pow2q[(r) as usize]) as i64)
     let sh: i64 = 20 - q4
     var out: i64 = 0
     if sh >= 63 {
@@ -634,7 +562,6 @@ fn requantize(gr: u64, ch: u64) {
         var i: u64 = 0
         var sfb: u64 = 0
         if mixed[(k) as usize] == 1 {
-            // Die ersten zwei Teilbaender sind LANG.
             sfb = 0
             var next: u64 = (mp3tab.sfbl[(h_si * 23 + 1) as usize]) as u64
             while i < 36 && i < n {
@@ -683,8 +610,6 @@ fn requantize(gr: u64, ch: u64) {
     }
 }
 
-// ------------------------------------------------------------ Umsortieren
-
 static mut re: [i64; 576] = [0 as i64; 576]
 
 fn reorder(gr: u64, ch: u64) {
@@ -723,8 +648,6 @@ fn reorder(gr: u64, ch: u64) {
         }
     }
 }
-
-// -------------------------------------------------------------- Stereo
 
 fn mul20(a: i64, b: i64) -> i64 {
     return (a * b + HALF) >> FB
@@ -828,8 +751,6 @@ fn is_short(gr: u64, sfb: u64) {
     }
 }
 
-// ------------------------------------------------------- Aliasminderung
-
 fn antialias(gr: u64, ch: u64) {
     let k: u64 = gr * 2 + ch
     let base: u64 = ch * 576
@@ -860,23 +781,8 @@ fn antialias(gr: u64, ch: u64) {
     }
 }
 
-// ------------------------------------------------------ IMDCT und Fenster
-
 static mut raw: [i64; 36] = [0 as i64; 36]
-static mut store: [i64; 1152] = [0 as i64; 1152] // 2 Kanaele x 32 x 18
-
-// DIE IMDCT, mit der Symmetrie ihrer eigenen Kosinustafel.
-//
-// Fuer N=36 gilt Zeile fuer Zeile: cos-Zeile[p] = -cos-Zeile[17-p] fuer
-// p < 18 und cos-Zeile[p] = cos-Zeile[53-p] fuer p >= 18. Das ist keine
-// Naeherung, es ist eine Identitaet der Kosinusfunktion (tools/demux/
-// mktab.py rechnet sie nach). Also werden 18 der 36 Zeilen gerechnet und
-// die anderen 18 abgeleitet -- die Haelfte der Multiplikationen fuer
-// dasselbe Ergebnis, bis auf das letzte Bit.
-//
-// Dazu die zweite Ersparnis, die bei echter Musik die groessere ist: ein
-// Teilband, dessen 18 Werte alle null sind, hat eine IMDCT von null. Bei
-// 128 kbit/s ist das die Mehrzahl der Teilbaender.
+static mut store: [i64; 1152] = [0 as i64; 1152]
 
 static mut tmp36: [i64; 36] = [0 as i64; 36]
 
@@ -1003,28 +909,10 @@ fn freq_inv(ch: u64) {
     }
 }
 
-// -------------------------------------------------- die Teilbandsynthese
-
-static mut vvec: [i64; 2048] = [0 as i64; 2048] // 2 Kanaele x 1024
+static mut vvec: [i64; 2048] = [0 as i64; 2048]
 static mut svec: [i64; 32] = [0 as i64; 32]
-static mut pcm: [u8; 4608] = [0 as u8; 4608] // 1152 x 2 Kanaele x 2 Oktette
+static mut pcm: [u8; 4608] = [0 as u8; 4608]
 static mut nsamp: u64 = 0
-
-// DIE POLYPHASENSYNTHESE, ohne das Umkopieren und mit der halben Matrix.
-//
-// Zwei Dinge, die pdmp3 und die Norm woertlich so machen und die man
-// nicht so machen muss:
-//
-//  1. "Den V-Vektor um 64 nach oben schieben" sind 960 Kopien je
-//     Abtastschritt -- 34560 je Rahmen und Kanal. Ein Ringpuffer mit
-//     einem VERSATZ tut dasselbe mit einer Subtraktion. 1024 ist eine
-//     Zweierpotenz, also ist "modulo" ein UND.
-//  2. Die Matrix hat 64 Zeilen, aber nur 32 verschiedene: Zeile 32-i ist
-//     das Negative von Zeile i (und Zeile 16 ist null), und Zeile i ist
-//     fuer i > 32 gleich Zeile 96-i. Das ist wieder eine Identitaet des
-//     Kosinus, nachgerechnet in tools/demux/mktab.py.
-//
-// Dazu: Teilbaender, die null sind, kosten keine Multiplikation.
 
 static mut vrot: [u64; 2] = [0 as u64; 2]
 static mut nzi: [u64; 32] = [0 as u64; 32]
@@ -1048,7 +936,6 @@ fn subband(gr: u64, ch: u64, outoff: u64) {
             }
             i = i + 1
         }
-        // Die 32 wirklich verschiedenen Zeilen: 0..15 und 33..48.
         i = 0
         while i < 16 {
             var acc: i64 = 0
@@ -1088,13 +975,6 @@ fn subband(gr: u64, ch: u64, outoff: u64) {
             vvec[(vb + ((rot + i) & 1023)) as usize] = vtmp[(i) as usize]
             i = i + 1
         }
-        // DER U-VEKTOR WIRD NICHT GEBAUT. Die Norm beschreibt ihn als
-        // 512 Werte, die man erst aus V zusammensucht und dann mit der
-        // Flanke multipliziert. Beides in EINER Schleife spart 512
-        // Kopien je Abtastschritt -- und das Ergebnis ist dasselbe, weil
-        // der Index eine feste Rechnung ist: u[j*32+i] liegt bei
-        // V[(j/2)*128 + i] fuer gerades j und bei V[(j/2)*128 + i + 96]
-        // fuer ungerades.
         i = 0
         while i < 32 {
             var acc: i64 = 0
@@ -1125,8 +1005,6 @@ fn subband(gr: u64, ch: u64, outoff: u64) {
         ss = ss + 1
     }
 }
-
-// ------------------------------------------------------ ein ganzer Rahmen
 
 static mut skipped: u64 = 0
 
@@ -1168,8 +1046,6 @@ fn mp3_rate() -> u64 {
     return sr
 }
 
-// Setzt den Dekodierer zurueck: Reservoir leer, Ueberlappung leer.
-// Ohne das klingt der erste Rahmen nach einem Sprung falsch.
 fn mp3_reset() {
     res_n = 0
     mb_bit = 0
@@ -1192,8 +1068,6 @@ fn mp3_reset() {
     vrot[(1) as usize] = 0
 }
 
-// Einen Rahmen aus `inb[0..len]` dekodieren. Rueckgabe: Abtastwerte je
-// Kanal (1152), oder 0.
 fn mp3_decode(len: u64) -> u64 {
     nsamp = 0
     if len < 4 || len > MAXIN {
@@ -1204,7 +1078,6 @@ fn mp3_decode(len: u64) -> u64 {
         return 0
     }
     if h_layer != 3 || h_ver != 3 {
-        // Layer I/II oder MPEG-2/2.5: erkannt, nicht dekodiert.
         return 0
     }
     var side: u64 = 32
@@ -1220,11 +1093,7 @@ fn mp3_decode(len: u64) -> u64 {
     }
     read_side()
     let mdlen: u64 = len - head
-    // DAS RESERVOIR. Erst den Startpunkt aus dem ALTEN Stand nehmen,
-    // dann anhaengen -- nie andersherum.
     if si_begin > res_n {
-        // Der Anfang fehlt (erste Rahmen einer Datei, oder nach einem
-        // Sprung). Daten aufheben, aber nichts ausgeben.
         skipped = skipped + 1
         if mdlen <= RESMAX {
             var i: u64 = 0
@@ -1279,7 +1148,6 @@ fn mp3_decode(len: u64) -> u64 {
         }
         gr = gr + 1
     }
-    // Nur die letzten 511 Oktette werden je wieder gebraucht.
     if res_n > 511 {
         let keep: u64 = 511
         let from: u64 = res_n - keep
@@ -1293,8 +1161,6 @@ fn mp3_decode(len: u64) -> u64 {
     nsamp = 1152
     return 1152
 }
-
-// ------------------------------------------- die eigenstaendige MP3-Datei
 
 static mut fpos: u64 = 0
 static mut fbeg: u64 = 0
@@ -1341,8 +1207,6 @@ fn mp3_pos_ms() -> u64 {
     return posms
 }
 
-// Ein ID3v2-Kopf am Anfang wird uebersprungen: "ID3", zwei Oktette
-// Fassung, ein Oktett Fahnen und vier Oktette Laenge in Siebenbitgruppen.
 fn skip_id3(off: u64) -> u64 {
     if media.src_byte(off) == 0x49 && media.src_byte(off + 1) == 0x44
         && media.src_byte(off + 2) == 0x33 {
@@ -1353,16 +1217,13 @@ fn skip_id3(off: u64) -> u64 {
         var n: u64 = (a << 21) | (b << 14) | (c << 7) | d
         var extra: u64 = 10
         if (media.src_byte(off + 5) & 0x10) != 0 {
-            extra = 20 // Fussleiste
+            extra = 20
         }
         return off + n + extra
     }
     return off
 }
 
-// Sucht ab `off` den naechsten Kopf, der auch einen ZWEITEN gueltigen
-// Kopf an der von ihm behaupteten Stelle hat. Ein einzelnes 0xFF-Paar
-// findet man in jedem Bild; erst das Paar macht es glaubhaft.
 fn find_sync(off: u64) -> u64 {
     var p: u64 = off
     var guard: u64 = 0
@@ -1371,13 +1232,9 @@ fn find_sync(off: u64) -> u64 {
         if mp3_hdr_at(p) {
             let l: u64 = h_len
             if p + l + 4 > fend {
-                return p // letzter Rahmen, kein Nachfolger mehr
+                return p
             }
             if mp3_hdr_at(p + l) {
-                // DREI VERKETTETE KOEPFE, nicht zwei. Ein einzelnes
-                // Paar findet man in jedem Rauschen -- und eine WAV-
-                // Datei ist voller 0xFF, weil jeder negative Abtastwert
-                // ueber -256 genau so anfaengt.
                 let l2: u64 = h_len
                 var gut: bool = p + l + l2 + 4 > fend
                 if !gut {
@@ -1430,8 +1287,6 @@ fn mp3_probe() -> bool {
     return false
 }
 
-// Die ganze Datei einmal durchgehen: Rahmen zaehlen, Dauer und
-// Datenrate RECHNEN. Kein Xing-Kopf wird geglaubt.
 fn mp3_open() -> bool {
     trunc = 0
     nfr = 0
@@ -1460,8 +1315,6 @@ fn mp3_open() -> bool {
         if !mp3_hdr_at(p) {
             resyncs = resyncs + 1
             if resyncs > 256 {
-                // Mehr als 256 Wiederanschluesse: das ist keine
-                // MP3-Datei, das ist etwas anderes mit 0xFF darin.
                 trunc = 1
                 p = fend
                 nfr = 0
@@ -1493,13 +1346,9 @@ fn mp3_open() -> bool {
     if rate > 0 {
         durms = (samples * 1000) / rate
     }
-    // Den Kopf des ERSTEN Rahmens wiederherstellen, damit
-    // `mp3_rate`/`mp3_channels` das Richtige sagen.
     mp3_hdr_at(fbeg)
     fpos = fbeg
     mp3_reset()
-    // Eine MP3-Datei ist EINE Tonspur. Sie kommt in dieselbe Tafel wie
-    // die Spuren aus MP4 und MKV, damit die Anwendung nur eine kennt.
     media.trk_reset()
     let t: u64 = media.trk_add(media.K_AUDIO, media.C_MP3, 0)
     if t < 16 {
@@ -1521,8 +1370,6 @@ fn spf_of() -> u64 {
     return 576
 }
 
-// Den naechsten Rahmen der Datei dekodieren. Rueckgabe: Abtastwerte je
-// Kanal, 0 am Ende oder bei einem Rahmen ohne Ausgabe.
 fn mp3_next() -> u64 {
     if fpos + 4 > fend {
         return 0
@@ -1558,8 +1405,6 @@ fn mp3_next() -> u64 {
     return n
 }
 
-// Springen. Ohne Index geht das bei fester Datenrate genau und bei
-// veraenderlicher naeherungsweise -- und der Abspieler SAGT das.
 fn mp3_seek_ms(ms: u64) -> bool {
     if durms == 0 || fend <= fbeg {
         return false

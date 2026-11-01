@@ -1,42 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/sha.fi -- SHA-256 for programs in ring 3, over any length.
-//
-// MERGE (Runden INSTALL und TRESOR): ZWEI RUNDEN HABEN DIESE DATEI
-// UNABHAENGIG VONEINANDER ANGELEGT, mit demselben Grund (`pw.fi` hat
-// SHA-256, aber mit `if len > 256 { return false }`) und mit zwei
-// Schnittstellen: INSTALL eine einschuessige (`sha256`, `hex_eq`,
-// `hexval`), TRESOR eine stroemende (`begin`/`update`/`finish`).
-// GEBLIEBEN IST TRESORS RECHNUNG -- sie ist die allgemeinere, sie
-// braucht keinen Puffer von der Groesse der Nachricht, und `shat.fi`
-// misst sie gegen Pythons `hashlib`. INSTALLs Namen stehen als
-// Aufsatz darauf, damit `opk.fi` unveraendert bleibt; die Rechnung
-// steht nur EINMAL da.
-//
-// WHY A SECOND ONE. `kernel/user/pw.fi` already has SHA-256, and it is
-// measured against Python's `hashlib` (round K13). It also has a hard
-// limit: `if len > 256 { return false }`. That was the right shape for
-// what it does -- a password and a 64 octet HMAC pad never come close --
-// but this round hashes FILE CONTENT in chunks of four kibioctets, and a
-// hash function that refuses its input is not a hash function.
-//
-// So: the same algorithm (FIPS 180-4), written as a STREAM. `begin`,
-// `update` as often as you like, `finish`. The one-shot `hash` is the
-// same three calls behind one name.
-//
-// THE STATE IS A MODULE VARIABLE and not a caller-supplied context. That
-// is a real restriction -- two interleaved hashes would tread on each
-// other -- and it is deliberate: this userland has no allocator, and
-// every user of this module (`hwid`, `backup`) hashes one thing at a time
-// from start to finish. `begin` resets everything, so the restriction is
-// visible at the call site rather than hidden.
-//
-// EVERY ARITHMETIC IS MASKED TO 32 BIT. Firn's integers here are 64 bit;
-// SHA-256 is a 32 bit algorithm. A single missing `& M32` produces a hash
-// that is stable, looks random, and agrees with nothing in the world --
-// which is why this file is not trusted but MEASURED: `tools/vault/run.sh`
-// runs the standard vectors of FIPS 180-4 ("abc", the empty string, the
-// 448 bit message) plus a 4096 octet block through this code AND through
-// the host's `hashlib`, and compares the hex digit by digit.
 
 profile kernel
 
@@ -53,8 +14,8 @@ static mut kt: [u64; 64] = [0 as u64; 64]
 static mut kt_ready: u64 = 0
 static mut hv: [u64; 8] = [0 as u64; 8]
 static mut buf: [u8; 64] = [0 as u8; 64]
-static mut have: u64 = 0 // octets sitting in `buf`
-static mut total: u64 = 0 // octets fed in altogether
+static mut have: u64 = 0
+static mut total: u64 = 0
 
 fn ktab() {
     if kt_ready != 0 {
@@ -131,7 +92,6 @@ fn rotr(x: u64, n: u64) -> u64 {
     return (((x & M32) >> n) | ((x & M32) << (32 - n))) & M32
 }
 
-// One compression over the sixty-four octets in `buf`.
 fn compress() {
     compress_at((&buf[0 as usize]) as u64)
 }
@@ -229,11 +189,6 @@ fn update(p: u64, n: u64) {
     total = total + n
 }
 
-// The padding of FIPS 180-4: one bit set, zeros, and the LENGTH IN BITS
-// as a 64 bit big-endian number. The length is the length of the whole
-// message, not of the last block -- getting that wrong gives a hash that
-// is right for short inputs and wrong for long ones, which is the worst
-// kind of wrong.
 fn finish(out: u64) {
     let bits: u64 = total * 8
     buf[have as usize] = 0x80 as u8
@@ -273,11 +228,6 @@ fn hash(p: u64, n: u64, out: u64) {
     finish(out)
 }
 
-// Thirty-two octets as sixty-four lower-case hex digits, NUL terminated.
-// MERGE: die DREI-Argument-Fassung der Runde INSTALL. TRESOR hatte
-// zwei und rechnete immer ueber DIGEST; `n` macht dieselbe Funktion
-// auch fuer kuerzere Felder brauchbar, und die Aufrufer von TRESOR
-// geben jetzt `sha.DIGEST` mit.
 fn hex_out(dig: u64, n: u64, out: u64) {
     var tab: [u8; 17] = "0123456789abcdef\0"
     var i: u64 = 0
@@ -301,11 +251,6 @@ fn equal(a: u64, b: u64) -> bool {
     return true
 }
 
-// ---------------------------------------------------------- RUNDE INSTALL
-//
-// Die einschuessige Fassung und die zwei Hilfsmittel um Hexziffern. Die
-// Rechnung dahinter ist die von oben; hier steht nur die Schnittstelle,
-// die `opk.fi` seit der Runde INSTALL benutzt.
 fn sha256(p: u64, len: u64, out: u64) -> bool {
     hash(p, len, out)
     return true

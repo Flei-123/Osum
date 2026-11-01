@@ -1,29 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/wmd.fi -- docs/COMPOSITOR.md stage S4: `wmd`, THE SHADOW COMPOSITOR (an OBSERVER, it never touches the screen); since S6a it composes the window
-// shadows and since S6b the frame, title bar, caption buttons and title text of plain framed windows itself, and judges them.
-//
-// The plan (docs/COMPOSITOR.md section 3) moves the compositor out of the kernel into a ring-3 program. Before anything is switched, this
-// program does the work IN PARALLEL and compares: it reads the window table page (WM_TABLE: who stands where, in which order) and the
-// buffers of the shared windows (WM_BUFFD: the very frames the clients paint into), composes the client areas into an off-screen
-// picture with the library `fui.comp` (the same row loops `wm.fi` calls), reads the picture the kernel put on the screen (/dev/fb) and
-// counts the pixels that differ. The oracle is `wm.fi`, which exists.
-//
-// WHAT IT COMPOSES, honestly: the CLIENT AREAS of the windows the table marks PLAIN (the server paints them as a plain copy: no
-// opening motion, no lift, no blur, no glass, no translucency), in the order of the table (layer, then z). Everything the server draws
-// around and over a window is stage S6: the shadow (S6a) and the frame, title bar, caption buttons and title text (S6b) are composed here
-// now; blur, glass and the pointer are not. So a pixel counts for the comparison only when
-//   * it lies in the outer rectangle of a plain framed window whose chrome is composed here (S6b), or else in the client area of a plain
-//     window, 16 points inside the edge (rounded corners), and
-//   * no window above it is anything but a plain window further up, with 48 points around its outer rectangle given up for shadows, and
-//   * it is not near the pointer.
-// `compared` says how many pixels that was; `differ` how many of them were not the same. The screen has to hold still while we look:
-// the table and the picture are read twice and a cycle where something moved is thrown away (`unstable`).
-//
-// S5 (`wmd present`, at the end of this file): the same program, started with the argument `present`, is THE COMPOSITOR that shows the frames:
-// the kernel hands every finished rectangle over, this program calls CP_PRESENT, the kernel's watchdog takes over when it hangs or dies.
-//
-// Every cycle prints one line:  wmd: cycle <n> windows=<n> plain=<n> compared=<px> differ=<px> compose_us=<us> first=<x>,<y>
-// and `wmd: summary ...` at the end. Integer only, no heap: the program runs in the kernel profile.
 
 profile kernel
 
@@ -48,25 +22,21 @@ const DG_BPP: u64 = 31
 const PROT_R: u64 = 1
 const MAP_SH: u64 = 1
 
-const MAXPX: u64 = 1024000 // 1280 x 800
+const MAXPX: u64 = 1024000
 const MAXWIN: u64 = 32
-const MARGIN: u64 = 16 // inside the client area: rounded corners
-const CAPBAND: u64 = 56 // the caption strip of a window that paints its own title bar, with the server's buttons on it
-const SHADOW: u64 = 48 // around the outer rectangle of a window that is not composed here
+const MARGIN: u64 = 16
+const CAPBAND: u64 = 56
+const SHADOW: u64 = 48
 const PTR_W: u64 = 40
 const PTR_H: u64 = 48
 
-// the off-screen picture, the mask of the pixels it is allowed to be judged on, two reads of the screen
 static mut sb: [u32; 1024000] = [0 as u32; 1024000]
 static mut mask: [u8; 1024000] = [0 as u8; 1024000]
-// the two reads of the screen live in shared memory (4 MiB each): the program image (11 MiB) cannot hold all four pictures
 static mut p_fba: u64 = 0
 static mut p_fbb: u64 = 0
 static mut rowbuf: [u8; 8192] = [0 as u8; 8192]
-// a copy of the table (header 16 words + 32 rows of 12) taken twice
 static mut tab1: [u64; 400] = [0 as u64; 400]
 static mut tab2: [u64; 400] = [0 as u64; 400]
-// the mapped buffers of the shared windows: window id, address, width, height
 static mut mp_id: [u64; 32] = [0 as u64; 32]
 static mut mp_ptr: [u64; 32] = [0 as u64; 32]
 static mut mp_w: [u64; 32] = [0 as u64; 32]
@@ -78,25 +48,21 @@ static mut scr_h: u64 = 0
 static mut pitch: u64 = 0
 static mut bpp: u64 = 4
 
-// S6a: the window shadow, the same numbers and the same integer arithmetic as `shadow_build` / `shadow_mask` in wm.fi. The corner square holds two
-// banks (focused window, other windows) of SH_SIDE x SH_SIDE octets, the straight edges two strips of SH_MAX octets.
 const SH_SIDE: u64 = 40
 const SH_MAX: u64 = 16
 static mut sh_corner: [u8; 3200] = [0 as u8; 3200]
 static mut sh_edge: [u8; 32] = [0 as u8; 32]
 static mut sh_side: u64 = 0
-static mut sh_k8: u64 = 0 // the table words 8 and 9 the tables were built from (0 = never)
+static mut sh_k8: u64 = 0
 static mut sh_k9: u64 = 0
-static mut sh_px: u64 = 0 // pixels the shadow blended in this cycle
-// the rectangle the kernel repaints when a window is damaged (`damage_win_ex`: the outer rectangle grown by the larger reach, one point more at the
-// right and bottom): the kernel paints the shadow only inside it, so only inside it can the shadow be judged
+static mut sh_px: u64 = 0
 static mut sh_cx0: i64 = 0
 static mut sh_cy0: i64 = 0
 static mut sh_cx1: i64 = 0
 static mut sh_cy1: i64 = 0
-static mut geo_done: u64 = 0 // key of the focused window's geometry last printed as a shadow-geo line
-static mut sh_win: u64 = 0 // windows whose shadow was composed in this cycle
-static mut o_noshadow: u64 = 0 // counter-proof: judge the shadow ring but do NOT compose it (the judge must then see differences)
+static mut geo_done: u64 = 0
+static mut sh_win: u64 = 0
+static mut o_noshadow: u64 = 0
 
 static mut s_w: [u8; 6] = "wmd: \0"
 static mut s_dev: [u8; 8] = "/dev/fb\0"
@@ -153,7 +119,6 @@ fn imax(a: i64, b: i64) -> i64 {
     return b
 }
 
-// copy the table page into `dst` (400 words); true when the sequence number was even and the same before and after the copy
 fn snap(t: u64, dst: u64) -> bool {
     let s0: u64 = __mmio_read64((t + 8) as *mut u64)
     if (s0 & 1) != 0 {
@@ -170,7 +135,6 @@ fn snap(t: u64, dst: u64) -> bool {
 fn same_tab() -> bool {
     var i: u64 = 0
     while i < 400 {
-        // word 1 is the sequence number (it rises every frame), word 5 the frame counter: the rest must be equal
         if i != 1 && i != 5 {
             if tab1[i as usize] != tab2[i as usize] {
                 return false
@@ -181,7 +145,6 @@ fn same_tab() -> bool {
     return true
 }
 
-// read the screen into `dst` (scr_h rows of scr_w pixels, 4 octets each)
 fn read_screen(dst: u64) -> bool {
     let fd: u64 = io.open((&s_dev[0 as usize]) as u64, 0)
     if ulib.bad(fd) {
@@ -199,7 +162,6 @@ fn read_screen(dst: u64) -> bool {
                 good = false
             } else {
                 if bpp == 4 {
-                    // the card holds B G R x; a pixel is 0x00RRGGBB in a 32-bit word on this little-endian machine: the same octets
                     var x: u64 = 0
                     while x < scr_w {
                         __mmio_write32((dst + (y * scr_w + x) * 4) as *mut u32, (__mmio_read32((rp + x * 4) as *mut u32) & 0xFFFFFF) as u32)
@@ -216,7 +178,6 @@ fn read_screen(dst: u64) -> bool {
     return good
 }
 
-// the buffer of window `id` (slot k of the cache), mapped read-only; remapped when the size changed. 0 = none.
 fn buffer_of(k: u64, id: u64, w: u64, h: u64) -> u64 {
     if mp_id[k as usize] == id && mp_w[k as usize] == w && mp_h[k as usize] == h && mp_ptr[k as usize] != 0 {
         return mp_ptr[k as usize]
@@ -241,7 +202,6 @@ fn buffer_of(k: u64, id: u64, w: u64, h: u64) -> u64 {
     return p
 }
 
-// `n` octets of `v` at `p` (rep stosb)
 fn fill8(p: u64, v: u64, n: u64) {
     if n == 0 {
         return
@@ -273,12 +233,6 @@ fn set_mask_rect(x0: i64, y0: i64, x1: i64, y1: i64) {
     mask_rect(x0, y0, x1, y1, 1)
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------
-// S6a -- THE WINDOW SHADOW IN RING 3
-//
-// `shadow_ramp` / `shadow_build` / `shadow_mask` of kernel/ui/wm.fi, line by line in the same integers. The table page (words 8 and 9) carries
-// the numbers the kernel builds its mask from.
-
 fn isqrt(n: u64) -> u64 {
     if n < 2 {
         return n
@@ -300,7 +254,6 @@ fn sh_ramp(strength: u64, reach: u64, d16: u64) -> u64 {
     return strength * 255 / 100 * (full - d16) / full
 }
 
-// build the tables from the table page words (only when they changed)
 fn sh_build(w8: u64, w9: u64) {
     if sh_k8 == w8 && sh_k9 == w9 && sh_side != 0 {
         return
@@ -362,15 +315,12 @@ fn sh_build(w8: u64, w9: u64) {
     sh_k9 = w9
 }
 
-// `color` over the picture pixel at (x, y) with the opacity `a`; a pixel the client left clear or translucent is not touched (the server paints
-// something else there, it is not judged either). The result keeps alpha 255.
 fn sh_mix(x: i64, y: i64, color: u64, a: u64) {
     if a == 0 || x < sh_cx0 || y < sh_cy0 || x >= sh_cx1 || y >= sh_cy1 || x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
         return
     }
     let p: u64 = (&sb[0 as usize]) as u64 + (y as u64 * scr_w + x as u64) * 4
     let old: u64 = __mmio_read32(p as *mut u32) as u64
-    // (a terminal's pixels come from the kernel's own painter, which leaves the alpha octet clear: it is opaque by the window's kind, mask value 2)
     if (old >> 24) != 255 && mask[(y as u64 * scr_w + x as u64) as usize] != 2 {
         return
     }
@@ -382,7 +332,6 @@ fn sh_mix(x: i64, y: i64, color: u64, a: u64) {
     sh_px = sh_px + 1
 }
 
-// a run of `n` pixels from (x, y) to the right, the opacity read from the octets at `m` (step +1 or -1)
 fn sh_run_mask(x: i64, y: i64, n: i64, color: u64, m0: u64, step: i64) {
     var m: u64 = m0
     var k: i64 = 0
@@ -412,7 +361,6 @@ fn sh_run_edge(x: i64, y: i64, n: i64, color: u64, a: u64) {
     }
 }
 
-// the shadow of one window: outer rectangle (wx, wy, ow, oh), reach and bank as the kernel chose them (bank 0 = the focused window)
 fn sh_window(wx: i64, wy: i64, ow: i64, oh: i64, reach: u64, bank: u64, color: u64, r: u64) {
     let side: u64 = sh_side
     if side == 0 || reach == 0 {
@@ -463,17 +411,6 @@ fn sh_window(wx: i64, wy: i64, ow: i64, oh: i64, reach: u64, bank: u64, color: u
     }
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------
-// S6b -- THE FRAME, THE TITLE BAR, THE CAPTION BUTTONS AND THE TITLE TEXT IN RING 3
-//
-// `paint_win` / `paint_title` / `paint_caption` / `cap_face` / `cap_glyph` / `title_text` of kernel/ui/wm.fi, step by step with the same integers.
-// The numbers (colours, measures, hover state, titles) come over the CHROME PAGE (WM_TABLE with argument 1, root only; the layout is in the header of
-// `chrome_object` in wm.fi). The glyph bitmaps of the title come from the kernel's rasteriser (WIG_GLYPH / WIG_KERN, the very bitmaps `title_text`
-// draws), the caption symbols from `fui.core` (the same source as the kernel's `cg_mal`).
-//
-// A pixel is "composed" when its alpha octet in `sb` is 255. A translucent pixel (corner smoothing, glass) can only be blended over a composed pixel: over
-// the wallpaper (not composed here) it stays as it is and is not judged, as in S6a.
-
 const CHR_MAGIC: u64 = 0x52484357
 const CHR_TITLE: u64 = 32
 const CHR_MARK: u64 = 192
@@ -484,24 +421,24 @@ const CAP_MAX: u64 = 1
 const CAP_CLOSE: u64 = 2
 const F_MAXIMIZED: u64 = 4
 const F_CAPCLIENT: u64 = 64
-const CG_SIDE: u64 = 40 // 10 * the largest scale (4)
-const CG_CELL: u64 = 6400 // 40 * 40 * 4 octets: fUi writes four octets per pixel
+const CG_SIDE: u64 = 40
+const CG_CELL: u64 = 6400
 const GL_BUF: u64 = 8192
 
 static mut chr1: [u64; 224] = [0 as u64; 224]
 static mut chr2: [u64; 224] = [0 as u64; 224]
-static mut p_chr: u64 = 0 // the mapped chrome page
-static mut ch_have: u64 = 0 // 1 = this cycle has a consistent chrome page
-static mut ch_px: u64 = 0 // pixels the chrome wrote in this cycle (frame, title bar, buttons, text)
-static mut ch_win: u64 = 0 // windows whose chrome was composed in this cycle
-static mut ch_txt: u64 = 0 // title text pixels in this cycle
-static mut ch_cap: u64 = 0 // caption symbol pixels in this cycle
-static mut o_nochrome: u64 = 0 // counter-proof: judge the chrome but do NOT compose it
+static mut p_chr: u64 = 0
+static mut ch_have: u64 = 0
+static mut ch_px: u64 = 0
+static mut ch_win: u64 = 0
+static mut ch_txt: u64 = 0
+static mut ch_cap: u64 = 0
+static mut o_nochrome: u64 = 0
 static mut gl_buf: [u8; 8192] = [0 as u8; 8192]
 static mut cg_deck: [u8; 25600] = [0 as u8; 25600]
 static mut cg_gut: [u64; 4] = [0 as u64; 4]
 static mut cg_gr: u64 = 0
-static mut geo_chr: [u64; 32] = [0 as u64; 32] // key of each window's chrome geometry last printed
+static mut geo_chr: [u64; 32] = [0 as u64; 32]
 
 fn fill32(p: u64, v: u64, n: u64) {
     if n == 0 {
@@ -510,8 +447,6 @@ fn fill32(p: u64, v: u64, n: u64) {
     asm("cld\nrep stosd", in("rdi") p, in("rax") v, in("rcx") n, clobber("rdi"), clobber("rcx"), clobber("memory"))
 }
 
-// copy the chrome page into `dst` (224 words); true when the table's sequence number was even and the same before and after (the chrome page is
-// written inside the same odd/even bracket as the table)
 fn chr_snap(t: u64, dst: u64) -> bool {
     if p_chr == 0 {
         return false
@@ -528,7 +463,6 @@ fn chr_snap(t: u64, dst: u64) -> bool {
     if __mmio_read64((t + 8) as *mut u64) != s0 {
         return false
     }
-    // magic, valid
     return (__mmio_read64(dst as *mut u64) & 0xFFFFFFFF) == CHR_MAGIC && __mmio_read64((dst + 16) as *mut u64) == (1 as u64)
 }
 
@@ -543,7 +477,6 @@ fn same_chr() -> bool {
     return true
 }
 
-// a pixel of the picture, written opaque (the kernel's `fb.pixel`)
 fn ch_set(x: i64, y: i64, color: u64) {
     if x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
         return
@@ -553,7 +486,6 @@ fn ch_set(x: i64, y: i64, color: u64) {
     ch_px = ch_px + 1
 }
 
-// a pixel with an opacity (the kernel's `fb.pixel_a`): over a composed pixel only
 fn ch_mix(x: i64, y: i64, color: u64, a: u64) {
     if a == 0 || x < 0 || y < 0 || x >= scr_w as i64 || y >= scr_h as i64 {
         return
@@ -571,7 +503,6 @@ fn ch_mix(x: i64, y: i64, color: u64, a: u64) {
     ch_px = ch_px + 1
 }
 
-// the kernel's `fill_clip`
 fn ch_fill(x: i64, y: i64, w: i64, h: i64, color: u64, a: u64) {
     if w <= 0 || h <= 0 || a == 0 {
         return
@@ -599,7 +530,6 @@ fn ch_fill(x: i64, y: i64, w: i64, h: i64, color: u64, a: u64) {
     }
 }
 
-// the kernel's `fill_round`: a rectangle with rounded, smoothed corners
 fn ch_round(x: i64, y: i64, w: i64, h: i64, r0: u64, color: u64, a: u64) {
     if w <= 0 || h <= 0 || a == 0 {
         return
@@ -643,7 +573,6 @@ fn ch_round(x: i64, y: i64, w: i64, h: i64, r0: u64, color: u64, a: u64) {
     }
 }
 
-// the kernel's `shade24`, `grad_room`, `mix24` (colours as 0xRRGGBB)
 fn ch_shade(c: u64, d: u64) -> u64 {
     var r: u64 = (c >> 16) & 255
     var g: u64 = (c >> 8) & 255
@@ -689,7 +618,6 @@ fn ch_mix24(a: u64, b: u64, per: u64) -> u64 {
     return (r << 16) | (g << 8) | bl
 }
 
-// `paint_title`: the title bar (round at the top, with a gradient when the theme has one)
 fn ch_title_bar(wx: i64, wy: i64, ow: i64, focused: bool) {
     let wal: u64 = chr1[21]
     let bo: i64 = chr1[17] as i64
@@ -733,7 +661,6 @@ fn ch_title_bar(wx: i64, wy: i64, ow: i64, focused: bool) {
     }
 }
 
-// `cap_face`: the face of one caption button (only the close button follows the window's round corner)
 fn ch_cap_face(x: i64, y: i64, h: i64, tr: u64, color: u64, right: bool) {
     let wal: u64 = chr1[21]
     let w: i64 = chr1[19] as i64
@@ -747,7 +674,6 @@ fn ch_cap_face(x: i64, y: i64, h: i64, tr: u64, color: u64, right: bool) {
     ch_fill(x, y + r, w, h - r, color, wal)
 }
 
-// `cg_bau` / `cg_mal`: the symbol as a coverage map (one octet per pixel), once per size. fUi's own forms, as in the kernel.
 fn cg_make(slot: u64, n: u64, maximized: bool, dd: u64, sbw: u64) -> bool {
     if slot >= 4 || dd == 0 || dd > CG_SIDE {
         return false
@@ -778,7 +704,6 @@ fn cg_make(slot: u64, n: u64, maximized: bool, dd: u64, sbw: u64) -> bool {
     } else {
         core.cap_close(&z, 0 as usize, 0 as usize, dd as usize, sbw as usize, white)
     }
-    // four octets per pixel down to one (in place: pixel k lies at k * 4 and goes to k)
     var k2: u64 = 0
     while k2 < dd * dd {
         var v: u8 = 0 as u8
@@ -792,7 +717,6 @@ fn cg_make(slot: u64, n: u64, maximized: bool, dd: u64, sbw: u64) -> bool {
     return true
 }
 
-// `cap_glyph`: the symbol at (x, y), every covered pixel in the colour `color`
 fn ch_cap_glyph(n: u64, x: i64, y: i64, color: u64, maximized: bool) {
     let sk: u64 = chr1[20]
     let dd: u64 = 10 * sk
@@ -820,7 +744,6 @@ fn ch_cap_glyph(n: u64, x: i64, y: i64, color: u64, maximized: bool) {
     }
 }
 
-// `paint_caption`: the three buttons at the right end of the title bar. `hov` = the hovered button coded (slot * 4 + n) + 1, `held` = pressed
 fn ch_caption(wx: i64, wy: i64, ow: i64, focused: bool, slot: u64, maximized: bool) {
     let bo: i64 = chr1[17] as i64
     let cwid: i64 = chr1[19] as i64
@@ -870,7 +793,6 @@ fn ch_caption(wx: i64, wy: i64, ow: i64, focused: bool, slot: u64, maximized: bo
     }
 }
 
-// `title_text`: the title of the window, glyph by glyph (the kernel's bitmaps and kerning), blended over the bar
 fn ch_title_text(tp: u64, x: i64, y: i64, color: u64, limit: i64, px: u64) {
     var cx: i64 = x * 64
     var before: u64 = 0
@@ -929,9 +851,6 @@ fn ch_title_text(tp: u64, x: i64, y: i64, color: u64, limit: i64, px: u64) {
     }
 }
 
-// the geometry of every composed window's chrome, whenever it changes, for the gate (tools/comp/chrome.sh checks the PICTURE against it: the bar,
-// the buttons and the title ink must stand where these numbers say, in the kernel's own screenshot). One line per window and geometry:
-//   wmd: chrome-geo <focused> <own strip> x y ow oh border title_h cap_w scale radius title frame text padding gradient close
 fn chrome_geo(k: u64, x: i64, y: i64, ow: i64, oh: i64, focused: bool, capc: bool) {
     let gk: u64 = (x as u64 & 0xFFFF) | ((y as u64 & 0xFFFF) << 16) | ((ow as u64 & 0xFFFF) << 32) | ((oh as u64 & 0xFFFF) << 48)
         ^ (if focused { 0x5555 as u64 } else { 0 as u64 })
@@ -992,8 +911,6 @@ fn chrome_geo(k: u64, x: i64, y: i64, ow: i64, oh: i64, focused: bool, capc: boo
     lineout.end_line()
 }
 
-// the whole chrome of one framed window, in the order of `paint_win`: frame, title bar, buttons, title (a window that paints its own strip gets its
-// buttons after the client area: `ch_strip_buttons`)
 fn ch_window(row: u64, wx: i64, wy: i64, ow: i64, oh: i64, focused: bool, slot: u64, flags: u64) {
     let maximized: bool = (flags & F_MAXIMIZED) != 0
     let capc: bool = (flags & F_CAPCLIENT) != 0
@@ -1021,10 +938,8 @@ fn ch_strip_buttons(wx: i64, wy: i64, ow: i64, focused: bool, slot: u64, flags: 
     ch_win = ch_win + 1
 }
 
-// One cycle. Returns 0 = judged, 1 = the screen or the table moved (thrown away), 2 = could not look. Fills the counters.
 static mut c_win: u64 = 0
 static mut c_plain: u64 = 0
-// r486: terminal windows (kind 1, painted by the kernel into a kernel-made shared buffer) composed in this cycle, and the judged pixels / differences that lie on them
 static mut c_term: u64 = 0
 static mut c_term_cmp: u64 = 0
 static mut c_term_diff: u64 = 0
@@ -1033,15 +948,15 @@ static mut c_diff: u64 = 0
 static mut c_us: u64 = 0
 static mut c_fx: u64 = 0
 static mut c_fy: u64 = 0
-static mut smp: [u64; 64] = [0 as u64; 64] // sample of 16 differing pixels: x, y, screen, ours
+static mut smp: [u64; 64] = [0 as u64; 64]
 static mut smp_n: u64 = 0
-static mut c_na: u64 = 0 // judged-area pixels the client left clear or translucent (not compared)
+static mut c_na: u64 = 0
 static mut c_bx0: u64 = 0
 static mut c_by0: u64 = 0
 static mut c_bx1: u64 = 0
 static mut c_by1: u64 = 0
-static mut c_lt: u64 = 0 // differing pixels where the screen is lighter than ours
-static mut c_sv: u64 = 0 // the screen's pixel and ours at the first difference (for the log)
+static mut c_lt: u64 = 0
+static mut c_sv: u64 = 0
 static mut c_bv: u64 = 0
 
 fn cycle(t: u64) -> u64 {
@@ -1050,19 +965,16 @@ fn cycle(t: u64) -> u64 {
     if !snap(t, t1) {
         return 1
     }
-    // S6b: the chrome page of the same table sequence (colours, measures, hover, titles); without a consistent one the chrome is left alone
     ch_have = 0
     if chr_snap(t, (&chr1[0 as usize]) as u64) {
         ch_have = 1
     }
-    // the screen, the first time
     if !read_screen(p_fba) {
         return 2
     }
     let px0: u64 = wlibc.mouse_x()
     let py0: u64 = wlibc.mouse_y()
 
-    // 1. compose the plain client areas into the off-screen picture, in the order of the table (layer, then z), and keep the mask
     let tc0: u64 = tsc()
     let n: u64 = tab1[2]
     c_win = n
@@ -1071,7 +983,6 @@ fn cycle(t: u64) -> u64 {
         order[i as usize] = i
         i = i + 1
     }
-    // insertion sort by layer, then z (row word 6: z | layer << 16 | kind << 24)
     var a: u64 = 1
     while a < n && a < MAXWIN {
         var b: u64 = a
@@ -1121,11 +1032,7 @@ fn cycle(t: u64) -> u64 {
         let plain: u64 = (tab1[(r + 11) as usize] >> 32) & 1
         let ow: i64 = (w + 2 * inx) as i64
         let oh: i64 = (h + iny + inx) as i64
-        // whatever stands here is covered by this window (and by its shadow): nothing below it can be judged
-        // a hidden window (the start menu, the search, the toast ... waiting at 0,0) puts nothing on the screen: it neither covers nor paints
         let hidden: u64 = tab1[(r + 7) as usize] & 1
-        // S6a: a plain framed window whose shadow numbers are on the table page: the shadow is composed here, so only the window itself is
-        // taken out of the judged area (frame and title bar are not composed yet); everything else keeps the 48 points of margin
         let shadowed: u64 = (tab1[(r + 11) as usize] >> 33) & 1
         var sh_ok: bool = false
         if hidden == 0 && plain == 1 && shadowed == 1 && (tab1[9] & (1 << 32)) != 0 && (tab1[9] & (1 << 33)) == 0 {
@@ -1133,8 +1040,6 @@ fn cycle(t: u64) -> u64 {
         }
         if hidden == 0 {
             if sh_ok {
-                // the damage rectangle of the kernel: what lies outside it keeps whatever an earlier repaint left there (the shadow is only
-                // painted inside the rectangle), so the ring outside is not judged; inside it, only the window itself is taken out
                 var rr: i64 = ((tab1[8] >> 8) & 0xFF) as i64
                 let rr2: i64 = ((tab1[8] >> 24) & 0xFF) as i64
                 if rr2 > rr {
@@ -1173,7 +1078,6 @@ fn cycle(t: u64) -> u64 {
             if strength != 0 && o_noshadow == 0 {
                 sh_win = sh_win + 1
                 sh_window(x, y, ow, oh, reach, bank, tab1[9] & 16777215, (tab1[8] >> 32) & 0xFF)
-                // the geometry of the focused window's shadow, whenever it changes, for the gate (tools/comp/shadow.sh checks the picture just below it)
                 let gk: u64 = (x as u64 & 0xFFFF) | ((y as u64 & 0xFFFF) << 16) | ((ow as u64 & 0xFFFF) << 32) | ((oh as u64 & 0xFFFF) << 48)
                 if bank == 0 && geo_done != gk && o_noshadow == 0 {
                     geo_done = gk
@@ -1202,8 +1106,6 @@ fn cycle(t: u64) -> u64 {
             let cx: i64 = x + inx as i64
             let cy: i64 = y + iny as i64
             let flags: u64 = tab1[(r + 7) as usize]
-            // S6b: the frame, the title bar, the buttons and the title of a framed window are composed here too (when the chrome page is consistent
-            // and the window is one this code knows how to paint: modern buttons, a title font, no network mark, the screen not locked)
             var chok: bool = false
             if sh_ok && ch_have == 1 && chr1[16] != 0 && chr1[29] == 1 && chr1[3] == 0xFF0000 && chr1[4] == 0xFF00 && chr1[5] == 0xFF
                 && chr1[20] >= 1 && chr1[20] <= 4 && chr1[(CHR_MARK + k) as usize] == 0 && (tab1[7] & 1) == 0 {
@@ -1216,12 +1118,9 @@ fn cycle(t: u64) -> u64 {
                 if o_nochrome == 0 {
                     ch_window(k, x, y, ow, oh, focused, tab1[r as usize] >> 32, flags)
                 } else {
-                    // counter-proof: a hole in a colour no theme has, so the judge MUST see the frame it does not compose
                     ch_fill(x, y, ow, oh, 0xFF00FF, 255)
                 }
             }
-            // the rows of the client area that lie on the screen, copied with the library's row loop (the bottom corners, and the top ones of a window
-            // with its own strip, keep what the rounded frame left there: the same skip as the kernel's)
             var ry: u64 = 0
             while ry < h {
                 let sy: i64 = cy + ry as i64
@@ -1256,18 +1155,14 @@ fn cycle(t: u64) -> u64 {
             if chok && capc && o_nochrome == 0 {
                 ch_strip_buttons(x, y, ow, focused, tab1[r as usize] >> 32, flags)
             }
-            // a client that paints its own title strip (flag 64) has the server's caption buttons drawn over it: that band is not judged
-            // (unless the chrome is composed here)
             var top: i64 = MARGIN as i64
             if (flags & F_CAPCLIENT) != 0 && !chok {
                 top = CAPBAND as i64
             }
             if chok {
-                // the whole outer rectangle is judged: pixels over the wallpaper-less corners are skipped by the "not opaque" rule
                 mask_rect(x, y, x + ow, y + oh, 1)
                 chrome_geo(k, x, y, ow, oh, focused, capc)
             }
-            // r486: a terminal window (kind 1) marks its pixels with 2, so the judge can say how much of what it compared was terminal
             var mv: u64 = 1
             if ((tab1[(r + 6) as usize] >> 24) & 0xFF) == 1 {
                 mv = 2
@@ -1278,10 +1173,8 @@ fn cycle(t: u64) -> u64 {
         oi = oi + 1
     }
     c_us = us_of(tsc() - tc0)
-    // not near the pointer
     clear_mask_rect(px0 as i64 - 8, py0 as i64 - 8, px0 as i64 + PTR_W as i64, py0 as i64 + PTR_H as i64)
 
-    // 2. the screen, the second time, and the table: nothing may have moved
     if !read_screen(p_fbb) {
         return 2
     }
@@ -1296,7 +1189,6 @@ fn cycle(t: u64) -> u64 {
             return 1
         }
     }
-    // 3. compare, where the mask says the pixel can be judged and the screen held still
     c_cmp = 0
     c_term_cmp = 0
     c_term_diff = 0
@@ -1313,7 +1205,6 @@ fn cycle(t: u64) -> u64 {
             let at: u64 = yy * scr_w + xx
             if mask[at as usize] != 0 {
                 if mask[at as usize] != 2 && (sb[at as usize] >> 24 as u32) != 255 as u32 {
-                    // a pixel the client left clear or translucent: the server paints what lies behind it (wallpaper, blur), not ours
                     c_na = c_na + 1
                 } else if __mmio_read32((p_fba + at * 4) as *mut u32) != __mmio_read32((p_fbb + at * 4) as *mut u32) {
                     moved = moved + 1
@@ -1452,7 +1343,6 @@ fn run_observe(args: u64) -> u64 {
         lineout.end_line()
         return 1
     }
-    // S6b: the chrome page (root only); without it the program judges as before
     let cfd: u64 = wlibc.sys3w(WM_TABLE, 1, 0, 0)
     if !ulib.bad(cfd) {
         let cm: u64 = mmap_fd(cfd, 4096)
@@ -1473,7 +1363,6 @@ fn run_observe(args: u64) -> u64 {
     var dif: u64 = 0
     var maxus: u64 = 0
     var tries: u64 = 0
-    // every ~1.5 s for as long as the harness lets us live
     while tries < 160 {
         tries = tries + 1
         let rc: u64 = cycle(t)
@@ -1617,19 +1506,6 @@ fn run_observe(args: u64) -> u64 {
     return 0
 }
 
-// ---------------------------------------------------------------------------------------------------------------------------
-// S5 -- `wmd present`: THE COMPOSITOR THAT SHOWS THE FRAMES (docs/COMPOSITOR.md section 4)
-//
-// The kernel still paints the picture; with this program attached (WM_COMP / CP_ATTACH) it does not push a finished rectangle to the card but
-// hands it over and wakes us. We sleep in CP_WAIT (wake driven: the same wake-up `poll` uses), then CP_PRESENT shows the rectangle. The kernel keeps
-// a watchdog: a rectangle that waits longer than 50 ms is shown by the kernel (a miss), three misses in a row or our death detach us and the kernel
-// presents every frame itself again. We also read the input copy ring (pointer moves, button changes, shortcut keys) the kernel writes while the screen
-// is not locked and no trusted dialog is up.
-//
-// Test hooks (arguments, `wigapp=/bin/wmd,present,slow=80`): `slow=<ms>` sleeps before every present (a compositor that is too slow),
-// `hangon=<n>` stops presenting for good after the n-th button press (a hang: alive, silent), `dieon=<n>` exits at the n-th button press (a crash).
-// Every second it prints:  wmd: present frames= shown= px= ev= move= btn= key= keycode= lost= busy= errors=
-
 const WM_COMP: u64 = 2144
 const CP_ATTACH: u64 = 0
 const CP_WAIT: u64 = 1
@@ -1646,7 +1522,6 @@ fn rd64(p: u64) -> u64 {
     return __mmio_read64(p as *mut u64)
 }
 
-// does the zero-terminated string at `p` start with the zero-terminated `lit`?
 fn has_prefix(p: u64, lit: u64) -> bool {
     var i: u64 = 0
     while rd8(lit + i) != 0 {
@@ -1658,7 +1533,6 @@ fn has_prefix(p: u64, lit: u64) -> bool {
     return true
 }
 
-// the number after `lit` ("slow=") in one of the arguments, or `def`
 fn arg_num(args: u64, lit: u64, def: u64) -> u64 {
     var len: u64 = 0
     while rd8(lit + len) != 0 {
@@ -1776,13 +1650,10 @@ fn run_present(args: u64) -> u64 {
     var dirty_say: bool = false
     while true {
         if hanging {
-            // alive and silent: no wait, no present
             let _s: u64 = ulib.sleep_ms(200)
         } else {
             var f: u64 = ulib.sys(WM_COMP, CP_WAIT, seen, 100)
             if ulib.bad(f) {
-                // detached by the kernel (the watchdog took the screen back): the kernel shows the frames now. Wait a little so that the
-                // start-up storm is over, then attach again (a new compositor re-attaches to the table and the buffers, section 3, point 5).
                 lineout.add_text((&n_wer[0 as usize]) as u64)
                 lineout.end_line()
                 pr_report()
@@ -1807,7 +1678,6 @@ fn run_present(args: u64) -> u64 {
                 var px: u64 = ulib.sys(WM_COMP, CP_PRESENT, 0, 0)
                 var tries: u64 = 0
                 while ulib.bad(px) && tries < 8 {
-                    // busy: the compose lock did not come free in time (its holder may have been preempted): give the CPU away, once more
                     pr_busy = pr_busy + 1
                     let _y: u64 = ulib.sleep_ms(1)
                     px = ulib.sys(WM_COMP, CP_PRESENT, 0, 0)
@@ -1824,7 +1694,6 @@ fn run_present(args: u64) -> u64 {
                 dirty_say = true
             }
         }
-        // the input copy ring
         let head: u64 = rd64(page + 16)
         if head > tail + CPR_N {
             pr_lost = pr_lost + (head - CPR_N - tail)
