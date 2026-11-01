@@ -95,7 +95,7 @@ def randbedingungen():
 
 
 QUELLEN = [
-    ("kernel/gfx/fb.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
+    ("kernel/gfx/fb/fbdraw.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
     ("lib/fui/comp.fi", "return (src *% a +% dst *% ia +% 127) / 255"),
     ("kernel/user/wlibc.fi",
      "return (src *% a +% dst *% ia +% 127) / 255"),

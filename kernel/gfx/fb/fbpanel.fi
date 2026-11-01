@@ -1,0 +1,2058 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import gfx.font
+import arch.x86_64.fpu
+import lib.kstate
+import gfx.fb.fbbase
+import gfx.fb.fbdraw
+
+const S_MODE: u64 = 0x0F8
+
+const S_PWIDTH: u64 = 0x700
+
+const S_PHEIGHT: u64 = 0x708
+
+const S_PPITCH: u64 = 0x710
+
+const S_LUT: u64 = 0x718
+
+const S_ROT: u64 = 0x720 // 0, 90, 180, 270
+
+const S_SCALE: u64 = 0x728
+
+const S_PRESENTS: u64 = 0x730
+
+const S_SAT: u64 = 0x748 // Farbsaettigung in Hundertsteln, 100 = unberuehrt
+
+const S_LOGW: u64 = 0x750
+
+const S_LOGH: u64 = 0x758
+
+const S_UIWANT: u64 = 0x7A8
+
+const S_PRS: u64 = 0x988 // panel red shift (what the card scans); S_RSHIFT is the shift of the back buffer
+
+const S_PGS: u64 = 0x990 // panel green shift
+
+const S_PBS: u64 = 0x998 // panel blue shift
+
+const M_NOHIDSKIP: u64 = 8589934592 // "nohidskip" -- a hidden window's repaint damages the screen again, as before (counter-proof)
+
+const M_NODIFF: u64 = 4294967296 // "nodiff" -- write whole rectangles to the card, as before (counter-proof of tools/vboxlag)
+
+const SCALE_ASPECT: u64 = 1
+
+const M_GFX: u64 = 1 // "gfx"      -- Bildschirm an
+
+const M_NODBL: u64 = 2
+
+const M_UC: u64 = 4
+
+const M_BIG: u64 = 8 // "fbbig"    -- 1024x768 statt 800x600
+
+const M_NOCUR: u64 = 16
+
+const M_HOLD: u64 = 32
+
+const M_PATTERN: u64 = 64
+
+const M_USER: u64 = 128 // "fbuser"   -- das Programm in Ring 3 laufen lassen
+
+const M_RES: u64 = 256
+
+const M_WB: u64 = 512 // "fbwb" -- WC ausdruecklich NICHT einschalten
+
+const M_FLIP: u64 = 1024 // "flip"   -- doppelte Hoehe abbilden
+
+const M_NOFLIP: u64 = 2048 // "noflip" -- die Gegenprobe
+
+const M_NOSIMD: u64 = 4096 // "fbnosimd"
+
+// ============================================== RUNDE ECHTHARDWARE-6
+// `fbstreifen` -- DEN STREIFENBETRIEB ERZWINGEN.
+const M_STRIPE: u64 = 8192 // "fbstreifen"
+
+// ===================================================== RUNDE GLAS
+const M_NOGLAS: u64 = 16384
+
+// 04.10.2026 (Dell): `nowinsweep` -- the counter-proof of the dead-window
+// sweep (`kgui.fenster_wache`). With it a window whose process ended stays
+// on the screen, as on the Dell: the start menu is a picture that takes
+// neither click nor key. tools/menualive/run.sh must SEE that without the
+// sweep, or it measured nothing.
+const M_NOSWEEP: u64 = 32768
+
+// `nohltidle` -- the desktop loop spins again instead of waiting for the next
+// interrupt (`sched.idle_wait`): the counter-proof of tools/menualive.
+const M_NOHLT: u64 = 65536
+
+// DELL ROUND 2 (04.10.2026): counter-proofs of tools/fourbugs. `nowinfix`
+// puts back the old window behaviour (title baseline = border + ascent, whole
+// window kept on the work area, cursor only at right/bottom, 4 px top grip,
+// 16 px snap strip); `nozreap` keeps the corpses of ended programs in the
+// task table, as before.
+const M_NOWINFIX: u64 = 131072
+
+const M_NOZREAP: u64 = 262144
+
+// r461 (docs/COMPOSITOR.md S2): `norgn` -- the damage is ONE box again (no list of rectangles). tools/region/run.sh runs the same
+// drehbuch with and without it and demands the same picture: the region is a saving and never a change.
+const M_NORGN: u64 = 524288
+
+// r460: `phases` -- F12 also prints the `wm: phase` line (where the frame time went). Off by default: it is a long serial line.
+const M_PHASES: u64 = 1048576
+
+// r454: `nostrip` -- the server refuses a client title strip (the counter-proof of tools/tabstrip: the file manager keeps its tab row under the title bar)
+const M_NOSTRIP: u64 = 2097152
+
+// COMPOSITOR S3: `noshare` -- windows get no shared buffer (WM_CREATE ignores the memfd): the clients copy with WIG_BLIT as before (counter-proof of tools/comp/shared.sh)
+const M_NOSHARE: u64 = 4194304
+
+// COMPOSITOR S5: `nocomp` -- the window server refuses a compositor (WM_COMP attach fails): the kernel presents every frame itself
+// (the counter-proof of tools/comp/present.sh: with it the program finds no hand-over and its presents stay 0).
+const M_NOCOMP: u64 = 8388608
+
+// COMPOSITOR S5: `nowatch` -- the watchdog is off: a compositor that hangs freezes the screen (the counter-proof of the crash test:
+// without the watchdog the picture must stay frozen, or the take-over measured nothing).
+const M_NOWATCH: u64 = 16777216
+
+// COMPOSITOR r486: `termdump` -- every pulse the terminal's cells go to the serial line (`wm: termgeo` + `wm: termzeile`) even without the diagnostic board:
+// the independent witness of tools/comp/termshare.sh (the cells are the kernel's state, the screenshot comes from the screen device).
+// r5xx: `nocascade` -- new terminal windows keep the old fixed start (counter-proof of tools/term/multi.sh)
+const M_NOCASCADE: u64 = 67108864
+
+// W-DRAG: `nodragbar` -- a lifted (dragged) window is painted WITHOUT frame, title bar and caption buttons, as before the fix (counter-proof of tools/drag/run.sh)
+const M_NODRAGBAR: u64 = 134217728
+
+// W-PRESENT: `fullrows` -- the window server pushes whole screen rows to the card for every frame, as before the fix (counter-proof of
+// tools/present/run.sh: the copy is 3-6 times larger there, so the picture is exposed to the scan-out that much longer)
+const M_FULLROWS: u64 = 268435456
+
+// W-VBLANK: `nobeam` -- never wait for the raster before a copy (counter-proof of tools/vblank/run.sh and the way back if a pipe lies)
+const M_NOBEAM: u64 = 536870912
+
+// W-VBLANK: `keepmarks` -- keep the old rule (drop only marks inside the copied rows); default drops ALL dirty-row marks after the frame's rectangle copies (measured 2.4 MB vs 9.6 MB per copy at 1920x1080)
+const M_KEEPMARKS: u64 = 1073741824
+
+// W-CURSOR: `noshapes` -- the counter-proof of tools/cursor: the pointer is an arrow everywhere (no edge, text, hand or app shape)
+const M_NOSHAPES: u64 = 2147483648
+
+const M_TERMDUMP: u64 = 33554432
+
+// W-WIN11: `nosnap` -- no edge snap while dragging a floating window, no restore when a maximized window is dragged (counter-proof of tools/snap/run.sh)
+const M_MTRRSIM: u64 = 68719476736 // "fbmtrrsim" -- test only: switch MTRRs on with default type UC so the WC range path can be proven in QEMU
+
+const M_MTRRSTRICT: u64 = 137438953472 // "fbmtrrstrict" -- test only: apply the speed-gain check also under fbmtrrsim
+
+const M_NOMTRR: u64 = 34359738368 // "fbnomtrr" -- never program a write-combining MTRR for the framebuffer (counter-proof)
+
+const M_NOSNAP: u64 = 17179869184
+
+const SRC_NONE: u64 = 0
+
+const SRC_MB: u64 = 1 // vom Lader (Multiboot, Flag-Bit 12)
+
+const MB_FB_RPOS: u64 = 110
+
+const MB_FB_GPOS: u64 = 112
+
+const MB_FB_BPOS: u64 = 114
+
+static mut noswz_want: u64 = 0
+
+static mut nopitch_want: u64 = 0
+
+fn init(state: u64, mbi: u64, want_w: u64, want_h: u64,
+    back_ptr: u64, back_bytes: u64, uncached_flag: bool) -> bool {
+    font.load(state + fbbase.FONT_OFF)
+
+    var cur_source: u64 = SRC_NONE
+    var p: u64 = 0
+    var w: u64 = 0
+    var h: u64 = 0
+    var pt: u64 = 0
+    var bp: u64 = 32
+    var rs: u64 = 16
+    var gs: u64 = 8
+    var bs: u64 = 0
+
+    if mbi != 0 {
+        if (kstate.get32(mbi + fbbase.MB_FLAGS) & fbbase.MB_FB_FLAG) != 0 {
+            if kstate.get8(mbi + fbbase.MB_FB_TYPE) == fbbase.MB_FB_RGB {
+                p = __mmio_read64((mbi + fbbase.MB_FB_ADDR) as *mut u64)
+                pt = kstate.get32(mbi + fbbase.MB_FB_PITCH)
+                w = kstate.get32(mbi + fbbase.MB_FB_WIDTH)
+                h = kstate.get32(mbi + fbbase.MB_FB_HEIGHT)
+                bp = kstate.get8(mbi + fbbase.MB_FB_BPP)
+                rs = kstate.get8(mbi + MB_FB_RPOS)
+                gs = kstate.get8(mbi + MB_FB_GPOS)
+                bs = kstate.get8(mbi + MB_FB_BPOS)
+                if p != 0 && w != 0 && h != 0 && bp == 32 {
+                    cur_source = SRC_MB
+                }
+            }
+        }
+    }
+
+    if cur_source == SRC_NONE {
+        if fbdraw.vbe_present() {
+            let lfb: u64 = fbdraw.find_lfb()
+            if lfb != 0 {
+                let gemessen: u64 = fbdraw.vbe_set(want_w, want_h)
+                if gemessen != 0 {
+                    p = lfb
+                    w = want_w
+                    h = want_h
+                    pt = gemessen
+                    bp = 32
+                    rs = 16
+                    gs = 8
+                    bs = 0
+                    cur_source = fbbase.SRC_VBE
+                }
+            }
+        }
+    }
+
+    if cur_source == SRC_NONE {
+        return false
+    }
+
+    if nopitch_want != 0 && pt > w * (bp / 8) {
+        pt = w * (bp / 8)
+    }
+    if pt < w * (bp / 8) {
+        return false
+    }
+
+    let n: u64 = pt * h
+    let blk: u64 = p & (~(fbbase.HUGE_SIZE - 1))
+    let inner: u64 = p - blk
+    var nn: u64 = n
+    if want(state, M_FLIP) && !want(state, M_NOFLIP) {
+        nn = n * 2
+    }
+    var kacheln: u64 = (inner + nn + fbbase.HUGE_SIZE - 1) / fbbase.HUGE_SIZE
+    // RUNDE ZWISCHENSPEICHER: PAT ZUERST, DANN ABBILDEN.
+    var wc_flag: u64 = 0
+    if !uncached_flag && !want(state, M_WB) {
+        if fbdraw.pat_setup(state) {
+            wc_flag = 1
+        }
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_WC, wc_flag)
+    var window: u64 = fbdraw.map_run(state, blk, kacheln, uncached_flag)
+    var streifen: u64 = 0
+    // RUNDE ECHTHARDWARE-6: `fbstreifen` erzwingt Justins Weg.
+    if want(state, M_STRIPE) {
+        window = 0
+    }
+    if window == 0 {
+        if back_ptr == 0 || back_bytes < n {
+            return false
+        }
+        window = fbdraw.map_run(state, blk, 1, uncached_flag)
+        if window == 0 {
+            return false
+        }
+        kacheln = 1
+        streifen = 1
+    }
+
+    if fbbase.pad_wunsch != 0 && w > fbbase.pad_wunsch + 320 {
+        w = w - fbbase.pad_wunsch
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_PHYS, p)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_ADDR, window + inner)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLOCK, blk)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_OFFSET, inner)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_HUGES, kacheln)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_WIDTH, w)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_HEIGHT, h)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_PITCH, pt)
+    kstate.set(state, fbbase.FB_OFF + S_PWIDTH, w)
+    kstate.set(state, fbbase.FB_OFF + S_PHEIGHT, h)
+    kstate.set(state, fbbase.FB_OFF + S_PPITCH, pt)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SLOT0, (window - fbbase.WIN_VIRT) / fbbase.HUGE_SIZE + 1)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_STRIPE, streifen)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SLOTV, window)
+    kstate.set(state, fbbase.FB_OFF + S_LUT, 0)
+    kstate.set(state, fbbase.FB_OFF + S_ROT, 0)
+    kstate.set(state, fbbase.FB_OFF + S_SCALE, fbbase.SCALE_FULL)
+    kstate.set(state, fbbase.FB_OFF + S_SAT, 100)
+    kstate.set(state, fbbase.FB_OFF + S_PRESENTS, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BPP, bp)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BYTES, n)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_MAPPED, kacheln *% fbbase.HUGE_SIZE -% inner)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SOURCE, cur_source)
+    if fbbase.rgb_want != 0 {
+        rs = 0
+        gs = 8
+        bs = 16
+    }
+    kstate.set(state, fbbase.FB_OFF + S_PRS, rs)
+    kstate.set(state, fbbase.FB_OFF + S_PGS, gs)
+    kstate.set(state, fbbase.FB_OFF + S_PBS, bs)
+    if back_ptr != 0 && streifen == 0 && bp == 32 && noswz_want == 0 {
+        rs = 16
+        gs = 8
+        bs = 0
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RSHIFT, rs)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_GSHIFT, gs)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BSHIFT, bs)
+    var us: u64 = kstate.get(state, fbbase.FB_OFF + S_UIWANT)
+    if us == 0 || us > 4 {
+        us = fbdraw.scale_for(w, h)
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_UISCALE, us)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_FSCALE, us)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_COLS, w / (font.GLYPH_W * us))
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_ROWS, h / (font.GLYPH_H * us))
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_UNCACHED, fbdraw.bool_num(uncached_flag))
+
+    if back_ptr != 0 && back_bytes >= n {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_BACK, back_ptr)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_BACKBYTES, back_bytes)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, back_ptr)
+    } else {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_BACK, 0)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, window + inner)
+    }
+
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_FG, fbdraw.rgb(state, 0xC8, 0xD0, 0xD8))
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BG, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CURSOR, 1)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_READY, 1)
+    fbdraw.clear(state, 0)
+    flush(state)
+    return true
+}
+
+fn set_uiscale(state: u64, v: u64) -> bool {
+    if v < 1 || v > 4 {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_UISCALE, v)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_FSCALE, v)
+    relayout(state)
+    fbdraw.home(state)
+    return true
+}
+
+fn geometry_ok(state: u64) -> bool {
+    if !fbdraw.ready(state) {
+        return false
+    }
+    let w: u64 = fbdraw.width(state)
+    let h: u64 = fbdraw.height(state)
+    if w == 0 || h == 0 {
+        return false
+    }
+    if fbdraw.pitch(state) < w * (fbdraw.bpp(state) / 8) {
+        return false
+    }
+    if fbdraw.bytes(state) != panel_pitch(state) * panel_h(state) {
+        return false
+    }
+    if panel_pitch(state) < panel_w(state) * (fbdraw.bpp(state) / 8) {
+        return false
+    }
+    if fbdraw.cols(state) != w / font.GLYPH_W {
+        return false
+    }
+    return fbdraw.rows(state) == h / font.GLYPH_H
+}
+
+//     1280x800    fill=442/1000 Takte je Punkt   fill_a=53929/1000
+//     1920x1080   fill=849/1000                  fill_a=53788/1000
+//     3440x1440   fill=1602/1000                 fill_a=62479/1000
+const SIMD_MIN: u64 = 8
+
+fn simd_ok(state: u64) -> bool {
+    if want(state, M_NOSIMD) {
+        return false
+    }
+    return fpu.enabled(state)
+}
+
+fn hline_a_simd(p0: u64, len: u64, color: u64, a: u64) -> u64 {
+    let four: u64 = len / 4
+    if four == 0 {
+        return 0
+    }
+    var konst: [u64; 8] = [0, 0, 0, 0, 0, 0, 0, 0]
+    let c: u64 = color & 0xFFFFFFFF
+    let ia: u64 = 255 - a
+    let a16: u64 = (a << 48) | (a << 32) | (a << 16) | a
+    let i16: u64 = (ia << 48) | (ia << 32) | (ia << 16) | ia
+    let a128: u64 = (128 << 48) | (128 << 32) | (128 << 16) | 128
+    konst[0] = (c << 32) | c
+    konst[1] = (c << 32) | c
+    konst[2] = a16
+    konst[3] = a16
+    konst[4] = i16
+    konst[5] = i16
+    konst[6] = a128
+    konst[7] = a128
+
+    asm("pxor xmm3,xmm3\nmovdqu xmm4,[rax]\nmovdqu xmm5,[rax+16]\nmovdqu xmm6,[rax+32]\nmovdqu xmm7,[rax+48]\nmovdqa xmm8,xmm4\npunpcklbw xmm4,xmm3\npunpckhbw xmm8,xmm3\npmullw xmm4,xmm5\npmullw xmm8,xmm5",
+        in("rax") (&konst[0]) as u64, clobber("memory"))
+    asm("test rcx,rcx\njz 2f\n1:\nmovdqu xmm0,[rdi]\nmovdqa xmm1,xmm0\npunpcklbw xmm0,xmm3\npunpckhbw xmm1,xmm3\npmullw xmm0,xmm6\npmullw xmm1,xmm6\npaddw xmm0,xmm4\npaddw xmm1,xmm8\npaddw xmm0,xmm7\npaddw xmm1,xmm7\nmovdqa xmm2,xmm0\npsrlw xmm2,8\npaddw xmm0,xmm2\npsrlw xmm0,8\nmovdqa xmm2,xmm1\npsrlw xmm2,8\npaddw xmm1,xmm2\npsrlw xmm1,8\npackuswb xmm0,xmm1\nmovdqu [rdi],xmm0\nadd rdi,16\ndec rcx\njnz 1b\n2:",
+        in("rdi") p0, in("rcx") four,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+    return four * 4
+}
+
+fn hline_a(state: u64, x: u64, y: u64, n: u64, color: u64, a: u64) {
+    if a == 0 || n == 0 {
+        return
+    }
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) || x >= w {
+        return
+    }
+    if y < fbdraw.band_lo(state) {
+        return
+    }
+    var len: u64 = n
+    if x + len > w {
+        len = w - x
+    }
+    if a >= 255 {
+        fbdraw.hline(state, x, y, len, color)
+        return
+    }
+    let ia: u64 = 255 - a
+    let sr: u64 = (color >> 16) & 0xFF
+    let sg: u64 = (color >> 8) & 0xFF
+    let sb: u64 = color & 0xFF
+    var p: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% fbdraw.spot(state, x, y)
+    var k: u64 = 0
+    if simd_ok(state) && len >= SIMD_MIN {
+        let fl: u64 = arch.irq_save()
+        k = hline_a_simd(p, len, color, a)
+        arch.irq_restore(fl)
+        p = p +% k *% 4
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_SIMDPX,
+            kstate.get(state, fbbase.FB_OFF + fbbase.S_SIMDPX) +% k)
+    }
+    while k < len {
+        let alt: u64 = __mmio_read32(p as *mut u32) as u64
+        let r: u64 = fbdraw.mix8((alt >> 16) & 0xFF, sr, a, ia)
+        let g: u64 = fbdraw.mix8((alt >> 8) & 0xFF, sg, a, ia)
+        let b: u64 = fbdraw.mix8(alt & 0xFF, sb, a, ia)
+        __mmio_write32(p as *mut u32, ((r << 16) | (g << 8) | b) as u32)
+        p = p +% 4
+        k = k + 1
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDS,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDS) +% len)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDR,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDR) +% len)
+    fbdraw.dirty_x(state, x, x + len, y, y + 1)
+}
+
+fn fill_a(state: u64, x: u64, y: u64, w: u64, h: u64, color: u64, a: u64) {
+    var row: u64 = 0
+    while row < h {
+        hline_a(state, x, y + row, w, color, a)
+        row = row + 1
+    }
+}
+
+fn glasgrow_aus(state: u64) -> bool {
+    return (mode(state) & M_NOGLAS) != 0
+}
+
+fn winfix_aus(state: u64) -> bool {
+    return (mode(state) & M_NOWINFIX) != 0
+}
+
+fn zreap_aus(state: u64) -> bool {
+    return (mode(state) & M_NOZREAP) != 0
+}
+
+fn nohidskip_an(state: u64) -> bool {
+    return (mode(state) & M_NOHIDSKIP) != 0
+}
+
+fn nodiff_an(state: u64) -> bool {
+    return (mode(state) & M_NODIFF) != 0
+}
+
+// VMSVGA full-update path: switch the diff flush off (whole rectangles to the card) and forget the shadow.
+fn nodiff_force(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + S_MODE, mode(state) | M_NODIFF)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+}
+
+fn phases_an(state: u64) -> bool {
+    return (mode(state) & M_PHASES) != 0
+}
+
+fn beam_trust(state: u64) -> bool {
+    return (mode(state) & M_KEEPMARKS) == 0
+}
+
+fn nobeam_an(state: u64) -> bool {
+    return (mode(state) & M_NOBEAM) != 0
+}
+
+fn fullrows_an(state: u64) -> bool {
+    return (mode(state) & M_FULLROWS) != 0
+}
+
+fn termdump_an(state: u64) -> bool {
+    return (mode(state) & M_TERMDUMP) != 0
+}
+
+fn noshare_an(state: u64) -> bool {
+    return (mode(state) & M_NOSHARE) != 0
+}
+
+fn nocomp_an(state: u64) -> bool {
+    return (mode(state) & M_NOCOMP) != 0
+}
+
+fn nosnap_an(state: u64) -> bool {
+    return (mode(state) & M_NOSNAP) != 0
+}
+
+fn nomtrr_an(state: u64) -> bool {
+    return (mode(state) & M_NOMTRR) != 0
+}
+
+fn mtrrsim_an(state: u64) -> bool {
+    return (mode(state) & M_MTRRSIM) != 0
+}
+
+fn mtrrstrict_an(state: u64) -> bool {
+    return (mode(state) & M_MTRRSTRICT) != 0
+}
+
+fn noshapes_an(state: u64) -> bool {
+    return (mode(state) & M_NOSHAPES) != 0
+}
+
+fn nowatch_an(state: u64) -> bool {
+    return (mode(state) & M_NOWATCH) != 0
+}
+
+fn nocascade_an(state: u64) -> bool {
+    return (mode(state) & M_NOCASCADE) != 0
+}
+
+fn nodragbar_an(state: u64) -> bool {
+    return (mode(state) & M_NODRAGBAR) != 0
+}
+
+fn nostrip_an(state: u64) -> bool {
+    return (mode(state) & M_NOSTRIP) != 0
+}
+
+fn rgn_aus(state: u64) -> bool {
+    return (mode(state) & M_NORGN) != 0
+}
+
+fn hlt_aus(state: u64) -> bool {
+    return (mode(state) & M_NOHLT) != 0
+}
+
+fn sweep_aus(state: u64) -> bool {
+    return (mode(state) & M_NOSWEEP) != 0
+}
+
+fn flush_stripe(state: u64, lo: u64, hi: u64) {
+    if hi > lo {
+        fbdraw.vms_note(state, 0, lo, kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH), hi - lo)
+    }
+    let b: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+    let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_SLOTV)
+    if b == 0 || basis == 0 {
+        return
+    }
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    let uc: bool = kstate.get(state, fbbase.FB_OFF + fbbase.S_UNCACHED) != 0
+    let phys0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PHYS)
+    var off: u64 = lo *% pt
+    let ende: u64 = hi *% pt
+    while off < ende {
+        let p: u64 = phys0 +% off
+        let blk: u64 = p & (~(fbbase.HUGE_SIZE - 1))
+        let inner: u64 = p - blk
+        var n: u64 = fbbase.HUGE_SIZE - inner
+        if n > ende - off {
+            n = ende - off
+        }
+        let fl: u64 = arch.irq_save()
+        if !slot_remap(state, basis, blk, uc) {
+            arch.irq_restore(fl)
+            return
+        }
+        let dst: u64 = basis +% inner
+        let src: u64 = b +% off
+        let worte: u64 = n / 8
+        fbdraw.copy_words(dst, src, worte)
+        var i: u64 = worte * 8
+        while i + 4 <= n {
+            __mmio_write32((dst +% i) as *mut u32,
+                __mmio_read32((src +% i) as *mut u32))
+            i = i + 4
+        }
+        arch.barrier_write()
+        arch.irq_restore(fl)
+        shadow_copy(state, off, n)
+        // RUNDE VIRTIOGPU: der Streifenweg wiegt jeden Block.
+        fbdraw.tx_add(state, n)
+        off = off +% n
+    }
+    arch.barrier_write()
+    fbdraw.nachspuelen(state)
+}
+
+fn flush(state: u64) {
+    let b: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+    if b == 0 {
+        return
+    }
+    if fbdraw.on_vgpu(state) {
+        return
+    }
+
+    if transformed(state) {
+        present(state)
+        return
+    }
+    let flr: u64 = arch.irq_save()
+    var lo: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO)
+    var hi: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, 0)
+    arch.irq_restore(flr)
+    if hi <= lo {
+        return
+    }
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    if hi > h {
+        hi = h
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        flush_stripe(state, lo, hi)
+        kstate.add(state, fbbase.FB_OFF + fbbase.S_FLUSHES, 1)
+        return
+    }
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    fbdraw.vms_note(state, 0, lo, kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH), hi - lo)
+    let von: u64 = lo *% pt
+    let n: u64 = (hi - lo) *% pt
+    // RUNDE VSYNC: dieselbe Weiche wie in `flush_rect`.
+    let dst: u64 = fbdraw.draw_base(state) +% von
+    let src: u64 = b +% von
+    let worte: u64 = n / 8
+    fbdraw.copy_words(dst, src, worte)
+    var i: u64 = worte * 8
+    while i + 4 <= n {
+        __mmio_write32((dst +% i) as *mut u32,
+            __mmio_read32((src +% i) as *mut u32))
+        i = i + 4
+    }
+    shadow_copy(state, von, n)
+    fbdraw.tx_add(state, n)
+    arch.barrier_write()
+    fbdraw.nachspuelen(state)
+    kstate.add(state, fbbase.FB_OFF + fbbase.S_FLUSHES, 1)
+}
+
+fn putc(state: u64, c: u64) {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_READY) == 0 {
+        return
+    }
+    fbdraw.mark(state, false)
+    if c == 10 {
+        fbdraw.nl(state)
+        fbdraw.mark(state, true)
+        flush(state)
+        return
+    }
+    if c == 13 {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+        fbdraw.mark(state, true)
+        return
+    }
+    if c == 8 {
+        let x: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_CX)
+        if x > 0 {
+            kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, x - 1)
+            fbdraw.glyph(state, 32)
+        }
+        fbdraw.mark(state, true)
+        return
+    }
+    if c == 9 {
+        let x: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_CX)
+        var n: u64 = 8 - (x & 7)
+        while n > 0 {
+            fbdraw.glyph(state, 32)
+            fbdraw.advance(state)
+            n = n - 1
+        }
+        fbdraw.mark(state, true)
+        return
+    }
+    fbdraw.glyph(state, c)
+    fbdraw.advance(state)
+    kstate.add(state, fbbase.FB_OFF + fbbase.S_CHARS, 1)
+    fbdraw.mark(state, true)
+}
+
+fn puts(state: u64, p: u64) {
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(p + i)
+        if c == 0 {
+            return
+        }
+        putc(state, c)
+        i = i + 1
+    }
+}
+
+fn text(state: u64, p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        putc(state, kstate.get8(p + i))
+        i = i + 1
+    }
+}
+
+fn echo(c: u8) {
+    let state: u64 = fbdraw.kdata()
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_ECHO) == 0 {
+        return
+    }
+    putc(state, c as u64)
+}
+
+fn parse(state: u64, cmd: u64) {
+    var w_gfx: [u8; 4] = "gfx\0"
+    var w_nodbl: [u8; 6] = "nodbl\0"
+    var w_uc: [u8; 5] = "fbuc\0"
+    var w_big: [u8; 6] = "fbbig\0"
+    var w_nocur: [u8; 9] = "nocursor\0"
+    var w_hold: [u8; 7] = "fbhold\0"
+    var w_pat: [u8; 7] = "fbtest\0"
+    var w_usr: [u8; 7] = "fbuser\0"
+    var w_res: [u8; 7] = "fbres=\0"
+    var w_pad: [u8; 7] = "fbpad=\0"
+    var w_wb: [u8; 5] = "fbwb\0"
+    var w_nosimd: [u8; 9] = "fbnosimd\0"
+    var w_str: [u8; 12] = "fbstreifen\0\0"
+    var w_ngg: [u8; 12] = "noglasgrow\0\0"
+    var w_nsw: [u8; 12] = "nowinsweep\0\0"
+    var w_nhl: [u8; 12] = "nohltidle\0\0\0"
+    var w_nwf: [u8; 10] = "nowinfix\0\0"
+    var w_nzr: [u8; 9] = "nozreap\0\0"
+    var w_nrg: [u8; 6] = "norgn\0"
+    var w_nph: [u8; 7] = "phases\0"
+    var w_ndf: [u8; 7] = "nodiff\0"
+    var w_nhs: [u8; 10] = "nohidskip\0"
+    var w_nst: [u8; 8] = "nostrip\0"
+    var w_nsh: [u8; 8] = "noshare\0"
+    var w_ncp: [u8; 7] = "nocomp\0"
+    var w_nwa: [u8; 8] = "nowatch\0"
+    var w_ncs: [u8; 10] = "nocascade\0"
+    var w_ndb: [u8; 10] = "nodragbar\0"
+    var w_fur: [u8; 9] = "fullrows\0"
+    var w_nbm: [u8; 7] = "nobeam\0"
+    var w_kpm: [u8; 10] = "keepmarks\0"
+    var w_nsp: [u8; 9] = "noshapes "
+    var w_tdp: [u8; 9] = "termdump\0"
+    var w_nsn: [u8; 7] = "nosnap\0"
+    var w_nmt: [u8; 9] = "fbnomtrr\0"
+    var w_msm: [u8; 10] = "fbmtrrsim\0"
+    var w_mst: [u8; 13] = "fbmtrrstrict\0"
+    var m: u64 = 0
+    if cmd != 0 {
+        fbdraw.pad_set(fbdraw.num_after(state, cmd, (&w_pad[0]) as u64, 6))
+        var w_virt: [u8; 8] = "fbvirt=\0"
+        var w_rgbo: [u8; 6] = "fbrgb\0"
+        fbdraw.virt_set(fbdraw.num_after(state, cmd, (&w_virt[0]) as u64, 7))
+        if fbdraw.find(cmd, (&w_rgbo[0]) as u64, 5) != 0 {
+            fbdraw.rgb_set(1)
+        }
+        var w_canon: [u8; 8] = "fbcanon\0"
+        var w_noswz: [u8; 8] = "fbnoswz\0"
+        var w_nopit: [u8; 10] = "fbnopitch\0"
+        if fbdraw.find(cmd, (&w_canon[0]) as u64, 7) != 0 {
+            fbbase.canon_want = 1
+        }
+        if fbdraw.find(cmd, (&w_noswz[0]) as u64, 7) != 0 {
+            noswz_want = 1
+        }
+        if fbdraw.find(cmd, (&w_nopit[0]) as u64, 9) != 0 {
+            nopitch_want = 1
+        }
+        if fbdraw.find(cmd, (&w_gfx[0]) as u64, 3) != 0 {
+            m = m | M_GFX
+        }
+        if fbdraw.find(cmd, (&w_nodbl[0]) as u64, 5) != 0 {
+            m = m | M_NODBL
+        }
+        if fbdraw.find(cmd, (&w_uc[0]) as u64, 4) != 0 {
+            m = m | M_UC
+        }
+        if fbdraw.find(cmd, (&w_wb[0]) as u64, 4) != 0 {
+            m = m | M_WB
+        }
+        if fbdraw.find(cmd, (&w_str[0]) as u64, 10) != 0 {
+            m = m | M_STRIPE
+        }
+        if fbdraw.find(cmd, (&w_ngg[0]) as u64, 10) != 0 {
+            m = m | M_NOGLAS
+        }
+        if fbdraw.find(cmd, (&w_nsw[0]) as u64, 10) != 0 {
+            m = m | M_NOSWEEP
+        }
+        if fbdraw.find(cmd, (&w_nhl[0]) as u64, 9) != 0 {
+            m = m | M_NOHLT
+        }
+        if fbdraw.find(cmd, (&w_nwf[0]) as u64, 8) != 0 {
+            m = m | M_NOWINFIX
+        }
+        if fbdraw.find(cmd, (&w_nzr[0]) as u64, 7) != 0 {
+            m = m | M_NOZREAP
+        }
+        if fbdraw.find(cmd, (&w_nrg[0]) as u64, 5) != 0 {
+            m = m | M_NORGN
+        }
+        if fbdraw.find(cmd, (&w_nph[0]) as u64, 6) != 0 {
+            m = m | M_PHASES
+        }
+        if fbdraw.find(cmd, (&w_ndf[0]) as u64, 6) != 0 {
+            m = m | M_NODIFF
+        }
+        if fbdraw.find(cmd, (&w_nhs[0]) as u64, 9) != 0 {
+            m = m | M_NOHIDSKIP
+        }
+        if fbdraw.find(cmd, (&w_nst[0]) as u64, 7) != 0 {
+            m = m | M_NOSTRIP
+        }
+        if fbdraw.find(cmd, (&w_nsh[0]) as u64, 7) != 0 {
+            m = m | M_NOSHARE
+        }
+        if fbdraw.find(cmd, (&w_ncp[0]) as u64, 6) != 0 {
+            m = m | M_NOCOMP
+        }
+        if fbdraw.find(cmd, (&w_ncs[0]) as u64, 9) != 0 {
+            m = m | M_NOCASCADE
+        }
+        if fbdraw.find(cmd, (&w_ndb[0]) as u64, 9) != 0 {
+            m = m | M_NODRAGBAR
+        }
+        if fbdraw.find(cmd, (&w_fur[0]) as u64, 8) != 0 {
+            m = m | M_FULLROWS
+        }
+        if fbdraw.find(cmd, (&w_nbm[0]) as u64, 6) != 0 {
+            m = m | M_NOBEAM
+        }
+        if fbdraw.find(cmd, (&w_kpm[0]) as u64, 9) != 0 {
+            m = m | M_KEEPMARKS
+        }
+        if fbdraw.find(cmd, (&w_nsp[0]) as u64, 8) != 0 {
+            m = m | M_NOSHAPES
+        }
+        if fbdraw.find(cmd, (&w_nwa[0]) as u64, 7) != 0 {
+            m = m | M_NOWATCH
+        }
+        if fbdraw.find(cmd, (&w_tdp[0]) as u64, 8) != 0 {
+            m = m | M_TERMDUMP
+        }
+        if fbdraw.find(cmd, (&w_nsn[0]) as u64, 6) != 0 {
+            m = m | M_NOSNAP
+        }
+        if fbdraw.find(cmd, (&w_nmt[0]) as u64, 8) != 0 {
+            m = m | M_NOMTRR
+        }
+        if fbdraw.find(cmd, (&w_msm[0]) as u64, 9) != 0 {
+            m = m | M_MTRRSIM
+        }
+        if fbdraw.find(cmd, (&w_mst[0]) as u64, 12) != 0 {
+            m = m | M_MTRRSTRICT
+        }
+        if fbdraw.find(cmd, (&w_nosimd[0]) as u64, 8) != 0 {
+            m = m | M_NOSIMD
+        }
+        if fbdraw.find(cmd, (&w_big[0]) as u64, 5) != 0 {
+            m = m | M_BIG
+        }
+        if fbdraw.find(cmd, (&w_nocur[0]) as u64, 8) != 0 {
+            m = m | M_NOCUR
+        }
+        if fbdraw.find(cmd, (&w_hold[0]) as u64, 6) != 0 {
+            m = m | M_HOLD
+        }
+        if fbdraw.find(cmd, (&w_pat[0]) as u64, 6) != 0 {
+            m = m | M_PATTERN
+        }
+        if fbdraw.find(cmd, (&w_usr[0]) as u64, 6) != 0 {
+            m = m | M_USER
+        }
+        var w_flip: [u8; 5] = "flip\0"
+        var w_nofl: [u8; 7] = "noflip\0"
+        if fbdraw.find(cmd, (&w_flip[0]) as u64, 4) != 0 {
+            m = m | M_FLIP
+        }
+        if fbdraw.find(cmd, (&w_nofl[0]) as u64, 6) != 0 {
+            m = m | M_NOFLIP
+        }
+    }
+    if fbdraw.find(cmd, (&w_res[0]) as u64, 6) != 0 {
+        if fbdraw.parse_zahlenpaar(state, cmd, (&w_res[0]) as u64, 6) {
+            m = m | M_RES
+        }
+    }
+    if cmd != 0 {
+        var w_ui: [u8; 9] = "uiscale=\0"
+        let a: u64 = fbdraw.find(cmd, (&w_ui[0]) as u64, 8)
+        if a != 0 {
+            let v: u64 = fbdraw.num_at(a + 8)
+            if v >= 1 && v <= 4 {
+                kstate.set(state, fbbase.FB_OFF + S_UIWANT, v)
+            }
+        }
+    }
+    kstate.set(state, fbbase.FB_OFF + S_MODE, m)
+}
+
+fn mode(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_MODE)
+}
+
+fn want(state: u64, bit: u64) -> bool {
+    return (kstate.get(state, fbbase.FB_OFF + S_MODE) & bit) != 0
+}
+
+fn set_backbuf(state: u64, b: u64, n: u64) {
+    // vboxlag: a new back buffer of another size: the shadow no longer fits (a mode change leaves the diff off)
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_SHBYTES) < n {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_SHADOW, 0)
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BACK, b)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BACKBYTES, n)
+    relayout(state)
+}
+
+fn back_bytes(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BACKBYTES)
+}
+
+fn set_back(state: u64, b: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+    if b == 0 && kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        return
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BACK, b)
+    if b != 0 {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, b)
+    } else {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR))
+    }
+    fbdraw.dirty_all(state)
+}
+
+// ---------------------------------------------------------- die Zusagen
+
+fn failbits(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_FAIL)
+}
+
+fn pass_ok(state: u64, nr: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_FAIL,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_FAIL) & ~(1 << nr))
+}
+
+fn selftest_max() -> u64 {
+    return 13
+}
+
+// ==================================================== RUNDE DISPLAY
+
+fn win_slots() -> u64 {
+    return fbbase.WIN_SLOTS
+}
+
+fn huge_size() -> u64 {
+    return fbbase.HUGE_SIZE
+}
+
+fn slot0(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_SLOT0)
+    if v == 0 {
+        return fbbase.WIN_SLOTS
+    }
+    return v - 1
+}
+
+fn free_slots(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < fbbase.WIN_SLOTS {
+        if fbdraw.slot_used(state, i) == 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn map_span(p: u64, n: u64) -> u64 {
+    let blk: u64 = p & (~(fbbase.HUGE_SIZE - 1))
+    let inner: u64 = p - blk
+    return (inner + n + fbbase.HUGE_SIZE - 1) / fbbase.HUGE_SIZE
+}
+
+fn unmap(state: u64) {
+    let s0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_SLOT0)
+    if s0 == 0 {
+        return
+    }
+    let first: u64 = s0 - 1
+    let n: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HUGES)
+    let pd: u64 = fbdraw.kernel_pd(state)
+    if pd == 0 {
+        return
+    }
+    var j: u64 = 0
+    while j < n {
+        if first + j < fbbase.WIN_SLOTS {
+            __mmio_write64((pd + (fbbase.WIN_FIRST + first + j) * 8) as *mut u64, 0)
+            kstate.set(state, fbbase.WIN_LIST + (first + j) * 8, 0)
+        }
+        j = j + 1
+    }
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SLOT0, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_ADDR, 0)
+}
+
+fn remap(state: u64, p: u64, w: u64, h: u64, pt: u64, uncached_flag: bool) -> bool {
+    if w == 0 || h == 0 || p == 0 {
+        return false
+    }
+    if pt < w * 4 {
+        return false
+    }
+    let n: u64 = pt * h
+    let blk: u64 = p & (~(fbbase.HUGE_SIZE - 1))
+    let inner: u64 = p - blk
+    let kacheln: u64 = (inner + n + fbbase.HUGE_SIZE - 1) / fbbase.HUGE_SIZE
+    if kacheln > fbbase.WIN_SLOTS {
+        return false
+    }
+    unmap(state)
+    let window: u64 = fbdraw.map_run(state, blk, kacheln, uncached_flag)
+    if window == 0 {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_PHYS, p)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_ADDR, window + inner)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLOCK, blk)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_OFFSET, inner)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_HUGES, kacheln)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SLOT0, (window - fbbase.WIN_VIRT) / fbbase.HUGE_SIZE + 1)
+    kstate.set(state, fbbase.FB_OFF + S_PWIDTH, w)
+    kstate.set(state, fbbase.FB_OFF + S_PHEIGHT, h)
+    kstate.set(state, fbbase.FB_OFF + S_PPITCH, pt)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BYTES, n)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_UNCACHED, fbdraw.bool_num(uncached_flag))
+    relayout(state)
+    return true
+}
+
+fn slot_remap(state: u64, virt: u64, block_val: u64, uncached_val: bool) -> bool {
+    if virt < fbbase.WIN_VIRT {
+        return false
+    }
+    let i: u64 = (virt - fbbase.WIN_VIRT) / fbbase.HUGE_SIZE
+    if i >= fbbase.WIN_SLOTS {
+        return false
+    }
+    let pd: u64 = fbdraw.kernel_pd(state)
+    if pd == 0 {
+        return false
+    }
+    let bits: u64 = fbdraw.fb_bits(state, uncached_val)
+    // W-PRESENT: ALREADY POINTING THERE -- NOTHING TO DO. The rectangle copy remaps once per ROW; without this every row paid a page
+    // table write, a full TLB flush (CR3) and a write-combining drain, 600 times for a window. The entry is read back (not a list kept
+    // on the side), so an interrupt that moved the slot in between is seen. The accessed/dirty bits (0x20, 0x40) are set by the machine.
+    let cur: u64 = __mmio_read64((pd + (fbbase.WIN_FIRST + i) * 8) as *mut u64)
+    if (cur & (~(0x60 as u64))) == ((block_val | bits) & (~(0x60 as u64))) {
+        return true
+    }
+    arch.barrier_write()
+    __mmio_write64((pd + (fbbase.WIN_FIRST + i) * 8) as *mut u64, block_val | bits)
+    kstate.set(state, fbbase.WIN_LIST + i * 8, block_val + 1)
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    return true
+}
+
+fn unmap_slot(state: u64, virt: u64) {
+    if virt < fbbase.WIN_VIRT {
+        return
+    }
+    let i: u64 = (virt - fbbase.WIN_VIRT) / fbbase.HUGE_SIZE
+    if i >= fbbase.WIN_SLOTS {
+        return
+    }
+    let pd: u64 = fbdraw.kernel_pd(state)
+    if pd == 0 {
+        return
+    }
+    arch.barrier_write()
+    __mmio_write64((pd + (fbbase.WIN_FIRST + i) * 8) as *mut u64, 0)
+    kstate.set(state, fbbase.WIN_LIST + i * 8, 0)
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+}
+
+fn longest_run(state: u64) -> u64 {
+    let s0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_SLOT0)
+    var first: u64 = fbbase.WIN_SLOTS
+    var n_fb: u64 = 0
+    if s0 != 0 {
+        first = s0 - 1
+        n_fb = kstate.get(state, fbbase.FB_OFF + fbbase.S_HUGES)
+    }
+    var best: u64 = 0
+    var lauf: u64 = 0
+    var i: u64 = 0
+    while i < fbbase.WIN_SLOTS {
+        var free: bool = fbdraw.slot_used(state, i) == 0
+        if i >= first && i < first + n_fb {
+            free = true
+        }
+        if free {
+            lauf = lauf + 1
+            if lauf > best {
+                best = lauf
+            }
+        } else {
+            lauf = 0
+        }
+        i = i + 1
+    }
+    return best
+}
+
+fn panel_w(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+}
+
+fn panel_h(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+}
+
+fn panel_pitch(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_PPITCH)
+}
+
+fn rotation(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_ROT)
+}
+
+fn scale(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_SCALE)
+}
+
+fn lut(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_LUT)
+}
+
+fn saturation(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_SAT)
+}
+
+fn presents(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_PRESENTS)
+}
+
+fn swizzled(state: u64) -> bool {
+    if kstate.get(state, fbbase.FB_OFF + S_PRS) != kstate.get(state, fbbase.FB_OFF + fbbase.S_RSHIFT) {
+        return true
+    }
+    if kstate.get(state, fbbase.FB_OFF + S_PGS) != kstate.get(state, fbbase.FB_OFF + fbbase.S_GSHIFT) {
+        return true
+    }
+    return kstate.get(state, fbbase.FB_OFF + S_PBS) != kstate.get(state, fbbase.FB_OFF + fbbase.S_BSHIFT)
+}
+
+fn panel_order(state: u64) -> u64 {
+    let r: u64 = kstate.get(state, fbbase.FB_OFF + S_PRS)
+    let g: u64 = kstate.get(state, fbbase.FB_OFF + S_PGS)
+    let b: u64 = kstate.get(state, fbbase.FB_OFF + S_PBS)
+    if r == 16 && g == 8 && b == 0 {
+        return 1
+    }
+    if r == 0 && g == 8 && b == 16 {
+        return 2
+    }
+    return 3
+}
+
+fn transformed(state: u64) -> bool {
+    if kstate.get(state, fbbase.FB_OFF + S_ROT) != 0 {
+        return true
+    }
+    if swizzled(state) {
+        return true
+    }
+    if kstate.get(state, fbbase.FB_OFF + S_LUT) != 0 {
+        return true
+    }
+    if kstate.get(state, fbbase.FB_OFF + S_SAT) != 100 {
+        return true
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+        != kstate.get(state, fbbase.FB_OFF + S_PWIDTH) {
+        return true
+    }
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+        != kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+}
+
+fn relayout(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+    let pw: u64 = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+    let rot: u64 = kstate.get(state, fbbase.FB_OFF + S_ROT)
+    var lw: u64 = kstate.get(state, fbbase.FB_OFF + S_LOGW)
+    var lh: u64 = kstate.get(state, fbbase.FB_OFF + S_LOGH)
+    if lw == 0 || lh == 0 {
+        lw = pw
+        lh = ph
+        if rot == 90 || rot == 270 {
+            lw = ph
+            lh = pw
+        }
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_WIDTH, lw)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_HEIGHT, lh)
+    let back_val: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+    if transformed(state) {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_PITCH, lw * 4)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, back_val)
+    } else {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_PITCH,
+            kstate.get(state, fbbase.FB_OFF + S_PPITCH))
+        if back_val != 0 {
+            kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, back_val)
+        } else {
+            kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW,
+                kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR))
+        }
+    }
+    let fs: u64 = fbdraw.fscale(state)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_COLS, lw / (font.GLYPH_W * fs))
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_ROWS, lh / (font.GLYPH_H * fs))
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_CX) >= lw / (font.GLYPH_W * fs) {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_CY) >= lh / (font.GLYPH_H * fs) {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, 0)
+    }
+    fbdraw.dirty_all(state)
+}
+
+fn logical_ok(state: u64, lw: u64, lh: u64) -> bool {
+    let back_val: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+    if back_val == 0 {
+        return false
+    }
+    if lw == 0 || lh == 0 {
+        return false
+    }
+    if lw > 16384 || lh > 16384 {
+        return false
+    }
+    return lw * 4 * lh <= kstate.get(state, fbbase.FB_OFF + fbbase.S_BACKBYTES)
+}
+
+fn dims_at_rotation(state: u64, rot: u64) -> u64 {
+    var lw: u64 = kstate.get(state, fbbase.FB_OFF + S_LOGW)
+    var lh: u64 = kstate.get(state, fbbase.FB_OFF + S_LOGH)
+    if lw == 0 || lh == 0 {
+        lw = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+        lh = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+        if rot == 90 || rot == 270 {
+            lw = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+            lh = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+        }
+    }
+    return (lw << 32) | lh
+}
+
+fn set_rotation(state: u64, rot: u64) -> bool {
+    if rot != 0 && rot != 90 && rot != 180 && rot != 270 {
+        return false
+    }
+    if rot != 0 {
+        let m: u64 = dims_at_rotation(state, rot)
+        if !logical_ok(state, m >> 32, m & 0xFFFFFFFF) {
+            return false
+        }
+    }
+    kstate.set(state, fbbase.FB_OFF + S_ROT, rot)
+    relayout(state)
+    return true
+}
+
+// ------------------------------------------------------------------
+// INPUT FOLLOWS THE OUTPUT (rotation 0/90/180/270 + scale mode).
+// `present` maps a logical pixel (lx, ly) to a panel pixel; a tablet or
+// touch screen reports PANEL positions, and the hardware cursor is
+// placed in PANEL pixels. These two functions are the same maths as
+// `present`, forwards and backwards, so a click lands on the button
+// that is drawn. Results are packed: x << 32 | y.
+// ------------------------------------------------------------------
+
+// Size of the rotated image on the panel (dw << 32 | dh) -- the same
+// rules as the head of `present`.
+fn fit_dims(state: u64) -> u64 {
+    let pw: u64 = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+    let lw: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let lh: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let rot: u64 = kstate.get(state, fbbase.FB_OFF + S_ROT)
+    var rw: u64 = lw
+    var rh: u64 = lh
+    if rot == 90 || rot == 270 {
+        rw = lh
+        rh = lw
+    }
+    let art: u64 = kstate.get(state, fbbase.FB_OFF + S_SCALE)
+    var dw: u64 = pw
+    var dh: u64 = ph
+    if art == fbbase.SCALE_NONE {
+        dw = fbdraw.min2(rw, pw)
+        dh = fbdraw.min2(rh, ph)
+    } else if art == SCALE_ASPECT && rw != 0 && rh != 0 {
+        if rw * ph <= pw * rh {
+            dh = ph
+            dw = rw * ph / rh
+        } else {
+            dw = pw
+            dh = rh * pw / rw
+        }
+        if dw == 0 {
+            dw = 1
+        }
+        if dh == 0 {
+            dh = 1
+        }
+        if dw > pw {
+            dw = pw
+        }
+        if dh > ph {
+            dh = ph
+        }
+    }
+    return (dw << 32) | dh
+}
+
+// A panel pixel -> the logical pixel drawn there.
+fn panel_to_logical(state: u64, px: u64, py: u64) -> u64 {
+    let pw: u64 = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+    let lw: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let lh: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let rot: u64 = kstate.get(state, fbbase.FB_OFF + S_ROT)
+    let fd: u64 = fit_dims(state)
+    let dw: u64 = fd >> 32
+    let dh: u64 = fd & 0xFFFFFFFF
+    if pw == 0 || ph == 0 || lw == 0 || lh == 0 || dw == 0 || dh == 0 {
+        return (px << 32) | py
+    }
+    var rw: u64 = lw
+    var rh: u64 = lh
+    if rot == 90 || rot == 270 {
+        rw = lh
+        rh = lw
+    }
+    let dx0: u64 = (pw - dw) / 2
+    let dy0: u64 = (ph - dh) / 2
+    var ix: u64 = 0
+    if px > dx0 {
+        ix = px - dx0
+    }
+    var iy: u64 = 0
+    if py > dy0 {
+        iy = py - dy0
+    }
+    if ix >= dw {
+        ix = dw - 1
+    }
+    if iy >= dh {
+        iy = dh - 1
+    }
+    var ux: u64 = (ix * ((rw << 16) / dw)) >> 16
+    var uy: u64 = (iy * ((rh << 16) / dh)) >> 16
+    if ux >= rw {
+        ux = rw - 1
+    }
+    if uy >= rh {
+        uy = rh - 1
+    }
+    var lx: u64 = ux
+    var ly: u64 = uy
+    if rot == 180 {
+        lx = lw - 1 - ux
+        ly = lh - 1 - uy
+    } else if rot == 90 {
+        lx = uy
+        ly = lh - 1 - ux
+    } else if rot == 270 {
+        lx = lw - 1 - uy
+        ly = ux
+    }
+    return (lx << 32) | ly
+}
+
+// A logical pixel -> the panel pixel it is drawn on (centre of the cell).
+fn logical_to_panel(state: u64, lx0: u64, ly0: u64) -> u64 {
+    let pw: u64 = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+    let lw: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let lh: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let rot: u64 = kstate.get(state, fbbase.FB_OFF + S_ROT)
+    let fd: u64 = fit_dims(state)
+    let dw: u64 = fd >> 32
+    let dh: u64 = fd & 0xFFFFFFFF
+    if pw == 0 || ph == 0 || lw == 0 || lh == 0 || dw == 0 || dh == 0 {
+        return (lx0 << 32) | ly0
+    }
+    var lx: u64 = lx0
+    var ly: u64 = ly0
+    if lx >= lw {
+        lx = lw - 1
+    }
+    if ly >= lh {
+        ly = lh - 1
+    }
+    var rw: u64 = lw
+    var rh: u64 = lh
+    var ux: u64 = lx
+    var uy: u64 = ly
+    if rot == 180 {
+        ux = lw - 1 - lx
+        uy = lh - 1 - ly
+    } else if rot == 90 {
+        rw = lh
+        rh = lw
+        ux = lh - 1 - ly
+        uy = lx
+    } else if rot == 270 {
+        rw = lh
+        rh = lw
+        ux = ly
+        uy = lw - 1 - lx
+    }
+    let dx0: u64 = (pw - dw) / 2
+    let dy0: u64 = (ph - dh) / 2
+    var px: u64 = dx0 + ((2 * ux + 1) * dw) / (2 * rw)
+    var py: u64 = dy0 + ((2 * uy + 1) * dh) / (2 * rh)
+    if px >= dx0 + dw {
+        px = dx0 + dw - 1
+    }
+    if py >= dy0 + dh {
+        py = dy0 + dh - 1
+    }
+    return (px << 32) | py
+}
+
+fn set_logical(state: u64, lw: u64, lh: u64) -> bool {
+    if lw == 0 && lh == 0 {
+        kstate.set(state, fbbase.FB_OFF + S_LOGW, 0)
+        kstate.set(state, fbbase.FB_OFF + S_LOGH, 0)
+        relayout(state)
+        return true
+    }
+    if !logical_ok(state, lw, lh) {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + S_LOGW, lw)
+    kstate.set(state, fbbase.FB_OFF + S_LOGH, lh)
+    relayout(state)
+    return true
+}
+
+fn set_scale(state: u64, s: u64) -> bool {
+    if s > fbbase.SCALE_NONE {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + S_SCALE, s)
+    fbdraw.dirty_all(state)
+    return true
+}
+
+fn set_lut(state: u64, p: u64) {
+    kstate.set(state, fbbase.FB_OFF + S_LUT, p)
+    relayout(state)
+}
+
+fn set_saturation(state: u64, s: u64) -> bool {
+    if s > 200 {
+        return false
+    }
+    if s != 100 && kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK) == 0 {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + S_SAT, s)
+    relayout(state)
+    return true
+}
+
+fn panel_hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
+    if n == 0 {
+        return
+    }
+    let addr_val: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    var p: u64 = addr_val +% y *% kstate.get(state, fbbase.FB_OFF + S_PPITCH) +% x *% 4
+    var len: u64 = n
+    if (p & 7) != 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
+    }
+    let paare: u64 = len / 2
+    fbdraw.fill_words(p, fbdraw.twice(color), paare)
+    p = p +% paare *% 8
+    len = len - paare * 2
+    while len > 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
+    }
+}
+
+fn lut_color(state: u64, tab: u64, c: u64) -> u64 {
+    let rs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_RSHIFT)
+    let gs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_GSHIFT)
+    let bs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BSHIFT)
+    let r: u64 = kstate.get8(tab + ((c >> rs) & 0xFF))
+    let g: u64 = kstate.get8(tab + 256 + ((c >> gs) & 0xFF))
+    let b: u64 = kstate.get8(tab + 512 + ((c >> bs) & 0xFF))
+    return (r << rs) | (g << gs) | (b << bs)
+}
+
+fn sat_channel(v: u64, grau: u64, s: u64) -> u64 {
+    if v >= grau {
+        let d: u64 = (v - grau) * s / 100
+        if grau + d > 255 {
+            return 255
+        }
+        return grau + d
+    }
+    let d: u64 = (grau - v) * s / 100
+    if d >= grau {
+        return 0
+    }
+    return grau - d
+}
+
+fn sat_color(state: u64, c: u64, s: u64) -> u64 {
+    let rs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_RSHIFT)
+    let gs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_GSHIFT)
+    let bs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BSHIFT)
+    let r: u64 = (c >> rs) & 0xFF
+    let g: u64 = (c >> gs) & 0xFF
+    let b: u64 = (c >> bs) & 0xFF
+    let grau: u64 = (77 * r + 150 * g + 29 * b) >> 8
+    return (sat_channel(r, grau, s) << rs) | (sat_channel(g, grau, s) << gs)
+        | (sat_channel(b, grau, s) << bs)
+}
+
+fn present(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+    fbdraw.vms_note(state, 0, 0, kstate.get(state, fbbase.FB_OFF + S_PWIDTH), kstate.get(state, fbbase.FB_OFF + S_PHEIGHT))
+    let b: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+    if b == 0 {
+        return
+    }
+    let addr_val: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if addr_val == 0 {
+        return
+    }
+    let pw: u64 = kstate.get(state, fbbase.FB_OFF + S_PWIDTH)
+    let ph: u64 = kstate.get(state, fbbase.FB_OFF + S_PHEIGHT)
+    let ppt: u64 = kstate.get(state, fbbase.FB_OFF + S_PPITCH)
+    let lw: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let lh: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let lpt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    let rot: u64 = kstate.get(state, fbbase.FB_OFF + S_ROT)
+    let tab: u64 = kstate.get(state, fbbase.FB_OFF + S_LUT)
+    let sat: u64 = kstate.get(state, fbbase.FB_OFF + S_SAT)
+    if pw == 0 || ph == 0 || lw == 0 || lh == 0 {
+        return
+    }
+
+    var rw: u64 = lw
+    var rh: u64 = lh
+    if rot == 90 || rot == 270 {
+        rw = lh
+        rh = lw
+    }
+
+    let art: u64 = kstate.get(state, fbbase.FB_OFF + S_SCALE)
+    var dw: u64 = pw
+    var dh: u64 = ph
+    if art == fbbase.SCALE_NONE {
+        dw = fbdraw.min2(rw, pw)
+        dh = fbdraw.min2(rh, ph)
+    } else if art == SCALE_ASPECT {
+        if rw * ph <= pw * rh {
+            dh = ph
+            dw = rw * ph / rh
+        } else {
+            dw = pw
+            dh = rh * pw / rw
+        }
+        if dw == 0 {
+            dw = 1
+        }
+        if dh == 0 {
+            dh = 1
+        }
+        if dw > pw {
+            dw = pw
+        }
+        if dh > ph {
+            dh = ph
+        }
+    }
+    let dx0: u64 = (pw - dw) / 2
+    let dy0: u64 = (ph - dh) / 2
+
+    if dw != pw || dh != ph {
+        var yy: u64 = 0
+        while yy < ph {
+            if yy < dy0 || yy >= dy0 + dh {
+                panel_hline(state, 0, yy, pw, 0)
+            } else {
+                panel_hline(state, 0, yy, dx0, 0)
+                panel_hline(state, dx0 + dw, yy, pw - dx0 - dw, 0)
+            }
+            yy = yy + 1
+        }
+    }
+
+    let stepx: u64 = (rw << 16) / dw
+    let stepy: u64 = (rh << 16) / dh
+
+    let rs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_RSHIFT)
+    let gs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_GSHIFT)
+    let bs: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BSHIFT)
+    let ors: u64 = kstate.get(state, fbbase.FB_OFF + S_PRS)
+    let ogs: u64 = kstate.get(state, fbbase.FB_OFF + S_PGS)
+    let obs: u64 = kstate.get(state, fbbase.FB_OFF + S_PBS)
+    let swz: bool = swizzled(state)
+    let tabr: u64 = tab
+    let tabg: u64 = tab + 256
+    let tabb: u64 = tab + 512
+
+    if rot == 0 && dw == rw && dh == rh && (tab != 0 || swz) && sat == 100 {
+        var lo: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO)
+        var hi: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI)
+        if hi > lh {
+            hi = lh
+        }
+        if hi > lo {
+            var y: u64 = lo
+            while y < hi {
+                var src: u64 = b +% y *% lpt
+                var dst: u64 = addr_val +% (dy0 + y) *% ppt +% dx0 *% 4
+                var x: u64 = 0
+                while x < dw {
+                    let c: u64 = __mmio_read32(src as *mut u32) as u64
+                    var v: u64 = 0
+                    if tab != 0 {
+                        v = ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
+                                as u64) << ors)
+                            | ((__mmio_read8((tabg + ((c >> gs) & 0xFF))
+                                as *mut u8) as u64) << ogs)
+                            | ((__mmio_read8((tabb + ((c >> bs) & 0xFF))
+                                as *mut u8) as u64) << obs)
+                    } else {
+                        v = (((c >> rs) & 0xFF) << ors)
+                            | (((c >> gs) & 0xFF) << ogs)
+                            | (((c >> bs) & 0xFF) << obs)
+                    }
+                    __mmio_write32(dst as *mut u32, v as u32)
+                    src = src +% 4
+                    dst = dst +% 4
+                    x = x + 1
+                }
+                y = y + 1
+            }
+        }
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, 0)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, 0)
+        kstate.add(state, fbbase.FB_OFF + fbbase.S_FLUSHES, 1)
+        kstate.add(state, fbbase.FB_OFF + S_PRESENTS, 1)
+        fbdraw.tx_add(state, kstate.get(state, fbbase.FB_OFF + S_PPITCH)
+            *% kstate.get(state, fbbase.FB_OFF + S_PHEIGHT))
+        return
+    }
+
+    var py: u64 = 0
+    while py < dh {
+        let ry: u64 = (py * stepy) >> 16
+        var basis: u64 = 0
+        var einheit: u64 = 4
+        var bound: u64 = lw
+        var rueck: bool = false
+        if rot == 0 {
+            basis = b +% ry *% lpt
+        } else if rot == 180 {
+            basis = b +% (lh - 1 - ry) *% lpt
+            rueck = true
+        } else if rot == 90 {
+            basis = b +% ry *% 4
+            einheit = lpt
+            bound = lh
+            rueck = true
+        } else {
+            basis = b +% (lw - 1 - ry) *% 4
+            einheit = lpt
+            bound = lh
+        }
+        var dst: u64 = addr_val +% (dy0 + py) *% ppt +% dx0 *% 4
+        var px: u64 = 0
+        if tab == 0 && sat == 100 && !swz {
+            while px < dw {
+                var idx: u64 = (px * stepx) >> 16
+                if idx >= bound {
+                    idx = bound - 1
+                }
+                if rueck {
+                    idx = bound - 1 - idx
+                }
+                __mmio_write32(dst as *mut u32,
+                    __mmio_read32((basis +% idx *% einheit) as *mut u32))
+                dst = dst +% 4
+                px = px + 1
+            }
+        } else if sat == 100 {
+            while px < dw {
+                var idx: u64 = (px * stepx) >> 16
+                if idx >= bound {
+                    idx = bound - 1
+                }
+                if rueck {
+                    idx = bound - 1 - idx
+                }
+                let c: u64 = __mmio_read32((basis +% idx *% einheit)
+                    as *mut u32) as u64
+                var v: u64 = 0
+                if tab != 0 {
+                    v = ((__mmio_read8((tabr + ((c >> rs) & 0xFF)) as *mut u8)
+                            as u64) << ors)
+                        | ((__mmio_read8((tabg + ((c >> gs) & 0xFF)) as *mut u8)
+                            as u64) << ogs)
+                        | ((__mmio_read8((tabb + ((c >> bs) & 0xFF)) as *mut u8)
+                            as u64) << obs)
+                } else {
+                    v = (((c >> rs) & 0xFF) << ors)
+                        | (((c >> gs) & 0xFF) << ogs)
+                        | (((c >> bs) & 0xFF) << obs)
+                }
+                __mmio_write32(dst as *mut u32, v as u32)
+                dst = dst +% 4
+                px = px + 1
+            }
+        } else {
+            while px < dw {
+                var idx: u64 = (px * stepx) >> 16
+                if idx >= bound {
+                    idx = bound - 1
+                }
+                if rueck {
+                    idx = bound - 1 - idx
+                }
+                var c: u64 = __mmio_read32((basis +% idx *% einheit)
+                    as *mut u32) as u64
+                if tab != 0 {
+                    c = ((__mmio_read8((tabr + ((c >> rs) & 0xFF))
+                        as *mut u8) as u64) << rs)
+                        | ((__mmio_read8((tabg + ((c >> gs) & 0xFF))
+                        as *mut u8) as u64) << gs)
+                        | ((__mmio_read8((tabb + ((c >> bs) & 0xFF))
+                        as *mut u8) as u64) << bs)
+                }
+                let r: u64 = (c >> rs) & 0xFF
+                let gr: u64 = (c >> gs) & 0xFF
+                let bl: u64 = (c >> bs) & 0xFF
+                let grau: u64 = (77 * r + 150 * gr + 29 * bl) >> 8
+                let v: u64 = (sat_channel(r, grau, sat) << ors)
+                    | (sat_channel(gr, grau, sat) << ogs)
+                    | (sat_channel(bl, grau, sat) << obs)
+                __mmio_write32(dst as *mut u32, v as u32)
+                dst = dst +% 4
+                px = px + 1
+            }
+        }
+        py = py + 1
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, 0)
+    kstate.add(state, fbbase.FB_OFF + fbbase.S_FLUSHES, 1)
+    kstate.add(state, fbbase.FB_OFF + S_PRESENTS, 1)
+    fbdraw.tx_add(state, kstate.get(state, fbbase.FB_OFF + S_PPITCH)
+        *% kstate.get(state, fbbase.FB_OFF + S_PHEIGHT))
+}
+
+fn selftest2_max() -> u64 {
+    return 11
+}
+
+fn selftest3(state: u64) -> u64 {
+    if !fbdraw.ready(state) {
+        return 0
+    }
+    var n: u64 = 0
+    let weiss: u64 = fbdraw.rgb(state, 0xFF, 0xFF, 0xFF)
+    let schwarz: u64 = fbdraw.rgb(state, 0, 0, 0)
+    let rot: u64 = fbdraw.rgb(state, 0xFF, 0, 0)
+
+    if fbdraw.blend(state, weiss, schwarz, 0) == weiss {
+        n = n + 1
+    }
+    if fbdraw.blend(state, weiss, schwarz, 255) == schwarz {
+        n = n + 1
+    }
+    if fbdraw.blend(state, weiss, schwarz, 128) == fbdraw.rgb(state, 127, 127, 127) {
+        n = n + 1
+    }
+    if fbdraw.blend(state, schwarz, weiss, 127) == fbdraw.rgb(state, 127, 127, 127) {
+        n = n + 1
+    }
+    let h: u64 = fbdraw.blend(state, schwarz, rot, 128)
+    if h == fbdraw.rgb(state, 128, 0, 0) {
+        n = n + 1
+    }
+    let blau: u64 = fbdraw.rgb(state, 0, 0, 0xFF)
+    let m: u64 = fbdraw.blend(state, rot, blau, 128)
+    if m == fbdraw.rgb(state, 127, 0, 128) {
+        n = n + 1
+    }
+    let v: u64 = fbdraw.blends(state)
+    fbdraw.blend(state, rot, blau, 10)
+    fbdraw.blend(state, rot, blau, 20)
+    fbdraw.blend(state, rot, blau, 30)
+    if fbdraw.blends(state) == v + 3 {
+        n = n + 1
+    }
+    let v2: u64 = fbdraw.blends(state)
+    let s2: u64 = fbdraw.blend_skips(state)
+    fbdraw.blend(state, rot, blau, 0)
+    fbdraw.blend(state, rot, blau, 255)
+    if fbdraw.blends(state) == v2 && fbdraw.blend_skips(state) == s2 + 2 {
+        n = n + 1
+    }
+    fbdraw.pixel(state, 0, 0, weiss)
+    fbdraw.pixel_a(state, 1, 0, weiss, 255)
+    if fbdraw.get_pixel(state, 1, 0) == weiss {
+        n = n + 1
+    }
+    fbdraw.pixel(state, 2, 0, rot)
+    fbdraw.pixel_a(state, 2, 0, weiss, 0)
+    if fbdraw.get_pixel(state, 2, 0) == rot {
+        n = n + 1
+    }
+    fbdraw.pixel(state, 3, 0, schwarz)
+    fbdraw.pixel_a(state, 3, 0, weiss, 128)
+    if fbdraw.get_pixel(state, 3, 0) == fbdraw.rgb(state, 128, 128, 128) {
+        n = n + 1
+    }
+    fbdraw.pixel_a(state, 3, 0, weiss, 128)
+    if fbdraw.get_pixel(state, 3, 0) == fbdraw.rgb(state, 192, 192, 192) {
+        n = n + 1
+    }
+    fbdraw.fill(state, 0, 1, 8, 1, schwarz)
+    hline_a(state, 0, 1, 8, weiss, 77)
+    fbdraw.pixel(state, 0, 2, schwarz)
+    fbdraw.pixel_a(state, 0, 2, weiss, 77)
+    var same: bool = true
+    var k: u64 = 0
+    while k < 8 {
+        if fbdraw.get_pixel(state, k, 1) != fbdraw.get_pixel(state, 0, 2) {
+            same = false
+        }
+        k = k + 1
+    }
+    if same {
+        n = n + 1
+    }
+    fbdraw.fill(state, 0, 3, 4, 2, schwarz)
+    let d0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO)
+    fill_a(state, 0, 3, 4, 2, weiss, 77)
+    if fbdraw.get_pixel(state, 3, 4) == fbdraw.get_pixel(state, 0, 2)
+        && kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO) <= d0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn selftest3_max() -> u64 {
+    return 14
+}
+
+fn get_panel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, fbbase.FB_OFF + S_PWIDTH) {
+        return 0
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + S_PHEIGHT) {
+        return 0
+    }
+    let addr_val: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    return __mmio_read32((addr_val +% y *% kstate.get(state, fbbase.FB_OFF + S_PPITCH)
+        +% x *% 4) as *mut u32) as u64
+}
+
+// ------------------------------------------------- RUNDE SCHIRM: Proben
+fn selftest4(state: u64) -> u64 {
+    var n: u64 = 0
+    if fbdraw.scale_for(1024, 768) == 1 {
+        n = n + 1
+    }
+    if fbdraw.scale_for(1920, 1080) == 1 {
+        n = n + 1
+    }
+    if fbdraw.scale_for(3840, 2160) == 2 {
+        n = n + 1
+    }
+    if fbdraw.scale_for(7680, 4320) == 3 {
+        n = n + 1
+    }
+    if fbdraw.need_bytes(0, 1920, 1080) == 1920 * 4 * 1080 {
+        n = n + 1
+    }
+    if fbdraw.need_bytes(0, 0, 0) == 0 {
+        n = n + 1
+    }
+    if fbdraw.fscale(state) >= 1 && fbdraw.uiscale(state) >= 1 {
+        n = n + 1
+    }
+    if fbdraw.ready(state) {
+        let fs: u64 = fbdraw.fscale(state)
+        if fbdraw.cols(state) == fbdraw.width(state) / (font.GLYPH_W * fs) {
+            n = n + 1
+        }
+        if fbdraw.rows(state) == fbdraw.height(state) / (font.GLYPH_H * fs) {
+            n = n + 1
+        }
+    }
+    var probe: [u8; 24] = "gfx fbres=1280x1024 wm\0\0"
+    var saved_w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_RESW)
+    var saved_h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_RESH)
+    var word: [u8; 7] = "fbres=\0"
+    if fbdraw.parse_zahlenpaar(state, (&probe[0]) as u64, (&word[0]) as u64, 6) {
+        if kstate.get(state, fbbase.FB_OFF + fbbase.S_RESW) == 1280
+            && kstate.get(state, fbbase.FB_OFF + fbbase.S_RESH) == 1024 {
+            n = n + 1
+        }
+    }
+    var probe2: [u8; 20] = "gfx fbres=9999x1 wm\0"
+    if !fbdraw.parse_zahlenpaar(state, (&probe2[0]) as u64, (&word[0]) as u64, 6) {
+        n = n + 1
+    }
+    var probe3: [u8; 18] = "gfx fbres=1280 wm\0"
+    if !fbdraw.parse_zahlenpaar(state, (&probe3[0]) as u64, (&word[0]) as u64, 6) {
+        n = n + 1
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RESW, saved_w)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RESH, saved_h)
+    return n
+}
+
+fn selftest4_max() -> u64 {
+    return 12
+}
+
+fn beat_x(state: u64, field: u64) -> u64 {
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    if w < 320 {
+        return 0
+    }
+    if field == 0 {
+        return w - 136
+    }
+    return w - 68
+}
+
+fn beat_y(state: u64) -> u64 {
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    if h < 2 * fbbase.BEAT_H {
+        return 0
+    }
+    return h / 2 - fbbase.BEAT_H / 2
+}
+
+// Measured (tools/vboxlag): an idle desktop copied 1.27 MB per frame to the card and the pointer 1.1 MB, where the pixels that really
+// change are a few KB. A rectangle that the damage rules grow (glass bar, blur window) is painted again in the back buffer, but
+// most of its pixels come out the same. Writing them anyway costs every write-combined page; a virtual card (VirtualBox) tracks
+// each written page. So: keep a shadow copy of what the card shows, compare each row of the rectangle word by word and write only
+// the span from the first to the last changed word (into the card AND the shadow, from the same word read once, so the two cannot
+// differ).
+//
+// The shadow is valid only after one full copy (`shadow_sync_all`). Everything that writes the card behind the back buffer's
+// back (rotation, /dev/fb direct write, mode change, page flip) calls `shadow_inval`; the next rectangle then copies the whole
+// frame once and the shadow is valid again. Writers that copy back-buffer rows to the card (`flush`, `flush_stripe`, `flush_rows`)
+// keep the shadow in step with `shadow_copy`.
+fn set_shadow(state: u64, addr_val: u64, bytes_val: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHADOW, addr_val)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHBYTES, bytes_val)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+}
+
+fn shadow_inval(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+}
+
+fn shadow_addr(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_SHADOW)
+}
+
+fn shadow_bytes(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_SHBYTES)
+}
+
+fn diff_skipped(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_DIFFSKIP)
+}
+
+// keep the shadow in step with a span the card just received from the back buffer
+fn shadow_copy(state: u64, off: u64, n: u64) {
+    let sh: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_SHADOW)
+    if sh == 0 || kstate.get(state, fbbase.FB_OFF + fbbase.S_SHVALID) == 0 {
+        return
+    }
+    let b: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+    if b == 0 || fbdraw.flip_on(state) || off + n > kstate.get(state, fbbase.FB_OFF + fbbase.S_SHBYTES) {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+        return
+    }
+    fbdraw.copy_words(sh +% off, b +% off, n / 8)
+    var k: u64 = (n / 8) * 8
+    while k + 4 <= n {
+        __mmio_write32((sh +% off +% k) as *mut u32, __mmio_read32((b +% off +% k) as *mut u32))
+        k = k + 4
+    }
+}

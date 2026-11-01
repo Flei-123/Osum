@@ -176,7 +176,7 @@ def main():
         members.setdefault("main", [])
     sizes = {}
     em = EXPORT.search("\n".join(header) + "\n")
-    exported = [x.strip() for x in em.group(1).replace("\n", " ").split(",") if x.strip()] if em else []
+    exported = [x.strip() for x in re.sub(r"//[^\n]*", "", em.group(1)).replace("\n", " ").split(",") if x.strip()] if em else []
     for mod, ns in sorted(members.items(), key=lambda x: rank[x[0]]):
         ns.sort(key=lambda n: by[n]["start"])
         parts = []

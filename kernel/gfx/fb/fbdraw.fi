@@ -1,0 +1,1847 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import arch.arch
+import gfx.font
+import lib.kstate
+import arch.msr
+import gfx.fb.fbbase
+
+const S_SCROLLS: u64 = 0x098
+
+const S_BLENDS0: u64 = 0x770
+
+const S_BAND: u64 = 0x7B8
+
+const S_BANDOPEN: u64 = 0x7C0
+
+const S_FLIP: u64 = 0x7D0 // 1 = Seitenumschaltung moeglich und an
+
+const S_PAGE: u64 = 0x7D8 // welche Haelfte gerade GEMALT wird (0/1)
+
+const S_FLIPS: u64 = 0x7E0
+
+const S_VH: u64 = 0x7E8
+
+const S_SEQ: u64 = 0x7F8 // Folgenummer: ungerade = Seitenwechsel laeuft
+
+const S_TXOCT: u64 = 0x808
+
+const S_TXRECT: u64 = 0x810
+
+const S_FRAMES: u64 = 0x818
+
+const S_RX0: u64 = 0x820 // links, einschliesslich
+
+const S_RY0: u64 = 0x828 // oben
+
+const S_RX1: u64 = 0x830 // rechts, ausschliesslich
+
+const S_RY1: u64 = 0x838 // unten
+
+const S_RVALID: u64 = 0x840 // 0 = nichts angemeldet
+
+const S_VGPU: u64 = 0x848
+
+// vboxlag: DIFF FLUSH. A shadow copy of what was last written to the card; `flush_rect` writes only the words that differ from it.
+const S_PATVAL: u64 = 0x938 // the PAT value the boot core set (WC at index 4); every other core copies it in `sched.on_tick`
+
+const S_PATDONE: u64 = 0x940 // bit per core: this core has the value (bit 0 = the boot core)
+
+// ------------------------------------------------------- Bochs-VBE
+
+const VBE_INDEX: u16 = 0x01CE
+
+const VBE_DATA: u16 = 0x01CF
+
+const VBE_ID: u64 = 0
+
+const VBE_XRES: u64 = 1
+
+const VBE_YRES: u64 = 2
+
+const VBE_BPP: u64 = 3
+
+const VBE_ENABLE: u64 = 4
+
+const VBE_BANK: u64 = 5
+
+const VBE_VWIDTH: u64 = 6
+
+const VBE_VHEIGHT: u64 = 7
+
+const VBE_XOFF: u64 = 8
+
+const VBE_YOFF: u64 = 9
+
+const VBE_DISABLED: u64 = 0
+
+const VBE_ENABLED: u64 = 0x01
+
+const VBE_LFB: u64 = 0x40
+
+const VBE_ID_LO: u64 = 0xB0C0
+
+const VBE_ID_HI: u64 = 0xB0C5
+
+// ------------------------------------------------ PCI und Seitentafel
+
+const PCI_ADDR: u16 = 0xCF8
+
+const PCI_DATA: u16 = 0xCFC
+
+const CFG_VENDOR: u64 = 0x00
+
+const CFG_COMMAND: u64 = 0x04
+
+const CFG_CLASS: u64 = 0x08 // Revision, ProgIF, Unterklasse, Klasse
+
+const CFG_HEADER: u64 = 0x0C
+
+const CFG_BAR0: u64 = 0x10
+
+const CMD_MEM: u64 = 0x2 // Speicherbereiche des Geraets anschalten
+
+const CLASS_VGA: u64 = 0x03
+
+const PAGE_PRESENT: u64 = 1
+
+const PAGE_WRITE: u64 = 2
+
+const PAGE_HUGE: u64 = 0x80
+
+// ------------------------------------------------------- Torbefehle
+
+fn out16(port: u16, v: u16) {
+    asm("out dx, ax", in("dx") port, in("ax") v)
+}
+
+fn in16(port: u16) -> u64 {
+    return asm("in ax, dx\nmovzx eax, ax", out("rax"), in("dx") port)
+}
+
+fn out32(port: u16, v: u32) {
+    asm("out dx, eax", in("dx") port, in("eax") v)
+}
+
+fn in32(port: u16) -> u64 {
+    return asm("in eax, dx", out("rax"), in("dx") port)
+}
+
+// ------------------------------------------------------ PCI, das Noetige
+
+fn cfg_addr(bus: u64, dev: u64, fun: u64, off: u64) -> u32 {
+    return (0x80000000 | (bus << 16) | (dev << 11) | (fun << 8)
+        | (off & 0xFC)) as u32
+}
+
+fn cfg32(bus: u64, dev: u64, fun: u64, off: u64) -> u64 {
+    out32(PCI_ADDR, cfg_addr(bus, dev, fun, off))
+    return in32(PCI_DATA)
+}
+
+fn cfg32_write(bus: u64, dev: u64, fun: u64, off: u64, v: u64) {
+    out32(PCI_ADDR, cfg_addr(bus, dev, fun, off))
+    out32(PCI_DATA, v as u32)
+}
+
+fn find_lfb() -> u64 {
+    var dev: u64 = 0
+    while dev < 32 {
+        var fun: u64 = 0
+        var last: u64 = 0
+        while fun <= last {
+            let id: u64 = cfg32(0, dev, fun, CFG_VENDOR)
+            if (id & 0xFFFF) != 0xFFFF {
+                if fun == 0 {
+                    if (cfg32(0, dev, 0, CFG_HEADER) & 0x00800000) != 0 {
+                        last = 7 // mehrfunktionales Geraet
+                    }
+                }
+                let cls: u64 = (cfg32(0, dev, fun, CFG_CLASS) >> 24) & 0xFF
+                if cls == CLASS_VGA {
+                    let cmd: u64 = cfg32(0, dev, fun, CFG_COMMAND)
+                    if (cmd & CMD_MEM) == 0 {
+                        cfg32_write(0, dev, fun, CFG_COMMAND, cmd | CMD_MEM)
+                    }
+                    let bar: u64 = cfg32(0, dev, fun, CFG_BAR0)
+                    if (bar & 1) == 0 {
+                        let base: u64 = bar & 0xFFFFFFF0
+                        if base != 0 {
+                            return base
+                        }
+                    }
+                }
+            }
+            fun = fun + 1
+        }
+        dev = dev + 1
+    }
+    return 0
+}
+
+// ------------------------------------------------------- der Modus
+
+fn vbe_write(index: u64, value: u64) {
+    out16(VBE_INDEX, index as u16)
+    out16(VBE_DATA, value as u16)
+}
+
+fn vbe_read(index: u64) -> u64 {
+    out16(VBE_INDEX, index as u16)
+    return in16(VBE_DATA)
+}
+
+fn vbe_present() -> bool {
+    let id: u64 = vbe_read(VBE_ID)
+    return id >= VBE_ID_LO && id <= VBE_ID_HI
+}
+
+fn vbe_set(w: u64, h: u64) -> u64 {
+    vbe_write(VBE_ENABLE, VBE_DISABLED)
+    vbe_write(VBE_XRES, w)
+    vbe_write(VBE_YRES, h)
+    vbe_write(VBE_BPP, 32)
+    vbe_write(VBE_BANK, 0)
+    vbe_write(VBE_XOFF, 0)
+    vbe_write(VBE_YOFF, 0)
+    vbe_write(VBE_ENABLE, VBE_ENABLED | VBE_LFB)
+    if virt_want >= w {
+        vbe_write(VBE_VWIDTH, virt_want)
+    }
+    if vbe_read(VBE_XRES) != w || vbe_read(VBE_YRES) != h {
+        return 0
+    }
+    if vbe_read(VBE_BPP) != 32 {
+        return 0
+    }
+    var vw: u64 = vbe_read(VBE_VWIDTH)
+    if vw < w {
+        vw = w
+    }
+    return vw * 4
+}
+
+fn slot_used(state: u64, i: u64) -> u64 {
+    return kstate.get(state, fbbase.WIN_LIST + i * 8)
+}
+
+fn wc(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_WC)
+}
+
+fn pat_setup(state: u64) -> bool {
+    let alt: u64 = msr.rd0(state, fbbase.IA32_PAT)
+    if alt == 0 {
+        return false
+    }
+    let maske: u64 = 255 << 32
+    let fresh: u64 = (alt & (~maske)) | (fbbase.PAT_WC << 32)
+    if !msr.wr(state, fbbase.IA32_PAT, fresh) {
+        return false
+    }
+    let c: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rax", in("rax") c)
+    let ok: bool = msr.rd0(state, fbbase.IA32_PAT) == fresh
+    if ok {
+        // vboxlag: PAT is PER CORE. The other cores were started before the screen (smp.stage) and still have the power-on value
+        // (index 4 = write-back): a write to the card from core 1 or 2 would go through a write-back mapping of the same pages.
+        // They pick the value up in their next timer tick (`sched.pat_here`).
+        kstate.set(state, fbbase.FB_OFF + S_PATDONE, 1)
+        kstate.set(state, fbbase.FB_OFF + S_PATVAL, fresh)
+    }
+    return ok
+}
+
+fn fb_bits(state: u64, uncached: bool) -> u64 {
+    var bits: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_HUGE
+    if uncached {
+        return bits | fbbase.PAGE_PCD | fbbase.PAGE_PWT
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_WC) != 0 {
+        return bits | fbbase.PAGE_PAT_HUGE
+    }
+    return bits
+}
+
+// ================================================ RUNDE MERGE-11: R5-e1000
+// DER RAHMENPUFFER LAESST GERAETEN IHRE PLAETZE.
+const DEVICES_FREE: u64 = 2
+
+// W-C3: how many 2 MiB tiles the framebuffer may take AT MOST: map_run refuses when (tiles held by other devices) + n + DEVICES_FREE
+// > WIN_SLOTS. The framebuffer's own tiles do not count (remap frees them first). vmode.check_custom asks this BEFORE a mode is set, so a
+// host hint that would not map is shrunk in one clean step instead of switching, failing in remap and rolling back (VirtualBox z16:
+// 2496x1575 = 8 tiles failed, 7 tiles = 2400x1500 worked).
+fn tile_room(state: u64) -> u64 {
+    return tile_room_in(room_used(state), room_first(state), room_nfb(state))
+}
+
+// W-EDID: bit i = window tile i is held (by the framebuffer or a device).
+fn room_used(state: u64) -> u64 {
+    var m: u64 = 0
+    var i: u64 = 0
+    while i < fbbase.WIN_SLOTS {
+        if slot_used(state, i) != 0 {
+            m = m | (1 << i)
+        }
+        i = i + 1
+    }
+    return m
+}
+
+// First tile of the framebuffer's own window (WIN_SLOTS = it has none) and how many tiles it holds.
+fn room_first(state: u64) -> u64 {
+    let s0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_SLOT0)
+    if s0 == 0 {
+        return fbbase.WIN_SLOTS
+    }
+    return s0 - 1
+}
+
+fn room_nfb(state: u64) -> u64 {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_SLOT0) == 0 {
+        return 0
+    }
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_HUGES)
+}
+
+// Pure form of tile_room (no state): `used` = held tiles, the framebuffer's own tiles [first, first + n_fb) do not count.
+fn tile_room_in(used: u64, first: u64, n_fb: u64) -> u64 {
+    var others: u64 = 0
+    var i: u64 = 0
+    while i < fbbase.WIN_SLOTS {
+        if ((used >> i) & 1) != 0 && !(i >= first && i < first + n_fb) {
+            others = others + 1
+        }
+        i = i + 1
+    }
+    if others + DEVICES_FREE >= fbbase.WIN_SLOTS {
+        return 0
+    }
+    return fbbase.WIN_SLOTS - DEVICES_FREE - others
+}
+
+// W-L2: true when map_run would find a CONTIGUOUS run of `n` free tiles once the framebuffer's own tiles are released (remap frees them
+// first). tile_room only counts tiles; a device tile in the middle (EDID block) splits the window, so a hint that passed tile_room could
+// still fail in map_run -> mode switch, failed remap, rollback through the old mode (z22 VirtualBox: 2496x1507 -> 1280 -> 2340, white
+// screen, host CPU 100 %, once a kernel #GP). Asked by vmode.check_custom BEFORE the mode is set.
+fn run_room(state: u64, n: u64) -> bool {
+    return run_room_in(room_used(state), room_first(state), room_nfb(state), n,
+        kstate.mode_on(state, kstate.M_ROOMOLD))
+}
+
+// Pure form of run_room. `count_only` is the counter-proof (`roomold`): the pre-W-L2 rule that only counts free tiles.
+fn run_room_in(used: u64, first: u64, n_fb: u64, n: u64, count_only: bool) -> bool {
+    if n == 0 || n > fbbase.WIN_SLOTS {
+        return false
+    }
+    var run: u64 = 0
+    var total: u64 = 0
+    var i: u64 = 0
+    while i < fbbase.WIN_SLOTS {
+        if ((used >> i) & 1) == 0 || (i >= first && i < first + n_fb) {
+            run = run + 1
+            total = total + 1
+            if !count_only && run >= n {
+                return true
+            }
+        } else {
+            run = 0
+        }
+        i = i + 1
+    }
+    if count_only {
+        return total >= n
+    }
+    return false
+}
+
+// W-EDID: twelve promises about the window-room rules, on synthetic tile masks (no page table is touched). WIN_SLOTS = 16, DEVICES_FREE = 2.
+fn selftest5(state: u64) -> u64 {
+    var n: u64 = 0
+    let old: bool = kstate.mode_on(state, kstate.M_ROOMOLD)
+    // 1 empty window, no framebuffer: all 16 tiles are one run; 17 and 0 never fit
+    if run_room_in(0, fbbase.WIN_SLOTS, 0, 16, old) && !run_room_in(0, fbbase.WIN_SLOTS, 0, 17, old) && !run_room_in(0, fbbase.WIN_SLOTS, 0, 0, old) {
+        n = n + 1
+    }
+    // 2 one device tile in the middle (slot 8) splits 16 into 8 + 7: 8 fits, 9 does not (the W-L2 case)
+    if run_room_in(1 << 8, fbbase.WIN_SLOTS, 0, 8, old) {
+        n = n + 1
+    }
+    if !run_room_in(1 << 8, fbbase.WIN_SLOTS, 0, 9, old) {
+        n = n + 1
+    }
+    // 4 the framebuffer's own tiles count as free (remap releases them): fb at 2..5, devices at 1 and 6 -> run 2..5 = 4, 7..15 = 9
+    let u3: u64 = (1 << 1) | (3 << 2) | (3 << 4) | (1 << 6)
+    if run_room_in(u3, 2, 4, 9, old) && !run_room_in(u3, 2, 4, 10, old) {
+        n = n + 1
+    }
+    // 5 every second tile held: single tiles only
+    if run_room_in(0x5555, fbbase.WIN_SLOTS, 0, 1, old) && !run_room_in(0x5555, fbbase.WIN_SLOTS, 0, 2, old) {
+        n = n + 1
+    }
+    // 6 a full window has no room, unless the framebuffer itself holds 3 of the tiles
+    if !run_room_in(0xFFFF, fbbase.WIN_SLOTS, 0, 1, old) {
+        n = n + 1
+    }
+    if run_room_in(0xFFFF, 4, 3, 3, old) && !run_room_in(0xFFFF, 4, 3, 4, old) {
+        n = n + 1
+    }
+    // 8 tile_room counts: empty = 14 (16 - 2 kept free for later devices), 3 devices = 11, own fb tiles do not count, full = 0
+    if tile_room_in(0, fbbase.WIN_SLOTS, 0) == 14 && tile_room_in(7 << 3, fbbase.WIN_SLOTS, 0) == 11 {
+        n = n + 1
+    }
+    if tile_room_in((15 << 2) | (7 << 8), 2, 4) == 11 && tile_room_in(0xFFFF, fbbase.WIN_SLOTS, 0) == 0 {
+        n = n + 1
+    }
+    // 10 the two rules together: one device tile at slot 8 -> tile_room says 13, but 13 contiguous tiles do NOT exist
+    if tile_room_in(1 << 8, fbbase.WIN_SLOTS, 0) == 13 && !run_room_in(1 << 8, fbbase.WIN_SLOTS, 0, 13, old) {
+        n = n + 1
+    }
+    // 11 and the live state agrees with its own mask: the framebuffer's tiles are inside [first, first + n_fb)
+    if room_nfb(state) <= fbbase.WIN_SLOTS && (room_nfb(state) == 0 || room_first(state) + room_nfb(state) <= fbbase.WIN_SLOTS) {
+        n = n + 1
+    }
+    // 12 the mode that is on screen right now always fits (its tiles are released first)
+    if !ready(state) || room_nfb(state) == 0 || run_room(state, room_nfb(state)) {
+        n = n + 1
+    }
+    return n
+}
+
+fn selftest5_max() -> u64 {
+    return 12
+}
+
+fn map_run(state: u64, block: u64, n: u64, uncached: bool) -> u64 {
+    if n == 0 || n > fbbase.WIN_SLOTS {
+        return 0
+    }
+    var belegt: u64 = 0
+    var b: u64 = 0
+    while b < fbbase.WIN_SLOTS {
+        if slot_used(state, b) != 0 {
+            belegt = belegt + 1
+        }
+        b = b + 1
+    }
+    if belegt + n + DEVICES_FREE > fbbase.WIN_SLOTS {
+        return 0
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    var start: u64 = 0
+    while start + n <= fbbase.WIN_SLOTS {
+        var k: u64 = 0
+        var free: bool = true
+        while k < n {
+            if slot_used(state, start + k) != 0 {
+                free = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if free {
+            let bits: u64 = fb_bits(state, uncached)
+            var j: u64 = 0
+            while j < n {
+                __mmio_write64((pd + (fbbase.WIN_FIRST + start + j) * 8) as *mut u64,
+                    (block + j * fbbase.HUGE_SIZE) | bits)
+                kstate.set(state, fbbase.WIN_LIST + (start + j) * 8,
+                    block + j * fbbase.HUGE_SIZE + 1)
+                j = j + 1
+            }
+            let c: u64 = asm("mov rax, cr3", out("rax"))
+            asm("mov cr3, rax", in("rax") c)
+            return fbbase.WIN_VIRT + start * fbbase.HUGE_SIZE
+        }
+        start = start + 1
+    }
+    return 0
+}
+
+fn kernel_pd(state: u64) -> u64 {
+    var pml4: u64 = kstate.get(state, kstate.KPML4)
+    if pml4 == 0 {
+        pml4 = asm("mov rax, cr3", out("rax")) & fbbase.ADDR_MASK
+    }
+    let pdpt: u64 = __mmio_read64(pml4 as *mut u64) & fbbase.ADDR_MASK
+    if pdpt == 0 {
+        return 0
+    }
+    return __mmio_read64(pdpt as *mut u64) & fbbase.ADDR_MASK
+}
+
+// ------------------------------------------------------------ Start
+
+//     fb: 1920x1080x32  pitch=7680  src=mb  ...  back=none
+fn need_bytes(mbi: u64, want_w: u64, want_h: u64) -> u64 {
+    if mbi != 0 {
+        if (kstate.get32(mbi + fbbase.MB_FLAGS) & fbbase.MB_FB_FLAG) != 0 {
+            if kstate.get8(mbi + fbbase.MB_FB_TYPE) == fbbase.MB_FB_RGB {
+                let p: u64 = __mmio_read64((mbi + fbbase.MB_FB_ADDR) as *mut u64)
+                let pt: u64 = kstate.get32(mbi + fbbase.MB_FB_PITCH)
+                let w: u64 = kstate.get32(mbi + fbbase.MB_FB_WIDTH)
+                let h: u64 = kstate.get32(mbi + fbbase.MB_FB_HEIGHT)
+                let bp: u64 = kstate.get8(mbi + fbbase.MB_FB_BPP)
+                if p != 0 && w != 0 && h != 0 && bp == 32 && pt >= w * 4 {
+                    return pt * h
+                }
+            }
+        }
+    }
+    if want_w == 0 || want_h == 0 {
+        return 0
+    }
+    return want_w * 4 * want_h
+}
+
+fn scale_for(w: u64, h: u64) -> u64 {
+    if h >= 2600 || w >= 4600 {
+        return 3
+    }
+    if h >= 1600 || w >= 2800 {
+        return 2
+    }
+    return 1
+}
+
+static mut virt_want: u64 = 0
+
+fn canon_probe(state: u64) {
+    if fbbase.canon_want == 0 || !ready(state) {
+        return
+    }
+    fill(state, 500, 0, 100, 100, 0xFF0000)
+    fill(state, 600, 0, 100, 100, 0x00FF00)
+    fill(state, 700, 0, 100, 100, 0x0000FF)
+    fill(state, 800, 0, 100, 100, 0x102030)
+}
+
+fn virt_set(n: u64) {
+    virt_want = n
+}
+
+fn rgb_set(n: u64) {
+    fbbase.rgb_want = n
+}
+
+fn pad_set(n: u64) {
+    fbbase.pad_wunsch = n
+}
+
+fn pad_value() -> u64 {
+    return fbbase.pad_wunsch
+}
+
+fn bool_num(b: bool) -> u64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+// -------------------------------------------------------- die Zahlen
+
+fn band(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_BAND)
+}
+
+fn band_lo(state: u64) -> u64 {
+    if kstate.get(state, fbbase.FB_OFF + S_BANDOPEN) != 0 {
+        return 0
+    }
+    return kstate.get(state, fbbase.FB_OFF + S_BAND)
+}
+
+fn band_open(state: u64, on: bool) {
+    var v: u64 = 0
+    if on {
+        v = 1
+    }
+    kstate.set(state, fbbase.FB_OFF + S_BANDOPEN, v)
+}
+
+fn set_band(state: u64, px: u64) -> bool {
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    if h == 0 {
+        return false
+    }
+    var n: u64 = px
+    if n * 2 >= h {
+        n = 0
+    }
+    if n != 0 {
+        let w0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+        let pitch: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+        let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+        let hh0: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+        if w0 != 0 && pitch != 0 && basis != 0 && n <= hh0 {
+            var lines: u64 = n
+            let bb: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BACKBYTES)
+            if kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK) == basis && bb != 0 {
+                let fits: u64 = bb / pitch
+                if fits < lines {
+                    lines = fits
+                }
+            }
+            var yy: u64 = 0
+            while yy < lines {
+                fill_words(basis +% yy *% pitch, 0, (w0 *% 4) / 8)
+                yy = yy + 1
+            }
+        }
+    }
+    kstate.set(state, fbbase.FB_OFF + S_BAND, n)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    if zh != 0 && h > n {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_ROWS, (h - n) / zh)
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, 0)
+    return n != 0
+}
+
+fn ready(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_READY) != 0
+}
+
+fn width(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+}
+
+fn height(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+}
+
+fn pitch(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+}
+
+fn bpp(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BPP)
+}
+
+fn bytes(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BYTES)
+}
+
+fn addr(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+}
+
+fn phys(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_PHYS)
+}
+
+fn block(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BLOCK)
+}
+
+fn offset(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_OFFSET)
+}
+
+fn huges(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_HUGES)
+}
+
+fn source(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_SOURCE)
+}
+
+fn back(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK)
+}
+
+fn draw_at(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+}
+
+fn draw_set(state: u64, v: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DRAW, v)
+}
+
+fn dirty_lo(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO)
+}
+
+fn dirty_hi(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI)
+}
+
+fn dirty_put(state: u64, lo: u64, hi: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, lo)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, hi)
+}
+
+fn cols(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_COLS)
+}
+
+fn rows(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_ROWS)
+}
+
+fn cx(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_CX)
+}
+
+fn cy(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_CY)
+}
+
+fn chars(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_CHARS)
+}
+
+fn flushes(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_FLUSHES)
+}
+
+fn scrolls(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_SCROLLS)
+}
+
+fn double_buffered(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BACK) != 0
+}
+
+fn uncached(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_UNCACHED) != 0
+}
+
+fn cursor_on(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_CURSOR) != 0
+}
+
+fn echo_on(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_ECHO) != 0
+}
+
+fn fscale(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_FSCALE)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+fn uiscale(state: u64) -> u64 {
+    let v: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_UISCALE)
+    if v == 0 {
+        return 1
+    }
+    return v
+}
+
+fn stripe(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0
+}
+
+fn res_w(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_RESW)
+}
+
+fn res_h(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_RESH)
+}
+
+// ------------------------------------------------------ die Farben
+
+fn rgb(state: u64, r: u64, g: u64, b: u64) -> u64 {
+    return ((r & 0xFF) << kstate.get(state, fbbase.FB_OFF + fbbase.S_RSHIFT))
+        | ((g & 0xFF) << kstate.get(state, fbbase.FB_OFF + fbbase.S_GSHIFT))
+        | ((b & 0xFF) << kstate.get(state, fbbase.FB_OFF + fbbase.S_BSHIFT))
+}
+
+fn set_color(state: u64, fg: u64, bg: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_FG, fg)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BG, bg)
+}
+
+fn set_cursor(state: u64, on: bool) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CURSOR, bool_num(on))
+}
+
+fn set_echo(state: u64, on: bool) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_ECHO, bool_num(on))
+}
+
+// ------------------------------------------------- die Zeichengrundlagen
+
+// ---------------------------------------------- die beiden Blockbefehle
+
+fn fill_words(p: u64, value: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep stosq", in("rdi") p, in("rax") value, in("rcx") words,
+        clobber("rdi"), clobber("rcx"), clobber("memory"))
+}
+
+fn copy_words(dst: u64, src: u64, words: u64) {
+    if words == 0 {
+        return
+    }
+    asm("cld\nrep movsq", in("rdi") dst, in("rsi") src, in("rcx") words,
+        clobber("rdi"), clobber("rsi"), clobber("rcx"), clobber("memory"))
+}
+
+fn twice(color: u64) -> u64 {
+    let c: u64 = color & 0xFFFFFFFF
+    return (c << 32) | c
+}
+
+fn spot(state: u64, x: u64, y: u64) -> u64 {
+    return y *% kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH) +% x *% 4
+}
+
+fn pixel(state: u64, x: u64, y: u64, color: u64) {
+    if x >= kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH) {
+        return
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) {
+        return
+    }
+    if y < band_lo(state) {
+        return
+    }
+    __mmio_write32((kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% spot(state, x, y))
+        as *mut u32, color as u32)
+}
+
+fn flip_setup(state: u64) -> bool {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_SOURCE) != fbbase.SRC_VBE {
+        return false
+    }
+    if !vbe_present() {
+        return false
+    }
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    vbe_write(VBE_VHEIGHT, h * 2)
+    if vbe_read(VBE_VHEIGHT) < h * 2 {
+        return false
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_MAPPED) < h * 2 *% pt {
+        return false
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        return false
+    }
+    let _u: u64 = w
+    kstate.set(state, fbbase.FB_OFF + S_VH, h * 2)
+    kstate.set(state, fbbase.FB_OFF + S_PAGE, 1)
+    kstate.set(state, fbbase.FB_OFF + S_FLIPS, 0)
+    kstate.set(state, fbbase.FB_OFF + S_FLIP, 1)
+    vbe_write(VBE_YOFF, 0)
+    return true
+}
+
+fn flip_on(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0
+}
+
+fn flips(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_FLIPS)
+}
+
+fn page(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_PAGE)
+}
+
+fn draw_base(state: u64) -> u64 {
+    let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if kstate.get(state, fbbase.FB_OFF + S_FLIP) == 0 {
+        return basis
+    }
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    return basis +% kstate.get(state, fbbase.FB_OFF + S_PAGE) *% h *% pt
+}
+
+fn flip(state: u64) {
+    if kstate.get(state, fbbase.FB_OFF + S_FLIP) == 0 {
+        return
+    }
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let s: u64 = kstate.get(state, fbbase.FB_OFF + S_PAGE)
+    kstate.add(state, fbbase.FB_OFF + S_SEQ, 1)
+    arch.barrier_write()
+    nachspuelen(state)
+    vbe_write(VBE_YOFF, s *% h)
+    kstate.set(state, fbbase.FB_OFF + S_PAGE, 1 - s)
+    kstate.add(state, fbbase.FB_OFF + S_FLIPS, 1)
+    arch.barrier_write()
+    kstate.add(state, fbbase.FB_OFF + S_SEQ, 1)
+}
+
+fn front_paar(state: u64, x: u64, y0: u64, y1: u64, aus: u64) -> bool {
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    if x >= w || y0 >= h || y1 >= h {
+        return false
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        return false
+    }
+    let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if basis == 0 {
+        return false
+    }
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    //     flips=1     (fast nie umgeschaltet)  0 Risse in 2 892 193
+    //     flips~4700  (staendig umgeschaltet)  ~2 Risse in ~1 200 000
+    let f0: u64 = kstate.get(state, fbbase.FB_OFF + S_SEQ)
+    if (f0 & 1) != 0 {
+        return false
+    }
+    arch.barrier_read()
+    var off: u64 = 0
+    if kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0 {
+        off = (1 - kstate.get(state, fbbase.FB_OFF + S_PAGE)) *% h
+    }
+    let a: u64 = __mmio_read32((basis +% (y0 +% off) *% pt
+        +% x *% 4) as *mut u32) as u64
+    let b: u64 = __mmio_read32((basis +% (y1 +% off) *% pt
+        +% x *% 4) as *mut u32) as u64
+    arch.barrier_read()
+    if kstate.get(state, fbbase.FB_OFF + S_SEQ) != f0 {
+        return false
+    }
+    __mmio_write64(aus as *mut u64, a)
+    __mmio_write64((aus + 8) as *mut u64, b)
+    return true
+}
+
+fn front_pixel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH) {
+        return 0xFFFFFFFF
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) {
+        return 0xFFFFFFFF
+    }
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        return 0xFFFFFFFF
+    }
+    let basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if basis == 0 {
+        return 0xFFFFFFFF
+    }
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    var vy: u64 = y
+    if kstate.get(state, fbbase.FB_OFF + S_FLIP) != 0 {
+        let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+        vy = y +% (1 - kstate.get(state, fbbase.FB_OFF + S_PAGE)) *% h
+    }
+    return __mmio_read32((basis +% vy *% pt +% x *% 4) as *mut u32) as u64
+}
+
+fn get_pixel(state: u64, x: u64, y: u64) -> u64 {
+    if x >= kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH) {
+        return 0
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) {
+        return 0
+    }
+    return __mmio_read32((kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+        +% spot(state, x, y)) as *mut u32) as u64
+}
+
+// src-over mit vorbelegter Deckung a (0..255):
+//
+//     out = (src * a + dst * (255 - a)) / 255
+//     Division   526 Takte je Bildpunkt   Abbild 2 846 920 Oktette
+//     Schieben   646 Takte je Bildpunkt   Abbild 2 846 920 Oktette
+fn mix8(dst: u64, src: u64, a: u64, ia: u64) -> u64 {
+    return (src *% a +% dst *% ia +% 127) / 255
+}
+
+fn blend(state: u64, dst: u64, src: u64, a: u64) -> u64 {
+    if a == 0 {
+        kstate.set(state, fbbase.FB_OFF + S_BLENDS0,
+            kstate.get(state, fbbase.FB_OFF + S_BLENDS0) +% 1)
+        return dst
+    }
+    if a >= 255 {
+        kstate.set(state, fbbase.FB_OFF + S_BLENDS0,
+            kstate.get(state, fbbase.FB_OFF + S_BLENDS0) +% 1)
+        return src
+    }
+    let ia: u64 = 255 - a
+    let r: u64 = mix8((dst >> 16) & 0xFF, (src >> 16) & 0xFF, a, ia)
+    let g: u64 = mix8((dst >> 8) & 0xFF, (src >> 8) & 0xFF, a, ia)
+    let b: u64 = mix8(dst & 0xFF, src & 0xFF, a, ia)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDS,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDS) +% 1)
+    return (r << 16) | (g << 8) | b
+}
+
+fn scaled_row_a(state: u64, y: u64, x0: i64, x1: i64, src_row: u64, ox: i64, bw: i64, nw: i64, a: u64) {
+    if a == 0 || nw <= 0 || bw <= 0 {
+        return
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) || y < band_lo(state) {
+        return
+    }
+    var c0: i64 = x0
+    var c1: i64 = x1
+    if c0 < ox {
+        c0 = ox
+    }
+    if c0 < 0 {
+        c0 = 0
+    }
+    let sw: i64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH) as i64
+    if c1 > sw {
+        c1 = sw
+    }
+    if c1 > ox + nw {
+        c1 = ox + nw
+    }
+    if c1 <= c0 {
+        return
+    }
+    let num0: i64 = (c0 - ox) * bw
+    var q: i64 = num0 / nw
+    var r: i64 = num0 - q * nw
+    let qs: i64 = bw / nw
+    let rs: i64 = bw - qs * nw
+    var out: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% spot(state, c0 as u64, y)
+    var n: i64 = c1 - c0
+    var drawn: u64 = 0
+    let ia: u64 = 255 - a
+    while n > 0 {
+        if q >= 0 && q < bw {
+            let c: u64 = (__mmio_read32((src_row +% (q as u64) *% 4) as *mut u32) as u64) & 0x00FFFFFF
+            if a >= 255 {
+                __mmio_write32(out as *mut u32, c as u32)
+            } else {
+                let alt: u64 = __mmio_read32(out as *mut u32) as u64
+                let rr: u64 = mix8((alt >> 16) & 0xFF, (c >> 16) & 0xFF, a, ia)
+                let gg: u64 = mix8((alt >> 8) & 0xFF, (c >> 8) & 0xFF, a, ia)
+                let bb: u64 = mix8(alt & 0xFF, c & 0xFF, a, ia)
+                __mmio_write32(out as *mut u32, ((rr << 16) | (gg << 8) | bb) as u32)
+            }
+            drawn = drawn + 1
+        }
+        out = out +% 4
+        q = q + qs
+        r = r + rs
+        if r >= nw {
+            r = r - nw
+            q = q + 1
+        }
+        n = n - 1
+    }
+    if drawn == 0 {
+        return
+    }
+    if a >= 255 {
+        kstate.set(state, fbbase.FB_OFF + S_BLENDS0, kstate.get(state, fbbase.FB_OFF + S_BLENDS0) +% drawn)
+    } else {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDR, kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDR) +% drawn)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDS, kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDS) +% drawn)
+    }
+    dirty_x(state, c0 as u64, c1 as u64, y, y + 1)
+}
+
+fn pixel_a(state: u64, x: u64, y: u64, color: u64, a: u64) {
+    if a == 0 {
+        kstate.set(state, fbbase.FB_OFF + S_BLENDS0,
+            kstate.get(state, fbbase.FB_OFF + S_BLENDS0) +% 1)
+        return
+    }
+    if x >= kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH) {
+        return
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) {
+        return
+    }
+    if y < band_lo(state) {
+        return
+    }
+    if a >= 255 {
+        kstate.set(state, fbbase.FB_OFF + S_BLENDS0,
+            kstate.get(state, fbbase.FB_OFF + S_BLENDS0) +% 1)
+        __mmio_write32((kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+            +% spot(state, x, y)) as *mut u32, color as u32)
+        dirty_x(state, x, x + 1, y, y + 1)
+        return
+    }
+    let p: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% spot(state, x, y)
+    let alt: u64 = __mmio_read32(p as *mut u32) as u64
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDR,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDR) +% 1)
+    __mmio_write32(p as *mut u32, blend(state, alt, color, a) as u32)
+    dirty_x(state, x, x + 1, y, y + 1)
+}
+
+fn hline_mask(state: u64, x: u64, y: u64, n: u64, color: u64, maske: u64,
+    schritt: i64) {
+    if n == 0 {
+        return
+    }
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) || x >= w {
+        return
+    }
+    if y < band_lo(state) {
+        return
+    }
+    var len: u64 = n
+    if x + len > w {
+        len = w - x
+    }
+    let sr: u64 = (color >> 16) & 0xFF
+    let sg: u64 = (color >> 8) & 0xFF
+    let sb: u64 = color & 0xFF
+    var p: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% spot(state, x, y)
+    var m: u64 = maske
+    var k: u64 = 0
+    var gemischt: u64 = 0
+    while k < len {
+        let a: u64 = __mmio_read8(m as *mut u8) as u64
+        if a != 0 {
+            if a >= 255 {
+                __mmio_write32(p as *mut u32, color as u32)
+            } else {
+                let ia: u64 = 255 - a
+                let alt: u64 = __mmio_read32(p as *mut u32) as u64
+                let r: u64 = mix8((alt >> 16) & 0xFF, sr, a, ia)
+                let g: u64 = mix8((alt >> 8) & 0xFF, sg, a, ia)
+                let b: u64 = mix8(alt & 0xFF, sb, a, ia)
+                __mmio_write32(p as *mut u32,
+                    ((r << 16) | (g << 8) | b) as u32)
+            }
+            gemischt = gemischt + 1
+        }
+        p = p +% 4
+        if schritt < 0 {
+            m = m -% 1
+        } else {
+            m = m +% 1
+        }
+        k = k + 1
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDS,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDS) +% gemischt)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDR,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDR) +% gemischt)
+    if gemischt != 0 {
+        dirty(state, y, y + 1)
+    }
+}
+
+fn bm(state: u64, off: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + off)
+}
+
+fn bm_set(state: u64, off: u64, v: u64) {
+    kstate.set(state, fbbase.FB_OFF + off, v)
+}
+
+fn bm_add(state: u64, off: u64, v: u64) {
+    kstate.add(state, fbbase.FB_OFF + off, v)
+}
+
+fn blends(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDS)
+}
+
+fn blend_reads(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_BLENDR)
+}
+
+fn blend_skips(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_BLENDS0)
+}
+
+fn simd_px(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_SIMDPX)
+}
+
+fn blend_reset(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDS, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_BLENDR, 0)
+    kstate.set(state, fbbase.FB_OFF + S_BLENDS0, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_SIMDPX, 0)
+}
+
+fn hline(state: u64, x: u64, y: u64, n: u64, color: u64) {
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT) || x >= w {
+        return
+    }
+    if y < band_lo(state) {
+        return
+    }
+    var len: u64 = n
+    if x + len > w {
+        len = w - x
+    }
+    let sp_x0: u64 = x
+    let sp_x1: u64 = x + len
+    var p: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% spot(state, x, y)
+    if (p & 7) != 0 && len > 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
+    }
+    let paare: u64 = len / 2
+    fill_words(p, twice(color), paare)
+    p = p +% paare *% 8
+    len = len - paare * 2
+    while len > 0 {
+        __mmio_write32(p as *mut u32, color as u32)
+        p = p +% 4
+        len = len - 1
+    }
+    dirty_x(state, sp_x0, sp_x1, y, y + 1)
+}
+
+fn fill(state: u64, x: u64, y: u64, w: u64, h: u64, color: u64) {
+    var row: u64 = 0
+    while row < h {
+        hline(state, x, y + row, w, color)
+        row = row + 1
+    }
+}
+
+fn line(state: u64, x0: u64, y0: u64, x1: u64, y1: u64, color: u64) {
+    var dx: u64 = 0
+    var sx: bool = true
+    if x1 >= x0 {
+        dx = x1 - x0
+    } else {
+        dx = x0 - x1
+        sx = false
+    }
+    var dy: u64 = 0
+    var sy: bool = true
+    if y1 >= y0 {
+        dy = y1 - y0
+    } else {
+        dy = y0 - y1
+        sy = false
+    }
+    var n: u64 = dx
+    if dy > n {
+        n = dy
+    }
+    if n == 0 {
+        pixel(state, x0, y0, color)
+        return
+    }
+    var i: u64 = 0
+    while i <= n {
+        let ox: u64 = (dx * i + n / 2) / n
+        let oy: u64 = (dy * i + n / 2) / n
+        var x: u64 = 0
+        if sx {
+            x = x0 + ox
+        } else {
+            if ox > x0 {
+                return
+            }
+            x = x0 - ox
+        }
+        var y: u64 = 0
+        if sy {
+            y = y0 + oy
+        } else {
+            if oy > y0 {
+                return
+            }
+            y = y0 - oy
+        }
+        pixel(state, x, y, color)
+        i = i + 1
+    }
+    dirty_x(state, min2(x0, x1), max2(x0, x1) + 1,
+        min2(y0, y1), max2(y0, y1) + 1)
+}
+
+fn min2(a: u64, b: u64) -> u64 {
+    if a < b {
+        return a
+    }
+    return b
+}
+
+fn max2(a: u64, b: u64) -> u64 {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fn blit(state: u64, sx: u64, sy: u64, dx: u64, dy: u64, w: u64, h: u64) {
+    let base: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+    let n: u64 = w *% 4
+    let worte: u64 = n / 8
+    let rest: u64 = n - worte * 8
+    let bl: u64 = band_lo(state)
+    var r: u64 = 0
+    while r < h {
+        if dy + r >= bl {
+            let s: u64 = base +% spot(state, sx, sy + r)
+            let d: u64 = base +% spot(state, dx, dy + r)
+            copy_words(d, s, worte)
+            if rest != 0 {
+                __mmio_write32((d +% worte *% 8) as *mut u32,
+                    __mmio_read32((s +% worte *% 8) as *mut u32))
+            }
+        }
+        r = r + 1
+    }
+}
+
+fn clear(state: u64, color: u64) {
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    var y: u64 = 0
+    while y < h {
+        hline(state, 0, y, kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH), color)
+        y = y + 1
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, 0)
+    dirty_all(state)
+}
+
+fn flush_us_sum(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_FLUS)
+}
+
+fn flush_us_max(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_FLMAX)
+}
+
+fn flush_okt(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_FLOK)
+}
+
+fn flush_us_n(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_FLN)
+}
+
+fn tx_octets(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_TXOCT)
+}
+
+fn tx_rects(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_TXRECT)
+}
+
+fn frames(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + S_FRAMES)
+}
+
+fn tx_add(state: u64, oktette: u64) {
+    kstate.add(state, fbbase.FB_OFF + S_TXOCT, oktette)
+    kstate.add(state, fbbase.FB_OFF + S_TXRECT, 1)
+}
+
+// ================================================ RUNDE VMSVGA
+// The VMware SVGA II driver (drv/gpu/vmsvga.fi) tells the host ONE update rectangle per frame. The copy sites of this file note
+// the box they really wrote here. The state page and the words below mirror vmsvga.fi (S_READY, S_ACC_*); memmap.py checks
+// the page. Without a ready driver this is a single compare and nothing else.
+const VMS_OFF: u64 = 0x170000
+
+const VMS_READY: u64 = 0x08
+
+const VMS_ACC_VALID: u64 = 0x100
+
+const VMS_ACC_X0: u64 = 0x108
+
+const VMS_LOCK: u64 = 0x1A8 // spin lock word (vmsvga.fi S_LOCK)
+
+const VMS_DROPN: u64 = 0x1B0 // notes seen (word vmsvgadrop swallows every 7th)
+
+fn vms_note(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if kstate.get(state, VMS_OFF + VMS_READY) == 0 || w == 0 || h == 0 {
+        return
+    }
+    if kstate.mode_on(state, kstate.M_VMSVGADROP) {
+        // gate negative control: lose every 7th note (the rectangle way must then show wrong pictures)
+        kstate.add(state, VMS_OFF + VMS_DROPN, 1)
+        if kstate.get(state, VMS_OFF + VMS_DROPN) % 7 == 0 {
+            return
+        }
+    }
+    let x1: u64 = x + w
+    let y1: u64 = y + h
+    // irq_save only excludes this core: with several cores two notes (or a note and the driver's take) could lose a box.
+    let fl: u64 = arch.irq_save()
+    let lk: *mut u64 = (state + VMS_OFF + VMS_LOCK) as *mut u64
+    var got: u64 = __atomic_swap(lk, 0, 1)
+    while got != 0 {
+        arch.pause()
+        got = __atomic_swap(lk, 0, 1)
+    }
+    if kstate.get(state, VMS_OFF + VMS_ACC_VALID) == 0 {
+        kstate.set(state, VMS_OFF + VMS_ACC_X0, x)
+        kstate.set(state, VMS_OFF + VMS_ACC_X0 + 8, y)
+        kstate.set(state, VMS_OFF + VMS_ACC_X0 + 16, x1)
+        kstate.set(state, VMS_OFF + VMS_ACC_X0 + 24, y1)
+        kstate.set(state, VMS_OFF + VMS_ACC_VALID, 1)
+    } else {
+        if x < kstate.get(state, VMS_OFF + VMS_ACC_X0) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0, x)
+        }
+        if y < kstate.get(state, VMS_OFF + VMS_ACC_X0 + 8) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0 + 8, y)
+        }
+        if x1 > kstate.get(state, VMS_OFF + VMS_ACC_X0 + 16) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0 + 16, x1)
+        }
+        if y1 > kstate.get(state, VMS_OFF + VMS_ACC_X0 + 24) {
+            kstate.set(state, VMS_OFF + VMS_ACC_X0 + 24, y1)
+        }
+    }
+    __mmio_write64(lk, 0)
+    arch.irq_restore(fl)
+}
+
+fn frame_done(state: u64) {
+    kstate.add(state, fbbase.FB_OFF + S_FRAMES, 1)
+}
+
+fn tx_reset(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + S_TXOCT, 0)
+    kstate.set(state, fbbase.FB_OFF + S_TXRECT, 0)
+    kstate.set(state, fbbase.FB_OFF + S_FRAMES, 0)
+}
+
+fn dirty_rect(state: u64, x: u64, y: u64, w: u64, h: u64) {
+    if w == 0 || h == 0 {
+        return
+    }
+    let x1: u64 = x + w
+    let y1: u64 = y + h
+    if kstate.get(state, fbbase.FB_OFF + S_RVALID) == 0 {
+        kstate.set(state, fbbase.FB_OFF + S_RX0, x)
+        kstate.set(state, fbbase.FB_OFF + S_RY0, y)
+        kstate.set(state, fbbase.FB_OFF + S_RX1, x1)
+        kstate.set(state, fbbase.FB_OFF + S_RY1, y1)
+        kstate.set(state, fbbase.FB_OFF + S_RVALID, 1)
+        return
+    }
+    if x < kstate.get(state, fbbase.FB_OFF + S_RX0) {
+        kstate.set(state, fbbase.FB_OFF + S_RX0, x)
+    }
+    if y < kstate.get(state, fbbase.FB_OFF + S_RY0) {
+        kstate.set(state, fbbase.FB_OFF + S_RY0, y)
+    }
+    if x1 > kstate.get(state, fbbase.FB_OFF + S_RX1) {
+        kstate.set(state, fbbase.FB_OFF + S_RX1, x1)
+    }
+    if y1 > kstate.get(state, fbbase.FB_OFF + S_RY1) {
+        kstate.set(state, fbbase.FB_OFF + S_RY1, y1)
+    }
+}
+
+fn rect_valid(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + S_RVALID) != 0
+}
+
+fn rect_x0(state: u64) -> u64 { return kstate.get(state, fbbase.FB_OFF + S_RX0) }
+
+fn rect_y0(state: u64) -> u64 { return kstate.get(state, fbbase.FB_OFF + S_RY0) }
+
+fn rect_x1(state: u64) -> u64 { return kstate.get(state, fbbase.FB_OFF + S_RX1) }
+
+fn rect_y1(state: u64) -> u64 { return kstate.get(state, fbbase.FB_OFF + S_RY1) }
+
+fn rect_take(state: u64, x0: *mut u64, y0: *mut u64, x1: *mut u64,
+    y1: *mut u64) -> bool {
+    let fl: u64 = arch.irq_save()
+    let gueltig: bool = kstate.get(state, fbbase.FB_OFF + S_RVALID) != 0
+    if gueltig {
+        __mmio_write64(x0, kstate.get(state, fbbase.FB_OFF + S_RX0))
+        __mmio_write64(y0, kstate.get(state, fbbase.FB_OFF + S_RY0))
+        __mmio_write64(x1, kstate.get(state, fbbase.FB_OFF + S_RX1))
+        __mmio_write64(y1, kstate.get(state, fbbase.FB_OFF + S_RY1))
+        kstate.set(state, fbbase.FB_OFF + S_RVALID, 0)
+    }
+    arch.irq_restore(fl)
+    return gueltig
+}
+
+fn set_vgpu(state: u64, an: bool) {
+    var v: u64 = 0
+    if an {
+        v = 1
+    }
+    kstate.set(state, fbbase.FB_OFF + S_VGPU, v)
+}
+
+fn on_vgpu(state: u64) -> bool {
+    return kstate.get(state, fbbase.FB_OFF + S_VGPU) != 0
+}
+
+fn dirty_all(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT))
+    dirty_rect(state, 0, 0, kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH),
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT))
+}
+
+fn dirty_x(state: u64, x0: u64, x1: u64, y0: u64, y1: u64) {
+    if y1 > y0 && x1 > x0 {
+        dirty_rect(state, x0, y0, x1 - x0, y1 - y0)
+    }
+    dirty(state, y0, y1)
+}
+
+fn dirty(state: u64, y0: u64, y1: u64) {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI) == 0 {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, y0)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, y1)
+        return
+    }
+    if y0 < kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO) {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_LO, y0)
+    }
+    if y1 > kstate.get(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI) {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_DIRTY_HI, y1)
+    }
+}
+
+// ================= RUNDE BLECHEINGABE: DER SCHALTER `fbflush`.
+fn nachspuelen(state: u64) {
+    if kstate.mode_on(state, kstate.M_FBFLUSH) {
+        arch.cache_writeback()
+    }
+}
+
+fn write_bytes(state: u64, off: u64, src: u64, n: u64) -> u64 {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_READY) == 0 {
+        return 0
+    }
+    let int: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BYTES)
+    if off >= int {
+        return 0
+    }
+    var len: u64 = n
+    if off + len > int {
+        len = int - off
+    }
+    var basis: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        basis = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+    } else {
+        // vboxlag: this write goes to the card behind the shadow's back
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_SHVALID, 0)
+    }
+    let dst: u64 = basis +% off
+    let worte: u64 = len / 8
+    copy_words(dst, src, worte)
+    var i: u64 = worte * 8
+    while i < len {
+        kstate.set8(dst +% i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    return len
+}
+
+fn read_bytes(state: u64, off: u64, dst: u64, n: u64) -> u64 {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_READY) == 0 {
+        return 0
+    }
+    let int: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BYTES)
+    if off >= int {
+        return 0
+    }
+    var len: u64 = n
+    if off + len > int {
+        len = int - off
+    }
+    var basis2: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ADDR)
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_STRIPE) != 0 {
+        basis2 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW)
+    }
+    let src: u64 = basis2 +% off
+    var i: u64 = 0
+    while i < len {
+        kstate.set8(dst + i, kstate.get8(src +% i) as u8)
+        i = i + 1
+    }
+    return len
+}
+
+// -------------------------------------------------------- die Konsole
+
+fn cell_x(state: u64) -> u64 {
+    return kstate.get(state, fbbase.FB_OFF + fbbase.S_CX) *% (font.GLYPH_W * fscale(state))
+}
+
+fn cell_y(state: u64) -> u64 {
+    let bd: u64 = kstate.get(state, fbbase.FB_OFF + S_BAND)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    return bd +% kstate.get(state, fbbase.FB_OFF + fbbase.S_CY) *% zh
+}
+
+fn mark(state: u64, on: bool) {
+    if kstate.get(state, fbbase.FB_OFF + fbbase.S_CURSOR) == 0 {
+        return
+    }
+    var c: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BG)
+    if on {
+        c = kstate.get(state, fbbase.FB_OFF + fbbase.S_FG)
+    }
+    let fs: u64 = fscale(state)
+    let y: u64 = cell_y(state) + font.GLYPH_H * fs - 2 * fs
+    fill(state, cell_x(state), y, font.GLYPH_W * fs, 2 * fs, c)
+    dirty(state, y, y + 2 * fs)
+}
+
+fn glyph(state: u64, ch: u64) {
+    let px: u64 = cell_x(state)
+    let py: u64 = cell_y(state)
+    if py < band_lo(state) {
+        return
+    }
+    let fg: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_FG)
+    let bg: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_BG)
+    let base: u64 = state + fbbase.FONT_OFF
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let fs: u64 = fscale(state)
+    let gw: u64 = font.GLYPH_W * fs
+    let gh: u64 = font.GLYPH_H * fs
+    if px + gw > w || py + gh > h {
+        var r2: u64 = 0
+        while r2 < font.GLYPH_H {
+            let b2: u64 = font.row(base, ch, r2)
+            var c2: u64 = 0
+            while c2 < font.GLYPH_W {
+                var f2: u64 = bg
+                if ((b2 >> (7 - c2)) & 1) != 0 {
+                    f2 = fg
+                }
+                var sy: u64 = 0
+                while sy < fs {
+                    var sx: u64 = 0
+                    while sx < fs {
+                        pixel(state, px + c2 * fs + sx, py + r2 * fs + sy, f2)
+                        sx = sx + 1
+                    }
+                    sy = sy + 1
+                }
+                c2 = c2 + 1
+            }
+            r2 = r2 + 1
+        }
+        dirty(state, py, py + gh)
+        return
+    }
+    let pt: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_PITCH)
+    var cur_row: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_DRAW) +% py *% pt +% px *% 4
+    var r: u64 = 0
+    while r < font.GLYPH_H {
+        let bits: u64 = font.row(base, ch, r)
+        var wdh: u64 = 0
+        while wdh < fs {
+            var q: u64 = cur_row
+            var c: u64 = 0
+            while c < font.GLYPH_W {
+                var color: u64 = bg
+                if ((bits >> (7 - c)) & 1) != 0 {
+                    color = fg
+                }
+                var k: u64 = 0
+                while k < fs {
+                    __mmio_write32(q as *mut u32, color as u32)
+                    q = q +% 4
+                    k = k + 1
+                }
+                c = c + 1
+            }
+            cur_row = cur_row +% pt
+            wdh = wdh + 1
+        }
+        r = r + 1
+    }
+    dirty(state, py, py + gh)
+}
+
+fn scroll(state: u64) {
+    let h: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_HEIGHT)
+    let w: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_WIDTH)
+    let zh: u64 = font.GLYPH_H * fscale(state)
+    if h <= zh {
+        clear(state, kstate.get(state, fbbase.FB_OFF + fbbase.S_BG))
+        return
+    }
+    let bd: u64 = kstate.get(state, fbbase.FB_OFF + S_BAND)
+    let rest: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_ROWS) *% zh - zh
+    if bd + rest + zh > h {
+        clear(state, kstate.get(state, fbbase.FB_OFF + fbbase.S_BG))
+        return
+    }
+    blit(state, 0, bd + zh, 0, bd, w, rest)
+    fill(state, 0, bd + rest, w, h - bd - rest,
+        kstate.get(state, fbbase.FB_OFF + fbbase.S_BG))
+    dirty_all(state)
+    kstate.add(state, fbbase.FB_OFF + S_SCROLLS, 1)
+}
+
+fn nl(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+    let y: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_CY) + 1
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_ROWS) {
+        scroll(state)
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, kstate.get(state, fbbase.FB_OFF + fbbase.S_ROWS) - 1)
+    } else {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, y)
+    }
+}
+
+fn advance(state: u64) {
+    let x: u64 = kstate.get(state, fbbase.FB_OFF + fbbase.S_CX) + 1
+    if x >= kstate.get(state, fbbase.FB_OFF + fbbase.S_COLS) {
+        nl(state)
+    } else {
+        kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, x)
+    }
+}
+
+fn home(state: u64) {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, 0)
+}
+
+fn goto(state: u64, c: u64, r: u64) {
+    var x: u64 = c
+    var y: u64 = r
+    if x >= kstate.get(state, fbbase.FB_OFF + fbbase.S_COLS) {
+        x = kstate.get(state, fbbase.FB_OFF + fbbase.S_COLS) - 1
+    }
+    if y >= kstate.get(state, fbbase.FB_OFF + fbbase.S_ROWS) {
+        y = kstate.get(state, fbbase.FB_OFF + fbbase.S_ROWS) - 1
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CX, x)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_CY, y)
+}
+
+// ------------------------------------------------------- der Spiegel
+
+fn kdata() -> u64 {
+    return asm("lea rax, [rip + kdata]", out("rax"))
+}
+
+// ----------------------------------------------------- die Kommandozeile
+
+fn find(heu: u64, nadel: u64, n: u64) -> u64 {
+    if heu == 0 || n == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while true {
+        let c: u64 = kstate.get8(heu + i)
+        if c == 0 {
+            return 0
+        }
+        var k: u64 = 0
+        var same: bool = true
+        while k < n {
+            let a: u64 = kstate.get8(heu + i + k)
+            if a == 0 || a != kstate.get8(nadel + k) {
+                same = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if same {
+            return heu + i
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn num_at(p: u64) -> u64 {
+    var v: u64 = 0
+    var i: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        let c: u64 = kstate.get8(p + i)
+        if c >= 0x30 && c <= 0x39 && i < 6 {
+            v = v * 10 + (c - 0x30)
+            i = i + 1
+        } else {
+            lauf = false
+        }
+    }
+    if i == 0 {
+        return 0
+    }
+    return v
+}
+
+fn ziffern_ab(p: u64) -> u64 {
+    var i: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        let c: u64 = kstate.get8(p + i)
+        if c >= 0x30 && c <= 0x39 && i < 6 {
+            i = i + 1
+        } else {
+            lauf = false
+        }
+    }
+    return i
+}
+
+fn parse_zahlenpaar(state: u64, cmd: u64, word: u64, wlen: u64) -> bool {
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RESW, 0)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RESH, 0)
+    let a: u64 = find(cmd, word, wlen)
+    if a == 0 {
+        return false
+    }
+    let p1: u64 = a + wlen
+    let n1: u64 = ziffern_ab(p1)
+    if n1 == 0 {
+        return false
+    }
+    if kstate.get8(p1 + n1) != 0x78 {
+        return false
+    }
+    let p2: u64 = p1 + n1 + 1
+    let n2: u64 = ziffern_ab(p2)
+    if n2 == 0 {
+        return false
+    }
+    let w: u64 = num_at(p1)
+    let h: u64 = num_at(p2)
+    if w < 320 || h < 200 || w > 8192 || h > 4608 {
+        return false
+    }
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RESW, w)
+    kstate.set(state, fbbase.FB_OFF + fbbase.S_RESH, h)
+    return true
+}
+
+//     fb: 3440x1440x32  pitch=13760      (13760 = 3440 * 4)
+fn num_after(state: u64, cmd: u64, word: u64, wlen: u64) -> u64 {
+    if cmd == 0 {
+        return 0
+    }
+    let a: u64 = find(cmd, word, wlen)
+    if a == 0 {
+        return 0
+    }
+    let p1: u64 = a + wlen
+    if ziffern_ab(p1) == 0 {
+        return 0
+    }
+    return num_at(p1)
+}

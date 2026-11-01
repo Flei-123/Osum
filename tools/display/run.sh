@@ -55,7 +55,7 @@ echo "== 1. the sources: two files, one truth =="
 for r in VBE_INDEX VBE_DATA VBE_ID VBE_XRES VBE_YRES VBE_BPP VBE_ENABLE \
          VBE_BANK VBE_VWIDTH VBE_VHEIGHT VBE_XOFF VBE_YOFF \
          VBE_DISABLED VBE_ENABLED VBE_LFB VBE_ID_LO VBE_ID_HI; do
-    a=$(grep -aE "^const $r: (u16|u64) = " kernel/gfx/fb.fi | sed 's/.*= //; s/ *\/\/.*//')
+    a=$(grep -aE "^const $r: (u16|u64) = " <(bash tools/structure/srcview.sh kernel/gfx/fb.fi) | sed 's/.*= //; s/ *\/\/.*//')
     b=$(grep -aE "^const $r: (u16|u64) = " kernel/gfx/vmode.fi | sed 's/.*= //; s/ *\/\/.*//')
     if [ -n "$a" ] && [ "$a" = "$b" ]; then ok "$r is the same in fb.fi and vmode.fi ($a)"
     else bad "$r: fb.fi='$a', vmode.fi='$b'"; fi
