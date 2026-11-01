@@ -259,7 +259,7 @@ section "$RT" REJOIN END | grep -aq 'auto=up rc=0' && ok "runtime: rejoin with t
 section "$RT" REJOIN END | grep -aq '^wltxoff=off' && ok "runtime: wltxoff off again" || bad "runtime: wltxoff not off again"
 section "$RT" REJOIN END | grep -aq 'quirks=0x200' && ok "runtime: live quirk word back to 0x200 (only BC_BYTES)" || bad "runtime: quirk word not 0x200"
 printf 'wltxoff on\n# comment\nwlbcbytes\nbogusknob on\niwlnoipoll off\n' > "$T/knobs.txt"
-KF_SCRIPT=$'echo ==START==\nsleep 14\nwlanctl reload list\ncat /proc/wlan\necho ==END==\n'
+KF_SCRIPT=$'echo ==START==\nsleep 14\nwlanctl reload list\ncat /proc/wlan\necho ==SET==\nwlanctl knobs set wltrace,wlswgrp wllq\ncat /etc/wlan.knobs\necho ==BAD==\nwlanctl knobs set wltrace,nosuchknob\ncat /etc/wlan.knobs\necho ==CLR==\nwlanctl knobs clear\ncat /etc/wlan.knobs\necho ==END==\n'
 rt_image kf "$KF_SCRIPT" "$T/knobs.txt" || bad "image kf"
 run kf "iwlfhtest iwlfhbind iwlnoipoll"
 KF="$T/kf.klar"
@@ -268,6 +268,10 @@ grep -aq '^wlbcbytes=on' "$KF" && ok "knob file: a bare name means on" || bad "k
 grep -aq '^iwlnoipoll=off' "$KF" && ok "knob file: explicit off overrides the cmdline word" || bad "knob file: iwlnoipoll not off"
 grep -aq 'quirks=0x300' "$KF" && ok "knob file: live quirk word 0x300 at boot" || bad "knob file: quirk word not 0x300"
 grep -aq 'auto=up rc=0' "$KF" && ok "knob file: join works with the knobs" || bad "knob file: no link"
+section "$KF" SET BAD | grep -aq '^wltrace$' && section "$KF" SET BAD | grep -aq '^wlswgrp$' && section "$KF" SET BAD | grep -aq '^wllq$' && ok "knobs set: comma list and extra word written to /etc/wlan.knobs" || bad "knobs set: file content wrong"
+section "$KF" SET BAD | grep -aq '^wltxoff' && bad "knobs set: old file content not replaced" || ok "knobs set: replaces the old content"
+section "$KF" BAD CLR | grep -aq '^wltrace$' && ok "knobs set: unknown name rejected, file untouched" || bad "knobs set: unknown name changed the file"
+section "$KF" CLR END | grep -aq '^wl' && bad "knobs clear: file not empty" || ok "knobs clear: file empty"
 echo "-- ap: airplane mode (wlanctl radio off/on): link drops, no rejoin while off, back up when on; control without the switch"
 air_image() { # name script
     printf '%s' "$2" > "$T/$1.sh"

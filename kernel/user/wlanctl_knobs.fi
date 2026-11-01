@@ -1,0 +1,165 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import tools
+import dbgio
+
+export { knob_index, knob_name, cmd_list, cmd_knobs }
+
+const NAME_MAX: u64 = 63
+const FILE_CAP: u64 = 1000
+const KNOB_SCAN: u64 = 64
+
+static mut KNOB: [u8; 64] = [0 as u8; 64]
+static mut TOKEN: [u8; 64] = [0 as u8; 64]
+static mut OUT: [u8; 1024] = [0 as u8; 1024]
+static mut S_ON: [u8; 3] = "on\0"
+static mut S_OFF: [u8; 4] = "off\0"
+
+fn knob_name() -> u64 {
+    return (&KNOB[0 as usize]) as u64
+}
+
+fn knob_index(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < KNOB_SCAN {
+        let n: u64 = dbgio.call(dbgio.OP_WLAN_KNOB_NAME, i, (&KNOB[0 as usize]) as u64, 0, 0)
+        if ulib.bad(n) {
+            return 0
+        }
+        if ulib.streq((&KNOB[0 as usize]) as u64, name) {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn cmd_list() -> u64 {
+    var i: u64 = 0
+    while i < KNOB_SCAN {
+        let n: u64 = dbgio.call(dbgio.OP_WLAN_KNOB_NAME, i, (&KNOB[0 as usize]) as u64, 0, 0)
+        if ulib.bad(n) {
+            tools.ob_flush()
+            return 0
+        }
+        tools.ob_str((&KNOB[0 as usize]) as u64)
+        tools.ob_byte(61)
+        if dbgio.call(dbgio.OP_WLAN_KNOB_STATE, i, 0, 0, 0) == 1 {
+            tools.ob_str((&S_ON[0 as usize]) as u64)
+        } else {
+            tools.ob_str((&S_OFF[0 as usize]) as u64)
+        }
+        tools.ob_nl()
+        i = i + 1
+    }
+    tools.ob_flush()
+    return 0
+}
+
+fn out_name(at: u64, len: u64) -> u64 {
+    var i: u64 = 0
+    var o: u64 = at
+    while i < len {
+        OUT[o as usize] = TOKEN[i as usize]
+        o = o + 1
+        i = i + 1
+    }
+    OUT[o as usize] = 10 as u8
+    return o + 1
+}
+
+fn write_file(len: u64) -> u64 {
+    var path: [u8; 16] = "/etc/wlan.knobs\0"
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&path[0 as usize]) as u64, ulib.O_MAKE, 0)
+    if ulib.bad(fd) {
+        return fd
+    }
+    var done: u64 = 0
+    while done < len {
+        let w: u64 = ulib.sys(ulib.SYS_WRITE, fd, (&OUT[0 as usize]) as u64 + done, len - done)
+        if ulib.bad(w) || w == 0 {
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            return 0 - 1
+        }
+        done = done + w
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return 0
+}
+
+fn cmd_set(args: u64) -> u64 {
+    var s_unknown: [u8; 14] = "unknown knob\0\0"
+    var s_long: [u8; 15] = "too many knobs\0"
+    var s_write: [u8; 29] = "cannot write /etc/wlan.knobs\0"
+    var s_ok: [u8; 13] = "knobs saved\0\0"
+    let ac: u64 = ulib.arg_count(args)
+    var at: u64 = 0
+    var a: u64 = 3
+    while a < ac {
+        let s: u64 = ulib.arg_at(args, a)
+        var p: u64 = 0
+        var t: u64 = 0
+        var more: bool = true
+        while more {
+            let c: u8 = *((s + p) as *mut u8)
+            if c == 44 as u8 || c == 0 as u8 {
+                if t != 0 {
+                    TOKEN[t as usize] = 0 as u8
+                    if knob_index((&TOKEN[0 as usize]) as u64) == 0 {
+                        ulib.esay_line((&s_unknown[0 as usize]) as u64, (&TOKEN[0 as usize]) as u64)
+                        return 2
+                    }
+                    if at + t + 1 > FILE_CAP {
+                        ulib.esay_line((&s_long[0 as usize]) as u64, 0)
+                        return 2
+                    }
+                    at = out_name(at, t)
+                    t = 0
+                }
+                if c == 0 as u8 { more = false }
+            } else {
+                if t >= NAME_MAX {
+                    ulib.esay_line((&s_unknown[0 as usize]) as u64, 0)
+                    return 2
+                }
+                TOKEN[t as usize] = c
+                t = t + 1
+            }
+            p = p + 1
+        }
+        a = a + 1
+    }
+    if ulib.bad(write_file(at)) {
+        ulib.esay_line((&s_write[0 as usize]) as u64, 0)
+        return 1
+    }
+    tools.ob_str((&s_ok[0 as usize]) as u64)
+    tools.ob_nl()
+    tools.ob_flush()
+    return 0
+}
+
+fn cmd_knobs(args: u64) -> u64 {
+    var s_use: [u8; 42] = "usage: wlanctl knobs list|set N,N..|clear\0"
+    var w_list: [u8; 5] = "list\0"
+    var w_set: [u8; 4] = "set\0"
+    var w_clear: [u8; 6] = "clear\0"
+    let ac: u64 = ulib.arg_count(args)
+    if ac >= 3 {
+        let sub: u64 = ulib.arg_at(args, 2)
+        if ac == 3 && ulib.streq(sub, (&w_list[0 as usize]) as u64) {
+            return cmd_list()
+        }
+        if ac == 3 && ulib.streq(sub, (&w_clear[0 as usize]) as u64) {
+            if ulib.bad(write_file(0)) { return 1 }
+            return 0
+        }
+        if ac >= 4 && ulib.streq(sub, (&w_set[0 as usize]) as u64) {
+            return cmd_set(args)
+        }
+    }
+    ulib.esay_line((&s_use[0 as usize]) as u64, 0)
+    return 2
+}
