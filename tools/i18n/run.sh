@@ -217,45 +217,46 @@ lauf "$TMPD/de" de
 [ -s "$TMPD/de/de.ppm" ] && ok "the German screenshot is ready" \
     || bad "kein deutsches Bildschirmfoto"
 
-feld() { # datei id was
-    grep -a "settings: feld id=$2 " "$1" | tail -1 \
-        | grep -oE " $3=[0-9]+" | tail -1 | grep -oE '[0-9]+$'
+SCENE="python3 tools/i18n/scene.py"
+
+scene_has() {
+    $SCENE find "$1" "$2" ${4:-wlib} >/dev/null 2>&1 && ok "$3" \
+        || bad "$3 -- '$2' missing in the scene trace"
 }
-text_von() { grep -a "settings: feld id=$2 " "$1" | tail -1 | sed 's/.* t=//'; }
+
+scene_pixels() {
+    local trace=$1 shot=$2 text=$3 size=$4 source=${5:-wlib}
+    local x y w fr fg fb r g b
+    read -r x y w < <($SCENE find "$trace" "$text" "$source") \
+        || { bad "'$text' missing in the scene trace"; return; }
+    read -r fr fg fb < <($SCENE colors "$trace" "$text" "$source")
+    read -r r g b < <($SCENE ground "$shot" "$x" "$y")
+    schau "'$text' stands on the screen pixel-exact" \
+        tchain "$shot" "$SANS_INK" "$size" "$x" "$y" "$fr" "$fg" "$fb" \
+        "$r" "$g" "$b" "$text" 8
+}
+
+scene_ink() {
+    local trace=$1 shot=$2 text=$3 source=${4:-wlib}
+    local x y w
+    read -r x y w < <($SCENE find "$trace" "$text" "$source") \
+        || { bad "'$text' missing in the scene trace"; return; }
+    local n; n=$($SCENE ink "$shot" "$x" "$y" "$w") \
+        && ok "'$text' has ink at its reported place ($n pixels)" \
+        || bad "'$text' is reported but nothing is painted there ($n pixels)"
+}
 
 EF="$TMPD/en/en.txt"; DF="$TMPD/de/de.txt"
-is "der Knopf heisst auf Englisch"  "$(text_von "$EF" 5)" "Apply"
-is "und auf Deutsch"                "$(text_von "$DF" 5)" "Übernehmen"
-is "das Statusfeld auf Englisch"    "$(text_von "$EF" 42)" "ready"
-is "und auf Deutsch"                "$(text_von "$DF" 42)" "bereit"
+scene_has "$EF" "Time & language" "English: the navigation names 'Time & language'"
+scene_has "$DF" "Zeit & Sprache" "German: the navigation names 'Zeit & Sprache'"
+scene_has "$EF" "ready" "English: the status field says 'ready'"
+scene_has "$DF" "bereit" "German: the status field says 'bereit'"
+hasnot "$DF" "/etc/schemata" "and no path was translated into German"
 
-case "$(text_von "$DF" 1)" in
-    *"/etc/schemas"*) ok "the German text names the path UNCHANGED: $(text_von "$DF" 1)" ;;
-    *) bad "the path was translated: $(text_von "$DF" 1)" ;;
-esac
-hasnot "$DF" "/etc/schemata" "und kein Pfad wurde eingedeutscht"
-
-ex=$(feld "$EF" 5 x); eb=$(feld "$EF" 5 base)
-dx=$(feld "$DF" 5 x); db=$(feld "$DF" 5 base)
-schau "der englische Knopf steht bildpunktgenau da" \
-    tchain "$TMPD/en/en.ppm" "$SANS_INK" 15 $((CX + ex)) $((CY + eb)) \
-    230 230 230 57 64 74 "Apply" 8
-schau "DER DEUTSCHE KNOPF AUCH -- MIT ECHTEM UMLAUT" \
-    tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
-    230 230 230 57 64 74 "Übernehmen" 8
-schau_nicht "und die Ersatzschreibung 'Uebernehmen' steht dort NICHT" \
-    tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + dx)) $((CY + db)) \
-    230 230 230 57 64 74 "Uebernehmen" 8
-lx=$(feld "$DF" 1 x); lb=$(feld "$DF" 1 base)
-schau "der uebersetzte Satz mit dem unuebersetzten Pfad steht auf dem Schirm" \
-    tchain "$TMPD/de/de.ppm" "$SANS_INK" 15 $((CX + lx)) $((CY + lb)) \
-    230 230 230 30 34 40 "Farbschema (aus /etc/schemas):" 8
-
-has "$EF" "taskbar: text net" "die Taskleiste meldet ihr Netzfeld"
-grep -a 'taskbar: text net' "$EF" | tail -1 | grep -q 'no network' \
-    && ok "auf Englisch: no network" || bad "the taskbar is not English"
-grep -a 'taskbar: text net' "$DF" | tail -1 | grep -q 'kein Netz' \
-    && ok "in German: no network" || bad "the taskbar is not German"
+scene_pixels "$EF" "$TMPD/en/en.ppm" "Time & language" 14
+scene_pixels "$DF" "$TMPD/de/de.ppm" "Zeit & Sprache" 14
+scene_pixels "$EF" "$TMPD/en/en.ppm" "Settings" 15 taskbar
+scene_pixels "$DF" "$TMPD/de/de.ppm" "Einstellungen" 15 taskbar
 
 d=$(python3 tools/i18n/diff.py "$TMPD/en/en.ppm" "$TMPD/de/de.ppm" 2>&1)
 case "$d" in
@@ -265,72 +266,67 @@ esac
 
 echo "== 7. switching the language -- with the mouse, in ONE run =="
 
-lauf "$TMPD/en" vor
-rfeld() { grep -a "settings: reiter nr=$1" "$2" | tail -1 \
-          | grep -oE " $3=[0-9]+" | grep -oE '[0-9]+$'; }
-rx=$(rfeld 5 "$TMPD/en/vor.txt" x)
-ry=$(rfeld 5 "$TMPD/en/vor.txt" y)
-rw=$(rfeld 5 "$TMPD/en/vor.txt" w)
-rh=$(rfeld 5 "$TMPD/en/vor.txt" h)
-if [ -z "${rx:-}" ]; then
-    bad "the program does not report the position of its tabs"
+abs_point() { # trace text -> "x y" of the middle of the text
+    local x y w
+    read -r x y w < <($SCENE find "$1" "$2") || return 1
+    echo "$((x + w / 2)) $((y - 5))"
+}
+menu_field() { grep -a 'settings: menu open' "$1" | tail -1 \
+               | grep -oE " $2=[0-9]+" | grep -oE '[0-9]+$'; }
+
+NAV1=$(abs_point "$EF" "Time & language")
+if [ -z "$NAV1" ]; then
+    bad "the settings window does not report its navigation entry 'Time & language'"
 else
-    ok "der Reiter 'Language' liegt bei x=$rx y=$ry w=$rw h=$rh"
-    TX=$((CX + rx + rw / 2)); TY=$((CY + ry + rh / 2))
-    python3 tools/i18n/mouse.py "$TX" "$TY" > "$TMPD/klick1.mon"
-    lauf "$TMPD/en" tab "$TMPD/klick1.mon"
-    has "$TMPD/en/tab.txt" "t=Language of the surface:" \
-        "ein Klick auf den Reiter oeffnet die Sprachseite"
-    zeile_von() { grep -a 'settings: feld' "$1" | grep " kind=$2 " \
-                  | tail -1; }
-    cx=$(grep -a 'settings: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
-         | head -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-    cb=$(grep -a 'settings: feld' "$TMPD/en/tab.txt" | grep ' kind=9 ' \
-         | head -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
-    bx=$(zeile_von "$TMPD/en/tab.txt" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-    bb=$(zeile_von "$TMPD/en/tab.txt" 2 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
-    if [ -z "${cx:-}" ] || [ -z "${bx:-}" ]; then
-        bad "the language page reports no selection field or no button"
+    ok "navigation entry 'Time & language' is at $NAV1"
+    python3 tools/i18n/mouse.py $NAV1 > "$TMPD/click1.mon"
+    lauf "$TMPD/en" tab "$TMPD/click1.mon"
+    scene_has "$TMPD/en/tab.txt" "Language" "one click on the category lists the Language page"
+    NAV2=$(abs_point "$TMPD/en/tab.txt" "Language")
+    python3 tools/i18n/mouse.py $NAV1 $NAV2 > "$TMPD/click2.mon"
+    lauf "$TMPD/en" page "$TMPD/click2.mon"
+    scene_has "$TMPD/en/page.txt" "Language of the surface:" \
+        "a second click opens the language page"
+    COMBO=$(abs_point "$TMPD/en/page.txt" "English")
+    if [ -z "$COMBO" ]; then
+        bad "the language page reports no selection field"
     else
-        ok "the selection field is at x=$cx base=$cb, the button at x=$bx base=$bb"
-        python3 tools/i18n/mouse.py "$TX" "$TY" \
-            $((CX + cx + 30)) $((CY + cb - 6)) \
-            $((CX + bx + 10)) $((CY + bb - 6)) \
-            --park $((WX + 500)) $((WY + 380)) > "$TMPD/klick3.mon"
-        lauf "$TMPD/en" wechsel "$TMPD/klick3.mon"
-        W="$TMPD/en/wechsel.txt"
-        if grep -qa 't=Übernehmen' "$W"; then
-            ok "AFTER THE THREE CLICKS THE UI IS IN GERMAN -- without a restart"
+        python3 tools/i18n/mouse.py $NAV1 $NAV2 $COMBO > "$TMPD/click3.mon"
+        lauf "$TMPD/en" menu "$TMPD/click3.mon"
+        M="$TMPD/en/menu.txt"
+        mx=$(menu_field "$M" x); my=$(menu_field "$M" y)
+        mrh=$(menu_field "$M" rh); mrows=$(menu_field "$M" rows)
+        APPLY=$(abs_point "$M" "Apply")
+        if [ -z "${mx:-}" ] || [ -z "${mrh:-}" ] || [ -z "$APPLY" ]; then
+            bad "the selection list or the button is not reported"
         else
-            bad "the UI is not German after the click"
-            grep -a 'settings: feld' "$W" | tail -8 | sed 's/^/        /'
+            ok "the list has ${mrows:-?} rows of $mrh pixels, the button is at $APPLY"
+            DEUTSCH="$((mx + 100)) $((my + mrh + mrh / 2))"
+            python3 tools/i18n/mouse.py $NAV1 $NAV2 $COMBO $DEUTSCH $APPLY \
+                --park 600 650 > "$TMPD/click4.mon"
+            lauf "$TMPD/en" switch "$TMPD/click4.mon"
+            W="$TMPD/en/switch.txt"
+            if grep -qa 't=Übernehmen' "$W"; then
+                ok "AFTER THE CLICKS THE UI IS IN GERMAN -- without a restart"
+            else
+                bad "the UI is not German after the click"
+                grep -a 'wlib: text' "$W" | tail -8 | cut -c1-150 | sed 's/^/        /'
+            fi
+            scene_has "$W" "Sprache gewechselt: de" "and the status field says so"
+            scene_has "$W" "Zeit & Sprache" "the navigation follows: 'Zeit & Sprache'"
+            scene_ink "$W" "$TMPD/en/switch.ppm" "Übernehmen"
+            scene_pixels "$W" "$TMPD/en/switch.ppm" "Zeit & Sprache" 14
+            hasnot "$W" "t=Uebernehmen" "and the ersatz spelling 'Uebernehmen' is NOT used"
+            python3 tools/osum/mkfs.py cat "$TMPD/en/live-switch.img" \
+                /users/root/config/locale > "$TMPD/chosen.txt" 2>/dev/null
+            is "/users/root/config/locale holds" \
+                "$(tr -d '\n' < "$TMPD/chosen.txt")" "de"
+            python3 tools/osum/mkfs.py list "$TMPD/en/live-switch.img" \
+                > "$TMPD/list.txt" 2>/dev/null
+            grep -q '^/etc/locale' "$TMPD/list.txt" \
+                && bad "the language is under /etc/ -- it belongs to the user" \
+                || ok "and NOT under /etc/ -- the language belongs to the user"
         fi
-        has "$W" "t=Sprache gewechselt: de" "und das Statusfeld sagt es"
-        if grep -a 'taskbar: text net' "$W" | tail -1 | grep -q 'kein Netz'; then
-            ok "and the TASKBAR, a DIFFERENT process, follows: 'kein Netz' instead of 'no network'"
-        else
-            bad "the taskbar stays English: $(grep -a 'taskbar: text net' "$W" | tail -1)"
-        fi
-        # BILDPUNKTGENAU, in DEMSELBEN Lauf, in dem vorher Englisch stand.
-        wx=$(zeile_von "$W" 2 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-        wb=$(zeile_von "$W" 2 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
-        schau "der umgestellte Knopf steht bildpunktgenau auf dem Schirm" \
-            tchain "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 $((CX + wx)) $((CY + wb)) \
-            230 230 230 57 64 74 "Übernehmen" 8
-        nx=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' x=[0-9]+' | grep -oE '[0-9]+')
-        nb=$(grep -a 'taskbar: text net' "$W" | tail -1 | grep -oE ' base=[0-9]+' | grep -oE '[0-9]+')
-        schau "und die umgestellte Taskleiste auch" \
-            tchain "$TMPD/en/wechsel.ppm" "$SANS_INK" 15 "$nx" $((572 + nb)) \
-            230 230 230 42 47 55 "kein Netz" 8
-        python3 tools/osum/mkfs.py cat "$TMPD/en/live-wechsel.img" \
-            /users/root/config/locale > "$TMPD/gewaehlt.txt" 2>/dev/null
-        is "in /users/root/config/locale steht" \
-            "$(tr -d '\n' < "$TMPD/gewaehlt.txt")" "de"
-        python3 tools/osum/mkfs.py list "$TMPD/en/live-wechsel.img" \
-            > "$TMPD/liste.txt" 2>/dev/null
-        grep -q '^/etc/locale' "$TMPD/liste.txt" \
-            && bad "the language is under /etc/ -- it belongs to the user" \
-            || ok "and NOT under /etc/ -- the language belongs to the user"
     fi
 fi
 

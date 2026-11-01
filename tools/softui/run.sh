@@ -12,9 +12,9 @@ export LOOKBUILD="$TMPD/build"
 P=0; F=0
 ok()  { P=$((P+1)); printf '   OK    %s\n' "$*"; }
 bad() { F=$((F+1)); printf '   FAIL  %s\n' "$*"; }
-is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: $2, erwartet $3"; fi; }
-ge()  { if [ "${2:-0}" -ge "$3" ] 2>/dev/null; then ok "$1: $2 (>= $3)"; else bad "$1: ${2:-?}, erwartet >= $3"; fi; }
-le()  { if [ "${2:-999999}" -le "$3" ] 2>/dev/null; then ok "$1: $2 (<= $3)"; else bad "$1: ${2:-?}, erwartet <= $3"; fi; }
+is()  { if [ "$2" = "$3" ]; then ok "$1: $2"; else bad "$1: $2, expected $3"; fi; }
+ge()  { if [ "${2:-0}" -ge "$3" ] 2>/dev/null; then ok "$1: $2 (>= $3)"; else bad "$1: ${2:-?}, expected >= $3"; fi; }
+le()  { if [ "${2:-999999}" -le "$3" ] 2>/dev/null; then ok "$1: $2 (<= $3)"; else bad "$1: ${2:-?}, expected <= $3"; fi; }
 
 shot() { # dir args...
     local d=$1; shift
@@ -23,7 +23,7 @@ shot() { # dir args...
 }
 val() { grep -aoE "$2" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+$'; }
 
-echo "== A. classic ist unveraendert =="
+echo "== A. classic is unchanged =="
 #
 #   git worktree add --detach /root/mgline2-base 54bf135
 #   cd /root/mgline2-base && FIRNLIB=$(pwd)/lib bash tools/look/shot.sh \
@@ -39,33 +39,33 @@ if shot A shape=classic scheme=day mode=light keep=yes accel=tcg; then
             --zeit --ausser 26,62,560,380 2>&1)
         echo "$G" | sed 's/^/        /'
         D=$(echo "$G" | grep -oE 'unterschiedlich [0-9]+' | grep -oE '[0-9]+')
-        is "classic: abweichende Bildpunkte gegen die Grundlinie" "${D:-x}" "0"
+        is "classic: pixels differing from the baseline" "${D:-x}" "0"
     else
         #
-        printf '   --    Abschnitt A uebersprungen: keine Grundlinie unter %s\n' "$REF"
-        printf '         Herstellen:\n'
+        printf '   --    section A skipped: no baseline at %s\n' "$REF"
+        printf '         Create it:\n'
         printf '           git worktree add --detach /root/mgline2-base <commit-vor-softui>\n'
         printf '           cd /root/mgline2-base && FIRNLIB=$(pwd)/lib bash tools/look/shot.sh \\\n'
         printf '               /tmp/softui/base-classic shape=classic scheme=day mode=light keep=yes accel=tcg\n'
     fi
 else
-    bad "classic bootet nicht"
+    bad "classic does not boot"
 fi
 
 echo "== B. the shape file is read COMPLETELY =="
 if shot B shape=modern scheme=day mode=light keep=yes shadow=on extra='einst nostart wigapp=/bin/explorer'; then
     K=$(val "$TMPD/B/serial.txt" 'shape file=modern name=Modern id=1 keys=[0-9]+')
-    is "Marken aus modern.shape" "${K:-0}" "24"
+    is "marks from modern.shape" "${K:-0}" "24"
     CH=$(grep -aoE 'ctrl_h=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
-    is "ctrl_h aus der Datei" "${CH:-0}" "32"
+    is "ctrl_h from the file" "${CH:-0}" "32"
     N=$(grep -aoE 'form n=[0-9]+' "$TMPD/B/serial.txt" | tail -1 | grep -oE '[0-9]+')
     # r402: three words more (WF_TITLE_BAR, WF_CAP_W, WF_FRAME): 17 -> 20
     # W-S: WF_BLURRIM (edge highlight of blurred surfaces) joined: 20 -> 21
-    is "Formwoerter an den Server" "${N:-0}" "21"
+    is "shape words sent to the server" "${N:-0}" "21"
     S=$(stat -c%s assets/shapes/modern.shape)
-    ge "und die Datei ist groesser als der alte Puffer" "$S" "4097"
+    ge "and the file is larger than the old buffer" "$S" "4097"
 else
-    bad "modern bootet nicht"
+    bad "modern does not boot"
 fi
 
 echo "== C. the shadow: mask against rings against none =="
@@ -84,7 +84,7 @@ if [ -s "$TMPD/B/serial.txt" ]; then
     OA=$(echo "$O" | grep -oE 'aapx=[0-9]+' | grep -oE '[0-9]+')
     if [ -n "$MU" ] && [ -n "$RU" ] && [ -n "$OU" ]; then
         MK=$((MU - OU)); RK=$((RU - OU))
-        echo "        Schatten kostet: Maske ${MK} us, Ringe ${RK} us"
+        echo "        shadow cost: mask ${MK} us, rings ${RK} us"
         if [ "$MK" -lt "$RK" ]; then
             ok "the mask is cheaper than the rings ($MK < $RK us)"
         else
@@ -98,8 +98,8 @@ if [ -s "$TMPD/B/serial.txt" ]; then
             "$((MA - OA))" "$(((RA - OA) / 4))"
     fi
     SB=$(val "$TMPD/B/serial.txt" 'shbuild=[0-9]+')
-    le "die Maske wurde je Lauf gebaut" "${SB:-99}" "1"
-    ge "und sie wurde ueberhaupt gebaut" "${SB:-0}" "1"
+    le "the mask was built once per run" "${SB:-99}" "1"
+    ge "and it was built at all" "${SB:-0}" "1"
 fi
 
 echo "== D. the three buttons, and the red one =="
@@ -130,7 +130,7 @@ if shot D shape=modern scheme=day mode=light keep=yes extra='einst nostart' hove
         || bad "the hover state is missing"
     grep -q 'macos: no circles' "$TMPD/D.knopf" \
         && ok "and there are NO three coloured circles" \
-        || bad "da sind bunte Kreise"
+        || bad "there are coloured circles"
 fi
 
 echo "== E. the focus, without a loud colour =="
@@ -164,15 +164,15 @@ for v in "day light 516" "night dark 1236"; do
     if shot "F-$1" shape=modern scheme=$1 mode=$2 keep=yes extra='einst nostart'; then
         M=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
             | awk '$1=="on-accent"&&$2=="accent"{print $6}')
-        is "$1/$2: Text/Akzent im Modell (x100), unveraendert" "${M:-0}" "$3"
+        is "$1/$2: text/accent in the model (x100), unchanged" "${M:-0}" "$3"
         W=$(python3 tools/theme/model.py contrast "assets/schemes/$1.scheme" $2 \
             | awk '$3=="normal"{print $6}' | sort -n | head -1)
-        echo "        kleinstes Textpaar im Modell: $W"
+        echo "        smallest text pair in the model: $W"
         K=$(python3 tools/softui/title.py "$TMPD/F-$1/desktop.ppm" \
             "$TMPD/F-$1/serial.txt" 2>&1 | tail -1)
         echo "        $K"
         R=$(echo "$K" | grep -oE 'ratio [0-9]+' | grep -oE '[0-9]+')
-        ge "$1/$2: Titelschrift im BILD, gemessen" "${R:-0}" "$(( $3 / 100 ))"
+        ge "$1/$2: title text in the IMAGE, measured" "${R:-0}" "$(( $3 / 100 ))"
     fi
 done
 
@@ -186,12 +186,12 @@ for d in B D F-day F-night; do
         if [ $R -eq 0 ]; then
             ok "$d: no empty, clipped or overlapping label"
         else
-            bad "$d: Beanstandungen"
+            bad "$d: remarks"
             head -8 "$TMPD/$d.pruef" | sed 's/^/          /'
         fi
     fi
 done
 
 echo
-echo "SOFTUI: $P bestanden, $F gefallen"
+echo "SOFTUI: $P passed, $F failed"
 [ "$F" -eq 0 ]
