@@ -186,8 +186,10 @@ def main():
             q = qualify(txt, mod, place, locs - {n}, violations, n)
             parts.append(q)
         if mod == "main" and a.wrap:
+            wrapped = set()
             for n in exported:
-                if n in by and place[n] != "main":
+                if n in by and place[n] != "main" and n not in wrapped:
+                    wrapped.add(n)
                     seg_lines = lines[by[n]["head"]:by[n]["end"]]
                     w = make_wrapper(seg_lines, place[n]) if by[n]["kind"] == "fn" else make_const_alias(seg_lines, place[n])
                     if w is None:
