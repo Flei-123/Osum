@@ -21,8 +21,8 @@ const IP_AT: u64 = 32
 const UDP_AT: u64 = 52
 const DHCP_AT: u64 = 60
 const BROADCAST: u64 = 0xFFFFFFFF
-const ROUND_WAIT: u64 = 100
-const SEND_ROUNDS: u64 = 4
+const ROUND_WAIT: u64 = 6000
+const SEND_ROUNDS: u64 = 3
 const SETTLE_IDLES: u64 = 10
 const BUF: usize = 2400
 const NOTE_REPLY: u64 = 1
@@ -117,18 +117,27 @@ fn reply_parse(p: u64, n: usize, xid: u64, lease: *mut Lease) -> bool {
 }
 
 fn wait_reply(s: *mut connect.Session, g: *mut device.Device, idle: fn(u64) -> u64, idle_ctx: u64,
-    xid: u64, lease: *mut Lease, raw: u64, plain: u64) -> bool {
+    xid: u64, lease: *mut Lease, raw: u64, plain: u64, want_offer: bool) -> bool {
     var tries: u64 = 0
     while tries < ROUND_WAIT {
         let n: i64 = connect.data_receive(s, g, raw, BUF, plain, BUF)
         if n > 0 {
-            if reply_parse(plain, n as usize, xid, lease) { return true }
+            var got: Lease = lease_new()
+            if reply_parse(plain, n as usize, xid, &got) && kind_wanted(got.kind, want_offer) {
+                *lease = got
+                return true
+            }
         } else {
             idle(idle_ctx)
             tries = tries + 1
         }
     }
     return false
+}
+
+fn kind_wanted(kind: u64, want_offer: bool) -> bool {
+    if want_offer { return kind == llc.D_OFFER }
+    return kind == llc.D_ACK || kind == llc.D_NAK
 }
 
 fn settle(idle: fn(u64) -> u64, idle_ctx: u64) {
@@ -140,12 +149,13 @@ fn settle(idle: fn(u64) -> u64, idle_ctx: u64) {
 }
 
 fn exchange(s: *mut connect.Session, g: *mut device.Device, idle: fn(u64) -> u64, idle_ctx: u64,
-    xid: u64, lease: *mut Lease, frame: u64, flen: usize, prot: u64, raw: u64, plain: u64) -> i64 {
+    xid: u64, lease: *mut Lease, frame: u64, flen: usize, prot: u64, raw: u64, plain: u64,
+    want_offer: bool) -> i64 {
     var round: u64 = 0
     while round < SEND_ROUNDS {
         note(NOTE_REQUEST, round, (*lease).ip, (*lease).server, flen as u64, xid)
         if connect.data_send(s, g, frame, flen, prot, BUF) < 0 { return E_DHCP_SEND }
-        if wait_reply(s, g, idle, idle_ctx, xid, lease, raw, plain) { return 0 }
+        if wait_reply(s, g, idle, idle_ctx, xid, lease, raw, plain, want_offer) { return 0 }
         round = round + 1
     }
     return 1
@@ -166,11 +176,11 @@ fn dhcp_acquire(s: *mut connect.Session, g: *mut device.Device, idle: fn(u64) ->
     let o: u64 = (&out[0]) as u64
     let dl: usize = discover_frame(o, sa, bssid, xid)
     settle(idle, idle_ctx)
-    let er: i64 = exchange(s, g, idle, idle_ctx, xid, lease, o, dl, (&prot[0]) as u64, (&raw[0]) as u64, (&plain[0]) as u64)
+    let er: i64 = exchange(s, g, idle, idle_ctx, xid, lease, o, dl, (&prot[0]) as u64, (&raw[0]) as u64, (&plain[0]) as u64, true)
     if er < 0 { return er }
     if er > 0 || (*lease).kind != llc.D_OFFER { return E_DHCP_NO_OFFER }
     let rl: usize = request_frame(o, sa, bssid, xid, (*lease).ip, (*lease).server)
-    let qr: i64 = exchange(s, g, idle, idle_ctx, xid, lease, o, rl, (&prot[0]) as u64, (&raw[0]) as u64, (&plain[0]) as u64)
+    let qr: i64 = exchange(s, g, idle, idle_ctx, xid, lease, o, rl, (&prot[0]) as u64, (&raw[0]) as u64, (&plain[0]) as u64, false)
     if qr < 0 { return qr }
     if qr > 0 { return E_DHCP_NO_ACK }
     if (*lease).kind == llc.D_NAK { return E_DHCP_NAK }
