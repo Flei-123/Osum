@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/brand-env.sh"
 #
 #   bash tools/usbimg/run.sh [arbeitsverzeichnis]
 #
@@ -9,7 +10,7 @@ ROOT=$(pwd)
 TMPD=${1:-$(mktemp -d)}
 mkdir -p "$TMPD"
 IMGDIR="$TMPD/bau"
-IMG="$IMGDIR/osum-usb.img"
+IMG="$IMGDIR/${MARKE_DATEI}-usb.img"
 
 pass=0
 fail=0
