@@ -26,11 +26,6 @@ reference next to it so the integer routine itself can be judged.
 import os
 import sys
 
-# ---------------------------------------------------------------- fixed point
-#
-# One scale for everything: 1.0 == 1 << 24.  A product of two values in
-# [0,1] fits in 48 bits, so u64 never overflows and Firn needs no
-# 128-bit type.
 SCALE = 1 << 24
 
 
@@ -91,7 +86,7 @@ def contrast100(a, b):
     return ((la + SCALE // 20) * 100) // (lb + SCALE // 20)
 
 
-HOVER_PCT_LIGHT = 6   # kernel/user/wlibc.fi, round W-D
+HOVER_PCT_LIGHT = 6
 HOVER_PCT_DARK = 8
 
 
@@ -113,13 +108,8 @@ def mix(a, b, p):
     return out
 
 
-# ------------------------------------------------------------ layer 1: ramps
 WHITE = 0xFFFFFF
 BLACK = 0x000000
-# steps 100..500 are the base mixed towards white, 700..900 towards
-# black.  The base itself is step 600.  The percentages are read off
-# the Tailwind ramps that the palette file is built on, so a ramp
-# generated from #2563EB lands within a few units of blue-100..blue-900.
 LIGHTEN = [88, 76, 60, 38, 18]
 DARKEN = [16, 33, 50]
 A_100, A_200, A_300, A_400, A_500, A_600, A_700, A_800, A_900 = range(9)
@@ -142,7 +132,6 @@ def ramp(base):
     return r
 
 
-# -------------------------------------------------------- layer 2: semantics
 SEMANTIC = [
     "surface", "surface-raised", "surface-sunken", "surface-hover",
     "surface-pressed", "text-primary", "text-secondary", "text-disabled",
@@ -153,11 +142,6 @@ SEMANTIC = [
 ]
 S = {n: i for i, n in enumerate(SEMANTIC)}
 
-# -------------------------------------------------------- layer 3: components
-#
-# Every entry is a SEMANTIC NAME.  There is no raw colour on this side
-# of the file and there is none on the Firn side either; that is what
-# tests/theme/rohfarben.py counts.
 COMPONENT = [
     ("window-bg", "surface"),
     ("window-text", "text-primary"),
@@ -263,9 +247,6 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_0])
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
-            # FILL RULE (Justin 02.10.2026): a widget with a border never
-            # has the fill of its ground -- control and field step off
-            # the collapsed surface by one ramp step.
             put("control", neutral[N_100])
             put("control-hover", neutral[N_200])
             put("control-pressed", neutral[N_300])
@@ -279,25 +260,17 @@ def resolve(scheme, dark, accent_override=None):
         else:
             put("surface", neutral[N_50])
             put("surface-raised", neutral[N_0])
-            # FILL RULE: sunken N_100 -> N_200, it was the fill of the field
-            # (a list with a scroll track: the track vanished).
             put("surface-sunken", neutral[N_200])
             put("surface-hover", neutral[N_100])
             put("surface-pressed", neutral[N_200])
             put("control", neutral[N_200])
-            # ROUND W-D (r1002): subtle hover, see kernel/user/wlibc.fi HOVER_PCT_*
             put("control-hover", mix(neutral[N_200], neutral[N_900], HOVER_PCT_LIGHT))
             put("control-pressed", neutral[N_400])
             put("field", neutral[N_100])
             put("text-primary", neutral[N_900])
-            # n600 and not n500: n500 on surface-sunken measures 4.34:1
-            # and that is below 4.5.  The number decided the token.
             put("text-secondary", neutral[N_600])
             put("text-disabled", neutral[N_400])
             put("border", neutral[N_300])
-            # n500 and not n400: a control boundary is a user interface
-            # component (WCAG 1.4.11) and needs 3:1.  n400 measures
-            # 2.45:1 on this surface.  The number decided the token.
             put("border-strong", neutral[N_500])
             put("shadow", neutral[N_950])
         start, step = A_600, +1
@@ -308,7 +281,6 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-sunken", neutral[N_1000])
             put("surface-hover", neutral[N_800])
             put("surface-pressed", neutral[N_700])
-            # FILL RULE: see the light high-contrast binding.
             put("control", neutral[N_800])
             put("control-hover", neutral[N_700])
             put("control-pressed", neutral[N_600])
@@ -322,7 +294,6 @@ def resolve(scheme, dark, accent_override=None):
         else:
             put("surface", neutral[N_900])
             put("surface-raised", neutral[N_800])
-            # FILL RULE: sunken N_950 -> N_1000, it was the fill of the field.
             put("surface-sunken", neutral[N_1000])
             put("surface-hover", mix(neutral[N_800], neutral[N_0], HOVER_PCT_DARK))
             put("surface-pressed", neutral[N_600])
@@ -331,19 +302,6 @@ def resolve(scheme, dark, accent_override=None):
             put("control-pressed", neutral[N_500])
             put("field", neutral[N_950])
             put("text-primary", neutral[N_50])
-            # ROUND FARBE (15.09.2026), A-021: text-secondary N_400 ->
-            # N_300 in the dark branch.  WCAG 2.1 (1.4.3) wants 4.5:1
-            # for normal text; N_400 on surface-hover measured 4.038
-            # (day/night), 4.073 (paper), 4.075 (midnight) -- four
-            # promises below the line.  N_300 gives 6.974 / 6.896 /
-            # 7.066 and nothing else gets worse (the tightest other
-            # pairing, on surface-raised, sits at 9.85..10.18).
-            #
-            # This is the SECOND implementation being pulled in the
-            # SAME commit as the first (kernel/user/wlibc.fi), not
-            # afterwards.  Four of the five causes round KLEINKRAM
-            # dug up were exactly this file lagging behind that one.
-            # The number decided the token; see tools/theme/wcag_check.py.
             put("text-secondary", neutral[N_300])
             put("text-disabled", neutral[N_600])
             put("border", neutral[N_700])
@@ -351,23 +309,6 @@ def resolve(scheme, dark, accent_override=None):
             put("shadow", neutral[N_1000])
         start, step = A_400, -1
 
-    # ---- the accent, and the check that decides whether it may stay
-    #
-    # Two rules, both WCAG 2.1: text on the accent needs 4.5:1 (1.4.3),
-    # and the accent is a user interface component against the surface
-    # and needs 3:1 (1.4.11).  The high-contrast scheme raises both to
-    # 7:1 and 4.5:1 -- that is what it is for.
-    #
-    # HOVER AND PRESSED ARE NOT RAMP STEPS.  They were, and the green
-    # accent of `night` showed why that is wrong: on a green the
-    # readable label is BLACK, so walking the ramp darker to satisfy
-    # the surface rule walks the label rule off a cliff, and no step of
-    # a green ramp satisfies both at once.  They are now derived from
-    # the accent in the direction that can only HELP the label: if the
-    # label is the light candidate the states go darker, if it is the
-    # dark candidate they go lighter.  Then the label contrast of the
-    # hover and pressed states is >= that of the accent itself, by
-    # construction, and only one pairing has to be searched.
     need_text = 700 if high else 450
     need_ui = 450 if high else 300
     on_candidates = [neutral[N_0], neutral[N_1000], neutral[N_900]]
@@ -393,9 +334,6 @@ def resolve(scheme, dark, accent_override=None):
             idx, ok = i, True
             break
     if not ok:
-        # Nothing on the ramp satisfies both rules.  Take the step that
-        # comes closest instead of the one the user asked for -- and
-        # keep ok = False, because the settings window has to say so.
         def score(i):
             r_txt, r_bg = judge(i)
             t = r_txt * 100 // need_text
@@ -406,18 +344,9 @@ def resolve(scheme, dark, accent_override=None):
     accent = ra[idx]
     hov_c, prs_c, on_accent = states_of(accent)
 
-    # The focus ring is not the accent.  It is the step of the accent
-    # ramp that stands out most against the surface -- for a light
-    # scheme the darkest, for a dark scheme the lightest.  Tying it to
-    # the accent itself produced a 1.91:1 ring on `night` in light mode.
     focus = max(range(9), key=lambda i: contrast100(ra[i],
                                                     sem[S["surface"]]))
 
-    # The three status colours are read off their own ramps by the same
-    # rule as the accent: nearest step to the scheme's own that clears
-    # the text bar against the surface, else the step with the most
-    # contrast.  Without this the high-contrast scheme in dark mode
-    # showed 5.32:1 for danger against its 7:1 bar.
     def fit_status(r):
         cand = sorted(range(9), key=lambda i: (abs(i - start),
                                                0 if (i - start) * step >= 0
@@ -434,9 +363,6 @@ def resolve(scheme, dark, accent_override=None):
     put("accent-disabled", mix(accent, sem[S["surface"]], 65))
     put("on-accent", on_accent)
     put("border-focus", ra[focus])
-    # r399 (design audit): a selection is a TINT of the accent over the raised surface and
-    # keeps the text colour (the accent goes into the indicator bar the list painters
-    # draw); the high-contrast schemes keep the solid accent plate.
     if high:
         put("selection", accent)
         put("on-selection", on_accent)
@@ -456,10 +382,6 @@ def resolve(scheme, dark, accent_override=None):
     }
 
 
-# ---------------------------------------------------------------- the checks
-#
-# Every text-on-surface pairing the system can actually produce.  Not a
-# selection of the flattering ones.
 TEXT_PAIRS = [
     ("text-primary", "surface", "normal"),
     ("text-primary", "surface-raised", "normal"),
@@ -482,15 +404,11 @@ TEXT_PAIRS = [
     ("text-primary", "control-hover", "normal"),
     ("text-primary", "control-pressed", "normal"),
     ("text-primary", "field", "normal"),
-    # non-text: a user interface component against its background, 3:1
     ("accent", "surface", "ui"),
     ("border-focus", "surface", "ui"),
     ("border-strong", "surface", "ui"),
     ("border", "surface", "decor"),
 ]
-# A divider inside a panel is decoration and WCAG 1.4.11 exempts it
-# outright.  It is measured and printed anyway -- a number that is
-# allowed to be low still has to be looked at.
 LIMIT = {"normal": 450, "large": 300, "ui": 300, "decor": 0}
 LIMIT_HIGH = {"normal": 700, "large": 450, "ui": 450, "decor": 0}
 
@@ -506,14 +424,6 @@ def checks(res):
     return out
 
 
-# --------------------------------------------------------------- fill rule
-#
-# FILL RULE (Justin 02.10.2026, same rule as fUi's
-# themefile.check_fill_distinct): a widget with a border never has the
-# fill of the ground it sits on.  Measured in OKLab (perceptual), the
-# distance has to be at least FILL_MIN.  This is a CHECK, not part of
-# the resolution, so floating point is fine here; the kernel binds the
-# same tokens and tests/theme/run.sh section 5b compares the two.
 FILL_MIN = 0.012
 FILL_PAIRS = [
     ("field", "surface"), ("field", "surface-raised"),

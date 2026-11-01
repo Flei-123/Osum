@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/tz/check.py <oracle> -- every zone of lib/tz/zonedata.fi against IANA tzdata.
-# Instants: a 2h53m grid over 2024..2040 plus both sides (-1 s, 0, +1 s) of every real
-# changeover of every zone (found by bisection). Prints "OK <what>" / "FAIL <what>".
 import sys, subprocess, datetime as dt
 from zoneinfo import ZoneInfo
 sys.path.insert(0, __file__.rsplit("/", 1)[0] if "/" in __file__ else ".")
@@ -71,13 +68,11 @@ for idx, reg, name, base, rule in zones:
     if got != want:
         n = sum(1 for a, b in zip(got, want) if a != b)
         bad_zones.append("%s (%d of %d differ)" % (name, n, len(pts)))
-    # the python twin agrees too (second reading of the same rules)
     twin = [tzmodel.offset_min(t, base, rule) for t in pts]
     if twin != want:
         bad_zones.append("%s (python twin)" % name)
 ok(not bad_zones, "all %d zones x changeovers = %d instants equal IANA tzdata %s" % (len(zones), total, "; ".join(bad_zones[:4])))
 
-# negative controls: the oracle must be able to disagree
 def raw(base_w, rule, t):
     return int(run("raw %s%d %d %d\n" % ("w" if base_w < 0 else "", abs(base_w), rule, t))[0])
 vi = ZoneInfo("Europe/Vienna"); ny = ZoneInfo("America/New_York")
@@ -87,7 +82,6 @@ ok(raw(-300, 2, t) == -240 and raw(-300, 0, t) == -300, "control: negative base 
 ok(raw(-300, 1, int(dt.datetime(2026, 3, 29, 1, 30, tzinfo=UTC).timestamp())) == -240, "control: EU rule on a west base still follows the UTC instant")
 mar = int(dt.datetime(2026, 3, 15, 12, tzinfo=UTC).timestamp())
 ok(raw(60, 2, mar) == 120 and raw(60, 1, mar) == 60, "control: 15 Mar 2026 US rule already summer, EU not yet")
-# the changeover instants, exact to the second
 eu = int(dt.datetime(2026, 3, 29, 1, 0, 0, tzinfo=UTC).timestamp())
 ok(raw(60, 1, eu - 1) == 60 and raw(60, 1, eu) == 120, "EU: switch at 01:00:00 UTC on 29 Mar 2026")
 us = int(dt.datetime(2026, 3, 8, 7, 0, 0, tzinfo=UTC).timestamp())

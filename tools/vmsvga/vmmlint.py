@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/vmsvga/vmmlint.py -- static check of the VirtualBox guest-device (VMMDev) requests in kernel/drv/gpu/vmsvga.fi.
-#
-# WHY: QEMU has no VMMDev, so the gate cannot talk to the real thing. The failures found on VirtualBox 7.2.20 were exactly of the kind a
-# table check finds: a wrong event_ack (host answers the stale "last read" request = 0x0 forever), a wrong request size/type (rc = -2).
-# The expected values below come from the VirtualBox headers (VMMDev.h / Linux vmmdev.h, copies in /root/jarvis/data/vmmdev-ref):
-#   VMMDevReq_*: ReportGuestInfo 50, CtlGuestFilterMask 42, GetDisplayChangeRequest2 54, SetGuestCapabilities 56, ReportGuestInfo2 58,
-#   ReportGuestStatus 59; sizes = 24-byte header + body (AssertCompileSize in VMMDev.h); VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST = BIT(2);
-#   VMMDEV_GUEST_SUPPORTS_GRAPHICS = BIT(2); VBoxGuestFacilityType_Graphics = 1100, _Driver = 20; status Active = 50.
-# Usage: vmmlint.py <vmsvga.fi>     exit 0 = all checks pass; prints one OK/FAIL line per check.
 import re, sys
 
 src = open(sys.argv[1], encoding="latin1").read()
@@ -44,7 +35,6 @@ for name, size, fn in sizes:
     val = eval(m.group(1)) if m else None
     check("request %s has size %s (header 24 + body)" % (name, size), val == size)
 
-# display change request: event_ack field (offset 36) must carry VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST, else the host returns 0x0
 check("GetDisplayChangeRequest2: event_ack (offset 36) = VMM_EVENT_DISPLAY", re.search(r"wr32\(rq, 36, VMM_EVENT_DISPLAY\)", hint) is not None)
 check("GetDisplayChangeRequest2: display index (offset 40) = 0", re.search(r"wr32\(rq, 40, 0\)", hint) is not None)
 check("GetDisplayChangeRequest2: xres/yres read at offsets 24/28", "rd32(rq, 24)" in hint and "rd32(rq, 28)" in hint)

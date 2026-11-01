@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-# tools/pdf/search_cmp.py -- the viewer's text search against poppler.
-#   search_cmp.py pdfsearch-binary file.pdf [file2.pdf ...]
-# Per page: (a) the reader's text with all blanks removed equals pdftotext's with all
-# blanks removed (folded the same way); (b) for up to 12 words of the page the number of
-# matches equals the number of occurrences in pdftotext's text. Prints `OK n` / `DIFF ...`.
 import re, subprocess, sys, unicodedata
 
 def fold(t):
@@ -30,7 +25,6 @@ for pdf in sys.argv[2:]:
         ref = subprocess.run(["pdftotext", "-raw", "-f", str(pg), "-l", str(pg), pdf, "-"], capture_output=True).stdout.decode("utf-8", "replace")
         total += 1
         a, b = squash(mine), squash(ref)
-        # a hyphen joined at a line end is removed by the reader and kept by pdftotext
         b2 = re.sub(r"-(?=\n)", "", fold(ref))
         b2 = re.sub(r"\s+", "", b2)
         if a != b and a != b2:
@@ -49,7 +43,6 @@ for pdf in sys.argv[2:]:
             out = subprocess.run([binpath, pdf, w, "100"], capture_output=True).stdout.decode()
             m = re.search(r"^page %d matches=(\d+)" % pg, out, re.M)
             got = int(m.group(1)) if m else -1
-            # an occurrence split over a line end may be found by one and not the other
             if got != want and abs(got - want) > 0:
                 bad += 1
                 print("DIFF %s page %d word %r: mine %d, poppler %d" % (pdf, pg, w, got, want))

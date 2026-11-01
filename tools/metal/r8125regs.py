@@ -1,54 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/metal/r8125regs.py -- HAELT DEN 8125-ZWEIG GEGEN LINUX.
-
-WARUM ES DAS GIBT
-=================
-
-`kernel/drv/net/r8169.fi` faehrt drei Spielarten desselben Chips:
-
-    VAR_CP    RTL8139C+   -- in QEMU GEMESSEN, Oktett fuer Oktett.
-    VAR_8169  RTL8168/69  -- aus dem Datenblatt, nie an einem Brett.
-    VAR_8125  RTL8125/26  -- aus Linux, WEDER GEMESSEN NOCH MESSBAR:
-                             QEMU 7.2 hat kein Modell dieses Chips.
-
-Fuer VAR_8125 gibt es also keinen Testlauf, der irgendetwas widerlegen
-koennte. Es gibt nur eine einzige Pruefmoeglichkeit: den Quelltext Zeile
-fuer Zeile gegen den Treiber halten, der auf echter Hardware laeuft.
-
-UND DAS HAT SICH SOFORT GELOHNT. Beim ersten Lauf fiel auf:
-
-    r8169.fi, tx_kick:   w8(state, u, R_TPPOLL25, 64)
-    Linux, rtl8169_doorbell:
-        if (rtl_is_8125(tp))  RTL_W16(tp, TxPoll_8125, BIT(0));
-        else                  RTL_W8 (tp, TxPoll,      NPQ);
-
-Die ADRESSE war richtig aus Linux uebernommen (0x90), BREITE und WERT
-aber vom alten Chip stehen geblieben (8 Bit, NPQ = Bit 6 = 0x40). Auf
-einer echten RTL8125 haette das geheissen: Chip laeuft an, Verbindung
-steht, Empfang geht -- und kein einziges Paket verlaesst die Karte, weil
-der Sendeanstoss nie ankommt. Kein Absturz, keine Meldung.
-
-WAS GEPRUEFT WIRD
-=================
-
-  1. Die sechs 8125-Registeradressen aus `r8169.fi` gegen die Namen aus
-     Linux' `r8169_main.c`.
-  2. Die ZUGRIFFSBREITE und der WERT an den Stellen, an denen sich die
-     Spielarten unterscheiden. Genau hier sass der Fehler, und eine
-     Pruefung, die nur Adressen vergleicht, haette ihn nicht gesehen.
-  3. Dass jede 8125-Konstante in `r8169.fi` ueberhaupt eine Quellenzeile
-     im Dateikopf hat.
-
-AUFRUF
-======
-
-    python3 tools/metal/r8125regs.py             # gegen /tmp/r8169_linux.c
-    python3 tools/metal/r8125regs.py --fetch     # laedt r8169_main.c neu
-    python3 tools/metal/r8125regs.py --src DATEI
-
-Rueckgabe 0, wenn nichts widerlegt ist.
-"""
 
 import os
 import re
@@ -81,7 +32,7 @@ ZUGRIFFE = [
      "IntrStatus_8125 ist 32 Bit breit"),
 ]
 
-OFFEN = {
+OPEN = {
     "INTCFG0_EN": (
         "Wir schreiben INT_CFG0 (0x34) Bit 0 = 1, um den "
         "Unterbrechungsblock einzuschalten. Linux UPSTREAM definiert "
@@ -103,7 +54,6 @@ def hol_linux(path, force=False):
 
 
 def linux_offsets(text):
-    """Die Adressen aus dem grossen enum in r8169_main.c."""
     out = {}
     for m in re.finditer(r"^\s*(\w+_8125)\s*=\s*(0x[0-9a-fA-F]+),", text, re.M):
         out[m.group(1)] = int(m.group(2), 16)
@@ -123,7 +73,6 @@ def unsere_konstanten(text):
 
 
 def unsere_zugriffe(text, fn, konst):
-    """(breite, wert) der Zugriffe auf `konst` innerhalb von `fn`."""
     m = re.search(r"^fn %s\(" % re.escape(fn), text, re.M)
     if not m:
         return []
@@ -200,7 +149,7 @@ def main():
 
     print()
     print("DELIBERATELY OPEN (not an error, but unchecked)")
-    for name, text in OFFEN.items():
+    for name, text in OPEN.items():
         print("   %s = %s" % (name, ok_.get(name)))
         for zeile in re.findall(r".{1,64}(?:\s|$)", text):
             if zeile.strip():

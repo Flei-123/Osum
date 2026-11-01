@@ -3,9 +3,9 @@
 import re
 import sys
 
-ZEIT = re.compile(r'^\s*\[(\w*)\s+(\d+),(\d{3}) s\s+(\S+)\]\s*$')
-KOPF = re.compile(r'^== (.+?) ==\s*$')
-FEHL = re.compile(r'^\s*FEHLER\s+(\S+) ist fehlgeschlagen')
+TIME = re.compile(r'^\s*\[(\w*)\s+(\d+),(\d{3}) s\s+(\S+)\]\s*$')
+HEADER = re.compile(r'^== (.+?) ==\s*$')
+FAIL = re.compile(r'^\s*FEHLER\s+(\S+) ist fehlgeschlagen')
 ZUS = re.compile(r'^\s*([A-Za-z][A-Za-z0-9]*): (\d+) (passed|proofs)')
 BILANZ = re.compile(r'^(ALLE (\d+) ABSCHNITTE BESTANDEN, (\d+) Zusagen'
                     r'|(\d+) Abschnitte bestanden, (\d+) FEHLGESCHLAGEN \((\d+) Zusagen\))')
@@ -20,7 +20,7 @@ def lies(pfad):
     bilanz = None
     for zeile in open(pfad, errors="replace"):
         z = zeile.rstrip("\n")
-        m = KOPF.match(z)
+        m = HEADER.match(z)
         if m:
             offen = {"titel": m.group(1), "fehler": False, "zusagen": None}
             continue
@@ -28,10 +28,10 @@ def lies(pfad):
         if m:
             offen["zusagen"] = int(m.group(2))
             continue
-        if FEHL.match(z):
+        if FAIL.match(z):
             offen["fehler"] = True
             continue
-        m = ZEIT.match(z)
+        m = TIME.match(z)
         if m:
             accel, s, ms, name = m.group(1), int(m.group(2)), int(m.group(3)), m.group(4)
             ab[name] = {
@@ -63,8 +63,8 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    a, a_s, a_b = lies(sys.argv[1])   # TCG
-    b, b_s, b_b = lies(sys.argv[2])   # KVM
+    a, a_s, a_b = lies(sys.argv[1])
+    b, b_s, b_b = lies(sys.argv[2])
 
     namen = list(a.keys()) + [n for n in b if n not in a]
 

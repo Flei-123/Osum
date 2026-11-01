@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/iwlfh/ref.py -- blobs + expected kernel lines for tools/iwlfh/run.sh (HP-9b).
-
-usage: python3 -I tools/iwlfh/ref.py gen <dir>
-Writes <name>.bin (synthetic family-8000 ucode) and <name>.exp (the five summary lines the kernel
-prints after `iwl: fh `) for the cases of tools/wlan/fh8000_ref.py that fit the kernel bring-up
-(bounce buffer 0x20000). The expected text comes from the INDEPENDENT Python reference."""
 import os
 import sys
 

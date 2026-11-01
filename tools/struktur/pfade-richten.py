@@ -9,7 +9,6 @@ MUSTER = re.compile(r"kernel/([a-z0-9_]+)\.fi")
 
 
 def ort_von(name):
-    """Wo liegt <name>.fi wirklich? Ohne user/ und app/."""
     for stamm, verz, namen in os.walk(os.path.join(WURZEL, "kernel")):
         verz[:] = [d for d in verz if d not in ("user", "app")]
         if name + ".fi" in namen:
@@ -34,7 +33,7 @@ def dateien():
 def main():
     trocken = "--trocken" in sys.argv
     cache = {}
-    n_zeilen = 0
+    n_lines = 0
     n_dateien = 0
     for p, rel in dateien():
         try:
@@ -67,21 +66,21 @@ def main():
                 geaendert = True
                 return neu
 
-            neu_z = MUSTER.sub(ersetze, z)
-            if neu_z != z:
+            new_z = MUSTER.sub(ersetze, z)
+            if new_z != z:
                 if trocken:
                     print("  %s:%d" % (rel, i + 1))
                     print("    - %s" % z.strip()[:110])
-                    print("    + %s" % neu_z.strip()[:110])
-                zeilen[i] = neu_z
-                n_zeilen += 1
+                    print("    + %s" % new_z.strip()[:110])
+                zeilen[i] = new_z
+                n_lines += 1
         if geaendert:
             n_dateien += 1
             if not trocken:
                 with open(p, "w", encoding="utf-8") as f:
                     f.write("\n".join(zeilen))
     wort = "waeren zu richten" if trocken else "gerichtet"
-    print("%d Zeilen in %d Dateien %s" % (n_zeilen, n_dateien, wort))
+    print("%d Zeilen in %d Dateien %s" % (n_lines, n_dateien, wort))
     return 0
 
 

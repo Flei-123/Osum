@@ -97,10 +97,8 @@ def main():
 
     def gz_make(key, srvname, raw, force_bad=False):
         """Write <srvname>.gz next to the raw file and add its sysgz line."""
-        # mtime 0 + no name: reproducible bytes
         z = bytearray(gzip.compress(raw, 9, mtime=0))
         if force_bad and not flipped[0]:
-            # flip a bit in the middle of the deflate data (header is 10 octets, trailer 8)
             at = 10 + max(1, (len(z) - 18) // 2)
             z[at] ^= 0x10
             flipped[0] = True
@@ -194,8 +192,8 @@ def main():
         open(vz + ".sig", "wb").write(sig)
         pub = m.ed25519_public(sk)
     else:
-        b = vf.bund_lesen(opt["--bund"])
-        roh = vf.verzeichnis_text(count, b["haupt"]["gen"], [dict(k) for k in b["kette"]],
+        b = vf.bund_read(opt["--bund"])
+        roh = vf.dir_text(count, b["haupt"]["gen"], [dict(k) for k in b["kette"]],
                                   [], []).decode()
         roh += "\n".join(lines) + "\n"
         open(vz, "wb").write(roh.encode("ascii"))

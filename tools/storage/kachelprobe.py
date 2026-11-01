@@ -30,7 +30,7 @@ WAS DIESE DATEI TUT:
 import re
 import sys
 
-KACHEL = re.compile(
+TILE = re.compile(
     r"speicher: kachel i=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
     r"farbe=(\d+) name=(\S+)")
 
@@ -74,7 +74,7 @@ def main(argv):
 
     kacheln = [(int(m.group(1)), int(m.group(2)), int(m.group(3)),
                 int(m.group(4)), int(m.group(5)), int(m.group(6)),
-                m.group(7)) for m in KACHEL.finditer(txt)]
+                m.group(7)) for m in TILE.finditer(txt)]
     if not kacheln:
         print("kachelprobe: keine einzige Kachel gemeldet")
         return 1

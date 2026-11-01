@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/termtabs/zombie.py <serial.txt> <cycles> -- reads one tools/termtabs/zombie.sh run (W-X2: tabs leave no corpse behind)
 import re, sys
 
 ser = open(sys.argv[1], errors='replace').read().split('\n')

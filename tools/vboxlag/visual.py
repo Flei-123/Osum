@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vboxlag/visual.py <monitor-socket> <serial.txt> <outdir> <timeout_s>
-
-Visual check of the diff flush: logs in, then takes a deterministic screendump series (outdir/v*.ppm) while the pointer is moved over the
-desktop, the taskbar and windows (parked in the corner, then moved by a fixed relative path, so two runs are comparable).
-tools/vboxlag/visual.sh runs it once normally and once with `nodiff`, then compares the series pixel by pixel.
-"""
 import re, socket, sys, time
 
 mon, serial, outdir, tmo = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -98,12 +92,12 @@ for _try in range(4):
     if try_login():
         ok = True
         break
-    for _ in range(14):          # clear a half-typed field
+    for _ in range(14):
         cmd("sendkey backspace", 0.03)
 if not ok:
     print("RESULT login=0 ready=1")
     sys.exit(1)
-time.sleep(14)           # let the desktop come up (bar, programs)
+time.sleep(14)
 results = []
 n_shot = 0
 
@@ -115,16 +109,15 @@ def shot(tag):
 
 
 def park():
-    cmd("mouse_move -1500 -1000", 0.6)   # one big move into the corner (PS/2 clamps)
+    cmd("mouse_move -1500 -1000", 0.6)
     time.sleep(0.4)
 
 
 def go(x, y, tag, sweep=True):
     park()
     if sweep:
-        move(120, 5, 3)          # fast sweep to leave trails if any
+        move(120, 5, 3)
         park()
-    # relative path to (x, y) in chunks
     while x > 0 or y > 0:
         dx, dy = min(x, 40), min(y, 40)
         cmd("mouse_move %d %d" % (dx, dy), 0.12)
@@ -138,7 +131,6 @@ time.sleep(2)
 shot("initial")
 for i, (x, y) in enumerate([(300, 300), (550, 60), (900, 500), (60, 780), (640, 785), (1200, 300), (20, 20), (1260, 780), (500, 200), (1000, 100)]):
     go(x, y, "p%d" % i)
-# open the start menu (win key) and move over it
 cmd("sendkey meta_l", 0.9)
 time.sleep(1.5)
 shot("menu")
@@ -146,7 +138,6 @@ go(300, 400, "menu_ptr", sweep=False)
 cmd("sendkey esc", 0.5)
 time.sleep(1.0)
 go(600, 500, "after_menu")
-# drag-like fast diagonal sweeps with 1 px steps ending at a fixed place
 park()
 move(200, 1, 1)
 time.sleep(0.8)

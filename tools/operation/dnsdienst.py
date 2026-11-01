@@ -43,7 +43,7 @@ BOESE = None
 KOEDER = 3
 LOG = None
 TC = set()
-ZAEHLER = {"fragen": 0, "koeder": 0, "antworten": 0}
+COUNTER = {"fragen": 0, "koeder": 0, "antworten": 0}
 
 
 def protokoll(*w):
@@ -56,7 +56,7 @@ def protokoll(*w):
         sys.stderr.flush()
 
 
-def name_lesen(b, at):
+def name_read(b, at):
     teile = []
     i = at
     spr = 0
@@ -83,36 +83,34 @@ def name_lesen(b, at):
     return b".".join(teile), i
 
 
-def antwort_bauen(frage, txid, qende, name, qtyp, kaputt_case=False,
-                  txid_falsch=False, tc=False, klein=False):
-    q = bytearray(frage[:qende])
+def reply_build(ask, txid, qende, name, qtyp, broken_case=False,
+                  txid_wrong=False, tc=False, klein=False):
+    q = bytearray(ask[:qende])
     if klein:
-        # A NAT DNS proxy that rebuilds the question in lower case
-        # (VirtualBox NAT): the 0x20 echo never matches.
         for i in range(12, qende):
             if 65 <= q[i] <= 90:
                 q[i] += 32
-    if kaputt_case:
+    if broken_case:
         for i in range(12, qende):
             c = q[i]
             if 65 <= c <= 90 or 97 <= c <= 122:
                 q[i] = c ^ 0x20
-    kopf_id = (txid ^ 0x5A5A) & 0xFFFF if txid_falsch else txid
+    header_id = (txid ^ 0x5A5A) & 0xFFFF if txid_wrong else txid
     ip = EINTRAEGE.get(name.decode("ascii", "replace").lower())
-    fl = 0x8180  # QR, RD, RA
+    fl = 0x8180
     if tc:
         fl |= 0x0200
     an = 0
     rd = b""
     if ip is None:
-        fl = (fl & ~0x000F) | 3  # NXDOMAIN
+        fl = (fl & ~0x000F) | 3
     elif qtyp == 1 and not tc:
         an = 1
         rd = (b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 60, 4)
               + socket.inet_aton(ip))
     elif qtyp != 1:
-        an = 0  # NODATA
-    kopf = struct.pack(">HHHHHH", kopf_id, fl, 1, an, 0, 0)
+        an = 0
+    kopf = struct.pack(">HHHHHH", header_id, fl, 1, an, 0, 0)
     return bytes(kopf) + bytes(q[12:]) + rd
 
 
@@ -120,12 +118,12 @@ def bedienen(sock, daten, herkunft):
     if len(daten) < 12:
         return
     txid = struct.unpack(">H", daten[0:2])[0]
-    name, ende = name_lesen(daten, 12)
+    name, ende = name_read(daten, 12)
     if name is None or ende + 4 > len(daten):
         return
     qtyp = struct.unpack(">H", daten[ende:ende + 2])[0]
     qende = ende + 4
-    ZAEHLER["fragen"] += 1
+    COUNTER["fragen"] += 1
     kn = name.decode("ascii", "replace").lower()
     protokoll("FRAGE", kn, "typ", qtyp, "txid", txid, "von", herkunft)
 
@@ -135,31 +133,31 @@ def bedienen(sock, daten, herkunft):
             if BOESE == "alle":
                 art = ["txid", "port", "case"][i % 3]
             if art == "txid":
-                p = antwort_bauen(daten, txid, qende, name, qtyp,
-                                  txid_falsch=True)
+                p = reply_build(daten, txid, qende, name, qtyp,
+                                  txid_wrong=True)
                 sock.sendto(p, herkunft)
             elif art == "case":
-                p = antwort_bauen(daten, txid, qende, name, qtyp,
-                                  kaputt_case=True)
+                p = reply_build(daten, txid, qende, name, qtyp,
+                                  broken_case=True)
                 sock.sendto(p, herkunft)
             elif art == "port":
                 falsch = dict(EINTRAEGE)
                 echt = EINTRAEGE.get(kn)
                 if echt:
                     EINTRAEGE[kn] = "6.6.6.6"
-                p = antwort_bauen(daten, txid, qende, name, qtyp)
+                p = reply_build(daten, txid, qende, name, qtyp)
                 EINTRAEGE.update(falsch)
                 s2 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 s2.bind(("", 0))
                 s2.sendto(p, herkunft)
                 s2.close()
-            ZAEHLER["koeder"] += 1
+            COUNTER["koeder"] += 1
         time.sleep(0.01)
 
-    p = antwort_bauen(daten, txid, qende, name, qtyp, tc=(kn in TC),
+    p = reply_build(daten, txid, qende, name, qtyp, tc=(kn in TC),
                       klein=(BOESE == "klein"))
     sock.sendto(p, herkunft)
-    ZAEHLER["antworten"] += 1
+    COUNTER["antworten"] += 1
 
 
 def main():
@@ -214,7 +212,7 @@ def main():
                              daemon=True).start()
     except KeyboardInterrupt:
         pass
-    protokoll("ENDE %s" % ZAEHLER)
+    protokoll("ENDE %s" % COUNTER)
     return 0
 
 

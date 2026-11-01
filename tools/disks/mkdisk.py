@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/disks/mkdisk.py <outdir> -- disk images for the partition table reader (lib/disks/table.fi).
-
-Writes, sparse, into <outdir>:
-  gpt.img      16 MiB, protective MBR + GPT (primary and backup, right CRCs): EFI 1 MiB at 2048, OFS 8 MiB, "data" basic 4 MiB
-  mbr.img      16 MiB, MBR with FAT32 (type 0x0C) at 2048 for 4 MiB and Linux (0x83) for 8 MiB after it
-  badcrc.img   gpt.img with ONE byte of the entry array flipped (must read as no table)
-  badhdr.img   gpt.img with one byte of the header flipped
-  empty.img    16 MiB of zeros (no table)
-  expect-*.txt the listing `unit` must print for each
-"""
 import os
 import struct
 import sys
@@ -54,7 +44,6 @@ def header(my, alt, first, last, ent_lba, ent_crc):
 
 def gpt():
     img = bytearray(TOTAL * SECT)
-    # protective MBR
     img[446 + 4] = 0xEE
     struct.pack_into("<II", img, 446 + 8, 1, TOTAL - 1)
     img[510] = 0x55
@@ -68,7 +57,6 @@ def gpt():
     first, last = 34, TOTAL - 34
     img[SECT:SECT + 92] = header(1, TOTAL - 1, first, last, 2, acrc)
     img[2 * SECT:2 * SECT + len(arr)] = arr
-    # backup: entries before the last sector, header in the last sector
     bent = TOTAL - 33
     img[bent * SECT:bent * SECT + len(arr)] = arr
     img[(TOTAL - 1) * SECT:(TOTAL - 1) * SECT + 92] = header(TOTAL - 1, 1, first, last, bent, acrc)

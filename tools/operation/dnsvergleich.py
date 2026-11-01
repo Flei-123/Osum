@@ -34,7 +34,7 @@ import subprocess
 import sys
 import time
 
-LISTE = [
+LIST = [
     ("example.com", "A", "ein gewoehnlicher Name"),
     ("www.example.com", "A", "ein Name mit Unterteil"),
     ("one.one.one.one", "A", "vier gleiche Marken"),
@@ -116,7 +116,7 @@ def main():
     gut = 0
     rot = 0
     zeilen = []
-    for name, typ, warum in LISTE:
+    for name, typ, warum in LIST:
         t0 = time.time()
         h = host(prog, name, typ, server)
         ms = int((time.time() - t0) * 1000)

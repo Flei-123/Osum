@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fvviewer/gui_input.py <serial.txt> <input.log> -- judge the GUI gate stage "input" (gui_input.sh).
-
-input.log is the Rust test host's input log with "### <name>" marker lines written by the drehbuch;
-serial.txt is the guest's serial trace. Prints "  OK/FAIL/INFO  <what>" lines, exit code = number of FAILs.
-"""
 import re
 import sys
 
@@ -24,7 +19,6 @@ def info(what):
     print("  INFO  %s" % what)
 
 
-# ---- split the host log by markers
 segs = {}
 cur = None
 for line in hl.split("\n"):
@@ -121,14 +115,10 @@ TAB = {
     "esc": key(4, True), "tab": key(3, True), "backspace": key(1, True), "left": key(5, True), "right": key(6, True),
     "up": key(7, True), "down": key(8, True), "delete": key(9, True), "home": key(10, True), "end": key(11, True),
     "pgup": key(12, True), "pgdn": key(13, True), "f1": key(30, True), "f5": key(34, True),
-    # US layout: AltGr (Alt_r) gives no third level, the OS hands over the plain character; the ISO key "less" does not
-    # exist on a US keyboard (no key at all, nothing to check)
     "alt_r-q": key(113), "alt_r-7": key(55), "alt_r-8": key(56), "alt_r-9": key(57), "alt_r-0": key(48),
     "alt_r-minus": key(45), "alt_r-less": [], "alt_r-e": key(101),
-    # the guest keyboard is US (KB_LAYOUT 0): the OS hands over the US characters and the viewer passes them on
     "bracket_left": key(91), "semicolon": key(59), "apostrophe": key(39), "minus": key(45), "shift-bracket_left": key(123),
     "ctrl-c": vkcombo([17], 67), "ctrl-v": vkcombo([17], 86), "ctrl-a": vkcombo([17], 65),
-    # no "alt-tab" key: the guest window manager consumes it (the toolbar button covers Special ALTTAB)
 }
 KEYMAP_NOTE = {}
 for k, want in TAB.items():
@@ -146,7 +136,6 @@ for k, want in TAB.items():
             break
         pos = found + 1
     ok(good, "key %-18s -> %s   (got: %s)" % (k, " | ".join(want[:2]), "; ".join(s[:6]) or "nothing"))
-# no stray keys: every key segment holds only lines of its own expectation family (no leaked Special/Key from a neighbour)
 rep = [l for l in seg("key-repeat") if l.startswith("Key code=122")]
 downs = sum(1 for l in rep if l.endswith("down=true"))
 ups = sum(1 for l in rep if l.endswith("down=false"))
@@ -162,8 +151,6 @@ ok(any(n == "12" and t == "fvv-gui-clip" for n, t in clips), "guest -> host: ASC
 uni = "Grüße € \U0001f600"
 ok(any(n == "16" and t == uni for n, t in clips), "guest -> host: unicode text (umlaut, sharp s, euro, emoji; 16 octets) intact")
 ok("fvviewer: clip unicode echo ok" in ser, "host -> guest: the unicode echo came back byte for byte")
-# the OS clipboard keeps 4096 octets at most (wig fallback, CLIP_MAX), so the 150001-octet text arrives cut there,
-# at a character boundary: 'a' + 2047 x U+00FC = 4095 octets
 big = [(int(n), t) for n, t in clips if int(n) > 1000]
 ok(len(big) == 1, "oversize text (150001 octets): sent exactly once (no resend loop), %d message(s)" % len(big))
 if big:
@@ -198,11 +185,9 @@ ok(re.search(r"L a1/1 a2/2 a3/4 a4/8 a5/16 a6/30 G4\.6\.1 L", txt) is not None,
 ok(re.search(r"L a1/1 a2/2 a3/4 a4/8 a5/16 C L", txt) is not None, "R3 'Abbrechen' in the countdown stops the tries; 'Wiederholen' then connects")
 ok(re.search(r"L G6\.0\.0$", txt) is not None, "R4 wrong password after a live session was ended by hand: error at once (kind 6), no tries, no retry button")
 ok(not re.search(r"G6\.\d+\.0 a", txt), "R4: nothing reconnects after the refusal")
-# wall-clock spacing of the 6 tries of R2
 lost = [e for e in ev if e[0] == "lost"]
 r2 = []
 mm = re.search(r"G4\.6\.1", txt)
-# the 'lost' lines between the 6th... take the 7 lost lines that precede the give-up event
 gi = [i for i, e in enumerate(ev) if e[0] == "giveup" and e[1] == 4]
 if gi:
     pre = [e for e in ev[:gi[0]] if e[0] == "lost"][-6:]

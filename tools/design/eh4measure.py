@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/eh4measure.py -- DER BEFUND DER RUNDE ECHTHARDWARE-4.
-
-Liest das Ausgabeverzeichnis von `tools/design/eh4.sh` und rechnet
-Justins vier Punkte nach.  JEDE Aussage hier ist eine Zahl aus einem
-Bild oder aus der seriellen Leitung; nichts davon ist "sieht besser
-aus".
-
-    python3 tools/design/eh4measure.py <ausgabeverzeichnis>
-"""
 import glob
 import os
 import re
@@ -39,7 +30,6 @@ def letzte(t, muster):
 
 
 def flaechenfarben(im, n=6):
-    """Die haeufigsten Toene, nach Flaeche."""
     k = im.getcolors(maxcolors=1 << 24) or []
     k.sort(reverse=True)
     ges = sum(a for (a, _) in k) or 1
@@ -47,9 +37,6 @@ def flaechenfarben(im, n=6):
 
 
 def blaustich(im):
-    """B minus R auf den Flaechenfarben, nach Flaeche gewichtet.
-    Windows 11 und GNOME liegen bei 0, KDE bei +6; die Slate-Rampe,
-    die der Dunkelmodus bis zu dieser Runde las, bei +27 bis +29."""
     tot = 0.0
     gew = 0.0
     for (c, p) in flaechenfarben(im, 8):
@@ -59,10 +46,6 @@ def blaustich(im):
 
 
 def kasten_der_tinte(im, cx, cy, r, tol=40):
-    """Der umschliessende Kasten alles dessen, was sich in einem
-    Quadrat um (cx,cy) vom haeufigsten Ton unterscheidet.  Damit wird
-    der Mauszeiger auf leerer Flaeche vermessen, ohne dass jemand ihn
-    im Bild suchen muss."""
     x0 = max(0, cx - r)
     y0 = max(0, cy - r)
     x1 = min(im.width, cx + r)
@@ -88,7 +71,7 @@ def kasten_der_tinte(im, cx, cy, r, tol=40):
     return (x0 + min(xs), y0 + min(ys), x0 + max(xs), y0 + max(ys)), bg, n
 
 
-def lupe(quelle, ziel, box, faktor=6):
+def lupe(quelle, ziel, box, factor=6):
     im = Image.open(quelle).convert("RGB")
     x0, y0, x1, y1 = box
     x0 = max(0, x0)
@@ -96,15 +79,13 @@ def lupe(quelle, ziel, box, faktor=6):
     x1 = min(im.width, x1)
     y1 = min(im.height, y1)
     aus = im.crop((x0, y0, x1, y1))
-    aus = aus.resize((aus.width * faktor, aus.height * faktor),
+    aus = aus.resize((aus.width * factor, aus.height * factor),
                      Image.NEAREST)
     aus.save(ziel)
     return ziel
 
 
 def unterschied(a, b):
-    """Wie viele Bildpunkte zweier gleich grosser Bilder sich
-    unterscheiden, und in welchem Kasten."""
     ia = Image.open(a).convert("RGB")
     ib = Image.open(b).convert("RGB")
     if ia.size != ib.size:
@@ -123,7 +104,7 @@ def unterschied(a, b):
     return (n, (min(xs), min(ys), max(xs), max(ys)))
 
 
-def teil_leiste(out, name, uisc):
+def part_taskbar(out, name, uisc):
     d = os.path.join(out, name)
     bd = os.path.join(out, "bilder", name)
     t = serial(d)
@@ -199,15 +180,15 @@ def teil_leiste(out, name, uisc):
               % (os.path.basename(p), b, toene, marke))
 
 
-def teil_menue(out):
+def part_menu(out):
     bd = os.path.join(out, "bilder", "menue-2560")
     print("")
     print("=" * 68)
     print("START MENU -- does it appear only on demand?")
     print("=" * 68)
-    folge = ["01-ohne-menue", "02-super-offen", "03-escape-weg",
+    seq = ["01-ohne-menue", "02-super-offen", "03-escape-weg",
              "04-logo-offen", "05-klick-daneben-weg"]
-    pfade = [os.path.join(bd, f + ".png") for f in folge]
+    pfade = [os.path.join(bd, f + ".png") for f in seq]
     for p in pfade:
         if not os.path.exists(p):
             print("  fehlt: %s" % os.path.basename(p))
@@ -216,19 +197,19 @@ def teil_menue(out):
     for i, p in enumerate(pfade):
         r = unterschied(grund, p)
         if r is None:
-            print("  %s: andere Groesse" % folge[i])
+            print("  %s: andere Groesse" % seq[i])
             continue
         n, k = r
-        soll_offen = folge[i] in ("02-super-offen", "04-logo-offen")
-        ok = (n > 20000) if soll_offen else (n < 20000)
+        soll_open = seq[i] in ("02-super-offen", "04-logo-offen")
+        ok = (n > 20000) if soll_open else (n < 20000)
         print("  %-22s %8d pixels differ from 01   box %s   %s"
-              % (folge[i], n, k, "erwartet" if ok else "VERLETZT"))
+              % (seq[i], n, k, "erwartet" if ok else "VERLETZT"))
     print("  reading: 02 and 04 must differ STRONGLY from 01"
           " (das Menue steht da),")
     print("          03 and 05 hardly at all (it is gone again).")
 
 
-def teil_zeiger(out):
+def part_cursor(out):
     print("")
     print("=" * 68)
     print("MAUSZEIGER -- Groesse, Kantenglaettung, Lage")
@@ -270,9 +251,9 @@ def main():
     print("Verzeichnis: %s" % out)
     for name, uisc in (("hell-1280", 1), ("hell-2560", 2),
                        ("dunkel-1280", 1), ("dunkel-2560", 2)):
-        teil_leiste(out, name, uisc)
-    teil_menue(out)
-    teil_zeiger(out)
+        part_taskbar(out, name, uisc)
+    part_menu(out)
+    part_cursor(out)
     return 0
 
 

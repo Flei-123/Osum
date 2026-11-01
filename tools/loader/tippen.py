@@ -22,7 +22,7 @@ Programm dann abbricht statt still ein anderes Zeichen zu tippen.
 """
 import sys
 
-TASTEN = {
+KEYS = {
     " ": "spc", "-": "minus", "/": "slash", ".": "dot", ",": "comma",
     "=": "equal", ";": "semicolon", "\\": "backslash",
     ">": "shift-dot", "<": "shift-comma", ":": "shift-semicolon",
@@ -30,8 +30,8 @@ TASTEN = {
 
 
 def taste(c):
-    if c in TASTEN:
-        return TASTEN[c]
+    if c in KEYS:
+        return KEYS[c]
     if ("a" <= c <= "z") or ("0" <= c <= "9"):
         return c
     raise SystemExit("tippen: fuer '%s' ist keine Taste eingetragen" % c)
@@ -42,7 +42,7 @@ def main(argv):
         print(__doc__)
         return 2
     warte = 3
-    eingabe = True
+    input_ = True
     text = []
     i = 1
     while i < len(argv):
@@ -51,7 +51,7 @@ def main(argv):
             i += 1
             warte = float(argv[i])
         elif a == "--ohne-eingabe":
-            eingabe = False
+            input_ = False
         else:
             text.append(a)
         i += 1
@@ -59,7 +59,7 @@ def main(argv):
     for satz in text:
         for c in satz:
             zeilen.append("sendkey " + taste(c))
-        if eingabe:
+        if input_:
             zeilen.append("sendkey ret")
         zeilen.append("warte %g" % warte)
     print("\n".join(zeilen))

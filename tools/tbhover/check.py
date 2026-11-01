@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tbhover/check.py <run dir> <ui scale> -- reads serial.txt + the pictures of tools/tbhover/run.sh.
-
-Rectangles come from the bar's own report lines (`taskbar: geom`, `pin`, `start`, `chevron`, `field clock`), never from a guess.
-"""
 import re
 import sys
 
@@ -128,7 +124,6 @@ def plate(img, r):
     return px(img, *edge(r))
 
 
-# 1. hover over an idle pin: a plate appears, rounded (corner pixel untouched)
 bg = bg_at(rest, rs)
 check(dist(plate(rest, rs), bg) <= 6, "idle pin without pointer: edge pixel is the bar colour %s" % (bg,),
       "idle pin shows a plate at rest: %s vs bar %s" % (plate(rest, rs), bg))
@@ -138,20 +133,16 @@ check(dist(p1, bg) >= 12, "hover on the idle pin: plate %s differs from the bar 
 c1 = px(im["01-hover-pin"], rs[0], rs[1])
 check(dist(c1, px(rest, rs[0], rs[1])) <= 6, "the plate is rounded: corner pixel untouched",
       "corner pixel changed: %s -> %s (square plate)" % (px(rest, rs[0], rs[1]), c1))
-# 2. gone again
 a2 = plate(im["02-away"], rs)
 check(dist(a2, bg) <= 6, "pointer left: the plate is gone again", "plate stays after the pointer left: %s" % (a2,))
-# 3. start, chevron, clock
 for nm, r, key in (("start button", rst, "03-start"), ("tray chevron", rch, "04-chevron"), ("clock", rck, "05-clock")):
     pc = plate(im[key], r)
     check(dist(pc, bg) >= 12, "hover on the %s: plate %s" % (nm, pc), "hover on the %s: NO plate (%s vs bar %s)" % (nm, pc, bg))
-# 4. pressed: another colour than hover, and not the bar
 pd = plate(im["06-down"], rt)
 ph = plate(im["01-hover-pin"], rs)
 check(dist(pd, bg) >= 12, "pressed pin: plate %s" % (pd,), "pressed pin shows no plate: %s" % (pd,))
 check(dist(pd, ph) >= 4, "pressed colour %s differs from the hover colour %s" % (pd, ph),
       "pressed colour %s == hover colour %s" % (pd, ph))
-# 5. active strips (final layout)
 act = im["07-active"]
 fe = pin("explorer", True)
 ft = pin("taskmgr", True)
@@ -188,12 +179,10 @@ check(ht >= 3 * sc, "strip thickness scales with uiscale (%d px, want >= %d)" % 
       "strip thickness does not scale (%d px, want >= %d)" % (ht, 3 * sc))
 check(we >= wt * 3 // 2 and we >= 6 * sc, "focused program: wide strip (%d px > %d px)" % (we, wt),
       "focused strip not wider than the running one (%d vs %d)" % (we, wt))
-# 6. hover over a running (not focused) pin
 pr = plate(im["08-hover-running"], ft)
 pq = plate(act, ft)
 check(dist(pr, pq) >= 12, "hover on the running pin: plate %s (before %s)" % (pr, pq),
       "hover on the running pin: no plate (%s vs %s)" % (pr, pq))
-# 7. repaint only on change: one trace line per change of the hovered button
 hl = len(re.findall(r"taskbar: hotbtn \d+", ser))
 check(1 <= hl <= 40, "hover trace lines: %d (only changes repaint)" % hl, "hover trace lines: %d (expected 1..40)" % hl)
 print("TBHOVER-CHECK: %d passed, %d failed" % (passed, failed))

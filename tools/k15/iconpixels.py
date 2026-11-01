@@ -55,10 +55,10 @@ def main(argv):
     if len(argv) < 7:
         print(__doc__)
         return 2
-    schirm, x, y, bw, bh, sym = argv[1], int(argv[2]), int(argv[3]), \
+    screen, x, y, bw, bh, sym = argv[1], int(argv[2]), int(argv[3]), \
         int(argv[4]), int(argv[5]), argv[6]
     tol = int(argv[7]) if len(argv) > 7 else 0
-    w, h, roh = ppm(schirm)
+    w, h, roh = ppm(screen)
     sw, sh, bild = symmod.zurueck(sym)
     deckend = 0
     falsch = 0

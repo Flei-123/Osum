@@ -46,7 +46,7 @@ def waitline(path, rx, t0, timeout):
 
 def _cpu_ticks(pid):
     f = open("/proc/%s/stat" % pid).read().rsplit(")", 1)[1].split()
-    return int(f[11]) + int(f[12])  # utime + stime
+    return int(f[11]) + int(f[12])
 
 
 def procstat(pid, secs):
@@ -96,7 +96,6 @@ def portio(text):
     m = re.search(r"PORTIO median/s: (\d+)", text)
     if m:
         out["idle.portio_per_s"] = int(m.group(1))
-    # the ODB agent polls COM2 (serial) ~800x/s: counted in idle.portio_per_s, but the budget is on everything else
     top = [float(x) for x in re.findall(r"^\s+(?!serial)\S+\s+(?:read|write)\s+0x\w+\s+([\d.]+)/s", text, re.M)]
     if top:
         out["idle.portio_nonserial_per_s"] = int(round(sum(top)))

@@ -66,9 +66,9 @@ class Qmp:
         self.s = s
         self.f = s.makefile("rb")
         self.gruss = json.loads(self.f.readline())
-        self.befehl("qmp_capabilities")
+        self.cmd("qmp_capabilities")
 
-    def befehl(self, name, **args):
+    def cmd(self, name, **args):
         d = {"execute": name}
         if args:
             d["arguments"] = args
@@ -77,10 +77,10 @@ class Qmp:
             zeile = self.f.readline()
             if not zeile:
                 raise RuntimeError("QMP: Verbindung weg")
-            antwort = json.loads(zeile)
-            if "event" in antwort:
+            reply = json.loads(zeile)
+            if "event" in reply:
                 continue
-            return antwort
+            return reply
 
     def rel(self, dx, dy):
         ev = []
@@ -90,33 +90,33 @@ class Qmp:
             ev.append({"type": "rel", "data": {"axis": "y", "value": int(dy)}})
         if not ev:
             return
-        self.befehl("input-send-event", events=ev)
+        self.cmd("input-send-event", events=ev)
 
     def taste(self, down, name):
-        self.befehl("input-send-event", events=[
+        self.cmd("input-send-event", events=[
             {"type": "btn", "data": {"down": down, "button": name}}])
 
     def key(self, down, qcode):
-        self.befehl("input-send-event", events=[
+        self.cmd("input-send-event", events=[
             {"type": "key", "data": {"down": down,
                                      "key": {"type": "qcode", "data": qcode}}}])
 
     def screendump(self, ziel):
         if os.path.exists(ziel):
             os.unlink(ziel)
-        a = self.befehl("screendump", filename=ziel)
+        a = self.cmd("screendump", filename=ziel)
         alt = -1
-        gleich = 0
+        eq = 0
         bis = time.time() + 20
         while time.time() < bis:
             if os.path.exists(ziel):
                 n = os.path.getsize(ziel)
                 if n == alt and n > 0:
-                    gleich += 1
-                    if gleich >= 3:
+                    eq += 1
+                    if eq >= 3:
                         return True
                 else:
-                    gleich = 0
+                    eq = 0
                 alt = n
             time.sleep(0.1)
         return "error" not in a
@@ -127,7 +127,7 @@ def main():
         print(__doc__)
         return 2
     sock = sys.argv[1]
-    sekunden = float(sys.argv[2])
+    secs = float(sys.argv[2])
     hz = float(sys.argv[3])
     opt = {"breite": "3424", "hoehe": "1440", "klick_ms": "2000",
            "klickfeld": "", "tasten": "0", "shot": "", "heim": "1"}
@@ -161,11 +161,11 @@ def main():
     cy = H / 2
     Tx = 7.0
     Ty = 17.0
-    n_soll = int(sekunden * hz)
+    n_soll = int(secs * hz)
     dt = 1.0 / hz
-    gesendet = 0
+    sent = 0
     klicks = 0
-    klick_unten = False
+    klick_bottom = False
     klick_seit = 0.0
     naechster_klick = klick_ms / 1000.0
     t0 = time.perf_counter()
@@ -185,25 +185,25 @@ def main():
             q.rel(dx, dy)
             px += dx
             py += dy
-            gesendet += 1
-        if klick_unten and t - klick_seit >= 0.040:
+            sent += 1
+        if klick_bottom and t - klick_seit >= 0.040:
             q.taste(False, "left")
-            klick_unten = False
-        if not klick_unten and t >= naechster_klick:
-            drin = True
+            klick_bottom = False
+        if not klick_bottom and t >= naechster_klick:
+            in_ = True
             if feld is not None:
-                drin = feld[0] <= px < feld[2] and feld[1] <= py < feld[3]
-            if drin:
+                in_ = feld[0] <= px < feld[2] and feld[1] <= py < feld[3]
+            if in_:
                 q.taste(True, "left")
-                klick_unten = True
+                klick_bottom = True
                 klick_seit = t
                 klicks += 1
                 naechster_klick = t + klick_ms / 1000.0
-    if klick_unten:
+    if klick_bottom:
         time.sleep(0.05)
         q.taste(False, "left")
-    dauer = time.perf_counter() - t0
-    rate = gesendet / dauer if dauer > 0 else 0
+    dur = time.perf_counter() - t0
+    rate = sent / dur if dur > 0 else 0
 
     tasten = int(opt["tasten"])
     for k in range(tasten):
@@ -218,7 +218,7 @@ def main():
     if opt["shot"]:
         shot_ok = q.screendump(opt["shot"])
     print("maus: bewegungen=%d dauer_s=%.1f rate_hz=%.0f klicks=%d tasten=%d "
-          "zeiger=%d,%d shot=%s" % (gesendet, dauer, rate, klicks, tasten,
+          "zeiger=%d,%d shot=%s" % (sent, dur, rate, klicks, tasten,
                                     px, py, shot_ok))
     return 0
 

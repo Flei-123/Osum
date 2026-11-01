@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/drag/check.py -- is the title bar of a dragged window in EVERY frame of the series?
-#
-#   check.py <dir> <prefix> <list>      <list> = lines "schleppfoto: <name> <x> <y> <phase>" (from the drehbuch run)
-#
-# The pointer holds the window by the middle of its title bar. The pixels in a strip LEFT of the pointer on the pointer's row belong to the
-# title bar in every frame in which the bar exists (the bar moves with the pointer; the swing lags by a few points only, the bar is
-# 30..60 points high). Reference = the median colour of that strip in the picture BEFORE the grab (title text skews the mean, the median
-# ignores it). A frame passes when >= 70 % of its strip pixels are within TOL of the reference AND the reference differs from the colour
-# 80 points further left outside the strip... (no: from the colour of the desktop, measured far from the window) so that a bar that
-# happens to look like the wallpaper cannot pass.
 import sys, os
 
 TOL = 18

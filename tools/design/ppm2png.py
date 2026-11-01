@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/ppm2png.py -- PPM nach PNG, ohne fremde Bibliothek.
-
-Die Aufnahmen entstehen als PPM (das schreibt QEMUs `screendump`), und
-PPM ist unkomprimiert: ein Bild in 2560x1440 sind 11 MB. Als Beleg
-abgelegt werden sie deshalb als PNG -- verlustfrei, also derselbe
-Bildinhalt, nur ein Zehntel so gross.
-
-    python3 tools/design/ppm2png.py <ein.ppm> <aus.png>
-
-Kein Pillow: dieses Projekt haelt seine Werkzeuge frei von Abhaengig-
-keiten, die es nur zum Verpacken braucht. zlib ist in der Standard-
-bibliothek, und mehr als ein IHDR, ein IDAT und ein IEND braucht ein
-Vollfarb-PNG nicht.
-"""
 import sys, zlib, struct
 
 

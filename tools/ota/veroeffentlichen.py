@@ -134,7 +134,7 @@ def signieren(bund, datei, aus, wer="haupt"):
     return r.stdout.strip()
 
 
-def bund_lesen(bund):
+def bund_read(bund):
     with open(bund) as f:
         return json.load(f)
 
@@ -158,22 +158,21 @@ def meta_aus_opk(pfad):
     return name, fassung or "0"
 
 
-# ------------------------------------------------------------- Register
 
-def register_pfad(aus):
+def register_path(aus):
     return os.path.join(aus, "register.json")
 
 
-def register_lesen(aus):
-    p = register_pfad(aus)
+def register_read(aus):
+    p = register_path(aus)
     if not os.path.isfile(p):
         return {"letzte": 0, "vergeben": [], "zurueckgenommen": []}
     with open(p) as f:
         return json.load(f)
 
 
-def register_schreiben(aus, r):
-    p = register_pfad(aus)
+def register_write(aus, r):
+    p = register_path(aus)
     tmp = p + ".neu"
     with open(tmp, "w") as f:
         json.dump(r, f, indent=1)
@@ -186,7 +185,7 @@ def journal(aus, text):
                 % (time.strftime("%Y-%m-%dT%H:%M:%S"), text))
 
 
-def gesperrt_lesen(aus):
+def gesperrt_read(aus):
     p = os.path.join(aus, "gesperrt.txt")
     if not os.path.isfile(p):
         return []
@@ -198,7 +197,7 @@ def gesperrt_lesen(aus):
     return sorted(set(out))
 
 
-def gesperrt_schreiben(aus, liste):
+def gesperrt_write(aus, liste):
     with open(os.path.join(aus, "gesperrt.txt"), "w") as f:
         f.write("# withdrawn versions. A device does NOT install them\n")
         f.write("# any more, even if it was offline for a long time.\n")
@@ -206,9 +205,8 @@ def gesperrt_schreiben(aus, liste):
             f.write("%d\n" % n)
 
 
-# --------------------------------------------------------- das Verzeichnis
 
-def verzeichnis_text(fassung, gen, kette, gesperrt, pakete):
+def dir_text(fassung, gen, kette, gesperrt, pakete):
     z = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t%d" % gen]
     for k in kette:
         z.append("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
@@ -229,7 +227,7 @@ def verknuepfen(quelle, ziel):
         shutil.copy2(quelle, ziel)
 
 
-def aktuell_setzen(aus, register, gesperrt):
+def current_set(aus, register, gesperrt):
     """`aktuell/` zeigt auf die hoechste NICHT gesperrte Fassung."""
     kandidaten = [n for n in register["vergeben"] if n not in gesperrt
                   and os.path.isdir(os.path.join(aus, "v", str(n)))]
@@ -245,14 +243,14 @@ def aktuell_setzen(aus, register, gesperrt):
     return n
 
 
-def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
+def bauen(aus, stand, bund, notiz, sperren, feste_version=None,
           signierer="haupt", kette_kaputt=False):
     os.makedirs(os.path.join(aus, "pakete"), exist_ok=True)
     os.makedirs(os.path.join(aus, "v"), exist_ok=True)
 
-    reg = register_lesen(aus)
-    if feste_fassung is not None:
-        fassung = feste_fassung
+    reg = register_read(aus)
+    if feste_version is not None:
+        fassung = feste_version
         if fassung <= reg["letzte"]:
             raise SystemExit("veroeffentlichen: --fassung %d geht zurueck "
                              "(gefuehrt ist %d) -- das ist genau der Fall, "
@@ -262,7 +260,7 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
         fassung = reg["letzte"] + 1
     reg["letzte"] = fassung
     reg.setdefault("vergeben", []).append(fassung)
-    register_schreiben(aus, reg)
+    register_write(aus, reg)
     journal(aus, "nummer\t%d\tvergeben%s"
             % (fassung, ("\t" + notiz) if notiz else ""))
 
@@ -296,16 +294,15 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
     signieren(bund, os.path.join(zv, "INDEX"),
               os.path.join(zv, "INDEX.sig"), signierer)
 
-    # 4. DAS VERZEICHNIS.
-    b = bund_lesen(bund)
-    sperrliste = sorted(set(gesperrt_lesen(aus)) | set(sperren))
-    gesperrt_schreiben(aus, sperrliste)
+    b = bund_read(bund)
+    sperrliste = sorted(set(gesperrt_read(aus)) | set(sperren))
+    gesperrt_write(aus, sperrliste)
     kette = [dict(k) for k in b["kette"]]
     if kette_kaputt and kette:
         sig = bytearray(bytes.fromhex(kette[-1]["sig"]))
         sig[0] ^= 1
         kette[-1]["sig"] = bytes(sig).hex()
-    roh = verzeichnis_text(fassung, b["haupt"]["gen"], kette,
+    roh = dir_text(fassung, b["haupt"]["gen"], kette,
                            sperrliste, pakete)
     with open(os.path.join(zv, "VERZEICHNIS"), "wb") as f:
         f.write(roh)
@@ -315,7 +312,7 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
     with open(os.path.join(zv, "schluessel.pub"), "wb") as f:
         f.write(bytes.fromhex(b["haupt"]["pub"]))
 
-    n = aktuell_setzen(aus, reg, sperrliste)
+    n = current_set(aus, reg, sperrliste)
     journal(aus, "auslieferung\t%d\t%d Paket(e)\tgen %d\tkette %d\t"
             "gesperrt %s\taktuell %d"
             % (fassung, len(pakete), b["haupt"]["gen"], len(b["kette"]),
@@ -328,13 +325,13 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
 
 
 def zuruecknehmen(aus, fassung):
-    reg = register_lesen(aus)
-    sperr = gesperrt_lesen(aus)
-    sperr.append(fassung)
-    gesperrt_schreiben(aus, sperr)
+    reg = register_read(aus)
+    lock = gesperrt_read(aus)
+    lock.append(fassung)
+    gesperrt_write(aus, lock)
     reg.setdefault("zurueckgenommen", []).append(fassung)
-    register_schreiben(aus, reg)
-    n = aktuell_setzen(aus, reg, gesperrt_lesen(aus))
+    register_write(aus, reg)
+    n = current_set(aus, reg, gesperrt_read(aus))
     journal(aus, "zuruecknahme\t%d\tletzte bleibt %d\taktuell %d"
             % (fassung, reg["letzte"], n))
     print("   version %d withdrawn; led remains %d, current is %d"
@@ -345,11 +342,11 @@ def zuruecknehmen(aus, fassung):
 
 
 def zeigen(aus):
-    reg = register_lesen(aus)
+    reg = register_read(aus)
     print("gefuehrte Fassung  %d" % reg["letzte"])
     print("vergeben           %s" % reg.get("vergeben", []))
     print("zurueckgenommen    %s" % reg.get("zurueckgenommen", []))
-    print("gesperrt           %s" % gesperrt_lesen(aus))
+    print("gesperrt           %s" % gesperrt_read(aus))
     vd = os.path.join(aus, "v")
     if os.path.isdir(vd):
         print("vorgehalten        %s"

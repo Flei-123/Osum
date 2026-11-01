@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""multi.py <serial.txt>: judge the per-window dumps of tools/term/multi.sh (`wm: termwin ...`, `wm: tw<slot> <row> [text]`).
-
-Checks (r528-r530): nine terminal windows at once (the console one + eight opened from the start menu; the old 8-slot tty
-table allowed seven), each its own tty, every typed marker stands in exactly ONE window (the focused one), consecutive new
-windows do not stack, closing the top-most window twice leaves the others alive AND the next typed line reaches one of them
-(focus after a close), three more windows can be opened afterwards (slots given back), and 40 openpty/close rounds (ptytest)
-all succeed. Exit code 0 = all good."""
 import re
 import sys
 
 
 def snapshots(path):
-    """a list of snapshots; each is {slot: {"tty", "focus", "x", "y", "rows": {row: text}}}"""
     snaps = []
     cur = None
     for z in open(path, "rb").read().decode("latin1").splitlines():
@@ -32,7 +24,6 @@ def snapshots(path):
 
 
 def holders(snap, marker):
-    """the slots whose cells show the marker as ECHOED OUTPUT (a line that is exactly the marker)"""
     return sorted(s for s, w in snap.items() if any(t.strip() == marker for t in w["rows"].values()))
 
 
@@ -47,8 +38,6 @@ def main(path):
             bad += 1
 
     def find(marker, first=False):
-        """the LAST snapshot in which `marker` stands in some window (`first`: the FIRST one -- the state
-        right after the line was typed, before later windows were opened or closed)"""
         hit = [x for x in sn if holders(x, marker)]
         if not hit:
             return None
@@ -58,7 +47,6 @@ def main(path):
         check(False, "no window dump on the serial line")
         return 1
     names = ["two-a", "three-a", "four-a", "five-a", "six-a", "seven-a", "eight-a", "nine-a"]
-    # --- nine windows at once
     p9 = find("nine-a")
     check(p9 is not None and len(p9) >= 9, "nine terminal windows at once (console + 8 new): saw %d" % (len(p9) if p9 else 0))
     if p9:
@@ -74,10 +62,9 @@ def main(path):
         ok = len(new) >= 8
         for a, b in zip(new, new[1:]):
             if abs(a["x"] - b["x"]) < 16 and abs(a["y"] - b["y"]) < 16:
-                ok = False    # two consecutive windows on (almost) the same spot
+                ok = False
         spots = set((w["x"], w["y"]) for w in new)
         check(ok and len(spots) >= 6, "new windows cascade (consecutive ones differ, >= 6 distinct spots): %s" % sorted(spots))
-    # --- focus after a close, twice
     for mk, want in (("after-a", 8), ("after-b", 7)):
         sx = find(mk, first=True)
         h = holders(sx, mk) if sx else []
@@ -89,7 +76,6 @@ def main(path):
     if s7:
         for mk in ("two-a", "three-a", "four-a", "five-a", "six-a", "seven-a"):
             check(len(holders(s7, mk)) == 1, "after two closes marker %s is still in one window" % mk)
-    # --- slots come back: three more windows
     fin = find("rec-a")
     check(fin is not None and len(fin) == 10, "three more windows after two closes (slots given back): saw %d" % (len(fin) if fin else 0))
     if fin:
@@ -97,7 +83,6 @@ def main(path):
         check(len(set(ttys)) == len(ttys), "final windows have their own ttys: %s" % sorted(ttys))
         hs = [holders(fin, mk) for mk in ("rea-a", "reb-a", "rec-a")]
         check(all(len(h) == 1 for h in hs) and len(set(h[0] for h in hs)) == 3, "the three new markers stand in three different windows: %s" % hs)
-    # --- openpty rounds
     txt = open(path, "rb").read().decode("latin1")
     m = re.findall(r"ptytest: ok=(\d+) fail=(\d+)", txt)
     check(bool(m) and m[-1] == ("40", "0"), "ptytest: 40 openpty/close rounds without a failure: %s" % (m[-1] if m else ("no line",),))

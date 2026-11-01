@@ -1,54 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/metal/chipnames.py -- HAELT kernel/lib/chipname.fi GEGEN pci.ids.
-
-WARUM ES DAS GIBT
-=================
-
-`kernel/lib/chipname.fi` behauptet fuer rund 150 PCI-Nummern einen
-Klartextnamen. Eine solche Tabelle ist genau so viel wert wie ihre
-Nachpruefbarkeit: Wer vor einem fremden Brett steht und liest "Intel
-I226-V", GLAUBT das -- und wenn es falsch ist, sucht er stundenlang in
-die falsche Richtung. Ein erfundener Name ist schlimmer als gar keiner.
-
-Beim ERSTEN Lauf dieses Skripts gegen die erste Fassung von
-chipname.fi standen 40 Namen richtig, 14 falsch und 6 nicht in pci.ids.
-Die 14 waren echte Fehler, darunter:
-
-    8086:02F0  behauptet "AX201"        -- ist der CNVi-ANSCHLUSS, nicht
-                                          das Funkmodul. Am selben 02F0
-                                          haengt je nach Subsystem ein
-                                          AX201, AX203 oder AC 9560.
-    1D6A:80B1  behauptet "AQC107"       -- ist ein AQC100S.
-    1969:E0B1  behauptet "Killer E2600" -- ist ein Killer E2500.
-    8086:125E  behauptet "I225/I226"    -- ist ein I221-V.
-
-Ohne dieses Skript waeren alle vier im Kern gelandet.
-
-WAS GEPRUEFT WIRD
-=================
-
-  1. Jede Nummer, die chipname.fi kennt, wird in pci.ids nachgeschlagen.
-     Das Modellkuerzel aus unserem Namen (das erste Wort, z. B. "I226-V"
-     oder "AQC108S") muss im pci.ids-Namen VORKOMMEN.
-  2. Nummern, die pci.ids nicht kennt, sind KEIN Fehler -- aber sie
-     muessen im Quelltext eine Quellenmarke [L] tragen, also aus dem
-     Linux-Treiber stammen. Eine Nummer ohne beide Quellen ist geraten
-     und faellt durch.
-  3. Umgekehrt: die vollstaendigen igc- und igb-Nummernlisten aus dem
-     Linux-Quelltext muessen ALLE in chipname.fi vorkommen. Eine Karte,
-     die wir nicht benennen koennen, ist genau die, vor der jemand
-     ratlos steht.
-
-AUFRUF
-======
-
-    python3 tools/metal/chipnames.py                 # gegen /tmp/pci.ids
-    python3 tools/metal/chipnames.py --ids DATEI
-    python3 tools/metal/chipnames.py --fetch         # laedt pci.ids neu
-
-Rueckgabe 0, wenn nichts widerlegt ist.
-"""
 
 import os
 import re
@@ -128,22 +79,15 @@ KNOWN_CONFLICT = {
 
 
 def normalise(text):
-    """Bindestriche und Gross/Klein raus -- 'RTL-8110SC' und 'RTL8110SC'
-    sind derselbe Chip, und daran darf eine Pruefung nicht scheitern."""
     return text.lower().replace("-", "").replace(" ", "")
 
 
 def model_tokens(name):
-    """Die Modellkuerzel aus UNSEREM Namen, ohne Klammerzusatz.
-    'RTL8111/8168/8411' -> drei Kuerzel; 'I225-K2 / Killer E3100X' ->
-    zwei. Ein Name gilt als bestaetigt, wenn EINES davon in pci.ids
-    steht: bei Doppelnamen ist jede Haelfte fuer sich richtig."""
     head = name.split("(")[0].strip()
     return [t for t in re.split(r"[/,]", head) if t.strip()]
 
 
 def confirms(name, real):
-    """Bestaetigt pci.ids unseren Namen?"""
     r = normalise(real)
     for tok in model_tokens(name):
         t = normalise(tok)
@@ -177,7 +121,6 @@ def load_ids(path):
 
 
 def claims(src):
-    """(ven, dev, name, quellenmarke) aus dem Quelltext ziehen."""
     strs = {k: v.replace("\\0", "")
             for k, v in re.findall(
                 r'var (s_\w+):\s*\[u8;\s*\d+\]\s*=\s*"([^"]*)"', src)}

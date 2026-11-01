@@ -1,43 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/i18n/columns.py -- BREITE IN ZEICHEN, PUFFER IN OKTETT.
-
-Runde UMLAUT2. Der Auftrag dieser Runde vermutete, ein Umlaut mache
-jede Zeichenkette LAENGER. Er tut es nicht: die Umschrift `ue` ist
-schon zwei Oktette, und `ü` ist auch zwei. Dasselbe gilt fuer `ae`,
-`oe` und `ss`/`ß`. GEMESSEN an allen 42 Ketten dieser Runde: 42 mal
-dieselbe Oktettzahl vorher wie nachher.
-
-WAS SICH SEHR WOHL AENDERT, IST DIE ZAHL DER ZEICHEN. "Waerme:  " sind
-neun Zeichen in neun Oktetten, "Wärme:  " sind acht Zeichen in neun
-Oktetten. Und genau daran haengt eine Beschriftungsspalte: `/bin/power`
-setzt seine Zeilen mit
-
-    Profil:  ...      Akku:    ...      Netz:    ...
-
-untereinander, indem jede Beschriftung auf NEUN ZEICHEN aufgefuellt
-ist. Wer die Umschrift ersetzt und die Fuellzeichen laesst, hat eine
-Zeile, die um ein Zeichen nach links rutscht -- der Puffer stimmt, der
-Uebersetzer schweigt, und die Tabelle ist schief. Das ist der Fehler,
-den diese Datei findet.
-
-Zwei Pruefungen:
-
-  1. DIE SPALTEN. Die Tabelle unten nennt die Beschriftungsspalten
-     dieses Baums mit ihrer Breite IN ZEICHEN. Jede Kette wird aus dem
-     Quelltext gelesen und gezaehlt. Weicht eine ab, ist die Spalte
-     schief.
-  2. DIE PUFFER. Jedes `[u8; N] = "..."` traegt GENAU N Oktette, und
-     danach steht mindestens eine Null. Das erzwingt auch der
-     Uebersetzer -- aber erst nach ein paar Minuten Bauzeit, und diese
-     Pruefung braucht eine Zehntelsekunde.
-
-  columns.py            beides
-  columns.py --zahlen   nur die Bilanz
-
-rc=0 alles gerade, rc=1 eine Spalte ist schief, rc=2 ein Puffer passt
-nicht.
-"""
 import os
 import re
 import sys
@@ -48,8 +10,7 @@ DEKL = re.compile(
     r'\s*:\s*\[u8;\s*(\d+)\s*\]\s*=\s*"((?:\\.|[^"\\])*)"')
 FN = re.compile(r'^(?:pub\s+)?fn\s+([A-Za-z_0-9]+)')
 
-#
-SPALTEN = [
+COLUMNS = [
     ("kernel/user/power.fi",
      [("zeig_profil", "s_p"), ("zeig_akku", "s_a"), ("zeig_akku", "s_net"),
       ("zeig_akku", "s_mod"), ("zeig_waerme", "s_t")], 9,
@@ -81,32 +42,12 @@ SPALTEN = [
 
 
 def inhalt(roh):
-    """Der Text einer Firn-Kette bis zur ersten Null."""
     s = roh.split('\\0')[0]
     return (s.replace('\\n', '\n').replace('\\t', '\t')
              .replace('\\"', '"').replace('\\\\', '\\'))
 
 
 def oktette(roh):
-    """Wieviele Oktette dieses Literal belegt -- Escape zaehlt eins.
-
-    RUNDE BLECH: `\\xNN` IST VIER ZEICHEN LANG UND EIN OKTETT BREIT.
-    Bis hierher hat diese Funktion jeden Escape mit `i += 2`
-    uebersprungen -- richtig fuer `\\0`, `\\n`, `\\t` und `\\\\`, und falsch
-    fuer die hexadezimale Form: von `\\x1e` wurden `\\x` als ein Oktett
-    gezaehlt und `1` und `e` danach als zwei weitere. Ein Literal aus
-    sechsundzwanzig `\\xNN` kam so auf 78 statt auf 26.
-
-    Gefunden hat es `kernel/drv/usb/ehci.fi`: die Tabelle, die einen
-    HID-Gebrauchscode in einen PS/2-Abtastcode uebersetzt, ist ein Feld
-    aus sechsundzwanzig Oktetten, und keines davon ist ein druckbares
-    Zeichen. Sie ist das erste Literal dieses Baums in dieser Form --
-    deshalb ist der Fehler bis zum 02.09.2026 niemandem aufgefallen.
-
-    Die Gegenprobe steht in `tools/i18n/run.sh` und wurde NICHT
-    entschaerft: eine Spalte um ein Zeichen zu kuerzen macht den Pruefer
-    weiterhin rot.
-    """
     n = 0
     i = 0
     while i < len(roh):
@@ -133,14 +74,6 @@ UNI = re.compile(r'\\u\{([0-9a-fA-F]+)\}')
 
 
 def ketten(pfad):
-    """-> {(funktion, name): (zeile, N, roh)}.
-
-    MIT DER FUNKTION ALS TEIL DES SCHLUESSELS, und das ist kein Zierat:
-    `kernel/user/power.fi` hat ein `s_t` in `zeig_profil` ("Taktstufen")
-    und ein zweites in `zeig_waerme` ("Wärme:   "). Wer nur den Namen
-    nimmt, misst die falsche Kette und meldet eine schiefe Spalte, die
-    gerade ist.
-    """
     aus = {}
     fn = '<datei>'
     for nr, z in enumerate(open(pfad, encoding='utf-8').read().split('\n'),
@@ -157,7 +90,7 @@ def ketten(pfad):
     return aus
 
 
-def alle_ketten(wurzel):
+def all_ketten(wurzel):
     for dp, dns, fns in os.walk(os.path.join(wurzel, 'kernel')):
         dns[:] = [d for d in dns if not d.startswith('.')]
         for fn in sorted(fns):
@@ -178,7 +111,7 @@ def main(argv):
     wurzel = os.environ.get('OSUM_ROOT', '.')
     schief = []
     geprueft = 0
-    for datei, namen, breite, wozu in SPALTEN:
+    for datei, namen, breite, wozu in COLUMNS:
         pfad = os.path.join(wurzel, datei)
         if not os.path.exists(pfad):
             schief.append('%s fehlt' % datei)
@@ -198,13 +131,13 @@ def main(argv):
                     '%s:%d  %s = %r -- %d Zeichen, die Spalte ist %d '
                     '(%s)' % (datei, nr, n, t, len(t), breite, wozu))
     print('spalten: %d Beschriftungen in %d Spalten, %d schief'
-          % (geprueft, len(SPALTEN), len(schief)))
+          % (geprueft, len(COLUMNS), len(schief)))
     for z in schief:
         print('    SCHIEF  ' + z)
 
     eng = []
     nk = 0
-    for rel, nr, name, N, roh in alle_ketten(wurzel):
+    for rel, nr, name, N, roh in all_ketten(wurzel):
         nk += 1
         b = oktette(roh)
         if b != N:

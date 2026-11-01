@@ -3,7 +3,6 @@ sys.argv = ["x"]
 exec(open("/root/dellw/bwtest.py").read().split("before = warum()")[0])
 print(mon("info network")[:400], flush=True)
 s0 = warum().get("sitzungen_seit_status", 0)
-# --- supervisor: kill the worker (pid 26 under supervisor 25, from ps.txt)
 ps = open(W + "/ps.txt").read().split("\n")
 jv = [l.split() for l in ps if l.strip().endswith("jarvisd")]
 print("jarvisd tasks:", jv, flush=True)
@@ -19,7 +18,6 @@ jv2 = [l.split() for l in ps2.split("\n") if l.strip().endswith("jarvisd")]
 print("jarvisd tasks after:", jv2, flush=True)
 chk("D3 same supervisor, new worker pid", any(x[0] == sup and x[1] == "1" for x in jv2) and any(x[1] == sup and x[0] != worker for x in jv2), jv2)
 
-# --- watchdog: cut the network for > 30 s (watchdog = 30 in this image)
 s1 = warum().get("sitzungen_seit_status", 0)
 n0 = ser().count("worker silent too long")
 print("link off:", mon("set_link n0 off")[:200], flush=True)

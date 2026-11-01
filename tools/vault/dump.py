@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 
-WARTE = 6.0
+WAIT = 6.0
 
 
 def main(argv):
@@ -49,7 +49,7 @@ def main(argv):
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     try:
-        time.sleep(WARTE)
+        time.sleep(WAIT)
         p.stdin.write(('pmemsave 0x0 0x100000 "%s"\n' % out).encode())
         p.stdin.flush()
         time.sleep(2.0)

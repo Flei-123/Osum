@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/termtabs/check.py <outdir> -- reads serial.txt + the .ppm pictures of one tools/termtabs run (r1014 terminal tabs)
 import os, re, sys
 
 out = sys.argv[1]
@@ -36,7 +35,6 @@ def px(img, x, y):
 
 
 def differs(a, b, box):
-    # number of pixels in box (x0, y0, x1, y1) that differ clearly between two pictures
     if a is None or b is None:
         return -1
     n = 0
@@ -83,7 +81,6 @@ DARK, GREY = (9, 9, 11), (72, 72, 75)
 
 
 def tabs(n, xs):
-    # which tabs look active (dark like the terminal body) / inactive (grey), probed at y=448 inside each tab
     r = []
     for x in xs:
         p = px(img[n], x, 448)

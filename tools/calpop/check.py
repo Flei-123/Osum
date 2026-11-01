@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/calpop/check.py <outdir> -- judge serial + pictures of tools/calpop/shot.sh (P-011 calendar popup)."""
 import calendar, datetime, os, re, sys
 
 out = sys.argv[1]
@@ -28,7 +27,6 @@ if not opens:
 ty, tm, td, px, py, pw, ph = [int(v) for v in opens[0]]
 host = datetime.date.today()
 say(abs((datetime.date(ty, tm, td) - host).days) <= 1, "today in the popup (%d-%d-%d) is the system date (host %s)" % (ty, tm, td, host))
-# grids: every `calpop: grid first= days=` after a `calpop: month Y-M` matches the real calendar
 bad = 0; n = 0
 for m in re.finditer(r"calpop: month (\d+)-(\d+)\ncalpop: grid first=(\d+) days=(\d+)", ser.replace("\r", "")):
     y, mo, first, days = [int(v) for v in m.groups()]
@@ -53,14 +51,12 @@ keys = re.findall(r"calpop: key (\d+)", ser)
 say("esc" in shuts and "27" in keys, "Esc reaches the popup and closes it (shuts %s, keys %s)" % (shuts, keys))
 rects = dict((n_, tuple(int(v) for v in r)) for n_, *r in re.findall(r"calpop: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser))
 say(all(k in rects for k in ("prev", "next", "today", "cell")), "the popup reports its buttons (%s)" % sorted(rects))
-# geometry: the card lies above the bar and inside the screen
 W, H = 1280, 800
 say(px >= 0 and px + pw <= W and py >= 0 and py + ph <= H, "the card is inside the screen (x=%d y=%d w=%d h=%d)" % (px, py, pw, ph))
 geom = re.findall(r"taskbar: geom edge=0 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)
 if geom:
     by = int(geom[-1][1])
     say(py + ph <= by, "the card ends above the bar (card bottom %d, bar top %d)" % (py + ph, by))
-# pictures: the open picture differs from the bar picture inside the card, the closed one does not
 def blue(name):
     wa, ha, da = load_ppm(os.path.join(out, name + ".ppm"))
     n = 0

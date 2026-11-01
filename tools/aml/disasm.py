@@ -134,9 +134,6 @@ REGION_SPACE = {
 }
 
 
-# ===================================================================
-# NAMEN
-# ===================================================================
 
 def seg_text(b):
     return b.decode("latin1").rstrip("_") or "_"
@@ -168,11 +165,10 @@ class Aml:
         self.d = data
         self.n = len(data)
         self.methods = methods if methods is not None else {}
-        self.names = []          # (voller Name, Art, Zusatz)
+        self.names = []
         self.count = count if count is not None else {}
         self.errors = []
 
-    # ------------------------------------------------------- Grundformen
 
     def u8(self, i):
         if i >= self.n:
@@ -192,21 +188,21 @@ class Aml:
 
     def namestring(self, i):
         pre = ""
-        if self.u8(i) == 0x5C:      # RootChar
+        if self.u8(i) == 0x5C:
             pre = "\\"
             i += 1
         else:
-            while self.u8(i) == 0x5E:   # ParentPrefixChar
+            while self.u8(i) == 0x5E:
                 pre += "^"
                 i += 1
         c = self.u8(i)
-        if c == 0x00:               # NullName
+        if c == 0x00:
             return pre, i + 1
-        if c == 0x2E:               # DualNamePath
+        if c == 0x2E:
             a = seg_text(self.d[i + 1:i + 5])
             b = seg_text(self.d[i + 5:i + 9])
             return pre + a + "." + b, i + 9
-        if c == 0x2F:               # MultiNamePath
+        if c == 0x2F:
             cnt = self.u8(i + 1)
             segs = [seg_text(self.d[i + 2 + 4 * k:i + 6 + 4 * k])
                     for k in range(cnt)]
@@ -216,7 +212,6 @@ class Aml:
     def note(self, op):
         self.count[op] = self.count.get(op, 0) + 1
 
-    # ------------------------------------------------------ Nachschlagen
 
     def lookup_method(self, scope, name):
         """Wie viele Argumente nimmt der Name, wenn er eine Methode ist?
@@ -235,7 +230,6 @@ class Aml:
                 return None
             base = base.rsplit(".", 1)[0] if "." in base else "\\"
 
-    # ------------------------------------------------------- TermArg
 
     def termarg(self, i, scope, out):
         """EIN Ausdruck.  Gibt die Position dahinter zurueck."""
@@ -248,7 +242,7 @@ class Aml:
             self.note(c)
             out.append("Arg%d" % (c - 0x68))
             return i + 1
-        if c == 0x11:                    # Buffer
+        if c == 0x11:
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -256,7 +250,7 @@ class Aml:
             j = self.termarg(j, scope, sub)
             out.append("Buffer(%s){%d Oktett}" % (sub[0], end - j))
             return end
-        if c in (0x12, 0x13):            # Package / VarPackage
+        if c in (0x12, 0x13):
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -277,12 +271,11 @@ class Aml:
             return end
         return self.term(i, scope, out)
 
-    # -------------------------------------------------------- ein Term
 
     def term(self, i, scope, out, allow_name_data=False):
         c = self.u8(i)
 
-        if c == 0x10:                    # Scope
+        if c == 0x10:
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -292,7 +285,7 @@ class Aml:
             self.termlist(j, end, full, out)
             out.append("Scope(%s)" % full)
             return end
-        if c == 0x14:                    # Method
+        if c == 0x14:
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -309,7 +302,7 @@ class Aml:
                 self.errors.append("%s: %s" % (full, e))
             out.append("Method(%s, %d)" % (full, flags & 7))
             return end
-        if c == 0x15:                    # External
+        if c == 0x15:
             self.note(c)
             nm, j = self.namestring(i + 1)
             kind = self.u8(j)
@@ -319,7 +312,7 @@ class Aml:
                 self.methods[full] = argc
             out.append("External(%s)" % full)
             return j + 2
-        if c == 0x08:                    # Name
+        if c == 0x08:
             self.note(c)
             nm, j = self.namestring(i + 1)
             full = join(scope, nm)
@@ -328,7 +321,7 @@ class Aml:
             self.names.append((full, "Name", sub[0] if sub else ""))
             out.append("Name(%s, %s)" % (full, sub[0] if sub else "?"))
             return j
-        if c == 0xA0:                    # If
+        if c == 0xA0:
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -338,7 +331,7 @@ class Aml:
             self.termlist(j, end, scope, body)
             out.append("If(%s)" % (sub[0] if sub else "?"))
             return end
-        if c == 0xA1:                    # Else
+        if c == 0xA1:
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -346,7 +339,7 @@ class Aml:
             self.termlist(j, end, scope, body)
             out.append("Else")
             return end
-        if c == 0xA2:                    # While
+        if c == 0xA2:
             self.note(c)
             ln, j = self.pkglen(i + 1)
             end = i + 1 + ln
@@ -356,7 +349,7 @@ class Aml:
             self.termlist(j, end, scope, body)
             out.append("While(%s)" % (sub[0] if sub else "?"))
             return end
-        if c == 0x92:                    # LNot, evtl. als Paar
+        if c == 0x92:
             nxt = self.u8(i + 1)
             if nxt in LNOT_PAIR:
                 self.note(0x9200 | nxt)
@@ -371,11 +364,10 @@ class Aml:
             out.append("LNot(%s)" % a[0])
             return j
 
-        # --- erweiterte Opcodes
         if c == 0x5B:
             e = self.u8(i + 1)
             self.note(0x5B00 | e)
-            if e in (0x82, 0x85, 0x84, 0x83):   # Device, ThermalZone, PowerRes, Processor
+            if e in (0x82, 0x85, 0x84, 0x83):
                 ln, j = self.pkglen(i + 2)
                 end = i + 2 + ln
                 nm, j = self.namestring(j)
@@ -383,15 +375,15 @@ class Aml:
                 kind = {0x82: "Device", 0x85: "ThermalZone",
                         0x84: "PowerResource", 0x83: "Processor"}[e]
                 if e == 0x83:
-                    j += 6                       # ProcID, PblkAddr, PblkLen
+                    j += 6
                 if e == 0x84:
-                    j += 3                       # SystemLevel, ResourceOrder
+                    j += 3
                 self.names.append((full, kind, ""))
                 body = []
                 self.termlist(j, end, full, body)
                 out.append("%s(%s)" % (kind, full))
                 return end
-            if e == 0x81:                        # Field
+            if e == 0x81:
                 ln, j = self.pkglen(i + 2)
                 end = i + 2 + ln
                 nm, j = self.namestring(j)
@@ -400,7 +392,7 @@ class Aml:
                 self.fieldlist(j, end, scope, join(scope, nm), flags)
                 out.append("Field(%s)" % join(scope, nm))
                 return end
-            if e == 0x86:                        # IndexField
+            if e == 0x86:
                 ln, j = self.pkglen(i + 2)
                 end = i + 2 + ln
                 nm1, j = self.namestring(j)
@@ -410,7 +402,7 @@ class Aml:
                 self.fieldlist(j, end, scope, join(scope, nm1), flags)
                 out.append("IndexField(%s, %s)" % (nm1, nm2))
                 return end
-            if e == 0x87:                        # BankField
+            if e == 0x87:
                 ln, j = self.pkglen(i + 2)
                 end = i + 2 + ln
                 nm1, j = self.namestring(j)
@@ -422,7 +414,7 @@ class Aml:
                 self.fieldlist(j, end, scope, join(scope, nm1), flags)
                 out.append("BankField(%s, %s)" % (nm1, nm2))
                 return end
-            if e == 0x13:                        # CreateField
+            if e == 0x13:
                 a, b, cc = [], [], []
                 j = self.termarg(i + 2, scope, a)
                 j = self.termarg(j, scope, b)
@@ -435,7 +427,7 @@ class Aml:
                 name, spec = EXT[e]
                 j = i + 2
                 args = []
-                if e == 0x80:                    # OperationRegion
+                if e == 0x80:
                     nm, j = self.namestring(j)
                     space = self.u8(j)
                     j += 1
@@ -449,7 +441,7 @@ class Aml:
                                   REGION_SPACE.get(space, str(space)),
                                   a[0], b[0]))
                     return j
-                if e in (0x01, 0x02):            # Mutex, Event
+                if e in (0x01, 0x02):
                     nm, j = self.namestring(j)
                     if e == 0x01:
                         j += 1
@@ -521,7 +513,7 @@ class Aml:
                     sub = []
                     i = self.termarg(i, scope, sub)
                     out.append(sub[0] if sub else "?")
-            else:                                # T, S
+            else:
                 sub = []
                 i = self.termarg(i, scope, sub)
                 out.append(sub[0] if sub else "?")
@@ -532,19 +524,19 @@ class Aml:
         off = 0
         while i < end:
             c = self.u8(i)
-            if c == 0x00:                        # ReservedField
+            if c == 0x00:
                 ln, i = self.pkglen(i + 1)
                 off += ln
                 continue
-            if c == 0x01:                        # AccessField
+            if c == 0x01:
                 i += 3
                 continue
-            if c == 0x02:                        # ConnectField
+            if c == 0x02:
                 i += 1
                 sub = []
                 i = self.termarg(i, scope, sub)
                 continue
-            if c == 0x03:                        # ExtendedAccessField
+            if c == 0x03:
                 i += 4
                 continue
             nm = seg_text(self.d[i:i + 4])
@@ -583,14 +575,14 @@ def collect_methods(body, methods, scope="\\"):
     def walk(i, end, scope):
         while i < end:
             c = p.u8(i)
-            if c == 0x14:                       # Method
+            if c == 0x14:
                 ln, j = p.pkglen(i + 1)
                 nm, j = p.namestring(j)
                 flags = p.u8(j)
                 methods[join(scope, nm)] = flags & 7
                 i = i + 1 + ln
                 continue
-            if c == 0x10:                       # Scope
+            if c == 0x10:
                 ln, j = p.pkglen(i + 1)
                 nm, j = p.namestring(j)
                 walk(j, i + 1 + ln, join(scope, nm))

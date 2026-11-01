@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Rewrite the length of every `static mut NAME: [u8; N] = "text\\0"` in a Firn file to the
-real byte count of its string (UTF-8, escapes \\0 \\n \\t \\\\ \\" count one octet).
-usage: fixlens.py kernel/user/store.fi"""
 import re, sys
 
 def blen(lit):

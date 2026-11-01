@@ -42,9 +42,9 @@ def main():
     if len(sys.argv) < 4:
         print(__doc__)
         return 2
-    sock, ordner, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    sock, folder, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
     abstand = float(sys.argv[4]) if len(sys.argv) > 4 else 0.03
-    os.makedirs(ordner, exist_ok=True)
+    os.makedirs(folder, exist_ok=True)
 
     s = verbinden(sock)
     if s is None:
@@ -57,7 +57,7 @@ def main():
         pass
 
     for i in range(n):
-        ziel = os.path.join(ordner, "b%03d.ppm" % i)
+        ziel = os.path.join(folder, "b%03d.ppm" % i)
         if os.path.exists(ziel):
             os.unlink(ziel)
         s.sendall(("screendump %s\n" % ziel).encode())
@@ -67,10 +67,9 @@ def main():
             pass
         time.sleep(abstand)
 
-    # Halbe Dateien wegwerfen -- siehe schuesse.py.
     gut = 0
     for i in range(n):
-        ziel = os.path.join(ordner, "b%03d.ppm" % i)
+        ziel = os.path.join(folder, "b%03d.ppm" % i)
         letzte = -1
         for _ in range(50):
             try:

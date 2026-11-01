@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/rotinput/drive.py -- INPUT FOLLOWS THE OUTPUT: click the Start button of a ROTATED desktop through an absolute tablet.
-
-    drive.py <qmp-socket> <monitor-socket> <serial.txt> <outdir> <rot> [abs|rel]
-
-The desktop booted with `deskrot<rot>` (rot 0 = no word). The taskbar reports its own geometry in LOGICAL (unrotated) pixels
-(`taskbar: geom`, `taskbar: start`). The oracle below turns the Start button centre into a PANEL pixel with the rotation of
-`fb.present` (written from the definition, not from the new kernel code) and a QMP absolute tablet event goes exactly there.
-If the click really hits the button that is DRAWN there, the taskbar reports `taskbar: click ... hits=start` with a local
-position inside the Start rectangle, and the start menu opens (`taskbar: startmenue auf`).
-Facts go to scenes.txt as key=value lines. Waits are event driven (serial lines).
-"""
 import json
 import os
 import re
@@ -63,7 +52,6 @@ class Qmp:
         time.sleep(0.25)
 
     def rel_push(self, sx, sy, n=60):
-        # many relative steps in ONE call: far more than the panel is wide, so the pointer ends clamped at a screen edge/corner
         ev = []
         for _ in range(n):
             ev.append({"type": "rel", "data": {"axis": "x", "value": 100 * sx}})
@@ -107,22 +95,19 @@ def ppm(path):
 
 
 def logical_to_panel(rot, lx, ly, pw, ph):
-    """the rotation of fb.present, forwards: logical pixel -> panel pixel"""
     if rot == 0:
         return lx, ly
     if rot == 180:
         return pw - 1 - lx, ph - 1 - ly
-    if rot == 90:      # logical x = panel y, logical y = lh-1-panel x  (lh = pw)
+    if rot == 90:
         return pw - 1 - ly, lx
-    if rot == 270:     # logical x = lw-1-panel y, logical y = panel x  (lw = ph)
+    if rot == 270:
         return ly, ph - 1 - lx
     raise SystemExit("bad rotation")
 
 
 def main():
     qmp_path, mon, ser, out, rot = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-    # QEMU sends every `btn` event to the FIRST pointing device (the tablet), so the absolute scene (usb-tablet) and the
-    # relative scene (usb-mouse) run in two separate boots.
     mode = sys.argv[6] if len(sys.argv) > 6 else "abs"
     q = Qmp(qmp_path)
     facts = []
@@ -137,7 +122,7 @@ def main():
         return
     fact("desktop", 1)
     sx, sy, sw, sh = [int(v) for v in m.groups()]
-    time.sleep(2.0)                                   # let the bar settle
+    time.sleep(2.0)
     txt = serial_text(ser)
     g = re.findall(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)
     bx, by = (int(g[-1][0]), int(g[-1][1])) if g else (0, 0)
@@ -153,7 +138,6 @@ def main():
     fact("logical_centre", f"{lx},{ly}")
     fact("panel_target", f"{px},{py}")
     if mode == "abs":
-        # the old (unrotated) place of the button on the panel, for the report
         mark = len(serial_text(ser))
         q.abs_move(px, py, pw, ph)
         q.button(True)
@@ -164,7 +148,6 @@ def main():
             fact("click_local", f"{cx},{cy}")
             fact("click_line", mc.group(0).strip().replace(" ", "_"))
             fact("click_in_start", 1 if (sx <= cx < sx + sw and sy <= cy < sy + sh) else 0)
-            # read the next lines as well: `hits=` / `startmenue auf`
         else:
             fact("click_local", "none")
             fact("click_in_start", 0)
@@ -173,8 +156,6 @@ def main():
         fact("hits_start", 1 if re.search(r"taskbar: click x=\d+ y=\d+[^\n]*\n[^\n]*hits=start", serial_text(ser)[mark:]) or re.search(r"hits=start", serial_text(ser)[mark:]) else 0)
         time.sleep(1.0)
         shot(mon, os.path.join(out, "after.ppm"))
-    # --- relative mouse: push the pointer PHYSICALLY toward the panel corner that shows the LOGICAL bottom-right corner (inside the
-    # taskbar). Clamping makes it independent of pointer acceleration. The click must land at the end of the bar.
     if mode == "rel":
         gw = re.findall(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", serial_text(ser))
         bw, bh = (int(gw[-1][2]), int(gw[-1][3])) if gw else (0, 0)

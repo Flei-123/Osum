@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
-#
-#
-#   ./tools/paint/aacheck.py [ttf] [--px 11,13,16,24] [--zeichen ABC]
-#
 import os
 import sys
 
@@ -23,10 +16,6 @@ except Exception:
     HAT_PIL = False
 
 
-# ---------------------------------------------------------------- der
-# EIGENE, EINSTELLBARE RASTERER.
-#
-#
 def raster_s(f, gid, px, S):
     schritt = 64 // S
     halb = schritt // 2
@@ -91,13 +80,9 @@ def raster_s(f, gid, px, S):
     return w, h, bx0, by1, a
 
 
-def deckung_osum(schrift, px, zeichen):
-    """Das Deckungsfeld, wie der Kernel es rastert.
-
-    Gibt (w, h, links, oben, [Deckung 0..255]) -- Zeile fuer Zeile.
-    """
-    g = schrift.glyphe_px(zeichen, px) if hasattr(schrift, "glyphe_px") \
-        else schrift.glyphe(zeichen)
+def deckung_osum(font, px, zeichen):
+    g = font.glyphe_px(zeichen, px) if hasattr(font, "glyphe_px") \
+        else font.glyphe(zeichen)
     feld = []
     for r in range(g.h):
         for k in range(g.w):
@@ -106,7 +91,6 @@ def deckung_osum(schrift, px, zeichen):
 
 
 def deckung_freetype(pfad, px, zeichen):
-    """Dasselbe Zeichen ueber FreeType, als Graustufenmaske."""
     f = ImageFont.truetype(pfad, px)
     m = f.getmask(zeichen, mode="L")
     w, h = m.size
@@ -118,11 +102,6 @@ def stufen(feld):
 
 
 def kantenstufen(w, h, feld):
-    """Die meisten verschiedenen Werte in EINER senkrechten Bildzeile.
-
-    Das ist die Zahl, die eine Schraege im Bild zeigt: wie viele
-    Graustufen zwischen Tinte und Grund liegen.
-    """
     best = 0
     for k in range(w):
         s = set(feld[r * w + k] for r in range(h))
@@ -132,15 +111,6 @@ def kantenstufen(w, h, feld):
 
 
 def abweichung(aw, ah, af, bw, bh, bf):
-    """Mittlere und groesste Abweichung ueber die beste Ausrichtung.
-
-    Die beiden Rasterer setzen den Ursprung nicht zwingend gleich (die
-    Rundung der Randkiste unterscheidet sich um bis zu einen Bildpunkt),
-    also wird ueber -2..+2 in beiden Richtungen gesucht und die beste
-    Ausrichtung genommen.  Alles, was ausserhalb liegt, zaehlt als
-    Deckung 0 -- ein Bildpunkt, den nur EIN Rasterer setzt, ist ein
-    Fehler und kein fehlendes Feld.
-    """
     def hole(f, w, h, x, y):
         if x < 0 or y < 0 or x >= w or y >= h:
             return 0
@@ -202,11 +172,11 @@ def main():
 
     zusagen = 0
     fehler = 0
-    alle_stufen = []
-    alle_kanten = []
-    alle_d = []
-    alle_max = []
-    dichte = {}          # S -> [summe, n, groesst]
+    all_stufen = []
+    all_edges = []
+    all_d = []
+    all_max = []
+    dichte = {}
     DICHTEN = [4, 8, 16]
     REF = 32
 
@@ -219,16 +189,16 @@ def main():
             feld = [g.punkt(k, r) for r in range(g.h) for k in range(g.w)]
             st = stufen(feld)
             ka = kantenstufen(g.w, g.h, feld)
-            alle_stufen.append(st)
-            alle_kanten.append(ka)
+            all_stufen.append(st)
+            all_edges.append(ka)
             zeile = ("   px=%2d  '%s'  %2dx%-2d  stufen=%-3d kante=%-3d"
                      % (px, c, g.w, g.h, st, ka))
             if HAT_PIL:
                 bw, bh, bf = deckung_freetype(pfad, px, c)
                 mittel, groesst, dx, dy = abweichung(g.w, g.h, feld,
                                                      bw, bh, bf)
-                alle_d.append(mittel)
-                alle_max.append(groesst)
+                all_d.append(mittel)
+                all_max.append(groesst)
                 zeile += ("  |d|=%6.2f  max=%3d  (versatz %+d,%+d)"
                           % (mittel, groesst, dx, dy))
             gid = s.f.glyph_of(ord(c))
@@ -246,41 +216,40 @@ def main():
                         e[2] = d
             print(zeile)
 
-    n = len(alle_stufen)
+    n = len(all_stufen)
     if n == 0:
         print("PAINT-AA: no glyph with an outline checked")
         return 1
-    m_st = sum(alle_stufen) / float(n)
-    m_ka = sum(alle_kanten) / float(n)
+    m_st = sum(all_stufen) / float(n)
+    m_ka = sum(all_edges) / float(n)
     print("PAINT-AA: %d Zeichen  stufen: min=%d mittel=%.1f max=%d"
           "   kante: min=%d mittel=%.1f max=%d"
-          % (n, min(alle_stufen), m_st, max(alle_stufen),
-             min(alle_kanten), m_ka, max(alle_kanten)))
+          % (n, min(all_stufen), m_st, max(all_stufen),
+             min(all_edges), m_ka, max(all_edges)))
 
-    if min(alle_stufen) > 2:
+    if min(all_stufen) > 2:
         print("  OK    every glyph has more than two coverage levels "
-              "(kleinstes: %d)" % min(alle_stufen))
+              "(kleinstes: %d)" % min(all_stufen))
         zusagen += 1
     else:
         print("  FAIL  a glyph has only %d coverage levels -- that is "
-              "eine Bitmaske" % min(alle_stufen))
+              "eine Bitmaske" % min(all_stufen))
         fehler += 1
 
-    if min(alle_kanten) >= 3:
+    if min(all_edges) >= 3:
         print("  OK    every edge carries at least three levels "
               "(kleinste: %d, mittlere: %.1f)"
-              % (min(alle_kanten), m_ka))
+              % (min(all_edges), m_ka))
         zusagen += 1
     else:
-        print("  FAIL  an edge carries only %d levels" % min(alle_kanten))
+        print("  FAIL  an edge carries only %d levels" % min(all_edges))
         fehler += 1
 
     if HAT_PIL:
-        md = sum(alle_d) / float(len(alle_d))
+        md = sum(all_d) / float(len(all_d))
         print("PAINT-AA: gegen FreeType  |d| mittel=%.2f  "
               "schlechtestes Zeichen=%.2f  groesster Einzelfehler=%d"
-              % (md, max(alle_d), max(alle_max)))
-        #
+              % (md, max(all_d), max(all_max)))
         if md < 45.0:
             print("  OK    the same glyph as FreeType, |d| = %.2f of "
                   "255 (%.2f Prozent, ueberwiegend Hinting)"

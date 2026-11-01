@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# tools/backlum/gen.py -- writes kernel/user/backlum.fi from the template below (the name arrays need exact lengths)
 import re, sys
 body = open(sys.argv[1]).read()
 names = []

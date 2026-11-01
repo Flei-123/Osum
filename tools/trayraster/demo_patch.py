@@ -1,5 +1,3 @@
-# Counter-proof helper: adds ONLY the `tray_demo` test keys to an old tree (kernel/user/taskbar.fi) so the old layout can be measured with a fake battery/volume.
-# usage: python3 -I demo_patch.py <tree-root>
 import sys
 p=sys.argv[1]+'/kernel/user/taskbar.fi'
 s=open(p,encoding='latin1').read()

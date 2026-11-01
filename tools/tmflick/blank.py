@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tmflick/blank.py <dir> <prefix> [--max N] -- W-FLICKER resize sweep: count frames whose client area is (mostly) flat dark = blank flash.
-
-The task manager client area is light (panel background); a frame where fewer than half of the pixels in the 40..600 x 60..600 box are
-light is the window cleared to the dark background colour (or a half-painted picture).
-"""
 import glob
 import sys
 

@@ -1,11 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/vmsvga/harness.py -- QEMU monitor + minimal VNC client for tools/vmsvga/run.sh.
-#
-# usage: harness.py <monitor sock> <vnc sock> <base> <serial file> <mode full|short|frames> <vga>
-#   full   : wait for the five `vmsvga: panel=` lines; after each one: screendump <base>.p<i>.ppm, size file, VNC compare
-#   short  : wait 25 s only (control: nothing should appear)
-#   frames : wait for the `vmsvga: frames hw=` line only
-# VNC client: applies ONLY what the server sends (Raw rects, DesktopSize), keeps the last RichCursor shape.
 import os
 import socket
 import struct
@@ -37,7 +30,7 @@ class Vnc:
         self.lock = threading.Lock()
         self.w = self.h = 0
         self.buf = bytearray()
-        self.cursor = None  # (w, h, opaque, transparent)
+        self.cursor = None
         self.updates = 0
         self.stop = False
         self.s = socket.socket(socket.AF_UNIX)
@@ -63,7 +56,6 @@ class Vnc:
         (nl,) = struct.unpack(">I", self.rx(4))
         self.rx(nl)
         self.resize(w, h)
-        # 32 bpp little endian true colour: bytes B G R X
         self.s.sendall(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
         encs = [0, -239, -223]
         self.s.sendall(struct.pack(">BxH", 2, len(encs)) + b"".join(struct.pack(">i", e) for e in encs))
@@ -118,7 +110,6 @@ class Vnc:
                         mask = self.rx(((w + 7) // 8) * h)
                         op = sum(bin(b).count("1") for b in mask)
                         tr = (((w + 7) // 8) * 8 * h) - op
-                        # padding bits of each row are zero: count transparent only inside the width
                         pad = (((w + 7) // 8) * 8 - w) * h
                         self.cursor = (w, h, op, tr - pad)
                     elif enc == -223:

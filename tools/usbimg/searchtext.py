@@ -62,7 +62,7 @@ sys.path.insert(0, os.path.join(HIER, "..", "ttf"))
 import raster  # noqa: E402
 
 
-def ppm_lesen(pfad):
+def ppm_read(pfad):
     roh = open(pfad, "rb").read()
     if not roh.startswith(b"P6"):
         raise ValueError("kein P6-PPM: %s" % pfad)
@@ -88,8 +88,6 @@ def ppm_lesen(pfad):
 
 def punkte(text, ttf, px, deckung):
     """(dx, dy, tinte?) -- dy ist relativ zur Grundlinie."""
-    # ROUND FUI-TEXT: `fui:<ttf>` expects fUi's ink (Ring 3 text since
-    # kernel/user/fuiglyph.fi), a bare path the kernel's.
     if ttf.startswith("fui:"):
         import fuiraster
         s = fuiraster.Schrift(ttf[4:], px)
@@ -114,7 +112,7 @@ def punkte(text, ttf, px, deckung):
     return voll, rand, s
 
 
-def suche(bild, voll, rand, tol):
+def search(bild, voll, rand, tol):
     h, w, _ = bild.shape
     xs = [p[0] for p in voll] + [p[0] for p in rand]
     ys = [p[1] for p in voll] + [p[1] for p in rand]
@@ -127,24 +125,24 @@ def suche(bild, voll, rand, tol):
     nx = w - bw + 1
     ny = h - bh + 1
 
-    def flaeche(dx, dy):
+    def area(dx, dy):
         ax = dx - x0
         ay = dy - y0
         return bild[ay:ay + ny, ax:ax + nx, :]
 
-    erste = flaeche(voll[0][0], voll[0][1])
+    first = area(voll[0][0], voll[0][1])
     treffer = np.zeros((ny, nx), dtype=np.int32)
     for (dx, dy) in voll:
-        f = flaeche(dx, dy)
-        gleich = (np.abs(f - erste) <= tol).all(axis=2)
-        treffer += gleich.astype(np.int32)
+        f = area(dx, dy)
+        eq = (np.abs(f - first) <= tol).all(axis=2)
+        treffer += eq.astype(np.int32)
     gegen = np.zeros((ny, nx), dtype=np.int32)
     schritt = max(1, len(rand) // 400)
     genommen = rand[::schritt]
     for (dx, dy) in genommen:
-        f = flaeche(dx, dy)
-        anders = (np.abs(f - erste) > tol).any(axis=2)
-        gegen += anders.astype(np.int32)
+        f = area(dx, dy)
+        changed = (np.abs(f - first) > tol).any(axis=2)
+        gegen += changed.astype(np.int32)
 
     anteil_tinte = treffer / float(len(voll))
     anteil_gegen = gegen / float(max(1, len(genommen)))
@@ -172,12 +170,12 @@ def main(argv):
             mind = float(argv[i + 1])
         if a == "--deckung":
             deckung = int(argv[i + 1])
-    bild = ppm_lesen(ppm)
+    bild = ppm_read(ppm)
     voll, rand, _ = punkte(text, ttf, px, deckung)
     if not voll:
         print("die Zeile '%s' hat keinen einzigen vollgedeckten Punkt" % text)
         return 2
-    e = suche(bild, voll, rand, tol)
+    e = search(bild, voll, rand, tol)
     if e is None:
         print("the line is larger than the image")
         return 2

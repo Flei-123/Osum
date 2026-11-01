@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Legacy-dialect test (old German paths/keys/words/headers) of the why-offline features against a throw-away instance."""
 import json, os, shutil, socket, subprocess, sys, tempfile, time, urllib.request, secrets
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -12,7 +11,7 @@ def chk(name, cond, extra=""):
     if cond: ok += 1; print("OK   ", name)
     else: bad += 1; print("FAIL ", name, extra)
 
-env = dict(os.environ, BRUECKE_TOT_S="3", BRUECKE_WAECHTER_S="0.4", BRUECKE_JOB_TTL_S="4", BRUECKE_BUSY_GRACE_S="7")
+env = dict(os.environ, BRUECKE_TOT_S="3", BRUECKE_WAECHTER_S="0.4", BRIDGE_JOB_TTL_S_2="4", BRIDGE_BUSY_GRACE_S_2="7")
 def start():
     return subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_server.py"), "--port", str(PORT), "--bind", "127.0.0.1", "--wurzel", W],
                             env=env, stderr=open(W + "/log.txt", "a"), stdout=subprocess.DEVNULL)
@@ -71,7 +70,6 @@ def wait_state(d, want, t=12):
         time.sleep(0.3)
     return False
 
-# ---- A: online, then silent -> stumm, with an event
 d = Dev(); d.prepair()
 chk("login ok", d.login() == "willkommen")
 for _ in range(3): d.puls(); time.sleep(0.2)
@@ -82,7 +80,6 @@ chk("SILENT event written", any("SILENT" in e[1] for e in w["ereignisse"]), w["e
 chk("text says cause not determinable", "cannot be determined" in w["kurz"])
 chk("verbunden false in /geraete", [g for g in api("/bruecke/geraete")["geraete"] if g["kennung"] == d.kennung][0]["verbunden"] is False)
 
-# ---- B: new session after silence -> logged, then busy job, keepalive
 chk("relogin", d.login() == "willkommen")
 chk("event NEW SESSION", any("NEW SESSION" in e[1] for e in warum(d)["ereignisse"]))
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "befehl", "ziel": "sleep 99"})
@@ -93,12 +90,10 @@ chk("BUSY event", wait_event(d, "BUSY"))
 d.send("lebt"); 
 chk("keepalive `lebt` -> online again", warum(d)["zustand"] == "online")
 chk("`lebt` hands out no job", d.send("lebt") == b"")
-# busy -> stumm after grace
 chk("busy -> stumm after grace", wait_state(d, "stumm", 14))
 wait_event(d, "unanswered"); w = warum(d)
 chk("stumm names the unanswered job", "unanswered" in " ".join(e[1] for e in w["ereignisse"]), w["ereignisse"][-2:])
 
-# ---- C: result clears the running job; goodbye
 d.login()
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "liste", "ziel": "/"})
 a = d.puls().decode().split()
@@ -109,7 +104,6 @@ d.send("tschuess")
 chk("goodbye -> sauber_beendet", wait_state(d, "sauber_beendet", 10))
 wait_event(d, "DISCONNECTED"); chk("sauber ende_grund", "bye" in warum(d)["ende_grund"])
 
-# ---- D: stale job dropped (TTL 4 s), kept with ttl_s 0
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "system"})
 api("/bruecke/auftrag", {"geraet": d.kennung, "art": "system", "ttl_s": 0})
 time.sleep(5)
@@ -118,7 +112,6 @@ r = d.puls().decode()
 chk("stale job dropped, ttl_s 0 job survives", r.startswith("auftrag ") and warum(d)["offene_auftraege"] == 0
     and any("JOB DROPPED" in e[1] for e in warum(d)["ereignisse"]), (r[:30], warum(d)["ereignisse"][-3:]))
 
-# ---- E: info -> MAC, WoL packet on loopback
 mac = "aa:bb:cc:dd:ee:01"
 d.send("info", ("mac=%s;commit=abc1234" % mac).encode())
 chk("MAC learned", warum(d)["mac"] == mac, warum(d)["mac"])
@@ -136,7 +129,6 @@ chk("wol bad mac refused", api("/bruecke/wol", {"mac": "xyz"}).get("http") == 40
 chk("admin sets MAC", api("/bruecke/koppeln", {"was": "mac", "geraet": d.kennung, "mac": "11:22:33:44:55:66"}).get("mac") == "11:22:33:44:55:66")
 chk("warum needs admin key", api("/bruecke/warum", admin=False).get("http") == 403)
 
-# ---- F: restart keeps last contact + MAC; event about the restart
 time.sleep(0.5)
 srv.terminate(); srv.wait(5)
 srv = start(); time.sleep(1.5)
@@ -150,10 +142,9 @@ chk("fresh login after restart works", d.login() == "willkommen")
 chk("FIRST SESSION event", any("FIRST SESSION" in e[1] for e in warum(d)["ereignisse"]))
 srv.terminate(); srv.wait(5)
 
-# ---- G: a device that only knocks (greeting, never `ich`) -> "klopft", then recovers
 srv = start(); time.sleep(1.2)
 d2 = Dev(); d2.prepair()
-d2.sid = secrets.token_hex(8); d2.sid = d2.pub[:24]       # the real client uses the key prefix as wire id
+d2.sid = secrets.token_hex(8); d2.sid = d2.pub[:24]
 for _ in range(3):
     d2.send("osum-bruecke 1"); time.sleep(0.3)
 chk("knock only -> klopft", wait_state(d2, "klopft", 6), warum(d2).get("zustand"))

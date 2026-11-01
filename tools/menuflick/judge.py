@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/menuflick/judge.py <serial.txt> -- split the serial log at the F12 `wm: bild` lines and print per phase the frame numbers and
-the count/area of the large dirty rectangles (`wm: dmg x0 y0 x1 y1` lines of the word `phases`, rectangles over 16384 px). Exit 1 when a hover phase fails the verdict."""
 import re
 import sys
 
-# The window under test of each hover phase (origin of its outer rectangle at 1280x800, uiscale 1). Rectangles of OTHER windows are noise
-# of the audit setup (`uitrace=yes` prints into the terminal window behind, which then repaints) and are only listed, not judged.
 TARGET = {3: (8, 336), 5: (21, 37)}
 
 t = open(sys.argv[1], "rb").read().decode("latin1")
@@ -24,7 +20,6 @@ for line in t.splitlines():
         cur["dmg"] = cur.get("dmg", 0) + (1 if (int(r.group(3)) - int(r.group(1))) * (int(r.group(4)) - int(r.group(2))) > 16384 else 0)
     r = re.search(r"wm: crect (\d+) (\d+) (\d+) (\d+) ", line)
     if r:
-        # composed (grown) rectangle > 16384 px: this is what the machine really repaints and sends
         cur["rects"] += 1
         cur["px"] += (int(r.group(3)) - int(r.group(1))) * (int(r.group(4)) - int(r.group(2)))
         cur.setdefault("org", {})
@@ -40,7 +35,6 @@ for i in (3, 5):
     if i < len(phases):
         p = phases[i]
         mine = p.get("org", {}).get(TARGET[i], 0)
-        # X2: Settings paints into a private picture too (set_atomic): its hover must be near zero, 1 per 100 frames; the start menu 1 per 50
         lim = 100 if i == 5 else 50
         ok = p["n"] == 0 or mine * lim <= max(p["n"], 1)
         print("  %s  %s: %d composed large rects of the window under test in %d frames (need <= 1 per %d; %d of other windows ignored)" %

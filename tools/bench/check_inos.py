@@ -8,7 +8,6 @@ exit 0 = all required keys present, numeric and plausible; 1 = problems (listed 
 """
 import json, re, sys
 
-# key -> (min, max) inclusive. Ranges only catch a broken measurement, not a slow one.
 RANGES = {
     "boot.init_ms": (1, 600000),
     "boot.total_ms": (1, 600000),
@@ -17,9 +16,9 @@ RANGES = {
     "mem.used_kib": (100, 1 << 26),
     "mem.kheap_kib": (1, 1 << 26),
     "idle.window_ms": (1000, 60000),
-    "idle.cpu_busy_permille": (0, 1000),   # optional: needs per-core counters (CS_COUNT > 0)
+    "idle.cpu_busy_permille": (0, 1000),
     "idle.traps_per_s": (0, 1e7),
-    "idle.ctxsw_per_s": (0, 1e7),          # optional, same reason
+    "idle.ctxsw_per_s": (0, 1e7),
     "idle.syscalls_per_s": (0, 1e7),
     "size.kernel_end_kib": (100, 1 << 20),
     "size.bin_total_b": (1000, 1 << 32),
@@ -30,7 +29,7 @@ RANGES = {
     "syscall.pipe_rtt_poll_ns": (1, 1e8),
     "syscall.pipe_rtt_block_ns": (1, 1e8),
     "syscall.fork_exit_wait_us": (1, 1e7),
-    "syscall.exec_exit_wait_us": (1, 4000),  # r1222: 10-13 ms while every exec wrote ~270 UART octets; ~1.4 ms now
+    "syscall.exec_exit_wait_us": (1, 4000),
     "syscall.exec_call_us": (1, 4000),
     "syscall.exec_wait_us": (1, 4000),
     "fs.tmp_write_kib_s": (1, 1e8),
@@ -51,7 +50,6 @@ RANGES = {
 }
 
 
-# keys that only exist with per-core counters (full image / firmware tables); the fast QEMU -kernel gate image has none
 OPTIONAL = {"idle.cpu_busy_permille", "idle.ctxsw_per_s"}
 
 

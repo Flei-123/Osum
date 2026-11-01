@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""mkgate.py <old-results> <new-results> <outdir>
-
-  accept.txt  every check that passes on the NEW kernel and does not depend on timing -- "what works today must keep working"
-  fixed.txt   every check that does NOT pass on the old kernel (main before the round) and passes on the new one -- the counter-proof list
-Run it after a full run of tools/unterbau/run.sh (UB_RESULT=... and, for the old kernel, OLDK=<kernel of the old tree> UB_OLD_RESULT=...)."""
 import sys, os
 TIMING = ("timedwait", "advances_with_sleep", "spawn_returns_before", "timerfd", "blocks_until_event", "alarm_fires", "setitimer", "interrupts_nanosleep",
           "sigsuspend", "periodic", "sigchld", "churn", "wait_wnohang", "stress", "2_threads", "24_threads", "committed_mib", "tmpfile")

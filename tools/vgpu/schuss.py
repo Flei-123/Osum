@@ -45,10 +45,10 @@ def main():
         s.recv(65536)
     except OSError:
         pass
-    befehl = "screendump %s" % ziel
+    cmd = "screendump %s" % ziel
     if geraet:
-        befehl += " %s" % geraet
-    s.sendall((befehl + "\n").encode())
+        cmd += " %s" % geraet
+    s.sendall((cmd + "\n").encode())
     letzte = -1
     bis = time.time() + frist
     while time.time() < bis:

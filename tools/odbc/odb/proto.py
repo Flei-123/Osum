@@ -1,13 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Payload layer of docs/ODB.md: TLV blocks, command requests, stream payloads, ACKs.
-
-REQ payload  = cmdlen u8 | cmd ASCII | tlv*
-RESP/ERR     = tlv*
-END          = stream u8 | tlv*
-DATA         = stream u8 | bytes   (file stream 3: offset u64 | bytes)
-ACK          = stream u8 | next u64
-tlv          = klen u8 | key | vlen u16 | value        (repeated key = list)
-"""
 import struct
 
 STDIN, STDOUT, STDERR, FILE, SHOT, LOG = 0, 1, 2, 3, 4, 5
@@ -27,7 +18,6 @@ class AgentError(Exception):
 
 
 class Tlv:
-    """Ordered (key, bytes) pairs with dict-like helpers."""
 
     def __init__(self, pairs=()):
         self.pairs = list(pairs)
@@ -78,7 +68,6 @@ def _val(v):
 
 
 def enc_tlv(items):
-    """items: dict or list of (k, v); a list/tuple value = repeated key; None skipped."""
     if hasattr(items, "items"):
         items = items.items()
     out = bytearray()

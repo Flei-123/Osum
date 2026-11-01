@@ -150,9 +150,6 @@ def main(argv):
         line_list.append(target_dir + "/")
         line_list.append("%s/INFO=%s" % (target_dir, os.path.join(file_path, "INFO")))
         sym = os.path.join(arbeit, name + ".symbol")
-        # r399 (design audit): a bundle may carry a finished OSYM picture
-        # (`symbol.osym`, vector art baked from symbol.svg by tools/svg/apps.sh); it wins over the
-        # 16x16 drawing in `symbol.txt`.
         fertig = os.path.join(file_path, "symbol.osym")
         if os.path.isfile(os.path.join(file_path, "symbol.svg")) and not os.path.isfile(fertig):
             print("bundle: %s has symbol.svg but no baked symbol.osym (run tools/svg/apps.sh)" % file_path, file=sys.stderr)
@@ -168,9 +165,6 @@ def main(argv):
                 print(r.stdout + r.stderr, file=sys.stderr)
                 return 1
         line_list.append("%s/symbol=%s" % (target_dir, sym))
-        # AB-003: the image's own bundles carry SYSTEM -- their programs act
-        # as the user and get no app label from the kernel
-        # (kernel/sched/origin.fi). `opk` never installs this name.
         brand_name = os.path.join(arbeit, "SYSTEM")
         if not os.path.exists(brand_name):
             with open(brand_name, "w") as f:
@@ -180,7 +174,7 @@ def main(argv):
         line_list.append("%s/data/README=%s"
                       % (target_dir, os.path.join(file_path, "data", "README")))
         if (console_von(file_path) and nur is not None and "/bin/term" in nur
-                and not os.environ.get("OSUM_NOCONSOLE")):   # OSUM_NOCONSOLE: counter-proof switch of tools/term/editwin.sh
+                and not os.environ.get("OSUM_NOCONSOLE")):
             skript = os.path.join(arbeit, name + ".start")
             with open(skript, "w") as f:
                 f.write("#!/bin/term -c%s\n" % start_von(file_path))

@@ -31,7 +31,7 @@ Laeuft mehrfach ohne Schaden: nach dem ersten Lauf steht dort eine Zahl.
 import re
 import sys
 
-ZEILE = re.compile(
+LINE = re.compile(
     r'^(?P<kopf>\s*(?:static\s+mut|static|var|let)\s+[A-Za-z_][A-Za-z_0-9]*'
     r'\s*:\s*\[u8;\s*)\?(?P<mitte>\s*\]\s*=\s*)"(?P<text>(?:[^"\\]|\\.)*)"'
     r'(?P<rest>.*)$'
@@ -66,7 +66,7 @@ def datei(pfad: str) -> int:
     aus = []
     n = 0
     for zeile in alt.split("\n"):
-        m = ZEILE.match(zeile)
+        m = LINE.match(zeile)
         if not m:
             aus.append(zeile)
             continue

@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/trustdlg/flicker.py -- flicker detector for the trusted dialog.
-
-    flicker.py <monitor-socket> <workdir> <x> <y> <w> <h> <samples>
-
-Takes <samples> screendumps of the guest in a row while the dialog is up and compares the dialog
-rectangle (x y w h) between them. The most frequent crop is the reference; every other crop is a
-frame in which the dialog was seen torn / missing / half painted. Prints one line:
-    flicker: samples=N odd=M distinct=D worst_px=P
-Exit 0 always (the gate decides). The pointer is outside the rectangle by construction.
-"""
 import hashlib, os, socket, sys, time
 
 
@@ -31,7 +21,6 @@ def dump(sock, path):
 def crop(path, x, y, w, h):
     with open(path, "rb") as f:
         data = f.read()
-    # P6\nW H\n255\n
     parts = data.split(b"\n", 3)
     W, H = [int(v) for v in parts[1].split()]
     pix = parts[3]

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
 import sys, zlib, struct
 
 
-def ppm_lesen(p):
+def ppm_read(p):
     d = open(p, 'rb').read()
     if not d.startswith(b'P6'):
         raise SystemExit("kein P6-PPM: " + p)
@@ -63,17 +60,17 @@ if __name__ == '__main__':
         raise SystemExit(__doc__)
     src, dst = sys.argv[1], sys.argv[2]
     zoom = int(sys.argv[3]) if len(sys.argv) > 3 else 12
-    w, h, px = ppm_lesen(src)
+    w, h, px = ppm_read(src)
 
-    def farbe(x, y):
+    def color_2(x, y):
         i = (y * w + x) * 3
         return (px[i], px[i + 1], px[i + 2])
 
-    hg = farbe(w - 5, 5)
+    hg = color_2(w - 5, 5)
     y0 = None
     for y in range(0, h // 2):
-        anders = sum(1 for x in range(w // 2, w - 1, 7) if farbe(x, y) != hg)
-        if anders > 8:
+        changed = sum(1 for x in range(w // 2, w - 1, 7) if color_2(x, y) != hg)
+        if changed > 8:
             y0 = y
             break
     if y0 is None:
@@ -88,7 +85,7 @@ if __name__ == '__main__':
     zaehl = {}
     for y in range(y0, min(h, y0 + bh)):
         for x in range(x0, min(w, x0 + bw)):
-            zaehl[farbe(x, y)] = zaehl.get(farbe(x, y), 0) + 1
+            zaehl[color_2(x, y)] = zaehl.get(color_2(x, y), 0) + 1
     top = sorted(zaehl.items(), key=lambda kv: -kv[1])[:6]
     print("   haeufigste Farben im Knopfbereich:")
     for c, n in top:

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/netui/model.py -- independent Python model of lib/netui/netui.fi (LW-5) and the check driver.
-
-usage: python3 -I tools/netui/model.py <oracle binary>
-Prints "  OK    ..." / "  FAIL  ..." lines and "RESULT pass=N fail=M". The model is written from the rules in the
-task (bars thresholds, sort order, password limits), not from the Firn source.
-"""
 import random
 import subprocess
 import sys
@@ -29,7 +23,6 @@ def run(binpath, lines):
     return p.stdout.splitlines()
 
 
-# ---- model -----------------------------------------------------------------
 
 def m_bars(r):
     if r >= 0:
@@ -70,7 +63,7 @@ def m_conn(z):
 
 class Model:
     def __init__(self):
-        self.items = []   # dicts in arrival order
+        self.items = []
 
     def add(self, ssid, rssi, kind, known):
         cls = kind if 0 <= kind <= 6 else 7
@@ -94,7 +87,6 @@ class Model:
         def hidden(it):
             return len(it["ssid"]) == 0 or all(b == 0 for b in it["ssid"])
         eff = lambda r: -127 if r >= 0 else r
-        # python sort is stable: arrival order breaks the remaining ties
         return sorted(self.items, key=lambda it: (hidden(it), -eff(it["rssi"]), -it["known"]))
 
 
@@ -143,7 +135,6 @@ def main():
     binpath = sys.argv[1]
     rng = random.Random(20261021)
 
-    # ---- bars: every dBm from +5 to -127 against the model, and the thresholds by hand
     cmds = ["b %d" % r for r in range(5, -128, -1)]
     out = run(binpath, cmds)
     ok = len(out) == len(cmds) and all(out[i] == "b %d" % m_bars(5 - i) for i in range(len(cmds)))
@@ -152,7 +143,6 @@ def main():
     check("bars: thresholds at -55/-65/-75/-85, 0 = no measurement = 0 bars",
           o == ["b 4", "b 3", "b 3", "b 2", "b 2", "b 1", "b 1", "b 0", "b 0"])
 
-    # ---- security class
     out = run(binpath, ["s %d" % k for k in range(0, 12)])
     good = True
     for k in range(0, 12):
@@ -160,23 +150,21 @@ def main():
         good = good and out[k] == "s cls=%d weak=%d pw=%d" % (c, 1 if w else 0, 1 if pw else 0)
     check("security: kinds 0..11 (0..6 known, rest unknown = weak, no password prompt) equal the model", good)
 
-    # ---- connection class
     out = run(binpath, ["c %d" % z for z in range(0, 14)])
     check("connection: states 0..13 map to off/scanning/connecting/keys/connected/failed (unknown = failed)",
           out == ["c %d" % m_conn(z) for z in range(0, 14)])
 
-    # ---- list: fixed case
     A = lambda s, r, k, kn: "A %s %d %d %d" % (hx(s), r, k, kn)
     script = ["L",
-              A(b"far", -80, 3, 0),          # src 0
-              A(b"near", -45, 3, 0),         # src 1
-              A(b"", -30, 3, 0),             # src 2 hidden: last although strongest
-              A(b"mid", -60, 5, 0),          # src 3
-              A(b"mid", -50, 5, 0),          # same name + kind: stronger wins, still one entry
-              A(b"mid", -40, 3, 0),          # same name, other kind: a second entry (src 4)
-              A(b"nosig", 0, 3, 0),          # no measurement: weakest visible
-              A(b"known", -80, 3, 1),        # ties with "far" at -80: known first
-              A(b"\x00\x00", -20, 0, 0),     # all-zero name: hidden
+              A(b"far", -80, 3, 0),
+              A(b"near", -45, 3, 0),
+              A(b"", -30, 3, 0),
+              A(b"mid", -60, 5, 0),
+              A(b"mid", -50, 5, 0),
+              A(b"mid", -40, 3, 0),
+              A(b"nosig", 0, 3, 0),
+              A(b"known", -80, 3, 1),
+              A(b"\x00\x00", -20, 0, 0),
               "P"]
     out = run(binpath, script)
     mdl = Model()
@@ -201,13 +189,11 @@ def main():
           names.index(hx(b"known")) < names.index(hx(b"far")))
     check("list: 'no measurement' is the weakest visible entry", rows[len(vis) - 1]["ssid"] == hx(b"nosig"))
 
-    # ---- list: limits
     script = ["L"] + [A(b"net%02d" % i, -50 - i, 3, 0) for i in range(17)] + [A(b"x" * 33, -50, 3, 0)]
     out = run(binpath, script)
     check("list: the 17th network is refused (full), a 33-octet name is refused",
           out[1:17] == ["A ok"] * 16 and out[17] == "A full" and out[18] in ("A full", "A bad"))
 
-    # ---- list: random fuzz against the model (re-sorting after every add must not change the result)
     bad = 0
     for run_no in range(40):
         mdl = Model()
@@ -220,10 +206,9 @@ def main():
             mdl.add(ssid, rssi, kind, known)
             script.append(A(ssid, rssi, kind, known))
             if rng.random() < 0.3:
-                script.append("P")   # sorting in the middle must not disturb later adds
+                script.append("P")
         script.append("P")
         out = run(binpath, script)
-        # the last "P" block: find it
         idx = max(i for i, l in enumerate(out) if l.startswith("P "))
         cnt = int(out[idx].split()[1])
         rws = [parse_rank(l) for l in out[idx + 1:idx + 1 + cnt]]
@@ -234,7 +219,6 @@ def main():
             bad += 1
     check("list: 40 random scans (0..14 results, duplicates, hidden, unknown kinds) equal the model", bad == 0)
 
-    # ---- password
     keys = [ord(c) for c in "abcdefg"]
     out = run(binpath, ["W"] + ["K %d" % c for c in keys] + ["K 13", "K 104", "K 13", "Q"])
     pw = Pw()

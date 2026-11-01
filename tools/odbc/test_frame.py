@@ -12,7 +12,6 @@ from odb import frame as F  # noqa: E402
 
 class FrameCodec(unittest.TestCase):
     def test_spec_vectors(self):
-        # docs/ODB.md section 2 test vectors
         self.assertEqual(zlib.crc32(b"123456789") & 0xFFFFFFFF, 0xCBF43926)
         self.assertEqual(F.encode(F.Frame(F.PING, 0, b"hi")).hex(), "4f44423101060000000000000200000068692d574d30")
         from odb import proto
@@ -75,7 +74,7 @@ class FrameCodec(unittest.TestCase):
         d = F.Decoder()
         self.assertEqual(d.feed(b"junk OD"), [])
         self.assertEqual(d.feed(b"B"), [])
-        self.assertEqual(d.feed(F.encode(f)), [f])      # "ODB" + frame magic: resync finds the real one
+        self.assertEqual(d.feed(F.encode(f)), [f])
         self.assertGreaterEqual(d.garbage, 6)
 
     def test_bad_crc_resync(self):
@@ -89,7 +88,7 @@ class FrameCodec(unittest.TestCase):
     def test_magic_inside_payload_of_corrupt_frame(self):
         inner = F.encode(F.Frame(F.PING, 5, b"in"))
         outer = bytearray(F.encode(F.Frame(F.DATA, 1, b"aa" + inner + b"zz")))
-        outer[-1] ^= 1                       # outer crc broken, inner frame still intact
+        outer[-1] ^= 1
         d = F.Decoder()
         got = d.feed(bytes(outer))
         self.assertEqual([x.id for x in got], [5])
@@ -130,7 +129,6 @@ class FrameCodec(unittest.TestCase):
         d = F.Decoder()
         for _ in range(2000):
             d.feed(bytes(rnd.randrange(256) for _ in range(rnd.randrange(1, 200))))
-        # a good frame after arbitrary garbage must still decode
         f = F.Frame(F.END, 77, b"done")
         out = d.feed(F.encode(f) * 2)
         self.assertEqual(out[-1], f)

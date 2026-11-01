@@ -1,35 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/count.py -- WER MALT NOCH SELBST?
-
-    count.py [--json <datei>]
-
-Justins Regel fuer diese Runde lautet: ALLES an Oberflaeche geht ueber
-das Rahmenwerk.  Kein Programm malt selbst, kein Programm tippt eine
-Farbe, kein Programm tippt einen Abstand.  Was das Rahmenwerk nicht
-kann, wird INS Rahmenwerk eingebaut.
-
-Eine Regel, die man nicht zaehlen kann, ist ein Vorsatz.  Dieses
-Werkzeug zaehlt sie:
-
-  1. DIREKTE ZEICHENAUFRUFE.  Jeder Aufruf einer MALENDEN Routine des
-     Zeichenkerns (`wlibc.rect`, `.px`, `.hline`, `.rrect`, `.text_at`,
-     ...) in kernel/user/*.fi AUSSER wlib.fi und wlibc.fi selbst.
-     MESSENDE Routinen (`text_w`, `ascent_of`, `px_ui`) zaehlen nicht --
-     eine Breite zu erfragen ist kein Malen.  Ziel: 0.
-
-  2. FESTE FARBWERTE.  Eine Zahl, die als Farbe in eine Malroutine
-     geht, ohne durch `wlibc.theme`/`sem`/`shade`/`blend` gegangen zu
-     sein.  Ziel: 0 ausserhalb von theme*/wlibc.
-
-  3. FESTE PIXELMASSE.  Zahlenliterale in Geometrie-Argumenten, die
-     nicht aus `metric`/`sp`/`grid`/`ctrl_*` stammen -- als Hinweis,
-     nicht als Abnahmekriterium.
-
-Ausgenommen sind Programme, die KEINE Fensteroberflaeche sind, sondern
-den Zeichenkern selbst pruefen: `icont` (Symbolpruefstand) und
-`themetest`.  Sie stehen einzeln in der Ausgabe, mit Begruendung.
-"""
 import glob
 import json
 import os
@@ -63,7 +33,6 @@ def zeilen(pfad):
 
 
 def scan(pfad):
-    """(mal-treffer, farb-treffer) einer Datei."""
     mal = []
     for nr, z in enumerate(zeilen(pfad), 1):
         if RE_COMMENT.match(z):
@@ -88,12 +57,11 @@ RE_MAL_CALL = re.compile(
          "draw_area", "draw_board", "draw_separator", "draw_text",
          "draw_bar", "draw_point", "draw_frame", "draw_line",
          "draw_edge3"]) + r")\s*\(")
-RE_ZAHL = re.compile(r"\b(0x[0-9a-fA-F]{6,8}|\d{5,8})\b")
+RE_NUM = re.compile(r"\b(0x[0-9a-fA-F]{6,8}|\d{5,8})\b")
 RE_MASKE = re.compile(r"[&|^]\s*(0x[0-9a-fA-F]+|\d+)\s*$")
 
 
 def farben(pfad):
-    """Zahlenliterale, die ALS FARBE in einen Malaufruf gehen."""
     treffer = []
     for nr, z in enumerate(zeilen(pfad), 1):
         if RE_COMMENT.match(z):
@@ -101,7 +69,7 @@ def farben(pfad):
         code = z.split("//")[0]
         if not RE_MAL_CALL.search(code):
             continue
-        for m in RE_ZAHL.finditer(code):
+        for m in RE_NUM.finditer(code):
             v = m.group(1)
             vor = code[: m.start()].rstrip()
             if vor.endswith("&") or vor.endswith("|") or vor.endswith("^"):
@@ -115,7 +83,7 @@ def main():
                         "..", "..", "kernel", "user")
     hier = os.path.normpath(hier)
     ergebnis = {"dateien": {}, "summe": 0, "pruefstand": 0, "farben": 0}
-    breit = []
+    wide = []
     for pfad in sorted(glob.glob(os.path.join(hier, "*.fi"))):
         name = os.path.basename(pfad)
         if name in KERN:
@@ -124,21 +92,21 @@ def main():
         f = farben(pfad)
         if not mal and not f:
             continue
-        ist_pruef = name in PRUEFSTAND
+        ist_check = name in PRUEFSTAND
         ergebnis["dateien"][name] = {
-            "mal": len(mal), "farben": len(f), "pruefstand": ist_pruef,
+            "mal": len(mal), "farben": len(f), "pruefstand": ist_check,
             "stellen": [{"zeile": n, "fn": fn, "text": t} for n, fn, t in mal],
         }
-        if ist_pruef:
+        if ist_check:
             ergebnis["pruefstand"] += len(mal)
         else:
             ergebnis["summe"] += len(mal)
             ergebnis["farben"] += len(f)
-        breit.append((name, len(mal), len(f), ist_pruef))
+        wide.append((name, len(mal), len(f), ist_check))
 
     print("== direkte Zeichenaufrufe ausserhalb wlib/wlibc ==")
     print("%-18s %6s %7s  %s" % ("Programm", "malt", "farben", "Art"))
-    for name, m, f, p in breit:
+    for name, m, f, p in wide:
         print("%-18s %6d %7d  %s" % (name, m, f, "PRUEFSTAND" if p else ""))
     print("-" * 46)
     print("Summe (Programme):      %d Zeichenaufrufe, %d feste Farbwerte"

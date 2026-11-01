@@ -26,7 +26,6 @@ import mkfs  # noqa: E402
 
 
 def root_from_usb(path, work):
-    # Partition 1 (MBR or GPT) starts at 2048 on every image build.sh writes.
     out = os.path.join(work, 'root.img')
     r = subprocess.run(['mcopy', '-o', '-i', '%s@@1M' % path, '::/root.img', out],
                        capture_output=True)

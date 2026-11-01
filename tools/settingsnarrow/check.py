@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/settingsnarrow/check.py <cfg> <serial.txt> <outdir> -- checks of tools/settingsnarrow/run.sh (exit 1 on any FAIL).
 import re, sys, os
 
 cfg, serial, outdir = sys.argv[1:4]
@@ -18,7 +17,7 @@ def ok(c, m):
 
 lay_re = re.compile(r"settings: layout nav=(\d+) detail=(\d+) scroll=(\d+) content=(\d+) view=(\d+) off=(\d+)")
 rect_re = re.compile(r"settings: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-lays = []   # (nav, detail, scroll, content, view, off, rects since the last waa)
+lays = []
 rects = {}
 for ln in txt.splitlines():
     m = rect_re.search(ln)
@@ -54,10 +53,6 @@ if nav:
     long_page = any(l[3] > l[4] for l in pg)
     ok(long_page, "page is longer than the window (content > view)")
     ok(any(l[5] > 0 for l in pg), "wheel over the page scrolled it (off > 0)")
-    # keyboard focus: the wheel is idle during the Tab phase, so the pane can only move because the focus reveal scrolls it.
-    # A page with few Tab stops makes the focus WRAP (offsets fall again); a page with many stops only rises. Both are fine:
-    # the wheel phase makes at most 3 page reports (down, down, back up), so 2 rises in the tail can only come from the reveal.
-    # (serial lines of other programs may eat single reports, so 4 intact reports are enough: open + 3 reveal steps.)
     offs = [l[5] for l in pg]
     tail = offs[-6:]
     rises = sum(1 for i in range(len(tail) - 1) if tail[i] < tail[i + 1])
@@ -67,7 +62,6 @@ if nav:
     ok(seq_ok, "Tab focus scrolled the page (reveal moves the pane while the focus walks, wrap optional: %s)" % tail)
     ok(lays[-1][1] == 0, "Back returned to the list (detail=0)")
     ok(any("whp" in l[6] for l in pg), "Back button reported on the page")
-    # nothing cut off at the right edge: every reported control of the page (first page report, offset 0)
     pgr = [l[6] for l in pg if "waa" in l[6]]
     if pgr:
         r = pgr[0]
@@ -86,7 +80,6 @@ else:
     else:
         ok(True, "page fits the window (no scrolling needed)")
 
-# pictures: taken, and the page differs from the list
 def ppm(n):
     p = os.path.join(outdir, n + ".ppm")
     return open(p, "rb").read() if os.path.exists(p) else None

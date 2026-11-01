@@ -72,7 +72,6 @@ def main(argv):
         o = (y * W + x) * 3
         return (px[o], px[o + 1], px[o + 2])
 
-    #
     def abstand(a, b):
         return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
 

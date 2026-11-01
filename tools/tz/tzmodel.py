@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/tz/tzmodel.py -- python twin of the rules in lib/tz/rules.fi + lib/tz/tz.fi (used by gen.py
-# and by the gate as an independent second reading). Rule numbers: see NAMES.
 import datetime as dt
 
 NAMES = ["none", "eu", "us", "au", "nz", "cl", "cu", "il", "eg"]
 RULES = list(range(len(NAMES)))
 SUN, THU, FRI = 6, 3, 4
 HOUR = 3600
-# (start month, window start day, weekday (Mon=0), seconds, ref), (end ...), southern
 TABLE = {
     1: ((3, 25, SUN, 1 * HOUR, "utc"), (10, 25, SUN, 1 * HOUR, "utc"), False),
     2: ((3, 8, SUN, 2 * HOUR, "std"), (11, 1, SUN, 1 * HOUR, "std"), False),

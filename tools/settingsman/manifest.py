@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/settingsman/manifest.py -- the second reader of the SETTINGS manifest (docs/SETTINGS-MANIFEST.md).
-
-The first reader is lib/settingsman/manifest.fi (the Settings app). This one is written from the SPEC, not
-copied from the Firn code; tools/settingsman/run.sh feeds both the same files and compares the output
-(and a golden file per case). Usage: manifest.py < SETTINGS   -> the same text form as dump.fi.
-       manifest.py --catalog < SECTIONS   -> the form of catalog.fi: several manifests in one catalogue (r143), sections
-                                             `%% add` / `%% pkg <dir>` / `%% load` like catalog.fi.
-"""
 import sys
 
-MAX_ITEMS = 280     # per manifest
+MAX_ITEMS = 280
 MAX_PAGES = 32
 POOL_MAX = 16384
-MAX_APPS = 8        # whole catalogue
+MAX_APPS = 8
 CAT_PAGES = 44
 CAT_ITEMS = 340
 CAT_POOL = 20480
@@ -30,7 +22,6 @@ class Reject(Exception):
 
 
 def words(raw):
-    """Split a line at blanks (space, tab, CR); a word starting with '#' ends the line. Up to 8 words."""
     out = []
     many = False
     i = 0
@@ -58,7 +49,6 @@ def name_ok(w, maxlen):
 
 
 class Catalog:
-    """What the readers have accepted so far: apps, pages (each knows its app), items, octets of text."""
     def __init__(self):
         self.apps = []
         self.pages = []
@@ -68,7 +58,6 @@ class Catalog:
 
 
 def parse(data, cat=None, expect=None):
-    """Parses ONE manifest into the catalogue cat (a new one when None). On Reject nothing of the file is added."""
     if cat is None:
         cat = Catalog()
     st = 0
@@ -314,7 +303,6 @@ def dump(data):
 
 
 def dump_catalog(data):
-    """Sections `%% add` / `%% pkg <dir>`; the text between two `%%` lines is one SETTINGS file."""
     cat = Catalog()
     secs = []
     for raw in data.split(b"\n"):
@@ -326,9 +314,8 @@ def dump_catalog(data):
     out = []
     for n, (kind, d, lines) in enumerate(secs, 1):
         body = b"\n".join(lines)
-        # the last section runs to the end of the input, like catalog.fi (a trailing newline of the input is part of it)
         if kind == b"load":
-            cat = Catalog()  # load(): the catalogue is emptied first, whatever happens next
+            cat = Catalog()
         try:
             app, pages, items, warns = parse(body, cat, d if kind == b"pkg" else None)
             out.append("add %d ok app=%s items=%d warns=%d" % (n, app, len(items), warns))

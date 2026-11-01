@@ -82,7 +82,7 @@ def main():
                            check=True)
         else:
             os.rename(src, dst)
-        os.symlink(os.path.join(lay, f), src)   # relative: survives `cp -a kernel/user <copy>`
+        os.symlink(os.path.join(lay, f), src)
         if git:
             subprocess.run(['git', '-C', a.root, 'add', os.path.relpath(src, a.root)], check=True)
     print(f'moved {len(moves)} files')

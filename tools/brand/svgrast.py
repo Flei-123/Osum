@@ -5,8 +5,7 @@ import re, sys
 def toks(d):
     return re.findall(r'([MmLlCcZzHhVv])|(-?\d*\.?\d+(?:[eE][-+]?\d+)?)', d)
 
-def pfad_punkte(d, tol=0.2):
-    """Gibt Liste von Konturen (Liste von (x,y)) zurueck."""
+def path_points(d, tol=0.2):
     it = toks(d); i = 0
     konturen=[]; akt=[]; cx=cy=0.0; sx=sy=0.0; cmd=None
     def num():
@@ -37,7 +36,6 @@ def pfad_punkte(d, tol=0.2):
         elif cmd in ('C','c'):
             x1=num();y1=num();x2=num();y2=num();x=num();y=num()
             if cmd=='c': x1+=cx;y1+=cy;x2+=cx;y2+=cy;x+=cx;y+=cy
-            # adaptive Unterteilung nach Sehnenlaenge
             n=max(3,int((abs(x1-cx)+abs(y1-cy)+abs(x2-x1)+abs(y2-y1)+abs(x-x2)+abs(y-y2))/tol))
             n=min(n,64)
             for k in range(1,n+1):
@@ -58,12 +56,10 @@ def pfad_punkte(d, tol=0.2):
     return konturen
 
 def rastern(pfade, groesse, vb, ss=4):
-    """pfade: Liste (konturen, (r,g,b)). Gibt RGBA-Bytes zurueck."""
     W=H=groesse
     vx,vy,vw,vh = vb
-    acc=[[None]*(W) for _ in range(H)]   # (r,g,b,a) akkumuliert
-    for konturen, farbe in pfade:
-        # Kantenliste in Geraetekoordinaten
+    acc=[[None]*(W) for _ in range(H)]
+    for konturen, color in pfade:
         kanten=[]
         for k in konturen:
             pts=[((px-vx)*W/vw, (py-vy)*H/vh) for px,py in k]
@@ -98,7 +94,7 @@ def rastern(pfade, groesse, vb, ss=4):
                 if a<=0: continue
                 if a>1: a=1
                 old=acc[py][px]
-                r,g,b=farbe
+                r,g,b=color
                 if old is None:
                     acc[py][px]=(r,g,b,a)
                 else:
@@ -120,7 +116,6 @@ def rastern(pfade, groesse, vb, ss=4):
     return bytes(out)
 
 def _mat(a,b):
-    """a nach b verketten (a wird zuerst angewandt? nein: b innen, a aussen)."""
     (a0,a1,a2,a3,a4,a5)=a; (b0,b1,b2,b3,b4,b5)=b
     return (a0*b0+a2*b1, a1*b0+a3*b1, a0*b2+a2*b3, a1*b2+a3*b3,
             a0*b4+a2*b5+a4, a1*b4+a3*b5+a5)
@@ -144,10 +139,7 @@ def _parse_tf(t):
 def _anwenden(m,x,y):
     return (m[0]*x+m[2]*y+m[4], m[1]*x+m[3]*y+m[5])
 
-def lade_svg(p):
-    """Liest die Pfade MIT der Transformationskette ihrer <g>-Eltern.
-    Ohne das liegen die Koordinaten im Zehntausenderbereich (potrace
-    schreibt sie so und stellt sie per translate/scale zurecht)."""
+def load_svg(p):
     s=open(p).read()
     vb=[float(x) for x in re.search(r'viewBox="([^"]*)"',s).group(1).split()]
     pfade=[]
@@ -180,16 +172,12 @@ def lade_svg(p):
         col=fuell[-1]
         if fm:
             h=fm.group(1); col=(int(h[0:2],16),int(h[2:4],16),int(h[4:6],16))
-        kont=pfad_punkte(dm.group(1))
+        kont=path_points(dm.group(1))
         kont=[[_anwenden(cur,x,y) for x,y in k] for k in kont]
         pfade.append((kont, col))
     return pfade, vb
 
 
-#
-#
-#
-#   python3 tools/brand/svgrast.py <signet.svg> <ausgabeordner>
 
 def _png(px, w, h, fn):
     import struct, zlib
@@ -204,9 +192,7 @@ def _png(px, w, h, fn):
 
 
 def signet_pfade(svg):
-    """Nur die Pfade INNERHALB der viewBox. Die Lockup-Dateien haben die
-    Wortmarke rechts daneben liegen -- die gehoert nicht auf den Knopf."""
-    pfade, vb = lade_svg(svg)
+    pfade, vb = load_svg(svg)
     innen = [(k, c) for k, c in pfade
              if max(x for kk in k for x, y in kk) <= vb[2] + 1]
     return innen, vb

@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/lockflicker/check.py <run dir> <lock|glogin> <width> <height> <scale>
-
-Layout check of the lock / login screen from ONE run (serial.txt + base.ppm):
-  rects   the entry and its tiles (serial `<app>: rect ...`) lie completely inside the screen, the group is centred
-  avatar  the avatar disc (solid 0x4C6A92 pixels in the picture) is complete inside the screen, centred, 112 * scale wide
-  name    the white text between the avatar and the entry lies inside the column and is centred
-Prints one `OK`/`FAIL` line per measurement; exit 0 = all OK, 1 = some FAIL.
-"""
 import re, sys
 
 def read_ppm(path):
@@ -42,14 +34,11 @@ def main():
         cx = (x0 + x1) // 2
         ok(abs(cx - W // 2) <= 8 * S, "entry group centred (centre %d, screen centre %d)" % (cx, W // 2))
     others = [r for r in rects if r[1] == 2 and r[3] > H * 3 // 4]
-    for r in (others if H // S >= 480 else []):  # design height < 480 points: the bottom strip cannot fit (1280x800 at scale 2)
+    for r in (others if H // S >= 480 else []):
         ok(r[2] >= 0 and r[2] + r[4] <= W and r[3] + r[5] <= H, "bottom tile id=%d inside the screen (x %d..%d, y %d..%d)" % (r[0], r[2], r[2] + r[4], r[3], r[3] + r[5]))
     w, h, px = read_ppm(run + "/base.ppm")
     ok((w, h) == (W, H), "picture is %dx%d" % (w, h))
-    # avatar disc: solid colour 0x4C6A92 (+-3) in the upper 3/4, biggest connected blob approximated by the bounding box of
-    # rows with >= 8 * S such pixels (the bottom-left chip of the lock is far smaller and sits in the lower quarter)
     tr, tg, tb = 0x4C, 0x6A, 0x92
-    # the disc = the roundest big blob of the avatar colour in the upper 3/4 (a wallpaper can contain the same colour here and there)
     import numpy as np
     from scipy import ndimage
     arr = np.frombuffer(px, dtype=np.uint8).reshape(h, w, 3).astype(np.int32)
@@ -73,11 +62,10 @@ def main():
         av_bottom = maxy
         if H // S >= 480:
             ok(abs(dw - 112 * S) <= 6 * S and abs(dh - 112 * S) <= 6 * S, "avatar %dx%d, expected %d" % (dw, dh, 112 * S))
-        else:  # short screen (< 480 points): the avatar shrinks (signin.fit_av, 48..112 points), still a round disc
+        else:
             ok(48 * S - 6 * S <= dw <= 112 * S + 6 * S and abs(dw - dh) <= 2 * S, "avatar %dx%d, expected 48..112 points * %d (short screen)" % (dw, dh, S))
         ok(minx >= 0 and maxx < W and miny >= 0 and maxy < H, "avatar completely inside the screen (x %d..%d, y %d..%d)" % (minx, maxx, miny, maxy))
         ok(abs((minx + maxx) // 2 - W // 2) <= 6 * S, "avatar centred (centre %d, screen centre %d)" % ((minx + maxx) // 2, W // 2))
-    # name + status text: near-white pixels between the avatar and the entry
     if ey and av_bottom:
         tminx, tmaxx, cnt = w, -1, 0
         for y in range(av_bottom + 4, max(av_bottom + 5, ey - 4)):

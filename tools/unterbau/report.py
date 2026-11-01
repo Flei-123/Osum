@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""report.py <old-results> <new-results> -- one markdown table: every check, its verdict on the kernel of main (before this round)
-and on this tree, and the detail of the new run when it is not a PASS.
-
-  python3 tools/unterbau/report.py /tmp/ub-main-results.txt /tmp/ub-new-results.txt > table.md
-A results file holds lines `<test>.<check> PASS|FAIL|GAP <detail>` (what run.sh writes with UB_RESULT=...)."""
 import sys, collections
 
 def load(p):
@@ -31,7 +26,6 @@ for t, ns in tests.items():
     print("|---|---|---|---|")
     for n in ns:
         o = old.get(n, (None, ""))[0]; v, det = new.get(n, (None, ""))
-        # only rows that are interesting: changed, or not ok now
         if o == "PASS" and v == "PASS":
             continue
         print("| %s | %s | %s | %s |" % (n.split(".", 1)[1], sym[o], sym[v], det.replace("|", "/")[:150]))

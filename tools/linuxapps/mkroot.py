@@ -52,7 +52,6 @@ def main(argv):
         h = host(p)
         if not os.path.lexists(h):
             return
-        # a path whose parent chain contains a symlink is resolved through the parent first
         par = os.path.dirname(p)
         if os.path.islink(host(par)):
             real = os.path.realpath(host(par))
@@ -96,7 +95,6 @@ def main(argv):
             if l.startswith('/') and not l.startswith(('/proc', '/dev', '/sys')):
                 add(l)
     dirs = sorted(p for p, (k, _) in want.items() if k == 'd')
-    # directories that only exist because /proc /dev /sys /run /tmp /w are mount points / scratch
     for d in ('/proc', '/dev', '/sys', '/run', '/tmp', '/w', '/var/log', '/root'):
         if d not in want:
             dirs.append(d)

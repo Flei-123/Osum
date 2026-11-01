@@ -8,26 +8,21 @@ def P(x,y):
     if y==-1: return (U+UR)[x]
     raise Exception()
 T={}
-def put(m,x,y,terms):  # terms: Liste (gewicht, idx), + rundung/shift
+def put(m,x,y,terms):
     T.setdefault(m,{})[(x,y)]=terms
-# Modus 0: vertikal
 for y in range(4):
     for x in range(4): put(0,x,y,[(1,P(x,-1))])
-# 1: horizontal
 for y in range(4):
     for x in range(4): put(1,x,y,[(1,P(-1,y))])
-# 3: diagonal down-left
 for y in range(4):
     for x in range(4):
         if x==3 and y==3: put(3,x,y,[(1,P(6,-1)),(3,P(7,-1))])
         else: put(3,x,y,[(1,P(x+y,-1)),(2,P(x+y+1,-1)),(1,P(x+y+2,-1))])
-# 4: diagonal down-right
 for y in range(4):
     for x in range(4):
         if x>y:   put(4,x,y,[(1,P(x-y-2,-1)),(2,P(x-y-1,-1)),(1,P(x-y,-1))])
         elif x<y: put(4,x,y,[(1,P(-1,y-x-2)),(2,P(-1,y-x-1)),(1,P(-1,y-x))])
         else:     put(4,x,y,[(1,P(0,-1)),(2,P(-1,-1)),(1,P(-1,0))])
-# 5: vertical right
 for y in range(4):
     for x in range(4):
         z=2*x-y
@@ -35,7 +30,6 @@ for y in range(4):
         elif z>=0:          put(5,x,y,[(1,P(x-(y>>1)-2,-1)),(2,P(x-(y>>1)-1,-1)),(1,P(x-(y>>1),-1))])
         elif z==-1:         put(5,x,y,[(1,P(-1,0)),(2,P(-1,-1)),(1,P(0,-1))])
         else:               put(5,x,y,[(1,P(-1,y-1)),(2,P(-1,y-2)),(1,P(-1,y-3))])
-# 6: horizontal down
 for y in range(4):
     for x in range(4):
         z=2*y-x
@@ -43,12 +37,10 @@ for y in range(4):
         elif z>=0:          put(6,x,y,[(1,P(-1,y-(x>>1)-2)),(2,P(-1,y-(x>>1)-1)),(1,P(-1,y-(x>>1)))])
         elif z==-1:         put(6,x,y,[(1,P(-1,0)),(2,P(-1,-1)),(1,P(0,-1))])
         else:               put(6,x,y,[(1,P(x-1,-1)),(2,P(x-2,-1)),(1,P(x-3,-1))])
-# 7: vertical left
 for y in range(4):
     for x in range(4):
         if y%2==0: put(7,x,y,[(1,P(x+(y>>1),-1)),(1,P(x+(y>>1)+1,-1))])
         else:      put(7,x,y,[(1,P(x+(y>>1),-1)),(2,P(x+(y>>1)+1,-1)),(1,P(x+(y>>1)+2,-1))])
-# 8: horizontal up
 for y in range(4):
     for x in range(4):
         z=x+2*y

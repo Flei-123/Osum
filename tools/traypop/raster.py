@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/traypop/raster.py -- the tile RASTER of the tray flyout (W-MERGEB2), read from serial + photos.
-
-    raster.py <serial> <open.ppm> <hover.ppm> <menu.ppm> <label>
-
-Prints `OK    ...` / `FAIL  ...` lines (run.sh counts them).  Checks:
-  1. tile lines `traypop: tile i= x= y= w= h=` (window coordinates): all tiles one size, one x pitch per row, one row pitch,
-     all inside the flyout rectangle of `traypop: open n= x= y= w= h=`
-  2. icon centre: the ink of each tile (pixels unlike the tile's main colour) has its bounding-box centre within 1 px of the
-     tile centre (both axes)
-  3. hover: the photo with the pointer on tile 0 differs from the one without it inside tile 0, not (or hardly) inside tile 1
-  4. right click on tile 0 -> `traypop: menu id=<id of item 0>`, the photo shows a menu (differs from the hover photo)
-COUNTER-PROOFS (the checks have teeth): the same raster check on a copy with one tile moved by 2 px must FAIL, the centre
-check on an ink box shifted by 3 px must FAIL.
-"""
 import re
 import sys
 
@@ -33,7 +19,6 @@ def load(p):
 
 
 def raster_ok(tiles, ow, oh):
-    """-> (ok, why).  tiles: {i: (x, y, w, h)}"""
     if len(tiles) < 2:
         return False, "only %d tile(s)" % len(tiles)
     sizes = {(t[2], t[3]) for t in tiles.values()}
@@ -81,7 +66,6 @@ def ink_box(W, px, x, y, w, h):
 
 
 def centre_off(box, x, y, w, h):
-    """offset of the ink centre from the tile centre in px (x, y), halves kept"""
     cx2 = box[0] + box[2] + 1
     cy2 = box[1] + box[3] + 1
     return (cx2 - (2 * x + w)) / 2.0, (cy2 - (2 * y + h)) / 2.0
@@ -132,7 +116,6 @@ def main():
     W, H, op = load(p_open)
     W2, _, hv = load(p_hover)
     W3, _, mn = load(p_menu)
-    # 2. icon centre
     for i in sorted(tiles)[:6]:
         x, y, w, h = tiles[i]
         box = ink_box(W, op, ox + x + 2, oy + y + 2, w - 4, h - 4)
@@ -148,7 +131,6 @@ def main():
         sh = (box[0] + 3, box[1], box[2] + 3, box[3])
         dx, dy = centre_off(sh, ox + x, oy + y, w, h)
         say(abs(dx) > 1 or abs(dy) > 1, "COUNTER: an icon shifted by 3 px is caught (off %+.1f)" % dx)
-    # 3. hover
     x0, y0, w0, h0 = tiles[min(tiles)]
     d0 = diff(W, op, hv, ox + x0, oy + y0, w0, h0)
     say(d0 >= w0 * h0 // 20, "hover on tile 0: %d of %d px of the tile changed (want >= 5 %%)" % (d0, w0 * h0))
@@ -156,7 +138,6 @@ def main():
     x1, y1, w1, h1 = tiles[k1]
     d1 = diff(W, op, hv, ox + x1, oy + y1, w1, h1)
     say(d1 <= w1 * h1 // 10, "tile %d (not hovered) changed in %d of %d px (want <= 10 %%)" % (k1, d1, w1 * h1))
-    # 4. right click
     mid = re.search(r"traypop: item 0 id=(\d+)", t)
     mm = re.search(r"traypop: menu id=(\d+)", t)
     say(bool(mm), "right click on tile 0 -> `traypop: menu id=%s`" % (mm[1] if mm else "?"))

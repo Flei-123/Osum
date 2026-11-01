@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/print/pwgcheck.py -- a SECOND, independent reader of PWG raster
-(PWG 5102.4), written from the standard and not from kernel/app/drucke.fi.
-
-    pwgcheck.py <file.pwg> <outdir>
-
-Checks the sync word, every 1796-octet page header, and decodes every row
-strictly: a run that overflows the row, a missing row or trailing octets
-are errors, not warnings. Each page is written as <outdir>/page-<n>.pgm
-(8-bit grey), which tesseract reads directly.
-
-Output: one `key=value` line per fact, `ok=1` at the end if everything
-held. Exit code 0 only then.
-"""
 import struct
 import sys
 

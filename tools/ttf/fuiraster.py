@@ -1,32 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ttf/fuiraster.py -- fUi's glyph rasteriser, SECOND VERSION.
-
-ROUND FUI-TEXT (24.09.2026): since this round every letter a Ring 3
-program draws comes from fUi's font engine (`kernel/user/fuiglyph.fi` ->
-vendor/firn/lib/font/ttf.fi + lib/font/raster.fi), not from the kernel's
-4x4-sampling rasteriser (`kernel/gfx/ttf.fi`, whose second version is
-`raster.py` next to this file). A screenshot of Ring 3 text is therefore
-checked against THIS file. Since round FUI-KERNTEXT (26.09.2026) the
-kernel's own text (titles, terminal, WIG_GLYPH) is fUi ink as well
-(kernel/gfx/fuiink.fi), and `raster.py` hands every glyph to `glyph`
-below; its 4x4 rasteriser is the second version of the FALLBACK only.
-
-Every computation below is written the way it stands in Firn, in the same
-order: Python floats are IEEE doubles like Firn's f64, so the same
-operations in the same order give the same bits. That is the whole point
--- the comparison stays EXACT (tolerance 0), it is not loosened.
-
-  * outlines: ttf.fi `simple` / `emit_contour` / `composite`, with the
-    2x2 matrix and the implied on-curve midpoints
-  * curves: raster.fi `raster_quad`, flattened with `steps_for`
-  * fill: raster.fi `accumulate` + `span` (signed area accumulation) and
-    `raster_finish` (running sum, absolute value, clipped at 1)
-  * the glyph window: kernel/user/fuiglyph.fi `glyph_into` -- bbox from
-    the glyf header times px/upem, floor/ceil, coverage * 255 + 0.5
-  * advance and kerning: the kernel's integer formula, so the layout is
-    the same as before (fuiglyph.fi says why)
-"""
 import os
 import struct
 import sys
@@ -95,7 +68,6 @@ def _steps_for(d):
 
 
 class Raster:
-    """raster.fi `Raster`, with a plain list instead of a cell buffer."""
 
     def __init__(self, ox, oy, w, h):
         self.ox, self.oy, self.w, self.h = ox, oy, w, h
@@ -197,7 +169,6 @@ class Raster:
         self.accumulate(ax - self.ox, ay - self.oy, bx - self.ox, by - self.oy)
 
     def finish(self):
-        """Running sum per row, absolute value, clipped at one."""
         cov = []
         for y in range(self.h):
             acc = 0.0
@@ -217,8 +188,6 @@ def _ffabs(x):
     return 0.0 - x if x < 0.0 else x
 
 
-# raster.fi writes `ffabs(a) + ffabs(b) + ffabs(c) + ffabs(d)` -- left to
-# right, which is what Python does with `+` as well.
 def _qd(x0, y0, cx, cy, x1, y1):
     return _ffabs(cx - x0) + _ffabs(cy - y0) + _ffabs(x1 - cx) + \
         _ffabs(y1 - cy)
@@ -234,7 +203,6 @@ def _devy(px, py, oy, scale, m01, m11, tdy):
 
 
 class Outline:
-    """ttf.fi `outline_at` and what it calls, on a `raster.Ttf`."""
 
     def __init__(self, f):
         self.f = f
@@ -442,7 +410,6 @@ HINT_CODEPOINTS = (0x78, 0x48, 0x64)
 
 
 def hint_zones(f):
-    """lib/fonthint.fi `ensure`: x-height, cap height and ascender tops."""
     z = getattr(f, "_hint_zones", None)
     if z is not None:
         return z
@@ -459,7 +426,6 @@ def hint_zones(f):
 
 
 def vfactor(f, px, top):
-    """lib/fonthint.fi `vfactor`, same operations in the same order."""
     if px < HINT_MIN_PX or px > HINT_MAX_PX or top <= 0:
         return 1.0
     upem = int(f.upm)
@@ -484,7 +450,6 @@ def vfactor(f, px, top):
 
 
 def glyph(f, gid, px, hint=True):
-    """kernel/user/fuiglyph.fi `glyph_into`, line for line."""
     sc16 = kern.scale_of(px, f.upm)
     adv = kern.f26(f.advance(gid), sc16)
     ol = Outline(f)
@@ -502,7 +467,7 @@ def glyph(f, gid, px, hint=True):
         w = bx1 - bx0
         h = by1 - by0
     if w < 0 or h < 0 or w > 256 or h > 256:
-        return None                       # the kernel draws it instead
+        return None
     a = bytearray(w * h)
     if w * h > 0:
         r = Raster(float(bx0), float(0 - by1), w, h)
@@ -518,8 +483,6 @@ def glyph(f, gid, px, hint=True):
 
 
 class Schrift(kern.Schrift):
-    """`raster.Schrift` with fUi's ink. Layout (`stellen`, `laufweite`,
-    ascender ...) is inherited unchanged -- it IS unchanged."""
 
     def glyphe(self, c):
         if c in self.speicher:

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/certus/color.py -- how often one SPECIFIC color occurs in the image.
-
-A page demanding `background:#0033aa` on 300 x 80 pixels needs 24000 pixels of exactly that color.
-
-    color.py <bild.ppm> <rrggbb>
-"""
 import sys
 
 

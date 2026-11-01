@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/settingsflick/judge.py <serial.txt> <maximised.ppm> -- X2: the Settings window is painted into a private picture, so a hover
-damages only what changed. Per F12 phase (`wm: bild` lines) the composed large rectangles (`wm: crect`, > 16384 px) of the window under
-test are counted. Verdicts: (a) hover over the small window: <= 1 large rect per 100 frames; (b) the window follows a maximise (the
-screenshot after it shows the window surface over the work area, not wallpaper); (c) hover over the maximised window: <= 1 large
-rect per 100 frames. Exit 1 on any FAIL."""
 import re
 import sys
 
@@ -32,9 +27,7 @@ for i, p in enumerate(phases):
 if len(phases) < 5:
     print("  FAIL  only %d phases measured" % len(phases))
     sys.exit(1)
-# Noise of the audit setup, not judged: the terminal window behind (uitrace prints into it), the task bar and the clock.
 NOISE = {(24, 40), (24, 0), (0, 40), (0, 760), (1092, 16)}
-# the window under test moves (placement, maximise), so every other origin counts
 for i in (2, 4):
     p = phases[i]
     mine = max([v for k, v in p["org"].items() if k not in NOISE] or [0])
@@ -43,7 +36,6 @@ for i in (2, 4):
           ("OK  " if ok else "FAIL", names[i], mine, p["n"]))
     bad += 0 if ok else 1
 
-# (b) the maximised screenshot: the lower right quarter of the screen must be painted by the window (not one flat colour = wallpaper/black)
 def ppm(path):
     d = open(path, "rb").read()
     parts = d.split(b"\n", 3)
@@ -51,7 +43,6 @@ def ppm(path):
     return w, h, parts[3]
 try:
     w, h, px = ppm(sys.argv[2])
-    # the strip right of the old window (x > 1030) and the strip below it (y 742..756) must now be window surface (light), not the dark wallpaper
     def lum(x, y):
         o = (y * w + x) * 3
         return sum(px[o:o + 3]) // 3

@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/i18n/quota.py -- WIEVIEL IST WIRKLICH UEBERSETZT?
-#
-#   python3 tools/i18n/quota.py [locale-verzeichnis]
-#
-#
 import os
 import sys
 
-VALW = 192  # must match kernel/user/msg.fi
-KEYW = 48  # must match kernel/user/msg.fi
+VALW = 192
+KEYW = 48
 
 
 def lies(pfad):
@@ -32,7 +27,7 @@ def lies(pfad):
 
 def main():
     wurzel = sys.argv[1] if len(sys.argv) > 1 else "locale"
-    en, fehler_en = lies(os.path.join(wurzel, "en", "messages"))
+    en, error_en = lies(os.path.join(wurzel, "en", "messages"))
     if not en:
         print("no source language under %s/en/messages" % wurzel)
         return 1
@@ -47,12 +42,12 @@ def main():
         de, fehler = lies(p)
         fehlt = [k for k in en if k not in de]
         zuviel = [k for k in de if k not in en]
-        gleich = [k for k in de if k in en and de[k] == en[k]]
+        eq = [k for k in de if k in en and de[k] == en[k]]
         deckung = (len(en) - len(fehlt)) * 100 // len(en)
         zeilen.append("%s: %d von %d Schluesseln = %d%% abgedeckt, "
                       "%d fehlen, %d unbekannt, %d gleich wie Englisch"
                       % (code, len(en) - len(fehlt), len(en), deckung,
-                         len(fehlt), len(zuviel), len(gleich)))
+                         len(fehlt), len(zuviel), len(eq)))
         for k in fehlt:
             zeilen.append("    fehlt in %s: %s" % (code, k))
         for k in zuviel:
@@ -61,7 +56,6 @@ def main():
         for nr, z in fehler:
             zeilen.append("    kaputte Zeile %s:%d: %s" % (p, nr, z))
             schlecht += 1
-        # Die Plaetze.
         for k, v in sorted(de.items()):
             roh = v.replace("\\n", "\n").replace("\\t", "\t") \
                    .replace("\\\\", "\\")
@@ -75,7 +69,7 @@ def main():
                 zeilen.append("    SCHLUESSEL ZU LANG (%d von %d): %s"
                               % (len(k), KEYW - 1, k))
                 schlecht += 1
-    for nr, z in fehler_en:
+    for nr, z in error_en:
         zeilen.append("    kaputte Zeile en:%d: %s" % (nr, z))
         schlecht += 1
     lang_en = max((len(v.encode("utf-8")) for v in en.values()), default=0)

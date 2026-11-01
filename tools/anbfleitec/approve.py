@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/approve.py -- the human at the other device, in code.
-
-    approve.py <issuer> <ca.pem> <user_code> <allow|deny> [user] [password]
-
-Does what a browser does against fleitec-id: open the confirm page, get sent
-to the login page, sign in (form + CSRF cookie + Origin), confirm or refuse
-the device code. Prints the title of the final page. Exit 0 if the page
-title is "Device connected" (allow) or "Cancelled" (deny).
-"""
 import http.cookiejar
 import re
 import ssl
@@ -22,7 +13,7 @@ def main():
     user = sys.argv[5] if len(sys.argv) > 5 else "justin"
     pw = sys.argv[6] if len(sys.argv) > 6 else "test-password-1"
     ctx = ssl.create_default_context(cafile=ca)
-    ctx.check_hostname = False  # the CA vouches for the name konto.test, the URL is an IP
+    ctx.check_hostname = False
     jar = http.cookiejar.CookieJar()
     op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar),
                                      urllib.request.HTTPSHandler(context=ctx))

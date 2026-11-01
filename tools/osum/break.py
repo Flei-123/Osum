@@ -46,9 +46,6 @@ P_TYPE, P_FLAGS, P_OFFSET, P_VADDR, P_FILESZ, P_MEMSZ = 0, 4, 8, 16, 32, 40
 PHENT = 56
 PT_LOAD, PT_NOTE = 1, 4
 
-# The header level defects never make the loader look at a segment, so
-# the file may be cut down to one page -- 34 of those on a small disk
-# would otherwise be 500 KiB of image nobody reads.
 HEADER_ONLY = {"magic", "class", "endian", "version", "type", "machine",
                "phent", "phnum", "phoff", "noload"}
 
@@ -112,9 +109,9 @@ def main(argv):
     elif what == "version":
         d[6] = 0
     elif what == "type":
-        p16(d, E_TYPE, 3)          # ET_DYN
+        p16(d, E_TYPE, 3)
     elif what == "machine":
-        p16(d, E_MACHINE, 3)       # EM_386
+        p16(d, E_MACHINE, 3)
     elif what == "phent":
         p16(d, E_PHENTSIZE, 32)
     elif what == "phnum":
@@ -125,18 +122,11 @@ def main(argv):
         for ph in loads(d):
             p32(d, ph + P_TYPE, PT_NOTE)
     elif what == "segfile":
-        # The segment keeps its length and is moved to the LAST page of
-        # the file, so that it reaches past the end. p_filesz stays where
-        # it was on purpose -- raising it as well would trip the
-        # `filesz > memsz` check first and measure the wrong thing.
         ph = loads(d)[0]
         p64(d, ph + P_OFFSET, len(d) & ~0xFFF)
     elif what == "bigoff":
         p64(d, loads(d)[0] + P_OFFSET, 0xFFFFFFFFFFFFF000)
     elif what == "memsz":
-        # The FIRST loadable segment, not the last: a linker may leave an
-        # empty PT_LOAD at the end (p_memsz 0), the loader skips those,
-        # and a defect placed there would be a file that still works.
         ph = loads(d)[0]
         p64(d, ph + P_FILESZ, u64(d, ph + P_MEMSZ) + 1)
     elif what == "range":
@@ -153,7 +143,7 @@ def main(argv):
         p64(d, segs[1] + P_VADDR, u64(d, segs[0] + P_VADDR))
     elif what == "noexec":
         ph = entry_segment(d)
-        p32(d, ph + P_FLAGS, 4)    # PF_R only
+        p32(d, ph + P_FLAGS, 4)
     else:
         print("break: unknown defect '%s'" % what)
         return 2

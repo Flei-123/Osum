@@ -1,30 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/umlaut/schriftprobe.py -- HAT DIE SCHRIFT DIE ZEICHEN, DIE WIR
-SCHREIBEN?
-
-Runde UMLAUT2. Eine Zeichenkette auf echte Umlaute umzustellen ist die
-halbe Arbeit; die andere Haelfte ist, dass die AUSGELIEFERTE Schrift
-diese Zeichen auch kennt. `assets/osum-sans.ttf` ist aus DejaVu
-GESCHNITTEN -- 339 Zeichen, nicht die ganze Datei -- und was nicht im
-Schnitt liegt, malt der Rasterer gar nicht. Auf dem Bild steht dann
-nichts, und im Quelltext sieht alles richtig aus.
-
-Also: JEDES Zeichen ueber ASCII, das irgendwo in sichtbarem Text
-vorkommt, muss in der `cmap` beider Schriften stehen. Gelesen wird die
-Tabelle so, wie `kernel/gfx/ttf.fi` sie liest -- Format 4 und Format 12.
-
-Quellen des sichtbaren Textes:
-
-    locale/de/*                 jeder Wert rechts vom "="
-    assets/apps/*.osp/INFO      name= und info=
-    kernel/**/*.fi              jede Zeichenkette der Klasse SICHTBAR
-                                (tools/i18n/quellen.py)
-
-  schriftprobe.py
-
-rc=0 alles da, rc=1 ein Zeichen fehlt.
-"""
 import glob
 import os
 import re
@@ -51,15 +26,14 @@ def tabellen(roh):
 
 
 def cmap(pfad):
-    """Die Menge der Codepunkte, die diese Schrift abbildet."""
     roh = open(pfad, 'rb').read()
     t = tabellen(roh)
     if 'cmap' not in t:
         raise SystemExit('%s: keine cmap' % pfad)
     base = t['cmap'][0]
-    anzahl = struct.unpack('>H', roh[base + 2:base + 4])[0]
+    count = struct.unpack('>H', roh[base + 2:base + 4])[0]
     aus = set()
-    for i in range(anzahl):
+    for i in range(count):
         o = base + 4 + i * 8
         off = struct.unpack('>I', roh[o + 4:o + 8])[0]
         s = base + off
@@ -103,7 +77,6 @@ def cmap(pfad):
 
 
 def sichtbarer_text(wurzel):
-    """-> Liste (herkunft, text) fuer allen Bildschirmtext des Systems."""
     aus = []
     for pfad in sorted(glob.glob(os.path.join(wurzel, 'locale/de/*'))):
         rel = os.path.relpath(pfad, wurzel)

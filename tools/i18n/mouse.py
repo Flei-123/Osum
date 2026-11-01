@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/i18n/mouse.py <x1> <y1> [<x2> <y2> ...] [--park <x> <y>]
-#
-#
-#
-#
-#
 import sys
 
 

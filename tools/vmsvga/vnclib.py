@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/vmsvga/vnclib.py -- minimal VNC client (applies ONLY the rectangles the server sends) + QEMU monitor helper for desktop.py.
 import os
 import socket
 import struct
@@ -13,7 +12,7 @@ class Vnc:
         self.lock = threading.Lock()
         self.w = self.h = 0
         self.buf = bytearray()
-        self.cursor = None  # (w, h, opaque, transparent)
+        self.cursor = None
         self.updates = 0
         self.rects = 0
         self.area = 0
@@ -42,12 +41,11 @@ class Vnc:
         (nl,) = struct.unpack(">I", self.rx(4))
         self.rx(nl)
         self.resize(w, h)
-        # 32 bpp little endian true colour: bytes B G R X
         self.s.sendall(struct.pack(">BxxxBBBBHHHBBBxxx", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
         encs = [0, -239, -223]
         self.s.sendall(struct.pack(">BxH", 2, len(encs)) + b"".join(struct.pack(">i", e) for e in encs))
         self.request(0)
-        self.s.settimeout(None)  # an idle screen is silent for a long time: a read timeout must not kill the client
+        self.s.settimeout(None)
         self.t = threading.Thread(target=self.loop, daemon=True)
         self.t.start()
 
@@ -101,7 +99,6 @@ class Vnc:
                         mask = self.rx(((w + 7) // 8) * h)
                         op = sum(bin(b).count("1") for b in mask)
                         tr = (((w + 7) // 8) * 8 * h) - op
-                        # padding bits of each row are zero: count transparent only inside the width
                         pad = (((w + 7) // 8) * 8 - w) * h
                         self.cursor = (w, h, op, tr - pad)
                     elif enc == -223:
@@ -181,8 +178,6 @@ def ppm_rgb(f):
     parts = d.split(b"\n", 3)
     w, h = map(int, parts[1].split())
     body = parts[3]
-    # QEMU's ppm writer pads every row to a multiple of 4 bytes (a width like 1366 gives 4098 -> 4100 bytes per row): un-pad, otherwise the
-    # picture reads sheared (2 bytes per row)
     if h > 0 and len(body) != w * h * 3 and len(body) >= w * h * 3 and len(body) % h == 0:
         stride = len(body) // h
         if stride >= w * 3 and stride - w * 3 < 4:

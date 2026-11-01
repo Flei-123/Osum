@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/term/esc.py -- judge the serial line of tools/term/esc.sh (r537: ESC in front of a command)."""
 import re
 import sys
 

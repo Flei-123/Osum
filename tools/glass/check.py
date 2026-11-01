@@ -44,7 +44,6 @@ def mean(v):
 
 def field_metrics(im, box):
     x, y, w, h = box
-    # the face: top and bottom band of the interior (the dots sit in the middle), without the corners
     vals = []
     adj = []
     for j in list(range(y + 4, y + 9)) + list(range(y + h - 9, y + h - 4)):
@@ -63,7 +62,7 @@ def cmd_field(a):
     d, app, label = a[0], a[1], a[2]
     flat = "flat" in a[3:]
     strong = "strong" in a[3:]
-    cover_max = 0.82 if strong else 0.85   # light plate must keep dark ink readable (signinlook needs alpha >= ~112), so strong measures 0.77; subtle 0.73-0.82. Look is judged in the VM.
+    cover_max = 0.82 if strong else 0.85
     surround_min = 1.3 if strong else 1.08
     im = Image.open(d + "/desktop.ppm").convert("RGB")
     R = rects(d + "/serial.txt", "glogin" if app == "glogin" else "lock")
@@ -79,8 +78,6 @@ def cmd_field(a):
     res.append((abs(m["rim"] - m["inner"]) >= 3.0, "border: rim %.1f vs inside %.1f (need |diff| >= 3: light rim on dark glass, accent/dark rim on milk glass)" % (m["rim"], m["inner"])))
     ratio = (max(m["face"], m["out"]) + 12.0) / (min(m["face"], m["out"]) + 12.0)
     res.append((ratio >= surround_min, "surround: plate %.1f vs picture around %.1f (ratio %.2f, need >= %.2f)" % (m["face"], m["out"], ratio, surround_min)))
-    # transparency (Justin, 16.10.2026: field + buttons looked solid grey): how much of the plate is tint. A white plate
-    # over the picture: face = a*255 + (1-a)*around -> a = (face-around)/(255-around); a dark plate: a = (around-face)/around.
     if m["face"] >= m["out"]:
         cover = (m["face"] - m["out"]) / max(1.0, 255.0 - m["out"])
     else:

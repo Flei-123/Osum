@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/theme/hover.py -- THE HOVER LAYER IS SUBTLE LIKE WINDOWS 11 (W-D r1002, 17.10.2026).
-
-    python3 -I tools/theme/hover.py [<path to model.py>]
-
-Windows 11: a hovered row/button is a faint layer (light ~ black 4-6 %, dark ~ white 6-8 %), not a
-ramp step. For every scheme x mode (high contrast excluded: there hover must be loud) this
-measures the largest channel distance between
-
-    surface-hover  and its ground:  light surface, dark surface-raised (the card/menu fill)
-    control-hover  and its button:  control
-
-and requires  MIN <= distance <= MAX.  MIN keeps the old RUNDE HOVERSTIL promise (a pointer over a
-tile changes the picture); MAX is the 'subtle' bar. The counter-proof runs this file on the
-model.py of the old main: it MUST fail (23/24 levels).
-"""
 import os, subprocess, sys
 
 here = os.path.dirname(os.path.abspath(__file__))

@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/pdf/corpus.py -- the test PDFs of the viewer (lib/pdfread).
-
-    python3 tools/pdf/corpus.py <outdir>
-
-Every file is made by an independent writer (reportlab, pypdf or the raw
-writer below), so the reader is not tested against its own idea of a PDF.
-"""
 import base64, io, os, struct, sys, zlib
 
 def main(out):
@@ -16,7 +9,6 @@ def main(out):
     from reportlab.lib import colors
     from reportlab import rl_config
 
-    # 1. text, graphics, dash, colours, two pages (uncompressed)
     rl_config.pageCompression = 0
     c = canvas.Canvas(f"{out}/basic.pdf", pagesize=A4)
     c.setFont("Helvetica", 24); c.drawString(72, 750, "Hello PDF viewer: Umlaute äöü ß €")
@@ -30,7 +22,6 @@ def main(out):
     c.setFillGray(.5); c.rect(420, 300, 60, 60, fill=1, stroke=0)
     c.showPage(); c.setFont("Helvetica-Bold", 18); c.drawString(72, 750, "Page two"); c.save()
 
-    # 2. compressed, rotated text, clipping, even-odd, curves, transparency
     rl_config.pageCompression = 1
     c = canvas.Canvas(f"{out}/graphics.pdf", pagesize=letter)
     c.saveState(); c.translate(300, 400); c.rotate(30); c.setFont("Helvetica", 20); c.drawString(0, 0, "Rotated 30 degrees"); c.restoreState()
@@ -43,7 +34,6 @@ def main(out):
     c.setFillAlpha(1); c.setLineWidth(.2); c.grid([50, 100, 150, 200], [50, 100, 150, 200])
     c.showPage(); c.save()
 
-    # 2b. the faces (bold, italic, monospace) and big rotated text
     c = canvas.Canvas(f"{out}/styles.pdf", pagesize=A4)
     y = 780
     for f in ["Helvetica", "Helvetica-Bold", "Helvetica-Oblique", "Times-Roman", "Times-Bold", "Times-Italic", "Courier", "Courier-Bold"]:
@@ -54,7 +44,6 @@ def main(out):
         c.saveState(); c.translate(x0, y0); c.rotate(ang); c.setFont("Helvetica-Bold", 40); c.drawString(0, 0, "Rotated %d" % ang); c.restoreState()
     c.showPage(); c.save()
 
-    # 2c. serif text: Times at several sizes, bold, italic, mixed with a sans heading
     c = canvas.Canvas(f"{out}/serif.pdf", pagesize=A4)
     c.setFont("Helvetica-Bold", 20); c.drawString(60, 790, "A heading in the sans face")
     y = 750
@@ -67,7 +56,6 @@ def main(out):
         c.drawString(60, y, para[k * 60:(k + 1) * 60 + 60].strip()[:100]); y -= 16
     c.showPage(); c.save()
 
-    # 2d. text for the SEARCH: cases, umlauts, hyphenated line ends, ligatures, a word on every page
     try:
         from reportlab.pdfbase import pdfmetrics as pm2
         from reportlab.pdfbase.ttfonts import TTFont as TT2
@@ -89,7 +77,6 @@ def main(out):
         c.showPage()
     c.save()
 
-    # 3. platypus: a long text with a table, many pages
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
     from reportlab.lib.styles import getSampleStyleSheet
     st = getSampleStyleSheet()
@@ -103,7 +90,6 @@ def main(out):
         story.append(Spacer(1, 6)); story.append(t); story.append(PageBreak())
     doc.build(story)
 
-    # 4. an embedded TrueType font with Greek and Cyrillic
     try:
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
@@ -116,7 +102,6 @@ def main(out):
     except Exception as e:
         print("no unicode.pdf:", e)
 
-    # 5. images: PNG (RGB + alpha) and JPEG
     from PIL import Image
     im = Image.new("RGB", (64, 48))
     for y in range(48):
@@ -129,18 +114,15 @@ def main(out):
     c.saveState(); c.translate(150, 400); c.rotate(20); c.drawImage(f"{out}/_i.png", 0, 0, 160, 120); c.restoreState()
     c.save()
 
-    # 6. rotated pages (pypdf)
     from pypdf import PdfReader, PdfWriter
     for rot in (90, 180, 270):
         w = PdfWriter(); r = PdfReader(f"{out}/basic.pdf"); pg = r.pages[0]; pg.rotate(rot); w.add_page(pg)
         with open(f"{out}/rot{rot}.pdf", "wb") as f:
             w.write(f)
 
-    # 7. encrypted
     c = canvas.Canvas(f"{out}/encrypted.pdf", pagesize=A4, encrypt="secret")
     c.drawString(72, 700, "secret"); c.save()
 
-    # 7b. encrypted with the EMPTY user password (opens everywhere without asking)
     for name, alg in (("rc4-40", "RC4-40"), ("rc4-128", "RC4-128"), ("aes-128", "AES-128"), ("aes-256", "AES-256")):
         try:
             w = PdfWriter(); r = PdfReader(f"{out}/long.pdf" if name != "rc4-40" else f"{out}/basic.pdf")
@@ -152,9 +134,7 @@ def main(out):
         except Exception as e:
             print("no enc-%s.pdf:" % name, e)
 
-    # 8. the raw writer: xref stream + object stream, and the old filters
     def raw_pdf(path, objs, content_filter=None, xref_stream=False, objstm=False):
-        """objs: dict num -> bytes (a dict/array text) or ('stream', dict_text, data)."""
         out_b = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
         offs = {}
         in_stm = []
@@ -190,7 +170,6 @@ def main(out):
                     rows += struct.pack(">BHB", 1, offs[n], 0)
                 else:
                     rows += struct.pack(">BHB", 0, 0, 255)
-            # PNG "up" predictor, to exercise it
             rowsz = 4; pred = b""; prev = bytes(rowsz)
             for i in range(0, len(rows), rowsz):
                 r = rows[i:i + rowsz]
@@ -217,7 +196,6 @@ def main(out):
     objs = dict(base); objs[4] = ("stream", "/Filter /FlateDecode", zlib.compress(cs))
     raw_pdf(f"{out}/xrefstm.pdf", objs, xref_stream=True, objstm=True)
     raw_pdf(f"{out}/plain-flate.pdf", objs)
-    # ASCII85 + Flate, ASCIIHex, RunLength, LZW
     a85 = base64.a85encode(zlib.compress(cs), adobe=True)
     objs = dict(base); objs[4] = ("stream", "/Filter [/ASCII85Decode /FlateDecode]", a85)
     raw_pdf(f"{out}/a85.pdf", objs)
@@ -231,7 +209,6 @@ def main(out):
     raw_pdf(f"{out}/rl.pdf", objs)
 
     def lzw_encode(data):
-        # PDF LZW, early change 1
         table = {bytes([i]): i for i in range(256)}; nxt = 258; bits = 9
         out_bits = []; w = b""
         def emit(code):
@@ -264,13 +241,11 @@ def main(out):
     objs = dict(base); objs[4] = ("stream", "/Filter /LZWDecode", lzw_encode(cs + b" " + lines))
     raw_pdf(f"{out}/lzw.pdf", objs)
 
-    # 9. damaged: truncated (no xref, no trailer) and with a wrong startxref
     data = open(f"{out}/plain-flate.pdf", "rb").read()
     open(f"{out}/damaged-notrailer.pdf", "wb").write(data[:data.index(b"xref\n0")])
     open(f"{out}/damaged-startxref.pdf", "wb").write(data.replace(b"startxref\n", b"startxref\n99999", 1))
     open(f"{out}/damaged-garbage.pdf", "wb").write(b"%PDF-1.4\nthis is not a pdf at all\n" * 5)
     open(f"{out}/damaged-empty.pdf", "wb").write(b"")
-    # 10. a PDF with a form XObject and an Info dictionary
     form = b"0 1 0 rg 0 0 50 50 re f 0 0 0 RG 0 0 50 50 re S"
     objs = dict(base)
     objs[3] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R /Resources << /XObject << /Fm1 6 0 R >> >> >>"

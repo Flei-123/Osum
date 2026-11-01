@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/pdf/compare.py <pdf> <svgdir> -- compares the reader's pages with poppler.
-
-Text: the multiset of non-blank characters per page must be equal to pdftotext's.
-Picture: the page is rendered from the reader's SVG (cairosvg) and by pdftoppm at
-72 dpi, both blurred; the mean absolute difference (0..255) is printed.
-Prints one line per page: `P <n> text=<ok|DIFF> diff=<x.x>`
-"""
 import collections, glob, html, os, re, subprocess, sys, io
 
 def svg_text(path):
@@ -47,7 +40,6 @@ def main(pdf, svgdir):
         d = -1.0
         if rim is not None:
             if rim.size != im.size:
-                # poppler rounds the page size differently by a pixel
                 w, h = min(rim.size[0], im.size[0]), min(rim.size[1], im.size[1])
                 rim = rim.crop((0, 0, w, h)); im = im.crop((0, 0, w, h))
             x = np.asarray(im.filter(ImageFilter.GaussianBlur(2)), dtype=float)

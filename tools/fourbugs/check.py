@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fourbugs/check.py -- reads the serial log and the pictures of the
-Dell round (title centring, edge cursor, resize in 8 directions, windows
-that stick out). Prints OK/FAIL lines; exit code = number of FAIL."""
 import re, sys
 ser = open(sys.argv[1], 'rb').read().decode('latin1')
 out = sys.argv[2]
@@ -17,23 +14,11 @@ def s64(v):
     v = int(v)
     return v - (1 << 64) if v >= (1 << 63) else v
 
-# r402: the chrome of the terminal as the server reports it (`bar= capw= fr=` at the end of the
-# `wm: fen` line of id 7, all in pixels): frame, and frame + bar + 1 separator. Without the fields (an
-# older kernel) the old numbers: 2 and 22 points.
 mc = re.search(r"wm: fen i=\d+ id=7 [^\n]*? bar=(\d+) capw=(\d+) fr=(\d+)", ser)
 CH_BO = int(mc.group(3)) if mc else 2 * scale
 CH_TH = CH_BO + int(mc.group(1)) + 1 if mc else 22 * scale
 
-# ---- (4) cursor shape at the eight edges and the corners
-# The wire says `wm: form=N x=X y=Y` at every change of the cursor shape. The
-# model below is the grip rule: a point of the terminal (id 7) is on the left /
-# right edge within GRIP = 8*scale px of the work area edge, on the top edge
-# within 2*border... (border 2*scale + 3*scale), on the bottom likewise.
-# Every line must agree with the model; each of the eight directions must
-# have been SEEN at least once.
 mg = re.search(r"wm: fen i=\d+ id=7 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)
-# only the hover phase: the window has not been resized yet (geometry = the
-# first `wm: fen` line)
 hover = ser[:ser.find("wm: zieh k=")] if "wm: zieh k=" in ser else ser
 forms = [(int(m.group(1)), int(m.group(2)), int(m.group(3)))
          for m in re.finditer(r"wm: form=(\d+) x=(\d+) y=(\d+)", hover)]
@@ -42,7 +27,7 @@ if not mg:
 else:
     wx, wy, ww, wh = (int(v) for v in mg.groups())
     bo, th, grip = CH_BO, CH_TH, 8 * scale
-    cx, cy = wx + bo, wy + th          # content origin
+    cx, cy = wx + bo, wy + th
     def model(x, y):
         lx, ly = x - cx, y - (wy + th)
         if not (lx > -grip and ly >= -th and lx < ww + grip and ly < wh + grip):
@@ -69,14 +54,10 @@ else:
     for nm in ("left", "right", "top", "bottom", "top-left", "bottom-right", "top-right", "bottom-left"):
         ok(nm in seen, "the resize cursor was shown at the %s" % nm)
 
-# ---- (4) resize works in every direction AND the edge follows the pointer
-# `wm: gezogen id=N x= y= w= h=` is written when the button goes up. The drive
-# grabs each edge at a fixed distance and moves by (dx, dy); the grabbed edge
-# must move by exactly that, the opposite edge must stay.
 g0 = re.search(r"wm: fen i=\d+ id=7 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)
 gz = [tuple(s64(v) for v in m.groups())
       for m in re.finditer(r"wm: gezogen id=7 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)]
-steps = [("left", (1, 0, 0, 0, -1, 0)),      # name, (dx_edge...) filled below
+steps = [("left", (1, 0, 0, 0, -1, 0)),
          ]
 if not g0:
     ok(False, "resize: no start geometry")
@@ -101,11 +82,10 @@ else:
         else:
             ok(False, "resize %s: no report" % name)
 
-# ---- (3) a window pushed over the edge keeps its place
 md = re.search(r"wm: fen i=\d+ id=8 x=\d+ y=\d+ w=(\d+) ", ser)
 mt = re.search(r"wm: fen i=\d+ id=9 x=\d+ y=(\d+) ", ser)
-SCRW = int(md.group(1)) if md else 1920      # screen width
-BARY = int(mt.group(1)) if mt else 1040      # top of the taskbar = work area bottom
+SCRW = int(md.group(1)) if md else 1920
+BARY = int(mt.group(1)) if mt else 1040
 ab = [(s64(m.group(2)), s64(m.group(3)), int(m.group(4)), int(m.group(5)))
       for m in re.finditer(r"wm: abgelegt id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)]
 ok(len(ab) >= 3, "the server reported %d drops (need 3)" % len(ab))
@@ -120,11 +100,6 @@ if len(ab) >= 3:
     ok(x3 + w3 >= 90 * scale, "pushed far left: at least 96*scale px stay in sight (right edge %d)" % (x3 + w3))
     ok(x3 < 0, "... and the window does stick out on the left (x=%d)" % x3)
 
-# ---- (2) the title text sits in the middle of the bar
-# The window is the terminal (id 7). The bar runs from the border to the
-# bottom of the title bar; the text is "Terminal -- sh" (ascenders, no
-# descenders), so its ink runs from the ascender top to the baseline and the
-# gaps above and below must agree within one pixel.
 def ppm(path):
     d = open(path, 'rb').read()
     parts = d.split(b'\n', 3)
@@ -160,6 +135,5 @@ else:
     else:
         top = ys[0]
         bot = (y1 - y0 - 1) - ys[-1]
-        # the descender-free ink is one pixel off at most because of rounding
         ok(abs(top - bot) <= scale, "title text: gap above %d px, gap below %d px (bar %d px, scale %d)" % (top, bot, y1 - y0, scale))
 sys.exit(fails)

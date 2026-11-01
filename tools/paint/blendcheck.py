@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
-#
-#     tools/icons/sheet.py   `mische`   -- mit `+ 127`
-#
-#
-#
-#
 import os
 import sys
 
@@ -17,31 +8,19 @@ WURZEL = os.path.normpath(os.path.join(HIER, "..", ".."))
 
 
 def exakt(dst, src, a):
-    """(src*a + dst*(255-a)) / 255, kaufmaennisch gerundet."""
     num = src * a + dst * (255 - a)
     return (num * 2 + 255) // (255 * 2)
 
 
 def abschneiden(dst, src, a):
-    """Was bis Runde PAINT in drei der vier Dateien stand."""
     return (src * a + dst * (255 - a)) // 255
 
 
 def plus127(dst, src, a):
-    """Die Fassung der Python-Seite seit Runde PAINT."""
     return (src * a + dst * (255 - a) + 127) // 255
 
 
-def schieben(dst, src, a):
-    """Die exakte Fassung OHNE Division -- gemessen, verworfen.
-
-    t = num + 128, dann (t + (t >> 8)) >> 8.  Ebenso exakt wie
-    `plus127`, aber auf dem Messrechner ein Fuenftel langsamer (526
-    gegen 646 Takte je Bildpunkt im Kern, 6.17 gegen 6.65 nativ).  Sie
-    steht hier weiter, damit die Zusage "beide exakten Fassungen
-    liefern denselben Wert" pruefbar bleibt -- und damit niemand die
-    Entscheidung ein zweites Mal ohne Messung trifft.
-    """
+def pan(dst, src, a):
     t = src * a + dst * (255 - a) + 128
     return (t + (t >> 8)) >> 8
 
@@ -49,12 +28,11 @@ def schieben(dst, src, a):
 FASSUNGEN = [
     ("abschneiden  (vor PAINT)", abschneiden),
     ("(num+127)/255 (Python)  ", plus127),
-    ("(t+(t>>8))>>8 verworfen ", schieben),
+    ("(t+(t>>8))>>8 verworfen ", pan),
 ]
 
 
 def messen(schritt):
-    """Gibt {name: [maxfehler, summe, falsch, gesamt]}."""
     erg = dict((name, [0, 0, 0, 0]) for name, _ in FASSUNGEN)
     for a in range(0, 256, schritt):
         ia = 255 - a
@@ -76,12 +54,6 @@ def messen(schritt):
 
 
 def randbedingungen():
-    """a = 0 und a = 255 muessen bei ALLEN Fassungen exakt sein.
-
-    Eine Mischung, die bei voller Deckung nicht die neue Farbe liefert,
-    faerbt jede undurchsichtige Flaeche um -- der Fehler, der aussieht
-    wie ein kaputter Bildschirm und nicht wie eine Rundung.
-    """
     schlecht = []
     for name, f in FASSUNGEN:
         for v in range(256):
@@ -104,7 +76,7 @@ QUELLEN = [
 ]
 
 
-def quellen_pruefen():
+def quellen_check():
     fehlt = []
     for datei, nadel in QUELLEN:
         p = os.path.join(WURZEL, datei)
@@ -163,7 +135,7 @@ def main():
     for a in range(0, 256, schritt):
         for src in range(256):
             for dst in range(256):
-                if schieben(dst, src, a) != plus127(dst, src, a):
+                if pan(dst, src, a) != plus127(dst, src, a):
                     ungleich += 1
     if ungleich == 0:
         print("  OK    kernel and host deliver on all %d triples "
@@ -174,7 +146,6 @@ def main():
               % ungleich)
         fehler += 1
 
-    # ZUSAGE 5: die Raender.
     schlecht = randbedingungen()
     if not schlecht:
         print("  OK    a=0 leaves the background and a=255 gives the new "
@@ -186,7 +157,7 @@ def main():
         fehler += 1
 
     if "--quellen" in sys.argv:
-        fehlt = quellen_pruefen()
+        fehlt = quellen_check()
         if not fehlt:
             print("  OK    all %d occurrences carry the same rounding"
                   % len(QUELLEN))

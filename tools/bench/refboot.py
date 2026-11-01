@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bench/refboot.py <kind> <workdir> <artifact> [runs] -- boot a reference distro in QEMU/KVM and measure it (prints JSON).
-kind: alpine (virt ISO, kernel+initramfs taken from the ISO), tinycore (CorePure64 ISO + a tiny extra initrd that reports from
-/opt/bootlocal.sh), debian (cloud nocloud qcow2 prepared by debprep.sh). Same machine as tools/bench/measure.sh: KVM, 2 vCPU, 1536 MiB, headless, COM1 on stdio.
-Measured per run: boot_prompt_ms (host clock QEMU start -> login prompt / init-done marker), idle memory 20 s later from
-/proc/meminfo (used = MemTotal - MemFree; used_avail = MemTotal - MemAvailable), rootfs used MB (df /). Median over runs."""
 import json, os, re, shutil, statistics, subprocess, sys, threading, time
 
 kind, wd, art = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -38,7 +33,7 @@ def prep():
 def one(i):
     cmd, ready = prep()
     if kind == "debian":
-        shutil.copy(art, wd + "/disk.qcow2")  # art = debprep.sh output (no first-boot wizard, empty root password)
+        shutil.copy(art, wd + "/disk.qcow2")
         cmd = [c.replace("%s/disk.qcow2", wd + "/disk.qcow2") if "%s" in c else c for c in cmd]
     buf = bytearray()
     t0 = time.time()
@@ -63,7 +58,7 @@ def one(i):
     for attempt in range(4 if kind != "tinycore" else 1):
         if kind != "tinycore":
             p.stdin.write(b"\nroot\n"); p.stdin.flush(); time.sleep(2)
-            p.stdin.write(b"\n"); p.stdin.flush(); time.sleep(3)  # empty password prompt (debian); a bare newline at a shell is harmless
+            p.stdin.write(b"\n"); p.stdin.flush(); time.sleep(3)
             p.stdin.write((MEMSH + "\n").encode()); p.stdin.flush()
         end = time.time() + 12
         while b"X:END" not in bytes(buf).replace(b"echo X:END", b"") and time.time() < end:
@@ -71,7 +66,7 @@ def one(i):
         if b"X:END" in bytes(buf).replace(b"echo X:END", b""):
             break
     txt = bytes(buf).decode("latin1")
-    txt = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", txt).replace("\r", "")  # debian: bracketed-paste escapes sit right before "M:"
+    txt = re.sub(r"\x1b\[[0-9;?]*[a-zA-Z]", "", txt).replace("\r", "")
     p.kill(); p.wait()
     m = re.search(r"^M:(\d+) (\d+) (\d+)", txt, re.M); d = re.search(r"^D:(\d+)", txt, re.M)
     if not m:

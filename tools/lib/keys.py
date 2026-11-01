@@ -64,8 +64,8 @@ import socket
 import sys
 import time
 
-ZEIT_JE_TASTE = 12.0
-ZEIT_BEREIT = 40.0
+TIME_JE_KEY = 12.0
+TIME_READY = 40.0
 
 
 def zeilen(pfad):
@@ -77,10 +77,10 @@ def zeilen(pfad):
         return 0
 
 
-def warte_auf(pfad, text, grenze):
+def wait_auf(pfad, text, limit):
     """Warten, bis TEXT in der seriellen Ausgabe steht."""
     roh = text.encode()
-    ende = time.time() + grenze
+    ende = time.time() + limit
     while time.time() < ende:
         try:
             with open(pfad, "rb") as f:
@@ -98,9 +98,9 @@ def main(argv):
         return 2
     sock = argv[1]
     seriell = argv[2]
-    tasten = []
+    keys_2 = []
     bereit = None
-    zeit = ZEIT_JE_TASTE
+    zeit = TIME_JE_KEY
     vorlauf = 0.4
     i = 3
     while i < len(argv):
@@ -115,10 +115,10 @@ def main(argv):
             i += 1
             vorlauf = float(argv[i])
         else:
-            tasten.append(a)
+            keys_2.append(a)
         i += 1
 
-    if bereit and not warte_auf(seriell, bereit, ZEIT_BEREIT):
+    if bereit and not wait_auf(seriell, bereit, TIME_READY):
         print("keys: the kernel has '%s' nicht gemeldet" % bereit)
         return 1
 
@@ -127,7 +127,7 @@ def main(argv):
     time.sleep(vorlauf)
 
     fehlend = []
-    for nr, taste in enumerate(tasten, 1):
+    for nr, taste in enumerate(keys_2, 1):
         vorher = zeilen(seriell)
         s.sendall(("sendkey %s\n" % taste).encode())
         anfang = time.time()
@@ -138,21 +138,21 @@ def main(argv):
                 angekommen = True
                 break
             time.sleep(0.02)
-        dauer = time.time() - anfang
+        dur = time.time() - anfang
         if angekommen:
             print("keys: %2d/%d  %-10s arrived after %.2fs"
-                  % (nr, len(tasten), taste, dauer))
+                  % (nr, len(keys_2), taste, dur))
         else:
             print("keys: %2d/%d  %-10s NOT arrived (waited %.1fs)"
-                  % (nr, len(tasten), taste, dauer))
+                  % (nr, len(keys_2), taste, dur))
             fehlend.append(taste)
     s.close()
 
     if fehlend:
         print("keys: %d of %d keys did not arrive: %s"
-              % (len(fehlend), len(tasten), " ".join(fehlend)))
+              % (len(fehlend), len(keys_2), " ".join(fehlend)))
         return 1
-    print("keys: all %d keys arrived via IRQ1" % len(tasten))
+    print("keys: all %d keys arrived via IRQ1" % len(keys_2))
     return 0
 
 

@@ -52,7 +52,7 @@ fails = []
 count = 0
 
 
-def gleich(name, ist, soll):
+def eq(name, ist, soll):
     global count
     count += 1
     if ist != soll:
@@ -83,7 +83,7 @@ def bloecke(pfad):
     return aus
 
 
-def index_namen(speicher):
+def index_names(speicher):
     namen = set()
     p = os.path.join(speicher, "INDEX")
     if not os.path.exists(p):
@@ -98,7 +98,7 @@ def main():
     if len(sys.argv) < 6:
         print(__doc__)
         return 2
-    speicher, baum, passphrase, N, r = sys.argv[1:6]
+    speicher, tree, passphrase, N, r = sys.argv[1:6]
     N, r = int(N), int(r)
     habe, habe_nicht, modus = [], [], None
     for a in sys.argv[6:]:
@@ -109,7 +109,6 @@ def main():
         elif modus is not None:
             modus.append(a)
 
-    # ---------------------------------------------- (b) der Klartext
     marke = b"GEHEIMNIS-4711"
     alle = b""
     dateien = []
@@ -120,17 +119,17 @@ def main():
             alle += open(p, "rb").read()
     print("  the memory: %s, %d octets together"
           % (", ".join(dateien), len(alle)))
-    gleich("(b) der Klartext steht NICHT im Speicher", marke in alle, False)
-    gleich("(b) und auch nicht als Dateiname",
+    eq("(b) der Klartext steht NICHT im Speicher", marke in alle, False)
+    eq("(b) und auch nicht als Dateiname",
            any(marke.decode() in f for f in dateien), False)
     imbaum = False
-    for wurzel, _, fs in os.walk(baum):
+    for wurzel, _, fs in os.walk(tree):
         for f in fs:
             if marke in open(os.path.join(wurzel, f), "rb").read():
                 imbaum = True
-    gleich("(b) GEGENPROBE: im Klartextbaum steht sie sehr wohl", imbaum, True)
-    namen = index_namen(speicher)
-    gleich("(b) der Index hat Namen", len(namen) > 0, True)
+    eq("(b) GEGENPROBE: im Klartextbaum steht sie sehr wohl", imbaum, True)
+    namen = index_names(speicher)
+    eq("(b) der Index hat Namen", len(namen) > 0, True)
 
     kopf = os.path.join(speicher, "KOPF")
     felder = {}
@@ -156,7 +155,7 @@ def main():
         print("  the bundle cannot be derived -- (c) measures nothing")
         return 1
     KN = bytes.fromhex(bund[64:128])
-    gleich("(c) der Schluesselbund des Besitzers stimmt mit dem KOPF ueberein",
+    eq("(c) der Schluesselbund des Besitzers stimmt mit dem KOPF ueberein",
            bund[256:320], felder.get("pruef", ""))
 
     def naiv_treffer(dateien):
@@ -179,11 +178,11 @@ def main():
 
     print("  (c) the attacker suspects %d files, %d of which "
           "der Nutzer wirklich" % (len(habe) + len(habe_nicht), len(habe)))
-    gleich("(c) NAIV (blanker SHA-256): erkannte Dateien", naiv_treffer(habe), 0)
-    gleich("(c) NAIV: falsch erkannte", naiv_treffer(habe_nicht), 0)
-    gleich("(c) GEGENPROBE mit K_NAME: der Speicher HAT die Dateien",
+    eq("(c) NAIV (blanker SHA-256): erkannte Dateien", naiv_treffer(habe), 0)
+    eq("(c) NAIV: falsch erkannte", naiv_treffer(habe_nicht), 0)
+    eq("(c) GEGENPROBE mit K_NAME: der Speicher HAT die Dateien",
            hmac_treffer(habe), len(habe))
-    gleich("(c) GEGENPROBE mit K_NAME: und die anderen nicht",
+    eq("(c) GEGENPROBE mit K_NAME: und die anderen nicht",
            hmac_treffer(habe_nicht), 0)
 
     naiv_index = set()
@@ -196,11 +195,10 @@ def main():
     tn = sum(1 for f in habe_nicht
              if any(hashlib.sha256(b).hexdigest() in naiv_index
                     for b in bloecke(f)))
-    gleich("(c) IN EINEM NAIVEN SPEICHER waere der Angriff aufgegangen",
+    eq("(c) IN EINEM NAIVEN SPEICHER waere der Angriff aufgegangen",
            t, len(habe))
-    gleich("(c) und haette die fremden Dateien NICHT gemeldet", tn, 0)
+    eq("(c) und haette die fremden Dateien NICHT gemeldet", tn, 0)
 
-    # ------------------------------------ was der Server SEHR WOHL sieht
     n_bloecke = len(namen)
     groessen = set()
     idx = os.path.join(speicher, "INDEX")
@@ -211,7 +209,7 @@ def main():
                 groessen.add(int(t2[2]))
     print("  WAS DER SERVER TROTZDEM SIEHT: %d Bloecke, Groessen %s"
           % (n_bloecke, sorted(groessen)))
-    gleich("alle Bloecke sind gleich gross", len(groessen), 1)
+    eq("alle Bloecke sind gleich gross", len(groessen), 1)
     if fails:
         print("  %d von %d Zusagen gefallen" % (len(fails), count))
         return 1

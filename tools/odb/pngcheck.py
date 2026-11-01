@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""pngcheck.py <file.png> <w> <h> -- verify an ODB `shot pattern=1` PNG pixel-exactly.
-
-Decodes the PNG with zlib + unfilter (all five filter types) and compares every pixel with the
-agent's test image formula (pat_pixel in kernel/user/odbd.fi) evaluated for the 320x200 source.
-Exit 0 = identical, 1 = pixel mismatch, 2 = not a valid PNG of the expected size.
-"""
 import struct
 import sys
 import zlib
@@ -76,7 +70,7 @@ def decode(data):
 
 def main():
     path, ew, eh = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-    mask = (255 >> int(sys.argv[4])) << int(sys.argv[4]) if len(sys.argv) > 4 else 255   # optional: colour bits dropped by `shot --quant`
+    mask = (255 >> int(sys.argv[4])) << int(sys.argv[4]) if len(sys.argv) > 4 else 255
     try:
         w, h, rows = decode(open(path, "rb").read())
     except Exception as e:  # noqa: BLE001

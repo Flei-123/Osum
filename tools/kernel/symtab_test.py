@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/kernel/symtab_test.py <kernel.elf> -- the block-compressed line table (symtab.pack_lines) must answer every lookup exactly
-# like the plain "largest entry <= addr" search over the flat table. Checks every entry address, +-1, and 200000 random addresses.
 import bisect, os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import symtab

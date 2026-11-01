@@ -1,49 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/aml/pflichtenheft.py -- WELCHE AML-OPCODES DIE EREIGNISSE BRAUCHEN.
-
-WARUM ES DIESES PROGRAMM GIBT.
-
-Ein vollstaendiger AML-Interpreter ist eine Lebensaufgabe: die
-Spezifikation kennt weit ueber zweihundert Opcodes, und die
-Betriebssysteme, die AML wirklich ausfuehren, haben dafuer je eine
-sechsstellige Zahl von Zeilen liegen.  Osum braucht drei Dinge --
-Einschalttaste, Deckel, Akku -- und nicht mehr.
-
-Die Frage ist also nicht "wie baut man einen AML-Interpreter", sondern
-"WELCHEN AUSSCHNITT muss er koennen, damit diese drei Dinge gehen".
-Das ist eine MESSUNG und keine Schaetzung, und sie laeuft wie das
-Pflichtenheft des Assemblers in Runde ASM: nicht raten, welche Befehle
-vorkommen koennten, sondern die Tabellen nehmen, die es wirklich gibt,
-und zaehlen.
-
-WAS GEZAEHLT WIRD
-
-  1. Die Tabellen von QEMU (`tools/aml/run.sh` zieht sie mit `amldump`
-     aus der laufenden Maschine).  Das ist die Grundlage, auf der hier
-     gemessen werden KANN.
-  2. Nachgebaute Laptop-Tabellen unter `tools/aml/asl/`.  Sie stehen im
-     Repo als ASL-Quelltext und werden mit `iasl` uebersetzt; sie bilden
-     nach, was auf einem echten Brett in der DSDT steht -- ein Deckel
-     (`_LID`), ein Akku (`_BST`/`_BIF`/`_BIX`), eine Einschalttaste und
-     die GPE-Methoden `_Lxx`/`_Exx`/`_Qxx`, die beim Ereignis laufen.
-
-     DAS IST EIN NACHBAU UND KEIN BRETT.  Er ist nach ACPI 6.4 Kapitel
-     9.4, 10.2 und 5.6.4 geschrieben und deckt ab, was die Fassungen
-     dieser Kapitel verlangen -- aber eine echte Firmware darf mehr
-     tun, und was Justins Brett wirklich hinlegt, weiss erst, wer es
-     dort ausliest.  `tools/aml/brett.sh` ist der Weg dafuer.
-
-  3. Was der Interpreter KANN, wird nicht abgeschrieben, sondern aus
-     `kernel/acpi/aml.fi` (Funktion `report_can`) ABGELESEN -- derselben
-     Liste, die er zur Laufzeit auf die serielle Leitung legt.
-
-Aufruf:
-    python3 tools/aml/pflichtenheft.py [TABELLE.aml ...]
-
-Ohne Argumente werden die uebersetzten Tabellen unter tools/aml/asl/
-genommen (und, falls vorhanden, alles unter tools/aml/brett/).
-"""
 import glob
 import os
 import re
@@ -56,7 +12,6 @@ sys.path.insert(0, HIER)
 
 
 def kannliste(pfad=None):
-    """Die KANN-Liste aus kernel/acpi/aml.fi ablesen."""
     pfad = pfad or os.path.join(WURZEL, "kernel", "aml.fi")
     s = open(pfad, encoding="utf-8", errors="replace").read()
     m = re.search(r"fn report_can\(state: u64\) \{(.*?)\n\}", s, re.S)
@@ -68,15 +23,14 @@ def kannliste(pfad=None):
         can.add(int(v, 16))
     for v in re.findall(r"ext\[\d+\] = (0x[0-9A-Fa-f]+) as u8", body):
         can.add(0x5B00 | int(v, 16))
-    for o in range(0x60, 0x6F):      # Local0..7, Arg0..6
+    for o in range(0x60, 0x6F):
         can.add(o)
-    for o in range(0x93, 0x96):      # LNotEqual/LLessEqual/LGreaterEqual
+    for o in range(0x93, 0x96):
         can.add(0x9200 | o)
     return can
 
 
 def uebersetzen():
-    """Die ASL-Quellen unter tools/aml/asl/ mit iasl uebersetzen."""
     asl = os.path.join(HIER, "asl")
     if not os.path.isdir(asl):
         return []

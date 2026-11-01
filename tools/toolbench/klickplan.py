@@ -34,8 +34,8 @@ RECT = re.compile(r"taskmgr: rect id=(\d+) kind=(\d+) x=(\d+) y=(\d+) "
 CTXRECT = re.compile(r"taskmgr: ctxrect x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 TAB = re.compile(r"taskmgr: tabelle x=(\d+) y=(\d+) kopf=(\d+) zh=(\d+)")
 NAV = re.compile(r"taskmgr: nav x=(\d+) y=(\d+) w=(\d+)")
-SPALTE = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
-ZEILE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
+COLUMN = re.compile(r"taskmgr: spalte c=(\d+) x=(\d+) w=(\d+)")
+LINE = re.compile(r"taskmgr: zeile r=(\d+) pid=(\d+) ppid=(\d+) st=(\d+) "
                    r"pm=(\d+) kib=(\d+) kern=(\d+) ticks=(\d+) grp=(\d+) "
                    r"(uid=\d+ thr=\d+ prio=\d+ dr=\d+ dw=\d+ drate=\d+) "
                    r"(ntx=\d+ nrx=\d+|net=-) gpu=(\S+) y=(\d+) "
@@ -46,7 +46,6 @@ TBFELD = re.compile(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSOPEN = re.compile(r"qs: open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 QSSYM = re.compile(r"qs: sym n=(\d+) x=(\d+) y=(\d+)")
 QSKACHEL = re.compile(r"qs: kachel n=(\d+) platz=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
-# the plate of a cell (Windows-11 quick settings: plate on top, label under it)
 QSPLATTE = re.compile(r"qs: platte n=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 DLG = re.compile(r"wlib: text win=(\d+) kind=2 x=(\d+) base=(\d+) fg=(\d+) "
                  r"bg=(\d+) tw=(\d+)(?: ax=\d+ ay=\d+)? t=(.*)$")
@@ -71,7 +70,7 @@ def fenster(zeilen, welches=0):
     return v[0] if welches else v[-1]
 
 
-def letzter_block(zeilen):
+def last_block(zeilen):
     """Der letzte VOLLSTAENDIGE Block. Ein halb geschriebener Block am
     Ende des Mitschnitts (die Maschine wurde mittendrin abgeraeumt)
     haette Zeilen ohne Kopf."""
@@ -148,8 +147,6 @@ def main(argv):
             m = QSKACHEL.search(z)
             if m and m.group(1) == t:
                 k = m
-            # since the Windows-11 panel the cell is plate + label: aim at the PLATE
-            # (the middle of the whole cell lies at the plate's lower edge)
             m = QSPLATTE.search(z)
             if m and m.group(1) == t:
                 k = m
@@ -176,8 +173,6 @@ def main(argv):
         return 0
 
     if was == "ja":
-        # The answer button of the question: the program reports it in
-        # window coordinates; add the origin of the work area.
         d = None
         for z in zeilen:
             m = DLGOK.search(z)
@@ -272,7 +267,7 @@ def main(argv):
         c = argv[3]
         s = None
         for z in zeilen:
-            m = SPALTE.search(z)
+            m = COLUMN.search(z)
             if m and m.group(1) == c:
                 s = m
         if s is None:
@@ -289,10 +284,10 @@ def main(argv):
 
     if was in ("zeile", "pid", "pidvon"):
         ziel = argv[3]
-        block = letzter_block(zeilen)
+        block = last_block(zeilen)
         treffer = None
         for z in block:
-            m = ZEILE.search(z)
+            m = LINE.search(z)
             if not m:
                 continue
             if was == "pid" and m.group(2) == ziel:

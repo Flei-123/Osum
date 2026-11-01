@@ -55,7 +55,6 @@ import re
 import sys
 
 
-# ------------------------------------------------------------ das Bild
 def ppm(pfad):
     d = open(pfad, "rb").read()
     if not d.startswith(b"P6"):
@@ -95,7 +94,6 @@ class Bild:
         return z
 
 
-# ---------------------------------------------------- die Meldungen
 RE_TEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+) "
     r"tw=(\d+) ax=(\d+) ay=(\d+)(?: ow=\d+ bw=\d+)? t=(.*)")
@@ -120,7 +118,7 @@ def lies(pfad):
 
 def sammle(serial):
     t = lies(serial)
-    rechtecke = []          # (quelle, art, x, y, w, h)
+    rechtecke = []
     for m in RE_RECT.finditer(t):
         quelle = m.group(1)
         art = int(m.group(3)) if m.group(3) else -1
@@ -150,7 +148,6 @@ def sammle(serial):
     return rechtecke, texte, font, zh, geom, shape
 
 
-# ------------------------------------------------------- die Messungen
 def raster(rechtecke, n=4):
     """Wie viele gemeldete Laengen liegen auf dem n-Raster?"""
     gut = ges = 0
@@ -166,11 +163,11 @@ def raster(rechtecke, n=4):
 
 
 def klickflaechen(rechtecke, mindest=32):
-    zu_klein = []
+    zu_small = []
     for quelle, art, _x, _y, w, h in rechtecke:
         if art in FASSBAR and h > 0 and h < mindest:
-            zu_klein.append((quelle, art, w, h))
-    return zu_klein
+            zu_small.append((quelle, art, w, h))
+    return zu_small
 
 
 def eckfarben(b, x, y, n=16):
@@ -195,7 +192,7 @@ def eckfarben(b, x, y, n=16):
     return len(z)
 
 
-def eck_radius(b, x, y, hg, tol=24):
+def corner_radius(b, x, y, hg, tol=24):
     """Der Radius der oberen linken Ecke bei (x, y), an der Diagonale
     abgelesen: wie viele Bildpunkte der Diagonale sind noch Hintergrund?
     Dazu die Zahl der ZWISCHENWERTE in dem Quadrat -- 0 heisst harte
@@ -208,7 +205,7 @@ def eck_radius(b, x, y, hg, tol=24):
         if max(abs(p[k] - hg[k]) for k in range(3)) > tol:
             r = i
             break
-    zwischen = 0
+    between = 0
     if r > 0:
         innen = b.px(x + r + 2, y + r + 2)
         if innen is not None:
@@ -220,14 +217,14 @@ def eck_radius(b, x, y, hg, tol=24):
                     dh = max(abs(p[k] - hg[k]) for k in range(3))
                     di = max(abs(p[k] - innen[k]) for k in range(3))
                     if dh > tol and di > tol:
-                        zwischen += 1
-    return r, zwischen
+                        between += 1
+    return r, between
 
 
 def schatten(b, x, y, w, h, tiefe=8):
     """Der Helligkeitsabfall im Band unter der Unterkante, gegen die
     Zeile `tiefe` weiter unten (die schon wieder Schreibtisch ist)."""
-    def hell(p):
+    def bright(p):
         return (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
     unten = []
     ref = []
@@ -236,13 +233,13 @@ def schatten(b, x, y, w, h, tiefe=8):
         for xx in range(x + w // 4, x + 3 * w // 4, 4):
             p = b.px(xx, y + h + i - 1)
             if p:
-                zeile.append(hell(p))
+                zeile.append(bright(p))
         if zeile:
             unten.append(sum(zeile) // len(zeile))
     for xx in range(x + w // 4, x + 3 * w // 4, 4):
         p = b.px(xx, y + h + tiefe + 12)
         if p:
-            ref.append(hell(p))
+            ref.append(bright(p))
     if not unten or not ref:
         return None
     r = sum(ref) // len(ref)
@@ -267,7 +264,7 @@ def entdoppeln(texte):
     return list(d.values())
 
 
-def text_pruefung(b, texte, fenster=None):
+def text_check(b, texte, fenster=None):
     """Leere Beschriftung, abgeschnitten, ueberlappend -- die drei
     Fragen aus tools/themestore/shotcheck.py."""
     leer = ab = 0
@@ -309,7 +306,6 @@ def hauptfarben(b):
     return len(z), stark
 
 
-# --------------------------------------------------------------- lauf
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -362,15 +358,15 @@ def main():
         e = {}
         n, stark = hauptfarben(b)
         e["farben"], e["farben_stark"] = n, stark
-        eig = pfad[:-4] + ".serial"
+        own = pfad[:-4] + ".serial"
         g2 = geom
-        if os.path.exists(eig):
-            g2 = sammle(eig)[4]
+        if os.path.exists(own):
+            g2 = sammle(own)[4]
         if "settings" not in g2:
             m = None
             for m in re.finditer(
                     r"settings: rect name=win x=(\d+) y=(\d+) w=(\d+) h=(\d+)",
-                    lies(eig) if os.path.exists(eig) else ""):
+                    lies(own) if os.path.exists(own) else ""):
                 pass
             if m:
                 g2 = dict(g2)
@@ -388,16 +384,16 @@ def main():
             hg = b.px(max(gx - 8, 0), max(gy - 8, 0))
             e["eckfarben"] = eckfarben(b, gx, gy)
             if hg:
-                r, zwi = eck_radius(b, gx, gy, hg)
+                r, zwi = corner_radius(b, gx, gy, hg)
                 e["radius"], e["aa_punkte"] = r, zwi
             s = schatten(b, gx, gy, gw, gh)
             if s:
                 e["schatten"] = s
-        if os.path.exists(eig):
-            _r2, t2, _f2, _z2, _g2, _s2 = sammle(eig)
+        if os.path.exists(own):
+            _r2, t2, _f2, _z2, _g2, _s2 = sammle(own)
         else:
             t2 = texte
-        leer, ab, ueber = text_pruefung(b, entdoppeln(t2))
+        leer, ab, ueber = text_check(b, entdoppeln(t2))
         e["text_leer"], e["text_ab"], e["text_ueber"] = leer, ab, ueber
         erg["bilder"][name] = e
         print("   %-20s farben=%-5d tragend=%-3d eckfarben=%-4s "

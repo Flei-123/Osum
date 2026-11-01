@@ -1,4 +1,3 @@
-"""CLI error handling: missing token file / local file must not print a traceback."""
 import os
 import subprocess
 import sys

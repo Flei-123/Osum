@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bridge/proceed.py -- ein Weiterleiter aus dem Netzraum zum Wirt.
-
-    proceed.py <lauschadresse> <lauschport> <zieladresse> <zielport>
-
-WOZU. Der echte JARVIS-Server laeuft auf dem WIRT (127.0.0.1), der Draht
-zu Osum endet aber in einem NETZRAUM (`ip netns`) -- und ein Netzraum
-sieht das Loopback des Wirtes nicht. Dieses Programm laeuft IM Netzraum,
-nimmt dort die Verbindung von Osum an und reicht sie an den Server
-weiter.
-
-Es fasst die Oktette NICHT an: TLS bleibt Ende zu Ende zwischen Osum und
-dem Server, und dieser Weiterleiter kann darin nichts lesen und nichts
-aendern. Er ist ein Kabel, kein Zwischenstueck -- sonst waere die
-Messung wertlos.
-"""
 import socket
 import sys
 import threading

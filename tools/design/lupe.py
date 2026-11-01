@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/design/lupe.py -- EIN AUSSCHNITT, VERGROESSERT, VORHER NEBEN NACHHER.
-#
-#   lupe.py <ansicht> <x> <y> <b> <h> [zoom] [ziel.png]
-#
 import sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -12,7 +8,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 SHOTS = os.path.join(ROOT, ".design2-shots")
 
 
-def lies_ppm(p):
+def read_ppm_2(p):
     with open(p, "rb") as f:
         d = f.read()
     felder = []
@@ -34,7 +30,7 @@ def lies_ppm(p):
     return w, h, d[i : i + w * h * 3]
 
 
-def schreib_png(p, w, h, roh):
+def write_png(p, w, h, roh):
     import zlib, struct
     z = b"".join(b"\x00" + roh[y * w * 3 : (y + 1) * w * 3] for y in range(h))
     def chunk(t, d):
@@ -66,20 +62,20 @@ def main():
     if len(sys.argv) < 6:
         print(__doc__ or "lupe.py <ansicht> <x> <y> <b> <h> [zoom] [ziel]")
         return 2
-    ansicht = sys.argv[1]
+    view_2 = sys.argv[1]
     x0, y0, bw, bh = (int(v) for v in sys.argv[2:6])
     zoom = int(sys.argv[6]) if len(sys.argv) > 6 else 6
     ziel = sys.argv[7] if len(sys.argv) > 7 else os.path.join(
-        SHOTS, "lupe", "lupe-%s.png" % ansicht)
+        SHOTS, "lupe", "lupe-%s.png" % view_2)
     os.makedirs(os.path.dirname(ziel), exist_ok=True)
 
     teile = []
     for lauf in ("vorher-run", "nachher-run"):
-        p = os.path.join(SHOTS, lauf, "bilder", ansicht + ".ppm")
+        p = os.path.join(SHOTS, lauf, "bilder", view_2 + ".ppm")
         if not os.path.exists(p):
             print("fehlt: %s" % p)
             return 1
-        w, h, roh = lies_ppm(p)
+        w, h, roh = read_ppm_2(p)
         teile.append(schnitt(w, h, roh, x0, y0, bw, bh, zoom))
 
     lw, lh, _ = teile[0]
@@ -92,7 +88,7 @@ def main():
             d = (y * gw + ox) * 3
             s = y * tw * 3
             aus[d : d + tw * 3] = td[s : s + tw * 3]
-    schreib_png(ziel, gw, lh, bytes(aus))
+    write_png(ziel, gw, lh, bytes(aus))
     print("%s  (links vorher, rechts nachher, %dx%d, zoom %d)"
           % (ziel, gw, lh, zoom))
     return 0

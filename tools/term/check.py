@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/term/check.py <serial.txt> -- read the cell dumps of the terminal window (`wm: termzeile N [text]`) and judge them.
-
-A dump is a block of consecutive `wm: termzeile` lines (rows of one moment). For every dump: a row that contains an
-escape-sequence remnant as plain text (`[7m`, `[K`, `[?25h`, `[19;1H`, `[m`) is a failure. The last dump that shows the editor's
-help line (`^O Write`) proves the editor was on screen. Exit code 0 = good.
-"""
 import re
 import sys
 
@@ -30,7 +24,6 @@ def dumps(path):
 
 
 def grid_size(path):
-    """the grid of the last terminal window the machine reported: (cols, rows)"""
     cols = rows = 0
     for z in open(path, "rb").read().decode("latin1").splitlines():
         m = re.search(r"wm: term win=\d+\s+cols=(\d+)\s+rows=(\d+)", z)
@@ -52,8 +45,6 @@ def main(path):
         if ed:
             saw_editor = True
             print("EDITOR-SCREEN dump %d (%d rows)" % (n, len(d)))
-            # the editor must lay its screen out for the REAL size of the window: the help line stands on the last rows,
-            # the status line above it, and nothing is wider than the window (no wrapped help line)
             hrow = max(r for r, t in d if "^O Write" in t)
             last = max(r for r, t in d)
             if rows and not (rows - 2 <= hrow <= rows - 1):

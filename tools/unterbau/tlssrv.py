@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/unterbau/tlssrv.py -- throw-away HTTPS server for the TLS stone probes (run.sh section 3d, STONES_NET=1).
-#   tlssrv.py <port> <cert.pem> <key.pem> <docroot>
 import functools, http.server, ssl, sys
 
 port, cert, key, root = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]

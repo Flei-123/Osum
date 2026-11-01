@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/xfer/check.py -- reads the serial output of tools/xfer/guest.sh and judges the transfer service.
-
-    check.py <serial.txt>            prints `CHECK <name> ok|fail <note>` for every check
-"""
 import re
 import sys
 

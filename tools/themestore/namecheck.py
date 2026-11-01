@@ -57,10 +57,10 @@ import fuiraster                                   # noqa: E402
 
 from PIL import Image                              # noqa: E402
 
-SCHRIFT = "assets/osum-sans.ttf"
+FONT = "assets/osum-sans.ttf"
 PX_UI = 15
 
-ZEILE = re.compile(
+LINE = re.compile(
     r"wlib: text win=(\d+) kind=12 x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
     r" tw=(\d+) ax=(\d+) ay=(\d+) nq=(\d+) nv=(\d+) t=(.*)")
 
@@ -90,7 +90,7 @@ def main(argv):
     schwanz = roh[schnitt:] if schnitt >= 0 else roh
     gemalt = {}
     for ln in schwanz.splitlines():
-        m = ZEILE.search(ln)
+        m = LINE.search(ln)
         if m:
             gemalt[m.group(11)] = m
 
@@ -101,8 +101,7 @@ def main(argv):
                 soll[ln[5:].strip()] = os.path.basename(p)
 
     im = Image.open(bild).convert("RGB")
-    # ROUND FUI-TEXT: the tile names are Ring 3 text, drawn by fUi.
-    s = fuiraster.Schrift(SCHRIFT, PX_UI)
+    s = fuiraster.Schrift(FONT, PX_UI)
 
     if len(argv) > 4:
         loch = im.copy()

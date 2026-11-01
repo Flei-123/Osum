@@ -35,12 +35,12 @@ Rueckgabe 0, wenn es mindestens drei Stufen gab, sonst 1.
 """
 import sys
 
-RAHMEN = (0x2E, 0x6F, 0xD9)
-FLAECHE = (0xE8, 0xEE, 0xF7)
+FRAME = (0x2E, 0x6F, 0xD9)
+AREA = (0xE8, 0xEE, 0xF7)
 NAH = 40
 
 
-def ppm_lesen(pfad):
+def ppm_read(pfad):
     with open(pfad, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):
@@ -70,17 +70,15 @@ def nahe(px, ziel):
             and abs(px[2] - ziel[2]) <= NAH)
 
 
-def zaehlen(pfad):
-    w, h, dat = ppm_lesen(pfad)
+def count(pfad):
+    w, h, dat = ppm_read(pfad)
     flaeche = 0
     gemischt = 0
     for k in range(0, len(dat) - 2, 3):
         px = (dat[k], dat[k + 1], dat[k + 2])
-        if nahe(px, RAHMEN) or nahe(px, FLAECHE):
+        if nahe(px, FRAME) or nahe(px, AREA):
             flaeche += 1
-            # Genau getroffen = fertig gemalt; daneben = gemischt, also
-            # mitten in der Bewegung.
-            if px != RAHMEN and px != FLAECHE:
+            if px != FRAME and px != AREA:
                 gemischt += 1
     _ = (w, h)
     return flaeche, gemischt
@@ -90,23 +88,23 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    werte = []
+    values = []
     gmax = 0
     for pfad in sys.argv[1:]:
         try:
-            f, g = zaehlen(pfad)
+            f, g = count(pfad)
         except (OSError, ValueError) as e:
             print("%s FEHLER %s" % (pfad, e))
             return 2
-        werte.append(f)
+        values.append(f)
         gmax = max(gmax, g)
         print("%s flaeche=%d gemischt=%d" % (pfad.split("/")[-1], f, g))
-    if not werte:
+    if not values:
         return 2
-    mitinhalt = [v for v in werte if v > 0]
+    mitinhalt = [v for v in values if v > 0]
     stufen = len(set(mitinhalt))
     print("FOLGE bilder=%d min=%d max=%d stufen=%d gemischt_max=%d"
-          % (len(werte), min(werte), max(werte), stufen, gmax))
+          % (len(values), min(values), max(values), stufen, gmax))
     return 0 if stufen >= 3 else 1
 
 

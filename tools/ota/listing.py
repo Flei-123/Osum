@@ -68,7 +68,7 @@ def load_opk():
     return m
 
 
-def fremd_prueft(pk, msg, sig):
+def foreign_prueft(pk, msg, sig):
     """Eine zweite Meinung zur eigenen Signatur. None = keine da."""
     try:
         from nacl.signing import VerifyKey
@@ -169,8 +169,8 @@ def main():
     sig = m.ed25519_sign(sk, roh)
     if not m.ed25519_verify(pk, roh, sig):
         raise SystemExit("verzeichnis: die eigene Signatur gilt nicht")
-    anders = fremd_prueft(pk, roh, sig)
-    if anders is False:
+    changed = foreign_prueft(pk, roh, sig)
+    if changed is False:
         raise SystemExit("verzeichnis: eine FREMDE Umsetzung erkennt die "
                          "Signatur nicht an")
 
@@ -180,7 +180,7 @@ def main():
         f.write(sig)
     print("   VERZEICHNIS  fassung %d, %d Paket(e), %d Oktette, sig %s...%s"
           % (fassung, len(dateien), len(roh), sig.hex()[:12],
-             "" if anders else " (KEINE zweite Meinung verfuegbar)"))
+             "" if changed else " (KEINE zweite Meinung verfuegbar)"))
     return 0
 
 

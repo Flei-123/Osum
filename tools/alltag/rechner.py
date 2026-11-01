@@ -22,7 +22,7 @@ import re
 import sys
 
 SCHRANKE = 1e-9
-QUELLE = "tools/alltag/ausdruecke.txt"
+SOURCE = "tools/alltag/ausdruecke.txt"
 
 UMGEBUNG = {
     "sqrt": math.sqrt, "abs": abs, "sin": math.sin, "cos": math.cos,
@@ -40,7 +40,7 @@ UMGEBUNG = {
 
 def ausdruecke():
     aus = []
-    for z in open(QUELLE, encoding="utf-8"):
+    for z in open(SOURCE, encoding="utf-8"):
         z = z.strip()
         if z and not z.startswith("#"):
             aus.append(z)
@@ -75,7 +75,7 @@ def wert(a: str) -> float:
     return float(eval(nach_python(a), {"__builtins__": {}}, UMGEBUNG))
 
 
-def gleich(gast: float, wirt: float) -> bool:
+def eq(gast: float, wirt: float) -> bool:
     if math.isnan(gast) or math.isnan(wirt):
         return False
     d = abs(gast - wirt)
@@ -103,34 +103,34 @@ def pruefen(serial: str) -> int:
     schlecht = 0
     for i, a in enumerate(aus):
         marke = "AUSDRUCK-%d" % i
-        antwort = None
+        reply = None
         for k, z in enumerate(zeilen):
             if z.strip() == marke:
                 for j in range(k + 1, min(k + 12, len(zeilen))):
                     s = zeilen[j].strip()
                     if not s or s.startswith("elf:") or s.startswith("osum$"):
                         continue
-                    antwort = s
+                    reply = s
                     break
                 break
         soll = wert(a)
-        if antwort is None:
+        if reply is None:
             print("  FAIL  %-22s no answer in the guest (expected %.12g)"
                   % (a, soll))
             schlecht += 1
             continue
         try:
-            ist = float(antwort)
+            ist = float(reply)
         except ValueError:
             print("  FAIL  %-22s Gast sagt '%s' (soll %.12g)"
-                  % (a, antwort, soll))
+                  % (a, reply, soll))
             schlecht += 1
             continue
-        if gleich(ist, soll):
-            print("  OK    %-22s %s" % (a, antwort))
+        if eq(ist, soll):
+            print("  OK    %-22s %s" % (a, reply))
             gut += 1
         else:
-            print("  FAIL  %-22s Gast %s, Python %.12g" % (a, antwort, soll))
+            print("  FAIL  %-22s Gast %s, Python %.12g" % (a, reply, soll))
             schlecht += 1
     print("calc: %d of %d match Python" % (gut, len(aus)))
     return 0 if schlecht == 0 else 1

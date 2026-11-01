@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""odbc serve: one upstream open, many short-lived odbc clients (VBox uart2 pipe is single-client)."""
 import os
 import socket
 import subprocess
@@ -52,7 +51,7 @@ class ProxyInProcess(unittest.TestCase):
     def test_client_dropped_mid_session_then_next_works(self):
         s = self.sess()
         s.login()
-        s.close()                      # leaves without a goodbye
+        s.close()
         s = self.sess()
         s.login()
         s.ping()
@@ -74,7 +73,7 @@ class ProxyInProcess(unittest.TestCase):
             s.login()
         s.close()
         s = self.sess()
-        s.login()                      # right token still works afterwards
+        s.login()
         s.close()
 
 
@@ -97,7 +96,7 @@ class ProxyCli(unittest.TestCase):
                 serve = subprocess.Popen([sys.executable, "-I", os.path.join(HERE, "odbc.py"), "--port", "unix:" + sock,
                                           "serve", "--listen", "tcp:127.0.0.1:%d" % port],
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                for rnd in range(3):   # three separate odbc processes, one upstream connection
+                for rnd in range(3):
                     r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "odbc.py"), "--port",
                                         "tcp:127.0.0.1:%d" % port, "--wait", "10", "--token-file", tok, "info"],
                                        capture_output=True, text=True, timeout=30)

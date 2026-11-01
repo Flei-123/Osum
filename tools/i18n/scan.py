@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/i18n/scan.py [wurzel]
-#
-#
-#
-#
-#
-#
-#
-#
-#
 import os
 import re
 import sys
@@ -34,8 +23,8 @@ WOERTER = [
     "gesetzt für", "Menü", "vortäuschen", "Fläche", "Schlüssel",
     "Zurück", "Nächstes", "Vorwärts", "Ausgewählt", "lädt",
 ]
-ERSATZ = re.compile(r"\b[A-ZÄÖÜa-zäöü]*(ue|ae|oe)[a-z]{2,}\b")
-ERSATZ_OK = {"guest", "queue", "value", "values", "true", "blue",
+FALLBACK = re.compile(r"\b[A-ZÄÖÜa-zäöü]*(ue|ae|oe)[a-z]{2,}\b")
+FALLBACK_OK = {"guest", "queue", "value", "values", "true", "blue",
              "aeon", "oeuvre", "cue", "due", "issue", "rue", "sue"}
 
 OBERFLAECHE = [
@@ -80,15 +69,11 @@ OBERFLAECHE = [
     "kernel/ui/wm/wmtrust.fi",
 ]
 
-#
-#
-#
 QUELLEN = ["kernel"]
-AUSNAHMEN = ["kernel/user/i18nt.fi"]
+EXCEPTIONS = ["kernel/user/i18nt.fi"]
 
 
 def literale(zeile):
-    """Die Zeichenkettenliterale einer Zeile, ohne Kommentare."""
     aus = []
     i = 0
     n = len(zeile)
@@ -116,13 +101,11 @@ def literale(zeile):
 
 
 def erlaubt(text):
-    """Mitschnitte, Pfade und Konfigurationsschluessel."""
     t = text.strip()
     if not t:
         return True
     if t.startswith("/"):
         return True
-    # "taskbar: ...", "settings: ...", "i18n: ..." -- ein Mitschnitt.
     if re.match(r"^[a-z0-9]+: ", t):
         return True
     if re.match(r"^[a-z0-9_]+(\.[a-z0-9_]+)+(\\0)*$", t):
@@ -134,8 +117,7 @@ def erlaubt(text):
     return False
 
 
-#
-def liste_pruefen(wurzel):
+def list_check(wurzel):
     if len(sys.argv) > 1:
         return
     fehlt = [r for r in OBERFLAECHE
@@ -146,7 +128,7 @@ def liste_pruefen(wurzel):
         raise SystemExit(2)
 
 
-def pruefe(pfad, streng):
+def check(pfad, streng):
     treffer = []
     try:
         roh = open(pfad, "rb").read().decode("utf-8", "replace")
@@ -166,8 +148,8 @@ def pruefe(pfad, streng):
             else:
                 if not streng:
                     continue
-                m = ERSATZ.search(klar)
-                if m and m.group(0).lower() not in ERSATZ_OK \
+                m = FALLBACK.search(klar)
+                if m and m.group(0).lower() not in FALLBACK_OK \
                         and len(klar.strip()) > 6:
                     treffer.append((pfad, nr, m.group(0), klar.strip()))
     return treffer
@@ -175,25 +157,25 @@ def pruefe(pfad, streng):
 
 def main():
     wurzel = sys.argv[1] if len(sys.argv) > 1 else "."
-    liste_pruefen(wurzel)
+    list_check(wurzel)
     surface = []
     rest = []
     for basis in QUELLEN:
         start = os.path.join(wurzel, basis)
         if not os.path.isdir(start):
             continue
-        for ordner, _dirs, dateien in os.walk(start):
+        for folder, _dirs, dateien in os.walk(start):
             for d in sorted(dateien):
                 if not d.endswith(".fi"):
                     continue
-                p = os.path.join(ordner, d)
+                p = os.path.join(folder, d)
                 rel = os.path.relpath(p, wurzel).replace(os.sep, "/")
-                if rel in AUSNAHMEN:
+                if rel in EXCEPTIONS:
                     continue
                 if rel in OBERFLAECHE:
-                    surface += pruefe(p, True)
+                    surface += check(p, True)
                 else:
-                    rest += pruefe(p, False)
+                    rest += check(p, False)
     for pfad, nr, wort, text in surface:
         print("%s:%d: '%s' in \"%s\"" % (pfad, nr, wort, text[:70]))
     print("gefunden: %d" % len(surface))

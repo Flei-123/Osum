@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tunnel/proxy.py -- SOCKS5 and HTTP CONNECT against real servers.
-
-Three counterparts, none of them written by this repository:
-
-  1. A SOCKS5 server in Python (`socksd.py`, started here), which is
-     enough to check the wire format, the username/password exchange of
-     RFC 1929 and every reply code -- including the ones that must be
-     REFUSALS.
-  2. An HTTP proxy in Python, for the CONNECT method.
-  3. THE REAL TOR DAEMON, if it is installed. This is the point of the
-     whole exercise: Osum does not implement Tor, it speaks SOCKS5 to a
-     Tor that other people wrote and other people audit. If the SOCKS5
-     client is right, `tor` is usable from Osum and the switch in the
-     settings is honest. See docs/TUNNEL.md.
-
-Tor is only asked to resolve and connect through the network if it can
-reach it; where there is no route to the internet the check is reported
-as SKIPPED rather than passed, because a check that quietly passes when
-it did nothing is worse than no check.
-"""
 import os
 import socket
 import struct
@@ -49,18 +29,13 @@ def skip(name, why):
 
 
 def drv(*lines):
-    """One run of `.probe/socksdrv`, one answer per line."""
     inp = ("\n".join(lines) + "\n").encode()
     p = subprocess.run([DRV], input=inp, capture_output=True, timeout=120)
     return p.stdout.decode().splitlines()
 
 
-# =====================================================================
-# a SOCKS5 server, and a target for it to reach
-# =====================================================================
 
 class Target(threading.Thread):
-    """An HTTP server that answers anything with a known first line."""
     daemon = True
 
     def __init__(self):
@@ -94,7 +69,6 @@ class Target(threading.Thread):
 
 
 class Socks5Server(threading.Thread):
-    """RFC 1928 and RFC 1929, on the other side of the wire from us."""
     daemon = True
 
     def __init__(self, require_auth=False, force_reply=None,
@@ -265,8 +239,6 @@ def main():
     ok("the proxy saw the credential we sent",
        asrv.seen_creds and asrv.seen_creds[-1] == ("ident-a", "secret"),
        str(asrv.seen_creds[-1]) if asrv.seen_creds else "-")
-    # And without one, against a server that demands it, the exchange must
-    # FAIL rather than proceed.
     r = drv("socks5 127 0 0 1 %d osum.example 80" % asrv.port)[0]
     ok("no credential against a proxy that demands one is refused",
        r.startswith("fail method"), r)
@@ -327,8 +299,6 @@ def main():
             if "Opening Socks listener" in ln:
                 pass
         if not booted:
-            # The SOCKS port is up long before the network is; a refusal
-            # from Tor is still a valid measurement of OUR client.
             up = False
             try:
                 t = socket.create_connection(("127.0.0.1", port), 3)
@@ -350,13 +320,8 @@ def main():
                r.startswith("ok 0"), r[:100])
             r = drv("socks5 127 0 0 1 %d not-a-real-onion-address.onion 80"
                     % port)[0]
-            # Tor 0.4.9 answers a malformed .onion with the ordinary
-            # code 1, not with its extended 0xF6. The check is that it is
-            # REFUSED and that our client reports the code it really got;
-            # inventing 0xF6 here would be a test written to its answer.
             ok("Tor refuses a malformed .onion address",
                r.startswith("fail reply"), r)
-            # stream isolation: two credentials, two circuits
             r1 = drv("socks5 127 0 0 1 %d example.com 80 ident-a x" % port)
             r2 = drv("socks5 127 0 0 1 %d example.com 80 ident-b x" % port)
             ok("two isolated streams both work",

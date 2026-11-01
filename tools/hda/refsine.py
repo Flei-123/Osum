@@ -1,46 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/hda/refsine.py -- DERSELBE SINUS, NOCH EINMAL, AUF DEM WIRT.
-
-Diese Datei rechnet Zeile fuer Zeile das nach, was `audio.sine_q28` und
-`audio.tone_into` in `kernel/drv/snd/audio.fi` rechnen: dieselbe Festkommareihe
-in Q28, derselbe Phasenschritt, dieselbe Rundung, dieselbe Klammer.
-
-WOZU. Ohne sie hiesse "der Ton stimmt" nur "es sieht nach einem Sinus
-aus". Mit ihr laesst sich die Datei, die QEMU geschrieben hat, WERT FUER
-WERT gegen das halten, was der Kernel erzeugt haben MUSS -- und wenn
-jeder einzelne der 96000 Werte stimmt, dann ist der ganze Weg
-
-    Erzeugung -> Ringpuffer -> Deskriptorliste -> DMA -> Mischer -> Datei
-
-rechnungsfrei. Das ist die Zusage "bitgleich" aus dem Auftrag dieser
-Runde, und sie ist nur so pruefbar.
-
-WENN DIESE DATEI UND kernel/drv/snd/audio.fi AUSEINANDERLAUFEN, faellt der
-Vergleich -- absichtlich. Wer die Reihe im Kernel aendert, aendert sie
-hier mit, und beim naechsten Lauf steht in der Ausgabe, ob beide
-dasselbe meinen.
-
-RUNDE HDA: sie VERGLEICHT jetzt auch.  Bis dahin hat sie nur eine
-Vergleichsdatei geschrieben und das Gegenrechnen dem Testlaeufer
-ueberlassen; das ist zweimal dieselbe Rechnung an zwei Stellen.  Wird
-ihr eine WAV-Datei uebergeben, die es schon gibt, sucht sie darin den
-Nutzbereich (erster bis letzter Wert ungleich null) und haelt ihn WERT
-FUER WERT gegen die Reihe.  Sie druckt
-
-    ungleich=N   Werte, die abweichen -- null heisst bitgleich
-    maxdiff=N    der groesste Abstand, falls doch etwas abweicht
-    verglichen=N wie viele Werte ueberhaupt verglichen wurden
-
-    refsine.py aus.wav [--hz 440] [--rahmen 48000] [--pegel 24000]
-               [--schreiben]
-"""
 import argparse
 import struct
 import wave
 
 Q28 = 1 << 28
-PI_HALF_Q28 = 421657428  # round(pi/2 * 2**28)
+PI_HALF_Q28 = 421657428
 
 
 def sine_q28(phase):

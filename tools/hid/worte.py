@@ -1,34 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/hid/worte.py -- KEIN MODUSWORT DARF IN EINEM ANDEREN STECKEN.
-
-`mode_of` in kernel/kmain.fi sucht die Woerter der Kommandozeile mit
-einem reinen OKTETTVERGLEICH (`find`); es gibt keine Wortgrenze.  Steckt
-ein Moduswort in einem anderen, schaltet der eine Schalter den anderen
-stillschweigend mit.
-
-Runde K17 hat das im Kommentar zu `nousb` beschrieben ("ein Schalter, den
-sein eigenes Argument aufhebt, ist keiner").  RUNDE HID IST TROTZDEM
-HINEINGELAUFEN: die Gegenprobe zum generischen Weg hiess `nohidrep`, und
-darin steckt `nohid` -- der Schalter der Runde K17, der die ganze
-HID-Eingabe abschaltet.  Damit hatte der Lauf, der beweisen sollte, dass
-OHNE den Zerleger alles weiterlaeuft, ueberhaupt kein Eingabegeraet mehr.
-Aufgefallen ist es an einer einzigen gefallenen Zusage in
-tools/hid/run.sh; ohne die waere der Kernel mit einer Gegenprobe
-ausgeliefert worden, die etwas anderes misst, als sie behauptet.
-
-Seitdem wird das mechanisch geprueft -- fuer JEDES Wort im Baum und nicht
-nur fuer die dieser Runde.
-
-Aufruf:  python3 tools/hid/worte.py [kernelverzeichnis]
-Rueckgabe 0, wenn kein Wort in einem anderen steckt.
-"""
 import glob
 import os
 import re
 import sys
 
-#
 BEKANNT = {
     ("disp", "dispeigen"), ("disp", "dispeigenbad"),
     ("disp", "dispeigenfrist"),
@@ -46,9 +22,6 @@ BEKANNT = {
     ("usb", "nousb"), ("usb", "usbhold"), ("usb", "usbnoirq"),
     ("usb", "usbpoll"), ("usb", "usbstick"),
     ("usb", "usbstop"), ("usb", "usbleg"),
-    #
-    #
-    #
     ("audio", "noaudio"),
     ("flip", "noflip"),
     ("self", "blkself"), ("self", "nicself"),
@@ -58,14 +31,14 @@ BEKANNT = {
 def main():
     kdir = sys.argv[1] if len(sys.argv) > 1 else "kernel"
     worte = {}
-    def _alle(d):
+    def _all(d):
         aus = []
         for stamm, verz, namen in os.walk(d):
             verz[:] = [v for v in verz if v not in ("user", "app")]
             aus += [os.path.join(stamm, n) for n in namen if n.endswith(".fi")]
         return sorted(aus)
 
-    for pfad in _alle(kdir):
+    for pfad in _all(kdir):
         quelle = open(pfad, "r", encoding="utf-8", errors="replace").read()
         for name, w in re.findall(
                 r'var (w_\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0', quelle):

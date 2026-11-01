@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/hotkey/check.py <outdir> -- reads serial.txt + the .ppm pictures of one tools/hotkey run (r1309: Ctrl+Shift+T as a scancode burst)
 import os, re, sys
 
 out = sys.argv[1]
@@ -30,7 +29,6 @@ def load(name):
 
 
 def lit(img, box):
-    # pixels in box (x0, y0, x1, y1) that are not black-ish: how much is drawn there
     if img is None:
         return -1
     w, h, b = img

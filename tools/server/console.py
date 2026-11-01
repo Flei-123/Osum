@@ -62,11 +62,11 @@ def main():
         return 1
     s.settimeout(0.2)
 
-    puffer = bytearray()
+    buffer = bytearray()
     fehler = []
     frist = 40.0
 
-    def lesen(bis):
+    def read_2(bis):
         ende = time.time() + bis
         while time.time() < ende:
             try:
@@ -77,14 +77,14 @@ def main():
                 break
             if not d:
                 break
-            puffer.extend(d)
-        return puffer
+            buffer.extend(d)
+        return buffer
 
-    def warte_auf(muster, bis):
+    def wait_auf(muster, bis):
         ende = time.time() + bis
         rx = re.compile(muster.encode(), re.S)
         while time.time() < ende:
-            if rx.search(puffer):
+            if rx.search(buffer):
                 return True
             try:
                 d = s.recv(4096)
@@ -94,14 +94,14 @@ def main():
                 return False
             if not d:
                 return False
-            puffer.extend(d)
+            buffer.extend(d)
         return False
 
     for art, wert in schritte:
         if art == "--frist":
             frist = float(wert)
         elif art == "--erwarte":
-            if warte_auf(wert, frist):
+            if wait_auf(wert, frist):
                 print("   erwartet und bekommen: %s" % wert)
             else:
                 fehler.append(wert)
@@ -118,9 +118,9 @@ def main():
         elif art == "--roh":
             s.send(bytes(int(x) for x in wert.split(",")))
 
-    lesen(1.0)
+    read_2(1.0)
     with open(log, "wb") as f:
-        f.write(bytes(puffer))
+        f.write(bytes(buffer))
     try:
         s.close()
     except OSError:

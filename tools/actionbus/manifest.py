@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/actionbus/manifest.py -- the action manifest, checked on the HOST.
-#
-# The second reader of the format of docs/ACTION-BUS.md section 3 (the
-# first is kernel/user/orientbus.fi). It exists for the package build --
-# a manifest that the broker would refuse must not get into an .opk --
-# and for everything off the device that wants the catalogue as JSON
-# (the JARVIS server, a store page, documentation).
-#
-# Two readers of one format on purpose, the same way tools/osum/mkfs.py
-# is the second writer of OFS: where they disagree, the test in
-# tools/actionbus/run.sh (section 1) shows it.
-#
-#   manifest.py check <ACTIONS> [...]      exit 1 on the first broken file
-#   manifest.py json  <ACTIONS> [...]      the catalogue as JSON on stdout
-#   manifest.py check --wrapper <file>     a wrapper manifest (adapters)
-#
-# AB-005: `keyed` (the argument `key` names a setting of
-# /etc/settings.schema; rights by <app>.<key>). AB-008: `for exe <path>`
-# and `adapter cli|file|dbus|ui|keys ...`, only in wrapper manifests.
 import json
 import re
 import sys
@@ -116,7 +97,6 @@ def parse(text, path="<manifest>", wrapper=False):
             if cur is not None and "args" in cur:
                 cur["keyed"] = "settings.schema"
         elif k == "for":
-            # AB-008: `for exe <path>`; AB-008b: `for window "<glob>"`
             if len(w) < 3 or w[1] not in ("exe", "window"):
                 raise Bad("%s: 'for exe <path>' or 'for window \"<glob>\"'" % where)
             if w[1] == "window" and not wrapper:
@@ -131,13 +111,11 @@ def parse(text, path="<manifest>", wrapper=False):
                 cur["adapter"] = w[1]
                 cur["reliability"] = RELIABILITY[w[1]]
         elif k == "private":
-            # AB-015: an event only the user and the app itself hear
             if cur is not None and "fields" in cur:
                 cur["private"] = True
             else:
                 raise Bad("%s: 'private' belongs under an event" % where)
         elif k == "menu":
-            # D1: `menu <file|dir|any> "label"` -- a context-menu entry
             if cur is None or "args" not in cur or len(w) < 2 \
                     or w[1] not in ("file", "dir", "any") or not quoted(line):
                 raise Bad('%s: menu <file|dir|any> "label" belongs under an action'

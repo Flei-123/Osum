@@ -52,13 +52,9 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(HIER)
 sys.path.insert(0, os.path.join(WURZEL, "k15"))
-# ROUND MERGE: round rename-en renamed tools/k15/symbol.py to icon.py.
-# A python import names the module without its extension, so nothing
-# that looks like a path had to change and nothing did -- this line
-# raised ModuleNotFoundError and took the whole icon check with it.
 import icon as symmod  # noqa: E402
 
-QUELLE = os.path.join(WURZEL, "..", "assets", "netview")
+SOURCE = os.path.join(WURZEL, "..", "assets", "netview")
 
 ZUSTAENDE = ["state-nocarrier", "state-noip", "state-noroute", "state-online"]
 MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
@@ -66,43 +62,42 @@ SYSTEM = ["sys-faking"]
 KACHELN = ["tile-fake", "tile-net", "tile-hide",
            "tile-dark", "tile-power", "tile-tile"]
 
-KREUZ = [("sys-faking", "mark-faked")]
+CROSS = [("sys-faking", "mark-faked")]
 
-KREUZ_KACHEL = [("tile-fake", "state-online"),
+CROSS_TILE = [("tile-fake", "state-online"),
                 ("tile-fake", "state-nocarrier"),
                 ("tile-hide", "state-online"),
                 ("tile-net", "state-online")]
 
-DATEI_NAME = {"ink": "fg", "dim": "dim", "accent": "accent",
+FILE_NAME = {"ink": "fg", "dim": "dim", "accent": "accent",
               "warn": "focus", "panel": "panel"}
 
 
-def schema_lesen(pfad):
-    werte = {}
+def schema_read(pfad):
+    values = {}
     for roh in open(pfad, encoding="ascii"):
         roh = roh.strip()
         if not roh or roh.startswith("#") or "=" not in roh:
             continue
         k, _, v = roh.partition("=")
-        werte[k.strip()] = int(v.strip(), 16)
+        values[k.strip()] = int(v.strip(), 16)
     aus = {}
-    for rolle, schluessel in DATEI_NAME.items():
-        if schluessel not in werte:
+    for rolle, schluessel in FILE_NAME.items():
+        if schluessel not in values:
             raise SystemExit("icons: %s hat kein %s=" % (pfad, schluessel))
-        aus[rolle] = werte[schluessel]
+        aus[rolle] = values[schluessel]
     return aus
 
 
 SCHEMEN = {
-    "dark": schema_lesen(os.path.join(QUELLE, "theme-dark")),
-    "light": schema_lesen(os.path.join(QUELLE, "theme-light")),
+    "dark": schema_read(os.path.join(SOURCE, "theme-dark")),
+    "light": schema_read(os.path.join(SOURCE, "theme-light")),
 }
 
-MIN_KONTRAST = 4.5
-MIN_UNTERSCHIED = 33  # Prozent der eingefaerbten Bildpunkte
+MIN_CONTRAST = 4.5
+MIN_UNTERSCHIED = 33
 
 
-# ------------------------------------------------------------ Kontrast
 
 def linear(k):
     k = k / 255.0
@@ -111,22 +106,21 @@ def linear(k):
     return ((k + 0.055) / 1.055) ** 2.4
 
 
-def helligkeit(rgb):
+def brightness(rgb):
     r, g, b = (rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255
     return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
 
 
-def kontrast(a, b):
-    la, lb = helligkeit(a), helligkeit(b)
+def contrast(a, b):
+    la, lb = brightness(a), brightness(b)
     if la < lb:
         la, lb = lb, la
     return (la + 0.05) / (lb + 0.05)
 
 
-# ------------------------------------------------------------ die Bilder
 
 def zeichnung(name):
-    return os.path.join(QUELLE, name + ".txt")
+    return os.path.join(SOURCE, name + ".txt")
 
 
 def lies(name):
@@ -164,34 +158,33 @@ def bitreihen(name):
     return reihen, w, len(zeilen)
 
 
-# ------------------------------------------------------------ die Pruefung
 
-def pruefe_gestaltung(sagen=True):
+def check_gestaltung(say_2=True):
     fehler = 0
 
-    def sag(t):
-        if sagen:
+    def say(t):
+        if say_2:
             print(t)
 
-    sag("== Kontrast jeder Rolle gegen die Flaeche, hell und dunkel ==")
+    say("== Contrast of each role against the area, light and dark ==")
     for sn, s in sorted(SCHEMEN.items()):
         for rolle in ("ink", "dim", "accent", "warn"):
-            k = kontrast(s[rolle], s["panel"])
-            gut = k >= MIN_KONTRAST
+            k = contrast(s[rolle], s["panel"])
+            gut = k >= MIN_CONTRAST
             fehler += 0 if gut else 1
-            sag("  %-5s %-7s %5.2f:1  %s"
+            say("  %-5s %-7s %5.2f:1  %s"
                 % (sn, rolle, k, "ok" if gut else "ZU WENIG"))
 
-    for titel, gruppe in (("Systemzustand", ZUSTAENDE), ("Merkmal", MERKMALE),
+    for title, gruppe in (("Systemzustand", ZUSTAENDE), ("Merkmal", MERKMALE),
                           ("Kachel", KACHELN)):
-        sag("== %s: FORM VOR FARBE -- Schattenrisse gegeneinander ==" % titel)
+        say("== %s: SHAPE BEFORE COLOR -- silhouettes against each other ==" % title)
         risse = {n: schattenriss(n) for n in gruppe}
         for i in range(len(gruppe)):
             for j in range(i + 1, len(gruppe)):
                 a, wa, ha = risse[gruppe[i]]
                 b, wb, hb = risse[gruppe[j]]
                 if (wa, ha) != (wb, hb):
-                    sag("  %s und %s sind nicht gleich gross" % (gruppe[i], gruppe[j]))
+                    say("  %s and %s are not the same size" % (gruppe[i], gruppe[j]))
                     fehler += 1
                     continue
                 u = len(a | b)
@@ -199,16 +192,16 @@ def pruefe_gestaltung(sagen=True):
                 pz = 100 * d // u if u else 0
                 gut = pz >= MIN_UNTERSCHIED
                 fehler += 0 if gut else 1
-                sag("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
+                say("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
                     % (gruppe[i].split("-", 1)[1], gruppe[j].split("-", 1)[1], d, u, pz,
                        "ok" if gut else "ZU AEHNLICH"))
 
-    sag("== UEBER die Gruppen hinweg: Zeichen, die nebeneinander stehen ==")
-    for a_n, b_n in KREUZ + KREUZ_KACHEL:
+    say("== ACROSS the groups: glyphs that stand side by side ==")
+    for a_n, b_n in CROSS + CROSS_TILE:
         a, wa, ha = schattenriss(a_n)
         b, wb, hb = schattenriss(b_n)
         if (wa, ha) != (wb, hb):
-            sag("  %s und %s sind nicht gleich gross" % (a_n, b_n))
+            say("  %s and %s are not the same size" % (a_n, b_n))
             fehler += 1
             continue
         u = len(a | b)
@@ -216,7 +209,7 @@ def pruefe_gestaltung(sagen=True):
         pz = 100 * d // u if u else 0
         gut = pz >= MIN_UNTERSCHIED
         fehler += 0 if gut else 1
-        sag("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
+        say("  %-15s vs %-15s %3d von %3d = %2d%%  %s"
             % (a_n, b_n, d, u, pz, "ok" if gut else "ZU AEHNLICH"))
     return fehler
 
@@ -225,14 +218,13 @@ def masse():
     """Groesse und Deckung je Zeichen -- die Zahlen fuer die Doku."""
     aus = []
     for n in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
-        riss, w, h = schattenriss(n)
-        aus.append((n, w, h, len(riss), w * h))
+        tear, w, h = schattenriss(n)
+        aus.append((n, w, h, len(tear), w * h))
     return aus
 
 
-# ------------------------------------------------------------ das Erzeugen
 
-KOPF = """// SPDX-License-Identifier: GPL-2.0-only
+HEADER = """// SPDX-License-Identifier: GPL-2.0-only
 // kernel/net/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
 //
 // NICHT VON HAND AENDERN. `tools/netview/icons.py kern` schreibt diese
@@ -294,7 +286,7 @@ def kernquelle():
                              % (n, rw, rh, w, h))
         reihen.append(r)
 
-    def tafel(index):
+    def board(index):
         t = []
         for m, r in enumerate(reihen):
             for y, paar in enumerate(r):
@@ -304,9 +296,9 @@ def kernquelle():
                          % (m, y, paar[index]))
         return "".join(t)
 
-    return KOPF % {
+    return HEADER % {
         "w": w, "h": h, "count": len(MERKMALE),
-        "masken": tafel(0), "rollen": tafel(1),
+        "masken": board(0), "rollen": board(1),
     }
 
 
@@ -337,7 +329,7 @@ def main(argv):
                   % (n, w, h, deck, ganz, 100 * deck // ganz))
         return 0
     if len(argv) >= 2 and argv[1] == "pruefe":
-        fehler = pruefe_gestaltung()
+        fehler = check_gestaltung()
         kdatei = os.path.join(WURZEL, "..", "kernel", "net", "netmark.fi")
         if "--kern" in argv:
             kdatei = argv[argv.index("--kern") + 1]

@@ -1,45 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wm/cursor2.py -- DIE ZEIGERFORMEN, ALS UMRISSE STATT ALS BITMASKEN.
-
-RUNDE ECHTHARDWARE-4.  Justins Befund an den Belegbildern aus
-ECHTHARDWARE-3 (und deutlicher noch auf seinen Fotos vom echten
-Monitor): "der Zeiger sieht nicht gut aus" -- ein kleiner, hart
-gepixelter Schwarzweisspfeil ohne Kantenglaettung, der bei hoher
-Aufloesung ausfranst.
-
-DER GRUND STAND IN `kernel/ui/wm.fi`: der Zeiger war eine Bitmaske von
-zwoelf mal achtzehn Bildpunkten (`cursor_row_of`), und bei
-Vervielfachung 2 wurde JEDER Bildpunkt zu einem 2x2-Block.  Das ist
-Vergroesserung eines Rasterbildes und nichts anderes; jede Treppe wird
-doppelt so hoch.  Ausserdem gab es genau ZWEI Formen -- Pfeil und
-Textmarke.  Hand, Groessenaenderung, Verschieben und Warten fehlten.
-
-WAS HIER STEHT: je Form EIN geschlossener Umriss in einem
-Entwurfsraster von 24 mal 24 Einheiten, in Vierteleinheiten als Oktette
-(0..96, passt in ein Oktett).  Der Kern rastert daraus in ZIELGROESSE
-(24 Bildpunkte bei Vervielfachung 1, 48 bei 2), mit dreifacher
-Ueberabtastung, und leitet Aussenlinie und Schattenkante durch
-Aufweitung desselben Umrisses ab -- nicht durch ein zweites Bild, das
-mit dem ersten aus der Reihe laufen koennte.
-
-Aufruf:
-    python3 tools/wm/cursor2.py            pruefen und als Bild malen
-    python3 tools/wm/cursor2.py --bauen    kernel/zeiger.fi erzeugen
-
-Rueckgabe 0, wenn jede Form die Pruefungen haelt.
-"""
 import os
 import sys
 
 G = 24.0
 
-#
 NAMEN = ["pfeil", "text", "hand", "breite", "hoehe",
          "diag1", "diag2", "kreuz", "warten", "verboten", "kopie", "ziel"]
 
 
-def _dreh(pts, grad, cx=12.0, cy=12.0):
+def _rot(pts, grad, cx=12.0, cy=12.0):
     import math
     a = math.radians(grad)
     s, c = math.sin(a), math.cos(a)
@@ -67,37 +37,26 @@ HAND_ROH = [(8.0, 2.5), (10.6, 2.5), (11.4, 3.4), (11.4, 11.4),
 
 HAND = [(x - 1.0, y) for (x, y) in HAND_ROH]
 
-# --- 3 BREITE (Doppelpfeil waagrecht) -----------------------------
-BREITE = [(1.5, 12.0), (7.0, 7.2), (7.0, 10.3), (17.0, 10.3),
+WIDTH = [(1.5, 12.0), (7.0, 7.2), (7.0, 10.3), (17.0, 10.3),
           (17.0, 7.2), (22.5, 12.0), (17.0, 16.8), (17.0, 13.7),
           (7.0, 13.7), (7.0, 16.8)]
 
-# --- 4 HOEHE ------------------------------------------------------
-HOEHE = _dreh(BREITE, 90.0)
+HEIGHT = _rot(WIDTH, 90.0)
 
-# --- 5/6 DIAGONALEN -----------------------------------------------
-DIAG1 = _dreh(BREITE, 45.0)    # NW <-> SO
-DIAG2 = _dreh(BREITE, -45.0)   # NO <-> SW
+DIAG1 = _rot(WIDTH, 45.0)
+DIAG2 = _rot(WIDTH, -45.0)
 
-# --- 7 VERSCHIEBEN (Vierwegekreuz) --------------------------------
-KREUZ = [(12.0, 1.5), (16.0, 6.0), (13.5, 6.0), (13.5, 10.5),
+CROSS = [(12.0, 1.5), (16.0, 6.0), (13.5, 6.0), (13.5, 10.5),
          (18.0, 10.5), (18.0, 8.0), (22.5, 12.0), (18.0, 16.0),
          (18.0, 13.5), (13.5, 13.5), (13.5, 18.0), (16.0, 18.0),
          (12.0, 22.5), (8.0, 18.0), (10.5, 18.0), (10.5, 13.5),
          (6.0, 13.5), (6.0, 16.0), (1.5, 12.0), (6.0, 8.0),
          (6.0, 10.5), (10.5, 10.5), (10.5, 6.0), (8.0, 6.0)]
 
-# --- 8 WARTEN (Sanduhr) -------------------------------------------
-WARTEN = [(6.5, 2.5), (17.5, 2.5), (17.5, 5.0), (13.3, 11.3),
+WAIT = [(6.5, 2.5), (17.5, 2.5), (17.5, 5.0), (13.3, 11.3),
           (13.3, 12.7), (17.5, 19.0), (17.5, 21.5), (6.5, 21.5),
           (6.5, 19.0), (10.7, 12.7), (10.7, 11.3), (6.5, 5.0)]
 
-# --- 9 VERBOTEN (Ring mit Schraegstrich) --------------------------
-# One SIMPLE outline (the rasteriser uses the even-odd rule and `pruefe`
-# forbids self-crossing). Ring + bar has two holes, so each hole is opened
-# by a radial slit of 0.45 units next to one bar end: arc1 - bar - arc2 is
-# a chain and the polygon needs no bridge. The widened white outline
-# (1.33 units) closes the slit in the final image, so it reads as a seam.
 def _verboten():
     import math
     cx, cy, ro, ri, w, gap = 12.0, 12.0, 10.2, 7.2, 1.5, 0.45
@@ -110,17 +69,11 @@ def _verboten():
     def arc(r, a0, a1, n):
         return [P(r, a0 + (a1 - a0) * k / n) for k in range(n + 1)]
     pts = []
-    # outer circle CW from slit1 end to slit2 start
     pts += arc(ro, 45 + di + g, 225 + di, 12)
-    # radial in at slit2 start, E- from NW corner to SE corner
     pts += [P(ri, 225 + di), P(ri, 45 - di + 360)]
-    # inner circle of arc2 backwards (CCW) to slit2 end, radial out
     pts += arc(ri, 405 - di, 225 + di + gi, 8)[1:]
-    # outer circle CW from slit2 end to slit1 start
     pts += arc(ro, 225 + di + g, 405 + di, 12)
-    # radial in at slit1 start, E+ from SE corner to NW corner
     pts += [P(ri, 45 + di + 360), P(ri, 225 - di)]
-    # inner circle of arc1 backwards to slit1 end
     pts += arc(ri, 225 - di, 45 + di + gi, 8)[1:]
     return pts
 
@@ -128,27 +81,25 @@ def _verboten():
 VERBOTEN = _verboten()
 
 KOPIE = [(10, 3), (14, 3), (14, 10), (21, 10), (21, 14), (14, 14), (14, 21), (10, 21), (10, 14), (3, 14), (3, 10), (10, 10)]
-ZIEL = [(10, 2.5), (14, 2.5), (14, 12.5), (17.5, 12.5), (12, 19), (6.5, 12.5), (10, 12.5)]
+TARGET = [(10, 2.5), (14, 2.5), (14, 12.5), (17.5, 12.5), (12, 19), (6.5, 12.5), (10, 12.5)]
 
 FORMEN = [
     ("pfeil",  (2.0, 2.0),   PFEIL),
     ("text",   (12.0, 12.0), TEXT),
     ("hand",   (8.3, 2.5),   HAND),
-    ("breite", (12.0, 12.0), BREITE),
-    ("hoehe",  (12.0, 12.0), HOEHE),
+    ("breite", (12.0, 12.0), WIDTH),
+    ("hoehe",  (12.0, 12.0), HEIGHT),
     ("diag1",  (12.0, 12.0), DIAG1),
     ("diag2",  (12.0, 12.0), DIAG2),
-    ("kreuz",  (12.0, 12.0), KREUZ),
-    ("warten", (12.0, 12.0), WARTEN),
+    ("kreuz",  (12.0, 12.0), CROSS),
+    ("warten", (12.0, 12.0), WAIT),
     ("verboten", (12.0, 12.0), VERBOTEN),
     ("kopie", (12.0, 12.0), KOPIE),
-    ("ziel", (12.0, 12.0), ZIEL),
+    ("ziel", (12.0, 12.0), TARGET),
 ]
 
 
-# ------------------------------------------------------ die Pruefungen
 def _schnitt(p1, p2, p3, p4):
-    """Schneiden sich die Strecken p1p2 und p3p4 in ihrem Inneren?"""
     def kreuz(o, a, b):
         return ((a[0] - o[0]) * (b[1] - o[1])
                 - (a[1] - o[1]) * (b[0] - o[0]))
@@ -160,7 +111,7 @@ def _schnitt(p1, p2, p3, p4):
            ((d3 > 1e-9 and d4 < -1e-9) or (d3 < -1e-9 and d4 > 1e-9))
 
 
-def pruefe(name, hot, pts):
+def check(name, hot, pts):
     fehler = []
     n = len(pts)
     if n < 3:
@@ -186,7 +137,7 @@ def pruefe(name, hot, pts):
     return fehler, abs(a) / 2.0
 
 
-def drin(pts, x, y):
+def in_(pts, x, y):
     n = len(pts)
     ja = False
     j = n - 1
@@ -201,7 +152,6 @@ def drin(pts, x, y):
 
 
 def male(pts, groesse=24):
-    """Dasselbe Verfahren wie im Kern: ueberabtasten und mitteln."""
     S = 3
     zeilen = []
     for r in range(groesse):
@@ -212,7 +162,7 @@ def male(pts, groesse=24):
                 for sx in range(S):
                     x = (c + (sx + 0.5) / S) * G / groesse
                     y = (r + (sy + 0.5) / S) * G / groesse
-                    if drin(pts, x, y):
+                    if in_(pts, x, y):
                         t = t + 1
             if t == S * S:
                 z = z + "#"
@@ -226,8 +176,7 @@ def male(pts, groesse=24):
     return zeilen
 
 
-def tafel():
-    """Die Umrisse als Oktettfolge, in Vierteleinheiten."""
+def board():
     kopf = []
     daten = []
     for (name, hot, pts) in FORMEN:
@@ -244,7 +193,7 @@ def esc(bs):
 
 
 def bauen(ziel):
-    kopf, daten = tafel()
+    kopf, daten = board()
     for b in daten:
         assert 0 <= b <= 255, b
     kb = []
@@ -252,8 +201,8 @@ def bauen(ziel):
         assert off % 2 == 0
         assert off // 2 < 256 and n < 256
         kb += [off // 2, n, hx, hy]
-    vorlage = os.path.join(os.path.dirname(__file__), "cursor.fi.template")
-    s = open(vorlage, encoding="utf-8").read()
+    template = os.path.join(os.path.dirname(__file__), "cursor.fi.template")
+    s = open(template, encoding="utf-8").read()
     s = s.replace("@@KOPF@@", esc(kb))
     s = s.replace("@@KOPFN@@", str(len(kb)))
     s = s.replace("@@PUNKTE@@", esc(daten))
@@ -267,9 +216,9 @@ def bauen(ziel):
 def main():
     schlecht = 0
     for (name, hot, pts) in FORMEN:
-        fehler, flaeche = pruefe(name, hot, pts)
+        fehler, area = check(name, hot, pts)
         print("== %s: %d Ecken, Flaeche %.1f Einheiten, Griff %.1f,%.1f"
-              % (name, len(pts), flaeche, hot[0], hot[1]))
+              % (name, len(pts), area, hot[0], hot[1]))
         for z in male(pts, 24):
             print("   |" + z + "|")
         for f in fehler:

@@ -52,13 +52,13 @@ import sys
 SAETZE = {
     "ascii": [(0x20, 0x7E)],
     "latin": [
-        (0x20, 0x7E),      # Basic Latin
-        (0xA0, 0xFF),      # Latin-1 Supplement
-        (0x100, 0x17F),    # Latin Extended-A
-        (0x2010, 0x201F),  # Striche und Anfuehrungszeichen
-        (0x2022, 0x2022),  # BULLET -- the dots of a password field
-        (0x2026, 0x2026),  # Auslassungspunkte
-        (0x20AC, 0x20AC),  # Eurozeichen
+        (0x20, 0x7E),
+        (0xA0, 0xFF),
+        (0x100, 0x17F),
+        (0x2010, 0x201F),
+        (0x2022, 0x2022),
+        (0x2026, 0x2026),
+        (0x20AC, 0x20AC),
         (0xFFFD, 0xFFFD),
     ],
     "europe": [
@@ -124,7 +124,6 @@ class Vorlage:
         self.descent = s16(self.d, self.tab["hhea"][0] + 6)
         self.gap = s16(self.d, self.tab["hhea"][0] + 8)
 
-    # ------------------------------------------------------------ loca
     def loca(self, gid):
         off = self.tab["loca"][0]
         if self.locfmt == 0:
@@ -138,7 +137,6 @@ class Vorlage:
         g = self.tab["glyf"][0]
         return self.d[g + a:g + b]
 
-    # ------------------------------------------------------------ hmtx
     def metric(self, gid):
         h = self.tab["hmtx"][0]
         if gid < self.nhmetrics:
@@ -147,7 +145,6 @@ class Vorlage:
         lsb = s16(self.d, h + self.nhmetrics * 4 + (gid - self.nhmetrics) * 2)
         return adv, lsb
 
-    # ------------------------------------------------------------ cmap
     def cmap(self):
         """Zeichen -> Glyphe, aus der besten Untertabelle."""
         off = self.tab["cmap"][0]
@@ -207,7 +204,6 @@ class Vorlage:
             raise SystemExit("schnitt: cmap-Format %d wird nicht gelesen" % fmt)
         return m
 
-    # ------------------------------------------------------------ kern
     def kern0(self):
         """Format-0-Paare aus der ersten waagerechten Untertabelle."""
         if "kern" not in self.tab:
@@ -237,7 +233,6 @@ class Vorlage:
         return paare
 
 
-# ------------------------------------------------------- zusammenbauen
 
 def komponenten(roh):
     """Die Glyphennummern, aus denen eine zusammengesetzte Glyphe besteht."""
@@ -250,14 +245,14 @@ def komponenten(roh):
         gid = u16(roh, p + 2)
         aus.append(gid)
         p += 4
-        p += 4 if (flags & 1) else 2          # ARG_1_AND_2_ARE_WORDS
-        if flags & 8:                         # WE_HAVE_A_SCALE
+        p += 4 if (flags & 1) else 2
+        if flags & 8:
             p += 2
-        elif flags & 0x40:                    # X_AND_Y_SCALE
+        elif flags & 0x40:
             p += 4
-        elif flags & 0x80:                    # TWO_BY_TWO
+        elif flags & 0x80:
             p += 8
-        if not (flags & 0x20):                # MORE_COMPONENTS
+        if not (flags & 0x20):
             break
     return aus
 
@@ -392,7 +387,6 @@ def main(argv):
     behalten.sort()
     karte = {alt: neu for neu, alt in enumerate(behalten)}
 
-    # 2. glyf und loca.
     glyf = bytearray()
     versatz = []
     for alt in behalten:

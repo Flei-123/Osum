@@ -1,59 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tests/theme/rawcolour.py -- COUNT THE COLOURS THAT ARE STILL WRITTEN
-INTO CODE THAT PAINTS THE INTERFACE.
-
-The promise of a token system is not "the colours live in a file". It
-is "no painting routine names a colour". Those are different promises,
-and only the second one survives a second theme -- so only the second
-one is worth making, and a promise about the SHAPE OF THE SOURCE has to
-be checked against the source, mechanically, or it is a sentence in a
-document that stops being true in the first week.
-
-    rawcolour.py [root]        exit 0 when the count is zero
-
-WHAT IS SCANNED. The files that decide what the interface LOOKS LIKE,
-listed by name below: the drawing core, the widget library, the six
-programs with a window, and `kernel/ui/wm.fi`, which paints frame and
-title bar because it composites the screen. Not the whole tree --
-`kernel/gfx/fb.fi` maps a framebuffer and does not decide what a button
-looks like, and a checker whose output is mostly noise is a checker
-nobody reads.
-
-WHAT COUNTS AS A COLOUR. A hexadecimal literal of exactly six digits,
-or of eight digits whose top two are zero: 0x00RRGGBB is how this
-system spells a 24-bit colour. Shorter literals (0xFFFF, a field mask)
-and longer ones (0xFFFFFFFFFFFFFFFF) are not counted.
-
-THE ALLOWED PLACES, and there are exactly two, both in wlibc.fi:
-
-  1. `fn primitives_builtin` -- the ramp a machine falls back on when
-     /etc is empty. It has to exist somewhere, and the bottom of the
-     primitive layer is where a raw value belongs.
-  2. The named constants RGB24, RGB_WHITE, RGB_BLACK, RGB_BAD,
-     ACCENT_BLACK. RGB24 is a field mask, RGB_BAD and ACCENT_BLACK are
-     markers, and white and black are the two ends the ramp generator
-     mixes towards -- which is arithmetic, not styling.
-
-Both are listed here by name. An exception granted by a pattern is an
-exception that grows.
-"""
 import os
 import re
 import sys
 
 PAT = re.compile(r"0x(?:00)?([0-9A-Fa-f]{6})\b")
-# The OTHER way a colour hides in this tree: three channel literals in
-# a row. `fb.rgb(state, 0x10, 0x14, 0x1A)` is every bit as much a
-# hardcoded colour as 0x0010141A, and the first version of this script
-# walked straight past four of them -- the terminal window kept its
-# dark background in a light theme and the screenshot showed it.
 PAT_RGB = re.compile(r"\brgb\(\s*state\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
                      r"\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})"
                      r"\s*,\s*(0x[0-9A-Fa-f]{1,2}|\d{1,3})\s*\)")
 
-# The files that paint the interface. wlibc draws the shapes, wlib the
-# widgets, and the six programs are everything with a window in it.
 FILES = [
     "kernel/ui/wm.fi",
     "kernel/user/wlibc.fi",
@@ -82,109 +37,25 @@ FILES = [
     "kernel/user/widgetdemo.fi",
 ]
 
-# Named constants that are shaped like a colour and are not one: a
-# field mask, two markers, the two ends the ramp generator mixes
-# towards, a size bound, and the two probe values of the window
-# server's self test. Every one of them is listed BY NAME. An exception
-# granted by a pattern is an exception that grows.
 ALLOWED_CONSTS = ("const RGB24", "const RGB_WHITE", "const RGB_BLACK",
                   "const RGB_BAD", "const ACCENT_BLACK",
                   "const STRUT_MAX", "const PROBE_IN", "const PROBE_OUT",
                   "const CURSOR_BODY", "const CURSOR_EDGE")
-# file -> the functions in it that may hold raw values.
-#
-# ROUND FARBE (15.09.2026), A-022: this was one name per file and is
-# now a LIST, because `kernel/wm.fi` has three separate reasons and
-# collapsing them into one entry would have hidden two of them.
-# EVERY entry is still a FUNCTION NAME, never a pattern -- the rule at
-# the top of this file has not moved.
-#
-# WHAT DOES *NOT* BELONG IN HERE, and this is the whole point of the
-# list: a colour that decides what a BUTTON, a WINDOW or the DESKTOP
-# looks like. Those must come from a token, and none of the entries
-# below is one of them. Each is a colour that is NOT styling:
-# a wire format, an opacity mask, or a debug board that must stay
-# readable in every theme precisely BECAUSE it ignores the theme.
 ALLOWED_FN = {
-    # `platte` ORs the marker of a text plate into the high byte of a pixel:
-    # 0xFFFFFF is the mask that keeps the colour, not a colour.
     "kernel/user/wlibc.fi": ["fn primitives_builtin", "fn platte", "fn plate_ink"],
-    # The two report functions print the bar's colour as six hex digits:
-    # `& 0xFFFFFF` strips the alpha byte, it names no colour.
     "kernel/user/taskbar/tbstatus.fi": ["fn glas_say"],
     "kernel/user/taskbar/tbmetrics.fi": ["fn schild_say"],
     "kernel/ui/wm.fi": [
-        # The server paints frame and title bar because it composites the
-        # screen. Ring 3 hands it eight numbers (WM_DECO); `deco_fallback`
-        # is what it draws with until somebody does, and a machine whose
-        # taskbar has not started yet may not be black on black.
         "fn deco_fallback",
-        # ---------------------------------------------- r462
-        # `term_palette` IS THE ANSI COLOUR TABLE OF THE TERMINAL, A PROTOCOL AND NOT A STYLE: a program that writes
-        # `ESC[31m` asks for RED, and it must get the same red in every theme (a theme controls the window's own
-        # foreground and background, `W_FG` / `W_BG`, which stay tokens). The sixteen values are the table of the
-        # standard, listed here by function name like the signature colours below.
         "fn term_palette",
-        # ---------------------------------------------- DELL ROUND, 05.10.
-        # `glass_mix` keeps the colour part of a pixel (`neu & 0xFFFFFF`):
-        # a mask, not a colour.
         "fn glass_mix",
-        # `selftest_glas` paints known probe colours and compares them: the
-        # values are the test's fixtures, like PROBE_IN / PROBE_OUT above.
         "fn selftest_glas",
-        # `td_paint` is the confirmation dialog "OrientOS - Bestaetigung
-        # (vom System)": a message of the SYSTEM, not of a program. It must
-        # not follow a theme -- a theme is something a program (or the user's
-        # own scheme file) controls, and a dialog that asks "may this run?"
-        # has to look the same in every theme or it can be imitated.
         "fn td_paint",
-        # ---------------------------------------------- W-A1 (18.10.2026), three more, each with its reason
-        # `tab_publish` hands the compositor its CHROME PROBE: pure red / green / blue in the shared chrome
-        # object (`chrome_object`) are the fixture the compositor's self-check compares against (like
-        # PROBE_IN / PROBE_OUT) -- a theme token here would make the probe depend on the theme it checks.
         "fn tab_publish",
-        # `paint_switcher` (Alt+Tab, 17.10.) is a fixed dark HUD plate like the system dialog above: it is
-        # drawn by the window server over every window and over a screen that may be locked or themed
-        # either way, so it carries its own contrast pair. Following the theme is a design item (r1087).
         "fn paint_switcher",
-        # `fps_overlay` is the debug counter (debug.fps): green on black for the camera / the log reader,
-        # like the measurement board, independent of the theme on purpose.
         "fn fps_overlay",
-        # ---------------------------------------------- A-022, reason 1
-        # `sig_colour` IS A WIRE FORMAT, NOT A STYLE.
-        #
-        # In signature mode (`wmsig`) the server stains a strip at the
-        # top and bottom of every window with a colour derived from the
-        # FRAME NUMBER. `tools/vsync/zerreiss.py` then reads a PPM back
-        # and counts tearing: two different signature colours inside one
-        # window means the screenshot caught a half-transferred frame.
-        # That reader carries the same eight triples in its own table
-        # (`zerreiss.py:50`), so these values are a CONTRACT BETWEEN TWO
-        # PROGRAMS -- the same kind of shared constant as a packet
-        # header, and the comment above the function already says why
         "fn sig_colour",
-        # ---------------------------------------------- A-022, reason 2
-        # 0xFFFFFF HERE IS AN OPACITY, NOT A COLOUR.
-        #
-        # `cg_mal` fills the glyph buffer for a window caption button.
-        # The buffer holds COVERAGE; which colour it becomes is decided
-        # later, by `cap_glyph`, from the server's theme. White is the
-        # neutral element of that multiplication -- writing a token in
-        # here would apply the theme TWICE. The comment above the
         "fn cg_mal",
-        # ---------------------------------------------- A-022, reason 3
-        # THE MEASUREMENT BOARD DELIBERATELY IGNORES THE THEME.
-        #
-        # The six functions below paint the diagnostic board that Justin
-        # PHOTOGRAPHS off a real screen (`mess_grund`, `messzeile` and
-        # the four ink colours; the ground is painted by
-        # `measure_reason` -- the older name `mess_grund` survives only
-        # in comments). It is not part of the desktop: it is
-        # drawn over everything, before the taskbar exists, and it has
-        # to stay legible on a machine whose theme is broken -- which is
-        # exactly the machine it gets used on. Black ground with green /
-        # red / white / yellow ink is chosen for the CAMERA, not for
-        # taste, and `mess_ampel` uses green-vs-red as a MEANING
         "fn measure_reason",
         "fn messzeile",
         "fn mess_gruen",
@@ -233,19 +104,6 @@ def main():
     hits = []
     uses = 0
     seen = 0
-    # A NAME IN THIS LIST THAT IS NOT A FILE IS AN ERROR, NOT A SKIP.
-    #
-    # It used to `continue`, and that is how the list came to hold
-    # "kernel/user/settings.fi" for weeks before any such file existed,
-    # right next to "einstellungen.fi", which was the same program under
-    # its old name. The checker reported "files 10" and nobody counted
-    # the eleven entries. A checker that quietly examines one file fewer
-    # than it says it does is worse than no checker: it is a green light
-    # with a hole in it.
-    # ...ON THE CURRENT TREE. Given an explicit root -- the historical
-    # checkout the counter-test below unpacks, or a directory a test
-    # builds with one file in it -- files are missing ON PURPOSE, and
-    # the list of this tree says nothing about that one.
     given = len(sys.argv) > 1
     missing = [] if given else [
         r for r in FILES if not os.path.isfile(os.path.join(root, r))]
@@ -262,7 +120,7 @@ def main():
     for rel in FILES:
         p = os.path.join(root, rel)
         if not os.path.isfile(p):
-            continue          # only reachable with an explicit root
+            continue
         seen += 1
         h, u = scan(p, rel)
         hits += h

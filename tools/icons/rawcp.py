@@ -78,7 +78,7 @@ def zeichencode(wurzel):
     return aus
 
 
-def ohne_kommentare(text):
+def without_kommentare(text):
     """Kommentare weg, Zeilennummern bleiben stehen.
 
     ROUND ROTABSCHNITTE.  The check counted its OWN documentation.
@@ -137,13 +137,13 @@ def ohne_kommentare(text):
     return ''.join(aus)
 
 
-def treffer(text, erlaubt_werte):
+def treffer(text, erlaubt_values):
     aus = []
     for art, muster, basis in (("hex", HEX, 16), ("escape", ESC, 16),
                                ("decimal", DEC, 10)):
         for m in muster.finditer(text):
             v = int(m.group(1), basis)
-            if v in erlaubt_werte:
+            if v in erlaubt_values:
                 zeile = text.count("\n", 0, m.start()) + 1
                 aus.append((zeile, art, v))
     return sorted(aus)
@@ -170,7 +170,7 @@ def main(argv):
     n = 0
     for voll in dateien:
         rel = os.path.relpath(voll, wurzel)
-        text = ohne_kommentare(
+        text = without_kommentare(
             open(voll, encoding="utf-8", errors="replace").read())
         for zeile, art, wert in treffer(text, karte):
             n += 1

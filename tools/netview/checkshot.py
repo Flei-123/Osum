@@ -30,10 +30,6 @@ import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HIER), "k15"))
-# ROUND MERGE: round rename-en renamed tools/k15/symbol.py to icon.py.
-# A python import names the module without its extension, so nothing
-# that looks like a path had to change and nothing did -- this line
-# raised ModuleNotFoundError and took the whole icon check with it.
 import icon as symmod  # noqa: E402
 sys.path.insert(0, HIER)
 import icons as iconmod  # noqa: E402
@@ -68,12 +64,12 @@ def main(argv):
     if len(argv) < 6:
         print(__doc__)
         return 2
-    schirm, x, y, zeichnung, schema = (argv[1], int(argv[2]), int(argv[3]),
+    screen, x, y, zeichnung, schema = (argv[1], int(argv[2]), int(argv[3]),
                                        argv[4], argv[5])
     nicht = "--nicht" in argv
-    farben = iconmod.schema_lesen(schema)
+    farben = iconmod.schema_read(schema)
     palette, zeilen = symmod.lies(zeichnung)
-    w, h, roh = ppm(schirm)
+    w, h, roh = ppm(screen)
     deckend = 0
     falsch = 0
     for r, zeile in enumerate(zeilen):

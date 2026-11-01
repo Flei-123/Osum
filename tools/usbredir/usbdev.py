@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# Emulated USB network gadgets behind QEMU's usb-redir (QEMU has no CDC-NCM model of its own).
-#
-#   usbdev.py --sock PATH --profile ncm|ncm-multi|android-rndis|android-ncm|ecm
-#             [--net-local PORT --net-remote PORT] [--trigger FILE] [--unplug FILE] [--log FILE]
-#
-# QEMU:  -chardev socket,id=r0,path=PATH,server=on,wait=off -device usb-redir,chardev=r0
-# The script connects, answers the usbredir hello and (after the trigger file appears) presents the device.
-# Ethernet frames go over UDP datagrams to a helper QEMU (slirp router: DHCP, DNS, NAT) -- see usbredir/run.sh.
 import argparse, os, socket, struct, sys, time, select
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand

@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""TLS front for a throw-away bruecke_server.py instance (tools/stab/net.sh).
-
-jarvisd talks HTTPS to /bruecke/draht. This script terminates TLS 1.3 (test
-certificate from tools/hwnet/mkcerts.py), forwards each request to the plain
-HTTP instance of the bridge server and logs one line per connection:
-
-    CONN <monotonic seconds> <handshake ms> <first word of the body or ->
-
-The log is what tools/stab/net.sh measures: the number of connections while
-the device is idle (each one is a full TLS handshake on the guest) and the gap
-between the end of a network outage and the next connection.
-"""
 import argparse
 import http.client
 import socket
@@ -47,7 +35,7 @@ def handle(raw, ctx, args, log, lock):
     t0 = time.monotonic()
     try:
         conn = ctx.wrap_socket(raw, server_side=True)
-    except Exception as e:  # handshake failed
+    except Exception as e:
         with lock:
             log.write("HSFAIL %.3f %s\n" % (time.monotonic(), type(e).__name__))
             log.flush()

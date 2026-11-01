@@ -78,12 +78,12 @@ def main(argv):
             o = row + x * 3
             if a[o] == b[o] and a[o + 1] == b[o + 1] and a[o + 2] == b[o + 2]:
                 continue
-            drin = False
+            in_ = False
             for _n, r in aussen:
                 if r[0] <= x < r[2] and r[1] <= y < r[3]:
-                    drin = True
+                    in_ = True
                     break
-            if drin:
+            if in_:
                 continue
             n += 1
             d = max(abs(a[o] - b[o]), abs(a[o + 1] - b[o + 1]),

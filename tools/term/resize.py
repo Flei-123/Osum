@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""resize.py <serial.txt>: the last cell dump must hold the editor help line on the LAST row, and the grid must have grown."""
 import re, sys
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 import check

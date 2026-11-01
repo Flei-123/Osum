@@ -52,7 +52,7 @@ from collections import Counter
 
 from PIL import Image
 
-SCHLEIER = 0          # kernel/ui/wm.fi, const SCHLEIER
+SCHLEIER = 0
 SCHLEIER_WIN = 0
 VOLL = 96
 
@@ -70,7 +70,7 @@ def blend(alt, neu, a):
     return tuple(mix8(alt[i], neu[i], a, ia) for i in range(3))
 
 
-def hell(c):
+def bright(c):
     return (c[0] * 299 + c[1] * 587 + c[2] * 114) // 1000
 
 
@@ -80,7 +80,7 @@ def glass_mix(alt, neu, key, alpha, schleier=SCHLEIER):
         return neu
     d = min(sum(abs(neu[i] - key[i]) for i in range(3)), VOLL)
     a = alpha + (100 - alpha) * d // VOLL
-    dl = abs(hell(alt) - hell(key))
+    dl = abs(bright(alt) - bright(key))
     if schleier > 0 and dl > schleier:
         a = max(a, 100 - schleier * 100 // dl)
     return blend(alt, neu, a * 255 // 100)
@@ -140,11 +140,6 @@ def hex2rgb(s):
     return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
 
 
-# ================================== RUNDE GLAS (fix-r3-2): DIE FENSTERSCHRIFT
-#
-#
-#
-#
 FENSTERTEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
     r" tw=(\d+) ax=(\d+) ay=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
@@ -200,7 +195,7 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
         dv = [haeufig[i] - fg[i] for i in range(3)]
         ll = sum(v * v for v in dv)
 
-        def auf_linie(f):
+        def auf_line(f):
             if ll == 0 or f == haeufig:
                 return False
             t = sum((f[i] - fg[i]) * dv[i] for i in range(3)) / ll
@@ -209,7 +204,7 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
             return ab <= 12 * 12
 
         kand = [(f0, k) for f0, k in c.items()
-                if k * 100 >= ges and not auf_linie(f0)]
+                if k * 100 >= ges and not auf_line(f0)]
         if not kand:
             kand = [c.most_common(1)[0]]
         kand.sort(key=lambda fk: kontrast(fg, fk[0]))
@@ -228,9 +223,6 @@ def fenster(bild, serial, marke="settings: rect name=waa "):
     return 0
 
 
-#
-#
-#
 def reiter(bild, serial):
     im = Image.open(bild).convert("RGB")
     roh = open(serial, "rb").read().decode("latin1")
@@ -274,7 +266,6 @@ def main(argv):
             gesetzt.add(k)
         else:
             rest.append(a)
-    #
     if cmd == "kontrast" and "x1" not in gesetzt:
         opt["x1"] = 1 << 30
 
@@ -293,19 +284,14 @@ def main(argv):
         return 0
 
     im = Image.open(rest[0]).convert("RGB")
-    #
     if "y0" in gesetzt or "y1" in gesetzt:
         pts = rechteck(im, opt["x0"], opt["x1"],
                       opt.get("y0", 0), opt.get("y1", im.size[1]))
     else:
         pts = leiste(im, opt["hoehe"], opt["x0"], opt["x1"])
-    # ============================= RUNDE GLAS (NACHTRAG 2): --felder
-    #
-    #
-    #
     if opt.get("felder"):
         asc = int(opt.get("ascent", 12))
-        unten = int(opt.get("unter", 4))
+        bottom = int(opt.get("unter", 4))
         bar_y = im.size[1] - opt["hoehe"]
         erlaubt = []
         for f in str(opt["felder"]).split(";"):
@@ -314,8 +300,7 @@ def main(argv):
             teile = f.split(",")
             fx, fb, ftw = (int(v) for v in teile[:3])
             y0 = bar_y + fb - asc
-            y1 = bar_y + fb + unten - 1
-            #
+            y1 = bar_y + fb + bottom - 1
             erlaubt.append((fx, y0, fx + ftw, y1,
                             hex2rgb(teile[3]) if len(teile) > 3 else None))
         pts = [p for p in pts
@@ -339,7 +324,7 @@ def main(argv):
         return 0
 
     if cmd == "var":
-        l = [hell(p) for p in px]
+        l = [bright(p) for p in px]
         m = sum(l) / len(l)
         var = sum((v - m) ** 2 for v in l) / len(l)
         print("var %d mittel %d n %d farben %d"
@@ -347,8 +332,6 @@ def main(argv):
         return 0
 
     if cmd == "linien":
-        #
-        #
         x, y, w, h = (int(v) for v in rest[1:5])
         rand = int(rest[5]) if len(rest) > 5 else 56
         x0, x1 = x + rand, x + w - rand
@@ -356,7 +339,7 @@ def main(argv):
             print("lines=0 width=0 -- crop too narrow")
             return 0
 
-        def weg(a, b):
+        def gone(a, b):
             return max(abs(a[k] - b[k]) for k in range(3)) > 12
 
         n = 0
@@ -364,8 +347,8 @@ def main(argv):
             treffer = 0
             for i in range(x0, x1):
                 p = im.getpixel((i, j))
-                if weg(p, im.getpixel((i, j - 2))) \
-                        and weg(p, im.getpixel((i, j + 2))):
+                if gone(p, im.getpixel((i, j - 2))) \
+                        and gone(p, im.getpixel((i, j + 2))):
                     treffer += 1
             if treffer * 10 >= (x1 - x0) * 9:
                 n += 1
@@ -373,17 +356,14 @@ def main(argv):
         return 0
 
     if cmd == "ecke":
-        #
-        #
-        #
         x, y, k = (int(v) for v in rest[1:4])
         wo = rest[4] if len(rest) > 4 else "ol"
-        rechts = wo in ("or", "ur")
-        unten = wo in ("ul", "ur")
+        right = wo in ("or", "ur")
+        bottom = wo in ("ul", "ur")
 
         def P(i, j):
-            X = (x + k - 1 - i) if rechts else (x + i)
-            Y = (y + k - 1 - j) if unten else (y + j)
+            X = (x + k - 1 - i) if right else (x + i)
+            Y = (y + k - 1 - j) if bottom else (y + j)
             return im.getpixel((X, Y))
 
         aussen = P(-6, k // 2)
@@ -411,9 +391,6 @@ def main(argv):
         return 0
 
     if cmd == "kachel":
-        # EINE VORSCHAUKACHEL, GANZ GEMESSEN.
-        #
-        #
         x, y, w, h, r = (int(v) for v in rest[1:6])
         grund = im.getpixel((x - 6, y + h // 2))
 
@@ -421,13 +398,12 @@ def main(argv):
             return max(abs(a[i] - b[i]) for i in range(3)) <= tol
 
         mitte = y + h // 2
-        links = rechts = -1
+        links = right = -1
         for i in range(-4, w + 5):
             if not nah(im.getpixel((x + i, mitte)), grund):
                 if links < 0:
                     links = x + i
-                rechts = x + i
-        #
+                right = x + i
         slack = int(opt.get("slack", 2))
 
         def ein(j):
@@ -440,25 +416,22 @@ def main(argv):
             e = int(math.ceil(r - 0.5 - math.sqrt(rest))) - slack
             return e if e > 0 else 0
 
-        fremd = 0
+        foreign = 0
         starts = []
         for j in range(h):
             d = min(j, h - 1 - j)
             e = ein(d) if 0 < j < h - 1 else 0
             for i in range(e):
                 if not nah(im.getpixel((x + i, y + j)), grund):
-                    fremd += 1
+                    foreign += 1
                 if not nah(im.getpixel((x + w - 1 - i, y + j)), grund):
-                    fremd += 1
+                    foreign += 1
             if j < r:
                 s = 0
                 while s < r + 8 and nah(im.getpixel((x + s, y + j)), grund):
                     s += 1
                 starts.append(s)
         tiefe = (max(starts) - min(starts)) if starts else 0
-        #
-        #
-        #
         probe = [(x + i, y + j)
                  for j in range(r + 1, h - r - 1) for i in range(4, 8)]
         for j in (5, 6, 7, h - 8, h - 7, h - 6):
@@ -466,20 +439,18 @@ def main(argv):
                 probe.append((x + i, y + j))
         innen = 0
         if probe:
-            flaeche = Counter(im.getpixel(p) for p in probe).most_common(1)[0][0]
-            innen = sum(1 for p in probe if not nah(im.getpixel(p), flaeche, 24))
+            area = Counter(im.getpixel(p) for p in probe).most_common(1)[0][0]
+            innen = sum(1 for p in probe if not nah(im.getpixel(p), area, 24))
         print("kachel links=%d rechts=%d fremd=%d innen=%d probe=%d tiefe=%d r=%d"
-              % (links, rechts, fremd, innen, len(probe), tiefe, r))
+              % (links, right, foreign, innen, len(probe), tiefe, r))
         return 0
 
     if cmd == "kontrast" and opt.get("_felder"):
-        #
         vor = hex2rgb(rest[1])
         schlecht = None
         zeile = []
         for (a, b, cc, d, ffg) in opt["_felder"]:
             fg = ffg if ffg else vor
-            #
 
             fpx = [im.getpixel((i, j))
                    for i in range(max(a, 0), min(cc, im.size[0] - 1) + 1)
@@ -490,7 +461,7 @@ def main(argv):
             ges = len(fpx)
             haeufig = cnt.most_common(1)[0][0]
 
-            def auf_linie(f, fg=fg, haeufig=haeufig):
+            def auf_line(f, fg=fg, haeufig=haeufig):
                 dv = [haeufig[i] - fg[i] for i in range(3)]
                 ll = sum(v * v for v in dv)
                 if ll == 0:
@@ -503,7 +474,7 @@ def main(argv):
             kand = [(f, n) for f, n in cnt.items()
                     if n * 5 >= ges
                     and max(abs(f[i] - fg[i]) for i in range(3)) > 40
-                    and not auf_linie(f)]
+                    and not auf_line(f)]
             if not kand:
                 kand = [(haeufig, cnt[haeufig])]
             kand.sort(key=lambda fn: kontrast(fg, fn[0]))
@@ -521,18 +492,14 @@ def main(argv):
         return 0
 
     if cmd == "kontrast":
-        #
-        #
         fg = hex2rgb(rest[1])
         c = Counter(px)
         ges = max(len(px), 1)
         schwelle = 5 if opt.get("felder") else 1
 
-        #
-        #
         haeufig = c.most_common(1)[0][0]
 
-        def auf_linie(f):
+        def auf_line(f):
             d = [haeufig[i] - fg[i] for i in range(3)]
             ll = sum(v * v for v in d)
             if ll == 0:
@@ -545,7 +512,7 @@ def main(argv):
         kand = [(f, n) for f, n in c.items()
                 if n * 100 >= ges * schwelle
                 and max(abs(f[i] - fg[i]) for i in range(3)) > 40
-                and not auf_linie(f)]
+                and not auf_line(f)]
         if not kand:
             kand = [c.most_common(1)[0]]
         kand.sort(key=lambda fn: kontrast(fg, fn[0]))

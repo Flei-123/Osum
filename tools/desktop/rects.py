@@ -106,7 +106,6 @@ def main():
         return 1
     mx = mx[0]
 
-    # 1. the bar on its edge
     br = (bar["x"], bar["y"], bar["ow"], bar["oh"])
     want = {
         0: (0, SCREEN_H - thick, SCREEN_W, thick),
@@ -120,7 +119,6 @@ def main():
         bad.append("the bar reserves edge %d, expected %d"
                    % (bar["strutedge"], e))
 
-    # 2. + 3. the work area
     srv = one(text, "wm: work ")
     r3 = one(text, "taskbar: work ")
     if srv is None or r3 is None:
@@ -144,12 +142,10 @@ def main():
     if sr != expect:
         bad.append("work area %s, expected %s" % (sr, expect))
 
-    # 4. the maximized window IS the work area
     mr = (mx["x"], mx["y"], mx["ow"], mx["oh"])
     if mr != sr:
         bad.append("maximized window %s is not the work area %s" % (mr, sr))
 
-    # 5. no overlap, and no gap
     ov = overlap(mr, br)
     if nostrut:
         if ov == 0:

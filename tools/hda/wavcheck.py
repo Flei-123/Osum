@@ -1,38 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/hda/wavcheck.py -- EINE TONDATEI IN ZAHLEN VERWANDELN.
-
-QEMU schreibt mit `-audiodev wav` genau die Oktette in eine Datei, die
-sonst an eine Soundkarte gingen.  Dieses Programm macht daraus Zahlen,
-die eine Abnahme vergleichen kann -- Schall laesst sich nicht
-zurueckrechnen, eine Datei schon.
-
-Was es ausgibt (jede Zahl in der Form name=wert, damit ein Testlaeufer
-sie mit einem grep holen kann):
-
-    rate=      die Abtastrate aus dem Dateikopf
-    frames=    Rahmen in der Datei
-    nutz=      Rahmen zwischen dem ersten und dem letzten Wert != 0
-    gaps=      NULLSTRECKEN darin, laenger als die Schwelle.  Ein
-               Aussetzer hinterlaesst genau so eine.
-    still=     wie viele Rahmen in diesen Luecken liegen
-    luecke_rest= der groesste Betrag INNERHALB der Luecken.  Bei einem
-               Aussetzer, der als Stille ausgelegt ist, MUSS er null
-               sein; ein Regler, der den Ringpuffer noch einmal
-               abspielt, hinterlaesst dort das alte Signal.
-    max= min=  die Aussteuerung
-    rms=       der Effektivwert des Nutzbereichs
-    peak_hz=   die Frequenz mit der groessten Leistung (Goertzel ueber
-               ein 1-Hz-Raster um die erwartete Frequenz)
-    p1= p2=    die Leistung bei der erwarteten und bei der zweiten
-               Frequenz -- damit sich ZWEI gleichzeitige Toene
-               EINZELN nachweisen lassen
-
-Verwendung:
-    wavcheck.py datei.wav [--hz 440] [--zweite 660] [--rate 48000]
-                          [--schwelle 64] [--nur-rms] [--luecke-still]
-                          [--von-ms N] [--bis-ms N]
-"""
 import argparse
 import array
 import math

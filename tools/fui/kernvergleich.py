@@ -1,35 +1,15 @@
 #!/usr/bin/env python3
-"""tools/fui/kernvergleich.py -- MALT DER KERN DASSELBE WIE DIE ANWENDUNG?
-
-Der Zweck dieser Runde in einer Zahl. Das Fensterzeichen entsteht an
-zwei Orten:
-
-  KERN        kernel/ui/wm.fi  `cap_glyph`   (der Fensterserver)
-  ANWENDUNG   lib/fui/core.fi `cap_*`     (ueber wlib -> fuib -> fUi)
-
-Laut core.fi ist genau diese Teilung schon ZWEIMAL auseinandergelaufen
-("erst ein ausgefranstes Kreuz aus einem Vektorrasterer, dann ein Kreuz,
-von dem nur eine Diagonale uebrig war"). Dieses Werkzeug rechnet beide
-Fassungen nach und zaehlt die abweichenden Bildpunkte.
-
-  ./tools/fui/kernvergleich.py          die Fassungen vergleichen
-  ./tools/fui/kernvergleich.py --alt    auch die ALTE wm-Fassung zeigen
-
-WAS ES NICHT IST: ein Ersatz fuer ein Bildschirmfoto. Es prueft die
-GEOMETRIE, nicht den Weg auf den Schirm. Der Beweis am laufenden System
-steht in den Aufnahmen der Runde.
-"""
 import sys
 
 
-def fui_close(d, sb):                       # core.fi cap_close
+def fui_close(d, sb):
     if d == 0 or sb == 0 or sb > d:
         return set()
     kn = d - (sb - 1)
-    breit = kn + sb - 1
-    hoch = kn
-    ox = (d - breit) // 2 if d > breit else 0
-    oy = (d - hoch) // 2 if d > hoch else 0
+    wide = kn + sb - 1
+    up = kn
+    ox = (d - wide) // 2 if d > wide else 0
+    oy = (d - up) // 2 if d > up else 0
     p = set()
     for k in range(kn):
         for t in range(sb):
@@ -37,7 +17,7 @@ def fui_close(d, sb):                       # core.fi cap_close
             p.add((ox + kn - 1 - k + t, oy + k))
     return p
 
-def _border(x, y, w, h, st):                # core.fi border
+def _border(x, y, w, h, st):
     if w == 0 or h == 0 or st == 0:
         return set()
     s = st
@@ -52,10 +32,10 @@ def _border(x, y, w, h, st):                # core.fi border
             p.add((x + xx, y + s + yy)); p.add((x + w - s + xx, y + s + yy))
     return p
 
-def fui_maximize(d, sb):                    # core.fi cap_maximize
+def fui_maximize(d, sb):
     return _border(0, 0, d, d, sb) if d and sb else set()
 
-def fui_restore(d, sb):                     # core.fi cap_restore
+def fui_restore(d, sb):
     if d == 0 or sb == 0:
         return set()
     v = 2 * sb
@@ -64,7 +44,7 @@ def fui_restore(d, sb):                     # core.fi cap_restore
     k = d - v
     return _border(v, 0, k, k, sb) | _border(0, v, k, k, sb)
 
-def fui_minimize(d, sb):                    # core.fi cap_minimize
+def fui_minimize(d, sb):
     if d == 0 or sb == 0:
         return set()
     oy = d // 2
@@ -75,7 +55,7 @@ def fui_minimize(d, sb):                    # core.fi cap_minimize
 
 def wm_alt_close(d, sb):
     kn = d - (sb - 1)
-    off = (d - (kn + sb - 1)) // 2          # EINE Verschiebung, beide Achsen
+    off = (d - (kn + sb - 1)) // 2
     p = set()
     for k in range(kn):
         for t in range(sb):
@@ -83,7 +63,7 @@ def wm_alt_close(d, sb):
             p.add((off + kn - 1 - k + t, off + k))
     return p
 
-def wm_alt_box_thick(x, y, w, h, sb):       # cap_box_thick
+def wm_alt_box_thick(x, y, w, h, sb):
     p = set()
     for t in range(sb):
         for k in range(w):
@@ -123,8 +103,8 @@ def main():
     print("construction zero: it IS the same source. The second column shows")
     print("what the old, self-painted version would have done differently.")
     print()
-    print(f"{'uisc':>4} {'d':>3} {'sb':>3} | {'Zeichen':<17} "
-          f"{'Punkte':>7} | {'neu!=fUi':>9} {'alt!=fUi':>9}")
+    print(f"{'uisc':>4} {'d':>3} {'sb':>3} | {'Char':<17} "
+          f"{'Points':>7} | {'neu!=fUi':>9} {'alt!=fUi':>9}")
     print("-" * 72)
     schlimm = 0
     for sk in (1, 2, 3, 4):
@@ -132,11 +112,11 @@ def main():
         for name, ff, wf in zeichen:
             f = ff(d, sb)
             a = wf(d, sb, sk)
-            d_neu = 0                       # derselbe Quelltext
+            d_new = 0
             d_alt = len(f ^ a)
             schlimm = max(schlimm, d_alt)
             print(f"{sk:>4} {d:>3} {sb:>3} | {name:<17} {len(f):>7} | "
-                  f"{d_neu:>9} {d_alt:>9}")
+                  f"{d_new:>9} {d_alt:>9}")
     print("-" * 72)
     print(f"largest deviation of the OLD version: {schlimm} pixels")
     print()

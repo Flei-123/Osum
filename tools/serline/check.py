@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/serline/check.py -- count intact `SL<id>:<i>:<payload>:E` lines of one
-section of a serial capture.
-
-  check.py <capture> <section> <workers> <lines>
-
-The section is the text between `==<section>==` and the next `==...==`.
-Prints `intact=N expected=M torn=K dup=D done=0|1` (torn = expected - intact).
-A line counts when the whole line is one SL record (an optional `OPEN:`
-prefix is allowed: the parent leaves that line open on purpose) and the
-payload is the letter and length the guest derives from <id> and <i>.
-"""
 import re
 import sys
 

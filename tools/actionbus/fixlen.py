@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/actionbus/fixlen.py -- set the length of every `[u8; N] = "..."`
-# string array in a Firn source to the exact number of octets of its
-# literal. Firn insists on the exact count, and counting by hand is where
-# the mistakes are. Idempotent; prints how many declarations it changed.
-#
-#   python3 tools/actionbus/fixlen.py kernel/user/act.fi [...]
 import re
 import sys
 

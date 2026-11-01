@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/proxy.py -- TLS 1.3 terminator in front of the REAL broker.
-
-    proxy.py --listen 10.9.0.1:8443 --to 127.0.0.1:18470 --cert good.pem
-             --key good.key --log DIR
-
-fleitec-id speaks plain HTTP on loopback; the OrientOS client only speaks
-HTTPS. This proxy splices the decrypted bytes both ways and writes them to
-DIR/c2s.log (client -> broker) and DIR/s2c.log (broker -> client), so that
-interop.sh can read the tokens the broker handed out (host side only) and see
-which calls reached it (e.g. POST /oidc/revoke). It changes nothing.
-
-Optional path routing (repeatable): --route /api/kontakte=127.0.0.1:18471
-sends connections whose FIRST request line starts with that path prefix to
-another backend (the mock address book, tools/anbfleitec/book.py); their
-bytes go to DIR/book-c2s.log and DIR/book-s2c.log, never to the broker logs.
-The guest opens one connection per request (Connection: close).
-"""
 import argparse
 import socket
 import ssl
@@ -44,7 +27,6 @@ def pump(src, dst, path, lock):
 
 
 def pick(conn, target, routes):
-    """Read the first request line; return (backend, prefix-of-log, bytes read)."""
     if not routes:
         return target, "", b""
     buf = b""

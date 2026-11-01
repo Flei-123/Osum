@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/exfat/exfat.py -- independent exFAT reader/writer for the host gate.
-
-The host is an LXC without loop mounts, so the gate cannot mount an exFAT
-image. This module is the reference: it parses an image made by
-mkfs.exfat, populates it (files, directories, fragmented and contiguous
-files, directories bigger than one cluster) and reads everything back.
-
-Scope: 512-byte sectors, one FAT, bitmap in the root directory, names are
-printable ASCII for writing and UTF-16 for reading, NoFatChain and
-FAT-chained files and directories.
-
-CLI:
-  exfat.py populate IMG BASE   build the known tree, print "sha size path"
-  exfat.py dump IMG BASE       print "sha size path" for every entry
-"""
 import hashlib
 import struct
 import sys
@@ -41,7 +26,6 @@ class ExFat:
                 self.bmp_len = struct.unpack_from("<Q", e, 24)[0]
         assert self.bmp_first, "no bitmap entry"
 
-    # ---- raw access
     def rd(self, off, n):
         self.f.seek(self.base + off)
         return self.f.read(n)
@@ -59,7 +43,6 @@ class ExFat:
     def fat_set(self, c, v):
         self.wr(self.fat_off * BS + c * 4, struct.pack("<I", v))
 
-    # ---- bitmap
     def bmp_get(self, c):
         i = c - 2
         return (self.rd(self.clus_off(self.bmp_first) + i // 8, 1)[0] >> (i % 8)) & 1
@@ -74,9 +57,7 @@ class ExFat:
     def used_count(self):
         return sum(1 for c in range(2, self.nclus + 2) if self.bmp_get(c))
 
-    # ---- chains
     def chain_of(self, first, nofat, size):
-        """cluster list of a file/directory with a known size"""
         n = (size + self.csize - 1) // self.csize
         if first == 0 or n == 0:
             return []
@@ -90,7 +71,6 @@ class ExFat:
         return out
 
     def dir_chain(self, first, nofat, size):
-        """cluster list of a directory (size None = follow the FAT)"""
         if nofat:
             return self.chain_of(first, True, size)
         cl = []
@@ -109,7 +89,6 @@ class ExFat:
             data = data[:d["vdl"]] + b"\0" * (d["size"] - d["vdl"])
         return data
 
-    # ---- directories
     def dir_entries(self, first, nofat, size):
         out = []
         for c in self.dir_chain(first, nofat, size):
@@ -168,7 +147,6 @@ class ExFat:
                 return d
         return None
 
-    # ---- checksums
     @staticmethod
     def set_checksum(raw):
         cs = 0
@@ -185,7 +163,6 @@ class ExFat:
             h = (((h << 15) | (h >> 1)) + b) & 0xFFFF
         return h
 
-    # ---- allocation
     def alloc_run(self, n):
         run = 0
         for c in range(2, self.nclus + 2):
@@ -211,9 +188,8 @@ class ExFat:
         self.wr(self.clus_off(c), b"\0" * self.csize)
 
     def store(self, data, contiguous=True, spread=0):
-        """-> (first, nofat). spread>0 skips clusters between pieces."""
         if not data:
-            return 0, False   # empty file: first=0, no NoFatChain flag
+            return 0, False
         n = (len(data) + self.csize - 1) // self.csize
         if contiguous:
             first = self.alloc_run(n)
@@ -233,7 +209,6 @@ class ExFat:
             self.fat_set(c, cl[k + 1] if k + 1 < n else 0xFFFFFFFF)
         return cl[0], False
 
-    # ---- creating entries
     def make_set(self, name, attr, first, nofat, size):
         u = name.encode("utf-16-le")
         nn = (len(name) + 14) // 15
@@ -324,7 +299,6 @@ def pattern(n, seed):
     return bytes(out[:n])
 
 
-# The known tree: (dir, name, size, seed, contiguous, spread)
 TREE_FILES = [
     ("/", "hello.txt", 12, 1, True, 0),
     ("/", "empty.bin", 0, 2, True, 0),
@@ -337,7 +311,7 @@ TREE_FILES = [
     ("/sub", "Mixed Case Name.dat", 3000, 9, False, 1),
     ("/sub/deep", "deepfile.bin", 5000, 10, True, 0),
 ]
-MANY = 40  # files in /many: more than one 512-byte directory cluster
+MANY = 40
 
 
 def populate(img, base):

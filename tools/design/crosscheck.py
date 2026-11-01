@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
-#
-#
-#
 import sys
 
-EINS = 64  # dieselbe Festkommaeinheit wie vektor.EINS (Annahme, s.u.)
+EINS = 64
 
 
-def strich_umriss(x0, y0, x1, y1, sb):
-    """Die vier Eckpunkte des Rechtecks um die Strecke, wie `strichen`
-    sie legt. Runde Enden lassen wir weg -- fuer die Frage "ueberlappen
-    sich zwei Umrisse" sind sie unerheblich."""
+def stroke_umriss(x0, y0, x1, y1, sb):
     dx, dy = x1 - x0, y1 - y0
     ln = (dx * dx + dy * dy) ** 0.5
     if ln == 0:
@@ -25,7 +16,6 @@ def strich_umriss(x0, y0, x1, y1, sb):
 
 
 def innen(poly, px, py):
-    """Umlaufzahl eines Punktes gegen ein Polygon (Nichtnull-Regel)."""
     w = 0
     n = len(poly)
     for i in range(n):
@@ -39,15 +29,12 @@ def innen(poly, px, py):
     return w
 
 
-def messen(d, sb, zwei):
-    """Wie oft wird jeder Bildpunkt bedeckt? `zwei`=True baut das X aus
-    ZWEI getrennten Strichen (heutiger Stand), False aus einem
-    zusammenhaengenden Zug."""
-    if zwei:
-        umrisse = [strich_umriss(0, 0, d, d, sb),
-                   strich_umriss(d, 0, 0, d, sb)]
+def messen(d, sb, two_2):
+    if two_2:
+        umrisse = [stroke_umriss(0, 0, d, d, sb),
+                   stroke_umriss(d, 0, 0, d, sb)]
     else:
-        umrisse = [strich_umriss(0, 0, d, d, sb)]
+        umrisse = [stroke_umriss(0, 0, d, d, sb)]
     mehrfach = 0
     gesamt = 0
     for py in range(-2, d + 3):

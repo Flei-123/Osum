@@ -45,11 +45,11 @@ def main():
     fehler = 0
 
     print("== THE GROOVE AS THE CONTROL CENTER REPORTS IT ==")
-    spur = alle(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
-    if not spur:
+    trace = alle(txt, r"qs: bright trace from=(\d+) bis=(\d+) ym=(\d+)")
+    if not trace:
         print("  NO groove reported -- the control center was never open")
         return 1
-    v, b, ym = spur[-1].groups()
+    v, b, ym = trace[-1].groups()
     print(f"  Brightness: from x={v} to x={b}, middle y={ym}")
 
     print()
@@ -78,20 +78,20 @@ def main():
 
     print()
     print("== THE VALUE THE PANEL READS WHEN PAINTING ==")
-    werte = [int(m.group(1)) for m in alle(txt, r"qs: bright is=(\d+)")]
-    folge = []
-    for w in werte:
-        if not folge or folge[-1] != w:
-            folge.append(w)
-    print(f"  gemeldete Werte in Reihenfolge: {folge}")
-    if len(folge) < 2:
+    values = [int(m.group(1)) for m in alle(txt, r"qs: bright is=(\d+)")]
+    seq = []
+    for w in values:
+        if not seq or seq[-1] != w:
+            seq.append(w)
+    print(f"  gemeldete Werte in Reihenfolge: {seq}")
+    if len(seq) < 2:
         print("  unveraendert -- erwartbar, solange der Kern ENODEV sagt:")
         print("  the panel reads the value from the kernel when painting, and it")
         print("  did not take it over. What the UI does is shown")
         print("  im Abschnitt darueber.")
     else:
-        print(f"  verschiedene Werte: {len(set(folge))}")
-        if len(set(folge)) < 2:
+        print(f"  verschiedene Werte: {len(set(seq))}")
+        if len(set(seq)) < 2:
             print("  FEHLT: immer derselbe Wert")
             fehler += 1
         else:

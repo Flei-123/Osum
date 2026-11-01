@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""STAB-1 host part: one report from two serial logs (boss VM vs test VM / QEMU).
-
-  python3 tools/stab/report.py --boss boss.txt --test test.txt [--out report.md]
-
-Reads the `taskbar:` and `desk:` lines of each log, judges every boot on its own (did the bar come
-up: ready, STEHT geometry, health line with pins/size, icons) and then diffs the two boots by class
-(conf, geometry, icons, health, shape, lang). The last line says which class explains a blank bar,
-or that conf / geometry / icons are ruled out. Exit 0 = report written, 2 = a log is unreadable.
-"""
 import argparse
 import re
 import sys
@@ -110,7 +101,6 @@ def main():
     out.extend("- " + x for x in only_b[:40])
     w("## lines only in test (%d)" % len(only_t))
     out.extend("- " + x for x in only_t[:40])
-    # verdict
     if jb["bar_ok"]:
         verdict = "boss bar came up in this boot; no blank bar reproduced (run more cold boots)"
     elif not jb["ready"] and not jb["steht"]:

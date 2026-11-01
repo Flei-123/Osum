@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-SPERRE = {
+LOCK = {
     "tools/hv/run.sh":  "testet den eigenen Hypervisor, setzt -accel tcg selbst",
     "tools/smp/run.sh": "misst tcg,thread=single gegen multi",
     "tools/arm/run.sh": "qemu-system-aarch64, falscher Bogen fuer KVM",
@@ -18,7 +18,6 @@ CD_RE = re.compile(r'^cd "\$\(dirname "\$0"\)/\.\./\.\."\s*$')
 
 
 def laeufer():
-    """Die Skripte, die test.sh wirklich aufruft."""
     txt = (ROOT / "test.sh").read_text(errors="replace")
     namen = re.findall(r"^\s+((?:tools|tests)/[a-z0-9]+/[a-z]+\.sh)\s", txt, re.M)
     return sorted(set(namen))
@@ -26,8 +25,8 @@ def laeufer():
 
 def umstellen(pfad: Path, pruefen: bool):
     rel = str(pfad.relative_to(ROOT))
-    if rel in SPERRE:
-        return 0, f"uebersprungen ({SPERRE[rel]})"
+    if rel in LOCK:
+        return 0, f"uebersprungen ({LOCK[rel]})"
 
     zeilen = pfad.read_text(errors="replace").splitlines(keepends=True)
     treffer = 0
@@ -76,7 +75,7 @@ def main():
             return 1
 
     print(f"\n{gesamt} qemu-Aufrufe umgestellt"
-          f"{' (nur geprueft)' if pruefen else ''}")
+          f"{' (only geprueft)' if pruefen else ''}")
 
     if not pruefen:
         rest = subprocess.run(
@@ -84,7 +83,7 @@ def main():
             cwd=ROOT, capture_output=True, text=True).stdout.splitlines()
         schlimm = [z for z in rest
                    if "timeout" in z and "-accel" not in z
-                   and not any(s in z for s in SPERRE)]
+                   and not any(s in z for s in LOCK)]
         if schlimm:
             print("\nWARNING -- these lines still start without -accel:")
             for z in schlimm:

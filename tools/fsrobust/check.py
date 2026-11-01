@@ -112,7 +112,6 @@ class Bild:
             d = d + bytes(BS - len(d))
         return d
 
-    # ---------------------------------------------------------- Inodes
     def iat(self, ino):
         if self.xin and ino > self.inodes:
             slot = ino - 1 - self.inodes

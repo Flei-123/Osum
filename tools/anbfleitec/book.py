@@ -1,32 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/book.py -- mock address book for the broker swap (r115b).
-
-    book.py --listen 127.0.0.1:18471 --jwks http://127.0.0.1:18470/oidc/jwks.json
-            --issuer https://10.9.0.1:8443 --ctl DIR
-
-Stands in for firnchat-web + fleikontakte in tools/anbfleitec/interop.sh. It
-implements the SAME contract as FirnChat (docs/LOGIN-OIDC.md, "Broker-Token
-gegen fkt1 tauschen"), including a REAL Ed25519 check against the JWKS of the
-REAL broker (python3-cryptography):
-
-  POST /api/kontakte/zugang-broker   Authorization: Bearer <access token>
-       -> 200 {"token":"fkt1.<uid>.<64 hex>"}   or 401 {"error":"token refused"}
-  GET  /api/kontakte/liste           Authorization: Bearer <that fkt1>
-       -> 200 {"items":[...]}                   or 401
-
-Checks (like fl_jwt in firnchat-web): alg exactly EdDSA, kid in the JWKS,
-signature, iss exact, aud = wanted (a list only with azp = wanted), exp, nbf,
-sub, jti REQUIRED (a broker id_token has none), the account (claim uid, else
-sub) must already exist, an Origin header is refused (403, not for browsers).
-
-The test steers it through files in --ctl (read on every request):
-  aud       the audience wanted (default: orientos)
-  clock     seconds added to "now" (default 0; 200000 = tokens are expired)
-  accounts  comma separated accounts that exist (default: none)
-It appends one line per swap/list to --ctl/book.log ("swap ok uid=..." or
-"swap refused <reason>"); the reason never contains the token.
-"""
 import argparse
 import base64
 import json
@@ -64,7 +37,6 @@ def log(line):
 
 
 def verify(token):
-    """Return (uid, None) or (None, reason)."""
     parts = token.split(".")
     if len(parts) != 3:
         return None, "not a JWT"
@@ -151,7 +123,7 @@ class H(BaseHTTPRequestHandler):
             log("swap refused " + why)
             return self.send_json(401, {"error": "token refused"})
         fkt = "fkt1.%s.%s" % (uid, secrets.token_hex(32))
-        ISSUED.clear()  # a new swap replaces the old broker token
+        ISSUED.clear()
         ISSUED.add(fkt)
         with open(os.path.join(ARGS.ctl, "issued"), "w") as f:
             f.write(fkt + "\n")

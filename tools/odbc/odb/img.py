@@ -1,10 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Tiny PNG reader + screenshot comparison for the host side (stdlib only).
-
-The agent's `shot` returns 8-bit RGB PNGs. `decode_png` returns (w, h, rows) with one bytearray of w*3 octets per row.
-`diff` compares two decoded images and reports how many pixels differ by more than `tol` per channel and the bounding
-box of the differences. Used by `odbc imgdiff` and tools/odb/loop.py (screenshot before/after checks).
-"""
 import struct
 import zlib
 
@@ -59,8 +53,6 @@ def decode_png(data):
 
 
 def diff(a, b, tol=8, region=None):
-    """Compare two decoded images of the same size. region = (x, y, w, h) in pixels or None.
-    Returns dict: pixels (compared), changed, frac, bbox=(x0, y0, x1, y1) or None."""
     (aw, ah, ar), (bw, bh, br) = a, b
     if (aw, ah) != (bw, bh):
         raise ValueError("size differs: %dx%d vs %dx%d" % (aw, ah, bw, bh))

@@ -34,12 +34,6 @@ import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-# ---------------------------------------------------------------- the app table
-# id      short name used in file names
-# term    what is typed into the start menu search (the first hit is started with Return)
-# bin     the program the launcher must start (`launcher: start <bin> pid=N` on the serial line)
-# prog    firn program(s) that have to be in the image for the app to exist
-# acts    extra drehbuch lines after the app is open (VM mode); every `foto` is judged
 APPS = [
     dict(id="settings", osp="settings", name="Settings", term="settings", bin="settings", prog="settings settingsd",
          acts=["warte 3", "klick_body", "foto {id}-3-body", "taste tab", "warte 1", "foto {id}-4-tab"]),
@@ -69,17 +63,14 @@ APPS = [
          needs_special_build=True,
          acts=["warte 8", "foto {id}-3-nach-8s"]),
 ]
-# tray / panel things that are not in the app list but a human clicks on them in the first minute
 TRAY = [
     dict(id="netz", name="Control centre (network icon)", rect="netz"),
     dict(id="uhr", name="Clock", rect="uhr"),
     dict(id="glocke", name="Notifications", rect="glocke"),
 ]
-# the installer is deliberately NOT started (it would partition a disk); the launcher is the menu itself
 NOT_STARTED = ["installer", "launcher"]
 
-# things only the real Dell can answer -- the VM protocol lists them as OFFEN, never as OK
-NUR_DELL = [
+ONLY_DELL = [
     ("keyboard", "real keyboard layout, AltGr, Fn keys, key repeat (VM: QEMU sendkey, US layout)"),
     ("pointer", "touchpad / USB mouse speed, acceleration, scroll (VM: PS/2)"),
     ("net", "I219 link, DHCP lease, DNS, TLS to the bridge server (VM: user-mode NAT)"),
@@ -96,12 +87,10 @@ CRASH_RE = re.compile(
     r"(panic|PANIC|page fault|#PF|#UD|#GP|#DF|\*\*\* EXCEPTION|general protection|double fault|SIGSEGV|SIGILL|SIGBUS|"
     r"segfault|killed by|stack smash|unhandled|[Oo]ops|FAULT|assert(ion)? fail|launcher: start refused|"
     r"elf: refused|no such program|exec failed|out of memory|OOM )")
-# serial lines that look like a crash but are boot-time summaries or on purpose (extend with care)
 CRASH_IGNORE = re.compile(r"^(tafel|disp|usb|USB|heap test|fb|osum|smp|wm: selftest|wm: termzeile|tile|"
                           r"pci|ttf|kbd|key|pwr|r3|wlib)\b|nofault|fault-test|fault_inject|FAIL 0")
 
 
-# ---------------------------------------------------------------- helpers
 def read(path):
     try:
         with open(path, "rb") as f:
@@ -151,7 +140,6 @@ def script_lines(apps, res, tray=True):
                 line = "klick %d,%d" % (w // 2, h // 2 - 100)
             out.append(line)
         out += ["schritt %s acted" % i,
-                # maximise, restore, drag, close: the caption buttons the window server reports
                 "taste f12", "warte 2", "kappe fokus max", "warte 3", "foto %s-5-max" % i,
                 "taste f12", "warte 2", "kappe fokus max", "warte 3", "foto %s-6-restore" % i,
                 "taste f12", "warte 2", "ziehtitel fokus 160,90", "warte 3", "foto %s-7-gezogen" % i,
@@ -167,7 +155,6 @@ def script_lines(apps, res, tray=True):
     return out
 
 
-# ---------------------------------------------------------------- evaluation (VM)
 def load_steps(out):
     steps = []
     for z in read(os.path.join(out, "schritte.tsv")).splitlines():
@@ -177,9 +164,6 @@ def load_steps(out):
     return steps
 
 
-# The VM image carries no /bin/jarvisd (the bridge daemon is not built into the walk image), so the
-# desktop's boot-time `desk: start /bin/jarvisd` is always followed by one loader refusal. That pair
-# is a property of the walk image, not an app fault: drop exactly that pair, keep every other refusal.
 JARVISD_PAIR = re.compile(r"(desk: start /bin/jarvisd[^\n]*\n)elf: refused, reason 1  no such file\n?")
 
 
@@ -224,15 +208,12 @@ def judge_app(a, out, serial, steps, shots):
     crashes = [c for c in crash_lines(sl) if "launcher: start refused" not in c]
     if crashes:
         reasons.append("crash/error line(s) on the serial log: " + " | ".join(crashes[:2]))
-    # r545: Settings says how many lines of the theme files it did not understand (the window shows the same number)
     if i == "settings":
         bad = re.findall(r"settings: shape file=[^\n]* bad=(\d+)", sl)
         if bad:
             info["bad_lines"] = int(bad[-1])
             if int(bad[-1]) > 0:
                 reasons.append("Settings counts %s theme line(s) as not understood (settings: shape ... bad=)" % bad[-1])
-    # r541: the widget layout must fit the (scaled) window: no rectangle outside it, none on another one
-    # (at 3440x1440 the interface scale is 2; unscaled boxes put buttons on the text fields)
     if i == "widgets":
         g = re.search(r"widgetdemo: geom w=(\d+) h=(\d+)", sl)
         if not g:
@@ -246,9 +227,6 @@ def judge_app(a, out, serial, steps, shots):
                                capture_output=True, text=True)
             os.unlink(tf.name)
             info["layout_rc"] = r.returncode
-            # the rectangles must also FILL the scaled window: boxes laid out unscaled leave the right
-            # 55 % and the bottom half empty while the text is drawn at scale 2 (no overlap among the
-            # rectangles themselves, so layout.py alone cannot see it)
             rects = [tuple(int(v) for v in m) for m in re.findall(
                 r"widgetdemo: rect id=\d+ kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", sl)]
             if rects:
@@ -324,7 +302,7 @@ def run_vm(args):
     env.setdefault("DRIVE_WATCHDOG", "9000")
     cmd = ["bash", os.path.join(ROOT, "tools/design/eh6.sh"), runner, "accel=" + args.accel,
            "res=" + args.res, "progs=" + progs, "drehbuch=" + os.path.join(out, "drehbuch.txt"),
-           "halt=0", "tafel=nein", "tzrule=eu"]  # tzrule=eu: the personal image has `rule=eu` in /etc/time.conf
+           "halt=0", "tafel=nein", "tzrule=eu"]
     print("vm: eh6.sh res=%s accel=%s progs=%d" % (args.res, args.accel, len(have)), flush=True)
     t0 = time.time()
     with open(os.path.join(out, "eh6.log"), "w") as lg:
@@ -341,7 +319,7 @@ def evaluate_vm(runner, out, apps, args, rc=0):
         if fn.endswith(".ppm"):
             try:
                 shots[fn[:-4]] = ppm_to_array(os.path.join(runner, fn))
-            except Exception as ex:  # a half-written picture counts as missing
+            except Exception as ex:
                 print("picture %s unreadable: %s" % (fn, ex))
     res = []
     for a in apps:
@@ -365,7 +343,7 @@ def evaluate_vm(runner, out, apps, args, rc=0):
     for k in shots:
         if k.endswith(("-2-offen", "-8-zu", "-5-max")) or k in ("00-desktop", "99-ende"):
             Image.open(os.path.join(runner, k + ".ppm")).convert("RGB").save(os.path.join(shotdir, k + ".png"))
-    if not getattr(args, "keep_ppm", False):           # the 15 MB ppm files are only kept on request
+    if not getattr(args, "keep_ppm", False):
         for fn in os.listdir(runner):
             if fn.endswith(".ppm"):
                 os.unlink(os.path.join(runner, fn))
@@ -378,7 +356,7 @@ def write_protocol(out, res, summary):
     skip = sum(1 for r in res if r["status"] == "SKIP")
     summary.update(ok=ok, fehler=bad, skip=skip, total=len(res))
     with open(os.path.join(out, "protokoll.json"), "w") as f:
-        json.dump(dict(summary=summary, results=res, nur_dell=[dict(id=k, what=v) for k, v in NUR_DELL]), f,
+        json.dump(dict(summary=summary, results=res, only_dell=[dict(id=k, what=v) for k, v in ONLY_DELL]), f,
                   indent=1, default=str)
     L = ["# Dell walk protocol (%s)" % summary["mode"], "",
          "- result: **%d OK / %d FEHLER / %d SKIP** of %d" % (ok, bad, skip, len(res)),
@@ -390,7 +368,7 @@ def write_protocol(out, res, summary):
             why += " [known: %s]" % r["known"]
         L.append("| %s | %s | %s | %s |" % (r["name"], r["status"], r["scope"], why.replace("|", "/")))
     L += ["", "## Only on the real Dell (OFFEN -- this run cannot say OK)", ""]
-    L += ["- **%s**: %s" % (k, v) for k, v in NUR_DELL]
+    L += ["- **%s**: %s" % (k, v) for k, v in ONLY_DELL]
     if summary.get("crash_samples"):
         L += ["", "## Crash-like lines anywhere on the serial log", ""]
         L += ["- `%s`" % z for z in summary["crash_samples"]]
@@ -399,8 +377,6 @@ def write_protocol(out, res, summary):
     print("\n".join(L[:5 + len(res)]))
 
 
-# ---------------------------------------------------------------- echt mode (bridge)
-# set-1 make codes for the keys the walk needs (break = make | 0x80)
 SC = {c: v for c, v in zip("1234567890", range(2, 12))}
 for _row, _base in (("qwertyuiop", 0x10), ("asdfghjkl", 0x1E), ("zxcvbnm", 0x2C)):
     for _n, _c in enumerate(_row):
@@ -408,7 +384,7 @@ for _row, _base in (("qwertyuiop", 0x10), ("asdfghjkl", 0x1E), ("zxcvbnm", 0x2C)
 SC.update({" ": 0x39, "ret": 0x1C, "esc": 0x01, "tab": 0x0F, "f12": 0x58, "+": 0x0D})
 
 
-class Bruecke:
+class Bridge:
     """Local client of bruecke_server.py (127.0.0.1:8090). The device never talks to this script."""
 
     def __init__(self, device, base="http://127.0.0.1:8090", keyfile="/srv/bruecke/verwalter.key", dry=False):
@@ -499,8 +475,6 @@ class Bruecke:
         self.job("input", "knopf 1 0")
 
 
-# ps of the Dell: `PID PPID STATE ... NAME`. Apps show up with the name `-` (the bundle's `start`), only the Terminal is
-# `sh`, and the task manager calls them `start` -- so an app is recognised by a NEW PID, never by its name (r547).
 PS_RE = re.compile(r"\s*(\d+)\s+(\d+)\s+(\S+)\s+\S+\s+\d+\s+\d+\s+\S+\s+(.*)")
 PS_TOOLS = ("ps", "log", "kill", "tail", "jarvisctl", "cat", "head")
 
@@ -578,7 +552,7 @@ def run_echt(args):
     kill what is left, (4) three terminals, (5) OK / FEHLER per app and per window step in the protocol."""
     out = os.path.abspath(args.outdir)
     os.makedirs(out, exist_ok=True)
-    br = Bruecke(args.device, dry=args.dry)
+    br = Bridge(args.device, dry=args.dry)
     if not args.dry:
         up, why = br.online()
         print("device check: %s (%s)" % ("ONLINE" if up else "OFFLINE", why))
@@ -633,12 +607,10 @@ def run_echt(args):
         c = crash_lines(log)
         if c:
             reasons.append("kernel log: " + " | ".join(c[:2]))
-        # ---- window steps: only when a window was found in the photo
         if rect is None and not args.dry:
             steps.append(("window", False, "no window found in the photo (nothing to maximise / drag / close)"))
         elif rect is not None and not reasons:
             bt = buttons(rect)
-            # maximise
             br.click(*bt["maxi"])
             wait(2)
             mx = shot("3-max")
@@ -646,7 +618,6 @@ def run_echt(args):
             r2 = window_rect(pre, mx) if not args.dry else (0, 0, W, H)
             steps.append(("maximise", bool(r2 and r2[2] - r2[0] >= 0.9 * W),
                           "window box after: %s (screen %dx%d)" % (r2, W, H)))
-            # restore (the maximised window's buttons: same distance from the right edge, top edge 0)
             bm = buttons(r2 if r2 else (0, 0, W, H))
             br.click(*bm["maxi"])
             wait(2)
@@ -656,7 +627,6 @@ def run_echt(args):
             same = bool(r3 and abs(r3[0] - rect[0]) < 24 and abs(r3[1] - rect[1]) < 24 and abs(r3[2] - rect[2]) < 24)
             steps.append(("restore", same, "window box %s, before the maximise %s" % (r3, rect)))
             cur = r3 if r3 else rect
-            # drag by the title bar
             bd = buttons(cur)
             dx, dy = (60, 60) if cur[2] + 60 < W and cur[3] + 60 < H - 40 else (-60, -60)
             br.drag(bd["drag"][0], bd["drag"][1], bd["drag"][0] + dx, bd["drag"][1] + dy)
@@ -666,7 +636,6 @@ def run_echt(args):
             r4 = window_rect(pre, dr) if not args.dry else cur
             moved = bool(r4 and (abs(r4[0] - cur[0]) >= 30 or abs(r4[1] - cur[1]) >= 30))
             steps.append(("drag", moved, "window box %s -> %s" % (cur, r4)))
-            # close with X
             bc = buttons(r4 if r4 else cur)
             br.click(*bc["close"])
             wait(3)
@@ -680,7 +649,6 @@ def run_echt(args):
         for n, ok, why in steps:
             if not ok:
                 reasons.append("%s: %s" % (n, why))
-        # ---- kill what is left (kill closes the window)
         ps3 = ps_now()
         for k in fresh:
             if k in ps3:
@@ -706,9 +674,6 @@ def run_echt(args):
     return 0 if all(r["status"] != "FEHLER" for r in res) else 1
 
 
-# ---------------------------------------------------------------- smoke mode (bridge, READ-ONLY)
-# Only reads: no input, no write, no reboot. Safe on a machine that is installing or in use.
-# Each check is one line `OK|FAIL <name>: <why>`; the photo is archived next to the protocol.
 SMOKE_LOG_WORDS = ("panic", "fault", "refused", "failed")
 SMOKE_DAEMONS = ("jarvisd", "taskbar", "starter", "desktop")
 
@@ -717,7 +682,7 @@ def run_smoke(args):
     from concurrent.futures import ThreadPoolExecutor
     out = os.path.abspath(args.outdir)
     os.makedirs(os.path.join(out, "fotos"), exist_ok=True)
-    br = Bruecke(args.device, dry=args.dry)
+    br = Bridge(args.device, dry=args.dry)
     t0 = time.time()
     up, why = br.online()
     print("device check: %s (%s)" % ("ONLINE" if up else "OFFLINE", why[:120]))
@@ -736,7 +701,6 @@ def run_smoke(args):
         return st, txt
 
     cmds = ["/bin/uname -a", "/bin/cat /system/FASSUNG", "/bin/df", "/bin/ps"] + ["/bin/grep %s /proc/klog" % w for w in SMOKE_LOG_WORDS]
-    # independent reads in parallel (the bridge answers each job on its own)
     with ThreadPoolExecutor(max_workers=4) as ex:
         got = dict(zip(cmds, ex.map(cmd, cmds)))
     for c in cmds[:2]:

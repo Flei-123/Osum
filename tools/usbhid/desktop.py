@@ -1,9 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/usbhid/desktop.py -- OHCI tablet on the REAL desktop (stick image), called by tools/usbhid/desktop.sh.
-# usage: desktop.py <monitor sock> <qmp sock> <serial file> <out base> <settle seconds>
-# Logs in through the PS/2 keyboard (monitor sendkey), waits for the desktop, then injects absolute tablet events through QMP
-# input-send-event and writes <base>.res:  <pulse lines> <max wmpolls> <max reports> <max errors>
-# (parsed from the serial lines `ohci: pulse polls=N wmpolls=N reports=N errors=N ...` printed on every input pulse).
 import json
 import os
 import re
@@ -97,7 +92,6 @@ def main():
         return
     time.sleep(settle)
     q = Qmp(qmp_sock)
-    # a sweep over the screen plus a click: every step is one USB report that must reach the window server
     for rnd in range(3):
         for i in range(0, 33):
             q.abs(i * 1000, i * 900)

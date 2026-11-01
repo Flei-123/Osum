@@ -39,226 +39,220 @@ Aufruf:
 """
 import sys
 
-# ----------------------------------------------------------------------
-# 1. Boot-Tastatur, HID 1.11 Anhang B.1
 KBD_BOOT = bytes([
-    0x05, 0x01,        # Usage Page (Generic Desktop)
-    0x09, 0x06,        # Usage (Keyboard)
-    0xA1, 0x01,        # Collection (Application)
-    0x05, 0x07,        #   Usage Page (Keyboard/Keypad)
-    0x19, 0xE0,        #   Usage Minimum (224)
-    0x29, 0xE7,        #   Usage Maximum (231)
-    0x15, 0x00,        #   Logical Minimum (0)
-    0x25, 0x01,        #   Logical Maximum (1)
-    0x75, 0x01,        #   Report Size (1)
-    0x95, 0x08,        #   Report Count (8)
-    0x81, 0x02,        #   Input (Data,Var,Abs)   -- die acht Zusatztasten
-    0x95, 0x01,        #   Report Count (1)
-    0x75, 0x08,        #   Report Size (8)
-    0x81, 0x01,        #   Input (Cnst)           -- das vorbehaltene Oktett
-    0x95, 0x05,        #   Report Count (5)
-    0x75, 0x01,        #   Report Size (1)
-    0x05, 0x08,        #   Usage Page (LEDs)
-    0x19, 0x01,        #   Usage Minimum (1)
-    0x29, 0x05,        #   Usage Maximum (5)
-    0x91, 0x02,        #   Output (Data,Var,Abs)  -- die Leuchten
-    0x95, 0x01,        #   Report Count (1)
-    0x75, 0x03,        #   Report Size (3)
-    0x91, 0x01,        #   Output (Cnst)          -- Fuellbits
-    0x95, 0x06,        #   Report Count (6)
-    0x75, 0x08,        #   Report Size (8)
-    0x15, 0x00,        #   Logical Minimum (0)
-    0x25, 0x65,        #   Logical Maximum (101)
-    0x05, 0x07,        #   Usage Page (Keyboard/Keypad)
-    0x19, 0x00,        #   Usage Minimum (0)
-    0x29, 0x65,        #   Usage Maximum (101)
-    0x81, 0x00,        #   Input (Data,Array)     -- sechs Tastenplaetze
-    0xC0,              # End Collection
+    0x05, 0x01,
+    0x09, 0x06,
+    0xA1, 0x01,
+    0x05, 0x07,
+    0x19, 0xE0,
+    0x29, 0xE7,
+    0x15, 0x00,
+    0x25, 0x01,
+    0x75, 0x01,
+    0x95, 0x08,
+    0x81, 0x02,
+    0x95, 0x01,
+    0x75, 0x08,
+    0x81, 0x01,
+    0x95, 0x05,
+    0x75, 0x01,
+    0x05, 0x08,
+    0x19, 0x01,
+    0x29, 0x05,
+    0x91, 0x02,
+    0x95, 0x01,
+    0x75, 0x03,
+    0x91, 0x01,
+    0x95, 0x06,
+    0x75, 0x08,
+    0x15, 0x00,
+    0x25, 0x65,
+    0x05, 0x07,
+    0x19, 0x00,
+    0x29, 0x65,
+    0x81, 0x00,
+    0xC0,
 ])
 
-# 2. Boot-Maus, HID 1.11 Anhang B.2
 MOUSE_BOOT = bytes([
-    0x05, 0x01,        # Usage Page (Generic Desktop)
-    0x09, 0x02,        # Usage (Mouse)
-    0xA1, 0x01,        # Collection (Application)
-    0x09, 0x01,        #   Usage (Pointer)
-    0xA1, 0x00,        #   Collection (Physical)
-    0x05, 0x09,        #     Usage Page (Button)
-    0x19, 0x01,        #     Usage Minimum (1)
-    0x29, 0x03,        #     Usage Maximum (3)
-    0x15, 0x00,        #     Logical Minimum (0)
-    0x25, 0x01,        #     Logical Maximum (1)
-    0x95, 0x03,        #     Report Count (3)
-    0x75, 0x01,        #     Report Size (1)
-    0x81, 0x02,        #     Input (Data,Var,Abs)
-    0x95, 0x01,        #     Report Count (1)
-    0x75, 0x05,        #     Report Size (5)
-    0x81, 0x01,        #     Input (Cnst)
-    0x05, 0x01,        #     Usage Page (Generic Desktop)
-    0x09, 0x30,        #     Usage (X)
-    0x09, 0x31,        #     Usage (Y)
-    0x15, 0x81,        #     Logical Minimum (-127)
-    0x25, 0x7F,        #     Logical Maximum (127)
-    0x75, 0x08,        #     Report Size (8)
-    0x95, 0x02,        #     Report Count (2)
-    0x81, 0x06,        #     Input (Data,Var,Rel)
-    0xC0,              #   End Collection
-    0xC0,              # End Collection
+    0x05, 0x01,
+    0x09, 0x02,
+    0xA1, 0x01,
+    0x09, 0x01,
+    0xA1, 0x00,
+    0x05, 0x09,
+    0x19, 0x01,
+    0x29, 0x03,
+    0x15, 0x00,
+    0x25, 0x01,
+    0x95, 0x03,
+    0x75, 0x01,
+    0x81, 0x02,
+    0x95, 0x01,
+    0x75, 0x05,
+    0x81, 0x01,
+    0x05, 0x01,
+    0x09, 0x30,
+    0x09, 0x31,
+    0x15, 0x81,
+    0x25, 0x7F,
+    0x75, 0x08,
+    0x95, 0x02,
+    0x81, 0x06,
+    0xC0,
+    0xC0,
 ])
 
-# 3. Radmaus: Berichtsnummer, fuenf Knoepfe, 16 Bit je Achse, Rad
 MOUSE_WHEEL = bytes([
-    0x05, 0x01,        # Usage Page (Generic Desktop)
-    0x09, 0x02,        # Usage (Mouse)
-    0xA1, 0x01,        # Collection (Application)
-    0x85, 0x01,        #   Report ID (1)
-    0x09, 0x01,        #   Usage (Pointer)
-    0xA1, 0x00,        #   Collection (Physical)
-    0x05, 0x09,        #     Usage Page (Button)
-    0x19, 0x01,        #     Usage Minimum (1)
-    0x29, 0x05,        #     Usage Maximum (5)
-    0x15, 0x00,        #     Logical Minimum (0)
-    0x25, 0x01,        #     Logical Maximum (1)
-    0x95, 0x05,        #     Report Count (5)
-    0x75, 0x01,        #     Report Size (1)
-    0x81, 0x02,        #     Input (Data,Var,Abs)
-    0x95, 0x01,        #     Report Count (1)
-    0x75, 0x03,        #     Report Size (3)
-    0x81, 0x01,        #     Input (Cnst)
-    0x05, 0x01,        #     Usage Page (Generic Desktop)
-    0x09, 0x30,        #     Usage (X)
-    0x09, 0x31,        #     Usage (Y)
-    0x16, 0x01, 0x80,  #     Logical Minimum (-32767)
-    0x26, 0xFF, 0x7F,  #     Logical Maximum (32767)
-    0x75, 0x10,        #     Report Size (16)
-    0x95, 0x02,        #     Report Count (2)
-    0x81, 0x06,        #     Input (Data,Var,Rel)
-    0x09, 0x38,        #     Usage (Wheel)
-    0x15, 0x81,        #     Logical Minimum (-127)
-    0x25, 0x7F,        #     Logical Maximum (127)
-    0x75, 0x08,        #     Report Size (8)
-    0x95, 0x01,        #     Report Count (1)
-    0x81, 0x06,        #     Input (Data,Var,Rel)
-    0xC0,              #   End Collection
-    0xC0,              # End Collection
+    0x05, 0x01,
+    0x09, 0x02,
+    0xA1, 0x01,
+    0x85, 0x01,
+    0x09, 0x01,
+    0xA1, 0x00,
+    0x05, 0x09,
+    0x19, 0x01,
+    0x29, 0x05,
+    0x15, 0x00,
+    0x25, 0x01,
+    0x95, 0x05,
+    0x75, 0x01,
+    0x81, 0x02,
+    0x95, 0x01,
+    0x75, 0x03,
+    0x81, 0x01,
+    0x05, 0x01,
+    0x09, 0x30,
+    0x09, 0x31,
+    0x16, 0x01, 0x80,
+    0x26, 0xFF, 0x7F,
+    0x75, 0x10,
+    0x95, 0x02,
+    0x81, 0x06,
+    0x09, 0x38,
+    0x15, 0x81,
+    0x25, 0x7F,
+    0x75, 0x08,
+    0x95, 0x01,
+    0x81, 0x06,
+    0xC0,
+    0xC0,
 ])
 
 
 def _finger():
     """Eine Finger-Sammlung eines Praezisions-Touchpads, 73 Oktette."""
     return [
-        0x05, 0x0D,        #   Usage Page (Digitizer)
-        0x09, 0x22,        #   Usage (Finger)
-        0xA1, 0x02,        #   Collection (Logical)
-        0x15, 0x00,        #     Logical Minimum (0)
-        0x25, 0x01,        #     Logical Maximum (1)
-        0x09, 0x47,        #     Usage (Confidence)
-        0x09, 0x42,        #     Usage (Tip Switch)
-        0x95, 0x02,        #     Report Count (2)
-        0x75, 0x01,        #     Report Size (1)
-        0x81, 0x02,        #     Input (Data,Var,Abs)
-        0x95, 0x01,        #     Report Count (1)
-        0x75, 0x02,        #     Report Size (2)
-        0x81, 0x03,        #     Input (Cnst,Var,Abs)
-        0x95, 0x01,        #     Report Count (1)
-        0x75, 0x04,        #     Report Size (4)
-        0x25, 0x05,        #     Logical Maximum (5)
-        0x09, 0x51,        #     Usage (Contact Identifier)
-        0x81, 0x02,        #     Input (Data,Var,Abs)
-        0x05, 0x01,        #     Usage Page (Generic Desktop)
-        0x15, 0x00,        #     Logical Minimum (0)
-        0x26, 0x20, 0x0E,  #     Logical Maximum (3616)
-        0x75, 0x10,        #     Report Size (16)
-        0x55, 0x0E,        #     Unit Exponent (-2)
-        0x65, 0x11,        #     Unit (cm)
-        0x09, 0x30,        #     Usage (X)
-        0x35, 0x00,        #     Physical Minimum (0)
-        0x46, 0x60, 0x02,  #     Physical Maximum (608)
-        0x95, 0x01,        #     Report Count (1)
-        0x81, 0x02,        #     Input (Data,Var,Abs)
-        0x46, 0x8E, 0x01,  #     Physical Maximum (398)
-        0x26, 0x88, 0x08,  #     Logical Maximum (2184)
-        0x09, 0x31,        #     Usage (Y)
-        0x81, 0x02,        #     Input (Data,Var,Abs)
-        0x05, 0x0D,        #     Usage Page (Digitizer)
-        0xC0,              #   End Collection
+        0x05, 0x0D,
+        0x09, 0x22,
+        0xA1, 0x02,
+        0x15, 0x00,
+        0x25, 0x01,
+        0x09, 0x47,
+        0x09, 0x42,
+        0x95, 0x02,
+        0x75, 0x01,
+        0x81, 0x02,
+        0x95, 0x01,
+        0x75, 0x02,
+        0x81, 0x03,
+        0x95, 0x01,
+        0x75, 0x04,
+        0x25, 0x05,
+        0x09, 0x51,
+        0x81, 0x02,
+        0x05, 0x01,
+        0x15, 0x00,
+        0x26, 0x20, 0x0E,
+        0x75, 0x10,
+        0x55, 0x0E,
+        0x65, 0x11,
+        0x09, 0x30,
+        0x35, 0x00,
+        0x46, 0x60, 0x02,
+        0x95, 0x01,
+        0x81, 0x02,
+        0x46, 0x8E, 0x01,
+        0x26, 0x88, 0x08,
+        0x09, 0x31,
+        0x81, 0x02,
+        0x05, 0x0D,
+        0xC0,
     ]
 
 
-# 4. Praezisions-Touchpad, fuenf Finger
 PTP = bytes(
     [
-        0x05, 0x0D,        # Usage Page (Digitizer)
-        0x09, 0x05,        # Usage (Touch Pad)
-        0xA1, 0x01,        # Collection (Application)
-        0x85, 0x01,        #   Report ID (1)
+        0x05, 0x0D,
+        0x09, 0x05,
+        0xA1, 0x01,
+        0x85, 0x01,
     ]
     + _finger() * 5
     + [
-        0x05, 0x0D,        #   Usage Page (Digitizer)
-        0x09, 0x54,        #   Usage (Contact Count)
-        0x95, 0x01,        #   Report Count (1)
-        0x75, 0x07,        #   Report Size (7)
-        0x15, 0x00,        #   Logical Minimum (0)
-        0x25, 0x05,        #   Logical Maximum (5)
-        0x81, 0x02,        #   Input (Data,Var,Abs)
-        0x05, 0x09,        #   Usage Page (Button)
-        0x09, 0x01,        #   Usage (Button 1)
-        0x25, 0x01,        #   Logical Maximum (1)
-        0x75, 0x01,        #   Report Size (1)
-        0x95, 0x01,        #   Report Count (1)
-        0x81, 0x02,        #   Input (Data,Var,Abs)
-        0x05, 0x0D,        #   Usage Page (Digitizer)
-        0x09, 0x56,        #   Usage (Scan Time)
-        0x55, 0x00,        #   Unit Exponent (0)
-        0x66, 0x01, 0x10,  #   Unit (Sekunden)
-        0x47, 0xFF, 0xFF, 0x00, 0x00,   # Physical Maximum (65535)
-        0x27, 0xFF, 0xFF, 0x00, 0x00,   # Logical Maximum (65535)
-        0x75, 0x10,        #   Report Size (16)
-        0x95, 0x01,        #   Report Count (1)
-        0x81, 0x02,        #   Input (Data,Var,Abs)
-        0x09, 0x55,        #   Usage (Contact Count Maximum)
-        0x25, 0x05,        #   Logical Maximum (5)
-        0x75, 0x08,        #   Report Size (8)
-        0xB1, 0x02,        #   Feature (Data,Var,Abs)
-        0xC0,              # End Collection
+        0x05, 0x0D,
+        0x09, 0x54,
+        0x95, 0x01,
+        0x75, 0x07,
+        0x15, 0x00,
+        0x25, 0x05,
+        0x81, 0x02,
+        0x05, 0x09,
+        0x09, 0x01,
+        0x25, 0x01,
+        0x75, 0x01,
+        0x95, 0x01,
+        0x81, 0x02,
+        0x05, 0x0D,
+        0x09, 0x56,
+        0x55, 0x00,
+        0x66, 0x01, 0x10,
+        0x47, 0xFF, 0xFF, 0x00, 0x00,
+        0x27, 0xFF, 0xFF, 0x00, 0x00,
+        0x75, 0x10,
+        0x95, 0x01,
+        0x81, 0x02,
+        0x09, 0x55,
+        0x25, 0x05,
+        0x75, 0x08,
+        0xB1, 0x02,
+        0xC0,
     ]
 )
 
-# 5. Verbrauchersteuerung (Multimediatasten)
 CONSUMER = bytes([
-    0x05, 0x0C,        # Usage Page (Consumer)
-    0x09, 0x01,        # Usage (Consumer Control)
-    0xA1, 0x01,        # Collection (Application)
-    0x85, 0x03,        #   Report ID (3)
-    0x15, 0x00,        #   Logical Minimum (0)
-    0x26, 0xFF, 0x03,  #   Logical Maximum (1023)
-    0x19, 0x00,        #   Usage Minimum (0)
-    0x2A, 0xFF, 0x03,  #   Usage Maximum (1023)
-    0x75, 0x10,        #   Report Size (16)
-    0x95, 0x02,        #   Report Count (2)
-    0x81, 0x00,        #   Input (Data,Array,Abs)
-    0xC0,              # End Collection
+    0x05, 0x0C,
+    0x09, 0x01,
+    0xA1, 0x01,
+    0x85, 0x03,
+    0x15, 0x00,
+    0x26, 0xFF, 0x03,
+    0x19, 0x00,
+    0x2A, 0xFF, 0x03,
+    0x75, 0x10,
+    0x95, 0x02,
+    0x81, 0x00,
+    0xC0,
 ])
 
 KBD_NKRO = bytes([
-    0x05, 0x01,        # Usage Page (Generic Desktop)
-    0x09, 0x06,        # Usage (Keyboard)
-    0xA1, 0x01,        # Collection (Application)
-    0x85, 0x02,        #   Report ID (2)
-    0x05, 0x07,        #   Usage Page (Keyboard/Keypad)
-    0x19, 0xE0,        #   Usage Minimum (224)
-    0x29, 0xE7,        #   Usage Maximum (231)
-    0x15, 0x00,        #   Logical Minimum (0)
-    0x25, 0x01,        #   Logical Maximum (1)
-    0x75, 0x01,        #   Report Size (1)
-    0x95, 0x08,        #   Report Count (8)
-    0x81, 0x02,        #   Input (Data,Var,Abs)
-    0x19, 0x00,        #   Usage Minimum (0)
-    0x29, 0x77,        #   Usage Maximum (119)
-    0x95, 0x78,        #   Report Count (120)
-    0x81, 0x02,        #   Input (Data,Var,Abs)
-    0xC0,              # End Collection
+    0x05, 0x01,
+    0x09, 0x06,
+    0xA1, 0x01,
+    0x85, 0x02,
+    0x05, 0x07,
+    0x19, 0xE0,
+    0x29, 0xE7,
+    0x15, 0x00,
+    0x25, 0x01,
+    0x75, 0x01,
+    0x95, 0x08,
+    0x81, 0x02,
+    0x19, 0x00,
+    0x29, 0x77,
+    0x95, 0x78,
+    0x81, 0x02,
+    0xC0,
 ])
 
 GUT = [
@@ -274,13 +268,11 @@ GUT = [
 E_OK, E_TRUNC, E_NEST, E_FIELDS, E_RIDS = 0, 1, 2, 3, 4
 E_PUSH, E_SIZE, E_USAGE, E_LONG, E_EMPTY, E_BIG = 5, 6, 7, 8, 9, 10
 
-KAPUTT = [
-    # mitten in einem Posten abgeschnitten
+BROKEN = [
     ("abgeschn", KBD_BOOT[:41], E_TRUNC),
     ("kopfleer", KBD_BOOT[:62] + bytes([0x26]), E_TRUNC),
     ("offen", KBD_BOOT[:-1], E_NEST),
     ("endeohne", bytes([0xC0]), E_NEST),
-    # neun Sammlungen tief -- MAX_DEPTH ist acht
     ("zutief", bytes([0x05, 0x01, 0x09, 0x06] + [0xA1, 0x01] * 9), E_NEST),
     ("popleer", bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0xB4, 0xC0]),
      E_PUSH),
@@ -293,7 +285,6 @@ KAPUTT = [
                        0x81, 0x02, 0xC0]), E_BIG),
     ("langpost", bytes([0x05, 0x01, 0xFE, 0x02, 0x00, 0x00, 0x00, 0xC0]),
      E_LONG),
-    # leer
     ("leer", b"", E_EMPTY),
     ("vielfeld",
      bytes([0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x75, 0x01, 0x95, 0x01]
@@ -320,7 +311,7 @@ def bitset(buf, bit, wert, n=1):
     return buf
 
 
-def nkro(mods, tasten):
+def nkro(mods, keys):
     """Ein Bericht der NKRO-Tastatur (Beschreibung 5, Nummer 2).
     Oktett 0 ist die Nummer, dann 8 Bit Zusatztasten (0xE0..0xE7),
     dann 120 Bit -- EIN Bit je Taste, Gebrauch 0 bis 119."""
@@ -328,23 +319,23 @@ def nkro(mods, tasten):
     b[0] = 2
     for m in mods:
         bitset(b, 8 + (m - 0xE0), 1)
-    for u in tasten:
+    for u in keys:
         bitset(b, 8 + 8 + u, 1)
     return bytes(b)
 
 
-def bootkbd(mods, tasten):
+def bootkbd(mods, keys):
     """Ein Bericht der Boot-Tastatur (Beschreibung 0, ohne Nummer):
     ein Zusatztastenoktett, ein leeres, sechs Plaetze."""
     b = bytearray(8)
     for m in mods:
         b[0] |= 1 << (m - 0xE0)
-    for i, u in enumerate(tasten[:6]):
+    for i, u in enumerate(keys[:6]):
         b[2 + i] = u
     return bytes(b)
 
 
-def ptp(finger, knopf=0, zeit=0):
+def ptp(finger, button=0, zeit=0):
     """Ein Bericht des Praezisions-Touchpads (Beschreibung 3, Nummer 1).
 
     Bitlage je Finger k, ab Bit k*40 (nachgerechnet aus der
@@ -362,15 +353,15 @@ def ptp(finger, knopf=0, zeit=0):
     b[0] = 1
     for k, f in enumerate(finger[:5]):
         cid, x, y = f[0], f[1], f[2]
-        conf = f[3] if len(f) > 3 else 1   # 0 = "palm" (not confident)
+        conf = f[3] if len(f) > 3 else 1
         o = 8 + k * 40
-        bitset(b, o + 0, conf)  # Zuversicht
-        bitset(b, o + 1, 1)     # Spitzenschalter
+        bitset(b, o + 0, conf)
+        bitset(b, o + 1, 1)
         bitset(b, o + 4, cid, 4)
         bitset(b, o + 8, x, 16)
         bitset(b, o + 24, y, 16)
     bitset(b, 8 + 200, len(finger[:5]), 7)
-    bitset(b, 8 + 207, knopf, 1)
+    bitset(b, 8 + 207, button, 1)
     bitset(b, 8 + 208, zeit, 16)
     return bytes(b)
 
@@ -383,7 +374,6 @@ def bootmaus(knoepfe, dx, dy):
 BERICHTE = [
     (5, nkro([], [4, 5, 6, 7, 8, 9, 10, 11]), "acht Tasten"),
     (5, nkro([0xE1], [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]), "elf mit Umschalt"),
-    #     alles los
     (5, nkro([], []), "alles losgelassen"),
     (5, nkro([0xE3], []), "Super gedrueckt"),
     (5, nkro([0xE3], [4]), "Super+a"),
@@ -393,55 +383,42 @@ BERICHTE = [
     (0, bootkbd([0xE1], [4]), "boot: Umschalt+a"),
     (0, bootkbd([], []), "boot: los"),
     (0, bootkbd([], [1, 1, 1, 1, 1, 1]), "boot: Ueberlauf"),
-    #     r157 (H-001): three keys in ONE report, slots in the order they
-    #     went down: x z y. The bitmap used to give x y z.
     (0, bootkbd([], [0x1B, 0x1D, 0x1C]), "boot: Reihenfolge xzy"),
     (0, bootkbd([], []), "boot: Reihenfolge los"),
-    #     r157: modifiers and a key in ONE report: modifiers first.
     (0, bootkbd([0xE1, 0xE0], [4]), "boot: Strg+Umschalt+a"),
     (0, bootkbd([], []), "boot: Strg+Umschalt los"),
     (1, bootmaus(1, 10, 250), "maus: links, +10, -6"),
     (1, bootmaus(0, 0, 0), "maus: losgelassen"),
     (3, ptp([(1, 1000, 800)]), "pad: aufsetzen"),
-    #     +300 Einheiten in x.  Teiler 3616/1024 = 3 -> 100 Bildpunkte
     (3, ptp([(1, 1300, 800)]), "pad: +300x -> +100px"),
-    #     +150 in y.  Teiler 2184/768 = 2 -> 75 Bildpunkte
     (3, ptp([(1, 1300, 950)]), "pad: +150y -> +75px"),
-    #     Knopf gedrueckt
-    (3, ptp([(1, 1300, 950)], knopf=1), "pad: klick"),
-    (3, ptp([(1, 1300, 950)], knopf=0), "pad: klick los"),
+    (3, ptp([(1, 1300, 950)], button=1), "pad: klick"),
+    (3, ptp([(1, 1300, 950)], button=0), "pad: klick los"),
     (3, ptp([(1, 1300, 950), (2, 1800, 950)]), "pad: zwei Finger"),
     (3, ptp([(1, 1300, 1070), (2, 1800, 1070)]), "pad: rollen"),
-    #     abheben
     (3, ptp([]), "pad: abheben"),
-    #     W-TPSET4 r1740: the legacy path (no gesture machine) maps a press with the finger in the bottom right
-    #     corner (3400/2000 of 3616/2184) to the RIGHT button, a press in the middle stays left
     (3, ptp([(1, 3400, 2000)]), "pad: ecke aufsetzen"),
-    (3, ptp([(1, 3400, 2000)], knopf=1), "pad: ecke klick"),
-    (3, ptp([(1, 3400, 2000)], knopf=0), "pad: ecke los"),
+    (3, ptp([(1, 3400, 2000)], button=1), "pad: ecke klick"),
+    (3, ptp([(1, 3400, 2000)], button=0), "pad: ecke los"),
     (3, ptp([]), "pad: ecke abheben"),
-    # --- L-002 r797: GESTURES. Played only with `hidgest` (gbase).
-    #     Pad 3616 x 2184: slop = 56, edge strip x >= 3255, swipe >= 602.
-    #     The replay clock runs 20 ms per report (tap limit 250 ms).
     (3, ptp([(1, 1500, 1000)]), "gest: tap aufsetzen"),
     (3, ptp([(1, 1500, 1000)]), "gest: tap halten"),
-    (3, ptp([]), "gest: tap ende"),                     # left click
+    (3, ptp([]), "gest: tap ende"),
     (3, ptp([(1, 1500, 1000), (2, 2000, 1000)]), "gest: zwei tap aufsetzen"),
     (3, ptp([(1, 1500, 1000), (2, 2000, 1000)]), "gest: zwei tap halten"),
-    (3, ptp([]), "gest: zwei tap ende"),                # right click
+    (3, ptp([]), "gest: zwei tap ende"),
     (3, ptp([(1, 1000, 1000), (2, 1500, 1000), (3, 2000, 1000)]),
      "gest: drei tap aufsetzen"),
-    (3, ptp([]), "gest: drei tap ende"),                # middle click
+    (3, ptp([]), "gest: drei tap ende"),
     (3, ptp([(1, 3400, 500)]), "gest: rand aufsetzen"),
-    (3, ptp([(1, 3400, 520)]), "gest: rand zittern"),   # inside slop
-    (3, ptp([(1, 3400, 700)]), "gest: rand scharf"),    # arms, no event
-    (3, ptp([(1, 3400, 1000)]), "gest: rand rollen"),   # +300 -> 1 detent
+    (3, ptp([(1, 3400, 520)]), "gest: rand zittern"),
+    (3, ptp([(1, 3400, 700)]), "gest: rand scharf"),
+    (3, ptp([(1, 3400, 1000)]), "gest: rand rollen"),
     (3, ptp([]), "gest: rand ende"),
     (3, ptp([(1, 1000, 1000), (2, 1500, 1000)]), "gest: rollen aufsetzen"),
     (3, ptp([(1, 1000, 1200), (2, 1500, 1200)]), "gest: rollen entscheiden"),
     (3, ptp([(1, 1000, 1400), (2, 1500, 1400)]), "gest: rollen rollen"),
     (3, ptp([]), "gest: rollen ende"),
-    # r804: two fingers sideways -> one horizontal wheel step to the right (hidev: hrad)
     (3, ptp([(1, 1000, 1000), (2, 1500, 1000)]), "gest: seit aufsetzen"),
     (3, ptp([(1, 1200, 1000), (2, 1700, 1000)]), "gest: seit entscheiden"),
     (3, ptp([(1, 1400, 1000), (2, 1900, 1000)]), "gest: seit rollen"),
@@ -453,17 +430,15 @@ BERICHTE = [
     (3, ptp([(1, 2400, 1000), (2, 2800, 1000), (3, 3200, 1000)]),
      "gest: wisch aufsetzen"),
     (3, ptp([(1, 1700, 1000), (2, 2100, 1000), (3, 2500, 1000)]),
-     "gest: wisch links"),                              # dir 1, n 3
+     "gest: wisch links"),
     (3, ptp([]), "gest: wisch ende"),
     (3, ptp([(1, 1500, 1000, 0)]), "gest: handballen aufsetzen"),
     (3, ptp([(1, 1500, 1000, 0)]), "gest: handballen halten"),
-    (3, ptp([]), "gest: handballen ende"),              # no click
+    (3, ptp([]), "gest: handballen ende"),
     (3, ptp([(1, 1500, 1000, 0), (2, 2000, 1200)]), "gest: ballen+finger aufsetzen"),
     (3, ptp([(1, 1500, 1000, 0), (2, 2000, 1200)]), "gest: ballen+finger halten"),
-    (3, ptp([]), "gest: ballen+finger ende"),           # ONE left click
+    (3, ptp([]), "gest: ballen+finger ende"),
     (3, ptp([]), "gest: ende"),
-    # --- W-TPSET4: multi-finger section (still part of the hidgest replay).
-    #     tap-and-drag: tap, then touch again quickly and move 300 units: left button held while moving
     (3, ptp([(1, 1500, 1000)]), "mf: drag tap aufsetzen"),
     (3, ptp([(1, 1500, 1000)]), "mf: drag tap halten"),
     (3, ptp([]), "mf: drag tap ende"),
@@ -471,12 +446,10 @@ BERICHTE = [
     (3, ptp([(1, 1800, 1000)]), "mf: drag ziehen"),
     (3, ptp([(1, 2100, 1000)]), "mf: drag weiter"),
     (3, ptp([]), "mf: drag ende"),
-    #     pinch closing: -200 units = one wheel step the other way, with a virtual Ctrl around it
     (3, ptp([(1, 1000, 1000), (2, 1800, 1000)]), "mf: zu aufsetzen"),
     (3, ptp([(1, 1100, 1000), (2, 1700, 1000)]), "mf: zu entscheiden"),
     (3, ptp([(1, 1200, 1000), (2, 1600, 1000)]), "mf: zu weiter"),
     (3, ptp([]), "mf: zu ende"),
-    #     three-finger swipes: right (dir 2), up (dir 3), down (dir 4)
     (3, ptp([(1, 1500, 1000), (2, 1900, 1000), (3, 2300, 1000)]), "mf: rechts aufsetzen"),
     (3, ptp([(1, 2200, 1000), (2, 2600, 1000), (3, 3000, 1000)]), "mf: rechts wisch"),
     (3, ptp([]), "mf: rechts ende"),
@@ -486,20 +459,18 @@ BERICHTE = [
     (3, ptp([(1, 1500, 800), (2, 1900, 800), (3, 2300, 800)]), "mf: runter aufsetzen"),
     (3, ptp([(1, 1500, 1500), (2, 1900, 1500), (3, 2300, 1500)]), "mf: runter wisch"),
     (3, ptp([]), "mf: runter ende"),
-    #     clickpad press: finger in the bottom right 25 % box = right button, elsewhere = left button
     (3, ptp([(1, 3400, 2000)]), "mf: ecke aufsetzen"),
-    (3, ptp([(1, 3400, 2000)], knopf=1), "mf: ecke klick"),
-    (3, ptp([(1, 3400, 2000)], knopf=0), "mf: ecke los"),
+    (3, ptp([(1, 3400, 2000)], button=1), "mf: ecke klick"),
+    (3, ptp([(1, 3400, 2000)], button=0), "mf: ecke los"),
     (3, ptp([]), "mf: ecke ende"),
     (3, ptp([(1, 1500, 1000)]), "mf: mitte aufsetzen"),
-    (3, ptp([(1, 1500, 1000)], knopf=1), "mf: mitte klick"),
-    (3, ptp([(1, 1500, 1000)], knopf=0), "mf: mitte los"),
+    (3, ptp([(1, 1500, 1000)], button=1), "mf: mitte klick"),
+    (3, ptp([(1, 1500, 1000)], button=0), "mf: mitte los"),
     (3, ptp([]), "mf: mitte ende"),
-    #     options changed in the middle of the script (corner, pinch, swipe3 off): the same moves do something else
     (3, ptp([]), "mf: optionen aus"),
     (3, ptp([(1, 3400, 2000)]), "mf: aus ecke aufsetzen"),
-    (3, ptp([(1, 3400, 2000)], knopf=1), "mf: aus ecke klick"),
-    (3, ptp([(1, 3400, 2000)], knopf=0), "mf: aus ecke los"),
+    (3, ptp([(1, 3400, 2000)], button=1), "mf: aus ecke klick"),
+    (3, ptp([(1, 3400, 2000)], button=0), "mf: aus ecke los"),
     (3, ptp([]), "mf: aus ecke ende"),
     (3, ptp([(1, 1000, 1000), (2, 1800, 1000)]), "mf: aus zu aufsetzen"),
     (3, ptp([(1, 1100, 1000), (2, 1700, 1000)]), "mf: aus zu entscheiden"),
@@ -514,8 +485,6 @@ BERICHTE = [
 
 
 
-#
-#
 
 
 def i2c_res(adr, hz=400000, quelle=b"\\_SB.PCI0.I2C1\0"):
@@ -526,15 +495,15 @@ def i2c_res(adr, hz=400000, quelle=b"\\_SB.PCI0.I2C1\0"):
     return bytes([0x8E]) + len(rest).to_bytes(2, "little") + rest
 
 
-def acpi_tabelle(adressen, sig=b"DSDT"):
+def acpi_table(adressen, sig=b"DSDT"):
     """Eine Tabelle mit Kopf (36 Oktett) und AML-artigem Fuellwerk, in
     dem die Ressourcenvorlagen stehen.  Das Fuellwerk enthaelt absichtlich
     ein einzelnes 0x8E, das KEINE I2C-Verbindung ist -- ein Sucher, der
     nur auf das Oktett schaut, faellt daran auf."""
     koerper = bytearray()
-    koerper += bytes([0x5B, 0x82, 0x30, 0x44, 0x45, 0x56, 0x30])  # Device(DEV0)
-    koerper += bytes([0x08, 0x5F, 0x48, 0x49, 0x44])              # Name(_HID
-    koerper += (0x500CD041).to_bytes(4, "little")                 # EisaId PNP0C50
+    koerper += bytes([0x5B, 0x82, 0x30, 0x44, 0x45, 0x56, 0x30])
+    koerper += bytes([0x08, 0x5F, 0x48, 0x49, 0x44])
+    koerper += (0x500CD041).to_bytes(4, "little")
     koerper += bytes([0x8E, 0x00, 0x00, 0xFF])
     koerper += i2c_res(adressen[0])
     koerper += bytes([0x11, 0x22, 0x33, 0x44, 0x8E, 0x02])
@@ -552,7 +521,7 @@ def acpi_tabelle(adressen, sig=b"DSDT"):
 
 
 I2C_ADRESSEN = [0x2C, 0x15]
-ACPI_BLOB = acpi_tabelle(I2C_ADRESSEN)
+ACPI_BLOB = acpi_table(I2C_ADRESSEN)
 
 
 
@@ -562,7 +531,7 @@ MAX_FIELDS, MAX_RIDS, MAX_USAGES, MAX_DEPTH, MAX_PUSH = 64, 16, 32, 8, 8
 M64 = 0xFFFFFFFFFFFFFFFF
 
 
-class Fehler(Exception):
+class Error(Exception):
     def __init__(self, code, pos):
         self.code = code
         self.pos = pos
@@ -639,8 +608,7 @@ def zerlege(d):
         kopf["err"] = E_EMPTY
         return kopf, felder
 
-    gl = [0] * 10   # 0 Seite 1 lmin 2 lmax 3 pmin 4 pmax
-    #                 5 uexp 6 unit 7 rsize 8 rid 9 rcount
+    gl = [0] * 10
     stapel = []
     ul, umin, umax, bereich = [], 0, 0, False
     rids = []
@@ -669,14 +637,14 @@ def zerlege(d):
             b0 = d[p]
             p += 1
             if b0 == 0xFE:
-                raise Fehler(E_LONG, start)
+                raise Error(E_LONG, start)
             bsize = b0 & 3
             if bsize == 3:
                 bsize = 4
             btype = (b0 >> 2) & 3
             btag = (b0 >> 4) & 0xF
             if p + bsize > len(d):
-                raise Fehler(E_TRUNC, start)
+                raise Error(E_TRUNC, start)
             data = 0
             for k in range(bsize):
                 data |= d[p + k] << (k * 8)
@@ -698,24 +666,24 @@ def zerlege(d):
                     gl[btag] = data
                 elif btag == 8:
                     if data == 0 or data > 255:
-                        raise Fehler(E_SIZE, start)
+                        raise Error(E_SIZE, start)
                     gl[8] = data
                     kopf["hasid"] = 1
                 elif btag == 9:
                     gl[9] = data
                 elif btag == 10:
                     if len(stapel) >= MAX_PUSH:
-                        raise Fehler(E_PUSH, start)
+                        raise Error(E_PUSH, start)
                     stapel.append(list(gl))
                 elif btag == 11:
                     if not stapel:
-                        raise Fehler(E_PUSH, start)
+                        raise Error(E_PUSH, start)
                     gl = stapel.pop()
 
             elif btype == 2:
                 if btag == 0:
                     if len(ul) >= MAX_USAGES:
-                        raise Fehler(E_USAGE, start)
+                        raise Error(E_USAGE, start)
                     ul.append(data if bsize == 4
                               else (gl[0] << 16) | (data & 0xFFFF))
                 elif btag == 1:
@@ -731,7 +699,7 @@ def zerlege(d):
                 if btag == 0xA:
                     tiefe += 1
                     if tiefe > MAX_DEPTH:
-                        raise Fehler(E_NEST, start)
+                        raise Error(E_NEST, start)
                     maxd = max(maxd, tiefe)
                     if tiefe == 1:
                         tu = ul[0] if ul else (umin if bereich else 0)
@@ -740,35 +708,35 @@ def zerlege(d):
                         karte |= art_von((tu >> 16) & 0xFFFF, tu & 0xFFFF)
                 elif btag == 0xC:
                     if tiefe == 0:
-                        raise Fehler(E_NEST, start)
+                        raise Error(E_NEST, start)
                     tiefe -= 1
                 elif btag in (0x8, 0x9, 0xB):
                     kd = {0x8: KIND_IN, 0x9: KIND_OUT, 0xB: KIND_FEAT}[btag]
                     rsize, rcount = gl[7], gl[9]
                     if rsize > 32:
-                        raise Fehler(E_SIZE, start)
+                        raise Error(E_SIZE, start)
                     if rcount > 1024:
-                        raise Fehler(E_SIZE, start)
+                        raise Error(E_SIZE, start)
                     if rsize * rcount > 4096:
-                        raise Fehler(E_BIG, start)
+                        raise Error(E_BIG, start)
                     slot = rid_slot(gl[8])
                     if slot >= MAX_RIDS:
-                        raise Fehler(E_RIDS, start)
+                        raise Error(E_RIDS, start)
                     idx = kd
                     base = rids[slot][idx]
                     if base + rsize * rcount > 4096:
-                        raise Fehler(E_BIG, start)
+                        raise Error(E_BIG, start)
                     for e in ausgeben(gl[8], kd, data & 0xFFFF, base, rsize,
                                       rcount, gl[0], ul, umin, umax, bereich,
                                       gl[1], gl[2]):
                         if len(felder) >= MAX_FIELDS:
-                            raise Fehler(E_FIELDS, start)
+                            raise Error(E_FIELDS, start)
                         felder.append(e)
                     rids[slot][idx] = base + rsize * rcount
                 ul, umin, umax, bereich = [], 0, 0, False
         if tiefe != 0:
-            raise Fehler(E_NEST, len(d))
-    except Fehler as f:
+            raise Error(E_NEST, len(d))
+    except Error as f:
         kopf["err"] = f.code
         kopf["errat"] = f.pos
         raus()
@@ -782,10 +750,8 @@ def zerlege(d):
     return kopf, felder
 
 
-# ----------------------------------------------------------------------
-# Die Ausgaben.
 
-ALLE = GUT + [(k[0], k[1]) for k in KAPUTT]
+ALL = GUT + [(k[0], k[1]) for k in BROKEN]
 
 
 def firn():
@@ -802,7 +768,7 @@ def firn():
     a("// naechsten Mal ungleich.")
     a("//")
     a("// Das Ganze kostet %d Oktett Nutzdaten im Abbild und wird NUR im"
-      % sum(len(d) for _, d in ALLE))
+      % sum(len(d) for _, d in ALL))
     a("// Modus `hidrep` angesehen.")
     a("")
     a("profile kernel")
@@ -812,7 +778,7 @@ def firn():
     a("export { count, len_of, name_of, load, GUTE,")
     a("    bcount, bdesc, blen, bload, alen, aload, gbase, obase }")
     a("")
-    a("const N: u64 = %d" % len(ALLE))
+    a("const N: u64 = %d" % len(ALL))
     a("// Die ersten GUTE Beschreibungen muessen durchgehen, die uebrigen")
     a("// muessen mit einer bestimmten Fehlernummer scheitern.")
     a("const GUTE: u64 = %d" % len(GUT))
@@ -823,7 +789,7 @@ def firn():
     a("")
     a("fn len_of(i: u64) -> u64 {")
     a("    var t: [u64; %d] = [%s]"
-      % (len(ALLE), ", ".join(str(len(d)) for _, d in ALLE)))
+      % (len(ALL), ", ".join(str(len(d)) for _, d in ALL)))
     a("    if i >= N {")
     a("        return 0")
     a("    }")
@@ -834,8 +800,8 @@ def firn():
     a("// lesbar, ohne dass eine Zeichenkettentabelle noetig waere.")
     a("fn name_of(i: u64) -> u64 {")
     namen = ["0x%016X" % int.from_bytes((nm + "        ")[:8].encode("ascii"),
-                                        "little") for nm, _ in ALLE]
-    a("    var t: [u64; %d] = [%s]" % (len(ALLE), ", ".join(namen)))
+                                        "little") for nm, _ in ALL]
+    a("    var t: [u64; %d] = [%s]" % (len(ALL), ", ".join(namen)))
     a("    if i >= N {")
     a("        return 0")
     a("    }")
@@ -843,12 +809,12 @@ def firn():
     a("}")
     a("")
     offs, cur = [], 0
-    for _, d in ALLE:
+    for _, d in ALL:
         offs.append(cur)
         cur += (len(d) + 7) // 8
     a("fn off_of(i: u64) -> u64 {")
     a("    var t: [u64; %d] = [%s]"
-      % (len(ALLE), ", ".join(str(o) for o in offs)))
+      % (len(ALL), ", ".join(str(o) for o in offs)))
     a("    if i >= N {")
     a("        return 0")
     a("    }")
@@ -872,7 +838,7 @@ def firn():
     a("}")
     a("")
     worte = []
-    for _, d in ALLE:
+    for _, d in ALL:
         pad = d + b"\0" * ((8 - len(d) % 8) % 8)
         for k in range(0, len(pad), 8):
             worte.append(int.from_bytes(pad[k:k + 8], "little"))
@@ -889,7 +855,6 @@ def firn():
     a("    }")
     a("    return t[i as usize]")
     a("}")
-    # ---------------------------------------------------------- Berichte
     a("")
     a("// ------------------------------------------------------ DIE BERICHTE")
     a("//")
@@ -1026,9 +991,9 @@ def firn():
     print("\n".join(z))
 
 
-def kopf_zeilen():
+def header_lines():
     out = []
-    for i, (nm, d) in enumerate(ALLE):
+    for i, (nm, d) in enumerate(ALL):
         k, _ = zerlege(d)
         out.append("hidrep: dev=%d ok=%d err=%d errat=%d felder=%d rids=%d "
                    "hasid=%d top=0x%x art=%d bits=%d posten=%d tiefe=%d"
@@ -1038,9 +1003,9 @@ def kopf_zeilen():
     return out
 
 
-def feld_zeilen():
+def field_lines():
     out = []
-    for i, (nm, d) in enumerate(ALLE):
+    for i, (nm, d) in enumerate(ALL):
         k, f = zerlege(d)
         if not k["ok"]:
             continue
@@ -1073,12 +1038,12 @@ def main():
     if was == "firn":
         firn()
     elif was == "kopf":
-        print("\n".join(kopf_zeilen()))
+        print("\n".join(header_lines()))
     elif was == "felder":
-        print("\n".join(feld_zeilen()))
+        print("\n".join(field_lines()))
     elif was == "fehler":
         schlecht = 0
-        for nm, d, e in KAPUTT:
+        for nm, d, e in BROKEN:
             k, _ = zerlege(d)
             gut = (e == k["err"] and k["ok"] == 0)
             schlecht += 0 if gut else 1

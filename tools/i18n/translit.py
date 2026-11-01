@@ -1,49 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/i18n/translit.py -- in Sprachdateien stehen ECHTE ZEICHEN.
-
-WOFUER DIESE PRUEFUNG DA IST. Bis Runde I18N konnte dieses System kein
-"ue" auf den Bildschirm bringen, und deshalb stand im ganzen Baum die
-UMSCHRIFT: "aendern", "Groesse", "schliessen", "Menue". Seit I18N kann
-die Schrift es (339 Zeichen, `assets/osum-sans.ttf`) und der Rasterer
-auch. Damit ist die Umschrift kein Notbehelf mehr, sondern ein FEHLER --
-und ein Fehler, den niemand bemerkt, weil die Zeile ja lesbar bleibt.
-Genau so ist "Text schreiben und aendern" ein halbes Jahr lang auf dem
-Schirm gestanden, waehrend zwei Zeilen darueber "Ausfuehren" schon
-richtig als "Ausführen" erschien.
-
-Eine Zusage, die ein Mensch mit dem Auge nachsehen muss, ist keine.
-Deshalb diese hier.
-
-WAS GEPRUEFT WIRD
-
-  1. locale/de/*        JEDER Wert rechts vom "=" und jeder Kommentar.
-  2. assets/apps/*.osp/INFO   `name=` und `info=` -- das sind die
-                        Beschriftungen im Starter, also Bildschirmtext.
-  3. Die LAENGEN, die diese Texte tragen: der Katalog-Wert gegen VALW
-     und der Schluessel gegen KEYW aus kernel/user/msg.fi, und die
-     INFO-Datei gegen die 1023 Oktette, die `appdir.eine_datei` liest.
-
-WARUM EINE WORTLISTE UND KEIN MUSTER. "ae", "oe", "ue" und "ss" kommen
-in richtigem Deutsch dauernd vor: Prozess, Adresse, Klasse, Messung,
-Wasser, muss, dass, Poesie, aktuell, Dueren. Ein Muster auf die
-Buchstabenpaare wuerde jede zweite Zeile anmeckern und waere nach einer
-Woche abgeschaltet. Gesucht werden also STAEMME, die es im Deutschen nur
-als Umschrift gibt -- und jeder Fund nennt den Ersatz, damit man ihn
-nicht nachschlagen muss.
-
-WAS ERLAUBT BLEIBT. Ein Kommentar darf UEBER die Umschrift reden. Dafuer
-muss das Wort in Anfuehrungszeichen stehen ("ue" statt "ü") -- was in
-Anfuehrungszeichen steht, ist ein ZITAT und kein Text. Das ist die
-gleiche Regel wie sonst im Baum: ein Beispiel wird gezeigt, nicht
-verwendet.
-
-  tools/i18n/translit.py            prueft und meldet
-  tools/i18n/translit.py --zaehle   dazu die Zahl der echten Umlaute
-
-rc=0 alles sauber, rc=1 Umschrift gefunden, rc=2 etwas passt nicht mehr
-in seinen Puffer.
-"""
 import glob
 import os
 import re
@@ -235,7 +191,6 @@ _ZITAT = re.compile(r'"[^"]*"')
 
 
 def finde(text, zitate_zaehlen=True):
-    """-> Liste (stamm, ersatz) fuer jeden Fund ausserhalb von Zitaten."""
     if not zitate_zaehlen:
         text = _ZITAT.sub(lambda m: " " * len(m.group(0)), text)
     aus = []
@@ -275,7 +230,6 @@ def main(argv):
     umlaute = 0
     geprueft = 0
 
-    # ---- 1. die Sprachdateien
     for pfad in sorted(glob.glob(os.path.join(wurzel, "locale/de/*"))):
         rel = os.path.relpath(pfad, wurzel)
         for nr, zeile in enumerate(
@@ -304,7 +258,6 @@ def main(argv):
             eng.append("%s  %d Oktette >= FILE_MAX %d"
                        % (rel, os.path.getsize(pfad), g["FILE_MAX"]))
 
-    # ---- 2. die Buendel-Beschriftungen
     for d in sorted(glob.glob(os.path.join(wurzel, "assets/apps/*.osp"))):
         pfad = os.path.join(d, "INFO")
         if not os.path.exists(pfad):

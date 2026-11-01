@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/trayfit/check.py <outdir> <scale> <lang> <flags> -- judge the tray corner (picture 00-bar + serial of shot.sh).
-
-Windows 11 corner, measured:
-  fields   language is ONE line (the code only), the clock is two lines (time over date), no keyboard symbol
-  fit      every text of a field starts inside the cell and ends inside it (measured text width from the report,
-           `tw=`), the ink in the picture too; the clock cell ends >= 8 px before the bar's right edge
-  raster   icon cells are 24*scale wide, all gaps between the tray fields are identical (+-1), one top/height
-  nochip   NO plate behind the symbols or texts: the pixels inset in each cell (corners, edge middles) are the bar
-           background (the gap pixels), +-4 per channel
-  text     language text is DEU/ENG, the clock reads HH:MM (or h:MM AM|PM with flag 12h), date dd.mm.yyyy
-flags: 12h (clock_12h=1), wday (clock_weekday=1)
-"""
 import re, sys, os
 
 out = sys.argv[1]
@@ -58,7 +46,6 @@ def at_px(x, y):
     return px[o], px[o + 1], px[o + 2]
 def near(a, b, t=4): return max(abs(a[i] - b[i]) for i in range(3)) <= t
 
-# ---- text reports of the fields
 def texts(mark):
     return re.findall(r"taskbar: text %s x=(\d+) base=(\d+) fg=\d+ bg=\d+ tw=(\d+) t=(.*)" % mark, ser_bar)
 lt = texts("lang"); ct = texts("clock")
@@ -75,7 +62,6 @@ dre = r"(.{2,3}, )?[0-3][0-9]\.[01][0-9]\.20[0-9][0-9]" if "wday" in flags else 
 say(len(ctx) == 2 and re.fullmatch(dre, ctx[1]) is not None, "date line %s%s" % (ctx[1:] , " (with weekday)" if "wday" in flags else ""))
 say("kbd" not in "".join(re.findall(r"taskbar: icon field=(\w+)", ser_bar)), "no keyboard symbol in front of the language")
 
-# ---- text inside its cell (reported widths)
 for name, tl in (("lang", lt), ("clock", ct)):
     f = F[name]
     ok_all = bool(tl)
@@ -88,7 +74,6 @@ cl = F["clock"]
 say(bw - (cl[0] + cl[2]) >= 8, "the clock cell ends >= 8 px before the bar edge (%d)" % (bw - (cl[0] + cl[2])))
 say(bx + cl[0] + cl[2] <= w, "nothing past the screen edge")
 
-# ---- rects / raster
 order = ["chevron", "lang", "net", "snd", "battery", "clock"]
 R = {n: (F[n][0], F[n][1] + by, F[n][2], F[n][3]) for n in order}
 rs = [R[n] for n in order]
@@ -98,7 +83,6 @@ say(max(gaps) - min(gaps) <= 1 and min(gaps) >= 4, "gaps between all tray fields
 say(len(set((r[1], r[3]) for r in rs)) == 1, "one top and height for all fields")
 say(all(R[n][2] == 24 * sc for n in ("chevron", "net", "snd")), "icon cells are %d wide (%s)" % (24 * sc, [R[n][2] for n in ("chevron", "net", "snd")]))
 
-# ---- text ink inside the cell (picture)
 def ink_cols(x0, y0, x1, y1, bg, thr=60):
     l = r = None
     for y in range(y0, y1):
@@ -108,13 +92,12 @@ def ink_cols(x0, y0, x1, y1, bg, thr=60):
                 if l is None or x < l: l = x
                 if r is None or x > r: r = x
     return l, r
-bgc = at_px(rs[0][0] + rs[0][2] + gaps[0] // 2, rs[0][1] + rs[0][3] // 2)   # the gap between chevron and language = bar ground
+bgc = at_px(rs[0][0] + rs[0][2] + gaps[0] // 2, rs[0][1] + rs[0][3] // 2)
 for name in ("lang", "clock"):
     x, y, ww, hh = R[name]
     l, r = ink_cols(x - 1, y + 2, x + ww + 1, y + hh - 2, bgc)
     say(l is not None and l >= x + 1 and r <= x + ww - 2, "%s ink (x %s..%s) is inside its cell (%d..%d), not cut" % (name, l, r, x, x + ww))
 
-# ---- no chip: just around the ink of every symbol / text the pixels are the ground next to the cell (a plate would be 32 steps off)
 def inkbox(x0, y0, x1, y1, bg, thr=60):
     l = t = 10**9; r = bb = -1
     for y in range(y0, y1):
@@ -126,7 +109,7 @@ def inkbox(x0, y0, x1, y1, bg, thr=60):
 bad = []
 for k, name in enumerate(order):
     x, y, ww, hh = R[name]
-    ref = at_px(x - max(gaps[max(k - 1, 0)] // 2, 2), y + hh // 2)       # the gap left of the cell, same row
+    ref = at_px(x - max(gaps[max(k - 1, 0)] // 2, 2), y + hh // 2)
     bb = inkbox(x + 1, y + 2, x + ww - 1, y + hh - 2, at_px(x + 1, y + hh // 2))
     if bb is None:
         bad.append((name, "no ink")); continue

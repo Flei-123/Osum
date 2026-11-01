@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
-# tools/fui/fixlen.py -- MAKE [u8; N] MATCH THE STRING.
-#
-# Firn stage 0 wants the declared length of a byte array to be exactly
-# the number of bytes in the literal, and it counts escapes (\n) as one.
-# Getting that right by hand across a few hundred labels is busy work
-# that produces exactly one kind of bug, so the machine does it.
-#
-#     tools/fui/fixlen.py <file.fi> ...
-#
-# It only ever rewrites the NUMBER, never the text -- so it cannot
-# quietly change what a label says.
 import re
 import sys
 
@@ -18,7 +7,6 @@ PAT = re.compile(r'(\[u8;\s*)(\d+)(\s*\]\s*=\s*")((?:[^"\\]|\\.)*)(")')
 
 
 def blen(s: str) -> int:
-    # Undo the Firn escapes, then count BYTES in UTF-8.
     out = []
     i = 0
     while i < len(s):

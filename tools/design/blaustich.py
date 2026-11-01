@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Blaustich B-R einer PPM-Aufnahme: gewichtet nach Flaeche.
-Gemessen wird auf den FLAECHENFARBEN (die haeufigsten Toene), nicht auf
-dem ganzen Bild -- Text und Symbole sind bunt und wuerden das Mittel
-verwaschen."""
 import sys, collections
 def read_ppm(p):
     d=open(p,'rb').read()
-    # P6\n<w> <h>\n<max>\n
     parts=[]; i=0
     while len(parts)<4:
         while i<len(d) and d[i:i+1].isspace(): i+=1

@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/design/kreuzecht.py <schirm.ppm>
-#
-#
 import sys
 
 
-def ppm_lesen(p):
+def ppm_read(p):
     d = open(p, 'rb').read()
     tok, i = [], 2
     while len(tok) < 3:
@@ -27,7 +23,7 @@ def ppm_lesen(p):
 
 
 if __name__ == '__main__':
-    w, h, px = ppm_lesen(sys.argv[1])
+    w, h, px = ppm_read(sys.argv[1])
 
     def f(x, y):
         i = (y * w + x) * 3
@@ -64,20 +60,20 @@ if __name__ == '__main__':
         ys = sorted(set(p[1] for p in punkte))
         mx = (xs[0] + xs[-1]) / 2.0
         beide = 0
-        nur_links = 0
-        nur_rechts = 0
+        only_left = 0
+        only_right = 0
         for y in ys:
             l = sum(1 for p in punkte if p[1] == y and p[0] < mx)
             r = sum(1 for p in punkte if p[1] == y and p[0] > mx)
             if l and r:
                 beide += 1
             elif l:
-                nur_links += 1
+                only_left += 1
             elif r:
-                nur_rechts += 1
+                only_right += 1
         print("  %-11s %3d points, %2dx%2d, rows: both %2d / left only %2d / right only %2d"
               % (name, len(punkte), xs[-1] - xs[0] + 1, ys[-1] - ys[0] + 1,
-                 beide, nur_links, nur_rechts))
+                 beide, only_left, only_right))
         if name == "SCHLIESSEN":
             if beide >= (len(ys) * 2) // 3:
                 print("               -> a CROSS (both diagonals)")

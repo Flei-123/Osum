@@ -42,16 +42,9 @@ sys.path.insert(0, os.path.join(WURZEL, "tools", "ttf"))
 
 import raster  # noqa: E402
 
-# The two colour pairs.  THEY ARE NOT INVENTED HERE and they are not a
-# theme: they are the light and the dark binding of the two roles
-# `surface` and `text-primary` from round THEME's `day` scheme
-# (assets/schemes/day.scheme on that branch: neutral50 / neutral900 and
-# neutral900 / neutral100).  This program takes them as a picture would
-# take them, to show that ONE outline serves both; the interface itself
-# never writes a colour, it asks the theme.
-HELL_BG = (0xF8, 0xFA, 0xFC)
-HELL_FG = (0x0F, 0x17, 0x2A)
-HELL_DIM = (0x47, 0x55, 0x69)
+BRIGHT_BG = (0xF8, 0xFA, 0xFC)
+BRIGHT_FG = (0x0F, 0x17, 0x2A)
+BRIGHT_DIM = (0x47, 0x55, 0x69)
 DUNKEL_BG = (0x0F, 0x17, 0x2A)
 DUNKEL_FG = (0xF1, 0xF5, 0xF9)
 DUNKEL_DIM = (0x94, 0xA3, 0xB8)
@@ -92,7 +85,7 @@ class Bild:
     def png(self, pfad):
         roh = bytearray()
         for y in range(self.h):
-            roh.append(0)                       # filter: none
+            roh.append(0)
             at = y * self.w * 3
             roh += self.d[at:at + self.w * 3]
 
@@ -108,7 +101,7 @@ class Bild:
         return len(datei)
 
 
-def glyphe_malen(bild, f, cp, px, x, y, rgb):
+def glyphe_paint(bild, f, cp, px, x, y, rgb):
     """One glyph, top left at (x, y), the em box px on a side.
 
     The icon font's ascent is its whole em, so the baseline sits at
@@ -133,7 +126,7 @@ def glyphe_malen(bild, f, cp, px, x, y, rgb):
     return gesetzt
 
 
-def text_malen(bild, f, px, x, grund, s, rgb):
+def text_paint(bild, f, px, x, grund, s, rgb):
     cx = x * 64
     vorher = 0
     for ch in s:
@@ -154,7 +147,7 @@ def text_malen(bild, f, px, x, grund, s, rgb):
     return cx >> 6
 
 
-def liste_lesen(pfad):
+def list_read(pfad):
     aus = []
     for roh in open(pfad, encoding="ascii"):
         if roh.startswith("#") or not roh.strip():
@@ -166,18 +159,18 @@ def liste_lesen(pfad):
     return aus
 
 
-def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, titel):
+def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
     """One sheet: per icon a row of sizes and the name."""
-    spalten = 2
-    je = (len(eintraege) + spalten - 1) // spalten
+    columns = 2
+    je = (len(eintraege) + columns - 1) // columns
     zellw = 300
     zeilh = max(sizes) + 8
     rand = 16
     kopf = 34
-    w = rand * 2 + zellw * spalten
+    w = rand * 2 + zellw * columns
     h = kopf + rand + je * zeilh
     b = Bild(w, h, bg)
-    text_malen(b, tfont, 15, rand, rand + 12, titel, fg)
+    text_paint(b, tfont, 15, rand, rand + 12, title, fg)
     x0 = rand
     for i, (name, cp, _q) in enumerate(eintraege):
         sp = i // je
@@ -185,17 +178,17 @@ def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, titel):
         cx = x0 + sp * zellw
         cy = kopf + ze * zeilh
         for px in sizes:
-            glyphe_malen(b, ifont, cp, px, cx, cy + (max(sizes) - px) // 2, fg)
+            glyphe_paint(b, ifont, cp, px, cx, cy + (max(sizes) - px) // 2, fg)
             cx += px + 6
         kurz = name[5:] if name.startswith("icon.") else name
-        text_malen(b, tfont, 13, cx + 4, cy + max(sizes) - 5, kurz, dim)
+        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, kurz, dim)
     return b
 
 
 def main(argv):
     ifont_p = os.path.join(WURZEL, "assets", "osum-icons.ttf")
     tfont_p = os.path.join(WURZEL, "assets", "osum-sans.ttf")
-    liste_p = os.path.join(WURZEL, "assets", "icons", "icons.list")
+    list_p = os.path.join(WURZEL, "assets", "icons", "icons.list")
     aus_d = os.path.join(WURZEL, "docs", "icons")
     sizes = [16, 20, 24]
     i = 1
@@ -206,7 +199,7 @@ def main(argv):
         elif a == "--text":
             tfont_p = argv[i + 1]; i += 2
         elif a == "--list":
-            liste_p = argv[i + 1]; i += 2
+            list_p = argv[i + 1]; i += 2
         elif a == "--out":
             aus_d = argv[i + 1]; i += 2
         elif a == "--sizes":
@@ -216,7 +209,7 @@ def main(argv):
             return 2
 
     os.makedirs(aus_d, exist_ok=True)
-    eintraege = liste_rest = liste_lesen(liste_p)
+    eintraege = list_rest = list_read(list_p)
     ifont = raster.Ttf(open(ifont_p, "rb").read())
     tfont = raster.Ttf(open(tfont_p, "rb").read())
     grad = ", ".join(str(s) for s in sizes) + " px"
@@ -229,17 +222,13 @@ def main(argv):
 
     stuecke = [
         ("icons-light.png",
-         blatt(eintraege, ifont, tfont, sizes, HELL_BG, HELL_FG, HELL_DIM,
+         blatt(eintraege, ifont, tfont, sizes, BRIGHT_BG, BRIGHT_FG, BRIGHT_DIM,
                "Osum icons -- light, text-primary on surface, " + grad)),
         ("icons-dark.png",
          blatt(eintraege, ifont, tfont, sizes, DUNKEL_BG, DUNKEL_FG,
                DUNKEL_DIM,
                "Osum icons -- dark, the same outlines, one colour changed, "
                + grad)),
-        # THE COLOURBLIND SHEET.  Everything in one grey, so that the
-        # only thing left telling warning from error from success is the
-        # outline.  If two of them look the same here, they mean the
-        # same to a person who cannot separate the colours.
         ("icons-grey.png",
          blatt(eintraege, ifont, tfont, sizes, (0xEE, 0xEE, 0xEE),
                (0x33, 0x33, 0x33), (0x77, 0x77, 0x77),
@@ -252,10 +241,6 @@ def main(argv):
               % (os.path.join(os.path.relpath(aus_d, WURZEL), name),
                  b.w, b.h, n))
 
-    # THE NUMBER THAT SAYS WHETHER SIXTEEN PIXELS WORKS.  For every icon
-    # at every size: how much ink there is, how much of it reaches full
-    # coverage, and how much sits in the grey middle.  An icon with no
-    # fully covered pixel at all is a smear, and it is named.
     print()
     print("legibility, measured through the kernel's own rasteriser:")
     print("  %-5s %6s %8s %8s %8s" % ("px", "icons", "ink", "solid", "grey%"))
@@ -278,7 +263,7 @@ def main(argv):
                  100.0 * grau / tinte if tinte else 0))
         for n in blass:
             print("        no fully covered pixel at %d px: %s" % (px, n))
-    _ = liste_rest
+    _ = list_rest
     return 0
 
 

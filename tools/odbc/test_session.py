@@ -116,7 +116,7 @@ class Commands(unittest.TestCase):
         s, _ = pair()
 
         def start(fid):
-            s.send(F.Frame(F.REQ, s.new_id(), proto.enc_req("info")))   # second request while exec runs
+            s.send(F.Frame(F.REQ, s.new_id(), proto.enc_req("info")))
         s.request("exec", {"cmd": "sleep 0.5"}, on_start=start)
         self.assertEqual([proto.err_from(f.payload).code for f in s.stray if f.type == F.ERR], ["EBUSY"])
 
@@ -130,7 +130,7 @@ class Commands(unittest.TestCase):
         with self.assertRaises(proto.AgentError) as c:
             s.request("exec", {"cmd": "sleep 30"}, on_start=start, timeout=5)
         self.assertEqual(c.exception.code, "ECANCEL")
-        s.request("info")                      # agent usable again
+        s.request("info")
 
     def test_ps_kill(self):
         s, ag = pair()
@@ -174,7 +174,6 @@ class Commands(unittest.TestCase):
         self.assertEqual(ag.inputs[2]["x"], "10")
 
     def test_input_text_cli_omits_absent_delay(self):
-        # r1170: the agent must get "text" alone (no delay_ms key) and still accept it; guard the client side
         import argparse
         from odb import cli
         s, ag = pair()
@@ -254,9 +253,6 @@ class FileTransfer(unittest.TestCase):
             self.assertEqual(body, blob)
 
     def test_small_pull_acks_at_once(self):
-        # the real odbd sends END only after the last byte is ACKed and resends every ~resend_s; the host used to ACK
-        # only after window/2 bytes or 2 s of silence, and every resend reset that silence timer: a 100 byte pull
-        # never finished on a slow line (VirtualBox uart2).
         s, ag = pair(end_after_ack=True, resend_s=0.1, files={"/small": b"A" * 100})
         s.ack_timeout = 0.5
         t0 = time.time()
@@ -266,7 +262,6 @@ class FileTransfer(unittest.TestCase):
         self.assertEqual(s.stats["rewinds"], 0)
 
     def test_exact_chunk_pull_acks_resend(self):
-        # a file of exactly one full frame is not a "short" frame: the resend rule has to break the deadlock
         s, ag = pair(end_after_ack=True, resend_s=0.1, maxchunk=8192, files={"/exact": b"B" * 8192})
         s.ack_timeout = 0.5
         t0 = time.time()
@@ -325,25 +320,23 @@ class Robustness(unittest.TestCase):
 
     def test_lost_response_is_retried(self):
         s, ag = pair()
-        ag.drop_every = 2                      # every second reply frame is lost
+        ag.drop_every = 2
         for _ in range(6):
             s.request("info", timeout=10)
         self.assertGreater(s.stats["retries"], 0)
-        self.assertEqual(sum(1 for c, _ in ag.log if c == "info"), 6)   # cached answer, no double execution
+        self.assertEqual(sum(1 for c, _ in ag.log if c == "info"), 6)
 
     def test_lost_request_is_retried(self):
         a, b = socket.socketpair()
         s = Session(SocketTransport(a).start(), token=TOKEN, retry_s=0.2)
         ag = MockAgent()
         tr = SocketTransport(b).start()
-        # swallow the first REQ frame, then let the agent see everything
         first = F.Decoder().feed(b"")
         got = []
         ag.serve_bg(tr)
 
         def drop_first():
             pass
-        # simplest: wrap transport write to drop the first frame
         orig = s.t.write
         n = {"i": 0}
 
@@ -420,7 +413,6 @@ class Transports(unittest.TestCase):
 
 
 class CliEndToEnd(unittest.TestCase):
-    """The real CLI as a subprocess against the mock agent on a unix socket."""
 
     @classmethod
     def setUpClass(cls):

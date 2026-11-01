@@ -1,12 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Mock odbd agent following docs/ODB.md (Python counterpart for tests / host-only runs).
-
-  python3 tools/odbc/odb/mock.py --unix /tmp/odb.sock --token-file tok [--chunk N]
-
-Fault knobs (tests): noise_every (garbage before every N-th frame), corrupt_every
-(flip a byte), drop_every (do not send every N-th frame at all), chunk (tiny
-writes like a slow UART). One request at a time (EBUSY), RETRY cache, CANCEL, ACK.
-"""
 import hashlib
 import hmac
 import os
@@ -52,7 +44,7 @@ class MockAgent:
         self.noise_every, self.corrupt_every, self.drop_every, self.chunk = noise_every, corrupt_every, drop_every, chunk
         self.window, self.maxchunk = window, maxchunk
         self.drop_prob, self.resend_s = drop_prob, resend_s
-        self.end_after_ack = end_after_ack   # like the real odbd: END only after the last byte is ACKed (pull)
+        self.end_after_ack = end_after_ack
         self.rnd = random.Random(4711)
         self.allow = set(allow.split(",")) if allow else None
         self.fs = dict(files or {})
@@ -72,7 +64,6 @@ class MockAgent:
         self.job = None
         self.cache = {}
 
-    # ---- plumbing -----------------------------------------------------
     def serve(self, tr):
         dec = F.Decoder()
         self.reset_session()
@@ -121,7 +112,6 @@ class MockAgent:
     def err(self, tr, fid, code, msg="", errno=None):
         self.final(tr, fid, F.ERR, proto.enc_tlv([("code", code), ("msg", msg), ("errno", errno)]))
 
-    # ---- dispatch -------------------------------------------------------
     def handle(self, tr, fr):
         if fr.type == F.PING:
             return self.out(tr, F.PONG, fr.id, fr.payload)
@@ -138,7 +128,7 @@ class MockAgent:
             t, p = self.cache[fr.id]
             return self.out(tr, t, fr.id, p)
         if self.job is not None and self.job.fid == fr.id:
-            return                                  # retry of a running request: ignore
+            return
         try:
             cmd, a = proto.dec_req(fr.payload)
         except proto.ProtoError as e:
@@ -187,7 +177,6 @@ class MockAgent:
             if self.job is j:
                 self.err(tr, j.fid, "EINTERNAL", repr(e))
 
-    # ---- commands (run in a job thread) ------------------------------------
     def cmd_info(self, tr, j):
         self.resp(tr, j.fid, [("os", "MockOS"), ("kernel", "mock-1"), ("uptime_ms", 123456), ("cpus", 2),
                               ("mem_total_kb", 4194304), ("mem_free_kb", 3000000), ("idle_pct", 97),
@@ -285,7 +274,7 @@ class MockAgent:
                     off, b = proto.dec_file(f.payload)
                 except proto.ProtoError:
                     continue
-                if off != len(buf):                  # gap or duplicate: ask for the right offset
+                if off != len(buf):
                     if off < len(buf) and off + len(b) > len(buf):
                         buf += b[len(buf) - off:]
                     self.out(tr, F.ACK, j.fid, proto.enc_ack(proto.FILE, len(buf)))
@@ -296,7 +285,7 @@ class MockAgent:
                     last_ack = len(buf)
                     self.out(tr, F.ACK, j.fid, proto.enc_ack(proto.FILE, len(buf)))
             elif f.type == F.END:
-                if len(buf) < size:                  # END overtook lost data
+                if len(buf) < size:
                     self.out(tr, F.ACK, j.fid, proto.enc_ack(proto.FILE, len(buf)))
                     continue
                 got_end = True
@@ -308,7 +297,6 @@ class MockAgent:
         self.resp(tr, j.fid, [("size", len(buf)), ("sha256", sha), ("crc32", zlib.crc32(bytes(buf)) & 0xFFFFFFFF)])
 
     def _send_file(self, tr, j, data, offset):
-        """Go-back-N sender for pull/crashdump."""
         sent = acked = offset
         end_sent = False
         last = time.time()
@@ -330,7 +318,7 @@ class MockAgent:
                 if f.type == F.ACK:
                     _s, nxt = proto.dec_ack(f.payload)
                     last = time.time()
-                    if nxt < sent and nxt <= acked:      # duplicate ACK = gap on the receiver
+                    if nxt < sent and nxt <= acked:
                         sent, end_sent = nxt, False
                     acked = nxt
                     if acked >= len(data) and (end_sent or self.end_after_ack):

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/fvviewer/mkcerts.py <dir> -- test CA + server certificate for "localhost" (ECDSA P-256, SHA-256).
-# notBefore is two days in the past: the OrientOS guest clock runs behind UTC (RTC read as local time),
-# a certificate valid "from now" is rejected there ("not yet valid", seen as TLS error 2).
 import datetime, sys
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization

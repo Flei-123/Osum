@@ -15,7 +15,7 @@ Ausgabe: eine Zahl.
 import sys
 
 
-def lade(pfad):
+def load(pfad):
     d = open(pfad, "rb").read()
     teile = []
     i = 0
@@ -44,7 +44,7 @@ def main():
     ppm = sys.argv[1]
     x0, y0, w, h = (int(v) for v in sys.argv[2:6])
     ziel = tuple(int(v) for v in sys.argv[6:9])
-    W, H, px = lade(ppm)
+    W, H, px = load(ppm)
     n = 0
     for y in range(y0, min(y0 + h, H)):
         for x in range(x0, min(x0 + w, W)):

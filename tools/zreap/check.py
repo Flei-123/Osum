@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/zreap/check.py <serial.txt> <label>: tasks and corpses of the last two
-`ps` listings (raw lines or the terminal dump `wm: termzeile N [ ... ]`)."""
 import re, sys
 t = open(sys.argv[1], errors="replace").read().split("\n")
 heads = [i for i, l in enumerate(t) if "PID PPID STATE" in l]

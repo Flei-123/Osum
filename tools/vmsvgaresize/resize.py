@@ -1,10 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/vmsvgaresize/resize.py -- desktop after host resolution changes (r1004), called by tools/vmsvgaresize/run.sh.
-# usage: resize.py <monitor sock> <vnc sock> <base> <serial file> <settle seconds> <WxH,WxH,...>
-# Boots nothing itself. Logs in, waits for the desktop, then asks QEMU for each size through the VNC SetDesktopSize message (the same
-# kernel path as a VirtualBox hint: vmsvga.host_pending -> vmode.follow_host). After every size the screendump is saved
-# (<base>.<n>.ppm) and measured; one line per size is written to <base>.res:
-#   <n> <w> <h> <black share of the upper 60 % of the screen> <taskbar rows: distinct-colour rows in the bottom 60 rows> <share of black pixels in the bottom row> <expected w> <expected h> <bar duplicate share> <start menu centre x or -1> <start menu bottom row or -1> <width and height of the menu screendump> <the same four for the menu left OPEN by the step before (-1 0 0 for the first step)>
 import os
 import sys
 import time
@@ -41,13 +35,10 @@ def measure(mon, tag):
     img = np.frombuffer(b, dtype=np.uint8).reshape(h, w, 3)
     up = img[: int(h * 0.6)]
     black = float(np.mean(np.all(up < 6, axis=2)))
-    # the bar: bottom 60 rows must not look like the plain wallpaper -> count rows whose colour differs from the row 70 rows up
     bot = img[h - 60 :]
     ref = img[max(0, h - 130) : h - 70].reshape(-1, 3).mean(axis=0) if h > 200 else np.zeros(3)
     rows = int(np.sum(np.abs(bot.astype(int).mean(axis=1) - ref).max(axis=1) > 12))
     lastblack = float(np.mean(np.all(img[h - 1] < 6, axis=1)))
-    # r1006: the bar must be painted with the NEW row length. A stale stride shows the left part of the bar again, shifted by the old
-    # width. Measure it: the share of bar pixels (not the white bar colour) that equal the pixel `d` columns to the left, best `d`.
     bar = img[h - 46 : h - 6].astype(np.int16)
     ink = bar.min(axis=2) < 200
     dup = 0.0
@@ -57,8 +48,6 @@ def measure(mon, tag):
             continue
         eq = np.all(bar[:, d:] == bar[:, :-d], axis=2) & ink[:, d:]
         dup = max(dup, float(eq.sum()) / n)
-    # r1135: the wallpaper window must cover the WHOLE screen after a resize (VirtualBox z21: a white margin 25 px left/right, 14 px
-    # above). Share of near-white pixels (all channels >= 235) in the left 24 / right 24 columns and the top 8 rows of the upper 60 %.
     band = np.concatenate([up[:, :24].reshape(-1, 3), up[:, w - 24 :].reshape(-1, 3), up[:8].reshape(-1, 3)])
     wedge = float(np.mean(np.all(band >= 235, axis=1)))
     return w, h, black, rows, lastblack, dup, wedge
@@ -77,11 +66,6 @@ def menu_find(mon, tag):
 
 
 def menu_probe(mon, tag, leave_open):
-    # r1007: open the start menu (Super key) and measure where its panel stands: horizontal centre and bottom edge. The panel colour
-    # is (248,249,251); the menu must be centred on the CURRENT screen and end above the bar. The key toggles: if the first press
-    # finds no menu (it was open and is closed now), press once more.
-    # r1010: the menu is LEFT OPEN after every step but the last, so the next resize hits an OPEN menu: `carry` is that menu as found after
-    # the resize (it must have followed the new size, not stand half off the screen). Returns carry + fresh measurement.
     res = (-1, -1, 0, 0)
     carry = menu_find(mon, tag + "c")
     if carry[0] >= 0:
@@ -117,13 +101,10 @@ def main():
     out = open(base + ".res", "w")
     early = open(base + ".early", "w")
     import re
-    # the kernel plays the hints from its own clock (serial `vmsvga: testhint WxH rc=N`), also before the login: every step waits
-    # for the NEXT line, lets the desktop settle and expects exactly the size of the newest line
     last = read_serial().count("vmsvga: testhint ")
     steps = len(sizes.split(","))
     for n in range(1, steps + 1):
         wait_for(lambda t: t.count("vmsvga: testhint ") > last, 60)
-        # r1065: the bar must also be there EARLY, right after the switch (z11: it vanished once during an 800x600 change)
         time.sleep(2.0)
         re_ = measure(mon, "%de" % n)
         early.write("%d %d\n" % (n, re_[3]))
@@ -133,8 +114,6 @@ def main():
         last = t.count("vmsvga: testhint ")
         m = re.findall(r"vmsvga: testhint (\d+)x(\d+) rc=(\d+)(?: now=(\d+)x(\d+))?", t)
         ew, eh = (int(m[-1][0]), int(m[-1][1])) if m else (0, 0)
-        # r1139: a hint over the card/tile limit is shrunk by the kernel (big.sh); the screen is then judged against the size the
-        # kernel reports in `now=`, and big.sh checks that number itself
         if m and os.environ.get("RESIZE_USE_NOW") == "1" and m[-1][3]:
             ew, eh = int(m[-1][3]), int(m[-1][4])
         r = measure(mon, str(n))

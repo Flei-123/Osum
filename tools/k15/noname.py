@@ -24,7 +24,7 @@ import re
 import sys
 
 
-def ohne_anmerkungen(text):
+def without_anmerkungen(text):
     """`//` bis zum Zeilenende weg -- aber nicht, wenn es in einem
     Zeichenkettenliteral steht.  Ein Zustandsautomat, weil ein
     `sed 's|//.*||'` an `"http://"` scheitert."""
@@ -64,7 +64,7 @@ def main():
         return 2
     pfad, name = sys.argv[1], sys.argv[2]
     roh = open(pfad, encoding="utf-8", errors="replace").read()
-    code = ohne_anmerkungen(roh)
+    code = without_anmerkungen(roh)
     if name in code:
         for nr, zeile in enumerate(code.split("\n"), 1):
             if name in zeile:

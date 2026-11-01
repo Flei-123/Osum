@@ -118,7 +118,6 @@ class Fahrer:
     def leeren(self):
         try:
             self.s.settimeout(0.4)
-            # Bounded: a monitor that keeps streaming must not keep us here forever.
             end = time.time() + 3.0
             while time.time() < end:
                 if not self.s.recv(65536):
@@ -136,10 +135,6 @@ class Fahrer:
         time.sleep(0.06)
         self.leeren()
 
-    #
-    #
-    #
-    #
     ECKSCHRITTE = 32
 
     def ecke(self):
@@ -157,8 +152,6 @@ class Fahrer:
             dy -= sy
         self.x, self.y = x, y
 
-    #
-    #
     def klick_nahe(self, x, y, mal=1, taste=1, halten=0.05):
         dx, dy = x - self.x, y - self.y
         while dx or dy:
@@ -243,8 +236,6 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
-    # W-DRAG: DRAG A WINDOW BY ITS TITLE BAR AND TAKE A PICTURE AFTER EVERY STEP (button still down), then let go and take
-    # pictures at once (the swing phase). Returns [(name, pointer x, pointer y, phase)].
     def schleppe_fotos(self, x0, y0, dx, dy, schritte, prefix, nach=2):
         out = []
         self.fahre(x0, y0)
@@ -288,19 +279,12 @@ class Fahrer:
         time.sleep(0.35)
         for i in range(mal):
             self.cmd("mouse_button %d" % taste)
-            #
-            #
             if mal == 1:
                 time.sleep(0.05)
             self.cmd("mouse_button 0")
         time.sleep(1.2)
 
-    # ============================================ RUNDE ECHTHARDWARE-3
-    # ZIEHEN: DRUECKEN, IN SCHRITTEN FAHREN, LOSLASSEN.
-    #
     def ziehe(self, x0, y0, x1, y1, schritte=8):
-        #
-        #
         self.fahre(x0, y0)
         time.sleep(0.35)
         self.cmd("mouse_button 1")
@@ -323,8 +307,6 @@ class Fahrer:
         self.cmd("mouse_button 0")
         time.sleep(1.2)
 
-    # W-DND: press at (x0,y0), move in steps to (x1,y1), HOLD there `halt` seconds (no mouse events: a hover timer in the
-    # window server / taskbar must fire by itself), optional photo during the hold, optional Esc during the hold, release.
     def ziehe_halt(self, x0, y0, x1, y1, halt, foto=None, esc=False, schritte=8):
         self.fahre(x0, y0)
         time.sleep(0.35)
@@ -366,9 +348,6 @@ class Fahrer:
             time.sleep(0.2)
         return False
 
-    # `marke` / `warteneu`: wait for a NEW match (a count above the one taken
-    # at `marke`), not for any match in the whole history. A fixed `warte`
-    # after a program start is a race on a loaded host (zreap: 33 of 34).
     def marke(self, muster):
         self.marke_muster = re.compile(muster)
         self.marke_n = len(self.marke_muster.findall(lies(self.serial)))
@@ -406,22 +385,13 @@ class Fahrer:
         print("foto %s FEHLGESCHLAGEN" % name)
         return False
 
-    # w-lock: BURST SERIES. `serie <click|idle> <n> <name>` sends (optionally) a left click and then
-    # n back-to-back `screendump`s in ONE write to the monitor, so the frames follow each other as
-    # fast as QEMU can write them (no sleeps, no size polling in between). Files: <name>-000.ppm ...
-    # r-rest: an optional pace (ms) sends the commands one by one with a wall-clock gap, so
-    # the burst spans n * pace ms however fast QEMU dumps (a blink test needs > 2 periods;
-    # an unpaced burst of 120 frames lasted 0.5-1.2 s depending on the load: 0 or 1 toggles).
     def serie(self, mode, n, name, frist=60.0, pace_ms=0):
         cmds = []
         if mode == "click":
             cmds += ["mouse_button 1", "mouse_button 0"]
         elif mode.startswith("key:"):
-            # w-caret: `serie key:<name> <n> <name>` presses a key in the same write, then the burst
             cmds.append("sendkey %s" % mode[4:])
         elif mode.startswith("drag:"):
-            # W-FLICKER: `serie drag:<dx>,<dy>,<period> <n> <name> <pace>` holds the left button (the pointer sits on a window border or
-            # corner) and moves by (dx,dy) before every dump, reversing the direction every <period> frames: a resize sweep
             dgx, dgy, dgp = (int(v) for v in mode[5:].split(","))
             cmds.append("mouse_button 1")
         paths = []
@@ -434,7 +404,6 @@ class Fahrer:
                 sg = 1 if (i // dgp) % 2 == 0 else -1
                 cmds.append("mouse_move %d %d" % (sg * dgx, sg * dgy))
             if mode == "move":
-                # W-LOGIN: the pointer keeps moving between the frames (every move makes the window server compose)
                 cmds.append("mouse_move %d 0" % (6 if i % 2 == 0 else -6))
             cmds.append("screendump %s" % pth)
         if mode.startswith("drag:"):
@@ -469,7 +438,6 @@ class Fahrer:
         print("serie %s: %d frames" % (name, n))
         return True
 
-    # ------------------------------------------------ die Rechtecke
     def fenster(self, prog):
         """Der Ursprung der Malflaeche eines Programmfensters."""
         t = lies(self.serial)
@@ -480,15 +448,10 @@ class Fahrer:
         if m is None:
             return None
         if prog == "launcher":
-            # the launcher has no frame at all; the old runs (menuhover, the rows `lzeile<N>`) count 2 / 22
-            # and their checkers use the same numbers -- the rows are 52 high and forgive it
             return (int(m.group(1)) + BORDER, int(m.group(2)) + TITLE_H)
         b, th = self.chrome()
-        # r454: a window that paints its own title strip (the file manager's tabs) has its drawing area at the top of the
-        # title bar: it says so on the serial line (`explorer: strip h=`)
         if re.search(r"%s: strip h=\d+" % prog, t):
             th = b
-            # the window may have been moved since it was created: the last F12 dump has its place now
             k = t.rfind("wm: fenliste")
             if k >= 0:
                 for w in re.finditer(r"wm: fen i=\d+ id=\d+ x=(\d+) y=(\d+) w=\d+ h=\d+ lay=\d+ fl=(\d+) ", t[k:]):
@@ -496,9 +459,6 @@ class Fahrer:
                         return (int(w.group(1)) + b, int(w.group(2)) + th)
         return (int(m.group(1)) + b, int(m.group(2)) + th)
 
-    # r402: the frame and the whole top part of a framed window at scale 1, from the shape file the
-    # machine runs (`theme.conf` of the out directory names it): frame + bar + 1 separator.
-    # `classic` and `modern` say nothing and keep the old 2 / 22.
     def chrome(self):
         if getattr(self, "_chrome", None):
             return self._chrome
@@ -540,7 +500,6 @@ class Fahrer:
         b, th = self.chrome()
         return (x, y, w, h, b * sk, th * sk)
 
-    #
     def fokus_id(self):
         t = lies(self.serial)
         m = None
@@ -561,7 +520,6 @@ class Fahrer:
 
         if name in ("cap_min", "cap_max", "cap_close"):
             fen = []
-            # only the LAST dump counts (it starts at `wm: fenliste`), hidden windows (flag 1) do not
             k = t.rfind("wm: fenliste")
             tt = t[k:] if k >= 0 else t
             letzter = []
@@ -638,10 +596,6 @@ class Fahrer:
         gm = letzte(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
         if name.startswith("pin") and not name[3:].isdigit():
-            #
-            #
-            #     taskbar: pin settings x=172 y=4 w=32 h=32 ...
-            #
             wort = name[3:]
             alle = list(re.finditer(
                 r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % wort, t))
@@ -680,8 +634,6 @@ class Fahrer:
                 return None
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
-        # W-MERGEB2: `traytile<N>` -- tile N of the tray flyout (traypop.fi reports `traypop: tile i=N x= y= w= h=` in the
-        # coordinates of the flyout window, which stands at the last `traypop: open ... x= y=`).
         if name.startswith("traytile") and name[8:].isdigit():
             o = letzte(r"traypop: open n=\d+ x=(\d+) y=(\d+)")
             m = letzte(r"traypop: tile i=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % name[8:])
@@ -739,9 +691,6 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("dmenue"):
-            # Row <N> of the desktop's context menu (right click on the bare desktop): the desktop reports the menu
-            # rectangle itself in `desktop: context open x= y= w= h=` (its wlib does not trace windows); the menu has
-            # no title bar, rows are (h - 4) / 4 high.
             n = int(name[6:])
             m = letzte(r"desktop: context open x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None:
@@ -749,8 +698,6 @@ class Fahrer:
             zh = (int(m.group(4)) - 4) // 4
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("bmenue"):
-            # Row <N> of the task bar's menu on the EMPTY bar (right click): the bar reports the menu window itself in
-            # `taskbar: kontext leer x= y= w= h= n=`; no title bar, rows are (h - 4) / n high.
             n = int(name[6:])
             m = letzte(r"taskbar: kontext leer x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
             if m is None:
@@ -782,7 +729,6 @@ class Fahrer:
                 return None
             return (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
         if name.startswith("calrect"):
-            # calpop.fi (P-011) reports its buttons in SCREEN pixels: `calpop: rect name=<n> x= y= w= h=`
             m = letzte(r"calpop: rect name=%s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % re.escape(name[7:]))
             if m is None:
                 return None
@@ -798,7 +744,6 @@ class Fahrer:
                 return None
             return (int(m.group(3)), int(m.group(4)), int(m.group(1)), int(m.group(2)))
         if name.startswith("chrect"):
-            # charmap.fi (P-015): `charmap: rect name=<n> x= y= w= h= ax= ay=` -- ax/ay are SCREEN pixels of the element
             m = letzte(r"charmap: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % re.escape(name[6:]))
             if m is None:
                 return None
@@ -824,8 +769,6 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)) + n * zh,
                     int(m.group(3)), zh)
         if name.startswith("sreiter"):
-            #
-            #
             n = int(name[7:])
             m = letzte(r"settings: rect name=waa x=(\d+) y=(\d+) "
                        r"w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)")
@@ -841,7 +784,6 @@ class Fahrer:
                     w // reiter, h)
         if name.startswith("srect"):
             k = name[5:]
-            # the rect line carries ax/ay (screen coordinates of its corner): no window lookup needed
             ms = letzte(r"settings: rect name=%s x=\d+ y=\d+ w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)" % k)
             if ms is not None:
                 return (int(ms.group(3)), int(ms.group(4)), int(ms.group(1)), int(ms.group(2)))
@@ -852,7 +794,6 @@ class Fahrer:
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("ftabzeile"):
-            #
             n = int(name[9:])
             m = letzte(r"explorer: rect id=\d+ kind=6 "
                        r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -865,8 +806,6 @@ class Fahrer:
             y0 = int(m.group(2)) + kopf + 2 + n * zh
             return (o[0] + int(m.group(1)), o[1] + y0, int(m.group(3)), zh)
         if name.startswith("fkante"):
-            # W4c: the right edge of column <N> in the file table header (`explorer: spalten x0 x1 x2 x3` =
-            # the text x of each column; the edge after column N is the cell start of column N+1 = x - 10).
             n = int(name[6:])
             sp = letzte(r"explorer: spalten (\d+) (\d+) (\d+) (\d+)")
             m = letzte(r"explorer: rect id=\d+ kind=6 "
@@ -885,9 +824,6 @@ class Fahrer:
                 return None
             return (o[0] + int(m.group(1)), o[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
-        # FreeViewer window (kernel/user/fvviewer.fi, test mode): `fvrect<name>` = a widget the app reports
-        # ("fvviewer: rect name=id|pw|go|img|view x= y= w= h=", canvas coordinates); `fvpt<A>x<B>` = the point
-        # A % / B % into the picture area ("view"), so a click lands on a known picture pixel.
         if name.startswith("fvrect") or name.startswith("fvpt"):
             nm = name[6:] if name.startswith("fvrect") else "view"
             m = letzte(r"fvviewer: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
@@ -899,9 +835,6 @@ class Fahrer:
                 fa, fb = name[4:].split("x")
                 return (o[0] + rx + rw_ * int(fa) // 100, o[1] + ry + rh_ * int(fb) // 100, 0, 0)
             return (o[0] + rx, o[1] + ry, rw_, rh_)
-        # Mail window (kernel/user/mail.fi, test mode): `mailrect<name>` = a widget the app reports
-        # ("mail: rect name=go|pw|fold|list|body|fetch|new|acct|to|subj|txt|send|cancel x= y= w= h="); `mailpt<A>x<B>` =
-        # the point A % / B % into the message table ("list"), so a click lands on a known row.
         if name.startswith("mailrect") or name.startswith("mailpt"):
             nm = name[8:] if name.startswith("mailrect") else "list"
             m = letzte(r"mail: rect name=%s x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)" % nm)
@@ -961,8 +894,6 @@ class Fahrer:
 
 
 def main():
-    # Watchdog: DRIVE_WATCHDOG=<seconds> dumps all thread stacks and ends the driver (exit code 1) when the script is not done by then.
-    # Default 1800 s so a stuck run always ends by itself (set 0 to disable).
     wd = int(os.environ.get("DRIVE_WATCHDOG", "1800") or 0)
     if wd > 0:
         faulthandler.dump_traceback_later(wd, exit=True)
@@ -973,7 +904,7 @@ def main():
     os.makedirs(out, exist_ok=True)
     f = Fahrer(sock, serial, out)
     fehler = 0
-    base_gap = float(os.environ.get("DRIVE_TIPPE_GAP", "0.12"))   # slower typing on loaded hosts
+    base_gap = float(os.environ.get("DRIVE_TIPPE_GAP", "0.12"))
     tippe_gap = base_gap
     for roh in open(buch, encoding="utf-8"):
         z = roh.strip()
@@ -982,10 +913,6 @@ def main():
         teile = z.split(None, 1)
         b = teile[0]
         arg = teile[1].strip() if len(teile) > 1 else ""
-        # 04.10.2026 (Dell): `killstarter` -- types `kill <pid>` of the start
-        # menu's process into the terminal (the pid is read from the line
-        # `launcher: pid=N` on the serial line). The terminal
-        # must have the keyboard focus (click on it first).
         if b == "killstarter":
             pids = re.findall(r"launcher: pid=(\d+)",
                               open(serial, errors="replace").read())
@@ -995,10 +922,7 @@ def main():
                 continue
             b = "tippe"
             arg = "kill %s" % pids[-1]
-            tippe_gap = 0.4    # a doubled letter ("ll") is lost at 0.12 s
-        # 04.10.2026 (Dell): `killlast` -- types `kill <pid>` of the program
-        # the start menu started LAST (line `launcher: start <arg> pid=N`,
-        # a refused start is skipped). The terminal must have the focus.
+            tippe_gap = 0.4
         if b == "killlast":
             pids = re.findall(r"launcher: start (?!refused)[^\n]*? pid=(\d+)",
                               open(serial, errors="replace").read())
@@ -1029,7 +953,6 @@ def main():
             if not ok:
                 fehler += 1
                 if b == "warteaufmuss":
-                    # gate precondition failed (e.g. a typed key was lost): stop the script, the wrapper retries
                     print("ABBRUCH: %s ist Voraussetzung" % muster)
                     break
         elif b == "halte":
@@ -1038,7 +961,6 @@ def main():
             time.sleep(0.35)
             f.cmd("mouse_button 1")
             time.sleep(0.6)
-        # `halteauf <name>`: as `halte`, on the middle of a reported rectangle
         elif b == "halteauf":
             r = f.rechteck(arg)
             if r is None:
@@ -1049,8 +971,6 @@ def main():
                 time.sleep(0.35)
                 f.cmd("mouse_button 1")
                 time.sleep(0.6)
-        # `rad <n>`: mouse wheel by n notches over the current pointer position (HMP `mouse_move 0 0 <n>`;
-        # measured in the guest (settingsnarrow): n > 0 = wheel UP, n < 0 = wheel DOWN). One monitor round trip per notch so the guest sees separate events.
         elif b == "rad":
             n = int(arg)
             for _ in range(abs(n)):
@@ -1068,8 +988,6 @@ def main():
                 f.klick(x, y, 1, taste=2)
             else:
                 f.klick(x, y, 2 if b == "doppel" else 1)
-        # `wische <n> <dx>,<dy>` -- n small relative pointer moves back to back (reverses every 20 steps so it
-        # stays on screen). The workload of the pointer lag gate (tools/vboxlag): many events, no pause.
         elif b == "wische":
             t = arg.split()
             n = int(t[0])
@@ -1077,9 +995,6 @@ def main():
             for k in range(n):
                 sg = 1 if (k // 20) % 2 == 0 else -1
                 f.cmd("mouse_move %d %d" % (sg * sdx, sg * sdy))
-        # `fahreauf <name>` -- only HOVER over the middle of the reported
-        # rectangle (relative moves from the last known point, no click, no
-        # detour through the corner). Needed for hover pixel checks.
         elif b == "fahreauf":
             r = f.rechteck(arg)
             if r is None:
@@ -1117,8 +1032,6 @@ def main():
             f.klick(x, y, 1)
         elif b in ("klickauf", "doppelauf", "rklickauf", "mklickauf"):
             r = f.rechteck(arg)
-            # r837: under load the window needs a moment after the opening click to report its
-            # rectangles (the foto before this line already costs ~1 s); poll up to 6 s before giving up.
             for _try in range(24):
                 if r is not None:
                     break
@@ -1134,7 +1047,7 @@ def main():
             if b == "rklickauf":
                 f.klick(x, y, 1, taste=2)
             elif b == "mklickauf":
-                f.klick(x, y, 1, taste=4)   # r529: the middle button (bit 2)
+                f.klick(x, y, 1, taste=4)
             elif arg == "toast":
                 f.klick_nahe(x, y, 1, 1, 0.15)
             else:
@@ -1145,8 +1058,6 @@ def main():
             x1, y1 = (int(v) for v in t[1].split(","))
             f.ziehe(x0, y0, x1, y1)
             print("ziehe %d,%d -> %d,%d" % (x0, y0, x1, y1))
-        #
-        #
         elif b == "ziehauf":
             t = arg.split()
             ra, rb = f.rechteck(t[0]), f.rechteck(t[1])
@@ -1159,8 +1070,6 @@ def main():
             f.ziehe(xa, ya, xb, yb)
             print("ziehauf %s -> %d,%d to %d,%d" % (arg, xa, ya, xb, yb))
         elif b == "ziehnach":
-            # W4c: `ziehnach <name> <dx>,<dy>` drags (button held, relative steps) from the middle of the
-            # reported rectangle by (dx, dy), e.g. `ziehnach fkante0 40,0` widens column 0 by 40 px.
             t = arg.split()
             ra = f.rechteck(t[0])
             if ra is None:
@@ -1186,7 +1095,7 @@ def main():
                 fehler += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
-            lx = wx                      # the outermost pixel (r402: not `bo - 2`, which is outside for a frame of 1)
+            lx = wx
             rx = wx + ww + 2 * bo - 1
             oy = wy + 1
             uy = wy + ti + wh + bo - 1
@@ -1204,8 +1113,6 @@ def main():
             print("dragedge id=%d %s from %d,%d by %d,%d "
                   "(fenster %d,%d %dx%d bo=%d ti=%d)"
                   % (wid, kante, x0, y0, dx, dy, wx, wy, ww, wh, bo, ti))
-        # 04.10.2026 (Dell): `fahrekante <id> <kante>` -- only HOVER at the grip
-        # of window <id> (kante: l r o u lo ro lu ru), computed like `ziehkante`.
         elif b == "fahrekante":
             t = arg.split()
             wid = int(t[0])
@@ -1216,13 +1123,12 @@ def main():
                 fehler += 1
                 continue
             wx, wy, ww, wh, bo, ti = g
-            lx = wx                      # the outermost pixel (r402: not `bo - 2`, which is outside for a frame of 1)
+            lx = wx
             rx = wx + ww + 2 * bo - 1
             oy = wy + 1
             uy = wy + ti + wh + bo - 1
             mx = wx + bo + ww // 2
             my = wy + ti + wh // 2
-            # W-CURSOR: "titel" = the title bar left of the caption buttons, "aussen" = just outside the frame (desktop)
             stelle = {"l": (lx, my), "r": (rx, my), "o": (mx, oy),
                       "u": (mx, uy), "lo": (lx, oy), "ro": (rx, oy),
                       "lu": (lx, uy), "ru": (rx, uy), "mitte": (mx, my),
@@ -1231,7 +1137,6 @@ def main():
             x0, y0 = stelle[kante]
             f.fahre(x0, y0)
             print("fahrekante id=%d %s -> %d,%d" % (wid, kante, x0, y0))
-        #
         elif b == "kappe":
             t = arg.split()
             if t[0] == "fokus":
@@ -1298,8 +1203,6 @@ def main():
                 x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             f.klick_nahe(x, y)
             print("klicknah %s -> %d,%d" % (arg, x, y))
-        # r454: `ziehemitte <name> <dx>,<dy>` -- the same from the CENTRE of the reported rectangle (a tab: its label, not
-        # the cross in its corner; the empty part of the title strip)
         elif b == "ziehemitte":
             t = arg.split()
             r = f.rechteck(t[0])
@@ -1328,7 +1231,6 @@ def main():
             t = arg.split()
             wid = int(t[0])
             if wid < 0:
-                # -1 = the newest window with a frame (fl=0: the desktop shell's terminal), whatever id the boot gave it
                 ids = re.findall(r"wm: fen i=\d+ id=(\d+) x=\d+ y=\d+ w=\d+ h=\d+ lay=\d+ fl=0 ", lies(f.serial))
                 wid = int(ids[-1]) if ids else 0
             dx, dy = (int(v) for v in t[1].split(","))
@@ -1341,9 +1243,6 @@ def main():
             print("schleppfoto: geom %d,%d %dx%d bo=%d ti=%d" % (wx, wy, ww, wh, bo, ti))
             for nm, px, py, ph in f.schleppe_fotos(wx + bo + ww // 3, wy + ti // 2, dx, dy, int(t[2]), t[3]):
                 print("schleppfoto: %s %d %d %s" % (nm, px, py, ph))
-        # W-PRESENT: `schleppschnell <window id> <dx>,<dy> <reps>`: grab the title bar and drag the window there and back <reps> times as fast as
-        # the monitor takes the moves (120 points per move, no pause, no picture), release. Used with F12 before and after: the frames
-        # of that burst and what their copies to the card cost (`wm: bild`, `wm: flush`).
         elif b == "schleppschnell":
             t = arg.split()
             wid = int(t[0])
@@ -1400,8 +1299,6 @@ def main():
             x1 = r[0] + r[2] * p1 // 100
             f.ziehe_nahe(x0, y, x1, y)
             print("ziehspurnah %s -> %d,%d nach %d,%d" % (t[0], x0, y, x1, y))
-        #
-        #
         elif b == "ziehvon":
             t = arg.split()
             r0 = f.rechteck(t[0])
@@ -1416,7 +1313,6 @@ def main():
             f.ziehe(x0, y0, x1, y1)
             print("ziehvon %s(%d,%d) -> %s(%d,%d)"
                   % (t[0], x0, y0, t[1], x1, y1))
-        # W-DND: `ziehhalt <srect|x,y> <x1>,<y1> <seconds> [esc] [foto=<name>]` -- drag with a hold before the release
         elif b == "ziehhalt":
             t = arg.split()
             if "," in t[0]:
@@ -1449,7 +1345,6 @@ def main():
             f.ziehe(x0, y, x1, y)
             print("ziehespur %s -> %d,%d nach %d,%d  (rect %d,%d %dx%d)"
                   % (t[0], x0, y, x1, y, r[0], r[1], r[2], r[3]))
-        # FreeViewer gate: `extern <shell command>` runs a helper on the host (e.g. kill / restart the test host), max 120 s.
         elif b == "extern":
             import subprocess
             try:
@@ -1466,17 +1361,13 @@ def main():
                      ":": "shift-semicolon", ";": "semicolon",
                      "=": "equal", "+": "shift-equal", "?": "shift-slash",
                      "&": "shift-7", "%": "shift-5", "@": "shift-2"}
-            # a doubled letter ("ss" in testpass123) is lost at 0.12 s (measured, FreeViewer gui_input gate)
             if any(arg[i] == arg[i + 1] for i in range(len(arg) - 1)):
                 tippe_gap = max(tippe_gap, 0.4)
             for ch in arg:
-                # an upper-case letter is Shift + the letter (a bare "H" is no QEMU key name: it was dropped)
                 f.taste(namen.get(ch, "shift-" + ch.lower() if ch.isalpha() and ch.isupper() else ch))
                 time.sleep(tippe_gap)
             tippe_gap = base_gap
             print("tippe %s (%d Zeichen)" % (arg, len(arg)))
-        # QA walk (tools/qa/dell_walk.py): `schritt <app> <step>` writes the serial byte offset and
-        # the time to <out>/schritte.tsv so the evaluator can cut the serial log per app and step.
         elif b == "schritt":
             with open(os.path.join(out, "schritte.tsv"), "a", encoding="utf-8") as sf:
                 sf.write("%d\t%.1f\t%s\n" % (len(lies(f.serial)), time.time(), arg))

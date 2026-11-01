@@ -1,31 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tunnel/vectors.py -- the four primitives against their RFCs.
-
-WHY THIS FILE IS THE FIRST THING ROUND TUNNEL BUILT. A VPN is a pile of
-plumbing wrapped around four arithmetic functions. If any one of the four
-is wrong, everything above it is worse than useless: it looks encrypted
-and is not. So the primitives are measured before a single packet is
-sent, and they are measured TWICE over:
-
-  1. AGAINST THE LITERAL VECTORS PRINTED IN THE RFC. These are typed in
-     from the document text. They are the authority; a cross-check against
-     another implementation only proves that two implementations agree,
-     which is exactly what happens when both are wrong in the same way.
-  2. AGAINST A SECOND, INDEPENDENT IMPLEMENTATION over generated inputs:
-     Python's `hashlib` (which is OpenSSL/libb2 underneath) for BLAKE2s,
-     `cryptography` (OpenSSL) for ChaCha20-Poly1305, and `nacl`
-     (libsodium) for X25519 and XChaCha20-Poly1305. This is what catches
-     the length and boundary cases no RFC prints.
-
-The thing under test is `.probe/oracle`, a hosted Firn program that links
-THE SAME `lib/crypto/*.fi` files the kernel links. That they compile in
-both the hosted and the kernel profile is checked by section 62 of
-./test.sh; that they COMPUTE THE RIGHT THING is checked here.
-
-    ./tools/tunnel/vectors.py            run everything
-    ./tools/tunnel/vectors.py --slow     also the 1 000 000 round X25519
-"""
 import os
 import subprocess
 import sys
@@ -41,7 +15,6 @@ GROUPS = {}
 
 
 def h(s):
-    """Hex text -> bytes, ignoring the whitespace RFCs print for readability."""
     return bytes.fromhex("".join(s.split()))
 
 
@@ -50,8 +23,6 @@ def x(b):
 
 
 class Oracle:
-    """One process, many questions -- starting a process per vector would
-    measure `fork` rather than the arithmetic."""
 
     def __init__(self):
         self.lines = []
@@ -81,48 +52,31 @@ class Oracle:
 
 o = Oracle()
 
-# =====================================================================
-# BLAKE2s -- RFC 7693
-# =====================================================================
 
-# RFC 7693 Appendix B, the one vector the document prints in full.
 o.ask("blake2s 32 - 616263", "RFC 7693 App. B",
       "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982")
 
-# RFC 7693 Appendix A prints BLAKE2b; the BLAKE2s KAT that ships with the
-# reference implementation (blake2s-kat.txt) is the 256 keyed hashes of
-# the inputs 00, 0001, 000102, ... under the key 000102..1f. It is
-# reproduced here through hashlib, which is the same libb2/OpenSSL code
-# the KAT file was generated from.
 KEY = bytes(range(32))
 for n in range(0, 256):
     data = bytes(range(n))
     o.ask("blake2s 32 %s %s" % (x(KEY), x(data)), "BLAKE2s KAT (keyed)",
           hashlib.blake2s(data, key=KEY, digest_size=32).hexdigest())
 
-# Unkeyed, every length up to two blocks and a bit -- the boundary at 64
-# and at 128 octets is where a wrong "compress as soon as the buffer is
-# full" shows up, and nowhere else.
 for n in list(range(0, 200)) + [255, 256, 257, 511, 512, 513, 1000]:
     data = bytes((i * 7 + 3) & 255 for i in range(n))
     o.ask("blake2s 32 - %s" % x(data), "BLAKE2s length sweep",
           hashlib.blake2s(data, digest_size=32).hexdigest())
 
-# Every digest length BLAKE2s allows. This is the check that the digest
-# length goes into the PARAMETER BLOCK and is not a truncation.
 for dl in range(1, 33):
     o.ask("blake2s %d - 616364" % dl, "BLAKE2s digest lengths",
           hashlib.blake2s(b"acd", digest_size=dl).hexdigest())
     o.ask("blake2s %d %s 616364" % (dl, x(KEY[:16])), "BLAKE2s digest lengths",
           hashlib.blake2s(b"acd", key=KEY[:16], digest_size=dl).hexdigest())
 
-# Every key length BLAKE2s allows.
 for kl in range(0, 33):
     o.ask("blake2s 32 %s 6d657373616765" % x(KEY[:kl]), "BLAKE2s key lengths",
           hashlib.blake2s(b"message", key=KEY[:kl], digest_size=32).hexdigest())
 
-# Refusals. BLAKE2s has no digest above 32 and no key above 32; a
-# silently truncated answer would be worse than an error.
 o.ask("blake2s 33 - 00", "BLAKE2s refusals", "FAIL")
 o.ask("blake2s 64 - 00", "BLAKE2s refusals", "FAIL")
 o.ask("blake2s 32 %s 00" % x(bytes(33)), "BLAKE2s refusals", "FAIL")
@@ -130,8 +84,6 @@ o.ask("blake2s 0 - 00", "BLAKE2s refusals", "FAIL")
 
 o.run()
 
-# HMAC-BLAKE2s (RFC 2104 over BLAKE2s) -- WireGuard's HKDF is built on it.
-# hashlib.blake2s is the hash; hmac.new does the construction.
 import hmac as _hmac
 for kl in [0, 1, 16, 31, 32, 63, 64, 65, 100, 200]:
     for ml in [0, 1, 15, 16, 63, 64, 65, 127, 128, 300]:
@@ -141,20 +93,13 @@ for kl in [0, 1, 16, 31, 32, 63, 64, 65, 100, 200]:
         o.ask("hmacb2s %s %s" % (x(key), x(msg)), "HMAC-BLAKE2s", want)
 o.run()
 
-# =====================================================================
-# ChaCha20 -- RFC 8439
-# =====================================================================
 
-# RFC 8439 2.3.2, the block function test vector. The keystream block is
-# obtained by encrypting 64 zero octets with that counter.
 o.ask("chacha20 %s %s 1 %s" % (
     "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     "000000090000004a00000000", "00" * 64), "RFC 8439 2.3.2 block",
     "10f1e7e4d13b5915500fdd1fa32071c4c7d1f4c733c068030422aa9ac3d46c4e"
     "d2826446079faa0914c2d705d98b02a2b5129cd1de164eb9cbd083e8a2503c4e")
 
-# RFC 8439 2.4.2, the encryption test vector -- 114 octets of the
-# "Ladies and Gentlemen of the class of '99" text.
 PLAIN_2_4_2 = h(
     "4c616469657320616e642047656e746c656d656e206f662074686520636c6173"
     "73206f66202739393a204966204920636f756c64206f6666657220796f75206f"
@@ -168,8 +113,6 @@ o.ask("chacha20 %s %s 1 %s" % (
     "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736"
     "5af90bbf74a35be6b40b8eedf2785e42874d")
 
-# RFC 8439 Appendix A.1 -- four block function vectors that walk the key,
-# the counter and the nonce through their edge values.
 A1 = [
     ("00" * 32, "00" * 12, 0,
      "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7"
@@ -191,7 +134,6 @@ for key, nonce, ctr, want in A1:
     o.ask("chacha20 %s %s %d %s" % (key, nonce, ctr, "00" * 64),
           "RFC 8439 A.1 blocks", want)
 
-# RFC 8439 Appendix A.2 -- three encryption vectors.
 A2_2_PLAIN = h(
     "416e79207375626d697373696f6e20746f20746865204945544620696e74656e"
     "6465642062792074686520436f6e7472696275746f7220666f72207075626c69"
@@ -225,8 +167,6 @@ o.ask("chacha20 %s %s 1 %s" % (
     "98ced759c3ff9b6477338f3da4f9cd8514ea9982ccafb341b2384dd902f3d1ab"
     "7ac61dd29c6f21ba5b862f3730e37cfdc4fd806c22f221")
 
-# And a cross-check against OpenSSL over generated inputs, because the RFC
-# prints no vector whose length is not a multiple of 64 except one.
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 rnd = random.Random(20260827)
 for n in list(range(0, 130)) + [255, 256, 257, 1023, 1024, 1025]:
@@ -234,7 +174,6 @@ for n in list(range(0, 130)) + [255, 256, 257, 1023, 1024, 1025]:
     nonce = bytes(rnd.randrange(256) for _ in range(12))
     ctr = rnd.randrange(0, 1 << 20)
     data = bytes(rnd.randrange(256) for _ in range(n))
-    # OpenSSL's ChaCha20 takes a 16 octet "nonce" that is counter||nonce
     full = ctr.to_bytes(4, "little") + nonce
     c = Cipher(algorithms.ChaCha20(key, full), mode=None).encryptor()
     want = c.update(data) + c.finalize()
@@ -242,19 +181,12 @@ for n in list(range(0, 130)) + [255, 256, 257, 1023, 1024, 1025]:
           "ChaCha20 vs OpenSSL", x(want) if n else "-")
 o.run()
 
-# =====================================================================
-# Poly1305 -- RFC 8439
-# =====================================================================
 
-# RFC 8439 2.5.2.
 o.ask("poly1305 %s %s" % (
     "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b",
     x(b"Cryptographic Forum Research Group")), "RFC 8439 2.5.2",
     "a8061dc1305136c6c22b8baf0c0127a9")
 
-# RFC 8439 Appendix A.3 -- eleven vectors, and they are chosen to hit
-# exactly the places a limb based implementation goes wrong: r = 0, s
-# alone, the wrap at 2^130-5, a carry that must NOT be dropped.
 A3 = [
     ("00" * 32, "00" * 64, "00000000000000000000000000000000"),
     ("00" * 16 + "36e5f6b5c5e06070f0efca96227a863e",
@@ -292,7 +224,6 @@ A3 = [
      "6162653a0a416c6c206d696d737920776572652074686520626f726f676f7665"
      "732c0a416e6420746865206d6f6d65207261746873206f757467726162652e",
      "4541669a7eaaee61e708dc7cbcc5eb62"),
-    # A.3 #5..#11: the carry and wrap cases.
     ("02" + "00" * 31, "ff" * 16, "03000000000000000000000000000000"),
     ("02" + "00" * 15 + "ff" * 16,
      "02000000000000000000000000000000", "03000000000000000000000000000000"),
@@ -304,9 +235,6 @@ A3 = [
      "01010101010101010101010101010101", "00000000000000000000000000000000"),
     ("02" + "00" * 31,
      "fdffffffffffffffffffffffffffffff", "faffffffffffffffffffffffffffffff"),
-    # A.3 #10 and #11 -- r = 01 00..00 04 00..00, s = 0. These two are the
-    # reason a Poly1305 implementation gets written twice: they are the
-    # cases where the final reduction must and must not subtract p.
     ("0100000000000000" + "0400000000000000" + "00" * 16,
      "e33594d7505e43b900000000000000003394d7505e4379cd0100000000000000"
      "00000000000000000000000000000000" + "01000000000000000000000000000000",
@@ -326,11 +254,7 @@ for i, (key, msg, want) in enumerate(A3):
           "RFC 8439 A.3 Poly1305", want)
 o.run()
 
-# =====================================================================
-# ChaCha20-Poly1305 AEAD -- RFC 8439
-# =====================================================================
 
-# RFC 8439 2.8.2.
 AAD = "50515253c0c1c2c3c4c5c6c7"
 KEY_282 = "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
 NONCE_282 = "070000004041424344454647"
@@ -342,8 +266,6 @@ o.ask("seal %s %s %s %s" % (KEY_282, NONCE_282, AAD, x(PLAIN_2_4_2)),
       "3ff4def08e4b7a9de576d26586cec64b6116"
       "1ae10b594f09e26a7e902ecbd0600691")
 
-# RFC 8439 Appendix A.5 -- the decryption direction, with a different
-# key, a 12 octet AAD and a long body.
 A5_CT = h(
     "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb2"
     "4c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf"
@@ -369,9 +291,6 @@ o.ask("open %s %s %s %s" % (
         "6d206f74686572207468616e206173202fe2809c776f726b20696e2070726f67"
         "726573732e2fe2809d")))
 
-# The refusal that matters more than any success: one flipped bit in the
-# ciphertext, one in the AAD, one in the tag -- each MUST be refused. An
-# AEAD that returns plaintext for a broken tag is not an AEAD.
 good = h("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
          "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
          "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
@@ -398,8 +317,6 @@ o.ask("open %s %s %s %s" % (KEY_282, x(bytes(badnonce)), AAD, x(good)),
       "AEAD refusals", "FAIL")
 o.ask("open %s %s %s 00" % (KEY_282, NONCE_282, AAD), "AEAD refusals", "FAIL")
 
-# And the sweep against OpenSSL: every plaintext length across the block
-# boundary, with and without associated data.
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 for n in list(range(0, 80)) + [127, 128, 129, 255, 256, 1000]:
     key = bytes(rnd.randrange(256) for _ in range(32))
@@ -413,14 +330,7 @@ for n in list(range(0, 80)) + [127, 128, 129, 255, 256, 1000]:
           "AEAD vs OpenSSL", x(pt))
 o.run()
 
-# =====================================================================
-# XChaCha20-Poly1305 -- draft-irtf-cfrg-xchacha, used by the cookie reply
-# =====================================================================
 
-# draft-irtf-cfrg-xchacha-03 section 2.2.1: the HChaCha20 vector. It is
-# exercised through the AEAD, since the oracle exposes no bare HChaCha20:
-# a wrong subkey cannot produce the right ciphertext.
-# A.3.1 of the same draft, the AEAD vector.
 o.ask("xseal %s %s %s %s" % (
     "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
     "404142434445464748494a4b4c4d4e4f5051525354555657",
@@ -436,7 +346,6 @@ o.ask("xseal %s %s %s %s" % (
     "21f9664c97637da9768812f615c68b13b52e"
     "c0875924c1c7987947deafd8780acf49")
 
-# Cross-check against libsodium over generated inputs.
 try:
     from nacl.bindings import (
         crypto_aead_xchacha20poly1305_ietf_encrypt as xenc,
@@ -455,11 +364,7 @@ except ImportError:
     print("note: PyNaCl missing, the libsodium cross-check was skipped")
 o.run()
 
-# =====================================================================
-# X25519 -- RFC 7748
-# =====================================================================
 
-# RFC 7748 5.2, the two single vectors printed in the document.
 o.ask("x25519 %s %s" % (
     "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
     "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c"),
@@ -471,8 +376,6 @@ o.ask("x25519 %s %s" % (
     "RFC 7748 5.2",
     "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957")
 
-# RFC 7748 6.1, the Diffie-Hellman example: both sides must reach the
-# same secret, and both public keys must be the ones printed.
 A_PRIV = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
 A_PUB = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
 B_PRIV = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"
@@ -483,9 +386,6 @@ o.ask("x25519base %s" % B_PRIV, "RFC 7748 6.1", B_PUB)
 o.ask("x25519 %s %s" % (A_PRIV, B_PUB), "RFC 7748 6.1", SHARED)
 o.ask("x25519 %s %s" % (B_PRIV, A_PUB), "RFC 7748 6.1", SHARED)
 
-# RFC 7748 5.2, the iterated test. After 1 round and after 1000 rounds
-# the document prints the value. The million round checkpoint is behind
-# --slow because it takes minutes.
 BASE9 = "0900000000000000000000000000000000000000000000000000000000000000"
 o.ask("x25519iter 1 %s" % BASE9, "RFC 7748 5.2 iterated",
       "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079")
@@ -495,8 +395,6 @@ if "--slow" in sys.argv:
     o.ask("x25519iter 1000000 %s" % BASE9, "RFC 7748 5.2 iterated",
           "7c3911e0ab2586fd864497297e575e6f3bc601c0883c30df5f4dd2d24f665424")
 
-# Cross-check against libsodium over generated scalars and points, which
-# is where the clamping and the masked top bit get exercised.
 try:
     from nacl.bindings import crypto_scalarmult, crypto_scalarmult_base
     for _ in range(200):
@@ -507,10 +405,8 @@ try:
         try:
             want = x(crypto_scalarmult(s, p))
         except Exception:
-            continue  # libsodium refuses all-zero results; skip, not a pass
+            continue
         o.ask("x25519 %s %s" % (x(s), x(p)), "X25519 vs libsodium", want)
-    # The top bit of the u coordinate MUST be ignored (RFC 7748 5,
-    # "decodeUCoordinate"): setting it must not change the answer.
     for _ in range(20):
         s = bytes(rnd.randrange(256) for _ in range(32))
         p = bytearray(rnd.randrange(256) for _ in range(32))
@@ -524,7 +420,6 @@ except ImportError:
     print("note: PyNaCl missing, the libsodium cross-check was skipped")
 o.run()
 
-# =====================================================================
 
 print()
 w = max(len(k) for k in GROUPS)

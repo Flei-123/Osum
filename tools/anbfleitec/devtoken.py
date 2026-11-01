@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/devtoken.py -- a device sign-in at the broker WITHOUT a guest.
-
-    devtoken.py <issuer> <ca.pem> <client_id> <scope> <out-prefix>
-
-Runs the device flow like OrientOS does (device_authorization, "the person" confirms
-with approve.py, token poll) and writes the broker's answer to <out-prefix>.access,
-<out-prefix>.id and <out-prefix>.refresh (one value per file, no newline). interop-real.sh
-uses it to get as many fresh access tokens as it needs (the address book will take a token only once).
-"""
 import json
 import os
 import ssl

@@ -34,7 +34,6 @@ UMZUEGE = [
 ]
 
 SEITHER_WEITERENTWICKELT = {
-    # kgui.fi
     "surface": "MERGE-2 13 (usbimg): die Aenderung an `surface` geportet",
     "desk_start": "MERGE-2 15/16 (themestore, softui): der Schreibtisch"
                   " startet die Vorlagen mit",
@@ -43,7 +42,6 @@ SEITHER_WEITERENTWICKELT = {
                    " Selbsttest der Runde",
     "display_hold": "MERGE-2 18 (customres): M_EIGEN/M_EIGENBAD/M_EIGENFRIST",
     "disp_eigen": "MERGE-2 18 (customres): neu, im Original nicht da",
-    # sysgui.fi
     "wm_call": "MERGE-2 16 (softui): die neuen WM-Felder",
     "do_dispget": "MERGE-2 18 (customres): die vierzehn neuen DG_-Felder",
     "do_dispset": "MERGE-2 18 (customres): DS_CUSTOM, DS_CHECK, DS_SAVE",
@@ -102,7 +100,7 @@ UMZUG_COMMIT = {
 }
 
 
-def namen_beim_umzug(ziel):
+def names_beim_umzug(ziel):
     """Die Funktionsnamen, die ZIEL beim Umzug schon hatte."""
     c = UMZUG_COMMIT.get(ziel)
     if not c:
@@ -120,8 +118,8 @@ def main():
         return 2
     basis = sys.argv[1]
     schlecht = 0
-    for alt, neu, praefixe, neue_namen in UMZUEGE:
-        beim_umzug = namen_beim_umzug(neu)
+    for alt, neu, praefixe, new_names in UMZUEGE:
+        beim_umzug = names_beim_umzug(neu)
         spaeter = 0
         roh = subprocess.run(["git", "show", "%s:%s" % (basis, alt)],
                              capture_output=True)
@@ -132,12 +130,12 @@ def main():
         A = funktionen(roh.stdout.decode("utf8", "replace"))
         with open(neu, "rb") as f:
             B = funktionen(f.read().decode("utf8", "replace"))
-        gleich = 0
-        weg = 0
+        eq = 0
+        gone = 0
         abweichend = []
         for name, text in B.items():
-            if name in neue_namen:
-                weg += 1
+            if name in new_names:
+                gone += 1
                 continue
             if name not in A:
                 if name in beim_umzug:
@@ -149,12 +147,12 @@ def main():
             for p in praefixe:
                 t = re.sub(r"(?<![A-Za-z0-9_.])" + p + r"\.", "", t)
             if t == A[name]:
-                gleich += 1
+                eq += 1
             else:
                 abweichend.append((name, "weicht ab"))
-        ganz = len(B) - weg
+        ganz = len(B) - gone
         print("  %-22s %d of %d functions identical to %s"
-              % (neu.split("/")[-1], gleich, ganz, alt.split("/")[-1]))
+              % (neu.split("/")[-1], eq, ganz, alt.split("/")[-1]))
         if spaeter:
             print("      (%d functions exist only AFTER the move"
                   " entstanden und gehoeren nicht dazu)" % spaeter)

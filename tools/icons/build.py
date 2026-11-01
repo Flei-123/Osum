@@ -48,8 +48,6 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(os.path.dirname(HIER))
 sys.path.insert(0, os.path.join(WURZEL, "tools", "ttf"))
 
-# MERGE FIX: round RENAME renamed tools/ttf/schnitt.py to subset.py;
-# this import was written on the branch that never saw the rename.
 import subset as schnitt  # noqa: E402  -- the path has to be set first
 
 
@@ -57,20 +55,16 @@ VORGABE_MAP = os.path.join(WURZEL, "assets", "icons", "icons.map")
 VORGABE_OUT = os.path.join(WURZEL, "assets", "osum-icons.ttf")
 VORGABE_IDS = os.path.join(WURZEL, "lib", "icons.fi")
 VORGABE_LIST = os.path.join(WURZEL, "assets", "icons", "icons.list")
-# Where the Lucide package was unpacked.  Not in the tree: it is 4.9 MB
-# of npm package for a 680 KB font we use 42 glyphs of.  What IS in the
-# tree is the result and the licence.
 VORGABE_SRC = "/root/icon-src/lucide/font/lucide.ttf"
 VORGABE_INFO = "/root/icon-src/lucide/font/info.json"
 
 
-# --------------------------------------------------------- the map file
 
 class Eintrag:
     def __init__(self, name, cp, quelle):
         self.name = name
         self.cp = cp
-        self.quelle = quelle      # source glyph name, None for an alias
+        self.quelle = quelle
         self.alias_von = None
 
 
@@ -115,7 +109,6 @@ def map_lesen(pfad):
             e = Eintrag(name, cp, teile[1])
         liste.append(e)
         nach_name[name] = e
-    # A code point may carry several names only through an alias.
     gesehen = {}
     for e in liste:
         if e.alias_von is None:
@@ -127,7 +120,6 @@ def map_lesen(pfad):
     return liste, nach_name
 
 
-# ------------------------------------------------------- the font maker
 
 def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
           leise=False):
@@ -138,8 +130,7 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     v = schnitt.Vorlage(src_pfad)
     voll = v.cmap()
 
-    # 1. source glyph name -> source code point -> source glyph id.
-    zeichen = {}          # target code point -> source glyph id
+    zeichen = {}
     fehlend = []
     for e in echte:
         satz = info.get(e.quelle)
@@ -158,7 +149,6 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
                   % (name, quelle), file=sys.stderr)
         raise SystemExit(1)
 
-    # 2. which source glyphs stay, components of composites included.
     behalten = [0]
     for gid in zeichen.values():
         if gid not in behalten:
@@ -177,7 +167,6 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     behalten.sort()
     karte = {alt: neu for neu, alt in enumerate(behalten)}
 
-    # 3. glyf and loca -- the same arrangement as subset.py.
     glyf = bytearray()
     versatz = []
     for alt in behalten:
@@ -203,12 +192,6 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     maxp = bytearray(v.d[v.tab["maxp"][0]:v.tab["maxp"][0] + 32])
     struct.pack_into(">H", maxp, 4, len(behalten))
 
-    # NO `kern` TABLE.  Icons are placed by the caller at a position it
-    # computed; they are never set next to each other as a line of text,
-    # so there is no pair whose spacing could be corrected.  Leaving the
-    # table out is not an omission, it is the absence of a thing that has
-    # no meaning here -- and `kernel/ttf.fi` already treats `kern` as
-    # optional (`F_KERN == 0` means none).
     tabellen = {
         "cmap": schnitt.cmap4({c: karte[g] for c, g in zeichen.items()}),
         "glyf": bytes(glyf),
@@ -269,7 +252,6 @@ def bauen(map_pfad, src_pfad, info_pfad, out_pfad, ids_pfad, list_pfad,
     return len(datei), quelle_gross, len(echte), len(liste)
 
 
-# ----------------------------------------------------- the generated Firn
 
 def firn_name(name):
     """icon.network.no-internet -> NETWORK_NO_INTERNET."""

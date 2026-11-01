@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""pinnew.py <serial.txt>: judge tools/term/pinnew.sh (r529 pin opens more terminals, r530 error window).
-
-Checks: the console terminal runs from boot, so a left click on the pin only switches (no start); the context menu "New window"
-starts one more terminal each time (three times); every start gives a real window with its own tty;
-/bin/termfull shows its window. Exit code 0 = all good."""
 import re
 import sys
 
@@ -22,7 +17,6 @@ def main(path):
         print(("  OK    " if ok else "  FAIL  ") + msg)
         if not ok:
             bad += 1
-    # the serial line of another program may cut in after "start" (a mixed line), so the pid is not part of the match
     starts = re.findall(r"taskbar: pin starte /apps/terminal\.osp/start", txt)
     check(len(starts) == 3,
           "pin starts: three times the menu item = 3 starts, the left click none (saw %d)" % len(starts))

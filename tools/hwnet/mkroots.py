@@ -90,8 +90,6 @@ def main(argv):
         print("mkroots: no bundle at %s" % bundle, file=sys.stderr)
         return 1
 
-    # The bundle is PEM blocks; Debian writes no subject lines into it, so
-    # the name has to come out of the certificate itself.
     try:
         from cryptography import x509
         from cryptography.hazmat.primitives import serialization

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Independent reference of the pointer curve (kernel/drv/hid/ptrcfg.fi).
-
-Prints the expected `ptrcfg: case ...` and `ptrcfg: e2e ...` lines.
-Written from the spec in the header of ptrcfg.fi, not from the Firn code.
-"""
 import sys
 
 DENOM = 25600
@@ -63,7 +58,6 @@ CASES = [(100, 0, 0), (200, 0, 0), (50, 0, 0), (100, 2, 0), (150, 3, 1),
 
 
 def e2e():
-    # speed 200, accel 0, natural; packet dx=+10, dy=+4 (up), wheel +1
     p = Ptr(200, 0, 1)
     mg = 10
     dx = p.axis(10, mg, 0)

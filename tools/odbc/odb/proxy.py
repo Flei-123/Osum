@@ -1,13 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Long-lived relay between one upstream byte stream and short-lived local clients.
-
-A VirtualBox uart2 server pipe serves ONE client and stays busy after it left (ERROR_PIPE_BUSY until the VM restarts),
-so every `odbc` process that opens the pipe itself works exactly once. `odbc serve` opens the pipe once and keeps it;
-each odbc command then connects to the local TCP/unix listener instead (`--port tcp:127.0.0.1:4710`).
-
-The relay is a dumb byte pipe: frames, auth and resync stay end to end. One client at a time; a new client replaces the
-old one (a stale client must never block the next command). Upstream bytes with no client attached are dropped.
-"""
 import os
 import socket
 import threading
@@ -19,7 +10,6 @@ DEFAULT_LISTEN = "tcp:127.0.0.1:4710"
 
 
 def make_listener(spec):
-    """tcp:host:port | unix:path -> bound, listening socket."""
     if spec.startswith("unix:"):
         path = spec[5:]
         if os.path.exists(path):
@@ -38,14 +28,14 @@ def make_listener(spec):
 
 class Proxy:
     def __init__(self, upstream, listener):
-        self.up = upstream            # a started Transport
+        self.up = upstream
         self.ls = listener
         self.client = None
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.clients_served = 0
-        self.up_bytes = 0             # upstream -> client bytes relayed
-        self.dropped = 0              # upstream bytes with no client attached
+        self.up_bytes = 0
+        self.dropped = 0
 
     def start(self):
         threading.Thread(target=self._up_pump, daemon=True).start()
@@ -66,7 +56,7 @@ class Proxy:
         while not self.stop.is_set():
             d = self.up.read(0.2)
             if d is None:
-                self.stop.set()       # upstream gone: the VM went away
+                self.stop.set()
                 break
             if not d:
                 continue
@@ -129,7 +119,6 @@ class Proxy:
 
 
 def serve(upstream_spec, listen_spec=DEFAULT_LISTEN, wait=0.0, announce=print):
-    """Open upstream once, listen locally, relay until upstream closes or Ctrl-C. Returns an exit code."""
     try:
         up = open_transport(upstream_spec, wait)
     except TransportError as e:

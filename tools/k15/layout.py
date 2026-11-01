@@ -76,13 +76,12 @@ def main():
                 fehler.append("id=%d and id=%d overlap: "
                               "(%d,%d %dx%d) / (%d,%d %dx%d)"
                               % (ia, ib, xa, ya, wa, ha, xb, yb, wb, hb))
-    spalten = {}
+    columns = {}
     for (i, k, x, y, w, h) in r:
-        # r454: the ids from 50 on (the tabs, the drag region) sit in the title strip above everything, whatever their number
         if i >= 50 or i in vertical:
             continue
-        spalten.setdefault(x, []).append((i, y))
-    for x, liste in spalten.items():
+        columns.setdefault(x, []).append((i, y))
+    for x, liste in columns.items():
         if len(liste) < 2:
             continue
         nach_id = [y for (i, y) in sorted(liste)]
@@ -100,7 +99,7 @@ def main():
         return 1
     print("%d rectangles, all inside window %dx%d, no overlap, "
           "order correct in %d columns"
-          % (len(r), bw, bh, len(spalten)))
+          % (len(r), bw, bh, len(columns)))
     return 0
 
 

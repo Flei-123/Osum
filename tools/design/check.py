@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/check.py -- the measured claims of the design audit (r399).
-
-    check.py <audit-outdir>
-
-<audit-outdir> is the output of `tools/design/audit.sh` with the drehbuch
-tools/design/views.txt: 01-schreibtisch.png, 02-startmenue.png,
-03-einstellungen.png, 04-explorer.png, 05-dialog.png and serial.txt.
-Prints one line per claim, `OK` or `FAIL`, and a last line
-`DESIGN: <n> passed, <m> failed`.
-
-Every number comes out of the pictures or the serial log; nothing is typed in.
-"""
 import os
 import re
 import sys
@@ -47,7 +35,6 @@ def px(im, x, y):
 
 
 def ink_box(im, box, bg, thr=60):
-    """Bounding box of the pixels in `box` that differ from the colour `bg`."""
     x0, y0, x1, y1 = box
     xs, ys = [], []
     for y in range(y0, y1):
@@ -87,7 +74,6 @@ def main(argv):
     check(share <= 0.60, "equal-neighbour share in the tree line: %.3f (nearest-neighbour stretch: 0.721)" % share)
 
     print("== C. frosted surfaces follow the rounded shape")
-    # r402: the window of the start menu stands where the launcher says (it depends on its height)
     ser = open(os.path.join(d, "serial.txt"), "rb").read().decode("latin-1") if os.path.exists(os.path.join(d, "serial.txt")) else ""
     gm = re.findall(r"launcher: geom x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser)
     gx, gy = (int(gm[-1][0]), int(gm[-1][1])) if gm else (8, 300)
@@ -99,17 +85,13 @@ def main(argv):
     print("== D. a selection is a tint with an indicator bar")
     s2 = png("02-startmenue")
     s2b = png("02b-suche")
-    # the first row of the result list is selected; its plate colour is the pixel right of the title
     plate = px(s2b, gx + lx + lw - 40, gy + ly + 26)
     ground = px(s2b, gx + lx + lw - 40, gy + ly + 26 + 104)
     cr_plate = M.contrast(plate, ground)
     check(cr_plate < 3.0, "the plate is a soft tint of the ground: contrast plate/ground %.2f (solid accent was 4.9)" % cr_plate)
-    # the title text of the row: darkest pixel in the title box
     dark = min((px(s2b, x, y) for x in range(gx + lx + 54, gx + lx + 114) for y in range(gy + ly + 4, gy + ly + 22)), key=lambda p: sum(p))
     check(M.contrast(dark, plate) >= 7.0, "the text on the plate keeps contrast %.1f:1 (>= 7)" % M.contrast(dark, plate))
     acc = 0
-    # the bar sits a few points inside the list's left edge: find the column of the first row that has
-    # the most accent pixels, and count those (the column 16 points further in must not have them)
     for cx in range(gx + lx, gx + lx + 14):
         n_ = 0
         for y in range(gy + ly + 2, gy + ly + 42):

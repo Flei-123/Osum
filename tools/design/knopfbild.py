@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
 import sys, zlib, struct
 
-SK = 2  # Justins Skalierung auf 3440x1440 (Tafelzeile: S2)
+SK = 2
 D = 10 * SK
 ZOOM = 20
 
@@ -26,8 +24,6 @@ def leer(n):
 
 
 def deckung_direkt(k):
-    """Die zurueckgebaute Fassung: jeder Bildpunkt GENAU EINMAL gesetzt.
-    Rueckgabe: Feld mit 0/1 -- mehr als 1 kann gar nicht entstehen."""
     f = [[0] * D for _ in range(D)]
     sb = SK
     if k == 'min':
@@ -54,9 +50,6 @@ def deckung_direkt(k):
 
 
 def deckung_vektor():
-    """Die alte Vektorfassung des X: zwei Strich-UMRISSE in EINEM Pfad,
-    gefuellt nach der Nichtnull-Regel. Wo beide Umrisse liegen, addiert
-    sich die Umlaufzahl -- das Feld bekommt dort 2."""
     sb = 3 * SK / 2.0
     f = [[0] * D for _ in range(D)]
 
@@ -67,7 +60,7 @@ def deckung_vektor():
         return [(x0 + nx, y0 + ny), (x1 + nx, y1 + ny),
                 (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)]
 
-    def drin(poly, px, py):
+    def in_(poly, px, py):
         w = 0
         for i in range(len(poly)):
             ax, ay = poly[i]
@@ -81,14 +74,12 @@ def deckung_vektor():
     for u in (umriss(0, 0, D - 1, D - 1), umriss(D - 1, 0, 0, D - 1)):
         for y in range(D):
             for x in range(D):
-                if drin(u, x + 0.5, y + 0.5):
+                if in_(u, x + 0.5, y + 0.5):
                     f[y][x] += 1
     return f
 
 
-def malen(pfad, felder, titel):
-    """Mehrere Felder nebeneinander, vergroessert. Farben:
-    weiss = leer, schwarz = einmal gedeckt, ROT = MEHRFACH gedeckt."""
+def paint(pfad, felder, titel):
     n = len(felder)
     breite = n * (D + 2) * ZOOM
     hoehe = (D + 2) * ZOOM
@@ -103,7 +94,7 @@ def malen(pfad, felder, titel):
                 elif v == 1:
                     r, g, b = 20, 20, 20
                 else:
-                    r, g, b = 220, 30, 30      # DOPPELT GEDECKT
+                    r, g, b = 220, 30, 30
                 for dy in range(ZOOM):
                     for dx in range(ZOOM):
                         if dx == 0 or dy == 0:
@@ -127,11 +118,11 @@ if __name__ == '__main__':
     print()
     v = deckung_vektor()
     mehr = sum(1 for r in v for c in r if c > 1)
-    malen(aus + '/vorher-x-vektor.png', [v],
+    paint(aus + '/vorher-x-vektor.png', [v],
           "VORHER: X aus zwei Strichen (rot = doppelt)")
     print("        doppelt gedeckte Bildpunkte: %d" % mehr)
     d = [deckung_direkt(k) for k in ('min', 'max', 'close')]
-    malen(aus + '/nachher-drei-knoepfe.png', d,
+    paint(aus + '/nachher-drei-knoepfe.png', d,
           "NACHHER: min / max / schliessen, direkt gemalt")
     mehr2 = sum(1 for f in d for r in f for c in r if c > 1)
     print("        doppelt gedeckte Bildpunkte: %d" % mehr2)

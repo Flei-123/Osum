@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/cursor/gen_tables.py -- writes the outline tables of tools/wm/cursor2.py
-into kernel/gfx/cursor.fi (the .fi file itself carries the hand-kept
-rasteriser; only the table lines and their sizes are generated).
-  python3 tools/cursor/gen_tables.py          # patch in place
-  python3 tools/cursor/gen_tables.py --check  # exit 1 if the file is stale"""
 import os, re, sys
 here = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(here, "..", "wm"))
 import zeiger2
-kopf, daten = zeiger2.tafel()
+kopf, daten = zeiger2.board()
 kb = []
 for (off, n, hx, hy) in kopf:
     assert off % 2 == 0 and off // 2 < 256 and n < 256

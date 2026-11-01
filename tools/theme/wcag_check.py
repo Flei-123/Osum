@@ -30,7 +30,6 @@ of the two is wrong and the difference is the finding.
 """
 import sys
 
-# --------------------------------------------------------------- WCAG proper
 
 
 def srgb_to_linear(c8):
@@ -57,16 +56,11 @@ def contrast(fg, bg):
     return (a + 0.05) / (b + 0.05)
 
 
-# ------------------------------------------------------- the schemes, parsed
-#
-# Read straight from assets/schemes/*.scheme so this file cannot drift
-# away from the real ramps the way model.py drifted away from wlibc.fi.
 
 RAMP_KEYS = ["neutral0", "neutral50", "neutral100", "neutral200",
              "neutral300", "neutral400", "neutral500", "neutral600",
              "neutral700", "neutral800", "neutral900", "neutral950",
              "neutral1000"]
-# index into the ramp list, by the name the source uses
 N = {k.replace("neutral", "N_"): i for i, k in enumerate(RAMP_KEYS)}
 
 
@@ -86,11 +80,6 @@ def ramp_of(scheme):
     return [int(scheme[k], 16) for k in RAMP_KEYS]
 
 
-# ------------------------------------------------------- the semantic layer
-#
-# Mirrors kernel/user/wlibc.fi and tools/theme/model.py.  BEFORE is the
-# state this round started from; AFTER is the state it proposes.  Only
-# the entries that differ are listed in AFTER.
 
 def semantics(ramp, dark, high, text_secondary_dark):
     """The neutral-derived roles.  Accent roles are generated and are
@@ -133,9 +122,6 @@ def semantics(ramp, dark, high, text_secondary_dark):
     return s
 
 
-# Every neutral pairing the system can produce, with its WCAG class.
-# Taken from TEXT_PAIRS in model.py -- the accent pairings are left to
-# model.py because the accent is generated, not tabulated.
 PAIRS = [
     ("text_primary", "surface", "normal"),
     ("text_primary", "surface_raised", "normal"),

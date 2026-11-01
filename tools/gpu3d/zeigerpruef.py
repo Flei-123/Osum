@@ -40,10 +40,10 @@ import sys
 
 MAXPX = 48
 MIN_DUNKEL = 20
-MIN_HELL = 10       # und so viele Randpunkte
+MIN_BRIGHT = 10
 
 
-def lade(pfad):
+def load(pfad):
     d = open(pfad, "rb").read()
     i = 0
     f = []
@@ -71,8 +71,8 @@ def main():
         print(__doc__)
         return 2
     try:
-        wh, hh, hw = lade(sys.argv[1])
-        ws, hs, sw = lade(sys.argv[2])
+        wh, hh, hw = load(sys.argv[1])
+        ws, hs, sw = load(sys.argv[2])
     except Exception as e:
         print("FEHL: %s" % e)
         return 1
@@ -124,12 +124,12 @@ def main():
     phw = punkte(hw)
 
     dunkel = sum(1 for p in psw if sum(p) < 120)
-    hell = sum(1 for p in psw if sum(p) > 600)
+    bright = sum(1 for p in psw if sum(p) > 600)
     print("in the software image at this spot: %d dark, %d bright pixels"
-          % (dunkel, hell))
-    if dunkel < MIN_DUNKEL or hell < MIN_HELL:
+          % (dunkel, bright))
+    if dunkel < MIN_DUNKEL or bright < MIN_BRIGHT:
         print("FAIL: no painted pointer there (expected at least")
-        print("      %d dunkle und %d helle)." % (MIN_DUNKEL, MIN_HELL))
+        print("      %d dunkle und %d helle)." % (MIN_DUNKEL, MIN_BRIGHT))
         return 1
 
     farben = set(phw)

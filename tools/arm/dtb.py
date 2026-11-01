@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/arm/dtb.py -- read the device tree QEMU writes for `-M virt`.
-
-Every address in `kernel/arch/aarch64/virt.inc` came out of this, and not
-out of a manual:
-
-    qemu-system-aarch64 -machine virt,dumpdtb=/tmp/virt.dtb -cpu cortex-a53
-    ./tools/arm/dtb.py /tmp/virt.dtb
-
-The point is not that the numbers are hard to look up. The point is that a
-number looked up somewhere else is a claim about the machine, and a number
-read out of the machine is a measurement. When `-M virt` moves the GIC in
-some future QEMU, `tools/arm/run.sh` compares this output with `virt.inc`
-and the disagreement is a failed test rather than a mystery.
-
-It is a flat DTB reader, about a hundred lines, no library. `dtc` is not
-installed on the measuring machine and adding a package for four numbers
-would be the wrong trade.
-"""
 import struct
 import sys
 
@@ -72,7 +54,6 @@ def words(v):
 
 
 def reg64(v):
-    """`reg` with #address-cells = #size-cells = 2: pairs of 64-bit values."""
     w = words(v)
     return [(w[i] << 32 | w[i + 1], w[i + 2] << 32 | w[i + 3])
             for i in range(0, len(w) - 3, 4)]
@@ -130,9 +111,8 @@ def main():
     node, p = first(lambda n, p: n == "/timer")
     if p:
         w = words(p["interrupts"])
-        # four triples: secure phys, non-secure phys, virtual, hypervisor
         if len(w) >= 12:
-            result["TIMER_INTID"] = w[7] + 16       # the virtual timer, a PPI
+            result["TIMER_INTID"] = w[7] + 16
 
     if facts:
         for k in ("RAM_BASE", "RAM_SIZE", "UART0", "UART_INTID", "GICD", "GICC",

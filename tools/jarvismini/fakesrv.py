@@ -1,19 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/jarvismini/fakesrv.py -- a fake JARVIS server for the JARVIS Mini gate (TLS + login + WebSocket), the host side of /bin/jmlink.
-
-    fakesrv.py <port> <cert.pem> <key.pem> <logfile>
-
-Same protocol as the real server (public/mini.html): POST /api/login {"username","password"} -> {"token"} (only justin / geheim),
-then GET /?role=ui&dev=..&token=.. with a WebSocket upgrade (token must match). Every event is ONE log line the gate reads:
-    fake: login ok user=justin | fake: login bad user=<name> | fake: ws open | fake: ws refused
-    fake: msg <text> images=<n> files=<n> imgmagic=<first base64 chars> | fake: ws closed
-The reply to a message: one `token` frame ("pong from fake") + `done`.
-"""
 import base64, hashlib, json, re, socket, ssl, struct, sys, threading, time
 
 port, cert, key, logf = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-TOKEN = "tok-fake-" + "x" * 40  # the real one is a JWT (long); jmlink wants >= 20 characters
+TOKEN = "tok-fake-" + "x" * 40
 lock = threading.Lock()
 
 

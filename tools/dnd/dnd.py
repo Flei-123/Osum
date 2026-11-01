@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/dnd/dnd.py -- judge the serial line of tools/dnd/run.sh (W-DND: drag hover-raise, Esc cancel, path drop on terminal).
-
-Witnesses in order: wm: dndcancel (Esc phase) -> taskbar: dndraise id=N rc= (taskbar phase) -> wm: dndraise id=N (hover raise)
--> wm: dndterm tty=T (drop on the terminal). The no-payload drag before the Esc phase must produce NOTHING."""
 import re
 import sys
 

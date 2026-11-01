@@ -23,7 +23,7 @@ import shutil
 import sys
 
 
-def lade(sp, name):
+def load(sp, name):
     p = os.path.join(sp, name)
     return open(p, "rb").read() if os.path.exists(p) else b""
 
@@ -33,7 +33,7 @@ def sichere(sp, name, d):
 
 
 def aendern(sp):
-    d = bytearray(lade(sp, "PACK"))
+    d = bytearray(load(sp, "PACK"))
     if not d:
         return "PACK ist leer"
     d[100] ^= 0x01
@@ -47,11 +47,11 @@ def rueckschritt(sp, alt):
 
 
 def fremd(sp):
-    idx = lade(sp, "INDEX").split(b"\n")
+    idx = load(sp, "INDEX").split(b"\n")
     eintraege = [z.split(b"\t") for z in idx if z.count(b"\t") == 2]
     if len(eintraege) < 2:
         return "zu wenige Bloecke"
-    d = bytearray(lade(sp, "PACK"))
+    d = bytearray(load(sp, "PACK"))
     a = (int(eintraege[0][1]), int(eintraege[0][2]))
     b = (int(eintraege[1][1]), int(eintraege[1][2]))
     d[a[0]:a[0] + a[1]] = d[b[0]:b[0] + b[1]]
@@ -60,7 +60,7 @@ def fremd(sp):
 
 
 def gross(sp):
-    idx = lade(sp, "INDEX").split(b"\n")
+    idx = load(sp, "INDEX").split(b"\n")
     aus = []
     getan = False
     for z in idx:
@@ -75,7 +75,7 @@ def gross(sp):
 
 
 def wurzelluege(sp):
-    d = lade(sp, "ROOT").split(b" ")
+    d = load(sp, "ROOT").split(b" ")
     if len(d) < 4:
         return "keine Wurzel"
     n = bytearray(d[2])
@@ -86,7 +86,7 @@ def wurzelluege(sp):
 
 
 def halbe(sp):
-    d = lade(sp, "ROOT")
+    d = load(sp, "ROOT")
     sichere(sp, "ROOT", d[:len(d) // 2])
     return "ROOT nur zur Haelfte geschrieben (Stromausfall)"
 

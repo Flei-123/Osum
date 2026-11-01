@@ -80,7 +80,7 @@ def main(argv):
     wx, wy = (int(v) for v in argv[3].split(","))
 
     g = None
-    werte = None
+    values_2 = None
     graphs = {}
     reports = []
     for z in txt:
@@ -90,8 +90,8 @@ def main(argv):
             graphs[int(m.group(5))] = m
         m = CPU.search(z)
         if m:
-            werte = [int(v) for v in m.group(1).split()]
-            reports.append(werte)
+            values_2 = [int(v) for v in m.group(1).split()]
+            reports.append(values_2)
     if g is None:
         print("no graph line in the capture")
         return 1
@@ -103,7 +103,6 @@ def main(argv):
         if m and int(m.group(3)) > 400:
             cx, cy = int(m.group(5)), int(m.group(6))
 
-    # ---- 1. die Flaeche
     farben = set()
     for y in range(gy + 2, gy + gh - 2, 3):
         for x in range(gx + 2, gx + gw - 2, 7):
@@ -126,13 +125,9 @@ def main(argv):
     print("Grundfarbe %s (%d von %d Punkten)"
           % (grund, zaehler[grund], sum(zaehler.values())))
 
-    # ---- 2. die Punkte
-    if not werte:
+    if not values_2:
         print("no gcpu values (did the program run without `melde`?)")
         return 1
-    # The program reports after every picture it paints, and the shot of the run is taken at some moment of that
-    # sequence -- a few samples before the last report is normal. The picture must show ONE of the reported states:
-    # take the report that fits best.
     def score(vals):
         nn = len(vals)
         hit = 0
@@ -154,7 +149,6 @@ def main(argv):
     best = None
     longest = max([len(v) for v in reports] or [0])
     for vals in reports:
-        # a short report (the first frames of the run) proves nothing: only the longer half counts
         if len(vals) < 2 or len(vals) * 2 < longest:
             continue
         sc = score(vals)
@@ -164,7 +158,7 @@ def main(argv):
     if best is None:
         print("no gcpu values in the capture")
         return 1
-    werte = best
+    values_2 = best
     n = len(best)
     treffer = score(best)
     daneben = n - treffer

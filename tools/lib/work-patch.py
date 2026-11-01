@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST = ROOT / "test.sh"
 
 ALT = 'WORK="$ROOT/.test-work"\nmkdir -p "$WORK"\n'
-NEU = ('# Where the logs of each section go. Overridable so two\n'
+NEW = ('# Where the logs of each section go. Overridable so two\n'
        '# acceptance runs (e.g. tcg and kvm) do not overwrite each\n'
        '# other logs.\n'
        'WORK="${OSUM_WORK:-$ROOT/.test-work}"\n'
@@ -22,7 +22,7 @@ def main():
     if ALT not in t:
         print("ERROR: I do not see the WORK line", file=sys.stderr)
         return 1
-    TEST.write_text(t.replace(ALT, NEU, 1))
+    TEST.write_text(t.replace(ALT, NEW, 1))
     print("test.sh: WORK can now be redirected with $OSUM_WORK")
     return 0
 

@@ -12,8 +12,7 @@ from erhebung import lies  # noqa: E402
 import shell  # noqa: E402
 
 
-def lies_soll():
-    """modul -> Sollverzeichnis (relativ zu kernel/, '.' = oben)."""
+def read_soll():
     soll = {}
     if not os.path.exists(SOLLDATEI):
         return soll
@@ -27,11 +26,7 @@ def lies_soll():
     return soll
 
 
-def ist_ablage():
-    """modul -> Istverzeichnis, nur fuer die Dateien des Kernabbilds.
-
-    `kernel/user/` und `kernel/app/` sind eigene Programme und werden
-    nicht betrachtet -- sonst zaehlte man `netmon` doppelt."""
+def ist_clipboard():
     kern = huelle.huelle(os.path.join(KERN, "kmain.fi"))
     kern |= huelle.huelle(os.path.join(KERN, "uprog.fi"))
     ist = {}
@@ -41,10 +36,7 @@ def ist_ablage():
     return ist
 
 
-def alle_dateien():
-    """Jede .fi im Kernbaum, unabhaengig von der Erreichbarkeit --
-    ohne user/ und app/. Braucht man, um eine Datei zu bemerken, die
-    am falschen Ort liegt UND deshalb gar nicht mehr erreicht wird."""
+def all_dateien():
     aus = {}
     for stamm, verz, namen in os.walk(KERN):
         verz[:] = [d for d in verz if d not in ("user", "app")]
@@ -57,9 +49,9 @@ def alle_dateien():
 
 
 def vergleiche():
-    soll = lies_soll()
-    ist = ist_ablage()
-    flach = alle_dateien()
+    soll = read_soll()
+    ist = ist_clipboard()
+    flach = all_dateien()
     for m, d in flach.items():
         if m in soll and m not in ist:
             ist[m] = d

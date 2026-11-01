@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/lib/opkpfad.py -- where the package tool `opk.py` lives.
-
-Prints ONE path. Order:
-
-  1. $OPK, if set (the caller knows best).
-  2. /root/orientos-install/pkg/opk.py, if it still exists (the old
-     default; that folder was only a git WORKTREE of the product repo
-     and was removed in the cleanup of 21.09.2026 -- since then
-     ota, install, module, loader and dynlader failed with
-     "can't open file .../opk.py" before measuring anything).
-  3. `pkg/opk.py` from the product repo at ref $ORIENTOS_REF (default
-     `main`), read with `git show` and cached under ~/.cache/osum/ by
-     its blob hash. `git show` and not the checked-out file: the repo's
-     working copy sits on whatever branch someone is working on, and a
-     measurement must not depend on that.
-  4. Otherwise the old default, so the caller's error message still
-     names a concrete path.
-
-Usable from shell (`OPK=${OPK:-$(python3 tools/lib/opkpfad.py)}`) and
-from Python (`import opkpfad; opkpfad.pfad()`).
-"""
 import os
 import subprocess
 import sys
@@ -56,7 +35,7 @@ def pfad():
         with open(tmp, "wb") as f:
             f.write(inhalt)
         os.chmod(tmp, 0o755)
-        os.replace(tmp, ziel)          # atomic: parallel runners are fine
+        os.replace(tmp, ziel)
     return ziel
 
 

@@ -23,34 +23,22 @@ import re
 import sys
 
 GRAFIK = ["fb", "wm", "wig", "font", "ttf", "tile", "vmode", "ansi", "ps2m"]
-EIGEN = set(g + ".fi" for g in GRAFIK) | {
+OWN = set(g + ".fi" for g in GRAFIK) | {
     "gfx.fi", "gfx-aus.fi", "kgui.fi", "kgbase.fi", "kgdisp.fi", "kgsvc.fi", "kgwm.fi", "kgrun.fi", "kgstage.fi", "sysgui.fi",
     "dispsave.fi",
     "zeiger.fi",
     "vgpu.fi",
-    # W-VBLANK: `drv/gpu/beam.fi` (scan-line counter of the Intel display pipe) is graphics only, like vgpu (wm.fi imports it).
     "beam.fi",
     "shot.fi",
     "pixelguard.fi",
     "vmsvga.fi",
-    # RUNDE ROADMAP-5 (K-008): `kernel/app/drucke.fi` is a ring-3 PROGRAM
-    # (--profile=app, its own ELF, /bin/drucke), not a kernel module. It
-    # rasterises text with the TrueType reader (`ttf.*`, `raster.*`) --
-    # that is its job, and none of it is linked into any kernel image:
-    # nothing in kernel/ imports it, build-kernel.sh does not name it.
     "drucke.fi",
-    # RUNDE FUI-TEXT (24.09.2026): `kernel/user/fuiglyph.fi` is RING-3
-    # code as well -- fUi's font engine (`lib/font/ttf.fi`, `raster.fi`)
-    # rasterising the glyphs for `wlibc`. Only ring-3 programs import it
-    # (wlib.fi, desktop.fi, taskbar.fi); nothing in the kernel image does,
-    # build-kernel.sh does not name it. Its 18 "places" are `ttf.*` calls
-    # into lib/, not the kernel's frame buffer. Same case as drucke.fi.
     "fuiglyph.fi"}
 MUSTER = re.compile(
     r"(?<![A-Za-z0-9_.])(" + "|".join(GRAFIK) + r")\.(?!(?:len|ptr)\b)([A-Za-z_][A-Za-z0-9_]*)")
 
 
-def ohne_kommentare(text):
+def without_kommentare(text):
     aus = []
     for zeile in text.split("\n"):
         i = zeile.find("//")
@@ -58,7 +46,7 @@ def ohne_kommentare(text):
     return "\n".join(aus)
 
 
-def ohne_importe(text):
+def without_importe(text):
     """`import font.metrics` ist kein Zugriff auf die Grafik.
 
     RUNDE ROTABSCHNITTE.  `kernel/user/fuib.fi:72` stand mit genau einer
@@ -82,13 +70,13 @@ def zaehle(wurzel):
     namen = collections.Counter()
     for pfad, _, dateien in os.walk(wurzel):
         for d in sorted(dateien):
-            if not d.endswith(".fi") or d in EIGEN:
+            if not d.endswith(".fi") or d in OWN:
                 continue
             p = os.path.join(pfad, d)
             with open(p, "rb") as f:
                 roh = f.read().decode("utf8", "replace")
-            fremd = set(re.findall(r"^\s*import\s+(?!(?:gfx|ui|drv)\.)[A-Za-z0-9_.]+\.([A-Za-z0-9_]+)", roh, re.M))
-            treffer = [t for t in MUSTER.findall(ohne_importe(ohne_kommentare(roh))) if t[0] not in fremd]
+            foreign = set(re.findall(r"^\s*import\s+(?!(?:gfx|ui|drv)\.)[A-Za-z0-9_.]+\.([A-Za-z0-9_]+)", roh, re.M))
+            treffer = [t for t in MUSTER.findall(without_importe(without_kommentare(roh))) if t[0] not in foreign]
             if treffer:
                 je_datei[os.path.relpath(p, wurzel)] = len(treffer)
                 for a, b in treffer:

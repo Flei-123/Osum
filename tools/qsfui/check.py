@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/qsfui/check.py -- is the quick-settings panel laid out like Windows 11?
-
-    check.py <serial.txt> <shot.ppm> <ui_scale> [--shift]
-
-Reads the panel's own scene report (`qs: open`, `qs: kachel`, `qs: platte`,
-`qs: label`, `qs: regler`, `qs: medien`, `qs: fussb`) and the picture, and
-judges:
-
-  1. eight tiles, three to a row (3 + 3 + 2), every cell and every plate EQUAL in size
-  2. nothing outside the panel: tiles, labels, sliders, media tile, footer buttons
-  3. the label stands UNDER the plate (below its bottom edge), inside its cell
-  4. the sliders lie inside the panel with a margin (they used to run out of it)
-  5. PIXELS: the label ink lies inside its cell -- the gaps between the cells and
-     the strip right of the last cell are free of ink at label height
-  6. PIXELS: every label has ink (it was painted), the media tile has ink
-  7. the gear is the right-most footer button, the battery glyph stands left of it
-
-`--shift` is the counter-proof: every rectangle moved half a cell to the right --
-the check must complain, otherwise it measures nothing.
-Exit code 0 = all OK.
-"""
 import re
 import sys
 
@@ -43,7 +22,6 @@ def ppm(path):
 
 def kv(line):
     d = {k: int(v) for k, v in re.findall(r"(\w+)=(\d+)", line)}
-    # a line torn by other serial output (loaded host) lacks a key: it is not a report
     return d if all(k in d for k in ("x", "y", "w", "h")) else {}
 
 
@@ -93,7 +71,6 @@ def main():
         good = x >= margin and y >= margin and x + w <= qw - margin and y + h <= qh - margin
         ok(good, "%s inside the panel %dx%d (x=%d y=%d w=%d h=%d)" % (what, qw, qh, x, y, w, h))
 
-    # 1. the grid
     ok(len(cells) >= 8, "%d tiles reported (need 8)" % len(cells))
     if len(cells) < 8 or len(plates) < 8 or len(labels) < 8:
         ok(False, "plates %d / labels %d reported (need 8 each)" % (len(plates), len(labels)))
@@ -112,13 +89,11 @@ def main():
     ok(perrow == [3, 3, 2], "three tiles to a row, then three, then two (rows: %s)" % perrow)
     xs = sorted({c["x"] for c in cells.values()})
     ok(len(xs) == 3 and xs[1] - xs[0] == xs[2] - xs[1], "three equal columns (x: %s)" % xs)
-    # 2. nothing outside
     for n, c in sorted(cells.items()):
         inside(c, "tile %d" % n)
     for nm, r in sorted(reg.items()):
         inside(r, "slider %s" % nm, 8 * sc)
         ok(r["w"] >= 120 * sc, "slider %s is wide enough to use (%d px)" % (nm, r["w"]))
-        # fuiscene.slider once set its height with spf() in a points tree: 40 pt at scale 2
         ok(r["h"] == 20 * sc, "slider %s is 20 points high (%d px at scale %d)" % (nm, r["h"], sc))
     ok(len(med) == 0, "no media row without a session")
     if False:
@@ -130,13 +105,11 @@ def main():
         right = qx + qw - 16 * sc
         ok(abs(fuss[1]["x"] + fuss[1]["w"] - right) <= 4 * sc,
            "the gear stands bottom right: its right edge %d is at the card's inner edge %d" % (fuss[1]["x"] + fuss[1]["w"], right))
-    # 3. label under plate
     for n in sorted(cells):
         p, l, c = plates[n], labels[n], cells[n]
         ok(l["y"] >= p["y"] + p["h"] and l["y"] + l["h"] <= c["y"] + c["h"] + 1,
            "tile %d: the label (y %d..%d) is under the plate (bottom %d), inside the cell" %
            (n, l["y"], l["y"] + l["h"], p["y"] + p["h"]))
-    # 5/6 pixels
     def px(x, y):
         o = (y * pw + x) * 3
         return pix[o], pix[o + 1], pix[o + 2]
@@ -144,13 +117,10 @@ def main():
     def far(a, b):
         return abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 90
 
-    # the card colour: the pixel in the panel's top-left padding
     bg = px(qx + 3 * sc, qy + qh // 2)
     row_by_y = {}
     for n, c in cells.items():
         row_by_y.setdefault(c["y"], []).append(n)
-    # the harness paints a measurement strip over the top of the screen (fb.band);
-    # 'qs: open ... ay=' reports where the free work area starts. Pixels above it are not the panel.
     free_top = 0
     for l in lines:
         if l.startswith("qs: open "):
@@ -165,7 +135,6 @@ def main():
             ok(True, "row at y=%d: label band (screen y %d) lies under the harness strip (free area starts at %d), pixel check skipped"
                % (y, qy + l0["y"], free_top))
             continue
-        # gaps between cells and right of the last
         edges = []
         for i, n in enumerate(ns):
             c = cells[n]

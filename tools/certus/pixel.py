@@ -35,7 +35,7 @@ import zlib
 from collections import Counter
 import os
 sys.path.insert(0, os.path.join(os.environ.get("FIRN", "/root/firn"), "tools/testkit"))
-from testkit import read_ppm  # shared reader (Firn tools/testkit)
+from testkit import read_ppm
 
 
 def write_png(path, w, h, px):
@@ -55,7 +55,7 @@ def write_png(path, w, h, px):
     open(path, "wb").write(out)
 
 
-def zaehlen(w, h, px, y0=0, y1=None):
+def count(w, h, px, y0=0, y1=None):
     if y1 is None:
         y1 = h
     cnt = Counter()
@@ -71,7 +71,7 @@ def zaehlen(w, h, px, y0=0, y1=None):
     dark = sum(v for k, v in cnt.items()
                if k[0] < 96 and k[1] < 96 and k[2] < 96)
     baender = 0
-    drin = False
+    in_ = False
     for y in range(y0, y1):
         base = y * w * 3
         d = 0
@@ -79,18 +79,18 @@ def zaehlen(w, h, px, y0=0, y1=None):
             o = base + x * 3
             if px[o] < 96 and px[o + 1] < 96 and px[o + 2] < 96:
                 d += 1
-        if d >= 3 and not drin:
+        if d >= 3 and not in_:
             baender += 1
-            drin = True
+            in_ = True
         elif d < 3:
-            drin = False
-    flaeche = w * (y1 - y0)
+            in_ = False
+    area = w * (y1 - y0)
     return {
         "breite": w,
         "hoehe": y1 - y0,
         "hintergrund": "#%02x%02x%02x" % (bg[0], bg[1], bg[2]),
         "tintenpunkte": ink,
-        "tintenanteil": round(ink / float(flaeche), 5) if flaeche else 0,
+        "tintenanteil": round(ink / float(area), 5) if area else 0,
         "dunkle_punkte": dark,
         "farben": len(cnt),
         "textbaender": baender,
@@ -116,7 +116,7 @@ def main():
         y1 = max(y0, h - 32)
     if "--oben" in args:
         y0 = int(args[args.index("--oben") + 1])
-    r = zaehlen(w, h, px, y0, y1)
+    r = count(w, h, px, y0, y1)
     if "--json" in args:
         json.dump(r, open(args[args.index("--json") + 1], "w"), indent=2)
     print("%dx%d  Hintergrund %s  Tinte %d (%.2f %%)  dunkel %d  "

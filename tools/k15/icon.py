@@ -75,7 +75,7 @@ def lies(pfad):
                     raise SystemExit(
                         "symbol: '%s' ist kein einzelnes Zeichen" % zeichen)
                 if not wert:
-                    palette[zeichen] = None  # durchsichtig
+                    palette[zeichen] = None
                 elif wert.startswith("@"):
                     name = wert[1:]
                     if name not in ROLLEN:
@@ -144,9 +144,6 @@ def zurueck(pfad):
             if a == 0:
                 reihe.append(None)
             elif a != 255 and w >= 32 and h >= 32:
-                # r399: a vector icon (32x32 and up) carries a REAL coverage in the fourth
-                # octet; an edge pixel is a blend with whatever is behind it and cannot be
-                # recounted -- only the opaque pixels are compared
                 reihe.append(None)
             elif a != 255:
                 reihe.append(("rolle", a))
@@ -158,7 +155,6 @@ def zurueck(pfad):
 
 def main(argv):
     if len(argv) >= 4 and argv[1] == "--pruefe" and argv[3].endswith(".osym"):
-        # r399: the bundle carries a finished picture; the image must hold the SAME octets
         import os
         import symjoin
         want = symjoin.joined(os.path.dirname(argv[3]) or ".")

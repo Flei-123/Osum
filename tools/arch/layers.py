@@ -44,7 +44,6 @@ ALLOWED = {
 def _s(x):
     return set(x.split())
 
-# layer -> file names (without .fi) while the tree is still flat
 TABLE = {
     'base': _s("""ulib msg nv pw grp sha tools nidx appdir actwire actcli act image gif jpeg pngenc flate inflate media
         unix kbund bstore jenc jsig key vault pin trash chacha dcrypt bsec aiot setschema wl_data wl_input
@@ -69,10 +68,8 @@ TABLE = {
         plugboese plugpaar plugprobe plugregel plugspaet plugtempo pluguhr pollbr pollt sockt soclocal stab fftempo
         cptempo ctr ctrkill presentlog nvcheck noise ofs3 netmeter sysstub mut"""),
 }
-# a name can only be in one set: first listed layer wins, in this order
 ORDER = ['test', 'cmd', 'toolkit', 'services', 'shell', 'apps', 'base']
 
-# apps may import other apps only inside the same family (shared code belongs in toolkit/base)
 FAMILY = {}
 for fam, names in {
     'explorer': 'explorer expakt exporte fileop expdlg expmodell massren trashbin',
@@ -100,7 +97,7 @@ def layer_of(nid):
 def run(root):
     g = deps.Graph(root)
     lay = {k: layer_of(k) for k in g.nodes}
-    viol = []   # (rule, importer, imported, text)
+    viol = []
     for a, bs in g.edges.items():
         la = lay[a]
         if la in ('unassigned',):

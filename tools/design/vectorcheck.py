@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
-#
 import sys
 import math
 
 EINS = 64
 KAPPA = 35
-KURVE_TEILE = 16
+CURVE_PARTS = 16
 
 
 def tdiv(a, b):
@@ -22,10 +18,6 @@ def tdiv(a, b):
 
 
 def rdiv(a, b):
-    """Teilen mit Runden, symmetrisch um die Null.
-
-    Muss Bit fuer Bit dasselbe tun wie `rdiv` in kernel/lib/vektor.fi --
-    sonst prueft dieser Test etwas anderes, als der Kernel rechnet."""
     if b == 0:
         return 0
     if b < 0:
@@ -35,7 +27,7 @@ def rdiv(a, b):
     return -((-a + b // 2) // b)
 
 
-class Pfad:
+class Path:
     def __init__(self):
         self.pts = []
         self.kanten = []
@@ -45,12 +37,12 @@ class Pfad:
         self.start = len(self.pts)
         self.pts.append((x, y))
 
-    def linie(self, x, y):
+    def line_2(self, x, y):
         self.pts.append((x, y))
 
     def kubik(self, c1x, c1y, c2x, c2y, x, y):
         ax, ay = self.pts[-1]
-        n = KURVE_TEILE
+        n = CURVE_PARTS
         for i in range(1, n + 1):
             t = i
             u = n - i
@@ -61,7 +53,7 @@ class Pfad:
                       + 3 * u * t * t * c2y + t * t * t * y, nnn)
             self.pts.append((bx, by))
 
-    def bogen(self, x0, y0, ex, ey, x1, y1):
+    def arc(self, x0, y0, ex, ey, x1, y1):
         c1x = x0 + rdiv((ex - x0) * KAPPA, 64)
         c1y = y0 + rdiv((ey - y0) * KAPPA, 64)
         c2x = x1 + rdiv((ex - x1) * KAPPA, 64)
@@ -84,9 +76,9 @@ class Pfad:
 
 def rechteck(p, x, y, w, h):
     p.nach(x, y)
-    p.linie(x + w, y)
-    p.linie(x + w, y + h)
-    p.linie(x, y + h)
+    p.line_2(x + w, y)
+    p.line_2(x + w, y + h)
+    p.line_2(x, y + h)
     p.zu()
 
 
@@ -96,28 +88,27 @@ def rundeck(p, x, y, w, h, r):
         return rechteck(p, x, y, w, h)
     x1, y1 = x + w, y + h
     p.nach(x + r, y)
-    p.linie(x1 - r, y)
-    p.bogen(x1 - r, y, x1, y, x1, y + r)
-    p.linie(x1, y1 - r)
-    p.bogen(x1, y1 - r, x1, y1, x1 - r, y1)
-    p.linie(x + r, y1)
-    p.bogen(x + r, y1, x, y1, x, y1 - r)
-    p.linie(x, y + r)
-    p.bogen(x, y + r, x, y, x + r, y)
+    p.line_2(x1 - r, y)
+    p.arc(x1 - r, y, x1, y, x1, y + r)
+    p.line_2(x1, y1 - r)
+    p.arc(x1, y1 - r, x1, y1, x1 - r, y1)
+    p.line_2(x + r, y1)
+    p.arc(x + r, y1, x, y1, x, y1 - r)
+    p.line_2(x, y + r)
+    p.arc(x, y + r, x, y, x + r, y)
     p.zu()
 
 
 def ellipse(p, cx, cy, rx, ry):
     p.nach(cx, cy - ry)
-    p.bogen(cx, cy - ry, cx + rx, cy - ry, cx + rx, cy)
-    p.bogen(cx + rx, cy, cx + rx, cy + ry, cx, cy + ry)
-    p.bogen(cx, cy + ry, cx - rx, cy + ry, cx - rx, cy)
-    p.bogen(cx - rx, cy, cx - rx, cy - ry, cx, cy - ry)
+    p.arc(cx, cy - ry, cx + rx, cy - ry, cx + rx, cy)
+    p.arc(cx + rx, cy, cx + rx, cy + ry, cx, cy + ry)
+    p.arc(cx, cy + ry, cx - rx, cy + ry, cx - rx, cy)
+    p.arc(cx - rx, cy, cx - rx, cy - ry, cx, cy - ry)
     p.zu()
 
 
-def rastern(p, regel=0):
-    """Dasselbe Verfahren wie kernel/lib/vektor.fi:rastern."""
+def rastern(p, rule=0):
     if not p.kanten:
         return None
     xs = [k[0] for k in p.kanten] + [k[2] for k in p.kanten]
@@ -132,17 +123,17 @@ def rastern(p, regel=0):
         cov = [0] * w
         for sub in range(4):
             ysamp = py * 64 + 8 + sub * 16
-            kreuz = []
+            cross = []
             for (ax, ay, bx, by) in p.kanten:
                 lo, hi, d = (ay, by, 1) if ay < by else (by, ay, -1)
                 if lo <= ysamp < hi:
                     x = ax + rdiv((bx - ax) * (ysamp - ay), by - ay)
-                    kreuz.append((x, d))
-            kreuz.sort()
-            if regel == 0:
+                    cross.append((x, d))
+            cross.sort()
+            if rule == 0:
                 wind = 0
                 anf = 0
-                for (x, d) in kreuz:
+                for (x, d) in cross:
                     v = wind
                     wind += d
                     if v == 0 and wind != 0:
@@ -150,8 +141,8 @@ def rastern(p, regel=0):
                     if v != 0 and wind == 0:
                         spanne(cov, anf, x, bx0, w)
             else:
-                for i in range(0, len(kreuz) - 1, 2):
-                    spanne(cov, kreuz[i][0], kreuz[i + 1][0], bx0, w)
+                for i in range(0, len(cross) - 1, 2):
+                    spanne(cov, cross[i][0], cross[i + 1][0], bx0, w)
         for c in range(w):
             v = min(cov[c], 16)
             out[(py - by0) * w + c] = (v * 255 + 8) // 16
@@ -169,21 +160,15 @@ def spanne(cov, a, b, bx0, w):
             cov[c] += 1
 
 
-# ------------------------------------------------------------ PRUEFUNGEN
 
-def flaeche(d):
-    """Summe der Deckung, in Bildpunkten."""
+def area_2(d):
     return sum(d[0]) / 255.0
 
 
-#
-#
-#
 SYM_TOL = 16
 
 
 def sym_lr(d):
-    """Groesster Unterschied zwischen links und rechts gespiegelt."""
     buf, w, h = d[0], d[1], d[2]
     m = 0
     for y in range(h):
@@ -206,7 +191,6 @@ def sym_ud(d):
 
 
 def loecher(d):
-    """Unbedeckte Punkte, die ringsum von voller Deckung umgeben sind."""
     buf, w, h = d[0], d[1], d[2]
     n = 0
     for y in range(1, h - 1):
@@ -220,10 +204,6 @@ def loecher(d):
 
 
 def randbreite(d):
-    """Wie viele Zeilen haben einen Kantensaum (weder 0 noch 255)?
-
-    Eine runde Form muss ueberall einen Saum haben; eine, bei der er
-    fehlt, ist eine Treppe."""
     buf, w, h = d[0], d[1], d[2]
     mit = 0
     for y in range(h):
@@ -236,12 +216,12 @@ def randbreite(d):
 
 
 FEHLER = []
-ZEILEN = []
+LINES = []
 
 
 def pruef(name, ist, soll, tol, einheit=""):
     ok = abs(ist - soll) <= tol
-    ZEILEN.append("  %-46s ist %8.2f%s  soll %8.2f  tol %.2f  %s"
+    LINES.append("  %-46s ist %8.2f%s  soll %8.2f  tol %.2f  %s"
                   % (name, ist, einheit, soll, tol, "OK" if ok else "FEHLER"))
     if not ok:
         FEHLER.append(name)
@@ -252,103 +232,95 @@ def main():
     print("VECTOR SELF-TEST -- basic shapes against target values from the geometry")
     print("=" * 78)
 
-    # ---------------------------------------------------------- RECHTECK
     print("\n[1] Rectangle: area exact, no anti-aliasing needed")
     for (w, h) in [(10, 10), (33, 17), (64, 64), (7, 100)]:
-        p = Pfad()
+        p = Path()
         rechteck(p, 0, 0, w * EINS, h * EINS)
         d = rastern(p)
-        pruef("Rechteck %dx%d Flaeche" % (w, h), flaeche(d), w * h,
+        pruef("Rechteck %dx%d Flaeche" % (w, h), area_2(d), w * h,
               0.01, " px")
         pruef("Rechteck %dx%d Loecher" % (w, h), loecher(d), 0, 0)
 
-    # ------------------------------------------------------------- KREIS
     print("\n[2] Circle: area against pi*r^2, symmetry, no hole")
     for r in [4, 8, 16, 32, 48]:
-        p = Pfad()
+        p = Path()
         ellipse(p, r * EINS, r * EINS, r * EINS, r * EINS)
         d = rastern(p)
         soll = math.pi * r * r
-        pruef("Kreis r=%d Flaeche" % r, flaeche(d), soll, soll * 0.015, " px")
+        pruef("Kreis r=%d Flaeche" % r, area_2(d), soll, soll * 0.015, " px")
         pruef("Kreis r=%d Symmetrie links/rechts" % r, sym_lr(d), 0, SYM_TOL)
         pruef("Kreis r=%d Symmetrie oben/unten" % r, sym_ud(d), 0, SYM_TOL)
         pruef("Kreis r=%d Loecher" % r, loecher(d), 0, 0)
-        ohne = 2 * r - randbreite(d)
-        pruef("Kreis r=%d Zeilen ohne Saum" % r, ohne, 0.0,
+        without = 2 * r - randbreite(d)
+        pruef("Kreis r=%d Zeilen ohne Saum" % r, without, 0.0,
               2.0 + r / 6.0, " Zeilen")
 
-    # ----------------------------------------------------------- ELLIPSE
     print("\n[3] Ellipse: area against pi*rx*ry")
     for (rx, ry) in [(20, 10), (8, 30), (40, 12)]:
-        p = Pfad()
+        p = Path()
         ellipse(p, rx * EINS, ry * EINS, rx * EINS, ry * EINS)
         d = rastern(p)
         soll = math.pi * rx * ry
-        pruef("Ellipse %dx%d Flaeche" % (rx, ry), flaeche(d), soll,
+        pruef("Ellipse %dx%d Flaeche" % (rx, ry), area_2(d), soll,
               soll * 0.02, " px")
         pruef("Ellipse %dx%d Symmetrie l/r" % (rx, ry), sym_lr(d), 0,
               2 * SYM_TOL)
 
-    # --------------------------------------------------- RECHTECK + ECKE
     print("\n[4] Rundeck: Flaeche = w*h - (4-pi)*r^2")
     for (w, h, r) in [(40, 24, 6), (64, 64, 16), (100, 30, 8), (48, 48, 24)]:
-        p = Pfad()
+        p = Path()
         rundeck(p, 0, 0, w * EINS, h * EINS, r * EINS)
         d = rastern(p)
         soll = w * h - (4 - math.pi) * r * r
-        pruef("Rundeck %dx%d r=%d Flaeche" % (w, h, r), flaeche(d), soll,
+        pruef("Rundeck %dx%d r=%d Flaeche" % (w, h, r), area_2(d), soll,
               soll * 0.02, " px")
         pruef("Rundeck %dx%d r=%d Symmetrie l/r" % (w, h, r), sym_lr(d), 0, SYM_TOL)
         pruef("Rundeck %dx%d r=%d Symmetrie o/u" % (w, h, r), sym_ud(d), 0, SYM_TOL)
         pruef("Rundeck %dx%d r=%d Loecher" % (w, h, r), loecher(d), 0, 0)
 
-    p = Pfad()
+    p = Path()
     rundeck(p, 0, 0, 48 * EINS, 48 * EINS, 24 * EINS)
-    a1 = flaeche(rastern(p))
-    p = Pfad()
+    a1 = area_2(rastern(p))
+    p = Path()
     ellipse(p, 24 * EINS, 24 * EINS, 24 * EINS, 24 * EINS)
-    a2 = flaeche(rastern(p))
+    a2 = area_2(rastern(p))
     pruef("Rundeck r=w/2 ist der Kreis", abs(a1 - a2), 0, 1.0, " px")
 
-    # ----------------------------------------------- SKALIERUNG / GROESSE
     print("\n[5] Target size: rasterised twice is four times the area")
     for r in [8, 16]:
-        p = Pfad()
+        p = Path()
         ellipse(p, r * EINS, r * EINS, r * EINS, r * EINS)
-        a1 = flaeche(rastern(p))
-        p = Pfad()
+        a1 = area_2(rastern(p))
+        p = Path()
         r2 = r * 2
         ellipse(p, r2 * EINS, r2 * EINS, r2 * EINS, r2 * EINS)
-        a2 = flaeche(rastern(p))
+        a2 = area_2(rastern(p))
         pruef("Kreis r=%d -> r=%d Flaechenverhaeltnis" % (r, r2),
               a2 / a1, 4.0, 0.06)
 
-    # ------------------------------------------ HALBE BILDPUNKTE (Lage)
     print("\n[6] Subpixel: an edge shifted by half a point")
-    p = Pfad()
+    p = Path()
     rechteck(p, 0, 0, 10 * EINS, 10 * EINS)
-    a1 = flaeche(rastern(p))
-    p = Pfad()
+    a1 = area_2(rastern(p))
+    p = Path()
     rechteck(p, EINS // 2, 0, 10 * EINS, 10 * EINS)
-    a2 = flaeche(rastern(p))
+    a2 = area_2(rastern(p))
     pruef("Rechteck um 1/2 px versetzt: gleiche Flaeche", abs(a1 - a2),
           0, 0.6, " px")
 
-    # ----------------------------------------------- GERADE-UNGERADE
     print("\n[7] Fuellregeln: Ring, innen hohl")
-    p = Pfad()
+    p = Path()
     ellipse(p, 32 * EINS, 32 * EINS, 30 * EINS, 30 * EINS)
     ellipse(p, 32 * EINS, 32 * EINS, 15 * EINS, 15 * EINS)
     d_nz = rastern(p, 0)
     d_eo = rastern(p, 1)
     soll_nz = math.pi * 30 * 30
     soll_eo = math.pi * (30 * 30 - 15 * 15)
-    pruef("Nichtnull: voller Kreis", flaeche(d_nz), soll_nz,
+    pruef("Nichtnull: voller Kreis", area_2(d_nz), soll_nz,
           soll_nz * 0.02, " px")
-    pruef("Gerade-Ungerade: Ring mit Loch", flaeche(d_eo), soll_eo,
+    pruef("Gerade-Ungerade: Ring mit Loch", area_2(d_eo), soll_eo,
           soll_eo * 0.02, " px")
 
-    # ---------------------------------------------------- STRICHE
     print("\n[8] Strokes: two strokes in ONE path (the cross)")
 
     def wurzel(v):
@@ -363,13 +335,11 @@ def main():
             n += 1
         return x
 
-    def strich(p, pts, hb):
-        """Nachbau von kernel/lib/vektor.fi:strichen -- EIN Strich, an den
-        bestehenden Pfad angehaengt."""
+    def stroke(p, pts, hb):
         n = len(pts)
-        for seite in range(2):
+        for page in range(2):
             for k in range(n - 1):
-                a, b = (k, k + 1) if seite == 0 else (n - 1 - k, n - 2 - k)
+                a, b = (k, k + 1) if page == 0 else (n - 1 - k, n - 2 - k)
                 ax, ay = pts[a]
                 bx, by = pts[b]
                 dx, dy = bx - ax, by - ay
@@ -378,26 +348,25 @@ def main():
                     continue
                 nx = -dy * hb // l
                 ny = dx * hb // l
-                if k == 0 and seite == 0:
+                if k == 0 and page == 0:
                     p.nach(ax + nx, ay + ny)
                 else:
-                    p.linie(ax + nx, ay + ny)
-                p.linie(bx + nx, by + ny)
+                    p.line_2(ax + nx, ay + ny)
+                p.line_2(bx + nx, by + ny)
         p.zu()
 
-    p = Pfad()
-    strich(p, [(0, 0), (20 * EINS, 0)], EINS)
-    a1 = flaeche(rastern(p))
+    p = Path()
+    stroke(p, [(0, 0), (20 * EINS, 0)], EINS)
+    a1 = area_2(rastern(p))
     pruef("Ein waagerechter Strich 20x2", a1, 40.0, 2.0, " px")
 
-    #
-    p = Pfad()
+    p = Path()
     d = 20 * EINS
-    strich(p, [(0, 0), (d, d)], EINS)
-    strich(p, [(d, 0), (0, d)], EINS)
+    stroke(p, [(0, 0), (d, d)], EINS)
+    stroke(p, [(d, 0), (0, d)], EINS)
     dk = rastern(p)
     soll = 2 * (20 * 1.4142 * 2) - 8
-    pruef("Kreuz aus zwei Strichen: Flaeche", flaeche(dk), soll,
+    pruef("Kreuz aus zwei Strichen: Flaeche", area_2(dk), soll,
           soll * 0.12, " px")
     def sym_lr_kern(d):
         buf, w, h = d[0], d[1], d[2]
@@ -410,17 +379,17 @@ def main():
     pruef("Kreuz: Symmetrie l/r (ohne Spitzen)", sym_lr_kern(dk), 0,
           SYM_TOL)
     pruef("Kreuz: Symmetrie oben/unten", sym_ud(dk), 0, SYM_TOL)
-    p = Pfad()
-    strich(p, [(0, 0), (d, d)], EINS)
-    a_einer = flaeche(rastern(p))
-    pruef("Ein Strich ist halb so viel wie zwei", flaeche(dk) / a_einer,
+    p = Path()
+    stroke(p, [(0, 0), (d, d)], EINS)
+    a_einer = area_2(rastern(p))
+    pruef("Ein Strich ist halb so viel wie zwei", area_2(dk) / a_einer,
           2.0, 0.25)
 
     print("\n" + "=" * 78)
-    for z in ZEILEN:
+    for z in LINES:
         print(z)
     print("=" * 78)
-    n = len(ZEILEN)
+    n = len(LINES)
     if FEHLER:
         print("ERGEBNIS: %d von %d Pruefungen FEHLGESCHLAGEN" % (len(FEHLER), n))
         for f in FEHLER:

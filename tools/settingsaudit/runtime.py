@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/settingsaudit/runtime.py -- runtime control inventory from the Settings serial trace.
-
-Reads the serial log of tools/settingsui/run.sh (uitrace=yes). The app prints one
-`settings: rect name=wXX x= y= w= h=` line per scene control after every page build; a build starts
-with the `waa` rect (first node). Per build it counts controls, checks overlaps and out-of-window rects.
-
-  python3 -I tools/settingsaudit/runtime.py <serial.txt> [--limit N] [--md]
-"""
 import re, sys
 
 R = re.compile(r"settings: rect name=(\w+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)")
@@ -40,7 +32,6 @@ def main():
             cur.append((n, x, y, w, h))
     rows = []
     for i, b in enumerate(builds):
-        # the search field (wdu-like, x < 260) and sidebar are not page content: keep rects right of the sidebar
         page = [r for r in b if r[1] >= 250 and r[0] != "waa"]
         ov = 0
         for a in range(len(page)):
@@ -49,7 +40,6 @@ def main():
                 if A[1] < B[1] + B[3] and B[1] < A[1] + A[3] and A[2] < B[2] + B[4] and B[2] < A[2] + A[4]:
                     ov += 1
         rows.append((i, len(page), ov))
-    # build 0 = initial window, builds 1..20 = sidebar clicks a..t (PAGE_IDS), the rest = search typing (empty result)
     ids = ["appearance", "screen", "time", "network", "users", "netview", "language", "presets", "accounts", "sync",
            "bridge", "system", "approights", "log", "updates", "mouse", "power", "about", "apps", "screen2", "taskbar", "effects", "wifi", "usbnet", "scheme", "accent", "password", "pin", "transfer", "sound", "touchpad", "bluetooth", "monitors"]
     bad = 0

@@ -80,7 +80,7 @@ class Monitor:
         time.sleep(pause)
         self.leeren()
 
-    def zeiger(self, x, y):
+    def cursor(self, x, y):
         for _ in range(12):
             self.cmd("mouse_move -120 -120", 0.03)
         dx, dy = x, y
@@ -91,14 +91,14 @@ class Monitor:
             dy -= sy
 
     def klick(self, x, y):
-        self.zeiger(x, y)
+        self.cursor(x, y)
         time.sleep(0.4)
         self.cmd("mouse_button 1", 0.15)
         self.cmd("mouse_button 0", 0.15)
         time.sleep(0.6)
 
     def rklick(self, x, y):
-        self.zeiger(x, y)
+        self.cursor(x, y)
         time.sleep(0.4)
         self.cmd("mouse_button 2", 0.15)
         self.cmd("mouse_button 0", 0.15)
@@ -133,7 +133,7 @@ class Monitor:
         return 0
 
 
-def ziel_einmal(serial, worte):
+def target_einmal(serial, worte):
     r = subprocess.run(["python3", os.path.join(HIER, "klickplan.py"), serial]
                        + worte, capture_output=True, text=True)
     if r.returncode != 0 or not r.stdout.strip():
@@ -141,10 +141,10 @@ def ziel_einmal(serial, worte):
     return r.stdout.strip(), ""
 
 
-def ziel_holen(serial, worte, frist=12.0):
+def target_get(serial, worte, frist=12.0):
     bis = time.time() + frist
     while True:
-        p, fehler = ziel_einmal(serial, worte)
+        p, fehler = target_einmal(serial, worte)
         if p is not None or time.time() >= bis:
             return p, fehler
         time.sleep(0.5)
@@ -159,13 +159,13 @@ def zaehle(serial, muster):
     return len(re.findall(muster, t, re.M))
 
 
-def warte_auf(serial, muster, anzahl, frist):
+def wait_auf(serial, muster, count, frist):
     bis = time.time() + frist
     while time.time() < bis:
-        if zaehle(serial, muster) >= anzahl:
+        if zaehle(serial, muster) >= count:
             return True
         time.sleep(0.25)
-    return zaehle(serial, muster) >= anzahl
+    return zaehle(serial, muster) >= count
 
 
 def main(argv):
@@ -183,7 +183,7 @@ def main(argv):
         if was == "warte":
             time.sleep(float(teile[1]))
         elif was == "warteauf":
-            ok = warte_auf(serial, teile[1], int(teile[2]), float(teile[3]))
+            ok = wait_auf(serial, teile[1], int(teile[2]), float(teile[3]))
             print("plan: warteauf %s >=%s -> %s" % (teile[1], teile[2], "ok" if ok else "TIMEOUT"))
         elif was == "marke":
             print("plan: %s" % " ".join(teile[1:]))
@@ -192,7 +192,7 @@ def main(argv):
             m.klick(x, y)
             print("plan: klick %d,%d" % (x, y))
         elif was in ("ziel", "rziel"):
-            p, fehler = ziel_holen(serial, teile[1:])
+            p, fehler = target_get(serial, teile[1:])
             if p is None:
                 print("plan: TARGET NOT FOUND: %s -- %s"
                       % (" ".join(teile[1:]), fehler))

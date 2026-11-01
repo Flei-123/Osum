@@ -1,8 +1,5 @@
 #!/usr/bin/env python3 -I
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fvviewer/inputtest.py <it-binary>
-lib/fv/input.fi against an independent model of the Rust contract (proto.rs wire
-format: Key 0x33 code:le32 named down; KeyVk 0x35 vk:le16 ext down; Special 0x36 code)."""
 import subprocess, sys
 
 IT = sys.argv[1]
@@ -30,12 +27,11 @@ def tap_uni(c):
     return [key(c, 0, 1), key(c, 0, 0)]
 
 
-def combo(mods, v, ext=0):  # mods: list of vk
+def combo(mods, v, ext=0):
     return [vk(m, 0, 1) for m in mods] + [vk(v, ext, 1), vk(v, ext, 0)] + [vk(m, 0, 0) for m in mods]
 
 
 CTRL, ALT, SHIFT = 0x11, 0x12, 0x10
-# (name, code, mod, expected messages)
 cases = [
     ("a", 97, 0, tap_uni(97)),
     ("A (shift)", 65, 2, tap_uni(65)),
@@ -94,10 +90,9 @@ for name, code, mod, exp in cases:
         fails += 1
         print(f"  FAIL  {name}: got '{got}' want '{want}'")
 
-# pointer: (px, py, box bx by bw bh, remote rw rh, zoom) -> expected
 def model(px, py, bx, by, bw, bh, rw, rh, z):
     zw, zh = rw * z // 100, rh * z // 100
-    ox = bx + int((bw - zw) / 2)  # truncation toward zero, like Firn's i64 division
+    ox = bx + int((bw - zw) / 2)
     oy = by + int((bh - zh) / 2)
     rx, ry = px - ox, py - oy
     if rx < 0 or ry < 0 or rx >= zw or ry >= zh:
@@ -111,14 +106,13 @@ ptr = [
     (150, 50, 0, 0, 100, 100, 200, 200, 50),
     (0, 0, 0, 0, 100, 100, 200, 200, 50),
     (99, 99, 0, 0, 100, 100, 200, 200, 50),
-    (10, 10, 10, 10, 640, 480, 1920, 1080, 33),   # letterbox: image 633 x 356 centred
+    (10, 10, 10, 10, 640, 480, 1920, 1080, 33),
     (10, 200, 10, 10, 640, 480, 1920, 1080, 33),
     (320, 250, 10, 10, 640, 480, 1920, 1080, 33),
     (5, 5, 0, 0, 640, 480, 640, 480, 100),
     (639, 479, 0, 0, 640, 480, 640, 480, 100),
     (640, 479, 0, 0, 640, 480, 640, 480, 100),
 ]
-# scaling sweep: viewer area (window sizes) x host resolutions, zoom as fit_image() computes it (min of both axes, 5..400 %)
 def fit_zoom(bw, bh, iw, ih):
     z = bw * 100 // iw
     zy = bh * 100 // ih
@@ -133,7 +127,6 @@ for (bw, bh) in ((836, 530), (640, 400), (400, 300), (1800, 1000)):
         zw, zh = rw * z // 100, rh * z // 100
         ox = 12 + int((bw - zw) / 2)
         oy = 40 + int((bh - zh) / 2)
-        # first / last picture pixel, the pixel just outside on each side, and the middle
         for px, py in ((ox, oy), (ox + zw - 1, oy + zh - 1), (ox - 1, oy), (ox, oy - 1), (ox + zw, oy), (ox, oy + zh),
                        (ox + zw // 2, oy + zh // 2)):
             ptr.append((px, py, 12, 40, bw, bh, rw, rh, z))
@@ -155,7 +148,6 @@ def hx(msgs):
     return " ".join(m.hex() for m in msgs)
 
 
-# UTF-8: the OrientOS keyboard sends the OCTETS of a character one key event at a time (decoder state is kept)
 utf = [
     ("a-umlaut C3 A4 -> U+00E4", [(0xC3, 0), (0xA4, 0)], [hx([]), hx(tap_uni(0xE4))]),
     ("sharp-s C3 9F -> U+00DF", [(0xC3, 0), (0x9F, 0)], [hx([]), hx(tap_uni(0xDF))]),
@@ -182,7 +174,6 @@ for name, items, exp in utf:
         fails += 1
         print(f"  FAIL  utf8 {name}: got {got} want {exp}")
 
-# reconnect rules == Rust viewer (src/viewer.rs backoff/next_retry/Fail::retryable); E_* ids of lib/fv/client.fi
 E = dict(TCP=1, TLS=2, UPGRADE=3, RELAY=4, AUTH=5, DENIED=6, PROTO=7, IO=8, MEM=9, GONE=10, CRYPTO=11, DNS=12)
 BO = [1, 2, 4, 8, 16, 30, 30, 30]
 for n, w in enumerate(BO, 1):
@@ -191,7 +182,6 @@ for n, w in enumerate(BO, 1):
     if got != str(w):
         fails += 1
         print(f"  FAIL  backoff({n}): got {got} want {w}")
-# (err, ever_live, ask, attempt) -> seconds ; 0 = no retry
 rules = []
 for att in range(0, 8):
     w = BO[att] if att < 6 else 0
@@ -201,21 +191,20 @@ for att in range(0, 8):
     rules.append(("TLS", 1, 0, att, w))
     rules.append(("UPGRADE", 1, 0, att, w))
 for e in ("AUTH", "DENIED", "PROTO", "CRYPTO", "MEM"):
-    rules.append((e, 1, 0, 0, 0))               # never, even in a live session
+    rules.append((e, 1, 0, 0, 0))
 for e in ("IO", "GONE", "TCP", "RELAY", "DNS"):
-    rules.append((e, 0, 0, 0, 0))               # no session was ever live -> error at once
-    rules.append((e, 1, 1, 0, 0))               # ask mode never reconnects silently
-rules.append(("RELAY", 1, 0, 0, 1))              # relay "offline" text is checked in the gate (kind needs the text)
+    rules.append((e, 0, 0, 0, 0))
+    rules.append((e, 1, 1, 0, 0))
+rules.append(("RELAY", 1, 0, 0, 1))
 for e, live, ask, att, want in rules:
     if e == "RELAY":
-        continue                                  # text-dependent: kind_of(RELAY, text) is covered by the gate
+        continue
     total += 1
     got = subprocess.run([IT, "retry", str(E[e]), str(live), str(ask), str(att)], capture_output=True, text=True, timeout=20).stdout.strip()
     if got != str(want):
         fails += 1
         print(f"  FAIL  retry({e}, live={live}, ask={ask}, attempt={att}): got {got} want {want}")
 
-# clipboard cut: never tear a UTF-8 sequence
 trims = [("41", 1), ("c3a4", 2), ("c3", 0), ("41c3", 1), ("e282ac", 3), ("e282", 0), ("41e282", 1), ("f09f9880", 4), ("f09f98", 0), ("c3a4e2", 2), ("80", 1)]
 for h, want in trims:
     total += 1

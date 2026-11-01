@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#     const S_TILE: u64 = 0x180      // Runde TILING
-#     const S_DECO: u64 = 0x180      // Runde THEME, elf Woerter
-#
-#
-#
-#   ./tools/paint/scalars.py [dateien...]
-#
-#
 import os
 import re
 import sys
@@ -19,22 +9,21 @@ WURZEL = os.path.normpath(os.path.join(HIER, "..", ".."))
 
 CONST = re.compile(
     r"^const\s+(S_[A-Z0-9_]+)\s*:\s*u64\s*=\s*(0x[0-9A-Fa-f]+)\s*(//.*)?$")
-ZAHL = re.compile(
+NUM = re.compile(
     r"^const\s+([A-Z0-9_]+)\s*:\s*u64\s*=\s*(0x[0-9A-Fa-f]+|\d+)", re.M)
 WOERTER = re.compile(r"(\d+)\s+W[oe]+rter")
 OKTETTE = re.compile(r"(\d+)\s+Oktette")
 
-LAENGE_AUS = {
+LEN_AUS = {
     ("wm.fi", "S_DECO"): "DECO_SLOTS",
 }
 
 
 def laengen(pfad):
-    """[(name, anfang, oktette, zeile)] fuer eine Datei."""
     with open(pfad, "rb") as fh:
         text = fh.read().decode("utf-8", "replace")
     konst = {}
-    for m in ZAHL.finditer(text):
+    for m in NUM.finditer(text):
         konst[m.group(1)] = int(m.group(2), 0)
     aus = []
     datei = os.path.basename(pfad)
@@ -55,15 +44,15 @@ def laengen(pfad):
         elif o:
             n = int(o.group(1))
         schluessel = (datei, name)
-        if schluessel in LAENGE_AUS:
-            k = LAENGE_AUS[schluessel]
+        if schluessel in LEN_AUS:
+            k = LEN_AUS[schluessel]
             if k in konst:
                 n = konst[k] * 8
         aus.append((name, wert, n, nr))
     return aus
 
 
-def pruefen(pfad):
+def check(pfad):
     eintraege = laengen(pfad)
     treffer = []
     for i in range(len(eintraege)):
@@ -84,7 +73,7 @@ def main():
     gesamt = 0
     schlecht = 0
     for p in dateien:
-        eintraege, treffer = pruefen(p)
+        eintraege, treffer = check(p)
         gesamt += len(eintraege)
         rel = os.path.relpath(p, WURZEL)
         for (an, aw, al, az, bn, bw, bl, bz) in treffer:

@@ -1,12 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/vmsvga/desktop.py -- REAL DESKTOP check for the VMSVGA driver (called by tools/vmsvga/desktop.sh).
-#
-# usage: desktop.py <monitor sock> <vnc sock> <base> <serial file> <seed> <rounds> <settle seconds>
-# Boots nothing itself. Waits for the sign-in screen, logs in (justin / startkennwort), then plays random mouse + key sequences.
-# After every sequence it compares the VNC client's picture (built ONLY from the rectangles the host was told about) with the
-# screendump (which reads VRAM directly). A compare only counts when two screendumps in a row are identical (the picture stood
-# still); the VNC picture is read between them.
-# Output files: <base>.login (1/0), <base>.rounds (one line per compare: "<i> <diff pixels | -1 unstable>"), <base>.updates
 import os
 import random
 import sys
@@ -45,9 +37,6 @@ def stats(vnc):
 
 
 def compare(mon, vnc, tag):
-    """Count pixels where the VNC picture differs from the screendump, ignoring pixels that change by themselves
-    (clock seconds): those differ between two screendumps taken in a row. -1 = too many unstable pixels, -2 = size mismatch."""
-    # the VNC picture is read FIRST (before the slow screendumps), so a trailing keep-alive UPDATE cannot repair it meanwhile
     with vnc.lock:
         vw, vh = vnc.w, vnc.h
         buf = bytes(vnc.buf)
@@ -92,7 +81,7 @@ def main():
     if not ok:
         mon.quit()
         return
-    time.sleep(settle)  # desktop comes up, heal stages and the trailing UPDATE are over
+    time.sleep(settle)
     out = open(base + ".rounds", "w")
     out.write("0 %d %s\n" % (compare(mon, vnc, "r0"), stats(vnc)))
     out.flush()
@@ -107,11 +96,11 @@ def main():
                 mon.cmd("mouse_button 0", 0.15)
             else:
                 mon.cmd("sendkey " + rng.choice(keys), 0.1)
-        time.sleep(0.7)  # shorter than the 2 s trailing UPDATE: a lost rectangle must still be visible here
+        time.sleep(0.7)
         out.write("%d %d %s\n" % (i, compare(mon, vnc, "r%d" % i), stats(vnc)))
         out.flush()
         with vnc.lock:
-            open(base + ".updates", "w").write(str(vnc.updates))  # kept current: a cut-off run still reports it
+            open(base + ".updates", "w").write(str(vnc.updates))
     out.close()
     with vnc.lock:
         n = vnc.updates

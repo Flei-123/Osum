@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bench/mintboot.py <mint.iso> <workdir> [runs] [vcpu] [mem_mb] -- boot Linux Mint (live ISO) in QEMU/KVM and measure it (prints JSON).
-Method (host side only, the live ISO is NOT modified):
-  * kernel + initrd are taken out of the ISO and direct-booted (no bootloader menu, like refboot.py alpine); the ISO is the cdrom.
-  * desktop_ms = host clock QEMU start -> first screen frame that equals the final settled desktop frame (QMP screendump every 0.5 s,
-    mean abs diff of a 96x72 grid <= 1.5 grey levels for all later frames; settled = 10 s without change and not blank: mean>8, stdev>15).
-  * idle_cpu_pct = host CPU of the QEMU process (utime+stime) over 30 s, 15 s after the desktop settled, nothing touched.
-  * Then Ctrl+Alt+T opens a terminal; the typed command mounts a tiny MEASURE cdrom and runs m.sh, which writes to the serial line:
-    memory (MemTotal/MemFree/MemAvailable), squashfs size and app start times (launch -> new window in _NET_CLIENT_LIST).
-Median over runs. Memory is taken with one terminal open (it is the measurement shell)."""
 import json, os, re, socket, statistics, subprocess, sys, time, zlib
 
 iso, wd = sys.argv[1], sys.argv[2]
@@ -67,7 +58,6 @@ class Qmp:
 
 
 def grid(path):
-    """96x72 grey grid + brightness from a PPM screendump (None if unreadable)."""
     try:
         d = open(path, "rb").read()
         m = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\s", d)
@@ -123,7 +113,7 @@ def one(i):
     p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         q = Qmp(sock)
-        frames = []  # (t, grid)
+        frames = []
         last_g = None; fin = None
         while time.time() - t0 < 240:
             time.sleep(0.5)
@@ -133,7 +123,7 @@ def one(i):
                 continue
             g = r[0]; t = time.time() - t0
             frames.append((t, g))
-            if sum(g) / len(g) > 8 and statistics.pstdev(g) > 15:  # not a black/blank screen (the Mint wallpaper is dark)
+            if sum(g) / len(g) > 8 and statistics.pstdev(g) > 15:
                 recent = [x for x in frames if x[0] > t - 10]
                 if t > 12 and recent[0][0] < t - 9.5 and all(diff(x[1], g) <= 1.5 for x in recent):
                     fin = r; break

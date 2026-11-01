@@ -21,7 +21,6 @@ def main():
         return 2
     s = None
     for _ in range(300):
-        # a fresh socket per attempt: re-connecting a socket whose connect() failed gives EINVAL later
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             s.connect(sys.argv[1])
@@ -45,7 +44,7 @@ def main():
         line, _, buf = buf.partition(b"\n")
         return line.decode()
 
-    readline()  # greeting
+    readline()
 
     def call(cmd, **args):
         s.sendall((json.dumps({"execute": cmd, "arguments": args}) + "\n").encode())

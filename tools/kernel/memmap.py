@@ -84,9 +84,6 @@ BEREICHE = [
     ("NAMEK",      "kstate.fi", "NAMEK_OFF",      "NAMEK_MAX"),
     ("BLOCKK",     "kstate.fi", "BLOCKK_OFF",     "BLOCKK_MAX"),
     ("EARGK",      "kstate.fi", "EARGK_OFF",      "EARGK_MAX"),
-    # ROUND A11Y-2 (S-007): the accessibility tree. Six pages,
-    # 0x13E000..0x144000, allotted in advance by the wave of 18.09.2026
-    # (see kstate.fi at KDATA_SIZE) -- this round took exactly that.
     ("AX",         "kstate.fi", "AX_OFF",         "AX_MAX"),
     ("FLOCK",      "kstate.fi", "FLOCK_OFF",      "FLOCK_MAX"),
     ("WECHSEL",    "kstate.fi", "WECHSEL_OFF",    "WECHSEL_MAX"),
@@ -97,14 +94,12 @@ BEREICHE = [
     ("UCNT",       "unixsock.fi", "UCNT_OFF",    "0x40"),
     ("USHM",       "unixsock.fi", "USHM_OFF",    "USHM_MAX * USHM_BYTES"),
     ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_PAGED * SHM_PAGES_MAX * 8"),
-    # COMPOSITOR S3: who maps which shared object (the reference of a mapping is given back by munmap and by the end of the task)
     ("UMAP",       "unixsock.fi", "UMAP_OFF",    "UMAP_MAX * UMAP_BYTES"),
     ("WLSCRATCH",  "sysconst.fi", "WL_SCRATCH",  "0x1000"),
     ("WLPATH",     "sysconst.fi", "WL_PATH",     "0x1000"),
     ("OFS3",       "kstate.fi", "OFS3_OFF",       "OFS3_MAX"),
     ("MODE",       "kstate.fi", "MODE_OFF",       "MODE_MAX"),
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
-    # RUNDE POWERMON: die Akkuanalyse je Programm (0x5C000..0x5E000).
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
     ("NETDEV",     "kstate.fi", "NETDEV_OFF",     "NETDEV_MAX"),
@@ -123,8 +118,6 @@ BEREICHE = [
     ("DISP",       "kstate.fi", "DISP_OFF",       "DISP_MAX"),
     ("DLUT",       "kstate.fi", "DLUT_OFF",       "DLUT_MAX"),
     ("DESK",       "kstate.fi", "DSK_OFF",        "DSK_MAX"),
-    # DELL ROUND 04.10.2026: the window event rings of the 32 windows, in the
-    # hole 0x10C000..0x110000.
     ("DESKEV",     "kstate.fi", "EVR_OFF",        "EVR_MAX"),
     ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
     ("WMPLUG",     "kstate.fi", "WMP_OFF",        "WMP_MAX"),
@@ -142,7 +135,6 @@ BEREICHE = [
     ("EBPFVER",    "kstate.fi", "EBPFVER_OFF",    "EBPFVER_MAX"),
     ("EBPFHOOK",   "kstate.fi", "EBPFHOOK_OFF",   "EBPFHOOK_MAX"),
     ("SHARE",      "kstate.fi", "SHARE_OFF",      "SHARE_MAX"),
-    # ---- Runde HANDLE ----
     ("HND",        "kstate.fi", "HND_OFF",        "HND_MAX"),
     ("HOBJ",       "kstate.fi", "HOBJ_OFF",       "HOBJ_MAX"),
     ("HREQ",       "kstate.fi", "HREQ_OFF",       "HREQ_MAX"),
@@ -231,10 +223,10 @@ EHCI_STUECKE = [
     ("ehci.fi", "BUF_OFF",  0xC00),
 ]
 
-KEINE_KDATA = {
-    ("fb.fi", "FB_OFF"),        # Spiegel von kstate.FB_OFF, s. u.
-    ("fb.fi", "FONT_OFF"),      # liegt IN FB_OFF
-    ("fb.fi", "VMS_OFF"),       # Spiegel von kstate.VMSVGA_OFF (vmsvga.fi)
+NO_KDATA = {
+    ("fb.fi", "FB_OFF"),
+    ("fb.fi", "FONT_OFF"),
+    ("fb.fi", "VMS_OFF"),
     ("inet.fi", "SOCK_OFF"),
     ("inet.fi", "ARP_OFF"),
     ("inet.fi", "ICMP_OFF"),
@@ -249,13 +241,13 @@ KEINE_KDATA = {
     ("pci.fi", "K2_OFF"),
     ("ttf.fi", "A_HEAP"),
     ("wmlayout.fi", "W_OFF"),
-    ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
-    ("wig.fi", "STAGE_OFF"),    # dito
-    ("vmode.fi", "LUT_OFF"),    # Versatz IN DLUT_OFF (Runde DISPLAY)
-    ("vmode.fi", "EDID_OFF"),   # dito
-    ("vmode.fi", "LIST_OFF"),   # Versatz IN DISP_OFF (Runde DISPLAY)
-    ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
-    ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
+    ("wig.fi", "CLIP_OFF"),
+    ("wig.fi", "STAGE_OFF"),
+    ("vmode.fi", "LUT_OFF"),
+    ("vmode.fi", "EDID_OFF"),
+    ("vmode.fi", "LIST_OFF"),
+    ("kstate.fi", "FSG_OFF"),
+    ("kstate.fi", "JRNL_OFF"),
     ("kstate.fi", "OP_NAME"),
     ("kstate.fi", "OP_NAME2"),
     ("kstate.fi", "OP_OLD"),
@@ -266,7 +258,7 @@ KEINE_KDATA = {
     ("kstate.fi", "OP_LINK"),
     ("kstate.fi", "OP_TMP"),
     ("kstate.fi", "OP_ENT"),
-    ("fs.fi", "G_INODES"),      # Versaetze IN FSG_OFF (Runde OFS3)
+    ("fs.fi", "G_INODES"),
     ("fs.fi", "G_DATA"),
     ("fs.fi", "G_BMSTART"),
     ("fs.fi", "G_BMBLOCKS"),
@@ -277,23 +269,23 @@ KEINE_KDATA = {
     ("fs.fi", "G_NAMELEN"),
     ("fs.fi", "G_HINT"),
     ("nidx.fi", "H_BASE"),
-    ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
+    ("hv.fi", "CNT_OFF"),
     ("hv.fi", "VAL_OFF"),
     ("hv.fi", "VM_OFF"),
     ("hv.fi", "GPR_OFF"),
     ("virtio.fi", "C_QNOTIFY_OFF"),
-    ("mnt.fi", "MNT_OFF"),      # in K14_OFF
-    ("part.fi", "PART_OFF"),    # in K14_OFF
-    ("part.fi", "SECT_OFF"),    # in K14_OFF
-    ("ofs.fi", "SCRATCH_OFF"),  # in K14_OFF
-    ("fat.fi", "SB_OFF"),       # in FAT_OFF
-    ("fat.fi", "NODE_OFF"),     # in FAT_OFF
-    ("fat.fi", "CACHE_OFF"),    # in FAT_OFF (r208 chain cache)
+    ("mnt.fi", "MNT_OFF"),
+    ("part.fi", "PART_OFF"),
+    ("part.fi", "SECT_OFF"),
+    ("ofs.fi", "SCRATCH_OFF"),
+    ("fat.fi", "SB_OFF"),
+    ("fat.fi", "NODE_OFF"),
+    ("fat.fi", "CACHE_OFF"),
 }
 for _d, _k, _n in K17_STUECKE:
-    KEINE_KDATA.add((_d, _k))
+    NO_KDATA.add((_d, _k))
 for _d, _k, _n in EHCI_STUECKE:
-    KEINE_KDATA.add((_d, _k))
+    NO_KDATA.add((_d, _k))
 
 def konstanten(path):
     source = open(path, "r", encoding="utf-8").read()
@@ -343,7 +335,6 @@ def main():
 
     dateien = {}
     for d in ("kstate.fi", "pci.fi", "nvme.fi", "fb.fi", "inet.fi",
-              # RUNDE AHCI -- der SATA-Treiber nimmt fuenf Seiten.
               "ahci.fi",
               "virtio.fi", "hv.fi",
               "xhci.fi", "usb.fi",
@@ -353,7 +344,6 @@ def main():
               "fs.fi",
               "rootsel.fi", "ehci.fi", "blkdev.fi",
               "hidrep.fi", "hidin.fi", "i2chid.fi",
-              # RUNDE GRAFIK-1 -- der Software-Rasterer.
               "r3dsoft.fi",
               "unixsock.fi", "sys.fi", "sysconst.fi"):
         p = None
@@ -372,7 +362,6 @@ def main():
 
     kdata = value(dateien["kstate.fi"], "KDATA_SIZE")
 
-    # 1. Alles ausrechnen.
     pieces = []
     for name, file, anf, gr in BEREICHE:
         w = dateien[file]
@@ -382,7 +371,6 @@ def main():
 
     errors = []
 
-    # 2. Ueberschneidungen -- der eigentliche Zweck.
     pieces.sort()
     for i in range(len(pieces)):
         a1, e1, n1, d1, k1 = pieces[i]
@@ -407,7 +395,7 @@ def main():
         for k in w:
             if not k.endswith("_OFF"):
                 continue
-            if (file, k) in benannt or (file, k) in KEINE_KDATA:
+            if (file, k) in benannt or (file, k) in NO_KDATA:
                 continue
             errors.append("%s:%s is in no map -- region or "
                           "ausdruecklich kein kdata?" % (file, k))

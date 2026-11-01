@@ -21,7 +21,7 @@ import sys
 from collections import Counter
 import os
 sys.path.insert(0, os.path.join(os.environ.get("FIRN", "/root/firn"), "tools/testkit"))
-from testkit import read_ppm  # shared reader (Firn tools/testkit)
+from testkit import read_ppm
 
 
 def census(px):

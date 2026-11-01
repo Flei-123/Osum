@@ -101,7 +101,7 @@ sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "
 import brandrender as brand_render
 
 BS = 512
-MAGIC = 0x4F53554D2D4F4653  # "OSUM-OFS"
+MAGIC = 0x4F53554D2D4F4653
 INODE_SIZE = 128
 INODES_PER_BLOCK = 4
 INODE_COUNT = 128
@@ -111,7 +111,7 @@ INODE_BLOCKS = 32
 DATA_START = 34
 DIRENT = 32
 NAME_LEN = 24
-DIRECT = 8      # Fassung 2
+DIRECT = 8
 DIRECT_V1 = 11
 
 T_FREE, T_FILE, T_DIR = 0, 1, 2
@@ -122,14 +122,10 @@ INODE_SIZE_V3 = 256
 IPB_V3 = 2
 DIRENT_V3 = 264
 NAME_V3 = 256
-BITS_PER_BLOCK = BS * 8  # 4096
+BITS_PER_BLOCK = BS * 8
 T_LINK = 3
 I_TINDIRECT, I_CTIME, I_MTIME, I_ATIME = 128, 136, 144, 152
 I_QINDIRECT = 160
-# ROUND K4: the twelfth direct slot became the double indirect pointer --
-# 11 + 64 + 64 * 64 blocks instead of 12 + 64. `kernel/fs.fi` has the
-# same three constants and the same two levels; the two must agree octet
-# for octet, and section 3 of tools/posix/run.sh checks that they do.
 I_DINDIRECT = 120
 SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
           DATA=48, ROOT=56, VERSION=64,
@@ -194,7 +190,6 @@ class Fs:
     def directs(self):
         return DIRECT if self.version >= OFS_V2 else DIRECT_V1
 
-    # ------------------------------------------------------------ octets
     def g64(self, at):
         return struct.unpack_from("<Q", self.d, at)[0]
 
@@ -271,7 +266,6 @@ class Fs:
                 b += 1
         return frei
 
-    # ------------------------------------------------------------ inodes
     def inode_at(self, ino):
         if ino < 1 or ino > self.inodes + self.xin:
             raise SystemExit("mkfs: inode %d is outside the table (%d)"
@@ -311,7 +305,6 @@ class Fs:
         return sum(1 for i in range(1, self.inodes + self.xin + 1)
                    if self.iget(i, I_TYPE) != T_FREE)
 
-    # ------------------------------------------------------------- files
     def file_block(self, ino, index, grow):
         if index < self.directs:
             b = self.iget(ino, I_DIRECT + index * 8)
@@ -454,7 +447,6 @@ class Fs:
             n += chunk
         return bytes(out)
 
-    # -------------------------------------------------------- directories
     def dir_entries(self, ino):
         return self.iget(ino, I_SIZE) // self.dirent
 
@@ -506,7 +498,6 @@ class Fs:
         self.dir_add(ino, ".", ino)
         self.dir_add(ino, "..", parent)
 
-    # -------------------------------------------------------------- paths
     def resolve(self, path):
         ino = self.root
         for part in [p for p in path.split("/") if p]:
@@ -599,7 +590,6 @@ class Fs:
         self.set_meta(ino, mode, uid, gid)
         return ino
 
-    # ------------------------------------------------------------- format
     def format(self):
         self.p64(SB["MAGIC"], MAGIC)
         self.p64(SB["BSIZE"], BS)
@@ -775,12 +765,6 @@ def main(argv):
         print("%s %s ctime=%d mtime=%d atime=%d" % (argv[3], art, c, mt, a))
         return 0
     if cmd == "cat":
-        # ROUND K4: read a file back OFF an image, on the host. The
-        # counter-check to the double indirect block lives on it
-        # (tools/posix/run.sh, section 3): a file of 100000 octets is
-        # written and has to come back octet for octet -- the old format
-        # stopped at 38912, and a reader that still walked only one level
-        # would give back the first 38912 and call it a file.
         fs = load(argv[2])
         if fs is None:
             print("no OSUM-OFS magic")
@@ -828,8 +812,6 @@ def main(argv):
         if spec.startswith("--reserve="):
             reserve = int(spec.split("=", 1)[1])
             continue
-        # RUNDE INSTALL: `--karten=<n>` -- der Vorrat an Kartenbloecken,
-        # siehe `Fs.__init__`.
         if spec.startswith("--karten="):
             karten = int(spec.split("=", 1)[1])
             continue
@@ -842,13 +824,6 @@ def main(argv):
         v = OFS_V1
     if "--v3" in argv[4:]:
         v = OFS_V3
-    # r399 (design audit): A TEST IMAGE THAT WOULD NOT FIT FORMAT 2 BECOMES FORMAT 3.
-    # The file manager passed the 2 134 016 octets a format-2 file may hold (the limit is
-    # a property of the test builders, not of the product, which boots format 3: plan
-    # step W0 of docs/FUI-WLIB-PLAN.md). Every runner that puts /bin/explorer on a
-    # default image would have needed its own `--v3`; the builder now says so itself --
-    # and ONLY when a source file really is too big, so every image that was built
-    # before stays octet for octet the same (tools/k15/run.sh 15d).
     if v == OFS_V2:
         v2max = (DIRECT + BS // 8 + (BS // 8) ** 2) * BS
         for spec in rest:
@@ -868,8 +843,6 @@ def main(argv):
         fs.set_times(1, zeit, zeit, zeit)
     for spec in rest:
         mode, uid, gid = None, 0, 0
-        # w-lc2: the LAST '@' separates the mode (Alpine key files are called alpine-devel@lists.alpinelinux.org-*.rsa.pub);
-        # a '@' followed by '=', or in a symlink spec, belongs to the name/target and there is no mode suffix.
         head, _, meta = spec.rpartition("@")
         if "@" in spec and "->" not in spec and "=" not in meta:
             if "/" in meta:

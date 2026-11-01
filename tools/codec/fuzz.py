@@ -1,5 +1,3 @@
-"""Kaputte Stroeme: der Dekodierer darf NICHT abstuerzen oder haengen,
-sondern muss sauber abweisen."""
 import random, sys, ref264 as R
 random.seed(42)
 data=open('/tmp/cm/i_klein.264','rb').read()
@@ -18,16 +16,13 @@ def lauf(d, name):
     except Exception as e:
         n_crash+=1
         print("UNERWARTET",type(e).__name__,e,"bei",name)
-# 1. abgeschnitten
 for k in range(1,30):
     lauf(data[:len(data)*k//60], "abgeschnitten %d"%k)
-# 2. einzelne Oktette verfaelscht
 for i in range(150):
     b=bytearray(data)
     p=random.randrange(len(b))
     b[p]^=1<<random.randrange(8)
     lauf(bytes(b), "kipp %d"%i)
-# 3. ganze Bereiche mit Muell
 for i in range(60):
     b=bytearray(data)
     p=random.randrange(max(1,len(b)-40))

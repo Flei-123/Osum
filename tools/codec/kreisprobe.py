@@ -1,10 +1,3 @@
-"""Kreisprobe fuer residual_block.
-
-Der Kodierer hier ist die STRENGE UMKEHRUNG des Dekodierers: er baut
-die Bitfolge aus denselben Tafeln und derselben suffixLength-Regel.
-Dadurch prueft der Kreis genau das, was er pruefen soll -- die
-Tafeln, die Positionsrechnung und die Zustandsfortschreibung.
-"""
 import json, random, ref264 as R
 T=json.load(open('tabs.json'))
 CT_LAB=[(t1,tc) for tc in range(17) for t1 in range(4)]
@@ -27,7 +20,6 @@ class RB:
         return v
 
 def lev_to_code(v, sub2):
-    """Umkehrung von: lc gerade -> (lc+2)>>1 ; ungerade -> (-lc-1)>>1"""
     if v>0: lc=2*v-2
     else:   lc=-2*v-1
     if sub2: lc-=2
@@ -37,7 +29,7 @@ def enc(co, nC, maxc):
     w=W()
     nz=[(i,c) for i,c in enumerate(co) if c!=0]
     tc=len(nz)
-    lev=[c for _,c in nz][::-1]        # hoechste Position zuerst
+    lev=[c for _,c in nz][::-1]
     pos=[i for i,_ in nz][::-1]
     t1=0
     for i in range(min(3,tc)):

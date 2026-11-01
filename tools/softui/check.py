@@ -126,7 +126,6 @@ def main(argv):
         print("check: NO text message in the capture -- nothing to check")
         return 1
 
-    # keep, per window origin, only the texts of the LAST batch (see MARK)
     letzte_ep = {}
     for m in texte:
         o = (m.group(9), m.group(10))
@@ -137,23 +136,12 @@ def main(argv):
     seen = 0
     kaesten = {}
     leiste = wins.get("Taskleiste", (0, 0, W, H))
-    # THE LATEST REPORT AT A PLACE WINS. A window paints many times in one
-    # run and its text changes (the taskbar clock 07:35 -> 07:36, a button
-    # text that turns white when the window gets the focus). Only the last
-    # report at (window, x, base) describes what the picture shows; the
-    # older ones were checked against a picture they were never part of.
     letzte = {}
     for n_, m in enumerate(texte):
         k = (m.group(1), m.group(2), m.group(9), m.group(10),
              m.group(4), m.group(5))
         letzte[k] = (n_, m)
-    # The bar re-lays out while the machine comes up (a button moves when the first
-    # window opens): a text reported at an OLDER place is stale. Every text of the
-    # bar is on the screen once, so for the bar the latest report of each TEXT wins
-    # as well (after the latest-per-place rule: the clock changes its minute).
     def leistenschluessel(m):
-        # a status field of the bar (clock, battery, ...) is ONE text at one place
-        # whatever it says; a window button is told apart by its text
         mk = marke_von.get(id(m), "")
         if mk and mk != "button":
             return mk
@@ -183,7 +171,6 @@ def main(argv):
             ox, oy, ww, wh = leiste
         else:
             ox, oy, ww, wh = 0, 0, W, H
-        # LEER?
         x0 = max(0, ox + x)
         y0 = max(0, oy + base - asc)
         y1 = min(H, oy + base + 4)
@@ -202,7 +189,6 @@ def main(argv):
         if tinte + nah == 0:
             print("LEER      win=%s x=%d base=%d t=%s" % (wid, x, base, txt))
             bad += 1
-        # ABGESCHNITTEN?
         if tw and x + tw > ww:
             rand = ox + ww - 1
             traf = 0
@@ -215,13 +201,10 @@ def main(argv):
                       % (wid, x, tw, ww, traf, txt))
                 bad += 1
         if tw:
-            #
-            #
             key = (ox, oy)
             kaesten.setdefault(key, {})[(x, base, txt)] = (
                 x, base - asc, x + tw, base + 4, txt)
 
-    # UEBERLAPPEND?
     for wid, kd in kaesten.items():
         ks = list(kd.values())
         for i in range(len(ks)):

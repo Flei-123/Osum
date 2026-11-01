@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/usbhid/drive.py -- inject host input into the running guest through QMP input-send-event.
-
-    drive.py <qmp-socket> <serial.txt> <scenario>        scenario: mouse | tablet | kbd | ps2
-
-Waits (event driven) for the guest line `hidwin: open`, injects the scenario, then returns.
-mouse/ps2: relative move, wheel up x3, wheel down x1, right button press+release, middle button.
-tablet:    absolute move to the far corner (axis values 0..32767), wheel up, right button.
-kbd:       key a, key b, key shift+c.
-"""
 import json
 import socket
 import sys

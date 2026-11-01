@@ -86,13 +86,13 @@ class Mon:
         except OSError:
             pass
 
-    def tu(self, befehl):
-        self.s.sendall((befehl + "\n").encode())
+    def tu(self, cmd_2):
+        self.s.sendall((cmd_2 + "\n").encode())
         time.sleep(0.12)
         self.leeren()
 
 
-def tasten_fuer(zeichen):
+def keys_for(zeichen):
     if zeichen in EINFACH:
         return [EINFACH[zeichen]]
     if zeichen in SHIFT:
@@ -104,9 +104,9 @@ def tasten_fuer(zeichen):
     return []
 
 
-def warte_auf(datei, muster, grenze=60.0):
+def wait_auf(datei, muster, limit=60.0):
     """Bis <muster> in der seriellen Datei steht. Rueckgabe: hat es geklappt."""
-    bis = time.time() + grenze
+    bis = time.time() + limit
     muster_b = muster.encode()
     while time.time() < bis:
         try:
@@ -148,7 +148,7 @@ def main():
             time.sleep(float(teile[1]))
         elif cmd == "aufzeile":
             muster = z.split(None, 1)[1]
-            if warte_auf(seriell, muster):
+            if wait_auf(seriell, muster):
                 print("   gesehen: %s" % muster)
                 n_ok += 1
             else:
@@ -174,7 +174,7 @@ def main():
             m.tu("sendkey %s" % teile[1])
         elif cmd == "text":
             for c in z.split(None, 1)[1]:
-                for t in tasten_fuer(c):
+                for t in keys_for(c):
                     m.tu("sendkey %s" % t)
         elif cmd == "maus":
             m.tu("mouse_move %s %s" % (teile[1], teile[2]))

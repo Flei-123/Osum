@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/design/kreuzmess.py <schirm.ppm> [x_rechte_kante]
-#
-#
 import sys
 
 
-def ppm_lesen(p):
+def ppm_read(p):
     d = open(p, 'rb').read()
     if not d.startswith(b'P6'):
         raise SystemExit("kein P6-PPM")
@@ -30,7 +26,7 @@ def ppm_lesen(p):
 
 if __name__ == '__main__':
     src = sys.argv[1]
-    w, h, px = ppm_lesen(src)
+    w, h, px = ppm_read(src)
 
     def f(x, y):
         i = (y * w + x) * 3
@@ -53,18 +49,18 @@ if __name__ == '__main__':
         xr = int(sys.argv[2])
     print("Fenster: Titelleiste y=%d, rechte Kante x=%d" % (ytop, xr))
 
-    feld_x0, feld_x1 = xr - 60, xr - 5
-    feld_y0, feld_y1 = ytop + 4, ytop + 52
-    hell = []
-    for y in range(feld_y0, feld_y1):
-        for x in range(feld_x0, feld_x1):
+    field_x0, field_x1 = xr - 60, xr - 5
+    field_y0, field_y1 = ytop + 4, ytop + 52
+    bright = []
+    for y in range(field_y0, field_y1):
+        for x in range(field_x0, field_x1):
             r, g, b = f(x, y)
             if r + g + b > 330:
-                hell.append((x, y))
-    if not hell:
+                bright.append((x, y))
+    if not bright:
         raise SystemExit("kein Strich gefunden -- Feld falsch abgesteckt")
-    xs = sorted(set(p[0] for p in hell))
-    ys = sorted(set(p[1] for p in hell))
+    xs = sorted(set(p[0] for p in bright))
+    ys = sorted(set(p[1] for p in bright))
     print("cross sits at x %d..%d, y %d..%d  (%d x %d)"
           % (xs[0], xs[-1], ys[0], ys[-1], xs[-1] - xs[0] + 1,
              ys[-1] - ys[0] + 1))
@@ -72,18 +68,18 @@ if __name__ == '__main__':
     print("  Zeile   Punkte")
     zeilen = []
     for y in range(ys[0], ys[-1] + 1):
-        n = sum(1 for p in hell if p[1] == y)
+        n = sum(1 for p in bright if p[1] == y)
         zeilen.append(n)
         print("   %3d     %d" % (y - ys[0], n))
     print()
-    spalten = [sum(1 for p in hell if p[0] == x) for x in range(xs[0], xs[-1] + 1)]
+    columns = [sum(1 for p in bright if p[0] == x) for x in range(xs[0], xs[-1] + 1)]
     print("erste Zeile %d, letzte Zeile %d   %s"
           % (zeilen[0], zeilen[-1],
              "GLEICH" if zeilen[0] == zeilen[-1] else "UNGLEICH <-- Fehler"))
     print("erste Spalte %d, letzte Spalte %d  %s"
-          % (spalten[0], spalten[-1],
-             "GLEICH" if spalten[0] == spalten[-1] else "UNGLEICH <-- Fehler"))
-    gut = zeilen[0] == zeilen[-1] and spalten[0] == spalten[-1]
+          % (columns[0], columns[-1],
+             "GLEICH" if columns[0] == columns[-1] else "UNGLEICH <-- Fehler"))
+    gut = zeilen[0] == zeilen[-1] and columns[0] == columns[-1]
     print()
     print("URTEIL:", "alle vier Enden gleich" if gut else "die Enden sind NICHT gleich")
     sys.exit(0 if gut else 1)

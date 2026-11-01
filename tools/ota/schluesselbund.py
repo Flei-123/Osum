@@ -94,11 +94,11 @@ def chacha():
     return ChaCha20Poly1305
 
 
-def pass_holen(umgebung, frage):
+def pass_get(umgebung, ask):
     p = os.environ.get(umgebung)
     if p is not None:
         return p.encode("utf-8")
-    return getpass.getpass(frage).encode("utf-8")
+    return getpass.getpass(ask).encode("utf-8")
 
 
 def huelle(geheim, passphrase):
@@ -121,7 +121,7 @@ def entkapseln(e, passphrase):
                                   base64.b64decode(e["geheim"]), None)
 
 
-def laden(bund):
+def load_2(bund):
     if not os.path.isfile(bund):
         raise SystemExit("schluesselbund: %s gibt es nicht -- erst `anlegen`"
                          % bund)
@@ -129,7 +129,7 @@ def laden(bund):
         return json.load(f)
 
 
-def sichern(bund, d):
+def save(bund, d):
     tmp = bund + ".neu"
     with open(tmp, "w") as f:
         json.dump(d, f, indent=1)
@@ -148,8 +148,8 @@ def anlegen(bund, aus=None):
     if os.path.exists(bund):
         raise SystemExit("schluesselbund: %s gibt es schon" % bund)
     m = opkmod()
-    hp = pass_holen("OSUM_SIGN_PASS", "Passphrase Hauptschluessel: ")
-    ep = pass_holen("OSUM_ERSATZ_PASS", "Passphrase Ersatzschluessel: ")
+    hp = pass_get("OSUM_SIGN_PASS", "Passphrase Hauptschluessel: ")
+    ep = pass_get("OSUM_ERSATZ_PASS", "Passphrase Ersatzschluessel: ")
     haupt = open(aus, "rb").read() if aus else os.urandom(32)
     if len(haupt) != 32:
         raise SystemExit("schluesselbund: %s ist nicht 32 Oktett" % aus)
@@ -161,7 +161,7 @@ def anlegen(bund, aus=None):
          "ersatz": {"pub": m.ed25519_public(ersatz).hex(),
                     "huelle": huelle(ersatz, ep)},
          "kette": []}
-    sichern(bund, d)
+    save(bund, d)
     print("schluesselbund %s angelegt" % bund)
     print("  haupt  gen 0  %s" % d["haupt"]["pub"])
     print("  ersatz        %s" % d["ersatz"]["pub"])
@@ -169,7 +169,7 @@ def anlegen(bund, aus=None):
 
 
 def zeigen(bund):
-    d = laden(bund)
+    d = load_2(bund)
     print("haupt  gen %d  %s" % (d["haupt"]["gen"], d["haupt"]["pub"]))
     print("ersatz        %s" % d["ersatz"]["pub"])
     for k in d["kette"]:
@@ -178,21 +178,21 @@ def zeigen(bund):
     return 0
 
 
-def geheim_holen(d, wer):
+def secret_get(d, wer):
     if wer == "ersatz":
         return entkapseln(d["ersatz"]["huelle"],
-                          pass_holen("OSUM_ERSATZ_PASS",
+                          pass_get("OSUM_ERSATZ_PASS",
                                      "Passphrase Ersatzschluessel: "))
     return entkapseln(d["haupt"]["huelle"],
-                      pass_holen("OSUM_SIGN_PASS",
+                      pass_get("OSUM_SIGN_PASS",
                                  "Passphrase Hauptschluessel: "))
 
 
-def kette_nachricht(gen, pub_hex):
+def chain_nachricht(gen, pub_hex):
     return ("osum-schluessel\t%d\t%s" % (gen, pub_hex)).encode("ascii")
 
 
-def wechseln(bund, mit_ersatz=False):
+def wechseln(bund, mit_fallback=False):
     """Ein neuer Hauptschluessel, und der Kettensatz, der ihn beglaubigt.
 
     Der Satz wird mit dem ALTEN Hauptschluessel signiert (oder, wenn die
@@ -200,29 +200,29 @@ def wechseln(bund, mit_ersatz=False):
     Geraet nimmt den neuen Schluessel erst an, wenn diese Signatur
     stimmt; deshalb ist ein Wechsel ein VORGANG und kein Austausch.
     """
-    d = laden(bund)
+    d = load_2(bund)
     m = opkmod()
-    alt_geheim = geheim_holen(d, "ersatz" if mit_ersatz else "haupt")
-    hp = pass_holen("OSUM_SIGN_PASS", "Passphrase Hauptschluessel (neu): ")
+    alt_secret = secret_get(d, "ersatz" if mit_fallback else "haupt")
+    hp = pass_get("OSUM_SIGN_PASS", "Passphrase Hauptschluessel (neu): ")
     neu = os.urandom(32)
-    neu_pub = m.ed25519_public(neu)
+    new_pub = m.ed25519_public(neu)
     gen = d["haupt"]["gen"] + 1
-    sig = m.ed25519_sign(alt_geheim, kette_nachricht(gen, neu_pub.hex()))
-    d["kette"].append({"gen": gen, "pub": neu_pub.hex(), "sig": sig.hex(),
-                       "von": "ersatz" if mit_ersatz else "haupt"})
-    d["haupt"] = {"gen": gen, "pub": neu_pub.hex(),
+    sig = m.ed25519_sign(alt_secret, chain_nachricht(gen, new_pub.hex()))
+    d["kette"].append({"gen": gen, "pub": new_pub.hex(), "sig": sig.hex(),
+                       "von": "ersatz" if mit_fallback else "haupt"})
+    d["haupt"] = {"gen": gen, "pub": new_pub.hex(),
                   "huelle": huelle(neu, hp)}
-    sichern(bund, d)
+    save(bund, d)
     print("Schluesselwechsel auf gen %d: %s (signiert vom %s)"
-          % (gen, neu_pub.hex(), "Ersatzschluessel" if mit_ersatz
+          % (gen, new_pub.hex(), "Ersatzschluessel" if mit_fallback
              else "Schluessel gen %d" % (gen - 1)))
     return 0
 
 
 def signieren(bund, datei, aus, wer):
-    d = laden(bund)
+    d = load_2(bund)
     m = opkmod()
-    sk = geheim_holen(d, wer)
+    sk = secret_get(d, wer)
     roh = open(datei, "rb").read()
     sig = m.ed25519_sign(sk, roh)
     pk = m.ed25519_public(sk)
@@ -236,7 +236,7 @@ def signieren(bund, datei, aus, wer):
 
 
 def oeffentlich(bund, wer, aus):
-    d = laden(bund)
+    d = load_2(bund)
     pub = bytes.fromhex(d[wer]["pub"])
     if aus:
         with open(aus, "wb") as f:
@@ -247,7 +247,7 @@ def oeffentlich(bund, wer, aus):
 
 
 def kette(bund):
-    d = laden(bund)
+    d = load_2(bund)
     for k in d["kette"]:
         print("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
     return 0

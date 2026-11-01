@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/lockflicker/icons.py <run dir> <lock|glogin> <width> <height> <scale> [picture=base]
-
-W-LOGIN, task B: the symbol in every square tile (eye, unlock/sign-in arrow, power, network) sits in the MIDDLE of its tile.
-Tiles: serial `<app>: rect ... w=<36*scale> h=<36*scale>` (+ `wlib: eyerect x= y=` for the eye of the sign-in screen).
-Per tile: the face colour is the median colour of the tile's inner box (inset 5 * scale); the symbol is every pixel that differs from it
-by more than 60 (sum of channel differences). Measured: centre of the symbol's bounding box and its pixel centroid against the tile centre.
-Prints one line per tile; `ICONS ok=N bad=M worst=<px>`; exit 0 = every bounding-box centre within 1 px of the tile centre in x and y, 1 = not, 2 = no tile found.
-"""
 import re, sys
 
 def read_ppm(path):

@@ -82,7 +82,7 @@ def make_srv(cak, cac, cn, ip):
     return k, c
 
 
-def schreiben(pfad, obj, privat=False):
+def write_2(pfad, obj, privat=False):
     with open(pfad, "wb") as f:
         if privat:
             f.write(obj.private_bytes(
@@ -104,15 +104,15 @@ def main():
 
     cak, cac = make_ca("OTA Pruefstand Wurzel")
     sk, sc = make_srv(cak, cac, cn, ip)
-    schreiben(os.path.join(d, "ca.pem"), cac)
-    schreiben(os.path.join(d, "srv.pem"), sc)
-    schreiben(os.path.join(d, "srv.key"), sk, privat=True)
+    write_2(os.path.join(d, "ca.pem"), cac)
+    write_2(os.path.join(d, "srv.pem"), sc)
+    write_2(os.path.join(d, "srv.key"), sk, privat=True)
 
     fak, fac = make_ca("OTA Fremde Wurzel")
     fk, fc = make_srv(fak, fac, cn, ip)
-    schreiben(os.path.join(d, "fremd-ca.pem"), fac)
-    schreiben(os.path.join(d, "fremd.pem"), fc)
-    schreiben(os.path.join(d, "fremd.key"), fk, privat=True)
+    write_2(os.path.join(d, "fremd-ca.pem"), fac)
+    write_2(os.path.join(d, "fremd.pem"), fc)
+    write_2(os.path.join(d, "fremd.key"), fk, privat=True)
 
     print("   ca.pem, srv.pem (%s / %s) and the foreign root" % (cn, ip))
     return 0

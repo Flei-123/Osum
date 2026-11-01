@@ -27,8 +27,8 @@ DATEIEN = [
     ("epsilon.txt", b"x" * 300),
     ("zeta.md", b"# zeta\n"),
 ]
-ORDNER = ["bilder", "notizen"]
-UNTER = {
+FOLDER = ["bilder", "notizen"]
+UNDER = {
     "bilder": [("rot.ppm", b"P6\n1 1\n255\n\xff\x00\x00"),
                ("blau.ppm", b"P6\n1 1\n255\n\x00\x00\xff")],
     "notizen": [("todo.txt", b"nichts\n")],
@@ -69,10 +69,10 @@ def main():
             f.write(inhalt)
         zeilen.append("/data/%s=%s@0644" % (name, p))
         soll.append((name, len(inhalt), "-"))
-    for o in ORDNER:
+    for o in FOLDER:
         zeilen.append("/data/%s/" % o)
         soll.append((o, 0, "d"))
-        for name, inhalt in UNTER.get(o, []):
+        for name, inhalt in UNDER.get(o, []):
             p = os.path.join(roh, "%s_%s" % (o, name))
             with open(p, "wb") as f:
                 f.write(inhalt)

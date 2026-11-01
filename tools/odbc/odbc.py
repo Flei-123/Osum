@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""odbc entry point: python3 tools/odbc/odbc.py --port unix:/tmp/odb.sock info"""
 import os
 import sys
 

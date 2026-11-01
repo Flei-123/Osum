@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/netdidle/flood.py -- background chatter on a QEMU `-netdev dgram` link.
-
-    flood.py <qemu-local-port> <frames-per-second> <seconds> [<source-port>]
-
-QEMU connect()s its datagram socket to the `remote` address, so frames from any other
-source port are silently dropped (this is why the first gate saw rx_f=0): the sender
-must bind the very port QEMU was given as `remote.port` / `udp=`.
-
-Sends broadcast ARP requests (the kind a bridged VirtualBox NIC sees all day:
-ARP, mDNS, SSDP) as raw Ethernet frames, one UDP datagram each.
-"""
 import socket
 import struct
 import sys

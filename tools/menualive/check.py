@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/menualive/check.py -- measurements for tools/menualive/run.sh.
-
-    check.py cpu  <serial.txt> <task-name|kind:KIND|notkind:KIND|pid:N>   share of one core, from two `ps`
-                (notkind:idle = what the taskbar CPU widget shows)
-    check.py table <serial.txt>   every task's share of the core, biggest first
-    check.py diff <a.ppm> <b.ppm> x0 y0 x1 y1  changed pixels in a rectangle
-
-`cpu`: the last two `ps` listings on the serial line. Every task's ticks are
-subtracted; the time that passed is the sum of all gains (one core), so the
-share is gain(task) / sum -- no clock of the host involved. Prints `share=<percent>`, exit 0 always (the caller decides).
-"""
 import re
 import sys
 
 
 def blocks(path):
-    """The `ps` listings the terminal showed. The kernel copies the terminal
-    window to the serial line every five seconds as `wm: termzeile N [text]`
-    (one dump = the lines in a row); a dump with the ps header is a listing."""
     dumps, cur = [], []
     for l in open(path, errors="replace"):
         m = re.match(r"wm: termzeile (\d+) \[(.*)\]\s*$", l)
@@ -47,12 +33,8 @@ def cpu(path, name):
         print("share=-1 (fewer than two ps listings: %d)" % len(bl))
         return 1
     a, b = bl[0], bl[-1]
-    # One core (the eh6 machine): everything that ran adds up to the time that
-    # passed. With more cores the sum is larger and the share comes out
-    # SMALLER, so a pass is never faked by it.
     span = sum(max(0, b[k][1] - a[k][1]) for k in b if k in a)
     if name.startswith("notkind:"):
-        # the CPU widget's method: everything that is NOT the core's idle task
         gain = sum(b[k][1] - a[k][1] for k in b if k in a and b[k][0] != name[8:])
     elif name.startswith("pid:"):
         gain = sum(b[k][1] - a[k][1] for k in b if k in a and k == int(name[4:]))
@@ -68,9 +50,6 @@ def cpu(path, name):
 
 
 def table(path):
-    """Per-task share of one core between the first and the last `ps`:
-    one line `pid=N kind=K share=P` for every task that gained ticks (idle excluded),
-    biggest first. The names `ps` shows differ per image, so the pid is the key."""
     bl = blocks(path)
     if len(bl) < 2:
         print("share=-1 (fewer than two ps listings: %d)" % len(bl))

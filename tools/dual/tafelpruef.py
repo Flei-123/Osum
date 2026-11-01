@@ -54,7 +54,7 @@ def kopf_lesen(f, lba, b: Befund, name):
     }
 
 
-def tafel_pruefen(f, k, b: Befund, name):
+def board_check(f, k, b: Befund, name):
     gesamt = k["anzahl"] * k["esize"]
     f.seek(k["tafel"] * BS)
     roh = f.read(gesamt)
@@ -98,7 +98,6 @@ def main():
         groesse = f.tell()
         sekt = groesse // BS
 
-        # ---- der Schutz-MBR
         f.seek(0)
         mbr = f.read(BS)
         if mbr[510:512] != b"\x55\xaa":
@@ -107,18 +106,16 @@ def main():
         if 0xEE not in typen:
             b.bad("protective MBR: no entry of type 0xEE")
 
-        # ---- beide Koepfe
         prim = kopf_lesen(f, 1, b, "primaer")
         sich = kopf_lesen(f, sekt - 1, b, "sicherung")
 
         parts = []
         if prim:
-            parts = tafel_pruefen(f, prim, b, "primaer")
+            parts = board_check(f, prim, b, "primaer")
             b.kopf = prim
         if sich:
-            tafel_pruefen(f, sich, b, "sicherung")
+            board_check(f, sich, b, "sicherung")
 
-        # ---- zeigen sie aufeinander?
         if prim and sich:
             if prim["andere"] != sich["meine"]:
                 b.bad("the headers do not point at each other (primary -> backup)")
@@ -127,7 +124,6 @@ def main():
             if prim["tcrc"] != sich["tcrc"]:
                 b.bad("die beiden Koepfe nennen verschiedene Tafelsummen")
 
-        # ---- ueberschneiden sich Partitionen?
         srt = sorted(parts, key=lambda p: p["start"])
         for i in range(1, len(srt)):
             if srt[i]["start"] <= srt[i - 1]["ende"]:

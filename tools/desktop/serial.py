@@ -33,16 +33,12 @@ Usage:  serial.py selftest                prints "OK <what>" / "FAIL <what>" (do
 import re
 import sys
 
-# every program that writes records to the serial port in the runs of this gate
 PREFIXES = ("taskbar", "settings", "wlib", "wm", "launcher", "desktop", "explorer", "pwr",
             "ptrcfg", "fuiapp", "fuib", "fuiglyph", "qs", "desk", "ring3", "i18n", "dhcp",
             "widgetdemo")
-# no look-behind on purpose: the cut lands anywhere, also behind a hex digit ("key=ffffffwm: ...")
 MARK = re.compile(r"(?:%s): " % "|".join(PREFIXES))
 
 N = r"-?[0-9]+"
-# strict schemas: (kind-prefix, full regex of the REST after the kind). Fields in the order the
-# program prints them (see the `say` calls in kernel/user/{taskbar,settings,wlib}.fi).
 SCHEMAS = {
     "taskbar: geom ": rf"edge={N} x={N} y={N} w={N} h={N} vertical={N} thick={N} shown={N}",
     "taskbar: work ": rf" ?x={N} y={N} w={N} h={N}",
@@ -73,8 +69,6 @@ def intact(seg):
     rx, rest = schema_for(seg)
     if rx is not None:
         return rx.fullmatch(rest) is not None
-    # no schema: a key that appears twice means a tail was glued on
-    # (free text after ` t=` and a second group after a double space do not count)
     head = re.split(r" t=|  ", seg, maxsplit=1)[0]
     keys = KV.findall(head)
     return len(keys) == len(set(keys))
@@ -103,7 +97,6 @@ def clean(data):
         line = raw.rstrip(b"\r").decode("latin-1")
         for text, ended, marked in pieces(line):
             if not marked:
-                # a plain line stays; the tail of a cut record (it is in front of a marker) goes
                 (keep if ended else torn).append(text)
             elif ended and intact(text):
                 keep.append(text)
@@ -133,8 +126,6 @@ def selftest():
         keep, torn = clean(text.encode("latin-1"))
         return keep, torn
 
-    # 1. nested: another record lands inside the geom record. The old `tail -1 | grep -oE` took
-    #    the x/y/w/h of the INNER record as the bar's geometry.
     k, t = run(GEOM_OK + "\n"
                "taskbar: geom edge=3 x=696" + RECT_EDGE + " y=0 w=104 h=600 vertical=1 thick=104 shown=1\n")
     case("nested record: the intact geom is the last geom", last(k, "taskbar: geom ") == GEOM_OK)
@@ -143,17 +134,13 @@ def selftest():
     k2, _ = run(RECT_EDGE + "\n")
     case("nested record: the same inner record alone is believed", RECT_EDGE in k2)
     case("nested record: the cut outer record is counted as torn", len(t) >= 1)
-    # 2. cut in the middle of the last number: must not be believed as w=76
     k, t = run("settings: rect name=win x=20 y=3 w=760launcher: apps=6\n0 h=500\n")
     case("cut record: 'w=760' without h is not a record", last(k, "settings: rect") is None)
     case("cut record: the other program's record is kept", "launcher: apps=6" in k)
-    # 3. a tail glued onto another record (duplicate key) is refused
     k, t = run("settings: preset i=6 id=tafel bg=16317180 txt=1 acc=2 base=17 fg=3 bg=16777215 tw=41 t=20:30\n")
     case("glued tail: duplicate key -> torn", not k and len(t) == 1)
-    # 4. only a torn record exists: nothing is invented
     k, t = run("taskbar: geom edge=3 x=696settings: rect name=edge x=216 y=100 w=81 h=30 ax=1 ay=2\n")
     case("only a torn geom: the log has NO geom", last(k, "taskbar: geom ") is None)
-    # counter-proofs: damage is dropped, a real wrong state is not
     bad_geom = GEOM_OK.replace("x=696", "x=600")
     k, t = run(bad_geom + "\n")
     case("counter-proof: an intact record with a WRONG value is kept (the check will see it)",

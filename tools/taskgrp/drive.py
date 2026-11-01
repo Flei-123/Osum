@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/taskgrp/drive.py -- taskbar grouping: open two Explorer windows + Settings, read the last taskbar repaint.
-
-    drive.py <qmp-socket> <monitor-socket> <serial.txt> <outdir>
-
-Writes scenes.txt: buttons=<count of `taskbar: btn` lines of the last repaint>, grp_max=<largest `taskbar: grp n=`>,
-grp_lines=<number of grp lines in that repaint>.
-"""
 import os
 import re
 import sys
@@ -42,7 +35,6 @@ def main():
         time.sleep(2.0)
     time.sleep(3.0)
     rep = last_repaint(serial_text(ser))
-    # one repaint = btn lines with rising i; cut at the second `i=0`
     parts = re.split(r"(?=taskbar: btn i=0 )", rep)
     rep = parts[1] if len(parts) > 2 else rep
     btns = re.findall(r"taskbar: btn i=(\d+) ", rep)

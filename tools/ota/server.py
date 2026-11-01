@@ -71,7 +71,7 @@ KURZ = {}
 LOG = None
 EINMAL = False
 GETAN = threading.Event()
-ZAEHLER = {"anfragen": 0, "oktette": 0}
+COUNTER = {"anfragen": 0, "oktette": 0}
 
 
 def protokoll(*w):
@@ -113,10 +113,10 @@ class Hand(http.server.BaseHTTPRequestHandler):
             pass
 
     def do_HEAD(self):
-        self.do_GET(nur_kopf=True)
+        self.do_GET(only_header=True)
 
-    def do_GET(self, nur_kopf=False):
-        ZAEHLER["anfragen"] += 1
+    def do_GET(self, only_header=False):
+        COUNTER["anfragen"] += 1
         pfad = self.path.split("?")[0]
         name = os.path.basename(pfad)
         datei = os.path.join(WURZEL, name)
@@ -151,7 +151,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     return
 
         laenge = gesamt - von
-        grenze = ABBRUCH.get(name, ABBRUCH.get(os.path.basename(name)))
+        limit = ABBRUCH.get(name, ABBRUCH.get(os.path.basename(name)))
         self.send_response(206 if teil else 200)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(laenge))
@@ -160,7 +160,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                              "bytes %d-%d/%d" % (von, gesamt - 1, gesamt))
         self.send_header("Accept-Ranges", "bytes")
         self.end_headers()
-        if nur_kopf:
+        if only_header:
             return
 
         geschrieben = 0
@@ -173,22 +173,22 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     protokoll("KURZ", name, "bei", stelle,
                               "nach", geschrieben,
                               "von", laenge, "angekuendigt")
-                    ZAEHLER["oktette"] += geschrieben
+                    COUNTER["oktette"] += geschrieben
                     if EINMAL:
                         GETAN.set()
                     return
-                if grenze is not None and stelle >= grenze:
+                if limit is not None and stelle >= limit:
                     protokoll("ABBRUCH", name, "bei", stelle,
                               "nach", geschrieben,
                               "von", laenge, "angekuendigt")
-                    ZAEHLER["oktette"] += geschrieben
+                    COUNTER["oktette"] += geschrieben
                     self._hart_zu()
                     if EINMAL:
                         GETAN.set()
                     return
                 stueck = 4096
-                if grenze is not None:
-                    stueck = min(stueck, grenze - stelle)
+                if limit is not None:
+                    stueck = min(stueck, limit - stelle)
                 if kgrenze is not None:
                     stueck = min(stueck, kgrenze - stelle)
                 stueck = min(stueck, laenge - geschrieben)
@@ -201,7 +201,7 @@ class Hand(http.server.BaseHTTPRequestHandler):
                     protokoll("RISS", name, "nach", geschrieben)
                     return
                 geschrieben += len(b)
-        ZAEHLER["oktette"] += geschrieben
+        COUNTER["oktette"] += geschrieben
         protokoll("200" if not teil else "206", name, "von", von,
                   "laenge", geschrieben, "gesamt", gesamt)
         if EINMAL:
@@ -273,7 +273,7 @@ def main():
     except KeyboardInterrupt:
         pass
     protokoll("ENDE anfragen=%d oktette=%d"
-              % (ZAEHLER["anfragen"], ZAEHLER["oktette"]))
+              % (COUNTER["anfragen"], COUNTER["oktette"]))
     return 0
 
 

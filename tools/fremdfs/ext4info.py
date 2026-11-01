@@ -33,13 +33,13 @@ class Ext4:
             raise SystemExit('ext4info: keine ext4-Magie')
         self.bs = 1024 << struct.unpack_from('<I', sb, 0x18)[0]
         self.inodes_pro_gruppe = struct.unpack_from('<I', sb, 0x28)[0]
-        self.inode_groesse = struct.unpack_from('<H', sb, 0x58)[0]
-        self.erster_block = struct.unpack_from('<I', sb, 0x14)[0]
-        self.desc_groesse = struct.unpack_from('<H', sb, 0xFE)[0] or 32
+        self.inode_size = struct.unpack_from('<H', sb, 0x58)[0]
+        self.first_block = struct.unpack_from('<I', sb, 0x14)[0]
+        self.desc_size = struct.unpack_from('<H', sb, 0xFE)[0] or 32
         self.inkompat = struct.unpack_from('<I', sb, 0x60)[0]
         self.kompat = struct.unpack_from('<I', sb, 0x5C)[0]
         self.rokompat = struct.unpack_from('<I', sb, 0x64)[0]
-        self.zustand = struct.unpack_from('<H', sb, 0x3A)[0]
+        self.state = struct.unpack_from('<H', sb, 0x3A)[0]
         self.bloecke = struct.unpack_from('<I', sb, 0x4)[0]
         self.sb = sb
 
@@ -50,32 +50,32 @@ class Ext4:
     def inode(self, ino):
         gruppe = (ino - 1) // self.inodes_pro_gruppe
         idx = (ino - 1) % self.inodes_pro_gruppe
-        gd_block = self.erster_block + 1
-        off = gruppe * self.desc_groesse
+        gd_block = self.first_block + 1
+        off = gruppe * self.desc_size
         self.f.seek(gd_block * self.bs + off)
-        gd = self.f.read(self.desc_groesse)
+        gd = self.f.read(self.desc_size)
         tab = struct.unpack_from('<I', gd, 0x8)[0]
-        if self.desc_groesse >= 64:
+        if self.desc_size >= 64:
             tab |= struct.unpack_from('<I', gd, 0x28)[0] << 32
-        self.f.seek(tab * self.bs + idx * self.inode_groesse)
-        return self.f.read(self.inode_groesse)
+        self.f.seek(tab * self.bs + idx * self.inode_size)
+        return self.f.read(self.inode_size)
 
     def extent_tiefe(self, ino):
         inode = self.inode(ino)
         flags = struct.unpack_from('<I', inode, 0x20)[0]
         if not (flags & 0x80000):
-            return -1          # keine Extents, sondern indirekte Bloecke
+            return -1
         magie, _, _, tiefe, _ = struct.unpack_from('<HHHHI', inode, 0x28)
         if magie != 0xF30A:
             return -2
         return tiefe
 
-    def extent_zahl(self, ino):
+    def extent_num(self, ino):
         """Wie viele BLATT-Extents hat die Datei insgesamt."""
         inode = self.inode(ino)
-        return self._zaehlen(inode[0x28:0x28 + 60])
+        return self._count(inode[0x28:0x28 + 60])
 
-    def _zaehlen(self, knoten):
+    def _count(self, knoten):
         magie, eintraege, _, tiefe, _ = struct.unpack_from('<HHHHI', knoten, 0)
         if magie != 0xF30A:
             return 0
@@ -86,16 +86,16 @@ class Ext4:
             e = 12 + i * 12
             lo = struct.unpack_from('<I', knoten, e + 4)[0]
             hi = struct.unpack_from('<H', knoten, e + 8)[0]
-            summe += self._zaehlen(self.block(lo | (hi << 32)))
+            summe += self._count(self.block(lo | (hi << 32)))
         return summe
 
-    def suchen(self, pfad):
+    def find(self, pfad):
         """Inodenummer zu einem Pfad. Nur so viel Verzeichnislogik wie
         noetig -- lineare Eintraege reichen, htree-Verzeichnisse haben
         dieselben linearen Bloecke darunter."""
         ino = 2
         for teil in [t for t in pfad.split('/') if t]:
-            ino = self._eintrag(ino, teil)
+            ino = self._entry(ino, teil)
             if ino is None:
                 return None
         return ino
@@ -125,7 +125,7 @@ class Ext4:
                 hi = struct.unpack_from('<H', knoten, e + 8)[0]
                 yield from self._blatt(self.block(lo | (hi << 32)))
 
-    def _eintrag(self, dir_ino, name):
+    def _entry(self, dir_ino, name):
         ziel = name.encode()
         for b in self._bloecke_von(dir_ino):
             daten = self.block(b)
@@ -142,7 +142,7 @@ class Ext4:
     def htree(self, dir_ino):
         inode = self.inode(dir_ino)
         flags = struct.unpack_from('<I', inode, 0x20)[0]
-        return bool(flags & 0x1000)     # EXT4_INDEX_FL
+        return bool(flags & 0x1000)
 
 
 def main():
@@ -152,21 +152,21 @@ def main():
     fs = Ext4(abbild)
     if was == 'sb':
         print(f'blockgroesse {fs.bs}')
-        print(f'inodegroesse {fs.inode_groesse}')
+        print(f'inodegroesse {fs.inode_size}')
         print(f'bloecke {fs.bloecke}')
         print(f'inkompat 0x{fs.inkompat:x}')
         print(f'rokompat 0x{fs.rokompat:x}')
-        print(f'zustand {fs.zustand}')
+        print(f'zustand {fs.state}')
         print(f'64bit {1 if fs.inkompat & 0x80 else 0}')
         return
     pfad = sys.argv[3]
-    ino = fs.suchen(pfad)
+    ino = fs.find(pfad)
     if ino is None:
         raise SystemExit(f'ext4info: {pfad} nicht gefunden')
     if was == 'tiefe':
         print(fs.extent_tiefe(ino))
     elif was == 'extents':
-        print(fs.extent_zahl(ino))
+        print(fs.extent_num(ino))
     elif was == 'htree':
         print(1 if fs.htree(ino) else 0)
     elif was == 'inode':

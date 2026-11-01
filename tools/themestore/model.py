@@ -29,9 +29,6 @@ spec = importlib.util.spec_from_file_location(
 M = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(M)
 
-# THE SEVENTEEN PAIRINGS, in the order `wlibc.pairs_init` puts them in.
-# Two lists that have to agree is exactly the sort of thing that drifts,
-# so `run.sh` compares them index by index and not as a set.
 PAIRS = [p for p in M.TEXT_PAIRS if p[2] == "normal"]
 
 

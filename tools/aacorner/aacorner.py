@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/aacorner/aacorner.py -- ARE THE ROUND CORNERS AND THE RIM OF A POPUP ANTIALIASED?
-#
-#   aacorner.py <picture.ppm> <x> <y> <w> <h> <radius> [corners]
-#
-# (x, y, w, h) is the OUTER edge of a rounded surface (window, popup menu,
-# tooltip, toast) with corner radius `radius`, a rim of one pixel and a fill.
-# The tool takes the three pure colours from the straight edge (outside =
-# the ground, rim, fill), renders the ideal rounded corner with 8x8
-# supersampling (outer arc radius r, inner arc radius r-1, rim between)
-# and compares it with the picture in the four corner squares:
-#
-#   px     pixels compared (corner squares, one pixel margin outside)
-#   arc    pixels the outer arc crosses (ideal coverage 0 < c < 1)
-#   soft   of those: pixels that are NOT one of the pure colours (they carry
-#          coverage alpha) -- a staircase corner has none
-#   max    largest channel difference to the ideal, 0..255
-#   bad    pixels differing by more than 12 (a dark fringe between rim and
-#          fill, a rim that ends in the air, a missing arc)
-#
-# Output (one line): `px=.. arc=.. soft=.. max=.. bad=..`
 import sys
 
 TOL = 3
@@ -71,7 +51,7 @@ def cover(x0, y0, cx, cy, r, sx, sy):
             dx = (px - cx) * sx
             dy = (py - cy) * sy
             if dx <= 0 or dy <= 0:
-                n += 1  # straight side: inside
+                n += 1
             elif dx * dx + dy * dy <= r * r:
                 n += 1
     return n / (SS * SS)
@@ -101,8 +81,6 @@ def measure(img, x, y, w, h, r, which=None):
     for name, ex, ey, sx, sy in corners:
         if which and name not in which:
             continue
-        # pure colours from the straight edge, in the middle of the side
-        # that carries this corner's rim (top for t*, bottom for b*)
         mx = x + w // 2
         ground = get(ex + 2 if sx > 0 else ex - 3, ey + 2 if sy > 0 else ey - 3)
         if sy < 0:
@@ -111,18 +89,14 @@ def measure(img, x, y, w, h, r, which=None):
         else:
             rim = get(mx, y + h - 1)
             fill = get(mx, y + h - 4)
-        # the corner circle centre of the outer and of the inner shape
         ccx = ex - sx * r
         ccy = ey - sy * r
         for j in range(-1, r + 1):
             for i in range(-1, r + 1):
-                # pixel position, counted from the corner inwards
                 pxx = ex - 1 - i if sx > 0 else ex + i
                 pyy = ey - 1 - j if sy > 0 else ey + j
                 co = cover(pxx, pyy, ccx, ccy, r, sx, sy)
                 ci = cover(pxx, pyy, ccx, ccy, max(r - 1, 0), sx, sy)
-                # the inner shape lies one pixel inside the straight edges
-                # as well: a pixel on the edge row/column is rim, not fill
                 inner_x = (pxx >= x + 1) and (pxx < x + w - 1)
                 inner_y = (pyy >= y + 1) and (pyy < y + h - 1)
                 if not (inner_x and inner_y):
@@ -133,7 +107,7 @@ def measure(img, x, y, w, h, r, which=None):
                 if r == 0:
                     ci = 1.0 if (inner_x and inner_y) else 0.0
                 if co >= 1.0 and ci >= 1.0:
-                    continue  # pure fill: nothing to judge (text may stand here)
+                    continue
                 ideal = mix(ground, mix(rim, fill, ci), co)
                 actual = get(pxx, pyy)
                 err = max(abs(actual[k] - ideal[k]) for k in range(3))

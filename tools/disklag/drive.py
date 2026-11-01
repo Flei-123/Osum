@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/disklag/drive.py -- boot a kernel with an OFS root on a THROTTLED
-AHCI disk (a stand-in for a rotating laptop disk) and time shell commands.
-
-usage: drive.py <kernel.mb> <root.img> <iops> <workdir> [cmdline] [--keys]
-
-Output: one line per measurement, "M name=value".  The shell is driven over
-a serial pipe; the QEMU monitor is used for `sendkey` (lost-key test).
-"""
 import os, sys, time, subprocess, threading, socket, re
 
 kernel, img, iops, work = sys.argv[1:5]
@@ -108,9 +100,6 @@ try:
         timed_n(f"write{i}", f"echo hello{i} > /etc/w{i}.txt", 1)
     timed_n("ls_after_write", "ls /etc", 1)
     if KEYS:
-        # lost-key test: start a disk-heavy command, type a word through the
-        # monitor (PS/2) with 40 ms gaps while it runs, press return after,
-        # and see how much of the word reached the shell's line buffer.
         word = "abdeghijkpqrvyz"
         p0 = len(text())
         sin.write(b"ls /etc\n")

@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
-#
-#
-#
 import os
 import sys
 
 
-def ppm_lesen(pfad):
+def ppm_read(pfad):
     with open(pfad, "rb") as fh:
         d = fh.read()
     if not d.startswith(b"P6"):
@@ -41,20 +35,20 @@ def punkt(bild, w, h, x, y):
     return (bild[o], bild[o + 1], bild[o + 2])
 
 
-def hell(p):
+def bright(p):
     """Wahrgenommene Helligkeit -- Rec. 601, ganzzahlig."""
     return (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
 
 
 def schatten(argv):
     """Der Schatten, gegen den Lauf ohne ihn."""
-    ohne, mit = argv[0], argv[1]
+    without, mit = argv[0], argv[1]
     x, y, w0, h0 = (int(v) for v in argv[2:6])
     reach = 6
     if "--reach" in argv:
         reach = int(argv[argv.index("--reach") + 1])
-    wa, ha, A = ppm_lesen(ohne)
-    wb, hb, B = ppm_lesen(mit)
+    wa, ha, A = ppm_read(without)
+    wb, hb, B = ppm_read(mit)
     if (wa, ha) != (wb, hb):
         print("  FAIL  verschiedene Bildgroessen")
         return 1
@@ -67,8 +61,8 @@ def schatten(argv):
     for k in range(reach + 3):
         pa = punkt(A, wa, ha, rand + k, zy)
         pb = punkt(B, wb, hb, rand + k, zy)
-        ov.append(None if pa is None else hell(pa))
-        mv.append(None if pb is None else hell(pb))
+        ov.append(None if pa is None else bright(pa))
+        mv.append(None if pb is None else bright(pb))
     print("   without shadow: %s"
           % " ".join("--" if v is None else "%3d" % v for v in ov))
     print("   mit  Schatten: %s"
@@ -111,13 +105,13 @@ def schatten(argv):
 
 def ecke(argv):
     """Die Ecke, gegen den Lauf mit der eckigen."""
-    ohne, mit = argv[0], argv[1]
+    without, mit = argv[0], argv[1]
     x, y = int(argv[2]), int(argv[3])
     r = 8
     if "--r" in argv:
         r = int(argv[argv.index("--r") + 1])
-    wa, ha, A = ppm_lesen(ohne)
-    wb, hb, B = ppm_lesen(mit)
+    wa, ha, A = ppm_read(without)
+    wb, hb, B = ppm_read(mit)
 
     def gemischt(b, w, h):
         """Bildpunkte im Eckquadrat, die WEDER Rahmen NOCH Grund sind.
@@ -127,16 +121,16 @@ def ecke(argv):
         beide aus DEMSELBEN Bild, damit kein Schema-Unterschied
         hineinrechnet.
         """
-        rahmen = punkt(b, w, h, x + r + 2, y + r + 2)
+        frame = punkt(b, w, h, x + r + 2, y + r + 2)
         grund = punkt(b, w, h, x - 3, y - 3)
         n = 0
         for dy in range(r):
             for dx in range(r):
                 p = punkt(b, w, h, x + dx, y + dy)
-                if p is None or p == rahmen or p == grund:
+                if p is None or p == frame or p == grund:
                     continue
                 n += 1
-        return n, rahmen, grund
+        return n, frame, grund
 
     na, ra, ga = gemischt(A, wa, ha)
     nb, rb, gb = gemischt(B, wb, hb)
@@ -170,14 +164,14 @@ def ecke(argv):
 def vergleich(argv):
     a, bpfad = argv[0], argv[1]
     x, y, w0, h0 = (int(v) for v in argv[2:6])
-    wa, ha, ba = ppm_lesen(a)
-    wb, hb, bb = ppm_lesen(bpfad)
+    wa, ha, ba = ppm_read(a)
+    wb, hb, bb = ppm_read(bpfad)
     if (wa, ha) != (wb, hb):
         print("  FAIL  verschiedene Bildgroessen: %dx%d gegen %dx%d"
               % (wa, ha, wb, hb))
         return 1
     reach = 8
-    anders = 0
+    changed = 0
     gesamt = 0
     for yy in range(max(0, y - reach), min(ha, y + h0 + reach)):
         for xx in range(max(0, x - reach), min(wa, x + w0 + reach)):
@@ -185,12 +179,12 @@ def vergleich(argv):
                 continue
             gesamt += 1
             if punkt(ba, wa, ha, xx, yy) != punkt(bb, wb, hb, xx, yy):
-                anders += 1
+                changed += 1
     print("PAINT-COMPARE: edge around %d,%d %dx%d (%d pixels wide)"
           % (x, y, w0, h0, reach))
     print("   %d of %d pixels differ (%.1f%%)"
-          % (anders, gesamt, 100.0 * anders / gesamt if gesamt else 0))
-    if anders > 0:
+          % (changed, gesamt, 100.0 * changed / gesamt if gesamt else 0))
+    if changed > 0:
         print("  OK    the edge is demonstrably a different one")
         return 0
     print("  FAIL  the two runs paint the same edge -- the "

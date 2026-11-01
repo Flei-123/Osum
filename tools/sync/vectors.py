@@ -1,32 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/sync/vectors.py -- die Bausteine der Runde SYNC gegen etwas, das
-NICHT aus diesem Baum stammt.
-
-Gemessen wird `.probe/syncoracle`, ein gehostetes Firn-Programm, das
-GENAU DIE DATEIEN bindet, die auch `/bin/sync` und `/bin/vault` binden:
-lib/crypto/sha256.fi, lib/crypto/chacha.fi, lib/crypto/scrypt.fi,
-lib/crypto/hkdf.fi, lib/sync/chain.fi.
-
-Wogegen:
-
-  * PBKDF2-HMAC-SHA256 -- Pythons `hashlib.pbkdf2_hmac` (OpenSSL)
-  * Salsa20/8          -- der Testvektor aus RFC 7914 Abschnitt 8
-  * scrypt             -- DREI der vier Testvektoren aus RFC 7914
-                          Abschnitt 12 und Zufallsfaelle gegen
-                          `hashlib.scrypt`. Der vierte (N = 1048576,
-                          r = 8, p = 1) braucht 1 GiB Arbeitsspeicher in
-                          EINEM Stueck; er ist ausgelassen und das steht
-                          hier, statt "alle vier" zu behaupten.
-  * HKDF-SHA256        -- RFC 5869 Anhang A.1, A.2, A.3
-  * XChaCha20-Poly1305 -- libsodium ueber PyNaCl, also eine Umsetzung aus
-                          einer ganz anderen Werkstatt
-  * die Schluesselkette, die Blocknamen, der Wiederherstellungscode und
-    die Huelle -- in Python nachgerechnet, Schritt fuer Schritt
-
-Die zweite Umsetzung ist der ganze Punkt. Ein Code, der sich selbst
-prueft, ist auf beiden Seiten gleich falsch.
-"""
 import binascii
 import hashlib
 import hmac as pyhmac
@@ -72,14 +45,13 @@ def ask(lines):
     return out
 
 
-def gleich(name, ist, soll):
+def eq(name, ist, soll):
     global count
     count += 1
     if ist != soll:
         fails.append("%s: %s != %s" % (name, str(ist)[:80], str(soll)[:80]))
 
 
-# ------------------------------------------------------------ PBKDF2
 
 def t_pbkdf2():
     q, w = [], []
@@ -96,11 +68,10 @@ def t_pbkdf2():
         q.append("pbkdf2 %s %s %d %d" % (hx(pw), hx(salt), it, dk))
         w.append(hashlib.pbkdf2_hmac("sha256", pw, salt, it, dk).hex())
     for name, ist, soll in zip(range(len(q)), ask(q), w):
-        gleich("pbkdf2/%d" % name, ist, soll)
+        eq("pbkdf2/%d" % name, ist, soll)
     print("  PBKDF2-HMAC-SHA256: %d Faelle gegen hashlib" % len(q))
 
 
-# ---------------------------------------------------------- Salsa20/8
 
 SALSA_IN = ("7e879a214f3ec9867ca940e641718f26baee555b8c61c1b50df846116dcd3b1d"
             "ee24f319df9b3d8514121e4b5ac5aa3276021d2909c74829edebc68db8b8c25e")
@@ -109,11 +80,10 @@ SALSA_OUT = ("a41f859c6608cc993b81cacb020cef05044b2181a2fd337dfd7b1c6396682f29"
 
 
 def t_salsa():
-    gleich("salsa20/8 RFC 7914 §8", ask(["salsa " + SALSA_IN])[0], SALSA_OUT)
+    eq("salsa20/8 RFC 7914 §8", ask(["salsa " + SALSA_IN])[0], SALSA_OUT)
     print("  Salsa20/8: the test vector from RFC 7914 section 8")
 
 
-# ------------------------------------------------------------- scrypt
 
 def t_scrypt(voll):
     faelle = [(b"", b"", 16, 1, 1, 64),
@@ -128,12 +98,11 @@ def t_scrypt(voll):
     for (c, g) in zip(faelle, got):
         w = hashlib.scrypt(c[0], salt=c[1], n=c[2], r=c[3], p=c[4],
                            dklen=c[5], maxmem=1 << 26).hex()
-        gleich("scrypt N=%d r=%d p=%d" % (c[2], c[3], c[4]), g, w)
+        eq("scrypt N=%d r=%d p=%d" % (c[2], c[3], c[4]), g, w)
     print("  scrypt: %d cases, including THREE of the four from RFC 7914 §12 "
           "(der vierte braucht 1 GiB)" % len(faelle))
 
 
-# --------------------------------------------------------------- HKDF
 
 def hkdf_ext(salt, ikm):
     return pyhmac.new(salt, ikm, hashlib.sha256).digest()
@@ -149,7 +118,6 @@ def hkdf_exp(prk, info, ln):
 
 
 def t_hkdf():
-    # RFC 5869 Anhang A.1 / A.2 / A.3
     faelle = [
         (bytes.fromhex("0b" * 22), bytes.fromhex("000102030405060708090a0b0c"),
          bytes.fromhex("f0f1f2f3f4f5f6f7f8f9"), 42,
@@ -172,11 +140,11 @@ def t_hkdf():
         q.append("hkdfext %s %s" % (hx(salt), hx(ikm)))
     got = ask(q)
     for (c, g) in zip(faelle, got):
-        gleich("hkdf extract", g, c[4])
+        eq("hkdf extract", g, c[4])
     q = ["hkdfexp %s %s %d" % (c[4], hx(c[2]), c[3]) for c in faelle]
     got = ask(q)
     for (c, g) in zip(faelle, got):
-        gleich("hkdf expand", g, c[5])
+        eq("hkdf expand", g, c[5])
     q, w = [], []
     for _ in range(5):
         prk = os.urandom(32)
@@ -185,100 +153,98 @@ def t_hkdf():
         q.append("hkdfexp %s %s %d" % (hx(prk), hx(info), ln))
         w.append(hkdf_exp(prk, info, ln).hex())
     for (g, s) in zip(ask(q), w):
-        gleich("hkdf expand (zufall)", g, s)
+        eq("hkdf expand (zufall)", g, s)
     print("  HKDF-SHA256: RFC 5869 A.1/A.2/A.3 und 5 Zufallsfaelle")
 
 
-# ------------------------------------------------------- die Kette
 
-def t_kette():
+def t_chain():
     pw = b"eine passphrase mit umlauten aeoeue"
     salt = os.urandom(16)
     N, r = 256, 8
     bund = ask(["keys %s %s %d %d" % (hx(pw), hx(salt), N, r)])[0]
     mk = hashlib.scrypt(pw, salt=salt, n=N, r=r, p=1, dklen=32, maxmem=1 << 26)
     prk = hkdf_ext(salt, mk)
-    gleich("schluesselbund", bund,
+    eq("schluesselbund", bund,
            hkdf_exp(prk, b"osum sync v1 unterkette", 160).hex())
     KI = bytes.fromhex(bund[0:64])
     KN = bytes.fromhex(bund[64:128])
     blk = os.urandom(4096)
     n1 = ask(["name %s %s" % (hx(KN), hx(blk))])[0]
-    gleich("blockname ist HMAC(K_NAME, P)", n1,
+    eq("blockname ist HMAC(K_NAME, P)", n1,
            pyhmac.new(KN, blk, hashlib.sha256).hexdigest())
     n2 = ask(["naiv %s" % hx(blk)])[0]
-    gleich("der naive Name ist der blanke SHA-256", n2,
+    eq("der naive Name ist der blanke SHA-256", n2,
            hashlib.sha256(blk).hexdigest())
-    gleich("und die beiden sind NICHT dasselbe", n1 != n2, True)
+    eq("und die beiden sind NICHT dasselbe", n1 != n2, True)
     name = bytes.fromhex(n1)
     ct = ask(["seal %s %s %s" % (hx(KI), hx(name), hx(blk))])[0]
     if HAT_SODIUM:
         kb = pyhmac.new(KI, name, hashlib.sha256).digest()
         nc = pyhmac.new(KI, b"nonce" + name, hashlib.sha256).digest()[:24]
-        gleich("siegel gegen libsodium", ct, xenc(blk, name, nc, kb).hex())
-    gleich("siegel ist 16 Oktette laenger", len(ct) // 2, 4096 + 16)
-    gleich("und geht wieder auf",
+        eq("siegel gegen libsodium", ct, xenc(blk, name, nc, kb).hex())
+    eq("siegel ist 16 Oktette laenger", len(ct) // 2, 4096 + 16)
+    eq("und geht wieder auf",
            ask(["open %s %s %s" % (hx(KI), hx(name), ct)])[0], blk.hex())
     bad = bytearray(bytes.fromhex(ct))
     bad[100] ^= 1
-    gleich("ein gekipptes Bit wird abgelehnt",
+    eq("ein gekipptes Bit wird abgelehnt",
            ask(["open %s %s %s" % (hx(KI), hx(name), bad.hex())])[0], "FAIL")
-    gleich("ein fremder Name wird abgelehnt",
+    eq("ein fremder Name wird abgelehnt",
            ask(["open %s %s %s" % (hx(KI), hx(os.urandom(32)), ct)])[0], "FAIL")
     ct2 = ask(["seal %s %s %s" % (hx(KI), hx(name), hx(blk))])[0]
-    gleich("derselbe Klartext gibt denselben Geheimtext", ct, ct2)
+    eq("derselbe Klartext gibt denselben Geheimtext", ct, ct2)
     print("  the chain: bundle, names, seal%s"
           % (" (gegen libsodium)" if HAT_SODIUM else " (OHNE libsodium!)"))
 
 
-# ------------------------------------------ Wiederherstellungscode
 
 def t_code():
     for _ in range(20):
         k = os.urandom(32)
         code = bytes.fromhex(ask(["rcenc %s" % hx(k)])[0]).decode()
-        gleich("code ist 65 Zeichen", len(code), 65)
-        gleich("code in elf Gruppen", code.count("-"), 10)
-        gleich("code zurueck", ask(["rcdec %s" % hx(code.encode())])[0], k.hex())
-        gleich("klein geschrieben geht auch",
+        eq("code ist 65 Zeichen", len(code), 65)
+        eq("code in elf Gruppen", code.count("-"), 10)
+        eq("code zurueck", ask(["rcdec %s" % hx(code.encode())])[0], k.hex())
+        eq("klein geschrieben geht auch",
                ask(["rcdec %s" % hx(code.lower().encode())])[0], k.hex())
         i = random.choice([j for j in range(65) if code[j] != "-"])
         a = code[i]
         b = random.choice([c for c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
                            if c != a])
-        kaputt = code[:i] + b + code[i + 1:]
-        gleich("ein Tippfehler faellt auf",
-               ask(["rcdec %s" % hx(kaputt.encode())])[0], "FAIL")
+        broken = code[:i] + b + code[i + 1:]
+        eq("ein Tippfehler faellt auf",
+               ask(["rcdec %s" % hx(broken.encode())])[0], "FAIL")
     k = os.urandom(32)
     code = bytes.fromhex(ask(["rcenc %s" % hx(k)])[0]).decode()
     stellen = [j for j in range(65) if code[j] != "-"]
-    gleich("55 bedeutsame Stellen", len(stellen), 55)
-    fragen, erwartet = [], 0
+    eq("55 bedeutsame Stellen", len(stellen), 55)
+    ask_2, erwartet = [], 0
     for i in stellen:
         for b in "0123456789ABCDEFGHJKMNPQRSTVWXYZ":
             if b == code[i]:
                 continue
-            fragen.append("rcdec %s" % hx((code[:i] + b + code[i + 1:])
+            ask_2.append("rcdec %s" % hx((code[:i] + b + code[i + 1:])
                                           .encode()))
             erwartet += 1
-    durch = [z for z in ask(fragen) if z != "FAIL"]
-    gleich("KEIN einziger Tippfehler kommt durch (%d geprueft)" % erwartet,
+    durch = [z for z in ask(ask_2) if z != "FAIL"]
+    eq("KEIN einziger Tippfehler kommt durch (%d geprueft)" % erwartet,
            len(durch), 0)
     print("  recovery code: 21 codes back and forth, "
           "20 zufaellige und %d erschoepfende Tippfehler erkannt" % erwartet)
 
 
-def t_huelle():
+def t_envelope():
     for _ in range(5):
         mk, ek, nn = os.urandom(32), os.urandom(32), os.urandom(24)
         h = ask(["hwrap %s %s %s" % (hx(ek), hx(nn), hx(mk))])[0]
         if HAT_SODIUM:
-            gleich("huelle gegen libsodium", h,
+            eq("huelle gegen libsodium", h,
                    xenc(mk, b"osum sync v1 huelle", nn, ek).hex())
-        gleich("huelle ist 48 Oktette", len(h) // 2, 48)
-        gleich("huelle auf", ask(["hopen %s %s %s" % (hx(ek), hx(nn), h)])[0],
+        eq("huelle ist 48 Oktette", len(h) // 2, 48)
+        eq("huelle auf", ask(["hopen %s %s %s" % (hx(ek), hx(nn), h)])[0],
                mk.hex())
-        gleich("falscher Einpackschluessel -> nein",
+        eq("falscher Einpackschluessel -> nein",
                ask(["hopen %s %s %s" % (hx(os.urandom(32)), hx(nn), h)])[0],
                "FAIL")
     print("  the envelope: 5 rounds, each with its control run")
@@ -297,9 +263,9 @@ if __name__ == "__main__":
     t_salsa()
     t_scrypt(voll)
     t_hkdf()
-    t_kette()
+    t_chain()
     t_code()
-    t_huelle()
+    t_envelope()
     if fails:
         print("  %d von %d Zusagen GEFALLEN:" % (len(fails), count))
         for f in fails[:12]:

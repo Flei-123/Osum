@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/xfer/mkpng.py -- two test pictures for the image clipboard gate.
-
-    mkpng.py <outdir>      writes a.png (96x64) and b.png (40x30)
-"""
 import os
 import sys
 

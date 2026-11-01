@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/jarvismini/stub.py -- plain TCP chat stub for JARVIS Mini (W-S5 gate).
-
-    stub.py <port> [bind-address]
-
-Sends one greeting line on connect. Every received line is answered with THREE lines (so the box grows):
-`stub: got '<line>'`, `second line of the answer`, `third line of the answer`. Prints `stub: rx <line>` on stdout for the gate.
-"""
 import socket, sys, threading
 
 def serve(conn):

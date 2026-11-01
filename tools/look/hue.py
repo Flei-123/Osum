@@ -54,10 +54,10 @@ except ImportError:
     sys.exit(2)
 
 
-def lies_schema(name):
+def read_schema(name):
     """Die Rampe und der Akzent aus assets/schemes/<name>.scheme."""
     p = f"assets/schemes/{name}.scheme"
-    werte = {}
+    values = {}
     with open(p, encoding="utf-8") as f:
         for z in f:
             z = z.strip()
@@ -66,11 +66,11 @@ def lies_schema(name):
             k, v = z.split("=", 1)
             if re.fullmatch(r"[0-9a-fA-F]{6}", v):
                 n = int(v, 16)
-                werte[k] = (n >> 16 & 255, n >> 8 & 255, n & 255)
-    return werte
+                values[k] = (n >> 16 & 255, n >> 8 & 255, n & 255)
+    return values
 
 
-def haupt_farben(im, n=6):
+def main_farben(im, n=6):
     px = im.load()
     w, h = im.size
     c = Counter()
@@ -117,22 +117,22 @@ def aufgehellt(px, w, h, soll):
 BEFUND = {"fehler": 0, "vertauscht": 0}
 
 
-def pruefe_farbe(bild, r, g, bl, n, ramp):
+def check_color(bild, r, g, bl, n, ramp):
     best, bd = None, 10 ** 9
     for nm, (sr, sg, sb) in ramp.items():
         d = abs(r - sr) + abs(g - sg) + abs(bl - sb)
         if d < bd:
             bd, best = d, (nm, sr, sg, sb)
     nm, sr, sg, sb = best
-    dreh = None
+    rot = None
     for qn, (qr, qg, qb) in ramp.items():
         if (r, g, bl) == (qb, qg, qr) and qr != qb:
-            dreh = qn
+            rot = qn
             break
     kurz = bild.split("/")[-1]
-    if dreh:
+    if rot:
         print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d}) {n:7d}"
-              f"  = {dreh} MIT VERTAUSCHTEM R UND B")
+              f"  = {rot} MIT VERTAUSCHTEM R UND B")
         BEFUND["vertauscht"] += 1
         BEFUND["fehler"] += 1
     elif bd <= 6:
@@ -149,7 +149,7 @@ def main():
         return 2
     scheme, mode = sys.argv[1], sys.argv[2]
     bilder = sys.argv[3:]
-    ramp = lies_schema(scheme)
+    ramp = read_schema(scheme)
     if not ramp:
         print(f"kein Schema gelesen: {scheme}")
         return 2
@@ -160,31 +160,29 @@ def main():
     vertauscht = 0
     for b in bilder:
         im = Image.open(b).convert("RGB")
-        #
-        #
         w0, h0 = im.size
         ganz = (w0 // 2) * (h0 // 2)
-        for (r, g, bl), n in haupt_farben(im, 12):
+        for (r, g, bl), n in main_farben(im, 12):
             if n * 100 < ganz:
                 continue
-            pruefe_farbe(b, r, g, bl, n, ramp)
+            check_color(b, r, g, bl, n, ramp)
         continue
-        (r, g, bl), n = haupt_farben(im, 1)[0]
+        (r, g, bl), n = main_farben(im, 1)[0]
         best, bd = None, 10 ** 9
         for nm, (sr, sg, sb) in ramp.items():
             d = abs(r - sr) + abs(g - sg) + abs(bl - sb)
             if d < bd:
                 bd, best = d, (nm, sr, sg, sb)
         nm, sr, sg, sb = best
-        dreh = None
+        rot = None
         for qn, (qr, qg, qb) in ramp.items():
             if (r, g, bl) == (qb, qg, qr) and qr != qb:
-                dreh = qn
+                rot = qn
                 break
         kurz = b.split("/")[-1]
-        if dreh:
+        if rot:
             print(f"  {kurz:26s} RGB({r:3d},{g:3d},{bl:3d})"
-                  f"  = {dreh} MIT VERTAUSCHTEM R UND B")
+                  f"  = {rot} MIT VERTAUSCHTEM R UND B")
             vertauscht += 1
             fehler += 1
         elif bd <= 6:
@@ -217,7 +215,6 @@ def main():
                 print(f"  {kurz:26s} RGB({ar:3d},{ag:3d},{ab:3d})"
                       f" {an:6d} Punkte  OK")
             elif aufgehellt(px, w, h, soll) is not None:
-                #
                 t, gf = aufgehellt(px, w, h, soll)
                 print(f"  {kurz:26s} RGB{gf} = accent at {t*100:.0f} %"
                       f" gegen Weiss gemischt  OK")

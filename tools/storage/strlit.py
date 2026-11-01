@@ -45,7 +45,7 @@ def main(argv):
         print(__doc__)
         return 2
     pfad = argv[1]
-    nur_pruefen = "--pruefen" in argv
+    only_check = "--pruefen" in argv
     zeilen = open(pfad, encoding="utf-8").read().split("\n")
     aus = []
     geaendert = 0
@@ -72,7 +72,7 @@ def main(argv):
               % (pfad, nr, ist, will, lit), file=sys.stderr)
     if zu_lang:
         return 1
-    if geaendert and not nur_pruefen:
+    if geaendert and not only_check:
         open(pfad, "w", encoding="utf-8").write("\n".join(aus))
     print("%s: %d Literale aufgefuellt" % (pfad, geaendert))
     return 0

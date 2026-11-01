@@ -48,11 +48,11 @@ def strukturen(tbl):
         t, l = tbl[p], tbl[p + 1]
         if l < 4:
             return
-        rumpf = tbl[p:p + l]
+        body = tbl[p:p + l]
         q = p + l
         texte = []
         if q + 1 < len(tbl) and tbl[q] == 0 and tbl[q + 1] == 0:
-            q += 2                       # gar keine Zeichenkette
+            q += 2
         else:
             while q < len(tbl):
                 e = tbl.find(b"\0", q)
@@ -62,9 +62,9 @@ def strukturen(tbl):
                 texte.append(tbl[q:e].decode("latin1"))
                 q = e + 1
                 if q < len(tbl) and tbl[q] == 0:
-                    q += 1               # die zusaetzliche NUL schliesst
+                    q += 1
                     break
-        yield t, rumpf, texte
+        yield t, body, texte
         if t == 127:
             return
         p = q
@@ -103,42 +103,42 @@ def main(argv):
     art, at, _ = treffer[-1]
 
     if art == "_SM_":
-        haupt, neben = d[at + 6], d[at + 7]
+        main_2, neben = d[at + 6], d[at + 7]
         tlen = struct.unpack_from("<H", d, at + 0x16)[0]
         tadr = struct.unpack_from("<I", d, at + 0x18)[0]
         kind = 2
     else:
-        haupt, neben = d[at + 7], d[at + 8]
+        main_2, neben = d[at + 7], d[at + 8]
         tlen = struct.unpack_from("<I", d, at + 0x0C)[0]
         tadr = struct.unpack_from("<Q", d, at + 0x10)[0]
         kind = 3
 
     print("entry=0x%x" % at)
     print("kind=%d" % kind)
-    print("version=%d" % (haupt * 100 + neben))
+    print("version=%d" % (main_2 * 100 + neben))
     print("table=0x%x" % tadr)
     print("tlen=%d" % tlen)
 
     tbl = d[tadr:tadr + tlen]
     felder = {}
     n = 0
-    for t, rumpf, texte in strukturen(tbl):
+    for t, body, texte in strukturen(tbl):
         n += 1
 
         def s(i):
             return texte[i - 1] if 1 <= i <= len(texte) else ""
 
         if t == 1:
-            felder["sys_man"] = s(rumpf[4])
-            felder["sys_prod"] = s(rumpf[5])
-            felder["sys_ver"] = s(rumpf[6])
-            felder["sys_ser"] = s(rumpf[7])
-            if len(rumpf) >= 24:
-                felder["uuid"] = rumpf[8:24].hex()
+            felder["sys_man"] = s(body[4])
+            felder["sys_prod"] = s(body[5])
+            felder["sys_ver"] = s(body[6])
+            felder["sys_ser"] = s(body[7])
+            if len(body) >= 24:
+                felder["uuid"] = body[8:24].hex()
         elif t == 2:
-            felder["brd_man"] = s(rumpf[4])
-            felder["brd_prod"] = s(rumpf[5])
-            felder["brd_ser"] = s(rumpf[7])
+            felder["brd_man"] = s(body[4])
+            felder["brd_prod"] = s(body[5])
+            felder["brd_ser"] = s(body[7])
     print("count=%d" % n)
     for k in ("sys_man", "sys_prod", "sys_ver", "sys_ser",
               "brd_man", "brd_prod", "brd_ser"):

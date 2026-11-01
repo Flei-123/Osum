@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/kstack/depth.py -- static worst-case kernel stack depth (r837).
-#   python3 tools/kstack/depth.py <kernel.elf> [root-symbol ...]
-# Sums `sub $N,%rsp` + pushes per function and follows direct calls; the
-# result over-approximates (every call of a function counts, recursion is
-# cut). Prints the deepest chain below each root (default: the syscall path).
 import re, subprocess, sys, collections
 
 sys.setrecursionlimit(20000)
@@ -33,7 +28,6 @@ memo = {}
 onstack = set()
 
 def depth(f):
-    # memoised longest path; a node met again while it is still open (recursion) counts 0
     if f in memo:
         return memo[f]
     if f in onstack:

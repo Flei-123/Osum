@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/preview/axpng.py -- host preview of an Osum window: the a11y tree
-dump (`act call a11y.tree window=<title>`) rendered to a PNG, no VM needed.
-
-  python3 tools/preview/axpng.py <dump.txt> -o out.png [--window TITLE] [--dark]
-                                 [--scale N] [--list] [--json]
-
-Input: any text that contains node lines of axd.fi `line()`:
-    node.<i>=<role> win<id> <x>,<y> <w>x<h> <flags|-> "<name>" [act=..] [value=..]
-(a serial log is fine: other lines are ignored). The tree is the same one a
-screen reader gets, so the picture is a WIREFRAME: right places, roles, names,
-states; colours and fonts are an approximation of the theme, NOT pixel truth.
-Use it to see/test layout without booting a guest; use the guest screenshot
-for the final look.
-
---json prints the parsed nodes (machine check); --list prints the windows.
-Exit 1 when no node of the window was found.
-"""
 import argparse, json, re, sys
 
 NODE = re.compile(
@@ -50,8 +33,6 @@ def windows(nodes):
 
 
 def pick(nodes, title):
-    """Last dump of the wanted window: the window node plus the nodes that
-    follow it with the same window id (a log may hold several dumps)."""
     ws = [n for n in windows(nodes) if not title or title in n["name"]]
     if not ws:
         return None, []
@@ -74,7 +55,6 @@ def render(win, nodes, theme="light", scale=1, pad=8):
     except OSError:
         font = bold = ImageFont.load_default()
     ox, oy = win["x"], win["y"]
-    # canvas = window rect united with every node (nodes may stick out: that is a finding)
     right = max([win["x"] + win["w"]] + [n["x"] + n["w"] for n in nodes])
     bottom = max([win["y"] + win["h"]] + [n["y"] + n["h"] for n in nodes])
     W, H = (right - ox + 2 * pad) * scale, (bottom - oy + 2 * pad) * scale

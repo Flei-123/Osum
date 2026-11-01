@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/wayland/footpix.py -- pixel facts of a QEMU screendump (P6 PPM) with a foot window in it.
-#   footpix.py <shot.ppm>      prints: W=<w> H=<h> bg=<n> text=<n> bx0=.. by0=.. bx1=.. by1=.. dist=<n>
-# bg   = pixels of foot's default background (#242424); the box is their bounding box (the terminal grid)
-# text = pixels inside the box that are light (every channel >= 0x90): glyphs, cursor
-# dist = number of distinct colours inside the box (a flat fill has 1)
 import sys
 
 def read_ppm(path):

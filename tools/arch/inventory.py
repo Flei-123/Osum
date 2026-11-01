@@ -1,49 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/arch/inventory.py -- WHAT IS ACTUALLY TIED TO x86-64, COUNTED.
-
-Round ARM, step A. Before anything is moved, the size of the job has to be
-a number and not a feeling.
-
-HOW IT COUNTS, and why that way. A first version of this script matched
-the whole file text and produced a picture that was too dark: `sys.fi`
-came out "machine dependent" because the WORD `syscall` appears in a
-comment, and `hw.fi` because it says `IRQ` forty-two times while
-describing hardware it never touches. So:
-
-  1. comments are removed first (`//` to end of line, `/* ... */`), and
-     string literals are kept -- inline assembly LIVES in a string,
-  2. what is counted is not matches but LINES OF CODE that carry a mark,
-  3. the number that matters is that line count, not the file size.
-
-The marks:
-
-  asm    inline assembly (`asm("...")`) -- instructions of one machine
-  port   the x86 I/O port space (`in`/`out`) -- AArch64 has none at all
-  creg   control and system registers (cr0..cr4, MSRs, cpuid, rdtsc)
-  desc   the descriptor tables of x86 (lidt/lgdt/ltr, iretq, sysret)
-  page   the x86-64 page table format (pml4, pdpt, cr3, invlpg)
-  intc   the interrupt controllers of the PC (PIC 8259, PIT 8254, APIC)
-  svm    AMD-V / SVM (vmrun, VMCB, NPT) -- no counterpart on AArch64
-  mmio   `__mmio_read*`/`__mmio_write*`. As a LANGUAGE construct this is
-         machine independent; what is not is the ORDER it promises. It is
-         counted and shown, but a file is not called machine dependent
-         for it alone -- see docs/ARCH.md, "the weak memory model".
-
-The classes:
-
-  INDEPENDENT  no marked code line at all
-  SEAM         1..15 marked code lines: a portable file with a small
-               machine seam that step B pulls behind the boundary
-  DEPENDENT    more than 15 marked code lines: this IS machine layer
-  X86-ONLY     the subject does not exist on AArch64 `-M virt` in that
-               form. Named by hand below, with the reason -- a regular
-               expression cannot tell "AMD-V" from "some registers".
-
-    ./tools/arch/inventory.py            the table
-    ./tools/arch/inventory.py --csv      the same, machine readable
-    ./tools/arch/inventory.py --sum      only the summary
-"""
 import os
 import re
 import sys
@@ -62,7 +18,6 @@ MARKS = [
     ("mmio", re.compile(r"__mmio_(read|write)")),
 ]
 
-# Files whose SUBJECT does not exist on AArch64 `-M virt`, with the reason.
 X86_ONLY = {
     "hv.fi": "AMD-V/SVM with a VMCB; the AArch64 counterpart is EL2, a different design",
     "hv.s": "the AMD-V world switch (vmrun/vmload/vmsave) and the guest bodies themselves",
@@ -76,8 +31,6 @@ X86_ONLY = {
     "boot.s": "the Multiboot header and the climb into long mode",
 }
 
-# The machine layer proper -- a counterpart exists on the other side, and
-# step B is about giving both the same name.
 LAYER = {
     "start.s": "startup: stack, page tables, the jump into the kernel",
     "isr.s": "the exception and interrupt entry points",
@@ -120,7 +73,6 @@ BLOCK = re.compile(r"/\*.*?\*/", re.S)
 
 
 def strip_comments(text):
-    """Comments out, strings kept -- inline assembly lives in a string."""
     text = BLOCK.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     out = []
     for line in text.split("\n"):
@@ -145,7 +97,6 @@ def strip_comments(text):
             elif c == "/" and i + 1 < len(line) and line[i + 1] == "/":
                 break
             elif c in "#;" and line.lstrip().startswith(c) and not res:
-                # `#` starts a comment in GNU as source only at line start
                 break
             else:
                 res.append(c)
@@ -195,9 +146,6 @@ def rows_of(kdir, prefix=""):
 
 
 def main():
-    # Since round ARM the machine has a directory of its own. Everything in
-    # it is machine code by definition, so it is counted apart -- mixing it
-    # into the table above would make the boundary look like a failure.
     rows = rows_of(os.path.join(ROOT, "kernel"))
     x86 = rows_of(os.path.join(ROOT, "kernel", "arch", "x86_64"), "arch/x86_64/")
     a64 = rows_of(os.path.join(ROOT, "kernel", "arch", "aarch64"), "arch/aarch64/")

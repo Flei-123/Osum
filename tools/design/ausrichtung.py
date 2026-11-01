@@ -1,48 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/ausrichtung.py -- SITZT SYMBOL UND TEXT AUF EINER LINIE?
-
-RUNDE ECHTHARDWARE-4, Punkt 6 aus Justins Nachmessung.  Er hat die
-Belege aus ECHTHARDWARE-3 SELBST mit der Lupe vermessen und dabei
-gefunden, was keine unserer Abnahmen gefunden hat:
-
-    Leiste          obere Kante y=1401, Unterkante y=1440  ->  39 hoch
-    Terminalsymbol  x 57..68, y 1416..1425  ->  12 x 10
-    Startsymbol     x 12..69, y 1401..1437  ->  klebt bei x=12
-
-Ein Symbol, das ein Viertel der Leistenhoehe fuellt, ist kein Geschmack
--- es ist eine Zahl.  Und eine Zahl, die ein Mensch mit der Lupe
-ausmessen muss, wird beim naechsten Mal wieder niemand ausmessen.
-DESHALB IST DIESE PRUEFUNG EIN WERKZEUG UND KEINE HANDARBEIT.
-
-WAS ES MISST.  Es bekommt ein Bild und die RECHTECKE der Klickfelder
-(die Leiste, der Starter, der Explorer und das Kontrollzentrum melden
-sie ohnehin auf der seriellen Leitung -- deshalb muss hier nichts
-geraten werden) und rechnet je Feld nach:
-
-    Symbolkasten    das erste Tintenbuendel von links
-    Textkasten      alles danach
-    Abstand links / rechts / oben / unten des GANZEN Inhalts
-    Mitte des Symbols (y) gegen Mitte des Textes (y)
-
-DIE REGELN, gegen die geprueft wird (`--regel`):
-
-    mitte      Symbolmitte und Textmitte hoechstens 1 Punkt auseinander
-    waagrecht  Abstand links und rechts hoechstens 1 Punkt auseinander
-    senkrecht  Abstand oben und unten hoechstens 1 Punkt auseinander
-    anteil     Symbolhoehe zwischen `--min-anteil` und `--max-anteil`
-               der Feldhoehe (Vorgabe 55 bis 75 Hundertstel)
-
-Aufruf:
-
-    python3 tools/design/ausrichtung.py BILD.png \\
-        --feld 54,1401,60,39:terminal --feld 12,1401,58,39:start
-    python3 tools/design/ausrichtung.py BILD.png \\
-        --zeilen 40,300,320,220 --zeilenhoehe 28
-
-Rueckgabe 0, wenn jede Regel haelt; sonst 1, und jede Verletzung steht
-mit ihrer Zahl in der Ausgabe.
-"""
 import argparse
 import sys
 
@@ -54,7 +11,6 @@ except ImportError:
 
 
 def grund(px, x0, y0, w, h):
-    """Die haeufigste Farbe des Feldes ist der Grund."""
     zaehl = {}
     for y in range(y0, y0 + h):
         for x in range(x0, x0 + w):
@@ -64,11 +20,6 @@ def grund(px, x0, y0, w, h):
 
 
 def tinte(px, x0, y0, w, h, bg, schwelle):
-    """Eine Maske: 1, wo sich der Bildpunkt vom Grund abhebt.
-
-    Der Abstand ist die Summe der drei Kanalabstaende und nicht der
-    euklidische -- er ist billiger und fuer ein Ja/Nein genauso gut.
-    """
     m = [[0] * w for _ in range(h)]
     for y in range(h):
         for x in range(w):
@@ -80,7 +31,6 @@ def tinte(px, x0, y0, w, h, bg, schwelle):
 
 
 def kasten(m, x0=None, x1=None):
-    """Der umschliessende Kasten der Tinte, ggf. auf Spalten begrenzt."""
     h = len(m)
     w = len(m[0]) if h else 0
     a = 0 if x0 is None else x0
@@ -96,16 +46,13 @@ def kasten(m, x0=None, x1=None):
     return (min(xs), min(ys), max(xs), max(ys))
 
 
-def spalten(m):
-    """Je Spalte: hat sie Tinte?"""
+def columns(m):
     h = len(m)
     w = len(m[0]) if h else 0
     return [any(m[y][x] for y in range(h)) for x in range(w)]
 
 
 def buendel(voll, luecke):
-    """Zusammenhaengende Spaltenbereiche, getrennt durch >= `luecke`
-    leere Spalten."""
     out = []
     lauf = None
     leer = 0
@@ -128,10 +75,9 @@ def buendel(voll, luecke):
     return out
 
 
-def feld_messen(px, x0, y0, w, h, name, args):
+def field_messen(px, x0, y0, w, h, name, args):
     bg = grund(px, x0, y0, w, h)
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
-    #
     for r in range(max(0, h - args.rand_unten), h):
         for c in range(w):
             m[r][c] = 0
@@ -142,7 +88,7 @@ def feld_messen(px, x0, y0, w, h, name, args):
     if ganz is None:
         return {"name": name, "leer": True, "feld": (x0, y0, w, h)}
     gx0, gy0, gx1, gy1 = ganz
-    voll = spalten(m)
+    voll = columns(m)
     bs = buendel(voll, args.luecke)
     sym = None
     txt = None
@@ -221,11 +167,7 @@ def bericht(r, args, fehler):
         print("               Abstand Symbol->Text %d" % abstand)
 
 
-def zeilen_finden(px, x0, y0, w, h, args):
-    """Ein Listenbereich in Zeilen zerlegen: Zeilen mit Tinte, getrennt
-    durch leere Zeilen.  Damit misst dasselbe Werkzeug die Trefferliste
-    des Startmenues, die Dateiliste des Explorers und die Kacheln des
-    Kontrollzentrums, ohne dass jemand Zeilenhoehen abtippt."""
+def lines_find(px, x0, y0, w, h, args):
     bg = grund(px, x0, y0, w, h)
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
     voll = [any(m[y][x] for x in range(w)) for y in range(h)]
@@ -291,7 +233,7 @@ def main():
 
     if args.zeilen:
         x, y, w, h = [int(v) for v in args.zeilen.split(",")]
-        zs = zeilen_finden(px, x, y, w, h, args)
+        zs = lines_find(px, x, y, w, h, args)
         print("ROWS in area %d,%d %dx%d: %d found"
               % (x, y, w, h, len(zs)))
         hoehen = [zh for (_, zh) in zs]
@@ -308,7 +250,7 @@ def main():
             print("  %-14s lies outside the image" % name)
             fehler.append("%s: ausserhalb" % name)
             continue
-        bericht(feld_messen(px, x, y, w, h, name, args), args, fehler)
+        bericht(field_messen(px, x, y, w, h, name, args), args, fehler)
 
     print("ERGEBNIS %d Felder, %d Verletzungen"
           % (len(felder), len(fehler)))

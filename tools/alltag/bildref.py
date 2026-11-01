@@ -41,7 +41,7 @@ import sys
 from PIL import Image
 
 
-def zahlen(pfad):
+def nums(pfad):
     im = Image.open(pfad)
     art = im.format.lower()
     voll = True
@@ -136,14 +136,14 @@ def main(argv):
         return 2
     if argv[1] != "pruefen":
         for p in argv[1:]:
-            print(p, zahlen(p))
+            print(p, nums(p))
         return 0
     text = open(argv[2], "rb").read().decode("latin1")
     gut = 0
     schlecht = 0
     for pfad in argv[3:]:
         name = pfad.split("/")[-1]
-        w = zahlen(pfad)
+        w = nums(pfad)
         g = gast(text, name)
         if g is None:
             print("  FAIL  %-16s the guest said nothing" % name)

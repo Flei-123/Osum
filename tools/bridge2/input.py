@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/input.py -- checks of the Win+Esc / red-sign drive (tools/bridge2/input.txt).
-#   python3 tools/bridge2/input.py <run dir with serial.txt + *.ppm>
 import re, sys, os
 
 def ppm(p):
@@ -11,7 +9,6 @@ def ppm(p):
     return w, h, d[m.end():]
 
 def red(p):
-    # danger-colour pixels in the bar's sign area (right part, bottom 34 rows), as a set of (x, y)
     w, h, px = ppm(p)
     out = set()
     for y in range(h - 34, h):

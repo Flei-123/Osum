@@ -72,10 +72,10 @@ def main():
         with open(pfad + ".sig", "wb") as f:
             f.write(sig)
         eigen = m.ed25519_verify(pk, roh, sig)
-        anders = fremd(pk, roh, sig)
-        if not eigen or anders is False:
+        changed = fremd(pk, roh, sig)
+        if not eigen or changed is False:
             raise SystemExit("signpak: die eigene Signatur wird nicht "
-                             "anerkannt (eigen=%s fremd=%s)" % (eigen, anders))
+                             "anerkannt (eigen=%s fremd=%s)" % (eigen, changed))
         print("   signiert  %-40s %d Oktette, %s..."
               % (os.path.basename(pfad), len(roh), sig.hex()[:16]))
     return 0

@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
-#
-#   python3 tools/brand/startimage.py assets/marke kernel/user/brand_start.fi
 
 import sys
 from PIL import Image
 
-#
-#
-#
-#
 GROESSEN = [16, 24, 32, 48, 64]
 
 
-def lade(pfad, n):
+def load(pfad, n):
     im = Image.open(pfad).convert("RGBA")
     if im.size != (n, n):
         im = im.resize((n, n), Image.LANCZOS)
@@ -49,7 +40,7 @@ def main():
     t.append("profile kernel\n\n")
     t.append("export { breit, punkt }\n\n")
     for n in GROESSEN:
-        im = lade("%s/start-%d.png" % (quelle, n), n)
+        im = load("%s/start-%d.png" % (quelle, n), n)
         w = worte(im)
         t.append("static mut b%d: [u64; %d] = [\n" % (n, len(w)))
         zeile = "    "

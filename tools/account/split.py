@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/account/split.py -- RUNDE KONTO: DIE TRENNUNGSWACHE.
-
-Die Zusage lautet: ANBIETERWISSEN BLEIBT IM RUECKEN. Sobald irgendwo im
-allgemeinen Teil `wenn anbieter == "..."` steht, ist die Trennung kaputt
--- und niemand merkt es, weil so ein `wenn` funktioniert.
-
-Also wird es gemessen. Dieses Skript liest die allgemeinen Dateien und
-sucht darin nach den Namen der Ruecken. Gefunden wird nichts -- ausser
-in der EINEN Anmeldeliste in `konto.fi`, die es geben muss, damit ein
-Ruecken ueberhaupt in die Tafel kommt.
-
-    split.py <wurzel>            prueft und meldet
-    split.py <wurzel> --zahlen   nur die Zahlen, fuer den Laeufer
-
-Rueckgabe 0, wenn die Trennung haelt, sonst 1.
-"""
 import os
 import re
 import sys
@@ -32,42 +16,35 @@ ALLGEMEIN = [
     "kernel/app/account.fi",
 ]
 
-RUECKEN = ["kernel/app/prov_jarvis.fi", "kernel/app/prov_xoffi.fi",
+PUSH = ["kernel/app/prov_jarvis.fi", "kernel/app/prov_xoffi.fi",
            "kernel/app/prov_own.fi", "kernel/app/prov_fleitec.fi"]
 
 WOERTER = ["xoffi", "jarvis", "fleitec", "nexus"]
 
-MARKE_AUF = "fn push_login"
-MARKE_ZU = "^}"
+BRAND_AUF = "fn push_login"
+BRAND_ZU = "^}"
 
 
-def zeilen_der_anmeldung(text):
-    """Die Zeilennummern (1-basiert) der Anmeldefunktion."""
+def lines_der_anmeldung(text):
     zeilen = text.split("\n")
-    drin = False
+    in_ = False
     raus = set()
     for i, z in enumerate(zeilen, 1):
-        if z.startswith(MARKE_AUF):
-            drin = True
-        if drin:
+        if z.startswith(BRAND_AUF):
+            in_ = True
+        if in_:
             raus.add(i)
-        if drin and re.match(MARKE_ZU, z):
-            drin = False
+        if in_ and re.match(BRAND_ZU, z):
+            in_ = False
     return raus
 
 
 def kommentarfrei(zeile):
-    """Ein Kommentar darf einen Anbieter NENNEN -- er kann nichts tun.
-
-    Das ist keine Bequemlichkeit: `anbieter.fi` muss erklaeren duerfen,
-    warum es keinen Anbieter kennt, und `konto.fi` muss die Ausnahme
-    begruenden duerfen. Was gesucht wird, ist WIRKENDER Quelltext.
-    """
     i = zeile.find("//")
     return zeile if i < 0 else zeile[:i]
 
 
-def pruefe(wurzel):
+def check(wurzel):
     verstoesse = []
     geprueft = 0
     for rel in ALLGEMEIN:
@@ -76,7 +53,7 @@ def pruefe(wurzel):
             verstoesse.append((rel, 0, "die Datei fehlt"))
             continue
         text = open(pfad, encoding="utf-8").read()
-        erlaubt = zeilen_der_anmeldung(text) if rel.endswith(("konto.fi", "account.fi")) \
+        erlaubt = lines_der_anmeldung(text) if rel.endswith(("konto.fi", "account.fi")) \
             else set()
         for nr, zeile in enumerate(text.split("\n"), 1):
             geprueft += 1
@@ -91,10 +68,9 @@ def pruefe(wurzel):
     return verstoesse, geprueft
 
 
-def ruecken_zahlen(wurzel):
-    """Wie viel Anbieterwissen wirklich in den Ruecken steckt."""
+def push_nums(wurzel):
     aus = []
-    for rel in RUECKEN:
+    for rel in PUSH:
         pfad = os.path.join(wurzel, rel)
         if not os.path.exists(pfad):
             continue
@@ -116,11 +92,11 @@ def main():
         return 2
     wurzel = sys.argv[1]
     zahlen = "--zahlen" in sys.argv
-    verstoesse, geprueft = pruefe(wurzel)
+    verstoesse, geprueft = check(wurzel)
     if zahlen:
         print("geprueft=%d dateien=%d verstoesse=%d"
               % (geprueft, len(ALLGEMEIN), len(verstoesse)))
-        for rel, n, k in ruecken_zahlen(wurzel):
+        for rel, n, k in push_nums(wurzel):
             print("ruecken %s zeilen=%d anbieterzeilen=%d" % (rel, n, k))
     for rel, nr, w in verstoesse:
         print("VERSTOSS %s:%d -- '%s' im allgemeinen Teil" % (rel, nr, w))

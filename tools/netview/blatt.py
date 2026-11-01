@@ -24,16 +24,12 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HIER), "k15"))
 sys.path.insert(0, HIER)
-# ROUND MERGE: round rename-en renamed tools/k15/symbol.py to icon.py.
-# A python import names the module without its extension, so nothing
-# that looks like a path had to change and nothing did -- this line
-# raised ModuleNotFoundError and took the whole icon check with it.
 import icon as symmod  # noqa: E402
 import icons as iconmod  # noqa: E402
 
 ROLLE_NAME = {v: k for k, v in symmod.ROLLEN.items()}
-GROSS = 6
-LUFT = 6
+BIG = 6
+AIR = 6
 
 
 def bild(name, farben):
@@ -71,11 +67,11 @@ def main(argv):
         eins = []
         for n in namen:
             eins.append(bild(n, farben))
-        breite = LUFT + sum(max(w, w * GROSS) + LUFT for w, _, _ in eins)
-        hoehe = LUFT + 16 + LUFT + 16 * GROSS + LUFT
-        im = Image.new("RGB", (breite, hoehe),
+        breite = AIR + sum(max(w, w * BIG) + AIR for w, _, _ in eins)
+        height_2 = AIR + 16 + AIR + 16 * BIG + AIR
+        im = Image.new("RGB", (breite, height_2),
                        tuple(((farben["panel"] >> s) & 255) for s in (16, 8, 0)))
-        x = LUFT
+        x = AIR
         for w, h, punkte in eins:
             for r in range(h):
                 for c in range(w):
@@ -83,24 +79,24 @@ def main(argv):
                     if v is None:
                         continue
                     rgb = ((v >> 16) & 255, (v >> 8) & 255, v & 255)
-                    im.putpixel((x + c, LUFT + r), rgb)
-                    for dy in range(GROSS):
-                        for dx in range(GROSS):
-                            im.putpixel((x + c * GROSS + dx,
-                                         LUFT + 16 + LUFT + r * GROSS + dy),
+                    im.putpixel((x + c, AIR + r), rgb)
+                    for dy in range(BIG):
+                        for dx in range(BIG):
+                            im.putpixel((x + c * BIG + dx,
+                                         AIR + 16 + AIR + r * BIG + dy),
                                         rgb)
-            x += max(w, w * GROSS) + LUFT
+            x += max(w, w * BIG) + AIR
         bloecke.append(im)
     breite = max(b.width for b in bloecke)
-    hoehe = sum(b.height for b in bloecke)
-    blatt = Image.new("RGB", (breite, hoehe), (0, 0, 0))
+    height_2 = sum(b.height for b in bloecke)
+    blatt = Image.new("RGB", (breite, height_2), (0, 0, 0))
     y = 0
     for b in bloecke:
         blatt.paste(b, (0, y))
         y += b.height
     blatt.save(argv[1])
     print("sheet: %s  %dx%d, %d characters, light and dark"
-          % (argv[1], breite, hoehe, len(namen)))
+          % (argv[1], breite, height_2, len(namen)))
     return 0
 
 

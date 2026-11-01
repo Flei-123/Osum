@@ -1,42 +1,34 @@
 
-from wasm2firn import (Leser, blocktyp, Fehler)
+from wasm2firn import (Leser, blocktyp, Error)
 
 
 class Ebene:
-    """Eine WASM-Blockebene im flachen Verteiler."""
 
-    def __init__(self, art, beginn, ende, sp_ein, res):
-        self.art = art          # 'block' | 'loop' | 'if' | 'func'
-        self.beginn = beginn
+    def __init__(self, art, begin, ende, sp_ein, res):
+        self.art = art
+        self.begin = begin
         self.ende = ende
-        self.sp_ein = sp_ein    # Stapelhoehe beim Betreten
-        self.res = res          # Ergebnistypen
+        self.sp_ein = sp_ein
+        self.res = res
         self.hat_else = False
-        self.else_stueck = None
+        self.else_chunk = None
         self.sp_else = 0
 
 
 class FlachErzeuger:
-    """Uebersetzt EINE WASM-Funktion in einen flachen Verteiler.
-
-    Nutzt den bestehenden `Erzeuger` fuer alles, was NICHT
-    Kontrollfluss ist (Rechnen, Speicher, Rufe) -- dort aendert sich
-    nichts, und der Code ist erprobt.
-    """
 
     def __init__(self, erz):
-        self.erz = erz          # der bestehende Erzeuger
+        self.erz = erz
         self.m = erz.m
 
-    # ---------------------------------------------------------------
-    def rumpf(self, code, par, res):
+    def body(self, code, par, res):
         erz = self.erz
         m = self.m
         self.res = res
 
         self.stuecke = {}
-        self.n_stueck = 0
-        self.jetzt = self.neues_stueck()
+        self.n_chunk = 0
+        self.jetzt = self.neues_chunk()
 
         self.gebraucht = set()
 
@@ -50,7 +42,6 @@ class FlachErzeuger:
         while l.at < len(code):
             op = l.u8()
 
-            # ------------------------------------------------- end
             if op == 0x0B:
                 b = self.stapel.pop()
                 if b.art == 'func':
@@ -60,31 +51,29 @@ class FlachErzeuger:
                 if not unerreichbar:
                     self.spring(b.ende)
                 if b.art == 'if' and not b.hat_else:
-                    self.setz_stueck(b.else_stueck)
+                    self.set_chunk(b.else_chunk)
                     self.spring(b.ende)
-                self.setz_stueck(b.ende)
+                self.set_chunk(b.ende)
                 sp = b.sp_ein + len(b.res)
                 unerreichbar = False
                 continue
 
-            # ------------------------------------------------ else
             if op == 0x05:
                 b = self.stapel[-1]
                 b.hat_else = True
                 if not unerreichbar:
                     self.spring(b.ende)
-                self.setz_stueck(b.else_stueck)
+                self.set_chunk(b.else_chunk)
                 sp = b.sp_else
                 unerreichbar = False
                 continue
 
-            # ---------------------------------------------- Bloecke
             if op in (0x02, 0x03, 0x04):
                 bt = l.sleb()
                 bpar, bres = blocktyp(m, bt)
                 sp -= len(bpar)
                 ende = self.reservieren()
-                if op == 0x04:                      # if
+                if op == 0x04:
                     sp -= 1
                     bed = erz.sv(sp)
                     dann = self.reservieren()
@@ -98,19 +87,19 @@ class FlachErzeuger:
                     self.gebraucht.add(dann)
                     self.gebraucht.add(sonst)
                     e = Ebene('if', dann, ende, sp, bres)
-                    e.else_stueck = sonst
+                    e.else_chunk = sonst
                     e.sp_else = sp + len(bpar)
-                    self.setz_stueck(dann)
-                elif op == 0x03:                    # loop
-                    beginn = self.reservieren()
-                    self.spring(beginn)
-                    e = Ebene('loop', beginn, ende, sp, bres)
-                    self.setz_stueck(beginn)
-                else:                               # block
-                    beginn = self.reservieren()
-                    self.spring(beginn)
-                    e = Ebene('block', beginn, ende, sp, bres)
-                    self.setz_stueck(beginn)
+                    self.set_chunk(dann)
+                elif op == 0x03:
+                    begin = self.reservieren()
+                    self.spring(begin)
+                    e = Ebene('loop', begin, ende, sp, bres)
+                    self.set_chunk(begin)
+                else:
+                    begin = self.reservieren()
+                    self.spring(begin)
+                    e = Ebene('block', begin, ende, sp, bres)
+                    self.set_chunk(begin)
                 sp += len(bpar)
                 self.stapel.append(e)
                 unerreichbar = False
@@ -120,13 +109,12 @@ class FlachErzeuger:
                 erz.ueberspringen(l, op)
                 continue
 
-            # ------------------------------------- Kontrollfluss-Ops
-            if op == 0x0F:                                    # return
+            if op == 0x0F:
                 self.rueckgabe(sp)
                 unerreichbar = True
                 continue
 
-            if op in (0x0C, 0x0D):                            # br/br_if
+            if op in (0x0C, 0x0D):
                 lab = l.uleb()
                 bed = None
                 if op == 0x0D:
@@ -140,38 +128,36 @@ class FlachErzeuger:
                     self.br_bedingt(ziel, sp, bed)
                 continue
 
-            if op == 0x0E:                                    # br_table
+            if op == 0x0E:
                 n = l.uleb()
                 ziele = [l.uleb() for _ in range(n)]
                 sonst = l.uleb()
                 sp -= 1
                 wahl = erz.sv(sp)
-                self.br_tabelle(wahl, ziele, sonst, sp)
+                self.br_table(wahl, ziele, sonst, sp)
                 unerreichbar = True
                 continue
 
             sp, unerreichbar = self.gewoehnlich(l, op, sp)
 
-        self.setz_stueck(ende_funk)
+        self.set_chunk(ende_funk)
         self.rueckgabe(sp)
         return self.ausgeben()
 
-    # ================================================== Stueckverwaltung
     def reservieren(self):
-        self.n_stueck += 1
-        return self.n_stueck
+        self.n_chunk += 1
+        return self.n_chunk
 
-    def neues_stueck(self):
+    def neues_chunk(self):
         self.stuecke[0] = []
         return 0
 
-    def setz_stueck(self, nr):
+    def set_chunk(self, nr):
         if nr not in self.stuecke:
             self.stuecke[nr] = []
         self.jetzt = nr
 
     def z(self, s):
-        """Eine Zeile in das laufende Stueck."""
         self.stuecke[self.jetzt].append(s)
 
     def spring(self, nr):
@@ -179,25 +165,18 @@ class FlachErzeuger:
         self.z('fall = %d' % nr)
         self.z('continue')
 
-    # ================================================== Kontrollfluss
     def zielnummer(self, ziel):
-        """Wohin ein `br` auf diese Ebene fuehrt.
-
-        DIE Kernunterscheidung von WASM: auf einen `block` ans ENDE,
-        auf eine `loop` an den ANFANG."""
         if ziel.art == 'loop':
-            return ziel.beginn
+            return ziel.begin
         return ziel.ende
 
-    def wert_schieben(self, ziel, sp):
-        """Nimmt ein Sprung einen Wert mit, muss er dort liegen, wo ihn
-        das Zielstueck erwartet."""
+    def value_pan(self, ziel, sp):
         if ziel.art == 'func':
             return
         if not ziel.res:
             return
         if ziel.art == 'loop':
-            return                       # `loop` erwartet Parameter, keine Ergebnisse
+            return
         n = len(ziel.res)
         for i in range(n):
             von = sp - n + i
@@ -209,12 +188,12 @@ class FlachErzeuger:
         if ziel.art == 'func':
             self.rueckgabe(sp)
             return
-        self.wert_schieben(ziel, sp)
+        self.value_pan(ziel, sp)
         self.spring(self.zielnummer(ziel))
 
     def br_bedingt(self, ziel, sp, bed):
-        weiter = self.reservieren()
-        self.gebraucht.add(weiter)
+        next_ = self.reservieren()
+        self.gebraucht.add(next_)
         if ziel.art == 'func':
             self.z('if %s != 0 {' % bed)
             self.rueckgabe_eingerueckt(sp, '    ')
@@ -236,17 +215,12 @@ class FlachErzeuger:
             self.z('    ' + s)
         self.z('    fall = %d' % nr)
         self.z('} else {')
-        self.z('    fall = %d' % weiter)
+        self.z('    fall = %d' % next_)
         self.z('}')
         self.z('continue')
-        self.setz_stueck(weiter)
+        self.set_chunk(next_)
 
-    def br_tabelle(self, wahl, ziele, sonst, sp):
-        """`br_table` wird zur Fallnummer-Berechnung -- KEINE
-        Schachtelung, nur unabhaengige `if`.
-
-        Das ist die Stelle, an der der flache Verteiler am meisten
-        gewinnt: `yy_reduce` in SQLite hat 276 Ziele."""
+    def br_table(self, wahl, ziele, sonst, sp):
         for i, lab in enumerate(ziele):
             ziel = self.stapel[len(self.stapel) - 1 - lab]
             self.z('if %s == %d {' % (wahl, i))
@@ -287,17 +261,13 @@ class FlachErzeuger:
         else:
             self.z('%sreturn' % vor)
 
-    # ============================== gewoehnliche Befehle weiterreichen
     def gewoehnlich(self, l, op, sp):
-        """Alles, was kein Kontrollfluss ist, uebersetzt der bestehende
-        `Erzeuger`. Er schreibt ueber `e(tiefe, s)` -- also faengt der
-        Flacherzeuger diese Zeilen kurz ab und legt sie ins Stueck."""
         erz = self.erz
         gesammelt = []
         alt_e = erz.e
         erz.e = lambda tiefe, s: gesammelt.append((tiefe, s))
         try:
-            sp2, unerr = erz.befehl(l, op, sp, self.stapel_ersatz(), 1)
+            sp2, unerr = erz.cmd(l, op, sp, self.stack_fallback(), 1)
         finally:
             erz.e = alt_e
         grund = None
@@ -307,19 +277,10 @@ class FlachErzeuger:
             self.z('    ' * max(0, tiefe - grund) + s)
         return sp2, unerr
 
-    def stapel_ersatz(self):
-        """`befehl` fasst den Stapel nur bei `br`/`br_table` an -- und
-        die behandelt der Flacherzeuger selbst. Fuer alles Uebrige
-        reicht die Liste unveraendert."""
+    def stack_fallback(self):
         return self.stapel
 
-    # ====================================================== Ausgeben
     def ausgeben(self):
-        """Der fertige Verteiler.
-
-        Ein Stueck, das niemand anspringt, wird an sein Vorgaengerstueck
-        angehaengt statt als eigener `match`-Arm ausgegeben. Sonst
-        haette `f97` statt 31 000 Zeilen ueber 60 000."""
         o = []
         o.append(' var fall: u64 = 0')
         o.append(' while true {')

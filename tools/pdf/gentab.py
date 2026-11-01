@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/pdf/gentab.py -- writes lib/pdfread/pdftab.fi: the data tables of the
-PDF reader (the 14 standard fonts' widths, the base encodings, Adobe's glyph
-list). Source: reportlab's copies of Adobe's AFM data and glyph list.
-
-    python3 tools/pdf/gentab.py > lib/pdfread/pdftab.fi
-"""
 import sys
 from reportlab.pdfbase import _fontdata as fd
 from reportlab.pdfbase._fontdata_enc_winansi import WinAnsiEncoding
@@ -46,7 +40,6 @@ for var, f in fonts:
 out.append(arr("U_WIN", [uni_of(n) for n in WinAnsiEncoding]))
 out.append(arr("U_MAC", [uni_of(n) for n in MacRomanEncoding]))
 out.append(arr("U_STD", [uni_of(n) for n in StandardEncoding]))
-# the glyph list as "name=hex\n" lines, sorted; only BMP, only the first code point of a sequence
 ent = []
 for name, u in agl.items():
     if isinstance(u, int) and 0 < u < 0x10000 and len(name) <= 24:

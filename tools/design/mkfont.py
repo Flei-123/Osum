@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/mkfont.py -- build the interface font subset from Inter (SIL OFL 1.1).
-
-    mkfont.py <Inter-*.ttf> <out.ttf> <codepoints.cps | template.ttf>
-
-The system reads TrueType with seven tables (cmap format 4, glyf, head, hhea,
-hmtx, loca, maxp) plus an optional legacy `kern` table (format 0).  Inter keeps
-its kerning in GPOS, so the pair values are FLATTENED here with HarfBuzz: every
-pair of characters of the subset is shaped, and the difference to the plain
-advances is the kern value.  The code points are taken from the old
-osum-sans.ttf so that the new font carries exactly the same characters.
-"""
 import sys
 import itertools
 from fontTools import subset
@@ -25,7 +14,6 @@ def main():
         cps = sorted(int(l.split()[0], 16) for l in open(tmpl) if l.strip() and not l.startswith('#'))
     else:
         cps = sorted(TTFont(tmpl).getBestCmap().keys())
-    # 1. kerning pairs out of GPOS, shaped on the ORIGINAL font
     blob = hb.Blob.from_file_path(src)
     face = hb.Face(blob)
     font = hb.Font(face)
@@ -48,7 +36,6 @@ def main():
             d = pos[0].x_advance - adv[a]
             if d != 0:
                 pairs[(names[a], names[b])] = d
-    # 2. subset (outlines + metrics only)
     opts = subset.Options()
     opts.layout_features = []
     opts.hinting = False
@@ -65,22 +52,16 @@ def main():
     for t in list(f.keys()):
         if t not in keep and t != 'GlyphOrder':
             del f[t]
-    # Inter has no U+00AD (soft hyphen), U+0149 and U+FFFD, which the old DejaVu cut carried
-    # and the i18n runner demands: the soft hyphen draws as a hyphen, U+0149 as an n, and
-    # the replacement character of the UTF-8 decoder as a question mark
     for cp, gname in ((0xAD, 'hyphen'), (0x149, 'n'), (0xFFFD, 'question')):
         if cp in cps and gname in f.getGlyphOrder():
             for t in f['cmap'].tables:
                 if t.isUnicode():
                     t.cmap[cp] = gname
-    # 3. legacy kern table, format 0
     have = set(f.getGlyphOrder())
     kt = KernTable_format_0()
     kt.version = 0
     kt.coverage = 1
     kt.format = 0
-    # the length field of a format 0 subtable is 16 bits: at most 10921 pairs.
-    # Keep the strongest ones (the weakest are below a quarter pixel at 15 px).
     allp = [(abs(v), k, v) for k, v in pairs.items() if k[0] in have and k[1] in have]
     allp.sort(key=lambda t: (-t[0], t[1]))
     allp = allp[:10900]
@@ -89,7 +70,6 @@ def main():
     kern.version = 0
     kern.kernTables = [kt]
     f['kern'] = kern
-    # reproducible: the head table carries a time stamp, pin it
     f['head'].created = f['head'].modified = 3849000000
     f.save(dst)
     print("%s: %d glyphs, %d kern pairs, %d bytes" % (

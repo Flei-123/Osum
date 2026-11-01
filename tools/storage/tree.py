@@ -37,7 +37,7 @@ Verwendung:
 import os
 import sys
 
-ORDNER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
+FOLDER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
           "chrom", "eisen"]
 
 
@@ -47,9 +47,9 @@ def namen(n):
     Abbilder vergleichbar bleiben."""
     aus = []
     for i in range(n):
-        ordner = ORDNER[i % len(ORDNER)]
-        unten = (i // len(ORDNER)) % 2 == 1
-        pfad = "/data/%s%s" % (ordner, "/tief" if unten else "")
+        folder = FOLDER[i % len(FOLDER)]
+        bottom = (i // len(FOLDER)) % 2 == 1
+        pfad = "/data/%s%s" % (folder, "/tief" if bottom else "")
         aus.append((pfad, "datei%04d.txt" % i))
     return aus
 
@@ -114,7 +114,7 @@ def main(argv):
     kb = {}
     dat = {}
 
-    def dazu(p, o):
+    def add_2(p, o):
         teile = p.strip("/").split("/")
         for k in range(0, len(teile) + 1):
             d = "/" + "/".join(teile[:k])
@@ -127,7 +127,7 @@ def main(argv):
             dat[d] = dat.get(d, 0) + 1
 
     for i, (pfad, _name) in enumerate(liste):
-        dazu(pfad, sz[i])
+        add_2(pfad, sz[i])
     for d in sorted(gesehen):
         dd = d if len(d) == 1 else d.rstrip("/")
         okt.setdefault(dd, 0)

@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/measure.py -- numbers for the design audit (r399).
-
-    measure.py <before-dir> <after-dir>
-
-Both directories hold the photographs of tools/design/audit.sh (01-schreibtisch.png,
-02-startmenue.png, ...).  Every number is read OUT OF THE PICTURES (or the
-serial log next to them), none is typed in:
-
-  wallpaper   share of horizontally equal neighbour pixels in the tree line crop
-              (nearest-neighbour upscaling repeats every source pixel 2-3 times:
-              a high share = blocks; a smooth bilinear picture has a low one)
-  corner      pixels outside the rounded corner arc of the start menu that differ
-              from the picture WITHOUT the menu (a frosted rectangle behind a
-              rounded window shows up here: the grey halo)
-  selection   contrast of the plate (selected row) against the list ground and of
-              the text against the plate, WCAG 2.x
-  frame       `bildzeit:` of the run (mean frame time in microseconds, frames over 16 ms)
-"""
 import os
 import re
 import sys
@@ -42,7 +24,6 @@ def contrast(a, b):
 
 def wallpaper_blockiness(path):
     im = Image.open(path).convert("RGB")
-    # the tree line of the sea photograph, right side, below the menu and the bar
     box = (960, 380, 1280, 560)
     c = im.crop(box)
     w, h = c.size
@@ -64,10 +45,9 @@ def corner_halo(menu_png, base_png, x0=8, y0=300, r=8):
     tot = 0
     for dy in range(r):
         for dx in range(r):
-            # centre of the corner circle is (r, r) from the corner of the window
             ddx = 2 * (r - dx) - 1
             ddy = 2 * (r - dy) - 1
-            if ddx * ddx + ddy * ddy > (2 * r + 2) ** 2:  # more than one pixel outside the arc
+            if ddx * ddx + ddy * ddy > (2 * r + 2) ** 2:
                 tot += 1
                 if mp[x0 + dx, y0 + dy] != bp[x0 + dx, y0 + dy]:
                     n += 1

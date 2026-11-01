@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/design/textmitte.py <schirm.ppm> <x> <y> <w> <h> [name]
-#
-#
-#
-#
 import sys
 
 
-def ppm_lesen(p):
+def ppm_read(p):
     d = open(p, 'rb').read()
     tok, i = [], 2
     while len(tok) < 3:
@@ -42,14 +36,14 @@ def messen(px, w, h, bx, by, bw, bh, name):
         return False
     grund = max(zaehl.items(), key=lambda kv: kv[1])[0]
 
-    def anders(c):
+    def changed(c):
         return (abs(c[0] - grund[0]) + abs(c[1] - grund[1])
                 + abs(c[2] - grund[2])) > 90
 
     pts = [(x, y)
            for y in range(by, min(by + bh, h))
            for x in range(bx, min(bx + bw, w))
-           if anders(f(x, y))]
+           if changed(f(x, y))]
     if not pts:
         print("  %-14s no text/symbol found in the button" % name)
         return False
@@ -70,7 +64,7 @@ def messen(px, w, h, bx, by, bw, bh, name):
 
 if __name__ == '__main__':
     src = sys.argv[1]
-    w, h, px = ppm_lesen(src)
+    w, h, px = ppm_read(src)
     if len(sys.argv) >= 6:
         bx, by, bw, bh = (int(v) for v in sys.argv[2:6])
         name = sys.argv[6] if len(sys.argv) > 6 else "Knopf"

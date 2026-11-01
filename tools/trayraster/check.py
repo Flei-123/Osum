@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/trayraster/check.py <outdir> <scale> -- judge the tray raster (pictures + serial of shot.sh).
-
-Prints OK/FAIL lines and "RESULT ok=<n> fail=<n>".  Measured (Windows 11 tray):
-  rects   chevron, language, network, volume, battery, clock: in one row, one gap (all gaps identical),
-          the same top and height (one centre line), right margin >= 8, nothing past the screen edge
-  cells   the icon-only cells (chevron, network, volume) are exactly 24 points * scale wide
-  icons   every tray symbol is <= 16*scale + 1 high and wide (ink), its ink centre lies on the centre line
-          (+-1 px) and, in an icon-only cell, in the middle of the cell (+-2*scale px)
-  text    battery text is not clipped (ink stays >= 3 px inside the field), text of battery, language and
-          clock has one height (digits/caps within 2*scale px), the gaps between the fields stay empty
-  apps    the program symbol of a window button is about as big as the logo of the start button
-          (ink height >= logo - 6*scale) and sits on the same centre line (+-1 px)
-"""
 import re, sys, os
 
 out = sys.argv[1]
@@ -34,7 +21,6 @@ def load_ppm(path):
     return f[0], f[1], d[at+1:]
 
 ser = open(os.path.join(out, "serial.txt"), "rb").read().decode("latin1")
-# geometry belongs to the picture 00-bar (taken before the first click): later reports (tray popup open) re-lay the bar
 ser_bar = ser[:ser.find("taskbar: click")] if "taskbar: click" in ser else ser
 def last(pat):
     m = re.findall(pat, ser_bar)
@@ -43,7 +29,7 @@ geom = last(r"taskbar: geom edge=0 x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 F = {}
 for n in ("lang", "net", "snd", "battery", "clock"):
     F[n] = last(r"taskbar: field %s x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)" % n)
-F["noti"] = last(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)")   # optional notification bell field
+F["noti"] = last(r"taskbar: field noti x=(\d+) y=(\d+) w=(\d+) h=(\d+) lines=(\d+)")
 F["chevron"] = last(r"taskbar: chevron x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 start = last(r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 btn = last(r"taskbar: btn i=0 id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
@@ -59,7 +45,6 @@ def at_px(x, y):
     o = (y * w + x) * 3
     return px[o], px[o + 1], px[o + 2]
 def inkbox(x0, y0, x1, y1, bg=None, thr=70):
-    """bounding box (l, t, r, b inclusive) of pixels differing from the background, or None"""
     x0 = max(x0, 0); y0 = max(y0, 0); x1 = min(x1, w); y1 = min(y1, h)
     if bg is None: bg = at_px(x0, (y0 + y1) // 2)
     l = t = 10**9; r = b = -1
@@ -74,9 +59,8 @@ def inkbox(x0, y0, x1, y1, bg=None, thr=70):
             o += 3
     return None if r < 0 else (l, t, r, b)
 
-# ---- rects
 order = ["chevron"] + (["noti"] if F["noti"] else []) + ["lang", "net", "snd", "battery", "clock"]
-rects = {n: (F[n][0], F[n][1] + by, F[n][2], F[n][3]) for n in order}   # absolute y
+rects = {n: (F[n][0], F[n][1] + by, F[n][2], F[n][3]) for n in order}
 rects_x = [rects[n] for n in order]
 NF = len(order) - 1
 ordered = all(rects_x[i][0] + rects_x[i][2] <= rects_x[i + 1][0] for i in range(NF))
@@ -90,7 +74,6 @@ cw = 24 * sc
 say(all(rects[n][2] == cw for n in ("chevron", "net", "snd")),
     "icon-only cells chevron/net/snd are %d wide (%s)" % (cw, [rects[n][2] for n in ("chevron", "net", "snd")]))
 
-# ---- icons
 mid = rects["clock"][1] + rects["clock"][3] / 2.0
 icon_cells = [("chevron", rects["chevron"]), ("net", rects["net"]),
               ("snd", rects["snd"]), ("battery", rects["battery"])]
@@ -113,7 +96,6 @@ mx = max(s for _, s in sizes) if sizes else 0
 mn = min(s for _, s in sizes) if sizes else 0
 say(mn >= 8 * sc and mx <= 16 * sc + 1, "tray symbols are of one size class (largest side %s)" % [s for _, s in sizes])
 
-# ---- text
 bt = rects["battery"]
 bgb = at_px(bt[0] + 1, bt[1] + bt[3] // 2)
 tb = inkbox(bt[0] + cw - 2 * sc, bt[1] + 2, bt[0] + bt[2] + gaps[-1], bt[1] + bt[3] - 2, bgb)
@@ -126,25 +108,23 @@ else:
     cl = rects["clock"]
     cb = inkbox(cl[0] + 2, cl[1] + 2, cl[0] + cl[2] - 1, cl[1] + cl[3] // 2 - 1, at_px(cl[0] + 1, cl[1] + cl[3] // 2))
     lg = rects["lang"]
-    lb = inkbox(lg[0] + 2, lg[1] + 2, lg[0] + lg[2] - 1, lg[1] + lg[3] - 2, at_px(lg[0] + 1, lg[1] + lg[3] // 2))   # W-C1: one line, no symbol
+    lb = inkbox(lg[0] + 2, lg[1] + 2, lg[0] + lg[2] - 1, lg[1] + lg[3] - 2, at_px(lg[0] + 1, lg[1] + lg[3] // 2))
     if cb and lb:
         chh, lhh = cb[3] - cb[1] + 1, lb[3] - lb[1] + 1
         say(abs(th - chh) <= 3 * sc and abs(lhh - chh) <= 2 * sc,
             "text height alike: battery %d, clock line %d, language line %d" % (th, chh, lhh))
     else:
         say(False, "clock and language text have ink")
-# gaps between fields stay empty (nothing runs over into a neighbour)
 leak = 0
 for i in range(NF):
     gx0 = rects_x[i][0] + rects_x[i][2]
     gx1 = rects_x[i + 1][0]
     y0, y1 = rects_x[i][1] + 3, rects_x[i][1] + rects_x[i][3] - 3
-    if gx1 > gx0 and (order[i], order[i + 1]) not in (("net", "snd"), ("snd", "battery")):      # inside the capsule the panel edge itself is drawn
+    if gx1 > gx0 and (order[i], order[i + 1]) not in (("net", "snd"), ("snd", "battery")):
         bb = inkbox(gx0 + 1, y0, gx1 - 1, y1, at_px(gx0 + 1, (y0 + y1) // 2))
         if bb: leak += 1
 say(leak == 0, "the gaps between the fields stay empty (%d with ink)" % leak)
 
-# ---- program symbol vs start logo
 if start and btn:
     sx, sy, sw, shh = start[0], start[1] + by, start[2], start[3]
     logo = inkbox(sx + 3, sy + 3, sx + sw - 3, sy + shh - 3, at_px(sx + 3, sy + 3), 60)

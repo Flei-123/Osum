@@ -1,33 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/account/attrappe.py -- RUNDE KONTO: die Server im Testaufbau.
-
-WARUM EIN NACHBAU UND NICHT DAS ECHTE SYSTEM. Xoffi gehoert einer
-anderen Firma. Justin hat die Nutzung der API erlaubt; erlaubt ist nicht
-dasselbe wie zumutbar. Ein Abschnitt, der zwanzigmal ein falsches
-Passwort schickt, um die Bremse zu messen, ist ein Rateangriff auf ein
-Produktivsystem, auch wenn er gut gemeint ist. Also ein Nachbau, der
-GENAU die Antworten gibt, die der Betreiber beschrieben hat -- und gegen
-das echte System nur ein einzelner, harmloser GET /api/health.
-
-Der Nachbau ist ausserdem das einzige, womit sich die Faelle messen
-lassen, auf die es ankommt: abgelaufenes Zwischentoken, dieselbe
-E-Mail in zwei Organisationen, ein Token mit `master_session`, ein
-abgelehntes Erneuern. An keinen davon kaeme man auf einem echten Server
-heran, ohne ihn dafuer praeparieren zu lassen.
-
-Drei Server in einem Programm, weil sie sich einen Anschluss teilen
-duerfen -- der Pfad sagt, wer gemeint ist:
-
-    /api/auth/...          Xoffi (die Beschreibung des Betreibers)
-    /api/login|logout|me   JARVIS (aus server.js und lib/auth.js gelesen)
-    /konto/...             der eigene Server (unser eigenes Protokoll)
-
-JEDE ANFRAGE WIRD MITGESCHRIEBEN -- Methode, Pfad und ALLE Kopfzeilen --
-nach <verzeichnis>/protokoll.jsonl. Daran misst der Laeufer, dass nie
-ein Keks hinausging, wo keiner hingehoert, und dass das Token als
-`Authorization: Bearer` kam.
-"""
 import argparse
 import base64
 import hashlib
@@ -40,9 +12,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-GEHEIM = b"attrappe-geheimnis-nur-fuer-den-testaufbau"
+SECRET = b"attrappe-geheimnis-nur-fuer-den-testaufbau"
 
-KONTEN = {
+ACCOUNTS = {
     ("justin@example.test", "alpha"): {
         "id": "1001", "username": "justin", "passwort": "richtig",
         "mfa": False, "daten": "alpha-geheimnis"},
@@ -61,10 +33,9 @@ KONTEN = {
         "daten": "alpha-geheimnis"},
 }
 
-# JARVIS kennt keine Organisationen.
 JARVIS = {"justin": "richtig", "zweiter": "auchrichtig"}
 
-zustand = {
+state = {
     "verzeichnis": ".",
     "gesperrt": set(),
     "fehlversuche": {},
@@ -81,13 +52,13 @@ def b64u(b):
 
 def jwt(payload):
     kopf = b64u(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
-    rumpf = b64u(json.dumps(payload).encode())
-    daten = (kopf + "." + rumpf).encode()
-    sig = b64u(hmac.new(GEHEIM, daten, hashlib.sha256).digest())
-    return kopf + "." + rumpf + "." + sig
+    body = b64u(json.dumps(payload).encode())
+    daten = (kopf + "." + body).encode()
+    sig = b64u(hmac.new(SECRET, daten, hashlib.sha256).digest())
+    return kopf + "." + body + "." + sig
 
 
-def jwt_lesen(tok):
+def jwt_read(tok):
     try:
         teile = tok.split(".")
         roh = teile[1] + "=" * (-len(teile[1]) % 4)
@@ -97,8 +68,8 @@ def jwt_lesen(tok):
 
 
 def protokoll(eintrag):
-    pfad = os.path.join(zustand["verzeichnis"], "protokoll.jsonl")
-    with zustand["sperre"]:
+    pfad = os.path.join(state["verzeichnis"], "protokoll.jsonl")
+    with state["sperre"]:
         with open(pfad, "a", encoding="utf-8") as f:
             f.write(json.dumps(eintrag) + "\n")
 
@@ -117,7 +88,7 @@ class Griff(BaseHTTPRequestHandler):
         except Exception:
             return {}
 
-    def _antwort(self, code, obj, kekse=None):
+    def _reply(self, code, obj, kekse=None):
         roh = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
@@ -146,32 +117,32 @@ class Griff(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == "/api/auth/health":
             tok = self._bearer()
-            if not tok or tok in zustand["gesperrt"]:
-                return self._antwort(401, {"success": False,
+            if not tok or tok in state["gesperrt"]:
+                return self._reply(401, {"success": False,
                                            "detail": "kein Token"})
-            return self._antwort(200, {"success": True, "status": "healthy"})
+            return self._reply(200, {"success": True, "status": "healthy"})
         if p == "/api/health":
-            return self._antwort(200, {"success": True, "status": "healthy",
+            return self._reply(200, {"success": True, "status": "healthy",
                                        "backend": {"framework": "FastAPI"}})
         if p == "/api/me":
             tok = self._bearer()
             if not tok:
-                keks = self.headers.get("Cookie") or ""
-                for teil in keks.split(";"):
+                cookie = self.headers.get("Cookie") or ""
+                for teil in cookie.split(";"):
                     if teil.strip().startswith("fleitec_session="):
                         tok = teil.strip()[16:]
-            an = jwt_lesen(tok or "")
-            if not an or (tok in zustand["gesperrt"]):
-                return self._antwort(401, {"error": "Nicht angemeldet"})
-            return self._antwort(200, {"username": an.get("name"),
+            an = jwt_read(tok or "")
+            if not an or (tok in state["gesperrt"]):
+                return self._reply(401, {"error": "Nicht angemeldet"})
+            return self._reply(200, {"username": an.get("name"),
                                        "admin": False})
         if p == "/konto/pruefen":
             tok = self._bearer()
-            an = jwt_lesen(tok or "")
-            if not an or tok in zustand["gesperrt"]:
-                return self._antwort(401, {"fehler": "kein Token"})
-            return self._antwort(200, {"gueltig": True})
-        return self._antwort(404, {"fehler": "unbekannt"})
+            an = jwt_read(tok or "")
+            if not an or tok in state["gesperrt"]:
+                return self._reply(401, {"fehler": "kein Token"})
+            return self._reply(200, {"gueltig": True})
+        return self._reply(404, {"fehler": "unbekannt"})
 
     def do_POST(self):
         self._mitschreiben()
@@ -186,37 +157,34 @@ class Griff(BaseHTTPRequestHandler):
         if p == "/api/auth/logout":
             tok = self._bearer()
             if tok:
-                zustand["gesperrt"].add(tok)
-            return self._antwort(200, {"success": True})
+                state["gesperrt"].add(tok)
+            return self._reply(200, {"success": True})
         if p == "/api/login":
             return self.jarvis_login(b)
         if p == "/api/logout":
-            return self._antwort(200, {"ok": True})
+            return self._reply(200, {"ok": True})
         if p == "/konto/anmelden":
-            return self.eigen_login(b)
+            return self.own_login(b)
         if p == "/konto/erneuern":
-            return self.eigen_refresh(b)
+            return self.own_refresh(b)
         if p == "/konto/abmelden":
             tok = self._bearer()
             if tok:
-                zustand["gesperrt"].add(tok)
-            return self._antwort(200, {"ok": True})
-        return self._antwort(404, {"fehler": "unbekannt"})
+                state["gesperrt"].add(tok)
+            return self._reply(200, {"ok": True})
+        return self._reply(404, {"fehler": "unbekannt"})
 
-    # ------------------------------------------------------------- Xoffi
     def bremse(self, kennung):
-        """Die Bremse. Sie sagt NICHT, ob es das Konto gibt -- gezaehlt
-        wird der VERSUCH, nicht der Treffer."""
         jetzt = time.time()
-        with zustand["sperre"]:
-            liste = [t for t in zustand["fehlversuche"].get(kennung, [])
+        with state["sperre"]:
+            liste = [t for t in state["fehlversuche"].get(kennung, [])
                      if jetzt - t < 60]
-            zustand["fehlversuche"][kennung] = liste
+            state["fehlversuche"][kennung] = liste
             return len(liste) >= 10
 
     def fehlschlag(self, kennung):
-        with zustand["sperre"]:
-            zustand["fehlversuche"].setdefault(kennung, []).append(time.time())
+        with state["sperre"]:
+            state["fehlversuche"].setdefault(kennung, []).append(time.time())
 
     def _bremszeile(self, obj):
         self.send_response(429)
@@ -233,127 +201,125 @@ class Griff(BaseHTTPRequestHandler):
         if self.bremse(kennung):
             return self._bremszeile({"success": False,
                                      "detail": "zu viele Versuche"})
-        treffer = [o for (k, o) in KONTEN if k == kennung]
+        treffer = [o for (k, o) in ACCOUNTS if k == kennung]
         if not org:
             if len(treffer) > 1:
-                return self._antwort(409, {"success": False,
+                return self._reply(409, {"success": False,
                                            "organisations": sorted(treffer)})
             org = treffer[0] if treffer else "alpha"
-        konto = KONTEN.get((kennung, org))
-        if not konto or konto["passwort"] != (b.get("password") or ""):
+        account = ACCOUNTS.get((kennung, org))
+        if not account or account["passwort"] != (b.get("password") or ""):
             self.fehlschlag(kennung)
-            return self._antwort(401, {"success": False,
+            return self._reply(401, {"success": False,
                                        "detail": "Anmeldung fehlgeschlagen"})
-        if konto.get("mfa"):
+        if account.get("mfa"):
             temp = b64u(os.urandom(12))
-            zustand["temp"][temp] = (kennung, org, time.time() + 600)
-            return self._antwort(200, {"success": True, "mfa_required": True,
+            state["temp"][temp] = (kennung, org, time.time() + 600)
+            return self._reply(200, {"success": True, "mfa_required": True,
                                        "temp_token": temp})
-        return self.xoffi_sitzung(kennung, org, konto)
+        return self.xoffi_session(kennung, org, account)
 
-    def xoffi_sitzung(self, kennung, org, konto):
+    def xoffi_session(self, kennung, org, account):
         jetzt = int(time.time())
-        ansprueche = {
-            "id": konto["id"], "email": kennung,
-            "username": konto["username"], "organisation": org,
-            "menu_group_id": 1, "is_admin": bool(konto.get("is_admin")),
-            "nexus_core_access": bool(konto.get("nexus")),
+        claims = {
+            "id": account["id"], "email": kennung,
+            "username": account["username"], "organisation": org,
+            "menu_group_id": 1, "is_admin": bool(account.get("is_admin")),
+            "nexus_core_access": bool(account.get("nexus")),
             "nexus_developer": False, "type": "access",
-            "iat": jetzt, "exp": jetzt + zustand["access_sekunden"],
+            "iat": jetzt, "exp": jetzt + state["access_sekunden"],
         }
-        if konto.get("master"):
-            ansprueche["master_session"] = True
-        zugriff = jwt(ansprueche)
-        erneuerung = jwt({"id": konto["id"], "organisation": org,
+        if account.get("master"):
+            claims["master_session"] = True
+        zugriff = jwt(claims)
+        erneuerung = jwt({"id": account["id"], "organisation": org,
                           "type": "refresh", "iat": jetzt,
                           "exp": jetzt + 2592000})
-        antwort = {"success": True, "data": {
-            "user": {"id": konto["id"], "email": kennung,
-                     "username": konto["username"]},
+        reply = {"success": True, "data": {
+            "user": {"id": account["id"], "email": kennung,
+                     "username": account["username"]},
             "token": zugriff, "refresh_token": erneuerung,
             "organisation": org, "domain": org + ".example.test"}}
-        return self._antwort(200, antwort,
+        return self._reply(200, reply,
                              kekse=["xoffi_jwt=%s; HttpOnly; Path=/"
                                     % zugriff])
 
     def xoffi_mfa(self, b):
         temp = b.get("temp_token") or ""
-        eintrag = zustand["temp"].get(temp)
+        eintrag = state["temp"].get(temp)
         if not eintrag:
-            return self._antwort(410, {"success": False,
+            return self._reply(410, {"success": False,
                                        "detail": "temp_token unbekannt"})
         kennung, org, ablauf = eintrag
         if time.time() > ablauf:
-            del zustand["temp"][temp]
-            return self._antwort(410, {"success": False,
+            del state["temp"][temp]
+            return self._reply(410, {"success": False,
                                        "detail": "temp_token abgelaufen"})
         if (b.get("code") or "") != "123456":
-            return self._antwort(401, {"success": False,
+            return self._reply(401, {"success": False,
                                        "detail": "Code falsch"})
-        del zustand["temp"][temp]
-        return self.xoffi_sitzung(kennung, org, KONTEN[(kennung, org)])
+        del state["temp"][temp]
+        return self.xoffi_session(kennung, org, ACCOUNTS[(kennung, org)])
 
     def xoffi_refresh(self, b):
-        if zustand["refresh_verweigern"]:
-            return self._antwort(401, {"success": False,
+        if state["refresh_verweigern"]:
+            return self._reply(401, {"success": False,
                                        "detail": "abgelehnt"})
         tok = b.get("refresh_token") or ""
-        an = jwt_lesen(tok)
-        if not an or an.get("type") != "refresh" or tok in zustand["gesperrt"]:
-            return self._antwort(401, {"success": False,
+        an = jwt_read(tok)
+        if not an or an.get("type") != "refresh" or tok in state["gesperrt"]:
+            return self._reply(401, {"success": False,
                                        "detail": "kein Erneuerungstoken"})
         org = an.get("organisation")
-        konto = None
+        account = None
         kennung = None
-        for (k, o), v in KONTEN.items():
+        for (k, o), v in ACCOUNTS.items():
             if v["id"] == an.get("id") and o == org:
-                konto, kennung = v, k
-        if not konto:
-            return self._antwort(401, {"success": False})
-        return self.xoffi_sitzung(kennung, org, konto)
+                account, kennung = v, k
+        if not account:
+            return self._reply(401, {"success": False})
+        return self.xoffi_session(kennung, org, account)
 
-    # ------------------------------------------------------------ JARVIS
     def jarvis_login(self, b):
         name = (b.get("username") or "").strip()
         if self.bremse("jarvis:" + name):
             return self._bremszeile({"error": "Zu viele Fehlversuche."})
         if JARVIS.get(name) != (b.get("password") or ""):
             self.fehlschlag("jarvis:" + name)
-            return self._antwort(401, {
+            return self._reply(401, {
                 "error": "Falscher Benutzername oder Passwort"})
         jetzt = int(time.time())
         tok = jwt({"uid": "u_" + name, "name": name, "iat": jetzt,
-                   "exp": jetzt + zustand["access_sekunden"]})
-        return self._antwort(200, {"username": name, "token": tok},
+                   "exp": jetzt + state["access_sekunden"]})
+        return self._reply(200, {"username": name, "token": tok},
                              kekse=["fleitec_session=%s; HttpOnly; Path=/"
                                     % tok])
 
-    # ------------------------------------------------------------- eigen
-    def eigen_login(self, b):
+    def own_login(self, b):
         kennung = b.get("kennung") or ""
         if JARVIS.get(kennung) != (b.get("geheim") or ""):
-            return self._antwort(401, {"fehler": "falsch"})
+            return self._reply(401, {"fehler": "falsch"})
         jetzt = int(time.time())
         tok = jwt({"uid": "e_" + kennung, "type": "access", "iat": jetzt,
-                   "exp": jetzt + zustand["access_sekunden"]})
+                   "exp": jetzt + state["access_sekunden"]})
         erneu = jwt({"uid": "e_" + kennung, "type": "refresh", "iat": jetzt,
                      "exp": jetzt + 2592000})
-        return self._antwort(200, {
+        return self._reply(200, {
             "subjekt": "e_" + kennung, "anzeige": kennung,
             "zugriff": tok, "erneuerung": erneu,
-            "ablauf": jetzt + zustand["access_sekunden"],
+            "ablauf": jetzt + state["access_sekunden"],
             "datenort": "eigen"})
 
-    def eigen_refresh(self, b):
-        if zustand["refresh_verweigern"]:
-            return self._antwort(401, {"fehler": "abgelehnt"})
-        an = jwt_lesen(b.get("erneuerung") or "")
+    def own_refresh(self, b):
+        if state["refresh_verweigern"]:
+            return self._reply(401, {"fehler": "abgelehnt"})
+        an = jwt_read(b.get("erneuerung") or "")
         if not an:
-            return self._antwort(401, {"fehler": "kein Token"})
+            return self._reply(401, {"fehler": "kein Token"})
         jetzt = int(time.time())
         tok = jwt({"uid": an.get("uid"), "type": "access", "iat": jetzt,
                    "exp": jetzt + 604800})
-        return self._antwort(200, {
+        return self._reply(200, {
             "subjekt": an.get("uid"), "anzeige": an.get("uid"),
             "zugriff": tok, "erneuerung": b.get("erneuerung"),
             "ablauf": jetzt + 604800, "datenort": "eigen"})
@@ -369,9 +335,9 @@ def main():
     ap.add_argument("--refresh-verweigern", action="store_true")
     ap.add_argument("--access-sekunden", type=int, default=604800)
     a = ap.parse_args()
-    zustand["verzeichnis"] = a.verzeichnis
-    zustand["refresh_verweigern"] = a.refresh_verweigern
-    zustand["access_sekunden"] = a.access_sekunden
+    state["verzeichnis"] = a.verzeichnis
+    state["refresh_verweigern"] = a.refresh_verweigern
+    state["access_sekunden"] = a.access_sekunden
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Griff)
     if not a.kein_tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

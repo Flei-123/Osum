@@ -1,44 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tunnel/against_wg.py -- Osum's WireGuard against Linux's.
-
-THIS IS THE MEASUREMENT THE ROUND STANDS OR FALLS ON. Everything else in
-`tools/tunnel/` compares this repository against itself or against a test
-vector. Here `lib/wg/proto.fi` -- the identical file the kernel compiles
--- completes a handshake with the WireGuard implementation IN THE LINUX
-KERNEL and carries real traffic through it.
-
-THE WIRE, and why it is not a tap device. `/dev/net/tun` cannot be
-created in the container this repository is measured in (`mknod:
-Operation not permitted`, the same finding round K8 wrote down). A
-WireGuard interface needs no tun device -- it is its own netdev type --
-and network namespaces can be created here, so:
-
-    our proto.fi  <--UDP on veth-->  Linux wg0 in the namespace `wgt`
-    10.90.0.1:51821                  10.90.0.2:51820
-    tunnel 10.91.0.1                 tunnel 10.91.0.2
-
-WHAT IS PROVEN, in the order the checks run:
-
-  1. THE HANDSHAKE. `wg show` on the Linux side reports a latest
-     handshake. Linux only reports one after it has decrypted an
-     initiation, verified both MACs and the timestamp, and had its
-     response accepted well enough for a transport packet to arrive.
-  2. LINUX'S OWN PING GOES THROUGH OUR TUNNEL. `ping` inside the
-     namespace sends an ICMP echo to 10.91.0.1. The Linux kernel
-     encrypts it with the keys it negotiated with us; we decrypt it,
-     build the echo reply ourselves, encrypt it and send it back; Linux
-     decrypts it and `ping` prints a round trip time. Nothing about that
-     works if a single field of the protocol is wrong.
-  3. THROUGHPUT IN BOTH DIRECTIONS, in MB/s, over a real UDP stream.
-  4. THE REFUSALS. A replayed transport packet, a packet with a flipped
-     octet, a handshake with a wrong mac1, a replayed initiation -- each
-     must be REFUSED, and the counters must show it.
-  5. THE SAME AGAIN WITH A PRE-SHARED KEY, because psk2 changes the
-     chain and an implementation can pass without it and fail with it.
-
-Run it through `tools/tunnel/run.sh`, which builds `.probe/peer` first.
-"""
 import os
 import random
 import re
@@ -86,7 +47,6 @@ def ip2n(s):
 
 
 class Peer:
-    """`.probe/peer` as a subprocess: one command in, one line out."""
 
     def __init__(self):
         self.p = subprocess.Popen([PEER], stdin=subprocess.PIPE,
@@ -141,7 +101,6 @@ def build_ip(src, dst, proto, payload, ident=0x4242):
 
 
 def icmp_reply_for(pkt):
-    """Turn an ICMP echo request in an IPv4 packet into its reply."""
     if len(pkt) < 28 or (pkt[0] >> 4) != 4:
         return None
     ihl = (pkt[0] & 0x0F) * 4
@@ -150,7 +109,7 @@ def icmp_reply_for(pkt):
     icmp = bytearray(pkt[ihl:])
     if icmp[0] != 8:
         return None
-    icmp[0] = 0            # echo reply
+    icmp[0] = 0
     icmp[2] = 0
     icmp[3] = 0
     c = ipv4_checksum(bytes(icmp))
@@ -223,9 +182,6 @@ def setup(psk_hex=None):
     peer.cmd("endpoint", 0, ip2n(NS_IP), WG_PORT)
 
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Linux fills the wire far faster than a Python loop with a pipe to a
-    # subprocess can drain it. A big receive buffer plus a paced sender is
-    # what keeps the harness from being the thing under test.
     s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 * 1024 * 1024)
     s.bind((HOST_IP, OUR_PORT))
     s.settimeout(3.0)
@@ -265,8 +221,6 @@ def main():
             if not handshake(peer, s, label):
                 continue
 
-            # A keepalive, so Linux considers the session confirmed and
-            # will send us traffic of its own.
             ka = peer.cmd("send", 0, "-", now_us())
             s.sendto(bytes.fromhex(ka), (NS_IP, WG_PORT))
             time.sleep(0.3)
@@ -279,7 +233,6 @@ def main():
                len(tp) >= 2 and int(tp[1]) > 0,
                " ".join(tp[1:]) if len(tp) >= 2 else "-")
 
-            # ---- 2. Linux's own ping, through our implementation ----
             pinger = subprocess.Popen(
                 "ip netns exec %s ping -c 3 -i 0.3 -W 2 %s" % (NS, OUR_TUN),
                 shell=True, stdout=subprocess.PIPE, text=True)
@@ -309,8 +262,6 @@ def main():
                    re.search(r"rtt.*", pout).group(0) if "rtt" in pout
                    else "no rtt line"))
 
-            # ---- 3. throughput, both directions ----
-            # Osum -> Linux: we encrypt, Linux decrypts and counts.
             payload = bytes(random.randrange(256) for _ in range(1200))
             pkt_tpl = build_udp(OUR_TUN, NS_TUN, 5000, 9999, payload)
             n = 1500
@@ -328,7 +279,6 @@ def main():
                moved >= n * (len(pkt_tpl) + 32) * 0.95,
                "%d octets on the wire" % moved)
 
-            # Linux -> Osum: Linux encrypts, we decrypt and count.
             m = 400
             sender = subprocess.Popen(
                 "ip netns exec %s python3 -c \"%s\"" % (NS, (
@@ -359,13 +309,6 @@ def main():
                got >= m, "%d of %d packets" % (got, m))
             s.settimeout(3.0)
 
-            # ---- 3b. the inner loop, timed without any I/O ----
-            #
-            # The rate above is the RATE OF THE HARNESS: every packet
-            # crosses a pipe to a subprocess and a Python loop. The
-            # number that says something about this code is the AEAD
-            # over the payload size a tunnel carries, measured inside
-            # the program with no socket in the way.
             if not psk_hex:
                 bl = peer.cmd("benchaed", 1200, 20000).split()
                 seal_ns, open_ns, opened = (int(bl[0]), int(bl[1]),
@@ -379,15 +322,10 @@ def main():
                 RESULTS.append(("ChaCha20-Poly1305 open MB/s", True,
                                 "%.1f" % open_mbs))
 
-            # ---- 4. the refusals ----
             good = peer.cmd("send", 0, pkt_tpl.hex(), now_us())
-            # (a) a flipped octet in the body
             bad = bytearray(bytes.fromhex(good))
             bad[40] ^= 0x01
             r = peer.cmd("recv", bad.hex(), now_us(), rnd64())
-            # our own packet cannot decrypt with our own receive key
-            # anyway, so this is checked with a packet FROM Linux below.
-            # (b) replay: take a real packet from Linux
             s2 = subprocess.Popen(
                 "ip netns exec %s python3 -c \"%s\"" % (NS, (
                     "import socket;"
@@ -417,7 +355,6 @@ def main():
                 ok("a replayed transport packet is refused" + label, False,
                    "no packet arrived to replay")
 
-            # (c) a handshake initiation with a wrong mac1
             init = peer.cmd("handshake", 0, rnd64(), int(time.time()),
                             time.time_ns() % 1_000_000_000, now_us())
             b = bytearray(bytes.fromhex(init))
@@ -432,8 +369,6 @@ def main():
             ok("Linux ignores an initiation with a wrong mac1" + label,
                silent, "silent" if silent else "it answered")
 
-            # (d) a replayed initiation: same packet twice, Linux must not
-            #     complete a second handshake from the stale timestamp.
             ok("counters agree: %d good, %d bad, %d handshakes" % (
                 int(peer.cmd("stat", 0)), int(peer.cmd("stat", 1)),
                 int(peer.cmd("stat", 3))), True, "")

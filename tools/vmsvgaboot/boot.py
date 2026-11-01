@@ -1,8 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/vmsvgaboot/boot.py -- called by tools/vmsvgaboot/run.sh: log in, take one screendump, measure it.
-# usage: boot.py <monitor sock> <vnc sock> <base> <serial file>
-# writes <base>.login (1/0), <base>.res ("<w> <h> <black share of the upper 60 %> <taskbar rows>"), <base>.bar (height in px of the bottom bar,
-# measured as the number of bottom rows whose colour differs from the wallpaper row 200 px above... see bar_height)
 import os
 import sys
 import time
@@ -49,7 +45,6 @@ def main():
     time.sleep(15)
     f = mon.dump(base + ".d.ppm")
     w, h, b = ppm_rgb(f)
-    # QEMU pads every dumped row to a multiple of 4 bytes (width 2250 -> 6752 instead of 6750 bytes): derive the stride from the payload
     stride = len(b) // h
     img = np.frombuffer(b, dtype=np.uint8)[: stride * h].reshape(h, stride)[:, : w * 3].reshape(h, w, 3)
     up = img[: int(h * 0.6)]
@@ -57,8 +52,6 @@ def main():
     bot = img[h - 60:]
     ref = img[max(0, h - 330): h - 270].reshape(-1, 3).mean(axis=0)
     rows = int(np.sum(np.abs(bot.astype(int).mean(axis=1) - ref).max(axis=1) > 12))
-    # bar height: contiguous bottom rows that are light (the day-theme bar is a near-white band, the wallpaper above it is dark); the old scan
-    # against a wallpaper reference row ran into its 199-row cap in the control run whenever that row differed
     lum = img[h - 400:].astype(int).mean(axis=2).mean(axis=1)
     hb = 0
     for y in range(len(lum) - 1, -1, -1):

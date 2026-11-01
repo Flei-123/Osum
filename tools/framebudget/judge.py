@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/framebudget/judge.py <serial.txt> -- MON-5: frames of 32 ms and more per scripted scenario (bucket 6 + 7 of `wm: bild ... fach=`).
-
-Phases (F12 lines): 1 boot rest (ignored), 2 idle, 3 start menu, 4 Settings opens, 5 wheel scroll, 6 window drag.
-Budget: 0 frames >= 32 ms in phases 3..6, and every scenario phase painted at least MINFRAMES frames (a phase without frames proves nothing).
-Exit 1 on any FAIL. `--selftest` plants a 40 ms frame in a doctored copy of the serial lines and expects the verdict to turn red."""
 import re
 import sys
 

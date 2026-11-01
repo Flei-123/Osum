@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/midline/check.py <audit-outdir> -- D-009: icon, text and row share ONE centre line (<= 1 px).
-
-Reads `explorer: geom`, `explorer: rect id=`, `explorer: rows` and `explorer: navrows` out of serial.txt, the
-picture 01-explorer.ppm, and measures (measure.py) the rows of the detail list, of the navigation pane (its
-group headings are skipped, a sub-folder row is one level further in) and the four icon buttons of the
-command row.  The chrome offset of the window is frame + bar + 1 (read from `wm: fen ... bar= fr=`)."""
 import os
 import re
 import sys
@@ -34,10 +28,10 @@ def main(out):
         return
     gx, gy = int(g[-1][0]), int(g[-1][1])
     c = re.findall(r"wm: fen i=\d+ id=\d+ x=%d y=%d [^\n]*? bar=(\d+) capw=\d+ fr=(\d+)" % (gx, gy), t)
-    bar, fr = (int(c[-1][0]), int(c[-1][1])) if c else (32, 1)   # (the shape osum; F12 prints the real ones)
+    bar, fr = (int(c[-1][0]), int(c[-1][1])) if c else (32, 1)
     ox, oy = gx + fr, gy + fr + bar + 1
     if re.search(r"explorer: strip h=\d+", t):
-        oy = gy + fr     # r454: the drawing area starts at the top of the title bar (the tabs live there)
+        oy = gy + fr
     rects = {}
     for m in re.finditer(r"explorer: rect id=(\d+) kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t):
         rects[int(m.group(1))] = tuple(int(v) for v in m.groups()[1:])
@@ -46,7 +40,6 @@ def main(out):
     kinds = re.findall(r"explorer: navrows ([hpus]+)", t)
     kinds = kinds[-1] if kinds else ""
     im = Image.open(os.path.join(out, "01-explorer.ppm")).convert("RGB")
-    # ---- the detail list (id 26): header 28 + 2, then rows of `zh`
     check(26 in rects, "the detail list reports its rectangle (`explorer: rect id=26`; a torn serial line loses it)")
     if 26 not in rects:
         return
@@ -64,7 +57,6 @@ def main(out):
         check(abs(ic - rc) <= 1.0 and abs(tc - rc) <= 1.0,
               "detail list row %d: icon %+.1f, text %+.1f from the row centre" % (i, ic - rc, tc - rc))
     check(nrow >= 4, "%d detail rows measured" % nrow)
-    # ---- the navigation pane (id 24): one row per char of `navrows`
     if 24 in rects and kinds:
         lx, ly, lw, lh = rects[24]
         X, Y = ox + lx, oy + ly
@@ -82,12 +74,11 @@ def main(out):
                 continue
             ic, tc, rc = r[0], r[1], r[2]
             if r[4][1] - r[4][0] < 4:
-                continue            # ".." has no body of lower-case letters to measure
+                continue
             measured += 1
             check(abs(ic - rc) <= 1.0 and abs(tc - rc) <= 1.0,
                   "navigation row %d (%s): icon %+.1f, text %+.1f" % (i, k, ic - rc, tc - rc))
         check(measured >= 5, "%d navigation rows measured" % measured)
-    # ---- the icon buttons of the address row (ids 4..7) and of the command bar (30..37): ink centre = button centre
     for rid in (4, 5, 6, 7, 30, 31, 32, 33, 34, 35, 36, 37):
         if rid not in rects:
             continue
@@ -100,15 +91,11 @@ def main(out):
         if ys:
             off = (min(ys) + max(ys)) / 2.0 - (Y + (bh - 1) / 2.0)
             check(abs(off) <= 1.0, "icon button %d: icon %+.1f from the middle" % (rid, off))
-    # ---- the title bar: the title text and the three control glyphs on the centre line of the bar
     wm = re.findall(r"wm: fen i=\d+ id=\d+ x=%d y=%d w=(\d+) h=\d+ [^\n]*? bar=(\d+) capw=\d+ fr=(\d+)" % (gx, gy), t)
     if wm:
         ww, tbar, tfr = (int(v) for v in wm[-1])
         cy_bar = gy + tfr + (tbar - 1) / 2.0
         tbg = im.getpixel((gx + tfr + 3, int(cy_bar)))[:3]
-        # the title is judged like tools/fourbugs does (Justin's complaint of 04.10.2026): the gap above the ascender top and
-        # the gap below the BASELINE agree within a pixel (descenders hang below the baseline and are not counted: a
-        # title of "File Explorer" has a `p`, a title of "Terminal" has none, and both must look centred)
         rows = []
         for yy in range(gy + tfr, gy + tfr + tbar):
             n = 0
@@ -117,7 +104,6 @@ def main(out):
                 if sum(abs(a - b) for a, b in zip(px, tbg)) > 150:
                     n += 1
             rows.append(n)
-        # r454: with the tabs in the title bar there is no server title text here (the tab labels are measured below)
         if rows and max(rows) > 0 and oy == gy + fr + bar + 1:
             inked = [i for i, n in enumerate(rows) if n > 0]
             solid = [i for i, n in enumerate(rows) if n * 100 >= max(rows) * 35]
@@ -130,7 +116,6 @@ def main(out):
             if box:
                 off = (box[2] + box[3]) / 2.0 - cy_bar
                 check(abs(off) <= 1.0, "title bar: the %s glyph is %+.1f from the middle of the bar" % (nm, off))
-    # ---- the tabs (picture 02-tabs): the label of each tab on the centre line of its box
     p2 = os.path.join(out, "02-tabs.ppm")
     if os.path.exists(p2):
         t2 = Image.open(p2).convert("RGB")
@@ -143,7 +128,6 @@ def main(out):
                 if r:
                     off = (r[2] + r[3]) / 2.0 - (Y + (bh - 1) / 2.0)
                     check(abs(off) <= 1.0, "tab %d: the label is %+.1f from the middle of the tab" % (rid - 49, off))
-    # ---- the context menu (picture 03-menu): the text of each row on its centre line
     p3 = os.path.join(out, "03-menu.ppm")
     mr = re.findall(r"explorer: menurect wx=(\d+) wy=(\d+) wh=(\d+) zh=(\d+)", t)
     if os.path.exists(p3) and mr:
@@ -159,7 +143,6 @@ def main(out):
                 done += 1
                 check(abs(r[0] - (y0 + (mzh - 1) / 2.0)) <= 1.0, "menu row %d: the text is %+.1f from the middle of the row" % (rI, r[0] - (y0 + (mzh - 1) / 2.0)))
         check(done >= 4, "%d menu rows measured" % done)
-    # ---- the task bar: the pinned icons and the start button on the centre line of the bar
     gm = re.findall(r"taskbar: geom edge=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t)
     if gm:
         bx0, by0, bw0, bh0 = (int(v) for v in gm[-1])

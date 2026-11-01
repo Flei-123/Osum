@@ -121,7 +121,6 @@ def main(argv):
         print("min: NO stroke -- rows %s" % zeilen)
         bad += 1
 
-    # --- MAX: Rand voll, Mitte leer
     g = felder[1][2]
     rand = (sum(1 for c in g[0] if dunkel(c, grund))
             + sum(1 for c in g[9] if dunkel(c, grund))
@@ -140,11 +139,11 @@ def main(argv):
     for row in g:
         for c in row:
             cnt2[c] += 1
-    grund2 = cnt2.most_common(1)[0][0]
-    dia = sum(1 for k in range(10) if dunkel(g[k][k], grund2)) \
-        + sum(1 for k in range(10) if dunkel(g[k][9 - k], grund2))
+    reason2 = cnt2.most_common(1)[0][0]
+    dia = sum(1 for k in range(10) if dunkel(g[k][k], reason2)) \
+        + sum(1 for k in range(10) if dunkel(g[k][9 - k], reason2))
     kante = sum(1 for k in range(2, 8)
-                if dunkel(g[0][k], grund2) or dunkel(g[9][k], grund2))
+                if dunkel(g[0][k], reason2) or dunkel(g[9][k], reason2))
     if dia >= 18 and kante == 0:
         print("close: cross ok  (%d of 20 diagonal points, %d edge points)"
               % (dia, kante))
@@ -153,19 +152,19 @@ def main(argv):
         bad += 1
 
     fx = bx + 2 * CAP_W
-    flaeche = Counter()
+    area = Counter()
     for j in range(by, by + h):
         for i in range(fx, fx + CAP_W):
-            flaeche[at(i, j)] += 1
-    haupt, hn = flaeche.most_common(1)[0]
-    r, gg, b = haupt
+            area[at(i, j)] += 1
+    main_2, hn = area.most_common(1)[0]
+    r, gg, b = main_2
     rot = r > 120 and r > gg + 60 and r > b + 60
     if rot:
-        hell = sum(1 for k in range(10)
-                   if sum(g[k][k]) > sum(haupt) + 150)
+        bright = sum(1 for k in range(10)
+                   if sum(g[k][k]) > sum(main_2) + 150)
         print("hover: red ok  area #%02x%02x%02x on %d of %d points, "
-              "kreuz hell auf %d von 10" % (r, gg, b, hn, CAP_W * h, hell))
-        if hell < 6:
+              "kreuz hell auf %d von 10" % (r, gg, b, hn, CAP_W * h, bright))
+        if bright < 6:
             print("hover: but the cross is NOT bright enough")
             bad += 1
     else:

@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tmflick/judge.py <dir> <prefix> [--max N] -- W-FLICKER: count frames whose STATIC regions differ from the per-pixel median of the series.
-
-Static regions of the task manager window (1920x1080 wigapp, window at 21,17 .. 983,619): the navigation rail text rows and the
-title bar are never repainted with different content, so any pixel change there between two screendumps is a half-painted picture the
-window server composed (the in-place paint cleared the window and the screendump caught it before the widgets came back).
-"""
 import glob
 import sys
 

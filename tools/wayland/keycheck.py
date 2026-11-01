@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wayland/keycheck.py <us|de> < wlin-log-lines
-
-What a real client does with the events wayd sent: it feeds the modifier events and the key events into libxkbcommon (the keymap of
-the layout, compiled from the same text wayd sent) and asks for the keysym of every key press. Reads `wlin[X]: ...` lines on stdin
-(lines `mods ... depressed=N` and `key ... key=N state=S`) and prints the keysyms as the client would see them, in order:
-
-    syms: a A 1 exclam Ctrl+c Up
-
-Shift, Control and AltGr key presses themselves are not listed. An `us` or `de` layout is compiled by name (rules evdev, model pc105).
-"""
 import ctypes
 import ctypes.util
 import re

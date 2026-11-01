@@ -147,7 +147,6 @@ def hauptschluessel(hdr, pw):
     return k, None, -1
 
 
-# --------------------------------------------------------------- lies
 
 def cmd_lies(pfad, pw):
     """Was Osum geschrieben hat, mit fremdem Werkzeug aufmachen."""
@@ -174,7 +173,6 @@ def cmd_lies(pfad, pw):
     return 0
 
 
-# ----------------------------------------------------------- schreib
 
 def cmd_schreib(pfad, pw, t=1, m=64, p=1, bloecke=8192):
     """EINEN TRAEGER ANLEGEN, DEN NUR DIESES PROGRAMM GESCHRIEBEN HAT.
@@ -185,7 +183,7 @@ def cmd_schreib(pfad, pw, t=1, m=64, p=1, bloecke=8192):
     `os.urandom`.
     """
     mk = os.urandom(KEY_LEN)
-    while mk[:32] == mk[32:]:          # XTS verbietet gleiche Haelften
+    while mk[:32] == mk[32:]:
         mk = os.urandom(KEY_LEN)
     salt = os.urandom(SALT_LEN)
     wrap = kdf(pw, salt, t, m, p)
@@ -218,7 +216,6 @@ def cmd_schreib(pfad, pw, t=1, m=64, p=1, bloecke=8192):
     return 0
 
 
-# --------------------------------------------------------------- roh
 
 def cmd_roh(pfad):
     """Das Rohgeraet ansehen: steht dort irgendetwas Erkennbares?
@@ -266,7 +263,6 @@ def cmd_roh(pfad):
     return 0
 
 
-# ---------------------------------------------------------- vektoren
 
 def cmd_vektoren(orakel):
     """Die Rechnung von Osum gegen die Normen und gegen OpenSSL.
@@ -281,7 +277,6 @@ def cmd_vektoren(orakel):
     gesamt_gut = 0
     gesamt_alle = 0
 
-    # --- BLAKE2b gegen hashlib -------------------------------------
     fr, soll = [], []
     for mlen in (0, 1, 2, 63, 64, 65, 127, 128, 129, 200, 1000):
         msg = bytes((i * 7 + 3) & 255 for i in range(mlen))
@@ -332,7 +327,6 @@ def cmd_vektoren(orakel):
     gesamt_gut += gut
     gesamt_alle += len(soll)
 
-    # --- XTS gegen OpenSSL, BEIDE Richtungen -----------------------
     fr, soll = [], []
     for n in (16, 32, 48, 512, 4096):
         for kn in range(3):
@@ -359,15 +353,11 @@ def cmd_vektoren(orakel):
     gesamt_alle += len(soll)
 
     schlecht = [
-        # XTS mit gleichen Schluesselhaelften (FIPS 140-2 IG A.9)
         "xtsenc %s %s %s" % (("11" * 32 + "11" * 32), "00" * 16, "00" * 16),
-        # zu kurzer Block
         "xtsenc %s %s %s" % ("00" * 32 + "11" * 32, "00" * 16, "00" * 8),
         "xtsenc %s %s %s" % ("00" * 32, "00" * 16, "00" * 16),
         "argon2id 4142 4142 1 8 1 32",
-        # Argon2 mit m < 8*p
         "argon2id 4142 %s 1 8 4 32" % ("41" * 16),
-        # unbekanntes Wort
         "quatsch 00",
     ]
     ist = frag(schlecht)
@@ -401,13 +391,13 @@ def _ofs_leser(blk):
         sz = struct.unpack_from("<Q", ino, 8)[0]
         need = (sz + SECTOR - 1) // SECTOR
         out = []
-        for i in range(8):                      # I_DIRECT, acht ab OFS2
+        for i in range(8):
             if len(out) >= need:
                 break
             p = struct.unpack_from("<Q", ino, 24 + 8 * i)[0]
             if p:
                 out.append(p)
-        ind = struct.unpack_from("<Q", ino, 112)[0]     # I_INDIRECT
+        ind = struct.unpack_from("<Q", ino, 112)[0]
         if len(out) < need and ind:
             ib = blk(ind)
             for j in range(PER_BLOCK):
@@ -416,7 +406,7 @@ def _ofs_leser(blk):
                 p = struct.unpack_from("<Q", ib, j * 8)[0]
                 if p:
                     out.append(p)
-        dind = struct.unpack_from("<Q", ino, 120)[0]    # I_DINDIRECT
+        dind = struct.unpack_from("<Q", ino, 120)[0]
         if len(out) < need and dind:
             db = blk(dind)
             for j in range(PER_BLOCK):

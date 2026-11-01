@@ -18,7 +18,6 @@ except Exception:
 
 
 class Wire:
-    """Zeilen und Nutzlasten auf einem TLS-Strom."""
 
     def __init__(self, s):
         self.s = s
@@ -46,8 +45,6 @@ class Wire:
         return d
 
     def nachricht(self):
-        """Eine Zeile plus ihre Nutzlast. Die Laenge ist immer das
-        letzte Feld -- so steht es im Protokoll."""
         z = self.zeile()
         f = z.split(" ")
         laenge = 0
@@ -100,7 +97,7 @@ def main():
 
     log = open(a.aus, "w")
 
-    def sag(*teile):
+    def say(*teile):
         log.write(" ".join(str(t) for t in teile) + "\n")
         log.flush()
 
@@ -124,101 +121,99 @@ def main():
     lauscher.bind(("0.0.0.0", a.port))
     lauscher.listen(4)
     lauscher.settimeout(a.wartezeit)
-    sag("BEREIT", a.port)
+    say("BEREIT", a.port)
 
     ergebnis = 0
     for runde in range(a.verbindungen):
-        ergebnis = eine_verbindung(a, ctx, lauscher, sag, auftraege, runde)
+        ergebnis = eine_verbindung(a, ctx, lauscher, say, auftraege, runde)
     lauscher.close()
     log.close()
     return ergebnis
 
 
-def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
+def eine_verbindung(a, ctx, lauscher, say, auftraege, runde):
     try:
         roh, adr = lauscher.accept()
     except socket.timeout:
-        sag("KEINE-VERBINDUNG")
+        say("KEINE-VERBINDUNG")
         return 1
-    sag("VERBUNDEN", adr[0])
+    say("VERBUNDEN", adr[0])
     roh.settimeout(a.wartezeit)
     try:
         s = ctx.wrap_socket(roh, server_side=True)
     except Exception as e:
-        sag("HANDSCHLAG-GESCHEITERT", type(e).__name__)
+        say("HANDSCHLAG-GESCHEITERT", type(e).__name__)
         return 1
-    sag("TLS", s.version(), s.cipher()[0])
+    say("TLS", s.version(), s.cipher()[0])
 
     d = Wire(s)
     pub = None
     try:
-        # ---------------------------------------------------- Anmeldung
         f, _ = d.nachricht()
-        sag("GRUSS", " ".join(f))
+        say("GRUSS", " ".join(f))
         f, _ = d.nachricht()
         if f[0] != "hello":
-            sag("FEHLER kein `hello`")
+            say("ERROR no `hello`")
             return 1
         pub = bytes.fromhex(f[1])
-        sag("PUB", f[1])
+        say("PUB", f[1])
 
         if not a.kein_beweis:
             nonce = os.urandom(32)
             d.sende(["challenge", nonce.hex()])
             f, _ = d.nachricht()
             if f[0] != "proof":
-                sag("FEHLER kein `proof`, sondern", f[0])
+                say("ERROR no `proof`, but", f[0])
                 return 1
             sig = bytes.fromhex(f[1])
-            sag("SIG", f[1])
+            say("SIG", f[1])
             if HAT_CRYPTO:
                 try:
                     Ed25519PublicKey.from_public_bytes(pub).verify(sig, nonce)
-                    sag("BEWEIS gut")
+                    say("BEWEIS gut")
                 except InvalidSignature:
-                    sag("BEWEIS FALSCH")
+                    say("BEWEIS FALSCH")
                     return 1
                 try:
                     Ed25519PublicKey.from_public_bytes(pub).verify(
                         sig, os.urandom(32))
-                    sag("GEGENPROBE FALSCH-ANGENOMMEN")
+                    say("GEGENPROBE FALSCH-ANGENOMMEN")
                 except InvalidSignature:
-                    sag("GEGENPROBE gut")
+                    say("GEGENPROBE gut")
             else:
-                sag("BEWEIS ungeprueft (python3-cryptography fehlt)")
+                say("BEWEIS ungeprueft (python3-cryptography fehlt)")
 
         if a.kopplung and a.kopplung_web:
             wire_code = hex_von(a.kopplung) if a.kopplung_hex else a.kopplung
             for n in range(abs(a.kopplung_web)):
                 d.sende(["pairing-needed", wire_code])
                 f, _ = d.nachricht()
-                sag("KOPPLUNG-WEB", n + 1, " ".join(f[:1]))
+                say("KOPPLUNG-WEB", n + 1, " ".join(f[:1]))
                 if f[0] != "hello":
-                    sag("KOPPLUNG-WEB-FALSCH", f[0])
+                    say("KOPPLUNG-WEB-FALSCH", f[0])
                     return 1
             if a.kopplung_web < 0:
-                sag("KOPPLUNG-WEB-ENDE ohne Freigabe")
+                say("PAIRING-WEB-END without approval")
                 return 0
         elif a.kopplung:
             wire_code = hex_von(a.kopplung) if a.kopplung_hex else a.kopplung
             d.sende(["pairing-needed", wire_code])
             f, _ = d.nachricht()
-            sag("KOPPLUNG", " ".join(f))
+            say("KOPPLUNG", " ".join(f))
             if f[0] == "pair-rejected":
-                sag("KOPPLUNG-ABGELEHNT")
+                say("KOPPLUNG-ABGELEHNT")
                 return 0
             if f[0] != "pair" or f[1] != wire_code:
-                sag("KOPPLUNG-FALSCH")
+                say("KOPPLUNG-FALSCH")
                 return 1
         d.sende(["welcome"])
-        sag("ANGEMELDET")
+        say("ANGEMELDET")
 
-        # ---------------------------------------------------- Auftraege
         for nr, (art, arg1, nutzhex) in enumerate(auftraege, start=1):
             nutz = bytes.fromhex(nutzhex) if nutzhex else b""
             d.sende(["job", str(nr), wire_kind(art), hex_von(wire_arg(art, arg1)), "0"], nutz)
             if a.abriss and nr == 1:
-                sag("ABRISS nach Auftrag", nr)
+                say("ABRISS nach Auftrag", nr)
                 try:
                     s.shutdown(socket.SHUT_RDWR)
                 except Exception:
@@ -227,19 +222,19 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
                 return 0
             f, inhalt = d.nachricht()
             if f[0] != "done":
-                sag("FEHLER unerwartet", " ".join(f))
+                say("FEHLER unerwartet", " ".join(f))
                 return 1
             dig = hashlib.sha256(inhalt).hexdigest()
-            sag("ANTWORT", f[1], art, STATUS_LOG.get(f[2], f[2]), len(inhalt), dig)
+            say("ANTWORT", f[1], art, STATUS_LOG.get(f[2], f[2]), len(inhalt), dig)
             with open("%s.%s.bin" % (a.aus, f[1]), "wb") as fh:
                 fh.write(inhalt)
             if f[2] == "failed":
-                sag("GRUND", inhalt.decode("utf-8", "replace").strip())
+                say("GRUND", inhalt.decode("utf-8", "replace").strip())
         d.sende(["bye"])
-        sag("TSCHUESS")
+        say("TSCHUESS")
     except (EOFError, socket.timeout, ConnectionResetError,
             ssl.SSLError, OSError) as e:
-        sag("ABGERISSEN", type(e).__name__)
+        say("ABGERISSEN", type(e).__name__)
     finally:
         try:
             s.close()

@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/i18n/diff.py <a.ppm> <b.ppm> [x y w h]
-#
-#
-#
 import sys
 
 

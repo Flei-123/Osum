@@ -3,7 +3,7 @@
 import re
 import sys
 
-ERSATZ = [
+FALLBACK = [
     (r'\(\*\(\*v\)\.m\)\.mem', 'mem_p'),
     (r'mem_bound\(v, ([^,]+), ([^)]+)\)', r'mem_ok(\1, \2)'),
     (r'g_ld32\(v, ', 'mem_ld32('),
@@ -13,7 +13,6 @@ ERSATZ = [
     (r'g_st8\(v, ', 'mem_st8('),
     (r'g_st64\(v, ', 'mem_st64('),
     (r'g_st16\(v, ', 'mem_st16('),
-    # Argumente
     (r'\(\*v\)\.argv_von', 'wasi_argv_von'),
     (r'\(\*v\)\.argc', 'wasi_argc'),
     (r'\(\*v\)\.start', 'wasi_start'),
@@ -31,7 +30,7 @@ def ziehen(quelle):
     start = next(i for i, l in enumerate(lines) if l.startswith('const E_OK'))
     end = next(i for i, l in enumerate(lines) if l.startswith('fn wasi_rufen'))
     txt = '\n'.join(lines[start:end])
-    for pat, rep in ERSATZ:
+    for pat, rep in FALLBACK:
         txt = re.sub(pat, rep, txt)
     if '(*v)' in txt or '*mut VM' in txt:
         rest = [l for l in txt.split('\n') if '(*v)' in l or '*mut VM' in l]

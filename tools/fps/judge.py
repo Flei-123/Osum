@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""tools/fps/judge.py -- W-E: judge the frame cadence cases and the FPS overlay. usage: judge.py <outdir>"""
 import os, re, sys
 
 PH = {1: "boot rest", 2: "idle 6 s", 3: "pointer sweep", 4: "window drag", 5: "start menu"}
@@ -39,14 +38,9 @@ def p95_bucket(f):
     return 7
 
 
-# r1039 (17.10.2026): hard thresholds. The `wm: cadence` lines do not describe the active phases (they are printed on every desktop pulse and
-# every F12; their intervals are dominated by idle repaints), so the verdict uses the slices of tools/latency: every F12 and every pulse prints
-# `wm: bild` (frame times) + `wm: lat` (poll gaps, frames driven by the pointer). A slice with >= 3 pointer-driven frames is an ACTIVE slice;
-# the first two slices (boot rest, idle) are not judged. The drehbuch tools/fps/fps.txt now runs through tools/design/audit.sh (PS/2 mouse
-# from the QEMU monitor), so the pointer sweep / window drag / start menu phases really get fed.
-LIM_GAP = 2           # poll gaps > 33 ms per active slice (the serial pulse itself is one)
-MIN_POLLS = 2000      # median polls per active slice of the shipping loop (the old 10-20 ms tick loop makes < 1000)
-MIN_FRAMES = 12       # median painted frames per active slice (a sweep must be seen, not skipped)
+LIM_GAP = 2
+MIN_POLLS = 2000
+MIN_FRAMES = 12
 
 
 def slices(case):
@@ -126,9 +120,7 @@ if os.path.isdir(os.path.join(sys.argv[1], "fpsoff")):
     chk(offv is not None and offv == 0, "fps off (counter-proof): nothing drawn top-right (%s green pixels)" % offv)
 
 
-# ---- FPS-OV: Ctrl+Alt+F, numbers from the real clocks (serial `wm: fpsov`), photos, counter-proofs
 def ov_phases(case):
-    """list of phases (cut at `wm: cadence` lines), each a list of dicts of the `wm: fpsov` lines in it"""
     p = os.path.join(sys.argv[1], case, "serial.txt")
     out, cur = [], []
     if not os.path.exists(p):
@@ -151,8 +143,6 @@ if ph is not None:
     chk("ptrcfg: fps saved on" in txt, "ovon: the switch was written to /etc/mouse.conf (serial: ptrcfg: fps saved on)")
     allv = [r for p in ph for r in p]
     chk(len(allv) >= 10, "ovon: %d fpsov lines (the overlay clocks run)" % len(allv))
-    # The phases cannot be cut by `wm: cadence` (it is printed on every desktop pulse too), so the verdict is on ALL lines. The test desktop
-    # is never silent (terminal trace line every 0.5 s, RAM/CPU widgets): its baseline is ~4 fps (ovoff cadence lines: ~12 frames per pulse).
     fpsv = [r["fps"] for r in allv]
     print("== ovon: fps over the run: min %d max %d, mean frame time up to %d us, present up to %d/s" % (min(fpsv or [0]), max(fpsv or [0]),
           max([r["avg"] for r in allv] or [0]), max([r["pres"] for r in allv] or [0])))

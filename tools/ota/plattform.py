@@ -1,43 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/plattform.py -- WOFUER ein Paket ist, in einem Wort.
-
-Runde STORE-MOBIL. Das VERZEICHNIS einer Auslieferung bekommt je
-Paketzeile eine sechste Spalte:
-
-    paket  <name> <fassung> <sha256> <oktette> <datei> <plattform>
-
-und `plattform` ist eines dieser Woerter:
-
-    osum-x86_64     fuer Osum auf x86-64
-    osum-aarch64    fuer Osum auf AArch64
-    osum-any        fuer jede Osum-Maschine (Daten, Skripte, Vorlagen)
-
-Dieselben Woerter benutzt der Katalog des Speichers (`index.json`,
-/root/orientstore, Feld `ziele`), damit ein Telefon und ein
-Osum-Rechner mit EINEM Vokabular arbeiten.
-
-WOHER DAS WORT KOMMT, in dieser Reihenfolge:
-
-  1. `plattform=` in den Metadaten des Pakets -- wenn ein Rezept es
-     ausdruecklich sagt;
-  2. `arch=` in den Metadaten (die Schreibweise des Speichers);
-  3. die NUTZLAST: steckt ein ELF darin, sagt sein Kopf (`e_machine`),
-     fuer welche Maschine es uebersetzt wurde. Das ist der Normalfall
-     fuer alles, was `tools/loader/pakete.sh` baut, denn `opk.py` schreibt
-     heute weder `arch=` noch `plattform=`;
-  4. kein ELF: `osum-any`.
-
-Ein ELF fuer eine Maschine, die Osum nicht kennt, ist ein FEHLER
-und keine Vermutung -- das Werkzeug bricht ab und sagt, welche Zahl es
-gelesen hat.
-
-Warum die Kennung OTA2 bleibt: die Spalte ist keine Sicherheitsaussage.
-Ein Geraet von vor dieser Runde liest die Felder 0 bis 4 und ignoriert
-die sechste Spalte; ein Geraet DIESER Runde blendet Zeilen OHNE die
-Spalte aus und sagt das. Was ein altes Geraet dabei verliert, ist nur
-die Auswahl -- es installiert, wie bisher, alles.
-"""
 import struct
 
 ELF_MASCHINE = {62: "x86_64", 183: "aarch64"}
@@ -45,7 +7,6 @@ WOERTER = ("osum-x86_64", "osum-aarch64", "osum-any")
 
 
 def teile(roh):
-    """(meta, daten) eines .opk, oder ValueError."""
     if len(roh) < 64 or roh[0:8] != b"OPKG0001":
         raise ValueError("not an OPKG file (Kennung fehlt)")
     ml, dl = struct.unpack_from("<QQ", roh, 8)
@@ -53,17 +14,13 @@ def teile(roh):
 
 
 def elf_maschine(oktette):
-    """e_machine eines ELF-Kopfes als Zahl, oder None (kein ELF)."""
     if len(oktette) < 20 or oktette[0:4] != b"\x7fELF":
         return None
     (em,) = struct.unpack_from("<H", oktette, 18)
     return em
 
 
-def maschinen_im_archiv(daten):
-    """Alle e_machine-Zahlen der ELF-Dateien im deterministischen Archiv
-    von `opk.py` (`archiv_bauen`). Leer, wenn keine ELF darin ist oder
-    die Nutzlast kein solches Archiv ist."""
+def maschinen_im_archive(daten):
     aus = set()
     i = 0
     try:
@@ -87,7 +44,6 @@ def maschinen_im_archiv(daten):
 
 
 def aus_meta(meta):
-    """`plattform=` oder `arch=` aus den Metadaten, sonst None."""
     plattform = arch = None
     for z in meta.decode("utf-8", "replace").split("\n"):
         if z.startswith("plattform="):
@@ -109,15 +65,15 @@ def plattform_von_roh(roh, name="?"):
             raise SystemExit("plattform: %s nennt %r -- bekannt sind %s"
                              % (name, p, ", ".join(WOERTER)))
         return p
-    ems = maschinen_im_archiv(daten)
+    ems = maschinen_im_archive(daten)
     if not ems:
         return "osum-any"
     woerter = sorted(set(ELF_MASCHINE.get(e, "elf-%d" % e) for e in ems))
-    fremd = [w for w in woerter if w.startswith("elf-")]
-    if fremd:
+    foreign = [w for w in woerter if w.startswith("elf-")]
+    if foreign:
         raise SystemExit("plattform: %s traegt ein ELF fuer eine Maschine, "
                          "die Osum nicht kennt (e_machine %s)"
-                         % (name, ", ".join(w[4:] for w in fremd)))
+                         % (name, ", ".join(w[4:] for w in foreign)))
     if len(woerter) > 1:
         raise SystemExit("plattform: %s traegt ELF-Dateien fuer MEHRERE "
                          "Maschinen (%s) -- ein Paket, eine Maschine"

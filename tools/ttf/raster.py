@@ -84,7 +84,6 @@ def tdiv(n, d):
     return q
 
 
-# --------------------------------------------------------------- lesen
 
 class Ttf:
     """Der Leser.  Wortgleich zu `kernel/gfx/ttf.fi`."""
@@ -114,7 +113,6 @@ class Ttf:
         self.cmap_off = self._cmap4()
         self.kern_off, self.kern_paare = self._kern0()
 
-    # -- cmap 4 --------------------------------------------------------
     def _cmap4(self):
         o = self.tab["cmap"][0]
         n = u16(self.d, o + 2)
@@ -154,7 +152,6 @@ class Ttf:
             return 0
         return (g + dl) & 0xFFFF
 
-    # -- kern 0 --------------------------------------------------------
     def _kern0(self):
         if "kern" not in self.tab:
             return 0, 0
@@ -183,7 +180,6 @@ class Ttf:
                 hi = m
         return 0
 
-    # -- loca / hmtx ---------------------------------------------------
     def loca(self, gid):
         o = self.tab["loca"][0]
         if self.locfmt == 0:
@@ -196,7 +192,6 @@ class Ttf:
             gid = self.nhmetrics - 1
         return u16(self.d, h + gid * 4)
 
-    # -- glyf ----------------------------------------------------------
     def contours(self, gid, tiefe=0):
         """Die Umrisse als Listen von (x, y, auf_der_kurve), in Font-Einheiten."""
         a, b = self.loca(gid), self.loca(gid + 1)
@@ -272,7 +267,7 @@ class Ttf:
                 p += 4
             elif flags & 0x80:
                 p += 8
-            if not (flags & 2):          # ARGS_ARE_XY_VALUES fehlt
+            if not (flags & 2):
                 dx = dy = 0
             for k in self.contours(gid, tiefe + 1):
                 aus.append([(x + dx, y + dy, an) for (x, y, an) in k])
@@ -281,7 +276,6 @@ class Ttf:
         return aus
 
 
-# ----------------------------------------------------------- rastern
 
 def f26(v, scale):
     """Font-Einheit -> 26.6.  `>>` rundet nach unten, in beiden Sprachen."""
@@ -369,19 +363,6 @@ class Glyphe:
         return sum(1 for v in self.a if v >= 128)
 
 
-# ======================================================== FUI-KERNTEXT
-#
-# SINCE ROUND FUI-KERNTEXT (26.09.2026) THE KERNEL DRAWS fUi INK TOO.
-# kernel/gfx/ttf.fi hands every glyph to fUi's rasteriser
-# (kernel/gfx/fuiink.fi) and only falls back to the 4x4 samples below
-# when fUi cannot draw it (no vector unit: `nofpu`; a glyph larger than
-# 256 x 256). So `raster` -- what every test here compares a screenshot
-# with -- is fUi's ink, and the 4x4 rasteriser is `raster_kern`, the
-# second version of the FALLBACK.
-#
-# OSUM_TINTE=kern in the environment (or `kern:` in front of a font path
-# in tools/gfx/checkshot.py) selects the old ink, for a boot with
-# `nofpu`.
 TINTE = os.environ.get("OSUM_TINTE", "fui")
 
 
@@ -466,7 +447,6 @@ class Schrift:
     """Ein geladener Zeichensatz samt Glyphenspeicher."""
 
     def __init__(self, pfad, px, tinte=None):
-        # `kern:` / `fui:` in front of the path choose the ink.
         if pfad.startswith("kern:"):
             pfad, tinte = pfad[5:], "kern"
         elif pfad.startswith("fui:"):
@@ -523,7 +503,6 @@ class Schrift:
         return aus
 
 
-# ------------------------------------------------------------ Befehle
 
 def summe(g):
     """FNV-1a ueber die rohen Deckungswerte -- dieselbe Zeile wie

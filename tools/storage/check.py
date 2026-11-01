@@ -32,7 +32,6 @@ PROBE = re.compile(
     r"du: probe pfad=(\S+)\s+idx=(\d+)\s+lauf=(\d+)\s+idxkb=(\d+)\s+"
     r"laufkb=(\d+)\s+ok=(\d+)")
 FERTIG = re.compile(r"du: probe done checked=(\d+)\s+falsch=(\d+)")
-# du: index [/data] okt=419868 kb=686  us10=158
 MESS = re.compile(r"du: (index|durchlauf) \[(\S+)\] okt=(\d+) kb=(\d+)")
 
 

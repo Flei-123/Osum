@@ -1,42 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/update/vectors.py -- SHA-512 and Ed25519 against their standards.
-
-WHY THIS FILE IS THE FIRST THING ROUND UPDATE BUILT. The whole point of
-this round is that the device stops trusting the transport and starts
-trusting a SIGNATURE. If the signature check is wrong in the direction of
-"accepts too much", the update path is worse than having none: it looks
-protected and is not. So the two primitives are measured before a single
-package is built, and they are measured three ways over:
-
-  1. AGAINST THE LITERAL VECTORS PRINTED IN THE RFC. Section 7.1 of RFC
-     8032 prints five complete Ed25519 vectors; they are typed in below
-     from the document text. They are the authority. A cross-check against
-     another implementation only proves that two implementations agree,
-     which is exactly what happens when both are wrong in the same way.
-  2. AGAINST THE OFFICIAL VECTOR FILE, all 1024 of it. `sign.input.gz` is
-     the file the Ed25519 authors published with the reference
-     implementation and the file RFC 8032's own test driver (Appendix B)
-     consumes: one line per vector, `sk||pk : pk : msg : sig||msg :`.
-     Every line is checked THREE times -- the public key derived from the
-     seed, the signature produced for the message, and the verification of
-     that signature.
-  3. AGAINST A SECOND, INDEPENDENT IMPLEMENTATION over generated inputs:
-     Python's `hashlib` (OpenSSL) for SHA-512 and `nacl` (libsodium) for
-     Ed25519. This is what catches the length and boundary cases no
-     standard prints.
-
-AND THE NEGATIVE SIDE, which is the half that actually protects anything:
-for every vector the runner also flips one bit -- in the message, in R, in
-S -- and requires the answer to be NO. A verifier that says yes to
-everything passes every positive test ever written.
-
-The thing under test is `.probe/uoracle`, a hosted Firn program that links
-THE SAME `lib/crypto/*.fi` files the kernel and `/bin/opk` link.
-
-    ./tools/update/vectors.py            everything
-    ./tools/update/vectors.py --quick    the RFC vectors and 64 of the 1024
-"""
 import gzip
 import hashlib
 import os
@@ -64,7 +27,6 @@ def x(b):
 
 
 def ask(lines):
-    """One batch through the oracle: a list of command lines -> answers."""
     p = subprocess.run([ORACLE], input="\n".join(lines) + "\n",
                        capture_output=True, text=True)
     if p.returncode != 0:
@@ -89,11 +51,7 @@ def check(group, name, got, want):
         BAD.append("%s / %s: got %s want %s" % (group, name, got, want))
 
 
-# =====================================================================
-# 1. SHA-512
-# =====================================================================
 def sha512_vectors():
-    # FIPS 180-4 and the two block-boundary cases that catch a padding bug.
     lit = [
         (b"abc",
          "ddaf35a193617aba cc417349ae204131 12e6fa4e89a97ea2 0a9eeee64b55d39a"
@@ -111,8 +69,6 @@ def sha512_vectors():
         check("sha512 / FIPS 180-4", "len %d" % len(m), got,
               "".join(want.split()))
 
-    # Against hashlib, over every length that can go wrong: around the 128
-    # octet block, around the 112 octet padding boundary, and long.
     rnd = random.Random(20260828)
     msgs = [bytes(rnd.getrandbits(8) for _ in range(n))
             for n in list(range(0, 260)) + [1000, 4096, 65000]]
@@ -122,11 +78,7 @@ def sha512_vectors():
               hashlib.sha512(m).hexdigest())
 
 
-# =====================================================================
-# 2. Ed25519 -- the five vectors printed in RFC 8032 7.1
-# =====================================================================
 RFC_VECTORS = [
-    # (name, secret key seed, public key, message, signature)
     ("TEST 1",
      "9d61b19deffd5a60ba844af492ec2cc4 4449c5697b326919703bac031cae7f60",
      "d75a980182b10ab7d54bfed3c964073a 0ee172f3daa62325af021a68f707511a",
@@ -170,9 +122,6 @@ def rfc_vectors():
         check(grp, name, got, w)
 
 
-# =====================================================================
-# 3. Ed25519 -- all 1024 vectors of the official sign.input
-# =====================================================================
 def sign_input():
     with gzip.open(SIGNINPUT, "rt") as f:
         rows = [ln.strip().split(":") for ln in f if ln.strip()]
@@ -196,9 +145,6 @@ def sign_input():
     return rows
 
 
-# =====================================================================
-# 4. THE NEGATIVE SIDE -- one flipped bit has to be refused
-# =====================================================================
 def negatives(rows):
     rnd = random.Random(4711)
     sample = rows if QUICK else rnd.sample(rows, 200)
@@ -209,35 +155,28 @@ def negatives(rows):
         pk = h(r[1])
         msg = h(r[2])
         sig = h(r[3])[:64]
-        # a bit in the message
         if msg:
             m2 = bytearray(msg)
             m2[rnd.randrange(len(m2))] ^= 1 << rnd.randrange(8)
             lines.append("verify %s %s %s" % (x(pk), x(sig), x(bytes(m2))))
             want.append(("negative / message bit", "#%d" % i, "0"))
-        # a bit in R
         s2 = bytearray(sig)
         s2[rnd.randrange(32)] ^= 1 << rnd.randrange(8)
         lines.append("verify %s %s %s" % (x(pk), x(bytes(s2)), x(msg)))
         want.append(("negative / R bit", "#%d" % i, "0"))
-        # a bit in S
         s3 = bytearray(sig)
         s3[32 + rnd.randrange(31)] ^= 1 << rnd.randrange(8)
         lines.append("verify %s %s %s" % (x(pk), x(bytes(s3)), x(msg)))
         want.append(("negative / S bit", "#%d" % i, "0"))
-        # a bit in the public key
         p2 = bytearray(pk)
         p2[rnd.randrange(32)] ^= 1 << rnd.randrange(8)
         lines.append("verify %s %s %s" % (x(bytes(p2)), x(sig), x(msg)))
         want.append(("negative / public key bit", "#%d" % i, "0"))
-        # S + L -- the same signature, non-canonically encoded. RFC 8032
-        # 8.4: a verifier that takes this makes signatures malleable.
         s = int.from_bytes(sig[32:], "little")
         if s + L < 2 ** 256:
             s4 = sig[:32] + (s + L).to_bytes(32, "little")
             lines.append("verify %s %s %s" % (x(pk), x(s4), x(msg)))
             want.append(("negative / S+L malleability", "#%d" % i, "0"))
-        # the signature of the NEXT vector's message
         other = h(sample[(i + 1) % len(sample)][2])
         if other != msg:
             lines.append("verify %s %s %s" % (x(pk), x(sig), x(other)))
@@ -246,9 +185,6 @@ def negatives(rows):
         check(grp, name, got, w)
 
 
-# =====================================================================
-# 5. Against libsodium (pynacl) over generated inputs
-# =====================================================================
 def against_libsodium():
     try:
         from nacl.signing import SigningKey, VerifyKey
@@ -275,7 +211,6 @@ def against_libsodium():
     for got, (grp, name, w) in zip(ask(lines), want):
         check(grp, name, got, w)
 
-    # And the other way round: what OUR signer produces, libsodium takes.
     rnd = random.Random(99)
     pairs = []
     lines = []

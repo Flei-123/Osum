@@ -22,8 +22,6 @@ import sys
 
 
 def go(x, y):
-    #
-    #
     out = ["mouse_move -120 -120"] * 12
     dx, dy = x, y
     while dx > 0 or dy > 0:

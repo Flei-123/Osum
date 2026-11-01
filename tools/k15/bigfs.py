@@ -36,7 +36,7 @@ import sys
 
 WOERTER = ["kupfer", "07", "datei", "quaste"]
 
-ORDNER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
+FOLDER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
           "chrom", "eisen"]
 
 
@@ -44,9 +44,9 @@ def namen(n):
     """Die Namen, in der Reihenfolge, in der sie angelegt werden."""
     aus = []
     for i in range(n):
-        ordner = ORDNER[i % len(ORDNER)]
-        unten = (i // len(ORDNER)) % 2 == 1
-        pfad = "/data/%s%s" % (ordner, "/tief" if unten else "")
+        folder = FOLDER[i % len(FOLDER)]
+        bottom = (i // len(FOLDER)) % 2 == 1
+        pfad = "/data/%s%s" % (folder, "/tief" if bottom else "")
         aus.append((pfad, "datei%04d.txt" % i))
     return aus
 

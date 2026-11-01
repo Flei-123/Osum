@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/platte/check.py -- the text plate follows the ink (r1062).
-
-    check.py <low.png> <low.serial> <full.png>
-
-low  = window_alpha=20 picture, full = window_alpha=100 picture of the SAME state.
-For every window label (rect from the `wlib: text` trace) the pixels split into
-  ink    : differ from the dominant colour of the rect in the full picture,
-  halo   : within 2 px (Chebyshev) of ink,
-  ground : the rest of the rect.
-Halo pixels must be equal in both pictures (opaque plate); ground pixels must differ (mixed with the backdrop).
-Prints: labels=N halo=N halo_same=N ground=N ground_diff=N corner=N corner_diff=N
-corner = the top-left pixel of each label rect (never ink).
-"""
 import importlib.util
 import os
 import re

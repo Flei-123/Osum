@@ -1,32 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/fenstermess.py -- FENSTER, LEISTE UND VOLLBILD NACHRECHNEN.
-
-    python3 tools/design/fenstermess.py <ausgabeordner> <breite> <hoehe>
-
-Justins Korrektur, woertlich: "in Windows koennen die Fenster auch nicht
-ueber die Taskleiste geschoben werden, ich hatte dir aber gesagt das
-soll so sein, das war mein Fehler. Ist das jetzt so oder nicht? Bitte
-mach's so wie Windows."
-
-WAS WINDOWS WIRKLICH TUT -- und was hier deshalb geprueft wird:
-
-  1. Die Leiste liegt IMMER OBENAUF. Ein normales Fenster darf durchaus
-     unter sie GESCHOBEN werden -- es verschwindet dort dahinter. Nicht
-     geblockt, nur darunter. Geprueft wird also NICHT, ob das Ziehen
-     verhindert wird (das waere falsch), sondern ob die Leiste nach dem
-     Ziehen noch vollstaendig sichtbar ist: Ebene der Leiste > Ebene des
-     Fensters, und das Leistenband im Bild unveraendert.
-  2. MAXIMIEREN endet an der ARBEITSFLAECHE. y+h darf die Oberkante der
-     Leiste nie ueberschreiten.
-  3. VOLLBILD (F11) endet am SCHIRM, liegt UEBER der Leiste und kommt
-     auf EXAKT die alte Geometrie zurueck.
-
-Gerechnet wird aus den Zeilen, die das System selbst gemeldet hat:
-`wm: work`, `wm: fen`, `wm: voll` und `taskbar: geom`. Das Bild wird
-nur dort befragt, wo eine Ebene allein nichts beweist -- beim
-Leistenband.
-"""
 import os
 import re
 import sys
@@ -38,7 +11,6 @@ def lies(pfad):
 
 
 def ppm(pfad):
-    """(breite, hoehe, bytes) eines P6-PPM."""
     d = open(pfad, "rb").read()
     i = 2
     tok = []
@@ -58,11 +30,10 @@ def ppm(pfad):
     return tok[0], tok[1], d[i:]
 
 
-def band(pfad, hoehe, von_unten):
-    """Die Farben des untersten Bandes -- das ist die Leiste."""
+def band(pfad, hoehe, von_bottom):
     w, h, px = ppm(pfad)
     s = {}
-    for y in range(h - von_unten, h, 2):
+    for y in range(h - von_bottom, h, 2):
         for x in range(0, w, 4):
             k = (y * w + x) * 3
             c = (px[k], px[k + 1], px[k + 2])
@@ -76,10 +47,10 @@ def i64(v):
 
 
 def main():
-    ordner = sys.argv[1]
+    folder = sys.argv[1]
     SW = int(sys.argv[2])
     SH = int(sys.argv[3])
-    t = lies(os.path.join(ordner, "serial.txt"))
+    t = lies(os.path.join(folder, "serial.txt"))
 
     pass_ = []
     fail = []
@@ -92,7 +63,6 @@ def main():
         fail.append(m)
         print("  FAIL  %s" % m)
 
-    # ---------------------------------------------- die Arbeitsflaeche
     print("== 0. DIE ARBEITSFLAECHE ==")
     mw = None
     for mw in re.finditer(
@@ -134,9 +104,7 @@ def main():
         bloecke.append([tuple(int(v) for v in f_) for f_ in fen])
     print("   %d measuring points (F12) on the wire" % len(bloecke))
 
-    def leiste_ebene(blk):
-        """Die Ebene des Fensters, das die Leiste ist -- das ist das
-        Fenster mit voller Breite am unteren Rand."""
+    def taskbar_ebene(blk):
         for (i_, id_, x, y, w, h, lay, fl, z) in blk:
             if w >= SW and h <= 100 and i64(y) >= SH - 200:
                 return lay, id_
@@ -152,7 +120,7 @@ def main():
 
     if bloecke:
         letzte = max(bloecke, key=tiefe)
-        lay_t, id_t = leiste_ebene(letzte)
+        lay_t, id_t = taskbar_ebene(letzte)
         if lay_t is None:
             print("   the bar cannot be recognised in the window list")
         else:
@@ -179,16 +147,16 @@ def main():
                 print("   no window reaches below the bar "
                       "-- das Ziehen hat es nicht so weit gebracht")
 
-    b1 = os.path.join(ordner, "11-fenster-normal.ppm")
-    b2 = os.path.join(ordner, "12-unter-der-leiste.ppm")
+    b1 = os.path.join(folder, "11-fenster-normal.ppm")
+    b2 = os.path.join(folder, "12-unter-der-leiste.ppm")
     if os.path.exists(b1) and os.path.exists(b2):
         hoehe = (SH - ty) if ty is not None else 80
         s1 = band(b1, SH, hoehe)
         s2 = band(b2, SH, hoehe)
-        gleich = sum(min(s1.get(c, 0), s2.get(c, 0))
+        eq = sum(min(s1.get(c, 0), s2.get(c, 0))
                      for c in set(s1) | set(s2))
         gesamt = sum(s1.values())
-        anteil = 100 * gleich // max(gesamt, 1)
+        anteil = 100 * eq // max(gesamt, 1)
         print("   bar band in the image: %d%% of the points unchanged"
               % anteil)
         if anteil >= 98:
@@ -198,7 +166,6 @@ def main():
                 "etwas deckt die Leiste zu" % (100 - anteil))
     print()
 
-    # ------------------------------------------------- 3. das Vollbild
     print("== 2. VOLLBILD (F11) ==")
     voll = re.findall(
         r"wm: voll id=(\d+) an=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)"
@@ -227,7 +194,6 @@ def main():
                 ok("fullscreen has no decoration (F_NODECO)")
             else:
                 bad("fullscreen still has frame/title (fl=%s)" % fl)
-        # der Rueckweg
         if ein and aus:
             vor = None
             for blk in bloecke:

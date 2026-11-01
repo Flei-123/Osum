@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vboxlag/drive.py <monitor-socket> <serial.txt> <outdir> <timeout_s>
-
-Logs in (as tools/inputlogin), then measures the pointer path with F12 between the phases:
-  P1 idle, P2 pointer over the desktop (400 small moves), P3 pointer over the taskbar (400 moves),
-  P4 a burst of 200 moves with 1 px steps over the desktop, screendump series during P2 (outdir/s*.ppm).
-Prints one `PH <name> ...` line per phase with the `wm: bild` and `wm: flush` numbers of that phase.
-"""
 import re, socket, sys, time
 
 mon, serial, outdir, tmo = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
@@ -62,9 +55,6 @@ def f12():
     cmd("sendkey f12", 0.6)
 
 
-# The serial lines of several CPUs tear into each other (worst under host load and with the `phases` rect log), so a marker
-# line like `glogin: bereit n=` may arrive without its prefix or not at all. Match the tolerant tails and fall back on the
-# earlier `glogin: fUi Szenenbaum` line plus a settle time.
 READY_MARKS = ("glogin: bereit", "bereit n=")
 LOGIN_MARKS = ("angemeldet als", "gemeldet als justin", "glogin: autostart", "glogin: desktop pid", "glogin: uid=")
 
@@ -84,7 +74,7 @@ while time.time() - t0 < tmo:
     if fui_at is None and "Szenenbaum" in read():
         fui_at = time.time()
     if fui_at is not None and time.time() - fui_at > 12:
-        ready = 1          # screen is up, ready line lost to torn serial output
+        ready = 1
         break
     time.sleep(1)
 if not ready:
@@ -117,17 +107,17 @@ for _try in range(4):
     if try_login():
         ok = True
         break
-    for _ in range(14):          # clear a half-typed field
+    for _ in range(14):
         cmd("sendkey backspace", 0.03)
 if not ok:
     print("RESULT login=0 ready=1")
     sys.exit(1)
-time.sleep(14)           # let the desktop come up (bar, programs)
+time.sleep(14)
 results = []
 
 
 def phase(name, action):
-    f12()                # reset counters (its own print is dropped)
+    f12()
     time.sleep(1.0)
     p0 = len(read())
     t = time.time()
@@ -177,7 +167,6 @@ phase("idle", a_idle)
 phase("desktop", a_desktop)
 phase("bar", a_bar)
 phase("slow", a_slow)
-# final picture (pointer parked at a fixed place): the A/B proof compares it between a normal and a `nodiff` run
 cmd("mouse_move -2000 -2000")
 cmd("mouse_move 700 300")
 time.sleep(1.5)

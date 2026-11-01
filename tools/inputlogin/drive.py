@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/inputlogin/drive.py <monitor-socket> <serial.txt> <timeout_s>
-
-Waits for the sign-in screen, moves the pointer, types the start password with
-sendkey and presses Enter. Prints one line: RESULT login=<0|1> keys=<n> ready=<0|1>.
-login=1 when the serial line `glogin: angemeldet als` shows up.
-"""
 import socket
 import sys
 import time

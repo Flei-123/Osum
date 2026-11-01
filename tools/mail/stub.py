@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/mail/stub.py -- tiny IMAP4 + SMTP test server (TLS or plain) for tools/mail/run.sh.
-#
-#   stub.py <outdir> <tls|plain> [cert key]
-#
-# Writes "<imap_port> <smtp_port>" to <outdir>/ports once both listen. Accepts the one
-# account justin / geheim. Mails received by SMTP land in <outdir>/msg-N.eml (after
-# undoing dot-stuffing). Not a mail server: just enough protocol for the client gate.
 import base64, os, socket, ssl, sys, threading
 
 OUT = sys.argv[1]

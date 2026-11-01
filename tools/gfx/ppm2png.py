@@ -27,7 +27,7 @@ import sys
 import zlib
 
 
-def ppm_lesen(pfad):
+def ppm_read(pfad):
     """P6 lesen. Der Kopf darf Kommentare enthalten, und die Felder
     duerfen durch beliebigen Zwischenraum getrennt sein -- so steht es
     in der Beschreibung des Formats, und QEMU haelt sich daran."""
@@ -49,9 +49,9 @@ def ppm_lesen(pfad):
             at += 1
         felder.append(int(roh[anfang:at]))
     at += 1
-    b, h, hoch = felder
-    if hoch != 255:
-        raise SystemExit("ppm2png: nur 8 Bit je Kanal, nicht %d" % hoch)
+    b, h, up = felder
+    if up != 255:
+        raise SystemExit("ppm2png: nur 8 Bit je Kanal, nicht %d" % up)
     daten = roh[at:at + b * h * 3]
     if len(daten) < b * h * 3:
         raise SystemExit("ppm2png: %d Oktette zu wenig"
@@ -68,13 +68,13 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    b, h, daten = ppm_lesen(argv[1])
+    b, h, daten = ppm_read(argv[1])
 
     zeilen = bytearray()
     schritt = b * 3
     for y in range(h):
         z = daten[y * schritt:(y + 1) * schritt]
-        zeilen.append(1)  # Filter "Sub"
+        zeilen.append(1)
         zeilen += z[:3]
         vorher = memoryview(z)[:-3]
         jetzt = memoryview(z)[3:]

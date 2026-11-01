@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#   python3 tools/design/dunkelmess.py <hell.ppm> <dunkel.ppm> [name]
-#
-#
-#
-#
 import sys
 
 
-def ppm_lesen(p):
+def ppm_read(p):
     d = open(p, 'rb').read()
     if not d.startswith(b'P6'):
         raise SystemExit("kein P6-PPM: " + p)
@@ -30,7 +24,7 @@ def ppm_lesen(p):
     return w, h, d[i:i + w * h * 3]
 
 
-def helligkeit(px, w, x0, y0, x1, y1, schritt=3):
+def brightness(px, w, x0, y0, x1, y1, schritt=3):
     s = 0.0
     n = 0
     for y in range(y0, y1, schritt):
@@ -46,13 +40,13 @@ if __name__ == '__main__':
         raise SystemExit(__doc__)
     hp, dp = sys.argv[1], sys.argv[2]
     name = sys.argv[3] if len(sys.argv) > 3 else hp.split('/')[-1]
-    wh, hh, ph = ppm_lesen(hp)
-    wd, hd, pd = ppm_lesen(dp)
+    wh, hh, ph = ppm_read(hp)
+    wd, hd, pd = ppm_read(dp)
     if (wh, hh) != (wd, hd):
         raise SystemExit("verschieden gross: %dx%d gegen %dx%d" % (wh, hh, wd, hd))
 
-    gh = helligkeit(ph, wh, 0, 0, wh, hh)
-    gd = helligkeit(pd, wd, 0, 0, wd, hd)
+    gh = brightness(ph, wh, 0, 0, wh, hh)
+    gd = brightness(pd, wd, 0, 0, wd, hd)
     print("== %s ==" % name)
     print("  ganzes Bild      hell %6.1f   dunkel %6.1f   Differenz %+7.1f  %s"
           % (gh, gd, gd - gh, "OK" if gd < gh - 20 else "<-- ZIEHT NICHT MIT"))
@@ -66,8 +60,8 @@ if __name__ == '__main__':
         for kx in range(KX):
             x0, x1 = kx * wh // KX, (kx + 1) * wh // KX
             y0, y1 = ky * hh // KY, (ky + 1) * hh // KY
-            a = helligkeit(ph, wh, x0, y0, x1, y1, 5)
-            b = helligkeit(pd, wd, x0, y0, x1, y1, 5)
+            a = brightness(ph, wh, x0, y0, x1, y1, 5)
+            b = brightness(pd, wd, x0, y0, x1, y1, 5)
             zeile.append(b - a)
             if a > 60 and b > a - 20:
                 stehen.append((kx, ky, a, b))

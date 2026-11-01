@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/grid/check.py <rows> -- asserts the rows dumped by tools/grid/host.fi against an independent model
-(the model walks items one by one; the library uses closed formulas)."""
 import sys
 
 rows = {}
@@ -27,16 +25,13 @@ def group(g):
 
 CW, CH, GAP = 190, 90, 12
 
-# 1 columns: the largest c with c*cw + (c-1)*gap <= avail, at least 1
 bad1 = [(a, v) for (a, _), v in group(1).items()
         if v != max(1, max([c for c in range(1, 60) if c * CW + (c - 1) * GAP <= a] or [1]))]
 chk("columns for %d widths" % len(group(1)), not bad1, bad1[:3])
-# 2/3 rows and content height
 g2, g3 = group(2), group(3)
 chk("rows for %d (n, cols)" % len(g2), all(v == -(-n // c) for (n, c), v in g2.items()))
 chk("content height for %d (n, cols)" % len(g3),
     all(v == (0 if n == 0 else (-(-n // c)) * CH + (-(-n // c) - 1) * GAP) for (n, c), v in g3.items()))
-# 4/5 the visible range: walk the items and ask which rectangles touch the view
 def vis(sc, view, n, cols=3):
     out = []
     for i in range(n):
@@ -55,7 +50,6 @@ for (sc, view), v in g5.items():
     if want and (first != want[0] or v != len(want)):
         badc.append((sc, view, first, v, want[0], len(want)))
 chk("visible count for %d (scroll, view)" % len(g5), not badc, badc[:3])
-# 6 scroll_to: the item is fully visible afterwards, and the offset moved only when it had to
 bads = []
 for (i, sc), v in group(6).items():
     top = (i // 3) * (CH + GAP)
@@ -67,12 +61,10 @@ for (i, sc), v in group(6).items():
     if not fully(sc) and v not in (top, max(0, top + CH - 200)):
         bads.append((i, sc, v, "not the nearest edge"))
 chk("scroll_to for %d (item, scroll)" % len(group(6)), not bads, bads[:3])
-# 7/8/9 pages
 chk("pages", all(v == max(1, -(-n // pp)) for (n, pp), v in group(7).items()))
 chk("items on a page", all(v == max(0, min(pp, n - pg * pp)) for (k, pp), v in group(8).items()
                            for n, pg in [(k // 100, k % 100)]))
 chk("page_of / page_first", all(v == (n // pp) * 1000 + (n // pp) * pp for (n, pp), v in group(9).items()))
-# 10 arrow keys: a step to a neighbour that exists, otherwise stay; never leaves 0..n-1
 badm = []
 for (jk, nc), v in group(10).items():
     j, k = jk // 10, jk % 10

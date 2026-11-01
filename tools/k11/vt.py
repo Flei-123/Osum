@@ -25,20 +25,19 @@ so bleiben die Bootmeldungen des Kernels aussen vor.
 import sys
 
 
-class Schirm:
-    def __init__(self, zeilen=24, spalten=80):
+class Screen:
+    def __init__(self, zeilen=24, columns=80):
         self.h = zeilen
-        self.w = spalten
-        self.zellen = [[' '] * spalten for _ in range(zeilen)]
+        self.w = columns
+        self.zellen = [[' '] * columns for _ in range(zeilen)]
         self.x = 0
         self.y = 0
-        self.zustand = 0      # 0 Text, 1 nach ESC, 2 in ESC[
+        self.state = 0
         self.par = []
-        self.zahl = None
+        self.num = None
         self.priv = False
         self.folgen = 0
 
-    # -- Textzustand -------------------------------------------------
     def rollen(self):
         self.zellen.pop(0)
         self.zellen.append([' '] * self.w)
@@ -54,15 +53,15 @@ class Schirm:
         self.x += 1
 
     def steuer(self, o):
-        if o == 10:                      # Zeilenvorschub
+        if o == 10:
             self.x = 0
             self.y += 1
             if self.y >= self.h:
                 self.y = self.h - 1
                 self.rollen()
-        elif o == 13:                    # Wagenruecklauf
+        elif o == 13:
             self.x = 0
-        elif o == 8:                     # Ruecktaste: loescht, wie fb.putc
+        elif o == 8:
             if self.x > 0:
                 self.x -= 1
                 self.zellen[self.y][self.x] = ' '
@@ -71,7 +70,6 @@ class Schirm:
             for _ in range(n):
                 self.zeichen(' ')
 
-    # -- Fluchtfolgen ------------------------------------------------
     def wische(self, y0, x0, y1, x1):
         y = y0
         x = x0
@@ -122,37 +120,37 @@ class Schirm:
 
     def fuettern(self, oktette):
         for o in oktette:
-            if self.zustand == 0:
+            if self.state == 0:
                 if o == 27:
-                    self.zustand = 1
+                    self.state = 1
                 elif o in (8, 9, 10, 13):
                     self.steuer(o)
                 elif 32 <= o <= 126:
                     self.zeichen(chr(o))
-            elif self.zustand == 1:
+            elif self.state == 1:
                 if o == 91:
-                    self.zustand = 2
+                    self.state = 2
                     self.par = []
-                    self.zahl = None
+                    self.num = None
                     self.priv = False
                 else:
-                    self.zustand = 0
+                    self.state = 0
             else:
                 c = chr(o) if 32 <= o <= 126 else ''
                 if c == '?':
                     self.priv = True
                 elif c.isdigit():
-                    self.zahl = (self.zahl or 0) * 10 + int(c)
+                    self.num = (self.num or 0) * 10 + int(c)
                 elif c == ';':
-                    self.par.append(self.zahl or 0)
-                    self.zahl = None
+                    self.par.append(self.num or 0)
+                    self.num = None
                 elif 64 <= o <= 126:
-                    if self.zahl is not None:
-                        self.par.append(self.zahl)
+                    if self.num is not None:
+                        self.par.append(self.num)
                     self.fuehre(c)
-                    self.zustand = 0
+                    self.state = 0
                 elif o < 32:
-                    self.zustand = 0
+                    self.state = 0
                     self.steuer(o)
 
     def zeilen(self):
@@ -164,7 +162,7 @@ def main():
         print(__doc__)
         return 2
     daten = open(sys.argv[1], 'rb').read()
-    zeilen, spalten = 24, 80
+    zeilen, columns = 24, 80
     ab = None
     rest = sys.argv[2:]
     i = 0
@@ -174,13 +172,13 @@ def main():
             i += 2
         else:
             zeilen = int(rest[i])
-            spalten = int(rest[i + 1])
+            columns = int(rest[i + 1])
             i += 2
     if ab is not None:
         k = daten.rfind(ab)
         if k >= 0:
             daten = daten[k + len(ab):]
-    s = Schirm(zeilen, spalten)
+    s = Screen(zeilen, columns)
     s.fuettern(daten)
     for z in s.zeilen():
         print(z)

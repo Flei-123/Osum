@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/alttab/drive.py -- drive the Alt+Tab switcher through QMP key events (Alt can be HELD, which `sendkey` cannot).
-
-    drive.py <qmp-socket> <monitor-socket> <serial.txt> <outdir>
-
-Opens three windows (Win+E, Win+E, Win+I), then runs four scenes and writes `scenes.txt` (one `key=value` line per fact):
-  A  Alt down, Tab, Tab, Shift+Tab, release   -> open, step forward, step back, commit (focus changes only at release)
-  B  Alt down, Tab, Esc, release              -> cancel, focus unchanged
-  C  quick Alt+Tab tap (Alt already up)       -> open + commit in one go
-  D  Alt down, Tab, hold, screenshot, release -> overlay pixels differ while open and are gone after the commit
-Each wait is event driven (a serial line), never a fixed sleep for a result.
-"""
 import json
 import os
 import re
@@ -73,7 +62,6 @@ def serial_text(path):
 
 
 def wait_for(path, pattern, start, timeout=25.0):
-    """wait for a regex in the serial text after offset `start`; returns (match end offset, match) or (start, None)"""
     end = time.time() + timeout
     rx = re.compile(pattern)
     while time.time() < end:
@@ -119,7 +107,7 @@ def main():
     pos = 0
     pos, _ = wait_for(ser, r"eingabe: ber=", 0, 90)
     time.sleep(1.0)
-    q.tap("shift")  # warm-up: the first key after the first pulse was lost once on a loaded host
+    q.tap("shift")
     time.sleep(1.0)
     for combo, pat in ((("meta_l", "e"), r"taskbar: hk start /apps/explorer\.osp/start"),
                        (("meta_l", "e"), r"taskbar: hk start /apps/explorer\.osp/start"),
@@ -134,7 +122,6 @@ def main():
     fact("windows_focus_lines", len(re.findall(r"wm: fokus", serial_text(ser))))
     shot(mon, out + "/before.ppm")
 
-    # ---- scene A: Alt held, Tab, Tab, Shift+Tab, release
     pos = len(serial_text(ser))
     q.key("alt", True)
     q.tap("tab")
@@ -163,7 +150,6 @@ def main():
         fact("A_focus_after", f.group(1) if f else "none")
     time.sleep(1.0)
 
-    # ---- scene B: Esc cancels
     pos = len(serial_text(ser))
     q.key("alt", True)
     q.tap("tab")
@@ -179,7 +165,6 @@ def main():
     fact("B_commit_after_cancel", "1" if re.search(r"wm: switcher commit", t[mark:]) else "0")
     fact("B_focus_changed", "1" if re.search(r"wm: fokus", t[mark:]) else "0")
 
-    # ---- scene C: quick tap
     pos = len(serial_text(ser))
     q.key("alt", True)
     q.key("tab", True)
@@ -189,7 +174,6 @@ def main():
     fact("C_commit", "1" if m else "0")
     time.sleep(1.0)
 
-    # ---- scene D: pixels while open
     pos = len(serial_text(ser))
     shot(mon, out + "/idle.ppm")
     q.key("alt", True)
@@ -201,7 +185,6 @@ def main():
     pos, m = wait_for(ser, r"wm: switcher commit", pos, 15)
     time.sleep(1.5)
     shot(mon, out + "/after.ppm")
-    # ---- scene E: a second quick tap switches back to the window of `idle`; the picture must equal `idle` again (no panel left over)
     pos = len(serial_text(ser))
     q.key("alt", True)
     q.key("tab", True)
@@ -214,7 +197,6 @@ def main():
         idle, opn, aft, back = ppm(out + "/idle.ppm"), ppm(out + "/open.ppm"), ppm(out + "/after.ppm"), ppm(out + "/back.ppm")
         fact("D_screen", f"{idle[0]}x{idle[1]}")
         fact("D_open_vs_idle_px", diff_px(idle, opn))
-        # the commit raised another window, so `after` differs from `idle`; compare the panel strip (centre band) instead
         w, h = idle[0], idle[1]
         y0, y1 = h * 2 // 5, h * 3 // 5
         def band(img):
@@ -223,16 +205,13 @@ def main():
         fact("D_band_open_vs_after_px", diff_px(band(opn), band(aft)))
         fact("E_band_back_vs_idle_px", diff_px(band(idle), band(back)))
         fact("E_full_back_vs_idle_px", diff_px(idle, back))
-        # X1: the tiles have no black letterbox -- count pure 0x101010 pixels in the panel band of the open picture (the old code
-        # filled every thumbnail box with 0x101010 and left the side/bottom margins black)
         bo = band(opn)[2]
         fact("D_black_px", sum(1 for i in range(0, len(bo), 3) if bo[i:i + 3] == b"\x10\x10\x10"))
     except Exception as e:  # noqa
         fact("D_error", repr(e))
-    # ---- scene F (X1): a MINIMIZED window is listed (mins>=1), Tab reaches it, releasing Alt restores it
     try:
         pos = len(serial_text(ser))
-        q.tap("meta_l", "down")  # the focused floating window minimizes
+        q.tap("meta_l", "down")
         time.sleep(2.5)
         pos = len(serial_text(ser))
         q.key("alt", True)
@@ -262,7 +241,6 @@ def main():
         fact("F_focus_after", f.group(1) if f else "none")
         fact("F_commit_win", m3.group(3) if m3 else "none")
         time.sleep(1.5)
-        # the window is back: a new switcher lists no minimized window any more
         pos = len(serial_text(ser))
         q.key("alt", True)
         q.tap("tab")

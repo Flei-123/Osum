@@ -60,10 +60,10 @@ import struct
 import subprocess
 import sys
 
-MAGIC = 0x314D59534F  # "OSYM1", kleines Ende zuerst
+MAGIC = 0x314D59534F
 
-HDR = 104   # r1217: +8 for the line stream offset (H_LSTR)
-BLK = 16    # line entries per block (kernel/lib/ksymtab.fi LINE_BLK)
+HDR = 104
+BLK = 16
 
 
 def symbole(elf):
@@ -270,7 +270,7 @@ def blob(syms, lns):
     dnamen = bytearray(b"\0")
     dvers2 = {}
 
-    def leg_datei(s):
+    def leg_file(s):
         b = s.encode("utf-8", "replace") + b"\0"
         if b in dvers2:
             return dvers2[b]
@@ -281,7 +281,7 @@ def blob(syms, lns):
 
     dat_ver = bytearray()
     for d in dateien:
-        dat_ver += struct.pack("<I", leg_datei(d))
+        dat_ver += struct.pack("<I", leg_file(d))
 
     o_sadr = HDR
     o_snam = o_sadr + len(sym_adr)
@@ -315,7 +315,7 @@ def ausrichten(n):
     return (n + 7) & ~7
 
 
-def schreib_s(pfad, daten, syms, lns):
+def write_s(pfad, daten, syms, lns):
     with open(pfad, "w") as f:
         f.write("/* SPDX-License-Identifier: GPL-2.0-only */\n")
         f.write("/* ERZEUGT von tools/kernel/symtab.py -- NICHT VON HAND"
@@ -342,7 +342,7 @@ def main():
         return 1
     lns = zeilen(elf)
     daten = blob(syms, lns)
-    schreib_s(aus, daten, syms, lns)
+    write_s(aus, daten, syms, lns)
     sys.stderr.write("symtab: %d Symbole, %d Zeilen, %d Oktette\n"
                      % (len(syms), len(lns), len(daten)))
     return 0

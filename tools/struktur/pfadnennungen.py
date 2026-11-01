@@ -8,7 +8,6 @@ WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 
 
 def kernmodule():
-    """Alle Module, die vom Abbild erreicht werden."""
     sys.path.insert(0, os.path.join(WURZEL, "tools", "struktur"))
     import shell
     kern = huelle.huelle(os.path.join(WURZEL, "kernel", "kmain.fi"))
@@ -16,8 +15,6 @@ def kernmodule():
 
 
 def durchsuche():
-    """Liefert modul -> (ausfuehrbar, kommentar) als Listen von
-    (datei, zeilennr, text)."""
     ziele = {}
     for stamm, verz, namen in os.walk(WURZEL):
         verz[:] = [d for d in verz if d not in (".git", "kernel", "docs", "vendor")]

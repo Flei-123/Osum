@@ -42,7 +42,7 @@ UMSCHALT = {
 }
 
 
-def tasten_fuer(text):
+def keys_for(text):
     aus = []
     for c in text:
         if c.islower() or c.isdigit():
@@ -58,7 +58,7 @@ def tasten_fuer(text):
     return aus
 
 
-def key_zeilen(pfad):
+def key_lines(pfad):
     """Wie viele `key: `-Zeilen der Kern schon gemeldet hat.
 
     RUNDE ROTABSCHNITTE. `kernel/drv/hid/kbd.fi` meldet GENAU EINE Zeile
@@ -73,34 +73,34 @@ def key_zeilen(pfad):
         return 0
 
 
-ZEIT_JE_TASTE = 8.0
+TIME_JE_KEY = 8.0
 
 
 def main():
     if len(sys.argv) < 4:
         print(__doc__)
         return 2
-    sock, warte, muster = sys.argv[1], sys.argv[2], sys.argv[3]
-    folge = []
+    sock, wait, muster = sys.argv[1], sys.argv[2], sys.argv[3]
+    seq = []
     for t in sys.argv[4:]:
         if t.startswith('text:'):
-            folge += tasten_fuer(t[5:])
+            seq += keys_for(t[5:])
         else:
-            folge.append(t)
+            seq.append(t)
 
     bis = time.time() + 60
-    bereit = False
+    ready = False
     while time.time() < bis:
         try:
-            with open(warte, 'rb') as f:
+            with open(wait, 'rb') as f:
                 if muster.encode() in f.read():
-                    bereit = True
+                    ready = True
                     break
         except OSError:
             pass
         time.sleep(0.2)
-    if not bereit:
-        print("keys.py: '%s' ist nie in %s aufgetaucht" % (muster, warte))
+    if not ready:
+        print("keys.py: '%s' ist nie in %s aufgetaucht" % (muster, wait))
         return 1
 
     s = None
@@ -122,14 +122,14 @@ def main():
         s.recv(65536)
     except OSError:
         pass
-    for k in folge:
+    for k in seq:
         if k.startswith('foto:'):
             ziel = k[5:]
             if os.path.exists(ziel):
                 os.unlink(ziel)
             time.sleep(1.2)
             try:
-                with open(warte, 'rb') as f:
+                with open(wait, 'rb') as f:
                     open(ziel + '.ser', 'wb').write(f.read())
             except OSError:
                 pass
@@ -163,7 +163,7 @@ def main():
             while True:
                 time.sleep(0.4)
                 try:
-                    jetzt = os.path.getsize(warte)
+                    jetzt = os.path.getsize(wait)
                 except OSError:
                     break
                 if jetzt == letzte:
@@ -178,11 +178,11 @@ def main():
             except OSError:
                 pass
             continue
-        vorher = key_zeilen(warte)
+        vorher = key_lines(wait)
         s.sendall(("sendkey %s\n" % k).encode())
-        bis3 = time.time() + ZEIT_JE_TASTE
+        bis3 = time.time() + TIME_JE_KEY
         while time.time() < bis3:
-            if key_zeilen(warte) > vorher:
+            if key_lines(wait) > vorher:
                 break
             time.sleep(0.02)
         try:
@@ -191,7 +191,7 @@ def main():
             pass
     time.sleep(0.5)
     s.close()
-    print("%d Tasten geschickt" % len(folge))
+    print("%d Tasten geschickt" % len(seq))
     return 0
 
 

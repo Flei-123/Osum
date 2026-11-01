@@ -1,45 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/i18n/quellen.py -- WO IM BAUM BILDSCHIRMTEXT STEHT.
-
-Runde UMLAUT2. `translit.py` hat bis hierher zwei Quellen gekannt:
-`locale/de/*` und `assets/apps/*.osp/INFO`. Beide waren sauber, als im
-Starter trotzdem "Text schreiben und aendern" stand -- dieser Satz kam
-aus dem BUENDEL, und die Beschriftungen der Programme selbst kommen aus
-dem QUELLTEXT. Eine Pruefung, die nur den Katalog liest, sieht davon
-nichts. Deshalb dieses Stueck.
-
-Es liest `kernel/**/*.fi`, findet JEDE Zeichenkette, die eine deutsche
-Umschrift traegt, und sagt zu jeder, WAS sie ist:
-
-  SICHTBAR     Text, den ein Mensch liest -- Beschriftung, Ausgabe,
-               Fehlermeldung. HIER gehoeren echte Umlaute hin.
-
-  MITSCHNITT   Was ein FENSTERPROGRAMM oder der Kernel auf die serielle
-               Leitung schreibt ("leiste: knopf i=0 id=5"). docs/I18N.md
-               nimmt diese Zeilen ausdruecklich aus -- sie sind ein
-               Messwert, kein Satz, und die Abnahme greppt nach ihnen.
-               Erkannt daran, dass die Datei ein Fenster aufmacht (sie
-               bindet `wlib`/`wlibc` ein) oder im Kernel liegt UND die
-               Kette nirgends anders hingeht als in `say`/`kv`/`sagn`.
-
-  MARKE        Was mit einer EINGABE verglichen wird: Unterbefehl
-               ("opk rollback"), Schalter ("--source"), Pfad, Dateiname,
-               Schluessel. Dieselbe Ausnahme wie in docs/I18N.md
-               ("Befehlsname: nein") und dieselbe wie `keys=` in den
-               Buendeln -- man muss das tippen koennen, auch ohne
-               Umlauttaste. Erkannt an einem Vergleich (`streq`,
-               `text.equal`) oder daran, dass der Inhalt wie ein Name
-               aussieht und nicht wie ein Satz.
-
-Eine MARKE darf ASCII bleiben, aber sie darf nicht die EINZIGE Form
-sein, die das Programm annimmt: wer `zurück` tippt, meint dasselbe.
-Genau das prueft `translit.py --marken`.
-
-  quellen.py            nur die Funde der Klasse SICHTBAR
-  quellen.py --alle     alle drei Klassen
-  quellen.py --zahlen   nur die Bilanz
-"""
 import os
 import re
 import sys
@@ -62,14 +22,12 @@ TRACE = re.compile(r'(?:^|[^A-Za-z_0-9.])(?:'
 
 
 def inhalt_von(roh):
-    """Der Textinhalt einer Firn-Zeichenkette, ohne die Fuellnullen."""
     s = roh.replace('\\0', '')
     s = s.replace('\\n', '\n').replace('\\t', '\t')
     s = s.replace('\\"', '"').replace('\\\\', '\\')
     return s
 
 
-#
 PFAD = re.compile(r'(?<![A-Za-z0-9_])/[A-Za-z0-9_./+-]+')
 
 
@@ -104,7 +62,6 @@ def quelldateien(wurzel):
 
 
 def funde(wurzel):
-    """-> Liste dicts fuer JEDE Zeichenkette mit deutscher Umschrift."""
     aus = []
     for pfad in sorted(quelldateien(wurzel)):
         rel = os.path.relpath(pfad, wurzel).replace(os.sep, '/')
@@ -148,15 +105,6 @@ FNKOPF = re.compile(r'^(?:pub\s+)?fn\s')
 
 
 def block(zeilen, nr):
-    """Der Funktionsrumpf, in dem Zeile `nr` steht -- (von, bis).
-
-    WARUM NICHT DIE GANZE DATEI. Zwei Funktionen derselben Datei duerfen
-    beide ein `var s_g` haben, und sie bedeuten dann VERSCHIEDENE Texte.
-    Wer alle Zeilen der Datei durchsieht, findet die Verwendung der
-    anderen und ordnet die Kette der falschen Klasse zu -- genau so ist
-    "launcher: waehle datei" einmal als Bildschirmtext gezaehlt worden,
-    obwohl sie nur in den Mitschnitt geht.
-    """
     von = 0
     for i in range(nr - 1, -1, -1):
         if FNKOPF.match(zeilen[i]):
@@ -171,11 +119,6 @@ def block(zeilen, nr):
 
 
 def stellen(zeilen, name, ausser, fest):
-    """Alle Codezeilen im selben Rumpf, in denen dieser Name steht.
-
-    `fest` sagt, ob die Kette mit `static`/`const` am DATEIRAND steht --
-    dann gilt die ganze Datei, sonst nur der Rumpf, in dem sie steht.
-    """
     such = re.compile(r'(?<![A-Za-z_0-9])%s(?![A-Za-z_0-9])'
                       % re.escape(name))
     if not fest:
@@ -217,19 +160,6 @@ def klasse(name, inhalt, zeilen, nr, code, fenster, kern, fest):
 
 
 def marken(wurzel):
-    """Nimmt jede getippte Marke AUCH die Umlautschreibung?
-
-    Eine Marke darf ASCII bleiben -- man muss sie ohne Umlauttaste
-    tippen koennen. Sie darf aber nicht die EINZIGE Form sein: die
-    Hilfe zeigt seit dieser Runde `opk rollback`, und wer das abtippt,
-    muss ankommen. Dieselbe Regel wie `keys=` in den Buendeln.
-
-    Geprueft wird nur, was WIRKLICH mit einer Eingabe verglichen wird.
-    Ein Pfad (`/tmp/gross`) und ein Feldname im Mitschnitt (`bloecke=`)
-    werden nicht getippt und stehen deshalb nicht zur Debatte.
-
-    -> (geprueft, [Klage, ...])
-    """
     klagen = []
     n = 0
     for r in funde(wurzel):

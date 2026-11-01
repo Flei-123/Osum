@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/settingswin11/check.py <cfg> <serial.txt> <outdir> -- checks of tools/settingswin11/run.sh.
-# cfg flat is the counter-proof: the accordion checks must be RED there (exit 0 only when they are).
 import re, sys, os
 
 cfg, serial, outdir = sys.argv[1:4]

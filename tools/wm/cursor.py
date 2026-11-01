@@ -1,41 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wm/cursor.py -- DER MAUSZEIGER, ALS BILD UND NICHT ALS ZAHLEN.
-
-RUNDE BLECH-HID.  Justin hat den Zeiger auf seinem Blech abfotografiert
-und stark vergroessert: ein weisses Dreieck, darunter eine Luecke, und
-darunter zwei getrennte weisse Stummel.  Kein Pfeil.
-
-Der Fehler stand nicht in der Hardware und nicht im Raster, sondern in
-achtzehn von Hand geschriebenen Bitmasken in `kernel/ui/wm.fi`
-(`cursor_row_of`, Form 0).  Zeile 11 der Fuellung war `0x0400` -- EIN
-gesetzter Bildpunkt --, und die Zeilen 12 bis 16 hatten je ZWEI
-getrennte Bloecke (`0x0370`, `0x01b0`, `0x00d8`).  Das ist der
-klassische X11-Pfeil, dessen Schwanz sich in zwei Beine gabelt; von Hand
-in Hexadezimalzahlen geschrieben sieht das aus wie ein Zeiger und auf
-dem Schirm wie ein Zerfallsprodukt.
-
-UND GENAU DESHALB IST DIESE PRUEFUNG EIN BILD.  Achtzehn
-Hexadezimalzahlen kann niemand ansehen und sagen "das ist ein Pfeil".
-Ein ASCII-Bild kann jeder ansehen.  Die Maschine prueft daneben vier
-Dinge, die ein Mensch uebersieht:
-
-  (a) die Fuellung ist EINE zusammenhaengende Flaeche (4er-Nachbarschaft)
-  (b) jeder Fuellpunkt hat oben, unten, links und rechts entweder
-      Fuellung oder Rand -- nirgends direkt den Hintergrund, und auch
-      nicht den Bildrand
-  (c) keine Zeile hat zwei getrennte Bloecke, weder in der Fuellung noch
-      in der Silhouette
-  (d) kein Bildpunkt der Silhouette steht allein
-  (e) Fuellung und Rand ueberschneiden sich nicht
-  (f) die Spitze liegt oben links, auf dem Griffpunkt (0,0)
-
-Aufruf:
-    python3 tools/wm/cursor.py [kernel/ui/wm.fi]      pruefen und malen
-    python3 tools/wm/cursor.py --bauen             die Masken erzeugen
-
-Rueckgabe 0, wenn alle Pruefungen halten.
-"""
 import re
 import sys
 
@@ -61,9 +25,6 @@ def silhouette():
 
 
 def erodiert(sil):
-    """Die Fuellung: was rundherum (vier Richtungen) noch in der
-    Silhouette liegt.  Was uebrigbleibt, ist der Rand -- und er ist damit
-    ueberall genau einen Bildpunkt breit."""
     b = leer()
     for y in range(H):
         for x in range(W):
@@ -79,7 +40,6 @@ def erodiert(sil):
 
 
 def masken(sil, body):
-    """Zwei Zahlen je Zeile, Bit 11 ist links."""
     um, inn = [], []
     for y in range(H):
         u = f = 0
@@ -94,15 +54,14 @@ def masken(sil, body):
     return um, inn
 
 
-def firn(werte):
+def firn(values):
     aus = ""
-    for v in werte:
+    for v in values:
         aus += "\\x%02x\\x%02x" % ((v >> 8) & 0xFF, v & 0xFF)
     return aus + "\\x00"
 
 
 def lies(pfad):
-    """Die beiden Masken der Form 0 aus dem Quelltext."""
     q = open(pfad, encoding="utf-8", errors="replace").read()
     raus = {}
     for name in ("umriss", "innen"):
@@ -145,15 +104,15 @@ def bild(sil, body):
 
 
 def bloecke(reihe):
-    n, drin = 0, False
+    n, in_ = 0, False
     for v in reihe:
-        if v and not drin:
+        if v and not in_:
             n += 1
-        drin = bool(v)
+        in_ = bool(v)
     return n
 
 
-def pruefe(sil, body):
+def check(sil, body):
     fehler = []
     for y in range(H):
         for x in range(W):
@@ -201,7 +160,6 @@ def pruefe(sil, body):
             if b > 1:
                 fehler.append("(c) Zeile %d: die %s hat %d getrennte Bloecke"
                               % (y, was, b))
-    # (d) kein allein stehender Bildpunkt
     for y in range(H):
         for x in range(W):
             if not sil[y][x]:
@@ -236,7 +194,7 @@ def main():
     print("  THE POINTER AS IT IS PAINTED (# fill, . edge):")
     for z in bild(sil, body):
         print(z)
-    fehler = pruefe(sil, body)
+    fehler = check(sil, body)
     for f in fehler:
         print("  FALL  " + f)
     if fehler:

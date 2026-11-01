@@ -57,10 +57,10 @@ SIG = {
     (0xFF, 0x80, 0x00): 6,
     (0xFF, 0xFF, 0xFF): 7,
 }
-MIN_BREIT = 40
+MIN_WIDE = 40
 
 
-def ppm_lesen(pfad):
+def ppm_read(pfad):
     """Ein binaeres PPM (P6) als (w, h, bytes) lesen."""
     with open(pfad, "rb") as f:
         roh = f.read()
@@ -85,7 +85,7 @@ def ppm_lesen(pfad):
     return w, h, roh[i:i + w * h * 3]
 
 
-def streifen_der_zeile(w, zeile):
+def streifen_der_line(w, zeile):
     """Alle Laeufe einer Signaturfarbe in einer Bildzeile.
 
     Gibt [(x0, x1, farbnummer)] zurueck. Nur Laeufe ab MIN_BREIT.
@@ -104,20 +104,20 @@ def streifen_der_zeile(w, zeile):
             if SIG.get(q) != k:
                 break
             x += 1
-        if x - x0 >= MIN_BREIT:
+        if x - x0 >= MIN_WIDE:
             aus.append((x0, x, k))
     return aus
 
 
-def bild_pruefen(pfad):
+def image_check(pfad):
     """(fenster, zerrissen, farben) fuer ein Foto."""
-    w, h, dat = ppm_lesen(pfad)
+    w, h, dat = ppm_read(pfad)
     nach_spanne = {}
     for y in range(h):
         zeile = dat[y * w * 3:(y + 1) * w * 3]
         if len(zeile) < w * 3:
             break
-        for (x0, x1, k) in streifen_der_zeile(w, zeile):
+        for (x0, x1, k) in streifen_der_line(w, zeile):
             nach_spanne.setdefault((x0, x1), []).append((y, k))
     fenster = 0
     zerrissen = 0
@@ -127,12 +127,12 @@ def bild_pruefen(pfad):
         ks = set(t[1] for t in treffer)
         if len(ys) < 2:
             continue
-        luecke = False
+        gap = False
         for a, b in zip(ys, ys[1:]):
             if b - a > 8:
-                luecke = True
+                gap = True
                 break
-        if not luecke:
+        if not gap:
             continue
         fenster += 1
         farben |= ks
@@ -150,7 +150,7 @@ def main():
     n = 0
     for pfad in sys.argv[1:]:
         try:
-            f, z, farben = bild_pruefen(pfad)
+            f, z, farben = image_check(pfad)
         except (OSError, ValueError) as e:
             print("%s FEHLER %s" % (pfad, e))
             return 2

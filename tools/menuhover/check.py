@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/menuhover/check.py -- pixel checks for the start menu under the mouse.
-
-    check.py <capture-dir> <expect: sharp|smeared>
-
-The capture directory comes from tools/design/capture.sh with the script of
-run.sh. Pictures: `01-menu` (menu open, pointer far away) and `h<N>-...`
-(pointer on row N, ...). The checks use the pictures and the serial report only:
-
-  1. outside the pointer sprite, NOTHING inside the menu window may differ
-     from the picture without hover (count of points that differ by more
-     than 12 levels in one channel);
-  2. the row under the pointer keeps its sharpness: the sum of the absolute
-     horizontal differences of the row's rectangle is at least 90 % of the
-     value without hover (blur takes the text's edges away).
-
-`expect=smeared` is the counter-proof (kernel run with `noglasgrow`, the
-rule that grows the dirty area is off): the same checks MUST fail there,
-otherwise they never measured anything.
-"""
 import re
 import sys
 
@@ -37,8 +18,6 @@ rows = {}
 for m in re.finditer(r"launcher: rect id=2 kind=5 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", ser):
     rows["list"] = tuple(int(v) for v in m.groups())
 lx, ly, lw, lh = rows["list"]
-# the list's rectangle is relative to the window's inner origin; the same
-# conversion as tools/design/drive.py (geom + frame 2 + title bar 22)
 ox, oy = wx + 2, wy + 22
 rowh = 52
 base = Image.open(d + "/01-menu.ppm").convert("RGB")
@@ -65,14 +44,13 @@ for n in range(5):
         sys.exit(2)
     img = Image.open(fs[0]).convert("RGB")
     p = img.load()
-    # where was the pointer: the middle of row n
     px = ox + lx + lw // 2
     py = oy + ly + n * rowh + rowh // 2
     bad = 0
     for y in range(wy, min(wy + wh, img.size[1])):
         for x in range(wx, wx + ww):
             if px - 6 <= x <= px + 22 and py - 6 <= y <= py + 30:
-                continue                    # the pointer sprite
+                continue
             a, b = bpx[x, y], p[x, y]
             if max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2])) > 12:
                 bad += 1

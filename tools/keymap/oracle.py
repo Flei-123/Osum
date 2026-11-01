@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/keymap/oracle.py -- compare the kernel keyboard engine (dump of tools/keymap/host.fi) with libxkbcommon.
-
-    oracle.py <dump.txt>
-
-Prints one line per section: "OK <what> (<n> checks)" or "FAIL <what> (<bad> of <n>)" plus the first mismatches.
-Exit status 1 if any section failed.
-"""
 import os
 import sys
 

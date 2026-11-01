@@ -24,7 +24,7 @@ RESERVED = set(keyword.kwlist) | set(dir(builtins)) | {"self", "cls", "os", "sys
 def tracked_py():
     out = subprocess.run(["git", "ls-files", "*.py"], cwd=ROOT, capture_output=True, text=True).stdout.split()
     allow = count.load_allow()
-    return [f for f in out if not count.allowed(f, allow) and not f.startswith(count.SKIP_PREFIX)]
+    return [f for f in out if not count.allowed(f, allow) and not f.startswith(count.SKIP_PREFIX) and not f.startswith("tools/wlan/")]
 
 
 def translate(name):
@@ -204,33 +204,91 @@ def apply_file(path, mapping):
     return True
 
 
+EXTRA_SEG = {"kachel": "tile", "teile": "parts", "verteiler": "dispatch", "keine": "no", "ohne": "without", "schleife": "loop",
+             "faktor": "factor", "je": "per", "lauf": "run", "schrift": "font", "stapel": "stack", "ersatz": "fallback",
+             "reiter": "tab", "ausnahmen": "exceptions", "ausnahme": "exception", "taste": "key", "tasten": "keys"}
+
+
+def foreign_modules(files):
+    by_dir = {}
+    for f in files:
+        by_dir.setdefault(os.path.dirname(f), []).append(f)
+    stems = {}
+    for f in files:
+        stems.setdefault(os.path.splitext(os.path.basename(f))[0], set()).add(os.path.dirname(f))
+    out = set()
+    pat = re.compile(r"^\s*(?:from\s+([A-Za-z_][A-Za-z0-9_]*)\s+import|import\s+([A-Za-z_][A-Za-z0-9_, ]*))", re.M)
+    for f in files:
+        try:
+            src = open(os.path.join(ROOT, f), encoding="utf-8").read()
+        except Exception:
+            continue
+        d = os.path.dirname(f)
+        for m in pat.finditer(src):
+            mods = [m.group(1)] if m.group(1) else [x.strip().split(" ")[0] for x in m.group(2).split(",")]
+            for mod in mods:
+                if mod in stems and (stems[mod] - {d}):
+                    for dd in stems[mod]:
+                        if dd != d:
+                            out.add(os.path.join(dd, mod + ".py"))
+    return out
+
+
+def plan(files):
+    by_dir = {}
+    for f in files:
+        by_dir.setdefault(os.path.dirname(f), []).append(f)
+    shared = foreign_modules(files)
+    shared_names = set()
+    for f in shared:
+        try:
+            _, toks = tokens(os.path.join(ROOT, f))
+        except Exception:
+            continue
+        for t in toks:
+            if t.type == tokenize.NAME:
+                shared_names.add(t.string)
+    return by_dir, shared_names
+
+
 def main():
     do = "--apply" in sys.argv
+    only = [a for a in sys.argv[1:] if not a.startswith("--")]
     files = tracked_py()
-    names, strings, alltok = scan(files)
-    prot = protected(names, strings)
-    mapping = build_map(names, alltok, prot)
-    print("files %d, german names %d, protected %d, renamed %d" % (len(files), len(names), len(prot), len(mapping)))
-    if not do:
-        for n in sorted(mapping)[:80]:
-            print(" ", n, "->", mapping[n])
-        print("protected:", sorted(prot)[:60])
-        return 0
-    changed = 0
-    for f in files:
-        try:
-            if apply_file(os.path.join(ROOT, f), mapping):
-                changed += 1
-        except Exception as e:
-            print("skip", f, e)
+    by_dir, shared_names = plan(files)
+    for k, v in EXTRA_SEG.items():
+        SEG.setdefault(k, v)
+        count.GERMAN.add(k)
+    total = 0
     bad = 0
-    for f in files:
-        try:
-            compile(open(os.path.join(ROOT, f), encoding="utf-8").read(), f, "exec")
-        except Exception as e:
-            bad += 1
-            print("COMPILE FAIL", f, str(e)[:100])
-    print("changed %d files, compile failures %d" % (changed, bad))
+    allmap = {}
+    for d, fl in sorted(by_dir.items()):
+        if only and not any(d == o or d.startswith(o.rstrip("/") + "/") for o in only):
+            continue
+        fl = [f for f in fl if os.path.exists(os.path.join(ROOT, f))]
+        names, strings, alltok = scan(fl)
+        prot = protected(names, strings) | (set(names) & shared_names)
+        mapping = build_map(names, alltok, prot)
+        total += len(mapping)
+        allmap[d] = mapping
+        print("%s: files %d, names %d, protected %d, renamed %d" % (d, len(fl), len(names), len(prot), len(mapping)))
+        if not do:
+            continue
+        for f in fl:
+            try:
+                apply_file(os.path.join(ROOT, f), mapping)
+            except Exception as e:
+                print("skip", f, e)
+        for f in fl:
+            try:
+                compile(open(os.path.join(ROOT, f), encoding="utf-8").read(), f, "exec")
+            except Exception as e:
+                bad += 1
+                print("COMPILE FAIL", f, str(e)[:100])
+    if do and os.environ.get("PYRN_MAP"):
+        import json
+        json.dump(allmap, open(os.environ["PYRN_MAP"], "w"))
+    print("renamed %d, compile failures %d" % (total, bad))
     return 1 if bad else 0
 
 

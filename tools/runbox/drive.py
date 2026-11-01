@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/runbox/drive.py -- event driven Win+R scenario through QMP (no fixed waits for results).
-
-    drive.py <qmp-socket> <serial.txt> <outdir> [ready-timeout-seconds]
-
-Win+R -> wait `runbox: ready` -> type `echo hi` + Enter -> wait `runbox: exec /bin/echo pid=`
-Win+R -> wait the second `runbox: ready` -> type `nope` + Enter -> wait `runbox: fail /bin/nope` -> Esc.
-Writes `scenes.txt` (key=value). A step that never happens is recorded as 0 after its timeout (the old tree has no dialog).
-"""
 import importlib.util
 import os
 import re
@@ -69,8 +61,6 @@ def main():
         time.sleep(1.0)
         q.tap("esc")
         time.sleep(1.5)
-        # ---- X1 history: third dialog; Up -> the last started command (the failed `nope` is not in it), Up again -> nothing older,
-        # Down -> the draft (empty), Up + Enter -> starts echo again
         q.tap("meta_l", "r")
         end = time.time() + tmo
         while time.time() < end and count(r"runbox: ready") < 3:

@@ -1,27 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/qa/gen-manifest.py -- (re)generate tools/qa/gates.tsv from tools/*/run.sh.
-
-The manifest is the single list of gates: which paths trigger a gate, which
-tier it belongs to (quick / full / nightly) and what it needs (net lock, kvm).
-Hand edits survive: rows whose 'source' column is 'manual' are kept as they are.
-New run.sh scripts get a guessed row with source 'auto' (tier from a size/qemu
-heuristic, paths = their own directory + the area of their name) -- review them.
-
-  gen-manifest.py            write tools/qa/gates.tsv
-  gen-manifest.py --check    exit 1 if a run.sh has no row or a row has no script
-  gen-manifest.py --by-times re-tier 'auto' rows from measured wall times (gates.sh --times file,
-                             GATES_TIMES): fastest valid run <= 300 s quick, <= 1200 s full, else
-                             nightly. Runs killed by a limit (rc 124/137/143) are not measurements.
-                             Gates without a valid measurement keep their heuristic tier.
-"""
 import glob, os, re, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 OUT = os.path.join(ROOT, "tools", "qa", "gates.tsv")
 HEADER = "gate\ttier\tneeds\tpaths\tsource\tnote"
 
-# area -> path globs (ERE-free shell-style globs, matched with fnmatch on repo paths)
 AREAS = {
     "ui":     ["kernel/ui/*", "kernel/gfx/*", "lib/fui/*", "lib/font/*", "assets/schemes/*", "assets/shapes/*",
                "assets/themes/*", "etc/themes/*", "etc/shapes/*", "etc/schemas/*"],
@@ -55,13 +39,10 @@ GATE_AREAS = {
     "crypto": "krypto argon vault xtstafel geraetekey codec pdf",
     "bridge": "bridge server",
 }
-# gates that are expensive or need the whole system: nightly only (full run = before a big merge)
 NIGHTLY = set("ota install usbimg fsrobust hv design themestore actionbus vault sync wmplug metal wlan netview k15 k11 k17 "
               "suspend bridge server store stick kvm smp multicore s3smp".split())
-# cheap + broad: run at 'quick' level when their area changed (host-only gates, small scripts)
 HOSTONLY = set("english hardening overview progsize softui tokens update xtstafel region".split())
 NETLOCK = set("account actionbus aml bridge ebpf hwnet install net netmon netview netzplus netzui poll print rtl sshd tunnel".split())
-# representative per-area smoke gates that run at quick level for any change in their area
 QUICK_REP = set("tokens softui aacorner wm kernel userland posix pci net ofs3 krypto hid k13 midline lockscene".split())
 
 

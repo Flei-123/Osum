@@ -49,7 +49,7 @@ def main():
     try:
         time.sleep(0.3)
         try:
-            s.recv(65536)  # die Begruessung
+            s.recv(65536)
         except OSError:
             pass
         s.sendall(("screendump %s\n" % ziel).encode())

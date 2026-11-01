@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/weblogin.py -- the person's BROWSER login at firnchat-web via the broker.
-
-    weblogin.py <web-base> <issuer> <ca.pem> [user] [password]
-
-GET <web-base>/api/oidc/start, follow the redirects to the broker (https, own CA), sign in
-(form + CSRF + Origin), allow the consent, come back to firnchat-web. Exit 0 and "ok" if the
-session cookie fc_sess was set -- that login is what CREATES the account jarvis:<uid>
-(auto-konto = ja), which `zugang-broker` needs (it never creates one).
-"""
 import html as htmllib
 import http.cookiejar
 import re

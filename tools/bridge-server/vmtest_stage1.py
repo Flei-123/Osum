@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""VM test of the new jarvisd (keepalive, supervisor, watchdog, info) against the LIVE bridge with the vm-device key."""
 import json, os, subprocess, sys, time, urllib.request, shutil, socket
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
@@ -68,7 +67,6 @@ try:
     c, t, st = job("system")
     chk("B  job `system` works", c == 200 and st == "ok", (c, t[:80], st))
 
-    # --- keepalive: a command that outlasts the server's 90 s silence limit
     s0 = warum().get("sitzungen_seit_status", 0)
     r = api("/bruecke/auftrag", {"geraet": DEV, "art": "befehl", "ziel": "/bin/sleep 130", "ttl_s": 300})
     t0 = time.time(); states = []; maxgap = 0
@@ -80,7 +78,6 @@ try:
     chk("C2 long command finished ok", bool(res) and res["letzter_auftrag"]["status"] == "ok", res and res["letzter_auftrag"])
     chk("C3 same session throughout (no re-login)", warum().get("sitzungen_seit_status") == s0, (warum().get("sitzungen_seit_status"), s0))
 
-    # --- supervisor: kill the worker
     c, ps, st = job("befehl", ziel="/bin/ps")
     print("   ps:", ps[:600].replace("\n", " | "), flush=True)
     open(W + "/ps.txt", "w").write(ps)

@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/portio/analyze.py <trace.log> [idle_from_s; negative = last N s of the trace] -- port/MMIO access statistics of a QEMU memory_region_ops trace.
-# Prints: accesses per second (median over the idle window), the top regions/addresses, the ATA command mix.
 import re, sys, collections, statistics
 
 path = sys.argv[1]
@@ -17,7 +15,7 @@ if not rows:
     print("PORTIO: no parsable trace lines"); sys.exit(1)
 t0 = rows[0][0]
 tend = rows[-1][0]
-if idle_from < 0:  # negative: the window is the last |idle_from| s minus the final 5 s (idle.txt waits 80 s after "launcher: ready")
+if idle_from < 0:
     win = [r for r in rows if tend + idle_from <= r[0] <= tend - 5]
 else:
     win = [r for r in rows if r[0] - t0 >= idle_from]

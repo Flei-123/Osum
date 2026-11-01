@@ -3,7 +3,6 @@
 import struct
 import sys
 
-# ------------------------------------------------------------ Lesen
 
 class Leser:
     def __init__(self, b, at=0):
@@ -60,7 +59,7 @@ I32, I64, F32, F64, EMPTY = 0x7F, 0x7E, 0x7D, 0x7C, 0x40
 
 FLACH = True
 
-TURM_GRENZE = 8
+TURM_LIMIT = 8
 
 TIEFE_DECKEL = 20
 
@@ -72,26 +71,26 @@ def typname(t):
 FIRNTYP = 'u64'
 
 
-class Modul:
+class Module:
     def __init__(self, b):
         self.b = b
-        self.typen = []          # [(params, results)]
-        self.importe = []        # [(modul, name, art, index)]
-        self.funktypen = []      # typindex je funktion (importe zuerst)
-        self.tabelle_min = 0
-        self.elemente = []       # [(offset, [funcidx])]
+        self.typen = []
+        self.importe = []
+        self.funktypen = []
+        self.table_min = 0
+        self.elemente = []
         self.mem_min = 0
         self.mem_max = 0
-        self.globals = []        # [(typ, veraenderlich, initwert, ist_import)]
-        self.exporte = {}        # name -> (art, index)
+        self.globals = []
+        self.exporte = {}
         self.start = None
         self.code = []
-        self.data = []           # [(offset, bytes)]
+        self.data = []
         self.n_import_funcs = 0
         self.namen = {}
-        self.lesen()
+        self.read_2()
 
-    def lesen(self):
+    def read_2(self):
         b = self.b
         if b[0:4] != b'\x00asm':
             raise SystemExit('kein WASM-Modul')
@@ -107,7 +106,7 @@ class Modul:
     def sektion(self, sid, l, ende):
         if sid == 1:
             for _ in range(l.uleb()):
-                l.u8()                      # 0x60
+                l.u8()
                 p = [l.u8() for _ in range(l.uleb())]
                 r = [l.u8() for _ in range(l.uleb())]
                 self.typen.append((p, r))
@@ -142,7 +141,7 @@ class Modul:
             for _ in range(l.uleb()):
                 l.u8()
                 mn, _ = self.grenzen(l)
-                self.tabelle_min = max(self.tabelle_min, mn)
+                self.table_min = max(self.table_min, mn)
         elif sid == 5:
             for _ in range(l.uleb()):
                 mn, mx = self.grenzen(l)
@@ -253,38 +252,31 @@ class Modul:
         return self.typen[self.funktypen[fi]]
 
 
-# ---------------------------------------------------- Blocktypen
 
 def blocktyp(m, bt):
-    """(params, results) eines Blocks. Ein negativer Wert ist eine
-    Kurzform (leer oder ein einzelner Werttyp), ein positiver ein
-    Index in die Typtabelle."""
-    if bt == -64:                      # 0x40, leer
+    if bt == -64:
         return [], []
-    if bt in (-1, -2, -3, -4):         # i32 i64 f32 f64 als sleb
+    if bt in (-1, -2, -3, -4):
         return [], [{-1: I32, -2: I64, -3: F32, -4: F64}[bt]]
     return m.typen[bt]
 
 
 class Block:
     def __init__(self, art, tiefe, stack_ein, res, marke):
-        self.art = art          # 'block' | 'loop' | 'if'
+        self.art = art
         self.tiefe = tiefe
         self.stack_ein = stack_ein
         self.res = res
         self.marke = marke
         self.hat_else = False
-        self.schleife = (art == 'loop')
-        self.turm_marke = None
+        self.loop = (art == 'loop')
+        self.turm_brand = None
         self.turm_fall = 0
-        self.turm_schleife = False
+        self.turm_loop = False
 
 
-# ====================================================================
-#                          Der Erzeuger
-# ====================================================================
 
-def _block_braucht_schleife(b, at):
+def _block_braucht_loop(b, at):
     tiefe = 0
     l = Leser(b, at)
     n = len(b)
@@ -295,7 +287,7 @@ def _block_braucht_schleife(b, at):
             tiefe += 1
         elif op == 0x0B:
             if tiefe == 0:
-                return False              # Ende dieses Blocks erreicht
+                return False
             tiefe -= 1
         elif op == 0x05:
             pass
@@ -349,50 +341,36 @@ def _ueberlesen(l, op):
 TURM_KENNUNG = 1000000
 
 
-def _in_verteiler_rumpf(stapel, marke):
-    """Stehen wir unmittelbar im Rumpf des Verteilers `marke` -- also
-    ohne eine echte Schleife dazwischen? Nur dann traegt `continue`."""
+def _in_dispatch_body(stapel, marke):
     for x in reversed(stapel):
         if x.art == 'turm':
-            return x.turm_marke == marke
-        if x.art == 'loop' or (x.art == 'block' and x.schleife):
+            return x.turm_brand == marke
+        if x.art == 'loop' or (x.art == 'block' and x.loop):
             return False
     return False
 
 
-def _verteiler_ohne_schleife(stapel):
-    """Der innerste Verteiler, zu dem von HIER aus ein `continue`
-    traegt -- oder None."""
+def _dispatch_without_loop(stapel):
     for x in reversed(stapel):
         if x.art == 'turm':
-            return x.turm_marke
-        if x.art == 'loop' or (x.art == 'block' and x.schleife):
+            return x.turm_brand
+        if x.art == 'loop' or (x.art == 'block' and x.loop):
             return None
     return None
 
 
 def turm_messen(code, at):
-    """Wie viele `block`/`loop` werden ab `at` unmittelbar
-    hintereinander geoeffnet? Gibt (anzahl, position_danach, arten)
-    zurueck; `arten` sagt je Ebene, ob es eine Schleife ist.
-
-    AUCH SCHLEIFEN: SQLite schachtelt block und loop im Wechsel
-    (f878: 30 Ebenen, davon 6 loop). Zaehlte man nur `block`, blieben
-    die Laeufe kurz und der Turm wurde nie flachgelegt. Im Verteiler
-    ist eine Schleifenebene genauso billig: ein `br` dorthin heisst
-    "wieder von vorne", also fall = 0 und weiter -- denn der Rumpf
-    einer solchen Ebene faengt genau dort an, wo Fall 0 anfaengt."""
     l = Leser(code, at)
     arten = []
     while l.at < len(code):
-        merk = l.at
+        remember = l.at
         op = l.u8()
         if op not in (0x02, 0x03):
-            l.at = merk
+            l.at = remember
             break
         bt = l.sleb()
         if bt != -64:
-            l.at = merk
+            l.at = remember
             break
         arten.append(op == 0x03)
     return len(arten), l.at, arten
@@ -431,7 +409,7 @@ def _block_hat_sprung(b, at):
     return False
 
 
-class Fehler(Exception):
+class Error(Exception):
     pass
 
 
@@ -446,22 +424,20 @@ class Erzeuger:
     def w(self, s=''):
         self.out.append(s)
 
-    # ---------------------------------------------------------- Namen
     def fname(self, fi):
         return 'f%d' % fi
 
-    # ------------------------------------------------- eine Funktion
-    def funktion(self, fi):
+    def func(self, fi):
         m = self.m
         ci = fi - m.n_import_funcs
         lokdef, code = m.code[ci]
         par, res = m.typ_von(fi)
 
-        lokal_typen = list(par)
+        local_typen = list(par)
         for anz, t in lokdef:
-            lokal_typen += [t] * anz
-        self.lokal_typen = lokal_typen
-        self.nlok = len(lokal_typen)
+            local_typen += [t] * anz
+        self.local_typen = local_typen
+        self.nlok = len(local_typen)
         self.res = res
         self.fi = fi
 
@@ -473,7 +449,6 @@ class Erzeuger:
 
         for i in range(len(par)):
             self.w('    var l%d: u64 = p%d' % (i, i))
-        # deklarierte Lokale sind in WASM garantiert null
         for i in range(len(par), self.nlok):
             self.w('    var l%d: u64 = 0' % i)
 
@@ -486,12 +461,11 @@ class Erzeuger:
             if FLACH:
                 import flach
                 fe = flach.FlachErzeuger(self)
-                self.koerper = fe.rumpf(code, par, res)
+                self.koerper = fe.body(code, par, res)
             else:
-                self.rumpf(code, par, res)
-        except Fehler:
+                self.body(code, par, res)
+        except Error:
             raise
-        # Stapelvariablen anlegen
         for i in range(self.maxstack):
             self.w('    var s%d: u64 = 0' % i)
         if self.br_benutzt:
@@ -510,7 +484,7 @@ class Erzeuger:
             self.maxstack = i + 1
         return 's%d' % i
 
-    def rumpf(self, code, par, res):
+    def body(self, code, par, res):
         m = self.m
         l = Leser(code)
         sp = 0
@@ -522,8 +496,7 @@ class Erzeuger:
         while l.at < len(code):
             op = l.u8()
 
-            # ---------------------------------------------- Ende
-            if op == 0x0B:                       # end
+            if op == 0x0B:
                 b = stapel.pop()
                 if b.art == 'func':
                     break
@@ -534,18 +507,18 @@ class Erzeuger:
                     continue
                 tiefe -= 1
                 if b.art in ('block', 'loop'):
-                    if b.schleife:
+                    if b.loop:
                         self.e(tiefe, 'break')
                     self.e(tiefe - 1, '}')
-                    if b.schleife:
+                    if b.loop:
                         self.nach_block(b, tiefe - 1, stapel)
-                else:                            # if
+                else:
                     self.e(tiefe - 1, '}')
                 sp = b.stack_ein + len(b.res)
                 unerreichbar = False
                 continue
 
-            if op == 0x05:                       # else
+            if op == 0x05:
                 b = stapel[-1]
                 b.hat_else = True
                 self.e(tiefe - 1, '} else {')
@@ -554,16 +527,15 @@ class Erzeuger:
                 continue
 
             if op in (0x02, 0x03):
-                merk = l.at
-                anzahl, danach, arten = turm_messen(code, l.at - 1)
-                if anzahl > TURM_GRENZE or (anzahl >= 3 and tiefe >= TIEFE_DECKEL):
-                    sp = self.turm_erzeugen(l, code, anzahl, danach, sp,
+                remember = l.at
+                count_2, danach, arten = turm_messen(code, l.at - 1)
+                if count_2 > TURM_LIMIT or (count_2 >= 3 and tiefe >= TIEFE_DECKEL):
+                    sp = self.turm_erzeugen(l, code, count_2, danach, sp,
                                             stapel, tiefe, arten)
                     tiefe += 1
                     continue
-                l.at = merk
+                l.at = remember
 
-            # --------------------------------------------- Bloecke
             if op in (0x02, 0x03, 0x04):
                 bt = l.sleb()
                 bpar, bres = blocktyp(m, bt)
@@ -571,15 +543,15 @@ class Erzeuger:
                 self.marke += 1
                 b = Block({0x02: 'block', 0x03: 'loop', 0x04: 'if'}[op],
                           tiefe, sp, bres, self.marke)
-                b.schleife = (op == 0x03)
+                b.loop = (op == 0x03)
                 if op == 0x04:
                     sp -= 1
                     self.e(tiefe - 1, 'if %s != 0 {' % self.sv(sp))
                 elif op == 0x03:
                     self.e(tiefe - 1, 'while true {')
                 else:
-                    b.schleife = self.block_hat_sprung(l.b, l.at)
-                    if b.schleife:
+                    b.loop = self.block_hat_sprung(l.b, l.at)
+                    if b.loop:
                         self.e(tiefe - 1, 'while true {')
                     else:
                         self.e(tiefe - 1, '{')
@@ -593,7 +565,7 @@ class Erzeuger:
                 self.ueberspringen(l, op)
                 continue
 
-            sp, unerreichbar = self.befehl(l, op, sp, stapel, tiefe)
+            sp, unerreichbar = self.cmd(l, op, sp, stapel, tiefe)
 
         if res:
             if sp >= 1:
@@ -602,31 +574,22 @@ class Erzeuger:
                 self.e(0, 'return 0')
 
     def nach_block(self, b, tiefe, stapel=None):
-        """Direkt hinter einer verlassenen Schleife: trug der Sprung
-        eine AEUSSERE Tiefe, dann galt er nicht dieser Ebene -- also
-        weiter hinausbrechen. Das kostet einen Vergleich je verlassener
-        Ebene, nicht je Befehl.
-
-        `tiefe` ist die Einrueckung DIREKT NACH dem schliessenden `}`.
-        Auf Tiefe 0 (unmittelbar im Funktionsrumpf) gibt es keine
-        Schleife mehr, aus der man ausbrechen koennte -- dort wird der
-        Sprung zum `return`."""
         if not self.br_benutzt:
             return
         umschliesst = False
         if stapel is not None:
             for x in stapel:
-                if x.art == 'loop' or (x.art == 'block' and x.schleife) \
+                if x.art == 'loop' or (x.art == 'block' and x.loop) \
                         or x.art == 'turm':
                     umschliesst = True
                     break
-        ziel_tiefe = b.tiefe
+        target_tiefe = b.tiefe
         if b.art == 'loop':
-            ziel_tiefe = -2
+            target_tiefe = -2
         self.e(tiefe, 'if br_ziel >= 0 {')
         if not umschliesst:
             self.e(tiefe + 1, 'if br_ziel == %d { br_ziel = -1 } else {'
-                   % ziel_tiefe)
+                   % target_tiefe)
             if self.res:
                 self.e(tiefe + 2, 'return %s' % self.sv(0))
             else:
@@ -635,7 +598,7 @@ class Erzeuger:
         else:
             umg = stapel[-1] if stapel else None
             if umg is not None and umg.art == 'loop':
-                self.e(tiefe + 1, 'if br_ziel == %d {' % ziel_tiefe)
+                self.e(tiefe + 1, 'if br_ziel == %d {' % target_tiefe)
                 self.e(tiefe + 2, 'br_ziel = -1')
                 self.e(tiefe + 1, '} else if br_ziel == %d {' % umg.tiefe)
                 self.e(tiefe + 2, 'br_ziel = -1')
@@ -645,9 +608,9 @@ class Erzeuger:
                 self.e(tiefe + 1, '}')
                 self.e(tiefe, '}')
                 return
-            m = _verteiler_ohne_schleife(stapel) if stapel is not None else None
+            m = _dispatch_without_loop(stapel) if stapel is not None else None
             if m is not None:
-                self.e(tiefe + 1, 'if br_ziel == %d {' % ziel_tiefe)
+                self.e(tiefe + 1, 'if br_ziel == %d {' % target_tiefe)
                 self.e(tiefe + 2, 'br_ziel = -1')
                 self.e(tiefe + 1, '} else if br_ziel == %d {'
                        % (TURM_KENNUNG + m))
@@ -659,28 +622,26 @@ class Erzeuger:
             else:
                 self.e(tiefe + 1,
                        'if br_ziel == %d { br_ziel = -1 } else { break }'
-                       % ziel_tiefe)
+                       % target_tiefe)
         self.e(tiefe, '}')
 
-    # ------------------------------------------------- ein Befehl
-    def befehl(self, l, op, sp, stapel, tiefe):
+    def cmd(self, l, op, sp, stapel, tiefe):
         m = self.m
         E = lambda s: self.e(tiefe - 1, s)
         M32 = '4294967295'
 
-        # ---------------------------------------------- Kontrollfluss
-        if op == 0x00:                                    # unreachable
+        if op == 0x00:
             E('wasm_unreachable()')
             return sp, True
-        if op == 0x01:                                    # nop
+        if op == 0x01:
             return sp, False
-        if op == 0x0F:                                    # return
+        if op == 0x0F:
             if self.res:
                 E('return %s' % self.sv(sp - 1))
             else:
                 E('return')
             return sp, True
-        if op in (0x0C, 0x0D):                            # br, br_if
+        if op in (0x0C, 0x0D):
             lab = l.uleb()
             bed = None
             if op == 0x0D:
@@ -689,7 +650,7 @@ class Erzeuger:
             ziel = stapel[len(stapel) - 1 - lab]
             self.sprung(ziel, stapel, tiefe, bed, sp)
             return sp, (op == 0x0C)
-        if op == 0x0E:                                    # br_table
+        if op == 0x0E:
             n = l.uleb()
             ziele = [l.uleb() for _ in range(n)]
             sonst = l.uleb()
@@ -704,8 +665,7 @@ class Erzeuger:
             self.sprung(z, stapel, tiefe, None, sp)
             return sp, True
 
-        # ------------------------------------------------------ Rufe
-        if op == 0x10:                                    # call
+        if op == 0x10:
             fi = l.uleb()
             par, res = m.typ_von(fi)
             sp -= len(par)
@@ -717,7 +677,7 @@ class Erzeuger:
             else:
                 E('%s(%s)' % (ziel, args))
             return sp, False
-        if op == 0x11:                                    # call_indirect
+        if op == 0x11:
             ti = l.uleb()
             l.uleb()
             par, res = m.typen[ti]
@@ -734,10 +694,9 @@ class Erzeuger:
                 E(ruf)
             return sp, False
 
-        # ------------------------------------------------ Parameter
-        if op == 0x1A:                                    # drop
+        if op == 0x1A:
             return sp - 1, False
-        if op == 0x1B or op == 0x1C:                      # select
+        if op == 0x1B or op == 0x1C:
             if op == 0x1C:
                 for _ in range(l.uleb()):
                     l.u8()
@@ -746,89 +705,80 @@ class Erzeuger:
                                           self.sv(sp + 1)))
             return sp + 1, False
 
-        # -------------------------------------------- Lokale/Globale
-        if op == 0x20:                                    # local.get
+        if op == 0x20:
             i = l.uleb()
             E('%s = l%d' % (self.sv(sp), i))
             return sp + 1, False
-        if op == 0x21:                                    # local.set
+        if op == 0x21:
             i = l.uleb()
             E('l%d = %s' % (i, self.sv(sp - 1)))
             return sp - 1, False
-        if op == 0x22:                                    # local.tee
+        if op == 0x22:
             i = l.uleb()
             E('l%d = %s' % (i, self.sv(sp - 1)))
             return sp, False
-        if op == 0x23:                                    # global.get
+        if op == 0x23:
             i = l.uleb()
             E('%s = g%d' % (self.sv(sp), i))
             return sp + 1, False
-        if op == 0x24:                                    # global.set
+        if op == 0x24:
             i = l.uleb()
             E('g%d = %s' % (i, self.sv(sp - 1)))
             return sp - 1, False
 
-        # ------------------------------------------------ Konstanten
-        if op == 0x41:                                    # i32.const
+        if op == 0x41:
             E('%s = %d' % (self.sv(sp), l.sleb() & 0xFFFFFFFF))
             return sp + 1, False
-        if op == 0x42:                                    # i64.const
+        if op == 0x42:
             E('%s = %d' % (self.sv(sp), l.sleb() & 0xFFFFFFFFFFFFFFFF))
             return sp + 1, False
-        if op == 0x43:                                    # f32.const
+        if op == 0x43:
             E('%s = %d' % (self.sv(sp),
                            struct.unpack('<I', struct.pack('<f', l.f32()))[0]))
             return sp + 1, False
-        if op == 0x44:                                    # f64.const
+        if op == 0x44:
             E('%s = %d' % (self.sv(sp),
                            struct.unpack('<Q', struct.pack('<d', l.f64()))[0]))
             return sp + 1, False
 
-        # -------------------------------------------------- Speicher
         if 0x28 <= op <= 0x3E:
             return self.speicher(l, op, sp, tiefe)
-        if op == 0x3F:                                    # memory.size
+        if op == 0x3F:
             l.u8()
             E('%s = mem_seiten' % self.sv(sp))
             return sp + 1, False
-        if op == 0x40:                                    # memory.grow
+        if op == 0x40:
             l.u8()
             E('%s = mem_wachsen(%s)' % (self.sv(sp - 1), self.sv(sp - 1)))
             return sp, False
 
-        # ------------------------------------------------ Rechnen
-        r = self.zahl(op, sp, tiefe)
+        r = self.num(op, sp, tiefe)
         if r is not None:
             return r
 
-        # ------------------------------------------- 0xFC-Gruppe
         if op == 0xFC:
             u = l.uleb()
-            if u == 10:                                   # memory.copy
+            if u == 10:
                 l.u8()
                 l.u8()
                 sp -= 3
                 E('mem_copy(%s, %s, %s)' % (self.sv(sp), self.sv(sp + 1),
                                             self.sv(sp + 2)))
                 return sp, False
-            if u == 11:                                   # memory.fill
+            if u == 11:
                 l.u8()
                 sp -= 3
                 E('mem_fill(%s, %s, %s)' % (self.sv(sp), self.sv(sp + 1),
                                             self.sv(sp + 2)))
                 return sp, False
-            if u in (0, 1, 2, 3):                         # sat-Umwandlungen
+            if u in (0, 1, 2, 3):
                 E('%s = %s' % (self.sv(sp - 1), self.sattrunc(u, sp - 1)))
                 return sp, False
-            raise Fehler('0xFC %d' % u)
+            raise Error('0xFC %d' % u)
 
-        raise Fehler('opcode 0x%02x' % op)
+        raise Error('opcode 0x%02x' % op)
 
-    # ------------------------------------------------------- Sprung
     def sprung(self, ziel, stapel, tiefe, bed, sp):
-        """Ein `br` auf eine Blockebene. Liegt das Ziel genau eine
-        Ebene hoeher, reicht break/continue; sonst traegt `br_ziel` die
-        Tiefe, und jede verlassene Schleife reicht weiter."""
         E = lambda s: self.e(tiefe - 1, s)
         innen = stapel[-1]
         if bed is not None:
@@ -836,13 +786,13 @@ class Erzeuger:
             tiefe += 1
             E = lambda s: self.e(tiefe - 1, s)
         if ziel.art == 'turm':
-            E('fall%d = %d' % (ziel.turm_marke,
-                               0 if ziel.turm_schleife else ziel.turm_fall))
-            if _in_verteiler_rumpf(stapel, ziel.turm_marke):
+            E('fall%d = %d' % (ziel.turm_brand,
+                               0 if ziel.turm_loop else ziel.turm_fall))
+            if _in_dispatch_body(stapel, ziel.turm_brand):
                 E('continue')
             else:
                 self.br_benutzt = True
-                E('br_ziel = %d' % (TURM_KENNUNG + ziel.turm_marke))
+                E('br_ziel = %d' % (TURM_KENNUNG + ziel.turm_brand))
                 E('break')
         elif ziel.art == 'func':
             if self.res:
@@ -851,7 +801,7 @@ class Erzeuger:
                 E('return')
         elif ziel is innen and ziel.art == 'loop':
             E('continue')
-        elif ziel is innen and ziel.schleife:
+        elif ziel is innen and ziel.loop:
             E('break')
         else:
             self.br_benutzt = True
@@ -864,10 +814,9 @@ class Erzeuger:
             tiefe -= 1
             self.e(tiefe - 1, '}')
 
-    # ----------------------------------------------------- Speicher
     def speicher(self, l, op, sp, tiefe):
         E = lambda s: self.e(tiefe - 1, s)
-        l.uleb()                       # align
+        l.uleb()
         off = l.uleb()
         LAD = {
             0x28: ('mem_ld32', 0), 0x29: ('mem_ld64', 0),
@@ -905,7 +854,7 @@ class Erzeuger:
                 2: 'trunc_sat_i32_f64_s(%s)' % s,
                 3: 'trunc_sat_i32_f64_u(%s)' % s}[u]
 
-    def zahl(self, op, sp, tiefe):
+    def num(self, op, sp, tiefe):
         E = lambda s: self.e(tiefe - 1, s)
         M = '4294967295'
 
@@ -913,7 +862,7 @@ class Erzeuger:
             E('%s = %s' % (self.sv(sp - 1), ausdruck))
             return sp, False
 
-        def zwei(ausdruck):
+        def two(ausdruck):
             E('%s = %s' % (self.sv(sp - 2), ausdruck))
             return sp - 1, False
 
@@ -921,83 +870,77 @@ class Erzeuger:
         b = self.sv(sp - 1) if sp >= 1 else 's0'
         x = self.sv(sp - 1) if sp >= 1 else 's0'
 
-        # -------------------------------------------- i32 Vergleiche
         if op == 0x45: return ein('b2i(%s == 0)' % x)
-        if op == 0x46: return zwei('b2i(%s == %s)' % (a, b))
-        if op == 0x47: return zwei('b2i(%s != %s)' % (a, b))
-        if op == 0x48: return zwei('b2i(i32s(%s) < i32s(%s))' % (a, b))
-        if op == 0x49: return zwei('b2i(%s < %s)' % (a, b))
-        if op == 0x4A: return zwei('b2i(i32s(%s) > i32s(%s))' % (a, b))
-        if op == 0x4B: return zwei('b2i(%s > %s)' % (a, b))
-        if op == 0x4C: return zwei('b2i(i32s(%s) <= i32s(%s))' % (a, b))
-        if op == 0x4D: return zwei('b2i(%s <= %s)' % (a, b))
-        if op == 0x4E: return zwei('b2i(i32s(%s) >= i32s(%s))' % (a, b))
-        if op == 0x4F: return zwei('b2i(%s >= %s)' % (a, b))
-        # -------------------------------------------- i64 Vergleiche
+        if op == 0x46: return two('b2i(%s == %s)' % (a, b))
+        if op == 0x47: return two('b2i(%s != %s)' % (a, b))
+        if op == 0x48: return two('b2i(i32s(%s) < i32s(%s))' % (a, b))
+        if op == 0x49: return two('b2i(%s < %s)' % (a, b))
+        if op == 0x4A: return two('b2i(i32s(%s) > i32s(%s))' % (a, b))
+        if op == 0x4B: return two('b2i(%s > %s)' % (a, b))
+        if op == 0x4C: return two('b2i(i32s(%s) <= i32s(%s))' % (a, b))
+        if op == 0x4D: return two('b2i(%s <= %s)' % (a, b))
+        if op == 0x4E: return two('b2i(i32s(%s) >= i32s(%s))' % (a, b))
+        if op == 0x4F: return two('b2i(%s >= %s)' % (a, b))
         if op == 0x50: return ein('b2i(%s == 0)' % x)
-        if op == 0x51: return zwei('b2i(%s == %s)' % (a, b))
-        if op == 0x52: return zwei('b2i(%s != %s)' % (a, b))
-        if op == 0x53: return zwei('b2i(i64s(%s) < i64s(%s))' % (a, b))
-        if op == 0x54: return zwei('b2i(%s < %s)' % (a, b))
-        if op == 0x55: return zwei('b2i(i64s(%s) > i64s(%s))' % (a, b))
-        if op == 0x56: return zwei('b2i(%s > %s)' % (a, b))
-        if op == 0x57: return zwei('b2i(i64s(%s) <= i64s(%s))' % (a, b))
-        if op == 0x58: return zwei('b2i(%s <= %s)' % (a, b))
-        if op == 0x59: return zwei('b2i(i64s(%s) >= i64s(%s))' % (a, b))
-        if op == 0x5A: return zwei('b2i(%s >= %s)' % (a, b))
-        # ------------------------------------------- f32/f64 Vergleiche
-        if op == 0x5B: return zwei('b2i(f32v(%s) == f32v(%s))' % (a, b))
-        if op == 0x5C: return zwei('b2i(f32v(%s) != f32v(%s))' % (a, b))
-        if op == 0x5D: return zwei('b2i(f32v(%s) < f32v(%s))' % (a, b))
-        if op == 0x5E: return zwei('b2i(f32v(%s) > f32v(%s))' % (a, b))
-        if op == 0x5F: return zwei('b2i(f32v(%s) <= f32v(%s))' % (a, b))
-        if op == 0x60: return zwei('b2i(f32v(%s) >= f32v(%s))' % (a, b))
-        if op == 0x61: return zwei('b2i(f64v(%s) == f64v(%s))' % (a, b))
-        if op == 0x62: return zwei('b2i(f64v(%s) != f64v(%s))' % (a, b))
-        if op == 0x63: return zwei('b2i(f64v(%s) < f64v(%s))' % (a, b))
-        if op == 0x64: return zwei('b2i(f64v(%s) > f64v(%s))' % (a, b))
-        if op == 0x65: return zwei('b2i(f64v(%s) <= f64v(%s))' % (a, b))
-        if op == 0x66: return zwei('b2i(f64v(%s) >= f64v(%s))' % (a, b))
+        if op == 0x51: return two('b2i(%s == %s)' % (a, b))
+        if op == 0x52: return two('b2i(%s != %s)' % (a, b))
+        if op == 0x53: return two('b2i(i64s(%s) < i64s(%s))' % (a, b))
+        if op == 0x54: return two('b2i(%s < %s)' % (a, b))
+        if op == 0x55: return two('b2i(i64s(%s) > i64s(%s))' % (a, b))
+        if op == 0x56: return two('b2i(%s > %s)' % (a, b))
+        if op == 0x57: return two('b2i(i64s(%s) <= i64s(%s))' % (a, b))
+        if op == 0x58: return two('b2i(%s <= %s)' % (a, b))
+        if op == 0x59: return two('b2i(i64s(%s) >= i64s(%s))' % (a, b))
+        if op == 0x5A: return two('b2i(%s >= %s)' % (a, b))
+        if op == 0x5B: return two('b2i(f32v(%s) == f32v(%s))' % (a, b))
+        if op == 0x5C: return two('b2i(f32v(%s) != f32v(%s))' % (a, b))
+        if op == 0x5D: return two('b2i(f32v(%s) < f32v(%s))' % (a, b))
+        if op == 0x5E: return two('b2i(f32v(%s) > f32v(%s))' % (a, b))
+        if op == 0x5F: return two('b2i(f32v(%s) <= f32v(%s))' % (a, b))
+        if op == 0x60: return two('b2i(f32v(%s) >= f32v(%s))' % (a, b))
+        if op == 0x61: return two('b2i(f64v(%s) == f64v(%s))' % (a, b))
+        if op == 0x62: return two('b2i(f64v(%s) != f64v(%s))' % (a, b))
+        if op == 0x63: return two('b2i(f64v(%s) < f64v(%s))' % (a, b))
+        if op == 0x64: return two('b2i(f64v(%s) > f64v(%s))' % (a, b))
+        if op == 0x65: return two('b2i(f64v(%s) <= f64v(%s))' % (a, b))
+        if op == 0x66: return two('b2i(f64v(%s) >= f64v(%s))' % (a, b))
 
-        # -------------------------------------------------- i32 Rechnen
         if op == 0x67: return ein('i32_clz(%s)' % x)
         if op == 0x68: return ein('i32_ctz(%s)' % x)
         if op == 0x69: return ein('popcnt(%s & %s)' % (x, M))
-        if op == 0x6A: return zwei('(%s +%% %s) & %s' % (a, b, M))
-        if op == 0x6B: return zwei('(%s -%% %s) & %s' % (a, b, M))
-        if op == 0x6C: return zwei('(%s *%% %s) & %s' % (a, b, M))
-        if op == 0x6D: return zwei('i32_div_s(%s, %s)' % (a, b))
-        if op == 0x6E: return zwei('i32_div_u(%s, %s)' % (a, b))
-        if op == 0x6F: return zwei('i32_rem_s(%s, %s)' % (a, b))
-        if op == 0x70: return zwei('i32_rem_u(%s, %s)' % (a, b))
-        if op == 0x71: return zwei('%s & %s' % (a, b))
-        if op == 0x72: return zwei('%s | %s' % (a, b))
-        if op == 0x73: return zwei('%s ^ %s' % (a, b))
-        if op == 0x74: return zwei('(%s << ((%s & 31) as u32)) & %s' % (a, b, M))
-        if op == 0x75: return zwei('i32_shr_s(%s, %s)' % (a, b))
-        if op == 0x76: return zwei('(%s & %s) >> ((%s & 31) as u32)' % (a, M, b))
-        if op == 0x77: return zwei('i32_rotl(%s, %s)' % (a, b))
-        if op == 0x78: return zwei('i32_rotr(%s, %s)' % (a, b))
-        # -------------------------------------------------- i64 Rechnen
+        if op == 0x6A: return two('(%s +%% %s) & %s' % (a, b, M))
+        if op == 0x6B: return two('(%s -%% %s) & %s' % (a, b, M))
+        if op == 0x6C: return two('(%s *%% %s) & %s' % (a, b, M))
+        if op == 0x6D: return two('i32_div_s(%s, %s)' % (a, b))
+        if op == 0x6E: return two('i32_div_u(%s, %s)' % (a, b))
+        if op == 0x6F: return two('i32_rem_s(%s, %s)' % (a, b))
+        if op == 0x70: return two('i32_rem_u(%s, %s)' % (a, b))
+        if op == 0x71: return two('%s & %s' % (a, b))
+        if op == 0x72: return two('%s | %s' % (a, b))
+        if op == 0x73: return two('%s ^ %s' % (a, b))
+        if op == 0x74: return two('(%s << ((%s & 31) as u32)) & %s' % (a, b, M))
+        if op == 0x75: return two('i32_shr_s(%s, %s)' % (a, b))
+        if op == 0x76: return two('(%s & %s) >> ((%s & 31) as u32)' % (a, M, b))
+        if op == 0x77: return two('i32_rotl(%s, %s)' % (a, b))
+        if op == 0x78: return two('i32_rotr(%s, %s)' % (a, b))
         if op == 0x79: return ein('i64_clz(%s)' % x)
         if op == 0x7A: return ein('i64_ctz(%s)' % x)
         if op == 0x7B: return ein('popcnt(%s)' % x)
-        if op == 0x7C: return zwei('%s +%% %s' % (a, b))
-        if op == 0x7D: return zwei('%s -%% %s' % (a, b))
-        if op == 0x7E: return zwei('%s *%% %s' % (a, b))
-        if op == 0x7F: return zwei('i64_div_s(%s, %s)' % (a, b))
-        if op == 0x80: return zwei('i64_div_u(%s, %s)' % (a, b))
-        if op == 0x81: return zwei('i64_rem_s(%s, %s)' % (a, b))
-        if op == 0x82: return zwei('i64_rem_u(%s, %s)' % (a, b))
-        if op == 0x83: return zwei('%s & %s' % (a, b))
-        if op == 0x84: return zwei('%s | %s' % (a, b))
-        if op == 0x85: return zwei('%s ^ %s' % (a, b))
-        if op == 0x86: return zwei('%s << ((%s & 63) as u32)' % (a, b))
-        if op == 0x87: return zwei('i64_shr_s(%s, %s)' % (a, b))
-        if op == 0x88: return zwei('%s >> ((%s & 63) as u32)' % (a, b))
-        if op == 0x89: return zwei('i64_rotl(%s, %s)' % (a, b))
-        if op == 0x8A: return zwei('i64_rotr(%s, %s)' % (a, b))
-        # ------------------------------------------------ f32 Rechnen
+        if op == 0x7C: return two('%s +%% %s' % (a, b))
+        if op == 0x7D: return two('%s -%% %s' % (a, b))
+        if op == 0x7E: return two('%s *%% %s' % (a, b))
+        if op == 0x7F: return two('i64_div_s(%s, %s)' % (a, b))
+        if op == 0x80: return two('i64_div_u(%s, %s)' % (a, b))
+        if op == 0x81: return two('i64_rem_s(%s, %s)' % (a, b))
+        if op == 0x82: return two('i64_rem_u(%s, %s)' % (a, b))
+        if op == 0x83: return two('%s & %s' % (a, b))
+        if op == 0x84: return two('%s | %s' % (a, b))
+        if op == 0x85: return two('%s ^ %s' % (a, b))
+        if op == 0x86: return two('%s << ((%s & 63) as u32)' % (a, b))
+        if op == 0x87: return two('i64_shr_s(%s, %s)' % (a, b))
+        if op == 0x88: return two('%s >> ((%s & 63) as u32)' % (a, b))
+        if op == 0x89: return two('i64_rotl(%s, %s)' % (a, b))
+        if op == 0x8A: return two('i64_rotr(%s, %s)' % (a, b))
         if op == 0x8B: return ein('f32b(f32_abs(f32v(%s)))' % x)
         if op == 0x8C: return ein('f32b(0.0 - f32v(%s))' % x)
         if op == 0x8D: return ein('f32b(f32_ceil(f32v(%s)))' % x)
@@ -1005,14 +948,13 @@ class Erzeuger:
         if op == 0x8F: return ein('f32b(f32_trunc(f32v(%s)))' % x)
         if op == 0x90: return ein('f32b(f32_nearest(f32v(%s)))' % x)
         if op == 0x91: return ein('f32b(f32_sqrt(f32v(%s)))' % x)
-        if op == 0x92: return zwei('f32b(f32v(%s) + f32v(%s))' % (a, b))
-        if op == 0x93: return zwei('f32b(f32v(%s) - f32v(%s))' % (a, b))
-        if op == 0x94: return zwei('f32b(f32v(%s) * f32v(%s))' % (a, b))
-        if op == 0x95: return zwei('f32b(f32v(%s) / f32v(%s))' % (a, b))
-        if op == 0x96: return zwei('f32b(f32_min(f32v(%s), f32v(%s)))' % (a, b))
-        if op == 0x97: return zwei('f32b(f32_max(f32v(%s), f32v(%s)))' % (a, b))
-        if op == 0x98: return zwei('f32_copysign(%s, %s)' % (a, b))
-        # ------------------------------------------------ f64 Rechnen
+        if op == 0x92: return two('f32b(f32v(%s) + f32v(%s))' % (a, b))
+        if op == 0x93: return two('f32b(f32v(%s) - f32v(%s))' % (a, b))
+        if op == 0x94: return two('f32b(f32v(%s) * f32v(%s))' % (a, b))
+        if op == 0x95: return two('f32b(f32v(%s) / f32v(%s))' % (a, b))
+        if op == 0x96: return two('f32b(f32_min(f32v(%s), f32v(%s)))' % (a, b))
+        if op == 0x97: return two('f32b(f32_max(f32v(%s), f32v(%s)))' % (a, b))
+        if op == 0x98: return two('f32_copysign(%s, %s)' % (a, b))
         if op == 0x99: return ein('f64b(f64_abs(f64v(%s)))' % x)
         if op == 0x9A: return ein('f64b(0.0 - f64v(%s))' % x)
         if op == 0x9B: return ein('f64b(f64_ceil(f64v(%s)))' % x)
@@ -1020,40 +962,38 @@ class Erzeuger:
         if op == 0x9D: return ein('f64b(f64_trunc(f64v(%s)))' % x)
         if op == 0x9E: return ein('f64b(f64_nearest(f64v(%s)))' % x)
         if op == 0x9F: return ein('f64b(f64_sqrt(f64v(%s)))' % x)
-        if op == 0xA0: return zwei('f64b(f64v(%s) + f64v(%s))' % (a, b))
-        if op == 0xA1: return zwei('f64b(f64v(%s) - f64v(%s))' % (a, b))
-        if op == 0xA2: return zwei('f64b(f64v(%s) * f64v(%s))' % (a, b))
-        if op == 0xA3: return zwei('f64b(f64v(%s) / f64v(%s))' % (a, b))
-        if op == 0xA4: return zwei('f64b(f64_min(f64v(%s), f64v(%s)))' % (a, b))
-        if op == 0xA5: return zwei('f64b(f64_max(f64v(%s), f64v(%s)))' % (a, b))
-        if op == 0xA6: return zwei('f64_copysign(%s, %s)' % (a, b))
-        # ---------------------------------------------- Umwandlungen
-        if op == 0xA7: return ein('%s & 4294967295' % x)                  # i32.wrap_i64
+        if op == 0xA0: return two('f64b(f64v(%s) + f64v(%s))' % (a, b))
+        if op == 0xA1: return two('f64b(f64v(%s) - f64v(%s))' % (a, b))
+        if op == 0xA2: return two('f64b(f64v(%s) * f64v(%s))' % (a, b))
+        if op == 0xA3: return two('f64b(f64v(%s) / f64v(%s))' % (a, b))
+        if op == 0xA4: return two('f64b(f64_min(f64v(%s), f64v(%s)))' % (a, b))
+        if op == 0xA5: return two('f64b(f64_max(f64v(%s), f64v(%s)))' % (a, b))
+        if op == 0xA6: return two('f64_copysign(%s, %s)' % (a, b))
+        if op == 0xA7: return ein('%s & 4294967295' % x)
         if op == 0xA8: return ein('i32_trunc_f32_s(%s)' % x)
         if op == 0xA9: return ein('i32_trunc_f32_u(%s)' % x)
         if op == 0xAA: return ein('i32_trunc_f64_s(%s)' % x)
         if op == 0xAB: return ein('i32_trunc_f64_u(%s)' % x)
-        if op == 0xAC: return ein('i32s(%s) as u64' % x)                  # i64.extend_i32_s
-        if op == 0xAD: return ein('%s & 4294967295' % x)                  # i64.extend_i32_u
+        if op == 0xAC: return ein('i32s(%s) as u64' % x)
+        if op == 0xAD: return ein('%s & 4294967295' % x)
         if op == 0xAE: return ein('i64_trunc_f32_s(%s)' % x)
         if op == 0xAF: return ein('i64_trunc_f32_u(%s)' % x)
         if op == 0xB0: return ein('i64_trunc_f64_s(%s)' % x)
         if op == 0xB1: return ein('i64_trunc_f64_u(%s)' % x)
-        if op == 0xB2: return ein('f32b(i32s(%s) as f32)' % x)            # f32.convert_i32_s
+        if op == 0xB2: return ein('f32b(i32s(%s) as f32)' % x)
         if op == 0xB3: return ein('f32b((%s & 4294967295) as f32)' % x)
         if op == 0xB4: return ein('f32b(i64s(%s) as f32)' % x)
         if op == 0xB5: return ein('f32b(u64_zu_f32(%s))' % x)
-        if op == 0xB6: return ein('f32b(f64v(%s) as f32)' % x)            # f32.demote_f64
+        if op == 0xB6: return ein('f32b(f64v(%s) as f32)' % x)
         if op == 0xB7: return ein('f64b(i32s(%s) as f64)' % x)
         if op == 0xB8: return ein('f64b((%s & 4294967295) as f64)' % x)
         if op == 0xB9: return ein('f64b(i64s(%s) as f64)' % x)
         if op == 0xBA: return ein('f64b(u64_zu_f64(%s))' % x)
-        if op == 0xBB: return ein('f64b(f32v(%s) as f64)' % x)            # f64.promote_f32
-        if op == 0xBC: return ein('%s & 4294967295' % x)                  # i32.reinterpret_f32
-        if op == 0xBD: return ein('%s' % x)                               # i64.reinterpret_f64
-        if op == 0xBE: return ein('%s & 4294967295' % x)                  # f32.reinterpret_i32
-        if op == 0xBF: return ein('%s' % x)                               # f64.reinterpret_i64
-        # ------------------------------------ Vorzeichen-Erweiterungen
+        if op == 0xBB: return ein('f64b(f32v(%s) as f64)' % x)
+        if op == 0xBC: return ein('%s & 4294967295' % x)
+        if op == 0xBD: return ein('%s' % x)
+        if op == 0xBE: return ein('%s & 4294967295' % x)
+        if op == 0xBF: return ein('%s' % x)
         if op == 0xC0: return ein('sext8_32(%s)' % x)
         if op == 0xC1: return ein('sext16_32(%s)' % x)
         if op == 0xC2: return ein('sext8_64(%s)' % x)
@@ -1061,38 +1001,34 @@ class Erzeuger:
         if op == 0xC4: return ein('sext32_64(%s)' % x)
         return None
 
-    def turm_erzeugen(self, l, code, anzahl, danach, sp, stapel, tiefe, arten=None):
+    def turm_erzeugen(self, l, code, count_2, danach, sp, stapel, tiefe, arten=None):
         self.br_benutzt = True
         self.im_turm = True
-        self.turm_faelle = anzahl
+        self.turm_faelle = count_2
         marke = self.marke + 1
         self.marke += 1
         E = lambda t, x: self.e(t, x)
-        E(tiefe - 1, '// %d Bloecke am Stueck -> Verteiler (TIEFE.md)' % anzahl)
+        E(tiefe - 1, '// %d Bloecke am Stueck -> Verteiler (TIEFE.md)' % count_2)
         E(tiefe - 1, 'var fall%d: u64 = 0' % marke)
         E(tiefe - 1, 'while true {')
         E(tiefe, 'if fall%d == 0 {' % marke)
-        for k in range(anzahl):
+        for k in range(count_2):
             b = Block('turm', tiefe + k, sp, [], marke)
-            b.schleife = False
-            b.turm_marke = marke
-            b.turm_fall = anzahl - k        # br k -> fall = anzahl-k
-            # Schleifenebene: `br` dorthin heisst "von vorne" -> Fall 0.
-            b.turm_schleife = bool(arten[k]) if arten else False
+            b.loop = False
+            b.turm_brand = marke
+            b.turm_fall = count_2 - k
+            b.turm_loop = bool(arten[k]) if arten else False
             stapel.append(b)
         l.at = danach
         return sp
 
     def turm_ende(self, b, tiefe, stapel):
-        """Das `end` einer Turmebene: der bisherige Fall ist zu Ende,
-        der naechste faengt an. Jeder Fall ist ein EIGENES `if` mit
-        `break` -- keine else-if-Kette (die schachtelt im Parser)."""
-        self.e(tiefe + 1, 'fall%d = %d' % (b.turm_marke, b.turm_fall))
+        self.e(tiefe + 1, 'fall%d = %d' % (b.turm_brand, b.turm_fall))
         self.e(tiefe + 1, 'continue')
         self.e(tiefe, '}')
-        self.e(tiefe, 'if fall%d == %d {' % (b.turm_marke, b.turm_fall))
+        self.e(tiefe, 'if fall%d == %d {' % (b.turm_brand, b.turm_fall))
         noch = [x for x in stapel if x.art == 'turm'
-                and x.turm_marke == b.turm_marke]
+                and x.turm_brand == b.turm_brand]
         if not noch:
             self.e(tiefe + 1, 'break')
             self.e(tiefe, '}')
@@ -1100,8 +1036,8 @@ class Erzeuger:
             self.e(tiefe - 1, '}')
             self.im_turm = False
 
-    def block_braucht_schleife(self, b, at):
-        return _block_braucht_schleife(b, at)
+    def block_braucht_loop(self, b, at):
+        return _block_braucht_loop(b, at)
 
     def block_hat_sprung(self, b, at):
         return _block_hat_sprung(b, at)
@@ -1140,22 +1076,18 @@ class Erzeuger:
             elif u == 11:
                 l.u8()
 
-    # ------------------------------------------------- Name eines Rufs
     def rufname(self, fi):
         m = self.m
         if fi < m.n_import_funcs:
             mod, nam, art, _ = m.importe[fi]
-            return 'imp_%s' % sicher(nam)
+            return 'imp_%s' % secure(nam)
         return self.fname(fi)
 
 
-def sicher(n):
+def secure(n):
     return ''.join(c if (c.isalnum() or c == '_') else '_' for c in n)
 
 
-# ====================================================================
-#                     Das ganze Erzeugnis
-# ====================================================================
 
 def erzeugen(m, wasi_txt, laufzeit_txt, name):
     e = Erzeuger(m, {})
@@ -1199,19 +1131,17 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
     o.append('')
     o.append(wasi_txt)
 
-    # ------------------------------------------------------ Globale
     o.append('// ================================== Globale des Moduls')
     for i, (t, ver, w, imp) in enumerate(m.globals):
         o.append('static mut g%d: u64 = %d' % (i, w))
     o.append('')
 
-    # ------------------------------------------------------ Importe
     o.append('// ================================= Die Importe (WASI)')
     gesehen = set()
     for fi, (mod, nam, art, ti) in enumerate(m.importe):
         if art != 'func':
             continue
-        nm = 'imp_%s' % sicher(nam)
+        nm = 'imp_%s' % secure(nam)
         if nm in gesehen:
             continue
         gesehen.add(nm)
@@ -1242,17 +1172,14 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
                 o.append('}')
         o.append('')
 
-    # ------------------------------------------- Funktionen
     o.append('// =========================== Die uebersetzten Funktionen')
     for fi in range(m.n_import_funcs, len(m.funktypen)):
         e.out = []
-        e.funktion(fi)
+        e.func(fi)
         o += e.out
 
-    # ------------------------------------------- Tabelle
-    o += tabelle_erzeugen(m, e.indirekte_typen)
+    o += table_erzeugen(m, e.indirekte_typen)
 
-    # ------------------------------------------- Start
     o += start_erzeugen(m, name)
     return '\n'.join(o)
 
@@ -1291,9 +1218,8 @@ def wasi_ruf(nam, npar):
     return T.get(nam)
 
 
-def tabelle_erzeugen(m, indirekte_typen=()):
+def table_erzeugen(m, indirekte_typen=()):
     o = ['// ============================ Die Tabelle (call_indirect)']
-    # index -> funcidx
     tab = {}
     for off, funcs in m.elemente:
         for k, f in enumerate(funcs):
@@ -1316,7 +1242,7 @@ def tabelle_erzeugen(m, indirekte_typen=()):
         for idx, f in sorted(eintraege):
             if f < m.n_import_funcs:
                 mod, nam, art, mti = m.importe[f]
-                ziel = 'imp_%s' % sicher(nam)
+                ziel = 'imp_%s' % secure(nam)
             else:
                 ziel = 'f%d' % f
             if res:
@@ -1339,7 +1265,6 @@ def tabelle_erzeugen(m, indirekte_typen=()):
     return o
 
 
-# ------------------------------------------------------------ Start
 def start_erzeugen(m, name):
     o = ['// ==================================== Der Programmstart']
     o.append('fn wasi_clock_res(ret: u64) -> u64 {')
@@ -1430,7 +1355,6 @@ def firn_bytes(b):
     return ''.join(r)
 
 
-# ------------------------------------------------------------- Haupt
 def main():
     import argparse
     ap = argparse.ArgumentParser(
@@ -1443,7 +1367,7 @@ def main():
     a = ap.parse_args()
 
     import wasi_ziehen
-    m = Modul(open(a.wasm, 'rb').read())
+    m = Module(open(a.wasm, 'rb').read())
     wasi = wasi_ziehen.ziehen(a.wasm_fi)
     lz = open(a.laufzeit).read()
     txt = erzeugen(m, wasi, lz, a.wasm)

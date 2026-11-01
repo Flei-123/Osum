@@ -1,27 +1,4 @@
 #!/usr/bin/env python3
-# tools/social/host.py -- the Fleitec side of tools/social/run.sh.
-#
-#   host.py setup <port> <secret> <workdir>   -> prints the device token
-#   host.py watch <port> <secret> <serial> <out>
-#
-# setup: justin, anna, bert, carla and dora get profiles; anna and bert
-# are justin's friends (anna online, playing), carla asks justin, justin
-# asked dora; justin's DEVICE ACCESS TOKEN (fkt1 by default, or fkz1 with
-# SOCIAL_TOKEN_FORMAT=fkz1) is made and printed.
-# watch: follows the guest's serial output and does at a marker what a
-# person at another computer would do, and checks what they see:
-#   ==CHECK1==   what anna sees of justin (dnd, 'Im Spiel', an activity)
-#   ==BERTON==   bert comes online (the guest should get an event)
-#   ==CHECK2==   justin is invisible: anna sees offline, no activity
-#   ==PAIR==     the guest shows a pairing code: justin types it into his
-#                profile (POST /api/kontakte/koppeln)
-#   ==KEY==      the guest's device key (its public half is the address)
-#   ==MSG1==     anna's FirnChat client (SOCIAL_ANNA_ID) reads what OrientOS
-#                wrote and answers
-#   ==WATCH1==   anna writes once more; the guest has message polling off, so it
-#                can only arrive by the live session (r40); the host times it
-#   ==INV1==     anna sees OrientOS's invite and says yes; then she invites
-#                justin into Counter-Strike 2
 import base64, hashlib, hmac, json, os, re, subprocess, sys, time, urllib.request
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
@@ -74,8 +51,6 @@ def setup(port, secret):
     if aid and os.path.exists(aid):
         pub = open(aid).read().strip()[64:128]
         api(port, t["anna"], "/api/kontakte/geraet", {"art": "fc", "wert": pub, "label": "Anna-PC"})
-    # default is fkt1 (the service's new standard); SOCIAL_TOKEN_FORMAT=fkz1
-    # asks for the legacy form explicitly
     fmt = os.environ.get("SOCIAL_TOKEN_FORMAT", "fkt1")
     st, j = api(port, t["justin"], "/api/kontakte/zugang", {"format": fmt})
     print(j.get("token", ""))

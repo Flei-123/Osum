@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/alpine/mkapk.py -- build a tiny LOCAL apk repository (APKv2 package + APKINDEX.tar.gz), stdlib only.
-#
-#   python3 -I mkapk.py <outdir> [--arch=x86_64]
-#
-# Writes <outdir>/<arch>/APKINDEX.tar.gz and <outdir>/<arch>/osumhello-1.0-r0.apk, and prints the list of
-# "<image path>=<host file>" spec entries (relative to the repo root) on stdout, one per line.
-# The package holds /usr/bin/osumhello (a shell script) and /usr/share/osumhello/data.txt; it has no dependencies, so
-# `apk add --no-network --allow-untrusted --repository /repo osumhello` needs nothing but the repository.
 import base64, gzip, hashlib, io, os, sys, tarfile, time
 
 ARCH = "x86_64"
 PKG = "osumhello"
 VER = "1.0-r0"
-MTIME = 1760400000  # fixed: the repository is reproducible
+MTIME = 1760400000
 
 
 def tar_cut(members):
-    """ustar stream WITHOUT the two terminating zero blocks (abuild-tar --cut): gzip streams of one .apk concatenate."""
     bio = io.BytesIO()
     tf = tarfile.open(fileobj=bio, mode="w", format=tarfile.USTAR_FORMAT)
     for name, data, mode, kind in members:
@@ -60,13 +51,11 @@ def main():
         ("usr/share/osumhello", b"", 0o755, "dir"),
         ("usr/share/osumhello/data.txt", payload, 0o644, "file"),
     ]
-    # the data segment keeps its end-of-archive blocks (it is the last one); the control segment must not
     data_tar = io.BytesIO()
     tf = tarfile.open(fileobj=data_tar, mode="w", format=tarfile.PAX_FORMAT)
     for name, data, mode, kind in data_members:
         ti = tarfile.TarInfo(name)
         if kind != "dir":
-            # apk-tools 3 refuses a file without the embedded checksum ("file format is obsolete")
             ti.pax_headers = {"APK-TOOLS.checksum.SHA1": hashlib.sha1(data).hexdigest()}
         ti.mtime = MTIME
         ti.uid = ti.gid = 0

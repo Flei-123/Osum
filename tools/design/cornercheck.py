@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-#
-#
-#
 import sys, struct, zlib
 from collections import Counter
 
@@ -43,7 +40,6 @@ def readpng(p):
     return w,h,px
 
 def flaechen(px,w,h,minflaeche=2000):
-    """Find rectangular blocks of one color (run-length method)."""
     c=Counter()
     for y in range(0,h,2):
         for x in range(0,w,2):
@@ -64,7 +60,6 @@ def flaechen(px,w,h,minflaeche=2000):
     return out
 
 def eckpruef(px,w,h,color,x0,y0,x1,y1,rmax=32):
-    """Radius aus dem Bild bestimmen und Ausreisser zaehlen."""
     obere=[x for x in range(x0,x1+1) if px[y0][x]==color]
     if not obere: return None
     r=obere[0]-x0

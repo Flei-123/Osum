@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/i18n/coverage.py -- WHICH CHARACTERS DO THE SHIPPED FONTS COVER?
-#
-# Round I18N asks a question that has to be answered with a number, not
-# with a hope: a message catalog in German is worth nothing if the font
-# has no 'u' with two dots on it. This reads the `cmap` table of a
-# TrueType file the same way kernel/ttf.fi does -- format 4 and format
-# 12 -- and prints how many code points are mapped, per Unicode block.
-#
-#   python3 tools/i18n/coverage.py assets/osum-sans.ttf [--json]
-#
-# The block table below is short on purpose: it names the blocks a
-# desktop in a Latin, Greek or Cyrillic language needs, plus the ones
-# this round explicitly does NOT support, so that their absence shows up
-# as a zero instead of as silence.
 import sys
 import json
 
@@ -55,8 +41,6 @@ BLOCKS = [
     (0x1F300, 0x1F5FF, "Miscellaneous Symbols and Pictographs"),
 ]
 
-# The characters a German, French or Spanish surface really needs, plus
-# the replacement character the UTF-8 decoder falls back to.
 PROBE = ("äöüÄÖÜß"
          "éèêçàñ¿¡"
          "„“–€�")
@@ -81,7 +65,6 @@ def tables(b):
 
 
 def subtables(b, cmap):
-    """Every (platform, encoding, format, offset) the file offers."""
     n = u16(b, cmap + 2)
     out = []
     for i in range(n):
@@ -93,7 +76,6 @@ def subtables(b, cmap):
 
 
 def read_fmt4(b, o):
-    """Format 4 -- the Windows BMP table. Returns {codepoint: glyph}."""
     segx2 = u16(b, o + 6)
     seg = segx2 // 2
     ends = o + 14
@@ -125,7 +107,6 @@ def read_fmt4(b, o):
 
 
 def read_fmt12(b, o):
-    """Format 12 -- the segmented table that reaches past U+FFFF."""
     n = u32(b, o + 12)
     m = {}
     for i in range(n):

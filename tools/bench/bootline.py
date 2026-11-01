@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/bench/bootline.py <com1.log> [seconds=60] [min_gap_s=0.5] -- boot timeline of a RUNNING qemu: polls the COM1 log file
-# every 50 ms, stamps every new line with the seconds since this script started and prints the lines that came after a pause
-# >= min_gap_s (= where boot time goes). Start it right after tools/odbc/qemu.sh start.
 import os, sys, time
 
 path = sys.argv[1]

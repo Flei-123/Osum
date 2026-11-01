@@ -29,7 +29,7 @@ IMPORT_RE = re.compile(rb'^\s*import\s+([A-Za-z_][A-Za-z0-9_.]*)')
 FN_RE = re.compile(rb'^\s*(?:export\s+|pub\s+)?(?:inline\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)')
 PROFILE_RE = re.compile(rb'^profile\s+(\w+)')
 USTART_RE = re.compile(rb'\bu_start\b')
-STDLIB_ROOTS = {'std', 'fui', 'font', 'paint', 'plat'}   # resolved inside firnc (vendor/firn), no .fi under lib/
+STDLIB_ROOTS = {'std', 'fui', 'font', 'paint', 'plat'}
 
 
 def walk_fi(base):
@@ -38,7 +38,7 @@ def walk_fi(base):
         dn[:] = [d for d in dn if not d.startswith('.')]
         for f in fn:
             fp = os.path.join(dp, f)
-            if f.endswith('.fi') and not os.path.islink(fp):   # flat compat symlinks are views, not files
+            if f.endswith('.fi') and not os.path.islink(fp):
                 out.append(fp)
     return sorted(out)
 
@@ -48,16 +48,15 @@ class Graph:
         self.root = root
         self.usr = os.path.join(root, 'kernel', 'user')
         self.lib = os.path.join(root, 'lib')
-        self.nodes = {}      # id -> dict(path, lines, kind, profile)
-        self.edges = defaultdict(list)   # id -> [ids]
+        self.nodes = {}
+        self.edges = defaultdict(list)
         self.unresolved = defaultdict(list)
-        self.stdlib = defaultdict(list)   # imports of the Firn stdlib shipped inside firnc
+        self.stdlib = defaultdict(list)
         files = walk_fi(self.usr)
         if with_lib:
             files += walk_fi(self.lib)
         for p in files:
             self._load(p)
-        # flat name -> path, for `import wlib` when the file lives in kernel/user/<layer>/wlib.fi
         self.flat = {}
         for p in files:
             if p.startswith(self.usr + os.sep):
@@ -69,7 +68,7 @@ class Graph:
         rel = os.path.relpath(path, self.root)
         if rel.startswith('kernel/user/'):
             rel = rel[len('kernel/user/'):]
-            return rel[:-3]   # flat: 'wlib'; layered: 'toolkit/wlib'
+            return rel[:-3]
         if rel.startswith('lib/'):
             return 'lib:' + rel[4:-3]
         return rel
@@ -95,11 +94,11 @@ class Graph:
                 prof = m.group(1).decode()
             if b'u_start' in ln and b'fn u_start' in ln:
                 ustart = True
-        bodies = []   # (name, start, end, normalized-body hash) for top-level fns
+        bodies = []
         import hashlib
         for name, st in fns:
             if lines[st - 1][:1] in (b' ', b'\t'):
-                continue   # nested / indented, not a top-level function
+                continue
             en = st
             while en < len(lines) and lines[en - 1].rstrip() != b'}':
                 en += 1
@@ -118,24 +117,23 @@ class Graph:
         for mod, ln in n['imports']:
             rel = mod.replace('.', '/') + '.fi'
             hit = None
-            for base in (d, self.lib):   # importer dir first, then FIRNLIB (= lib/)
+            for base in (d, self.lib):
                 p = os.path.join(base, rel)
                 if os.path.isfile(p):
                     hit = p
                     break
             if hit is None and mod in self.flat:
-                hit = self.flat[mod]   # layered tree: flat compat symlinks make `import wlib` work from any layer
+                hit = self.flat[mod]
             if hit is None and os.path.isfile(os.path.join(self.usr, rel)):
                 hit = os.path.join(self.usr, rel)
             if hit is None:
-                if mod.split('.')[0] in STDLIB_ROOTS:   # embedded in firnc, not a file here
+                if mod.split('.')[0] in STDLIB_ROOTS:
                     self.stdlib[nid].append(mod)
                 else:
                     self.unresolved[nid].append((mod, ln))
                 continue
             tid = self.ident(hit)
             if tid not in self.nodes:
-                # lib module not scanned (no --lib): keep as leaf marker
                 self.nodes[tid] = dict(path=hit, lines=sum(1 for _ in open(hit, 'rb')),
                                        profile=None, program=False, imports=[], funcs=[],
                                        leaf=True)
@@ -283,7 +281,6 @@ def main():
             print(f'  L{lo:6d}-{hi:6d}  {k:<18s} {c:4d} fn')
         return
     if a.coupling:
-        # coupling that is NOT an import: files/paths several programs read or write (/etc/*.conf, /apps/*)
         pat = re.compile(rb'"(/(?:etc|apps|var|run|tmp|system)/[A-Za-z0-9_./-]+)')
         users = defaultdict(set)
         for k, v in local.items():
@@ -299,7 +296,6 @@ def main():
         n = g.nodes.get(a.regions)
         if not n:
             sys.exit(f'unknown module {a.regions}')
-        # contiguous runs of top-level functions sharing a name prefix = regions of one responsibility
         fns = [(nm, ln) for nm, ln in n['funcs'] if n_toplevel(n, ln)]
         runs = []
         for nm, ln in fns:
@@ -308,9 +304,8 @@ def main():
                 runs[-1][2] = ln; runs[-1][3] += 1; runs[-1][4][key] += 1
             else:
                 runs.append([key, ln, ln, 1, Counter({key: 1})])
-        # merge tiny runs into the neighbour so the list stays readable
         merged = []
-        pending = None   # leading tiny runs wait for the first real region
+        pending = None
         for r in runs:
             if r[3] < a.min:
                 if merged:

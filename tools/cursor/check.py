@@ -1,16 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/cursor/check.py <outdir> <log> <serial> <scale> -- W-CURSOR checks.
-
-For every `foto NN-name` of tools/cursor/script.txt the picture is cut around the
-pointer's hot spot (the spot the drehbuch moved to is in the drive log as
-`fahrekante id=7 <where> -> X,Y`) and each of the ten shapes is rendered
-here from the SAME outlines the kernel uses (tools/wm/cursor2.py), at the
-target size (24 px * scale). The score of a shape is how many of its sure
-rim pixels are white and sure core pixels dark in the picture, minus the
-white/dark ink in the box that the shape does not explain. The best shape must
-be the expected one. Prints `  OK` / `  FAIL` lines; exit code = number of FAIL.
-Also checks the serial `wm: form=` lines against the same expectation."""
 import os, re, sys
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "wm"))
@@ -33,7 +22,6 @@ def ppm(path):
 
 G = 24.0
 def ref(idx, g):
-    """sure core (dark) and sure rim (white) masks of shape idx at g px, plus the hot spot"""
     name, hot, pts = zeiger2.FORMEN[idx]
     P = np.array(pts)
     ys, xs = np.mgrid[0:g, 0:g]
@@ -55,9 +43,7 @@ def ref(idx, g):
         t = np.clip(((cx - a[0]) * ab[0] + (cy - a[1]) * ab[1]) / (ab @ ab), 0, 1)
         d = np.hypot(cx - (a[0] + t * ab[0]), cy - (a[1] + t * ab[1]))
         dist = np.minimum(dist, d)
-    px = G / g                      # design units per pixel
-    # thin shapes (the text bar is 1.8 design units wide) have no pixel 0.8 px from every edge:
-    # relax the margin until the "sure" set is big enough to judge
+    px = G / g
     for margin in (0.8, 0.5, 0.25):
         core = inside & (dist > margin * px)
         rim = (~inside) & (dist > margin * px) & (dist < 1.33 - margin * px)
@@ -66,12 +52,6 @@ def ref(idx, g):
     return core, rim, int(round(hot[0] * g / G)), int(round(hot[1] * g / G)), inside | (dist < 1.33 + 1.5 * px), inside, dist
 
 def classify(img, hx, hy, g, base=None, slack=3):
-    """base = the same picture with the pointer elsewhere: the difference is the pointer alone (the
-    terminal grid and the diagnostic board carry text that would otherwise look like ink).
-    With a base a shape scores the best IoU between the changed pixels and its silhouette (outline
-    polygon + white rim of 0.8 / 1.33 / 1.9 design units, the kernel's rim is anti-aliased), over
-    +-slack px of hot spot (the kernel rounds the 24 px design to the pixel grid, the drive log names
-    the spot it moved to). Without a base (bare desktop) the ink score of the sure pixels is used."""
     best, bs, scores = -1, -9.0, []
     for idx in range(len(zeiger2.FORMEN)):
         core, rim, ox, oy, near, inside, dist = ref(idx, g)
@@ -106,7 +86,6 @@ def classify(img, hx, hy, g, base=None, slack=3):
             bs, best = sc, idx
     return best, scores
 
-# targets: (photo, where, expected shape)
 TARGETS = [("01-desktop", "aussen", 0), ("02-terminal", "mitte", 1), ("03-title", "titel", 0),
            ("04-edge-r", "r", 3), ("05-corner-ru", "ru", 5), ("06-edge-b", "u", 4), ("07-corner-lo", "lo", 5)]
 txt = open(log, "rb").read().decode("latin1")
@@ -114,8 +93,6 @@ spots = [(m.group(1), int(m.group(2)), int(m.group(3))) for m in
          re.finditer(r"fahrekante id=7 (\S+) -> (\d+),(\d+)", txt)]
 g = 24 * scale
 seen = {}
-# two base pictures with the pointer parked far apart: 01-desktop (pointer at the first spot) and
-# 99-away (pointer at the last spot); each target uses the base whose parked pointer is farther away
 bases = []
 for nm, sp in (("01-desktop", spots[0] if spots else None), ("99-away", spots[-1] if spots else None)):
     f = os.path.join(out, nm + ".ppm")
@@ -139,7 +116,6 @@ for (ph, where, want), (w2, x, y) in zip(TARGETS, spots):
        % (ph, where, x, y, zeiger2.NAMEN[best] if best >= 0 else "?", zeiger2.NAMEN[want],
           sc[want], max(v for i, v in enumerate(sc) if i != want)))
 ok(len(spots) >= 7, "drive log names %d spots" % len(spots))
-# serial: every form line names a legal shape; resize/text/arrow all occurred
 ser = open(ser_path, "rb").read().decode("latin1")
 forms = [int(m.group(1)) for m in re.finditer(r"wm: form=(\d+) x=", ser)]
 ok(bool(forms) and max(forms) < len(zeiger2.FORMEN), "serial: %d shape changes, all < %d" % (len(forms), len(zeiger2.FORMEN)))

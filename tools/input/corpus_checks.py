@@ -160,12 +160,12 @@ def check_structure(r, caps, head, state):
     r.add(len(state.collections) == caps.nlink, "%s: link collection count" % name,
           "%d != %d" % (len(state.collections), caps.nlink))
     fingers = [c for c in state.collections if (c["page"], c["usage"]) == (PAGE_DIGITIZER, FINGER_USAGE)]
-    wanted_links = len({c.link for c in caps.caps if c.link > 0})
+    wanted_left = len({c.link for c in caps.caps if c.link > 0})
     if (caps.top_page, caps.top_usage) == (PAGE_DIGITIZER, 0x05):
         r.add(len(fingers) == TOUCHPAD_FINGERS, "%s: finger collections == %d" % (name, TOUCHPAD_FINGERS),
               str(len(fingers)))
-        r.add(wanted_links == TOUCHPAD_FINGERS, "%s: caps declare %d finger links" % (name, TOUCHPAD_FINGERS),
-              str(wanted_links))
+        r.add(wanted_left == TOUCHPAD_FINGERS, "%s: caps declare %d finger links" % (name, TOUCHPAD_FINGERS),
+              str(wanted_left))
     counted = hidcaps.header_counts(caps)
     for key, want in sorted(caps.counts.items()):
         r.add(counted[key] == want, "%s: caps header %s matches caps lines" % (name, key), "%d != %d" % (counted[key], want))

@@ -1,53 +1,33 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/mkfallback.py -- cut the two FALLBACK fonts of the interface (G-009 / r1084).
-
-    mkfallback.py <DejaVuSans.ttf> <NotoEmoji.ttf (variable)> <osum-sans.ttf> <out-symbols.ttf> <out-emoji.ttf>
-
-osum-sans.ttf (Inter) has no Emoji, no Latin Extended-B, no arrows.  fUi asks the fallback fonts only for a code
-point the role font lacks (kernel/user/fuiglyph.fi), so each cut carries ONLY code points the sans does not have:
-
-  osum-symbols.ttf   DejaVu Sans (Bitstream Vera licence: free, modified copies must not be called "Vera"/"Bitstream"
-                     -- the name table is dropped here, so the cut has no name at all)
-                     Latin Extended-A/B, IPA, spacing modifiers, Greek, Cyrillic, general punctuation, super/subscripts, letterlike,
-                     number forms, arrows, maths, technical, box drawing, blocks, geometric shapes, misc symbols,
-                     dingbats, Braille, supplemental arrows
-  osum-emoji.ttf     Noto Emoji (SIL OFL 1.1), the variable font frozen at wght 400, monochrome outlines
-                     the astral blocks of the character map (1F300-1F64F, 1F680-1F6FF, 1F900-1F9FF), plus the code points DejaVu lacks in 2190-2BFF / 2600-27BF, 
-
-Both are cut the way mkfont.py cuts Inter: no hinting, no layout tables, only cmap/glyf/head/hhea/hmtx/loca/maxp
-(the engine in lib/font/ttf.fi reads cmap formats 4 and 12 and composite glyphs).
-Zero-width joiners (U+200B..200D, U+FE0E/FE0F) are NOT in the cuts: fuiglyph draws them as empty glyphs.  Reproducible octet for octet.
-"""
 import sys
 from fontTools import subset
 from fontTools.ttLib import TTFont
 from fontTools.varLib import instancer
 
 SYMBOL_RANGES = [
-    (0x0100, 0x02FF),   # Latin Extended-A/B, IPA, spacing modifiers
-    (0x0370, 0x03FF),   # Greek and Coptic (r1086)
-    (0x0400, 0x052F),   # Cyrillic, Cyrillic Supplement (r1086)
-    (0x2010, 0x205E),   # general punctuation (dashes, quotes, bullets, ellipsis)
-    (0x2070, 0x209F),   # super/subscripts
-    (0x20A0, 0x20CF),   # currency
-    (0x2100, 0x218F),   # letterlike, number forms
-    (0x2190, 0x23FF),   # arrows, maths operators, technical
-    (0x2500, 0x25FF),   # box drawing, block elements, geometric shapes
-    (0x2600, 0x27BF),   # misc symbols, dingbats
-    (0x27C0, 0x27EF),   # misc maths A
-    (0x27F0, 0x27FF),   # supplemental arrows A
-    (0x2800, 0x28FF),   # Braille
-    (0x2900, 0x297F),   # supplemental arrows B
-    (0x2B00, 0x2B1F),   # misc symbols and arrows (head)
+    (0x0100, 0x02FF),
+    (0x0370, 0x03FF),
+    (0x0400, 0x052F),
+    (0x2010, 0x205E),
+    (0x2070, 0x209F),
+    (0x20A0, 0x20CF),
+    (0x2100, 0x218F),
+    (0x2190, 0x23FF),
+    (0x2500, 0x25FF),
+    (0x2600, 0x27BF),
+    (0x27C0, 0x27EF),
+    (0x27F0, 0x27FF),
+    (0x2800, 0x28FF),
+    (0x2900, 0x297F),
+    (0x2B00, 0x2B1F),
 ]
 EMOJI_BMP = [(0x2190, 0x21FF), (0x2300, 0x23FF), (0x25A0, 0x25FF), (0x2600, 0x27BF), (0x2900, 0x297F), (0x2B00, 0x2BFF),
              (0x3030, 0x3030), (0x303D, 0x303D), (0x3297, 0x3299), (0x00A9, 0x00AE), (0x203C, 0x203C), (0x2049, 0x2049),
              (0x2122, 0x2139), (0x24C2, 0x24C2)]
-# the astral blocks fUi's character map offers (kernel/user/charmap.fi) -- the rest of the plane costs flash and nobody types it
 EMOJI_ASTRAL = [(0x1F300, 0x1F64F), (0x1F680, 0x1F6FF), (0x1F900, 0x1F9FF)]
-EMOJI_GRID = 4      # outline coordinates snap to 4 font units (1/512 em: 0.03 px at 15 px) -- smaller glyf deltas
-MAX_POINTS = 1300   # fuiglyph's outline scratch holds 1300 points; a bigger glyph would come back as the missing box
+EMOJI_GRID = 4
+MAX_POINTS = 1300
 
 
 def cut(font, cps, keep_extra=()):

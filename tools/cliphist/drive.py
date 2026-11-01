@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/cliphist/drive.py -- event driven Win+V scenario through QMP (D-015).
-
-    drive.py <qmp-socket> <serial.txt> <outdir> [timeout-seconds]
-
-Win+R `cliphist put alpha beta gamma` (three bus entries, gamma newest)
-Win+V -> rows gamma beta alpha; Tab + Enter -> pick row 1 (beta), the bus head is beta
-Win+V -> beta gamma alpha (the second beta is shown once, ring n=4); key 3 -> pick row 2 (alpha)
-Win+V -> Down + Enter -> pick row 1; Win+V -> Esc -> closed, nothing picked.
-Writes `scenes.txt` (key=value). A step that never happens is recorded as 0 after its timeout (the old tree has no popup).
-"""
 import importlib.util
 import os
 import re
@@ -54,7 +44,6 @@ def main():
             time.sleep(0.2)
         return count(p) >= n
 
-    # seed three entries through the Run dialog (the hook of the program itself)
     q.tap("meta_l", "r")
     got = wait_count(r"runbox: ready", 1, tmo)
     facts.append(f"run_ready={1 if got else 0}")
@@ -71,7 +60,6 @@ def main():
         q.tap("meta_l", "v")
         return wait_count(r"cliphist: ready", n, tmo)
 
-    # 1. open: three rows, newest first
     r1 = popup(1)
     facts.append(f"open1={1 if r1 else 0}")
     time.sleep(1.5)
@@ -79,7 +67,6 @@ def main():
     facts.append(f"ring3={1 if 'cliphist: ready n=3 shown=3' in t else 0}")
     facts.append("rows1=%d" % (1 if re.search(ROWS1, t) else 0))
     if r1:
-        # Tab moves to row 1, Enter picks it
         q.tap("tab")
         time.sleep(0.6)
         q.tap("ret")
@@ -87,7 +74,6 @@ def main():
         facts.append(f"head_beta={1 if wait_count(r'cliphist: head beta', 1, 10) else 0}")
         facts.append(f"closed1={1 if wait_count(r'cliphist: closed', 1, 10) else 0}")
     time.sleep(1.0)
-    # 2. the picked entry is on top again; the older beta is not shown twice
     r2 = popup(2)
     facts.append(f"open2={1 if r2 else 0}")
     time.sleep(1.5)
@@ -100,7 +86,6 @@ def main():
         facts.append(f"head_alpha={1 if wait_count(r'cliphist: head alpha', 1, 10) else 0}")
         wait_count(r"cliphist: closed", 2, 10)
     time.sleep(1.0)
-    # 3. arrow keys
     r3 = popup(3)
     facts.append(f"open3={1 if r3 else 0}")
     time.sleep(1.5)
@@ -113,7 +98,6 @@ def main():
         facts.append(f"pick_down={1 if m else 0}")
         wait_count(r"cliphist: closed", 3, 10)
     time.sleep(1.0)
-    # 4. Esc closes without a pick
     picks = count(r"cliphist: pick ")
     r4 = popup(4)
     facts.append(f"open4={1 if r4 else 0}")

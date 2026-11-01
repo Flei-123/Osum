@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Request/response session (docs/ODB.md) over any Transport."""
 import collections
 import hashlib
 import hmac
@@ -46,7 +45,7 @@ class Session:
         self.retry_s = retry_s
         self.retries = retries
         self.ack_timeout = ack_timeout
-        self.stray = collections.deque(maxlen=64)   # frames of other request ids (late answers, EBUSY, ...)
+        self.stray = collections.deque(maxlen=64)
         self.wlock = threading.Lock()
         self.hello_info = None
         self.maxchunk = proto.MAX_CHUNK
@@ -61,14 +60,12 @@ class Session:
     def close(self):
         self.t.close()
 
-    # ---- low level ----------------------------------------------------
     def send(self, f):
         self.stats["tx_frames"] += 1
         with self.wlock:
             self.t.write(F.encode(f))
 
     def poll(self, timeout):
-        """Next frame or None after timeout. Raises Closed on EOF."""
         end = time.time() + timeout
         while True:
             if self.pending:
@@ -89,7 +86,6 @@ class Session:
         return i
 
     def ping(self, payload=b"odbc", timeout=2.0):
-        """Round-trip time in seconds."""
         fid = self.new_id()
         t0 = time.time()
         self.send(F.Frame(F.PING, fid, payload))
@@ -99,11 +95,7 @@ class Session:
                 return time.time() - t0
         raise Timeout("no PONG within %.1fs" % timeout)
 
-    # ---- request engine -------------------------------------------------
     def request(self, cmd, items=None, on_frame=None, on_start=None, timeout=15.0, flags=0):
-        """Send REQ, handle frames of this id until RESP (returns Tlv) or ERR (raises).
-        on_frame(frame) sees every DATA/END/ACK/other frame of the request.
-        timeout = max seconds without any frame of this request (after retries)."""
         fid = self.new_id()
         req = F.Frame(F.REQ, fid, proto.enc_req(cmd, items), flags)
         self.send(req)
@@ -149,7 +141,6 @@ class Session:
         self.send(F.Frame(F.CANCEL, fid))
 
     def send_resize(self, cols, rows):
-        """Tell a running `shell` the new window size (fire and forget; the agent's RESP lands in self.stray)."""
         fid = self.new_id()
         self.send(F.Frame(F.REQ, fid, proto.enc_req("resize", [("cols", cols), ("rows", rows)])))
         return fid
@@ -162,20 +153,15 @@ class Session:
     def end_stream(self, fid, stream, items=None):
         self.send(F.Frame(F.END, fid, proto.enc_end(stream, items)))
 
-    # ---- session setup ---------------------------------------------------
     def hello(self, timeout=3.0):
         r = self.request("hello", [("ver", 1), ("client", self.client), ("clientver", 1)], timeout=timeout)
         self.hello_info = r
         self.maxchunk = min(r.geti("maxchunk", proto.MAX_CHUNK), proto.MAX_CHUNK)
-        # push: one frame in flight at most (host -> agent only; pull keeps the full window). A VirtualBox uart2 pipe has no flow control, the agent loses the head of the next
-        # frame while it writes the previous one to disk (24 KiB push wedged the agent; 64 KiB at window=8192: 10.6 KiB/s,
-        # 0 rewinds). QEMU backpressures, so there the cost is nil (the line, not the RTT, is the limit).
         self.window = r.geti("window", 65536)
         self.push_window = min(self.window, self.maxchunk)
         return r
 
     def login(self, timeout=3.0):
-        """hello + auth (if the agent asks for it). Returns the hello Tlv."""
         h = self.hello(timeout)
         if h.get("auth") == "token":
             if not self.token:
@@ -183,10 +169,8 @@ class Session:
             self.request("auth", {"mac": auth_mac(self.token, h.get("nonce", ""))}, timeout=max(timeout, 35.0))
         return h
 
-    # ---- commands ---------------------------------------------------------
     def exec(self, cmd=None, argv=None, cwd=None, env=None, timeout_ms=None, stdin=None,
              on_out=None, on_err=None, timeout=None):
-        """Run a command. Returns (Tlv resp, stdout bytes, stderr bytes) unless callbacks consume the output."""
         out, err = bytearray(), bytearray()
         items = [("cmd", cmd), ("arg", argv), ("cwd", cwd), ("env", env), ("timeout_ms", timeout_ms),
                  ("stdin", 1 if stdin is not None else None)]
@@ -208,7 +192,6 @@ class Session:
         return r, bytes(out), bytes(err)
 
     def collect_stream(self, cmd, items, stream, sink=None, timeout=15.0):
-        """For ps/logs/shot/...: gather one DATA stream until RESP."""
         buf = bytearray()
 
         def on_frame(f):
@@ -220,7 +203,6 @@ class Session:
         return r, bytes(buf)
 
     def push(self, data, path, mode="644", overwrite=True, timeout=15.0, progress=None):
-        """Go-back-N file push. Returns resp Tlv; verifies sha256/crc32."""
         size = len(data)
         sha = hashlib.sha256(data).hexdigest()
         st = {"sent": 0, "acked": 0, "end": False, "t": time.time()}
@@ -238,7 +220,6 @@ class Session:
             if st["sent"] >= size and not st["end"]:
                 self.end_stream(fid, proto.FILE, {"size": size, "sha256": sha})
                 st["end"] = True
-            # no ACK progress for 2 s: resend from the last ACK
             if time.time() - st["t"] > self.ack_timeout:
                 st["t"] = time.time()
                 if st["acked"] < size or st["end"]:
@@ -253,7 +234,7 @@ class Session:
                 if s != proto.FILE:
                     return
                 st["t"] = time.time()
-                if nxt < st["sent"] and nxt <= st["acked"]:     # duplicate ACK = the receiver saw a gap
+                if nxt < st["sent"] and nxt <= st["acked"]:
                     self.stats["rewinds"] += 1
                     st["sent"] = nxt
                     st["end"] = False
@@ -279,11 +260,9 @@ class Session:
         return r
 
     def pull(self, path, offset=0, timeout=15.0, sink=None, progress=None):
-        """Go-back-N file pull. Returns (resp Tlv, bytes); verifies sha256/crc32 of the whole file."""
         return self.file_download("pull", [("path", path), ("offset", offset or None)], offset, timeout, sink, progress)
 
     def file_download(self, cmd, items, offset=0, timeout=15.0, sink=None, progress=None):
-        """Shared by pull and crashdump get: file stream 3 agent->host with ACKs."""
         buf = bytearray()
         st = {"next": offset, "acked": offset, "t": time.time(), "tack": 0.0}
         holder = {}
@@ -302,21 +281,17 @@ class Session:
                     return
                 st["t"] = time.time()
                 if off > st["next"]:
-                    ack()                      # gap: tell the agent where to continue
+                    ack()
                     self.stats["rewinds"] += 1
                     return
-                short = len(b) < self.maxchunk # a short frame ends a burst (last chunk of a file): nothing else follows
-                dup = off < st["next"] or (off == st["next"] and not b)   # the agent resent: it waits for our ACK
-                b = b[st["next"] - off:]       # drop a duplicated prefix
+                short = len(b) < self.maxchunk
+                dup = off < st["next"] or (off == st["next"] and not b)
+                b = b[st["next"] - off:]
                 if b:
                     (sink or buf.extend)(b)
                     st["next"] += len(b)
                     if progress:
                         progress(st["next"])
-                # ACK at once on a short frame, and on a resend (at most one per 0.5 s). Waiting for window/2 or 2 s of
-                # silence deadlocked small pulls on a slow line: the agent (which sends END only after the last ACK)
-                # resent every ~1 s, each resend reset our silence timer, so no ACK ever went out (VirtualBox, 100 byte
-                # and exactly 8 KiB files). The rate limit avoids an ACK storm after loss.
                 if short or (dup and time.time() - st["tack"] > 0.5) or st["next"] - st["acked"] >= win // 2:
                     ack()
             elif f.type == F.END:
@@ -325,7 +300,7 @@ class Session:
                     ack()
 
         def idle():
-            if time.time() - st["t"] > self.ack_timeout:     # silence: prompt a resend from where we are
+            if time.time() - st["t"] > self.ack_timeout:
                 ack()
                 self.stats["rewinds"] += 1
 

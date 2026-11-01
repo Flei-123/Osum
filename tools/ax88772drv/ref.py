@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Expected serial lines of tools/ax88772drv/test.fi, computed from the Asix protocol description only.
 import sys
 
 PAUSE = 150000

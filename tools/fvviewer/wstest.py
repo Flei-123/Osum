@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/fvviewer/wstest.py -- lib/net/ws.fi against an independent peer
-# (Python `websockets`). Starts the Firn host driver as a subprocess.
-#
-#   python3 tools/fvviewer/wstest.py <wstest-binary> [slow]
-#
-# The server sends text/binary of several lengths (7/16/64-bit headers), a
-# fragmented message, a ping; the client must report every event with the
-# exact length and octet sum, answer the ping, and its own masked frames
-# (incl. a 70000-octet one and a fragmented one) must arrive intact.
 import asyncio, sys
 from websockets.asyncio.server import serve
 
@@ -32,9 +23,9 @@ async def run(binary, slow):
             await ws.send("hello-server")
             await ws.send(pat(300))
             await ws.send(pat(70000))
-            await ws.send(pat(0))                     # empty binary
-            await ws.send([b"a" * 10, b"b" * 20, b"c" * 30])   # 3 fragments
-            await ws.send("é" * 5)                    # text, multi-byte
+            await ws.send(pat(0))
+            await ws.send([b"a" * 10, b"b" * 20, b"c" * 30])
+            await ws.send("é" * 5)
             await ws.ping(b"srvping")
             seen = []
             for _ in expect_server_view:

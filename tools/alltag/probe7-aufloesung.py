@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Probe-Aufloesung der sechs Konfliktdateien alltag -> merge7 (WEGWERF-Baum).
-
-Regeln je (Datei, Konfliktnummer):
-  head    -- die merge7-Seite gewinnt
-  both    -- beide Seiten hintereinander (HEAD zuerst)
-  union   -- Exportliste: HEAD-Seite + die Bezeichner, die nur alltag hat
-  keysdel -- wlib-Exportliste, Sonderfall: KEY_SDEL vor die HEAD-Seite
-  buildsh -- GUI=/CLI=-Zeilen: HEAD-Liste + die alltag-Namen angehaengt
-"""
 import re, sys, os
 
 ROOT = sys.argv[1] if len(sys.argv) > 1 else "/root/osum-probe7"
@@ -70,7 +61,6 @@ def resolve(path, rules):
     if k != len(rules):
         raise SystemExit(f"{path}: {k} Konflikte, {len(rules)} Regeln")
     text = "\n".join(out)
-    # Umnummerierung
     if path in ("kernel/sys/sys.fi", "lib/libc/kcall.fi"):
         text = text.replace("const SYS_OSUM_SPERRE: u64 = 1850", "const SYS_OSUM_SPERRE: u64 = 1870")
         text = text.replace("//   1850  osum_sperre", "//   1870  osum_sperre")

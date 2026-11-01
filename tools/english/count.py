@@ -181,6 +181,21 @@ def scan_script(text, ext):
     return 0, comment, logtext
 
 
+def scan_py_idents(text, names):
+    import io
+    import tokenize
+    total = 0
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except Exception:
+        return 0
+    for t in toks:
+        if t.type == tokenize.NAME and german_ident(t.string):
+            total += 1
+            names.add(t.string)
+    return total
+
+
 def tracked():
     out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True).stdout.splitlines()
     return out
@@ -214,6 +229,8 @@ def scan_all():
             i, c, l = scan_fi(text, nm) if ext == ".fi" else (0, scan_script(text.replace(";", "\n#"), ext)[1], 0)
         elif ext in (".py", ".sh", ".js", ".c", ".h"):
             i, c, l = scan_script(text, ext)
+            if ext == ".py":
+                i = scan_py_idents(text, nm)
         else:
             i = c = l = 0
         f = file_german(path)

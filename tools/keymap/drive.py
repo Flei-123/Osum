@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/keymap/drive.py -- keyboard engine scenario through QMP (USB keyboard).
-
-    drive.py <qmp-socket> <serial.txt> <outdir> [timeout-seconds]
-
-The image boots with /etc/keyboard.conf = `keyboard.layout=de`. Every step is event driven: a serial line, never a fixed sleep for a result.
-Writes `scenes.txt` (key=value, 1 = the step did what the layout promises).
-"""
 import importlib.util
 import os
 import re

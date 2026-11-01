@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""odbc command line. Port: --port / $ODB_PORT (see transport.py for spec strings)."""
 import argparse
 import glob
 import os
@@ -308,7 +307,6 @@ def cmd_ping(ns):
 
 
 def cmd_wait(ns):
-    """Wait until the agent answers hello (boot finished). Exit 0 on success, 1 on timeout."""
     spec = port_spec(ns)
     end = time.time() + ns.limit
     last = None
@@ -330,7 +328,6 @@ def cmd_wait(ns):
 
 
 def cmd_imgdiff(ns):
-    """Host-only: compare two shot PNGs. Exit 0 = at most --max-frac of the pixels differ, 1 = more, 2 = unreadable."""
     try:
         a = IMG.decode_png(open(ns.a, "rb").read())
         b = IMG.decode_png(open(ns.b, "rb").read())
@@ -344,7 +341,6 @@ def cmd_imgdiff(ns):
 
 
 def cmd_serve(ns):
-    """Long-lived relay: keeps a one-client upstream (VBox uart2 pipe) open for many odbc commands."""
     from .proxy import serve
     spec = port_spec(ns)
     if not spec:

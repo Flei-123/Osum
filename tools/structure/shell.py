@@ -11,10 +11,6 @@ from erhebung import IMPORT_RE, lies  # noqa: E402
 
 
 def huelle(wurzeldatei):
-    """Folgt `import` von einer Wurzel aus -- mit DERSELBEN Suchordnung
-    wie der Uebersetzer: erst neben der importierenden Datei, dann neben
-    der Wurzel (modules.rs, Schritte 1 und 2). Liefert Pfade relativ zu
-    `kernel/`."""
     basis = os.path.dirname(wurzeldatei)
     gesehen = set()
     stapel = [wurzeldatei]

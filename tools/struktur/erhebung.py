@@ -13,20 +13,11 @@ IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][A-Za-z0-9_.]*)[ \t]*(?://
 
 
 def lies(pfad):
-    """Liest eine Datei als Text. `kmain.fi` enthaelt eingebettete
-    Oktette, die kein UTF-8 sind (ein eingebautes Abbild) -- deshalb
-    'replace' statt eines Abbruchs."""
     with open(pfad, "rb") as f:
         return f.read().decode("utf-8", "replace")
 
 
 def sammle():
-    """Alle .fi-Dateien unter kernel/, als Modulname -> Angaben.
-
-    Der Modulname ist der Dateiname ohne Endung, denn genau so spricht
-    Firn ein Modul an (letzter Pfadteil). Zwei Dateien gleichen Namens
-    in verschiedenen Ordnern waeren eine Namenskollision; das meldet
-    diese Funktion, statt sie stillschweigend zu ueberschreiben."""
     module = {}
     kollisionen = []
     for stamm, _, namen in os.walk(KERN):
@@ -56,9 +47,6 @@ def sammle():
 
 
 def tarjan(knoten, kanten):
-    """Starke Zusammenhangskomponenten, iterativ (der Graph ist zu tief
-    fuer Rekursion in Python). Liefert nur Komponenten mit mehr als
-    einem Knoten -- das sind die echten Zyklen."""
     index = {}
     tief = {}
     aufstapel = set()
@@ -109,8 +97,6 @@ def tarjan(knoten, kanten):
 
 
 def lies_schichten():
-    """`schichten.txt`: je Zeile `schicht modul`, plus `#rang schicht n`
-    fuer die Ordnung. Fehlt die Datei, gibt es keine Regelpruefung."""
     if not os.path.exists(SCHICHTDATEI):
         return {}, {}
     zuord = {}
@@ -133,12 +119,6 @@ def lies_schichten():
 
 
 def pruefe_regel(module, zuord, rang):
-    """DIE REGEL: eine Schicht darf nur auf Schichten mit KLEINEREM oder
-    GLEICHEM Rang zugreifen. Gleicher Rang ist erlaubt (innerhalb einer
-    Schicht darf man sich kennen), hoeher ist ein Bruch -- der Treiber
-    darf die Oberflaeche nicht rufen.
-
-    Liefert (halten, brueche_liste)."""
     halten = 0
     brueche = []
     for name, ang in sorted(module.items()):

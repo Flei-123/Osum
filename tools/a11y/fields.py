@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/a11y/fields.py -- ONE PACKING, FOUR PLACES, HELD AGAINST EACH OTHER.
-
-The node of the accessibility tree (96 octets), its roles, its state bits,
-the AX_INFO fields and the call numbers are written in four files:
-
-    kernel/ui/ax.fi        the store (NODE_BYTES, R_*, S_*, AI_*, C_*)
-    kernel/sys/sys.fi      the call numbers (AX_*)
-    kernel/user/wlibc.fi   ring 3's calls and fields (AX_*, AXI_*, AXC_*)
-    kernel/user/wlib.fi    the builder (AXN_*, AXR_*, AXS_*)
-    kernel/user/axd.fi     the reader on the bus (its own copies)
-
-A number written in two places drifts; this program is the third place
-that does nothing but compare. Exit 0 = all agree.
-"""
 import re, sys, os, subprocess
 os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 

@@ -1,93 +1,23 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/multicore/onecore.py -- DIE EIN-KERN-RESTE, AN DER QUELLE GEZAEHLT.
-
-    onecore.py [--liste] [--nur <datei.fi>]
-
-WORUM ES GEHT. Ein Puffer in der Datenseite (`state + kstate.X_OFF`)
-gehoert der GANZEN MASCHINE. Solange nur ein Kern darin arbeitet, ist
-das die billigste und schnellste Loesung, die es gibt -- kein
-Allokator, keine Sperre, kein Stapelplatz. Sobald zwei Kerne
-gleichzeitig hineinschreiben, ist es ein stiller Datenverlust: der eine
-liest heraus, was der andere hineingelegt hat, und beide halten das
-Ergebnis fuer ihres.
-
-Es ist dieselbe Fehlerform wie `KSTACK_CUR` (Runde VIELKERN 1) und wie
-`fs.buf_in` (Runde VIELKERN 3) -- ein Wort fuer die ganze Maschine, das
-nur deshalb hielt, weil nie zwei Kerne gleichzeitig hinsahen. Seit
-`r3alle` sehen sie hin.
-
-WAS DAS WERKZEUG TUT. Es liest die Kernquellen, findet jede Funktion,
-die einen solchen Puffer als ARBEITSFLAECHE nimmt (also `let x: u64 =
-state + kstate.<NAME>_OFF ...`), und fragt fuer jede: liegt zwischen
-dem Betreten der Funktion und dem Gebrauch des Puffers eine Sperre?
-
-Bekannte Sperren:
-  * `fs.enter(state)` / `enter(state)`  -> atomic.L_FS
-  * `atomic.lock_take(state, ...)`      -> die genannte Sperre
-  * `serial.zeile_an(...)`              -> die Zeilensperre aus
-    VIELKERN 3, je Kern wiedereintrittsfaehig und begrenzt. Sie ist
-    seit Runde MERGE-6 auch der Riegel um den Ausgabeweg aus Ring 3
-    (`sys.conout`), und sie deckt dort BEIDES ab: den geteilten Puffer
-    und die Reihenfolge der Zeichen.
-  * `sched.irq_save()` allein zaehlt NICHT. Sie haelt die
-    Unterbrechungen DIESES Kerns an und sagt ueber den Nachbarkern
-    nichts aus. Genau dieser Irrtum steht in mehreren Kommentaren des
-    Baums.
-
-RUNDE GLYPHE: DIE ZWEITE BAUFORM DESSELBEN FEHLERS.
-
-Der Zeichenweg hat den Fehler noch einmal gehabt, und dieses Werkzeug
-hat ihn NICHT gesehen -- weil er nicht `state + kstate.X_OFF` heisst.
-`kernel/ui/wig.fi` holt seine Seite ueber einen eigenen Zugriff:
-
-    fn base(state: u64) -> u64 { return state + kstate.WIG_OFF }
-    ...
-    let stage: u64 = base(state) + STAGE_OFF     <-- derselbe Puffer
-
-Textlich steht dort kein `kstate.`, also fiel die Buehne durch das
-Raster -- und mit ihr der Fehler, an dem Runde MERGE-6 gescheitert ist
-(`panic: integer overflow in 'u64 * u64'`, ein Ring-3-Programm tot in
-einem von fuenf Laeufen mit vier Kernen). Seit dieser Runde sucht das
-Werkzeug deshalb ZWEI Formen:
-
-  1. `state + kstate.<X>_OFF`  -- die alte, und
-  2. `<zugriff>(state) + <KONST>` in jeder Datei, die einen solchen
-     Zugriff auf eine kdata-Seite selbst definiert.
-
-Was als Sperre gilt, ist um die drei Namen dieser Runde erweitert:
-`wig.buehne_an` (die Buehnensperre), `ttf.tafel_an` (der
-Glyphenspeicher) und `stage_of(` -- der letzte ist KEINE Sperre,
-sondern die Aufloesung JE KERN: er gibt die Seite DIESES Kerns
-(`kstate.WIGST_OFF + cpu.here(state) * STAGE_MAX`), und damit gibt es
-nichts mehr zu teilen. Er steht mit diesem Satz hier und nicht als
-stille Ausnahme.
-
-WAS ES NICHT KANN. Es liest Text und keine Ablaeufe. Eine Funktion, die
-ihren Puffer nur unter einer Sperre BEKOMMT (weil jeder Aufrufer sie
-haelt), steht hier trotzdem -- und eine, die ihn nur auf einem Kern
-benutzt, auch. Deshalb gibt es zwei Listen: `GESPERRT` und `OFFEN`, und
-`OFFEN` ist eine Liste zum ANSEHEN, keine Fehlerliste. Die Zahl darunter
-ist der Vertrag: sie darf nicht wachsen, ohne dass jemand es aufschreibt.
-"""
 import os
 import re
 import sys
 
 WURZEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 
-PUFFER = re.compile(
+BUFFER = re.compile(
     r"state\s*\+\s*kstate\.("
     r"NAME_OFF|BLOCK_OFF|EARG_OFF|FS_OFF|OFS3_OFF|LOAD_OFF|CONSOLE_OFF"
     r")")
 
-SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
+LOCK = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
                     r"|serial\.zeile_an\("
                     r"|stage_on\(|stage_if_|table_on\(|stage_of\(")
 
 BASISZUGRIFF = re.compile(
     r"fn (\w+)\(state: u64\) -> u64 \{\s*\n\s*return state \+ kstate\.(\w+_OFF)")
-def puffer2(zugriff):
+def buffer2(zugriff):
     return re.compile(r"\b%s\(state\)\s*\+\s*([A-Z][A-Z0-9_]*)" % zugriff)
 
 RUHIG = {
@@ -104,7 +34,6 @@ MITWISSEN = {
 
 
 def funktionen(pfad):
-    """{name: [zeilen]} -- die Funktionen einer Firn-Datei."""
     roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
     aus = {}
     name = None
@@ -147,15 +76,15 @@ def main(argv):
             pfad = os.path.join(wurzel, d)
             kurz = os.path.relpath(pfad, WURZEL)
             roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
-            zweite = [(z, seite, puffer2(z))
-                      for z, seite in BASISZUGRIFF.findall(roh)]
+            zweite = [(z, page, buffer2(z))
+                      for z, page in BASISZUGRIFF.findall(roh)]
             for fn, leib in sorted(funktionen(pfad).items()):
                 text = "\n".join(leib)
-                treffer = PUFFER.findall(text)
-                for zugriff, seite, muster in zweite:
+                treffer = BUFFER.findall(text)
+                for zugriff, page, muster in zweite:
                     if fn == zugriff:
                         continue
-                    treffer = treffer + ["%s+%s" % (seite, k)
+                    treffer = treffer + ["%s+%s" % (page, k)
                                          for k in muster.findall(text)]
                 if not treffer:
                     continue
@@ -163,7 +92,7 @@ def main(argv):
                 if (kurz, fn) in MITWISSEN:
                     mitwissen.append(eintrag)
                     continue
-                if SPERRE.search(text) or d in RUHIG:
+                if LOCK.search(text) or d in RUHIG:
                     gesperrt.append(eintrag)
                 else:
                     offen.append(eintrag)
@@ -183,10 +112,10 @@ def main(argv):
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
             print("      %s" % MITWISSEN[(k, f)])
         print()
-    dat_offen = sorted(set(k for k, _, _ in offen))
+    dat_open = sorted(set(k for k, _, _ in offen))
     print("einkern gesperrt=%d offen=%d mitwissen=%d dateien=%s"
           % (len(gesperrt), len(offen), len(mitwissen),
-             ",".join(dat_offen) or "-"))
+             ",".join(dat_open) or "-"))
     return 0
 
 

@@ -92,26 +92,26 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
             for x in range(tx + rand + 1, tx + tw - rand - 1):
                 c = pixel(x, y)
                 zaehl[c] = zaehl.get(c, 0) + 1
-        flaeche = max(zaehl, key=zaehl.get)
+        area = max(zaehl, key=zaehl.get)
 
         zeilen = []
-        rechts = tx + rand
+        right = tx + rand
         links = tx + tw - rand - 1
         for y in range(ty + rand, ty + th - rand):
             n_in = 0
             for x in range(tx + rand, tx + tw - rand - 1):
-                if pixel(x, y) != flaeche:
+                if pixel(x, y) != area:
                     n_in += 1
-                    if x > rechts:
-                        rechts = x
+                    if x > right:
+                        right = x
                     if x < links:
                         links = x
             zeilen.append((y, n_in))
 
-        if rechts >= tx + tw - rand - 2:
+        if right >= tx + tw - rand - 2:
             fehler.append("Kachel %d: Inhalt bis x=%d, die Kachel endet "
                           "bei %d -- die Beschriftung laeuft ueber"
-                          % (t, rechts, tx + tw - 1))
+                          % (t, right, tx + tw - 1))
         if links <= tx + rand:
             fehler.append("Kachel %d: Inhalt ab x=%d, die Kachel faengt "
                           "bei %d an" % (t, links, tx))
@@ -131,23 +131,23 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
                           % (t, len(bloecke), bloecke))
         else:
             for i in range(len(bloecke) - 1):
-                luecke = bloecke[i + 1][0] - bloecke[i][1] - 1
-                if luecke < 2:
+                gap_2 = bloecke[i + 1][0] - bloecke[i][1] - 1
+                if gap_2 < 2:
                     fehler.append("Kachel %d: nur %d Reihen zwischen %s "
                                   "und %s -- die Zeilen kleben"
-                                  % (t, luecke, bloecke[i], bloecke[i + 1]))
+                                  % (t, gap_2, bloecke[i], bloecke[i + 1]))
         meld.append("kachel %d: x %d..%d von %d..%d, Bloecke %s"
-                    % (t, links, rechts, tx, tx + tw - 1, bloecke))
+                    % (t, links, right, tx, tx + tw - 1, bloecke))
     return fehler, meld
 
 
 def main(argv):
     if len(argv) >= 5 and argv[2] == "--rects":
-        schirm = argv[1]
+        screen = argv[1]
         oben = int(argv[3])
         rand = int(argv[4])
         rects = [tuple(int(v) for v in a.split(",")) for a in argv[5:]]
-        w, h, roh = ppm(schirm)
+        w, h, roh = ppm(screen)
 
         def pixel(x, y):
             if x < 0 or y < 0 or x >= w or y >= h:
@@ -167,9 +167,9 @@ def main(argv):
     if len(argv) < 12:
         print(__doc__)
         return 2
-    (schirm, px, py, pw, ph, pad, tw, th, gap, n, oben) = (
+    (screen, px, py, pw, ph, pad, tw, th, gap, n, oben) = (
         argv[1], *[int(v) for v in argv[2:12]])
-    w, h, roh = ppm(schirm)
+    w, h, roh = ppm(screen)
 
     def pixel(x, y):
         if x < 0 or y < 0 or x >= w or y >= h:

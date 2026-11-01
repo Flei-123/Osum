@@ -41,7 +41,7 @@ def verbinden(pfad, frist=15.0):
     return None
 
 
-def sagen(s, zeile):
+def say(s, zeile):
     s.sendall((zeile + "\n").encode())
     try:
         s.recv(65536)
@@ -53,9 +53,9 @@ def main():
     if len(sys.argv) < 4:
         print(__doc__)
         return 2
-    sock, ordner, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
+    sock, folder, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
     schritt = int(sys.argv[4]) if len(sys.argv) > 4 else 7
-    os.makedirs(ordner, exist_ok=True)
+    os.makedirs(folder, exist_ok=True)
 
     s = verbinden(sock)
     if s is None:
@@ -68,28 +68,28 @@ def main():
         pass
 
     for _ in range(8):
-        sagen(s, "mouse_move -120 -120")
-    sagen(s, "mouse_move 120 52")
-    sagen(s, "mouse_move 120 0")
-    sagen(s, "mouse_move 64 0")
-    sagen(s, "mouse_button 1")
+        say(s, "mouse_move -120 -120")
+    say(s, "mouse_move 120 52")
+    say(s, "mouse_move 120 0")
+    say(s, "mouse_move 64 0")
+    say(s, "mouse_button 1")
 
     geschossen = 0
     for i in range(n):
-        sagen(s, "mouse_move %d %d" % (schritt, schritt // 2))
-        ziel = os.path.join(ordner, "s%03d.ppm" % i)
+        say(s, "mouse_move %d %d" % (schritt, schritt // 2))
+        ziel = os.path.join(folder, "s%03d.ppm" % i)
         if os.path.exists(ziel):
             os.unlink(ziel)
-        sagen(s, 'screendump %s' % ziel)
+        say(s, 'screendump %s' % ziel)
         time.sleep(0.02)
         geschossen += 1
 
-    sagen(s, "mouse_button 0")
+    say(s, "mouse_button 0")
     time.sleep(0.5)
 
     gut = 0
     for i in range(geschossen):
-        ziel = os.path.join(ordner, "s%03d.ppm" % i)
+        ziel = os.path.join(folder, "s%03d.ppm" % i)
         letzte = -1
         for _ in range(50):
             try:

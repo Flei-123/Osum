@@ -36,13 +36,13 @@ from PIL import Image, ImageDraw, ImageFont
 
 import glascheck
 
-SCHRIFT = "assets/osum-sans.ttf"
+FONT = "assets/osum-sans.ttf"
 
 
 def var_von(im, hoehe, x0, x1):
     """Die Streuung des Leistengrundes -- gerechnet von `glascheck`."""
     px = [im.getpixel(p) for p in glascheck.leiste(im, hoehe, x0, x1)]
-    l = [glascheck.hell(p) for p in px]
+    l = [glascheck.bright(p) for p in px]
     m = sum(l) / len(l)
     return int(sum((v - m) ** 2 for v in l) / len(l) * 100), len(set(px))
 
@@ -72,7 +72,7 @@ def main(argv):
             datei, _, text = a.partition("=")
             paare.append((datei, text))
     try:
-        font = ImageFont.truetype(SCHRIFT, 14)
+        font = ImageFont.truetype(FONT, 14)
     except OSError:
         font = ImageFont.load_default()
     breite = (x1 - x0) * zoom

@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""Tiny DNS stub for tools/stab/net.sh: every A query is answered with one address.
-
-    dnsstub.py <address> <port>
-
-Runs inside the private network namespace of the test, where the guest (QEMU
-user networking) reaches the host loopback as 10.0.2.2.
-"""
 import socket
 import struct
 import sys
@@ -22,7 +15,7 @@ while True:
     qend = 12
     while qend < len(data) and data[qend] != 0:
         qend += data[qend] + 1
-    qend += 5  # root label + type + class
+    qend += 5
     question = data[12:qend]
     qtype = struct.unpack(">H", data[qend - 4:qend - 2])[0]
     flags = 0x8180

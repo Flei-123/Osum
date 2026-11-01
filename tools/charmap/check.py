@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/charmap/check.py <outdir> [nocheck] [<other-outdir>] -- judge serial + pictures of tools/charmap/shot.sh (P-015).
-
-The witness for "does the system have this glyph" is NOT the app: it is the union of the cmaps of the shipped font FILES -- the sans and
-the two fallback faces (assets/osum-sans.ttf, osum-symbols.ttf, osum-emoji.ttf; G-009 chain, read with fontTools). Counter-proof mode `nocheck`: the app was started with `charmap nocheck` (every code point counts as
-present); the same drehbuch must then be CAUGHT by the witness (check passes when the app is wrong)."""
 import os, re, sys
 from fontTools.ttLib import TTFont
 
@@ -31,7 +26,7 @@ root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 cmap = {}
 for _n in ("sans", "symbols", "emoji"):
     cmap.update(TTFont(os.path.join(root, "assets", "osum-%s.ttf" % _n)).getBestCmap())
-MISSING = 0x1F322   # in the Emoji block but in NO shipped face: the cell must still be marked missing
+MISSING = 0x1F322
 ser = open(os.path.join(out, "serial.txt"), "rb").read().decode("latin1").replace("\r", "")
 def has(cp): return cp in cmap
 
@@ -48,7 +43,6 @@ if counter:
     say(len(wrong) >= 1, "COUNTER-PROOF: block present counts disagree with the font file in %d block reports" % len(wrong))
     print("RESULT ok=%d fail=%d" % (ok, fail)); sys.exit(1 if fail else 0)
 
-# 1. block reports: counts equal the font file's cmap
 blk = re.findall(r"charmap: block (\d+) lo=(\w+) hi=(\w+) shown=(\d+) present=(\d+) only=(\d) page=(\d+)/(\d+) name=(.*)", ser)
 say(len(blk) >= 4, "block reports on the serial line (%d)" % len(blk))
 bad = []
@@ -58,16 +52,13 @@ for i, lo, hi, shown, pres, only, pg, pgs, name in blk:
 say(not bad, "present= of every block equals the glyph count of the font files (sans + fallback faces) (%d reports; mismatches %s)" % (len(blk), bad[:3]))
 b0 = blk[0]
 say(b0[1] == "0020" and b0[2] == "007F" and b0[3] == "95" and b0[4] == "95", "first block is Basic Latin 0020-007F with 95 of 95 glyphs (%s)" % (b0[1:6],))
-# 1b. the fallback chain really loaded its faces from the image (one fuiglyph line per process that missed a glyph)
 say(re.search(r"fuiglyph: fallback=1,1", ser) is not None, "fuiglyph loaded both fallback faces from the image (/lib/symbols.ttf, /lib/emoji.ttf)")
-# 2. copy: first cell, euro, the missing emoji
 cp = re.findall(r"charmap: copy U\+([0-9A-F]+) present=(\d) len=(\d) clip=(\w+)", ser)
 say(len(cp) >= 3, "three clicks copied (%d copy lines)" % len(cp))
 if len(cp) >= 3:
     say(cp[0] == ("0061", "1", "1", "ok"), "typing one character finds its cell; a grid click copies U+0061, 1 byte UTF-8, clipboard read back ok (%s)" % (cp[0],))
     say(cp[1] == ("20AC", "1", "3", "ok"), "the euro sign copies as 3 UTF-8 bytes, clipboard ok (%s)" % (cp[1],))
     say(cp[2][:2] == ("%X" % MISSING, "0") and cp[2][2] == "4", "a code point NO face has is reported present=0 and still copies 4 bytes (%s)" % (cp[2],))
-# 3. search: goto lines agree with the witness
 gl = re.findall(r"charmap: goto U\+([0-9A-F]+) present=(\d) block=(\d+)", ser)
 for want in (0x20AC, 0x1F600, MISSING):
     r = [g for g in gl if int(g[0], 16) == want]
@@ -75,15 +66,12 @@ for want in (0x20AC, 0x1F600, MISSING):
 r = [g for g in gl if int(g[0], 16) == 0x20AC]
 say(bool(r) and any(b[0] == r[-1][2] and b[1] == "20A0" for b in blk), "U+20AC opens the block Currency Symbols (20A0-20CF)")
 say("charmap: nomatch" in ser, "a search that matches nothing reports `nomatch`")
-# 4. pages: Latin Extended-B has 208 code points = 2 pages, `Next` shows page 2; the symbols face has all of them
 eb = [b for b in blk if b[1] == "0180"]
 say(any(b[7] == "2" for b in eb) and any(b[6] == "1" for b in eb), "Latin Extended-B: 2 pages, Next shows page 2 (%s)" % [(b[6], b[7]) for b in eb][:3])
 say(eb and all(b[4] == "208" for b in eb), "Latin Extended-B: the fallback face has all 208, present=208 for every report (it was 0 with the sans alone)")
-# 5. the checkbox: `only` 1 hides, 0 shows everything
 oc = [(b[5], b[3], b[4]) for b in blk if b[1] == "20A0"]
 say(any(o == "1" and s == p for o, s, p in oc) and any(o == "0" and s == "48" for o, s, p in oc),
     "Currency Symbols: only=1 shows just the present glyphs, only=0 all 48 (%s)" % oc[:4])
-# 6. geometry + pictures
 rects = {}
 for n_, *v in re.findall(r"charmap: rect name=(\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)", ser):
     rects[n_] = tuple(int(x) for x in v)
@@ -96,15 +84,13 @@ def crop(name, x, y, w, h):
     for yy in range(y, y + h):
         r.append(da[(yy * wa + x) * 3:(yy * wa + x + w) * 3])
     return b"".join(r)
-def ink(buf):  # dark pixels (glyph strokes) in an RGB crop
+def ink(buf):
     return sum(1 for i in range(0, len(buf), 3) if buf[i] < 110 and buf[i + 1] < 110 and buf[i + 2] < 140)
 try:
     g = rects.get("cell0")
-    # the euro picture: its one cell has dark ink (the glyph is drawn); the missing-glyph cell differs from it
     d_open, d_eur = crop("00-open", g[4], g[5], g[2], g[3]), crop("02-euro", g[4], g[5], g[2], g[3])
     say(ink(d_eur) >= 8, "02-euro: the first cell shows the euro glyph (%d ink px)" % ink(d_eur))
     say(d_open != d_eur, "02-euro: the grid changed after the search")
-    # the selected cell AT THE TIME of each search (the last `sel` line belongs to a later layout)
     def selcell(goto, shot):
         at = ser.index("charmap: goto U+" + goto)
         ms = re.search(r"charmap: rect name=sel x=(\d+) y=(\d+) w=(\d+) h=(\d+) ax=(\d+) ay=(\d+)", ser[at:])
@@ -115,7 +101,7 @@ try:
     s, em = selcell("%X" % MISSING, "05b-missing")
     flat = len(set(em[i:i + 3] for i in range(0, len(em), 3)))
     say(em and flat >= 3 and ink(em) >= 8, "05b-missing: the cell of a code point no face has is drawn with a mark (%d colours, %d ink px)" % (flat, ink(em)))
-    dif_pe = sum(1 for i in range(0, min(len(em), len(emp)), 3) if em[i:i + 3] != emp[i:i + 3]) if s and s0 and s[2:4] == s0[2:4] else -1  # each crop at its own selected cell (same size)
+    dif_pe = sum(1 for i in range(0, min(len(em), len(emp)), 3) if em[i:i + 3] != emp[i:i + 3]) if s and s0 and s[2:4] == s0[2:4] else -1
     say(dif_pe >= 30, "the emoji cell and the missing cell look different (%d px)" % dif_pe)
     if other:
         wa, ha, da = load_ppm(os.path.join(other, "05b-missing.ppm"))

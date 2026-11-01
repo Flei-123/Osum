@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""odbc bench: latency + throughput numbers over any transport.
-  python3 bench.py --port unix:/tmp/odb.sock --token-file tok [--mib 1] [--path /tmp/odb-bench.bin]
-Prints one 'BENCH key=value' line per metric (grep-able) and a final OK/FAIL line."""
 import argparse
 import hashlib
 import os

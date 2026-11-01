@@ -1,10 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""ODB wire frame codec + resynchronising stream decoder.
-
-Frame (little endian):
-  magic 'ODB1'(4) | ver u8 | type u8 | flags u16 | id u32 | len u32 (<= 65536) | payload | crc32 u32
-The CRC32 (zlib) covers everything from magic up to and including the payload. See docs/ODB.md.
-"""
 import struct
 import zlib
 
@@ -12,7 +6,7 @@ MAGIC = b"ODB1"
 VERSION = 1
 MAX_PAYLOAD = 64 * 1024
 HDR = struct.Struct("<4sBBHII")
-HDR_LEN = HDR.size  # 16
+HDR_LEN = HDR.size
 CRC_LEN = 4
 OVERHEAD = HDR_LEN + CRC_LEN
 
@@ -55,14 +49,12 @@ def encode(f):
 
 
 class Decoder:
-    """Feed arbitrary byte chunks, get complete frames. On garbage / bad CRC it
-    skips to the next magic (resync) and counts what it dropped."""
 
     def __init__(self):
         self.buf = bytearray()
-        self.garbage = 0     # bytes skipped while hunting for a magic
+        self.garbage = 0
         self.bad_crc = 0
-        self.bad_hdr = 0     # header with impossible len / ver
+        self.bad_hdr = 0
 
     def feed(self, data):
         self.buf += data
@@ -71,7 +63,6 @@ class Decoder:
         while True:
             i = buf.find(MAGIC)
             if i < 0:
-                # keep a possible magic prefix at the tail
                 keep = 0
                 for k in (3, 2, 1):
                     if buf.endswith(MAGIC[:k]):
@@ -98,7 +89,7 @@ class Decoder:
             (crc,) = struct.unpack_from("<I", buf, HDR_LEN + ln)
             if zlib.crc32(bytes(buf[:HDR_LEN + ln])) & 0xFFFFFFFF != crc:
                 self.bad_crc += 1
-                del buf[:1]       # resync: maybe a magic inside the bad frame
+                del buf[:1]
                 continue
             out.append(Frame(typ, fid, bytes(buf[HDR_LEN:HDR_LEN + ln]), flags, ver))
             del buf[:total]

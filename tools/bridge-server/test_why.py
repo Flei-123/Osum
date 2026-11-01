@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Test of the why-offline features (current English dialect) against a throw-away instance."""
 import json, os, shutil, socket, subprocess, sys, tempfile, time, urllib.request, secrets
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -71,7 +70,6 @@ def wait_state(d, want, t=12):
         time.sleep(0.3)
     return False
 
-# ---- A: online, then silent -> stumm, with an event
 d = Dev(); d.prepair()
 chk("login ok", d.login() == "welcome")
 for _ in range(3): d.puls(); time.sleep(0.2)
@@ -82,7 +80,6 @@ chk("SILENT event written", any("SILENT" in e[1] for e in w["events"]), w["event
 chk("text says cause not determinable", "cannot be determined" in w["summary"])
 chk("verbunden false in /geraete", [g for g in api("/bridge/devices")["devices"] if g["device_id"] == d.device_id][0]["connected"] is False)
 
-# ---- B: new session after silence -> logged, then busy job, keepalive
 chk("relogin", d.login() == "welcome")
 chk("event NEW SESSION", any("NEW SESSION" in e[1] for e in why(d)["events"]))
 api("/bridge/job", {"device": d.device_id, "kind": "run", "target": "sleep 99"})
@@ -93,12 +90,10 @@ chk("BUSY event", wait_event(d, "BUSY"))
 d.send("alive"); 
 chk("keepalive `lebt` -> online again", why(d)["state"] == "online")
 chk("`lebt` hands out no job", d.send("alive") == b"")
-# busy -> stumm after grace
 chk("busy -> stumm after grace", wait_state(d, "silent", 14))
 wait_event(d, "unanswered"); w = why(d)
 chk("stumm names the unanswered job", "unanswered" in " ".join(e[1] for e in w["events"]), w["events"][-2:])
 
-# ---- C: result clears the running job; goodbye
 d.login()
 api("/bridge/job", {"device": d.device_id, "kind": "list", "target": "/"})
 a = d.puls().decode().split()
@@ -109,7 +104,6 @@ d.send("bye")
 chk("goodbye -> sauber_beendet", wait_state(d, "clean_exit", 10))
 wait_event(d, "DISCONNECTED"); chk("sauber ende_grund", "bye" in why(d)["end_reason"])
 
-# ---- D: stale job dropped (TTL 4 s), kept with ttl_s 0
 api("/bridge/job", {"device": d.device_id, "kind": "system"})
 api("/bridge/job", {"device": d.device_id, "kind": "system", "ttl_s": 0})
 time.sleep(5)
@@ -118,7 +112,6 @@ r = d.puls().decode()
 chk("stale job dropped, ttl_s 0 job survives", r.startswith("job ") and why(d)["open_jobs"] == 0
     and any("JOB DROPPED" in e[1] for e in why(d)["events"]), (r[:30], why(d)["events"][-3:]))
 
-# ---- E: info -> MAC, WoL packet on loopback
 mac = "aa:bb:cc:dd:ee:01"
 d.send("info", ("mac=%s;commit=abc1234" % mac).encode())
 chk("MAC learned", why(d)["mac"] == mac, why(d)["mac"])
@@ -136,7 +129,6 @@ chk("wol bad mac refused", api("/bridge/wol", {"mac": "xyz"}).get("http") == 400
 chk("admin sets MAC", api("/bridge/pair", {"what": "mac", "device": d.device_id, "mac": "11:22:33:44:55:66"}).get("mac") == "11:22:33:44:55:66")
 chk("warum needs admin key", api("/bridge/why", admin=False).get("http") == 403)
 
-# ---- F: restart keeps last contact + MAC; event about the restart
 time.sleep(0.5)
 srv.terminate(); srv.wait(5)
 srv = start(); time.sleep(1.5)
@@ -150,10 +142,9 @@ chk("fresh login after restart works", d.login() == "welcome")
 chk("FIRST SESSION event", any("FIRST SESSION" in e[1] for e in why(d)["events"]))
 srv.terminate(); srv.wait(5)
 
-# ---- G: a device that only knocks (greeting, never `ich`) -> "knocking", then recovers
 srv = start(); time.sleep(1.2)
 d2 = Dev(); d2.prepair()
-d2.sid = secrets.token_hex(8); d2.sid = d2.pub[:24]       # the real client uses the key prefix as wire id
+d2.sid = secrets.token_hex(8); d2.sid = d2.pub[:24]
 for _ in range(3):
     d2.send("osum-bridge 1"); time.sleep(0.3)
 chk("knock only -> klopft", wait_state(d2, "knocking", 6), why(d2).get("state"))

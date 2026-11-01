@@ -1,28 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/time/fakentp.py -- an NTP server that says what the test wants.
-
-    fakentp.py --port 12300 --log f --time 2026-10-02T12:00:00Z [more times...]
-                [--mode ok|spoof|kod|rate|li3|short|wrongmode]
-                [--now-offset-ms N] [--per N]
-
-Every group of --per requests (default 4: /bin/sntp asks each server four
-times in a burst) is answered with the NEXT time of the list (the last one
-repeats). Modes are the faulty answers the client must refuse:
-
-    ok         a good answer (mode 4, stratum 2, originate echoed)
-    spoof      the originate field is NOT the client's nonce
-    kod        stratum 0 (kiss-o'-death, code LOCL)
-    rate       stratum 0 with the kiss code RATE
-    li3        leap indicator 3 (server clock unsynchronised)
-    short      a 40-octet packet
-    wrongmode  mode 3 instead of 4
-
---now-offset-ms answers with the host's real time plus N milliseconds
-(fractions included) instead of the list.
-
-The log gets one line per request: `REQ n time=<unix> mode=<mode>`.
-"""
 import calendar
 import socket
 import struct
@@ -96,7 +73,7 @@ def main():
         origin = data[40:48]
         if mode == "spoof":
             origin = bytes(b ^ 0xFF for b in origin)
-        secs = (t + NTP_UNIX) & 0xFFFFFFFF  # 32 bits: era 1 starts in 2036
+        secs = (t + NTP_UNIX) & 0xFFFFFFFF
         pkt = struct.pack("!BBBb", first, st, 6, -20) + struct.pack("!II", 0, 0) \
             + struct.pack("!I", refid) + struct.pack("!II", secs, 0) \
             + origin + struct.pack("!II", secs, frac) + struct.pack("!II", secs, frac)

@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/operation/dimensions.py -- die Laengen der Textliterale nachziehen.
-
-    dimensions.py <datei.fi> [<datei.fi> ...]
-
-In Firn traegt ein Textliteral seine Laenge im Typ (`[u8; 27]`), und der
-Uebersetzer zaehlt `\\0`, `\\t` und `\\n` als je EIN Oktett. Wer eine
-Meldung umformuliert, muss die Zahl mitziehen; wer es vergisst, bekommt
-`array literal has 47 elements, 44 are expected`.
-
-Dieses Skript ruft den Uebersetzer, liest genau diese Meldung und
-schreibt die Zahl in der genannten Zeile richtig. Es ist ein
-Schreibhelfer und kein Teil des Systems.
-"""
 import re
 import subprocess
 import sys

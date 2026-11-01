@@ -1,27 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/sshd/vectors.py -- die Bausteine der Runde SSHD gegen etwas,
-das nicht aus diesem Baum stammt.
-
-Gemessen wird `.probe/sshoracle`, ein gehostetes Firn-Programm, das
-GENAU DIE DATEIEN bindet, die auch `kernel/user/sshd.fi` bindet:
-lib/crypto/sha256.fi, lib/crypto/chacha.fi, lib/ssh/wire.fi,
-lib/ssh/pack.fi, lib/ssh/kex.fi.
-
-Wogegen:
-
-  * SHA-256      -- FIPS 180-4 und Pythons `hashlib`
-  * HMAC-SHA-256 -- RFC 4231 und Pythons `hmac`
-  * mpint        -- die Beispiele aus RFC 4251 Abschnitt 5, Zahl fuer Zahl
-  * Base64       -- RFC 4648 und Pythons `base64`
-  * Ableitung    -- RFC 4253 Abschnitt 7.2, hier nochmal in Python
-  * das AEAD     -- OpenSSHs `PROTOCOL.chacha20poly1305`, hier nochmal in
-                    Python mit `cryptography` (ChaCha20 mit djbs
-                    16-Oktett-Nonce = Zaehler || IV, und Poly1305)
-
-Die zweite Umsetzung ist der ganze Punkt. Ein einziger Code, der sich
-selbst prueft, ist auf beiden Seiten gleich falsch.
-"""
 import base64
 import binascii
 import hashlib
@@ -44,7 +22,6 @@ def hx(b):
 
 
 def ask(lines):
-    """Ein Schwung durch das Orakel: Befehlszeilen rein, Antworten raus."""
     p = subprocess.run([ORACLE], input="\n".join(lines) + "\n",
                        capture_output=True, text=True)
     if p.returncode != 0:
@@ -68,7 +45,6 @@ def check(name, got, want):
         fails.append("%s: %s != %s" % (name, got, want))
 
 
-# ===================================================== 1. SHA-256
 def t_sha256():
     msgs = [b"", b"abc",
             b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
@@ -89,9 +65,7 @@ def t_sha256():
     print("  SHA-256: %d cases against hashlib and FIPS 180-4" % len(msgs))
 
 
-# ===================================================== 2. HMAC-SHA-256
 def t_hmac():
-    # RFC 4231, die sieben Faelle
     cases = [
         (b"\x0b" * 20, b"Hi There"),
         (b"Jefe", b"what do ya want for nothing?"),
@@ -123,9 +97,7 @@ def t_hmac():
     print("  HMAC-SHA-256: %d cases against hmac and RFC 4231" % len(cases))
 
 
-# ===================================================== 3. mpint
 def mpint(raw):
-    """RFC 4251 Abschnitt 5, in Python."""
     v = int.from_bytes(raw, "big")
     if v == 0:
         return b"\x00\x00\x00\x00"
@@ -156,7 +128,6 @@ def t_mpint():
     print("  mpint: %d Faelle gegen RFC 4251 Abschnitt 5" % len(cases))
 
 
-# ===================================================== 4. Base64
 def t_b64():
     rng = random.Random(99)
     cases = [b"", b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"]
@@ -171,7 +142,6 @@ def t_b64():
     for c, got in zip(cases, a):
         check("b64e-ohne(%d)" % len(c), got,
               hx(base64.b64encode(c).rstrip(b"=")))
-    # und zurueck
     q = ["b64d %s" % hx(base64.b64encode(c)) for c in cases]
     a = ask(q)
     for c, got in zip(cases, a):
@@ -185,9 +155,7 @@ def t_b64():
     print("  Base64: %d cases back and forth against base64" % (3 * len(cases)))
 
 
-# ===================================================== 5. Ableitung
 def derive(secret, h, sid, letter, want):
-    """RFC 4253 Abschnitt 7.2, in Python."""
     k = mpint(secret)
     out = hashlib.sha256(k + h + letter + sid).digest()
     while len(out) < want:
@@ -214,10 +182,7 @@ def t_derive():
           % (len(q), sum(1 for x in q if int(x.split()[-1]) > 32)))
 
 
-# ============================ 6. chacha20-poly1305@openssh.com
 def chacha20(key, iv8, counter, data):
-    """djbs Aufteilung: 16 Oktette Nonce = Zaehler (8, klein zuerst)
-    gefolgt vom IV (8). Genau das nimmt `cryptography`."""
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms
     nonce = counter.to_bytes(8, "little") + iv8
     c = Cipher(algorithms.ChaCha20(key, nonce), mode=None).encryptor()
@@ -302,7 +267,6 @@ def t_aead():
           "angenommen (erwartet 0)" % (len(a), bad))
 
 
-# ===================================================== 7. Auffuellung
 def t_pad():
     q, want = [], []
     for on in (0, 1):
@@ -321,7 +285,6 @@ def t_pad():
           % len(q))
 
 
-# ===================================================== 8. Klartextpakete
 def t_plain():
     rng = random.Random(5)
     q, want = [], []
@@ -351,7 +314,6 @@ def t_plain():
         check("openpp #%d" % i, a[i], hx(payload))
 
 
-# ===================================================== 9. name-list
 def t_list():
     lst = b"curve25519-sha256,curve25519-sha256@libssh.org,ext-info-c"
     q, want = [], []

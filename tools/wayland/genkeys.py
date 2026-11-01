@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wayland/genkeys.py -- the key tables of wayd, GENERATED from libxkbcommon.
-
-    python3 tools/wayland/genkeys.py > kernel/user/wl_keytab.fi        (the Firn tables)
-    python3 tools/wayland/genkeys.py --keymaps <dir>                    (keymap-us.xkb, keymap-de.xkb)
-
-The window server hands wayd a CHARACTER ("a", "A", "@", an arrow code). A Wayland client wants a Linux evdev key code and the
-modifier state, and it turns both into a symbol with the xkb keymap wayd sends it. So the reverse table "character -> (evdev
-code, modifiers)" has to come from the SAME keymap the client gets, or the two would drift apart. This script asks the real
-libxkbcommon of the host (the very library GTK, Qt and weston-terminal use) for both: the keymap text and, for every key and
-every level, the character it produces. Nothing here is typed in by hand.
-
-Output of the table mode: for each layout ("us", "de") a function `<layout>_find(cp) -> code | mods << 16` (0 = no such key)
-where mods is 1 = Shift, 4 = AltGr (Level3). Control is NOT in the table: the window server delivers Ctrl+letter as 1..26.
-The xkb modifier masks the keymap uses (Shift, Control, Mod5 = AltGr) are written as constants, read from the keymap.
-"""
 import ctypes
 import ctypes.util
 import os
@@ -61,7 +46,7 @@ def keymap_of(layout):
 
 
 def keymap_text(km):
-    p = LIB.xkb_keymap_get_as_string(km, 1)  # XKB_KEYMAP_FORMAT_TEXT_V1
+    p = LIB.xkb_keymap_get_as_string(km, 1)
     s = ctypes.string_at(p)
     libc.free(p)
     return s
@@ -79,7 +64,6 @@ def table_of(km):
     alt = mod_mask(km, "Mod1")
     st = LIB.xkb_state_new(km)
     best = {}
-    # fewest modifiers first, then the lowest key code
     combos = [(0, 0), (shift, 1), (level3, 4), (shift | level3, 5)]
     for mask, bits in combos:
         for ev in range(1, 128):
@@ -101,7 +85,6 @@ def main():
         for lay in ("us", "de"):
             ctx, km = keymap_of(lay)
             txt = keymap_text(km)
-            # the text must compile again, as a client does it (from a string, no files)
             km2 = LIB.xkb_keymap_new_from_string(ctx, txt, 1, 0)
             if not km2:
                 sys.exit("keymap %s does not compile from its own text" % lay)

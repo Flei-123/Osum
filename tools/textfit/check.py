@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/textfit/check.py <audit-outdir>... | --selftest -- G-010: no text is shortened ("...") where it could fit.
-
-The scene host (kernel/user/fuiscene.fi say_texts) prints, for every ONE-LINE text node whose full width `ow`
-is larger than the room `bw` the painter has for it (box minus both paddings), the extra fields ` ow= bw=`
-after `ay=`:  wlib: text win=.. kind=.. x= base= fg= bg= tw= ax= ay= ow=<full> bw=<room> t=<text>.
-The painter (render.draw_text -> run_draw_ellipsis) then paints "..." in its place.  That is right for DATA
-(file names, paths, user text) and wrong for FIXED CHROME (button words, menu items, labels of settings), so
-the gate lists every shortened text, drops the allowed ones (a data text, see ALLOW) and FAILS on the rest.
-A text is a data text when it contains a path separator, a dot extension or a digit run; fixed sentences
-and words are chrome however long they are (a shortened German sentence is exactly the bug).  Exit status 1 on any FAIL."""
 import os
 import re
 import sys
@@ -29,7 +19,6 @@ def check(c, m):
 
 
 def is_data(t):
-    """A text that is the user's data, not fixed chrome: it may be shortened."""
     return bool(re.search(r"[/\\]|\.[A-Za-z0-9]{1,4}$|\d{3,}", t))
 
 
@@ -56,8 +45,6 @@ def run_dir(out, tag):
     t = open(p, "rb").read().decode("utf-8", "replace")
     seen, cut = scan(t)
     check(seen >= 40, "%s: %d text lines reported (>= 40: the trace is on)" % (tag, seen))
-    # a text that starts or ends beyond the right edge of the screen is cut by the screen: the window is smaller than
-    # its content (nothing to scroll horizontally). Screen x = ax + x; its right end = that + the painted width tw.
     works = WORK.findall(t)
     sw = int(works[-1][2]) if works else 0
     off = {}

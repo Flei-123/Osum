@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/settingsaudit/ppm2png.py -- convert the PPM pictures of a run to small PNGs for docs/img/settings.
-
-  python3 -I tools/settingsaudit/ppm2png.py <indir> <outdir> [scale_percent=75]
-Page pictures are named page-a.ppm .. page-s.ppm (sidebar order, see PAGES in count.py).
-"""
 import os, sys
 from PIL import Image
 

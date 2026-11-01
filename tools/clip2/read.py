@@ -1,29 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/clip2/read.py -- RUNDE CLIP-2: was nach dem Ablegen WIRKLICH
-auf der Platte steht.
-
-    read.py <abbild>
-
-DAS IST DER SCHIEDSRICHTER DIESER RUNDE. Alles andere im Laeufer ist,
-was das PROGRAMM ueber sich sagt ("expl: drop ... rc=0"); hier steht,
-was der WIRT im Abbild findet. Ein Ablegen, das rc=0 meldet und nichts
-bewegt hat, faellt genau hier auf -- und sonst nirgends.
-
-Gelesen wird mit dem Leser aus `tools/fsrobust/check.py`: er kennt OFS
-in allen drei Fassungen, und ein zweiter Leser waere ein zweiter Ort,
-an dem dasselbe falsch sein kann.
-
-Ausgegeben wird eine Zeile je Befund, damit `run.sh` mit `grep` prueft
-und nicht mit Augenmass:
-
-    da  <pfad> ino=<n> size=<n>     das Stueck liegt dort
-    weg <pfad>                      es liegt dort NICHT
-    inode gleich <n>                Quelle und Ziel haben dieselbe Inode
-    inode anders <alt> <neu>        sie haben es nicht
-    inhalt ok <text>                der Inhalt ist der erwartete
-    inhalt falsch <text>            er ist es nicht
-"""
 import os
 import sys
 

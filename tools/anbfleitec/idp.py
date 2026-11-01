@@ -1,43 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/anbfleitec/idp.py -- mock Fleitec-ID (OIDC, device flow) for run.sh.
-
-A stand-in for the real service (fleitec-id, projects/.../fleitec-id), so that
-cases can be forced that a real server never produces on request: a token with
-the wrong issuer, an HS256 token MACed with the public key, a flipped
-signature, an id_token naming another subject, a dead refresh token.
-
-Speaks HTTPS (TLS 1.3, like tools/account/attrappe.py) and answers exactly the
-paths kernel/app/anb_fleitec.fi uses:
-
-    POST /oidc/device_authorization   client_id, scope
-    POST /oidc/token                  device_code | refresh_token grant
-    POST /oidc/revoke                 token, token_type_hint
-    GET  /oidc/userinfo               Authorization: Bearer
-    GET  /oidc/jwks.json
-
-SCENARIO = the content of <dir>/szenario, read at every device_authorization
-and baked into the device code ("dc-<scenario>-<n>"). Scenarios:
-
-    approve     pending, pending, then valid tokens
-    slowdown    slow_down, pending, then valid tokens
-    deny        pending, then access_denied
-    expired     pending, then expired_token
-    bad_iss     valid shape, iss has a trailing slash
-    bad_aud     aud is another product
-    hs256       alg HS256, MAC key = raw public key bytes (key confusion)
-    algnone     alg none, empty signature
-    exp_old     exp in the past
-    bad_sig     one bit of the signature flipped
-    bad_kid     kid not in the JWKS
-    id_other    access token fine, id_token names another sub
-    norefresh   fine, but refresh answers carry no new refresh token
-
-Times are issued relative to the HOST clock (the guest reads the wall clock).
-Every request (method, path, headers, form body) goes to <dir>/protokoll.jsonl.
-The tokens handed out are written to <dir>/refresh.txt and <dir>/access.txt
-(host side only, so run.sh can search the disk image for them).
-"""
 import argparse
 import base64
 import hashlib
@@ -70,8 +32,8 @@ state = {
     "interval": 1,
     "lock": threading.Lock(),
     "n": 0,
-    "devices": {},      # device_code -> {"scen", "polls"}
-    "refresh": {},      # refresh_token -> {"fam", "alive"}
+    "devices": {},
+    "refresh": {},
     "fam_dead": set(),
     "revoked": set(),
     "access_ttl": 3600,
@@ -263,7 +225,7 @@ class H(BaseHTTPRequestHandler):
         elif n <= 2:
             return self._send(400, {"error": "authorization_pending"})
         with state["lock"]:
-            state["devices"].pop(dc, None)   # a device code is single use
+            state["devices"].pop(dc, None)
         self._send(200, self.issue(scen, None))
 
     def token_refresh(self, f):
@@ -274,7 +236,6 @@ class H(BaseHTTPRequestHandler):
                 self._send(400, {"error": "invalid_grant"})
                 return
             if not e["alive"]:
-                # replay of a rotated token: the whole family dies
                 state["fam_dead"].add(e["fam"])
                 self._send(400, {"error": "invalid_grant"})
                 return

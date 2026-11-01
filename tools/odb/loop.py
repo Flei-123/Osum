@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/odb/loop.py -- one continuous agent round trip over ODB, repeated N times, with a time per step.
-
-One persistent odbc Session (hello+auth once) drives a booted ODB=1 desktop image:
-  ping, info, exec (stdout + exit code), push/pull (sha256 compared on the host), ps,
-  shot of the login screen, `input text` + `input key Enter` (login 'startkennwort'), desktop check (process list +
-  shot differs from the login screen), start the Terminal with a mouse click on the taskbar icon, type a command
-  into the GUI terminal (special characters on the guest's own keyboard layout), read the effect back with exec,
-  terminal region of the shot before/after compared pixel-wise.
-Every step is timed. A failed step is recorded and the run goes on (so a hang shows up as a FAIL with its timeout,
-not as a stuck script). Exit code 0 = every check of every round passed.
-
-  python3 -I tools/odb/loop.py --port unix:<dir>/odb.sock --token-file <f> [--rounds 5] [--out <dir>] [--json f]
-
-Geometry: fractions of the screen (src_w x src_h from the first shot), measured on the 1280x800 desktop image:
-the taskbar Terminal icon and the console window. See UI below.
-"""
 import argparse
 import hashlib
 import json
@@ -32,7 +16,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import brand
 
 PASSWORD = "startkennwort"
-# fractions of the screen: (x, y) of the Terminal icon in the taskbar; (x, y, w, h) of the Terminal window
 UI = {"term_icon": (0.409, 0.970), "term_win": (0.020, 0.050, 0.440, 0.520), "term_click": (0.200, 0.300)}
 
 
@@ -42,13 +25,12 @@ class Run:
         tok = read_token_file(ns.token_file) if ns.token_file else None
         self.s = Session.open(ns.port, wait=30, token=tok)
         self.s.login(timeout=10.0)
-        self.rows = []          # dict per step
+        self.rows = []
         self.round = 0
         self.fail = 0
-        self.src = None         # (w, h) of the guest screen
+        self.src = None
         os.makedirs(ns.out, exist_ok=True)
 
-    # ---- bookkeeping --------------------------------------------------------
     def rec(self, step, t0, ok, detail=""):
         dt = time.time() - t0
         self.rows.append({"round": self.round, "step": step, "seconds": round(dt, 3), "ok": bool(ok), "detail": detail})
@@ -58,7 +40,6 @@ class Run:
         return ok
 
     def step(self, name, fn):
-        """Run fn() -> (ok, detail). An exception is a failed step; the loop goes on."""
         t0 = time.time()
         try:
             ok, detail = fn()
@@ -66,13 +47,11 @@ class Run:
             ok, detail = False, "%s: %s" % (type(e).__name__, e)
         return self.rec(name, t0, ok, detail)
 
-    # ---- helpers ------------------------------------------------------------
     def exec(self, cmd, timeout=30):
         r, out, err = self.s.exec(cmd=cmd, timeout=timeout)
         return r.geti("exit", -1), out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
     def procs(self):
-        """{name: pid}: ps lines are `pid ppid state rss_kb name` (docs/ODB.md); kernel threads have no name."""
         _, body = self.s.collect_stream("ps", {}, proto.STDOUT, timeout=20)
         d = {}
         for l in body.decode("utf-8", "replace").splitlines():
@@ -105,7 +84,6 @@ class Run:
                                  ("action", "click")], timeout=30)
 
     def region(self, im, frac):
-        """Pixel region (x, y, w, h) of a decoded shot for a fractional rectangle."""
         w, h = im[0], im[1]
         return (int(frac[0] * w), int(frac[1] * h), int(frac[2] * w), int(frac[3] * h))
 
@@ -177,7 +155,6 @@ def main():
                 64 / (t1 - t0), 64 / (t2 - t1), s.stats["rewinds"])
         R.step("push+pull 64KiB", st_pushpull)
 
-        # ---- login screen or desktop ----------------------------------------------------------------
         p = R.procs()
         if not desktop_up(p):
             def st_shot_login():
@@ -211,9 +188,7 @@ def main():
             print("  round %d: %.1f s" % (rnd, time.time() - t_round))
             continue
 
-        # ---- Terminal -----------------------------------------------------------------------------
         def term_visible(im):
-            """The console window is a bright (white) panel; the wallpaper in that corner is dark/blue."""
             m = IMG.mean_rgb(im, R.region(im, UI["term_win"]))
             return min(m) > 200, m
 
@@ -234,11 +209,10 @@ def main():
         R.step("start terminal (click)", st_term_open)
 
         def st_term_cmd():
-            R.click(*UI["term_click"])          # focus
+            R.click(*UI["term_click"])
             time.sleep(0.5)
             before, _ = R.shot("typed0")
             tag = "ODBLOOP%d-%d" % (rnd, int(time.time()) % 100000)
-            # '>' and '/' differ between layouts: this proves `input text` follows the guest keyboard layout
             R.text("echo %s > /tmp/odbloop.txt" % tag)
             R.key("Enter")
             got = ""
@@ -258,7 +232,6 @@ def main():
         def st_stable():
             a, _ = R.shot("stable0")
             b, _ = R.shot("stable1")
-            # the terminal region is static between two shots; the clock/CPU widgets live outside it
             d = IMG.diff(a, b, tol=12, region=R.region(a, UI["term_win"]))
             return d["frac"] < 0.01, "two shots of the idle terminal differ in %.2f%%" % (d["frac"] * 100)
         R.step("shot compare (idle)", st_stable)
@@ -266,7 +239,6 @@ def main():
 
     total = time.time() - t_all
     print("== done: %d rounds, %.1f s, %d failed steps ==" % (ns.rounds, total, R.fail))
-    # per-step summary (mean of the rounds)
     names = []
     for r in R.rows:
         if r["step"] not in names:

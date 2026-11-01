@@ -17,10 +17,10 @@ def main():
     if len(sys.argv) != 4:
         print(__doc__)
         return 2
-    pfad, alt_p, neu_p = sys.argv[1:4]
+    pfad, alt_p, new_p = sys.argv[1:4]
     text = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
     alt = open(alt_p, "rb").read().decode("utf-8", "surrogateescape")
-    neu = open(neu_p, "rb").read().decode("utf-8", "surrogateescape")
+    neu = open(new_p, "rb").read().decode("utf-8", "surrogateescape")
     n = text.count(alt)
     if n != 1:
         print("patch.py: %s: the old piece occurs %d times, not once" % (pfad, n))

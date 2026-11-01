@@ -144,7 +144,7 @@ def funktion_in_text(elf: bytes, endung: str):
     text_i = next((i for i in range(shnum) if sname(i) == ".text"), None)
     for i in range(shnum):
         sh = shoff + i * shent
-        if struct.unpack_from("<I", elf, sh + 4)[0] != 2:      # SHT_SYMTAB
+        if struct.unpack_from("<I", elf, sh + 4)[0] != 2:
             continue
         so = struct.unpack_from("<Q", elf, sh + 24)[0]
         sz = struct.unpack_from("<Q", elf, sh + 32)[0]

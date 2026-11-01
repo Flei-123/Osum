@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/termsel/check.py <outdir> -- reads serial.txt + the .ppm pictures of one tools/termsel run (r1014)
 import os, re, sys
 
 out = sys.argv[1]
@@ -30,7 +29,6 @@ def load(name):
 
 
 def cell_bright(img, geo, c, r):
-    # share of bright pixels (> 150) in the cell
     if img is None or geo is None:
         return -1.0
     w, h, b = img
@@ -48,9 +46,8 @@ def cell_bright(img, geo, c, r):
     return hit / n if n else -1.0
 
 
-# ---- parse the dumps: geo, rows, tcur
 geo = None
-blocks = []   # (geo, {row: text}, tcur dict)
+blocks = []
 rows = {}
 for ln in ser:
     m = re.search(r'wm: termgeo cx=(\d+) cy=(\d+) cw=(\d+) ch=(\d+)', ln)
@@ -76,11 +73,9 @@ chk(len(tg) >= 2 and all(a <= b for a, b in zip(tg, tg[1:])) and tg[-1] - tg[0] 
     'the blink timer runs: toggles %s' % (tg[:1] + tg[-1:]))
 chk({t['on'] for t in tc} == {0, 1}, 'the cursor is on in some dumps and off in others')
 chk(all(t['hide'] == 0 for t in tc), 'the cursor is not hidden')
-# the pictures: the cursor cell (prompt row, column 6) is bright in some and dark in others
 pgeo = None
 prow = None
 for g, rws, t in blocks:
-    # the first dump that shows PASTEME: its last bare prompt row is where the cursor stands
     if t['copies'] == 0 and g and any(tx.strip() == 'PASTEME' for tx in rws.values()):
         for r, tx in rws.items():
             if tx.strip() == 'osum$':

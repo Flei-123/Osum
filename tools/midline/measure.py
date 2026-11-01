@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/midline/measure.py -- r402 D-009: ONE CENTRE LINE per row.
-
-    measure.py <picture> <x0> <y0> <x1> <y1> <icon_x0> <icon_x1> <text_x0> <text_x1> <row_h> <first_row_top>
-
-Scans the rows of a list (every row `row_h` high from `first_row_top`) in the picture and prints, per row,
-the vertical centre of the ICON ink (columns icon_x0..icon_x1), the centre of the TEXT's x-height band (the
-rows whose ink count is at least 55 % of the text's densest row: the body of the lower-case letters, not the
-ascenders), and the centre of the ROW.  `OK` when icon and text centres are within 1 px of the row centre
-(the `+` / `-` is the offset).
-"""
 import sys
 from PIL import Image
 
@@ -36,7 +26,6 @@ def rows(im, top, h, n, ix0, ix1, tx0, tx1, bg):
 
 
 def ink_box(im, x0, y0, x1, y1, bg, thr=90):
-    """The bounding box (minx, maxx, miny, maxy) of the ink in the rectangle, or None."""
     xs, ys = [], []
     for y in range(y0, y1):
         for x in range(x0, x1):
@@ -49,8 +38,6 @@ def ink_box(im, x0, y0, x1, y1, bg, thr=90):
 
 
 def band_center(im, x0, x1, y0, y1, bg):
-    """The vertical centre of the text's x-height band (rows with at least 55 % of the densest row's ink) in
-    the rectangle, or None when there is no text."""
     cnt = {y: sum(1 for x in range(x0, x1) if ink(im, x, y, bg, 140)) for y in range(y0, y1)}
     mx = max(cnt.values()) if cnt else 0
     band = [y for y, c in cnt.items() if mx and c >= 0.55 * mx]

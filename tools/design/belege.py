@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/belege.py -- AUS EINEM ABNAHMELAUF EINEN BELEGSTAPEL.
-
-    python3 tools/design/belege.py <laufverzeichnis> <belegverzeichnis>
-
-Je Bild wird abgelegt:
-
-  * das Bild als PNG (verlustfrei, ein Zehntel der PPM-Groesse)
-  * eine Zeile in BEFUND.md: was zu sehen ist, und der gemessene
-    BLAUSTICH (B-R, flaechengewichtet ueber die sechs haeufigsten
-    Flaechenfarben)
-
-WARUM JE BILD EINE BESCHREIBUNG UND NICHT NUR "ok": ein Beleg, der nur
-sagt, dass ein Bild entstanden ist, belegt nichts. Der PROGRAMM-AUDIT
-hat gezaehlt, dass zuletzt sechs von acht Bildern eines Laufs Oktett
-fuer Oktett gleich waren -- alle sechs waren "ok". Deshalb steht hier
-je Bild, WELCHE Fenster der Mitschnitt zu diesem Zeitpunkt gemeldet
-hat, und ob das Bild sich vom vorherigen unterscheidet.
-"""
 import os, sys, glob, hashlib, collections, subprocess, re
 
 HIER = os.path.dirname(os.path.abspath(__file__))
@@ -43,25 +25,6 @@ def read_ppm(p):
 
 
 def blaustich(px, w, h):
-    """B-R der GRAUFLAECHEN, gewichtet nach Flaeche.
-
-    Nicht ueber das ganze Bild: Text und Symbole sind bunt und wuerden
-    das Mittel verwaschen. Was hier gemessen wird, ist der Farbton der
-    FLAECHEN -- und um den geht es, wenn jemand sagt "das Grau ist blau".
-
-    UND DIE AKZENTFARBE ZAEHLT NICHT MIT. Sie ist mit Absicht bunt:
-    accent 8b5cf6 has B-R = +107, ad84f3 (its light step) +70. Ein
-    Fenster mit einer markierten Zeile bekaeme dadurch einen
-    "Blaustich" von +6,6, obwohl seine drei groessten Flaechen
-    09090b/18181b/27272a are -- also +2/+3. Gemessen am
-    Dateimanager im Dunkelmodus, 2560x1440: die 3,4 Prozent Akzent
-    haben das Mittel von +2,9 auf +6,6 gehoben.
-
-    Als GRAU gilt, was in keinem Kanal weiter als GRAU_TOL vom
-    Mittelwert abweicht. Das laesst jede Rampe dieses Systems durch
-    (Slate weicht um 27 ab und ist genau das, was gefunden werden
-    soll) und schliesst nur wirklich Buntes aus.
-    """
     GRAU_TOL = 40
     c = collections.Counter()
     for k in range(0, len(px), 3):
@@ -74,14 +37,13 @@ def blaustich(px, w, h):
     return (ws / wt if wt else 0.0), top
 
 
-def anteil(px, farbe):
+def anteil(px, color_2):
     n = sum(1 for k in range(0, len(px), 3)
-            if (px[k], px[k + 1], px[k + 2]) == farbe)
+            if (px[k], px[k + 1], px[k + 2]) == color_2)
     return 100.0 * n / (len(px) // 3)
 
 
-def fenster_aus_serial(pfad):
-    """Welche Programme haben sich in diesem Lauf bereit gemeldet."""
+def window_aus_serial(pfad):
     if not os.path.exists(pfad):
         return []
     try:
@@ -97,7 +59,7 @@ def main(lauf, beleg):
     vorher = {}
     for d in sorted(glob.glob(os.path.join(lauf, "*/"))):
         tag = os.path.basename(d.rstrip("/"))
-        ready = fenster_aus_serial(os.path.join(d, "serial.txt"))
+        ready = window_aus_serial(os.path.join(d, "serial.txt"))
         for ppm in sorted(glob.glob(os.path.join(d, "*.ppm"))):
             base = os.path.basename(ppm)[:-4]
             png = os.path.join(beleg, f"{tag}--{base}.png")
@@ -107,16 +69,16 @@ def main(lauf, beleg):
             w, h, px = read_ppm(ppm)
             bs, top = blaustich(px, w, h)
             md5 = hashlib.md5(px).hexdigest()
-            gleich = ""
+            eq = ""
             if md5 in vorher:
-                gleich = f" **BYTE-GLEICH mit {vorher[md5]}**"
+                eq = f" **BYTE-GLEICH mit {vorher[md5]}**"
             else:
                 vorher[md5] = f"{tag}/{base}"
             flaechen = "  ".join(f"`#{r:02x}{g:02x}{b:02x}` {100.0*n/(w*h):.0f}%"
                                  for (r, g, b), n in top[:3])
             zeilen.append(
                 f"| `{tag}` | `{base}` | {w}×{h} | **{bs:+.1f}** | "
-                f"{flaechen} | {', '.join(ready) or '—'}{gleich} |")
+                f"{flaechen} | {', '.join(ready) or '—'}{eq} |")
     kopf = ("# BEFUND — Abnahme MERGE-10\n\n"
             "Je Bild: die Auflösung, der gemessene **Blaustich B−R** "
             "(flächengewichtet über die sechs häufigsten Flächenfarben; "

@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vboxlag/compare.py <dir-diff> <dir-nodiff> [out-dir]
-
-Compares the screendump series of tools/vboxlag/visual.sh pixel by pixel (diff flush vs `nodiff`). Time-dependent areas
-(taskbar clock, widgets top right, terminal text) are masked; a pointer that stands at another place in the two runs shows up as
-two small differing boxes, so every difference outside the mask is reported with its bounding box and the number of 32x32 cells.
-Exit code 0 = all shots identical outside the mask, 1 = differences (they are printed).
-"""
 import glob
 import os
 import sys
@@ -15,12 +8,12 @@ from PIL import Image, ImageChops
 
 a, b = sys.argv[1], sys.argv[2]
 out = sys.argv[3] if len(sys.argv) > 3 else None
-MASKS = [(1085, 8, 1280, 145), (1090, 762, 1280, 800),  # widgets top right, clock bottom right (1280x800)
-         (24, 72, 590, 456),  # terminal text (boot log scrolls with time)
-         (36, 130, 44, 168)]  # caret of the start menu search field (blinks)
+MASKS = [(1085, 8, 1280, 145), (1090, 762, 1280, 800),
+         (24, 72, 590, 456),
+         (36, 130, 44, 168)]
 bad = 0
 tot = 0
-PTR_MAX = 520  # two arrow cursors (about 230 px each): the pointer stood at another place in the two runs (mouse packets are timing-dependent)
+PTR_MAX = 520
 ptr_only = 0
 for fa in sorted(glob.glob(os.path.join(a, "v*.ppm"))):
     name = os.path.basename(fa)

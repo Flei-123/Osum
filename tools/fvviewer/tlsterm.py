@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/fvviewer/tlsterm.py -- minimal TLS terminator for the GUI gate: tlsterm.py <listen-port> <target-port> <cert.pem> <key.pem>
-# (socat 1.7.4 pins the ECDH group and refuses the x25519-only ClientHello of the Firn TLS client: "no suitable key share")
 import socket, ssl, sys, threading
 
 def pump(a, b):

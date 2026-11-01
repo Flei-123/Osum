@@ -1,40 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/look/umlaut.py -- ein Umlaut auf dem Schirm, Bildpunkt fuer Bildpunkt.
-
-Teil A dieser Runde hat EINE deutsche Zeichenkette nachgerastert
-("Ausführen", 438 Tintenpunkte, 0 falsch) und damit bewiesen, dass der
-Weg Katalog -> UTF-8-Dekodierer -> cmap -> Rasterer funktioniert. Der
-dritte Nachtrag braucht mehr: FUENF VERSCHIEDENE Zeichen, darunter ein
-grosser Umlaut und das Eszett, aus vier verschiedenen Bedienelementen.
-
-Der Grund ist nicht Gruendlichkeit um ihrer selbst willen. `ä` und `ü`
-stehen im Katalog, `ß` und `Ö` kommen dort seltener vor, und ein
-Zeichensatz, der bei 339 Zeichen geschnitten wurde, kann genau an so
-einer Stelle eine Luecke haben, die bei "Ausführen" nie auffaellt.
-
-WAS DIESES PROGRAMM VON HAND ABNIMMT. Die gemeldete Lage eines Textes
-ist FENSTERBEZOGEN (`wlib: text ... x= base=`), das Bild ist es nicht.
-Dazwischen liegen zwei Zahlen: der Fensterrahmen und die Titelleiste.
-Beide werden hier NICHT geraten, sondern aus dem Mitschnitt geholt --
-`wm: win ... x= y=` nennt die AEUSSERE Lage, und die Innenkante liegt
-zwei Bildpunkte rechts und 22 darunter davon. Dieselben zwei Zahlen
-benutzt Teil A, und dieselben nennt tools/desktop/run.sh.
-
-  umlaut.py <serial> <ppm> <fenstertitel> <text> [toleranz] [--kette] [--ink]
-
-RUNDE UMLAUT2: `--kette` misst mit `checkshot tchain` statt `ttext`.
-Beide vergleichen jeden Tintenpunkt gegen dieselbe Rasterung; `tchain`
-baut die Zeile aber ERST Buchstabe fuer Buchstabe auf, bevor es
-vergleicht, und erwartet damit das Richtige, wo zwei Umrisse einander
-ueberlappen. Bei "Akzentfarbe unverändert übernommen" sind das 8 von
-1567 Punkten -- `ttext` nennt sie falsch, `tchain` nicht, und das Bild
-ist beide Male dasselbe und richtig. Die Messung wird dadurch strenger
-und nicht weicher: `tchain` prueft zusaetzlich die Reihenfolge des
-Mischens (siehe tools/gfx/checkshot.py).
-
-Eine Zeile, rc=0 wenn kein Bildpunkt abweicht.
-"""
 import os
 import re
 import subprocess
@@ -52,23 +17,7 @@ WINZ = re.compile(
     rb"x=(\d+) y=(\d+) w=(\d+) h=(\d+).*?t=\[([^\]]*)\]")
 
 
-def frei_bis(roh, titel, y0, y1, x0):
-    """Bis zu welchem x die Zeile y0..y1 rechts von x0 UNVERDECKT ist.
-
-    WAS VERDECKT IST, KANN NICHT GEMESSEN WERDEN -- und darf nicht als
-    falsch gerastertes Zeichen gezaehlt werden. `themetest` laesst zum
-    Bild absichtlich einen Dialog offen ("EIN DIALOG BLEIBT OFFEN",
-    kernel/user/themetest.fi); der liegt bei 230,258 und schneidet die
-    letzten fuenf Zeichen von `Übernehmen` ab. Der Rasterer meldete
-    dafuer "333 von 526 Tintenpunkten falsch" -- und die falschen sind
-    genau die, die auf dem Bild gar nicht stehen.
-
-    Gemessen wird deshalb bis zur linken Kante des naechsten Fensters,
-    das WEITER OBEN liegt und diese Bildzeilen schneidet. Das ist
-    strenger als es klingt: die sichtbaren Zeichen muessen weiterhin
-    Bildpunkt fuer Bildpunkt stimmen, und ist gar nichts sichtbar,
-    faellt die Zusage.
-    """
+def frei_bis(roh, title, y0, y1, x0):
     eigen = None
     fenster = []
     for m in WINZ.finditer(roh):
@@ -77,11 +26,11 @@ def frei_bis(roh, titel, y0, y1, x0):
                  y=int(m.group(6)), w=int(m.group(7)), h=int(m.group(8)),
                  t=m.group(9).decode("utf-8", "replace"))
         fenster.append(e)
-        if e["t"] == titel and not e["hidden"]:
+        if e["t"] == title and not e["hidden"]:
             eigen = e
     if eigen is None:
         return None
-    grenze = None
+    limit = None
     for e in fenster:
         if e["hidden"] or e["z"] <= eigen["z"] or e is eigen:
             continue
@@ -93,25 +42,15 @@ def frei_bis(roh, titel, y0, y1, x0):
             continue
         if ex1 <= x0:
             continue
-        if grenze is None or ex0 < grenze:
-            grenze = ex0
-    return grenze
+        if limit is None or ex0 < limit:
+            limit = ex0
+    return limit
 
 
-def fenster(roh, titel):
-    """Die AEUSSERE Lage des Fensters mit diesem Titel.
-
-    HIER wird NICHT am Foto abgeschnitten, und das ist kein Versehen:
-    der Fensterserver schreibt seine Tafel (`wm: win nr=...`) ERST NACH
-    `wm: hold`, also nach der Aufnahme. Sie beschreibt trotzdem genau
-    den Augenblick der Aufnahme -- danach bewegt in diesem Aufbau
-    niemand mehr ein Fenster, denn `wmhold` ist das Ende der
-    Ereignisschleife. Schneidet man hier mit ab, findet man gar kein
-    Fenster mehr.
-    """
+def fenster(roh, title):
     treffer = None
     for m in WIN.finditer(roh):
-        if m.group(7).decode("utf-8", "replace") == titel:
+        if m.group(7).decode("utf-8", "replace") == title:
             treffer = m
     if treffer is None:
         return None
@@ -122,36 +61,13 @@ def fenster(roh, titel):
             treffer.group(2) == b"1")
 
 
-def bis_zum_foto(roh):
-    """Der Mitschnitt BIS ZU DEM AUGENBLICK, in dem das Bild entstand.
-
-    tools/look/shot.sh wartet auf `wm: hold` und macht dann den
-    Bildschirmabzug. Was danach auf den Draht geht, steht NICHT auf dem
-    Bild -- und es ist nicht wenig: `themetest` schaltet unter `themegui`
-    weiter zwischen hell und dunkel um und malt sich dabei immer wieder
-    neu. Von 58 gemeldeten "Übernehmen" dieses Laufs liegen 30 hinter dem
-    Foto, und die letzte davon ist dunkel (fg=16317180 bg=1976635),
-    waehrend das Bild die helle zeigt (fg=988970 bg=16777215).
-
-    Nimmt man einfach die LETZTE Meldung, vergleicht man ein helles Bild
-    gegen dunkle Erwartungsfarben und bekommt "526 von 526 Tintenpunkten
-    falsch" -- eine Zahl, die wie ein kaputter Zeichensatz aussieht und
-    keiner ist. Eine Messung muss den Zustand zum Zeitpunkt der Aufnahme
-    benutzen, nicht den letzten, den es je gab.
-    """
+def bis_zum_photo(roh):
     i = roh.find(b"wm: hold")
     return roh if i < 0 else roh[:i]
 
 
 def gemalt(roh, text):
-    """Die zuletzt VOR dem Foto gemeldete Lage dieses Textes.
-
-    Auf den seriellen Draht schreiben fuenf Prozesse gleichzeitig, also
-    wird NICHT bis zum Zeilenende gelesen, sondern der ERWARTETE Text
-    als Anker benutzt -- genauso, wie Teil A es tut. Eine Zeile, die ein
-    anderes Programm zerschnitten hat, traegt ihren Anfang trotzdem.
-    """
-    roh = bis_zum_foto(roh)
+    roh = bis_zum_photo(roh)
     pat = (rb"kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)(?: [a-z]+=\d+)* t="
            + re.escape(text.encode("utf-8")))
     treffer = list(re.finditer(pat, roh))
@@ -167,8 +83,6 @@ def rgb(v):
     return [str((v >> 16) & 255), str((v >> 8) & 255), str(v & 255)]
 
 
-#
-#
 GITTER = re.compile(
     rb"wm: termgitter win=(\d+) x=(\d+) y=(\d+) cellw=(\d+) cellh=(\d+)"
     rb" asc=(\d+) px=(\d+)")
@@ -184,15 +98,6 @@ def gitter(roh):
 
 
 def grundfarben(ppm, x0, y0, x1, y1):
-    """Grund und Schrift einer Terminalzeile, AUS DEM BILD gelesen.
-
-    Die Farben eines Terminalfensters kommen aus dem Farbschema und
-    stehen auf keiner Leitung -- anders als bei `wlib: text`, wo das
-    Programm sein `fg=`/`bg=` selbst meldet. Sie sind aber im Bild
-    eindeutig: der Grund ist die haeufigste Farbe der Zeile, die
-    Schrift die, die am weitesten von ihm entfernt ist. Zwischentoene
-    liegen zwischen beiden und koennen keines von beiden sein.
-    """
     b = open(ppm, "rb").read()
     if not b.startswith(b"P6"):
         return None
@@ -224,7 +129,7 @@ def grundfarben(ppm, x0, y0, x1, y1):
     return vg, hg
 
 
-def term_pruefen(serial, ppm, text, zeile, spalte, tol, zeichen):
+def term_check(serial, ppm, text, zeile, spalte, tol, zeichen):
     roh = open(serial, "rb").read()
     g = gitter(roh)
     if g is None:
@@ -264,8 +169,6 @@ def main(argv):
         return 2
     kette = "--kette" in argv
     argv = [x for x in argv if x != "--kette"]
-    # `--ink`: text of fUi's scene host (one run at a fractional pen position):
-    # the tolerant per-glyph proof `checkshot tink` instead of `ttext`.
     ink = "--ink" in argv
     argv = [x for x in argv if x != "--ink"]
     if argv[2].startswith("--gitter="):
@@ -275,9 +178,9 @@ def main(argv):
             print("umlaut: %r traegt gar keinen Umlaut" % text)
             return 2
         zeile, spalte = (int(v) for v in argv[2].split("=", 1)[1].split(","))
-        return term_pruefen(argv[0], argv[1], text, zeile, spalte,
+        return term_check(argv[0], argv[1], text, zeile, spalte,
                             argv[4] if len(argv) > 4 else "0", zeichen)
-    serial, ppm, titel, text = argv[0], argv[1], argv[2], argv[3]
+    serial, ppm, title, text = argv[0], argv[1], argv[2], argv[3]
     tol = argv[4] if len(argv) > 4 else "0"
     zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
     if not zeichen:
@@ -285,9 +188,9 @@ def main(argv):
         return 2
     roh = open(serial, "rb").read()
 
-    w = fenster(roh, titel)
+    w = fenster(roh, title)
     if w is None:
-        print("umlaut: [%s] no visible window '%s'" % (zeichen, titel))
+        print("umlaut: [%s] no visible window '%s'" % (zeichen, title))
         return 1
     wx, wy, ww, wh, deco = w
     t = gemalt(roh, text)
@@ -298,21 +201,16 @@ def main(argv):
 
     ix = wx + (BORDER if deco else 0)
     iy = wy + (TITLE if deco else 0)
-    # r454: the file manager owns a caption strip (WF_CAPTION_CLIENT): its window
-    # buffer grows UPWARD by the strip, so buffer row 0 is `strip_h` rows above
-    # the classic client origin and every reported `base=` counts from there.
-    # The strip height is what the program itself asked for.
-    if titel == "Datei-Explorer":
+    if title == "Datei-Explorer":
         sm = re.findall(rb"explorer: strip h=(\d+)", roh)
         if sm and deco:
             iy -= int(sm[-1])
     ax, ay = ix + tx, iy + tb
 
-    #
     sys.path.insert(0, os.path.join("tools", "ttf"))
     import raster
-    schrift = raster.Schrift("assets/osum-sans.ttf", px)
-    stellen = list(schrift.stellen(text))
+    font = raster.Schrift("assets/osum-sans.ttf", px)
+    stellen = list(font.stellen(text))
     breite = ((stellen[-1][1] >> 6) if stellen else 0) + 12
     if tx + breite > ww:
         print("umlaut: [%s] '%s' laeuft von x=%d bis %d aus einem Fenster "
@@ -320,33 +218,32 @@ def main(argv):
               % (zeichen, text[:30], tx, tx + breite, ww))
         return 1
 
-    hoch = 20
-    grenze = frei_bis(roh, titel, ay - hoch, ay + 6, ax)
-    if grenze is not None:
+    up = 20
+    limit = frei_bis(roh, title, ay - up, ay + 6, ax)
+    if limit is not None:
         sicht = text
         for k, (c, x26) in enumerate(stellen):
-            if ax + (x26 >> 6) + 12 > grenze:
+            if ax + (x26 >> 6) + 12 > limit:
                 sicht = text[:k]
                 break
         if not sicht.strip() or not any(c in "äöüÄÖÜß" for c in sicht):
             print("umlaut: [%s] '%s' ist ab x=%d verdeckt -- vom Umlaut "
-                  "ist nichts zu sehen" % (zeichen, text[:30], grenze))
+                  "ist nichts zu sehen" % (zeichen, text[:30], limit))
             return 1
         if sicht != text:
             print("        verdeckt ab x=%d -- gemessen wird '%s'"
-                  % (grenze, sicht))
+                  % (limit, sicht))
         text = sicht
 
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",
          "tink" if ink else ("tchain" if kette else "ttext"), ppm,
-         # ROUND FUI-TEXT: window text is Ring 3 text, drawn by fUi.
          "fui:assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
         capture_output=True, text=True)
     kopf = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
     print("umlaut: [%s] kind=%d %s x=%d y=%d tol=%s -- %s"
-          % (zeichen, kind, titel, ax, ay, tol, kopf))
+          % (zeichen, kind, title, ax, ay, tol, kopf))
     for z in r.stdout.strip().split("\n")[1:]:
         print("        " + z)
     return r.returncode

@@ -1,18 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/blur/blurasm.py -- r464: the three inner loops of the acrylic blur as x86-64 assembly (Intel syntax).
-#
-#   python3 tools/blur/blurasm.py embed  <name>   print the asm string of one routine the way kernel/ui/wm.fi holds it
-#   python3 tools/blur/blurasm.py check           compare the strings in kernel/ui/wm.fi with the text below
-#   python3 tools/blur/blurasm.py test            build tools/blur/asmtest.c with gcc and compare against the reference loops
-#
-# Why: firnc emits stack code with an overflow check on every add (about 15 times slower than C -O2), so the filter
-# cost 260 - 390 ns a pixel and one start-menu blur (640 x 416) took 77 - 105 ms. The loops below are the same
-# arithmetic (same reciprocal table, same rounding, same hash) in registers.
-#
-# Every routine takes ONE argument: rdi = pointer to a block of 64-bit words (see the lists) that it also uses as scratch.
-# firnc allows only the caller-saved registers rax rcx rdx rsi rdi r8..r11 in an asm block, so the loops keep their
-# constants in the block and read them from memory (L1 hits). No calls, no stack use.
 import re, subprocess, sys, os, tempfile
 
 H = """
@@ -110,10 +97,6 @@ mov [rdx+24],rax
 jnz 1b
 0:
 """
-# H block: 0 src, 1 dst, 2 w, 3 h, 4 r, 5 reciprocal table (u64 per n); words 3 is used up (row counter). The running sum of a
-# row is ONE register, three 16-bit lanes (blue at bit 0, red at 16, green at 32: a lane holds at most 255 * 39 = 9945, so
-# nothing carries into the next lane, and the sum minus a pixel never goes below zero): adding / removing a pixel is
-# ((p & 0x00FF00FF) | ((p & 0xFF00) << 24)) and one add / sub. The arithmetic of the output is the one of the old loop.
 
 V = """
 mov rdx,rdi
@@ -255,10 +238,6 @@ cmp rax,[rdx+24]
 jb 5b
 0:
 """
-# V block: 0 src, 1 dst, 2 w, 3 h, 4 r, 5 reciprocal table, 6 sum row (w words, three 16-bit lanes like block H; the row 27520 octets =
-# BLUR_W_MAX * 8 further on is a row of zeros), 7 scratch, 8 scratch (words 7 - 9 of the block are used as scratch: 7 = row y, 8 = n, 9 = reciprocal;
-# the block has 12 words). ONE pass per output row: normalise the sums of the row into the destination, then add the incoming row and remove the
-# outgoing one (a row of zeros when there is none) -- the old code made three passes over 24 octets per pixel.
 
 M = """
 mov r11,rdi
@@ -358,11 +337,7 @@ mov [r11+16],rax
 jnz 1b
 0:
 """
-# M block: 0 src, 1 dst, 2 count (used up), 3 x (absolute, first pixel), 4 y * 19349663, 5 amp, 6 2 * amp + 1,
-#          7 100 - tint, 8 / 9 / 10 tone red / green / blue * tint, 11 scratch
 
-# r465: one row of the dragged (lifted, scaled) window. Block words: 0 source row, 1 destination, 2 count, 3 first source column q,
-# 4 remainder r, 5 whole step qs, 6 remainder step rs, 7 nw. Same stepping as the Firn loop it replaces: sx = (x - ox) * bw / nw.
 D = """
 mov rdx,rdi
 mov rcx,[rdx+16]
@@ -391,9 +366,6 @@ jnz 1b
 0:
 """
 
-# r466: the modulus of the grain (v % (2 * amp + 1), a 64-bit `div` per pixel, 25 - 40 cycles) as a multiplication. Block word 6 = d (odd, >= 3);
-# the routine writes the magic number (word 12) and the shift (word 13) once per blur; the loop M then does q = ((v - hi) >> 1 + hi) >> shift with
-# hi = high word of magic * v and v - q * d (the libdivide "65-bit" way; checked against `%` in tools/blur/asmtest.c).
 G = """
 mov r11,rdi
 mov rcx,[r11+48]
@@ -419,27 +391,9 @@ inc rax
 mov [r11+96],rax
 0:
 """
-# G block: the M block (16 words): 6 = d in, 12 = magic out, 13 = shift out
 
-# ---------------------------------------------------------------------------------------------------------------------
-# r481: SSE2 versions of the three loops (routines s, w, x). Same arithmetic, same pixels, 3 - 4 times faster:
-#   s  = the tint + grain of block M, four pixels per round (the grain's hash stays scalar: it is 64-bit multiplications)
-#   w  = the vertical pass of block V on a multiple of 4 columns (the other columns go through the scalar V)
-#   x  = the horizontal pass of block H on four rows at once (the remaining rows go through the scalar H)
-# They use xmm0 - xmm15, so a caller MUST check `fb.simd_ok` first (the vector unit has to be switched on, and `fbnosimd`
-# is the switch for the control run), and the interrupts must not run a task switch in the middle: block word `irq`
-# (non-zero) makes the routine wrap each ROW (s: the whole call, w: each output row, x: each group of four rows) in
-# pushfq / cli ... popfq. The tests in asmtest.c run in user mode and leave it zero.
-#
-# The exactness of the normalisation: n <= 39 so a sum S is at most 255 * 39 = 9945 (a 16-bit lane). The scalar code computes
-# (S * rec + 262144) >> 19 with rec = ceil(2^19 / n). Split rec = rh * 65536 + rl (both fit a 16-bit lane, rh <= 8):
-#   S * rec >> 16 = pmulhuw(S, rl) + S * rh      (the low 16 bits of S * rl only carry INTO bit 16 of nothing: we add whole
-#                                                 multiples of 65536, so floor(S * rl / 65536) + S * rh is exact)
-# and adding 262144 is adding 4 to that, so the result is (pmulhuw(S, rl) + pmullw(S, rh) + 4) >> 3 -- every word in range.
-# The tint: (c * (100 - t) + tone * t) * 5243 >> 19 with x <= 25500 < 65536: pmulhuw(x, 5243) >> 3 (a floor of a floor).
 
 def _bcast(reg, scal32):
-    # broadcast the low 16 bits of a 32-bit register into all 8 words of an xmm register
     return ["movd %s,%s" % (reg, scal32), "pshuflw %s,%s,0" % (reg, reg), "pshufd %s,%s,0" % (reg, reg)]
 
 def _irq_on(flagword):
@@ -449,7 +403,6 @@ def _irq_off(flagword):
     return ["mov rax,[r11+%d]" % (flagword * 8), "test rax,rax", "jz 92f", "popfq", "92:"]
 
 def _hash(k):
-    # the grain of pixel x + k into block word 16 + k, replicated into four words (the same noise on every channel)
     L = ["lea rcx,[r10+%d]" % k if k else "mov rcx,r10",
          "imul rcx,rcx,73856093", "xor rcx,[r11+32]", "mov rdx,rcx", "shr rdx,13", "xor rcx,rdx",
          "mov rax,2654435761", "imul rcx,rax", "mov rdx,rcx", "shr rdx,15", "xor rcx,rdx", "mov rsi,rcx",
@@ -459,23 +412,19 @@ def _hash(k):
     return L
 
 def _save(base):
-    # the caller's vector registers into the block (word base / 8 on; 256 octets): this kernel does not save them for a system call,
-    # and a user program may keep values in them. (firnc does not allow rsp in an asm block, so not on the stack.)
     return ["movdqu [r11+%d],xmm%d" % (base + 16 * k, k) for k in range(16)]
 
 def _restore(base):
     return ["movdqu xmm%d,[r11+%d]" % (k, base + 16 * k) for k in range(16)]
 
 def _s_body():
-    # block: 0 src, 1 dst, 2 count (used up), 3 x, 4 y * 19349663, 5 amp, 6 d, 7 100 - tint, 8 / 9 / 10 tone red / green / blue * tint,
-    # 12 magic, 13 shift (from routine g), 15 irq, 16 - 19 the grain of four pixels. Words 0, 1, 2, 3 are advanced by 4 * (count / 4).
     L = ["mov r11,rdi", "mov rax,[r11+16]", "shr rax,2", "jz 0f"] + _save(192) + ["mov rdi,rax", "mov r8,[r11]", "mov r9,[r11+8]", "mov r10,[r11+24]"]
     L += _irq_on(15)
-    L += ["pxor xmm0,xmm0", "mov rax,[r11+56]"] + _bcast("xmm1", "eax")                       # 100 - tint
+    L += ["pxor xmm0,xmm0", "mov rax,[r11+56]"] + _bcast("xmm1", "eax")
     L += ["mov rax,[r11+80]", "mov rcx,[r11+72]", "shl rcx,16", "or rax,rcx", "mov rcx,[r11+64]", "shl rcx,32", "or rax,rcx",
-          "movq xmm2,rax", "punpcklqdq xmm2,xmm2"]                          # tone * tint: blue, green, red, 0 per pixel
+          "movq xmm2,rax", "punpcklqdq xmm2,xmm2"]
     L += ["mov eax,5243"] + _bcast("xmm3", "eax")
-    L += ["pcmpeqd xmm4,xmm4", "psrld xmm4,8"]                              # 0x00FFFFFF per pixel
+    L += ["pcmpeqd xmm4,xmm4", "psrld xmm4,8"]
     L += ["mov rax,[r11+40]", "test rax,rax", "jz 3f", "1:"]
     for k in range(4):
         L += _hash(k)
@@ -490,7 +439,6 @@ def _s_body():
     return "\n".join(L) + "\n"
 
 def _load4(p):
-    # four pixels of four rows (pitch rcx, 3 * pitch rdx) at [p] -> xmm6 = rows 0, 1 and xmm7 = rows 2, 3 as 16-bit lanes
     return ["movd xmm6,[%s]" % p, "movd xmm4,[%s+rcx]" % p, "punpckldq xmm6,xmm4",
             "movd xmm7,[%s+rcx*2]" % p, "movd xmm4,[%s+rdx]" % p, "punpckldq xmm7,xmm4",
             "punpcklbw xmm6,xmm15", "punpcklbw xmm7,xmm15"]
@@ -500,11 +448,9 @@ def _norm(src, dst, tmp):
             "paddw %s,%s" % (dst, tmp), "paddw %s,xmm10" % dst, "psrlw %s,3" % dst]
 
 def _consts():
-    # the constant registers; they are set again at the start of EVERY interrupt-free window (another task may use them in between)
     return (["pxor xmm15,xmm15", "mov eax,4"] + _bcast("xmm10", "eax") + ["pcmpeqd xmm11,xmm11", "psrld xmm11,8"])
 
 def _x_body():
-    # block: 0 src, 1 dst, 2 w, 3 rows (a multiple of 4, used up), 4 r, 5 reciprocal table, 7 n, 8 last n, 9 irq
     L = ["mov r11,rdi", "mov rax,[r11+24]", "shr rax,2", "jz 0f", "mov [r11+24],rax", "mov rax,[r11+16]", "test rax,rax", "jz 0f"] + _save(96)
     L += ["mov r8,[r11]", "mov r9,[r11+8]", "mov rcx,[r11+16]", "shl rcx,2", "lea rdx,[rcx+rcx*2]"]
     L += ["1:"] + _irq_on(9) + _consts()
@@ -529,8 +475,6 @@ def _x_body():
     return "\n".join(L) + "\n"
 
 def _w_body():
-    # block: 0 src, 1 dst, 2 columns (a multiple of 4), 3 h, 4 r, 5 reciprocal table, 6 sum row (4 words of 16 bits per pixel:
-    # blue, green, red, alpha), 7 y, 8 n, 10 irq, 11 pitch in pixels. The row of zeros BLUR_W_MAX * 8 octets further on.
     L = ["mov r11,rdi", "mov rax,[r11+16]", "test rax,rax", "jz 0f", "mov rax,[r11+24]", "test rax,rax", "jz 0f"] + _save(96)
     L += ["mov r8,[r11+48]", "cld", "xor eax,eax", "mov rdi,r8", "mov rcx,[r11+16]", "rep stosq",
           "lea rdi,[r8+27520]", "mov rcx,[r11+16]", "rep stosq", "xor r10d,r10d", "xor r9d,r9d",
@@ -608,7 +552,6 @@ def test():
         asm = ".intel_syntax noprefix\n"
         for n in "hvmdgswx":
             asm += ".globl blur_%s_asm\nblur_%s_asm:\npush r12\npush r13\npush r14\npush r15\n%s\npop r15\npop r14\npop r13\npop r12\nret\n" % (n, n, "\n".join(lines(BODIES[n])))
-        # r481: xmm_check(fn, block, out, pattern): load a pattern into xmm0 - xmm15, call fn(block), store the registers to out
         asm += ".globl xmm_check\nxmm_check:\npush rbx\nmov rbx,rdx\nmov rax,rdi\nmov rdi,rsi\n"
         asm += "".join("movdqu xmm%d,[rcx+%d]\n" % (k, 16 * k) for k in range(16))
         asm += "call rax\n" + "".join("movdqu [rbx+%d],xmm%d\n" % (16 * k, k) for k in range(16)) + "pop rbx\nret\n"

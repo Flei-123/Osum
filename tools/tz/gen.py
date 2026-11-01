@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/tz/gen.py -- builds lib/tz/zonedata.fi from IANA tzdata (python zoneinfo).
-#
-# Every zone in CURATED is CLASSIFIED against the rules lib/tz/rules.fi knows
-# (see tools/tz/tzmodel.py NAMES): the standard offset is the smaller of the January and
-# July offsets, the rule is the one whose instants reproduce EVERY utcoffset of the
-# zone for 2024..2040 (hourly samples + both sides of each changeover). A zone that
-# matches no rule is REFUSED (printed, not written) -- the table never carries a
-# guess. Run:  python3 tools/tz/gen.py > lib/tz/zonedata.fi
 import sys, datetime as dt
 from zoneinfo import ZoneInfo
 
-# region letter -> zones (IANA id, display name)
 CURATED = [
  ("U", "UTC", "UTC"),
  ("E", "Atlantic/Reykjavik", "Reykjavik"), ("E", "Europe/Lisbon", "Lisbon"),
@@ -61,7 +52,7 @@ CURATED = [
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
 sys.path.insert(0, __file__.rsplit('/', 1)[0] if '/' in __file__ else '.')
-from tzmodel import offset_min, RULES   # the python twin of lib/tz/tz.fi
+from tzmodel import offset_min, RULES
 
 def samples(zi):
     out = []
@@ -80,7 +71,6 @@ def real(zi, t):
 def classify(zid):
     zi = ZoneInfo(zid)
     ss = samples(zi)
-    # refine around every real offset change
     prev = real(zi, ss[0]); extra = []
     for a, b in zip(ss, ss[1:]):
         cur = real(zi, b)

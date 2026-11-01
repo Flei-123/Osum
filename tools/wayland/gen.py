@@ -1,43 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wayland/gen.py -- DEN PROTOKOLLTEIL AUS DEN XML-DATEIEN ERZEUGEN.
-
-Der Auftrag dieser Runde sagt es ausdruecklich: die Protokolldefinitionen
-SIND XML-Dateien (wayland.xml, xdg-shell.xml), und der Firn-Code daraus
-wird ERZEUGT und nicht abgetippt. Das ist der Unterschied zwischen
-wartbar und Einwegarbeit -- wayland.xml allein hat 22 Schnittstellen mit
-zusammen ueber hundert Anfragen und Ereignissen.
-
-WAS HIER ENTSTEHT, und warum es so wenig ist:
-
-Ein Wayland-Server muss die Anfragen AUSEINANDERHALTEN (welche
-Schnittstelle, welcher Opcode, welche Argumente) und Ereignisse in der
-richtigen Form ZURUECKSCHICKEN. Was er NICHT braucht, ist der
-Klebe-Code, den `wayland-scanner` fuer C erzeugt: keine Funktionszeiger-
-tabellen, kein libffi, keine Marshalling-Schicht. Firn hat keine
-Funktionszeiger, und ein `if opcode == 3` ist hier ehrlicher als eine
-Sprungtabelle.
-
-Erzeugt werden deshalb genau drei Dinge, und alle drei sind Daten:
-
-  1. DIE NAMEN DER SCHNITTSTELLEN als Konstanten (WL_COMPOSITOR = 3
-     usw.), damit der Server eine Zeichenkette EINMAL aufloest und
-     danach mit Zahlen arbeitet.
-  2. DIE SIGNATUREN: fuer jede Anfrage, wieviele Argumente sie hat und
-     welcher Art sie sind. Daran erkennt der Server die LAENGE eines
-     Pakets, und daran faellt ein falsches Paket auf, bevor es Schaden
-     anrichtet.
-  3. DIE OPCODES der Ereignisse, die dieser Server WIRKLICH schickt.
-
-DIE AUSWAHL. Wer alle 27 Schnittstellen nachbaut, wird nie fertig -- der
-Auftrag sagt das auch. Erzeugt wird nur, was in LIMIT steht: die elf,
-ohne die kein Client startet. Alles andere wird vom Server mit
-`global_remove`-Schweigen behandelt, also gar nicht erst angeboten; ein
-Client, der es trotzdem bindet, bekommt einen Protokollfehler statt
-einer stillen Falschantwort.
-
-  ./tools/wayland/gen.py > kernel/user/wlproto.fi
-"""
 
 import sys
 import xml.etree.ElementTree as ET
@@ -52,12 +14,9 @@ LIMIT = [
     "wl_shm", "wl_shm_pool", "wl_buffer", "wl_surface",
     "wl_seat", "wl_keyboard", "wl_pointer", "wl_output", "wl_region",
     "xdg_wm_base", "xdg_surface", "xdg_toplevel",
-    # ROUND WAYLAND-INPUT: the clipboard (kernel/user/wl_data.fi)
     "wl_data_device_manager", "wl_data_device", "wl_data_source",
     "wl_data_offer",
-    # ROUND FOOT-1: sub-surfaces (foot aborts without wl_subcompositor)
     "wl_subcompositor", "wl_subsurface",
-    # ROUND LC3: toolkits probe these (GTK, Qt, weston clients)
     "wp_viewporter", "wp_viewport",
     "zxdg_decoration_manager_v1", "zxdg_toplevel_decoration_v1",
 ]
@@ -127,7 +86,6 @@ def main():
     exports = []
     body = []
 
-    # ---- 1. die Schnittstellen ----
     body.append("// ------------------------------------- die Schnittstellen")
     body.append("//")
     body.append("// Unsere eigene Nummerierung. Im Protokoll kommen")
@@ -143,7 +101,6 @@ def main():
     exports += ["IF_COUNT", "IF_NONE"]
     body.append("")
 
-    # ---- 2. die Fassungen ----
     body.append("// Welche Fassung dieser Server anbietet. Mehr zu")
     body.append("// behaupten als gebaut ist, ist die eine Luege, die ein")
     body.append("// Client nicht ueberlebt.")
@@ -188,7 +145,6 @@ def main():
     exports.append("name_at")
     body.append("")
 
-    # ---- 4. die Anfragen ----
     body.append("// ----------------------------------------- die Anfragen")
     body.append("//")
     body.append("// Je Schnittstelle und Opcode: wieviele Argumente, und")
@@ -235,7 +191,6 @@ def main():
     exports.append("req_count")
     body.append("")
 
-    # ---- 5. die Ereignisse ----
     body.append("// --------------------------------------- die Ereignisse")
     for name in LIMIT:
         el = ifaces[name]
@@ -245,7 +200,6 @@ def main():
             exports.append(c)
     body.append("")
 
-    # ---- 6. die Fehlercodes ----
     body.append("// ----------------------------------------- die Fehler")
     body.append("// wl_display.error nennt einen Code, und der Client")
     body.append("// druckt ihn. Falsche Zahlen hier heissen falsche")

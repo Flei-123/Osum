@@ -128,12 +128,12 @@ def mach(fall, grund, ziel):
         r.inode_set(2, mkfs.I_INDIRECT, b)
         r.inode_set(2, mkfs.I_SIZE, 1 << 20)
     elif fall == "verzkreis":
-        bild = _bild(ziel)
+        bild = _image(ziel)
         binino = bild.finde("/bin")
         bild.f.close()
         _dir_add(r, binino, "hoch", 1)
     elif fall == "selbstverz":
-        bild = _bild(ziel)
+        bild = _image(ziel)
         binino = bild.finde("/bin")
         bild.f.close()
         _dir_add(r, binino, "ich", binino)
@@ -143,7 +143,7 @@ def mach(fall, grund, ziel):
     elif fall == "wildzeiger":
         r.inode_set(2, mkfs.I_DIRECT, r.g(mkfs.SB["BLOCKS"]) + 1000)
     elif fall == "totlink":
-        bild = _bild(ziel)
+        bild = _image(ziel)
         binino = bild.finde("/bin")
         bild.f.close()
         _dir_add(r, binino, "nirgends", r.g(mkfs.SB["INODES"]) - 1)
@@ -159,10 +159,10 @@ def mach(fall, grund, ziel):
         js = r.g(mkfs.SB["JSTART"])
         if js:
             d = bytearray(BS)
-            struct.pack_into("<Q", d, 0, 0x4D4D4F434A53464F)  # OFSJCOMM
-            struct.pack_into("<Q", d, 8, 99)                  # Folgenummer
-            struct.pack_into("<Q", d, 16, 5)                  # Anzahl
-            struct.pack_into("<Q", d, 24, 0x1234567812345678)  # falsche Summe
+            struct.pack_into("<Q", d, 0, 0x4D4D4F434A53464F)
+            struct.pack_into("<Q", d, 8, 99)
+            struct.pack_into("<Q", d, 16, 5)
+            struct.pack_into("<Q", d, 24, 0x1234567812345678)
             r.put(js + 521, d)
     else:
         raise SystemExit("kaputt: unbekannter Fall %s" % fall)
@@ -170,7 +170,7 @@ def mach(fall, grund, ziel):
     return ziel
 
 
-def _bild(pfad):
+def _image(pfad):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import check
     return check.Bild(pfad)

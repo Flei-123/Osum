@@ -1,28 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bridge/ppmvergleich.py -- das Bild von INNEN gegen das von AUSSEN.
-
-    ppmvergleich.py <innen.ppm> <aussen.ppm>
-
-WIE HIER VERGLICHEN WIRD, UND WARUM NICHT EINFACH ALLES.
-
-Zwei Bilder desselben Schirms, ein paar Sekunden auseinander -- und
-dazwischen hat `serial.put` weitergespiegelt (kernel/gfx/fb.fi, `S_ECHO`):
-Osum meldet auf der seriellen Leitung, dass es fertig ist, und JEDES
-dieser Oktette landet auch auf dem Schirm. Der Wirt fotografiert danach
-und sieht darum ein paar Textzeilen MEHR.
-
-Gemessen im ersten Anlauf: 108 168 abweichende Oktette, verteilt auf 611
-von 800 Zeilen, in Baendern mit 12 bis 13 Zeilen Abstand -- genau die
-Hoehe einer Textzeile. Es war also die Konsole und nichts sonst.
-
-Ein Vergleich ueber das ganze Bild beantwortet damit die falsche Frage.
-Die richtige lautet: STIMMEN DIE BILDPUNKTE, DIE SICH NICHT GEAENDERT
-HABEN? Also werden beide Zahlen ausgerechnet und BEIDE ausgegeben. Die
-Zusage ist die zweite, und sie ist scharf: die Bildpunkte kommen aus dem
-Kern von innen und aus QEMU von aussen, und der Wirt kann von einem
-Fehler im Kern nicht belogen werden.
-"""
 import sys
 
 
@@ -66,11 +43,11 @@ def main():
     verschieden = [y for y in range(ih)
                    if ib[y * zeile:(y + 1) * zeile] != ab[y * zeile:(y + 1) * zeile]]
     vs = set(verschieden)
-    gleich = ih - len(verschieden)
-    print("lines equal: %d of %d" % (gleich, ih))
+    eq = ih - len(verschieden)
+    print("lines equal: %d of %d" % (eq, ih))
     print("Zeilen verschieden: %d" % len(verschieden))
 
-    anders = 0
+    changed = 0
     for y in range(ih):
         if y in vs:
             continue
@@ -78,8 +55,8 @@ def main():
         if ib[o:o + zeile] != ab[o:o + zeile]:
             for i in range(o, o + zeile):
                 if ib[i] != ab[i]:
-                    anders += 1
-    print("deviating octets in the same lines: %d" % anders)
+                    changed += 1
+    print("deviating octets in the same lines: %d" % changed)
 
     nichtschwarz = sum(1 for i in range(0, len(ib), 3)
                        if ib[i] or ib[i + 1] or ib[i + 2])
@@ -98,7 +75,7 @@ def main():
         print("Baender verschiedener Zeilen: %d, erste: %s"
               % (len(baender), baender[:4]))
 
-    if gleich > 0 and anders == 0 and nichtschwarz > 1000:
+    if eq > 0 and changed == 0 and nichtschwarz > 1000:
         print("GLEICH")
         return 0
     print("UNGLEICH")

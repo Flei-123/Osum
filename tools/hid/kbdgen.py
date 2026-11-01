@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/hid/kbdgen.py -- generate the keyboard layout data of the kernel from the xkb data of the host.
-
-  lib/keymap/kbdnames.fi       layout registry (count, names); in lib/ because user programs import it too
-  kernel/drv/hid/kbdlay.fi     symbols per layout, key position and level (plain, shift, altgr, altgr+shift, and the same with caps lock)
-  kernel/drv/hid/kbdcomb.fi    dead key spacing characters, dead key combinations, compose sequences
-
-  python3 tools/hid/kbdgen.py            write the three files
-  python3 tools/hid/kbdgen.py --check    exit 1 if a file on disk is stale
-"""
 import os
 import sys
 

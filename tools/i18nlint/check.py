@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/i18nlint/check.py -- NO RAW I18N KEY REACHES THE SCREEN (W-D, 17.10.2026).
-#
-#   python3 -I tools/i18nlint/check.py [<tree-root>]
-#
-# Boss found 'tray.mute', 'tray.more', 'tray.none' printed raw in the tray popup: the keys
-# were used in kernel/user/traypop.fi but never added to locale/*/messages. This lint scans
-# every Firn source for NUL-terminated string literals that look like a message key
-# ("<prefix>.<name>[.<name>]\0") whose prefix is a prefix of the tables, and requires the key
-# in EVERY language table. Also: every language table has the same keys as the others.
 import os, re, sys
 
 root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), "..", "..")
@@ -36,7 +27,6 @@ allow = set()
 for ln in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "allow.txt")):
     if ln.strip() and not ln.startswith("#"):
         allow.add(ln.strip())
-# "@<prefix>" lines: prefixes that are ALWAYS checked, even when no table has such a key yet
 extra_prefixes = set(a[1:] for a in allow if a.startswith("@"))
 allow = set(a for a in allow if not a.startswith("@"))
 
@@ -67,10 +57,6 @@ for l, ks in tables.items():
         bad += 1
         print("FAIL  %s missing in locale/%s (present in another language)" % (k, l))
 
-# r1015: THE CATALOGUE HAS TO FIT INTO kernel/user/msg.fi.  870 keys on 832 places made the last ~38
-# keys (every tray.* one) show raw although they were in both tables.  Keys, bytes of the file, key and
-# text lengths are held against the constants of msg.fi; 5 % headroom is required so the next round
-# does not hit the wall in the field.
 msgsrc = open(os.path.join(root, "kernel/user/msg.fi"), encoding="latin1").read()
 def const(name):
     m = re.search(r"^const %s: u64 = (\d+)" % name, msgsrc, re.M)

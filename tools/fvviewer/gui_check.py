@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fvviewer/gui_check.py -- judge one GUI gate stage from its artefacts.
-
-    gui_check.py <outdir> <thdir> <stage>
-
-<outdir> holds serial.txt + *.ppm (written by tools/design/eh6.sh + drive.py), <thdir>/input.log is the
-Rust test host's input log. Stage "plain" and "tls" check the full session; "tlsidle" checks only that
-the session stayed up. Prints "  OK/FAIL  <what>" lines and a "NUM ..." line with the measured numbers.
-Exit code = number of failures.
-"""
 import re
 import statistics
 import sys
@@ -74,16 +65,12 @@ lives = len(re.findall(r"fvviewer: state live", ser))
 ok(lives >= 1, "state live reached (%d x)" % lives)
 nums = []
 if geom and view:
-    # frame + title: osum shape frame=1 title_bar=32 -> origin (1, 34)
     ox, oy = int(geom.group(1)) + 1, int(geom.group(2)) + 34
     vx, vy = ox + int(view.group(1)), oy + int(view.group(2))
     vw, vh = int(view.group(3)), int(view.group(4))
     img = ppm("20-live")
     ok(img is not None, "screenshot 20-live")
     if img:
-        # test host picture: R = x/639*255, G = y/479*255, B = 128
-        # Several photos: when a window UNDER the viewer (the terminal that shows the serial trace) repaints, the guest
-        # compositor sometimes draws it over the viewer picture until the viewer repaints (r53) -> pass if one photo is whole.
         best, bad_photos, shown = -1, 0, ""
         for nm in ("20-live", "29-click-fast", "31-click-1s", "32-click-2s", "30-click"):
             im3 = ppm(nm)
@@ -100,10 +87,7 @@ if geom and view:
             if okc > best:
                 best, shown = okc, " ".join("%s~%s" % (g, w) for g, w in pr)
         ok(best == 5, "picture gradient at 5 probe points (%d/5, best photo; %d photo(s) with an unpainted region): %s" % (best, bad_photos, shown))
-        # alpha / background: a probe must not be the window grey -> covered by the gradient check above
     if stage != "tlsidle":
-        # click at 25% / 50% of the view -> the host answers with a red 16x16 mark (button 0). Which photo shows it first
-        # tells how long the picture needs to reach the screen (photo times: see tools/fvviewer/gui.sh script).
         seen = None
         for nm in ("29-click-fast", "31-click-1s", "32-click-2s", "30-click"):
             im2 = ppm(nm)
@@ -119,7 +103,6 @@ if geom and view:
                 seen = (nm, cnt)
         ok(seen is not None, "red click mark on screen (first photo showing it: %s)" % (seen,))
         nums.append("mark_first_seen=%s" % (seen[0] if seen else None))
-# serial evidence
 dn = re.findall(r"fvviewer: ev down x=(\d+) y=(\d+) btn=(\d+) inside=(\d) ptr=(\d+),(\d+)", ser)
 up = re.findall(r"fvviewer: ev up x=(\d+) y=(\d+) btn=(\d+) inside=(\d) ptr=(\d+),(\d+)", ser)
 if stage != "tlsidle":
@@ -131,7 +114,6 @@ if stage != "tlsidle":
     ok(any(abs(int(a) - 2500) < 400 and abs(int(b) - 5000) < 400 for a, b in mv), "MouseMove near (2500,5000): %s" % (mv[-3:],))
     keys = re.findall(r"^((?:KeyVk|Key|Special) [^\n]*)$", hl, re.M)
     ok(len(keys) >= 3, "test host logged key messages (%d): %s" % (len(keys), keys[:6]))
-    # mouse wheel (drive.py `rad 2`, then `rad -1`): the host must see Wheel messages, 3 lines per notch, both directions
     wl = [int(x) for x in re.findall(r"Wheel lines=(-?\d+)", hl)]
     nums.append("wheel_lines=%s" % wl[:8])
     ok(len(wl) >= 3 and sum(wl) != 0, "test host logged Wheel messages (lines: %s)" % (wl[:8],))
@@ -151,7 +133,6 @@ if stage in ("plain", "tls"):
     ok(lives >= 2, "reconnect: second 'state live' after host kill/start (%d)" % lives)
     ok(bool(re.search(r"fvviewer: lost err=", ser)), "viewer noticed the lost host (lost err line)")
 if stage in ("tls", "tlsidle"):
-    # the TLS idle fund: no 'lost' before the host was killed (idle seconds between host tiles)
     ok(ser.find("fvviewer: state live") >= 0, "wss session established")
 print("NUM %s" % " ".join(nums))
 sys.exit(fails)

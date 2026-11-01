@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/codec/nalzahl.py -- zaehlt die Slice-Einheiten eines Annex-B-Stroms.
-
-Damit prueft die Abnahme, dass der Strom `slices` WIRKLICH mehrere
-Slices je Bild hat. Ohne diese Zahl waere "mehrere Slices gehen" eine
-Hoffnung: kodiert x264 doch nur einen, laeuft der Test durch, ohne den
-Fall je zu beruehren.
-
-    python3 tools/codec/nalzahl.py DATEI   ->  "<slices> <idr> <erste_first_mb...>"
-"""
 import sys
 
 def nals(d):

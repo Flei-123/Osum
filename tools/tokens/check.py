@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/tokens/check.py <rows> -- asserts the rows dumped by tools/tokens/host.fi.
-
-The model below is written independently of lib/fui/tokens.fi (floats where the library has
-integers, tolerance where the rounding differs on purpose)."""
 import sys
 
 rows = {}
@@ -27,7 +23,7 @@ def ch(c):
     return (c >> 16) & 255, (c >> 8) & 255, c & 255
 
 
-def lum(c):  # true sRGB relative luminance
+def lum(c):
     def lin(v):
         v /= 255.0
         return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
@@ -91,7 +87,6 @@ for dk, nm in ((0, "light"), (1, "dark")):
             contrast(rg, rows[(9, 1, dk)]) >= 3.0)
         chk("%s accent %d: disabled is quieter than the accent" % (nm, ai),
             contrast(ds, rows[(9, 1, dk)]) < contrast(acc, rows[(9, 1, dk)]) or ds != acc)
-        # on-accent: never worse than 3:1 (large-text bar), and it is the better of white/black
         better = 0xFFFFFF if contrast(acc, 0xFFFFFF) >= contrast(acc, 0) else 0
         chk("%s accent %d: on-accent colour reads (%.1f:1)" % (nm, ai, contrast(acc, on)), contrast(acc, on) >= 3.0 and
             (on == better or abs(contrast(acc, 0xFFFFFF) - contrast(acc, 0)) < 1.0))

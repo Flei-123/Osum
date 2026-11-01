@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""tools/fvviewer/vectors.py -- compare lib/fv/{proto,session}.fi (via the vt
-binary) with the Rust contract file tests/orientos-vectors.json, byte for byte.
-
-  python3 -I tools/fvviewer/vectors.py <vt-binary> <vectors.json>
-
-Checks: encode() of every viewer message, decode of every host message,
-reject list, handshake (hello shape, ask answer, password proof for each
-Argon2 case, session key, 4 digit code, result 0x04/0x05), AES-GCM data
-frames both directions through session.seal_msg/open_msg (replay, tamper,
-wrong direction, truncated), relay JSON.
-Exit 0 = all equal.
-"""
 import json
 import subprocess
 import sys
@@ -40,7 +28,6 @@ def hx(s):
     return s.encode().hex() if s else "-"
 
 
-# ------------------------------------------------------------------ encode
 def enc_args(m):
     t = bytes.fromhex(m["hex"])[0]
     f = m["fields"]
@@ -81,7 +68,6 @@ for m in d["proto"]:
 print("  encode: %d messages" % nenc)
 
 
-# ------------------------------------------------------------------ decode
 def dec_want(m):
     t = bytes.fromhex(m["hex"])[0]
     f = m["fields"]
@@ -121,11 +107,9 @@ print("  decode: %d messages" % ndec)
 
 for r in d["proto_reject"]:
     out = run("dec", r["hex"] or "-")
-    # no decoded message may come out; types without a decoder are ignored
     check("reject " + r["name"], out.split(" ")[0].strip() in ("reject", "other"), True)
 print("  reject: %d byte strings" % len(d["proto_reject"]))
 
-# ------------------------------------------------------------------ handshake
 h = d["handshake"]
 host_pub = h["host_public"]
 name_hex = h["ask_device_name"].encode().hex()
@@ -138,7 +122,6 @@ out = run("hs", h["client_secret"], ack_main, "ask", name_hex, "05")
 check("handshake denied (0x05)", out.splitlines()[-1], "result 2 state 4")
 out = run("hs", h["client_secret"], ack_main, "ask", name_hex, "07")
 check("handshake unknown result byte", out.splitlines()[-1], "result 0 state 2")
-# a bad hello_ack must fail the session, not crash
 for nm, ack in (("short", ack_main[:-2]), ("wrong tag", "03" + ack_main[2:]), ("empty", ack_main[:2])):
     out = run("hs", h["client_secret"], ack, "ask", name_hex)
     check("handshake bad ack (%s) fails" % nm, "answer -\nstate 5\n" in out, True)
@@ -150,7 +133,6 @@ for c in d["argon2"]["cases"]:
     check("password proof (Argon2id) " + c["name"], ans[0][7:] if ans else out, c["proof_frame_V_to_H"])
 print("  handshake: ask + %d password cases" % len(d["argon2"]["cases"]))
 
-# ------------------------------------------------------------------ cipher
 ci = d["cipher"]
 key = ci["key"]
 v2h = ci["viewer_to_host"]
@@ -168,12 +150,10 @@ out = run("sess", key, "open", f0, f0, f1, f1, tamper, tamper_ct, f0[:20], "-",
 check("replay / tamper / direction / short", out[:10],
       ["ok:" + h2v[0]["plaintext_hex"], "fail", "ok:" + h2v[1]["plaintext_hex"], "fail",
        "fail", "fail", "fail", "fail", "fail", "fail"])
-# a forged frame must not advance the counter: tamper first, then the real one
 out = run("sess", key, "open", tamper, tamper_ct, f0).split("\n")[1:]
 check("failed frame does not burn the counter", out[:3], ["fail", "fail", "ok:" + h2v[0]["plaintext_hex"]])
 print("  cipher: %d + %d frames" % (len(v2h), len(h2v)))
 
-# ------------------------------------------------------------------ relay
 check("relay connect json", run("relay", "connect", "123456789").strip(), h["relay_connect_json"])
 check("relay connect rejects non-digits", run("relay", "connect", "12a45").strip(), "reject")
 check("relay connect rejects 33 digits", run("relay", "connect", "1" * 33).strip(), "reject")

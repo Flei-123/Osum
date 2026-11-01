@@ -99,14 +99,12 @@ def text_check(rp, im, name, box, fg, need):
         rp.put(False, "%s: box outside the picture %s" % (name, box))
         return
     lt = lum(fg)
-    # the background: everything clearly darker than the text colour
     bgl = [lum(p) for p in px if lum(p) < lt * 0.8]
     if len(bgl) < len(px) // 4:
         rp.put(False, "%s: no background found" % name)
         return
     bg_l = percentile(bgl, 0.9)
     ratio = (lt + 0.05) / (bg_l + 0.05)
-    # ink pixels: halfway between the background and the text colour or more
     thr = bg_l + (lt - bg_l) * 0.5
     xs, ys, n = [], [], 0
     for j in range(h):
@@ -130,7 +128,6 @@ def face_and_glyph(im, box):
     px = rect_pixels(im, x, y, w, h, inset=4)
     face = median_col(px)
     vals = sorted(cr(p, face) for p in px)
-    # strongest ~2 per cent of the pixels: the glyph's core, not one stray pixel
     return face, vals[min(len(vals) - 1, int(len(vals) * 0.985))]
 
 
@@ -168,7 +165,6 @@ def main():
             rp.put(False, "rects missing: %s" % miss)
             print("SIGNINLOOK %s: %d passed, %d failed" % (label, rp.ok, rp.bad))
             return 1
-        # the power tile is the LAST rect (its node id moves when the bottom strip gets a node, e.g. the bottom-left anchor column)
         entry, arrow, power = R[11], R[13], R[max(R)]
         name = (entry[0], entry[1] - 80, 320, 36)
         status = (entry[0], entry[1] - 44, 320, 32)
@@ -180,7 +176,6 @@ def main():
     eye = (entry[0] + entry[2] + 4, entry[1], 36, 36)
     lang = (net[0] - 44, net[1], 44, 36)
 
-    # ---- text
     text_check(rp, im, "name", name, WHITE, 3.0)
     text_check(rp, im, "status", status, WHITE, 4.5)
     if hint is not None:
@@ -190,7 +185,6 @@ def main():
         text_check(rp, im, "clock", clock, WHITE, 4.5)
     text_check(rp, im, "language", lang, WHITE, 4.5)
 
-    # ---- glyphs on their faces
     for nm, box in (("eye", eye), ("arrow", arrow), ("network", net), ("power", power)):
         face, c = face_and_glyph(im, box)
         rp.put(c >= 3.0, "%s glyph: %.2f to 1 on its face %s (need >= 3.0)" % (nm, c, face))
@@ -198,7 +192,6 @@ def main():
         face, c = face_and_glyph(im, other)
         rp.put(c >= 4.5, "'Anderer Benutzer' label: %.2f to 1 on %s (need >= 4.5)" % (c, face))
 
-    # ---- milk glass: the plate has to be seen against the picture next to it
     for nm, box in (("network", net), ("power", power)):
         x, y, w, h = box
         plate = median_col(rect_pixels(im, x, y, w, h, inset=4))
@@ -213,12 +206,11 @@ def main():
         rp.put(c >= 1.15, "glass %s: plate %s against the picture %s: %.2f to 1 (need >= 1.15)"
                % (nm, plate, bg, c))
 
-    # ---- the password field
     ex, ey, ew, eh = entry
     inner = rect_pixels(im, ex, ey, ew, eh, inset=5)
     fill = median_col(inner)
     dots = sorted(cr(p, fill) for p in inner)
-    dotc = dots[min(len(dots) - 1, int(len(dots) * 0.998))]   # three small dots: the top ~12 pixels
+    dotc = dots[min(len(dots) - 1, int(len(dots) * 0.998))]
     rp.put(dotc >= 4.5, "field: typed dots %.2f to 1 on the field %s (need >= 4.5)" % (dotc, fill))
     around = rect_pixels(im, ex - 8, ey - 8, ew + 16, 6) + rect_pixels(im, ex - 8, ey + eh + 2, ew + 16, 6)
     out = median_col(around)
@@ -226,7 +218,6 @@ def main():
     edge = max(cr(fill, out), cr(rim, out))
     rp.put(edge >= 2.0, "field: edge %.2f to 1 against the picture %s (need >= 2.0)" % (edge, out))
 
-    # ---- not blank
     cols = set()
     for j in range(0, im.height, 4):
         for i in range(0, im.width, 4):

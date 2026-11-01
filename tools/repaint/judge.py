@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-# tools/repaint/judge.py <outdir> [--png <dir>] [--max N]
-# Compares every inc-<x>.ppm (incremental damage tracking) with ref-<x>.ppm (full recompose after Ctrl+Alt+R).
-# Masked: the taskbar clock / tray corner (bottom right 260x48), it changes between the two pictures.
-# Prints `repaint: <x> diff=<n> bbox=x0,y0,x1,y1 rows=<n>` and exits 1 when any pair has more than --max differing pixels.
 import sys, os, glob
 from PIL import Image, ImageChops
 

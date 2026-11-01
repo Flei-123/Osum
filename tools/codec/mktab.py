@@ -1,45 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/codec/mktab.py -- DIE ZAHLENTAFELN FUER kernel/user/h264tab.fi.
-
-Die CAVLC-Tafeln, die Entblockungstafeln und die Gewichtstafel der
-Intra-4x4-Modi werden hier ERZEUGT und nicht abgetippt.  Herkunft:
-
-  tabs.json   aus FFmpegs libavcodec/h264_cavlc.c
-              (coeff_token, total_zeros, run_before, chroma_dc_*)
-  dbtab.json  aus FFmpegs libavcodec/h264_loopfilter.c
-              (alpha_table, beta_table, tc0_table)
-  pred4.json  aus tools/codec/pred_gen.py -- den Formeln 8.3.1.2.1-9
-              der Norm, als Gewichte ueber die 13 Nachbarn.
-
-Warum das so laeuft: eine abgetippte Huffman-Tafel hat einen Fehler,
-den man nicht sieht.  Er faellt erst drei Koeffizienten spaeter als
-"Code nicht in der Tafel" auf, und dann sucht man ihn an der falschen
-Stelle.  Erzeugte Tafeln koennen diesen Fehler nicht haben; dass sie
-stimmen, prueft tools/codec/run.sh mit der Praefixprobe nach.
-
-    python3 tools/codec/mktab.py > kernel/user/h264tab.fi
-"""
 import json, os, sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-def lade(n):
+def load_2(n):
     with open(os.path.join(HIER, n)) as f:
         return json.load(f)
 
-T  = lade('tabs.json')
-DB = lade('dbtab.json')
-P4 = lade('pred4.json')
+T  = load_2('tabs.json')
+DB = load_2('dbtab.json')
+P4 = load_2('pred4.json')
 
 aus = []
 def z(s=''): aus.append(s)
 
-def feld(name, werte, typ='u64', je=16, kommentar=None):
+def feld(name, values, typ='u64', je=16, kommentar=None):
     z('// %s' % kommentar if kommentar else '')
-    z('static mut %s: [%s; %d] = [' % (name, typ, len(werte)))
+    z('static mut %s: [%s; %d] = [' % (name, typ, len(values)))
     zeile = '   '
-    for i, v in enumerate(werte):
-        stueck = ' %d,' % v if i < len(werte)-1 else ' %d]' % v
+    for i, v in enumerate(values):
+        stueck = ' %d,' % v if i < len(values)-1 else ' %d]' % v
         if len(zeile) + len(stueck) > 76:
             z(zeile); zeile = '   '
         zeile += stueck
@@ -74,7 +54,6 @@ z('    VMAT, QPC, LEVTAB_V, LEVTAB_N')
 z('}')
 z()
 
-# ---- coeff_token: 4 Klassen zu 68 Eintraegen (t1 0..3, tc 0..16)
 ct_len=[]; ct_bits=[]
 for k in range(4):
     ct_len += T['coeff_token_len'][k]
@@ -111,7 +90,6 @@ feld('RUN_LEN', run_len, kommentar=
      'run_before, Tafel 9-10: 7 Zeilen (zerosLeft 1..6 und >6) zu 16.')
 feld('RUN_BITS', run_bits)
 
-# ---- Deblocking
 feld('ALPHA', DB['alpha'], kommentar=
      'alpha, Tafel 8-16. 52*3 lang: der Index ist qp+Versatz+52, damit\n'
      '// ein negativer Versatz nicht unter null greift.')
@@ -121,8 +99,6 @@ for row in DB['tc0']: tc0 += row
 feld('TC0', tc0, kommentar=
      'tc0, Tafel 8-17: je Index vier Werte (bS 0..3), Index ia*4+bS.')
 
-# ---- Intra-4x4-Gewichte
-# PRED4W[m*16+i] = Gewichtssumme, PRED4G/PRED4I = bis 4 Paare je Punkt
 w=[0]*(9*16); g=[0]*(9*16*4); idx=[0]*(9*16*4)
 for ms, rows in P4.items():
     m=int(ms)

@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bridge/findbrand.py -- steht die neue Zeile WIRKLICH im Bild?
-
-    findbrand.py <eins.ppm> <zwei.ppm>
-
-DIE GEGENPROBE AUF DEN INHALT. Dass sich zwei Bilder unterscheiden, sagt
-noch nicht, dass sie den Schirm zeigen -- zwei Aufnahmen von Rauschen
-unterscheiden sich auch. Zwischen den beiden Aufnahmen hat Osum EINE
-Textzeile geschrieben (`echo BRIDGE2-MARKE`), und die muss sich im
-zweiten Bild als das wiederfinden, was sie ist: eine Reihe HELLER
-Bildpunkte auf dunklem Grund, in EINER Zeilenhoehe, und im ersten Bild
-an derselben Stelle nicht.
-
-Es wird bewusst NICHT der Text gelesen (das waere eine Zeichenerkennung
-und eine zweite Fehlerquelle). Gemessen wird die Helligkeitsverteilung:
-* die Baender, in denen sich die Bilder unterscheiden, sind hoechstens
-  eine Textzeile hoch (der Zeichensatz ist 16 Bildpunkte hoch),
-* im zweiten Bild sind dort MEHR helle Bildpunkte als im ersten -- da
-  ist Text dazugekommen, nicht weggegangen.
-"""
 import sys
 
 
@@ -58,7 +39,6 @@ def main():
         print("NO LINE DIFFERENT -- the brand is nowhere")
         return 1
 
-    # Zusammenhaengende Baender.
     baender = []
     s0 = verschieden[0]
     pv = verschieden[0]
@@ -69,10 +49,10 @@ def main():
         pv = y
     baender.append((s0, pv))
     print("verschiedene Baender: %s" % baender)
-    hoch = max(e - s + 1 for s, e in baender)
-    print("highest band: %d lines (one text line is 16)" % hoch)
+    up = max(e - s + 1 for s, e in baender)
+    print("highest band: %d lines (one text line is 16)" % up)
 
-    def hell(bild, von, bis):
+    def bright(bild, von, bis):
         n = 0
         for y in range(von, bis + 1):
             o = y * zeile
@@ -81,11 +61,11 @@ def main():
                     n += 1
         return n
 
-    ha = sum(hell(a, s, e) for s, e in baender)
-    hb = sum(hell(b, s, e) for s, e in baender)
+    ha = sum(bright(a, s, e) for s, e in baender)
+    hb = sum(bright(b, s, e) for s, e in baender)
     print("bright pixels in these bands: one=%d two=%d" % (ha, hb))
 
-    if hoch <= 40 and hb > ha:
+    if up <= 40 and hb > ha:
         print("MARKE-GEFUNDEN")
         return 0
     print("BRAND-NOT-FOUND")

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/sizetext.py <bytes>... -- a size as the file manager writes it (lib/fui/navnum.fi `size_text`).
-
-The reference the pixel checks use for the Size column: "354 B", "1.5 KB", "12 KB", "3.4 MB", "5.0 GB".
-Units of 1024; one decimal below 10 of a unit, none from there on (rounded half up)."""
 import sys
 
 

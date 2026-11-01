@@ -1,25 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/sdk/osdk.py -- the Osum app SDK on the host (docs/SDK.md).
-
-    osdk.py new <id> [--kind app|service] [--dir DIR] [--name NAME] [--perm a,b]
-    osdk.py check <project-dir | INFO file> [--strict]
-    osdk.py build <project-dir> --out DIR
-    osdk.py perms                       the permission catalogue
-
-`new` makes a project from tools/sdk/template (INFO = manifest v2,
-src/main.fi, symbol.txt, README.md). `check` lints the manifest.
-`build` checks, compiles src/*.fi with the SDK modules next to it,
-links, and writes a bundle tree + the mkfs lines:
-
-    DIR/bin/<short>.elf
-    DIR/apps/<short>.osp/{INFO,symbol.txt,data/}
-    DIR/mkfs.lines          one mkfs.py argument per line
-
-The bundle does NOT carry the SYSTEM marker (tools/k15/bundle.py adds it
-for images' own apps): a third-party app is labelled by the kernel
-(docs/ACTION-BUS.md 5.2) and must not act as the user.
-"""
 import argparse
 import os
 import re
@@ -34,16 +14,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 TEMPLATE = os.path.join(HERE, "template")
 
-# kernel/user modules a project may import (the SDK surface, docs/SDK.md)
 SDK_MODULES = ["ulib", "actwire", "rpc", "actcli", "socsdk"]
 
-# the launcher keys (kernel/user/appdir.fi) + the v2 keys
 KEYS_V1 = ["name", "info", "exec", "icon", "keys", "fassung", "net"]
 KEYS_V2 = ["manifest", "id", "version", "author", "license", "min_os", "perm",
            "service", "actions", "opens", "needs", "sandbox"]
 REQUIRED = ["name", "info", "fassung", "manifest", "id", "version"]
 
-# permission -> (enforced by the system today?, what it means)
 PERMS = {
     "net": (True, "network access; build writes net=real, else net=none (netview, docs/NETVIEW.md)"),
     "notify": (True, "post notifications (bus NOTIPOST)"),
@@ -72,7 +49,6 @@ class Report:
 
 
 def parse_info(text, rep):
-    """key=value lines; '#' comments; returns {key: (value, lineno)}."""
     out = {}
     for no, raw in enumerate(text.split("\n"), 1):
         line = raw.rstrip("\r")
@@ -106,7 +82,6 @@ def csv(v):
 
 
 def lint(info_path, project=None):
-    """Manifest v2 lint. Returns (Report, fields)."""
     rep = Report()
     try:
         data = open(info_path, "rb").read()
@@ -128,7 +103,6 @@ def lint(info_path, project=None):
             rep.err(0, "missing required key '%s'" % k)
     if "manifest" in f and f["manifest"][0] != "2":
         rep.err(f["manifest"][1], "manifest=%s: this tool reads manifest=2" % f["manifest"][0])
-    # launcher keys must stand within the first 1023 octets (appdir / bundle.py)
     last = -1
     pos = 0
     for raw in data.split(b"\n"):
@@ -240,13 +214,11 @@ def lit(m):
 
 
 def slit(m):
-    # a module-level literal (static): for kind gui, where nodes are built in functions
     name, text = m.group(1), m.group(2)
     return 'static mut %s: [u8; %d] = "%s\\0"' % (name, len(text.encode()) + 1, text)
 
 
 def expand(text, subst):
-    # a literal may contain a placeholder: expand those first
     for k, v in subst.items():
         text = text.replace("{{%s}}" % k, v)
     text = re.sub(r"\{\{SLIT:([a-z_0-9]+):(.*?)\}\}", slit, text)
@@ -289,7 +261,6 @@ def run(cmd, cwd=None, env=None):
 
 
 def import_closure(roots):
-    """Modules of kernel/user that `roots` import, transitively (names without a dot)."""
     seen, todo = [], list(roots)
     while todo:
         m = todo.pop()
@@ -297,7 +268,7 @@ def import_closure(roots):
             continue
         f = os.path.join(ROOT, "kernel", "user", m + ".fi")
         if not os.path.isfile(f):
-            continue    # library module (lib/, vendor) -- FIRNLIB finds it
+            continue
         seen.append(m)
         for imp in re.findall(rb"^import ([a-z_0-9.]+)", open(f, "rb").read(), re.M):
             todo.append(imp.decode())
@@ -326,9 +297,6 @@ def cmd_build(args):
     out = os.path.abspath(args.out)
     work = tempfile.mkdtemp(prefix="osdk-")
     try:
-        # SDK modules + project sources side by side: a program finds its
-        # `import ulib` only next to itself (tools/sync/build.sh)
-        # kind gui (`profile app`): the scene tree modules too -- the closure of the local imports
         gui = bool(re.search(r"^profile app\b", open(main_src).read(), re.M))
         mods = list(SDK_MODULES)
         if gui:
@@ -343,12 +311,12 @@ def cmd_build(args):
                 shutil.copyfile(os.path.join(proj, "src", n), os.path.join(work, n))
         env = dict(os.environ, FIRNLIB=os.environ.get("FIRNLIB", os.path.join(ROOT, "lib")))
         gcs, optl = [], []
-        if gui:         # same flags as the image build (tools/sync/gc.sh): drop unused scene-host code
+        if gui:
             env["FIRN_FUNCTION_SECTIONS"] = "1"
             gcs = ["--gc-sections"]
             optl = ["--opt-level=release-fast", "--no-pass=inline"]
         crt = []
-        if not gui:     # a `profile app` program brings its own start (tools/sync/build.sh)
+        if not gui:
             rc, o = run(["as", "--64", "-o", os.path.join(work, "crt.o"), os.path.join(ROOT, "kernel", "user", "crt.s")])
             if rc:
                 print(o)
@@ -370,7 +338,6 @@ def cmd_build(args):
         os.makedirs(os.path.join(bundle, "data"), exist_ok=True)
         os.makedirs(os.path.join(out, "bin"), exist_ok=True)
         shutil.copyfile(elf, os.path.join(out, "bin", short + ".elf"))
-        # INFO: the launcher keys stay; net= is derived from perm
         info = open(os.path.join(proj, "INFO")).read().rstrip("\n")
         want_net = "real" if "net" in csv(f.get("perm", "")) else "none"
         if "net" not in f:

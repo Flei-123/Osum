@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/settingsaudit/count.py -- static control inventory of kernel/user/settings.fi.
-
-Counts the fuiscene.* widget constructors reachable from each page_* function
-(callees in the same file are followed, each callee counted once per page).
-
-  python3 -I tools/settingsaudit/count.py [--md] [--limit N]
-
-Primary control = button, button_main, toggle, choice, entry, slider,
-table_list (the things a user can operate). Labels are text rows (not counted as controls).
-"""
 import re, sys, os
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 import glob
 SRC = "".join(open(p, encoding="latin1").read() for p in [os.path.join(ROOT, "kernel/user/settings.fi")] + sorted(glob.glob(os.path.join(ROOT, "kernel/user/settings/*.fi"))))
-PAGES = [  # (id, R_ const, function, category)
+PAGES = [
     ("appearance", "R_DARST", "page_darst", "Personalisation"), ("screen", "R_SCREEN", "page_screen", "Display"),
     ("time", "R_TIME", "page_time", "Time & Language"), ("network", "R_NET", "page_network", "Network"),
     ("users", "R_BENUT", "page_benut", "Accounts"), ("netview", "R_NETV", "page_netv", "Network"),
@@ -30,7 +20,7 @@ PAGES = [  # (id, R_ const, function, category)
     ("transfer", "R_VTRANS", "page_vtrans", "Personalisation"),
     ("sound", "R_SOUND", "page_sound", "System"),
 ]
-INTERACTIVE = ("button", "button_main", "toggle", "choice", "entry", "slider", "table_list")  # entry_secret only marks an entry
+INTERACTIVE = ("button", "button_main", "toggle", "choice", "entry", "slider", "table_list")
 
 funcs = {}
 for m in re.finditer(r"^fn (\w+)\(", SRC, re.M):

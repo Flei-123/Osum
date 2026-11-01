@@ -63,10 +63,9 @@ import re
 import sys
 import os
 sys.path.insert(0, os.path.join(os.environ.get("FIRN", "/root/firn"), "tools/testkit"))
-from testkit import read_ppm  # shared reader (Firn tools/testkit)
+from testkit import read_ppm
 
 
-# ------------------------------------------------------------------ picture
 def read_any(path):
     if path.endswith(".ppm"):
         return read_ppm(path)
@@ -86,7 +85,6 @@ class Pic(object):
         return (self.d[o], self.d[o + 1], self.d[o + 2])
 
 
-# ------------------------------------------------------------------ the log
 TEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
     r" tw=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
@@ -99,9 +97,6 @@ FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
 def parse(path, marke="settings: rect name=waa "):
     body = open(path, "rb").read().decode("latin1")
-    # everything after the LAST full rectangle report is the page that
-    # is on the screen now
-    #
     cut = body.rfind(marke)
     tail = body[cut:] if cut >= 0 else body
     out = []
@@ -193,7 +188,6 @@ def main(argv):
             count[t["win"]] = count.get(t["win"], 0) + 1
         want_win = max(count, key=lambda k: count[k])
     texts = [t for t in texts if t["win"] == want_win and t["t"].strip()]
-    # the last report of each label is where it is now
     last = {}
     for t in texts:
         last[(t["kind"], t["t"])] = t

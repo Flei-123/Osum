@@ -1,17 +1,5 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/qa/gates-select.py -- pick the gates for a set of changed files (used by gates.sh).
-
-  gates-select.py --level quick|full|nightly [--explain] [--manifest F] < list-of-changed-paths
-
-Prints one gate name per line (stdout) and notes/warnings (stderr, prefixed '#').
-Levels are cumulative: quick = tier quick, full = quick+full, nightly = everything
-(nightly ignores the changed paths and selects ALL gates).
-Selection: a gate is picked when one of its path globs matches a changed file.
-A changed file under kernel/ lib/ vendor/ etc/ assets/ that NO gate claims is
-reported, and the fallback gates (kernel, userland) are added so that a typo in
-the manifest never means "no gate ran".
-"""
 import fnmatch, os, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -51,7 +39,6 @@ def main():
                         why[g] = f
             if not hit and f.startswith(WATCHED):
                 unmapped.append(f)
-        # a changed test.sh / gate runner itself selects the self-tests of the QA tooling
         if unmapped:
             print("# unmapped paths (add them to tools/qa/gen-manifest.py AREAS): " + ", ".join(unmapped[:8]) +
                   (" ..." if len(unmapped) > 8 else ""), file=sys.stderr)

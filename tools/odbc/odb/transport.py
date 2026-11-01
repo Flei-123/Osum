@@ -1,16 +1,4 @@
 # SPDX-License-Identifier: GPL-2.0-only
-"""Byte-stream transports for odbc. Every transport has a reader thread that
-pushes chunks into a queue, so read(timeout) works the same on Windows named
-pipes, sockets and ttys.
-
-Spec strings (--port / ODB_PORT):
-  pipe:\\\\.\\pipe\\name   Windows named pipe (VirtualBox uart ... --uart-mode client|server)
-  tcp:host:port          TCP socket (qemu -serial tcp:..., later odbd over the network)
-  unix:/path/sock        Unix socket (qemu -chardev socket,path=..)
-  tty:/dev/pts/N | com:COM3[,115200]   pty / serial port
-  file:/path             regular file/fifo (read+write)
-  udp:host[:port]        kernel ODB over LAN (one datagram = one frame, port 6970)
-"""
 import os
 import queue
 import socket
@@ -20,7 +8,7 @@ import time
 
 
 WAKE_ENABLE = os.environ.get("ODB_WAKE", "1") != "0"
-WAKE_IDLE_S = 8.0   # > any in-transfer wait (rewind timer 2 s); the agent sleeps after 3 s of silence
+WAKE_IDLE_S = 8.0
 WAKE_BYTES = 160
 WAKE_PAUSE_S = 0.05
 
@@ -39,9 +27,8 @@ class Transport:
         self._t = None
         self.rx_bytes = 0
         self.tx_bytes = 0
-        self.last_act = 0.0   # monotonic time of the last byte in either direction (0 = never)
+        self.last_act = 0.0
 
-    # subclasses: _read_blocking() -> bytes (b'' = EOF), _write(data), _close()
     def start(self):
         self._t = threading.Thread(target=self._pump, daemon=True)
         self._t.start()
@@ -60,7 +47,6 @@ class Transport:
         self.q.put(None)
 
     def read(self, timeout=0.1):
-        """Return bytes, b'' on timeout, None on EOF."""
         try:
             d = self.q.get(timeout=timeout)
         except queue.Empty:
@@ -73,9 +59,6 @@ class Transport:
         return d
 
     def write(self, data):
-        # Wake preamble (docs/ODB.md "idle agent"): after WAKE_IDLE_S of silence the agent may poll slowly (sleeping
-        # between polls to stay off the CPU) and a 16-byte UART FIFO would lose the head of a frame. Zero octets are
-        # garbage to the frame resync; the pause lets the agent wake before the real frame starts.
         now = time.monotonic()
         if WAKE_ENABLE and self.wake and now - self.last_act > WAKE_IDLE_S:
             self._write(b"\x00" * WAKE_BYTES)
@@ -144,7 +127,6 @@ class UdpTransport(SocketTransport):
 
 
 class FdTransport(Transport):
-    """Unbuffered file object (named pipe, tty, fifo)."""
 
     def __init__(self, f):
         super().__init__()
@@ -199,9 +181,6 @@ def _retry(fn, wait, what):
 
 
 class WinHandleTransport(Transport):
-    """Windows named pipe / COM port. A synchronous handle serialises I/O, so a
-    blocked ReadFile would block our writes: poll instead (PeekNamedPipe for
-    pipes, zero read timeouts for COM) and sleep 2 ms when idle."""
 
     def __init__(self, f, kind):
         super().__init__()
@@ -227,7 +206,7 @@ class WinHandleTransport(Transport):
                 avail = ct.c_ulong(0)
                 ok = self.k32.PeekNamedPipe(self.h, None, 0, None, ct.byref(avail), None)
                 if not ok:
-                    return b""            # broken pipe = peer gone
+                    return b""
                 n = avail.value
             else:
                 n = 4096
@@ -243,9 +222,6 @@ class WinHandleTransport(Transport):
         return b""
 
     def _write(self, data):
-        # A real VBox uart2 pipe stops accepting data while the guest side is not reading (agent not up, UART FIFO
-        # full): WriteFile then blocks forever and no client timeout could fire. Hand the bytes to a writer thread
-        # (daemon, may stay blocked at exit) so the session timeouts and Ctrl-C keep working.
         if self._wq is None:
             self._wq = queue.Queue()
             threading.Thread(target=self._writer, daemon=True).start()
@@ -264,7 +240,6 @@ class WinHandleTransport(Transport):
             self.q.put(None)
 
     def _close(self):
-        # do not close a handle another thread is blocked in WriteFile on: the process is about to exit anyway
         try:
             if self._wq is None or self._wq.empty():
                 self.f.close()
@@ -277,7 +252,6 @@ def _open_win_pipe(path):
         return open(path, "r+b", buffering=0)
     except OSError as e:
         if sys.platform == "win32" and e.errno == 22:
-            # CreateFile fails with ERROR_PIPE_BUSY (231) which the CRT reports as EINVAL
             raise OSError(e.errno, "pipe busy: another client is attached (a VBox server pipe serves one client "
                                    "and may not re-listen after it left: restart the VM)") from e
         raise
@@ -322,7 +296,6 @@ def open_unix(path, wait=0.0):
 def open_tty(spec, wait=0.0):
     path, _, baud = spec.partition(",")
     if sys.platform == "win32":
-        # COMx: raw open works for virtual ports and USB serial at the preset baud
         p = path if path.startswith("\\\\.\\") else "\\\\.\\" + path
         f = _retry(lambda: open(p, "r+b", buffering=0), wait, "com " + path)
         return WinHandleTransport(f, "com").start()
@@ -342,7 +315,7 @@ def open_tty(spec, wait=0.0):
                 a[4] = a[5] = sp
         termios.tcsetattr(fd, termios.TCSANOW, a)
     except termios.error:
-        pass  # pty or similar
+        pass
     return TtyTransport(fd).start()
 
 

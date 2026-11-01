@@ -1,43 +1,23 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/codec/praefix.py -- DIE CAVLC-TAFELN AUF MEHRDEUTIGKEIT PRUEFEN.
-
-Eine Huffman-Tafel, in der ein Code der ANFANG eines anderen ist, ist
-mehrdeutig: der Leser nimmt den kuerzeren und liegt ab da falsch. Der
-Fehler faellt nicht dort auf, wo er steht, sondern drei Koeffizienten
-spaeter als "Code nicht in der Tafel" -- und dann sucht man ihn an der
-falschen Stelle. Genau das ist in dieser Runde passiert, bevor die
-Tafeln erzeugt statt abgetippt wurden.
-
-Geprueft wird DIE DATEI, DIE DER KERN BENUTZT (kernel/user/h264tab.fi),
-und nicht die Quelle daneben -- sonst prueft man das Falsche.
-
-Zwei Bedingungen je Tafel:
-  1. PRAEFIXFREI: kein Code ist der Anfang eines anderen.
-  2. KRAFT-UNGLEICHUNG: die Summe der 2^-Laenge ist hoechstens 1.
-     Ist sie groesser, kann die Tafel gar nicht praefixfrei sein.
-
-Rueckgabe 0, wenn alles stimmt.
-"""
 import re, sys
 
-QUELLE = 'kernel/user/h264tab.fi'
+SOURCE = 'kernel/user/h264tab.fi'
 
 def felder(pfad):
-    """Die statischen Felder aus der Firn-Datei lesen."""
     s = open(pfad, encoding='utf-8').read()
     out = {}
     for m in re.finditer(r'static mut (\w+): \[u64; (\d+)\] = \[(.*?)\]',
                          s, re.S):
         name, n, body = m.group(1), int(m.group(2)), m.group(3)
-        werte = [int(x) for x in re.findall(r'-?\d+', body)]
-        if len(werte) != n:
-            print("  %s: %d Werte, %d erwartet" % (name, len(werte), n))
+        values = [int(x) for x in re.findall(r'-?\d+', body)]
+        if len(values) != n:
+            print("  %s: %d Werte, %d erwartet" % (name, len(values), n))
             return None
-        out[name] = werte
+        out[name] = values
     return out
 
-def pruefe(name, lens, bits):
+def check(name, lens, bits):
     codes = [(l, b) for l, b in zip(lens, bits) if l > 0]
     schlecht = 0
     for i in range(len(codes)):
@@ -52,7 +32,7 @@ def pruefe(name, lens, bits):
     return len(codes), schlecht, kraft
 
 def main():
-    F = felder(QUELLE)
+    F = felder(SOURCE)
     if F is None:
         return 1
     tafeln = []
@@ -76,7 +56,7 @@ def main():
     fehler = 0
     ncodes = 0
     for name, lens, bits in tafeln:
-        n, schlecht, kraft = pruefe(name, lens, bits)
+        n, schlecht, kraft = check(name, lens, bits)
         ncodes += n
         if schlecht or kraft > 1.0000001:
             fehler += 1

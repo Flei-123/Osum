@@ -90,7 +90,6 @@ import re
 import sys
 
 
-# ------------------------------------------------------------------ picture
 def read_ppm(path):
     d = open(path, "rb").read()
     if not d.startswith(b"P6"):
@@ -131,7 +130,6 @@ class Pic(object):
         return (self.d[o], self.d[o + 1], self.d[o + 2])
 
 
-# ------------------------------------------------------------------ the log
 TEXT = re.compile(
     r"wlib: text win=(\d+) kind=(\d+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
     r" tw=(\d+)(?: [a-z]+=-?\d+)* t=(.*)")
@@ -141,11 +139,8 @@ WINRE = re.compile(
 
 FONTRE = re.compile(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)")
 
-#
 KURZ = re.compile(r" nq=(\d+) nv=(\d+)")
 
-#
-#
 BARTEXT = re.compile(
     r"taskbar: text (\w+) x=(\d+) base=(\d+) fg=(\d+) bg=(\d+)"
     r" tw=(\d+) t=(.*)")
@@ -155,9 +150,7 @@ BARRECT = re.compile(
     r"taskbar: (?:(start)|btn i=\d+ id=\d+|field (\w+)|pin \S+) "
     r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 
-#
-#
-KNOPF = re.compile(
+BUTTON = re.compile(
     r"wlib: knopf x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+) ax=(\d+) ay=(\d+)")
 
 
@@ -187,17 +180,17 @@ def kanten(pic, x, y, w, h, r, tol=8, stufe=12, anteil=60):
         [((x + w - 1, y + j), (x + w + 1, y + j), (x + w - 4, y + j))
          for j in range(r + 2, h - r - 2)],
     )
-    for seite in seiten:
+    for page in seiten:
         n = 0
         d = 0
-        for auf, aussen, innen in seite:
+        for auf, aussen, innen in page:
             a, b, c = pic.at(*auf), pic.at(*aussen), pic.at(*innen)
             if a is None or b is None or c is None:
                 continue
             n += 1
-            linie = (max(abs(a[i] - b[i]) for i in range(3)) >= tol
+            line_2 = (max(abs(a[i] - b[i]) for i in range(3)) >= tol
                      and max(abs(a[i] - c[i]) for i in range(3)) >= tol)
-            if linie or max(abs(c[i] - b[i]) for i in range(3)) >= stufe:
+            if line_2 or max(abs(c[i] - b[i]) for i in range(3)) >= stufe:
                 d += 1
         if n > 0 and d * 100 >= n * anteil:
             gefunden += 1
@@ -231,13 +224,13 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
     ist ein Ueberstand und wird gezaehlt.
     """
     letzte = {}
-    for m in KNOPF.finditer(tail):
+    for m in BUTTON.finditer(tail):
         v = tuple(int(g) for g in m.groups())
         letzte[(v[5], v[6])] = v
     bad = []
     gemessen = 0
-    ohne = 0
-    ueber = 0
+    without = 0
+    over_2 = 0
     for (x, y, w, h, r, ax, ay) in letzte.values():
         if w < 8 or h < 8:
             continue
@@ -251,7 +244,7 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
         gemessen += 1
         k = kanten(pic, ax, ay, w, h, r)
         if k == 0:
-            ohne += 1
+            without += 1
             bad.append("BUTTON at %d,%d %dx%d r=%d has not a single "
                        "Umrisskante -- er sieht aus wie eine Beschriftung"
                        % (ax, ay, w, h, r))
@@ -266,13 +259,13 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
                 continue
             if tx >= ax + 1 and tx + t["tw"] <= ax + w - 1:
                 continue
-            ueber += 1
+            over_2 += 1
             bad.append("BUTTON at %d,%d %dx%d: the label '%s' "
                        "steht von %d bis %d und ragt ueber den Umriss "
                        "(%d bis %d) hinaus"
                        % (ax, ay, w, h, t["t"][:24], tx, tx + t["tw"],
                           ax, ax + w))
-    return gemessen, ohne, ueber, bad
+    return gemessen, without, over_2, bad
 
 
 def parse_bar(path):
@@ -308,12 +301,7 @@ def parse_bar(path):
 
 def parse(path, marke="settings: rect name=waa "):
     body = open(path, "rb").read().decode("latin1")
-    # everything after the LAST full rectangle report is the page that
-    # is on the screen now
-    #
     cut = body.rfind(marke)
-    #
-    #
     while cut > 0 and not any(TEXT.search(z)
                               for z in body[cut:].splitlines()):
         vor = body.rfind(marke, 0, cut)
@@ -408,12 +396,10 @@ def grund(pic, x0, y0, x1, y1):
     return max(zaehl, key=lambda k: zaehl[k])
 
 
-#
-#
-LINIE_LAUF = 10
+LINE_RUN = 10
 
 
-def _lauf(pic, x0, y, schritt, n, bg, tol):
+def _run(pic, x0, y, schritt, n, bg, tol):
     """Die Farbe eines einfarbigen Laufs von `n` Bildpunkten, oder None."""
     c = pic.at(x0, y)
     if c is None or near(c, bg, tol):
@@ -442,11 +428,11 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
             continue
         lo_x, lo_y, hi_x, hi_y = box[0], box[1], box[2], box[3]
         for y in range(lo_y, min(hi_y, oy + t["base"]) + 1):
-            links = _lauf(pic, lo_x - 2, y, -1, LINIE_LAUF, bg, 10)
+            links = _run(pic, lo_x - 2, y, -1, LINE_RUN, bg, 10)
             if links is None:
                 continue
-            rechts = _lauf(pic, hi_x + 2, y, 1, LINIE_LAUF, bg, 10)
-            if rechts is None or rechts != links:
+            right = _run(pic, hi_x + 2, y, 1, LINE_RUN, bg, 10)
+            if right is None or right != links:
                 continue
             treffer += 1
             schlecht.append(
@@ -454,12 +440,12 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
                 "%02x%02x%02x (Zeile y=%d, %d Bildpunkte links und rechts "
                 "einfarbig)"
                 % (t["t"][:32], x, oy + t["base"], links[0], links[1],
-                   links[2], y, LINIE_LAUF))
+                   links[2], y, LINE_RUN))
             break
     return treffer, schlecht
 
 
-def leiste_messen(pic, serial, asc, desc):
+def taskbar_messen(pic, serial, asc, desc):
     """Dieselben drei Fragen, gestellt an die Taskleiste.
 
     Rueckgabe: (Zahl der Texte, gemessen, leer, abgeschnitten,
@@ -499,7 +485,6 @@ def leiste_messen(pic, serial, asc, desc):
                             "the bar %d,%d %dx%d"
                             % (name[:32], x, x1, b[:4], bar["x"], bar["y"],
                                bar["w"], bar["h"]))
-    #
     for t in texts:
         eigen = None
         for rx, ry, rw, rh in rechtecke:
@@ -517,7 +502,7 @@ def leiste_messen(pic, serial, asc, desc):
                 % (t["t"][:24], t["x"], t["tw"],
                    t["x"] + t["tw"] - eigen[0] - eigen[2],
                    eigen[0], eigen[1], eigen[2], eigen[3]))
-    ueber = 0
+    over_2 = 0
     for i in range(len(boxes)):
         for j in range(i + 1, len(boxes)):
             a, b = boxes[i][1], boxes[j][1]
@@ -525,11 +510,11 @@ def leiste_messen(pic, serial, asc, desc):
                 continue
             if not (a[5] & b[5]):
                 continue
-            ueber += 1
+            over_2 += 1
             schlecht.append("LEISTE OVER   '%s' %s and '%s' %s"
                             % (boxes[i][0][:24], a[:4],
                                boxes[j][0][:24], b[:4]))
-    return len(texts), len(boxes), leer, ab, ueber, schlecht
+    return len(texts), len(boxes), leer, ab, over_2, schlecht
 
 
 def main(argv):
@@ -567,7 +552,6 @@ def main(argv):
             count[t["win"]] = count.get(t["win"], 0) + 1
         want_win = max(count, key=lambda k: count[k])
     texts = [t for t in texts if t["win"] == want_win and t["t"].strip()]
-    # the last report of each label is where it is now
     last = {}
     for t in texts:
         last[(t["kind"], t["t"])] = t
@@ -577,17 +561,11 @@ def main(argv):
         w = wins[want_win]
         ox, oy, ww, wh = w["cx"], w["cy"], w["w"], w["h"]
     elif not forced and texts and texts[0].get("ax") is not None:
-        # The window-number lines (`wlib: win id=`) carry the window HANDLE and
-        # every program numbers its own windows from 0, so the number finds no
-        # line. Every text of a scene window says where its client area is
-        # (`ax=`/`ay=`, in the picture's coordinates): that is the origin.
         ox, oy = texts[0]["ax"], texts[0]["ay"]
     asc, desc = font if font else (16, 6)
     bad = []
     boxes = []
     empty = 0
-    #
-    #
     ausserhalb = 0
     verdeckt = 0
     sicht = []
@@ -633,16 +611,14 @@ def main(argv):
             bad.append("CUT    '%s' at %d..%d (ink %s) leaves the window "
                        "%d,%d %dx%d"
                        % (name[:32], x, x1, b[:4], ox, oy, ww, wh))
-    #
-    #
     gekuerzt = 0
-    gk_reiter = 0
+    gk_tab = 0
     gk_fliess = 0
     for t in texts:
         if t["nv"] > t["nq"]:
             gekuerzt += 1
             if t["kind"] == 7:
-                gk_reiter += 1
+                gk_tab += 1
             else:
                 gk_fliess += 1
                 bad.append("KURZ   '%s' (typ %d) malt %d von %d Oktetten"
@@ -665,8 +641,7 @@ def main(argv):
                 bad.append("OVER   '%s' %s and '%s' %s"
                            % (boxes[i][0][:24], a[:4],
                               boxes[j][0][:24], b[:4]))
-    #
-    linie, lbad = linien_probe(pic, texts, ox, oy, ww, asc, desc)
+    line_2, lbad = linien_probe(pic, texts, ox, oy, ww, asc, desc)
     bad.extend(lbad)
     roh = open(argv[2], "rb").read().decode("latin1")
     schnitt = roh.rfind(marke)
@@ -679,13 +654,13 @@ def main(argv):
           "ausserhalb %d  verdeckt %d  linie %d  knopf %d  ohnekante %d  "
           "ueberstand %d"
           % (want_win, len(texts), len(boxes), empty, cut, over, gekuerzt,
-             gk_reiter, gk_fliess, ausserhalb, verdeckt, linie, kn, kohne,
+             gk_tab, gk_fliess, ausserhalb, verdeckt, line_2, kn, kohne,
              kueber))
     for line in bad[:30]:
         print("  " + line)
     schlecht = 0
     if leiste:
-        bn, bm, bleer, bab, bueber, bbad = leiste_messen(
+        bn, bm, bleer, bab, bueber, bbad = taskbar_messen(
             pic, argv[2], asc, desc)
         print("shotcheck: leiste texts %d  measured %d  empty %d  cut %d  "
               "overlapping %d" % (bn, bm, bleer, bab, bueber))
@@ -693,7 +668,7 @@ def main(argv):
             print("  " + line)
         schlecht = bleer + bab + bueber
     if linien:
-        schlecht = schlecht + linie
+        schlecht = schlecht + line_2
     if knoepfe:
         schlecht = schlecht + kohne + kueber
     return 0 if (empty == 0 and cut == 0 and over == 0

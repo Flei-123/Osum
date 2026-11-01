@@ -1,54 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/i18n/entschrift.py -- Umschrift in SICHTBAREN Texten aufloesen.
-
-    entschrift.py [--schreibe] [datei ...]
-
-WARUM.
-
-`tools/i18n/quellen.py --alle` zaehlt in kernel/** die Stellen, an denen
-ein SICHTBARER Text noch Umschrift traegt ("Geraet" statt "Gerät").
-Gemessen am 14.09.2026: SICHTBAR=125 in 30 Dateien. Die Zusage des
-Abschnitts `umlaut` lautet null.
-
-Von Hand ist das 125-mal dieselbe Handbewegung, und genau dabei
-passiert der Fehler, der teuer ist:
-
-DIE PUFFER SIND IN OKTETTEN BEMESSEN, NICHT IN ZEICHEN.
-
-    var n5: [u8; 15] = "platte_bloecke\\0"
-
-`bloecke` (7 Oktette) wird zu `blöcke` (7 Oktette: b l ö=2 c k e) --
-hier bleibt die Zahl gleich. Aber `groesser` (8) wird zu `größer`
-(7: g r ö=2 ß=2 e r), und `Geraet` (6) wird zu `Gerät` (6). Die Zahl
-in `[u8; N]` muss also NEU GERECHNET werden, und zwar aus der
-UTF-8-Laenge der neuen Zeichenkette plus den Null-Oktetten, die schon
-dastanden. Wer sie stehenlaesst, bekommt entweder einen abgeschnittenen
-Text oder einen Uebersetzerfehler -- und im schlimmsten Fall einen
-Puffer, der ein Oktett zu klein ist und beim Schreiben ueberlaeuft.
-
-WIE GERECHNET WIRD.
-
-Fuer jede Zeile der Form
-
-    var NAME: [u8; N] = "TEXT"
-
-ist N die Zahl der Oktette, die dastehen: len(TEXT.encode()) einschliess-
-lich der `\\0` am Ende. Die Differenz zwischen alter und neuer
-UTF-8-Laenge wird auf N addiert. Steht in der Zeile kein `[u8; N]`
-(ein Aufruf wie `ablehnen(aus, "...")`), wird nur der Text ersetzt.
-
-SICHERHEIT. Ohne `--schreibe` wird NICHTS veraendert; das Programm
-zeigt nur, was es taete. Ersetzt wird ausschliesslich innerhalb von
-Zeichenketten in Zeilen, die `quellen.py` als SICHTBAR meldet -- Namen
-von Funktionen, Marken und Mitschnitte bleiben unangetastet.
-"""
 import os
 import re
 import subprocess
 import sys
 
-ERSATZ = [
+FALLBACK = [
     ("Oberflaeche", "Oberfläche"), ("oberflaeche", "oberfläche"),
     ("Bloecke", "Blöcke"), ("bloecke", "blöcke"),
     ("Bloecken", "Blöcken"), ("bloecken", "blöcken"),
@@ -119,17 +76,16 @@ ERSATZ = [
     ("gross", "groß"), ("Gross", "Groß"),
     ("GERAET", "GERÄT"),
 ]
-ERSATZ.sort(key=lambda p: -len(p[0]))
+FALLBACK.sort(key=lambda p: -len(p[0]))
 
 _STR = re.compile(r'"((?:[^"\\]|\\.)*)"')
 _BUF = re.compile(r'\[u8;\s*(\d+)\]')
 
 
 def loese(text):
-    """Umschrift in TEXT aufloesen. -> (neu, [(alt, neu), ...])"""
     aus = []
     neu = text
-    for asc, uml in ERSATZ:
+    for asc, uml in FALLBACK:
         if asc == uml:
             continue
         if asc in neu:
@@ -139,7 +95,6 @@ def loese(text):
 
 
 def stellen(wurzel):
-    """Die SICHTBAR-Funde von quellen.py -> {datei: {zeilennr}}."""
     umg = dict(os.environ, OSUM_ROOT=wurzel)
     p = subprocess.run([sys.executable, "tools/i18n/quellen.py", "--alle"],
                        capture_output=True, text=True, cwd=wurzel, env=umg)
@@ -167,20 +122,19 @@ def bearbeite(pfad, zeilennummern, schreibe):
 
         def ersetze_str(m):
             inhalt = m.group(1)
-            neu_inhalt, gefunden = loese(inhalt)
+            new_inhalt, gefunden = loese(inhalt)
             if gefunden:
                 funde.extend(gefunden)
-                # Die Puffergroesse mitziehen: Differenz in OKTETTEN.
-                return '"' + neu_inhalt + '"'
+                return '"' + new_inhalt + '"'
             return m.group(0)
 
         neu = _STR.sub(ersetze_str, alt)
         if not funde:
             continue
         m_alt = _STR.search(alt)
-        m_neu = _STR.search(neu)
-        if m_alt and m_neu:
-            d = len(m_neu.group(1).encode("utf-8")) \
+        m_new = _STR.search(neu)
+        if m_alt and m_new:
+            d = len(m_new.group(1).encode("utf-8")) \
                 - len(m_alt.group(1).encode("utf-8"))
             if d:
                 mb = _BUF.search(neu)
