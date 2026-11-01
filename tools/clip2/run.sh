@@ -27,7 +27,7 @@ letzte() { grep -aoE "$2" "$1" 2>/dev/null | tail -1 | grep -oE '[0-9]+$'; }
 groesste() { grep -aoE "$2" "$1" 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "CLIP-2: uebersprungen, qemu-system-x86_64 ist nicht da"; exit 0
+    echo "CLIP-2: skipped, qemu-system-x86_64 is not there"; exit 0
 fi
 
 # =================================================== 1. der Quelltext
@@ -38,26 +38,26 @@ grep -qE '^const K_DROP: u64 = [0-9]+' kernel/user/wlib.fi \
 grep -qE 'fire\(d, K_DROP, zeile, w\)' kernel/user/wlib.fi \
     && ok "on_up feuert K_DROP" || bad "on_up feuert kein K_DROP"
 grep -qE 'fn drop_an\(' kernel/user/wlib.fi \
-    && ok "wlib hat drop_an (ein Fenster meldet sich als Ziel an)" \
-    || bad "wlib hat kein drop_an"
+    && ok "wlib has drop_an (a window registers as a target)" \
+    || bad "wlib has no drop_an"
 grep -qE 'fuiscene\.drop_accept\(true\)' kernel/user/explorer.fi \
-    && ok "der Dateimanager meldet sich als Ablegeziel an" \
-    || bad "der Dateimanager meldet sich nicht an"
+    && ok "the file manager registers as a drop target" \
+    || bad "the file manager does not register"
 grep -qE 'fn ablegen\(' kernel/user/explorer.fi \
-    && ok "der Dateimanager hat eine Ablegefunktion" \
-    || bad "der Dateimanager hat keine Ablegefunktion"
+    && ok "the file manager has a drop function" \
+    || bad "the file manager has no drop function"
 grep -qE 'expakt\.einfuegen' kernel/user/explorer.fi \
-    && ok "abgelegt wird ueber expakt.einfuegen (also io.rename)" \
+    && ok "dropping goes through expakt.einfuegen (so io.rename)" \
     || bad "das Ablegen geht an expakt vorbei"
 if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
     bad "explorer.fi fasst Dateien selbst an"
 else
-    ok "explorer.fi fasst keine Datei selbst an"
+    ok "explorer.fi does not touch any file itself"
 fi
 if grep -qE 'wlibc\.drag_take' kernel/user/explorer.fi; then
-    bad "der Dateimanager ruft wlibc.drag_take an der Bibliothek vorbei"
+    bad "the file manager calls wlibc.drag_take past the library"
 else
-    ok "Gegenprobe: kein wlibc.drag_take im Dateimanager"
+    ok "negative test: no wlibc.drag_take in the file manager"
 fi
 
 # ======================================================== 2. der Bau
@@ -92,22 +92,22 @@ bash tools/design/capture.sh "$OUT/lauf" res="$RES" \
     > "$OUT/lauf.log" 2>&1
 S="$OUT/lauf/serial.txt"
 if [ ! -s "$S" ]; then
-    echo "FEHLGESCHLAGEN: keine serielle Ausgabe"; tail -20 "$OUT/lauf.log"; exit 1
+    echo "FAILED: no serial output"; tail -20 "$OUT/lauf.log"; exit 1
 fi
 hat "$S" 'explorer: ready' "der Dateimanager ist hochgekommen"
 grep -qa 'KEIN RECHTECK GEMELDET' "$OUT/lauf.log" \
-    && bad "ein ziehvon fand sein Rechteck nicht (siehe lauf.log)" \
-    || ok "jedes ziehvon hat seine zwei Rechtecke gefunden"
+    && bad "a ziehvon did not find its rectangle (see lauf.log)" \
+    || ok "every ziehvon found its two rectangles"
 
 echo "== 4. Punkt 1: die Naht =="
 hat "$S" 'explorer: drops [0-9]+' "wlib meldet das Ablegen (K_DROP)"
 dn=$(groesste "$S" 'explorer: drops [0-9]+')
 [ "${dn:-0}" -ge 2 ] 2>/dev/null \
     && ok "Punkt 1: $dn Ablegungen gemeldet" \
-    || bad "Punkt 1: nur ${dn:-0} Ablegungen gemeldet -- erwartet >= 2"
+    || bad "point 1: only ${dn:-0} drops reported -- expected >= 2"
 
 # ------------------------------------- Punkt 2/5: was die Leitung sagt
-echo "== 5. Punkt 2 und 5: die Tat und der Leerlauf =="
+echo "== 5. points 2 and 5: the deed and the idle time =="
 hat "$S" 'expl: drop /data/alpha\.txt q=/data/bilder' \
     "Punkt 2: alpha.txt wurde auf /data/bilder abgelegt"
 hat "$S" 'expl: drop /data/notizen q=/data gleich' \
@@ -120,10 +120,10 @@ drc=$(grep -aoE 'expl: drop\* rc=[0-9]+' "$S" | tail -1 \
     && ok "Punkt 2: das Ablegen meldete rc=0" \
     || bad "Punkt 2: das Ablegen meldete rc=${drc:-?}"
 
-echo "== 6. die Platte (vom Wirt gelesen) =="
+echo "== 6. the disk (read by the host) =="
 IMG="$OUT/lauf/disk.img"
 if [ ! -s "$IMG" ]; then
-    bad "kein Plattenabbild zum Nachsehen"
+    bad "no disk image to look at"
 else
     #
     VOR=""
@@ -134,9 +134,9 @@ else
               | grep -oE '[0-9]+$')
     fi
     if [ -n "$VOR" ]; then
-        ok "die Inode von /data/alpha.txt vor dem Lauf: $VOR"
+        ok "the inode of /data/alpha.txt before the run: $VOR"
     else
-        bad "MESSUNG UNVOLLSTAENDIG: die Inode vor dem Lauf ist nicht lesbar"
+        bad "MEASUREMENT INCOMPLETE: the inode before the run is not readable"
     fi
     python3 tools/clip2/lies.py "$IMG" ${VOR:+"$VOR"} \
         > "$OUT/platte.txt" 2>"$OUT/platte.err"
@@ -144,26 +144,26 @@ else
         cat "$OUT/platte.txt"
         grep -qE '^da /data/bilder/alpha\.txt ' "$OUT/platte.txt" \
             && ok "Punkt 2: alpha.txt liegt in /data/bilder" \
-            || bad "Punkt 2: alpha.txt liegt NICHT in /data/bilder"
+            || bad "point 2: alpha.txt does NOT lie in /data/bilder"
         grep -qE '^weg /data/alpha\.txt' "$OUT/platte.txt" \
-            && ok "Punkt 2: alpha.txt ist nicht mehr in /data" \
-            || bad "Punkt 2: alpha.txt liegt noch in /data -- kopiert statt verschoben?"
+            && ok "point 2: alpha.txt is no longer in /data" \
+            || bad "point 2: alpha.txt is still in /data -- copied instead of moved?"
         # Punkt 3: dieselbe Inode, derselbe Inhalt.
         grep -qE '^inode gleich' "$OUT/platte.txt" \
             && ok "Punkt 3: dieselbe Inodenummer -- umgehaengt, nicht kopiert" \
-            || bad "Punkt 3: die Inodenummer hat sich geaendert"
+            || bad "point 3: the inode number changed"
         grep -qE '^inhalt ok' "$OUT/platte.txt" \
-            && ok "Punkt 3: der Inhalt ist unveraendert ('eins')" \
-            || bad "Punkt 3: der Inhalt stimmt nicht"
+            && ok "point 3: the content is unchanged ('eins')" \
+            || bad "point 3: the content does not match"
         grep -qE '^da /data/notizen ' "$OUT/platte.txt" \
             && ok "Punkt 5: notizen liegt unveraendert in /data" \
             || bad "Punkt 5: notizen ist verschwunden"
     else
-        bad "das Abbild liess sich nicht lesen"; head -5 "$OUT/platte.err"
+        bad "the image could not be read"; head -5 "$OUT/platte.err"
     fi
 fi
 
-echo "== 7. die Gegenprobe: ohne drop_an meldet wlib nichts =="
+echo "== 7. the negative test: without drop_an wlib registers nothing =="
 GEG=$OUT/gegen
 mkdir -p "$GEG"
 #
@@ -176,30 +176,30 @@ tar -C "$ROOT" --exclude=./.git --exclude=./docs --exclude=./pruef \
 if ! grep -qE '^\s*fuiscene\.drop_accept\(true\)' "$GBAUM/kernel/user/explorer.fi"; then
     bad "GEGENPROBE GREIFT NICHT: 'fuiscene.drop_accept(true)' steht gar nicht da"
 else
-    ok "Gegenprobe greift: die Zeile 'fuiscene.drop_accept(true)' ist da"
+    ok "negative test holds: the line 'fuiscene.drop_accept(true)' ist da"
     sed -i 's/^\(\s*\)fuiscene\.drop_accept(true)/\1fuiscene.drop_accept(false)/' \
         "$GBAUM/kernel/user/explorer.fi"
     if grep -qE '^\s*fuiscene\.drop_accept\(false\)' "$GBAUM/kernel/user/explorer.fi"; then
-        ok "Gegenprobe: die Anmeldung ist auf false gesetzt"
+        ok "negative test: the registration is set to false"
         export DESIGNBUILD=/tmp/osum-clip2-gegen
         bash "$GBAUM/tools/design/capture.sh" "$GEG/bau" nurbau=ja res="$RES" \
             > "$GEG/bau.log" 2>&1
         if [ $? -ne 0 ]; then
-            bad "GEGENPROBE MISST NICHTS: der Bau ohne drop_an lief nicht durch"
+            bad "NEGATIVE TEST MEASURES NOTHING: the build without drop_an did not go through"
             tail -10 "$GEG/bau.log"
         else
-            ok "Gegenprobe: der Bau ohne drop_an laeuft durch"
+            ok "negative test: the build without drop_an goes through"
             cp "$OUT/dreh.txt" "$GEG/dreh.txt"
             bash "$GBAUM/tools/design/capture.sh" "$GEG/lauf" res="$RES" \
                 extra='nostart wigapp=/bin/explorer' uitrace=yes \
                 drehbuch="$GEG/dreh.txt" > "$GEG/lauf.log" 2>&1
             GS="$GEG/lauf/serial.txt"
             if [ ! -s "$GS" ]; then
-                bad "GEGENPROBE MISST NICHTS: keine serielle Ausgabe"
+                bad "NEGATIVE TEST MEASURES NOTHING: no serial output"
             else
                 # Sie muss ueberhaupt gelaufen sein ...
                 if grep -qaE 'explorer: ready' "$GS"; then
-                    ok "Gegenprobe: der Dateimanager kam auch ohne drop_an hoch"
+                    ok "negative test: the file manager came up even without drop_an"
                     hatnicht "$GS" 'explorer: drops [0-9]+' \
                         "GEGENPROBE: ohne drop_an meldet wlib kein Ablegen"
                     hatnicht "$GS" 'expl: drop ' \
@@ -210,21 +210,21 @@ else
                             > "$GEG/platte.txt" 2>/dev/null
                         grep -qE '^da /data/alpha\.txt ' "$GEG/platte.txt" \
                             && ok "GEGENPROBE: alpha.txt blieb in /data" \
-                            || bad "GEGENPROBE MISST NICHTS: alpha.txt ist trotzdem weg"
+                            || bad "NEGATIVE TEST MEASURES NOTHING: alpha.txt is gone anyway"
                     fi
                 else
-                    bad "GEGENPROBE MISST NICHTS: der Dateimanager kam nicht hoch"
+                    bad "NEGATIVE TEST MEASURES NOTHING: the file manager did not come up"
                 fi
             fi
         fi
     else
-        bad "GEGENPROBE GREIFT NICHT: der sed hat nichts geaendert"
+        bad "NEGATIVE TEST DOES NOT HOLD: sed changed nothing"
     fi
 fi
 rm -rf "$GBAUM"
 [ "$(sha256sum kernel/user/explorer.fi | cut -d' ' -f1)" = "$EXPL_SHA0" ] \
-    && ok "kernel/user/explorer.fi im Baum ist unangetastet" \
-    || bad "ACHTUNG: kernel/user/explorer.fi im Baum wurde veraendert"
+    && ok "kernel/user/explorer.fi in the tree is untouched" \
+    || bad "WARNING: kernel/user/explorer.fi in the tree was changed"
 
 # ============================================================ 8. Bilder
 echo "== 8. die Bilder =="
@@ -240,9 +240,9 @@ PY
         [ -e "$f" ] || continue
         n=$((n+1)); cp "$f" "$SHOTS/"
     done
-    [ "$n" -ge 3 ] && ok "$n Aufnahmen entstanden" || bad "nur $n Aufnahmen"
+    [ "$n" -ge 3 ] && ok "$n Aufnahmen entstanden" || bad "only $n recordings"
 else
-    echo "  (Pillow fehlt, keine Bilder)"
+    echo "  (Pillow missing, no pictures)"
 fi
 
 echo

@@ -36,8 +36,8 @@ hin "Beschleuniger: $OSUM_QEMU_ACCEL"
 # ------------------------------------------------------------ die Kerne
 #
 bash tools/build-kernel.sh "$TMPD/neu.mb" --stufe 0 >"$TMPD/b1.txt" 2>&1 \
-    && ok "der Kern dieser Runde ist gebaut ($(stat -c%s "$TMPD/neu.mb") Oktette)" \
-    || { bad "der Kern liess sich nicht bauen"; sed 's/^/        /' "$TMPD/b1.txt" | head -5; }
+    && ok "the kernel of this round is built ($(stat -c%s "$TMPD/neu.mb") Oktette)" \
+    || { bad "the kernel could not be built"; sed 's/^/        /' "$TMPD/b1.txt" | head -5; }
 
 VOR=$(git merge-base HEAD main 2>/dev/null || echo "")
 ALT=""
@@ -50,7 +50,7 @@ if [ -n "$VOR" ]; then
         if ( cd "$ALTD" && bash tools/build-kernel.sh "$TMPD/alt.mb" --stufe 0 ) \
                 >"$TMPD/b0.txt" 2>&1; then
             ALT="$TMPD/alt.mb"
-            ok "der Kern des Abzweigpunkts ist gebaut ($(stat -c%s "$ALT") Oktette, ${VOR:0:8})"
+            ok "the kernel of the branch point is built ($(stat -c%s "$ALT") Oktette, ${VOR:0:8})"
         else
             hin "der alte Kern liess sich nicht bauen -- der Vergleich faellt aus"
         fi
@@ -58,7 +58,7 @@ if [ -n "$VOR" ]; then
 fi
 
 if python3 tools/kernel/memmap.py >"$TMPD/map.txt" 2>&1; then
-    ok "die Speicherkarte von kdata ist kollisionsfrei -- $(cat "$TMPD/map.txt")"
+    ok "the kdata memory map is collision-free -- $(cat "$TMPD/map.txt")"
 else
     bad "die Speicherkarte kollidiert"
     sed 's/^/        /' "$TMPD/map.txt" | head -10
@@ -71,13 +71,13 @@ for p in sh ls cat echo; do
         || { bad "$p.fi uebersetzt nicht"; continue; }
     ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start \
         -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null \
-        || bad "$p liess sich nicht binden"
+        || bad "$p could not be linked"
 done
 python3 tools/osum/mkfs.py build "$TMPD/root.img" 8192 /bin/ \
     "/bin/sh=$TMPD/sh.elf" "/bin/ls=$TMPD/ls.elf" \
     "/bin/cat=$TMPD/cat.elf" "/bin/echo=$TMPD/echo.elf" \
     >"$TMPD/mkfs.txt" 2>&1 \
-    && ok "ein OFS-Wurzelabbild von 8192 Bloecken, mit /bin/sh darin" \
+    && ok "an OFS root image of 8192 blocks, with /bin/sh in it" \
     || { bad "mkfs.py"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -3; }
 
 lauf() { # $1 = Abbild, $2 = Kommandozeile, $3 = Ausgabe, Rest = QEMU
@@ -95,7 +95,7 @@ hatnicht() { grep -qaF -- "$2" "$1" && bad "$3" || ok "$3"; }
 wert() { grep -oaE "$2" "$1" | tail -1 | grep -oaE '[0-9]+$'; }
 
 # =====================================================================
-echo "== 1. die Wurzel wird gesucht: nur ein NVMe-Riegel, nichts an 0x1F0 =="
+echo "== 1. the root is searched: only an NVMe slot, nothing at 0x1F0 =="
 # =====================================================================
 cp "$TMPD/root.img" "$TMPD/nv-alt.img"
 cp "$TMPD/root.img" "$TMPD/nv-neu.img"
@@ -113,8 +113,8 @@ lauf "$TMPD/neu.mb" "osum nokbd" "$TMPD/1neu.txt" \
     -drive "file=$TMPD/nv-neu.img,format=raw,if=none,id=d0" \
     -device "nvme,drive=d0,serial=blech"
 rc=$?
-[ "$rc" -eq 21 ] && ok "der neue Kern kommt bis zum Ende (21)" \
-                 || bad "der neue Kern endet mit $rc statt 21"
+[ "$rc" -eq 21 ] && ok "the new kernel reaches the end (21)" \
+                 || bad "the new kernel ends with $rc instead of 21"
 hat "$TMPD/1neu.txt" "rootsel: nvme -- WURZEL" \
     "DER NEUE KERN nimmt den NVMe-Riegel als Wurzel"
 hat "$TMPD/1neu.txt" "osum: mount=1" "und haengt sie ein"
@@ -122,7 +122,7 @@ hat "$TMPD/1neu.txt" "sh:1" "und /bin/sh liegt darin"
 hat "$TMPD/1neu.txt" "osum: sh exit=0" "und die Shell laeuft und endet sauber"
 
 # =====================================================================
-echo "== 2. ein Bewerber, der nur DA ist, gewinnt nicht =="
+echo "== 2. a candidate that is merely PRESENT does not win =="
 # =====================================================================
 dd if=/dev/zero of="$TMPD/leer.img" bs=1M count=8 2>/dev/null
 cp "$TMPD/root.img" "$TMPD/ah.img"
@@ -139,7 +139,7 @@ hat "$TMPD/2.txt" "rootsel: ahci -- WURZEL" \
 hat "$TMPD/2.txt" "osum: mount=1" "eingehaengt"
 
 # =====================================================================
-echo "== 3. GEGENPROBE: mit einer IDE-Wurzel laeuft die Suche NULL Mal =="
+echo "== 3. NEGATIVE: with an IDE root the search runs ZERO times =="
 # =====================================================================
 cp "$TMPD/root.img" "$TMPD/ide.img"
 dd if=/dev/zero of="$TMPD/leer2.img" bs=1M count=8 2>/dev/null
@@ -148,12 +148,12 @@ lauf "$TMPD/neu.mb" "osum nokbd" "$TMPD/3.txt" \
     -drive "file=$TMPD/leer2.img,format=raw,if=none,id=n0" \
     -device "nvme,drive=n0,serial=leer"
 n=$(grep -ca 'rootsel: versuch' "$TMPD/3.txt")
-[ "$n" -eq 0 ] && ok "kein einziger Versuch der neuen Suche (0) -- der alte Weg trug" \
-               || bad "die neue Suche lief $n Mal, obwohl der alte Weg trug"
+[ "$n" -eq 0 ] && ok "not a single attempt of the new search (0) -- the old path held" \
+               || bad "the new search ran $n times although the old path held"
 hat "$TMPD/3.txt" "osum: mount=1" "und die Wurzel steht"
 
 # =====================================================================
-echo "== 4. der RAID-Modus wird beim Namen genannt =="
+echo "== 4. the RAID mode is named =="
 # =====================================================================
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/4.txt" \
     -device megasas -device sdhci-pci \
@@ -170,7 +170,7 @@ hat "$TMPD/4.txt" "blkdev: reihenfolge: nvme > ahci > ide" \
     "und die Reihenfolge, in der gesucht wird, steht in EINER Zeile"
 
 # =====================================================================
-echo "== 5. EHCI: ein Stick, und der Wirt rechnet die Bloecke nach =="
+echo "== 5. EHCI: a stick, and the host recomputes the blocks =="
 # =====================================================================
 dd if=/dev/urandom of="$TMPD/stick.img" bs=512 count=2048 2>/dev/null
 python3 - "$TMPD/stick.img" > "$TMPD/summen.txt" <<'PY'
@@ -190,11 +190,11 @@ hat "$TMPD/5.txt" "speed=2" "an Anschluss 0 haengt ein Hochgeschwindigkeitsgerae
 hat "$TMPD/5.txt" "msc blocks=2048  bsize=512" \
     "READ CAPACITY (10): 2048 Bloecke zu 512 Oktett -- die Groesse des Abbilds"
 e=$(wert "$TMPD/5.txt" 'fehler=[0-9]+')
-[ "${e:-9}" -eq 0 ] && ok "keine Uebertragung ist fehlgeschlagen (fehler=0)" \
+[ "${e:-9}" -eq 0 ] && ok "no transfer failed (fehler=0)" \
                     || bad "fehlgeschlagene Uebertragungen: ${e:-?}"
 while read -r lba summe erstes; do
     if grep -qa "selftest lba=$lba  ok=1  sum=$summe  first=$erstes" "$TMPD/5.txt"; then
-        ok "Block $lba: Oktett fuer Oktett das, was der WIRT im Abbild hat (sum=$summe)"
+        ok "Block $lba: octet for octet what the HOST has in the image (sum=$summe)"
     else
         bad "Block $lba: erwartet sum=$summe first=$erstes"
         grep -a "selftest lba=$lba" "$TMPD/5.txt" | sed 's/^/        /'
@@ -202,7 +202,7 @@ while read -r lba summe erstes; do
 done < "$TMPD/summen.txt"
 
 # =====================================================================
-echo "== 6. EHCI: eine Tastatur, und es sind die RICHTIGEN Codes =="
+echo "== 6. EHCI: a keyboard, and they are the RIGHT codes =="
 ERWARTET="23 1e 26 26 18 1c"
 ( sleep 8
   for k in h a l l o ret; do echo "sendkey $k"; sleep 0.3; done
@@ -214,20 +214,20 @@ timeout 180 $QEMU_X86 -kernel "$TMPD/neu.mb" -m 256 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 hat "$TMPD/6.txt" "klasse=1" "die Tastatur wird als Tastatur erkannt"
 t=$(wert "$TMPD/6.txt" 'tasten=[0-9]+')
-[ "${t:-0}" -eq 6 ] && ok "sechs Tasten sind durch kbd.on_code gegangen (6)" \
+[ "${t:-0}" -eq 6 ] && ok "six keys went through kbd.on_code (6)" \
                     || bad "Tasten: ${t:-0}, erwartet 6"
 if grep -qa "ehci: codes $ERWARTET" "$TMPD/6.txt"; then
-    ok "und es sind DIESE sechs: $ERWARTET (h a l l o Eingabe, AT-Satz 1)"
+    ok "and they are THESE six: $ERWARTET (h a l l o Enter, AT set 1)"
 else
-    bad "die Abtastcodes stimmen nicht -- erwartet: $ERWARTET"
+    bad "the scan codes are wrong -- expected: $ERWARTET"
     grep -a 'ehci: codes' "$TMPD/6.txt" | sed 's/^/        /'
 fi
 p=$(wert "$TMPD/6.txt" 'abfragen=[0-9]+')
-[ "${p:-0}" -ge 500 ] && ok "der Endpunkt wurde $p Mal abgefragt (kein eigener Vektor)" \
+[ "${p:-0}" -ge 500 ] && ok "the endpoint was polled $p times (no vector of its own)" \
                       || bad "zu wenige Abfragen: ${p:-0}"
 
 # =====================================================================
-echo "== 6b. ZWEI Geraete am selben Regler -- Tastatur UND Stick =="
+echo "== 6b. TWO devices on the same controller -- keyboard AND stick =="
 ( sleep 8
   for k in h a l l o ret; do echo "sendkey $k"; sleep 0.3; done
   sleep 22; echo quit ) | \
@@ -246,19 +246,19 @@ n=$(wert "$TMPD/6b.txt" 'enum=[0-9]+')
 [ "${n:-0}" -eq 2 ] && ok "beide sind aufgezaehlt (enum=2)" \
                     || bad "aufgezaehlt: ${n:-0}, erwartet 2"
 if grep -qa "ehci: codes $ERWARTET" "$TMPD/6b.txt"; then
-    ok "die Tastatur liefert weiterhin die richtigen Codes, mit dem Stick daneben"
+    ok "the keyboard still delivers the right codes, with the stick next to it"
 else
-    bad "mit zwei Geraeten stimmen die Abtastcodes nicht mehr"
+    bad "with two devices the scan codes are wrong"
     grep -a 'ehci: codes' "$TMPD/6b.txt" | sed 's/^/        /'
 fi
 while read -r lba summe erstes; do
     grep -qa "selftest lba=$lba  ok=1  sum=$summe" "$TMPD/6b.txt" \
-        && ok "und Block $lba kommt weiterhin Oktett fuer Oktett richtig an" \
-        || bad "mit zwei Geraeten weicht Block $lba ab"
+        && ok "and block $lba still arrives octet for octet correctly" \
+        || bad "with two devices block $lba differs"
 done < "$TMPD/summen.txt"
 
 # =====================================================================
-echo "== 7. NVMe mit drei Namensraeumen, der dritte mit der Nummer 7 =="
+echo "== 7. NVMe with three namespaces, the third with number 7 =="
 # =====================================================================
 python3 - "$TMPD" > "$TMPD/nssummen.txt" <<'PY'
 import sys, os
@@ -286,12 +286,12 @@ hat "$TMPD/7.txt" "ns2 nsid=7" \
 i=0
 while read -r name blocks summe; do
     if grep -qa "ns$i nsid=.*blocks=$blocks " "$TMPD/7.txt"; then
-        ok "Namensraum $i: $blocks Bloecke, wie das Abbild gross ist"
+        ok "namespace $i: $blocks blocks, as large as the image"
     else
         bad "Namensraum $i: erwartet blocks=$blocks"
     fi
     if grep -qa "ns$i nsid=.*lba0=1  sum=$summe" "$TMPD/7.txt"; then
-        ok "Namensraum $i: Block 0 ist Oktett fuer Oktett der des Wirtes (sum=$summe)"
+        ok "namespace $i: block 0 is octet for octet that of the host (sum=$summe)"
     else
         bad "Namensraum $i: erwartet sum=$summe"
         grep -a "ns$i nsid=.*sum=" "$TMPD/7.txt" | sed 's/^/        /'
@@ -300,7 +300,7 @@ while read -r name blocks summe; do
 done < "$TMPD/nssummen.txt"
 
 # =====================================================================
-echo "== 8. die Gegenproben, in denen die Messung zusammenbrechen muss =="
+echo "== 8. the negative tests in which the measurement must collapse =="
 # =====================================================================
 lauf "$TMPD/neu.mb" "nokbd nosched noproc nofs noring3" "$TMPD/8a.txt" \
     -device "usb-ehci,id=eh" -device "usb-kbd,bus=eh.0"
@@ -323,12 +323,12 @@ hat "$TMPD/8c.txt" "msc blocks=2048  bsize=512" \
     "derselbe Treiber an ich9-usb-ehci1 (q35): dieselbe Platte"
 while read -r lba summe erstes; do
     grep -qa "selftest lba=$lba  ok=1  sum=$summe" "$TMPD/8c.txt" \
-        && ok "q35/ich9: Block $lba ebenfalls Oktett fuer Oktett gleich" \
+        && ok "q35/ich9: block $lba likewise octet for octet equal" \
         || bad "q35/ich9: Block $lba weicht ab"
 done < "$TMPD/summen.txt"
 
 # =====================================================================
-echo "== 9. was der Rechner ueber sich selbst sagt =="
+echo "== 9. what the machine says about itself =="
 # =====================================================================
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/9.txt"
 hat "$TMPD/9.txt" "blkdev: reihenfolge: ide" \
@@ -342,37 +342,37 @@ hat "$TMPD/9b.txt" "(kein Treiber)" \
     "und bei OHCI/UHCI steht dabei, dass es dafuer keinen Treiber gibt"
 
 # =====================================================================
-echo "== 10. die zwei Nachrechner: Namen und 8125-Register =="
+echo "== 10. the two recomputers: names and 8125 registers =="
 # =====================================================================
 #
 
 if python3 tools/metal/chipnames.py >"$TMPD/chipnames.txt" 2>&1; then
     n=$(grep -oaE 'BESTAETIGT[^0-9]*([0-9]+)' "$TMPD/chipnames.txt" | grep -oaE '[0-9]+$')
-    ok "chipname.fi gegen pci.ids: nichts widerlegt ($n Namen bestaetigt)"
+    ok "chipname.fi against pci.ids: nothing refuted ($n names confirmed)"
     for fam in igc igb I219; do
         grep -qaE "^$fam-Nummern fehlend +: +0 von" "$TMPD/chipnames.txt" \
-            && ok "$fam: alle Nummern aus dem Linux-Quelltext sind benannt" \
+            && ok "$fam: all numbers from the Linux source are named" \
             || bad "$fam: es fehlen Nummern in chipname.fi"
     done
 elif grep -qa 'hole https' "$TMPD/chipnames.txt"; then
-    echo "  ----  chipnames.py uebersprungen (pci.ids nicht da, kein Netz)"
+    echo "  ----  chipnames.py skipped (pci.ids not there, no network)"
 else
     bad "chipname.fi wurde widerlegt -- siehe $TMPD/chipnames.txt"
     sed -n '/WIDERSPRUCH/,/^$/p' "$TMPD/chipnames.txt" | head -12
 fi
 
 if python3 tools/metal/r8125regs.py >"$TMPD/r8125.txt" 2>&1; then
-    ok "der 8125-Zweig stimmt mit Linux' r8169_main.c ueberein"
+    ok "the 8125 branch matches Linux' r8169_main.c ueberein"
     hat "$TMPD/r8125.txt" "tx_kick" "und der Sendeanstoss wird eigens geprueft"
 elif grep -qa 'hole https' "$TMPD/r8125.txt"; then
-    echo "  ----  r8125regs.py uebersprungen (r8169_main.c nicht da, kein Netz)"
+    echo "  ----  r8125regs.py skipped (r8169_main.c not there, no network)"
 else
-    bad "der 8125-Zweig weicht von Linux ab -- siehe $TMPD/r8125.txt"
+    bad "the 8125 branch differs from Linux -- see $TMPD/r8125.txt"
     sed -n '/WIDERLEGT/,$p' "$TMPD/r8125.txt" | head -8
 fi
 
 # =====================================================================
-echo "== 11. der ehrliche Bestand, auch ueber Nicht-Ethernet =="
+echo "== 11. the honest inventory, also beyond non-Ethernet =="
 # =====================================================================
 #
 lauf "$TMPD/neu.mb" "hwdiag nokbd nosched noproc nofs noring3" "$TMPD/10.txt" \

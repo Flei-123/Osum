@@ -68,11 +68,11 @@ fi
 
 # ------------------------------------------------------------- 1. bauen
 
-echo "== 1. bauen: der Kern und $(echo $NEU $BASIS | wc -w) Programme in Ring 3 =="
+echo "== 1. build: the kernel and $(echo $NEU $BASIS | wc -w) programs in ring 3 =="
 
 bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
-    && ok "firnc0 baut den Kern mit /bin/init und dem echten Neustart" \
-    || { bad "firnc0 baut den Kern nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -8; }
+    && ok "firnc0 builds the kernel with /bin/init and the real restart" \
+    || { bad "firnc0 does not build the kernel"; sed 's/^/        /' "$TMPD/b0.txt" | head -8; }
 [ -f "$TMPD/k0.img" ] || { echo "INIT: $pass passed, $((fail+1)) failed"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s uebersetzt nicht"
@@ -91,15 +91,15 @@ build_progs() { # stufe
     done
     return $rc
 }
-build_progs 0 && ok "firnc0 baut alle $(echo $NEU $BASIS | wc -w) Programme" \
-             || bad "firnc0 baut nicht alle Programme"
+build_progs 0 && ok "firnc0 builds all $(echo $NEU $BASIS | wc -w) programs" \
+             || bad "firnc0 does not build all programs"
 
 undef=""
 for p in $NEU; do
     u=$(nm -u "$TMPD/${p}0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "kein neues Programm hat ein undefiniertes Symbol" \
+[ -z "$undef" ] && ok "no new program has an undefined symbol" \
                || bad "undefinierte Symbole:$undef"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
@@ -110,7 +110,7 @@ fi
 
 # ---------------------------------------------------------- 2. die Faelle
 
-echo "== 2. die Abbilder: /etc/inittab, /etc/ziel, /var/log =="
+echo "== 2. the images: /etc/inittab, /etc/ziel, /var/log =="
 
 cat > "$TMPD/inittab" <<'TAB'
 # name:ziele:art:befehl:optionen
@@ -173,20 +173,20 @@ bau() { # abbild ziel-datei
 }
 
 bau "$TMPD/d0.img" "$TMPD/ziel" \
-    && ok "mkfs.py baut ein Abbild mit /bin/init, /etc/inittab (9 Dienste) und /etc/ziel" \
+    && ok "mkfs.py builds an image with /bin/init, /etc/inittab (9 services) and /etc/ziel" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 bau "$TMPD/dg.img" "$TMPD/ziel-g" \
-    && ok "und ein zweites, das sich NUR in /etc/ziel unterscheidet (grafik)" \
+    && ok "and a second one that differs ONLY in /etc/ziel (graphics)" \
     || bad "mkfs.py fehlgeschlagen (grafik)"
 python3 tools/osum/mkfs.py build "$TMPD/dn.img" $BLOCKS $DIRS $SPEC $DATA \
     >/dev/null 2>&1 \
-    && ok "und ein drittes GANZ OHNE /etc/inittab" \
-    || bad "mkfs.py fehlgeschlagen (ohne inittab)"
+    && ok "and a third one WITHOUT /etc/inittab" \
+    || bad "mkfs.py failed (without inittab)"
 python3 tools/osum/mkfs.py build "$TMPD/d2.img" $BLOCKS $DIRS $SPEC $DATA \
     "/etc/inittab=$TMPD/inittab2@644:0:0" "/etc/ziel=$TMPD/ziel@644:0:0" \
     >/dev/null 2>&1 \
-    && ok "und ein viertes mit genau ZWEI Zeilen -- fuer die Gegenprobe zum Kernfehler" \
-    || bad "mkfs.py fehlgeschlagen (zwei Zeilen)"
+    && ok "and a fourth with exactly TWO lines -- for the negative test of the kernel bug" \
+    || bad "mkfs.py failed (two lines)"
 
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /bin/init)
 is "die Rechte von /bin/init im Abbild" "$m" "/bin/init 755 0 0"
@@ -208,7 +208,7 @@ run_case() { # name abbild anhang zeitlimit [weitere qemu-argumente]
 
 BASE="nokbd nosched noproc nofs noring3"
 
-echo "== 3. der Lauf: acht Dienste, ein Absturz, ein Ziel =="
+echo "== 3. the run: eight services, a crash, a target =="
 rc=$(run_case dienste "$TMPD/d0.img" "osum $BASE script=sh /t/dienste.sh" 300 -no-reboot)
 F="$TMPD/dienste.txt"
 is "die Maschine faehrt ueber ACPI herunter (QEMU beendet sich mit 0)" "$rc" "0"
@@ -219,15 +219,15 @@ has "$F" "init: ziel=konsole" "das Ziel kommt aus /etc/ziel"
 has "$F" "init: dienste=9" "init liest /etc/inittab und findet neun Dienste"
 hasnot "$F" "init: I am not process 1" "init IST der Prozess 1"
 
-echo "-- 3a. respawn: der Dienst, der wiederkommt"
+echo "-- 3a. respawn: the service that comes back"
 first=$(sp "$F" blink 4 head)
 later=$(spmax "$F" blink 4)
 if [ -n "${later:-}" ] && [ "$later" -gt "${first:-0}" ]; then
-    ok "ein Dienst mit respawn wird neu gestartet: $first -> $later Starts"
-else bad "der Dienst wurde nicht neu gestartet (${first:-?} -> ${later:-?})"; fi
+    ok "a service with respawn is restarted: $first -> $later starts"
+else bad "the service was not restarted (${first:-?} -> ${later:-?})"; fi
 is "und er hat dabei KEINEN Rueckfall (er endet mit 0)" "$(sp "$F" blink 5 head)" "0"
 
-echo "-- 3b. der Rueckfall-Zaehler: fuenfmal, dann Schluss"
+echo "-- 3b. the fallback counter: five times, then stop"
 has "$F" "init: abgeschaltet kaputt nach 5 Fehlstarts, 5 Starts" \
     "init schaltet den abstuerzenden Dienst nach genau fuenf Versuchen ab"
 is "sein Zustand ist danach 'failed' und nicht 'running'" \
@@ -237,7 +237,7 @@ is "und fuenf Rueckfaelle gezaehlt" "$(spn "$F" kaputt 5 2)" "5"
 has "$F" "kaputt failed 0 5 5 0" \
     "und die ganze Zeile steht so im Mitschnitt: failed, pid 0, 5 Starts, 5 Fehler"
 
-echo "-- 3c. DIE GEGENPROBE: wer mit 0 endet, wird NIE abgeschaltet"
+echo "-- 3c. THE NEGATIVE TEST: whoever exits with 0 is NEVER shut off"
 sauber_n=$(spmax "$F" sauber 4)
 if [ -n "${sauber_n:-}" ] && [ "$sauber_n" -gt 5 ]; then
     ok "der Dienst 'sauber' (/bin/true) hat $sauber_n Starts -- mehr als die Grenze"
@@ -247,19 +247,19 @@ if grep -qa "^sauber failed" "$F"; then
     bad "'sauber' wurde abgeschaltet -- die Grenze trifft das Falsche"
 else ok "'sauber' wurde NICHT abgeschaltet: $(spn "$F" sauber 2 2)"; fi
 
-echo "-- 3d. das Ziel: was nicht dazugehoert, laeuft nicht"
+echo "-- 3d. the target: what does not belong does not run"
 is "der grafische Dienst steht still" "$(sp "$F" fenster 2 tail)" "stopped"
 is "und wurde NULL mal gestartet -- in KEINER Ausgabe" "$(spmax "$F" fenster 4)" "0"
 is "sein Ziel steht in der Zeile" "$(sp "$F" fenster 7 head)" "grafik"
 is "und der konsolen-eigene Dienst laeuft" "$(sp "$F" kons 2 tail)" "running"
 
-echo "-- 3e. erst nach dem Netz"
+echo "-- 3e. only after the network"
 is "der Dienst mit 'netz' wartet, weil dieser Lauf keine Karte hat" \
    "$(sp "$F" spaet 2 tail)" "waiting"
 is "und wurde NULL mal gestartet -- in KEINER Ausgabe" "$(spmax "$F" spaet 4)" "0"
 hasnot "$F" "netz-ist-da" "seine Zeile steht folglich nirgends"
 
-echo "-- 3f. das alte Format von K13"
+echo "-- 3f. the old format of K13"
 is "eine Zeile 'name:art:befehl' laeuft weiter" "$(sp "$F" alt 2 tail)" "running"
 is "und sie gilt fuer JEDES Ziel" "$(sp "$F" alt 7 head)" "konsole,grafik"
 
@@ -268,19 +268,19 @@ has "$F" "protokoll-zeile" "die Zeile des Dienstes 'proto' steht in /var/log/pro
 n=$(grep -ac 'protokoll-zeile' "$F")
 is "und zwar GENAU EINMAL -- sie ging nicht auch auf die Konsole" "$n" "1"
 
-echo "-- 3h. svc: die Tafel und der Handgriff"
+echo "-- 3h. svc: the table and the manual action"
 has "$F" "DIENST           ZUSTAND   PID  STARTS  FEHLER  LAUFZEIT  ZIEL" \
     "svc list zeigt eine Tafel mit Laufzeit und Neustarts"
 has "$F" "Dienste laufen" "und darunter, wieviele von wievielen laufen"
 is "svc stop haelt einen Dienst an" "$(sp "$F" blink 2 tail)" "done"
 kn=$(sp "$F" kaputt 4 tail)
 if [ -n "${kn:-}" ] && [ "$kn" -gt 5 ]; then
-    ok "svc start hebt die Abschaltung auf: $kn Starts statt der fuenf, bei denen es stand"
-else bad "svc start hat den abgeschalteten Dienst nicht wieder angefasst (${kn:-?})"; fi
+    ok "svc start lifts the shutdown: $kn starts instead of the five at which it stood"
+else bad "svc start did not touch the shut-off service again (${kn:-?})"; fi
 if grep -qa "init: abgeschaltet kaputt nach 5 Fehlstarts, 10 Starts" "$F"; then
-    ok "und die Grenze greift danach ein ZWEITES Mal -- fuenf neue Versuche, dann wieder aus"
+    ok "and the limit applies a SECOND time afterwards -- five new attempts, then off again"
 else
-    bad "nach dem Handgriff greift die Grenze nicht noch einmal"
+    bad "after the manual action the limit does not apply once more"
 fi
 
 echo "-- 3i. Waisen und Leichen"
@@ -289,43 +289,43 @@ is "DIE WAISE FAELLT AN DEN PROZESS 1 und wird eingesammelt" \
 is "und am Ende steht keine Leiche mehr" "$(val "$F" 'zombies=[0-9]+')" "0"
 has "$F" "power: acpi pm1a=" "die Abschaltung liest FADT und _S5_ aus der ACPI-Tafel"
 
-echo "-- 3j. DER KERNFEHLER, DEN DIESE RUNDE GEFUNDEN HAT"
+echo "-- 3j. THE KERNEL BUG THIS ROUND FOUND"
 rc=$(run_case zweizeilen "$TMPD/d2.img" "osum $BASE script=sh /t/kurz.sh" 200 -no-reboot)
 Z="$TMPD/zweizeilen.txt"
 zn=$(spmax "$Z" sauber 4)
 is "behoben: die Maschine kommt sauber herunter" "$rc" "0"
 if [ -n "${zn:-}" ] && [ "$zn" -gt 5 ]; then
-    ok "behoben: der Dienst wurde $zn mal gestartet und jedes Mal eingesammelt"
-else bad "behoben: nur ${zn:-?} Starts -- die Messung taugt so nicht"; fi
+    ok "fixed: the service was started $zn times and reaped every time"
+else bad "fixed: only ${zn:-?} starts -- the measurement is useless like this"; fi
 is "und am Ende steht keine Leiche" "$(val "$Z" 'zombies=[0-9]+')" "0"
 
 rc=$(run_case waitfirst "$TMPD/d2.img" "osum waitfirst $BASE script=sh /t/kurz.sh" 200 -no-reboot)
 WF="$TMPD/waitfirst.txt"
 wn=$(spmax "$WF" sauber 4)
 if [ -n "${wn:-}" ] && [ "$wn" -le 2 ]; then
-    ok "GEGENPROBE waitfirst: derselbe Dienst bleibt bei $wn Starts stehen (behoben: $zn)"
-else bad "GEGENPROBE waitfirst traegt nicht: ${wn:-?} Starts gegen $zn"; fi
+    ok "NEGATIVE waitfirst: the same service stops at $wn starts (fixed: $zn)"
+else bad "NEGATIVE waitfirst does not hold: ${wn:-?} starts against $zn"; fi
 is "und er meldet sich weiter als 'running', obwohl er tot ist" \
    "$(sp "$WF" sauber 2 tail)" "running"
 wr=$(val "$WF" 'init: reaped=[0-9]+')
 zr=$(val "$Z" 'init: reaped=[0-9]+')
 if [ -n "${wr:-}" ] && [ -n "${zr:-}" ] && [ "$wr" -le 2 ] && [ "$zr" -gt "$wr" ]; then
-    ok "und init hat im GANZEN Lauf nur $wr Kinder eingesammelt -- behoben waren es $zr"
-else bad "die Zahl der eingesammelten Kinder trennt die beiden Laeufe nicht (${wr:-?} gegen ${zr:-?})"; fi
+    ok "and init reaped only $wr children in the WHOLE run -- fixed it was $zr"
+else bad "the number of reaped children does not separate the two runs (${wr:-?} against ${zr:-?})"; fi
 
-echo "== 4. DIE GEGENPROBE ZUM ZIEL: derselbe Baum mit /etc/ziel=grafik =="
+echo "== 4. THE NEGATIVE TEST FOR THE TARGET: the same tree with /etc/ziel=grafik =="
 rc=$(run_case grafik "$TMPD/dg.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)
 G="$TMPD/grafik.txt"
 has "$G" "init: ziel=grafik" "das Ziel ist ein anderes"
 is "JETZT laeuft der grafische Dienst" "$(sp "$G" fenster 2 head)" "running"
 gs=$(spmax "$G" fenster 4)
 if [ -n "${gs:-}" ] && [ "$gs" -ge 1 ]; then
-    ok "und wurde $gs mal gestartet -- im Lauf davor war es null"
+    ok "and it was started $gs times -- in the run before it was zero"
 else bad "'fenster' wurde auch mit ziel=grafik nicht gestartet"; fi
 is "und JETZT steht der konsolen-eigene still" "$(sp "$G" kons 2 head)" "stopped"
 is "mit null Starts -- im Lauf davor lief er" "$(spmax "$G" kons 4)" "0"
 
-echo "== 5. herunterfahren und neu starten =="
+echo "== 5. shut down and restart =="
 rc=$(run_case runter "$TMPD/d0.img" "osum $BASE script=shutdown" 300 -no-reboot)
 R="$TMPD/runter.txt"
 is "/bin/shutdown: QEMU beendet sich mit 0, also ueber ACPI" "$rc" "0"
@@ -338,13 +338,13 @@ N="$TMPD/neu.txt"
 is "/bin/reboot: QEMU beendet sich mit 0" "$rc" "0"
 has "$N" "init: neustart" "init unterscheidet den Neustart vom Ausschalten"
 if grep -qaE 'power: reset (fadt|0xCF9|8042)' "$N"; then
-    ok "und der Kern hat wirklich ein RESET ausgeloest: $(grep -aoE 'power: reset [^ ]*' "$N" | tail -1)"
+    ok "and the kernel really triggered a RESET: $(grep -aoE 'power: reset [^ ]*' "$N" | tail -1)"
 else
     bad "kein 'power: reset ...' im Mitschnitt -- es war kein Neustart"
 fi
 hasnot "$N" "power: acpi pm1a=" "und KEINE Abschaltung -- die beiden Wege sind getrennt"
 
-echo "-- 5a. DER EHRLICHSTE BEWEIS: die Maschine kommt wirklich zurueck"
+echo "-- 5a. THE MOST HONEST PROOF: the machine really comes back"
 cp "$TMPD/d0.img" "$TMPD/live-wieder.img"
 W="$TMPD/wieder.txt"
 : > "$W"
@@ -364,8 +364,8 @@ kill "$qpid" >/dev/null 2>&1
 wait "$qpid" 2>/dev/null
 b=$(grep -ac 'osum: pid1 init' "$W" 2>/dev/null || true)
 if [ "${b:-0}" -ge 2 ]; then
-    ok "der Kernel kam $b mal hoch -- der Neustart war ein echter Neustart"
-else bad "der Kernel kam nur ${b:-0} mal hoch; ein 'halt' saehe genauso aus"; fi
+    ok "the kernel came up $b times -- the restart was a real restart"
+else bad "the kernel came up only ${b:-0} times; a 'halt' saehe genauso aus"; fi
 
 echo "== 6. die Gegenproben =="
 rc=$(run_case noacpi "$TMPD/d0.img" "osum noacpi $BASE script=shutdown" 300 -no-reboot)
@@ -400,7 +400,7 @@ if build_progs 1; then
     has "$S" "init: dienste=9" "und ihr init liest dieselbe Tafel"
     is "und schaltet denselben Dienst ab" "$(sp "$S" kaputt 2 tail)" "failed"
 else
-    bad "firnc1 baut die Programme nicht"
+    bad "firnc1 does not build the programs"
 fi
 
 echo

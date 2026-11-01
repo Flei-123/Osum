@@ -45,11 +45,11 @@ fi
 
 # ------------------------------------------------------------- 1. bauen
 
-echo "== 1. bauen: ein Kern, zehn neue Programme, die Speicherkarte =="
+echo "== 1. build: a kernel, ten new programs, the memory map =="
 
 bash tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/b0.txt" 2>&1 \
-    && ok "firnc0 baut den Kern mit Benutzern, Rechten und init" \
-    || { bad "firnc0 baut den Kern nicht"; sed 's/^/        /' "$TMPD/b0.txt" | head -8; }
+    && ok "firnc0 builds the kernel with users, permissions and init" \
+    || { bad "firnc0 does not build the kernel"; sed 's/^/        /' "$TMPD/b0.txt" | head -8; }
 [ -f "$TMPD/k0.img" ] || { echo "K13: $pass passed, $((fail+1)) failed"; exit 1; }
 
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null || bad "crt.s uebersetzt nicht"
@@ -69,14 +69,14 @@ build_progs() { # stufe
     return $rc
 }
 build_progs 0 && ok "firnc0 baut $(echo $K13 $BASIS | wc -w) Programme in Ring 3" \
-             || bad "firnc0 baut nicht alle Programme"
+             || bad "firnc0 does not build all programs"
 
 undef=""
 for p in $K13; do
     u=$(nm -u "$TMPD/${p}0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
     [ -n "$u" ] && undef="$undef $p:$u"
 done
-[ -z "$undef" ] && ok "kein neues Programm hat ein undefiniertes Symbol" \
+[ -z "$undef" ] && ok "no new program has an undefined symbol" \
                || bad "undefinierte Symbole:$undef"
 
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
@@ -85,15 +85,15 @@ else
     bad "der Kartenpruefer schlaegt an"; sed 's/^/        /' "$TMPD/karte.txt" | head -8
 fi
 grep -q '"K13_OFF"' tools/kernel/memmap.py \
-    && ok "der Bereich dieser Runde (0x41000..0x43000) steht in der Karte" \
+    && ok "the range of this round (0x41000..0x43000) is in the map" \
     || bad "K13_OFF fehlt in tools/kernel/memmap.py"
 mkdir -p "$TMPD/kbad"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kbad/" \; )
 sed -i 's/^const K13_OFF: u64 = 0x41000/const K13_OFF: u64 = 0x40000/' "$TMPD/kbad/lib/kstate.fi"
 if python3 tools/kernel/memmap.py "$TMPD/kbad" > "$TMPD/karte-bad.txt" 2>&1; then
-    bad "GEGENPROBE: K13 auf 0x40000 (dem Hypervisor) faellt NICHT auf"
+    bad "NEGATIVE: K13 at 0x40000 (the hypervisor) is NOT noticed"
 else
-    ok "GEGENPROBE: K13 auf 0x40000 kollidiert mit HV und faellt auf"
+    ok "NEGATIVE: K13 at 0x40000 collides with HV and is noticed"
 fi
 
 # ---------------------------------------------------------- 2. die Faelle
@@ -176,13 +176,13 @@ DATA="/t/pw.txt=$TMPD/pw.txt@644:0:0 /t/bad.txt=$TMPD/bad.txt@644:0:0
 
 python3 tools/osum/mkfs.py build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab@644:0:0" > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "mkfs.py baut ein Abbild der Fassung 2 mit Rechten und Eigentuemern" \
+    && ok "mkfs.py builds a version 2 image with permissions and owners" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 python3 tools/osum/mkfs.py build "$TMPD/dl.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab-login@644:0:0" >/dev/null 2>&1
 python3 tools/osum/mkfs.py build "$TMPD/dv1.img" $BLOCKS --v1 $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab@644:0:0" >/dev/null 2>&1 \
-    && ok "mkfs.py baut auch ein Abbild der Fassung 1 (--v1)" \
+    && ok "mkfs.py also builds a version 1 image (--v1)" \
     || bad "mkfs.py --v1 fehlgeschlagen"
 
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /bin/passwd)
@@ -208,7 +208,7 @@ run_case() { # name kernel abbild anhang [zeitlimit]
     echo $?
 }
 
-echo "== 3. Kennungen in Ring 3, ohne Platte (kernel/uprog.fi) =="
+echo "== 3. identities in ring 3, without a disk (kernel/uprog.fi) =="
 rc=$(timeout 90 $QEMU_X86 -kernel "$TMPD/k0.img" -m 128 \
     -append "k13run zombie nokbd nosched noproc nofs noring3" \
     -serial "file:$TMPD/ids.txt" -display none -no-reboot \
@@ -238,7 +238,7 @@ zb=$(grep -aoE 'k13: zombies=[0-9]+ after=[0-9]+' "$F" | tail -1)
 is "GEGENPROBE ZU init: ohne Prozess 1 bleibt die Waise als Leiche stehen" \
    "$zb" "k13: zombies=0 after=1"
 
-echo "== 4. Rechte: derselbe Test als root und als justin =="
+echo "== 4. permissions: the same test as root and as justin =="
 rc=$(run_case rechte "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nokbd nosched noproc nofs noring3 script=sh /t/rechte.sh")
 F="$TMPD/rechte.txt"
@@ -301,13 +301,13 @@ is "die Datei, die justin angelegt hat, gehoert justin" "$m" "/w/ju.txt 644 1000
 
 kc=$(k13val "$F" checks)
 kd=$(k13val "$F" denied)
-if [ "${kc:-0}" -gt 100 ]; then ok "der Kern hat $kc Rechtefragen beantwortet"
-else bad "nur ${kc:-0} Rechtefragen -- da fragt niemand"; fi
+if [ "${kc:-0}" -gt 100 ]; then ok "the kernel answered $kc permission questions"
+else bad "only ${kc:-0} permission questions -- nobody is asking"; fi
 if [ "${kd:-0}" -gt 0 ]; then ok "davon $kd abgelehnt"
-else bad "keine einzige Ablehnung -- die Pruefung sagt immer ja"; fi
+else bad "not a single denial -- the check always says yes"; fi
 sx=$(val "$F" 'suidexec=[0-9]+')
-if [ "${sx:-0}" -gt 0 ]; then ok "das setuid-Bit hat $sx mal gegriffen"
-else bad "das setuid-Bit hat nie gegriffen"; fi
+if [ "${sx:-0}" -gt 0 ]; then ok "the setuid bit took effect $sx times"
+else bad "the setuid bit never took effect"; fi
 
 echo "== 5. GEGENPROBEN: noperm, nosuid, ofsv2raw =="
 rc=$(run_case noperm "$TMPD/k0.img" "$TMPD/d0.img" \
@@ -318,8 +318,8 @@ is "GEGENPROBE noperm: justin darf jetzt die Datei mit 0o000 lesen" \
 is "GEGENPROBE noperm: justin liest jetzt auch /etc/shadow" "$(nth "$G" wdeny 2)" "1"
 kd=$(k13val "$G" denied)
 if [ "${kd:-0}" -gt 0 ]; then
-    ok "und der Zaehler der Ablehnungen steht trotzdem bei $kd -- gezaehlt wird, nur nicht gewirkt"
-else bad "mit noperm wird nicht einmal mehr gezaehlt"; fi
+    ok "and the denial counter still stands at $kd -- counted, but without effect"
+else bad "with noperm not even counting happens anymore"; fi
 
 rc=$(run_case nosuid "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nosuid nokbd nosched noproc nofs noring3 script=sh /t/rechte.sh")
@@ -341,7 +341,7 @@ G="$TMPD/v2raw.txt"
 hasnot "$G" "uid=0(root) gid=0 euid=0(root) egid=0" \
     "GEGENPROBE ofsv2raw: dasselbe Abbild mit den Regeln der Fassung 2 bricht zusammen"
 
-echo "== 6. der erste Prozess: init, Dienste, Waisen, Abschaltung =="
+echo "== 6. the first process: init, services, orphans, shutdown =="
 rc=$(run_case init "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nokbd nosched noproc nofs noring3 script=sh /t/dienste.sh")
 F="$TMPD/init.txt"
@@ -353,13 +353,13 @@ is "und der Kern sagt es auch" "$(val "$F" 'init=[0-9]+')" "1"
 first=$(grep -aoE '^blink running [0-9]+ [0-9]+' "$F" | sed -n '1p' | awk '{print $4}')
 later=$(grep -aoE '^blink running [0-9]+ [0-9]+' "$F" | sed -n '2p' | awk '{print $4}')
 if [ -n "${later:-}" ] && [ "$later" -gt "${first:-0}" ]; then
-    ok "ein Dienst mit respawn wird neu gestartet: $first -> $later Starts"
-else bad "der Dienst wurde nicht neu gestartet (${first:-?} -> ${later:-?})"; fi
+    ok "a service with respawn is restarted: $first -> $later starts"
+else bad "the service was not restarted (${first:-?} -> ${later:-?})"; fi
 has "$F" "blink done" "svc stop haelt ihn an"
 last=$(grep -aoE '^blink running [0-9]+ [0-9]+' "$F" | tail -1 | awk '{print $4}')
 if [ -n "${last:-}" ] && [ "$last" -gt "${later:-0}" ]; then
     ok "svc start startet ihn wieder ($last Starts)"
-else bad "svc start hat nicht gestartet (${later:-?} -> ${last:-?})"; fi
+else bad "svc start did not start (${later:-?} -> ${last:-?})"; fi
 is "DIE WAISE FAELLT AN DEN PROZESS 1 und wird eingesammelt" \
    "$(val "$F" 'init: orphans=[0-9]+')" "1"
 is "und am Ende steht keine Leiche mehr" "$(val "$F" 'zombies=[0-9]+')" "0"
@@ -378,7 +378,7 @@ hasnot "$F" "osum: pid1 init" "und zwar mit /bin/sh statt /sbin/init"
 has "$F" "sh: ready, osum" "die Shell startet unmittelbar aus dem Kern"
 has "$F" "uid=0(root)" "das System ist damit vollstaendig benutzbar"
 
-echo "== 7. die Anmeldung: Name und Passwort ueber die Konsole =="
+echo "== 7. the login: name and password over the console =="
 rc=$(run_case login "$TMPD/k0.img" "$TMPD/dl.img" \
     "osum nokbd nosched noproc nofs noring3 script=justin;geheim12;id;whoami;exit")
 F="$TMPD/login.txt"
@@ -410,7 +410,7 @@ for l in raw.decode("latin1").splitlines():
     if len(f) > 1 and f[0] == "justin":
         rec = f[1]
 if not rec.startswith("$osum1$"):
-    print("kein osum1-Eintrag: %r" % rec[:40])
+    print("no osum1 entry: %r" % rec[:40])
     raise SystemExit
 _, _, it, salt, dk = rec.split("$", 4)
 neu = binascii.hexlify(hashlib.pbkdf2_hmac(
@@ -424,22 +424,22 @@ print("neu %s" % ("stimmt" if dk == neu else "STIMMT NICHT"))
 print("alt %s" % ("stimmt" if dk == alt else "stimmt nicht"))
 PY
 grep -q '^keinklartext' "$TMPD/pwcheck.txt" \
-    && ok "das Passwort steht NICHT im Klartext in /etc/shadow" \
-    || bad "das Passwort steht im Klartext in /etc/shadow"
+    && ok "the password is NOT in clear text in /etc/shadow" \
+    || bad "the password is in clear text in /etc/shadow"
 WANT_ITERS=$(grep -oE '^const KOSTEN: u64 = [0-9]+' kernel/user/pw.fi \
     | grep -oE '[0-9]+$')
 grep -q "^runden ${WANT_ITERS:-0}$" "$TMPD/pwcheck.txt" \
-    && ok "der Eintrag traegt seine Rundenzahl (${WANT_ITERS}) bei sich -- dieselbe, die pw.fi nennt" \
-    || bad "die Rundenzahl passt nicht zu pw.fi (${WANT_ITERS:-?}): $(grep '^runden' "$TMPD/pwcheck.txt" || true)"
+    && ok "the entry carries its round count (${WANT_ITERS}) -- the same one pw.fi names" \
+    || bad "the round count does not match pw.fi (${WANT_ITERS:-?}): $(grep '^runden' "$TMPD/pwcheck.txt" || true)"
 grep -q '^salzlaenge 8' "$TMPD/pwcheck.txt" \
-    && ok "und acht Oktette Salz aus getrandom" \
-    || bad "die Salzlaenge stimmt nicht: $(grep '^salzlaenge' "$TMPD/pwcheck.txt" || true)"
+    && ok "and eight octets of salt from getrandom" \
+    || bad "the salt length is wrong: $(grep '^salzlaenge' "$TMPD/pwcheck.txt" || true)"
 grep -q '^neu stimmt' "$TMPD/pwcheck.txt" \
-    && ok "PYTHON rechnet denselben Wert aus dem NEUEN Passwort -- es ist PBKDF2-HMAC-SHA256" \
-    || bad "Python kommt auf einen anderen Wert: $(grep '^neu' "$TMPD/pwcheck.txt" || true)"
+    && ok "PYTHON computes the same value from the NEW password -- it is PBKDF2-HMAC-SHA256" \
+    || bad "Python arrives at a different value: $(grep '^neu' "$TMPD/pwcheck.txt" || true)"
 grep -q '^alt stimmt nicht' "$TMPD/pwcheck.txt" \
-    && ok "GEGENPROBE: aus dem ALTEN Passwort kommt ein anderer Wert" \
-    || bad "altes und neues Passwort ergeben denselben Wert"
+    && ok "NEGATIVE: the OLD password gives a different value" \
+    || bad "old and new password give the same value"
 m=$(python3 tools/osum/mkfs.py meta "$TMPD/live-pw.img" /etc/shadow)
 is "und /etc/shadow gehoert weiter root und traegt 0o600" "$m" "/etc/shadow 600 0 0"
 
@@ -459,8 +459,8 @@ if bash tools/build-kernel.sh "$TMPD/k1.img" --stufe 1 > "$TMPD/b1.txt" 2>&1; th
         python3 tools/osum/mkfs.py build "$TMPD/d1.img" $BLOCKS $DIRS \
             $SPEC1 $ETC $DATA "/etc/inittab=$TMPD/inittab@644:0:0" \
             > "$TMPD/mkfs1.txt" 2>&1 \
-            && ok "und ein Abbild daraus" \
-            || { bad "mkfs.py scheitert am Userland von firnc1"
+            && ok "and an image from it" \
+            || { bad "mkfs.py fails at the userland of firnc1"
                  sed 's/^/        /' "$TMPD/mkfs1.txt" | head -4; }
         rc=$(run_case stufe1 "$TMPD/k1.img" "$TMPD/d1.img" \
             "osum nokbd nosched noproc nofs noring3 script=sh /t/rechte.sh")
@@ -470,10 +470,10 @@ if bash tools/build-kernel.sh "$TMPD/k1.img" --stufe 1 > "$TMPD/b1.txt" 2>&1; th
         has "$G" "k13t: kdf=dcf06f20c853126acc0b866d93a4fbcc6c816f5e68d90e59f532f32b1a33ed38" \
             "und PBKDF2 liefert dieselben 64 Hexziffern"
     else
-        bad "firnc1 baut die Programme nicht"
+        bad "firnc1 does not build the programs"
     fi
 else
-    bad "firnc1 baut den Kern nicht"
+    bad "firnc1 does not build the kernel"
     sed 's/^/        /' "$TMPD/b1.txt" | head -8
 fi
 
