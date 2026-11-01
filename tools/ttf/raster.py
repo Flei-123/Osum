@@ -77,7 +77,6 @@ def u32(d, o):
 
 
 def tdiv(n, d):
-    """Ganzzahlige Division, zur Null hin abgeschnitten -- Firns `/`."""
     q = abs(n) // abs(d)
     if (n < 0) != (d < 0):
         return -q
@@ -86,7 +85,6 @@ def tdiv(n, d):
 
 
 class Ttf:
-    """Der Leser.  Wortgleich zu `kernel/gfx/ttf.fi`."""
 
     def __init__(self, roh):
         self.d = roh
@@ -193,7 +191,6 @@ class Ttf:
         return u16(self.d, h + gid * 4)
 
     def contours(self, gid, tiefe=0):
-        """Die Umrisse als Listen von (x, y, auf_der_kurve), in Font-Einheiten."""
         a, b = self.loca(gid), self.loca(gid + 1)
         if b <= a:
             return []
@@ -278,7 +275,6 @@ class Ttf:
 
 
 def f26(v, scale):
-    """Font-Einheit -> 26.6.  `>>` rundet nach unten, in beiden Sprachen."""
     return (v * scale) >> 10
 
 
@@ -287,7 +283,6 @@ def scale_of(px, upm):
 
 
 def flatten(points, scale):
-    """Ein Umriss in 26.6 als Folge gerader Stuecke."""
     if not points:
         return []
     p = [(f26(x, scale), f26(y, scale), an) for (x, y, an) in points]
@@ -325,7 +320,6 @@ def flatten(points, scale):
 
 
 def quad_stuecke(x0, y0, cx, cy, x1, y1):
-    """Wie viele gerade Stuecke -- ganzzahlig und in beiden Fassungen gleich."""
     d = (abs(cx - x0) + abs(cy - y0) + abs(x1 - cx) + abs(y1 - cy))
     n = (d >> 6) // 3 + 2
     if n > 32:
@@ -376,7 +370,6 @@ def raster(f, gid, px, tinte=None):
 
 
 def raster_kern(f, gid, px):
-    """Eine Glyphe rastern.  Das Ergebnis ist DIE Zusage dieser Runde."""
     scale = scale_of(px, f.upm)
     edges = []
     for k in f.contours(gid):
@@ -444,7 +437,6 @@ def raster_kern(f, gid, px):
 
 
 class Font:
-    """Ein geladener Zeichensatz samt Glyphenspeicher."""
 
     def __init__(self, path_2, px, tinte=None):
         if path_2.startswith("kern:"):
@@ -475,7 +467,6 @@ class Font:
                     self.scale) + 63) >> 6
 
     def laufweite(self, text):
-        """Die Zeile in 26.6, mit Unterschneidung."""
         x = 0
         vorher = 0
         for ch in text:
@@ -488,7 +479,6 @@ class Font:
         return x
 
     def ask(self, text):
-        """(Zeichen, x-in-26.6) je Zeichen einer Zeile."""
         aus = []
         x = 0
         vorher = 0
@@ -505,8 +495,6 @@ class Font:
 
 
 def sum_2(g):
-    """FNV-1a ueber die rohen Deckungswerte -- dieselbe Zeile wie
-    `kmain.glyph_sum`."""
     acc = 2166136261
     for i in range(g.w * g.h):
         a = g.punkt(i % g.w, i // g.w)
@@ -515,17 +503,6 @@ def sum_2(g):
 
 
 def vergleich(path_ttf, mitschnitt):
-    """DIE ZUSAGE DIESER RUNDE UEBER DEN RASTERER.
-
-    Der Kernel gibt auf das Wort `ttfdump` hin einige Glyphen als Text
-    aus (`kmain.say_glyph`): Groesse, Lage, Laufweite, eine Pruefsumme
-    ueber die rohen Deckungswerte und die Zeilen auf zehn Stufen
-    gerundet.  Dieses Programm rastert dieselben Zeichen selbst und
-    haelt ALLES dagegen.
-
-    Zwei unabhaengige Fassungen desselben Algorithmus, in zwei Sprachen.
-    Stimmen ihre Pruefsummen ueberein, ist der Kernel-Rasterer nicht
-    "ungefaehr richtig", sondern gleich."""
     roh = open(mitschnitt, "rb").read().decode("latin1")
     faelle = re.findall(
         r"ttfglyph c=(\d+)\s+px=(\d+)\s+w=(\d+)\s+h=(\d+)\s+"

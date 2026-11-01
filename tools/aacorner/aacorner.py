@@ -31,18 +31,12 @@ def near(a, b, tol=TOL):
 
 
 def inside(px, py, cx, cy, r):
-    """Is the sample (px, py) inside the quarter disc around (cx, cy)?
-    The caller only asks in the corner square, so a plain distance test."""
     dx = px - cx
     dy = py - cy
     return dx * dx + dy * dy <= r * r
 
 
 def cover(x0, y0, cx, cy, r, sx, sy):
-    """Coverage of the pixel [x0,x0+1) x [y0,y0+1) by the shape whose
-    corner is the circle (cx, cy, r); (sx, sy) = direction of the corner
-    (-1 = left/top, +1 = right/bottom). Samples on the straight side of the
-    centre count as inside."""
     n = 0
     for j in range(SS):
         for i in range(SS):

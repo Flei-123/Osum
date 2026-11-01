@@ -69,7 +69,6 @@ class Image_2:
         return tuple(self.d[at:at + 3])
 
     def mische(self, x, y, rgb, a):
-        """The same mixing the interface does: dst + (src - dst) * a / 255."""
         if x < 0 or y < 0 or x >= self.w or y >= self.h or a == 0:
             return
         alt = self.hole(x, y)
@@ -102,13 +101,6 @@ class Image_2:
 
 
 def glyphe_paint(image, f, cp, px, x, y, rgb):
-    """One glyph, top left at (x, y), the em box px on a side.
-
-    The icon font's ascent is its whole em, so the baseline sits at
-    y + px and the box is exactly y .. y + px.  Same arithmetic as
-    `wlibc.icon_at`; if the two ever disagree the picture stops matching
-    the screen, which is the point of having two of them.
-    """
     gid = f.glyph_of(cp)
     if gid == 0:
         return 0
@@ -160,7 +152,6 @@ def list_read(path_2):
 
 
 def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
-    """One sheet: per icon a row of sizes and the name."""
     columns = 2
     je = (len(eintraege) + columns - 1) // columns
     zellw = 300

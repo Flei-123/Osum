@@ -60,7 +60,6 @@ LIST = [
 
 
 def dig(name, typ, server):
-    """(status, menge). Die Menge sind normalisierte Adressen."""
     r = subprocess.run(
         ["dig", "+tries=2", "+time=3", "@" + server, typ, name],
         capture_output=True, text=True, timeout=20)

@@ -28,7 +28,6 @@ MUSTER = re.compile(
 
 
 def oktette(lit):
-    """Wie viele Oktette dieses Literal wirklich hat."""
     n = 0
     i = 0
     while i < len(lit):

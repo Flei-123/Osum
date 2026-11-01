@@ -41,7 +41,6 @@ FOLDER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
 
 
 def names(n):
-    """Die Namen, in der Reihenfolge, in der sie angelegt werden."""
     aus = []
     for i in range(n):
         folder = FOLDER[i % len(FOLDER)]

@@ -25,9 +25,6 @@ import sys
 
 
 def without_anmerkungen(text):
-    """`//` bis zum Zeilenende weg -- aber nicht, wenn es in einem
-    Zeichenkettenliteral steht.  Ein Zustandsautomat, weil ein
-    `sed 's|//.*||'` an `"http://"` scheitert."""
     aus = []
     i = 0
     n = len(text)

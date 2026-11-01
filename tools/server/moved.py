@@ -101,7 +101,6 @@ UMZUG_COMMIT = {
 
 
 def names_beim_umzug(target):
-    """Die Funktionsnamen, die ZIEL beim Umzug schon hatte."""
     c = UMZUG_COMMIT.get(target)
     if not c:
         return set()

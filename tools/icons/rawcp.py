@@ -50,7 +50,6 @@ DEC = re.compile(r"(?<![\w.])(\d{5})(?![\w.])")
 
 
 def belegte(wurzel):
-    """The code points icons.map has given away -> {value: name}."""
     path_2 = os.path.join(wurzel, "assets", "icons", "icons.map")
     aus = {}
     for roh in open(path_2, encoding="ascii").read().splitlines():
@@ -65,7 +64,6 @@ def belegte(wurzel):
 
 
 def zeichencode(wurzel):
-    """The files that draw, in a fixed order so the count is stable."""
     aus = []
     aus += sorted(glob.glob(os.path.join(wurzel, "kernel", "user", "*.fi")))
     for n in ("wig.fi", "wm.fi", "ttf.fi"):
@@ -79,23 +77,6 @@ def zeichencode(wurzel):
 
 
 def without_kommentare(text):
-    """Kommentare weg, Zeilennummern bleiben stehen.
-
-    ROUND ROTABSCHNITTE.  The check counted its OWN documentation.
-    `kernel/user/taskbar.fi:3817` is the comment that explains why the
-    constant exists -- "`icons.START` ist in lib/icons.fi auf 0xE0A2
-    gebunden" -- and the checker read it as drawing code.  That is the
-    one hit this section was red for; there was no violation in any
-    line of code.
-
-    A rule that cannot be written down without breaking itself is not
-    a rule that can be kept.  Comments are where a number gets its
-    meaning explained, and `tools/server/count.py` has stripped them
-    since the day it was written, for the same reason.
-
-    Every removed character becomes a blank, every newline stays --
-    so a hit still reports the line it really stands in.
-    """
     aus = []
     i = 0
     n = len(text)

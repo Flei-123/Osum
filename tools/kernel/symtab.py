@@ -67,7 +67,6 @@ BLK = 16
 
 
 def symbole(elf):
-    """Adresse -> Name, aus `nm`, nur was im Text steht und ausfuehrbar ist."""
     aus = subprocess.run(["nm", "-n", elf], capture_output=True, text=True)
     if aus.returncode != 0:
         raise SystemExit("nm ist fehlgeschlagen: " + aus.stderr.strip())
@@ -91,28 +90,12 @@ def symbole(elf):
 
 
 def lesbar(name):
-    """`_F0.trap__entry` -> `trap.entry`.
-
-    firnc0 stellt jedem Symbol `_F0.` voran, firnc1 `_F1.`
-    (docs/SELF_HOSTING.md im Firn-Repo), und ein Modulname wird mit
-    zwei Unterstrichen angehaengt.  Auf einem Panik-Bildschirm zaehlt
-    jede Spalte; die vier Zeichen des Praefixes sagen nichts, was der
-    Leser nicht schon weiss.
-    """
     if name.startswith("_F0.") or name.startswith("_F1."):
         name = name[4:]
     return name.replace("__", ".")
 
 
 def lines(elf):
-    """Adresse -> (Datei, Zeile), aus `.debug_line`.
-
-    `readelf --debug-dump=decodedline` wickelt den Zustandsautomaten
-    des DWARF-Zeilenprogramms ab und druckt das Ergebnis als Tabelle.
-    Zusammengefasst wird hier: zwei aufeinanderfolgende Eintraege mit
-    derselben Datei und derselben Zeile sind EIN Bereich (aus 126419
-    Rohzeilen werden so 64477).
-    """
     aus = subprocess.run(["readelf", "--debug-dump=decodedline", elf],
                          capture_output=True, text=True)
     if aus.returncode != 0:
@@ -141,7 +124,6 @@ def lines(elf):
 
 
 def varint(v):
-    """LEB128: 7 bits per octet, high bit = more."""
     out = bytearray()
     while True:
         b = v & 0x7F
@@ -154,10 +136,6 @@ def varint(v):
 
 
 def pack_lines(ents):
-    """r1217: the line table in BLK-entry blocks. Index: per block u32 first address + u32 octet offset into the stream.
-    Stream: first entry of a block = varint(packed); every other entry = varint(address delta), varint(zigzag(packed delta)).
-    (8 octets per entry before; about 3 now. kernel/lib/ksymtab.fi line_of decodes at most BLK entries per lookup.)
-    """
     idx = bytearray()
     st = bytearray()
     pa = pp = 0
@@ -174,7 +152,6 @@ def pack_lines(ents):
 
 
 def unpack_line(idx, st, n, addr):
-    """Reference decoder (what the kernel does); tools/kernel/symtab_test.py compares it with a plain binary search."""
     nb = (n + BLK - 1) // BLK
     first = lambda k: struct.unpack_from("<I", idx, k * 8)[0]
     if addr < first(0):
@@ -213,27 +190,6 @@ def unpack_line(idx, st, n, addr):
 
 
 def blob(syms, lns):
-    """Die Oktette der Tabelle bauen.  Aufbau -- er steht auch in
-    `kernel/ksymtab.fi`, und die beiden muessen zusammenpassen:
-
-        0   u64 Kennung 'OSYM1'
-        8   u64 Zahl der Symbole
-        16  u64 Zahl der Zeileneintraege
-        24  u64 Versatz der Symboladressen (je u32)
-        32  u64 Versatz der Namensverweise (je u32 in den Namensblock)
-        40  u64 Versatz des Namensblocks
-        48  u64 Versatz der Zeilentabelle (r1217: Blockindex, je Block u32 Adresse + u32 Versatz in den Strom; siehe pack_lines)
-        56  u64 Versatz der Dateiverweise (je u32)
-        64  u64 Zahl der Dateien
-        72  u64 Versatz des Dateinamenblocks
-        80  u64 niedrigste Adresse
-        88  u64 hoechste Adresse
-        96  u64 Versatz des Zeilenstroms (r1217)
-
-    GEPACKT heisst: (Dateinummer << 20) | Zeilennummer.  Zwanzig Bits
-    fassen 1048575 Zeilen; die laengste Datei dieses Baums hat 10216.
-    Zwoelf Bits fassen 4096 Dateien; es sind 113.
-    """
     names = bytearray(b"\0")
     nvers = {}
 

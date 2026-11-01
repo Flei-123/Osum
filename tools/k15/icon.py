@@ -126,10 +126,6 @@ def build(path_2):
 
 
 def back(path_2):
-    """Das Bild wieder als Farben lesen -- die zweite Umsetzung, gegen die
-    der Testlaeufer den Schirm haelt. Sie liest die DATEI, nicht die
-    Zeichnung, und rechnet deshalb wirklich nach, was ausgeliefert wurde.
-    """
     d = open(path_2, "rb").read()
     if len(d) < 12 or d[:4] != b"OSYM":
         raise SystemExit("symbol: %s faengt nicht mit OSYM an" % path_2)

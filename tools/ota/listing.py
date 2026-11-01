@@ -69,7 +69,6 @@ def load_opk():
 
 
 def foreign_prueft(pk, msg, sig):
-    """Eine zweite Meinung zur eigenen Signatur. None = keine da."""
     try:
         from nacl.signing import VerifyKey
         from nacl.exceptions import BadSignatureError
@@ -94,13 +93,6 @@ def foreign_prueft(pk, msg, sig):
 
 
 def meta_aus_opk(path_2):
-    """name und fassung aus dem Kopf einer .opk-Datei.
-
-    Der Kopf ist `OPKG0001`, dann zwei Laengen zu acht Oktetten und der
-    SHA-256; die Metadaten stehen als `schluessel=wert` je Zeile dahinter.
-    Das ist dasselbe Format, das `kernel/user/opk.fi` liest -- hier wird
-    es nur gelesen, nirgends ein zweites geschrieben.
-    """
     with open(path_2, "rb") as f:
         header = f.read(64)
         if header[:8] != b"OPKG0001":

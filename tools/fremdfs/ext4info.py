@@ -71,7 +71,6 @@ class Ext4:
         return tiefe
 
     def extent_num(self, ino):
-        """Wie viele BLATT-Extents hat die Datei insgesamt."""
         inode = self.inode(ino)
         return self._count(inode[0x28:0x28 + 60])
 
@@ -90,9 +89,6 @@ class Ext4:
         return sum_2
 
     def find(self, path):
-        """Inodenummer zu einem Pfad. Nur so viel Verzeichnislogik wie
-        noetig -- lineare Eintraege reichen, htree-Verzeichnisse haben
-        dieselben linearen Bloecke darunter."""
         ino = 2
         for part in [t for t in path.split('/') if t]:
             ino = self._entry(ino, part)

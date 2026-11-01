@@ -48,7 +48,6 @@ def block_hash(b):
 
 
 class Image_2:
-    """Ein Abbild, blockweise, ohne es in den Speicher zu ziehen."""
 
     def __init__(self, path_2):
         self.f = open(path_2, "rb")
@@ -253,7 +252,6 @@ class Image_2:
 
 
 def struktur(image):
-    """Die Strukturpruefung. Rueckgabe: (befunde, zahlen)."""
     z = dict(dateien=0, dirs=0, bloecke=0, ausser=0, doppelt=0, badtype=0,
              lost=0, fehlend=0, totlinks=0, kreise=0)
     befunde = []
@@ -317,7 +315,6 @@ def struktur(image):
 
 
 def journal(image):
-    """Steht eine Bestaetigung offen, und stimmt sie?"""
     if not image.jstart or image.jblocks < J_BLOCKS:
         return dict(vorhanden=0)
     c = image.blk(image.jstart + 521)
@@ -353,7 +350,6 @@ def muster(g, k):
 
 
 def inhalt(image):
-    """Die Messdateien der Runde: /d/count, /d/roll, /d/fN."""
     befunde = []
     d = image.finde("/d")
     if not d:

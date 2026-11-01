@@ -74,7 +74,6 @@ VORGABE = "latin"
 
 
 def bereiche_read(text):
-    """"20-7E,A0-FF" -> [(0x20, 0x7E), (0xA0, 0xFF)].  Auch "FFFD" allein."""
     aus = []
     for chunk in text.split(","):
         chunk = chunk.strip()
@@ -146,7 +145,6 @@ class Vorlage:
         return adv, lsb
 
     def cmap(self):
-        """Zeichen -> Glyphe, aus der besten Untertabelle."""
         off = self.tab["cmap"][0]
         n = u16(self.d, off + 2)
         gewaehlt = None
@@ -205,7 +203,6 @@ class Vorlage:
         return m
 
     def kern0(self):
-        """Format-0-Paare aus der ersten waagerechten Untertabelle."""
         if "kern" not in self.tab:
             return {}
         o, _ = self.tab["kern"]
@@ -235,7 +232,6 @@ class Vorlage:
 
 
 def komponenten(roh):
-    """Die Glyphennummern, aus denen eine zusammengesetzte Glyphe besteht."""
     if len(roh) < 10 or s16(roh, 0) >= 0:
         return []
     aus = []
@@ -258,7 +254,6 @@ def komponenten(roh):
 
 
 def komponenten_new(roh, karte):
-    """Dieselbe Glyphe, aber mit umnummerierten Bestandteilen."""
     aus = bytearray(roh)
     p = 10
     while True:
@@ -291,7 +286,6 @@ def sum_2(b):
 
 
 def cmap4(paare):
-    """Format 4, ein Segment je zusammenhaengendem Block plus 0xFFFF."""
     zeichen = sorted(paare)
     segmente = []
     i = 0

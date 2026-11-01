@@ -12,7 +12,6 @@ BILANZ = re.compile(r'^(ALLE (\d+) ABSCHNITTE BESTANDEN, (\d+) Zusagen'
 
 
 def read_2(path_2):
-    """-> {name: {ms, accel, titel, ok, zusagen}}, gesamt_s, bilanz"""
     ab = {}
     title = None
     open_2 = {"titel": None, "fehler": False, "zusagen": None}
@@ -52,7 +51,6 @@ def read_2(path_2):
 
 
 def kurz(title, name):
-    """Die Abschnittsnummer und ein paar Worte."""
     m = re.match(r'^(\d+)\.\s*(.{0,42})', title)
     if not m:
         return name

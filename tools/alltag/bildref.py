@@ -71,7 +71,6 @@ def nums(path):
 
 
 def gast(text, name):
-    """Die drei Zeilen, die `viewer -i` fuer EINE Datei gedruckt hat."""
     brand = "viewer: datei " + name
     at = text.find(brand)
     if at < 0:

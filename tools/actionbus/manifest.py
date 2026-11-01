@@ -25,7 +25,6 @@ def quoted(line):
 
 
 def parse(text, path="<manifest>", wrapper=False):
-    """Returns (app, actions, events, warnings) or raises Bad."""
     app = None
     title = ""
     title_for = None
@@ -147,7 +146,6 @@ def parse(text, path="<manifest>", wrapper=False):
 
 
 def menu_entries(kind, name, acts):
-    """D1: what `act list --menu <kind> <name>` answers (host reader)."""
     out = []
     for a in acts:
         m = a.get("menu")

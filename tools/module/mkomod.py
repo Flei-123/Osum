@@ -52,12 +52,6 @@ SIGLEN = 64
 
 
 def ed25519_sign(seed: bytes, msg: bytes) -> bytes:
-    """Signieren. ZWEI Umsetzungen, und sie muessen sich einig sein.
-
-    Derselbe Gedanke wie in `orientstore/docs/KATALOG-FORMAT.md`
-    Abschnitt 4: sind sich zwei Umsetzungen uneins, ist eine davon
-    kaputt, und das ist schlimmer als eine ungueltige Signatur.
-    """
     aus = []
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -90,13 +84,6 @@ def pubkey(seed: bytes) -> bytes:
 
 
 def strip_debug(path_2: str) -> bytes:
-    """Die Fehlersuchabschnitte weg.
-
-    Sie sind nicht SHF_ALLOC und wuerden vom Lader ohnehin uebergangen --
-    aber ihre Relokationen stehen mit in der Datei, und sie machen aus 63
-    KiB 3,6 MiB. Was der Kern nicht braucht, gehoert nicht in eine Datei,
-    die er von der Platte liest.
-    """
     tmp = path_2 + ".stripped"
     r = subprocess.run(["objcopy", "--strip-debug", path_2, tmp],
                        capture_output=True)
@@ -108,12 +95,6 @@ def strip_debug(path_2: str) -> bytes:
 
 
 def text_bereich(elf: bytes):
-    """Wo `.text` in der Objektdatei liegt (Versatz, Laenge).
-
-    Wird nur fuer `--text-dreh` gebraucht: die Gegenprobe soll den
-    PROGRAMMTEXT verderben und nicht irgendein Oktett, denn nur so
-    stuerzt das Modul wirklich ab, statt eine falsche Zahl zu liefern.
-    """
     shoff = struct.unpack_from("<Q", elf, 0x28)[0]
     shent = struct.unpack_from("<H", elf, 0x3A)[0]
     shnum = struct.unpack_from("<H", elf, 0x3C)[0]
@@ -132,7 +113,6 @@ def text_bereich(elf: bytes):
 
 
 def func_in_text(elf: bytes, endung: str):
-    """(Wert, Groesse) der Funktion, deren Name auf `endung` endet, oder None."""
     shoff = struct.unpack_from("<Q", elf, 0x28)[0]
     shent = struct.unpack_from("<H", elf, 0x3A)[0]
     shnum = struct.unpack_from("<H", elf, 0x3C)[0]

@@ -4,7 +4,6 @@ import sys
 
 
 def fahre(aus, dx, dy):
-    """In Schritten unter 128 -- ein Paket, ein Schritt."""
     while dx or dy:
         sx = max(-120, min(120, dx))
         sy = max(-120, min(120, dy))

@@ -96,7 +96,6 @@ def main():
     flipped = [False]
 
     def gz_make(key, srvname, raw, force_bad=False):
-        """Write <srvname>.gz next to the raw file and add its sysgz line."""
         z = bytearray(gzip.compress(raw, 9, mtime=0))
         if force_bad and not flipped[0]:
             at = 10 + max(1, (len(z) - 18) // 2)

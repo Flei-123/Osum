@@ -439,7 +439,6 @@ class Fahrer:
         return True
 
     def window(self, prog):
-        """Der Ursprung der Malflaeche eines Programmfensters."""
         t = read_2(self.serial)
         m = None
         for m in re.finditer(

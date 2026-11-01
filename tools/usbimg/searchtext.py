@@ -87,7 +87,6 @@ def ppm_read(path_2):
 
 
 def points(text, ttf, px, deckung):
-    """(dx, dy, tinte?) -- dy ist relativ zur Grundlinie."""
     if ttf.startswith("fui:"):
         import fuiraster
         s = fuiraster.Font(ttf[4:], px)

@@ -42,9 +42,6 @@ FOLDER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
 
 
 def names(n):
-    """Die Namen, in der Reihenfolge, in der sie angelegt werden --
-    dieselbe Aufteilung wie in tools/k15/bigfs.py, damit die beiden
-    Abbilder vergleichbar bleiben."""
     aus = []
     for i in range(n):
         folder = FOLDER[i % len(FOLDER)]
@@ -55,11 +52,6 @@ def names(n):
 
 
 def groessen(n, budget):
-    """Eine schiefe Verteilung ohne Zufall: jede sechzehnte Datei
-    bekommt Inhalt, und ihre Groesse faellt geometrisch. Kein
-    Zufallsgenerator, weil ein Abbild, das bei jedem Lauf anders
-    aussieht, keine Zusage traegt -- zweimal bauen muss zweimal
-    dasselbe ergeben."""
     aus = [0] * n
     kand = list(range(0, n, 13))
     roh = []

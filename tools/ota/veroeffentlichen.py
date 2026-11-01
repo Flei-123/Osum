@@ -228,7 +228,6 @@ def verknuepfen(source, ziel):
 
 
 def current_set(aus, register, gesperrt):
-    """`aktuell/` zeigt auf die hoechste NICHT gesperrte Fassung."""
     kandidaten = [n for n in register["vergeben"] if n not in gesperrt
                   and os.path.isdir(os.path.join(aus, "v", str(n)))]
     if not kandidaten:

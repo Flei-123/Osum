@@ -69,7 +69,6 @@ TIME_READY = 40.0
 
 
 def zeilen(path_2):
-    """Wie viele `key: `-Zeilen stehen schon in der seriellen Ausgabe."""
     try:
         with open(path_2, "rb") as f:
             return f.read().count(b"key: ")
@@ -78,7 +77,6 @@ def zeilen(path_2):
 
 
 def wait_auf(path_2, text, limit):
-    """Warten, bis TEXT in der seriellen Ausgabe steht."""
     roh = text.encode()
     ende = time.time() + limit
     while time.time() < ende:

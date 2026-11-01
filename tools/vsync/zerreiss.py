@@ -61,7 +61,6 @@ MIN_WIDE = 40
 
 
 def ppm_read(path_2):
-    """Ein binaeres PPM (P6) als (w, h, bytes) lesen."""
     with open(path_2, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):
@@ -86,10 +85,6 @@ def ppm_read(path_2):
 
 
 def streifen_der_line(w, line):
-    """Alle Laeufe einer Signaturfarbe in einer Bildzeile.
-
-    Gibt [(x0, x1, farbnummer)] zurueck. Nur Laeufe ab MIN_BREIT.
-    """
     aus = []
     x = 0
     while x < w:
@@ -110,7 +105,6 @@ def streifen_der_line(w, line):
 
 
 def image_check(path_2):
-    """(fenster, zerrissen, farben) fuer ein Foto."""
     w, h, dat = ppm_read(path_2)
     nach_spanne = {}
     for y in range(h):

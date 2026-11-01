@@ -28,9 +28,6 @@ import zlib
 
 
 def ppm_read(path_2):
-    """P6 lesen. Der Kopf darf Kommentare enthalten, und die Felder
-    duerfen durch beliebigen Zwischenraum getrennt sein -- so steht es
-    in der Beschreibung des Formats, und QEMU haelt sich daran."""
     with open(path_2, "rb") as f:
         roh = f.read()
     if not roh.startswith(b"P6"):

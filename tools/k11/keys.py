@@ -59,13 +59,6 @@ def keys_for(text):
 
 
 def key_lines(path_2):
-    """Wie viele `key: `-Zeilen der Kern schon gemeldet hat.
-
-    RUNDE ROTABSCHNITTE. `kernel/drv/hid/kbd.fi` meldet GENAU EINE Zeile
-    `key: ` je Taste, die ueber IRQ1 angekommen ist (die Zusage steht
-    dort woertlich in Zeile 602). Das ist ein EREIGNIS -- und auf ein
-    Ereignis laesst sich warten, statt auf die Uhr zu sehen.
-    """
     try:
         with open(path_2, 'rb') as f:
             return f.read().count(b'key: ')

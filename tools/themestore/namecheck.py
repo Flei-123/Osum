@@ -70,7 +70,6 @@ def rgb(v):
 
 
 def glyphkasten(s, name, m):
-    """(Zeichen, x, y, Glyphe) je Zeichen einer gemalten Kachelzeile."""
     x0 = int(m.group(7)) + int(m.group(2))
     base = int(m.group(8)) + int(m.group(3))
     for c, x26 in s.ask(name):

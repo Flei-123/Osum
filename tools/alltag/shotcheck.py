@@ -128,18 +128,6 @@ def near(a, b, tol):
 
 
 def inkbox(pic, x0, y0, x1, y1, bg, tol):
-    """Der Kasten um die Tinte UND die Punkte selbst.
-
-    RUNDE THEMESTORE: die Punkte sind neu, und sie sind der Grund, dass
-    diese Datei ueberhaupt noch einmal angefasst wurde. `ueberlappend`
-    hiess bis hierher "zwei KAESTEN schneiden sich" -- und zwei
-    untereinander stehende Zeilen einer Liste tun das immer: der Kasten
-    ist so hoch wie die Schrift werden kann (Oberlaenge plus
-    Unterlaenge), die Zeilen stehen zwanzig Bildpunkte auseinander, und
-    schon melden drei Zeilen, die einander nicht beruehren, zwei
-    Ueberlappungen. Der Text der Datei sagt seit dem ersten Tag
-    "must not have ink in the same pixel"; jetzt wird das auch gemessen.
-    """
     lo_x = lo_y = hi_x = hi_y = None
     pts = set()
     for y in range(max(y0, 0), min(y1, pic.h)):

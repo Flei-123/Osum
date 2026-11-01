@@ -138,13 +138,6 @@ def save(bund, d):
 
 
 def anlegen(bund, aus=None):
-    """`aus` uebernimmt einen VORHANDENEN geheimen Schluessel als Haupt-
-    schluessel. Das ist kein Bequemlichkeitsschalter: die Pruefstaende
-    dieses Repos (tools/install/pakete.sh) erzeugen ihren Schluessel
-    selbst und signieren damit die Pakete, die schon im Abbild liegen.
-    Ohne diesen Weg muesste eine Messung entweder das Abbild neu bauen
-    oder mit zwei verschiedenen Vertrauensankern arbeiten -- beides
-    waere eine Aenderung an dem, was gemessen wird."""
     if os.path.exists(bund):
         raise SystemExit("schluesselbund: %s gibt es schon" % bund)
     m = opkmod()
@@ -193,13 +186,6 @@ def chain_nachricht(gen, pub_hex):
 
 
 def wechseln(bund, mit_fallback=False):
-    """Ein neuer Hauptschluessel, und der Kettensatz, der ihn beglaubigt.
-
-    Der Satz wird mit dem ALTEN Hauptschluessel signiert (oder, wenn die
-    Kette gerissen ist, mit dem Ersatzschluessel -- `--ersatz`). Ein
-    Geraet nimmt den neuen Schluessel erst an, wenn diese Signatur
-    stimmt; deshalb ist ein Wechsel ein VORGANG und kein Austausch.
-    """
     d = load_2(bund)
     m = opkmod()
     alt_secret = secret_get(d, "ersatz" if mit_fallback else "haupt")

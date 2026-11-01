@@ -67,7 +67,6 @@ def one(text, prefix):
 
 
 def overlap(a, b):
-    """Overlapping area of two (x, y, w, h) rectangles."""
     x0 = max(a[0], b[0])
     y0 = max(a[1], b[1])
     x1 = min(a[0] + a[2], b[0] + b[2])

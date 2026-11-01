@@ -65,7 +65,6 @@ SALT_LEN, KEY_LEN, WRAP_LEN = 32, 64, 96
 
 
 def missing():
-    """Sagt, WAS fehlt -- nicht einfach 'geht nicht'."""
     was = []
     if argon2ll is None:
         was.append("argon2-cffi")
@@ -75,7 +74,6 @@ def missing():
 
 
 def kdf(pw, salt, t, m, p, n=WRAP_LEN):
-    """Argon2id, mit der Referenzumsetzung der Norm."""
     return argon2ll.hash_secret_raw(
         secret=pw, salt=salt, time_cost=t, memory_cost=m,
         parallelism=p, hash_len=n, type=argon2ll.Type.ID, version=19)
@@ -92,14 +90,12 @@ def tweak_of(lba):
 
 
 def header_sum(hdr):
-    """SHA-256 ueber den Kopf, das Summenfeld als Nullen gerechnet."""
     b = bytearray(hdr[:HDR_SECTORS * SECTOR])
     b[H_SUM:H_SUM + 32] = b"\0" * 32
     return hashlib.sha256(bytes(b)).digest()
 
 
 def header_read(hdr):
-    """Den Kopfsatz zerlegen. Gibt ein dict oder wirft."""
     if hdr[:len(MAGIC)] != MAGIC:
         raise ValueError("keine OSUMCRYPT-Kennung")
     k = {
@@ -128,7 +124,6 @@ def header_read(hdr):
 
 
 def space_auf(sl, pw):
-    """Einen Schluesselplatz mit fremdem Werkzeug aufmachen."""
     if not sl["used"]:
         return None
     wrap = kdf(pw, sl["salt"], sl["t"], sl["m"], sl["p"])
@@ -149,7 +144,6 @@ def hauptschluessel(hdr, pw):
 
 
 def cmd_read(path, pw):
-    """Was Osum geschrieben hat, mit fremdem Werkzeug aufmachen."""
     d = open(path, "rb").read()
     hdr = d[:HDR_SECTORS * SECTOR]
     k, mk, wo = hauptschluessel(hdr, pw)
@@ -175,13 +169,6 @@ def cmd_read(path, pw):
 
 
 def cmd_write(path, pw, t=1, m=64, p=1, bloecke=8192):
-    """EINEN TRAEGER ANLEGEN, DEN NUR DIESES PROGRAMM GESCHRIEBEN HAT.
-
-    Das ist die schaerfere Richtung der Gegenprobe: Osum muss einen
-    Kopfsatz aufmachen koennen, den es nie gesehen hat, mit einem
-    Hauptschluessel, den es nicht gezogen hat, und einem Salz aus
-    `os.urandom`.
-    """
     mk = os.urandom(KEY_LEN)
     while mk[:32] == mk[32:]:
         mk = os.urandom(KEY_LEN)
@@ -218,13 +205,6 @@ def cmd_write(path, pw, t=1, m=64, p=1, bloecke=8192):
 
 
 def cmd_roh(path):
-    """Das Rohgeraet ansehen: steht dort irgendetwas Erkennbares?
-
-    Gemessen wird dreierlei, und die Unterscheidung ist wichtig:
-    NIE BESCHRIEBENE Sektoren sind lauter Nullen -- das ist kein Leck,
-    sondern eine unbenutzte Platte. Gezaehlt wird die Entropie nur ueber
-    die Sektoren, in denen wirklich etwas steht.
-    """
     import collections
     import math
     import re
@@ -265,10 +245,6 @@ def cmd_roh(path):
 
 
 def cmd_vektoren(orakel):
-    """Die Rechnung von Osum gegen die Normen und gegen OpenSSL.
-
-    Gibt eine Zeile je Gruppe: "<name> <gut>/<gesamt>".
-    """
     def frag(lines):
         r = subprocess.run([orakel], input="\n".join(lines) + "\n",
                            capture_output=True, text=True, timeout=1800)

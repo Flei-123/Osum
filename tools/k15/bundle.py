@@ -57,9 +57,6 @@ INFO_LIMIT = 1023
 
 
 def angaben_stehen_vorn(file_path):
-    """Ende der letzten `schluessel=wert`-Zeile in der INFO.
-
-    Gibt (ende, grenze). `ende < grenze` ist die Bedingung."""
     roh = open(file_path, "rb").read()
     last_item = -1
     for line_text in (b"name=", b"info=", b"keys=", b"fassung=", b"net=",
@@ -74,7 +71,6 @@ def angaben_stehen_vorn(file_path):
 
 
 def start_von(file_path):
-    """Welche Datei unter /bin `start` sein soll -- steht in start.txt."""
     for line_text in open(os.path.join(file_path, "start.txt"), encoding="ascii"):
         line_text = line_text.strip()
         if line_text and not line_text.startswith("#"):
@@ -83,8 +79,6 @@ def start_von(file_path):
 
 
 def console_von(file_path):
-    """r543: a bundle whose program is a CONSOLE program (needs a tty) has a `console.txt` file. Its start is then a
-    script `#!/bin/term -c<program>` (a new terminal window, see kernel/user/term.fi), not a second name of the program."""
     return os.path.isfile(os.path.join(file_path, "console.txt"))
 
 

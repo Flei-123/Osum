@@ -65,7 +65,6 @@ def schema_for(seg):
 
 
 def intact(seg):
-    """A piece that ended at a newline: is it a whole record?"""
     rx, rest = schema_for(seg)
     if rx is not None:
         return rx.fullmatch(rest) is not None
@@ -75,7 +74,6 @@ def intact(seg):
 
 
 def pieces(line):
-    """-> list of (text, ended_by_newline, starts_at_marker)."""
     ms = [m.start() for m in MARK.finditer(line)]
     if not ms:
         return [(line, True, False)]
@@ -115,8 +113,6 @@ def last(lines, prefix):
 
 
 def selftest():
-    """Doctored logs. The first group must be CLEANED, the second group (the counter-proofs)
-    must NOT be: a wrong value in an INTACT record has to reach the checks unchanged."""
     res = []
 
     def case(name, cond):

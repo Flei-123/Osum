@@ -49,7 +49,6 @@ BS = mkfs.BS
 
 
 class Roh:
-    """Ein Abbild, roh, blockweise -- ohne es in den Speicher zu ziehen."""
 
     def __init__(self, path_2):
         self.f = open(path_2, "r+b")
@@ -177,7 +176,6 @@ def _image(path_2):
 
 
 def _frei(r):
-    """Der erste freie Block laut Karte, gleich als belegt eingetragen."""
     bms = r.g(mkfs.SB["BITMAP"]) or 1
     bmb = r.g(mkfs.SB["BMBLOCKS"]) or 1
     ds = r.g(mkfs.SB["DATA"])
@@ -195,13 +193,6 @@ def _frei(r):
 
 
 def _dir_add(r, dirino, name, ziel):
-    """Einen Eintrag ans Ende eines Verzeichnisses haengen, roh.
-
-    Ein Eintrag der Fassung 3 ist 264 Oktette lang und geht deshalb
-    regelmaessig UEBER eine Blockgrenze. Wer das nicht behandelt, kann
-    an ein Verzeichnis nur jeden zweiten Eintrag haengen -- der erste
-    Entwurf dieses Werkzeugs ist genau daran gescheitert.
-    """
     dirent = r.dirent
     sz = r.inode_get(dirino, mkfs.I_SIZE)
     roh = bytearray(dirent)

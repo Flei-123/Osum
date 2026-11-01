@@ -48,6 +48,7 @@ def docstring_spans(src):
 
 
 def strip(src, docs):
+    keep_first = not docs
     lines = src.splitlines(keepends=True)
     toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
     for t in reversed(toks):
@@ -56,8 +57,13 @@ def strip(src, docs):
             ln = lines[r - 1]
             head = ln[:c].rstrip()
             lines[r - 1] = (head + "\n") if head else ""
-    if docs:
-        for a, b, col, only in sorted(docstring_spans(src), reverse=True):
+    spans = docstring_spans(src)
+    if keep_first:
+        first = ast.parse(src).body[0] if ast.parse(src).body else None
+        keep_line = first.lineno if first is not None and isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str) else -1
+        spans = [x for x in spans if x[0] != keep_line]
+    if True:
+        for a, b, col, only in sorted(spans, reverse=True):
             first = lines[a - 1]
             if first[:col].strip():
                 continue

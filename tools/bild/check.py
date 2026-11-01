@@ -63,8 +63,6 @@ def points(im):
 
 
 def spacing(a, b):
-    """Groesster und mittlerer Abstand je Bildpunkt (ueber die drei
-    Kanaele das Maximum)."""
     worst = 0
     sum_2 = 0
     nz = 0

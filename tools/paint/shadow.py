@@ -36,12 +36,10 @@ def punkt(image, w, h, x, y):
 
 
 def bright(p):
-    """Wahrgenommene Helligkeit -- Rec. 601, ganzzahlig."""
     return (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
 
 
 def schatten(argv):
-    """Der Schatten, gegen den Lauf ohne ihn."""
     without, mit = argv[0], argv[1]
     x, y, w0, h0 = (int(v) for v in argv[2:6])
     reach = 6
@@ -104,7 +102,6 @@ def schatten(argv):
 
 
 def corner(argv):
-    """Die Ecke, gegen den Lauf mit der eckigen."""
     without, mit = argv[0], argv[1]
     x, y = int(argv[2]), int(argv[3])
     r = 8
@@ -114,13 +111,6 @@ def corner(argv):
     wb, hb, B = ppm_read(mit)
 
     def gemischt(b, w, h):
-        """Bildpunkte im Eckquadrat, die WEDER Rahmen NOCH Grund sind.
-
-        Die Rahmenfarbe wird tief im Fenster abgelesen (r, r hinter der
-        Ecke), die Grundfarbe weit ausserhalb (drei Bildpunkte davor) --
-        beide aus DEMSELBEN Bild, damit kein Schema-Unterschied
-        hineinrechnet.
-        """
         frame = punkt(b, w, h, x + r + 2, y + r + 2)
         reason = punkt(b, w, h, x - 3, y - 3)
         n = 0

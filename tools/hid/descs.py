@@ -141,7 +141,6 @@ MOUSE_WHEEL = bytes([
 
 
 def _finger():
-    """Eine Finger-Sammlung eines Praezisions-Touchpads, 73 Oktette."""
     return [
         0x05, 0x0D,
         0x09, 0x22,
@@ -303,8 +302,6 @@ BROKEN = [
 
 
 def bitset(buf, bit, value, n=1):
-    """Ein Feld von n Bit ab `bit` setzen -- HID packt von der
-    niedrigsten Stelle aus."""
     for k in range(n):
         if (value >> k) & 1:
             buf[bit // 8 + (bit % 8 + k) // 8] |= 1 << ((bit % 8 + k) % 8)
@@ -312,9 +309,6 @@ def bitset(buf, bit, value, n=1):
 
 
 def nkro(mods, keys):
-    """Ein Bericht der NKRO-Tastatur (Beschreibung 5, Nummer 2).
-    Oktett 0 ist die Nummer, dann 8 Bit Zusatztasten (0xE0..0xE7),
-    dann 120 Bit -- EIN Bit je Taste, Gebrauch 0 bis 119."""
     b = bytearray(17)
     b[0] = 2
     for m in mods:
@@ -325,8 +319,6 @@ def nkro(mods, keys):
 
 
 def bootkbd(mods, keys):
-    """Ein Bericht der Boot-Tastatur (Beschreibung 0, ohne Nummer):
-    ein Zusatztastenoktett, ein leeres, sechs Plaetze."""
     b = bytearray(8)
     for m in mods:
         b[0] |= 1 << (m - 0xE0)
@@ -336,19 +328,6 @@ def bootkbd(mods, keys):
 
 
 def ptp(finger, button=0, zeit=0):
-    """Ein Bericht des Praezisions-Touchpads (Beschreibung 3, Nummer 1).
-
-    Bitlage je Finger k, ab Bit k*40 (nachgerechnet aus der
-    Beschreibung, und `tools/hid/descs.py felder` druckt sie aus):
-        +0      Zuversicht        1 Bit
-        +1      Spitzenschalter   1 Bit
-        +2..3   Fuellbits         2 Bit
-        +4..7   Kontaktnummer     4 Bit
-        +8..23  X                16 Bit
-        +24..39 Y                16 Bit
-    Danach: Bit 200..206 Kontaktzahl (7), Bit 207 Knopf,
-    Bit 208..223 Abtastzeit (16).  224 Bit = 28 Oktett, plus Nummer 29.
-    """
     b = bytearray(29)
     b[0] = 1
     for k, f in enumerate(finger[:5]):
@@ -367,7 +346,6 @@ def ptp(finger, button=0, zeit=0):
 
 
 def bootmaus(knoepfe, dx, dy):
-    """Boot-Maus (Beschreibung 1, ohne Nummer): Knoepfe, dx, dy."""
     return bytes([knoepfe & 7, dx & 0xFF, dy & 0xFF])
 
 
@@ -496,10 +474,6 @@ def i2c_res(adr, hz=400000, source=b"\\_SB.PCI0.I2C1\0"):
 
 
 def acpi_table(adressen, sig=b"DSDT"):
-    """Eine Tabelle mit Kopf (36 Oktett) und AML-artigem Fuellwerk, in
-    dem die Ressourcenvorlagen stehen.  Das Fuellwerk enthaelt absichtlich
-    ein einzelnes 0x8E, das KEINE I2C-Verbindung ist -- ein Sucher, der
-    nur auf das Oktett schaut, faellt daran auf."""
     koerper = bytearray()
     koerper += bytes([0x5B, 0x82, 0x30, 0x44, 0x45, 0x56, 0x30])
     koerper += bytes([0x08, 0x5F, 0x48, 0x49, 0x44])
@@ -559,7 +533,6 @@ def art_von(page, usage):
 
 def ausgeben(rid, kd, flags, base, rsize, rcount, page, ul, umin, umax,
              bereich, lmin, lmax):
-    """EIN Hauptposten -> Liste von Feldern.  Drei Faelle, siehe hidrep.fi."""
     if rcount == 0 or rsize == 0:
         return []
 
@@ -597,9 +570,6 @@ def ausgeben(rid, kd, flags, base, rsize, rcount, page, ul, umin, umax,
 
 
 def zerlege(d):
-    """(kopf, felder).  Bricht bei einer kaputten Beschreibung mit einer
-    Fehlernummer ab -- und laesst stehen, was bis dahin erkannt wurde,
-    genau wie kernel/drv/hid/hidrep.fi."""
     header = {"ok": 0, "err": 0, "errat": 0, "felder": 0, "rids": 0, "hasid": 0,
             "top": 0, "art": 0, "bits": 0, "posten": 0, "tiefe": 0,
             "len": len(d), "ridtab": []}
@@ -1019,11 +989,6 @@ def field_lines():
 
 
 def nr_von(brand):
-    """Die Nummer des Berichts mit dieser Bemerkung.  tools/hid/run.sh
-    holt sie SO und schreibt sie nicht hin -- als in dieser Runde zwei
-    Berichte fuer die Super-Taste dazukamen, verschoben sich alle
-    folgenden Nummern, und drei Zusagen fielen, obwohl am Kernel nichts
-    falsch war."""
     for i, (_, _, k) in enumerate(BERICHTE):
         if k == brand:
             return i

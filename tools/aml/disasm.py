@@ -140,7 +140,6 @@ def seg_text(b):
 
 
 def join(scope, name):
-    """Einen (moeglicherweise relativen) Namen an einen Bereich haengen."""
     if name.startswith("\\"):
         return name
     up = 0
@@ -159,7 +158,6 @@ def join(scope, name):
 
 
 class Aml:
-    """Der Parser.  Eine Instanz je Durchgang ueber eine Tabelle."""
 
     def __init__(self, data, methods=None, count=None):
         self.d = data
@@ -176,7 +174,6 @@ class Aml:
         return self.d[i]
 
     def pkglen(self, i):
-        """PkgLength -- die Laenge zaehlt SICH SELBST mit."""
         lead = self.u8(i)
         extra = lead >> 6
         if extra == 0:
@@ -214,10 +211,6 @@ class Aml:
 
 
     def lookup_method(self, scope, name):
-        """Wie viele Argumente nimmt der Name, wenn er eine Methode ist?
-
-        ACPI sucht einen einzelnen NameSeg vom aktuellen Bereich aufwaerts
-        bis zur Wurzel (Spezifikation 5.3, "Name Search Rules")."""
         if name.startswith("\\") or name.startswith("^") or "." in name:
             full = join(scope, name)
             return self.methods.get(full)
@@ -232,7 +225,6 @@ class Aml:
 
 
     def termarg(self, i, scope, out):
-        """EIN Ausdruck.  Gibt die Position dahinter zurueck."""
         c = self.u8(i)
         if 0x60 <= c <= 0x67:
             self.note(c)
@@ -520,7 +512,6 @@ class Aml:
         return i, out
 
     def fieldlist(self, i, end, scope, region, flags):
-        """Die Elemente eines Field.  Jedes traegt seine Bitbreite."""
         off = 0
         while i < end:
             c = self.u8(i)
@@ -564,12 +555,6 @@ def strip_header(raw):
 
 
 def collect_methods(body, methods, scope="\\"):
-    """Erster Durchgang: nur die Methodennamen und ihre Argumentzahlen.
-
-    Ein Methodenaufruf steht in AML als nackter Name -- ohne die
-    Argumentzahl weiss man nicht, wo er aufhoert.  Also werden die
-    Deklarationen zuerst eingesammelt, und dabei werden Methodenrumpfe
-    UEBERSPRUNGEN (ihre PkgLength sagt, wie weit)."""
     p = Aml(body, methods)
 
     def walk(i, end, scope):
@@ -612,7 +597,6 @@ def collect_methods(body, methods, scope="\\"):
 
 
 def parse_tables(paths):
-    """Alle Tabellen zusammen: erst die Methoden, dann der Baum."""
     bodies = []
     for path in paths:
         raw = open(path, "rb").read()

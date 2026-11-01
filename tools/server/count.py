@@ -47,15 +47,6 @@ def without_kommentare(text):
 
 
 def without_importe(text):
-    """`import font.metrics` ist kein Zugriff auf die Grafik.
-
-    RUNDE ROTABSCHNITTE.  `kernel/user/fuib.fi:72` stand mit genau einer
-    Stelle in der Liste, und diese Stelle war die Zeile `import
-    font.metrics` -- der Name eines MODULS aus `lib/`, nicht der Aufruf
-    von `kernel/gfx/font.fi`.  Eine Einbindung sagt nichts darueber, ob
-    jemand den Rahmenpuffer anfasst; sie nennt nur, woher ein Name
-    kommt.  Gezaehlt werden soll der ZUGRIFF.
-    """
     aus = []
     for line in text.split("\n"):
         if re.match(r"\s*import\s", line):

@@ -128,7 +128,6 @@ def read_2(name):
 
 
 def schattenriss(name):
-    """Jede Farbe zu einer: WAS wird eingefaerbt, egal womit."""
     palette, zeilen = read_2(name)
     aus = set()
     for y, z in enumerate(zeilen):
@@ -139,8 +138,6 @@ def schattenriss(name):
 
 
 def bitreihen(name):
-    """Das Zeichen als Reihen von Bits, hoechstwertiges Bit links, plus je
-    Bildpunkt die Rollennummer. Fuer den Kern, der keine Datei liest."""
     palette, zeilen = read_2(name)
     w = len(zeilen[0])
     reihen = []
@@ -215,7 +212,6 @@ def check_gestaltung(say_2=True):
 
 
 def dims():
-    """Groesse und Deckung je Zeichen -- die Zahlen fuer die Doku."""
     aus = []
     for n in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
         tear, w, h = schattenriss(n)

@@ -155,20 +155,6 @@ BUTTON = re.compile(
 
 
 def edges(pic, x, y, w, h, r, tol=8, level=12, anteil=60):
-    """Wie viele der vier Kanten eines Knopfes im Bild wirklich da sind.
-
-    Drei Bildpunkte je Stelle: AUF der Kante, zwei davor (draussen) und
-    drei dahinter (die Flaeche). Als Kante zaehlt
-      * eine LINIE -- der Punkt auf der Kante unterscheidet sich von
-        beiden Nachbarn (so malt `fuib.ring` sie, gemessen: Linie
-        227,233,240 zwischen zweimal 246,247,247), oder
-      * eine STUFE -- Flaeche und Umgebung sind verschieden genug, dass
-        der Knopf auch ohne Linie als Flaeche zu sehen ist.
-    Die zweite Bedingung ist absichtlich strenger (12 statt 8 Stufen):
-    genau der Fall, der diese Probe ausgeloest hat, war eine Flaeche in
-    Weiss auf einer Karte in #f8fafc -- neun Stufen, und niemand sieht
-    das.
-    """
     gefunden = 0
     seiten = (
         [((x + i, y), (x + i, y - 2), (x + i, y + 3))
@@ -198,31 +184,6 @@ def edges(pic, x, y, w, h, r, tol=8, level=12, anteil=60):
 
 
 def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
-    """(gemessen, ohne Kante, mit Ueberstand, Befunde) je Knopf.
-
-    Gemessen wird nur, was im GEMESSENEN FENSTER liegt und auf dem
-    Schirm zu sehen ist: ein Knopf eines Fensters dahinter waere
-    verdeckt, und ein Knopf unter der Leiste ist es auch -- beides ist
-    kein fehlender Rand.
-
-    ============================= RUNDE GLAS (fix-r4-1): DER UEBERSTAND
-
-    Die Kantenprobe darueber beantwortet die Frage "hat das Ding einen
-    Umriss?". Sie beantwortet NICHT die Frage, die der Knopf "Mit Konto
-    verknuepfen" auf Bild 09 gestellt hat: sein Umriss war da (eine
-    sehr helle Linie von x=38 bis x=189), nur war seine Beschriftung
-    156 Bildpunkte breit und stand von x=40 bis x=196 -- sieben
-    Bildpunkte davon LAGEN AUF UND NEBEN DEM RAHMEN. Angeschaut ist das
-    ein Wort mit einem Strich darueber und kein Knopf, und kein
-    Pruefer dieses Baums hat es gesehen: die Schriftpruefung misst
-    gegen das FENSTER, und im Fenster lag der Text ja.
-
-    Also wird ab jetzt jede gemeldete Beschriftung, deren Grundlinie in
-    einem gemeldeten Knopf liegt, gegen die Kanten DIESES Knopfes
-    gehalten. Ein Bildpunkt Luft auf jeder Seite ist erlaubt (die
-    Kantenglaettung eines Buchstabens reicht so weit); alles darueber
-    ist ein Ueberstand und wird gezaehlt.
-    """
     last_2 = {}
     for m in BUTTON.finditer(tail):
         v = tuple(int(g) for g in m.groups())
@@ -269,12 +230,6 @@ def knoepfe_messen(pic, tail, ox, oy, ww, wh, bar, texts=()):
 
 
 def parse_bar(path):
-    """Die Beschriftungen der Leiste und das Rechteck, in dem sie stehen.
-
-    Der LETZTE Bericht je Marke gilt, genau wie beim Fenster: die
-    Leiste malt bei jedem Uhrenwechsel neu, und was vor zehn Sekunden
-    einmal dort stand, ist auf der Aufnahme nicht mehr zu finden.
-    """
     body = open(path, "rb").read().decode("latin1")
     bar = None
     for m in BARWIN.finditer(body):
@@ -344,18 +299,6 @@ def near(a, b, tol):
 
 
 def inkbox(pic, x0, y0, x1, y1, bg, tol):
-    """Der Kasten um die Tinte UND die Punkte selbst.
-
-    RUNDE THEMESTORE: die Punkte sind neu, und sie sind der Grund, dass
-    diese Datei ueberhaupt noch einmal angefasst wurde. `ueberlappend`
-    hiess bis hierher "zwei KAESTEN schneiden sich" -- und zwei
-    untereinander stehende Zeilen einer Liste tun das immer: der Kasten
-    ist so hoch wie die Schrift werden kann (Oberlaenge plus
-    Unterlaenge), die Zeilen stehen zwanzig Bildpunkte auseinander, und
-    schon melden drei Zeilen, die einander nicht beruehren, zwei
-    Ueberlappungen. Der Text der Datei sagt seit dem ersten Tag
-    "must not have ink in the same pixel"; jetzt wird das auch gemessen.
-    """
     lo_x = lo_y = hi_x = hi_y = None
     pts = set()
     for y in range(max(y0, 0), min(y1, pic.h)):
@@ -374,16 +317,6 @@ def inkbox(pic, x0, y0, x1, y1, bg, tol):
 
 
 def reason(pic, x0, y0, x1, y1):
-    """Die haeufigste Farbe eines Ausschnitts -- der gemessene Grund.
-
-    Fuer ein Fenster ist der Grund die Farbe, die das Programm gemeldet
-    hat. Fuer die Leiste dieser Runde gilt das NICHT mehr: sie wird mit
-    `taskbar_alpha` ueber das Hintergrundbild gemischt, also ist hinter
-    der Schrift weder die Flaechenfarbe noch irgendeine andere Zahl,
-    die irgendwo gemeldet waere. Die haeufigste Farbe unter der Zeile
-    ist sie dagegen immer: Schrift bedeckt einen Bruchteil ihres
-    Kastens, der Rest ist Grund.
-    """
     zaehl = {}
     for y in range(max(y0, 0), min(y1, pic.h)):
         for x in range(max(x0, 0), min(x1, pic.w)):
@@ -400,7 +333,6 @@ LINE_RUN = 10
 
 
 def _run(pic, x0, y, schritt, n, bg, tol):
-    """Die Farbe eines einfarbigen Laufs von `n` Bildpunkten, oder None."""
     c = pic.at(x0, y)
     if c is None or near(c, bg, tol):
         return None
@@ -412,7 +344,6 @@ def _run(pic, x0, y, schritt, n, bg, tol):
 
 
 def linien_probe(pic, texts, ox, oy, ww, asc, desc):
-    """Wie viele Beschriftungen auf einer waagerechten Linie liegen."""
     treffer = 0
     bad_2 = []
     for t in texts:
@@ -446,11 +377,6 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
 
 
 def taskbar_messen(pic, serial, asc, desc):
-    """Dieselben drei Fragen, gestellt an die Taskleiste.
-
-    Rueckgabe: (Zahl der Texte, gemessen, leer, abgeschnitten,
-    ueberlappend, Liste der Befunde).
-    """
     texts, bar, rechtecke = parse_bar(serial)
     if bar is None:
         return 0, 0, 0, 0, 0, ["LEISTE keine `taskbar: STEHT`-Zeile "

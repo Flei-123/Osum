@@ -149,7 +149,6 @@ def sammle(serial):
 
 
 def raster(rechtecke, n=4):
-    """Wie viele gemeldete Laengen liegen auf dem n-Raster?"""
     gut = ges = 0
     schuldige = {}
     for source, _art, x, y, w, h in rechtecke:
@@ -171,18 +170,6 @@ def klickflaechen(rechtecke, mindest=32):
 
 
 def eckfarben(b, x, y, n=16):
-    """WIE VIELE VERSCHIEDENE FARBEN STEHEN IM ECKQUADRAT.
-
-    Das ist die ehrlichste Zahl, die man ueber eine Ecke aus EINEM Bild
-    lesen kann.  Eine harte, eckige Ecke kennt genau zwei Farben --
-    Schreibtisch und Rahmen --, eine geglaettete Rundung kennt die
-    Zwischenwerte der Deckung dazu.  Ein Radius in Bildpunkten laesst
-    sich dagegen nicht zuverlaessig ablesen, solange der Schreibtisch
-    ein VERLAUF ist: der Nachbarpunkt ist dort nie derselbe, und jede
-    Schwelle findet entweder alles oder nichts.  (Der erste Versuch
-    dieser Runde hat auf diese Weise dem eckigen Fenster einen Radius
-    von 11 zugeschrieben.)
-    """
     z = {}
     for dy in range(n):
         for dx in range(n):
@@ -193,10 +180,6 @@ def eckfarben(b, x, y, n=16):
 
 
 def corner_radius(b, x, y, hg, tol=24):
-    """Der Radius der oberen linken Ecke bei (x, y), an der Diagonale
-    abgelesen: wie viele Bildpunkte der Diagonale sind noch Hintergrund?
-    Dazu die Zahl der ZWISCHENWERTE in dem Quadrat -- 0 heisst harte
-    Treppe, also kein Antialiasing."""
     r = 0
     for i in range(0, 24):
         p = b.px(x + i, y + i)
@@ -222,8 +205,6 @@ def corner_radius(b, x, y, hg, tol=24):
 
 
 def schatten(b, x, y, w, h, tiefe=8):
-    """Der Helligkeitsabfall im Band unter der Unterkante, gegen die
-    Zeile `tiefe` weiter unten (die schon wieder Schreibtisch ist)."""
     def bright(p):
         return (p[0] * 299 + p[1] * 587 + p[2] * 114) // 1000
     bottom = []
@@ -247,17 +228,6 @@ def schatten(b, x, y, w, h, tiefe=8):
 
 
 def entdoppeln(texte):
-    """DIESELBE BESCHRIFTUNG ZAEHLT EINMAL.
-
-    Die Programme melden ihre Texte bei JEDEM Neuzeichnen, und ein
-    Schreibtisch zeichnet in dreissig Sekunden zwanzigmal neu.  Wer die
-    Liste nimmt, wie sie ist, findet die Beschriftung `Suchen` zwanzigmal
-    an derselben Stelle und meldet neunzehn Ueberlappungen, die es nicht
-    gibt -- der erste Lauf dieser Runde hat auf diese Weise 12 273
-    Ueberlappungen in einem Bild gefunden, auf dem gar kein Text
-    ueberlappt.  Geschluesselt wird auf Fenster, Ort und Inhalt; der
-    LETZTE Stand gewinnt, weil er der ist, der auf dem Bild steht.
-    """
     d = {}
     for t in texte:
         d[(t["win"], t["ax"] + t["x"], t["ay"] + t["base"], t["t"])] = t
@@ -265,8 +235,6 @@ def entdoppeln(texte):
 
 
 def text_check(b, texte, window=None):
-    """Leere Beschriftung, abgeschnitten, ueberlappend -- die drei
-    Fragen aus tools/themestore/shotcheck.py."""
     empty_2 = ab = 0
     belegt = {}
     over = 0

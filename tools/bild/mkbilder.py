@@ -42,8 +42,6 @@ from PIL import Image, ImageDraw
 
 
 def photo(w, h, seed=7):
-    """Was einem Dekodierer wehtut: harte Kanten, weiche Verlaeufe,
-    gesaettigte Farben."""
     im = Image.new("RGB", (w, h))
     px = im.load()
     for y in range(h):
@@ -61,7 +59,6 @@ def photo(w, h, seed=7):
 
 
 def bunt_palette(w, h, n=256):
-    """Ein Bild mit einer vollen Farbtafel: jeder Index kommt vor."""
     im = Image.new("P", (w, h))
     board = []
     for i in range(n):

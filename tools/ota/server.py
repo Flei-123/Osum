@@ -92,13 +92,6 @@ class Hand(http.server.BaseHTTPRequestHandler):
         pass
 
     def _hart_zu(self):
-        """Die Verbindung abreissen lassen, ohne `close_notify`.
-
-        SO_LINGER mit Zeit 0 macht aus dem `close` ein RST. Ein sauberes
-        Zumachen waere hier falsch: ein Empfaenger darf ein sauberes Ende
-        als Ende des Rumpfes lesen duerfen. Was gemessen werden soll, ist
-        ein RISS -- weniger Oktette als angekuendigt.
-        """
         try:
             roh = self.connection
             sock = getattr(roh, "_sock", None) or roh

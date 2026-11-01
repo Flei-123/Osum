@@ -56,9 +56,6 @@ def read_2(path_2):
 
 
 def window(lines, welches=0):
-    """Das Fenster des Aufgabenverwalters: das GROESSTE, das gemeldet
-    wurde -- der Dialog ist 340 breit, das Hauptfenster 752. Bei
-    `welches=1` das KLEINSTE, also der Dialog."""
     ws = {}
     for z in lines:
         m = WIN.search(z)
@@ -71,9 +68,6 @@ def window(lines, welches=0):
 
 
 def last_block(lines):
-    """Der letzte VOLLSTAENDIGE Block. Ein halb geschriebener Block am
-    Ende des Mitschnitts (die Maschine wurde mittendrin abgeraeumt)
-    haette Zeilen ohne Kopf."""
     ab = 0
     for i, z in enumerate(lines):
         if "taskmgr: sortiert " in z:

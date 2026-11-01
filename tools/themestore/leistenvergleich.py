@@ -40,7 +40,6 @@ FONT = "assets/osum-sans.ttf"
 
 
 def var_von(im, hoehe, x0, x1):
-    """Die Streuung des Leistengrundes -- gerechnet von `glascheck`."""
     px = [im.getpixel(p) for p in glascheck.leiste(im, hoehe, x0, x1)]
     l = [glascheck.bright(p) for p in px]
     m = sum(l) / len(l)

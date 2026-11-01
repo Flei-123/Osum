@@ -72,7 +72,6 @@ def ask(lines):
 
 
 def bloecke(path_2):
-    """Die 4096-Oktett-Bloecke einer Datei, aufgefuellt wie sync es tut."""
     d = open(path_2, "rb").read()
     aus = []
     i = 0

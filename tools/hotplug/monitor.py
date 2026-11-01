@@ -105,7 +105,6 @@ def keys_for(char):
 
 
 def wait_auf(file, muster, limit=60.0):
-    """Bis <muster> in der seriellen Datei steht. Rueckgabe: hat es geklappt."""
     bis = time.time() + limit
     muster_b = muster.encode()
     while time.time() < bis:

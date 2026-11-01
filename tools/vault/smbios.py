@@ -27,8 +27,6 @@ import sys
 
 
 def einstiegspunkte(d):
-    """Alle Einstiegspunkte, die 16-ausgerichtet sind UND deren Pruefsumme
-    aufgeht. Beide Bedingungen sind noetig; siehe --koeder."""
     treffer = []
     for at in range(0, len(d) - 32, 16):
         if d[at:at + 5] == b"_SM3_":
@@ -71,9 +69,6 @@ def strukturen(tbl):
 
 
 def koeder(d):
-    """Der Beleg, dass die Pruefsumme gebraucht wird: irgendwo steht die
-    ZEICHENKETTE '_SM3_' (SeaBIOS baut den Einstiegspunkt daraus), und sie
-    ist keiner."""
     at = d.find(b"_SM3_")
     if at < 0:
         print("koeder=0")

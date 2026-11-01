@@ -82,9 +82,6 @@ def ramp_of(scheme):
 
 
 def semantics(ramp, dark, high, text_secondary_dark):
-    """The neutral-derived roles.  Accent roles are generated and are
-    checked by model.py; this file judges the neutral pairings, which
-    is where A-021 sits."""
     n = ramp
     s = {}
     if not dark:
@@ -190,8 +187,6 @@ def run_pairs():
 
 
 def run_ramp(args):
-    """Contrast of every ramp step against one background, so a token
-    choice can be judged instead of guessed."""
     for name in SCHEMES:
         sc = load("assets/schemes/%s.scheme" % name)
         ramp = ramp_of(sc)

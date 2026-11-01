@@ -33,21 +33,6 @@ def go(x, y):
 
 
 def drag(points):
-    """RUNDE GLAS: ZIEHEN IST NICHT KLICKEN.
-
-    Ein Klick ist Knopf runter und sofort wieder hoch an derselben
-    Stelle; ein Zug haelt den Knopf und bewegt sich dazwischen. Die
-    Abnahme dieser Runde braucht ihn, weil die Schlierenfrage nur an
-    einem BEWEGTEN Fenster zu stellen ist: die Leiste mischt, was unter
-    ihr liegt, und ob sie das nach einer Bewegung noch einmal tut,
-    zeigt sich erst, wenn etwas unter ihr war und wieder weg ist.
-
-    Die Zwischenschritte sind nicht Zierde. Der Fensterserver sieht
-    einen Sprung von 600 Bildpunkten als EINE Bewegung und meldet ein
-    einziges Schmutzrechteck; ein Mensch zieht in vielen kleinen, und
-    genau die vielen kleinen sind der Fall, in dem eine vergessene
-    Neumischung als Schliere stehen bleibt.
-    """
     x0, y0 = points[0]
     out = go(x0, y0)
     out += ["warte 1", "mouse_button 1", "warte 1"]

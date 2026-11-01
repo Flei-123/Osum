@@ -140,7 +140,6 @@ class Graph:
             self.edges[nid].append(tid)
 
     def sccs(self):
-        """Tarjan, iterative."""
         index, low, onstack, stack, out = {}, {}, set(), [], []
         counter = [0]
         for root in self.nodes:

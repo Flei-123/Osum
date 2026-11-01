@@ -75,7 +75,6 @@ def bright(c):
 
 
 def glass_mix(alt, new, key, alpha, schleier=SCHLEIER):
-    """Die Rechnung aus kernel/ui/wm.fi, hier ein zweites Mal."""
     if alpha >= 100:
         return new
     d = min(sum(abs(new[i] - key[i]) for i in range(3)), VOLL)
@@ -87,15 +86,6 @@ def glass_mix(alt, new, key, alpha, schleier=SCHLEIER):
 
 
 def rechteck(im, x0, x1, y0, y1):
-    """Ein Rechteck des Bildes als Punktliste -- die EINE Stelle, die
-    aus Grenzen Punkte macht.
-
-    Runde GLAS (fix-r4-4): bis hierher gab es nur `leiste`, also nur
-    den Streifen am unteren Rand. Das Milchglas liegt seit dieser Runde
-    auch unter einem DURCHSICHTIGEN FENSTER, und dessen Ausschnitt ist
-    kein Streifen am Bildrand. Gemessen wird er mit derselben Rechnung
-    wie die Leiste -- `var` weiss nicht, welches Rechteck es ist.
-    """
     w, h = im.size
     return [(x, y) for x in range(max(x0, 0), min(x1, w))
             for y in range(max(y0, 0), min(y1, h))]
@@ -107,11 +97,6 @@ def leiste(im, hoehe, x0, x1):
 
 
 def wandfarben(im, hoehe, x0, x1):
-    """Die zwei Farben des Hintergrundbildes UEBER der Leiste.
-
-    Das mitgelieferte Musterbild hat genau zwei, und beide liegen auch
-    unter der Leiste -- ein Schachbrett hoert an ihrer Kante nicht auf.
-    """
     w, h = im.size
     top = h - hoehe
     c = Counter(im.getpixel((x, y))

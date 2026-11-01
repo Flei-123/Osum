@@ -34,11 +34,6 @@ def mulf(a, b):
 
 
 def fifth_root(v):
-    """v**(1/5) in fixed point, by Newton's method.
-
-    r <- (4r + v/r^4) / 5.  Sixty iterations is far more than needed;
-    the loop leaves early when it stops moving.  Firn has the same loop.
-    """
     if v == 0:
         return 0
     r = SCALE
@@ -56,13 +51,6 @@ def fifth_root(v):
 
 
 def lin_of(c):
-    """One sRGB channel (0..255) -> linear light, scaled by SCALE.
-
-    WCAG 2.x:  c <= 0.03928 ? c/12.92 : ((c+0.055)/1.055)**2.4
-    and x**2.4 == x**2 * (x**2)**(1/5), which is why the fifth root is
-    all the machinery this needs.  0.03928*255 = 10.02, so the integer
-    cut is at c <= 10 -- the same cut in both implementations.
-    """
     x = (c * SCALE) // 255
     if c <= 10:
         return (x * 10000) // 129200
@@ -72,14 +60,12 @@ def lin_of(c):
 
 
 def luminance(rgb):
-    """Relative luminance, scaled by SCALE."""
     return (2126 * lin_of((rgb >> 16) & 255)
             + 7152 * lin_of((rgb >> 8) & 255)
             + 722 * lin_of(rgb & 255)) // 10000
 
 
 def contrast100(a, b):
-    """(L1+0.05)/(L2+0.05), times 100.  452 means 4.52:1."""
     la, lb = luminance(a), luminance(b)
     if la < lb:
         la, lb = lb, la
@@ -91,15 +77,6 @@ HOVER_PCT_DARK = 8
 
 
 def mix(a, b, p):
-    """p percent of b into a, per sRGB channel.
-
-    Mixing in sRGB and not in linear light.  That is a simplification
-    and it is a visible one: a 50/50 mix comes out darker than the eye
-    expects.  It is kept because the ramps are anchored on hand-picked
-    values from the palette file, so the mix only has to interpolate
-    BETWEEN anchors, and because the alternative needs the inverse
-    transfer function on the hot path.
-    """
     out = 0
     for s in (16, 8, 0):
         ca = (a >> s) & 255
@@ -188,7 +165,6 @@ COMPONENT = [
 
 
 def read_scheme(path):
-    """A scheme file is key=value, one per line, '#' starts a comment."""
     out = {}
     with open(path) as f:
         for line in f:
@@ -207,13 +183,6 @@ def hexval(s):
 
 
 def pick_on(fg_candidates, bg):
-    """The text colour for a surface: whichever candidate reads better.
-
-    This is the piece that makes a badly chosen accent survivable.  It
-    is not a fallback for the user's mistake -- the mistake is still
-    reported -- it is the difference between "hard to read" and
-    "invisible".
-    """
     best = fg_candidates[0]
     bestr = 0
     for c in fg_candidates:
@@ -224,7 +193,6 @@ def pick_on(fg_candidates, bg):
 
 
 def resolve(scheme, dark, accent_override=None):
-    """primitives -> semantics -> components.  Returns everything."""
     neutral = [hexval(scheme[k]) for k in NEUTRAL_KEYS]
     accent_base = hexval(accent_override if accent_override
                          else scheme["accent"])

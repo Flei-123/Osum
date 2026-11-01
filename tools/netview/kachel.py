@@ -79,7 +79,6 @@ def ppm(path_2):
 
 
 def pruefe(w, h, pixel, kacheln, top_2, rand=2):
-    """kacheln: Liste (tx, ty, tw, th). Gibt (fehler, meldungen)."""
     error = []
     meld = []
     for t, (tx, ty, tw, th) in enumerate(kacheln):

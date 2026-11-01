@@ -55,7 +55,6 @@ except ImportError:
 
 
 def read_schema(name):
-    """Die Rampe und der Akzent aus assets/schemes/<name>.scheme."""
     p = f"assets/schemes/{name}.scheme"
     values = {}
     with open(p, encoding="utf-8") as f:
@@ -81,12 +80,6 @@ def main_farben(im, n=6):
 
 
 def aufgehellt(px, w, h, soll):
-    """Ist die lauteste bunte Farbe eine Mischung von `soll` gegen Weiss?
-
-    Eine Mischung hat in allen drei Kanaelen DENSELBEN Faktor; eine
-    Kanalumkehr hat drei verschiedene. Damit sind die beiden Faelle
-    auseinanderzuhalten, ohne eine Toleranz zu erfinden.
-    """
     c = Counter()
     sr, sg, sb = soll
     for y in range(0, h, 2):
