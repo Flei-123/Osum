@@ -1,0 +1,1835 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import actwire
+import libc.io
+import setschema
+import ulib
+import orientbus.obbase
+import orientbus.obstate
+
+const UN_ARGMAX: u64 = 200
+
+static mut undo_seq: u64 = 0
+
+static mut c_undo: u64 = 0
+
+static mut c_events: u64 = 0
+
+static mut c_badrep: u64 = 0
+
+static mut c_badevt: u64 = 0
+
+static mut evt_seq: u64 = 1
+
+static mut g_origin: [u8; 32] = [0 as u8; 32]
+
+static mut g_attested: bool = false
+
+static mut c_claims: u64 = 0 // a labelled process named another client
+
+static mut c_badprov: u64 = 0 // a provider with the wrong origin
+
+static mut adout: [u8; 2048] = [0 as u8; 2048]
+
+fn policy_load() {
+    var path: [u8; 22] = "/etc/orientbus/policy\0"
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return
+    }
+    let p: u64 = (&obbase.mf[0 as usize]) as u64
+    var n: u64 = 0
+    while n < 8191 {
+        let k: u64 = io.read(fd, p + n, 8191 - n)
+        if ulib.bad(k) || k == 0 {
+            break
+        }
+        n = n + k
+    }
+    io.close(fd)
+    obstate.st8(p, n, 0)
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    var w3: [u8; 32] = [0 as u8; 32]
+    var w4: [u8; 32] = [0 as u8; 32]
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    let p4: u64 = (&w4[0 as usize]) as u64
+    var k_allow: [u8; 6] = "allow\0"
+    var k_deny: [u8; 5] = "deny\0"
+    var at: u64 = 0
+    while obstate.ld8(p, at) != 0 {
+        let e: u64 = actwire.line_end(p, at)
+        let save: u64 = obstate.ld8(p, e)
+        obstate.st8(p, e, 0)
+        var nx: u64 = actwire.word_copy(p, at, p1, 32)
+        nx = actwire.word_copy(p, nx, p2, 32)
+        nx = actwire.word_copy(p, nx, p3, 32)
+        actwire.word_copy(p, nx, p4, 32)
+        if actwire.str_eq(p1, (&k_allow[0 as usize]) as u64) {
+            var l: u64 = obstate.level_of(p4)
+            if l == actwire.NONE || l == obbase.L_CRIT {
+                l = obbase.L_READ // critical is never granted, section 5
+            }
+            if obstate.rule_add(p2, p3, false, l, 0) {
+                obstate.st(obstate.ru(obbase.last_rule), obbase.RU_PERM, 1)
+            }
+        }
+        if actwire.str_eq(p1, (&k_deny[0 as usize]) as u64) {
+            if obstate.rule_add(p2, p3, true, 0, 0) {
+                obstate.st(obstate.ru(obbase.last_rule), obbase.RU_PERM, 1)
+            }
+        }
+        // AB-009: this client's changes need a dry run of the same call
+        var k_df: [u8; 9] = "dryfirst\0"
+        if actwire.str_eq(p1, (&k_df[0 as usize]) as u64) && obstate.ld8(p2, 0) != 0 {
+            dryfirst_add(p2)
+        }
+        // AB-012: the size at which the audit log is rotated (octets)
+        var k_amax: [u8; 9] = "auditmax\0"
+        if actwire.str_eq(p1, (&k_amax[0 as usize]) as u64) {
+            let m: u64 = ulib.to_num(p2)
+            if m >= 1024 {
+                obbase.audit_max = m
+            }
+        }
+        var k_auid: [u8; 12] = "adapter_uid\0"
+        if actwire.str_eq(p1, (&k_auid[0 as usize]) as u64) {
+            let u: u64 = ulib.to_num(p2)
+            if u != 0 {
+                obbase.adapter_uid = u // 0 would be root: never
+            }
+        }
+        obstate.st8(p, e, save)
+        at = e
+        if obstate.ld8(p, at) == 10 {
+            at = at + 1
+        }
+    }
+}
+
+// Section 5.4. One line per decision. Everything that changes state, is
+// parked or refused is written AT ONCE and BEFORE the change is
+// forwarded; returns false when that failed -- the caller then refuses
+// the change (fail closed).
+//
+// Allowed reads and dry runs change nothing. They are COUNTED per
+// (client, action, result) and written as one line with `count=` when
+// the next change is logged, when 16 kinds have piled up, or when the
+// broker has been idle for half a second.
+//
+// MEASURED (docs/ACTION-BUS.md, section 10): one synchronous append per
+// call cost ~16 ms on the IDE disk of the test guest -- 100 calls took
+// 165 ticks with the log and 3 without. Buffering the lines brought 200
+// calls down from 407 ticks to 79; counting them instead of writing
+// each one is the rest.
+fn audit(pid: u64, uid: u64, client: u64, verb: u64, target: u64,
+    decision: u64, result: u64, dry: bool) -> bool {
+    // AB-006: the counts per client for the page "what may which app"
+    if obbase.skip_tally {
+        obbase.skip_tally = false
+    } else {
+        let tk0: u64 = tally_kind(verb, decision, result, dry)
+        if tk0 != actwire.NONE {
+            tally(client, tk0)
+        }
+    }
+    if obbase.audit_lazy {
+        obbase.audit_lazy = false
+        return obstate.agg_add(pid, uid, client, verb, target, result, dry)
+    }
+    var b: [u8; 320] = [0 as u8; 320]
+    let bp: u64 = (&b[0 as usize]) as u64
+    obstate.audit_line(bp, actwire.ticks(), pid, uid, client, verb, target,
+        decision, result, dry)
+    var nlc: [u8; 2] = "\n\0"
+    ulib.strcat(bp, (&nlc[0 as usize]) as u64)
+    // what is counted so far goes first, so the file stays in order
+    if !obstate.flush_lazy() {
+        return false
+    }
+    obstate.audit_rotate()
+    let r: u64 = actwire.append_file((&obbase.s_logpath[0 as usize]) as u64, bp,
+        actwire.slen(bp))
+    if ulib.bad(r) {
+        obbase.c_logfail = obbase.c_logfail + 1
+        return false
+    }
+    return true
+}
+
+// AB-012: `act audit [n]` -- the last n lines (default 20, at most 60) of
+// the audit log, for the user only. What every other client is allowed to
+// know about itself stays `act rights` (its own counts and rules).
+fn do_audit(msg: u64, pid: u64, uid: u64, id: u64) {
+    if !is_user(msg, uid) {
+        var e_who: [u8; 31] = "denied only the user may read\0\0"
+        obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    let _f: bool = obstate.flush_lazy()
+    var w: [u8; 16] = [0 as u8; 16]
+    let nx: u64 = actwire.word_copy(msg, 0, (&w[0 as usize]) as u64, 16)
+    let _nx2: u64 = actwire.word_copy(msg, nx, (&w[0 as usize]) as u64, 16)
+    var want: u64 = 20
+    if obstate.ld8((&w[0 as usize]) as u64, 0) >= 48 && obstate.ld8((&w[0 as usize]) as u64, 0) <= 57 {
+        want = ulib.to_num((&w[0 as usize]) as u64)
+    }
+    if want == 0 || want > 60 {
+        want = 60
+    }
+    // the tail of the file: the last 8000 octets are more than 60 lines
+    let p: u64 = (&obbase.mf[0 as usize]) as u64
+    var have: u64 = 0
+    let sz: u64 = io.size_of((&obbase.s_logpath[0 as usize]) as u64)
+    let fd: u64 = io.open((&obbase.s_logpath[0 as usize]) as u64, 0)
+    if !ulib.bad(fd) && !ulib.bad(sz) {
+        var from: u64 = 0
+        if sz > 8000 {
+            from = sz - 8000
+        }
+        let _sk: u64 = io.seek(fd, from, 0)
+        var more: bool = true
+        while more && have < 8000 {
+            let g: u64 = io.read(fd, p + have, 8000 - have)
+            if ulib.bad(g) || g == 0 {
+                more = false
+            } else {
+                have = have + g
+            }
+        }
+        io.close(fd)
+    }
+    // count the lines from the end
+    var start: u64 = have
+    var lines: u64 = 0
+    var i: u64 = have
+    while i > 0 && lines <= want {
+        i = i - 1
+        if obstate.ld8(p, i) == 10 && i + 1 < have {
+            lines = lines + 1
+            if lines <= want {
+                start = i + 1
+            }
+        }
+    }
+    if i == 0 && lines < want {
+        start = 0
+    }
+    actwire.ob_reset()
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_rot: [u8; 11] = "rotations=\0"
+    var s_max: [u8; 11] = "\nauditmax=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str((&s_rot[0 as usize]) as u64)
+    actwire.ob_num(obbase.c_rotations)
+    actwire.ob_str((&s_max[0 as usize]) as u64)
+    actwire.ob_num(obbase.audit_max)
+    actwire.ob_str((&s_nl[0 as usize]) as u64)
+    if have > start {
+        actwire.ob_n(p + start, have - start)
+    }
+    obstate.reply(pid, id, actwire.ob_ptr(), actwire.ob_len())
+}
+
+// Runs the adapter of `act`; the reply is left in the output buffer.
+fn run_adapter(act: u64, msg: u64, dry: bool, uid: u64) -> bool {
+    let kind: u64 = obstate.ld(obstate.ac(act), obbase.AC_ADKIND)
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_ad: [u8; 9] = "adapter=\0"
+    if (kind == obbase.AD_UI || kind == obbase.AD_KEYS) && obstate.ld(obstate.ap(obstate.ld(obstate.ac(act), obbase.AC_APP)), obbase.AP_WIN) != 0 {
+        return obstate.run_window(act, msg, dry)
+    }
+    if kind == obbase.AD_DBUS || kind == obbase.AD_UI || kind == obbase.AD_KEYS {
+        // declared honestly, not faked: OrientOS has no D-Bus, and a
+        // keys/ui adapter without `for window` names no window to steer
+        // (docs/ACTION-BUS.md 7)
+        var e: [u8; 24] = "err adapter_unsupported\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e[0 as usize]) as u64)
+        actwire.ob_ch(32)
+        actwire.ob_str(obstate.adapter_name(kind))
+        actwire.ob_ch(10)
+        return false
+    }
+    var argc: u64 = 0
+    if kind == obbase.AD_CLI {
+        argc = obstate.adapter_argv(act, msg)
+        if argc == 0 {
+            var e2: [u8; 20] = "err adapter_broken\n\0"
+            actwire.ob_reset()
+            actwire.ob_str((&e2[0 as usize]) as u64)
+            return false
+        }
+    }
+    if dry {
+        var s_d: [u8; 16] = "ok\ndry=1\nwould=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_d[0 as usize]) as u64)
+        if kind == obbase.AD_CLI {
+            var i: u64 = 0
+            while i < argc {
+                if i > 0 {
+                    actwire.ob_ch(32)
+                }
+                actwire.ob_str(obbase.adptr[i as usize])
+                i = i + 1
+            }
+        } else {
+            actwire.ob_str(obstate.pl(obstate.ld(obstate.ac(act), obbase.AC_ADCMD)))
+        }
+        actwire.ob_ch(10)
+        actwire.ob_str((&s_ad[0 as usize]) as u64)
+        actwire.ob_str(obstate.adapter_name(kind))
+        actwire.ob_ch(10)
+        return true
+    }
+    // AB-019: a free job slot first -- four programs may run at once
+    var slot: u64 = actwire.NONE
+    var q: u64 = 0
+    while q < AJ_MAX && slot == actwire.NONE {
+        if obstate.ld(obstate.aj(q), AJ_USED) == 0 {
+            slot = q
+        }
+        q = q + 1
+    }
+    if slot == actwire.NONE {
+        var eb: [u8; 18] = "err adapter_busy\n\0"
+        actwire.ob_reset()
+        actwire.ob_str((&eb[0 as usize]) as u64)
+        return false
+    }
+    obbase.c_adapt = obbase.c_adapt + 1
+    var op: [u8; 32] = [0 as u8; 32]
+    obstate.aj_path(slot, (&op[0 as usize]) as u64)
+    // O_WRONLY|O_CREAT|O_TRUNC, mode 0666 -- the child writes it after
+    // dropping to another uid; the descriptor is already open
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&op[0 as usize]) as u64, 1 | 64 | 512, 438)
+    if ulib.bad(fd) {
+        var e3: [u8; 25] = "err adapter_unavailable\n\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e3[0 as usize]) as u64)
+        return false
+    }
+    let child: u64 = ulib.sys(ulib.SYS_FORK, 0, 0, 0)
+    if child == 0 {
+        obstate.adapter_child(act, msg, fd, uid)
+    }
+    io.close(fd)
+    if ulib.bad(child) {
+        var e4: [u8; 20] = "err adapter_failed\n\0"
+        actwire.ob_reset()
+        actwire.ob_str((&e4[0 as usize]) as u64)
+        return false
+    }
+    // AB-019: the broker does NOT wait here. Until round ACTION-BUS-5 it
+    // polled waitpid for up to 5 s, and every other call -- a read of
+    // another app, a confirmation, the settings window -- stood still
+    // behind one slow program. The job is noted, the caller gets its
+    // answer when the program ends (aj_poll in the serve loop), and the
+    // bus goes on meanwhile.
+    let jp: u64 = obstate.aj(slot)
+    obstate.st(jp, AJ_USED, 1)
+    obstate.st(jp, AJ_CHILD, child)
+    obstate.st(jp, AJ_T0, actwire.ticks())
+    obstate.st(jp, AJ_ACT, act)
+    obbase.g_started = true
+    obbase.g_slot = slot
+    obbase.aj_n = obbase.aj_n + 1
+    if obbase.aj_n > aj_peak {
+        aj_peak = obbase.aj_n
+    }
+    return true
+}
+
+// ================================= AB-019: ADAPTER CALLS RUN CONCURRENTLY
+const AJ_MAX: u64 = 4
+
+const AJ_USED: u64 = 0
+
+const AJ_CHILD: u64 = 8
+
+const AJ_ACT: u64 = 40
+
+const AJ_T0: u64 = 48
+
+static mut aj_peak: u64 = 0
+
+// the program of job `slot` has ended (or was killed): the reply as it
+// was before AB-019, then the caller, the undo record and the log
+fn aj_finish(slot: u64, killed: bool, code: u64) {
+    let jp: u64 = obstate.aj(slot)
+    let act: u64 = obstate.ld(jp, AJ_ACT)
+    let kind: u64 = obstate.ld(obstate.ac(act), obbase.AC_ADKIND)
+    var op: [u8; 32] = [0 as u8; 32]
+    obstate.aj_path(slot, (&op[0 as usize]) as u64)
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_ad: [u8; 9] = "adapter=\0"
+    // the output: k=v lines pass through, anything else becomes out=
+    let rfd: u64 = io.open((&op[0 as usize]) as u64, 0)
+    var n: u64 = 0
+    let ob: u64 = (&adout[0 as usize]) as u64
+    if !ulib.bad(rfd) {
+        n = io.read(rfd, ob, 2000)
+        io.close(rfd)
+        if ulib.bad(n) {
+            n = 0
+        }
+    }
+    obstate.st8(ob, n, 0)
+    actwire.ob_reset()
+    if killed || code != 0 {
+        var e5: [u8; 25] = "err adapter_failed exit=\0"
+        actwire.ob_str((&e5[0 as usize]) as u64)
+        if killed {
+            var s_to: [u8; 8] = "timeout\0"
+            actwire.ob_str((&s_to[0 as usize]) as u64)
+        } else {
+            actwire.ob_num(code)
+        }
+        actwire.ob_ch(10)
+    } else {
+        actwire.ob_str((&s_ok[0 as usize]) as u64)
+    }
+    var s_out: [u8; 5] = "out=\0"
+    var at: u64 = 0
+    var lines: u64 = 0
+    while obstate.ld8(ob, at) != 0 && lines < 16 {
+        let le: u64 = actwire.line_end(ob, at)
+        if le > at {
+            var has_eq: bool = false
+            var j: u64 = at
+            while j < le && !has_eq {
+                let c: u64 = obstate.ld8(ob, j)
+                if c == 61 {
+                    has_eq = true
+                } else if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 || c == 46) {
+                    j = le
+                }
+                j = j + 1
+            }
+            if !has_eq || obstate.ld8(ob, at) == 64 {
+                actwire.ob_str((&s_out[0 as usize]) as u64)
+            }
+            actwire.ob_n(ob + at, le - at)
+            actwire.ob_ch(10)
+            lines = lines + 1
+        }
+        at = le
+        if obstate.ld8(ob, at) == 10 {
+            at = at + 1
+        }
+    }
+    actwire.ob_str((&s_ad[0 as usize]) as u64)
+    actwire.ob_str(obstate.adapter_name(kind))
+    actwire.ob_ch(10)
+    let aok: bool = !killed && code == 0
+    let pid: u64 = obstate.ld(jp, obbase.AJ_PID)
+    let uid: u64 = obstate.ld(jp, obbase.AJ_UID)
+    let cp: u64 = jp + obbase.AJ_CLIENT
+    obstate.reply_ob(pid, obstate.ld(jp, obbase.AJ_ID))
+    let undo: bool = obstate.ld(jp, obbase.AJ_UNDO) != 0
+    if aok && !undo {
+        var noargs: [u8; 1] = "\0"
+        push_undo(cp, act, (&noargs[0 as usize]) as u64)
+    }
+    if obstate.ld(jp, obbase.AJ_LVL) == obbase.L_READ {
+        obbase.audit_lazy = true
+    } else {
+        obbase.skip_tally = true // counted as a change at its write-ahead line
+    }
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    var vb: u64 = (&s_callv[0 as usize]) as u64
+    if undo {
+        vb = (&s_undov[0 as usize]) as u64
+    }
+    var r_err: [u8; 4] = "err\0"
+    var r_ok: [u8; 3] = "ok\0"
+    var res: u64 = (&r_err[0 as usize]) as u64
+    if aok {
+        res = (&r_ok[0 as usize]) as u64
+    }
+    audit(pid, uid, cp, vb, obstate.ac(act) + obbase.AC_NAME, (&obbase.s_allow[0 as usize]) as u64,
+        res, false)
+    obstate.st(jp, AJ_USED, 0)
+    obbase.aj_n = obbase.aj_n - 1
+}
+
+// every turn of the serve loop: which programs have ended, which ran
+// out of time (5 s, as before: a hanging program is killed)
+fn aj_poll() {
+    if obbase.aj_n == 0 {
+        return
+    }
+    var status: [u64; 1] = [0 as u64; 1]
+    var i: u64 = 0
+    while i < AJ_MAX {
+        let jp: u64 = obstate.aj(i)
+        if obstate.ld(jp, AJ_USED) != 0 {
+            let child: u64 = obstate.ld(jp, AJ_CHILD)
+            status[0 as usize] = 0
+            let r: u64 = ulib.sys4(61, child, (&status[0 as usize]) as u64, 1, 0)
+            if r == child {
+                aj_finish(i, false, (status[0 as usize] >> 8) & 255)
+            } else if actwire.ticks() - obstate.ld(jp, AJ_T0) > 500 {
+                ulib.sys(62, child, 9, 0)
+                ulib.sys4(61, child, (&status[0 as usize]) as u64, 0, 0)
+                aj_finish(i, true, 0)
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn reply_confirm(pid: u64, id: u64, tp: u64, np: u64, rlvl: u64, act: u64) {
+    var s_c: [u8; 9] = "confirm \0"
+    var s_lv: [u8; 8] = "\nlevel=\0"
+    var s_ds: [u8; 7] = "\ntext=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_num(obstate.ld(tp, obbase.TK_NO))
+    actwire.ob_ch(32)
+    actwire.ob_str(np)
+    actwire.ob_str((&s_lv[0 as usize]) as u64)
+    actwire.ob_str(obstate.level_name(rlvl))
+    actwire.ob_str((&s_ds[0 as usize]) as u64)
+    actwire.ob_str(obstate.pl(obstate.ld(obstate.ac(act), obbase.AC_DESC)))
+    actwire.ob_ch(10)
+    obstate.reply_ob(pid, id)
+}
+
+fn tok_dup(cp: u64, uid: u64, print: u64) -> u64 {
+    var i: u64 = 0
+    while i < obbase.TOK_MAX {
+        if obstate.ld(obstate.tk(i), obbase.TK_USED) != 0 && obstate.ld(obstate.tk(i), obbase.TK_UID) == uid && obstate.ld(obstate.tk(i), obbase.TK_PRINT) == print
+            && actwire.str_eq(obstate.tk(i) + obbase.TK_CLIENT, cp) {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+// ======================================================== replies in
+
+fn push_undo(client: u64, act: u64, args: u64) {
+    // the inverse action is the one the MANIFEST names, in the same app
+    let uo: u64 = obstate.ld(obstate.ac(act), obbase.AC_UNDO)
+    if uo == actwire.NONE {
+        return
+    }
+    let inv: u64 = obstate.find_act(obstate.pl(uo), false)
+    if inv == actwire.NONE || obstate.ld(obstate.ac(inv), obbase.AC_APP) != obstate.ld(obstate.ac(act), obbase.AC_APP) {
+        return
+    }
+    var slot: u64 = 0
+    var oldest: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < obbase.UNDO_MAX {
+        let u: u64 = obstate.un(i)
+        if obstate.ld(u, obbase.UN_USED) == 0 {
+            slot = i
+            oldest = 0
+        } else if obstate.ld(u, obbase.UN_SEQ) < oldest {
+            slot = i
+            oldest = obstate.ld(u, obbase.UN_SEQ)
+        }
+        i = i + 1
+    }
+    undo_seq = undo_seq + 1
+    let u2: u64 = obstate.un(slot)
+    obstate.st(u2, obbase.UN_USED, 1)
+    obstate.st(u2, obbase.UN_SEQ, undo_seq)
+    obstate.st(u2, obbase.UN_ACT, inv)
+    obstate.copyz(u2 + obbase.UN_CLIENT, client, 24)
+    obstate.copyz(u2 + obbase.UN_ARGS, args, UN_ARGMAX)
+}
+
+// A reply from a provider: find the call it answers, check who sent
+// it, relay it to the caller.
+fn on_reply(s: u64) {
+    let id: u64 = actwire.asm_id(s)
+    let from: u64 = actwire.asm_pid(s)
+    let msg: u64 = actwire.asm_buf(s)
+    var k: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < obbase.PEND_MAX {
+        if obstate.ld(obstate.pe(i), obbase.PE_USED) != 0 && obstate.ld(obstate.pe(i), obbase.PE_NONCE) == id {
+            k = i
+        }
+        i = i + 1
+    }
+    if k == actwire.NONE {
+        c_badrep = c_badrep + 1
+        return
+    }
+    let p: u64 = obstate.pe(k)
+    let app: u64 = obstate.ld(p, obbase.PE_APP)
+    let bound: u64 = obstate.ld(obstate.ap(app), obbase.AP_PID)
+    if bound != 0 && bound != from {
+        // not the process that owns a.<app>: an impostor guessed an id
+        c_badrep = c_badrep + 1
+        var w: [u8; 45] = "orientbus: reply from a foreign pid, dropped\0"
+        obstate.say((&w[0 as usize]) as u64)
+        obstate.nl()
+        return
+    }
+    if bound == 0 {
+        // only the owner of a.<app> received the nonce: bind it -- if
+        // the kernel says it comes from that app or from the system
+        if !provider_ok(app, from) {
+            c_badprov = c_badprov + 1
+            var w2: [u8; 48] = "orientbus: provider with a foreign origin, pid \0"
+            obstate.lb_start((&w2[0 as usize]) as u64)
+            obstate.lb_num(from)
+            obstate.lb_say()
+            obstate.st(p, obbase.PE_USED, 0)
+            return
+        }
+        obstate.st(obstate.ap(app), obbase.AP_PID, from)
+    }
+    let flags: u64 = obstate.ld(p, obbase.PE_FLAGS)
+    obstate.st(p, obbase.PE_USED, 0)
+    if (flags & obbase.PF_PING) != 0 {
+        var b: [u8; 21] = "orientbus: provider \0"
+        var b2: [u8; 10] = " bound to\0"
+        var sp: [u8; 6] = " pid=\0"
+        obstate.lb_start((&b[0 as usize]) as u64)
+        obstate.lb_add(obstate.ap(app) + obbase.AP_NAME)
+        obstate.lb_add((&b2[0 as usize]) as u64)
+        obstate.lb_add((&sp[0 as usize]) as u64)
+        obstate.lb_num(from)
+        obstate.lb_say()
+        return
+    }
+    let act: u64 = obstate.ld(p, obbase.PE_ACT)
+    let dry: bool = (flags & obbase.PF_DRY) != 0
+    // relay everything but the @-lines; collect "@undo k=v k=v"
+    var args: [u8; 200] = [0 as u8; 200]
+    let agp: u64 = (&args[0 as usize]) as u64
+    var have_undo: bool = false
+    var k_undo: [u8; 7] = "@undo \0"
+    actwire.ob_reset()
+    var at: u64 = 0
+    var first: bool = true
+    while obstate.ld8(msg, at) != 0 {
+        let e: u64 = actwire.line_end(msg, at)
+        if actwire.is_meta(msg, at) {
+            if actwire.starts(msg + at, (&k_undo[0 as usize]) as u64) {
+                // "@undo a=1 b=2" -> "a=1\nb=2\n"
+                var n: u64 = 0
+                var j: u64 = at + 6
+                while j < e && n + 2 < 200 {
+                    var c: u64 = obstate.ld8(msg, j)
+                    if c == 32 {
+                        c = 10
+                    }
+                    obstate.st8(agp, n, c)
+                    n = n + 1
+                    j = j + 1
+                }
+                obstate.st8(agp, n, 10)
+                obstate.st8(agp, n + 1, 0)
+                have_undo = true
+            }
+        } else {
+            actwire.ob_n(msg + at, e - at)
+            actwire.ob_ch(10)
+        }
+        if first {
+            first = false
+        }
+        at = e
+        if obstate.ld8(msg, at) == 10 {
+            at = at + 1
+        }
+    }
+    let okr: bool = obstate.ld8(msg, 0) == 111 && obstate.ld8(msg, 1) == 107 // "ok"
+    if okr && have_undo && !dry && (flags & obbase.PF_UNDO) == 0 {
+        push_undo(p + obbase.PE_CLIENT, act, agp)
+        var s_u: [u8; 16] = "undo=available\n\0"
+        actwire.ob_str((&s_u[0 as usize]) as u64)
+    }
+    obstate.reply_ob(obstate.ld(p, obbase.PE_PID), obstate.ld(p, obbase.PE_ID))
+    var r_ok: [u8; 3] = "ok\0"
+    var r_err: [u8; 4] = "err\0"
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    var vb: u64 = (&s_callv[0 as usize]) as u64
+    if (flags & obbase.PF_UNDO) != 0 {
+        vb = (&s_undov[0 as usize]) as u64
+        c_undo = c_undo + 1
+    }
+    var res: u64 = (&r_ok[0 as usize]) as u64
+    if !okr {
+        res = (&r_err[0 as usize]) as u64
+    }
+    var dec: u64 = (&obbase.s_allow[0 as usize]) as u64
+    obbase.audit_lazy = okr && (dry || obstate.ld(obstate.ac(act), obbase.AC_LEVEL) == obbase.L_READ)
+    audit(obstate.ld(p, obbase.PE_PID), obstate.ld(p, obbase.PE_UID), p + obbase.PE_CLIENT, vb, obstate.ac(act) + obbase.AC_NAME,
+        dec, res, dry)
+}
+
+// An event from a provider: declared in its manifest, sent by the pid
+// that owns a.<app>, then published to everyone on orient.evt.
+fn on_event(s: u64) {
+    let msg: u64 = actwire.asm_buf(s)
+    var w: [u8; 16] = [0 as u8; 16]
+    var nm: [u8; 40] = [0 as u8; 40]
+    let wp: u64 = (&w[0 as usize]) as u64
+    let np: u64 = (&nm[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, wp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    let ev: u64 = obstate.find_act(np, true)
+    if ev == actwire.NONE {
+        c_badevt = c_badevt + 1
+        return
+    }
+    let app: u64 = obstate.ld(obstate.ac(ev), obbase.AC_APP)
+    if obstate.ld(obstate.ap(app), obbase.AP_PID) == 0 || obstate.ld(obstate.ap(app), obbase.AP_PID) != actwire.asm_pid(s) {
+        c_badevt = c_badevt + 1
+        var m: [u8; 48] = "orientbus: event from a pid that is not the app\0"
+        obstate.say((&m[0 as usize]) as u64)
+        obstate.nl()
+        return
+    }
+    var s_app: [u8; 6] = "@app=\0"
+    actwire.ob_reset()
+    let e0: u64 = actwire.line_end(msg, 0)
+    actwire.ob_n(msg, e0)
+    actwire.ob_ch(10)
+    actwire.ob_str((&s_app[0 as usize]) as u64)
+    actwire.ob_line(obstate.ap(app) + obbase.AP_NAME)
+    if obstate.ld8(msg, e0) == 10 {
+        actwire.ob_str(msg + e0 + 1)
+    }
+    deliver(obstate.ac(ev) + obbase.AC_NAME, app, (obstate.ld(obstate.ac(ev), obbase.AC_FLAGS) & obbase.FL_PRIVATE) != 0)
+    c_events = c_events + 1
+}
+
+// ============================================ AB-015: WHO HEARS WHICH EVENT
+//
+// Until round ACTION-BUS-5 the broker PUBLISHED every event on orient.evt
+// and the kernel handed it to whoever subscribed there: any app could
+// listen to every other app, and to `bus.confirm_needed`, which says who
+// wants to change what. Now nothing is published. A listener says
+// `subscribe [glob]` to the broker, and the broker SENDS each event into
+// that listener's reply box r.<pid> after a decision made for THAT event
+// and THAT listener:
+//
+//   * the user hears everything;
+//   * the broker's own events (`bus.*`: the questions to the person, the
+//     automations' runs) go to the user only;
+//   * an app hears its own events;
+//   * an event marked `private` in its manifest: nobody else;
+//   * everybody else hears an event like it would READ it: a deny rule
+//     for that client whose glob matches the event's name keeps it away
+//     (`act block jarvis notes.*` silences notes.changed for Jarvis too).
+//
+// The listener's client is the one the kernel attested when it subscribed
+// (AB-003); the rules are asked again for every event, so a block takes
+// effect at once, without a new subscription. A listener whose box is
+// gone is dropped. orient.evt stays registered by the broker, so nobody
+// else can hold the name; it carries nothing any more.
+const SB_MAX: u64 = 16
+
+const SB_B: u64 = 104
+
+const SB_USED: u64 = 0
+
+const SB_PID: u64 = 8
+
+const SB_USER: u64 = 16 // 1 = the listener is the user
+
+const SB_N: u64 = 24 // events it got
+
+const SB_CLIENT: u64 = 32 // 24 octets
+
+const SB_GLOB: u64 = 56 // 48 octets
+
+static mut subs: [u8; 1664] = [0 as u8; 1664]
+
+static mut c_withheld: u64 = 0 // events a listener did not get (AB-015)
+
+static mut c_subs: u64 = 0
+
+fn sb(i: u64) -> u64 {
+    return (&subs[0 as usize]) as u64 + i * SB_B
+}
+
+// may this listener hear event `name` of app `app` (NONE = the broker)?
+fn ev_allowed(sp: u64, name: u64, app: u64, private: bool) -> bool {
+    if obstate.ld(sp, SB_USER) != 0 {
+        return true
+    }
+    if app == actwire.NONE {
+        return false // bus.*: the user only
+    }
+    // the app itself: client `app:<name>`
+    let c: u64 = sp + SB_CLIENT
+    if obstate.ld8(c, 0) == 97 && obstate.ld8(c, 1) == 112 && obstate.ld8(c, 2) == 112 && obstate.ld8(c, 3) == 58
+        && actwire.str_eq(c + 4, obstate.ap(app) + obbase.AP_NAME) {
+        return true
+    }
+    if private {
+        return false
+    }
+    return obstate.decide_named(c, name, obbase.L_READ, false) != obbase.D_DENY
+}
+
+// the message is in actwire's output buffer
+fn deliver(name: u64, app: u64, private: bool) {
+    var pre: [u8; 3] = "r.\0"
+    var nm: [u8; 24] = [0 as u8; 24]
+    let np: u64 = (&nm[0 as usize]) as u64
+    var i: u64 = 0
+    while i < SB_MAX {
+        let sp: u64 = sb(i)
+        if obstate.ld(sp, SB_USED) != 0 && obstate.glob_match(sp + SB_GLOB, name) {
+            if !ev_allowed(sp, name, app, private) {
+                c_withheld = c_withheld + 1
+            } else {
+                actwire.name_of((&pre[0 as usize]) as u64, obstate.ld(sp, SB_PID), np)
+                let svc: u64 = actwire.bus_find(np)
+                if ulib.bad(svc) || ulib.bad(actwire.send_msg(svc, actwire.K_EVT,
+                    evt_seq, actwire.ob_ptr(), actwire.ob_len())) {
+                    obstate.st(sp, SB_USED, 0) // the listener is gone
+                } else {
+                    obstate.st(sp, SB_N, obstate.ld(sp, SB_N) + 1)
+                }
+            }
+        }
+        i = i + 1
+    }
+    evt_seq = evt_seq + 1
+}
+
+// subscribe [glob] | unsubscribe
+fn do_subscribe(msg: u64, pid: u64, uid: u64, id: u64, on: bool) {
+    var slot: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < SB_MAX {
+        let sp: u64 = sb(i)
+        if obstate.ld(sp, SB_USED) != 0 && obstate.ld(sp, SB_PID) == pid {
+            if on {
+                slot = i
+            } else {
+                obstate.st(sp, SB_USED, 0)
+            }
+        }
+        i = i + 1
+    }
+    var s_ok: [u8; 4] = "ok\n\0"
+    if !on {
+        obstate.reply(pid, id, (&s_ok[0 as usize]) as u64, 3)
+        return
+    }
+    i = 0
+    while i < SB_MAX && slot == actwire.NONE {
+        if obstate.ld(sb(i), SB_USED) == 0 {
+            slot = i
+        }
+        i = i + 1
+    }
+    if slot == actwire.NONE {
+        var e: [u8; 15] = "subscribe_full\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    var w: [u8; 16] = [0 as u8; 16]
+    var g: [u8; 48] = [0 as u8; 48]
+    let gp: u64 = (&g[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, (&w[0 as usize]) as u64, 16)
+    actwire.word_copy(msg, nx, gp, 48)
+    if obstate.ld8(gp, 0) == 0 || obstate.ld8(gp, 0) == 64 {
+        obstate.st8(gp, 0, 42) // "*"
+        obstate.st8(gp, 1, 0)
+    }
+    let sp: u64 = sb(slot)
+    obstate.st(sp, SB_USED, 1)
+    obstate.st(sp, SB_PID, pid)
+    obstate.st(sp, SB_N, 0)
+    obstate.st(sp, SB_USER, 0)
+    if is_user(msg, uid) {
+        obstate.st(sp, SB_USER, 1)
+    }
+    obstate.copyz(sp + SB_CLIENT, (&obbase.g_client[0 as usize]) as u64, 24)
+    obstate.copyz(sp + SB_GLOB, gp, 48)
+    c_subs = c_subs + 1
+    var s_s: [u8; 15] = "ok\nsubscribed=\0"
+    var s_c: [u8; 9] = "\nclient=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_s[0 as usize]) as u64)
+    actwire.ob_str(gp)
+    actwire.ob_str((&s_c[0 as usize]) as u64)
+    actwire.ob_str(sp + SB_CLIENT)
+    actwire.ob_ch(10)
+    obstate.reply_ob(pid, id)
+    var s_v: [u8; 10] = "subscribe\0"
+    var r_ok: [u8; 3] = "ok\0"
+    obbase.audit_lazy = true
+    audit(pid, uid, sp + SB_CLIENT, (&s_v[0 as usize]) as u64, gp,
+        (&obbase.s_allow[0 as usize]) as u64, (&r_ok[0 as usize]) as u64, false)
+}
+
+// ================================================== the other verbs
+
+fn is_user(msg: u64, uid: u64) -> bool {
+    if !actwire.str_eq((&obbase.g_client[0 as usize]) as u64,
+        (&obbase.s_user[0 as usize]) as u64) {
+        return false
+    }
+    if uid == 0 {
+        return true
+    }
+    // ROUND ACTION-BUS-3: THE PERSON WHO SIGNED IN IS THE USER TOO.
+    // Until here only uid 0 counted -- but on a real device glogin drops
+    // the session to the person's own uid (justin, >= 1000), so the one
+    // human at the machine could neither confirm nor grant. The kernel
+    // knows whose session it is (SYS_SPERRE op 8, set once by glogin
+    // while still root); an unlabelled process of THAT uid is the user.
+    let su: u64 = actwire.session_uid()
+    return su != 0 && su == uid
+}
+
+// AB-003: the client of this request. `g_attested` = the kernel named it.
+fn resolve_client(msg: u64, pid: u64) {
+    let gc: u64 = (&obbase.g_client[0 as usize]) as u64
+    let go: u64 = (&g_origin[0 as usize]) as u64
+    var claim: [u8; 24] = [0 as u8; 24]
+    let clp: u64 = (&claim[0 as usize]) as u64
+    var k_client: [u8; 8] = "@client\0"
+    let claimed: bool = actwire.kv_find(msg, (&k_client[0 as usize]) as u64,
+        clp, 24) && obstate.ld8(clp, 0) != 0
+    let n: u64 = actwire.origin_of(pid, go)
+    if n == actwire.NONE {
+        // the sender is gone: never "user"
+        var s_gone: [u8; 5] = "gone\0"
+        obstate.copyz(gc, (&s_gone[0 as usize]) as u64, 24)
+        g_attested = true
+        return
+    }
+    if n > 0 {
+        obstate.copyz(gc, go, 24)
+        g_attested = true
+        if claimed && !actwire.str_eq(clp, go) {
+            c_claims = c_claims + 1
+        }
+        return
+    }
+    g_attested = false
+    if claimed {
+        obstate.copyz(gc, clp, 24)
+    } else {
+        obstate.copyz(gc, (&obbase.s_user[0 as usize]) as u64, 24)
+    }
+}
+
+// whoami: what the broker sees -- for a client that wants to know, and
+// for the test that shows the kernel, not the caller, decides
+fn do_whoami(pid: u64, id: u64) {
+    var s_ok: [u8; 11] = "ok\nclient=\0"
+    var s_or: [u8; 9] = "\norigin=\0"
+    var s_at: [u8; 11] = "\nattested=\0"
+    var s_y: [u8; 4] = "yes\0"
+    var s_n: [u8; 3] = "no\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str((&obbase.g_client[0 as usize]) as u64)
+    actwire.ob_str((&s_or[0 as usize]) as u64)
+    if obstate.ld8((&g_origin[0 as usize]) as u64, 0) == 0 {
+        actwire.ob_ch(45)
+    } else {
+        actwire.ob_str((&g_origin[0 as usize]) as u64)
+    }
+    actwire.ob_str((&s_at[0 as usize]) as u64)
+    if g_attested {
+        actwire.ob_str((&s_y[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_n[0 as usize]) as u64)
+    }
+    // AB-009: must this client dry-run its changes first?
+    var s_df: [u8; 12] = "\ndry_first=\0"
+    actwire.ob_str((&s_df[0 as usize]) as u64)
+    if dryfirst_for((&obbase.g_client[0 as usize]) as u64) {
+        actwire.ob_str((&s_y[0 as usize]) as u64)
+    } else {
+        actwire.ob_str((&s_n[0 as usize]) as u64)
+    }
+    actwire.ob_ch(10)
+    obstate.reply_ob(pid, id)
+}
+
+// AB-003: may process `pid` be the provider of `app`? The kernel already
+// refuses `a.<app>` to a process with another app's label; this is the
+// second lock on the same door, and the one that also holds if a
+// provider was registered before this kernel rule existed.
+fn provider_ok(app: u64, pid: u64) -> bool {
+    var o: [u8; 32] = [0 as u8; 32]
+    let op: u64 = (&o[0 as usize]) as u64
+    let n: u64 = actwire.origin_of(pid, op)
+    if n == actwire.NONE {
+        return false
+    }
+    if n == 0 {
+        return true
+    }
+    var s_app: [u8; 5] = "app:\0"
+    if !actwire.starts(op, (&s_app[0 as usize]) as u64) {
+        return false
+    }
+    return actwire.str_eq(op + 4, obstate.ap(app) + obbase.AP_NAME)
+}
+
+// grant <client> <glob> <read|write> [seconds]
+fn do_grant(msg: u64, pid: u64, uid: u64, id: u64) {
+    var e_who: [u8; 31] = "denied only the user may grant\0"
+    var e_bad: [u8; 34] = "bad_arg grant <client> <glob> <l>\0"
+    if !is_user(msg, uid) {
+        obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w0: [u8; 32] = [0 as u8; 32]
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    var w3: [u8; 32] = [0 as u8; 32]
+    var w4: [u8; 32] = [0 as u8; 32]
+    let p0: u64 = (&w0[0 as usize]) as u64
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    let p4: u64 = (&w4[0 as usize]) as u64
+    var nx: u64 = actwire.word_copy(msg, 0, p0, 32)
+    nx = actwire.word_copy(msg, nx, p1, 32)
+    nx = actwire.word_copy(msg, nx, p2, 32)
+    nx = actwire.word_copy(msg, nx, p3, 32)
+    actwire.word_copy(msg, nx, p4, 32)
+    let l: u64 = obstate.level_of(p3)
+    if obstate.ld8(p1, 0) == 0 || obstate.ld8(p2, 0) == 0 || l == actwire.NONE || l == obbase.L_CRIT {
+        obstate.reply_err(pid, id, (&e_bad[0 as usize]) as u64, 0)
+        return
+    }
+    var until: u64 = 0
+    let secs: u64 = ulib.to_num(p4)
+    if secs > 0 {
+        until = actwire.ticks() + secs * 100
+    }
+    // AB-006: a grant without seconds is permanent -- and permanent
+    // means it is in the policy file, so it survives a restart and the
+    // page "what may which app" can take it out again
+    if secs == 0 {
+        var k_allow: [u8; 6] = "allow\0"
+        if !policy_append((&k_allow[0 as usize]) as u64, p1, p2, p3) {
+            var e5: [u8; 20] = "policy_not_writable\0"
+            obstate.reply_err(pid, id, (&e5[0 as usize]) as u64, 0)
+            return
+        }
+    }
+    if !obstate.rule_add(p1, p2, false, l, until) {
+        var e: [u8; 11] = "rules_full\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    if secs == 0 {
+        obstate.st(obstate.ru(obbase.last_rule), obbase.RU_PERM, 1)
+    }
+    var s_ok: [u8; 10] = "ok\ngrant \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(p1)
+    actwire.ob_ch(32)
+    actwire.ob_str(p2)
+    actwire.ob_ch(32)
+    actwire.ob_str(p3)
+    actwire.ob_ch(10)
+    obstate.reply_ob(pid, id)
+    var s_g: [u8; 6] = "grant\0"
+    var r_ok: [u8; 3] = "ok\0"
+    audit(pid, uid, p1, (&s_g[0 as usize]) as u64, p2,
+        (&obbase.s_allow[0 as usize]) as u64, (&r_ok[0 as usize]) as u64, false)
+}
+
+fn do_stat(pid: u64, id: u64) {
+    var s_ok: [u8; 4] = "ok\n\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    var k1: [u8; 11] = "manifests=\0"
+    stat_line((&k1[0 as usize]) as u64, obbase.c_manifests)
+    var k2: [u8; 20] = "rejected_manifests=\0"
+    stat_line((&k2[0 as usize]) as u64, obbase.c_rejected)
+    var k3: [u8; 6] = "apps=\0"
+    stat_line((&k3[0 as usize]) as u64, obbase.n_apps)
+    var k4: [u8; 9] = "actions=\0"
+    stat_line((&k4[0 as usize]) as u64, obbase.n_acts)
+    var k5: [u8; 7] = "calls=\0"
+    stat_line((&k5[0 as usize]) as u64, obbase.c_calls)
+    var k6: [u8; 9] = "allowed=\0"
+    stat_line((&k6[0 as usize]) as u64, obbase.c_allow)
+    var k7: [u8; 7] = "asked=\0"
+    stat_line((&k7[0 as usize]) as u64, obbase.c_ask)
+    var k7d: [u8; 11] = "duplicate=\0"
+    stat_line((&k7d[0 as usize]) as u64, obbase.c_dup)
+    var k8: [u8; 8] = "denied=\0"
+    stat_line((&k8[0 as usize]) as u64, obbase.c_deny)
+    var k9: [u8; 5] = "dry=\0"
+    stat_line((&k9[0 as usize]) as u64, obbase.c_dry)
+    var k10: [u8; 8] = "undone=\0"
+    stat_line((&k10[0 as usize]) as u64, c_undo)
+    var k11: [u8; 8] = "events=\0"
+    stat_line((&k11[0 as usize]) as u64, c_events)
+    var k12: [u8; 17] = "foreign_replies=\0"
+    stat_line((&k12[0 as usize]) as u64, c_badrep)
+    var k13: [u8; 16] = "foreign_events=\0"
+    stat_line((&k13[0 as usize]) as u64, c_badevt)
+    var k14: [u8; 14] = "log_failures=\0"
+    stat_line((&k14[0 as usize]) as u64, obbase.c_logfail)
+    var k15: [u8; 14] = "lazy_entries=\0"
+    stat_line((&k15[0 as usize]) as u64, obbase.c_lazy)
+    var k16: [u8; 16] = "claims_ignored=\0"
+    stat_line((&k16[0 as usize]) as u64, c_claims)
+    var k17: [u8; 19] = "foreign_providers=\0"
+    stat_line((&k17[0 as usize]) as u64, c_badprov)
+    var k18: [u8; 14] = "adapter_runs=\0"
+    stat_line((&k18[0 as usize]) as u64, obbase.c_adapt)
+    var k18b: [u8; 11] = "keys_sent=\0"
+    stat_line((&k18b[0 as usize]) as u64, obbase.c_keys)
+    var k19: [u8; 13] = "schema_keys=\0"
+    stat_line((&k19[0 as usize]) as u64, setschema.count())
+    var k20: [u8; 15] = "dry_run_first=\0"
+    stat_line((&k20[0 as usize]) as u64, obbase.c_dryfirst)
+    var k21: [u8; 17] = "events_withheld=\0"
+    stat_line((&k21[0 as usize]) as u64, c_withheld)
+    var k22: [u8; 15] = "subscriptions=\0"
+    stat_line((&k22[0 as usize]) as u64, c_subs)
+    var k23: [u8; 18] = "adapters_at_once=\0"
+    stat_line((&k23[0 as usize]) as u64, aj_peak)
+    var k24: [u8; 17] = "trusted_dialogs=\0"
+    stat_line((&k24[0 as usize]) as u64, obbase.c_trusted)
+    obstate.reply_ob(pid, id)
+}
+
+fn stat_line(k: u64, v: u64) {
+    actwire.ob_str(k)
+    actwire.ob_num(v)
+    actwire.ob_ch(10)
+}
+
+// hello <app>: a provider announces itself; the broker pings a.<app>
+// (the kernel routes that ping to the REAL owner) and binds its pid
+fn do_hello(msg: u64) {
+    var w: [u8; 16] = [0 as u8; 16]
+    var a: [u8; 24] = [0 as u8; 24]
+    let wp: u64 = (&w[0 as usize]) as u64
+    let arp: u64 = (&a[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, wp, 16)
+    actwire.word_copy(msg, nx, arp, 24)
+    let app: u64 = obstate.find_app(arp)
+    if app == actwire.NONE {
+        var m: [u8; 35] = "orientbus: hello from unknown app \0"
+        obstate.lb_start((&m[0 as usize]) as u64)
+        obstate.lb_add(arp)
+        obstate.lb_say()
+        return
+    }
+    var nothing: [u8; 1] = "\0"
+    obstate.forward(app, actwire.NONE, (&nothing[0 as usize]) as u64, 0, 0, 0,
+        (&obbase.s_user[0 as usize]) as u64, obbase.PF_PING)
+}
+
+// ============================================ AB-006: WHAT MAY WHICH APP
+//
+// The page "what may which app" in the settings window is built from
+// these verbs and nothing else -- the broker is the only place that
+// knows the rules, so it is the only place that can list them honestly:
+//
+//   rights                 every rule (number, allow/deny, client, glob,
+//                          level, permanent or seconds left), the
+//                          dry-run-first clients, and per client the
+//                          counts: reads, changes, asked, refused, dry runs
+//   revoke <n>             remove rule n (user only); a permanent rule
+//   revoke <client> <glob> is also taken out of /etc/orientbus/policy
+//   block <client> <glob>  a permanent deny rule (user only)
+//
+// A client that is not the user sees only its own lines: what Jarvis may
+// do is Jarvis's business and the user's, not every app's.
+//
+// The counts are kept per client since the broker started and are seeded
+// from the audit log when it starts, so they survive a restart. Imprecise
+// on purpose in one place: an adapter write logs `forwarded` and then
+// `ok`, and the seed counts that `ok` as a read.
+
+const CL_MAX: u64 = 24
+
+const CL_B: u64 = 64
+
+const CL_NAME: u64 = 0 // 24 octets
+
+const CL_READ: u64 = 24
+
+const CL_CHANGE: u64 = 32
+
+const CL_ASK: u64 = 40
+
+const CL_REFUSED: u64 = 48
+
+const CL_DRY: u64 = 56
+
+static mut cls: [u8; 1536] = [0 as u8; 1536]
+
+const TA_READ: u64 = 0
+
+const TA_CHANGE: u64 = 1
+
+const TA_ASK: u64 = 2
+
+const TA_DRY: u64 = 4
+
+fn cl(i: u64) -> u64 {
+    return (&cls[0 as usize]) as u64 + i * CL_B
+}
+
+fn cl_slot(name: u64) -> u64 {
+    if obstate.ld8(name, 0) == 0 {
+        return actwire.NONE
+    }
+    var i: u64 = 0
+    while i < CL_MAX {
+        if obstate.ld8(cl(i), CL_NAME) != 0 && actwire.str_eq(cl(i) + CL_NAME, name) {
+            return i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < CL_MAX {
+        if obstate.ld8(cl(i), CL_NAME) == 0 {
+            obstate.copyz(cl(i) + CL_NAME, name, 24)
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}
+
+fn tally_n(client: u64, kind: u64, n: u64) {
+    let s: u64 = cl_slot(client)
+    if s == actwire.NONE {
+        return
+    }
+    let off: u64 = CL_READ + kind * 8
+    obstate.st(cl(s), off, obstate.ld(cl(s), off) + n)
+}
+
+fn tally(client: u64, kind: u64) {
+    tally_n(client, kind, 1)
+}
+
+// What an audit line means for the counts; NONE = not counted.
+fn tally_kind(verb: u64, decision: u64, result: u64, dry: bool) -> u64 {
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    if !actwire.str_eq(verb, (&s_callv[0 as usize]) as u64)
+        && !actwire.str_eq(verb, (&s_undov[0 as usize]) as u64) {
+        return actwire.NONE
+    }
+    var r_conf: [u8; 8] = "confirm\0"
+    var r_fwd: [u8; 10] = "forwarded\0"
+    var r_ok: [u8; 3] = "ok\0"
+    var r_dry: [u8; 4] = "dry\0"
+    var r_dfirst: [u8; 14] = "dry_run_first\0"
+    if actwire.str_eq(decision, (&obbase.s_deny[0 as usize]) as u64)
+        || actwire.str_eq(result, (&r_dfirst[0 as usize]) as u64) {
+        return obbase.TA_REFUSED
+    }
+    if dry {
+        if actwire.str_eq(result, (&r_dry[0 as usize]) as u64)
+            || actwire.str_eq(result, (&r_ok[0 as usize]) as u64)
+            || actwire.str_eq(result, (&r_fwd[0 as usize]) as u64) {
+            return TA_DRY
+        }
+        return actwire.NONE
+    }
+    if actwire.str_eq(result, (&r_conf[0 as usize]) as u64) {
+        return TA_ASK
+    }
+    if actwire.str_eq(result, (&r_fwd[0 as usize]) as u64) {
+        return TA_CHANGE
+    }
+    if actwire.str_eq(result, (&r_ok[0 as usize]) as u64) {
+        return TA_READ
+    }
+    return actwire.NONE
+}
+
+// The value of ` key=` in one audit line (p..e) into out.
+fn line_field(p: u64, at: u64, e: u64, key: u64, out: u64, max: u64) -> bool {
+    let kl: u64 = actwire.slen(key)
+    var i: u64 = at
+    obstate.st8(out, 0, 0)
+    while i + kl <= e {
+        var hit: bool = i == at || obstate.ld8(p, i - 1) == 32
+        var k: u64 = 0
+        while hit && k < kl {
+            if obstate.ld8(p, i + k) != obstate.ld8(key, k) {
+                hit = false
+            }
+            k = k + 1
+        }
+        if hit {
+            var j: u64 = i + kl
+            var o: u64 = 0
+            while j < e && obstate.ld8(p, j) != 32 && o + 1 < max {
+                obstate.st8(out, o, obstate.ld8(p, j))
+                o = o + 1
+                j = j + 1
+            }
+            obstate.st8(out, o, 0)
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Seed the counts from the audit log (all of it, in pieces).
+fn seed_counts() {
+    // AB-012: the older generation first, then the current log
+    let n1: u64 = seed_from((&obbase.s_logold[0 as usize]) as u64)
+    let n2: u64 = seed_from((&obbase.s_logpath[0 as usize]) as u64)
+    var s1: [u8; 31] = "orientbus: counts seeded from \0"
+    obstate.lb_start((&s1[0 as usize]) as u64)
+    obstate.lb_num(n1 + n2)
+    var s3: [u8; 11] = " log lines\0"
+    obstate.lb_add((&s3[0 as usize]) as u64)
+    obstate.lb_say()
+}
+
+fn seed_from(path: u64) -> u64 {
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let p: u64 = (&obbase.mf[0 as usize]) as u64
+    var have: u64 = 0
+    var k_cl: [u8; 8] = "client=\0"
+    var k_vb: [u8; 6] = "verb=\0"
+    var k_dc: [u8; 10] = "decision=\0"
+    var k_rs: [u8; 8] = "result=\0"
+    var k_dr: [u8; 5] = "dry=\0"
+    var k_ct: [u8; 7] = "count=\0"
+    var c: [u8; 24] = [0 as u8; 24]
+    var v: [u8; 16] = [0 as u8; 16]
+    var d: [u8; 16] = [0 as u8; 16]
+    var r: [u8; 24] = [0 as u8; 24]
+    var y: [u8; 8] = [0 as u8; 8]
+    var n: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&c[0 as usize]) as u64
+    let vp: u64 = (&v[0 as usize]) as u64
+    let dp: u64 = (&d[0 as usize]) as u64
+    let rp: u64 = (&r[0 as usize]) as u64
+    let yp: u64 = (&y[0 as usize]) as u64
+    let np: u64 = (&n[0 as usize]) as u64
+    var lines: u64 = 0
+    var more: bool = true
+    while more {
+        let got: u64 = io.read(fd, p + have, 8000 - have)
+        if ulib.bad(got) || got == 0 {
+            more = false
+        } else {
+            have = have + got
+        }
+        // every complete line in p[0..have]
+        var at: u64 = 0
+        var i: u64 = 0
+        while i < have {
+            if obstate.ld8(p, i) == 10 || (!more && i + 1 == have) {
+                var e: u64 = i
+                if obstate.ld8(p, i) != 10 {
+                    e = i + 1
+                }
+                if line_field(p, at, e, (&k_cl[0 as usize]) as u64, cp, 24)
+                    && line_field(p, at, e, (&k_vb[0 as usize]) as u64, vp, 16)
+                    && line_field(p, at, e, (&k_dc[0 as usize]) as u64, dp, 16)
+                    && line_field(p, at, e, (&k_rs[0 as usize]) as u64, rp, 24) {
+                    line_field(p, at, e, (&k_dr[0 as usize]) as u64, yp, 8)
+                    var cnt: u64 = 1
+                    if line_field(p, at, e, (&k_ct[0 as usize]) as u64, np, 24) {
+                        cnt = ulib.to_num(np)
+                    }
+                    let kind: u64 = tally_kind(vp, dp, rp, obstate.ld8(yp, 0) == 49)
+                    if kind != actwire.NONE {
+                        tally_n(cp, kind, cnt)
+                    }
+                    lines = lines + 1
+                }
+                at = i + 1
+            }
+            i = i + 1
+        }
+        // keep the unfinished line
+        if at < have {
+            if at == 0 && have >= 8000 {
+                have = 0 // one line longer than the buffer: drop it
+            } else {
+                ulib.copy(p, p + at, have - at)
+                have = have - at
+            }
+        } else {
+            have = 0
+        }
+    }
+    io.close(fd)
+    return lines
+}
+
+// ------------------------------------------------- dry run first (AB-009)
+//
+// `dryfirst <client>` in the policy: that client's changes (write and
+// critical, not reads, not undo) are refused with `dry_run_first` unless
+// the SAME call -- same action, same arguments in the same order -- was
+// dry-run by the same client within the last 60 s. One dry run pays for
+// one real call. It turns "Jarvis dry-runs first and shows the plan"
+// from a promise in a prompt into a rule the device enforces.
+
+const DF_MAX: u64 = 4
+
+static mut dfirst: [u8; 96] = [0 as u8; 96] // DF_MAX x 24
+
+const DRY_MAX: u64 = 16
+
+const DRY_B: u64 = 48
+
+const DR_USED: u64 = 0
+
+const DR_HASH: u64 = 8
+
+const DR_T: u64 = 16
+
+const DR_CLIENT: u64 = 24 // 24 octets
+
+static mut drys: [u8; 768] = [0 as u8; 768]
+
+fn df(i: u64) -> u64 {
+    return (&dfirst[0 as usize]) as u64 + i * 24
+}
+
+fn dryfirst_add(client: u64) {
+    var i: u64 = 0
+    while i < DF_MAX {
+        if obstate.ld8(df(i), 0) == 0 {
+            obstate.copyz(df(i), client, 24)
+            return
+        }
+        i = i + 1
+    }
+}
+
+fn dryfirst_for(client: u64) -> bool {
+    var i: u64 = 0
+    while i < DF_MAX {
+        if obstate.ld8(df(i), 0) != 0 && obstate.client_match(df(i), client) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn dr(i: u64) -> u64 {
+    return (&drys[0 as usize]) as u64 + i * DRY_B
+}
+
+// FNV-1a over the action name and every argument line (not the verb
+// line, not the '@' meta lines -- `--dry` must not change the print).
+fn call_print(msg: u64, name: u64) -> u64 {
+    var h: u64 = 0xCBF29CE484222325
+    var i: u64 = 0
+    while obstate.ld8(name, i) != 0 {
+        h = (h ^ obstate.ld8(name, i)) *% 0x100000001B3
+        i = i + 1
+    }
+    h = (h ^ 10) *% 0x100000001B3
+    var at: u64 = actwire.line_end(msg, 0)
+    if obstate.ld8(msg, at) == 10 {
+        at = at + 1
+    }
+    while obstate.ld8(msg, at) != 0 {
+        let e: u64 = actwire.line_end(msg, at)
+        if obstate.ld8(msg, at) != 64 && e > at {
+            var k: u64 = at
+            while k < e {
+                h = (h ^ obstate.ld8(msg, k)) *% 0x100000001B3
+                k = k + 1
+            }
+            h = (h ^ 10) *% 0x100000001B3
+        }
+        at = e
+        if obstate.ld8(msg, at) == 10 {
+            at = at + 1
+        }
+    }
+    return h
+}
+
+fn dry_note(client: u64, hash: u64) {
+    let now: u64 = actwire.ticks()
+    var slot: u64 = 0
+    var oldest: u64 = 0xFFFFFFFFFFFFFFFF
+    var i: u64 = 0
+    while i < DRY_MAX {
+        let d: u64 = dr(i)
+        if obstate.ld(d, DR_USED) == 0 {
+            slot = i
+            oldest = 0
+        } else if obstate.ld(d, DR_T) < oldest {
+            slot = i
+            oldest = obstate.ld(d, DR_T)
+        }
+        i = i + 1
+    }
+    let d2: u64 = dr(slot)
+    obstate.st(d2, DR_USED, 1)
+    obstate.st(d2, DR_HASH, hash)
+    obstate.st(d2, DR_T, now)
+    obstate.copyz(d2 + DR_CLIENT, client, 24)
+}
+
+// true (and the dry run is used up) if this client dry-ran this call
+fn dry_take(client: u64, hash: u64) -> bool {
+    let now: u64 = actwire.ticks()
+    var i: u64 = 0
+    while i < DRY_MAX {
+        let d: u64 = dr(i)
+        if obstate.ld(d, DR_USED) != 0 {
+            if now - obstate.ld(d, DR_T) > 6000 {
+                obstate.st(d, DR_USED, 0)
+            } else if obstate.ld(d, DR_HASH) == hash
+                && actwire.str_eq(d + DR_CLIENT, client) {
+                obstate.st(d, DR_USED, 0)
+                return true
+            }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// ------------------------------------------------ the policy file, kept
+
+static mut pol_out: [u8; 8192] = [0 as u8; 8192]
+
+static mut s_polpath: [u8; 22] = "/etc/orientbus/policy\0"
+
+// Append one rule line; false if the file cannot be written.
+fn policy_append(kind: u64, client: u64, glob: u64, level: u64) -> bool {
+    actwire.ob_reset()
+    actwire.ob_str(kind)
+    actwire.ob_ch(32)
+    actwire.ob_str(client)
+    actwire.ob_ch(32)
+    actwire.ob_str(glob)
+    if level != 0 {
+        actwire.ob_ch(32)
+        actwire.ob_str(level)
+    }
+    actwire.ob_ch(10)
+    let r: u64 = actwire.append_file((&s_polpath[0 as usize]) as u64,
+        actwire.ob_ptr(), actwire.ob_len())
+    return !ulib.bad(r)
+}
+
+// Take the first `allow|deny <client> <glob>` line out of the policy;
+// every other line (comments too) stays as it was.
+fn policy_drop(deny: bool, client: u64, glob: u64) -> bool {
+    let p: u64 = (&obbase.mf[0 as usize]) as u64
+    let fd: u64 = io.open((&s_polpath[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let n: u64 = io.read(fd, p, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    obstate.st8(p, n, 0)
+    let q: u64 = (&pol_out[0 as usize]) as u64
+    var o: u64 = 0
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    var w3: [u8; 32] = [0 as u8; 32]
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    let p3: u64 = (&w3[0 as usize]) as u64
+    var k_allow: [u8; 6] = "allow\0"
+    var k_deny: [u8; 5] = "deny\0"
+    var kind: u64 = (&k_allow[0 as usize]) as u64
+    if deny {
+        kind = (&k_deny[0 as usize]) as u64
+    }
+    var done: bool = false
+    var at: u64 = 0
+    while obstate.ld8(p, at) != 0 {
+        let e: u64 = actwire.line_end(p, at)
+        let save: u64 = obstate.ld8(p, e)
+        obstate.st8(p, e, 0)
+        var nx: u64 = actwire.word_copy(p, at, p1, 32)
+        nx = actwire.word_copy(p, nx, p2, 32)
+        actwire.word_copy(p, nx, p3, 32)
+        obstate.st8(p, e, save)
+        var skip: bool = false
+        if !done && actwire.str_eq(p1, kind) && actwire.str_eq(p2, client)
+            && actwire.str_eq(p3, glob) {
+            skip = true
+            done = true
+        }
+        var stop: u64 = e
+        if obstate.ld8(p, stop) == 10 {
+            stop = stop + 1
+        }
+        if !skip {
+            var k: u64 = at
+            while k < stop && o < 8190 {
+                obstate.st8(q, o, obstate.ld8(p, k))
+                o = o + 1
+                k = k + 1
+            }
+        }
+        at = stop
+    }
+    if !done {
+        return true // it was not in the file (a rule from `grant`)
+    }
+    let w: u64 = ulib.sys(ulib.SYS_OPEN, (&s_polpath[0 as usize]) as u64,
+        1 | 64 | 512, 420)
+    if ulib.bad(w) {
+        return false
+    }
+    let r: u64 = io.write_all(w, q, o)
+    io.close(w)
+    return !ulib.bad(r)
+}
+
+// rights: the page "what may which app", as text
+fn do_rights(msg: u64, pid: u64, uid: u64, id: u64) {
+    let all: bool = is_user(msg, uid)
+    let me: u64 = (&obbase.g_client[0 as usize]) as u64
+    let now: u64 = actwire.ticks()
+    var s_ok: [u8; 4] = "ok\n\0"
+    var s_rule: [u8; 6] = "rule \0"
+    var s_allow2: [u8; 7] = " allow\0"
+    var s_deny2: [u8; 6] = " deny\0"
+    var s_perm: [u8; 11] = " permanent\0"
+    var s_left: [u8; 7] = " left=\0"
+    var s_sess: [u8; 9] = " session\0"
+    var s_df: [u8; 10] = "dryfirst \0"
+    var s_cl: [u8; 8] = "client \0"
+    var s_rd: [u8; 8] = " reads=\0"
+    var s_ch: [u8; 10] = " changes=\0"
+    var s_as: [u8; 8] = " asked=\0"
+    var s_rf: [u8; 10] = " refused=\0"
+    var s_dr: [u8; 6] = " dry=\0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    var i: u64 = 0
+    while i < obbase.RULE_MAX {
+        let r: u64 = obstate.ru(i)
+        if obstate.ld(r, obbase.RU_USED) != 0 && obstate.ld(r, obbase.RU_UNTIL) != 0 && now >= obstate.ld(r, obbase.RU_UNTIL) {
+            obstate.st(r, obbase.RU_USED, 0) // ran out
+        }
+        if obstate.ld(r, obbase.RU_USED) != 0 && (all || actwire.str_eq(r + obbase.RU_CLIENT, me)) {
+            actwire.ob_str((&s_rule[0 as usize]) as u64)
+            actwire.ob_num(i + 1)
+            if obstate.ld(r, obbase.RU_DENY) != 0 {
+                actwire.ob_str((&s_deny2[0 as usize]) as u64)
+            } else {
+                actwire.ob_str((&s_allow2[0 as usize]) as u64)
+            }
+            actwire.ob_ch(32)
+            actwire.ob_str(r + obbase.RU_CLIENT)
+            actwire.ob_ch(32)
+            actwire.ob_str(r + obbase.RU_GLOB)
+            if obstate.ld(r, obbase.RU_DENY) == 0 {
+                actwire.ob_ch(32)
+                actwire.ob_str(obstate.level_name(obstate.ld(r, obbase.RU_LEVEL)))
+            }
+            if obstate.ld(r, obbase.RU_UNTIL) != 0 {
+                actwire.ob_str((&s_left[0 as usize]) as u64)
+                actwire.ob_num((obstate.ld(r, obbase.RU_UNTIL) - now + 99) / 100)
+            } else if obstate.ld(r, obbase.RU_PERM) != 0 {
+                actwire.ob_str((&s_perm[0 as usize]) as u64)
+            } else {
+                actwire.ob_str((&s_sess[0 as usize]) as u64)
+            }
+            actwire.ob_ch(10)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < DF_MAX {
+        if obstate.ld8(df(i), 0) != 0 && (all || obstate.client_match(df(i), me)) {
+            actwire.ob_str((&s_df[0 as usize]) as u64)
+            actwire.ob_str(df(i))
+            actwire.ob_ch(10)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < CL_MAX {
+        let c: u64 = cl(i)
+        if obstate.ld8(c, CL_NAME) != 0 && (all || actwire.str_eq(c + CL_NAME, me)) {
+            actwire.ob_str((&s_cl[0 as usize]) as u64)
+            actwire.ob_str(c + CL_NAME)
+            actwire.ob_str((&s_rd[0 as usize]) as u64)
+            actwire.ob_num(obstate.ld(c, CL_READ))
+            actwire.ob_str((&s_ch[0 as usize]) as u64)
+            actwire.ob_num(obstate.ld(c, CL_CHANGE))
+            actwire.ob_str((&s_as[0 as usize]) as u64)
+            actwire.ob_num(obstate.ld(c, CL_ASK))
+            actwire.ob_str((&s_rf[0 as usize]) as u64)
+            actwire.ob_num(obstate.ld(c, CL_REFUSED))
+            actwire.ob_str((&s_dr[0 as usize]) as u64)
+            actwire.ob_num(obstate.ld(c, CL_DRY))
+            actwire.ob_ch(10)
+        }
+        i = i + 1
+    }
+    obstate.reply_ob(pid, id)
+}
+
+// revoke <n> | revoke <client> <glob>
+fn do_revoke(msg: u64, pid: u64, uid: u64, id: u64) {
+    var e_who: [u8; 32] = "denied only the user may revoke\0"
+    if !is_user(msg, uid) {
+        obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w0: [u8; 32] = [0 as u8; 32]
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    let p0: u64 = (&w0[0 as usize]) as u64
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    var nx: u64 = actwire.word_copy(msg, 0, p0, 32)
+    nx = actwire.word_copy(msg, nx, p1, 32)
+    actwire.word_copy(msg, nx, p2, 32)
+    var t: u64 = actwire.NONE
+    if obstate.ld8(p1, 0) >= 48 && obstate.ld8(p1, 0) <= 57 && obstate.ld8(p2, 0) == 0 {
+        let k: u64 = ulib.to_num(p1)
+        if k >= 1 && k <= obbase.RULE_MAX && obstate.ld(obstate.ru(k - 1), obbase.RU_USED) != 0 {
+            t = k - 1
+        }
+    } else {
+        var i: u64 = 0
+        while i < obbase.RULE_MAX && t == actwire.NONE {
+            let r: u64 = obstate.ru(i)
+            if obstate.ld(r, obbase.RU_USED) != 0 && actwire.str_eq(r + obbase.RU_CLIENT, p1)
+                && actwire.str_eq(r + obbase.RU_GLOB, p2) {
+                t = i
+            }
+            i = i + 1
+        }
+    }
+    if t == actwire.NONE {
+        var e: [u8; 13] = "no_such_rule\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, p1)
+        return
+    }
+    let r2: u64 = obstate.ru(t)
+    var s_rv: [u8; 7] = "revoke\0"
+    var r_ok: [u8; 3] = "ok\0"
+    // write-ahead like every change
+    if !audit(pid, uid, r2 + obbase.RU_CLIENT, (&s_rv[0 as usize]) as u64,
+        r2 + obbase.RU_GLOB, (&obbase.s_allow[0 as usize]) as u64,
+        (&r_ok[0 as usize]) as u64, false) {
+        var e4: [u8; 18] = "audit_unavailable\0"
+        obstate.reply_err(pid, id, (&e4[0 as usize]) as u64, 0)
+        return
+    }
+    if obstate.ld(r2, obbase.RU_PERM) != 0 {
+        if !policy_drop(obstate.ld(r2, obbase.RU_DENY) != 0, r2 + obbase.RU_CLIENT, r2 + obbase.RU_GLOB) {
+            var e5: [u8; 20] = "policy_not_writable\0"
+            obstate.reply_err(pid, id, (&e5[0 as usize]) as u64, 0)
+            return
+        }
+    }
+    obstate.st(r2, obbase.RU_USED, 0)
+    var s_ok: [u8; 11] = "ok\nrevoke \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(r2 + obbase.RU_CLIENT)
+    actwire.ob_ch(32)
+    actwire.ob_str(r2 + obbase.RU_GLOB)
+    actwire.ob_ch(10)
+    obstate.reply_ob(pid, id)
+}
+
+// block <client> <glob>: a permanent deny rule
+fn do_block(msg: u64, pid: u64, uid: u64, id: u64) {
+    var e_who: [u8; 31] = "denied only the user may block\0"
+    var e_bad: [u8; 30] = "bad_arg block <client> <glob>\0"
+    if !is_user(msg, uid) {
+        obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w0: [u8; 32] = [0 as u8; 32]
+    var w1: [u8; 32] = [0 as u8; 32]
+    var w2: [u8; 32] = [0 as u8; 32]
+    let p0: u64 = (&w0[0 as usize]) as u64
+    let p1: u64 = (&w1[0 as usize]) as u64
+    let p2: u64 = (&w2[0 as usize]) as u64
+    var nx: u64 = actwire.word_copy(msg, 0, p0, 32)
+    nx = actwire.word_copy(msg, nx, p1, 32)
+    actwire.word_copy(msg, nx, p2, 32)
+    if obstate.ld8(p1, 0) == 0 || obstate.ld8(p2, 0) == 0 {
+        obstate.reply_err(pid, id, (&e_bad[0 as usize]) as u64, 0)
+        return
+    }
+    var s_bl: [u8; 6] = "block\0"
+    var r_ok: [u8; 3] = "ok\0"
+    if !audit(pid, uid, p1, (&s_bl[0 as usize]) as u64, p2,
+        (&obbase.s_deny[0 as usize]) as u64, (&r_ok[0 as usize]) as u64, false) {
+        var e4: [u8; 18] = "audit_unavailable\0"
+        obstate.reply_err(pid, id, (&e4[0 as usize]) as u64, 0)
+        return
+    }
+    var k_deny: [u8; 5] = "deny\0"
+    if !policy_append((&k_deny[0 as usize]) as u64, p1, p2, 0) {
+        var e5: [u8; 20] = "policy_not_writable\0"
+        obstate.reply_err(pid, id, (&e5[0 as usize]) as u64, 0)
+        return
+    }
+    if !obstate.rule_add(p1, p2, true, 0, 0) {
+        var e: [u8; 11] = "rules_full\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    obstate.st(obstate.ru(obbase.last_rule), obbase.RU_PERM, 1)
+    var s_ok: [u8; 10] = "ok\nblock \0"
+    actwire.ob_reset()
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_str(p1)
+    actwire.ob_ch(32)
+    actwire.ob_str(p2)
+    actwire.ob_ch(10)
+    obstate.reply_ob(pid, id)
+}
+
+static mut tr_text: [u8; 5120] = [0 as u8; 5120] // TOK_MAX x TR_BYTES
+
+fn trt(i: u64) -> u64 {
+    return (&tr_text[0 as usize]) as u64 + i * obbase.TR_BYTES
+}
+
+fn tk_by_no(no: u64) -> u64 {
+    var i: u64 = 0
+    while i < obbase.TOK_MAX {
+        if obstate.ld(obstate.tk(i), obbase.TK_USED) != 0 && obstate.ld(obstate.tk(i), obbase.TK_NO) == no {
+            return i
+        }
+        i = i + 1
+    }
+    return actwire.NONE
+}

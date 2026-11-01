@@ -1,0 +1,995 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import actwire
+import setschema
+import trusttext
+import ulib
+import orientbus.obbase
+import orientbus.obops
+import orientbus.obstate
+
+const AC_CALLS: u64 = 88
+
+const PF_CONF: u64 = 8
+
+const TK_T0: u64 = 16
+
+const TK_LEN: u64 = 24
+
+const TK_PID: u64 = 32
+
+static mut tok_next: u64 = 1
+
+static mut svc_bus: u64 = 0xFFFFFFFF
+
+static mut running: bool = true
+
+static mut svc_evt: u64 = 0xFFFFFFFF
+
+static mut scratch: [u8; 2048] = [0 as u8; 2048]
+
+static mut idle_since: u64 = 0
+
+fn do_call(msg: u64, pid: u64, uid: u64, id: u64, confirmed: bool,
+    undo: bool) {
+    var name: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&name[0 as usize]) as u64
+    var verb: [u8; 16] = [0 as u8; 16]
+    let vp: u64 = (&verb[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    actwire.word_copy(msg, nx, np, 40)
+    var client: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&client[0 as usize]) as u64
+    var k_dry: [u8; 5] = "@dry\0"
+    obstate.copyz(cp, (&obbase.g_client[0 as usize]) as u64, 24)
+    var dv: [u8; 8] = [0 as u8; 8]
+    let dvp: u64 = (&dv[0 as usize]) as u64
+    let dry: bool = actwire.kv_find(msg, (&k_dry[0 as usize]) as u64, dvp, 8)
+        && obstate.ld8(dvp, 0) == 49
+    var s_callv: [u8; 5] = "call\0"
+    var s_undov: [u8; 5] = "undo\0"
+    var vb: u64 = (&s_callv[0 as usize]) as u64
+    if undo {
+        vb = (&s_undov[0 as usize]) as u64
+    }
+    var s_dash: [u8; 2] = "-\0"
+    let dash: u64 = (&s_dash[0 as usize]) as u64
+    var r_err: [u8; 4] = "err\0"
+    var r_ok: [u8; 3] = "ok\0"
+    var r_conf: [u8; 8] = "confirm\0"
+    var r_dry: [u8; 4] = "dry\0"
+    var r_fwd: [u8; 10] = "forwarded\0"
+
+    obbase.c_calls = obbase.c_calls + 1
+    let act: u64 = obstate.find_act(np, false)
+    if act == actwire.NONE {
+        var e: [u8; 15] = "unknown_action\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, np)
+        obops.audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    var why: [u8; 80] = [0 as u8; 80]
+    let wp: u64 = (&why[0 as usize]) as u64
+    if !obstate.check_args(msg, act, wp) {
+        obstate.reply_err(pid, id, wp, 0)
+        obops.audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    obbase.g_rlevel = obstate.ld(obstate.ac(act), obbase.AC_LEVEL)
+    if (obstate.ld(obstate.ac(act), obbase.AC_FLAGS) & obbase.FL_KEYED) != 0 {
+        // AB-005: the key decides -- name, level, and whether the value
+        // fits the schema. From here on `np` is `<app>.<key>`.
+        if !obstate.keyed_check(msg, act, np, wp) {
+            obstate.reply_err(pid, id, wp, 0)
+            obops.audit(pid, uid, cp, vb, np, dash, (&r_err[0 as usize]) as u64, dry)
+            return
+        }
+    }
+    let rlvl: u64 = obbase.g_rlevel
+    var d: u64 = obstate.decide_named(cp, np, rlvl, dry)
+    // what the decision would be without the dry run (dry runs report it)
+    var real: u64 = obstate.decide_named(cp, np, rlvl, false)
+    if real == obbase.D_ASK && rlvl == obbase.L_WRITE && (obstate.ld(obstate.ac(act), obbase.AC_FLAGS) & obbase.FL_NOASK) != 0 {
+        real = obbase.D_ALLOW
+        d = obbase.D_ALLOW
+    }
+    if d == obbase.D_ASK && confirmed {
+        d = obbase.D_ALLOW
+    }
+    if d == obbase.D_DENY {
+        obbase.c_deny = obbase.c_deny + 1
+        var e2: [u8; 7] = "denied\0"
+        obstate.reply_err(pid, id, (&e2[0 as usize]) as u64, np)
+        obops.audit(pid, uid, cp, vb, np, (&obbase.s_deny[0 as usize]) as u64,
+            (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    // AB-009: dry run first. A dry run is noted, a change of a client
+    // under `dryfirst` needs one -- before it is even parked, so the
+    // human is never asked about a call nobody looked at first.
+    if obops.dryfirst_for(cp) {
+        let print: u64 = obops.call_print(msg, np)
+        if dry {
+            obops.dry_note(cp, print)
+        } else if rlvl != obbase.L_READ && !confirmed && !undo {
+            if !obops.dry_take(cp, print) {
+                obbase.c_dryfirst = obbase.c_dryfirst + 1
+                var e7: [u8; 14] = "dry_run_first\0"
+                obstate.reply_err(pid, id, (&e7[0 as usize]) as u64, np)
+                obops.audit(pid, uid, cp, vb, np, (&obbase.s_deny[0 as usize]) as u64,
+                    (&e7[0 as usize]) as u64, false)
+                return
+            }
+        }
+    }
+    if d == obbase.D_ASK {
+        // park the request and hand out a number; `act confirm` from the
+        // user replays it (section 5.3)
+        obbase.c_ask = obbase.c_ask + 1
+        let print: u64 = obops.call_print(msg, np)
+        let dup: u64 = obops.tok_dup(cp, uid, print)
+        if dup != actwire.NONE {
+            obbase.c_dup = obbase.c_dup + 1
+            obops.reply_confirm(pid, id, obstate.tk(dup), np, rlvl, act)
+            return
+        }
+        let len: u64 = actwire.slen(msg)
+        var t: u64 = actwire.NONE
+        var i: u64 = 0
+        while i < obbase.TOK_MAX {
+            if obstate.ld(obstate.tk(i), obbase.TK_USED) == 0 && t == actwire.NONE {
+                t = i
+            }
+            i = i + 1
+        }
+        if t == actwire.NONE || len >= obbase.TOK_BYTES {
+            var e3: [u8; 13] = "confirm_full\0"
+            obstate.reply_err(pid, id, (&e3[0 as usize]) as u64, np)
+            return
+        }
+        let tp: u64 = obstate.tk(t)
+        obstate.st(tp, obbase.TK_USED, 1)
+        obstate.st(tp, obbase.TK_NO, tok_next)
+        obstate.st(tp, TK_T0, actwire.ticks())
+        obstate.st(tp, TK_LEN, len)
+        obstate.st(tp, TK_PID, pid)
+        obstate.st(tp, obbase.TK_UID, uid)
+        obstate.st(tp, obbase.TK_PRINT, print)
+        obstate.copyz(tp + obbase.TK_CLIENT, cp, 24)
+        obstate.copyn(obstate.tkmem(t), msg, len, obbase.TOK_BYTES)
+        tok_next = tok_next + 1
+        obops.reply_confirm(pid, id, tp, np, rlvl, act)
+        obops.audit(pid, uid, cp, vb, np, (&obbase.s_ask[0 as usize]) as u64,
+            (&r_conf[0 as usize]) as u64, dry)
+        // tell whoever shows confirmation dialogs
+        var s_ev: [u8; 29] = "event bus.confirm_needed\nno=\0"
+        var s_ac: [u8; 9] = "\naction=\0"
+        var s_cl: [u8; 9] = "\nclient=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_ev[0 as usize]) as u64)
+        actwire.ob_num(obstate.ld(tp, obbase.TK_NO))
+        actwire.ob_str((&s_ac[0 as usize]) as u64)
+        actwire.ob_str(np)
+        actwire.ob_str((&s_cl[0 as usize]) as u64)
+        actwire.ob_str(cp)
+        actwire.ob_ch(10)
+        var s_cn: [u8; 19] = "bus.confirm_needed\0"
+        obops.deliver((&s_cn[0 as usize]) as u64, actwire.NONE, true)
+        trusted_ask(obstate.ld(tp, obbase.TK_NO), cp, np, obstate.level_name(rlvl),
+            obstate.pl(obstate.ld(obstate.ac(act), obbase.AC_DESC)), rlvl)
+        return
+    }
+    // allowed
+    obbase.c_allow = obbase.c_allow + 1
+    let app: u64 = obstate.ld(obstate.ac(act), obbase.AC_APP)
+    if dry {
+        obbase.c_dry = obbase.c_dry + 1
+    }
+    if dry && (obstate.ld(obstate.ac(act), obbase.AC_FLAGS) & obbase.FL_DRY) == 0
+        && obstate.ld(obstate.ac(act), obbase.AC_ADKIND) == obbase.AD_NONE {
+        // the provider cannot simulate: the broker answers with what
+        // WOULD happen, and nothing is sent anywhere
+        var s_hd: [u8; 16] = "ok\ndry=1\nwould=\0"
+        var s_dc: [u8; 11] = "\ndecision=\0"
+        var s_lv: [u8; 8] = "\nlevel=\0"
+        actwire.ob_reset()
+        actwire.ob_str((&s_hd[0 as usize]) as u64)
+        actwire.ob_str(np)
+        actwire.ob_str((&s_dc[0 as usize]) as u64)
+        actwire.ob_str(obstate.decision_name(real))
+        actwire.ob_str((&s_lv[0 as usize]) as u64)
+        actwire.ob_str(obstate.level_name(rlvl))
+        actwire.ob_ch(10)
+        obstate.reply_ob(pid, id)
+        obbase.audit_lazy = true
+        obops.audit(pid, uid, cp, vb, np, (&obbase.s_allow[0 as usize]) as u64,
+            (&r_dry[0 as usize]) as u64, true)
+        return
+    }
+    // WRITE-AHEAD: a change is logged before it is made, or not made
+    if !dry && rlvl != obbase.L_READ {
+        if !obops.audit(pid, uid, cp, vb, np, (&obbase.s_allow[0 as usize]) as u64,
+            (&r_fwd[0 as usize]) as u64, false) {
+            var e4: [u8; 18] = "audit_unavailable\0"
+            obstate.reply_err(pid, id, (&e4[0 as usize]) as u64, np)
+            return
+        }
+    }
+    var fl: u64 = 0
+    if dry {
+        fl = fl | obbase.PF_DRY
+    }
+    if undo {
+        fl = fl | obbase.PF_UNDO
+    }
+    if confirmed {
+        fl = fl | PF_CONF
+    }
+    // AB-008: a wrapped program has no provider -- the adapter runs here
+    if obstate.ld(obstate.ac(act), obbase.AC_ADKIND) != obbase.AD_NONE {
+        if !obstate.app_running(app) {
+            var e6: [u8; 16] = "app_not_running\0"
+            obstate.reply_err(pid, id, (&e6[0 as usize]) as u64, obstate.ap(app) + obbase.AP_NAME)
+            obops.audit(pid, uid, cp, vb, np, (&obbase.s_allow[0 as usize]) as u64,
+                (&r_err[0 as usize]) as u64, dry)
+            return
+        }
+        obbase.g_started = false
+        let aok: bool = obops.run_adapter(act, msg, dry, uid)
+        if obbase.g_started {
+            // AB-019: the program runs; the answer comes from aj_finish
+            let jp: u64 = obstate.aj(obbase.g_slot)
+            obstate.st(jp, obbase.AJ_PID, pid)
+            obstate.st(jp, obbase.AJ_ID, id)
+            obstate.st(jp, obbase.AJ_UID, uid)
+            obstate.st(jp, obbase.AJ_LVL, rlvl)
+            obstate.st(jp, obbase.AJ_UNDO, 0)
+            if undo {
+                obstate.st(jp, obbase.AJ_UNDO, 1)
+            }
+            obstate.copyz(jp + obbase.AJ_CLIENT, cp, 24)
+            obstate.st(obstate.ac(act), AC_CALLS, obstate.ld(obstate.ac(act), AC_CALLS) + 1)
+            return
+        }
+        obstate.reply_ob(pid, id)
+        if aok && !dry && !undo {
+            // the manifest's inverse, without arguments (a wrapped program
+            // cannot hand any back): pause <-> play and the like
+            var noargs: [u8; 1] = "\0"
+            obops.push_undo(cp, act, (&noargs[0 as usize]) as u64)
+        }
+        if !dry && rlvl == obbase.L_READ {
+            obbase.audit_lazy = true
+        }
+        if !dry && rlvl != obbase.L_READ {
+            obbase.skip_tally = true // counted as a change at its write-ahead line
+        }
+        if aok {
+            obops.audit(pid, uid, cp, vb, np, (&obbase.s_allow[0 as usize]) as u64,
+                (&r_ok[0 as usize]) as u64, dry)
+        } else {
+            obops.audit(pid, uid, cp, vb, np, (&obbase.s_allow[0 as usize]) as u64,
+                (&r_err[0 as usize]) as u64, dry)
+        }
+        obstate.st(obstate.ac(act), AC_CALLS, obstate.ld(obstate.ac(act), AC_CALLS) + 1)
+        return
+    }
+    // stash the real decision for the dry-run reply
+    if !obstate.forward(app, act, msg, pid, uid, id, cp, fl) {
+        var e5: [u8; 16] = "app_not_running\0"
+        obstate.reply_err(pid, id, (&e5[0 as usize]) as u64, obstate.ap(app) + obbase.AP_NAME)
+        obops.audit(pid, uid, cp, vb, np, (&obbase.s_allow[0 as usize]) as u64,
+            (&r_err[0 as usize]) as u64, dry)
+        return
+    }
+    obstate.st(obstate.ac(act), AC_CALLS, obstate.ld(obstate.ac(act), AC_CALLS) + 1)
+}
+
+// confirm <no|last> / reject <no|last>
+fn do_confirm(msg: u64, pid: u64, uid: u64, id: u64, yes: bool) {
+    var e_who: [u8; 33] = "denied only the user may confirm\0"
+    var e_none: [u8; 16] = "no_such_request\0"
+    if !obops.is_user(msg, uid) {
+        obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var w: [u8; 16] = [0 as u8; 16]
+    var a: [u8; 16] = [0 as u8; 16]
+    let wp: u64 = (&w[0 as usize]) as u64
+    let arp: u64 = (&a[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, wp, 16)
+    actwire.word_copy(msg, nx, arp, 16)
+    var k_last: [u8; 5] = "last\0"
+    var t: u64 = actwire.NONE
+    var best: u64 = 0
+    var i: u64 = 0
+    while i < obbase.TOK_MAX {
+        let tp: u64 = obstate.tk(i)
+        if obstate.ld(tp, obbase.TK_USED) != 0 {
+            if actwire.str_eq(arp, (&k_last[0 as usize]) as u64) {
+                if obstate.ld(tp, obbase.TK_NO) > best {
+                    best = obstate.ld(tp, obbase.TK_NO)
+                    t = i
+                }
+            } else if obstate.ld(tp, obbase.TK_NO) == ulib.to_num(arp) {
+                t = i
+            }
+        }
+        i = i + 1
+    }
+    if t == actwire.NONE {
+        obstate.reply_err(pid, id, (&e_none[0 as usize]) as u64, arp)
+        return
+    }
+    if yes && tk_dlg[(t) as usize] != 0 && tr_screen {
+        // SETBROKER2: a critical request of the person's own window is answered in the trusted dialog only
+        var e_dlg: [u8; 11] = "use_dialog\0"
+        obstate.reply_err(pid, id, (&e_dlg[0 as usize]) as u64, arp)
+        return
+    }
+    obstate.st(obstate.tk(t), obbase.TK_USED, 0)
+    let m: u64 = (&scratch[0 as usize]) as u64
+    obstate.copyn(m, obstate.tkmem(t), obstate.ld(obstate.tk(t), TK_LEN), 2048)
+    if !yes {
+        var s_rj: [u8; 13] = "ok\nrejected\n\0"
+        obstate.reply(pid, id, (&s_rj[0 as usize]) as u64, 12)
+        var r_rej: [u8; 9] = "rejected\0"
+        var nm: [u8; 40] = [0 as u8; 40]
+        let np: u64 = (&nm[0 as usize]) as u64
+        let n2: u64 = actwire.word_copy(m, 0, np, 40)
+        actwire.word_copy(m, n2, np, 40)
+        var s_rej: [u8; 7] = "reject\0"
+        obops.tally(obstate.tk(t) + obbase.TK_CLIENT, obbase.TA_REFUSED)
+        obops.audit(pid, uid, (&obbase.s_user[0 as usize]) as u64,
+            (&s_rej[0 as usize]) as u64, np, (&obbase.s_deny[0 as usize]) as u64,
+            (&r_rej[0 as usize]) as u64, false)
+        return
+    }
+    // the ORIGINAL request, confirmed; the answer goes to the confirmer.
+    // It runs as the client that ASKED, not as the user who said yes --
+    // otherwise its undo entry and its log line would name the wrong one.
+    obstate.copyz((&obbase.g_client[0 as usize]) as u64, obstate.tk(t) + obbase.TK_CLIENT, 24)
+    do_call(m, pid, obstate.ld(obstate.tk(t), obbase.TK_UID), id, true, false)
+}
+
+// undo [@client=...]: the newest undo entry of that client
+fn do_undo(msg: u64, pid: u64, uid: u64, id: u64) {
+    var client: [u8; 24] = [0 as u8; 24]
+    let cp: u64 = (&client[0 as usize]) as u64
+    obstate.copyz(cp, (&obbase.g_client[0 as usize]) as u64, 24)
+    var best: u64 = actwire.NONE
+    var seq: u64 = 0
+    var i: u64 = 0
+    while i < obbase.UNDO_MAX {
+        let u: u64 = obstate.un(i)
+        if obstate.ld(u, obbase.UN_USED) != 0 && actwire.str_eq(u + obbase.UN_CLIENT, cp)
+            && obstate.ld(u, obbase.UN_SEQ) > seq {
+            seq = obstate.ld(u, obbase.UN_SEQ)
+            best = i
+        }
+        i = i + 1
+    }
+    if best == actwire.NONE {
+        var e: [u8; 16] = "nothing_to_undo\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    let u2: u64 = obstate.un(best)
+    obstate.st(u2, obbase.UN_USED, 0)
+    var s_call: [u8; 6] = "call \0"
+    var s_cl: [u8; 9] = "@client=\0"
+    let m: u64 = (&scratch[0 as usize]) as u64
+    obstate.copyz(m, (&s_call[0 as usize]) as u64, 2048)
+    ulib.strcat(m, obstate.ac(obstate.ld(u2, obbase.UN_ACT)) + obbase.AC_NAME)
+    var nlc: [u8; 2] = "\n\0"
+    ulib.strcat(m, (&nlc[0 as usize]) as u64)
+    ulib.strcat(m, (&s_cl[0 as usize]) as u64)
+    ulib.strcat(m, cp)
+    ulib.strcat(m, (&nlc[0 as usize]) as u64)
+    ulib.strcat(m, u2 + obbase.UN_ARGS)
+    // trailing newline of the args would make an empty line: harmless
+    do_call(m, pid, uid, id, false, true)
+}
+
+// ============================================================ the loop
+
+fn on_request(s: u64) {
+    let msg: u64 = actwire.asm_buf(s)
+    let pid: u64 = actwire.asm_pid(s)
+    let uid: u64 = actwire.asm_uid(s)
+    let id: u64 = actwire.asm_id(s)
+    if actwire.asm_over(s) {
+        var e: [u8; 9] = "too_long\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, 0)
+        return
+    }
+    obops.resolve_client(msg, pid)
+    var v: [u8; 16] = [0 as u8; 16]
+    let vp: u64 = (&v[0 as usize]) as u64
+    let nx: u64 = actwire.word_copy(msg, 0, vp, 16)
+    var k_call: [u8; 5] = "call\0"
+    var k_list: [u8; 5] = "list\0"
+    var k_desc: [u8; 9] = "describe\0"
+    var k_conf: [u8; 8] = "confirm\0"
+    var k_rej: [u8; 7] = "reject\0"
+    var k_undo: [u8; 5] = "undo\0"
+    var k_grant: [u8; 6] = "grant\0"
+    var k_stat: [u8; 5] = "stat\0"
+    var k_hello: [u8; 6] = "hello\0"
+    var k_stop: [u8; 5] = "stop\0"
+    var k_who: [u8; 7] = "whoami\0"
+    var k_rights: [u8; 7] = "rights\0"
+    var k_revoke: [u8; 7] = "revoke\0"
+    var k_block: [u8; 6] = "block\0"
+    var k_reload: [u8; 7] = "reload\0"
+    var k_audit: [u8; 6] = "audit\0"
+    var k_sub: [u8; 10] = "subscribe\0"
+    var k_unsub: [u8; 12] = "unsubscribe\0"
+    if actwire.str_eq(vp, (&k_stop[0 as usize]) as u64) {
+        // the broker ends (shutdown, tests); only the user may say so
+        if !obops.is_user(msg, uid) {
+            var e_who: [u8; 30] = "denied only the user may stop\0"
+            obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+            return
+        }
+        var s_ok: [u8; 9] = "ok\nstop\n\0"
+        obstate.reply(pid, id, (&s_ok[0 as usize]) as u64, 8)
+        var s_st: [u8; 5] = "stop\0"
+        var s_bus: [u8; 11] = "orient.bus\0"
+        var r_ok: [u8; 3] = "ok\0"
+        obops.audit(pid, uid, (&obbase.s_user[0 as usize]) as u64, (&s_st[0 as usize]) as u64,
+            (&s_bus[0 as usize]) as u64, (&obbase.s_allow[0 as usize]) as u64,
+            (&r_ok[0 as usize]) as u64, false)
+        running = false
+        return
+    }
+    if actwire.str_eq(vp, (&k_call[0 as usize]) as u64) {
+        do_call(msg, pid, uid, id, false, false)
+    } else if actwire.str_eq(vp, (&k_list[0 as usize]) as u64) {
+        // D1: `list --menu <file|dir> <name>` -- the context-menu entries
+        var o_menu: [u8; 7] = "--menu\0"
+        var m1: [u8; 12] = [0 as u8; 12]
+        var m2: [u8; 12] = [0 as u8; 12]
+        var m3: [u8; 160] = [0 as u8; 160]
+        let m1p: u64 = (&m1[0 as usize]) as u64
+        let m2p: u64 = (&m2[0 as usize]) as u64
+        let m3p: u64 = (&m3[0 as usize]) as u64
+        var mx: u64 = actwire.word_copy(msg, nx, m1p, 12)
+        if actwire.str_eq(m1p, (&o_menu[0 as usize]) as u64) {
+            mx = actwire.word_copy(msg, mx, m2p, 12)
+            while obstate.ld8(msg, mx) == 32 {
+                mx = mx + 1
+            }
+            var mn: u64 = 0
+            while obstate.ld8(msg, mx) != 0 && obstate.ld8(msg, mx) != 10 && mn < 158 {
+                obstate.st8(m3p, mn, obstate.ld8(msg, mx))
+                mn = mn + 1
+                mx = mx + 1
+            }
+            obstate.st8(m3p, mn, 0)
+            obstate.do_list_menu(pid, id, m2p, m3p)
+        } else {
+            obstate.do_list(pid, id)
+        }
+    } else if actwire.str_eq(vp, (&k_desc[0 as usize]) as u64) {
+        var f: [u8; 40] = [0 as u8; 40]
+        let fp: u64 = (&f[0 as usize]) as u64
+        actwire.word_copy(msg, nx, fp, 40)
+        obstate.do_describe(pid, id, fp)
+    } else if actwire.str_eq(vp, (&k_conf[0 as usize]) as u64) {
+        do_confirm(msg, pid, uid, id, true)
+    } else if actwire.str_eq(vp, (&k_rej[0 as usize]) as u64) {
+        do_confirm(msg, pid, uid, id, false)
+    } else if actwire.str_eq(vp, (&k_undo[0 as usize]) as u64) {
+        do_undo(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_grant[0 as usize]) as u64) {
+        obops.do_grant(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_stat[0 as usize]) as u64) {
+        obops.do_stat(pid, id)
+    } else if actwire.str_eq(vp, (&k_hello[0 as usize]) as u64) {
+        obops.do_hello(msg)
+    } else if actwire.str_eq(vp, (&k_who[0 as usize]) as u64) {
+        obops.do_whoami(pid, id)
+    } else if actwire.str_eq(vp, (&k_rights[0 as usize]) as u64) {
+        obops.do_rights(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_revoke[0 as usize]) as u64) {
+        obops.do_revoke(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_block[0 as usize]) as u64) {
+        obops.do_block(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_reload[0 as usize]) as u64) {
+        do_reload(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_audit[0 as usize]) as u64) {
+        obops.do_audit(msg, pid, uid, id)
+    } else if actwire.str_eq(vp, (&k_sub[0 as usize]) as u64) {
+        obops.do_subscribe(msg, pid, uid, id, true)
+    } else if actwire.str_eq(vp, (&k_unsub[0 as usize]) as u64) {
+        obops.do_subscribe(msg, pid, uid, id, false)
+    } else {
+        var e: [u8; 13] = "unknown_verb\0"
+        obstate.reply_err(pid, id, (&e[0 as usize]) as u64, vp)
+    }
+}
+
+// calls a provider never answered, confirmations nobody gave
+// ============================================ AB-004: THE TRUSTED DIALOG
+//
+// Every call an agent or an app parks is also put to the person in the
+// window server's own dialog (kernel/ui/wm.fi, sys.WM_TRUST): painted over every window,
+// answered with the real keyboard or mouse only. `act confirm` from the
+// user's shell stays -- it is the path without a screen -- and whichever
+// answers first wins: a token confirmed on the shell takes its dialog
+// off the screen, an expired token too.
+//
+// One dialog at a time (the window server holds one); the others wait
+// here, oldest first. The text is made when the call is parked, so the
+// dialog shows what the call was, not what the catalogue says later.
+// Without a window server (a guest with no screen) WM_TRUST fails and
+// the broker simply tries again later; nothing else changes.
+const WM_TRUST: u64 = 2129
+
+const TR_ASK: u64 = 0
+
+const TR_POLL: u64 = 1
+
+const TR_CANCEL: u64 = 2
+
+static mut tr_up: u64 = 0 // the token number on the screen, 0 = none
+
+static mut tr_retry: u64 = 0 // ticks: no screen, try again from then
+
+// SETBROKER2 (r1280): a CRITICAL request of the person's own window (the settings window, `act` in their
+// shell) is put to the same trusted dialog as an agent's. The window runs as the session person, and so
+// does any other program of theirs that no label marks as an app: the old `confirm <n>` over the bus
+// could therefore be sent by a program the person never meant. Such a token is "dialog only" as long as
+// the machine has a window server (tr_screen); `confirm` over the bus is refused with `use_dialog`, only
+// the dialog (real keyboard / mouse, wm.fi) can say yes. `reject` stays open to everyone. Without a
+// screen (a guest without graphics) nothing changes: the bus confirm is the only way.
+static mut tk_dlg: [u8; 8] = [0 as u8; 8] // TOK_MAX: 1 = dialog only
+
+static mut tr_screen: bool = false // a dialog was shown at least once on this boot
+
+fn trusted_ask(no: u64, cp: u64, np: u64, lvl: u64, desc: u64, rlvl: u64) {
+    let t: u64 = obops.tk_by_no(no)
+    if t == actwire.NONE {
+        return
+    }
+    // the slot may hold the text of an earlier token that was answered on
+    // the shell or expired: a new token starts without one
+    obstate.st8(obops.trt(t), 0, 0)
+    tk_dlg[(t) as usize] = 0 as u8
+    // the person's OWN request (the settings window, `act` on their
+    // shell) is answered where it was made, unless it is critical: then
+    // the dialog is the only place that can say yes (see above)
+    if actwire.str_eq(cp, (&obbase.s_user[0 as usize]) as u64) {
+        if rlvl != obbase.L_CRIT {
+            return
+        }
+        tk_dlg[(t) as usize] = 1 as u8
+    }
+    trusttext.build(obstate.tkmem(t), no, cp, np, lvl, desc)
+    obstate.copyn(obops.trt(t), actwire.ob_ptr(), actwire.ob_len(), obbase.TR_BYTES)
+    actwire.ob_reset()
+    trusted_poll()
+}
+
+// every turn of the serve loop: an answer? a token gone? the next one up?
+fn trusted_poll() {
+    if tr_up != 0 {
+        let t: u64 = obops.tk_by_no(tr_up)
+        let r: u64 = ulib.sys4(WM_TRUST, TR_POLL, tr_up, 0, 0)
+        if t == actwire.NONE {
+            // confirmed on the shell, or expired
+            ulib.sys4(WM_TRUST, TR_CANCEL, tr_up, 0, 0)
+            tr_up = 0
+        } else if ulib.bad(r) || r == 3 {
+            tr_up = 0
+        } else if r == 1 || r == 2 {
+            tr_up = 0
+            trusted_apply(t, r == 1)
+        }
+    }
+    if tr_up != 0 || actwire.ticks() < tr_retry {
+        return
+    }
+    // the oldest parked call with a text
+    var best: u64 = actwire.NONE
+    var i: u64 = 0
+    while i < obbase.TOK_MAX {
+        if obstate.ld(obstate.tk(i), obbase.TK_USED) != 0 && obstate.ld8(obops.trt(i), 0) != 0 {
+            if best == actwire.NONE || obstate.ld(obstate.tk(i), obbase.TK_NO) < obstate.ld(obstate.tk(best), obbase.TK_NO) {
+                best = i
+            }
+        }
+        i = i + 1
+    }
+    if best == actwire.NONE {
+        return
+    }
+    let no: u64 = obstate.ld(obstate.tk(best), obbase.TK_NO)
+    let r2: u64 = ulib.sys4(WM_TRUST, TR_ASK, no, obops.trt(best),
+        actwire.slen(obops.trt(best)))
+    if ulib.bad(r2) {
+        tr_retry = actwire.ticks() + 100 // no screen yet, or busy
+        return
+    }
+    tr_up = no
+    tr_screen = true
+}
+
+// the person answered in the dialog: exactly what `act confirm` and
+// `act reject` do, with the user as the one who said it and nobody to
+// send the answer to (the caller learnt its number when it was parked)
+fn trusted_apply(t: u64, yes: bool) {
+    obbase.c_trusted = obbase.c_trusted + 1
+    obstate.st(obstate.tk(t), obbase.TK_USED, 0)
+    obstate.st8(obops.trt(t), 0, 0)
+    let m: u64 = (&scratch[0 as usize]) as u64
+    obstate.copyn(m, obstate.tkmem(t), obstate.ld(obstate.tk(t), TK_LEN), 2048)
+    var nm: [u8; 40] = [0 as u8; 40]
+    let np: u64 = (&nm[0 as usize]) as u64
+    let n2: u64 = actwire.word_copy(m, 0, np, 40)
+    actwire.word_copy(m, n2, np, 40)
+    var s_dlg: [u8; 7] = "dialog\0"
+    var r_yes: [u8; 10] = "confirmed\0"
+    var r_no: [u8; 9] = "rejected\0"
+    if !yes {
+        obops.tally(obstate.tk(t) + obbase.TK_CLIENT, obbase.TA_REFUSED)
+        obops.audit(0, obstate.ld(obstate.tk(t), obbase.TK_UID), (&obbase.s_user[0 as usize]) as u64,
+            (&s_dlg[0 as usize]) as u64, np, (&obbase.s_deny[0 as usize]) as u64,
+            (&r_no[0 as usize]) as u64, false)
+        return
+    }
+    obops.audit(0, obstate.ld(obstate.tk(t), obbase.TK_UID), (&obbase.s_user[0 as usize]) as u64,
+        (&s_dlg[0 as usize]) as u64, np, (&obbase.s_allow[0 as usize]) as u64,
+        (&r_yes[0 as usize]) as u64, false)
+    obstate.copyz((&obbase.g_client[0 as usize]) as u64, obstate.tk(t) + obbase.TK_CLIENT, 24)
+    do_call(m, 0, obstate.ld(obstate.tk(t), obbase.TK_UID), 0, true, false)
+}
+
+fn expire() {
+    let now: u64 = actwire.ticks()
+    var i: u64 = 0
+    while i < obbase.PEND_MAX {
+        let p: u64 = obstate.pe(i)
+        if obstate.ld(p, obbase.PE_USED) != 0 && now - obstate.ld(p, obbase.PE_T0) > 500 {
+            obstate.st(p, obbase.PE_USED, 0)
+            if (obstate.ld(p, obbase.PE_FLAGS) & obbase.PF_PING) == 0 {
+                var e: [u8; 8] = "timeout\0"
+                obstate.reply_err(obstate.ld(p, obbase.PE_PID), obstate.ld(p, obbase.PE_ID), (&e[0 as usize]) as u64,
+                    obstate.ac(obstate.ld(p, obbase.PE_ACT)) + obbase.AC_NAME)
+                var r_to: [u8; 8] = "timeout\0"
+                var s_callv: [u8; 5] = "call\0"
+                obops.audit(obstate.ld(p, obbase.PE_PID), obstate.ld(p, obbase.PE_UID), p + obbase.PE_CLIENT,
+                    (&s_callv[0 as usize]) as u64, obstate.ac(obstate.ld(p, obbase.PE_ACT)) + obbase.AC_NAME,
+                    (&obbase.s_allow[0 as usize]) as u64, (&r_to[0 as usize]) as u64,
+                    false)
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < obbase.TOK_MAX {
+        let t: u64 = obstate.tk(i)
+        if obstate.ld(t, obbase.TK_USED) != 0 && now - obstate.ld(t, TK_T0) > 6000 {
+            obstate.st(t, obbase.TK_USED, 0)
+        }
+        i = i + 1
+    }
+}
+
+// the catalogue: every app bundle's ACTIONS and every wrapper manifest
+fn catalog_scan() {
+    var d_apps: [u8; 7] = "/apps/\0"
+    var sf_prog: [u8; 6] = ".prog\0"
+    var in_prog: [u8; 9] = "/ACTIONS\0"
+    var d_etc: [u8; 16] = "/etc/actions.d/\0"
+    var sf_act: [u8; 9] = ".actions\0"
+    var in_none: [u8; 1] = "\0"
+    obstate.scan((&d_apps[0 as usize]) as u64, (&sf_prog[0 as usize]) as u64,
+        (&in_prog[0 as usize]) as u64, 0)
+    // the image's and opk's bundles are .osp (kernel/user/opk.fi)
+    var sf_osp: [u8; 5] = ".osp\0"
+    obstate.scan((&d_apps[0 as usize]) as u64, (&sf_osp[0 as usize]) as u64,
+        (&in_prog[0 as usize]) as u64, 0)
+    obstate.scan((&d_etc[0 as usize]) as u64, (&sf_act[0 as usize]) as u64,
+        (&in_none[0 as usize]) as u64, 1)
+}
+
+// ======================================== AB-018: RELOAD THE CATALOGUE
+//
+// `act reload` (the user only -- opk runs it after installing or
+// removing a package): the catalogue is read again from the disk, so a
+// new app is callable, a removed one is gone and a changed manifest
+// counts, without restarting the broker. What must survive is carried
+// over BY NAME, because every table index may change: which pid answers
+// for which app (a provider that said hello stays bound), the call
+// counts of each action, and the undo records (an undo whose action no
+// longer exists is dropped -- it could not run anyway). A reload while
+// a call is on its way is refused (`busy`): that call holds an action
+// index and its answer must find it.
+static mut rl_app: [u8; 256] = [0 as u8; 256] // APP_MAX x 16
+
+static mut rl_pid: [u64; 16] = [0 as u64; 16]
+
+static mut rl_act: [u8; 2048] = [0 as u8; 2048] // ACT_MAX x 32
+
+static mut rl_calls: [u64; 64] = [0 as u64; 64]
+
+static mut rl_un: [u8; 512] = [0 as u8; 512] // UNDO_MAX x 32
+
+static mut c_reloads: u64 = 0
+
+fn do_reload(msg: u64, pid: u64, uid: u64, id: u64) {
+    if !obops.is_user(msg, uid) {
+        var e_who: [u8; 32] = "denied only the user may reload\0"
+        obstate.reply_err(pid, id, (&e_who[0 as usize]) as u64, 0)
+        return
+    }
+    var i: u64 = 0
+    if obbase.aj_n > 0 {
+        var e_busy2: [u8; 5] = "busy\0"
+        obstate.reply_err(pid, id, (&e_busy2[0 as usize]) as u64, 0)
+        return
+    }
+    while i < obbase.PEND_MAX {
+        if obstate.ld(obstate.pe(i), obbase.PE_USED) != 0 {
+            var e_busy: [u8; 5] = "busy\0"
+            obstate.reply_err(pid, id, (&e_busy[0 as usize]) as u64, 0)
+            return
+        }
+        i = i + 1
+    }
+    // what survives, by name
+    let a0: u64 = obbase.n_apps
+    let c0: u64 = obbase.n_acts
+    i = 0
+    while i < a0 && i < obbase.APP_MAX {
+        obstate.copyz((&rl_app[0 as usize]) as u64 + i * 16, obstate.ap(i) + obbase.AP_NAME, 16)
+        rl_pid[(i) as usize] = obstate.ld(obstate.ap(i), obbase.AP_PID)
+        i = i + 1
+    }
+    i = 0
+    while i < c0 && i < obbase.ACT_MAX {
+        obstate.copyz((&rl_act[0 as usize]) as u64 + i * 32, obstate.ac(i) + obbase.AC_NAME, 32)
+        rl_calls[(i) as usize] = obstate.ld(obstate.ac(i), AC_CALLS)
+        i = i + 1
+    }
+    i = 0
+    while i < obbase.UNDO_MAX {
+        let u: u64 = obstate.un(i)
+        obstate.st8((&rl_un[0 as usize]) as u64 + i * 32, 0, 0)
+        if obstate.ld(u, obbase.UN_USED) != 0 && obstate.ld(u, obbase.UN_ACT) < c0 {
+            obstate.copyz((&rl_un[0 as usize]) as u64 + i * 32, obstate.ac(obstate.ld(u, obbase.UN_ACT)) + obbase.AC_NAME, 32)
+        }
+        i = i + 1
+    }
+    // empty tables, read again
+    obbase.n_apps = 0
+    obbase.n_acts = 0
+    obbase.n_args = 0
+    obbase.pool_at = 1
+    obbase.c_rejected = 0
+    catalog_scan()
+    // carry over
+    i = 0
+    while i < a0 && i < obbase.APP_MAX {
+        let k: u64 = obstate.find_app((&rl_app[0 as usize]) as u64 + i * 16)
+        if k != actwire.NONE {
+            obstate.st(obstate.ap(k), obbase.AP_PID, rl_pid[(i) as usize])
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < c0 && i < obbase.ACT_MAX {
+        let nm: u64 = (&rl_act[0 as usize]) as u64 + i * 32
+        var k: u64 = obstate.find_act(nm, false)
+        if k == actwire.NONE {
+            k = obstate.find_act(nm, true)
+        }
+        if k != actwire.NONE {
+            obstate.st(obstate.ac(k), AC_CALLS, rl_calls[(i) as usize])
+        }
+        i = i + 1
+    }
+    var dropped: u64 = 0
+    i = 0
+    while i < obbase.UNDO_MAX {
+        let u: u64 = obstate.un(i)
+        if obstate.ld(u, obbase.UN_USED) != 0 {
+            let k: u64 = obstate.find_act((&rl_un[0 as usize]) as u64 + i * 32, false)
+            if k == actwire.NONE {
+                obstate.st(u, obbase.UN_USED, 0)
+                dropped = dropped + 1
+            } else {
+                obstate.st(u, obbase.UN_ACT, k)
+            }
+        }
+        i = i + 1
+    }
+    c_reloads = c_reloads + 1
+    // the answer and the log line: before -> after
+    actwire.ob_reset()
+    var s_ok: [u8; 9] = "ok\napps=\0"
+    var s_ac: [u8; 10] = "\nactions=\0"
+    var s_was: [u8; 11] = "\napps_was=\0"
+    var s_rj: [u8; 21] = "\nrejected_manifests=\0"
+    var s_ud: [u8; 15] = "\nundo_dropped=\0"
+    var s_nl: [u8; 2] = "\n\0"
+    actwire.ob_str((&s_ok[0 as usize]) as u64)
+    actwire.ob_num(obbase.n_apps)
+    actwire.ob_str((&s_ac[0 as usize]) as u64)
+    actwire.ob_num(obbase.n_acts)
+    actwire.ob_str((&s_was[0 as usize]) as u64)
+    actwire.ob_num(a0)
+    actwire.ob_str((&s_rj[0 as usize]) as u64)
+    actwire.ob_num(obbase.c_rejected)
+    actwire.ob_str((&s_ud[0 as usize]) as u64)
+    actwire.ob_num(dropped)
+    actwire.ob_str((&s_nl[0 as usize]) as u64)
+    obstate.reply(pid, id, actwire.ob_ptr(), actwire.ob_len())
+    var r1: [u8; 26] = "orientbus: reloaded apps=\0"
+    var r2: [u8; 10] = " actions=\0"
+    obstate.lb_start((&r1[0 as usize]) as u64)
+    obstate.lb_num(obbase.n_apps)
+    obstate.lb_add((&r2[0 as usize]) as u64)
+    obstate.lb_num(obbase.n_acts)
+    obstate.lb_say()
+    var s_rl: [u8; 7] = "reload\0"
+    var s_bus: [u8; 11] = "orient.bus\0"
+    var r_ok: [u8; 3] = "ok\0"
+    obops.audit(pid, uid, (&obbase.s_user[0 as usize]) as u64, (&s_rl[0 as usize]) as u64,
+        (&s_bus[0 as usize]) as u64, (&obbase.s_allow[0 as usize]) as u64,
+        (&r_ok[0 as usize]) as u64, false)
+}
+
+// r1087: is anything waiting for the timers of the serve loop -- an open question (expire), a parked call with a
+// dialog text (trusted_poll retry)? Cheap: two short tables.
+const IDLE_WAIT_MS: u64 = 1000 // r1087: longest sleep of an idle broker (no timers pending)
+
+fn timers_pending() -> bool {
+    var i: u64 = 0
+    while i < obbase.PEND_MAX {
+        if obstate.ld(obstate.pe(i), obbase.PE_USED) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < obbase.TOK_MAX {
+        if obstate.ld(obstate.tk(i), obbase.TK_USED) != 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn serve(limit: u64) -> u64 {
+    var n_bus: [u8; 11] = "orient.bus\0"
+    var n_evt: [u8; 11] = "orient.evt\0"
+    svc_bus = actwire.bus_reg((&n_bus[0 as usize]) as u64, actwire.A_ANY)
+    if ulib.bad(svc_bus) {
+        var e: [u8; 41] = "orientbus: orient.bus is taken or no bus\0"
+        obstate.say((&e[0 as usize]) as u64)
+        obstate.nl()
+        return 1
+    }
+    svc_evt = actwire.bus_reg((&n_evt[0 as usize]) as u64, actwire.A_ANY)
+    obops.policy_load()
+    obops.seed_counts()
+    var p_schema: [u8; 21] = "/etc/settings.schema\0"
+    obbase.have_schema = setschema.load((&p_schema[0 as usize]) as u64) != setschema.NONE
+    catalog_scan()
+    var r1: [u8; 23] = "orientbus: ready apps=\0"
+    var r2: [u8; 10] = " actions=\0"
+    var r3: [u8; 21] = " rejected_manifests=\0"
+    obstate.lb_start((&r1[0 as usize]) as u64)
+    obstate.lb_num(obbase.n_apps)
+    obstate.lb_add((&r2[0 as usize]) as u64)
+    obstate.lb_num(obbase.n_acts)
+    obstate.lb_add((&r3[0 as usize]) as u64)
+    obstate.lb_num(obbase.c_rejected)
+    obstate.lb_say()
+
+    var fr: [u8; 64] = [0 as u8; 64]
+    var meta: [u64; 6] = [0 as u64; 6]
+    let fp: u64 = (&fr[0 as usize]) as u64
+    let mp: u64 = (&meta[0 as usize]) as u64
+    let t0: u64 = actwire.ticks()
+    while running && (limit == 0 || actwire.ticks() - t0 < limit) {
+        // AB-002: blocks in the kernel until a message comes, at most
+        // 100 ms -- the timers below (expiring questions, the lazy
+        // policy write) need a turn now and then
+        var wait: u64 = 100
+        if obbase.aj_n > 0 || tr_up != 0 {
+            wait = 10 // AB-019/AB-004: a program or a person may answer
+        } else if obbase.lazy_t == 0 && !timers_pending() {
+            // r1087: nothing to expire, flush or ask: sleep on the bus (a message wakes the task at once). Every
+            // wake of an idle broker was charged one tick (VirtualBox ps: pid 3 = 8.5 % of a core at 10 wakes/s).
+            wait = IDLE_WAIT_MS
+        }
+        let n: u64 = actwire.bus_wait(fp, mp, wait)
+        obops.aj_poll()
+        trusted_poll()
+        if !ulib.bad(n) && n > 0 {
+            idle_since = 0
+            let s: u64 = actwire.asm_feed(fp, mp)
+            if s != actwire.NONE {
+                let k: u64 = actwire.asm_kind(s)
+                if k == actwire.K_REQ {
+                    on_request(s)
+                } else if k == actwire.K_REP {
+                    obops.on_reply(s)
+                } else if k == actwire.K_EVT {
+                    obops.on_event(s)
+                }
+                actwire.asm_free(s)
+            }
+        } else {
+            expire()
+            if obbase.lazy_t != 0 && actwire.ticks() - obbase.lazy_t > 50 {
+                obstate.flush_lazy()
+            }
+            // (AB-016 slept a tick per round here while the kernel bus
+            // could not block; AB-002 waits inside bus_wait instead)
+            if idle_since == 0 {
+                idle_since = actwire.ticks()
+            }
+        }
+    }
+    obstate.flush_lazy()
+    var z: [u8; 17] = "orientbus: done \0"
+    obstate.lb_start((&z[0 as usize]) as u64)
+    obstate.lb_num(obbase.c_calls)
+    obstate.lb_say()
+    return 0
+}
+
+// `orientbus check <file>`: the manifest as the broker understands it
+fn check(path: u64) -> u64 {
+    let ok: bool = obstate.load_manifest(path, 0)
+    var s1: [u8; 21] = "orientbus: check ok \0"
+    var s2: [u8; 25] = "orientbus: check FAILED \0"
+    var s3: [u8; 10] = " actions=\0"
+    var s4: [u8; 7] = " args=\0"
+    if ok {
+        obstate.say((&s1[0 as usize]) as u64)
+    } else {
+        obstate.say((&s2[0 as usize]) as u64)
+    }
+    obstate.say(path)
+    obstate.say((&s3[0 as usize]) as u64)
+    obstate.sayn(obbase.n_acts)
+    obstate.say((&s4[0 as usize]) as u64)
+    obstate.sayn(obbase.n_args)
+    obstate.nl()
+    if ok {
+        return 0
+    }
+    return 1
+}
+
+fn u_start(args: u64) -> u64 {
+    let argc: u64 = ulib.arg_count(args)
+    var h: [u8; 61] = "usage: orientbus serve [ticks] | orientbus check <manifest>\n\0"
+    if argc < 2 {
+        obstate.say((&h[0 as usize]) as u64)
+        return 1
+    }
+    let cmd: u64 = ulib.arg_at(args, 1)
+    var c_serve: [u8; 6] = "serve\0"
+    var c_check: [u8; 6] = "check\0"
+    if actwire.str_eq(cmd, (&c_serve[0 as usize]) as u64) {
+        var lim: u64 = 0
+        if argc >= 3 {
+            lim = ulib.to_num(ulib.arg_at(args, 2))
+        }
+        return serve(lim)
+    }
+    if actwire.str_eq(cmd, (&c_check[0 as usize]) as u64) && argc >= 3 {
+        return check(ulib.arg_at(args, 2))
+    }
+    obstate.say((&h[0 as usize]) as u64)
+    return 1
+}
