@@ -1,0 +1,563 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ctxreg
+import lineout
+import notifc
+import nv
+import qs
+import taskbar_ctx
+import taskview
+import ulib
+import wlibc
+import taskbar.tbbase
+import taskbar.tbhover
+import taskbar.tblayout
+import taskbar.tbmetrics
+import taskbar.tbpaint
+import taskbar.tbpopup
+import taskbar.tbstatus
+
+const SYS_AUDSET: u64 = 1851
+
+const AS_MUTE: u64 = 2
+
+static mut head_on: u64 = 0
+
+static mut spawned: u64 = 0
+
+static mut hide_t0: u64 = 0
+
+static mut size_fail: u64 = 0
+
+static mut size_tries: u64 = 0
+
+static mut s_sz2: [u8; 17] = "taskbar: size w=\0"
+
+static mut s_gx2: [u8; 4] = " h=\0"
+
+static mut s_rc2: [u8; 5] = " rc=\0"
+
+static mut s_sx: [u8; 16] = "taskbar: strut \0"
+
+static mut s_sz: [u8; 7] = " size=\0"
+
+fn apply() {
+    tbmetrics.window_rect()
+    let rs: u64 = tbpaint.bar_size(tbbase.win_w, tbbase.win_h)
+    size_fail = rs
+    tbmetrics.say((&s_sz2[0 as usize]) as u64)
+    tbmetrics.sayn(tbbase.win_w)
+    tbmetrics.say((&s_gx2[0 as usize]) as u64)
+    tbmetrics.sayn(tbbase.win_h)
+    tbmetrics.say((&s_rc2[0 as usize]) as u64)
+    tbmetrics.sayn(rs)
+    tbmetrics.nl()
+    let _m: u64 = wlibc.sys3w(wlibc.WM_MOVE, tbbase.w_h, (tbbase.win_x << 16) | tbbase.win_y, 0)
+    var reserve: u64 = tbbase.thick
+    if tbbase.cf_autohide != 0 {
+        reserve = tbbase.SLIVER
+    }
+    let rc: u64 = wlibc.win_strut(tbbase.w_h, tbbase.cf_edge, reserve)
+    tbmetrics.say((&s_sx[0 as usize]) as u64)
+    tbmetrics.say((&tbbase.s_ed[0 as usize]) as u64)
+    tbmetrics.sayn(tbbase.cf_edge)
+    tbmetrics.say((&s_sz[0 as usize]) as u64)
+    tbmetrics.sayn(reserve)
+    tbmetrics.say((&tbbase.s_rc[0 as usize]) as u64)
+    tbmetrics.sayn(rc)
+    tbmetrics.nl()
+    var layer: u64 = wlibc.L_TOP
+    if tbbase.cf_ontop == 0 {
+        layer = wlibc.L_NORMAL
+    }
+    let _l: u64 = wlibc.win_state(tbbase.w_h, wlibc.WS_LAYER, layer)
+
+    qs.anchor(tbbase.cf_edge, wlibc.work_x(tbbase.w_h), wlibc.work_y(tbbase.w_h),
+        wlibc.work_w(tbbase.w_h), wlibc.work_h(tbbase.w_h))
+    notifc.anchor(tbbase.cf_edge, wlibc.work_x(tbbase.w_h), wlibc.work_y(tbbase.w_h),
+        wlibc.work_w(tbbase.w_h), wlibc.work_h(tbbase.w_h))
+}
+
+static mut dnd_k: u64 = 0
+
+static mut dnd_k_t: u64 = 0
+
+static mut dnd_k_done: u64 = 0
+
+static mut s_dndr: [u8; 24] = "taskbar: dndraise id=\0\0\0"
+
+fn dnd_bar_step() -> bool {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    if (wlibc.mouse_btn() & 1) == 0 || !wlibc.drag_an() || !tbhover.inside_bar(mx, my) {
+        dnd_k = 0
+        dnd_k_done = 0
+        return false
+    }
+    let lx: u64 = mx - tbbase.bar_x
+    let ly: u64 = my - tbbase.bar_y
+    var key: u64 = 0
+    var wnd: u64 = tbbase.MAXK
+    var i: u64 = 0
+    while i < tbbase.nk {
+        if tbbase.kw[(i) as usize] != 0 && lx >= tbbase.kx[(i) as usize] && lx < tbbase.kx[(i) as usize] + tbbase.kw[(i) as usize]
+            && ly >= tbbase.ky[(i) as usize] && ly < tbbase.ky[(i) as usize] + tbbase.kh[(i) as usize] {
+            key = 1 + i
+            wnd = i
+            i = tbbase.nk
+        } else {
+            i = i + 1
+        }
+    }
+    if key == 0 {
+        var pk: u64 = 0
+        while pk < tbbase.npin {
+            if tbbase.pw_[(pk) as usize] != 0 && lx >= tbbase.px_[(pk) as usize] && lx < tbbase.px_[(pk) as usize] + tbbase.pw_[(pk) as usize]
+                && ly >= tbbase.py_[(pk) as usize] && ly < tbbase.py_[(pk) as usize] + tbbase.ph_[(pk) as usize]
+                && tbbase.pinwin[(pk) as usize] < tbbase.MAXK {
+                key = 100 + pk
+                wnd = tbbase.pinwin[(pk) as usize]
+                pk = tbbase.npin
+            } else {
+                pk = pk + 1
+            }
+        }
+    }
+    if key == 0 {
+        dnd_k = 0
+        dnd_k_done = 0
+        return false
+    }
+    if key != dnd_k {
+        dnd_k = key
+        dnd_k_t = tbmetrics.ticks_now()
+        dnd_k_done = 0
+        return false
+    }
+    if dnd_k_done == key || tbmetrics.ticks_now() - dnd_k_t < 60 {
+        return false
+    }
+    dnd_k_done = key
+    let rc: u64 = wlibc.win_act(tbbase.kid[(wnd) as usize], wlibc.WA_RAISE)
+    tbmetrics.say((&s_dndr[0 as usize]) as u64)
+    tbmetrics.sayn(tbbase.kid[(wnd) as usize])
+    tbmetrics.say((&tbbase.s_rc[0 as usize]) as u64)
+    tbmetrics.sayn(rc)
+    tbmetrics.nl()
+    let _a: bool = tblayout.list_read()
+    tblayout.layout()
+    tbpaint.paint(true)
+    return true
+}
+
+static mut s_d2: [u8; 20] = "taskbar: drag done \0"
+
+fn drag_step() {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    let e: u64 = tbhover.nearest_edge(mx, my)
+    tbbase.drag_edge = e
+    tbhover.preview_show(e)
+    if (wlibc.mouse_btn() & 1) == 0 {
+
+        tbbase.dragging = 0
+        tbhover.close_preview()
+        var written: u64 = 0
+        if e != tbbase.cf_edge {
+            tbbase.cf_edge = e
+            if tbstatus.conf_write() {
+                written = 1
+            }
+            tbmetrics.geometry()
+            apply()
+            let _l: bool = tblayout.list_read()
+            tblayout.layout()
+            tbpaint.paint(true)
+            tbstatus.geom_say()
+        }
+        tbmetrics.say((&s_d2[0 as usize]) as u64)
+        tbmetrics.say((&tbbase.s_ed[0 as usize]) as u64)
+        tbmetrics.sayn(e)
+        tbmetrics.say((&tbbase.s_wr[0 as usize]) as u64)
+        tbmetrics.sayn(written)
+        tbmetrics.nl()
+    }
+}
+
+static mut s_hd: [u8; 14] = "taskbar: hide\0"
+
+static mut s_sh2: [u8; 14] = "taskbar: show\0"
+
+static mut s_ms: [u8; 5] = " ms=\0"
+
+fn autohide_step() {
+    if tbbase.cf_autohide == 0 {
+        return
+    }
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    if tbbase.shown == 0 {
+        if tbhover.touches_edge(mx, my) {
+            if hide_t0 == 0 {
+                hide_t0 = tbmetrics.ticks()
+            }
+            tbbase.shown = 1
+            apply()
+            tblayout.layout()
+
+            tbpaint.paint(false)
+            let t1: u64 = tbmetrics.ticks()
+            tbmetrics.say((&s_sh2[0 as usize]) as u64)
+            tbmetrics.say((&s_ms[0 as usize]) as u64)
+            tbmetrics.sayn((t1 - hide_t0) * 10)
+            tbmetrics.nl()
+            hide_t0 = 0
+            tbpaint.paint(true)
+        }
+        return
+    }
+    if tbbase.dragging != 0 {
+        return
+    }
+    if !tbhover.inside_bar(mx, my) {
+        tbbase.shown = 0
+        apply()
+        tbpaint.paint(false)
+        tbmetrics.say((&s_hd[0 as usize]) as u64)
+        tbmetrics.nl()
+    }
+}
+
+static mut hk_seen: u64 = 0
+
+static mut hk_erst: u64 = 1
+
+static mut hk_sagte: u64 = 0
+
+static mut angeheftet: [u64; 16] = [0 as u64; 16]
+
+static mut s_ctxpin: [u8; 24] = "taskbar: pin neu starte\0"
+
+static mut s_ctxtat: [u8; 20] = "taskbar: kontext w=\0"
+
+static mut s_ctxleert: [u8; 27] = "taskbar: kontext leer w=\0\0\0"
+
+fn kontext_step() {
+    if !taskbar_ctx.is_open() {
+        return
+    }
+    let a: u64 = taskbar_ctx.step()
+    if a == taskbar_ctx.NONE || a == taskbar_ctx.DISMISSED {
+        return
+    }
+    let ctx: u64 = taskbar_ctx.picked_ctx()
+    let arg: u64 = taskbar_ctx.picked_arg()
+    if ctx == ctxreg.CTX_TASKBAR_PIN {
+        if a == taskbar_ctx.ACT_NEW_WINDOW && arg < tbbase.npin {
+            tbpaint.pin_exec(arg)
+            tbmetrics.say((&s_ctxpin[0 as usize]) as u64)
+            tbmetrics.nl()
+        } else {
+            let _c: bool = taskbar_ctx.run_common(a)
+        }
+        return
+    }
+    if ctx == ctxreg.CTX_WINDOW_BTN {
+        let i: u64 = arg - 1
+        if i >= tbbase.nk {
+            return
+        }
+        if a == taskbar_ctx.ACT_NEW_WINDOW {
+
+            if tbbase.kapp[((i * 24)) as usize] != 0 as u8 {
+                tbhover.app_exec((&tbbase.kapp[0 as usize]) as u64 + i * 24)
+            }
+        } else if a == taskbar_ctx.ACT_MINIMISE {
+            let _a: u64 = wlibc.win_act(tbbase.knv[(i) as usize], wlibc.WA_HIDE)
+        } else if a == taskbar_ctx.ACT_PIN {
+
+            angeheftet[(i) as usize] = 1
+        } else {
+            let _c: bool = taskbar_ctx.run_common(a)
+            return
+        }
+        tbmetrics.say((&s_ctxtat[0 as usize]) as u64)
+        tbmetrics.sayn(a)
+        tbmetrics.nl()
+        return
+    }
+
+    if taskbar_ctx.run_common(a) {
+        tbmetrics.say((&s_ctxleert[0 as usize]) as u64)
+        tbmetrics.sayn(a)
+        tbmetrics.nl()
+    }
+}
+
+fn hotkey_mine() -> bool {
+    let n: u64 = wlibc.head_count()
+    if n <= 1 {
+        return true
+    }
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    var first: u64 = 8
+    var under: u64 = 8
+    var hd: u64 = 0
+    while hd < 8 {
+        if wlibc.head_present(hd) {
+            if first == 8 {
+                first = hd
+            }
+            let x0: u64 = wlibc.head_field(hd, 0)
+            let y0: u64 = wlibc.head_field(hd, 1)
+            if mx >= x0 && my >= y0 && mx < x0 + wlibc.head_field(hd, 2) && my < y0 + wlibc.head_field(hd, 3) {
+                under = hd
+            }
+        }
+        hd = hd + 1
+    }
+    if under == 8 {
+        under = first
+    }
+    return under == tbbase.my_head
+}
+
+fn hotkey_step() {
+    let seq: u64 = nv.hotkey_seq()
+    if seq == hk_seen {
+        return
+    }
+    let war: u64 = hk_seen
+    hk_seen = seq
+    let key_code: u64 = nv.hotkey_key()
+    if hk_sagte < 8 {
+        hk_sagte = hk_sagte + 1
+        tbmetrics.say((&s_hk[0 as usize]) as u64)
+        tbmetrics.sayn(seq)
+        tbmetrics.say((&s_hkw[0 as usize]) as u64)
+        tbmetrics.sayn(war)
+        tbmetrics.say((&s_hkt[0 as usize]) as u64)
+        tbmetrics.sayn(key_code)
+        tbmetrics.nl()
+    }
+    if war == 0 && seq != 1 {
+        hk_erst = 0
+        return
+    }
+    hk_erst = 0
+    if key_code == 0 {
+
+        if hotkey_mine() {
+            tbpopup.startmenue_um()
+        }
+        return
+    }
+
+    if key_code == 101 || key_code == 69 {
+        var bn: [u8; 9] = "explorer\0"
+        tbmetrics.start_bundle((&bn[0 as usize]) as u64, 8)
+        return
+    }
+    if key_code == 105 || key_code == 73 {
+        var bn2: [u8; 9] = "settings\0"
+        tbmetrics.start_bundle((&bn2[0 as usize]) as u64, 8)
+        return
+    }
+    if key_code == 1000 {
+        var bn3: [u8; 8] = "taskmgr\0"
+        tbmetrics.start_bundle((&bn3[0 as usize]) as u64, 7)
+        return
+    }
+    if key_code == 100 || key_code == 68 {
+        tbpopup.show_desktop_toggle()
+        return
+    }
+    if key_code == 9 {
+        tbmetrics.say((&s_hktv[0 as usize]) as u64)
+        tbmetrics.nl()
+        taskview.toggle()
+        return
+    }
+    if key_code == 114 || key_code == 82 {
+        var bn4: [u8; 4] = "run\0"
+        tbmetrics.start_bundle((&bn4[0 as usize]) as u64, 3)
+        return
+    }
+    if key_code == 118 || key_code == 86 {
+
+        var bn5: [u8; 9] = "cliphist\0"
+        tbmetrics.start_bundle((&bn5[0 as usize]) as u64, 8)
+        return
+    }
+    if key_code == 336 {
+        tbpopup.snip_launch(false)
+        return
+    }
+    if key_code == 83 {
+        tbpopup.snip_launch(true)
+        return
+    }
+    if key_code == 110 || key_code == 78 {
+        if hotkey_mine() {
+            tbmetrics.say((&s_hknoti[0 as usize]) as u64)
+            tbmetrics.nl()
+            notifc.toggle()
+        }
+        return
+    }
+    if key_code == 116 {
+        tbpaint.bar_keys(true)
+        return
+    }
+    if key_code == 109 {
+        if tbbase.snd_da != 0 {
+            let an: u64 = ulib.sys(tbbase.SYS_AUDGET, tbbase.A_MUTED, 0, 0)
+            var fresh2: u64 = 1
+            if an == 1 {
+                fresh2 = 0
+            }
+            let rc: u64 = ulib.sys(SYS_AUDSET, AS_MUTE, fresh2, 0)
+            tbmetrics.say((&s_hkmute[0 as usize]) as u64)
+            tbmetrics.sayn(fresh2)
+            tbmetrics.say((&s_hkrc[0 as usize]) as u64)
+            tbmetrics.sayn(rc)
+            tbmetrics.nl()
+            tbbase.snd_mute = fresh2
+            tbstatus.status_build()
+            tbpaint.paint(false)
+        }
+        return
+    }
+}
+
+static mut s_hknoti: [u8; 18] = "taskbar: hk notif\0"
+
+static mut s_hktv: [u8; 15] = "taskbar: hk tv\0"
+
+static mut s_hkmute: [u8; 21] = "taskbar: hk mute on=\0"
+
+static mut s_hkrc: [u8; 5] = " rc=\0"
+
+static mut s_hk: [u8; 21] = "taskbar: klinke seq=\0"
+
+static mut s_hkw: [u8; 7] = "  war=\0"
+
+static mut s_hkt: [u8; 9] = "  taste=\0"
+
+static mut p_bar: [u8; 13] = "/bin/taskbar\0"
+
+static mut s_hd1: [u8; 22] = "taskbar: head my=\0\0\0\0\0"
+
+static mut s_hd2: [u8; 5] = " on=\0"
+
+static mut s_hd3: [u8; 7] = " spawn\0"
+
+static mut s_fw1: [u8; 26] = "taskbar: follow screen w=\0"
+
+fn head_setup() -> bool {
+
+    let _sr: bool = wlibc.screen_refresh()
+    var nx: u64 = 0
+    var ny: u64 = 0
+    var nw: u64 = wlibc.screen_w()
+    var nh: u64 = wlibc.screen_h()
+    var on: u64 = 0
+    var hd: u64 = tbbase.my_head
+    if tbbase.head_arg == 0 {
+        hd = 0
+        while hd < 8 && !wlibc.head_present(hd) {
+            hd = hd + 1
+        }
+        if hd >= 8 {
+            hd = 0
+        }
+    }
+    if hd < 8 && wlibc.head_present(hd) {
+        let w: u64 = wlibc.head_field(hd, 2)
+        let h: u64 = wlibc.head_field(hd, 3)
+        if !ulib.bad(w) && !ulib.bad(h) && w != 0 && h != 0 {
+            nx = wlibc.head_field(hd, 0)
+            ny = wlibc.head_field(hd, 1)
+            nw = w
+            nh = h
+            on = 1
+            tbbase.my_head = hd
+        }
+    }
+    var changed: bool = false
+    if nx != tbbase.hx || ny != tbbase.hy || nw != tbbase.sw || nh != tbbase.sh || on != head_on {
+        changed = true
+    }
+    tbbase.hx = nx
+    tbbase.hy = ny
+    tbbase.sw = nw
+    tbbase.sh = nh
+    head_on = on
+    wlibc.set_head_bounds(tbbase.hx, tbbase.hy, tbbase.sw, tbbase.sh)
+    return changed
+}
+
+fn spawn_bar(hd: u64) {
+    var num: [u8; 2] = [48 as u8, 0 as u8]
+    num[0 as usize] = (48 + hd) as u8
+    var argv: [u64; 4] = [0 as u64; 4]
+    argv[0 as usize] = (&p_bar[0 as usize]) as u64
+    argv[1 as usize] = (&tbbase.a_head[0 as usize]) as u64
+    argv[2 as usize] = (&num[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&p_bar[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 3)
+    tbmetrics.say((&s_hd1[0 as usize]) as u64)
+    tbmetrics.sayn(hd)
+    tbmetrics.say((&s_hd3[0 as usize]) as u64)
+    tbmetrics.sayn(pid)
+    tbmetrics.nl()
+}
+
+fn heads_step() {
+    if tbbase.head_arg != 0 && !wlibc.head_present(tbbase.my_head) {
+        tbbase.quit_req = 1
+        return
+    }
+    if tbbase.head_arg == 0 {
+        var hd: u64 = 0
+        while hd < 8 {
+            let bit: u64 = 1 << hd
+            if hd != tbbase.my_head && wlibc.head_present(hd) {
+                if (spawned & bit) == 0 {
+                    spawned = spawned | bit
+                    spawn_bar(hd)
+                }
+            } else {
+                spawned = spawned & (0xFF ^ bit)
+            }
+            hd = hd + 1
+        }
+    }
+    if head_setup() {
+
+        lineout.add_text((&s_fw1[0 as usize]) as u64)
+        lineout.add_num(tbbase.sw)
+        lineout.add_text((&s_gx2[0 as usize]) as u64)
+        lineout.add_num(tbbase.sh)
+        lineout.end_line()
+        tbmetrics.geometry()
+        tbbase.shown = 1
+        apply()
+        tblayout.layout()
+        tbpaint.paint(true)
+        tbmetrics.say((&s_hd1[0 as usize]) as u64)
+        tbmetrics.sayn(tbbase.my_head)
+        tbmetrics.say((&s_hd2[0 as usize]) as u64)
+        tbmetrics.sayn(head_on)
+        tbmetrics.nl()
+        tbstatus.geom_say()
+        size_tries = 0
+    } else if size_fail != 0 && size_tries < 30 {
+        size_tries = size_tries + 1
+        apply()
+        tblayout.layout()
+        tbpaint.paint(true)
+    }
+}

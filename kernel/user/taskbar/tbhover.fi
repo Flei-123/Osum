@@ -1,0 +1,958 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import appreg
+import barpop
+import brand_start
+import calpop
+import fuib
+import msg
+import symvar
+import taskbar_ctx
+import fui.traypower
+import ulib
+import wlib
+import wlibc
+import taskbar.tbbase
+import taskbar.tblayout
+import taskbar.tbmetrics
+import taskbar.tbstatus
+
+const REVEAL: u64 = 2
+
+const PREV_T: u64 = 3
+
+const NG_MASK: u64 = 2
+
+const NG_GW: u64 = 3
+
+static mut hot_b: u64 = 0
+
+static mut bat_tip: [u8; 96] = [0 as u8; 96]
+
+const HOVER_MAX: u64 = 223
+
+static mut prev_h: [u64; 5] = [0 as u64; 5]
+
+static mut prev_on: u64 = 0
+
+static mut k_h_none: [u8; 17] = "taskbar.tip.none\0"
+
+static mut k_h_fake: [u8; 18] = "taskbar.tip.faked\0"
+
+static mut k_h_filt: [u8; 21] = "taskbar.tip.filtered\0"
+
+static mut k_h_s0: [u8; 22] = "taskbar.tip.nocarrier\0"
+
+static mut k_h_s1: [u8; 17] = "taskbar.tip.noip\0"
+
+static mut k_h_s2: [u8; 20] = "taskbar.tip.noroute\0"
+
+static mut k_h_s3: [u8; 19] = "taskbar.tip.online\0"
+
+static mut k_h_fb1: [u8; 19] = "taskbar.tip.faking\0"
+
+static mut k_h_fb2: [u8; 22] = "taskbar.tip.fb_always\0"
+
+static mut k_h_fb3: [u8; 23] = "taskbar.tip.fb_offline\0"
+
+static mut h_sp2: [u8; 3] = "  \0"
+
+static mut h_msk: [u8; 9] = "  Maske \0"
+
+static mut h_gw: [u8; 6] = "  gw \0"
+
+static mut s_hotb: [u8; 17] = "taskbar: hotbtn \0"
+
+fn hover_clear() {
+    tbbase.hover_on = 0
+    __mmio_write8(((&tbbase.hover_txt[0 as usize]) as u64) as *mut u8, 0 as u8)
+}
+
+fn hover_set(txt: u64) {
+    tbbase.hover_on = 1
+    let _a: u64 = ulib.strncpy((&tbbase.hover_txt[0 as usize]) as u64, txt, 95)
+}
+
+fn hover_add(at: u64, q: u64) -> u64 {
+    let p: u64 = (&tbbase.hover_txt[0 as usize]) as u64
+    var k: u64 = 0
+    while __mmio_read8((q + k) as *mut u8) != 0 as u8
+        && at + k < HOVER_MAX {
+        __mmio_write8((p + at + k) as *mut u8,
+            __mmio_read8((q + k) as *mut u8))
+        k = k + 1
+    }
+    __mmio_write8((p + at + k) as *mut u8, 0 as u8)
+    return at + k
+}
+
+fn hover_state() {
+    var w: u64 = msg.get((&k_h_s0[0 as usize]) as u64)
+    if tbbase.net_state == 1 {
+        w = msg.get((&k_h_s1[0 as usize]) as u64)
+    } else if tbbase.net_state == 2 {
+        w = msg.get((&k_h_s2[0 as usize]) as u64)
+    } else if tbbase.net_state == 3 {
+        w = msg.get((&k_h_s3[0 as usize]) as u64)
+    }
+    var at: u64 = ulib.strncpy((&tbbase.hover_txt[0 as usize]) as u64, w, 40)
+    let h: u64 = (&tbbase.hover_txt[0 as usize]) as u64
+    if tbbase.net_state >= 2 {
+        at = hover_add(at, (&h_sp2[0 as usize]) as u64)
+        at = tbstatus.ip_at(h, at, ulib.sys(tbbase.SYS_NETGET, tbbase.NG_IP, 0, 0))
+        at = hover_add(at, (&h_msk[0 as usize]) as u64)
+        at = tbstatus.ip_at(h, at, ulib.sys(tbbase.SYS_NETGET, NG_MASK, 0, 0))
+        at = hover_add(at, (&h_gw[0 as usize]) as u64)
+        at = tbstatus.ip_at(h, at, ulib.sys(tbbase.SYS_NETGET, NG_GW, 0, 0))
+    }
+
+    if tbbase.nv_faking != 0 {
+        at = hover_add(at, msg.get((&k_h_fb1[0 as usize]) as u64))
+        if tbbase.nv_fall == 2 {
+            at = hover_add(at, msg.get((&k_h_fb2[0 as usize]) as u64))
+        } else {
+            at = hover_add(at, msg.get((&k_h_fb3[0 as usize]) as u64))
+        }
+    }
+    tbbase.hover_on = 1
+}
+
+fn hover_plate() -> u64 {
+    return wlibc.mix(wlibc.theme(wlibc.T_PANEL), wlibc.theme(wlibc.T_BTNHI), 55)
+}
+
+fn hover_step() -> bool {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    let was: u64 = tbbase.hover_on
+    var old: [u8; 96] = [0 as u8; 96]
+    let _c: u64 = ulib.strncpy((&old[0 as usize]) as u64,
+        (&tbbase.hover_txt[0 as usize]) as u64, 95)
+    hover_clear()
+    let hot_was: u64 = tbbase.hot_f
+    tbbase.hot_f = 255
+    let hb_was: u64 = hot_b
+    hot_b = 0
+    if inside_bar(mx, my) {
+        let lx: u64 = mx - tbbase.bar_x
+        let ly: u64 = my - tbbase.bar_y
+        tbbase.hot_f = tbmetrics.hot_field(lx, ly)
+        let hb: u64 = tbmetrics.hot_button(lx, ly)
+        if hb != 0 {
+            hot_b = hb * 2 + (wlibc.mouse_btn() & 1)
+        }
+        if lx >= tbbase.f_x[(tbbase.F_NET) as usize]
+            && lx < tbbase.f_x[(tbbase.F_NET) as usize] + tbbase.f_w[(tbbase.F_NET) as usize]
+            && ly >= tbbase.f_y[(tbbase.F_NET) as usize]
+            && ly < tbbase.f_y[(tbbase.F_NET) as usize] + tbbase.f_h[(tbbase.F_NET) as usize] {
+            hover_state()
+        } else {
+            var i: u64 = 0
+            while i < tbbase.nk {
+                if tbbase.kw[(i) as usize] != 0 && tbbase.knv[(i) as usize] != 0
+                    && lx >= tbbase.kx[(i) as usize]
+                    && lx < tbbase.kx[(i) as usize] + tbbase.kw[(i) as usize]
+                    && ly >= tbbase.ky[(i) as usize]
+                    && ly < tbbase.ky[(i) as usize] + tbbase.kh[(i) as usize] {
+                    if tbbase.knv[(i) as usize] == 1 {
+                        hover_set(msg.get((&k_h_filt[0 as usize]) as u64))
+                    } else if tbbase.knv[(i) as usize] == 2 {
+                        hover_set(msg.get((&k_h_fake[0 as usize]) as u64))
+                    } else {
+                        hover_set(msg.get((&k_h_none[0 as usize]) as u64))
+                    }
+                    i = tbbase.nk
+                } else {
+                    i = i + 1
+                }
+            }
+        }
+    }
+    if hb_was != hot_b {
+        tbmetrics.say((&s_hotb[0 as usize]) as u64)
+        tbmetrics.sayn(hot_b)
+        tbmetrics.nl()
+    }
+    if was != tbbase.hover_on || hot_was != tbbase.hot_f || hb_was != hot_b {
+        return true
+    }
+    return !ulib.streq((&old[0 as usize]) as u64,
+        (&tbbase.hover_txt[0 as usize]) as u64)
+}
+
+static mut s_pinexec: [u8; 21] = "taskbar: pin starte \0"
+
+fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
+    dim: bool) -> u64 {
+    return button_sym(x, y, w, h, txt, on, dim, 0, 0)
+}
+
+static mut mk_ink: u64 = 0
+
+fn brand_paint_ok(x: u64, y: u64, w: u64, h: u64, report: bool) -> bool {
+    if w < 8 || h < 8 {
+        return false
+    }
+    var edge: u64 = h - 4
+    if edge > w - 4 {
+        edge = w - 4
+    }
+    if brand_start.wide(edge) == 0 {
+        return false
+    }
+    brand_paint(x, y, w, h, report)
+    return true
+}
+
+fn brand_paint(x: u64, y: u64, w: u64, h: u64, report: bool) {
+    var s_mk: [u8; 18] = "taskbar: marke n=\0"
+    var s_mx: [u8; 4] = " x=\0"
+    var s_my: [u8; 4] = " y=\0"
+    var s_mi: [u8; 6] = " ink=\0"
+    if w < 8 || h < 8 {
+        return
+    }
+    var edge: u64 = h - 4
+    if edge > w - 4 {
+        edge = w - 4
+    }
+    let n: u64 = brand_start.wide(edge)
+    if n == 0 {
+        return
+    }
+    var qn: u64 = n
+    var draw: u64 = 1
+    var best: u64 = n
+    var bmal: u64 = 9
+    var kn: u64 = 16
+    while kn <= 64 {
+        var m2: u64 = 1
+        while m2 <= 4 {
+            let gr: u64 = kn * m2
+            if gr <= edge {
+                if gr > best || (gr == best && m2 < bmal) {
+                    best = gr
+                    bmal = m2
+                    qn = kn
+                    draw = m2
+                }
+            }
+            m2 = m2 + 1
+        }
+
+        if kn == 16 {
+            kn = 24
+        } else if kn == 24 {
+            kn = 32
+        } else if kn == 32 {
+            kn = 48
+        } else if kn == 48 {
+            kn = 64
+        } else {
+            kn = 65
+        }
+    }
+    let gz: u64 = qn * draw
+    let x0: u64 = x + (w - gz) / 2
+    let y0: u64 = y + (h - gz) / 2
+    let reason: u64 = wlibc.theme(wlibc.C_BUTTON_FACE)
+    mk_ink = 0
+    var yy: u64 = 0
+    while yy < qn {
+        var xx: u64 = 0
+        while xx < qn {
+            let v: u64 = brand_start.point(qn, xx, yy)
+            let a: u64 = (v >> 24) & 0xFF
+            if a != 0 {
+                var q: u64 = v & wlibc.RGB24
+                let qr: u64 = (q >> 16) & 255
+                let qg: u64 = (q >> 8) & 255
+                let qb: u64 = q & 255
+                var up: u64 = qr
+                if qg > up {
+                    up = qg
+                }
+                if qb > up {
+                    up = qb
+                }
+                var tief: u64 = qr
+                if qg < tief {
+                    tief = qg
+                }
+                if qb < tief {
+                    tief = qb
+                }
+                if up -% tief < 24 {
+                    q = wlibc.theme(wlibc.T_FG)
+                }
+                let f: u64 = wlibc.blend(reason, q, a)
+                var dy: u64 = 0
+                while dy < draw {
+                    var dx: u64 = 0
+                    while dx < draw {
+                        wlib.draw_point(x0 + xx * draw + dx,
+                            y0 + yy * draw + dy, f)
+                        dx = dx + 1
+                    }
+                    dy = dy + 1
+                }
+                mk_ink = mk_ink + 1
+            }
+            xx = xx + 1
+        }
+        yy = yy + 1
+    }
+    if report {
+        tbmetrics.say((&s_mk[0 as usize]) as u64)
+        tbmetrics.sayn(gz)
+        tbmetrics.say((&s_mx[0 as usize]) as u64)
+        tbmetrics.sayn(x0)
+        tbmetrics.say((&s_my[0 as usize]) as u64)
+        tbmetrics.sayn(y0)
+        tbmetrics.say((&s_mi[0 as usize]) as u64)
+        tbmetrics.sayn(mk_ink)
+        tbmetrics.nl()
+    }
+}
+
+fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
+    dim: bool, mark: u64, sym: u64) -> u64 {
+    let weich: bool = wlibc.radius() != 0
+        || wlibc.metric(wlibc.M_DIVIDER) < 50
+    var fg: u64 = wlibc.theme(wlibc.T_FG)
+    var face: u64 = wlibc.theme(wlibc.C_TASKBAR_BG)
+    let zx: u64 = wlibc.mouse_x()
+    let zy: u64 = wlibc.mouse_y()
+    let ox: u64 = tbbase.bar_x
+    let oy: u64 = tbbase.bar_y
+    let drauf: bool = zx >= ox + x && zx < ox + x + w
+        && zy >= oy + y && zy < oy + y + h
+    let gedrueckt: bool = drauf && (wlibc.mouse_btn() & 1) != 0
+    if weich {
+        if on {
+            var af: u64 = wlibc.theme(wlibc.C_BUTTON_HOVER)
+            if gedrueckt {
+                af = wlibc.mix(af, wlibc.theme(wlibc.T_BTNDN), 65)
+            } else if drauf {
+                af = wlibc.mix(af, wlibc.theme(wlibc.T_BTNHI), 40)
+            }
+            wlib.draw_board(x, y, w, h, wlib.MR_BUTTON, wlibc.EL_FLAT,
+                af, 0)
+            face = af
+        } else if gedrueckt {
+            wlib.draw_board(x, y, w, h, wlib.MR_BUTTON, wlibc.EL_FLAT,
+                wlibc.theme(wlibc.T_BTNDN), 0)
+            face = wlibc.theme(wlibc.T_BTNDN)
+        } else if drauf {
+            let dh: u64 = wlibc.mix(wlibc.theme(wlibc.T_PANEL),
+                wlibc.theme(wlibc.T_BTNHI), 55)
+            wlib.draw_board(x, y, w, h, wlib.MR_BUTTON, wlibc.EL_FLAT,
+                dh, 0)
+            face = dh
+        } else if dim {
+            fg = wlibc.theme(wlibc.T_DIM)
+        }
+        if dim {
+            fg = wlibc.theme(wlibc.T_DIM)
+        }
+    } else {
+        var bg: u64 = wlibc.theme(wlibc.C_BUTTON_FACE)
+        if on {
+            bg = wlibc.theme(wlibc.T_SEL)
+        } else if dim {
+            bg = wlibc.theme(wlibc.T_SCROLL)
+        }
+        wlib.draw_edge3(x, y, w, h, bg, wlibc.theme(wlibc.T_BTNHI),
+            wlibc.theme(wlibc.C_BORDER), on)
+        face = bg
+        if on {
+            fg = wlibc.theme(wlibc.T_SELFG)
+        } else if dim {
+            fg = wlibc.theme(wlibc.T_DIM)
+        }
+    }
+    var room: u64 = 0
+    var symsc: u64 = 0
+    var symw: u64 = 0
+    if sym != 0 {
+        symsc = tblayout.sym_scale(sym, h)
+        symw = tblayout.sym_w(sym, h)
+        room = room + symw + 3
+    }
+    if mark != 0 {
+        room = room + tbmetrics.mk_w() + 3
+    }
+    let n: u64 = tbmetrics.tlen(txt)
+    var tw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), txt, n)
+    if tw + 8 + room > w {
+        if w > 8 + room {
+            tw = w - 8 - room
+        } else {
+            tw = 0
+        }
+    }
+    let cur_gap: u64 = 4 * wlibc.ui_scale()
+    var gruppe: u64 = tw
+    if sym != 0 {
+        gruppe = gruppe + symw
+        if tw != 0 {
+            gruppe = gruppe + cur_gap
+        }
+    }
+    if mark != 0 {
+        gruppe = gruppe + tbmetrics.mk_w() + cur_gap
+    }
+    var gx: u64 = x + 3
+    if w > gruppe + 6 {
+        gx = x + (w - gruppe) / 2
+    }
+    let tx: u64 = gx + gruppe - tw
+    let base: u64 = y + (h + tbbase.asc) / 2 - 1
+    tbbase.lab_tx = tx
+    tbbase.lab_tw = tw
+    tbbase.lab_fg = fg
+    tbbase.lab_bg = face
+    if n == 0 {
+        tbbase.lab_tw = 0
+    }
+    var mx: u64 = gx
+    if sym != 0 {
+        let sh: u64 = tblayout.sym_hh(sym, h)
+        var sy2: u64 = y
+        if h > sh {
+            sy2 = y + (h - sh) / 2
+        }
+        if wlibc.icon_vec(sym) {
+            let _v: bool = wlibc.icon_draw_fit(symvar.pick(sym, symw), mx, sy2, symw)
+        } else {
+            let _s: bool = wlibc.icon_draw_sc(sym, mx, sy2, symsc)
+        }
+        mx = mx + symw
+        if tw != 0 {
+            mx = mx + cur_gap
+        }
+    }
+    tbbase.mk_x = mx
+    tbbase.mk_y = y + (h - tbmetrics.mk_w()) / 2
+    if mark != 0 {
+
+        let _m: bool = wlibc.icon_draw(mark, mx, y + (h - tbmetrics.mk_w()) / 2)
+    }
+    let _e: u64 = tbmetrics.text_mit_schild(tx, base, txt, n, fg, wlibc.TY_BODY,
+        face)
+    return (tx << 32) | base
+}
+
+static mut pl_y: u64 = 0
+
+fn group_next(e: u64) -> u64 {
+    let c: u64 = tbbase.kcnt[(e) as usize]
+    var cc: u64 = c
+    if cc > 8 {
+        cc = 8
+    }
+    var at: u64 = 0
+    var m: u64 = 0
+    while m < cc {
+        if tbbase.kmem[((e * 8 + m)) as usize] == tbbase.kid[(e) as usize] {
+            at = m
+        }
+        m = m + 1
+    }
+    return tbbase.kmem[((e * 8 + (at + 1) % cc)) as usize]
+}
+
+fn group_dashes(cnt: u64) {
+    if cnt < 2 || tbbase.pl_w == 0 {
+        return
+    }
+    let dy: u64 = pl_y
+    let c: u64 = wlibc.theme(wlibc.C_TEXT_MUTED)
+    let sc: u64 = wlibc.ui_scale()
+    if tbbase.pl_x >= 8 * sc {
+        wlib.draw_bar(tbbase.pl_x - 7 * sc, dy, 4 * sc, 3 * sc, c)
+    }
+    if cnt > 2 {
+        wlib.draw_bar(tbbase.pl_x + tbbase.pl_w + 3 * sc, dy, 4 * sc, 3 * sc, c)
+    }
+}
+
+fn pill(x: u64, y: u64, w: u64, h: u64, vorne: bool) {
+    tbbase.pl_x = 0
+    tbbase.pl_w = 0
+    let weich: bool = wlibc.radius() != 0
+        || wlibc.metric(wlibc.M_DIVIDER) < 50
+    if !weich || w < 12 || h < 6 {
+        return
+    }
+    let sc: u64 = wlibc.ui_scale()
+    var pw: u64 = 10 * sc
+    var c: u64 = wlibc.theme(wlibc.C_TEXT_MUTED)
+    if vorne {
+        pw = w * 45 / 100
+        if tbbase.lab_tw != 0 {
+            pw = tbbase.lab_tw
+        }
+        c = wlibc.theme(wlibc.C_ACCENT)
+    }
+    if pw > w - 4 {
+        pw = w - 4
+    }
+    var px: u64 = x + (w - pw) / 2
+    if vorne && tbbase.lab_tw != 0 && pw == tbbase.lab_tw {
+        px = tbbase.lab_tx
+    }
+    var py: u64 = y + h - 3 * sc
+    if tbbase.cf_edge == wlibc.WE_TOP {
+        py = y
+    }
+    wlib.draw_bar(px, py, pw, 3 * sc, c)
+    tbbase.pl_x = px
+    pl_y = py
+    tbbase.pl_w = pw
+}
+
+fn hover_left() -> u64 {
+    var x: u64 = tbbase.st_x + tbbase.st_w + tbmetrics.gap()
+    var i: u64 = 0
+    while i < tbbase.nk {
+        if tbbase.kw[(i) as usize] != 0 && tbbase.kx[(i) as usize] + tbbase.kw[(i) as usize] + tbmetrics.gap() > x {
+            x = tbbase.kx[(i) as usize] + tbbase.kw[(i) as usize] + tbmetrics.gap()
+        }
+        i = i + 1
+    }
+    return x
+}
+
+fn hover_right() -> u64 {
+    var x: u64 = tbbase.win_w
+    var f: u64 = 0
+    while f < tbbase.F_N {
+        if tbbase.f_w[(f) as usize] != 0 && tbbase.f_x[(f) as usize] < x {
+            x = tbbase.f_x[(f) as usize]
+        }
+        f = f + 1
+    }
+    var p: u64 = 0
+    while p < tbbase.PB_MAX {
+        if tbbase.pb_w[(p) as usize] != 0 && tbbase.pb_x[(p) as usize] < x {
+            x = tbbase.pb_x[(p) as usize]
+        }
+        p = p + 1
+    }
+    if x < tbmetrics.gap() {
+        return 0
+    }
+    return x - tbmetrics.gap()
+}
+
+fn put_n(p: u64, n: u64) {
+    var i: u64 = 0
+    while i < n {
+        let _c: u64 = ulib.sys(ulib.SYS_WRITE, ulib.OUT, p + i, 1)
+        i = i + 1
+    }
+}
+
+fn app_windows(name: u64) -> u64 {
+    var c: u64 = 0
+    var j: u64 = 0
+    while j < tbbase.nk {
+        if tblayout.sym_eq(name, (&tbbase.kapp[0 as usize]) as u64 + j * 24) {
+            c = c + tbbase.kcnt[(j) as usize]
+        }
+        j = j + 1
+    }
+    return c
+}
+
+fn glyph_button(x: u64, y: u64, w: u64, h: u64, cp: u64, edge: u64) {
+    let _r: u64 = button_sym(x, y, w, h, (&tbbase.s_empty[0 as usize]) as u64,
+        false, false, 0, 0)
+    if tbmetrics.glyphs_ok() && w > edge && h > edge {
+        let _g: bool = wlibc.icon_mid_ink(cp, x + (w - edge) / 2, y, edge,
+            h, edge, wlibc.theme(wlibc.T_FG))
+    }
+}
+
+static mut s_d1: [u8; 20] = "taskbar: drag edge=\0"
+
+static mut s_pv: [u8; 9] = "preview\0\0"
+
+fn close_preview() {
+    var i: u64 = 0
+    while i < 4 {
+        if prev_h[(i) as usize] != 0 {
+            let _c: u64 = wlibc.sys3w(wlibc.WM_CLOSE, prev_h[(i) as usize],
+                0, 0)
+            prev_h[(i) as usize] = 0
+        }
+        i = i + 1
+    }
+    prev_on = 0
+    tbbase.prev_edge = 9
+}
+
+fn preview_win(x: u64, y: u64, w: u64, h: u64) -> u64 {
+    let hd: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y,
+        (w << 16) | h, (&s_pv[0 as usize]) as u64, 0, 0)
+    if ulib.bad(hd) || hd == 0 {
+        return 0
+    }
+    let _d: u64 = wlibc.win_state(hd, wlibc.WS_DECO, 0)
+    let _l: u64 = wlibc.win_state(hd, wlibc.WS_LAYER, wlibc.L_TOP)
+    let _f: u64 = wlibc.sys5(wlibc.WM_FILL, hd, 0, (w << 16) | h,
+        wlibc.theme(wlibc.T_SEL), 0)
+    let _u: u64 = wlibc.sys3w(wlibc.WM_FLUSH, hd, 0, 0)
+    return hd
+}
+
+fn preview_show(edge: u64) {
+    if prev_on != 0 && tbbase.prev_edge == edge {
+        return
+    }
+    close_preview()
+    tbmetrics.rect_for(edge, tbmetrics.thickness_of(edge))
+    let x: u64 = tbbase.r_x
+    let y: u64 = tbbase.r_y
+    let w: u64 = tbbase.r_w
+    let h: u64 = tbbase.r_h
+    prev_h[(0) as usize] = preview_win(x, y, w, PREV_T)
+    prev_h[(1) as usize] = preview_win(x, y + h - PREV_T, w, PREV_T)
+    prev_h[(2) as usize] = preview_win(x, y, PREV_T, h)
+    prev_h[(3) as usize] = preview_win(x + w - PREV_T, y, PREV_T, h)
+    prev_on = 1
+    tbbase.prev_edge = edge
+    tbmetrics.say((&s_d1[0 as usize]) as u64)
+    tbmetrics.sayn(edge)
+    tbmetrics.say((&tbbase.s_gx[0 as usize]) as u64)
+    tbmetrics.sayn(x)
+    tbmetrics.say((&tbbase.s_gy[0 as usize]) as u64)
+    tbmetrics.sayn(y)
+    tbmetrics.say((&tbbase.s_gw[0 as usize]) as u64)
+    tbmetrics.sayn(w)
+    tbmetrics.say((&tbbase.s_gh[0 as usize]) as u64)
+    tbmetrics.sayn(h)
+    tbmetrics.nl()
+}
+
+fn nearest_edge(mx0: u64, my0: u64) -> u64 {
+
+    var mx: u64 = 0
+    var my: u64 = 0
+    if mx0 > tbbase.hx {
+        mx = mx0 - tbbase.hx
+    }
+    if my0 > tbbase.hy {
+        my = my0 - tbbase.hy
+    }
+    if mx > tbbase.sw - 1 {
+        mx = tbbase.sw - 1
+    }
+    if my > tbbase.sh - 1 {
+        my = tbbase.sh - 1
+    }
+    var best: u64 = wlibc.WE_LEFT
+    var d: u64 = mx
+    if tbbase.sw - 1 - mx < d {
+        d = tbbase.sw - 1 - mx
+        best = wlibc.WE_RIGHT
+    }
+    if my < d {
+        d = my
+        best = wlibc.WE_TOP
+    }
+    if tbbase.sh - 1 - my < d {
+        d = tbbase.sh - 1 - my
+        best = wlibc.WE_BOTTOM
+    }
+    return best
+}
+
+fn touches_edge(mx0: u64, my0: u64) -> bool {
+
+    if mx0 < tbbase.hx || my0 < tbbase.hy || mx0 >= tbbase.hx + tbbase.sw || my0 >= tbbase.hy + tbbase.sh {
+        return false
+    }
+    let mx: u64 = mx0 - tbbase.hx
+    let my: u64 = my0 - tbbase.hy
+    if tbbase.cf_edge == wlibc.WE_BOTTOM {
+        return my + 1 + REVEAL >= tbbase.sh
+    }
+    if tbbase.cf_edge == wlibc.WE_TOP {
+        return my <= REVEAL
+    }
+    if tbbase.cf_edge == wlibc.WE_LEFT {
+        return mx <= REVEAL
+    }
+    return mx + 1 + REVEAL >= tbbase.sw
+}
+
+fn inside_bar(mx: u64, my: u64) -> bool {
+    return mx >= tbbase.bar_x && mx < tbbase.bar_x + tbbase.bar_w
+        && my >= tbbase.bar_y && my < tbbase.bar_y + tbbase.bar_h
+}
+
+fn launcher_window() -> u64 {
+    var slot: u64 = 0
+    while slot < 32 {
+        let r: u64 = wlibc.win_list(slot, (&tbbase.rec[0 as usize]) as u64)
+        if ulib.bad(r) {
+            return 0
+        }
+        if r == 1 {
+            let b: u64 = (&tbbase.rec[0 as usize]) as u64
+            if ulib.streq(b + wlibc.WL_APP,
+                (&a_launcher[0 as usize]) as u64) {
+                let fl: u64 = __mmio_read64((b + wlibc.WL_FLAGS) as *mut u64)
+                let id: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                tbbase.menu_was_open = 1
+                if (fl & wlibc.F_HIDDEN) != 0 {
+                    tbbase.menu_was_open = 0
+                }
+                let _fo: u64 = __mmio_read64((b + wlibc.WL_FOCUS) as *mut u64)
+                return id
+            }
+        }
+        slot = slot + 1
+    }
+    return 0
+}
+
+static mut a_launcher: [u8; 9] = "launcher\0"
+
+fn hover_brand(x: u64, y: u64) -> u64 {
+    if x >= tbbase.st_x && x < tbbase.st_x + tbbase.st_w && y >= tbbase.st_y && y < tbbase.st_y + tbbase.st_h {
+        return 900
+    }
+    if tbbase.f_w[(tbbase.F_NET) as usize] != 0
+        && x >= tbbase.f_x[(tbbase.F_NET) as usize]
+        && x < tbbase.f_x[(tbbase.F_NET) as usize] + tbbase.f_w[(tbbase.F_NET) as usize]
+        && y >= tbbase.f_y[(tbbase.F_NET) as usize]
+        && y < tbbase.f_y[(tbbase.F_NET) as usize] + tbbase.f_h[(tbbase.F_NET) as usize] {
+        return 901
+    }
+    if tbbase.f_w[(tbbase.F_CLK) as usize] != 0
+        && x >= tbbase.f_x[(tbbase.F_CLK) as usize]
+        && x < tbbase.f_x[(tbbase.F_CLK) as usize] + tbbase.f_w[(tbbase.F_CLK) as usize]
+        && y >= tbbase.f_y[(tbbase.F_CLK) as usize]
+        && y < tbbase.f_y[(tbbase.F_CLK) as usize] + tbbase.f_h[(tbbase.F_CLK) as usize] {
+        return 902
+    }
+    if tbbase.bat_have != 0 && tbbase.f_w[(tbbase.F_BAT) as usize] != 0
+        && x >= tbbase.f_x[(tbbase.F_BAT) as usize]
+        && x < tbbase.f_x[(tbbase.F_BAT) as usize] + tbbase.f_w[(tbbase.F_BAT) as usize]
+        && y >= tbbase.f_y[(tbbase.F_BAT) as usize]
+        && y < tbbase.f_y[(tbbase.F_BAT) as usize] + tbbase.f_h[(tbbase.F_BAT) as usize] {
+        return 903
+    }
+    var i: u64 = 0
+    while i < tbbase.nk {
+        if tbbase.kver[(i) as usize] == 0
+            && x >= tbbase.kx[(i) as usize]
+            && x < tbbase.kx[(i) as usize] + tbbase.kw[(i) as usize]
+            && y >= tbbase.ky[(i) as usize]
+            && y < tbbase.ky[(i) as usize] + tbbase.kh[(i) as usize] {
+            return i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn hover_text(m: u64) -> u64 {
+    if m == 900 {
+        return msg.get((&tbbase.k_start[0 as usize]) as u64)
+    }
+    if m == 901 {
+        return tbmetrics.full_of(tbbase.F_NET)
+    }
+    if m == 902 {
+        return tbmetrics.full_of(tbbase.F_CLK)
+    }
+    if m == 903 {
+
+        tbstatus.tray_texts_sync()
+        var bat_ok: u64 = 1
+        if tbbase.bat_unknown != 0 {
+            bat_ok = 0
+        }
+        let _n: u64 = traypower.tooltip_valid(tbbase.bat_have, bat_ok, tbbase.bat_pct, tbbase.bat_chg, tbbase.bat_ac,
+            (&bat_tip[0 as usize]) as u64, 96)
+        return (&bat_tip[0 as usize]) as u64
+    }
+    if m >= 1 && m <= tbbase.nk {
+        return (&tbbase.ktit[0 as usize]) as u64 + (m - 1) * 40
+    }
+    return 0
+}
+
+fn tb_key(c: u64) {
+    taskbar_ctx.key(c)
+}
+
+const TIP_TICKS: u64 = 50
+
+static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut tp_was: u64 = 0
+
+static mut tp_seit: u64 = 0
+
+static mut tp_count: u64 = 0
+
+static mut s_tip: [u8; 12] = "wlib: tip [\0"
+
+static mut s_tipx: [u8; 7] = "] x=\0\0\0"
+
+static mut s_tipy: [u8; 5] = " y=\0\0"
+
+static mut s_tipn: [u8; 5] = " n=\0\0"
+
+static mut s_tipw: [u8; 5] = " w=\0\0"
+
+static mut s_tiph: [u8; 5] = " h=\0\0"
+
+static mut s_tipzu: [u8; 15] = "wlib: tip zu\0\0\0"
+
+static mut s_tipvoll: [u8; 21] = "wlib: tip kein Platz\0"
+
+fn tip_open_is() -> bool {
+    return tp_win != 0xFFFFFFFFFFFFFFFF
+}
+
+fn tip_close() {
+    if tp_win == 0xFFFFFFFFFFFFFFFF {
+        return
+    }
+    tp_win = 0xFFFFFFFFFFFFFFFF
+    barpop.tip_hide()
+    tbmetrics.say((&s_tipzu[0 as usize]) as u64)
+    tbmetrics.nl()
+}
+
+fn tip_open(text: u64, sx: u64, sy: u64) {
+    if text == 0 || tbmetrics.tlen(text) == 0 {
+        return
+    }
+    tip_close()
+    let n: u64 = tbmetrics.tlen(text)
+    let sc: u64 = wlibc.ui_scale()
+    let pad: u64 = 6 * sc
+
+    let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), text, n) + 2 * pad + sc
+    let bh: u64 = wlibc.text_h(wlibc.type_px(wlibc.TY_BODY)) + pad
+    let cur_gap: u64 = 6 * sc
+
+    var x: u64 = 0
+    var y: u64 = 0
+    var ax0: u64 = 0
+    var ax1: u64 = 0
+    if tbbase.f_w[(tbbase.F_CLK) as usize] != 0 {
+        ax0 = tbbase.bar_x + tbbase.f_x[(tbbase.F_CLK) as usize]
+        ax1 = ax0 + tbbase.f_w[(tbbase.F_CLK) as usize]
+    }
+
+    if ax1 != 0 {
+        ax0 = tbmetrics.loc(ax0, tbbase.hx)
+        ax1 = tbmetrics.loc(ax1, tbbase.hx)
+    }
+    fuib.tip_place(tbmetrics.loc(sx, tbbase.hx), tbmetrics.loc(sy, tbbase.hy), bw, bh, tbbase.sw, tbbase.sh,
+        tbmetrics.loc(tbbase.bar_y, tbbase.hy), tbmetrics.loc(tbbase.bar_y + tbbase.bar_h, tbbase.hy), ax0, ax1, cur_gap, &x, &y)
+    x = x + tbbase.hx
+    y = y + tbbase.hy
+
+    let i: u64 = barpop.tip_show(x, y, bw, bh, text)
+    if i != 0 {
+        tbmetrics.say((&s_tipvoll[0 as usize]) as u64)
+        tbmetrics.nl()
+        return
+    }
+    tp_win = 1
+    tp_count = tp_count + 1
+    tbmetrics.say((&s_tip[0 as usize]) as u64)
+    tbmetrics.say(text)
+    tbmetrics.say((&s_tipx[0 as usize]) as u64)
+    tbmetrics.sayn(x)
+    tbmetrics.say((&s_tipy[0 as usize]) as u64)
+    tbmetrics.sayn(y)
+    tbmetrics.say((&s_tipn[0 as usize]) as u64)
+    tbmetrics.sayn(tp_count)
+    tbmetrics.say((&s_tipw[0 as usize]) as u64)
+    tbmetrics.sayn(bw)
+    tbmetrics.say((&s_tiph[0 as usize]) as u64)
+    tbmetrics.sayn(bh)
+    tbmetrics.nl()
+}
+
+fn tip_hover(was: u64, text: u64, sx: u64, sy: u64) {
+    let now: u64 = tbmetrics.ticks_now()
+    if was != tp_was {
+        tp_was = was
+        tp_seit = now
+        tip_close()
+        return
+    }
+    if was == 0 || tip_open_is() {
+        return
+    }
+
+    if calpop.is_open() {
+        tp_seit = now
+        return
+    }
+    if now < tp_seit {
+        tp_seit = now
+        return
+    }
+    if now - tp_seit >= TIP_TICKS {
+        tip_open(text, sx, sy)
+    }
+}
+
+fn tip_step() {
+    let mx: u64 = wlibc.mouse_x()
+    let my: u64 = wlibc.mouse_y()
+    if !inside_bar(mx, my) {
+        tip_hover(0, 0, 0, 0)
+        return
+    }
+    let lx: u64 = mx - tbbase.bar_x
+    let ly: u64 = my - tbbase.bar_y
+    let m: u64 = hover_brand(lx, ly)
+    tip_hover(m, hover_text(m), mx, my)
+}
+
+fn app_exec(src: u64) {
+    var pp: [u8; 64] = [0 as u8; 64]
+    var pv: [u8; 7] = "/apps/\0"
+    var pn2: [u8; 11] = ".osp/start\0"
+    var q2: u64 = 0
+    var k2: u64 = 0
+    while k2 < 6 {
+        pp[(q2) as usize] = pv[(k2) as usize]
+        q2 = q2 + 1
+        k2 = k2 + 1
+    }
+    k2 = 0
+    while k2 < 23 && tbstatus.kstate8(src + k2) != 0 {
+        pp[(q2) as usize] = *((src + k2) as *mut u8)
+        q2 = q2 + 1
+        k2 = k2 + 1
+    }
+    k2 = 0
+    while k2 < 10 {
+        pp[(q2) as usize] = pn2[(k2) as usize]
+        q2 = q2 + 1
+        k2 = k2 + 1
+    }
+    pp[(q2) as usize] = 0 as u8
+    let pid2: u64 = appreg.launch(
+        (&pp[0 as usize]) as u64, 0, 0)
+    tbmetrics.say((&s_pinexec[0 as usize]) as u64)
+    tbmetrics.say((&pp[0 as usize]) as u64)
+    tbmetrics.say((&tbbase.s_pinpid[0 as usize]) as u64)
+    tbmetrics.sayn(pid2)
+    tbmetrics.nl()
+}

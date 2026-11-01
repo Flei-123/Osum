@@ -1,0 +1,819 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import appreg
+import libc.io
+import qs
+import symvar
+import ulib
+import wlibc
+import taskbar.tbbase
+import taskbar.tbmetrics
+import taskbar.tbstatus
+
+const TASK_MAX: u64 = 132
+
+const TASK_MIN: u64 = 48
+
+static mut list_sum: u64 = 0
+
+fn shorten(p: u64, avail: u64) {
+    var n: u64 = tbmetrics.tlen(p)
+    while n > 1
+        && wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), p, n) > avail {
+        n = n - 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+}
+
+fn fit_field(f: u64, avail: u64) {
+    let src: u64 = tbmetrics.full_of(f)
+    let l0: u64 = tbmetrics.line_of(f, 0)
+    let l1: u64 = tbmetrics.line_of(f, 1)
+    __mmio_write8((l1) as *mut u8, 0 as u8)
+    if tbstatus.field_without_text(f) {
+        __mmio_write8((l0) as *mut u8, 0 as u8)
+        tbbase.f_lines[(f) as usize] = 0
+        return
+    }
+    if f == tbbase.F_LANG && tbmetrics.tlen(src) > 2 {
+        tbstatus.copy_n(l0, src, tbmetrics.tlen(src))
+        __mmio_write8((l0 + tbmetrics.tlen(src)) as *mut u8, 0 as u8)
+        tbbase.f_lines[(f) as usize] = 1
+        return
+    }
+    if f == tbbase.F_LANG {
+
+        let a0: u64 = __mmio_read8((src) as *mut u8) as u64
+        let a1: u64 = __mmio_read8((src + 1) as *mut u8) as u64
+        var t0: u64 = a0
+        var t1: u64 = a1
+        var t2: u64 = 0
+        if a0 == 68 && a1 == 69 {
+            t0 = 68
+            t1 = 69
+            t2 = 85
+        } else if a0 == 69 && a1 == 78 {
+            t0 = 69
+            t1 = 78
+            t2 = 71
+        }
+        __mmio_write8((l0) as *mut u8, t0 as u8)
+        __mmio_write8((l0 + 1) as *mut u8, t1 as u8)
+        __mmio_write8((l0 + 2) as *mut u8, t2 as u8)
+        __mmio_write8((l0 + 3) as *mut u8, 0 as u8)
+
+        if t2 == 0 {
+            __mmio_write8((l0 + 2) as *mut u8, 0 as u8)
+        }
+        tbbase.f_lines[(f) as usize] = 1
+        return
+    }
+    if f == tbbase.F_CLK && tbbase.clk_two != 0 {
+        tbstatus.copy_n(l0, src, tbmetrics.tlen(src))
+        let z: u64 = (&tbbase.clk_z2[0 as usize]) as u64
+        tbstatus.copy_n(l1, z, tbmetrics.tlen(z))
+        tbbase.f_lines[(f) as usize] = 2
+        return
+    }
+    if tbmetrics.width_of(src) <= avail {
+        tbstatus.copy_n(l0, src, tbmetrics.tlen(src))
+        tbbase.f_lines[(f) as usize] = 1
+        return
+    }
+    let b: u64 = tbstatus.break_at(src)
+    if b > 0 {
+        tbstatus.copy_n(l0, src, b)
+        tbstatus.copy_n(l1, src + b, tbmetrics.tlen(src) - b)
+        if tbmetrics.width_of(l0) <= avail && tbmetrics.width_of(l1) <= avail {
+            tbbase.f_lines[(f) as usize] = 2
+            return
+        }
+        shorten(l0, avail)
+        shorten(l1, avail)
+        tbbase.f_lines[(f) as usize] = 2
+        return
+    }
+    tbstatus.copy_n(l0, src, tbmetrics.tlen(src))
+    shorten(l0, avail)
+    tbbase.f_lines[(f) as usize] = 1
+}
+
+fn title_room(i: u64) -> u64 {
+    var r: u64 = 0
+    let sy: u64 = sym_of((&tbbase.kapp[0 as usize]) as u64 + i * 24)
+    if sy != 0 {
+        r = sym_w(sy, tbbase.kh[(i) as usize]) + 3
+    }
+    if tbmetrics.mark_icon(tbbase.knv[(i) as usize]) != 0 {
+        r = r + tbmetrics.mk_w() + 3
+    }
+    return r
+}
+
+fn shorten_title(i: u64, width: u64) {
+    let q: u64 = (&tbbase.ktit[0 as usize]) as u64 + i * 40
+    let z: u64 = (&tbbase.klab[0 as usize]) as u64 + i * 40
+    var n: u64 = tbmetrics.tlen(q)
+    if n > 31 {
+        n = 31
+    }
+    var avail: u64 = 0
+    let room: u64 = title_room(i)
+    if width > room {
+        avail = width - room
+    }
+    while n > 1
+        && wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), q, n) + 10 > avail {
+        n = n - 1
+    }
+    tbstatus.copy_n(z, q, n)
+}
+
+fn layout() {
+    var i: u64 = 0
+    tbbase.tv_w = 0
+    tbbase.chv_w = 0
+    tbbase.grp_w = 0
+    var pz: u64 = 0
+    while pz < tbbase.PB_MAX {
+        tbbase.pb_w[(pz) as usize] = 0
+        pz = pz + 1
+    }
+    if tbbase.vertical != 0 {
+        let inner: u64 = tbbase.thick - tbmetrics.pad() * 2
+        tbbase.st_x = tbmetrics.pad()
+        tbbase.st_y = tbmetrics.pad()
+        tbbase.st_w = inner
+        tbbase.st_h = tbmetrics.btn_h()
+
+        var y: u64 = tbbase.bar_h - tbmetrics.pad()
+        var f: u64 = tbbase.F_CLK
+        while f < tbbase.F_N {
+
+            var vroom: u64 = 0
+            if f == tbbase.F_NET && tbmetrics.net_pic() != 0 {
+                vroom = tbmetrics.ic_w() + 2
+            } else if f == tbbase.F_NET && tbmetrics.glyphs_ok() {
+                vroom = tbmetrics.tr_icx()
+            }
+            if (f == tbbase.F_BAT || f == tbbase.F_SND) && tbmetrics.glyphs_ok() {
+                vroom = tbmetrics.tr_icx()
+            }
+            if f == tbbase.F_NET && tbmetrics.sys_icon() != 0 {
+                vroom = vroom + tbmetrics.mk_w() + 2
+            }
+            if tbmetrics.tlen(tbmetrics.full_of(f)) == 0 {
+                tbbase.f_x[(f) as usize] = tbmetrics.pad()
+                tbbase.f_y[(f) as usize] = y
+                tbbase.f_w[(f) as usize] = 0
+                tbbase.f_h[(f) as usize] = 0
+                tbbase.f_lines[(f) as usize] = 0
+            } else {
+            fit_field(f, inner - 8 - vroom)
+            let hh: u64 = tbbase.f_lines[(f) as usize] * tbmetrics.line_h() + 4
+            y = y - hh
+            tbbase.f_x[(f) as usize] = tbmetrics.pad()
+            tbbase.f_y[(f) as usize] = y
+            tbbase.f_w[(f) as usize] = inner
+            tbbase.f_h[(f) as usize] = hh
+            y = y - tbmetrics.gap()
+            }
+
+            if f == tbbase.F_CLK {
+                f = tbbase.F_BAT
+            } else if f == tbbase.F_BAT {
+                f = tbbase.F_SND
+            } else if f == tbbase.F_SND {
+                f = tbbase.F_NET
+            } else if f == tbbase.F_NET {
+                f = tbbase.F_LANG
+            } else if f == tbbase.F_LANG {
+                f = tbbase.F_NOTI
+            } else if f == tbbase.F_NOTI {
+                f = tbbase.F_REM
+            } else {
+                f = tbbase.F_N
+            }
+        }
+
+        let top: u64 = tbbase.st_y + tbbase.st_h + tbmetrics.gap()
+        var space: u64 = 0
+        if y > top {
+            space = y - top
+        }
+
+        var gy: u64 = tbbase.st_y
+        if tbbase.cf_align == tbbase.AL_CENTER {
+            var block: u64 = tbbase.st_h
+            if tbbase.nk > 0 {
+                block = tbbase.st_h + tbmetrics.gap() + tbbase.nk * tbmetrics.btn_h() + (tbbase.nk - 1) * tbmetrics.gap()
+            }
+            let run: u64 = y + tbmetrics.gap() - tbmetrics.pad()
+            if run > block {
+                gy = tbmetrics.pad() + (run - block) / 2
+            }
+        }
+        tbbase.st_y = gy
+        let top2: u64 = tbbase.st_y + tbbase.st_h + tbmetrics.gap()
+        i = 0
+        while i < tbbase.nk {
+            let by: u64 = top2 + i * (tbmetrics.btn_h() + tbmetrics.gap())
+            tbbase.kx[(i) as usize] = tbmetrics.pad()
+            tbbase.ky[(i) as usize] = by
+            tbbase.kw[(i) as usize] = inner
+            tbbase.kh[(i) as usize] = tbmetrics.btn_h()
+            if by + tbmetrics.btn_h() > top + space {
+                tbbase.kw[(i) as usize] = 0
+            } else {
+                shorten_title(i, inner)
+            }
+            i = i + 1
+        }
+        return
+    }
+    tbbase.st_x = tbmetrics.pad()
+    tbbase.st_y = (tbbase.bar_h - tbmetrics.btn_h()) / 2
+    tbbase.st_w = tbmetrics.start_w()
+    if tbbase.cf_labels == tbbase.LB_NEVER {
+        tbbase.st_w = tbmetrics.btn_h() + 8
+    }
+    tbbase.st_h = tbmetrics.btn_h()
+    var x: u64 = tbbase.bar_w - tbmetrics.pad()
+
+    if tbbase.thick >= 48 * wlibc.ui_scale() && x > 2 * tbmetrics.pad() {
+        x = x - 2 * tbmetrics.pad()
+    }
+    var f: u64 = tbbase.F_CLK
+    while f < tbbase.F_N {
+
+        var room: u64 = 0
+        if f == tbbase.F_NET && tbmetrics.net_pic() != 0 {
+            var iw: u64 = wlibc.icon_ink_wid(tbmetrics.net_pic())
+            if iw == 0 {
+                iw = tbmetrics.ic_w()
+            }
+            room = iw + 2
+        } else if f == tbbase.F_NET && tbmetrics.glyphs_ok() {
+
+            room = tbmetrics.tr_icx()
+        }
+        if (f == tbbase.F_BAT || f == tbbase.F_SND) && tbmetrics.glyphs_ok() {
+
+            room = tbmetrics.tr_icx()
+        }
+
+        if f == tbbase.F_NET && tbmetrics.sys_icon() != 0 {
+            room = room + tbmetrics.mk_w() + 2
+        }
+        var gg: u64 = tbmetrics.gap()
+        if false {
+            gg = 0
+
+        }
+
+        if tbmetrics.tlen(tbmetrics.full_of(f)) != 0 && tbstatus.compact() && (f == tbbase.F_NET || f == tbbase.F_SND)
+            && (room != 0 || (f == tbbase.F_SND && tbmetrics.glyphs_ok())) {
+
+            let w3: u64 = tbmetrics.tr_cell()
+            x = x - w3
+            tbbase.f_x[(f) as usize] = x
+            tbbase.f_y[(f) as usize] = tbbase.st_y
+            tbbase.f_w[(f) as usize] = w3
+            tbbase.f_h[(f) as usize] = tbmetrics.btn_h()
+            tbbase.f_lines[(f) as usize] = 0
+            x = x - gg
+        } else if tbmetrics.tlen(tbmetrics.full_of(f)) == 0 {
+            tbbase.f_x[(f) as usize] = x
+            tbbase.f_y[(f) as usize] = tbbase.st_y
+            tbbase.f_w[(f) as usize] = 0
+            tbbase.f_h[(f) as usize] = 0
+            tbbase.f_lines[(f) as usize] = 0
+        } else {
+        fit_field(f, tbbase.bar_w / 4 - room)
+
+        var padx: u64 = 10
+        if f == tbbase.F_CLK || f == tbbase.F_LANG {
+            padx = 2 * tbmetrics.fld_pad()
+        }
+        var ww: u64 = tbmetrics.width_of(tbmetrics.line_of(f, 0)) + padx + room
+        if tbbase.f_lines[(f) as usize] > 1 {
+            let w1: u64 = tbmetrics.width_of(tbmetrics.line_of(f, 1)) + padx + room
+            if w1 > ww {
+                ww = w1
+            }
+        }
+        ww = wlibc.snap_up(ww)
+        x = x - ww
+        tbbase.f_x[(f) as usize] = x
+        tbbase.f_y[(f) as usize] = tbbase.st_y
+        tbbase.f_w[(f) as usize] = ww
+        tbbase.f_h[(f) as usize] = tbmetrics.btn_h()
+        x = x - gg
+        }
+        if f == tbbase.F_CLK {
+            f = tbbase.F_BAT
+        } else if f == tbbase.F_BAT {
+            f = tbbase.F_SND
+        } else if f == tbbase.F_SND {
+            f = tbbase.F_NET
+        } else if f == tbbase.F_NET {
+            f = tbbase.F_LANG
+        } else if f == tbbase.F_LANG {
+            f = tbbase.F_NOTI
+        } else if f == tbbase.F_NOTI {
+            f = tbbase.F_REM
+        } else {
+            f = tbbase.F_N
+        }
+    }
+
+    if tbbase.cf_group != 0 {
+        var gl: u64 = 100000
+        var gr: u64 = 0
+        var gf: u64 = tbbase.F_NET
+        while gf <= tbbase.F_BAT {
+            if tbbase.f_w[(gf) as usize] != 0 {
+                if tbbase.f_x[(gf) as usize] < gl {
+                    gl = tbbase.f_x[(gf) as usize]
+                }
+                if tbbase.f_x[(gf) as usize] + tbbase.f_w[(gf) as usize] > gr {
+                    gr = tbbase.f_x[(gf) as usize] + tbbase.f_w[(gf) as usize]
+                }
+            }
+            gf = gf + 1
+        }
+        if gr > gl {
+            tbbase.grp_x = gl
+            tbbase.grp_w = gr - gl
+        }
+    }
+    let phid: bool = tbbase.cf_chev != 0 && tbbase.chev_open == 0
+    var pluecke: u64 = 8
+    if tbmetrics.gap() > pluecke {
+        pluecke = tbmetrics.gap()
+    }
+    var ptxt_da: bool = false
+    var pq: u64 = 0
+    while pq < tbbase.PB_MAX {
+        if !phid && tbmetrics.tlen(tbstatus.plug_text(pq)) != 0 {
+            ptxt_da = true
+        }
+        pq = pq + 1
+    }
+    if ptxt_da && x > pluecke - tbmetrics.gap() {
+        x = x - (pluecke - tbmetrics.gap())
+    }
+    var pw: u64 = 0
+    let pgrenze: u64 = tbbase.st_x + tbbase.st_w + tbmetrics.gap() * 2
+    while pw < tbbase.PB_MAX {
+        let pp: u64 = tbstatus.plug_text(pw)
+        if !phid && tbmetrics.tlen(pp) != 0 {
+            var pbw: u64 = wlibc.snap_up(tbmetrics.width_of(pp) + 10)
+            if pbw > tbbase.bar_w / 3 {
+                pbw = tbbase.bar_w / 3
+            }
+            if x > pgrenze + pbw {
+                x = x - pbw
+                tbbase.pb_x[(pw) as usize] = x
+                tbbase.pb_y[(pw) as usize] = tbbase.st_y
+                tbbase.pb_w[(pw) as usize] = pbw
+                tbbase.pb_h[(pw) as usize] = tbmetrics.btn_h()
+                x = x - tbmetrics.gap()
+            }
+        }
+        pw = pw + 1
+    }
+
+    if tbbase.cf_chev != 0 {
+
+        var cw: u64 = tbmetrics.tr_cell()
+        if cw > tbmetrics.btn_h() {
+            cw = tbmetrics.btn_h()
+        }
+        if x > pgrenze + cw + tbstatus.tv_extra() {
+            x = x - cw
+            tbbase.chv_x = x
+            tbbase.chv_y = tbbase.st_y
+            tbbase.chv_w = cw
+            tbbase.chv_h = tbmetrics.btn_h()
+            x = x - tbmetrics.gap()
+        }
+    }
+    let left: u64 = tbbase.st_x + tbbase.st_w + tbmetrics.gap() + tbstatus.tv_extra()
+    var space: u64 = 0
+    if x > left {
+        space = x - left
+    }
+    var width: u64 = TASK_MAX
+    if tbbase.cf_labels == tbbase.LB_NEVER {
+        width = tbmetrics.btn_h() + 8
+        if width < 28 {
+            width = 28
+        }
+    } else if tbbase.nk > 0 {
+        width = (space - (tbbase.nk - 1) * tbmetrics.gap()) / tbbase.nk
+        if width > TASK_MAX {
+            width = TASK_MAX
+        }
+    }
+    if tbbase.nk > 0 && tbbase.cf_labels != tbbase.LB_NEVER {
+        if tbbase.cf_labels == tbbase.LB_ROOM && width < TASK_MIN {
+            width = tbmetrics.btn_h() + 8
+        }
+    }
+    if tbbase.nk > 0 {
+        let hoechst: u64 = (space - (tbbase.nk - 1) * tbmetrics.gap()) / tbbase.nk
+        if width > hoechst {
+            width = hoechst
+        }
+    }
+
+    var gx: u64 = tbbase.st_x
+    if tbbase.cf_align == tbbase.AL_CENTER && tbbase.nk > 0 && width >= TASK_MIN {
+        let block: u64 = tbbase.st_w + tbmetrics.gap() + tbstatus.tv_extra() + tbbase.nk * width + (tbbase.nk - 1) * tbmetrics.gap()
+        let run: u64 = x + tbmetrics.gap() - tbmetrics.pad()
+        if run > block {
+            gx = tbmetrics.pad() + (run - block) / 2
+        }
+    } else if tbbase.cf_align == tbbase.AL_CENTER {
+
+        let run: u64 = x + tbmetrics.gap() - tbmetrics.pad()
+        if run > tbbase.st_w + tbstatus.tv_extra() {
+            gx = tbmetrics.pad() + (run - tbbase.st_w - tbstatus.tv_extra()) / 2
+        }
+    }
+    tbbase.st_x = gx
+    var pi: u64 = 0
+    while pi < tbbase.npin {
+        tbbase.pinwin[(pi) as usize] = tbbase.MAXK
+        var wj: u64 = 0
+        while wj < tbbase.nk {
+            if sym_eq((&tbbase.pinname[0 as usize]) as u64 + pi * 24,
+                (&tbbase.kapp[0 as usize]) as u64 + wj * 24) {
+                tbbase.pinwin[(pi) as usize] = wj
+                break
+            }
+            wj = wj + 1
+        }
+        pi = pi + 1
+    }
+    let pinbr: u64 = tbmetrics.btn_h()
+    var pl: u64 = tbbase.st_x + tbbase.st_w + tbmetrics.gap()
+    if tbstatus.tv_extra() != 0 {
+        tbbase.tv_x = pl
+        tbbase.tv_y = tbbase.st_y
+        tbbase.tv_w = tbmetrics.btn_h() + 8
+        tbbase.tv_h = tbmetrics.btn_h()
+        pl = pl + tbbase.tv_w + tbmetrics.gap()
+    }
+    pi = 0
+    while pi < tbbase.npin {
+        tbbase.px_[(pi) as usize] = pl
+        tbbase.py_[(pi) as usize] = tbbase.st_y
+        tbbase.pw_[(pi) as usize] = pinbr
+        tbbase.ph_[(pi) as usize] = tbmetrics.btn_h()
+        pl = pl + pinbr + tbmetrics.gap()
+        pi = pi + 1
+    }
+    let left2: u64 = pl
+    i = 0
+    var gelegt: u64 = 0
+    while i < tbbase.nk {
+        var istpin: bool = false
+        var pz: u64 = 0
+        while pz < tbbase.npin {
+            if tbbase.pinwin[(pz) as usize] == i {
+                istpin = true
+                break
+            }
+            pz = pz + 1
+        }
+        if istpin {
+            tbbase.kw[(i) as usize] = 0
+            tbbase.kx[(i) as usize] = tbbase.px_[(pz) as usize]
+            tbbase.ky[(i) as usize] = tbbase.py_[(pz) as usize]
+            tbbase.kh[(i) as usize] = tbbase.ph_[(pz) as usize]
+            i = i + 1
+            continue
+        }
+        tbbase.kx[(i) as usize] = left2 + gelegt * (width + tbmetrics.gap())
+        gelegt = gelegt + 1
+        tbbase.ky[(i) as usize] = tbbase.st_y
+        tbbase.kh[(i) as usize] = tbmetrics.btn_h()
+        if tbbase.cf_labels == tbbase.LB_NEVER || width < TASK_MIN {
+            tbbase.kw[(i) as usize] = width
+            __mmio_write8(((&tbbase.klab[0 as usize]) as u64 + i * 40) as *mut u8,
+                0 as u8)
+            if width < 12 {
+                tbbase.kw[(i) as usize] = 0
+            }
+        } else {
+            tbbase.kw[(i) as usize] = width
+            shorten_title(i, width)
+        }
+        i = i + 1
+    }
+    let _lu: u64 = left
+}
+
+fn list_read() -> bool {
+    var sum: u64 = 1469598103934665603
+    var n: u64 = 0
+    var slot: u64 = 0
+    while slot < 32 && n < tbbase.MAXK {
+        let r: u64 = wlibc.win_list(slot, (&tbbase.rec[0 as usize]) as u64)
+        if ulib.bad(r) {
+            slot = 32
+        } else {
+            if r == 1 {
+                let b: u64 = (&tbbase.rec[0 as usize]) as u64
+                let layer: u64 = __mmio_read64((b + wlibc.WL_LAYER) as *mut u64)
+
+                let own: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
+                if layer == wlibc.L_NORMAL && own != qs.win_id() {
+                    let id: u64 = own
+                    let fl: u64 = __mmio_read64((b + wlibc.WL_FLAGS) as *mut u64)
+                    let fo: u64 = __mmio_read64((b + wlibc.WL_FOCUS) as *mut u64)
+                    let nv: u64 = __mmio_read64((b + wlibc.WL_NETV) as *mut u64)
+                    tbbase.kid[(n) as usize] = id
+                    tbbase.kver[(n) as usize] = fl & wlibc.F_HIDDEN
+                    tbbase.kfok[(n) as usize] = fo
+                    tbbase.knv[(n) as usize] = nv
+
+                    var k: u64 = 0
+                    while k < 31 {
+                        tbbase.ktit[((n * 40 + k)) as usize] =
+                            __mmio_read8((b + wlibc.WL_TITLE + k) as *mut u8)
+                        k = k + 1
+                    }
+                    tbbase.ktit[((n * 40 + 31)) as usize] = 0 as u8
+                    k = 0
+                    while k < 23 {
+                        tbbase.kapp[((n * 24 + k)) as usize] =
+                            __mmio_read8((b + wlibc.WL_APP + k) as *mut u8)
+                        k = k + 1
+                    }
+                    tbbase.kapp[((n * 24 + 23)) as usize] = 0 as u8
+                    let mix: u64 = id *% 131 +% (fl & 1) *% 7 +% fo +% nv *% 17
+                    sum = (sum ^ mix) *% 1099511628211
+
+                    var gj: u64 = tbbase.MAXK
+                    if tbbase.kapp[((n * 24)) as usize] != 0 as u8 {
+                        var jj: u64 = 0
+                        while jj < n {
+                            if sym_eq((&tbbase.kapp[0 as usize]) as u64 + jj * 24, (&tbbase.kapp[0 as usize]) as u64 + n * 24) {
+                                gj = jj
+                                break
+                            }
+                            jj = jj + 1
+                        }
+                    }
+                    if gj < tbbase.MAXK {
+                        if tbbase.kcnt[(gj) as usize] < 8 {
+                            tbbase.kmem[((gj * 8 + tbbase.kcnt[(gj) as usize])) as usize] = id
+                        }
+                        tbbase.kcnt[(gj) as usize] = tbbase.kcnt[(gj) as usize] + 1
+                        if fo != 0 && tbbase.kfok[(gj) as usize] == 0 {
+
+                            tbbase.kid[(gj) as usize] = id
+                            tbbase.kver[(gj) as usize] = fl & wlibc.F_HIDDEN
+                            tbbase.kfok[(gj) as usize] = fo
+                            tbbase.knv[(gj) as usize] = nv
+                            var kt: u64 = 0
+                            while kt < 32 {
+                                tbbase.ktit[((gj * 40 + kt)) as usize] = tbbase.ktit[((n * 40 + kt)) as usize]
+                                kt = kt + 1
+                            }
+                        }
+                    } else {
+                        tbbase.kcnt[(n) as usize] = 1
+                        tbbase.kmem[((n * 8)) as usize] = id
+                        n = n + 1
+                    }
+                }
+            }
+            slot = slot + 1
+        }
+    }
+    tbbase.nk = n
+    sum = sum ^ (n *% 1000003)
+    let other: bool = sum != list_sum
+    list_sum = sum
+    return other
+}
+
+const SYM_N: u64 = 28
+
+const SYM_BYTES: u64 = 44900
+
+static mut sym_name: [u8; 672] = [0 as u8; 672]
+
+static mut sym_data: [u8; 1257200] = [0 as u8; 1257200]
+
+static mut sym_ok: [u64; 28] = [0 as u64; 28]
+
+static mut sym_used: u64 = 0
+
+static mut sym_hits: u64 = 0
+
+static mut sym_reads: u64 = 0
+
+fn sym_eq(a: u64, b: u64) -> bool {
+    var k: u64 = 0
+    while k < 24 {
+        let x: u64 = tbstatus.kstate8(a + k)
+        if x != tbstatus.kstate8(b + k) {
+            return false
+        }
+        if x == 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return true
+}
+
+static mut sym_miss_said: u64 = 0
+
+fn sym_miss(app: u64, why: u64) {
+    if sym_miss_said >= 8 {
+        return
+    }
+    sym_miss_said = sym_miss_said + 1
+    var s_m: [u8; 19] = "taskbar: sym miss \0"
+    var s_w: [u8; 6] = " why=\0"
+    tbmetrics.say((&s_m[0 as usize]) as u64)
+    tbmetrics.say(app)
+    tbmetrics.say((&s_w[0 as usize]) as u64)
+    tbmetrics.sayn(why)
+    tbmetrics.nl()
+}
+
+fn sym_of(app: u64) -> u64 {
+    if app == 0 || tbstatus.kstate8(app) == 0 {
+        return 0
+    }
+    var i: u64 = 0
+    while i < sym_used {
+        if sym_eq((&sym_name[0 as usize]) as u64 + i * 24, app) {
+            sym_hits = sym_hits + 1
+            if sym_ok[(i) as usize] == 1 {
+                return (&sym_data[0 as usize]) as u64 + i * SYM_BYTES
+            }
+            return 0
+        }
+        i = i + 1
+    }
+    if sym_used >= SYM_N {
+
+        sym_miss(app, 1)
+        sym_used = 0
+    }
+    let room: u64 = sym_used
+    sym_used = sym_used + 1
+    var k: u64 = 0
+    while k < 24 {
+        sym_name[((room * 24 + k)) as usize] = *((app + k) as *mut u8)
+        k = k + 1
+    }
+    sym_ok[(room) as usize] = 2
+    var path: [u8; 64] = [0 as u8; 64]
+    var before: [u8; 7] = "/apps/\0"
+    var move_to: [u8; 12] = ".osp/symbol\0"
+    var n: u64 = 0
+    k = 0
+    while k < 6 {
+        path[(n) as usize] = before[(k) as usize]
+        n = n + 1
+        k = k + 1
+    }
+    k = 0
+    while k < 23 && tbstatus.kstate8(app + k) != 0 {
+        path[(n) as usize] = *((app + k) as *mut u8)
+        n = n + 1
+        k = k + 1
+    }
+    k = 0
+    while k < 11 {
+        path[(n) as usize] = move_to[(k) as usize]
+        n = n + 1
+        k = k + 1
+    }
+    path[(n) as usize] = 0 as u8
+    let target: u64 = (&sym_data[0 as usize]) as u64 + room * SYM_BYTES
+    ulib.fill(target, 0, SYM_BYTES)
+    let fd: u64 = io.open((&path[0 as usize]) as u64, 0)
+    if ulib.bad(fd) {
+        let reg: u64 = appreg.resolve_symbol(app, target, 0)
+        if reg == SYM_BYTES {
+            sym_ok[(room) as usize] = 1
+            symvar.register(target, reg)
+            return target
+        }
+        sym_miss(app, 2)
+        return sym_fallback(room, app, target)
+    }
+    sym_reads = sym_reads + 1
+    var got: u64 = io.read(fd, target, SYM_BYTES)
+    io.close(fd)
+    if !ulib.bad(got) && got >= 12 {
+        got = appreg.resolve_symbol(app, target, got)
+    }
+    if ulib.bad(got) || got < 12 {
+        sym_miss(app, 3)
+        return sym_fallback(room, app, target)
+    }
+    if !wlibc.icon_ok(target) {
+        sym_miss(app, 4)
+        return sym_fallback(room, app, target)
+    }
+    sym_ok[(room) as usize] = 1
+    symvar.register(target, got)
+    return target
+}
+
+static mut sym_fb: u64 = 0
+
+static mut s_fb: [u8; 19] = "taskbar: sym fb n=\0"
+
+fn sym_fallback(room: u64, app: u64, target: u64) -> u64 {
+    if !wlibc.app_icon(app, target) {
+        return 0
+    }
+    sym_ok[(room) as usize] = 1
+    sym_fb = sym_fb + 1
+    tbmetrics.say((&s_fb[0 as usize]) as u64)
+    tbmetrics.sayn(sym_fb)
+    tbmetrics.nl()
+    return target
+}
+
+fn sym_ink(p: u64) -> u64 {
+    let w: u64 = wlibc.icon_w(p)
+    let h: u64 = wlibc.icon_h(p)
+    if w == 0 || h == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < w * h {
+        if (*((p + 12 + i * 4 + 3) as *mut u8)) != 0 as u8 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+const SYM_AIR: u64 = 2
+
+fn sym_scale(sym: u64, h: u64) -> u64 {
+    let ih: u64 = wlibc.icon_h(sym)
+    if ih == 0 {
+        return wlibc.ui_scale()
+    }
+    var cur_gap: u64 = 2 * SYM_AIR * wlibc.ui_scale()
+    if h <= cur_gap {
+        cur_gap = 0
+    }
+    let raum: u64 = h - cur_gap
+    var s: u64 = raum / ih
+    if s < 1 {
+        s = 1
+    }
+    if s > 8 {
+        s = 8
+    }
+    if s < wlibc.ui_scale() {
+        s = wlibc.ui_scale()
+    }
+    return s
+}
+
+fn sym_w(sym: u64, h: u64) -> u64 {
+    if wlibc.icon_vec(sym) {
+        let sc: u64 = wlibc.ui_scale()
+
+        var want: u64 = 24 * sc
+        var room: u64 = 0
+        if h > 2 * SYM_AIR * sc {
+            room = h - 2 * SYM_AIR * sc
+        }
+        if room > want {
+            want = room
+        }
+        if want > room && room > 0 {
+            want = room
+        }
+        return want
+    }
+    return wlibc.icon_w(sym) * sym_scale(sym, h)
+}
+
+fn sym_hh(sym: u64, h: u64) -> u64 {
+    if wlibc.icon_vec(sym) {
+        return sym_w(sym, h)
+    }
+    return wlibc.icon_h(sym) * sym_scale(sym, h)
+}
