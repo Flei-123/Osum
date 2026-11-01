@@ -72,23 +72,23 @@ else
         L="$W/lauf.txt"
         grep -qa 'wlan: no device -- there is no driver' "$L" \
             && ok "'wlan status' says during the RUN that there is no device" \
-            || bad "'wlan status' sagt im Lauf nichts dergleichen"
+            || bad "'wlan status' says nothing like that in the run"
         grep -qa 'wlan: /etc/wlan.conf written for network MeinNetz' "$L" \
-            && ok "'wlan verbinden' legt /etc/wlan.conf wirklich an" \
-            || bad "/etc/wlan.conf wird im Lauf nicht angelegt"
-        grep -qa 'wlan fw: Datei fehlt' "$L" \
+            && ok "'wlan connect' creates /etc/wlan.conf wirklich an" \
+            || bad "/etc/wlan.conf is not created in the run"
+        grep -qa 'wlan fw: file missing' "$L" \
             && ok "'wlan fw' reports honestly during the RUN: firmware file missing (no crash)" \
-            || bad "'wlan fw' sagt im Lauf nichts Passendes"
+            || bad "'wlan fw' says nothing fitting in the run"
         grep -qa '^ssid MeinNetz' "$L" && grep -qa '^psk geheim12345' "$L" \
-            && ok "in /etc/wlan.conf stehen wirklich ssid und psk" \
-            || bad "der Inhalt von /etc/wlan.conf stimmt nicht"
-        grep -qa 'wlan: das Passwort muss 8 bis 63 Zeichen haben' "$L" \
+            && ok "in /etc/wlan.conf really contains ssid and psk" \
+            || bad "the content of /etc/wlan.conf is wrong"
+        grep -qa 'wlan: the password must be 8 to 63 characters' "$L" \
             && ok "a too short password is rejected instead of accepted" \
             || bad "a too short password gets through"
         grep -qa 'wlan: /etc/wlan.conf deleted' "$L" \
             && ok "'wlan vergessen' deletes the file again" \
-            || bad "'wlan vergessen' loescht nichts"
-        grep -qa 'wlan: verbunden wird damit NICHT' "$L" \
+            || bad "'wlan vergessen' deletes nothing"
+        grep -qa 'wlan: this does NOT connect' "$L" \
             && ok "after setup the program says explicitly that it does NOT connect" \
             || bad "the program leaves open whether it connects"
     else
