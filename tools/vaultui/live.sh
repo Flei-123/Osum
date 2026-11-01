@@ -55,7 +55,8 @@ live() {
 }
 
 pin_lines() {
-    local pin=$1 i
+    local pin=$1 focus=${2:-1} i
+    [ "$focus" = 1 ] && { echo "sendkey tab"; echo "warte 1"; }
     for ((i = 0; i < ${#pin}; i++)); do echo "sendkey ${pin:i:1}"; echo "warte 1"; done
     echo "sendkey ret"
     echo "warte 4"
@@ -104,7 +105,7 @@ sys.exit(0 if d>200 else 1)" && ok "the message changes pixels on screen" || bad
 fi
 
 echo "== 4. countdown after the 5th wrong PIN =="
-mapfile -t L < <(for n in 1 2 3 4 5 6; do pin_lines $PINBAD; done)
+mapfile -t L < <(for n in 1 2 3 4 5 6; do pin_lines $PINBAD $([ "$n" = 1 ] && echo 1 || echo 0); done)
 live r4 "warte 2" "${L[@]}"
 S=$TMPD/r4/serial.txt
 [ "$(count "$S" "vaultui: unlock bad")" -ge 5 ] && ok "five wrong PINs: five bad answers" || bad "bad answers: $(count "$S" "vaultui: unlock bad")"

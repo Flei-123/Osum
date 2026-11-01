@@ -31,7 +31,15 @@ echo "== 1. build + static =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 PROGS="sh ls cat echo sleep mkdir grep su chmod vaultd vaultctl pinctl vaultui"
 mkdir -p "$TMPD/bin"
-if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else bad "programs do not build"; tail -15 "$TMPD/b.txt"; echo "VAULTUI: $pass passed, $fail failed"; exit 1; fi
+if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else bad "programs do not build"; tail -15 "$TMPD/b.txt"; if command -v swtpm >/dev/null 2>&1; then
+    echo "== live guest (tools/vaultui/live.sh) =="
+    LV=$(bash tools/vaultui/live.sh 2>&1)
+    printf '%s\n' "$LV" | grep -a '^  \(OK\|FAIL\)\|^=='
+    lp=$(printf '%s\n' "$LV" | sed -n 's/^VAULTUI-LIVE: \([0-9]*\) passed, \([0-9]*\) failed.*/\1/p')
+    lf=$(printf '%s\n' "$LV" | sed -n 's/^VAULTUI-LIVE: \([0-9]*\) passed, \([0-9]*\) failed.*/\2/p')
+    if [ -z "$lp" ]; then bad "live gate gave no result"; else pass=$((pass + lp)); fail=$((fail + lf)); fi
+fi
+echo "VAULTUI: $pass passed, $fail failed"; exit 1; fi
 if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then ok "kernel builds"; else bad "kernel does not build"; tail -8 "$TMPD/k.txt"; echo "VAULTUI: $pass passed, $fail failed"; exit 1; fi
 for l in de en; do
     miss=0
