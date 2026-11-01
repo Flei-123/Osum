@@ -28,7 +28,7 @@ import subprocess
 import sys
 import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import marke
+import brand
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -268,7 +268,7 @@ def cmd_new(args):
     extra = ""
     if args.kind == "service":
         extra = "service=%s" % short
-    sub = {"PRODUCT": marke.PRODUKT, "ID": app_id, "SHORT": short, "NAME": name, "PERM": perm, "EXTRA": extra}
+    sub = {"PRODUCT": brand.PRODUKT, "ID": app_id, "SHORT": short, "NAME": name, "PERM": perm, "EXTRA": extra}
     os.makedirs(os.path.join(d, "src"))
     for src, dst in (("INFO.in", "INFO"), ("README.md.in", "README.md"),
                      ("main-%s.fi.in" % args.kind, os.path.join("src", "main.fi"))):
