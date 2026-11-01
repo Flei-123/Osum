@@ -14,19 +14,19 @@ bad() { echo "  FAIL $*"; fail=$((fail + 1)); }
 QEMU=${QEMU:-qemu-system-x86_64}
 export FIRNLIB="$PWD/lib"
 
-echo "== 1. die Karte von kdata =="
+echo "== 1. the map of kdata =="
 kol=$(python3 tools/kernel/memmap.py kernel 2>&1 | tail -1)
 echo "        $kol"
 case "$kol" in
     *" 0 collisions") ok "der Busbereich ueberschneidet nichts" ;;
-    *) bad "die Karte hat Kollisionen" ;;
+    *) bad "the map has collisions" ;;
 esac
 grep -q 'BUS_OFF' tools/kernel/memmap.py \
-    && ok "der Bereich steht in der Karte des Pruefers" \
+    && ok "the range is in the checker's map" \
     || bad "BUS_OFF fehlt in tools/kernel/memmap.py"
 
 echo
-echo "== 2. die Ein-Kern-Regel, an der Quelle =="
+echo "== 2. the single-core rule, at the source =="
 n_static=$(grep -c '^static mut' kernel/bus/bus.fi || true)
 if [ "$n_static" = 0 ]; then
     ok "kernel/bus/bus.fi hat keinen 'static mut'"
@@ -34,7 +34,7 @@ else
     bad "kernel/bus/bus.fi hat $n_static globale Variablen"
 fi
 if sed -n '/^fn do_bus/,/^}/p' kernel/sys/sysbus.fi | grep -q 'state + kstate\.'; then
-    bad "sys.do_bus fasst einen kdata-Puffer an"
+    bad "sys.do_bus touches a kdata buffer"
 else
     ok "sys.do_bus kopiert in seinen eigenen Stapelrahmen"
 fi
@@ -81,21 +81,21 @@ PYEOF
 nfun=$(echo "$py" | awk '{print $1}')
 leck=$(echo "$py" | awk '{print $3}')
 if [ "$leck" = "-" ]; then
-    ok "$nfun Funktionen in bus.fi -- jeder Weg an die Tafel geht durch take()"
+    ok "$nfun functions in bus.fi -- every path to the table goes through take()"
 else
-    bad "diese fassen die Tafel ohne Sperre an: $leck"
+    bad "these touch the table without a lock: $leck"
 fi
 
 echo
-echo "== 3. der Kern und die Programme =="
+echo "== 3. the kernel and the programs =="
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/k.log" 2>&1 \
     && ok "der Kern baut ($(stat -c%s "$TMPD/k.mb") Oktette)" \
-    || { bad "der Kern baut nicht"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
+    || { bad "the kernel does not build"; tail -12 "$TMPD/k.log" | sed 's/^/        /'
          echo "SYSTEMBUS: $pass bestanden, $fail gescheitert"; exit 1; }
 
 PROGS="desktop taskbar settings launcher dhcp explorer widgetdemo locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
-    || bad "crt.s laesst sich nicht assemblieren"
+    || bad "crt.s cannot be assembled"
 bauen_ok=1
 for p in $PROGS; do
     UPROF=""; UCRT="$TMPD/crt.o"
@@ -107,9 +107,9 @@ for p in $PROGS; do
     strip --strip-all "$TMPD/$p.elf"
 done
 if [ "$bauen_ok" = 1 ]; then
-    ok "die $(echo $PROGS | wc -w) Programme bauen"
+    ok "the $(echo $PROGS | wc -w) programs build"
 else
-    bad "die Programme bauen nicht"
+    bad "the programs do not build"
 fi
 
 lauf() { # name smp extra [limit]
@@ -133,13 +133,13 @@ lauf() { # name smp extra [limit]
 wert() { grep -a "^$2" "$1" 2>/dev/null | tail -1 | sed "s/^$2//"; }
 
 echo
-echo "== 4. vier Kerne, zwei Prozesse, hundert Durchlaeufe =="
+echo "== 4. four cores, two processes, a hundred iterations =="
 lauf vier 4 "busbench bus r3alle" 200
 A="$TMPD/vier.txt"
 if grep -qa '^panic:\|^\*\*\* EXCEPTION' "$A"; then
-    bad "der Lauf ist gestorben: $(grep -am1 '^panic:\|^\*\*\* EXCEPTION' "$A")"
+    bad "the run died: $(grep -am1 '^panic:\|^\*\*\* EXCEPTION' "$A")"
 else
-    ok "der Lauf mit vier Kernen lebt"
+    ok "the run with four cores is alive"
 fi
 run=$(wert "$A" 'busa: run=')
 abw=$(wert "$A" 'busa: abw=')
@@ -148,12 +148,12 @@ leer=$(wert "$A" 'busb: leer=')
 echo "        busa run=$run abw=$abw   busb got=$got leer=$leer"
 [ "${run:-0}" = 100 ] && ok "hundert Durchlaeufe gefahren" \
                       || bad "nicht hundert Durchlaeufe, sondern '${run:-nichts}'"
-[ "${abw:-1}" = 0 ] && ok "NULL Abweichungen -- was A ablegte, las B Oktett fuer Oktett" \
-                    || bad "$abw Abweichungen zwischen Schreiber und Leser"
-[ "${leer:-1}" = 0 ] && ok "keine Runde ohne Nachricht beim Leser" \
-                     || bad "$leer Runden ohne Nachricht"
+[ "${abw:-1}" = 0 ] && ok "ZERO deviations -- what A put down, B read octet for octet" \
+                    || bad "$abw deviations between writer and reader"
+[ "${leer:-1}" = 0 ] && ok "no round without a message at the reader" \
+                     || bad "$leer rounds without a message"
 drops=$(wert "$A" 'bus: drops=')
-[ "${drops:-1}" = 0 ] && ok "keine Nachricht verloren (drops=0)" \
+[ "${drops:-1}" = 0 ] && ok "no message lost (drops=0)" \
                       || bad "$drops Nachrichten verloren"
 cs=$(wert "$A" 'bus: clipsets=')
 cg=$(wert "$A" 'bus: clipgets=')
@@ -163,51 +163,51 @@ else
     bad "clipsets=$cs clipgets=$cg"
 fi
 hist=$(wert "$A" 'bus: verlauf=')
-[ "${hist:-0}" = 20 ] && ok "der Verlauf steht bei zwanzig und laeuft nicht ueber" \
-                      || bad "der Verlauf zeigt '${hist:-nichts}' statt 20"
+[ "${hist:-0}" = 20 ] && ok "the history stands at twenty and does not overflow" \
+                      || bad "the history shows '${hist:-nichts}' statt 20"
 
 echo
-echo "== 5. das Nein, das man sehen kann =="
+echo "== 5. the no that can be seen =="
 ruf=$(wert "$A" 'busd: ruf=')
 vor=$(wert "$A" 'busd: vor=')
 uid=$(wert "$A" 'busd: uid=')
-echo "        vor=$vor uid=$uid ruf=$ruf"
-[ "${vor:-x}" = 0 ] && ok "als root geht derselbe Ruf durch (die Gegenprobe)" \
-                    || bad "schon als root abgelehnt: '$vor'"
-[ "${uid:-0}" = 1000 ] && ok "der Prozess hat seine Wurzelrechte wirklich abgelegt" \
+echo "        before=$vor uid=$uid call=$ruf"
+[ "${vor:-x}" = 0 ] && ok "as root the same call goes through (the control)" \
+                    || bad "already rejected as root: '$vor'"
+[ "${uid:-0}" = 1000 ] && ok "the process really dropped its root rights" \
                        || bad "uid ist '$uid' statt 1000"
-[ "${ruf:-x}" = "-3" ] && ok "der unberechtigte Ruf wird abgelehnt (E_DENIED)" \
+[ "${ruf:-x}" = "-3" ] && ok "the unauthorised call is rejected (E_DENIED)" \
                        || bad "der Ruf gab '$ruf' statt -3"
 z=$(grep -ac '^bus: ABGELEHNT' "$A" || true)
 if [ "${z:-0}" -ge 1 ]; then
-    ok "die Ablehnung steht auf der Leitung: $(grep -am1 '^bus: ABGELEHNT' "$A")"
+    ok "the rejection is on the line: $(grep -am1 '^bus: ABGELEHNT' "$A")"
 else
-    bad "abgelehnt wurde still -- keine Zeile 'bus: ABGELEHNT'"
+    bad "rejection was silent -- no line 'bus: ABGELEHNT'"
 fi
 den=$(wert "$A" 'bus: denied=')
 if [ "${den:-0}" -ge 1 ] 2>/dev/null; then
-    ok "und sie ist gezaehlt (denied=$den)"
+    ok "and it is counted (denied=$den)"
 else
-    bad "der Zaehler denied steht auf '${den:-nichts}'"
+    bad "the counter denied is at '${den:-nichts}'"
 fi
 
 echo
-echo "== 6. ein Megabyte, geteilt und nicht kopiert =="
+echo "== 6. one megabyte, shared and not copied =="
 byt=$(wert "$A" 'buss: byt=')
 us=$(wert "$A" 'buss: us=')
 sum=$(wert "$A" 'buss: sum=')
 sgp=$(wert "$A" 'bus: segseiten=')
 echo "        byt=$byt us=$us sum=$sum seiten=$sgp"
 [ "${byt:-0}" = 1048576 ] && ok "ein volles Megabyte" || bad "byt=$byt"
-[ "${sgp:-0}" = 256 ] && ok "256 Seiten aus dem Rahmenverwalter" || bad "segseiten=$sgp"
+[ "${sgp:-0}" = 256 ] && ok "256 pages from the frame manager" || bad "segseiten=$sgp"
 if [ -n "${us:-}" ] && [ "$us" -lt 5000 ] 2>/dev/null; then
-    ok "durch in ${us} us -- unter der Zusage von 5000 us"
+    ok "through in ${us} us -- under the promise of 5000 us"
 else
-    bad "die Uebergabe brauchte '${us:-nichts}' us"
+    bad "the handover needed '${us:-nichts}' us"
 fi
 erw=$(python3 -c 'n=131072; print((sum(range(n)) + 7*n) & (2**64-1))')
-[ "${sum:-0}" = "$erw" ] && ok "und der Inhalt stimmt (Summe $erw)" \
-                         || bad "die Summe ist $sum statt $erw"
+[ "${sum:-0}" = "$erw" ] && ok "and the content matches (sum $erw)" \
+                         || bad "the sum is $sum instead of $erw"
 
 echo
 echo "== 7. die Gegenproben =="
@@ -215,7 +215,7 @@ lauf ohne 4 "bus r3alle" 120
 if grep -qa '^bus: skipped' "$TMPD/ohne.txt"; then
     ok "ohne 'busbench' laeuft kein Busprogramm"
 else
-    bad "die Programme laufen auch ohne 'busbench'"
+    bad "the programs also run without 'busbench'"
 fi
 lauf nobus 4 "busbench bus nobus r3alle" 150
 B="$TMPD/nobus.txt"
@@ -233,7 +233,7 @@ else
 fi
 
 echo
-echo "== 8. die Oberflaeche: die Meldungen in der Leiste =="
+echo "== 8. the surface: the messages in the bar =="
 python3 tools/k15/tree.py "$TMPD/baum" > "$TMPD/baum.log" 2>&1 \
     || bad "tools/k15/tree.py faellt"
 printf '# taskbar.conf\nedge=0\nheight=40\nwidth=0\nautohide=0\nontop=1\n' > "$TMPD/tb.conf"
@@ -248,7 +248,7 @@ while read -r z; do ARGS+=("$z"); done \
     < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
 if python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1; then
-    ok "die Platte steht ($(stat -c%s "$TMPD/disk.img") Oktette)"
+    ok "the disk is there ($(stat -c%s "$TMPD/disk.img") Oktette)"
 else
     bad "mkfs.py faellt"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'
 fi
@@ -290,7 +290,7 @@ im.save(p + ".png")
 print("        bild %dx%d farben=%d"
       % (im.size[0], im.size[1], len(im.getcolors(maxcolors=1 << 24) or [])))
 PY
-        ok "das Bild $1.png liegt vor"
+        ok "the picture $1.png is there"
     else
         bad "kein Bild $1"
     fi
@@ -303,14 +303,14 @@ foto 01-leiste-meldung
 DREH
 gui leiste "bus notidemo" "$TMPD/dreh1"
 if grep -qa 'Meldg' "$TMPD/leiste.txt"; then
-    ok "die Leiste zeigt die Meldungen des Busses: $(grep -aom1 'Meldg [0-9]*' "$TMPD/leiste.txt")"
+    ok "the bar shows the messages of the bus: $(grep -aom1 'Meldg [0-9]*' "$TMPD/leiste.txt")"
 else
-    bad "in der Leiste steht keine Meldung"
+    bad "no message in the bar"
 fi
 bild 01-leiste-meldung
 
 echo
-echo "== 9. die Oberflaeche: kopieren im Editor, einfuegen im Terminal =="
+echo "== 9. the surface: copy in the editor, paste in the terminal =="
 #
 tipp() {
     python3 - "$1" <<'PY'
@@ -350,9 +350,9 @@ PY
 } > "$TMPD/dreh2"
 gui schreibtisch "bus notidemo" "$TMPD/dreh2"
 if grep -qa '^edit: ready' "$TMPD/schreibtisch.txt"; then
-    ok "der Editor ist im Terminalfenster wirklich gestartet"
+    ok "the editor really started in the terminal window"
 else
-    bad "der Editor ist nie gestartet -- die Tasten kamen nicht an"
+    bad "the editor never started -- the keys did not arrive"
 fi
 bild 02-schreibtisch
 bild 03-editor

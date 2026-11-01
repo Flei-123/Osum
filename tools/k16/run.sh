@@ -20,7 +20,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { # name value op expected
     local name=$1 value=$2 op=$3 want=$4
-    if [ -z "$value" ]; then bad "$name: keine Zahl gefunden (erwartet $op $want)"; return; fi
+    if [ -z "$value" ]; then bad "$name: no number found (expected $op $want)"; return; fi
     if [ "$value" -"$op" "$want" ] 2>/dev/null; then ok "$name: $value"
     else bad "$name: $value, erwartet $op $want"; fi
 }
@@ -36,7 +36,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "fetch-firnc.sh fehlgeschla
 [ -x "$FC1" ]   || { echo "firnc1 fehlt"; exit 1; }
 
 # ===================================================================
-echo "== 1. der Assembler: aus dem .s von firnc unmittelbar ein Programm =="
+echo "== 1. the assembler: from firnc's .s straight to a program =="
 
 as --64 -o "$TMPD/hostcrt.o" tools/k11/hostcrt.s 2>/dev/null \
     || { echo "as auf hostcrt.s fehlgeschlagen"; exit 1; }
@@ -48,7 +48,7 @@ if "$FIRNC" -c -o "$TMPD/fas.o" kernel/user/fas.fi > "$TMPD/fas.err" 2>&1 \
         "$TMPD/hostcrt.o" "$TMPD/fas.o" 2>/dev/null; then
     ok "fas ist gebaut ($(stat -c%s "$TMPD/fas") Oktette)"
 else
-    bad "fas laesst sich nicht bauen"; sed 's/^/        /' "$TMPD/fas.err" | head -8
+    bad "fas cannot be built"; sed 's/^/        /' "$TMPD/fas.err" | head -8
 fi
 FAS="$TMPD/fas"
 
@@ -79,7 +79,7 @@ for p in $PROGS; do
 done
 ANZ=$(echo $PROGS | wc -w)
 if [ -z "$nichtgebaut" ]; then
-    ok "fas uebersetzt und bindet alle $gebaut Programme dieses Userlands"
+    ok "fas translates and links all $gebaut programs of this userland"
 else
     bad "fas scheitert an:$nichtgebaut"
 fi
@@ -106,30 +106,30 @@ for p in $VERGLEICH; do
 done
 ANZV=$(echo $VERGLEICH | wc -w)
 if [ -z "$diffs" ]; then
-    ok "$same von $ANZV Programmen: fas und as+ld sagen dasselbe und gehen mit demselben Code"
+    ok "$same of $ANZV programs: fas and as+ld say the same and go with the same code"
 else
-    bad "fas und as+ld unterscheiden sich bei:$diffs"
+    bad "fas and as+ld differ at:$diffs"
 fi
 
 printf '.intel_syntax noprefix\n.text\n.globl _start\n_start:\n    mov rax, rbx\n    quatschbefehl rax, rbx\n    ret\n' > "$TMPD/kaputt.s"
 if "$FAS" "$TMPD/kaputt.s" -o "$TMPD/kaputt.bin" --wirt > "$TMPD/kaputt.err" 2>&1; then
-    bad "GEGENPROBE: fas hat einen unbekannten Befehl durchgelassen"
+    bad "CONTROL: fas let an unknown instruction through"
 else
     if grep -q "Zeile 6" "$TMPD/kaputt.err" && grep -q "quatschbefehl" "$TMPD/kaputt.err"; then
-        ok "GEGENPROBE: ein unbekannter Befehl bricht ab -- mit Zeilennummer und Wort"
+        ok "CONTROL: an unknown instruction aborts -- with line number and word"
     else
-        bad "GEGENPROBE: der Abbruch nennt nicht Zeile 6 und das Wort: $(head -1 "$TMPD/kaputt.err")"
+        bad "CONTROL: the abort does not name line 6 and the word: $(head -1 "$TMPD/kaputt.err")"
     fi
 fi
 printf '.intel_syntax noprefix\n.text\nfoo:\n    ret\n' > "$TMPD/ohne.s"
 if "$FAS" "$TMPD/ohne.s" -o "$TMPD/ohne.bin" --wirt > "$TMPD/ohne.err" 2>&1; then
-    bad "GEGENPROBE: fas hat eine Quelle ohne _start gebunden"
+    bad "CONTROL: fas linked a source without _start"
 else
     hat "$TMPD/ohne.err" "_start" "GEGENPROBE: ohne die Marke _start bricht fas ab"
 fi
 printf '.intel_syntax noprefix\n.text\n.globl _start\n_start:\n    jmp nirgendwo\n' > "$TMPD/weg.s"
 if "$FAS" "$TMPD/weg.s" -o "$TMPD/weg.bin" --wirt > "$TMPD/weg.err" 2>&1; then
-    bad "GEGENPROBE: fas hat einen Sprung ins Nichts gebunden"
+    bad "CONTROL: fas linked a jump into nothing"
 else
     hat "$TMPD/weg.err" "nirgendwo" "GEGENPROBE: ein Sprung auf einen unbekannten Namen bricht ab"
 fi
@@ -138,11 +138,11 @@ if "$FAS" "$TMPD/gut.s" -o "$TMPD/gut.bin" --wirt >/dev/null 2>&1; then
     chmod +x "$TMPD/gut.bin"; "$TMPD/gut.bin"; rc=$?
     num "und dieselbe Quelle ohne den Fehler laeuft und gibt 5 zurueck" "$rc" eq 5
 else
-    bad "die fehlerfreie Gegenprobe liess sich nicht bauen"
+    bad "the error-free control could not be built"
 fi
 
 # ===================================================================
-echo "== 2. die Zahlen, aus denen die Kernaenderungen folgen =="
+echo "== 2. the numbers from which the kernel changes follow =="
 mkdir -p "$TMPD/mess"
 printf 'fn main(start: u64) -> i32 {\n    return 0\n}\n' > "$TMPD/mess/klein.fi"
 python3 - "$ROOT/$FC1" "$TMPD/mess/klein.fi" > "$TMPD/mess.txt" 2>&1 <<'PY'
@@ -179,7 +179,7 @@ gleich "GEGENPROBE: mit einem MiB weniger Adressraum geht es nicht" \
 gleich "GEGENPROBE: mit acht KiB weniger Stapel geht es nicht" \
     "$(wert "$TMPD/mess.txt" 'weniger_stapel [0-9]+' | grep -oE '[0-9]+$')" "0"
 
-echo "== 2b. der stille Abbruch von firnc1 (D-019) =="
+echo "== 2b. the silent abort of firnc1 (D-019) =="
 LEER="$TMPD/leerimport"
 rm -rf "$LEER"; mkdir -p "$LEER"
 cp kernel/user/wlib.fi "$LEER/" 2>/dev/null
@@ -196,8 +196,8 @@ gleich "und schreibt dabei KEIN Oktett (das ist der Mangel)" \
     && ok "firnc0 scheitert an derselben Stelle (rc=$RC0)" \
     || bad "firnc0 haette auch scheitern muessen"
 grep -q "ulib.fi" "$LEER/c0.err" \
-    && ok "firnc0 NENNT die fehlende Datei -- so kommt man an die Ursache" \
-    || bad "firnc0 nennt die fehlende Datei nicht mehr"
+    && ok "firnc0 NAMES the missing file -- that is how to get at the cause" \
+    || bad "firnc0 no longer names the missing file"
 #
 #     error: the module 'std.rt' belongs to the standard library and
 #     is not available in profile 'kernel'
@@ -213,37 +213,37 @@ gleich "wlib AN IHREM PLATZ, ueber taskmgr.fi eingebunden, uebersetzt firnc1 kla
     "$RCG" "0"
 
 # ===================================================================
-echo "== 3. die Speicherkarte: der Bereich dieser Runde ueberschneidet keinen =="
+echo "== 3. the memory map: the range of this round overlaps none =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/karte.txt" 2>&1; then
     ok "$(tail -1 "$TMPD/karte.txt")"
 else
-    bad "die Speicherkarte hat Kollisionen"; sed 's/^/        /' "$TMPD/karte.txt" | head -5
+    bad "the memory map has collisions"; sed 's/^/        /' "$TMPD/karte.txt" | head -5
 fi
 grep -q 'K16_OFF' tools/kernel/memmap.py \
-    && ok "der Bereich K16 steht in tools/kernel/memmap.py und wird mitgerechnet" \
+    && ok "the range K16 is in tools/kernel/memmap.py and is counted" \
     || bad "K16 fehlt in tools/kernel/memmap.py"
 mkdir -p "$TMPD/kern"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$TMPD/kern/" \; )
 sed -i 's/^const K16_OFF: u64 = 0x49000$/const K16_OFF: u64 = 0x3F000/' "$TMPD/kern/lib/kstate.fi"
 grep -q '^const K16_OFF: u64 = 0x3F000' "$TMPD/kern/lib/kstate.fi" \
-    || bad "die Gegenprobe konnte K16_OFF gar nicht verschieben"
+    || bad "the control could not move K16_OFF at all"
 if python3 tools/kernel/memmap.py "$TMPD/kern" > "$TMPD/karte2.txt" 2>&1; then
-    bad "GEGENPROBE: auf 0x3F000 (Runde K10, der Schriftleser) haette der Pruefer anschlagen muessen"
+    bad "CONTROL: at 0x3F000 (round K10, the font reader) the checker should have raised the alarm"
 else
-    ok "GEGENPROBE: auf einer schon belegten Seite schlaegt der Kartenpruefer an ($(grep -c COLLISION "$TMPD/karte2.txt") Kollisionen)"
+    ok "CONTROL: on an already occupied page the map checker raises the alarm ($(grep -c COLLISION "$TMPD/karte2.txt") Kollisionen)"
 fi
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo
-    echo "K16: $pass passed, $fail failed  (ohne QEMU -- Teil 4 und 5 uebersprungen)"
+    echo "K16: $pass passed, $fail failed  (without QEMU -- parts 4 and 5 skipped)"
     [ "$fail" -eq 0 ] && exit 0 || exit 1
 fi
 
 # ===================================================================
-echo "== 4. der Uebersetzer auf Osum =="
+echo "== 4. the compiler on Osum =="
 
 bash tools/build-kernel.sh "$TMPD/k.mb" >/dev/null 2>&1 \
-    || { bad "der Kernel laesst sich nicht bauen"; echo "K16: $pass passed, $fail failed"; exit 1; }
+    || { bad "the kernel cannot be built"; echo "K16: $pass passed, $fail failed"; exit 1; }
 
 mkdir -p "$TMPD/o"
 bau_osum() { # name
@@ -253,7 +253,7 @@ bau_osum() { # name
     strip --strip-all "$TMPD/o/$1"
 }
 for p in sh cat echo hello fas firun k16; do
-    bau_osum "$p" || { bad "$p laesst sich nicht fuer Osum bauen"; sed 's/^/        /' "$TMPD/o/$p.err" | head -5; }
+    bau_osum "$p" || { bad "$p cannot be built for Osum"; sed 's/^/        /' "$TMPD/o/$p.err" | head -5; }
 done
 
 FIRNQ=""
@@ -261,14 +261,14 @@ for k in "${FIRN_REPO:-}" "$ROOT/../firn" "$ROOT/../../firn" "$ROOT/../../../fir
     [ -n "$k" ] && [ -f "$k/bin/firnc1.fi" ] && FIRNQ=$(cd "$k" && pwd) && break
 done
 if [ -z "$FIRNQ" ]; then
-    bad "die Quelle des Uebersetzers (bin/firnc1.fi) wurde nicht gefunden"
+    bad "the source of the compiler (bin/firnc1.fi) was not found"
 else
     if ( cd "$FIRNQ" && FIRNLIB="$FIRNQ/lib" "$ROOT/$FIRNC" -c -o "$TMPD/o/firnc.o" bin/firnc1.fi ) > "$TMPD/firnc.err" 2>&1 \
        && ld -T "$ULD" -o "$TMPD/o/firnc" "$TMPD/o/firnc.o" 2>/dev/null; then
         strip --strip-all "$TMPD/o/firnc"
-        ok "firnc ist fuer Osum gebunden ($(stat -c%s "$TMPD/o/firnc") Oktette, Abbild ab 0x40100000)"
+        ok "firnc is linked for Osum ($(stat -c%s "$TMPD/o/firnc") Oktette, Abbild ab 0x40100000)"
     else
-        bad "firnc laesst sich nicht fuer Osum binden"; sed 's/^/        /' "$TMPD/firnc.err" | head -5
+        bad "firnc cannot be linked for Osum"; sed 's/^/        /' "$TMPD/firnc.err" | head -5
     fi
 fi
 
@@ -310,8 +310,8 @@ python3 tools/osum/mkfs.py build "$TMPD/d.img" 8192 /bin/ \
     /bin/firnc="$TMPD/o/firnc" \
     /probe.fi="$TMPD/q/probe.fi" /kaputt.fi="$TMPD/q/kaputt.fi" \
     > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "ein Plattenabbild mit dem Uebersetzer darauf ($(grep -o 'free=[0-9]*' "$TMPD/mkfs.txt") Bloecke)" \
-    || { bad "mkfs fuer das Uebersetzerabbild fehlgeschlagen"; head -3 "$TMPD/mkfs.txt"; }
+    && ok "a disk image with the compiler on it ($(grep -o 'free=[0-9]*' "$TMPD/mkfs.txt") Bloecke)" \
+    || { bad "mkfs for the compiler image failed"; head -3 "$TMPD/mkfs.txt"; }
 fi
 
 if [ -f "$TMPD/d.img" ]; then
@@ -333,27 +333,27 @@ python3 tools/osum/mkfs.py cat "$TMPD/nach-ueb.img" /probe.s > "$TMPD/osum.s" 2>
 python3 tools/osum/mkfs.py cat "$TMPD/nach-ueb.img" /probe > "$TMPD/osum.bin" 2>/dev/null
 ( cd "$TMPD/q" && "$ROOT/$FC1" probe.fi > "$TMPD/wirt.s" 2>/dev/null )
 "$FAS" "$TMPD/wirt.s" -o "$TMPD/wirt.bin" > "$TMPD/wirt.fas" 2>&1 \
-    || { bad "fas kam auf dem Wirt nicht durch: $(head -1 "$TMPD/wirt.fas")"; }
+    || { bad "fas did not get through on the host: $(head -1 "$TMPD/wirt.fas")"; }
 num "die .s von Osum ist nicht leer (Oktette)" "$(stat -c%s "$TMPD/osum.s" 2>/dev/null || echo 0)" gt 1000
 if cmp -s "$TMPD/osum.s" "$TMPD/wirt.s"; then
-    ok "ZEICHENGLEICH: der Assemblertext von Osum ist Oktett fuer Oktett der vom Wirt ($(stat -c%s "$TMPD/osum.s") Oktette)"
+    ok "CHARACTER-IDENTICAL: the assembler text from Osum is octet for octet the one from the host ($(stat -c%s "$TMPD/osum.s") Oktette)"
 else
-    bad "der Assemblertext unterscheidet sich: $(cmp "$TMPD/osum.s" "$TMPD/wirt.s" 2>&1 | head -1)"
+    bad "the assembler text differs: $(cmp "$TMPD/osum.s" "$TMPD/wirt.s" 2>&1 | head -1)"
     diff "$TMPD/osum.s" "$TMPD/wirt.s" 2>/dev/null | head -6 | sed 's/^/        /'
 fi
 if cmp -s "$TMPD/osum.bin" "$TMPD/wirt.bin"; then
-    ok "ZEICHENGLEICH: die ausfuehrbare Datei von Osum ist Oktett fuer Oktett die vom Wirt ($(stat -c%s "$TMPD/osum.bin") Oktette)"
+    ok "CHARACTER-IDENTICAL: the executable from Osum is octet for octet the one from the host ($(stat -c%s "$TMPD/osum.bin") Oktette)"
 else
-    bad "die ausfuehrbare Datei unterscheidet sich: Osum $(stat -c%s "$TMPD/osum.bin" 2>/dev/null || echo -) Oktette, Wirt $(stat -c%s "$TMPD/wirt.bin" 2>/dev/null || echo -) Oktette, $(cmp -l "$TMPD/osum.bin" "$TMPD/wirt.bin" 2>/dev/null | wc -l) verschieden"
+    bad "the executable differs: Osum $(stat -c%s "$TMPD/osum.bin" 2>/dev/null || echo -) Oktette, Wirt $(stat -c%s "$TMPD/wirt.bin" 2>/dev/null || echo -) Oktette, $(cmp -l "$TMPD/osum.bin" "$TMPD/wirt.bin" 2>/dev/null | wc -l) verschieden"
     head -c 120 "$TMPD/osum.bin" | od -An -tx1 | head -2 | sed 's/^/        osum /'
     head -c 120 "$TMPD/wirt.bin" | od -An -tx1 | head -2 | sed 's/^/        wirt /'
     head -2 "$TMPD/wirt.fas" | sed 's/^/        /' 
 fi
 ( cd "$TMPD/q" && "$ROOT/$FC1" andere.fi > "$TMPD/andere.s" 2>/dev/null )
 if cmp -s "$TMPD/osum.s" "$TMPD/andere.s"; then
-    bad "GEGENPROBE: eine andere Quelle kam zeichengleich heraus -- der Vergleich misst nichts"
+    bad "CONTROL: a different source came out character-identical -- the comparison measures nothing"
 else
-    ok "GEGENPROBE: eine ANDERE Quelle kommt NICHT zeichengleich heraus"
+    ok "CONTROL: a DIFFERENT source does NOT come out character-identical"
 fi
 
 GROW=$(wert "$TMPD/ueb.txt" 'stackgrow=[0-9]+' | grep -oE '[0-9]+')
@@ -362,9 +362,9 @@ num "Stapelseiten, die waehrend des Laufs bei Bedarf entstanden sind" "${GROW:-0
 lauf "$TMPD/d.img" "osum nokbd nosched noproc nofs noring3 nostackgrow script=$S" \
      "$TMPD/nostack.txt"
 if [ "$(wert "$TMPD/nostack.txt" 'UEB=[0-9]+')" = "UEB=0" ]; then
-    bad "GEGENPROBE nostackgrow: der Uebersetzer lief trotzdem durch -- das Wachsen beweist nichts"
+    bad "CONTROL nostackgrow: the compiler ran through anyway -- the growth proves nothing"
 else
-    ok "GEGENPROBE nostackgrow: der Uebersetzer kommt NICHT durch ($(wert "$TMPD/nostack.txt" 'UEB=[0-9]+'))"
+    ok "CONTROL nostackgrow: the compiler does NOT get through ($(wert "$TMPD/nostack.txt" 'UEB=[0-9]+'))"
 fi
 hat "$TMPD/nostack.txt" "user fault:" \
     "GEGENPROBE nostackgrow: er stirbt an einem Seitenfehler"
@@ -376,9 +376,9 @@ gleich "GEGENPROBE nostackgrow: kein einziges Stapelfach ist entstanden" \
 lauf "$TMPD/d.img" "osum nokbd nosched noproc nofs noring3 nobigmem script=$S" \
      "$TMPD/nobig.txt"
 if [ "$(wert "$TMPD/nobig.txt" 'UEB=[0-9]+')" = "UEB=0" ]; then
-    bad "GEGENPROBE nobigmem: der Uebersetzer lief trotzdem durch -- die Arena beweist nichts"
+    bad "CONTROL nobigmem: the compiler ran through anyway -- the arena proves nothing"
 else
-    ok "GEGENPROBE nobigmem: ohne die grosse Arena kommt der Uebersetzer nicht durch ($(wert "$TMPD/nobig.txt" 'UEB=[0-9]+'))"
+    ok "CONTROL nobigmem: without the big arena the compiler does not get through ($(wert "$TMPD/nobig.txt" 'UEB=[0-9]+'))"
 fi
 hatnicht "$TMPD/nobig.txt" "osum hat mich uebersetzt" \
     "GEGENPROBE nobigmem: und nichts wird uebersetzt"
@@ -398,7 +398,7 @@ hat "$TMPD/open.txt" "im Quelltext steht ein Fehler" \
 fi
 
 # ===================================================================
-echo "== 5. womit man eine Datei oeffnet: die Tabelle und der Ausleger =="
+echo "== 5. what opens a file: the table and the outrigger =="
 
 mkdir -p "$TMPD/d"
 printf 'fn main(start: u64) -> i32 {\n    return 0\n}\n' > "$TMPD/d/p.fi"
@@ -416,8 +416,8 @@ python3 tools/osum/mkfs.py build "$TMPD/t.img" 8192 /bin/ \
     /fremd.zzz="$TMPD/d/fremd.zzz" /s1.sh="$TMPD/d/s1.sh" \
     /r1.sh="$TMPD/d/r1.sh" /r2.sh="$TMPD/d/r2.sh" \
     > "$TMPD/mkfs2.txt" 2>&1 \
-    && ok "ein Plattenabbild mit den sieben Faellen darauf" \
-    || { bad "mkfs fuer den Tabellenlauf fehlgeschlagen"; head -3 "$TMPD/mkfs2.txt"; }
+    && ok "a disk image with the seven cases on it" \
+    || { bad "mkfs for the table run failed"; head -3 "$TMPD/mkfs2.txt"; }
 
 lauf "$TMPD/t.img" "osum nokbd nosched noproc nofs noring3 script=k16;exit" \
      "$TMPD/tab.txt" 300
@@ -442,9 +442,9 @@ num "Eintraege in der Tabelle" "$(k16w tab_anz)" ge 8
 K tab_end     "-2"   "GEGENPROBE: hinter dem letzten Eintrag: -ENOENT"
 num "freg hat einen Platz vergeben" "$(k16w reg_nr)" ge 0
 if [ "$(k16w reg_danach)" = "-8" ]; then
-    bad "nach freg wird /fremd.zzz immer noch nicht eingeordnet -- die Tabelle wirkt nicht"
+    bad "after freg /fremd.zzz is still not classified -- the table has no effect"
 else
-    ok "nach freg wird /fremd.zzz eingeordnet (Platz $(k16w reg_danach)) -- die Tabelle wirkt wirklich"
+    ok "after freg /fremd.zzz is classified (place $(k16w reg_danach)) -- the table really works"
 fi
 K reg_prog    "/bin/cat" "und zwar mit dem Programm, das Ring 3 eingetragen hat"
 K reg_kurz    "-22"  "GEGENPROBE: ein Satz der falschen Laenge wird abgelehnt (-EINVAL)"

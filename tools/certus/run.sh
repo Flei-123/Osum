@@ -24,7 +24,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 num() { local n=$1 v=$2 op=$3 w=$4
-    if [ -z "$v" ]; then bad "$n: keine Zahl (erwartet $op $w)"; return; fi
+    if [ -z "$v" ]; then bad "$n: no number (expected $op $w)"; return; fi
     if [ "$v" -"$op" "$w" ] 2>/dev/null; then ok "$n: $v"
     else bad "$n: $v, erwartet $op $w"; fi
 }
@@ -34,7 +34,7 @@ for t in qemu-system-x86_64 python3; do
     command -v "$t" >/dev/null 2>&1 || { echo "CERTUS: uebersprungen, $t fehlt"; exit 0; }
 done
 [ -d "$CERTUS_REPO/lib/browser" ] || {
-    echo "CERTUS: uebersprungen, kein Certus-Baum in $CERTUS_REPO"; exit 0; }
+    echo "CERTUS: skipped, no Certus tree in $CERTUS_REPO"; exit 0; }
 [ -x "$CERTUS_REPO/compiler/target/release/firnc" ] || {
     echo "CERTUS: uebersprungen, $CERTUS_REPO/compiler/target/release/firnc fehlt"
     echo "        (cd $CERTUS_REPO/compiler && cargo build --release)"; exit 0; }
@@ -77,20 +77,20 @@ SRVPID=$!
 trap 'kill $SRVPID 2>/dev/null' EXIT
 sleep 1
 
-echo "== 1. bauen: /bin/certus, mit dem Uebersetzer des Certus-Baumes =="
+echo "== 1. build: /bin/certus, with the compiler of the Certus tree =="
 bash tools/loader/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
     && ok "Kern und $(wc -l < "$OUT/proglist") Programme uebersetzt" \
     || { bad "build.sh"; tail -20 "$OUT/build.log"; exit 1; }
 grep -q '^   browser' "$OUT/build.log" \
-    && ok "der Browser ist gebaut ($(stat -c%s "$OUT/bin/certus") Oktette)" \
-    || { bad "certus wurde nicht gebaut"; tail -12 "$OUT/certus.log"; }
+    && ok "the browser is built ($(stat -c%s "$OUT/bin/certus") Oktette)" \
+    || { bad "certus was not built"; tail -12 "$OUT/certus.log"; }
 
 if [ -x "$OUT/bin/certus" ]; then
     kind=$(readelf -h "$OUT/bin/certus" | awk -F: '/^  Type:/ {print $2}' | awk '{print $1}')
-    [ "$kind" = EXEC ] && ok "certus ist ET_EXEC (statisch, kein Interpreter)" \
+    [ "$kind" = EXEC ] && ok "certus is ET_EXEC (static, no interpreter)" \
                        || bad "certus: ELF-Art '$kind'"
     u=$(nm -u "$OUT/.certus-bau/certus.dbg" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
-    [ -z "$u" ] && ok "certus hat keinen einzigen undefinierten Namen (keine libc)" \
+    [ -z "$u" ] && ok "certus has not a single undefined name (no libc)" \
                 || bad "undefinierte Namen: $u"
     seg=$(readelf -l "$OUT/bin/certus" | grep -c '^  LOAD')
     num "certus: PT_LOAD-Segmente (Code / Konstanten / Daten getrennt)" "$seg" eq 3
@@ -110,19 +110,19 @@ print(h)')
 fi
 
 echo
-echo "== 2. was der Kern dafuer gelernt hat =="
+echo "== 2. what the kernel learned for it =="
 grep -qE '^const IMAGE_END: u64 = 0x40C00000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: IMAGE_END = 0x40C00000 (das Abbildfenster ist 11 MiB)" \
-    || bad "IMAGE_END steht nicht auf 0x40C00000"
+    && ok "kernel/sched/proc.fi: IMAGE_END = 0x40C00000 (the image window is 11 MiB)" \
+    || bad "IMAGE_END is not at 0x40C00000"
 grep -qE '^const BIG_FLOOR: u64 = 0x40C00000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x40C00000 (die Arena beginnt darueber)" \
-    || bad "BIG_FLOOR passt nicht zu IMAGE_END"
+    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x40C00000 (the arena starts above)" \
+    || bad "BIG_FLOOR does not match IMAGE_END"
 grep -qE '^const PRIV_SLOTS: u64 = 475' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 475 Kacheln (155 + 320 Arena fuer sparse SHM) zu 2 MiB" \
-    || bad "PRIV_SLOTS steht nicht auf 475"
+    && ok "kernel/sched/proc.fi: PRIV_SLOTS = 475 tiles (155 + 320 arena for sparse SHM) of 2 MiB" \
+    || bad "PRIV_SLOTS is not at 475"
 grep -qE '^const BIG_TOP: u64 = 0x52C00000' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: BIG_TOP = 0x52C00000" || bad "BIG_TOP fehlt"
-python3 - <<'PY' && ok "die private Gegend endet vor 0x7C000000 (tools/osum/run.sh bleibt gueltig)" \
+python3 - <<'PY' && ok "the private region ends before 0x7C000000 (tools/osum/run.sh stays valid)" \
                  || bad "die private Gegend erreicht 0x7C000000"
 import re, sys
 s = open("kernel/sched/proc.fi", encoding="utf-8").read()
@@ -135,53 +135,53 @@ grep -q 'w_self' kernel/fs/procfs.fi \
     && ok "kernel/fs/procfs.fi kennt /proc/self (der Sammler fragt danach)" \
     || bad "/proc/self fehlt"
 grep -q 'CR4_OSFXSR' kernel/arch/x86_64/fpu.fi \
-    && ok "kernel/arch/x86_64/fpu.fi schaltet SSE fuer Ring 3 ein (CR4.OSFXSR)" \
-    || bad "SSE wird nicht eingeschaltet"
+    && ok "kernel/arch/x86_64/fpu.fi enables SSE for ring 3 (CR4.OSFXSR)" \
+    || bad "SSE is not enabled"
 grep -q 'fpu.apply_here' kernel/kmain.fi \
-    && ok "und jeder weitere Kern auch (fpu.apply_here in ap_main)" \
-    || bad "die APs bekommen kein SSE"
+    && ok "and every further core too (fpu.apply_here in ap_main)" \
+    || bad "the APs get no SSE"
 grep -q 'fpu.switch' kernel/sched/sched.fi \
     && ok "sched.fi rettet die Vektorregister beim Umschalten (fpu.switch)" \
-    || bad "die Vektorregister werden beim Umschalten nicht gerettet"
+    || bad "the vector registers are not saved on switching"
 
 echo
-echo "== 3. die Leinwand und die Ein-Kern-Regel =="
+echo "== 3. the canvas and the single-core rule =="
 grep -q 'const K_CANVAS' kernel/user/wlib.fi \
-    && ok "kernel/user/wlib.fi hat das Widget K_CANVAS" || bad "K_CANVAS fehlt"
+    && ok "kernel/user/wlib.fi has the widget K_CANVAS" || bad "K_CANVAS fehlt"
 grep -q 'fn canvas_event' kernel/user/wlib.fi \
-    && ok "die Leinwand hat einen Ereignisring (canvas_event)" \
+    && ok "the canvas has an event ring (canvas_event)" \
     || bad "canvas_event fehlt"
 grep -q 'import libc.mem' kernel/user/wlibc.fi \
-    && bad 'wlibc bindet libc.mem -- zwei Module mem in einem Programm (Ein-Kern-Regel)' \
-    || ok 'wlibc kommt ohne libc.mem aus (kein zweites Modul mem neben html.mem)'
+    && bad 'wlibc binds libc.mem -- two modules mem in one program (single-core rule)' \
+    || ok 'wlibc gets by without libc.mem (no second module mem next to html.mem)'
 grep -q 'fn gmem' kernel/user/wlibc.fi \
-    && ok "der Glyphenspeicher kommt aus eigenen 64-KiB-Stuecken (gmem)" \
+    && ok "the glyph memory comes from its own 64 KiB pieces (gmem)" \
     || bad "gmem fehlt"
 grep -q 'wlib.leinwand(' "$CERTUS_REPO/lib/fenster/osum.fi" \
-    && ok "die vierte Rueckwand (lib/fenster/osum.fi) legt eine wlib-Leinwand an" \
-    || bad "lib/fenster/osum.fi legt keine Leinwand an"
+    && ok "the fourth back wall (lib/fenster/osum.fi) creates a wlib canvas" \
+    || bad "lib/fenster/osum.fi creates no canvas"
 for f in b_zurueck b_vor b_neu e_adr; do
-    grep -q "$f" "$CERTUS_REPO/lib/fenster/osum.fi" || bad "Widget $f fehlt in der Rueckwand"
+    grep -q "$f" "$CERTUS_REPO/lib/fenster/osum.fi" || bad "widget $f is missing from the back wall"
 done
 grep -q 'wlib.button' "$CERTUS_REPO/lib/fenster/osum.fi" \
     && grep -q 'wlib.entry' "$CERTUS_REPO/lib/fenster/osum.fi" \
-    && ok "Zurueck/Vor/Neu sind wlib.button, die Adresse ist wlib.entry" \
-    || bad "die Leiste ist nicht aus wlib-Widgets"
+    && ok "Back/Forward/New are wlib.button, the address is wlib.entry" \
+    || bad "the bar is not made of wlib widgets"
 
 echo
-echo "== 4. die Platte, die Pakete und der Laden =="
+echo "== 4. the disk, the packages and the store =="
 python3 "$OPK" schluessel "$OUT" > "$OUT/key.log" 2>&1
 cp -f "$OUT/oeffentlich.key" "$OUT/schluessel.pub"
 bash tools/loader/pakete.sh "$OUT" > "$OUT/pakete.log" 2>&1 \
     && ok "$(ls "$OUT"/stand/*.opk | wc -l) Pakete gebaut" \
     || { bad "pakete.sh"; tail -12 "$OUT/pakete.log"; }
 [ -s "$OUT/stand/certus-1.opk" ] \
-    && ok "certus-1.opk liegt im Stand ($(stat -c%s "$OUT/stand/certus-1.opk") Oktette)" \
+    && ok "certus-1.opk is in the stand ($(stat -c%s "$OUT/stand/certus-1.opk") Oktette)" \
     || bad "certus-1.opk fehlt"
 python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT"/stand/*.opk > /dev/null 2>&1 \
-    && ok "jedes Paket ist signiert" || bad "signpak.py"
+    && ok "every package is signed" || bad "signpak.py"
 grep -q '^certus|' tools/loader/apps.tab \
-    && ok "der Browser steht im Katalog des Ladens (tools/loader/apps.tab)" \
+    && ok "the browser is in the store catalog (tools/loader/apps.tab)" \
     || bad "certus fehlt in apps.tab"
 LADEN_STAND="$OUT/stand" bash tools/loader/abbild.sh "$OUT" > "$OUT/abbild.log" 2>&1 \
     && ok "Abbild gebaut" || { bad "abbild.sh"; tail -10 "$OUT/abbild.log"; exit 1; }
@@ -198,7 +198,7 @@ lauf_wig() { # <name> <url> <extraargs,mit,komma> <warte>
 }
 
 echo
-echo "== 5. eine echte Seite, im Fenster =="
+echo "== 5. a real page, in the window =="
 lauf_wig seite "http://10.0.2.2:$PORT/i.htm" ",--dump=/tmp/s.ppm" 18
 hat "$OUT/seite.txt" "k15: start /bin/certus" "der Kern hat /bin/certus im Fensterserver gestartet"
 BP=$(grep -oaE 'wig: blits=[0-9]+' "$OUT/seite.txt" | tail -1 | cut -d= -f2)
@@ -207,7 +207,7 @@ num "WIG_BLIT: Aufrufe aus Ring 3" "$BP" ge 1
 num "Bildpunkte, die wirklich ins Fenster geschoben wurden" "$PX" ge 300000
 python3 tools/osum/mkfs.py cat "$OUT/seite.img" /tmp/s.ppm > "$OUT/seite.ppm" 2>/dev/null
 if [ -s "$OUT/seite.ppm" ]; then
-    ok "Certus hat seinen Abzug auf die Platte des Gastes geschrieben ($(stat -c%s "$OUT/seite.ppm") Oktette)"
+    ok "Certus wrote its dump to the guest's disk ($(stat -c%s "$OUT/seite.ppm") Oktette)"
     python3 tools/certus/pixel.py "$OUT/seite.ppm" --json "$OUT/seite.json" | sed 's/^/        /'
     T=$(python3 -c "import json;print(json.load(open('$OUT/seite.json'))['tintenpunkte'])")
     D=$(python3 -c "import json;print(json.load(open('$OUT/seite.json'))['dunkle_punkte'])")
@@ -218,7 +218,7 @@ if [ -s "$OUT/seite.ppm" ]; then
     mkdir -p "$SHOTS"
     python3 tools/certus/pixel.py "$OUT/seite.ppm" --png "$SHOTS/leinwand.png" >/dev/null
 else
-    bad "kein Abzug auf der Platte"
+    bad "no dump on the disk"
 fi
 if [ -s "$OUT/seite.png" ]; then
     mkdir -p "$SHOTS"; cp -f "$OUT/seite.png" "$SHOTS/fenster.png"
@@ -228,11 +228,11 @@ im = Image.open('$OUT/seite.png').convert('RGB')
 print(len(im.getcolors(1 << 24) or []))")
     num "Bildschirmfoto: verschiedene Farben (ein leerer Schirm hat zwei)" "$FARBEN" ge 50
 else
-    bad "kein Bildschirmfoto der Seite"
+    bad "no screenshot of the page"
 fi
 
 echo
-echo "== 6. eine Seite mit JavaScript =="
+echo "== 6. a page with JavaScript =="
 lauf_wig js "http://10.0.2.2:$PORT/j.htm" ",--dump=/tmp/j.ppm" 18
 python3 tools/osum/mkfs.py cat "$OUT/js.img" /tmp/j.ppm > "$OUT/js.ppm" 2>/dev/null
 if [ -s "$OUT/js.ppm" ]; then
@@ -246,11 +246,11 @@ if [ -s "$OUT/js.ppm" ]; then
     mkdir -p "$SHOTS"
     python3 tools/certus/pixel.py "$OUT/js.ppm" --png "$SHOTS/javascript.png" >/dev/null
 else
-    bad "die JS-Seite hat keinen Abzug geliefert"
+    bad "the JS page delivered no dump"
 fi
 
 echo
-echo "== 7. Zeit bis Bild =="
+echo "== 7. time to picture =="
 #
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/zeit.img"
 LADEN_PLATTE="$OUT/zeit.img" LADEN_KILL=ja LADEN_WARTE=15 \
@@ -274,18 +274,18 @@ done
 wait "$zpid" 2>/dev/null
 if [ "$t_start" != 0 ] && [ "$t_bild" != 0 ]; then
     MS=$((t_bild - t_start))
-    ok "Zeit vom Programmstart bis zum fertigen Bild: ${MS} ms"
+    ok "time from program start to finished picture: ${MS} ms"
     echo "$MS" > "$OUT/zeit-ms.txt"
     num "das Bild kam ueberhaupt (ms)" "$MS" gt 0
 else
-    bad "kein Bild -- Start gefunden: $t_start, Bild: $t_bild"
+    bad "no picture -- start found: $t_start, picture: $t_bild"
 fi
 HOEHE=$(grep -oaE '^HOEHE [0-9]+' "$OUT/zeit.txt" | head -1 | awk '{print $2}')
 num "die Dokumenthoehe, die Certus ausgerechnet hat (Bildpunkte)" "$HOEHE" ge 100
 rm -f "$OUT/zeit.img"
 
 echo
-echo "== 8. $SOAK Laeufe ohne Panik =="
+echo "== 8. $SOAK runs without panic =="
 #
 PAR=${CERTUS_PAR:-4}
 panik=0; lief=0; ohne=0
@@ -315,7 +315,7 @@ while [ "$i" -le "$SOAK" ]; do
         grep -aE 'panic|PANIK|user fault|kernel fault' "$OUT/$n.txt" | head -2 | sed 's/^/          /'
     fi
     grep -qa 'k15: start /bin/certus' "$OUT/$n.txt" 2>/dev/null || {
-        ohne=$((ohne + 1)); echo "        Lauf $i: certus kam nicht hoch"; }
+        ohne=$((ohne + 1)); echo "        run $i: certus did not come up"; }
     rm -f "$OUT/$n.img" "$OUT/$n.ppm"
     i=$((i + 1))
 done
@@ -324,7 +324,7 @@ num "Laeufe mit Panik" "$panik" eq 0
 num "Laeufe, in denen der Browser nicht hochkam" "$ohne" eq 0
 
 echo
-echo "== 9. aus dem Laden installiert =="
+echo "== 9. installed from the store =="
 cp --sparse=always -f "$OUT/platte/disk.img" "$OUT/store.img"
 LADEN_PLATTE="$OUT/store.img" bash tools/loader/lauf.sh store \
     "osum vfs nokbd nosched noproc nofs noring3 script=opk install /store/certus-1.opk;opk list;exit" \
