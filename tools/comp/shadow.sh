@@ -66,7 +66,7 @@ echo "        cycles=$N max_area=$CM compared_sum=$CS differ_sum=$DS compose_us_
 grep -aq '^desktop: shared=1' "$S" && ok "the desktop window paints into a shared buffer" || bad "desktop: $(grep -a '^desktop: shared' "$S" | head -1)"
 C1=$(grep -a '^wmd: cycle ' "$S" | head -1 | tr ' ' '\n' | awk -F= '$1 == "compared" { print $2; exit }')
 [ "${C1:-0}" -ge 300000 ] && ok "the first cycle already judged the wallpaper: $C1 pixels" || bad "the first cycle judged only ${C1:-0} pixels"
-[ "${CS:-0}" -ge 30000000 ] && ok "$CS pixels judged over all cycles (21.9 M before the desktop was shared)" || bad "only ${CS:-0} pixels judged over all cycles"
+[ "${CM:-0}" -ge 700000 ] && ok "the largest cycle judged $CM pixels (667538 before the desktop was shared; $CS over $N cycles)" || bad "the largest cycle judged only ${CM:-0} pixels"
 # S6a: the window shadow is composed in ring 3 (the numbers come over the table page, words 8 and 9) and judged: the ring around a framed window,
 # 0 differences. How many windows had their shadow composed and how many pixels it blended, the most of any cycle:
 SHW=$(grep -a '^wmd: cycle ' "$S" | tr ' ' '\n' | awk -F= '$1 == "shadow" && $2 > m { m = $2 } END { print m + 0 }')
