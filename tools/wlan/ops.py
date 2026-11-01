@@ -103,8 +103,8 @@ def check_seq(hw):
     ok(le(tx, 4 + 4, 4) == 0x2008 and le(tx, 4 + 12, 4) == 0x400D, "TX_CMD flags ACK|SEQ_CTL, 6M OFDM rate")
     if hw:
         k1, k2 = c[9], c[10]
-        ok(k1[4 + 4:4 + 20] == bytes([0x55] * 16) and le(k1, 4 + 2, 2) == 0x0002, "ADD_STA_KEY pairwise: key bytes, CCMP, unicast")
-        ok(le(k2, 4 + 2, 2) == 0x4102 and k2[4 + 1] == 2, "ADD_STA_KEY group: multicast, key id 1")
+        ok(k1[4 + 4:4 + 20] == bytes([0x55] * 16) and le(k1, 4 + 2, 2) == 0x000A, "ADD_STA_KEY pairwise: key bytes, CCMP, unicast")
+        ok(le(k2, 4 + 2, 2) == 0x410A and k2[4 + 1] == 2, "ADD_STA_KEY group: multicast, key id 1")
     rx = [l for l in out if l.startswith("rx ")][0].split()
     ok(rx[1] == "30" and rx[3] == "-60" and rx[5] == "1", "RX: frame 30 octets, rssi -60, scan still running")
     ok(bytes.fromhex(rx[6]) == frame, "RX frame handed over unchanged")
@@ -226,5 +226,42 @@ check_lq()
 check_diag()
 check_eapol()
 check_parse()
+
+def check_variants():
+    print("== data path variants (wlhwc, wlplain, wlsta, wldq) ==")
+    for name in ("base", "hwc", "plain", "sta", "dq"):
+        hwc = name == "hwc"
+        out = run([name])
+        c = cmds(out)
+        ids = [x[0] for x in c]
+        tx = [x for x in c if x[0] == 0x1C]
+        rc = [l for l in out if l.startswith("rc ")][0].split()
+        ok(rc[1:7] == ["0", "0", "0", "0", "0", "40"], "%s: all operations returned 0: %s" % (name, " ".join(rc[1:])))
+        ok(rc[7] == ("1" if name in ("hwc", "plain") else "0"), "%s: clear-frame path flag %s" % (name, rc[7]))
+        ok(ids.count(0x17) == (2 if hwc else 0), "%s: ADD_STA_KEY count %d" % (name, ids.count(0x17)))
+        ok(len(tx) == 1, "%s: one data frame" % name)
+        t = tx[0]
+        sec = t[4 + 17]
+        tid = t[4 + 51]
+        ln = le(t, 4, 2)
+        fc1 = t[4 + 56 + 1]
+        if hwc:
+            ok(sec == 2 and t[4 + 20:4 + 36] == bytes([0x55] * 16), "hwc: TX_CMD sec_ctl CCM with the pairwise key")
+            ok(ln == 48 and fc1 == 0x41, "hwc: frame grew by the 8-octet CCMP header, protected bit set")
+            ok(t[4 + 56 + 24:4 + 56 + 32] == bytes([1, 0, 0, 0x20, 0, 0, 0, 0]), "hwc: CCMP header carries PN 1 and the ExtIV bit")
+            ok(t[4 + 56 + 32:4 + 56 + 40] == bytes([0xAA, 0xAA, 3, 0, 0, 0, 8, 0]) and t[4 + 56 + 40] == 0x11 and t[4 + 56 + 47] == 0x22, "hwc: payload moved behind the CCMP header unchanged")
+            k1 = [x for x in c if x[0] == 0x17]
+            ok(le(k1[0], 4 + 2, 2) == 0x000A and le(k1[1], 4 + 2, 2) == 0x410A, "hwc: key flags carry CCM, WEP_KEY_MAP, key id, multicast")
+        else:
+            ok(sec == 0 and ln == 40 and fc1 == 0x01, "%s: frame sent as handed over, no security" % name)
+        ok(tid == (0 if name == "dq" else 8), "%s: TX tid %d" % (name, tid))
+        sta = [x for x in c if x[0] == 0x18]
+        ok(len(sta) == 2, "%s: two ADD_STA commands" % name)
+        want = (0xFFFF, 0x3C020000) if name == "sta" else (0, 0)
+        ok(all((le(x, 4 + 2, 2), le(x, 4 + 24, 4)) == want for x in sta), "%s: ADD_STA tid_disable_tx / station_flags_msk %s" % (name, str(want)))
+
+
+check_variants()
+
 print("RESULT pass=%d fail=%d" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

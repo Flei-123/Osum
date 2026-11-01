@@ -5,6 +5,7 @@ import wlan.iwl_buf
 import wlan.iwl_le
 import wlan.iwl_fwcaps
 import wlan.iwl_mvm
+import wlan.iwl_mvm_crypt
 import wlan.iwl_mvm_ctx
 import wlan.iwl_mvm_rs
 import wlan.iwl_mvm_scan
@@ -16,7 +17,7 @@ import wlan.iwl_mvm_txq
 export {
     Mvm, Transport, mvm_new, ops_attach, ops_setup, ops_scan_start, ops_scan_state,
     ops_peer_add, ops_peer_remove, ops_associated, ops_poll_one, ops_rssi, ops_rx_channel,
-    ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_set_queues, ops_set_address,
+    ops_keys_sent, ops_cmd_count, ops_set_hw_crypto, ops_sync_board, ops_set_queues, ops_set_address,
     ops_default_channels, ops_set_caps, ops_caps,
     ops_fail_step, ops_fail_rc, ops_fail_cmd, ops_ok_steps,
     STEP_NONE, STEP_PHY_CTX, STEP_MAC_CTX, STEP_BINDING, STEP_SCAN_CFG, STEP_SCAN_REQ, STEP_AUX_STA,
@@ -76,6 +77,8 @@ struct Mvm {
     tx_queue: u64,
     slot: u64,
     hw_crypto: bool,
+    ptk: [u8; 16],
+    tx_pn: u64,
     ctx_ready: bool,
     peer_added: bool,
     lq_sent: bool,
@@ -104,7 +107,7 @@ fn mvm_new() -> Mvm {
     var o: Mvm = Mvm {
         tr: Transport { submit: dead_submit, poll: dead_poll },
         tctx: 0, mac: [0; 6], bssid: [0; 6], channel: 1,
-        cmd_queue: 0, tx_queue: 2, slot: 0, hw_crypto: false,
+        cmd_queue: 0, tx_queue: 2, slot: 0, hw_crypto: false, ptk: [0; 16], tx_pn: 0,
         ctx_ready: false, peer_added: false, lq_sent: false, ptk_set: false, queue_msk: iwl_mvm_txq.QUEUE_MSK_LEGACY,
         scan_state: 0, scan_uid: 0, scan_status: 0,
         rssi: 0, rx_channel: 0, cmds: 0, keys_sent: 0,
@@ -125,6 +128,10 @@ fn ops_set_caps(o: *mut Mvm, w: *mut u64) {
 fn ops_caps(o: *mut Mvm) -> *mut u64 { return (&(*o).caps[0]) as *mut u64 }
 
 fn ops_set_hw_crypto(o: *mut Mvm, on: bool) { (*o).hw_crypto = on }
+fn quirk_on(o: *mut Mvm, q: u64) -> bool { return iwl_fwcaps.caps_quirk(ops_caps(o), q) }
+fn hwc_on(o: *mut Mvm) -> bool { return (*o).hw_crypto || quirk_on(o, iwl_fwcaps.Q_HWC) }
+fn clear_path(o: *mut Mvm) -> bool { return hwc_on(o) || quirk_on(o, iwl_fwcaps.Q_PLAIN) }
+fn ops_sync_board(g: *mut device.Device, o: *mut Mvm) { device.ccmp_capable_set(g, clear_path(o)) }
 fn ops_set_queues(o: *mut Mvm, cmd_queue: u64, tx_queue: u64) {
     (*o).cmd_queue = cmd_queue
     (*o).tx_queue = tx_queue
@@ -187,7 +194,7 @@ fn ops_attach(g: *mut device.Device, o: *mut Mvm, tctx: u64,
     (*o).tr = Transport { submit: submit_fn, poll: poll_fn }
     (*o).tctx = tctx
     let ok: bool = device.board_set(g, o as u64, o_send, o_receive,
-        o_channel, o_key, (*o).hw_crypto)
+        o_channel, o_key, clear_path(o))
     if ok { device.addr_set(g, mac_addr(o)) }
     return ok
 }
@@ -257,6 +264,15 @@ fn scan_cfg_cmd(o: *mut Mvm) -> i64 {
         flags, 3, 3, SCAN_CFG_RATES, 0, 0, 10, 110, 44, 90, mac_addr(o), STA_AUX, SCAN_CFG_CHAN_FLAGS,
         (&chans[0]) as u64, n)
     return submit_long(o, scan_cfg_pad(o, len, n))
+}
+
+const STA_TID_DISABLE_ALL: u64 = 0xFFFF
+const STA_FLAGS_MSK_LINUX: u64 = 0x3C020000
+
+fn sta_tune(o: *mut Mvm) {
+    if !quirk_on(o, iwl_fwcaps.Q_STA) { return }
+    iwl_le.st16(cmd_addr(o), iwl_buf.HDR + 2, STA_TID_DISABLE_ALL)
+    iwl_le.st32(cmd_addr(o), iwl_buf.HDR + 24, STA_FLAGS_MSK_LINUX)
 }
 
 fn sta_len(o: *mut Mvm, n: u64) -> u64 {
@@ -437,6 +453,7 @@ fn ops_peer_add(o: *mut Mvm, bssid: u64) -> i64 {
     (*o).queue_msk = msk
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 0,
         iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, 0, msk)
+    sta_tune(o)
     let r: i64 = submit(o, sta_len(o, n))
     if r < 0 { return r }
     (*o).peer_added = true
@@ -449,6 +466,7 @@ fn ops_associated(o: *mut Mvm, aid: u64) -> i64 {
     if !(*o).peer_added { return E_OPS_STATE }
     let n: u64 = iwl_mvm.mvm_add_sta(cmd_addr(o), (*o).cmd_queue, next_slot(o), 1,
         iwl_mvm_ctx.mvm_id_color(MAC_ID, 0), bssid_addr(o), STA_AP, 0, 0, aid, (*o).queue_msk)
+    sta_tune(o)
     let r: i64 = submit(o, sta_len(o, n))
     if r < 0 { return r }
     let m: i64 = mac_cmd(o, iwl_mvm_ctx.CTXT_MODIFY, true, aid)
@@ -502,11 +520,20 @@ fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
     let o: *mut Mvm = ctx as *mut Mvm
     if art == device.KEY_OFF {
         (*o).ptk_set = false
-        if (*o).hw_crypto { return ops_peer_remove(o) }
+        (*o).tx_pn = 0
+        if hwc_on(o) { return ops_peer_remove(o) }
         return 0
     }
-    if art == device.KEY_PTK { (*o).ptk_set = true }
-    if !(*o).hw_crypto { return 0 }
+    if art == device.KEY_PTK {
+        (*o).ptk_set = true
+        (*o).tx_pn = 0
+        var k: usize = 0
+        while k < 16 && len >= 16 {
+            (*o).ptk[k] = *((key + k as u64) as *mut u8)
+            k = k + 1
+        }
+    }
+    if !hwc_on(o) { return 0 }
     if !(*o).peer_added { return E_OPS_STATE }
     var pn: [u8; 6] = [0; 6]
     var offset: u64 = 0
@@ -518,6 +545,7 @@ fn o_key(ctx: u64, art: u64, id: u64, key: u64, len: usize) -> i64 {
     let n: u64 = iwl_mvm.mvm_sta_key_ccmp(cmd_addr(o), (*o).cmd_queue, next_slot(o), STA_AP,
         offset, id, multicast, key, (&pn[0]) as u64)
     (*o).keys_sent = (*o).keys_sent + 1
+    if !iwl_fwcaps.caps_tkip_mic(ops_caps(o)) { return submit(o, iwl_buf.HDR + 64) }
     return submit(o, n)
 }
 
@@ -539,6 +567,14 @@ fn o_send(ctx: u64, frame_ptr: u64, len: usize) -> i64 {
     var sec: u64 = 0
     var keyp: u64 = 0
     if (*o).hw_crypto && frame.geschuetzt(fcv) { sec = 1 }
+    var protect: bool = false
+    if quirk_on(o, iwl_fwcaps.Q_HWC) && (*o).ptk_set && frame.art(fcv) == frame.KIND_DATA && !frame.geschuetzt(fcv) && hl != 0 && !iwl_mvm_crypt.tx_is_eapol(frame_ptr, len as u64, hl) {
+        protect = true
+        sec = iwl_mvm_crypt.SEC_CCM
+        keyp = (&(*o).ptk[0]) as u64
+    }
+    var flen: u64 = len as u64
+    if protect { flen = flen + iwl_mvm_crypt.CCMP_HDR }
     var offload: u64 = 0
     var tid: u64 = 0
     var pm_timeout: u64 = 0
@@ -547,16 +583,23 @@ fn o_send(ctx: u64, frame_ptr: u64, len: usize) -> i64 {
         tid = iwl_mvm_tx.tx_tid_of(frame_ptr, len)
         pm_timeout = iwl_mvm_tx.tx_pm_timeout_of(frame_ptr, len, hl)
     }
+    if quirk_on(o, iwl_fwcaps.Q_DQ) && frame.art(fcv) == frame.KIND_DATA { tid = 0 }
     var rate: u64 = RATE_6M_OFDM
     if sta_rate_ok(o, fcv) {
         flags = flags | iwl_mvm_tx.TX_FLG_STA_RATE
         rate = 0
     }
-    let total: u64 = iwl_mvm_tx.mvm_tx_cmd(cmd_addr(o), (*o).tx_queue, next_slot(o), offload, flags,
+    var total: u64 = iwl_mvm_tx.mvm_tx_cmd(cmd_addr(o), (*o).tx_queue, next_slot(o), offload, flags,
         rate, STA_AP, sec, 0, keyp, 0xFFFFFFFF, 0, 60, 15, tid, pm_timeout, frame_ptr, len as u64)
+    if protect {
+        (*o).tx_pn = (*o).tx_pn + 1
+        iwl_mvm_crypt.tx_protect(cmd_addr(o) + iwl_mvm_tx.TX_CMD_LEN, hl, len as u64, (*o).tx_pn)
+        iwl_le.st16(cmd_addr(o), iwl_buf.HDR, flen)
+        total = total + iwl_mvm_crypt.CCMP_HDR
+    }
     if pad != 0 {
         let base: u64 = iwl_mvm_tx.TX_CMD_LEN
-        var i: u64 = len as u64
+        var i: u64 = flen
         while i > hl {
             iwl_le.st8(cmd_addr(o), base + i + pad - 1, iwl_le.ld8(cmd_addr(o), base + i - 1))
             i = i - 1
@@ -623,6 +666,7 @@ fn ops_poll_one(o: *mut Mvm, out: u64, room: usize) -> i64 {
         let bytes: u64 = iwl_le.ld16(a, h)
         if bytes == 0 || h + 4 + bytes > (n as u64) || (bytes as usize) > room { return -2 }
         iwl_le.copy(out, a + h + 4, bytes)
+        if quirk_on(o, iwl_fwcaps.Q_HWC) && (*o).ptk_set { return iwl_mvm_crypt.rx_unprotect(out, bytes) as i64 }
         return bytes as i64
     }
     return -2

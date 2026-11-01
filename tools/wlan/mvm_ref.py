@@ -6,7 +6,7 @@ mac = bytes([0x02, 0x11, 0x22, 0x33, 0x44, 0x55])
 key = bytes(0xA0 + i for i in range(16))
 pn = bytes([1, 0, 0, 0, 0, 0])
 def sta_key(q, slot, sta, off, keyid, mc):
-    fl = 2 | (keyid << 8) | (0x4000 if mc else 0)
+    fl = 2 | 8 | (keyid << 8) | (0x4000 if mc else 0)
     common = struct.pack('<BBH', sta, off, fl) + key.ljust(32, b'\0') + pn.ljust(16, b'\0')
     return hdr(0x17, q, slot) + common + struct.pack('<QQQ', 0, 0, 0)
 out = {}
