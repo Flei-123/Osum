@@ -203,7 +203,7 @@ def klasse(name, inhalt, zeilen, nr, code, fenster, kern, fest):
     feld = False
     if name != '-':
         wieerst = re.compile(
-            r'(?:sag|sagn|kv|kvs|kvt|say_line|h_claim)\s*\(\s*\(?\s*&%s\s*\['
+            r'(?:sag|sagn|kv|kvs|kvt|say_line|h_claim|emit|say|say_kt|say_kv)\s*\(\s*\(?\s*&%s\s*\['
             % re.escape(name))
         feld = any(wieerst.search(z) for z in benutzt)
     if fenster or kern or feld:
