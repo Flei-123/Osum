@@ -369,7 +369,7 @@ echo "== 7. that the driver switch really took place =="
 n=0
 for f in nvme xhci usb ahci e1000 fs; do
     q=$(find kernel -name "$f.fi" -print -quit)
-    k=$(grep -ac 'klog\.' "$q" 2>/dev/null || echo 0)
+    k=$(bash tools/structure/srcview.sh "$q" 2>/dev/null | grep -ac 'klog\.' || true)
     [ "$k" -gt 0 ] && n=$((n + 1))
     printf '        %-6s %s Aufrufe der Log-Schnittstelle\n' "$f" "$k"
 done
