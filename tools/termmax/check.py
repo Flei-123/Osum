@@ -30,7 +30,9 @@ if len(cols) >= 5:
     small = cols[1]
     chk(cols[0] > 150 and cols[0] > small * 2, 'maximised grid is wide (%d columns vs %d)' % (cols[0], small))
     chk(cols[2] == cols[0] and cols[3] == small, 'double click maximises and restores the same grid (%d, %d)' % (cols[2], cols[3]))
-    chk(len(cols) >= 5 and cols[4] > small + 10, 'edge drag widens the grid (%d > %d)' % (cols[4], small))
+    drag = cols[4:-1] if len(cols) > 5 else cols[4:]
+    chk(max(drag) > small + 10, 'edge drag widens the grid (%d > %d, %d live rounds)' % (max(drag), small, len(drag)))
+    chk(len(cols) > 5 and abs(cols[-1] * 2 - cols[0]) <= 4, 'title drag to the left edge snaps to half the screen (%d of %d)' % (cols[-1], cols[0]))
 shells = [l for l in ser if re.search(r'sh: ready', l)]
 print('  INFO  `sh: ready` lines on the serial line: %d' % len(shells))
 print('== result ==')
