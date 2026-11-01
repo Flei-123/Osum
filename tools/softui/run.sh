@@ -81,6 +81,7 @@ if [ -s "$TMPD/B/serial.txt" ]; then
     OU=$(echo "$O" | grep -oE 'full=[0-9]+' | grep -oE '[0-9]+')
     MA=$(echo "$L" | grep -oE 'aapx=[0-9]+' | grep -oE '[0-9]+')
     RA=$(echo "$R" | grep -oE 'aapx=[0-9]+' | grep -oE '[0-9]+')
+    OA=$(echo "$O" | grep -oE 'aapx=[0-9]+' | grep -oE '[0-9]+')
     if [ -n "$MU" ] && [ -n "$RU" ] && [ -n "$OU" ]; then
         MK=$((MU - OU)); RK=$((RU - OU))
         echo "        Schatten kostet: Maske ${MK} us, Ringe ${RK} us"
@@ -92,8 +93,9 @@ if [ -s "$TMPD/B/serial.txt" ]; then
     else
         bad "no timing in the capture"
     fi
-    if [ -n "$MA" ] && [ -n "$RA" ]; then
-        le "Eckabtastungen je Bild mit der Maske" "$MA" "$((RA / 4))"
+    if [ -n "$MA" ] && [ -n "$RA" ] && [ -n "$OA" ]; then
+        le "shadow corner samples per frame with the mask (without the shadowless baseline $OA)" \
+            "$((MA - OA))" "$(((RA - OA) / 4))"
     fi
     SB=$(val "$TMPD/B/serial.txt" 'shbuild=[0-9]+')
     le "die Maske wurde je Lauf gebaut" "${SB:-99}" "1"
