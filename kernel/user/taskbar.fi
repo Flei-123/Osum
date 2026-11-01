@@ -1,74 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/taskbar.fi -- THE TASKBAR, /bin/taskbar.
-//
-// (The file was `leiste.fi` until round LOOK's addendum. Round RENAME
-// had renamed suchen/starter/wigdemo and left the three biggest files
-// of the desktop alone, because four rounds were editing them at the
-// same time. Names of files, programs and commands in Osum are
-// English; German is for the text a person reads on the screen and
-// for the comments in this tree.)
-//
-// WHAT IT SHOWS. A start button that opens `/bin/launcher`; one button
-// per ordinary window that switches to it, or minimizes it if it is
-// already the active one (`WA_TOGGLE`); and three status fields fed
-// from system calls and from nothing else: the network address
-// (`osum_netget`), the battery (`osum_pwrget`, round K18) and the
-// clock (`sysinfo`, round K9). A battery percentage that this machine
-// cannot measure is not printed as zero, it is printed as "no battery".
-//
-// ==================== WHAT THIS ADDENDUM ADDS: THE EDGE ==============
-//
-// Justin asked on 27.08.2026 whether the bar can be dragged to another
-// screen edge, the way Windows 10 could and Windows 11 no longer can.
-// It could not: `taskbar.fi` had no position at all, the bar was at the
-// bottom because `py = sh - PH` was written into the source. It can
-// now, and in the two ways one expects:
-//
-//   1. DRAG IT. Press the left button on an empty part of the bar and
-//      move the pointer towards an edge. A preview RECTANGLE follows
-//      the pointer -- four thin always-on-top windows drawn in the
-//      selection colour, which is an outline and not a filled sheet
-//      because a filled 128 x 600 window is 300 kilooctets and this
-//      process has 832 for everything. Let go, and the bar is there.
-//   2. SET IT. /bin/settings, page "Darstellung".
-//
-//   BOTH WRITE THE SAME FILE, /etc/taskbar.conf, and neither keeps a
-//   second copy of the answer anywhere:
-//
-//       edge=bottom       bottom | top | left | right
-//       height=28         thickness of a HORIZONTAL bar
-//       width=104         thickness of a VERTICAL bar
-//       autohide=0        1 = slide out until the pointer touches the edge
-//       ontop=1           1 = always above ordinary windows
-//
-//   Two thickness keys and not one, because they are two different
-//   numbers: 28 pixels is a good height for a horizontal bar and a
-//   useless width for a vertical one. Windows keeps them apart for the
-//   same reason.
-//
-// A VERTICAL BAR IS NOT A ROTATED HORIZONTAL ONE. The window buttons
-// stack downwards instead of sideways, the start button sits at the
-// top, and the three status fields sit at the bottom, one above the
-// other. Each status field measures its own text (`text_w`) against the
-// width it has: if it does not fit it WRAPS onto a second line -- the
-// address 10.0.2.15 becomes "10.0." and "2.15" -- and only if even that
-// fails does it shorten, and then it reports the SHORTENED text so that
-// what the runner checks character by character is what is on screen.
-// Nothing is silently clipped.
-//
-// AND THE WORK AREA MOVES WITH IT. The bar tells the server which edge
-// it occupies (WM_STRUT, see kernel/wm.fi); the server subtracts every
-// such reservation from the screen and calls the rest the work area.
-// A maximized window fills the work area and follows it when the bar
-// moves. That is the same idea as `_NET_WM_STRUT` in X11, and it is
-// what the round TILING needs as the root rectangle of its frame tree.
-//
-// WHAT IT MAY DO AND WHY. `WM_LIST` and `WM_ACT` answer only to a
-// process that has reserved a screen edge -- that is, to a panel, and
-// reserving an edge needs root. An ordinary application gets -E_RIGHTS
-// and does not see the titles of other processes.
-
-// ================================================ RUNDE 31: profile app
 profile app
 
 import ulib
@@ -104,88 +34,45 @@ import std.rt
 
 export { u_start }
 
-// ------------------------------------------------------------ numbers
-
-const PAD0: u64 = 3 // margin between the bar edge and its contents
-const GAP0: u64 = 4 // between two elements
-const BTN_H0: u64 = 22 // height of every button, in both orientations
-const SLIVER: u64 = 2 // what is left of a hidden bar
-const REVEAL: u64 = 2 // pointer this close to the edge brings it back
-const BAND: u64 = 80 // rows of the drawing surface used at a time
+const PAD0: u64 = 3
+const GAP0: u64 = 4
+const BTN_H0: u64 = 22
+const SLIVER: u64 = 2
+const REVEAL: u64 = 2
+const BAND: u64 = 80
 const TASK_MAX: u64 = 132
 const TASK_MIN: u64 = 48
-const MAXK: u64 = 16 // that many window buttons at most (DELL ROUND: 10 -> 16, the window table has 32 slots)
-const MAXPIN: u64 = 10 // r384: 6 -> 10 (the reference bar has a row of them)
+const MAXK: u64 = 16
+const MAXPIN: u64 = 10
 
-const PREV_T: u64 = 3 // thickness of the preview outline
+const PREV_T: u64 = 3
 
-// ================================== ROUND LOOK: WHERE THE BUTTONS SIT
-//
-// Windows 11 centres the start button and the window buttons and leaves
-// the status corner where it was.  Windows 10 and everything before it
-// put them at the left.  Both are defensible and neither is a law, so
-// this is a SETTING and not a redesign -- `align=` in
-// /etc/taskbar.conf, and the DEFAULT IS `left`, because a round that
-// moves a user's start button without being asked has broken something
-// that was not broken.
-//
-// WHAT IS CENTRED AND WHAT IS NOT. The start button and the window
-// buttons are one group and they move together; the three status
-// fields do NOT move.  That is not an imitation of Windows for its own
-// sake, it is the only arrangement that survives a window opening: a
-// centred group grows from the middle outwards, and if the clock were
-// part of it, the clock would jump sideways every time a program
-// started.  A corner does not move.
-//
-// AND IT WORKS ON A VERTICAL BAR TOO, where "centre" means centred in
-// the HEIGHT between the top edge and the topmost status field.  A
-// setting that silently does nothing in one of four configurations is
-// worse than no setting.
 const AL_LEFT: u64 = 0
 const AL_CENTER: u64 = 1
 
-// The limits of the two thicknesses. They are limits and not
-// suggestions: `win_size` cannot grow the window past the buffer it was
-// created with, and that buffer is V_MAX * screen height.
 const H_MIN0: u64 = 20
-// 48 = the height of the Windows 11 bar (W3 polish run); was 40.
+
 const H_MAX0: u64 = 48
 const V_MIN: u64 = 56
 const V_MAX: u64 = 128
 const DEF_H0: u64 = 28
 const DEF_V: u64 = 104
 
-// The status fields, bottom-up in a vertical bar and right to left in
-// a horizontal one.
-//
-// ROUND TON-2 ADDED THE VOLUME, and it sits BEFORE the battery on
-// purpose: the order here is the order on the bar, and every system
-// that has both puts the speaker next to the clock, not out at the
-// edge. It follows the same rule as the two before it -- NO SOUND
-// CARD, NO FIELD (`snd_da`), because a symbol stands for something the
-// machine HAS.
 const F_NET: u64 = 0
 const F_SND: u64 = 1
 const F_BAT: u64 = 2
 const F_CLK: u64 = 3
 const F_NOTI: u64 = 4
-// r384: the sixth field, the LANGUAGE of the keyboard and the interface, two
-// lines like in Windows 11 ("DEU" over "DE"). Only with `tray_language=1`
-// in /etc/taskbar.conf (default: off, so that no existing bar moves).
+
 const F_LANG: u64 = 5
-// Remote-control sign: a red field that is there ONLY while input from
-// outside (the JARVIS bridge) is flowing or was a moment ago. It sits at
-// the end of the chain (far left on a bottom bar), next to the windows.
+
 const F_REM: u64 = 6
 const F_N: u64 = 7
-// The kernel call that tells the truth (SYS_OSUM_TIPP / TI_INFO / TQ_RECENT).
+
 const RM_SYS: u64 = 1843
 const RM_INFO: u64 = 0
 const RM_RECENT: u64 = 8
 
-// The calls this bar needs besides the window server.
-// ROUND TON-2: the sound interface. Same numbers as /bin/play,
-// /bin/qs and kernel/sys.fi -- one way to a thing, not two.
 const SYS_AUDGET: u64 = 1850
 const SYS_AUDSET: u64 = 1851
 const AS_MUTE: u64 = 2
@@ -202,13 +89,11 @@ const SYS_PWRGET: u64 = 1750
 const PG_BATPRESENT: u64 = 24
 const PG_BATPERCENT: u64 = 25
 const PG_BATVALID: u64 = 56
-// ROUND LOOK: bit 1 is the ACPI _BST charging bit. Same number as in
-// kernel/sys.fi and kernel/user/power.fi -- the numbers are the
-// interface to ring 3 and this bar does not invent a second one.
+
 const PG_BATSTATE: u64 = 27
-// L-006 / r782: mains adapter (1 = plugged). Same number as kernel/user/powerd.fi.
+
 const PG_AC: u64 = 34
-// ============================== RUNDE ACPI-EREIGNISSE
+
 const PG_EVREADY: u64 = 45
 const PG_LID: u64 = 48
 const PG_EVCHANGE: u64 = 53
@@ -222,65 +107,21 @@ const BAT_CRIT: u64 = 10
 const SYS_NETGET: u64 = 1300
 const NG_READY: u64 = 0
 const NG_IP: u64 = 1
-// ROUND NETVIEW, addendum.
+
 const NG_MASK: u64 = 2
 const NG_GW: u64 = 3
 const NG_STATE: u64 = 8
-// ROUND NETVIEW, second addendum: the systemwide fallback. Asked
-// through NETVGET, which anybody may ask about anything -- see
-// `sys.do_netvget`; a bar that could not read it could not be honest
-// about it.
+
 const SYS_NETVGET: u64 = 1310
 const NV_FALLBACK: u64 = 13
 const NV_FBVIEW: u64 = 14
 
-// The two icon sets. `/etc/netview/` is where the image puts them, and
-// a bar that does not find them falls back to text -- a missing icon
-// must not take the address off the screen with it.
 const ICON_MAX: u64 = 1100
 const MARK_MAX: u64 = 640
 const IC_W0: u64 = 16
 const MK_W0: u64 = 12
-// ROUND LOOK: the side of a status glyph. `wlibc.icon_small()` is the
-// size the icon font was cut and measured for (docs/ICONS.md: 25.0
-// solid pixels per icon at 16, against 11.4 for the runner-up), so
-// it is the size that is used, and it is written here once.
-const GL_W0: u64 = 16 // = wlibc.icon_small()
 
-// ================================ ROUND LOOK: THE SYMBOLS IN THE CORNER
-//
-// Justin looked at the booted image and said: no symbol for the battery
-// and none for the network, only text. He was right, and there were two
-// separate reasons.
-//
-//   * THE NETWORK had a symbol since round NETVIEW -- an OSYM bitmap
-//     out of /etc/netview/. The image simply did not carry the
-//     directory, so `icons_load` counted 0 and the bar fell back to
-//     text, exactly as it is supposed to. That is fixed in the image
-//     (tools/look/shot.sh) and NOT here.
-//   * THE BATTERY never had one at all. Round K18 gave the bar a
-//     percentage and round ICONS gave the system six battery glyphs,
-//     and nothing ever joined the two.
-//
-// So this round adds the glyph path, and it adds it BENEATH the OSYM
-// path and not instead of it: `tools/netview/run.sh` reads the state
-// pictures pixel by pixel out of the screenshot, and a round that
-// swapped them for something else would have broken twenty-nine
-// assertions to change a picture nobody complained about. The order is
-//
-//   1. the OSYM file from /etc/netview/  (round NETVIEW, measured there)
-//   2. the glyph from /lib/icons.ttf     (this round)
-//   3. the text alone                    (round DESKTOP, still true)
-//
-// and each step is only taken when the one before it has nothing.
-//
-// NO SYMBOL FOR SOMETHING THE MACHINE CANNOT MEASURE. The battery
-// grades come from `PG_BATPERCENT` and `PG_BATSTATE`, both out of the
-// kernel's ACPI reader; when `PG_BATPRESENT` is 0 the symbol is
-// BATTERY_ABSENT, which is a statement about the firmware's answer and
-// not a decoration for a missing one. The four network grades are the
-// four states `sys.NG_STATE` already computes -- this bar does not ask
-// three questions and draw its own conclusion.
+const GL_W0: u64 = 16
 
 fn pad() -> u64 {
     return wlibc.space(0)
@@ -298,10 +139,7 @@ fn btn_h() -> u64 {
     } else {
         raum = thick
     }
-    // Windows 11 bar (48 px): the buttons are 40 px squares with 4 px air
-    // above and below, the 24 px program symbols sit in them. Only a
-    // horizontal bar of 48 points or more grows its buttons; every bar
-    // that is smaller keeps exactly the size it had.
+
     if vertical == 0 && thick >= 48 * wlibc.ui_scale() && h < raum {
         h = raum
     }
@@ -350,13 +188,10 @@ fn start_w() -> u64 {
 }
 
 fn gl_w() -> u64 {
-    // R-RASTER (Windows 11 tray): EVERY tray symbol is 16 points (times the screen
-    // scale), whatever the bar's thickness; the cells around them are all alike.
+
     return GL_W0 * wlibc.ui_scale()
 }
 
-// R-RASTER: one cell = symbol + `tr_pad` of air on both sides; a field that also shows
-// text puts the text behind `tr_icx` (4 points of the old left margin stay in `x + 4`).
 fn tr_pad() -> u64 {
     return 4 * wlibc.ui_scale()
 }
@@ -369,13 +204,10 @@ fn tr_icx() -> u64 {
     return gl_w() + 2 * tr_pad() - 4
 }
 
-// W-C1: the air at each side of a TEXT-only tray cell (language, clock). The cell is `measured text
-// width + 2 * fld_pad`, so the text can never touch or pass the cell's edge, at any screen scale.
 fn fld_pad() -> u64 {
     return 6 * wlibc.ui_scale()
 }
 
-// the network picture (OSYM) only when there is no icon font: the tray draws glyphs
 fn net_pic() -> u64 {
     if glyphs_ok() {
         return 0
@@ -391,12 +223,6 @@ fn mk_w() -> u64 {
     return MK_W0 * wlibc.ui_scale()
 }
 
-// ROUND TON-2: THE VOLUME, AS A SHAPE.
-//
-// Three steps and a cross, and the thresholds are the same idea as the
-// battery's four: at sixteen pixels a number cannot be read, an
-// outline can. Muted is its OWN shape and not a colour -- "silent" has
-// to be visible to someone who cannot separate grey from red.
 fn snd_icon() -> u64 {
     if snd_mute != 0 {
         return icons.VOLUME_MUTED
@@ -414,8 +240,7 @@ fn bat_icon() -> u64 {
     if bat_have == 0 || bat_unknown != 0 {
         return icons.BATTERY_ABSENT
     }
-    // r782: the state comes from fui.traypower (the same model `powerd status` prints). On mains and full
-    // (not charging) the item shows the plug; charging keeps the charging battery.
+
     if traypower.state(bat_have, bat_pct, bat_chg, bat_ac) == traypower.BV_PLUGGED {
         return icons.BATTERY_PLUG
     }
@@ -454,13 +279,6 @@ fn bat_colour() -> u64 {
     return wlibc.theme(wlibc.T_FG)
 }
 
-// The four states of the machine, as glyphs. Same four the OSYM
-// pictures draw and in the same order, because they are the same four
-// states -- `sys.NG_STATE` numbers them and nothing here renumbers them.
-//   0 no carrier  nothing plugged in        -> unplug
-//   1 no address  carrier, no address yet   -> ban
-//   2 no route    address, no way out       -> cloud-off
-//   3 online      a way out                 -> cable
 fn net_glyph(st: u64) -> u64 {
     if st == 3 {
         return icons.NETWORK_WIRED
@@ -484,23 +302,14 @@ fn net_colour(st: u64) -> u64 {
     return wlibc.theme(wlibc.C_WARNING)
 }
 
-// Is there a glyph path at all? One question, asked once per repaint,
-// so that the room reserved in `layout` and the drawing in `paint`
-// cannot disagree -- which is the bug round NETVIEW's addendum found
-// the hard way when the icon took room it had not been given.
 fn glyphs_ok() -> bool {
     return wlibc.icon_have()
 }
 
-// ------------------------------------------------------------- state
-
 static mut w_h: u64 = 0
 static mut sw: u64 = 0
 static mut sh: u64 = 0
-// r828 BAR PER HEAD. `sw`/`sh` are the size of the HEAD this instance serves (the whole screen on a plain machine),
-// `hx`/`hy` its origin in desktop pixels. `my_head` is the output index (0 = the first head that exists, also when
-// no `--head` was given); `head_on` is 1 once the window server answered with a head rectangle. The first instance
-// (no `--head`) starts the others (`heads_step`); `spawned` is a bit mask of heads that already got a bar.
+
 static mut hx: u64 = 0
 static mut hy: u64 = 0
 static mut my_head: u64 = 0
@@ -509,41 +318,40 @@ static mut head_on: u64 = 0
 static mut spawned: u64 = 0
 static mut asc: u64 = 0
 
-// the configuration, and nothing else in this file decides these five
 static mut cf_edge: u64 = 0
 static mut cf_align: u64 = AL_LEFT
 static mut cf_height: u64 = 28
 static mut cf_width: u64 = 104
 static mut cf_autohide: u64 = 0
 static mut cf_ontop: u64 = 1
-// RUNDE STARTKNOPF: die Uhr.
-static mut cf_sec: u64 = 0 // Sekunden mitzeigen
-static mut cf_date: u64 = 0 // Datum mitzeigen
-static mut cf_wday: u64 = 0 // Wochentag mitzeigen
+
+static mut cf_sec: u64 = 0
+static mut cf_date: u64 = 0
+static mut cf_wday: u64 = 0
 static mut cf_clines: u64 = 1
 const LB_NEVER: u64 = 0
 const LB_ALWAYS: u64 = 1
 const LB_ROOM: u64 = 2
 static mut cf_labels: u64 = LB_ROOM
 static mut cf_hidemissing: u64 = 1
-// r384: the Windows 11 corner: the language field, the four-digit year.
+
 static mut cf_lang: u64 = 0
 static mut cf_year4: u64 = 0
-// W-C1: `clock_12h=1` shows the time as "11:34 AM" (default 0 = 24 h)
+
 static mut cf_12h: u64 = 0
-// W-C1: the tray field under the pointer (F_* number, 255 = none); only that one gets a hover plate
+
 static mut hot_f: u64 = 255
-// W-TBHOVER: the button under the pointer (0 none, 1 start, 2 chevron, 3 task view, 100+i pin, 200+i window), times 2, plus 1 while the left button is down; only a change repaints
+
 static mut hot_b: u64 = 0
-// r387 (Windows 11 layout, rest): all four are OFF by default.
-static mut cf_tv: u64 = 0 // task view button after the start button
-static mut cf_chev: u64 = 0 // tray chevron: icons only <-> the texts
-// gate/diagnostic: `tray_demo=<1..101>` fakes battery (value-1 %) + volume (value-1 %), `tray_demochg=1` = charging
+
+static mut cf_tv: u64 = 0
+static mut cf_chev: u64 = 0
+
 static mut cf_demo: u64 = 0
 static mut cf_demochg: u64 = 0
-static mut cf_group: u64 = 0 // network, sound, battery as ONE capsule, icons only
-static mut cf_badge: u64 = 0 // 0 = off, N = a count on a pinned program with N or more windows (2 is the usual one)
-static mut chev_open: u64 = 0 // 1 = the chevron has opened the tray: texts are shown
+static mut cf_group: u64 = 0
+static mut cf_badge: u64 = 0
+static mut chev_open: u64 = 0
 static mut tv_x: u64 = 0
 static mut tv_y: u64 = 0
 static mut tv_w: u64 = 0
@@ -556,7 +364,6 @@ static mut grp_x: u64 = 0
 static mut grp_w: u64 = 0
 static mut cf_from_file: u64 = 0
 
-// the geometry derived from it
 static mut vertical: u64 = 0
 static mut thick: u64 = 28
 static mut bar_x: u64 = 0
@@ -569,7 +376,6 @@ static mut win_w: u64 = 800
 static mut win_h: u64 = 28
 static mut shown: u64 = 1
 
-// the layout
 static mut st_x: u64 = 0
 static mut st_y: u64 = 0
 static mut st_w: u64 = 0
@@ -579,13 +385,13 @@ static mut f_y: [u64; 7] = [0 as u64; 7]
 static mut f_w: [u64; 7] = [0 as u64; 7]
 static mut f_h: [u64; 7] = [0 as u64; 7]
 static mut f_lines: [u64; 7] = [0 as u64; 7]
-static mut f_txt: [u8; 448] = [0 as u8; 448] // 7 fields x 2 lines x 32
+static mut f_txt: [u8; 448] = [0 as u8; 448]
 const SYS_KBD: u64 = 1703
 const KB_GET: u64 = 0
 
-static mut f_full: [u8; 224] = [0 as u8; 224] // 7 fields x 32, unshortened
+static mut f_full: [u8; 224] = [0 as u8; 224]
 const PB_MAX: u64 = 8
-static mut pb_txt: [u8; 256] = [0 as u8; 256] // PB_MAX x 32
+static mut pb_txt: [u8; 256] = [0 as u8; 256]
 static mut pb_x: [u64; 8] = [0 as u64; 8]
 static mut pb_y: [u64; 8] = [0 as u64; 8]
 static mut pb_w: [u64; 8] = [0 as u64; 8]
@@ -594,7 +400,7 @@ static mut pb_slots: u64 = 0
 static mut pb_sum: u64 = 0
 static mut kx: [u64; 16] = [0 as u64; 16]
 static mut kapp: [u8; 384] = [0 as u8; 384]
-static mut pinname: [u8; 240] = [0 as u8; 240] // MAXPIN * 24
+static mut pinname: [u8; 240] = [0 as u8; 240]
 static mut npin: u64 = 0
 static mut pinwin: [u64; 10] = [0 as u64; 10]
 static mut px_: [u64; 10] = [0 as u64; 10]
@@ -608,26 +414,18 @@ static mut kh: [u64; 16] = [0 as u64; 16]
 static mut kid: [u64; 16] = [0 as u64; 16]
 static mut kver: [u64; 16] = [0 as u64; 16]
 static mut kfok: [u64; 16] = [0 as u64; 16]
-// WINDOW GROUPING (Windows 11): windows of one program (same WL_APP name) are ONE button. `kcnt` = windows in the group, `kmem` = their ids
-// (8 per group, in slot order). The window the button stands for (kid / kfok / ktit) is the focused one, else the first.
+
 static mut kcnt: [u64; 16] = [0 as u64; 16]
 static mut kmem: [u64; 128] = [0 as u64; 128]
-// ROUND NETVIEW: the network view of the process each window belongs to.
+
 static mut knv: [u64; 16] = [0 as u64; 16]
 static mut ktit: [u8; 640] = [0 as u8; 640]
 static mut klab: [u8; 640] = [0 as u8; 640]
 static mut nk: u64 = 0
 
-// ROUND NETVIEW, addendum: the pictures, read once at start. Four
-// states of 16x16 and three marks of 12x12, in the order the kernel
-// (`sys.NS_*`) and `kernel/netview.fi` (`V_*`) count them.
 static mut ic_buf: [u8; 4400] = [0 as u8; 4400]
 static mut mk_buf: [u8; 1920] = [0 as u8; 1920]
-// SECOND ADDENDUM: the sign for "the machine is faking". Its own
-// buffer, because it is neither a state icon nor a window mark -- it
-// stands NEXT to the state icon and says something about the machine
-// that the four states cannot: a machine can be genuinely online AND
-// faking a network for every new program at the same time.
+
 static mut sy_buf: [u8; 640] = [0 as u8; 640]
 static mut ic_ok: u64 = 0
 static mut mk_ok: u64 = 0
@@ -635,22 +433,16 @@ static mut sy_ok: u64 = 0
 static mut ic_files: u64 = 0
 static mut ic_min: u64 = 0
 static mut net_state: u64 = 0
-// ROUND LOOK: what the battery is doing, as the two numbers the kernel
-// gives and nothing worked out here. `bat_have` is `PG_BATPRESENT`,
-// `bat_pct` is `PG_BATPERCENT`, `bat_chg` is bit 1 of `PG_BATSTATE`
-// (the ACPI _BST charging bit). A machine that cannot answer leaves
-// them at 0 and gets the "no battery" symbol -- which is a MEASUREMENT
-// and not a guess: `PG_BATPRESENT` returning 0 means the firmware says
-// there is none.
+
 static mut bat_have: u64 = 0
 static mut bat_pct: u64 = 0
 static mut bat_unknown: u64 = 0
 static mut kb_unk: [u8; 21] = "tray.battery.unknown\0"
 static mut bat_unk_txt: [u8; 2] = "?\0"
 static mut bat_chg: u64 = 0
-// r782: `PG_AC`, the mains adapter. With bat_have/bat_pct/bat_chg it is the whole input of fui.traypower.
+
 static mut bat_ac: u64 = 0
-// r782: tooltip text of the battery item (traypower.tooltip, NUL terminated)
+
 static mut bat_tip: [u8; 96] = [0 as u8; 96]
 static mut bat_msg: [u8; 112] = [0 as u8; 112]
 static mut kb_none: [u8; 18] = "tray.battery.none\0"
@@ -663,10 +455,10 @@ static mut kb_low: [u8; 17] = "tray.battery.low\0"
 static mut kb_crit: [u8; 22] = "tray.battery.critical\0"
 static mut kb_warn: [u8; 18] = "tray.battery.warn\0"
 static mut kb_warn2: [u8; 19] = "tray.battery.crit2\0"
-static mut bat_warned: u64 = 0 // 0 = nichts, 1 = Warnung, 2 = ernst
+static mut bat_warned: u64 = 0
 static mut ev_seen: u64 = 0
-static mut nv_fall: u64 = 0 // 0 off, 1 when-offline, 2 always
-static mut nv_faking: u64 = 0 // is it faking RIGHT NOW
+static mut nv_fall: u64 = 0
+static mut nv_faking: u64 = 0
 static mut st_said: u64 = 99
 static mut fk_said: u64 = 99
 const HOVER_MAX: u64 = 223
@@ -675,8 +467,7 @@ static mut hover_on: u64 = 0
 
 static mut rec: [u8; 104] = [0 as u8; 104]
 static mut ev: [u8; 16] = [0 as u8; 16]
-// r387: 1024 and not 256 -- the file of a Windows 11 bar (16 keys and ten pins) is
-// ~400 octets; at 256 the reader lost the pins and the writer ran over the end.
+
 static mut conf: [u8; 1024] = [0 as u8; 1024]
 static mut minute_sum: u64 = 0
 static mut list_sum: u64 = 0
@@ -687,13 +478,10 @@ static mut paints: u64 = 0
 static mut writes: u64 = 0
 
 const QUIET_ROUNDS: u64 = 80
-// bit set since the last pulse: 1 repaint, 2 popup step, 4 drag/hide, 8 power event, 16 pointer moved
+
 static mut ub_qwhy: u64 = 0
 static mut ub_quiet: u64 = 0
 
-// r1129b: DEEP QUIET. After DEEP_QUIET_ROUNDS rounds (~20 s) with no sign of life, the file pollers of the bar (locale, taskbar.conf)
-// run once a second instead of four times a second; any sign of life ends it at once. Each pass is an open + read of several
-// files, i.e. disk commands and port I/O in a VM, with nobody there to see the answer.
 const DEEP_QUIET_ROUNDS: u64 = 400
 static mut sp_at: u64 = 0xFFFFFFFF
 fn slow_poll_due() -> bool {
@@ -713,7 +501,7 @@ static mut ub_sb: u64 = 0
 static mut ub_sbt: u64 = 0
 static mut ub_px: u64 = 0
 static mut ub_naechster: u64 = 0
-static mut ub_soll: u64 = 0   // Bildpunkte, die hinueber SOLLTEN
+static mut ub_soll: u64 = 0
 static mut ub_null: u64 = 0
 
 static mut pdrag: u64 = 0
@@ -822,16 +610,6 @@ fn width_of(p: u64) -> u64 {
     return wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), p, tlen(p))
 }
 
-// ==================================================== the configuration
-//
-// ONE FILE, TWO WRITERS, ONE READER. `/bin/settings` writes it
-// when the user picks an edge in the settings, this bar writes it when
-// the user drags itself to an edge, and this bar reads it -- at start
-// and every half second afterwards, so that a change made in the
-// settings arrives without a restart. There is no second place where
-// the edge is remembered; if the file says `left`, the bar is on the
-// left, and if the file is not there, the defaults below are.
-
 static mut p_conf: [u8; 19] = "/etc/taskbar.conf\0\0"
 static mut k_edge: [u8; 5] = "edge\0"
 static mut k_pins: [u8; 5] = "pins\0"
@@ -932,9 +710,6 @@ fn clamp(v: u64, lo: u64, hi: u64) -> u64 {
     return v
 }
 
-// Read the file. Unknown keys are ignored, missing keys keep their
-// value -- the same rule as `/etc/theme` (wlibc.theme_load). Returns
-// true if the file was there at all.
 fn conf_read() -> bool {
     var word: [u8; 24] = [0 as u8; 24]
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
@@ -949,7 +724,7 @@ fn conf_read() -> bool {
     }
     var i: u64 = 0
     while i < n {
-        // one line
+
         let ks: u64 = i
         var ke: u64 = i
         while ke < n && __mmio_read8((b + ke) as *mut u8) != 61 as u8
@@ -963,7 +738,7 @@ fn conf_read() -> bool {
                 && __mmio_read8((b + ve) as *mut u8) != 13 as u8 {
                 ve = ve + 1
             }
-            // the value as a word and as a number
+
             let wp: u64 = (&word[0 as usize]) as u64
             var k: u64 = 0
             var v: u64 = 0
@@ -1091,11 +866,7 @@ fn conf_read() -> bool {
             } else if key_is(b + ks, kl, (&k_labels[0 as usize]) as u64) {
                 cf_labels = labels_by_name(wp)
             } else if key_is(b + ks, kl, (&k_align[0 as usize]) as u64) {
-                // ROUND LOOK. A WORD AND NOT A NUMBER, like `edge=`
-                // above and unlike `ontop=`: `align=center` says what
-                // it does and `align=1` does not. An unknown word
-                // leaves the value alone -- the same rule the whole
-                // file follows.
+
                 cf_align = align_by_name(wp)
             }
             i = ve + 1
@@ -1109,9 +880,6 @@ fn conf_read() -> bool {
 static mut c_head: [u8; 60] =
     "# taskbar.conf -- written by /bin/taskbar and /bin/settings\0"
 
-// r387: one key line of the file: `key=value\n`; `at` is the place of the newline
-// before it (the file's first line is written by the caller), the result the place of
-// the newline after it. These two replace twenty copies of the same four statements.
 fn wk_num(b: u64, at: u64, key: u64, v: u64) -> u64 {
     var a: u64 = text_at_p(b, at + 1, key)
     __mmio_write8((b + a) as *mut u8, 61 as u8)
@@ -1142,10 +910,7 @@ fn conf_write() -> bool {
     at = wk_num(b, at, (&k_autohide[0 as usize]) as u64, cf_autohide)
     at = wk_num(b, at, (&k_ontop[0 as usize]) as u64, cf_ontop)
     at = wk_txt(b, at, (&k_align[0 as usize]) as u64, align_name(cf_align))
-    // r384: THE KEYS THAT ARE NOT ABOUT THE EDGE go out too -- the clock,
-    // the labels, the corner. Before, a change of the edge in Settings
-    // dropped them from the file (and a bar the person had set up to look like
-    // Windows 11 went back to the defaults).
+
     at = wk_txt(b, at, (&k_labels[0 as usize]) as u64, labels_name(cf_labels))
     at = wk_num(b, at, (&k_cdate[0 as usize]) as u64, cf_date)
     at = wk_num(b, at, (&k_cwday[0 as usize]) as u64, cf_wday)
@@ -1197,11 +962,7 @@ static mut s_ww: [u8; 8] = " width=\0"
 static mut s_ah: [u8; 11] = " autohide=\0"
 static mut s_ot: [u8; 8] = " ontop=\0"
 static mut s_al: [u8; 8] = " align=\0"
-// ROUND LOOK: WHERE THE START BUTTON REALLY IS. Until now the bar
-// reported only where it put the WORD `Start`, which is the button's
-// x plus half the space left over by the label -- a checker that wants
-// the button has to undo that, and undoing a centring is exactly the
-// kind of recomputation this repository does not accept as proof.
+
 static mut lk_sx: [u8; 18] = "taskbar: start x=\0"
 static mut lk_sy: [u8; 5] = " y=\0\0"
 static mut lk_sw: [u8; 5] = " w=\0\0"
@@ -1280,7 +1041,6 @@ fn glas_say() {
     nl()
 }
 
-// ========================================== RUNDE GLAS (fix-r4-1)
 const BADGE_LEVEL: u64 = 32
 
 fn badge_channel(c: u64, dunkler: bool) -> u64 {
@@ -1424,19 +1184,11 @@ fn conf_say() {
     nl()
 }
 
-// ======================================================== the geometry
-//
-// The rectangle of the bar for an edge and a thickness. In ONE
-// function, because the drag preview, the strut, the window itself and
-// the settings all have to agree on it, and four copies of this
-// arithmetic would agree on three days out of four.
-
 static mut r_x: u64 = 0
 static mut r_y: u64 = 0
 static mut r_w: u64 = 0
 static mut r_h: u64 = 0
 
-// r828: desktop pixel -> head-local pixel (0 left of / above the head)
 fn loc(v: u64, o: u64) -> u64 {
     if v < o {
         return 0
@@ -1487,8 +1239,6 @@ fn geometry() {
     bar_h = r_h
 }
 
-// The rectangle the WINDOW currently has -- the same as the bar when it
-// is out, a SLIVER at the edge when auto-hide has pulled it in.
 fn window_rect() {
     if shown != 0 {
         win_x = bar_x
@@ -1504,8 +1254,6 @@ fn window_rect() {
     win_h = r_h
 }
 
-// W-C3: WM_SIZE can fail (no contiguous frames for a bigger buffer right after a huge mode switch). The geometry is stored by then, so the
-// next poll saw "unchanged" and the bar stayed at its old width for good. `size_fail` makes heads_step retry the apply a few times.
 static mut size_fail: u64 = 0
 static mut size_tries: u64 = 0
 static mut s_sz2: [u8; 17] = "taskbar: size w=\0"
@@ -1585,16 +1333,6 @@ fn geom_say() {
     nl()
 }
 
-// PUT THE WINDOW WHERE THE CONFIGURATION SAYS. Size first, then
-// position, then the reservation -- in that order, because a window
-// that is moved before it is shrunk is briefly 800 wide at the left
-// edge, and the server would compose that.
-//
-// THE RESERVATION IS THE SLIVER WHEN AUTO-HIDE IS ON, in BOTH states.
-// Not the full thickness while the bar is out and zero while it is in:
-// that would resize every maximized window twice a second as the
-// pointer wanders past. Windows reserves a sliver for an auto-hiding
-// bar for exactly this reason.
 fn apply() {
     window_rect()
     let rs: u64 = bar_size(win_w, win_h)
@@ -1625,40 +1363,12 @@ fn apply() {
         layer = wlibc.L_NORMAL
     }
     let _l: u64 = wlibc.win_state(w_h, wlibc.WS_LAYER, layer)
-    // THIRD ADDENDUM, and this is the whole of the panel in this file:
-    // it is told WHERE, and it decides everything else. The rectangle
-    // it gets is the WORK AREA -- what is left of the screen after this
-    // bar reserved its edge -- and not the screen, so the panel appears
-    // beside the bar on all four edges instead of under it on three.
+
     qs.anchor(cf_edge, wlibc.work_x(w_h), wlibc.work_y(w_h),
         wlibc.work_w(w_h), wlibc.work_h(w_h))
     notifc.anchor(cf_edge, wlibc.work_x(w_h), wlibc.work_y(w_h),
         wlibc.work_w(w_h), wlibc.work_h(w_h))
 }
-
-// ============================================ ROUND NETVIEW, addendum
-//
-// TWO ANSWERS AND NOT ONE, and that is the whole of this part.
-//
-// Windows shows ONE icon in the corner and it describes THE MACHINE.
-// Here the network is a property of a PROCESS, so one icon cannot say
-// it: this machine can be genuinely online while three programs see a
-// faked network, one sees none and two see the real one. A single
-// symbol would have to be wrong about five of them.
-//
-// So there are two displays, answering two different questions:
-//
-//   the CORNER  -- what the machine really has: carrier, address,
-//                  route. Four states, one icon, and the details as
-//                  text while the pointer rests on it.
-//   the BUTTON  -- what THIS program sees. A mark, and only when it is
-//                  not the normal case; `real` gets nothing, because a
-//                  mark on every window is a mark that says nothing.
-//
-// THE SAME DRAWING IN BOTH SCHEMES. The pictures are OSYM files whose
-// colours are ROLES and not values (`wlibc.icon_draw`), so a light
-// scheme and a dark one get the same shapes in their own colours, out
-// of one file.
 
 static mut p_icons: [u8; 14] = "/etc/netview/\0"
 static mut n_state: [u8; 54] = "state-nocarrier\0state-noip\0state-noroute\0state-online\0"
@@ -1678,9 +1388,6 @@ fn nth(p: u64, i: u64) -> u64 {
     return at
 }
 
-// One picture into `dst`. 0 if there is no such file -- which is not
-// fatal and not silent: `icons_load` counts what it got and the count
-// goes into the report, so a run with no pictures says so.
 fn icon_read(name: u64, dst: u64, max: u64) -> u64 {
     var path: [u8; 64] = [0 as u8; 64]
     let a: u64 = ulib.strcpy((&path[0 as usize]) as u64,
@@ -1730,9 +1437,6 @@ fn icons_load() {
     }
 }
 
-// The sign, or 0 when the machine is not faking. `real` gets nothing --
-// the same rule the window marks follow, and for the same reason: a
-// sign that is always there says nothing when it matters.
 fn sys_icon() -> u64 {
     if nv_faking == 0 || sy_ok == 0 {
         return 0
@@ -1747,29 +1451,12 @@ fn state_icon(s: u64) -> u64 {
     return (&ic_buf[0 as usize]) as u64 + s * ICON_MAX
 }
 
-// The view of a process minus one: `real` is 0 and gets no mark, so
-// `filtered` is mark 0, `faked` mark 1, `none` mark 2. 0 means "this
-// one gets nothing".
 fn mark_icon(v: u64) -> u64 {
     if v == 0 || v > 3 || mk_ok < 3 {
         return 0
     }
     return (&mk_buf[0 as usize]) as u64 + (v - 1) * MARK_MAX
 }
-
-// ============================================ ROUND NETVIEW, addendum
-//
-// WHAT THE POINTER IS RESTING ON, AS A SENTENCE. An icon that says
-// something the person cannot look up is a rune. There is no tooltip
-// window in this system and a bar that is 28 pixels high cannot open
-// one; what there IS is the empty space between the last window button
-// and the first status field, and that is where the sentence goes.
-//
-// It is drawn in the DIM role, so it reads as an explanation and not as
-// another control, and it is reported on the serial line like every
-// other piece of text in this bar -- so `tools/netview/run.sh` can hold
-// the reported sentence against the picture, character by character,
-// the way round DESKTOP does it for the clock.
 
 static mut k_h_none: [u8; 17] = "taskbar.tip.none\0"
 static mut k_h_fake: [u8; 18] = "taskbar.tip.faked\0"
@@ -1778,10 +1465,7 @@ static mut k_h_s0: [u8; 22] = "taskbar.tip.nocarrier\0"
 static mut k_h_s1: [u8; 17] = "taskbar.tip.noip\0"
 static mut k_h_s2: [u8; 20] = "taskbar.tip.noroute\0"
 static mut k_h_s3: [u8; 19] = "taskbar.tip.online\0"
-// SECOND ADDENDUM. The sentence that has to be there, because the sign
-// alone is a rune: an icon nobody can look up is not honesty, it is
-// decoration. Two sentences and not one -- WHAT is happening, and on
-// WHOSE orders, so that the person knows where to go and undo it.
+
 static mut k_h_fb1: [u8; 19] = "taskbar.tip.faking\0"
 static mut k_h_fb2: [u8; 22] = "taskbar.tip.fb_always\0"
 static mut k_h_fb3: [u8; 23] = "taskbar.tip.fb_offline\0"
@@ -1801,11 +1485,6 @@ fn hover_set(txt: u64) {
     let _a: u64 = ulib.strncpy((&hover_txt[0 as usize]) as u64, txt, 95)
 }
 
-// The corner: the state in words, and then the three numbers Windows
-// hides behind two more clicks.
-// Append, and STOP AT THE END. `text_at_p` does not count, which is
-// fine for a field that is built out of numbers of known length and is
-// not fine for a sentence that grows with the state of the machine.
 fn hover_add(at: u64, q: u64) -> u64 {
     let p: u64 = (&hover_txt[0 as usize]) as u64
     var k: u64 = 0
@@ -1838,9 +1517,7 @@ fn hover_state() {
         at = hover_add(at, (&h_gw[0 as usize]) as u64)
         at = ip_at(h, at, ulib.sys(SYS_NETGET, NG_GW, 0, 0))
     }
-    // AND WHAT THE SIGN BESIDE IT MEANS. It goes AFTER the state of the
-    // machine on purpose: the machine's own truth is not replaced by
-    // the fact that the system is dressing it up, it is added to.
+
     if nv_faking != 0 {
         at = hover_add(at, msg.get((&k_h_fb1[0 as usize]) as u64))
         if nv_fall == 2 {
@@ -1865,12 +1542,10 @@ fn ip_at(p: u64, at: u64, v: u64) -> u64 {
     return num_at(p, o, v & 255)
 }
 
-// W-C1: the plate of a tray field while the pointer is on it (the same face as a hovered window button)
 fn hover_plate() -> u64 {
     return wlibc.mix(wlibc.theme(wlibc.T_PANEL), wlibc.theme(wlibc.T_BTNHI), 55)
 }
 
-// W-C1: which tray field the pointer is on (255 = none)
 fn hot_field(lx: u64, ly: u64) -> u64 {
     var f: u64 = 0
     while f < F_N {
@@ -1889,7 +1564,6 @@ fn in_rect(lx: u64, ly: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     return w != 0 && lx >= x && lx < x + w && ly >= y && ly < y + h
 }
 
-// W-TBHOVER: which bar button (start, chevron, task view, pin, window) the pointer is on
 fn hot_button(lx: u64, ly: u64) -> u64 {
     if in_rect(lx, ly, st_x, st_y, st_w, st_h) {
         return 1
@@ -1919,9 +1593,6 @@ fn hot_button(lx: u64, ly: u64) -> u64 {
     return 0
 }
 
-// Which of the two displays the pointer is on. Called once per poll,
-// and it changes nothing but `hover_txt` -- the repaint is decided by
-// the caller, so that a pointer standing still costs no drawing.
 fn hover_step() -> bool {
     let mx: u64 = wlibc.mouse_x()
     let my: u64 = wlibc.mouse_y()
@@ -1981,13 +1652,9 @@ fn hover_step() -> bool {
         (&hover_txt[0 as usize]) as u64)
 }
 
-// ============================================================ W-DND
-// HOVER-RAISE OVER A WINDOW BUTTON. While a drag runs (left button down, the bus drag slot full) and the pointer rests
-// ~600 ms on a window button or a pinned launcher of a running program, that window is raised (shown if minimised) --
-// so a file can be dropped there. Same delay as the window server's own hover-raise (wm.fi `dnd_tick`).
-static mut dnd_k: u64 = 0       // the button under the pointer while a drag runs: 1 + window button, 100 + pin, 0 = none
-static mut dnd_k_t: u64 = 0     // ticks (10 ms) when the pointer came to it
-static mut dnd_k_done: u64 = 0   // the key already raised
+static mut dnd_k: u64 = 0
+static mut dnd_k_t: u64 = 0
+static mut dnd_k_done: u64 = 0
 static mut s_dndr: [u8; 24] = "taskbar: dndraise id=\0\0\0"
 
 fn dnd_bar_step() -> bool {
@@ -2054,20 +1721,6 @@ fn dnd_bar_step() -> bool {
     return true
 }
 
-// ================================================== the status fields
-//
-// Three strings out of three system calls, and then the only
-// interesting part: MAKING THEM FIT. A field has `avail` pixels. If the
-// whole string fits, it is one line. If not, it is broken at a sensible
-// character -- the last dot of an address, the space of "Battery 87%"
-// -- and becomes two lines. Only if a half still does not fit is it
-// shortened, one character at a time, and then the SHORTENED text is
-// what gets reported. `tools/desktop/run.sh` checks the reported text
-// against the picture character by character, so a program that reports
-// the long form and paints the short one would fail there and not pass
-// quietly.
-
-// ================================================ RUNDE I18N: DIE TEXTE
 static mut k_title: [u8; 14] = "taskbar.title\0"
 static mut k_start: [u8; 14] = "taskbar.start\0"
 static mut k_batt: [u8; 16] = "taskbar.battery\0"
@@ -2081,7 +1734,7 @@ static mut k_remote: [u8; 15] = "taskbar.remote\0"
 static mut s_remote: [u8; 7] = "JARVIS\0"
 static mut k_remote_toast: [u8; 21] = "taskbar.remote_toast\0"
 static mut s_remote_toast: [u8; 40] = "JARVIS is controlling this computer\0\0\0\0\0"
-static mut rem_on: u64 = 0 // the sign was up at the last look
+static mut rem_on: u64 = 0
 static mut rem_toasts: u64 = 0
 static mut s_dot: [u8; 2] = ".\0"
 static mut p_time: [u8; 16] = "/etc/time.conf\0\0"
@@ -2094,14 +1747,9 @@ fn line_of(f: u64, l: u64) -> u64 {
     return (&f_txt[0 as usize]) as u64 + (f * 2 + l) * 32
 }
 
-// The offset to local time. This kernel can read the hardware clock and
-// not set it (`SYS_TIME`), so what a ring 3 program can honestly do is
-// shift the DISPLAY -- and that is what /etc/time.conf holds.
-// r1129b: /etc/time.conf is read at most every 2 s (the status text is built several times a second; an open + read per build
-// was one of the idle disk readers). 0xFFFF = never read yet.
 static mut off_at: u64 = 0xFFFF
 fn offset_read() {
-    let sec2: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0) / 2000 // I_UPTIME is in ms
+    let sec2: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_UPTIME, 0, 0) / 2000
     if !ulib.bad(sec2) {
         if sec2 == off_at {
             return
@@ -2203,7 +1851,7 @@ fn clock_build() {
         at = text_at_p(c, 2, (&c_sp[0 as usize]) as u64)
     }
     if cf_12h != 0 {
-        // W-C1: 12-hour clock, no leading zero ("9:05 PM", "12:00 AM")
+
         var h12: u64 = (int / 60) % 12
         if h12 == 0 {
             h12 = 12
@@ -2283,9 +1931,7 @@ fn clock_build() {
             __mmio_write8((c + at) as *mut u8, 0 as u8)
         }
     }
-    // The network clock has not synced yet (or still fails): a "?" next to
-    // the time, so a wrong clock is not taken for a right one. The same mark
-    // stands while the kernel says the hardware clock is void (state=unset).
+
     if clock_unsynced() {
         let e: u64 = tlen(c)
         __mmio_write8((c + e) as *mut u8, 32 as u8)
@@ -2294,8 +1940,6 @@ fn clock_build() {
     }
 }
 
-// /system/clock.stand (written by `sntp boot`): first letter S = synced.
-// Read at most every 5 seconds; no file = no network clock = no marker.
 static mut clk_flag: u64 = 0
 static mut clk_flag_t: u64 = 0xFFFF
 static mut P_CLKSTAND: [u8; 21] = "/system/clock.stand\0\0"
@@ -2310,7 +1954,7 @@ fn clock_unsynced() -> bool {
             var b: [u8; 4] = [0 as u8; 4]
             let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&b[0 as usize]) as u64, 2)
             ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
-            // r1063: only F (no sync after two minutes) marks the clock; W (first sync still pending) shows no "?", the RTC is valid then
+
             if !ulib.bad(n) && n > 0 && b[0 as usize] == 70 as u8 {
                 clk_flag = 1
             }
@@ -2344,10 +1988,6 @@ static mut net_da: u64 = 1
 static mut noti_fresh: u64 = 0
 static mut s_glocke: [u8; 7] = "Meldg \0"
 
-// ROUND TON-2. `snd_da` is the same rule as `net_da` and `bat_have`:
-// no sound card, no field. `snd_gen` is the change counter the kernel
-// keeps (`A_VOLGEN`) -- the bar asks for ONE number to find out
-// whether anything moved, instead of repainting on a timer.
 static mut snd_da: u64 = 0
 static mut snd_vol: u64 = 0
 static mut snd_mute: u64 = 0
@@ -2404,14 +2044,11 @@ fn bat_warn_check() {
     __mmio_write8((p + at) as *mut u8, 32 as u8)
     at = at + 1
     at = num_at(p, at, bat_pct)
-    __mmio_write8((p + at) as *mut u8, 37 as u8) // '%'
+    __mmio_write8((p + at) as *mut u8, 37 as u8)
     __mmio_write8((p + at + 1) as *mut u8, 0 as u8)
     let _r: u64 = wlib.noti_post(level, p, at + 1)
 }
 
-// Gate/diagnostic: with `tray_demo=<1..101>` the bar shows a battery of (value-1) % and a
-// volume of (value-1) % without hardware, so the tray raster can be measured on every
-// machine (tools/trayraster). 0 = real hardware.
 fn demo_pwr(what: u64) -> u64 {
     if cf_demo != 0 {
         if what == PG_BATPRESENT {
@@ -2500,10 +2137,7 @@ fn status_build() -> bool {
             let _q: u64 = text_at_p(a, at, (&s_pct[0 as usize]) as u64)
         }
     }
-    // ============================== ROUND TON-2: the volume field.
-    // Same rule as the battery above -- no card, no field. The text is
-    // the percentage, and it is what a bar without a glyph path falls
-    // back to; with glyphs the symbol replaces it.
+
     let sn: u64 = full_of(F_SND)
     snd_da = 0
     if demo_aud(A_READY) == 1 {
@@ -2526,10 +2160,7 @@ fn status_build() -> bool {
         __mmio_write8((sn) as *mut u8, 0 as u8)
     }
     let ne: u64 = full_of(F_NET)
-    // ROUND NETVIEW, addendum: the four states of the MACHINE. The
-    // kernel works them out (`sys.NG_STATE`) so that this bar does not
-    // ask three questions and draw its own conclusion -- the next
-    // reader of those three would conclude something else.
+
     let st: u64 = ulib.sys(SYS_NETGET, NG_STATE, 0, 0)
     net_da = 1
     if ulib.bad(st) {
@@ -2540,10 +2171,7 @@ fn status_build() -> bool {
     } else {
         net_state = st
     }
-    // SECOND ADDENDUM: the preference, and what it amounts to right
-    // now. Both out of the kernel, neither worked out here -- the bar
-    // must not be the second place that decides what `when-offline`
-    // means.
+
     let fb: u64 = ulib.sys(SYS_NETVGET, 0, NV_FALLBACK, 0)
     if ulib.bad(fb) {
         nv_fall = 0
@@ -2577,7 +2205,7 @@ fn status_build() -> bool {
         at = text_at_p(ne, at, (&s_dot[0 as usize]) as u64)
         at = num_at(ne, at, ip & 255)
     }
-    // ================================================ RUNDE SYSTEMBUS
+
     let nb: u64 = full_of(F_NOTI)
     noti_fresh = wlibc.noti_new()
     if noti_fresh == 0 {
@@ -2586,8 +2214,7 @@ fn status_build() -> bool {
         var nat: u64 = text_at_p(nb, 0, (&s_glocke[0 as usize]) as u64)
         nat = num_at(nb, nat, noti_fresh)
     }
-    // r384: the language field -- the two letters of the interface language
-    // ("de"), shown in capitals over their three-letter form by fit_field.
+
     let lg: u64 = full_of(F_LANG)
     let lc: u64 = msg.lang()
     if cf_lang == 0 || lc == 0 || __mmio_read8((lc) as *mut u8) == 0 as u8 {
@@ -2618,10 +2245,7 @@ fn status_build() -> bool {
             __mmio_write8((lg + li) as *mut u8, 0 as u8)
         }
     }
-    // REMOTE-CONTROL SIGN. Ask the KERNEL (not the helper): has input
-    // from outside flowed within the last seconds? Then the field shows
-    // JARVIS in red. The first look of such a session also posts a toast,
-    // so that someone who looks away from the corner sees it too.
+
     let rm: u64 = full_of(F_REM)
     let rn: u64 = ulib.sys(RM_SYS, RM_INFO, RM_RECENT, 0)
     if !ulib.bad(rn) && rn == 1 {
@@ -2639,11 +2263,9 @@ fn status_build() -> bool {
         rem_on = 0
     }
     var sum: u64 = 1469598103934665603 ^ (net_state *% 2654435761)
-    // The sign is not part of any of the three texts, so without this
-    // line the bar would not repaint when the preference changed --
-    // the person would set `always` and see nothing happen.
+
     sum = sum ^ ((nv_faking * 3 + nv_fall) *% 40503)
-    // r782: plugged / charging is not part of the battery text either; without it the plug glyph would lag.
+
     sum = sum ^ ((bat_ac * 5 + bat_chg * 11) *% 69069)
     var q: u64 = 0
     while q < F_N {
@@ -2661,8 +2283,6 @@ fn status_build() -> bool {
     return changed
 }
 
-// ==================================================== RUNDE WMPLUGIN
-// WAS DIE ERWEITERUNGEN ANZEIGEN WOLLEN, EINMAL JE SEKUNDE GEHOLT.
 fn plugbar_read() -> bool {
     if pb_slots == 0 {
         let m: u64 = ulib.sys(SYS_WM_PLUG_INFO, 0, PL_MAXPLUG, 0)
@@ -2705,7 +2325,6 @@ fn plug_text(i: u64) -> u64 {
     return (&pb_txt[0 as usize]) as u64 + i * 32
 }
 
-// Copy `n` characters and terminate.
 fn copy_n(dst: u64, src: u64, n: u64) {
     var k: u64 = 0
     while k < n {
@@ -2716,7 +2335,6 @@ fn copy_n(dst: u64, src: u64, n: u64) {
     __mmio_write8((dst + n) as *mut u8, 0 as u8)
 }
 
-// Shorten a line until it fits. The last resort, and it is reported.
 fn shorten(p: u64, avail: u64) {
     var n: u64 = tlen(p)
     while n > 1
@@ -2726,8 +2344,6 @@ fn shorten(p: u64, avail: u64) {
     __mmio_write8((p + n) as *mut u8, 0 as u8)
 }
 
-// WHERE TO BREAK A LINE. For an address the LAST dot ("10.0." / "2.15"),
-// for anything else the last space. Zero means: no sensible break.
 fn break_at(p: u64) -> u64 {
     let n: u64 = tlen(p)
     var dot: u64 = 0
@@ -2772,8 +2388,7 @@ fn fit_field(f: u64, avail: u64) {
         return
     }
     if f == F_LANG {
-        // the ISO 639-2 style three letters for the languages the system
-        // has, the code itself for any other
+
         let a0: u64 = __mmio_read8((src) as *mut u8) as u64
         let a1: u64 = __mmio_read8((src + 1) as *mut u8) as u64
         var t0: u64 = a0
@@ -2792,7 +2407,7 @@ fn fit_field(f: u64, avail: u64) {
         __mmio_write8((l0 + 1) as *mut u8, t1 as u8)
         __mmio_write8((l0 + 2) as *mut u8, t2 as u8)
         __mmio_write8((l0 + 3) as *mut u8, 0 as u8)
-        // W-C1: ONE line, the code only ("DEU"), like the Windows 11 corner shows it
+
         if t2 == 0 {
             __mmio_write8((l0 + 2) as *mut u8, 0 as u8)
         }
@@ -2829,13 +2444,6 @@ fn fit_field(f: u64, avail: u64) {
     f_lines[(f) as usize] = 1
 }
 
-// ========================================================== the layout
-
-// r389: the room the picture of the program (and the network mark) take inside a window
-// button: `button_sym` puts the text next to them, so the title may only use what is left.
-// `shorten_title` used to measure against the whole button and the last letters of a
-// vertical bar's "Terminal -- sh" ran under the edge of the plate (tools/desktop: the dash at
-// x=98, 4 of 10 ink points clipped).
 fn title_room(i: u64) -> u64 {
     var r: u64 = 0
     let sy: u64 = sym_of((&kapp[0 as usize]) as u64 + i * 24)
@@ -2867,18 +2475,10 @@ fn shorten_title(i: u64, width: u64) {
     copy_n(z, q, n)
 }
 
-// EVERY RECTANGLE OF THE BAR, FOR BOTH ORIENTATIONS, IN ONE PLACE.
-// A vertical bar is not a rotated horizontal one: the start button sits
-// at the top instead of the left, the window buttons stack downwards,
-// and the three status fields sit at the bottom one above the other,
-// each as tall as the number of lines it needed.
-// r387: the tray shows icons only (network, sound) while the group is on and the
-// chevron has not opened it.
 fn compact() -> bool {
     return cf_group != 0 && chev_open == 0
 }
 
-// the room the task view button takes in front of the pins (0 = none)
 fn tv_extra() -> u64 {
     if cf_tv != 0 && vertical == 0 {
         return btn_h() + 8 + gap()
@@ -2902,13 +2502,11 @@ fn layout() {
         st_y = pad()
         st_w = inner
         st_h = btn_h()
-        // the status fields, from the bottom up: clock, battery, net
+
         var y: u64 = bar_h - pad()
         var f: u64 = F_CLK
         while f < F_N {
-            // ROUND NETVIEW, addendum: the icon takes its room off the
-            // text's share here too -- see the horizontal case below for
-            // what happened when it did not.
+
             var vroom: u64 = 0
             if f == F_NET && net_pic() != 0 {
                 vroom = ic_w() + 2
@@ -2937,11 +2535,7 @@ fn layout() {
             f_h[(f) as usize] = hh
             y = y - gap()
             }
-            // ROUND TON-2: the volume sits between the battery and
-            // the network. Two chains walk these fields (here and in
-            // the horizontal layout below) and BOTH have to name the
-            // same order -- a field that only one of them knows is a
-            // field that is laid out on one edge and not on the other.
+
             if f == F_CLK {
                 f = F_BAT
             } else if f == F_BAT {
@@ -2958,15 +2552,13 @@ fn layout() {
                 f = F_N
             }
         }
-        // the window buttons in between
+
         let top: u64 = st_y + st_h + gap()
         var space: u64 = 0
         if y > top {
             space = y - top
         }
-        // ROUND LOOK: centred in the HEIGHT on a vertical bar. Same
-        // rule, same run: from under the start button to the top of
-        // the topmost status field.
+
         var gy: u64 = st_y
         if cf_align == AL_CENTER {
             var block: u64 = st_h
@@ -2988,7 +2580,7 @@ fn layout() {
             kw[(i) as usize] = inner
             kh[(i) as usize] = btn_h()
             if by + btn_h() > top + space {
-                kw[(i) as usize] = 0 // no room left: no button, no lie
+                kw[(i) as usize] = 0
             } else {
                 shorten_title(i, inner)
             }
@@ -3004,19 +2596,13 @@ fn layout() {
     }
     st_h = btn_h()
     var x: u64 = bar_w - pad()
-    // W3: the Windows 11 bar keeps 12 points of air right of the clock
+
     if thick >= 48 * wlibc.ui_scale() && x > 2 * pad() {
         x = x - 2 * pad()
     }
     var f: u64 = F_CLK
     while f < F_N {
-        // ROUND NETVIEW, addendum: THE ICON NEEDS ROOM AND IT HAS TO BE
-        // TAKEN OFF THE TEXT'S SHARE, not added on top of it. The first
-        // version drew the icon in front of the address and left the
-        // field the width it had -- so the address ran out of its own
-        // rectangle and into the battery beside it, and the acceptance
-        // run of round DESKTOP said the rectangles were wrong. It was
-        // right, and this is why that run stays in the suite.
+
         var room: u64 = 0
         if f == F_NET && net_pic() != 0 {
             var iw: u64 = wlibc.icon_ink_wid(net_pic())
@@ -3025,32 +2611,26 @@ fn layout() {
             }
             room = iw + 2
         } else if f == F_NET && glyphs_ok() {
-            // R-RASTER: the glyph cell is the same as every other tray cell
+
             room = tr_icx()
         }
         if (f == F_BAT || f == F_SND) && glyphs_ok() {
-            // Z9: the volume symbol needs the same room as the battery one
+
             room = tr_icx()
         }
-        // W-C1: the language field is the code only ("DEU"), no keyboard symbol in front of it
-        // SECOND ADDENDUM: and the faking sign takes its room off the
-        // same share. The lesson of the first addendum, applied before
-        // it had to be learned twice: an icon that is added ON TOP of
-        // the field's width pushes the address into the battery.
+
         if f == F_NET && sys_icon() != 0 {
             room = room + mk_w() + 2
         }
         var gg: u64 = gap()
         if false {
             gg = 0
-            // W4b: the battery percentage ends right before the sound icon; with no gap it read as
-            // "92%92%" (battery text, sound text). Keep a small gap behind the battery text.
+
         }
 
         if tlen(full_of(f)) != 0 && compact() && (f == F_NET || f == F_SND)
             && (room != 0 || (f == F_SND && glyphs_ok())) {
-            // icon only: the field is as wide as its icon
-            // R-RASTER: every icon-only cell is exactly one tray cell wide
+
             let w3: u64 = tr_cell()
             x = x - w3
             f_x[(f) as usize] = x
@@ -3067,7 +2647,7 @@ fn layout() {
             f_lines[(f) as usize] = 0
         } else {
         fit_field(f, bar_w / 4 - room)
-        // W-C1: the text-only cells (language, clock) are as wide as their MEASURED text plus the air at both sides
+
         var padx: u64 = 10
         if f == F_CLK || f == F_LANG {
             padx = 2 * fld_pad()
@@ -3103,7 +2683,7 @@ fn layout() {
             f = F_N
         }
     }
-    // r387: the capsule around network, sound and battery
+
     if cf_group != 0 {
         var gl: u64 = 100000
         var gr: u64 = 0
@@ -3160,9 +2740,9 @@ fn layout() {
         }
         pw = pw + 1
     }
-    // r387: the tray chevron, the leftmost thing of the tray
+
     if cf_chev != 0 {
-        // r1015: Windows 11 chevron button is ~ 32 points wide, not as wide as a whole window button
+
         var cw: u64 = tr_cell()
         if cw > btn_h() {
             cw = btn_h()
@@ -3204,22 +2784,7 @@ fn layout() {
             width = hoechst
         }
     }
-    // ROUND LOOK: THE GROUP, AND WHERE IT STARTS.
-    //
-    // `left` is what this bar always did: the start button at PAD and
-    // the window buttons right after it.  `center` moves BOTH -- the
-    // start button and the run of window buttons are one block, and the
-    // block is centred in the space that is left over between the two
-    // edges of the bar and the first status field.
-    //
-    // It is centred in the SPACE and not on the screen, and that
-    // distinction is the whole of it: the status fields on the right
-    // are 250 pixels wide on this machine, so a block centred on the
-    // screen would sit visibly left of the middle of what a person sees
-    // as empty bar.  `left_edge .. x` is that empty run, and the block
-    // is centred in it.  When the block is wider than the run there is
-    // nothing to centre and it falls back to the left, which is what
-    // `sub` does here without an `if`.
+
     var gx: u64 = st_x
     if cf_align == AL_CENTER && nk > 0 && width >= TASK_MIN {
         let block: u64 = st_w + gap() + tv_extra() + nk * width + (nk - 1) * gap()
@@ -3228,7 +2793,7 @@ fn layout() {
             gx = pad() + (run - block) / 2
         }
     } else if cf_align == AL_CENTER {
-        // No window buttons: the start button alone is the block.
+
         let run: u64 = x + gap() - pad()
         if run > st_w + tv_extra() {
             gx = pad() + (run - st_w - tv_extra()) / 2
@@ -3308,8 +2873,6 @@ fn layout() {
     let _lu: u64 = left
 }
 
-// ========================================================== the window list
-
 fn list_read() -> bool {
     var sum: u64 = 1469598103934665603
     var n: u64 = 0
@@ -3322,12 +2885,7 @@ fn list_read() -> bool {
             if r == 1 {
                 let b: u64 = (&rec[0 as usize]) as u64
                 let layer: u64 = __mmio_read64((b + wlibc.WL_LAYER) as *mut u64)
-                // THIRD ADDENDUM: OUR OWN QUICK SETTINGS ARE NOT AN
-                // APPLICATION. The panel lives on the normal layer
-                // because it has to be able to take the keyboard (see
-                // `qs.init`), and everything on that layer gets a
-                // button in this bar -- but a panel that belongs to
-                // this bar must not stand beside the programs.
+
                 let own: u64 = __mmio_read64((b + wlibc.WL_ID) as *mut u64)
                 if layer == wlibc.L_NORMAL && own != qs.win_id() {
                     let id: u64 = own
@@ -3338,7 +2896,7 @@ fn list_read() -> bool {
                     kver[(n) as usize] = fl & wlibc.F_HIDDEN
                     kfok[(n) as usize] = fo
                     knv[(n) as usize] = nv
-                    // ================================ ROUND NETVIEW
+
                     var k: u64 = 0
                     while k < 31 {
                         ktit[((n * 40 + k)) as usize] =
@@ -3355,7 +2913,7 @@ fn list_read() -> bool {
                     kapp[((n * 24 + 23)) as usize] = 0 as u8
                     let mix: u64 = id *% 131 +% (fl & 1) *% 7 +% fo +% nv *% 17
                     sum = (sum ^ mix) *% 1099511628211
-                    // grouping: a window of a program that already has a button joins that button instead of getting its own
+
                     var gj: u64 = MAXK
                     if kapp[((n * 24)) as usize] != 0 as u8 {
                         var jj: u64 = 0
@@ -3373,7 +2931,7 @@ fn list_read() -> bool {
                         }
                         kcnt[(gj) as usize] = kcnt[(gj) as usize] + 1
                         if fo != 0 && kfok[(gj) as usize] == 0 {
-                            // the focused window stands for the group
+
                             kid[(gj) as usize] = id
                             kver[(gj) as usize] = fl & wlibc.F_HIDDEN
                             kfok[(gj) as usize] = fo
@@ -3401,8 +2959,6 @@ fn list_read() -> bool {
     return other
 }
 
-// ============================================================ painting
-
 static mut s_st: [u8; 6] = "Start\0"
 static mut m_start: [u8; 6] = "start\0"
 static mut m_clk: [u8; 6] = "clock\0"
@@ -3422,12 +2978,12 @@ static mut s_tf: [u8; 5] = " fg=\0"
 static mut s_tg: [u8; 5] = " bg=\0"
 static mut s_tt: [u8; 4] = " t=\0"
 static mut s_tw: [u8; 5] = " tw=\0"
-// ===================================== RUNDE PAINT: DIE PROGRAMMSYMBOLE
+
 const SYM_N: u64 = 28
-const SYM_BYTES: u64 = 44900 // 72 px picture + 44 px + 64 px bakes, same as appdir.SYMBYTES
-static mut sym_name: [u8; 672] = [0 as u8; 672] // SYM_N * 24
-static mut sym_data: [u8; 1257200] = [0 as u8; 1257200] // SYM_N * SYM_BYTES
-static mut sym_ok: [u64; 28] = [0 as u64; 28] // 0 unbenutzt, 1 da, 2 keins
+const SYM_BYTES: u64 = 44900
+static mut sym_name: [u8; 672] = [0 as u8; 672]
+static mut sym_data: [u8; 1257200] = [0 as u8; 1257200]
+static mut sym_ok: [u64; 28] = [0 as u64; 28]
 static mut sym_used: u64 = 0
 static mut sym_hits: u64 = 0
 static mut sym_reads: u64 = 0
@@ -3452,8 +3008,7 @@ fn kstate8(p: u64) -> u64 {
 }
 
 static mut sym_miss_said: u64 = 0
-// r1090: a bundle without a symbol is no error, but a button with a grey plate must be explainable from the serial line:
-// why = 1 cache full, 2 file did not open, 3 short read, 4 not an OSYM picture
+
 fn sym_miss(app: u64, why: u64) {
     if sym_miss_said >= 8 {
         return
@@ -3483,8 +3038,7 @@ fn sym_of(app: u64) -> u64 {
         i = i + 1
     }
     if sym_used >= SYM_N {
-        // r1090: the cache never gave a place back, so a long session (every popup / dialog name stays) used it up and the NEXT app
-        // got a grey plate. When full, start over: a symbol is re-read once per name, nothing else is lost.
+
         sym_miss(app, 1)
         sym_used = 0
     }
@@ -3551,9 +3105,6 @@ fn sym_of(app: u64) -> u64 {
     return target
 }
 
-// ROUND W-ICON: a program without a symbol of its own gets the shared letter tile
-// (lib/appicon.fi through wlibc.app_icon) -- the same picture the start menu, Alt+Tab and the task
-// manager show for it -- instead of an empty button.  Counted in sym_fb for the gate.
 static mut sym_fb: u64 = 0
 static mut s_fb: [u8; 19] = "taskbar: sym fb n=\0"
 fn sym_fallback(room: u64, app: u64, target: u64) -> u64 {
@@ -3662,9 +3213,6 @@ fn say_text(mark: u64, x: u64, base: u64, fg: u64, bg: u64, txt: u64) {
     nl()
 }
 
-// One button: face, edge, and the label CENTRED. Returns the position
-// of the label so it can be reported; the runner recomputes it in the
-// picture, per character.
 fn button(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     dim: bool) -> u64 {
     return button_sym(x, y, w, h, txt, on, dim, 0, 0)
@@ -3722,7 +3270,7 @@ fn brand_paint(x: u64, y: u64, w: u64, h: u64, report: bool) {
             }
             m2 = m2 + 1
         }
-        // 16 -> 24 -> 32 -> 48 -> 64, die eingebackenen Groessen
+
         if kn == 16 {
             kn = 24
         } else if kn == 24 {
@@ -3823,16 +3371,10 @@ fn sym_scale(sym: u64, h: u64) -> u64 {
     return s
 }
 
-// r399 (design audit): the drawn size of a program symbol. A vector icon (72x72 with real
-// alpha, tools/svg/mkapps.py) is drawn into a square of 24 points (x ui_scale),
-// the size of the icons of the Windows 11 bar, but never taller than the button
-// minus the air above and below; a 16x16 drawing keeps its integer factor.
 fn sym_w(sym: u64, h: u64) -> u64 {
     if wlibc.icon_vec(sym) {
         let sc: u64 = wlibc.ui_scale()
-        // R-ICONS: the program symbol is as big as the logo of the start button: the whole
-        // button minus the air above and below (measured: 4/5 of the button gave an ink 24
-        // high against a logo ink 28 at scale 1; the artwork carries a margin of its own)
+
         var want: u64 = 24 * sc
         var room: u64 = 0
         if h > 2 * SYM_AIR * sc {
@@ -3976,10 +3518,7 @@ fn button_sym(x: u64, y: u64, w: u64, h: u64, txt: u64, on: bool,
     mk_x = mx
     mk_y = y + (h - mk_w()) / 2
     if mark != 0 {
-        // FLUSH LEFT AND VERTICALLY CENTRED. Left, because a mark that
-        // moves with the length of the title is a mark the eye has to
-        // look for; the whole value of it is that it is always in the
-        // same place.
+
         let _m: bool = wlibc.icon_draw(mark, mx, y + (h - mk_w()) / 2)
     }
     let _e: u64 = text_mit_schild(tx, base, txt, n, fg, wlibc.TY_BODY,
@@ -4012,7 +3551,6 @@ fn group_next(e: u64) -> u64 {
     return kmem[((e * 8 + (at + 1) % cc)) as usize]
 }
 
-// a group of several windows shows one short dash on each side of the bar (up to two more)
 fn group_dashes(cnt: u64) {
     if cnt < 2 || pl_w == 0 {
         return
@@ -4063,8 +3601,6 @@ fn pill(x: u64, y: u64, w: u64, h: u64, vorne: bool) {
     pl_w = pw
 }
 
-// Where the free space of a horizontal bar begins and ends: behind the
-// last window button, in front of the first status field.
 fn hover_left() -> u64 {
     var x: u64 = st_x + st_w + gap()
     var i: u64 = 0
@@ -4114,7 +3650,6 @@ static mut s_bgl: [u8; 20] = "taskbar: badge txt=\0"
 static mut s_opn: [u8; 7] = " open=\0"
 static mut s_bgn: [u8; 4] = " n=\0"
 
-// r387: the number of open windows of the program a pin stands for
 fn app_windows(name: u64) -> u64 {
     var c: u64 = 0
     var j: u64 = 0
@@ -4127,7 +3662,6 @@ fn app_windows(name: u64) -> u64 {
     return c
 }
 
-// r387: a button of the bar whose picture is a glyph of the icon font
 fn glyph_button(x: u64, y: u64, w: u64, h: u64, cp: u64, edge: u64) {
     let _r: u64 = button_sym(x, y, w, h, (&s_empty[0 as usize]) as u64,
         false, false, 0, 0)
@@ -4137,7 +3671,6 @@ fn glyph_button(x: u64, y: u64, w: u64, h: u64, cp: u64, edge: u64) {
     }
 }
 
-// r387: the count on a pinned program with several windows (top right corner)
 fn badge_paint(px0: u64, py0: u64, pw0: u64, n: u64, report: bool) {
     var dg: [u8; 4] = [0 as u8; 4]
     var dl: u64 = 1
@@ -4186,7 +3719,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     wlibc.clip_set(0, y0, win_w, y0 + hh)
     let gbase: u64 = wlibc.theme(wlibc.C_TASKBAR_BG)
     wlib.draw_area(0, y0, win_w, hh, gbase)
-    // the hairline on the side that faces the desktop
+
     if cf_edge == wlibc.WE_BOTTOM {
         wlib.draw_line(0, 0, win_w, wlibc.theme(wlibc.C_BORDER))
     } else if cf_edge == wlibc.WE_TOP {
@@ -4394,14 +3927,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 sayn(kfok[(i) as usize])
                 say((&s_tt[0 as usize]) as u64)
                 say(lab)
-                // ROUND NETVIEW, addendum: WHICH mark, and WHERE -- and
-                // ONLY when there is one. A picture that is reported but
-                // not drawn and a picture that is drawn but not reported
-                // both fail in `tools/netview/run.sh`, which reads these
-                // numbers and then reads the pixels. But the normal case
-                // is `real`, and printing `netv=0` for every window of
-                // every repaint is a line about nothing on a line that
-                // three programs share.
+
                 if knv[(i) as usize] != 0 {
                     say((&s_bn[0 as usize]) as u64)
                     sayn(knv[(i) as usize])
@@ -4425,7 +3951,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         i = i + 1
     }
     if grp_w != 0 {
-        // W-C1: no resting plate behind the symbols (it read as a chip); only the hover plate of Windows 11
+
         if hot_f <= F_BAT {
             wlib.draw_board(grp_x, st_y, grp_w, btn_h(), wlib.MR_BUTTON,
                 wlibc.EL_FLAT, hover_plate(), 0)
@@ -4448,16 +3974,9 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 f_w[(f) as usize], f_h[(f) as usize], wlib.MR_BUTTON,
                 wlibc.EL_FLAT, hover_plate(), 0)
         }
-        // ROUND NETVIEW, addendum: the state of the MACHINE, in the
-        // corner, where every system has put it for thirty years. It
-        // goes in FRONT of the address and not instead of it: the icon
-        // says at a glance which of four things is true, the address
-        // says which address -- and neither of them replaces the other.
+
         var icx: u64 = 0
-        // W-C1: the language field is the code only -- no keyboard symbol (it stuck to the letters)
-        // ROUND LOOK: THE BATTERY GETS A SYMBOL. It never had one -- the
-        // percentage came from round K18 and the glyphs from round
-        // ICONS, and the two were never joined.
+
         if f == F_BAT && glyphs_ok() {
             let bid: u64 = bat_icon()
             let bx: u64 = f_x[(f) as usize] + tr_pad()
@@ -4482,18 +4001,13 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                     nl()
                 }
             } else if report {
-                // A GLYPH THAT IS NOT THERE IS SAID SO. Silence here
-                // and a missing picture on screen look the same, and
-                // one of them is a defect.
+
                 say((&lk_no[0 as usize]) as u64)
                 say((&lk_bat[0 as usize]) as u64)
                 nl()
             }
         }
-        // ROUND TON-2: THE VOLUME GETS THE SAME TREATMENT AS THE
-        // BATTERY -- symbol first, percentage behind it. Built the
-        // same way on purpose: two status fields that report
-        // differently are two fields a test has to know separately.
+
         if f == F_SND && glyphs_ok() {
             let vid: u64 = snd_icon()
             let vx: u64 = f_x[(f) as usize] + tr_pad()
@@ -4524,14 +4038,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             }
         }
         if f == F_NET {
-            // SECOND ADDENDUM, and the ORDER is the argument: the
-            // faking sign comes FIRST, before the state of the machine.
-            // What is read first is what is read at all, and "this
-            // system is telling programs a story" is the more important
-            // of the two sentences -- especially in the one case that
-            // needs it, `always` on a machine that is genuinely online,
-            // where the state icon on its own would be true and
-            // misleading at once.
+
             let sy: u64 = sys_icon()
             if sy != 0 {
                 let _s: bool = wlibc.icon_draw(sy, f_x[(f) as usize] + 2,
@@ -4556,8 +4063,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             }
             let ic: u64 = net_pic()
             if ic == 0 && glyphs_ok() {
-                // ROUND LOOK: no OSYM file on this disk, but there is an
-                // icon font. Same four states, same place, same room.
+
                 let nid: u64 = net_glyph(net_state)
                 let nx: u64 = f_x[(f) as usize] + tr_pad() + icx
                 let ny: u64 = f_y[(f) as usize]
@@ -4633,11 +4139,9 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             let n: u64 = tlen(p)
             var tx: u64 = f_x[(f) as usize] + 4 + icx
             var base: u64 = f_y[(f) as usize] + (f_h[(f) as usize] + asc) / 2 - 1
-            // r1015: the two clock lines end on the same right edge like in Windows 11 ("14:41" over
-            // "17.10.2026", both right-aligned), not on the same left edge.
+
             if (f == F_CLK || f == F_LANG) && icx == 0 {
-                // W-C1: the cell is measured text + 2 * fld_pad: the two-line clock is right-aligned at the
-                // pad (time over date), the language code and a one-line clock stand in the middle
+
                 let lw: u64 = width_of(p)
                 if f == F_CLK && f_lines[(f) as usize] > 1 {
                     if f_w[(f) as usize] >= lw + fld_pad() {
@@ -4658,8 +4162,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             var tfg: u64 = wlibc.theme(wlibc.T_FG)
             var tbg: u64 = wlibc.theme(wlibc.C_TASKBAR_BG)
             if f == F_REM {
-                // red text on the normal plate (the plate colour is the
-                // material's, draw_board does not take it for buttons)
+
                 tfg = wlibc.theme(wlibc.C_DANGER)
             }
             schild_tray = 1
@@ -4680,8 +4183,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
                 } else if f == F_SND {
                     mark = (&m_snd[0 as usize]) as u64
                 }
-                // r1130: report the colours the text was PAINTED with (tfg on tbg = the bar), not T_PANEL: the tray texts sit on the bar
-                // colour (opaque with transparency=off), and tools/desktop recomputes every glyph against exactly these two colours
+
                 say_text(mark, tx, base, tfg, tbg, p)
             }
             l = l + 1
@@ -4713,7 +4215,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
             sayn(f_h[(f) as usize])
             say((&s_fn[0 as usize]) as u64)
             sayn(f_lines[(f) as usize])
-            // W-C1: the measured width of the widest line, so a gate can check text <= cell
+
             var tmw: u64 = 0
             var tl: u64 = 0
             while tl < f_lines[(f) as usize] {
@@ -4767,11 +4269,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         pb = pb + 1
         }
     }
-    // ROUND NETVIEW, addendum: WHAT THE POINTER IS RESTING ON, as a
-    // sentence, in the empty space between the last window button and
-    // the first status field. There is no tooltip window in this system
-    // and a bar 28 pixels high cannot open one; this is the room there
-    // is, and an icon nobody can look up is a rune.
+
     if hover_on != 0 && vertical == 0 {
         let hb: u64 = hover_left()
         let he: u64 = hover_right()
@@ -4809,7 +4307,7 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
         ub_null = ub_null + 1
     }
     if report {
-        // ROUND LOOK: the RECTANGLE, not only the word inside it.
+
         say((&lk_sx[0 as usize]) as u64)
         sayn(st_x)
         say((&lk_sy[0 as usize]) as u64)
@@ -4827,15 +4325,10 @@ fn paint_band(y0: u64, hh: u64, report: bool) {
     }
 }
 
-// THE WHOLE BAR, BAND BY BAND. The drawing surface of the widget
-// library is 800 x 81 pixels; a horizontal bar is one band, a vertical
-// one is eight. Everything is clipped to the band, so each band paints
-// only what falls into it -- and the report is written in the FIRST
-// band only, because it describes the layout and not the band.
 fn paint(report: bool) {
     var y: u64 = 0
     var first: bool = true
-    //     1920 -> 136      2560 -> 102      3440 -> 76      3840 -> 68
+
     var band: u64 = BAND
     let tragf: u64 = wlibc.surf_rows()
     if tragf != 0 && tragf < band {
@@ -4858,16 +4351,6 @@ fn paint(report: bool) {
     schild_n = 0
 }
 
-// ============================================================ the drag
-//
-// WHY THE POINTER IS POLLED AND NOT AWAITED. A window is only told
-// about the pointer while the pointer is INSIDE it (kernel/wm.fi,
-// `on_mouse`). A drag from the bottom edge to the left edge leaves the
-// bar after four pixels and the button is let go on the other side of
-// the screen, where no event of ours will ever be raised. So the bar
-// asks for the position and the buttons directly (`WIG_SCREEN`), forty
-// times a second, for as long as the drag lasts -- and for no longer.
-
 static mut s_d0: [u8; 21] = "taskbar: drag start \0"
 static mut s_d1: [u8; 20] = "taskbar: drag edge=\0"
 static mut s_d2: [u8; 20] = "taskbar: drag done \0"
@@ -4888,7 +4371,6 @@ fn close_preview() {
     prev_edge = 9
 }
 
-// ONE THIN ALWAYS-ON-TOP WINDOW. Four of them make the outline.
 fn preview_win(x: u64, y: u64, w: u64, h: u64) -> u64 {
     let hd: u64 = wlibc.sys5(wlibc.WM_CREATE, (x << 16) | y,
         (w << 16) | h, (&s_pv[0 as usize]) as u64, 0, 0)
@@ -4903,10 +4385,6 @@ fn preview_win(x: u64, y: u64, w: u64, h: u64) -> u64 {
     return hd
 }
 
-// THE PREVIEW RECTANGLE FOR AN EDGE. Four thin windows and not one
-// filled sheet: a filled 128 x 600 window costs 300 kilooctets of
-// buffer, and this process has 832 for the bar, the preview and the
-// drawing surface together. An outline is 34.
 fn preview_show(edge: u64) {
     if prev_on != 0 && prev_edge == edge {
         return
@@ -4936,11 +4414,8 @@ fn preview_show(edge: u64) {
     nl()
 }
 
-// THE NEAREST EDGE TO A POINT. Plain distance to the four sides; the
-// same rule Windows 10 used, and the reason a drag towards a corner
-// picks the side you were heading for and not the one you started on.
 fn nearest_edge(mx0: u64, my0: u64) -> u64 {
-    // r828: relative to this bar's head (a pointer on another head counts as that head's edge)
+
     var mx: u64 = 0
     var my: u64 = 0
     if mx0 > hx {
@@ -5124,7 +4599,7 @@ fn drag_step() {
     drag_edge = e
     preview_show(e)
     if (wlibc.mouse_btn() & 1) == 0 {
-        // let go: this is where the edge really changes.
+
         dragging = 0
         close_preview()
         var written: u64 = 0
@@ -5149,14 +4624,12 @@ fn drag_step() {
     }
 }
 
-// ======================================================== the auto-hide
-
 static mut s_hd: [u8; 14] = "taskbar: hide\0"
 static mut s_sh2: [u8; 14] = "taskbar: show\0"
 static mut s_ms: [u8; 5] = " ms=\0"
 
 fn touches_edge(mx0: u64, my0: u64) -> bool {
-    // r828: the edge of THIS head -- a pointer on another head, or outside it, never reveals this bar
+
     if mx0 < hx || my0 < hy || mx0 >= hx + sw || my0 >= hy + sh {
         return false
     }
@@ -5179,12 +4652,6 @@ fn inside_bar(mx: u64, my: u64) -> bool {
         && my >= bar_y && my < bar_y + bar_h
 }
 
-// PULL IT IN, LET IT OUT. The measurement the runner takes is the time
-// between the pointer REACHING the edge and the bar STANDING there --
-// `hide_t0` is stamped at the first poll that saw the pointer on the
-// edge, the second stamp is taken after the repaint. Ticks are 10
-// milliseconds in this kernel (`kernel/time.fi`, TICK_HZ = 100), so
-// that is the resolution of the number and not a millisecond.
 fn autohide_step() {
     if cf_autohide == 0 {
         return
@@ -5199,12 +4666,7 @@ fn autohide_step() {
             shown = 1
             apply()
             layout()
-            // PAINTED, NOT REPORTED, and the stopwatch stops here. The
-            // first version reported the whole layout inside this paint
-            // and measured 230 ms -- most of which was the serial line,
-            // not the bar. What is timed is the work the user waits
-            // for: resize, move, reserve, draw. The layout is reported
-            // afterwards, outside the measurement.
+
             paint(false)
             let t1: u64 = ticks()
             say((&s_sh2[0 as usize]) as u64)
@@ -5228,8 +4690,6 @@ fn autohide_step() {
     }
 }
 
-// ============================================================== clicks
-
 static mut s_cl: [u8; 18] = "taskbar: click x=\0"
 static mut s_cy: [u8; 4] = " y=\0"
 static mut s_ct: [u8; 8] = " hits=\0\0"
@@ -5245,7 +4705,6 @@ static mut s_noqs: [u8; 28] = "taskbar: no quick settings\0\0"
 
 static mut menu_pid: u64 = 0
 
-// ===================================================== RUNDE TUERSCHLOSS
 fn launcher_window() -> u64 {
     var slot: u64 = 0
     while slot < 32 {
@@ -5281,13 +4740,8 @@ static mut menu_was_open: u64 = 0
 static mut hk_seen: u64 = 0
 static mut hk_erst: u64 = 1
 
-// Gemessen am fertigen Abbild (UEFI, xHCI-Tastatur, 3440x1440):
-//
-//     hk: super allein
-//     hk: super allein
 static mut hk_sagte: u64 = 0
 
-// ==================================================== RUNDE ECHTHARDWARE-2
 fn hover_brand(x: u64, y: u64) -> u64 {
     if x >= st_x && x < st_x + st_w && y >= st_y && y < st_y + st_h {
         return 900
@@ -5338,7 +4792,7 @@ fn hover_text(m: u64) -> u64 {
         return full_of(F_CLK)
     }
     if m == 903 {
-        // r782: "Akku 77 %, wird geladen" etc. out of the same model as the glyph
+
         tray_texts_sync()
         var bat_ok: u64 = 1
         if bat_unknown != 0 {
@@ -5370,10 +4824,8 @@ static mut s_cw: [u8; 4] = " w=\0"
 static mut s_ch: [u8; 4] = " h=\0"
 static mut s_cn: [u8; 4] = " n=\0"
 
-// Right click in the bar. The menus themselves (rows, labels, life cycle) are in taskbar_ctx.fi / ctxreg.fi; this only decides
-// WHICH context is meant: a pin, a window button or the empty part of the bar.
 fn rechtsklick(x: u64, y: u64) {
-    // r529: right click on a pin: "New window" (a second terminal, a second explorer ...)
+
     let pg: u64 = pin_under(x, y)
     if pg < npin {
         tip_close()
@@ -5384,7 +4836,7 @@ fn rechtsklick(x: u64, y: u64) {
     tip_close()
     if m < 1 || m > nk {
         if taskbar_ctx.open_empty() {
-            // the menu rectangle goes into the line (tools/barctx clicks the rows from it)
+
             let mw: u64 = taskbar_ctx.win()
             say((&s_ctxleer[0 as usize]) as u64)
             say((&s_cx[0 as usize]) as u64)
@@ -5420,7 +4872,6 @@ fn tb_key(c: u64) {
     taskbar_ctx.key(c)
 }
 
-// What was chosen, once per round (the menu's own event loop is `taskbar_ctx.step`).
 fn kontext_step() {
     if !taskbar_ctx.is_open() {
         return
@@ -5447,14 +4898,14 @@ fn kontext_step() {
             return
         }
         if a == taskbar_ctx.ACT_NEW_WINDOW {
-            // NEW WINDOW of the program of this button (jump list); nothing to start when the program names no bundle
+
             if kapp[((i * 24)) as usize] != 0 as u8 {
                 app_exec((&kapp[0 as usize]) as u64 + i * 24)
             }
         } else if a == taskbar_ctx.ACT_MINIMISE {
             let _a: u64 = wlibc.win_act(knv[(i) as usize], wlibc.WA_HIDE)
         } else if a == taskbar_ctx.ACT_PIN {
-            // the button stays when the window goes
+
             angeheftet[(i) as usize] = 1
         } else {
             let _c: bool = taskbar_ctx.run_common(a)
@@ -5465,7 +4916,7 @@ fn kontext_step() {
         nl()
         return
     }
-    // empty bar
+
     if taskbar_ctx.run_common(a) {
         say((&s_ctxleert[0 as usize]) as u64)
         sayn(a)
@@ -5473,12 +4924,11 @@ fn kontext_step() {
     }
 }
 
-// ==================================================== RUNDE ECHTHARDWARE-2
-const TIP_TICKS: u64 = 50 // 500 ms bei 100 Hz
+const TIP_TICKS: u64 = 50
 
 static mut tp_win: u64 = 0xFFFFFFFFFFFFFFFF
 static mut tp_was: u64 = 0
-static mut tp_seit: u64 = 0 // seit wann, in Schlaegen
+static mut tp_seit: u64 = 0
 static mut tp_count: u64 = 0
 
 static mut s_tip: [u8; 12] = "wlib: tip [\0"
@@ -5515,13 +4965,11 @@ fn tip_open(text: u64, sx: u64, sy: u64) {
     let n: u64 = tlen(text)
     let sc: u64 = wlibc.ui_scale()
     let pad: u64 = 6 * sc
-    // r399: `text_w` floors the width of the line (26.6 -> whole points); a face whose last
-    // glyph reaches the end of its advance (Inter's k) lost its tail in a bubble sized to the
-    // floor -- one point more
+
     let bw: u64 = wlibc.text_w(wlibc.F_UI, wlibc.type_px(wlibc.TY_BODY), text, n) + 2 * pad + sc
     let bh: u64 = wlibc.text_h(wlibc.type_px(wlibc.TY_BODY)) + pad
     let cur_gap: u64 = 6 * sc
-    // ============================== RUNDE BELEG: fUi SAGT, WO SIE HINGEHOERT.
+
     var x: u64 = 0
     var y: u64 = 0
     var ax0: u64 = 0
@@ -5530,7 +4978,7 @@ fn tip_open(text: u64, sx: u64, sy: u64) {
         ax0 = bar_x + f_x[(F_CLK) as usize]
         ax1 = ax0 + f_w[(F_CLK) as usize]
     }
-    // r828: the placement rule works in head-local pixels; this head's origin is added back afterwards
+
     if ax1 != 0 {
         ax0 = loc(ax0, hx)
         ax1 = loc(ax1, hx)
@@ -5539,8 +4987,7 @@ fn tip_open(text: u64, sx: u64, sy: u64) {
         loc(bar_y, hy), loc(bar_y + bar_h, hy), ax0, ax1, cur_gap, &x, &y)
     x = x + hx
     y = y + hy
-    // r: since 05.10.2026 the bubble is the one tooltip window of the scene host
-    // (barpop.fi): text, WM_SIZE, repaint, WM_MOVE, show.
+
     let i: u64 = barpop.tip_show(x, y, bw, bh, text)
     if i != 0 {
         say((&s_tipvoll[0 as usize]) as u64)
@@ -5575,7 +5022,7 @@ fn tip_hover(was: u64, text: u64, sx: u64, sy: u64) {
     if was == 0 || tip_open_is() {
         return
     }
-    // r1063: no tooltip while the calendar popup is open (it covered the "Today" button)
+
     if calpop.is_open() {
         tp_seit = now
         return
@@ -5593,21 +5040,20 @@ fn ticks_now() -> u64 {
     return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
 }
 
-// ================================================== RUNDE TOAST (S-006)
 const TOAST_TICKS: u64 = 400
-const TOAST_EIN: u64 = 20 // 200 ms Einblenden
-const TOAST_AUS: u64 = 25 // 250 ms Ausblenden
+const TOAST_EIN: u64 = 20
+const TOAST_AUS: u64 = 25
 
 static mut to_win: u64 = 0xFFFFFFFFFFFFFFFF
-static mut to_seit: u64 = 0 // wann sie aufging, in Schlaegen
+static mut to_seit: u64 = 0
 static mut to_count: u64 = 0
-static mut to_seen: u64 = 0 // Stand von noti_total beim letzten Blick
+static mut to_seen: u64 = 0
 static mut to_text: u64 = 0
-static mut to_prio: u64 = 0 // 1 = Hinweis, 2 = ernst
+static mut to_prio: u64 = 0
 static mut to_w: u64 = 0
 static mut to_h: u64 = 0
 static mut to_erst: u64 = 1
-static mut to_alpha_war: u64 = 0xFFFFFFFFFFFFFFFF // zuletzt gemalter Verlauf
+static mut to_alpha_war: u64 = 0xFFFFFFFFFFFFFFFF
 static mut to_takt: u64 = 0
 static mut to_x: u64 = 0
 static mut to_y: u64 = 0
@@ -5738,7 +5184,7 @@ fn toast_clicked() -> bool {
 }
 
 fn toast_step() {
-    // ================================ RUNDE TOAST: DIE DROSSEL, GEMESSEN.
+
     to_takt = to_takt + 1
     if (to_takt % 10) != 0 && to_win == 0xFFFFFFFFFFFFFFFF {
         return
@@ -5759,7 +5205,7 @@ fn toast_step() {
             if pr == 0 {
                 pr = 1
             }
-            // do not disturb (quick settings tile): the bell counts it, no pop-up
+
             if !qs.dnd_on() {
                 toast_auf((&to_puf[0 as usize]) as u64, pr)
             }
@@ -5799,8 +5245,6 @@ fn tip_step() {
     tip_hover(m, hover_text(m), mx, my)
 }
 
-// r831: true when this bar is the one that answers a key for the start menu: the bar of the output under the pointer
-// (the first present output when the pointer is on none). One output: always.
 fn hotkey_mine() -> bool {
     let n: u64 = wlibc.head_count()
     if n <= 1 {
@@ -5854,21 +5298,13 @@ fn hotkey_step() {
     }
     hk_erst = 0
     if key_code == 0 {
-        // r831: with several outputs every bar sees the key; only the bar of the output the pointer is on opens the menu
-        // (else the second bar would close it again at once)
+
         if hotkey_mine() {
             startmenue_um()
         }
         return
     }
-    // ROUND TON-2: SUPER+M SILENCES THE MACHINE.
-    //
-    // `m` and not one of the multimedia keys, because this kernel's
-    // keyboard driver (kernel/kbd.fi) delivers letters and not the
-    // extended scan codes a media key sends -- a shortcut on a key
-    // that never arrives is not a shortcut. `m` for mute is what
-    // Windows, GNOME and KDE all use for the same thing.
-    //     if c == 108 || c == 76 { ... SP_ON = 1 ... return }
+
     if key_code == 101 || key_code == 69 {
         var bn: [u8; 9] = "explorer\0"
         start_bundle((&bn[0 as usize]) as u64, 8)
@@ -5900,7 +5336,7 @@ fn hotkey_step() {
         return
     }
     if key_code == 118 || key_code == 86 {
-        // D-015: Win+V = the clipboard history popup (bundle `cliphist` -> /bin/cliphist)
+
         var bn5: [u8; 9] = "cliphist\0"
         start_bundle((&bn5[0 as usize]) as u64, 8)
         return
@@ -5953,7 +5389,6 @@ static mut desk_hidden: u64 = 0
 static mut desk_ids: [u64; 16] = [0 as u64; 16]
 static mut desk_n: u64 = 0
 
-// W1 (hotkeys): start the bundle /apps/<name>.osp/start (same path the pinned buttons use).
 fn start_bundle(name: u64, len: u64) {
     var pp: [u8; 64] = [0 as u8; 64]
     var pv: [u8; 7] = "/apps/\0"
@@ -5986,7 +5421,6 @@ fn start_bundle(name: u64, len: u64) {
     nl()
 }
 
-// W1 (hotkeys): Win+D. First press hides every window of the bar's list (remembering which), the second brings them back.
 fn show_desktop_toggle() {
     let _l: bool = list_read()
     var i: u64 = 0
@@ -6020,9 +5454,6 @@ static mut s_hk: [u8; 21] = "taskbar: klinke seq=\0"
 static mut s_hkw: [u8; 7] = "  war=\0"
 static mut s_hkt: [u8; 9] = "  taste=\0"
 
-// L-008: start the screenshot tool. region=false: `snip -q` (whole screen,
-// saved to /bilder/Screenshots and put on the clipboard); region=true:
-// `snip -r` (frozen picture, drag a rectangle).
 fn snip_launch(region: bool) {
     var path: [u8; 10] = "/bin/snip\0"
     var path_t: [u8; 11] = "/bin/snipt\0"
@@ -6037,7 +5468,7 @@ fn snip_launch(region: bool) {
     } else {
         argv[1 as usize] = (&flag_q[0 as usize]) as u64
     }
-    // snip creates /bilder/Screenshots itself: stays root until the user has a writable picture folder (SESSUID3 open point)
+
     let pid: u64 = ulib.sys(ulib.SYS_EXEC, argv[0 as usize],
         (&argv[0 as usize]) as u64, 2)
     say((&s_sn[0 as usize]) as u64)
@@ -6046,7 +5477,7 @@ fn snip_launch(region: bool) {
 }
 
 fn startmenue_um() {
-    // r831: the menu opens on the output of THIS bar (the launcher reads it when it is shown / started)
+
     wlibc.start_head_set(my_head)
     let w: u64 = launcher_window()
     if w != 0 {
@@ -6065,8 +5496,7 @@ fn startmenue_um() {
         nl()
         return
     }
-    //     fn do_spawn(state, me, prog, arg) {
-    //         if prog == 0 || prog > 16 { return neg(errno.E_INVAL) }
+
     let pid: u64 = ulib.sys(ulib.SYS_EXEC,
         (&p_start[0 as usize]) as u64, 0, 0)
     menu_pid = pid
@@ -6081,13 +5511,10 @@ static mut z_nc: [u8; 7] = "notifc\0"
 static mut z_chev: [u8; 8] = "chevron\0"
 static mut z_clk: [u8; 6] = "clock\0"
 
-// r529: start pin `pk` as a NEW instance (the path /apps/<name>.osp/start, the one the launcher uses), whether or not one
-// already runs. A click on a running pin only switches the window; a terminal needs a way to open one more.
 fn pin_exec(pk: u64) {
     app_exec((&pinname[0 as usize]) as u64 + pk * 24)
 }
 
-// start /apps/<name>.osp/start for a bundle name (23 bytes max, NUL ended) at `src`
 fn app_exec(src: u64) {
     var pp: [u8; 64] = [0 as u8; 64]
     var pv: [u8; 7] = "/apps/\0"
@@ -6127,10 +5554,7 @@ fn click(x: u64, y: u64) {
     sayn(x)
     say((&s_cy[0 as usize]) as u64)
     sayn(y)
-    // THIRD ADDENDUM: the icon group in the corner opens the quick
-    // settings, the way the same corner does on every system that has
-    // such a panel. Before the window buttons, because it is a field
-    // and not a button and would otherwise fall through to the drag.
+
     if grp_w != 0 && x >= grp_x && x < grp_x + grp_w
         && y >= st_y && y < st_y + btn_h() {
         say((&s_ct[0 as usize]) as u64)
@@ -6150,8 +5574,7 @@ fn click(x: u64, y: u64) {
         say((&s_ct[0 as usize]) as u64)
         say((&z_chev[0 as usize]) as u64)
         nl()
-        // W-TRAY5: the chevron opens the tray flyout (traypop.fi) above the button. r1015: the anchor is in SCREEN
-        // points (bar origin + button), not in the bar window's own -- the card sat at the top of the screen before.
+
         calpop.shut_now()
         traypop.toggle(bar_x + chv_x, bar_y + chv_y, chv_w, chv_h, net_da, net_state)
         if chev_open == 0 {
@@ -6164,9 +5587,7 @@ fn click(x: u64, y: u64) {
         paint(true)
         return
     }
-    // THE BELL opens the notification centre (history + clear). The field exists
-    // only while something is unread (f_w == 0 otherwise), so this never fires on
-    // an empty bar.
+
     if f_w[(F_NOTI) as usize] != 0
         && x >= f_x[(F_NOTI) as usize]
         && x < f_x[(F_NOTI) as usize] + f_w[(F_NOTI) as usize]
@@ -6178,7 +5599,7 @@ fn click(x: u64, y: u64) {
         notifc.toggle()
         return
     }
-    // P-011: the clock opens the calendar popup (calpop.fi) above it; the chevron's flyout makes room
+
     if f_w[(F_CLK) as usize] != 0
         && x >= f_x[(F_CLK) as usize]
         && x < f_x[(F_CLK) as usize] + f_w[(F_CLK) as usize]
@@ -6205,10 +5626,7 @@ fn click(x: u64, y: u64) {
         qs.toggle()
         return
     }
-    // ROUND TON-2: THE SPEAKER OPENS THE SAME PANEL. It is the field
-    // next door and it belongs to the same corner -- a symbol that
-    // shows a state and does nothing when it is clicked is a symbol
-    // that teaches people not to click it.
+
     if snd_da != 0 && f_w[(F_SND) as usize] != 0
         && x >= f_x[(F_SND) as usize]
         && x < f_x[(F_SND) as usize] + f_w[(F_SND) as usize]
@@ -6238,7 +5656,7 @@ fn click(x: u64, y: u64) {
             if w2 < MAXK {
                 var rc2: u64 = 0
                 if kcnt[(w2) as usize] > 1 && kfok[(w2) as usize] != 0 {
-                    // grouped and already in front: walk to the next window of the program
+
                     rc2 = wlibc.win_act(group_next(w2), wlibc.WA_RAISE)
                 } else {
                     rc2 = wlibc.win_act(kid[(w2) as usize], wlibc.WA_TOGGLE)
@@ -6290,8 +5708,7 @@ fn click(x: u64, y: u64) {
         }
         i = i + 1
     }
-    // NOTHING WAS HIT -- so this press is the beginning of a drag. That
-    // is the whole gesture: press on an empty part of the bar and pull.
+
     say((&s_ct[0 as usize]) as u64)
     say((&z_none[0 as usize]) as u64)
     nl()
@@ -6306,14 +5723,12 @@ fn click(x: u64, y: u64) {
     nl()
 }
 
-// ================================================================ main
-
 static mut s_bad: [u8; 23] = "taskbar: no surface\0\0\0\0"
 static mut s_nol: [u8; 40] = "taskbar: no layer 2 -- not root?\0\0\0\0\0\0\0\0"
 static mut s_rdy: [u8; 22] = "taskbar: ready ascent\0"
 static mut s_eq: [u8; 2] = "=\0"
 static mut s_stt: [u8; 18] = "taskbar: state n=\0"
-// RUNDE 31: HAT fUi WIRKLICH GEMALT?
+
 static mut s_fui: [u8; 6] = " fui=\0"
 static mut s_fuix: [u8; 7] = " fuix=\0"
 static mut s_fuig: [u8; 7] = " fuig=\0"
@@ -6342,25 +5757,6 @@ static mut t_btn: [u8; 8] = "Battery\0"
 static mut t_nin: [u8; 14] = "Notifications\0"
 static mut t_stn: [u8; 6] = "Start\0"
 
-// =============================================================== r381 STAGE 1
-// THE BAR IS A WINDOW OF THE SCENE HOST (window 0), and its rectangles are nodes.
-//
-// What did not change: `layout()` computes every rectangle, `paint_band` paints with
-// the same painters into the same one-band surface, the polled pointer, the drag,
-// the auto-hide. What did:
-//   * the window is `fuiscene.open_plain` and not a raw `WM_CREATE` window;
-//   * a band is not blitted to the window server any more but copied into `bar_r`
-//     (a retained picture of the whole bar); the host paints it as its backdrop
-//     (`bar_overlay`, over the faces of the ghost nodes) and pushes it -- so the focus ring and everything else the
-//     host draws land on top of the bar's own picture, and nothing is lost when
-//     the host repaints;
-//   * the rectangles are ALSO a tree of nodes that paint nothing (ghost buttons) --
-//     start, task view, chevron, pins, window buttons, status fields, extension
-//     widgets, each with a key and the name a screen reader says: the bar is
-//     visible to the accessibility export, the bridge can press a node, and the
-//     keyboard focus ring has something to stand on;
-//   * the pointer events of the window come to `bar_raw` (the old `EV_DOWN` code,
-//     unchanged), the host skips them.
 const BI_MAX: u64 = 48
 const K_START: u64 = 1
 const K_TV: u64 = 2
@@ -6369,7 +5765,7 @@ const K_PIN: u64 = 10
 const K_TASK: u64 = 30
 const K_FIELD: u64 = 60
 const K_PLUG: u64 = 80
-static mut bar_r: u64 = 0 // the retained picture of the bar, win_w x win_h x 4 octets
+static mut bar_r: u64 = 0
 static mut bar_cap: u64 = 0
 static mut bar_ready: u64 = 0
 static mut bi_n: u64 = 0
@@ -6379,7 +5775,7 @@ static mut bi_w: [u64; 48] = [0 as u64; 48]
 static mut bi_h: [u64; 48] = [0 as u64; 48]
 static mut bi_k: [u64; 48] = [0 as u64; 48]
 static mut bi_l: [u64; 48] = [0 as u64; 48]
-static mut bi_o: [u64; 48] = [0 as u64; 48] // the order of the tree
+static mut bi_o: [u64; 48] = [0 as u64; 48]
 static mut bar_nodes: u64 = 0
 static mut bar_pump_said: u64 = 0
 
@@ -6396,8 +5792,6 @@ fn bi_add(x: u64, y: u64, w: u64, h: u64, key: u64, lab: u64) {
     bi_n = bi_n + 1
 }
 
-// the name of a status field for the accessibility tree: its text, or a word when
-// the field is an icon only
 fn field_name(f: u64) -> u64 {
     let t: u64 = full_of(f)
     if tlen(t) != 0 && f != F_NET {
@@ -6418,7 +5812,6 @@ fn field_name(f: u64) -> u64 {
     return t
 }
 
-// does item `p` come after item `q` (later row, or the same row and further right)?
 fn bi_after(p: u64, q: u64) -> bool {
     if bi_y[(p) as usize] != bi_y[(q) as usize] {
         return bi_y[(p) as usize] > bi_y[(q) as usize]
@@ -6426,7 +5819,6 @@ fn bi_after(p: u64, q: u64) -> bool {
     return bi_x[(p) as usize] > bi_x[(q) as usize]
 }
 
-// every rectangle of the bar, in the order of the tree
 fn bi_collect() {
     bi_n = 0
     bi_add(st_x, st_y, st_w, st_h, K_START,
@@ -6471,7 +5863,7 @@ fn bi_collect() {
         }
         q = q + 1
     }
-    // order: top to bottom, then left to right (insertion sort of the indices, at most 48)
+
     var a: u64 = 0
     while a < bi_n {
         bi_o[(a) as usize] = a
@@ -6498,9 +5890,8 @@ static mut s_nocp: [u8; 19] = "taskbar: no calpop\0"
 static mut a_chev: [u8; 16] = "taskbar.chevron\0"
 static mut a_quick: [u8; 14] = "taskbar.quick\0"
 static mut a_pinp: [u8; 13] = "taskbar.pin.\0"
-static mut a_pinb: [u8; 440] = [0 as u8; 440] // MAXPIN x 44
+static mut a_pinb: [u8; 440] = [0 as u8; 440]
 
-// the bus action of a node (what `act call a11y.press action=...` names; 0 = none)
 fn bar_action(key: u64) -> u64 {
     if key == K_START {
         return (&a_start[0 as usize]) as u64
@@ -6527,8 +5918,6 @@ fn bar_action(key: u64) -> u64 {
     return 0
 }
 
-// The tree: one row per line of the bar (a horizontal bar is ONE row), spacers where
-// there is room between two rectangles, a ghost button for each rectangle.
 fn bar_build() {
     let r: usize = fuiscene.root()
     fuiscene.set_pad(r, 0)
@@ -6571,8 +5960,6 @@ fn bar_build() {
     bar_nodes = nodes
 }
 
-// a node was pressed through the tree (the accessibility export, the keyboard): the
-// same as a click in the middle of its rectangle
 fn bar_press(key: u64) {
     var i: u64 = 0
     while i < bi_n {
@@ -6585,18 +5972,12 @@ fn bar_press(key: u64) {
     }
 }
 
-// the pointer events of the bar's window (the old loop's `EV_DOWN` branch)
 static mut s_kbon: [u8; 17] = "taskbar: keys on\0"
 static mut s_kbk: [u8; 16] = "taskbar: key n=\0"
 static mut s_kboff: [u8; 19] = "taskbar: keys off \0"
-static mut bar_kb: u64 = 0 // 1 = the keyboard is in the bar (Super+T)
+static mut bar_kb: u64 = 0
 static mut bar_kb_btn: u64 = 0
 
-// Super+T: the keyboard goes to the bar. Tab / Shift+Tab walk the nodes (the focus ring
-// is the host's), Enter or Space presses the focused one (the same as a click in its
-// middle), Escape, a press of the pointer or an activation gives the keyboard back.
-// While it is on, the window server hands the keys to the bar AND to the focused
-// program (WS_KEYS), so it is short on purpose.
 fn bar_keys(on: bool) {
     if bar_ready == 0 {
         return
@@ -6682,7 +6063,6 @@ fn bar_copy(dst: u64, src: u64, n: u64) {
     }
 }
 
-// a band of the painted bar goes into the retained picture
 fn bar_push(y0: u64, hh: u64) -> u64 {
     if bar_r == 0 || hh == 0 || win_w == 0 {
         return 0
@@ -6714,7 +6094,6 @@ fn bar_push(y0: u64, hh: u64) -> u64 {
     return win_w * rows
 }
 
-// the host's overlay for window 0: the retained picture of the bar
 fn bar_overlay() {
     let dst: u64 = fuiscene.canvas_px()
     if dst == 0 || bar_r == 0 {
@@ -6735,8 +6114,6 @@ fn bar_overlay() {
     bar_copy(dst, bar_r, rows * win_w * 4)
 }
 
-// the host paints what the bar painted: rebuild the tree (the rectangles moved) and
-// let the host push the picture. Called after every paint of the bar.
 fn bar_sync() {
     if bar_ready == 0 {
         return
@@ -6745,7 +6122,6 @@ fn bar_sync() {
     fuiscene.refresh()
 }
 
-// one turn of the host for the bar's window; a node that was pressed comes back as a key
 fn bar_pump() {
     if bar_ready == 0 {
         return
@@ -6761,7 +6137,6 @@ fn bar_pump() {
     bar_kb_step()
 }
 
-// the size of the bar's window (the host re-binds its canvas at its next turn)
 fn bar_size(w: u64, h: u64) -> u64 {
     let _s: bool = fuiscene.win_select(0)
     if fuiscene.win_size(w, h) {
@@ -6776,14 +6151,11 @@ static mut s_hd1: [u8; 22] = "taskbar: head my=\0\0\0\0\0"
 static mut s_hd2: [u8; 5] = " on=\0"
 static mut s_hd3: [u8; 7] = " spawn\0"
 static mut quit_req: u64 = 0
-// W-C3g: one serial line per followed screen change, NOT gated by /etc/uitrace (tools/vmsvgaresize judges it: the bar must follow every step)
+
 static mut s_fw1: [u8; 26] = "taskbar: follow screen w=\0"
 
-// r828: find out which output this instance serves and how big it is. The first instance (no `--head`) serves the
-// first head that exists; `--head N` serves head N. On a machine without a head table (one screen) nothing changes:
-// hx = hy = 0, sw/sh = the screen. Returns true when the rectangle differs from what was set before.
 fn head_setup() -> bool {
-    // r1004: a resolution change (host hint, Settings) moves the whole desktop rectangle
+
     let _sr: bool = wlibc.screen_refresh()
     var nx: u64 = 0
     var ny: u64 = 0
@@ -6825,7 +6197,6 @@ fn head_setup() -> bool {
     return changed
 }
 
-// Start one more bar for output `hd`: /bin/taskbar --head N
 fn spawn_bar(hd: u64) {
     var num: [u8; 2] = [48 as u8, 0 as u8]
     num[0 as usize] = (48 + hd) as u8
@@ -6842,9 +6213,6 @@ fn spawn_bar(hd: u64) {
     nl()
 }
 
-// Polled a few times a second. The first instance starts a bar for every other head that appears (and forgets it when
-// the head goes, so a replug starts a new one); a `--head` instance ends when its head is gone; a head whose rectangle
-// changed (new mode, replug) moves the bar there.
 fn heads_step() {
     if head_arg != 0 && !wlibc.head_present(my_head) {
         quit_req = 1
@@ -6866,7 +6234,7 @@ fn heads_step() {
         }
     }
     if head_setup() {
-        // one write per piece, no ^ anchor needed by the readers (serial lines may interleave under load)
+
         lineout.add_text((&s_fw1[0 as usize]) as u64)
         lineout.add_num(sw)
         lineout.add_text((&s_gx2[0 as usize]) as u64)
@@ -6893,7 +6261,7 @@ fn heads_step() {
 }
 
 fn u_start(args: u64) -> u64 {
-    // DELL ROUND: this program never waits for what it starts.
+
     ulib.ignore_children()
     dbg_setup(args)
     var once: bool = false
@@ -6928,12 +6296,10 @@ fn u_start(args: u64) -> u64 {
         nl()
         return 1
     }
-    // ROUND FUI-TEXT: the type of this program is set by fUi.
+
     let _ft: bool = fuiglyph.install()
     let _t0: u64 = wlibc.theme_reload()
-    // ROUND NETVIEW, addendum: the seven pictures, once, at the start.
-    // A bar that reads them every repaint would read them sixty times a
-    // second for something that never changes.
+
     icons_load()
     sw = wlibc.screen_w()
     sh = wlibc.screen_h()
@@ -6945,17 +6311,7 @@ fn u_start(args: u64) -> u64 {
         cf_from_file = 1
     }
     geometry()
-    // THE WINDOW IS CREATED AS LARGE AS THE LARGEST CONFIGURATION AND
-    // NOT AS LARGE AS THE CURRENT ONE. `win_size` can shrink a window
-    // and can grow it back, but it cannot grow it past the buffer it
-    // was created with -- and a bar that starts at the bottom (800 x 28,
-    // 89 kilooctets) and is dragged to the left (104 x 600, 249) would
-    // be refused at exactly that moment.
-    // r381: window 0 of the scene host. Its buffer holds the area of the largest
-    // configuration (a vertical bar V_MAX wide, or a horizontal one h_max() high),
-    // laid out as w x h with w = the screen's width.
-    // r1004: the buffer is sized for a screen up to 3840x2160 (never less than the current one): a window can shrink inside its buffer
-    // but never grow past it, and the host may enlarge the screen while the bar runs.
+
     var ref_w: u64 = 3840
     var ref_h: u64 = 2160
     if sw > ref_w {
@@ -6970,10 +6326,7 @@ fn u_start(args: u64) -> u64 {
     }
     let cw0: u64 = sw
     let ch0: u64 = (area + sw - 1) / sw
-    // On layer L_TOP from the start: a window that is created on L_NORMAL takes the keyboard
-    // focus from the program the person is typing in (barpop: `notify hello toast` went into
-    // the bar). A program that may not use L_TOP (not root) falls back to L_NORMAL, as the
-    // raw window did, and the code below says so.
+
     var made: bool = fuiscene.open_plain(0, 0, cw0, ch0, txt((&k_title[0 as usize]) as u64,
         (&s_title[0 as usize]) as u64), wlibc.L_TOP, bar_build)
     if !made {
@@ -7017,26 +6370,22 @@ fn u_start(args: u64) -> u64 {
     let _u: bool = status_build()
     let _pb: bool = plugbar_read()
     let _l: bool = list_read()
-    // THIRD ADDENDUM: the quick settings own a second window of this
-    // process, created here and kept hidden. Opening it is a move and a
-    // repaint and NOT a program start -- which is why it can be timed
-    // in microseconds.
+
     if !qs.init(cf_autohide) {
         say((&s_noqs[0 as usize]) as u64)
         nl()
     }
-    // the tooltip and the toast: one window each on the scene host (after qs.init,
-    // which reserves window 0 for the bar's own window)
+
     if !barpop.init() {
         say((&s_nobp[0 as usize]) as u64)
         nl()
     }
-    // r387: the task view card (hidden until its button is pressed)
+
     if !traypop.init() {
         say((&s_notp[0 as usize]) as u64)
         nl()
     }
-    // P-011: the calendar popup (opened by a press on the clock field)
+
     if !calpop.init() {
         say((&s_nocp[0 as usize]) as u64)
         nl()
@@ -7096,10 +6445,7 @@ fn u_start(args: u64) -> u64 {
     var s_dk: [u8; 17] = "taskbar: deko n=\0"
     say((&s_dk[0 as usize]) as u64)
     sayn(wlibc.deco_push())
-    // ROUND PAINT: and the FORM right after the colour.  Both come from
-    // the same resolved token set, so they have to be pushed together
-    // or a `modern` window would get modern colours and classic corners
-    // for one repaint.
+
     var s_fm: [u8; 15] = "  form n=\0\0\0\0\0\0"
     say((&s_fm[0 as usize]) as u64)
     sayn(wlibc.form_push())
@@ -7111,18 +6457,16 @@ fn u_start(args: u64) -> u64 {
     var round: u64 = 0
     var tsum: u64 = wlibc.theme_sum()
     var alive: bool = true
-    // W-W (18.10.2026): quiet backoff -- see the end of the loop
+
     var quiet: u64 = 0
-    // W-C3g: pollers are DUE-based, not `round % N`. In quiet mode `round` advances by 2, so its parity at the check was fixed:
-    // with the wrong parity `round % 8` (heads_step) and `round % 10` NEVER hit and the bar never followed a resolution change.
+
     var due8: u64 = 8
     var due5: u64 = 5
     var due10: u64 = 10
     var q_mx: u64 = 0
     var q_my: u64 = 0
     while alive {
-        // r381: the events of the bar's window come through the host (`bar_raw` for the
-        // pointer), a node pressed through the tree comes back from `bar_pump`
+
         bar_pump()
         if !fuiscene.alive() {
             alive = false
@@ -7133,11 +6477,7 @@ fn u_start(args: u64) -> u64 {
         if dragging != 0 {
             drag_step()
         }
-        // THIRD ADDENDUM. The panel polls its own window, the hotkey
-        // latch and the pointer; the only thing it hands back is the
-        // one setting that lives in a FILE THIS BAR OWNS. Two writers
-        // of `/etc/taskbar.conf` inside one process would be two
-        // answers to one question.
+
         let _qsc: bool = qs.step()
         let _tvs: bool = taskview.step()
         let _tps: bool = traypop.step()
@@ -7178,14 +6518,11 @@ fn u_start(args: u64) -> u64 {
             }
         }
         var fresh: bool = false
-        // ROUND NETVIEW, addendum. Every poll, because the pointer
-        // moves between polls and a sentence that appears half a second
-        // after the pointer arrived is a sentence nobody waits for. It
-        // costs a comparison unless something changed.
+
         if hover_step() {
             fresh = true
         }
-        if dnd_bar_step() { // W-DND
+        if dnd_bar_step() {
             fresh = true
         }
         if round >= due5 {
@@ -7194,7 +6531,7 @@ fn u_start(args: u64) -> u64 {
                 fresh = true
             }
         }
-        // ==================================== RUNDE ACPI-EREIGNISSE
+
         let evc: u64 = ulib.sys(SYS_PWRGET, PG_EVCHANGE, 0, 0)
         if !ulib.bad(evc) && evc != 0 {
             ev_seen = ev_seen + 1
@@ -7232,11 +6569,7 @@ fn u_start(args: u64) -> u64 {
                 let _s2: bool = status_build()
                 fresh = true
             }
-            // AND THE CONFIGURATION. This is how a change made in
-            // /bin/settings arrives here without a restart: the
-            // settings write the file, the bar notices within half a
-            // second. There is no message, no shared memory and no
-            // second copy of the state -- there is the file.
+
             let old_e: u64 = cf_edge
             let old_h: u64 = cf_height
             let old_w: u64 = cf_width
@@ -7257,13 +6590,7 @@ fn u_start(args: u64) -> u64 {
         }
         if fresh && shown != 0 {
             layout()
-            // REPORTED, NOT JUST PAINTED -- and the difference cost two
-            // measurements. The first version reported the layout only
-            // on the very first paint. By the time the screenshot was
-            // taken the starter had opened a window, the buttons had
-            // been re-laid out and re-shortened, and the runner was
-            // comparing the picture against a layout replaced seconds
-            // earlier. Every repaint now says what it painted.
+
             paint(true)
             say((&s_stt[0 as usize]) as u64)
             sayn(nk)
@@ -7283,12 +6610,7 @@ fn u_start(args: u64) -> u64 {
             sayn(fuib.fui_reasons())
             nl()
         }
-        // AND ONCE MORE BEFORE THE SLEEP. Measured, not guessed: with
-        // one look per turn the hotkey took 93 to 128 milliseconds,
-        // because a key pressed early in a turn waits out the whole
-        // repaint of the bar -- WITH its report on the serial line --
-        // before anything looks at the latch. A second look here costs
-        // one system call and takes the repaint out of the wait.
+
         let _qs2: bool = qs.step()
         ub_round = ub_round + 1
         if ub_round >= ub_naechster {
@@ -7314,13 +6636,7 @@ fn u_start(args: u64) -> u64 {
             ub_qwhy = 0
             nl()
         }
-        // W-W (18.10.2026): QUIET BACKOFF. VirtualBox idle desktop: the bar showed ~36 % of
-        // a core with nothing happening (40 rounds/s x ~15 pollers). After QUIET_ROUNDS
-        // rounds (2 s) without ANY sign of life -- nothing repainted, no popup or drag
-        // moving, no power event, pointer still -- the bar sleeps 50 ms instead of 25 ms
-        // and counts that round double, so the `round % N` pollers (window list, status,
-        // theme, conf) keep their rate in time (list_read: 250 ms instead of 125 ms).
-        // Any sign of life brings the 25 ms rhythm back at once.
+
         let mxn: u64 = wlibc.mouse_x()
         let myn: u64 = wlibc.mouse_y()
         var qwhy: u64 = 0
