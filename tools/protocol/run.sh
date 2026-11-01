@@ -309,7 +309,7 @@ rm -f "$sock"
 
 if [ -s "$TMPD/panic.ppm" ]; then
     ok "a screenshot of the panic exists ($(stat -c%s "$TMPD/panic.ppm") octets)"
-    python3 tools/protocol/schirmtext.py "$TMPD/panic.ppm" kernel/gfx/font.fi \
+    python3 tools/protocol/screentext.py "$TMPD/panic.ppm" kernel/gfx/font.fi \
         > "$TMPD/screen.txt" 2>"$TMPD/screen.err"
     if [ -s "$TMPD/screen.txt" ]; then
         echo "        --- what is on the screen:"

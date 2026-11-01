@@ -170,7 +170,7 @@ Die Messtafel der Runde BLECHFÜNF (24 × 48 Zeichen) bleibt und läuft
 davor — sie reicht für Vektor, RIP und vier rohe Adressen und für nichts
 sonst.
 
-### 4. Der Bildschirm wird WIRKLICH GELESEN — `tools/protocol/schirmtext.py`
+### 4. Der Bildschirm wird WIRKLICH GELESEN — `tools/protocol/screentext.py`
 
 Ein Testläufer, der zählt, wie viele Pixel nicht rot sind, misst nicht
 „fünf aufgelöste Symbole" — er misst, dass irgendetwas gemalt wurde. Und
@@ -178,7 +178,7 @@ ein Läufer, der statt des Bildes die serielle Ausgabe liest, misst den
 *anderen* Weg; gerade der Panik-Bildschirm ist für die Maschine gebaut,
 die keine serielle Leitung hat.
 
-`schirmtext.py` holt die Glyphen aus `kernel/font.fi`, legt über das PPM
+`screentext.py` holt die Glyphen aus `kernel/font.fi`, legt über das PPM
 ein Raster von 8 × 16, macht aus jeder Zelle wieder sechzehn Oktette und
 schlägt sie in der Glyphentafel nach. Das ist keine Zeichenerkennung mit
 Wahrscheinlichkeiten, sondern die exakte Umkehrung des Zeichnens.
@@ -296,7 +296,7 @@ Kollisionen.
 `kernel/arch/x86_64/osym.s`, `kernel/user/log.fi`,
 `kernel/user/crash.fi`, `kernel/user/noise.fi`,
 `tools/kernel/symtab.py`, `tools/protocol/run.sh`,
-`tools/protocol/schirmtext.py`, `STATUS-PROTOKOLL.md`.
+`tools/protocol/screentext.py`, `STATUS-PROTOKOLL.md`.
 
 **Geändert:** `kstate.fi` (LOG_OFF, KDATA_SIZE, vier Modusworte),
 `boot.s`, `arch/x86_64/smp.fi` (Phase PH_LOG, `lograce`, `logbank`),
