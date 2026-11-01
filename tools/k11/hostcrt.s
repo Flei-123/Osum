@@ -1,30 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* tools/k11/hostcrt.s -- NUR ZUM ENTWICKELN, nicht Teil des Systems.
- *
- * Dieselben Programme, gebunden fuer den WIRT. Das geht, weil die
- * Aufrufnummern dieses Userlands seit Runde K4 die von Linux sind: ein
- * Programm, das `open`, `read`, `write`, `lseek` und `exit` ruft, laeuft
- * unveraendert unter Linux -- es fehlt nur der Einstieg, denn Osum legt
- * den Argumentblock in rdi und Linux legt ihn auf den Stapel.
- *
- * Und genau da liegt die Ueberraschung: der Block, den `kernel/elf.fi`
- * baut (argc, dann die Zeiger, dann eine Null), hat DIESELBE Form wie
- * der Stapel bei `_start` unter Linux. `mov rdi, rsp` genuegt.
- *
- * Wozu das gut ist: `find`, `sed`, `diff`, `tar` und `gzip` lassen sich
- * damit unmittelbar gegen ihr GNU-Gegenstueck halten, ohne QEMU dazwischen
- * -- eine Runde dauert Millisekunden statt Minuten. Die ABNAHME misst
- * trotzdem in QEMU auf dem echten Kernel; das hier ist die Werkbank.
- *
- * Was hier NICHT laeuft: `xargs` und `top`. Sie rufen 1000 (spawn), 1002
- * (sysinfo) und 1003 (pstat), und die gibt es auf Linux nicht.
- */
     .section .text
     .globl _start
 _start:
     xorq %rbp, %rbp
-    movq %rsp, %rdi                 /* argc, dann argv[] -- wie in Osum */
-    andq $-16, %rsp
+    movq %rsp, %rdi    andq $-16, %rsp
     call USER_ENTRY
     movq %rax, %rdi
     movq $60, %rax

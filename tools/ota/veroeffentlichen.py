@@ -200,8 +200,8 @@ def gesperrt_lesen(aus):
 
 def gesperrt_schreiben(aus, liste):
     with open(os.path.join(aus, "gesperrt.txt"), "w") as f:
-        f.write("# zurueckgezogene Fassungen. Ein Geraet spielt sie NICHT\n")
-        f.write("# mehr ein, auch wenn es lange offline war.\n")
+        f.write("# withdrawn versions. A device does NOT install them\n")
+        f.write("# any more, even if it was offline for a long time.\n")
         for n in sorted(set(liste)):
             f.write("%d\n" % n)
 

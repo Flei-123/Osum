@@ -270,18 +270,6 @@ isr_return_in_nmi:
  */
     .set KSTACK_CUR, 344            /* kstate.KSTACK_CUR -- kstate.fi */
 
-    /* RUNDE VIELKERN: DIE BEIDEN WOERTER LIEGEN JETZT JE KERN.
-     *
-     * Die Zahlen sind die Feldabstaende im `cpu`-Satz (kernel/cpu.fi,
-     * C_SYSRSP und C_KSTACK), und die GS-Basis dieses Kerns zeigt auf
-     * seinen eigenen Satz (kernel/arch/x86_64/user.fi, `gs_set`).
-     * Damit ist `%gs:CPU_KSTACK` auf jedem Kern etwas anderes -- und
-     * genau das ist der ganze Unterschied zu vorher.
-     *
-     * Ring 3 may own GS (arch_prctl ARCH_SET_GS, T_GSBASE), so every
-     * ring-3 entry and exit pairs a `swapgs`: inside the kernel GS base is
-     * this core's `cpu` record, and the task's user GS base waits in
-     * KERNEL_GS_BASE (switched per task by fsbase_apply). */
     .set CPU_SYSRSP, 136            /* cpu.C_SYSRSP -- kernel/cpu.fi */
     .set CPU_KSTACK, 144            /* cpu.C_KSTACK -- kernel/cpu.fi */
     .set CPU_SYSCALLS, 160          /* cpu.C_SYSCALLS -- kernel/cpu.fi */
@@ -329,13 +317,6 @@ syscall_entry:
     swapgs
     movq %rsp, %gs:CPU_SYSRSP       /* the user stack -- no register is free */
     movq %gs:CPU_KSTACK, %rsp
-    /* RUNDE VIELKERN 3: EIN BEFEHL, DER DEN BEWEIS FUEHRT.
-     *
-     * Er zaehlt in DENSELBEN Satz, aus dem eine Zeile darueber der
-     * Kernstapel kam. Zaehlt ein Kern hier hoch, dann hat sein
-     * `%gs:CPU_KSTACK` funktioniert -- er steht ja schon darauf.
-     * Kein Register wird angefasst; die Flaggen sind hier frei, die
-     * des Benutzers liegen in r11 und werden gleich gerettet. */
     incq %gs:CPU_SYSCALLS
     pushq %gs:CPU_SYSRSP            /* user rsp */
     pushq %r11                      /* user rflags */
@@ -462,20 +443,6 @@ user_entry:
     hlt                             /* privileged: #GP in ring 3 */
     jmp 1b
 
-/* ROUND K9: DER RUECKWEG AUS EINER SIGNALBEHANDLUNG, und er liegt hier,
- * weil er in `.utext` liegen MUSS. Der Kernel baut einen Rahmen auf den
- * Nutzerstapel und setzt als Ruecksprungadresse der Behandlungsroutine
- * diese drei Befehle. Auf dem STAPEL koennten sie nicht stehen: seit
- * Runde K1 traegt jede Stapelseite das No-Execute-Bit, und ein Kernel,
- * der es fuer den Trampolinsprung wieder abnimmt, hat die aelteste Luecke
- * wieder aufgemacht, die es gibt. `.utext` ist die eine Seite, die in
- * JEDEM Adressraum fuer Ring 3 lesbar und ausfuehrbar ist
- * (`proc.map_programs`), und sie ist nicht beschreibbar -- genau das, was
- * ein Trampolinsprung braucht.
- *
- * Nummer 15 ist `rt_sigreturn`, Linux' Nummer. Kommt der Aufruf zurueck,
- * ist etwas kaputt; dann `hlt`, was in Ring 3 ein #GP ist und damit
- * sichtbar statt still. */
     .section .utext, "ax"
     .globl sigreturn_tramp
 sigreturn_tramp:
@@ -483,24 +450,6 @@ sigreturn_tramp:
     syscall
     hlt
 
-/* `user_iret(rdi = 22 Woerter)` -- zurueck nach Ring 3 mit einem
- * VOLLSTAENDIGEN Zusammenhang, ueber `iretq` statt ueber `sysretq`.
- *
- * WARUM ES BEIDE WEGE BRAUCHT. `sysretq` nimmt rip aus rcx und rflags aus
- * r11 -- und genau diese beiden Register zerstoert `syscall` beim
- * Eintritt. Fuer einen Rueckweg aus einem SYSTEMAUFRUF ist das richtig:
- * dort waren sie ohnehin schon verloren. Ein Signal darf aber auch
- * mitten in ein Programm zugestellt werden, das gar keinen Systemaufruf
- * gemacht hat -- aus dem Zeitgeber heraus, und das ist der Fall, den
- * STRG-C in einer Endlosschleife braucht. Dann sind rcx und r11 echte
- * Registerwerte des Programms, und `sigreturn` muss sie zurueckgeben
- * koennen. Das kann nur `iretq`.
- *
- * Der Block, auf den rdi zeigt, hat GENAU die Form, die `isr_common`
- * oben aufbaut -- fuenfzehn Register, Vektor, Fehlercode, dann die fuenf
- * Woerter des Prozessors. Deshalb ist der Rumpf hier Zeile fuer Zeile
- * das Ende von `isr_common`.
- */
     .text
     .globl user_iret
 user_iret:
@@ -528,33 +477,6 @@ user_iret:
 1:
     iretq
 
-/* --------------------------------- rdmsr/wrmsr MIT FAENGERPFAD ---
- * RUNDE KVMFIX. Warum es diese beiden Funktionen gibt und warum sie in
- * Assembler stehen muessen, steht in `kernel/msr.fi`. Hier steht nur,
- * was der Assembler dazu beitraegt: eine ADRESSE, die auf den einen
- * Befehl genau zeigt, der fehlschlagen darf.
- *
- *   msr_read_safe (rdi = Index, rsi = Zeiger auf u64)  -> rax 0 = gut,
- *   msr_write_safe(rdi = Index, rsi = Wert)               rax 1 = #GP
- *
- * DIE ABMACHUNG, UND SIE IST STRENGER ALS SYSTEM V: ausser rax und den
- * Flaggen aendert sich KEIN Register. Der Aufrufer ist ein `asm("call
- * rax", ...)` aus Firn heraus, und was so ein Block dem Uebersetzer
- * ueber zerstoerte Register sagen kann, ist genau das, was in den
- * `clobber`-Klauseln steht. Also zerstoert diese Funktion nichts, was
- * dort nicht steht: rcx und rdx werden gerettet, die Flaggen mit
- * `pushfq`/`popfq` -- ein `shl`/`or` mitten in einem fremden
- * Flaggenzustand waere sonst ein Fehler, den niemand mehr findet.
- *
- * WICHTIG FUER DEN FAENGERPFAD: der Faenger wird mit demselben rsp
- * betreten, den der Befehl hatte, der fehlgeschlagen ist -- ein #GP ist
- * ein FAULT, der Prozessor legt seinen Rahmen auf den Kernelstapel und
- * nicht auf diesen. Deshalb muss der Faenger dieselben drei Woerter
- * abraeumen wie der gute Ausgang, und deshalb stehen die Pops in beiden
- * Zweigen. Eine einzige vergessene Zeile hier waere ein Stapel, der um
- * acht Oktette verrutscht ist, und der Fehler zeigte sich erst drei
- * Funktionen spaeter.
- */
     .globl msr_read_safe
 msr_read_safe:
     pushfq
@@ -574,8 +496,7 @@ msr_read_safe:
     popfq
     ret
 .Lmsr_rd_fix:
-    movq $0, (%rsi)                 /* keine Messung, also eine Null */
-    movl $1, %eax
+    movq $0, (%rsi)    movl $1, %eax
     popq %rdx
     popq %rcx
     popfq
@@ -598,8 +519,7 @@ msr_write_safe:
     pushq %rcx
     pushq %rdx
     movq %rdi, %rcx
-    movq %rsi, %rax                 /* wrmsr nimmt nur eax */
-    movq %rsi, %rdx
+    movq %rsi, %rax    movq %rsi, %rdx
     shrq $32, %rdx
 .Lmsr_wr_insn:
     wrmsr                           /* <- darf fehlschlagen */
@@ -617,9 +537,6 @@ msr_write_safe:
 
     .section .rodata
     .align 8
-/* Die Faengertabelle: Paare (Adresse des Befehls, Adresse des Faengers),
- * abgeschlossen durch ein Nullpaar. `kernel/msr.fi::catch_rip` sucht
- * darin, `trap.fi` benutzt das Ergebnis. */
     .globl msr_fixups
 msr_fixups:
     .quad .Lmsr_rd_insn, .Lmsr_rd_fix
@@ -664,28 +581,13 @@ vectors:
      * complete context (iretq instead of sysret). */
     .quad sigreturn_tramp           /* 67: kernel/signal.fi */
     .quad user_iret                 /* 68: kernel/signal.fi */
-    /* Runde K12: der Hypervisor. EIN Eintrag, wie bei smp_vectors --
-     * der Weltwechsel und die Gaeste stehen in kernel/hv.s. */
     .quad hv_vectors                /* 69: kernel/hv.s */
-    /* Runde KVMFIX: der MSR-Zugriff, der ein #GP ueberlebt. 70 ist die
-     * Faengertabelle, 71 und 72 die beiden Zugriffe (kernel/msr.fi). */
     .quad msr_fixups                /* 70: kernel/msr.fi */
     .quad msr_read_safe             /* 71 */
     .quad msr_write_safe            /* 72 */
 
-    /* RUNDE MODUL: `osum_panic` als ADRESSE.
-     *
-     * `kernel/ksym.fi` reicht die Kerndienste an ein nachgeladenes Modul
-     * durch, und JEDES Modul braucht `osum_panic` -- der Uebersetzer legt
-     * den Aufruf unter `profile kernel` bei jeder geprueften Rechnung
-     * selbst dazu (SPEC Abschnitt 2). Ein Funktionswert hilft dort nicht:
-     * `osum_panic` steht in dieser Datei und ist keine Firn-Funktion.
-     * Also derselbe Weg wie fuer die Faengerroutinen 70..72. */
     .quad osum_panic                /* 73: kernel/ksym.fi */
 
-    /* RUNDE BLECHKERN: das Ende des Kerncodes, aus kernel/kernel.ld.
-     * Die einzige obere Schranke, mit der sich eine Zahl auf dem
-     * Kernstapel als Ruecksprungadresse ausweisen laesst. */
     .quad _etext                    /* 74: kernel/kernel.ld */
 
     /* K-004: the way back from S3 (end of kernel/arch/x86_64/smp.s). */

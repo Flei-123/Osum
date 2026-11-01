@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/certus/color.py -- wie oft eine BESTIMMTE Farbe im Bild steht.
+"""tools/certus/color.py -- how often one SPECIFIC color occurs in the image.
 
-Der Unterschied zwischen "es ist Tinte da" und "die Seite ist da": eine
-Seite verlangt `background:#0033aa` auf 300 x 80 Bildpunkten, und dann
-muessen 24000 Bildpunkte genau diese Farbe haben. Ein Browser, der
-irgendetwas malt, besteht die Tintenzaehlung und diese hier nicht.
+A page demanding `background:#0033aa` on 300 x 80 pixels needs 24000 pixels of exactly that color.
 
     color.py <bild.ppm> <rrggbb>
 """

@@ -34,7 +34,7 @@ UNTER = {
     "notizen": [("todo.txt", b"nichts\n")],
 }
 
-THEME = b"""# /etc/theme -- das Farbschema von Osum, Runde K15.
+THEME = b"""# /etc/theme -- the Osum color scheme, round K15.
 bg=1c2430
 panel=26303c
 btn=3a4a5e

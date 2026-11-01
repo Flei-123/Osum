@@ -35,21 +35,6 @@
  */
 
     .set MB_MAGIC, 0x1BADB002
-    /* Bit 0 aligned modules, Bit 1 memory map, Bit 2 VIDEO MODE.
-     *
-     * BIT 2 IST DER UEFI-PFAD, und das ist nicht offensichtlich: Osum
-     * bootet ueber Multiboot, und ein Multiboot-Lader, der unter UEFI
-     * laeuft (Limine), muss dem Kern einen Bildschirm uebergeben, bevor er
-     * die Firmware verlaesst. Ohne Bit 2 nimmt er den Textmodus an -- und
-     * unter UEFI gibt es keinen; der Ladevorgang bricht mit "multiboot1:
-     * Cannot use text mode with UEFI" ab. Mit Bit 2 und `mode_type = 0`
-     * verlangt der Kern einen LINEAREN Rahmenpuffer, den die Firmware
-     * setzen kann -- und damit bootet dasselbe Abbild ueber BIOS UND ueber
-     * UEFI. Gemessen in beidem (tools/uefi/run.sh).
-     *
-     * Der Kern BENUTZT den Rahmenpuffer nicht; seine Konsole ist die
-     * serielle Schnittstelle. Was Bit 2 leistet, ist allein, dass der
-     * Lader nicht mehr auf einen Textmodus besteht, den es nicht gibt. */
     .set MB_FLAGS, 0x00000007
     .set MB_CHECK, -(MB_MAGIC + MB_FLAGS)
 
@@ -60,9 +45,6 @@
     .long MB_MAGIC
     .long MB_FLAGS
     .long MB_CHECK
-    /* Die Adressfelder der Spezifikation (Abschnitt 3.1.3). Sie gelten
-     * nur mit Flag-Bit 16, das hier aus ist -- stehen muessen sie
-     * trotzdem, weil die Videofelder dahinter liegen. */
     .long 0, 0, 0, 0, 0
     .long 0                             /* mode_type: 0 = linear graphics */
     .long 0                             /* width:  keine Vorgabe */
@@ -158,25 +140,6 @@ long_mode:
     hlt
     jmp 2b
 
-    /* --------------------------------------------------------- GDT ---
-     *
-     * The layout is the one `syscall`/`sysret` prescribes: STAR[63:48]
-     * points at the unused 32-bit user code segment, `sysretq` takes SS
-     * from base+8 and CS from base+16. That is why that segment sits at
-     * 0x18 -- not out of nostalgia but because the processor counts from
-     * there.
-     *
-     * RUNDE KVMFIX: der Wert in STAR[63:48] ist 0x1B und nicht 0x18 --
-     * derselbe Eintrag, aber MIT RPL 3. AMDs `sysret` uebernimmt die
-     * zwei untersten Bits fuer SS unveraendert, Intels nicht. Also
-     * werden SS = 0x23 und CS = 0x2B daraus, und das sind genau die
-     * Selektoren, die `kernel/signal.fi` seit Runde K9 in seine
-     * iretq-Rahmen schreibt (USER_CS/USER_SS). Naeheres in
-     * `kernel/arch/x86_64/user.fi::setup`.
-     *
-     * The table lies in .data and not in .rodata: the kernel writes the
-     * TSS descriptor (0x30/0x38) at run time, out of Firn.
-     */
     .section .data
     .align 16
     .globl gdt64
@@ -198,52 +161,7 @@ gdt64_pointer:
     /* --------------------------- page tables, stacks, data area --- */
     .section .bss, "aw", @nobits
 
-    /* ============================================== RUNDE LEISTE ===
-     *
-     * DIE SEITENTAFELN LAGEN UNTER DEN STAPELN. GEMESSEN:
-     *
-     *   *** EXCEPTION 14 #PF  err=0xb  cr2=0xb2c140
-     *     rip=0x26d0b7 (fb.fill_words)  rsp=0x5096c0
-     *   *** EXCEPTION 14 #PF  err=0x2  cr2=0xa00000
-     *     rsp=0x503ea0
-     *
-     * `err=0xb` hat das RESERVED-Bit gesetzt: der Prozessor hat in
-     * einem Seitentafeleintrag Bits gefunden, die dort nicht stehen
-     * duerfen. Und der zweite `rsp` ist 0x503ea0 -- das lag GENAU IN
-     * `pml4` (0x503000). Die alte Reihenfolge war
-     *
-     *   pml4, pdpt, pd, tss, boot_stack(16K), kernel_stack(64K), ...
-     *
-     * und ein Stapel waechst nach unten. `kernel_stack` ist unten
-     * herausgelaufen, durch `boot_stack` und `tss` hindurch, und hat
-     * die Seitentafeln aufgefressen. Danach ist jede Adresse des
-     * Rechners eine Zufallszahl -- und weil die Seitentafeln stumm
-     * sind, sieht man davon nichts, bis irgendwo etwas Unmoegliches
-     * passiert.
-     *
-     * DAS IST DIESELBE KRANKHEIT WIE BEI DEN AUFGABEN-KERNSTAPELN
-     * (kernel/sched.fi, KSTACK_FRAMES), nur eine Etage tiefer -- und
-     * es ist der beste Kandidat fuer den "unsichtbaren
-     * Ueberschreiber", den die Runde STARTKNOPF gesucht hat: WELCHES
-     * Byte ein ueberlaufender Stapel trifft, entscheidet die
-     * Bindereihenfolge, und die aendert sich mit jedem neuen `import`.
-     *
-     * DREI AENDERUNGEN:
-     *
-     *   1. DIE SEITENTAFELN UND DAS TSS STEHEN JETZT OBEN, hinter
-     *      allen Stapeln. Kein Stapel dieses Kerns kann sie noch
-     *      erreichen, egal wie tief er faellt.
-     *   2. EIN WACHFELD VON 128 KiB unter dem untersten Stapel. Wer
-     *      ueberlaeuft, faellt zuerst dort hinein -- und dort steht
-     *      nichts, was jemand braucht.
-     *   3. `kernel_stack` IST 256 KiB STATT 64. Das ist der Stapel,
-     *      auf dem `kmain` die ganze Kette der Startstufen faehrt
-     *      (Grafik, Fensterserver, Messtafel, USB); 64 KiB haben
-     *      nachweislich nicht gereicht. `.bss` kostet nichts im
-     *      Abbild -- die Seiten entstehen beim ersten Zugriff.
-     */
 
-    /* 1. DAS WACHFELD. Ganz unten, damit ein Ueberlauf hier landet. */
     .align 4096
     .globl stack_guard_lo
 stack_guard_lo:
@@ -258,22 +176,6 @@ boot_stack_top:
 
     .align 16
 kernel_stack_bottom:
-    /* RUNDE AML (Zweig acpi-ereignisse): der Stapel steht schon auf 262144.
-     *
-     * Der AML-Interpreter (kernel/aml.fi) fuehrt FREMDEN Code aus, den
-     * die Firmware hinterlegt hat, und er tut es rekursiv: jede
-     * Klammerebene eines AML-Ausdrucks ist eine Verschachtelungsstufe.
-     * Gemessen mit der Stapelwache in kernel/amlev.fi, beim Auswerten
-     * von `_PRT` in QEMUs DSDT: 42240 Oktette. Das sind zwei Drittel
-     * der alten 65536 -- zu wenig Abstand fuer eine DSDT, die tiefer
-     * verschachtelt ist als die einer virtuellen Maschine.
-     *
-     * Die Wache (STACK_LIMIT, 57344) bricht die Auswertung mit einem
-     * definierten Fehler ab, bevor der Stapel ausgeht. main ist dem
-     * Zweig `aml` zuvorgekommen und steht auf 262144 -- das ist das
-     * Vierfache der gemessenen 42240 und weit mehr, als der Zweig
-     * mit 131072 verlangt haette. Die Zahl bleibt deshalb, wie sie
-     * ist; nur die Begruendung kommt dazu. */
     .skip 262144
     .globl kernel_stack_top
 kernel_stack_top:
@@ -313,8 +215,6 @@ irq_stack_bottom:
     .globl irq_stack_top
 irq_stack_top:
 
-    /* RUNDE LEISTE: DIE SEITENTAFELN UND DAS TSS, JETZT OBERHALB
-     * ALLER STAPEL. Der Grund steht oben bei `stack_guard_lo`. */
     .align 4096
 pml4:
     .skip 4096
@@ -337,37 +237,8 @@ tss:
 kdata:
     .skip KDATA_SIZE
 
-/* ==================================================== RUNDE PROTOKOLL
- * DER STUMMEL DER SYMBOLTABELLE, ALS SCHWACHES SYMBOL.
- *
- * `kernel/ksymtab.fi` holt die Symbol- und Zeilentabelle mit
- * `lea rax, [rip + osym_tab]` -- Firn kann Bindersymbole nicht anders
- * benennen. Die WIRKLICHE Tabelle entsteht aber erst aus dem fertig
- * gebundenen Abbild (`tools/kernel/symtab.py`), also erst NACH dem
- * ersten Bindedurchgang.
- *
- * WARUM SIE HIER STEHT UND NICHT IN EINER EIGENEN DATEI: sie stand
- * zuerst in `kernel/arch/x86_64/osym.s`, und `tools/build-kernel.sh`
- * band sie mit. Nur bindet dieses Repo den Kernel an EINEM DUTZEND
- * STELLEN selbst -- `tools/osum/run.sh`, `tools/smp/run.sh`,
- * `tools/handle/run.sh`, `tools/async/run.sh`, `tools/userland/run.sh`
- * und weitere haben ihre eigene `ld`-Zeile mit fünf Objektdateien
- * darin. Die alle nachzuziehen ist eine Liste, die beim nächsten
- * Läufer wieder unvollständig ist; gemessen an einem Lauf dieser
- * Runde: fünf Abschnitte fielen mit "ld failed on the kernel" durch,
- * weil ihnen `osym.o` fehlte.
- *
- * `boot.s` ist in JEDER dieser Zeilen dabei. Also steht der Stummel
- * hier, und weil er SCHWACH ist, überschreibt ihn die erzeugte Tabelle
- * des zweiten Durchgangs ohne "multiple definition" -- genau das ist,
- * wofür `.weak` da ist.
- *
- * Kennung 0 heisst "keine Tabelle"; `ksymtab.have()` sagt dann nein und
- * der Panik-Bildschirm zeigt rohe Adressen. Der Aufbau steht in
- * `kernel/ksymtab.fi`. */
     .section .rodata
     .align 8
     .weak osym_tab
 osym_tab:
-    .quad 0     /* Kennung: 0 = keine Tabelle */
-    .quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    .quad 0    .quad 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0

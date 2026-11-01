@@ -7,10 +7,9 @@ ROOT = Path(__file__).resolve().parents[2]
 TEST = ROOT / "test.sh"
 
 ALT = 'WORK="$ROOT/.test-work"\nmkdir -p "$WORK"\n'
-NEU = ('# Wohin die Protokolle je Abschnitt gehen. Ueberschreibbar, damit\n'
-       '# ZWEI Abnahmen (z. B. eine unter tcg und eine unter kvm) sich\n'
-       '# nebeneinander nicht die Protokolle ueberschreiben -- gefunden\n'
-       '# beim Messen dieser Runde, siehe tools/lib/work-patch.py.\n'
+NEU = ('# Where the logs of each section go. Overridable so two\n'
+       '# acceptance runs (e.g. tcg and kvm) do not overwrite each\n'
+       '# other logs.\n'
        'WORK="${OSUM_WORK:-$ROOT/.test-work}"\n'
        'mkdir -p "$WORK"\n')
 
