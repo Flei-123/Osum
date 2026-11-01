@@ -36,10 +36,10 @@ for f in tools/loader/build.sh tools/install/build.sh; do
 done
 
 #    jemand die Ehrlichkeit herausnimmt.
-if grep -q 'kein Geraet -- es gibt keinen Treiber' kernel/user/wlan.fi; then
+if grep -q 'no device -- there is no driver' kernel/user/wlan.fi; then
     ok "'wlan status' says there is no device instead of staying silent"
 else
-    bad "'wlan status' behauptet etwas anderes"
+    bad "'wlan status' claims something else"
 fi
 if grep -q '0600\|384' kernel/user/wlan.fi; then
     ok "/etc/wlan.conf gets mode 0600 (the PMK is a secret)"
