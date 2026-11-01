@@ -13,7 +13,8 @@ table_list (the things a user can operate). Labels are text rows (not counted as
 import re, sys, os
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-SRC = open(os.path.join(ROOT, "kernel/user/settings.fi"), encoding="latin1").read()
+import glob
+SRC = "".join(open(p, encoding="latin1").read() for p in [os.path.join(ROOT, "kernel/user/settings.fi")] + sorted(glob.glob(os.path.join(ROOT, "kernel/user/settings/*.fi"))))
 PAGES = [  # (id, R_ const, function, category)
     ("appearance", "R_DARST", "page_darst", "Personalisation"), ("screen", "R_SCREEN", "page_screen", "Display"),
     ("time", "R_TIME", "page_time", "Time & Language"), ("network", "R_NET", "page_network", "Network"),

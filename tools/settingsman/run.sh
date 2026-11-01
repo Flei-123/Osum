@@ -91,7 +91,8 @@ lim pool "error 9 "
 echo "== 3. the accounts page is wired =="
 python3 -I - <<'PY' && ok "wiring checks" || bad "wiring checks (see FAIL lines above)"
 import re, sys
-src = open("kernel/user/settings.fi", encoding="utf-8").read()
+import subprocess
+src = subprocess.run(["bash", "tools/structure/catprog.sh", "kernel/user/settings.fi"], capture_output=True, text=True, encoding="utf-8").stdout
 man = open("kernel/user/settings.d/builtin.settings", encoding="utf-8").read()
 en = open("locale/en/messages", encoding="utf-8", errors="replace").read()
 de = open("locale/de/messages", encoding="utf-8", errors="replace").read()
@@ -131,21 +132,21 @@ for k in sorted(set(labels)):
 for ix, k in re.findall(r"if ix == (\d+) \{ return (K_[A-Z]+) \}", src):
     if not re.search(r"^const %s: u64 = \d+" % k, src, re.M): bad("%s is not defined" % k)
 if "fuiscene.button(left, msg.get((&k_k_book" in src: bad("the book button is built by hand again")
-if '__include_str("settings.d/accounts.bind")' not in src: bad("the binding names are not embedded in settings.fi")
-if '__include_str("settings.d/builtin.settings")' not in src: bad("the manifest is not embedded in settings.fi")
+if '__include_str("../settings.d/accounts.bind")' not in src: bad("the binding names are not embedded in settings.fi")
+if '__include_str("../settings.d/builtin.settings")' not in src: bad("the manifest is not embedded in settings.fi")
 if "manifest.page_find(" not in src: bad("page_accounts does not read the manifest")
-if '__include_str("settings.d/network.bind")' not in src: bad("the network binding names are not embedded in settings.fi")
+if '__include_str("../settings.d/network.bind")' not in src: bad("the network binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_nzust" in src: bad("the Network page is built by hand again")
-if '__include_str("settings.d/display.bind")' not in src: bad("the display binding names are not embedded in settings.fi")
+if '__include_str("../settings.d/display.bind")' not in src: bad("the display binding names are not embedded in settings.fi")
 if "fuiscene.label(left, (&l_screen" in src: bad("the Display page is built by hand again")
-if '__include_str("settings.d/personal.bind")' not in src: bad("the personal binding names are not embedded in settings.fi")
+if '__include_str("../settings.d/personal.bind")' not in src: bad("the personal binding names are not embedded in settings.fi")
 for fnname in ("page_taskbar", "page_effects", "page_usbnet", "page_proto", "page_update", "page_vorl"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(4," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
 for fnname in ("page_sync", "page_bridge", "page_system", "page_rechte", "page_netv"):
     m = re.search(r"fn %s\(left: usize, right: usize\) \{\n(.*?)\n\}\n" % fnname, src, re.S)
     if not m or "page_man(5," not in m.group(1) or m.group(1).count("\n") != 0: bad("%s is not a one-line page_man wrapper" % fnname)
-if '__include_str("settings.d/tools.bind")' not in src: bad("the tools binding names are not embedded in settings.fi")
+if '__include_str("../settings.d/tools.bind")' not in src: bad("the tools binding names are not embedded in settings.fi")
 if "fn net_tables" in src or "fuiscene.label(left, (&l_yprov" in src: bad("a tools page is built by hand again")
 if "fn man_shown" in src: bad("man_shown is back: conditions belong in the manifest (when/unless)")
 for fnname in ("page_time", "page_benut", "page_passw", "page_pin", "page_sprache", "page_wifi", "page_vtrans", "page_info"):
@@ -229,7 +230,8 @@ def bad(m):
 man = open("pakete/social/SETTINGS", encoding="utf-8").read()
 acts = open("pakete/social/ACTIONS", encoding="utf-8").read()
 en = open("locale/en/messages", encoding="utf-8").read(); de = open("locale/de/messages", encoding="utf-8").read()
-src = open("kernel/user/settings.fi", encoding="utf-8").read()
+import subprocess
+src = subprocess.run(["bash", "tools/structure/catprog.sh", "kernel/user/settings.fi"], capture_output=True, text=True, encoding="utf-8").stdout
 app = None; cur = None; labels = []; binds = []
 for line in man.splitlines():
     w = line.split("#")[0].split()

@@ -240,7 +240,7 @@ for f in "kernel/ui/wm.fi kernel/ui/wm/wmhead.fi kernel/ui/wm/wmworkarea.fi" ker
         bad "$f numbers the edges differently"
     fi
 done
-grep -q 'edge=' kernel/user/taskbar.fi kernel/user/taskbar/*.fi && grep -q 'edge=' kernel/user/settings.fi \
+grep -q 'edge=' kernel/user/taskbar.fi kernel/user/taskbar/*.fi && grep -q 'edge=' kernel/user/settings.fi kernel/user/settings/*.fi \
     && ok "both writers of /etc/taskbar.conf spell the key 'edge'" \
     || bad "the two writers of /etc/taskbar.conf disagree about the key"
 

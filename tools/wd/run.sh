@@ -65,7 +65,7 @@ for l in de en; do
     n=$(grep -a '^settings.lock.choices' locale/$l/messages | head -1 | sed 's/^[^=]*= *//' | awk -F'\\\\n' '{print NF}')
     is "settings page offers 7 choices ($l)" "$n" 7
 done
-grep -aq 'lockidle.secs_of' kernel/user/settings.fi && grep -aq 'lockidle.level_of' kernel/user/settings.fi && ok "settings.fi uses fui.lockidle (write + read back)" || bad "settings.fi does not use fui.lockidle"
+grep -aq 'lockidle.secs_of' kernel/user/settings.fi kernel/user/settings/*.fi && grep -aq 'lockidle.level_of' kernel/user/settings.fi kernel/user/settings/*.fi && ok "settings.fi uses fui.lockidle (write + read back)" || bad "settings.fi does not use fui.lockidle"
 grep -aq 'idle limit now' kernel/user/idlelock.fi && ok "idlelock re-reads the limit (change takes effect without re-login)" || bad "idlelock does not re-read the limit"
 # counter-proof: the old files fail the same assertions
 is "COUNTER-PROOF old schema default was" "$(old etc/settings.schema | grep -a -A1 '^setting lock.idle' | grep -a default | tr -s ' ' | cut -d' ' -f3)" 300

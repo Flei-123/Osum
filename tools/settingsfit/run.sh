@@ -13,7 +13,7 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 REV=${1:-}
 get() { if [ -n "$REV" ]; then git show "$REV:$1"; else cat "$1"; fi; }
-get kernel/user/settings.fi > "${TMPDIR:-/tmp}/fit.$$.fi"
+{ get kernel/user/settings.fi; for f in kernel/user/settings/*.fi; do get "$f"; done; } > "${TMPDIR:-/tmp}/fit.$$.fi"
 get locale/en/messages > "${TMPDIR:-/tmp}/fit.$$.en"
 get locale/de/messages > "${TMPDIR:-/tmp}/fit.$$.de"
 trap 'rm -f "${TMPDIR:-/tmp}"/fit.$$.*' EXIT

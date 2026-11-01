@@ -40,6 +40,13 @@ ERSATZ_OK = {"guest", "queue", "value", "values", "true", "blue",
 
 OBERFLAECHE = [
     "kernel/user/settings.fi",
+    "kernel/user/settings/setaccount.fi",
+    "kernel/user/settings/setbase.fi",
+    "kernel/user/settings/setbuild.fi",
+    "kernel/user/settings/setcore.fi",
+    "kernel/user/settings/setdevice.fi",
+    "kernel/user/settings/setpages.fi",
+    "kernel/user/settings/setsystem.fi",
     "kernel/user/taskbar.fi",
     "kernel/user/taskbar/tbbase.fi",
     "kernel/user/taskbar/tbhover.fi",

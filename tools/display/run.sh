@@ -73,7 +73,7 @@ gleich "und sie folgt unmittelbar auf den Modustreiber" \
     "$(printf '0x%X' $(( $d1 + 0x1000 )))" "$(printf '0x%X' $(( $d2 )))"
 fremd=$(grep -ran --include='*.fi' -E '^const SYS_[A-Za-z0-9_]+: u64 = 181[0-9]' kernel/ \
     | grep -v -e '^kernel/sys/sys.fi' -e '^kernel/user/dispctl.fi' \
-              -e '^kernel/user/settings.fi' -e '^kernel/user/qs.fi' \
+              -e '^kernel/user/settings.fi' -e '^kernel/user/settings/' -e '^kernel/user/qs.fi' \
               -e '^kernel/user/snip.fi' -e '^kernel/user/wmd.fi' || true)
 [ -z "$fremd" ] && ok "no call number from 1810..1819 lies outside the files of this round" \
                 || bad "call numbers from 1810..1819 also appear in: $(echo $fremd | tr '\n' ' ')"
@@ -120,10 +120,10 @@ for f in locale/de/messages locale/en/messages; do
     hat_nicht "$f" "this kernel cannot change it" \
         "und auch nicht in seiner englischen Fassung in $f"
 done
-grep -v '^\s*//' kernel/user/settings.fi > "$TMPD/eins-code.fi"
+grep -v '^\s*//' <(bash tools/structure/catprog.sh kernel/user/settings.fi) > "$TMPD/eins-code.fi"
 hat_nicht "$TMPD/eins-code.fi" "kann dieser Kernel ihn nicht wechseln" \
     "der Satz 'im Betrieb kann dieser Kernel ihn nicht wechseln' ist aus dem Programm weg"
-hat kernel/user/settings.fi "SYS_DISPSET" \
+hat <(bash tools/structure/catprog.sh kernel/user/settings.fi) "SYS_DISPSET" \
     "das Einstellungen-Programm ruft wirklich den Kernel und schreibt keine Datei mehr"
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then

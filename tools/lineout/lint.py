@@ -14,9 +14,12 @@ SKIP = {"kernel/user/lineout.fi"}
 def targets(root):
     found = []
     user = os.path.join(root, "kernel/user")
-    for name in sorted(os.listdir(user)):
-        if not name.endswith(".fi"):
-            continue
+    names = []
+    for dirpath, _dirs, files in os.walk(user):
+        for name in files:
+            if name.endswith(".fi"):
+                names.append(os.path.relpath(os.path.join(dirpath, name), user))
+    for name in sorted(names):
         rel = "kernel/user/" + name
         with open(os.path.join(root, rel), "rb") as fh:
             data = fh.read()

@@ -692,7 +692,8 @@ grep -qa "no such path" "$TMPD/wo9.txt" \
 
 # ======================================================================
 echo "== 15. Einstellungen -> Konten: 'Adressbuch verbinden' (r125) =="
-SF=kernel/user/settings.fi
+SF="$TMPD/settings.all"
+bash tools/structure/catprog.sh kernel/user/settings.fi > "$SF"
 # r136: the page comes from the SETTINGS manifest (kernel/user/settings.d/builtin.settings); the button is an action `book`
 # there with the catalogue key konto.ui.book, and the binding `book` -> K_BKBOOK is in settings.fi.
 num "Knopf K_BKBOOK in der Konten-Seite (Manifest-Aktion + Bindung)" "$(( $(grep -c '^field book action konto.ui.book$' kernel/user/settings.d/builtin.settings) + $(grep -c 'if ix == 7 { return K_BKBOOK }' $SF) ))" eq 2

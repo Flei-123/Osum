@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(sys.argv[1])
 WORD_KEYS = r"k_(b_uber|settings_back|nav_back|nav_fwd|nav_up)\b"
-SOURCES = [ROOT / "kernel/user/settings.fi", ROOT / "kernel/user/navview.fi"]
+SOURCES = [ROOT / "kernel/user/settings.fi"] + sorted((ROOT / "kernel/user/settings").glob("*.fi")) + [ROOT / "kernel/user/navview.fi"]
 LOCALES = [ROOT / "locale/de/messages", ROOT / "locale/en/messages"]
 DEV_TEXT = re.compile(r"RRGGBB|WCAG|\bhex\b|#[0-9A-Fa-f]{6}\b", re.I)
 RAW_CHOICE = re.compile(r"^(modern|classic|osum)$", re.I)
@@ -31,7 +31,7 @@ def scan_sources():
 
 def scan_locales():
     shown = set()
-    text = (ROOT / "kernel/user/settings.fi").read_text() if (ROOT / "kernel/user/settings.fi").exists() else ""
+    text = "".join(p.read_text() for p in SOURCES if p.exists() and p.name != "navview.fi")
     for m in re.finditer(r"fuiscene\.(label|label_muted|label_wrap|button|button_main|entry|choice)\([^\n]*msg\.get\(\(&k_(\w+)\[", text):
         shown.add(m.group(2))
     for path in LOCALES:

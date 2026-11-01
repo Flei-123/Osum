@@ -18,7 +18,7 @@ else
 fi
 
 mkdir -p "$work/mut/kernel/user" "$work/mut/tools/lineout"
-cp kernel/user/*.fi "$work/mut/kernel/user/"
+cp -r kernel/user/. "$work/mut/kernel/user/"
 cp tools/lineout/extra.txt "$work/mut/tools/lineout/"
 
 cp "$work/mut/kernel/user/settings.fi" "$work/settings.orig"

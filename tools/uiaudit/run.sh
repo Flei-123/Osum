@@ -13,7 +13,7 @@ echo "$out" | grep FINDING
 [ $rc -eq 0 ] && ok "no UI audit findings in the Settings sources" || bad "audit findings: $(echo "$out" | tail -1)"
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
 mkdir -p "$D/kernel/user" "$D/locale/de" "$D/locale/en"
-cp kernel/user/settings.fi kernel/user/navview.fi "$D/kernel/user/"; cp locale/de/messages "$D/locale/de/"; cp locale/en/messages "$D/locale/en/"
+cp kernel/user/settings.fi kernel/user/navview.fi "$D/kernel/user/"; cp -r kernel/user/settings "$D/kernel/user/"; cp locale/de/messages "$D/locale/de/"; cp locale/en/messages "$D/locale/en/"
 cat >> "$D/kernel/user/settings.fi" <<'X'
 fn old_a() {
     let n_b1: usize = fuiscene.button_main(right, msg.get((&k_b_uber[0 as usize]) as u64), K_B1)

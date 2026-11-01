@@ -128,9 +128,9 @@ if "$FIRNC" $UPROF -c kernel/user/settings.fi -o "$TMPD/eins.o" > "$TMPD/eins.er
 else
     bad "settings.fi cannot be built"; head -8 "$TMPD/eins.err" | sed 's/^/        /'
 fi
-hat kernel/user/settings.fi "DS_CUSTOM" \
+hat <(bash tools/structure/catprog.sh kernel/user/settings.fi) "DS_CUSTOM" \
     "das Bedienfeld ruft wirklich den neuen Aufruf und baut keine Liste nach"
-hat kernel/user/settings.fi "DG_CUSTNUM" \
+hat <(bash tools/structure/catprog.sh kernel/user/settings.fi) "DG_CUSTNUM" \
     "und es holt die ZAHL aus dem Kern, statt eine eigene zu rechnen"
 
 if bash tools/build-kernel.sh "$TMPD/k1.mb" --stufe 1 > "$TMPD/k1.log" 2>&1; then

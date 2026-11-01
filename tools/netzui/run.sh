@@ -27,7 +27,7 @@ rumpf() { # datei funktion
 }
 
 for fn in rate_aus rate_an append_amount zehntel_an; do
-    a=$(rumpf kernel/user/settings.fi "$fn")
+    a=$(rumpf <(bash tools/structure/catprog.sh kernel/user/settings.fi) "$fn")
     b=$(rumpf tools/netzui/logik.fi "$fn")
     if [ -z "$a" ]; then
         bad "$fn: in kernel/user/settings.fi nicht gefunden"
@@ -40,7 +40,7 @@ for fn in rate_aus rate_an append_amount zehntel_an; do
 done
 
 for fn in glatt_ein glatt_tx glatt_rx; do
-    a=$(rumpf kernel/user/settings.fi "$fn")
+    a=$(rumpf <(bash tools/structure/catprog.sh kernel/user/settings.fi) "$fn")
     b=$(rumpf tools/netzui/logik.fi "$fn")
     if [ "$a" = "$b" ] && [ -n "$a" ]; then
         ok "$fn ist in beiden Dateien dieselbe"
@@ -52,7 +52,7 @@ done
 echo "== 2. the control of the control =="
 cp tools/netzui/logik.fi "$TMPD/kaputt.fi"
 sed -i 's|return (fresh - alt) \* 100 / dt|return (fresh - alt) * 99 / dt|' "$TMPD/kaputt.fi"
-a=$(rumpf kernel/user/settings.fi rate_aus)
+a=$(rumpf <(bash tools/structure/catprog.sh kernel/user/settings.fi) rate_aus)
 b=$(rumpf "$TMPD/kaputt.fi" rate_aus)
 if [ "$a" != "$b" ]; then
     ok "a changed body is detected (100 -> 99)"
@@ -90,7 +90,7 @@ fi
 
 echo "== 5. stehen die neuen Texte in BEIDEN Katalogen? =="
 kn=0
-for k in $(grep -o 'settings\.net\.[a-z.]*' kernel/user/settings.fi | sort -u); do
+for k in $(grep -o 'settings\.net\.[a-z.]*' <(bash tools/structure/catprog.sh kernel/user/settings.fi) | sort -u); do
     kn=$((kn+1))
     d=$(grep -c "^$k = " locale/de/messages)
     e=$(grep -c "^$k = " locale/en/messages)
@@ -117,7 +117,7 @@ fi
 
 echo "== 7. do the table columns fit their table? =="
 for tafel in c_nprog c_nconn; do
-    summe=$(grep -a "static mut $tafel" kernel/user/settings.fi \
+    summe=$(grep -a "static mut $tafel" <(bash tools/structure/catprog.sh kernel/user/settings.fi) \
             | sed 's/.*= "//; s/".*//' \
             | grep -aoE '[0-9]+' \
             | awk '{s += $1} END {print s+0}')
