@@ -1,0 +1,2031 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import actcli
+import bstore
+import expakt
+import expmodell
+import exporte
+import expsmb
+import nav.folder
+import fuiscene
+import icons
+import libc.io
+import lineout
+import msg
+import fui.navnum
+import product
+import ulib
+import wlib
+import wlibc
+import explorer.expbase
+
+const SIC_MAXENT: u64 = 96
+
+const SIC_NAMEB: u64 = 32
+
+static mut entry_names: [u8; 3072] = [0 as u8; 3072] // SIC_MAXENT * SIC_NAMEB
+
+static mut entry_sizes: [u64; 96] = [0 as u64; 96]
+
+static mut art: [u64; 96] = [0 as u64; 96] // 1 = Verzeichnis
+
+static mut modus: [u64; 96] = [0 as u64; 96]
+
+// ROUND ICONS: one icon per table row, filled by `baue_tabelle` at the
+// same moment the row's text is built.  Two loops over the same list
+// would be two places to get the order wrong -- and the order is what
+// puts an icon next to the right name.
+static mut symbole: [u64; 96] = [0 as u64; 96]
+
+// The tree on the left: the way up and then one folder per directory.
+static mut bsymbole: [u64; 96] = [0 as u64; 96]
+
+static mut ov_free: [u64; 96] = [0 as u64; 96]
+
+static mut ov_ro: [u64; 96] = [0 as u64; 96]
+
+static mut k_cols_pc: [u8; 26] = "explorer.columns.computer\0"
+
+static mut k_ty_drive: [u8; 20] = "explorer.type.drive\0"
+
+static mut k_ty_system: [u8; 21] = "explorer.type.system\0"
+
+static mut k_ty_ro: [u8; 23] = "explorer.type.readonly\0"
+
+static mut tblob: [u8; 6144] = [0 as u8; 6144]
+
+static mut bblob: [u8; 1024] = [0 as u8; 1024]
+
+static mut vollpfad: [u8; 192] = [0 as u8; 192]
+
+static mut tab_path: [u8; 1024] = [0 as u8; 1024]
+
+static mut k_items: [u8; 21] = "explorer.count.items\0"
+
+static mut k_folders: [u8; 23] = "explorer.count.folders\0"
+
+static mut k_cols: [u8; 17] = "explorer.columns\0"
+
+static mut k_massren: [u8; 17] = "explorer.massren\0"
+
+static mut t_massdef: [u8; 11] = "[N]_[C][E]\0"
+
+static mut vctx: [u8; 528] = [0 as u8; 528]
+
+static mut vpfad: [u8; 256] = [0 as u8; 256]
+
+static mut vinfo: [u64; 4] = [0 as u64; 4]
+
+static mut zeiten: [u8; 1920] = [0 as u8; 1920]  // SIC_MAXENT * 20, das Datum
+
+static mut t_bwohin: [u8; 6] = "/data\0"
+
+fn dbg_on() -> bool {
+    return expbase.s_dbg != 0
+}
+
+fn dbg_setup(args: u64) {
+    var p_tr: [u8; 14] = "/etc/uitrace\0\0"
+    let fdt: u64 = io.open((&p_tr[0 as usize]) as u64, 0)
+    if !ulib.bad(fdt) {
+        io.close(fdt)
+        expbase.s_dbg = 1
+    }
+    var a_dbg: [u8; 6] = "debug\0"
+    let argc: u64 = ulib.arg_count(args)
+    var ai: u64 = 1
+    while ai < argc {
+        if ulib.streq(ulib.arg_at(args, ai), (&a_dbg[0 as usize]) as u64) {
+            expbase.s_dbg = 1
+        }
+        ai = ai + 1
+    }
+}
+
+fn say(p: u64) {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    lineout.add_text(p)
+}
+
+fn sayn(v: u64) {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    lineout.add_num(v)
+}
+
+fn nl() {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    lineout.end_line()
+}
+
+fn kv(name: u64, v: u64) {
+    var sp: [u8; 2] = " \0"
+    say(name)
+    sayn(v)
+    say((&sp[0 as usize]) as u64)
+}
+
+fn nptr(i: u64) -> u64 {
+    return (&entry_names[0 as usize]) as u64 + i * SIC_NAMEB
+}
+
+// ============================================ RUNDE EXPLORER-2: DAS MODELL
+fn m_count() -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.total()
+    }
+    return expbase.entry_count
+}
+
+fn m_ord(line: u64) -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.ord_at(line)
+    }
+    if line >= expbase.entry_count {
+        return 0
+    }
+    return expbase.entry_order[(line) as usize]
+}
+
+fn m_name(e: u64) -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.name_at(e)
+    }
+    return nptr(e)
+}
+
+fn m_art(e: u64) -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.art_at(e)
+    }
+    return art[(e) as usize]
+}
+
+fn m_size(e: u64) -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.size_at(e)
+    }
+    return entry_sizes[(e) as usize]
+}
+
+fn m_modus(e: u64) -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.modus_at(e)
+    }
+    return modus[(e) as usize]
+}
+
+fn join(dir: u64, name: u64) -> u64 {
+    let out: u64 = (&vollpfad[0 as usize]) as u64
+    var n: u64 = 0
+    while (*((dir + n) as *mut u8)) != 0 as u8 && n < 150 {
+        __mmio_write8((out + n) as *mut u8, *((dir + n) as *mut u8))
+        n = n + 1
+    }
+    if n > 1 || (*((out) as *mut u8)) != 47 as u8 {
+        if n == 0 || (*((out + n - 1) as *mut u8)) != 47 as u8 {
+            __mmio_write8((out + n) as *mut u8, 47 as u8)
+            n = n + 1
+        }
+    }
+    var k: u64 = 0
+    while (*((name + k) as *mut u8)) != 0 as u8 && n < 190 {
+        __mmio_write8((out + n) as *mut u8, *((name + k) as *mut u8))
+        n = n + 1
+        k = k + 1
+    }
+    __mmio_write8((out + n) as *mut u8, 0 as u8)
+    return out
+}
+
+fn zptr(i: u64) -> u64 {
+    return (&zeiten[0 as usize]) as u64 + i * 20
+}
+
+fn scan_mem() -> u64 {
+    var namebuf: [u8; 64] = [0 as u8; 64]
+    expbase.entry_count = 0
+    let fd: u64 = bstore.snaps_open((&expbase.vspeicher[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var next: bool = true
+    while next {
+        if !bstore.snaps_next(fd, (&namebuf[0 as usize]) as u64, 60) {
+            next = false
+        } else if expbase.entry_count < SIC_MAXENT {
+            if bstore.snap_head((&expbase.vspeicher[0 as usize]) as u64,
+                    (&namebuf[0 as usize]) as u64, zptr(expbase.entry_count),
+                    (&vinfo[0 as usize]) as u64) {
+                if vinfo[(2) as usize] != 0 {
+                    ulib.strncpy(nptr(expbase.entry_count), (&namebuf[0 as usize]) as u64,
+                        SIC_NAMEB - 1)
+                    entry_sizes[(expbase.entry_count) as usize] = vinfo[(1) as usize]
+                    art[(expbase.entry_count) as usize] = 1
+                    modus[(expbase.entry_count) as usize] = 16877
+                    expbase.entry_count = expbase.entry_count + 1
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return expbase.entry_count
+}
+
+fn scan_sicherung() -> u64 {
+    expbase.entry_count = 0
+    let pl: u64 = ulib.length((&expbase.vunter[0 as usize]) as u64)
+    let fd: u64 = bstore.entries_open((&expbase.vspeicher[0 as usize]) as u64,
+        (&expbase.vsicher[0 as usize]) as u64, (&vctx[0 as usize]) as u64)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var next: bool = true
+    while next {
+        if !bstore.entries_next(fd, (&vctx[0 as usize]) as u64,
+                (&vpfad[0 as usize]) as u64, (&vinfo[0 as usize]) as u64) {
+            next = false
+        } else if expbase.entry_count < SIC_MAXENT {
+            if pl == 0 || ulib.strneq((&vpfad[0 as usize]) as u64,
+                    (&expbase.vunter[0 as usize]) as u64, pl) {
+                let rest: u64 = (&vpfad[0 as usize]) as u64 + pl
+                if (*((rest) as *mut u8)) == 47 as u8 {
+                    var k: u64 = 1
+                    var tiefer: bool = false
+                    while (*((rest + k) as *mut u8)) != 0 as u8 {
+                        if (*((rest + k) as *mut u8)) == 47 as u8 {
+                            tiefer = true
+                        }
+                        k = k + 1
+                    }
+                    if !tiefer && k > 1 {
+                        ulib.strncpy(nptr(expbase.entry_count), rest + 1, SIC_NAMEB - 1)
+                        entry_sizes[(expbase.entry_count) as usize] = vinfo[(1) as usize]
+                        modus[(expbase.entry_count) as usize] = vinfo[(0) as usize]
+                        if (vinfo[(0) as usize] & 61440) == 16384 {
+                            art[(expbase.entry_count) as usize] = 1
+                        } else {
+                            art[(expbase.entry_count) as usize] = 0
+                        }
+                        __mmio_write8((zptr(expbase.entry_count)) as *mut u8, 0 as u8)
+                        expbase.entry_count = expbase.entry_count + 1
+                    }
+                }
+            }
+        }
+    }
+    io.close(fd)
+    return expbase.entry_count
+}
+
+fn in_sicherung(e: u64) -> u64 {
+    var sl: [u8; 2] = "/\0"
+    ulib.strncpy((&vpfad[0 as usize]) as u64,
+        (&expbase.vunter[0 as usize]) as u64, 200)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&sl[0 as usize]) as u64)
+    ulib.strcat((&vpfad[0 as usize]) as u64, nptr(e))
+    return (&vpfad[0 as usize]) as u64
+}
+
+fn point(name: u64) -> bool {
+    if (*((name) as *mut u8)) != 46 as u8 {
+        return false
+    }
+    if (*((name + 1) as *mut u8)) == 0 as u8 {
+        return true
+    }
+    if (*((name + 1) as *mut u8)) == 46 as u8 {
+        if (*((name + 2) as *mut u8)) == 0 as u8 {
+            return true
+        }
+    }
+    return false
+}
+
+// ------------------------------------------------------------ sortieren
+fn kleiner(a: u64, b: u64) -> bool {
+    if art[(a) as usize] != art[(b) as usize] {
+        return art[(a) as usize] > art[(b) as usize]
+    }
+    var r: bool = false
+    if expbase.sortby == 1 {
+        if entry_sizes[(a) as usize] != entry_sizes[(b) as usize] {
+            r = entry_sizes[(a) as usize] < entry_sizes[(b) as usize]
+        } else {
+            r = ulib.cmp(nptr(a), nptr(b)) == 1
+        }
+    } else if expbase.sortby == 3 {
+        if modus[(a) as usize] != modus[(b) as usize] {
+            r = modus[(a) as usize] < modus[(b) as usize]
+        } else {
+            r = ulib.cmp(nptr(a), nptr(b)) == 1
+        }
+    } else {
+        r = ulib.cmp(nptr(a), nptr(b)) == 1
+    }
+    if expbase.sortrev != 0 {
+        return !r
+    }
+    return r
+}
+
+fn sort_entries() {
+    if expbase.vmodus == 0 {
+        expmodell.set_sort(expbase.sortby, expbase.sortrev)
+        expmodell.sort_rows()
+        return
+    }
+    var i: u64 = 0
+    while i < expbase.entry_count {
+        expbase.entry_order[(i) as usize] = i
+        i = i + 1
+    }
+    i = 1
+    while i < expbase.entry_count {
+        let v: u64 = expbase.entry_order[(i) as usize]
+        var k: u64 = i
+        while k > 0 && kleiner(v, expbase.entry_order[(k - 1) as usize]) {
+            expbase.entry_order[(k) as usize] = expbase.entry_order[(k - 1) as usize]
+            k = k - 1
+        }
+        expbase.entry_order[(k) as usize] = v
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------- die Textbloecke
+
+static mut tp: u64 = 0
+
+fn put(c: u64) {
+    if tp < 6100 {
+        tblob[(tp) as usize] = c as u8
+        tp = tp + 1
+    }
+}
+
+fn puts(p: u64) {
+    var k: u64 = 0
+    while (*((p + k) as *mut u8)) != 0 as u8 {
+        put((*((p + k) as *mut u8)) as u64)
+        k = k + 1
+    }
+}
+
+fn putn(v: u64) {
+    var d: [u8; 24] = [0 as u8; 24]
+    let n: u64 = ulib.digits(v, (&d[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < n {
+        put((d[(k) as usize]) as u64)
+        k = k + 1
+    }
+}
+
+fn putmode(m: u64, dir: u64) {
+    if dir != 0 {
+        put(100) // d
+    } else {
+        put(45) // -
+    }
+    var b: u64 = 256
+    var k: u64 = 0
+    while k < 9 {
+        if (m & b) != 0 {
+            if k % 3 == 0 {
+                put(114) // r
+            } else if k % 3 == 1 {
+                put(119) // w
+            } else {
+                put(120) // x
+            }
+        } else {
+            put(45)
+        }
+        b = b >> 1
+        k = k + 1
+    }
+}
+
+// WHICH ICON A FILE GETS, and it is decided from what `stat` said and
+// from the name -- not from a table of file types, which this system
+// does not have in Ring 3.  Four kinds, and no more, because a fifth
+// that cannot be told apart at sixteen pixels is decoration:
+//
+//   a directory              a folder
+//   anything executable      the terminal glyph, "this one runs"
+//   a name ending in .fi,
+//   .md, .txt, .s, .sh       a page with lines on it
+//   everything else          a blank page
+//
+// A FILE THAT IS BOTH -- executable AND named .sh -- IS A PROGRAM.
+// What a thing DOES beats what it is called; that is the same rule
+// round K16 put into `kernel/ftype.fi` when `/tarn.fi` turned out to be
+// a program.
+fn icon_for(e: u64) -> u64 {
+    if art[(e) as usize] != 0 {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_FOLDER), 15904798)
+    }
+    if (modus[(e) as usize] & 73) != 0 {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_PROGRAM), 8141549)
+    }
+    if ends_with(nptr(e)) {
+        return wlib.icon_tint(wlib.icon_id(icons.FILE_TEXT), 3900150)
+    }
+    return wlib.icon_tint(wlib.icon_id(icons.FILE_FILE), 9741240)
+}
+
+// Does the name end in one of the endings that mean readable text?
+// Written out rather than table-driven: five endings, and a table of
+// five entries in a language without string arrays is more code than
+// the five comparisons.
+fn ends_with(p: u64) -> bool {
+    var n: u64 = 0
+    while (*((p + n) as *mut u8)) != 0 as u8 {
+        n = n + 1
+    }
+    if n < 3 {
+        return false
+    }
+    let a: u64 = (*((p + n - 3) as *mut u8)) as u64
+    let b: u64 = (*((p + n - 2) as *mut u8)) as u64
+    let c: u64 = (*((p + n - 1) as *mut u8)) as u64
+    if a == 46 && b == 102 && c == 105 {
+        return true // .fi
+    }
+    if a == 46 && b == 109 && c == 100 {
+        return true // .md
+    }
+    if a == 46 && b == 115 && c == 104 {
+        return true // .sh
+    }
+    if b == 46 && c == 115 {
+        return true // .s
+    }
+    if n >= 4 {
+        let d: u64 = (*((p + n - 4) as *mut u8)) as u64
+        if d == 46 && a == 116 && b == 120 && c == 116 {
+            return true // .txt
+        }
+    }
+    return false
+}
+
+static mut k_ty_dir2: [u8; 22] = "explorer.type.folder\0\0"
+
+static mut k_ty_file2: [u8; 20] = "explorer.type.file\0\0"
+
+static mut sizetmp: [u8; 24] = [0 as u8; 24]
+
+static mut k_sysname_tail: [u8; 5] = " (/)\0"
+
+static mut k_pc_used: [u8; 17] = "explorer.pc.used\0"
+
+// r1015: the fill of a drive as text for the date slot: "95 % belegt" / "95 % used", or "--" when
+// the kernel reports nothing. `used` is the per-mille value + 1 (0 = unknown).
+fn used_text(z: u64, used: u64) {
+    if used == 0 {
+        __mmio_write8(z as *mut u8, 45 as u8)
+        __mmio_write8((z + 1) as *mut u8, 45 as u8)
+        __mmio_write8((z + 2) as *mut u8, 0 as u8)
+        return
+    }
+    var dg: [u8; 12] = [0 as u8; 12]
+    let nd: u64 = ulib.digits((used - 1 + 5) / 10, (&dg[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < nd && k < 4 {
+        __mmio_write8((z + k) as *mut u8, dg[(k) as usize])
+        k = k + 1
+    }
+    __mmio_write8((z + k) as *mut u8, 32 as u8)
+    __mmio_write8((z + k + 1) as *mut u8, 37 as u8)
+    __mmio_write8((z + k + 2) as *mut u8, 32 as u8)
+    let w: u64 = msg.get((&k_pc_used[0 as usize]) as u64)
+    var j: u64 = 0
+    while j < 14 && (*((w + j) as *mut u8)) != 0 as u8 {
+        __mmio_write8((z + k + 3 + j) as *mut u8, *((w + j) as *mut u8))
+        j = j + 1
+    }
+    __mmio_write8((z + k + 3 + j) as *mut u8, 0 as u8)
+}
+
+// VIEW 3: all drives with their fill. One row per mounted drive (the carriers of the side pane): the mount path, the fill as a
+// percentage with a bar (host: `heat_bar`), the kind, the free room. A drive whose fill the kernel does not report shows "--".
+fn scan_computer() -> u64 {
+    expbase.entry_count = 0
+    var bsz: u64 = ulib.sys(ulib.SYS_SYSINFO, ulib.I_BSIZE, 0, 0)
+    if ulib.bad(bsz) || bsz == 0 {
+        bsz = 4096
+    }
+    let n: u64 = exporte.places_num()
+    var i: u64 = 0
+    while i < n && expbase.entry_count < SIC_MAXENT {
+        if exporte.place_is_carrier(i) {
+            ulib.strncpy(nptr(expbase.entry_count), exporte.place_path(i), SIC_NAMEB - 1)
+            let bl: u64 = exporte.carrier_blocks(i)
+            let be: u64 = exporte.carrier_used(i)
+            entry_sizes[(expbase.entry_count) as usize] = bl * bsz
+            ov_free[(expbase.entry_count) as usize] = 0
+            expbase.ov_used[(expbase.entry_count) as usize] = 0
+            if bl != 0 && be != 0 && be <= bl {
+                ov_free[(expbase.entry_count) as usize] = (bl - be) * bsz
+                var pm: u64 = be * 1000 / bl
+                if pm > 1000 {
+                    pm = 1000
+                }
+                expbase.ov_used[(expbase.entry_count) as usize] = pm + 1
+            }
+            ov_ro[(expbase.entry_count) as usize] = exporte.carrier_flags(i) & ulib.MNT_RDONLY
+            art[(expbase.entry_count) as usize] = 1
+            modus[(expbase.entry_count) as usize] = 16877
+            // the fill as text in the date slot: "73 % used" or "--"
+            used_text(zptr(expbase.entry_count), expbase.ov_used[(expbase.entry_count) as usize])
+            expbase.entry_count = expbase.entry_count + 1
+        }
+        i = i + 1
+    }
+    if expbase.entry_count == 0 {
+        // no mount table entry (the machine has the system disk as its only drive and the kernel lists none): the system volume
+        // from the numbers the kernel has for it (`SYS_SYSINFO`), so that the overview is never an empty list
+        let sbl: u64 = exporte.sys_bloecke()
+        let sbe: u64 = exporte.sys_benutzt()
+        __mmio_write8((nptr(0)) as *mut u8, 47 as u8)
+        __mmio_write8((nptr(0) + 1) as *mut u8, 0 as u8)
+        entry_sizes[0] = sbl * bsz
+        ov_free[0] = 0
+        expbase.ov_used[0] = 0
+        if sbl != 0 && sbe != 0 && sbe <= sbl {
+            ov_free[0] = (sbl - sbe) * bsz
+            expbase.ov_used[0] = sbe * 1000 / sbl + 1
+        }
+        ov_ro[0] = 0
+        art[0] = 1
+        modus[0] = 16877
+        used_text(zptr(0), expbase.ov_used[0])
+        expbase.entry_count = 1
+    }
+    return expbase.entry_count
+}
+
+fn build_table() {
+    if expbase.vmodus == 3 {
+        // the overview: Name, Used (with a bar), Type, Free
+        tp = 0
+        puts(msg.get((&k_cols_pc[0 as usize]) as u64))
+        var j: u64 = 0
+        while j < expbase.entry_count {
+            let e: u64 = expbase.entry_order[(j) as usize]
+            symbole[(j) as usize] = wlib.icon_id(icons.FILE_DRIVE)
+            if (*((nptr(e)) as *mut u8)) == 47 as u8 && (*((nptr(e) + 1) as *mut u8)) == 0 as u8 {
+                puts(product.product())
+                puts((&k_sysname_tail[0 as usize]) as u64)
+            } else {
+                puts(nptr(e))
+            }
+            put(9)
+            puts(zptr(e))
+            put(9)
+            if ov_ro[(e) as usize] != 0 {
+                puts(msg.get((&k_ty_ro[0 as usize]) as u64))
+            } else if (*((nptr(e)) as *mut u8)) == 47 as u8 && (*((nptr(e) + 1) as *mut u8)) == 0 as u8 {
+                puts(msg.get((&k_ty_system[0 as usize]) as u64))
+            } else {
+                puts(msg.get((&k_ty_drive[0 as usize]) as u64))
+            }
+            put(9)
+            if expbase.ov_used[(e) as usize] != 0 {
+                let _sf: usize = navnum.size_text(ov_free[(e) as usize], (&sizetmp[0 as usize]) as u64, 24)
+                puts((&sizetmp[0 as usize]) as u64)
+            } else {
+                put(45)
+                put(45)
+            }
+            put(10)
+            j = j + 1
+        }
+        put(0)
+        return
+    }
+    if expbase.vmodus == 0 {
+        let _z: u64 = expmodell.table_build(msg.get((&k_cols[0 as usize]) as u64))
+        return
+    }
+    tp = 0
+    puts(msg.get((&k_cols[0 as usize]) as u64))
+    var i: u64 = 0
+    while i < expbase.entry_count {
+        let e: u64 = expbase.entry_order[(i) as usize]
+        symbole[(i) as usize] = icon_for(e)
+        // r442: Name, Date modified, Type, Size -- like the model's table
+        puts(nptr(e))
+        put(9)
+        // the time: in a backup it stands in the header of the snapshot (CMOS clock)
+        if (*((zptr(e)) as *mut u8)) != 0 as u8 {
+            puts(zptr(e))
+        } else {
+            put(45)
+            put(45)
+        }
+        put(9)
+        if art[(e) as usize] != 0 {
+            puts(msg.get((&k_ty_dir2[0 as usize]) as u64))
+        } else {
+            puts(msg.get((&k_ty_file2[0 as usize]) as u64))
+        }
+        put(9)
+        if art[(e) as usize] == 0 {
+            let _sn: usize = navnum.size_text(entry_sizes[(e) as usize],
+                (&sizetmp[0 as usize]) as u64, 24)
+            puts((&sizetmp[0 as usize]) as u64)
+        }
+        put(10)
+        i = i + 1
+    }
+    put(0)
+}
+
+fn tab_text() -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.table_ptr()
+    }
+    return (&tblob[0 as usize]) as u64
+}
+
+fn tab_icons() -> u64 {
+    if expbase.vmodus == 0 {
+        return expmodell.symbole_ptr()
+    }
+    return (&symbole[0 as usize]) as u64
+}
+
+// ============================================================ r442 (D-012): THE NAVIGATION PANE
+//
+// ONE list instead of two boxes: group headings (Quick access, This computer, Volumes), the places, and
+// the folder tree of where we are (Folders: "..", the current folder, its sub-folders one level in).
+// `nav_refs` says what a row IS: a place number (0..999), NAV_UP, NAV_CUR, or NAV_SUB + n for the n-th
+// sub-folder (the same n that `tree_walk` counts); NAV_NONE for a heading of the tree.
+const NAV_MAX: u64 = 128
+
+const NAV_NONE: u64 = 1002
+
+static mut nav_bp: u64 = 0
+
+static mut k_nav_folders: [u8; 24] = "explorer.nav.folders\0\0\0\0"
+
+static mut k_nav_root: [u8; 22] = "explorer.place.root\0\0\0"
+
+static mut s_nav_up: [u8; 4] = "..\0\0"
+
+fn nav_add(text: u64, icon: u64, head: u64, level: u64, target: u64) {
+    if expbase.nav_n >= NAV_MAX {
+        return
+    }
+    let n: u64 = ulib.length(text)
+    if nav_bp + n + 2 >= 8192 {
+        return
+    }
+    var k: u64 = 0
+    while k < n {
+        expbase.nav_blob[(nav_bp + k) as usize] = *((text + k) as *mut u8)
+        k = k + 1
+    }
+    expbase.nav_blob[(nav_bp + n) as usize] = 10 as u8
+    nav_bp = nav_bp + n + 1
+    expbase.nav_icons[(expbase.nav_n) as usize] = icon
+    expbase.nav_heads[(expbase.nav_n) as usize] = head as u8
+    expbase.nav_levels[(expbase.nav_n) as usize] = level as u8
+    expbase.nav_refs[(expbase.nav_n) as usize] = target
+    expbase.nav_n = expbase.nav_n + 1
+}
+
+// The last name of the path (the folder we are in); the root shows the name of the start place.
+fn nav_last_part(p: u64) -> u64 {
+    let n: u64 = ulib.length(p)
+    var k: u64 = n
+    while k > 0 && *((p + k - 1) as *mut u8) != 47 as u8 {
+        k = k - 1
+    }
+    if k >= n {
+        return msg.get(((&k_nav_root[0 as usize]) as u64))
+    }
+    return p + k
+}
+
+fn nav_build() {
+    expbase.nav_n = 0
+    nav_bp = 0
+    let places: u64 = exporte.places_num()
+    let syms: u64 = exporte.places_icons()
+    var i: u64 = 0
+    while i < places {
+        var head: u64 = 0
+        if exporte.place_is_header(i) {
+            head = 1
+        }
+        nav_add(exporte.place_text(i), *((syms + i * 8) as *mut u64), head, 0, i)
+        i = i + 1
+    }
+    nav_add(msg.get(((&k_nav_folders[0 as usize]) as u64)), 0, 1, 0, NAV_NONE)
+    nav_add(((&s_nav_up[0 as usize]) as u64), wlib.icon_id(icons.NAV_UP), 0, 0, expbase.NAV_UP)
+    if expbase.vmodus == 0 {
+        let folder: u64 = wlib.icon_tint(wlib.icon_id(icons.FILE_FOLDER), 15904798)
+        nav_add(nav_last_part(((&expbase.dir_path[0 as usize]) as u64)),
+            wlib.icon_tint(wlib.icon_id(icons.FILE_FOLDER_OPEN), 15904798), 0, 0, expbase.NAV_CUR)
+        var k: u64 = 0
+        var subs: u64 = 0
+        while k < m_count() {
+            let e: u64 = m_ord(k)
+            if m_art(e) != 0 {
+                nav_add(m_name(e), folder, 0, 1, expbase.NAV_SUB + subs)
+                subs = subs + 1
+            }
+            k = k + 1
+        }
+    }
+    expbase.nav_blob[(nav_bp) as usize] = 0 as u8
+}
+
+// The row of the pane that says where we are: the place the user clicked while it is still our path,
+// else the first place with our path, else the row of the current folder. Also sets the chosen place
+// (what the eject button needs).
+fn nav_sync_sel() {
+    let places: u64 = exporte.places_num()
+    var want: u64 = fuiscene.HEAD_ROW
+    var chosen: u64 = 0xFFFFFFFFFFFFFFFF
+    if expbase.vmodus == 3 {
+        var ov: u64 = 0
+        while ov < places {
+            if exporte.place_is_overview(ov) {
+                chosen = ov
+            }
+            ov = ov + 1
+        }
+    }
+    if chosen != 0xFFFFFFFFFFFFFFFF {
+        want = chosen
+    } else if expbase.place_choice < places && !exporte.place_is_header(expbase.place_choice)
+        && expbase.vmodus == 0 && ulib.streq(exporte.place_path(expbase.place_choice), ((&expbase.dir_path[0 as usize]) as u64)) {
+        chosen = expbase.place_choice
+    } else if expbase.vmodus == 0 {
+        var i: u64 = 0
+        while i < places && chosen == 0xFFFFFFFFFFFFFFFF {
+            if !exporte.place_is_header(i) && ulib.streq(exporte.place_path(i), ((&expbase.dir_path[0 as usize]) as u64)) {
+                chosen = i
+            }
+            i = i + 1
+        }
+    }
+    if chosen != 0xFFFFFFFFFFFFFFFF {
+        want = chosen
+    } else {
+        var r: u64 = places
+        while r < expbase.nav_n {
+            if expbase.nav_refs[(r) as usize] == expbase.NAV_CUR {
+                want = r
+            }
+            r = r + 1
+        }
+    }
+    expbase.place_choice = chosen
+    fuiscene.table_set_sel(expbase.K_PLACES, want)
+}
+
+fn build_tree() {
+    nav_build()
+    var bp: u64 = 0
+    var auf: [u8; 4] = "..\0\0"
+    // The first row of the tree is the way up, and it is not a folder --
+    // it is a MOVE.  An arrow says that and a folder does not.
+    bsymbole[0 as usize] = wlib.icon_id(icons.NAV_UP)
+    var bz: u64 = 1
+    var k: u64 = 0
+    while (*(((&auf[0 as usize]) as u64 + k) as *mut u8)) != 0 as u8 {
+        bblob[(bp) as usize] = auf[(k) as usize]
+        bp = bp + 1
+        k = k + 1
+    }
+    bblob[(bp) as usize] = 10 as u8
+    bp = bp + 1
+    var i: u64 = 0
+    let n: u64 = m_count()
+    while i < n {
+        let e: u64 = m_ord(i)
+        if m_art(e) != 0 && bp < 980 {
+            if bz < 96 {
+                bsymbole[(bz) as usize] = wlib.icon_tint(wlib.icon_id(icons.FILE_FOLDER), 15904798)
+                bz = bz + 1
+            }
+            let p: u64 = m_name(e)
+            k = 0
+            while (*((p + k) as *mut u8)) != 0 as u8 && bp < 980 {
+                bblob[(bp) as usize] = *((p + k) as *mut u8)
+                bp = bp + 1
+                k = k + 1
+            }
+            bblob[(bp) as usize] = 10 as u8
+            bp = bp + 1
+        }
+        i = i + 1
+    }
+    bblob[(bp) as usize] = 0 as u8
+}
+
+static mut k_drives: [u8; 23] = "explorer.count.drives\0\0"
+
+static mut k_drive1: [u8; 23] = "explorer.count.drive1\0\0"
+
+fn build_status() {
+    if expbase.vmodus == 3 {
+        // W4: the overview counts drives ("2 drives"), not folders and bytes
+        var dd: [u8; 24] = [0 as u8; 24]
+        var dk: u64 = msg.get((&k_drives[0 as usize]) as u64)
+        if expbase.entry_count == 1 {
+            dk = msg.get((&k_drive1[0 as usize]) as u64)
+        }
+        let lq: u64 = anhaengen(0, (&dd[0 as usize]) as u64, expbase.entry_count, dk)
+        expbase.lauf[(lq) as usize] = 0 as u8
+        return
+    }
+    var bytes: u64 = 0
+    var dirs: u64 = 0
+    var i: u64 = 0
+    let n: u64 = m_count()
+    while i < n {
+        let e: u64 = m_ord(i)
+        if m_art(e) != 0 {
+            dirs = dirs + 1
+        } else {
+            bytes = bytes + m_size(e)
+        }
+        i = i + 1
+    }
+    let s1: u64 = msg.get((&k_items[0 as usize]) as u64)
+    let s2: u64 = msg.get((&k_folders[0 as usize]) as u64)
+    var lp: u64 = 0
+    var d: [u8; 24] = [0 as u8; 24]
+    lp = anhaengen(lp, (&d[0 as usize]) as u64, n,
+        s1)
+    lp = anhaengen(lp, (&d[0 as usize]) as u64, dirs,
+        s2)
+    // r442: the size as a person reads it ("354 B", "1.2 KB")
+    let _sn: usize = navnum.size_text(bytes, (&d[0 as usize]) as u64, 24)
+    var k: u64 = 0
+    while k < 24 && d[(k) as usize] != 0 as u8 && lp < 90 {
+        expbase.lauf[(lp) as usize] = d[(k) as usize]
+        lp = lp + 1
+        k = k + 1
+    }
+    expbase.lauf[(lp) as usize] = 0 as u8
+}
+
+// r442: while rows are marked the status line says so: "3 selected (12 KB)".
+static mut selbuf: [u8; 96] = [0 as u8; 96]
+
+fn status_selection() {
+    let key: u64 = cur_key()
+    let marked: u64 = fuiscene.table_sel_num(key)
+    if marked == 0 || expbase.vmodus != 0 {
+        expbase.stat_msg = 0
+        return
+    }
+    var bytes: u64 = 0
+    var i: u64 = 0
+    let n: u64 = m_count()
+    while i < n {
+        if fuiscene.table_sel_has(key, i) {
+            let e: u64 = m_ord(i)
+            if m_art(e) == 0 {
+                bytes = bytes + m_size(e)
+            }
+        }
+        i = i + 1
+    }
+    var d: [u8; 24] = [0 as u8; 24]
+    var at: u64 = ulib.digits(marked, (&d[0 as usize]) as u64)
+    var k: u64 = 0
+    while k < at {
+        selbuf[(k) as usize] = d[(k) as usize]
+        k = k + 1
+    }
+    let w: u64 = msg.get((&k_selected[0 as usize]) as u64)
+    var j: u64 = 0
+    while *((w + j) as *mut u8) != 0 as u8 && at < 60 {
+        selbuf[(at) as usize] = *((w + j) as *mut u8)
+        at = at + 1
+        j = j + 1
+    }
+    if bytes > 0 {
+        selbuf[(at) as usize] = 32 as u8
+        selbuf[(at + 1) as usize] = 40 as u8
+        at = at + 2
+        let sn: usize = navnum.size_text(bytes, (&d[0 as usize]) as u64, 24)
+        var q: u64 = 0
+        while q < sn as u64 && at < 90 {
+            selbuf[(at) as usize] = d[(q) as usize]
+            at = at + 1
+            q = q + 1
+        }
+        selbuf[(at) as usize] = 41 as u8
+        at = at + 1
+    }
+    selbuf[(at) as usize] = 0 as u8
+    expbase.stat_msg = ((&selbuf[0 as usize]) as u64)
+}
+
+static mut k_selected: [u8; 26] = "explorer.status.selected\0\0"
+
+fn anhaengen(lp0: u64, d: u64, v: u64, txt: u64) -> u64 {
+    var lp: u64 = lp0
+    let n: u64 = ulib.digits(v, d)
+    var k: u64 = 0
+    while k < n && lp < 90 {
+        expbase.lauf[(lp) as usize] = *((d + k) as *mut u8)
+        lp = lp + 1
+        k = k + 1
+    }
+    k = 0
+    while (*((txt + k) as *mut u8)) != 0 as u8 && lp < 90 {
+        expbase.lauf[(lp) as usize] = *((txt + k) as *mut u8)
+        lp = lp + 1
+        k = k + 1
+    }
+    return lp
+}
+
+// ------------------------------------------------------------- gehen
+
+fn tab_p(i: u64) -> u64 {
+    return (&tab_path[(i * expbase.TAB_WIDTH) as usize]) as u64
+}
+
+fn tab_name(pf: u64, aus: u64, max: u64) -> u64 {
+    let n: u64 = ulib.length(pf)
+    if n == 0 {
+        return 0
+    }
+    if n == 1 {
+        return ulib.strncpy(aus, pf, max)
+    }
+    var ab: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        if (*((pf + k) as *mut u8)) == 47 as u8 && k + 1 < n {
+            ab = k + 1
+        }
+        k = k + 1
+    }
+    return ulib.strncpy(aus, pf + ab, max)
+}
+
+fn tab_label(i: u64, aus: u64, max: u64) -> u64 {
+    var at: u64 = 0
+    if expbase.tab_n > 1 {
+        __mmio_write8((aus) as *mut u8, (49 + i) as u8)
+        __mmio_write8((aus + 1) as *mut u8, 32 as u8)
+        at = 2
+    }
+    return at + tab_name(tab_p(i), aus + at, max - at)
+}
+
+fn tab_remember() {
+    if expbase.tab_at < expbase.TAB_MAX {
+        ulib.strncpy(tab_p(expbase.tab_at), (&expbase.dir_path[0 as usize]) as u64,
+            expbase.TAB_WIDTH - 1)
+    }
+}
+
+fn hist_push(p: u64) {
+    let _r: bool = folder.record(p)
+    var s_h: [u8; 18] = "explorer: hist n=\0"
+    var s_a: [u8; 5] = " at=\0"
+    say((&s_h[0 as usize]) as u64)
+    sayn(folder.count())
+    say((&s_a[0 as usize]) as u64)
+    sayn(folder.position() + 1)
+    nl()
+}
+
+fn eltern(p: u64) {
+    if expsmb.is_url(p) {
+        let _up: bool = expsmb.parent_in_place(p)
+        return
+    }
+    var n: u64 = ulib.length(p)
+    if n <= 1 {
+        return
+    }
+    if (*((p + n - 1) as *mut u8)) == 47 as u8 {
+        n = n - 1
+    }
+    while n > 1 && (*((p + n - 1) as *mut u8)) != 47 as u8 {
+        n = n - 1
+    }
+    if n > 1 {
+        n = n - 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+}
+
+fn columns_set(tbreite: u64) {
+    cm_follow()
+    var probe: [u8; 32] = [0 as u8; 32]
+    let pp: u64 = expmodell.time_text(1893456000,
+        (&probe[0 as usize]) as u64)
+    let wz: u64 = wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), pp,
+        ulib.length(pp)) / fuiscene.scale()
+    let pad: u64 = wlibc.metric(wlibc.M_PAD_X) / fuiscene.scale()
+    // r442: Name | Date modified | Type | Size. The date as wide as its longest form, the type as wide as
+    // the longest of five words, the size as wide as "999.9 KB" (right-aligned, 14 points before its edge)
+    var w_date: u64 = wz + 2 * pad
+    var w_type: u64 = 96
+    var w_size: u64 = 96
+    var w_name: u64 = 0
+    if tbreite > w_date + w_type + w_size {
+        w_name = tbreite - w_date - w_type - w_size
+    }
+    // X5: a narrow list (the preview pane is open, a small window) squeezes the OTHER columns first: Type and Size
+    // shrink to 72, the date column to 104, so the name keeps at least 120 points (before: 54, "con..." / "brie...").
+    if w_name < 120 && tbreite > 120 + 104 + 72 + 72 {
+        w_type = 72
+        w_size = 72
+        w_date = 104
+        w_name = tbreite - w_date - w_type - w_size
+    } else if w_name < 120 && tbreite > 120 + 96 + 64 + 64 {
+        w_type = 64
+        w_size = 64
+        w_date = 96
+        w_name = tbreite - w_date - w_type - w_size
+    }
+    // The name gets the rest, but never less than the date column:
+    // a file manager in which the name is the narrowest column shows a list of dots.
+    if w_name < w_date {
+        w_name = w_date
+    }
+    expbase.col_widths[(0) as usize] = w_name
+    expbase.col_widths[(1) as usize] = w_date
+    expbase.col_widths[(2) as usize] = w_type
+    expbase.col_widths[(3) as usize] = w_size
+    if expbase.cols_user != 0 {
+        // W4b: the widths the person dragged (Date, Type, Size) stay; the name takes the rest
+        let ud: u64 = expbase.ucol[(1) as usize]
+        let ut: u64 = expbase.ucol[(2) as usize]
+        let us: u64 = expbase.ucol[(3) as usize]
+        var nm: u64 = 0
+        if tbreite > ud + ut + us {
+            nm = tbreite - ud - ut - us
+        }
+        if nm >= 48 {
+            expbase.col_widths[(0) as usize] = nm
+            expbase.col_widths[(1) as usize] = ud
+            expbase.col_widths[(2) as usize] = ut
+            expbase.col_widths[(3) as usize] = us
+        }
+    }
+    if expbase.cm_say != 0 {
+        expbase.cm_say = 0
+        say(((&s_cw[0 as usize]) as u64))
+        kv(((&s_cw_a[0 as usize]) as u64), expbase.col_widths[(0) as usize])
+        kv(((&s_cw_b[0 as usize]) as u64), expbase.col_widths[(1) as usize])
+        kv(((&s_cw_c[0 as usize]) as u64), expbase.col_widths[(2) as usize])
+        kv(((&s_cw_d[0 as usize]) as u64), expbase.col_widths[(3) as usize])
+        nl()
+    }
+}
+
+// X5: THE COLUMN WIDTHS ARE REMEMBERED PER FOLDER. A drag stores the four widths under a hash of the path (16 folders,
+// oldest replaced first); entering a folder loads its widths, an unknown folder gets the measured defaults.
+const CM_MAX: u64 = 16
+
+static mut cm_hash: [u64; 16] = [0 as u64; 16]
+
+static mut cm_w: [u64; 64] = [0 as u64; 64]
+
+static mut cm_n: u64 = 0
+
+static mut cm_next: u64 = 0
+
+static mut cm_cur: u64 = 0
+
+static mut s_cm: [u8; 18] = "explorer: colmem \0"
+
+static mut s_cm_a: [u8; 5] = "hit=\0"
+
+static mut s_cm_b: [u8; 3] = "n=\0"
+
+static mut s_cw: [u8; 17] = "explorer: colw \0\0"
+
+static mut s_cw_a: [u8; 3] = "a=\0"
+
+static mut s_cw_b: [u8; 3] = "b=\0"
+
+static mut s_cw_c: [u8; 3] = "c=\0"
+
+static mut s_cw_d: [u8; 3] = "d=\0"
+
+fn cm_hash_of_path() -> u64 {
+    var h: u64 = 1469598103934665603
+    var i: u64 = 0
+    while i < 127 && expbase.dir_path[(i) as usize] != 0 as u8 {
+        h = (h ^ (expbase.dir_path[(i) as usize] as u64)) *% 1099511628211
+        i = i + 1
+    }
+    if h == 0 {
+        h = 1
+    }
+    return h
+}
+
+fn cm_find(h: u64) -> u64 {
+    var i: u64 = 0
+    while i < cm_n {
+        if cm_hash[(i) as usize] == h {
+            return i
+        }
+        i = i + 1
+    }
+    return CM_MAX
+}
+
+// Called from columns_set (every layout pass): when the folder changed, switch to its stored widths (or the defaults).
+fn cm_follow() {
+    let h: u64 = cm_hash_of_path()
+    if h == cm_cur {
+        return
+    }
+    cm_cur = h
+    let at: u64 = cm_find(h)
+    if at < CM_MAX {
+        var c: u64 = 0
+        while c < 4 {
+            expbase.ucol[(c) as usize] = cm_w[(at * 4 + c) as usize]
+            c = c + 1
+        }
+        expbase.cols_user = 1
+    } else {
+        expbase.cols_user = 0
+    }
+    expbase.cm_say = 1
+    say(((&s_cm[0 as usize]) as u64))
+    kv(((&s_cm_a[0 as usize]) as u64), expbase.cols_user)
+    kv(((&s_cm_b[0 as usize]) as u64), cm_n)
+    nl()
+}
+
+// Called after a column drag: store the four widths for the folder that is shown.
+fn cm_store() {
+    var at: u64 = cm_find(cm_cur)
+    if at >= CM_MAX {
+        if cm_n < CM_MAX {
+            at = cm_n
+            cm_n = cm_n + 1
+        } else {
+            at = cm_next
+            cm_next = (cm_next + 1) % CM_MAX
+        }
+        cm_hash[(at) as usize] = cm_cur
+    }
+    var c: u64 = 0
+    while c < 4 {
+        cm_w[(at * 4 + c) as usize] = expbase.ucol[(c) as usize]
+        c = c + 1
+    }
+}
+
+const SYMMAX: u64 = 512
+
+fn icon_view_build() {
+    var sp: u64 = 0
+    var z: u64 = 0
+    expbase.sym_gone = 0
+    let n: u64 = m_count()
+    while z < n {
+        let e: u64 = m_ord(z)
+        let name: u64 = m_name(e)
+        let len: u64 = ulib.length(name)
+        if z >= SYMMAX || sp + len + 2 >= 16380 {
+            expbase.sym_gone = expbase.sym_gone + 1
+        } else {
+            if expbase.vmodus == 0 {
+                expbase.symicons[(z) as usize] = expmodell.icon_for(e)
+            } else {
+                expbase.symicons[(z) as usize] = icon_for(e)
+            }
+            var k: u64 = 0
+            while k < len {
+                expbase.symblob[(sp) as usize] = *((name + k) as *mut u8)
+                sp = sp + 1
+                k = k + 1
+            }
+            expbase.symblob[(sp) as usize] = 10 as u8
+            sp = sp + 1
+        }
+        z = z + 1
+    }
+    expbase.symblob[(sp) as usize] = 0 as u8
+}
+
+fn compare_start(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while true {
+        let cb: u64 = (__mmio_read8((b + i) as *mut u8)) as u64
+        if cb == 0 {
+            return true
+        }
+        let ca: u64 = (__mmio_read8((a + i) as *mut u8)) as u64
+        if ca != cb {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+static mut k_errtit: [u8; 19] = "explorer.err.title\0"
+
+static mut k_newfile: [u8; 17] = "explorer.newfile\0"
+
+static mut k_newfname: [u8; 22] = "explorer.newfile.name\0"
+
+fn eintraege(p: u64) -> u64 {
+    if p == 0 {
+        return 0
+    }
+    var n: u64 = 0
+    var k: u64 = 0
+    var opened: bool = false
+    while (*((p + k) as *mut u8)) != 0 as u8 {
+        if (*((p + k) as *mut u8)) == 10 as u8 {
+            n = n + 1
+            opened = false
+        } else {
+            opened = true
+        }
+        k = k + 1
+    }
+    if opened {
+        n = n + 1
+    }
+    return n
+}
+
+fn full_from(line: u64) -> u64 {
+    if line >= m_count() {
+        return 0
+    }
+    return join((&expbase.dir_path[0 as usize]) as u64, m_name(m_ord(line)))
+}
+
+fn select_list(tab: u64) -> u64 {
+    var s_sel: [u8; 15] = "explorer: sel \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_a: [u8; 7] = "anker=\0"
+    expakt.list_clear()
+    var n: u64 = 0
+    var z: u64 = 0
+    let int: u64 = m_count()
+    while z < int {
+        if fuiscene.table_sel_has(cur_key(), z) {
+            if expakt.list_add(full_from(z)) {
+                n = n + 1
+            }
+        }
+        z = z + 1
+    }
+    if n == 0 {
+        let v: u64 = cur_row()
+        if v < int {
+            if expakt.list_add(full_from(v)) {
+                n = 1
+            }
+        }
+    }
+    say((&s_sel[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, n)
+    kv((&s_a[0 as usize]) as u64, cur_row())
+    nl()
+    return n
+}
+
+fn error_show(rc: u64) -> bool {
+    var s_f: [u8; 21] = "explorer: fehler rc=\0"
+    var s_k: [u8; 6] = " key=\0"
+    if rc == 0 {
+        return false
+    }
+    let schl: u64 = expakt.error_key(rc)
+    say((&s_f[0 as usize]) as u64)
+    sayn(rc)
+    say((&s_k[0 as usize]) as u64)
+    say(schl)
+    nl()
+    let _d: u64 = dlg_hinweis(msg.get((&k_errtit[0 as usize]) as u64),
+        msg.get(schl))
+    return true
+}
+
+// ------------------------------------------------------------- Programm
+
+fn window_open() {
+    var path: [u8; 14] = "/bin/explorer\0"
+    var s_go: [u8; 24] = "explorer: new window=\0\0\0"
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&path[0 as usize]) as u64, 0, 0)
+    say((&s_go[0 as usize]) as u64)
+    sayn(pid)
+    nl()
+}
+
+fn launcher_open() {
+    var path2: [u8; 17] = "/bin/launcher\0\0\0\0"
+    var s_go: [u8; 25] = "explorer: launcher pid=\0\0"
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&path2[0 as usize]) as u64,
+        0, 0)
+    say((&s_go[0 as usize]) as u64)
+    sayn(pid)
+    nl()
+}
+
+fn report_time() {
+    var s_z: [u8; 16] = "explorer: zeit \0"
+    var s_m: [u8; 7] = "mtime=\0"
+    var s_e: [u8; 5] = "mit=\0"
+    var s_v: [u8; 5] = "von=\0"
+    var s_o: [u8; 7] = "tzoff=\0"
+    if expbase.vmodus != 0 {
+        return
+    }
+    var mit: u64 = 0
+    var first: u64 = 0
+    var i: u64 = 0
+    let n: u64 = m_count()
+    while i < n {
+        let t: u64 = expmodell.mtime_at(expmodell.ord_at(i))
+        if t != 0 {
+            mit = mit + 1
+            if first == 0 {
+                first = t
+            }
+        }
+        i = i + 1
+    }
+    say((&s_z[0 as usize]) as u64)
+    kv((&s_m[0 as usize]) as u64, first)
+    kv((&s_e[0 as usize]) as u64, mit)
+    kv((&s_v[0 as usize]) as u64, n)
+    kv((&s_o[0 as usize]) as u64, expmodell.time_offset())
+    nl()
+}
+
+fn ziehen(line: u64) {
+    if line >= m_count() {
+        return
+    }
+    let e: u64 = m_ord(line)
+    let full: u64 = join((&expbase.dir_path[0 as usize]) as u64, m_name(e))
+    let n: u64 = ulib.length(full)
+    let _d: u64 = wlib.drag_put(wlib.CT_PATH | wlib.CT_TEXT, full, n)
+    var s_zg: [u8; 12] = "expl: zieh \0"
+    say((&s_zg[0 as usize]) as u64)
+    say(full)
+    nl()
+}
+
+// ====================================================== RUNDE ALLTAG
+//
+// SICHTBARE RUECKMELDUNG WAEHREND DES ZIEHENS.
+static mut zieh_laeuft: u64 = 0
+
+static mut ziehtext: [u8; 220] = [0 as u8; 220]
+
+fn drag_target_on(line: u64, stat: u64) {
+    if line >= m_count() {
+        return
+    }
+    let e: u64 = m_ord(line)
+    var s_zt: [u8; 10] = "Ziehe: \0\0\0"
+    var at: u64 = 0
+    at = at + ulib.strncpy((&ziehtext[0 as usize]) as u64,
+        (&s_zt[0 as usize]) as u64, 16)
+    let _n: u64 = ulib.strncpy((&ziehtext[(at) as usize]) as u64,
+        m_name(e), 190)
+    zieh_laeuft = 1
+    stat_set((&ziehtext[0 as usize]) as u64)
+}
+
+fn drag_target_off() {
+    zieh_laeuft = 0
+    expbase.stat_msg = 0
+    rfr()
+}
+
+// True when the last characters of `full` (length `nl`) equal the lower-case, NUL-terminated `ext` (".txt\0").
+// Letters are compared case-insensitively (bit 32); only lower-case letters, digits and '.' are valid in `ext`.
+fn tail_is(full: u64, nl: u64, ext: u64) -> bool {
+    let el: u64 = ulib.length(ext)
+    if nl <= el {
+        return false
+    }
+    var i: u64 = 0
+    while i < el {
+        let c: u64 = (*((full + nl - el + i) as *mut u8)) as u64 | 32
+        let w: u64 = (*((ext + i) as *mut u8)) as u64
+        if c != w {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// File association for the merged Editor (/bin/nedit): plain-text and source file extensions (Notepad-like).
+fn is_text_file(full: u64, nl: u64) -> bool {
+    var exts: [u8; 97] = ".txt\0.md\0.log\0.conf\0.cfg\0.ini\0.json\0.csv\0.xml\0.html\0.css\0.js\0.py\0.fi\0.sh\0.c\0.h\0.toml\0.yaml\0.yml\0\0"
+    var p: u64 = (&exts[0 as usize]) as u64
+    while (*(p as *mut u8)) as u64 != 0 {
+        if tail_is(full, nl, p) {
+            return true
+        }
+        p = p + ulib.length(p) + 1
+    }
+    return false
+}
+
+fn eltern_v(p: u64) {
+    var n: u64 = ulib.length(p)
+    while n > 0 && (*((p + n - 1) as *mut u8)) != 47 as u8 {
+        n = n - 1
+    }
+    if n > 0 {
+        n = n - 1
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+}
+
+fn show_place(fpfad: u64) {
+    var sl: [u8; 2] = "/\0"
+    if expbase.vmodus != 2 {
+        path_set((&expbase.dir_path[0 as usize]) as u64)
+        return
+    }
+    ulib.strncpy((&vpfad[0 as usize]) as u64,
+        (&expbase.vspeicher[0 as usize]) as u64, 120)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&sl[0 as usize]) as u64)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&expbase.vsicher[0 as usize]) as u64)
+    ulib.strcat((&vpfad[0 as usize]) as u64, (&expbase.vunter[0 as usize]) as u64)
+    path_set((&vpfad[0 as usize]) as u64)
+}
+
+fn build_progress() {
+    var k_s_d: [u8; 24] = "explorer.progress.files\0"
+    var k_s_b: [u8; 24] = "explorer.progress.bytes\0"
+    var k_s_n: [u8; 22] = "explorer.progress.new\0"
+    var d: [u8; 24] = [0 as u8; 24]
+    var lp: u64 = 0
+    lp = pfeld(lp, msg.get((&k_s_d[0 as usize]) as u64), (&d[0 as usize]) as u64,
+        bstore.files_of())
+    lp = pfeld(lp, msg.get((&k_s_b[0 as usize]) as u64), (&d[0 as usize]) as u64,
+        bstore.read_of())
+    lp = pfeld(lp, msg.get((&k_s_n[0 as usize]) as u64), (&d[0 as usize]) as u64,
+        bstore.written_of())
+    expbase.pbuf[(lp) as usize] = 0 as u8
+}
+
+fn pfeld(lp0: u64, txt: u64, d: u64, value: u64) -> u64 {
+    var lp: u64 = lp0
+    var k: u64 = 0
+    while (*((txt + k) as *mut u8)) != 0 as u8 && lp < 120 {
+        expbase.pbuf[(lp) as usize] = *((txt + k) as *mut u8)
+        lp = lp + 1
+        k = k + 1
+    }
+    let n: u64 = ulib.digits(value, d)
+    var i: u64 = 0
+    while i < n && lp < 120 {
+        expbase.pbuf[(lp) as usize] = *((d + i) as *mut u8)
+        lp = lp + 1
+        i = i + 1
+    }
+    return lp
+}
+
+fn in_own_tree(target: u64) -> bool {
+    let q: u64 = ulib.length((&expbase.t_bquelle[0 as usize]) as u64)
+    if !ulib.strneq(target, (&expbase.t_bquelle[0 as usize]) as u64, q) {
+        return false
+    }
+    let c: u64 = (*((target + q) as *mut u8)) as u64
+    return c == 0 || c == 47
+}
+
+fn next_number(target: u64) -> u64 {
+    var namebuf: [u8; 64] = [0 as u8; 64]
+    let fd: u64 = bstore.snaps_open(target)
+    if ulib.bad(fd) {
+        return 1
+    }
+    var n: u64 = 0
+    var next: bool = true
+    while next {
+        if !bstore.snaps_next(fd, (&namebuf[0 as usize]) as u64, 60) {
+            next = false
+        } else {
+            n = n + 1
+        }
+    }
+    io.close(fd)
+    return n + 1
+}
+
+fn say_backup(target: u64, nam: u64, rc: u64) {
+    var s1: [u8; 23] = "explorer: backup ziel=\0"
+    var s2: [u8; 7] = " name=\0"
+    var s3: [u8; 10] = " dateien=\0"
+    var s4: [u8; 10] = " oktette=\0"
+    var s5: [u8; 6] = " neu=\0"
+    var s6: [u8; 5] = " rc=\0"
+    say((&s1[0 as usize]) as u64)
+    say(target)
+    say((&s2[0 as usize]) as u64)
+    say(nam)
+    say((&s3[0 as usize]) as u64)
+    sayn(bstore.files_of())
+    say((&s4[0 as usize]) as u64)
+    sayn(bstore.read_of())
+    say((&s5[0 as usize]) as u64)
+    sayn(bstore.written_of())
+    say((&s6[0 as usize]) as u64)
+    sayn(rc)
+    nl()
+}
+
+fn zurueckholen(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    var z1: [u8; 19] = "explorer: zurueck \0"
+    var z2: [u8; 5] = " rc=\0"
+    var rc: u64 = 1
+    if expbase.vmodus == 1 {
+        let z: u64 = cur_row()
+        if z < m_count() {
+            let e: u64 = m_ord(z)
+            ulib.strncpy((&expbase.pziel[0 as usize]) as u64,
+                (&t_bwohin[0 as usize]) as u64, 120)
+            rc = bstore.restore((&expbase.vspeicher[0 as usize]) as u64, nptr(e),
+                (&expbase.pziel[0 as usize]) as u64, 0)
+        }
+    } else if expbase.vmodus == 2 {
+        let z: u64 = cur_row()
+        if z < m_count() {
+            let e: u64 = m_ord(z)
+            let full: u64 = in_sicherung(e)
+            let wohin: u64 = join((&t_bwohin[0 as usize]) as u64, nptr(e))
+            ulib.strncpy((&expbase.pziel[0 as usize]) as u64, wohin, 120)
+            rc = bstore.get((&expbase.vspeicher[0 as usize]) as u64,
+                (&expbase.vsicher[0 as usize]) as u64, full,
+                (&expbase.pziel[0 as usize]) as u64)
+        }
+    }
+    say((&z1[0 as usize]) as u64)
+    say((&expbase.pziel[0 as usize]) as u64)
+    say((&z2[0 as usize]) as u64)
+    sayn(rc)
+    nl()
+}
+
+// append `src` to `dst` at `at` (at most `max` bytes in all); the new end
+fn bm_cat(dst: u64, at: u64, src: u64, max: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while __mmio_read8((src + i) as *mut u8) != 0 as u8 && o + 1 < max {
+        __mmio_write8((dst + o) as *mut u8,
+            __mmio_read8((src + i) as *mut u8))
+        o = o + 1
+        i = i + 1
+    }
+    __mmio_write8((dst + o) as *mut u8, 0 as u8)
+    return o
+}
+
+// A pick of the sub menu: `call <action> path=<full path>`.
+fn actions_run(idx: u64) -> u64 {
+    var s_call: [u8; 6] = "call \0"
+    var k_path: [u8; 5] = "path\0"
+    var s_ac: [u8; 18] = "explorer: action \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    if idx >= expbase.bm_n {
+        return 0
+    }
+    let nm: u64 = (&expbase.bm_names[0 as usize]) as u64 + idx * 64
+    var at: u64 = bm_cat((&expbase.bm_line[0 as usize]) as u64, 0,
+        (&s_call[0 as usize]) as u64, 290)
+    at = bm_cat((&expbase.bm_line[0 as usize]) as u64, at, nm, 290)
+    if !actcli.open() {
+        return 0
+    }
+    actcli.req((&expbase.bm_line[0 as usize]) as u64)
+    actcli.arg((&k_path[0 as usize]) as u64, (&expbase.bm_path[0 as usize]) as u64)
+    let rc: u64 = actcli.send(600)
+    say((&s_ac[0 as usize]) as u64)
+    say(nm)
+    say((&s_rc[0 as usize]) as u64)
+    sayn(rc)
+    if rc != actcli.R_OK {
+        // the status line of the reply says why (denied, parked, no provider ...)
+        var s_why: [u8; 8] = " reply=\0"
+        if actcli.line(0, (&expbase.bm_tmp[0 as usize]) as u64, 120) {
+            say((&s_why[0 as usize]) as u64)
+            say((&expbase.bm_tmp[0 as usize]) as u64)
+        }
+    }
+    nl()
+    return 0
+}
+
+fn netview_starten(idx: u64, tab: u64) {
+    var v0: [u8; 5] = "real\0"
+    var v1: [u8; 9] = "filtered\0"
+    var v2: [u8; 6] = "faked\0"
+    var v3: [u8; 5] = "none\0"
+    var tool: [u8; 13] = "/bin/netview\0"
+    var voll2: [u8; 200] = [0 as u8; 200]
+    var argv: [u64; 3] = [0 as u64; 3]
+    var s_nv: [u8; 19] = "explorer: netview \0"
+    var s_sp2: [u8; 2] = " \0"
+    var s_pid: [u8; 8] = " pid=\0\0\0"
+    let z: u64 = cur_row()
+    if z >= m_count() {
+        return
+    }
+    let e: u64 = m_ord(z)
+    if m_art(e) != 0 {
+        return
+    }
+    ulib.strncpy((&voll2[0 as usize]) as u64,
+        join((&expbase.dir_path[0 as usize]) as u64, m_name(e)), 190)
+    var word: u64 = (&v0[0 as usize]) as u64
+    if idx == 1 {
+        word = (&v1[0 as usize]) as u64
+    } else if idx == 2 {
+        word = (&v2[0 as usize]) as u64
+    } else if idx == 3 {
+        word = (&v3[0 as usize]) as u64
+    }
+    argv[0 as usize] = (&tool[0 as usize]) as u64
+    argv[1 as usize] = word
+    argv[2 as usize] = (&voll2[0 as usize]) as u64
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&tool[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 3)
+    say((&s_nv[0 as usize]) as u64)
+    say(word)
+    say((&s_sp2[0 as usize]) as u64)
+    say((&voll2[0 as usize]) as u64)
+    say((&s_pid[0 as usize]) as u64)
+    sayn(pid)
+    nl()
+}
+
+fn clipboard_do(tab: u64, schnitt: bool) -> u64 {
+    var s_c: [u8; 16] = "explorer: clip \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_s: [u8; 9] = "schnitt=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    let n: u64 = select_list(tab)
+    if n == 0 {
+        return 0
+    }
+    let rc: u64 = expakt.copy_remember(schnitt)
+    var sn: u64 = 0
+    if schnitt {
+        sn = 1
+    }
+    say((&s_c[0 as usize]) as u64)
+    kv((&s_n[0 as usize]) as u64, n)
+    kv((&s_s[0 as usize]) as u64, sn)
+    kv((&s_rc[0 as usize]) as u64, rc)
+    nl()
+    let _f: bool = error_show(rc)
+    return 0
+}
+
+fn rename_ask(tab: u64) -> u64 {
+    // D3: two or more marked rows -> one rule for all of them (mass rename, code 13)
+    if select_list(tab) >= 2 {
+        ulib.strncpy((&expbase.dlgpuffer[0 as usize]) as u64, (&t_massdef[0 as usize]) as u64, 120)
+        let _m: u64 = dlg_entry(msg.get((&expbase.k_rename[0 as usize]) as u64),
+            msg.get((&k_massren[0 as usize]) as u64),
+            (&expbase.dlgpuffer[0 as usize]) as u64)
+        return 13
+    }
+    let z: u64 = first_select(tab)
+    if z >= m_count() {
+        return 0
+    }
+    fuiscene.table_set_sel(cur_key(), z)
+    ulib.strncpy((&expbase.dlgpuffer[0 as usize]) as u64, m_name(m_ord(z)), 120)
+    let _d: u64 = dlg_entry(msg.get((&expbase.k_rename[0 as usize]) as u64),
+        msg.get((&expbase.k_name[0 as usize]) as u64),
+        (&expbase.dlgpuffer[0 as usize]) as u64)
+    return 1
+}
+
+fn delete_ask(tab: u64, endgueltig: bool) -> u64 {
+    let n: u64 = select_list(tab)
+    if n == 0 {
+        return 0
+    }
+    var ask: u64 = msg.get((&expbase.k_del[0 as usize]) as u64)
+    if endgueltig {
+        ask = msg.get((&expbase.k_delperm[0 as usize]) as u64)
+    }
+    let _d: u64 = dlg_ask(msg.get((&expbase.k_deltit[0 as usize]) as u64),
+        ask)
+    if endgueltig {
+        return 5
+    }
+    return 3
+}
+
+fn new_file_ask() -> u64 {
+    let _d: u64 = dlg_entry(msg.get((&k_newfile[0 as usize]) as u64),
+        msg.get((&expbase.k_name[0 as usize]) as u64),
+        msg.get((&k_newfname[0 as usize]) as u64))
+    return 7
+}
+
+fn first_select(tab: u64) -> u64 {
+    var z: u64 = 0
+    let int: u64 = m_count()
+    while z < int {
+        if fuiscene.table_sel_has(cur_key(), z) {
+            return z
+        }
+        z = z + 1
+    }
+    return cur_row()
+}
+
+fn say_sorting() {
+    var s_s: [u8; 17] = "explorer: sort \0\0"
+    var s_sp: [u8; 8] = "spalte=\0"
+    var s_r: [u8; 5] = "rev=\0"
+    say((&s_s[0 as usize]) as u64)
+    kv((&s_sp[0 as usize]) as u64, expbase.sortby)
+    kv((&s_r[0 as usize]) as u64, expbase.sortrev)
+    nl()
+}
+
+fn say_tat(was: u64, getan: u64, rc: u64) {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    var b: [u8; 96] = [0 as u8; 96]
+    var s_tat: [u8; 16] = "explorer: tat \0\0"
+    var s_n: [u8; 4] = " n=\0"
+    var s_rc: [u8; 8] = " rc=\0\0\0\0"
+    let p: u64 = (&b[0 as usize]) as u64
+    var at: u64 = ulib.strcpy(p, (&s_tat[0 as usize]) as u64)
+    at = at + ulib.digits(was, p + at)
+    at = at + ulib.strcpy(p + at, (&s_n[0 as usize]) as u64)
+    at = at + ulib.digits(getan, p + at)
+    at = at + ulib.strcpy(p + at, (&s_rc[0 as usize]) as u64)
+    at = at + ulib.digits(rc, p + at)
+    b[(at) as usize] = 10 as u8
+    lineout.add_bytes(p, at + 1)
+}
+
+static mut s_cb: [u8; 200] = [0 as u8; 200]
+
+static mut t_ab: [u8; 14] = "dialog.cancel\0"
+
+// ------------------------------------------------------------ helpers
+
+fn rfr() {
+    if expbase.s_up {
+        fuiscene.refresh()
+    }
+}
+
+fn cur_key() -> u64 {
+    if expbase.symansicht == 1 {
+        return expbase.K_SYM
+    }
+    return expbase.K_TAB
+}
+
+fn cur_row() -> u64 {
+    return fuiscene.table_sel(cur_key())
+}
+
+fn tree_row() -> u64 {
+    return fuiscene.table_sel(expbase.K_TREE)
+}
+
+// The status line shows a message instead of the counts until the next read.
+fn stat_set(p: u64) {
+    expbase.stat_msg = p
+    rfr()
+}
+
+// The path field holds a new text (the field keeps what the user typed, so
+// every change of the place has to be written into it).
+fn path_set(p: u64) {
+    if expbase.s_up {
+        fuiscene.entry_set(expbase.K_PATH, p)
+    }
+}
+
+fn text_w(p: u64) -> u64 {
+    return wlibc.text_w(wlibc.F_UI, wlibc.px_ui(), p, ulib.length(p)) / fuiscene.scale()
+}
+
+// A catalogue text with one line per item -> items one after the other,
+// each ended by a NUL (what the popup menu of the scene host takes).
+fn split_items(src: u64, dst: u64, max: u64) -> u64 {
+    var n: u64 = 0
+    var at: u64 = 0
+    var k: u64 = 0
+    var last_nl: bool = true
+    while __mmio_read8((src + k) as *mut u8) != 0 as u8 && at + 2 < max {
+        let c: u8 = __mmio_read8((src + k) as *mut u8)
+        if c == 10 as u8 {
+            __mmio_write8((dst + at) as *mut u8, 0 as u8)
+            n = n + 1
+            last_nl = true
+        } else {
+            __mmio_write8((dst + at) as *mut u8, c)
+            last_nl = false
+        }
+        at = at + 1
+        k = k + 1
+    }
+    if !last_nl {
+        n = n + 1
+    }
+    __mmio_write8((dst + at) as *mut u8, 0 as u8)
+    __mmio_write8((dst + at + 1) as *mut u8, 0 as u8)
+    return n
+}
+
+fn item_at(p: u64, j: u64) -> u64 {
+    var q: u64 = p
+    var k: u64 = 0
+    while k < j {
+        q = q + ulib.length(q) + 1
+        k = k + 1
+    }
+    return q
+}
+
+// Where a popup that nobody pointed at goes: into the file list.
+fn where_x() -> u64 {
+    let n: usize = fuiscene.node_of_key(cur_key())
+    if n == fuiscene.NONE {
+        return 40
+    }
+    return fuiscene.node_x(n) + 24
+}
+
+fn where_y() -> u64 {
+    let n: usize = fuiscene.node_of_key(cur_key())
+    if n == fuiscene.NONE {
+        return 80
+    }
+    return fuiscene.node_y(n) + 40
+}
+
+// ------------------------------------------------------------ the dialogs
+
+fn dlg_entry(title: u64, label: u64, initial: u64) -> u64 {
+    fuiscene.dialog_entry(title, label, initial, msg.get((&expbase.t_ok[0 as usize]) as u64), msg.get((&t_ab[0 as usize]) as u64))
+    return 0
+}
+
+fn dlg_ask(title: u64, text: u64) -> u64 {
+    fuiscene.dialog_open(title, text, msg.get((&expbase.t_ok[0 as usize]) as u64), msg.get((&t_ab[0 as usize]) as u64))
+    return 0
+}
+
+fn dlg_hinweis(title: u64, text: u64) -> u64 {
+    fuiscene.dialog_open(title, text, msg.get((&expbase.t_ok[0 as usize]) as u64), 0)
+    return 0
+}
+
+fn dlg_choice(title: u64, text: u64, btns: u64, n: u64) -> u64 {
+    let _n: u64 = split_items(btns, ((&s_cb[0 as usize]) as u64), 190)
+    fuiscene.dialog_choice(title, text, ((&s_cb[0 as usize]) as u64), n)
+    return 0
+}
+
+fn pv_skip_ws(p: u64, n: u64, at: u64) -> u64 {
+    var i: u64 = at
+    var go: bool = true
+    while go && i < n {
+        let c: u64 = (__mmio_read8((p + i) as *mut u8)) as u64
+        if c == 35 {
+            // a comment runs to the end of the line
+            while i < n && (__mmio_read8((p + i) as *mut u8)) != 10 as u8 {
+                i = i + 1
+            }
+        } else if c == 32 || c == 9 || c == 10 || c == 13 {
+            i = i + 1
+        } else {
+            go = false
+        }
+    }
+    return i
+}
+
+// Reads one decimal number at `at`; the number goes to pv_num, the new position is returned.
+static mut pv_num: u64 = 0
+
+fn pv_read_num(p: u64, n: u64, at: u64) -> u64 {
+    var i: u64 = pv_skip_ws(p, n, at)
+    var v: u64 = 0
+    var any: u64 = 0
+    while i < n {
+        let c: u64 = (__mmio_read8((p + i) as *mut u8)) as u64
+        if c < 48 || c > 57 {
+            break
+        }
+        if v < 100000 {
+            v = v * 10 + (c - 48)
+        }
+        any = 1
+        i = i + 1
+    }
+    pv_num = v
+    if any == 0 {
+        return 0
+    }
+    return i
+}
+
+// Binary PPM (P6) and PGM (P5) with maxval 255 -> 0xAARRGGBB. Sets pv_w/pv_h; false when not such a file.
+fn ppm_read(src: u64, n: u64, out: u64, cap: u64) -> bool {
+    if n < 9 || (__mmio_read8(src as *mut u8)) != 80 as u8 {
+        return false
+    }
+    let t: u64 = (__mmio_read8((src + 1) as *mut u8)) as u64
+    if t != 54 && t != 53 {
+        return false
+    }
+    var at: u64 = pv_read_num(src, n, 2)
+    if at == 0 {
+        return false
+    }
+    let w: u64 = pv_num
+    at = pv_read_num(src, n, at)
+    if at == 0 {
+        return false
+    }
+    let h: u64 = pv_num
+    at = pv_read_num(src, n, at)
+    if at == 0 || pv_num != 255 || w == 0 || h == 0 {
+        return false
+    }
+    // exactly one blank separates the header from the data
+    at = at + 1
+    var ch: u64 = 3
+    if t == 53 {
+        ch = 1
+    }
+    if w * h * 4 > cap || at + w * h * ch > n {
+        return false
+    }
+    var i: u64 = 0
+    while i < w * h {
+        var r: u64 = 0
+        var g: u64 = 0
+        var b: u64 = 0
+        if ch == 3 {
+            r = (__mmio_read8((src + at + i * 3) as *mut u8)) as u64
+            g = (__mmio_read8((src + at + i * 3 + 1) as *mut u8)) as u64
+            b = (__mmio_read8((src + at + i * 3 + 2) as *mut u8)) as u64
+        } else {
+            r = (__mmio_read8((src + at + i) as *mut u8)) as u64
+            g = r
+            b = r
+        }
+        __mmio_write32((out + i * 4) as *mut u32, (4278190080 | (r << 16) | (g << 8) | b) as u32)
+        i = i + 1
+    }
+    expbase.pv_w = w
+    expbase.pv_h = h
+    return true
+}
+
+fn tab_text_build() {
+    rfr()
+    say(((&s_tab_t[0 as usize]) as u64))
+    sayn(expbase.tab_n)
+    say(((&s_tab_a[0 as usize]) as u64))
+    sayn(expbase.tab_at)
+    nl()
+}
+
+static mut s_tab_t: [u8; 18] = "explorer: reiter \0"
+
+static mut s_tab_a: [u8; 4] = " a=\0"

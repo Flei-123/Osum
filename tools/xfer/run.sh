@@ -153,8 +153,8 @@ echo
 echo "== 4. COUNTER-PROBE for the file manager: it ignores the clipboard when pasting =="
 T2="$OUT/mut-explorer"
 mkdir -p "$T2"; tar -C "$ROOT" --exclude=.git -cf - . | tar -C "$T2" -xf -
-sed -i 's/        let _l: u64 = expakt.load_from_bus()/        let _l: u64 = 0/' "$T2/kernel/user/explorer.fi"
-if cmp -s "$T2/kernel/user/explorer.fi" "$ROOT/kernel/user/explorer.fi"; then bad "explorer mutant: the sed expression changed nothing"; else
+sed -i 's/        let _l: u64 = expakt.load_from_bus()/        let _l: u64 = 0/' "$T2/kernel/user/explorer/expnav.fi"
+if cmp -s "$T2/kernel/user/explorer/expnav.fi" "$ROOT/kernel/user/explorer/expnav.fi"; then bad "explorer mutant: the sed expression changed nothing"; else
     capture "$T2" "$OUT/files-mut" "$FILES_PROGS" 'nostart wigapp=/bin/explorer' script-files.sh ""
     hasnt "$OUT/files-mut/serial.txt" "explorer: paste n=1 sprung=0 pos=0 rc=0" "mutant: without the bus the paste is NOT the other program's one file"
 fi

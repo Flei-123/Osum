@@ -136,7 +136,7 @@ stage_build() {
         && ok "explorer (rename-several dialog, preview, apply) compiles + links" || { bad "explorer build"; head -10 "$T/e.txt"; }
     grep -q '^explorer.massren = ' locale/de/messages && grep -q '^explorer.massren = ' locale/en/messages \
         && ok "locale key explorer.massren in de + en" || bad "locale key missing"
-    grep -q 'was == 13' kernel/user/explorer.fi && grep -q 'was == 14' kernel/user/explorer.fi \
+    grep -q 'was == 13' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) && grep -q 'was == 14' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
         && ok "explorer handles dialog codes 13 (rule) and 14 (confirm)" || bad "explorer dialog codes missing"
 }
 

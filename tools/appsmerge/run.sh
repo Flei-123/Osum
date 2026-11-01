@@ -18,7 +18,7 @@ chk "no console bundle for /bin/edit" "! grep -qa '^/bin/edit' assets/apps/*/sta
 chk "/bin/edit stays in the image program list" "grep -a 'PROGS=\${PROGS:-' -A2 tools/usbimg/build.sh | grep -qaw edit"
 chk "image check list: editor.osp/INFO present" "grep -qa '/apps/editor.osp/INFO' tools/usbimg/build.sh"
 chk "image check list: no nedit.osp path" "! grep -a '^/bin/nedit' tools/usbimg/build.sh | grep -qa 'nedit.osp'"
-chk "explorer: text files open in /bin/nedit" "grep -qa 'fn is_text_file' kernel/user/explorer.fi && grep -qa '/bin/nedit' kernel/user/explorer.fi"
+chk "explorer: text files open in /bin/nedit" "grep -qa 'fn is_text_file' kernel/user/explorer.fi kernel/user/explorer/*.fi && grep -qa '/bin/nedit' kernel/user/explorer.fi kernel/user/explorer/*.fi"
 chk "dell_walk has no separate Editor+ entry" "! grep -qa 'name=\"Editor+\"' tools/qa/dell_walk.py"
 echo "APPSMERGE: $ok ok, $bad fail"
 [ "$bad" = 0 ]

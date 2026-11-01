@@ -1,0 +1,2117 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import actcli
+import bstore
+import fui.cmdbar
+import expakt
+import expdlg
+import expmodell
+import exporte
+import expsmb
+import nav.folder
+import fuiscene
+import gif
+import icons
+import image
+import libc.io
+import jpeg
+import msg
+import fui.navnum
+import trash
+import ulib
+import wlib
+import wlibc
+import explorer.expbase
+import explorer.expwork
+
+static mut k_cmd: [u8; 13] = "explorer.cmd\0"
+
+static mut k_gzurueck: [u8; 20] = "explorer.nav.back\0\0\0"
+
+static mut k_gvor: [u8; 24] = "explorer.nav.forward\0\0\0\0"
+
+static mut k_gauf: [u8; 20] = "explorer.nav.up\0\0\0\0\0"
+
+static mut k_gneu: [u8; 24] = "explorer.nav.refresh\0\0\0\0"
+
+static mut k_gaus: [u8; 16] = "explorer.eject\0\0"
+
+static mut k_ausok: [u8; 19] = "explorer.eject.ok\0\0"
+
+static mut k_ausbusy: [u8; 21] = "explorer.eject.busy\0\0"
+
+static mut k_ausfail: [u8; 21] = "explorer.eject.fail\0\0"
+
+static mut k_ausnone: [u8; 21] = "explorer.eject.none\0\0"
+
+static mut plabel: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut k_t_bfrage: [u8; 20] = "explorer.backup.ask\0"
+
+static mut k_t_lauft: [u8; 24] = "explorer.backup.running\0"
+
+static mut t_snap: [u8; 10] = "sicherung\0"
+
+static mut k_t_self2: [u8; 24] = "explorer.backup.notself\0"
+
+// A click (or Enter) on a row of the pane.
+fn nav_click(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    let row: u64 = fuiscene.table_sel(expbase.K_PLACES)
+    if row >= expbase.nav_n {
+        return
+    }
+    let t: u64 = expbase.nav_refs[(row) as usize]
+    if t < expbase.NAV_UP {
+        expbase.place_choice = t
+        place_walk(t, tree, tab, stat, fpfad)
+    } else if t == expbase.NAV_UP {
+        tree_walk(0, tree, tab, stat, fpfad)
+    } else if t >= expbase.NAV_SUB {
+        tree_walk(t - expbase.NAV_SUB + 1, tree, tab, stat, fpfad)
+    }
+}
+
+fn tab_new(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if expbase.tab_n >= expbase.TAB_MAX {
+        var s_voll: [u8; 22] = "explorer: reiter voll\0"
+        expwork.say((&s_voll[0 as usize]) as u64)
+        expwork.nl()
+        return
+    }
+    expwork.tab_remember()
+    var i: u64 = expbase.tab_n
+    while i > expbase.tab_at + 1 {
+        ulib.strncpy(expwork.tab_p(i), expwork.tab_p(i - 1), expbase.TAB_WIDTH - 1)
+        i = i - 1
+    }
+    ulib.strncpy(expwork.tab_p(expbase.tab_at + 1), (&expbase.dir_path[0 as usize]) as u64,
+        expbase.TAB_WIDTH - 1)
+    expbase.tab_n = expbase.tab_n + 1
+    expbase.tab_at = expbase.tab_at + 1
+    expwork.tab_text_build()
+    new_read(tree, tab, stat, fpfad)
+}
+
+fn tab_close_do(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if expbase.tab_n <= 1 {
+        var s_letzt: [u8; 23] = "explorer: reiter letzt\0"
+        expwork.say((&s_letzt[0 as usize]) as u64)
+        expwork.nl()
+        return
+    }
+    var i: u64 = expbase.tab_at
+    while i + 1 < expbase.tab_n {
+        ulib.strncpy(expwork.tab_p(i), expwork.tab_p(i + 1), expbase.TAB_WIDTH - 1)
+        i = i + 1
+    }
+    expbase.tab_n = expbase.tab_n - 1
+    if expbase.tab_at >= expbase.tab_n {
+        expbase.tab_at = expbase.tab_n - 1
+    }
+    ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, expwork.tab_p(expbase.tab_at), 126)
+    expwork.tab_text_build()
+    new_read(tree, tab, stat, fpfad)
+}
+
+fn tab_switch(nr: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if nr >= expbase.tab_n || nr == expbase.tab_at {
+        return
+    }
+    expwork.tab_remember()
+    expbase.tab_at = nr
+    ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, expwork.tab_p(expbase.tab_at), 126)
+    expwork.tab_text_build()
+    expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+    new_read(tree, tab, stat, fpfad)
+}
+
+fn hist_back(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if folder.step_back((&expbase.dir_path[0 as usize]) as u64, 127) {
+        new_read(tree, tab, stat, fpfad)
+    }
+}
+
+fn hist_forward(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if folder.step_forward((&expbase.dir_path[0 as usize]) as u64, 127) {
+        new_read(tree, tab, stat, fpfad)
+    }
+}
+
+static mut crumb_n: u64 = 0
+
+static mut g_edge: u64 = 0
+
+static mut g_gap: u64 = 0
+
+static mut g_ch: u64 = 0
+
+static mut g_mbh: u64 = 0
+
+static mut g_sth: u64 = 0
+
+static mut g_innen: u64 = 0
+
+static mut g_hinh: u64 = 0
+
+static mut g_bbaum: u64 = 0
+
+static mut g_horte: u64 = 0
+
+static mut g_hbaum: u64 = 0
+
+fn eject_click(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    var s_a: [u8; 17] = "explorer: eject \0"
+    var s_rc: [u8; 5] = " rc=\0"
+    if expbase.place_choice >= exporte.places_num()
+        || !exporte.place_is_carrier(expbase.place_choice) {
+        expwork.stat_set(msg.get((&k_ausnone[0 as usize]) as u64))
+        expwork.say((&s_a[0 as usize]) as u64)
+        expwork.sayn(999)
+        expwork.nl()
+        return
+    }
+    let target: u64 = exporte.place_path(expbase.place_choice)
+    if target == 0 {
+        return
+    }
+    var i: u64 = 0
+    var tr: u64 = ulib.WX_MAX
+    while i < ulib.WX_MAX {
+        var pf: [u8; 24] = [0 as u8; 24]
+        var n: u64 = 0
+        while n < 23 {
+            let c: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_PATHCH, i, n)
+            pf[n as usize] = c as u8
+            if c == 0 {
+                n = 23
+            } else {
+                n = n + 1
+            }
+        }
+        pf[23] = 0 as u8
+        if ulib.streq((&pf[0 as usize]) as u64, target) {
+            tr = i
+            i = ulib.WX_MAX
+        } else {
+            i = i + 1
+        }
+    }
+    if tr >= ulib.WX_MAX {
+        expwork.stat_set(msg.get((&k_ausnone[0 as usize]) as u64))
+        return
+    }
+    let rc: u64 = ulib.sys(ulib.SYS_WECHSEL, ulib.WX_EJECT, tr, 0)
+    expwork.say((&s_a[0 as usize]) as u64)
+    expwork.say(target)
+    expwork.kv((&s_rc[0 as usize]) as u64, rc)
+    expwork.nl()
+    if rc == 0 {
+        expwork.stat_set(msg.get((&k_ausok[0 as usize]) as u64))
+        expbase.place_choice = 0xFFFFFFFFFFFFFFFF
+        places_show()
+        if ulib.length((&expbase.dir_path[0 as usize]) as u64) >= ulib.length(target)
+            && expwork.compare_start((&expbase.dir_path[0 as usize]) as u64, target) {
+            expbase.dir_path[0] = 47 as u8
+            expbase.dir_path[1] = 0 as u8
+            expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+        }
+        new_read(tree, tab, stat, fpfad)
+        return
+    }
+    if rc == 16 {
+        expwork.stat_set(msg.get((&k_ausbusy[0 as usize]) as u64))
+        return
+    }
+    expwork.stat_set(msg.get((&k_ausfail[0 as usize]) as u64))
+}
+
+fn place_walk(line: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    var s_g: [u8; 21] = "explorer: ortsprung \0"
+    if line >= exporte.places_num() {
+        return
+    }
+    if exporte.place_is_header(line) {
+        return
+    }
+    if exporte.place_is_overview(line) {
+        // r458: the overview of all drives with their fill bars
+        expbase.vmodus = 3
+        new_read(tree, tab, stat, fpfad)
+        expwork.say((&expbase.s_ovw[0 as usize]) as u64)
+        expwork.sayn(expbase.entry_count)
+        expwork.nl()
+        return
+    }
+    if exporte.place_is_tool(line) {
+        // "Disk management": a program of its own (docs/DISKS.md); the file manager never edits a table
+        var dprog: [u8; 12] = "/bin/disks\0\0"
+        let dpid: u64 = ulib.sys(ulib.SYS_EXEC, (&dprog[0 as usize]) as u64, 0, 0)
+        expwork.say((&expbase.s_dmgmt[0 as usize]) as u64)
+        expwork.sayn(dpid)
+        expwork.nl()
+        expwork.nav_sync_sel()
+        return
+    }
+    let target: u64 = exporte.place_path(line)
+    if target == 0 || (*((target) as *mut u8)) == 0 as u8 {
+        return
+    }
+    expbase.vmodus = 0
+    ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, target, 126)
+    expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+    new_read(tree, tab, stat, fpfad)
+    expwork.say((&s_g[0 as usize]) as u64)
+    expwork.say((&expbase.dir_path[0 as usize]) as u64)
+    expwork.nl()
+}
+
+static mut k_konftit: [u8; 24] = "explorer.conflict.title\0"
+
+static mut k_konfbtn: [u8; 26] = "explorer.conflict.buttons\0"
+
+static mut k_konfask: [u8; 22] = "explorer.conflict.ask\0"
+
+static mut kfl_alt: [u8; 256] = [0 as u8; 256]
+
+static mut kfl_fresh: [u8; 128] = [0 as u8; 128]
+
+fn conflict_show(besitzer: u64) -> bool {
+    var s_k: [u8; 20] = "explorer: konflikt \0"
+    if !expakt.conflict_present() {
+        return false
+    }
+    let _b: u64 = besitzer
+    let _d: u64 = expwork.dlg_choice(msg.get((&k_konftit[0 as usize]) as u64),
+        msg.get((&k_konfask[0 as usize]) as u64),
+        msg.get((&k_konfbtn[0 as usize]) as u64), 4)
+    say_dlgrect()
+    expwork.say((&s_k[0 as usize]) as u64)
+    expwork.say(expakt.conflict_path())
+    expwork.nl()
+    return true
+}
+
+fn paste_do(besitzer: u64, tree: u64, tab: u64, stat: u64,
+    fpfad: u64, fresh: bool) -> u64 {
+    var s_p: [u8; 17] = "explorer: paste \0"
+    var s_n: [u8; 3] = "n=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    expbase.kfl_op = 1
+    if fresh {
+        let _l: u64 = expakt.load_from_bus()
+    }
+    let rc: u64 = expakt.paste((&expbase.dir_path[0 as usize]) as u64)
+    expwork.say((&s_p[0 as usize]) as u64)
+    expwork.kv((&s_n[0 as usize]) as u64, expakt.clipboard_num())
+    expwork.kv((&s_rc[0 as usize]) as u64, rc)
+    expwork.nl()
+    new_read(tree, tab, stat, fpfad)
+    if conflict_show(besitzer) {
+        return 9
+    }
+    let _f: bool = expwork.error_show(rc)
+    return 0
+}
+
+fn rename_do(besitzer: u64, alt: u64, fresh: u64, tree: u64, tab: u64,
+    stat: u64, fpfad: u64) -> u64 {
+    ulib.strncpy((&kfl_alt[0 as usize]) as u64, alt, 250)
+    ulib.strncpy((&kfl_fresh[0 as usize]) as u64, fresh, 120)
+    expbase.kfl_op = 2
+    let rc: u64 = expakt.rename_entry((&kfl_alt[0 as usize]) as u64,
+        (&kfl_fresh[0 as usize]) as u64)
+    new_read(tree, tab, stat, fpfad)
+    if conflict_show(besitzer) {
+        return 9
+    }
+    let _f: bool = expwork.error_show(rc)
+    return 0
+}
+
+fn conflict_reply(choice: u64, besitzer: u64, tree: u64, tab: u64,
+    stat: u64, fpfad: u64) -> u64 {
+    expakt.conflict_reply(choice)
+    if choice == expakt.K_ABBRUCH {
+        return 0
+    }
+    if expbase.kfl_op == 2 {
+        return rename_do(besitzer, (&kfl_alt[0 as usize]) as u64,
+            (&kfl_fresh[0 as usize]) as u64, tree, tab, stat, fpfad)
+    }
+    return paste_do(besitzer, tree, tab, stat, fpfad, false)
+}
+
+fn open(line: u64, tree: u64, tab: u64, stat: u64, fpfad: u64,
+    mark: u64) {
+    if line >= expwork.m_count() {
+        return
+    }
+    let e: u64 = expwork.m_ord(line)
+    // RUNDE EXPLORER-2, Befund 15-unterordner.png: DER DOPPELKLICK
+    // GING INS LEERE.
+    let name: u64 = expwork.m_name(e)
+    // r458: IN THE OVERVIEW a row is a drive: go there
+    if expbase.vmodus == 3 {
+        expbase.vmodus = 0
+        ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, name, 126)
+        expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+        new_read(tree, tab, stat, fpfad)
+        return
+    }
+    if expbase.vmodus == 2 {
+        if expwork.m_art(e) != 0 {
+            var sl2: [u8; 2] = "/\0"
+            ulib.strcat((&expbase.vunter[0 as usize]) as u64,
+                (&sl2[0 as usize]) as u64)
+            ulib.strcat((&expbase.vunter[0 as usize]) as u64, name)
+            expwork.show_place(fpfad)
+            new_read(tree, tab, stat, fpfad)
+        }
+        return
+    }
+    if expbase.vmodus == 1 {
+        expbase.vmodus = 2
+        ulib.strncpy((&expbase.vsicher[0 as usize]) as u64, name, 60)
+        expbase.vunter[(0) as usize] = 0 as u8
+        expwork.show_place(fpfad)
+        new_read(tree, tab, stat, fpfad)
+        return
+    }
+    if expwork.m_art(e) != 0 {
+        let full: u64 = expwork.join((&expbase.dir_path[0 as usize]) as u64, name)
+        ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, full, 126)
+        if bstore.is_store((&expbase.dir_path[0 as usize]) as u64) {
+            expbase.vmodus = 1
+            ulib.strncpy((&expbase.vspeicher[0 as usize]) as u64,
+                (&expbase.dir_path[0 as usize]) as u64, 120)
+        }
+        expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+        new_read(tree, tab, stat, fpfad)
+        return
+    }
+    var full: u64 = expwork.join((&expbase.dir_path[0 as usize]) as u64, name)
+    if expsmb.is_url((&expbase.dir_path[0 as usize]) as u64) {
+        let fetched: u64 = expsmb.fetch(full)
+        if fetched == 0 {
+            smb_prompt()
+            return
+        }
+        full = fetched
+    }
+    var arg: [u8; 200] = [0 as u8; 200]
+    ulib.strncpy((&arg[0 as usize]) as u64, full, 190)
+    // DAILY-DRIVER (r55): a `.pdf` opens in the PDF viewer, the one file
+    // association there is (anything else is still started as a program).
+    var pdfpid: u64 = 0xFFFFFFFFFFFFFFFF
+    let path_len: u64 = ulib.length(full)
+    if path_len > 4 {
+        let e1: u64 = (*((full + path_len - 4) as *mut u8)) as u64
+        let e2: u64 = (*((full + path_len - 3) as *mut u8)) as u64 | 32
+        let e3: u64 = (*((full + path_len - 2) as *mut u8)) as u64 | 32
+        let e4: u64 = (*((full + path_len - 1) as *mut u8)) as u64 | 32
+        if e1 == 46 && e2 == 112 && e3 == 100 && e4 == 102 {
+            var pdfprog: [u8; 13] = "/bin/pdfview\0"
+            var pdfname: [u8; 8] = "pdfview\0"
+            var pdfargv: [u64; 2] = [0 as u64; 2]
+            pdfargv[0 as usize] = (&pdfname[0 as usize]) as u64
+            pdfargv[1 as usize] = (&arg[0 as usize]) as u64
+            pdfpid = ulib.sys(ulib.SYS_EXEC, (&pdfprog[0 as usize]) as u64,
+                (&pdfargv[0 as usize]) as u64, 2)
+        }
+    }
+    // Editor merge (16.10.2026): text and source files open in the windowed Editor (/bin/nedit <file>).
+    if ulib.bad(pdfpid) {
+        if expwork.is_text_file(full, path_len) {
+            var txtprog: [u8; 11] = "/bin/nedit\0"
+            var txtname: [u8; 6] = "nedit\0"
+            var txtargv: [u64; 2] = [0 as u64; 2]
+            txtargv[0 as usize] = (&txtname[0 as usize]) as u64
+            txtargv[1 as usize] = (&arg[0 as usize]) as u64
+            pdfpid = ulib.sys(ulib.SYS_EXEC, (&txtprog[0 as usize]) as u64,
+                (&txtargv[0 as usize]) as u64, 2)
+        }
+    }
+    var pid: u64 = pdfpid
+    if ulib.bad(pdfpid) {
+        pid = ulib.sys(ulib.SYS_EXEC, (&arg[0 as usize]) as u64, 0, 0)
+    }
+    expwork.say(mark)
+    expwork.say(full)
+    var sp: [u8; 8] = " pid=\0\0\0"
+    expwork.say((&sp[0 as usize]) as u64)
+    expwork.sayn(pid)
+    expwork.nl()
+}
+
+fn save(target: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    var s_fertig: [u8; 12] = "  -- fertig\0"
+    var s_error: [u8; 20] = "  -- FEHLGESCHLAGEN\0"
+    var d: [u8; 24] = [0 as u8; 24]
+    var nam: [u8; 32] = [0 as u8; 32]
+
+    if expwork.in_own_tree(target) {
+        expwork.dlg_ask(msg.get((&expbase.k_t_bak[0 as usize]) as u64),
+            msg.get((&k_t_self2[0 as usize]) as u64))
+        expwork.say_backup(target, (&t_snap[0 as usize]) as u64, 2)
+        return
+    }
+    ulib.strcpy((&nam[0 as usize]) as u64, (&t_snap[0 as usize]) as u64)
+    let k: u64 = ulib.digits(expwork.next_number(target), (&d[0 as usize]) as u64)
+    var i: u64 = 0
+    let l0: u64 = ulib.length((&nam[0 as usize]) as u64)
+    while i < k {
+        nam[((l0 + i)) as usize] = *(((&d[0 as usize]) as u64 + i) as *mut u8)
+        i = i + 1
+    }
+    nam[((l0 + k)) as usize] = 0 as u8
+
+    fuiscene.dialog_busy(msg.get((&expbase.k_t_bak[0 as usize]) as u64),
+        msg.get((&k_t_lauft[0 as usize]) as u64))
+    plabel = 1
+    fuiscene.repaint_now()
+    let rc: u64 = bstore.save((&expbase.t_bquelle[0 as usize]) as u64, target,
+        (&nam[0 as usize]) as u64, 0, (&expbase.t_bquelle[0 as usize]) as u64,
+        progress_state)
+    plabel = 0xFFFFFFFFFFFFFFFF
+    expwork.build_progress()
+    var lp: u64 = ulib.length((&expbase.pbuf[0 as usize]) as u64)
+    var q: u64 = 0
+    var txt: u64 = (&s_fertig[0 as usize]) as u64
+    if rc != 0 {
+        txt = (&s_error[0 as usize]) as u64
+    }
+    while (*((txt + q) as *mut u8)) != 0 as u8 && lp < 126 {
+        expbase.pbuf[(lp) as usize] = *((txt + q) as *mut u8)
+        lp = lp + 1
+        q = q + 1
+    }
+    expbase.pbuf[(lp) as usize] = 0 as u8
+    fuiscene.dialog_open(msg.get((&expbase.k_t_bak[0 as usize]) as u64),
+        (&expbase.pbuf[0 as usize]) as u64, msg.get((&expbase.t_ok[0 as usize]) as u64), 0)
+    expwork.say_backup(target, (&nam[0 as usize]) as u64, rc)
+    new_read(tree, tab, stat, fpfad)
+}
+
+fn tree_walk(line: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if line == 0 {
+        if expbase.vmodus == 2 {
+            if expbase.vunter[(0) as usize] != 0 as u8 {
+                expwork.eltern_v((&expbase.vunter[0 as usize]) as u64)
+            } else {
+                expbase.vmodus = 1
+            }
+            expwork.show_place(fpfad)
+            new_read(tree, tab, stat, fpfad)
+            return
+        }
+        if expbase.vmodus == 3 {
+            // up from the overview: back to the folder we came from
+            expbase.vmodus = 0
+            new_read(tree, tab, stat, fpfad)
+            return
+        }
+        if expbase.vmodus == 1 {
+            expbase.vmodus = 0
+        }
+        expwork.eltern((&expbase.dir_path[0 as usize]) as u64)
+        expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+        new_read(tree, tab, stat, fpfad)
+        return
+    }
+    if expbase.vmodus != 0 {
+        return
+    }
+    var seen: u64 = 0
+    var i: u64 = 0
+    while i < expwork.m_count() {
+        let e: u64 = expwork.m_ord(i)
+        if expwork.m_art(e) != 0 {
+            seen = seen + 1
+            if seen == line {
+                let full: u64 = expwork.join((&expbase.dir_path[0 as usize]) as u64, expwork.m_name(e))
+                ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, full, 126)
+                expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+                new_read(tree, tab, stat, fpfad)
+                i = expwork.m_count()
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn zip_starten(full: u64, packen: bool, tree: u64, tab: u64, stat: u64,
+    fpfad: u64) {
+    var tool: [u8; 9] = "/bin/zip\0"
+    var o_c: [u8; 3] = "-c\0"
+    var o_x: [u8; 3] = "-x\0"
+    var target: [u8; 200] = [0 as u8; 200]
+    var endung: [u8; 5] = ".zip\0"
+    var s_go: [u8; 20] = "explorer: zip pid=\0\0"
+    var argv: [u64; 4] = [0 as u64; 4]
+    argv[0 as usize] = (&tool[0 as usize]) as u64
+    if packen {
+        ulib.strncpy((&target[0 as usize]) as u64, full, 190)
+        ulib.strcat((&target[0 as usize]) as u64,
+            (&endung[0 as usize]) as u64)
+        argv[1 as usize] = (&o_c[0 as usize]) as u64
+        argv[2 as usize] = (&target[0 as usize]) as u64
+        argv[3 as usize] = full
+    } else {
+        argv[1 as usize] = (&o_x[0 as usize]) as u64
+        argv[2 as usize] = full
+        argv[3 as usize] = (&expbase.dir_path[0 as usize]) as u64
+    }
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&tool[0 as usize]) as u64,
+        (&argv[0 as usize]) as u64, 4)
+    expwork.say((&s_go[0 as usize]) as u64)
+    expwork.sayn(pid)
+    expwork.nl()
+    if !ulib.bad(pid) && pid != 0 {
+        let _w: u64 = ulib.wait_code(pid)
+    }
+    new_read(tree, tab, stat, fpfad)
+}
+
+static mut bm_lbl: [u8; 1100] = [0 as u8; 1100] // labels, one per line
+
+static mut k_noacts: [u8; 22] = "explorer.actions.none\0"
+
+// Ask the bus for the entries of the selected row and open the sub menu.
+// Returns the menu number (14) or 0 when nothing could be opened.
+fn actions_menu() -> u64 {
+    var s_lf: [u8; 17] = "list --menu file\0"
+    var s_ld: [u8; 16] = "list --menu dir\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_nl: [u8; 2] = "\n\0"
+    let z: u64 = expwork.cur_row()
+    expbase.bm_n = 0
+    if z >= expwork.m_count() {
+        return 0
+    }
+    let e: u64 = expwork.m_ord(z)
+    ulib.strncpy((&expbase.bm_path[0 as usize]) as u64, expwork.full_from(z), 190)
+    var at: u64 = 0
+    if expwork.m_art(e) != 0 {
+        at = expwork.bm_cat((&expbase.bm_line[0 as usize]) as u64, 0, (&s_ld[0 as usize]) as u64, 290)
+    } else {
+        at = expwork.bm_cat((&expbase.bm_line[0 as usize]) as u64, 0, (&s_lf[0 as usize]) as u64, 290)
+    }
+    at = expwork.bm_cat((&expbase.bm_line[0 as usize]) as u64, at, (&s_sp[0 as usize]) as u64, 290)
+    at = expwork.bm_cat((&expbase.bm_line[0 as usize]) as u64, at, expwork.m_name(e), 290)
+    var la: u64 = 0
+    __mmio_write8(((&bm_lbl[0 as usize]) as u64) as *mut u8, 0 as u8)
+    if actcli.open() {
+        actcli.req((&expbase.bm_line[0 as usize]) as u64)
+        if actcli.send(300) == actcli.R_OK {
+            var k: u64 = 1
+            while expbase.bm_n < 8 && actcli.line(k, (&expbase.bm_tmp[0 as usize]) as u64, 230) {
+                // action TAB label TAB level
+                let t: u64 = (&expbase.bm_tmp[0 as usize]) as u64
+                var a: u64 = 0
+                var nm: u64 = (&expbase.bm_names[0 as usize]) as u64 + expbase.bm_n * 64
+                while __mmio_read8((t + a) as *mut u8) != 0 as u8
+                    && __mmio_read8((t + a) as *mut u8) != 9 as u8 && a < 62 {
+                    __mmio_write8((nm + a) as *mut u8, __mmio_read8((t + a) as *mut u8))
+                    a = a + 1
+                }
+                __mmio_write8((nm + a) as *mut u8, 0 as u8)
+                if __mmio_read8((t + a) as *mut u8) == 9 as u8 {
+                    a = a + 1
+                }
+                var lb: [u8; 80] = [0 as u8; 80]
+                var b: u64 = 0
+                while __mmio_read8((t + a) as *mut u8) != 0 as u8
+                    && __mmio_read8((t + a) as *mut u8) != 9 as u8 && b < 78 {
+                    lb[b as usize] = __mmio_read8((t + a) as *mut u8)
+                    a = a + 1
+                    b = b + 1
+                }
+                if la + 80 < 1090 {
+                    la = expwork.bm_cat((&bm_lbl[0 as usize]) as u64, la,
+                        (&lb[0 as usize]) as u64, 1090)
+                    la = expwork.bm_cat((&bm_lbl[0 as usize]) as u64, la,
+                        (&s_nl[0 as usize]) as u64, 1090)
+                    expbase.bm_n = expbase.bm_n + 1
+                }
+                k = k + 1
+            }
+        }
+    }
+    if expbase.bm_n == 0 {
+        // nobody offers anything for this entry: say so instead of nothing
+        la = expwork.bm_cat((&bm_lbl[0 as usize]) as u64, 0,
+            msg.get((&k_noacts[0 as usize]) as u64), 1090)
+    }
+    let _n: u64 = popup_at(fuiscene.menu_x(), fuiscene.menu_y(),
+        (&bm_lbl[0 as usize]) as u64)
+    return 14
+}
+
+fn undo_do(tree: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    var s_u: [u8; 16] = "explorer: undo \0"
+    var s_a: [u8; 5] = "art=\0"
+    var s_rc: [u8; 4] = "rc=\0"
+    let art0: u64 = expakt.undo_art()
+    let rc: u64 = expakt.undo_last()
+    new_read(tree, tab, stat, fpfad)
+    expwork.say((&s_u[0 as usize]) as u64)
+    expwork.kv((&s_a[0 as usize]) as u64, art0)
+    expwork.kv((&s_rc[0 as usize]) as u64, rc)
+    expwork.nl()
+    let _f: bool = expwork.error_show(rc)
+    return 0
+}
+
+fn save_ask(tab: u64, tree: u64, stat: u64, fpfad: u64) -> u64 {
+    ulib.strncpy((&expbase.pziel[0 as usize]) as u64, (&expbase.dir_path[0 as usize]) as u64,
+        120)
+    let z2: u64 = expwork.cur_row()
+    if z2 < expwork.m_count() {
+        let e2: u64 = expwork.m_ord(z2)
+        if expwork.m_art(e2) != 0 {
+            ulib.strncpy((&expbase.pziel[0 as usize]) as u64,
+                expwork.join((&expbase.dir_path[0 as usize]) as u64, expwork.m_name(e2)), 120)
+        }
+    }
+    if bstore.is_store((&expbase.pziel[0 as usize]) as u64) {
+        save((&expbase.pziel[0 as usize]) as u64, tree, tab, stat, fpfad)
+        return 0
+    }
+    let _d: u64 = expwork.dlg_ask(msg.get((&expbase.k_t_bak[0 as usize]) as u64),
+        msg.get((&k_t_bfrage[0 as usize]) as u64))
+    return 4
+}
+
+fn goto_to(idx: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    var t_home: [u8; 8] = "/home\0\0\0"
+    var t_data: [u8; 8] = "/data\0\0\0"
+    var s_g: [u8; 18] = "explorer: gehezu \0"
+    if idx == 0 {
+        hist_back(tree, tab, stat, fpfad)
+    } else if idx == 1 {
+        hist_forward(tree, tab, stat, fpfad)
+    } else if idx == 2 {
+        expwork.eltern((&expbase.dir_path[0 as usize]) as u64)
+        expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+        new_read(tree, tab, stat, fpfad)
+    } else if idx == 3 {
+        var wohin: u64 = (&t_data[0 as usize]) as u64
+        if ulib.is_dir((&t_home[0 as usize]) as u64) {
+            wohin = (&t_home[0 as usize]) as u64
+        }
+        expbase.vmodus = 0
+        ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, wohin, 126)
+        expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+        new_read(tree, tab, stat, fpfad)
+    } else if idx == 4 {
+        let k: u64 = trash.trash_from((&expbase.dir_path[0 as usize]) as u64)
+        if k != 0 {
+            expbase.vmodus = 0
+            ulib.strncpy((&expbase.dir_path[0 as usize]) as u64, k, 126)
+            expwork.hist_push((&expbase.dir_path[0 as usize]) as u64)
+            new_read(tree, tab, stat, fpfad)
+        }
+    }
+    expwork.say((&s_g[0 as usize]) as u64)
+    expwork.sayn(idx)
+    var sp: [u8; 2] = " \0"
+    expwork.say((&sp[0 as usize]) as u64)
+    expwork.say((&expbase.dir_path[0 as usize]) as u64)
+    expwork.nl()
+    return 0
+}
+
+const K_SEP: u64 = 100 // r442: the chevrons between crumbs (100..111), nobody listens
+
+const MBH: u64 = 28
+
+const CH: u64 = 32
+
+const STH: u64 = 24
+
+const ROWH: u64 = 32
+
+static mut s_pm: [u8; 1100] = [0 as u8; 1100]
+
+static mut s_rl: [u8; 320] = [0 as u8; 320]
+
+static mut n_stat: usize = 4294967295
+
+static mut t_plus: [u8; 2] = "+\0"
+
+static mut k_tabzu: [u8; 19] = "explorer.tab.close\0"
+
+static mut s_rpt: [u8; 19] = "explorer: rect id=\0"
+
+static mut s_rkind: [u8; 7] = " kind=\0"
+
+static mut s_rx: [u8; 4] = " x=\0"
+
+static mut s_ry: [u8; 4] = " y=\0"
+
+static mut s_rw: [u8; 4] = " w=\0"
+
+static mut s_rh: [u8; 4] = " h=\0"
+
+static mut s_sp1: [u8; 2] = " \0"
+
+static mut s_mrect: [u8; 20] = "explorer: menurect \0"
+
+static mut s_mwx: [u8; 4] = "wx=\0"
+
+static mut s_mwy: [u8; 4] = "wy=\0"
+
+static mut s_mwh: [u8; 4] = "wh=\0"
+
+static mut s_mzh: [u8; 4] = "zh=\0"
+
+static mut s_drect: [u8; 19] = "explorer: dlgrect \0"
+
+static mut s_dx: [u8; 3] = "x=\0"
+
+static mut s_dy: [u8; 3] = "y=\0"
+
+static mut s_dw: [u8; 3] = "w=\0"
+
+static mut s_dh: [u8; 3] = "h=\0"
+
+static mut s_ausk: [u8; 23] = "explorer: ausknopf id=\0"
+
+static mut s_orteliste: [u8; 24] = "explorer: orteliste id=\0"
+
+static mut s_navrows: [u8; 20] = "explorer: navrows \0\0"
+
+static mut s_rows: [u8; 16] = "explorer: rows \0"
+
+static mut s_rows_x: [u8; 3] = "x=\0"
+
+static mut s_rows_b: [u8; 6] = "base=\0"
+
+static mut s_rows_h: [u8; 4] = "zh=\0"
+
+static mut s_rows_k: [u8; 6] = "kopf=\0"
+
+static mut s_rows_kh: [u8; 7] = "kopfh=\0"
+
+static mut s_rows_f: [u8; 4] = "fg=\0"
+
+static mut s_rows_g: [u8; 4] = "bg=\0"
+
+static mut s_rows_s: [u8; 5] = "sel=\0"
+
+static mut s_rows_c: [u8; 7] = "selfg=\0"
+
+static mut s_rows_d: [u8; 5] = "dim=\0"
+
+static mut s_rows_i: [u8; 4] = "ix=\0"
+
+static mut s_rows_j: [u8; 4] = "iy=\0"
+
+static mut s_rows_hb: [u8; 8] = "headbg=\0"
+
+static mut s_spalt: [u8; 19] = "explorer: spalten \0"
+
+// Open a popup menu with the lines of `src` at (x, y); the number of lines.
+fn popup_at(x: u64, y: u64, src: u64) -> u64 {
+    let dst: u64 = ((&s_pm[0 as usize]) as u64)
+    let n: u64 = expwork.split_items(src, dst, 1090)
+    var wm: u64 = 160
+    var j: u64 = 0
+    while j < n {
+        let tw: u64 = expwork.text_w(expwork.item_at(dst, j)) + 32
+        if tw > wm {
+            wm = tw
+        }
+        j = j + 1
+    }
+    wm = (wm + 3) / 4 * 4
+    fuiscene.menu_open(x, y, wm, dst, n)
+    say_menurect()
+    return n
+}
+
+// ------------------------------------------------------------ the picture
+
+// ---- W4b: THE PREVIEW PANE (Alt+P, "View" menu): the name, kind, size and date of the selected item in a card
+// right of the list. A text or picture preview of the content is not drawn yet; the pane is the place for it.
+const K_PREV: u64 = 87
+
+const PREV_W: u64 = 232
+
+static mut g_prev: u64 = 0
+
+static mut pv_size: [u8; 40] = [0 as u8; 40]
+
+static mut pv_date: [u8; 48] = [0 as u8; 48]
+
+static mut k_pvnone: [u8; 22] = "explorer.preview.none\0"
+
+static mut k_pvtitle: [u8; 23] = "explorer.preview.title\0"
+
+static mut pv_txt: [u8; 364] = [0 as u8; 364]
+
+static mut s_pvtxt: [u8; 23] = "explorer: preview txt \0"
+
+static mut s_pvtxt_n: [u8; 3] = "n=\0"
+
+static mut s_pvon: [u8; 19] = "explorer: preview \0"
+
+static mut s_pvon_a: [u8; 4] = "on=\0"
+
+fn preview_toggle(tree: u64, tab: u64, stat: u64, fpfad: u64) -> u64 {
+    if expbase.prev_on == 0 {
+        expbase.prev_on = 1
+    } else {
+        expbase.prev_on = 0
+    }
+    dim_set()
+    expwork.say(((&s_pvon[0 as usize]) as u64))
+    expwork.kv(((&s_pvon_a[0 as usize]) as u64), expbase.prev_on)
+    expwork.kv(((&s_pvon_a[0 as usize]) as u64), g_prev)
+    expwork.nl()
+    expwork.rfr()
+    return 0
+}
+
+// ---- X5: THE PICTURE IN THE PREVIEW PANE. PNG, BMP, JPEG, GIF (first frame) and binary PPM/PGM (P6/P5, maxval 255) are
+// decoded with the viewer's decoders into ONE buffer (mapped on the first use) and shown in a picture box that
+// fits the picture into the card. What does not decode (too big for the buffer, 16 bit, progressive, ...) shows the text only.
+// The decoded picture is cached by path + size + date, so a rebuild of the scene does not decode again.
+const K_PVIMG: u64 = 88
+
+const PV_DATCAP: u64 = 786432
+
+const PV_PIXCAP: u64 = 4210688
+
+const PV_BOX_H: u64 = 150
+
+static mut pv_dat: u64 = 0
+
+static mut pv_pix: u64 = 0
+
+static mut pv_key: u64 = 0
+
+static mut pv_state: u64 = 0
+
+static mut pv_shown: u64 = 0
+
+static mut pv_dim: [u8; 24] = [0 as u8; 24]
+
+static mut s_pvimg: [u8; 23] = "explorer: preview img \0"
+
+static mut s_pvimg_s: [u8; 7] = "state=\0"
+
+static mut s_pvimg_w: [u8; 3] = "w=\0"
+
+static mut s_pvimg_h: [u8; 3] = "h=\0"
+
+// Decodes the file into pv_pix. 1 = a picture is in the buffer (pv_w x pv_h), 2 = nothing to show.
+fn pv_decode(path: u64) -> u64 {
+    if pv_dat == 0 {
+        pv_dat = wlibc.map_surface(PV_DATCAP)
+        pv_pix = wlibc.map_surface(PV_PIXCAP)
+        if ulib.bad(pv_dat) || ulib.bad(pv_pix) {
+            pv_dat = 0
+            pv_pix = 0
+            return 2
+        }
+    }
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 2
+    }
+    var n: u64 = 0
+    var more: bool = true
+    while more {
+        let g: u64 = io.read(fd, pv_dat + n, PV_DATCAP - n)
+        if ulib.bad(g) || g == 0 {
+            more = false
+        } else {
+            n = n + g
+            if n >= PV_DATCAP {
+                more = false
+            }
+        }
+    }
+    io.close(fd)
+    if n == 0 || n >= PV_DATCAP {
+        return 2
+    }
+    if image.ist_png(pv_dat, n) {
+        if image.png_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            expbase.pv_w = image.width()
+            expbase.pv_h = image.height()
+            return 1
+        }
+        return 2
+    }
+    if image.ist_bmp(pv_dat, n) {
+        if image.bmp_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            expbase.pv_w = image.width()
+            expbase.pv_h = image.height()
+            return 1
+        }
+        return 2
+    }
+    if jpeg.ist_jpeg(pv_dat, n) {
+        if jpeg.jpeg_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            expbase.pv_w = jpeg.width()
+            expbase.pv_h = jpeg.height()
+            return 1
+        }
+        return 2
+    }
+    if gif.ist_gif(pv_dat, n) {
+        if gif.gif_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+            expbase.pv_w = gif.width()
+            expbase.pv_h = gif.height()
+            return 1
+        }
+        return 2
+    }
+    if expwork.ppm_read(pv_dat, n, pv_pix, PV_PIXCAP) {
+        return 1
+    }
+    return 2
+}
+
+// FNV hash of the full path plus size and date: changes when the file is replaced.
+fn pv_file_key(path: u64, e: u64) -> u64 {
+    var h: u64 = 1469598103934665603
+    var i: u64 = 0
+    while i < 190 && (__mmio_read8((path + i) as *mut u8)) != 0 as u8 {
+        h = (h ^ ((__mmio_read8((path + i) as *mut u8)) as u64)) *% 1099511628211
+        i = i + 1
+    }
+    h = (h ^ expwork.m_size(e)) *% 1099511628211
+    h = (h ^ expmodell.mtime_at(e)) *% 1099511628211
+    if h == 0 {
+        h = 1
+    }
+    return h
+}
+
+// "W x H" as plain digits (no words, so no catalogue text needed)
+fn pv_dim_text() {
+    var at: u64 = 0
+    var v: u64 = expbase.pv_w
+    var k: u64 = 0
+    var a: [u8; 8] = [0 as u8; 8]
+    var pass: u64 = 0
+    while pass < 2 {
+        k = 0
+        if v == 0 {
+            a[0 as usize] = 48 as u8
+            k = 1
+        }
+        while v > 0 && k < 7 {
+            a[(k) as usize] = (48 + v % 10) as u8
+            v = v / 10
+            k = k + 1
+        }
+        while k > 0 && at < 20 {
+            k = k - 1
+            pv_dim[(at) as usize] = a[(k) as usize]
+            at = at + 1
+        }
+        if pass == 0 {
+            pv_dim[(at) as usize] = 32 as u8
+            pv_dim[(at + 1) as usize] = 120 as u8
+            pv_dim[(at + 2) as usize] = 32 as u8
+            at = at + 3
+            v = expbase.pv_h
+        }
+        pass = pass + 1
+    }
+    pv_dim[(at) as usize] = 0 as u8
+}
+
+// The picture box + the size line for a picture entry; returns 1 when a picture is shown.
+fn preview_image(cd: usize, e: u64) -> u64 {
+    let path: u64 = expwork.join((&expbase.dir_path[0 as usize]) as u64, expwork.m_name(e))
+    let key: u64 = pv_file_key(path, e)
+    if key != pv_key {
+        pv_key = key
+        pv_state = 0
+        if expwork.m_size(e) > 0 {
+            pv_state = pv_decode(path)
+        } else {
+            pv_state = 2
+        }
+        pv_shown = 0
+        if expbase.s_dbg != 0 {
+            expwork.say(((&s_pvimg[0 as usize]) as u64))
+            expwork.kv(((&s_pvimg_s[0 as usize]) as u64), pv_state)
+            expwork.kv(((&s_pvimg_w[0 as usize]) as u64), expbase.pv_w)
+            expwork.kv(((&s_pvimg_h[0 as usize]) as u64), expbase.pv_h)
+            expwork.nl()
+        }
+    }
+    if pv_state != 1 {
+        return 0
+    }
+    var bw: u64 = 0
+    if g_prev > 40 {
+        bw = g_prev - 40
+    }
+    let _b: usize = fuiscene.image(cd, K_PVIMG, bw, PV_BOX_H)
+    if pv_shown != key {
+        pv_shown = key
+        fuiscene.image_set(K_PVIMG, pv_pix, expbase.pv_w, expbase.pv_h)
+        fuiscene.image_fit(K_PVIMG)
+    }
+    pv_dim_text()
+    let _d: usize = fuiscene.label_muted(cd, ((&pv_dim[0 as usize]) as u64))
+    return 1
+}
+
+fn preview_build(cr: usize) {
+    let cd: usize = fuiscene.card(cr)
+    fuiscene.set_size(cd, g_prev, g_hinh)
+    fuiscene.set_key(cd, K_PREV)
+    let _h: usize = fuiscene.label_muted(cd, msg.get(((&k_pvtitle[0 as usize]) as u64)))
+    let z: u64 = expwork.cur_row()
+    if expbase.vmodus != 0 || z >= expwork.m_count() {
+        let _n: usize = fuiscene.label(cd, msg.get(((&k_pvnone[0 as usize]) as u64)))
+        return
+    }
+    let e: u64 = expwork.m_ord(z)
+    let _t: usize = fuiscene.label_wrap(cd, expwork.m_name(e), 3)
+    let _k: usize = fuiscene.label_muted(cd, expmodell.type_text(e))
+    var is_pic: u64 = 0
+    if expwork.m_art(e) == 0 && expmodell.kind_of(e) == 3 {
+        is_pic = preview_image(cd, e)
+    }
+    if expwork.m_art(e) == 0 {
+        let _sz: usize = navnum.size_text(expwork.m_size(e), ((&pv_size[0 as usize]) as u64), 40)
+        let _s: usize = fuiscene.label(cd, ((&pv_size[0 as usize]) as u64))
+    }
+    let _tz: u64 = expmodell.time_text(expmodell.mtime_at(e), ((&pv_date[0 as usize]) as u64))
+    let _d: usize = fuiscene.label_muted(cd, ((&pv_date[0 as usize]) as u64))
+    // W4c: the first lines of a text file
+    if expwork.m_art(e) == 0 && expwork.m_size(e) > 0 && is_pic == 0 && expmodell.kind_of(e) != 3 {
+        let tn: u64 = preview_text(expwork.join((&expbase.dir_path[0 as usize]) as u64, expwork.m_name(e)))
+        if tn > 0 {
+            let _x: usize = fuiscene.label_wrap(cd, ((&pv_txt[0 as usize]) as u64), 12)
+        }
+    }
+}
+
+// Reads up to 360 bytes of the file into pv_txt as ONE line (line breaks and tabs become blanks).
+// Returns the byte count, or 0 when the file is empty, unreadable or binary (a control byte other than \n \r \t).
+fn preview_text(path: u64) -> u64 {
+    pv_txt[0 as usize] = 0 as u8
+    let fd: u64 = io.open(path, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    var n: u64 = io.read(fd, ((&pv_txt[0 as usize]) as u64), 360)
+    io.close(fd)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    if n >= 360 {
+        // cut a cut-off multi-byte character: back to the last ASCII byte
+        while n > 0 && pv_txt[(n - 1) as usize] >= 128 as u8 {
+            n = n - 1
+        }
+    }
+    var i: u64 = 0
+    var bin: u64 = 0
+    while i < n {
+        let c: u8 = pv_txt[(i) as usize]
+        if c == 10 as u8 || c == 13 as u8 || c == 9 as u8 {
+            pv_txt[(i) as usize] = 32 as u8
+        } else if c < 32 as u8 || c == 127 as u8 {
+            bin = 1
+        }
+        i = i + 1
+    }
+    if bin != 0 || n == 0 {
+        pv_txt[0 as usize] = 0 as u8
+        return 0
+    }
+    pv_txt[(n) as usize] = 0 as u8
+    if expbase.s_dbg != 0 {
+        expwork.say(((&s_pvtxt[0 as usize]) as u64))
+        expwork.kv(((&s_pvtxt_n[0 as usize]) as u64), n)
+        expwork.nl()
+    }
+    return n
+}
+
+fn dim_set() {
+    let bw: u64 = fuiscene.width()
+    var bh: u64 = fuiscene.height()
+    // r454: the strip of the title bar (the tabs) is not part of the body
+    if fuiscene.strip_on() && bh > fuiscene.strip_h() {
+        bh = bh - fuiscene.strip_h()
+    }
+    g_edge = 8
+    g_gap = 8
+    g_ch = CH
+    g_mbh = MBH
+    g_sth = STH
+    g_innen = 0
+    if bw > 16 {
+        g_innen = bw - 16
+    }
+    // r442: the command bar and the address row, the tab row only while there are two tabs or more
+    // (one tab repeated the folder name twice), the content, and the status line; the gaps are 8
+    var nrows: u64 = 1
+    if expbase.tab_n > 1 && !fuiscene.strip_on() {
+        nrows = 2
+    }
+    // W4b: the command bar has a row of its own under the address row (Windows 11)
+    nrows = nrows + 1
+    let fix: u64 = nrows * CH + STH + (nrows + 1) * 8 + 16
+    g_hinh = 0
+    if bh > fix + 40 {
+        g_hinh = (bh - fix) / 4 * 4
+    }
+    // ONE navigation pane (groups, places, the folder tree) a quarter of the width, 176..240 points
+    g_bbaum = (g_innen / 4) / 4 * 4
+    if g_bbaum < 176 {
+        g_bbaum = 176
+    }
+    if g_bbaum > 240 {
+        g_bbaum = 240
+    }
+    expbase.g_binh = 0
+    if g_innen > g_bbaum + 8 {
+        expbase.g_binh = g_innen - g_bbaum - 8
+    }
+    // W4b: the preview pane (Alt+P) takes a strip at the right of the list
+    g_prev = 0
+    if expbase.prev_on != 0 && expbase.vmodus == 0 && expbase.g_binh > PREV_W + 8 + 200 {
+        g_prev = PREV_W
+        expbase.g_binh = expbase.g_binh - PREV_W - 8
+    }
+    g_horte = g_hinh
+    g_hbaum = 0
+    expwork.columns_set(expbase.g_binh)
+}
+
+// What the window shows, described for the scene tree.
+// ---- r442: the command bar. The eight commands of the file manager in the order of their importance,
+// as icons; the word and the shortcut are the tooltip and the accessibility name.
+static mut sc_f5: [u8; 3] = "F5\0"
+
+static mut sc_find: [u8; 7] = "Ctrl+F\0"
+
+static mut sc_newtab: [u8; 7] = "Ctrl+T\0"
+
+static mut sc_newdir: [u8; 13] = "Ctrl+Shift+N\0"
+
+static mut sc_cut: [u8; 7] = "Ctrl+X\0"
+
+static mut sc_copy: [u8; 7] = "Ctrl+C\0"
+
+static mut sc_paste: [u8; 7] = "Ctrl+V\0"
+
+static mut sc_rename: [u8; 3] = "F2\0"
+
+static mut sc_del: [u8; 4] = "Del\0"
+
+static mut sc_preview: [u8; 6] = "Alt+P\0"
+
+static mut k_tabnew: [u8; 17] = "explorer.tab.new\0"
+
+static mut tipbuf: [u8; 960] = [0 as u8; 960]
+
+static mut cmd_words: [u8; 200] = [0 as u8; 200]
+
+// A tooltip + accessibility name "<word> (<shortcut>)" for `key`, built into slot `slot` of `tipbuf`.
+fn set_tip(key: u64, word: u64, shortcut: u64, slot: u64) {
+    if slot >= 12 {
+        return
+    }
+    let o: u64 = ((&tipbuf[(slot * 80) as usize]) as u64)
+    let _n: u64 = cmdbar.tip_text(word, shortcut, o, 80)
+    fuiscene.tip(key, o)
+}
+
+// The commands, in the order of their importance. Returns the width of the whole bar in points.
+fn cmd_room() -> u64 {
+    let mt: u64 = ((&cmd_words[0 as usize]) as u64)
+    let nm: u64 = expwork.split_items(msg.get(((&k_cmd[0 as usize]) as u64)), mt, 190)
+    fuiscene.cmd_begin()
+    if nm >= 9 {
+        // W4b: Windows 11 command bar: New (word), the five editing commands (words when the row has room
+        // for all of them), Sort and View (words), More (icon only)
+        fuiscene.cmd_item_t(icons.CMD_NEW_FOLDER, expbase.K_CMD, expwork.item_at(mt, 0), ((&sc_newdir[0 as usize]) as u64), 0, 1)
+        fuiscene.cmd_item_t(icons.CMD_CUT, expbase.K_CMD + 1, expwork.item_at(mt, 1), ((&sc_cut[0 as usize]) as u64), 1, 2)
+        fuiscene.cmd_item_t(icons.CMD_COPY, expbase.K_CMD + 2, expwork.item_at(mt, 2), ((&sc_copy[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.CMD_PASTE, expbase.K_CMD + 3, expwork.item_at(mt, 3), ((&sc_paste[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.CMD_RENAME, expbase.K_CMD + 4, expwork.item_at(mt, 4), ((&sc_rename[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.TRASH, expbase.K_CMD + 5, expwork.item_at(mt, 5), ((&sc_del[0 as usize]) as u64), 0, 2)
+        fuiscene.cmd_item_t(icons.CMD_SORT, expbase.K_SORT, expwork.item_at(mt, 6), 0, 1, 1)
+        fuiscene.cmd_item_t(icons.CMD_VIEW, expbase.K_MB + 2, expwork.item_at(mt, 7), ((&sc_preview[0 as usize]) as u64), 0, 1)
+        fuiscene.cmd_item(icons.CMD_MORE, expbase.K_MB, expwork.item_at(mt, 8), 0, 0)
+    }
+    return fuiscene.cmd_width()
+}
+
+// r454: THE TABS IN THE TITLE BAR. The strip row of the tree (fuiscene.strip_row) holds the tabs (one per folder, the close
+// cross only from the second tab on), the plus button, then the empty drag region (the window moves when it is pressed there,
+// a double click maximises) and a gap for the three caption buttons of the server at the right end.
+fn strip_build() {
+    let sr: usize = fuiscene.strip_row()
+    if sr == fuiscene.NONE {
+        return
+    }
+    let sh: u64 = fuiscene.strip_h()
+    var th: u64 = 16
+    if sh > 6 {
+        // the label of a tab is painted at a fixed distance from the tab's top, for the default tab height (32): only that
+        // height puts it on the centre line (tools/midline), a lower tab leaves the label low
+        th = 32
+        if th > sh {
+            th = sh
+        }
+    }
+    var tw: u64 = 192
+    let bw: u64 = fuiscene.width()
+    let used: u64 = 8 + fuiscene.strip_caps_w() + th + 4 + 48
+    if bw > used {
+        let share: u64 = (bw - used) / expbase.tab_n
+        if share < tw {
+            tw = share
+        }
+    }
+    tw = tw / 4 * 4
+    if tw < 72 {
+        tw = 72
+    }
+    fuiscene.accent_ink(true)
+    var r: u64 = 0
+    while r < expbase.tab_n {
+        let lbl: u64 = (&s_rl[(r * 40) as usize]) as u64
+        let at: u64 = expwork.tab_label(r, lbl, 28)
+        __mmio_write8((lbl + at) as *mut u8, 0 as u8)
+        if expbase.tab_n > 1 {
+            let _tb: usize = fuiscene.tab_close(sr, lbl, expbase.K_RT + r, expbase.K_RX + r,
+                msg.get(((&k_tabzu[0 as usize]) as u64)), r == expbase.tab_at, tw, th)
+        } else {
+            let tb1: usize = fuiscene.tab(sr, lbl, expbase.K_RT + r, true)
+            fuiscene.set_size(tb1, tw, th)
+        }
+        r = r + 1
+    }
+    if expbase.tab_n < expbase.TAB_MAX {
+        let pb: usize = fuiscene.icon_button(sr, icons.CMD_PLUS,
+            msg.get(((&k_tabnew[0 as usize]) as u64)), expbase.K_RPLUS)
+        fuiscene.flat(pb)
+        fuiscene.set_size(pb, th, th)
+        set_tip(expbase.K_RPLUS, msg.get(((&k_tabnew[0 as usize]) as u64)), ((&sc_newtab[0 as usize]) as u64), 11)
+    }
+    fuiscene.accent_ink(false)
+    let dr: usize = fuiscene.row(sr)
+    fuiscene.set_size(dr, 0, sh)
+    fuiscene.set_grow(dr, 1)
+    fuiscene.set_key(dr, expbase.K_STRIPDRAG)
+    let _cp: usize = fuiscene.space(sr, fuiscene.strip_caps_w(), 1)
+}
+
+static mut s_chev: [u8; 2] = ">\0"
+
+static mut s_rtabs: [u8; 20] = "explorer: reiter n=\0"
+
+static mut s_rtaba: [u8; 4] = " a=\0"
+
+static mut k_search: [u8; 18] = "explorer.search\0\0\0"
+
+static mut search_last: [u8; 64] = [0 as u8; 64]
+
+const SEARCH_W: u64 = 184
+
+fn build() {
+    dim_set()
+    let col: usize = fuiscene.root()
+    // ---- the ADDRESS ROW: back, forward, up, refresh, the way as breadcrumbs (or the field after Ctrl+L),
+    // then -- at the right-hand end -- the search field and, while there is one tab only, the new-tab button.
+    // The eject button only while a drive is selected.
+    let tr: usize = fuiscene.row(col)
+    fuiscene.set_gap(tr, 4)
+    let b1: usize = fuiscene.icon_button(tr, icons.NAV_BACK,
+        msg.get(((&k_gzurueck[0 as usize]) as u64)), expbase.K_BZUR)
+    fuiscene.set_size(b1, CH, CH)
+    let b2: usize = fuiscene.icon_button(tr, icons.NAV_FORWARD,
+        msg.get(((&k_gvor[0 as usize]) as u64)), expbase.K_BVOR)
+    fuiscene.set_size(b2, CH, CH)
+    let b3: usize = fuiscene.icon_button(tr, icons.NAV_UP,
+        msg.get(((&k_gauf[0 as usize]) as u64)), expbase.K_BAUF)
+    fuiscene.set_size(b3, CH, CH)
+    let b4: usize = fuiscene.icon_button(tr, icons.NAV_REFRESH,
+        msg.get(((&k_gneu[0 as usize]) as u64)), expbase.K_BNEU)
+    fuiscene.set_size(b4, CH, CH)
+    set_tip(expbase.K_BZUR, msg.get(((&k_gzurueck[0 as usize]) as u64)), 0, 0)
+    set_tip(expbase.K_BVOR, msg.get(((&k_gvor[0 as usize]) as u64)), 0, 1)
+    set_tip(expbase.K_BAUF, msg.get(((&k_gauf[0 as usize]) as u64)), 0, 2)
+    set_tip(expbase.K_BNEU, msg.get(((&k_gneu[0 as usize]) as u64)), ((&sc_f5[0 as usize]) as u64), 3)
+    // the commands (icons: the word is the tooltip) in the order of their importance; the crumbs keep at
+    // least 140 points; what does not fit goes into the "..." menu
+    let cm: u64 = cmd_room()
+    var fixed: u64 = (CH + 4) * 4 + SEARCH_W + 4 + 140 + 4
+    if expbase.tab_n == 1 && expbase.tab_n < expbase.TAB_MAX && !fuiscene.strip_on() {
+        fixed = fixed + CH + 4
+    }
+    if exporte.place_is_carrier(expbase.place_choice) {
+        let b5: usize = fuiscene.icon_button(tr, icons.FILE_DRIVE,
+            msg.get(((&k_gaus[0 as usize]) as u64)), expbase.K_BAUS)
+        fuiscene.set_size(b5, CH, CH)
+        fixed = fixed + CH + 4
+    }
+    // W4b: the commands have a row of their own (below); the crumbs get all the room the address row has left
+    var cmd_avail: u64 = 0
+    if g_innen > 8 {
+        cmd_avail = g_innen - 8
+    }
+    var room: u64 = 140
+    if g_innen > fixed + 8 {
+        room = g_innen - fixed - 8
+    }
+    if cm == 0 {
+        room = room + 0
+    }
+    if expbase.pfadfeld_an {
+        let _fe: usize = fuiscene.entry(tr, expbase.K_PATH, room, ((&expbase.dir_path[0 as usize]) as u64))
+    } else {
+        // as many of the LAST crumbs as fit (a chevron between them); the early ones drop out
+        var first: u64 = crumb_n
+        var used: u64 = 0
+        while first > 0 {
+            let t1: u64 = exporte.crumb_text(first - 1)
+            let w1: u64 = (expwork.text_w(t1) + 24 + 3) / 4 * 4 + 4 + 12 + 4
+            if used + w1 > room {
+                break
+            }
+            used = used + w1
+            first = first - 1
+        }
+        if first == crumb_n && crumb_n > 0 {
+            first = crumb_n - 1
+        }
+        var q: u64 = first
+        while q < crumb_n {
+            if q > first {
+                // a chevron between two crumbs (a flat icon button nobody listens to: key 50 + q)
+                let sep: usize = fuiscene.icon_button(tr, icons.CHEVRON_RIGHT,
+                    ((&s_chev[0 as usize]) as u64), K_SEP + q)
+                fuiscene.flat(sep)
+                fuiscene.set_size(sep, 12, CH)
+            }
+            let t2: u64 = exporte.crumb_text(q)
+            let kb: usize = fuiscene.button(tr, t2, expbase.K_CRUMB + q)
+            fuiscene.flat(kb)
+            fuiscene.set_size(kb, (expwork.text_w(t2) + 24 + 3) / 4 * 4, CH)
+            q = q + 1
+        }
+    }
+    let spc: usize = fuiscene.row(tr)
+    fuiscene.set_grow(spc, 1)
+    let _se: usize = fuiscene.entry(tr, expbase.K_SEARCH, SEARCH_W, ((&search_last[0 as usize]) as u64))
+    fuiscene.entry_hint(expbase.K_SEARCH, msg.get(((&k_search[0 as usize]) as u64)))
+    set_tip(expbase.K_SEARCH, msg.get(((&k_search[0 as usize]) as u64)), ((&sc_find[0 as usize]) as u64), 10)
+    let _sep0: usize = fuiscene.space(tr, 4, 4)
+    if expbase.tab_n == 1 && expbase.tab_n < expbase.TAB_MAX && !fuiscene.strip_on() {
+        let pb1: usize = fuiscene.icon_button(tr, icons.CMD_PLUS,
+            msg.get(((&k_tabnew[0 as usize]) as u64)), expbase.K_RPLUS)
+        fuiscene.flat(pb1)
+        fuiscene.set_size(pb1, CH, CH)
+        set_tip(expbase.K_RPLUS, msg.get(((&k_tabnew[0 as usize]) as u64)), ((&sc_newtab[0 as usize]) as u64), 11)
+    }
+    // ---- the tabs: only from the second tab on (one tab said the folder name a second time)
+    expbase.n_rrow = fuiscene.NONE
+    if fuiscene.strip_on() {
+        strip_build()
+    }
+    if expbase.tab_n > 1 && !fuiscene.strip_on() {
+        let rr: usize = fuiscene.row(col)
+        expbase.n_rrow = rr
+        fuiscene.set_gap(rr, 4)
+        var tw: u64 = 192
+        if g_innen > 56 {
+            let share: u64 = (g_innen - 56) / expbase.tab_n
+            if share < tw {
+                tw = share
+            }
+        }
+        tw = tw / 4 * 4
+        if tw < 96 {
+            tw = 96
+        }
+        var r: u64 = 0
+        while r < expbase.tab_n {
+            let lbl: u64 = (&s_rl[(r * 40) as usize]) as u64
+            let at: u64 = expwork.tab_label(r, lbl, 28)
+            __mmio_write8((lbl + at) as *mut u8, 0 as u8)
+            let _tb: usize = fuiscene.tab_close(rr, lbl, expbase.K_RT + r, expbase.K_RX + r,
+                msg.get(((&k_tabzu[0 as usize]) as u64)), r == expbase.tab_at, tw, CH)
+            r = r + 1
+        }
+        if expbase.tab_n < expbase.TAB_MAX {
+            let pb: usize = fuiscene.button(rr, ((&t_plus[0 as usize]) as u64), expbase.K_RPLUS)
+            fuiscene.set_size(pb, CH, CH)
+            fuiscene.compact(pb)
+        }
+    }
+    // ---- W4b: the command bar in a row of its own (Windows 11): New, Cut ... Delete, Sort, View, More
+    let cmr: usize = fuiscene.row(col)
+    fuiscene.set_gap(cmr, 4)
+    let _vis: u64 = fuiscene.cmd_end(cmr, cmd_avail, expbase.K_OVF)
+    // ---- the content: ONE navigation pane (groups, places, the folder tree) and the files
+    let cr: usize = fuiscene.row(col)
+    fuiscene.set_gap(cr, 8)
+    let _o: usize = fuiscene.table_list(cr, expbase.K_PLACES, g_bbaum, g_hinh, 1,
+        ((&expbase.nav_blob[0 as usize]) as u64))
+    fuiscene.table_icons(expbase.K_PLACES, ((&expbase.nav_icons[0 as usize]) as u64))
+    fuiscene.table_heads(expbase.K_PLACES, ((&expbase.nav_heads[0 as usize]) as u64))
+    fuiscene.table_indent(expbase.K_PLACES, ((&expbase.nav_levels[0 as usize]) as u64))
+    if expbase.symansicht == 1 {
+        let _sy: usize = fuiscene.table_list(cr, expbase.K_SYM, expbase.g_binh, g_hinh, 1,
+            ((&expbase.symblob[0 as usize]) as u64))
+        fuiscene.table_icons(expbase.K_SYM, ((&expbase.symicons[0 as usize]) as u64))
+    } else {
+        let _tt: usize = fuiscene.table_blob(cr, expbase.K_TAB, expbase.g_binh, g_hinh, 4,
+            expwork.tab_text())
+        fuiscene.table_icons(expbase.K_TAB, expwork.tab_icons())
+        var c: u64 = 0
+        while c < 4 {
+            fuiscene.table_colw(expbase.K_TAB, c, expbase.col_widths[(c) as usize])
+            c = c + 1
+        }
+    }
+    if g_prev > 0 {
+        preview_build(cr)
+    }
+    // ---- the status line
+    var sp: u64 = expbase.stat_msg
+    if sp == 0 {
+        sp = ((&expbase.lauf[0 as usize]) as u64)
+    }
+    n_stat = fuiscene.label(col, sp)
+}
+
+// The things the tables are set up for, once, before the window opens.
+fn tabellen_einrichten() {
+    fuiscene.table_prep(expbase.K_PLACES)
+    fuiscene.table_prep(expbase.K_TAB)
+    fuiscene.table_prep(expbase.K_SYM)
+    // r442: rows of 32 points, the row under the pointer lights up, sizes end at the column's right edge
+    fuiscene.table_row_height(expbase.K_PLACES, ROWH)
+    fuiscene.table_row_height(expbase.K_TAB, ROWH)
+    fuiscene.table_resizable(expbase.K_TAB, true)
+    fuiscene.table_hover(expbase.K_PLACES, true)
+    fuiscene.table_hover(expbase.K_TAB, true)
+    fuiscene.table_align_right(expbase.K_TAB, 3, true)
+    fuiscene.table_prep(expbase.K_TREE)
+    fuiscene.table_own(expbase.K_TAB, true)
+    fuiscene.table_exact(expbase.K_TAB, true)
+    fuiscene.table_exact(expbase.K_SYM, true)
+    fuiscene.table_own(expbase.K_SYM, true)
+    fuiscene.table_own(expbase.K_PLACES, true)
+    fuiscene.table_own(expbase.K_TREE, true)
+    fuiscene.table_multi(expbase.K_TAB, true)
+    fuiscene.table_drag(expbase.K_TAB, true)
+    fuiscene.table_drop_filter(expbase.K_TAB, drop_ok_tab)
+    fuiscene.table_multi(expbase.K_SYM, true)
+    fuiscene.table_drag(expbase.K_SYM, true)
+    fuiscene.table_drop_filter(expbase.K_SYM, drop_ok_tab)
+    fuiscene.table_drop_filter(expbase.K_PLACES, drop_ok_places)
+    // a place is a jump, not a selection: ONE click goes there
+    fuiscene.table_click_only(expbase.K_PLACES, true)
+}
+
+fn drop_ok_tab(row: u64) -> bool {
+    if expbase.vmodus != 0 || row >= expwork.m_count() {
+        return false
+    }
+    return expwork.m_art(expwork.m_ord(row)) != 0
+}
+
+fn drop_ok_places(row: u64) -> bool {
+    if expbase.vmodus != 0 || row >= exporte.places_num() {
+        return false
+    }
+    if exporte.place_is_header(row) {
+        return false
+    }
+    return exporte.place_droppable(row)
+}
+
+// ------------------------------------------------------------ the tabs
+
+fn tab_below(mx: u64, my: u64) -> u64 {
+    var k: u64 = 0
+    while k < expbase.tab_n {
+        let n: usize = fuiscene.node_of_key(expbase.K_RT + k)
+        if n != fuiscene.NONE {
+            if mx >= fuiscene.node_x(n) && mx < fuiscene.node_x(n) + fuiscene.node_w(n)
+                && my >= fuiscene.node_y(n)
+                && my < fuiscene.node_y(n) + fuiscene.node_h(n) {
+                return k
+            }
+        }
+        k = k + 1
+    }
+    return expbase.tab_at
+}
+
+// Close the tab `nr` (the cross of that tab).
+fn tab_close_nr(nr: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    if nr >= expbase.tab_n {
+        return
+    }
+    if nr != expbase.tab_at {
+        tab_switch(nr, tree, tab, stat, fpfad)
+    }
+    tab_close_do(tree, tab, stat, fpfad)
+}
+
+// ------------------------------------------------------------ the views
+
+fn view_set(welche: u64, tab: u64, tree: u64, stat: u64, fpfad: u64) {
+    expbase.symansicht = welche
+    expwork.icon_view_build()
+    expwork.rfr()
+    expwork.say(((&s_view[0 as usize]) as u64))
+    expwork.sayn(welche)
+    expwork.say(((&s_sp1[0 as usize]) as u64))
+    expwork.kv(((&s_vn[0 as usize]) as u64), expwork.m_count())
+    expwork.kv(((&s_vw[0 as usize]) as u64), expbase.sym_gone)
+    expwork.nl()
+}
+
+// View sizes (small / medium / large): the row height of the list and of the icon view.
+// 24 and 32 points draw the 16x16 row icon, 48 points the 32 point vector icon (same rule as the start menu).
+static mut ansichtgr: u64 = 1
+
+static mut s_vsz: [u8; 20] = "explorer: viewsize \0"
+
+static mut s_vsh: [u8; 5] = " rh=\0"
+
+fn view_size_set(g: u64) {
+    var rh: u64 = ROWH
+    if g == 0 {
+        rh = 24
+    } else if g == 2 {
+        rh = 48
+    }
+    ansichtgr = g
+    fuiscene.table_row_height(expbase.K_TAB, rh)
+    fuiscene.table_row_height(expbase.K_SYM, rh)
+    expwork.rfr()
+    expwork.say(((&s_vsz[0 as usize]) as u64))
+    expwork.sayn(g)
+    expwork.say(((&s_vsh[0 as usize]) as u64))
+    expwork.sayn(rh)
+    expwork.nl()
+}
+
+static mut s_view: [u8; 16] = "explorer: view \0"
+
+static mut s_vn: [u8; 3] = "n=\0"
+
+static mut s_vw: [u8; 5] = "weg=\0"
+
+fn places_show() {
+    let n: u64 = exporte.places_make()
+    expwork.nav_build()
+    if expbase.s_up {
+        expwork.nav_sync_sel()
+    }
+    expwork.rfr()
+    expwork.say(((&s_places[0 as usize]) as u64))
+    expwork.kv(((&s_on[0 as usize]) as u64), n)
+    expwork.kv(((&s_ot[0 as usize]) as u64), exporte.carrier_num())
+    expwork.nl()
+    if expwork.dbg_on() {
+        var p2: u64 = 0
+        while p2 < exporte.places_num() {
+            if exporte.place_is_carrier(p2) {
+                expwork.say(((&s_ortz[0 as usize]) as u64))
+                expwork.sayn(p2)
+                expwork.say(((&s_ory[0 as usize]) as u64))
+                expwork.sayn(p2 * ROWH)
+                expwork.say(((&s_orh[0 as usize]) as u64))
+                expwork.sayn(ROWH)
+                expwork.nl()
+            }
+            p2 = p2 + 1
+        }
+    }
+}
+
+static mut s_places: [u8; 16] = "explorer: orte \0"
+
+static mut s_on: [u8; 3] = "n=\0"
+
+static mut s_ot: [u8; 9] = "traeger=\0"
+
+static mut s_ortz: [u8; 22] = "explorer: ortzeile i=\0"
+
+static mut s_ory: [u8; 4] = " y=\0"
+
+static mut s_orh: [u8; 4] = " h=\0"
+
+// The crumbs: data only (the buttons are made by `build`).
+fn crumb_data() {
+    var n: u64 = 0
+    if expbase.vmodus == 3 {
+        n = exporte.crumb_overview()
+    } else {
+        n = exporte.crumb_make(((&expbase.dir_path[0 as usize]) as u64))
+    }
+    crumb_n = n
+    if crumb_n > 12 {
+        crumb_n = 12
+    }
+}
+
+fn crumb_show() {
+    crumb_data()
+    expwork.rfr()
+    var field: u64 = 0
+    if expbase.pfadfeld_an {
+        field = 1
+    }
+    expwork.say(((&s_crumb[0 as usize]) as u64))
+    expwork.kv(((&s_kn[0 as usize]) as u64), crumb_n)
+    expwork.kv(((&s_kf[0 as usize]) as u64), field)
+    expwork.nl()
+}
+
+static mut s_crumb: [u8; 17] = "explorer: krume \0"
+
+static mut s_kn: [u8; 3] = "n=\0"
+
+static mut s_kf: [u8; 6] = "feld=\0"
+
+fn crumb_toggle(fpfad: u64) {
+    expbase.pfadfeld_an = !expbase.pfadfeld_an
+    if expbase.pfadfeld_an {
+        expwork.path_set(((&expbase.dir_path[0 as usize]) as u64))
+    }
+    crumb_show()
+    if expbase.pfadfeld_an && expbase.s_up {
+        fuiscene.build_now()
+        fuiscene.focus(expbase.K_PATH)
+    }
+}
+
+fn crumb_click(id: u64, tree: u64, tab: u64, stat: u64, fpfad: u64) -> bool {
+    if id < expbase.K_CRUMB || id >= expbase.K_CRUMB + 12 {
+        return false
+    }
+    let i: u64 = id - expbase.K_CRUMB
+    if i < crumb_n {
+        let target: u64 = exporte.crumb_path(i)
+        if target != 0 && (*((target) as *mut u8)) != 0 as u8 {
+            expbase.vmodus = 0
+            ulib.strncpy(((&expbase.dir_path[0 as usize]) as u64), target, 126)
+            expwork.hist_push(((&expbase.dir_path[0 as usize]) as u64))
+            new_read(tree, tab, stat, fpfad)
+            expwork.say(((&s_krsp[0 as usize]) as u64))
+            expwork.say(((&expbase.dir_path[0 as usize]) as u64))
+            expwork.nl()
+        }
+    }
+    return true
+}
+
+static mut s_krsp: [u8; 23] = "explorer: krumesprung \0"
+
+// ------------------------------------------------------------ reading
+
+fn smb_prompt() {
+    if expbase.vmodus != 0 || !expsmb.is_url((&expbase.dir_path[0 as usize]) as u64) {
+        return
+    }
+    let wait: u64 = expsmb.prompt()
+    if wait != 0 {
+        expbase.s_wartet = wait
+    }
+}
+
+fn new_read(tree: u64, tab: u64, stat: u64, fpfad: u64) {
+    var r: u64 = 0
+    if expbase.vmodus == 1 {
+        r = expwork.scan_mem()
+    } else if expbase.vmodus == 2 {
+        r = expwork.scan_sicherung()
+    } else if expbase.vmodus == 3 {
+        r = expwork.scan_computer()
+    } else {
+        r = expmodell.fetch(((&expbase.dir_path[0 as usize]) as u64))
+    }
+    if ulib.bad(r) {
+        expbase.entry_count = 0
+        smb_prompt()
+    }
+    expwork.sort_entries()
+    expwork.build_table()
+    heat_setup()
+    expwork.build_tree()
+    expwork.nav_sync_sel()
+    expwork.build_status()
+    expbase.stat_msg = 0
+    expwork.path_set(((&expbase.dir_path[0 as usize]) as u64))
+    expwork.icon_view_build()
+    crumb_data()
+    if expbase.s_up {
+        fuiscene.table_sel_none(expbase.K_TAB)
+        fuiscene.table_sel_none(expbase.K_SYM)
+        fuiscene.table_set_top(expbase.K_TAB, 0)
+        fuiscene.table_set_top(expbase.K_SYM, 0)
+        fuiscene.refresh()
+    }
+    expwork.say(((&s_cd[0 as usize]) as u64))
+    expwork.say(((&expbase.dir_path[0 as usize]) as u64))
+    expwork.say(((&s_nn[0 as usize]) as u64))
+    expwork.sayn(expwork.m_count())
+    expwork.nl()
+    expwork.report_time()
+}
+
+static mut s_cd: [u8; 14] = "explorer: cd \0"
+
+static mut s_nn: [u8; 4] = " n=\0"
+
+// r442: the search field filters the list while typing (the model keeps the text for `passt`).
+fn search_poll() {
+    if !expbase.s_up || expbase.vmodus != 0 {
+        return
+    }
+    let t: u64 = fuiscene.entry_text(expbase.K_SEARCH)
+    if t == 0 || ulib.streq(t, ((&search_last[0 as usize]) as u64)) {
+        return
+    }
+    ulib.strncpy(((&search_last[0 as usize]) as u64), t, 60)
+    ulib.strncpy(((&expbase.fbuf[0 as usize]) as u64), t, 60)
+    if expbase.fbuf[0] == 0 as u8 {
+        expmodell.set_filter(0)
+    } else {
+        expmodell.set_filter(((&expbase.fbuf[0 as usize]) as u64))
+    }
+    view_refresh(expbase.K_TREE, expbase.K_TAB)
+    expwork.build_status()
+    expwork.icon_view_build()
+    fuiscene.table_sel_none(expbase.K_TAB)
+    fuiscene.table_set_top(expbase.K_TAB, 0)
+    expbase.stat_msg = 0
+    expwork.say(((&s_srch[0 as usize]) as u64))
+    expwork.sayn(expwork.m_count())
+    expwork.nl()
+    expwork.rfr()
+}
+
+static mut s_srch: [u8; 20] = "explorer: search n=\0"
+
+// the bars of the overview: the host paints the "Used" cells (column 1) of the list as bars; every other view has none
+fn heat_setup() {
+    fuiscene.heat_clear()
+    if expbase.vmodus == 3 {
+        fuiscene.heat_key(expbase.K_TAB, 1, 99)
+        fuiscene.heat_bar(true)
+        var r: u64 = 0
+        while r < expbase.entry_count && r < 64 {
+            fuiscene.heat_set(r, 0, expbase.ov_used[(expbase.entry_order[(r) as usize]) as usize])
+            r = r + 1
+        }
+    } else {
+        fuiscene.heat_key(0, 99, 99)
+        fuiscene.heat_bar(false)
+    }
+}
+
+fn view_refresh(tree: u64, tab: u64) {
+    expwork.sort_entries()
+    expwork.build_table()
+    heat_setup()
+    expwork.build_tree()
+    expwork.rfr()
+}
+
+fn say_selection(tab: u64) {
+    expwork.say(((&s_selx[0 as usize]) as u64))
+    expwork.kv(((&s_sn[0 as usize]) as u64), fuiscene.table_sel_num(expwork.cur_key()))
+    expwork.kv(((&s_sa[0 as usize]) as u64), fuiscene.table_anchor(expwork.cur_key()))
+    expwork.kv(((&s_sr[0 as usize]) as u64), fuiscene.table_frames())
+    expwork.nl()
+}
+
+static mut s_selx: [u8; 15] = "explorer: sel \0"
+
+static mut s_sn: [u8; 3] = "n=\0"
+
+static mut s_sa: [u8; 7] = "anker=\0"
+
+static mut s_sr: [u8; 8] = "rahmen=\0"
+
+fn progress_state(n: u64) -> u64 {
+    if plabel == 0xFFFFFFFFFFFFFFFF {
+        return 0
+    }
+    if (n & 7) != 0 {
+        return 0
+    }
+    expwork.build_progress()
+    fuiscene.dialog_set_text(((&expbase.pbuf[0 as usize]) as u64))
+    fuiscene.repaint_now()
+    return 0
+}
+
+fn props_show(besitzer: u64, tab: u64) -> u64 {
+    let z: u64 = expwork.cur_row()
+    if z >= expwork.m_count() {
+        return 0
+    }
+    let full: u64 = expwork.full_from(z)
+    let n: u64 = expdlg.own_make(full, expwork.m_name(expwork.m_ord(z)),
+        expmodell.time_offset())
+    let _m: u64 = popup_at(expwork.where_x(), expwork.where_y(), expdlg.own_ptr())
+    expwork.say(((&s_pp[0 as usize]) as u64))
+    expwork.kv(((&s_pz[0 as usize]) as u64), n)
+    expwork.kv(((&s_pb[0 as usize]) as u64), expdlg.own_size())
+    expwork.kv(((&s_ps[0 as usize]) as u64), expdlg.own_chunks())
+    expwork.nl()
+    return 8
+}
+
+static mut s_pp: [u8; 17] = "explorer: props \0"
+
+static mut s_pz: [u8; 8] = "zeilen=\0"
+
+static mut s_pb: [u8; 7] = "bytes=\0"
+
+static mut s_ps: [u8; 8] = "stueck=\0"
+
+fn openwith_show(tab: u64) -> u64 {
+    let n: u64 = expdlg.openwith_make()
+    if n == 0 {
+        return 0
+    }
+    let _m: u64 = popup_at(expwork.where_x(), expwork.where_y(), expdlg.openwith_ptr())
+    return 10
+}
+
+// ------------------------------------------------------------ the reports
+//
+// The acceptance runs read these lines (tools/design/drive.py, k15,
+// explorer2, clip2, vault): the same formats as before, now measured on
+// the nodes of the scene tree.
+
+fn say_node(id: u64, kind: u64, key: u64) {
+    let n: usize = fuiscene.node_of_key(key)
+    if n == fuiscene.NONE {
+        return
+    }
+    say_box(id, kind, fuiscene.node_x(n), fuiscene.node_y(n),
+        fuiscene.node_w(n), fuiscene.node_h(n))
+}
+
+fn say_box(id: u64, kind: u64, x: u64, y: u64, w: u64, h: u64) {
+    expwork.say(((&s_rpt[0 as usize]) as u64))
+    expwork.sayn(id)
+    expwork.say(((&s_rkind[0 as usize]) as u64))
+    expwork.sayn(kind)
+    expwork.say(((&s_rx[0 as usize]) as u64))
+    expwork.sayn(x)
+    expwork.say(((&s_ry[0 as usize]) as u64))
+    expwork.sayn(y)
+    expwork.say(((&s_rw[0 as usize]) as u64))
+    expwork.sayn(w)
+    expwork.say(((&s_rh[0 as usize]) as u64))
+    expwork.sayn(h)
+    expwork.nl()
+}
+
+// r454: the runners read this line (the strip height and the width of the caption buttons). It is said again with every
+// report of the rectangles: a serial line of another program can cut one in half, and a runner needs only one whole copy.
+fn say_strip_info() {
+    if fuiscene.strip_on() {
+        expwork.say(((&expbase.s_strip[0 as usize]) as u64))
+        expwork.sayn(fuiscene.strip_h())
+        expwork.say(((&expbase.s_stripc[0 as usize]) as u64))
+        expwork.sayn(fuiscene.strip_caps_w())
+        expwork.nl()
+    }
+}
+
+// r454: the rectangles of the strip again (the tabs change with every new / closed / switched tab, the runners need the new
+// places): called when the tab set changed and one more frame was painted (the layout is done then).
+fn say_strip_rects() {
+    say_strip_info()
+    expwork.say(((&s_rtabs[0 as usize]) as u64))
+    expwork.sayn(expbase.tab_n)
+    expwork.say(((&s_rtaba[0 as usize]) as u64))
+    expwork.sayn(expbase.tab_at)
+    expwork.nl()
+    var tbj: u64 = 0
+    while tbj < expbase.tab_n && tbj < 8 {
+        say_node(50 + tbj, 7, expbase.K_RT + tbj)
+        tbj = tbj + 1
+    }
+    say_node(60, 1, expbase.K_STRIPDRAG)
+    say_node(39, 2, expbase.K_RPLUS)
+}
+
+fn say_rects(mb: u64, bzur: u64, bvor: u64, bauf: u64, fpfad: u64,
+    tree: u64, tab: u64, stat: u64) {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    // Ids in the order of the picture, top to bottom (tools/k15/layout.py
+    // wants the ids of one column to rise with y): the four menu titles,
+    // the tool bar, the way, the tabs, the places, the tree, the files.
+    // (the four menu titles of the old layout, ids 0..3, are gone: the commands are icons since r442, ids 30..38)
+    say_node(4, 2, expbase.K_BZUR)
+    say_node(5, 2, expbase.K_BVOR)
+    say_node(6, 2, expbase.K_BAUF)
+    say_node(7, 2, expbase.K_BNEU)
+    say_node(8, 2, expbase.K_BAUS)
+    say_node(9, 2, expbase.K_BSTART)
+    say_node(10, 4, expbase.K_PATH)
+    var q: u64 = 0
+    while q < crumb_n {
+        say_node(11 + q, 2, expbase.K_CRUMB + q)
+        q = q + 1
+    }
+    say_node(25, 5, expbase.K_TREE)
+    say_node(29, 4, expbase.K_SEARCH)
+    // W4c: how the command bar was drawn (mode 0 icons, 1 words of tier 1, 2 all words) and how many items overflow
+    expwork.say(((&s_cbar[0 as usize]) as u64))
+    expwork.kv(((&s_cbar_m[0 as usize]) as u64), fuiscene.cmd_label_mode())
+    expwork.kv(((&s_cbar_h[0 as usize]) as u64), fuiscene.cmd_hidden_n())
+    expwork.nl()
+    // r442: the buttons of the command bar (30..37: new folder, cut, copy, paste, rename, delete, view, more),
+    // the overflow button 38 and the new-tab button 39
+    var cbi: u64 = 0
+    while cbi < 6 {
+        say_node(30 + cbi, 2, expbase.K_CMD + cbi)
+        cbi = cbi + 1
+    }
+    // the tabs (50 + n), when there are two or more: the labels must sit on the centre line of the tab row
+    var tbi: u64 = 0
+    while tbi < expbase.tab_n && (expbase.tab_n > 1 || fuiscene.strip_on()) && tbi < 8 {
+        say_node(50 + tbi, 7, expbase.K_RT + tbi)
+        tbi = tbi + 1
+    }
+    // r454: the empty part of the title strip (the drag region)
+    say_node(60, 1, expbase.K_STRIPDRAG)
+    say_node(36, 2, expbase.K_MB + 2)
+    say_node(41, 2, expbase.K_SORT)
+    say_node(42, 1, K_PREV)
+    say_node(37, 2, expbase.K_MB)
+    say_node(38, 2, expbase.K_OVF)
+    say_node(39, 2, expbase.K_RPLUS)
+    say_node(26, 6, expbase.K_TAB)
+    if n_stat != fuiscene.NONE {
+        say_box(27, 1, fuiscene.node_x(n_stat), fuiscene.node_y(n_stat),
+            fuiscene.node_w(n_stat), fuiscene.node_h(n_stat))
+    }
+    say_node(24, 5, expbase.K_PLACES)
+    say_node(28, 5, expbase.K_SYM)
+    if expbase.n_rrow != fuiscene.NONE {
+        say_box(23, 7, fuiscene.node_x(expbase.n_rrow), fuiscene.node_y(expbase.n_rrow),
+            fuiscene.node_w(expbase.n_rrow), fuiscene.node_h(expbase.n_rrow))
+    }
+    expwork.say(((&s_ausk[0 as usize]) as u64))
+    expwork.sayn(8)
+    expwork.nl()
+    expwork.say(((&s_orteliste[0 as usize]) as u64))
+    expwork.sayn(24)
+    expwork.nl()
+    // r442: what each row of the navigation pane is -- h heading, p place, u up/current folder, s sub-folder
+    var kinds: [u8; 130] = [0 as u8; 130]
+    var kr: u64 = 0
+    while kr < expbase.nav_n && kr < 128 {
+        var ch: u8 = 112 as u8
+        let t: u64 = expbase.nav_refs[(kr) as usize]
+        if expbase.nav_heads[(kr) as usize] != 0 as u8 {
+            ch = 104 as u8
+        } else if t == expbase.NAV_UP || t == expbase.NAV_CUR {
+            ch = 117 as u8
+        } else if t >= expbase.NAV_SUB {
+            ch = 115 as u8
+        }
+        kinds[(kr) as usize] = ch
+        kr = kr + 1
+    }
+    expwork.say(((&s_navrows[0 as usize]) as u64))
+    expwork.say(((&kinds[0 as usize]) as u64))
+    expwork.nl()
+    var key: u64 = expbase.K_TAB
+    if expbase.symansicht == 1 {
+        key = expbase.K_SYM
+    }
+    expwork.say(((&s_rows[0 as usize]) as u64))
+    expwork.kv(((&s_rows_x[0 as usize]) as u64), fuiscene.table_text_x(key))
+    expwork.kv(((&s_rows_b[0 as usize]) as u64), fuiscene.table_base(key, 0))
+    expwork.kv(((&s_rows_h[0 as usize]) as u64), fuiscene.table_row_h(key))
+    expwork.kv(((&s_rows_k[0 as usize]) as u64), fuiscene.table_head_base(key))
+    expwork.kv(((&s_rows_kh[0 as usize]) as u64), 28)
+    expwork.kv(((&s_rows_f[0 as usize]) as u64), fuiscene.table_rgb(1))
+    expwork.kv(((&s_rows_g[0 as usize]) as u64), fuiscene.table_rgb(0))
+    expwork.kv(((&s_rows_s[0 as usize]) as u64), fuiscene.table_rgb(3))
+    expwork.kv(((&s_rows_c[0 as usize]) as u64), fuiscene.table_rgb(4))
+    expwork.kv(((&s_rows_d[0 as usize]) as u64), fuiscene.table_rgb(2))
+    expwork.kv(((&s_rows_i[0 as usize]) as u64), fuiscene.table_icon_x(key))
+    expwork.kv(((&s_rows_j[0 as usize]) as u64), fuiscene.table_icon_y(key, 0))
+    expwork.kv(((&s_rows_hb[0 as usize]) as u64), fuiscene.table_rgb(5))
+    expwork.nl()
+    expwork.say(((&s_spalt[0 as usize]) as u64))
+    let tn: usize = fuiscene.node_of_key(key)
+    var cx: u64 = 0
+    if tn != fuiscene.NONE {
+        cx = fuiscene.node_x(tn)
+    }
+    var i: u64 = 0
+    while i < 4 {
+        if i == 0 {
+            expwork.sayn(fuiscene.table_text_x(key))
+        } else {
+            expwork.sayn(cx + 10)
+        }
+        expwork.say(((&s_sp1[0 as usize]) as u64))
+        cx = cx + expbase.col_widths[(i) as usize]
+        i = i + 1
+    }
+    expwork.nl()
+}
+
+fn say_menurect() {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    let w: u64 = fuiscene.win_id()
+    expwork.say(((&s_mrect[0 as usize]) as u64))
+    expwork.kv(((&s_mwx[0 as usize]) as u64), wlib.win_cx(w) + fuiscene.menu_x())
+    expwork.kv(((&s_mwy[0 as usize]) as u64), wlib.win_cy(w) + fuiscene.menu_y())
+    expwork.kv(((&s_mwh[0 as usize]) as u64), fuiscene.menu_h())
+    expwork.kv(((&s_mzh[0 as usize]) as u64), 28)
+    expwork.nl()
+}
+
+fn say_dlgrect() {
+    if expbase.s_dbg == 0 {
+        return
+    }
+    let w: u64 = fuiscene.win_id()
+    expwork.say(((&s_drect[0 as usize]) as u64))
+    expwork.kv(((&s_mwx[0 as usize]) as u64), wlib.win_cx(w))
+    expwork.kv(((&s_mwy[0 as usize]) as u64), wlib.win_cy(w))
+    expwork.kv(((&s_dx[0 as usize]) as u64), fuiscene.dialog_btn_x(0))
+    expwork.kv(((&s_dy[0 as usize]) as u64), fuiscene.dialog_btn_y())
+    expwork.kv(((&s_dw[0 as usize]) as u64), fuiscene.dialog_btn_w())
+    expwork.kv(((&s_dh[0 as usize]) as u64), fuiscene.dialog_btn_h())
+    expwork.nl()
+}
+
+static mut s_cbar: [u8; 18] = "explorer: cmdbar \0"
+
+static mut s_cbar_m: [u8; 6] = "mode=\0"
+
+static mut s_cbar_h: [u8; 5] = "hid=\0"

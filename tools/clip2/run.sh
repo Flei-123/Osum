@@ -40,21 +40,21 @@ grep -qE 'fire\(d, K_DROP, line, w\)' <(bash tools/structure/catprog.sh kernel/u
 grep -qE 'fn drop_an\(' <(bash tools/structure/catprog.sh kernel/user/wlib.fi) \
     && ok "wlib has drop_an (a window registers as a target)" \
     || bad "wlib has no drop_an"
-grep -qE 'fuiscene\.drop_accept\(true\)' kernel/user/explorer.fi \
+grep -qE 'fuiscene\.drop_accept\(true\)' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
     && ok "the file manager registers as a drop target" \
     || bad "the file manager does not register"
-grep -qE 'fn ablegen\(' kernel/user/explorer.fi \
+grep -qE 'fn ablegen\(' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
     && ok "the file manager has a drop function" \
     || bad "the file manager has no drop function"
-grep -qE 'expakt\.paste' kernel/user/explorer.fi \
+grep -qE 'expakt\.paste' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
     && ok "dropping goes through expakt.einfuegen (so io.rename)" \
     || bad "das Ablegen geht an expakt vorbei"
-if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
+if grep -qE 'io\.(create|write_all|unlink)\(' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
     bad "explorer.fi fasst Dateien selbst an"
 else
     ok "explorer.fi does not touch any file itself"
 fi
-if grep -qE 'wlibc\.drag_take' kernel/user/explorer.fi; then
+if grep -qE 'wlibc\.drag_take' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
     bad "the file manager calls wlibc.drag_take past the library"
 else
     ok "negative test: no wlibc.drag_take in the file manager"
@@ -168,18 +168,18 @@ GEG=$OUT/gegen
 mkdir -p "$GEG"
 #
 GBAUM="$GEG/baum"
-EXPL_SHA0=$(sha256sum kernel/user/explorer.fi | cut -d' ' -f1)
+EXPL_SHA0=$(bash tools/structure/srcview.sh kernel/user/explorer.fi | sha256sum | cut -d' ' -f1)
 rm -rf "$GBAUM"; mkdir -p "$GBAUM"
 tar -C "$ROOT" --exclude=./.git --exclude=./docs --exclude=./pruef \
     --exclude=./.gauntlet-shots --exclude=./.clip2-shots -cf - . \
     | tar -C "$GBAUM" -xf -
-if ! grep -qE '^\s*fuiscene\.drop_accept\(true\)' "$GBAUM/kernel/user/explorer.fi"; then
+if ! grep -qE '^\s*fuiscene\.drop_accept\(true\)' "$GBAUM"/kernel/user/explorer/*.fi; then
     bad "GEGENPROBE GREIFT NICHT: 'fuiscene.drop_accept(true)' steht gar nicht da"
 else
     ok "negative test holds: the line 'fuiscene.drop_accept(true)' ist da"
     sed -i 's/^\(\s*\)fuiscene\.drop_accept(true)/\1fuiscene.drop_accept(false)/' \
-        "$GBAUM/kernel/user/explorer.fi"
-    if grep -qE '^\s*fuiscene\.drop_accept\(false\)' "$GBAUM/kernel/user/explorer.fi"; then
+        "$GBAUM"/kernel/user/explorer/*.fi
+    if grep -qE '^\s*fuiscene\.drop_accept\(false\)' "$GBAUM"/kernel/user/explorer/*.fi; then
         ok "negative test: the registration is set to false"
         export DESIGNBUILD=/tmp/osum-clip2-gegen
         bash "$GBAUM/tools/design/capture.sh" "$GEG/bau" nurbau=ja res="$RES" \
@@ -222,7 +222,7 @@ else
     fi
 fi
 rm -rf "$GBAUM"
-[ "$(sha256sum kernel/user/explorer.fi | cut -d' ' -f1)" = "$EXPL_SHA0" ] \
+[ "$(bash tools/structure/srcview.sh kernel/user/explorer.fi | sha256sum | cut -d' ' -f1)" = "$EXPL_SHA0" ] \
     && ok "kernel/user/explorer.fi in the tree is untouched" \
     || bad "WARNING: kernel/user/explorer.fi in the tree was changed"
 

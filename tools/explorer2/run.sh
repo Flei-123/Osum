@@ -70,24 +70,24 @@ grep -q 'nur_en \[\]' "$OUT/katalog.txt" \
     || { bad "Schluessel fehlen in de"; grep nur_en "$OUT/katalog.txt"; }
 
 echo "== 3. Quelltext: Punkte 2, 11, 12 =="
-if grep -qE '^\s*static mut t_(zur|vor|auf):' kernel/user/explorer.fi; then
+if grep -qE '^\s*static mut t_(zur|vor|auf):' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
     bad "item 12: the text characters < > ^ are still in the source"
 else
     ok "item 12: the text characters < > ^ are gone"
 fi
-grep -qE 'fuiscene\.icon_button\([a-z]+, icons\.NAV_BACK' kernel/user/explorer.fi \
+grep -qE 'fuiscene\.icon_button\([a-z]+, icons\.NAV_BACK' <(bash tools/structure/srcview.sh kernel/user/explorer.fi) \
     && ok "Punkt 12: die Werkzeugleiste ruft icon_button(NAV_BACK)" \
     || bad "item 12: no symbol buttons in the toolbar"
 
 grep -qE 'io\.rename' kernel/user/expakt.fi \
     && ok "Punkt 2: umbenennen ruft io.rename" \
     || bad "item 2: no io.rename -- it still copies and deletes"
-if grep -qE '^fn umbenennen\(' kernel/user/explorer.fi; then
+if grep -qE '^fn umbenennen\(' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
     bad "item 2: the old function umbenennen() is still in explorer.fi"
 else
     ok "item 2: the old function umbenennen() is gone"
 fi
-if grep -qE 'io\.(create|write_all|unlink)\(' kernel/user/explorer.fi; then
+if grep -qE 'io\.(create|write_all|unlink)\(' <(bash tools/structure/srcview.sh kernel/user/explorer.fi); then
     bad "item 2: explorer.fi still touches files itself"
 else
     ok "item 2: explorer.fi no longer touches any file itself"
@@ -99,7 +99,7 @@ hi=$(grep -oE '^const CAP: u64 = [0-9]+' lib/nav/stack.fi | grep -oE '[0-9]+$')
 [ "${me:-0}" -ge 4096 ] && ok "Punkt 11: MAXENT = $me" || bad "Punkt 11: MAXENT = ${me:-0}"
 [ "${nb:-0}" -ge 256 ]  && ok "Punkt 11: NAMEB = $nb"  || bad "Punkt 11: NAMEB = ${nb:-0}"
 [ "${hi:-0}" -ge 32 ]   && ok "Punkt 11: Historie = $hi" || bad "Punkt 11: Historie = ${hi:-0}"
-w4=$(grep -cE 'if welches == 4 \{' kernel/user/explorer.fi)
+w4=$(grep -cE 'if welches == 4 \{' <(bash tools/structure/srcview.sh kernel/user/explorer.fi))
 [ "$w4" -le 1 ] && ok "item 11: the duplicate branch is resolved ($w4 occurrences)" \
     || bad "Punkt 11: 'if welches == 4' steht $w4 mal da, der zweite ist tot"
 

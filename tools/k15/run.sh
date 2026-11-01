@@ -817,7 +817,7 @@ schau_nicht "without a text field underneath there is no bar (the arrow)" \
     pixel "$TMPD/ruhe.ppm" "$E1X" "$BY0" 0 0 0
 
 echo "== 14. the name, the second name and discoverability =="
-aus=$(python3 tools/k15/noname.py kernel/user/explorer.fi "File Explorer" 2>&1)
+aus=$(python3 tools/k15/noname.py <(bash tools/structure/srcview.sh kernel/user/explorer.fi) "File Explorer" 2>&1)
 if [ $? -eq 0 ]; then ok "the display name is NOT in the code ($aus)"
 else bad "the display name is in the code: $aus"; fi
 aus=$(python3 tools/k15/noname.py kernel/user/launcher.fi "Suchen" 2>&1)
