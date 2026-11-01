@@ -45,9 +45,9 @@ live() {
     for line in "$@"; do MON+=("mon=$line"); done
     bash tools/alltag/build.sh "$TMPD/$nm" kbd=yes uitrace=yes lang=en \
         "accel=${OSUM_QEMU_ACCEL}" "waitfor=vaultui: ready" \
-        "extra=vfs bus wighalt=120 wigapp=/bin/vuihost" \
+        "extra=osum vfs bus wighalt=120 wigapp=/bin/vuihost" \
         "progs=vaultui vaultd vaultctl pinctl vuihost theme" \
-        xdir=/secrets xdir=/etc/vault \
+        xdir=/proc xdir=/dev xdir=/secrets xdir=/etc/vault \
         "xfile=/etc/vuihost.script=$TMPD/vuihost.script" "xfile=/etc/vault/kdf=$TMPD/kdf" \
         "xfile=/etc/wallpaper=assets/wallpaper-sea.osym" \
         "qemu=-chardev socket,id=chrtpm,path=$sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0" \
