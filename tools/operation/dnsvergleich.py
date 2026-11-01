@@ -34,8 +34,6 @@ import subprocess
 import sys
 import time
 
-# Die Namen sind so gewaehlt, dass jede Eigenschaft des Zerteilers
-# vorkommt, die im Auftrag steht.
 LISTE = [
     ("example.com", "A", "ein gewoehnlicher Name"),
     ("www.example.com", "A", "ein Name mit Unterteil"),
@@ -45,36 +43,16 @@ LISTE = [
     ("xoffi.ai", "A", "kurze Endung"),
     ("fleitec.com", "A", "die eigene Domaene"),
     ("heise.de", "A", "de-Zone"),
-    # AUCH DIESE ZWEI SIND RAUS, aus demselben Grund wie oben:
-    # `mail.google.com` und `api.github.com` geben je Frage EINE Adresse
-    # aus einem grossen, wechselnden Vorrat heraus, und zwei Fragen kurz
-    # nacheinander treffen verschiedene. Die CNAME-Kette misst
-    # `de.wikipedia.org` (CNAME auf dyna.wikimedia.org) und
-    # `www.github.com` (CNAME auf github.com) -- beide mit kleiner,
-    # stabiler Adressmenge.
     ("c.root-servers.net", "A", "feste Adresse"),
     ("www.debian.org", "A", "kleine, feste Adressmenge"),
     ("d1.awsstatic.com", "A", "Name mit Ziffer in der Marke"),
     ("a.root-servers.net", "A", "Name mit Bindestrich"),
     ("example.com", "AAAA", "AAAA statt A"),
-    # KEIN GOOGLE-AAAA MEHR: `google.com` verteilt sein AAAA ueber
-    # mehrere /64, und zwei Fragen kurz nacheinander bekommen zwei
-    # disjunkte Mengen. `a.root-servers.net` hat GENAU EIN AAAA und
-    # aendert es seit Jahren nicht.
     ("a.root-servers.net", "AAAA", "AAAA mit fester Adresse"),
     ("one.one.one.one", "AAAA", "AAAA, vier Marken"),
     ("de.wikipedia.org", "AAAA", "AAAA hinter einer CNAME-Kette"),
-    # ein sehr langer Name: 4 Marken, zusammen 71 Oktett, existiert
     ("assets.tumblr.com", "A", "Name mit vielen Marken"),
     ("b.root-servers.net", "A", "feste Adresse, gut zum Nachrechnen"),
-    # KEIN NAME HINTER EINEM GROSSEN LASTVERTEILER MEHR. Der erste
-    # Entwurf dieser Liste hatte `s3.dualstack.eu-central-1.amazonaws.com`
-    # als "langer Name" darin, und der Fall war ROT, ohne dass etwas
-    # falsch war: die Zone gibt aus einem Vorrat von ueber zwanzig
-    # Adressen bei jeder Frage acht andere heraus, und `host` und `dig`
-    # bekamen zwei disjunkte Mengen. Ein Pruefstand, der bei richtigem
-    # Verhalten wuerfelt, misst nichts. Der lange Name steht jetzt in
-    # `a.gtld-servers.net` (18 Oktett, drei Marken, EINE feste Adresse).
     ("a.gtld-servers.net", "A", "langer Name, feste Adresse"),
     ("gibt-es-ganz-sicher-nicht-9q7x.example", "A", "NXDOMAIN"),
     ("nx-zzz-4711.invalid", "A", "NXDOMAIN in einer reservierten Endung"),
@@ -152,8 +130,6 @@ def main():
         else:
             ok = norm(h) in menge
             if not ok:
-                # zweite Frage: die Zone kann sich zwischen zwei
-                # Abfragen bewegt haben
                 _, m2 = dig(name, typ, server)
                 menge |= m2
                 ok = norm(h) in menge

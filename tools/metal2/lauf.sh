@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/metal2/lauf.sh -- EIN SCHREIBTISCHLAUF MIT USB-MAUS UND QMP-STROM.
-#
-#   bash tools/metal2/lauf.sh <ausgabeverzeichnis> <osum.mb> <root.img> \
-#        <sekunden> <hz> "<zusatz-bootwoerter>" [maus.py-optionen...]
-#
-# Startet den Kern unter QEMU/KVM auf 3440x1440 (fbres=) mit
-# `fbpad=16` (gemeldete Breite 3424 bei Zeilenbreite 13760 -- der Fall
-# echter Firmware), einem xHCI-Regler mit USB-Tastatur und USB-Maus,
-# wartet, bis die Taskleiste steht, laesst tools/metal2/maus.py den
-# Bewegungsstrom fahren, fotografiert, und legt ab:
-#
-#   <aus>/serial.txt   die serielle Leitung (mit `tafel:`-Zeilen)
-#   <aus>/maus.txt     was maus.py gesendet hat
-#   <aus>/shot.ppm/png das Bild am Ende
-#   <aus>/tafel.txt    der LETZTE vollstaendige Tafelanstrich
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -43,7 +27,6 @@ GESAMT=$(( SEK + 150 ))
   echo $? > "$AUS/rc" ) &
 QPID=$!
 
-# warten, bis die Leiste steht (oder 60 s)
 i=0
 while [ $i -lt 1200 ]; do
     grep -qa 'taskbar: STEHT' "$AUS/serial.txt" 2>/dev/null && break
@@ -54,7 +37,6 @@ sleep 2
 python3 tools/metal2/maus.py "$AUS/qmp.sock" "$SEK" "$HZ" \
     shot="$AUS/shot.ppm" $MAUSOPT > "$AUS/maus.txt" 2>&1
 cat "$AUS/maus.txt"
-# noch einen Puls abwarten, damit die Tafel nach dem Strom gesagt wird
 sleep 6
 # QEMU beenden
 python3 - "$AUS/qmp.sock" <<'PY' 2>/dev/null
@@ -75,9 +57,7 @@ if [ -f "$AUS/shot.ppm" ]; then
     python3 tools/gfx/ppm2png.py "$AUS/shot.ppm" "$AUS/shot.png" >/dev/null 2>&1 \
         || python3 -c "from PIL import Image; Image.open('$AUS/shot.ppm').save('$AUS/shot.png')"
 fi
-# der letzte vollstaendige Anstrich: ab der letzten Zeile '1 ' bis zum Ende
 grep -a '^tafel: ' "$AUS/serial.txt" | sed 's/^tafel: //' > "$AUS/tafel-alle.txt"
-# je Zeilennummer der LETZTE Stand (Zeile 0 traegt keine Nummer und faellt weg)
 awk '{ if ($1 ~ /^[0-9]+$/) { k = $1 + 0; z[k] = $0; if (k > m) m = k } } END { for (i = 0; i <= m; i++) if (i in z) print z[i] }' "$AUS/tafel-alle.txt" > "$AUS/tafel.txt"
 echo "== letzter Tafelanstrich =="
 cat "$AUS/tafel.txt"

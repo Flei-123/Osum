@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/lib/sched-pruef.sh -- die PARALLELMASCHINERIE von test.sh pruefen,
-# ohne eine einzige Minute QEMU zu verbrennen.
-#
-#   bash tools/lib/sched-pruef.sh
-#
-# WARUM DAS HIER LIEGT UND NICHT IN /tmp: die erste Fassung dieser Pruefung
-# lag in /tmp und war nach einem Neustart des Wirts weg -- mitten in der
-# Messung. Eine Pruefung, die man nach einem Neustart neu schreiben muss,
-# ist keine.
-#
-# GEPRUEFT WIRD:
-#   1. dass parallel schneller ist als seriell (mit bekannten Schlafzeiten),
-#   2. dass BEIDE Wege dieselbe Bilanz liefern (PASS/FAIL/Zusagen),
-#   3. dass die Ausgabe in BEIDEN Faellen in der Reihenfolge des Skripts
-#      steht -- auch wenn ein spaeterer Abschnitt frueher fertig ist,
-#   4. dass die vier Netz-Abschnitte sich NIE ueberschneiden (die Zeitspur
-#      wird nachgerechnet, nicht geglaubt),
-#   5. dass ein durchgefallener Abschnitt in beiden Faellen durchfaellt.
-#
-# Die Stubs schlafen absichtlich RUECKWAERTS (der erste am laengsten),
-# damit die Reihenfolge der Ausgabe nicht zufaellig stimmt.
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -44,12 +22,6 @@ STUBS=(
 mkdir -p "$STUB/tools"
 for e in "${STUBS[@]}"; do
     IFS=: read -r n sl rc zu netz <<< "$e"
-    # WICHTIG: das Sperrmuster in test.sh ist ^tools/(net|netmon|netview|
-    # tunnel)/ -- es haengt am VERZEICHNIS. Ein Stub unter tools/nets3/
-    # matcht NICHT (nach "net" muss ein Schraegstrich kommen). Genau
-    # darueber ist diese Pruefung beim ersten Lauf gestolpert; die
-    # Netz-Stubs muessen wirklich unter tools/net/ und tools/netmon/
-    # liegen, sonst prueft man nichts.
     d="$STUB/tools/$n"; [ "$netz" != 0 ] && d="$STUB/tools/$netz"
     mkdir -p "$d"
     cat > "$d/run.sh" <<STUBEOF
@@ -64,12 +36,7 @@ STUBEOF
     chmod +x "$d/run.sh"
 done
 
-# --- ein test.sh-Verschnitt, der GENAU die Maschinerie von test.sh nimmt
-# Herausgeschnitten wird der Block zwischen den beiden Markierungen, damit
-# diese Pruefung nicht eine ZWEITE Kopie des Schedulers pruef, sondern die
-# echte. Faellt das hier durch, ist test.sh kaputt, nicht diese Datei.
 sed -n '/^JOBS=\${OSUM_JOBS/,/^}$/p' "$ROOT/test.sh" > "$STUB/maschinerie.sh"
-# bis zum Ende von abschnitte_abarbeiten
 python3 - "$ROOT/test.sh" "$STUB/maschinerie.sh" <<'PYEOF'
 import re, sys
 t = open(sys.argv[1], encoding='utf-8').read()
@@ -134,7 +101,6 @@ o4=$(printf '%s\n' "$B" | grep -oE '^== s[0-9]' | tr -d '\n')
 [ "$o1" = "$o4" ] && melde ok "die Ausgabereihenfolge ist identisch" \
                   || melde no "die Reihenfolge weicht ab"
 
-# 4. Netz-Abschnitte ueberschneiden sich nie
 python3 - "$STUB/.w4" <<'PYEOF'
 import sys, pathlib, re
 w = pathlib.Path(sys.argv[1])
@@ -154,9 +120,6 @@ else:
 PYEOF
 [ $? -eq 0 ] || FEHLER=$((FEHLER+1))
 
-# 6. die Wartezeit an der Netzsperre wird als solche AUSGEWIESEN und
-#    zaehlt nicht als Laufzeit des Abschnitts. s3 und s4 schlafen je 2 s
-#    und muessen nacheinander -- einer von beiden wartet also gut 2 s.
 if printf '%s\n' "$B" | grep -q 'Warten auf die Netzsperre'; then
     melde ok "die Wartezeit an der Netzsperre steht getrennt in der Zeile"
     printf '%s\n' "$B" | grep 'Warten auf die Netzsperre' | sed 's/^/        /'
@@ -164,7 +127,6 @@ else
     melde no "die Wartezeit an der Netzsperre wird NICHT ausgewiesen"
 fi
 
-# 5. der durchgefallene faellt in beiden durch
 for x in "$A" "$B"; do
     printf '%s\n' "$x" | grep -q 'FEHLER  tools/s5/run.sh' || FEHLER=$((FEHLER+1))
 done

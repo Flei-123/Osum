@@ -64,11 +64,7 @@ import socket
 import sys
 import time
 
-# Wie lange auf EINE Taste gewartet wird, bevor sie als verloren gilt.
-# Grosszuegig, weil der Wirt geteilt wird -- das Zeitlimit ist die
-# Notbremse und nicht die Messung.
 ZEIT_JE_TASTE = 12.0
-# Wie lange gewartet wird, bis der Kern ueberhaupt bereit ist.
 ZEIT_BEREIT = 40.0
 
 
@@ -128,9 +124,6 @@ def main(argv):
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.connect(sock)
-    # Ein kurzer Vorlauf bleibt: der Monitor selbst muss seine
-    # Begruessung losgeworden sein, bevor er Befehle annimmt. Das ist
-    # eine Eigenschaft von QEMU und nicht von Osum.
     time.sleep(vorlauf)
 
     fehlend = []

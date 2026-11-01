@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge/build.sh -- Kern, Userland und /bin/jarvisd fuer Runde BRIDGE.
-#
-#   tools/bridge/build.sh <arbeitsverzeichnis> [stufe]
-#
-# stufe 0 = firnc0 (der Uebersetzer in Rust), 1 = firnc1 (der in Firn).
-#
-# ZWEI PROFILE IN EINEM ABBILD, und das ist der Grund, aus dem dieses
-# Skript existiert und nicht tools/hwnet/build.sh benutzt wird:
-#
-#   * /bin/jsig, /bin/jarvisctl und das uebrige Userland sind
-#     `profile kernel` und bauen gegen $ROOT/lib (die libc dieses Repos).
-#   * /bin/jarvisd ist `--profile=app` und baut gegen
-#     vendor/firn/lib -- die volle Firn-Bibliothek mit TLS 1.3.
-#
-# Beides in EINEM Aufruf ginge nicht: der Uebersetzer fuehrt Module unter
-# ihrem letzten Namen, und `crypto.sha512` dieses Repos und
-# `std.crypto.sha512` von Firn heissen beide `sha512`.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -68,7 +50,6 @@ for p in $PROGS; do
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
 
-# --------------------------------------------------- der Helfer selbst
 FIRNLIB="$ROOT/lib" "$CC" -c --profile=app \
     -o "$W/jarvisd.o" kernel/app/jarvisd.fi >> "$W/build.log" 2>&1 || {
     echo "jarvisd.fi uebersetzt nicht"; tail -20 "$W/build.log"; exit 1; }

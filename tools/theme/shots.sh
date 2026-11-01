@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-#
-# tools/theme/shots.sh -- DIE SIEBEN BILDSCHIRME, UND SIE BLEIBEN LIEGEN.
-#
-# `tests/theme/run.sh` baut dieselben Bilder, wirft sie aber am Ende weg
-# (`trap 'rm -rf "$TMPD"' EXIT`). Fuer A-023 musste man sie ANSEHEN und
-# nicht nur die Prozentzahlen lesen -- also dasselbe noch einmal, mit
-# einem Verzeichnis, das stehen bleibt.
-#
-#   bash tools/theme/shots.sh AUSGABEVERZEICHNIS
-#
-# Erzeugt je Schema ein .ppm, ein .png daneben und eine Zeile mit den
-# fuenf haeufigsten Farben.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh

@@ -65,8 +65,6 @@ run fix
 S="$TMPD/fix/serial.txt"
 # (serial lines of different tasks can be glued together: no ^ anchors)
 n=$(grep -ao 'launcher: start /[^ ]* pid=[0-9]*' "$S" | wc -l); r=$(grep -ao 'launcher: start refused' "$S" | wc -l); z=$(grep -ao 'kgui: zombie reaped' "$S" | wc -l)
-# A start the drive never got (lost key press on a loaded host, `warteneu ... NICHT DA`, 1 of 34 also on the
-# old base) is no kernel fault: it does not count against the kernel, 2 at most.
 lost=$(grep -ac 'NICHT DA' "$TMPD/fix.log")
 if [ "$n" -ge "$CYC" ]; then ok "all $CYC starts worked ($n x 'launcher: start')"
 elif [ "$lost" -le 2 ] && [ $((n + lost)) -ge "$CYC" ]; then ok "all starts that were asked for worked ($n of $CYC, $lost never reached the machine: lost input)"

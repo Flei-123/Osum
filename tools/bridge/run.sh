@@ -817,7 +817,6 @@ while at < len(d):
 assert stuecke == ["IHDR", "IDAT", "IEND"], stuecke
 roh = zlib.decompress(idat)
 assert len(roh) == h * (1 + 3 * w), "Bilddaten %d statt %d" % (len(roh), h*(1+3*w))
-# JEDEN Bildpunkt nachrechnen -- das Muster steht in jarvisd.fi.
 falsch = 0
 for y in range(h):
     z = roh[y*(1+3*w):(y+1)*(1+3*w)]

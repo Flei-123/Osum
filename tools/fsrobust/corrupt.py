@@ -120,9 +120,6 @@ def mach(fall, grund, ziel):
     elif fall == "bereiche":
         r.s(mkfs.SB["DATA"], 1)
     elif fall == "zeigerkreis":
-        # Eine Datei bekommt einen einfach indirekten Zeiger, der auf
-        # SICH SELBST zeigt: der Block ist voll mit seiner eigenen
-        # Nummer.
         b = r.g(mkfs.SB["DATA"]) + 3
         d = bytearray(BS)
         for i in range(BS // 8):
@@ -131,9 +128,6 @@ def mach(fall, grund, ziel):
         r.inode_set(2, mkfs.I_INDIRECT, b)
         r.inode_set(2, mkfs.I_SIZE, 1 << 20)
     elif fall == "verzkreis":
-        # /bin bekommt einen Eintrag auf die Wurzel, und die Wurzel
-        # einen auf /bin -- den hat sie schon. Ein Durchlauf ohne Marke
-        # laeuft damit zwischen beiden hin und her.
         bild = _bild(ziel)
         binino = bild.finde("/bin")
         bild.f.close()
@@ -177,14 +171,6 @@ def mach(fall, grund, ziel):
 
 
 def _bild(pfad):
-    # RUNDE GRUNDLINIE: `pruef` heisst seit ENGLISCH ETAPPE 8 (6f1bb7c)
-    # `check`. Die Umbenennung hat diese eine Zeile nicht mitgenommen --
-    # sie steht als einzige INNERHALB einer Funktion und nicht oben bei
-    # den Importen, wo das Werkzeug der Etappe gesucht hat. Der Fehler
-    # war darum erst zur Laufzeit sichtbar:
-    #     ModuleNotFoundError: No module named 'pruef'
-    # und traf nur die Faelle, die ein Bild brauchen -- gebaut wurden 5
-    # von 13 kaputten Abbildern, der Rest fiel mit.
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import check
     return check.Bild(pfad)

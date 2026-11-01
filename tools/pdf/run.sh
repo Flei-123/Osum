@@ -1,25 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/pdf/run.sh -- THE PDF VIEWER (r55), MEASURED.
-#
-#   bash tools/pdf/run.sh
-#
-#   1. build: the reader's host drivers (the SAME lib/pdfread the viewer uses)
-#   2. corpus: PDFs from reportlab, pypdf and a raw writer (xref streams, object
-#      streams, ASCII85/Hex/RunLength/LZW, rotated pages, images, Unicode fonts,
-#      forms, damaged and encrypted files) -- not from the reader's own idea of a PDF
-#   3. against poppler: per page the multiset of characters equals pdftotext's,
-#      and the picture (reader -> SVG -> OrientOS's SVG renderer, images blitted)
-#      differs from pdftoppm's by less than 3 grey levels on average
-#   4. damaged files: password needed / AES-256 -> error 2, garbage/empty -> error 1, truncated or
-#      with a wrong startxref -> the file is rebuilt and the page is there
-#   5. fuzz: 800 random corruptions of the corpus; the reader may refuse, never
-#      crash, never hang (exit 0 or 3, nothing else)
-#   6. speed: 40 pages in under 5 s; a 150-page document in under 15 s
-#   7. IN THE GUEST (QEMU, OrientOS's own build): /bin/pdfview --render prints the
-#      checksum of the page it made; it must equal the host's, bit for bit
-#   8. THE WINDOW: a picture of it, then the keys PgDn and `-` through the QEMU
-#      monitor: the page counter says "Seite 2 von 2" and the zoom went down
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

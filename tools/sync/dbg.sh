@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/sync/dbg.sh -- NUR (a) und (g), zum Nachsehen. Kein Testlauf,
-# kein Urteil: baut A, B und den Konfliktfall und laesst die Logs stehen.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh

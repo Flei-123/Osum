@@ -1,25 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/abriss.sh -- RUNDE BRUECKE: REISST DIE VERBINDUNG AB.
-#
-# ====================================================================
-# DIE FRAGE
-# ====================================================================
-#
-# Justins Rechner steht in einem Wohnzimmer. Der Router startet neu,
-# das WLAN wechselt, der Rechner schlaeft ein. Die Bruecke muss das
-# ueberleben, OHNE dass jemand etwas tut -- und ohne dem Server die
-# Tuer einzurennen.
-#
-# Gemessen wird nicht, DASS es wieder geht (das behauptet jedes
-# Programm), sondern WANN: die Abstaende zwischen den Versuchen. Sie
-# muessen WACHSEN und gedeckelt sein. `kernel/app/jarvisd.fi` sagt 250
-# ms, dann doppelt, bis 30 s -- dieser Laeufer rechnet nach, ob das
-# stimmt.
-#
-# WIE ABGERISSEN WIRD: die Gegenstelle wird schlicht ERSCHOSSEN. Das
-# ist haerter als ein Router-Neustart (kein FIN, kein RST, die
-# Verbindung verschwindet einfach) und damit der ehrlichere Fall.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 W=${ABRISS_W:-/tmp/bruecke-abriss}
@@ -120,9 +99,6 @@ sleep 0.5
 ok "Netzraum und Draht stehen"
 
 echo "== 3. KEINE Gegenstelle: das Geraet darf nicht haemmern =="
-# Osum startet, die Gegenstelle gibt es NICHT. Jeder Versuch scheitert
-# sofort (kein Lauscher = RST), also ist der Abstand zwischen den
-# Versuchen REIN die Wartezeit -- genau das, was gemessen werden soll.
 cp "$W/probe.img" "$W/live.img"
 timeout 200 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx nocursor nic nip=$OSUM_IP/24 ngw=$HOST_IP nsvc=0 nwait=0 script=jarvisd -v -t 70000;exit" \
@@ -142,10 +118,6 @@ else
     bad "zu wenige Versuche ($VERSUCHE) -- gibt es die Wiederverbindung?"
 fi
 
-# DIE ENTSCHEIDENDE ZAHL. Waeren die Abstaende fest bei 250 ms, kaeme
-# das Geraet in 70 s auf ~280 Versuche. Mit Verdopplung bis 30 s sind
-# es eine Handvoll. Die Zahl der Versuche IST der Beweis fuer den
-# wachsenden Abstand.
 if [ "${VERSUCHE:-0}" -gt 0 ] && [ "${VERSUCHE:-0}" -le 12 ]; then
     ok "und der Abstand WAECHST: $VERSUCHE Versuche statt ~280 bei festen 250 ms"
     note "250, 500, 1000, 2000, 4000, 8000, 16000, 30000 ms -- gedeckelt bei 30 s"
@@ -161,8 +133,6 @@ else
 fi
 
 echo "== 4. Gegenstelle da, dann WEG, dann wieder da =="
-# Jetzt mit Gegenstelle: erst kommt das Geraet durch, dann wird die
-# Gegenstelle erschossen, und es muss sich von selbst wieder melden.
 cat > "$W/auftraege.txt" <<'AUF'
 system||
 AUF
@@ -183,7 +153,6 @@ timeout 200 qemu-system-x86_64 -kernel "$W/k.mb" -m 256 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$W/q-abriss.log" 2>&1 &
 QPID=$!
 
-# Warten, bis es EINMAL durch ist -- dann abreissen.
 for i in $(seq 1 60); do
     if grep -aq 'jarvisd: signed in' "$W/s-abriss.txt" 2>/dev/null; then break; fi
     sleep 0.5
@@ -198,8 +167,6 @@ kill -9 "$GPID" 2>/dev/null; GPID=""
 note "die Gegenstelle wurde ERSCHOSSEN -- kein FIN, kein RST"
 sleep 3
 
-# Und wieder hinstellen. Wenn die Bruecke taugt, meldet sich das
-# Geraet von selbst, ohne dass jemand etwas tut.
 ip netns exec "$NS" python3 tools/bridge/peer.py \
     --cert "$W/certs/good.pem" --key "$W/certs/good.key" \
     --port "$TLSPORT" --auftraege "$W/auftraege.txt" --aus "$W/aus2" \

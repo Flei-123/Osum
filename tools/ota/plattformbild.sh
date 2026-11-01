@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/ota/plattformbild.sh -- RUNDE STORE-MOBIL: EIN BILD VOM SCHIRM.
-#
-# `tools/ota/plattformprobe.sh` misst, was `/bin/ota` unter QEMU AUSGIBT
-# -- ueber die serielle Leitung, weil sich das vergleichen laesst. Diese
-# Datei macht das, was man nicht vergleichen, aber ansehen kann: ein
-# Bildschirmfoto DERSELBEN Maschine, waehrend `ota search` laeuft.
-#
-# Der Weg ist der aus Runde K15 (und `tools/storage/run.sh`): QEMU hat
-# auch bei `-display none` eine Bildflaeche, wenn man `-vga std` gibt,
-# und ueber den Monitor an einem Unix-Socket schreibt `screendump` sie
-# als PPM; `tools/gfx/ppm2png.py` macht ein PNG daraus.
-#
-#   bash tools/ota/plattformprobe.sh      # erst messen (baut $OUT)
-#   bash tools/ota/plattformbild.sh       # dann das Bild
-#
-# $OUT (Vorgabe /tmp/ota-plattform) muss der Ausgabeordner eines Laufes
-# von plattformprobe.sh sein: Abbild, Gegenstelle und Verzeichnis liegen
-# dort schon. Ergebnis: $OUT/ota-plattform.png (und .ppm).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -31,7 +12,6 @@ for d in "$OUT/k.mb" "$OUT/quelle.img" "$OUT/quelle.crc" "$OUT/ziel.img"; do
     [ -e "$d" ] || { echo "BILD: $d fehlt -- erst plattformprobe.sh laufen lassen"; exit 1; }
 done
 
-# Die Gegenstelle: dieselbe wie in der Probe. Der Port steht in ota.conf.
 if [ -z "$PORT" ]; then
     PORT=$(sed -n 's#^quelle=https://10\.0\.2\.2:\([0-9]*\).*#\1#p' "$OUT/ota.conf")
 fi
@@ -67,9 +47,6 @@ timeout 900 $QEMU_X86 -machine pc -cpu "$OSUM_CPU" -m "${MEM:-512}" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1 &
 PID=$!
 
-# Warten, bis die Liste WIRKLICH auf dem Schirm steht -- nicht blind
-# schlafen. Die letzte Zeile, die `ota search` schreibt, ist die
-# Zaehlung des Ausgeblendeten.
 i=0
 while [ $i -lt 2000 ]; do
     grep -qaF "ota: platform" "$AUS" 2>/dev/null && break

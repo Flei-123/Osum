@@ -276,9 +276,6 @@ tesseract "$TMPD/pg/page-1.pgm" - -l deu --psm 6 > "$TMPD/ocr1.txt" 2>/dev/null
 tesseract "$TMPD/pg/page-2.pgm" - -l deu --psm 6 > "$TMPD/ocr2.txt" 2>/dev/null
 grep -q 'Drucktest' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Drucktest'" || bad "OCR Seite 1 liest 'Drucktest' nicht"
 grep -q 'Grüße aus Österreich' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Grüße aus Österreich' -- mit Umlauten und ß" || bad "OCR Seite 1: die Umlautzeile fehlt: $(sed -n 2p "$TMPD/ocr1.txt")"
-# Capital umlauts stand in words: alone ("ÄÖÜ") tesseract drops the
-# dots of the Ü although they are on the paper (checked by eye on the
-# page image, round ROADMAP-5) -- an OCR weakness, not a print error.
 grep -q 'äöü ß' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'äöü ß'" || bad "OCR: 'äöü ß' fehlt"
 grep -q 'Übel Ärger Öfen' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'Übel Ärger Öfen' -- grosse Umlaute" || bad "OCR: 'Übel Ärger Öfen' fehlt: $(sed -n 2p "$TMPD/ocr1.txt")"
 grep -q 'quick brown fox' "$TMPD/ocr1.txt" && ok "OCR Seite 1: 'quick brown fox'" || bad "OCR: 'quick brown fox' fehlt"

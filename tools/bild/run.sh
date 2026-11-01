@@ -54,11 +54,9 @@ import sys, os
 d = sys.argv[1]
 roh = open(os.path.join(d, "g-tafel.gif"), "rb").read()
 open(os.path.join(d, "k-kurz.gif"), "wb").write(roh[:len(roh) // 2])
-# Die Bildschirmgroesse im Kopf auf 4000x4000 luegen (Versatz 6..9).
 b = bytearray(roh)
 b[6] = 160; b[7] = 15; b[8] = 160; b[9] = 15
 open(os.path.join(d, "k-luege.gif"), "wb").write(bytes(b))
-# Eine Datei, die nur so heisst.
 open(os.path.join(d, "k-kein.gif"), "wb").write(b"das ist kein GIF\n" * 4)
 print("kaputte Dateien: 3")
 PYEOF

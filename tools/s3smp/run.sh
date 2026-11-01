@@ -1,25 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/s3smp/run.sh -- DD-12 / K-004c: STANDBY (S3) ON MACHINES WITH SEVERAL CORES.
-#
-# The kernel parks every application processor before the sleep and starts
-# it again after the wake-up (kernel/arch/x86_64/smp.fi park_all/unpark_all,
-# kernel/pwr/s3.fi suspend). This runner sleeps a QEMU machine with 2 and
-# with 4 cores, three times in a row (the kernel's own `s3smp` entry, which
-# runs AFTER the other cores stand in their scheduler loops -- the state of a
-# running desktop), and reads the per-core counters the kernel prints
-# (`s3: kern vor|nach <core> online= ticks= idle= sw=`).
-#
-# SECTIONS
-#   1. build: the kernel and a Limine disk for it (like tools/s3/run.sh).
-#   2. -smp 2 and -smp 4, three cycles each: the VM is really suspended every
-#      time (QEMU monitor), the kernel parked all but the boot core
-#      (online=1), brought all back (online=N), and EVERY core's timer ticks,
-#      idle turns AND context switches grew within 300 ms after the
-#      wake-up -- a core that is "online" but dead would not move them. The
-#      wall clock advanced by the time slept, the kernel ran on to its end.
-#   3. counter-check `s3nostart` (cores parked and NOT started again): the
-#      same check must FAIL -- proof that the counters measure the restart.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh

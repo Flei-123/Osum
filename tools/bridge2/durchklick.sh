@@ -1,28 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/durchklick.sh -- RUNDE BRUECKE: EINGABE EINSPEISEN, MIT BELEG.
-#
-# ====================================================================
-# DIE FRAGE, DIE DIESER LAEUFER BEANTWORTET
-# ====================================================================
-#
-# Eine eingespeiste Taste, die niemand sieht, ist keine eingespeiste
-# Taste -- sie ist eine Behauptung. Dieser Laeufer macht daraus eine
-# Messung, und zwar in der einzigen Form, die zaehlt:
-#
-#     Bild VORHER  ->  Taste einspeisen  ->  Bild NACHHER
-#
-# und dann werden die beiden Bilder VERGLICHEN. Sind sie gleich, ist
-# nichts passiert, egal was die Zaehler sagen. `ppmvergleich.py` aus
-# Runde BRIDGE-2 rechnet den Unterschied aus.
-#
-# GEMESSEN WIRD AUSSERDEM, DASS DIE SCHLOESSER HALTEN:
-#   * ohne `eingabe = ja` wird abgelehnt,
-#   * ohne Schein lehnt der KERN ab, nicht das Programm,
-#   * mit `--ohne-bruecke` gibt es den Aufruf gar nicht.
-#
-# Der letzte Punkt ist der wichtigste: er unterscheidet ein
-# abgeschaltetes Schloss von einer Abwesenheit.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -43,7 +19,6 @@ if [ ! -f "$W/k.mb" ] || [ -n "${DURCHKLICK_BAU:-}" ]; then
 fi
 ok "Kern und Programme gebaut ($(stat -c%s "$W/k.mb") Oktette)"
 
-# Ein Kern OHNE die Bruecke, fuer den Abwesenheitsnachweis.
 if [ ! -f "$W/k-ohne.mb" ] || [ -n "${DURCHKLICK_BAU:-}" ]; then
     bash tools/build-kernel.sh "$W/k-ohne.mb" --ohne-bruecke \
         >"$W/bau-ohne.log" 2>&1 || {

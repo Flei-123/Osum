@@ -93,8 +93,6 @@ def antwort_bauen(frage, txid, qende, name, qtyp, kaputt_case=False,
             if 65 <= q[i] <= 90:
                 q[i] += 32
     if kaputt_case:
-        # Jeden Buchstaben im Fragenteil kippen -- die 0x20-Kodierung
-        # muss das merken.
         for i in range(12, qende):
             c = q[i]
             if 65 <= c <= 90 or 97 <= c <= 122:
@@ -145,11 +143,6 @@ def bedienen(sock, daten, herkunft):
                                   kaputt_case=True)
                 sock.sendto(p, herkunft)
             elif art == "port":
-                # DIESELBE, RICHTIGE Antwort -- nur von einem anderen
-                # Quellport. Ein Aufloeser, der nicht nachsieht, WOHER
-                # ein Paket kam, nimmt sie an; einer, der nachsieht,
-                # wirft sie weg. Damit die Messung eindeutig ist, traegt
-                # sie eine FALSCHE Adresse.
                 falsch = dict(EINTRAEGE)
                 echt = EINTRAEGE.get(kn)
                 if echt:

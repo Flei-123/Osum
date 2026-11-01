@@ -76,7 +76,6 @@ def main():
                 fehler.append("id=%d and id=%d overlap: "
                               "(%d,%d %dx%d) / (%d,%d %dx%d)"
                               % (ia, ib, xa, ya, wa, ha, xb, yb, wb, hb))
-    # Reihenfolge innerhalb einer Spalte (gleiche linke Kante)
     spalten = {}
     for (i, k, x, y, w, h) in r:
         # r454: the ids from 50 on (the tabs, the drag region) sit in the title strip above everything, whatever their number

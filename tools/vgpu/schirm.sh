@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# tools/vgpu/schirm.sh -- DER SCHIRMWECHSEL ZUR LAUFZEIT.
-#
-# QEMU kann die Anzeige eines virtio-gpu im Betrieb umstellen
-# (`set_display_resolution` ueber den Monitor gibt es nicht, aber der
-# Wirt meldet EVENT_DISPLAY bei jeder Aenderung seiner Bildflaeche).
-# Dieser Laeufer zieht mit `screendump` auf verschiedene Groessen und
-# liest danach, ob der Kern das Ereignis GESEHEN hat -- `vgpu: ereig=`.
-#
-# GEMESSEN WIRD NICHT "das Fenster ist jetzt anders gross" -- das waere
-# eine Eigenschaft von QEMU. Gemessen wird, ob der TREIBER es erfaehrt.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh >/dev/null 2>&1
@@ -37,11 +27,6 @@ import socket, sys, time
 s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); time.sleep(0.4)
 try: s.recv(65536)
 except OSError: pass
-# Der Wirt aendert seine Bildflaeche, sobald ein Gast ein anderes
-# Scanout-Rechteck setzt -- hier von aussen nicht erzwingbar. Was
-# erzwingbar ist: ein `device_del`/`device_add` waere ein anderer Test.
-# Also wird nur nachgesehen, ob der Kern in acht Sekunden Leerlauf
-# ueberhaupt Ereignisse zaehlt (erwartet: mindestens das erste).
 for c in ("info block", "info qtree"):
     s.sendall((c+"\n").encode()); time.sleep(0.3)
     try: s.recv(200000)

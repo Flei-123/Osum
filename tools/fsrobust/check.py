@@ -76,15 +76,6 @@ class Bild:
         self.jblocks = g(mkfs.SB["JBLOCKS"])
         self.ipb = BS // self.isize
         self.directs = 11 if self.version < 2 else 8
-        # ------------------------------------------------ DIE DECKELUNG
-        #
-        # Sie steht hier und nicht erst in der Pruefung, und sie ist der
-        # Grund, warum dieses Programm auf einem mutwillig zerstoerten
-        # Abbild FERTIG WIRD. Ein Superblock ist die Behauptung eines
-        # fremden Programms; wer sie glaubt, laeuft bei "2^40 Inodes"
-        # eine Billion Mal durch eine Tabelle, die es nicht gibt. Genau
-        # das ist dem ersten Entwurf dieser Datei passiert, gemessen an
-        # tools/fsrobust/corrupt.py, Fall `inodes`.
         if self.blocks > self.geraet:
             self.blocks = self.geraet
         if not (0 < self.itable < self.data <= self.blocks):
@@ -123,9 +114,6 @@ class Bild:
 
     # ---------------------------------------------------------- Inodes
     def iat(self, ino):
-        # `ino - 1`: die Tabelle faengt bei Nummer EINS an, es gibt
-        # keinen Platz null -- `kernel/fs.fi::inode_block_of` rechnet
-        # genauso.
         if self.xin and ino > self.inodes:
             slot = ino - 1 - self.inodes
             b = self.blk(self.xit + slot // self.ipb)
@@ -147,7 +135,6 @@ class Bild:
         blk = self.blk(self.bmstart + b // mkfs.BITS_PER_BLOCK)
         return (blk[(b % mkfs.BITS_PER_BLOCK) // 8] >> (b % 8)) & 1
 
-    # Alle Bloecke, auf die eine Inode zeigt -- Daten UND Zeigerbloecke.
     def bloecke(self, ino):
         d = self.iat(ino)
         aus = []
@@ -167,11 +154,6 @@ class Bild:
             if not self.valid(p):
                 return
             if aus.count(p) > 1:
-                # SCHON EINMAL DA. Ein Zeigerblock, der auf sich selbst
-                # zeigt, wird EINMAL gezaehlt und nicht betreten --
-                # dieselbe Regel wie in `kernel/user/fsck.fi`, sonst
-                # sagen die beiden Umsetzungen ueber dasselbe kaputte
-                # Abbild verschiedene Zahlen.
                 return
             b = self.blk(p)
             for i in range(PER_BLOCK):
@@ -314,7 +296,6 @@ def struktur(bild):
             z["verloren"] += 1
         if not bit and gesehen[b]:
             z["fehlend"] += 1
-    # Der Verzeichnisbaum, mit Marke gegen Kreise.
     besucht = set()
     stapel = [bild.root]
     besucht.add(bild.root)
@@ -432,15 +413,12 @@ def inhalt(bild):
         if schlecht >= 0:
             befunde.append("/d/%d: Oktett %d falsch" % (k, schlecht))
             continue
-        # Die Rechte-Metadaten (Runde MULTIUSER): der Modus wurde nach
-        # dem Schreiben gesetzt, der Zaehler kam danach.
         m = bild.ig(ino, mkfs.I_MODE) & 0o7777
         if m != 0o600 + (k % 8):
             befunde.append("/d/%d traegt Modus %o statt %o"
                            % (k, m, 0o600 + (k % 8)))
         else:
             ganz += 1
-    # Die Datei DANACH darf es nicht halb geben.
     ino = bild.finde("/d/%d" % (c + 1))
     naechste = 0
     if ino:

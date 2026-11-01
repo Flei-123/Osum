@@ -1,13 +1,8 @@
-# Erzeugt die 4x4-Intramodi DIREKT aus den Formeln der Norm 8.3.1.2.1-9,
-# als Tafel (Ziel -> welche Nachbarn mit welchen Gewichten).
-# Nachbarn: Index 0..3 = L0..L3 (links, oben->unten), 4 = LU (Ecke),
-#           5..8 = U0..U3, 9..12 = UR0..UR3
 L0,L1,L2,L3,LU = 0,1,2,3,4
 U = [5,6,7,8]
 UR = [9,10,11,12]
 Lr = [L0,L1,L2,L3]
 def P(x,y):
-    # p[x,y] der Norm: x=-1 -> links, y=-1 -> oben
     if x==-1 and y==-1: return LU
     if x==-1: return Lr[y]
     if y==-1: return (U+UR)[x]

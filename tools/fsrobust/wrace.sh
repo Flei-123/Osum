@@ -1,40 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fsrobust/wrace.sh -- DAILY-DRIVER: WRITERS ON FOUR CORES, CHECKED
-# BY THE HOST.
-#
-#   bash tools/fsrobust/wrace.sh [rounds]
-#
-# Roadmap r200 (27.09.2026): an installed system came up with a broken file
-# system -- 128 octets from byte 16 of a sector zeroed at random; before
-# that the Dell update had pieces of another file written onto the stick.
-# The fix of that day gave every core its own copy page
-# (kstate.BLOCKK_OFF); nothing checks that it holds. This does:
-#
-#   1. /bin/wrace starts four writers (`-smp 4 r3alle`, ring 3 on all
-#      cores), each writes its own file in 4 KiB blocks from a pattern that
-#      depends on the file AND the octet, with a read of another file
-#      between the writes -- the traffic that corrupted the stick
-#   2. the guest compares every octet it wrote (it reads through the same
-#      kernel it is testing, so it is not trusted alone) ...
-#   3. ... and AFTER THE GUEST HAS SHUT DOWN the host reads every file off
-#      the disk image with mkfs.py, the second implementation of the
-#      format, and recomputes the pattern in Python
-#   4. a second boot from the same disk compares everything again, with
-#      the kernel's caches empty
-#   GEGENPROBE: one octet of the image is flipped on the host and the
-#   host check must see it; without that a checker that always says "ok"
-#   would pass for ever.
-#
-# WHAT THIS CANNOT SAY, MEASURED ON 02.10.2026: that the copy-page race of
-# r200 is gone. The shared page was put back on purpose (blockb = BLOCK_OFF
-# for everybody) and three rounds still passed -- the writers share the
-# file-system lock, so they never meet in the page. What the test does
-# prove: four writers on four cores lose and mix up nothing, the guest
-# and the host agree on every octet, and the files survive a restart.
-# Roadmap r200 therefore stays open for what it names: the DESKTOP on four
-# cores (window calls + file writes) -- tools/multicore/run.sh is the place
-# for a negative control.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

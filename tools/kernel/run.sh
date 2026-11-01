@@ -66,9 +66,6 @@ hasnot() { # file text name
     grep -qF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"
 }
 
-# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
-# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
-# Ziel gebaut. Das Skript baut nur, wenn noetig.
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
@@ -120,7 +117,6 @@ as --64 -o "$TMPD/switch.o" kernel/arch/x86_64/switch.s 2>"$TMPD/as3.err" \
 as --64 -o "$TMPD/smp.o" kernel/arch/x86_64/smp.s 2>"$TMPD/as4.err" \
     && ok "smp.s assembles (the trampoline of the other processors)" \
     || { bad "smp.s"; sed 's/^/        /' "$TMPD/as4.err" | head -5; }
-# RUNDE K12: die fuenfte Assemblerdatei -- der Weltwechsel und die Gaeste.
 as --64 -o "$TMPD/hv.o" kernel/arch/x86_64/hv.s 2>"$TMPD/as5.err" \
     && ok "hv.s assembles (the world switch and the guests)" \
     || { bad "hv.s"; sed 's/^/        /' "$TMPD/as5.err" | head -5; }
@@ -167,34 +163,6 @@ for f in k0 k1 uprog0 uprog1; do
     kind=$(readelf -h "$o" | awk -F: '/^  Type:/ {print $2}' | awk '{print $1}')
     [ "$kind" = "REL" ] && ok "$f.o: ELF type REL (object file, not an executable)" \
                         || bad "$f.o: ELF kind '$kind', expected REL"
-    # ROUND 72: `osum_panic` is the ONE name allowed to stay undefined in an
-    # object file. Checked arithmetic (SPEC section 13, item L9) calls it
-    # under `profile kernel` when a value goes out of range, on purpose;
-    # `kernel/arch/x86_64/isr.s` defines it and the link step above resolves it.
-    #
-    # ROUND K7 ADDS A SECOND ONE, `kdata`, AND ONLY FOR THE KERNEL OBJECT.
-    # `serial.put` mirrors every octet onto the framebuffer console
-    # (`fb.echo`), and that console needs the kernel data area -- the same
-    # address `kernel_main` gets in rdx. `serial.put` has no argument for
-    # it and must not grow one: it is called from roughly a thousand
-    # places, from `kmain` into the exception report, and none of them
-    # should change for a console. So `fb.kdata()` takes the address off
-    # the LINKER SYMBOL that `kernel/arch/x86_64/boot.s` already exports
-    # (`.globl kdata`), with one `lea`. The name is resolved by the link
-    # step above, out of boot.o, exactly like `osum_panic` out of isr.o.
-    #
-    # What the check is FOR is unchanged: no libc, no runtime, nothing
-    # from outside this kernel. Both names are defined in this kernel's
-    # own assembly. `uprog.o` is held to the stricter rule on purpose --
-    # a program in ring 3 that reached `kdata` would be reaching into the
-    # kernel, and it may not even name it.
-    # RUNDE PROTOKOLL: `osym_tab` ist der dritte solche Name. Er steht
-    # als SCHWACHES Symbol in `boot.s` (die wirkliche Symboltabelle
-    # setzt `tools/build-kernel.sh` im zweiten Bindedurchgang darueber),
-    # und `kernel/ksymtab.fi` erreicht ihn mit derselben einen `lea`,
-    # mit der `ksym.fi` an `kdata` kommt. Aufgeloest wird er beim Binden
-    # aus boot.o -- genau wie `osum_panic` aus isr.o. Die Zusage bleibt
-    # dieselbe: keine libc, keine Laufzeit, nichts von aussen.
     erlaubt='^(osum_panic)$'
     case "$f" in k0|k1) erlaubt='^(osum_panic|kdata|osym_tab)$' ;; esac
     undef=$(nm -u "$o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE "$erlaubt")
@@ -309,32 +277,6 @@ done
 
 echo "== 4. firnc0 against firnc1: the same kernel says the same thing =="
 if [ -f "$TMPD/full0.txt" ] && [ -f "$TMPD/full1.txt" ]; then
-    # The two differ in one respect that says nothing about the language:
-    # how many turns the scheduler needed. Code of a different length runs
-    # at a different speed, and the workers are done after a different
-    # number of ticks. The trace and the counters are therefore compared
-    # by their SHAPE, not word by word.
-    # RUNDE PROTOKOLL: die Zeile `  spur rsp=... ` faellt dazu.
-    #
-    # Sie ist die Rueckverfolgung eines Ring-3-Absturzes, und sie
-    # entsteht, indem der Kern den BENUTZERSTAPEL nach Zahlen absucht,
-    # die im Textbereich des Programms liegen (`trap.spur_sagen`). Was
-    # dort steht, haengt daran, wie lang der Code ist und wie tief die
-    # Aufrufe gingen -- also genau an dem, was sich zwischen firnc0 und
-    # firnc1 unterscheidet und was die Zeile darueber schon fuer den
-    # Ablaufplaner einraeumt.
-    #
-    # GEMESSEN, nicht vermutet: bis Runde PROTOKOLL hielt `spur_sagen`
-    # JEDE Zahl zwischen 0x400000 und 0x40400000 fuer Code -- darin
-    # liegt auch der Benutzerstapel (0x4007F000), und deshalb fand sie
-    # immer acht "Adressen", auf beiden Stufen. Seit die Grenzen richtig
-    # sind, findet sie auf Stufe 0 eine echte und auf Stufe 1 keine:
-    #     <   spur rsp=NxX  phys=NxX  kstack=NxX NxX
-    #     >   spur rsp=NxX  phys=NxX  kstack=NxX  (keine)
-    # Das ist kein Verhaltensunterschied der Sprache, sondern der
-    # Inhalt eines fremden Stapels. Die Zeile daneben ("user fault:
-    # pid=... -- process killed") wird weiter Wort fuer Wort verglichen,
-    # und sie ist die, auf die es ankommt.
     normalise "$TMPD/full0.txt" | grep -vE '^(trace|task|sched|proc|fs|sh|ata):|^  spur ' > "$TMPD/n0.txt"
     normalise "$TMPD/full1.txt" | grep -vE '^(trace|task|sched|proc|fs|sh|ata):|^  spur ' > "$TMPD/n1.txt"
     if diff -q "$TMPD/n0.txt" "$TMPD/n1.txt" >/dev/null; then

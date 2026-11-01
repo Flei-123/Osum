@@ -62,9 +62,6 @@ import sys
 
 MAGIC = 0x314D59534F  # "OSYM1", kleines Ende zuerst
 
-# Der Kopf der Tabelle, 96 Oktette.  Jede Zahl ist ein Versatz VOM ANFANG
-# von `osym_tab` -- damit ist die Tabelle verschiebbar und der Kern
-# braucht nur EINE Adresse (`lea rax, [rip + osym_tab]`).
 HDR = 104   # r1217: +8 for the line stream offset (H_LSTR)
 BLK = 16    # line entries per block (kernel/lib/ksymtab.fi LINE_BLK)
 
@@ -83,9 +80,6 @@ def symbole(elf):
         if art not in ("T", "t"):
             continue
         roh.append((int(adr, 16), lesbar(name)))
-    # Gleiche Adresse mehrfach (Aliasse wie `_boot`/`_start`): der erste
-    # Name gewinnt, und zwar der KUERZERE -- `trap.entry` sagt mehr als
-    # `_F0.trap__entry`, und beide zeigen auf denselben Befehl.
     raus = []
     for adr, name in roh:
         if raus and raus[-1][0] == adr:

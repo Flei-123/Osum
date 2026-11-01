@@ -1,29 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/install/shot-gui.sh -- EIN FOTO VOM INSTALLATIONSFENSTER.
-#
-#   bash tools/install/shot-gui.sh <bauverzeichnis> <ausgabe.png> [args] [zielplatte]
-#
-# <bauverzeichnis> ist eines von `tools/usbimg/build.sh` (osum.mb +
-# root.img). Die Zielplatte haengt als /dev/hda daran -- ohne sie hat
-# das Fenster nichts zu zeigen, und genau das waere ein falsches Bild.
-#
-# ==================================================================
-# WARUM `wigapp=` UND KEIN NEUES KERNWORT
-# ==================================================================
-#
-# Runde POWERMON hat dafuer schon die richtige Stelle gebaut, und der
-# Kommentar in `kernel/kgui.fi` sagt auch warum: ein viertes fest
-# verdrahtetes `/bin/NAME` haette eine fuenfte Runde gebraucht, die ein
-# fuenftes will. `wigapp=/bin/installer` startet dieses Programm im
-# Fensterserver, ohne dass ein Bit in `kstate.MODE` dafuer draufgeht --
-# und das Wort davor (`wig`) setzt M_WIG ohnehin.
-#
-# DER DAUERBETRIEB UND NICHT `wmhold`: mit `wmhold` ist die Schleife
-# vorbei, bevor ein Monitorbefehl ankommt -- der Druck steht dann als
-# letzte Zeile im Bericht und niemand liest ihn mehr. Das ist die Lehre
-# aus tools/usbimg/shot-qs2.sh, Punkt 1, und sie wird hier nicht noch
-# einmal neu gelernt.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
@@ -41,20 +16,14 @@ W=$(mktemp -d)
 QP=""
 trap 'kill $QP 2>/dev/null; rm -rf "$W"' EXIT
 
-# EINE EIGENE KOPIE DER ZIELPLATTE. Zwei Laeufe duerfen sich nicht um
-# die Schreibsperre streiten ("Failed to get write lock"), und ein Foto
-# soll die Platte nicht veraendern, die der naechste Lauf misst.
 PLATTE=()
 if [ -n "$ZIEL" ]; then
     cp "$ZIEL" "$W/ziel.img"
     PLATTE=(-drive "file=$W/ziel.img,format=raw,if=ide,index=0")
 fi
 
-# `vfs` haengt /dev ein -- ohne das findet das Programm keine Platte.
 APPEND="modfs osum vfs gfx wm wig desk wmshell wmdauer herz nostart"
 APPEND="$APPEND nosched noproc nofs lang=de uiscale=1"
-# Die Argumente haengen mit KOMMA am Pfad -- so zerlegt sie
-# `wigapp_zerlegen` in kernel/kgui.fi (jedes Komma wird zur Null).
 if [ -n "$ARGS" ]; then
     APPEND="$APPEND wigapp=/bin/installer,$ARGS"
 else
@@ -72,20 +41,6 @@ QP=$!
 
 mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$W/mon" >/dev/null 2>&1; sleep "${2:-1}"; }
 
-# Warten, bis das Fenster WIRKLICH steht -- nicht nur der Kern.
-#
-# GEWARTET WIRD AUF DEN FENSTERSERVER UND NICHT AUF DAS PROGRAMM.
-# Die erste Fassung hat hier auf die Zeile 'installer: ready' gewartet --
-# Zeile, die das Programm selbst schreibt. Sie kam nie: die Ausgabe
-# eines Programms, das der Schreibtisch startet, landet nicht auf der
-# seriellen Leitung des Kerns. Gewartet wurde also 300 Sekunden lang
-# auf etwas, das nicht kommen konnte, und das Bild entstand erst durch
-# den Zeitablauf.
-#
-# Was der Kern SEHR WOHL meldet, ist jedes Fenster, das er malt
-# (die Zeile 'wm: fen ... w=640 h=440'). Darauf laesst sich warten, und es
-# ist die ehrlichere Bedingung: es steht genau dann da, wenn wirklich
-# ein Fenster dieser Groesse gemalt wurde.
 i=0
 while [ $i -lt 400 ]; do
     grep -qa 'w=640 h=440' "$W/serial.txt" 2>/dev/null && break

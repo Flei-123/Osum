@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hotplug/lauf.sh -- EIN LAUF MIT EINEM STICK, DER IM BETRIEB KOMMT.
-#
-#   bash tools/hotplug/lauf.sh <name> <kernel> <kommandozeile> <drehbuch> [qemu-args...]
-#
-# Startet QEMU im Hintergrund, faehrt das Drehbuch ueber den Monitor
-# (tools/hotplug/monitor.py) und laesst danach abraeumen. Die serielle
-# Ausgabe landet in $ARB/<name>.txt, die Bilder dort, wo das Drehbuch
-# sie hinlegt.
-#
-# $ARB (Arbeitsverzeichnis) kommt von aussen; ohne es wird eines
-# angelegt. Das ist Absicht: der Laeufer darueber will die Dateien
-# NACH dem Lauf noch lesen, und ein `mktemp -d` mit `trap rm` haette
-# sie weggeraeumt, bevor die erste Zusage gemessen ist.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -48,9 +34,6 @@ python3 tools/hotplug/monitor.py "$SOCK" "$SER" "$DREH" \
     > "$ARB/$NAME.mon" 2>&1
 MRC=$?
 
-# Dem Kern Zeit geben, sich selbst zu beenden -- `isa-debug-exit` gibt
-# 21, und diese Zahl ist eine Zusage. Wer hier sofort abschiesst, misst
-# stattdessen sein eigenes `kill`.
 i=0
 while [ $i -lt "${HP_NACHLAUF:-40}" ]; do
     kill -0 "$QP" 2>/dev/null || break

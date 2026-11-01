@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/account/dbg.sh -- die kurze Schleife zum Suchen von Fehlern.
-#
-# Baut Kern, Programm, Zertifikate, Netzraum, Attrappe und ein Abbild --
-# und fuehrt DANN genau EINE Gast-Befehlszeile aus, deren serielle
-# Ausgabe vollstaendig auf den Schirm kommt. run.sh misst, dbg.sh zeigt.
-#
-#   bash tools/account/dbg.sh 'konto anmelden --anbieter jarvis ...'
-#
-# Mit BAUEN=0 wird ein vorhandener Aufbau aus /tmp/konto-dbg weiter
-# benutzt (dann dauert ein Durchgang Sekunden statt Minuten).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -106,10 +95,6 @@ if [ "${NETZ:-1}" = "1" ]; then
     sleep 1.0
 fi
 
-# Ab hier: JEDES Argument ist EIN Gast-Lauf, nacheinander, gegen
-# denselben laufenden Server. `@ZW@` in einem Skript wird durch das
-# `zwischen`-Token des vorigen Laufs ersetzt -- damit laesst sich der
-# zweite Faktor in einem Rutsch durchspielen.
 ZW=""
 if [ $# -eq 0 ]; then set -- "konto anbieter"; fi
 for SKRIPT in "$@"; do

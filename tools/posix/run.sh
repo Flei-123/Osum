@@ -74,9 +74,6 @@ num() { # name value op expected
 has() { grep -aqF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -aqF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 
-# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
-# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
-# Ziel gebaut. Das Skript baut nur, wenn noetig.
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
@@ -386,10 +383,6 @@ say "$F" "err execmis" -2 "execve of a file that is not there: -ENOENT"
 say "$F" "err sleep" -22 "a sleep of a thousand seconds: -EINVAL"
 say "$F" "errno" 2 "and the libc turns the same refusal into -1 with errno = ENOENT"
 
-# --------------------------------------------- RUNDE FREMDLAND
-# Die Nummern, die diese Runde ergaenzt hat. Zu jeder eine Antwort, die
-# nachpruefbar ist, und wo es eine gibt eine GEGENPROBE -- eine Nummer,
-# die nur "kein -ENOSYS" liefert, ist nicht gemessen.
 say "$F" "uname sys" 0 "uname(63) fuellt seine sechs Felder"
 say "$F" "uname mach" 120 "und Feld 4 faengt mit 'x' an (x86_64) -- die Felder liegen 65 Oktette auseinander"
 say "$F" "uname faul" -14 "GEGENPROBE: uname auf einen Zeiger in den Kern: -EFAULT"

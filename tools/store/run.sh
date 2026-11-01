@@ -1,34 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/store/run.sh -- P-007: THE STORE (provider /bin/stored, window /bin/store), MEASURED.
-#
-#   bash tools/store/run.sh
-#
-# AGAINST WHAT. There is no real store to test against from here, so the runner serves
-# SIGNED sources over HTTPS from the host (tools/ota/server.py: real TLS 1.3 from Python's
-# ssl, a real certificate chain), made with the host's own opk (not this repository's
-# idea of a package): two programs, `gruss` (new) and `hallo` (the device has 1.0.0, the
-# store offers 2.0.0). The device is a QEMU guest with an e1000 behind QEMU's user network
-# (10.0.2.2 is the host), the action bus, and the REAL provider /bin/stored -- every
-# call below goes through the broker with `act`, the way the window does it.
-#
-# SECTIONS
-#   1. build: the programs (stored, store, opk, ota, fetch ...), the kernel, setsess
-#   2. the sources and the server: good store; three bad ones: a package with a flipped
-#      octet and its OLD signature, a flipped package RE-SIGNED with the right key (the
-#      signature is fine, the hash in the signed catalog is not -- the case a single signature
-#      cannot catch), and a catalog signed with a FOREIGN key
-#   3. the good way, over the bus, from the signed-in person: the list is empty before
-#      the first fetch, `store.refresh` brings the verified catalog (gruss = neu, hallo =
-#      update), install -> the program is in `opk list`, update -> hallo is the new
-#      version, remove -> it is gone; a dry run changes nothing; a name that is no program
-#      is refused
-#   4. the rights, enforced in the provider: admin (default) lets root and uid 1000 in and
-#      keeps uid 1001 out; `benutzer` lets every account in but never nobody; `aus` nobody;
-#      `admins=` adds a uid -- and the same over the bus: another account's request
-#      confirmed by the person still ends in `not_allowed`
-#   5. the three refusals: flipped package (signature), re-signed flipped package (hash),
-#      foreign catalog -- and after each NOTHING is installed
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

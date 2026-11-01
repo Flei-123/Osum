@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge/fotoprobe.sh -- RUNDE BRIDGE-2: WAS SIEHT RING 3 VOM SCHIRM?
-#
-# Ein kleiner Laeufer nur fuer die eine Frage, an der Abschnitt 12 der
-# Abnahme haengt: gibt der Kern dem Helfer ein Bildschirmfoto, und wenn
-# nein, WORAN GENAU liegt es. Er startet Osum mit `gfx` und laesst
-# `jarvisd -s` die Zahlen auf die serielle Leitung schreiben.
-#
-#   bash tools/bridge/fotoprobe.sh [weitere Kernwoerter]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

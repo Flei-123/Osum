@@ -1,5 +1,4 @@
 #!/bin/bash
-# Osum-Konfiguration fuer busybox: nur was die Runde verlangt.
 set -e
 cd /root/fremdland-tmp/busybox
 make allnoconfig >/dev/null 2>&1
@@ -7,7 +6,6 @@ CFG=.config
 on() { sed -i "s/^# $1 is not set/$1=y/; " $CFG; grep -q "^$1=y" $CFG || echo "$1=y" >> $CFG; }
 off() { sed -i "s/^$1=y/# $1 is not set/" $CFG; }
 
-# statisch, kein NLS, kein Debug
 on CONFIG_STATIC
 on CONFIG_FEATURE_PREFER_APPLETS
 on CONFIG_LONG_OPTS
@@ -23,7 +21,6 @@ on CONFIG_ASH_TEST
 on CONFIG_ASH_PRINTF
 on CONFIG_ASH_GETOPTS
 on CONFIG_ASH_CMDCMD
-# coreutils der Abnahme
 for a in CAT LS ECHO WC SORT HEAD TAIL CP MV RM MKDIR DATE ENV PWD TRUE FALSE \
          TEST SLEEP TOUCH SEQ BASENAME DIRNAME CUT TR UNAME YES PRINTF EXPR OD; do
   on CONFIG_$a

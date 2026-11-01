@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# tools/k16/fas-zaehlen.sh -- WIEVIELE PROGRAMME BINDET `fas`?
-#
-# RUNDE BAUFEHLER (14.09.2026). Die Zahl, an der A-015 haengt, in einem
-# Aufruf und ohne den ganzen Abschnitt 21 zu fahren. Sie zaehlt genau,
-# was `tools/k16/run.sh` zaehlt (jede Datei unter kernel/user/ mit
-# `fn u_start`, ohne die acht Bibliotheksmodule), baut jedes Programm mit
-# dem Profil AUS SEINER WURZELDATEI und haengt `--crt` nur an, wenn die
-# .s kein eigenes `_start` mitbringt.
-#
-# Ausgabe:
-#     PROGRAMME_GESAMT=135
-#     PROFILE_APP=18
-#     GEBUNDEN=135
-#     NICHT:
-#
-# Gemessen am 13.09.2026 auf main (ae381a3): GEBUNDEN=117, und die
-# achtzehn fehlenden waren genau die mit `profile app` -- alle an
-# "diese Marke gibt es zwei '_F1.rt__ld8'". Ursache und Behebung stehen
-# in vendor/firn/patches/0005-rt-rt-heisst-std-rt.patch und in
-# docs/RUNDE-BAUFEHLER.md.
-#
-# Laeuft rund 20 Minuten (firnc1 uebersetzt 135 Programme einzeln).
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"
 FIRNC=vendor/firn/bin/firnc

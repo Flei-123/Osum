@@ -36,8 +36,6 @@ def aendern(sp):
     d = bytearray(lade(sp, "PACK"))
     if not d:
         return "PACK ist leer"
-    # Ein Oktett in der Mitte des ersten Blocks -- also im Geheimtext,
-    # nicht im Siegel. Genau das muss Poly1305 fangen.
     d[100] ^= 0x01
     sichere(sp, "PACK", bytes(d))
     return "ein Bit in PACK bei Oktett 100 gekippt"
@@ -56,8 +54,6 @@ def fremd(sp):
     d = bytearray(lade(sp, "PACK"))
     a = (int(eintraege[0][1]), int(eintraege[0][2]))
     b = (int(eintraege[1][1]), int(eintraege[1][2]))
-    # Block B unter dem Namen von Block A ausliefern. Beide sind ECHT
-    # versiegelt -- nur am falschen Platz. Das faengt nur das AAD.
     d[a[0]:a[0] + a[1]] = d[b[0]:b[0] + b[1]]
     sichere(sp, "PACK", bytes(d))
     return "Block 2 unter dem Namen von Block 1 ausgeliefert"
@@ -82,7 +78,6 @@ def wurzelluege(sp):
     d = lade(sp, "ROOT").split(b" ")
     if len(d) < 4:
         return "keine Wurzel"
-    # Der Name wird veraendert, das Siegel bleibt. Muss auffallen.
     n = bytearray(d[2])
     n[0] = ord("0") if n[0] != ord("0") else ord("1")
     d[2] = bytes(n)

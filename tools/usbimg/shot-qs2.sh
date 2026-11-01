@@ -1,50 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/usbimg/shot-qs.sh -- EIN FOTO VOM KONTROLLZENTRUM (und vom Starter).
-#
-#   bash tools/usbimg/shot-qs.sh <bauverzeichnis> <ausgabe-praefix> [lang]
-#
-# macht <praefix>-qs.png       das Kontrollzentrum, offen
-#       <praefix>-start.png    das Startmenue/der Starter, offen
-#       <praefix>.txt          der serielle Mitschnitt dazu
-#
-# ==================================================================
-# WARUM ES DIESES SKRIPT GIBT
-# ==================================================================
-#
-# `tools/usbimg/run.sh` macht EIN Bild, und darauf steht der STARTER.
-# Das ist richtig fuer das, was dort gemessen wird (deutsche Texte mit
-# Umlauten), zeigt aber das KONTROLLZENTRUM nicht -- und das ist die
-# Oberflaeche, an der Justin sich stoert. Ein Umbau, dessen Ergebnis
-# man nicht sieht, ist eine Behauptung.
-#
-# ==================================================================
-# WAS BEIM ERSTEN ANLAUF SCHIEFGING -- damit es niemand wiederholt
-# ==================================================================
-#
-# 1. `wmhold` IST DAS ENDE UND NICHT DER BETRIEB.
-#    Mit `wmhold` haelt der Fensterserver am Ende still, damit ein Foto
-#    entstehen kann. Wer DANACH eine Taste schickt, dessen Druck steht
-#    als letzte Zeile im Bericht und niemand liest ihn mehr:
-#
-#        wm: hold
-#        wm: halt sek=20
-#        hk: super+a        <- zu spaet, die Schleife der Leiste ist vorbei
-#
-#    Gebraucht wird der DAUERBETRIEB: `wmshell wmdauer herz`, genau wie
-#    in tools/design/suchabnahme.sh. Dann laeuft die Schleife der
-#    Leiste weiter, und `qs.step` liest den Hotkey-Zaehler wirklich.
-#
-# 2. DAS BILD KOMMT UEBER `screendump` AUS DEM MONITOR.
-#    Kein zweites Werkzeug, kein eigener Weg -- dieselbe Zeile, die
-#    suchabnahme.sh benutzt.
-#
-# 3. SUPER+A UND NICHT SUPER ALLEIN.
-#    `Super` allein oeffnet das STARTMENUE (taskbar.fi), `Super+A` das
-#    Kontrollzentrum (qs.fi: `nv.hotkey_key() == 97`). Der Kern LATCHT
-#    beides mit einem Zaehler (kernel/kbd.fi), statt es an ein Fenster
-#    zu geben -- ein Hotkey hat kein Fenster. Beide Leser nehmen sich
-#    den Druck deshalb nicht gegenseitig weg.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -61,7 +15,6 @@ trap 'kill $QP 2>/dev/null; rm -rf "$W"' EXIT
 KVM=(-accel tcg)
 [ -w /dev/kvm ] && KVM=(-accel kvm -cpu host)
 
-# DER DAUERBETRIEB, nicht das Standbild -- siehe Punkt 1 im Kopf.
 APPEND="modfs osum gfx wm wig desk wmshell wmdauer herz"
 APPEND="$APPEND nosched noproc nofs lang=$LANG_ uiscale=2"
 
@@ -75,7 +28,6 @@ QP=$!
 mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$W/mon" >/dev/null 2>&1; sleep "${2:-1}"; }
 schuss() { mon "screendump $W/$1.ppm" 3; }
 
-# Warten, bis die Leiste WIRKLICH laeuft -- nicht nur gestartet ist.
 i=0
 while [ $i -lt 400 ]; do
     grep -qa 'taskbar: state\|launcher: ready\|wm: windows' "$W/serial.txt" 2>/dev/null && break
@@ -90,7 +42,6 @@ mon "sendkey esc" 2
 mon "sendkey meta_l-a" 4
 schuss 10-qs
 
-# Wieder zu, damit das naechste Bild nicht beides zeigt.
 mon "sendkey meta_l-a" 3
 
 # ------------------------------------------------------------ der Starter

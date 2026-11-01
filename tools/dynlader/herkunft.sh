@@ -1,29 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dynlader/herkunft.sh -- WELCHER FREMDCODE LANDET AUF DEM SYSTEM?
-#
-#   bash tools/dynlader/herkunft.sh
-#
-# Justins Frage vom 14.09.2026, woertlich: ist das "originaler Fremdcode"
-# oder nur Uebersetzung?
-#
-# DIE EHRLICHE ANTWORT, und dieses Skript fuehrt sie vor statt sie zu
-# behaupten: BEIDES, und es laesst sich sauber trennen.
-#
-#   * Was in DIESEM Repo steht, ist eigener Firn-Code. Die Runde
-#     DYNLADER hat genau EINE Kerndatei angefasst (kernel/elf.fi) und
-#     keine Zeile fremden Code hineingenommen. Regel 4 aus
-#     /root/osum-roadmap/FREMDSOFTWARE.md -- "Kein Fremdcode im Kern" --
-#     gilt unveraendert.
-#
-#   * Was auf dem SYSTEM landet, sind FREMDE BINAERDATEIEN. Sie sind
-#     nicht uebersetzt, nicht nachgebaut und nicht angepasst: es sind
-#     dieselben Oktette, die der Wirt hat. Genau das ist der Sinn der
-#     Runde -- ein nachgebauter Lader waere kein Nachweis, dass Linux-
-#     Programme laufen, sondern nur einer, dass unser Nachbau laeuft.
-#
-# Das Skript rechnet die SHA-256 jeder fremden Datei nach und nennt
-# Herkunft, Fassung und Lizenz. Es AENDERT nichts.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 

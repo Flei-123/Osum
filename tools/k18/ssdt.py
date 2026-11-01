@@ -77,7 +77,6 @@ def pkglen(n_payload):
             if total <= 0x3F:
                 return bytes([total])
             continue
-        # oberste zwei Bits = Zahl der Folgeoktette, untere vier = Bits 3:0
         if total < (1 << (4 + 8 * (width - 1))):
             out = [((width - 1) << 6) | (total & 0x0F)]
             v = total >> 4
@@ -156,8 +155,6 @@ def build(a):
     out = b""
 
     if not a.kein_akku:
-        # _BIF -- was der Akku IST.  Dreizehn Elemente, die ersten neun
-        # Zahlen, die letzten vier Zeichenketten.
         bif = package([
             aml_int(a.einheit),      # 0 = mW/mWh
             aml_int(a.design),       # Auslegungskapazitaet
@@ -173,7 +170,6 @@ def build(a):
             aml_str(a.art),
             aml_str(a.hersteller),
         ])
-        # _BST -- wie es ihm GERADE geht.
         bst = package([
             aml_int(a.zustand),      # Bit 0 entlaedt, Bit 1 laedt
             aml_int(a.rate),         # mW
@@ -185,8 +181,6 @@ def build(a):
         body += name_op("_STA", aml_int(a.sta))
         body += name_op("_BIF", bif)
         if a.methode:
-            # DIE GEGENPROBE: `_BST` als Methode.  Osum kann das nicht
-            # lesen und MUSS deshalb "kein Akku" melden.
             body += method_returning("_BST", bst)
         else:
             body += name_op("_BST", bst)
@@ -235,8 +229,6 @@ def main():
     with open(a.out, "wb") as f:
         f.write(data)
 
-    # Was der Kernel daraus ausrechnen MUSS -- damit der Testlauf nicht
-    # dieselbe Rechnung noch einmal aufschreiben muss.
     if a.kein_akku:
         prozent = minuten = -1
     else:

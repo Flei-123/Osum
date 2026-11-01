@@ -59,10 +59,6 @@ def nimmt(f):
 def rufer(f):
     return [n for n, b in funcs.items()
             if n != f and re.search(r"(?<![\w.])" + f + r"\(", "\n".join(b))]
-# `init` laeuft vor dem ersten Nutzerprozess und vor dem zweiten Kern.
-# Die reinen Leser einzelner Woerter lesen ein Wort atomar; eine Sperre
-# dafuer waere teurer als der Zugriff. Wer diese Liste erweitert, muss
-# den Grund danebenschreiben -- sonst ist der Pruefer eine Zierde.
 bekannt = {"init", "stat", "clip_count", "noti_count", "seg_pages",
            "seg_frame", "seg_owner", "drag_types", "drag_active",
            "noti_len", "noti_prio", "noti_idx", "idx_of", "noti_seen",
@@ -302,16 +298,6 @@ PY
 
 cat > "$TMPD/dreh1" <<'DREH'
 warteauf 'wm: hold' || 90
-# RUNDE ROTABSCHNITTE: hier stand `warte 5` -- eine feste Frist, die
-# darauf wettete, dass die Leiste ihr Meldungsfeld innerhalb von fuenf
-# Sekunden gemalt hat. Auf einem Wirt, den sich mehrere QEMU-Prozesse
-# teilen, stimmt diese Wette nicht mehr, und das Foto entstand vor dem
-# Text -- daher "in der Leiste steht keine Meldung". Die Leiste MELDET
-# aber, wenn sie das Feld gemalt hat: `taskbar: text noti ... t=Meldg N`
-# (taskbar.fi, say_text aus paint(true)). Auf dieses Ereignis wird jetzt
-# gewartet statt auf die Uhr. Die Meldungen selbst liegen schon vor dem
-# ersten Nutzerprozess auf dem Bus (kmain.fi, M_NOTIDEMO), es fehlt hier
-# also wirklich nur der Anstrich.
 warteauf 'taskbar: text noti' || 90
 foto 01-leiste-meldung
 DREH
@@ -329,15 +315,6 @@ echo "== 9. die Oberflaeche: kopieren im Editor, einfuegen im Terminal =="
 tipp() {
     python3 - "$1" <<'PY'
 import sys
-# RUNDE ROTABSCHNITTE: DIE TASTATUR DIESES LAUFS IST DEUTSCH.
-# Der Mitschnitt sagt es woertlich: `kbd: layout de`. Auf einer
-# deutschen Tastatur liegt der Schraegstrich auf UMSCHALT+7 --
-# `sendkey slash` schickt dagegen den Abtastcode 0x35, und der ist
-# dort das Minuszeichen (kernel/kbd.fi, `de_plain`: code 0x35 -> 45).
-# Getippt wurde deshalb `edit -etc-taskbar.conf`, eine Datei, die es
-# nicht gibt; der Editor startete nie, und `edit: ready` kam nicht.
-# Nachgesehen an einem behaltenen Lauf: alle 39 Tasten KAMEN an, nur
-# eben die falschen Zeichen. Das war kein Tasten- und kein Busproblem.
 karte = {" ": "spc", "-": "slash", "/": "shift-7", ".": "dot",
          "_": "shift-minus", "=": "equal", ",": "comma"}
 for c in sys.argv[1]:

@@ -34,12 +34,6 @@ Verwendung:
 import os
 import sys
 
-# Die Woerter, nach denen gesucht wird, und warum gerade diese:
-#   "kupfer"  kommt in genau einem Namen vor -- ein Treffer.
-#   "07"      trifft eine Handvoll -- mehr als einen, weniger als alle.
-#   "datei"   trifft fast alles -- die teuerste Suche.
-#   "quaste"  kommt NIRGENDS vor. Eine Suche, die immer etwas findet,
-#             ist keine Suche.
 WOERTER = ["kupfer", "07", "datei", "quaste"]
 
 ORDNER = ["messing", "kupfer", "zinn", "blei", "zink", "nickel",
@@ -85,9 +79,6 @@ def main(argv):
         for pfad, name in liste:
             f.write("%s/%s\n" % (pfad, name))
 
-    # Was jedes Wort treffen MUSS -- gezaehlt ueber die NAMEN, nicht
-    # ueber die Pfade: der Index haelt Namen, und `locate` vergleicht
-    # Namen. Die Ordner zaehlen mit, sie haben auch Namen.
     alle = [name for _, name in liste]
     alle += [p.strip("/").split("/")[-1] for p in sorted(gesehen)]
     alle += ["data"]

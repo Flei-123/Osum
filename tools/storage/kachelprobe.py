@@ -34,10 +34,6 @@ KACHEL = re.compile(
     r"speicher: kachel i=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+) "
     r"farbe=(\d+) name=(\S+)")
 
-# Die Kachelkoordinaten sind FENSTERrelativ. Das Fenster steht bei 40,40,
-# und darauf kommen Rahmen und Titelleiste -- welche genau, sagt die
-# Bibliothek, nicht diese Datei. Also werden die plausiblen Versaetze
-# durchprobiert und der eine genommen, mit dem ALLES passt.
 VERSAETZE = [(x, y) for x in (40, 41, 42, 43) for y in
              (40, 42, 60, 61, 62, 63, 64, 65, 66)]
 
@@ -103,14 +99,6 @@ def main(argv):
     schlecht = 0
     breiten = []
     for _i, x, y, w, h, f, n in kacheln:
-        # A-029: NICHT NUR EINE BILDZEILE. Der Mauszeiger steht beim
-        # Foto in der Bildmitte (639,399) und damit mitten in einer
-        # Kachel; auf genau der mittleren Zeile gemessen, war "chrom"
-        # 54 statt 62 breit -- der Zeiger, nicht das Programm. Gemessen
-        # wird deshalb auf fuenf Zeilen der unteren Haelfte (oben steht
-        # der Name) und die BREITESTE zaehlt: ein Zeiger oder eine
-        # Beschriftung kann einen Lauf nur verkuerzen, nie verlaengern,
-        # also verdeckt das Maximum keinen echten Fehler.
         mitte = x + w // 2 + ox
         gemessen = 0
         for k in (4, 5, 6, 7):
@@ -125,7 +113,6 @@ def main(argv):
                 re_ += 1
             gemessen = max(gemessen, re_ - li + 1)
         breiten.append((n, w, gemessen))
-        # Ein Rahmen um die Kachel darf ein paar Punkte kosten.
         gut = abs(gemessen - w) <= 4
         if not gut:
             schlecht += 1

@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Kleine Probe: startet das Installationsfenster ueberhaupt, und was
-# sagt es? `zeig` malt es und geht wieder -- kein Schreibzugriff.
-#   bash tools/dual/probe.sh [args] [ausgabe]
 cd "$(dirname "$0")/../.."
 export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
 . tools/lib/qemu.sh
@@ -11,7 +8,6 @@ OUT=${2:-/tmp/dual-probe}
 BAU=${BAU:-/tmp/dual-img}
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-# Eine fremde Platte als Ziel -- sonst gibt es nichts zu sehen.
 bash tools/dual/fremdplatte.sh "$OUT/platte.img" 512 > "$OUT/bau.txt" 2>&1
 
 APPEND="modfs osum vfs gfx wm wig wmhold wmdauer wighalt=900 nokbd nosched noproc nofs"
@@ -25,7 +21,6 @@ timeout "${LIMIT:-240}" $QEMU_X86 -m 512 \
   -monitor "unix:$OUT/mon,server,nowait" > "$OUT/qemu.log" 2>&1 &
 QP=$!
 for i in $(seq 1 60); do [ -S "$OUT/mon" ] && break; sleep 1; done
-# warten, bis das Programm etwas sagt
 for i in $(seq 1 120); do
     grep -qa 'installer: ready\|installer: keine\|installer: BESIDE_NO\|installer: done\|installer: ERROR' "$OUT/ser.txt" 2>/dev/null && break
     sleep 1

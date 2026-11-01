@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/install/pakete.sh -- ZWEI FASSUNGEN EINES PAKETS UND ZWEI
-# SIGNIERTE QUELLEN, gebaut mit dem Werkzeug des Wirts.
-#
-# WARUM DER WIRT SIE BAUT UND NICHT OSUM. `opk bauen` ist die Seite, die
-# ein Entwickler benutzt; `opk install` die, die auf dem Geraet
-# laeuft. Diese Runde baut die zweite. Dass die erste weiter auf dem Wirt
-# steht, ist keine Luecke, sondern die Arbeitsteilung, die jede
-# Distribution hat -- und sie ist ausserdem der bessere Nachweis: was
-# hier entsteht, hat Osum NIE gesehen, und trotzdem muss es dort
-# hineinpassen, Oktett fuer Oktett.
-#
-#   bash tools/install/pakete.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -35,20 +22,10 @@ for v in 1 2; do
         || exit 1
 done
 
-# ZWEI QUELLEN, damit „aktualisieren" wirklich etwas zu holen hat: die
-# erste traegt Fassung 1, die zweite Fassung 2. Jede bekommt ihren
-# eigenen INDEX und ihre eigene Signatur.
 rm -rf "$OUT/quelle1" "$OUT/quelle2"
 mkdir -p "$OUT/quelle1" "$OUT/quelle2"
 cp "$OUT/pak/hallo-1.opk" "$OUT/quelle1/"
 cp "$OUT/pak/hallo-2.opk" "$OUT/quelle2/"
-# DER SCHLUESSEL ENTSTEHT NUR EINMAL. Bis Runde UPDATE wurde er bei
-# JEDEM Bau neu gewuerfelt -- genau der Punkt 6.2 der Roadmap ("der
-# oeffentliche Schluessel entsteht bei jedem Bau neu"). Seit die
-# Signatur PFLICHT ist, ist das kein Schoenheitsfehler mehr: ein zweiter
-# Bau haette sonst Pakete signiert, die das Geraet aus dem ersten Bau
-# nicht mehr annimmt -- und die Fehlermeldung dafuer ("SIGNATURE WRONG")
-# sieht aus wie ein Angriff und ist ein Werkzeugfehler.
 if [ ! -s "$OUT/geheim.key" ]; then
     python3 "$OPK" schluessel "$OUT" > "$OUT/schluessel.log" 2>&1 || {
         cat "$OUT/schluessel.log"; exit 1; }
@@ -60,13 +37,6 @@ for q in quelle1 quelle2; do
         > "$OUT/$q.log" 2>&1 || { cat "$OUT/$q.log"; exit 1; }
 done
 
-# ---------------------------------------------------------- RUNDE UPDATE
-#
-# JEDES PAKET BEKOMMT SEINE EIGENE SIGNATUR, und der oeffentliche
-# Schluessel wird zu der Datei, die `/bin/opk` auf dem Geraet erwartet.
-# Ohne beides installiert `opk` seit Runde UPDATE gar nichts mehr -- und
-# das ist der Punkt: der Nachweis ist nicht, dass eine Signatur ANLIEGT,
-# sondern dass ohne sie NICHTS passiert.
 for q in quelle1 quelle2; do
     python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/$q"/*.opk \
         || exit 1

@@ -1,38 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/clockwork/messen.sh -- LAEUFT DAS BILD OHNE EINGABE WEITER?
-#
-# ==================================================================
-# DIE FRAGE, UND WARUM SIE OHNE EINGABE GESTELLT WIRD
-# ==================================================================
-#
-# Justin hat auf echtem Blech fotografiert: die Uhr in der Taskleiste
-# steht. Faehrt er mit der MAUS ueber die Ziffern, springt sie auf die
-# richtige Zeit. Maus woanders bewegen reicht nicht.
-#
-# Das ist die Beschreibung eines Bildschirms, der nur dort und nur dann
-# aufgefrischt wird, wo Eingabe passiert -- und die Gegenprobe dazu ist
-# ein Lauf, in dem NIEMAND etwas eingibt. Kein `mouse_move`, kein
-# `sendkey`, nichts. Was sich in diesem Lauf bewegt, bewegt sich aus
-# eigener Kraft.
-#
-# GEMESSEN WIRD AUS DER SERIELLEN LEITUNG, in Zahlen und nicht im Bild:
-#
-#   B=    wm.composites  -- wie oft das Bild ZUSAMMENGESETZT wurde. Das
-#         ist die Kernzahl. Ohne Eingabe muss sie steigen, sonst kommt
-#         nichts auf den Schirm.
-#   T=    kstate.TICKS   -- schlaegt der Zeitgeber ueberhaupt?
-#   LOOP= board_loop     -- laeuft die Schreibtischschleife?
-#   IRQ=  board_irq      -- calls from the timer
-#   PRE=  kstate.PREEMPT -- ist die Verdraengung an? (Soll 1)
-#   HZ=   die gemessene Rate (Soll 100)
-#   R=    taskbar: round -- laeuft die Ring-3-Schleife der Leiste?
-#   SB=   status_build-Rufe / SBT= davon `true`
-#
-# Und dazu zwei Bilder, am Anfang und am Ende. Steht in beiden dieselbe
-# Uhrzeit, ist das Bild eingefroren -- egal was die Zahlen sagen.
-#
-#   bash tools/clockwork/messen.sh <baudir> <ergebnisdir> [sekunden] [smp]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -46,9 +12,6 @@ BREITE=${UHR_W:-3440}
 HOEHE=${UHR_H:-1440}
 mkdir -p "$ERG"
 
-# GENAU DIE ZEILE DES STICKS (tools/usbimg/build.sh, Eintrag 1) -- ohne
-# `nopuls`, weil der Puls hier das Messgeraet ist, und mit `tafel`,
-# weil die Tafelzeilen die Zahlen tragen.
 APP="modfs osum gfx fbres=${BREITE}x${HOEHE} wm wig desk wmshell wmdauer tafel herz tz=120 usb hidgen nosched noproc nofs"
 
 SOCK="$ERG/mon.sock"
@@ -66,7 +29,6 @@ echo "== Lauf: ${SEK}s, -smp $SMP, ${BREITE}x${HOEHE}, KEINE EINGABE =="
   echo $? > "$ERG/rc" ) &
 QPID=$!
 
-# Auf die erste Tafelzeile warten -- ab da laeuft der Schreibtisch.
 i=0
 while [ $i -lt 1200 ]; do
     grep -qa 'osum ' "$OUT" 2>/dev/null && break
@@ -91,7 +53,6 @@ echo "-- Bild 1 (Anfang) --"
 schuss anfang
 A_MARKE=$(date +%s)
 
-# ============ UND JETZT PASSIERT NICHTS. Das ist der Versuch.
 sleep "$SEK"
 
 echo "-- Bild 2 (Ende) --"
@@ -99,9 +60,6 @@ schuss ende
 kill "$QPID" 2>/dev/null
 wait "$QPID" 2>/dev/null
 
-# ---- die Zahlen aus der seriellen Leitung ----
-# Zeile 0 der Tafel: "<fassung> B<composites> T<ticks> sh<n>"
-# Zeile 8:           "8 TAKT  IRQ <n> MAL <n> LOOP <n> PRE <n> HZ <n>"
 z0() { grep -a ' B[0-9]* T[0-9]*' "$OUT" | sed -n "$1p"; }
 feld() { sed -n "s/.*[ ]$2\([0-9]\+\).*/\1/p" <<<"$1"; }
 takt() { grep -a '8 TAKT' "$OUT" | sed -n "$1p"; }
@@ -145,7 +103,6 @@ echo "  Bildpunkte geschoben .... ${PX_E:-?}"
 echo "=================================================="
 } | tee "$ERG/bericht.txt"
 
-# Die beiden Bilder unterscheiden sich? Dann hat sich etwas bewegt.
 if [ -f "$ERG/anfang.ppm" ] && [ -f "$ERG/ende.ppm" ]; then
     if cmp -s "$ERG/anfang.ppm" "$ERG/ende.ppm"; then
         echo "BILD: IDENTISCH -- der Schirm steht still." | tee -a "$ERG/bericht.txt"

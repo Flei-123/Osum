@@ -1,27 +1,8 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/lib/messtabelle.py -- aus zwei Abnahmeprotokollen die Tabelle
-# Abschnitt / TCG-Zeit / KVM-Zeit / TCG-Ergebnis / KVM-Ergebnis bauen.
-#
-#   python3 tools/lib/messtabelle.py .mess/A-tcg-seriell.log .mess/B-kvm-seriell.log
-#
-# Gelesen werden die Zeilen, die test.sh seit dieser Runde je Abschnitt
-# ausgibt:
-#
-#     == 4. der Kern laeuft: ... ==
-#        KERNEL: 174 passed, 0 failed
-#        [kvm  62,547 s  kernel]
-#
-# und, wenn der Abschnitt gefallen ist:
-#
-#       FEHLER  tools/kernel/run.sh ist fehlgeschlagen (siehe ...)
 
 import re
 import sys
 
-# Das accel-Feld ist LEER bei den drei Laeufern, die tools/lib/qemu.sh
-# nicht einbinden (hv, smp, arm) -- die schreiben keine `accel:`-Zeile.
-# Genau die sollen ja auf TCG bleiben, also ist das kein Fehler.
 ZEIT = re.compile(r'^\s*\[(\w*)\s+(\d+),(\d{3}) s\s+(\S+)\]\s*$')
 KOPF = re.compile(r'^== (.+?) ==\s*$')
 FEHL = re.compile(r'^\s*FEHLER\s+(\S+) ist fehlgeschlagen')

@@ -1,33 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/struktur/erhebung.py -- die Ist-Aufnahme des Kernbaums.
-#
-# Dieses Werkzeug AENDERT NICHTS. Es liest jede `.fi`-Datei unter
-# `kernel/`, sammelt ihre `import`-Zeilen und beantwortet damit vier
-# Fragen, die man einem flachen Verzeichnis mit 137 Dateien sonst nicht
-# ansieht:
-#
-#   1. WER RUFT WEN? Die Kanten des Abhaengigkeitsgraphen.
-#   2. WO SIND ZYKLEN? Starke Zusammenhangskomponenten (Tarjan). Ein
-#      Zyklus ist kein Fehler in Firn -- der Uebersetzer liest den ganzen
-#      Baum auf einmal --, aber er sagt, welche Dateien man NICHT
-#      einzeln herausloesen kann.
-#   3. WIE SCHWER WIEGT EINE DATEI? Zeilen, eingehende und ausgehende
-#      Kanten.
-#   4. HAELT DIE SCHICHTREGEL? Dazu liest es `tools/struktur/schichten.txt`
-#      (Zuordnung Datei -> Schicht) und zaehlt, wie viele Kanten die
-#      Regel einhalten und wie viele sie brechen.
-#
-# WICHTIG ZUR MODULAUFLOESUNG (gemessen in /root/firn/compiler/src/modules.rs):
-# `import a.b.c` laedt `a/b/c.fi` und spricht das Modul unter dem LETZTEN
-# Namensteil an (`c`). Ein Verschieben von `x.fi` nach `unter/x.fi`
-# aendert also NUR die import-Zeilen der Aufrufer -- KEINE Aufrufstelle
-# im Rumpf. Genau das macht diese Runde ueberhaupt moeglich.
-#
-# Aufruf:
-#   python3 tools/struktur/erhebung.py            # Textbericht
-#   python3 tools/struktur/erhebung.py --json     # Maschinenlesbar
-#   python3 tools/struktur/erhebung.py --pruefen  # nur Regelbrueche, Code 1
 
 import json
 import os
@@ -38,8 +9,6 @@ WURZEL = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 KERN = os.path.join(WURZEL, "kernel")
 SCHICHTDATEI = os.path.join(WURZEL, "tools", "struktur", "schichten.txt")
 
-# `import foo`, `import arch.x86_64.apic` -- am Zeilenanfang, keine
-# Fortsetzung. Kommentare (`//`) zaehlen nicht.
 IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([A-Za-z_][A-Za-z0-9_.]*)[ \t]*(?://.*)?$")
 
 
@@ -99,7 +68,6 @@ def tarjan(knoten, kanten):
     for start in knoten:
         if start in index:
             continue
-        # (Knoten, Iterator ueber seine Nachbarn)
         arbeit = [(start, iter(kanten.get(start, ())))]
         index[start] = tief[start] = zaehler[0]
         zaehler[0] += 1
@@ -196,7 +164,6 @@ def main():
     modus = sys.argv[1] if len(sys.argv) > 1 else ""
     module, kollisionen = sammle()
     kanten = {k: v["importe"] for k, v in module.items()}
-    # Eingangsgrad: wie viele andere Dateien brauchen diese hier.
     ein = {k: 0 for k in module}
     for k, zs in kanten.items():
         for z in zs:
@@ -215,7 +182,6 @@ def main():
         return 0
 
     if modus == "--pruefen":
-        # Gegenprobe-tauglich: NUR das Urteil, Code 1 bei Bruch.
         if not zuord:
             print("KEINE Schichtzuordnung (tools/struktur/schichten.txt) -- nichts geprueft")
             return 1

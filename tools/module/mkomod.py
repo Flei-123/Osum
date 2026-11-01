@@ -153,8 +153,6 @@ def funktion_in_text(elf: bytes, endung: str):
         for e in range(so, so + sz, 24):
             nm, info, _o, shndx, wert, groesse = struct.unpack_from(
                 "<IBBHQQ", elf, e)
-            # firnc schreibt Funktionen als NOTYPE mit Groesse 0 (readelf:
-            # "NOTYPE GLOBAL ... modul_init") -- beides zaehlt.
             if (info & 0xF) not in (0, 2) or shndx != text_i:
                 continue
             name = elf[stro + nm:elf.index(b"\0", stro + nm)].decode()
@@ -205,17 +203,7 @@ def bauen(argv):
 
     if text_dreh > 0:
         off, laenge = text_bereich(bytes(nutz))
-        # In die MITTE des Programmtextes, damit `modul_init` (das ganz
-        # vorne liegt) noch anspringbar ist und der Absturz WAEHREND des
-        # Laufs kommt und nicht schon beim Sprung.
         anfang = off + laenge // 2
-        # RUNDE ROADMAP-3: seit das Modul ueber den geordneten Kernbaum
-        # gebaut wird (O-STRUKTUR), liegen in `.text` auch serial.fi und die
-        # Leerfassung von gfx -- die Mitte traf toten Code, rc=21, die
-        # Gegenprobe mass nichts. Jetzt in den Treiber selbst (`ps2m.init`
-        # -> `init_inner`), den der Kern ERST NACH dem Laden ruft
-        # ("modul: laden=ok" steht dann schon da), hinter dem Vorspann.
-        # `modul_init` waere zu frueh: es laeuft INNERHALB des Ladens.
         ziel = (funktion_in_text(bytes(nutz), "ps2m__init_inner")
                 or funktion_in_text(bytes(nutz), "ps2m__init"))
         if ziel is not None:
@@ -238,8 +226,6 @@ def bauen(argv):
     sig = bytearray(ed25519_sign(seed, msg))
 
     if nutz_dreh >= 0:
-        # NACH dem Signieren: die Signatur bleibt gueltig ueber die alte
-        # Nutzlast und faellt damit ueber die neue.
         nb = bytearray(nb)
         nb[nutz_dreh] ^= 0xFF
         nb = bytes(nb)

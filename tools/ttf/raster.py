@@ -164,8 +164,6 @@ class Ttf:
         deckung = u16(self.d, o + 8)
         if (deckung >> 8) != 0 or (deckung & 1) != 1:
             return 0, 0
-        # +18: siehe `kernel/ttf.fi` -- der Kopf des Formats 0 ist acht
-        # Oktette lang, nicht vier.
         return o + 18, u16(self.d, o + 10)
 
     def kern(self, g1, g2):
@@ -299,7 +297,6 @@ def flatten(punkte, scale):
     if not punkte:
         return []
     p = [(f26(x, scale), f26(y, scale), an) for (x, y, an) in punkte]
-    # Anfangspunkt: der erste auf der Kurve, sonst der Mittelpunkt.
     start = None
     for i, (x, y, an) in enumerate(p):
         if an:
@@ -320,8 +317,6 @@ def flatten(punkte, scale):
             aus.append((x, y))
             i += 1
             continue
-        # ein Kontrollpunkt: der Endpunkt ist der naechste auf der Kurve
-        # oder der Mittelpunkt zum naechsten Kontrollpunkt.
         nx, ny, nan = p[(i + 1) % n]
         if not nan:
             nx = (x + nx) >> 1
@@ -360,7 +355,7 @@ class Glyphe:
         self.w, self.h = w, h
         self.links, self.oben = links, oben
         self.adv26 = adv26
-        self.a = deckung            # h Zeilen zu w Oktetten, 0..255
+        self.a = deckung
 
     def punkt(self, x, y):
         if x < 0 or y < 0 or x >= self.w or y >= self.h:

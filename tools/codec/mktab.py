@@ -88,7 +88,6 @@ feld('CDC_LEN', T['chroma_dc_coeff_token_len'], kommentar=
      'coeff_token fuer den Chroma-DC-Block (4:2:0, maxCoeff 4).')
 feld('CDC_BITS', T['chroma_dc_coeff_token_bits'])
 
-# ---- total_zeros: 15 Zeilen zu 16 (aufgefuellt)
 tz_len=[]; tz_bits=[]
 for i in range(15):
     r=T['total_zeros_len'][i]; b=T['total_zeros_bits'][i]
@@ -154,7 +153,6 @@ feld('VMAT', vm, kommentar=
 feld('QPC', [29,30,31,32,32,33,34,34,35,35,36,36,37,37,37,38,38,38,39,39,39,39],
      kommentar='qPc aus qPy fuer qPy >= 30, Tafel 8-15.')
 
-# ---- die Wertetafel des CAVLC-Lesers (FFmpegs init_cavlc_level_tab)
 def av_log2(x): return x.bit_length()-1 if x>0 else 0
 LV=[]; LN=[]
 for sl in range(7):

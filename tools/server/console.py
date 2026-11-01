@@ -48,7 +48,6 @@ def main():
             print("unbekannt: %s" % args[i])
             return 2
 
-    # Auf die Steckdose warten -- QEMU legt sie erst an, wenn es laeuft.
     s = None
     for _ in range(200):
         try:
@@ -109,9 +108,6 @@ def main():
                 print("   AUSGEBLIEBEN: %s" % wert)
                 break
         elif art == "--sende":
-            # Zeichen fuer Zeichen und mit einer kleinen Pause: so
-            # tippt ein Mensch, und so misst der Lauf die
-            # Zeilendisziplin und nicht die FIFO des Bausteins.
             zeile = wert.replace("\\n", "\n").replace("\\t", "\t")
             zeile = zeile.replace("\\003", "\003").replace("\\004", "\004")
             zeile = zeile.replace("\\025", "\025").replace("\\010", "\010")

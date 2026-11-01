@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dynlader/messung-wirt.sh -- RUNDE DYNLADER, SCHRITT 0: MESSEN.
-#
-# Bevor irgendetwas gebaut wird, wird gezaehlt, was ein dynamisch
-# gelinktes musl-Programm auf einem ECHTEN Linux vom Kern verlangt.
-# Das Ergebnis steht in docs/RUNDE-DYNLADER.md Abschnitt 1 und ist der
-# Grund, aus dem diese Runde KEINE neuen Syscalls baut.
 set -u
 W=${1:-/tmp/dynlader-messung}
 mkdir -p "$W"; cd "$W"

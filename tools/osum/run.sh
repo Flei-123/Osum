@@ -57,9 +57,6 @@ PROGS="sh ls cat echo rm hurt hello"
 BLOCKS=2048
 
 TMPD=$(mktemp -d)
-# OSUM_BEHALTEN=1 laesst das Arbeitsverzeichnis stehen, damit man die
-# seriellen Mitschnitte nach einem Fehlschlag noch ansehen kann. Ohne
-# die Variable ist das Verhalten unveraendert.
 if [ -n "${OSUM_BEHALTEN:-}" ]; then
     trap 'echo "ARBEITSVERZEICHNIS BLEIBT: $TMPD" >&2' EXIT
 else
@@ -82,9 +79,6 @@ has() { grep -qF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -qF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 value() { grep -oE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
 
-# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
-# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
-# Ziel gebaut. Das Skript baut nur, wenn noetig.
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
@@ -366,9 +360,6 @@ H="$TMPD/hurt.txt"
 grep -qE '^user fault: pid=[0-9]+  vector=14  err=0x7  cr2=0x40100000' "$H" \
     && ok "writing into its own code page: #PF err=0x7 (page there, write, ring 3) -- the text is read only" \
     || { bad "no #PF err=0x7 on the code page"; grep '^user fault' "$H" | sed 's/^/        /'; }
-# RUNDE LIMITS: the stack of a program from disk ends at 0x535FF000 now (10 MiB); K16: der Stapel reichte von 0x40001000 bis 0x4007F000
-# (`proc.ARGS_BASE`), nicht mehr nur bis 0x40009000 -- die Adresse, an
-# der `hurt` in seinen eigenen Stapel springt, liegt deshalb hoeher.
 grep -qE '^user fault: pid=[0-9]+  vector=14  err=0x15  cr2=0x535' "$H" \
     && ok "executing its own stack: #PF err=0x15 (page there, instruction fetch, ring 3) -- the no-execute bit works" \
     || { bad "no #PF err=0x15 out of the stack"; grep '^user fault' "$H" | sed 's/^/        /'; }
@@ -511,15 +502,6 @@ for _ in $(seq 1 200); do
     sleep 0.2
 done
 if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/null; then
-    # RUNDE ROTABSCHNITTE: auf die WIRKUNG warten, nicht auf die Uhr.
-    # Vorher stand hier `time.sleep(0.3)` je Taste. Das ist auf einer
-    # geteilten Maschine zu wenig -- QEMU bekommt seine Zeitscheibe
-    # nicht, und die Zeile darunter zaehlte 2 statt 3. Gemessen wurde
-    # damit die Last des Wirts und nicht der Kern. tools/lib/tasten.py
-    # schickt eine Taste und wartet, bis der Kern ihre `key: `-Zeile
-    # gemeldet hat (genau eine je Taste, kernel/kbd.fi), bevor die
-    # naechste kommt. Die Zusage bleibt dieselbe: es muessen alle drei
-    # ankommen.
     python3 tools/lib/tasten.py "$TMPD/mon.sock" "$TMPD/kbd.txt" \
         l s ret | sed 's/^/        /'
     wait $qemu_pid 2>/dev/null
@@ -527,30 +509,6 @@ if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/n
     K="$TMPD/kbd.txt"
     [ "$rc" -eq 21 ] && ok "the interactive run ends by itself (exit 21) -- a quiet console is the end of the input" \
                      || { bad "keyboard run: exit code $rc"; tail -6 "$K" | sed 's/^/        /'; }
-    # RUNDE ROTABSCHNITTE: `grep -c '^key: '` GEMESSEN UND FALSCH.
-    # Der Kern schreibt je Taste die Meldung `key: <zeichen>` auf die
-    # Leitung. Die Shell schreibt ihre Eingabeaufforderung `osum$ ` OHNE
-    # abschliessenden Zeilenumbruch davor -- im Mitschnitt steht deshalb
-    #
-    #     osum$ key: l
-    #     key: s
-    #     key: [enter]
-    #
-    # Die ERSTE Meldung steht nicht am Zeilenanfang, und `^key: ` sieht
-    # sie nie. Gezaehlt wurden 2, geschickt waren 3. Das hat NICHTS mit
-    # Last zu tun -- es ist bei jedem Lauf so, auch auf einer leeren
-    # Maschine, und keine noch so lange Wartezeit haette es geheilt.
-    # Nachgemessen an einem behaltenen Mitschnitt: `key: ` kommt 3-mal
-    # vor, `^key: ` 2-mal, und die drei Tasten sind alle angekommen
-    # (die Shell fuehrt `ls` ja auch wirklich aus, zwei Zusagen weiter).
-    #
-    # Gezaehlt wird jetzt die MELDUNG und nicht die Spalte, in der sie
-    # zufaellig beginnt. `apic: keyboard gsi 1` und aehnliche Zeilen
-    # enthalten `key: ` nicht und koennen nicht mitzaehlen (geprueft).
-    # Das Muster laesst `key: ` am Zeilenanfang ODER hinter einem
-    # Zeichen zu, das kein Kleinbuchstabe ist (hier das Leerzeichen von
-    # `osum$ `). Gegengeprueft: `monkey: `, `donkey: `, `keyboard: ` und
-    # `apic: keyboard gsi 1` zaehlen NICHT mit, die drei echten schon.
     n=$(grep -aoE '(^|[^a-z])key: ' "$K" | wc -l)
     num "keys that arrived over IRQ1" "$n" eq 3
     has "$K" "osum\$ ls" "the shell read the line 'ls' out of the keyboard"

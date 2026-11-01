@@ -331,7 +331,6 @@ import random, sys
 src, ziel, seed = sys.argv[1], sys.argv[2], int(sys.argv[3])
 d = bytearray(open(src, 'rb').read())
 r = random.Random(seed)
-# Den Anfang (SPS/PPS) in Ruhe lassen: es geht um den SLICE-Inhalt.
 for _ in range(6):
     p = r.randrange(64, len(d))
     d[p] ^= 1 << r.randrange(8)

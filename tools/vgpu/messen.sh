@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/vgpu/messen.sh -- DIE WAAGE DER RUNDE VIRTIOGPU.
-#
-# EIN Schreibtischlauf, zwei Betriebsarten, DIESELBE Rechnung:
-#
-#   vga     der heutige Weg -- Kopie in den Rahmenpuffer der Firmware
-#   vgpu    der neue Weg    -- virtio-gpu, nur geaenderte Rechtecke
-#
-# Gemessen wird an einem BEWEGTEN Bild: `mausflut=60` erzeugt einen
-# echten Zeigerstrom aus dem Kern (60 Pakete je Sekunde), und die Uhr
-# in der Leiste tickt ohnehin. Ein stehendes Bild waere die falsche
-# Messung -- dort ist jede Zahl klein, weil sich nichts aendert.
-#
-#   bash tools/vgpu/messen.sh [sekunden]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -26,15 +12,11 @@ if [ -z "${VGPU_KERNEL:-}" ]; then
         || { echo "Bau fehlgeschlagen"; tail -20 "$TMPD/build.log"; exit 1; }
 fi
 
-# DAS ABBILD MIT DEN SCHRIFTEN -- ohne sie gibt es keine Fenster, und
-# ohne Fenster misst dieser Lauf einen leeren Schirm.
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs fehlgeschlagen"; cat "$TMPD/mkfs.txt"; exit 1; }
 
 GRUND="nokbd noproc nofs"
-# mausflut=60 -- ein Zeigerstrom mit echter Rate. wighalt haelt den
-# Schreibtisch die Messdauer offen, damit die Uhr wirklich tickt.
 APP="gfx wm wig desk wmhold wiglong vsync mausflut=60 wighalt=$SEK $GRUND"
 
 lauf() { # name qemu-grafikargumente...

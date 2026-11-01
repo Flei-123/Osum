@@ -57,22 +57,6 @@ ULD=kernel/user/user.ld
 NETPROGS="sh ls cat echo ping wget"
 BLOCKS=4096
 
-# RUNDE K12 HAT DIESE FUENF ZEILEN GEAENDERT, und der Grund gehoert hierher.
-#
-# Namensraum, Verbindungspaar und die beiden Anschluesse waren FEST:
-# `k8net`, `v0`/`v1`, 5555 und 5556. Solange nur ein Arbeitsbaum durch
-# `./test.sh` laeuft, ist das richtig. Laufen zwei gleichzeitig -- und im
-# Augenblick laufen drei Runden nebeneinander an diesem Repo --, dann
-# reisst der zweite dem ersten mitten in Abschnitt 14 den Namensraum
-# weg (`ip netns del k8net` steht in der Vorbereitung JEDES Laufs), und
-# der erste stirbt ohne Fehlermeldung oder misst 40 rote Zusagen, weil
-# seine Pakete in den fremden Namensraum gehen. Genau das ist beim
-# Messen der Runde K12 dreimal passiert.
-#
-# Die Namen haengen jetzt an der Prozessnummer. GEMESSEN WIRD DASSELBE:
-# dieselbe Bauart, dieselben Adressen, dieselben Zusagen -- nur der Lauf
-# gehoert sich selbst. Der Name des Namensraums steht ausserdem unten in
-# der Kopfzeile, damit man ihn im Protokoll wiederfindet.
 NS=k8net-$$
 V0=v0-$$
 V1=v1
@@ -184,18 +168,6 @@ build_stage 1 && ok "firnc1: the same, out of the compiler written in Firn" \
 # is the pinned Firn commit and not a copy in this repository.
 for s in 0 1; do
     [ -f "$TMPD/k$s.o" ] || continue
-    # RUNDE K7B: `kdata` ist der ZWEITE erlaubte offene Name, genau wie in
-    # tools/kernel/run.sh und tools/pci/run.sh.  Runde K7 haengt den
-    # Bildschirmspiegel unter `serial.put`; damit `fb.fi` weder `serial`
-    # noch `mem` einbinden muss (das waere ein Kreis im
-    # Abhaengigkeitsgraphen), holt sich `fb.kdata()` die Adresse des
-    # Datenbereichs ueber das Bindersymbol `kdata` aus `boot.s` -- mit
-    # einem `lea`, aufgeloest im Bindeschritt darueber, wie `osum_panic`
-    # aus isr.o.  DIESER Laeufer entstand auf dem Netzzweig, parallel zu
-    # K7, und hat den zweiten Namen beim Verschmelzen nicht mitbekommen:
-    # er meldete `k0.o: undefined symbols: kdata` und `k1.o` dasselbe.
-    # Das waren die beiden Fehler, die auf `main` schon standen, bevor
-    # diese Runde anfing.
     undef=$(nm -u "$TMPD/k$s.o" 2>/dev/null | awk '{print $NF}' | sed '/^$/d' | grep -vE '^(osum_panic|kdata|osym_tab)$')
     [ -z "$undef" ] && ok "k$s.o: no undefined name other than osum_panic, kdata und osym_tab" \
                     || bad "k$s.o: undefined symbols: $undef"

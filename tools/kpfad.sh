@@ -1,16 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/kpfad.sh -- zum EINBINDEN, nicht zum Ausfuehren.
-#
-#     . tools/kpfad.sh
-#     grep -aE '^const MAX_CPUS' "$(kfi kstate)"
-#
-# `kfi` gibt den Pfad einer Kerndatei zurueck, egal in welcher Schicht
-# sie liegt. Das ist die kurze Fassung von `tools/kfind.sh`; die lange
-# Erklaerung steht dort.
-#
-# WARUM EIN ZWISCHENSPEICHER: manche Laeufer fragen dieselbe Datei
-# zwanzigmal, und jedes `find` liest den Verzeichnisbaum neu. Der
-# Speicher haelt nur, solange die Shell laeuft.
 
 if [[ -z ${KPFAD_WURZEL:-} ]]; then
     KPFAD_WURZEL=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

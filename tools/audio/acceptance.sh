@@ -1,27 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/audio/acceptance.sh -- DIE 60-SEKUNDEN-ABNAHME DER RUNDE TON-2.
-#
-#   bash tools/audio/acceptance.sh [ausgabeverzeichnis]
-#
-# ZWOELF LAEUFE: -smp 1 und -smp 4, Quelle ide und ram, je DREI Mal.
-#
-# WARUM DREI UND NICHT EINER. Der Aussetzerzaehler des Treibers
-# (`hda.fi`, S_UNDER) wird nur fortgeschrieben, wenn jemand die
-# Position abfragt, und schwankte ueber EINE Sekunde bei voellig
-# gleichem Code zwischen eins und fuenf. Eine einzelne Zahl ist damit
-# Rauschen. Drei Laeufe zeigen, ob eine Null eine Eigenschaft ist oder
-# ein Zufall.
-#
-# WARUM SECHZIG SEKUNDEN. Ein Aussetzer ist selten; ueber eine Sekunde
-# gemessen sagt seine Zahl nichts. Sechzig Sekunden gehen in diesem
-# Dateisystem nicht als EINE Datei (ein Inode fasst 2134016 Oktette =
-# 12,1 s bei 44100 Hz stereo), deshalb spielt `/bin/play -w 6` die
-# Zehn-Sekunden-Datei sechsmal an EINEM offenen Strom.
-#
-# DIE ZAHL, DIE ZAEHLT, IST `gaps` -- echte Nullstrecken in dem, was
-# das Geraet ausgegeben hat. Alles andere ist Buchhaltung des Kerns
-# ueber sich selbst.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 OUT=${1:-/root/ton2-abnahme}

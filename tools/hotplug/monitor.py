@@ -137,8 +137,6 @@ def main():
         cmd = teile[0]
         if cmd == "stecke":
             ident, datei = teile[1], teile[2]
-            # ERST das Laufwerk, DANN das Geraet. Andersherum haengt ein
-            # usb-storage ohne Ruecken in der Maschine.
             m.tu("drive_add 0 id=%s,if=none,file=%s,format=raw" % (ident, datei))
             m.tu("device_add usb-storage,id=dev%s,drive=%s" % (ident, ident))
             print("   stecke %s (%s)" % (ident, datei))
@@ -159,7 +157,6 @@ def main():
         elif cmd == "foto":
             ziel = teile[1]
             m.tu("screendump %s" % ziel)
-            # `screendump` ist fertig, wenn die Datei nicht mehr waechst.
             bis = time.time() + 20.0
             letzte = -1
             while time.time() < bis:

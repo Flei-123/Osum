@@ -23,44 +23,13 @@ import re
 import sys
 
 GRAFIK = ["fb", "wm", "wig", "font", "ttf", "tile", "vmode", "ansi", "ps2m"]
-# Die Dateien, DENEN die Grafik gehoert: die Module selbst, die Naht und
-# die beiden Ausbauten aus `kmain.fi` und `sys.fi`.
 EIGEN = set(g + ".fi" for g in GRAFIK) | {
     "gfx.fi", "gfx-aus.fi", "kgui.fi", "sysgui.fi",
-    # MERGE-2 18 (customres): der gespeicherte Bildmodus. Sie ist selbst
-    # eine Grafikdatei und wird bei --gui off mit geloescht.
     "dispsave.fi",
-    # RUNDE ROTABSCHNITTE: `zeiger.fi` stand in `build-kernel.sh` schon
-    # in GFX_DATEIEN (Zeile 213) und wird bei `--gui off` mit geloescht
-    # -- nur hier fehlte sie. Eine Datei, die der Bau als Grafikdatei
-    # behandelt, muss auch hier eine sein, sonst zaehlt der Pruefer eine
-    # Stelle, die es im Serverbau gar nicht gibt.
     "zeiger.fi",
-    # A-039 (24.09.2026): `drv/gpu/vgpu.fi`, der virtio-gpu-Treiber,
-    # rechnet auf dem Rahmenpuffer (`fb.back`, `fb.rect_take`, ...) und
-    # wird NUR aus Grafikdateien geholt (fb.fi, gfx.fi, wm.fi, kgui.fi).
-    # GEMESSEN: im Serverabbild 0 Symbole `vgpu__`, im GUI-Abbild 64.
-    # Die 6 "Stellen" waren also Grafik in einer Grafikdatei, und der
-    # Serverbau loescht sie seitdem ausdruecklich (GFX_DATEIEN).
     "vgpu.fi",
     # W-VBLANK: `drv/gpu/beam.fi` (scan-line counter of the Intel display pipe) is graphics only, like vgpu (wm.fi imports it).
     "beam.fi",
-    # RUNDE ROTABSCHNITTE: `shot.fi` (Runde FEEDBACK) ist das
-    # Bildschirmfoto VON INNEN und liest dafuer den Rahmenpuffer -- 15
-    # Stellen `fb.*`. Sie gehoert damit zur Grafik wie die zwoelf davor.
-    #
-    # GEMESSEN und nicht behauptet: im Serverabbild steht KEIN einziges
-    # ihrer Symbole.
-    #
-    #     nm /tmp/rot-srv.mb.elf | grep -c '_F0\.shot__'   ->  0
-    #     nm /tmp/rot-srv.mb.elf | grep -c '_F0\.fb__'     ->  0
-    #     nm /tmp/rot-srv.mb.elf | grep -c '_F0\.gfx__'    -> 70
-    #
-    # Der Grund: `shot.fi` wird NUR von `kgui.fi` und `sysgui.fi`
-    # eingebunden, und beide loescht `--gui off`. Der Binder nimmt sie
-    # damit gar nicht erst mit. Die Zusage dieses Abschnitts -- "kein
-    # Modul ausser der Naht greift noch auf die Grafik zu" -- gilt also
-    # im ABBILD, und das ist die Ebene, auf der sie etwas heisst.
     "shot.fi",
     "pixelguard.fi",
     "vmsvga.fi",

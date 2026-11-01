@@ -66,7 +66,7 @@ def main(argv):
         for c in range(min(bw, sw)):
             soll = bild[r][c]
             if soll is None:
-                continue  # durchsichtig: darueber sagt das Bild nichts
+                continue
             deckend += 1
             px, py = x + c, y + r
             if px >= w or py >= h:

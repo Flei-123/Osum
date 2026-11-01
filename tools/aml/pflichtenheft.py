@@ -138,7 +138,6 @@ def main(argv):
               % (kurz, len(count), deck,
                  "" if not fehlt else "   FEHLT: " +
                  ", ".join(disasm.op_text(o) for o in fehlt)))
-        # Die Namen, um die es in dieser Runde geht.
         wichtig = [n for n, k, e in names
                    if n.split(".")[-1] in
                    ("_LID", "_BST", "_BIF", "_BIX", "_PSR", "_STA", "_PRW")

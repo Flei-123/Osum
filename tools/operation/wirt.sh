@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/operation/wirt.sh -- ein Programm aus kernel/user/ fuer den WIRT
-# bauen. Siehe crt-wirt.s: derselbe Quelltext, dieselbe Bibliothek,
-# derselbe Uebersetzer -- nur der Lader ist Linux statt Osum.
-#
-#   bash tools/operation/wirt.sh <name> [ausgabe]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

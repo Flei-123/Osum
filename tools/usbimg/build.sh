@@ -319,8 +319,6 @@ d, it, pr, pj, konto = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4], 
 def rec(pw):
     if pw == '!':
         return '!'
-    # DAS SALZ IST ZUFAELLIG UND ACHT OKTETTE LANG -- so lang, wie
-    # pw.fi es schreibt (`make_hash`: acht Oktette aus dem Kern).
     salt = os.urandom(8)
     dk = hashlib.pbkdf2_hmac('sha256', pw.encode(), salt, it, 32)
     return "$osum1$%d$%s$%s" % (it, binascii.hexlify(salt).decode(),
@@ -442,14 +440,6 @@ if [ -n "${OTA_CONF:-}" ] && [ -s "${OTA_CONF}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
 else
     cat > "$OUT/ota.conf" <<EOFOTA
-# /etc/ota.conf -- woher dieses Geraet seine Updates holt.
-#
-# quelle   ein NAME und keine Adresse. Das Geraet loest ihn ueber den
-#          Nameserver auf, den ihm DHCP gegeben hat (Runde BETRIEB), und
-#          prueft das Zertifikat gegen /etc/ssl/roots.pem.
-# abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     true/false (ja/nein gehen auch). Vorgabe true (Entscheidung des Besitzers 02.10.2026): suchen, holen, einspielen; abschaltbar in Einstellungen -> Updates.
-# frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
 quelle=$STORE/aktuell
 abstand=3600
 auto=true
@@ -658,29 +648,6 @@ ARGS+=(/boot/ "${BOOTK[@]}" "${BOOTO[@]}"
 fi
 #
 cat > "$OUT/inittab" <<'EOFTAB'
-# /etc/inittab -- name:ziele:art:befehl:optionen
-#
-# DIE OBERFLAECHE STEHT HIER NICHT DRIN, und das ist kein Versaeumnis:
-# `kgui.desk_start` startet Schreibtisch, Leiste, Starter und den Rest
-# selbst, direkt aus dem Kern. Was init auf einem Abbild mit Bildschirm
-# tut, ist deshalb genau zweierlei -- Waisen einsammeln und beim
-# Abschalten aufraeumen (SIGTERM, Frist, SIGKILL, sync, umount) --,
-# und dafuer braucht es keinen eigenen Dienst.
-#
-# DIE KONSOLE LAEUFT NUR IM ZIEL `konsole`, und `ctrl` heisst dort
-# "wenn diese Shell endet, endet das System" (init.fi: A_CTRL ->
-# going = 0). Fuer einen Serverlauf ist das richtig: das Skript von
-# `script=` laeuft, die Shell endet, die Maschine faehrt sauber herunter.
-#
-# WARUM NICHT AUCH IM ZIEL `grafik`, gemessen und wieder verworfen:
-#   * mit `ctrl` wuerde ein `exit` im Terminalfenster den ganzen
-#     Rechner ausschalten.
-#   * mit `respawn` startet sie endlos neu -- gemessen 71 Mal in
-#     zwanzig Sekunden ("sh: ready" / "sh: bye" im Wechsel), weil auf
-#     einem Schreibtisch niemand an dieser Konsole sitzt und sie sofort
-#     wieder auf EOF laeuft.
-# Also gar nicht. Ein Dienst, der nichts zu tun hat, gehoert nicht in
-# die Tafel.
 sh:konsole:ctrl:/bin/sh
 hwinv:grafik:once:/bin/hwinv -d /var/jarvis/hwinv.txt
 vaultd:grafik:respawn:/bin/vaultd

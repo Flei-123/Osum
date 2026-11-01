@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/struktur/ablage.py -- LIEGT JEDE DATEI, WO SIE LIEGEN SOLL?
-#
-# Liest `tools/struktur/ablage.txt` (Soll) und den Baum (Ist) und
-# vergleicht beides. Das ist die zweite Haelfte der Ordnung: die
-# Aufrufrichtung prueft `erhebung.py`, die tatsaechliche Ablage diese
-# Datei.
-#
-# Aufruf:
-#   python3 tools/struktur/ablage.py             # Uebersicht
-#   python3 tools/struktur/ablage.py --pruefen   # Code 1 bei Abweichung
-#   python3 tools/struktur/ablage.py --offen     # was noch umzuziehen ist
-#   python3 tools/struktur/ablage.py --fehlend   # Module ohne Soll-Eintrag
 
 import os
 import sys
@@ -72,9 +59,6 @@ def alle_dateien():
 def vergleiche():
     soll = lies_soll()
     ist = ist_ablage()
-    # Eine Datei, die am falschen Ort liegt, faellt aus der Huelle
-    # heraus (ihr import zeigt ins Leere) -- sie waere sonst unsichtbar.
-    # Darum wird der Baum ZUSAETZLICH flach gelesen.
     flach = alle_dateien()
     for m, d in flach.items():
         if m in soll and m not in ist:
@@ -88,7 +72,6 @@ def vergleiche():
             passt.append((m, d))
         else:
             falsch.append((m, d, s))
-    # Und was im Soll steht, aber nirgends liegt, ist ein Verlust.
     for m in sorted(soll):
         if m not in ist and m not in flach:
             fehlt.append(m)

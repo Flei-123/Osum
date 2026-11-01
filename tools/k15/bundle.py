@@ -53,24 +53,6 @@ sys.path.insert(0, HIER)
 import symjoin  # noqa: E402
 
 
-# ===================================================== RUNDE TUERSCHLOSS
-#
-# WIE WEIT VORNE DIE ANGABEN STEHEN MUESSEN, und warum das hier
-# nachgerechnet und nicht gehofft wird.
-#
-# `appdir.eine_datei` (kernel/user/appdir.fi) liest von einer INFO
-# GENAU 1023 Oktette. Steht `name=` dahinter, findet der Starter keinen
-# Namen, zaehlt das Buendel nicht mit -- und es fehlt im Menue, obwohl
-# es vollstaendig im Abbild liegt. Nichts beschwert sich dabei.
-#
-# GEMESSEN, 08.09.2026: die erste Fassung von settings.osp/INFO hatte
-# den Kommentar vor den Angaben, `name=` stand bei Oktett 1109, und der
-# Starter meldete `apps=5` statt 6. Beim Nachrechnen stellte sich
-# heraus, dass explorer.osp/INFO mit 1019 Oktetten nur VIER Oktette vom
-# selben Fehler entfernt war -- ein Satz mehr im Kommentar, und der
-# Dateimanager waere aus dem Menue verschwunden.
-#
-# Deshalb bricht der Bau jetzt ab, statt ein stummes Buendel zu bauen.
 INFO_GRENZE = 1023
 
 
@@ -157,9 +139,6 @@ def main(argv):
         pfad = os.path.join(quelle, name)
         if nur is not None and start_von(pfad) not in nur:
             continue
-        # RUNDE TUERSCHLOSS: stehen die Angaben weit genug vorn?
-        # Ein Buendel, dessen `name=` hinter Oktett 1023 steht, wird vom
-        # Starter stumm uebergangen (siehe oben). Lieber hier abbrechen.
         ende, grenze = angaben_stehen_vorn(os.path.join(pfad, "INFO"))
         if ende >= grenze:
             print("buendel: %s/INFO -- die Angaben enden erst bei Oktett %d,"
@@ -200,11 +179,6 @@ def main(argv):
         zeilen.append("%s/data/" % ziel)
         zeilen.append("%s/data/README=%s"
                       % (ziel, os.path.join(pfad, "data", "README")))
-        # DER VERWEIS ZULETZT: `mkfs.py` loest den vorhandenen Pfad auf,
-        # und der muss dafuer schon im Abbild stehen. Die Reihenfolge
-        # dieser Zeilen ist die Reihenfolge, in der gebaut wird.
-        # r543: console programs run in their OWN terminal window -- only where /bin/term is on the image (the small test
-        # images without term keep the plain second name, so their runs stay octet for octet the same)
         if (console_von(pfad) and nur is not None and "/bin/term" in nur
                 and not os.environ.get("OSUM_NOCONSOLE")):   # OSUM_NOCONSOLE: counter-proof switch of tools/term/editwin.sh
             skript = os.path.join(arbeit, name + ".start")

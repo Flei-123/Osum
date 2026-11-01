@@ -109,7 +109,7 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 import plattform as PLT   # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import opkpfad  # noqa: E402  -- A-025: der alte Standardpfad war ein Arbeitsbaum
+import opkpfad
 OPK = opkpfad.pfad()
 BUND_PY = os.path.join(HIER, "schluesselbund.py")
 
@@ -123,9 +123,6 @@ def sha256d(pfad):
 
 
 def signieren(bund, datei, aus, wer="haupt"):
-    # Erst wegnehmen: das Ziel kann eine HARTE VERKNUEPFUNG in den Vorrat
-    # sein (aus einem aelteren Stand dieses Werkzeugs), und ein Schreiben
-    # darauf traefe jede andere Verknuepfung mit.
     if os.path.lexists(aus):
         os.remove(aus)
     r = subprocess.run([sys.executable, BUND_PY, bund, "signieren", datei,
@@ -253,8 +250,6 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
     os.makedirs(os.path.join(aus, "pakete"), exist_ok=True)
     os.makedirs(os.path.join(aus, "v"), exist_ok=True)
 
-    # 1. DIE NUMMER, UND ZWAR ZUERST. Sie ist verbraucht, sobald sie
-    #    vergeben ist -- auch wenn der Rest dieses Laufs scheitert.
     reg = register_lesen(aus)
     if feste_fassung is not None:
         fassung = feste_fassung
@@ -276,8 +271,6 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
         shutil.rmtree(zv)
     os.makedirs(zv)
 
-    # 2. DIE PAKETE IN DEN VORRAT, inhaltsadressiert, und je eine
-    #    Signatur daneben.
     quellen = sorted(f for f in os.listdir(stand) if f.endswith(".opk"))
     if not quellen:
         raise SystemExit("veroeffentlichen: %s hat keine .opk-Datei" % stand)
@@ -289,31 +282,12 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
         if not os.path.isfile(vorrat):
             shutil.copy2(p, vorrat)
         verknuepfen(vorrat, os.path.join(zv, d))
-        # DIE SIGNATUR GEHOERT DER AUSLIEFERUNG UND NICHT DEM VORRAT.
-        #
-        # GEMESSEN, UND ES WAR EIN ECHTER FEHLER: der erste Entwurf legte
-        # `<sha256>.opk.sig` neben die Datei in den Vorrat und benutzte
-        # sie wieder. Nach einem SCHLUESSELWECHSEL war die Auslieferung
-        # damit in sich widerspruechlich -- `INDEX.sig` und
-        # `VERZEICHNIS.sig` trugen den neuen Schluessel, die Paketsignatur
-        # den alten -- und ein Geraet, das den Wechsel gerade angenommen
-        # hatte, sagte richtigerweise `opk: SIGNATURE WRONG -- das Paket
-        # wird ABGELEHNT`. Das Paket ist inhaltsadressiert und
-        # unveraenderlich; die Signatur darueber haengt an einer
-        # SCHLUESSELGENERATION. Beides in denselben Topf zu legen war der
-        # Fehler.
-        #
-        # Also: die Oktette liegen einmal im Vorrat, die Signatur wird je
-        # Auslieferung neu gerechnet. Das kostet 64 Oktett je Paket und
-        # Fassung und macht jede Auslieferung unter EINEM Schluessel in
-        # sich stimmig.
         signieren(bund, vorrat, os.path.join(zv, d + ".sig"), signierer)
         name, pf = meta_aus_opk(p)
         plattform = PLT.plattform_von_opk(p)
         pakete.append((name, pf, h, os.path.getsize(p), d, plattform))
         print("   paket    %-14s %-8s %s" % (name, pf, plattform))
 
-    # 3. INDEX (von `opk.py`, unsigniert) und die Signatur aus dem Bund.
     r = subprocess.run([sys.executable, OPK, "quelle", zv],
                        capture_output=True, text=True)
     if r.returncode != 0:
@@ -328,11 +302,6 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
     gesperrt_schreiben(aus, sperrliste)
     kette = [dict(k) for k in b["kette"]]
     if kette_kaputt and kette:
-        # EIN BIT IM LETZTEN KETTENSATZ. Alles andere bleibt richtig:
-        # die Auslieferung ist sauber signiert, nur der WECHSEL laesst
-        # sich nicht mehr nachrechnen. Das ist der Fall "unterbrochene
-        # Kette", und ein Geraet muss ihn von "kein Wechsel"
-        # unterscheiden.
         sig = bytearray(bytes.fromhex(kette[-1]["sig"]))
         sig[0] ^= 1
         kette[-1]["sig"] = bytes(sig).hex()
@@ -343,8 +312,6 @@ def bauen(aus, stand, bund, notiz, sperren, feste_fassung=None,
     signieren(bund, os.path.join(zv, "VERZEICHNIS"),
               os.path.join(zv, "VERZEICHNIS.sig"), signierer)
 
-    # 5. Der oeffentliche Schluessel liegt zum Nachsehen daneben. Er ist
-    #    KEIN Vertrauensanker -- der steht im Abbild des Geraets.
     with open(os.path.join(zv, "schluessel.pub"), "wb") as f:
         f.write(bytes.fromhex(b["haupt"]["pub"]))
 
@@ -366,7 +333,6 @@ def zuruecknehmen(aus, fassung):
     sperr.append(fassung)
     gesperrt_schreiben(aus, sperr)
     reg.setdefault("zurueckgenommen", []).append(fassung)
-    # `letzte` wird NICHT angefasst. Die Nummer ist verbraucht.
     register_schreiben(aus, reg)
     n = aktuell_setzen(aus, reg, gesperrt_lesen(aus))
     journal(aus, "zuruecknahme\t%d\tletzte bleibt %d\taktuell %d"

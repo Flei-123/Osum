@@ -39,7 +39,6 @@ class Ext4:
         self.inkompat = struct.unpack_from('<I', sb, 0x60)[0]
         self.kompat = struct.unpack_from('<I', sb, 0x5C)[0]
         self.rokompat = struct.unpack_from('<I', sb, 0x64)[0]
-        # s_state steht bei 0x3A; bei 0x38 steht die Magie.
         self.zustand = struct.unpack_from('<H', sb, 0x3A)[0]
         self.bloecke = struct.unpack_from('<I', sb, 0x4)[0]
         self.sb = sb

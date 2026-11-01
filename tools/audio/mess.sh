@@ -1,24 +1,4 @@
 #!/bin/bash
-# RUNDE TON -- DIE MESSSTRECKE.
-#
-# Kein Pruefstand, sondern ein MESSGERAET: EIN Lauf, EINE Zeile Zahlen.
-# Die Frage, die dieses Skript beantwortet, ist nicht "geht es?",
-# sondern "WORAN liegt es?" -- und dafuer braucht es die vier Zahlen aus
-# kernel/audio.fi, die /bin/play am Ende ausgibt:
-#
-#   luecke_us   groesste Pause zwischen zwei Schueben aus Ring 3
-#   kern_us     Zeit, die IN den Ton-Systemaufrufen verging
-#   wand_us     erster bis letzter Schub
-#   schuebe     wie oft Ring 3 ueberhaupt geliefert hat
-#   minvorrat   kleinster Vorrat, der je im Ring stand (Rahmen)
-#
-# LESEART: ist luecke_us groesser als die Ringlatenz (85333 us), kam
-# Ring 3 zu spaet -- der Puffer ist dann NICHT zu klein, der Abspieler
-# ist zu langsam. Ist kern_us nahe an wand_us, frisst der Kern die
-# Zeit. Ist minvorrat gross und trotzdem Aussetzer gezaehlt, zaehlt der
-# Zaehler falsch.
-#
-# Verwendung: bash tools/audio/mess.sh [datei.wav] [smp]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -29,14 +9,8 @@ ULD=kernel/user/user.ld
 PROGS="sh echo cat ls play"
 
 MEDIA=${1:-/ton.wav}
-# RUNDE TON-2: zusaetzliche Argumente an /bin/play (z. B. "-w 6" fuer
-# sechs Durchlaeufe). Sie stehen VOR dem Pfad, weil /bin/play seine
-# Optionen vor dem Dateinamen erwartet.
 PLAYOPT=${TON_PLAYOPT:-}
 SMP=${2:-4}
-# QUELLE: ide (Platte an den ATA-Ports) oder ram (dieselbe Abbildung als
-# Multiboot-Modul). Der Unterschied zwischen beiden Laeufen ist der
-# Beweis, ob die Aussetzer vom TON kommen oder vom LESEN.
 QUELLE=${3:-ide}
 TMPD=${TON_TMPD:-$(mktemp -d)}
 KEEP=${TON_KEEP:-0}
@@ -59,10 +33,6 @@ bash tools/hda/mkmedia.sh "$TMPD/m" > "$TMPD/media.txt" 2>&1
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 for f in "$TMPD"/m/*; do SPEC="$SPEC /$(basename "$f")=$f"; done
-# RUNDE TON-2: die Platte richtet sich nach dem, was drauf soll.
-# 16384 Sektoren (8 MiB) reichten fuer eine Sekunde Ton; die
-# 60-s-Abnahme bringt allein 10,6 MiB mit. Statt einer festen Zahl
-# wird gerechnet: alles, was hineinkommt, plus die Haelfte als Luft.
 SEKT=$(( $(du -cb "$TMPD"/m/* "$TMPD"/*.elf 2>/dev/null | tail -1 | cut -f1) * 3 / 2 / 512 + 4096 ))
 [ "$SEKT" -lt 16384 ] && SEKT=16384
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" "$SEKT" $SPEC > "$TMPD/mkfs.txt" 2>&1 \

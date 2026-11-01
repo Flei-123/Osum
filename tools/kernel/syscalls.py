@@ -69,8 +69,6 @@ import sys
 HIER = os.path.dirname(os.path.abspath(__file__))
 WURZEL = os.path.dirname(os.path.dirname(HIER))
 
-# RUNDE O-STRUKTUR: der Kern liegt jetzt in Schichten. Gesucht statt
-# buchstabiert -- dann ueberlebt dieses Werkzeug auch den naechsten Umzug.
 def _finde(name):
     for stamm, verz, namen in os.walk(os.path.join(WURZEL, "kernel")):
         verz[:] = [d for d in verz if d not in ("user", "app")]
@@ -82,9 +80,6 @@ def _finde(name):
 KERN = _finde("sys.fi")
 LIBC = "lib/libc/kcall.fi"
 
-# Namen, die aussehen wie eine Aufrufnummer und keine sind. Der Grund
-# steht oben im Kopf; er gehoert dazu, sonst ist eine Ausnahmeliste nur
-# eine Liste der Faelle, die jemand nicht verstehen wollte.
 KEINE_NUMMER = {
     "SYS_MARK": "Marke der Exkursion (Runde 59), gilt nur bei EXCURSION",
     "SYS_LEAVE": "Marke der Exkursion (Runde 59), gilt nur bei EXCURSION",

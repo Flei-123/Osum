@@ -112,18 +112,12 @@ DATA_START = 34
 DIRENT = 32
 NAME_LEN = 24
 DIRECT = 8      # Fassung 2
-DIRECT_V1 = 11  # Fassung 1, vor Runde K13
+DIRECT_V1 = 11
 
 T_FREE, T_FILE, T_DIR = 0, 1, 2
 I_TYPE, I_SIZE, I_NLINK, I_DIRECT, I_INDIRECT = 0, 8, 16, 24, 112
-# RUNDE K13. Die drei Woerter, die aus den Blockzeigern 8, 9 und 10
-# wurden (`kernel/fs.fi`, dieselben Offsets). In einem Abbild der Fassung
-# 1 gibt es sie nicht.
 I_MODE, I_UID, I_GID = 88, 96, 104
 OFS_V1, OFS_V2, OFS_V3 = 1, 2, 3
-# RUNDE OFS3. Die zweite Umsetzung derselben Zahlen, die in
-# `kernel/fs.fi` stehen -- und dass es zwei sind, ist der ganze Sinn
-# dieser Datei: zwei Programme, zwei Sprachen, zwei Seiten der Platte.
 INODE_SIZE_V3 = 256
 IPB_V3 = 2
 DIRENT_V3 = 264
@@ -139,23 +133,11 @@ I_QINDIRECT = 160
 I_DINDIRECT = 120
 SB = dict(MAGIC=0, BSIZE=8, BLOCKS=16, INODES=24, BITMAP=32, ITABLE=40,
           DATA=48, ROOT=56, VERSION=64,
-          # RUNDE OFS3: vier Felder, alle mit derselben Regel wie
-          # VERSION -- eine Null heisst "wie vor dieser Runde".
           BMBLOCKS=72, ISIZE=80, DIRENT=88, NAMELEN=96,
-          # RUNDE INSTALL nennt Wort 72 BITBLOCKS. Es ist DASSELBE Wort;
-          # beide Runden haben unabhaengig voneinander denselben Versatz
-          # gewaehlt. Der zweite Name bleibt stehen, weil die Werkzeuge
-          # der Runde INSTALL ihn benutzen.
           BITBLOCKS=72,
-          # RUNDE FSROBUST: wo das Journal liegt und wie viele
-          # Bloecke es hat. Eine Null heisst "kein Journal", und
-          # damit sagt jede Platte von vor dieser Runde von
-          # selbst das Richtige.
           JSTART=104, JBLOCKS=112,
           XVER=120, XBLOCKS=128, XBMSTART=136, XITSTART=144, XINODES=152,
           XPLAN=160, XCURSOR=168)
-# `kernel/ofsj.fi::BLOCKS_NEEDED` -- 1 Kopf + 8 Zieltafel + 512
-# Nutzlast + 1 Bestaetigung. Die ZWEITE Umsetzung derselben Zahl.
 J_BLOCKS = 522
 
 
@@ -165,11 +147,6 @@ class Fs:
         self.inodes = inodes
         self.version = version
         self.zeit = zeit
-        # RUNDE OFS3: DIE GEOMETRIE HAENGT AN DER FASSUNG. Sie steht in
-        # `kernel/fs.fi::format_as` noch einmal, Zeile fuer Zeile
-        # dieselbe Rechnung -- und wenn eine der beiden sich irrt,
-        # findet der Kernel die Bloecke nicht, die dieses Programm
-        # geschrieben hat.
         if version >= OFS_V3:
             self.isize = INODE_SIZE_V3
             self.ipb = IPB_V3
@@ -182,33 +159,14 @@ class Fs:
             self.ipb = INODES_PER_BLOCK
             self.dirent = DIRENT
             self.namelen = NAME_LEN
-            # RUNDE INSTALL: AUCH IN DER FASSUNG 2 DARF DIE KARTE
-            # MEHRBLOCKIG SEIN. `fs.mount` liest Wort 72 des Superblocks
-            # OHNE auf die Fassungsnummer zu sehen -- die Zahl beschreibt
-            # eine Groesse und keine andere Bedeutung bestehender Felder.
-            # Bei bis zu 4096 Bloecken kommt 1 heraus, und ein Abbild
-            # ohne `--karten` ist damit Oktett fuer Oktett das von vorher.
             self.bmblocks = max(1, (blocks + BITS_PER_BLOCK - 1)
                                 // BITS_PER_BLOCK)
-        # RUNDE INSTALL: VORRAT AN KARTENBLOECKEN. `--karten=n` legt
-        # MEHR Kartenbloecke an, als die Platte braucht; die Bits
-        # dahinter stehen auf BELEGT. Genau das braucht ein
-        # Installationsprogramm, das dasselbe Dateisystem spaeter auf
-        # einer groesseren Partition WACHSEN lassen will: es setzt die
-        # neue Blockzahl in den Superblock und macht die Bits frei.
-        # Ohne Vorrat muesste dabei die Inodetabelle wandern, und das
-        # ist kein Wachsen mehr, sondern ein Neubau.
         if karten > self.bmblocks:
             self.bmblocks = karten
         self.karten = self.bmblocks
         self.bmstart = BITMAP_BLOCK
         self.itable = self.bmstart + self.bmblocks
         self.itab_blocks = (inodes + self.ipb - 1) // self.ipb
-        # RUNDE FSROBUST: DER JOURNALBEREICH LIEGT ZWISCHEN INODETABELLE
-        # UND DATEN -- dieselbe Rechnung wie in `fs.format_as`. Er ist
-        # damit von selbst belegt: die Karte traegt alles vor
-        # `data_start` als besetzt ein. Ohne `--journal` ist er null,
-        # und dann ist das Abbild Oktett fuer Oktett das von vorher.
         self.journal = J_BLOCKS if journal else 0
         self.jstart = self.itable + self.itab_blocks if self.journal else 0
         self.data_start = self.itable + self.itab_blocks + self.journal
@@ -217,8 +175,6 @@ class Fs:
                              "inodes (the table alone takes %d)"
                              % (blocks, inodes, self.itab_blocks))
         self.blocks = blocks
-        # RUNDE OFS3: NUR SO VIEL, WIE GEBRAUCHT WIRD. Am Anfang die
-        # Verwaltung und ein paar Datenbloecke; `_deck` legt nach.
         self.d = bytearray(min(blocks, self.data_start + 64) * BS)
         self.root = 1
         self._hint = self.data_start
@@ -227,21 +183,13 @@ class Fs:
         self.xit = 0
         self.xin = 0
 
-    # Dafuer sorgen, dass Block `b` im Puffer liegt.
     def _deck(self, b):
         noetig = (b + 1) * BS
         if len(self.d) < noetig:
-            # In Schritten von mindestens 1 MiB, sonst kostet das
-            # Nachlegen bei jeder Zuteilung eine Kopie des Ganzen.
             neu = max(noetig, len(self.d) * 2, len(self.d) + (1 << 20))
             neu = min(neu, self.blocks * BS)
             self.d.extend(bytes(neu - len(self.d)))
 
-    # RUNDE K13: wie viele direkte Blockzeiger dieses Abbild hat. Die
-    # ZWEITE Umsetzung derselben Regel, die in `kernel/fs.fi::directs`
-    # steht -- und genau deshalb faellt es auf, wenn eine der beiden
-    # sich irrt: der Kern faende dann die Bloecke nicht, die dieses
-    # Programm geschrieben hat.
     @property
     def directs(self):
         return DIRECT if self.version >= OFS_V2 else DIRECT_V1
@@ -253,11 +201,6 @@ class Fs:
     def p64(self, at, v):
         struct.pack_into("<Q", self.d, at, v & 0xFFFFFFFFFFFFFFFF)
 
-    # ------------------------------------------------------------ bitmap
-    # RUNDE OFS3: DIE KARTE IST MEHRBLOCKIG. Block `bmstart + k` traegt
-    # die Bits der Bloecke k*4096 .. k*4096+4095. Das `% BITS_PER_BLOCK`
-    # ist die ganze Aenderung -- und ohne es zeigte die Rechnung bei
-    # Block 4096 in den naechsten Kartenblock hinein.
     def _bm_at(self, b):
         cover = self.bmblocks * BITS_PER_BLOCK
         if self.xblocks and b >= cover:
@@ -277,8 +220,6 @@ class Fs:
         return (self.d[self._bm_at(b)] >> (b % 8)) & 1
 
     def block_alloc(self):
-        # Wie im Kernel: ab dem letzten Fund, nicht immer von vorn. Ein
-        # Abbild von 100 MiB waere sonst auch auf dem Wirt quadratisch.
         b = max(self._hint, self.data_start)
         while b < self.blocks:
             if not self.bit_get(b):
@@ -297,16 +238,9 @@ class Fs:
             b += 1
         raise SystemExit("mkfs: the disk is full")
 
-    # RUNDE OFS3: die ersten `n` Datenbloecke belegen, ohne sie zu
-    # benutzen. Danach beginnt die naechste Zuteilung bei
-    # `data_start + n`, und eine Datei landet dort, wo man sie haben
-    # will: hinter der alten Zwei-Megaoktett-Grenze.
     def reserve(self, n):
         b = self.data_start
         ende = min(self.data_start + n, self.blocks)
-        # OKTETTWEISE, sonst ist eine Reservierung von Millionen Bloecken
-        # auf dem Wirt eine Sache von Minuten. Der Rand links und rechts
-        # geht bitweise, alles dazwischen als ganzes Oktett.
         while b < ende and (b % 8) != 0:
             self.bit_set(b)
             b += 1
@@ -319,9 +253,6 @@ class Fs:
         self._hint = ende
         return ende - self.data_start
 
-    # OKTETTWEISE, nicht bitweise -- dieselbe Ueberlegung wie in
-    # `fs.free_blocks`. Bei vier Millionen Bloecken ist der Unterschied
-    # zwischen einer halben Sekunde und einer halben Minute.
     def free_blocks(self):
         frei = 0
         b = 0
@@ -359,9 +290,6 @@ class Fs:
         self.p64(self.inode_at(ino) + field, v)
 
     def inode_alloc(self, kind):
-        # Der naechste freie und nicht immer wieder von vorn: bei 4000
-        # Dateien waere das linear von eins ein quadratischer Bau, und der
-        # dauert auf dem Wirt Minuten statt Sekunden.
         start = getattr(self, "_next_ino", 1)
         for ino in range(start, self.inodes + 1):
             if self.iget(ino, I_TYPE) == T_FREE:
@@ -371,8 +299,6 @@ class Fs:
                 self.iset(ino, I_NLINK, 1)
                 if self.version >= OFS_V2:
                     self.iset(ino, I_MODE, 0o755)
-                # RUNDE OFS3: die drei Zeiten entstehen mit der Datei --
-                # dieselbe Regel wie in `fs.inode_init`.
                 if self.version >= OFS_V3:
                     self.iset(ino, I_CTIME, self.zeit)
                     self.iset(ino, I_MTIME, self.zeit)
@@ -400,7 +326,6 @@ class Fs:
         d = k - BS // 8
         if d < (BS // 8) ** 2:
             return self.double_block(ino, d, grow)
-        # RUNDE OFS3: die dritte Stufe, 64 * 64 * 64 Bloecke.
         if self.version >= OFS_V3:
             t = d - (BS // 8) ** 2
             if t < (BS // 8) ** 3:
@@ -420,8 +345,6 @@ class Fs:
             n += (BS // 8) ** 3 + (BS // 8) ** 4
         return n * BS
 
-    # Dieselbe Bewegung wie `fs.stufe` im Kernel: der k-te Zeiger AUS
-    # einem Zeigerblock, angelegt wenn noetig.
     def stufe(self, block, k, grow):
         b = self.g64(block * BS + k * 8)
         if b or not grow:
@@ -543,13 +466,6 @@ class Fs:
         name = raw[8:].split(b"\0")[0].decode("ascii", "replace")
         return ino, name
 
-    # EIN GEDAECHTNIS JE VERZEICHNIS, und es ist nicht Bequemlichkeit.
-    # `dir_find` und die Suche nach einem freien Platz gingen beide von
-    # vorn durch das Verzeichnis; bei 4000 Dateien in einem Ordner sind
-    # das acht Millionen Eintragsleseoperationen, und der Bau des
-    # Messabbilds dauerte damit 59 Sekunden. Der Kernel darf so
-    # arbeiten -- er legt selten viertausend Dateien an --, ein Werkzeug
-    # auf dem Wirt nicht.
     def _cache(self, dirino):
         c = getattr(self, "_dc", None)
         if c is None:
@@ -617,9 +533,6 @@ class Fs:
         self.iset(ino, I_UID, uid)
         self.iset(ino, I_GID, gid)
 
-    # RUNDE OFS3: die drei Zeiten, aus dem Abbild gelesen. Der WIRT
-    # prueft damit, was der Kernel im Gastsystem geschrieben hat -- nicht
-    # ein Mitschnitt einer seriellen Leitung, sondern der Inode.
     def get_times(self, ino):
         if self.version < OFS_V3:
             return 0, 0, 0
@@ -633,8 +546,6 @@ class Fs:
         self.iset(ino, I_MTIME, m)
         self.iset(ino, I_ATIME, a)
 
-    # EIN SYMBOLISCHER VERWEIS. Eine eigene Inode der Art T_LINK, deren
-    # INHALT der Pfad ist -- kein Sonderfeld, keine zweite Tafel.
     def symlink(self, path, target):
         if self.version < OFS_V3:
             raise SystemExit("mkfs: symbolische Verweise gibt es erst in "
@@ -650,9 +561,6 @@ class Fs:
 
     def get_meta(self, ino):
         if self.version < OFS_V2:
-            # Dieselbe Antwort wie `kernel/fs.fi::inode_mode`: ein
-            # Abbild der Fassung 1 traegt keine Rechte, und vor dieser
-            # Runde war dort alles erlaubt.
             return 0o755, 0, 0
         return (self.iget(ino, I_MODE) & 0o7777, self.iget(ino, I_UID),
                 self.iget(ino, I_GID))
@@ -669,27 +577,6 @@ class Fs:
         self.set_meta(ino, mode, uid, gid)
         return ino
 
-    # RUNDE K15: EIN ZWEITER NAME FUER DIESELBE DATEI.
-    #
-    # Ein Verzeichniseintrag ist eine Inode-Nummer und ein Name (32
-    # Oktette, `kernel/fs.fi`). Zwei Eintraege mit DERSELBEN Nummer sind
-    # deshalb zwei Namen fuer eine Datei -- ein harter Verweis, wie ihn
-    # jedes Unix hat, und er braucht in diesem Format keine einzige neue
-    # Zeile. Die Verweiszahl im Inode gibt es auch schon (`I_NLINK`); sie
-    # wird hier hochgezaehlt, damit sie die Wahrheit sagt.
-    #
-    # WARUM DAS UND NICHT ZWEIMAL DIESELBE DATEI: `/bin/explorer` ist
-    # 205 KiB. Zweimal waeren 410 KiB auf einem Abbild von 2 MiB, und die
-    # beiden koennten auseinanderlaufen. Der Testlaeufer misst genau das:
-    # er baut dasselbe Abbild einmal mit Verweis und einmal mit Kopie und
-    # vergleicht die freien Bloecke.
-    #
-    # WAS DIESER KERNEL DABEI NOCH NICHT KANN, und es gehoert gesagt:
-    # `unlink` zaehlt die Verweiszahl nicht herunter, es gibt den Inode
-    # frei. Wer einen der beiden Namen loescht, macht den anderen
-    # unbrauchbar. Auf einem Abbild, das nur gelesen wird -- und `/bin`
-    # wird nur gelesen --, faellt das nicht an; ein `rm /bin/files` waere
-    # trotzdem falsch, und das steht in docs/ROUNDK15.md.
     def link(self, newpath, oldpath):
         ino = self.resolve(oldpath)
         if not ino:
@@ -723,10 +610,6 @@ class Fs:
         self.p64(SB["DATA"], self.data_start)
         self.p64(SB["ROOT"], 1)
         self.p64(SB["VERSION"], self.version)
-        # RUNDE OFS3: die vier neuen Felder NUR in Fassung 3. In der
-        # Fassung 2 bleiben sie null, und eine Null heisst dort "wie
-        # vorher" -- ein Abbild ohne `--v3` ist damit Oktett fuer Oktett
-        # eines aus Runde K13.
         if self.version >= OFS_V3:
             self.p64(SB["BMBLOCKS"], self.bmblocks)
             self.p64(SB["ISIZE"], self.isize)
@@ -738,17 +621,9 @@ class Fs:
         if self.version >= OFS_V3:
             pass
         elif self.bmblocks > 1:
-            # RUNDE INSTALL: in der Fassung 2 steht NUR diese eine Zahl
-            # da, und auch sie nur, wenn sie etwas Neues sagt. Eine 0
-            # heisst 1 -- ein Abbild mit einem Kartenblock bleibt damit
-            # Oktett fuer Oktett dasselbe wie vor beiden Runden.
             self.p64(SB["BMBLOCKS"], self.bmblocks)
         for b in range(self.data_start):
             self.bit_set(b)
-        # WAS HINTER DER PLATTE LIEGT, GILT ALS BELEGT -- dieselbe Regel
-        # wie in `fs.format_as`. Die Karte fasst ein Vielfaches von 4096
-        # Bloecken; die Bits dahinter freizulassen hiesse, dem Zuteiler
-        # Bloecke anzubieten, die es nicht gibt.
         for b in range(self.blocks, self.bmblocks * BITS_PER_BLOCK):
             self.bit_set(b)
         self.root = 1
@@ -776,10 +651,6 @@ class Fs:
         return out
 
 
-# Ein Abbild vom Wirt lesen -- und die Geometrie AUS DEM SUPERBLOCK
-# nehmen, nicht aus den Konstanten. Genau das tut `fs.mount` seit dem
-# zweiten K15-Nachtrag auch; eine der beiden Umsetzungen, die es nicht
-# taete, waere der Fehler, gegen den es die zweite ueberhaupt gibt.
 def load(path):
     with open(path, "rb") as fh:
         raw = fh.read(BS)
@@ -792,10 +663,6 @@ def load(path):
     raw = open(path, "rb").read()
     inodes = struct.unpack_from("<Q", raw, SB["INODES"])[0] or INODE_COUNT
     version = struct.unpack_from("<Q", raw, SB["VERSION"])[0] or OFS_V2
-    # RUNDE OFS3: die Geometrie kommt aus dem SUPERBLOCK und nicht aus
-    # der Fassungsnummer -- ein Abbild darf 256er Inodes und 32er
-    # Eintraege haben, wenn es das von sich sagt. Genau das tut
-    # `fs.mount` auch.
     ipb = INODES_PER_BLOCK
     if version >= OFS_V3:
         isz = struct.unpack_from("<Q", raw, SB["ISIZE"])[0] or INODE_SIZE
@@ -804,8 +671,6 @@ def load(path):
     noetig = (1 + bmb + (inodes + ipb - 1) // ipb + 8)
     fs = Fs(max(len(raw) // BS, noetig), version, inodes, 0, bmb)
     fs.d[:len(raw)] = raw
-    # RUNDE INSTALL: auch eine Fassung 2 kann eine mehrblockige Karte
-    # haben, und dann wandert die Inodetabelle mit.
     if version < OFS_V3 and bmb > 1:
         fs.bmblocks = bmb
         fs.karten = bmb
@@ -823,7 +688,6 @@ def load(path):
     if fs.g64(SB["MAGIC"]) != MAGIC:
         return None
     fs.root = fs.g64(SB["ROOT"])
-    # RUNDE K13: die Fassung steht im Superblock; eine 0 heisst 1.
     fs.version = fs.g64(SB["VERSION"]) or OFS_V1
     return fs
 
@@ -867,23 +731,12 @@ def main(argv):
             print("no OSUM-OFS magic")
             return 1
         if cmd == "meta":
-            # RUNDE K13: Rechte und Eigentuemer AUS DEM ABBILD, auf dem
-            # Wirt gelesen. Das ist die ehrliche Art zu pruefen, dass
-            # `chmod` im Gastsystem etwas getan hat -- nicht ein
-            # Mitschnitt einer seriellen Leitung, sondern der Inode.
             if len(argv) > 3:
                 ino = fs.resolve(argv[3])
                 if not ino:
                     print("mkfs: no such path '%s'" % argv[3])
                     return 1
                 m, u, g = fs.get_meta(ino)
-                # DIESE ZEILE BLEIBT, WIE SIE IST. Runde OFS3 wollte hier
-                # zuerst die drei Zeiten anhaengen -- und hat damit auf
-                # einen Schlag zehn Zusagen aus `tools/k13/run.sh`
-                # umgeworfen, die die Zeile Zeichen fuer Zeichen
-                # vergleichen. Eine bestehende Ausgabe ist eine
-                # Schnittstelle. Was neu ist, bekommt einen eigenen
-                # Befehl: `mkfs.py times <abbild> <pfad>`.
                 print("%s %o %d %d" % (argv[3], m, u, g))
                 return 0
             print("version=%d bmblocks=%d isize=%d dirent=%d namelen=%d"
@@ -907,10 +760,6 @@ def main(argv):
         for line in fs.tree():
             print(line)
         return 0
-    # RUNDE OFS3: DIE DREI ZEITEN UND DIE ART, vom WIRT aus dem Inode
-    # gelesen. Die Gegenprobe zu allem, was der Kern im Gastsystem in
-    # einen Inode schreibt -- kein Mitschnitt einer seriellen Leitung,
-    # sondern die Oktette auf der Platte.
     if cmd == "times":
         fs = load(argv[2])
         if fs is None:
@@ -943,10 +792,6 @@ def main(argv):
         size = fs.iget(ino, I_SIZE)
         sys.stdout.buffer.write(fs.read_at(ino, 0, size))
         return 0
-    # RUNDE OFS3: `where <abbild> <pfad>` sagt, AN WELCHEN BLOECKEN eine
-    # Datei wirklich liegt. Ein Testlaeufer kann damit belegen, dass die
-    # Datei, die der Kern gleich liest, an Block 8.000.000 steht -- eine
-    # Nummer, fuer die es in Fassung 2 kein Bit gab.
     if cmd == "where":
         fs = load(argv[2])
         ino = fs.resolve(argv[3])
@@ -980,15 +825,6 @@ def main(argv):
         if spec.startswith("--time="):
             zeit = int(spec.split("=", 1)[1])
             continue
-        # RUNDE OFS3: `--reserve=<n>` MARKIERT DIE ERSTEN n DATENBLOECKE
-        # ALS BELEGT, ohne sie irgendeiner Datei zu geben. Das ist die
-        # einzige Art, eine Datei ABSICHTLICH weit hinten auf eine grosse
-        # Platte zu legen, ohne die Platte vorher wirklich vollzuschreiben
-        # -- und weit hinten ist genau die Stelle, an der die alte,
-        # einblockige Karte nichts mehr verwalten konnte. Der Kern liest
-        # die Datei danach an einer Blocknummer, die in Fassung 2 kein
-        # Bit gehabt haette; DAS ist der Beweis, und nicht die Zahl im
-        # Superblock.
         if spec.startswith("--reserve="):
             reserve = int(spec.split("=", 1)[1])
             continue
@@ -1001,12 +837,6 @@ def main(argv):
             journal = 1
             continue
         rest.append(spec)
-    # RUNDE OFS3: DIE VORGABE BLEIBT FASSUNG 2. Das ist keine
-    # Zaghaftigkeit -- Abschnitt 15d von `tools/k15/run.sh` baut dasselbe
-    # Abbild zweimal, vergleicht es mit `cmp` und prueft, dass der
-    # Datenbereich weiter bei Block 34 liegt. Waere die Vorgabe die neue
-    # Fassung, waeren 1486 bestehende Zusagen an einer anderen Platte
-    # gemessen worden, und keine einzige davon haette es gesagt.
     v = OFS_V2
     if "--v1" in argv[4:]:
         v = OFS_V1
@@ -1037,21 +867,12 @@ def main(argv):
     if zeit:
         fs.set_times(1, zeit, zeit, zeit)
     for spec in rest:
-        # ZWEI BEDEUTUNGEN FUER EIN ZEICHEN, und sie sind zu
-        # unterscheiden: K13 haengt `@rechte[:uid[:gid]]` an einen
-        # Dateinamen, K15 schreibt `<neu>@<vorhanden>` fuer einen
-        # ZWEITEN NAMEN derselben Datei. Was hinter dem `@` steht,
-        # entscheidet -- ein Pfad hat einen Schraegstrich, eine Rechte-
-        # angabe hat nur Ziffern und Doppelpunkte. Beide Formen aus den
-        # Runden davor gelten Zeichen fuer Zeichen weiter.
         mode, uid, gid = None, 0, 0
         # w-lc2: the LAST '@' separates the mode (Alpine key files are called alpine-devel@lists.alpinelinux.org-*.rsa.pub);
         # a '@' followed by '=', or in a symlink spec, belongs to the name/target and there is no mode suffix.
         head, _, meta = spec.rpartition("@")
         if "@" in spec and "->" not in spec and "=" not in meta:
             if "/" in meta:
-                # <neuer pfad>@<vorhandener pfad> -- ein zweiter NAME fuer
-                # dieselbe Datei, kein zweites Exemplar.
                 fs.link(head, meta)
                 continue
             spec = head
@@ -1061,9 +882,6 @@ def main(argv):
                 uid = int(parts[1])
             if len(parts) > 2 and parts[2] != "":
                 gid = int(parts[2])
-        # RUNDE OFS3: `<pfad>-><ziel>` ist ein SYMBOLISCHER Verweis. Das
-        # Zeichen `>` kommt in keinem Pfad dieses Systems vor, und `->`
-        # ist genau das, was `ls -l` fuer einen Verweis schreibt.
         if "->" in spec:
             pfad, _, ziel = spec.partition("->")
             fs.symlink(pfad, ziel)
@@ -1075,15 +893,13 @@ def main(argv):
         if not sep:
             raise SystemExit("mkfs: '%s' needs <path>=<hostfile>" % spec)
         if not host:
-            fs.addfile(path, b"")  # eine leere Datei: ein Name, kein Block
+            fs.addfile(path, b"")
             continue
         with open(host, "rb") as f:
             payload = brand_render.render_for_image(f.read(), host)
         fs.addfile(path, payload, 0o755 if mode is None else mode, uid, gid)
     with open(image, "wb") as f:
         f.write(fs.d)
-        # RUNDE OFS3: der Rest der Platte ist ein LOCH. Er liest sich als
-        # Nullen und belegt keinen Block auf dem Wirt.
         f.truncate(fs.blocks * BS)
     print("mkfs: %s  blocks=%d free=%d inodes=%d/%d data=%d version=%d "
           "bmblocks=%d isize=%d dirent=%d namelen=%d maxfile=%d "

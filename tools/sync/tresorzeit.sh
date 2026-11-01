@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/sync/tresorzeit.sh -- WIE LANGE DAUERT ES, DEN TRESOR ZU OEFFNEN?
-#
-# Der Auftrag fragt danach, und die Antwort aus der scrypt-Tabelle des
-# Wirtes ist nur die halbe: sie sagt, was das VERFAHREN kostet, nicht
-# was das SYSTEM braucht. Also wird hier IM System gemessen, mit der Uhr
-# des Systems (`date -u` gibt die Betriebsdauer in Millisekunden) und mit
-# dem voreingestellten Preis N=16384, r=8 -- nicht mit dem billigen
-# N=256 der uebrigen Testlaeufe.
-#
-#   bash tools/sync/tresorzeit.sh [N] [r]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh

@@ -1,31 +1,5 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dual/abnahme-cli.sh -- DIE ABNAHME OHNE FENSTERSERVER.
-#
-#   bash tools/dual/abnahme-cli.sh [bauverzeichnis] [ausgabeverzeichnis]
-#
-# ==================================================================
-# WARUM ES DIESEN LAUF ZUSAETZLICH ZUM FENSTER GIBT
-# ==================================================================
-#
-# Die Zusage dieser Runde -- "OrientOS legt sich neben ein fremdes
-# System, ohne dessen Daten anzufassen" -- ist eine Aussage ueber die
-# PLATTE und nicht ueber die Oberflaeche. Sie muss auch dann pruefbar
-# sein, wenn der Fensterserver nicht laeuft.
-#
-# Deshalb faehrt dieser Lauf denselben Weg ueber `/bin/dualcli`: dieselbe
-# `dualkern.neben_schreiben`, dasselbe `instkern.wurzel_kopieren_ab`,
-# dieselbe Startdatei -- nur ohne Fenster, gestartet mit `script=`.
-#
-# GEMESSEN WIRD GENAU DAS, WAS DER AUFTRAG VERLANGT:
-#
-#   * die fremden Partitionen sind BYTEWEISE unveraendert,
-#   * die Datei in der ESP ist noch da,
-#   * die GPT ist gueltig -- mit einem FREMDEN Werkzeug gegengelesen,
-#   * das Bootmenue bietet beide Eintraege an,
-#   * und die Gegenprobe: zu wenig Platz -> sauberer Abbruch, Platte
-#     unveraendert.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -42,10 +16,6 @@ titel() { printf '\n=== %s\n' "$*"; }
 [ -f "$BAU/osum.mb" ]  || { echo "== $BAU/osum.mb fehlt"  >&2; exit 1; }
 [ -f "$BAU/root.img" ] || { echo "== $BAU/root.img fehlt" >&2; exit 1; }
 
-# DIE LAGE DER FREMDEN PARTITIONEN WIRD GELESEN, NICHT GETIPPT.
-# `fremdplatte.sh` darf seine Groessen aendern, ohne dass die
-# Pruefsummen hier danebengreifen -- eine Summe ueber den falschen
-# Bereich waere still gruen.
 lies_lage() {
     local img=$1
     ESP_START=$(sgdisk -i 1 "$img" 2>/dev/null | sed -n 's/First sector: \([0-9]*\).*/\1/p')
@@ -77,8 +47,6 @@ echo "   VORHER  daten $VOR_DAT"
 
 # ==================================================================
 titel "2. der Probelauf -- versteht es die fremde Platte?"
-# ==================================================================
-# OHNE `--ja`: es darf KEIN Oktett geschrieben werden.
 cp -f "$OUT/platte.img" "$OUT/probe.img"
 PROBE_VOR=$(sha256sum < "$OUT/probe.img" | cut -d' ' -f1)
 lauf "$OUT/probe.img" "dualcli /dev/hdb --quelle /dev/hda" "$OUT/ser-probe.txt"
@@ -87,7 +55,6 @@ tr -d '\000' < "$OUT/ser-probe.txt" 2>/dev/null | grep -a '^dual:' | head -12 | 
 grep -qa 'dual: table=2' "$OUT/ser-probe.txt" \
     && ok "es liest die fremde Tafel: 2 Partitionen" \
     || bad "die fremde Tafel wurde nicht gelesen"
-# Die ESP ist Partition 1, Typ 1 (T_ESP); die Daten sind Typ 2.
 grep -qa "dual: part 1 $ESP_START $((ESP_START+ESP_SEK-1)) 1" "$OUT/ser-probe.txt" \
     && ok "Partition 1 richtig erkannt: Sektor $ESP_START..$((ESP_START+ESP_SEK-1)), Art EFI" \
     || bad "Partition 1 wurde nicht richtig gelesen"
@@ -199,13 +166,7 @@ fi
 
 # ==================================================================
 titel "8. DIE GEGENPROBE: zu wenig freier Platz"
-# ==================================================================
-# Dieselbe Platte, aber ohne Luecke: die Datenpartition reicht bis ans
-# Ende. Jetzt MUSS das Programm abbrechen, und die Platte muss
-# unveraendert bleiben.
 bash tools/dual/fremdplatte.sh "$OUT/eng.img" 80 > /dev/null 2>&1
-# Die zweite Partition bis kurz vors Ende verlaengern -- mit sgdisk,
-# also von aussen.
 sgdisk -d 2 "$OUT/eng.img" > /dev/null 2>&1
 sgdisk -n "2:$DAT_START:163806" -t 2:0700 -c 2:"Basic data partition" "$OUT/eng.img" > /dev/null 2>&1
 ENG_VOR=$(sha256sum < "$OUT/eng.img" | cut -d' ' -f1)

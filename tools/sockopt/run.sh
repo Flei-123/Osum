@@ -73,10 +73,6 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     exit 0
 fi
 
-# RUNDE KVMFIX hat den Kernel unter KVM zum Laufen gebracht (zwei echte
-# Hardwarefehler, siehe KVMFIX-STATUS.md). Wo /dev/kvm da ist, wird es
-# benutzt -- und wo nicht, sagt es der Laeufer, statt still langsamer zu
-# messen.
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL="-accel kvm"; ACCELNAME="kvm"
 else

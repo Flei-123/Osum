@@ -62,9 +62,6 @@ SRC = os.path.join(ROOT, "kernel", "chipname.fi")
 IDS_URL = "https://pci-ids.ucw.cz/v2.2/pci.ids"
 IDS_CACHE = "/tmp/pci.ids"
 
-# Die Quellen, aus denen die Nummern stammen duerfen, die pci.ids nicht
-# kennt. Wer hier etwas ergaenzt, muss die Datei im Kopf von
-# chipname.fi nennen.
 LINUX_SOURCES = {
     "igc": "drivers/net/ethernet/intel/igc/igc_hw.h",
     "igb": "drivers/net/ethernet/intel/igb/e1000_hw.h",
@@ -72,11 +69,6 @@ LINUX_SOURCES = {
     "atlantic": "drivers/net/ethernet/aquantia/atlantic/aq_common.h",
 }
 
-# Die vollstaendigen Listen aus dem Linux-Quelltext, Zweig master,
-# abgerufen am 02.09.2026 ueber git.kernel.org. Sie stehen HIER als
-# Zahlen und nicht als Netzabruf, damit die Pruefung auch ohne Netz
-# laeuft -- ein Pruefwerkzeug, das eine Internetverbindung braucht, ist
-# genau dann kaputt, wenn man es braucht.
 IGC_IDS = {
     0x15F2: "I225_LM", 0x15F3: "I225_V", 0x15F8: "I225_I",
     0x15F7: "I220_V", 0x3100: "I225_K", 0x3101: "I225_K2",
@@ -105,8 +97,6 @@ IGB_IDS = {
     0x1F45: "I354_BACKPLANE_2_5GBPS",
 }
 
-# I219, aus e1000e/hw.h. LM und V getrennt, weil chipname.fi genau diese
-# zwei Namen vergibt und die Pruefung sonst nichts aussagt.
 I219_LM = [
     0x156F, 0x15B7, 0x15B9, 0x15D7, 0x15E3, 0x15BD, 0x15BB, 0x15DF,
     0x15E1, 0x0D4E, 0x0D4C, 0x0D53, 0x15FB, 0x15F9, 0x15F4, 0x0DC5,
@@ -129,17 +119,9 @@ VEN_MAP = {
     "DEC": 0x1011,
 }
 
-# Namen, die absichtlich KEIN Modell nennen. Fuer sie darf pci.ids
-# etwas anderes sagen -- sie behaupten ja gerade nichts Genaues.
 VAGUE = ("CNVi-WLAN", "Realtek-WLAN", "Broadcom-WLAN", "Atheros-WLAN",
          "I225/I226")
 
-# DER EINE GEPRUEFTE QUELLENKONFLIKT. pci.ids traegt fuer 8086:550B
-# WORTWOERTLICH denselben Text wie fuer 550A ("Ethernet Connection (18)
-# I219-LM"); fuer ein LM/V-Paar kann das nicht stimmen, und Linux sagt
-# I219_V18. Hier gilt Linux. Der Eintrag steht NAMENTLICH hier, damit er
-# nicht in einer Sammelausnahme verschwindet -- wer die Ausnahme
-# streicht, sieht sofort, worum es ging.
 KNOWN_CONFLICT = {
     (0x8086, 0x550B): "pci.ids wiederholt den Text von 550A; Linux: I219_V18",
 }
@@ -169,10 +151,6 @@ def confirms(name, real):
             continue
         if t in r:
             return True
-        # Reine Zahlenfolge des Kuerzels ("8139" aus "RTL8139"): pci.ids
-        # schreibt oft eine Sammelzeile ("RTL-8100/8101L/8139"), in der
-        # der Herstellerpraefix anders sitzt. Die Nummer selbst reicht,
-        # wenn sie lang genug ist, um nicht zufaellig zu treffen.
         for run in re.findall(r"[0-9]{3,}", tok):
             if run in r:
                 return True
@@ -246,12 +224,6 @@ def main():
     for ven, dev, name, mark in cl:
         real = ids.get((ven, dev))
         if real is None:
-            # KEIN FREIBRIEF. Eine Nummer, die pci.ids nicht kennt, wird
-            # gegen den LINUX-Namen gehalten -- sonst koennte hier jeder
-            # beliebige Text stehen, solange die Nummer selten genug
-            # ist. Die Negativkontrolle hat genau diese Luecke gezeigt:
-            # 8086:125E liess sich ungestraft "I226-V" nennen, obwohl
-            # Linux I221_V sagt.
             lin = IGC_IDS.get(dev) if ven == 0x8086 else None
             if lin is None and ven == 0x8086:
                 lin = IGB_IDS.get(dev)
@@ -274,13 +246,6 @@ def main():
         if confirms(name, real):
             ok += 1
             continue
-        # --- I219: pci.ids benennt einen Teil dieser Familie nach dem
-        #     CHIPSATZ ("500 Series Chipset Family GbE Controller
-        #     (Corporate/vPro)") statt nach dem Chip. Das ist kein
-        #     Widerspruch, sondern eine andere Benennung derselben
-        #     Sache -- und pci.ids verraet die LM/V-Lage trotzdem, ueber
-        #     "Corporate/vPro" gegen "Consumer". GENAU DAS wird hier
-        #     geprueft, statt die Zeile einfach durchzuwinken.
         if dev in I219_LM or dev in I219_V:
             want_lm = dev in I219_LM
             says_lm = "vpro" in normalise(real) or "corporate" in normalise(real)

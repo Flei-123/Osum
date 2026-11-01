@@ -40,11 +40,6 @@ import struct
 import subprocess
 import sys
 
-# ------------------------------------------------ das fremde Werkzeug
-#
-# argon2-cffi und cryptography liegen nicht zwingend im System-Python.
-# `tools/krypto/run.sh` legt bei Bedarf eine Umgebung an und setzt
-# OSUM_KRYPTO_PY; ohne sie wird der laufende Interpreter genommen.
 try:
     import argon2.low_level as argon2ll
 except ImportError:
@@ -172,9 +167,6 @@ def cmd_lies(pfad, pw):
     print("auf: 1 platz=%d" % wo)
     print("schluessel: haelften_ungleich=%d"
           % (1 if mk[:32] != mk[32:] else 0))
-    # Den Superblock des Dateisystems entschluesseln und zeigen, dass
-    # dort wirklich OFS steht -- das ist der Beleg, dass die
-    # Sektorrechnung (Tweak aus der Nummer OBERHALB des Kopfes) stimmt.
     erst = k["first"]
     sb = xts(mk, tweak_of(0), d[erst * SECTOR:(erst + 1) * SECTOR], True)
     print("fs: magie=%s" % sb[:8].hex())
@@ -269,8 +261,6 @@ def cmd_roh(pfad):
         print("roh: entropie_min=%.3f mittel=%.3f unter7=%d"
               % (min(ents), sum(ents) / len(ents),
                  sum(1 for e in ents if e < 7.0)))
-    # Lesbarer Text: in Zufall kommen kurze druckbare Folgen vor, lange
-    # nicht. Ab 16 Zeichen waere es eine Aussage.
     lang = [r for r in re.findall(rb"[ -~]{16,}", daten)]
     print("roh: textfolgen16=%d" % len(lang))
     return 0
@@ -312,7 +302,6 @@ def cmd_vektoren(orakel):
     gesamt_gut += gut
     gesamt_alle += len(soll)
 
-    # --- Argon2 gegen die Referenzumsetzung ------------------------
     fr, soll = [], []
     faelle = []
     for t in (1, 2, 3):
@@ -355,7 +344,6 @@ def cmd_vektoren(orakel):
             soll.append(ct.hex())
             fr.append("xtsdec %s %s %s" % (key.hex(), tw.hex(), ct.hex()))
             soll.append(pt.hex())
-    # und der Weg ueber die Sektornummer
     for lba in (0, 1, 2, 63, 1000, 123456):
         key = bytes((i * 3 + 9) & 255 for i in range(64))
         pt = bytes((i * 11 + lba) & 255 for i in range(512))
@@ -370,18 +358,12 @@ def cmd_vektoren(orakel):
     gesamt_gut += gut
     gesamt_alle += len(soll)
 
-    # --- DIE NEGATIVE HAELFTE --------------------------------------
-    #
-    # Ein Orakel, das nie FAIL sagt, misst nichts. Jede dieser Zeilen
-    # MUSS abgelehnt werden.
     schlecht = [
         # XTS mit gleichen Schluesselhaelften (FIPS 140-2 IG A.9)
         "xtsenc %s %s %s" % (("11" * 32 + "11" * 32), "00" * 16, "00" * 16),
         # zu kurzer Block
         "xtsenc %s %s %s" % ("00" * 32 + "11" * 32, "00" * 16, "00" * 8),
-        # Schluessel zu kurz
         "xtsenc %s %s %s" % ("00" * 32, "00" * 16, "00" * 16),
-        # Argon2 mit zu kleinem Salz
         "argon2id 4142 4142 1 8 1 32",
         # Argon2 mit m < 8*p
         "argon2id 4142 %s 1 8 4 32" % ("41" * 16),
@@ -398,21 +380,6 @@ def cmd_vektoren(orakel):
     return 0 if gesamt_gut == gesamt_alle else 1
 
 
-# ---------------------------------------------------------- baum
-#
-# DER SCHAERFSTE EINZELNE PUNKT DIESER RUNDE: die DATEIEN, die Osum
-# auf den verschluesselten Traeger geschrieben hat, hier mit fremdem
-# Werkzeug wieder herausholen.
-#
-# Dieses Programm kennt dafuer zwei aufgeschriebene Formate und keinen
-# Zeilentext von Osum: den Kopfsatz (oben) und den Aufbau von OFS
-# (Superblock, Inode, Verzeichnis) aus `kernel/fs.fi`. Alles dazwischen
-# -- Argon2id, XTS, die Sektorrechnung -- ist fremdes Werkzeug.
-#
-# Stimmen die vier SHA-256, dann ist JEDE Schicht richtig: die
-# Ableitung, das Auspacken des Schluessels, der Tweak je Sektor und die
-# Blockrechnung bis in die zweifach indirekten Zeiger der 40000er
-# Datei.
 PER_BLOCK = SECTOR // 8
 
 
@@ -501,8 +468,6 @@ def cmd_baum(pfad, pw):
                    d[(erst + i) * SECTOR:(erst + i + 1) * SECTOR], True)
 
     wurzel, datei = _ofs_leser(blk)
-    # Derselbe Baum, den `krypto.tree_write` schreibt: Datei i hat
-    # tree_len(i) Oktette nach der Regel (i*37 + k*7 + 3) & 255.
     laengen = [100, 700, 5000, 40000]
     eintraege = sorted(wurzel(), key=lambda x: x[1])
     print("baum: auf=1 platz=%d dateien=%d" % (wo, len(eintraege)))

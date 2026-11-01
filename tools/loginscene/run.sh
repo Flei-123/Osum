@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/loginscene/run.sh -- r373: THE SIGN-IN SCREEN IS A SCENE TREE OF fUi.
-#
-#   bash tools/loginscene/run.sh [<out dir>]
-#
-# glogin (kernel/user/glogin.fi) on a small disk with one account `justin`
-# (uid 1000, password geheim12). Measures, from the guest's trace lines:
-#   tree     "fUi Szenenbaum", the rectangles of the host's tree: ONE password
-#            field, four buttons (Anmelden, Anderer Benutzer, network, power),
-#            the clock at the bottom right; 4-pixel grid >= 92 %
-#   chain    Tab chain Kennwort -> Auge -> Anmelden -> Anderer Benutzer ->
-#            Netzwerk -> Ein/Aus -> Kennwort (host focus, `wlib: focus` lines)
-#   caret    the caret blinks (`wlib: caret` lines)
-#   eye      Tab, Enter on the eye shows the text (`wlib: eye ... shown=1`)
-#   login    wrong password: refused and the screen stays; right one: signed in
-#            as justin, uid 1000
-#   other    "Anderer Benutzer": name field comes out, typing a name and the
-#            password signs that user in
-#   quick    network / power icons open their panel, nothing is switched off
-#   counter  only wrong passwords: nobody is signed in
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

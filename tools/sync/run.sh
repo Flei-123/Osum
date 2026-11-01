@@ -728,9 +728,6 @@ assert t.count(auf_mit) == 1
 t = t.replace(auf_mit, auf_ohne)
 open(d + "/kaputt/kette-ohneaad.fi", "w").write(t)
 
-# Und die wirklich losgeloeste Fassung: das AAD ist weg UND Schluessel
-# und Nonce haengen nicht mehr am Namen, sondern an einer festen
-# Zeichenkette. Damit ist die Bindung an den Platz vollstaendig weg.
 alt_k = """    block_schluessel(inhaltkey, name, (&kb[0]) as u64)
     block_nonce(inhaltkey, name, (&nc[0]) as u64)"""
 neu_k = """    var fest: [u8; 33] = "osum-sync-block-ohne-namensbindg\\0"
@@ -998,7 +995,6 @@ is "die Schluesselableitung: vier Stufen gemessen (auf dem Wirt, firnc0)" \
 
 python3 - <<'PY'
 n = 10000
-# eine Datei kleiner als 4096 Oktette = ein Block; dazu das Verzeichnis
 zeile = 64 + 1 + 9 + 1 + 4 + 1     # name TAB offset TAB laenge NL
 print("  Blockindex bei 10 000 Dateien (je ein Block): %d Oktette = %.1f KiB"
       % (n * zeile, n * zeile / 1024.0))

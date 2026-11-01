@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# MERGE-8: das fertige Stick-Abbild in QEMU starten (3440x1440) und
-# OHNE JEDE EINGABE zwei Bilder machen: eines sofort nach dem
-# Schreibtisch, eines 90 s spaeter. Die Uhr in der Leiste muss dazwischen
-# weitergelaufen sein (UHRWERK-Fix).
 set -u
 IMG=${1:?abbild fehlt}
 ERG=${2:-/tmp/m8-schuss}
@@ -12,8 +8,6 @@ SOCK="$ERG/mon.sock"
 SER="$ERG/seriell.txt"
 rm -f "$SOCK" "$SER" "$ERG"/*.ppm "$ERG"/*.png
 
-# -vga std mit viel vgamem: 3440x1440x32 sind 19,8 MiB Bildspeicher.
-# KVM, damit die Uhr in Echtzeit laeuft (darum geht es hier).
 $QEMU -m 2048 -smp 4 -enable-kvm -cpu host \
     -drive "file=$IMG,format=raw,if=ide,index=0" \
     -vga std -global VGA.vgamem_mb=64 \
@@ -38,7 +32,6 @@ s.close()
 PY
 }
 
-# Auf den Schreibtisch warten (die Leiste meldet ihre Runden seriell).
 i=0
 while [ $i -lt 2400 ]; do
     grep -qa 'taskbar: round=\|desk: start' "$SER" 2>/dev/null && break

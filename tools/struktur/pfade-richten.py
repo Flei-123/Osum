@@ -1,29 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/struktur/pfade-richten.py -- tote Pfade in den Werkzeugen
-# auf den neuen Ort umbiegen.
-#
-# Nach dem raeumlichen Umbau nennen ueber neunzig Testlaeufer noch
-# `kernel/kstate.fi`, obwohl die Datei `kernel/lib/kstate.fi` heisst.
-# Das bricht den Bau NICHT -- es bricht die Messung: ein `grep` findet
-# nichts, und der Laeufer wird rot oder, schlimmer, misst still eine
-# falsche Zahl.
-#
-# Dieses Werkzeug ersetzt `kernel/<name>.fi` durch den Ort, an dem die
-# Datei WIRKLICH liegt.
-#
-# ZWEI REGELN, die es vorsichtig machen:
-#
-#   1. NUR AUSFUEHRBARE ZEILEN. Eine Kommentarzeile ("siehe
-#      kernel/fs.fi") wird nicht angefasst -- sie bricht nichts, und
-#      ein Kommentar ueber eine Datei darf auch ihren alten Ort
-#      nennen, wenn er von damals erzaehlt.
-#   2. NUR, WENN DER ALTE PFAD WIRKLICH TOT IST. Existiert
-#      `kernel/<name>.fi` noch (weil die Datei liegen blieb, wie die
-#      Netzdateien), bleibt die Zeile unberuehrt.
-#
-#   python3 tools/struktur/pfade-richten.py --trocken
-#   python3 tools/struktur/pfade-richten.py
 
 import os
 import re
@@ -52,7 +27,7 @@ def dateien():
                 p = os.path.join(stamm, n)
                 rel = os.path.relpath(p, WURZEL)
                 if rel.startswith("tools/struktur/"):
-                    continue          # die eigenen Werkzeuge
+                    continue
                 yield p, rel
 
 
@@ -82,7 +57,6 @@ def main():
                 nonlocal geaendert
                 name = m.group(1)
                 alt = "kernel/%s.fi" % name
-                # Regel 2: nur wenn der alte Pfad tot ist.
                 if os.path.exists(os.path.join(WURZEL, alt)):
                     return m.group(0)
                 if name not in cache:

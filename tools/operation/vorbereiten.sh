@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/operation/vorbereiten.sh -- alles, was VOR den Messungen entsteht:
-# Pakete, Zertifikate, der Schluesselbund, vier Auslieferungen, das
-# Abbild und eine Platte, auf der Fassung 1 laeuft.
-#
-#   bash tools/operation/vorbereiten.sh [ausgabeverzeichnis]
-#
-# Das dauert (Bau plus Installation in QEMU) und wird deshalb einmal
-# gemacht; `tools/operation/run.sh` benutzt danach `$OUT/basis.img`.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -35,10 +26,6 @@ python3 tools/ota/mkcerts.py "$OUT/certs" "$NAME" 10.0.2.2 \
     > "$OUT/certs.log" 2>&1 || { cat "$OUT/certs.log"; exit 1; }
 
 echo "== 2. der Schluesselbund"
-# Der Hauptschluessel ist DERSELBE, mit dem `tools/install/pakete.sh`
-# die Pakete signiert hat -- sonst muesste entweder das Abbild einen
-# zweiten Vertrauensanker tragen oder die Pakete neu signiert werden,
-# und beides waere eine Aenderung an dem, was gemessen wird.
 rm -f "$OUT/bund.json" "$OUT/fremd.json"
 python3 tools/ota/schluesselbund.py "$OUT/bund.json" anlegen \
     --aus "$OUT/geheim.key" || exit 1
@@ -64,9 +51,6 @@ abstand=3600
 auto=nein
 frist=15
 EOF
-# DIE EINTRAGUNG VON HAND. Genau das verlangt der Auftrag neben DHCP:
-# ein Nameserver, den ein Mensch hingeschrieben hat. 10.0.2.2 ist in
-# QEMUs Benutzernetz der Wirt, und dort laeuft `tools/operation/dnsdienst.py`.
 cat > "$OUT/resolv.conf" <<EOF
 # von Hand eingetragen
 nameserver 10.0.2.2
@@ -98,9 +82,6 @@ grep -a 'ota: version here\|ota: key generation\|ersatzschluessel\|nameserver' \
     "$OUT/basis0.txt" | head -6
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 
-# DER SCHNAPPSCHUSS. `run.sh` veroeffentlicht Fassungen und wechselt
-# Schluessel; damit ein zweiter Lauf dieselben Zahlen ergibt wie der
-# erste, stellt er von hier wieder her.
 rm -rf "$OUT/rein"
 mkdir -p "$OUT/rein"
 cp -a "$OUT/aus" "$OUT/rein/aus"

@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hotplug/bild-knopf.sh -- DER AUSWURFKNOPF, IM BILD UND GEDRUECKT.
-#
-#   bash tools/hotplug/bild-knopf.sh [ausgabeverzeichnis]
-#
-# Die Vorrunde konnte den Knopf nicht fotografieren ("der Dateimanager
-# startet in diesem Baum nicht bis zum Fenster"). Das lag NICHT am
-# Dateimanager, sondern am Abbild: ohne den /data-Baum stirbt er beim
-# Aufbau der Seitenleiste. Mit `tools/k15/tree.py` laeuft er, und damit
-# ist der Weg frei fuer das, was die Vorrunde offenliess.
-#
-# DREI DINGE, DIE HIER ANDERS SIND ALS IN `bilder.sh`:
-#
-#   * /etc/uitrace LIEGT AUF DER PLATTE. Ohne die Datei meldet kein
-#     Programm seine Bedienelemente (`dbg_setup`), und dann klickt man
-#     auf geratene Koordinaten. Mit ihr steht jedes Rechteck im
-#     Mitschnitt, und `knopf.py` rechnet den Klickpunkt aus.
-#   * EINE MAUS IST ANGESTECKT (`-device usb-mouse`). In `bilder.sh`
-#     hing keine -- ein Klick war dort gar nicht moeglich.
-#   * KEIN F5. Der Dateimanager haengt seit dieser Runde am Systembus
-#     und liest die Orte neu, sobald der Kern das Kommen meldet. Genau
-#     das ist die Zusage, die das zweite Bild zeigt.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -65,8 +43,6 @@ echo "  Programme: $(echo $PROGS | wc -w)"
 python3 tools/k15/tree.py "$ARB/baum" > "$ARB/baum.log" 2>&1 \
     || { echo "tree.py scheitert"; tail -3 "$ARB/baum.log"; exit 1; }
 
-# OHNE DIESE DATEI SCHWEIGT DIE OBERFLAECHE. Siehe `dbg_setup` in
-# explorer.fi: erst mit ihr meldet jedes Bedienelement sein Rechteck.
 printf 'on\n' > "$ARB/uitrace"
 
 MK=()

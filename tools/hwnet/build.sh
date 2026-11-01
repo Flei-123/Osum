@@ -48,11 +48,6 @@ ld -n -T "$LDSCRIPT" \
 objcopy -O elf32-i386 "$W/k.elf" "$W/k.mb" || exit 1
 
 SPEC="/bin/"
-# RUNDE ROADMAP-3 (A-016-Rest): ueber `up_build`, das das Profil aus der
-# Wurzeldatei LIEST. Hier stand ein nackter Aufruf ohne `--profile` und
-# ohne `-c`; fuer sh/ls/cat faellt das nicht auf, fuer `settings`
-# (profile app) kam "input file is the same as output file" -- und
-# `tools/account/run.sh` meldete deshalb "der Kern baut nicht".
 . tools/lib/userprog.sh
 for p in $PROGS; do
     up_build "$CC" "$p" "$W/$p.o" "$W/$p.elf" "$W/crt.o" "$ULD" "$S" \

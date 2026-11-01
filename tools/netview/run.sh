@@ -467,38 +467,6 @@ set_edge() { # edge
         "$1" > "$TMPD/taskbar.conf"
 }
 
-# RUNDE BAUFEHLER (13.09.2026): 16384 -> 32768 Bloecke (8 -> 16 MiB).
-# Derselbe Grund wie bei jeder Erhoehung davor, neue Ursache: Runde
-# GRUNDLINIE (1d16d34) hat die Laeufer -- zu Recht -- auf `--profile=app`
-# umgestellt, denn die Programme mit Oberflaeche tragen seit Runde 31
-# `profile app` in ihrer ersten Zeile. Das Profil `app` bringt Firns
-# volle Laufzeit mit, und sechs der vierzehn Programme dieses Abbilds
-# sind solche: desktop, taskbar, settings, launcher, explorer,
-# widgetdemo. `/bin/explorer` allein ist damit 1623040 statt 907360
-# Oktette. `mkfs.py` sagte "the disk is full", die sechs Zustandsbilder
-# liessen sich nicht bauen, und das kostete diesen Laeufer 29 Zusagen
-# ("mkfs for st-nocarrier failed", "nocarrier: no screenshot", ...).
-#
-# GEMESSEN mit Dateien in der Groesse der echten Programme:
-#
-#    16384 Bloecke  ( 8 MiB)   mkfs: the disk is full
-#    24576 Bloecke  (12 MiB)   geht, 4476 Bloecke frei
-#    32768 Bloecke  (16 MiB)   geht, 12666 Bloecke frei
-#
-# EIN BLOCK IST 512 OKTETTE (tools/osum/mkfs.py, `BS = 512`). Der
-# Kommentar darunter rechnet mit 4096 und nennt darum zu grosse
-# Megaoktett-Zahlen; die Bloeckezahlen selbst waren richtig, weil sie
-# gemessen wurden. 32768 und nicht 24576, damit die naechste Erweiterung
-# von wlib nicht sofort wieder hier landet. Das Abbild liegt in $TMPD
-# und lebt nur waehrend des Laufs.
-#
-# ROUND MERGE8: 16384 blocks (was 8192, before that 4096). The fourteen programs of this
-# graphical image have grown past the two mebioctets that were an OFS
-# disk's ceiling before round OFS3 -- every one of them links ulib,
-# tools, wlib and the libc, and those grew with every round. `mkfs.py`
-# said "the disk is full" and the six state images could not be built,
-# which cost this runner twenty-nine assertions. Same cause and same fix
-# as in tools/userland/run.sh and tests/theme/build.sh.
 mk_gimage() { # image theme-file
     local img=$1 th=$2
     local ARGS=(build "$img" 65536 --v3 --inodes=512 /lib/
@@ -594,21 +562,6 @@ Image.open(sys.argv[1]).save(sys.argv[2])
 PYX
 }
 
-# WHAT THE BAR REPORTS IS INSIDE ITS OWN WINDOW; WHAT THE PICTURE HAS IS
-# THE SCREEN. The offset between the two is the position of the bar's
-# window, which the bar also reports (`taskbar: geom ... x= y=`). The
-# first run of this section forgot that and measured the icon against the
-# wrong 62 pixels -- so the offset is read out of the log and never
-# assumed.
-# THE WHOLE LINE OR NOTHING. Three programs write to this one serial
-# line at the same time, and a line that another program wrote into the
-# middle of is not a measurement -- the first version took `tail -1` of
-# anything starting with `taskbar: geom`, got a spliced line, read no
-# offset, quietly used 0 and then measured the top-left corner of the
-# screen against a taskbar icon. It said `falsch 54 von 54` and it was
-# right; the icon was perfect and the question was wrong. So: only a
-# line that matches END TO END counts, and if there is none, the runner
-# says so instead of assuming a zero.
 gx_of() { grep -aoE '^taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+ ' "$1" | tail -1 | grep -oE 'x=[0-9]+' | cut -d= -f2; }
 gy_of() { grep -aoE '^taskbar: geom edge=[0-9]+ x=[0-9]+ y=[0-9]+ ' "$1" | tail -1 | grep -oE 'y=[0-9]+' | cut -d= -f2; }
 st_of()  { grep -aoE '^taskbar: state s=[0-9]+' "$1" | tail -1 | cut -d= -f2; }

@@ -1,31 +1,5 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dual/startprobe.sh -- STARTET DIE PLATTE WIRKLICH? UND ZEIGT DAS
-# MENUE BEIDE SYSTEME?
-#
-#   bash tools/dual/startprobe.sh <platte.img> [ausgabeverzeichnis]
-#
-# ==================================================================
-# WARUM DIESER LAUF SEPARAT STEHT
-# ==================================================================
-#
-# Die Abnahme (`abnahme-cli.sh`) prueft, was auf der PLATTE steht: die
-# Tafel, die Pruefsummen, die Dateien, die Startdatei. Das ist die
-# Zusage ueber die Daten, und sie ist die wichtigere.
-#
-# Sie sagt aber noch nichts darueber, ob die Firmware damit auch etwas
-# anfangen kann. Ein Bootmenue, das in einer Datei richtig aussieht und
-# auf dem Schirm nie erscheint, hat niemandem geholfen.
-#
-# Also: OVMF, KEIN `-kernel`, KEIN `-initrd`, KEIN Installationsmedium.
-# Nur die Platte. Was jetzt erscheint, kommt von dieser Platte -- oder
-# es erscheint nichts.
-#
-# Gemessen wird mit einem Foto und `tesseract`: stehen BEIDE Namen im
-# Menue? Das ist der einzige Weg, eine Bildschirmausgabe des Bootladers
-# zu pruefen -- er schreibt nicht auf die serielle Leitung, bevor ein
-# Eintrag gewaehlt ist.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -44,7 +18,6 @@ cp -f "$VARS" "$OUT/vars.fd"
 
 rm -f "$OUT/mon" "$OUT/menue.ppm" "$OUT/menue.png" "$OUT/ser.txt"
 
-# KEIN -kernel, KEIN -initrd. Nur OVMF und die Platte.
 qemu-system-x86_64 -accel tcg -m 512 \
     -drive "if=pflash,format=raw,unit=0,readonly=on,file=$CODE" \
     -drive "if=pflash,format=raw,unit=1,file=$OUT/vars.fd" \
@@ -55,11 +28,9 @@ qemu-system-x86_64 -accel tcg -m 512 \
 QP=$!
 
 for i in $(seq 1 60); do [ -S "$OUT/mon" ] && break; sleep 1; done
-# Das Menue steht `timeout: 5` Sekunden. Nach drei Sekunden fotografieren.
 sleep "${WARTE:-3}"
 printf 'screendump %s/menue.ppm\n' "$OUT" | socat - "UNIX-CONNECT:$OUT/mon" >/dev/null 2>&1
 sleep 3
-# Und danach weiterlaufen lassen, bis OrientOS gestartet ist.
 sleep "${LANG_WARTE:-40}"
 printf 'screendump %s/danach.ppm\n' "$OUT" | socat - "UNIX-CONNECT:$OUT/mon" >/dev/null 2>&1
 sleep 3
@@ -98,9 +69,6 @@ if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qaE '^(osum|wm|desk):'; the
 else
     bad "${MARKE_PRODUKT} ist nicht gestartet"
 fi
-# UND ES FINDET SEINE WURZEL AUF DER NEU ANGELEGTEN PARTITION.
-# `wm: rootpart=` nennt die Nummer und den ersten Sektor -- genau die
-# Zahlen, die `neben_schreiben` in die fremde Tafel geschrieben hat.
 RP=$(tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -aoE 'rootpart=[0-9]+  first=[0-9]+' | head -1)
 if [ -n "$RP" ]; then
     ok "es findet seine Wurzel in der neuen Partition ($RP)"
@@ -112,7 +80,6 @@ if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'desk: start /bin/deskto
 else
     bad "der Schreibtisch startet nicht"
 fi
-# Die Gegenprobe: es darf KEIN Boot-Modul im Spiel sein.
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'from module'; then
     bad "die Wurzel kam als Boot-Modul -- das war kein Start von der Platte"
 else

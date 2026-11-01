@@ -1,28 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/xtstafel/run.sh -- DIE ABNAHME VON K-022: DIE SCHLUESSELTAFEL.
-#
-# K-022: der XTS-Schluesselspeicher hielt genau EINEN Schluessel. Ein
-# zweiter verschluesselter Traeger fuellte ihn bei jedem Wechsel neu,
-# rund 12 us je Wechsel. Diese Runde hat daraus eine Tafel mit vier
-# Plaetzen gemacht.
-#
-# WAS HIER GEMESSEN WIRD, und jedes Stueck mit seiner Gegenprobe:
-#
-#   1. DER WECHSEL. Zwei Traeger abwechselnd, 200 Sektoren. Nach dem
-#      Aufwaermen darf die Zahl der Fuellungen NICHT mehr steigen.
-#      GEGENPROBE: dieselbe Messung mit SLOTS=1 -- das ist der Zustand
-#      VOR dieser Runde, und er MUSS durchfallen (200 Fuellungen).
-#   2. `forget()` LOESCHT ALLE PLAETZE. Nachgesehen wird im echten
-#      Speicher der Tafel, nicht in einer Behauptung -- das ist die
-#      Frage, die Runde AESNI ausdruecklich offen gelassen hat.
-#      GEGENPROBE: ein `forget()`, das nur Platz 0 raeumt, MUSS
-#      durchfallen.
-#   3. Und die drei Nachbarabnahmen bleiben gruen (61/0, 31/0, 35/0) --
-#      das laeuft NICHT hier, sondern in den eigenen Laeufern; hier
-#      steht nur, dass es dazugehoert.
-#
-# Aufruf:  bash tools/xtstafel/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -75,16 +51,6 @@ else
     sed 's/^/        /' "$TMPD/l.err" | head -20
 fi
 
-# ==================================================================
-# DIE GEGENPROBEN. Beide aendern lib/crypto/xts.fi und messen. Ohne sie
-# waere jede Zahl oben eine Behauptung: eine Abnahme, die auch am
-# kaputten Zustand gruen wird, misst nichts.
-#
-# IN EINER KOPIE DES BIBLIOTHEKSBAUMS (dieselbe Lehre wie A-028 bei
-# tools/sync): bis hierher wurde lib/crypto/xts.fi IM BAUM verbogen und
-# danach zurueckgelegt -- ohne trap. Ein abgebrochener Lauf liess die
-# kaputte Fassung stehen, und jeder parallele Bau las sie mit.
-# ==================================================================
 GLIB="$TMPD/lib-gegen"
 XTS_SHA0=$(sha256sum lib/crypto/xts.fi | cut -d' ' -f1)
 rm -rf "$GLIB"; cp -a lib "$GLIB"

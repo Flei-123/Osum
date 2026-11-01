@@ -1,58 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/wasm2firn/wasm2firn.py -- RUNDE SCHLEUSE-2
-#
-# WASM VORAB nach Firn uebersetzen, statt es zur Laufzeit zu deuten.
-#
-# Das ist das wasm2c-Prinzip. Der Deuter aus SCHLEUSE liest bei JEDEM
-# Befehl ein Oktett, verteilt ueber eine if/else-Kette und bewegt einen
-# Stapel im Speicher -- 67 ns je Schritt, 158x langsamer als nativ.
-# Hier passiert das alles EINMAL, auf dem Bauserver: aus jeder
-# WASM-Funktion wird eine Firn-Funktion, aus dem Stapel werden lokale
-# Variablen, aus dem Kontrollfluss werden Firn-Schleifen. Was uebrig
-# bleibt, uebersetzt firnc zu Maschinencode.
-#
-# WARUM DAS HIER IN PYTHON STEHT UND NICHT IN FIRN. Das Werkzeug laeuft
-# auf dem BAUSERVER, nie auf Osum -- dort ist alles erlaubt. Das
-# ERGEBNIS muss mit firnc bauen, und nur das zaehlt.
-#
-# ---------------------------------------------------------------- Der
-# Stapel wird zu Variablen. WASM ist eine Stapelmaschine, aber die
-# Stapelhoehe ist an jeder Stelle STATISCH bekannt -- das ist die
-# Eigenschaft, auf der wasm2c steht. `i32.add` nimmt zwei Werte und legt
-# einen zurueck; wo der Stapel vorher 5 tief war, ist er danach 4 tief.
-# Also heisst der oberste Wert einfach `s4`, und aus
-#
-#     local.get 0 ; local.get 1 ; i32.add
-#
-# wird
-#
-#     s0 = l0 ; s1 = l1 ; s0 = (s0 +% s1) & 4294967295
-#
-# Kein Stapelzeiger, kein Speicherzugriff, keine Grenzpruefung je Befehl.
-#
-# ---------------------------------------------------------------- Der
-# Kontrollfluss. WASM hat block/loop/if mit `br N` ("verlasse den N-ten
-# Block von innen"). Firn hat while/if/break/continue. Die Uebersetzung,
-# die immer traegt und ohne Relooper auskommt:
-#
-#   block  -> `while true { ... break }`   (br = break aus dieser Schleife)
-#   loop   -> `while true { ... break }`   (br = continue, also zurueck)
-#   if     -> `if ... {}` -- und WEIL ein `br` aus einem `if` heraus
-#             mehrere Ebenen springen kann, traegt jede Funktion eine
-#             Sprungvariable `br_ziel`. Wer `br 2` macht, setzt sie auf
-#             die Tiefe des Ziels und verlaesst die innerste Schleife;
-#             jede umgebende Schleife prueft am Ende, ob sie selbst
-#             gemeint ist, und bricht sonst weiter aus.
-#
-# Das kostet einen Vergleich je verlassener Ebene, nicht je Befehl.
-#
-# ---------------------------------------------------------------- Das
-# umlaufende Rechnen. WASM rechnet umlaufend, Firn prueft. firnc hat
-# dafuer `+% -% *%` (SPEC ~1238), die ohne jede Pruefung genau eine
-# Anweisung erzeugen -- am Assembler nachgesehen, siehe STATUS-SCHLEUSE2
-# Abschnitt 0. i32 wird in u64 gerechnet und mit & 4294967295 auf 32 Bit
-# geschnitten; i64 laeuft direkt in u64.
 
 import struct
 import sys
@@ -112,31 +58,10 @@ class Leser:
 
 I32, I64, F32, F64, EMPTY = 0x7F, 0x7E, 0x7D, 0x7C, 0x40
 
-# Ab so vielen Bloecken am Stueck wird aus dem Turm ein Verteiler.
-#
-# DIE ZAHL IST GEMESSEN, NICHT GERATEN. firncs `escape`-Durchgang ist in
-# der Verschachtelungstiefe EXPONENTIELL (siehe TIEFE.md, Abschnitt
-# "Der zweite Grund"): eine Funktion mit 24 geschachtelten `while true`
-# uebersetzt in 0 s, dieselbe mit 26 braucht 70 s -- Faktor ~8 je Ebene.
-# Bei SQLite reicht die Schachtelung bis 54 Ebenen; damit baut das
-# Modul gar nicht mehr fertig.
-#
-# Deshalb wird der Turm schon ab 8 Bloecken flachgelegt. Das trifft
-# neben den echten Sprungtabellen auch gewoehnliche Schachtelung --
-# und genau das ist erwuenscht, denn jede eingesparte Ebene zaehlt
-# exponentiell.
-# RUNDE SCHLEUSE-3: EIN flacher Verteiler je Funktion statt
-# geschachtelter Bloecke. Siehe flach.py und FIRN-ESCAPE-TIEFE.md.
-# Mit FLACH = True bleibt die Tiefe bei 3, egal wie tief das WASM
-# schachtelt -- der einzige Weg, SQLite in ertraeglicher Zeit zu bauen.
 FLACH = True
 
 TURM_GRENZE = 8
 
-# Ab dieser Schachtelungstiefe wird JEDER Turm flachgelegt, auch ein
-# kurzer. Grund: firncs `escape`-Durchgang kostet je Ebene grob das
-# Achtfache (24 Ebenen 0 s, 26 Ebenen 70 s -- gemessen, TIEFE.md).
-# Unter ~20 Ebenen ist er unauffaellig.
 TIEFE_DECKEL = 20
 
 
@@ -144,10 +69,6 @@ def typname(t):
     return {I32: 'i32', I64: 'i64', F32: 'f32', F64: 'f64'}.get(t, '?')
 
 
-# Wie ein Wert in Firn gehalten wird. ALLES liegt in u64 -- auch die
-# Gleitkommazahlen, die als Bitmuster durchgereicht und nur zum Rechnen
-# ausgepackt werden. Ein einziger Variablentyp macht den Stapel
-# uniform: `s3` ist immer u64, egal was gerade darin liegt.
 FIRNTYP = 'u64'
 
 
@@ -164,10 +85,10 @@ class Modul:
         self.globals = []        # [(typ, veraenderlich, initwert, ist_import)]
         self.exporte = {}        # name -> (art, index)
         self.start = None
-        self.code = []           # [(lokale, bytecode)] nur eigene funktionen
+        self.code = []
         self.data = []           # [(offset, bytes)]
         self.n_import_funcs = 0
-        self.namen = {}          # funcidx -> name aus der name-Sektion
+        self.namen = {}
         self.lesen()
 
     def lesen(self):
@@ -248,8 +169,6 @@ class Modul:
                     n = l.uleb()
                     self.elemente.append((off, [l.uleb() for _ in range(n)]))
                 else:
-                    # passive/deklarative Segmente: fuer unsere Module
-                    # nicht noetig, aber sauber ueberspringen
                     if flag in (1, 3):
                         l.u8()
                         n = l.uleb()
@@ -288,7 +207,6 @@ class Modul:
                     n = l.uleb()
                     self.data.append((off, l.bytes(n)))
         elif sid == 0:
-            # name-Sektion: nur fuer lesbare Namen im Erzeugnis
             try:
                 nm = l.name()
                 if nm == 'name':
@@ -311,9 +229,6 @@ class Modul:
         return mn, mx
 
     def konstausdruck(self, l):
-        # Ein Initialisierer ist ein winziger Ausdruck, der mit `end`
-        # aufhoert. Fuer unsere Module reichen die Konstanten und
-        # global.get (auf importierte Globale).
         w = 0
         while True:
             op = l.u8()
@@ -359,10 +274,7 @@ class Block:
         self.res = res
         self.marke = marke
         self.hat_else = False
-        # Wird dieser Block als `while true` erzeugt? Nur dann darf
-        # ein `break` darin stehen, und nur dann gibt es ein `continue`.
         self.schleife = (art == 'loop')
-        # Nur fuer Ebenen eines Turms (siehe turm_erzeugen/TIEFE.md)
         self.turm_marke = None
         self.turm_fall = 0
         self.turm_schleife = False
@@ -372,17 +284,6 @@ class Block:
 #                          Der Erzeuger
 # ====================================================================
 
-# ------------------------------- braucht dieser `block` eine Schleife?
-#
-# Ein `block` wird nur dann zu `while true { ... break }`, wenn
-# WIRKLICH jemand aus ihm herausspringt. Sonst reicht ein nackter
-# Firn-Block `{ ... }`, und genau das entscheidet bei SQLite ueber
-# Bauen oder Nicht-Bauen: mit `while` je Block erreichte die
-# Verschachtelung 278 Ebenen, firnc laesst 200 zu.
-#
-# Gesucht wird ein `br`/`br_if`/`br_table`, das GENAU auf diesen Block
-# zeigt -- also mit einer Sprungweite, die der Zahl der seither
-# geoeffneten Ebenen entspricht.
 def _block_braucht_schleife(b, at):
     tiefe = 0
     l = Leser(b, at)
@@ -445,18 +346,6 @@ def _ueberlesen(l, op):
             l.u8()
 
 
-# ============================================================
-#   Der Turm aus Bloecken -> ein Verteiler  (siehe TIEFE.md)
-# ============================================================
-#
-# Ein `block`-Turm, der nur dazu da ist, dass ein `br_table` in einen
-# von n Faellen springt, sprengt firncs Grenze von 200 Ebenen. SQLite
-# hat genau eine solche Stelle: `yy_reduce` mit 276 Bloecken.
-#
-# Erkannt wird der Turm daran, dass am Stueck (ohne einen anderen
-# Befehl dazwischen) mehr als GRENZE Bloecke geoeffnet werden.
-# Kennungen fuer `br_ziel`, die keinen Blockebenen entsprechen, sondern
-# einem VERTEILER. Blockebenen sind klein (< 300), diese hier nicht.
 TURM_KENNUNG = 1000000
 
 
@@ -502,18 +391,13 @@ def turm_messen(code, at):
             l.at = merk
             break
         bt = l.sleb()
-        if bt != -64:            # nur leere Blocktypen sind so einfach
+        if bt != -64:
             l.at = merk
             break
         arten.append(op == 0x03)
     return len(arten), l.at, arten
 
 
-# Verlaesst IRGENDEIN Sprung diese Blockebene -- sie selbst oder eine
-# weiter aussen? Dann muss der Block eine `while true` sein, denn nur
-# aus einer Schleife traegt `break`. Ein nackter `{ }` wuerde das
-# `break` an die naechste umgebende Schleife weiterreichen und den Rest
-# des Blocks ueberspringen (siehe Kommentar an der Aufrufstelle).
 def _block_hat_sprung(b, at):
     tiefe = 0
     l = Leser(b, at)
@@ -573,7 +457,6 @@ class Erzeuger:
         lokdef, code = m.code[ci]
         par, res = m.typ_von(fi)
 
-        # Lokale: erst die Parameter, dann die deklarierten
         lokal_typen = list(par)
         for anz, t in lokdef:
             lokal_typen += [t] * anz
@@ -588,10 +471,6 @@ class Erzeuger:
             ' -> u64' if res else '')
         self.w(kopf)
 
-        # WASM darf auf PARAMETER schreiben (`local.set 0`), Firn nicht:
-        # ein Parameter ist dort unveraenderlich. Also bekommt jeder
-        # Parameter eine veraenderliche Kopie. Das kostet nichts --
-        # firnc haelt beide im selben Register.
         for i in range(len(par)):
             self.w('    var l%d: u64 = p%d' % (i, i))
         # deklarierte Lokale sind in WASM garantiert null
@@ -624,11 +503,6 @@ class Erzeuger:
         self.w('')
 
     def e(self, tiefe, s):
-        # EIN Leerzeichen je Ebene, nicht vier. Bei SQLite wird bis zu
-        # 278 Ebenen tief geschachtelt; mit vier Leerzeichen waeren das
-        # 1112 Spalten Einrueckung je Zeile und ein Vielfaches an
-        # Dateigroesse. Lesbar ist der erzeugte Text ohnehin nicht --
-        # er ist Zwischenerzeugnis, kein Quelltext zum Anschauen.
         self.koerper.append(' ' + ' ' * tiefe + s)
 
     def sv(self, i):
@@ -636,18 +510,10 @@ class Erzeuger:
             self.maxstack = i + 1
         return 's%d' % i
 
-    # ------------------------------------------------------ der Rumpf
-    #
-    # Ein Durchgang ueber den Bytecode. `sp` ist die STATISCHE
-    # Stapelhoehe -- die Zahl, die den ganzen Ansatz traegt: an jeder
-    # Stelle im Code steht fest, wie viele Werte auf dem Stapel liegen,
-    # also bekommt jeder davon eine eigene Variable.
     def rumpf(self, code, par, res):
         m = self.m
         l = Leser(code)
         sp = 0
-        # Der aeusserste "Block" ist die Funktion selbst: ein `br` auf
-        # die aeusserste Tiefe ist ein `return`.
         stapel = [Block('func', 0, 0, res, 0)]
         self.marke = 0
         tiefe = 1
@@ -662,20 +528,12 @@ class Erzeuger:
                 if b.art == 'func':
                     break
                 if b.art == 'turm':
-                    # Das `end` einer Turmebene schliesst keinen
-                    # Firn-Block -- es beendet einen FALL. Der Code
-                    # dahinter gehoert in den naechsten Zweig.
                     self.turm_ende(b, tiefe, stapel)
                     sp = b.stack_ein + len(b.res)
                     unerreichbar = False
                     continue
                 tiefe -= 1
                 if b.art in ('block', 'loop'):
-                    # Eine `while true` darf nicht von selbst noch
-                    # einmal laufen: ein `loop` faellt nach dem letzten
-                    # Befehl heraus (nur ein `br` geht zurueck), ein
-                    # `block` ist am Ende ohnehin zu Ende. Also
-                    # schliesst jede ECHTE Schleife mit `break`.
                     if b.schleife:
                         self.e(tiefe, 'break')
                     self.e(tiefe - 1, '}')
@@ -695,22 +553,9 @@ class Erzeuger:
                 unerreichbar = False
                 continue
 
-            # ------------------------------ der Turm (siehe TIEFE.md)
-            #
-            # Werden hier mehr als GRENZE Bloecke am Stueck geoeffnet,
-            # ist das eine Sprungtabelle in Blockform. Sie wird nicht
-            # geschachtelt, sondern als Verteiler erzeugt: eine Ebene
-            # statt 276.
-            # SCHACHTELBAR: `im_turm` war frueher ein einziger
-            # Schalter -- damit blieb JEDER Turm INNERHALB eines Turms
-            # ungeflacht. Genau daran hing f564 mit 66 Ebenen.
             if op in (0x02, 0x03):
                 merk = l.at
                 anzahl, danach, arten = turm_messen(code, l.at - 1)
-                # Ein Turm wird flachgelegt, wenn er entweder LANG ist
-                # (eine Sprungtabelle) ODER wenn wir ohnehin schon tief
-                # stehen -- denn jede weitere Ebene kostet firnc
-                # exponentiell (TIEFE.md).
                 if anzahl > TURM_GRENZE or (anzahl >= 3 and tiefe >= TIEFE_DECKEL):
                     sp = self.turm_erzeugen(l, code, anzahl, danach, sp,
                                             stapel, tiefe, arten)
@@ -731,30 +576,8 @@ class Erzeuger:
                     sp -= 1
                     self.e(tiefe - 1, 'if %s != 0 {' % self.sv(sp))
                 elif op == 0x03:
-                    # NUR `loop` braucht wirklich eine Schleife: allein
-                    # dorthin kann ein `br` ZURUECKspringen.
                     self.e(tiefe - 1, 'while true {')
                 else:
-                    # `block` ist KEINE Schleife -- ein `br` daraus
-                    # geht immer VORWAERTS ans Ende. Frueher stand hier
-                    # ebenfalls `while true`, und genau das hat SQLite
-                    # gesprengt: die Verschachtelung erreichte 278
-                    # Ebenen, firnc laesst 200 zu. Ein `block` wird
-                    # deshalb zu einem EINMAL durchlaufenen `while`,
-                    # der nur dann entsteht, wenn wirklich jemand
-                    # herausspringt -- sonst gar nichts.
-                    # FALLSTRICK, teuer bezahlt: ein nackter Firn-Block
-                    # `{ }` schluckt kein `break`. Springt IRGENDWER von
-                    # innen ueber diese Ebene hinweg nach aussen, laeuft
-                    # sein `break` in die naechste UMGEBENDE Schleife und
-                    # ueberspringt den Rest dieses Blocks. Genau daran
-                    # ist dateitest.wasm gestorben: `path_open` wurde nie
-                    # gerufen, weil ein `br 1` den umgebenden Block mit
-                    # verlassen hat.
-                    #
-                    # Deshalb wird ein `block` NUR dann nackt erzeugt,
-                    # wenn aus ihm heraus GAR NICHT gesprungen wird --
-                    # weder auf ihn selbst noch an ihm vorbei.
                     b.schleife = self.block_hat_sprung(l.b, l.at)
                     if b.schleife:
                         self.e(tiefe - 1, 'while true {')
@@ -767,21 +590,11 @@ class Erzeuger:
                 continue
 
             if unerreichbar:
-                # Nach `br`/`return`/`unreachable` bis zum naechsten
-                # end/else nur noch ueberspringen -- der Code ist tot,
-                # aber die Operanden muessen gelesen werden.
                 self.ueberspringen(l, op)
                 continue
 
             sp, unerreichbar = self.befehl(l, op, sp, stapel, tiefe)
 
-        # Rueckgabe der Funktion.
-        #
-        # `sp` kann hier 0 sein: dann endete der Rumpf mit `br`,
-        # `return` oder `unreachable`, und das `end` der Funktion ist
-        # gar nicht erreichbar. Firn will trotzdem einen Rueckgabewert
-        # sehen -- der Erzeuger haengt ihn hinter der letzten
-        # Anweisung an, er wird nie ausgefuehrt.
         if res:
             if sp >= 1:
                 self.e(0, 'return %s' % self.sv(sp - 1))
@@ -800,11 +613,6 @@ class Erzeuger:
         Sprung zum `return`."""
         if not self.br_benutzt:
             return
-        # Steht ueberhaupt noch eine Schleife um diese Stelle herum?
-        # Nur dann darf hier `break` stehen. Sonst ist der Sprung nur
-        # noch als `return` aus der Funktion zu erfuellen -- das ist
-        # der Fall, wenn ein `block` (der KEINE Schleife erzeugt) die
-        # aeusserste Ebene ist.
         umschliesst = False
         if stapel is not None:
             for x in stapel:
@@ -812,26 +620,7 @@ class Erzeuger:
                         or x.art == 'turm':
                     umschliesst = True
                     break
-        # WELCHE TIEFE HIER STEHEN MUSS -- der Fehler, der f175 zerlegt
-        # hat. Wir stehen DIREKT HINTER dem `}` des gerade verlassenen
-        # Blocks `b`, also wieder auf der Ebene, die ihn UMGIBT. Ein
-        # Sprung ist genau dann erfuellt, wenn er DIESE umgebende Ebene
-        # meinte -- nicht die des verlassenen Blocks.
-        #
-        # `b.tiefe` ist die Ebene, auf der `b` selbst lag; die Ebene
-        # dahinter ist `b.tiefe - 1`. Stand vorher `b.tiefe` da, wurde
-        # ein `br 1` (Ziel: die umgebende Ebene) nie als erfuellt
-        # erkannt und brach weiter nach aussen aus -- der Rest der
-        # Funktion wurde uebersprungen.
         ziel_tiefe = b.tiefe
-        # WAR EIN ECHTER FEHLER (f177 in dateitest.wasm): ein `br` auf
-        # eine SCHLEIFE bedeutet ZURUECK an ihren Anfang, nicht hinter
-        # ihr Ende. Stand hinter dem `}` der Schleife die Pruefung
-        # `br_ziel == <ihre Tiefe>`, wurde der Sprung dort als erfuellt
-        # abgehakt -- und die Schleife war verlassen statt neu
-        # durchlaufen. Hinter einer Schleife wird deshalb NICHTS mehr
-        # abgehakt; erfuellt wird ein Schleifensprung INNERHALB der
-        # Schleife (siehe `umgebende Schleife` weiter unten).
         if b.art == 'loop':
             ziel_tiefe = -2
         self.e(tiefe, 'if br_ziel >= 0 {')
@@ -844,10 +633,6 @@ class Erzeuger:
                 self.e(tiefe + 2, 'return')
             self.e(tiefe + 1, '}')
         else:
-            # Ist die UMGEBENDE Ebene eine Schleife, dann heisst ein
-            # Sprung auf sie: von vorne. Das wird hier abgefangen --
-            # `continue` traegt genau bis zu ihr, denn sie ist die
-            # innerste Schleife um diese Stelle.
             umg = stapel[-1] if stapel else None
             if umg is not None and umg.art == 'loop':
                 self.e(tiefe + 1, 'if br_ziel == %d {' % ziel_tiefe)
@@ -862,8 +647,6 @@ class Erzeuger:
                 return
             m = _verteiler_ohne_schleife(stapel) if stapel is not None else None
             if m is not None:
-                # Von hier aus traegt ein `continue` bis in den
-                # Verteiler -- also die Verteilerkennung abfangen.
                 self.e(tiefe + 1, 'if br_ziel == %d {' % ziel_tiefe)
                 self.e(tiefe + 2, 'br_ziel = -1')
                 self.e(tiefe + 1, '} else if br_ziel == %d {'
@@ -912,12 +695,6 @@ class Erzeuger:
             sonst = l.uleb()
             sp -= 1
             wahl = self.sv(sp)
-            # KEINE else-if-Kette: sie schachtelt in firncs Parser, und
-            # `br_table` hat bei SQLite bis zu 185 Ziele -- zusammen mit
-            # dem umgebenden Code reisst das die Grenze von 200 Ebenen.
-            # Unabhaengige `if`-Bloecke sind flach. Jeder Zweig endet
-            # ohnehin mit `continue`/`break`/`return`, also kann keiner
-            # in den naechsten durchfallen.
             for i, lab in enumerate(ziele):
                 E('if %s == %d {' % (wahl, i))
                 z = stapel[len(stapel) - 1 - lab]
@@ -1059,17 +836,8 @@ class Erzeuger:
             tiefe += 1
             E = lambda s: self.e(tiefe - 1, s)
         if ziel.art == 'turm':
-            # Sprung in einen Fall des Verteilers: Nummer setzen und
-            # die Verteilerschleife neu durchlaufen.
             E('fall%d = %d' % (ziel.turm_marke,
                                0 if ziel.turm_schleife else ziel.turm_fall))
-            # ACHTUNG (durch pruefung/turm.wat, Fall $tinner, gefunden):
-            # `continue` setzt die INNERSTE Schleife fort. Stehen wir
-            # nicht unmittelbar im Verteilerrumpf, sondern in einer
-            # Schleife darin, muss erst aus allen dazwischenliegenden
-            # Schleifen herausgebrochen werden. Dafuer traegt `br_ziel`
-            # eine Kennung des Verteilers; jedes `nach_block` innerhalb
-            # des Verteilers erkennt sie und macht daraus `continue`.
             if _in_verteiler_rumpf(stapel, ziel.turm_marke):
                 E('continue')
             else:
@@ -1088,8 +856,6 @@ class Erzeuger:
         else:
             self.br_benutzt = True
             if ziel.art == 'loop':
-                # Ein Sprung an den Anfang einer AEUSSEREN Schleife:
-                # dorthin ausbrechen und dort wieder eintreten.
                 E('br_ziel = %d' % ziel.tiefe)
             else:
                 E('br_ziel = %d' % ziel.tiefe)
@@ -1121,12 +887,6 @@ class Erzeuger:
         if op in LAD:
             fn, breite = LAD[op]
             adr = self.sv(sp - 1)
-            # DIE BREITE ZAEHLT. `i32.load8_s` von 0xFF ist 0xFFFFFFFF
-            # (32 Bit), NICHT 0xFFFFFFFFFFFFFFFF -- der Wert liegt in
-            # den unteren 32 Bit eines i32. `i64.load8_s` dagegen
-            # erweitert auf volle 64 Bit. Wer das gleich behandelt,
-            # bekommt bei jedem Vergleich mit einer i32-Konstante ein
-            # falsches Ergebnis; die Pruefung mem.wat faengt genau das.
             if breite == 32:
                 E('%s = %s(%s +%% %d) & 4294967295'
                   % (self.sv(sp - 1), fn, adr, off))
@@ -1145,15 +905,6 @@ class Erzeuger:
                 2: 'trunc_sat_i32_f64_s(%s)' % s,
                 3: 'trunc_sat_i32_f64_u(%s)' % s}[u]
 
-    # ------------------------------------------------------ Rechnen
-    #
-    # HIER ZAHLT SICH DER FUND AUS. Jedes `+% -% *%` wird von firnc zu
-    # EINER Anweisung ohne Ueberlaufpruefung -- der Deuter brauchte
-    # dafuer einen Funktionsaufruf (`wadd`) mit Verzweigung.
-    #
-    # i32 liegt in den unteren 32 Bit einer u64 und wird nach jeder
-    # Rechnung mit `& 4294967295` beschnitten. Vorzeichenbehaftete
-    # Operationen gehen ueber i64-Umdeutung (`i32s`).
     def zahl(self, op, sp, tiefe):
         E = lambda s: self.e(tiefe - 1, s)
         M = '4294967295'
@@ -1310,20 +1061,6 @@ class Erzeuger:
         if op == 0xC4: return ein('sext32_64(%s)' % x)
         return None
 
-    # ---------------------------------------- der Turm als Verteiler
-    #
-    # Aus
-    #     block block block ... (n mal)  RUMPF  end end end ...
-    # wird
-    #     var fall = 0
-    #     while true {
-    #         if fall == 0 { RUMPF }            // br k setzt fall = n-k
-    #         else if fall == 1 { ...hinter dem innersten end... }
-    #         ...
-    #         break
-    #     }
-    #
-    # Der Kontrollfluss ist derselbe, die Tiefe ist 1 statt n.
     def turm_erzeugen(self, l, code, anzahl, danach, sp, stapel, tiefe, arten=None):
         self.br_benutzt = True
         self.im_turm = True
@@ -1334,14 +1071,7 @@ class Erzeuger:
         E(tiefe - 1, '// %d Bloecke am Stueck -> Verteiler (TIEFE.md)' % anzahl)
         E(tiefe - 1, 'var fall%d: u64 = 0' % marke)
         E(tiefe - 1, 'while true {')
-        # KEINE else-if-Kette: die schachtelt in firncs Parser und
-        # sprengt bei 276 Faellen dieselbe Grenze von 200 noch einmal
-        # (gemessen). Stattdessen unabhaengige `if`-Bloecke, jeder mit
-        # `break` am Ende -- das ist flach und traegt auch 300 Faelle.
         E(tiefe, 'if fall%d == 0 {' % marke)
-        # Die n Blockebenen werden als Block-Objekte gefuehrt, damit
-        # `br k` weiterhin die richtige Ebene findet -- sie erzeugen nur
-        # keine Einrueckung mehr.
         for k in range(anzahl):
             b = Block('turm', tiefe + k, sp, [], marke)
             b.schleife = False
@@ -1357,16 +1087,10 @@ class Erzeuger:
         """Das `end` einer Turmebene: der bisherige Fall ist zu Ende,
         der naechste faengt an. Jeder Fall ist ein EIGENES `if` mit
         `break` -- keine else-if-Kette (die schachtelt im Parser)."""
-        # WICHTIG (durch pruefung/turm.wat gefunden): hier stand
-        # `break` -- und das verliess den GANZEN Verteiler. Faellt der
-        # Code aber nur unten aus einer Blockebene heraus, muessen die
-        # Reste ALLER weiter aussen liegenden Ebenen noch laufen. Der
-        # naechste Fall ist genau der, der gleich geoeffnet wird.
         self.e(tiefe + 1, 'fall%d = %d' % (b.turm_marke, b.turm_fall))
         self.e(tiefe + 1, 'continue')
         self.e(tiefe, '}')
         self.e(tiefe, 'if fall%d == %d {' % (b.turm_marke, b.turm_fall))
-        # War das die letzte Ebene, schliesst der Verteiler.
         noch = [x for x in stapel if x.art == 'turm'
                 and x.turm_marke == b.turm_marke]
         if not noch:
@@ -1382,11 +1106,6 @@ class Erzeuger:
     def block_hat_sprung(self, b, at):
         return _block_hat_sprung(b, at)
 
-    # ------------------------------------- toten Code ueberspringen
-    #
-    # Nach `br`/`return`/`unreachable` ist der Rest des Blocks nicht
-    # erreichbar. Er muss trotzdem GELESEN werden, damit die Operanden
-    # richtig ueberlaufen werden -- ausgeben muss man ihn nicht.
     def ueberspringen(self, l, op):
         if op in (0x02, 0x03, 0x04):
             l.sleb()
@@ -1510,10 +1229,6 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
                 o.append('    rt.finish(a0 as i64)')
                 o.append('}')
             elif res:
-                # SPUR: mit gesetztem wasi_spur nennt jeder abschlaegige
-                # Ruf sich selbst -- derselbe Dienst, den `wasm -s` im
-                # Deuter leistet. Ohne das sucht man bei einem Modul mit
-                # zwanzig Importen im Dunkeln.
                 o.append('    let r: u64 = %s' % ruf)
                 o.append('    if wasi_spur && r != 0 {')
                 o.append('        io.print("wasi: %s -> errno=")' % nam)
@@ -1542,8 +1257,6 @@ def erzeugen(m, wasi_txt, laufzeit_txt, name):
     return '\n'.join(o)
 
 
-# Welcher WASI-Ruf gehoert zu welchem Namen. Die Reihenfolge der
-# Argumente ist die der Spezifikation.
 def wasi_ruf(nam, npar):
     T = {
         'fd_write':              'w_fd_write(a0, a1, a2 as usize, a3)',
@@ -1578,14 +1291,6 @@ def wasi_ruf(nam, npar):
     return T.get(nam)
 
 
-# ------------------------------------------------------- call_indirect
-#
-# WASM ruft indirekt ueber eine TABELLE: `call_indirect` nimmt einen
-# Index und einen erwarteten Typ. Firn hat keine Funktionszeiger in
-# Stufe 0, also wird je Typ eine Verteilerfunktion erzeugt -- eine
-# Kette von Vergleichen ueber die Eintraege, die diesen Typ haben.
-# Das ist der Preis dafuer, dass es ohne Funktionszeiger geht; er faellt
-# nur bei indirekten Rufen an, nicht bei gewoehnlichen.
 def tabelle_erzeugen(m, indirekte_typen=()):
     o = ['// ============================ Die Tabelle (call_indirect)']
     # index -> funcidx
@@ -1596,20 +1301,10 @@ def tabelle_erzeugen(m, indirekte_typen=()):
     gebraucht = set()
     for ci, (lok, code) in enumerate(m.code):
         pass
-    # Welche Typen werden indirekt gerufen? Der Erzeuger sammelt das
-    # beim Uebersetzen; einfacher ist: fuer jeden Typ, der in der
-    # Tabelle vorkommt, eine Verteilerfunktion bauen.
     typen = {}
     for idx, f in tab.items():
         ti = m.funktypen[f]
         typen.setdefault(ti, []).append((idx, f))
-    # ALTER FEHLER, erst durch RUNDE SCHLEUSE-3 sichtbar: ein
-    # `call_indirect` kann einen Typ nennen, der in KEINEM
-    # Tabelleneintrag vorkommt (SQLite tut das, Typ 5). Frueher blieb
-    # das unbemerkt, weil der Bau vorher in der Tiefe haengen blieb --
-    # firnc bricht sonst mit "unknown function 'tab_ruf_5'" ab.
-    # Ein solcher Aufruf kann zur Laufzeit nur scheitern; er bekommt
-    # deshalb einen Verteiler, der genau das tut: die WASM-Falle.
     for ti in indirekte_typen:
         typen.setdefault(ti, [])
     for ti, eintraege in sorted(typen.items()):
@@ -1652,19 +1347,6 @@ def start_erzeugen(m, name):
     o.append('    return 0')
     o.append('}')
     o.append('')
-    # Datensegmente als eine einzige Zeichenkette: Firn kann lange
-    # Byte-Literale, und der Startcode kopiert sie in den Speicher.
-    # DIE DATENSEGMENTE.
-    #
-    # Sie sind BELIEBIGE OKTETTE -- der Datenbereich eines Rust- oder
-    # C-Programms enthaelt Zeiger, Sprungtabellen und Zahlen, kein
-    # Text. Ein Firn-Zeichenkettenliteral verlangt aber gueltiges
-    # UTF-8 ("\xNN above 0x7F does not yield valid UTF-8"), also
-    # scheidet der bequeme Weg aus.
-    #
-    # Stattdessen: ein `const`-Feld aus u8. Das ist genau das, was ein
-    # Datensegment ist, und firnc legt es unveraendert in den
-    # Datenbereich des Programms.
     for k, (off, b) in enumerate(m.data):
         if not b:
             continue
@@ -1692,11 +1374,6 @@ def start_erzeugen(m, name):
     o.append('fn main(start: u64) -> i32 {')
     o.append('    wasi_start = start')
     o.append('    wasi_argc = rt.arg_count(start)')
-    # DIE ARGUMENTE. Anders als beim Deuter ist das erzeugte Programm
-    # SELBST das Modul -- argv[0] ist also schon der Modulpfad, und die
-    # Argumente fangen bei 0 an. (Im Deuter musste `argv_von` erst auf
-    # den Modulpfad gesetzt werden, weil davor noch `wasm` und `-s`
-    # standen; siehe Fallstrick 7 in STATUS-SCHLEUSE.)
     o.append('    wasi_argv_von = 0')
     o.append('    // WASMSPUR=1 in der Umgebung gibt es hier nicht --')
     o.append('    // die Spur haengt an einem eigenen Schalter, der dem')
@@ -1769,7 +1446,6 @@ def main():
     m = Modul(open(a.wasm, 'rb').read())
     wasi = wasi_ziehen.ziehen(a.wasm_fi)
     lz = open(a.laufzeit).read()
-    # der Kopf der Laufzeit traegt die imports -- die kommen ganz nach oben
     txt = erzeugen(m, wasi, lz, a.wasm)
     open(a.out, 'w').write(txt)
     n = txt.count('\n')

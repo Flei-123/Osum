@@ -101,7 +101,6 @@ soll = hash_secret_raw(secret=pw, salt=salt, time_cost=3, memory_cost=32,
                        version=19).hex()
 ist = ora("argon2id %s %s 3 32 4 32" % (pw.hex(), salt.hex()))
 print("RFC9106 %s" % ("ja" if soll == ist else "NEIN %s %s" % (soll, ist)))
-# Und die Breite: alle drei Spielarten, t, m und p durchgefahren.
 tt = {"ID": Type.ID, "I": Type.I, "D": Type.D}
 wort = {"ID": "argon2id", "I": "argon2i", "D": "argon2d"}
 random.seed(4711)

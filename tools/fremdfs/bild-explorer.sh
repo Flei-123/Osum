@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fremdfs/bild-explorer.sh -- DAS BILD: EIN FREMDES DATEISYSTEM
-# IM DATEIMANAGER.
-#
-# Der Auftrag dieser Runde verlangt ein Bild vom Explorer mit dem
-# fremden Dateisystem darin. Zahlen auf der seriellen Leitung sagen,
-# dass die Oktette stimmen; ein Bild sagt, dass ein Mensch die Dateien
-# wirklich SIEHT -- mit den richtigen Namen, den richtigen Groessen
-# und den Umlauten an der richtigen Stelle.
-#
-# Der Weg ist der der Runde EXPLORER-2: `tools/design/capture.sh`
-# fährt eine echte Maschine mit Fensterserver hoch und schickt ihr ein
-# Drehbuch; die Bilder kommen aus QEMUs Monitor (`screendump`). Neu ist
-# nur der Parameter `zweite=` -- die Platte mit dem fremden Dateisystem.
-#
-#   bash tools/fremdfs/bild-explorer.sh [ext4|ntfs] [bildverzeichnis]
-#
-# Die Bilder landen in docs/bilder/fremdfs-<art>-*.png.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -42,8 +24,6 @@ case "$ART" in
 esac
 [ -f "$QUELLE" ] || { echo "$QUELLE fehlt"; exit 1; }
 
-# Die Partitionstafel drumherum -- wie im Pruefstand, damit das Bild
-# dieselbe Lage zeigt wie die Messung.
 groesse=$(stat -c %s "$QUELLE")
 python3 - "$W/zweite.img" $(( groesse / 1048576 + 2 )) <<'PYEOF'
 import sys
@@ -56,18 +36,10 @@ printf 'label: dos\nstart=2048, type=%s\n' "$TYP" \
     | sfdisk "$W/zweite.img" >/dev/null 2>&1
 dd if="$QUELLE" of="$W/zweite.img" bs=512 seek=2048 conv=notrunc status=none
 
-# DAS DREHBUCH.
-#
-# Der Laeufer faehrt mit `fs=an`, also MIT Wurzelplatte und VFS-Schicht
-# (sonst gaebe es nichts einzuhaengen). Das fremde Dateisystem kommt
-# ueber `script=` auf /mnt, BEVOR der Fensterserver den Dateimanager
-# startet -- danach steht es schon da, und der Dateimanager muss nur
-# noch hingeschickt werden.
 cat > "$W/dreh.txt" <<'DREH'
 warteauf explorer: modell n= || 120
 warte 6
 foto 1-start
-# In die Pfadleiste tippen: Strg+L macht aus ihr ein Textfeld.
 taste ctrl-l
 warte 4
 taste ctrl-a
@@ -77,7 +49,6 @@ taste ret
 warte 12
 warte 8
 foto 2-fremd
-# Ein Unterverzeichnis: das mit den 512 Eintraegen.
 taste ctrl-l
 warte 3
 taste ctrl-a
@@ -87,7 +58,6 @@ taste ret
 warte 12
 warte 8
 foto 3-viele
-# Und der tiefe Pfad.
 taste ctrl-l
 warte 3
 taste ctrl-a
@@ -118,7 +88,6 @@ echo ">> was die Maschine gemeldet hat:"
 grep -aE "^(ext4|ntfs):" "$S" | head -4 | sed 's/^/    /'
 grep -aE '^explorer: cd ' "$S" | head -5 | sed 's/^/    /'
 
-# Die Bilder wandeln und ablegen.
 mkdir -p docs/bilder
 python3 - "$W/lauf" "$ART" <<'PY'
 import glob, os, sys

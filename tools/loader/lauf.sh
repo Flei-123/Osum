@@ -1,25 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/loader/lauf.sh -- EIN Lauf auf der Arbeitsplatte, mit Bild.
-#
-#   bash tools/loader/lauf.sh <name> "<kernelzeile>" [limit] [marke] [monitordatei]
-#
-# Die Platte ist $OUT/lauf.img und wird NICHT zurueckgesetzt: die Runde
-# misst eine FOLGE -- vorher, installieren, nachher --, und dafuer muss
-# der Lauf davor auf der Platte stehengeblieben sein. Wer von vorn
-# anfangen will, kopiert $OUT/platte/disk.img selbst darueber.
-#
-# ZWEI ARTEN, EIN BILD ZU BEKOMMEN, und beide gibt es schon:
-#
-#   `fb: hold`  Der Kern spiegelt die Konsole auf den Schirm und haelt
-#               am Ende rund vier Sekunden still (Runde K7, `fbhold`).
-#               So wird aus einer SHELL-Ausgabe ein Bild. Danach
-#               beendet er sich selbst -- hier wird NICHT abgeschossen.
-#   `wm: hold`  Der Fensterserver haelt (`wmhold`). Der Lauf endet
-#               nicht von selbst, also wird nach dem Foto abgeschossen.
-#
-# Welche der beiden gemeint ist, sagt die Marke; ob abgeschossen wird,
-# entscheidet $LADEN_KILL (Vorgabe: nur bei `wm:`).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -32,10 +11,6 @@ MON=${5:-}
 MEM=${MEM:-1024}
 XRES=${LADEN_XRES:-1280}
 YRES=${LADEN_YRES:-1024}
-# `-cpu host` unter KVM. Der Grund steht in docs/OTA.md: Firns
-# Bibliothek nimmt ihren AVX2-Weg, sobald CPUID ihn anbietet, und seit
-# der Runde AVX schaltet Osum XSAVE/XCR0 fuer Ring 3 frei. Wer das
-# Gegenteil messen will, haengt `nofpu` an die Kernelzeile.
 ACC=(-cpu qemu64)
 if [ "$OSUM_QEMU_ACCEL" = kvm ]; then ACC=(-cpu host); fi
 
@@ -66,16 +41,7 @@ if [ -n "$MARKE" ]; then
         sleep 0.15; i=$((i + 1))
     done
 fi
-# NACH DER MARKE NOCH WARTEN. Eine Marke sagt, dass eine Stufe
-# BEGONNEN hat -- `desk: start` steht in der seriellen Leitung, bevor
-# der erste Bildpunkt des Schreibtischs auf dem Schirm ist. Wer sofort
-# fotografiert, bekommt ein leeres Bild; gemessen: 1280x1024 mit ZWEI
-# Farben.
 [ "${LADEN_WARTE:-0}" != 0 ] && sleep "${LADEN_WARTE}"
-# EIN BILD VOR DEM EINGRIFF. Der Nachweis "das Programm kam aus dem
-# Laden" braucht ZWEI Aufnahmen derselben Maschine: den Starter mit der
-# Liste, und danach dasselbe Bild mit dem gestarteten Fenster darin.
-# Zwei Laeufe waeren zwei Maschinen.
 if [ "${LADEN_VORSHOT:-nein}" = ja ]; then
     python3 tools/gfx/screenshot.py "$sock" "$OUT/$NAME-vor.ppm" 25 \
         > "$OUT/$NAME-vor.shot" 2>&1
@@ -87,14 +53,6 @@ fi
 if [ -n "$MON" ] && [ -s "$MON" ]; then
     python3 tools/wm/monitor.py "$sock" "$MON" "${LADEN_TIPPAUSE:-0.10}" > "$OUT/$NAME.monlog" 2>&1
 fi
-# DIE ZWEITE MARKE, und sie ist der Grund, warum die Bilder dieser
-# Runde ueberhaupt etwas zeigen: das Terminalfenster haengt an der
-# KONSOLE, und auf dieselbe Konsole schreiben Kern, Schreibtisch und
-# Taskleiste weiter. Wer nach einem festen `warte 220` fotografiert,
-# bekommt nicht die Antwort des Befehls, sondern das, was seither
-# nachgerueckt ist -- gemessen: das Bild zeigte die Zeilen der
-# Taskleiste. $LADEN_MARKE2 wartet auf die LETZTE Zeile der Antwort
-# und loest sofort danach aus.
 if [ -n "${LADEN_MARKE2:-}" ]; then
     i=0
     while [ $i -lt 8000 ]; do

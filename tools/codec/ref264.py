@@ -115,11 +115,6 @@ ZIGZAG4 = [0,1,4,8,5,2,3,6,9,12,13,10,7,11,14,15]
 def _av_log2(x):
     return x.bit_length() - 1 if x > 0 else 0
 
-# DIE WERTETAFEL, GENAU WIE FFMPEG SIE BAUT (init_cavlc_level_tab).
-# Sie ist der Grund, warum dieser Dekodierer bitgleich ist: die Norm
-# beschreibt in 9.2.2.1 dieselbe Sache in Prosa, und beim Abtippen aus
-# der Prosa entstehen genau die Fehler, die erst vier Koeffizienten
-# spaeter auffallen. Hier wird die Tafel GERECHNET, nicht abgeschrieben.
 LEVEL_TAB_BITS = 8
 CAVLC_LEVEL_TAB = []
 for _sl in range(7):
@@ -162,7 +157,6 @@ def residual_block(br, nC, maxc):
         lev[i] = 1 - 2 * br.u1()
     if t1 < tc:
         sl = 1 if (tc > 10 and t1 < 3) else 0
-        # ---------------- der erste Wert hinter den Einsen
         bitsi = br.show(LEVEL_TAB_BITS)
         levelCode, used = CAVLC_LEVEL_TAB[sl][bitsi]
         br.p += used
@@ -184,15 +178,8 @@ def residual_block(br, nC, maxc):
             lev[t1] = (levelCode + 2) >> 1 if (levelCode % 2 == 0) \
                       else (-levelCode - 1) >> 1
         else:
-            # KURZER WEG: levelCode ist hier schon der fertige WERT.
             if t1 < 3:
                 levelCode += 1 if levelCode >= 0 else -1
-            # FFmpeg: suffix_length = 1 + (level_code + 3U > 6U).
-            # Das U ist wesentlich: in vorzeichenloser Arithmetik ist
-            # die Bedingung fuer JEDEN negativen Wert ausser -1,-2,-3
-            # wahr -- zusammengenommen heisst die Zeile schlicht
-            # |level| > 3. Vorzeichenbehaftet gerechnet kommt fuer
-            # negative Werte das Falsche heraus.
             sl = 1 + (1 if abs(levelCode) > 3 else 0)
             lev[t1] = levelCode
         # ---------------- die uebrigen
@@ -214,12 +201,6 @@ def residual_block(br, nC, maxc):
                 levelCode = (levelCode + 2) >> 1 if (levelCode % 2 == 0) \
                             else (-levelCode - 1) >> 1
             lev[i] = levelCode
-            # Die Norm (9.2.2.1): suffixLength steigt um eins, sobald
-            # |level| die Schranke suffixLimit ueberschreitet.
-            # FFmpeg schreibt dafuer eine Zeile in vorzeichenloser
-            # C-Arithmetik, die fuer NEGATIVE level immer zutrifft --
-            # das ist dort ohne Wirkung, weil die Werte, bei denen es
-            # auffiele, nicht vorkommen. Hier steht die Regel der Norm.
             if sl < 6 and abs(levelCode) > SUFFIX_LIMIT[sl]:
                 sl += 1
     zerosLeft = 0
@@ -285,10 +266,6 @@ def hadamard4(blk):
         o[j]=e0+e3; o[4+j]=e1+e2; o[8+j]=e1-e2; o[12+j]=e0-e3
     return o
 
-# ===================================================== Intra-Vorhersage
-# Die Modi kommen als GEWICHTSTAFEL aus pred4.json (erzeugt von
-# pred_gen.py direkt aus den Formeln 8.3.1.2.1-9). Nachbarindex:
-# 0..3 = L0..L3, 4 = LU, 5..8 = U0..U3, 9..12 = UR0..UR3.
 PRED4 = {int(k): v for k, v in json.load(open(
     os.path.join(os.path.dirname(os.path.abspath(__file__)),
                  'pred4.json'))).items()}
@@ -384,21 +361,6 @@ def pred_chroma(mode, L, LU, U, avail_l, avail_u):
                 o[y*8+x]=clip((a+b*(x-3)+c*(y-3)+16)>>5)
     return o
 
-# ============================================ Bewegungskompensation
-#
-# 8.4.2.2.1, sauber nach der Norm und nicht nach Gefuehl. Die 16
-# Viertelpel-Stellen (xFrac, yFrac) sind in der Norm mit Buchstaben
-# benannt; hier steht fuer jede Stelle, aus welchen ZWEI Groessen sie
-# gemittelt wird (oder welche sie direkt ist):
-#
-#     G a b c      G = ganz        b = halb waagerecht
-#     d e f g      h = halb senkrecht
-#     h i j k      j = halb/halb (aus den Zwischenwerten, >>10)
-#     n p q r
-#
-# a=(G+b)/2 c=(b+H)/2 d=(G+h)/2 n=(h+M)/2 f=(b+j)/2 i=(h+j)/2
-# k=(j+m)/2 q=(j+s)/2 e=(b+h)/2 g=(b+m)/2 p=(h+s)/2 r=(m+s)/2
-# wobei H=G(x+1), M=h(x+1), s=b(y+1), m=h... -- siehe Tafel 8-12.
 
 def _clampref(ref, rw, rh, px, py):
     if px < 0: px = 0
@@ -411,7 +373,6 @@ def luma_qpel(ref, rw, rh, x, y, mvx, mvy, bw, bh, out, ostride, ox, oy):
     fx = mvx & 3; fy = mvy & 3
     ix = x + (mvx >> 2); iy = y + (mvy >> 2)
     R = lambda px, py: _clampref(ref, rw, rh, px, py)
-    # Zwischenwerte OHNE Klemmung (fuer j), mit Klemmung (fuer b,h)
     def braw(px, py):
         return (R(px-2,py)-5*R(px-1,py)+20*R(px,py)+20*R(px+1,py)
                 -5*R(px+2,py)+R(px+3,py))
@@ -565,15 +526,6 @@ class Dec:
         s.num_ref_idx_l0=num_ref_idx_l0
         return b, first_mb, idr, frame_num, slice_type
 
-# Block-Nachbarschaft: die 16 Luma-4x4 in Norm-Reihenfolge (8.2.2)
-# blkIdx -> (x,y) in 4x4-Einheiten innerhalb des MB
-# 8.2.2: blkIdx -> (x,y) in 4x4-Einheiten. Die Reihenfolge ist NICHT
-# zeilenweise, sondern in 8x8-Vierteln, darin wieder in 4x4-Vierteln:
-#   0 1 | 4 5      Das ist der Z-Zug ueber zwei Ebenen. Wer hier die
-#   2 3 | 6 7      naheliegende Bitverdrehung hinschreibt, bekommt
-#   ----+----      doppelte Koordinaten und merkt es erst, wenn der
-#   8 9 |12 13     Bitstrom drei Makrobloecke spaeter aus dem Tritt
-#  10 11|14 15     geraet -- genau das ist hier passiert.
 BLK_XY=[]
 for i in range(16):
     x=((i>>2)&1)*2 + (i&1)
@@ -587,7 +539,7 @@ class MB:
         s.type=0; s.pred=0; s.cbp=0; s.qp=0; s.intra=True
         s.i16mode=0; s.i4=[2]*16; s.mvx=[0]*16; s.mvy=[0]*16
         s.ref=[-1]*16; s.nz=[0]*24; s.skipped=False; s.cpred=0
-        s.done=False   # noch nicht dekodiert -> fuer Nachbarn NICHT da
+        s.done=False
 
 def dec_frame(s, data):
     pass
@@ -717,8 +669,6 @@ def mv_of(d,sps,mbx,mby,bx,by):
     nmbx=x>>2; nmby=y>>2
     m=d.mbs[nmby*sps.mbw+nmbx]
     if m is None: return None
-    # Der EIGENE Makroblock zaehlt immer (seine Vektoren sind gerade
-    # gelesen worden); ein fremder erst, wenn er dekodiert ist.
     if (nmbx!=mbx or nmby!=mby) and not m.done: return None
     i=(y&3)*4+(x&3)
     return (m.mvx[i], m.mvy[i], m.ref[i], m.intra)
@@ -737,7 +687,6 @@ def pred_mv(d,sps,mbx,mby,bx,by,bw,refidx):
         if t[3]: return (0,0,-1)   # intra -> nicht verfuegbar
         return (t[0],t[1],t[2])
     a=norm(A); bb=norm(B); c=norm(C)
-    # Nur EIN Nachbar hat dieselbe Referenz -> der gewinnt
     same=[t for t in (a,bb,c) if t[2]==refidx]
     if len(same)==1: return same[0][0], same[0][1]
     if bb[2]==-1 and c[2]==-1 and A is not None:
@@ -810,11 +759,6 @@ def pred_mode_from_nb(d,sps,mbx,mby,bx,by):
         if mb is None: return None
         if nmbx!=mbx or nmby!=mby:
             if not mb.done: return None
-        # Ein INTER-Nachbar ist verfuegbar und zaehlt als DC (2). Nur
-        # bei constrained_intra_pred_flag gilt er als nicht vorhanden.
-        # Andersherum gedacht (Inter -> None) kommt in einem P-Slice
-        # fuer jeden Intra-Makroblock die falsche Modusvorhersage
-        # heraus -- und damit der falsche Modus aus dem Strom.
         if not mb.intra:
             return None if d.cur_pps.constrained_intra else 2
         if mb.type!=0: return 2   # I16x16 -> DC
@@ -823,7 +767,6 @@ def pred_mode_from_nb(d,sps,mbx,mby,bx,by):
     if A is None or B is None: return 2
     return A if A<B else B
 
-# Die Aufteilung eines P-MB: (Teile, Breite, Hoehe) in 4x4-Einheiten
 def p_part(mtype):
     """Die Aufteilung eines P-Makroblocks in 4x4-Einheiten.
     Typ 3 ist P_8x8, Typ 4 ist P_8x8ref0 -- dasselbe, nur dass die
@@ -882,10 +825,8 @@ def pred_mv_part(d,sps,mbx,mby,bx,by,bw,refidx,ph=None,n=None):
     if n==2 and ph==4:           # 8x16
         if bx==0 and a[2]==refidx: return a[0],a[1]
         if bx==2 and c[2]==refidx: return c[0],c[1]
-    # --- 2. genau einer passt
     same=[t for t in (a,bb,c) if t[2]==refidx]
     if len(same)==1: return same[0][0],same[0][1]
-    # --- B und C fehlen ganz: dann gilt A
     if B is None and C is None and A is not None:
         return a[0],a[1]
     def med(p,q,r): return p+q+r-min(p,q,r)-max(p,q,r)
@@ -940,7 +881,6 @@ def decode_mb(d, b, sps, pps, mb_idx, qp):
         if d.num_ref_idx_l0>1 and mtype!=4:
             for p in range(n): refs[p]=read_te(b,d.num_ref_idx_l0-1)
         if acht:
-            # Erst alle Referenzen, dann alle Vektoren (7.3.5.1)
             for p in range(4):
                 sn,sw,sh=sub_part(sub[p])
                 bx0=(p%2)*2; by0=(p//2)*2
@@ -985,7 +925,6 @@ def finish_mb(d,b,sps,pps,mb,mbx,mby,qp,i16,cbp):
     dcL=[0]*16
     cdc=[[0]*4,[0]*4]
     cac=[[[0]*16 for _ in range(4)] for _ in range(2)]
-    # Erst alles auf null -- ein nicht kodierter Block hat nC 0.
     for i in range(24): mb.nz[i]=0
     if cbp>0 or i16:
         qp=qp+b.se()
@@ -995,7 +934,6 @@ def finish_mb(d,b,sps,pps,mb,mbx,mby,qp,i16,cbp):
         nC=calc_nc(d,sps,mbx,mby,0,0)
         co,tc=residual_block(b,nC,16)
         for i in range(16): dcL[ZIGZAG4[i]]=co[i]
-        # Der Luma-DC-Block zaehlt NICHT in die Nachbarschaft der AC.
     for i8 in range(4):
         if not (cbp & (1<<i8)):
             continue
@@ -1064,26 +1002,13 @@ def reconstruct(d,sps,pps,mb,mbx,mby,qp,i16,cbp,dcL,coef,cdc,cac):
     availD = (mbx>0 and mby>0)
     if mb.intra:
         if i16:
-            # DC durch Hadamard und Skalierung
             dq=hadamard4(dcL)
-            # 8.5.10: die DC-Skalierung. ACHTUNG, hier steckte der erste
-            # Fehler dieser Runde: die Norm skaliert MIT DEM FAKTOR DER
-            # 4x4-Transformation (LevelScale enthaelt schon die 16), und
-            # das Ergebnis geht als Koeffizient 0 in die Transformation,
-            # die selbst noch (x+32)>>6 macht. Die Formel lautet
-            #   qP >= 36:  (f * w) << (qP/6 - 6)
-            #   sonst:     (f * w + 2^(5-qP/6)) >> (6 - qP/6)
-            # -- aber f ist der HADAMARD-Wert mal 16 noch nicht enthalten.
-            # Gemessen gegen ffmpeg: richtig ist
-            #   qP >= 12:  (f * w) << (qP/6 - 2)
-            #   sonst:     (f * w + 2^(1-qP/6)) >> (2 - qP/6)
             m=qp%6; sh=qp//6
             w=VMAT[m][0]
             dc=[0]*16
             for i in range(16):
                 if qp>=12: dc[i]=(dq[i]*w)<<(sh-2)
                 else:      dc[i]=(dq[i]*w+(1<<(1-sh)))>>(2-sh)
-            # Vorhersage fuer den ganzen MB
             L=[0]*16; U=[0]*16; LU=0
             if availA:
                 for i in range(16): L[i]=f.Y[(mby*16+i)*W+mbx*16-1]
@@ -1107,7 +1032,6 @@ def reconstruct(d,sps,pps,mb,mbx,mby,qp,i16,cbp,dcL,coef,cdc,cac):
                 px=mbx*16+bx*4; py=mby*16+by*4
                 aL = availA if bx==0 else True
                 aU = availB if by==0 else True
-                # rechts-oben: nur wenn der Block dort schon steht
                 if by==0:
                     aUR = availC if bx==3 else availB
                 else:
@@ -1123,7 +1047,6 @@ def reconstruct(d,sps,pps,mb,mbx,mby,qp,i16,cbp,dcL,coef,cdc,cac):
                     for x in range(4):
                         f.Y[(py+y)*W+px+x]=clip(P[y*4+x]+((res[y*4+x]+32)>>6))
     else:
-        # Inter: die Vorhersage steht schon (mc_mb), nur der Rest addiert
         for by in range(4):
             for bx in range(4):
                 if not any(coef[by*4+bx]): continue
@@ -1145,8 +1068,6 @@ def blk_ur_avail(bx,by,availB,availC):
     if by==0:
         return availC if bx==3 else availB
     if bx==3: return False
-    # innerhalb: der Block rechts oben ist da, wenn er in der
-    # Dekodierreihenfolge VOR diesem liegt
     here=BLK_XY.index((bx,by))
     there=BLK_XY.index((bx+1,by-1))
     return there<here
@@ -1172,10 +1093,6 @@ def recon_chroma(d,sps,pps,mb,mbx,mby,qp,cbp,cdc,cac,availA,availB,availD):
             a,bb,cc,dd=cdc[c][0],cdc[c][1],cdc[c][2],cdc[c][3]
             e0=a+bb; e1=a-bb; e2=cc+dd; e3=cc-dd
             t=[e0+e2, e1+e3, e0-e2, e1-e3]
-            # 8.5.11.2: dcC = ((f * LevelScale(qPc%6,0,0)) << (qPc/6)) >> 5,
-            # und LevelScale traegt auch hier die flache 16 (siehe
-            # scale_block). Ohne sie sitzt das ganze Chroma um einen
-            # festen Betrag daneben -- das Muster stimmt, die Hoehe nicht.
             m=qpc%6; sh=qpc//6
             w=VMAT[m][0]*16
             for i in range(4):
@@ -1193,12 +1110,6 @@ def recon_chroma(d,sps,pps,mb,mbx,mby,qp,cbp,cdc,cac,availA,availB,availD):
                            else plane[(py+y)*CW+px+x]
                     plane[(py+y)*CW+px+x]=clip(base+((res[y*4+x]+32)>>6))
 
-# ====================================================== Deblocking, 8.7
-#
-# Die drei Tafeln kommen MECHANISCH aus FFmpegs h264_loopfilter.c
-# (alpha_table, beta_table, tc0_table). Sie sind je 52*3 lang: der
-# Index ist qp + Versatz + 52, damit ein negativer Versatz nicht unter
-# null greift. Genau diese Verschiebung steht auch hier.
 ALPHA_TABLE=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 17, 20, 22, 25, 28, 32, 36, 40, 45, 50, 56, 63, 71, 80, 90, 101, 113, 127, 144, 162, 182, 203, 226, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
 BETA_TABLE=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18, 18]
 TC0_TABLE=[[1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 0], [1, 0, 0, 1], [1, 0, 0, 1], [1, 0, 0, 1], [1, 0, 0, 1], [1, 0, 1, 1], [1, 0, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 2], [1, 1, 1, 2], [1, 1, 1, 2], [1, 1, 1, 2], [1, 1, 2, 3], [1, 1, 2, 3], [1, 2, 2, 3], [1, 2, 2, 4], [1, 2, 3, 4], [1, 2, 3, 4], [1, 3, 3, 5], [1, 3, 4, 6], [1, 3, 4, 6], [1, 4, 5, 7], [1, 4, 5, 8], [1, 4, 6, 9], [1, 5, 7, 10], [1, 6, 8, 11], [1, 6, 8, 13], [1, 7, 10, 14], [1, 8, 11, 16], [1, 9, 12, 18], [1, 10, 13, 20], [1, 11, 15, 23], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25], [1, 13, 17, 25]]
@@ -1296,10 +1207,6 @@ def _deblock(d,sps,pps):
                     base=(mby*16+y)*W+mbx*16+e*4
                     _filter_line(f.Y,base,1,s,alpha,beta,tc0,False)
                 if e%2==0:
-                    # Chroma ist halb so gross: die Kante e (0 oder 2)
-                    # liegt bei Chromaspalte e*2. Die Filterstaerke
-                    # kommt aus DEMSELBEN 4x4-Luma-Blockpaar wie oben --
-                    # also mit den Luma-Indizes, nicht mit halbierten.
                     for y in range(8):
                         by=y>>1              # Chromazeile -> Luma-4x4-Zeile
                         iQ=by*4+e

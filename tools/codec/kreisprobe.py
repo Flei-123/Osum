@@ -74,10 +74,6 @@ def enc(co, nC, maxc):
             w.put(1,1)
             if sb: w.put(suf,sb)
             if first:
-                # Der Dekodierer rechnet sl aus dem levelCode NACH dem
-                # +2 (t1<3). Der Kodierer hat vorher -2 gerechnet --
-                # also hier dieselbe Groesse verwenden, sonst laufen
-                # Kodierer und Dekodierer auseinander.
                 lc_dec = lc + (2 if t1<3 else 0)
                 if pre>=14 or (1 if (tc>10 and t1<3) else 0): sl=2
                 else: sl=1+(1 if (lc_dec+3)>6 else 0)

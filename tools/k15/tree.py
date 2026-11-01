@@ -19,9 +19,6 @@ Legt darin an:
 import os
 import sys
 
-# Name, Inhalt.  Die Groessen sind absichtlich verschieden und
-# absichtlich klein: die Zusage ist "die Spalte zeigt die Groesse, die
-# `stat` meldet", und die prueft sich an 3 Oktetten so gut wie an 3000.
 DATEIEN = [
     ("alpha.txt", b"eins\n"),
     ("beta.txt", b"zweizwei\n"),
@@ -31,8 +28,6 @@ DATEIEN = [
     ("zeta.md", b"# zeta\n"),
 ]
 ORDNER = ["bilder", "notizen"]
-# Was in den Unterordnern liegt -- damit ein Doppelklick auf einen
-# Ordner etwas ANDERES zeigt als vorher, und das im Bild zu sehen ist.
 UNTER = {
     "bilder": [("rot.ppm", b"P6\n1 1\n255\n\xff\x00\x00"),
                ("blau.ppm", b"P6\n1 1\n255\n\x00\x00\xff")],
@@ -40,7 +35,6 @@ UNTER = {
 }
 
 THEME = b"""# /etc/theme -- das Farbschema von Osum, Runde K15.
-# Was hier nicht steht, behaelt den eingebauten Wert.
 bg=1c2430
 panel=26303c
 btn=3a4a5e
@@ -73,13 +67,6 @@ def main():
         p = os.path.join(roh, name)
         with open(p, "wb") as f:
             f.write(inhalt)
-        # 0644 AUSDRUECKLICH, und hier steht warum. Seit K13 traegt jeder
-        # Inode echte Rechte, und `mkfs.py` faellt ohne Angabe auf 0755
-        # zurueck -- ein Wert, der fuer ein Programm richtig ist und fuer
-        # eine Datendatei falsch. Der Dateimanager zeigt, was wirklich im
-        # Inode steht; ohne diese Angabe stuende dort `-rwxr-xr-x` an einer
-        # Textdatei. Die Rechte gehoeren an die Stelle, die die Datei
-        # anlegt, nicht in einen Rueckfall.
         zeilen.append("/data/%s=%s@0644" % (name, p))
         soll.append((name, len(inhalt), "-"))
     for o in ORDNER:
@@ -94,7 +81,6 @@ def main():
     with open(os.path.join(d, "liste"), "w") as f:
         for z in zeilen:
             f.write(z + "\n")
-    # Sortiert wie der Dateimanager: Verzeichnisse zuerst, dann Namen.
     soll.sort(key=lambda t: (0 if t[2] == "d" else 1, t[0]))
     with open(os.path.join(d, "soll.txt"), "w") as f:
         for name, groesse, art in soll:

@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/echtstart.sh -- WAS BEIM ERSTEN ECHTEN BOOT PASSIERT
-#
-#   bash tools/bridge2/echtstart.sh [arbeitsordner]
-#
-# Justins Frage, sinngemaess: "geht die Bruecke wirklich -- auf ECHTER
-# Hardware?" Alle bisherigen Kopplungen kamen aus 192.168.1.51 mit
-# Rechnername "pruefstand". Auf Blech ist sie nie gelaufen.
-#
-# GEPRUEFT WERDEN DIE VIER FRAGEN, DIE AUF BLECH ANDERS AUSGEHEN
-# KOENNEN ALS HIER -- so realitaetsnah, wie es im Pruefstand geht:
-#
-#   A. Kommt `jarvisd` hoch, wenn es KEINEN DHCP-Server gibt?
-#      (Justins Fritzbox hat einen, ein fremdes Netz vielleicht nicht.)
-#   B. Was passiert, wenn das Netz ERST NACH dem Start da ist?
-#   C. Wird der Kopplungscode zuverlaessig angezeigt -- und wie lange?
-#   D. Was passiert bei Verbindungsabbruch MITTEN in der Sitzung?
-#
-# Gemessen wird aus der seriellen Leitung, nicht aus dem Quelltext.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -31,8 +12,6 @@ bad(){ fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 hm(){ offen=$((offen+1)); printf '  OFFEN %s\n' "$1"; }
 
 echo "== 0. Kern und Wurzel =="
-# Der Kern aus dem ABBILD, nicht ein eigens gebauter -- sonst prueft
-# man etwas anderes, als auf dem Stick liegt.
 KERN=${KERN:-/tmp/usbimg/osum.mb}
 WURZEL=${WURZEL:-/tmp/usbimg/root.img}
 [ -s "$KERN" ]   || { echo "FEHLT: $KERN (tools/usbimg/build.sh laufen lassen)"; exit 1; }
@@ -41,18 +20,8 @@ echo "   Kern   $KERN ($(stat -c%s "$KERN") Oktette)"
 echo "   Wurzel $WURZEL ($(stat -c%s "$WURZEL") Oktette)"
 echo
 
-# ------------------------------------------------------------------
-# A. OHNE DHCP-SERVER
-# ------------------------------------------------------------------
-# `dhcp` steht in der cmdline des Abbilds. Hier gibt es KEINEN
-# DHCP-Server im Netz (nur ein user-Netz ohne Dienste waere geschummelt
-# -- QEMUs user-Netz HAT einen DHCP-Server). Genommen wird deshalb
-# `-netdev socket` ins Leere: Draht da, niemand antwortet.
 echo "== A. KEIN DHCP-SERVER IM NETZ =="
 cp "$WURZEL" "$W/a.img"
-# Die Wurzel als PLATTE, wie tools/bridge2/abriss.sh es tut -- mit
-# `-initrd` als Modul findet `script=` das Programm nicht. Und
-# `noring3` NICHT setzen: jarvisd ist ein Ring-3-Programm.
 timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
     -append "osum nokbd nosched noproc nofs gfx nocursor nic dhcp nsvc=0 nwait=0 script=jarvisd --diagnose;exit" \
     -serial "file:$W/a.txt" -display none -no-reboot \
@@ -67,9 +36,6 @@ if grep -qa 'jarvisd:' "$W/a.txt"; then
 else
     bad "jarvisd kommt gar nicht erst hoch"
 fi
-# AB WERK OHNE SERVERADRESSE -- das ist Absicht, siehe rechte.conf:
-# "Ein Stick, der sich beim ersten Start irgendwo meldet, waere eine
-# Entscheidung, die niemand getroffen hat."
 if grep -qa 'kein .server = ' "$W/a.txt"; then
     ok "es haelt AB WERK an und sagt warum (keine Serveradresse) -- Absicht"
     echo "        -> auf Justins Rechner muss EINMAL `jarvisctl` die Adresse setzen"
@@ -80,7 +46,6 @@ else
 fi
 echo
 
-# ---- A2: MIT Serveradresse, aber ohne DHCP-Server ----
 echo "== A2. MIT Serveradresse, weiterhin KEIN DHCP =="
 cat > "$W/rechte.conf" <<CONF
 server         = 10.0.2.99:8090

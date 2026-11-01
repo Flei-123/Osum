@@ -20,7 +20,6 @@ import os
 import re
 import sys
 
-# Die allgemeinen Dateien: sie duerfen von keinem Anbieter wissen.
 ALLGEMEIN = [
     "kernel/app/anbieter.fi",
     "kernel/app/knetz.fi",
@@ -33,17 +32,12 @@ ALLGEMEIN = [
     "kernel/app/account.fi",
 ]
 
-# Die Ruecken. Ihr Name IST das Anbieterwissen.
 RUECKEN = ["kernel/app/anb_jarvis.fi", "kernel/app/anb_xoffi.fi",
            "kernel/app/anb_eigen.fi", "kernel/app/anb_fleitec.fi"]
 
-# Die Woerter, nach denen gesucht wird -- die Namen der Ruecken, plus
-# die Marken, unter denen sie im Netz auftreten.
 WOERTER = ["xoffi", "jarvis", "fleitec", "nexus"]
 
-# Die EINE Liste, in der die Ruecken angemeldet werden. Zeilen zwischen
-# diesen beiden Marken duerfen Anbieternamen tragen; sonst keine.
-MARKE_AUF = "fn push_login"   # vor Runde ENGLISCH: ruecken_anmelden
+MARKE_AUF = "fn push_login"
 MARKE_ZU = "^}"
 
 
@@ -89,10 +83,6 @@ def pruefe(wurzel):
             if nr in erlaubt:
                 continue
             code = kommentarfrei(zeile).lower()
-            # EINE EINFUHR IST KEINE ENTSCHEIDUNG. `import anb_xoffi`
-            # sagt, dass es den Ruecken gibt; es sagt nichts darueber,
-            # was er ist, und es kann sich nicht verzweigen. Was diese
-            # Wache sucht, ist ein `if`, ein Vergleich, ein Sonderweg.
             if code.strip().startswith("import "):
                 continue
             for w in WOERTER:

@@ -40,26 +40,6 @@ TABELLE ist eine rohe ACPI-Tabelle MIT ihrem 36 Oktett langen Kopf
 import sys
 
 
-# ===================================================================
-# DIE OPCODE-TAFEL
-# ===================================================================
-#
-# Jeder Eintrag: (Name, Argumentliste).  Die Buchstaben der Argumentliste:
-#
-#   T  TermArg          -- ein Ausdruck
-#   S  SuperName        -- ein benennbares Ziel (wird wie TermArg gelesen)
-#   R  Target           -- SuperName ODER NullName (ein einzelnes 0x00)
-#   N  NameString
-#   B  ein Oktett
-#   W  zwei Oktette
-#   D  vier Oktette
-#   Q  acht Oktette
-#   Z  Zeichenkette, mit Null beendet
-#
-# Opcodes mit PkgLength und eigenem Rumpf (Scope, If, Method, Buffer ...)
-# stehen NICHT hier, sondern werden im Parser einzeln behandelt -- ihre
-# Form ist jeweils anders genug, dass eine Tabelle sie nur verstecken
-# wuerde.
 
 OPS = {
     0x00: ("Zero", ""),
@@ -122,7 +102,6 @@ OPS = {
     0xFF: ("Ones", ""),
 }
 
-# Die erweiterten Opcodes, alle mit 0x5B davor.
 EXT = {
     0x01: ("Mutex", "NB"),
     0x02: ("Event", "N"),
@@ -146,8 +125,6 @@ EXT = {
     0x80: ("OperationRegion", "NBTT"),
 }
 
-# Was `LNot` daraus macht: die drei zusammengesetzten Vergleiche stehen
-# in AML als zwei Opcodes hintereinander.
 LNOT_PAIR = {0x93: "LNotEqual", 0x94: "LLessEqual", 0x95: "LGreaterEqual"}
 
 REGION_SPACE = {
@@ -305,7 +282,6 @@ class Aml:
     def term(self, i, scope, out, allow_name_data=False):
         c = self.u8(i)
 
-        # --- Namensraum-Bauwerke mit eigenem Rumpf
         if c == 0x10:                    # Scope
             self.note(c)
             ln, j = self.pkglen(i + 1)
@@ -329,7 +305,7 @@ class Aml:
             body = []
             try:
                 self.termlist(j, end, full, body)
-            except Exception as e:       # ein kaputter Rumpf haelt uns nicht auf
+            except Exception as e:
                 self.errors.append("%s: %s" % (full, e))
             out.append("Method(%s, %d)" % (full, flags & 7))
             return end
@@ -487,7 +463,6 @@ class Aml:
             raise ValueError("unbekannter erweiterter Opcode 0x5b%02x an %d"
                              % (e, i))
 
-        # --- die einfachen Opcodes aus der Tafel
         if c in OPS:
             self.note(c)
             name, spec = OPS[c]
@@ -498,7 +473,6 @@ class Aml:
                 out.append("%s(%s)" % (name, ", ".join(args)))
             return j
 
-        # --- sonst: ein Name.  Entweder ein Methodenaufruf oder ein Verweis.
         if c in (0x5C, 0x5E, 0x2E, 0x2F) or (0x41 <= c <= 0x5A) or c == 0x5F:
             nm, j = self.namestring(i)
             nargs = self.lookup_method(scope, nm)
@@ -588,9 +562,6 @@ class Aml:
             out.extend(sub)
 
 
-# ===================================================================
-# Ein Durchgang ueber eine Tabelle
-# ===================================================================
 
 def strip_header(raw):
     if len(raw) < 36:
@@ -642,8 +613,6 @@ def collect_methods(body, methods, scope="\\"):
                     methods.setdefault(join(scope, nm), p.u8(j + 1))
                 i = j + 2
                 continue
-            # alles andere: ueberspringen ist nicht moeglich, ohne es zu
-            # lesen -- also einen vollen Term lesen und wegwerfen.
             sub = []
             i = p.term(i, scope, sub)
     walk(0, len(body), scope)
@@ -736,8 +705,6 @@ def main(argv):
             print("%-34s %6d" % (op_text(op), count[op]))
         print("verschiedene=%d gesamt=%d" % (len(count), sum(count.values())))
     elif mode == "asm":
-        # Der Baum ist schon beim Parsen ausgegeben worden; hier nur die
-        # oberste Ebene, damit die Ausgabe lesbar bleibt.
         for full, kind, extra in names:
             print("%-40s %-16s %s" % (full, kind, extra))
     elif mode == "prt":

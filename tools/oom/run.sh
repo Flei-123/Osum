@@ -150,7 +150,6 @@ if [ -f "$TMPD/hw.img" ] || python3 tools/osum/mkfs.py build "$TMPD/hw.img" 4096
     if python3 - "$TMPD/hw.img" <<'PY'
 import sys
 d = open(sys.argv[1], 'rb').read()
-# Der Inhalt ist bekannt und steht als Block im Abbild.
 sys.exit(0 if b'A' * 64 in d else 1)
 PY
     then
@@ -264,7 +263,6 @@ if [ "$BUILT" = 1 ]; then
             FARBEN=$(python3 - "$SHOTS/oom-desktop.ppm" <<'PY'
 import sys
 d=open(sys.argv[1],'rb').read()
-# P6-Kopf ueberspringen: drei Felder (Breite, Hoehe, Maximum)
 i=2; felder=0
 while felder<3 and i<len(d):
     while i<len(d) and d[i] in b' \t\r\n': i+=1

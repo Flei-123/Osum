@@ -75,7 +75,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import opkpfad  # noqa: E402  -- A-025: der alte Standardpfad war ein Arbeitsbaum
+import opkpfad
 OPK = opkpfad.pfad()
 SCRYPT_N = 1 << 15
 SCRYPT_R = 8
@@ -188,10 +188,6 @@ def geheim_holen(d, wer):
                                  "Passphrase Hauptschluessel: "))
 
 
-# DIE NACHRICHT EINES KETTENSATZES. Sie faengt mit einem eigenen Wort an,
-# das in keiner anderen signierten Sache dieses Systems vorkommt --
-# damit eine Wechselsignatur niemals als Signatur ueber ein VERZEICHNIS
-# oder ein Paket durchgehen kann und umgekehrt.
 def kette_nachricht(gen, pub_hex):
     return ("osum-schluessel\t%d\t%s" % (gen, pub_hex)).encode("ascii")
 

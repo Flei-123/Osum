@@ -49,8 +49,6 @@ def main():
     if geraet:
         befehl += " %s" % geraet
     s.sendall((befehl + "\n").encode())
-    # Warten, bis die Datei fertig ist: `screendump` kehrt zurueck,
-    # bevor geschrieben wurde.
     letzte = -1
     bis = time.time() + frist
     while time.time() < bis:

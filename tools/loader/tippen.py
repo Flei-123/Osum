@@ -25,11 +25,6 @@ import sys
 TASTEN = {
     " ": "spc", "-": "minus", "/": "slash", ".": "dot", ",": "comma",
     "=": "equal", ";": "semicolon", "\\": "backslash",
-    # `>` ist die UMSCHALTETE Punkt-Taste. QEMU kennt dafuer die
-    # Schreibweise `shift-<taste>`; ohne die Umschaltung kaeme ein
-    # Punkt an, und der Befehl liefe -- nur eben anders, als er
-    # dasteht. Genau die Art Fehler, die ein Bildschirmfoto nicht
-    # zeigt.
     ">": "shift-dot", "<": "shift-comma", ":": "shift-semicolon",
 }
 

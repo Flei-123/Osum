@@ -104,11 +104,6 @@ def main():
         print("refsine: %s geschrieben -- %d Rahmen, %d Hz, Pegel %d"
               % (a.ausgabe, a.rahmen, a.hz, a.pegel))
         return
-    # VERGLEICHEN.  Der Nutzbereich der gemessenen Datei wird gesucht
-    # und Wert fuer Wert gegen die Reihe gehalten.  Der ANFANG wird
-    # dabei nicht geraten: es wird der Versatz genommen, bei dem der
-    # erste Wert ungleich null steht -- der Kern faengt bei Phase null
-    # an, und alles davor ist die Stille des Vorlaufs.
     import array
     try:
         w = wave.open(a.ausgabe)
@@ -127,8 +122,6 @@ def main():
         print("ungleich=999999 verglichen=0 grund=leer")
         return
     lo = nz[0]
-    # Der erste Wert der Reihe ist null (Phase null), also faengt der
-    # Vergleich EINEN Rahmen vor dem ersten Wert ungleich null an.
     if lo > 0:
         lo = lo - 1
     n = min(len(refl), len(links) - lo)

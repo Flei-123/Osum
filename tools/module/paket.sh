@@ -1,45 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/module/paket.sh -- DEN TREIBER AUSLIEFERN, wie Justin es sich
-# vorstellt: "Treiber herunterladen" -- nur aus seinem eigenen Speicher.
-#
-# DIE KETTE, ganz, von der Quelldatei bis zum Gerät:
-#
-#   module/ps2maus.fi
-#        │  tools/module/build.sh          (firnc, strip, Kopf, Ed25519)
-#        ▼
-#   ps2maus.omod                        ← das, was der KERN prueft
-#        │  pkg/opk.py bauen            (OrientOS-Paketformat)
-#        ▼
-#   ps2maus-1.0.0.opk                   ← das, was OPK installiert
-#        │  werkzeug/store add          (Orient-Speicher)
-#        ▼
-#   speicher/index.json + index.json.sig
-#        │  store publish → https://store.fleitec.com/
-#        ▼
-#   opk install /store/…/ps2maus-1.0.0.opk
-#        │
-#        ▼
-#   /lib/ps2maus.omod  auf der Platte -- und der Kern laedt es
-#
-# DREI SIGNATUREN, DREI VERSCHIEDENE FRAGEN, und das ist kein Zufall:
-#
-#   1. Ed25519 ueber die `.omod`     -- "darf dieser Programmtext in
-#      (kernel/module.fi, Schluessel     Ring 0?" Prueft DER KERN,
-#      im Kernabbild)                  jedes Mal beim Laden.
-#   2. Ed25519 ueber die `.opk`      -- "kommt dieses Paket von mir?"
-#      (kernel/user/opk.fi,             Prueft OPK, einmal beim
-#      Runde UPDATE)                    Installieren.
-#   3. Ed25519 ueber `index.json`    -- "ist dieser Katalog echt?"
-#      (orientstore, Schluessel in       Prueft der Speicher-Client,
-#      die App einkompiliert)           bei jedem Abgleich.
-#
-# Eine davon wegzulassen waere jedes Mal eine andere Luecke. Windows hat
-# an derselben Stelle ebenfalls zwei getrennte Huerden -- Code Integrity
-# beim LADEN und die PnP-Signatur beim INSTALLIEREN
-# (docs/MODUL-BEFUND.md, Abschnitt 1.5).
-#
-#   bash tools/module/paket.sh [ausgabeverzeichnis] [--fassung X.Y.Z]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -65,11 +24,6 @@ bash tools/module/build.sh "$OUT/ps2maus.omod" --name ps2maus --abi 1 \
 
 echo "== 2. daraus ein Paket =="
 cat > "$OUT/ps2maus.rezept" <<REZEPT
-# Der Treiber fuer das Zeigegeraet am 8042, als NACHLADBARES Kernmodul.
-#
-# Die Nutzlast ist genau eine Datei: das signierte \`.omod\`. Sie landet
-# auf dem Geraet unter /lib/ps2maus.omod, und dort sucht sie
-# \`kernel/module.fi\`.
 name=ps2maus
 fassung=$FASSUNG
 titel=Zeigegeraet (PS/2, 8042)

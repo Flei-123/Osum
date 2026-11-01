@@ -162,11 +162,6 @@ import struct, sys
 with open(sys.argv[1], 'r+b') as f:
     f.seek(1024)
     sb = bytearray(f.read(1024))
-    # ACHTUNG, HIER LAG EIN FEHLER: s_state steht bei 0x3A, bei 0x38
-    # steht die MAGIE (0xEF53). Wer hier 0x38 schreibt, zerstoert die
-    # Magie und baut aus Versehen das KAPUTTE Abbild noch einmal --
-    # und die Gegenprobe "unsauber wird erkannt" haette dann in
-    # Wahrheit "keine Magie wird erkannt" gemessen.
     struct.pack_into('<H', sb, 0x3A, 0)              # s_state: nicht sauber
     inc = struct.unpack_from('<I', sb, 0x60)[0] | 0x4  # NEEDS_RECOVERY
     struct.pack_into('<I', sb, 0x60, inc)
@@ -189,7 +184,6 @@ fi
 cp --sparse=always "$AUS/ext4.img" "$AUS/kurz-ext4.img"
 python3 - "$AUS/kurz-ext4.img" <<'PYEOF'
 import os, sys
-# 24 von 48 MiB: der Superblock nennt mehr Bloecke, als das Geraet hat.
 os.truncate(sys.argv[1], 24 * 1024 * 1024)
 PYEOF
 

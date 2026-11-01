@@ -1,32 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fremdfs/tempo.sh -- WIE SCHNELL GELESEN WIRD, in MB/s.
-#
-# Der Auftrag dieser Runde verlangt eine Zahl gegen das EIGENE
-# Dateisystem. `run.sh` misst die Dauer eines ganzen Durchgangs -- das
-# ist ehrlich, aber darin steckt der Start des Kernels, das Anlegen von
-# 520 Pruefsummen und die Ausgabe ueber die serielle Schnittstelle.
-# Fuer eine Zahl in MB/s taugt das nicht.
-#
-# Hier wird deshalb genau EINE Sache gemessen: EINE Datei von 2 MB
-# ganz lesen, ohne sie zu hashen, mit der Uhr des Kernels davor und
-# danach. Dreimal je Dateisystem, und die Zeit des SCHNELLSTEN Laufs
-# zaehlt -- die anderen enthalten das, was die Maschine sonst noch tat.
-#
-# WARUM 2 MB UND NICHT DIE 6 MiB DES PRUEFBAUMS: eine Datei auf OFS
-# kann in dieser Fassung hoechstens 2134016 Oktette gross sein (acht
-# direkte Bloecke, 64 ueber den einfach und 4096 ueber den doppelt
-# indirekten -- siehe `kernel/fs.fi` und docs/OFS-LIMITS.md). Die
-# grosse Datei des Pruefbaums passt dort nicht hinein, und ohne einen
-# Wert fuer OFS gaebe es keinen Vergleich. 2000000 Oktette passen auf
-# ALLE DREI -- und nur dann ist die Zahl eine Aussage ueber die
-# Treiber und nicht ueber die Grenzen des einen Dateisystems.
-#
-# Dieselbe Datei liegt dazu auf OFS, dem eigenen Dateisystem. Der
-# Vergleich ist damit fair: dieselbe Maschine, dieselbe Platte,
-# dieselbe Datei, derselbe Weg durch die VFS-Schicht.
-#
-#   bash tools/fremdfs/tempo.sh [bildverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -58,8 +30,6 @@ for p in $PROGS; do
     strip --strip-all "$W/$p.elf"
 done
 
-# Die 2-MB-Datei liegt auch auf der WURZELPLATTE (OFS) -- das ist der
-# Vergleichswert.
 python3 - "$W/gross.bin" 2000000 <<'PYEOF'
 import sys
 ziel, n = sys.argv[1], int(sys.argv[2])

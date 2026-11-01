@@ -128,22 +128,16 @@ def suche(bild, voll, rand, tol):
     ny = h - bh + 1
 
     def flaeche(dx, dy):
-        # Der Ausschnitt, der bei Lage (0,0) auf (dx,dy) faellt.
         ax = dx - x0
         ay = dy - y0
         return bild[ay:ay + ny, ax:ax + nx, :]
 
-    # 1. Die Farbe der Tinte wird an den Tintenpunkten GEMESSEN, nicht
-    #    vorgegeben: der erste Tintenpunkt setzt sie, alle weiteren
-    #    muessen zu ihr passen.
     erste = flaeche(voll[0][0], voll[0][1])
     treffer = np.zeros((ny, nx), dtype=np.int32)
     for (dx, dy) in voll:
         f = flaeche(dx, dy)
         gleich = (np.abs(f - erste) <= tol).all(axis=2)
         treffer += gleich.astype(np.int32)
-    # 2. UND DIE GEGENPUNKTE muessen ANDERS sein. Ohne das findet jede
-    #    einfarbige Flaeche jeden Text.
     gegen = np.zeros((ny, nx), dtype=np.int32)
     schritt = max(1, len(rand) // 400)
     genommen = rand[::schritt]
@@ -154,8 +148,6 @@ def suche(bild, voll, rand, tol):
 
     anteil_tinte = treffer / float(len(voll))
     anteil_gegen = gegen / float(max(1, len(genommen)))
-    # Beides zaehlt, und zwar beides ganz: ein Wort, das zu 100 Prozent
-    # dieselbe Farbe hat, aber dessen Rand auch, ist ein Rechteck.
     punktzahl = np.minimum(anteil_tinte, anteil_gegen)
     idx = int(np.argmax(punktzahl))
     yy, xx = divmod(idx, nx)

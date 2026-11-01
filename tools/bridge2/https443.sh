@@ -1,37 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/https443.sh -- RUNDE MERGE-11: OSUM SPRICHT SELBST
-# HTTPS MIT store.fleitec.com.
-#
-# ====================================================================
-# WAS DIESER LAEUFER BEWEIST, UND WARUM ES IHN BRAUCHT
-# ====================================================================
-#
-# `tools/bridge2/kette.sh` stellt einen Anschluss in einen NETZRAUM auf
-# demselben Rechner. Das misst das Protokoll -- aber nicht den Weg, den
-# Justins Rechner wirklich nehmen muss. Der steht in einem FREMDEN
-# Heimnetz hinter NAT; dorthin gibt es keine Portfreigabe, und deshalb
-# hat sich sein Geraet nie gemeldet: im Koppelbuch standen am
-# 10.09.2026 nur zwei Pruefstaende aus dem Hausnetz, beide gesperrt.
-#
-# Dieser Laeufer nimmt den ECHTEN Weg:
-#
-#   Osum in QEMU (Benutzernetz, also NAT wie bei Justin)
-#     -> DNS auf store.fleitec.com
-#     -> TLS 1.3 mit dem ECHTEN Zertifikat, gegen /etc/ssl/roots.pem
-#     -> POST /bruecke/draht auf Port 443
-#     -> openresty (.51) -> diagnose_server.py -> bruecke_server.py
-#
-# Nichts davon ist gestellt. Faellt irgendein Glied aus, faellt der
-# Lauf durch.
-#
-# WAS ER MISST:
-#   1. der Name loest auf                    (DNS aus lib/libc/dns.fi)
-#   2. der Handschlag steht                  (echtes Zertifikat)
-#   3. der Server antwortet 200
-#   4. ein unbekanntes Geraet bekommt einen PAIRING CODE
-#   5. der Code steht im Protokoll des Dienstes -- die Zeile, die
-#      Justin vorlesen wird
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -62,7 +29,6 @@ for p in sh ls cat echo jsig jarvisctl dhcp host ping; do
         echo "$p bindet nicht"; cat "$W/ld-$p"; exit 1; }
     strip --strip-all "$W/$p.elf"
 done
-# jarvisd ist eine `app`: anderes Profil, FIRNLIB aus DIESEM Baum.
 FIRNLIB="$ROOT/lib" vendor/firn/bin/firnc -c --profile=app \
     -o "$W/jarvisd.o" kernel/app/jarvisd.fi > "$W/e-jarvisd" 2>&1 || {
     echo "jarvisd baut nicht"; head -30 "$W/e-jarvisd"; exit 1; }
@@ -71,9 +37,6 @@ ld -T kernel/user/user.ld -o "$W/jarvisd.elf" "$W/jarvisd.o" \
 strip --strip-all "$W/jarvisd.elf"
 ok "jarvisd gebaut ($(stat -c%s "$W/jarvisd.elf") Oktette)"
 
-# ------------------------------------------------ die Rechteliste
-# GENAU DIE, DIE AUCH AUF JUSTINS STICK LIEGT -- `weg = https`, ein
-# NAME statt einer Zahl, und nichts von Hand einzutragen.
 cat > "$W/rechte.conf" <<'CONF'
 transport            = https
 servername     = store.fleitec.com
@@ -90,7 +53,6 @@ work_file    = /var/jarvis/output.txt
 permit_file = /var/jarvis/screenshot-permit
 CONF
 
-# Der ECHTE Wurzelspeicher -- ohne ihn wird nichts vertraut.
 for c in /etc/ssl/certs/ca-certificates.crt \
          /etc/pki/tls/certs/ca-bundle.crt; do
     [ -r "$c" ] && { cp "$c" "$W/roots.pem"; break; }
@@ -98,16 +60,6 @@ done
 [ -s "$W/roots.pem" ] || { echo "kein Wurzelspeicher auf dem Wirt"; exit 1; }
 note "wurzeln $(stat -c%s "$W/roots.pem") Oktette"
 
-# ------------------------------------------------ /etc/resolv.conf
-# OHNE DIESE DATEI GIBT ES KEINE NAMENSAUFLOESUNG, und der Fehler sieht
-# aus wie ein Netzfehler: `jarvisd: der Name laesst sich nicht
-# aufloesen`, obwohl Karte, Verbindung und Stapel stehen. Gemessen in
-# genau diesem Laeufer, erster Anlauf.
-#
-# 10.0.2.3 ist der Namensdienst von QEMUs Benutzernetz (10.0.2.2 ist
-# der Router, 10.0.2.15 der Gast). Auf Justins Stick schreibt `/bin/dhcp`
-# diese Datei aus dem Lease -- hier steht sie fest, weil dieser Lauf
-# das DNS misst und nicht den DHCP.
 printf 'nameserver 10.0.2.3\n' > "$W/resolv.conf"
 
 SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
@@ -122,8 +74,6 @@ python3 tools/osum/mkfs.py build "$W/probe.img" 32768 $SPEC \
 ok "Platte gebaut"
 
 echo "== 2. Osum faehrt und spricht mit store.fleitec.com =="
-# QEMUs Benutzernetz ist NAT -- dieselbe Lage wie bei Justin: der Gast
-# kommt hinaus, von aussen kommt niemand herein.
 timeout 300 qemu-system-x86_64 -kernel "$W/k0.mb" -m 512 \
     -append "osum nokbd nosched noproc nofs modfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp script=dhcp;jarvisd -1 -t 50000" \
     -serial "file:$W/serial.txt" -display none -no-reboot \
@@ -155,7 +105,6 @@ grep -qa 'der Server antwortet' "$W/serial.txt" \
 grep -qa 'PAIRING CODE' "$W/serial.txt" \
     && ok "das Geraet ist beim Dienst angekommen und zeigt einen Code" \
     || bad "das Geraet ist NICHT angekommen"
-# Der Code, den Justin vorlesen wird -- als Klartext, nicht als Hex.
 HEX=$(grep -a 'PAIRING CODE' "$W/serial.txt" | tail -1 | awk '{print $NF}')
 if [ -n "$HEX" ]; then
     note "Code auf dem Bildschirm: $(python3 -c "import sys;print(bytes.fromhex(sys.argv[1]).decode())" "$HEX" 2>/dev/null)"

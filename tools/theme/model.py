@@ -324,17 +324,6 @@ def resolve(scheme, dark, accent_override=None):
             put("surface-raised", neutral[N_800])
             # FILL RULE: sunken N_950 -> N_1000, it was the fill of the field.
             put("surface-sunken", neutral[N_1000])
-            # ROUND KLEINKRAM (14.09.2026), A-017: hover N_800 -> N_700 and
-            # pressed N_700 -> N_600.  This is the SECOND implementation
-            # catching up with the first, not a softened expectation.
-            # Commit 65d3300 ("Der Hover war kaputt") fixed the kernel:
-            # in dark mode surface-raised and surface-hover were BOTH
-            # N_800, measured `bg=2565930 bthi=2565930`, both #27272A --
-            # the pointer over a tile changed nothing at all.  Pressed had
-            # to move along, otherwise hover and pressed would collide at
-            # N_700.  Four steps now: base 900, surface 800, hover 700,
-            # pressed 600.  kernel/user/wlibc.fi:3006 is the truth here;
-            # this file was simply never pulled after that commit.
             put("surface-hover", mix(neutral[N_800], neutral[N_0], HOVER_PCT_DARK))
             put("surface-pressed", neutral[N_600])
             put("control", neutral[N_700])

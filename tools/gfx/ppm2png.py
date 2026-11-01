@@ -48,7 +48,7 @@ def ppm_lesen(pfad):
         while at < len(roh) and not roh[at:at + 1].isspace():
             at += 1
         felder.append(int(roh[anfang:at]))
-    at += 1  # genau EIN Zwischenraumzeichen nach dem Hoechstwert
+    at += 1
     b, h, hoch = felder
     if hoch != 255:
         raise SystemExit("ppm2png: nur 8 Bit je Kanal, nicht %d" % hoch)
@@ -76,7 +76,6 @@ def main(argv):
         z = daten[y * schritt:(y + 1) * schritt]
         zeilen.append(1)  # Filter "Sub"
         zeilen += z[:3]
-        # Der linke Nachbar, drei Oktette zurueck, modulo 256.
         vorher = memoryview(z)[:-3]
         jetzt = memoryview(z)[3:]
         zeilen += bytes((a - c) & 255 for a, c in zip(jetzt, vorher))

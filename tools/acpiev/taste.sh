@@ -1,13 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/acpiev/taste.sh -- DIE EINSCHALTTASTE, WIRKLICH GEDRUECKT.
-#
-# `system_powerdown` am QEMU-Monitor IST der Druck auf die
-# Einschalttaste: QEMU setzt PWRBTN_STS in PM1a_STS und zieht den SCI.
-# Was danach passiert, ist Sache des Gastes -- und genau das wird hier
-# gemessen.
-#
-# Aufruf:  bash tools/acpiev/taste.sh KERNEL AUSGABE [warte_s] [append...]
 set -uo pipefail
 K=${1:?kernel}
 OUT=${2:?ausgabe}
@@ -25,9 +16,6 @@ qemu-system-x86_64 -accel kvm -kernel "$K" -m 256 \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
 QPID=$!
 
-# Warten, bis der Kern aufgesetzt hat. NICHT blind schlafen: auf die
-# Zeile warten, die sagt, dass die Ereignisse stehen -- sonst misst man
-# auf einer schnellen Maschine etwas anderes als auf einer langsamen.
 for _ in $(seq 1 300); do
     grep -qa 'acpiev: ready=' "$OUT" 2>/dev/null && break
     kill -0 $QPID 2>/dev/null || break
@@ -39,9 +27,6 @@ sleep 2
 python3 - "$MON" <<'PY'
 import socket, sys, time, os
 pfad = sys.argv[1]
-# WARTEN, BIS DER ANSCHLUSS DA IST. `server,nowait` legt ihn an, sobald
-# QEMU so weit ist -- das kann nach dem Start des Kerns sein. Wer hier
-# blind verbindet, bekommt ECONNREFUSED und misst nichts.
 for _ in range(200):
     if os.path.exists(pfad):
         break
@@ -65,7 +50,6 @@ print("Monitor: %s" % letzt, file=sys.stderr)
 sys.exit(1)
 PY
 
-# Dem Gast Zeit geben zu reagieren.
 for _ in $(seq 1 $((WARTE * 10))); do
     kill -0 $QPID 2>/dev/null || break
     sleep 0.1

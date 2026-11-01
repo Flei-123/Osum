@@ -1,23 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/lib/umstellen.py -- die qemu-Aufrufe der Laeufer auf $QEMU_X86
-# umstellen. EINMALIG benutzt; steht hier, damit nachvollziehbar ist,
-# WELCHE Zeilen angefasst wurden und welche nicht.
-#
-#   bash: python3 tools/lib/umstellen.py [--pruefen]
-#
-# Regel, nach der eine Zeile umgestellt wird:
-#   * sie enthaelt `qemu-system-x86_64`
-#   * UND sie enthaelt `timeout`  (also ein echter Start, keine Abfrage)
-#   * UND sie enthaelt KEIN `-accel`  (wer selbst waehlt, behaelt seine Wahl)
-#   * UND die Datei steht nicht auf der Sperrliste unten
-#
-# Damit bleiben ausgeschlossen:
-#   `command -v qemu-system-x86_64`     -- Vorhandenheitsabfrage
-#   `echo "... qemu-system-x86_64 ..."` -- Text
-#   `for t in qemu-system-x86_64 ...`   -- Werkzeugliste
-#   `qemu-system-x86_64 -device help`   -- Faehigkeitsabfrage (k17)
-#   `-accel tcg`, `-accel "tcg,thread=..."` -- hv und smp
 
 import re
 import subprocess
@@ -26,7 +7,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
-# Dateien, die GAR NICHT angefasst werden.
 SPERRE = {
     "tools/hv/run.sh":  "testet den eigenen Hypervisor, setzt -accel tcg selbst",
     "tools/smp/run.sh": "misst tcg,thread=single gegen multi",
@@ -64,7 +44,6 @@ def umstellen(pfad: Path, pruefen: bool):
     if treffer == 0:
         return 0, "keine passende Zeile"
 
-    # `. tools/lib/qemu.sh` direkt nach dem cd ins Repo-Wurzelverzeichnis.
     if not any("tools/lib/qemu.sh" in z for z in zeilen):
         for i, z in enumerate(zeilen):
             if CD_RE.match(z):
@@ -99,8 +78,6 @@ def main():
     print(f"\n{gesamt} qemu-Aufrufe umgestellt"
           f"{' (nur geprueft)' if pruefen else ''}")
 
-    # Gegenprobe: nach dem Umbau darf in den umgestellten Dateien kein
-    # nacktes `timeout ... qemu-system-x86_64` ohne -accel mehr stehen.
     if not pruefen:
         rest = subprocess.run(
             ["grep", "-rn", "--include=*.sh", "qemu-system-x86_64", "."],

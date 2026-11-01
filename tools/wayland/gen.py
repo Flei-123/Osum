@@ -47,9 +47,6 @@ XDG_XML = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 VIEWPORTER_XML = "/usr/share/wayland-protocols/stable/viewporter/viewporter.xml"
 DECORATION_XML = "/usr/share/wayland-protocols/unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"
 
-# Genau die Schnittstellen, die ein einfacher Client braucht. Die Zahlen
-# sind die Reihenfolge, in der dieser Server sie kennt -- sie stehen
-# NICHT im Protokoll, sie sind unsere eigene Nummerierung.
 LIMIT = [
     "wl_display", "wl_registry", "wl_callback", "wl_compositor",
     "wl_shm", "wl_shm_pool", "wl_buffer", "wl_surface",
@@ -65,9 +62,6 @@ LIMIT = [
     "zxdg_decoration_manager_v1", "zxdg_toplevel_decoration_v1",
 ]
 
-# Welche Fassung dieser Server anbietet. Mehr zu behaupten, als gebaut
-# ist, waere die eine Luege, die ein Client nicht ueberlebt: er ruft
-# dann eine Anfrage, die es hier nicht gibt.
 VERSION = {
     "wl_compositor": 4,
     "wl_shm": 1,
@@ -164,7 +158,6 @@ def main():
     exports.append("version_of")
     body.append("")
 
-    # ---- 3. die Namen als Oktettfolgen ----
     body.append("// Der NAME einer Schnittstelle, wie er im Protokoll")
     body.append("// steht. `wl_registry.global` schickt ihn, und")
     body.append("// `wl_registry.bind` bringt ihn zurueck.")

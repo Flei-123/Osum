@@ -1,43 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dmodul/kosten.sh -- RUNDE MODULE: WAS DIE KAESTCHEN KOSTEN.
-#
-#   bash tools/dmodul/kosten.sh <ausgabe> [accel=kvm|tcg]
-#
-# ============================================================ DIE FRAGE
-#
-# Module werden in JEDEM Bild gemalt. Die Frage ist nicht "sieht es gut
-# aus", sondern "was geht davon ab". Der Rahmen aus vorhandenen
-# Messungen dieses Projekts:
-#
-#   eine Blur-Blase 360x120      3,1 ms = 18 % des 60-Hz-Budgets
-#   ein Taskleistenstreifen      0,01 ms
-#
-# Ein Modul ist naeher am zweiten als am ersten -- und genau das muss
-# nachgerechnet und nicht behauptet werden.
-#
-# ============================================================ DIE ZAHL
-#
-# Gemessen wird `wm: composites=` und `pixels=` ueber einen Lauf von
-# 20 Sekunden mit `wmhold`. `composites` ist die Zahl der
-# Zusammensetzungen, `pixels` die Summe der dabei angefassten
-# Bildpunkte -- beide zaehlt der Fensterserver SELBST, keiner wird aus
-# einem Bild geraten.
-#
-# DREI LAEUFE, und der erste ist die Gegenprobe:
-#
-#   0-aus      alle Module AUS (module.conf mit an=0). Das ist der
-#              Zustand VOR dieser Runde -- ohne ihn ist jede Zahl
-#              danach eine Zahl ohne Vergleich.
-#   1-an       alle drei AN, Vorgabelage.
-#   2-bearb    alle drei AN, Bearbeitungsmodus (jedes Modul traegt
-#              zusaetzlich einen Akzentrahmen).
-#
-# WAS DIE ZAHL NICHT SAGT: sie misst den Schreibtisch im RUHEZUSTAND.
-# Ein Modul malt sich nur neu, wenn sich seine Zahl geaendert hat
-# (`werte_holen` gibt sonst false) -- die Uhr also einmal je Minute,
-# Speicher und Last einmal je Sekunde. Der Dauerzustand ist damit
-# genau das, was hier steht, und nicht ein Bild je 16 ms.
 set -uo pipefail
 WURZEL=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$WURZEL" || exit 1
@@ -140,7 +101,6 @@ messen() {
         kill -0 "$PID" 2>/dev/null || break
         sleep 0.15; i=$((i+1))
     done
-    # Im Bearbeitungsmodus: den rechten Knopf auf das erste Modul.
     if [ "$name" = 2-bearb ]; then
         local gx gy
         gx=$(awk '/name=uhr /{for(i=1;i<=NF;i++){n=index($i,"=");
@@ -156,8 +116,6 @@ messen() {
                 > "$OUT/click-$name.log" 2>&1
         fi
     fi
-    # Den Lauf zu Ende gehen lassen (`wmhold` haelt 20 s) und dann die
-    # letzte Zeile nehmen.
     wait "$PID" 2>/dev/null
     rm -f "$OUT/d-$name.img"
 }
@@ -204,9 +162,6 @@ print("  Bildpunkte an      %12d   (%+.2f %%)" % (p1, (p1 - p0) * 100.0 / p0))
 if p2:
     print("  Bildpunkte bearb   %12d   (%+.2f %%)" % (p2, (p2 - p0) * 100.0 / p0))
 print("  Zusammensetzungen  aus=%d an=%d" % (c0, c1))
-# Ein Bildpunkt kostet im Zusammensetzer rund 4 Oktette Schreiben.
-# Der Vergleich, der etwas sagt: drei Kaestchen zu 184x36 sind
-# 19 872 Bildpunkte je Neuzeichnung.
 print("  ein Modulsatz      %12d Bildpunkte je Neuzeichnung (3 x 184 x 36)"
       % (3 * 184 * 36))
 PY

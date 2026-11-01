@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k15/oneshot.sh -- EINEN Lauf machen, ein Foto holen, zum Iterieren.
-#
-#   bash tools/k15/oneshot.sh <name> "<kommandozeile>" [monitordatei]
-#
-# Legt unter $OUT ab: <name>.txt (die serielle Leitung) und <name>.ppm.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL

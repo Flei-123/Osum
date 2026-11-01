@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# herkunft.sh -- der Nachweis "fremd und unveraendert".
-# Entpackt JEDES Archiv ein zweites Mal an einen frischen Ort und
-# vergleicht es mit dem Baum, aus dem wirklich gebaut wurde.
 set -u
 Q=/root/fremdquellen
 W=/root/fremdland-tmp
@@ -24,7 +21,6 @@ for pair in \
 do
   o="${pair%%:*}"; b="${pair##*:}"
   if [ ! -d "$b" ]; then echo "$o: BAUBAUM FEHLT ($b)"; continue; fi
-  # Bauartefakte zaehlen nicht als Aenderung am QUELLTEXT.
   d=$(diff -r -x '*.o' -x '*.a' -x '.config*' -x 'busybox' -x 'busybox_unstripped*' \
         -x 'include' -x 'applets' -x '.kernelrelease' -x 'Makefile.flags' \
         -x '*.d' -x '.*.cmd' -x 'scripts' -x 'docs' -x '_*' \

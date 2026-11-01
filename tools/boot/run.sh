@@ -1,39 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/boot/run.sh -- DER BEWEIS, DASS DER MULTIBOOT-KOPF EINEN
-# BILDSCHIRM VERLANGT -- UND WARUM DAS DER UEFI-PFAD IST.
-#
-# Osum startet ueber Multiboot. Bis zu dieser Runde stand im Kopf
-# `MB_FLAGS = 0x3`: ausgerichtete Module und Speicherkarte, sonst nichts.
-# Ein Lader liest daraus, dass der Kern keinen Bildschirmwunsch hat, und
-# nimmt den TEXTMODUS an.
-#
-# Unter UEFI gibt es keinen Textmodus. Ein Multiboot-Lader, der unter
-# UEFI laeuft (Limine), bricht deshalb mit
-#
-#     PANIC: multiboot1: Cannot use text mode with UEFI.
-#
-# ab -- gemessen, bevor diese Runde den Kopf geaendert hat. Mit Bit 2 und
-# `mode_type = 0` verlangt der Kern einen LINEAREN RAHMENPUFFER, den die
-# Firmware setzen kann, und dasselbe Abbild bootet ueber BIOS UND ueber
-# UEFI.
-#
-# WAS HIER GEMESSEN WIRD:
-#
-#   1. Der Kopf steht in den ersten 8 KiB des Abbilds, die Pruefsumme
-#      stimmt (Magie + Flags + Pruefsumme = 0 modulo 2^32).
-#   2. Bit 2 ist gesetzt und `mode_type` ist 0 -- linearer Rahmenpuffer,
-#      keine Vorgabe fuer Breite und Hoehe.
-#   3. Der Kern startet weiterhin ueber `qemu-system-x86_64 -kernel`, und
-#      er meldet die Flags, die der Lader ihm gegeben hat.
-#   4. Die Gegenprobe: derselbe Kern, aus BEIDEN Uebersetzern, mit
-#      demselben Kopf.
-#
-# Der Boot ueber eine ECHTE UEFI-Firmware wird nicht hier gemessen,
-# sondern dort, wo der Lader und das Abbild zu Hause sind: in OrientOS
-# (`tests/step-25-osum-uefi.sh`). Dieses Repo baut einen Kern, kein ISO.
-#
-# Verwendung:  bash tools/boot/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -58,13 +23,9 @@ for stufe in 0 1; do
         continue
     fi
 
-    # Den Kopf im ABBILD suchen, nicht in der Quelle: gemessen wird, was
-    # ein Lader vorfindet.
     KOPF=$(python3 - "$IMG" <<'PY'
 import struct, sys
 daten = open(sys.argv[1], 'rb').read()
-# Multiboot 1: die Magie liegt 4-fach ausgerichtet in den ersten 8192
-# Oktetten (Spezifikation 3.1.1).
 for off in range(0, min(len(daten), 8192) - 48, 4):
     if daten[off:off+4] == b'\x02\xb0\xad\x1b':
         f = struct.unpack_from('<9I', daten, off)
@@ -99,8 +60,6 @@ PY
     gleich "firnc$stufe: mode_type = linearer Rahmenpuffer" "$MODUS" "0"
     gleich "firnc$stufe: 32 Bit je Bildpunkt" "$TIEFE" "32"
 
-    # Der alte Weg muss weitergehen. Ein Kopf, der UEFI erlaubt, aber den
-    # bisherigen Start kaputtmacht, waere kein Fortschritt.
     if command -v qemu-system-x86_64 >/dev/null 2>&1; then
         OUT="$TMPD/o$stufe.txt"
         rc=0

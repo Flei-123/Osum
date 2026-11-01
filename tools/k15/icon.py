@@ -27,10 +27,6 @@ Kennung am Anfang steht.
 DIE QUELLE IST TEXT, und das ist Absicht: ein Symbol, das als
 Oktettklumpen im Baum liegt, kann niemand in einem Unterschied lesen.
 
-    # X = 4a90d0        eine Farbe je Zeichen, RGB in sechs Hexziffern
-    # o = ffffff
-    # . =               nichts dahinter heisst DURCHSICHTIG
-    # I = @ink          eine ROLLE statt eines Wertes (Runde NETVIEW)
     ................
     ..XXXXXXXXXXXX..
     ...
@@ -40,11 +36,6 @@ hellen und in einem dunklen Farbschema richtig aussehen soll, darf seine
 Farbe nicht selbst kennen. Ein Palettenwert, der mit `@` anfaengt, ist
 darum keine Farbe, sondern eine ROLLE:
 
-    # I = @ink          die Vordergrundfarbe des laufenden Schemas
-    # D = @dim          die gedaempfte
-    # A = @accent       die Akzentfarbe
-    # W = @warn         die Aufmerksamkeitsfarbe
-    # P = @panel        die Flaeche, auf der gemalt wird
 
 Sie stehen im DECKUNGSOKTETT und nicht in den Farboktetten: 0 heisst
 durchsichtig wie bisher, 255 heisst "die drei Oktette sind die Farbe"
@@ -61,9 +52,6 @@ Verwendung:
 import struct
 import sys
 
-# Die Rollen und ihre Nummer im Deckungsoktett. Die Liste steht AUCH in
-# `kernel/user/wlibc.fi` (`icon_draw`) und in `tools/netview/icons.py`;
-# dass die drei uebereinstimmen, misst `tools/netview/run.sh`.
 ROLLEN = {
     "ink": 1,
     "dim": 2,
@@ -130,8 +118,6 @@ def baue(pfad):
             if rgb is None:
                 aus += bytes(4)
             elif isinstance(rgb, tuple):
-                # Eine Rolle: die drei Farboktette sind null, das
-                # Deckungsoktett traegt die Nummer.
                 aus += bytes((0, 0, 0, rgb[1]))
             else:
                 aus += bytes(((rgb & 255), (rgb >> 8) & 255,

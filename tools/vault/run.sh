@@ -585,18 +585,11 @@ REACH=bc9c62d6877b710a648c
 python3 - "$TMPD" "$ORPH" "$REACH" <<'PY2'
 import os, sys
 t, orph, reach = sys.argv[1], sys.argv[2], sys.argv[3]
-# DER SICHERUNGSSATZ, wie ihn PLAN2 definiert: PLAN + config + state.
 os.makedirs(t + "/set/config", exist_ok=True)
 os.makedirs(t + "/set/state", exist_ok=True)
 open(t + "/set/PLAN", "wb").write(
     ("app mine 0.1.0\t%s\napp hallo 1.0.0\t%s\n" % (orph, reach)).encode())
 open(t + "/set/config/app.conf", "wb").write(b"theme=dark\nfont=12\n")
-# DIE GROESSE IST MIT ABSICHT GEWAEHLT. PLAN2 hat den Sicherungssatz eines
-# echten Baumes gemessen: 44 076 Oktette (docs/BACKUP.md § 2). Ein
-# Spielzeugsatz von 800 Oktetten wuerde den Aufschlag durch ein 29-KiB-Paket
-# als "+3587 %" ausweisen -- eine wahre Zahl, die nichts bedeutet. Hier
-# steht deshalb ungefaehr so viel Benutzerdatum wie dort, damit der
-# Prozentsatz mit der echten Messung VERGLEICHBAR ist.
 st = 0x2545F4914F6CDD1D
 def nxt():
     global st
@@ -606,7 +599,6 @@ def nxt():
     return st & 0xFF
 open(t + "/set/state/doc.txt", "wb").write(bytes(nxt() for _ in range(24000)))
 open(t + "/set/state/notes.md", "wb").write(bytes(nxt() for _ in range(19000)))
-# Die ORPHANS-Liste nach der Schnittstelle aus docs/ORPHANS.md.
 open(t + "/ORPHANS", "wb").write((orph + "\n").encode())
 open(t + "/EMPTY", "wb").write(b"")
 open(t + "/BADSHAPE", "wb").write(b"../../etc/passwd\n")
@@ -763,12 +755,10 @@ def nxt():
     st ^= st >> 7
     st ^= (st << 17) & 0xFFFFFFFFFFFFFFFF
     return st & 0xFF
-# 1. DIESELBE DATEI IN DREI ORDNERN. 8192 Oktette = genau zwei Bloecke.
 gleich = bytes(nxt() for _ in range(8192))
 for d in ("x", "y", "z"):
     os.makedirs(t + "/drei/" + d, exist_ok=True)
     open(t + "/drei/%s/gleich.bin" % d, "wb").write(gleich)
-# 2. DER BAUM, zweimal gesichert -- und einmal mit EINER kleinen Aenderung.
 os.makedirs(t + "/data/sub", exist_ok=True)
 a = bytes(nxt() for _ in range(20000))
 b = bytes(nxt() for _ in range(16384))   # genau vier Bloecke
@@ -776,7 +766,6 @@ c = bytes(nxt() for _ in range(8000))
 open(t + "/data/a.txt", "wb").write(a)
 open(t + "/data/b.bin", "wb").write(b)
 open(t + "/data/sub/c.txt", "wb").write(c)
-# Dieselben Dateien, EIN Oktett anders -- im ERSTEN Block von b.bin.
 os.makedirs(t + "/data2/sub", exist_ok=True)
 b2 = bytearray(b); b2[100] ^= 0xFF
 open(t + "/data2/a.txt", "wb").write(a)
@@ -980,7 +969,6 @@ open(t + "/etc/passwd", "wb").write(b"MARK-PASSWD-ORDINARY\n")
 open(t + "/secrets/vault.kdbx", "wb").write(blob(b"MARK-VAULT-SECRET-BANK-PW ", 8192))
 open(t + "/config/vpn/keys/home.key", "wb").write(b"MARK-VPNKEY-SECRET\n")
 open(t + "/etc/shadow", "wb").write(b"MARK-SHADOW-SECRET\n")
-# (c) DARF NIE MIT
 open(t + "/device/key", "wb").write(b"MARK-DEVICEKEY-NEVER\n")
 open(t + "/etc/machine-id", "wb").write(b"MARK-MACHINEID-NEVER\n")
 open(t + "/state/session/token", "wb").write(b"MARK-SESSION-NEVER\n")
@@ -1108,10 +1096,6 @@ for st in ("/sA/", "/sB/", "/sC/"):
     print("store %s size=%d" % (st, len(blob)))
     for k, v in marks.items():
         print("  %s %s %d" % (st, k, blob.count(v)))
-# DER ROHINHALT DES TRESORS, genau an seiner Stelle. Der Schnappschuss
-# nennt die Bloecke einer Datei, INDEX sagt wo sie in PACK liegen -- also
-# genau das, was ein Finder des Sticks tun wuerde. Herausgeschnitten wird
-# der ERSTE Block von /secrets/vault.kdbx.
 def block_of(store, snap, path):
     txt = cat(store + snap).decode("latin-1")
     line = [l for l in txt.split("\n") if l.startswith(path + "\t")]
@@ -1133,7 +1117,6 @@ for st, sn in (("/sB/", "S-b1"), ("/sC/", "S-c1")):
         print("vaultblock %s name=%s len=%d mark=%d" % (
             st, name[:16], len(oct_), oct_.count(b"MARK-VAULT-SECRET-BANK-PW")))
         print("vaulthex %s %s" % (st, oct_[:48].hex()))
-# UND das Gegenstueck: der Pfad steht im Klartext im Schnappschuss (B4).
 sc = store_blob("/sC/")
 print("pathleak %d" % sc.count(b"/secrets/vault.kdbx"))
 PY2
@@ -1224,7 +1207,6 @@ for a, b in paare:
         gleich += 1
     else:
         print("UNGLEICH %s <-> %s" % (a, b))
-# UND: die Klasse (c) darf im wiederhergestellten Baum NICHT auftauchen.
 weg = 0
 for p in ("/outC/device/key", "/outC/etc/machine-id", "/outC/state/session/token"):
     if cat(p) is None:

@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plattform as PLT   # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
-import opkpfad  # noqa: E402  -- A-025: der alte Standardpfad war ein Arbeitsbaum
+import opkpfad
 OPK = opkpfad.pfad()
 
 
@@ -149,26 +149,14 @@ def main():
     if not dateien:
         raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % quelle)
 
-    # RUNDE BETRIEB: OTA2. Dieses Werkzeug bleibt der einfache
-    # Pruefstand-Erzeuger (eine Fassung, ein Schluessel, keine Kette,
-    # keine Sperrliste); die Betriebsfassung mit Register, Vorrat,
-    # Sperrliste und Schluesselwechsel ist
-    # `tools/ota/veroeffentlichen.py`. Die Kennung muss trotzdem
-    # mitziehen, weil ein Geraet dieser Runde ein OTA1-Verzeichnis
-    # ABLEHNT -- sonst waere die Sperrliste durch ein altes, richtig
-    # signiertes Verzeichnis abzuschalten.
     zeilen = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t0"]
     for d in dateien:
         p = os.path.join(quelle, d)
         roh = open(p, "rb").read()
         h = hashlib.sha256(roh).hexdigest()
         if kaputt == d:
-            # RICHTIG SIGNIERT, FALSCHER STREUWERT. Ein Bit im Streuwert
-            # gekippt: die Signatur ueber das Verzeichnis bleibt gueltig,
-            # die Kette zum Paket ist gebrochen.
             h = ("%x" % (int(h, 16) ^ 1)).rjust(64, "0")
         name, pf = meta_aus_opk(p)
-        # RUNDE STORE-MOBIL: die sechste Spalte, siehe plattform.py.
         plattform = PLT.plattform_von_roh(roh, d)
         zeilen.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
                       % (name, pf, h, len(roh), d, plattform))

@@ -27,9 +27,6 @@ import socket
 import sys
 import time
 
-# Ein Zeichen -> eine QEMU-Taste. Was hier nicht steht, kann diese
-# Tastatur nicht schicken, und dann sagt das Programm das, statt es
-# stillschweigend wegzulassen.
 EINFACH = {
     ' ': 'spc', '\n': 'ret', '\t': 'tab',
     '-': 'minus', '=': 'equal', '[': 'bracket_left', ']': 'bracket_right',
@@ -76,12 +73,6 @@ def key_zeilen(pfad):
         return 0
 
 
-# So lange wird auf die Wirkung EINER Taste gewartet, bevor es
-# weitergeht. Grosszuegig, weil der Wirt geteilt wird: das Zeitlimit ist
-# die Notbremse und nicht die Messung. Wer hier ankommt, hat entweder
-# eine Taste geschickt, die keine Zeile erzeugt (Umschalttaste allein,
-# eine Taste, die der Editor schluckt), oder der Kern ist stehen
-# geblieben -- und dann faellt der Abschnitt sowieso durch.
 ZEIT_JE_TASTE = 8.0
 
 
@@ -97,8 +88,6 @@ def main():
         else:
             folge.append(t)
 
-    # Warten, bis der Rechner sagt, dass er bereit ist. Ohne das faellt die
-    # erste Taste in die Shell und nicht in den Editor.
     bis = time.time() + 60
     bereit = False
     while time.time() < bis:
@@ -138,14 +127,7 @@ def main():
             ziel = k[5:]
             if os.path.exists(ziel):
                 os.unlink(ziel)
-            # Erst zur Ruhe kommen lassen: ein Foto mitten im Neuzeichnen
-            # zeigt einen halben Schirm, und der verliert jeden Vergleich.
             time.sleep(1.2)
-            # DER MITSCHNITT WIRD IM SELBEN AUGENBLICK FESTGEHALTEN.
-            # Ohne das misst man spaeter den Schirm, den der Editor beim
-            # VERLASSEN hinterlassen hat, und nicht den, der auf dem Foto
-            # steht -- und dann vergleicht man zwei verschiedene
-            # Zeitpunkte miteinander.
             try:
                 with open(warte, 'rb') as f:
                     open(ziel + '.ser', 'wb').write(f.read())
@@ -188,25 +170,6 @@ def main():
                     break
                 letzte = jetzt
             continue
-        # RUNDE ROTABSCHNITTE: AUF DIE WIRKUNG WARTEN, NICHT AUF DIE UHR.
-        #
-        # Hier stand `time.sleep(0.12)`. Auf einem Wirt, den sich bis zu
-        # sechs fremde QEMU-Prozesse teilen, bekommt die virtuelle
-        # Maschine ihre Zeitscheibe nicht in 120 ms -- die Taste liegt
-        # dann noch in der Tastatur, und die naechste kommt schon
-        # hinterher. Gezaehlt wurden so 2 Tasten statt 3, und der
-        # Abschnitt war rot, ohne dass am Kern etwas falsch war.
-        #
-        # Gewartet wird jetzt, bis der Kern die Taste GEMELDET hat.
-        # Kommt keine Meldung (eine Taste, die keine Zeile erzeugt --
-        # eine reine Umschalttaste, oder eine, die ein Programm
-        # schluckt), geht es nach ZEIT_JE_TASTE trotzdem weiter: diese
-        # Datei tippt auch dort, wo gar kein `key: ` zu erwarten ist.
-        # Entschaerft wird damit nichts -- wer die Zeilen zaehlt, zaehlt
-        # sie weiterhin selbst.
-        # `nowait:<key>` -- a key that reports no `key: ` line (Num Lock,
-        # Ctrl+Alt+L): send it and go on after a short pause instead of
-        # ZEIT_JE_TASTE, which is longer than the console's idle limit.
         if k.startswith('nowait:'):
             s.sendall(("sendkey %s\n" % k[7:]).encode())
             time.sleep(0.3)

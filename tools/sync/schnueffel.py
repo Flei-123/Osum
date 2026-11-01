@@ -123,34 +123,15 @@ def main():
     gleich("(b) der Klartext steht NICHT im Speicher", marke in alle, False)
     gleich("(b) und auch nicht als Dateiname",
            any(marke.decode() in f for f in dateien), False)
-    # Die Gegenprobe zur Gegenprobe: die Marke steht wirklich im Baum.
     imbaum = False
     for wurzel, _, fs in os.walk(baum):
         for f in fs:
             if marke in open(os.path.join(wurzel, f), "rb").read():
                 imbaum = True
     gleich("(b) GEGENPROBE: im Klartextbaum steht sie sehr wohl", imbaum, True)
-    # Und: kein Name im INDEX ist der blanke Hash irgendeines Blocks des
-    # Baums -- das ist (c) in seiner scharfen Form.
     namen = index_namen(speicher)
     gleich("(b) der Index hat Namen", len(namen) > 0, True)
 
-    # ------------------------------- (c) der Wiedererkennungsangriff
-    # Den Schluessel K_NAME holt sich der BESITZER (fuer die Gegenprobe),
-    # nicht der Angreifer.
-    # DER WEG ZUM SCHLUESSELBUND IST DER WEG DES BESITZERS, und nicht die
-    # Abkuerzung. Der Hauptschluessel eines echten Kontos ist ZUFAELLIG
-    # (kbund.kb_neu) und liegt eingepackt in der Huelle; die Passphrase
-    # oeffnet nur die Huelle. Wer statt dessen den Hauptschluessel aus der
-    # Passphrase ableitet, bekommt einen Bund, der zu nichts passt -- und
-    # dann meldet die Gegenprobe "0 von 3 gefunden" und sieht aus wie ein
-    # Erfolg der Verschluesselung. Genau das ist hier einmal passiert.
-    # Also, drei Schritte, jeder einzeln nachpruefbar:
-    #   1. Einpackschluessel = scrypt(Passphrase, Salz) -- mit PYTHONS
-    #      hashlib.scrypt, nicht mit unserem Code. Passt der Bund am Ende,
-    #      ist das nebenbei der Beweis, dass unser scrypt richtig rechnet.
-    #   2. Hauptschluessel = Huelle oeffnen (XChaCha20-Poly1305).
-    #   3. Bund = HKDF(Hauptschluessel, Salz).
     kopf = os.path.join(speicher, "KOPF")
     felder = {}
     if os.path.exists(kopf):
@@ -175,8 +156,6 @@ def main():
         print("  der Bund laesst sich nicht ableiten -- (c) misst nichts")
         return 1
     KN = bytes.fromhex(bund[64:128])
-    # Und die Probe auf die Probe: der Pruefwert im KOPF ist der fuenfte
-    # Unterschluessel. Stimmt er, ist der ganze Weg richtig gegangen.
     gleich("(c) der Schluesselbund des Besitzers stimmt mit dem KOPF ueberein",
            bund[256:320], felder.get("pruef", ""))
 
@@ -198,8 +177,6 @@ def main():
                     break
         return t
 
-    # Der Angreifer rechnet die NAIVEN Namen aus -- so, wie jeder
-    # inhaltsadressierte Speicher ohne Schluessel sie bilden wuerde.
     print("  (c) der Angreifer hat %d Dateien im Verdacht, %d davon hat "
           "der Nutzer wirklich" % (len(habe) + len(habe_nicht), len(habe)))
     gleich("(c) NAIV (blanker SHA-256): erkannte Dateien", naiv_treffer(habe), 0)
@@ -209,8 +186,6 @@ def main():
     gleich("(c) GEGENPROBE mit K_NAME: und die anderen nicht",
            hmac_treffer(habe_nicht), 0)
 
-    # Und die Simulation des naiven Speichers, damit die Zahl oben nicht
-    # nur "0 von 3" heisst, sondern auch "waere 3 von 3 gewesen".
     naiv_index = set()
     for f in habe:
         for b in bloecke(f):

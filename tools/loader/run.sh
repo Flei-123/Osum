@@ -1,45 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/loader/run.sh -- DIE ABNAHME DER RUNDE LADEN.
-#
-#   bash tools/loader/run.sh [arbeitsverzeichnis]
-#
-# Sie misst EINE Behauptung, und zwar die ganze:
-#
-#     Der Laden liefert echte Programme aus. Ein Osum in QEMU holt sie
-#     ueber HTTPS von store.fleitec.com, prueft sie, installiert sie,
-#     und danach stehen sie im Starter und lassen sich benutzen.
-#
-# SIEBEN ABSCHNITTE, und jeder hat eine Gegenprobe:
-#
-#   1. DIE PAKETE. Acht Stueck, aus den Programmen DIESES Baums, mit
-#      Titel, Fassung, Beschreibung, Schluesselwoertern und Symbol.
-#      Gegenprobe: `opk.py zeigen` liest jedes zurueck und findet
-#      `start`, `INFO` und `symbol` darin.
-#   2. DIE AUSLIEFERUNG. Sie liegt unter /srv/store/osum und ist von
-#      aussen mit `curl` zu holen -- mit einem FREMDEN Werkzeug, damit
-#      die Aussage nicht von diesem Repo abhaengt.
-#   3. DIE LISTE. Ein Osum ohne jedes Paket fragt den Laden und zaehlt
-#      acht auf. Gegenprobe: die Fassungsnummer, die es DABEI liest,
-#      ist die aus dem signierten VERZEICHNIS und nicht geraten.
-#   4. DIE INSTALLATION. `ota apply`: holen, Laenge und SHA-256
-#      gegen das VERZEICHNIS, dann `opk` -- das die Signatur ein
-#      ZWEITES Mal prueft, mit eigenem Code.
-#   5. DAS PROGRAMM LAEUFT. Der Schreibtisch startet, der Starter
-#      findet die neuen Programme unter ihrem ANZEIGENAMEN, und eines
-#      davon macht sein Fenster auf. Mit Bild.
-#   6. DIE GEGENPROBE. Die beschaedigten Pakete aus
-#      /root/ota-avx-nach/boese muessen ABGELEHNT werden -- eines mit
-#      gekipptem Oktett, eines ohne Signatur, eines mit der Signatur
-#      eines fremden Schluessels. Ohne diesen Abschnitt waere Abschnitt
-#      4 kein Nachweis, sondern eine Beobachtung.
-#   7. DIE BILDER. Sie werden nicht angeschaut, sondern GELESEN:
-#      `tesseract` holt den Text aus dem Terminalfenster zurueck und
-#      die erwarteten Zeilen muessen darin stehen.
-#
-# DIESER LAEUFER IST NICHT IN test.sh ANGEMELDET. Er braucht das offene
-# Internet und einen Server, der diesem Wirt gehoert; eine Abnahme, die
-# ohne fremde Infrastruktur nicht gruen werden kann, ist keine Abnahme.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -88,11 +47,6 @@ for f in VERZEICHNIS VERZEICHNIS.sig INDEX INDEX.sig; do
     code=$(curl -sS -o "$OUT/netz-$f" -w '%{http_code}' --max-time 30 "$BASIS/$f")
     gleich "curl holt $f" "$code" "200"
 done
-# RUNDE STORE (25.09.2026): Anzahl, Fassung und Namen kommen aus dem
-# geholten VERZEICHNIS und nicht aus dem Laeufer. Fassung 3 (acht Pakete)
-# hatte KEINE Plattform-Spalte -- jedes Geraet ab STORE-MOBIL blendete
-# alle acht aus ("hidden, no platform given: 8"), der Laden war
-# leer, und dieser Laeufer zaehlte trotzdem "acht" als gruen.
 N=$(grep -c '^paket' "$OUT/netz-VERZEICHNIS" 2>/dev/null)
 FASS=$(awk -F'\t' '$1=="fassung"{print $2}' "$OUT/netz-VERZEICHNIS")
 NAMEN=$(awk -F'\t' '$1=="paket"{print $2}' "$OUT/netz-VERZEICHNIS")

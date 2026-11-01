@@ -64,7 +64,6 @@ K="$W/k.mb"
 ok "$(tail -1 "$W/bau.txt")"
 
 cat > "$W/rechte.conf" <<CONF
-# Fuer diesen Pruefstand: der Server ist der echte JARVIS auf dem Wirt.
 server         = $HOST_IP:$TLSPORT
 servername     = jarvis.test
 roots        = /etc/ssl/roots.pem

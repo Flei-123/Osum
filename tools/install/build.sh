@@ -146,18 +146,6 @@ if [ -n "${OTA_CONF:-}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
 else
     cat > "$OUT/ota.conf" <<'EOFC'
-# /etc/ota.conf -- woher dieses Geraet seine Updates holt.
-#
-# quelle   die Adresse der Quelle. IPv4 und nicht ein Name: dieses
-#          System hat keinen Resolver (docs/ROADMAP-UPDATE.md A2).
-# name     der Name, den das Zertifikat tragen MUSS. Ohne ihn wird die
-#          Adresse als Name genommen, und die traegt kein Zertifikat --
-#          die Verbindung wird dann abgelehnt, und das ist richtig so.
-# abstand  Sekunden zwischen zwei automatischen Suchen.
-# auto     ja/nein. Vorgabe: ja (Entscheidung des Besitzers 02.10.2026).
-# frist    Sekunden, die der Wachhund auf den Erfolgsvermerk wartet.
-#quelle=https://192.0.2.1:443
-#name=pkg.example.org
 abstand=3600
 auto=true
 frist=120

@@ -56,7 +56,6 @@ def main():
     if F is None:
         return 1
     tafeln = []
-    # coeff_token: vier Klassen zu 68
     for k in range(4):
         tafeln.append(("coeff_token nC-Klasse %d" % k,
                        F['CT_LEN'][k*68:(k+1)*68],

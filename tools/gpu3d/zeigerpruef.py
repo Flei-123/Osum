@@ -38,8 +38,8 @@ Rueckgabe 0, wenn alles stimmt; sonst 1 mit Begruendung.
 """
 import sys
 
-MAXPX = 48          # cursor.MAXPX -- groesser wird der Zeiger nie
-MIN_DUNKEL = 20     # so viele Kernpunkte muss der gemalte Zeiger haben
+MAXPX = 48
+MIN_DUNKEL = 20
 MIN_HELL = 10       # und so viele Randpunkte
 
 

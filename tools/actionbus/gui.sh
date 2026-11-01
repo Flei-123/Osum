@@ -315,14 +315,10 @@ if waitfor "==G-RIGHTS==" 120; then
     shot "$TMPD/4-rights.ppm"
     J=$(mid rjar) && { klick $J; sleep 2; shot "$TMPD/5-granted.ppm"; } || bad "the rights page did not report its controls"
 fi
-# AB-005c: the page Bildschirm sets the brightness through the bus, the
-# page Netz switches to DHCP through the bus -- critical, so it asks, and
-# "Ja, ändern" on that page answers
 if waitfor "==G-SCREEN==" 60; then
     T=$(mid tabb) && klick $T
     sleep 5
     shot "$TMPD/5b-screen.ppm"
-    # the brightness as it stands; "Übernehmen" sends it
     if A2=$(mid dapply); then
         klick $A2; sleep 2
     else
@@ -333,7 +329,6 @@ if waitfor "==G-NET==" 60; then
     T=$(mid tabd) && klick $T
     sleep 5
     if M=$(mid nmode) && N=$(mid napply) && C=$(mid nconf); then
-        # the choice opens its list below itself; item 0 is "über DHCP"
         read mx my mw mh <<< "$(rect nmode)"
         klick $M; klick $(( mx + 40 )) $(( my + mh + 12 )); sleep 1
         # the choice rebuilds the page (conditional fields): the buttons move, read their places again
@@ -353,10 +348,6 @@ if waitfor "==G-LOGPAGE==" 60; then
     sleep 4
     shot "$TMPD/8-log.ppm"
 fi
-# DAILY-DRIVER: the page Updates (15th tab) -- state over settings.update.status,
-# "Jetzt nach Updates suchen" asks settingsd, which starts `ota` (no server in
-# this run, so the check fails -- what is measured is that the page asks the
-# bus and that settingsd answers)
 if waitfor "==G-UPDPAGE==" 60; then
     T=$(mid tabo) && klick $T
     sleep 4

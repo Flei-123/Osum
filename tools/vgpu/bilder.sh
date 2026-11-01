@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# tools/vgpu/bilder.sh -- ZWEI BILDER, DIE GLEICH AUSSEHEN MUESSEN.
-#
-# Derselbe Kern, dieselbe Kommandozeile, einmal mit und einmal ohne
-# Grafiktreiber -- und danach `pruef/bildpruef.py` auf beide. Sieht das
-# Ergebnis verschieden aus, ist der Treiber falsch, egal wie gut seine
-# Zahlen sind.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh >/dev/null 2>&1
@@ -34,14 +28,6 @@ for modus in alt neu; do
         sleep 0.15; i=$((i+1))
     done
     sleep 1
-    # DAS FOTO MUSS VOM RICHTIGEN GERAET KOMMEN.
-    #
-    # `screendump` ohne Geraetenamen nimmt das ERSTE Anzeigegeraet, und
-    # das ist die VGA-Karte, die QEMU immer dazustellt. Mit Treiber
-    # steht das Bild aber auf der virtio-gpu -- die VGA-Flaeche bleibt
-    # schwarz. Ein Foto davon zeigt nicht "der Treiber malt nicht",
-    # sondern "hier wird das falsche Geraet fotografiert", und der
-    # Unterschied ist der zwischen einem Fehler und einer Fehlmessung.
     DEV=""
     [ "$modus" = neu ] && DEV="$VGPU_DEV"
     python3 tools/vgpu/schuss.py "$S" "$AUS/$modus.ppm" 25 $DEV >/dev/null 2>&1

@@ -49,17 +49,8 @@ import struct
 import sys
 
 
-# ------------------------------------------------------------ SAETZE
-#
-# Ein Satz ist eine Liste von Bereichen (erstes, letztes) EINSCHLIESSLICH.
-# Was in der Vorlage nicht vorkommt, wird still uebergangen -- eine
-# Schrift ohne Kyrillisch soll hier nicht abbrechen, sondern weniger
-# Zeichen tragen und das melden.
 SAETZE = {
-    # Reines ASCII -- der Stand vor Runde I18N, zum Nachrechnen der
-    # alten Zahlen aus docs/ROUNDK10W.md.
     "ascii": [(0x20, 0x7E)],
-    # Was eine Oberflaeche in einer WESTEUROPAEISCHEN Sprache braucht.
     "latin": [
         (0x20, 0x7E),      # Basic Latin
         (0xA0, 0xFF),      # Latin-1 Supplement
@@ -68,20 +59,14 @@ SAETZE = {
         (0x2022, 0x2022),  # BULLET -- the dots of a password field
         (0x2026, 0x2026),  # Auslassungspunkte
         (0x20AC, 0x20AC),  # Eurozeichen
-        (0xFFFD, 0xFFFD),  # ERSATZZEICHEN -- das Fehlerbild des Dekodierers
+        (0xFFFD, 0xFFFD),
     ],
-    # Dasselbe plus Griechisch und Kyrillisch.  Nicht die Vorgabe: er
-    # kostet gemessen mehr Oktette, und in dieser Runde gibt es keine
-    # griechische oder russische Uebersetzung, die ihn braucht.
     "europe": [
         (0x20, 0x7E), (0xA0, 0xFF), (0x100, 0x17F),
         (0x370, 0x3FF), (0x400, 0x4FF),
         (0x2010, 0x201F), (0x2022, 0x2022), (0x2026, 0x2026),
         (0x20AC, 0x20AC), (0xFFFD, 0xFFFD),
     ],
-    # NUR zum MESSEN, wie teuer Ostasiatisch waere -- siehe
-    # docs/I18N.md, Abschnitt "Was diese Runde NICHT kann".  Kein
-    # Abbild traegt das.
     "cjk": [(0x20, 0x7E), (0x3000, 0x303F), (0x3040, 0x30FF),
             (0x4E00, 0x9FFF), (0xFFFD, 0xFFFD)],
 }
@@ -378,7 +363,6 @@ def main(argv):
     elif rest and rest[0] == "--ranges":
         bereiche = bereiche_lesen(rest[1])
     elif rest:
-        # Die alte Form mit zwei Zahlen bleibt gueltig.
         erst = int(rest[0], 0)
         letzt = int(rest[1], 0) if len(rest) > 1 else 0x7E
         bereiche = [(erst, letzt)]
@@ -388,9 +372,6 @@ def main(argv):
     v = Vorlage(quelle)
     voll = v.cmap()
 
-    # 1. Welche Glyphen bleiben -- samt Bestandteilen zusammengesetzter.
-    #    Die Reihenfolge ist die der BEREICHE und darin aufsteigend, damit
-    #    zweimaliges Schneiden dieselbe Datei ergibt.
     behalten = [0]
     zeichen = {}
     for erst, letzt in bereiche:
@@ -427,15 +408,11 @@ def main(argv):
     else:
         loca = b"".join(struct.pack(">H", o // 2) for o in versatz)
 
-    # 3. hmtx -- eine volle Metrik je Glyphe.  Das kostet zwei Oktette je
-    #    Glyphe mehr und spart dem Kernel den Sonderfall "hinter der
-    #    letzten Laufweite stehen nur noch Seitenabstaende".
     hmtx = b"".join(struct.pack(">Hh", *v.metric(alt)) for alt in behalten)
 
-    # 4. die drei Koepfe.
     head = bytearray(v.d[v.tab["head"][0]:v.tab["head"][0] + 54])
     struct.pack_into(">h", head, 50, 1 if lang else 0)
-    struct.pack_into(">I", head, 8, 0)  # checkSumAdjustment, unten gesetzt
+    struct.pack_into(">I", head, 8, 0)
     hhea = bytearray(v.d[v.tab["hhea"][0]:v.tab["hhea"][0] + 36])
     struct.pack_into(">H", hhea, 34, len(behalten))
     maxp = bytearray(v.d[v.tab["maxp"][0]:v.tab["maxp"][0] + 32])

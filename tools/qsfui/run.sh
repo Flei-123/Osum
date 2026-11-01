@@ -1,33 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/qsfui/run.sh -- THE QUICK SETTINGS ARE A TREE OF fUi (05.10.2026).
-#
-#   bash tools/qsfui/run.sh [<uiscale> ...]        (default: 1 2)
-#
-# The panel of the task bar (kernel/user/qs.fi) used to paint itself: a band
-# loop over wlibc/wlib primitives, hit tests by hand, a poll of the window's
-# event ring. Now it is window 1 of the task bar's scene host (window 0 is the
-# bar's own wlib window, `fuiscene.foreign_main`): a card with tiles (a button
-# face of fUi plus the program's own picture), two sliders of fUi, a separator
-# and a footer with icon buttons.
-#
-# Serial lines can be torn by other writers (a line may start in the middle of another), so no ^ anchors on qs: lines.
-# What this run measures, on the machine of the stick (tools/design/eh6.sh:
-# USB keyboard and mouse, 4 cores), at ui_scale 1 (dark) and 2 (light):
-#   1. Super+A opens the panel, it reports its geometry, it lies on the screen
-#   2. Windows 11 layout (W-C2, 18.10.2026): five tiles, three to a row, all cells
-#      100 points wide, plate on top and the label UNDER it, the sliders and the media
-#      tile inside the panel, battery bottom left, gear bottom right -- judged by
-#      tools/qsfui/check.py from the panel's own report (qs: kachel/platte/label/regler/
-#      medien) and the picture (no label ink outside its cell)
-#   3. a click on the "Tiling" tile reaches the system (`qs: tile n=5 to=1`)
-#      and the tile is drawn on the accent colour afterwards (pixels)
-#   4. a click into the brightness slider sets the brightness to the middle of
-#      its range (`qs: hell auf =`), and the knob moved (pixels)
-#   5. Escape closes the panel (the window has the keyboard: `closed by
-#      escape`), Super+A opens it again and closes it again
-#   COUNTER-PROOF: kachel.py with a rectangle moved half a tile to the right
-#   must complain -- otherwise step 2 measures nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 TMPD=$(mktemp -d)

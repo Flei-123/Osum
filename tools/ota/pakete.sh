@@ -67,7 +67,6 @@ fi
 rm -rf "$OUT/netzvoll" "$OUT/grossbau"
 mkdir -p "$OUT/netzvoll" "$OUT/grossbau"
 cat > "$OUT/gross.rezept" <<EOF
-# Ein Paket, das absichtlich zu gross fuer die Platte des Pruefstands ist.
 name=gross
 fassung=1.0.0
 titel=Gross

@@ -1,44 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/wayland/run.sh -- DIE ABNAHME DER RUNDE WAYLAND.
-#
-# Der Auftrag dieser Runde verlangt, ZUERST zu messen, ob dieses System
-# ueberhaupt kann, worauf Wayland steht -- und das Ergebnis aufzu-
-# schreiben, bevor eine Zeile Protokoll entsteht. Das ist getan, und es
-# war ein klares Nein:
-#
-#   kernel/sys.fi do_socket:  if domain != AF_INET { -EAFNOSUPPORT }
-#   kernel/sys.fi:            MAP_PRIVATE=2, MAP_ANONYMOUS=32, sonst nichts
-#   grep SCM_RIGHTS/sendmsg/recvmsg kernel/  ->  null Treffer
-#
-# Dagegen gemessen wurde der ECHTE Client (weston-simple-shm 10.0.1,
-# unveraendert, statisch gegen musl + libwayland-client 1.21.0, gegen
-# ein echtes weston gelaufen, Beendigungscode 0). EIN Lauf macht:
-#
-#   sendmsg 323, poll 323, recvmsg 322, mmap 120, fcntl 3,
-#   socket 1, memfd_create 1, connect 1
-#
-# und KEIN read/write auf dem Socket. SCM_RIGHTS kommt genau einmal vor
-# (der memfd des wl_shm_pool).
-#
-# WAS DIESES SKRIPT MISST, und alles davon IM LAUFENDEN KERN:
-#
-#   1. Der Kern baut, und die Speicherkarte hat keine Kollision.
-#   2. Der Wirt kann den echten Client bauen -- libffi und
-#      libwayland-client statisch gegen musl, Protokollcode aus den
-#      OFFIZIELLEN XML-Dateien mit wayland-scanner erzeugt (nicht
-#      abgetippt).
-#   3. wltest im laufenden Kern: AF_UNIX, SCM_RIGHTS, MAP_SHARED --
-#      jede Zusage einzeln, mit Gegenproben.
-#
-# GEGENPROBEN, ohne die hier nichts zaehlt:
-#   - AF_99 und AF_UNIX+SOCK_DGRAM werden abgewiesen.
-#   - Derselbe Pfad zweimal gebunden wird abgewiesen.
-#   - connect auf einen Pfad, auf dem niemand lauscht, SCHEITERT
-#     SOFORT -- es haengt nicht. Das ist der Fall "Client ohne Server".
-#   - Nach F_SEAL_SHRINK scheitert das Verkleinern.
-#   - Frisch abgebildeter geteilter Speicher ist GENULLT.
-#
 set -u
 
 cd "$(dirname "$0")/../.." || exit 1
@@ -99,8 +59,6 @@ else
     bad "wltest baut nicht"; grep -v 'GNU-stack\|deprecated' "$TMPD/cc.txt" | head -5 | sed 's/^/        /'
 fi
 
-# /bin/sh wird gebraucht: `script=` laeuft in der Shell, und ohne sie
-# meldet der Kern "sh did not load" und startet nichts.
 FIRNC="$ROOT/vendor/firn/bin/firnc"
 export FIRNLIB="$ROOT/lib"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>"$TMPD/as.txt" \
@@ -134,9 +92,6 @@ if [ -f "$TMPD/wltest" ]; then
     if grep -q "wltest fertig" "$TMPD/clean.txt"; then
         ok "wltest ist im Kern gelaufen"
         sed -n '/== wltest/,/wltest fertig/p' "$TMPD/clean.txt" | sed 's/^/     /'
-        # `grep -c` gibt bei null Treffern eine 0 UND einen Code != 0 --
-        # das `|| echo 0` haengte deshalb eine zweite Zeile an, und
-        # `$((...))` sah "0\n0". `tr -d` macht daraus wieder eine Zahl.
         n_ok=$(grep -c '^  ok   ' "$TMPD/clean.txt" 2>/dev/null | tr -dc '0-9')
         n_bad=$(grep -c '^  FEHL ' "$TMPD/clean.txt" 2>/dev/null | tr -dc '0-9')
         [ -n "$n_ok" ] || n_ok=0
@@ -151,8 +106,6 @@ fi
 echo
 echo "== 4. der echte Client: libwayland-client, unveraendert =="
 
-# Der Protokollteil wird ERZEUGT und nicht abgetippt -- das steht im
-# Auftrag und ist hier die erste Zusage.
 if python3 tools/wayland/gen.py > "$TMPD/wlproto.fi" 2>"$TMPD/gen.txt"; then
     if cmp -s "$TMPD/wlproto.fi" kernel/user/wlproto.fi; then
         ok "wlproto.fi ist ERZEUGT: $(tail -1 "$TMPD/gen.txt")"
@@ -163,7 +116,6 @@ else
     bad "tools/wayland/gen.py scheitert"; sed 's/^/        /' "$TMPD/gen.txt" | head -3
 fi
 
-# Die Quellen, aus denen erzeugt wird -- offizielle Dateien des Wirts.
 for x in /usr/share/wayland/wayland.xml \
          /usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml; do
     [ -r "$x" ] && ok "Protokollquelle da: $x" \
@@ -197,8 +149,6 @@ grep -q 'wayd:grafik:off:/bin/wayd' etc/inittab.wayland 2>/dev/null \
 grep -q 'kernel/user/wayd.fi' kernel/user/wayd.fi 2>/dev/null \
     && ok "der Server ist ein Ring-3-Programm (kernel/user/wayd.fi)" \
     || bad "wayd.fi fehlt"
-# Die Gegenprobe der Modularitaet: KEIN anderer Teil des Systems ruft
-# den Server. Waere er hineinkompiliert, faende man ihn hier.
 n=$(grep -rl 'wayd\.' kernel/*.fi kernel/user/desktop.fi \
         kernel/user/taskbar.fi 2>/dev/null | wc -l)
 [ "$n" -eq 0 ] \

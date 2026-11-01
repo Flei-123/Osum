@@ -99,7 +99,6 @@ def main(argv):
     if not treffer:
         print("kein gueltiger Einstiegspunkt")
         return 1
-    # Wie im Kernel: SMBIOS 3 hat Vorrang vor SMBIOS 2.
     treffer.sort(key=lambda x: 3 if x[0] == "_SM3_" else 2)
     art, at, _ = treffer[-1]
 
@@ -141,8 +140,6 @@ def main(argv):
             felder["brd_prod"] = s(rumpf[5])
             felder["brd_ser"] = s(rumpf[7])
     print("count=%d" % n)
-    # Leere Felder wie der Kernel schreiben, damit sich beide vergleichen
-    # lassen, ohne dass ein Skript die Faelle auseinanderhalten muss.
     for k in ("sys_man", "sys_prod", "sys_ver", "sys_ser",
               "brd_man", "brd_prod", "brd_ser"):
         v = felder.get(k, "")

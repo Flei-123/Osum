@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/ota/plattformprobe.sh -- RUNDE STORE-MOBIL: ZEIGT `/bin/ota`
-# WIRKLICH NUR, WAS AUF DIESE MASCHINE PASST?
-#
-# Gemessen wird an einer echten Maschine (QEMU, e1000, QEMUs Benutzernetz)
-# gegen eine echte Gegenstelle (`tools/ota/server.py`, TLS 1.3), mit einem
-# VERZEICHNIS, in dem DREI ARTEN von Paketzeilen stehen:
-#
-#   hallo      osum-x86_64    ein ELF fuer x86-64            -> muss kommen
-#   hallo-arm  osum-aarch64   dasselbe ELF, e_machine=183    -> muss weg
-#   daten      osum-any       kein ELF, nur Text             -> muss kommen
-#
-# und in einem zweiten Durchgang mit demselben Verzeichnis, aus dem die
-# sechste Spalte einer Zeile HERAUSGESCHNITTEN und das Ganze NEU SIGNIERT
-# wurde -- der Fall "Verzeichnis von vor dieser Runde". Diese Zeile muss
-# ebenfalls ausgeblendet und GEZAEHLT werden, nicht stillschweigend
-# installiert.
-#
-#   bash tools/ota/plattformprobe.sh
-#
-# $OUT (Vorgabe /tmp/ota-plattform) darf der Ausgabeordner eines frueheren
-# Laufs sein; dann werden Pakete und Abbild wiederverwendet.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -74,11 +52,6 @@ bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 \
     && ok "die beiden Fassungen von hallo (Wirt, signiert)" \
     || { cat "$OUT/pak1.log"; bad "install/pakete.sh"; exit 1; }
 
-# --- das AArch64-Paket. Es ist DASSELBE Programm; nur `e_machine` im
-# ELF-Kopf sagt 183 statt 62. Damit misst diese Probe genau das, was sie
-# behauptet -- die Herkunft der Plattformangabe -- und nicht nebenbei
-# einen Uebersetzer fuer AArch64, den dieser Baum fuers Userland nicht
-# hat.
 python3 - "$OUT" <<'PY' || exit 1
 import struct, sys
 o = sys.argv[1]
@@ -127,9 +100,6 @@ grep -qa "^paket	hallo-arm	.*	osum-aarch64$" "$V" && ok "hallo-arm traegt osum-a
 grep -qa "^paket	daten	.*	osum-any$"        "$V" && ok "daten traegt osum-any (kein ELF)"                 || bad "daten: falsche Spalte"
 [ "$(head -1 "$V")" = OTA2 ] && ok "die Kennung bleibt OTA2 -- ein altes Geraet liest weiter" || bad "Kennung nicht OTA2"
 
-# --- dieselbe Quelle, aber einer Zeile fehlt die sechste Spalte, und
-# das Ganze ist RICHTIG NEU SIGNIERT. Das ist ein Verzeichnis von vor
-# dieser Runde -- die Signatur ist in Ordnung, die Auskunft fehlt.
 rm -rf "$OUT/netzalt"; cp -a "$OUT/netzmix" "$OUT/netzalt"
 python3 - "$OUT" "$OPK" <<'PY' || exit 1
 import importlib.util, sys

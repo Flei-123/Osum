@@ -66,7 +66,7 @@ class Schirm:
             if self.x > 0:
                 self.x -= 1
                 self.zellen[self.y][self.x] = ' '
-        elif o == 9:                     # Tabulator auf die naechste Achtel
+        elif o == 9:
             n = 8 - (self.x & 7)
             for _ in range(n):
                 self.zeichen(' ')
@@ -119,7 +119,6 @@ class Schirm:
                 self.wische(self.y, 0, self.y + 1, 0)
             else:
                 self.wische(self.y, self.x, self.y + 1, 0)
-        # 'm', 'h', 'l' aendern nur die Darstellung, nicht den Text.
 
     def fuettern(self, oktette):
         for o in oktette:
@@ -130,8 +129,6 @@ class Schirm:
                     self.steuer(o)
                 elif 32 <= o <= 126:
                     self.zeichen(chr(o))
-                # alles andere: `fb.putc` malt ein '?', aber der Editor
-                # schickt es nicht -- also faellt es hier weg.
             elif self.zustand == 1:
                 if o == 91:
                     self.zustand = 2

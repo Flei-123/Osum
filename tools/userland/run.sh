@@ -80,9 +80,6 @@ has() { grep -qF "$2" "$1" && ok "$3" || bad "$3 -- '$2' is missing"; }
 hasnot() { grep -qF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 matches() { grep -qE "$2" "$1" && ok "$3" || bad "$3 -- nothing matches /$2/"; }
 
-# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
-# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
-# Ziel gebaut. Das Skript baut nur, wenn noetig.
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }
@@ -713,11 +710,6 @@ for _ in $(seq 1 200); do
     sleep 0.2
 done
 if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/null; then
-    # RUNDE ROTABSCHNITTE: siehe tools/osum/run.sh -- auf die `key: `
-    # Zeile je Taste warten statt auf 0,3 s. Hier sind es fuenf Tasten,
-    # und die vierte ist der Pfeil nach oben (`E0 48`), der die Zeile
-    # zurueckholt; gerade der ging unter Last verloren, und dann fehlte
-    # auch die zweite Auflistung.
     python3 tools/lib/tasten.py "$TMPD/mon.sock" "$TMPD/kbd.txt" \
         l s ret up ret | sed 's/^/        /'
     wait $qemu_pid 2>/dev/null
@@ -725,30 +717,6 @@ if [ -S "$TMPD/mon.sock" ] && grep -q "sh: ready, osum" "$TMPD/kbd.txt" 2>/dev/n
     K="$TMPD/kbd.txt"
     [ "$rc" -eq 21 ] && ok "the interactive run ends by itself (exit 21) -- a quiet console is the end of the input" \
                      || { bad "keyboard run: exit code $rc"; tail -6 "$K" | sed 's/^/        /'; }
-    # RUNDE ROTABSCHNITTE: `grep -c '^key: '` GEMESSEN UND FALSCH.
-    # Der Kern schreibt je Taste die Meldung `key: <zeichen>` auf die
-    # Leitung. Die Shell schreibt ihre Eingabeaufforderung `osum$ ` OHNE
-    # abschliessenden Zeilenumbruch davor -- im Mitschnitt steht deshalb
-    #
-    #     osum$ key: l
-    #     key: s
-    #     key: [enter]
-    #
-    # Die ERSTE Meldung steht nicht am Zeilenanfang, und `^key: ` sieht
-    # sie nie. Gezaehlt wurden 2, geschickt waren 3. Das hat NICHTS mit
-    # Last zu tun -- es ist bei jedem Lauf so, auch auf einer leeren
-    # Maschine, und keine noch so lange Wartezeit haette es geheilt.
-    # Nachgemessen an einem behaltenen Mitschnitt: `key: ` kommt 3-mal
-    # vor, `^key: ` 2-mal, und die drei Tasten sind alle angekommen
-    # (die Shell fuehrt `ls` ja auch wirklich aus, zwei Zusagen weiter).
-    #
-    # Gezaehlt wird jetzt die MELDUNG und nicht die Spalte, in der sie
-    # zufaellig beginnt. `apic: keyboard gsi 1` und aehnliche Zeilen
-    # enthalten `key: ` nicht und koennen nicht mitzaehlen (geprueft).
-    # Das Muster laesst `key: ` am Zeilenanfang ODER hinter einem
-    # Zeichen zu, das kein Kleinbuchstabe ist (hier das Leerzeichen von
-    # `osum$ `). Gegengeprueft: `monkey: `, `donkey: `, `keyboard: ` und
-    # `apic: keyboard gsi 1` zaehlen NICHT mit, die drei echten schon.
     n=$(grep -aoE '(^|[^a-z])key: ' "$K" | wc -l)
     num "keys that arrived over IRQ1 (l, s, return, up, return)" "$n" eq 5
     n=$(grep -c '^\./ \.\./ bin/ d/ t/ $' "$K")

@@ -116,7 +116,6 @@ arr = d[1024:1024 + 128 * 128]
 print("arr_crc_ok", struct.unpack_from("<I", h, 88)[0] == zlib.crc32(arr))
 print("cur", struct.unpack_from("<Q", h, 24)[0])
 print("bak", struct.unpack_from("<Q", h, 32)[0])
-# die Sicherung am Ende
 f.seek(0, 2); n = f.tell() // 512
 f.seek((n - 1) * 512); b = f.read(512)[:92]
 b0 = bytearray(b); b0[16:20] = b"\0\0\0\0"
@@ -196,10 +195,6 @@ gleich "erster Block der Wurzelpartition" "$erst" "72048"
 cp -f "$OUT/ziel.img" "$OUT/kaputt.img"
 python3 - "$OUT/kaputt.img" > "$OUT/kaputt-crc.txt" <<'EOF'
 import struct, sys, zlib
-# Ein Oktett IN DER EINTRAGSTAFEL umdrehen -- der erste Block der
-# Wurzelpartition. Und danach auf dem WIRT nachrechnen, dass die
-# Pruefsumme im Kopf jetzt WIRKLICH nicht mehr passt: eine Gegenprobe,
-# die den Fall gar nicht herbeifuehrt, ist keine.
 at = 1024 + 128 + 32          # Eintrag 1, Feld "erster Block"
 f = open(sys.argv[1], "r+b")
 f.seek(at); b = f.read(1)

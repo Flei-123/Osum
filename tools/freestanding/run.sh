@@ -43,9 +43,6 @@ fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-# Der FESTGENAGELTE Uebersetzer aus vendor/ (vendor/firn/COMMIT). Beide
-# Stufen kommen aus EINEM Firn-Commit; nichts wird gegen ein bewegliches
-# Ziel gebaut. Das Skript baut nur, wenn noetig.
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 [ -x "$FIRNC" ] || { echo "firnc0 is missing: $FIRNC"; exit 1; }
 [ -x "$FC1" ]   || { echo "firnc1 is missing: $FC1"; exit 1; }

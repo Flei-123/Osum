@@ -1,15 +1,4 @@
 #!/usr/bin/env bash
-# Zeigt das Installationsfenster der Runde DUALBOOT.
-#
-# DIE KOMMANDOZEILE IST GEMESSEN UND NICHT GERATEN. Auf diesem Wirt
-# laeuft der Fensterserver nur mit `desk wmshell` -- ohne die beiden
-# bleibt die Leitung bei "init: dienste=1" stehen, und zwar auch mit der
-# Abnahme der VORIGEN Runde (docs/RUNDE-DUALBOOT.md, Abschnitt 4.3).
-# `wmhold`/`wighalt` allein genuegen hier nicht.
-#
-# Der Preis: `wmshell` legt den Starter ueber das Fenster. Deshalb wird
-# er weggeklickt, bevor das Foto entsteht -- derselbe Weg, den ein
-# Mensch nimmt.
 cd /root/os-dual
 . tools/lib/qemu.sh
 O=/root/dualwork/fenster
@@ -40,7 +29,6 @@ for i in $(seq 1 150); do
 done
 sleep "${NACH:-8}"
 
-# DEN STARTER WEGKLICKEN und das Fenster nach vorn holen.
 mon 'mouse_move 400 60'
 sleep 1
 mon 'mouse_button 1'

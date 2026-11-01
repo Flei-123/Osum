@@ -1,30 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/server/build.sh -- DAS SERVERABBILD: ein Kern ohne eine Zeile
-# Grafik und eine Platte ohne ein Programm mit Oberflaeche.
-#
-#   bash tools/server/build.sh [ausgabeverzeichnis] [--gui on]
-#
-# Was entsteht:
-#
-#   k.mb       der Kern, gebaut mit `tools/build-kernel.sh --gui off`.
-#              `kernel/fb.fi`, `wm.fi`, `wig.fi`, `font.fi`, `ttf.fi`,
-#              `tile.fi`, `vmode.fi`, `ansi.fi`, `ps2m.fi`, `kgui.fi`
-#              und `sysgui.fi` sind dabei NICHT im Uebersetzungsbaum.
-#   bin/*      das Userland eines Servers -- Shell, Dateiwerkzeuge,
-#              Prozesse, Netz, Pakete. KEIN `schreibtisch`, kein
-#              `leiste`, kein `einstellungen`, kein `explorer`, kein
-#              `launcher`, kein `widgetdemo`, kein `tiling`, kein
-#              `dispctl`: die haengen an `wlib.fi` und damit am
-#              Fensterserver, und ohne den gibt es sie nicht.
-#   disk.img   ein OFS-Dateisystem mit genau diesen Programmen.
-#
-# Danach bootet
-#
-#   qemu-system-x86_64 -accel kvm -kernel k.mb -m 256 -nographic \
-#       -append "osum console=ttyS0" -drive file=disk.img,format=raw,if=ide
-#
-# bis zu einer Shell, in die man tippen kann.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -41,10 +15,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# DIE PROGRAMMLISTE EINES SERVERS. Sie steht hier und nicht in einer
-# Datei daneben, weil sie eine Aussage ist: das ist, was ohne Bildschirm
-# uebrigbleibt, und wer etwas vermisst, sieht sofort, ob es fehlt oder
-# ob es nie hineingehoerte.
 PROGS=${PROGS:-"sh ls cat echo cp mv rm mkdir rmdir touch head tail wc \
 grep sort uniq cut tr seq tee xargs true false sleep ps kill uname date \
 df du find which basename dirname chmod chown id whoami su login passwd \
@@ -86,9 +56,6 @@ for p in $PROGS; do
 done
 [ $rc = 0 ] || exit 1
 
-# GEGENPROBE, UND SIE IST DER PUNKT DIESER DATEI: kein Programm auf
-# dieser Platte darf den Fensterserver brauchen. Ein `schreibtisch`, der
-# sich mit hineinstiehlt, faellt hier auf und nicht erst beim Booten.
 verboten=""
 for p in schreibtisch leiste einstellungen explorer launcher widgetdemo \
          tiling themetest dispctl icont; do

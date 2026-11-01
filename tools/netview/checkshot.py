@@ -80,7 +80,7 @@ def main(argv):
         for c, zeichen in enumerate(zeile):
             soll = palette[zeichen]
             if soll is None:
-                continue  # durchsichtig: darueber sagt das Bild nichts
+                continue
             if isinstance(soll, tuple):
                 soll = farben[ROLLE_NAME[soll[1]]]
             deckend += 1
@@ -94,9 +94,6 @@ def main(argv):
                     or roh[at + 2] != (soll & 255)):
                 falsch += 1
     if nicht:
-        # DIE GEGENPROBE. Wenn dort nichts stehen soll, muessen sich die
-        # meisten Bildpunkte unterscheiden -- ein einzelner Treffer ist
-        # Zufall, ein vollstaendiger Treffer ist das Bild.
         if falsch * 4 >= deckend:
             print("ok nicht da: %d von %d anders" % (falsch, deckend))
             return 0

@@ -71,9 +71,6 @@ def main():
                 print("%s:%d: '%s' is in the code: %s"
                       % (pfad, nr, name, zeile.strip()[:80]))
                 return 1
-    # Und die Gegenprobe zum Pruefer selbst: in den ANMERKUNGEN steht er
-    # sehr wohl, und das ist in Ordnung -- ein Kopfkommentar darf
-    # erklaeren, wie das Programm heisst.
     inkomm = name in roh and name not in code
     print("'%s' is not in the code of %s%s"
           % (name, pfad, " (but in a remark)" if inkomm else ""))

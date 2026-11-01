@@ -87,30 +87,6 @@ def warte_auf(muster, grenze=120.0, was=""):
     return False
 
 
-# ------------------------------------------------------------ der Lauf
-# DIE SCHREIBTISCHSCHLEIFE, NICHT DIE HALTESCHLEIFE.
-#
-# `wmhold`/`wighalt` haelt das Bild still -- und ruft NIE `usb.poll`.
-# Gemessen: `mouse: id=3 packets=0`, kein einziger Klick kam an, obwohl
-# die Maus aufgezaehlt war (`driver=mouse`). Die Vorrunde hat deshalb
-# nie geklickt, sondern der Shell ein Skript gereicht.
-#
-# `wmdauer` laeuft `wait_wm` dauerhaft, und DORT stehen `usb.poll`,
-# `usb.hotplug_work` und `wechsel_schritt` hintereinander -- dieselbe
-# Schleife, in der ein Mensch den Stick steckt und klickt.
-# `wmshell` IST PFLICHT, auch wenn hier niemand tippt: `wait_wm` wird
-# NUR unter diesem Wort betreten (kgui.fi, `if mode_on(M_WMSHELL)`).
-# Ohne es laeuft k15_start durch und der Kern beendet sich, bevor ein
-# Klick moeglich waere -- gemessen: "kernel: done" nach 30 Sekunden.
-# `wmdauer` haelt die Schleife danach offen.
-# `hidgen` IST DER UNTERSCHIED ZWISCHEN MAUS UND KEINER MAUS.
-# Ohne das Wort bleibt `usb.S_GEN` null, der generische HID-Weg ist
-# gesperrt, und die QEMU-Maus (0627:0001, ohne brauchbares
-# Boot-Protokoll in diesem Aufbau) liefert nichts: gemessen
-# `mouse: id=3 packets=0` ueber den ganzen Lauf. `pruef/oneshot.py`,
-# der einzige Laeufer dieses Baums, der WIRKLICH klickt, setzt es
-# ebenfalls -- hier stand es nur nie, weil vor dieser Runde niemand
-# im Dateimanager geklickt hat.
 APP = ("gfx wm wigfiles wmshell wmdauer herz hidgen "
        "nosched noproc nofs usb vfs fbres=%dx%d" % (BREIT, HOCH))
 kvm = (["-accel", "kvm", "-cpu", "host"] if os.access("/dev/kvm", os.W_OK)
@@ -131,13 +107,9 @@ sag("QEMU pid=%d" % p.pid)
 
 rc = 1
 try:
-    # In der Schreibtischschleife gibt es kein `wm: hold` -- gewartet
-    # wird auf das Fenster des Dateimanagers selbst.
     if not warte_auf(r"wlib: win id=\d+ x=\d+ y=\d+ w=\d+ h=\d+", 180,
                      "das Fenster des Dateimanagers steht"):
         raise SystemExit(1)
-    # Der Dateimanager ist gross; sein Fenster steht nicht im selben
-    # Augenblick wie der Fensterserver.
     if not warte_auf(r"explorer: orte n=\d+", 120, "die Seitenleiste steht"):
         raise SystemExit(1)
     time.sleep(6)
@@ -157,8 +129,6 @@ try:
     if not warte_auf(r"wechsel: kommt", 90, "der Kern haengt ihn ein"):
         raise SystemExit(1)
 
-    # DIE ZUSAGE DIESER RUNDE: OHNE ZUTUN. Kein F5, kein Klick --
-    # der Dateimanager haengt am Bus und liest die Orte von selbst neu.
     got = False
     t0 = time.time()
     while time.time() - t0 < 60:
@@ -173,12 +143,7 @@ try:
     m.foto(os.path.join(ARB, "20-steckt.ppm"))
     sag("Bild 2: der Stick steht in der Leiste")
 
-    # ------------------------------------- den Auswurfknopf finden
     txt = lies()
-    # DIE LAGE DES FENSTERS. `wlib` meldet sie selbst, sobald das
-    # Fenster steht -- `wm: win ...` kommt erst beim Halt und ist
-    # deshalb hier nicht da. Die Rechtecke unten sind fensterrelativ,
-    # also ist das die Zahl, auf die alles andere aufsetzt.
     wins = re.findall(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", txt)
     if not wins:
         sag("kein Fenster des Dateimanagers im Bericht")
@@ -194,8 +159,6 @@ try:
         raise SystemExit(1)
     sag("%d gemeldete Bedienelemente" % len(rects))
 
-    # Der Auswurfknopf ist der LETZTE Symbolknopf vor dem Starterknopf;
-    # seine Nummer steht im Mitschnitt hinter `explorer: eject id=`.
     zid = re.findall(r"explorer: ausknopf id=(\d+)", txt)
     ziel = None
     if zid:
@@ -214,11 +177,6 @@ try:
         "[Fenster %d,%d + Rechteck %s,%s %sx%s]"
         % (cx, cy, wx, wy, rx, ry, rw, rh))
 
-    # ERST DEN STICK IN DER LEISTE AUSWAEHLEN. Der Knopf wirft den
-    # AUSGEWAEHLTEN Traeger aus und sagt sonst "keiner da"
-    # (`auswerfen_klick`: `ort_wahl >= places_num()`). Die Zeile wird
-    # nicht abgezaehlt, sondern gemeldet -- `explorer: ortzeile i= y= h=`
-    # aus `orte_anzeigen`, das bei jedem Neulesen laeuft.
     liste = None
     oid = re.findall(r"explorer: orteliste id=(\d+)", txt)
     if oid:
@@ -231,8 +189,6 @@ try:
             "(liste=%s zeilen=%d)" % (liste is not None, len(zeilen)))
         raise SystemExit(1)
     lx, ly, lw = int(liste[2]), int(liste[3]), int(liste[4])
-    # Die LETZTE gemeldete Traegerzeile ist der Stick: die Wurzel steht
-    # davor, weil `carrier_read` die Einhaengungen der Reihe nach liest.
     zi, zy, zh = (int(v) for v in zeilen[-1])
     zx = wx + lx + lw // 2
     zyy = wy + ly + zy + zh // 2

@@ -123,8 +123,6 @@ def sichtbarer_text(wurzel):
                 aus.append(('%s:%d' % (rel, nr), z.split('=', 1)[1]))
     for r in quellen.funde(wurzel):
         aus.append(('%s:%d' % (r['datei'], r['zeile']), r['inhalt']))
-    # Und jede Zeichenkette des Quelltexts, die ein Zeichen ueber ASCII
-    # traegt -- die interessiert hier unabhaengig von ihrer Klasse.
     STR = re.compile(r'"(?:\\.|[^"\\])*"')
     for dp, dns, fns in os.walk(os.path.join(wurzel, 'kernel')):
         dns[:] = [x for x in dns if not x.startswith('.')]

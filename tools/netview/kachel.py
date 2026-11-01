@@ -87,10 +87,6 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
             fehler.append("Kachel %d: %d,%d %dx%d liegt nicht auf dem Schirm"
                           % (t, tx, ty, tw, th))
             continue
-        # DIE FLAECHE DER KACHEL: die haeufigste Farbe im inneren
-        # Rechteck. Nicht geraten und nicht aus einer Datei -- ein
-        # Farbschema darf sich aendern, ohne dass diese Pruefung falsch
-        # wird.
         zaehl = {}
         for y in range(ty + rand + 1, ty + th - rand - 1):
             for x in range(tx + rand + 1, tx + tw - rand - 1):
@@ -98,11 +94,6 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
                 zaehl[c] = zaehl.get(c, 0) + 1
         flaeche = max(zaehl, key=zaehl.get)
 
-        # Alles, was nicht die Flaeche ist, ist Inhalt. Zeilenweise, weil
-        # die Frage nach dem Ueberlappen eine Frage nach ZEILEN ist.
-        # UEBER DIE GANZE KACHEL fuer die Frage nach dem Rand -- ein
-        # Symbol, das ueberlaeuft, waere derselbe Fehler --, aber die
-        # Bloecke werden erst UNTERHALB des Symbolbandes gezaehlt.
         zeilen = []
         rechts = tx + rand
         links = tx + tw - rand - 1
@@ -117,9 +108,6 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
                         links = x
             zeilen.append((y, n_in))
 
-        # UEBER DEN RAND: liegt rechts vom letzten eingefaerbten
-        # Bildpunkt noch Kachel? Es muss, sonst steht die Beschriftung
-        # auf dem Rahmen oder darueber hinaus.
         if rechts >= tx + tw - rand - 2:
             fehler.append("Kachel %d: Inhalt bis x=%d, die Kachel endet "
                           "bei %d -- die Beschriftung laeuft ueber"
@@ -128,11 +116,6 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
             fehler.append("Kachel %d: Inhalt ab x=%d, die Kachel faengt "
                           "bei %d an" % (t, links, tx))
 
-        # ZWEI ZEILEN, EINE LUECKE. Die belegten Reihen in Bloecke
-        # zerlegen; zwischen dem Block der Beschriftung und dem Block des
-        # Wortes darunter muss mindestens eine leere Reihe liegen. Genau
-        # eine waere zu wenig, um es "gestaltet" zu nennen, aber die
-        # Pruefung fragt nur nach dem Fehler.
         bloecke = []
         anf = None
         for y, n_in in [(y, k) for (y, k) in zeilen if y >= ty + oben]:
@@ -143,8 +126,6 @@ def pruefe(w, h, pixel, kacheln, oben, rand=2):
                 anf = None
         if anf is not None:
             bloecke.append((anf, zeilen[-1][0]))
-        # ein, zwei oder drei Zeilen Text (ein langes Wort bricht um): die
-        # Bloecke muessen nur durch Luecken getrennt sein
         if len(bloecke) < 1 or len(bloecke) > 3:
             fehler.append("Kachel %d: %d Textbloecke -- %s"
                           % (t, len(bloecke), bloecke))

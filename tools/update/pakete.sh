@@ -1,33 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/update/pakete.sh -- die Pakete, die RUNDE UPDATE zusaetzlich
-# braucht, und sie sind fast alle kaputt.
-#
-# `tools/install/pakete.sh` baut zwei ordentliche, signierte Quellen.
-# Diese Runde misst die andere Haelfte: was passiert, wenn eine Signatur
-# FEHLT, FALSCH ist, oder ueber einen anderen INDEX gerechnet wurde -- und
-# was passiert, wenn ein Update sauber signiert ist und trotzdem nicht
-# hochkommt. Ein Signaturweg, von dem nur der positive Fall gemessen ist,
-# ist nicht gemessen.
-#
-# Was entsteht (unter $OUT):
-#
-#   quelle3/       Fassung 3 des Probepakets, richtig signiert. Das
-#                  PROGRAMM darin beendet sich mit Code 1 -- ein Update,
-#                  das sich einwandfrei installiert und danach NICHT
-#                  laeuft. Dafuer gibt es den Erprobungszaehler.
-#   boese/hallo-1.opk        ohne .sig      -> muss abgelehnt werden
-#   boese/verdreht.opk       mit der Signatur des UNVERAENDERTEN Pakets,
-#                            aber einem gekippten Oktett IM ARCHIV
-#                            -> muss abgelehnt werden
-#   boese/INDEX, INDEX.sig   der INDEX von quelle1, um eine Zeile
-#                            veraendert, mit der ALTEN Signatur
-#                            -> die Quelle muss abgelehnt werden
-#   fremd.pub                ein ANDERER oeffentlicher Schluessel, fuer
-#                            die Gegenprobe "richtige Signatur, falscher
-#                            Schluessel"
-#
-#   bash tools/update/pakete.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -59,10 +30,6 @@ python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/quelle3"/*.opk || exit 1
 rm -f "$OUT/boese"/*
 # 1. ohne Signatur
 cp "$OUT/quelle1/hallo-1.opk" "$OUT/boese/ohnesig.opk"
-# 2. ein gekipptes Oktett IM ARCHIV, mit der Signatur des Originals.
-#    Das Oktett liegt weit hinten, mitten in den Daten -- und zwar so,
-#    dass die SHA-256 im Kopf danach ebenfalls nicht mehr passt. Beides
-#    ist Absicht: geprueft wird, dass die SIGNATUR zuerst zuschlaegt.
 cp "$OUT/quelle1/hallo-1.opk" "$OUT/boese/verdreht.opk"
 cp "$OUT/quelle1/hallo-1.opk.sig" "$OUT/boese/verdreht.opk.sig"
 python3 - "$OUT/boese/verdreht.opk" <<'EOF'
@@ -74,15 +41,12 @@ f.seek(20000)
 f.write(bytes([b[0] ^ 0x40]))
 f.close()
 EOF
-# 3. ein veraenderter INDEX mit der alten Signatur
 cp "$OUT/quelle1/hallo-1.opk" "$OUT/boese/hallo-1.opk"
 cp "$OUT/quelle1/hallo-1.opk.sig" "$OUT/boese/hallo-1.opk.sig"
 cp "$OUT/quelle1/INDEX.sig" "$OUT/boese/INDEX.sig"
 python3 - "$OUT/quelle1/INDEX" "$OUT/boese/INDEX" <<'EOF'
 import sys
 z = open(sys.argv[1]).read()
-# denselben Namen, einen anderen Streuwert: genau das, was ein
-# Angreifer eintraege, der ein eigenes Paket unterschieben will.
 f = z.split("\t")
 f[2] = "0" * 64
 open(sys.argv[2], "w").write("\t".join(f))

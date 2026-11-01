@@ -34,7 +34,6 @@ for i in range(60):
     for k in range(random.randint(1,40)):
         if p+k<len(b): b[p+k]=random.randrange(256)
     lauf(bytes(b), "muell %d"%i)
-# 4. leer / nur Startcode / Unsinn
 for d in [b'', b'\x00\x00\x01', b'\x00\x00\x01\x67', b'\xff'*100,
           b'\x00\x00\x01\x67\xff\xff\xff\xff', b'\x00'*1000]:
     lauf(d, "sonder")

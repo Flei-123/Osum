@@ -49,8 +49,6 @@ def main(argv):
                          stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
     try:
-        # Der Monitor kennt kein `sleep`; die Pausen macht dieses Programm,
-        # indem es die Zeilen langsam nachschiebt.
         time.sleep(WARTE)
         p.stdin.write(('pmemsave 0x0 0x100000 "%s"\n' % out).encode())
         p.stdin.flush()

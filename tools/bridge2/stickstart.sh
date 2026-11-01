@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/stickstart.sh -- RUNDE MERGE-11: WAS JUSTIN WIRKLICH TUT.
-#
-# Der Unterschied zu tools/bridge2/https443.sh ist genau EIN Wort, und
-# es ist das entscheidende: dieser Laeufer startet `jarvisd` NICHT
-# selbst ueber `script=`. Er faehrt die BEFEHLSZEILE DES STICKS und
-# schaut zu, ob der Kern den Helfer von sich aus hochbringt.
-#
-# WARUM DAS EIN EIGENER LAEUFER IST. https443.sh hat bewiesen, dass
-# jarvisd ueber 443 mit store.fleitec.com sprechen KANN -- aber es hat
-# ihn von Hand gestartet. Im Abbild lag das Programm da und niemand
-# rief es. Justin haette gebootet, gewartet und nie einen Code gesehen.
-# Genau diese Luecke misst dieser Laeufer.
-#
-# Er beweist die Kette, die Justin erlebt:
-#   Stick booten -> Schreibtisch -> dhcp -> jarvisd -> Code am Schirm
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -30,19 +14,13 @@ note(){ printf '        %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "kein qemu"; exit 0; }
 [ -s "$BUILDD/k0.mb" ] || { echo "kein Kern in $BUILDD"; exit 1; }
 
-# Der Kern MUSS der frische sein -- der mit dem Autostart.
 ./tools/build-kernel.sh "$W/k0.mb" > "$W/k.log" 2>&1 || {
     echo "der Kern baut nicht"; tail -20 "$W/k.log"; exit 1; }
 note "kernel $(stat -c%s "$W/k0.mb") Oktette"
 
-# Die Platte des eh5-Laeufers wiederverwenden: sie hat die 55
-# Programme, /bin/jarvisd und /bin/dhcp.
-# Die WURZEL DES ECHTEN ABBILDES -- dort liegt /bin/jarvisd.
 [ -s "${STICK_ROOT:-/tmp/m11-img2/root.img}" ] && cp "${STICK_ROOT:-/tmp/m11-img2/root.img}" "$W/disk.img"
 [ -s "$W/disk.img" ] || { echo "keine Platte -- erst tools/design/eh5.sh laufen lassen"; exit 1; }
 
-# DIE BEFEHLSZEILE DES STICKS, woertlich aus tools/usbimg/build.sh,
-# minus `modfs` (die Platte kommt hier ueber -drive).
 APPEND="osum gfx fbres=1280x800 wm wig desk wmshell wmdauer tafel herz"
 APPEND="$APPEND absturzhalt nopuls tz=120 lang=en"
 APPEND="$APPEND nic nip=169.254.10.1/16 nsvc=0 nwait=0 dhcp jarvis"

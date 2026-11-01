@@ -310,8 +310,6 @@ import sys
 # Dieselben 4096 Oktette wie /bin/fremdfs sie liest: ab 3000000.
 import subprocess, os
 baum = None
-# Der Baum liegt nicht mehr da -- die Datei wird neu erzeugt, genau wie
-# in bild.sh, und das ist zulaessig, weil sie dort auch erzeugt wurde.
 n = 6291456
 buf = bytearray()
 i = 0

@@ -44,12 +44,6 @@ import re
 import sys
 
 
-# Ein Bereich: (Name, Datei, Ausdruck fuer den Anfang, Ausdruck fuer die
-# Groesse).  Beides sind Ausdruecke ueber KONSTANTEN AUS DEM QUELLTEXT --
-# hier steht keine Zahl, die nicht auch dort steht.  Wer eine Konstante
-# aendert, aendert damit diese Karte mit; wer einen Bereich hinzufuegt,
-# ohne ihn hier einzutragen, faellt beim naechsten Punkt auf: die Summe
-# der Bereiche wird gegen die Liste der `_OFF`-Konstanten gehalten.
 BEREICHE = [
     ("IDT",        "kstate.fi", "IDT_OFF",        "0x1000"),
     ("BITMAP",     "kstate.fi", "BITMAP_OFF",     "BITMAP_BYTES"),
@@ -71,30 +65,11 @@ BEREICHE = [
     ("NVME_ID",    "nvme.fi",   "ID_OFF",         "0x1000"),
     ("NVME_BUF_A", "nvme.fi",   "BUF_A",          "0x1000"),
     ("NVME_BUF_B", "nvme.fi",   "BUF_B",          "0x1000"),
-    # RUNDE AHCI: der SATA-Treiber.  Fuenf Seiten aus dem Rest, den
-    # `kstate.fi` als frei ausgewiesen hat (0x7A000..0x7F000).  Die
-    # Ausrichtungen, die ein AHCI-Controller verlangt (1024 fuer die
-    # Befehlsliste, 256 fuer den FIS-Empfang, 128 fuer die Befehlstafel),
-    # fallen dabei von der Seitengrenze ab.
-    # RUNDE HID: der Zerleger fuer Berichtsbeschreibungen, der
-    # Eingabeweg und HID ueber I2C.  Neun Seiten.  RUNDE BLECH-ECHT:
-    # sie lagen auf 0x92000..0x9B000 -- das war frei, als der Zweig
-    # `hid` abzweigte, und gehoert seit Merge 2 der Runde ASYNC
-    # (AIO/ACQ/ASC).  Sie liegen jetzt auf 0xA0000..0xA9000, hinter
-    # der alten Grenze; dafuer ist KDATA_SIZE auf 0xB0000 gewachsen.
     ("HIDREP_FLD", "hidrep.fi", "FLD_OFF",       "MAX_DEV * 0x1000"),
     ("HIDREP_SUM", "hidrep.fi", "SUM_OFF",       "MAX_DEV * SUM_BYTES"),
     ("HIDREP_RAW", "hidrep.fi", "RAW_OFF",       "MAX_DEV * RAW_MAX"),
     ("HIDIN",      "hidin.fi",  "IN_OFF",        "0x1000"),
     ("I2CHID",     "i2chid.fi", "I2C_OFF",       "0x1000"),
-    # RUNDE GRAFIK-1 -- der Software-Rasterer und sein Wuerfel teilen
-    # sich VIER Seiten am oberen Ende.  Der Eintrag steht hier, weil
-    # die erste Fassung der Runde 0x3D000 genommen hat: dort liegt der
-    # Fensterserver aus Runde K10/K11.  Die Karte hat das NICHT
-    # gemeldet -- sie kann nur pruefen, was in dieser Liste steht, und
-    # ein neuer Bereich, der hier fehlt, ist fuer sie unsichtbar.  Das
-    # ist derselbe Fehler, den die vier Kommentare oben beschreiben,
-    # zum fuenften Mal.
     ("R3D",        "r3dsoft.fi", "R3D_OFF",      "R3D_MAX"),
     ("I2CBUF",     "i2chid.fi", "BUF_OFF",       "0x1000"),
     ("AHCI",       "ahci.fi",   "AHCI_OFF",       "0x1000"),
@@ -128,68 +103,20 @@ BEREICHE = [
     ("TTY",        "kstate.fi", "TTY_OFF",        "TTY_MAX"),
     ("TTY2",       "kstate.fi", "TTY2_OFF",       "TTY2_MAX"),
     ("RAND",       "kstate.fi", "RANDOM_OFF",       "RANDOM_MAX"),
-    # RUNDE K7B: der Rahmenpuffer-Zustand samt Zeichensatz.  Er stand bis
-    # zu dieser Runde als einziger Bereich NICHT in `kstate.fi`, sondern
-    # nur in `fb.fi` -- und genau deshalb ging er bei K9 unter.
     ("FB",         "kstate.fi", "FB_OFF",         "FB_MAX"),
     ("K11",        "kstate.fi", "K11_OFF",        "K11_MAX"),
-    # RUNDE K10: die Oberflaeche.  Sie liegt in den beiden Luecken, die
-    # Runde K7B als frei ausgewiesen hat -- und sie steht HIER, weil
-    # genau das der Fehler war, an dem Runde K7 gescheitert ist.
     ("MOUSE",      "kstate.fi", "MOUSE_OFF",      "MOUSE_MAX"),
     ("WM",         "kstate.fi", "WM_OFF",         "WM_MAX"),
     ("TTF",        "kstate.fi", "TTF_OFF",        "TTF_MAX"),
-    # RUNDE K16: die Dateiarten (0x49000..0x4C000).  Der Vorrat dieser
-    # Runde ist VOR dem Bauen verteilt worden, weil am 26.08.2026 vier
-    # Runden gleichzeitig liefen und drei dieselbe Seite genommen haben.
     ("K16",        "kstate.fi", "K16_OFF",        "K16_MAX"),
-    # RUNDE K17: DER USB-BAUM (0x50000..0x58000).  Diese Runde hat kdata
-    # von 0x50000 auf 0x58000 wachsen lassen -- der zweite Zuwachs nach
-    # Runde K12, und aus demselben Grund: ein xHCI liest seine Ringe,
-    # seine Zusammenhangstafel und seine Puffer SELBST aus dem Speicher,
-    # und die muessen ausgerichtet und ortsfest liegen.  EIN Bereich fuer
-    # die ganze Runde; wie er innen aufgeteilt ist, steht in `xhci.fi`
-    # und `usb.fi` und wird unten (Punkt 5) nachgerechnet.
     ("K17",        "kstate.fi", "K17_OFF",        "K17_MAX"),
-    # RUNDE K12: die Gastmaschinen des Hypervisors.  Der Bereich steht
-    # in `hv.fi` und nicht in `kstate.fi` -- absichtlich, denn er ist die
-    # EINZIGE Seite, die diese Runde in `kdata` braucht; alles andere
-    # (Steuerbloecke, verschachtelte Seitentabellen, Bitkarten, der
-    # Speicher der Gaeste) kommt aus dem Rahmenverwalter.  Eingetragen
-    # ist er hier, damit der Kollisionspruefer ihn trotzdem sieht.
     ("HV",         "hv.fi",     "HV_OFF",         "HV_MAX"),
-    # RUNDE HV2: die virtuellen Geraete je Gastmaschine (serielle
-    # Schnittstelle, Unterbrechungsverteiler, Zeitgeber). EINE Seite,
-    # acht Maschinen zu je 128 Oktetten. Sie liegt NICHT neben `HV`,
-    # weil der Bereich dahinter seit Runde K12 vollstaendig belegt
-    # wurde -- 0x84000 ist die erste wirklich freie Seite.
     ("VDEV",       "hv.fi",     "VDEV_OFF",       "VDEV_MAX"),
-    # RUNDE K13: die Zaehler der Benutzer- und Rechteschicht. Zwei
-    # Seiten, 0x41000 und 0x42000 -- die ersten hinter dem Bereich des
-    # Hypervisors, so wie kstate.fi es fuer die naechste Runde
-    # ausgewiesen hat. Die zweite Seite ist der Ausgabepuffer von
-    # SYS_OSUM_USERINFO; sie steht hier mit, damit die Runde danach bei
-    # 0x43000 anfaengt und nicht mitten drin.
     ("K13",        "kstate.fi", "K13_OFF",        "K13_MAX"),
-    # RUNDE MULTIUSER: zwei Seiten am Anfang des letzten freien Stuecks
-    # (0x7A000..0x80000). Eine Seite Zaehler, eine Seite Zusatzgruppen
-    # (MAX_TASKS * MU_GRPMAX * 8 = 4096 Oktette).
     ("MU",         "kstate.fi", "MU_OFF",         "MU_MAX"),
-    # RUNDE K14: die VFS-Schicht und die fremden Dateisysteme. Der
-    # Auftrag dieser Runde hat 0x43000..0x46000 zugeteilt, weil weitere
-    # Runden GLEICHZEITIG an diesem Baum arbeiten -- genau die Lage, aus
-    # der die vier Kollisionen oben entstanden sind. Drei Seiten, drei
-    # Eintraege, und der Pruefer rechnet nach.
     ("K14",        "kstate.fi", "K14_OFF",        "K14_MAX"),
     ("K14FAT",     "kstate.fi", "FAT_OFF",        "FAT_MAX"),
     ("K14PROC",    "kstate.fi", "PROCFS_OFF",     "PROCFS_MAX"),
-    # RUNDE K15: die Naht zwischen Fensterserver und Widget-Bibliothek.
-    # Drei Seiten -- Skalare, Zwischenablage, Umschlagpuffer.  Sie liegen
-    # in dem Vorrat, den diese Runde zugeteilt bekommen hat
-    # (0x46000..0x49000), und in keinem anderen: drei Runden liefen
-    # gleichzeitig, und genau daran waeren die Merges beinahe
-    # gescheitert.  Der Rest der Bibliothek liegt in Ring 3 und kommt in
-    # `kdata` gar nicht vor.
     ("WIG",        "kstate.fi", "WIG_OFF",        "WIG_MAX"),
     ("WIGST",      "kstate.fi", "WIGST_OFF",      "WIGST_MAX"),
     ("SCANB",      "kstate.fi", "SCANB_OFF",      "SCANB_MAX"),
@@ -200,16 +127,10 @@ BEREICHE = [
     # 0x13E000..0x144000, allotted in advance by the wave of 18.09.2026
     # (see kstate.fi at KDATA_SIZE) -- this round took exactly that.
     ("AX",         "kstate.fi", "AX_OFF",         "AX_MAX"),
-    # RUNDE FREMDLAND: die Tafel der Dateisperren.  Eine Seite, 64
-    # Eintraege zu 48 Oktetten -- (Inode, Einhaengung, Bereich, Art,
-    # Halter).  Sie liegt HINTER NAMEK, in den 0x1000 Oktetten, die
-    # der Ton dort frei gelassen hat.
     ("FLOCK",      "kstate.fi", "FLOCK_OFF",      "FLOCK_MAX"),
-    # RUNDE HOTPLUG -- die Tafel der Wechseldatentraeger (wechsel.fi).
     ("WECHSEL",    "kstate.fi", "WECHSEL_OFF",    "WECHSEL_MAX"),
     ("VGPU",       "kstate.fi", "VGPU_OFF",       "VGPU_MAX"),
     ("VMSVGA",     "kstate.fi", "VMSVGA_OFF",     "VMSVGA_MAX"),
-    # ---- Runde WAYLAND: der lokale Socket und der geteilte Speicher ----
     ("USOCK",      "unixsock.fi", "USOCK_OFF",   "USOCK_MAX * USOCK_BYTES"),
     ("UNAME",      "unixsock.fi", "UNAME_OFF",   "UNAME_MAX * UNAME_BYTES"),
     ("UCNT",       "unixsock.fi", "UCNT_OFF",    "0x40"),
@@ -217,170 +138,44 @@ BEREICHE = [
     ("USHMPG",     "unixsock.fi", "USHMPG_OFF",  "USHM_PAGED * SHM_PAGES_MAX * 8"),
     # COMPOSITOR S3: who maps which shared object (the reference of a mapping is given back by munmap and by the end of the task)
     ("UMAP",       "unixsock.fi", "UMAP_OFF",    "UMAP_MAX * UMAP_BYTES"),
-    # Die zwei Arbeitsplaetze von `sys.fi` fuer den Weg zwischen Ring 3
-    # und dem Ring des Sockets. Sie halten keinen Zustand ueber einen
-    # Systemaufruf hinaus -- aber sie belegen kdata, also stehen sie hier.
     ("WLSCRATCH",  "sys.fi",      "WL_SCRATCH",  "0x1000"),
     ("WLPATH",     "sys.fi",      "WL_PATH",     "0x1000"),
-    # RUNDE OFS3: die Pfadpuffer des Dateisystems.  Sie sind hier ein
-    # EIGENER Bereich und kein Versatz -- die zwei Seiten gehoeren
-    # dieser Runde allein, und genau das soll die Karte nachrechnen.
     ("OFS3",       "kstate.fi", "OFS3_OFF",       "OFS3_MAX"),
-    # RUNDE K18: die Energieschicht.  Ihr Vorrat ist 0x58000..0x60000 --
-    # er liegt HINTER der alten Grenze KDATA_SIZE (0x50000), und deshalb
-    # hat diese Runde `kdata` von 0x50000 auf 0x60000 wachsen lassen
-    # (kstate.fi UND kernel/arch/x86_64/boot.s, beide Zahlen muessen gleich sein).
-    # Belegt sind zwei Seiten: die Skalare der Energieschicht und das,
-    # was aus den ACPI-Tabellen ueber Akku, Netzteil und Thermalzone
-    # gelesen wurde.  Der Rest des Vorrats bleibt frei.
-    # RUNDE K17: DIE SEITE DES MODUSVEKTORS (0x4C000..0x4D000).  Bis zu
-    # dieser Runde stand der ganze Modus in EINEM Skalar (Versatz 88);
-    # er ist voll gelaufen, und seitdem liegt er als Feld aus
-    # MODE_WORDS Woertern hier.  Er steht in dieser Karte, weil er eine
-    # Seite `kdata` belegt wie jeder andere Bereich auch -- und weil die
-    # naechste Runde sonst genau diese Seite naehme.
     ("MODE",       "kstate.fi", "MODE_OFF",       "MODE_MAX"),
     ("K18",        "kstate.fi", "K18_OFF",        "K18_MAX"),
     # RUNDE POWERMON: die Akkuanalyse je Programm (0x5C000..0x5E000).
     ("PMON",       "kstate.fi", "PMON_OFF",       "PMON_MAX"),
     ("NETVIEW",    "kstate.fi", "NETVIEW_OFF",    "NETVIEW_MAX"),
     ("NETDEV",     "kstate.fi", "NETDEV_OFF",     "NETDEV_MAX"),
-    # RUNDE BLECH: die Wurzelgeraetewahl (kernel/rootsel.fi).  EINE Seite
-    # aus dem Stueck, das diese Karte selbst als frei ausweist
-    # (0x84380..0x88000, hinter den Zaehlern der Handle-Schicht).  Sie
-    # haelt drei Listen zu acht Eintraegen: Bewerber, Befunde,
-    # USB-Regler.
     ("ROOTSEL",    "rootsel.fi", "ROOT_OFF",      "ROOT_MAX"),
-    # RUNDE BLECH, NACHTRAG: die Treiberschicht fuer Massenspeicher
-    # (kernel/blkdev.fi) -- dasselbe, was netdev.fi fuer Netz ist.  EINE
-    # Seite direkt hinter der Wurzelwahl.
     ("BLKDEV",     "blkdev.fi", "BLKDEV_OFF",     "BLKDEV_MAX"),
-    # RUNDE FEEDBACK (in diesen Zweig geholt von BRIDGE-2): der Schein
-    # fuers Bildschirmfoto (kernel/shot.fi).  EINE Seite, und zwar die
-    # LETZTE freie vor TASK_OFF.  Der erste Versuch dieser Runde nahm
-    # 0x85000, weil der Kopf von kstate.fi das Stueck ab 0x84380 als
-    # frei auswies -- dort liegt ROOTSEL.  Genau dafuer gibt es diese
-    # Datei; die Kollision stand in keiner gemeinsamen Zeile.
     ("SHOT",       "kstate.fi", "SHOT_OFF",       "SHOT_MAX"),
     ("TIPP",       "kstate.fi", "TIPP_OFF",       "TIPP_MAX"),
-    # RUNDE BLECH: der USB-2.0-Regler (kernel/ehci.fi).  Drei Seiten,
-    # 0x4D000..0x50000 -- genau das Stueck, das diese Karte bis zu
-    # dieser Runde als "frei 0x4D000..0x50000 (12 KiB)" ausgewiesen hat.
-    # Die periodische Rahmenliste MUSS auf 4096 ausgerichtet liegen
-    # (PERIODICLISTBASE hat unten zwoelf Bits, die es nicht gibt); jeder
-    # QH und jeder qTD auf 32.  Beides faellt von der Seitengrenze ab.
     ("EHCI",       "ehci.fi",   "EHCI_OFF",       "EHCI_MAX"),
-    # RUNDE MODUL: der Modullader.  Drei Seiten; sie lagen auf
-    # 0x4D000..0x50000, und genau dieselben drei hat die Runde BLECH
-    # fuer den EHCI-Regler genommen (beide aus demselben Loch
-    # zwischen MODE_OFF und K17_OFF).  RUNDE BLECH-ECHT hat den
-    # Lader auf 0xA9000..0xAC000 gelegt.  Ehemals: drei Seiten aus
-    # dem Loch zwischen dem Modusvektor (MODE_OFF, endet 0x4D000) und
-    # dem USB-Vorrat (K17_OFF, faengt 0x50000 an).  Die Karte in
-    # `kstate.fi` weist es seit Runde K17 als frei aus; genommen wird es
-    # hier zum ersten Mal.  Darin liegen die Skalare des Laders, die
-    # vier Modulsaetze, die Abschnittstafel des laufenden Ladevorgangs
-    # und die TREIBERTAFEL, die ein geladenes Modul fuellt.
     ("MODUL",      "kstate.fi", "MODULE_OFF",      "MODULE_MAX"),
     ("BUS",        "kstate.fi", "BUS_OFF",        "BUS_MAX"),
 
-    # RUNDE FSROBUST: der Zustand des OFS-Journals (kernel/ofsj.fi).
-    # Drei Seiten aus dem letzten freien Stueck, 0x7A000..0x80000.
     ("JR",         "kstate.fi", "JR_OFF",         "JR_MAX"),
     ("K18BATT",    "kstate.fi", "BATT_OFF",       "BATT_MAX"),
-    # RUNDE AML: die Skalare des AML-Interpreters (0x85000, eine Seite).
-    # Der NAMENSRAUM liegt NICHT in `kdata`: er kommt aus dem
-    # Rahmenverwalter (`mem.frame_run`, 64 Rahmen) und geht nach
-    # Gebrauch dorthin zurueck. Hier steht nur, was ihn ueberlebt --
-    # die Routentafel Steckplatz/Stift -> GSI.
     ("AML",        "kstate.fi", "AML_OFF",        "AML_MAX"),
-    # RUNDE ACPI-EREIGNISSE: eine eigene Seite hinter dem
-    # Interpreter, siehe die Begruendung in kstate.fi.
     ("ACPIEV",     "kstate.fi", "ACPIEV_OFF",     "ACPIEV_MAX"),
-    # RUNDE DISPLAY: der Modustreiber.  Zwei Seiten aus demselben Vorrat
-    # (0x5A000 und 0x5B000) -- die Modusliste samt Skalaren und die
-    # Nachschlagetabelle fuer Gamma/Helligkeit/Kontrast/Saettigung samt
-    # EDID-Block.  Sie stehen hier, weil zur Zeit dieser Runde fuenf
-    # Runden gleichzeitig an diesem Baum arbeiten.
     ("DISP",       "kstate.fi", "DISP_OFF",       "DISP_MAX"),
     ("DLUT",       "kstate.fi", "DLUT_OFF",       "DLUT_MAX"),
-    # RUNDE DESKTOP: die Fenstertafel und die Ereignisringe des
-    # Fensterservers.  Sie standen bis zu dieser Runde in WM_OFF (zwei
-    # Seiten); mit MAX_WIN 16 statt 8 sind das 0x1000 Oktette Tafel und
-    # 0x2000 Oktette Ringe und passen dort nicht mehr hinein.  Der
-    # Vorrat dieser Runde ist 0x54000..0x58000, und er liegt ABSICHTLICH
-    # am oberen Ende des freien Bereichs: wer sequentiell greift, greift
-    # 0x4C000, und am 27.08.2026 laufen wieder mehrere Runden.
     ("DESK",       "kstate.fi", "DSK_OFF",        "DSK_MAX"),
     # DELL ROUND 04.10.2026: the window event rings of the 32 windows, in the
     # hole 0x10C000..0x110000.
     ("DESKEV",     "kstate.fi", "EVR_OFF",        "EVR_MAX"),
-    # RUNDE TILING: der Fensterbaum.  Vier Seiten. Diese Runde
-    # hatte 0x4C000..0x50000 genommen; dort liegt seit Runde K17 der
-    # Modusvektor und dahinter deren USB-Seiten. TILE zieht deshalb
-    # hinter die Fenstertafel der Runde DESKTOP, auf 0x68000..0x6C000.
-    # Er steht HIER, weil
-    # zur Zeit dieser Runde sieben Runden gleichzeitig an diesem Baum
-    # gearbeitet haben -- genau die Lage, aus der die vier Kollisionen
-    # oben entstanden sind.  Die Runde DESKTOP bekommt 0x54000; dazwischen
-    # bleibt eine Seitengruppe frei.
     ("TILE",       "kstate.fi", "TILE_OFF",       "TILE_MAX"),
     ("WMPLUG",     "kstate.fi", "WMP_OFF",        "WMP_MAX"),
     ("SUSP",       "kstate.fi", "SUSP_OFF",       "SUSP_MAX"),
     ("SCHLAF",     "kstate.fi", "SCHLAF_OFF",     "SCHLAF_MAX"),
-    # RUNDE WACH (K-018, Abschluss): der Wiederanlauf.  Fuenf Seiten,
-    # 0x127000..0x12C000, VORHER zugeteilt -- diese Runde hat sich keine
-    # Seite gesucht.
     ("WACH",       "kstate.fi", "WACH_OFF",       "WACH_MAX"),
-    # RUNDE O-CONTAINER: die Container.  EINE Seite.  Acht Saetze zu 256
-    # Oktetten plus drei Zaehler sind 2072 Oktette; der Rest der Seite
-    # bleibt dieser Runde zugeteilt und frei.
-    #
-    # BEIM VERSCHMELZEN VERSCHOBEN (18.09.2026): der Zweig waehlte
-    # 0x12C000 direkt hinter WACH und war fuer sich gruen -- auf `main`
-    # hatte EBPF inzwischen denselben Anfang genommen.  Dieses Werkzeug
-    # hat die Kollision gemeldet, bevor sie in den Kern kam; der
-    # Container liegt jetzt auf 0x13C000, hinter EBPFHOOK.
     ("CONTAINER",  "kstate.fi", "CTR_OFF",        "CTR_MAX"),
-    # RUNDE KRYPTO (K-019): die Plattenverschluesselung.  Fuenf Seiten,
-    # VORHER zugeteilt in der Welle vom 15.09.2026 -- diese Runde hat
-    # sich keine Seite gesucht, sie hat die bekommen, die in kstate.fi
-    # oben bei KDATA_SIZE fuer sie steht.
     ("KRYPTO",     "kstate.fi", "CRYPT_OFF",      "CRYPT_MAX"),
-    # RUNDE CODEC (P-022): die Zaehler des Videodekodierers.  Acht
-    # Seiten, 0x118000..0x120000, dieser Runde VORHER zugeteilt (siehe
-    # den Wellen-Vermerk in kstate.fi).  Die Bildpuffer liegen
-    # ABSICHTLICH nicht hier, sondern als statische Felder in
-    # kernel/user/h264.fi -- ein CIF-Bild ist 152 KiB, vier davon
-    # waeren der halbe kdata-Bereich.
     ("CODEC",      "kstate.fi", "CODEC_OFF",      "CODEC_MAX"),
-    # RUNDE AESNI (K-020): AES auf den Befehlen der Maschine.  EINE
-    # Seite, 0x120000..0x121000, in der Welle vom 15.09.2026 vorher
-    # zugeteilt -- zusammen mit den Modusindizes 1010..1019, weil beim
-    # letzten Mal nur die Seiten vergeben waren und sich zwei Runden
-    # denselben Modusindex genommen haben.  Die Schluesselplaene liegen
-    # NICHT hier (sie gehoeren lib/crypto/xts.fi, das auch auf dem Wirt
-    # laeuft); hier stehen nur Zaehler und die cpuid-Befunde.
     ("AESNI",      "kstate.fi", "AESNI_OFF",      "AESNI_MAX"),
-    # RUNDE ARGON (K-021): Argon2 ueber die vier Spuren, dazu SHA-NI.
-    # EINE Seite, 0x126000..0x127000, in Welle 3 vom 15.09.2026 vorher
-    # zugeteilt -- zusammen mit den Modusindizes 1040..1049.  Der
-    # Argon2-SPEICHER liegt NICHT hier: das sind bis zu 64 MiB aus
-    # mem.frame_run (siehe krypto.argmem).  Hier stehen Zaehler, die
-    # Messwerte und die acht Spur-Auftraege.
     ("ARGON",      "kstate.fi", "ARGON_OFF",      "ARGON_MAX"),
-    # RUNDE NETMON: die Zaehlung je Prozess und der Weiterleiter mit
-    # NAT und DHCP-Server. Beide Bereiche sind beim Zusammenfuehren
-    # gewandert (0x5A000/0x5D000 waren von OFS3, DISPLAY und SPEICHER
-    # belegt) und stehen deshalb hier -- der Pruefer ist der Grund,
-    # warum das aufgefallen ist.
     ("NETMON",     "kstate.fi", "NETMON_OFF",     "NETMON_MAX"),
-    # RUNDE O-EBPF: die vier Bereiche des eBPF-Kerns, im letzten grossen
-    # Loch unterhalb von KDATA_SIZE (0x12C000..0x140000).  Der Pruefer
-    # (EBPFVER) ist der groesste Posten und war in der ersten Fassung zu
-    # gross fuer das Loch -- der Registerzustand wurde daraufhin von 8
-    # auf 4 Oktette je Register gepackt.  Genau diese Zeile hier hat den
-    # Fehler gemeldet, bevor ein einziges Oktett davon lief.
     ("EBPF",       "kstate.fi", "EBPF_OFF",       "EBPF_MAX"),
     ("EBPFMAP",    "kstate.fi", "EBPFMAP_OFF",    "EBPFMAP_MAX"),
     ("EBPFVER",    "kstate.fi", "EBPFVER_OFF",    "EBPFVER_MAX"),
@@ -392,73 +187,23 @@ BEREICHE = [
     ("HREQ",       "kstate.fi", "HREQ_OFF",       "HREQ_MAX"),
     ("HNON",       "kstate.fi", "HNON_OFF",       "HNON_MAX"),
     ("HCNT",       "kstate.fi", "HCNT_OFF",       "HCNT_MAX"),
-    # RUNDE ASYNC: die asynchrone Auftragsschicht.  Drei Bereiche HINTER
-    # der alten Grenze 0x80000 -- deshalb waechst KDATA_SIZE in
-    # kstate.fi UND in kernel/arch/x86_64/boot.s auf 0x90000, und
-    # tools/hv/run.sh haelt beide Zahlen gegeneinander.
     ("AIO",        "kstate.fi", "AIO_OFF",        "AIO_MAX"),
     ("ACQ",        "kstate.fi", "ACQ_OFF",        "ACQ_MAX"),
     ("ASC",        "kstate.fi", "ASC_OFF",        "ASC_MAX"),
     ("APATH",      "kstate.fi", "APATH_OFF",      "APATH_MAX"),
-    # RUNDE PROTOKOLL: der Ringpuffer des Kernprotokolls, 64 KiB am
-    # Stueck hinter allem bisherigen.  Er ist der Grund, aus dem
-    # KDATA_SIZE in dieser Runde von 0xB0000 auf 0xC0000 gewachsen ist.
     ("LOG",        "kstate.fi", "LOG_OFF",        "LOG_MAX"),
-    # RUNDE TRESOR: die Geraeteidentitaet, zwei Seiten (0x5A000..0x5C000).
-    # Die erste traegt die Merkmale, die zweite ist das DMA-Ziel des
-    # `identify controller` von NVMe -- und deshalb MUSS sie eine eigene,
-    # seitenausgerichtete Seite sein und darf nicht in der ersten liegen.
     ("HWID",       "kstate.fi", "HWID_OFF",       "HWID_MAX"),
-    # RUNDE K15, ZWEITER NACHTRAG.  Die erste Seite dieses Vorrats wird
-    # geteilt: `wig.fi` braucht davon 0x40 Oktette, der Rest gehoert der
-    # Geometrie des Dateisystems (FSG, zwei Woerter aus dem Superblock).
-    # FSG liegt INNERHALB von WIG_OFF und ist deshalb hier kein eigener
-    # Bereich -- es steht unten bei den Unterversaetzen.  Was hier zaehlt,
-    # ist: derselbe Vorrat, keine neue Seite.
-    # RUNDE SPEICHER: das Aenderungsjournal ist aus dieser geteilten Seite
-    # AUSGEZOGEN und hat jetzt zwei eigene (0x5E000..0x60000).  Es traegt
-    # seit dieser Runde auch die Groessenaenderungen, und 56 Saetze waren
-    # dafuer zu wenig -- die Begruendung steht bei JRNL_OFF in kstate.fi.
-    # Damit ist es ein Bereich in `kdata` wie jeder andere und steht
-    # NICHT mehr unten in KEINE_KDATA.
     ("JRNL",       "kstate.fi", "JRNL_OFF",       "JRNL_MAX"),
-    # RUNDE HDA: der Ton, sechs Seiten -- RUNDE TON: sieben, und auf
-    # 0xB0000..0xB7000 statt 0x92000..0x98000, wo seit Merge 2 die Runde
-    # ASYNC liegt (fuenf Kollisionen, VOR dem Bauen gefunden).  Der
-    # zweite Anlauf, 0x9F000..0xA6000, traf die Runde HID (sechs
-    # Kollisionen, ebenfalls hier gefunden).  Deshalb KDATA_SIZE
-    # 0xB0000 -> 0xC0000 und der Ton HINTER der alten Grenze.  Eine Seite Tonschicht und AC97, drei Seiten
-    # Intel HD-Audio (Skalare samt Positionspuffer, CORB/RIRB,
-    # Deskriptorliste samt Widget-Tafel), zwei Seiten Mischer.  Die
-    # DMA-Ringpuffer selbst stehen NICHT hier -- sie kommen aus dem
-    # Rahmenverwalter, weil 16 KiB je Strom in dieser Karte
-    # Verschwendung waeren und der Rahmenverwalter ohnehin
-    # seitenausgerichtet liefert.
     ("AUD",        "kstate.fi", "AUD_OFF",        "AUD_MAX"),
     ("HDA",        "kstate.fi", "HDA_OFF",        "HDA_MAX"),
     ("HDARING",    "kstate.fi", "HDAR_OFF",       "HDAR_MAX"),
     ("HDABDL",     "kstate.fi", "HDAB_OFF",       "HDAB_MAX"),
     ("MIX",        "kstate.fi", "MIX_OFF",        "MIX_MAX"),
-    # RUNDE TON: der Umsteigepuffer der Ton-Systemaufrufe, eine Seite
-    # hinter dem Mischer -- statt des maschinenweiten BLOCK_OFF.
     ("AUDB",       "kstate.fi", "AUDB_OFF",       "AUDB_MAX"),
-    # RUNDE TON: der Vorauslesepuffer der Platte (kernel/blk.fi) -- eine
-    # Seite Buchhaltung, acht Seiten Daten (BLKC_WAYS Wege zu
-    # BLKC_SECTORS Sektoren).  RUNDE MERGE-7: der Zweig hatte die beiden
-    # zwar in kstate.fi angelegt, aber NICHT hier eingetragen; der
-    # Pruefer hat sie beim Zusammenfuehren als "steht in keiner Karte"
-    # gemeldet.  Jetzt stehen sie hier, und ihre Lage wird mitgerechnet.
     ("BLKCACHE",   "kstate.fi", "BLKC_OFF",       "BLKC_MAX"),
     ("BLKDATA",    "kstate.fi", "BLKD_OFF",       "BLKD_MAX"),
 ]
 
-# `_OFF`-Konstanten, die KEINE Bereiche in `kdata` sind -- Offsets
-# innerhalb eines anderen Puffers oder innerhalb von Geraetespeicher.
-# Wer hier etwas eintraegt, sagt damit ausdruecklich: das ist kein Stueck
-# `kdata`.  Alles andere MUSS in BEREICHE stehen.
-# RUNDE K17: die Untergliederung des USB-Bereichs.  Jeder dieser Versaetze
-# liegt INNERHALB von kstate.K17_OFF; Punkt 5 unten rechnet das nach und
-# prueft ausserdem, dass sich die Stuecke nicht gegenseitig ueberschneiden.
 K17_STUECKE = [
     ("xhci.fi", "SCAL_OFF",   0x400),
     ("xhci.fi", "EPTAB_OFF",  0x400),
@@ -482,13 +227,6 @@ K17_STUECKE = [
     ("usb.fi",  "ISO_BUF_OFF", 0x600),
 ]
 
-# RUNDE FREMDFS: dieselbe Buchfuehrung fuer die zwei fremden
-# Dateisysteme.  Beide Treiber teilen ihre drei Seiten in dieselben
-# sechs Stuecke; jedes liegt INNERHALB von EXT4_OFF bzw. NTFS_OFF, und
-# Punkt 5c unten rechnet nach, dass keines herauslaeuft und keines ein
-# anderes ueberschneidet.  Ohne diese Liste haette der Pruefer die
-# Versaetze als "steht in keiner Karte" gemeldet -- und genau das ist
-# beim ersten Bauversuch dieser Runde auch passiert.
 EXT4_STUECKE = [
     ("ext4.fi", "SB_OFF",   0x400),
     ("ext4.fi", "NODE_OFF", 0x380),
@@ -523,11 +261,6 @@ EXFAT_STUECKE = [
     ("exfat.fi", "CACHE_RR",  0x8),
 ]
 
-# RUNDE BLECH: dieselbe Buchfuehrung fuer den EHCI-Bereich.  Jedes
-# Stueck liegt INNERHALB von ehci.EHCI_OFF; Punkt 5b unten rechnet nach,
-# dass keines herauslaeuft und keines ein anderes ueberschneidet.  Die
-# periodische Rahmenliste ist 1024 * 4 Oktett und MUSS auf 4096
-# ausgerichtet liegen -- das prueft Punkt 5b ausdruecklich.
 EHCI_STUECKE = [
     ("ehci.fi", "PF_OFF",   0x1000),
     ("ehci.fi", "SCAL_OFF", 0x200),
@@ -541,10 +274,10 @@ KEINE_KDATA = {
     ("fb.fi", "FB_OFF"),        # Spiegel von kstate.FB_OFF, s. u.
     ("fb.fi", "FONT_OFF"),      # liegt IN FB_OFF
     ("fb.fi", "VMS_OFF"),       # Spiegel von kstate.VMSVGA_OFF (vmsvga.fi)
-    ("inet.fi", "SOCK_OFF"),    # Offsets im Netzbereich von netsvc.fi
+    ("inet.fi", "SOCK_OFF"),
     ("inet.fi", "ARP_OFF"),
     ("inet.fi", "ICMP_OFF"),
-    ("virtio.fi", "RXD_OFF"),   # Offsets im DMA-Bereich der Karte
+    ("virtio.fi", "RXD_OFF"),
     ("virtio.fi", "RXA_OFF"),
     ("virtio.fi", "RXU_OFF"),
     ("virtio.fi", "TXD_OFF"),
@@ -552,9 +285,9 @@ KEINE_KDATA = {
     ("virtio.fi", "TXU_OFF"),
     ("virtio.fi", "RXB_OFF"),
     ("virtio.fi", "TXB_OFF"),
-    ("pci.fi", "K2_OFF"),       # derselbe Wert wie TABLE_OFF
-    ("ttf.fi", "A_HEAP"),       # Versatz IM Glyphenspeicher, nicht kdata
-    ("wmlayout.fi", "W_OFF"),         # Versatz IN der Fenstertafel
+    ("pci.fi", "K2_OFF"),
+    ("ttf.fi", "A_HEAP"),
+    ("wmlayout.fi", "W_OFF"),
     ("wig.fi", "CLIP_OFF"),     # Versatz IN WIG_OFF (Runde K15)
     ("wig.fi", "STAGE_OFF"),    # dito
     ("vmode.fi", "LUT_OFF"),    # Versatz IN DLUT_OFF (Runde DISPLAY)
@@ -562,7 +295,6 @@ KEINE_KDATA = {
     ("vmode.fi", "LIST_OFF"),   # Versatz IN DISP_OFF (Runde DISPLAY)
     ("kstate.fi", "FSG_OFF"),   # Versatz IN WIG_OFF (K15, zweiter Nachtrag)
     ("kstate.fi", "JRNL_OFF"),  # dito -- das Aenderungsjournal
-    # RUNDE OFS3: Versaetze INNERHALB von OFS3_OFF, kein eigenes kdata.
     ("kstate.fi", "OP_NAME"),
     ("kstate.fi", "OP_NAME2"),
     ("kstate.fi", "OP_OLD"),
@@ -583,15 +315,12 @@ KEINE_KDATA = {
     ("fs.fi", "G_DIRENT"),
     ("fs.fi", "G_NAMELEN"),
     ("fs.fi", "G_HINT"),
-    ("nidx.fi", "H_BASE"),      # Versatz IM Journal, nicht kdata
+    ("nidx.fi", "H_BASE"),
     ("hv.fi", "CNT_OFF"),       # Versaetze INNERHALB von HV_OFF (Runde K12)
     ("hv.fi", "VAL_OFF"),
     ("hv.fi", "VM_OFF"),
     ("hv.fi", "GPR_OFF"),
-    ("virtio.fi", "C_QNOTIFY_OFF"),  # ein Register im Konfigurationsraum
-    # RUNDE K14: Versaetze INNERHALB der drei Seiten oben, kein eigenes
-    # kdata. Sie stehen hier, damit Punkt 3 unten sie sieht und nicht
-    # als vergessenen Bereich meldet.
+    ("virtio.fi", "C_QNOTIFY_OFF"),
     ("mnt.fi", "MNT_OFF"),      # in K14_OFF
     ("part.fi", "PART_OFF"),    # in K14_OFF
     ("part.fi", "SECT_OFF"),    # in K14_OFF
@@ -600,9 +329,6 @@ KEINE_KDATA = {
     ("fat.fi", "NODE_OFF"),     # in FAT_OFF
     ("fat.fi", "CACHE_OFF"),    # in FAT_OFF (r208 chain cache)
 }
-# Die K17-Stuecke sind ebenfalls kein eigenes kdata -- sie liegen alle in
-# K17_OFF.  Eingetragen wird das mechanisch, damit die beiden Listen
-# nicht auseinanderlaufen koennen.
 for _d, _k, _n in K17_STUECKE:
     KEINE_KDATA.add((_d, _k))
 for _d, _k, _n in EHCI_STUECKE:
@@ -633,14 +359,6 @@ def wert(werte, ausdruck, tiefe=0):
         return wert(werte, werte[t], tiefe + 1)
     if not re.fullmatch(r"[A-Za-z_0-9 +\-*()x]+", t):
         raise ValueError("kein rechenbarer Ausdruck: %s" % ausdruck)
-    # RUNDE HID: DIE HEXZAHLEN ZUERST.  Bis hierher lief die
-    # Namensersetzung direkt ueber den Ausdruck -- und `0x1000` faengt
-    # nach der Ziffer 0 mit dem Buchstaben `x` an, also hat der
-    # Namensausdruck daraus die "Konstante" `x1000` gemacht und der
-    # Pruefer ist mit `unbekannte Konstante x1000` stehengeblieben.
-    # Eine einzelne Hexzahl (`"0x2000"`) ging weiter oben durch, ein
-    # Produkt wie `MAX_DEV * 0x1000` nicht.  Also werden Hexzahlen
-    # ersetzt, BEVOR nach Namen gesucht wird.
     ersetzt = re.sub(r"0[xX][0-9A-Fa-f]+",
                      lambda m: str(int(m.group(0), 16)), t)
     ersetzt = re.sub(r"[A-Za-z_][A-Za-z_0-9]*",
@@ -683,42 +401,16 @@ def main():
               # RUNDE AHCI -- der SATA-Treiber nimmt fuenf Seiten.
               "ahci.fi",
               "virtio.fi", "hv.fi",
-              # RUNDE K17 -- sonst pruefte die Karte den USB-Bereich gar
-              # nicht, und ein vergessener Versatz fiele nie auf.
               "xhci.fi", "usb.fi",
-              # RUNDE K14 -- sonst pruefte die Karte diese Dateien gar
-              # nicht, und ein vergessener Bereich fiele nie auf.
               "vfs.fi", "mnt.fi", "fat.fi", "procfs.fi", "devfs.fi",
-              # RUNDE FREMDFS -- ext4 und NTFS, je drei Seiten.
               "ext4.fi", "ntfs.fi", "exfat.fi",
               "part.fi", "ofs.fi",
-              # RUNDE OFS3 -- die Geometriewoerter stehen hier.
               "fs.fi",
-              # RUNDE BLECH -- die Wurzelgeraetewahl nimmt eine Seite,
-              # der EHCI-Treiber drei.
               "rootsel.fi", "ehci.fi", "blkdev.fi",
-              # RUNDE HID -- der Zerleger, der Eingabeweg und I2C-HID.
               "hidrep.fi", "hidin.fi", "i2chid.fi",
               # RUNDE GRAFIK-1 -- der Software-Rasterer.
               "r3dsoft.fi",
-              # RUNDE WAYLAND -- der lokale Socket und der geteilte
-              # Speicher. Fuenf Bereiche ab 0xF3000; ohne diese Zeile
-              # pruefte die Karte sie gar nicht.
               "unixsock.fi", "sys.fi"):
-        # RUNDE ARM hat hier zwei feste Orte eingetragen (`kernel/` und
-        # `kernel/arch/x86_64/`), weil `hv.fi` umgezogen war und die
-        # Schleife es nicht mehr fand -- KeyError 'hv.fi', mitten in der
-        # Abnahme.
-        #
-        # RUNDE O-STRUKTUR hat den Kern in Schichten gelegt, und damit
-        # waere dieselbe Liste zum dritten Mal falsch geworden
-        # (KeyError 'kstate.fi'). Statt einen dritten Ort einzutragen
-        # wird jetzt GESUCHT -- dann ueberlebt diese Karte auch den
-        # naechsten Umzug.
-        #
-        # `kernel/user/` und `kernel/app/` bleiben aussen vor: das sind
-        # eigene Programme, und Namen wie `nidx.fi` gibt es dort noch
-        # einmal.
         p = None
         for stamm, verz, namen in os.walk(kdir):
             verz[:] = [v for v in verz if v not in ("user", "app")]
@@ -756,13 +448,7 @@ def main():
                 "%s (%s:%s) 0x%X..0x%X"
                 % (n1, d1, k1, a1, e1, n2, d2, k2, a2, e2))
 
-    # 3. Vollstaendigkeit: jede `_OFF`-Konstante ist entweder ein Bereich
-    #    dieser Karte oder ausdruecklich als Nicht-kdata erklaert.  Ohne
-    #    diesen Punkt schuetzt die Karte nur das, woran jemand gedacht hat.
     benannt = {(d, k) for _, _, _, d, k in stuecke}
-    # RUNDE FREMDFS: die Unterversaetze der zwei Treiber sind KEINE
-    # eigenen kdata-Bereiche, sondern Stuecke IN ihrem Bereich -- sie
-    # sind oben (Punkt 5c) nachgerechnet und gelten damit als benannt.
     benannt |= {(d, k) for d, k, _ in EXT4_STUECKE}
     benannt |= {(d, k) for d, k, _ in NTFS_STUECKE}
     benannt |= {(d, k) for d, k, _ in EXFAT_STUECKE}
@@ -776,11 +462,6 @@ def main():
             fehler.append("%s:%s steht in keiner Karte -- Bereich oder "
                           "ausdruecklich kein kdata?" % (datei, k))
 
-    # 4. `fb.fi` fuehrt einen SPIEGEL von kstate.FB_OFF, weil es die
-    #    Konstante zur Uebersetzungszeit braucht und Firn keine Konstante
-    #    aus einem anderen Modul in einen `const` einsetzt.  Die beiden
-    #    muessen gleich sein, und das wird hier nachgerechnet statt
-    #    gehofft.
     if "fb.fi" in dateien:
         a = wert(dateien["kstate.fi"], "FB_OFF")
         b = wert(dateien["fb.fi"], "FB_OFF")
@@ -793,13 +474,6 @@ def main():
             fehler.append("FONT_OFF 0x%X liegt nicht in FB_OFF 0x%X + 0x%X"
                           % (f, b, n))
 
-    # 5b. RUNDE BLECH: dieselbe Nachrechnung fuer den EHCI-Bereich, und
-    #     zusaetzlich die eine Ausrichtung, an der ein EHCI-Treiber
-    #     stillschweigend falsch laeuft: PERIODICLISTBASE hat unten
-    #     zwoelf Bits, die es nicht gibt.  Eine Rahmenliste, die nicht
-    #     auf 4096 liegt, wird vom Controller an der falschen Stelle
-    #     gelesen -- und das sieht man erst daran, dass die Tastatur
-    #     nichts liefert.
     if "ehci.fi" in dateien:
         a0 = wert(dateien["ehci.fi"], "EHCI_OFF")
         e0 = a0 + wert(dateien["ehci.fi"], "EHCI_MAX")
@@ -829,10 +503,6 @@ def main():
                     "KOLLISION IN EHCI: %s:%s 0x%X..0x%X ueberschneidet "
                     "%s:%s 0x%X..0x%X" % (d1, k1, a1, e1, d2, k2, a2, e2))
 
-    # 5. RUNDE K17: die Untergliederung des USB-Bereichs.  Sie ist kein
-    #    eigener kdata-Bereich, aber sie kann sich SELBST ueberschneiden
-    #    und aus ihrem Bereich herauslaufen -- und beides faende sonst
-    #    niemand, weil die Karte oben nur EINEN Block sieht.
     if "xhci.fi" in dateien and "usb.fi" in dateien:
         a0 = wert(dateien["kstate.fi"], "K17_OFF")
         e0 = a0 + wert(dateien["kstate.fi"], "K17_MAX")
@@ -869,8 +539,6 @@ def main():
             if vor17 < e0:
                 print("       ---- frei 0x%05X..0x%05X" % (vor17, e0))
 
-    # 5c. RUNDE FREMDFS: die Untergliederung der zwei fremden
-    #     Dateisysteme, nach demselben Muster wie K17 und EHCI.
     for name, liste in (("EXT4", EXT4_STUECKE), ("NTFS", NTFS_STUECKE),
                         ("EXFAT", EXFAT_STUECKE)):
         datei0 = liste[0][0]
@@ -924,66 +592,6 @@ def main():
             print("       ---- frei 0x%05X..0x%05X (%d KiB)"
                   % (vor, kdata, (kdata - vor) // 1024))
 
-    # ------------------------------------------------ die Vektortabelle
-    #
-    # RUNDE K10 HAT DENSELBEN FEHLER EINE EBENE HOEHER GEMACHT.  Der
-    # Maustreiber bekam `VEC_MOUSE = 44` -- und 44 ist seit Runde K2 der
-    # Vektor des NVMe-Reglers.  Die Weiche in `trap.fi` ist eine Kette
-    # von `if`s; die Mausbedingung stand vor der NVMe-Bedingung, und
-    # damit gingen alle Abschlussmeldungen des Reglers an den
-    # Maustreiber.  `nvme: irqs=0` statt `irqs=5`, in jedem Lauf, auch
-    # OHNE das Wort `wm`.
-    #
-    # Die Regel ist dieselbe wie oben: DERSELBE Name darf mehrfach
-    # dastehen (`trap.fi` und `nvme.fi` fuehren VEC_NVME beide, weil
-    # Firn keine Konstante eines anderen Moduls in einen `const`
-    # einsetzt), ZWEI VERSCHIEDENE Namen duerfen nicht auf derselben
-    # Zahl liegen.
-    # ------------------------------------------- der Modusvektor
-    #
-    # RUNDE K17 HAT DENSELBEN FEHLER EINE DRITTE EBENE HOEHER GEFUNDEN,
-    # UND DIESMAL ZWEIMAL.
-    #
-    # (a) DIE KOLLISION.  `kstate.MODE` war EIN Wort, in dem jede Runde
-    #     ihre Schalter als Bit ablegte -- und die Runden K13, K14 und
-    #     K16 haben alle drei bei 1 << 31 angefangen.  Folge: `novfs`
-    #     schaltete auch die Rechtepruefung ab (M_NOPERM) und das
-    #     Stapelwachstum (M_NOSTACK), und die Gegenprobe `novfs` von
-    #     Runde K14 starb daran, dass der Uebersetzer in Ring 3 keine
-    #     Stapelseite mehr bekam.  Beide Zweige waren FUER SICH gruen;
-    #     die Kollision stand in keiner gemeinsamen Zeile.  Genau wie bei
-    #     `kdata` und bei der Vektortafel.
-    #
-    # (b) DAS ENDE DES VORRATS.  Nach dem Auseinanderziehen waren von 64
-    #     Bits 60 belegt und vier frei (38, 61, 62, 63); Runde K17
-    #     brauchte neun.  Ein zweites Wort haette die Rechnung nur
-    #     verschoben und gegen (a) nichts getan.
-    #
-    # SEIT RUNDE K17 IST DER MODUS EIN VEKTOR: eine Seite `kdata` mit
-    # MODE_WORDS Woertern, EIN WORT JE UNTERSYSTEM, und ein Modusname
-    # ist ein BITINDEX darueber:
-    #
-    #     Index = Wort * 64 + Bit
-    #
-    # Weil der Index das Wort enthaelt, prueft diese Karte den neuen Raum
-    # mit DERSELBEN Regel wie den alten -- derselbe Name darf mehrfach
-    # dastehen, ZWEI VERSCHIEDENE Namen duerfen nicht auf demselben Wert
-    # liegen -- und zusaetzlich mit zwei neuen:
-    #
-    #   * jeder Index bleibt unter MODE_WORDS * 64.  Eine vergessene alte
-    #     Maske (2147483648) faellt damit sofort auf, statt still in ein
-    #     Wort zu greifen, das es nicht gibt.
-    #   * die Seite des Vektors steht oben in BEREICHE, damit die
-    #     naechste Runde sie nicht als frei nimmt.
-    #
-    # NUR `kstate.fi` UND `kmain.fi`.  Seit Runde K17 stehen alle Namen
-    # des gemeinsamen Modus in `kstate.fi`; `kmain.fi` wird trotzdem
-    # weiter gelesen, damit eine dort neu angelegte zweite Liste sofort
-    # auffaellt -- genau diese zweite Liste war der Grund, warum ein zu
-    # enger `grep` die Kollisionen nicht fand.  Andere Module (`hw.fi`,
-    # `fb.fi`, `hv.fi`, `guard.fi`, `smp.fi`, `bootmod.fi`) fuehren ein
-    # EIGENES Wort mit eigenen Bits; dort faengt jede Runde zu Recht
-    # wieder bei 1 an.
     mode_words = wert(dateien["kstate.fi"], "MODE_WORDS")
     modi = {}
     for datei in ("kstate.fi", "kmain.fi"):
@@ -1028,9 +636,6 @@ def main():
               % (", ".join(str(w) for w in leer) or "keins"))
 
     vektoren = {}
-    # RUNDE ARM hat hier zwei Verzeichnisse aufgezaehlt; RUNDE
-    # O-STRUKTUR sucht den ganzen Baum ab (`trap.fi` fuehrt die
-    # Vektornummern und liegt unter arch/x86_64/).
     for pfad in alle_fi(kdir):
         datei = os.path.basename(pfad)
         for k, roh in konstanten(pfad).items():

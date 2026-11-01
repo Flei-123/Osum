@@ -120,15 +120,6 @@ class Hand(http.server.BaseHTTPRequestHandler):
         pfad = self.path.split("?")[0]
         name = os.path.basename(pfad)
         datei = os.path.join(WURZEL, name)
-        # RUNDE BETRIEB: EIN PFAD DARF AUCH EIN PFAD SEIN.
-        #
-        # Bis hierher liess dieser Dienst NUR den letzten Namensteil
-        # gelten -- das reichte fuer eine Auslieferung, die aus einem
-        # flachen Verzeichnis besteht. Eine Betriebsauslieferung haelt
-        # ALTE FASSUNGEN vor (`v/2/VERZEICHNIS`, `pakete/<sha>.opk`),
-        # und ein Geraet, das drei Fassungen hinterherhinkt, greift
-        # genau dorthin. Der flache Weg bleibt als Rueckfall, damit
-        # `tools/ota/run.sh` sich nicht um ein Oktett aendert.
         rel = pfad.lstrip("/")
         if rel and ".." not in rel.split("/"):
             tief = os.path.join(WURZEL, rel)
@@ -174,14 +165,6 @@ class Hand(http.server.BaseHTTPRequestHandler):
 
         geschrieben = 0
         kgrenze = KURZ.get(name, KURZ.get(os.path.basename(name)))
-        # DIE STELLE, AN DER DIE LEITUNG REISST, IST EINE STELLE IN DER
-        # DATEI -- nicht eine Anzahl Oktette dieser einen Antwort. Sonst
-        # kaeme ein Geraet, das ab 20000 wieder ansetzt, beim zweiten
-        # Versuch einfach durch (13787 Oktett Rest sind ja weniger als
-        # 20000), und die Gegenstelle waere nach einer Wiederaufnahme
-        # heil -- eine Leitung, die von selbst besser wird, misst nichts.
-        # Absolut gerechnet reisst sie IMMER an derselben Stelle, und
-        # der erste Lauf scheitert wirklich.
         with open(datei, "rb") as f:
             f.seek(von)
             while geschrieben < laenge:

@@ -80,9 +80,6 @@ else
 fi
 
 cat > "$TMPD/rechte.conf" <<EOFC
-# Die Rechteliste des PRUEFSTANDS. Sie liegt NICHT im Abbild -- sie
-# kommt auf der zweiten Platte herein und wird mit \`jarvisd -c\`
-# genommen. Das Abbild bleibt unangetastet.
 server         = 10.0.2.2:$SRVPORT
 servername     = jarvis.test
 roots        = /mnt/ca.pem

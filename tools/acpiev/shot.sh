@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/acpiev/shot.sh -- DIE BILDER DER RUNDE.
-#
-#   bash tools/acpiev/shot.sh <bauverz> <ausgabe.png> <was> [sekunden]
-#
-# `was` ist einer von:
-#   leiste   der Schreibtisch mit dem Akku in der Leiste (77 %)
-#   deckel   Deckel zuklappen -> der Sperrbildschirm muss kommen
-#   taste    die Einschalttaste druecken -> das Energiemenue
-#
-# Der Weg ist der aus `tools/anmeldung/shot.sh`; hier steht nur, WAS
-# ausgeloest wird und WANN das Bild entsteht.
-#
-# QEMU 7.2 hat weder Deckel noch Akku. `tools/acpiev/asl/laptop.aml`
-# baut beide nach und wird mit `-acpitable` eingehaengt; ausgeloest
-# wird mit den Woertern `evfake`/`evlid`, weil es an dieser Maschine
-# keine Hardware gibt, die das GPE-Bit zieht. Die EINSCHALTTASTE ist
-# davon ausgenommen: die kann QEMU wirklich, ueber `system_powerdown`
-# am Monitor, und genau so wird sie hier gedrueckt.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -69,7 +50,6 @@ Image.open(sys.argv[1]).save(sys.argv[2])
 PY
 }
 
-# Warten, bis der Schreibtisch steht.
 for _ in $(seq 1 400); do
     grep -qa 'acpiev: ready=' "$W/serial.txt" 2>/dev/null && break
     kill -0 $QP 2>/dev/null || break
@@ -77,8 +57,6 @@ for _ in $(seq 1 400); do
 done
 sleep 16
 
-# DAS BILD VORHER -- ohne das ist "danach sieht es anders aus" keine
-# Messung, sondern eine Behauptung.
 mon "screendump $W/vor.ppm"; sleep 1
 [ -f "$W/vor.ppm" ] && wandeln "$W/vor.ppm" "${OUT%.png}-vorher.png"
 
@@ -87,8 +65,6 @@ case "$WAS" in
         : # nichts ausloesen, das Bild ist der Zustand
         ;;
     deckel)
-        # Der Kern klappt den Deckel selbst zu (Wort `evlid`), weil
-        # QEMU kein Deckelgeraet hat. Gewartet wird auf die Zeile.
         for _ in $(seq 1 200); do
             grep -qa 'lid closed' "$W/serial.txt" 2>/dev/null && break
             sleep 0.1
@@ -96,8 +72,6 @@ case "$WAS" in
         sleep 4
         ;;
     taste)
-        # DIE ECHTE TASTE. `system_powerdown` setzt PWRBTN_STS und
-        # zieht den SCI -- das ist kein Nachbau.
         mon "system_powerdown"
         sleep 6
         ;;

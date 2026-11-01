@@ -1,24 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/clockwork/uhrprobe.sh -- TICKT DIE UHR OHNE EINGABE?
-#
-# Der Unterschied zu `messen.sh`: dort geht es um die ZAHLEN auf der
-# seriellen Leitung, hier um das BILD. Und zwar um genau die Frage, die
-# Justin gestellt hat -- bewegen sich die ZIFFERN, wenn niemand die
-# Maus anfasst?
-#
-# Deshalb wird nicht zweimal fotografiert, sondern SECHSMAL im Abstand
-# von je drei Sekunden, und zwar ERST, wenn der Schreibtisch fertig
-# aufgebaut ist. Zwei Bilder aus der Aufbauphase unterscheiden sich
-# immer -- da malt noch alles zum ersten Mal, und ein Unterschied
-# beweist dann gar nichts.
-#
-# Verglichen wird NUR DER STREIFEN, in dem die Uhr sitzt: die unteren
-# Zeilen am rechten Rand. Aendert er sich von Bild zu Bild, laeuft die
-# Uhr aus eigener Kraft. Aendert er sich nicht, steht sie -- und genau
-# das ist Justins Foto.
-#
-#   bash tools/clockwork/uhrprobe.sh <baudir> <ergebnisdir> [smp] [n] [abstand]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -44,10 +24,6 @@ rm -f "$OUT" "$SOCK"
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 > "$ERG/qemu.log" 2>&1 ) &
 QPID=$!
 
-# WARTEN, BIS DER SCHREIBTISCH STEHT. Die Leiste meldet ihre erste
-# Pulszeile nach 200 Runden, also nach rund fuenf Sekunden Betrieb --
-# dann ist alles einmal gemalt und was sich danach bewegt, bewegt sich
-# im laufenden Betrieb.
 i=0
 while [ $i -lt 1600 ]; do
     grep -qa 'taskbar: round=' "$OUT" 2>/dev/null && break
@@ -68,8 +44,6 @@ s.close()
 PY
 }
 
-# ============ UND JETZT WIRD NICHTS EINGEGEBEN. Keine Maus, keine
-# Taste -- nur fotografiert.
 for k in $(seq 1 "$N"); do
     schuss "b$k"
     echo "  Bild $k"
@@ -91,8 +65,6 @@ if len(ims) < 2:
 W, H = ims[0][1].size
 print("Bildgroesse: %dx%d, %d Bilder" % (W, H, len(ims)))
 
-# Der Uhrstreifen: die unteren 90 Zeilen, rechte Haelfte. Die Leiste ist
-# height=40 bei Skala 2, also 80 Zeilen; 90 gibt Rand.
 box = (W // 2, H - 90, W, H)
 def cut(im): return im.crop(box)
 
@@ -110,8 +82,6 @@ for k, im in ims:
     vor = c
     c.save(os.path.join(erg, "uhr-b%d.png" % k))
 
-# Und der GANZE Schirm, als Gegenprobe: wenn sich der ganze Schirm
-# aendert, malt etwas zu viel.
 print("\n== DER GANZE SCHIRM (Gegenprobe gegen Vollbild-Malerei) ==")
 vor = None
 for k, im in ims:

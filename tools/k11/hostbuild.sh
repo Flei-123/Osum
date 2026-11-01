@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/k11/hostbuild.sh -- dieselben Programme fuer den WIRT bauen.
-# Werkbank, keine Abnahme: siehe den Kopf von tools/k11/hostcrt.s.
-#   bash tools/k11/hostbuild.sh find sed diff ...   -> /tmp/k11host/<name>
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export FIRNLIB="$(pwd)/lib"

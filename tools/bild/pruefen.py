@@ -44,8 +44,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from PIL import Image
 
-# Welche geholte Datei kommt aus welcher Quelle, und wie streng?
-#   (geholt, quelle, art, qualitaet)
 FAELLE = [
     ("s-gif.png", "g-tafel.gif", "png", None),
     ("s-lace.png", "g-lace.gif", "png", None),
@@ -55,9 +53,6 @@ FAELLE = [
     ("s-gif.jpg", "g-tafel.gif", "jpeg", 90),
 ]
 
-# Die Schranken. `MITTEL_LIBJPEG` ist die wichtige: so weit darf mein
-# Kodierer von libjpeg abweichen, bei gleicher Qualitaet und gleichem
-# Bild.
 MITTEL_LIBJPEG = 6.0
 MAX_LIBJPEG = 40
 GROESSE_FAKTOR = 1.35
@@ -120,7 +115,6 @@ def main(argv):
         pm, po = punkte(mein), punkte(orig)
         worst, mittel, nz, n = abstand(pm, po)
         if art == "png":
-            # Verlustfrei: jede Zahl muss stimmen.
             if worst == 0:
                 print("OK    %-12s %dx%d PNG verlustfrei, Abweichung 0 "
                       "(%d Bildpunkte)" % (name, mein.size[0],
@@ -131,7 +125,6 @@ def main(argv):
                       % (name, worst, nz, n))
                 schlecht += 1
             continue
-        # JPEG: gegen libjpeg bei derselben Qualitaet.
         b = io.BytesIO()
         orig.convert("RGB").save(b, "JPEG", quality=q, subsampling=0)
         libp = punkte(Image.open(io.BytesIO(b.getvalue())))

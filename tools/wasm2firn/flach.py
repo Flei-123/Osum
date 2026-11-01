@@ -1,71 +1,3 @@
-# SPDX-License-Identifier: GPL-2.0-only
-#
-# tools/wasm2firn/flach.py -- RUNDE SCHLEUSE-3
-#
-# EIN flacher Verteiler je Funktion, statt geschachtelter Bloecke.
-#
-# ====================================================================
-# WARUM
-# ====================================================================
-#
-# firncs `escape`-Durchgang ist EXPONENTIELL in der Schachtelungstiefe
-# (gemessen in FIRN-ESCAPE-TIEFE.md: Faktor ~2 je Ebene). SQLite
-# erreichte mit der geschachtelten Erzeugung 25 Ebenen; der Bau lief
-# ueber 1,5 Stunden und war nicht fertig.
-#
-# Die Loesung ist die, die jeder WASM-nach-Quelltext-Uebersetzer ohne
-# `goto` nimmt (Emscriptens Relooper, wasm2c ohne goto): der ganze
-# Funktionsrumpf wird EIN Zustandsautomat.
-#
-#     var fall: u64 = 0
-#     while true {
-#         match fall {
-#             0 => { ...Stueck 0...  fall = 3  continue }
-#             1 => { ...Stueck 1...  break }
-#             ...
-#             _ => { break }
-#         }
-#     }
-#
-# Tiefe: `while` (1) + `match` (2) + Arm (3). FERTIG. Egal wie tief das
-# WASM schachtelt.
-#
-# ====================================================================
-# DIE UEBERSETZUNG
-# ====================================================================
-#
-# WASM-Kontrollfluss ist bereits strukturiert -- das macht es einfach.
-# Jede Blockebene bekommt ZWEI Marken:
-#
-#   * `beginn` -- die Nummer des Stuecks, das ihren Rumpf anfaengt
-#   * `ende`   -- die Nummer des Stuecks, das HINTER ihrem `end` steht
-#
-# Damit ist `br k` in beiden Faellen dasselbe: eine Zuweisung.
-#
-#   * `br k` auf einen `block` -> `fall = <ende von k>`
-#   * `br k` auf eine `loop`   -> `fall = <beginn von k>`
-#
-# Genau der Unterschied, an dem der geschachtelte Erzeuger in RUNDE
-# SCHLEUSE-2 gestorben ist (Fehler 5) -- hier ist er eine Zeile und
-# nicht zu verwechseln.
-#
-# `if`/`else` braucht keinen Sonderfall: die Bedingung waehlt zwischen
-# zwei Stueck-Nummern.
-#
-# ====================================================================
-# DER STAPEL
-# ====================================================================
-#
-# Der WASM-Operandenstapel liegt wie bisher in Variablen `s0..sN`, und
-# die statische Stapelhoehe ist an jeder Stelle bekannt. Weil die
-# Stuecke nur ueber ihre Nummer verbunden sind, muessen die
-# Stapelvariablen ueber einen Stueckwechsel HINWEG gelten -- sie sind
-# ohnehin Funktionsvariablen, also stimmt das von selbst.
-#
-# Ein Sprung, der einen Wert mitnimmt (`br` aus einem Block mit
-# Ergebnistyp), muss den Wert an die Stelle legen, an der ihn das
-# Zielstueck erwartet. Das ist die einzige Stelle, an der wirklich
-# umkopiert wird.
 
 from wasm2firn import (Leser, blocktyp, Fehler)
 
@@ -75,8 +7,8 @@ class Ebene:
 
     def __init__(self, art, beginn, ende, sp_ein, res):
         self.art = art          # 'block' | 'loop' | 'if' | 'func'
-        self.beginn = beginn    # Stueck-Nummer des Rumpfanfangs
-        self.ende = ende        # Stueck-Nummer HINTER dem `end`
+        self.beginn = beginn
+        self.ende = ende
         self.sp_ein = sp_ein    # Stapelhoehe beim Betreten
         self.res = res          # Ergebnistypen
         self.hat_else = False
@@ -102,17 +34,12 @@ class FlachErzeuger:
         m = self.m
         self.res = res
 
-        # Die Stuecke: Nummer -> Liste von Zeilen.
         self.stuecke = {}
         self.n_stueck = 0
         self.jetzt = self.neues_stueck()
 
-        # Stuecke, die tatsaechlich angesprungen werden. Alles andere
-        # faellt am Ende weg -- sonst stuenden Hunderte leerer Arme da.
         self.gebraucht = set()
 
-        # Die aeusserste Ebene ist die Funktion: ein `br` darauf ist
-        # ein `return`.
         ende_funk = self.reservieren()
         self.stapel = [Ebene('func', 0, ende_funk, 0, res)]
 
@@ -127,22 +54,11 @@ class FlachErzeuger:
             if op == 0x0B:
                 b = self.stapel.pop()
                 if b.art == 'func':
-                    # Faellt der Rumpf unten heraus, geht es beim
-                    # Ausgang weiter -- NICHT einfach `break`, sonst
-                    # verliert die Funktion ihren Rueckgabewert.
                     if not unerreichbar:
                         self.spring(b.ende)
                     break
-                # REIHENFOLGE ZAEHLT: erst den gerade laufenden Zweig
-                # abschliessen, DANN den fehlenden else-Zweig
-                # nachtragen. Andersherum landet der Abschluss des
-                # then-Zweigs im else-Stueck -- und der then-Zweig
-                # faellt aus dem Verteiler heraus (Fehler in `if2`,
-                # Fall $d).
                 if not unerreichbar:
                     self.spring(b.ende)
-                # Ein `if` OHNE else: der fehlende Zweig springt
-                # unmittelbar hinter das `end`.
                 if b.art == 'if' and not b.hat_else:
                     self.setz_stueck(b.else_stueck)
                     self.spring(b.ende)
@@ -234,10 +150,8 @@ class FlachErzeuger:
                 unerreichbar = True
                 continue
 
-            # ------------- alles Uebrige: der erprobte Befehlsuebersetzer
             sp, unerreichbar = self.gewoehnlich(l, op, sp)
 
-        # Der Ausgang der Funktion.
         self.setz_stueck(ende_funk)
         self.rueckgabe(sp)
         return self.ausgeben()
@@ -308,7 +222,6 @@ class FlachErzeuger:
             return
         nr = self.zielnummer(ziel)
         self.gebraucht.add(nr)
-        # Muss ein Wert mitwandern, geht das nur im Zweig.
         schiebe = []
         if ziel.res and ziel.art != 'loop':
             n = len(ziel.res)
@@ -334,7 +247,6 @@ class FlachErzeuger:
 
         Das ist die Stelle, an der der flache Verteiler am meisten
         gewinnt: `yy_reduce` in SQLite hat 276 Ziele."""
-        # Erst alle Werte einsammeln, dann EINE Kette flacher `if`.
         for i, lab in enumerate(ziele):
             ziel = self.stapel[len(self.stapel) - 1 - lab]
             self.z('if %s == %d {' % (wahl, i))
@@ -419,8 +331,6 @@ class FlachErzeuger:
             o.append('   %d => {' % nr)
             for z in zeilen:
                 o.append('    ' + z)
-            # Ein Stueck, das nicht selbst springt, faellt ans Ende der
-            # Funktion. Das kann nur beim Ausgang vorkommen.
             if not zeilen or not (zeilen[-1].startswith('continue')
                                   or zeilen[-1].startswith('return')
                                   or zeilen[-1].lstrip().startswith('return')):

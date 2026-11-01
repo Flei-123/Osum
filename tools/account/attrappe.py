@@ -42,9 +42,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 GEHEIM = b"attrappe-geheimnis-nur-fuer-den-testaufbau"
 
-# Die Konten des Nachbaus. `justin@example.test` gibt es ZWEIMAL -- in
-# zwei Organisationen, mit VERSCHIEDENEN Daten. Das ist Fall (d) des
-# Auftrags, und ohne zwei Eintraege waere er nicht messbar.
 KONTEN = {
     ("justin@example.test", "alpha"): {
         "id": "1001", "username": "justin", "passwort": "richtig",
@@ -144,9 +141,6 @@ class Griff(BaseHTTPRequestHandler):
             return h[7:].strip()
         return None
 
-    # Der Keks wird MITGESCHRIEBEN und von den Xoffi-Wegen ABSICHTLICH
-    # NIE AUSGEWERTET. Ein Nachbau, der ihn akzeptiert, koennte nicht
-    # messen, dass das Geraet ohne ihn auskommt.
     def do_GET(self):
         self._mitschreiben()
         p = self.path.split("?")[0]
@@ -197,9 +191,6 @@ class Griff(BaseHTTPRequestHandler):
         if p == "/api/login":
             return self.jarvis_login(b)
         if p == "/api/logout":
-            # JARVIS loescht NUR den Keks -- das ausgestellte JWT bleibt
-            # gueltig. Der Nachbau tut dasselbe, damit der Bericht die
-            # Wahrheit sagen kann und nicht die Wunschfassung.
             return self._antwort(200, {"ok": True})
         if p == "/konto/anmelden":
             return self.eigen_login(b)
@@ -245,16 +236,12 @@ class Griff(BaseHTTPRequestHandler):
         treffer = [o for (k, o) in KONTEN if k == kennung]
         if not org:
             if len(treffer) > 1:
-                # ES WIRD GEFRAGT. Genau hier waere Raten ein
-                # Mandantenleck.
                 return self._antwort(409, {"success": False,
                                            "organisations": sorted(treffer)})
             org = treffer[0] if treffer else "alpha"
         konto = KONTEN.get((kennung, org))
         if not konto or konto["passwort"] != (b.get("password") or ""):
             self.fehlschlag(kennung)
-            # DIESELBE ANTWORT FUER "gibt es nicht" UND "falsches
-            # Kennwort". Ein Unterschied waere ein Kontoverzeichnis.
             return self._antwort(401, {"success": False,
                                        "detail": "Anmeldung fehlgeschlagen"})
         if konto.get("mfa"):

@@ -114,10 +114,6 @@ def main():
     im.save(p("g-lace.gif"), interlace=True)
     sag("g-lace.gif", "64x48, verschachtelt")
 
-    # AUSDRUECKLICH NICHT VERSCHACHTELT. Pillow setzt das Merkmal von
-    # sich aus bei fast jedem Bild -- ohne diese Datei wuerde der
-    # gerade Weg (Zeile fuer Zeile) NIE gemessen, und ein Fehler darin
-    # bliebe unentdeckt.
     im = bunt_palette(36, 28, 32)
     im.save(p("g-gerade.gif"), interlace=False)
     sag("g-gerade.gif", "36x28, NICHT verschachtelt")

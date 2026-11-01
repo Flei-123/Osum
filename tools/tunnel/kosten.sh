@@ -1,46 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/tunnel/kosten.sh -- WAS DER TUNNEL KOSTET, WENN KEINER LAEUFT.
-#
-# Justins Vorgabe zum Nachtrag: der Kernelteil „darf ohne das Paket
-# NICHTS kosten -- weder Speicher noch Rechenzeit". Das ist eine
-# Behauptung, bis jemand misst. Drei Kosten, drei Messungen, und jede
-# hat ihre eigene Falle:
-#
-#   ABBILD      Zwei Abbilder, eines mit `kernel/wg.fi` und eines mit
-#               `kernel/wg-aus.fi`. Das ist die einzige Kosten, die
-#               bleibt, solange der Tunnel mituebersetzt wird: Osum hat
-#               keine nachladbaren Module, ein Multiboot-Abbild ist ein
-#               Stueck.
-#
-#               DIE FALLE, und sie hat diese Messung einmal um mehr als
-#               das Doppelte verfaelscht: Firn legt an JEDER Stelle, an
-#               der es bei Ueberlauf anhaelt, den DATEIPFAD als Text ins
-#               Abbild. Derselbe Kern, aus einem laengeren Verzeichnis
-#               uebersetzt, ist deshalb groesser -- gemessen 2 097 188
-#               gegen 2 248 844 Oktette, ein Unterschied von 151 656
-#               Oktetten fuer nichts als den Pfad. Ein Vergleich ist nur
-#               dann einer, wenn BEIDE Abbilder denselben Weg gehen;
-#               `tools/build-kernel.sh` uebersetzt seit dem Nachtrag
-#               immer aus einer Kopie, damit das gilt.
-#
-#   SPEICHER    NICHT zwei Abbilder, sondern EIN Abbild zweimal: einmal
-#               mit `wgpriv=` auf der Kommandozeile und einmal ohne.
-#               Nur so ist die Differenz der Tunnel und nicht der
-#               Uebersetzer. Gezaehlt werden die freien Seitenrahmen AM
-#               ENDE des Laufs (`mm: frei_f=`), denn beim Hochlauf hat
-#               `configure` noch nicht gelaufen und die Antwort waere
-#               immer null.
-#
-#   RECHENZEIT  Wieder EIN Abbild zweimal, mit und ohne `wgpriv=`,
-#               derselbe Durchsatztest. Wenn der Haken im Paketpfad
-#               etwas kostet, steht es hier. Die Laeufe wechseln sich ab
-#               und laufen nicht in zwei Bloecken -- eine Maschine, auf
-#               der vierzehn andere Runden bauen, wird im Laufe einer
-#               Minute messbar langsamer, und zwei Bloecke haetten das
-#               dem Tunnel zugeschrieben.
-#
-#   bash tools/tunnel/kosten.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh          # $QEMU_X86, $OSUM_QEMU_ACCEL
@@ -57,8 +15,6 @@ command -v qemu-system-x86_64 >/dev/null || { echo "qemu fehlt"; exit 0; }
 
 echo "== was der Tunnel kostet, wenn keiner laeuft =="
 
-# ---------------------------------------------------------------- Abbild
-# Beide aus demselben TMPDIR, sonst siehe die Falle oben.
 export TMPDIR="$TMPD"
 ./tools/build-kernel.sh "$TMPD/mit.mb"  >/dev/null 2>&1 || { echo "Bau mit fehlgeschlagen"; exit 1; }
 ./tools/build-kernel.sh "$TMPD/ohne.mb" --ohne-tunnel >/dev/null 2>&1 || { echo "Bau ohne fehlgeschlagen"; exit 1; }
@@ -71,7 +27,6 @@ note "Abbild ohne Tunnel $S_OHNE Oktette"
     && ok "der Tunnel kostet $DIFF Oktette Abbild ($PCT %) -- und --ohne-tunnel nimmt sie ganz weg" \
     || bad "das Abbild ohne Tunnel ist nicht kleiner ($DIFF)"
 
-# Gegenprobe zur Falle: derselbe Kern aus einem laengeren Pfad.
 LANG_D="$TMPD/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 mkdir -p "$LANG_D"
 TMPDIR="$LANG_D" ./tools/build-kernel.sh "$TMPD/lang.mb" >/dev/null 2>&1
@@ -82,7 +37,6 @@ if [ -f "$TMPD/lang.mb" ]; then
 fi
 export TMPDIR="$TMPD"
 
-# ------------------------------------------------- ein Lauf, ein Abbild
 PRIV=$(python3 -c "import os;k=bytearray(os.urandom(32));k[0]&=248;k[31]=(k[31]&127)|64;print(bytes(k).hex())")
 PEER=$(python3 -c "import os;print(os.urandom(32).hex())")
 WGARGS="wgpriv=$PRIV wgpeer=$PEER wgep=10.5.0.1:51820 wgallow=10.91.0.2/32 \
@@ -109,12 +63,6 @@ else
     bad "die Zeile mm: frei_f= fehlt"
 fi
 
-# ------------------------------------------------------------ Rechenzeit
-# nsvc=4: Osum baut die Verbindung SELBST auf und misst -- dafuer
-# braucht es keinen Gegenpart im Wirt, der die Messung verrauschen
-# koennte. Ohne Ziel schlaegt der Verbindungsaufbau fehl; gemessen wird
-# hier nur, wie viele Runden `netd` in der Zeit durch den Paketpfad
-# schafft (`nic: pumps=`), und genau das ist der Preis des Hakens.
 AUS_R=(); AN_R=()
 for i in $(seq 1 $RUNDEN); do
     lauf "$TMPD/ohne.mb" "" "$TMPD/cpu_aus$i.log" "nsvc=0 nwait=1500"

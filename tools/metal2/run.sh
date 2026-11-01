@@ -132,16 +132,8 @@ p = d.split(b'\n', 3); W, H = map(int, p[1].split()); px = p[3]
 wx, wy, ww = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 def at(x, y):
     i = (y * W + x) * 3; return px[i:i+3]
-# Rand 4, Titelleiste 44 (uisc 2), Zelle 20 breit: Spalte 22 beginnt bei 4 + 22*20
 x0 = wx + 4 + 22 * 20; x1 = wx + 4 + ww - 8
 y0 = wy + 44 + 4; y1 = min(wy + 44 + 700, H - 100)
-# RUNDE BLECH2, KORREKTUR DER MESSUNG: das Terminal malt seine Zeilen
-# ABWECHSELND auf zwei Untergruende (Streifen). "ungleich EINER
-# Hintergrundfarbe" zaehlt darum jede zweite Zeile komplett mit und
-# meldet 73920 Tintenpunkte, wo gar kein Text steht -- das Bild zeigt
-# nur kurze `sh:`-Zeilen. Gezaehlt wird deshalb gegen die BEIDEN
-# Streifenfarben, und die holt sich die Messung aus derselben Spalte
-# ganz rechts, wo nie Text stehen kann.
 bgs = set()
 for y in range(y0, y1):
     bgs.add(at(x1 - 2, y))

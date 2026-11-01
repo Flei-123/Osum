@@ -1,49 +1,5 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dual/abnahme.sh -- DIE ABNAHME DER RUNDE DUALBOOT.
-#
-#   bash tools/dual/abnahme.sh [bauverzeichnis] [ausgabeverzeichnis]
-#
-# ==================================================================
-# DIE FRAGE, UM DIE ES GEHT
-# ==================================================================
-#
-# Kann OrientOS sich neben ein vorhandenes System legen, OHNE dessen
-# Daten anzufassen? Das ist keine Frage, die sich mit "das Programm
-# meldet fertig" beantworten laesst. Ein Installationsprogramm, das
-# nebenbei eine fremde Partition zerstoert, meldet sich genauso fertig.
-#
-# Deshalb diese Kette, und die Pruefsummen sind nicht verhandelbar:
-#
-#   1. EINE PLATTE, AUF DER SCHON JEMAND WOHNT. Gebaut mit `sgdisk`,
-#      also einem FREMDEN Werkzeug: GPT, eine ESP mit einer Datei
-#      darin, eine grosse Datenpartition, dahinter freier Platz.
-#      Je Partition eine sha256.
-#
-#   2. INSTALLIEREN -- in den freien Platz, nicht auf die ganze Platte.
-#
-#   3. DIE FREMDEN PARTITIONEN SIND BYTEWEISE UNVERAENDERT. Dieselbe
-#      Rechnung wie in Glied 1, und sie muss dasselbe ergeben. Das ist
-#      die eigentliche Zusage dieser Runde.
-#
-#   4. DIE DATEI IN DER ESP IST NOCH DA. Die ESP wurde MITBENUTZT und
-#      nicht neu geschrieben -- genau der Punkt, an dem ein schlechtes
-#      Installationsprogramm fremde Bootlader loescht.
-#
-#   5. DIE GPT IST GUELTIG, mit einem FREMDEN Werkzeug gegengelesen
-#      (`sgdisk -v`) und zusaetzlich mit einem unabhaengigen eigenen
-#      Pruefer, der beide CRC32 selbst rechnet.
-#
-#   6. DAS BOOTMENUE BIETET BEIDE EINTRAEGE AN.
-#
-#   7. ORIENTOS STARTET VON DER PLATTE -- ohne Installationsmedium.
-#
-# GEGENPROBE (Glied 8): dieselbe Platte, aber ohne ausreichend freien
-# Platz. Dann MUSS das Programm sauber abbrechen und die Platte
-# unveraendert lassen. Ohne diese Gegenprobe waere nicht gezeigt, dass
-# die Pruefungen wirklich greifen -- ein Programm, das immer schreibt,
-# haette bis hierher genauso gruen ausgesehen.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export BOOT_KERNEL_COPY=1   # r1223: QEMU -kernel/-initrd has no boot medium; the installer needs /boot/osum.mb in the root
@@ -62,9 +18,6 @@ titel() { printf '\n=== %s\n' "$*"; }
 [ -f "$BAU/osum.mb" ]  || { echo "== $BAU/osum.mb fehlt"  >&2; exit 1; }
 [ -f "$BAU/root.img" ] || { echo "== $BAU/root.img fehlt" >&2; exit 1; }
 
-# Die Lage der fremden Partitionen -- dieselben Zahlen wie in
-# fremdplatte.sh. Sie stehen hier noch einmal, weil die Pruefsummen
-# genau diese Bereiche lesen muessen.
 ESP_START=2048;   ESP_SEK=$((64 * 2048))
 DAT_START=133120; DAT_SEK=$((128 * 2048))
 
@@ -115,7 +68,6 @@ echo "   was das Programm gesehen und getan hat:"
 grep -aE '^installer: (disk|ready|tafel=|part |frei |fremdesp=|weg=|neuepart|esp=|menue=|step=|fertig|FEHLER|NEBENNEIN|bei=)' \
     "$OUT/ser.txt" 2>/dev/null | head -30 | sed 's/^/        /'
 
-# Hat es die Tafel ueberhaupt gelesen?
 grep -qa 'installer: table=2' "$OUT/ser.txt" \
     && ok "es hat die fremde Partitionstafel gelesen (2 Partitionen)" \
     || bad "die fremde Partitionstafel wurde nicht gelesen"
@@ -143,9 +95,6 @@ else
     bad "die fremde Datenpartition wurde veraendert -- ${VOR_DAT:0:16}… -> ${NACH_DAT:0:16}…"
 fi
 
-# DIE ESP DARF SICH AENDERN -- dort legt OrientOS ja seine Dateien ab.
-# Was NICHT passieren darf, ist, dass die fremden Dateien verschwinden.
-# Deshalb wird hier nicht die Summe verglichen, sondern der INHALT.
 if [ "$VOR_ESP" = "$NACH_ESP" ]; then
     echo "   (die ESP ist unveraendert -- dann hat ${MARKE_PRODUKT} dort nichts abgelegt)"
 fi
@@ -163,7 +112,6 @@ grep -qi 'BCD' "$OUT/esp-fremd.txt" \
     && ok "die fremde Datei BCD in der ESP ist noch da" \
     || bad "die fremde Datei BCD ist verschwunden"
 
-# Und liegt OrientOS in SEINEM eigenen Verzeichnis?
 mdir -i "$OUT/platte.img@@$ESPOFF" ::"/EFI/${MARKE_KURZ}" > "$OUT/esp-osum.txt" 2>&1
 sed 's/^/        /' "$OUT/esp-osum.txt" | head -8
 grep -qi 'osum' "$OUT/esp-osum.txt" \
@@ -189,7 +137,6 @@ grep -qi 'OSUM' "$OUT/gpt-nachher.txt" \
     && ok "die neue Partition heisst OSUM" \
     || bad "keine Partition namens OSUM"
 
-# Der zweite, unabhaengige Pruefer -- er rechnet beide CRC32 selbst.
 python3 tools/dual/tafelpruef.py "$OUT/platte.img" > "$OUT/tafelpruef.txt" 2>&1
 TPRC=$?
 sed 's/^/        /' "$OUT/tafelpruef.txt"

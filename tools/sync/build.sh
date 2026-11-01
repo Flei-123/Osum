@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/sync/build.sh -- die Programme dieser Runde in ein Verzeichnis,
-# damit der Laeufer und ein Mensch, der von Hand nachsieht, denselben
-# Befehl benutzen.
-#
-#   bash tools/sync/build.sh <zielverzeichnis> [stufe] [programm ...]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 ROOT=$(pwd)
-# FIRNLIB darf von aussen gesetzt sein: die Gegenproben (j) bauen gegen
-# eine KOPIE des Bibliotheksbaums, damit kein Test je die echten Quellen
-# im Arbeitsbaum anfasst -- ein abgebrochener Lauf soll nichts kaputt
-# zuruecklassen.
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
-# USRC ebenso (A-028): das Verzeichnis, aus dem die Programme kommen.
-# Ein Programm findet `import ulib`, `import kbund` nur neben sich selbst,
-# FIRNLIB hilft da nicht. Die Gegenproben (j3, j4) legen deshalb eine
-# KOPIE von kernel/user/ an, flicken DORT und bauen mit USRC=<kopie>.
-# Der Quelltext im Baum wird von keinem Laeufer mehr angefasst.
 USRC="${USRC:-kernel/user}"
 
 OUT=${1:?zielverzeichnis fehlt}

@@ -58,20 +58,6 @@ def main():
     ap.add_argument("--schwelle", type=int, default=64)
     ap.add_argument("--nur-rms", action="store_true")
     ap.add_argument("--luecke-still", action="store_true")
-    # RUNDE TON-2: NUR EIN FENSTER MESSEN, in Millisekunden ab dem
-    # ersten Ton.
-    #
-    # WARUM ES DAS BRAUCHT: laufen zwei Programme nebeneinander und
-    # endet eines frueher, steht am Dateiende die STILLE des laengeren
-    # allein -- `catch_up` in kernel/audio.fi holt den Schreibzeiger
-    # dann auf die Position und nullt den Rest, und das ist der
-    # dokumentierte Entwurf und kein Fehler. Ueber die GANZE Datei
-    # gemessen ist dieses Ende eine "Luecke", die keine ist. Wer die
-    # Mischung pruefen will, misst das Fenster, in dem BEIDE spielen.
-    #
-    # Dasselbe umgekehrt fuer einen kurzen Systemklang: 180 ms in
-    # einer 5-Sekunden-Datei mittelt eine Auswertung ueber alles auf
-    # ein Dreissigstel herunter.
     ap.add_argument("--von-ms", type=int, default=0)
     ap.add_argument("--bis-ms", type=int, default=0)
     a = ap.parse_args()
@@ -105,8 +91,6 @@ def main():
     seg = links[lo:hi + 1]
     print("nutz=%d ab=%d" % (len(seg), lo))
 
-    # Die Luecken.  Eine Nullstrecke, die laenger ist als die Schwelle,
-    # ist keine Nulldurchgangsfolge eines Sinus mehr, sondern ein Loch.
     luecken = []
     lauf = 0
     start = 0
@@ -122,16 +106,8 @@ def main():
     still = sum(x[1] for x in luecken)
     print("gaps=%d still=%d" % (len(luecken), still))
 
-    # Was IN den Luecken steht.  Bei einer Luecke aus echter Stille ist
-    # das null; bei einem Regler, der den Ring noch einmal abspielt,
-    # steht dort das alte Signal.  Gemessen wird um die Luecke herum,
-    # nicht darin -- darin ist es per Definition null.  Also: das
-    # Stueck ZWISCHEN zwei Luecken, das kuerzer ist als ein
-    # Ringdurchlauf, gilt als Rest.
     rest = 0
     if a.luecke_still and luecken:
-        # der Bereich zwischen dem Ende der ersten und dem Anfang der
-        # letzten Luecke, wenn er kein Nutzsignal traegt
         for i in range(len(luecken) - 1):
             e = luecken[i][0] + luecken[i][1]
             s2 = luecken[i + 1][0]
@@ -145,8 +121,6 @@ def main():
     if a.nur_rms:
         return 0
 
-    # Das Spektrum.  Gemessen wird auf einem Stueck OHNE Luecken, damit
-    # ein Loch nicht als Breitband erscheint.
     anf = 0
     if luecken:
         anf = luecken[-1][0] + luecken[-1][1]
@@ -166,7 +140,6 @@ def main():
     print("p1=%d" % int(goertzel(stueck, fr, a.hz)))
     if a.zweite:
         print("p2=%d" % int(goertzel(stueck, fr, a.zweite)))
-        # ein Punkt DAZWISCHEN, an dem nichts sein darf
         mitte = (a.hz + a.zweite) // 2
         print("pmitte=%d" % int(goertzel(stueck, fr, mitte)))
     else:

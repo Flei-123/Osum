@@ -61,17 +61,7 @@ def groessen(n, budget):
     aussieht, keine Zusage traegt -- zweimal bauen muss zweimal
     dasselbe ergeben."""
     aus = [0] * n
-    # DIE KANDIDATEN: JEDE DREIZEHNTE, und die 13 ist kein Geschmack.
-    # Der Ordner einer Datei ist `i % 8`, ihre Ebene `(i // 8) % 2` --
-    # also wiederholt sich die Zuordnung alle 16. Wer jede SECHZEHNTE
-    # nimmt, legt allen Inhalt in denselben Ordner: die erste Fassung
-    # dieses Werkzeugs tat das, und im Abbild hatte `/data/messing`
-    # 600 000 Oktette und jeder andere Ordner null. 13 ist zu 16
-    # teilerfremd, also laeuft die Auswahl durch alle sechzehn
-    # Kombinationen.
     kand = list(range(0, n, 13))
-    # Geometrisch fallend, dann so skaliert, dass die Summe das Budget
-    # trifft.  `roh` ist absichtlich ganzzahlig und nie null.
     roh = []
     wert = 65536
     for k in range(len(kand)):
@@ -108,8 +98,6 @@ def main(argv):
                 if p != "/data/":
                     zeilen.append(p)
 
-    # Die Dateien.  Wer Inhalt bekommt, bekommt ihn als eigene Datei auf
-    # dem Wirt; wer nicht, bleibt leer (`pfad=`).
     for i, (pfad, name) in enumerate(liste):
         if sz[i] > 0:
             wirt = os.path.join(inhalt, "f%05d" % i)
@@ -122,12 +110,6 @@ def main(argv):
     with open(os.path.join(arbeit, "angaben"), "w") as f:
         f.write("\n".join(zeilen) + "\n")
 
-    # ------------------------------------------------ die Wahrheit dazu
-    #
-    # Fuer jedes Verzeichnis die Summe seines TEILBAUMS.  Genau die Regel,
-    # nach der auch `du` und der Index rechnen: die GROESSE der Dateien,
-    # ein Verzeichnis selbst zaehlt null, die Bloecke je Datei
-    # aufgerundet auf 1024.
     okt = {}
     kb = {}
     dat = {}

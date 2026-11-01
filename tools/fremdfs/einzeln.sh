@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fremdfs/einzeln.sh -- EIN EINZELNER LAUF, zum Nachsehen.
-#
-# `run.sh` baut alles und misst alles; wenn dabei etwas rot ist, will
-# man EINEN Fall wiederholen und die ganze serielle Ausgabe SEHEN --
-# ohne dreissig Abschnitte davor und ohne dass das Verzeichnis
-# hinterher weggeraeumt wird.
-#
-#   bash tools/fremdfs/einzeln.sh <art> <abbild> [befehl]
-#
-#   art     ext4 | ntfs | vfat
-#   abbild  ein Abbild AUS tools/fremdfs/bild.sh (ohne Partitionstafel)
-#   befehl  was in Osum laufen soll; Vorgabe:
-#           "fremdfs <art> /dev/hdb1 /mnt"
-#
-# Das Arbeitsverzeichnis bleibt stehen und wird am Ende genannt.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -51,7 +35,6 @@ if [ ! -f "$W/k0.mb" ]; then
         tail -5 "$W/mkfs.log"; exit 1; }
 fi
 
-# Die Partitionstafel drumherum -- wie in run.sh.
 typ=83
 [ "$ART" = ntfs ] && typ=7
 [ "$ART" = vfat ] && typ=c

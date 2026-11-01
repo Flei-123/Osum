@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/sync/messdbg.sh -- NUR die Messstrecke, und der Arbeitsordner
-# bleibt stehen. Kein Urteil, keine Zusagen: drei Abgleiche ueber 20
-# Dateien, danach liegt alles zum Nachsehen unter $TMPD.
-#
-#   bash tools/sync/messdbg.sh [anzahl] [groesse] [blocks]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh

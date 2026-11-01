@@ -76,10 +76,6 @@ import sys
 
 WURZEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
 
-# Die Puffer der Datenseite, die als ARBEITSFLAECHE benutzt werden --
-# nicht die Tafeln (TASK_OFF, CPU_OFF, WM_OFF ...), die je Eintrag
-# gehoeren, sondern die, in die geschrieben und gleich danach wieder
-# gelesen wird.
 PUFFER = re.compile(
     r"state\s*\+\s*kstate\.("
     r"NAME_OFF|BLOCK_OFF|EARG_OFF|FS_OFF|OFS3_OFF|LOAD_OFF|CONSOLE_OFF"
@@ -87,30 +83,17 @@ PUFFER = re.compile(
 
 SPERRE = re.compile(r"\benter\(state\)|\bfs\.enter\(|atomic\.lock_take\("
                     r"|serial\.zeile_an\("
-                    # RUNDE GLYPHE: die drei Namen des Zeichenwegs.
                     r"|buehne_an\(|buehne_wenn_|table_on\(|stage_of\(")
 
-# RUNDE GLYPHE: die zweite Bauform -- eine Seite, die die Datei ueber
-# einen EIGENEN Zugriff holt. Der Zugriff selbst wird hier gesucht ...
 BASISZUGRIFF = re.compile(
     r"fn (\w+)\(state: u64\) -> u64 \{\s*\n\s*return state \+ kstate\.(\w+_OFF)")
-# ... und das hier ist sein Gebrauch als ARBEITSFLAECHE. `+ 0x` und
-# `+ <kleinbuchstaben>` faengt es nicht: nur benannte Konstanten, also
-# genau das, was eine Runde sich als Puffer hinlegt.
 def puffer2(zugriff):
     return re.compile(r"\b%s\(state\)\s*\+\s*([A-Z][A-Z0-9_]*)" % zugriff)
 
-# Diese Dateien laufen nachweislich nur auf einem Kern oder nur vor dem
-# Start der Anwendungskerne. Sie stehen mit BEGRUENDUNG hier und nicht
-# als stille Ausnahme.
 RUHIG = {
     "kmain.fi": "laeuft vor smp.probe, also bevor es zweite Kerne gibt",
 }
 
-# RUNDE GLYPHE: EINE Stelle, die den geteilten Puffer mit Absicht
-# anfasst -- und sie steht hier mit Namen, so wie `inode_get_blind` und
-# `race_core` in tools/multicore/run.sh. Wer eine zweite dazutut, muss
-# sie hier eintragen und begruenden.
 MITWISSEN = {
     ("kernel/ui/wig.fi", "stage_of"):
         "gibt die Buehne DIESES Kerns (kstate.WIGST_OFF + cpu.here * "
@@ -164,9 +147,6 @@ def main(argv):
             pfad = os.path.join(wurzel, d)
             kurz = os.path.relpath(pfad, WURZEL)
             roh = open(pfad, "rb").read().decode("utf-8", "surrogateescape")
-            # RUNDE GLYPHE: hat die Datei einen eigenen Zugriff auf eine
-            # kdata-Seite? Dann ist `<zugriff>(state) + KONST` derselbe
-            # geteilte Puffer, nur anders geschrieben.
             zweite = [(z, seite, puffer2(z))
                       for z, seite in BASISZUGRIFF.findall(roh)]
             for fn, leib in sorted(funktionen(pfad).items()):

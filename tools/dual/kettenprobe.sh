@@ -1,37 +1,5 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dual/kettenprobe.sh -- STARTET DER ZWEITE EINTRAG WIRKLICH DAS
-# FREMDE SYSTEM?
-#
-#   bash tools/dual/kettenprobe.sh <platte.img> [ausgabeverzeichnis]
-#
-# ==================================================================
-# WAS HIER GEMESSEN WIRD, UND WARUM ES NICHT GENUEGT, DASS DER EINTRAG
-# IM MENUE STEHT
-# ==================================================================
-#
-# `startprobe.sh` zeigt, dass "Windows Boot Manager" auf dem Schirm
-# steht. Das ist eine Aussage ueber eine Zeile Text. Ob dahinter auch
-# etwas passiert, wenn man sie waehlt, ist eine andere Frage -- und es
-# ist die, auf die es ankommt: ein Menueeintrag, der ins Leere fuehrt,
-# ist schlimmer als keiner, weil er wie ein Weg zurueck ins alte System
-# aussieht.
-#
-# Deshalb liegt an der Stelle, an der auf einem echten Rechner
-# \EFI\Microsoft\Boot\bootmgfw.efi liegt, eine ECHTE, winzige
-# UEFI-Anwendung (tools/dual/beweis.c), die sich SELBST zu erkennen
-# gibt: sie schreibt auf COM1 und auf den EFI-Schirm einen Satz, den
-# sonst niemand schreibt.
-#
-# WARUM NICHT EINFACH EINE ZWEITE KOPIE VON LIMINE: sie sucht dieselbe
-# Konfiguration wie die erste und ist von ihr nicht zu unterscheiden --
-# der Schirm bleibt schwarz, und das sieht wie ein Fehlschlag aus,
-# obwohl der Kettenstart lief. Gemessen in dieser Runde, eine Stunde
-# lang.
-#
-# Der zweite Eintrag wird mit der PFEILTASTE gewaehlt, wie ein Mensch
-# es taete.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -64,10 +32,8 @@ QP=$!
 for i in $(seq 1 60); do [ -S "$OUT/mon" ] && break; sleep 1; done
 sleep "${WARTE:-4}"
 
-# 1. Irgendeine Taste haelt den Countdown an.
 mon 'sendkey spc'
 sleep 2
-# 2. Pfeil nach unten: der ZWEITE Eintrag.
 mon 'sendkey down'
 sleep 2
 mon "screendump $OUT/wahl.ppm"
@@ -94,7 +60,6 @@ fi
 echo "== und auf der seriellen Leitung"
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -a 'BEWEIS' | head -3 | sed 's/^/        /'
 
-# DER BELEG: der fremde Bootmanager meldet sich selbst.
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'KETTENSTART HAT FUNKTIONIERT'; then
     ok "DER KETTENSTART LAEUFT -- der fremde Bootmanager meldet sich"
 else
@@ -105,7 +70,6 @@ if [ -s "$OUT/kette.png" ] && tesseract "$OUT/kette.png" - 2>/dev/null | grep -q
 else
     bad "auf dem Schirm steht er nicht"
 fi
-# Gegenprobe: OrientOS darf NICHT gestartet sein.
 if tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -qa 'desk: start'; then
     bad "es hat ${MARKE_PRODUKT} gestartet statt des fremden Systems"
 else

@@ -1,28 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge2/echt.sh -- RUNDE BRUECKE: DER WEG VON AUSSEN, ueber HTTPS.
-#
-# ====================================================================
-# WAS DIESER LAEUFER BEWEIST, UND WAS `echtserver.sh` NICHT BEWIES
-# ====================================================================
-#
-# `tools/bridge/echtserver.sh` (Runde BRIDGE-2) stellt einen JARVIS in
-# einen NETZRAUM auf demselben Rechner und laesst Osum sich dort
-# anmelden. Das ist ein ehrlicher Nachweis fuer das PROTOKOLL -- aber
-# nicht fuer den WEG. Im Netzraum ist der Server einen Hop entfernt,
-# hat eine feste 10.9.0.1 und ein selbstgemachtes Zertifikat.
-#
-# Justins Rechner steht hinter einem fremden Router, in einem anderen
-# Heimnetz, und muss durch: NAT, die Router-Firewall, das ECHTE
-# Zertifikat von store.fleitec.com und den openresty davor. Nichts
-# davon kommt in einem Netzraum vor. Dieser Laeufer misst genau das --
-# er spricht mit derselben oeffentlichen Adresse, die auch das Geraet
-# in Justins Wohnzimmer anspricht.
-#
-# WAS ER NICHT MISST: den Osum-Client. Dafuer ist
-# `tools/bridge2/qemu.sh` da. Die beiden zusammen decken den ganzen
-# Weg ab; getrennt, weil ein Laeufer, der beides misst, bei einem
-# Fehler nicht sagen kann, auf welcher Seite er lag.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 W=${BRUECKE_W:-/tmp/bruecke-echt}
@@ -45,8 +21,6 @@ python3 -c 'import cryptography' 2>/dev/null || {
 [ -r "$SCHLUESSEL" ] || { echo "BRUECKE: uebersprungen, $SCHLUESSEL nicht lesbar"; exit 0; }
 VK=$(cat "$SCHLUESSEL")
 
-# Eine Kennung je Lauf. Ohne sie traegt der zweite Lauf die Kopplung
-# des ersten und misst damit etwas anderes als der erste.
 KENN="pruefstand-$$"
 
 echo "== 1. der Dienst ist von AUSSEN erreichbar =="

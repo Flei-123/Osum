@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/loader/build.sh -- RUNDE LADEN: Kern und Programme uebersetzen.
-#
-# Baut alles, was die Abnahme dieser Runde braucht, in EIN
-# Arbeitsverzeichnis:
-#
-#   k.mb      der Kern
-#   bin/*     die Programme (Ring 3, `profile kernel`)
-#   bin/fetch das Programm der zweiten Bauart (`kernel/app/`, mit Halde)
-#
-# Es wird PARALLEL uebersetzt; der Uebersetzer ist ein eigener Prozess
-# je Datei, und die Ausgaben landen in getrennten Dateien.
-#
-#   bash tools/loader/build.sh [ausgabeverzeichnis]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
@@ -24,15 +10,6 @@ OUT=${1:-/tmp/laden}
 JOBS=${JOBS:-$(nproc)}
 mkdir -p "$OUT/bin"
 
-# DIE PROGRAMME. Die erste Gruppe ist die Oberflaeche (alles, was
-# `import wlib` hat), die zweite das Werkzeug darunter -- darunter
-# `opk` und `ota`, ohne die diese Runde nichts zu messen haette.
-# RUNDE CERTUS-AUF-OSUM: `taskmgr` gehoert dazu. assets/apps enthaelt
-# taskmgr.osp, und dessen `start` ist ein zweiter Name auf /bin/taskmgr
-# -- fehlt die Datei, lehnt tools/osum/mkfs.py das ganze Abbild ab
-# ("mkfs: '/bin/taskmgr' gibt es nicht"). Gemessen beim ersten Bau
-# dieser Runde; es hat nichts mit dem Browser zu tun und wird hier
-# trotzdem behoben, weil es JEDEN Bau dieses Skripts betrifft.
 GUI=${GUI:-"desktop taskbar launcher settings explorer widgetdemo themetest netmon theme taskmgr rechner trashbin viewer snip lock"}
 CLI=${CLI:-"sh ls cat echo edit cp mv rm mkdir rmdir touch head tail wc grep sort sleep ps kill uname date df install opk ota dhcp host reboot find du chmod id whoami top netview locate tar mount umount env which zip wlan"}
 APPS=${APPS:-"fetch"}
@@ -50,8 +27,6 @@ as --64 -o "$OUT/crt.o" kernel/user/crt.s || exit 1
 
 eins() { # <name>
     local p=$1
-    # Seit ENGLISCH ETAPPE 9 heisst die QUELLE von /bin/rechner calc.fi;
-    # Paket und Laden kennen das Programm weiter als `rechner`.
     local q=$p
     [[ $p == rechner ]] && q=calc
     UPROF=""; UCRT="$OUT/crt.o"
@@ -93,19 +68,6 @@ for p in $APPS; do
     echo "   app       $p ($(stat -c%s "$OUT/bin/$p") Oktette)"
 done
 
-# ============================================ RUNDE CERTUS-AUF-OSUM
-#
-# Der Browser ist die dritte Bauart in diesem Skript, und er ist die
-# einzige, deren QUELLTEXT NICHT IN DIESEM BAUM LIEGT: Certus gehoert
-# zum Firn-Projekt ($CERTUS_REPO, Zweig `osum`), ist rund 105.000
-# Zeilen gross und wird mit SEINEM eigenen Uebersetzer gebaut -- nicht
-# mit dem festgenagelten aus vendor/firn, dem er voraus ist. Wie das
-# geht und warum, steht in kernel/user/certus/build.sh.
-#
-# Fehlt der Baum, faellt hier nichts aus: das Abbild hat dann kein
-# /bin/certus, und tools/loader/pakete.sh laesst das Paket weg. Ein
-# Bauskript, das ohne fremdes Repo gar nicht mehr durchlaeuft, waere
-# der schlechtere Tausch.
 if [ -d "${CERTUS_REPO:-/root/certus-sammeln}/lib/browser" ]; then
     if bash kernel/user/certus/build.sh "$OUT/bin/certus" \
             > "$OUT/certus.log" 2>&1; then

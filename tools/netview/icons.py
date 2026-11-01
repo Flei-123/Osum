@@ -60,64 +60,19 @@ import icon as symmod  # noqa: E402
 
 QUELLE = os.path.join(WURZEL, "..", "assets", "netview")
 
-# Die vier Systemzustaende, in der Reihenfolge, in der der Kern sie
-# zaehlt (`sys.NS_*`), und die drei Merkmale in der Reihenfolge der
-# Sichten (`netview.V_*`, ohne `real`, das keines bekommt).
 ZUSTAENDE = ["state-nocarrier", "state-noip", "state-noroute", "state-online"]
 MERKMALE = ["mark-filtered", "mark-faked", "mark-none"]
-# ZWEITER NACHTRAG: das Zeichen fuer "die Maschine taeuscht gerade vor".
-# Eigene Gruppe, weil es weder ein Systemzustand noch ein Merkmal am
-# Programm ist -- es steht NEBEN dem Zustandssymbol in der Ecke.
 SYSTEM = ["sys-faking"]
-# DRITTER NACHTRAG: die Kacheln der Schnelleinstellungen. EINE Zeichnung
-# je Kachel und nicht eine je Kachel und Zustand -- die Begruendung steht
-# in `assets/netview/tile-net.txt` und wurde hier GEMESSEN, bevor sie
-# aufgeschrieben wurde: zwei 16x16-Zeichen, die sich nur innen
-# unterscheiden, kommen auf etwa ein Viertel verschiedene Bildpunkte und
-# fallen an genau der Schwelle durch, die diese Datei setzt.
-# RUNDE MERGE-11 (R7): DREI KACHELN FEHLTEN, UND DAS SAH AUS WIE EIN
-# ZEICHENFEHLER. Justin nennt die Symbole im Kontrollzentrum seit
-# Tagen "korrumpiert". GEMESSEN auf dem Abbild d832136:
-#
-#   qs: symbols n=3          <- qs.fi will N_TILE_ALL = 6
-#   /etc/netview/tile-dark   FEHLT
-#   /etc/netview/tile-power  FEHLT
-#   /etc/netview/tile-tile   FEHLT
-#
-# Die Zeichnungen liegen seit ihrer Runde unter assets/netview/, aber
-# dieses Werkzeug hat sie nie gebaut und build.sh sie nie eingepackt.
-# Drei Kacheln ohne Symbol malen, was gerade im Puffer steht -- genau
-# der Eindruck, den Justin beschreibt. Es war NICHT der Rasterer.
 KACHELN = ["tile-fake", "tile-net", "tile-hide",
            "tile-dark", "tile-power", "tile-tile"]
 
-# UND ES MUSS SICH VON `mark-faked` UNTERSCHEIDEN. Die beiden koennen
-# gleichzeitig auf dem Schirm stehen und bedeuten Verschiedenes: das
-# eine sagt "dieses Programm", das andere "die ganze Maschine". Sie
-# tragen absichtlich dieselbe Welle; also muss der RAHMEN den
-# Unterschied tragen, und genau das wird hier nachgerechnet.
 KREUZ = [("sys-faking", "mark-faked")]
 
-# DRITTER NACHTRAG: die Kacheln stehen im Panel UEBER der Ecke -- die
-# Zustandssymbole und die Kacheln sind gleichzeitig auf dem Schirm und
-# gleich gross. `tile-fake` und `tile-hide` sind beide Schirme, und
-# `tile-fake` sagt dasselbe wie `sys-faking`, DARF also aehnlich sein;
-# gegen die Zustandssymbole muss es sich trotzdem halten.
 KREUZ_KACHEL = [("tile-fake", "state-online"),
                 ("tile-fake", "state-nocarrier"),
                 ("tile-hide", "state-online"),
                 ("tile-net", "state-online")]
 
-# DIE ZWEI SCHEMEN, GEGEN DIE GERECHNET WIRD -- AUS DEN DATEIEN, mit
-# denen die gemessenen Laeufe wirklich booten
-# (`assets/netview/theme-dark`, `theme-light`). Sie standen hier erst als
-# Zahlen im Quelltext; das waere eine zweite Fassung derselben Farben
-# gewesen, und die erste Aenderung an einer der Dateien haette diese
-# Pruefung zu einer Aussage ueber nichts gemacht.
-#
-# Der Name der Rolle ist der Name des Schluessels in der Datei, mit
-# einer Ausnahme: `ink` heisst dort `fg`, weil die Datei die Namen der
-# Runde K15 traegt und die nicht dieser Runde gehoren.
 DATEI_NAME = {"ink": "fg", "dim": "dim", "accent": "accent",
               "warn": "focus", "panel": "panel"}
 
@@ -277,11 +232,6 @@ def masse():
 
 # ------------------------------------------------------------ das Erzeugen
 
-# ROUND MERGE: der Kopf traegt die SPDX-Zeile MIT. Runde INVENTORY
-# setzt eine Kopfzeile in jede Quelldatei; `kernel/netmark.fi` ist
-# erzeugt, also muss der Erzeuger sie schreiben, sonst weicht die
-# Datei im Baum von der frisch gebauten ab und dieser Laeufer faellt
-# durch -- genau so ist es passiert.
 KOPF = """// SPDX-License-Identifier: GPL-2.0-only
 // kernel/net/netmark.fi -- ERZEUGT AUS assets/netview/mark-*.txt.
 //

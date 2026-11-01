@@ -1,33 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/bridge/peer.py -- DIE GEGENSTELLE FUER DEN PRUEFSTAND.
-#
-# DAS IST NICHT DER ECHTE JARVIS-SERVER. Der laeuft anderswo, spricht
-# ein anderes Protokoll und ist nicht Teil dieses Repos. Dieses Programm
-# ist ein TLS-1.3-Server in Python, der GENAU das Protokoll aus
-# kernel/app/jarvisd.fi spricht, damit `tools/bridge/run.sh` etwas hat,
-# gegen das es messen kann -- und damit jede Zusage dieser Runde gegen
-# Software geprueft wird, die dieses Repo nicht geschrieben hat
-# (Pythons ssl-Modul, OpenSSL darunter, `cryptography` fuer Ed25519).
-#
-# Was hier steht und was in run.sh steht, ist damit ausdruecklich
-# getrennt: die Zahlen kommen von aussen, nicht aus Osum.
-#
-# Aufruf:
-#   peer.py --cert C --key K --port P --auftraege A --aus D
-#                  [--kopplung CODE [--kopplung-hex]] [--abriss] [--kein-beweis]
-#                  [--wartezeit S]
-#
-# Die Auftragsdatei traegt eine Zeile je Auftrag:
-#   <art>|<arg1>|<nutzlast-hex>
-# zum Beispiel
-#   system||
-#   lies|/var/jarvis/gruss.txt|
-#   schreib|/var/jarvis/neu.txt|68616c6c6f
-#
-# In die Ausgabedatei kommt eine Zeile je Antwort:
-#   ANTWORT <id> <art> <status> <laenge> <sha256>
-# und die Nutzlast selbst als <aus>.<id>.bin daneben.
 
 import argparse
 import hashlib
@@ -163,9 +134,6 @@ def main():
     return ergebnis
 
 
-# Eine einzelne Sitzung. Getrennt, damit der Pruefstand ZWEI verlangen
-# kann: die Kopplung braucht einen ersten Anlauf, der abgelehnt wird,
-# und einen zweiten, der nach der Bestaetigung durchgeht.
 def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
     try:
         roh, adr = lauscher.accept()
@@ -210,8 +178,6 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
                 except InvalidSignature:
                     sag("BEWEIS FALSCH")
                     return 1
-                # Die Gegenprobe: dieselbe Signatur ueber ANDERE Oktette
-                # muss durchfallen. Sonst prueft die Pruefung nichts.
                 try:
                     Ed25519PublicKey.from_public_bytes(pub).verify(
                         sig, os.urandom(32))
@@ -252,8 +218,6 @@ def eine_verbindung(a, ctx, lauscher, sag, auftraege, runde):
             nutz = bytes.fromhex(nutzhex) if nutzhex else b""
             d.sende(["job", str(nr), wire_kind(art), hex_von(wire_arg(art, arg1)), "0"], nutz)
             if a.abriss and nr == 1:
-                # MITTEN IM AUFTRAG die Verbindung wegnehmen. Der Helfer
-                # darf daran nicht sterben und nichts liegenlassen.
                 sag("ABRISS nach Auftrag", nr)
                 try:
                     s.shutdown(socket.SHUT_RDWR)

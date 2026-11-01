@@ -28,13 +28,6 @@ abwaerts gilt die volle Probe zu dritt.
 import re
 import sys
 
-# du: probe pfad=/data idx=419868 lauf=419868 idxkb=686 laufkb=686 ok=1
-# ZWISCHENRAUM IST \s+ UND NICHT " ". Der Gast trennt seine Felder mit
-# einem oder zwei Leerzeichen -- `kv()` schreibt eines, und manche
-# Zeichenkette traegt selbst schon eines. Die erste Fassung dieser
-# Datei stand auf EINEM Leerzeichen und fand daraufhin keine einzige
-# Probe; sie meldete "der Lauf ist nicht durchgekommen", waehrend in
-# der Ausgabe einundzwanzig richtige Zeilen standen.
 PROBE = re.compile(
     r"du: probe pfad=(\S+)\s+idx=(\d+)\s+lauf=(\d+)\s+idxkb=(\d+)\s+"
     r"laufkb=(\d+)\s+ok=(\d+)")
@@ -100,9 +93,6 @@ def main(argv):
     for z in zeilen:
         print(z)
 
-    # Die Zusammenfassung, die der Gast selbst gezogen hat -- sie muss zu
-    # dem passen, was hier herauskommt. Zwei Zaehler, die sich
-    # widersprechen, sind selbst ein Fund.
     for m in FERTIG.finditer(roh):
         g, f = int(m.group(1)), int(m.group(2))
         print("pruefen: der Gast sagt geprueft=%d falsch=%d" % (g, f))

@@ -70,7 +70,6 @@ def main():
     print("Zeilen gleich: %d von %d" % (gleich, ih))
     print("Zeilen verschieden: %d" % len(verschieden))
 
-    # Die gleichen Zeilen Oktett fuer Oktett -- die eigentliche Zusage.
     anders = 0
     for y in range(ih):
         if y in vs:
@@ -82,13 +81,10 @@ def main():
                     anders += 1
     print("abweichende Oktette in den gleichen Zeilen: %d" % anders)
 
-    # Ein schwarzes Bild waere auch "gleich" -- also nachsehen, ob
-    # ueberhaupt etwas darauf ist.
     nichtschwarz = sum(1 for i in range(0, len(ib), 3)
                        if ib[i] or ib[i + 1] or ib[i + 2])
     print("nicht-schwarze Bildpunkte innen: %d von %d" % (nichtschwarz, iw * ih))
 
-    # Passt der Abstand der verschiedenen Zeilen zu einer Textzeile?
     if verschieden:
         baender = []
         s0 = verschieden[0]

@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# tools/wasm2firn/pruefung/run.sh -- RUNDE SCHLEUSE-2
-#
-# Jedes .wat hier prueft EINE Sache und sagt je Fall OK oder FEHLER.
-# Der Witz: dasselbe Modul laeuft einmal im DEUTER und einmal durch
-# wasm2firn+firnc. Beide Ausgaben muessen gleich sein -- und zwar
-# beide "OK". Ein Unterschied zeigt sofort, ob der Fehler im
-# Uebersetzer oder in der gemeinsamen WASI-Schicht liegt.
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
 ROOT=$(pwd)

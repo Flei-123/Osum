@@ -1,31 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/fsrobust/r200.sh -- DAILY-DRIVER: THE NEGATIVE CONTROL r200 NEVER HAD.
-#
-#   bash tools/fsrobust/r200.sh
-#
-# Roadmap r200 (27.09.2026): "128 octets from byte 16 of a sector zeroed, at
-# random" on an installed system. The fix of that day (kstate.BLOCKK_OFF, one
-# copy page per core) was never confirmed independently: tools/fsrobust/wrace.sh
-# stays green with the fix taken back, because its writers share the file-system
-# lock and never meet in the page.
-#
-# WHAT MEETS IN THE PAGE: kernel/sys/sysgui.fi `wl_fill` zeroes
-# `blockb(state)+3600 .. +3727` (WL_BYTES = 128) before it fills in one record
-# of the window table -- the taskbar polls that call. 3600 mod 512 = 16: the
-# very symptom of r200. A file write bounces its 4 KiB block through the same
-# page, OUTSIDE the file-system lock on the window side.
-#
-# THE TEST: /bin/wrace starts four writers on four cores (-smp 4 r3alle) AND
-# /bin/wspam, which does what the taskbar does (a window with a screen edge
-# reserved, then WM_LIST in a loop) under the real window server; every octet
-# the writers wrote is read back and compared.
-#
-#   1. the tree as it is        -> `wrace: ok files=4`      (the fix holds)
-#   2. a COPY of the tree whose `blockb` gives every caller the one shared page
-#      (the state before the fix) -> `wrace: BAD ...`       (the test CAN fail;
-#      it names block 0, octet 3600 -- the window-list record)
-#   Without 2 a green 1 would prove nothing.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)

@@ -113,7 +113,6 @@ for i in range(n):
     sek = random.randrange(0, 2**40)
     faelle.append((key, sek, pt))
 
-# Beide Wege durch DASSELBE Orakel, einmal mit und einmal ohne AES-NI.
 def lauf(vorspann):
     ein = []
     if vorspann:
@@ -138,7 +137,6 @@ bad_weg = sum(1 for a, b in zip(schnell, tabelle) if a != b)
 print("faelle=%d openssl_abweichungen=%d wegunterschiede=%d"
       % (len(faelle), bad_ossl, bad_weg))
 
-# Und die Rueckrichtung: was OpenSSL anlegt, muss OrientOS aufmachen.
 ein = []
 erw = []
 for key, sek, pt in faelle[:40]:

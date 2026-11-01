@@ -1,30 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/anmeldung/shot.sh -- EIN FOTO AUS EINEM LAUF, mit Tastendruecken.
-#
-#   bash tools/anmeldung/shot.sh <bauverz> <ausgabe.png> [taste ...]
-#
-# Der Weg ist woertlich der aus tools/usbimg/shot-qs2.sh und
-# /root/gbwork/qsshot.sh: DAUERBETRIEB (`wmshell wmdauer herz`), nicht
-# `wmhold` -- mit `wmhold` ist die Schleife der Leiste vorbei, und eine
-# Taste, die danach kommt, steht als letzte Zeile im Bericht und wirkt
-# nicht mehr.
-#
-# Die Tasten gehen ueber den QEMU-Monitor (`sendkey`), mit einer Pause
-# dazwischen -- dieselbe Mechanik, mit der die Runde ALLTAG den
-# Sperrbildschirm gemessen hat. `@N` wartet N Zehntelsekunden,
-# `#foto:name` macht ein Zwischenbild <ausgabe>-name.png.
-#
-# ENV:
-#   APPEND_EXTRA   zusaetzliche Woerter auf der Kernelzeile
-#   SEKUNDEN       Gesamtlaufzeit (Vorgabe 45)
-#   VORLAUF        Wartezeit vor der ersten Taste (Vorgabe 12)
-#   ACPITABLE      eine zusaetzliche ACPI-Tabelle (-acpitable file=...).
-#                  RUNDE ACPI-EREIGNISSE: QEMU 7.2 hat weder Deckel noch
-#                  Akku; `tools/acpiev/asl/laptop.aml` baut beide nach,
-#                  und ohne diese Zeile waere auf jedem Bild dieser
-#                  Runde "kein Akku" zu sehen -- richtig gemessen und
-#                  trotzdem nicht das, was gezeigt werden soll.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -43,8 +17,6 @@ W=$(mktemp -d)
 QP=""
 trap 'kill $QP 2>/dev/null; rm -rf "$W"' EXIT
 
-# EIGENE KOPIE DER PLATTE: zwei Laeufe duerfen sich nicht um die
-# Schreibsperre streiten ("Failed to get write lock").
 cp "$BUILD/root.img" "$W/disk.img"
 
 KVM=(-accel tcg)

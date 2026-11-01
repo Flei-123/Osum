@@ -68,7 +68,6 @@ def perfctl(ratios, prof):
     r = {SPAREN: lo, MITTE: basis, LEISTUNG: hi}[prof]
     w = (r & 0xFF) << 8
     if prof == SPAREN:
-        # Wer den kleinsten Takt will, will die Turbostufe nicht.
         w |= PERF_NOTURBO
     return w
 
@@ -76,29 +75,18 @@ def perfctl(ratios, prof):
 def hwp(ratios, prof):
     lo, basis, hi = teile(ratios)
     if prof == SPAREN:
-        # Untergrenze das Sparsamste, Obergrenze das Zugesicherte,
-        # Vorliebe ganz auf Sparsamkeit.
         return lo | (basis << 8) | (255 << 24)
     if prof == MITTE:
-        # Der ganze Bereich, Vorliebe in der Mitte.
         return lo | (hi << 8) | (128 << 24)
-    # Nicht unter das Zugesicherte, Vorliebe ganz auf Leistung (EPP 0,
-    # also kein Bit zu setzen).
     return basis | (hi << 8)
 
 
 def misc(orig, prof):
-    # ALLES ANDERE BLEIBT STEHEN. In diesem Register haengen unter
-    # anderem der Zustandsautomat von MONITOR (Bit 18) und die
-    # Vorablader; wer es ueberschreibt, schaltet Dinge ab, von denen er
-    # nichts weiss.
     w = orig & ~(MISC_EIST | MISC_NOTURBO)
     if prof == SPAREN:
         w |= MISC_EIST | MISC_NOTURBO
     elif prof == MITTE:
         w |= MISC_EIST
-    # LEISTUNG: EIST aus (der Takt bleibt oben, statt von der Firmware
-    # heruntergeregelt zu werden), Turbo frei -- beide Bits bleiben 0.
     return w
 
 

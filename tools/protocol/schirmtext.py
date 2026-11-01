@@ -99,9 +99,6 @@ def main():
         o = (y * w + x) * 3
         return (px[o], px[o + 1], px[o + 2])
 
-    # DER HINTERGRUND IST DIE HAEUFIGSTE FARBE.  Das ist robuster als
-    # eine feste Farbe im Skript: der Panik-Bildschirm ist rot, eine
-    # gewoehnliche Textkonsole schwarz, und beides soll lesbar sein.
     zaehl = {}
     for y in range(0, h, 4):
         for x in range(0, w, 4):

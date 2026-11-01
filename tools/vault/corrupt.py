@@ -48,9 +48,6 @@ def main(argv):
         return 1
     new = bytes([old[0] ^ xor])
     fs.write_at(ino, off, new)
-    # NUR die urspruengliche Laenge zurueckschreiben: `load` legt sich ein
-    # groesseres Feld an, als die Datei lang ist, und ein Abbild, das beim
-    # Anfassen waechst, waere ein zweiter Unterschied neben dem gewollten.
     with open(image, "r+b") as f:
         f.write(bytes(fs.d[:original]))
     print("kaputt: %s[%d] 0x%02x -> 0x%02x" % (path, off, old[0], new[0]))

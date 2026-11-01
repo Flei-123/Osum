@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/pdfbar/run.sh [--old] -- THE PDF VIEWER BAR (r972, 17.10.2026): one Edge-like toolbar in the window.
-#
-#   bash tools/pdfbar/run.sh          the gate (QEMU, the image's own build of /bin/pdfview)
-#   bash tools/pdfbar/run.sh --old    counter-proof: runs this gate against the tree BEFORE the bar (OLD_REF); it must fail
-#
-# What is measured (serial trace of the window: rects, texts, tooltips):
-#   1. ONE bar: >= 10 icon buttons (side list, open, page up/down, zoom -/+, fit width, fit page, match up/down)
-#      share one row (same centre line), the search field sits on that line too, nothing sticks out of the window
-#   2. tooltips of the icon buttons exist (the word and the key: "Vergrößern (+)")
-#   3. no path field while a document is open (it is a second row only without a document / after Open)
-#   4. key F4: the page list opens at the left, the page area gets narrower -> the fit-width zoom goes DOWN, row "Seite 2"
-#   5. no document: path field + "Öffnen" button are there
-#   6. Ctrl+F puts the cursor into the search field, typing "wasser" + Enter -> "Treffer 1 von 8"
-#   7. the picture: icons are drawn in the bar (ink in the bar's strip), the page below is drawn
 set -uo pipefail
 OLD_REF=7f9c4eae
 cd "$(dirname "$0")/../.."

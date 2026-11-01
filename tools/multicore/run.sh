@@ -80,14 +80,6 @@ def roh(f):
                           "\n".join(funcs.get(f,[]))))
 def callers(f):
     return [n for n,b in funcs.items() if n!=f and re.search(r"(?<![\w.])"+f+r"\(", "\n".join(b))]
-# RUNDE MERGE-6: DIE GEGENPROBE IST KEIN FEHLER.
-# `inode_get_blind` ist WOERTLICH der Rumpf, den `inode_get` vor
-# VIELKERN 3 hatte, und `race_core` ruft ihn -- absichtlich und nur,
-# wenn `fsblind` auf der Befehlszeile steht. Ein Pruefer, der seine
-# eigene Gegenprobe anzeigt, zwingt den naechsten dazu, die Gegenprobe
-# zu loeschen statt sie zu behalten. Beide stehen deshalb HIER mit
-# Namen, und wer einen dritten Namen dazutut, muss ihn hier eintragen
-# und begruenden.
 mitwissen={"inode_get_blind","race_core"}
 offen=[f for f in funcs if roh(f) and not enter(f) and f not in mitwissen]
 leck=[]; gesehen=set(); todo=list(offen)

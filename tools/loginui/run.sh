@@ -297,9 +297,6 @@ for r in sys.argv[2:]:
 print(' '.join(hits) if hits else '-')
 PY
 }
-# r373: THE CHAIN OF THE SCENE-TREE SCREEN. The host puts every button into
-# the Tab chain, so the eye and the two quick-access icons are stops now:
-# Kennwort -> Auge -> Anmelden -> Anderer Benutzer -> Netzwerk -> Ein/Aus.
 EYE0=$(eyerect)
 exx=$(fld "$EYE0" x); eyy=$(fld "$EYE0" y); eyw=$(fld "$EYE0" w)
 EYER="id=16 kind=2 x=$exx y=$eyy w=$eyw h=$eyw"

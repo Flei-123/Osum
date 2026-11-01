@@ -1,28 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/struktur/huelle.py -- WAS IST EIGENTLICH DER KERNEL?
-#
-# `kernel/` enthaelt 346 .fi-Dateien, aber das Kernabbild besteht nicht
-# aus ihnen allen. `tools/build-kernel.sh` uebersetzt ZWEI Wurzeln:
-#
-#     firnc -o k.o      kernel/kmain.fi
-#     firnc -o uprog.o  kernel/uprog.fi
-#
-# Firn liest von einer Wurzel aus den ganzen Baum ueber `import`. Alles,
-# was von keiner der beiden Wurzeln erreichbar ist, liegt zwar im
-# Verzeichnis, ist aber NICHT im Abbild -- das sind die Anwendungen
-# unter `kernel/user/` (eigene Programme, je mit eigener Wurzel) und
-# `kernel/app/`.
-#
-# Dieses Werkzeug rechnet die Huellen aus und trennt damit die drei
-# Mengen, die diese Runde auseinanderhalten MUSS:
-#
-#   KERN   -- von kmain.fi erreichbar. Nur diese Dateien wandern.
-#   UPROG  -- von uprog.fi erreichbar (das eingebettete Ring-3-Programm).
-#   AUSSEN -- alles uebrige: Anwendungen, Gegenfassungen (*-aus.fi),
-#             Programme unter user/ und app/.
-#
-# Aufruf: python3 tools/struktur/huelle.py [--liste kern|uprog|aussen]
 
 import os
 import sys

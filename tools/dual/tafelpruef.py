@@ -1,31 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/dual/tafelpruef.py -- DIE TAFEL MIT FREMDEN AUGEN LESEN.
-#
-#   python3 tools/dual/tafelpruef.py <platte.img> [--json]
-#
-# ==================================================================
-# WOFUER
-# ==================================================================
-#
-# `dualkern.fi` rechnet zwei CRC32 und schreibt sie in eine fremde
-# Partitionstafel. Wer nur mit demselben Code nachliest, den er
-# geschrieben hat, prueft, ob er sich selbst wiederfindet -- und nicht,
-# ob das Ergebnis RICHTIG ist.
-#
-# Diese Datei ist die zweite Meinung. Sie liest die Tafel nach der
-# Beschreibung (UEFI 2.10, Abschnitt 5.3) und rechnet beide Summen neu,
-# ohne eine Zeile aus dem Kernel zu benutzen:
-#
-#   * die Signatur "EFI PART" in Sektor 1
-#   * die CRC32 des Kopfes (mit dem eigenen Feld auf Null)
-#   * die CRC32 der ganzen Eintragstafel
-#   * DASSELBE noch einmal fuer die Sicherung am Plattenende
-#   * und die Gegenprobe, dass beide Koepfe aufeinander zeigen
-#
-# `sgdisk` prueft das auch, sagt aber bei einem Fehler nur "invalid".
-# Hier steht, WELCHE der vier Summen nicht stimmt -- und das ist der
-# Unterschied zwischen "kaputt" und "reparierbar".
 import sys
 import zlib
 import json

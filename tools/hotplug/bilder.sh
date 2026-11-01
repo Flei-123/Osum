@@ -1,22 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hotplug/bilder.sh -- DIE BILDER ZUR ABNAHME.
-#
-#   bash tools/hotplug/bilder.sh [ausgabeverzeichnis]
-#
-# Der Explorer laeuft, DANN kommt der Stick, und es entstehen drei
-# Bilder aus derselben laufenden Maschine:
-#
-#   10-ohne.png    die Seitenleiste, bevor der Stick da ist
-#   20-mit.png     dieselbe Seitenleiste, nachdem er gesteckt wurde
-#   30-nachher.png nachdem er ausgeworfen wurde
-#
-# WARUM DREI UND NICHT EINES: ein einzelnes Bild mit einem Eintrag
-# darauf beweist nichts -- der Eintrag koennte immer dagestanden haben.
-# Erst der UNTERSCHIED zwischen 10 und 20 zeigt, dass er WEGEN des
-# Sticks da ist, und der zwischen 20 und 30, dass er wieder verschwindet.
-# Gemessen wird der Unterschied in Zahlen (pruef/bildpruef.py) und nicht
-# im Auge des Betrachters.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -51,29 +33,6 @@ for p in $PROGS; do
 done
 echo "  Programme: $(echo $PROGS | wc -w)"
 
-# DAS ABBILD, GENAU WIE tools/k15/run.sh ES BAUT. Drei Dinge sind
-# nicht wegzulassen, und jedes hat diesen Lauf schon einmal gekostet:
-#   * die SCHRIFTEN unter /lib -- ohne sie "ttf: keine Schrift gefunden"
-#     und ein Fensterserver, der nichts schreiben kann;
-#   * /bin/files@/bin/explorer -- `wigfiles` startet `/bin/files`, und
-#     ohne den Verweis startet gar nichts ("osum: skipped");
-#   * die SPRACHDATEIEN, sonst steht in jedem Bedienelement sein
-#     Schluessel statt seiner Beschriftung.
-# DER /data-BAUM, GENAU WIE tools/k15/run.sh IHN ANLEGT.
-#
-# Er ist NICHT Zierde. Die Seitenleiste baut ihre Orte aus /data,
-# /data/dokumente, /data/bilder, /data/downloads und dem Papierkorb --
-# und `exporte.entry` kopiert den Pfad, BEVOR es prueft, ob es ihn
-# gibt. Auf einem Abbild ohne diesen Baum stirbt der Dateimanager
-# deshalb beim Aufbau der Seitenleiste:
-#
-#   user fault: pid=3 vector=14 err=0x5 cr2=0x0 -- process killed
-#
-# Das ist ein BESTEHENDER Fehler und keiner dieser Runde -- die
-# Gegenprobe mit dem unveraenderten explorer.fi aus main stirbt
-# genauso (siehe docs/HOTPLUG-MEDIA.md, "Was dabei aufgefallen ist").
-# Hier wird er umgangen, nicht behoben: diese Runde baut den
-# Wechseldatentraeger, nicht den Dateimanager.
 python3 tools/k15/tree.py "$ARB/baum" > "$ARB/baum.log" 2>&1 \
     || { echo "tree.py scheitert"; tail -3 "$ARB/baum.log"; exit 1; }
 
@@ -110,23 +69,12 @@ echo "  Stick: FAT32, MBR, eine Datei des Wirts"
 
 # ------------------------------------------------------------ der Lauf
 cat > "$ARB/dreh.txt" <<DREH
-# Der Explorer muss stehen, BEVOR fotografiert wird.
-# 'wm: hold' ist die Marke, nicht 'explorer: ready': der
-# Fensterserver meldet hier, dass er zur Ruhe gekommen ist und ein
-# Foto ein fertiges Bild zeigt. Der Dateimanager schreibt seine
-# 'ready'-Zeile in diesem Lauf nicht auf die serielle Leitung.
 aufzeile wm: hold
-# Der Dateimanager ist 1,6 MB gross und braucht nach dem Start einen
-# Augenblick, bis sein Fenster steht. Ein Foto davor zeigt einen
-# leeren Schreibtisch -- und der Vergleich zweier leerer Bilder ist
-# kein Test (die Lehre aus Runde B3).
 warte 12
 foto $ARB/10-ohne.ppm
-# jetzt der Stick, im Betrieb
 stecke stk $ARB/stick.img
 aufzeile wechsel: kommt
 warte 4
-# Der Explorer liest die Seitenleiste beim Aktualisieren neu: F5.
 taste f5
 warte 6
 foto $ARB/20-mit.ppm
@@ -135,8 +83,6 @@ DREH
 
 cp "$ARB/disk.img" "$ARB/live.img"
 SOCK="$ARB/mon.sock"; rm -f "$SOCK"
-# `wighalt=90`: zwanzig Sekunden (wiglong) reichen nicht -- zwischen
-# den Bildern liegt ein Stick, der aufgezaehlt und eingehaengt wird.
 APP="gfx wm wigfiles wmhold wighalt=90 nokbd nosched noproc nofs usb vfs"
 ( timeout 400 $QEMU_X86 -kernel "$ARB/k.mb" -m 512 -append "$APP" \
     -serial "file:$ARB/seriell.txt" -display none -no-reboot -vga std \

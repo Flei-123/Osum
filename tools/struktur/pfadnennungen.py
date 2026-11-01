@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/struktur/pfadnennungen.py -- WELCHE PFADNENNUNG TUT WEH?
-#
-# `grep -c "kernel/sys.fi" tools/` zaehlt 88 Treffer. Die allermeisten
-# stehen in KOMMENTAREN ("siehe kernel/sys.fi") und tun beim
-# Verschieben gar nichts -- sie werden nur ungenau. Was wirklich
-# bricht, ist die Nennung in AUSFUEHRBAREM Code: ein `grep`, ein `sed`,
-# ein `cp`, ein Dateiname in einer Python-Liste.
-#
-# Dieses Werkzeug trennt beides, damit die Entscheidung "verschieben
-# oder liegenlassen" auf der richtigen Zahl steht.
-#
-# REGEL: eine Zeile gilt als AUSFUEHRBAR, wenn sie nicht mit einem
-# Kommentarzeichen beginnt (# in sh/py, // in Firn) und der Pfad nicht
-# nur in einer Zeichenkette eines Kommentars steht. Das ist bewusst
-# grob in Richtung "lieber zu viel melden als zu wenig".
-#
-# Aufruf:
-#   python3 tools/struktur/pfadnennungen.py            # Uebersicht
-#   python3 tools/struktur/pfadnennungen.py <modul>    # Fundstellen
 
 import os
 import re

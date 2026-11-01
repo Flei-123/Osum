@@ -53,23 +53,11 @@ def main(argv):
             print("weg %s" % pfad)
         return ino
 
-    # DIE VIER STELLEN, um die es geht.
     alt = zeig("/data/alpha.txt")
     neu = zeig("/data/bilder/alpha.txt")
     zeig("/data/notizen")
     zeig("/data/beta.txt")
 
-    # DIE INODE. Sie ist der ganze Unterschied zwischen "umgehaengt"
-    # und "kopiert und geloescht": beim Umhaengen bleibt die Nummer.
-    # Verglichen wird gegen die Nummer, die `mkfs` vergeben hat -- die
-    # steht nicht mehr zur Verfuegung, sobald die Datei weg ist, also
-    # nimmt der Laeufer den zweiten Weg: die Nummer der Datei am ZIEL
-    # gegen die Nummer, die eine NICHT bewegte Nachbardatei hat. Ist
-    # alpha kopiert worden, bekam die Kopie eine FRISCHE Inode --
-    # also eine, die groesser ist als alle, die mkfs vergeben hat.
-    #
-    # Genauer und ohne Raten geht es mit der Nummer aus dem Abbild VOR
-    # dem Lauf; die reicht `run.sh` als zweites Argument herein.
     if len(argv) > 2:
         try:
             vorher = int(argv[2])

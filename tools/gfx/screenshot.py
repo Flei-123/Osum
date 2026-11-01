@@ -31,8 +31,6 @@ def main():
     if os.path.exists(ziel):
         os.unlink(ziel)
 
-    # Auf den Monitor warten: QEMU legt den Socket beim Start an, und der
-    # Testlaeufer ruft hier unter Umstaenden frueher.
     s = None
     bis = time.time() + frist
     while time.time() < bis:
@@ -56,8 +54,6 @@ def main():
             pass
         s.sendall(("screendump %s\n" % ziel).encode())
 
-        # Warten, bis die Datei steht UND ihre Groesse sich nicht mehr
-        # aendert.
         letzte = -1
         ruhig = 0
         bis = time.time() + frist

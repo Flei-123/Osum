@@ -105,7 +105,6 @@ class Qmp:
         if os.path.exists(ziel):
             os.unlink(ziel)
         a = self.befehl("screendump", filename=ziel)
-        # warten, bis die Datei steht und sich nicht mehr aendert
         alt = -1
         gleich = 0
         bis = time.time() + 20
@@ -150,16 +149,12 @@ def main():
 
     px, py = W // 2, H // 2
     if opt["heim"] == "1":
-        # Heim: 80 Schritte a -120 in beiden Achsen, mit 10 ms Abstand,
-        # damit jeder Schritt in einen eigenen Bericht faellt. Danach
-        # steht der Zeiger am Anschlag (0,0), egal wo er vorher war.
         for _ in range(80):
             q.rel(-120, -120)
             time.sleep(0.010)
         time.sleep(0.3)
         px, py = 0, 0
 
-    # DER WEG: eine Lissajous-Figur ueber die ganze Flaeche, mit Rand.
     ax = W / 2 - 40
     ay = H / 2 - 40
     cx = W / 2
@@ -176,7 +171,6 @@ def main():
     t0 = time.perf_counter()
     for i in range(n_soll):
         t = i * dt
-        # auf den Takt warten
         soll = t0 + t
         jetzt = time.perf_counter()
         if soll > jetzt:
@@ -192,7 +186,6 @@ def main():
             px += dx
             py += dy
             gesendet += 1
-        # Klick: nieder, und 40 ms spaeter wieder hoch
         if klick_unten and t - klick_seit >= 0.040:
             q.taste(False, "left")
             klick_unten = False

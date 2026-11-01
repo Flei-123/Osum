@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/clockwork/acceptance.sh -- DIE ABNAHME DER RUNDE UHRWERK.
-#
-# Fuenf Laeufe je Kernzahl, und in jedem wird GEZAEHLT statt geglaubt:
-#
-#   1. KEIN PANIK-ABBRUCH. Beendigungscode und die Meldungen des Kerns.
-#   2. DIE LEISTE KOMMT AN. `null=` ist die Zahl der Pushs, die NICHTS
-#      hinuebergebracht haben -- der Fehler dieser Runde. Sie MUSS null
-#      sein, und `px=` MUSS gleich `soll=` sein.
-#   3. DIE EINGABE LEBT NOCH. Nach der Ruhephase gehen echte
-#      Mauspakete und Tastendruecke hinein; die Zahlen des
-#      Eingabepulses (`kl=` Klicks, `bew=` Bewegungen) muessen steigen.
-#      Eine Abhilfe, die das Bild rettet und die Maus kostet, ist keine.
-#
-#   bash tools/clockwork/acceptance.sh <baudir> <ergebnisdir> [laeufe]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -54,8 +39,6 @@ lauf() { # smp nr mit_eingabe
     done
     sleep 8
     if [ "$eing" = ja ]; then
-        # ECHTE EINGABE, nach der Ruhe. Die Gegenprobe zu "die Maus
-        # bleibt fluessig".
         cat > "$ERG/$n.cmd" <<'EOM'
 warte 0.5
 mouse_move 300 200

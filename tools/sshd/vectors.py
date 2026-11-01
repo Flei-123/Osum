@@ -80,9 +80,6 @@ def t_sha256():
     a = ask(q)
     for m, got in zip(msgs, a):
         check("sha256(%d)" % len(m), got, hashlib.sha256(m).hexdigest())
-    # Die zwei Vektoren, die in FIPS 180-4 mit ihrem Ergebnis abgedruckt
-    # sind -- damit auch dann etwas auffiele, wenn hashlib und dieser
-    # Code auf dieselbe Weise falsch waeren.
     check("FIPS abc", a[1],
           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
     check("FIPS leer", a[0],
@@ -139,14 +136,12 @@ def mpint(raw):
 def t_mpint():
     cases = [b"", b"\x00", b"\x00" * 32, b"\x01", b"\x80", b"\xff",
              b"\x00\x80", b"\x7f\xff", b"\x00\x00\x01\x00"]
-    # Die Beispiele, die RFC 4251 Abschnitt 5 abdruckt
     cases.append(bytes.fromhex("09a378f9b2e332a7"))
     rng = random.Random(31337)
     for _ in range(300):
         n = rng.randrange(1, 40)
         cases.append(bytes(rng.getrandbits(8) for _ in range(n)))
     for _ in range(64):
-        # genau die Faelle, auf die es ankommt: das oberste Bit gesetzt
         cases.append(bytes([rng.randrange(128, 256)])
                      + bytes(rng.getrandbits(8) for _ in range(31)))
     q = ["mpint %s" % hx(c) for c in cases]
@@ -181,12 +176,10 @@ def t_b64():
     a = ask(q)
     for c, got in zip(cases, a):
         check("b64d(%d)" % len(c), got, hx(c))
-    # eine echte authorized_keys-Zeile
     key = os.urandom(32)
     blob = (b"\x00\x00\x00\x0bssh-ed25519" + b"\x00\x00\x00\x20" + key)
     a = ask(["b64d %s" % hx(base64.b64encode(blob))])
     check("b64d des Schluessel-Blobs", a[0], hx(blob))
-    # ein Zeichen, das nicht hineingehoert, muss abgelehnt werden
     a = ask(["b64d %s" % hx(b"AAAA!AAA")])
     check("b64d lehnt ein fremdes Zeichen ab", a[0], "FAIL")
     print("  Base64: %d Faelle hin und zurueck gegen base64" % (3 * len(cases)))
@@ -273,7 +266,6 @@ def t_aead():
     print("  chacha20-poly1305@openssh.com: %d Pakete Oktett fuer Oktett "
           "gegen cryptography" % len(q))
 
-    # ...und wieder herein. Das Orakel entschluesselt, was Python gebaut hat.
     q = ["openp %s %d %s" % (hx(k), s, w)
          for (k, s, p, pd), w in zip(cases, want)]
     a = ask(q)
@@ -281,8 +273,6 @@ def t_aead():
         check("open #%d" % i, got, hx(cases[i][2]))
     print("  ...und dieselben %d Pakete wieder aufgemacht" % len(q))
 
-    # DIE GEGENPROBE: ein einziges gekipptes Bit muss abgelehnt werden --
-    # an jeder Stelle des Pakets, auch im Laengenfeld und im Merkmal.
     q, spots = [], []
     for i, ((k, s, p, pd), w) in enumerate(zip(cases[:25], want[:25])):
         raw = bytearray(binascii.unhexlify(w))
@@ -293,8 +283,6 @@ def t_aead():
     a = ask(q)
     bad = 0
     for i, got in enumerate(a):
-        # Ein Kippen im LAENGENFELD ergibt eine andere Laenge; das Orakel
-        # sagt dann ebenfalls FAIL (die Laenge passt nicht zum Puffer).
         if got != "FAIL":
             bad += 1
             fails.append("gekipptes Bit an %d wurde ANGENOMMEN" % spots[i])
@@ -303,7 +291,6 @@ def t_aead():
     print("  Gegenprobe: %d Pakete mit EINEM gekippten Bit, %d angenommen "
           "(erwartet 0)" % (len(a), bad))
 
-    # Die falsche Paketnummer ist derselbe Fehler und muss ebenso auffallen.
     q = ["openp %s %d %s" % (hx(k), s + 1, w)
          for (k, s, p, pd), w in zip(cases[:25], want[:25])]
     a = ask(q)
@@ -325,7 +312,6 @@ def t_pad():
     a = ask(q)
     for i, got in enumerate(a):
         check("padc #%d" % i, got, want[i])
-    # Und die Regel, die dahintersteht, noch einmal ausdruecklich:
     for plen in range(0, 300):
         p = padc(True, plen)
         assert p >= 4 and (1 + plen + p) % 8 == 0

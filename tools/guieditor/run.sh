@@ -44,7 +44,6 @@ const TEXT: u64 = 0x1234
 EOF
 cat > "$ZWEI" <<'EOF'
 #!/bin/sh
-# zwei.sh -- die zweite Datei fuer den Reitertest
 echo "Hallo Welt"
 for i in 1 2 3; do
     echo "Zeile $i"   # eine Schleife
@@ -171,13 +170,10 @@ python3 - "$SHOTS/ab-zeig2.png" > "$OUT/farben.txt" 2>&1 <<'PY'
 import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert("RGB")
-# der Textbereich des Fensters (aus der Geometrie dieser Runde)
 aus = im.crop((115, 170, 1020, 430))
 zaehl = {}
 for p in aus.getdata():
     zaehl[p] = zaehl.get(p, 0) + 1
-# Alles, was oft genug vorkommt, um Schrift und nicht Kantenglaettung
-# zu sein, und dunkler als der Hintergrund ist.
 farben = [c for c, n in zaehl.items() if n > 120 and sum(c) < 600]
 print("farben=%d" % len(farben))
 for c in sorted(farben, key=lambda c: -zaehl[c])[:8]:

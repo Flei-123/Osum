@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# tools/vgpu/paar.sh -- EIN PAAR LAEUFE: alter Weg gegen neuen, auf
-# DERSELBEN Maschine, mit DEMSELBEN Kern und DERSELBEN Kommandozeile.
-# Der einzige Unterschied ist das Wort `novgpu`.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh >/dev/null 2>&1

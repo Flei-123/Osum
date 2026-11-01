@@ -63,7 +63,6 @@ LINUX_URL = ("https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/"
              "linux.git/plain/drivers/net/ethernet/realtek/r8169_main.c")
 LINUX_CACHE = "/tmp/r8169_linux.c"
 
-# UNSERE Konstante  ->  der Name im Linux-Treiber.
 OFFSETS = {
     "R_INTCFG0_25": "INT_CFG0_8125",
     "R_IMR25": "IntrMask_8125",
@@ -73,11 +72,6 @@ OFFSETS = {
     "R_QNUMCTRL25": "Q_NUM_CTRL_8125",
 }
 
-# Die Stellen, an denen sich BREITE oder WERT zwischen den Spielarten
-# unterscheiden. Das ist der Teil, den ein reiner Adressvergleich nicht
-# faengt -- und der Teil, in dem der Fehler sass.
-#
-#   funktion, unsere Konstante, erwartete Breite, erwarteter Wert, Beleg
 ZUGRIFFE = [
     ("tx_kick", "R_TPPOLL25", 16, 1,
      "rtl8169_doorbell: RTL_W16(tp, TxPoll_8125, BIT(0))"),
@@ -87,10 +81,6 @@ ZUGRIFFE = [
      "IntrStatus_8125 ist 32 Bit breit"),
 ]
 
-# Die Stelle, an der Linux und dieser Treiber BEWUSST auseinandergehen.
-# Sie steht hier namentlich, damit sie nicht in einer Sammelausnahme
-# verschwindet -- und damit jemand mit einer echten Karte weiss, wo er
-# zuerst nachsehen muss.
 OFFEN = {
     "INTCFG0_EN": (
         "Wir schreiben INT_CFG0 (0x34) Bit 0 = 1, um den "

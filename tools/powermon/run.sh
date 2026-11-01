@@ -135,29 +135,9 @@ else
     bad "SYS_OSUM_PMON = ${v:-missing} lies OUTSIDE 1830..1839"
 fi
 
-# THE NUMBERS OF THIS ROUND APPEAR NOWHERE ELSE. This is the situation
-# out of which all four kdata collisions of this project grew: a dozen
-# rounds on the same tree at the same time. Round K18 learned to look for
-# CALL NUMBERS and not for any occurrence of the digits -- a buffer
-# length of 1832 collides with nothing.
-# RUNDE ROTABSCHNITTE: DIE FRAGE WAR FALSCH GESTELLT.
-# Gesucht ist eine KOLLISION -- zwei Runden, die DIESELBE Nummer fuer
-# VERSCHIEDENE Dinge vergeben. Eine Liste erlaubter Dateien misst das
-# nicht: sie faellt um, sobald ein Programm den Aufruf BENUTZT. Genau
-# das ist passiert -- `kernel/user/taskmgr.fi:526` schreibt
-# `const SYS_PMON: u64 = 1830`, denselben Wert wie `kernel/sys.fi`,
-# und holt darueber den Prozessnamen (Art 2). Ein Benutzer ist keine
-# Kollision; er ist der Zweck der Nummer.
-# Gezaehlt wird deshalb, welche VERSCHIEDENEN WERTE unter dem Namen
-# vergeben sind. Stimmen alle Stellen ueberein, ist die Nummer
-# eindeutig -- egal wie viele Programme sie benutzen. Weicht eine ab,
-# steht sie mit Datei und Wert da.
 werte=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]*PMON[A-Za-z0-9_]*: u64 = [0-9]+' kernel/ \
     | sed -E 's/.*= ([0-9]+).*/\1/' | sort -u)
 anzahl=$(printf '%s\n' "$werte" | grep -c . || true)
-# Und die Gegenprobe in dieselbe Richtung: steht in 1830..1839 ein
-# Aufruf, der NICHT PMON heisst, dann hat sich eine fremde Runde
-# bedient. Das ist die Kollision, die die Zeile sucht.
 fremd=$(grep -ran --include='*.fi' --include='*.s' -E '^const SYS_[A-Za-z0-9_]+: u64 = 183[0-9]' kernel/ \
     | grep -v 'PMON' || true)
 if [ "$anzahl" = "1" ] && [ -z "$fremd" ]; then

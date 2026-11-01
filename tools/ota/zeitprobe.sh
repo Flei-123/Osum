@@ -1,23 +1,5 @@
 #!/usr/bin/env bash
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/marke-env.sh"
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/ota/zeitprobe.sh -- WANN GENAU PASSIERT WAS BEIM EINSPIELEN.
-#
-# WOZU DAS DA IST: Test (e) schiesst die Maschine mitten im Einspielen
-# ab. Damit das etwas misst, muessen die Schuesse dort liegen, wo wirklich
-# geschrieben wird -- nicht in der Firmware. Im ersten vollen Lauf lagen
-# alle dreissig Schuesse zwischen 1 und 16 Sekunden, und der Rechner war
-# nach 16 Sekunden noch nicht einmal mit dem Hochfahren fertig: dreissig
-# von dreissig Durchlaeufen endeten auf "alt", KEIN EINZIGER auf "neu".
-# Dreissig gruene Haken, die nichts belegen.
-#
-# Diese Probe faehrt EINEN sauberen Lauf von `ota apply` und stempelt
-# jede serielle Zeile mit der Zeit seit dem Start von QEMU. Daraus kommt
-# das Fenster fuer die Schuesse. Ausgabe auf der Standardausgabe:
-#
-#     MS <Tab> <Zeile>            fuer jede Zeile
-#   und am Ende auf Deskriptor 3 bzw. in --marken:
-#     T_NETZ=..  T_SCHREIB=..  T_FERTIG=..  T_ENDE=..
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
@@ -40,8 +22,6 @@ mcopy -o -i "$OUT/zp.img@@1048576" "$OUT/zp.conf" ::/limine.conf 2>/dev/null
 FIFO=$OUT/zp.fifo
 rm -f "$FIFO"; mkfifo "$FIFO"
 
-# Der Leser stempelt jede Zeile. Er muss VOR QEMU laufen, sonst blockiert
-# das Oeffnen der Roehre.
 python3 - "$FIFO" "$OUT/zp.stempel" <<'PY' &
 import sys, time
 fifo, ziel = sys.argv[1], sys.argv[2]

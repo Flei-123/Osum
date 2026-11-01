@@ -75,18 +75,12 @@ cat > "$OUT/dreh.txt" <<'DREH'
 warteauf explorer: ready || 240
 warte 8
 foto 20-vorher
-# --- PUNKT 5 ZUERST: ABLEGEN IM SELBEN ORDNER TUT NICHTS.
-#     `notizen` (Zeile 1) auf `beta.txt` (Zeile 3) -- Ziel ist damit
-#     /data, und dort liegt `notizen` schon.
 ziehvon ftabzeile1 ftabzeile3
 warte 6
 foto 21-leerlauf
-# --- PUNKT 2/3: DIE TAT. alpha.txt (Zeile 2) auf bilder (Zeile 0).
 ziehvon ftabzeile2 ftabzeile0
 warte 8
 foto 22-abgelegt
-# --- PUNKT 4: AUF EINE DATEI ABGELEGT -> in den ANGEZEIGTEN Ordner.
-#     Erst in `bilder` hineingehen, dort liegt jetzt alpha.txt.
 doppelauf ftabzeile0
 warteauf explorer: cd /data/bilder || 60
 warte 5

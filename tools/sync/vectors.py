@@ -177,7 +177,6 @@ def t_hkdf():
     got = ask(q)
     for (c, g) in zip(faelle, got):
         gleich("hkdf expand", g, c[5])
-    # und ein paar Zufallsfaelle gegen die Python-Nachrechnung
     q, w = [], []
     for _ in range(5):
         prk = os.urandom(32)
@@ -226,8 +225,6 @@ def t_kette():
            ask(["open %s %s %s" % (hx(KI), hx(name), bad.hex())])[0], "FAIL")
     gleich("ein fremder Name wird abgelehnt",
            ask(["open %s %s %s" % (hx(KI), hx(os.urandom(32)), ct)])[0], "FAIL")
-    # zweimal derselbe Klartext -> zweimal dieselben Oktette. Das ist die
-    # Doppelspeicherung, und ohne sie waere der ganze Speicher sinnlos.
     ct2 = ask(["seal %s %s %s" % (hx(KI), hx(name), hx(blk))])[0]
     gleich("derselbe Klartext gibt denselben Geheimtext", ct, ct2)
     print("  die Kette: Bund, Namen, Siegel%s"
@@ -245,7 +242,6 @@ def t_code():
         gleich("code zurueck", ask(["rcdec %s" % hx(code.encode())])[0], k.hex())
         gleich("klein geschrieben geht auch",
                ask(["rcdec %s" % hx(code.lower().encode())])[0], k.hex())
-        # ein Tippfehler an einer zufaelligen Stelle
         i = random.choice([j for j in range(65) if code[j] != "-"])
         a = code[i]
         b = random.choice([c for c in "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -253,12 +249,6 @@ def t_code():
         kaputt = code[:i] + b + code[i + 1:]
         gleich("ein Tippfehler faellt auf",
                ask(["rcdec %s" % hx(kaputt.encode())])[0], "FAIL")
-    # ERSCHOEPFEND, und nicht auf gut Glueck. Zwanzig zufaellige Tippfehler
-    # haben genau EINEN Fall uebersehen: das LETZTE Zeichen traegt nur zwei
-    # bedeutsame Bit, seine unteren drei sind Fuellung. Wer sie nicht
-    # prueft, laesst ein Achtel aller Vertipper im letzten Zeichen durch --
-    # ein Fehler, der bei Stichproben fast immer unentdeckt bleibt. Also:
-    # JEDE der 55 Stellen, JEDES der 31 anderen Zeichen. 1705 Faelle.
     k = os.urandom(32)
     code = bytes.fromhex(ask(["rcenc %s" % hx(k)])[0]).decode()
     stellen = [j for j in range(65) if code[j] != "-"]

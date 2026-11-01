@@ -1,27 +1,4 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: GPL-2.0-only
-# tools/hotplug/bild-term.sh -- DIE BILDER: DER STICK IM TERMINALFENSTER.
-#
-#   bash tools/hotplug/bild-term.sh [ausgabeverzeichnis]
-#
-# WARUM NICHT IM DATEIMANAGER: der stirbt in diesem Baum beim Aufbau
-# seiner Seitenleiste, und zwar SEIT VOR DIESER RUNDE -- die Gegenprobe
-# mit dem unveraenderten `explorer.fi` aus `main` stirbt genauso
-# (docs/HOTPLUG-MEDIA.md, "Ein bestehender Fehler"). Ein Bild von einem
-# Programm, das nicht laeuft, gibt es nicht.
-#
-# Was stattdessen fotografiert wird, ist derselbe Weg eine Schicht
-# tiefer und auf demselben Schreibtisch: eine SHELL IM FENSTER
-# (`wmshell`), in der `eject` laeuft -- dasselbe Programm, dasselbe
-# Aufruf 1704, dieselbe Tafel des Kerns, die auch die Seitenleiste
-# liest. Drei Bilder aus EINER laufenden Maschine:
-#
-#   10-vorher.png   `eject` sagt: kein Wechseldatentraeger da
-#   20-steckt.png   nach dem Anstecken: /medien/usb0 mit Groesse
-#   30-danach.png   nach dem Auswerfen: wieder leer
-#
-# Der UNTERSCHIED zwischen den dreien ist die Zusage. Ein einzelnes
-# Bild mit einer Zeile darauf koennte immer dagestanden haben.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -78,14 +55,6 @@ dd if="$ARB/stick.part" of="$ARB/stick.img" bs=512 seek=2048 conv=notrunc status
 rm -f "$ARB/stick.part"
 echo "  Stick: FAT32, MBR, eine Datei des Wirts"
 
-# ------------------------------------------------------------ der Lauf
-#
-# DIE SHELL IM FENSTER BEKOMMT IHR SKRIPT UEBER `script=` (`wmshell`).
-# Getippt wird NICHT: eine Tastatur im Fenster ist eine eigene Zusage
-# (Runde SYSTEMBUS, Abschnitt 9, hat sie ausdruecklich NICHT erbracht),
-# und diese Runde misst den Wechseldatentraeger und nicht den Tastenweg.
-# Das Skript haelt zwischen den Schritten an, damit jedes Bild einen
-# fertigen Bildschirm zeigt.
 SKRIPT='eject;sleep 12;ls /medien/usb0;eject;sleep 12;cat /medien/usb0/host.txt;eject 0;eject;sleep 8'
 
 cat > "$ARB/dreh.txt" <<DREH
