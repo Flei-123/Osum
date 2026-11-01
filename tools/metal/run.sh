@@ -165,7 +165,7 @@ hat "$TMPD/4.txt" "1000:0060" "und mit SEINEN NUMMERN genannt"
 hat "$TMPD/4.txt" "MegaRAID" "und mit seinem NAMEN"
 hat "$TMPD/4.txt" 'set BIOS "SATA Mode" to AHCI' \
     "und es steht daneben, was zu tun ist"
-hat "$TMPD/4.txt" "SD/eMMC controller" "der SD-Regler ebenfalls"
+hat "$TMPD/4.txt" "SD/eMMC-Regler" "der SD-Regler ebenfalls"
 hat "$TMPD/4.txt" "blkdev: reihenfolge: nvme > ahci > ide" \
     "und die Reihenfolge, in der gesucht wird, steht in EINER Zeile"
 
