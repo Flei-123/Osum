@@ -1,47 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/cap.fi -- Handles statt Umgebungsautoritaet.
-//
-// HERKUNFT. Dieses Modul ist die Portierung von OrientOS' nativer ABI
-// (`libs/osum-abi-native/`, Rust, no_std) nach Firn. Uebernommen sind:
-// `rights.rs` (die zehn Rechtebits), `handle.rs` (Slot + Generation,
-// Objektarten), `table.rs` (die Handle-Tabelle eines Prozesses mit
-// Wuerfelwert) und die Fehlerliste aus `lib.rs`. Die Zahlen sind
-// ABSICHTLICH dieselben -- ein Programm, das gegen OrientOS' native ABI
-// uebersetzt wurde, sieht hier dieselben Bits.
-//
-// WARUM UEBERHAUPT. Die POSIX-Schicht dieses Kernels (`sys.fi`, Runde K4)
-// arbeitet mit UMGEBUNGSAUTORITAET: ein Prozess bekommt bei seiner
-// Erzeugung die Deskriptoren 0, 1, 2 geschenkt, `open` durchsucht einen
-// globalen Wurzelbaum, und wer eine Zahl raet, die zufaellig ein offener
-// Deskriptor ist, darf damit arbeiten. Das ist die Bauart von 1970, und
-// sie ist der Grund, warum jedes Unix nachtraeglich Rechte, Namensraeume
-// und Sandkaesten daraufsetzen musste.
-//
-// Hier gilt das Gegenteil, und es sind drei Saetze:
-//
-//   1. EINE FRISCHE TABELLE IST LEER. Wer etwas darf, hat es explizit
-//      uebergeben bekommen. Es wird nichts geerbt.
-//   2. EIN HANDLE IST SLOT + GENERATION. Ein geschlossenes Handle trifft
-//      nach Wiederverwendung des Platzes niemals das neue Objekt.
-//   3. RECHTE KOENNEN NUR KLEINER WERDEN. `restrict` ist eine
-//      Schnittmenge; es gibt keinen Weg, ein Recht hinzuzufuegen.
-//
-// Dazu kommt der Wuerfelwert (`nonce`) der Tabelle: er wird in das
-// Generationsfeld eingerechnet, damit derselbe Platz in zwei Prozessen
-// NICHT denselben Handle-Wert ergibt. Ein abgehoerter Wert aus einem
-// fremden Prozess ist damit auch dann kein Treffer, wenn dort zufaellig
-// derselbe Platz belegt ist.
-//
-// WO DER ZUSTAND LIEGT. Stufe 0 von Firn hat keine globalen
-// veraenderlichen Variablen (SPEC 14, Punkt 5). Wie ueberall in diesem
-// Kernel liegt der Zustand deshalb in der uebergebenen Datenregion:
-// `kstate.CAP_OFF` sind 32 Tabellen zu je 16 Plaetzen zu je 32 Oktetten,
-// `kstate.CAP_NONCE_OFF` die Wuerfelwerte.
-//
-// ARITHMETIK. Seit Runde 72 sind `+`, `-` und `*` geprueft und panicken
-// beim Ueberlauf. Wo hier eine Zweierkomplement-Umdeutung gemeint ist --
-// die Generation, die ueberlaeuft, der Fehlercode, der negativ wird, der
-// Mischwert des Wuerfels -- steht `+%`, `-%` oder `*%`.
 
 import lib.kstate
 
@@ -62,14 +18,7 @@ export {
     kind_at, rights_at, object_at, handle_at
 }
 
-// Die Fassung der ABI, die `SYS_CAP_VERSION` zurueckgibt.
 const ABI_VERSION: u64 = 1
-
-// ----------------------------------------------------------- die Rechte
-//
-// Wortgleich zu `libs/osum-abi-native/src/rights.rs`. Zehn Bits, und
-// R_ALL ist genau ihre Vereinigung -- ein Bit, das hier nicht steht, ist
-// kein Recht, sondern Muell, und wird beim Weitergeben weggefiltert.
 
 const R_NONE: u64 = 0
 const R_READ: u64 = 1
@@ -82,61 +31,38 @@ const R_MANAGE: u64 = 64
 const R_CREATE: u64 = 128
 const R_MAP: u64 = 256
 const R_WAIT: u64 = 512
-const R_ALL: u64 = 1023 // 0x3ff
-
-// -------------------------------------------------------- die Objektarten
-//
-// Wortgleich zu `ObjectKind` in `handle.rs`. Die 0 ist keine Art: sie
-// bedeutet in der Tabelle "Platz frei", und eine frisch genullte
-// Datenregion ist damit eine leere Tabelle.
+const R_ALL: u64 = 1023
 
 const K_NONE: u64 = 0
-const K_STREAM: u64 = 1 // Byteorientierter Strom (Konsole, Pipe-Ende)
-const K_MEMORY: u64 = 2 // Speicherobjekt, einblendbar
-const K_CHANNEL: u64 = 3 // Nachrichtenkanal
-const K_PORT: u64 = 4 // Wartepunkt -- ersetzt Signale
+const K_STREAM: u64 = 1
+const K_MEMORY: u64 = 2
+const K_CHANNEL: u64 = 3
+const K_PORT: u64 = 4
 const K_PROCESS: u64 = 5
 const K_THREAD: u64 = 6
-const K_NAMESPACE: u64 = 7 // Namensraum-Knoten, kein globaler Wurzelbaum
+const K_NAMESPACE: u64 = 7
 const K_TIMER: u64 = 8
-// RUNDE K12. Eine GASTMASCHINE ist eine Objektart wie jede andere. Das
-// ist keine Bequemlichkeit, sondern die einzige Bauart, die zu diesem
-// Kernel passt: wer eine fremde Maschine anhalten oder abraeumen darf,
-// darf es, weil sein HANDLE dieses Recht traegt -- und nicht, weil er
-// zufaellig die richtige Zahl geraten hat. Die Objektnummer ist der
-// Platz in `hv.fi`, also wieder eine ZAHL und nie ein Zeiger.
 const K_VM: u64 = 9
 const K_MAX: u64 = 9
 
-// ------------------------------------------------------- die Fehlerwerte
-//
-// Positive Zahlen hier, negativ auf dem Rueckweg (`err`). Es sind die
-// Werte von `Error` in `libs/osum-abi-native/src/lib.rs` und BEWUSST
-// nicht die von `kernel/errno.fi`: die POSIX-Schicht uebersetzt in
-// Linux-Nummern, die native ABI tut das nicht. Zwei ABIs, zwei Listen --
-// eine gemeinsame waere eine Luege ueber beide.
-
-const E_BADHANDLE: u64 = 1 // Handle gibt es nicht (oder nicht hier)
-const E_RIGHTS: u64 = 2 // Handle ja, Recht nein
+const E_BADHANDLE: u64 = 1
+const E_RIGHTS: u64 = 2
 const E_NOTFOUND: u64 = 3
 const E_INVALID: u64 = 4
-const E_EXHAUSTED: u64 = 5 // Tabelle voll
+const E_EXHAUSTED: u64 = 5
 const E_WRONGTYPE: u64 = 6
 const E_WOULDBLOCK: u64 = 7
 const E_CLOSED: u64 = 8
-const E_UNSUPPORTED: u64 = 9 // vom Kernel (noch) nicht angeboten
+const E_UNSUPPORTED: u64 = 9
 
-// ------------------------------------------------------------ die Tabelle
-
-const MAX_CAPS: u64 = 16 // Plaetze je Prozess
+const MAX_CAPS: u64 = 16
 const CAP_BYTES: u64 = 32
 
-const C_GEN: u64 = 0 // Generation dieses Platzes (lebt weiter)
-const C_KIND: u64 = 8 // 0 = frei
+const C_GEN: u64 = 0
+const C_KIND: u64 = 8
 const C_RIGHTS: u64 = 16
-const C_OBJ: u64 = 24 // Kennung des Objekts -- eine ZAHL, nie ein Zeiger
+const C_OBJ: u64 = 24
 
-// Das ungueltige Handle. Anders als bei POSIX ist die 0 kein "stdin".
 const HANDLE_NONE: u64 = 0
 
 fn slot_addr(task: u64, i: u64) -> u64 {
@@ -147,15 +73,10 @@ fn nonce_addr(task: u64) -> u64 {
     return kstate.CAP_NONCE_OFF + task * 8
 }
 
-// ------------------------------------------------------ Rechte rechnen
-
 fn rights_contains(have: u64, need: u64) -> bool {
     return (have & need) == need
 }
 
-// Der EINZIGE erlaubte Weg, Rechte bei der Weitergabe zu aendern.
-// Schnittmenge -- sie kann nie eines hinzufuegen, und unbekannte Bits
-// fallen mit `R_ALL` als Maske heraus.
 fn rights_restrict(have: u64, mask: u64) -> u64 {
     return (have & mask) & R_ALL
 }
@@ -163,11 +84,6 @@ fn rights_restrict(have: u64, mask: u64) -> u64 {
 fn rights_union(a: u64, b: u64) -> u64 {
     return (a | b) & R_ALL
 }
-
-// ------------------------------------------------------ Handles rechnen
-//
-// 64 Bit: unten Slot+1, oben Generation. Das +1 haelt die 0 fuer
-// HANDLE_NONE frei -- Platz 0 ist gueltig, das Handle 0 nie.
 
 fn handle_make(slot: u64, generation: u64) -> u64 {
     return ((generation & 0xFFFFFFFF) << 32) | ((slot +% 1) & 0xFFFFFFFF)
@@ -185,23 +101,14 @@ fn handle_valid(h: u64) -> bool {
     return (h & 0xFFFFFFFF) != 0
 }
 
-// Ein Fehler auf dem Rueckweg: das Zweierkomplement in einem
-// vorzeichenlosen Register. `0 -% e` und nichts anderes -- `-` waere seit
-// Runde 72 geprueft und wuerde hier zu Recht panicken.
 fn err(e: u64) -> u64 {
     return 0 -% e
 }
 
-// Die Vereinbarung der nativen ABI: >= 0 ist ein Ergebnis, < 0 ein
-// Fehler. Es gibt nur neun Fehler, also reicht das obere Bit.
 fn is_err(v: u64) -> bool {
     return (v >> 63) != 0
 }
 
-// ------------------------------------------------------- der Wuerfelwert
-//
-// Aus der pid, damit zwei Prozesse denselben Platz nicht mit demselben
-// Handle-Wert treffen. Multiplikation ueberlaeuft mit Absicht: `*%`.
 fn nonce_for(pid: u64) -> u64 {
     var acc: u64 = pid +% 0x9E3779B97F4A7C15
     acc = (acc ^ (acc >> 30)) *% 0xBF58476D1CE4E5B9
@@ -223,12 +130,6 @@ fn set_nonce(state: u64, task: u64, nonce: u64) {
     kstate.set(state, nonce_addr(task), nonce & 0xFFFFFFFF)
 }
 
-// ---------------------------------------------------------- die Zugriffe
-
-// Eine frische Tabelle ist LEER. Das ist keine Bequemlichkeit, das ist
-// die erste Zusage dieses Moduls: kein Erben, keine geschenkten
-// Deskriptoren. Die Generationen werden mit geloescht -- ein Prozess, der
-// einen Platz erbt, erbt sonst dessen Zaehlerstand.
 fn clear_task(state: u64, task: u64, pid: u64) {
     if task >= kstate.MAX_TASKS {
         return
@@ -245,10 +146,6 @@ fn clear_task(state: u64, task: u64, pid: u64) {
     set_nonce(state, task, nonce_for(pid))
 }
 
-// Traegt ein Objekt ein und liefert das frische Handle, oder HANDLE_NONE,
-// wenn kein Platz mehr frei ist. Die Generation zaehlt bei JEDER Belegung
-// hoch, nicht beim Freigeben -- damit unterscheidet sich das neue Handle
-// immer vom alten.
 fn insert(state: u64, task: u64, kind: u64, rights: u64, object: u64) -> u64 {
     if task >= kstate.MAX_TASKS {
         return HANDLE_NONE
@@ -275,10 +172,6 @@ fn insert(state: u64, task: u64, kind: u64, rights: u64, object: u64) -> u64 {
     return HANDLE_NONE
 }
 
-// Der Platz hinter einem Handle, oder MAX_CAPS. Falscher Index, falsche
-// Generation, fremder Wuerfelwert und das ungueltige Handle enden alle
-// hier -- und der Aufrufer macht daraus E_BADHANDLE. Ein Handle aus einem
-// anderen Prozess faellt an der Generation ODER am Wuerfelwert.
 fn find(state: u64, task: u64, h: u64) -> u64 {
     if task >= kstate.MAX_TASKS {
         return MAX_CAPS
@@ -322,8 +215,6 @@ fn object_at(state: u64, task: u64, i: u64) -> u64 {
     return kstate.get(state, slot_addr(task, i) + C_OBJ)
 }
 
-// Das Handle, das zu diesem Platz gehoert -- fuer Meldungen und fuer die
-// Gegenprobe, dass ein Platz wirklich ein anderes Handle bekommen hat.
 fn handle_at(state: u64, task: u64, i: u64) -> u64 {
     if task >= kstate.MAX_TASKS || i >= MAX_CAPS {
         return HANDLE_NONE
@@ -335,8 +226,6 @@ fn handle_at(state: u64, task: u64, i: u64) -> u64 {
     return handle_make(i, kstate.get(state, a + C_GEN) ^ nonce_of(state, task))
 }
 
-// Schliesst ein Handle. Der Platz wird frei, die GENERATION BLEIBT --
-// genau das macht das alte Handle dauerhaft ungueltig.
 fn close(state: u64, task: u64, h: u64) -> bool {
     let i: u64 = find(state, task, h)
     if i >= MAX_CAPS {

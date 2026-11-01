@@ -1,50 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/pwr/s3.fi -- K-004: THE REAL S3 ("Standby", suspend to RAM).
-//
-// Justin, 24.09.2026: a real standby, not only the hibernation that
-// RUNDE SCHLAF built. The difference: in S4 the machine is OFF and the
-// kernel starts from the beginning and reads its state back from disk.
-// In S3 the RAM stays powered, everything else loses power, and the
-// firmware jumps back into the kernel at the address the kernel wrote
-// into the FACS. Seconds instead of a boot.
-//
-// WHAT THE PREVIOUS ROUNDS LEFT, AND WHY IT WAS NOT BUILT:
-// `schlaf.s3_befund` said "Trampolin unter 1 MiB fehlt" and feared that
-// the firmware touches memory below 1 MiB between sleep and wake-up.
-// Measured on 24.09.2026 with a 200-line stub (docs/RUNDE-ROADMAP-5.md,
-// K-004): under QEMU 7.2 / SeaBIOS 1.16.2 the page 0x8000 survives, the
-// firmware enters it at 0800:0000, and the only thing that broke the way
-// back was a LOAD segment of the TEST image at 0xFF000 that had
-// overwritten the BIOS shadow. The kernel links at 1 MiB.
-//
-// THE CYCLE, in the order this file runs it:
-//
-//   1. the values: \_S3 (susp.measure, AML), PM1a/b_CNT and the FACS.
-//   2. a pattern in a fresh frame and its checksum -- the RAM promise.
-//   3. what S3 erases and nobody else restores: the PCI command
-//      register and BARs of every device `pci.scan` found (and the MSI
-//      address/data), the local APIC and the I/O APIC table, the 8259
-//      masks, whether ACPI mode (SCI_EN) was on.
-//   4. the wake-up blob to 0x8000 (end of arch/x86_64/smp.s), its
-//      address into FIRMWARE_WAKING_VECTOR, X_FIRMWARE_WAKING_VECTOR 0.
-//   5. `s3_save` -- returns 0 now. Caches written back, WAK_STS cleared,
-//      SLP_TYP written, then SLP_TYP|SLP_EN. The machine is gone.
-//   6. `s3_save` returns a SECOND time, with 1: the blob brought the
-//      processor back into long mode with every register of step 5.
-//   7. serial line, 8259s, APICs, PCI, SCI_EN back; checksum compared.
-//
-// COUNTER-CHECK `s3kaputt`: the first byte of the blob becomes `hlt`.
-// The machine sleeps exactly the same way and must NOT come back -- if
-// it did, something other than this blob would be bringing it back.
-//
-// WHAT THIS DOES NOT DO (and says so on the line):
-//   * other processors: this kernel parks them; S3 kills them and they
-//     are not started again here (`smp` would have to be run again).
-//   * device state INSIDE devices: a network card, an xHCI controller
-//     or an NVMe queue loses its rings. Their drivers need a resume
-//     hook of their own. What is restored here is the bus side only.
-//   * only measured under QEMU/SeaBIOS and QEMU/OVMF is not measured;
-//     a real board is Justin's to test.
 
 import lib.kstate
 import serial
@@ -63,19 +16,15 @@ import sched.time
 
 export { stage, stage_smp, suspend, R_OK_S3, R_NOS3, R_SMP, R_NOMEM_S3, R_NOWAKE, R_PARK, R_RESUME }
 
-// isr.s vector table, index 75 -> s3_vectors in smp.s
 const V_S3: u64 = 75
 
-// context offsets, see smp.s
 const C_WOKE: u64 = 0xD8
 const C_STAGE: u64 = 0x120
 
-// FADT
 const F_SMI_CMD: u64 = 48
 const F_ACPI_ENABLE: u64 = 52
 const F_PM1A_EVT: u64 = 56
 const F_PM1B_EVT: u64 = 60
-// FACS
 const FACS_WAKE: u64 = 12
 const FACS_XWAKE: u64 = 24
 
@@ -84,8 +33,6 @@ const SLP_TYP_MASK: u64 = 0x1C00
 const SCI_EN: u64 = 1
 const WAK_STS: u64 = 0x8000
 
-// the save buffer: frame 0 the APICs (16 + 480 words, apic.s3_save),
-// frames 1..2 the PCI side (32 devices * 24 words = 6144 bytes)
 const PCI_WORDS: u64 = 24
 const BUF_FRAMES: u64 = 3
 
@@ -116,9 +63,6 @@ fn kx(t: u64, v: u64) {
     serial.hex(v)
 }
 
-// Wait until the UART has shifted out its last bit. Without this the
-// last line before the sleep is cut off -- the transmitter loses power
-// with bytes still in its FIFO.
 fn drain() {
     let b: u64 = serial.port() as u64
     var spin: u64 = 0
@@ -129,8 +73,6 @@ fn drain() {
         spin = spin + 1
     }
 }
-
-// ------------------------------------------------ the RAM promise
 
 fn rotl(x: u64, n: u64) -> u64 {
     return (x << n) | (x >> (64 - n))
@@ -150,19 +92,12 @@ fn sum(frame: u64) -> u64 {
     var i: u64 = 0
     var h: u64 = 0
     while i < 512 {
-        // an ADD in the chain: with xor and rotations only, this pattern
-        // sums to 0 for every seed (it is linear over GF(2) -- measured,
-        // the first run printed sum=0x0 before and after)
         h = rotl(h, 5) +% (get(frame, i) ^ i)
         i = i + 1
     }
     return h
 }
 
-// ------------------------------------------------ the PCI side
-
-// Per device: bdf, dwords 0x04..0x3C (15), MSI cap offset, MSI control,
-// addr lo, addr hi, data -- 22 of 24 words used.
 fn pci_save(state: u64, buf: u64) -> u64 {
     var n: u64 = pci.count(state)
     if n > pci.MAX_DEV {
@@ -197,9 +132,6 @@ fn pci_save(state: u64, buf: u64) -> u64 {
     return n
 }
 
-// How many BAR/command dwords were NOT what they had been, right after
-// the wake-up and before anything was restored. This is the number that
-// says why the restore exists.
 fn pci_lost(state: u64, buf: u64, n: u64) -> u64 {
     var lost: u64 = 0
     var i: u64 = 0
@@ -221,9 +153,6 @@ fn pci_lost(state: u64, buf: u64, n: u64) -> u64 {
     return lost
 }
 
-// Restore, BARs and the rest of the header first, the command register
-// LAST: a device must not decode its old addresses before they are back.
-// Returns the number of dwords that read back different afterwards.
 fn pci_restore(state: u64, buf: u64, n: u64) -> u64 {
     var i: u64 = 0
     while i < n {
@@ -269,8 +198,6 @@ fn pci_restore(state: u64, buf: u64, n: u64) -> u64 {
     return bad
 }
 
-// ------------------------------------------------ the sleep itself
-
 fn write_slp(port: u64, typ: u64) {
     if port == 0 {
         return
@@ -287,13 +214,6 @@ fn clear_wak(port: u64) {
     }
 }
 
-// ------------------------------------------------ the screen and the 8042
-//
-// SeaBIOS runs the VGA option ROM on the way back (`vga_post`, seen on
-// the debug port), and that puts a Bochs/QEMU display adapter back into
-// 80x25 text mode. The mode lives in the DISPI registers; they are
-// stored here and written back, ENABLE last, and then the whole back
-// buffer is pushed to the screen again. Words 500..509 of frame 0.
 const DISPI_IDX: u64 = 0x1CE
 const DISPI_DAT: u64 = 0x1CF
 const W_VBE: u64 = 500
@@ -323,7 +243,6 @@ fn vbe_save(buf: u64) {
     }
 }
 
-// Returns 1 if a mode was put back, 0 if there was none to put back.
 fn vbe_restore(buf: u64) -> u64 {
     if get(buf, W_VBE) == 0 {
         return 0
@@ -336,7 +255,6 @@ fn vbe_restore(buf: u64) -> u64 {
         }
         i = i + 1
     }
-    // ENABLE with LFB and without clearing video memory (bit 7 NOCLEARMEM)
     dispi_wr(4, get(buf, W_VBE + 4) | 0x80)
     return 1
 }
@@ -363,12 +281,8 @@ fn kbc_wait_out() -> bool {
     return false
 }
 
-// The controller's command byte: which ports raise an interrupt, which
-// clocks run. The 8042 comes back from the reset with its default.
 fn kbc_save(buf: u64) {
     put(buf, W_KBC, 0)
-    // anything still waiting in the output buffer is not ours to read,
-    // but it would be taken for the answer
     var n: u64 = 0
     while n < 16 && (arch.dev_in8(0x64 as u16) as u64 & 1) != 0 {
         arch.dev_in8(0x60 as u16)
@@ -398,8 +312,6 @@ fn kbc_restore(buf: u64) -> u64 {
         return 0
     }
     arch.dev_out8(0x60 as u16, cb as u8)
-    // the aux port (mouse): its clock runs if bit 5 is clear. A reset
-    // mouse does not report until it is told to (0xF4).
     if (cb & 0x20) == 0 {
         if kbc_wait_in() {
             arch.dev_out8(0x64 as u16, 0xA8 as u8)
@@ -411,13 +323,12 @@ fn kbc_restore(buf: u64) -> u64 {
             arch.dev_out8(0x60 as u16, 0xF4 as u8)
         }
         if kbc_wait_out() {
-            arch.dev_in8(0x60 as u16) // the 0xFA
+            arch.dev_in8(0x60 as u16)
         }
     }
     return 1
 }
 
-// One cycle. Returns true if the machine came back.
 fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     var s_sl: [u8; 21] = "s3: schlafe zyklus=\0\0"
     var s_wa: [u8; 18] = "s3: wach zyklus=\0\0"
@@ -461,7 +372,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     let imr1: u64 = arch.dev_in8(0x21 as u16) as u64
     let imr2: u64 = arch.dev_in8(0xA1 as u16) as u64
 
-    // the blob
     let blob: u64 = vec(state, 0)
     let blob_end: u64 = vec(state, 1)
     let base: u64 = vec(state, 2)
@@ -471,11 +381,9 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
         i = i + 1
     }
     if broken {
-        kstate.set8(base, 0xF4 as u8) // hlt, and nothing else
+        kstate.set8(base, 0xF4 as u8)
     }
     __mmio_write64((ctx + C_WOKE) as *mut u64, 0)
-    // the vector: 32-bit field; the 64-bit one must be 0 or the
-    // firmware takes that instead (ACPI 6.4, 5.2.10)
     __mmio_write32((facs + FACS_WAKE) as *mut u32, base as u32)
     if susp.facs_len(state) >= 32 {
         __mmio_write64((facs + FACS_XWAKE) as *mut u64, 0)
@@ -491,7 +399,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     asm("pushfq; pop rax", out("rax") & fl)
     let if_on: bool = (fl & 0x200) != 0
     let ticks_before: u64 = kstate.get(state, kstate.TICKS)
-    // DD-12: what the devices and the clock look like before the sleep
     s3dev.prepare(state)
     time.suspend_mark(state)
     asm("cli")
@@ -517,7 +424,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
         return false
     }
 
-    // ---- BACK. Everything below runs on a machine that was asleep.
     serial.init()
     let t1: u64 = apic.tsc()
     serial.puts((&s_wa[0]) as u64)
@@ -528,9 +434,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     serial.dec(__mmio_read64((ctx + C_STAGE) as *mut u64))
     serial.nl()
 
-    // the interrupt controllers: legacy masks first (a reset 8259 is
-    // wide open), then the APIC side, which masks them again if it owns
-    // the interrupts
     idt.pic_remap()
     idt.pic_mask(imr1 as u8, imr2 as u8)
     let apic_bad: u64 = apic.s3_restore(state, buf)
@@ -540,7 +443,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     serial.dec(apic_bad)
     serial.nl()
 
-    // DD-12: the wall clock goes on during S3, the kernel's counters do not
     var s_uh: [u8; 18] = "s3: uhr schlaf=\0\0\0"
     var s_us: [u8; 5] = " s\0\0\0"
     let slept: u64 = time.resume_fix(state)
@@ -559,15 +461,8 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     serial.dec(pci_bad)
     serial.nl()
 
-    // AFTER the PCI side: the frame buffer is a BAR of the display
-    // adapter, and until it is back the pixels go nowhere.
-    // the screen: mode back, then the back buffer in full -- unless the
-    // counter-check `s3nobild` wants to see what S3 leaves on the glass
     var bild: u64 = 0
-    // what the wake-up left in the DISPI enable register, before anything
-    // is written: the number that says whether this restore is needed
     let dispi_after: u64 = dispi_rd(4)
-    // the card may have lost its memory: what the diff flush remembers of it is worth nothing now (the next rectangle repaints it all)
     if gfx.ready(state) {
         gfx.shadow_inval(state)
     }
@@ -591,8 +486,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     serial.hex(dispi_rd(4) & 0x7F)
     serial.nl()
 
-
-    // ACPI mode: the firmware may hand the machine back in legacy mode
     let sci_after: u64 = arch.dev_in16((pm1a & 0xFFFF) as u16) as u64 & SCI_EN
     if sci_before != 0 && sci_after == 0 {
         let smi: u64 = kstate.get32(fadt + F_SMI_CMD)
@@ -627,9 +520,6 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
     serial.nl()
 
     let hz: u64 = apic.tsc_hz(state)
-    // The interrupt flag as it was before the sleep -- and if it was on,
-    // proof that the restored timer really delivers again: 200 ms with
-    // interrupts on must bring new ticks.
     serial.puts((&s_ti[0]) as u64)
     if if_on {
         asm("sti")
@@ -656,24 +546,18 @@ fn cycle(state: u64, nr: u64, broken: bool, buf: u64, frame: u64) -> bool {
         serial.puts((&s_ms[0]) as u64)
         serial.nl()
     }
-    // DD-12: the devices' own state (rings, queues, slots, streams)
     s3dev.resume(state, kstate.mode_on(state, kstate.M_S3LOSS))
     return true
 }
 
-// ------------------------------------------------ the way in from ring 3
-//
-// `reboot(RB_SUSPEND)` lands here (sys.fi, do_reboot). One cycle, and the
-// answer tells the caller why not if it did not happen.
 const R_OK_S3: u64 = 0
-const R_NOS3: u64 = 1 // the machine offers no S3 (or it was not measured)
-const R_SMP: u64 = 2 // other processors are running; they would die in S3
+const R_NOS3: u64 = 1
+const R_SMP: u64 = 2
 const R_NOMEM_S3: u64 = 3
-const R_NOWAKE: u64 = 4 // SLP_EN written, but the machine did not sleep
-const R_PARK: u64 = 5 // a processor did not stop in time (DD-12), no sleep
-const R_RESUME: u64 = 6 // slept and woke, but a processor did not come back
+const R_NOWAKE: u64 = 4
+const R_PARK: u64 = 5
+const R_RESUME: u64 = 6
 
-// DD-12: one line per processor, so the runner can compare before/after.
 fn cores_report(state: u64, tag: u64) {
     var s_k: [u8; 11] = "s3: kern \0\0"
     var s_on: [u8; 9] = " online=\0"
@@ -721,9 +605,6 @@ fn suspend(state: u64) -> u64 {
         mem.frame_free_run(state, buf, BUF_FRAMES)
         return R_NOMEM_S3
     }
-    // DD-12 (K-004c): the application processors are parked before the
-    // sleep and started again after it. A processor that does not stop
-    // means no sleep at all (R_PARK), never a half sleep.
     var s_vor: [u8; 5] = "vor\0\0"
     var s_nach: [u8; 7] = "nach\0\0\0"
     var s_pk: [u8; 27] = "s3: kerne geparkt online=\0\0"
@@ -765,8 +646,6 @@ fn suspend(state: u64) -> u64 {
         if back && up != cores {
             res = R_RESUME
         }
-        // 300 ms of the machine running on all cores again, then the
-        // counters: every core's ticks and idle turns must have grown.
         let hz: u64 = apic.tsc_hz(state)
         let c0: u64 = apic.tsc()
         var w: u64 = 0
@@ -845,8 +724,6 @@ fn stage(state: u64) {
     }
     mem.frame_free_run(state, buf, BUF_FRAMES)
     mem.frame_free_run(state, frame, 1)
-    // With a screen, hold still for three seconds so the runner can take
-    // its picture of what the wake-up left -- `s3: bild` is its marker.
     if gfx.ready(state) {
         serial.puts((&s_bs[0]) as u64)
         serial.nl()
@@ -865,12 +742,6 @@ fn stage(state: u64) {
     serial.nl()
 }
 
-// DD-12: THE TEST ENTRY AFTER THE OTHER CORES RUN. Word `s3smp`: three sleeps
-// in a row from the kernel itself, each preceded by 300 ms of the machine
-// running on all cores (so that their counters have something to show).
-// `suspend` prints the per-core lines. Runs after `smp.stage`, where the
-// application processors stand in their scheduler loops -- the state a
-// running desktop has.
 fn stage_smp(state: u64) {
     if !kstate.mode_on(state, kstate.M_S3SMP) {
         return

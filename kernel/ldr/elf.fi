@@ -1,54 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/elf.fi -- round K1: a program comes off the disk.
-//
-// Everything the kernel could run until this round was LINKED INTO IT.
-// `kernel/uprog.fi` is a translation unit of its own and lies on
-// pages of its own, but it travels in the same image, and the number of
-// programs the system knows was decided when the kernel was compiled.
-// That is not an operating system; that is a demonstration with a fixed
-// programme.
-//
-// This file closes the gap. It reads an ELF64 file out of the file system
-// (`fs.fi`, on the RAM disk or on a real drive over ATA PIO), lays its
-// segments into the address space of a NEW process with the rights the
-// file asks for, zeroes what the file does not fill, builds an argument
-// block on the top stack page and starts the thing. `/bin/sh` is loaded
-// exactly like every program it starts itself -- there is no second path.
-//
-// THREE RULES, and every one of them has a counter-check in
-// `tools/osum/run.sh` that makes the measurement collapse:
-//
-//   1. WHAT IS WRONG IS REFUSED, AND THE KERNEL LIVES ON. Twenty-one
-//      named reasons below, from a wrong magic number to a segment that
-//      claims more room than the private region has. Every one of them
-//      leaves the kernel standing and the caller with an error code. The
-//      run `tools/osum/run.sh` feeds the kernel eleven deliberately
-//      broken files and reads the reason back off the serial port.
-//   2. NOTHING IS ADDED UP THAT COULD OVERFLOW. Under `profile kernel`
-//      arithmetic is CHECKED (SPEC section 13, item L9) -- `off + filesz`
-//      with a hostile `off` does not wrap silently, it calls
-//      `osum_panic`, and the kernel is dead. Every bound in this file is
-//      therefore written as a SUBTRACTION on the side that is known to be
-//      big enough: `size - off < filesz` instead of `off + filesz > size`.
-//      That is not style, it is the difference between a refusal and a
-//      halted machine, and `bad_huge` in the guard is the case that
-//      proves it.
-//   3. ONE PAGE HAS ONE SET OF RIGHTS. A page table entry cannot be read
-//      only for the first half of a page and writable for the second, so
-//      the loader demands page aligned segments and refuses a file whose
-//      segments share a page (`R_ALIGN`, `R_OVERLAP`). A loader that
-//      quietly gave the shared page the union of both rights would have
-//      made the constants writable and the data executable without ever
-//      saying so. `kernel/user/user.ld` produces the three
-//      segments; `ld -n` produces the counter-example.
-//
-// THE ADDRESS SPACE the image lands in is the one `proc.fi` builds: one
-// private page table over 0x40000000..0x401FFFFF. Below live the data
-// page and the eight stack pages, from `proc.IMAGE_BASE` (0x40100000) on
-// there is room for the image. `proc.free_space` walks that table when
-// the process dies and gives every frame back -- the image frames are not
-// a special case, and `tools/osum/run.sh` measures that the free frame
-// count is the same before and after.
 
 import serial
 import lib.errno
@@ -73,91 +22,58 @@ export {
     R_VERSION, R_TYPE, R_MACHINE, R_SIZES, R_PHNUM, R_PHOFF, R_SEGFILE,
     R_MEMSZ, R_RANGE, R_ALIGN, R_OVERLAP, R_NOMEM, R_ENTRY, R_READ,
     R_NOLOAD, R_ARGS,
-    // RUNDE DYNLADER
     R_IPATH, R_INOFILE, R_ICHAIN, R_IFORM, R_STACK,
-    // DELL ROUND
     R_NOSLOT
 }
 
-// -------------------------------------------------------- the reasons
-
 const R_OK: u64 = 0
-const R_NOFILE: u64 = 1 // there is no such path
-const R_ISDIR: u64 = 2 // it is not a file
-const R_SHORT: u64 = 3 // shorter than an ELF header
-const R_MAGIC: u64 = 4 // 0x7F E L F is missing
-const R_CLASS: u64 = 5 // not ELFCLASS64
-const R_ENDIAN: u64 = 6 // not little endian
-const R_VERSION: u64 = 7 // not version 1
-const R_TYPE: u64 = 8 // not ET_EXEC
-const R_MACHINE: u64 = 9 // not x86-64
-const R_SIZES: u64 = 10 // e_ehsize or e_phentsize is wrong
-const R_PHNUM: u64 = 11 // no program headers, or too many
-const R_PHOFF: u64 = 12 // the program headers lie outside the file
-const R_SEGFILE: u64 = 13 // a segment lies outside the file
-const R_MEMSZ: u64 = 14 // p_filesz is bigger than p_memsz
-const R_RANGE: u64 = 15 // outside the region a process owns
-const R_ALIGN: u64 = 16 // not page aligned
-const R_OVERLAP: u64 = 17 // two segments want the same page
-const R_NOMEM: u64 = 18 // no frame left
-const R_ENTRY: u64 = 19 // the entry point is on no executable page
-const R_READ: u64 = 20 // the disk gave less than was asked for
-const R_NOLOAD: u64 = 21 // not a single PT_LOAD
-const R_ARGS: u64 = 22 // the arguments do not fit on the page
-// RUNDE K13: die Datei ist da, sie ist ein Programm -- aber dieser
-// Prozess darf sie nicht starten. Das ist kein Formatfehler, und sie
-// bekommt deshalb einen eigenen Grund und ihre eigene Fehlernummer
-// (-EACCES statt -ENOEXEC): "du darfst nicht" und "das ist kein
-// Programm" sind zwei verschiedene Auskuenfte, und ein Programm, das
-// beide gleich beantwortet bekommt, kann sie nicht auseinanderhalten.
+const R_NOFILE: u64 = 1
+const R_ISDIR: u64 = 2
+const R_SHORT: u64 = 3
+const R_MAGIC: u64 = 4
+const R_CLASS: u64 = 5
+const R_ENDIAN: u64 = 6
+const R_VERSION: u64 = 7
+const R_TYPE: u64 = 8
+const R_MACHINE: u64 = 9
+const R_SIZES: u64 = 10
+const R_PHNUM: u64 = 11
+const R_PHOFF: u64 = 12
+const R_SEGFILE: u64 = 13
+const R_MEMSZ: u64 = 14
+const R_RANGE: u64 = 15
+const R_ALIGN: u64 = 16
+const R_OVERLAP: u64 = 17
+const R_NOMEM: u64 = 18
+const R_ENTRY: u64 = 19
+const R_READ: u64 = 20
+const R_NOLOAD: u64 = 21
+const R_ARGS: u64 = 22
 const R_PERM: u64 = 23
 
-// RUNDE K16: `#!` zeigt auf einen Ausleger, der selbst wieder einer ist,
-// vier Stufen tief -- oder im Kreis. Linux nennt das ELOOP und hoert nach
-// vier Stufen auf; dieser Kern tut dasselbe.
 const R_INTERP: u64 = 24
 
-// ================================================== RUNDE DYNLADER
-// Ein Bild mit `PT_INTERP` braucht einen zweiten Lader, und dabei kann
-// vier Dinge schiefgehen, die mit dem Bild selbst nichts zu tun haben.
-// Sie bekommen eigene Gruende, weil "der Interpreter fehlt" und "das
-// Programm ist kaputt" zwei verschiedene Auskuenfte sind -- die
-// Gegenprobe `badinterp` in tools/dynlader/run.sh haengt daran.
-const R_IPATH: u64 = 25 // PT_INTERP ist zu lang oder nicht beendet
-const R_INOFILE: u64 = 26 // den Interpreter gibt es nicht
-const R_ICHAIN: u64 = 27 // der Interpreter hat selbst einen PT_INTERP
-const R_IFORM: u64 = 28 // der Interpreter ist kein brauchbares ET_DYN
-const R_STACK: u64 = 29 // der Startstapel passt nicht auf die Seite
-// DELL ROUND (04.10.2026): the task table is full (every slot is a running
-// program or a corpse). Not the same as R_NOMEM: more memory does not help,
-// closing a program does.
+const R_IPATH: u64 = 25
+const R_INOFILE: u64 = 26
+const R_ICHAIN: u64 = 27
+const R_IFORM: u64 = 28
+const R_STACK: u64 = 29
 const R_NOSLOT: u64 = 30
-// KEIN Grund, sondern die Auskunft "dieses Bild braucht gar keinen
-// Lader". Muss sich von R_OK (= 0) unterscheiden, siehe `read_interp`.
 const R_KEINER: u64 = 30
 
-// ---------------------------------------------------------- the format
-
 const PT_LOAD: u64 = 1
-// RUNDE DYNLADER: der Kopf, der sagt "ich brauche einen Lader". Sein
-// Inhalt ist ein Pfad als Zeichenkette, kein Zeiger.
 const PT_INTERP: u64 = 3
 const PF_X: u64 = 1
 const PF_W: u64 = 2
 
 const ET_EXEC: u64 = 2
-// RUNDE DYNLADER: ein verschiebbares Bild. Sowohl ein PIE-Programm als
-// auch JEDER Interpreter ist von diesem Typ -- seine `p_vaddr` zaehlen
-// ab 0 und werden auf eine Basis addiert, die der KERN waehlt.
 const ET_DYN: u64 = 3
 const EM_X86_64: u64 = 62
 
-const EHSIZE: u64 = 64 // e_ehsize, and the size of the header
-const PHENTSIZE: u64 = 56 // e_phentsize
-const MAX_PH: u64 = 16 // more than that is not a program of ours
+const EHSIZE: u64 = 64
+const PHENTSIZE: u64 = 56
+const MAX_PH: u64 = 16
 
-// The fields, as offsets. ELF64 is little endian on this machine, which
-// is why they can simply be read.
 const E_TYPE: u64 = 16
 const E_MACHINE: u64 = 18
 const E_EVERSION: u64 = 20
@@ -177,17 +93,9 @@ const P_MEMSZ: u64 = 40
 const PAGE: u64 = 4096
 const PAGE_MASK: u64 = 4095
 
-// What a freshly taken frame is filled with before the file goes in.
-// Whatever the program reads that it did not put there itself is this
-// pattern, and `nobss` on the command line leaves it standing on purpose
-// -- that is the counter-check for "the loader zeroes the .bss".
 const POISON: u64 = 0xAAAAAAAAAAAAAAAA
 
-// Where the strings of the argument block start on the page. MAX_ARGS (64)
-// pointers plus the closing zero is 65 words, and the count is the first.
-const STR_OFF: u64 = 544 // 8 (argc) + (MAX_ARGS + 1) * 8, rounded up to 16 (was 80 for eight words)
-
-// ---------------------------------------------------------- the reading
+const STR_OFF: u64 = 544
 
 fn get64(p: u64) -> u64 {
     return __mmio_read64(p as *mut u64)
@@ -222,15 +130,6 @@ fn fail(state: u64, r: u64) -> u64 {
     return r
 }
 
-// ------------------------------------------------------- the header
-
-// Reads the ELF header and every program header into the data area and
-// says what is wrong. R_OK = nothing.
-//
-// The order of the checks is the order in which a file gets less
-// trustworthy: what is not even an ELF file is not looked at any
-// further, and no number out of the file is used before the field that
-// says how long it is has been believed.
 fn read_header(state: u64, ino: u64) -> u64 {
     let h: u64 = head(state)
     let size: u64 = fs.inode_size(state, ino)
@@ -261,22 +160,6 @@ fn read_header(state: u64, ino: u64) -> u64 {
     if kstate.get8(h + 6) != 1 {
         return R_VERSION
     }
-    // RUNDE DYNLADER: ET_DYN IST JETZT AUCH EIN PROGRAMM.
-    //
-    // Bis zu dieser Runde stand hier `!= ET_EXEC`, und das hat jedes
-    // dynamisch gelinkte Linux-Programm mit Grund 8 abgewiesen -- und
-    // JEDEN Interpreter gleich mit, denn `ld-musl-x86_64.so.1` ist
-    // selbst ein ET_DYN (gemessen: "Elf file type is DYN (Shared object
-    // file), Entry 0x777ee").
-    //
-    // Der Unterschied zwischen den beiden ist NICHT, was erlaubt ist,
-    // sondern WER DIE ADRESSE WAEHLT. Ein ET_EXEC nennt seine Adressen
-    // selbst und besteht darauf; ein ET_DYN zaehlt ab 0 und laesst sich
-    // schieben. Die Pruefungen in `segment` gelten deshalb weiter --
-    // nur werden sie ab dieser Runde auf `vaddr + bias` angewendet und
-    // nicht auf `vaddr`. Ein ET_DYN mit bias 0 verhaelt sich exakt wie
-    // vorher, und genau das ist der Grund, warum die 135 bestehenden
-    // Programme von dieser Zeile nichts merken: sie sind ET_EXEC.
     let et: u64 = kstate.get16(h + E_TYPE)
     if et != ET_EXEC {
         if et != ET_DYN {
@@ -302,15 +185,11 @@ fn read_header(state: u64, ino: u64) -> u64 {
     if n > MAX_PH {
         return R_PHNUM
     }
-    // n <= 16, so this product cannot run away.
     let need: u64 = n * PHENTSIZE
     let off: u64 = get64(h + E_PHOFF)
     if off < EHSIZE {
         return R_PHOFF
     }
-    // NOT `off + need > size`: `off` comes out of the file and may be
-    // 0xFFFFFFFFFFFFFFF0. Checked addition would call `osum_panic` and
-    // the kernel would be gone -- see the head of this file.
     if off > size {
         return R_PHOFF
     }
@@ -323,29 +202,10 @@ fn read_header(state: u64, ino: u64) -> u64 {
     return R_OK
 }
 
-// ------------------------------------------------------- one segment
-
-// Lays one PT_LOAD into the address space of task `t`. Every page is
-// taken fresh, filled with the poison pattern, then filled from the file
-// as far as `p_filesz` reaches, and the rest of the page is zeroed --
-// that last step is what makes the `.bss` zero, and `nobss` leaves it
-// out.
 fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     bias: u64) -> u64 {
     let flags: u64 = kstate.get32(ph + P_FLAGS)
     let off: u64 = get64(ph + P_OFFSET)
-    // RUNDE DYNLADER: DIE BASIS KOMMT DAZU, UND ZWAR HIER UND NUR HIER.
-    //
-    // Fuer ein ET_EXEC ist `bias` null, und dann steht unter dieser
-    // Zeile Wort fuer Wort dasselbe wie vor der Runde. Fuer ein ET_DYN
-    // ist `bias` die Basis, die der Kern gewaehlt hat.
-    //
-    // Die Addition ist GEPRUEFT (profile kernel, SPEC 13/L9), also darf
-    // sie nicht ueberlaufen -- `vaddr` kommt aus der Datei und kann
-    // 0xFFFFFFFFFFFFFFF0 sein. Die Schranke steht deshalb VOR der
-    // Addition und ist eine Subtraktion auf der Seite, von der bekannt
-    // ist, dass sie gross genug ist. Ohne sie waere ein feindliches
-    // `p_vaddr` kein abgelehntes Programm, sondern ein toter Rechner.
     let vraw: u64 = get64(ph + P_VADDR)
     if vraw > proc.IMAGE_END {
         return R_RANGE
@@ -357,7 +217,7 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     let filesz: u64 = get64(ph + P_FILESZ)
     let memsz: u64 = get64(ph + P_MEMSZ)
     if memsz == 0 {
-        return R_OK // nothing to map, and nothing to complain about
+        return R_OK
     }
     if filesz > memsz {
         return R_MEMSZ
@@ -377,60 +237,6 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     if proc.IMAGE_END - vaddr < memsz {
         return R_RANGE
     }
-    // ============================================ RUNDE DYNLADER
-    // DER VERSATZ IN DER SEITE, UND WARUM DIE REGEL HIER WEICHER WIRD.
-    //
-    // Regel 3 im Kopf dieser Datei lautet: EINE SEITE HAT EINEN SATZ
-    // RECHTE, und daraus folgte bis zu dieser Runde `p_vaddr` und
-    // `p_offset` muessen auf 4096 aufgehen, sonst R_ALIGN. Fuer die
-    // Programme dieses Systems ist das richtig und bleibt es: sie werden
-    // mit `kernel/user/user.ld` gebunden, das die drei Segmente trennt.
-    //
-    // FUER EINEN FREMDEN INTERPRETER IST ES NICHT ZU HALTEN, und das ist
-    // gemessen und nicht vermutet (tools/dynlader/messung-wirt.sh):
-    //
-    //   ld-musl-x86_64.so.1  LOAD3  off=0xaab20 vaddr=0xabb20  -> 2848
-    //   hello_dyn (musl-gcc) LOAD3  off=0x2e00  vaddr=0x3e00   -> 3584
-    //
-    // Das letzte LOAD faengt bei BEIDEN mitten in einer Seite an. Der
-    // Grund ist derselbe, aus dem jeder Binder das so macht: die Datei
-    // wird kleiner, wenn das Datensegment direkt hinter dem Textsegment
-    // liegt, statt auf die naechste Seite gerundet zu werden.
-    //
-    // DER STATISCHE FALL KONNTE DAS UMGEHEN, der dynamische nicht.
-    // tools/foreign/osum.ld setzt `. = ALIGN(4096)` zwischen die
-    // Segmente -- das ist die erste der drei Regeln aus
-    // tools/foreign/README.md. Den STOCK-Interpreter des Systems kann
-    // man aber nicht neu binden; er ist die Datei, die da ist. Eine
-    // Runde, die ihn neu bindet, hat nicht "ein Linux-Programm zum
-    // Laufen gebracht", sondern sich ein eigenes gebaut.
-    //
-    // WAS LINUX TUT, und was ab hier auch dieser Kern tut: das Segment
-    // faengt an der SEITENGRENZE DARUNTER an, und der Versatz in der
-    // Seite bleibt erhalten. `p_vaddr & ~4095` ist die erste Seite,
-    // `p_vaddr & 4095` der Versatz, an dem die Dateidaten darin
-    // beginnen. Beides MUSS denselben Versatz haben (`p_vaddr` und
-    // `p_offset` kongruent modulo 4096) -- sonst laesst sich die Datei
-    // gar nicht seitenweise abbilden, und das prueft die Zeile unten.
-    //
-    // WAS DAS FUER REGEL 3 HEISST, ehrlich hingeschrieben: teilen sich
-    // zwei Segmente eine Seite, bekommt diese Seite die Rechte des
-    // ZWEITEN -- `map_page` wird fuer sie ein zweites Mal gerufen und
-    // `page_free` sagt dann nein, also bleibt sie, wie sie war. Bei
-    // musl ist das genau einmal der Fall, naemlich fuer die Seite, in
-    // der rodata endet und data anfaengt; sie wird dadurch nicht
-    // schreibbar, sondern bleibt lesbar, und das Datensegment bekommt
-    // seine eigenen Seiten ab der naechsten Grenze. Ein Programm, das
-    // darauf angewiesen waere, in diese eine geteilte Seite zu
-    // schreiben, liefe hier nicht -- musl ist es nicht, und das ist
-    // gemessen (die Zusagen hello/busybox in tools/dynlader/run.sh).
-    //
-    // ET_EXEC BLEIBT STRENG. Die Lockerung gilt nur, wenn ein Bild
-    // verschoben wird (`bias != 0`), also fuer ET_DYN -- und damit fuer
-    // genau die Dateien, die man nicht neu binden kann. Fuer die 135
-    // Programme dieses Userlands gilt R_ALIGN unveraendert weiter, und
-    // die Gegenprobe in tools/osum/run.sh, die ein `ld -n`-Abbild
-    // ablehnen laesst, misst weiter dasselbe.
     let versatz: u64 = vaddr & PAGE_MASK
     if bias == 0 {
         if versatz != 0 {
@@ -440,16 +246,10 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
             return R_ALIGN
         }
     } else {
-        // Verschiebbar, aber nicht beliebig: der Versatz in der Seite
-        // muss in Datei und Adressraum derselbe sein.
         if versatz != (off & PAGE_MASK) {
             return R_ALIGN
         }
     }
-    // Ab hier wird SEITENWEISE gedacht: `first` ist die Seite, in der
-    // das Segment anfaengt, `span` die Zahl der Oktette von dort bis zum
-    // Ende des Segments. Beide Zahlen sind durch die Pruefungen oben
-    // gedeckt (`versatz <= PAGE_MASK`, `memsz <= IMAGE_END - vaddr`).
     let first: u64 = vaddr - versatz
     let span: u64 = memsz + versatz
     if proc.IMAGE_END - first < span {
@@ -462,17 +262,6 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     var done: u64 = 0
     while done < span {
         let page: u64 = first + done
-        // EINE SEITE, DIE SCHON DA IST, WIRD NICHT NOCH EINMAL GELEGT.
-        //
-        // Bis zu dieser Runde war das R_OVERLAP und ein abgelehntes
-        // Programm. Das bleibt so, solange nichts verschoben wird
-        // (`bias == 0`) -- zwei Segmente eines ET_EXEC, die sich eine
-        // Seite teilen, sind weiterhin ein Fehler, und die Gegenprobe
-        // dafuer steht in tools/osum/run.sh.
-        //
-        // Bei einem verschobenen Bild ist es der NORMALFALL an genau
-        // einer Naht (siehe oben), und dort wird die Seite ERGAENZT
-        // statt abgelehnt: ihr Inhalt kommt dazu, ihre Rechte bleiben.
         var frame: u64 = 0
         if proc.page_free(state, t, page) {
             frame = proc.map_page(state, t, page, writable, runnable)
@@ -492,15 +281,10 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
                 return R_OVERLAP
             }
         }
-        // Welcher Teil DIESER Seite kommt aus der Datei? Fuer die erste
-        // Seite faengt er bei `versatz` an, fuer alle anderen bei 0; er
-        // endet, wo `p_filesz` endet. Alles dahinter ist .bss und schon
-        // genullt.
         var von: u64 = 0
         if done == 0 {
             von = versatz
         }
-        // Wie weit die Dateidaten in dieser Seite reichen.
         let daten: u64 = filesz + versatz
         var bis: u64 = 0
         if daten > done {
@@ -604,32 +388,10 @@ fn fill_bytes(p: u64, n: u64, v: u64) {
     }
 }
 
-// --------------------------------------------------------- the whole file
-
-// Reads the file into the address space of task `t`. The task must be
-// built and its page table empty above `proc.IMAGE_BASE`; on a refusal
-// the caller throws the whole process away, which gives every frame that
-// was already mapped back with it.
 fn load(state: u64, t: u64, ino: u64) -> u64 {
     return load_at(state, t, ino, 0)
 }
 
-// RUNDE DYNLADER: DASSELBE, ABER AUF EINE BASIS.
-//
-// `load` ist ab dieser Runde der Sonderfall `bias == 0` von `load_at`,
-// und das ist Absicht: es gibt weiterhin EINEN Weg, auf dem ein Bild in
-// einen Adressraum kommt. Was `load_at` zusaetzlich kann, ist, ein
-// zweites Bild neben ein schon liegendes zu legen -- der Interpreter.
-//
-// `AT_PHDR` WIRD HIER MITGENOMMEN, und das ist der Grund, warum diese
-// Funktion ueberhaupt etwas nach aussen schreibt. Der Hilfsvektor
-// braucht die Adresse, an der die Programmkoepfe NACH dem Laden im
-// Adressraum stehen. Die findet man nur, indem man beim Legen der
-// Segmente mitliest, welches `PT_LOAD` den Bereich `e_phoff` enthaelt;
-// hinterher ist die Auskunft nicht mehr zu bekommen, ohne die Datei ein
-// zweites Mal zu lesen. Findet sich keines (ein Bild, das seine Koepfe
-// nicht mit einblendet), bleibt der Wert 0 und der Lader kommt ohne ihn
-// aus, solange AT_BASE stimmt.
 fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     let r: u64 = read_header(state, ino)
     if r != R_OK {
@@ -656,10 +418,6 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
                 loads = loads + 1
                 bytes = bytes + get64(ph + P_FILESZ)
                 pages = pages + (get64(ph + P_MEMSZ) + PAGE_MASK) / PAGE
-                // Liegt `e_phoff` in DIESEM Segment, dann stehen die
-                // Programmkoepfe im Adressraum an `p_vaddr + bias +
-                // (phoff - p_offset)`. Die Subtraktionen sind so
-                // geschrieben, dass keine unter null geht.
                 let so: u64 = get64(ph + P_OFFSET)
                 let sf: u64 = get64(ph + P_FILESZ)
                 if phoff >= so {
@@ -667,8 +425,6 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
                         phdr = get64(ph + P_VADDR) + bias + (phoff - so)
                     }
                 }
-                // Das obere Ende des Bildes -- was der Aufrufer
-                // braucht, um ein zweites daneben zu legen.
                 let e: u64 = get64(ph + P_VADDR) + bias
                     + get64(ph + P_MEMSZ)
                 if e > top {
@@ -682,16 +438,12 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     if loads == 0 {
         return R_NOLOAD
     }
-    // The last check, and it is the one that catches a file whose header
-    // and whose segments each look fine on their own: `e_entry` has to
-    // land on a page that was really mapped and is really executable.
     if !entry_runnable(state, t, h, n, bias) {
         return R_ENTRY
     }
     kstate.set(state, kstate.ELF_BYTES, bytes)
     kstate.set(state, kstate.ELF_PAGES, pages)
     kstate.set(state, kstate.ELF_LOADS, loads)
-    // RUNDE DYNLADER: was `build` fuer den Hilfsvektor braucht.
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_PHDR, phdr)
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_PHNUM, n)
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_ENTRY,
@@ -700,23 +452,7 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     return R_OK
 }
 
-// One line per segment, and it is the ONLY way to see from outside what
-// rights a page really got: the numbers come out of the PAGE TABLE the
-// loader just wrote, not out of the file it read. `w=` and `x=` are what
-// `proc.page_free`/`proc.page_exec` see, `f=` is the frame the first page
-// landed on.
-// RUNDE DYNLADER: DIE ZEILE MUSS DIE BASIS KENNEN.
-//
-// Bis zu dieser Runde druckte sie `p_vaddr` aus der Datei und fragte die
-// Seitentabelle an genau dieser Adresse. Fuer ein verschobenes Bild ist
-// beides falsch: die Datei sagt 0x0, im Adressraum liegt das Segment auf
-// 0x40A00000, und `translate(0x0)` antwortet 0 -- also stand in der
-// Zeile `v=0x0 f=0x0`, und das sah aus, als sei nichts abgebildet
-// worden, waehrend in Wahrheit alles richtig lag. Eine Meldung, die beim
-// Verschieben nicht mitverschiebt, misst nicht das System, sondern die
-// Datei.
 fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
-    // r1222: synchronous UART output is the dominant cost of an exec; only with the `execlog` word
     if !kstate.mode_on(state, kstate.M_EXECLOG) {
         return
     }
@@ -753,32 +489,10 @@ fn yes(b: bool) -> u64 {
     return 0
 }
 
-// ------------------------------------------------------ the arguments
-
-// The block the program finds in rdi. It lies on the TOP stack page of
-// the process, and the stack pointer is set below it -- so it costs no
-// frame of its own and it is gone with the process.
-//
-//     +0     argc
-//     +8     argv[0..argc-1], then a zero
-//     +80    the strings, each one ended by a zero
-//
-// ROUND K11 PUT THE ENVIRONMENT ON THE SAME PAGE, at a fixed offset, so
-// that nothing about the first half moves:
-//
-//     +2048  envc
-//     +2056  envp[0..envc-1], then a zero
-//     +2192  those strings, each one ended by a zero
-//
-// Where it comes from: the kernel holds ONE environment block
-// (`kstate.K11_OFF + ENV_BUF`), and a process fills it with
-// SYS_OSUM_SETENV. Every program started afterwards finds it here. That
-// is not a per-process `environ` -- it is the half of it that a shell
-// needs, and `docs/ROUNDK11.md` says so.
 const ENV_OFF: u64 = 2048
 const ENV_MAXN: u64 = 16
 const STACK_ENV_MAXN: u64 = 64
-const ENV_STR: u64 = 2192 // ENV_OFF + 8 + (ENV_MAXN + 1) * 8
+const ENV_STR: u64 = 2192
 
 fn write_env(state: u64, frame: u64) {
     let n0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
@@ -815,17 +529,7 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
     if argc > proc.MAX_ARGS {
         return false
     }
-    // RUNDE K16: DIE SEITE MUSS ERST ENTSTEHEN. Bis zu dieser Runde war
-    // `ARGS_BASE` die oberste der acht Stapelseiten, die `space_build`
-    // ohnehin anlegt; jetzt liegt sie 476 KiB hoeher, damit der Stapel
-    // dazwischen wachsen kann (`proc.grow_stack`). EIN Rahmen mehr je
-    // Prozess von der Platte -- die acht von frueher bleiben, wo sie
-    // sind, und die Rahmenzaehlungen der Runden 62 bis K12 vergleichen
-    // vorher gegen nachher und nicht gegen eine feste Zahl.
     if proc.page_free(state, t, proc.ARGS_BASE) {
-        // RUNDE FREMDLAND: GENULLT. Der Argumentblock wird nur
-        // teilweise beschrieben; der Rest ist das, was ein Programm
-        // als envp/auxv-Ende liest.
         if proc.map_page_zero(state, t, proc.ARGS_BASE, true, false) == 0 {
             return false
         }
@@ -843,8 +547,6 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
         put64(frame + 8 + k * 8, proc.ARGS_BASE + at)
         var going: bool = true
         while going {
-            // ROUND K11: die Argumente enden bei ENV_OFF, denn dahinter
-            // liegt die Umgebung. Vorher war die Grenze die Seite.
             if at >= ENV_OFF - 1 {
                 return false
             }
@@ -862,50 +564,6 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
     write_env(state, frame)
     return true
 }
-
-// ============================================ RUNDE DYNLADER
-// DER SYSTEM-V-STARTSTAPEL. Das Kernstueck der Runde.
-//
-// Osum uebergibt seit Runde K1 einen EIGENEN Block in RDI, und
-// `write_args` weiter oben baut ihn. Die 135 Programme dieses Userlands
-// lesen ihn mit `kernel/user/crt.s`, und statische musl-Programme mit
-// `tools/foreign/start.s`, das ihn umrechnet.
-//
-// EIN FREMDER INTERPRETER HAT KEIN start.s. `ld-musl-x86_64.so.1`
-// erwartet den Stapel, den Linux legt, und er erwartet ihn genau so:
-//
-//     rsp ->  argc
-//             argv[0] .. argv[argc-1]
-//             NULL
-//             envp[0] .. envp[envc-1]
-//             NULL
-//             auxv[0].a_type, auxv[0].a_val
-//             ...
-//             AT_NULL, 0
-//             <die Zeichenketten, irgendwo darueber>
-//
-// OHNE `auxv` KOMMT ER KEINE ZEHN BEFEHLE WEIT, und das ist keine
-// Vermutung, sondern folgt aus dem, was er als Erstes tut: er muss sich
-// SELBST relozieren, bevor er irgendeine eigene globale Variable
-// anfassen darf. Dafuer braucht er `AT_BASE` (wo liege ich?). Danach
-// braucht er `AT_PHDR`/`AT_PHNUM`, um die Programmkoepfe des HAUPTBILDS
-// zu finden -- dort steht das `PT_DYNAMIC`, aus dem seine ganze Arbeit
-// kommt. Und `AT_ENTRY`, um am Ende zu wissen, wohin er springt.
-//
-// WARUM RDI TROTZDEM BLEIBT, WIE ES WAR: `build` setzt `T_WORK`
-// unveraendert auf `proc.ARGS_BASE`. Ein Programm mit `crt.s` liest RDI
-// und findet dort denselben Block wie vor der Runde; ein Programm mit
-// System-V-`_start` liest den Stapel. Beide Angaben stehen gleichzeitig
-// da und widersprechen sich nicht -- sie liegen nur an verschiedenen
-// Stellen derselben Seite.
-//
-// WO DER STAPEL LIEGT: auf der Seite UNTER dem Argumentblock, also
-// zwischen `STACK_FLOOR` und `ARGS_BASE`. Dort sind seit Runde K16 504
-// KiB Luft, und die Seiten davon entstehen bei Bedarf
-// (`proc.grow_stack`). Diese eine Seite wird hier ausdruecklich angelegt,
-// denn der allererste Zugriff darauf ist der `pop` des Interpreters --
-// und ein Seitenfehler auf einen Stapel, der noch keiner ist, waere ein
-// toter Prozess vor dem ersten Befehl.
 
 const AT_NULL: u64 = 0
 const AT_PHDR: u64 = 3
@@ -927,23 +585,14 @@ const AT_RANDOM: u64 = 25
 const AT_HWCAP2: u64 = 26
 const AT_EXECFN: u64 = 31
 
-// Die Stapelseite liegt unmittelbar unter dem Argumentblock.
-const SP_PAGE: u64 = 0x535FE000 // RUNDE LIMITS3: ARGS_BASE - 4096 (was 0x4CFFE000)
+const SP_PAGE: u64 = 0x535FE000
 
-// Wie viele Woerter der Vektor hoechstens belegt: 15 Paare plus AT_NULL.
 const AUXN: u64 = 40
 
 fn sv_put(frame: u64, at: u64, v: u64) {
     put64(frame + at, v)
 }
 
-// Baut den Stapel auf der Seite `SP_PAGE` und gibt den Stapelzeiger
-// zurueck -- oder 0, wenn nichts passt.
-//
-// DER AUFBAU IST RUECKWAERTS GEDACHT UND VORWAERTS GESCHRIEBEN: die
-// Zeichenketten kommen in die obere Haelfte der Seite, die Zeigertafel in
-// die untere, und `rsp` zeigt auf `argc`. So braucht keine Zahl dieser
-// Funktion eine Subtraktion, die unter null gehen koennte.
 fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     phdr: u64, phnum: u64, entry: u64, ibase: u64, path: u64) -> u64 {
     if argc > proc.MAX_ARGS {
@@ -960,17 +609,13 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     }
     fill_bytes(frame, PAGE, 0)
 
-    // Die Umgebung, die dieser Kern fuehrt (Runde K11).
     let e0: u64 = kstate.get(state, kstate.K11_OFF + kstate.ENV_N)
     var envc: u64 = e0
     if envc > STACK_ENV_MAXN {
         envc = STACK_ENV_MAXN
     }
 
-    // Die Zeigertafel: argc(1) + argv + 0 + envp + 0 + auxv.
     let need: u64 = (1 + argc + 1 + envc + 1 + AUXN) * 8
-    // Die Zeichenketten fangen in der oberen Haelfte an. Passt die Tafel
-    // nicht einmal bis dorthin, ist der Aufruf zu gross fuer diese Seite.
     let str_at: u64 = PAGE / 2
     if need > str_at {
         return 0
@@ -980,7 +625,6 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     sv_put(frame, at, argc)
     at = at + 8
 
-    // argv -- die Zeichenketten wandern mit.
     var sp_str: u64 = str_at
     var k: u64 = 0
     var src: u64 = args
@@ -1005,7 +649,6 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     sv_put(frame, at, 0)
     at = at + 8
 
-    // envp
     var esrc: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
     var j: u64 = 0
     while j < envc {
@@ -1029,28 +672,11 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     sv_put(frame, at, 0)
     at = at + 8
 
-    // AT_RANDOM: sechzehn Oktette, auf die musl seinen Stapelwaechter und
-    // den Anfangswert seiner Hashfunktionen stuetzt. Sie liegen HINTER
-    // den Zeichenketten auf derselben Seite.
     if sp_str + 16 >= PAGE {
         return 0
     }
     let rnd: u64 = sp_str
     var b: u64 = 0
-    // Kein Zufallszahlengeber im Lader, und das wird hier GESAGT statt
-    // verschwiegen: was hier steht, ist der Zaehlerstand der Uhr, mit dem
-    // Ort im Adressraum vermengt. Das ist genug, damit zwei Prozesse
-    // nicht dieselben sechzehn Oktette sehen, und es ist NICHT genug fuer
-    // etwas, das Zufall braucht. Wer Zufall will, ruft `getrandom` (318,
-    // der Kern hat es) -- musl tut das fuer `arc4random` auch.
-    // DIE MASKE IST PFLICHT, NICHT STIL. Unter `profile kernel` ist die
-    // Arithmetik GEPRUEFT (SPEC 13/L9), und `as u8` auf einem Wert ueber
-    // 255 ist kein stilles Abschneiden, sondern `osum_panic` -- der Kern
-    // ist dann tot. Gemessen, bevor `& 255` hier stand:
-    //   panic: integer overflow casting 'u64 as u8' at elf.fi:958
-    // und zwar NACHDEM beide Bilder schon richtig lagen. Jede Stelle
-    // dieser Datei, die ein Oktett aus einer Rechnung nimmt, maskiert
-    // deshalb ausdruecklich.
     let seed: u64 = kstate.get(state, kstate.TICKS) + t * 2654435761
     while b < 16 {
         let wert: u64 = (seed >> ((b & 7) * 8)) + b * 31 + t
@@ -1095,7 +721,6 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
         sp_str = sp_str + 1
     }
 
-    // Und der Vektor selbst.
     sv_put(frame, at, AT_PHDR)
     at = at + 8
     sv_put(frame, at, phdr)
@@ -1144,17 +769,10 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     at = at + 8
     sv_put(frame, at, 100)
     at = at + 8
-    // AT_SECURE ist 0, und das ist die WAHRHEIT und keine Bequemlichkeit:
-    // `perm.apply_exec` hat die Kennungen schon gesetzt, wenn das
-    // setuid-Bit stand. Waere hier eine 1 ohne diesen Fall, wuerde musl
-    // die Umgebung entschaerfen, obwohl nichts entschaerft werden muss.
     sv_put(frame, at, AT_SECURE)
     at = at + 8
     sv_put(frame, at, 0)
     at = at + 8
-    // AT_HWCAP: dieser Kern sagt nichts ueber die Faehigkeiten des
-    // Prozessors zu. musl benutzt den Wert nur fuer die Auswahl
-    // schnellerer Fassungen einzelner Funktionen und kommt mit 0 aus.
     sv_put(frame, at, AT_HWCAP)
     at = at + 8
     sv_put(frame, at, kstate.get(state, kstate.FPU_FEAT) & 0xFFFFFFFF)
@@ -1185,33 +803,7 @@ fn build_stack(state: u64, t: u64, args: u64, argc: u64,
     return SP_PAGE
 }
 
-// ------------------------------------------------------------- spawn
-
-// THE CALL EVERYTHING ELSE GOES THROUGH. `path` and `args` are KERNEL
-// addresses: `args` holds `argc` strings one after the other, each ended
-// by a zero. Returns the task index, or 0 -- and then `kstate.ELF_ERR`
-// says why.
-//
-// WHY THIS IS A `spawn` AND NOT A UNIX `exec`. Unix replaces the image of
-// the CALLING process, and it needs `fork` in front of it to have a
-// process to throw away. `fork` without copy-on-write means copying an
-// image that the very next instruction discards, and copy-on-write means
-// a fault handler that shares frames and counts references -- that is a
-// round of its own in `mem.fi` and `proc.fi`, and none of the four things
-// `fork` is really used for (a redirection between fork and exec, a
-// process that goes on running as itself, a shell job, a daemon) exists
-// in this system. What DOES exist is `proc.create_bare`: a task plus an
-// empty address space, exactly the thing an image has to be poured into.
-// So the loader fills a NEW process and hands its pid back, the way
-// `posix_spawn` does, and the caller waits for it with `wait`. The old
-// `spawn` of round 62 (a program compiled into the kernel, with the
-// parent's data page inherited) stays where it is and keeps its meaning;
-// an image off the disk gets a ZEROED data page, because there is nothing
-// sensible for it to inherit.
 fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
-    // r334: one program start at a time on the whole machine (see
-    // `lock_enter`). Interrupts stay off from here to the end of `build`;
-    // `build` itself saves and restores the (already off) flags.
     let lk: u64 = lock_enter(state)
     let t: u64 = build(state, path, args, argc, prio)
     lock_leave(state, lk)
@@ -1219,32 +811,11 @@ fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         return 0
     }
     let flags: u64 = sched.irq_save()
-    // ROUND K6, IN THE SHAPE ROUND K4 LEFT: the child gets the
-    // descriptors and the working directory of whoever asked for it.
-    // That, and nothing else, is what makes `ls > /out` work in a shell
-    // -- the shell redirects ITSELF and the child is born into it. It
-    // happens under the same lock that starts the task: one line later
-    // and the child could have run before it was given its output.
-    //
-    // THE THREE, AND NOT ALL SIXTEEN. This is not a `fork`: what the
-    // caller wants the child to have is where its output goes, and what it
-    // does not want to hand over is the descriptors it keeps for itself.
-    // `file.inherit_std` is the difference (`kernel/file.fi`).
-    //
-    // The one caller that is NOT a process is `kmain.osum`, which starts
-    // the first shell out of the boot task. That task never went through
-    // `proc.create`, so its descriptor table is empty -- and a child that
-    // inherited an empty table would have nowhere to write. It keeps the
-    // three console descriptors `proc.create_bare` gave it.
     let par: u64 = sched.current(state)
     if file.fd_of(state, par, 1) < file.MAX_OPEN {
         file.inherit_std(state, par, t)
     }
     uio.adopt(state, par, t)
-    // RUNDE O-CONTAINER: auch der Ein-Aufruf-Start bleibt im Container.
-    // `spawn` ist der Weg, den die Shell nimmt -- waere er offen, waere
-    // der Container genau so lange dicht, bis jemand ein Programm
-    // startet.
     ctr.inherit(state, par, t)
     say_start(state, t)
     sched.start(state, t)
@@ -1252,51 +823,15 @@ fn spawn(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     return t
 }
 
-// ================================================ RUNDE K16: DER AUSLEGER
-//
-// `#!/bin/sh` in der ersten Zeile. Das ist der aelteste Trick von Unix und
-// der Grund, warum eine Skriptsprache dort kein Sonderfall ist: das
-// Betriebssystem startet nicht die Datei, sondern das Programm, das in
-// ihrer ersten Zeile steht, und reicht ihr den Pfad der Datei als
-// Argument.
-//
-// WARUM DAS HIER STEHT UND NICHT IN DER SHELL. Eine Shell, die `#!` selbst
-// auswertet, hat es fuer sich geloest. `execve` ist die Stelle, durch die
-// JEDER Programmstart dieses Systems geht -- die Shell, `exec` aus Ring 3,
-// der Doppelklick von Runde K15, ein Programm, das ein anderes startet.
-// Steht es hier, koennen alle es, und keines von ihnen weiss davon.
-//
-// DIE REGEL, WORT FUER WORT WIE BEI LINUX:
-//
-//     Datei:   #!/bin/sh -e
-//     Aufruf:  execve("/tmp/x.sh", ["x.sh", "a"])
-//     wird zu: execve("/bin/sh", ["/bin/sh", "-e", "/tmp/x.sh", "a"])
-//
-// Das urspruengliche argv[0] FAELLT WEG -- an seine Stelle tritt der
-// Ausleger. Hoechstens EIN Argument wird aus der Zeile genommen; alles
-// weitere darin ist ein Wort dieses einen Arguments (auch das ist
-// Linux' Regel, und sie ist der Grund, warum `#!/usr/bin/env python3`
-// geht und `#!/usr/bin/env -S a b` nicht).
-//
-// GRENZEN, ausdruecklich:
-//   * hoechstens MAX_INTERP Stufen, dann -ELOOP. Ein Skript, dessen
-//     Ausleger es selbst ist, haelt den Kern damit nicht an.
-//   * der Pfad des Auslegers hoechstens IPATH_MAX-1 Oktette.
-//   * die Argumente zusammen hoechstens proc.MAX_ARGS Stueck -- die
-//     Argumentseite eines Prozesses fasst nicht mehr, und das war vor
-//     dieser Runde genauso.
 const MAX_INTERP: u64 = 4
 const IPATH_MAX: u64 = 128
 const IARGS_MAX: u64 = 2048
-const IWORD_MAX: u64 = 256 // ein Wort der Argumentliste
+const IWORD_MAX: u64 = 256
 
 fn ist_luecke(c: u64) -> bool {
     return c == 32 || c == 9
 }
 
-// Liest die erste Zeile der Datei. 0 = kein `#!`, sonst die Zahl der
-// Woerter (1 = nur der Ausleger, 2 = Ausleger und ein Argument),
-// 0xFFFFFFFFFFFFFFFF = es IST ein `#!`, aber unbrauchbar.
 fn read_shebang(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
     let buf: u64 = state + kstate.K16_OFF + kstate.FT_SB
     var i: u64 = 0
@@ -1309,14 +844,11 @@ fn read_shebang(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
         return 0
     }
     if kstate.get8(buf) != 35 {
-        return 0 // '#'
+        return 0
     }
     if kstate.get8(buf + 1) != 33 {
-        return 0 // '!'
+        return 0
     }
-    // Die Zeile endet am Zeilenvorschub oder am Ende dessen, was gelesen
-    // wurde. Ein Wagenruecklauf davor zaehlt als Ende -- eine Datei mit
-    // CRLF ist sonst ein Ausleger namens "/bin/sh\r", den es nicht gibt.
     var ende: u64 = 2
     var suche: bool = true
     while suche {
@@ -1336,7 +868,7 @@ fn read_shebang(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
         p = p + 1
     }
     if p >= ende {
-        return 0 -% 1 // `#!` und sonst nichts
+        return 0 -% 1
     }
     var k: u64 = 0
     while p < ende && !ist_luecke(kstate.get8(buf + p)) {
@@ -1357,9 +889,6 @@ fn read_shebang(state: u64, ino: u64, dst_path: u64, dst_arg: u64) -> u64 {
     if p >= ende {
         return 1
     }
-    // Der REST der Zeile ist EIN Argument, mitsamt seinen Leerzeichen --
-    // aber ohne die am Ende, weil ein Argument, das auf ein Leerzeichen
-    // endet, in keiner Datei so gemeint war.
     var e2: u64 = ende
     while e2 > p && ist_luecke(kstate.get8(buf + e2 - 1)) {
         e2 = e2 - 1
@@ -1391,7 +920,6 @@ fn copy_word(dst: u64, src: u64, max: u64) -> u64 {
     return max
 }
 
-// Wie viele Oktette das k-te Wort in einer Argumentliste vorne liegt.
 fn word_at(args: u64, k: u64) -> u64 {
     var at: u64 = 0
     var i: u64 = 0
@@ -1405,84 +933,19 @@ fn word_at(args: u64, k: u64) -> u64 {
     return args + at
 }
 
-// ROUND K4. `spawn` above is this plus `sched.start`, and the split is
-// what `execve` needed: it does not want a second RUNNING process, it
-// wants an address space with the image in it that it can take over
-// (`sys.do_execve`, `proc.swap_space`). What comes back is a task that is
-// complete and S_NEW -- the scheduler will not touch it until somebody
-// says so, and if nobody does, `proc.discard` takes it apart again.
-// Den Ausleger aufloesen. Zurueck kommt die neue Zahl der Argumente,
-// oder ein Fehler; Pfad und Argumentliste stehen danach in kdata
-// (IPATH_SLOT, IARGS_SLOT). Getrennt von `build`, damit die Ortsvariablen
-// dieser Schleife nicht waehrend `load` auf dem Kernelstapel stehen --
-// siehe den Kommentar dort.
 const IPATH_SLOT: u64 = 0x40
 const IARGS_SLOT: u64 = 0x48
 
-// ================================================== RUNDE DYNLADER
-// Was `load_at` ueber das eben gelegte Bild hinterlaesst, damit `build`
-// den Hilfsvektor fuellen kann. Sie liegen bei den uebrigen Skalaren des
-// K16-Bereichs und nicht als Rueckgabewerte, weil eine Firn-Funktion ein
-// Wort zurueckgibt und hier vier gebraucht werden.
-const DYN_PHDR: u64 = 0x50 // AT_PHDR: die Koepfe IM ADRESSRAUM
-const DYN_PHNUM: u64 = 0x58 // AT_PHNUM
-const DYN_ENTRY: u64 = 0x60 // AT_ENTRY: Einsprung des HAUPTBILDS
-const DYN_TOP: u64 = 0x68 // oberes Ende des Bildes
-const DYN_IBASE: u64 = 0x70 // AT_BASE: Basis des INTERPRETERS
+const DYN_PHDR: u64 = 0x50
+const DYN_PHNUM: u64 = 0x58
+const DYN_ENTRY: u64 = 0x60
+const DYN_TOP: u64 = 0x68
+const DYN_IBASE: u64 = 0x70
 
-// WO DER INTERPRETER LIEGT, und warum ausgerechnet dort.
-//
-// Gemessen (tools/dynlader/messung-wirt.sh): ld-musl-x86_64.so.1 spannt
-// ueber alle PT_LOAD zusammen 0x0 .. 0xaef60, also 0,68 MiB. Das
-// Abbildfenster dieses Systems ist 11 MiB gross
-// (proc.IMAGE_BASE 0x40100000 .. proc.IMAGE_END 0x40C00000) -- der
-// Interpreter passt sechzehnmal hinein.
-//
-// Er bekommt eine FESTE Basis am OBEREN Ende des Fensters und nicht
-// irgendeine freie Stelle. Der Grund ist die Richtung, in die die beiden
-// Bilder wachsen: ein PIE-Programm faengt bei bias an und waechst nach
-// oben, also darf der Interpreter nicht darueber liegen, wo das Programm
-// ankommen kann. Zwei MiB unter IMAGE_END lassen ihm das Dreifache
-// seiner Spanne und dem Programm die uebrigen neun MiB.
-//
-// Die Ueberlappung wird trotzdem nicht ANGENOMMEN, sondern gemerkt:
-// `segment` ruft `proc.page_free` fuer jede Seite und gibt R_OVERLAP,
-// wenn das zweite Bild auf eine Seite des ersten trifft. Diese Konstante
-// ist also die Wahl, nicht die Sicherung.
 const INTERP_BASE: u64 = 0x40A00000
 
-// Wo ein PIE-Hauptbild hinkommt. Es zaehlt ab 0, also ist das schlicht
-// IMAGE_BASE -- dieselbe Stelle, an der ein ET_EXEC dieses Systems
-// ohnehin liegt (tools/foreign/osum.ld linkt genau dorthin).
 const PIE_BASE: u64 = 0x40100000
 
-// ================================================== RUNDE DYNLADER
-// LIEST `PT_INTERP` AUS EINEM BILD, DAS NOCH NICHT GELADEN IST.
-//
-// Der Kopf steht schon im gemeinsamen Puffer (`read_header` hat ihn
-// gelesen), aber sein INHALT nicht -- `p_offset`/`p_filesz` zeigen auf
-// eine Zeichenkette in der Datei. Die wird hier geholt.
-//
-// Rueckgabe: R_KEINER = kein PT_INTERP (das Bild braucht keinen Lader),
-// R_OK = Pfad steht in `dst`, sonst ein Grund.
-//
-// WARUM R_KEINER UND NICHT 0, und das war ein echter Fehler dieser
-// Runde: `R_OK` IST 0. Ein `return 0` fuer "kein PT_INTERP gefunden"
-// ist damit buchstaeblich dasselbe Wort wie "Pfad steht bereit", und
-// der Aufrufer, der auf `ir == R_OK` prueft, haelt JEDES Bild fuer
-// eines mit Lader -- auch die 135 statischen. Gemessen sah das so aus:
-// `elf: interp` druckte eine LEERE Zeile und der Lader suchte einen
-// Interpreter namens "", den es nicht gibt (Grund 26). Zwei Zustaende,
-// die sich unterscheiden muessen, brauchen zwei Zahlen.
-//
-// DREI DINGE WERDEN GEPRUEFT, und jedes davon ist ein Weg, auf dem eine
-// feindliche Datei sonst in den Kernel kaeme:
-//   * `p_filesz` gegen den Zielpuffer -- sonst schreibt eine Datei mit
-//     einem 4-GiB-"Pfad" durch den K16-Bereich,
-//   * `p_offset`/`p_filesz` gegen die Dateigroesse, als SUBTRAKTION
-//     (siehe Regel 2 im Kopf dieser Datei),
-//   * die Zeichenkette MUSS mit einer Null enden. Ein Pfad ohne Null
-//     waere ab `fs.path` eine Lesung ins Offene.
 fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
     let h: u64 = head(state)
     let size: u64 = fs.inode_size(state, ino)
@@ -1508,8 +971,6 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
             if fs.read_at(state, ino, off, dst, len) != len {
                 return R_READ
             }
-            // Die letzte Stelle MUSS die Null sein. Linux verlangt
-            // dasselbe, und aus demselben Grund.
             if kstate.get8(dst + len - 1) != 0 {
                 return R_IPATH
             }
@@ -1520,8 +981,6 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
     return R_KEINER
 }
 
-// W-MG3: put the jail root of the running task in front of an interpreter path (PT_INTERP or #! line), in place. The slot holds
-// IPATH_MAX octets; a path that does not fit with the root is refused. A host task passes unchanged.
 fn jail_ipath(state: u64, ip: u64) -> bool {
     let t: u64 = sched.current(state)
     if !ctr.jail_needed(state, t) {
@@ -1578,7 +1037,6 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
                 at = at + copy_word(na + at, ia, IWORD_MAX)
                 neu = neu + 1
             }
-            // W-MG3: the script path handed to the interpreter is relative to the jail root again (the interpreter jails it itself)
             at = at + copy_word(na + at, p + ctr.prefix_len(state, sched.current(state), p), IWORD_MAX)
             neu = neu + 1
             var k: u64 = 1
@@ -1598,7 +1056,6 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
             let z: u64 = kstate.K16_OFF + kstate.FT_SCALARS
                 + kstate.FT_SHEBANGS
             kstate.set(state, z, kstate.get(state, z) + 1)
-            // W-MG3: a #! interpreter of a jailed task is looked up inside the jail
             if !jail_ipath(state, ip) {
                 fail(state, R_INTERP)
                 return errno.neg(errno.E_NOENT)
@@ -1615,32 +1072,10 @@ fn aufloesen(state: u64, path: u64, args: u64, argc: u64) -> u64 {
     return n
 }
 
-// ================================================ r334: THE LOADER LOCK
-//
-// Everything `build_one` touches is ONE copy for the whole machine: the
-// header buffer (`kstate.ELF_OFF`), the interpreter path and argument
-// slots (`K16_OFF`), the auxv scalars (DYN_*) and the error word. With
-// one core that was fine; with two cores starting programs at the same
-// time (the login screen and the taskbar at boot) one of them read the
-// other's program headers, and `glogin` was refused with 'reason 17 two
-// segments one page' -- no login screen on a 4-core machine.
-//
-// The lock is a cell at the end of the loader's own page (the header
-// needs 960 of 4096 octets; the 8 slots of `atomic.fi` are all taken, see
-// `klog.fi`). Same rule as every lock here: `cli` first, then `cas`, so
-// that an interrupt on the holding core cannot spin on its own lock. It
-// is the OUTERMOST lock of a program start: taken before the scheduler,
-// frame and file system locks that `build_one` takes inside, and nothing
-// that holds one of those calls `build`.
-const LK_CELL: u64 = 4096 - 16 // 0 = free, 1 = held (kstate.ELF_MAX = 4096)
-const LK_SPINS: u64 = 4096 - 8 // turns of the waiting loop
+const LK_CELL: u64 = 4096 - 16
+const LK_SPINS: u64 = 4096 - 8
 const LK_STUCK: u64 = 400000000
 
-// The two halves are SEPARATE small functions on purpose: the kernel
-// stack is nearly full at the deepest point of a program start (see
-// `aufloesen`), and a wrapper around `build` would keep its frame alive
-// for the whole load. `spawn` calls them before and after `build`, so
-// only one extra word (the saved flags) stays on the stack.
 fn lock_enter(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
     if kstate.mode_on(state, kstate.M_NOELFLOCK) {
@@ -1677,13 +1112,6 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         fail(state, R_NOFILE)
         return 0
     }
-    // RUNDE K16: DER AUSLEGER. Die Arbeit steht in `aufloesen`, und das
-    // ist KEINE Geschmacksfrage: der tiefste Punkt, den der Kernelstapel
-    // dieses Systems je erreicht, liegt in `load` -> `fs.read_at` -> dem
-    // Plattentreiber, und er lag beim Bau dieser Runde bei 16.208 von
-    // 16.384 Oktetten. Jede Ortsvariable, die hier steht, steht waehrend
-    // `load` noch da. Also stehen sie in einer Funktion, die VORHER
-    // fertig ist, und was sie hinterlaesst, sind zwei Zeiger in kdata.
     let n: u64 = aufloesen(state, path, args, argc)
     if errno.is_error(n) {
         return 0
@@ -1697,23 +1125,11 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         fail(state, R_NOFILE)
         return 0
     }
-    // RUNDE K13, UND SIE STEHT HIER UND NUR HIER. Jeder Weg, auf dem in
-    // diesem Kernel ein Programm von der Platte startet -- `execve`,
-    // `SYS_OSUM_EXEC`, `elf.spawn` aus dem Kern heraus -- geht durch
-    // diese Funktion. Eine Datei ohne Ausfuehrungsrecht ist damit an
-    // JEDEM dieser Wege kein Programm, und es gibt keinen vierten.
     if !perm.may(state, sched.current(state), ino, perm.R_EXEC) {
         fail(state, R_PERM)
         return 0
     }
-    // AB-003: is this a program of an app bundle, and is the bundle one
-    // the image shipped? Asked HERE, with interrupts still on -- the
-    // answer may need a look at the disk (kernel/sched/origin.fi).
     let bundle: u64 = origin.probe(state, path)
-    // Interrupts stay down until the process is COMPLETE -- the same rule
-    // as in `proc.create`, and for the same reason: a task the scheduler
-    // takes while its page table is half full has an rip that points into
-    // a page that is not there yet.
     let flags: u64 = sched.irq_save()
     let t: u64 = proc.create_bare(state, prio)
     if t == 0 {
@@ -1725,10 +1141,6 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         }
         return 0
     }
-    // ============================================ RUNDE DYNLADER
-    // ERST NACHSEHEN, OB DAS BILD EINEN LADER VERLANGT -- und zwar
-    // BEVOR es gelegt wird, denn davon haengt ab, auf welche Basis es
-    // kommt. `read_header` hat die Programmkoepfe schon im Puffer.
     var r0: u64 = read_header(state, ino)
     if r0 != R_OK {
         proc.discard(state, t)
@@ -1750,18 +1162,9 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         }
     }
     let braucht_lader: bool = ir == R_OK
-    // RUNDE DYNLADER: WAS FUER EIN LADER VERLANGT WIRD, WIRD GESAGT.
-    // Ein Programm, das mit "interpreter missing" abgelehnt wird, ohne
-    // dass irgendwo steht, WELCHER Pfad gesucht wurde, ist so schwer zu
-    // finden wie ein Rechner, der stehenbleibt (derselbe Satz wie ueber
-    // `say_badentry`). Die Zeile kostet nichts bei Programmen ohne
-    // PT_INTERP -- die kommen hier gar nicht vorbei.
     if braucht_lader {
         say_interp(ipath)
     }
-    // Ein ET_DYN wird auf PIE_BASE geschoben, ein ET_EXEC bleibt, wo es
-    // sich selbst hingelegt hat. Das ist die EINZIGE Stelle, an der sich
-    // die beiden unterscheiden.
     var bias: u64 = 0
     if ist_dyn {
         bias = PIE_BASE
@@ -1780,10 +1183,6 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         fail(state, r)
         return 0
     }
-    // Was das HAUPTBILD fuer den Hilfsvektor beisteuert. Es wird hier
-    // weggesichert, weil das Laden des Interpreters dieselben Slots
-    // ueberschreibt -- ein gemeinsamer Puffer, wie ueberall in dieser
-    // Datei.
     let sc: u64 = state + kstate.K16_OFF + kstate.FT_SCALARS
     let at_phdr: u64 = kstate.get(state, kstate.K16_OFF
         + kstate.FT_SCALARS + DYN_PHDR)
@@ -1791,15 +1190,10 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         + kstate.FT_SCALARS + DYN_PHNUM)
     let at_entry: u64 = kstate.get(state, kstate.K16_OFF
         + kstate.FT_SCALARS + DYN_ENTRY)
-    // Der Einsprung, den `user_start` nimmt. Ohne Lader ist das der des
-    // Bildes selbst; mit Lader wird er unten ersetzt.
     var start_ip: u64 = at_entry
     var at_base: u64 = 0
     uio.interp_set(state, t, 0)
     if braucht_lader {
-        // Der Interpreter ist eine ganz gewoehnliche Datei dieses
-        // Dateisystems, und er wird wie jede andere gesucht.
-        // W-MG3 (chroot): the interpreter lives INSIDE the jail of the task that starts the program (`ld-musl` of a chroot).
         var ipj: u64 = 1
         if !jail_ipath(state, ipath) {
             ipj = 0
@@ -1824,11 +1218,6 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
             fail(state, R_IFORM)
             return 0
         }
-        // EIN INTERPRETER MIT EIGENEM INTERPRETER WIRD ABGEWIESEN.
-        // Linux macht es genauso, und der Grund ist derselbe: die Kette
-        // haette kein Ende, das der Kern garantieren koennte. Die
-        // Gegenprobe `ketteninterp` in tools/dynlader/run.sh faehrt
-        // genau diesen Fall.
         let kette: u64 = state + kstate.K16_OFF + kstate.FT_IPATH
             + 4 * IPATH_MAX
         if read_interp(state, iino, kette) != R_KEINER {
@@ -1846,16 +1235,9 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         }
         at_base = INTERP_BASE
         uio.interp_set(state, t, ipath)
-        // UND HIER WECHSELT DER EINSPRUNG. Der Kern springt NICHT in
-        // das Programm, sondern in den Lader; das Programm erfaehrt der
-        // Lader ueber AT_ENTRY. Das ist der ganze Unterschied zwischen
-        // statisch und dynamisch, auf eine Zeile gebracht.
         start_ip = kstate.get(state, kstate.K16_OFF
             + kstate.FT_SCALARS + DYN_ENTRY)
     }
-    // Das setuid-Bit, auf die eben gebaute Aufgabe. `execve` traegt die
-    // Kennungen von dort in den Aufrufer ein, `spawn` startet diese
-    // Aufgabe unmittelbar -- beide Wege kommen hier vorbei.
     perm.apply_exec(state, t, ino)
     if !write_args(state, t, a, n) {
         proc.discard(state, t)
@@ -1864,26 +1246,8 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         return 0
     }
     let h: u64 = head(state)
-    // ============================================ RUNDE STARTKNOPF
-    // DER EINSPRUNG WIRD GEPRUEFT, BEVOR EIN PROZESS DARAUS ENTSTEHT.
-    //
-    // `h` ist EIN gemeinsamer Kopfpuffer (`kstate.ELF_OFF`). Was hier
-    // gelesen wird, ist der Kopf der ZULETZT geladenen Datei -- und
-    // zwischen `load` und dieser Zeile liegen `perm.apply_exec` und
-    // `write_args`. Steht dort etwas Nichtkanonisches, endet es am
-    // `sysretq` in `enter_user_task` als #GP(0) IN RING 0, und das
-    // haelt die ganze Maschine an (genau Justins Absturz, rip
-    // 0x0010049C). Ein Programm, dessen Einsprung nicht in die untere
-    // Haelfte des Adressraums zeigt, wird ab hier gar nicht erst
-    // gestartet.
-    // RUNDE DYNLADER: der Einsprung kommt aus `start_ip` und nicht mehr
-    // aus dem Kopfpuffer. Fuer ein ET_EXEC ohne Lader ist das
-    // buchstaeblich derselbe Wert (bias 0, kein Interpreter) -- fuer
-    // alles andere ist es der einzig richtige.
     var eentry: u64 = start_ip
     if kstate.mode_on(state, kstate.M_EINSPRUNG) {
-        // Die Gegenprobe: ein Einsprung, wie ihn kein Uebersetzer je
-        // erzeugt. Muss abgelehnt werden, ohne den Rechner mitzunehmen.
         eentry = 0xDEAD000000000000
     }
     if eentry == 0 || (eentry >> 47) != 0 {
@@ -1894,32 +1258,6 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
         return 0
     }
     sched.tset(state, t, sched.T_ENTRY, eentry)
-    // RUNDE K16: DER STAPELZEIGER ZEIGT AUF DEN ARGUMENTBLOCK.
-    //
-    // Bis zu dieser Runde stand er 16 Oktette darunter, und der Block war
-    // NUR ueber rdi zu finden. Das ging, solange jedes Programm dieses
-    // Systems mit `kernel/user/crt.s` gebunden wurde -- der liest rdi.
-    //
-    // Ein Programm, das der UNVERAENDERTE `firnc` gebaut hat, liest ihn
-    // nicht. Sein `_start` steht in `lib/firnc1/codegen.fi` und lautet
-    // `xor rbp,rbp / mov rdi,rsp / and rsp,-16 / call main` -- die
-    // Uebergabe von Linux, wo argc bei `_start` AUF dem Stapel liegt.
-    // Und der Block, den `write_args` baut, hat genau diese Form: argc,
-    // dann die Zeiger, dann eine Null (der Kommentar darueber sagt es
-    // seit Runde K1, `tools/k11/hostcrt.s` nutzt es seit K11 in die
-    // andere Richtung).
-    //
-    // Es fehlten also 16 Oktette, und die sind hier. rdi bleibt, wie es
-    // war -- die 52 Programme mit crt.s merken nichts davon; was sich
-    // aendert, ist eine Zahl in der Startzeile (`tools/osum/run.sh`
-    // prueft sie und ist mitgezogen).
-    // ============================================ RUNDE DYNLADER
-    // WER EINEN LADER HAT, BEKOMMT DEN SYSTEM-V-STAPEL.
-    //
-    // Fuer alles andere bleibt es bei `ARGS_BASE` -- Wort fuer Wort wie
-    // seit Runde K16, und die 135 Programme dieses Userlands merken von
-    // dieser Runde nichts. RDI (`T_WORK`) bleibt in BEIDEN Faellen der
-    // Argumentblock; der fremde Lader sieht ihn nur nie an.
     var ustack: u64 = proc.ARGS_BASE
     if braucht_lader || ist_dyn {
         let sp: u64 = build_stack(state, t, a, n, at_phdr, at_phnum,
@@ -1937,39 +1275,15 @@ fn build(state: u64, path: u64, args: u64, argc: u64, prio: u64) -> u64 {
     sched.tset(state, t, sched.T_WORK, proc.ARGS_BASE)
     kstate.add(state, kstate.SPAWNS, 1)
     kstate.add(state, kstate.EXECS, 1)
-    // ROUND POWERMON: THE ONE SEAM WHERE A TASK GETS A PROGRAM. Every
-    // path that turns a file into something running -- `SYS_OSUM_SPAWN`,
-    // `SYS_OSUM_EXEC`, `execve`, round K16's opener, and `kmain.osum`
-    // starting the first shell out of the boot task -- ends here. Hooking
-    // the callers instead means hooking five of them and missing the
-    // sixth, and the sixth was the shell: it ran the whole acceptance
-    // script under the name `system`, because nobody had told the power
-    // accounting what it was.
-    //
-    // The slot may have been somebody else's a moment ago, so it is
-    // cleared before it is named.
     pmon.task_clear(state, t, sched.tget(state, t, sched.T_PID))
     pmon.name_set(state, t, path)
-    uio.exe_set(state, t, path)   // LC-PROC: /proc/<pid>/exe
-    // AB-003: AND THE SAME SEAM GIVES IT ITS ORIGIN. `path` is what the
-    // caller asked for -- for a `#!` file the script, so a shell script
-    // in an app bundle is that app and not "/bin/sh". The creator's label
-    // wins if it has one (kernel/sched/origin.fi).
+    uio.exe_set(state, t, path)
     origin.derive(state, sched.current(state), t, path, bundle)
-    // ROUND A11Y-2: THE RIGHTS OF THE ACCESSIBILITY TREE FALL HERE (and in
-    // sys.do_execve, which replaces the image in place and does not pass
-    // through this function). A
-    // grant is for the PROGRAM a root chose, not for whatever that
-    // program runs next: a screen reader that execs a shell must not
-    // hand the shell a view of every window. (The old branch listed the
-    // opposite as its first open point, docs/A11Y.md 7.)
     ax.drop_perm(state, t)
     sched.irq_restore(flags)
     return t
 }
 
-// Ein abgelehnter Einsprung wird GESAGT. Ein Programm, das schweigend
-// nicht startet, ist so schwer zu finden wie ein Rechner, der steht.
 fn say_badentry(state: u64, e: u64) {
     var s_a: [u8; 27] = "elf: entry abgelehnt e=\0\0\0\0"
     serial.puts((&s_a[0]) as u64)
@@ -2002,11 +1316,6 @@ fn say_start(state: u64, t: u64) {
     serial.nl()
 }
 
-// ---------------------------------------------------------- the errno
-
-// What ring 3 gets to see. Everything that is not a missing file, a
-// directory or a lack of memory is the same thing to a program: the file
-// is not a program of this machine.
 fn errno_of(r: u64) -> u64 {
     if r == R_NOFILE {
         return errno.E_NOENT
@@ -2026,51 +1335,18 @@ fn errno_of(r: u64) -> u64 {
     if r == R_INTERP {
         return errno.E_LOOP
     }
-    // RUNDE DYNLADER. Zwei der fuenf neuen Gruende bekommen eine eigene
-    // Fehlernummer, weil ein Programm sie auseinanderhalten koennen
-    // muss:
-    //   * den INTERPRETER gibt es nicht -> ENOENT. Das ist derselbe
-    //     Befund wie bei einer fehlenden Programmdatei, und Linux
-    //     antwortet hier ebenfalls ENOENT. Ohne diese Zeile bekaeme der
-    //     Aufrufer ENOEXEC ("kein Programm") fuer eine Datei, die ein
-    //     voellig gueltiges Programm IST -- nur eben ohne Lader.
-    //   * die Kette -> ELOOP, wie beim `#!`-Ausleger einer Zeile hoeher.
-    // R_IPATH, R_IFORM und R_STACK bleiben ENOEXEC: dort ist wirklich
-    // die DATEI kaputt bzw. zu gross.
     if r == R_INOFILE {
         return errno.E_NOENT
     }
     if r == R_ICHAIN {
         return errno.E_LOOP
     }
-    // DELL ROUND: "try again" -- after a program has been closed it works.
     if r == R_NOSLOT {
         return errno.E_AGAIN
     }
     return errno.E_NOEXEC
 }
 
-// ---------------------------------------------------------- the report
-
-// One line on the serial port for every refusal. The number is what the
-// guard reads, the text is what a person reads.
-//
-// WHY THIS IS FIVE FUNCTIONS AND NOT ONE. Written as one function the
-// twenty-two texts are twenty-two local arrays in ONE stack frame, some
-// 500 octets -- and this frame sits at the DEEPEST point the kernel ever
-// reaches: a refusal happens inside `sys.do_exec`, under `elf.spawn`,
-// under `fs.read_at`, under the ATA driver. Round K1 measured 16240
-// octets of kernel stack that way, out of the 16384 a task has; the same
-// run with the texts split across five functions that are called one
-// AFTER the other -- never one inside the other -- measures 9216.
-//
-// The obvious answer, `static` texts in `.rodata` (round 89), is not
-// available here: firnc1 compiles a `static` array and reads out of it,
-// but it cannot take its ADDRESS -- `(&MSG[0]) as u64` and `(&MSG) as
-// u64` both make it stop, while `(&X) as u64` on a scalar `static` is
-// fine. Both compilers have to build this kernel, so the texts stay
-// locals. Measured on 2026-08-24 against `.firnc1`; when that gap closes,
-// twenty-two `static`s and one function are the better shape.
 fn say_reason(r: u64) {
     var head_t: [u8; 22] = "elf: refused, reason \0"
     var gap: [u8; 3] = "  \0"
@@ -2082,9 +1358,6 @@ fn say_reason(r: u64) {
 }
 
 fn say_text(r: u64) {
-    // RUNDE DYNLADER: die fuenf neuen Gruende zuerst, in einer eigenen
-    // Funktion -- aus demselben Grund, aus dem es die fuenf anderen
-    // gibt (der Kommentar ueber `say_reason` rechnet ihn vor).
     if r >= R_IPATH {
         say_text_f(r)
         return
@@ -2233,7 +1506,6 @@ fn say_text_e(r: u64) {
     serial.puts((&tx[0]) as u64)
 }
 
-// RUNDE DYNLADER: die Gruende, die es ohne dynamischen Lader nicht gab.
 fn say_text_f(r: u64) {
     var t25: [u8; 20] = "bad PT_INTERP path\0\0"
     var t26: [u8; 22] = "interpreter missing\0\0\0"
@@ -2269,7 +1541,6 @@ fn say_text_f(r: u64) {
     serial.puts((&tz[0]) as u64)
 }
 
-// RUNDE DYNLADER: der Pfad, den ein Bild als Lader verlangt.
 fn say_interp(p: u64) {
     var s_i: [u8; 14] = "elf: interp \0\0"
     serial.puts((&s_i[0]) as u64)

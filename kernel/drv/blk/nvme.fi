@@ -1,69 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/nvme.fi -- round K2: a disk the processor does not carry.
-//
-// `blk.fi` had two devices: a run of frames in RAM, and a real disk over
-// ATA PIO. ATA PIO works, and it is honest about what it costs -- 256
-// `in ax, dx` per block of 512 octets. Every single one of those words
-// travels THROUGH the processor. The disk cannot reach memory; the
-// processor is the courier.
-//
-// This is the third device, and the whole point of it is that the
-// processor is not the courier any more:
-//
-//   * The kernel writes a 64-octet COMMAND into a queue in ordinary
-//     memory and does nothing else with the data.
-//   * It rings a DOORBELL -- one 32-bit write into a register of the
-//     controller -- to say that the queue has grown.
-//   * The controller reads the command out of memory ITSELF, moves the
-//     512 octets into the address the command names, ITSELF, and writes a
-//     16-octet COMPLETION into a second queue, ITSELF.
-//   * Only then does an interrupt arrive. Between the doorbell and the
-//     interrupt the processor is free, and in this kernel it spends that
-//     time in `hlt`.
-//
-// WHY NVMe AND NOT AHCI. Both were enumerated under QEMU before the
-// choice was made (`tools/pci/run.sh`, the two lines of the list):
-//
-//   00:04.0 1b36:0010 class=01:08:02 nvme  bar0=0xfebf0000/0x4000  msix
-//   00:05.0 8086:2922 class=01:06:01 ahci  bar4=io0xc040/0x20
-//                                          bar5=0xfebf5000/0x1000  msi
-//
-// Three measured differences decided it. AHCI still carries a PORT BAR --
-// it is an IDE controller that also speaks SATA, and driving it means
-// keeping one foot in exactly the legacy this round is trying to leave.
-// NVMe has one memory BAR and no port at all. AHCI wraps the ATA command
-// set that `blk.fi` already speaks over PIO, so an AHCI driver would
-// prove that DMA is faster than PIO for the SAME protocol; NVMe is a
-// different protocol, and the comparison is then between two real
-// designs rather than two ways of issuing `READ DMA EXT`. And the
-// capability lists differ: the NVMe controller offers MSI-X, the AHCI
-// controller only MSI -- so the fourth item of this round (message
-// signalled interrupts) is measurable on the NVMe device and not on the
-// other one.
-//
-// WHAT THE LANGUAGE CANNOT DO HERE, said plainly. A submission queue
-// entry is 64 octets with fields at fixed offsets, a completion entry is
-// 16. Firn does define struct layout (SPEC 13: declaration order,
-// natural alignment, no reordering), so a `struct` COULD describe both
-// exactly. Two things are missing and that is why this file computes
-// offsets by hand instead:
-//
-//   1. There is no VOLATILE FIELD ACCESS. The volatile promise of round
-//      52 hangs on the intrinsics `__mmio_read32`/`__mmio_write32`, which
-//      take an address, not on `a.b`. A queue entry that the controller
-//      reads while the kernel writes it is exactly the case in which the
-//      optimizer must not merge, move or drop a store -- and a plain
-//      field store carries no such promise.
-//   2. `#[align(n)]` is registered in `compiler/src/attrs.rs` with
-//      `implemented: false`. A queue has to start on a 4096-octet
-//      boundary; the language cannot say that. Here the alignment comes
-//      from the region `boot.s` hands over, which is page aligned by the
-//      linker script -- true, but true by accident of the layout rather
-//      than by a promise of the language.
-//
-// Neither is worked around silently: the offsets below are named
-// constants, and every access to device memory goes through the
-// intrinsics.
 
 import serial
 import lib.kstate
@@ -83,10 +17,6 @@ export {
     MAX_NS
 }
 
-// -------------------------------------------- the K2 data area, part 3
-
-// Scalars from 0x100 in `pci.K2_SCALARS`; 0x000 is pci.fi, 0x008..0x0F8
-// is apic.fi.
 const S_BASE: u64 = 0x100
 const S_BDF: u64 = 0x108
 const S_READY: u64 = 0x110
@@ -107,39 +37,23 @@ const S_POLL: u64 = 0x180
 const S_WAITS: u64 = 0x188
 const S_MSIX: u64 = 0x190
 const S_IDX: u64 = 0x198
-// ===================================================== RUNDE BLECH
-//
-// MEHR ALS EIN NAMENSRAUM. Bis zu dieser Runde stand in `identify` der
-// Satz "Namespace 1 is the one every NVMe device that has any namespace
-// at all has" -- richtig, und trotzdem zu wenig: ein Laufwerk darf
-// mehrere haben, und dann sieht dieser Kern alles ausser dem ersten
-// nicht. Auf einem Riegel mit getrennten Namensraeumen fuer System und
-// Daten faende Osum die Haelfte der Platte nicht.
-//
-// Die Tafel liegt in DERSELBEN Skalarseite (K2_SCALARS, 0x12000) --
-// keine neue Seite, kein Eintrag in der Speicherkarte, keine
-// Beruehrung mit einer anderen Runde.
-const S_NSN: u64 = 0x1A0 // wieviele aktive Namensraeume gefunden wurden
-const S_NSLIST: u64 = 0x1A8 // wieviele in der Liste des Controllers standen
-const NS_TAB: u64 = 0x1200 // MAX_NS * 32 Oktett
+const S_NSN: u64 = 0x1A0
+const S_NSLIST: u64 = 0x1A8
+const NS_TAB: u64 = 0x1200
 const MAX_NS: u64 = 8
 const N_ID: u64 = 0
 const N_BLOCKS: u64 = 8
 const N_LBADS: u64 = 16
 
-// The four queues and the buffers. Page aligned because `boot.s` aligns
-// the whole region and every offset here is a multiple of 4096.
-const ASQ_OFF: u64 = 0x14000 // admin submission, 64 entries of 64
-const ACQ_OFF: u64 = 0x15000 // admin completion, 64 entries of 16
+const ASQ_OFF: u64 = 0x14000
+const ACQ_OFF: u64 = 0x15000
 const IOSQ_OFF: u64 = 0x16000
 const IOCQ_OFF: u64 = 0x17000
-const ID_OFF: u64 = 0x18000 // what `identify` delivers
-const BUF_A: u64 = 0x19000 // measurement buffer, 8 KiB up to 0x1B000
+const ID_OFF: u64 = 0x18000
+const BUF_A: u64 = 0x19000
 const BUF_B: u64 = 0x1A000
 
 const QDEPTH: u64 = 64
-
-// ------------------------------------------------------- the registers
 
 const R_CAP: u64 = 0x00
 const R_VS: u64 = 0x08
@@ -156,31 +70,22 @@ const CC_ENABLE: u64 = 1
 const CSTS_RDY: u64 = 1
 const CSTS_CFS: u64 = 2
 
-// Admin opcodes.
 const A_CREATE_SQ: u64 = 0x01
 const A_CREATE_CQ: u64 = 0x05
 const A_IDENTIFY: u64 = 0x06
 const A_SET_FEATURES: u64 = 0x09
 
-// I/O opcodes.
 const IO_FLUSH: u64 = 0x00
 const IO_WRITE: u64 = 0x01
 const IO_READ: u64 = 0x02
 
-// The vector the completions arrive on. 44 is inside the 48 vectors
-// `isr.s` provides, so no assembly had to change for this round.
 const VEC_NVME: u64 = 44
 
 const PAGE: u64 = 4096
 const SECTOR: u64 = 512
 
-// How long the kernel waits before it calls a device dead. Bounded on
-// purpose: a controller that never answers must not hang the kernel, and
-// the counter-check `nobm` depends on this returning instead of freezing.
 const SPIN_LIMIT: u64 = 4000000
-const TICK_LIMIT: u64 = 300 // 3 s at 100 Hz
-
-// ------------------------------------------------------- small helpers
+const TICK_LIMIT: u64 = 300
 
 fn sc(off: u64) -> u64 {
     return pci.K2_SCALARS + off
@@ -245,11 +150,6 @@ fn wr64(b: u64, off: u64, v: u64) {
     __mmio_write64((b + off) as *mut u64, v)
 }
 
-// ------------------------------------------------------ the two queues
-
-// One dword of one submission entry. Sixty-four octets, sixteen dwords,
-// and every one of them written through the volatile intrinsic -- the
-// controller is the second reader of this memory.
 fn sqe(sq: u64, slot: u64, dw: u64, v: u64) {
     __mmio_write32((sq + slot * 64 + dw * 4) as *mut u32, (v & 0xFFFFFFFF) as u32)
 }
@@ -263,11 +163,6 @@ fn doorbell(state: u64, qid: u64, is_cq: u64, value: u64) {
     wr32(base(state), R_DOORBELL + (qid * 2 + is_cq) * stride, value)
 }
 
-// A command, filled field by field. `prp1` and `prp2` are PHYSICAL
-// addresses -- the controller does not walk page tables, it reads the
-// bus. In this kernel the two are the same number, because `boot.s` maps
-// the first gigabyte onto itself; on a kernel with a higher half they
-// would not be, and that is the line where a driver breaks.
 fn command(sq: u64, slot: u64, opcode: u64, cid: u64, nsid: u64,
     prp1: u64, prp2: u64, cdw10: u64, cdw11: u64, cdw12: u64) {
     var i: u64 = 0
@@ -286,10 +181,6 @@ fn command(sq: u64, slot: u64, opcode: u64, cid: u64, nsid: u64,
     sqe(sq, slot, 12, cdw12)
 }
 
-// The second pointer of a transfer. A PRP entry covers the rest of ITS
-// page and nothing more; 512 octets that begin at offset 0xE00 therefore
-// need the next page as well. Getting this wrong is not visible until a
-// buffer happens to sit near the end of a page.
 fn prp2_of(addr: u64, len: u64) -> u64 {
     let off: u64 = addr & (PAGE - 1)
     if off + len <= PAGE {
@@ -298,13 +189,6 @@ fn prp2_of(addr: u64, len: u64) -> u64 {
     return (addr - off) + PAGE
 }
 
-// ---------------------------------------------------- admin, by polling
-
-// The admin queue is driven WITHOUT interrupts, on purpose: it is used
-// exactly four times, before the message vector is armed, and a polling
-// loop that runs four times is simpler than an interrupt path that has
-// to be torn down again. Status 0 means the controller did what it was
-// asked; 0xFFFF means it never answered.
 fn admin(state: u64, opcode: u64, nsid: u64, prp1: u64,
     cdw10: u64, cdw11: u64) -> u64 {
     let sq: u64 = state + ASQ_OFF
@@ -317,13 +201,6 @@ fn admin(state: u64, opcode: u64, nsid: u64, prp1: u64,
         tail = 0
     }
     kstate.set(state, sc(S_ASQ_TAIL), tail)
-    // The queue must be in memory before the doorbell says it is. No
-    // fence instruction is written here and none is needed: the entry and
-    // the doorbell both go through the volatile intrinsics, which the
-    // compiler may not move past one another (round 52), and x86 does not
-    // reorder a store against a later store. On a machine with a weaker
-    // memory model this is the line that would need one -- and Firn would
-    // need an intrinsic for it, which it does not have.
     doorbell(state, 0, 0, tail)
 
     var head: u64 = kstate.get(state, sc(S_ACQ_HEAD))
@@ -355,29 +232,11 @@ fn next_cid(state: u64) -> u64 {
     return c
 }
 
-// ------------------------------------------------------------- bring-up
-
 fn present(state: u64) -> bool {
     return pci.find_class(state, pci.CLASS_STORAGE, pci.SUB_NVM,
         pci.PROGIF_NVME) < pci.MAX_DEV
 }
 
-// `use_msix` false routes the completion over the interrupt PIN through
-// the I/O APIC instead -- both paths end at the same vector, which is
-// what makes them comparable. `armed` false leaves the message vector
-// MASKED: the transfer then still works and the interrupt does not,
-// which is the counter-check that separates the two.
-// ==================================================== RUNDE PROTOKOLL
-// DIE QUELLE, UNTER DER DIESER TREIBER IM RING STEHT.
-//
-// Sie steht EINMAL je Datei und wird an jeden Aufruf gereicht -- der
-// Name im Protokoll ist damit derselbe wie der Dateiname und laesst
-// sich nicht aus Versehen anders schreiben.
-// Der Name liegt als `static mut` im Modul und nicht als `var` in
-// dieser Funktion: eine lokale Zeichenkette stirbt mit dem Rahmen,
-// und firnc faengt genau das ab ("the address of the local escapes
-// through the return value"). Der Protokollring liest den Namen
-// erst im Aufruf danach.
 static mut q_nvme: [u8; 5] = "nvme\0"
 
 fn lq() -> u64 {
@@ -401,9 +260,6 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
         return false
     }
     klog.sayh(state, klog.L_INFO, lq(), (&l_los[0]) as u64, phys)
-    // The BAR says where the controller answers ON THE BUS. What the
-    // kernel writes is a virtual address, and until this round there was
-    // no page table entry for anything that high (`apic.map_device`).
     let b: u64 = apic.map_device(state, phys)
     if b == 0 {
         return false
@@ -412,8 +268,6 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     kstate.set(state, sc(S_BASE), b)
     kstate.set(state, sc(S_BDF), pci.get(state, idx, pci.E_BDF))
 
-    // The capability register carries the doorbell stride and how deep a
-    // queue may be. Both are read, neither is assumed.
     let cap: u64 = rd64(b, R_CAP)
     if cap == 0 || cap == 0xFFFFFFFFFFFFFFFF {
         return false
@@ -425,21 +279,8 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
         return false
     }
 
-    // The one line that decides whether any of this works: without the
-    // master bit the controller may answer registers but may not fetch
-    // its own commands out of memory. `tools/pci/run.sh` runs this whole
-    // function once without it.
     pci.enable_master(bdf(state))
 
-    // THE INTERRUPT IS ARMED BEFORE THE CONTROLLER IS ENABLED, and that
-    // order is not a matter of taste. A queue remembers WHICH vector it
-    // reports on at the moment it is created -- the admin queue at the
-    // moment `CC.EN` goes up, the I/O queue at the moment the create
-    // command is answered. A vector armed afterwards is a vector no queue
-    // knows about, and the completions then land in memory in silence.
-    // That is exactly how this driver failed first: every command
-    // finished, the completion entry stood in the queue with its phase
-    // bit set, and not one interrupt ever arrived.
     if use_msix {
         if !msix_arm(state, idx, VEC_NVME, armed) {
             return false
@@ -450,8 +291,6 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
         kstate.set(state, sc(S_MSIX), 0)
     }
 
-    // Off, and really off: a controller that is still enabled ignores
-    // every queue address written into it.
     wr32(b, R_CC, 0)
     if !await_rdy(b, 0) {
         return false
@@ -475,8 +314,6 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     wr32(b, R_AQA, ((QDEPTH - 1) << 16) | (QDEPTH - 1))
     wr64(b, R_ASQ, state + ASQ_OFF)
     wr64(b, R_ACQ, state + ACQ_OFF)
-    // CSS 0 (the NVM command set), MPS 0 (4 KiB pages), submission
-    // entries of 2^6 octets, completion entries of 2^4.
     wr32(b, R_CC, CC_ENABLE | (6 << 16) | (4 << 20))
     if !await_rdy(b, 1) {
         return false
@@ -485,20 +322,10 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     if !identify(state) {
         return false
     }
-    // RUNDE BLECH: die uebrigen Namensraeume. NACH `identify` und nicht
-    // statt dessen -- `identify` beschreibt Namensraum 1, und an ihm
-    // haengt alles, was dieser Kern seit Runde K2 misst. Schlaegt der
-    // Durchgang fehl (ein Controller, der CNS 0x02 nicht kennt), bleibt
-    // die Tafel leer und sonst aendert sich nichts.
     ns_scan(state)
     if admin(state, A_SET_FEATURES, 0, 0, 0x07, 0) > 1 {
-        // Feature 7 is "number of queues". A controller may answer with
-        // fewer than asked; one pair is the minimum every one of them
-        // has, so a refusal is not fatal.
     }
-    // Completion queue before submission queue -- a submission queue
-    // names the completion queue it reports into.
-    let cq_cdw11: u64 = 1 | (1 << 1) | (0 << 16) // physically contiguous, interrupts on, vector 0
+    let cq_cdw11: u64 = 1 | (1 << 1) | (0 << 16)
     if admin(state, A_CREATE_CQ, 0, state + IOCQ_OFF,
         ((QDEPTH - 1) << 16) | 1, cq_cdw11) != 0 {
         return false
@@ -517,7 +344,7 @@ fn await_rdy(b: u64, want: u64) -> bool {
     while spin < SPIN_LIMIT {
         let csts: u64 = rd32(b, R_CSTS)
         if (csts & CSTS_CFS) != 0 {
-            return false // the controller declared itself broken
+            return false
         }
         if (csts & CSTS_RDY) == want {
             return true
@@ -535,13 +362,8 @@ fn zero(p: u64, n: u64) {
     }
 }
 
-// How big the namespace is and how big a block is. Both come out of the
-// device; a driver that assumes 512 works until it meets a disk that was
-// formatted to 4096.
 fn identify(state: u64) -> bool {
     zero(state + ID_OFF, PAGE)
-    // CNS 0 = this namespace. Namespace 1 is the one every NVMe device
-    // that has any namespace at all has.
     if admin(state, A_IDENTIFY, 1, state + ID_OFF, 0, 0) != 0 {
         return false
     }
@@ -557,20 +379,6 @@ fn identify(state: u64) -> bool {
     return true
 }
 
-// ===================================================== RUNDE BLECH
-//
-// DIE LISTE DER AKTIVEN NAMENSRAEUME (CNS 0x02) und dann jeder einzeln.
-//
-// CNS 0x02 mit nsid 0 liefert bis zu 1024 Nummern zu je vier Oktett,
-// AUFSTEIGEND, und die erste Null beendet die Liste -- das steht so in
-// NVMe 1.4 Figur 245 und ist die einzige Abbruchbedingung, die es
-// gibt. Wer stattdessen bis 1024 laeuft, liest hinter dem Ende weiter.
-//
-// Warum die Nummern ZUERST in eine eigene Tafel kopiert werden: der
-// Zielpuffer ist `ID_OFF`, und den braucht der naechste Befehl
-// (IDENTIFY NAMESPACE) wieder. Wer die Liste dort stehen laesst und
-// waehrend des Durchgangs daraus liest, liest ab dem zweiten
-// Namensraum die Antwort des ersten.
 fn ns_scan(state: u64) -> u64 {
     kstate.set(state, sc(S_NSN), 0)
     kstate.set(state, sc(S_NSLIST), 0)
@@ -578,7 +386,6 @@ fn ns_scan(state: u64) -> u64 {
     if admin(state, A_IDENTIFY, 0, state + ID_OFF, 2, 0) != 0 {
         return 0
     }
-    // Erst die Nummern retten.
     var found: u64 = 0
     var i: u64 = 0
     while i < 1024 {
@@ -600,7 +407,6 @@ fn ns_scan(state: u64) -> u64 {
     if n > MAX_NS {
         n = MAX_NS
     }
-    // Und jetzt jeden einzeln befragen.
     var k: u64 = 0
     var ok: u64 = 0
     while k < n {
@@ -649,10 +455,6 @@ fn ns_shift(state: u64, i: u64) -> u64 {
     return kstate.get(state, sc(NS_TAB + i * 32 + N_LBADS))
 }
 
-// Ein Block aus dem i-ten Namensraum. Derselbe Weg wie `read_block`,
-// nur mit einer anderen Nummer im zweiten Wort des Befehls -- und genau
-// das IST der ganze Unterschied zwischen einem Namensraum und dem
-// naechsten.
 fn read_block_ns(state: u64, i: u64, lba: u64, dst: u64) -> bool {
     let id: u64 = ns_id(state, i)
     if id == 0 {
@@ -688,14 +490,6 @@ fn ns_report(state: u64) {
     }
 }
 
-// DER DATENWEG, je Namensraum. Nicht "die Tafel sagt drei", sondern
-// "aus jedem der drei kommen die Oktette, die der Wirt hineingelegt
-// hat". Gedruckt wird eine gewichtete Summe ueber die ersten 512
-// Oktett, damit der Wirt sie nachrechnen kann.
-//
-// Sie laeuft nur, wenn es mehr als EINEN Namensraum gibt. Damit ist
-// jeder bestehende Lauf -- und alle haben genau einen -- Zeile fuer
-// Zeile derselbe wie vorher.
 fn ns_verify(state: u64) {
     var s_v: [u8; 9] = "nvme: ns\0"
     var s_i: [u8; 7] = " nsid=\0"
@@ -734,25 +528,6 @@ fn ns_verify(state: u64) {
     }
 }
 
-// RUNDE TRESOR: IDENTIFY CONTROLLER (CNS 1), und das ist eine ANDERE
-// Struktur als die oben.
-//
-// `identify` holt IDENTIFY NAMESPACE (CNS 0) -- die Groesse und das
-// Blockformat dieser einen Namensraeume. Die Seriennummer des LAUFWERKS
-// steht dort nicht; sie gehoert dem Controller, nicht dem Namensraum. Wer
-// die Oktette 4..23 aus dem vorhandenen Puffer nimmt, liest die
-// Kapazitaet als Text -- eine Verwechslung, die keinen Fehler ausloest
-// und nur falsche Zeichen liefert.
-//
-// Also ein zweiter Befehl, mit nsid 0 und CDW10 = 1. Der Zielpuffer kommt
-// VON AUSSEN: dieser Treiber hat keine Seite mehr frei (0x14000..0x1B000
-// sind vergeben), und der Aufrufer hat eine. An der bestehenden Logik
-// aendert das nichts -- die Funktion wird nur gerufen, wenn jemand sie
-// ruft.
-//
-// Im Puffer (NVMe 1.4, Figur 249): Oktette 4..23 die Seriennummer, 24..63
-// die Modellbezeichnung, 64..71 die Firmwarefassung. ASCII, mit LEERZEICHEN
-// aufgefuellt und NICHT nullterminiert.
 fn identify_ctrl(state: u64, dst: u64) -> bool {
     if dst == 0 {
         return false
@@ -767,12 +542,6 @@ fn identify_ctrl(state: u64, dst: u64) -> bool {
     return true
 }
 
-// ------------------------------------------------------- the interrupt
-
-// MSI-X: the device does not pull a line, it WRITES a word to an address
-// -- 0xFEE00000 plus the processor, with the vector as the data. There is
-// no line to share and no controller in between, which is why this is the
-// only interrupt in this kernel that needs no I/O APIC entry.
 fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     let d: u64 = pci.get(state, idx, pci.E_BDF)
     let cap: u64 = pci.get(state, idx, pci.E_MSIX)
@@ -789,38 +558,23 @@ fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     if tbase == 0 {
         return false
     }
-    // Entry 0: address low, address high, data, vector control.
-    // The PHYSICAL address of the local APIC: the controller writes this
-    // word onto the bus itself and never sees a page table.
     wr32(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
     wr32(tbase, 4, 0)
     wr32(tbase, 8, vector & 0xFF)
-    var ctrl: u64 = 1 // masked
+    var ctrl: u64 = 1
     if armed {
         ctrl = 0
     }
     wr32(tbase, 12, ctrl)
-    // Enable the capability, clear the function-wide mask, and switch the
-    // interrupt PIN off: a device must not use both.
     let msg: u64 = pci.cfg_read16(d, cap + 2)
     pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
     return true
 }
 
-// The other path: the interrupt PIN, through the I/O APIC. PCI lines are
-// level triggered and active low -- an entry that says edge would deliver
-// the interrupt once and then never again.
 fn intx_arm(state: u64, idx: u64, vector: u64, armed: bool) {
     let d: u64 = pci.get(state, idx, pci.E_BDF)
-    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF) // pin on
-    // RUNDE AML: DIE LEITUNG KOMMT AUS `_PRT`, NICHT AUS 0x3C.
-    // `aml.gsi_or_line` fragt zuerst die Interrupt-Routing-Tabelle der
-    // Firmware (das AML-Objekt `_PRT` der Wurzelbruecke, ausgewertet in
-    // kernel/aml.fi) und faellt auf genau die Zeile zurueck, die hier
-    // frueher stand, wenn es kein `_PRT` gibt, es nicht lesbar war oder
-    // das Geraet dort nicht vorkommt. Was beide Wege sagen, steht mit
-    // `aml` auf der seriellen Leitung nebeneinander.
+    pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) & 0xFBFF)
     let gsi: u64 = aml.gsi_or_line(state, idx)
     if gsi == 0 || gsi > 23 {
         return
@@ -833,9 +587,6 @@ fn intx_arm(state: u64, idx: u64, vector: u64, armed: bool) {
     }
 }
 
-// Called out of `trap.fi`. Everything the completion queue holds is taken
-// at once: one interrupt can stand for several finished commands, and a
-// handler that only ever takes one leaves the rest lying.
 fn irq(state: u64) {
     kstate.add(state, sc(S_IRQS), 1)
     drain(state)
@@ -868,25 +619,11 @@ fn drain(state: u64) -> u64 {
     return got
 }
 
-// After this the driver stops waiting for interrupts and polls the queue
-// instead. Used by the counter-check: with the message vector masked the
-// transfer HAS happened, only nobody said so.
 fn arm_polling(state: u64) {
     kstate.set(state, sc(S_POLL), 1)
 }
 
-// ------------------------------------------------------- the transfers
-
-// One command, one wait. The wait is the interesting part: `hlt` gives
-// the processor up until an interrupt arrives. The timer keeps ticking,
-// so this loop cannot deadlock even if the completion never comes -- it
-// gives up after three seconds and says so.
 fn run_io(state: u64, opcode: u64, lba: u64, count: u64, addr: u64, len: u64) -> bool {
-    // RUNDE BLECH: dieselbe Funktion, die Nummer des Namensraums als
-    // Argument. Der alte Aufruf steht hier mit einer festen 1 -- also
-    // ist jeder bestehende Weg Wort fuer Wort derselbe Befehl wie
-    // vorher, und die Runde aendert an den 54 Abschnitten der Abnahme
-    // nichts.
     return run_io_ns(state, opcode, 1, lba, count, addr, len)
 }
 
@@ -913,20 +650,6 @@ fn run_io_ns(state: u64, opcode: u64, nsid: u64, lba: u64, count: u64,
     return await(state, want)
 }
 
-// Is this processor even in a position to receive an interrupt? The
-// question is not academic. `fs.fi` was written for a device that could
-// do nothing but spin, and it therefore holds interrupts OFF across a
-// whole block operation (`sched.irq_save`, six places). A driver that
-// halts inside that critical section waits for an interrupt that cannot
-// arrive, and the machine stands still -- which is exactly what this one
-// did, for the whole length of `fs.format`.
-//
-// The answer is the one every kernel gives: when the caller cannot take
-// an interrupt, the driver POLLS. The data still moves by DMA -- the
-// controller reads the command and copies the octets itself either way --
-// only the completion is discovered by looking instead of by being told.
-// The difference between the two is measurable and is measured
-// (`nvme: ... irqs=`, and the bench, which runs with interrupts on).
 fn interruptible() -> bool {
     return arch.irq_are_on()
 }
@@ -954,7 +677,6 @@ fn await(state: u64, want: u64) -> bool {
     return kstate.get(state, sc(S_STATUS)) == 0
 }
 
-// The interface `blk.fi` asks for: block n, 512 octets, nothing else.
 fn read_block(state: u64, lba: u64, dst: u64) -> bool {
     return run_io(state, IO_READ, lba, 1, dst, SECTOR)
 }
@@ -966,10 +688,6 @@ fn write_block(state: u64, lba: u64, src: u64) -> bool {
     return flush(state)
 }
 
-// Several blocks in ONE command. Not needed for the file system -- it is
-// the number that shows what the per-block interface costs, and it is
-// what a real driver would do. At most two pages, because a longer
-// transfer would need a PRP LIST and this kernel does not build one.
 fn read_many(state: u64, lba: u64, count: u64, dst: u64) -> bool {
     let len: u64 = count * SECTOR
     if len > 2 * PAGE {
@@ -982,9 +700,6 @@ fn flush(state: u64) -> bool {
     return run_io(state, IO_FLUSH, 0, 1, 0, 0)
 }
 
-// ===================================================== DD-12: AFTER S3
-// `kill` is the POWER-LOSS SIMULATION of the S3 test (QEMU does not cut a
-// device's power): the controller is disabled, so every queue is gone.
 fn kill(state: u64) {
     let b: u64 = kstate.get(state, sc(S_BASE))
     if b != 0 {
@@ -992,9 +707,6 @@ fn kill(state: u64) {
     }
 }
 
-// `resume` brings the controller back the way the first start did: off,
-// admin queue, I/O queue, identify. False if there is no controller or it
-// does not come back.
 fn resume(state: u64) -> bool {
     if kstate.get(state, sc(S_BASE)) == 0 {
         return false

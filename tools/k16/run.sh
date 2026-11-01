@@ -230,7 +230,7 @@ grep -q '^const K16_OFF: u64 = 0x3F000' "$TMPD/kern/lib/kstate.fi" \
 if python3 tools/kernel/memmap.py "$TMPD/kern" > "$TMPD/karte2.txt" 2>&1; then
     bad "GEGENPROBE: auf 0x3F000 (Runde K10, der Schriftleser) haette der Pruefer anschlagen muessen"
 else
-    ok "GEGENPROBE: auf einer schon belegten Seite schlaegt der Kartenpruefer an ($(grep -c KOLLISION "$TMPD/karte2.txt") Kollisionen)"
+    ok "GEGENPROBE: auf einer schon belegten Seite schlaegt der Kartenpruefer an ($(grep -c COLLISION "$TMPD/karte2.txt") Kollisionen)"
 fi
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then

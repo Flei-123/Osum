@@ -1,48 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/kernel/memmap.py -- DIE SPEICHERKARTE VON `kdata` MECHANISCH PRUEFEN.
-
-Der Kernel hat EINEN zusammenhaengenden Datenbereich (`kernel/arch/x86_64/boot.s`,
-Symbol `kdata`, KDATA_SIZE Oktette), und jede Runde nimmt sich daraus
-Seiten: die Aufgabentabelle, die Seitentabellen, das PCI-Geraeteverzeichnis,
-die NVMe-Warteschlangen, die Deskriptoren, die Signale, die Terminals, der
-Rahmenpuffer-Zustand samt Zeichensatz.  Wer sich welche Seite nimmt, steht
-als `const ..._OFF: u64 = 0x....` im Quelltext -- verteilt ueber sechs
-Dateien.
-
-DAS IST DIE STELLE, AN DER DIESES PROJEKT VIERMAL DENSELBEN FEHLER GEMACHT
-HAT, und dreimal stand er hinterher als Kommentar in `kstate.fi`:
-
-  Runde K4  legte `exec`-Argumente auf 0x10000 -- dort lag schon das
-            PCI-Geraeteverzeichnis aus Runde K2.
-  Runde K5  legte die Kernregister auf 0x12000 -- dort lagen schon die
-            Zaehler von Runde K2.
-  Runde K6  legte das Arbeitsverzeichnis auf 0x1C000 -- dort lagen schon
-            die Skalare von Runde K5.
-  Runde K7  legte den Rahmenpuffer-Zustand und den ZEICHENSATZ auf
-            0x2F000; Runde K9 legte die Signaltabelle auf dieselbe
-            Adresse.  Beide Zweige waren FUER SICH gruen -- die Dateien
-            ueberschnitten sich nicht, nur die Adressen.  Nach dem
-            Verschmelzen loeschte der Signalblock der Aufgabe 1 die
-            Oktette 0x300..0x600 des Zeichensatzes, also die Glyphen
-            0x40..0x6F: '@' bis 'o'.  Auf dem Schirm blieben Ziffern und
-            Satzzeichen stehen, Buchstaben verschwanden.
-
-Ein Textverschmelzer kann so etwas nicht sehen: die Kollision steht in
-keiner gemeinsamen Zeile.  Also rechnet dieses Programm sie aus.
-
-Verwendung:
-    python3 tools/kernel/memmap.py [kernelverzeichnis]
-
-Ausgabe: eine Zeile je Bereich (nur mit -v), am Ende die Zahl der Bereiche
-und der Kollisionen.  Rueckgabe 0, wenn sich nichts ueberschneidet und
-alles in KDATA_SIZE passt.
-"""
 import glob
 import os
 import re
 import sys
-
 
 BEREICHE = [
     ("IDT",        "kstate.fi", "IDT_OFF",        "0x1000"),
@@ -334,63 +295,47 @@ for _d, _k, _n in K17_STUECKE:
 for _d, _k, _n in EHCI_STUECKE:
     KEINE_KDATA.add((_d, _k))
 
-
-def konstanten(pfad):
-    """Alle `const NAME: u64 = <ausdruck>` einer Firn-Datei."""
-    quelle = open(pfad, "r", encoding="utf-8").read()
-    werte = {}
+def konstanten(path):
+    source = open(path, "r", encoding="utf-8").read()
+    values = {}
     for name, rest in re.findall(
-            r"^const ([A-Za-z_0-9]+): u64 = (.+)$", quelle, re.M):
+            r"^const ([A-Za-z_0-9]+): u64 = (.+)$", source, re.M):
         rest = rest.split("//")[0].strip()
-        werte[name] = rest
-    return werte
+        values[name] = rest
+    return values
 
-
-def wert(werte, ausdruck, tiefe=0):
-    """Einen Ausdruck ueber Konstanten ausrechnen (nur + - * und Zahlen)."""
+def value(values, ausdruck, tiefe=0):
     if tiefe > 8:
         raise ValueError("Konstanten laufen im Kreis: %s" % ausdruck)
     t = ausdruck.strip()
     if re.fullmatch(r"(0x[0-9A-Fa-f]+|\d+)", t):
         return int(t, 0)
     if re.fullmatch(r"[A-Za-z_0-9]+", t):
-        if t not in werte:
+        if t not in values:
             raise ValueError("unbekannte Konstante %s" % t)
-        return wert(werte, werte[t], tiefe + 1)
+        return value(values, values[t], tiefe + 1)
     if not re.fullmatch(r"[A-Za-z_0-9 +\-*()x]+", t):
         raise ValueError("kein rechenbarer Ausdruck: %s" % ausdruck)
     ersetzt = re.sub(r"0[xX][0-9A-Fa-f]+",
                      lambda m: str(int(m.group(0), 16)), t)
     ersetzt = re.sub(r"[A-Za-z_][A-Za-z_0-9]*",
-                     lambda m: str(wert(werte, m.group(0), tiefe + 1)), ersetzt)
+                     lambda m: str(value(values, m.group(0), tiefe + 1)), ersetzt)
     return int(eval(ersetzt, {"__builtins__": {}}, {}))  # noqa: S307
 
-
-def alle_fi(kdir):
-    """Jede .fi im Kernbaum, ohne user/ und app/ -- gleich, wie tief.
-
-    RUNDE O-STRUKTUR: vorher standen hier feste glob-Muster fuer
-    `kernel/*.fi` und `kernel/arch/x86_64/*.fi`. Nach dem Umzug in
-    Schichten haetten sie die Haelfte des Kerns nicht mehr gesehen --
-    und eine Karte, die die Haelfte nicht sieht, meldet `0
-    Kollisionen`, weil sie nichts zu vergleichen hat. Das ist
-    schlimmer als ein Fehler."""
+def all_fi(kdir):
     aus = []
-    for stamm, verz, namen in os.walk(kdir):
+    for stamm, verz, names in os.walk(kdir):
         verz[:] = [v for v in verz if v not in ("user", "app")]
-        for n in namen:
+        for n in names:
             if n.endswith(".fi"):
                 aus.append(os.path.join(stamm, n))
     return sorted(aus)
 
-
 def finde_fi(kdir, name):
-    """Den Ort EINER Kerndatei suchen; None, wenn es sie nicht gibt."""
-    for p in alle_fi(kdir):
+    for p in all_fi(kdir):
         if os.path.basename(p) == name:
             return p
     return None
-
 
 def main():
     kdir = sys.argv[1] if len(sys.argv) > 1 else "kernel"
@@ -412,86 +357,86 @@ def main():
               "r3dsoft.fi",
               "unixsock.fi", "sys.fi", "sysconst.fi"):
         p = None
-        for stamm, verz, namen in os.walk(kdir):
+        for stamm, verz, names in os.walk(kdir):
             verz[:] = [v for v in verz if v not in ("user", "app")]
-            if d in namen:
+            if d in names:
                 p = os.path.join(stamm, d)
                 break
         if p is not None:
             dateien[d] = konstanten(p)
 
-    kdata = wert(dateien["kstate.fi"], "KDATA_SIZE")
+    kdata = value(dateien["kstate.fi"], "KDATA_SIZE")
 
     # 1. Alles ausrechnen.
-    stuecke = []
-    for name, datei, anf, gr in BEREICHE:
-        w = dateien[datei]
-        a = wert(w, anf)
-        n = wert(w, gr)
-        stuecke.append((a, a + n, name, datei, anf))
+    pieces = []
+    for name, file, anf, gr in BEREICHE:
+        w = dateien[file]
+        a = value(w, anf)
+        n = value(w, gr)
+        pieces.append((a, a + n, name, file, anf))
 
-    fehler = []
+    errors = []
 
     # 2. Ueberschneidungen -- der eigentliche Zweck.
-    stuecke.sort()
-    for i in range(len(stuecke)):
-        a1, e1, n1, d1, k1 = stuecke[i]
+    pieces.sort()
+    for i in range(len(pieces)):
+        a1, e1, n1, d1, k1 = pieces[i]
         if e1 > kdata:
-            fehler.append("%s (%s:%s) endet bei 0x%X, KDATA_SIZE ist 0x%X"
+            errors.append("%s (%s:%s) ends at 0x%X, KDATA_SIZE is 0x%X"
                           % (n1, d1, k1, e1, kdata))
-        for j in range(i + 1, len(stuecke)):
-            a2, e2, n2, d2, k2 = stuecke[j]
+        for j in range(i + 1, len(pieces)):
+            a2, e2, n2, d2, k2 = pieces[j]
             if a2 >= e1:
                 break
-            fehler.append(
-                "KOLLISION: %s (%s:%s) 0x%X..0x%X  ueberschneidet  "
+            errors.append(
+                "COLLISION: %s (%s:%s) 0x%X..0x%X  overlaps  "
                 "%s (%s:%s) 0x%X..0x%X"
                 % (n1, d1, k1, a1, e1, n2, d2, k2, a2, e2))
 
-    benannt = {(d, k) for _, _, _, d, k in stuecke}
+    benannt = {(d, k) for _, _, _, d, k in pieces}
     benannt |= {(d, k) for d, k, _ in EXT4_STUECKE}
     benannt |= {(d, k) for d, k, _ in NTFS_STUECKE}
     benannt |= {(d, k) for d, k, _ in EXFAT_STUECKE}
-    benannt |= {(datei, anf) for _, datei, anf, _ in BEREICHE}
-    for datei, w in dateien.items():
+    benannt |= {(file, anf) for _, file, anf, _ in BEREICHE}
+    for file, w in dateien.items():
         for k in w:
             if not k.endswith("_OFF"):
                 continue
-            if (datei, k) in benannt or (datei, k) in KEINE_KDATA:
+            if (file, k) in benannt or (file, k) in KEINE_KDATA:
                 continue
-            fehler.append("%s:%s steht in keiner Karte -- Bereich oder "
-                          "ausdruecklich kein kdata?" % (datei, k))
+            errors.append("%s:%s is in no map -- region or "
+                          "ausdruecklich kein kdata?" % (file, k))
 
     if "fb.fi" in dateien:
-        a = wert(dateien["kstate.fi"], "FB_OFF")
-        b = wert(dateien["fb.fi"], "FB_OFF")
+        a = value(dateien["kstate.fi"], "FB_OFF")
+        b = value(dateien["fb.fi"], "FB_OFF")
         if a != b:
-            fehler.append("fb.FB_OFF ist 0x%X, kstate.FB_OFF ist 0x%X"
+            errors.append("fb.FB_OFF is 0x%X, kstate.FB_OFF is 0x%X"
                           % (b, a))
-        f = wert(dateien["fb.fi"], "FONT_OFF")
-        n = wert(dateien["fb.fi"], "FB_MAX")
+        f = value(dateien["fb.fi"], "FONT_OFF")
+        n = value(dateien["fb.fi"], "FB_MAX")
         if not (b < f < b + n):
-            fehler.append("FONT_OFF 0x%X liegt nicht in FB_OFF 0x%X + 0x%X"
+            errors.append("FONT_OFF 0x%X is not inside FB_OFF 0x%X + 0x%X"
                           % (f, b, n))
 
     if "ehci.fi" in dateien:
-        a0 = wert(dateien["ehci.fi"], "EHCI_OFF")
-        e0 = a0 + wert(dateien["ehci.fi"], "EHCI_MAX")
-        pf = wert(dateien["ehci.fi"], "PF_OFF")
+        a0 = value(dateien["ehci.fi"], "EHCI_OFF")
+        e0 = a0 + value(dateien["ehci.fi"], "EHCI_MAX")
+        pf = value(dateien["ehci.fi"], "PF_OFF")
         if pf % 0x1000 != 0:
-            fehler.append("ehci.PF_OFF 0x%X liegt nicht auf 4096" % pf)
+            errors.append("ehci.PF_OFF 0x%X liegt nicht auf 4096" % pf)
         eh = []
-        for datei, k, n in EHCI_STUECKE:
-            if datei not in dateien or k not in dateien[datei]:
-                fehler.append("%s:%s fehlt -- die EHCI-Karte ist veraltet"
-                              % (datei, k))
+        for file, k, n in EHCI_STUECKE:
+            if file not in dateien or k not in dateien[file]:
+                errors.append("%s:%s is missing -- the EHCI map is stale"
+                              % (file, k))
                 continue
-            a = wert(dateien[datei], k)
+            a = value(dateien[file], k)
             if a < a0 or a + n > e0:
-                fehler.append(
+                errors.append(
                     "%s:%s 0x%X..0x%X liegt AUSSERHALB von EHCI 0x%X..0x%X"
-                    % (datei, k, a, a + n, a0, e0))
-            eh.append((a, a + n, datei, k))
+                    % (file, k, a, a + n, a0, e0))
+            eh.append((a, a + n, file, k))
         eh.sort()
         for i in range(len(eh)):
             a1, e1, d1, k1 = eh[i]
@@ -499,25 +444,25 @@ def main():
                 a2, e2, d2, k2 = eh[j]
                 if a2 >= e1:
                     break
-                fehler.append(
-                    "KOLLISION IN EHCI: %s:%s 0x%X..0x%X ueberschneidet "
+                errors.append(
+                    "COLLISION IN EHCI: %s:%s 0x%X..0x%X overlaps "
                     "%s:%s 0x%X..0x%X" % (d1, k1, a1, e1, d2, k2, a2, e2))
 
     if "xhci.fi" in dateien and "usb.fi" in dateien:
-        a0 = wert(dateien["kstate.fi"], "K17_OFF")
-        e0 = a0 + wert(dateien["kstate.fi"], "K17_MAX")
+        a0 = value(dateien["kstate.fi"], "K17_OFF")
+        e0 = a0 + value(dateien["kstate.fi"], "K17_MAX")
         k17 = []
-        for datei, k, n in K17_STUECKE:
-            if datei not in dateien or k not in dateien[datei]:
-                fehler.append("%s:%s fehlt -- die K17-Karte ist veraltet"
-                              % (datei, k))
+        for file, k, n in K17_STUECKE:
+            if file not in dateien or k not in dateien[file]:
+                errors.append("%s:%s is missing -- the K17 map is stale"
+                              % (file, k))
                 continue
-            a = wert(dateien[datei], k)
+            a = value(dateien[file], k)
             if a < a0 or a + n > e0:
-                fehler.append(
+                errors.append(
                     "%s:%s 0x%X..0x%X liegt AUSSERHALB von K17 0x%X..0x%X"
-                    % (datei, k, a, a + n, a0, e0))
-            k17.append((a, a + n, datei, k))
+                    % (file, k, a, a + n, a0, e0))
+            k17.append((a, a + n, file, k))
         k17.sort()
         for i in range(len(k17)):
             a1, e1, d1, k1 = k17[i]
@@ -525,39 +470,39 @@ def main():
                 a2, e2, d2, k2 = k17[j]
                 if a2 >= e1:
                     break
-                fehler.append(
-                    "KOLLISION IN K17: %s:%s 0x%X..0x%X ueberschneidet "
+                errors.append(
+                    "COLLISION IN K17: %s:%s 0x%X..0x%X overlaps "
                     "%s:%s 0x%X..0x%X" % (d1, k1, a1, e1, d2, k2, a2, e2))
         if laut:
-            print("  ---- die Untergliederung von K17 ----")
+            print("  ---- breakdown of K17 ----")
             vor17 = a0
             for a, e, dd, kk in k17:
                 if a > vor17:
-                    print("       ---- frei 0x%05X..0x%05X" % (vor17, a))
+                    print("       ---- free 0x%05X..0x%05X" % (vor17, a))
                 print("  0x%05X..0x%05X  %s:%s" % (a, e, dd, kk))
                 vor17 = max(vor17, e)
             if vor17 < e0:
-                print("       ---- frei 0x%05X..0x%05X" % (vor17, e0))
+                print("       ---- free 0x%05X..0x%05X" % (vor17, e0))
 
-    for name, liste in (("EXT4", EXT4_STUECKE), ("NTFS", NTFS_STUECKE),
+    for name, items in (("EXT4", EXT4_STUECKE), ("NTFS", NTFS_STUECKE),
                         ("EXFAT", EXFAT_STUECKE)):
-        datei0 = liste[0][0]
-        if datei0 not in dateien:
+        file0 = items[0][0]
+        if file0 not in dateien:
             continue
-        a0 = wert(dateien["kstate.fi"], name + "_OFF")
-        e0 = a0 + wert(dateien["kstate.fi"], name + "_MAX")
+        a0 = value(dateien["kstate.fi"], name + "_OFF")
+        e0 = a0 + value(dateien["kstate.fi"], name + "_MAX")
         teile = []
-        for datei, k, n in liste:
-            if datei not in dateien or k not in dateien[datei]:
-                fehler.append("%s:%s fehlt -- die %s-Karte ist veraltet"
-                              % (datei, k, name))
+        for file, k, n in items:
+            if file not in dateien or k not in dateien[file]:
+                errors.append("%s:%s is missing -- the %s map is stale"
+                              % (file, k, name))
                 continue
-            a = a0 + wert(dateien[datei], k)
+            a = a0 + value(dateien[file], k)
             if a < a0 or a + n > e0:
-                fehler.append(
+                errors.append(
                     "%s:%s 0x%X..0x%X liegt AUSSERHALB von %s 0x%X..0x%X"
-                    % (datei, k, a, a + n, name, a0, e0))
-            teile.append((a, a + n, datei, k))
+                    % (file, k, a, a + n, name, a0, e0))
+            teile.append((a, a + n, file, k))
         teile.sort()
         for i in range(len(teile)):
             a1, e1, d1, k1 = teile[i]
@@ -565,108 +510,107 @@ def main():
                 a2, e2, d2, k2 = teile[j]
                 if a2 >= e1:
                     break
-                fehler.append(
-                    "KOLLISION IN %s: %s:%s 0x%X..0x%X ueberschneidet "
+                errors.append(
+                    "COLLISION IN %s: %s:%s 0x%X..0x%X overlaps "
                     "%s:%s 0x%X..0x%X"
                     % (name, d1, k1, a1, e1, d2, k2, a2, e2))
         if laut:
-            print("  ---- die Untergliederung von %s ----" % name)
+            print("  ---- breakdown of %s ----" % name)
             vorx = a0
             for a, e, dd, kk in teile:
                 if a > vorx:
-                    print("       ---- frei 0x%05X..0x%05X" % (vorx, a))
+                    print("       ---- free 0x%05X..0x%05X" % (vorx, a))
                 print("  0x%05X..0x%05X  %s:%s" % (a, e, dd, kk))
                 vorx = max(vorx, e)
             if vorx < e0:
-                print("       ---- frei 0x%05X..0x%05X" % (vorx, e0))
+                print("       ---- free 0x%05X..0x%05X" % (vorx, e0))
 
     if laut:
         vor = 0
-        for a, e, n, d, k in stuecke:
+        for a, e, n, d, k in pieces:
             if a > vor:
-                print("       ---- frei 0x%05X..0x%05X (%d KiB)"
+                print("       ---- free 0x%05X..0x%05X (%d KiB)"
                       % (vor, a, (a - vor) // 1024))
             print("  0x%05X..0x%05X  %-12s %s:%s" % (a, e, n, d, k))
             vor = max(vor, e)
         if vor < kdata:
-            print("       ---- frei 0x%05X..0x%05X (%d KiB)"
+            print("       ---- free 0x%05X..0x%05X (%d KiB)"
                   % (vor, kdata, (kdata - vor) // 1024))
 
-    mode_words = wert(dateien["kstate.fi"], "MODE_WORDS")
-    modi = {}
-    for datei in ("kstate.fi", "kmain.fi"):
-        pfad = finde_fi(kdir, datei)
-        if pfad is None:
+    mode_words = value(dateien["kstate.fi"], "MODE_WORDS")
+    modes = {}
+    for file in ("kstate.fi", "kmain.fi"):
+        path = finde_fi(kdir, file)
+        if path is None:
             continue
-        for k, roh in konstanten(pfad).items():
+        for k, roh in konstanten(path).items():
             if not k.startswith("M_") or k == "M_MODE":
                 continue
             try:
                 v = int(roh.split("//")[0].strip(), 0)
             except ValueError:
                 continue
-            modi.setdefault(v, {}).setdefault(k, []).append(datei)
-    for v in sorted(modi):
-        if len(modi[v]) > 1:
+            modes.setdefault(v, {}).setdefault(k, []).append(file)
+    for v in sorted(modes):
+        if len(modes[v]) > 1:
             wer = ", ".join("%s (%s)" % (k, "+".join(dd))
-                            for k, dd in sorted(modi[v].items()))
-            fehler.append("KOLLISION: den Modusindex %d haben zwei Namen: %s"
+                            for k, dd in sorted(modes[v].items()))
+            errors.append("COLLISION: mode index %d has two names: %s"
                           % (v, wer))
         if v >= mode_words * 64:
-            wer = ", ".join(sorted(modi[v]))
-            fehler.append(
-                "%s: Modusindex %d liegt hinter dem Vektor (MODE_WORDS * 64 "
+            wer = ", ".join(sorted(modes[v]))
+            errors.append(
+                "%s: mode index %d lies beyond the vector (MODE_WORDS * 64 "
                 "= %d) -- eine alte Maske?" % (wer, v, mode_words * 64))
     if laut:
-        print("  ---- der Modusvektor, %d Woerter zu 64 Bits ----" % mode_words)
+        print("  ---- mode vector, %d words of 64 bits ----" % mode_words)
         for w in range(mode_words):
-            drin = sorted((v % 64, n)
-                          for v in modi if v // 64 == w
-                          for n in modi[v])
-            if not drin:
+            inside = sorted((v % 64, n)
+                          for v in modes if v // 64 == w
+                          for n in modes[v])
+            if not inside:
                 continue
-            print("  Wort %-2d  %2d von 64 belegt, hoechstes Bit %d"
-                  % (w, len(set(b for b, _ in drin)),
-                     max(b for b, _ in drin)))
-            for b, n in drin:
+            print("  word %-2d  %2d of 64 used, highest bit %d"
+                  % (w, len(set(b for b, _ in inside)),
+                     max(b for b, _ in inside)))
+            for b, n in inside:
                 print("     %3d = %d*64+%-2d  %s" % (w * 64 + b, w, b, n))
-        leer = [w for w in range(mode_words)
-                if not any(v // 64 == w for v in modi)]
-        print("  freie Woerter: %s"
-              % (", ".join(str(w) for w in leer) or "keins"))
+        empty = [w for w in range(mode_words)
+                if not any(v // 64 == w for v in modes)]
+        print("  free words: %s"
+              % (", ".join(str(w) for w in empty) or "keins"))
 
-    vektoren = {}
-    for pfad in alle_fi(kdir):
-        datei = os.path.basename(pfad)
-        for k, roh in konstanten(pfad).items():
+    vectors = {}
+    for path in all_fi(kdir):
+        file = os.path.basename(path)
+        for k, roh in konstanten(path).items():
             if not k.startswith("VEC_"):
                 continue
             try:
                 v = int(roh, 0)
             except ValueError:
                 continue
-            vektoren.setdefault(v, {}).setdefault(k, []).append(datei)
-    vfehler = []
-    for v in sorted(vektoren):
-        if len(vektoren[v]) > 1:
+            vectors.setdefault(v, {}).setdefault(k, []).append(file)
+    vector_errors = []
+    for v in sorted(vectors):
+        if len(vectors[v]) > 1:
             wer = ", ".join("%s (%s)" % (k, "+".join(d))
-                            for k, d in sorted(vektoren[v].items()))
-            vfehler.append("KOLLISION: Vektor %d haben zwei Namen: %s"
+                            for k, d in sorted(vectors[v].items()))
+            vector_errors.append("COLLISION: vector %d has two names: %s"
                            % (v, wer))
-    fehler += vfehler
+    errors += vector_errors
     if laut:
-        print("  ---- die Vektortabelle ----")
-        for v in sorted(vektoren):
-            print("  %3d  %s" % (v, ", ".join(sorted(vektoren[v]))))
+        print("  ---- vector table ----")
+        for v in sorted(vectors):
+            print("  %3d  %s" % (v, ", ".join(sorted(vectors[v]))))
 
-    for f in fehler:
+    for f in errors:
         print("  " + f)
-    print("%d Bereiche in 0x%X Oktetten kdata, %d Vektoren, "
-          "%d Modusnamen in %d Woertern, %d Kollisionen"
-          % (len(stuecke), kdata, len(vektoren),
-             sum(len(x) for x in modi.values()), mode_words, len(fehler)))
-    return 1 if fehler else 0
-
+    print("%d regions in 0x%X bytes of kdata, %d vectors, "
+          "%d mode names in %d words, %d collisions"
+          % (len(pieces), kdata, len(vectors),
+             sum(len(x) for x in modes.values()), mode_words, len(errors)))
+    return 1 if errors else 0
 
 if __name__ == "__main__":
     sys.exit(main())

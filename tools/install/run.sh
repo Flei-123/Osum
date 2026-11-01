@@ -38,7 +38,7 @@ echo "== 1. die Karte, und das Format, das sich NICHT geaendert haben darf =="
 
 k=$(python3 tools/kernel/memmap.py kernel 2>&1 | tail -1)
 echo "        $k"
-case "$k" in *"0 Kollisionen"*) ok "kdata ohne Kollision" ;; *) bad "kdata: $k" ;; esac
+case "$k" in *"0 collisions"*) ok "kdata ohne Kollision" ;; *) bad "kdata: $k" ;; esac
 
 mkdir -p "$OUT/fmt"
 echo "hallo" > "$OUT/fmt/a.txt"

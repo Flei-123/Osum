@@ -1,35 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/hw.fi -- round K2: the hardware stage of the kernel.
-//
-// This file is the seam between the kernel of rounds 59/62 and the three
-// files this round added. It exists so that `kmain.fi` gains three lines
-// and not thirty: several rounds are working on that file at the same
-// time, and a seam is cheaper to merge than a diff spread over a
-// thousand lines.
-//
-// It does three things, in the order the machine needs them:
-//
-//   1. `stage`  -- read the bus (pci.fi), then move the interrupts from
-//      the two 8259s to the APIC (apic.fi). This happens BEFORE the first
-//      `sti`, because a controller must not be changed while it is
-//      delivering.
-//   2. `disk`   -- bring up the NVMe controller (nvme.fi), put the SAME
-//      file system on it that ran on the RAM disk and on ATA, and then
-//      measure PIO against DMA.
-//   3. `timer_off` -- what the counter-check of round 59 needs: whichever
-//      timer is running has to be silenceable, and after this round that
-//      is not necessarily the PIT any more.
-//
-// EVERY SWITCH HERE HAS A COUNTER-CHECK IN `tools/pci/run.sh`, and every
-// one of them is a run in which the measurement collapses:
-//
-//   noapic    the PIC keeps the machine -- the ticks still have to arrive
-//   noioapic  APIC on, keyboard line NOT entered -- no key may arrive
-//   nobm      no bus master bit -- the controller may not fetch its own
-//             commands, and the driver has to report that instead of hang
-//   noirq     the message vector stays masked -- the transfer works, the
-//             interrupt does not, and the difference is measurable
-//   nomsix    the same completion over the interrupt pin and the I/O APIC
 
 import serial
 import lib.kstate
@@ -52,14 +20,11 @@ export {
     net_ws, net_ts, net_sack,
     net_fallback,
     on, yes, cmd_copy,
-    // RUNDE BLECHVIER: die Blech-Diagnose.
     blech_stage, gpe_abgeschaltet, gpe_status, ivrs_info, iommu_base,
     iommu_ctrl, iommu_stat, pmtmr_port, pmtmr_bits, smi_cmd,
     pm_tschz, pm_abweichung
 }
 
-// The words of the command line this round understands. They are read
-// here and not in `kmain.mode_of` for the same reason the stage exists.
 const M_NOPCI: u64 = 1
 const M_NOAPIC: u64 = 2
 const M_NOIOAPIC: u64 = 4
@@ -69,57 +34,26 @@ const M_NOMSIX: u64 = 32
 const M_NOIRQ: u64 = 64
 const M_BENCH: u64 = 128
 const M_NVPOLL: u64 = 256
-// ROUND K8. The word that brings the network card up is `nic` and not
-// `net`, and that is not taste: the counter-check runs the SAME command
-// line without it, and every parameter of this round (`nip=`, `ngw=`,
-// `nsvc=`) carries the three letters `net` inside it. A switch that its
-// own arguments turn on again is no switch.
-const M_NIC: u64 = 512 // bring the card up at all
-const M_NICINTX: u64 = 1024 // the pin through the I/O APIC, not MSI-X
-const M_NICNOIRQ: u64 = 2048 // the vector stays masked -- counter-check
-const M_NICNOBM: u64 = 4096 // no bus master -- counter-check
+const M_NIC: u64 = 512
+const M_NICINTX: u64 = 1024
+const M_NICNOIRQ: u64 = 2048
+const M_NICNOBM: u64 = 4096
 
-// RUNDE AHCI. Ein eigenes Wort, damit dieser Abschnitt NUR laeuft, wenn
-// er gemeint ist -- jede Messung aller vorherigen Runden bleibt damit
-// Oktett fuer Oktett die, die sie war.
 const M_AHCI: u64 = 8192
 
-// RUNDE RTL. Zwei Woerter, die NICHTS am Betrieb aendern und nur Zahlen
-// ausgeben -- deshalb duerfen sie in jedem anderen Lauf fehlen, ohne dass
-// sich eine einzige Messung frueherer Runden verschiebt.
-//   nictab   die Treibertabelle gegen eine eingebaute Nummernliste laufen
-//            lassen und je Zeile sagen, welcher Treiber es waere. Das ist
-//            der einzige Weg, die Wahl fuer einen I219 oder einen RTL8168
-//            zu pruefen, ohne einen zu besitzen.
-//   nicself  die Selbstpruefung der Treiber: voller Sendering, zu grosser
-//            Rahmen. Beides Faelle, die ein Ping nie ausloest.
 const M_NICTAB: u64 = 16384
 const M_NICSELF: u64 = 32768
-// ROUND NIC9020. Two test words for the PCH path of kernel/drv/net/e1000.fi:
-//   nicich   drive QEMU's 82574 (-device e1000e) through the I217/I219
-//            bring-up, so that path runs somewhere before it runs on a board
-//   nicfail  the reset "never finishes" -- the counter-check that a dead
-//            card costs the boot nothing but the network
 const M_NICICH: u64 = 65536
 const M_NICFAIL: u64 = 131072
-// DELL STABILITY: force the I219 descriptor-ring flush on QEMU's 82574 (see e1000.fi)
 const M_NICFLUSH: u64 = 524288
-const M_AHCIRAID: u64 = 262144 // pci.fi reads the same bit (T_AHCIRAID): the controller looks like RAID mode
-// r558 (Dell SATA HDD not found): test hooks of kernel/drv/blk/ahci.fi, read there from the same scalar
-//   slowsata  a present disk links LATE (DET 0 for 0.7 s, DET 1 until 1.0 s, BSY until 2.5 s)
-//   lostsig   the device signature is lost unless a COMRESET follows the HBA reset
-//   oldsata   the first-version scan (no COMRESET, empty port abandoned after 0.3 s): the counter-check
+const M_AHCIRAID: u64 = 262144
 const M_SLOWSATA: u64 = 1048576
 const M_OLDSATA: u64 = 2097152
 const M_LOSTSIG: u64 = 4194304
 const M_FAKEWLAN: u64 = 8388608
 
-const S_MODE: u64 = 0x1B0 // in the K2 scalar page, between apic and nvme
+const S_MODE: u64 = 0x1B0
 
-// ROUND K8. Read out of the command line in `parse`, which happens
-// BEFORE the frame allocator hands the command line itself out as heap
-// (see the comment there). 0x200 is `virtio.fi`, 0x300 `inet.fi`; this
-// is the strip between the seam and its socket table.
 const S_NIP: u64 = 0xC60
 const S_NPREFIX: u64 = 0xC68
 const S_NGW: u64 = 0xC70
@@ -127,12 +61,6 @@ const S_NSVC: u64 = 0xC78
 const S_NPORT: u64 = 0xC80
 const S_NBYTES: u64 = 0xC88
 const S_NWAIT: u64 = 0xC90
-// ROUND NETVIEW, second addendum: `nvfall=` -- the systemwide fallback
-// this machine boots with. 0 off, 1 when-offline, 2 always; the words
-// are in `netview.FB_*` and `docs/NETVIEW.md`. It is read HERE, beside
-// the other network parameters, for the reason at `parse`: the command
-// line stops existing the moment the heap is put on top of it, and a
-// preference that has to survive that cannot be read later.
 const S_NVFALL: u64 = 0xC98
 const S_NZWS: u64 = 0xCA0
 const S_NZTS: u64 = 0xCA8
@@ -140,24 +68,16 @@ const S_NZSACK: u64 = 0xCB0
 
 const TIMER_HZ: u64 = 100
 const GSI_MOUSE: u64 = 12
-const VEC_MOUSE: u64 = 46 // siehe trap.fi -- 44 gehoert dem NVMe-Regler
+const VEC_MOUSE: u64 = 46
 const GSI_KEYBOARD: u64 = 1
-// RUNDE SERVERBUILD: COM1 haengt an IRQ 4, COM2 an IRQ 3. Beide werden
-// eingetragen, wenn `console=` da ist -- ein Eintrag ohne Geraet
-// dahinter kostet nichts, und ein Eintrag, der davon abhaengt, WELCHE
-// der beiden Leitungen genommen wurde, waere eine zweite Art, wie ein
-// Lauf sich vom anderen unterscheidet.
 const GSI_COM1: u64 = 4
 const GSI_COM2: u64 = 3
 const VEC_KEYBOARD: u64 = 33
-// RUNDE SERVERBUILD -- siehe trap.fi. Die Zahl steht an beiden Orten,
-// wie VEC_KEYBOARD und VEC_MOUSE es seit Runde K10 tun, und
-// tools/kernel/memmap.py rechnet nach, dass sie dieselbe ist.
 const VEC_SERIAL: u64 = 36
 
-const FS_BLOCKS: u64 = 2048 // the same 1 MiB the RAM disk and ATA use
-const BENCH_BLOCKS: u64 = 256 // 128 KiB, read once per path
-const BENCH_BATCH: u64 = 16 // blocks in ONE command, 8 KiB, two PRPs
+const FS_BLOCKS: u64 = 2048
+const BENCH_BLOCKS: u64 = 256
+const BENCH_BATCH: u64 = 16
 
 fn mode(state: u64) -> u64 {
     return kstate.get(state, pci.K2_SCALARS + S_MODE)
@@ -167,21 +87,6 @@ fn on(state: u64, bit: u64) -> bool {
     return (mode(state) & bit) != 0
 }
 
-// ---------------------------------------------------------- stage zero
-
-// Reads the command line and NOTHING else, and it has to happen before
-// the frame allocator exists.
-//
-// This cost half an hour and belongs in a comment. QEMU puts the
-// multiboot command line directly BEHIND the kernel image -- in this
-// build at 0x184000, with `kernel_end` at 0x183038. `mem.scan` reserves
-// the kernel up to `kernel_end` and everything above it is free memory
-// as far as the frame allocator is concerned. The first thing the kernel
-// asks for is 64 frames for the heap, and it gets 0x184000. From then on
-// the command line reads as a heap block header. Round 62 never noticed
-// because it read the command line at the top of `kernel_main`; this
-// round wanted to read it again further down and found a string that had
-// turned into a number.
 fn parse(state: u64, cmd: u64) {
     kstate.set(state, pci.K2_SCALARS + S_MODE, mode_of(cmd))
     clock_words(state, cmd)
@@ -189,23 +94,6 @@ fn parse(state: u64, cmd: u64) {
     net_parse(state, cmd)
 }
 
-// ROUND TUNNEL: A COPY OF THE COMMAND LINE THAT SURVIVES THE HEAP.
-//
-// The note at `parse` above says the command line stops existing the
-// moment the frame allocator hands out the memory it sits on. Round K8
-// solved that by reading everything it needed HERE, into scalars. That
-// works while the values are numbers.
-//
-// Round TUNNEL needs 64 character keys and several of them, which are
-// not numbers and do not belong in a scalar each. So the command line
-// itself is copied, once, at the only moment it is still readable, into
-// the same page every other early value lives in. `cmd_copy` hands the
-// copy out; `kernel/wg.fi` reads its own words out of it long after the
-// original has become a heap block header.
-//
-// 0xE00..0x1200 of the K2 scalar page: round K2 reaches to 0xB00 and
-// round TUNNEL's own scalars sit at 0xC00, so this is the next free
-// strip and it ends well below the 0x2000 the page has.
 const S_CMD: u64 = 0xE00
 const CMD_MAX: u64 = 1023
 
@@ -222,14 +110,6 @@ fn save_cmd(state: u64, cmd: u64) {
     kstate.set8(pci.K2_SCALARS + S_CMD + i, 0 as u8)
 }
 
-
-// ROUND TICKFIX: test words that take clock sources away one by one, so
-// that every fallback of `apic.calibrate` can be walked in a VM:
-//   nopit nopm nocpuid nohpet  -- that calibration source is skipped
-//   notick                     -- ALL timers are silenced right before the
-//                                 tick wait (the stuck-laptop case)
-//   lapicmute                    -- only the local APIC timer is silenced;
-//                                 the PIT-via-IOAPIC reroute rescues it
 fn clock_words(state: u64, cmd: u64) {
     var w_pit: [u8; 6] = "nopit\0"
     var w_pm: [u8; 5] = "nopm\0"
@@ -259,7 +139,6 @@ fn clock_words(state: u64, cmd: u64) {
     kstate.set(state, pci.K2_SCALARS + apic.S_NOSRC, bits)
 }
 
-
 fn cmd_copy(state: u64) -> u64 {
     if kstate.get8(pci.K2_SCALARS + S_CMD) == 0 {
         return 0
@@ -267,13 +146,6 @@ fn cmd_copy(state: u64) -> u64 {
     return pci.K2_SCALARS + S_CMD
 }
 
-// ---------------------------------------------- the K8 command line
-//
-// `nip=10.9.0.2/24 ngw=10.9.0.1 nsvc=1 nport=7 nbytes=1048576 nwait=900`
-//
-// All of it here and not in `netsvc.fi` for the reason at `parse`: the
-// command line is a string that stops existing the moment the heap
-// stands on it, and this function runs before that.
 fn net_parse(state: u64, cmd: u64) {
     var w_ip: [u8; 5] = "nip=\0"
     var w_gw: [u8; 5] = "ngw=\0"
@@ -300,7 +172,7 @@ fn net_parse(state: u64, cmd: u64) {
     if a != 0 {
         var after: u64 = 0
         kstate.set(state, pci.K2_SCALARS + S_NIP, ip_of(a + 4, &after))
-        if kstate.get8(after) == 47 { // '/'
+        if kstate.get8(after) == 47 {
             var e: u64 = 0
             let p: u64 = dec_of(after + 1, &e)
             let first: u64 = kstate.get8(after + 1)
@@ -327,7 +199,6 @@ fn net_parse(state: u64, cmd: u64) {
     num_arg(state, cmd, (&w_zsk[0]) as u64, 7, S_NZSACK)
 }
 
-// RUNDE NETZPLUS: die drei Schalter, gelesen.
 fn net_ws(state: u64) -> u64 { return kstate.get(state, pci.K2_SCALARS + S_NZWS) }
 fn net_ts(state: u64) -> u64 { return kstate.get(state, pci.K2_SCALARS + S_NZTS) }
 fn net_sack(state: u64) -> u64 { return kstate.get(state, pci.K2_SCALARS + S_NZSACK) }
@@ -341,7 +212,6 @@ fn num_arg(state: u64, cmd: u64, word: u64, n: u64, slot: u64) {
     kstate.set(state, pci.K2_SCALARS + slot, dec_of(a + n, &e))
 }
 
-// A decimal number, and where it ended.
 fn dec_of(p: u64, endp: *mut u64) -> u64 {
     var v: u64 = 0
     var i: u64 = 0
@@ -367,8 +237,6 @@ fn dec_of(p: u64, endp: *mut u64) -> u64 {
     return v
 }
 
-// Four decimal numbers with three dots between them, packed the way the
-// stack wants them: the first octet at the top.
 fn ip_of(p: u64, endp: *mut u64) -> u64 {
     var v: u64 = 0
     var at: u64 = p
@@ -379,7 +247,7 @@ fn ip_of(p: u64, endp: *mut u64) -> u64 {
         v = (v << 8) | (part & 0xFF)
         at = e
         if i < 3 {
-            if kstate.get8(at) != 46 { // '.'
+            if kstate.get8(at) != 46 {
                 *endp = at
                 return 0
             }
@@ -425,8 +293,6 @@ fn net_wait(state: u64) -> u64 {
     return kstate.get(state, pci.K2_SCALARS + S_NWAIT)
 }
 
-// A value out of range reads as 0 -- `off`, which is what a machine
-// that never heard of this addendum does.
 fn net_fallback(state: u64) -> u64 {
     let v: u64 = kstate.get(state, pci.K2_SCALARS + S_NVFALL)
     if v > 2 {
@@ -435,13 +301,6 @@ fn net_fallback(state: u64) -> u64 {
     return v
 }
 
-// ---------------------------------------------------------- stage one
-
-// ROUND TICKFIX: the two clocks `apic.calibrate` may fall back on, read
-// from the ACPI tables BEFORE `apic.init` (blech_stage runs after it and
-// reads the FADT again for the cross-check; same values).
-// The HPET table keeps the block address as a generic address structure
-// at offset 40; the address itself is the 8 bytes at offset 44.
 fn clock_info(state: u64) {
     var w_facp: [u8; 5] = "FACP\0"
     var w_hpet: [u8; 5] = "HPET\0"
@@ -495,16 +354,12 @@ fn stage(state: u64) {
     }
     clock_info(state)
     let up: bool = apic.init(state, TIMER_HZ)
-    // ROUND TICKFIX: always say which clock was found and what the
-    // fallbacks saw -- one line, enough for a photo of a laptop screen.
     apic.timer_diag(state)
     if !up {
         serial.puts((&s_none[0]) as u64)
         serial.nl()
         return
     }
-    // Only now, with the new controller answering, is the old one shut
-    // up. The other order leaves a window with no controller at all.
     apic.pic_off()
     serial.puts((&s_on[0]) as u64)
     serial.puts((&s_id[0]) as u64)
@@ -519,32 +374,18 @@ fn stage(state: u64) {
     serial.dec(apic.window_slots(state))
     serial.nl()
 
-    // The keyboard is the one device line this kernel still has, and it
-    // is therefore the proof that the I/O APIC delivers at all. With
-    // `noioapic` the entry is deliberately left out: the PIC is mute, the
-    // line goes nowhere, and no key may arrive.
     var s_ser: [u8; 21] = "hw: serial gsi 4 ->\0\0"
     if on(state, M_NOIOAPIC) {
         serial.puts((&s_nokbd[0]) as u64)
         serial.nl()
     } else {
-        // W-INPUTHANG test bed: `nokirq` leaves IRQ 1 unrouted (a lost keyboard interrupt); only the wm watchdog (kbd.rescue) can bring keys then.
         if !kstate.mode_on(state, kstate.M_NOKIRQ) {
             apic.route(state, GSI_KEYBOARD, VEC_KEYBOARD, apic.id(state), false, false)
             serial.puts((&s_kbd[0]) as u64)
             serial.dec(VEC_KEYBOARD)
             serial.nl()
         }
-        // ROUNDE K10: der zweite Anschluss desselben Bausteins. Die
-        // Leitung wird IMMER eingetragen, auch ohne das Wort `wm` --
-        // ein I/O-APIC-Eintrag ohne Geraet dahinter kostet nichts, und
-        // ein Eintrag, der von einer Kommandozeile abhaengt, ist eine
-        // zweite Art, wie ein Lauf sich vom anderen unterscheidet.
         apic.route(state, GSI_MOUSE, VEC_MOUSE, apic.id(state), false, false)
-        // RUNDE SERVERBUILD: die serielle Konsole. Nur mit `console=`,
-        // und nicht mit `noserirq` -- das ist die Gegenprobe, die
-        // zeigen muss, dass die Oktette WIRKLICH ueber diesen Eintrag
-        // kommen und nicht ueber den Abfrageweg daneben.
         if kstate.mode_on(state, kstate.M_SERCON) {
             if !kstate.mode_on(state, kstate.M_NOSERIRQ) {
                 apic.route(state, GSI_COM1, VEC_SERIAL, apic.id(state),
@@ -559,9 +400,6 @@ fn stage(state: u64) {
     }
 }
 
-// Whichever clock is running has to be silenceable. Round 59 masked
-// IRQ0 at the PIC for that; after this round the timer may be inside the
-// processor, where the PIC cannot reach it.
 fn timer_off(state: u64) {
     if apic.active(state) {
         apic.timer_stop(state)
@@ -570,13 +408,7 @@ fn timer_off(state: u64) {
     idt.pic_mask(0xFD as u8, 0xFF as u8)
 }
 
-// ---------------------------------------------------------- stage two
-
 fn disk(state: u64) {
-    // RUNDE AHCI: EIN EIGENER ZWEIG, und er kehrt nicht zurueck. Der
-    // NVMe-Abschnitt darunter formatiert seine eigene Platte; beides in
-    // einem Lauf waere eine Messung, in der nicht mehr zu sagen ist,
-    // welcher Treiber welchen Block geschrieben hat.
     if on(state, M_AHCI) {
         sata(state)
         return
@@ -609,10 +441,6 @@ fn disk(state: u64) {
     let use_msix: bool = !on(state, M_NOMSIX)
     let armed: bool = !on(state, M_NOIRQ)
     let ok: bool = nvme.init(state, use_msix, armed)
-    // The bus master bit is taken away AFTER the controller was set up,
-    // when the counter-check asks for it: `init` itself needs to fetch
-    // one command out of memory to learn how big the disk is, and a run
-    // that cannot even do that would prove nothing about DMA.
     if on(state, M_NOBM) {
         pci.disable_master(nvme.bdf(state))
     }
@@ -638,21 +466,10 @@ fn disk(state: u64) {
     serial.puts((&s_bm[0]) as u64)
     serial.dec(yes(pci.master_on(nvme.bdf(state))))
     serial.nl()
-    // RUNDE BLECH: und was NEBEN Namensraum 1 noch auf dem Riegel
-    // liegt. Ein Laufwerk mit getrennten Namensraeumen fuer System und
-    // Daten sah bis zu dieser Runde zur Haelfte aus wie gar nichts.
     nvme.ns_report(state)
     nvme.ns_verify(state)
 
     if on(state, M_NOIRQ) {
-        // The counter-check that separates the two halves of a DMA
-        // driver. The message vector is masked, so the completion
-        // interrupt cannot arrive -- but the controller still fetches the
-        // command and still moves the data. The first read therefore has
-        // to FAIL (it waits three seconds and gives up), the completion
-        // has to be lying in the queue afterwards all the same, and the
-        // same read has to succeed the moment the driver stops waiting to
-        // be told and looks for itself.
         var n1: [u8; 20] = "nvme: noirq  onirq=\0"
         var n2: [u8; 10] = "  found=\0\0"
         var n3: [u8; 11] = "  polled=\0\0"
@@ -677,31 +494,8 @@ fn disk(state: u64) {
     }
 }
 
-// ==================================================================
-// RUNDE AHCI: DIE PLATTE, DIE EIN ECHTER PC HAT
-// ==================================================================
-//
-// Vier Messungen, und keine davon glaubt dem Treiber etwas:
-//
-//   1. WAS DER BUS SAGT. Der Controller wird ueber seine PCI-Klasse
-//      gefunden (01:06:01), nicht ueber eine Tabelle. Steht die
-//      Firmware auf IDE, meldet dieselbe Stelle `mode=ide` statt
-//      stumm nichts zu finden.
-//   2. EIN SEKTOR HIN UND ZURUECK. Ein Muster nach LBA 4096
-//      geschrieben, gelesen, verglichen. Ein Treiber, der beides
-//      nicht tut, sondern nur den Puffer stehen laesst, faellt hier
-//      NICHT auf -- deshalb wird der Lesepuffer vorher mit einem
-//      ANDEREN Muster gefuellt und zusaetzlich dagegen geprueft.
-//   3. ACHT SEKTOREN IN EINEM BEFEHL. Das ist die PRDT-Zeile mit der
-//      Laenge minus eins; ein Treiber, der sie falsch hat, liest
-//      genau einen Sektor zu wenig, und nur diese Messung sieht das.
-//   4. DAS DATEISYSTEM DARAUF. `fs.fi` bekommt kein Argument mehr und
-//      keine Zeile geaendert -- zum vierten Mal dieselbe Zusage wie
-//      bei DEV_NVME, DEV_ATA1 und DEV_USB. Und der WIRT liest das
-//      Abbild danach nach (`tools/ahci/run.sh`), also ist auch das
-//      nicht das Wort des Kernels.
-const AHCI_LBA1: u64 = 4096 // der einzelne Sektor
-const AHCI_LBAN: u64 = 5000 // die acht am Stueck
+const AHCI_LBA1: u64 = 4096
+const AHCI_LBAN: u64 = 5000
 const AHCI_MANY: u64 = 8
 
 fn sata(state: u64) {
@@ -749,11 +543,6 @@ fn sata(state: u64) {
         return
     }
 
-    // Das Busmaster-Bit wird NACH der Inbetriebnahme weggenommen, wenn
-    // die Gegenprobe danach fragt: `init` muss selbst einen Befehl
-    // (IDENTIFY) aus dem Speicher holen lassen, um die Groesse zu
-    // erfahren, und ein Lauf, der das schon nicht kann, sagt nichts
-    // ueber DMA aus. Genau dieselbe Ueberlegung wie in `disk`.
     if on(state, M_NOBM) {
         pci.disable_master(ahci.bdf(state))
     }
@@ -779,7 +568,6 @@ fn sata(state: u64) {
     serial.dec(yes(pci.master_on(ahci.bdf(state))))
     serial.nl()
 
-    // ---- 2. ein Sektor hin und zurueck
     let wbuf: u64 = ahci.buffer(state, 1)
     let rbuf: u64 = state + kstate.BLOCK_OFF
     fill(wbuf, 512, 0x5A)
@@ -788,11 +576,6 @@ fn sata(state: u64) {
         wlock.unlock(wlock.D_AHCI)
     }
     let w1: u64 = yes(ahci.write_block(state, AHCI_LBA1, wbuf))
-    // `pre` ist die Gegenprobe zum Vergleich darunter: der Lesepuffer
-    // steht VOR dem Lesen auf einem anderen Muster. Waere er hinterher
-    // immer noch darauf, haette der Controller nichts hineingelegt --
-    // und `same` waere trotzdem gruen, wenn beide Puffer nie angefasst
-    // wuerden. Erst die beiden Zahlen zusammen sagen etwas.
     let pre: u64 = same(rbuf, wbuf, 512)
     let r1: u64 = yes(ahci.read_block(state, AHCI_LBA1, rbuf))
     serial.puts((&s_one[0]) as u64)
@@ -805,7 +588,6 @@ fn sata(state: u64) {
     serial.dec(same(rbuf, wbuf, 512))
     serial.nl()
 
-    // ---- 3. acht Sektoren in EINEM Befehl
     let n: u64 = AHCI_MANY * 512
     stripe(wbuf, n)
     fill(rbuf, n, 0)
@@ -821,7 +603,6 @@ fn sata(state: u64) {
     serial.dec(same(rbuf, wbuf, n))
     serial.nl()
 
-    // ---- 4. das Dateisystem, ohne eine Zeile in `fs.fi`
     sata_fs(state)
 
     serial.puts((&s_up[0]) as u64)
@@ -875,9 +656,6 @@ fn fill(p: u64, n: u64, v: u64) {
     }
 }
 
-// Ein Muster, das je Sektor ANDERS ist. Mit einem einheitlichen Muster
-// waere ein Treiber gruen, der achtmal denselben Sektor liest -- und
-// genau das ist der Fehler, den ein falscher PRDT-Eintrag macht.
 fn stripe(p: u64, n: u64) {
     var i: u64 = 0
     while i < n {
@@ -886,9 +664,6 @@ fn stripe(p: u64, n: u64) {
     }
 }
 
-// The whole point of `blk.fi`: the file system does not learn that the
-// blocks now come out of a controller that fetches its own commands. Not
-// one line of `fs.fi` changed for this round.
 fn filesystem(state: u64) {
     var s_fmt: [u8; 14] = "nvme: format \0"
     var s_mount: [u8; 10] = "  mount=\0\0"
@@ -919,8 +694,6 @@ fn filesystem(state: u64) {
     serial.dec(got)
     serial.puts((&s_same[0]) as u64)
     serial.dec(same(scratch, (&text[0]) as u64, 30))
-    // How many completion interrupts the file system cost. Zero would
-    // mean the driver polled after all.
     serial.puts((&s_irqs[0]) as u64)
     serial.dec(nvme.irqs(state) - before)
     serial.puts((&s_wait[0]) as u64)
@@ -929,12 +702,6 @@ fn filesystem(state: u64) {
     list_dir(state, (&p_root[0]) as u64, (&s_list[0]) as u64)
 }
 
-// --------------------------------------------------------- the number
-
-// The measurement that justifies this round. The SAME amount of data over
-// the SAME interface -- `blk.read`, block by block, 512 octets -- once
-// through the processor and once past it. Then once more with sixteen
-// blocks in one command, which is what the per-block interface costs.
 fn bench(state: u64) {
     var s_ata: [u8; 12] = "bench: ata \0"
     var s_nv: [u8; 13] = "bench: nvme \0"
@@ -961,7 +728,6 @@ fn bench(state: u64) {
         serial.nl()
         return
     }
-    // ---- ATA PIO, through the processor.
     blk.use_ata(state, BENCH_BLOCKS)
     let a0: u64 = apic.tsc()
     let aok: u64 = read_run(state, BENCH_BLOCKS, buf)
@@ -971,7 +737,6 @@ fn bench(state: u64) {
         (&s_halt[0]) as u64, (&s_ok[0]) as u64,
         BENCH_BLOCKS, a1 - a0, BENCH_BLOCKS * 256, 0, aok)
 
-    // ---- NVMe, one block per command, the same interface.
     blk.use_nvme(state, BENCH_BLOCKS)
     let h0: u64 = nvme.waits(state)
     let n0: u64 = apic.tsc()
@@ -982,7 +747,6 @@ fn bench(state: u64) {
         (&s_halt[0]) as u64, (&s_ok[0]) as u64,
         BENCH_BLOCKS, n1 - n0, 0, nvme.waits(state) - h0, nok)
 
-    // ---- NVMe, sixteen blocks per command.
     let m0: u64 = apic.tsc()
     var done: u64 = 0
     var lba: u64 = 0
@@ -998,8 +762,6 @@ fn bench(state: u64) {
         (&s_halt[0]) as u64, (&s_ok[0]) as u64,
         BENCH_BLOCKS, m1 - m0, 0, 0, done)
 
-    // How much faster, in thousandths, so that a factor below two is
-    // still a number and not a rounded-down 1.
     serial.puts((&s_cmp[0]) as u64)
     var factor: u64 = 0
     if (n1 - n0) > 0 {
@@ -1022,9 +784,6 @@ fn read_run(state: u64, n: u64, buf: u64) -> u64 {
     return ok
 }
 
-// One line of the measurement. Eight labels as arguments because the
-// kernel profile has no string type and a local array per label in three
-// places would be three places to keep in step.
 fn line(state: u64, head: u64, l_blocks: u64, l_cyc: u64, l_us: u64,
     l_kb: u64, l_in: u64, l_halt: u64, l_ok: u64,
     blocks_n: u64, cycles: u64, inwords: u64, halts: u64, ok: u64) {
@@ -1052,8 +811,6 @@ fn line(state: u64, head: u64, l_blocks: u64, l_cyc: u64, l_us: u64,
     serial.dec(ok)
     serial.nl()
 }
-
-// --------------------------------------------------------- the helpers
 
 fn yes(b: bool) -> u64 {
     if b {
@@ -1100,12 +857,6 @@ fn list_dir(state: u64, p: u64, label: u64) {
     serial.nl()
 }
 
-// ------------------------------------------------------ the command line
-
-// The same shape as `kmain.mode_of`, for the words this round adds. A
-// word that is not there leaves its bit at zero, so a kernel started
-// without any of them behaves exactly as round 62 left it -- except that
-// the interrupts now come from the APIC, which is the point.
 fn mode_of(cmd: u64) -> u64 {
     var w_nopci: [u8; 6] = "nopci\0"
     var w_noapic: [u8; 7] = "noapic\0"
@@ -1231,48 +982,6 @@ fn find(hay: u64, needle: u64, n: u64) -> u64 {
     return 0
 }
 
-// =====================================================================
-// RUNDE BLECHVIER: DIE BLECH-DIAGNOSE
-// =====================================================================
-//
-// Drei Dinge, die auf echtem Blech einen Kern stillstehen lassen und in
-// QEMU NIE auffallen. Alle drei waren in diesem Baum bisher nicht
-// einmal nachgesehen -- `grep` nach GPE, SCI, SMI_CMD, DMAR, IVRS und
-// iommu ueber `kernel/` gab NULL Treffer.
-//
-// 1. DER GPE-STURM. Ein reales Brett hat viele verdrahtete General
-//    Purpose Events (Netzschalter, Temperatur, PCIe-Hotplug,
-//    USB-Aufwecken, GPIO). Feuert eines, wird der SCI gezogen -- meist
-//    IRQ 9, PEGELGESTEUERT. Der zugehoerige `_Lxx`/`_Exx`-Behandler ist
-//    AML, und AML fuehrt dieser Kern nicht aus. Das Statusbit wird also
-//    NIE geloescht, die Leitung bleibt gezogen, und der Rechner steht
-//    in einem Unterbrechungssturm. QEMU hat praktisch keine aktiven
-//    GPEs, deshalb faellt es dort nie auf.
-//
-//    Die Gegenmassnahme braucht KEIN AML: alle Bits in GPE0_EN und
-//    GPE1_EN auf null, Statusregister einmal leeren. Die Adressen
-//    stehen in der FADT, und die kann dieser Baum lesen.
-//
-// 2. DIE IOMMU. "Das BIOS hat IOMMU an" heisst NICHT, dass DMA
-//    blockiert wird -- es gibt zwei Zustaende. Uebersetzung aus oder
-//    Durchreichen: DMA laeuft. Uebersetzung AN mit Pre-Boot-DMA-Schutz:
-//    jeder Zugriff ausserhalb der Unity-Bereiche wird STILL abgebrochen.
-//    Symptombild: xHCI-Ereignisring bleibt leer, NVMe-Completion bleibt
-//    leer, prozessorseitig sieht alles richtig aus.
-//
-//    Hier wird ZUERST GEMESSEN und nichts repariert: IVRS suchen, das
-//    IVinfo-Feld und die IOMMU-Basisadresse aus dem ersten IVHD holen,
-//    das Steuerregister und das Fehlerregister lesen. Aus einem stillen
-//    Haenger wird damit eine Zahl auf der Tafel.
-//
-// 3. DER ACPI-ZEITGEBER. Feste 3,579545 MHz, per Spezifikation, nicht
-//    eichbeduerftig und von SMIs nicht zu verfaelschen -- der richtige
-//    Ersatz fuer den PIT auf Ryzen, wo der 8254 ueber LPC/eSPI emuliert
-//    wird und ein einzelner Lesezugriff laenger als 12 us dauern kann.
-//    Hier wird nur seine Anschrift geholt; geeicht wird in `time.fi`.
-
-// Die Felder der FADT, die diese Runde braucht. Alle aus ACPI 6.x,
-// Tabelle "Fixed ACPI Description Table (FADT) Format".
 const F_SMI_CMD: u64 = 48
 const F_ACPI_EN: u64 = 52
 const F_PM_TMR: u64 = 76
@@ -1283,18 +992,17 @@ const F_GPE0_LEN: u64 = 92
 const F_GPE1_LEN: u64 = 93
 const F_FLAGS: u64 = 112
 
-// Was gemessen wurde. Gelesen wird es von der Messtafel.
-const S_GPE_N: u64 = 0xCC8 // wie viele GPE-Bits abgeschaltet wurden
-const S_GPE_ST: u64 = 0xCD0 // was in den Statusregistern stand
-const S_IVRS: u64 = 0xCD8 // IVinfo, 0 = keine IVRS
-const S_IOMMU: u64 = 0xCE0 // Basisadresse des ersten IOMMU
-const S_IOMMU_C: u64 = 0xCE8 // sein Steuerregister
-const S_IOMMU_S: u64 = 0xCF0 // sein Fehlerregister
-const S_PMTMR: u64 = 0xCF8 // Anschrift des ACPI-Zeitgebers
-const S_PMBITS: u64 = 0xD00 // 24 oder 32
-const S_SMI: u64 = 0xD08 // SMI_CMD, 0 = keiner
-const S_PMHZ: u64 = 0xD10 // Zyklen je Sekunde, gegen den ACPI-Zeitgeber
-const S_ABW: u64 = 0xD18 // Abweichung zur PIT-Eichung, in Promille
+const S_GPE_N: u64 = 0xCC8
+const S_GPE_ST: u64 = 0xCD0
+const S_IVRS: u64 = 0xCD8
+const S_IOMMU: u64 = 0xCE0
+const S_IOMMU_C: u64 = 0xCE8
+const S_IOMMU_S: u64 = 0xCF0
+const S_PMTMR: u64 = 0xCF8
+const S_PMBITS: u64 = 0xD00
+const S_SMI: u64 = 0xD08
+const S_PMHZ: u64 = 0xD10
+const S_ABW: u64 = 0xD18
 
 fn dg(state: u64, off: u64) -> u64 {
     return kstate.get(state, pci.K2_SCALARS + off)
@@ -1340,23 +1048,14 @@ fn smi_cmd(state: u64) -> u64 {
     return dg(state, S_SMI)
 }
 
-// Zyklen je Sekunde, gegen den ACPI-Zeitgeber gemessen. 0 = nicht
-// gemessen.
 fn pm_tschz(state: u64) -> u64 {
     return dg(state, S_PMHZ)
 }
 
-// Um wie viele Promille die PIT-Eichung von der ACPI-Messung abweicht.
-// Ueber hundert (also ueber zehn Prozent) heisst nach Linux-Massstab:
-// die Eichung ist unbrauchbar. 9999 = nicht vergleichbar.
 fn pm_abweichung(state: u64) -> u64 {
     return dg(state, S_ABW)
 }
 
-// EIN GPE-BLOCK: die zweite Haelfte ist das Freigaberegister, die erste
-// die Statusanzeige. Reihenfolge mit Bedacht: ERST freigeben abschalten
-// (sonst kommt zwischen Loeschen und Abschalten ein neues Ereignis),
-// DANN den Status leeren. Statusbits sind RW1C -- eine Eins loescht.
 fn gpe_block_off(state: u64, blk: u64, len: u64) -> u64 {
     if blk == 0 || len < 2 {
         return 0
@@ -1376,8 +1075,6 @@ fn gpe_block_off(state: u64, blk: u64, len: u64) -> u64 {
     return halb * 8
 }
 
-// DIE GANZE DIAGNOSE. Laeuft einmal beim Start, kostet ein paar
-// Tabellenzugriffe und ein paar Anschlusszugriffe.
 fn blech_stage(state: u64) {
     var s_g: [u8; 12] = "acpi: gpe=\0\0"
     var s_gs: [u8; 7] = " sts=\0\0"
@@ -1389,10 +1086,6 @@ fn blech_stage(state: u64) {
     var s_ic: [u8; 8] = " ctrl=\0\0"
     var s_is: [u8; 8] = " stat=\0\0"
     var s_keine: [u8; 6] = "keine\0"
-    // `acpi.table` vergleicht VIER OKTETTE ab einem Zeiger, keine Zahl.
-    // Eine Kennung als u32 uebergeben zu wollen war der Fehler des
-    // ersten Laufs: "acpi: gpe=0 ... smi=0" auf einer Maschine, die
-    // sehr wohl eine FADT hat.
     var w_facp: [u8; 5] = "FACP\0"
     var w_ivrs: [u8; 5] = "IVRS\0"
 
@@ -1423,13 +1116,6 @@ fn blech_stage(state: u64) {
     serial.dec(dg(state, S_SMI))
     serial.nl()
 
-    // ---- DIE GEGENPROBE ZUR EICHUNG.
-    //
-    // Der PIT hat geeicht (`apic.calibrate`), der ACPI-Zeitgeber misst
-    // dasselbe noch einmal. Stimmen beide ueberein, ist die Eichung
-    // dieses Bretts in Ordnung -- und dann bleibt sie, wie sie ist.
-    // Weichen sie ab, steht die Zahl auf der Tafel, und der Umbau auf
-    // den ACPI-Zeitgeber ist keine Vermutung mehr, sondern faellig.
     var s_pm: [u8; 13] = "acpi: pmhz=\0\0"
     var s_pit: [u8; 8] = " pit=\0\0\0"
     var s_ab: [u8; 9] = " abw=\0\0\0\0"
@@ -1454,7 +1140,6 @@ fn blech_stage(state: u64) {
     serial.dec(dg(state, S_ABW))
     serial.nl()
 
-    // ---- die IOMMU. NUR LESEN.
     let ivrs: u64 = acpi.table(state, (&w_ivrs[0]) as u64)
     serial.puts((&s_i[0]) as u64)
     if ivrs == 0 {
@@ -1463,8 +1148,6 @@ fn blech_stage(state: u64) {
         return
     }
     ds(state, S_IVRS, kstate.get32(ivrs + 36))
-    // Der erste IVHD-Eintrag steht bei 48; Typ 0x10, 0x11 oder 0x40
-    // tragen die Basisadresse bei Versatz 8.
     let laenge: u64 = kstate.get32(ivrs + 4)
     var p: u64 = ivrs + 48
     var basis: u64 = 0
@@ -1482,9 +1165,6 @@ fn blech_stage(state: u64) {
     }
     ds(state, S_IOMMU, basis)
     if basis != 0 {
-        // Unbeschreibbar abgebildet -- ein Registersatz ist MMIO und
-        // gehoert nie in den Zwischenspeicher (`apic.map_device` setzt
-        // PCD und PWT).
         let v: u64 = apic.map_device(state, basis & 0xFFFFFFFFFFFFC000)
         if v != 0 {
             ds(state, S_IOMMU_C, __mmio_read64((v + 0x18) as *mut u64))

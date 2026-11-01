@@ -1,85 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/modul.fi -- RUNDE MODUL: EIN TREIBER, DER NICHT IM KERN STEHT.
-//
-// Bis zu dieser Runde war die Antwort auf die Frage "welche Treiber hat
-// Osum" beim UEBERSETZEN entschieden. `kernel/netdev.fi` waehlt aus
-// PCI-Nummern einen Treiber -- aber nur unter denen, die
-// `tools/build-kernel.sh` mit hineingebunden hat. Ein Geraet, fuer das
-// beim Bau kein Treiber dabei war, bleibt fuer immer stumm; ein Treiber,
-// den es fuer dieses Geraet gibt, kommt nur mit einem NEUEN KERN hinein.
-// Genau das ist der Unterschied, nach dem der Eigner gefragt hat: unter
-// Windows steht "Microsoft Basic Display Adapter", und man laedt einen
-// Treiber DAZU, ohne Windows neu zu bauen.
-//
-// Diese Datei ist der Weg dorthin. Sie liest eine Datei von der Platte,
-// prueft sie, legt sie in den Speicher, bindet ihre offenen Namen gegen
-// `kernel/ksym.fi`, loest ihre Relokationen auf und springt hinein.
-// `docs/MODUL-BEFUND.md` sagt, warum es dieser Weg ist und nicht ein
-// anderer, und was er NICHT bringt (naemlich einen Treiber von NVIDIA).
-//
-// ================================================== WAS EINE .omod IST
-//
-// Ein Kopf von 64 Oktetten, danach eine gewoehnliche ELF64-Objektdatei
-// (ET_REL, das, was `firnc -o x.o x.fi` erzeugt), danach 64 Oktette
-// Ed25519-Signatur ueber ALLES DAVOR:
-//
-//   0   8   Kennung "OSUMMOD\n"
-//   8   4   Formatfassung dieses Kopfes (1)
-//  12   4   die Schnittstellenfassung, gegen die gebaut wurde (ksym.ABI)
-//  16   8   Laenge der Nutzlast
-//  24   8   Merker, 0
-//  32  32   Name, nullbeendet
-//  64   n   die Objektdatei
-//  64+n 64  Ed25519 ueber die Oktette 0 .. 64+n
-//
-// DREI RIEGEL, in dieser Reihenfolge, und jeder hat eine Gegenprobe in
-// `tools/module/run.sh`, die ihn ausloest:
-//
-//   1. DIE KENNUNG UND DAS FORMAT. Billig, und faengt die Datei ab, die
-//      gar keine ist.
-//   2. DIE SCHNITTSTELLENFASSUNG. Ein Modul fuer einen anderen Kern wird
-//      ABGEWIESEN, nicht versucht. Das ist die Zeile, an der Windows'
-//      WDDM 1.x/2.x/3.x haengt und die Linux mit `vermagic` loest --
-//      und der Unterschied zwischen "der Treiber laeuft nicht" und "die
-//      Maschine steht".
-//   3. DIE SIGNATUR. Ed25519 (RFC 8032) gegen einen im Kern
-//      EINKOMPILIERTEN oeffentlichen Schluessel. Nicht gegen eine Datei
-//      auf der Platte: wer die Platte schreiben kann, schriebe sonst
-//      beides. Dasselbe tut `werkzeug/store` fuer den Katalog und
-//      `kernel/user/opk.fi` fuer ein Paket -- ein Modul im Ring 0 ist
-//      der Ort, an dem es am meisten zaehlt. Ein unsigniertes Modul im
-//      Ring 0 ist ein zweiter Kern.
-//
-// ============================================== WAS DER LADER WIRKLICH TUT
-//
-//   1. Die Datei in einen Rahmenlauf lesen (`mem.frame_run`).
-//   2. Kopf, Fassung, Signatur.
-//   3. Die Abschnittstafel durchgehen. Jeder Abschnitt mit SHF_ALLOC
-//      bekommt einen Platz im Abbild, ausgerichtet auf sh_addralign.
-//   4. Einen ZWEITEN Rahmenlauf fuer das Abbild, PROGBITS kopieren,
-//      NOBITS nullen.
-//   5. Jede Relokation aus jedem `.rela.<abschnitt>`, dessen Ziel im
-//      Abbild liegt: das Symbol aufloesen (im Modul selbst, oder ueber
-//      `ksym.such` im Kern), die Zahl ausrechnen, hineinschreiben.
-//      Fuenf Arten: 64, PC32, PLT32, 32, 32S. Alles andere wird
-//      abgewiesen -- ein Lader, der eine unbekannte Art ueberspringt,
-//      liefert ein Abbild mit einem Loch darin.
-//   6. `modul_init` und `modul_exit` in der Symboltafel suchen.
-//   7. Den Dateipuffer zurueckgeben, `modul_init` anspringen.
-//
-// DER SPRUNG geht mit `asm("call rax", ...)` und ist genau der, den
-// `kernel/msr.fi` seit Runde KVMFIX macht. Firn kann eine Zahl nicht in
-// einen Funktionszeiger wandeln (`vfs.fi` sagt das ausdruecklich); was
-// es kann, ist eine Adresse in ein Register legen und `call` schreiben.
-//
-// ================================== WAS DIESER PROTOTYP NICHT KANN
-//
-// Steht ausfuehrlich in `docs/RUNDE-MODUL.md`, Abschnitt "was noch
-// fehlt". In einem Satz: keine Abhaengigkeiten zwischen Modulen, kein
-// Verweiszaehler, kein W^X (Osum setzt EFER.NXE gar nicht, jede
-// beschreibbare Seite ist ausfuehrbar), keine Ruecknahme halb
-// angewandter Relokationen, und ein Modul, das in Ring 0 abstuerzt,
-// nimmt den Kern mit -- das ist gemessen und steht als Zahl im Bericht.
 
 profile kernel
 
@@ -104,44 +22,34 @@ export {
     R_SECOFF, R_READ, R_ALIGN, R_REVOKED, R_BANLIST, MAX_MOD, ban_entries
 }
 
-// ---------------------------------------------------------- die Gruende
-//
-// Wie in `kernel/elf.fi`: jeder Grund hat einen Namen, jeder Name wird
-// gedruckt, und der Kern lebt nach jedem von ihnen weiter. Der Laeufer
-// liest sie von der seriellen Leitung ab.
 const R_OK: u64 = 0
-const R_NOFILE: u64 = 1 // es gibt diesen Pfad nicht
-const R_SHORT: u64 = 2 // kuerzer als Kopf und Signatur
-const R_TOOBIG: u64 = 3 // groesser als der Vorrat dieses Laders
-const R_MAGIC: u64 = 4 // "OSUMMOD\n" fehlt
-const R_FORMAT: u64 = 5 // Formatfassung des Kopfes unbekannt
-const R_ABI: u64 = 6 // gegen einen anderen Kern gebaut
-const R_LEN: u64 = 7 // das Laengenfeld passt nicht zur Datei
-const R_SIG: u64 = 8 // die Ed25519-Signatur gilt nicht
-const R_ELF: u64 = 9 // keine ELF64-Datei
-const R_ETYPE: u64 = 10 // nicht ET_REL
-const R_MACHINE: u64 = 11 // nicht x86-64
-const R_SHDR: u64 = 12 // die Abschnittstafel liegt ausserhalb
-const R_SECTIONS: u64 = 13 // mehr Abschnitte als Plaetze
-const R_NOMEM: u64 = 14 // kein Rahmenlauf frei
-const R_SYMTAB: u64 = 15 // keine Symboltafel
-const R_SYM: u64 = 16 // ein Name, den der Kern nicht anbietet
-const R_RELTYPE: u64 = 17 // eine Relokationsart, die dieser Lader nicht kann
-const R_RANGE: u64 = 18 // eine Relokation passt nicht in 32 Bit
-const R_ENTRY: u64 = 19 // `modul_init` fehlt
-const R_SLOT: u64 = 20 // kein Modulplatz frei
-const R_INIT: u64 = 21 // `modul_init` hat einen Fehler gemeldet
-const R_SECOFF: u64 = 22 // ein Abschnitt liegt ausserhalb der Datei
-const R_READ: u64 = 23 // die Platte gab weniger als verlangt
-const R_ALIGN: u64 = 24 // eine Ausrichtung, die keine Zweierpotenz ist
-const R_REVOKED: u64 = 25 // K-014: the module is on the signed revocation list
-const R_BANLIST: u64 = 26 // K-014: a revocation list exists but is not valid
+const R_NOFILE: u64 = 1
+const R_SHORT: u64 = 2
+const R_TOOBIG: u64 = 3
+const R_MAGIC: u64 = 4
+const R_FORMAT: u64 = 5
+const R_ABI: u64 = 6
+const R_LEN: u64 = 7
+const R_SIG: u64 = 8
+const R_ELF: u64 = 9
+const R_ETYPE: u64 = 10
+const R_MACHINE: u64 = 11
+const R_SHDR: u64 = 12
+const R_SECTIONS: u64 = 13
+const R_NOMEM: u64 = 14
+const R_SYMTAB: u64 = 15
+const R_SYM: u64 = 16
+const R_RELTYPE: u64 = 17
+const R_RANGE: u64 = 18
+const R_ENTRY: u64 = 19
+const R_SLOT: u64 = 20
+const R_INIT: u64 = 21
+const R_SECOFF: u64 = 22
+const R_READ: u64 = 23
+const R_ALIGN: u64 = 24
+const R_REVOKED: u64 = 25
+const R_BANLIST: u64 = 26
 
-// --------------------------------------------------------- die Aufteilung
-//
-// `kstate.MODULE_OFF` (0x4D000), drei Seiten. 0x0800..0x0C00 gehoert
-// `modtab.fi`; alles andere hier. Eingetragen in
-// `tools/kernel/memmap.py`.
 const S_READY: u64 = 0x00
 const S_LOADED: u64 = 0x08
 const S_TRIES: u64 = 0x10
@@ -156,12 +64,11 @@ const S_SECS: u64 = 0x50
 const S_UNLOADS: u64 = 0x58
 const S_ABIFILE: u64 = 0x60
 const S_INITRC: u64 = 0x68
-const S_EXTSYMS: u64 = 0x70 // wie viele Namen aus dem KERN kamen
-const S_BANLEN: u64 = 0x78 // K-014: entries in the last valid revocation list
+const S_EXTSYMS: u64 = 0x70
+const S_BANLEN: u64 = 0x78
 const S_LASTK: u64 = 0x80
 const S_BUSY: u64 = 0x88
 
-// Die Modulsaetze.
 const MOD_OFF: u64 = 0x0100
 const MOD_SPAN: u64 = 0x80
 const MAX_MOD: u64 = 4
@@ -171,38 +78,23 @@ const M_FRAMES: u64 = 0x10
 const M_ENTRY: u64 = 0x18
 const M_EXIT: u64 = 0x20
 const M_SLOT: u64 = 0x28
-const M_NAME: u64 = 0x30 // 32 Oktett
+const M_NAME: u64 = 0x30
 const M_REFS: u64 = 0x50
 
-// Wo die Plaetze der Abschnitte im Abbild vermerkt werden.
 const SEC_OFF: u64 = 0x0400
 const MAX_SEC: u64 = 64
 
-// Der Kopf der Datei wird hierhin kopiert, damit die Signaturpruefung
-// und der Parser nicht beide im Rahmenlauf herumzeigen.
 const HDR_OFF: u64 = 0x1000
 
-// Wie gross eine Moduldatei hoechstens sein darf. 512 KiB sind 128
-// Rahmen; das groesste Modul dieser Runde hat 21.
 const MAX_FILE: u64 = 0x80000
 
 const HDR_LEN: u64 = 64
 const SIG_LEN: u64 = 64
 const FORMAT: u64 = 1
 
-// K-014: the revocation list. Layout (all little-endian):
-//   0   8   magic "OSUMSPR\n"
-//   8   4   format (1)
-//  12   4   number of entries n
-//  16  64n  the Ed25519 signatures of the revoked .omod files
-//  16+64n 64  Ed25519 over bytes 0 .. 16+64n, same key as the modules
-// An entry is the SIGNATURE of the revoked file: Ed25519 is
-// deterministic, so a signature names exactly one signed file, and the
-// loader already holds it -- no second hash function in the kernel.
 const BAN_HDR: u64 = 16
 const BAN_MAX: u64 = 256
 
-// ------------------------------------------------------------ ELF-Zahlen
 const ET_REL: u64 = 1
 const EM_X86_64: u64 = 62
 const SHT_PROGBITS: u64 = 1
@@ -221,8 +113,6 @@ const RT_PC32: u64 = 2
 const RT_PLT32: u64 = 4
 const RT_32: u64 = 10
 const RT_32S: u64 = 11
-
-// ------------------------------------------------------- kleine Griffe
 
 fn ld64(p: u64) -> u64 {
     return __mmio_read64(p as *mut u64)
@@ -244,11 +134,6 @@ fn st32(p: u64, v: u64) {
     __mmio_write32(p as *mut u32, (v & 0xFFFFFFFF) as u32)
 }
 
-// `off + len` liegt in `[0, groesse]`, OHNE zu addieren. Unter `profile
-// kernel` ist `+` geprueft und haelt den Kern bei Ueberlauf an
-// (`osum_panic`) -- das waere aus einer geladenen Datei heraus ein
-// gehaltener Rechner statt einer Abweisung. Also wie in `elf.fi`: auf
-// der Seite subtrahieren, von der bekannt ist, dass sie gross genug ist.
 fn passt(groesse: u64, off: u64, len: u64) -> bool {
     if off > groesse {
         return false
@@ -293,17 +178,6 @@ fn fail(state: u64, grund: u64) -> u64 {
     return grund
 }
 
-// ---------------------------------------------------- der Sprung hinein
-//
-// Fuenf Fassungen, weil Firn eine Zahl nicht in einen Funktionszeiger
-// wandelt und die Argumentzahl im Assemblerstueck stehen muss. Mehr als
-// sechs braucht keine dieser Schnittstellen; die Register sind die der
-// System-V-Konvention (rdi, rsi, rdx, rcx, r8, r9).
-//
-// `clobber("memory")` ist nicht Zierat: die gerufene Funktion schreibt in
-// `kdata`, und ohne den Merker duerfte der Uebersetzer eine Lesung von
-// dort ueber den Aufruf hinweg heben.
-
 fn ruf0(adr: u64) -> u64 {
     var rc: u64 = 0
     asm("call rax", in("rax") adr, out("rax") & rc, clobber("memory"))
@@ -338,8 +212,6 @@ fn ruf6(adr: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> u64 {
         clobber("memory"))
     return rc
 }
-
-// ------------------------------------------------------------ der Anfang
 
 fn init(state: u64) {
     setz(state, S_READY, 1)
@@ -486,8 +358,6 @@ fn frames_of(state: u64, k: u64) -> u64 {
     return m(state, k, M_FRAMES)
 }
 
-// ------------------------------------------------------------ die Namen
-
 fn say_reason(g: u64) {
     var t0: [u8; 3] = "ok\0"
     var t1: [u8; 14] = "datei-fehlt\0\0\0"
@@ -546,18 +416,6 @@ fn say_reason(g: u64) {
     serial.dec(g)
 }
 
-// ------------------------------------------------------- die Signatur
-//
-// Der oeffentliche Schluessel steht HIER, im Kernabbild, und nicht in
-// einer Datei daneben. Wer die Platte schreiben kann, schriebe sonst
-// Modul und Schluessel zugleich, und die Pruefung waere ein Ritual.
-// Derselbe Gedanke steht in `orientstore/docs/KATALOG-FORMAT.md`
-// Abschnitt 4 ("Der oeffentliche Schluessel liegt nicht dort, wo er
-// zaehlt") und in `kernel/user/opk.fi`.
-//
-// DIES IST DER PRUEFSCHLUESSEL DIESER RUNDE und liegt absichtlich im
-// Repo (`tools/module/pruef.seed`). Eine Auslieferung braucht einen
-// anderen; das steht in `docs/RUNDE-MODUL.md` unter "was noch fehlt".
 static mut test_mode: u64 = 0
 
 fn set_test_mode(v: u64) {
@@ -584,8 +442,6 @@ fn signature_valid(state: u64, msg: u64, len: u64, sig: u64) -> bool {
     }
     return false
 }
-
-// ------------------------------------------------------------- das Laden
 
 fn load(state: u64, pfad: u64, slot: u64) -> u64 {
     zaehl(state, S_TRIES)
@@ -635,9 +491,6 @@ fn load(state: u64, pfad: u64, slot: u64) -> u64 {
     let g2: u64 = check_and_place(state, datei, groesse, k, slot)
     mem.frame_free_run(state, datei, rahmen)
     if g2 != R_OK {
-        // Ein Abbild, das schon stand, aber an einer spaeteren Pruefung
-        // gescheitert ist, wird zurueckgegeben. Sonst kostete jede
-        // abgewiesene Datei Rahmen.
         if m(state, k, M_BASE) != 0 {
             mem.frame_free_run(state, m(state, k, M_BASE),
                 m(state, k, M_FRAMES))
@@ -648,17 +501,12 @@ fn load(state: u64, pfad: u64, slot: u64) -> u64 {
         return fail(state, g2)
     }
 
-    // ERST JETZT wird gesprungen. Alles davor ist Pruefen; alles danach
-    // ist fremder Code in Ring 0.
     let e: u64 = m(state, k, M_ENTRY)
     modtab.allow(state, slot)
     let rc: u64 = ruf1(e, state)
     modtab.allow_all(state)
     setz(state, S_INITRC, rc)
     if rc != 0 {
-        // Das Modul hat sich SELBST abgewiesen (z. B. weil `k_abi()`
-        // etwas anderes sagte, als in seinem Kopf steht). Es wird wieder
-        // abgeraeumt.
         modtab.clear_slot(state, slot)
         mem.frame_free_run(state, m(state, k, M_BASE), m(state, k, M_FRAMES))
         m_set(state, k, M_USED, 0)
@@ -697,8 +545,6 @@ fn read(state: u64, ino: u64, dst: u64, groesse: u64) -> u64 {
     return R_OK
 }
 
-// ------------------------------------------- Kopf, Fassung und Signatur
-
 fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
     slot: u64) -> u64 {
     var mag: [u8; 9] = "OSUMMOD\n\0"
@@ -718,7 +564,6 @@ fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
         return R_ABI
     }
     let n: u64 = ld64(datei + 16)
-    // groesse == HDR_LEN + n + SIG_LEN, ohne zu addieren.
     if !passt(groesse, HDR_LEN, n) {
         return R_LEN
     }
@@ -735,15 +580,11 @@ fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
         setz(state, S_SIGOK, 1)
     }
 
-    // K-014: A VALID SIGNATURE IS NOT ENOUGH ANY MORE. A signed module
-    // stays signed forever; the revocation list is how a driver that
-    // turned out to be broken or hostile is taken back without a new key.
     let gb: u64 = check_banlist(state, datei + HDR_LEN + n)
     if gb != R_OK {
         return gb
     }
 
-    // Den Namen fuer die Anzeige merken.
     var j: u64 = 0
     while j < 32 {
         kstate.set8(state + kstate.MODULE_OFF + MOD_OFF + k * MOD_SPAN
@@ -754,14 +595,6 @@ fn check_and_place(state: u64, datei: u64, groesse: u64, k: u64,
     return elf_place(state, datei + HDR_LEN, n, k, slot)
 }
 
-// ------------------------------------------------ K-014: the revocation list
-//
-// No list on disk: nothing is revoked (a fresh system has none).
-// A list that is there but short, malformed or wrongly signed: NOTHING
-// loads (R_BANLIST). Ignoring a broken list would let anyone who can
-// flip one byte of it un-revoke every driver on it.
-// What this does NOT stop: deleting the file. Whoever can write /lib can
-// remove the list; docs/RUNDE-ROADMAP-5.md says so.
 fn check_banlist(state: u64, sig: u64) -> u64 {
     var pfad: [u8; 17] = "/lib/omod.sperre\0"
     var mag: [u8; 9] = "OSUMSPR\n\0"
@@ -836,8 +669,6 @@ fn check_banlist(state: u64, sig: u64) -> u64 {
     return g
 }
 
-// ------------------------------------------------------------ die ELF
-
 fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     if n < 64 {
         return R_ELF
@@ -882,7 +713,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     }
     setz(state, S_SECS, shnum)
 
-    // ------ Durchgang 1: Plaetze verteilen und die Gesamtgroesse zaehlen
     var sum: u64 = 0
     var i: u64 = 1
     while i < shnum {
@@ -913,10 +743,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
             if rest != 0 {
                 sum = sum + (a - rest)
             }
-            // Der Platz wird als VERSATZ vermerkt und spaeter um die
-            // Basis erhoeht. Die Null als "nicht vergeben" waere sonst
-            // fuer den ersten Abschnitt zweideutig -- also +1 und beim
-            // Lesen wieder -1.
             sec_set(state, i, sum + 1)
             sum = sum + size
             if sum > MAX_FILE {
@@ -940,7 +766,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     m_set(state, k, M_BASE, basis)
     m_set(state, k, M_FRAMES, rahmen)
 
-    // Die Versaetze in echte Adressen wandeln.
     i = 1
     while i < shnum {
         let v: u64 = sec(state, i)
@@ -950,7 +775,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         i = i + 1
     }
 
-    // ------ Durchgang 2: kopieren und nullen
     i = 1
     while i < shnum {
         let ziel: u64 = sec(state, i)
@@ -968,7 +792,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         i = i + 1
     }
 
-    // ------ die Symboltafel finden
     var symtab: u64 = 0
     var symn: u64 = 0
     var strtab: u64 = 0
@@ -1010,7 +833,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     }
     setz(state, S_SYMS, symn)
 
-    // ------ Durchgang 3: die Relokationen
     i = 1
     while i < shnum {
         let sh: u64 = o + shoff + i * SHENT
@@ -1038,7 +860,6 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         i = i + 1
     }
 
-    // ------ Ein- und Aussprung
     var ein_new: [u8; 12] = "module_init\0"
     var aus_new: [u8; 12] = "module_exit\0"
     var ein: [u8; 11] = "modul_init\0"
@@ -1085,11 +906,6 @@ fn nullen(dst: u64, len: u64) {
     }
 }
 
-// Ein definiertes Symbol im Modul, gesucht ueber seinen Namen. Nur fuer
-// `modul_init` und `modul_exit` -- die beiden sind mit `#[export_c]`
-// gebaut und tragen deshalb ihren blanken Namen, ohne `_F0.`/`_F1.`.
-// Genau darum steht der Name hier und funktioniert mit beiden
-// Uebersetzern.
 fn sym_adresse(state: u64, symtab: u64, symn: u64, strtab: u64, name: u64,
     shnum: u64) -> u64 {
     var i: u64 = 0
@@ -1114,7 +930,6 @@ fn sym_adresse(state: u64, symtab: u64, symn: u64, strtab: u64, name: u64,
     return 0
 }
 
-// DIE STELLE, AN DER EIN MODUL AN DEN KERN GEBUNDEN WIRD.
 fn sym_value(state: u64, symtab: u64, symn: u64, strtab: u64, idx: u64,
     shnum: u64, ok: u64) -> u64 {
     if idx >= symn {
@@ -1210,12 +1025,6 @@ fn rela_anwenden(state: u64, rela: u64, anzahl: u64, ziel: u64, symtab: u64,
     return R_OK
 }
 
-// ---------------------------------------------------------- das Entladen
-//
-// Die Reihenfolge ist nicht beliebig, und der Grund steht in
-// `modtab.fi`: erst wird die Tafel geleert, dann wird `modul_exit`
-// gerufen, dann gehen die Rahmen zurueck. Wer die Rahmen zuerst
-// zurueckgibt, springt danach in fremden Speicher.
 fn entladen(state: u64, k: u64) -> bool {
     if k >= MAX_MOD {
         return false

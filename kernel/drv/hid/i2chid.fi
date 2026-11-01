@@ -1,105 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/i2chid.fi -- Runde HID: HID UEBER I2C.
-//
-// DAS IST DER PUNKT DIESER RUNDE. Auf einem Desktop haengt die Tastatur
-// am 8042 und die Maus am USB; auf einem gewoehnlichen Laptop von 2026
-// haengen TASTATUR UND TOUCHPAD AN I2C. Dort hatte Osum bis zu dieser
-// Runde gar keine Eingabe -- nicht "eine schlechte", sondern keine.
-//
-// Der Weg dorthin hat drei Stufen, und jede kann fuer sich scheitern:
-//
-//   1. DEN REGLER FINDEN. Auf Intel-Brettern ist das ein
-//      Designware-I2C in der LPSS, sichtbar auf dem PCI-Bus. Er wird
-//      an seiner PCI-Klasse gesucht UND an seiner Kennung
-//      nachgeprueft: das Register IC_COMP_TYPE liefert 0x44570140,
-//      und das ist die einzige Auskunft, die wirklich aus dem Baustein
-//      kommt und nicht aus einer Tabelle.
-//   2. DAS GERAET FINDEN. Wo ein I2C-Geraet haengt (Sklavenadresse)
-//      und unter welchem Register seine HID-Beschreibung liegt, sagt
-//      die Firmware in ACPI -- in `_CRS` und `_DSM`.
-//   3. DAS PROTOKOLL SPRECHEN. HID over I2C: ein Registerwort
-//      hinschreiben, die Antwort lesen.
-//
-// ====================================================================
-// DER ERSATZWEG FUER ACPI, UND WARUM ER EINER IST
-//
-// Stufe 2 braucht eigentlich einen AML-INTERPRETER: `_CRS` und `_DSM`
-// sind METHODEN, und eine Methode muss man ausfuehren. Den baut gerade
-// die Runde AML auf dem Zweig `aml`. NACHGESEHEN AM 30.08.2026: dieser
-// Zweig zeigt auf denselben Commit wie `mergeline2` -- er enthaelt noch
-// keine Zeile. Gegen eine gedachte Schnittstelle zu bauen waere das
-// Schlechteste von beidem.
-//
-// ALSO DER ERSATZWEG, und er ist besser als sein Ruf: `_CRS` gibt eine
-// RESSOURCENVORLAGE zurueck, und die ist im AML-Oktettstrom ein
-// BUFFER mit einer Folge von Ressourcenbeschreibungen -- eine FESTE
-// BINAERSTRUKTUR, kein Programm. Der grosse Ressourcentyp 0x8E
-// ("Serial Bus Connection") mit Bustyp 0x01 ist eine
-// I2C-Verbindung, und die Sklavenadresse steht darin an einer festen
-// Stelle:
-//
-//     +0   0x8E              grosser Ressourcentyp
-//     +1   Laenge, 2 Oktett
-//     +3   Revision
-//     +4   Index der Ressourcenquelle
-//     +5   Bustyp            0x01 = I2C
-//     +6   allgemeine Merker
-//     +7   typabhaengige Merker, 2 Oktett
-//     +9   typabhaengige Revision
-//     +10  Laenge der Typdaten, 2 Oktett
-//     +12  Verbindungsgeschwindigkeit, 4 Oktett
-//     +16  SKLAVENADRESSE, 2 Oktett
-//
-// Diese Oktette lassen sich in DSDT und SSDT SUCHEN, ohne eine einzige
-// AML-Anweisung auszufuehren. Was dabei herauskommt, ist die Liste der
-// I2C-Adressen, die die Firmware ueberhaupt beschreibt -- und auf
-// einem Laptop sind das eine Handvoll, von denen zwei die Tastatur und
-// das Touchpad sind. Auf jede davon wird das HID-ueber-I2C-Protokoll
-// PROBIERT; wer nicht antwortet oder keine gueltige HID-Beschreibung
-// liefert, war es nicht.
-//
-// WAS DER ERSATZWEG NICHT KANN, und das gehoert dazu:
-//   * Er kann `_CRS` nicht AUSWERTEN, sondern nur wiedererkennen. Steht
-//     die Ressourcenvorlage nicht woertlich in der Tabelle, sondern
-//     wird zur Laufzeit zusammengebaut (`Concatenate`, `Store` in einen
-//     Puffer), findet er sie nicht.
-//   * Er kann `_DSM` GAR NICHT. Dort steht, unter welchem Register die
-//     HID-Beschreibung liegt. Statt zu raten wird DER STANDARDWERT 0x0001
-//     genommen und, wenn der nichts Gueltiges liefert, 0x0020 versucht --
-//     das sind die beiden Werte, die in der Praxis vorkommen. Ein
-//     Geraet mit einem dritten Wert wird nicht gefunden.
-//   * Er kann die Unterbrechungsleitung (GpioInt in `_CRS`) nicht dem
-//     Geraet zuordnen. Deshalb wird ABGEFRAGT und nicht auf eine
-//     Meldung gewartet.
-//
-// >>> WAS SPAETER AUF AML UMZUSTELLEN IST, an genau diesen Stellen:
-// >>>   `acpi_scan`      -> `_CRS` auswerten statt Oktette suchen
-// >>>   `HDESC_DEFAULT`  -> `_DSM` Funktion 1 auswerten
-// >>>   `poll`           -> GpioInt aus `_CRS` statt Abfrage
-// >>> Dasselbe steht in docs/REALHW.md.
-//
-// ====================================================================
-// WAS HIER GEMESSEN IST UND WAS NICHT
-//
-// QEMU HAT KEINEN DESIGNWARE-I2C. `-device help` kennt `i2c-ddc` und
-// `smbus-ipmi` an einem SMBus, aber keinen LPSS-Regler und kein
-// I2C-HID-Geraet. Deshalb, ehrlich getrennt:
-//
-//   GEMESSEN (tools/hid/run.sh):
-//     * Der ACPI-Sucher findet in einer GEBAUTEN Tabelle mit zwei
-//       I2C-Ressourcen genau diese zwei Adressen -- und nicht mehr.
-//     * Er findet in der ECHTEN DSDT, die QEMU stellt, KEINE -- was
-//       richtig ist, denn dort ist keine.
-//     * Der Zerleger fuer die 30 Oktett HID-ueber-I2C-Beschreibung
-//       liefert aus einem echten Oktettstrom die richtigen Register.
-//     * Die Suche nach dem Regler laeuft auf einer Maschine ohne einen
-//       solchen durch und meldet "keiner", statt etwas zu erfinden.
-//
-//   NUR AUS DER SPEZIFIKATION, in QEMU NICHT pruefbar:
-//     * Jeder Zugriff auf die Designware-Register (`dw_*`).
-//     * Das Aufsetzen des Reglers, Taktzahlen, die Warteschlangen.
-//     * Ob ein echtes Geraet auf 0x0001 antwortet.
-//   Diese Stellen sind unten einzeln mit "NUR SPEZIFIKATION" markiert.
 
 profile kernel
 
@@ -131,17 +29,13 @@ export {
     nctrl, ndev, find_ctrls, dev_ctrl, dev_adr, dev_slot, render, aml_scan
 }
 
-// Zwei Seiten aus dem Rest, den `kstate.fi` nach Merge 2 ausweist.
-const I2C_OFF: u64 = 0xA7000 // Zaehler, Adressliste, HID-Beschreibung
-const BUF_OFF: u64 = 0xA8000 // ein Uebertragungspuffer, 4096
+const I2C_OFF: u64 = 0xA7000
+const BUF_OFF: u64 = 0xA8000
 
 const MAX_SLAVES: u64 = 8
 
-// Die Kennung eines Designware-I2C. Sie steht in IC_COMP_TYPE und ist
-// das Einzige an dieser Suche, was wirklich aus dem Baustein kommt.
 const DW_MAGIC: u64 = 0x44570140
 
-// Die Designware-Register (Abstand vom Anfang der Speicherblende).
 const IC_CON: u64 = 0x00
 const IC_TAR: u64 = 0x04
 const IC_DATA_CMD: u64 = 0x10
@@ -163,45 +57,36 @@ const IC_TX_ABRT_SRC: u64 = 0x80
 const IC_ENABLE_STATUS: u64 = 0x9C
 const IC_COMP_TYPE: u64 = 0xFC
 
-// IC_CON: Herr am Bus, schnelle Betriebsart, Neustart erlaubt, kein
-// Sklavenbetrieb.
 const CON_MASTER: u64 = 0x01
 const CON_SPEED_FAST: u64 = 0x04
 const CON_RESTART_EN: u64 = 0x20
 const CON_SLAVE_DIS: u64 = 0x40
 
-// IC_DATA_CMD: Bit 8 = lesen, Bit 9 = Halt danach, Bit 10 = Neustart.
 const CMD_READ: u64 = 0x100
 const CMD_STOP: u64 = 0x200
 const CMD_RESTART: u64 = 0x400
 
-const STAT_TX_ABRT: u64 = 0x40 // IC_RAW_INTR_STAT Bit 6
+const STAT_TX_ABRT: u64 = 0x40
 
-// Das Register, unter dem die HID-Beschreibung liegt. Steht eigentlich
-// in `_DSM` Funktion 1; ohne AML-Interpreter werden die beiden Werte
-// probiert, die in der Praxis vorkommen.
 const HDESC_DEFAULT: u64 = 0x0001
 const HDESC_OLD: u64 = 0x0020
 
-// Der Ressourcentyp einer I2C-Verbindung in einer Ressourcenvorlage.
 const RES_SERIALBUS: u64 = 0x8E
 const BUS_I2C: u64 = 0x01
 
-// Die Zaehler und die Liste.
-const S_FOUND: u64 = 0x00 // 1 = ein Designware-Regler ist da
+const S_FOUND: u64 = 0x00
 const S_BDF: u64 = 0x08
 const S_MMIO: u64 = 0x10
 const S_NSLAVE: u64 = 0x18
-const S_TABLES: u64 = 0x20 // durchsuchte ACPI-Tabellen
-const S_PNP0C50: u64 = 0x28 // Treffer auf die Kennung eines I2C-HID
-const S_READY: u64 = 0x30 // 1 = ein Geraet antwortet
+const S_TABLES: u64 = 0x20
+const S_PNP0C50: u64 = 0x28
+const S_READY: u64 = 0x30
 const S_ABORTS: u64 = 0x38
 const S_TIMEOUTS: u64 = 0x40
 const S_REPORTS: u64 = 0x48
-const S_HDREG: u64 = 0x50 // das Register, unter dem es geklappt hat
-const S_SLAVES: u64 = 0x80 // MAX_SLAVES Woerter
+const S_HDREG: u64 = 0x50
+const S_SLAVES: u64 = 0x80
 
-// Die 30 Oktett der HID-ueber-I2C-Beschreibung, zerlegt.
 const H_LEN: u64 = 0x100
 const H_VERSION: u64 = 0x108
 const H_RDLEN: u64 = 0x110
@@ -216,25 +101,13 @@ const H_VID: u64 = 0x150
 const H_PID: u64 = 0x158
 const H_VER: u64 = 0x160
 
-
-// ======================================================================
-// W-TOUCH3: TABLES FOR SEVERAL CONTROLLERS AND SEVERAL DEVICES.
-//
-// A laptop of 2026 has up to eight LPSS I2C controllers; the touchpad sits
-// on one, the touch screen and the pen on ANOTHER. The first version knew
-// exactly one controller (S_MMIO) and one device (HID_SLOT). The tables are
-// `static mut` (no kstate offset), one flat array of words:
-//   controller c (0..MAX_CTRL-1): words T_CTRL + c*8 + CT_*
-//   device j (0..I2C_DEV_MAX-1):  words T_DEV  + j*16 + DV_*  (HID slot = I2C_DEV_FIRST + j)
-// S_MMIO stays "the controller the dw_* functions talk to right now"
-// (select_ctrl), so the register code below did not have to change.
 static mut tb: [u64; 512] = [0 as u64; 512]
 const MAX_CTRL: u64 = 8
 const T_CTRL: u64 = 0
 const CT_MMIO: u64 = 0
 const CT_BDF: u64 = 1
-const CT_IDS: u64 = 2 // vendor << 16 | device
-const CT_STATE: u64 = 3 // 0 = ok, 1 = HUNG (3 timeouts), skipped from then on
+const CT_IDS: u64 = 2
+const CT_STATE: u64 = 3
 const CT_TMO: u64 = 4
 const CT_ABRT: u64 = 5
 const CT_PROBES: u64 = 6
@@ -246,20 +119,20 @@ const DV_RDLEN: u64 = 3
 const DV_MAXIN: u64 = 4
 const DV_VID: u64 = 5
 const DV_PID: u64 = 6
-const DV_STATE: u64 = 7 // 0 = empty, 1 = ok, 2 = lost (still polled, slowly)
+const DV_STATE: u64 = 7
 const DV_FAILS: u64 = 8
-const DV_NEXT: u64 = 9 // next poll, ms
-const DV_BACK: u64 = 10 // current backoff, ms
+const DV_NEXT: u64 = 9
+const DV_BACK: u64 = 10
 const DV_REPS: u64 = 11
-const DV_VIA: u64 = 12 // 0 = byte search, 1 = AML
+const DV_VIA: u64 = 12
 const DV_INREG: u64 = 13
 const DV_CMDREG: u64 = 14
 const DV_KIND: u64 = 15
 const X_NCTRL: u64 = 200
 const X_NDEV: u64 = 201
-const X_CUR_C: u64 = 202 // controller the setup was made for (0xFF = none)
-const X_CUR_A: u64 = 203 // address the setup was made for (0xFFFF = none)
-const X_AML: u64 = 204 // 1 = the AML path produced candidates
+const X_CUR_C: u64 = 202
+const X_CUR_A: u64 = 203
+const X_AML: u64 = 204
 const POLL_FAST_MS: u64 = 8
 const POLL_BACK_MAX: u64 = 500
 const LOST_FAILS: u64 = 40
@@ -318,8 +191,6 @@ fn tables_reset() {
     ts(X_CUR_A, 0xFFFF)
 }
 
-// Make controller c the one the dw_* functions talk to. The next transfer
-// must run dw_setup again (X_CUR_A invalid).
 fn select_ctrl(state: u64, c: u64) {
     s(state, S_MMIO, ctg(c, CT_MMIO))
     s(state, S_BDF, ctg(c, CT_BDF))
@@ -427,25 +298,6 @@ fn hd_pid(state: u64) -> u64 {
     return g(state, H_PID)
 }
 
-// ======================================================================
-// STUFE 1: DEN REGLER FINDEN.
-//
-// Zwei Wege, und der zweite prueft den ersten nach:
-//   a) Auf dem PCI-Bus. Intel meldet die LPSS-I2C-Regler als Klasse
-//      0x0C Unterklasse 0x80 ("serieller Bus, anderes") -- manche
-//      Erzeugnisse auch als 0x11/0x80. Beide werden angesehen.
-//   b) IC_COMP_TYPE lesen. Steht dort 0x44570140, ist es wirklich ein
-//      Designware. Eine PCI-Klasse ist eine Behauptung der Firmware,
-//      dieses Register ist eine Auskunft des Bausteins.
-//
-// GEMESSEN: dass das auf einer Maschine OHNE einen solchen Regler
-// durchlaeuft und "keiner" meldet. NUR SPEZIFIKATION: dass es auf einer
-// Maschine MIT einem den richtigen findet -- QEMU hat keinen.
-// SPEC ONLY on hardware (HP-6, r1514). Intel LPSS functions (Sunrise Point / Kaby Lake-U, e.g. 8086:9d60..9d65)
-// may sit in D3 and keep the DesignWare core in reset until the driver releases it (Linux intel-lpss:
-// private registers at BAR0+0x200, RESETS at +0x204, value 3 = both resets released). Without this the
-// IC_COMP_TYPE read below can return 0 or all-ones and the controller looks absent. Safe elsewhere: only
-// Intel functions with a BAR of at least 4 KiB are touched, and the reset write is the documented value.
 const LPSS_PRIV_RESETS: u64 = 0x204
 const LPSS_RESETS_RELEASE: u64 = 3
 const PCI_CAP_PM: u64 = 0x01
@@ -463,13 +315,12 @@ fn lpss_wake(state: u64, i: u64, mm: u64) {
     if pm != 0 {
         let pmcsr: u64 = pci.cfg_read16(bdf, pm + 4)
         if (pmcsr & 3) != 0 {
-            pci.cfg_write16(bdf, pm + 4, pmcsr & 0xFFFC) // back to D0
+            pci.cfg_write16(bdf, pm + 4, pmcsr & 0xFFFC)
         }
     }
     __mmio_write32((mm + LPSS_PRIV_RESETS) as *mut u32, LPSS_RESETS_RELEASE as u32)
 }
 
-// Intel LPSS I2C functions by PCI id (Sunrise Point-LP, Union Point/Kaby Lake, Cannon Point-LP, Cannon Lake PCH-H).
 fn is_lpss_id(dev: u64) -> bool {
     if dev >= 0x9d60 && dev <= 0x9d66 {
         return true
@@ -504,9 +355,6 @@ fn note_cand(bdf: u64, ids: u64, bar: u64, comp: u64, found: u64) {
     cand_n = cand_n + 1
 }
 
-// ALL controllers: every PCI function of class 0C/80 or 11/80 or of an
-// Intel LPSS id with a memory BAR 0 whose IC_COMP_TYPE reads DW_MAGIC.
-// Word `i2cold` (counter-check) keeps only the first one, like before.
 fn find_ctrls(state: u64) -> u64 {
     cand_n = 0
     let n: u64 = pci.count(state)
@@ -543,18 +391,6 @@ fn find_ctrls(state: u64) -> u64 {
     return nctrl()
 }
 
-// ======================================================================
-// STUFE 2: DAS GERAET FINDEN -- DER ERSATZWEG.
-//
-// Alle ACPI-Tabellen durchgehen und nach dem Oktettmuster einer
-// I2C-Verbindung suchen. Kein AML wird ausgefuehrt; gesucht wird eine
-// BINAERSTRUKTUR, die in `_CRS` woertlich im Strom steht.
-//
-// GEPRUEFT WIRD JEDES FELD, und das ist der Unterschied zwischen einer
-// Suche und einem Zufallstreffer: das Oktett 0x8E kommt in einem
-// AML-Strom staendig vor. Ein Treffer zaehlt nur, wenn die angesagte
-// Laenge passt, der Bustyp 0x01 ist, die Typdatenlaenge mindestens
-// sechs betraegt und die Adresse in den 7-Bit-Bereich faellt.
 fn acpi_scan(state: u64) -> u64 {
     var n: u64 = 0
     let tn: u64 = acpi.table_count(state)
@@ -574,9 +410,6 @@ fn acpi_scan(state: u64) -> u64 {
     return n
 }
 
-// Einen Oktettblock durchsuchen. `schon` ist, wie viele Adressen
-// bereits stehen -- die Liste ist begrenzt und eine Adresse kommt nur
-// EINMAL hinein (dieselbe Vorlage steht in manchen Tabellen mehrfach).
 fn scan_block(state: u64, p: u64, len: u64, schon: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
@@ -600,9 +433,6 @@ fn scan_block(state: u64, p: u64, len: u64, schon: u64) -> u64 {
                 i = i + 1
             }
         } else {
-            // Die Kennung eines HID-ueber-I2C-Geraets, in beiden
-            // Schreibweisen, die in echten Tabellen vorkommen: als
-            // Zeichenkette "PNP0C50" und als gepackte EISA-Kennung.
             if kstate.get32(p + i) == 0x500CD041 {
                 s(state, S_PNP0C50, g(state, S_PNP0C50) + 1)
             }
@@ -623,14 +453,6 @@ fn kennt(state: u64, n: u64, adr: u64) -> bool {
     return false
 }
 
-// ======================================================================
-// STUFE 3: DAS PROTOKOLL.
-//
-// AB HIER NUR SPEZIFIKATION -- jede dieser Zeilen greift auf Register
-// zu, die QEMU nicht hat. Sie stehen so da, wie die Unterlagen zum
-// DW_apb_i2c und "HID over I2C" es vorschreiben, und sie sind nicht
-// gemessen. Das steht auch in docs/REALHW.md.
-
 fn r32(state: u64, mm: u64, off: u64) -> u64 {
     if mm == SIM_MM || mm == SIM_MM2 {
         return sim_rd(state, mm, off)
@@ -646,9 +468,6 @@ fn w32(state: u64, mm: u64, off: u64, v: u64) {
     __mmio_write32((mm + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
 }
 
-// NUR SPEZIFIKATION. Den Regler auf eine Sklavenadresse einstellen.
-// IC_TAR laesst sich nur bei ABGESCHALTETEM Regler aendern -- wer das
-// vergisst, redet weiter mit dem vorigen Geraet.
 fn dw_setup(state: u64, adr: u64) {
     let mm: u64 = g(state, S_MMIO)
     w32(state, mm, IC_ENABLE, 0)
@@ -659,9 +478,6 @@ fn dw_setup(state: u64, adr: u64) {
     w32(state, mm, IC_CON, CON_MASTER | CON_SPEED_FAST | CON_RESTART_EN
         | CON_SLAVE_DIS)
     w32(state, mm, IC_TAR, adr & 0x7F)
-    // Taktzahlen fuer 400 kHz an 100 MHz Eingangstakt. Auf einem echten
-    // Brett stehen bessere Werte in ACPI (`SSCN`/`FMCN`); ohne
-    // AML-Interpreter sind das die Rechenwerte aus den Unterlagen.
     w32(state, mm, IC_FS_HCNT, 0x3C)
     w32(state, mm, IC_FS_LCNT, 0x82)
     w32(state, mm, IC_RX_TL, 0)
@@ -671,9 +487,6 @@ fn dw_setup(state: u64, adr: u64) {
     ts(X_CUR_A, adr)
 }
 
-// NUR SPEZIFIKATION. `wlen` Oktett hinschreiben, dann `rlen` lesen, mit
-// einem Neustart dazwischen -- so verlangt es HID over I2C fuer jeden
-// Registerzugriff. Rueckgabe: gelesene Oktette, oder 0 bei Abbruch.
 fn dw_xfer(state: u64, wp: u64, wlen: u64, rp: u64, rlen: u64) -> u64 {
     let mm: u64 = g(state, S_MMIO)
     let unused: u64 = r32(state, mm, IC_CLR_INTR)
@@ -734,9 +547,6 @@ fn dw_xfer(state: u64, wp: u64, wlen: u64, rp: u64, rlen: u64) -> u64 {
     return got
 }
 
-// A read that never got data: count it globally and on the controller,
-// switch the controller off (a hung transfer must not stay armed) and mark
-// it HUNG after 3 of them. Other controllers keep running.
 fn note_timeout(state: u64, mm: u64) {
     s(state, S_TIMEOUTS, g(state, S_TIMEOUTS) + 1)
     let c: u64 = tg(X_CUR_C)
@@ -761,9 +571,6 @@ fn wait_space(state: u64, mm: u64) -> bool {
     return false
 }
 
-// Ein Register anfragen: zwei Oktett, KLEINSTWERTIG ZUERST. Das steht
-// so in "HID over I2C" und ist die Stelle, an der eine Umsetzung mit
-// vertauschten Oktetten gar keine Antwort bekommt.
 fn reg_read(state: u64, reg: u64, dst: u64, n: u64) -> u64 {
     var w: [u8; 2] = [0 as u8; 2]
     w[0] = (reg & 0xFF) as u8
@@ -771,11 +578,6 @@ fn reg_read(state: u64, reg: u64, dst: u64, n: u64) -> u64 {
     return dw_xfer(state, (&w[0]) as u64, 2, dst, n)
 }
 
-// ------------------------------------ die 30 Oktett HID-Beschreibung
-//
-// DIESER TEIL IST GEMESSEN, denn er rechnet nur auf einem Oktettstrom.
-// Er bekommt in `tools/hid/run.sh` einen echten und muss daraus die
-// richtigen Register ziehen.
 fn hid_desc(state: u64, p: u64, n: u64) -> bool {
     if n < 30 {
         return false
@@ -812,13 +614,6 @@ fn le16(p: u64, i: u64) -> u64 {
     return kstate.get8(p + i) | (kstate.get8(p + i + 1) << 8)
 }
 
-// NUR SPEZIFIKATION. Eine Adresse durchprobieren: HID-Beschreibung
-// holen, Berichtsbeschreibung holen, zerlegen.
-//
-// DER LETZTE PLATZ IN `hidrep` GEHOERT DIESER DATEI, und `usb.fi` haelt
-// sich daran (`hid_start`: `d + 1 < hidrep.MAX_DEV`). Die Plaetze 0 bis
-// 2 gehoeren den USB-Geraeten. Ohne diese Aufteilung wuerde ein viertes
-// USB-Geraet die Beschreibung des Touchpads ueberschreiben.
 const HID_SLOT: u64 = 3
 
 fn versuche(state: u64, c: u64, adr: u64, reg: u64) -> bool {
@@ -837,8 +632,6 @@ fn versuche(state: u64, c: u64, adr: u64, reg: u64) -> bool {
     if !hid_desc(state, p, 30) {
         return false
     }
-    // HID over I2C: power the device on and reset it before it sends
-    // reports (spec 7.3; Linux does the same). SPEC ONLY on hardware.
     power_on_reset(state)
     let rdlen: u64 = g(state, H_RDLEN)
     let dst: u64 = hidrep.raw_of(state, slot)
@@ -890,13 +683,6 @@ fn set_modes(state: u64, slot: u64) {
     }
 }
 
-// NUR SPEZIFIKATION. Einen Eingabebericht abholen. Die ersten zwei
-// Oktett sind die LAENGE des Berichts, danach kommt er -- mit
-// Berichtsnummer, wenn das Geraet welche benutzt. Laenge 0 heisst "es
-// gibt nichts"; das ist kein Fehler, sondern die Antwort auf eine
-// Abfrage ohne Ereignis.
-// One read of device j (no schedule). The fails/backoff bookkeeping lives
-// here; poll_tick decides WHEN.
 fn poll_dev(state: u64, j: u64) {
     let c: u64 = dvg(j, DV_CTRL)
     let adr: u64 = dvg(j, DV_ADR)
@@ -911,8 +697,6 @@ fn poll_dev(state: u64, j: u64) {
         select_ctrl(state, c)
         dw_setup(state, adr)
     }
-    // a device on this controller cannot hang the others: the transfer
-    // below is bounded (wait loops) and note_timeout switches it off
     let p: u64 = buf(state)
     let now: u64 = time.mono_ns(state) / 1000000
     if dw_xfer(state, 0, 0, p, max) < 2 {
@@ -948,7 +732,6 @@ fn poll_dev(state: u64, j: u64) {
     hidin.report(state, hidrep.I2C_DEV_FIRST + j, p + 2, n - 2)
 }
 
-// Every device once, ignoring the schedule (test beds).
 fn poll(state: u64) {
     var j: u64 = 0
     while j < ndev() {
@@ -957,7 +740,6 @@ fn poll(state: u64) {
     }
 }
 
-// ======================================================================
 fn stage(state: u64) {
     var s_aus: [u8; 14] = "i2chid: noi2c\0"
     if !kstate.mode_on(state, kstate.M_I2CHID) {
@@ -969,8 +751,6 @@ fn stage(state: u64) {
         return
     }
     tables_reset()
-    // ORDER IS INTENTIONAL: first the ACPI search (works everywhere), then
-    // the controllers (only on a board that has them).
     acpi_scan(state)
     find_ctrls(state)
     say(state)
@@ -983,11 +763,6 @@ fn stage(state: u64) {
     say_devs(state)
 }
 
-// Try every slave address the firmware names; the first one that
-// answers with a valid HID description wins.
-// Try every slave address the firmware names on every controller that is
-// not HUNG; each hit becomes a device (own HID slot). A timeout only
-// hurts the controller it happened on.
 fn probe_all(state: u64) -> bool {
     if tg(X_NAML) > 0 && probe_aml(state) {
         return true
@@ -1037,31 +812,26 @@ fn try_dev(state: u64, c: u64, adr: u64) -> bool {
     return false
 }
 
-// SPEC ONLY on hardware. SET_POWER(on) then RESET, then one read of the
-// 2-byte reset response (the device holds its interrupt until it is read).
-// Command = 2-byte command register, then [power/report byte, opcode].
 fn power_on_reset(state: u64) {
     var c: [u8; 4] = [0 as u8; 4]
     let p: u64 = buf(state)
     let cmdreg: u64 = g(state, H_CMDREG)
     c[0] = (cmdreg & 0xFF) as u8
     c[1] = ((cmdreg >> 8) & 0xFF) as u8
-    c[2] = 0 as u8 // power state ON
-    c[3] = 0x08 as u8 // SET_POWER
+    c[2] = 0 as u8
+    c[3] = 0x08 as u8
     let a: u64 = dw_xfer(state, (&c[0]) as u64, 4, 0, 0)
     c[2] = 0 as u8
-    c[3] = 0x01 as u8 // RESET
+    c[3] = 0x01 as u8
     let b2: u64 = dw_xfer(state, (&c[0]) as u64, 4, 0, 0)
     let ack: u64 = dw_xfer(state, 0, 0, p, 2)
 }
 
-// Rate limit for the GUI loop: at most one input read per 8 ms.
 const S_LAST: u64 = 0x58
 const S_FAILS: u64 = 0x60
 const POLL_GIVEUP: u64 = 400
 
 fn poll_tick(state: u64) {
-    // W-TPSET2: touchpad momentum scroll + release of the pinch Ctrl run on every GUI pass, also with a USB pad
     hidin.gest_tick(state)
     let n: u64 = ndev()
     if n == 0 {
@@ -1123,7 +893,6 @@ fn say(state: u64) {
     }
 }
 
-// One line per device found.
 fn say_devs(state: u64) {
     var j: u64 = 0
     while j < ndev() {
@@ -1147,12 +916,6 @@ fn say_devs(state: u64) {
     }
 }
 
-// ======================================================================
-// W-TOUCH4: THE AML PATH. The namespace (held by acpiev when the machine has a lid/battery/button) names every
-// HID-over-I2C device: _HID or _CID = PNP0C50, _CRS = I2cSerialBus (slave address + the controller's path),
-// the controller's _ADR = PCI device/function, _DSM(3CDFF6F7-..., 1, 1) = the HID description register.
-// With candidates from here, probe_all touches ONLY these (controller, address, register) triples -- no byte search
-// on any controller. Word i2cnoaml = old behaviour. No namespace / no PNP0C50 device = no candidates = old search.
 const T_AML: u64 = 256
 const AML_MAX: u64 = 8
 const AM_CTRL: u64 = 0
@@ -1175,7 +938,6 @@ fn aml_seg4(a: u64, b: u64, c: u64, d: u64) -> u64 {
     return a | (b << 8) | (c << 16) | (d << 24)
 }
 
-// 1 when the object (an integer, a string, or a package of those) is the PNP0C50 id.
 fn aml_obj_is_hidi2c(o: u64) -> bool {
     var want: [u8; 8] = "PNP0C50\0"
     let t: u64 = amlobj.otype(o)
@@ -1233,7 +995,6 @@ fn aml_dev_is_hidi2c(state: u64, dev: u64) -> bool {
     return false
 }
 
-// "\_SB.PCI0.I2C1" (also unpadded segments like "_SB") -> namespace node, or NONE.
 fn aml_resolve(state: u64, src: u64, maxlen: u64) -> u64 {
     var cur: u64 = 0
     var i: u64 = 0
@@ -1263,7 +1024,6 @@ fn aml_resolve(state: u64, src: u64, maxlen: u64) -> u64 {
     return cur
 }
 
-// The controller (index in our table) whose PCI device/function equals the node's _ADR, or 0xFF.
 fn aml_ctrl_of(state: u64, node: u64) -> u64 {
     var w_adr: [u8; 5] = "_ADR\0"
     let a: u64 = amlns.child(state, node, amlns.seg_of((&w_adr[0]) as u64))
@@ -1287,7 +1047,6 @@ fn aml_ctrl_of(state: u64, node: u64) -> u64 {
     return 0xFF
 }
 
-// _DSM(UUID 3CDFF6F7-4267-4555-AD05-B30A3D8938DE, rev 1, function 1, {}) = HID description register, or HREG_NONE.
 fn aml_dsm_hreg(state: u64, dev: u64) -> u64 {
     var w_dsm: [u8; 5] = "_DSM\0"
     let n: u64 = amlns.child(state, dev, amlns.seg_of((&w_dsm[0]) as u64))
@@ -1359,7 +1118,6 @@ fn aml_add_cand(c: u64, adr: u64, hreg: u64, node: u64) {
     ts(X_NAML, n + 1)
 }
 
-// Walk the held namespace. Returns the number of candidates (also in tg(X_NAML)); 0 = use the byte search.
 fn aml_scan(state: u64) -> u64 {
     var w_crs: [u8; 5] = "_CRS\0"
     ts(X_NAML, 0)
@@ -1416,7 +1174,6 @@ fn aml_scan(state: u64) -> u64 {
     return tg(X_NAML)
 }
 
-// Probe the AML candidates (only these). Returns true when at least one device answered.
 fn probe_aml(state: u64) -> bool {
     var k: u64 = 0
     while k < tg(X_NAML) {
@@ -1465,12 +1222,6 @@ fn say_aml(state: u64) {
     }
 }
 
-
-// ======================================================================
-// W-TOUCH4: /proc/inputdevs -- what the input stack found, as text.
-// Head line (keys for hwinv): i2c_ctrls= i2c_devs= i2c_hung= i2c_aml= i2c_tables= hid_devs=
-// then one line per controller and per device, then one line per HID slot with a kind (USB and I2C).
-// A photo of `cat /proc/inputdevs` answers "why has the touch screen no events".
 static mut r_at: u64 = 0
 static mut r_cap: u64 = 0
 static mut r_out: u64 = 0
@@ -1707,22 +1458,11 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     return r_at
 }
 
-
-// DER ERSATZWEG AN EINER TABELLE, VON DER MAN WEISS, WAS DRINSTEHT.
-//
-// Ohne ein Brett mit LPSS-I2C ist das die einzige Art, den Sucher zu
-// messen: eine Tabelle bauen (tools/hid/descs.py, nach der
-// Ressourcenbeschreibung der ACPI-Spezifikation), sie durchsuchen und
-// nachsehen, ob GENAU die zwei Adressen herauskommen, die drinstehen --
-// und nicht die drei Koeder, die wie eine I2C-Verbindung aussehen und
-// keine sind, und nicht die Wiederholung der ersten Vorlage.
 fn scan_test(state: u64) {
     var s_a: [u8; 17] = "i2ctest: laenge=\0"
     var s_b: [u8; 10] = " treffer=\0"
     var s_c: [u8; 10] = " pnp0c50=\0"
     var s_d: [u8; 8] = " prueb=\0"
-    // Der Zustand muss leer sein, sonst misst die Zaehlung den vorigen
-    // Lauf mit.
     var i: u64 = 0
     while i < MAX_SLAVES {
         s(state, S_SLAVES + i * 8, 0)
@@ -1753,32 +1493,27 @@ fn scan_test(state: u64) {
     }
 }
 
-// Was sich OHNE einen Regler pruefen laesst: der Ressourcensucher auf
-// einem gebauten Oktettblock und der Zerleger der HID-Beschreibung.
-// `tools/hid/run.sh` faehrt beides mit Daten, die `tools/hid/descs.py`
-// nach der Spezifikation baut, und rechnet nach.
 const SELFTEST_MAX: u64 = 6
 
 fn selftest(state: u64) -> u64 {
     var n: u64 = 0
-    // Eine HID-ueber-I2C-Beschreibung, wie sie ein Geraet liefert.
     var d: [u8; 30] = [0 as u8; 30]
     d[0] = 30 as u8
     d[2] = 0x00 as u8
-    d[3] = 0x01 as u8 // bcdVersion 0x0100
+    d[3] = 0x01 as u8
     d[4] = 0xB1 as u8
-    d[5] = 0x01 as u8 // Berichtsbeschreibung 433 Oktett
-    d[6] = 0x02 as u8 // ihr Register 0x0002
-    d[8] = 0x03 as u8 // Eingaberegister 0x0003
-    d[10] = 0x1D as u8 // hoechstens 29 Oktett
+    d[5] = 0x01 as u8
+    d[6] = 0x02 as u8
+    d[8] = 0x03 as u8
+    d[10] = 0x1D as u8
     d[12] = 0x04 as u8
     d[14] = 0x0C as u8
-    d[16] = 0x05 as u8 // Befehlsregister
-    d[18] = 0x06 as u8 // Datenregister
+    d[16] = 0x05 as u8
+    d[18] = 0x06 as u8
     d[20] = 0xF3 as u8
-    d[21] = 0x06 as u8 // Hersteller 0x06F3
+    d[21] = 0x06 as u8
     d[22] = 0x01 as u8
-    d[23] = 0x25 as u8 // Erzeugnis 0x2501
+    d[23] = 0x25 as u8
     let p: u64 = (&d[0]) as u64
     if hid_desc(state, p, 30) {
         n = n + 1
@@ -1795,9 +1530,6 @@ fn selftest(state: u64) -> u64 {
     if g(state, H_VID) == 0x06F3 && g(state, H_PID) == 0x2501 {
         n = n + 1
     }
-    // Eine abgeschnittene und eine mit falscher Fassung MUESSEN
-    // durchfallen -- ohne diese Gegenprobe misst die obige Zeile nur,
-    // dass die Funktion `true` zurueckgibt.
     d[3] = 0x02 as u8
     if !hid_desc(state, p, 30) && !hid_desc(state, p, 12) {
         n = n + 1
@@ -1805,27 +1537,6 @@ fn selftest(state: u64) -> u64 {
     return n
 }
 
-// ======================================================================
-// SIMULATED DESIGNWARE I2C CONTROLLERS WITH HID DEVICES (words i2csim, touchsim).
-//
-// QEMU has no DW_apb_i2c, so the register-level path (dw_setup, dw_xfer,
-// reg_read, versuche, poll) could never run. These models sit behind
-// r32/w32 when the "controller address" is SIM_MM or SIM_MM2 (1 and 2 --
-// never a real BAR). A controller behaves like the part the driver relies
-// on: TAR only changes while it is disabled, a command to an address
-// without a device aborts (TX_ABRT), reads pop an RX FIFO, a write phase
-// followed by a RESTART read selects the register. A device is a HID
-// device: HID description at its description register (1 or 0x20), report
-// description at 2, input reports at 3 or by a plain read; reports only
-// flow after SET_POWER(on). A device flagged HANG ACKs but never answers
-// a read (the driver must time out and go on).
-//
-//   i2csim:   one controller, a decoy at 0x15 and the precision touchpad
-//   touchsim: A = touchpad 0x2C; B = touch screen 0x10 (description at
-//             0x20), pen 0x11, hanging device 0x40
-//
-// All state lives in the static array `sm` (2 controller pages of 0x1000,
-// then 5 device pages of 0x800).
 const SIM_MM: u64 = 1
 const SIM_MM2: u64 = 2
 const SIM_ADDR: u64 = 0x2C
@@ -1843,9 +1554,9 @@ const CS_LEN: u64 = 0x38
 const CS_RXH: u64 = 0x40
 const CS_TARBAD: u64 = 0x48
 const CS_NREAD: u64 = 0x50
-const CS_RX: u64 = 0x100 // 64-byte FIFO ring
-const CS_W: u64 = 0x140 // write phase bytes (8)
-const CS_CUR: u64 = 0x180 // current input response (<= 64)
+const CS_RX: u64 = 0x100
+const CS_W: u64 = 0x140
+const CS_CUR: u64 = 0x180
 const CS_SCRATCH: u64 = 0xC00
 
 const DS_BASE: u64 = 0x2000
@@ -1853,7 +1564,7 @@ const DS_PAGE: u64 = 0x800
 const DS_ON: u64 = 0x00
 const DS_ADDR: u64 = 0x08
 const DS_CTRL: u64 = 0x10
-const DS_KIND: u64 = 0x18 // 0 pad, 1 touch screen, 2 pen
+const DS_KIND: u64 = 0x18
 const DS_QH: u64 = 0x20
 const DS_QT: u64 = 0x28
 const DS_POWER: u64 = 0x30
@@ -1862,9 +1573,9 @@ const DS_NRST: u64 = 0x40
 const DS_HANG: u64 = 0x48
 const DS_HDREG: u64 = 0x50
 const DS_RDLEN: u64 = 0x58
-const DS_HDESC: u64 = 0x80 // 30 bytes
-const DS_Q: u64 = 0x100 // 8 slots x 64: [n][payload...]
-const DS_RDESC: u64 = 0x300 // up to 0x500 bytes
+const DS_HDESC: u64 = 0x80
+const DS_Q: u64 = 0x100
+const DS_RDESC: u64 = 0x300
 
 fn sm_base() -> u64 {
     return (&sm[0]) as u64
@@ -1900,7 +1611,6 @@ fn em(dst: u64, at: u64, b: u64) -> u64 {
 }
 
 fn sim_desc_touch(dst: u64) -> u64 {
-    // touch screen: 2 fingers (tip, id, x, y) + contact count, report id 1
     var n: u64 = 0
     n = em(dst, n, 0x05)
     n = em(dst, n, 0x0D)
@@ -2057,7 +1767,6 @@ fn sim_desc_touch(dst: u64) -> u64 {
 }
 
 fn sim_desc_pen(dst: u64) -> u64 {
-    // pen: tip, barrel, in range, x, y, report id 2
     var n: u64 = 0
     n = em(dst, n, 0x05)
     n = em(dst, n, 0x0D)
@@ -2140,8 +1849,6 @@ fn sim_clear() {
     scs(SIM_MM2, CS_TAR, 0xFFFF)
 }
 
-// Device i on controller mm at address adr. kind 0 = precision touchpad,
-// 1 = touch screen, 2 = pen. hdreg = register of the HID description.
 fn sim_add_dev(i: u64, mm: u64, adr: u64, kind: u64, hdreg: u64, vid: u64, pid: u64, hang: u64) {
     sds(i, DS_ON, 1)
     sds(i, DS_ADDR, adr)
@@ -2161,16 +1868,16 @@ fn sim_add_dev(i: u64, mm: u64, adr: u64, kind: u64, hdreg: u64, vid: u64, pid: 
     sds(i, DS_RDLEN, rl)
     let hd: u64 = db(i) + DS_HDESC
     kstate.set8(hd + 0, 30 as u8)
-    kstate.set8(hd + 3, 0x01 as u8) // bcdVersion 0x0100
+    kstate.set8(hd + 3, 0x01 as u8)
     kstate.set8(hd + 4, (rl & 0xFF) as u8)
     kstate.set8(hd + 5, ((rl >> 8) & 0xFF) as u8)
-    kstate.set8(hd + 6, 0x02 as u8) // report description register 2
-    kstate.set8(hd + 8, 0x03 as u8) // input register 3
-    kstate.set8(hd + 10, 31 as u8) // max input length (2 length bytes + 29)
+    kstate.set8(hd + 6, 0x02 as u8)
+    kstate.set8(hd + 8, 0x03 as u8)
+    kstate.set8(hd + 10, 31 as u8)
     kstate.set8(hd + 12, 0x04 as u8)
     kstate.set8(hd + 14, 12 as u8)
-    kstate.set8(hd + 16, 0x05 as u8) // command register
-    kstate.set8(hd + 18, 0x06 as u8) // data register
+    kstate.set8(hd + 16, 0x05 as u8)
+    kstate.set8(hd + 18, 0x06 as u8)
     kstate.set8(hd + 20, (vid & 0xFF) as u8)
     kstate.set8(hd + 21, ((vid >> 8) & 0xFF) as u8)
     kstate.set8(hd + 22, (pid & 0xFF) as u8)
@@ -2188,8 +1895,6 @@ fn sim_find(mm: u64, tar: u64) -> u64 {
     return 0
 }
 
-// Put an input report (payload without the 2 length bytes) in the queue
-// of device i.
 fn sim_push(i: u64, p: u64, n: u64) -> bool {
     let h: u64 = sdg(i, DS_QH)
     let t: u64 = sdg(i, DS_QT)
@@ -2207,8 +1912,6 @@ fn sim_push(i: u64, p: u64, n: u64) -> bool {
     return true
 }
 
-// The response of an input read: [len lo, len hi, payload...]. Empty
-// queue or device asleep = length 0 (two zero bytes).
 fn sim_load_input(mm: u64, d: u64) -> bool {
     let cur: u64 = cb(mm) + CS_CUR
     var k: u64 = 0
@@ -2236,7 +1939,6 @@ fn sim_load_input(mm: u64, d: u64) -> bool {
     return true
 }
 
-// A read phase starts: which source answers, from the write phase.
 fn sim_select(mm: u64, d: u64) -> bool {
     let w: u64 = cb(mm) + CS_W
     let wn: u64 = scg(mm, CS_WN)
@@ -2280,7 +1982,6 @@ fn sim_byte(mm: u64, d: u64, pos: u64) -> u64 {
     return 0
 }
 
-// A finished write phase = a command: register 5, then [byte0, opcode].
 fn sim_command(mm: u64, d: u64) {
     let w: u64 = cb(mm) + CS_W
     if scg(mm, CS_WN) < 4 {
@@ -2364,8 +2065,6 @@ fn sim_wr(state: u64, mm: u64, off: u64, v: u64) {
         return
     }
     if off == IC_TAR {
-        // The real part ignores a TAR write while enabled -- the driver
-        // must disable first. Count the violations.
         if scg(mm, CS_EN) == 1 {
             scs(mm, CS_TARBAD, scg(mm, CS_TARBAD) + 1)
             return
@@ -2378,14 +2077,13 @@ fn sim_wr(state: u64, mm: u64, off: u64, v: u64) {
     }
     let d1: u64 = sim_find(mm, scg(mm, CS_TAR))
     if d1 == 0 {
-        // NACK on the address phase: abort, TX FIFO flushed.
         scs(mm, CS_ABRT, 1)
         return
     }
     let d: u64 = d1 - 1
     if (v & CMD_READ) != 0 {
         if sdg(d, DS_HANG) != 0 {
-            return // ACKed, but the device never answers
+            return
         }
         if (v & CMD_RESTART) != 0 || scg(mm, CS_SRC) == 0 {
             if !sim_select(mm, d) {
@@ -2419,9 +2117,6 @@ fn sim_wr(state: u64, mm: u64, off: u64, v: u64) {
     }
 }
 
-// The old test run (word i2csim): controller at SIM_MM with two slaves
-// from "firmware" (0x15 is a decoy without a device), probe, then play the
-// precision touchpad reports of hidtest through the I2C path.
 fn simrun(state: u64) {
     var s_a: [u8; 15] = "i2csim: ready=\0"
     var s_b: [u8; 9] = " aborts=\0"
@@ -2473,7 +2168,6 @@ fn simrun(state: u64) {
         }
         i = i + 1
     }
-    // An empty queue must read as "nothing" and not as an event.
     poll(state)
     hidin.set_trace(state, false)
     serial.puts((&s_h[0]) as u64)
@@ -2486,8 +2180,6 @@ fn simrun(state: u64) {
     hidin.say(state)
 }
 
-// ---------------------------------------------------------------------
-// touchsim: report builders and one step of the virtual clock.
 fn find_dev(c: u64, adr: u64) -> u64 {
     var j: u64 = 0
     while j < ndev() {
@@ -2504,7 +2196,6 @@ fn sim_step(state: u64, ms: u64) {
     poll(state)
 }
 
-// Touch screen report (rid 1): two fingers (tip, id, x, y) and the count.
 fn ts_report(state: u64, d: u64, n: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
     let p: u64 = cb(SIM_MM2) + CS_SCRATCH
     kstate.set8(p, 1 as u8)
@@ -2536,7 +2227,6 @@ fn ts_report(state: u64, d: u64, n: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
     sim_push(d, p, 14)
 }
 
-// Pen report (rid 2): bit 0 tip, bit 1 barrel, bit 2 in range; x, y.
 fn pen_report(state: u64, d: u64, bits: u64, x: u64, y: u64) {
     let p: u64 = cb(SIM_MM2) + CS_SCRATCH + 0x100
     kstate.set8(p, 2 as u8)
@@ -2548,8 +2238,6 @@ fn pen_report(state: u64, d: u64, bits: u64, x: u64, y: u64) {
     sim_push(d, p, 6)
 }
 
-// The touch run (word touchsim): controller A (touchpad + decoy), controller
-// B (touch screen with the description at 0x20, pen, a device that hangs).
 fn simrun2(state: u64) {
     var s_a: [u8; 17] = "touchsim: ctrls=\0"
     var s_b: [u8; 7] = " devs=\0"
@@ -2575,7 +2263,6 @@ fn simrun2(state: u64) {
     s(state, S_SLAVES + 16, 0x10)
     s(state, S_SLAVES + 24, 0x11)
     s(state, S_SLAVES + 32, 0x40)
-    // test path: hold the namespace here (the real boot path gets it from acpiev.stage)
     aml.ns_hold(state)
     aml_scan(state)
     say_aml(state)
@@ -2596,16 +2283,13 @@ fn simrun2(state: u64) {
     say_devs(state)
     let dscr: u64 = 1
     let dpen: u64 = 2
-    // the sim device indexes 1 and 2 (touch screen, pen) as the driver sees them
     let jt: u64 = find_dev(1, 0x10)
     let jp: u64 = find_dev(1, 0x11)
     hidin.set_trace(state, true)
-    // A: tap at the middle of the panel
     ts_report(state, dscr, 1, 1808, 1092, 0, 0)
     sim_step(state, 1000)
     ts_report(state, dscr, 0, 0, 0, 0, 0)
     sim_step(state, 1100)
-    // B: drag from the left to the right
     ts_report(state, dscr, 1, 400, 400, 0, 0)
     sim_step(state, 2000)
     ts_report(state, dscr, 1, 1200, 400, 0, 0)
@@ -2614,7 +2298,6 @@ fn simrun2(state: u64) {
     sim_step(state, 2040)
     ts_report(state, dscr, 0, 0, 0, 0, 0)
     sim_step(state, 2060)
-    // C: two-finger scroll, 600 units down (about 211 px = 5 notches)
     ts_report(state, dscr, 2, 1000, 800, 1200, 800)
     sim_step(state, 3000)
     ts_report(state, dscr, 2, 1000, 1000, 1200, 1000)
@@ -2625,12 +2308,10 @@ fn simrun2(state: u64) {
     sim_step(state, 3060)
     ts_report(state, dscr, 0, 0, 0, 0, 0)
     sim_step(state, 3080)
-    // D: long press (700 ms) = right click
     ts_report(state, dscr, 1, 900, 900, 0, 0)
     sim_step(state, 5000)
     ts_report(state, dscr, 0, 0, 0, 0, 0)
     sim_step(state, 5700)
-    // E: pen: hover, tip, tip + barrel, out of range
     pen_report(state, dpen, 4, 2000, 1000)
     sim_step(state, 6000)
     pen_report(state, dpen, 5, 2000, 1000)
@@ -2661,7 +2342,6 @@ fn simrun2(state: u64) {
     serial.puts((&s_h[0]) as u64)
     serial.dec(jp)
     serial.nl()
-    // W-TOUCH4: the /proc/inputdevs text, one serial line per text line (the tables are still filled here).
     var s_p: [u8; 12] = "inputdevs: \0"
     let rn: u64 = render(state, buf(state), 3000)
     var ri: u64 = 0

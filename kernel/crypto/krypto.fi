@@ -1,127 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/krypto.fi -- Runde K-019: DIE PLATTE VERSCHLUESSELT.
-//
-// ==================================================================
-// WAS DIESE DATEI IST UND WO SIE SITZT
-// ==================================================================
-//
-// Ein verschluesselter Datentraeger ist keine neue Art von
-// Dateisystem. Er ist eine SCHICHT DARUNTER: oben liegt OFS mit seinem
-// Journal (oder FAT, oder spaeter etwas anderes) und merkt nichts,
-// unten liegt `blk.read`/`blk.write` und merkt auch nichts. Dazwischen
-// steht genau diese Datei und tut zwei Dinge:
-//
-//   LESEN    Sektor von der Platte holen, entschluesseln, herausgeben.
-//   SCHREIBEN Sektor verschluesseln, auf die Platte legen.
-//
-// DAS IST DIE GANZE ZUSAGE DER RUNDE, und sie ist bewusst so klein:
-// `fs.fi` hat 1486 bestehende Zusagen, die daran haengen, dass ein
-// Block sich liest wie ein Block. Keine davon darf sich aendern. Wer
-// eine Verschluesselung baut, indem er das Dateisystem anfasst, hat
-// beides kaputt gemacht.
-//
-// DIE NAHT IST `kernel/blk.fi`, Funktionen `read` und `write` -- die
-// EINE Stelle, ueber die die Wurzelplatte erreicht wird. Dort stehen
-// jetzt zwei Zeilen mehr, und diese zwei Zeilen sind die ganze
-// Einbindung.
-//
-// ==================================================================
-// DAS VERFAHREN, UND WARUM GERADE DIESES
-// ==================================================================
-//
-// XTS-AES-256 fuer die Daten. Die Begruendung steht ausfuehrlich im
-// Kopf von `lib/crypto/xts.fi`; kurz: eine Platte hat keinen Platz fuer
-// einen Pruefwert je Sektor, also faellt jedes authentifizierende
-// Verfahren aus, und unter den verbleibenden ist XTS seit 2007 die
-// Norm (NIST SP 800-38E) und das, was LUKS2, BitLocker und FileVault
-// benutzen. Der Tweak kommt aus der Sektornummer -- zwei Sektoren mit
-// demselben Inhalt haben damit verschiedenen Geheimtext.
-//
-// Argon2id fuer die Schluesselableitung, nach RFC 9106. Die Runde SYNC
-// hatte sich in `scrypt.fi` gegen Argon2id entschieden, mit drei
-// Gruenden; zwei davon galten dem WIRT von damals (kein BLAKE2b im
-// Baum, keine fremde Umsetzung zum Gegenrechnen). Beide sind in dieser
-// Runde ausgeraeumt und nachgemessen -- siehe `docs/RUNDE-KRYPTO.md`.
-//
-// ==================================================================
-// DER KOPFSATZ, NACH DEM VORBILD VON LUKS2
-// ==================================================================
-//
-// EIGENER Aufbau, kein fremder Quelltext, aber dasselbe Prinzip, und
-// das Prinzip ist der eigentliche Gedanke von LUKS:
-//
-//   DER HAUPTSCHLUESSEL WIRD NIE AUS DER PASSPHRASE ABGELEITET.
-//
-// Er wird EINMAL aus dem Zufallsgenerator gezogen und bleibt fuer die
-// Lebensdauer des Datentraegers derselbe. Die Passphrase leitet nur
-// einen EINPACKSCHLUESSEL ab, und mit dem liegt der Hauptschluessel
-// verschluesselt in einem SCHLUESSELPLATZ. Daraus folgt das, was die
-// Abnahme dieser Runde misst:
-//
-//   * Die Passphrase laesst sich WECHSELN, ohne dass ein einziger
-//     Sektor neu verschluesselt werden muss -- es wird nur ein
-//     Schluesselplatz neu geschrieben.
-//   * Es kann MEHRERE Passphrasen geben (acht Plaetze), jede macht
-//     dieselbe Platte auf.
-//   * Ein Platz laesst sich loeschen, ohne die anderen anzutasten.
-//
-// Der Kopf liegt in den ersten 4096 Oktetten (acht Sektoren zu 512):
-//
-//   0x000  Kennung "OSUMCRYPT", 9 Oktette
-//   0x010  Fassung, 4 Oktette little endian (1)
-//   0x014  Chiffre, 4 Oktette (1 = XTS-AES-256)
-//   0x018  KDF, 4 Oktette (1 = Argon2id, 2 = PBKDF2-SHA256)
-//   0x01C  Sektorgroesse, 4 Oktette (512)
-//   0x020  erster Datensektor, 8 Oktette (8)
-//   0x028  Zahl der Datensektoren, 8 Oktette
-//   0x030  Pruefsumme des Kopfes ohne dieses Feld, SHA-256, 32 Oktette
-//   0x100  Schluesselplatz 0, 256 Oktette
-//   0x200  Schluesselplatz 1
-//   ...    bis Platz 7 auf 0x800
-//
-// Ein Schluesselplatz (256 Oktette):
-//
-//   0x00  belegt, 4 Oktette (0 = leer, 1 = belegt)
-//   0x04  t_cost, 4 Oktette
-//   0x08  m_cost in KiB, 4 Oktette
-//   0x0C  lanes, 4 Oktette
-//   0x10  Salz, 32 Oktette
-//   0x30  der eingepackte Hauptschluessel, 64 Oktette
-//   0x70  HMAC-SHA256 ueber den eingepackten Schluessel mit dem
-//         Pruefteil des Einpackschluessels, 32 Oktette
-//
-// WARUM DER PRUEFWERT UEBER DEN EINGEPACKTEN SCHLUESSEL GEHT und nicht
-// ueber den Hauptschluessel: ein Pruefwert ueber den Hauptschluessel
-// waere fuer jeden Platz derselbe und wuerde verraten, dass zwei
-// Plaetze dieselbe Platte aufmachen -- was zwar offensichtlich ist,
-// aber es waere auch ein Orakel, mit dem man einen geratenen
-// Hauptschluessel pruefen kann, ohne eine Passphrase zu haben.
-//
-// DIE ABLEITUNG liefert 96 Oktette: 64 fuer das Einpacken (XTS
-// braucht zwei Schluessel), 32 fuer den Pruefwert. Eingepackt wird mit
-// XTS-AES-256 und dem Tweak 0 -- der Platz ist genau ein Block von 64
-// Oktetten und wird nie an einer anderen Stelle stehen.
-//
-// ==================================================================
-// WAS EINE FALSCHE PASSPHRASE ZU SEHEN BEKOMMT
-// ==================================================================
-//
-// GENAU EINE Antwort, fuer jeden Fehlerfall dieselbe: `unlock` gibt
-// false und `kstate.CRY_FAILS` zaehlt hoch. Es gibt KEINE
-// Unterscheidung zwischen "Platz leer", "Pruefwert falsch" und "kein
-// Platz passt", weder im Rueckgabewert noch in der Meldung noch in der
-// Laufzeit -- ALLE acht Plaetze werden durchgerechnet, auch wenn der
-// erste schon passt. Das kostet Zeit und ist der Punkt: wer aus der
-// Dauer eines Fehlversuchs ablesen kann, wie weit er gekommen ist, hat
-// ein Orakel.
-//
-// EHRLICH DAZU, was das NICHT ist: die Rechnung darunter (AES ueber
-// eine S-Box-Tabelle, `lib/crypto/aes.fi`) ist nicht konstantzeitig,
-// und der Vergleich der Pruefwerte ist es. Gegen einen Angreifer mit
-// Zugriff auf den Zwischenspeicher DERSELBEN Maschine hilft das hier
-// nicht; gegen einen, der die gestohlene Platte vor sich hat -- der
-// Fall, um den es bei Plattenverschluesselung geht --, schon. Das
-// steht auch so unter den roten Punkten in `docs/RUNDE-KRYPTO.md`.
 
 profile kernel
 
@@ -147,9 +23,6 @@ export {
     HDR_SECTORS, SLOTS, derive_wrap
 }
 
-// Die Kennung. "OSUMCRYPT" -- neun Oktette, und sie steht ganz vorne,
-// damit ein fremdes Werkzeug den Traeger erkennt, statt ihn fuer
-// unformatiert zu halten und anzubieten, ihn zu ueberschreiben.
 const MAGIC_LEN: u64 = 9
 
 const VERSION: u64 = 1
@@ -157,14 +30,12 @@ const CIPHER_XTS: u64 = 1
 const KDF_ARGON2ID: u64 = 1
 const KDF_PBKDF2: u64 = 2
 
-// Der Kopf belegt acht Sektoren zu 512 = 4096 Oktette.
 const HDR_SECTORS: u64 = 8
 const SECTOR: u64 = 512
 const SLOTS: u64 = 8
 const SLOT_BASE: u64 = 0x100
 const SLOT_SIZE: u64 = 256
 
-// Versaetze im Kopf.
 const H_VERSION: u64 = 0x10
 const H_CIPHER: u64 = 0x14
 const H_KDF: u64 = 0x18
@@ -173,7 +44,6 @@ const H_FIRST: u64 = 0x20
 const H_COUNT: u64 = 0x28
 const H_SUM: u64 = 0x30
 
-// Versaetze im Schluesselplatz.
 const S_USED: u64 = 0x00
 const S_TCOST: u64 = 0x04
 const S_MCOST: u64 = 0x08
@@ -183,45 +53,11 @@ const S_SALTLEN: u64 = 32
 const S_WRAPPED: u64 = 0x30
 const S_MAC: u64 = 0x70
 
-// Der Hauptschluessel ist der von XTS-AES-256: zwei mal 32.
 const KEY_LEN: u64 = 64
-// Die Ableitung liefert 64 zum Einpacken und 32 zum Pruefen.
 const WRAP_LEN: u64 = 96
 
-// DIE VORGABEN DER ABLEITUNG. 64 MiB und drei Durchgaenge sind die
-// "erste empfohlene Einstellung" aus RFC 9106 Abschnitt 4, auf p=4
-// gestellt. Auf einer Maschine ohne Beschleunigung dauert das
-// spuerbar -- das ist der Zweck.
-//
-// FUER DEN ABNAHMELAUF laesst sich das kleiner stellen (`kryptoschnell`
-// waere ein eigenes Modusbit); diese Runde nimmt stattdessen die Werte
-// aus dem KOPFSATZ, die beim Anlegen festgelegt wurden. Ein Kopf, der
-// mit m=8 angelegt wurde, wird auch mit m=8 aufgemacht, und der
-// Abnahmelauf legt ihn so an. Das ist ehrlicher als ein Schalter, der
-// im Messlauf etwas anderes rechnet als im Betrieb.
-// GEMESSEN auf diesem Wirt (AMD EPYC, KVM), mit DIESER Umsetzung:
-// 13,7 us je KiB und Durchgang. Daraus:
-//
-//   t=3 m=64 MiB p=4   2,70 s je Platz   ->  21,6 s fuer acht
-//   t=2 m=32 MiB p=4   0,90 s je Platz   ->   7,2 s fuer acht
-//   t=3 m=16 MiB p=4   0,68 s je Platz   ->   5,4 s fuer acht
-//
-// DIE ACHT IST DER PUNKT: `unlock` rechnet IMMER alle acht Plaetze
-// durch, damit die Laufzeit nicht verraet, welcher gepasst hat (siehe
-// dort). Was ein Mensch beim Start wartet, ist also das ACHTFACHE der
-// Zeit eines Platzes -- und die erste Empfehlung aus RFC 9106
-// Abschnitt 4 (t=1, m=2 GiB) oder die zweite (t=3, m=64 MiB) waeren
-// damit 7 bzw. 22 Sekunden.
-//
-// Gewaehlt: t=2, m=32 MiB, p=4 -> rund 7 Sekunden bis zum Schreibtisch.
-// Das ist eine ABWAEGUNG und keine Empfehlung der Norm, und sie steht
-// deshalb in docs/RUNDE-KRYPTO.md bei den roten Punkten: mit AES-NI und
-// einem Argon2 in SIMD gehoerte hier 64 MiB oder mehr hin. Die Zahlen
-// stehen IM KOPFSATZ -- ein Traeger, der heute mit 32 MiB angelegt
-// wird, laesst sich morgen mit einem Schluesselplatz zu 256 MiB
-// versehen, ohne dass ein Sektor neu verschluesselt werden muss.
 const DEF_T: u64 = 2
-const DEF_M: u64 = 32768 // KiB, also 32 MiB
+const DEF_M: u64 = 32768
 const DEF_P: u64 = 4
 
 fn g(state: u64, off: u64) -> u64 {
@@ -286,7 +122,6 @@ fn zero(p: u64, n: u64) {
     }
 }
 
-// Die Kennung an den Anfang schreiben bzw. pruefen. "OSUMCRYPT".
 fn magic_put(p: u64) {
     let m: [u8; 9] = [79, 83, 85, 77, 67, 82, 89, 80, 84]
     var i: u64 = 0
@@ -306,8 +141,6 @@ fn magic_ok(p: u64) -> bool {
     }
     return diff == 0
 }
-
-// ------------------------------------------------------------- der Aufbau
 
 fn init(state: u64) {
     s(state, kstate.CRY_READY, 0)
@@ -335,9 +168,6 @@ fn on(state: u64) -> u64 {
     return g(state, kstate.CRY_ON)
 }
 
-// `active` ist die Frage, die `blk.read`/`blk.write` stellen: soll
-// dieser Zugriff durch die Verschluesselung? Nur wenn der Traeger
-// verschluesselt IST und der Schluessel DA ist.
 fn active(state: u64) -> bool {
     return g(state, kstate.CRY_ON) != 0 && g(state, kstate.CRY_READY) != 0
 }
@@ -358,35 +188,17 @@ fn slot_of(state: u64) -> u64 {
     return g(state, kstate.CRY_SLOT)
 }
 
-// Den Schluessel vergessen. Nach `lock_down` liest die Platte wieder
-// Geheimtext -- das ist der Weg, auf dem der Abnahmelauf belegt, dass
-// ohne Passphrase nichts zu sehen ist.
 fn lock_down(state: u64) {
     zero(state + kstate.CRY_KEY, KEY_LEN)
     s(state, kstate.CRY_READY, 0)
-    // RUNDE AESNI: `xts.fi` haelt seit dieser Runde die fertigen
-    // AES-NI-Schluesselplaene des zuletzt benutzten Schluessels (sonst
-    // kostete der Schluesselplan je Sektor mehr als die Rechnung, siehe
-    // docs/RUNDE-AESNI.md Abschnitt 4). Diese Kopie MUSS hier mit weg
-    // -- sonst laege der Schluessel nach dem Zusperren noch im
-    // Speicher, waehrend `CRY_KEY` schon genullt ist, und
-    // `lock_down` waere eine Luege.
     xts.forget()
 }
 
-// ------------------------------------------- der Arbeitsspeicher von Argon2
-//
-// Argon2 mit 64 MiB braucht 64 MiB AM STUECK. Der Haldenzuteiler gibt
-// so etwas nicht her; `mem.frame_run` schon -- es sucht einen Lauf
-// zusammenhaengender Rahmen. Der Speicher wird EINMAL geholt und
-// bleibt liegen: eine Entsperrung beim Start und ein Passphrasenwechsel
-// im Betrieb greifen auf denselben Block.
 fn argmem(state: u64, kib: u64) -> u64 {
     let have: u64 = g(state, kstate.CRY_ARGMEM)
     if have != 0 && g(state, kstate.CRY_ARGKIB) >= kib {
         return have
     }
-    // 4096 Oktette je Rahmen.
     let pages: u64 = (kib * 1024 + 4095) / 4096
     let p: u64 = mem.frame_run(state, pages)
     if p == 0 {
@@ -397,12 +209,6 @@ fn argmem(state: u64, kib: u64) -> u64 {
     return p
 }
 
-// ------------------------------------------------------ die Ableitung
-//
-// Aus Passphrase und Salz werden WRAP_LEN Oktette: 64 zum Einpacken,
-// 32 zum Pruefen. Welches Verfahren, steht im Kopf -- ein Kopf, der mit
-// PBKDF2 angelegt wurde, bleibt mit PBKDF2 lesbar, auch wenn der Kern
-// inzwischen Argon2id bevorzugt.
 fn derive_wrap(state: u64, pw: u64, pwlen: u64, salt: u64,
     t: u64, m: u64, p: u64, kdf: u64, out: u64) -> bool {
     if kdf == KDF_ARGON2ID {
@@ -410,29 +216,12 @@ fn derive_wrap(state: u64, pw: u64, pwlen: u64, salt: u64,
         if am == 0 {
             return false
         }
-        // RUNDE ARGON (K-021): DER WEG UEBER MEHRERE KERNE.
-        //
-        // `kargon.argon2id_par` rechnet DASSELBE wie
-        // `argon2.argon2id` -- es ruft dieselben drei Teile
-        // (`prepare`, die Scheiben, `finish`) aus derselben Datei. Der
-        // einzige Unterschied ist, dass die p Spuren einer Scheibe auf
-        // mehrere Kerne gelegt werden, was RFC 9106 ausdruecklich
-        // erlaubt (innerhalb einer Scheibe sind die Spuren
-        // unabhaengig, synchronisiert wird an der Scheibengrenze).
-        //
-        // Gibt es nur einen Kern oder steht `noargonpar` auf der
-        // Befehlszeile, rechnet dieselbe Funktion die Scheiben seriell
-        // -- Oktett fuer Oktett dasselbe Ergebnis, nur langsamer.
         return kargon.argon2id_par(state, pw, pwlen as usize, salt,
             S_SALTLEN as usize, t, m, p, am, out, WRAP_LEN as usize)
     }
     return false
 }
 
-// ------------------------------------------------------------ der Kopfsatz
-
-// Die Pruefsumme des Kopfes: SHA-256 ueber die ersten 4096 Oktette,
-// wobei das Summenfeld selbst als Nullen gerechnet wird.
 fn header_sum(hdr: u64, out: u64) {
     var keep: [u8; 32] = [0 as u8; 32]
     var i: u64 = 0
@@ -449,10 +238,6 @@ fn header_sum(hdr: u64, out: u64) {
     }
 }
 
-// Ist das ein Kopf, dem man trauen kann? Kennung, Fassung, Chiffre,
-// Sektorgroesse UND die Pruefsumme. Ein beschaedigter Kopf faellt hier
-// durch -- und zwar SAUBER, mit false, nicht mit einem Absturz und
-// nicht mit Muell.
 fn header_valid(hdr: u64) -> bool {
     if !magic_ok(hdr) {
         return false
@@ -484,9 +269,6 @@ fn header_valid(hdr: u64) -> bool {
     return diff == 0
 }
 
-// Den Kopf von der Platte holen. `dev` ist das Geraet; gelesen wird
-// ROH, ueber `blk.read_on`, denn die Verschluesselung ist an dieser
-// Stelle noch nicht auf.
 fn header_read(state: u64, dev: u64) -> bool {
     let hdr: u64 = state + kstate.CRY_HDR
     var i: u64 = 0
@@ -501,7 +283,6 @@ fn header_read(state: u64, dev: u64) -> bool {
 
 fn header_write(state: u64, dev: u64) -> bool {
     let hdr: u64 = state + kstate.CRY_HDR
-    // Die Summe IMMER frisch rechnen, bevor geschrieben wird.
     var sum: [u8; 32] = [0 as u8; 32]
     header_sum(hdr, (&sum[0]) as u64)
     var i: u64 = 0
@@ -535,12 +316,6 @@ fn slots_used(state: u64) -> u64 {
     return n
 }
 
-// --------------------------------------------- einen Platz aufmachen
-//
-// Gibt true, wenn die Passphrase diesen Platz oeffnet, und legt den
-// Hauptschluessel nach `dst`. KEIN frueher Ausstieg, KEINE
-// unterschiedliche Meldung -- der Aufrufer ruft das fuer alle acht
-// Plaetze auf und sieht am Ende nur, ob einer gepasst hat.
 fn slot_open(state: u64, i: u64, pw: u64, pwlen: u64, kdf: u64,
     dst: u64) -> bool {
     let sl: u64 = slot_at(state, i)
@@ -558,8 +333,6 @@ fn slot_open(state: u64, i: u64, pw: u64, pwlen: u64, kdf: u64,
     if !derive_wrap(state, pw, pwlen, sl + S_SALT, t, m, p, kdf, wp) {
         return false
     }
-    // Der Pruefwert: HMAC-SHA256 ueber den EINGEPACKTEN Schluessel mit
-    // den letzten 32 Oktetten der Ableitung.
     var mac: [u8; 32] = [0 as u8; 32]
     sha256.hmac(wp + 64, 32, sl + S_WRAPPED, KEY_LEN as usize,
         (&mac[0]) as u64)
@@ -572,7 +345,6 @@ fn slot_open(state: u64, i: u64, pw: u64, pwlen: u64, kdf: u64,
     if diff != 0 {
         return false
     }
-    // Auspacken: XTS mit Tweak 0 ueber die 64 Oktette.
     var tw: [u8; 16] = [0 as u8; 16]
     if !xts.decrypt(wp, (&tw[0]) as u64, sl + S_WRAPPED, dst,
         KEY_LEN as usize) {
@@ -581,14 +353,6 @@ fn slot_open(state: u64, i: u64, pw: u64, pwlen: u64, kdf: u64,
     return true
 }
 
-// ================================================== DIE ENTSPERRUNG
-//
-// ALLE acht Plaetze werden durchgerechnet, auch wenn der erste passt.
-// Das ist kein Versehen: ein Abbruch beim ersten Treffer macht die
-// Laufzeit zu einem Orakel dafuer, WELCHER Platz gepasst hat, und ein
-// Abbruch beim ersten Fehlschlag verraet, wie viele Plaetze belegt
-// sind. Acht Argon2-Laeufe kosten Zeit; eine Entsperrung findet
-// einmal beim Start statt.
 fn unlock(state: u64, dev: u64, pw: u64, pwlen: u64) -> bool {
     if !header_read(state, dev) {
         s(state, kstate.CRY_FAILS, g(state, kstate.CRY_FAILS) + 1)
@@ -631,12 +395,6 @@ fn unlock(state: u64, dev: u64, pw: u64, pwlen: u64) -> bool {
     return true
 }
 
-// ---------------------------------------------- einen Platz beschreiben
-//
-// Setzt Platz `i` auf die Passphrase `pw`. Der Hauptschluessel muss
-// dafuer bekannt sein -- entweder weil gerade angelegt wird, oder weil
-// vorher entsperrt wurde. GENAU DAS ist der Grund, warum ein
-// Passphrasenwechsel keine Daten anfasst.
 fn slot_write(state: u64, i: u64, pw: u64, pwlen: u64, key: u64,
     t: u64, m: u64, p: u64, kdf: u64) -> bool {
     if i >= SLOTS {
@@ -644,9 +402,6 @@ fn slot_write(state: u64, i: u64, pw: u64, pwlen: u64, key: u64,
     }
     let sl: u64 = slot_at(state, i)
     zero(sl, SLOT_SIZE)
-    // Ein frisches Salz je Platz. Zwei Plaetze mit derselben
-    // Passphrase bekommen damit verschiedene Einpackschluessel -- sonst
-    // saehe man an gleichen Plaetzen, dass die Passphrasen gleich sind.
     if rand.bytes(state, sl + S_SALT, S_SALTLEN) != S_SALTLEN {
         return false
     }
@@ -669,8 +424,6 @@ fn slot_write(state: u64, i: u64, pw: u64, pwlen: u64, key: u64,
     return true
 }
 
-// Einen Platz hinzufuegen, im laufenden Betrieb. Setzt voraus, dass
-// entsperrt ist -- der Hauptschluessel steht dann in `CRY_KEY`.
 fn slot_add(state: u64, dev: u64, i: u64, pw: u64, pwlen: u64,
     t: u64, m: u64, p: u64) -> bool {
     if g(state, kstate.CRY_READY) == 0 {
@@ -687,9 +440,6 @@ fn slot_add(state: u64, dev: u64, i: u64, pw: u64, pwlen: u64,
     return header_write(state, dev)
 }
 
-// Einen Platz loeschen. Der Platz wird mit Nullen ueberschrieben --
-// nicht nur als "leer" markiert, sonst stuende der eingepackte
-// Schluessel weiter auf der Platte.
 fn slot_kill(state: u64, dev: u64, i: u64) -> bool {
     if i >= SLOTS {
         return false
@@ -701,18 +451,10 @@ fn slot_kill(state: u64, dev: u64, i: u64) -> bool {
     return header_write(state, dev)
 }
 
-// ============================ K-019: THE HEADER INSIDE A PARTITION
-//
-// An installed disk has a GPT: the ESP in front, the root partition behind it.
-// The installer (kernel/user/dcrypt.fi) writes the key header into the FIRST
-// sectors of the root partition and the encrypted file system after it. The
-// header sector offset is kept in CRY_BASE; header_read/header_write and the
-// root offset (`blk.use_at`) add it. Base 0 = the old whole-disk layout.
 fn base_of(state: u64) -> u64 {
     return g(state, kstate.CRY_BASE)
 }
 
-// Is there a valid key header at sector `at` of `dev`? Reads, does not unlock.
 fn header_at(state: u64, dev: u64, at: u64) -> bool {
     s(state, kstate.CRY_BASE, at)
     let ok: bool = header_read(state, dev)
@@ -731,14 +473,6 @@ fn unlock_at(state: u64, dev: u64, at: u64, pw: u64, pwlen: u64) -> bool {
     return ok
 }
 
-// ==================================================== DAS ANLEGEN
-//
-// Kopfsatz schreiben, Hauptschluessel ziehen, Platz 0 setzen. Die
-// Daten darueber sind danach Geheimtext -- ein bestehendes Dateisystem
-// wird dabei NICHT umgeschrieben, es wird ueberschrieben. Wer Daten
-// behalten will, legt vorher eine Sicherung an; eine Umwandlung im
-// Betrieb (wie `cryptsetup reencrypt`) ist nicht Teil dieser Runde und
-// steht so in den roten Punkten.
 fn format(state: u64, dev: u64, pw: u64, pwlen: u64,
     t: u64, m: u64, p: u64) -> bool {
     let hdr: u64 = state + kstate.CRY_HDR
@@ -754,16 +488,11 @@ fn format(state: u64, dev: u64, pw: u64, pwlen: u64,
         return false
     }
     put_le64(hdr, H_COUNT, total - HDR_SECTORS)
-    // DER HAUPTSCHLUESSEL KOMMT AUS DEM ZUFALLSGENERATOR, nicht aus der
-    // Passphrase. Das ist der ganze Gedanke der Schluesselplaetze.
     var key: [u8; 64] = [0 as u8; 64]
     let kp: u64 = (&key[0]) as u64
     if rand.bytes(state, kp, KEY_LEN) != KEY_LEN {
         return false
     }
-    // XTS lehnt einen Schluessel ab, dessen Haelften gleich sind. Dass
-    // der Zufall das liefert, ist so gut wie ausgeschlossen -- geprueft
-    // wird es trotzdem, denn "so gut wie" ist keine Zusage.
     var same: u64 = 0
     var i: u64 = 0
     while i < 32 {
@@ -791,36 +520,9 @@ fn format(state: u64, dev: u64, pw: u64, pwlen: u64,
     return true
 }
 
-// ========================================= DIE WURZEL HINTER DEN KOPF
-//
-// DER FEHLER, DEN DIESE FUNKTION BEHEBT, WAR GEMESSEN UND NICHT
-// UEBERLEGT: ohne sie schreibt `fs.format` seinen Superblock auf
-// Sektor 0 -- und Sektor 0 IST der Kopfsatz. Im ersten Lauf ging alles
-// (der Schluessel lag im Speicher, der Baum entstand), beim Neustart
-// stand an Sektor 0 Geheimtext des Superblocks statt "OSUMCRYPT", und
-// `unlock` sagte fehler=1. Die Verschluesselung hatte ihren eigenen
-// Kopf ueberschrieben.
-//
-// `blk.use_at` kann genau das schon, seit Runde INSTALL: es gibt der
-// Wurzel einen VERSATZ auf dem Geraet. Was fuer eine Partition gilt,
-// gilt hier fuer den Kopfsatz -- das Dateisystem faengt bei Sektor 8
-// an, und `blk.read`/`blk.write` rechnen den Versatz dazu. `fs.fi`
-// merkt davon nichts.
-//
-// UND DER TWEAK BLEIBT DER RICHTIGE: `read`/`write` verschluesseln mit
-// der Nummer, die OBEN benutzt wird (der Block des Dateisystems), nicht
-// mit der absoluten auf dem Geraet. Damit ist der Tweak unabhaengig
-// davon, wo der Datenbereich anfaengt.
 fn wurzel_setzen(state: u64, dev: u64, first: u64, count: u64) {
     blk.use_at(state, dev, first, count)
 }
-
-// ============================================ DIE BEIDEN HEISSEN WEGE
-//
-// `lba` ist die Nummer, die der Aufrufer OBEN benutzt -- die
-// Verschluesselung liegt darunter und rechnet den Tweak aus genau
-// dieser Nummer. Damit bleibt der Tweak derselbe, egal wo der
-// Datenbereich auf dem Geraet anfaengt.
 
 fn encrypt_sector(state: u64, lba: u64, src: u64, dst: u64) -> bool {
     if g(state, kstate.CRY_READY) == 0 {
@@ -846,13 +548,6 @@ fn decrypt_sector(state: u64, lba: u64, src: u64, dst: u64) -> bool {
     return true
 }
 
-// ==================================================== DER SELBSTTEST
-//
-// Er prueft die EIGENSCHAFT, auf die sich alles stuetzt: was
-// verschluesselt wurde, kommt entschluesselt wieder heraus, und zwei
-// Sektoren mit demselben Inhalt haben VERSCHIEDENEN Geheimtext. Der
-// zweite Teil ist der wichtigere -- eine Verschluesselung, die den
-// Sektor nicht einrechnet, besteht den ersten Teil auch.
 fn selftest(state: u64) -> bool {
     if g(state, kstate.CRY_READY) == 0 {
         return false
@@ -879,7 +574,6 @@ fn selftest(state: u64) -> bool {
         }
         i = i + 1
     }
-    // Derselbe Klartext, ANDERER Sektor -> anderer Geheimtext.
     if !encrypt_sector(state, 101, a, d) {
         return false
     }
@@ -895,29 +589,6 @@ fn selftest(state: u64) -> bool {
     return true
 }
 
-// ==================================================================
-// DER ABNAHMELAUF: EIN BEKANNTER BAUM AUF DER VERSCHLUESSELTEN PLATTE
-// ==================================================================
-//
-// Diese zwei Funktionen sind das Messgeraet der Runde, und sie stehen
-// HIER und nicht in einem Ring-3-Programm, weil der Punkt der Messung
-// die Schicht UNTER dem Dateisystem ist: `tree_write` schreibt ganz
-// gewoehnlich ueber `fs.write_at`, und wenn die Verschluesselung
-// stimmt, liegt auf dem Blech Geheimtext, ohne dass eine Zeile von
-// `fs.fi` davon weiss.
-//
-// Der Baum ist mit Absicht BERECHENBAR statt zufaellig: Datei `i`
-// enthaelt `laenge(i)` Oktette nach der Regel `(i * 37 + k * 7 + 3) &
-// 255`. Damit kann der WIRT denselben Baum erzeugen, ohne dass eine
-// Liste von Pruefsummen zwischen zwei Programmen abgeglichen werden
-// muss -- `tools/krypto/run.sh` rechnet dieselbe Regel in Python und
-// haelt die SHA-256 dagegen.
-//
-// WARUM VERSCHIEDENE LAENGEN: 100, 700, 5000 und 40000 Oktette. Die
-// erste passt in einen Block, die zweite ueber zwei, die dritte ueber
-// die direkten Zeiger hinaus, die vierte tief in die indirekten. Eine
-// Verschluesselung, die nur den ersten Block richtig macht, faellt
-// spaetestens bei der dritten auf.
 const TREE_FILES: u64 = 4
 
 fn tree_len(i: u64) -> u64 {
@@ -933,7 +604,6 @@ fn tree_len(i: u64) -> u64 {
     return 40000
 }
 
-// Der Inhalt, Oktett fuer Oktett aus der Regel.
 fn tree_fill(buf: u64, i: u64, n: u64) {
     var k: u64 = 0
     while k < n {
@@ -942,19 +612,14 @@ fn tree_fill(buf: u64, i: u64, n: u64) {
     }
 }
 
-// Den Pfad `/kN` bauen. Kurze Namen, damit sie in jede Fassung von OFS
-// passen.
 fn tree_path(p: u64, i: u64) {
-    st8(p, 0, 47) // '/'
-    st8(p, 1, 107) // 'k'
-    st8(p, 2, 48 + i) // Ziffer
+    st8(p, 0, 47)
+    st8(p, 1, 107)
+    st8(p, 2, 48 + i)
     st8(p, 3, 0)
 }
 
-// Schreiben. Gibt die Zahl der Dateien, die wirklich entstanden sind.
 fn tree_write(state: u64) -> u64 {
-    // Der Puffer kommt aus dem eigenen Bereich: 40000 Oktette passen
-    // nicht auf den Kernstapel.
     let buf: u64 = g(state, kstate.CRY_ARGMEM)
     if buf == 0 {
         return 0
@@ -977,8 +642,6 @@ fn tree_write(state: u64) -> u64 {
     return done
 }
 
-// Nachlesen und die SHA-256 je Datei ausgeben. Das ist die Zusage:
-// nicht "es sieht richtig aus", sondern Oktett fuer Oktett dasselbe.
 fn tree_check(state: u64) -> u64 {
     let buf: u64 = g(state, kstate.CRY_ARGMEM)
     if buf == 0 {
@@ -1009,11 +672,6 @@ fn tree_check(state: u64) -> u64 {
         serial.put(61 as u8)
         serial.put(32 as u8)
         if ok {
-            // ZWEI HEXZIFFERN JE OKTETT, ohne `0x`. `serial.hex_width`
-            // setzt ein `0x` davor und macht aus einer Pruefsumme
-            // 32 einzelne Zahlen statt einer Kette -- der Wirt soll
-            // sie mit `sha256sum` vergleichen koennen, ohne vorher
-            // 32 Praefixe wegzuschneiden.
             let hx: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55,
                 56, 57, 97, 98, 99, 100, 101, 102]
             var j: u64 = 0

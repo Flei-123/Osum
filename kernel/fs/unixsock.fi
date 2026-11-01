@@ -1,66 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/unixsock.fi -- RUNDE WAYLAND: DER LOKALE SOCKET UND DER
-// GETEILTE SPEICHER.
-//
-// WARUM ES DIESE DATEI GIBT, in einem Satz: ein Wayland-Client redet
-// NICHT ueber das Netz, er redet ueber einen Unix-Domain-Socket, und er
-// schiebt seinen Bildpuffer als DATEIDESKRIPTOR hinueber statt ihn zu
-// kopieren. Beides konnte dieses System bis zu dieser Runde nicht, und
-// beides ist gemessen worden, bevor eine Zeile Protokoll entstand:
-//
-//   `kernel/sys.fi`, `do_socket`:  if domain != AF_INET { -EAFNOSUPPORT }
-//   `kernel/sys.fi`:               MAP_PRIVATE=2, MAP_ANONYMOUS=32 -- und
-//                                  sonst nichts. Kein MAP_SHARED.
-//   grep SCM_RIGHTS/sendmsg/recvmsg kernel/  ->  null Treffer.
-//
-// WAS DER ECHTE CLIENT WIRKLICH VERLANGT, gemessen mit `strace` an
-// weston-simple-shm 10.0.1 (statisch gegen musl+libwayland 1.21.0,
-// gegen ein echtes weston gelaufen, Beendigungscode 0). EIN Lauf:
-//
-//   sendmsg 323, poll 323, recvmsg 322, mmap 120, fcntl 3,
-//   socket 1, memfd_create 1, connect 1
-//
-// Daran haengt die ganze Bauform dieser Datei, und drei Dinge daraus
-// sind nicht verhandelbar:
-//
-//   1. KEIN read/write AUF DEM SOCKET. libwayland benutzt
-//      AUSSCHLIESSLICH sendmsg/recvmsg. Ein Unix-Socket, der nur `read`
-//      und `write` kann, ist fuer Wayland kein Unix-Socket.
-//   2. SCM_RIGHTS KOMMT GENAU EINMAL VOR -- beim `wl_shm_pool`, der den
-//      memfd hinueberreicht. Selten, aber unvermeidbar: ohne
-//      Deskriptoruebergabe gibt es keinen Bildpuffer.
-//   3. DER PUFFER WIRD GETEILT, NICHT KOPIERT. mmap(..., MAP_SHARED,
-//      memfd, 0) im Client, und der Server muss DIESELBEN Rahmen sehen.
-//      Eine Kopie waere bei 250.000 Oktetten je Bild das Ende jeder
-//      Bildrate -- und vor allem waere sie falsch: der Client malt
-//      NACH dem mmap weiter.
-//
-// ---------------------------------------------------------------- AUFBAU
-//
-// DREI TABELLEN, alle in `kdata` ab 0xF3000 (der Bereich, den
-// `tools/kernel/memmap.py` als frei ausweist -- 0xF3000..0x100000, 52
-// KiB; VGPU aus der Runde VIRTIOGPU endet bei 0xF3000):
-//
-//   NAMEN    Welcher Pfad gehoert zu welchem lauschenden Socket. Ein
-//            Unix-Socket wird ueber einen PFAD gefunden, nicht ueber
-//            Adresse und Port. Das ist der ganze Unterschied zu
-//            `inet.fi`, und er ist der Grund, warum diese Tabelle
-//            existiert.
-//   SOCKETS  Der Zustand je Socket: Art, Gegenstelle, Ringpuffer,
-//            Warteschlange der Annahme, die bis zu vier Deskriptoren,
-//            die in der Warteschlange stehen.
-//   SPEICHER Die memfd-Objekte: je einer eine Folge von Rahmen, die
-//            MEHR ALS EIN Prozess in seiner Seitentabelle stehen haben
-//            darf. Das ist der Kern von MAP_SHARED.
-//
-// ------------------------------------------------- WAS ABSICHTLICH FEHLT
-//
-// SOCK_DGRAM auf Unix-Sockets (Wayland braucht SOCK_STREAM),
-// abstrakte Namen (der fuehrende Nullpunkt in sun_path -- Linux-eigen,
-// libwayland benutzt ihn nicht), SO_PEERCRED, Socketpaare ueber
-// `socketpair` (dafuer gibt es `pipe`), und die Vererbung eines
-// lauschenden Sockets ueber `fork`. Wer alles baut, wird nie fertig;
-// der Auftrag dieser Runde nennt das Minimum, und das steht hier.
 
 profile kernel
 
@@ -74,45 +11,22 @@ import serial
 
 export {
     init, reset_all,
-    // die Sockets
     sock_new, sock_free, sock_used, sock_kind, sock_set_kind,
     sock_peer, sock_set_peer, sock_state, sock_set_state,
     bind_path, name_of, name_len, name_byte, find_listener, listen_on, accept_from, connect_to, connect_pair,
     pending,
     send_bytes, recv_bytes, waiting, room, peer_gone, shutdown_sock,
     push_fd, pop_fd, fd_waiting, fd_room,
-    // der geteilte Speicher
     map_room, map_note, map_release, map_release_all, maps_live, map_rec_base, map_rec_word, shm_file_find, shm_file_mark, shm_file_key,
     map_arena_find, shm_demand, demand_lock, demand_unlock, mm_lock, mm_unlock, scratch_lock, scratch_unlock, vm_lock, vm_unlock, vm_held, vm_oom_note, vm_oom_take, shm_lazy, shm_frame_demand, shm_resident, UM_LAZY, UM_WRITE,
     shm_new, shm_new_any, shm_free, shm_used, shm_pages, shm_frame, shm_grow, shm_new_contig, shm_wrap, shm_contig, shm_base, shm_flags, shm_max_pages,
     shm_ref, shm_unref, shm_refs, shm_size, shm_set_size,
     shm_seals, shm_add_seals, shm_wmaps, shm_wmap_take, shm_wmap_drop,
-    // Zahlen fuer die Abnahme
     socks_live, shms_live, bytes_moved, fds_moved,
     USOCK_MAX, USHM_MAX, USHM_PAGED, USUN_MAX, RING_CAP, FDQ_MAX, SHM_PAGES_MAX, SHM_PAGES_LIMIT, SHM_PAGES_CONTIG, SMF_CONTIG, SMF_RO, SMF_KEEP, SMF_FILE, UM_PAGES_MASK, UMAP_MAX,
     S_FREE, S_OPEN, S_LISTEN, S_CONNECTED, S_CLOSED,
     UK_FREE, UK_STREAM, UK_DGRAM, send_dgram, send_dgram_to, recv_dgram, dgram_len, dgram_room, bind_dgram, find_dgram, connect_dgram, fd_at_head, DGRAM_HDR
 }
-
-// ============================================================ DIE LAGE
-//
-// 0xF3000..0x100000 sind 52 KiB. Verteilt:
-//
-//   0xF3000..0xF3800  USOCK   32 Sockets zu je 64 Oktetten   =  2 KiB
-//   0xF3800..0xF4000  UNAME   16 Namen zu je 128 Oktetten    =  2 KiB
-//   0xF4000..0xF4040  UCNT    vier Zaehler                   = 64 Okt.
-//   0xF5000..0xF5400  USHM    16 Objekte zu je 64 Oktetten   =  1 KiB
-//   0xF6000..0xFE000  USHMPG  16 * 256 Rahmenadressen zu 8   = 32 KiB
-//
-// Zusammen belegt bis 0xFE000; frei bleibt 0xFE000..0x100000 (8 KiB).
-// Alle fuenf stehen in `tools/kernel/memmap.py` -- der Kartenpruefer
-// rechnet nach, dass sich nichts ueberschneidet.
-//
-// DIE RINGPUFFER LIEGEN NICHT IN kdata. 32 Ringe zu 4096 Oktetten
-// waeren 128 KiB und damit mehr, als der ganze freie Raum hergibt. Sie
-// liegen in Rahmen von `mem.frame_alloc`, und im Kopf steht nur die
-// Rahmenadresse -- dieselbe Bauform, die `wm.create` fuer die
-// Fensterpuffer benutzt.
 
 const USOCK_OFF: u64 = 0xF3000
 const USOCK_MAX: u64 = 32
@@ -121,137 +35,80 @@ const USOCK_BYTES: u64 = 64
 const UNAME_OFF: u64 = 0xF3800
 const UNAME_MAX: u64 = 16
 const UNAME_BYTES: u64 = 128
-const USUN_MAX: u64 = 108 // sun_path, wie bei Linux
+const USUN_MAX: u64 = 108
 
 const USHM_OFF: u64 = 0xF4040
-// COMPOSITOR S3 (docs/COMPOSITOR.md): 40 objects at 0xF5000..0xF5A00 (40 * 64 = 2.5 KiB, in the gap before USHMPG). The first USHM_PAGED (16) keep
-// their page-address table (USHMPG); objects 16..39 are CONTIGUOUS ONLY (a window buffer is one run of frames: base + count, no table).
 const USHM_MAX: u64 = 100
 const USHM_PAGED: u64 = 16
 const USHM_BYTES: u64 = 64
 
-// COMPOSITOR S3: WHO MAPS WHAT. `map_shm` has always added a reference for a mapping, but nothing took it away again: not `munmap`,
-// not the end of the process. A window buffer is 1 - 4 MiB; opening and closing windows would have eaten the memory. The table
-// remembers (address, task, object, pages) of every mapping, so that `munmap` of exactly that address and the end of the task
-// give the reference back. 96 records of 16 octets = 1.5 KiB at 0xF5A00..0xF6000, the rest of the gap before USHMPG
-// (0xFE000..0x100000 belong to the Wayland scratch and path buffers of sys.fi; tools/kernel/memmap.py checks all of it).
 const UMAP_OFF: u64 = 0xF5A00
 const UMAP_MAX: u64 = 96
 const UMAP_BYTES: u64 = 16
-// WP-DEMAND: the second word of a mapping record is task | object << 16 | pages << 32 | flags. The pages never need more than 18 bits.
 const UM_PAGES_MASK: u64 = 0x0FFFFFFF
-const UM_LAZY: u64 = 0x1000000000000000 // bit 60: the object is sparse here -- missing pages are filled by the page-fault handler
-const UM_WRITE: u64 = 0x2000000000000000 // bit 61: the mapping is writable
+const UM_LAZY: u64 = 0x1000000000000000
+const UM_WRITE: u64 = 0x2000000000000000
 
 const USHMPG_OFF: u64 = 0xF6000
-// RUNDE WAYLAND, Stufe 2: 256 KiB REICHEN NICHT.
-//
-// weston-simple-shm legt EINEN Vorrat an und schneidet ZWEI Puffer
-// daraus (es malt doppelt gepuffert): 250 * 250 * 4 * 2 = 500.000
-// Oktette. Mit 64 Seiten scheiterte `mmap` mit -ENOMEM, und der Client
-// sagte "mmap failed: Out of memory" -- nachdem sein erstes Fenster
-// schon stand. Gemessen, nicht geraten.
-//
-// 256 Seiten sind 1 MiB je Objekt. Das kostet nichts, solange niemand
-// so viel verlangt: die Rahmen kommen erst bei `shm_grow`. Was es
-// wirklich kostet, ist die ADRESSTAFEL, und die steht in kdata:
-// USHM_MAX * SHM_PAGES_MAX * 8 Oktette.
-//
-// Frei sind ab 0xF3000 genau 52 KiB. 32 Objekte zu 256 Seiten waeren
-// 64 KiB und passen NICHT. Also sechzehn Objekte zu je 1 MiB (32 KiB
-// Tafel) statt zweiunddreissig zu je 256 KiB -- ein Wayland-Client
-// braucht GROSSE Puffer, nicht viele. Ein Bildschirm in 1280x800 ist
-// allein 4 MiB; wer den will, hebt die Zahl erneut und verschiebt die
-// Tafel aus kdata heraus.
-const SHM_PAGES_MAX: u64 = 256 // 256 * 4096 = 1 MiB je Objekt: the INLINE part of the page table (USHMPG in kdata)
-// r710: a paged object holds up to SHM_PAGES_LIMIT pages (512 MiB). The first 256 addresses stay in USHMPG, the rest live in an
-// OUT-OF-LINE table: a run of frames (SM_BASE = its first frame, SM_TABN = how many frames) that grows with the object.
+const SHM_PAGES_MAX: u64 = 256
 const SHM_PAGES_LIMIT: u64 = 131072
-const PG_PER_TAB: u64 = 512 // addresses per table frame (4096 / 8)
-// COMPOSITOR S3: a CONTIGUOUS object (`MFD_FRAMES`) is one run of frames and costs no table: 8192 pages = 32 MiB (3440 x 1440 x 4 is 19 MB)
+const PG_PER_TAB: u64 = 512
 const SHM_PAGES_CONTIG: u64 = 8192
 
-// Der Ring eines Sockets ist EIN Rahmen. 4096 Oktette sind viel fuer
-// ein Wayland-Paket (das groesste im Mitschnitt oben war 132) und wenig
-// fuer den Kernel -- 32 Sockets waeren 128 KiB, und die stehen nur da,
-// wenn wirklich 32 Sockets offen sind.
 const RING_CAP: u64 = 4096
 
-// Wieviele Deskriptoren gleichzeitig in der Warteschlange EINES Sockets
-// stehen duerfen. libwayland schiebt einen je `wl_shm_pool`; vier ist
-// grosszuegig und begrenzt, was ein boesartiger Client anhaeufen kann.
 const FDQ_MAX: u64 = 16
-
-// ---------------------------------------------------------- die Felder
 
 const SK_USED: u64 = 0
 const SK_KIND: u64 = 8
 const SK_STATE: u64 = 16
-const SK_PEER: u64 = 24 // Nummer der Gegenstelle, oder USOCK_MAX
-const SK_RING: u64 = 32 // Rahmenadresse des Ringpuffers, oder 0
-const SK_HEAD: u64 = 40 // Leseposition im Ring
-const SK_TAIL: u64 = 48 // Schreibposition im Ring
-const SK_NAME: u64 = 56 // Nummer des Namens, oder UNAME_MAX
+const SK_PEER: u64 = 24
+const SK_RING: u64 = 32
+const SK_HEAD: u64 = 40
+const SK_TAIL: u64 = 48
+const SK_NAME: u64 = 56
 
-// Die Deskriptorwarteschlange liegt NICHT im 64-Oktett-Kopf (dort ist
-// kein Platz mehr), sondern am Anfang des RINGRAHMENS: die ersten 64
-// Oktette des Rahmens sind Verwaltung, die restlichen 4032 sind
-// Nutzlast. Das spart eine eigene Tabelle und haelt alles beieinander,
-// was zu einem Socket gehoert.
-const FQ_COUNT: u64 = 0 // wieviele Deskriptoren warten
-const FQ_SLOT: u64 = 8 // FDQ_MAX (16) slots of 8 bytes: the open-file number
-const FQ_MARK: u64 = 136 // FDQ_MAX marks: at which ring position the fd hangs
-const RING_DATA: u64 = 320 // payload starts here (8 + 16*8 + 16*8 = 264, rounded up)
-const RING_USABLE: u64 = 3776 // RING_CAP - RING_DATA
+const FQ_COUNT: u64 = 0
+const FQ_SLOT: u64 = 8
+const FQ_MARK: u64 = 136
+const RING_DATA: u64 = 320
+const RING_USABLE: u64 = 3776
 
 const UK_FREE: u64 = 0
 const UK_STREAM: u64 = 1
-const UK_DGRAM: u64 = 2 // socketpair(SOCK_DGRAM): ring of frames, each = 4-byte length + payload (message boundaries kept)
+const UK_DGRAM: u64 = 2
 const DGRAM_HDR: u64 = 4
 
 const S_FREE: u64 = 0
-const S_OPEN: u64 = 1 // angelegt, weder gebunden noch verbunden
-const S_LISTEN: u64 = 2 // lauscht auf einem Pfad
-const S_CONNECTED: u64 = 3 // hat eine Gegenstelle
-const S_CLOSED: u64 = 4 // Gegenstelle ist weg
+const S_OPEN: u64 = 1
+const S_LISTEN: u64 = 2
+const S_CONNECTED: u64 = 3
+const S_CLOSED: u64 = 4
 
-// Namensfelder
 const NM_USED: u64 = 0
-const NM_SOCK: u64 = 8 // welcher Socket lauscht hier
+const NM_SOCK: u64 = 8
 const NM_LEN: u64 = 16
-const NM_TEXT: u64 = 24 // ab hier die Oktette des Pfades
+const NM_TEXT: u64 = 24
 const NM_BORROW: u64 = 64
 
-// Felder eines Speicherobjekts
 const SM_USED: u64 = 0
-const SM_REFS: u64 = 8 // wieviele Deskriptoren zeigen darauf
-const SM_PAGES: u64 = 16 // wieviele Rahmen sind belegt
-const SM_SIZE: u64 = 24 // die Groesse, die `ftruncate` gesetzt hat
-const SM_SEALS: u64 = 32 // F_ADD_SEALS
-const SM_BASE: u64 = 40 // COMPOSITOR S3: the first frame of a contiguous object (the frames lie one after the other), 0 = none yet
-const SM_FLAGS: u64 = 48 // SMF_*
-const SM_TABN: u64 = 56 // r710: frames of the out-of-line page table of a paged object (SM_BASE), 0 = none
-const SMF_CONTIG: u64 = 1 // the frames are ONE run (`mem.frame_run`): the window server can compose from them
-const SMF_RO: u64 = 2 // may only be mapped read-only, never grown or written through a descriptor
-const SMF_FILE: u64 = 8 // LCSH: the pages are the shared pages of a REGULAR FILE (mmap MAP_SHARED + PROT_WRITE); SM_SIZE = ino+1 | first file page << 32
-const SMF_KEEP: u64 = 4 // the frames belong to the kernel (the window table page): never freed with the object
+const SM_REFS: u64 = 8
+const SM_PAGES: u64 = 16
+const SM_SIZE: u64 = 24
+const SM_SEALS: u64 = 32
+const SM_BASE: u64 = 40
+const SM_FLAGS: u64 = 48
+const SM_TABN: u64 = 56
+const SMF_CONTIG: u64 = 1
+const SMF_RO: u64 = 2
+const SMF_FILE: u64 = 8
+const SMF_KEEP: u64 = 4
 
-// Zaehler fuer die Abnahme. Sie stehen in den letzten Oktetten des
-// Socketbereichs, den kein Socket benutzt (32 * 64 = 2048 = genau der
-// Bereich; also in den Namensbereich hinter den 16 Namen).
 const UCNT_OFF: u64 = 0xF4000
 const C_SOCKS: u64 = 0
 const C_SHMS: u64 = 8
 const C_BYTES: u64 = 16
 const C_FDS: u64 = 24
-
-// ----------------------------------------------------- roher Speicher
-//
-// `kstate.get/set` rechnen mit einem OFFSET im Kerndatenbereich. Die
-// Ringpuffer und die Rahmen eines Speicherobjekts liegen aber in
-// Rahmen, die `mem.frame_alloc` hergibt -- das sind ABSOLUTE Adressen.
-// Dafuer braucht es die vier hier; `kstate.get8/set8` nehmen bereits
-// eine absolute Adresse und werden unveraendert benutzt.
 
 fn rd64(p: u64) -> u64 {
     return __mmio_read64(p as *mut u64)
@@ -285,8 +142,6 @@ fn pg_at(i: u64, p: u64) -> u64 {
     return USHMPG_OFF + (i * SHM_PAGES_MAX + p) * 8
 }
 
-// r710: where the address of page `p` of paged object `i` is stored: the inline table for the first 256 pages, the out-of-line
-// table (SM_BASE) behind it. 0 = no such slot (table not grown that far yet).
 fn inline_cap(i: u64) -> u64 {
     if i < USHM_PAGED {
         return SHM_PAGES_MAX
@@ -305,8 +160,6 @@ fn pg_slot(state: u64, i: u64, p: u64) -> u64 {
     }
     return kstate.get(state, sm_at(i) + SM_BASE) + q * 8
 }
-
-// COMPOSITOR S3: the records of objects 16..39 follow the first 16 (record size 64): sm_at(i) = USHM_OFF + i * 64 is right for all 40.
 
 fn init(state: u64) {
     reset_all(state)
@@ -355,8 +208,6 @@ fn reset_all(state: u64) {
     kstate.set(state, UCNT_OFF + C_FDS, 0)
 }
 
-// ==================================================== DIE SOCKETS SELBST
-
 fn sock_used(state: u64, i: u64) -> u64 {
     if i >= USOCK_MAX {
         return 0
@@ -403,9 +254,6 @@ fn sock_set_peer(state: u64, i: u64, p: u64) {
     }
 }
 
-// Ein neuer Socket. Der Ringrahmen kommt ERST beim Verbinden -- ein
-// lauschender Socket braucht keinen, und 32 ungenutzte Rahmen waeren
-// 128 KiB, die nichts tun.
 fn sock_new(state: u64, kind: u64) -> u64 {
     var i: u64 = 0
     while i < USOCK_MAX {
@@ -426,7 +274,6 @@ fn sock_new(state: u64, kind: u64) -> u64 {
     return USOCK_MAX
 }
 
-// Den Ringrahmen besorgen, falls noch keiner da ist.
 fn ensure_ring(state: u64, i: u64) -> u64 {
     var r: u64 = kstate.get(state, sk_at(i) + SK_RING)
     if r != 0 {
@@ -436,10 +283,6 @@ fn ensure_ring(state: u64, i: u64) -> u64 {
     if r == 0 {
         return 0
     }
-    // Der Rahmen kommt so, wie der vorige Besitzer ihn liess. Die
-    // Verwaltung am Anfang MUSS genullt werden, sonst steht dort eine
-    // Deskriptoranzahl aus einem fremden Leben -- genau der Fehler, den
-    // `proc.map_page_zero` fuer Ring 3 behebt.
     var o: u64 = 0
     while o < RING_DATA {
         wr8(r + o, 0)
@@ -455,9 +298,6 @@ fn sock_free(state: u64, i: u64) {
     if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_USED) == 0 {
         return
     }
-    // Wer noch wartende Deskriptoren hat, verliert sie hier -- und die
-    // offenen Dateien dahinter muessen entzaehlt werden, sonst ist das
-    // ein Leck in der Tafel aus `file.fi`.
     let r: u64 = kstate.get(state, sk_at(i) + SK_RING)
     if r != 0 {
         let n: u64 = rd64(r + FQ_COUNT)
@@ -471,22 +311,17 @@ fn sock_free(state: u64, i: u64) {
         }
         mem.frame_free(state, r)
     }
-    // Den Namen freigeben, falls dieser Socket gelauscht hat.
     let nmi: u64 = kstate.get(state, sk_at(i) + SK_NAME)
     if nmi < UNAME_MAX {
         kstate.set(state, nm_at(nmi) + NM_USED, 0)
         kstate.set(state, nm_at(nmi) + NM_SOCK, USOCK_MAX)
         kstate.set(state, nm_at(nmi) + NM_LEN, 0)
     }
-    // Die Gegenstelle erfaehrt, dass sie allein ist. Sie wird NICHT
-    // freigegeben: ihr Deskriptor lebt noch, und `recv` darauf muss 0
-    // liefern (Dateiende), nicht -EBADF.
     let p: u64 = kstate.get(state, sk_at(i) + SK_PEER)
     if p < USOCK_MAX && kstate.get(state, sk_at(p) + SK_USED) != 0 && kstate.get(state, sk_at(p) + SK_PEER) == i {
         kstate.set(state, sk_at(p) + SK_PEER, USOCK_MAX)
         kstate.set(state, sk_at(p) + SK_STATE, S_CLOSED)
     }
-    // r731: datagram sockets that connect()ed one-way to this one lose their destination (the slot may be reused)
     if kstate.get(state, sk_at(i) + SK_KIND) == UK_DGRAM {
         var j: u64 = 0
         while j < USOCK_MAX {
@@ -503,22 +338,12 @@ fn sock_free(state: u64, i: u64) {
     kstate.set(state, sk_at(i) + SK_PEER, USOCK_MAX)
     kstate.set(state, sk_at(i) + SK_RING, 0)
     kstate.set(state, sk_at(i) + SK_NAME, UNAME_MAX)
-    // RUNDE WAYLAND, der erste Fund dieser Runde: `0 - 1` auf einem u64
-    // ist unter `profile kernel` eine GEPRUEFTE Subtraktion und haelt
-    // die Maschine an (`panic: integer overflow in u64 - u64`), statt
-    // still zu -1 zu werden. Gemessen beim ersten Lauf von wltest, in
-    // `listen_on` ueber `bind` -> `sock_free`. Also lesen, pruefen,
-    // zurueckschreiben -- wie jeder andere Zaehler dieses Kerns.
     let n_s: u64 = kstate.get(state, UCNT_OFF + C_SOCKS)
     if n_s != 0 {
         kstate.set(state, UCNT_OFF + C_SOCKS, n_s - 1)
     }
 }
 
-// ------------------------------------------------------------ die Namen
-
-// Zwei Pfade vergleichen. Beide Seiten sind OFFSETS im
-// Kerndatenbereich, also wird `state + off` daraus.
 fn name_eq(state: u64, nmi: u64, path: u64, len: u64) -> bool {
     if kstate.get(state, nm_at(nmi) + NM_LEN) != len {
         return false
@@ -534,14 +359,10 @@ fn name_eq(state: u64, nmi: u64, path: u64, len: u64) -> bool {
     return true
 }
 
-// Den Pfad an einen lauschenden Socket binden. Der Pfad steht schon im
-// Kerndatenbereich (der Aufrufer in `sys.fi` hat ihn aus Ring 3
-// geholt und geprueft) -- hier wird nur kopiert.
 fn bind_path(state: u64, i: u64, path: u64, len: u64) -> u64 {
     if i >= USOCK_MAX || len == 0 || len > USUN_MAX {
         return errno.E_INVAL
     }
-    // Schon vergeben? Dann -EADDRINUSE, wie Linux.
     var n: u64 = 0
     while n < UNAME_MAX {
         if kstate.get(state, nm_at(n) + NM_USED) != 0
@@ -570,13 +391,12 @@ fn bind_path(state: u64, i: u64, path: u64, len: u64) -> u64 {
     return errno.E_NOSPC
 }
 
-// r731: bind a datagram socket to a path. It needs its ring at once: senders write into it before the owner ever calls recv.
 fn bind_dgram(state: u64, i: u64, path: u64, len: u64) -> u64 {
     if i >= USOCK_MAX || kstate.get(state, sk_at(i) + SK_KIND) != UK_DGRAM {
         return errno.E_INVAL
     }
     if kstate.get(state, sk_at(i) + SK_NAME) < UNAME_MAX {
-        return errno.E_INVAL // already bound
+        return errno.E_INVAL
     }
     if ensure_ring(state, i) == 0 {
         return errno.E_NOMEM
@@ -588,7 +408,6 @@ fn bind_dgram(state: u64, i: u64, path: u64, len: u64) -> u64 {
     return 0
 }
 
-// r731: the datagram socket bound under `path`, or USOCK_MAX.
 fn find_dgram(state: u64, path: u64, len: u64) -> u64 {
     var n: u64 = 0
     while n < UNAME_MAX {
@@ -604,7 +423,6 @@ fn find_dgram(state: u64, path: u64, len: u64) -> u64 {
     return USOCK_MAX
 }
 
-// r731: connect() of a datagram socket only picks the default destination. One-way: the target is not told (its own peer stays as it is).
 fn connect_dgram(state: u64, i: u64, dst: u64) -> u64 {
     if i >= USOCK_MAX || dst >= USOCK_MAX {
         return errno.E_INVAL
@@ -659,9 +477,6 @@ fn find_listener(state: u64, path: u64, len: u64) -> u64 {
     return USOCK_MAX
 }
 
-// Wartet jemand auf Annahme? Die Schlange haengt in SK_HEAD des
-// LAUSCHENDEN Sockets (er hat keinen Ring, also ist das Feld frei) --
-// `poll` fragt darueber, ob `accept` etwas zu holen hat.
 fn pending(state: u64, i: u64) -> bool {
     if i >= USOCK_MAX {
         return false
@@ -677,31 +492,12 @@ fn listen_on(state: u64, i: u64) -> u64 {
         return errno.E_BADF
     }
     if kstate.get(state, sk_at(i) + SK_NAME) >= UNAME_MAX {
-        // Ohne `bind` kein `listen` -- ein namenloser Socket ist nicht
-        // auffindbar, und ein `listen` darauf waere ein stilles Nichts.
         return errno.E_INVAL
     }
-    // DER ZWEITE FUND DIESER RUNDE, und er kostete einen Lauf:
-    // SK_HEAD ist bei einem frischen Socket 0 -- als RINGPOSITION
-    // richtig, als Schlangenzeiger falsch, denn 0 ist eine gueltige
-    // Socketnummer. Ein lauschender Socket meldete damit sofort
-    // "Socket 0 wartet", `accept` nahm eine Verbindung an, die es nicht
-    // gab, und der echte Client bekam danach -ECONNREFUSED.
-    //
-    // Ein lauschender Socket hat keinen Ring, also ist das Feld hier
-    // frei -- aber es muss AUSDRUECKLICH auf "leer" gesetzt werden.
     kstate.set(state, sk_at(i) + SK_HEAD, USOCK_MAX)
     kstate.set(state, sk_at(i) + SK_STATE, S_LISTEN)
     return 0
 }
-
-// --------------------------------------------------- verbinden, annehmen
-//
-// DIE WARTESCHLANGE DER ANNAHME. Ein lauschender Socket hat keinen
-// Ringpuffer; er benutzt sein SK_HEAD-Feld als Liste der wartenden
-// Verbindungen: SK_HEAD ist die Nummer des ersten wartenden Sockets
-// oder USOCK_MAX, und der wartende Socket zeigt mit SK_PEER weiter. Das
-// ist eine einfach verkettete Liste ohne eigene Tabelle.
 
 fn connect_to(state: u64, i: u64, lst: u64) -> u64 {
     if i >= USOCK_MAX || lst >= USOCK_MAX {
@@ -710,7 +506,6 @@ fn connect_to(state: u64, i: u64, lst: u64) -> u64 {
     if kstate.get(state, sk_at(lst) + SK_STATE) != S_LISTEN {
         return errno.E_CONNREFUSED
     }
-    // Hinten anhaengen, damit die Reihenfolge stimmt.
     var cur: u64 = kstate.get(state, sk_at(lst) + SK_HEAD)
     if cur >= USOCK_MAX {
         kstate.set(state, sk_at(lst) + SK_HEAD, i)
@@ -728,14 +523,9 @@ fn connect_to(state: u64, i: u64, lst: u64) -> u64 {
         }
     }
     kstate.set(state, sk_at(i) + SK_PEER, USOCK_MAX)
-    // Der Verbindende wartet. Sein Zustand bleibt S_OPEN, bis `accept`
-    // ihn holt -- `poll` auf dem lauschenden Socket sieht ihn dann.
     return 0
 }
 
-// Eine wartende Verbindung annehmen. Legt den Socket der Serverseite an
-// und verbindet beide. Gibt die Nummer der SERVERSEITE zurueck, oder
-// USOCK_MAX, wenn niemand wartet.
 fn accept_from(state: u64, lst: u64) -> u64 {
     if lst >= USOCK_MAX
         || kstate.get(state, sk_at(lst) + SK_STATE) != S_LISTEN {
@@ -745,39 +535,19 @@ fn accept_from(state: u64, lst: u64) -> u64 {
     if cli >= USOCK_MAX {
         return USOCK_MAX
     }
-    // Den naechsten Wartenden nachruecken lassen, BEVOR SK_PEER des
-    // Genommenen ueberschrieben wird -- dort steht die Verkettung.
     kstate.set(state, sk_at(lst) + SK_HEAD,
         kstate.get(state, sk_at(cli) + SK_PEER))
     let srv: u64 = sock_new(state, UK_STREAM)
     if srv >= USOCK_MAX {
-        // Kein Platz: der Wartende bleibt vorne in der Schlange.
         kstate.set(state, sk_at(cli) + SK_PEER,
             kstate.get(state, sk_at(lst) + SK_HEAD))
         kstate.set(state, sk_at(lst) + SK_HEAD, cli)
         return USOCK_MAX
     }
-    // BEIDE brauchen jetzt einen Ring: jede Richtung hat ihren eigenen.
-    // Ein Socket LIEST aus seinem eigenen Ring und SCHREIBT in den der
-    // Gegenstelle.
     if ensure_ring(state, srv) == 0 || ensure_ring(state, cli) == 0 {
         sock_free(state, srv)
         return USOCK_MAX
     }
-    // DER DRITTE FUND DIESER RUNDE, und der teuerste: SK_HEAD hat bis
-    // hierher ZWEI Bedeutungen getragen -- Leseposition im Ring UND
-    // Verkettung der Annahmeschlange. Fuer den verbindenden Socket
-    // stand darin die Nummer des naechsten Wartenden (oder USOCK_MAX),
-    // und `waiting()` las sie als Leseposition. Der Client bekam damit
-    // eine Fuellstandsrechnung aus einer Socketnummer: 180 gesendete
-    // Oktette, und `poll` meldete trotzdem nichts zu lesen.
-    //
-    // Der Server sendete, der Kern bestaetigte 180 -- und der Client
-    // sah nie ein Oktett. Das ist der Fehler, der wie ein
-    // Protokollfehler aussah und keiner war.
-    //
-    // BEIDE Ringpositionen werden hier ausdruecklich genullt, in dem
-    // Augenblick, in dem aus der Schlange eine Verbindung wird.
     kstate.set(state, sk_at(srv) + SK_HEAD, 0)
     kstate.set(state, sk_at(srv) + SK_TAIL, 0)
     kstate.set(state, sk_at(cli) + SK_HEAD, 0)
@@ -793,8 +563,6 @@ fn accept_from(state: u64, lst: u64) -> u64 {
     return srv
 }
 
-// RUNDE UNTERBAU: `socketpair` -- two sockets that are connected to each other from the start (what `accept` makes out of a waiting
-// `connect`, without the queue): one ring each, the head and tail zeroed, the peers and the state set. 0 = done.
 fn connect_pair(state: u64, a: u64, b: u64) -> u64 {
     if a >= USOCK_MAX || b >= USOCK_MAX || a == b {
         return errno.E_INVAL
@@ -812,8 +580,6 @@ fn connect_pair(state: u64, a: u64, b: u64) -> u64 {
     kstate.set(state, sk_at(b) + SK_STATE, S_CONNECTED)
     return 0
 }
-
-// ------------------------------------------------------- Oktette bewegen
 
 fn waiting(state: u64, i: u64) -> u64 {
     if i >= USOCK_MAX {
@@ -839,15 +605,6 @@ fn room(state: u64, i: u64) -> u64 {
     if r == 0 {
         return 0
     }
-    // Ein Oktett bleibt frei, sonst sind voll und leer nicht zu
-    // unterscheiden.
-    //
-    // UND DIE SUBTRAKTION WIRD ABGEFANGEN. Unter `profile kernel` ist
-    // sie geprueft: waere `waiting` je RING_USABLE oder mehr, hielte
-    // `RING_USABLE - waiting - 1` die MASCHINE an statt eine null
-    // zurueckzugeben. Der Ring laesst das nicht zu -- aber ein Kern,
-    // der sich darauf verlaesst, steht auf einer Annahme, und genau so
-    // eine hat diese Runde schon einmal angehalten.
     let w: u64 = waiting(state, i)
     if w + 1 >= RING_USABLE {
         return 0
@@ -859,15 +616,12 @@ fn peer_gone(state: u64, i: u64) -> bool {
     if i >= USOCK_MAX {
         return true
     }
-    // r731: a bound datagram socket has no peer by design -- it is a mailbox, not half of a connection (never reads as end of file)
     if kstate.get(state, sk_at(i) + SK_KIND) == UK_DGRAM && kstate.get(state, sk_at(i) + SK_NAME) < UNAME_MAX {
         return false
     }
     return kstate.get(state, sk_at(i) + SK_PEER) >= USOCK_MAX
 }
 
-// In den Ring der GEGENSTELLE schreiben. `src` ist eine Adresse im
-// Kerndatenbereich (der Aufrufer hat aus Ring 3 kopiert).
 fn send_bytes(state: u64, i: u64, src: u64, len: u64) -> u64 {
     if i >= USOCK_MAX {
         return errno.E_BADF
@@ -903,7 +657,6 @@ fn send_bytes(state: u64, i: u64, src: u64, len: u64) -> u64 {
     return n
 }
 
-// Aus dem EIGENEN Ring lesen. Gibt die Zahl der Oktette zurueck.
 fn recv_bytes(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     if i >= USOCK_MAX {
         return errno.E_BADF
@@ -935,13 +688,6 @@ fn recv_bytes(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     return n
 }
 
-// ------------------------------------------- SOCK_DGRAM (socketpair only)
-//
-// A datagram socket uses the same ring as a stream socket, but every message is stored as a frame: 4 length bytes (little endian), then the
-// payload. A frame is written whole or not at all (-EAGAIN when the ring has no room, -EMSGSIZE when it can never fit); a read takes exactly one
-// frame and drops what does not fit into the caller's buffer (Linux does the same without MSG_TRUNC).
-
-// Largest payload that fits into an empty ring.
 fn dgram_room(state: u64, i: u64) -> u64 {
     let r: u64 = room(state, i)
     if r <= DGRAM_HDR {
@@ -961,7 +707,6 @@ fn send_dgram(state: u64, i: u64, src: u64, len: u64) -> u64 {
     return send_dgram_to(state, p, src, len)
 }
 
-// r731: one frame into the ring of the socket `p` itself (a bound datagram socket: sendto(path), or the peer a connect() picked).
 fn send_dgram_to(state: u64, p: u64, src: u64, len: u64) -> u64 {
     if p >= USOCK_MAX || kstate.get(state, sk_at(p) + SK_USED) == 0 {
         return errno.E_PIPE
@@ -1033,7 +778,6 @@ fn fd_at_head(state: u64, i: u64) -> bool {
     return rd64(r + FQ_MARK) == kstate.get(state, sk_at(i) + SK_HEAD)
 }
 
-// Take ONE frame from the own ring. Returns the bytes copied (at most `len`); the rest of the frame is dropped. 0 when nothing is waiting.
 fn recv_dgram(state: u64, i: u64, dst: u64, len: u64) -> u64 {
     if i >= USOCK_MAX {
         return errno.E_BADF
@@ -1089,16 +833,6 @@ fn shutdown_sock(state: u64, i: u64) -> u64 {
     return 0
 }
 
-// ------------------------------------------- SCM_RIGHTS: die Deskriptoren
-//
-// EIN DESKRIPTOR WANDERT NICHT ALS ZAHL. Die Zahl 5 im sendenden
-// Prozess bedeutet im empfangenden nichts. Was wirklich uebergeben
-// wird, ist der EINTRAG IN DER TAFEL DER OFFENEN DATEIEN (`file.fi`) --
-// und der Empfaenger bekommt eine NEUE Zahl auf denselben Eintrag.
-// Genau deshalb wird hier `file.open_ref` gezaehlt: solange der
-// Deskriptor in der Warteschlange steht, gehoert er ihr, auch wenn der
-// Sender ihn laengst geschlossen hat.
-
 fn push_fd(state: u64, i: u64, of: u64) -> u64 {
     if i >= USOCK_MAX {
         return errno.E_BADF
@@ -1117,7 +851,6 @@ fn push_fd(state: u64, i: u64, of: u64) -> u64 {
     }
     file.open_ref(state, of)
     wr64(r + FQ_SLOT + n * 8, of)
-    // Die Marke: an welcher Stelle des Stroms haengt dieser Deskriptor.
     wr64(r + FQ_MARK + n * 8,
         kstate.get(state, sk_at(p) + SK_TAIL))
     wr64(r + FQ_COUNT, n + 1)
@@ -1125,7 +858,6 @@ fn push_fd(state: u64, i: u64, of: u64) -> u64 {
     return 0
 }
 
-// Free descriptor slots in the queue of the PEER of socket i (where push_fd puts them).
 fn fd_room(state: u64, i: u64) -> u64 {
     if i >= USOCK_MAX {
         return 0
@@ -1156,9 +888,6 @@ fn fd_waiting(state: u64, i: u64) -> u64 {
     return rd64(r + FQ_COUNT)
 }
 
-// Den vordersten wartenden Deskriptor holen. Gibt die Nummer der
-// offenen Datei zurueck, oder file.MAX_OPEN, wenn keiner wartet. Die
-// Zaehlung bleibt beim Aufrufer: er haengt sie an einen neuen fd.
 fn pop_fd(state: u64, i: u64) -> u64 {
     if i >= USOCK_MAX {
         return file.MAX_OPEN
@@ -1183,18 +912,6 @@ fn pop_fd(state: u64, i: u64) -> u64 {
     wr64(r + FQ_COUNT, n - 1)
     return of
 }
-
-// ================================================== DER GETEILTE SPEICHER
-//
-// EIN memfd IST EINE FOLGE VON RAHMEN OHNE DATEI. Was ihn von `mmap`
-// mit MAP_ANONYMOUS unterscheidet, ist EINE Eigenschaft: die Rahmen
-// gehoeren dem OBJEKT, nicht dem Prozess. Bildet ein zweiter Prozess
-// dasselbe Objekt ab, bekommt er DIESELBEN Rahmen in seine
-// Seitentabelle -- und was der eine schreibt, sieht der andere sofort.
-//
-// Das ist der Grund, warum Wayland ueberhaupt schnell sein kann, und es
-// ist der Punkt, an dem `mmap` in `sys.fi` bisher gelogen haette: es
-// gab nur MAP_PRIVATE.
 
 fn shm_used(state: u64, i: u64) -> u64 {
     if i >= USHM_MAX {
@@ -1246,9 +963,6 @@ fn shm_new_any(state: u64) -> u64 {
     return shm_new(state)
 }
 
-// COMPOSITOR S3: a CONTIGUOUS object (memfd_create with MFD_FRAMES). Its frames are one run, so the window server can use the
-// run as a window buffer and compose from what the client paints. High slots first (they have no page table and cannot be a
-// paged object), then the paged ones.
 fn shm_new_contig(state: u64) -> u64 {
     var i: u64 = USHM_MAX
     while i > 0 {
@@ -1268,7 +982,6 @@ fn shm_new_contig(state: u64) -> u64 {
     return USHM_MAX
 }
 
-// An object over frames the KERNEL owns (the window table page): `flags` as SMF_*, never freed. One reference stays for good.
 fn shm_wrap(state: u64, base: u64, pages: u64, flags: u64) -> u64 {
     let i: u64 = shm_new_contig(state)
     if i >= USHM_MAX {
@@ -1282,13 +995,10 @@ fn shm_wrap(state: u64, base: u64, pages: u64, flags: u64) -> u64 {
     return i
 }
 
-// ---- the table of mappings (COMPOSITOR S3)
-
 fn um_at(k: u64) -> u64 {
     return UMAP_OFF + k * UMAP_BYTES
 }
 
-// is there room for one more mapping record?
 fn map_room(state: u64) -> bool {
     var k: u64 = 0
     while k < UMAP_MAX {
@@ -1300,7 +1010,6 @@ fn map_room(state: u64) -> bool {
     return false
 }
 
-// Remember that `task` maps object `i` (`pages` pages) at `base`. false when the table is full (the caller must not have mapped).
 fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64, flags: u64) -> bool {
     var k: u64 = 0
     while k < UMAP_MAX {
@@ -1314,8 +1023,6 @@ fn map_note(state: u64, task: u64, i: u64, base: u64, pages: u64, flags: u64) ->
     return false
 }
 
-// `munmap(addr, len)` of a recorded mapping: its reference goes. Only the address of the start counts, and only when `len` covers all of
-// it (a part of a mapping stays mapped and stays counted).
 fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
     var k: u64 = 0
     while k < UMAP_MAX {
@@ -1336,7 +1043,6 @@ fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
     return false
 }
 
-// The end of a task: every mapping it still holds gives its reference back.
 fn map_release_all(state: u64, task: u64) -> u64 {
     var n: u64 = 0
     var k: u64 = 0
@@ -1358,7 +1064,6 @@ fn map_release_all(state: u64, task: u64) -> u64 {
     return n
 }
 
-// LCSH: the mapping record `k`: its start address (0 = free) and the second word (task | object << 16 | pages << 32 | flags).
 fn map_rec_base(state: u64, k: u64) -> u64 {
     if k >= UMAP_MAX {
         return 0
@@ -1373,8 +1078,6 @@ fn map_rec_word(state: u64, k: u64) -> u64 {
     return kstate.get(state, um_at(k) + 8)
 }
 
-// LCSH: the shared page object that holds file `ino` from file page `first_pg` on (USHM_MAX = none yet). Only the paged objects can be one.
-// The key lives in SM_SIZE (the size that ftruncate sets is never asked for a file object: it has no descriptor).
 fn shm_file_find(state: u64, ino: u64, first_pg: u64) -> u64 {
     let key: u64 = (ino + 1) | (first_pg << 32)
     var i: u64 = 0
@@ -1388,7 +1091,6 @@ fn shm_file_find(state: u64, ino: u64, first_pg: u64) -> u64 {
     return USHM_MAX
 }
 
-// Make object `i` the object of file `ino` (from file page `first_pg`). From now on it is written back to the file.
 fn shm_file_mark(state: u64, i: u64, ino: u64, first_pg: u64) {
     if i < USHM_PAGED {
         kstate.set(state, sm_at(i) + SM_SIZE, (ino + 1) | (first_pg << 32))
@@ -1396,7 +1098,6 @@ fn shm_file_mark(state: u64, i: u64, ino: u64, first_pg: u64) {
     }
 }
 
-// The key of a file object: ino + 1 in the low 32 bits, the first file page in the high 32 (0 when `i` is no file object).
 fn shm_file_key(state: u64, i: u64) -> u64 {
     if i >= USHM_PAGED || (kstate.get(state, sm_at(i) + SM_FLAGS) & SMF_FILE) == 0 {
         return 0
@@ -1416,7 +1117,6 @@ fn maps_live(state: u64) -> u64 {
     return n
 }
 
-// WP-DEMAND: does the record `k` belong to the address space of `task` (same page-table root; threads share it)?
 fn map_same_space(state: u64, a: u64, b: u64) -> bool {
     if a >= kstate.MAX_TASKS || b >= kstate.MAX_TASKS {
         return false
@@ -1425,8 +1125,6 @@ fn map_same_space(state: u64, a: u64, b: u64) -> bool {
     return ca != 0 && ca == sched.tget(state, b, sched.T_CR3)
 }
 
-// WP-DEMAND: a free run of `pages` pages inside the sparse-mapping arena [lo, hi) of the address space of `task`: first fit over the
-// recorded lazy mappings (their pages are NOT in the page table, so scanning the table would call them free). 0 = no room.
 fn map_arena_find(state: u64, task: u64, pages: u64, lo: u64, hi: u64) -> u64 {
     let want: u64 = pages * mem.FRAME_SIZE
     var cand: u64 = lo
@@ -1455,7 +1153,7 @@ fn map_arena_find(state: u64, task: u64, pages: u64, lo: u64, hi: u64) -> u64 {
     return cand
 }
 
-const DEMAND_LOCK: u64 = 32 // UCNT_OFF + 32: a spin word that serialises the page-table changes of the demand fault (`proc.demand_fault`)
+const DEMAND_LOCK: u64 = 32
 
 fn demand_lock(state: u64) {
     let lock: u64 = state + UCNT_OFF + DEMAND_LOCK
@@ -1468,13 +1166,6 @@ fn demand_unlock(state: u64) {
     atomic.store(state + UCNT_OFF + DEMAND_LOCK, 0)
 }
 
-// r721: two more spin words next to the demand lock. Both are taken with interrupts OFF (the holder cannot be preempted on its core, so
-// a waiter on that core can never spin against a sleeper); the flags come back from `*_lock` and go into `*_unlock`. Lock order: SCRATCH,
-// then MM. Nothing sleeps and nothing faults while one is held.
-//   MM_LOCK      the kernel's walk-and-copy of ONE user page (`copy_in`/`copy_out`/`peek`/`poke`: translate + access) against
-//                `proc.page_drop` (the frame goes back): without it a thread on another core could `munmap` between the two and the
-//                kernel would read or write a frame that already belongs to somebody else.
-//   SCRATCH_LOCK the one kernel bounce buffer (`WL_SCRATCH`) of sendmsg / recvmsg / read / write on a socket: two cores shared it.
 const MM_LOCK: u64 = 40
 const SCRATCH_LOCK: u64 = 48
 
@@ -1492,7 +1183,6 @@ fn spin_irq_unlock(state: u64, off: u64, fl: u64) {
     sched.irq_restore(fl)
 }
 
-// the counter-check words `nommlock` / `noscratch` skip the lock; the flags word then carries bit 63 so that the unlock skips too
 const LOCK_SKIPPED: u64 = 0x8000000000000000
 
 fn mm_lock(state: u64) -> u64 {
@@ -1521,12 +1211,8 @@ fn scratch_unlock(state: u64, fl: u64) {
     }
 }
 
-// r721 follow-up: the ADDRESS-SPACE lock. `mmap` (anonymous), `munmap`, `mprotect` and `mremap` of several threads of one process read and move
-// the same bump marks (T_MMAP / T_BIG) and scan the same page tables: two threads got the SAME pages, or one unmapped what the other
-// still used. One spin word for the machine (interrupts stay ON; the holder takes no sleeping path, `oom_handle` runs after the unlock).
-// The word holds `task + 1` of the holder, so `vm_held` can tell the holder from everybody else. Lock order: VM, then MM.
 const VM_LOCK: u64 = 56
-const VM_OOM: u64 = 64 // set (instead of calling `oom_handle`) when a path that holds the VM lock ran out of frames
+const VM_OOM: u64 = 64
 
 fn vm_lock(state: u64, task: u64) {
     if kstate.mode_on(state, kstate.M_NOVMLOCK) {
@@ -1553,7 +1239,6 @@ fn vm_oom_note(state: u64) {
     atomic.store(state + UCNT_OFF + VM_OOM, 1)
 }
 
-// true once after `vm_oom_note`: the caller (lock already released) runs the out-of-memory handler
 fn vm_oom_take(state: u64) -> bool {
     let lock: u64 = state + UCNT_OFF + VM_OOM
     if atomic.load(lock) == 0 {
@@ -1562,12 +1247,9 @@ fn vm_oom_take(state: u64) -> bool {
     return atomic.cas(lock, 1, 0) == 1
 }
 
-// WP-DEMAND: `addr` (page aligned) of the address space of `cur`: is it a page of a sparse mapping that is merely not there yet? Then the
-// frame (made now, zeroed) comes back with bit 0 set when the mapping is writable; 0 = a real fault. The caller maps it, holding the
-// demand lock (`proc.demand_fault`). `err` is the error word of the fault (0 for a system call that wants the page).
 fn shm_demand(state: u64, cur: u64, addr: u64, err: u64) -> u64 {
     if (err & 1) != 0 || (err & 8) != 0 {
-        return 0 // protection violation or reserved bit: not a missing page
+        return 0
     }
     var k: u64 = 0
     while k < UMAP_MAX {
@@ -1577,7 +1259,7 @@ fn shm_demand(state: u64, cur: u64, addr: u64, err: u64) -> u64 {
             let pages: u64 = (w >> 32) & UM_PAGES_MASK
             if (w & UM_LAZY) != 0 && addr < b + pages * mem.FRAME_SIZE && map_same_space(state, w & 0xFFFF, cur) {
                 if (err & 2) != 0 && (w & UM_WRITE) == 0 {
-                    return 0 // a write to a read-only mapping
+                    return 0
                 }
                 let f: u64 = shm_frame_demand(state, (w >> 16) & 0xFFFF, (addr - b) / mem.FRAME_SIZE)
                 if f == 0 {
@@ -1605,7 +1287,6 @@ fn shm_contig(state: u64, i: u64) -> bool {
     return (shm_flags(state, i) & SMF_CONTIG) != 0
 }
 
-// the first frame of a contiguous object (0 for a paged one or one that has no frames yet)
 fn shm_base(state: u64, i: u64) -> u64 {
     if i >= USHM_MAX || !shm_contig(state, i) {
         return 0
@@ -1613,7 +1294,6 @@ fn shm_base(state: u64, i: u64) -> u64 {
     return kstate.get(state, sm_at(i) + SM_BASE)
 }
 
-// the largest size (in pages) object `i` may have
 fn shm_max_pages(state: u64, i: u64) -> u64 {
     if shm_contig(state, i) {
         return SHM_PAGES_CONTIG
@@ -1648,7 +1328,6 @@ fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
     return rd64(slot)
 }
 
-// r710: make the out-of-line table big enough for `n` pages (copy the old one over, free it). 0 = ok, else an errno.
 fn shm_tab_for(state: u64, i: u64, n: u64) -> u64 {
     let cap: u64 = inline_cap(i)
     if n <= cap {
@@ -1682,9 +1361,6 @@ fn shm_tab_for(state: u64, i: u64, n: u64) -> u64 {
     return 0
 }
 
-// Auf `n` Rahmen wachsen. Rahmen werden GENULLT -- ein Bildpuffer, in
-// dem noch das Fenster eines fremden Prozesses steht, waere ein Leck
-// und sichtbar obendrein.
 fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
     if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 {
         return errno.E_BADF
@@ -1696,7 +1372,6 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
         return errno.E_PERM
     }
     if shm_contig(state, i) {
-        // ONE run, once. A second call may ask for the same or a smaller size, never for more.
         let have: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
         if have != 0 || n > SHM_PAGES_CONTIG {
             return errno.E_NOSPC
@@ -1721,9 +1396,6 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
     if tab_err != 0 {
         return tab_err
     }
-    // WP-DEMAND: only the first SHM_PAGES_MAX (256) pages get their frame now; a bigger object is SPARSE behind that: its table slots
-    // stay 0 and the frame appears at the first touch (`shm_frame_demand`, called from the page-fault handler through `shm_fault`).
-    // foot's default pool is a sparse 512 MiB memfd: 131072 eager frames would eat 512 MiB of real RAM.
     var have: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
     var eager: u64 = n
     if eager > SHM_PAGES_MAX {
@@ -1747,7 +1419,6 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
     return 0
 }
 
-// WP-DEMAND: does object `i` have a sparse part (pages the mapping must not map up front)?
 fn shm_lazy(state: u64, i: u64) -> bool {
     if i >= USHM_MAX || shm_contig(state, i) {
         return false
@@ -1755,9 +1426,6 @@ fn shm_lazy(state: u64, i: u64) -> bool {
     return kstate.get(state, sm_at(i) + SM_PAGES) > SHM_PAGES_MAX
 }
 
-// WP-DEMAND: the frame of page `p`, made on the spot (zeroed) when the page was never touched. Two processors may ask for the same page
-// at the same time: the slot is claimed with a compare-and-swap, the loser frees its frame and takes the winner's. 0 = out of range or
-// out of memory.
 fn shm_frame_demand(state: u64, i: u64, p: u64) -> u64 {
     if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 || shm_contig(state, i) {
         return 0
@@ -1790,7 +1458,6 @@ fn shm_frame_demand(state: u64, i: u64, p: u64) -> u64 {
     return f
 }
 
-// WP-DEMAND: how many pages of object `i` have a frame (measurement for the gates).
 fn shm_resident(state: u64, i: u64) -> u64 {
     if i >= USHM_MAX || shm_contig(state, i) {
         return kstate.get(state, sm_at(i) + SM_PAGES)
@@ -1821,9 +1488,6 @@ fn shm_set_size(state: u64, i: u64, sz: u64) {
     }
 }
 
-// K-07: the word SM_SEALS carries two things. Bits 0..15 are the seals (F_SEAL_*); bits 16.. COUNT the writable mappings of the
-// object (`shm_wmap_take` / `shm_wmap_drop`). Both live in ONE word so that "no writable mapping yet" and "F_SEAL_WRITE set" are
-// decided by a single compare-and-swap: a writable `mmap` racing with F_ADD_SEALS(F_SEAL_WRITE) on another core loses cleanly.
 const SEALS_MASK: u64 = 0xFFFF
 const SEAL_WRITE: u64 = 8
 const SEAL_FUTURE_WRITE: u64 = 16
@@ -1836,7 +1500,6 @@ fn shm_seals(state: u64, i: u64) -> u64 {
     return kstate.get(state, sm_at(i) + SM_SEALS) & SEALS_MASK
 }
 
-// writable mappings of the object (K-07 test hook)
 fn shm_wmaps(state: u64, i: u64) -> u64 {
     if i >= USHM_MAX {
         return 0
@@ -1844,7 +1507,6 @@ fn shm_wmaps(state: u64, i: u64) -> u64 {
     return kstate.get(state, sm_at(i) + SM_SEALS) >> 16
 }
 
-// Returns 0 or an errno (positive): E_BADF no object, E_INVAL unknown seal bits, E_BUSY F_SEAL_WRITE while a writable mapping exists.
 fn shm_add_seals(state: u64, i: u64, s: u64) -> u64 {
     if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 {
         return errno.E_BADF
@@ -1866,7 +1528,6 @@ fn shm_add_seals(state: u64, i: u64, s: u64) -> u64 {
     return 0
 }
 
-// A writable mapping of object `i` is about to be made: false when F_SEAL_WRITE is set (the mapping must then be refused, -EPERM).
 fn shm_wmap_take(state: u64, i: u64) -> bool {
     if i >= USHM_MAX {
         return false
@@ -1908,13 +1569,6 @@ fn shm_refs(state: u64, i: u64) -> u64 {
     return kstate.get(state, sm_at(i) + SM_REFS)
 }
 
-// Eine Bezugnahme weniger. Beim letzten fallen die Rahmen zurueck.
-//
-// UND HIER IST DIE STELLE, AN DER EIN FEHLER TEUER WAERE: solange EIN
-// Prozess das Objekt noch abgebildet hat, darf kein Rahmen zurueck --
-// sonst schreibt er in Speicher, der inzwischen jemand anderem gehoert.
-// Die Zaehlung steht deshalb auf den DESKRIPTOREN und auf den
-// ABBILDUNGEN, nicht nur auf den Deskriptoren.
 fn shm_unref(state: u64, i: u64) {
     if i >= USHM_MAX || kstate.get(state, sm_at(i) + SM_USED) == 0 {
         return
@@ -1976,8 +1630,6 @@ fn shm_free(state: u64, i: u64) {
         kstate.set(state, UCNT_OFF + C_SHMS, n_h - 1)
     }
 }
-
-// ------------------------------------------------- Zahlen fuer die Abnahme
 
 fn socks_live(state: u64) -> u64 {
     return kstate.get(state, UCNT_OFF + C_SOCKS)

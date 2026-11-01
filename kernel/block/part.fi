@@ -1,48 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/part.fi -- Runde K14: die Partitionstafel, MBR und GPT.
-//
-// EIN DATEISYSTEM LIEGT AUF EINER PLATTE NICHT AM ANFANG. Auf jeder
-// Platte, die Linux oder Windows beschrieben hat, steht in Block 0
-// keine Superblockkennung, sondern eine TAFEL, und das Dateisystem
-// faengt irgendwo dahinter an. Osum hat bis zu dieser Runde immer bei
-// Block 0 nachgesehen -- und deshalb war jede fremde Platte fuer diesen
-// Kernel leer, auch wenn drei Dateisysteme darauf lagen.
-//
-// Zwei Formate, und das zweite steckt IM ersten:
-//
-//   MBR   Der Blocksatz von 1983. Block 0, Oktett 510/511 traegt
-//         0x55 0xAA, und ab Oktett 446 stehen vier Eintraege zu 16
-//         Oktetten: Zustand, drei Oktette Zylinder/Kopf/Sektor (tot
-//         seit 1996), ein TYP-Oktett, noch einmal drei tote Oktette,
-//         der erste Block als 32-Bit-Zahl und die Zahl der Bloecke.
-//         Alles kleinendig. Mehr ist es nicht.
-//   GPT   Die Tafel von 1998, und sie meldet sich IM MBR an: ein
-//         einziger Eintrag mit dem Typ 0xEE, der die ganze Platte
-//         belegt, damit ein Werkzeug von 1983 die Platte fuer voll
-//         haelt und nicht daraufschreibt ("protective MBR"). Der
-//         eigentliche Kopf steht in Block 1 und faengt mit den acht
-//         Oktetten "EFI PART" an. Er nennt den Block, ab dem die
-//         Eintraege liegen, ihre Zahl und ihre Groesse -- und er traegt
-//         ZWEI Pruefsummen: eine ueber sich selbst und eine ueber die
-//         ganze Eintragstafel.
-//
-// DIE ZWEI PRUEFSUMMEN WERDEN GERECHNET UND NICHT UEBERSPRUNGEN. Das
-// ist der Unterschied zwischen "die Oktette sehen aus wie eine Tafel"
-// und "es IST die Tafel, die ein anderes System geschrieben hat": wer
-// ein Oktett darin aendert, faellt hier durch. `tools/k14/run.sh`
-// dreht genau dafuer ein Bit im Kopf um und verlangt, dass Osum die
-// Platte danach nicht mehr liest.
-//
-// CRC32 kommt aus `bootmod.fi` -- dieselbe Rechnung, die Runde K10 an
-// das Boot-Modul haengt (IEEE 802.3, reflektiert, 0xEDB88320). Sie wird
-// hier fortgeschrieben statt gesammelt: die Eintragstafel ist bis zu
-// 16 KiB gross, die Platte gibt sie in Sektoren her, und der ganze
-// Datenbereich dieser Runde sind drei Seiten.
-//
-// WO DER ZUSTAND LIEGT. Wie ueberall in diesem Kernel in der
-// uebergebenen Datenregion: `kstate.K14_OFF + PART_OFF`, sechzehn
-// Eintraege zu 48 Oktetten. Firn Stufe 0 hat keine globalen
-// veraenderlichen Variablen.
 
 import lib.kstate
 import serial
@@ -56,10 +11,8 @@ export {
     MAX_PARTS
 }
 
-// ------------------------------------------------------------ die Tafel
-
 const MAX_PARTS: u64 = 16
-const PART_OFF: u64 = 0x440 // in kstate.K14_OFF
+const PART_OFF: u64 = 0x440
 const PART_BYTES: u64 = 48
 
 const P_USED: u64 = 0
@@ -69,38 +22,17 @@ const P_KIND: u64 = 24
 const P_SCHEME: u64 = 32
 const P_DEV: u64 = 40
 
-// Der Sektorpuffer dieses Moduls. Ein Kernelstapel ist 8 KiB; ein
-// Block von 512 Oktetten darauf waere zu verschmerzen, zwei
-// gleichzeitig (Kopf und Eintragstafel) nicht mehr.
-const SECT_OFF: u64 = 0xE00 // in kstate.K14_OFF, 512 Oktette
+const SECT_OFF: u64 = 0xE00
 
 const SCH_NONE: u64 = 0
 const SCH_MBR: u64 = 1
 const SCH_GPT: u64 = 2
 
-// Was in der Tafel als TYP steht. Die Zahlen sind Osums eigene -- MBR
-// nennt ein Oktett, GPT eine 16 Oktette lange Kennung, und beide
-// bedeuten dasselbe Dutzend Dinge.
 const T_OTHER: u64 = 0
 const T_FAT32: u64 = 1
 const T_EFI: u64 = 2
 const T_LINUX: u64 = 3
-const T_BASIC: u64 = 4 // GPT: "Microsoft basic data" -- meist FAT/NTFS
-// RUNDE INSTALL: DIE EIGENE KENNUNG.
-//
-// Eine Wurzelpartition muss von aussen ERKENNBAR sein, sonst muesste der
-// Kern beim Start jede Partition anlesen und in jeder nach einem
-// Superblock suchen -- auf einer Platte mit einem fremden Dateisystem
-// waere das ein Ratespiel mit Schreibrechten. GPT hat dafuer die
-// Typkennung, und dies ist unsere:
-//
-//     4F53554D-4F46-5301-8E75-6D6F72694F53
-//
-// Die ersten vier Oktette sind "OSUM" (kleinendig auf der Platte, so
-// wie GPT die ersten drei Felder haelt), die naechsten "OF", dann 01
-// fuer die erste Fassung des Formats. Sie ist ausgedacht und muss es
-// sein: eine Kennung aus einer fremden Liste zu nehmen hiesse, fremden
-// Werkzeugen zu sagen, hier laege etwas, das sie kennen.
+const T_BASIC: u64 = 4
 const T_OFS: u64 = 5
 
 const BS: u64 = 512
@@ -166,7 +98,6 @@ fn index_of(state: u64, i: u64) -> u64 {
     return i + 1
 }
 
-// Die erste Partition dieser Art auf diesem Geraet, oder MAX_PARTS.
 fn find_kind(state: u64, dev: u64, want: u64) -> u64 {
     var i: u64 = 0
     while i < MAX_PARTS {
@@ -179,8 +110,6 @@ fn find_kind(state: u64, dev: u64, want: u64) -> u64 {
     }
     return MAX_PARTS
 }
-
-// ---------------------------------------------------- kleine Handgriffe
 
 fn le16(p: u64) -> u64 {
     return kstate.get8(p) | (kstate.get8(p + 1) << 8)
@@ -223,11 +152,9 @@ fn add(state: u64, dev: u64, s: u64, n: u64, k: u64, sch: u64) -> bool {
     return false
 }
 
-// Das Typoktett des MBR, uebersetzt. Die Liste ist die kurze: was
-// dieser Kernel unterscheiden koennen muss und keine Zeile mehr.
 fn mbr_kind(t: u64) -> u64 {
     if t == 0x0B || t == 0x0C {
-        return T_FAT32 // FAT32 (CHS) und FAT32 (LBA)
+        return T_FAT32
     }
     if t == 0xEF {
         return T_EFI
@@ -238,10 +165,6 @@ fn mbr_kind(t: u64) -> u64 {
     return T_OTHER
 }
 
-// ------------------------------------------------------------ der MBR
-
-// Rueckgabe: 0 = keine Tafel, 1 = MBR gelesen, 2 = das ist eine GPT
-// (Schutz-MBR mit dem einen Eintrag 0xEE).
 fn read_mbr(state: u64, dev: u64) -> u64 {
     let b: u64 = sect(state)
     if !blk.read_on(state, dev, 0, b) {
@@ -280,8 +203,6 @@ fn read_mbr(state: u64, dev: u64) -> u64 {
     return 1
 }
 
-// ------------------------------------------------------------ die GPT
-
 fn sig_ok(p: u64) -> bool {
     var want: [u8; 9] = "EFI PART\0"
     var i: u64 = 0
@@ -294,9 +215,6 @@ fn sig_ok(p: u64) -> bool {
     return true
 }
 
-// Die Pruefsumme des Kopfes. Sie steht IM Kopf, also wird sie ueber
-// einen Kopf gerechnet, in dem an ihrer Stelle vier Nullen stehen --
-// das ist die Vorschrift, und wer sie ueberspringt, prueft nichts.
 fn header_crc(state: u64, p: u64, size: u64) -> u64 {
     let save: u64 = le32(p + 16)
     var i: u64 = 0
@@ -313,11 +231,6 @@ fn header_crc(state: u64, p: u64, size: u64) -> u64 {
     return got
 }
 
-// Ist diese 16 Oktette lange Kennung die von "Microsoft basic data"?
-// 0xEBD0A0A2 0xB9E5 0x4433 87C0-68B6B72699C7, die ersten drei Felder
-// kleinendig, die letzten beiden grossendig -- so steht ein GUID auf
-// einer Platte, und deshalb wird er hier Oktett fuer Oktett verglichen
-// und nicht als Zahl.
 fn guid_is(p: u64, tafel: u64) -> bool {
     var i: u64 = 0
     while i < 16 {
@@ -453,7 +366,6 @@ fn read_gpt(state: u64, dev: u64) -> u64 {
     if n_entries == 0 || n_entries > 128 {
         n_entries = 128
     }
-    // 1. Die Pruefsumme der ganzen Eintragstafel, Sektor fuer Sektor.
     let per: u64 = BS / esize
     var total: u64 = n_entries * esize
     var crc: u64 = bootmod.crc32_start()
@@ -481,7 +393,6 @@ fn read_gpt(state: u64, dev: u64) -> u64 {
         serial.nl()
         return 0
     }
-    // 2. Erst jetzt werden die Eintraege geglaubt.
     done = 0
     lba = entry_lba
     var idx: u64 = 0
@@ -505,11 +416,6 @@ fn read_gpt(state: u64, dev: u64) -> u64 {
     return count(state)
 }
 
-// ------------------------------------------------------------ der Einstieg
-
-// Die Tafel eines Geraets lesen. Rueckgabe: die Zahl der gefundenen
-// Partitionen. Die Tafel wird VORHER geleert -- zweimal `scan` auf
-// derselben Platte darf nicht zwei Saetze Eintraege ergeben.
 fn scan(state: u64, dev: u64) -> u64 {
     var s_m: [u8; 12] = "part: mbr=\0\0"
     var s_g: [u8; 12] = "  gpt=\0\0\0\0\0\0"

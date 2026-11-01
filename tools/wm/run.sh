@@ -148,7 +148,7 @@ GG="$TMPD/kernel-gg"; mkdir -p "$GG"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GG/" \; )
 sed -i 's/^const WM_OFF: u64 = 0x1E000/const WM_OFF: u64 = 0x3C000/' "$GG/lib/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
-if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
+if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'COLLISION'; then
     ok "with WM_OFF at 0x3C000 the checker finds the collision with FB"
 else
     bad "the collision checker does NOT find the new collision: $gg"

@@ -1,86 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/ksymtab.fi -- RUNDE PROTOKOLL: AUS EINER ADRESSE WIRD EIN NAME.
-//
-// EINE ADRESSE IST KEINE ANTWORT. Die Rueckverfolgung der Runde
-// BLECHKERN druckt fuenf Zahlen, und was diese fuenf Zahlen bedeuten,
-// weiss nur, wer GENAU DAS ABBILD hat, aus dem der abgestuerzte Kern
-// gebaut wurde. Justin hat es nicht -- er hat einen Fotoapparat und ein
-// Brett, auf dem eine Fassung von vorgestern laeuft. Die Runde
-// EINSPRUNG hat zwei Stunden damit verbracht, GENAU EINE solche Zahl
-// zurueckzurechnen, und der Kommentar dort ist der beste Beleg dafuer,
-// dass das nicht der Weg sein kann.
-//
-// Diese Datei macht aus
-//
-//     kspur:     0x143aa1   0x1621c0   0x11e934
-//
-// dies:
-//
-//     kspur:  sched.irq_restore+0x11 (sched.fi:1046)
-//             wm.mess_kol+0x79 (wm.fi:4312)
-//             ...
-//
-// ------------------------------------------------------------------
-// WO DIE TABELLEN HERKOMMEN
-//
-// Aus dem Abbild selbst, im Abschnitt `.rodata`, unter dem Symbol
-// `osym_tab`. Erzeugt werden sie von `tools/kernel/symtab.py` aus dem
-// fertig gebundenen Abbild des ERSTEN Bindedurchgangs; der zweite
-// Durchgang bindet sie ein. Warum das gehen MUSS und wie es geprueft
-// wird, steht in `kernel/arch/x86_64/osym.s`.
-//
-// AUS DEM ABBILD UND NICHT VON DER PLATTE, und der Grund ist der
-// einzige, der zaehlt: der Panik-Bildschirm entsteht in einem Kern, der
-// gerade gestorben ist. Er kann keinen Block mehr lesen, er kann keine
-// Sperre mehr nehmen, er kann keinen Speicher mehr anfordern. Was er
-// nicht schon im Adressraum hat, hat er nicht.
-//
-// ------------------------------------------------------------------
-// DER ZUGRIFF AUF DAS SYMBOL
-//
-// Firn kann Bindersymbole nicht benennen. Der Weg dorthin ist derselbe,
-// den `ksym.fi` fuer `kdata` und `fb.fi` seit Runde K7B gehen:
-//
-//     asm("lea rax, [rip + osym_tab]", out("rax"))
-//
-// Das ist eine Adressberechnung ohne Speicherzugriff und damit auch
-// dann gefahrlos, wenn der Kern schon halb tot ist.
-//
-// ------------------------------------------------------------------
-// DER AUFBAU DER TABELLE
-//
-// Er steht ZWEIMAL, hier und in `tools/kernel/symtab.py`; die Kennung
-// im ersten Wort ist der Riegel dagegen, dass die beiden auseinander-
-// laufen. Alle Versaetze sind Versaetze VOM ANFANG der Tabelle.
-//
-//     0   u64 Kennung 'OSYM1' (0x314D59534F)
-//     8   u64 Zahl der Symbole
-//     16  u64 Zahl der Zeileneintraege
-//     24  u64 -> Symboladressen, je u32, aufsteigend sortiert
-//     32  u64 -> Namensverweise, je u32 in den Namensblock
-//     40  u64 -> Namensblock, nullterminierte Zeichenketten
-//     48  u64 -> Zeilentabelle: Blockindex (r1217, siehe line_of), vorher je 8 Oktett: u32 Adresse, u32 gepackt
-//     96  u64 -> Zeilenstrom (r1217)
-//     56  u64 -> Dateiverweise, je u32 in den Dateinamenblock
-//     64  u64 Zahl der Dateien
-//     72  u64 -> Dateinamenblock
-//     80  u64 niedrigste Symboladresse
-//     88  u64 hoechste Symboladresse
-//
-// GEPACKT: (Dateinummer << 20) | Zeilennummer.
-//
-// ------------------------------------------------------------------
-// DIE SUCHE
-//
-// Zweimal dieselbe Binaersuche ueber ein sortiertes u32-Feld: gesucht
-// wird der GROESSTE Eintrag, der nicht ueber der Adresse liegt. Bei den
-// Symbolen ist das die Funktion, in der die Adresse steht; bei den
-// Zeilen die Quellzeile, deren Maschinencode dort anfaengt.
-//
-// KEINE SPERRE, KEIN ZUSTAND. Beide Tabellen sind nur lesbar und liegen
-// im Abbild. Zwei Kerne, die gleichzeitig eine Panik melden, stoeren
-// einander hier nicht -- und ein Kern, der schon eine Sperre haelt,
-// kommt hier nicht ins Warten.
 
 profile kernel
 
@@ -107,8 +24,8 @@ const H_NDAT: u64 = 64
 const H_DSTR: u64 = 72
 const H_LO: u64 = 80
 const H_HI: u64 = 88
-const H_LSTR: u64 = 96     // r1217: offset of the line stream
-const LINE_BLK: u64 = 16   // entries per block, must equal BLK in tools/kernel/symtab.py
+const H_LSTR: u64 = 96
+const LINE_BLK: u64 = 16
 
 fn tab() -> u64 {
     return asm("lea rax, [rip + osym_tab]", out("rax"))
@@ -136,12 +53,6 @@ fn n_line() -> u64 {
     return w(H_NLINE)
 }
 
-// ------------------------------------------------------------ die Symbole
-
-// Der groesste Eintrag, der nicht ueber `addr` liegt. Zurueck kommt die
-// Nummer, oder `n_sym()` wenn die Adresse ausserhalb liegt -- das ist
-// die uebliche "gibt es nicht"-Antwort einer Binaersuche und braucht
-// keine Sonderzahl.
 fn resolve(addr: u64) -> u64 {
     let n: u64 = n_sym()
     if n == 0 || addr < w(H_LO) || addr > w(H_HI) + 0x10000 {
@@ -178,11 +89,6 @@ fn sym_name(i: u64) -> u64 {
     return tab() + w(H_STR) + kstate.get32(tab() + w(H_SNAM) + i * 4)
 }
 
-// ------------------------------------------------------------ die Zeilen
-
-// r1217: the line table is blocks of LINE_BLK entries (tools/kernel/symtab.py pack_lines). Index per block: u32 first address, u32
-// octet offset into the stream. Stream: first entry = varint(packed); then varint(address delta), varint(zigzag(packed delta)).
-// A lookup is a binary search over the blocks plus at most LINE_BLK - 1 steps of decoding. Still no lock, no state.
 fn vsize(p: u64) -> u64 {
     var n: u64 = 1
     while kstate.get8(p + n - 1) >= 128 {
@@ -201,7 +107,6 @@ fn vval(p: u64, n: u64) -> u64 {
     return v
 }
 
-// The largest entry that is not above `addr`. Back comes the PACKED word, or 0 when there is no line for this address.
 fn line_of(addr: u64) -> u64 {
     let n: u64 = n_line()
     if n == 0 {
@@ -270,11 +175,6 @@ fn file_name(f: u64) -> u64 {
     return tab() + w(H_DSTR) + kstate.get32(tab() + w(H_DVER) + f * 4)
 }
 
-// ------------------------------------------------------------ die Ausgabe
-
-// `sched.irq_restore+0x11 (sched.fi:1046)` -- und wenn es keine Tabelle
-// gibt, die rohe Adresse. Eine Zeile, die vorgibt, mehr zu wissen als
-// der Kern hat, waere schlimmer als eine Zahl.
 fn say_addr(addr: u64) {
     var s_plus: [u8; 2] = "+\0"
     var s_ob: [u8; 3] = " (\0"
@@ -303,8 +203,6 @@ fn say_addr(addr: u64) {
     serial.puts((&s_cb[0 as usize]) as u64)
 }
 
-// Dieselbe Zeile ohne Datei und Zeile -- fuer Stellen, an denen die
-// Spalte nicht reicht (das reservierte Band am oberen Bildrand).
 fn say_addr_short(addr: u64) {
     var s_plus: [u8; 2] = "+\0"
     let i: u64 = resolve(addr)

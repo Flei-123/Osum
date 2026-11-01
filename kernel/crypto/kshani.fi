@@ -1,34 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/kshani.fi -- die Naht fuer SHA-NI, Runde ARGON (K-021).
-//
-// Dasselbe Muster wie `kernel/kaesni.fi` aus Runde AESNI, und aus
-// demselben Grund dieselbe Aufteilung:
-//
-//   `lib/crypto/shani.fi`  die Rechnung. Kennt `kstate` NICHT und
-//                          laeuft deshalb auch im Orakel auf dem Wirt.
-//   `kernel/kshani.fi`     die Naht: `cpuid` fragen, `fpu` pruefen,
-//                          Schalter stellen, berichten, pruefen.
-//
-// `kshani` und nicht `shani`: Kern und `lib` teilen EINEN Namensraum.
-// Zwei Module gleichen Namens sind dort eines, und der Uebersetzer
-// meldet dann Fehler in `sha256.fi`, das mit dem Kern nichts zu tun
-// hat. Der Vorsatz `k` ist dieselbe Loesung wie bei `kaesni`, `kjson`,
-// `kutil`, `kgui`.
-//
-// ==================================================================
-// WARUM DER SCHALTER AN `fpu.enabled` HAENGT
-// ==================================================================
-//
-// SHA256RNDS2 und seine Geschwister sind SSE-Befehle und rechnen in
-// XMM-Registern. Ohne freigeschaltete Vektoreinheit (CR4.OSFXSR) ist
-// schon das erste `movdqu` ein #UD -- in Ring 0 also eine tote
-// Maschine. Und ohne einen Kontextwechsel, der XMM sichert, wuerde der
-// Kern still die Register laufender Ring-3-Prozesse zerstoeren.
-//
-// Beides hat Runde AVX gebaut und Runde AESNI nachgemessen (`fpu:
-// mode=3 cr4=0x340620 lazy=0`, eager sichern je Aufgabe). Diese Runde
-// benutzt es und baut es nicht neu -- aber sie fragt danach, und wer
-// die Vektoreinheit abschaltet (`nofpu`), schaltet SHA-NI mit ab.
 
 import lib.kstate
 import serial
@@ -47,22 +16,15 @@ fn s(state: u64, off: u64, v: u64) {
     kstate.set(state, off, v)
 }
 
-// Die Befunde einsammeln und den Schalter stellen. Laeuft EINMAL beim
-// Hochlauf, hinter `fpu.apply` -- vorher waere `fpu.enabled` noch nicht
-// entschieden.
 fn apply(state: u64) {
     let hat: bool = shani.usable()
     s(state, kstate.SHA_HAVE, kutil.yes(hat))
 
     var an: bool = hat
     if !fpu.enabled(state) {
-        // Ohne freigeschaltete Vektoreinheit waere das erste `movdqu`
-        // ein #UD in Ring 0.
         an = false
     }
     if kstate.mode_on(state, kstate.M_NOSHANI) {
-        // Die Gegenprobe von Hand -- damit sich auf DIESER Maschine
-        // messen laesst, ob beide Wege dasselbe rechnen.
         an = false
     }
     sha256.use_shani(an)
@@ -92,18 +54,6 @@ fn report(state: u64) {
     serial.nl()
 }
 
-// ==================================================== DIE KREISPROBE IN RING 0
-//
-// Dieselben Eingaben durch BEIDE Wege, Oktett fuer Oktett verglichen.
-// Sie laeuft im Kern und nicht nur auf dem Wirt, weil der Kern eine
-// andere Maschine ist: andere Freischaltung, anderer Kontextwechsel,
-// anderer Stapel. Ein Weg, der auf dem Wirt stimmt und in Ring 0 nicht,
-// waere genau die Art Fehler, die man sonst erst auf der Platte findet.
-//
-// Gemessen wird ueber viele LAENGEN und nicht ueber viele Schluessel:
-// SHA-256 hat keinen Schluessel, und was schiefgehen kann, ist die
-// Blockgrenze -- der letzte, unvollstaendige Block mit seinem
-// Auffuellen und der Laengenangabe.
 fn selftest(state: u64) {
     var s_h: [u8; 16] = "shani: kreis g=\0"
     var s_u: [u8; 9] = "  ungl=\0\0"
@@ -121,8 +71,6 @@ fn selftest(state: u64) {
     var b: [u8; 32] = [0 as u8; 32]
     var gleich: u64 = 0
     var ungleich: u64 = 0
-    // Jede Laenge von 0 bis 300 trifft jede Lage der Blockgrenze
-    // mehrfach, dazu ein paar grosse.
     var n: usize = 0
     while n <= 300 {
         sha256.use_shani(false)
@@ -165,8 +113,6 @@ fn selftest(state: u64) {
         }
         m = m + 1
     }
-    // Den Schalter wieder auf das stellen, was `apply` entschieden hat
-    // -- eine Probe, die den Zustand der Maschine aendert, ist keine.
     sha256.use_shani(used(state))
     s(state, kstate.SHA_KREIS, gleich)
     s(state, kstate.SHA_UNGL, ungleich)

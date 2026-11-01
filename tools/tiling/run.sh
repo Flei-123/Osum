@@ -122,7 +122,7 @@ sed -i -E 's/^const TILE_OFF: u64 = 0x[0-9A-Fa-f]+/const TILE_OFF: u64 = 0x58000
 grep -q '^const TILE_OFF: u64 = 0x58000' "$GG/lib/kstate.fi" \
     || bad "the control could not move TILE_OFF at all"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
-if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
+if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'COLLISION'; then
     ok "with TILE_OFF at 0x58000 the checker finds the collision with K18"
 else
     bad "the collision checker does NOT find the new collision: $gg"

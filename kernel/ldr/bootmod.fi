@@ -1,53 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/bootmod.fi -- was der Lader dem Kern mitgibt, und die Summe, die
-// beweist, dass es heil angekommen ist.
-//
-// HERKUNFT. Dieses Modul ist die Portierung von OrientOS'
-// `kernel/src/kcore/initramfs.rs` (Rust, 428 Zeilen) nach Firn -- nicht
-// des Archivformats, sondern der Sache, um die es dort ging.
-// KERNELWECHSEL.md § 4.4 hielt fest: *"Osum liest sein Dateisystem von
-// einer Platte und kennt kein Boot-Modul. Fuer ein ISO ohne Platte ist
-// das der Unterschied zwischen 'hat ein Userland' und 'hat keins'."*
-// Genau das ist hier behoben.
-//
-// WARUM DAS UEBERHAUPT FEHLTE. Osum hat drei Blockgeraete (`blk.fi`):
-// eine RAM-Platte, ATA und NVMe. Sein Userland liegt in einem
-// OFS-Dateisystem auf einer Platte, die QEMU mit `-drive` hereinreicht.
-// Ein ISO hat keine solche Platte -- ein bootfaehiges Abbild besteht aus
-// dem Lader, dem Kern und dem, was der Lader als MODUL danebenlegt. Ohne
-// Modulunterstuetzung kann ein ISO nur einen Kern tragen, keinen
-// Userland-Baum.
-//
-// WAS EIN MODUL IST. Multiboot 1 (Spezifikation 3.3): Flag-Bit 3 der
-// Informationsstruktur sagt, dass `mods_count` (Offset 20) und
-// `mods_addr` (Offset 24) gelten. Dahinter liegt eine Tabelle von je 16
-// Oktetten: Anfang, Ende, Zeichenkette, reserviert. Das ist alles. Der
-// Lader legt die Datei irgendwo in nutzbaren Speicher und nennt die
-// beiden Adressen -- er sagt nicht, was drin ist, und er prueft nichts.
-//
-// DIE PRUEFSUMME, und warum sie hier ueberhaupt vorkommt. Der Weg vom
-// Bauplatz zum Kern geht ueber ein Abbildformat, ein Bootmedium, eine
-// Firmware und einen Lader. Ein einzelnes gekipptes Oktett im
-// Programmtext faellt sonst erst als unerklaerlicher Absturz im
-// unprivilegierten Programm auf -- der Fehler ist dann vier Schichten
-// von seiner Ursache entfernt. `crc32` (IEEE, reflektiert, dasselbe
-// Polynom wie in OrientOS' `initramfs.rs`) wird ueber das GANZE Modul
-// gerechnet, BEVOR der erste Block davon gelesen wird, und gegen das
-// gehalten, was auf der Kommandozeile steht (`modcrc=<8 Hexziffern>`).
-// Passt es nicht, wird das Modul NICHT benutzt -- und das steht im
-// Protokoll, statt still zu passieren.
-//
-// TABELLENLOS. Die Summe wird Bit fuer Bit gerechnet, ohne
-// vorberechnete Tabelle: acht Runden je Oktett. Das ist der langsamere
-// von zwei Wegen und der kuerzere von beiden; bei einem Abbild von zwei
-// Megaoktetten sind es sechzehn Millionen Runden, was in QEMU unter
-// einer Sekunde bleibt. Eine Tabelle waere schneller und braeuchte
-// globalen Zustand, den Stufe 0 von Firn nicht hat.
-//
-// ARITHMETIK. `+`, `-`, `*` sind seit Runde 72 geprueft und panicken
-// beim Ueberlauf. Die eine Stelle, an der hier eine Zweierkomplement-
-// Umdeutung gemeint ist, ist die Maske aus dem untersten Bit der Summe
-// (`0 -% (crc & 1)` ergibt 0 oder 0xFFFFFFFFFFFFFFFF); dort steht `-%`.
 
 import lib.kstate
 import serial
@@ -60,9 +10,7 @@ export {
 
 const BLOCK_SIZE: u64 = 512
 
-// ------------------------------------------- Woerter der Kommandozeile
-
-const M_MODFS: u64 = 1 // "modfs"   -- das Modul ist die Wurzelplatte
+const M_MODFS: u64 = 1
 
 fn parse(state: u64, cmd: u64) {
     var w_modfs: [u8; 6] = "modfs\0"
@@ -90,18 +38,6 @@ fn want(state: u64, bit: u64) -> bool {
     return (kstate.get(state, kstate.MOD_MODE) & bit) != 0
 }
 
-// ---------------------------------------------------------- die Summe
-
-// CRC32, IEEE 802.3, reflektiert -- dieselbe Rechnung wie in OrientOS'
-// `initramfs.rs`. Startwert und Endwert sind invertiert, das Polynom ist
-// 0xEDB88320 in reflektierter Schreibweise.
-// ROUNDE K14 HAT DIESE RECHNUNG IN DREI TEILE ZERLEGT und keine Zahl
-// daran geaendert. Der Grund ist der GPT-Kopf: die Pruefsumme seiner
-// Eintragstafel geht ueber bis zu 16 KiB, die Platte gibt sie in
-// Sektoren zu 512 Oktetten her, und ein Puffer von 16 KiB im
-// Kerneldatenbereich waere vier Mal so gross wie der ganze Bereich
-// dieser Runde. Also wird fortgeschrieben statt gesammelt. `crc32`
-// unten ist wortgleich, was es war -- Abschnitt 15 misst es weiter.
 fn crc32_start() -> u64 {
     return 0xFFFFFFFF
 }
@@ -113,8 +49,6 @@ fn crc32_feed(seed: u64, p: u64, len: u64) -> u64 {
         crc = crc ^ kstate.get8(p + i)
         var k: u64 = 0
         while k < 8 {
-            // 0 oder lauter Einsen -- eine Verzweigung weniger im
-            // innersten Rumpf. Hier ist die Umdeutung gemeint, also `-%`.
             let maske: u64 = 0 -% (crc & 1)
             crc = (crc >> 1) ^ (0xEDB88320 & maske)
             k = k + 1
@@ -132,12 +66,6 @@ fn crc32(p: u64, len: u64) -> u64 {
     return crc32_end(crc32_feed(crc32_start(), p, len))
 }
 
-// ------------------------------------------------------------ die Stufe
-
-// Sucht das erste Modul, rechnet seine Summe und haelt fest, ob es
-// benutzbar ist. Laeuft NACH `mem.scan` -- der Rahmenverwalter muss den
-// Bereich des Moduls schon reserviert haben, sonst gibt er die Rahmen
-// aus, auf denen das Abbild liegt.
 fn stage(state: u64, mbi: u64) {
     var s_none: [u8; 11] = "mod: none\0\0"
     var s_a: [u8; 11] = "mod: base=\0"
@@ -164,8 +92,6 @@ fn stage(state: u64, mbi: u64) {
     let len: u64 = bis - von
     let sum: u64 = crc32(von, len)
     let soll: u64 = kstate.get(state, kstate.MOD_WANT)
-    // Ohne Vorgabe gilt das Modul als heil: dann ist die Summe eine
-    // Angabe, keine Bedingung. MIT Vorgabe muss sie stimmen.
     var ok: u64 = 1
     if soll != 0 {
         if soll != sum {
@@ -192,17 +118,6 @@ fn stage(state: u64, mbi: u64) {
     serial.nl()
 }
 
-// DIE SUMME NOCH EINMAL, am Ende des Laufs.
-//
-// Das ist die Gegenprobe zu einer Zeile in `mem.scan`, und sie ist der
-// Grund, warum es sie gibt: der Lader legt das Modul in Speicher, den die
-// Speicherkarte als NUTZBAR fuehrt, und `release` gibt genau diese Rahmen
-// an den Rahmenverwalter. Ohne das `reserve` in `mem.scan` bekommt der
-// naechste Anforderer das Userland-Abbild und schreibt darueber -- und
-// der Fehler zeigt sich erst viel spaeter, in einem Programm, das nicht
-// mehr laedt. Stimmt die Summe am Ende eines Laufs, der Prozesse
-// gestartet, Seiten abgebildet und die Halde benutzt hat, immer noch,
-// dann hat den Bereich niemand angefasst.
 fn recheck(state: u64) {
     var s_a: [u8; 18] = "mod: recheck crc=\0"
     var s_b: [u8; 8] = "  same=\0"
@@ -221,9 +136,6 @@ fn recheck(state: u64) {
     serial.nl()
 }
 
-// Benutzbar heisst: es gibt ein Modul, seine Summe stimmt, und die
-// Kommandozeile will es als Platte haben. Alle drei -- ein Modul, das
-// niemand angefordert hat, wird nicht heimlich zur Wurzel.
 fn ready(state: u64) -> bool {
     if !want(state, M_MODFS) {
         return false
@@ -253,8 +165,6 @@ fn sum(state: u64) -> u64 {
 fn expected(state: u64) -> u64 {
     return kstate.get(state, kstate.MOD_WANT)
 }
-
-// ---------------------------------------------------------- Kleinkram
 
 fn hex_at(p: u64, n: u64) -> u64 {
     var v: u64 = 0

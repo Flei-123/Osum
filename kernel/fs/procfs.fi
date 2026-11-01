@@ -1,71 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/procfs.fi -- Runde K14: /proc, ein Dateisystem aus nichts.
-//
-// EINE DATEI, DIE NIRGENDS LIEGT. Jede Datei bis zu dieser Runde hatte
-// Bloecke auf einer Platte. Die Dateien hier haben keine: sie ENTSTEHEN
-// in dem Augenblick, in dem jemand sie liest, aus dem Zustand des
-// laufenden Kernels, und sie sind wieder weg, sobald das `read` zurueck
-// ist. Das ist der ganze Trick von /proc, und es ist der Grund, warum
-// dieses Verzeichnis in jedem Unix seit 1984 existiert: ein Programm in
-// Ring 3 darf keine Kernelvariable lesen, aber es darf eine Datei lesen.
-//
-// WAS DAS ERSETZT. Runde K6 hat dafuer zwei SYSTEMAUFRUFE gebaut --
-// SYS_OSUM_PSTAT (Nummer 1003) und SYS_OSUM_SYSINFO (1002), je ein Feld
-// je Aufruf, und `ps`, `top`, `df`, `uname` und `date` fragen darueber.
-// Das ist eine eigene ABI fuer eine Frage, die jedes Unix ueber das
-// Dateisystem beantwortet. Von dieser Runde an geht es auch ueber
-// Dateien.
-//
-// DIE BEIDEN AUFRUFE BLEIBEN. Der Auftrag dieser Runde sagt es
-// ausdruecklich, und es ist auch die einzige ehrliche Reihenfolge: erst
-// wird gemessen, dass beide Wege DIESELBEN ZAHLEN liefern, dann darf
-// man ueber das Entfernen des einen reden. `tools/k14/run.sh` haelt
-// `ps` (ueber PSTAT) und `cat /proc/<pid>/status` (ueber dieses
-// Dateisystem) Zeile fuer Zeile gegeneinander -- und ein Unterschied
-// ist ein Fehler, egal in welchem der beiden.
-//
-// WAS DRIN STEHT:
-//
-//   /proc/meminfo    Rahmen, freie Rahmen, nutzbarer Speicher
-//   /proc/cpuinfo    je Prozessor eine Gruppe: Nummer, APIC-Kennung,
-//                    ob er laeuft, wie viele Wechsel er hatte
-//   /proc/uptime     Sekunden seit dem Start, mit Hundertsteln
-//   /proc/mounts     die Einhaengetafel aus `mnt.fi`, in der Form, die
-//                    Linux' /proc/mounts hat
-//   /proc/stat       Ticks, Kontextwechsel, Systemaufrufe, Prozesse
-//   /proc/version    was `uname` sagt
-//   /proc/<pid>/     ein Verzeichnis je lebendem Prozess, darin:
-//     status         Name, Pid, PPid, Zustand, Vorrang, Ticks, Fehler
-//     stat           dieselben Zahlen in einer Zeile
-//     cmdline        die Argumente, wie `execve` sie hingelegt hat --
-//                    GELESEN AUS DEM ADRESSRAUM DES PROZESSES ueber
-//                    `proc.translate`, nicht aus einer Kopie
-//     maps           WELCHE SEITEN WIRKLICH ABGEBILDET SIND. Das ist
-//                    keine Liste von Konstanten: die Seitentabelle des
-//                    Prozesses wird Seite fuer Seite abgelaufen
-//                    (`proc.translate`, `proc.page_exec`), und was
-//                    zusammenhaengt, wird zu einer Zeile. Ein Prozess,
-//                    der eine Seite mehr per `mmap` nimmt, hat danach
-//                    eine andere Datei -- und genau das misst
-//                    `tools/k14/run.sh`.
-//     fd/            ein Verzeichnis mit den offenen Deskriptoren
-//
-// KEINE SYMBOLISCHEN VERWEISE. Linux macht aus /proc/<pid>/fd/1 einen
-// Verweis; dieser Kernel hat keine. Die Eintraege sind hier gewoehnliche
-// Dateien, deren INHALT sagt, was der Deskriptor ist ("file 12",
-// "pipe", "tty 0"). Das steht so in docs/ROUNDK14.md, damit niemand
-// spaeter glaubt, hier fehle etwas.
-//
-// WO DER TEXT ENTSTEHT: auf `kstate.PROCFS_OFF`, EINER Seite, mit
-// `atomic.L_PROC` darum. Zwei Kerne, die gleichzeitig `/proc/meminfo`
-// lesen, wuerden sich sonst ihre Texte ineinanderschreiben.
 
 profile kernel
 
 import lib.kstate
 import fs.fsaudit
 import klog
-// RUNDE MARKE: der Produktname kommt aus EINER Quelle.
 import lib.brand
 import fs.mnt
 import fs.vfsops
@@ -131,26 +69,13 @@ import ui.sysmon
 
 export { ops, node_root, sfs_root }
 
-// ------------------------------------------------------------ die Knoten
-//
-// Ein Knoten ist EINE ZAHL, und sie traegt drei Dinge:
-//
-//     Art * 0x1000000  +  Aufgabenplatz * 0x100  +  Unterart
-//
-// Die Art sagt, was es ist; der Aufgabenplatz, zu welchem Prozess es
-// gehoert; die Unterart, welche der Dateien. Damit braucht dieses
-// Dateisystem KEINE Tafel im Speicher -- ein Knoten ist selbsterklaerend
-// und ueberlebt jedes `fork`, weil er nichts festhaelt.
 const K_ROOT: u64 = 1
 const K_GLOBAL: u64 = 2
 const K_PIDDIR: u64 = 3
 const K_PIDFILE: u64 = 4
 const K_FDDIR: u64 = 5
 const K_FDFILE: u64 = 6
-// ROUND UNTERBAU: /proc/sys/... (sub = which entry)
 const K_SYS: u64 = 7
-// ROUND LC-004: /sys (second procfs mount, mnt.dev == 1): node(K_SFS, cpu, sub). Only what is measured: the CPU set and the
-// first cache level from CPUID leaf 4. Nothing else of sysfs exists yet (no class/, no fs/).
 const K_SFS: u64 = 8
 const SF_ROOT: u64 = 1
 const SF_DEVICES: u64 = 2
@@ -175,56 +100,29 @@ const S_RANDOM: u64 = 4
 const S_PIDMAX: u64 = 5
 const S_OVERCOMMIT: u64 = 6
 const S_UUID: u64 = 7
-// ROUND STONES2: /proc/net/dev (busybox ifconfig lists the interfaces from it)
 const S_NET: u64 = 8
 const S_NETDEV: u64 = 9
 
 const ART: u64 = 0x1000000
 const SLOT: u64 = 0x100
 
-// Die globalen Dateien.
 const G_MEMINFO: u64 = 1
 const G_CPUINFO: u64 = 2
 const G_UPTIME: u64 = 3
 const G_MOUNTS: u64 = 4
 const G_STAT: u64 = 5
 const G_VERSION: u64 = 6
-// RUNDE TRESOR: /proc/hwid -- die Geraeteidentitaet. Sie steht HIER und
-// nicht hinter einem eigenen Systemaufruf, weil sie genau das ist, was
-// /proc gut kann: ein Blick auf den Kernzustand, den ein Programm in Ring
-// 3 ohne eigene ABI lesen darf.
 const G_HWID: u64 = 7
-// ==================================================== RUNDE PROTOKOLL
-//
-// /proc/klog -- DAS KERNPROTOKOLL, SO WEIT ES AUF EINE SEITE PASST.
-//
-// UND DAS IST DIE EINSCHRAENKUNG, DIE HIER STEHT UND NICHT IN EINER
-// FUSSNOTE: eine Datei dieses Dateisystems entsteht in EINEM
-// Seitenpuffer (`kstate.PROCFS_OFF`, 4096 Oktette). Der Ring haelt 510
-// Zeilen zu bis zu 130 Oktetten -- das ist das Sechzehnfache. Also
-// stehen hier die LETZTEN Zeilen, so viele wie hineinpassen, und die
-// erste Zeile sagt, wie viele es sind und wie viele fehlen.
-//
-// WER ALLES WILL, NIMMT /dev/klog (der Strom hat keine Grenze) oder
-// /bin/log (das liest nach Laufnummern). Diese Datei ist die bequeme
-// Antwort auf "was ist gerade los", nicht das Archiv.
 const G_KLOG: u64 = 8
-// ROUND UNTERBAU: /proc/loadavg and the directory /proc/sys (a directory is not
-// a global file: lookup and readdir treat G_SYSDIR specially).
 const G_LOADAVG: u64 = 9
 const G_SYSDIR: u64 = 10
 const G_NETDIR: u64 = 11
-// ROUND MINT2 (E1): hardware tables for the system report.
 const G_PCI: u64 = 12
 const G_USB: u64 = 13
 const G_FIRMWARE: u64 = 14
-// ROUND W-IWL (M1b): /proc/wlan, what iwl.fi read from the Intel WLAN MAC.
 const G_WLAN: u64 = 15
-// ROUND W-AR3 (AR-2b): /proc/apps, the per-app counters of lib/apprights/policy.fi.
 const G_APPS: u64 = 16
-// ROUND W-O1I: /proc/odb, the ODB agent's view of the kernel: `odb=1` on the command line and the UART receiver-overrun counter.
 const G_ODB: u64 = 17
-// ROUND BENCH-A: /proc/bench, `key value` lines for the in-OS `bench` tool: boot milestones (ms since kernel entry), kernel heap, trap count.
 const G_BENCH: u64 = 18
 const G_FRAMES: u64 = 19
 const G_ACPI: u64 = 20
@@ -234,11 +132,11 @@ const G_SAFE: u64 = 23
 const G_DMAR: u64 = 24
 const G_DRIVERS: u64 = 25
 const G_BACKLIGHT: u64 = 26
-const G_CPUS: u64 = 27 // W-SMP2: /proc/cpus
-const G_INPUTDEVS: u64 = 28 // W-TOUCH4: /proc/inputdevs
-const G_HOTKEYS: u64 = 29 // W-HW6: /proc/hotkeys
-const G_USBNET: u64 = 30 // W-CH336-3: /proc/usbnet
-const G_WLANPOLL: u64 = 31 // W-WLAN32: /proc/wlanpoll (exp2 table + register poll)
+const G_CPUS: u64 = 27
+const G_INPUTDEVS: u64 = 28
+const G_HOTKEYS: u64 = 29
+const G_USBNET: u64 = 30
+const G_WLANPOLL: u64 = 31
 const G_WLANIRQ: u64 = 32
 const G_CLOCK: u64 = 33
 const G_USBSUM: u64 = 34
@@ -260,20 +158,19 @@ const G_TPM: u64 = 49
 const G_LAST: u64 = 49
 const GPU_NA: u64 = 0xFFFFFFFFFFFFFFFF
 
-// Die Dateien je Prozess.
 const F_STATUS: u64 = 1
 const F_STAT: u64 = 2
 const F_CMDLINE: u64 = 3
 const F_MAPS: u64 = 4
-const F_FD: u64 = 5 // das VERZEICHNIS fd/
+const F_FD: u64 = 5
 const F_LIMITS: u64 = 6
 const F_CGROUP: u64 = 7
-const F_EXE: u64 = 8 // symlink: the program the task was started from
-const F_CWD: u64 = 9 // symlink: its working directory
+const F_EXE: u64 = 8
+const F_CWD: u64 = 9
 const F_MMAPLOG: u64 = 10
 const F_LAST: u64 = 10
 
-const BUF_MAX: u64 = 4000 // von 4096; der Rest ist Luft fuer die letzte Zeile
+const BUF_MAX: u64 = 4000
 
 fn node(art: u64, slot: u64, sub: u64) -> u64 {
     return art * ART + slot * SLOT + sub
@@ -295,7 +192,6 @@ fn node_root(state: u64) -> u64 {
     return node(K_ROOT, 0, 0)
 }
 
-// root node of the /sys mount (mnt.dev == 1)
 fn sfs_root(state: u64) -> u64 {
     return node(K_SFS, 0, SF_ROOT)
 }
@@ -303,8 +199,6 @@ fn sfs_root(state: u64) -> u64 {
 fn tick(state: u64) {
     kstate.add(state, kstate.VFS_INDIRECT, 1)
 }
-
-// ------------------------------------------------------- der Textaufbau
 
 fn buf(state: u64) -> u64 {
     return state + kstate.PROCFS_OFF
@@ -348,8 +242,6 @@ fn w_num(state: u64, at: u64, v: u64) -> u64 {
     return p
 }
 
-// Sechzehn Hexziffern, feste Breite -- so wie Linux' /proc/<pid>/maps
-// seine Adressen schreibt. Feste Breite, damit sich die Spalten decken.
 fn w_hex16(state: u64, at: u64, v: u64) -> u64 {
     var p: u64 = at
     var i: u64 = 16
@@ -369,9 +261,6 @@ fn w_nl(state: u64, at: u64) -> u64 {
     return w_ch(state, at, 10)
 }
 
-// ------------------------------------------------------- die Aufgaben
-
-// Der Aufgabenplatz zu einer PID. MAX_TASKS heisst: gibt es nicht.
 fn slot_of_pid(state: u64, pid: u64) -> u64 {
     var i: u64 = 0
     while i < kstate.get(state, kstate.TASKS) {
@@ -392,27 +281,26 @@ fn alive(state: u64, i: u64) -> bool {
     return sched.tget(state, i, sched.T_STATE) != sched.S_FREE
 }
 
-// Der Buchstabe, den Linux' /proc/<pid>/stat an dritter Stelle traegt.
 fn state_letter(s: u64) -> u64 {
     if s == sched.S_RUN {
-        return 82 // R
+        return 82
     }
     if s == sched.S_READY {
-        return 82 // R -- lauffaehig ist bei Linux dasselbe R
+        return 82
     }
     if s == sched.S_SLEEP {
-        return 83 // S
+        return 83
     }
     if s == sched.S_WAIT {
-        return 83 // S
+        return 83
     }
     if s == sched.S_ZOMBIE {
-        return 90 // Z
+        return 90
     }
     if s == sched.S_STOP {
-        return 84 // T
+        return 84
     }
-    return 78 // N -- neu, noch nie gelaufen
+    return 78
 }
 
 fn kind_name(k: u64, out: u64) {
@@ -441,11 +329,6 @@ fn kind_name(k: u64, out: u64) {
     }
     kstate.set8(out + i, 0 as u8)
 }
-
-// ------------------------------------------------------- die Erzeuger
-//
-// Jeder von ihnen schreibt seinen Text nach `buf` und gibt zurueck, wie
-// lang er geworden ist. Keiner von ihnen weiss, wer ihn liest.
 
 fn make_meminfo(state: u64) -> u64 {
     var t1: [u8; 17] = "MemTotal:      \0\0"
@@ -486,14 +369,9 @@ fn make_cpuinfo(state: u64) -> u64 {
     var c3: [u8; 14] = "online    : \0\0"
     var c4: [u8; 14] = "switches  : \0\0"
     var c5: [u8; 14] = "ticks     : \0\0"
-    // ROUND UNTERBAU: the lines feature detection by text looks for. Only the flags
-    // every x86-64 CPU has by definition (long mode needs them) -- no guessed extras.
     var c6: [u8; 30] = "model name : x86-64 processor\0"
     var c7: [u8; 54] = "flags      : fpu tsc msr pae cx8 mmx fxsr sse sse2 lm\0"
     var p: u64 = 0
-    // `cpu.count` ist die Zahl, die die FIRMWARE gemeldet hat -- und
-    // sie ist null, solange `smp.fi` nicht gelaufen ist. Ein Lauf ohne
-    // ACPI hat trotzdem einen Prozessor: den, auf dem er laeuft.
     var n: u64 = cpu.count(state)
     if n == 0 {
         n = 1
@@ -525,12 +403,6 @@ fn make_cpuinfo(state: u64) -> u64 {
     return p
 }
 
-// W-SMP2: /proc/cpus -- one head line, one line per core. A photo of `cat /proc/cpus` answers "are the other cores there, and why not".
-//   cpus_online=N cpus_madt=M failed=K kick=on|off kicks=T
-//   cpuN apic=A online=0|1 why=ok|nomem|nosipi|noonline|nosmp|- esr=0xE ticks=T idle=I busy=P% switches=S picks=K cur_pid=P
-//        cyc=C idlecyc=D halted=H kicktx=X kickrx=Y
-// `busy` is TIME-weighted (TSC cycles between ticks, booked to the state at the tick); `ticks`/`idle` are raw tick counts (an idle
-// application core ticks at 10 Hz, a busy one at 100 Hz, so tick counts of different cores are not comparable).
 fn w_why(state: u64, at: u64, code: u64) -> u64 {
     var p: u64 = at
     var v: u64 = cpu.why_word(code)
@@ -573,7 +445,6 @@ fn make_cpus(state: u64) -> u64 {
     if n > kstate.MAX_CPUS {
         n = kstate.MAX_CPUS
     }
-    // A boot without the SMP probe has no per-core table (count 0): the boot core alone is still one online core.
     var bsp_only: bool = false
     if n == 0 {
         n = 1
@@ -676,9 +547,6 @@ fn make_cpus(state: u64) -> u64 {
 }
 
 fn make_uptime(state: u64) -> u64 {
-    // Der Zeitgeber laeuft mit 100 Hz (`idt.fi`), ein Tick ist also eine
-    // Hundertstelsekunde. Linux schreibt hier zwei Zahlen mit zwei
-    // Nachkommastellen: Laufzeit und Leerlaufzeit.
     let ticks: u64 = kstate.get(state, kstate.TICKS)
     var p: u64 = 0
     p = w_num(state, p, ticks / 100)
@@ -703,11 +571,6 @@ fn make_uptime(state: u64) -> u64 {
     return p
 }
 
-// DIE QUELLE EINER EINHAENGUNG. Ein Dateisystem ohne Platte hat keine
-// Geraetedatei -- Linux schreibt dort den Namen des Treibers ("proc
-// /proc proc rw"), und dieser Kernel schreibt ihn auch. Ein
-// "/dev/ram0" davorzusetzen waere eine Erfindung: /proc liegt auf gar
-// keinem Geraet.
 fn source_text(state: u64, at: u64, m: u64) -> u64 {
     var t_proc: [u8; 6] = "proc \0"
     var t_dev: [u8; 7] = "devfs \0"
@@ -763,8 +626,6 @@ fn type_text(state: u64, at: u64, t: u64) -> u64 {
     return w_str(state, at, (&t_none[0]) as u64)
 }
 
-// Die Form von Linux' /proc/mounts, Feld fuer Feld:
-//     <Quelle> <Ort> <Art> <Schalter> 0 0
 fn make_mounts(state: u64) -> u64 {
     var rw: [u8; 3] = "rw\0"
     var ro: [u8; 3] = "ro\0"
@@ -831,7 +692,6 @@ fn make_stat(state: u64) -> u64 {
         z = z + 1
     }
     p = w_nl(state, p)
-    // W-SMP2: one line per core, Linux layout (user nice system idle ...); busy = ticks - idle ticks of THAT core.
     var sn: u64 = cpu.count(state)
     if sn > kstate.MAX_CPUS {
         sn = kstate.MAX_CPUS
@@ -883,8 +743,6 @@ fn make_stat(state: u64) -> u64 {
     return p
 }
 
-// Copies `n` bytes of a text but drops everything up to and including the first
-// blank ("osum 1a2b3c4d" -> "1a2b3c4d"); without a blank the whole text is copied.
 fn w_tail(state: u64, at: u64, s: u64, n: u64) -> u64 {
     var p: u64 = at
     var i: u64 = 0
@@ -904,10 +762,6 @@ fn w_tail(state: u64, at: u64, s: u64, n: u64) -> u64 {
 }
 
 fn make_version(state: u64) -> u64 {
-    // Format: "<product> (Firn) version <N> build <hash> image <id>\n". `uname` takes
-    // the text up to the number; the build hash comes from git at build time
-    // (lib/version.fi, "+" suffix = uncommitted changes), the image id from the
-    // IMAGE_ID build variable ("dev" when unset).
     var v: [u8; 64] = [0 as u8; 64]
     var vr: [u8; 22] = " (Firn) version \0\0\0\0\0\0"
     var l_build: [u8; 8] = " build \0"
@@ -925,17 +779,6 @@ fn make_version(state: u64) -> u64 {
     p = w_nl(state, p)
     return p
 }
-
-// ---------------------------------------------- RUNDE TRESOR: /proc/hwid
-//
-// Zeilen der Form `schluessel: wert`, weil das Format von /proc/meminfo
-// dasselbe ist und ein Werkzeug, das eines lesen kann, dann beide kann.
-//
-// EIN LEERER WERT IST EINE AUSSAGE, keine Luecke: er heisst "diese
-// Maschine gibt das nicht her". Genau deshalb steht auch `..._valid`
-// daneben -- sechzehn Nulloktette sind eine UUID, die keine ist, und ein
-// Fingerabdruck, der sie mitrechnet, waere auf jeder Standard-VM dieser
-// Welt derselbe.
 
 fn w_field(state: u64, at: u64, label: u64, which: u64) -> u64 {
     var p: u64 = at
@@ -967,11 +810,6 @@ fn w_hexb(state: u64, at: u64, v: u64) -> u64 {
     return p
 }
 
-// Die UUID in der gewohnten Schreibweise 8-4-4-4-12. Die ersten drei
-// Gruppen stehen im Speicher KLEINENDIG (SMBIOS 2.6 und spaeter), die
-// letzten beiden so, wie sie geschrieben werden -- wer alle sechzehn
-// Oktette der Reihe nach ausgibt, bekommt eine andere UUID als jedes
-// andere Werkzeug auf derselben Maschine.
 fn w_uuid(state: u64, at: u64) -> u64 {
     let src: u64 = hwid.field(state, hwid.F_UUID)
     var p: u64 = at
@@ -1011,9 +849,6 @@ fn make_hwid(state: u64) -> u64 {
     var l_ok: [u8; 12] = "smbios_ok: \0"
     var dot: [u8; 2] = ".\0"
 
-    // Die spaeten Quellen nachholen. `hwid.refresh` weiss selbst, dass es
-    // hoechstens achtmal fragt -- eine Maschine ohne Laufwerk soll nicht
-    // bei jedem `cat` einen Admin-Befehl bezahlen.
     hwid.refresh(state)
 
     var p: u64 = 0
@@ -1044,7 +879,6 @@ fn make_hwid(state: u64) -> u64 {
         p = w_num(state, p, 0)
     }
     p = w_nl(state, p)
-    // Die MAC-Adresse in der gewohnten Schreibweise mit Doppelpunkten.
     p = w_str(state, p, (&l_ma[0]) as u64)
     let m: u64 = hwid.field(state, hwid.F_MAC)
     var i: u64 = 0
@@ -1081,14 +915,6 @@ fn make_hwid(state: u64) -> u64 {
     return p
 }
 
-// ------------------------------------------------- die Dateien je Prozess
-
-// RUNDE PROTOKOLL: die letzten Zeilen des Rings in den Seitenpuffer.
-//
-// RUECKWAERTS GEZAEHLT, VORWAERTS GESCHRIEBEN. Erst wird von der
-// juengsten Zeile aus rueckwaerts gegangen, bis der Platz aufgebraucht
-// ist -- so bleiben die NEUESTEN Zeilen stehen und nicht die aeltesten.
-// Dann wird von dort vorwaerts geschrieben.
 fn make_klog(state: u64) -> u64 {
     var s_kopf: [u8; 8] = "# klog \0"
     var s_von: [u8; 6] = " von \0"
@@ -1097,12 +923,6 @@ fn make_klog(state: u64) -> u64 {
     let last: u64 = klog.seq(state)
     let first: u64 = klog.first_seq(state)
     let raum: u64 = kstate.PROCFS_MAX - 256
-    // WIE VIELE ZEILEN SICHER PASSEN. Eine Zeile ist hoechstens so
-    // lang wie ihr Eintrag: 88 Oktette Text, 8 Quelle und der Kopf mit
-    // Zeit, Kern, pid und Stufe -- zusammen unter 144. Also
-    // raum/144 Zeilen, ohne dass etwas gemessen werden muss. Passt
-    // hinterher mehr, bleibt Platz ungenutzt; das ist der Preis dafuer,
-    // dass diese Rechnung keine zweite Schleife braucht.
     var passt: u64 = raum / 144
     if passt == 0 {
         passt = 1
@@ -1146,7 +966,6 @@ fn make_status(state: u64, t: u64) -> u64 {
     var cm: [u8; 17] = [0 as u8; 17]
     var p: u64 = 0
     kind_name(sched.tget(state, t, sched.T_KIND), (&name[0]) as u64)
-    // RUNDE LC1: the real process name (exec / prctl) when there is one
     let ca: u64 = sched.tget(state, t, sched.T_COMMA)
     let cb: u64 = sched.tget(state, t, sched.T_COMMB)
     var ci: u64 = 0
@@ -1203,8 +1022,6 @@ fn make_status(state: u64, t: u64) -> u64 {
         k = k + 1
     }
     p = w_nl(state, p)
-    // RUNDE UNTERBAU: the lines a program that reads /proc/self/status looks for (Linux names, kB): Threads (the tasks of this group),
-    // VmRSS / VmSize (the pages this process holds, 4 kB each -- the kernel counts present pages, not a separate virtual size).
     var l12: [u8; 10] = "Threads:\0\0"
     var l13: [u8; 10] = "VmRSS:  \0\0"
     var l14: [u8; 10] = "VmSize: \0\0"
@@ -1238,8 +1055,6 @@ fn make_status(state: u64, t: u64) -> u64 {
     p = w_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4)
     p = w_str(state, p, (&l15[0]) as u64)
     p = w_nl(state, p)
-    // AB-003: where it comes from, as the kernel attests it
-    // (kernel/sched/origin.fi). "-" = no label: the system / the user.
     var l11: [u8; 10] = "Origin: \0\0"
     p = w_str(state, p, (&l11[0]) as u64)
     if origin.is_empty(state, t) {
@@ -1255,16 +1070,11 @@ fn make_status(state: u64, t: u64) -> u64 {
     return p
 }
 
-// r823: ` <number>` -- one more field of the stat line.
 fn st_num(state: u64, at: u64, v: u64) -> u64 {
     let p: u64 = w_ch(state, at, 32)
     return w_num(state, p, v)
 }
 
-// `/proc/<pid>/stat` in the Linux layout: 52 fields (proc(5)). busybox `ps`, procps and htop skip a fixed number of fields to find
-// utime/start_time/vsize; with the old 10-field line the skip ran past the end of the buffer (busybox ps: SIGSEGV).
-// Fields 1-4 are what `tools/k14` compares with SYS_OSUM_PSTAT (pid, (name), state, ppid). The kernel has no per-process
-// time split, no tty and no signal masks: those fields are 0, which is a valid value for each of them.
 fn make_pstat(state: u64, t: u64) -> u64 {
     var name: [u8; 12] = [0 as u8; 12]
     var cm: [u8; 17] = [0 as u8; 17]
@@ -1284,13 +1094,13 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     }
     p = w_num(state, p, sched.tget(state, t, sched.T_PID))
     p = w_ch(state, p, 32)
-    p = w_ch(state, p, 40) // '('
+    p = w_ch(state, p, 40)
     if ca != 0 {
         p = w_str(state, p, (&cm[0]) as u64)
     } else {
         p = w_str(state, p, (&name[0]) as u64)
     }
-    p = w_ch(state, p, 41) // ')'
+    p = w_ch(state, p, 41)
     p = w_ch(state, p, 32)
     p = w_ch(state, p, state_letter(sched.tget(state, t, sched.T_STATE)))
     let par: u64 = sched.tget(state, t, sched.T_PARENT)
@@ -1298,32 +1108,32 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     if par < kstate.MAX_TASKS {
         ppid = sched.tget(state, par, sched.T_PID)
     }
-    p = st_num(state, p, ppid) // 4
-    p = st_num(state, p, sched.tget(state, t, sched.T_PGID)) // 5 pgrp
-    p = st_num(state, p, sched.tget(state, t, sched.T_SID)) // 6 session
-    p = st_num(state, p, 0) // 7 tty_nr
-    p = st_num(state, p, 0) // 8 tpgid
-    p = st_num(state, p, 0) // 9 flags
-    p = st_num(state, p, sched.tget(state, t, sched.T_FAULTS)) // 10 minflt
-    p = st_num(state, p, 0) // 11 cminflt
-    p = st_num(state, p, 0) // 12 majflt
-    p = st_num(state, p, 0) // 13 cmajflt
-    p = st_num(state, p, sched.tget(state, t, sched.T_TICKS)) // 14 utime
-    p = st_num(state, p, 0) // 15 stime
-    p = st_num(state, p, 0) // 16 cutime
-    p = st_num(state, p, 0) // 17 cstime
-    p = st_num(state, p, sched.tget(state, t, sched.T_PRIO)) // 18 priority
-    p = st_num(state, p, 0) // 19 nice
-    p = st_num(state, p, 1) // 20 num_threads
-    p = st_num(state, p, 0) // 21 itrealvalue
-    p = st_num(state, p, 0) // 22 starttime
-    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4096) // 23 vsize
-    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES)) // 24 rss
-    p = st_num(state, p, 0 -% 1) // 25 rsslim
+    p = st_num(state, p, ppid)
+    p = st_num(state, p, sched.tget(state, t, sched.T_PGID))
+    p = st_num(state, p, sched.tget(state, t, sched.T_SID))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_FAULTS))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_TICKS))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_PRIO))
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 1)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, 0)
+    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES) * 4096)
+    p = st_num(state, p, sched.tget(state, t, sched.T_UPAGES))
+    p = st_num(state, p, 0 -% 1)
     var f: u64 = 26
     while f <= 52 {
         if f == 38 {
-            p = st_num(state, p, 17) // exit_signal = SIGCHLD
+            p = st_num(state, p, 17)
         } else {
             p = st_num(state, p, 0)
         }
@@ -1333,12 +1143,6 @@ fn make_pstat(state: u64, t: u64) -> u64 {
     return p
 }
 
-// DIE ARGUMENTE, AUS DEM ADRESSRAUM DES PROZESSES. `elf.write_args`
-// legt sie auf die oberste Stapelseite (`proc.ARGS_BASE`): erst `argc`,
-// dann `argc` Zeiger, dann die Zeichenketten. Hier wird genau dort
-// gelesen -- ueber `proc.translate`, also durch die Seitentabelle des
-// FREMDEN Prozesses hindurch, und nicht aus einer Kopie, die der Kernel
-// sich gemerkt haette. Eine Kopie waere veraltet, sobald `execve` lief.
 fn make_cmdline(state: u64, t: u64) -> u64 {
     var p: u64 = 0
     let frame: u64 = proc.translate(state, t, proc.ARGS_BASE)
@@ -1368,9 +1172,6 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
                     at = at + 1
                 }
             }
-            // Wie bei Linux: die Argumente sind durch NULLEN getrennt
-            // und nicht durch Leerzeichen. Wer das anders schreibt,
-            // kann ein Argument mit Leerzeichen nicht mehr wiedergeben.
             p = w_ch(state, p, 0)
             k = k + 1
         }
@@ -1379,16 +1180,7 @@ fn make_cmdline(state: u64, t: u64) -> u64 {
     return p
 }
 
-// DIE SEITENTABELLE, ABGELAUFEN. Keine Konstantenliste: was hier steht,
-// steht da, weil `proc.translate` fuer diese Adresse einen Rahmen
-// gefunden hat.
 fn make_maps(state: u64, t: u64) -> u64 {
-    // RUNDE UNTERBAU: THE WHOLE PRIVATE REGION, WITH THE RIGHTS AS THEY ARE. The first version stopped at the first 2 MiB tile (the
-    // image of a program, the stack, the first heap) and knew two right sets, "rw-" and "r-x"; a library mapped by dlopen, the mmap
-    // windows and the big region were not listed at all, and a PROT_NONE guard page looked like data. Now every run of pages with
-    // the same rights is one line `start-end rwxp 00000000 00:00 0` (the shape Linux prints, so a parser reads it), a run that is
-    // mapped but closed to the user shows `---p`. The kernel keeps no list of mappings (no VMA), so a run has NO file name; the
-    // main stack and the heap get the names Linux uses.
     var p: u64 = 0
     let low: u64 = proc.USER_DATA
     let high: u64 = proc.LAZY_ATOP
@@ -1399,7 +1191,6 @@ fn make_maps(state: u64, t: u64) -> u64 {
     while addr < high {
         var r: u64 = 0
         let k: u64 = proc.pd_slot(addr)
-        // a 2 MiB tile that has no table is skipped whole (most of the region is empty)
         if k != 0 && proc.pt_for(state, t, addr, false) == 0 {
             if in_run {
                 p = map_line(state, t, p, run_start, addr, run_r)
@@ -1432,7 +1223,6 @@ fn make_maps(state: u64, t: u64) -> u64 {
     return p
 }
 
-// one line of /proc/<pid>/maps
 fn map_line(state: u64, t: u64, at: u64, a: u64, b: u64, r: u64) -> u64 {
     var p: u64 = at
     p = w_hex16(state, p, a)
@@ -1496,7 +1286,6 @@ fn w_interp_name(state: u64, t: u64, at: u64) -> u64 {
     return p
 }
 
-// LC-PROC: the targets of the symlinks /proc/<pid>/exe and /proc/<pid>/cwd (the text is the link target, no newline)
 fn make_exe(state: u64, t: u64) -> u64 {
     let n: u64 = uio.exe_len(state, t)
     var i: u64 = 0
@@ -1527,12 +1316,6 @@ fn make_fdfile(state: u64, t: u64, fd: u64) -> u64 {
     var k_fb: [u8; 4] = "fb\0\0"
     var k_vfs: [u8; 5] = "vfs \0"
     var p: u64 = 0
-    // `file.fd_of` gibt den PLATZ IN DER TAFEL DER OFFENEN DATEIEN
-    // zurueck -- und `MAX_OPEN`, wenn der Deskriptor geschlossen ist.
-    // NICHT null: null ist ein gueltiger Platz, naemlich die Konsole
-    // auf Deskriptor 0. Die erste Fassung dieser Datei hat `!= 0`
-    // geprueft und damit genau das Gegenteil aufgezaehlt: Deskriptor 0
-    // fehlte in der Liste, und jeder GESCHLOSSENE stand darin.
     let e: u64 = file.fd_of(state, t, fd)
     if e >= file.MAX_OPEN {
         return 0
@@ -1563,16 +1346,6 @@ fn make_fdfile(state: u64, t: u64, fd: u64) -> u64 {
     return p
 }
 
-// EINE Weiche fuer alle Dateien dieses Dateisystems. Sie ist die
-// einzige Stelle, an der ein Knoten zu Text wird.
-
-// ===================================================== ROUND UNTERBAU
-//
-// /proc/loadavg, /proc/<pid>/limits, /proc/<pid>/cgroup and /proc/sys/...:
-// the files a big Linux program reads at startup. Values are the truth this
-// kernel knows: no load average is computed (0.00), the descriptor limit is
-// the real table size.
-
 fn make_loadavg(state: u64) -> u64 {
     var z: [u8; 18] = "0.00 0.00 0.00 1/\0"
     var p: u64 = w_str(state, 0, (&z[0]) as u64)
@@ -1591,10 +1364,6 @@ fn make_loadavg(state: u64) -> u64 {
     return w_nl(state, p)
 }
 
-// ---------------------------------------------------------------- E1 tables
-// /proc/pci, /proc/usb, /proc/firmware: what the kernel FOUND, one line per
-// device, no serial numbers (the system report must be safe to send).
-
 fn w_hexn(state: u64, at: u64, v: u64, n: u64) -> u64 {
     var p: u64 = at
     var i: u64 = n
@@ -1610,8 +1379,6 @@ fn w_hexn(state: u64, at: u64, v: u64, n: u64) -> u64 {
     return p
 }
 
-// "bb:dd.f cccc vvvv:dddd irq=N" -- class and subclass are the two digit pairs
-// of lspci -n; the line ends with the interrupt line the firmware assigned.
 fn make_pci(state: u64) -> u64 {
     var l_irq: [u8; 6] = " irq=\0"
     var p: u64 = 0
@@ -1709,8 +1476,6 @@ fn w_driver(state: u64, at: u64, k: u64) -> u64 {
     return w_str(state, at, (&d0[0]) as u64)
 }
 
-// A short device kind from the interface class (device class when the interface
-// class is empty): hid-keyboard / hid-mouse / hid / storage / hub / net / audio / other.
 fn w_kind(state: u64, at: u64, icls: u64, ipro: u64, dcls: u64) -> u64 {
     var k_kb: [u8; 13] = "hid-keyboard\0"
     var k_ms: [u8; 10] = "hid-mouse\0"
@@ -1748,14 +1513,6 @@ fn w_kind(state: u64, at: u64, icls: u64, ipro: u64, dcls: u64) -> u64 {
     return w_str(state, at, (&k_ot[0]) as u64)
 }
 
-// Controller lines come first, one per xHCI found on the PCI bus (also with no
-// device attached):
-//   "controller xhci 00:04.0 1b36:000d ports=8 state=up selected"
-//   "controller xhci 00:05.0 1022:149c state=idle"      (found, not the active one)
-//   "controller none"                                    (no xHCI on this machine)
-// Device lines:
-// "vvvv:pppp port=N [hub=M] speed=S class=cc/ss/pp if=cc/ss/pp driver=NAME hc=xhci kind=K"
-// (port = root port, hub = port on the hub in front of it, if any).
 fn make_usb(state: u64) -> u64 {
     var l_ctl: [u8; 17] = "controller xhci \0"
     var l_none: [u8; 17] = "controller none\n\0"
@@ -2476,11 +2233,6 @@ fn make_usbnet(state: u64) -> u64 {
     return w_usbnet_dhcp(state, p)
 }
 
-// /proc/wlan: one line per Intel gen2 WLAN function found on the bus, read
-// read-only by drv/net/iwl.fi (M1b). No MAC address, no serial number.
-//   "00:14.3 8086:a0f0 hw_rev=0x00000351 rf_id=0x0010a110 mac=QuZ rf=HR"
-//   "00:14.3 8086:a0f0 err=dead"      (device did not answer)
-//   "none"                            (no such device on the bus)
 fn w_rfkill(state: u64, at: u64, gp: u64) -> u64 {
     var l_rk: [u8; 13] = "rfkill: hw=\0\0"
     var l_on: [u8; 3] = "on\0"
@@ -2827,11 +2579,6 @@ fn w_ip(state: u64, at: u64, v: u64) -> u64 {
     return w_num(state, p, v & 255)
 }
 
-// /proc/wlan, autostart part (net/wlan_auto.fi), appended after the device lines:
-//   "wlan: waiting for driver"                   (no transport bound yet)
-//   "auto=retry rc=-111 tries=3 driver=bound"
-//   "link losses=0 reconnects=0"
-//   "ip=192.168.0.50 mask=255.255.255.0 gw=192.168.0.1"    (only when up)
 fn make_wlan(state: u64) -> u64 {
     var l_wait: [u8; 25] = "wlan: waiting for driver\0"
     var l_auto: [u8; 6] = "auto=\0"
@@ -2925,13 +2672,6 @@ fn make_wlan(state: u64) -> u64 {
     return p
 }
 
-// /proc/apps: one header line, then one line per app that has a slot in the rights table:
-//   "# app cpu_ticks wakeups tx_bytes rx_bytes"
-//   "mail 412 96 20480 1048576"
-// cpu_ticks = timer ticks charged to tasks that carry the label app:<name> (children included, the label is sticky),
-// wakeups = blocked->ready transitions of those tasks, tx/rx_bytes = payload octets of their sockets.
-// Counted since boot (an app that is not in the table, because it was never registered or the table is full, is not
-// counted). Unlabelled tasks (the person's own tools, system bundles) have no line.
 fn make_safe(state: u64) -> u64 {
     var l_s: [u8; 6] = "safe=\0"
     var l_f: [u8; 7] = "fails=\0"
@@ -2976,10 +2716,6 @@ fn make_odb(state: u64) -> u64 {
     return p
 }
 
-// /proc/bench: one `key value` per line, integers only.
-//   boot.<phase> = ms since kernel_main entry (rdtsc stamps from kmain.fi, TIME_KHZ = cycles per ms); a phase not reached is left out
-//   kernel.end = end of the kernel image in memory; heap.bytes / heap.blocks / heap.used_blocks = the kernel heap
-//   irq.traps = interrupts and exceptions of every kind since boot; tsc.khz = rdtsc cycles per millisecond
 fn bench_phase(state: u64, p0: u64, name: u64, i: u64, at: u64) -> u64 {
     let khz: u64 = kstate.get(state, kstate.TIME_KHZ)
     let t: u64 = kstate.get(state, kstate.BM_BASE + i * 8)
@@ -3398,9 +3134,6 @@ fn make_apps(state: u64) -> u64 {
     return p
 }
 
-// boot_mode: measured by hwdiag (traces a UEFI firmware does not leave).
-// secure_boot: honest "unknown" -- the loader leaves no variable behind
-// after the boot services are gone, so the kernel cannot read it.
 fn make_firmware(state: u64) -> u64 {
     var l_bm: [u8; 12] = "boot_mode: \0"
     var v_bios: [u8; 5] = "BIOS\0"
@@ -3512,7 +3245,6 @@ fn make_limits(state: u64, t: u64) -> u64 {
 }
 
 fn make_uuid_random(state: u64) -> u64 {
-    // a random (version 4) UUID, new at every read: 16 bytes from the kernel generator
     let scratch: u64 = buf(state) + 4064
     if rand.bytes(state, scratch, 16) != 16 {
         var z: u64 = 0
@@ -3538,12 +3270,10 @@ fn make_uuid_random(state: u64) -> u64 {
 fn make_sys(state: u64, sub: u64) -> u64 {
     var p: u64 = 0
     if sub == S_PIDMAX {
-        // pids are never reused here; the counter is 64 bit. The Linux default is shown.
         p = w_num(state, p, 4194304)
         return w_nl(state, p)
     }
     if sub == S_OVERCOMMIT {
-        // mmap does not refuse by a commit estimate: that is mode 1 ("always")
         p = w_num(state, p, 1)
         return w_nl(state, p)
     }
@@ -3556,9 +3286,6 @@ fn make_sys(state: u64, sub: u64) -> u64 {
     return 0
 }
 
-// /proc/net/dev: the one interface this kernel has. Packet counts are the
-// stack's frame counters; byte counts are the card's octet counters;
-// errors/drops are not counted anywhere, so they read 0 (the columns stay).
 fn w_col(state: u64, at: u64, v: u64) -> u64 {
     var p: u64 = w_ch(state, at, 32)
     return w_num(state, p, v)
@@ -3635,7 +3362,6 @@ fn sys_name(sub: u64, out: u64) {
     }
 }
 
-// the i-th child of directory `parent` (0 = none)
 fn sys_nth(parent: u64, i: u64) -> u64 {
     if parent == S_SYS {
         if i == 0 {
@@ -3667,7 +3393,6 @@ fn sys_nth(parent: u64, i: u64) -> u64 {
     return 0
 }
 
-// the child of `parent` with the given name (0 = none)
 fn sys_child(parent: u64, name: u64) -> u64 {
     var buf2: [u8; 24] = [0 as u8; 24]
     var i: u64 = 0
@@ -3879,8 +3604,6 @@ fn build(state: u64, n: u64) -> u64 {
     return 0
 }
 
-// ------------------------------------------------------ die Verrichtungen
-
 fn streq(a: u64, b: u64) -> bool {
     var i: u64 = 0
     while kstate.get8(a + i) != 0 && kstate.get8(b + i) != 0 {
@@ -3892,8 +3615,6 @@ fn streq(a: u64, b: u64) -> bool {
     return kstate.get8(a + i) == kstate.get8(b + i)
 }
 
-// Ein Namensteil aus dem Pfad, ab `at`. Rueckgabe: die Stelle hinter
-// ihm. `out` bekommt den Teil ohne Schraegstriche.
 fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
     var i: u64 = at
     while kstate.get8(path + i) == 47 {
@@ -4176,7 +3897,6 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
     }
     let g: u64 = global_of((&seg[0]) as u64)
     if g != 0 {
-        // Ein globaler Name darf nichts hinter sich haben.
         var rest: [u8; 24] = [0 as u8; 24]
         segment(path, at, (&rest[0]) as u64, 24)
         if kstate.get8((&rest[0]) as u64) != 0 {
@@ -4184,7 +3904,6 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
         }
         return node(K_GLOBAL, 0, g)
     }
-    // ROUND UNTERBAU: /proc/sys/<dir>/.../<file>
     var w_sys: [u8; 4] = "sys\0"
     var w_net: [u8; 4] = "net\0"
     let is_sys: bool = streq((&seg[0]) as u64, (&w_sys[0]) as u64)
@@ -4213,37 +3932,6 @@ fn p_lookup(state: u64, m: u64, path: u64) -> u64 {
         }
         return 0
     }
-    // ===================================== RUNDE CERTUS: `/proc/self`
-    //
-    // WARUM DIESER NAME FEHLTE UND WARUM ER DIE RUNDE AUFGEHALTEN HAT.
-    //
-    // Certus (der Browser) startete auf Osum, wurde geladen, kam in Ring
-    // 3 an -- und gab sofort 90 zurueck. 90 ist in der Wurzeldatei des
-    // Browsers die Zeile `if !gc_init() { return 90 }`.
-    //
-    // Der Sammler von Firn scannt den Stapel KONSERVATIV (SPEC 3.5.3):
-    // er liest jedes Wort zwischen dem aktuellen Stapelzeiger und dem
-    // BODEN des Stapels und behandelt alles, was wie ein Zeiger
-    // aussieht, als eine Wurzel. Dafuer muss er wissen, wo der Boden
-    // liegt -- und er kann es nicht selbst wissen, weil das
-    // Betriebssystem den Stapel angelegt hat. Also fragt er danach, so
-    // wie jede Laufzeit auf jedem Unix danach fragt:
-    // `/proc/self/maps`, und wenn das nichts hergibt,
-    // `/proc/self/stat` (`vendor/firn/lib/gc/gc.fi`,
-    // `__gc_stack_bottom_maps` und `__gc_stack_bottom`).
-    //
-    // Dieses Dateisystem hatte `/proc/<pid>/maps` und
-    // `/proc/<pid>/stat` seit Runde K11 -- aber `self` nicht, und ein
-    // Prozess kennt seine eigene Nummer erst, wenn er `getpid` gerufen
-    // hat. Ein Programm mit Sammler konnte hier also nicht starten, und
-    // die Fehlermeldung dafuer war eine Zahl.
-    //
-    // `self` ist der laufende Prozess, und nichts weiter: dieselben
-    // Dateien, dieselben Rechte, ein Name mehr. `sched.current` ist der
-    // Platz, dem der Kern gerade gehoert -- und weil ein Systemaufruf
-    // im Zusammenhang des Rufenden laeuft, ist das der Rufende.
-    // (Runde CERTUS vom 28.08.2026, in Runde CERTUS-AUF-OSUM auf
-    // `merge6` nachgezogen.)
     var w_self: [u8; 5] = "self\0"
     var slot: u64 = kstate.MAX_TASKS
     if streq((&seg[0]) as u64, (&w_self[0]) as u64) {
@@ -4541,7 +4229,6 @@ fn p_readdir(state: u64, m: u64, dir: u64, index: u64, out: u64) -> u64 {
             }
             return node(K_GLOBAL, 0, i + 1)
         }
-        // Dahinter die Prozesse, in der Reihenfolge der Aufgabentafel.
         var seen: u64 = 0
         var t: u64 = 0
         let n: u64 = kstate.get(state, kstate.TASKS)
@@ -4618,11 +4305,6 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
         return vfsops.N_NONE
     }
     if what == vfsops.A_SIZE {
-        // EINE DATEI, DIE NIRGENDS LIEGT, HAT KEINE LAENGE, BIS MAN SIE
-        // SCHREIBT. Also wird sie hier geschrieben und dann weggeworfen
-        // -- das ist genau, was Linux tut, und der Grund, warum
-        // `ls -l /proc` dort ueberall Nullen zeigt. Dieser Kernel sagt
-        // die Wahrheit statt Null, und das kostet einen Aufbau.
         if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && sys_is_dir(n_sub(n))) {
             return 0
         }
@@ -4639,12 +4321,12 @@ fn p_attr(state: u64, m: u64, n: u64, what: u64) -> u64 {
     }
     if what == vfsops.A_MODE {
         if art == K_ROOT || art == K_PIDDIR || art == K_FDDIR || (art == K_SYS && sys_is_dir(n_sub(n))) {
-            return 365 // 0o555 -- lesen und betreten, nicht schreiben
+            return 365
         }
         if art == K_PIDFILE && (n_sub(n) == F_EXE || n_sub(n) == F_CWD) {
-            return 511 // 0o777: a symlink
+            return 511
         }
-        return 292 // 0o444
+        return 292
     }
     if what == vfsops.A_NLINK {
         return 1
@@ -4666,8 +4348,6 @@ fn unlock(state: u64, flags: u64) {
     sched.irq_restore(flags)
 }
 
-// ------------------------------------------------------------ /sys (LC-004)
-
 fn sfs_ncpu(state: u64) -> u64 {
     let n: u64 = cpu.count(state)
     if n == 0 {
@@ -4684,12 +4364,10 @@ fn sfs_nonline(state: u64) -> u64 {
     return n
 }
 
-// CPUID leaf 4 (or AMD 0x8000001D), sub-leaf 0: type 0 means "no cache information" -- then index0 does not exist (nothing is invented).
 fn sfs_cache_leaf(state: u64) -> u64 {
     if fpu.cpuid_a(0, 0) >= 4 && (fpu.cpuid_a(4, 0) & 31) != 0 {
-        return 4 // Intel layout
+        return 4
     }
-    // AMD: the same register layout under leaf 0x8000001D, offered when CPUID 0x80000001 ECX bit 22 (TOPOEXT) is set
     if fpu.cpuid_a(0x80000000, 0) >= 0x8000001D && ((fpu.cpuid_c(0x80000001, 0) >> 22) & 1) != 0 && (fpu.cpuid_a(0x8000001D, 0) & 31) != 0 {
         return 0x8000001D
     }
@@ -4708,7 +4386,6 @@ fn sfs_is_dir(sub: u64) -> bool {
     return sub == SF_ROOT || sub == SF_DEVICES || sub == SF_SYSTEM || sub == SF_CPU || sub == SF_CPUN || sub == SF_CACHE || sub == SF_IDX0
 }
 
-// number of children of directory node (sub, slot)
 fn sfs_count(state: u64, sub: u64) -> u64 {
     if sub == SF_ROOT || sub == SF_DEVICES || sub == SF_SYSTEM {
         return 1
@@ -4731,7 +4408,6 @@ fn sfs_count(state: u64, sub: u64) -> u64 {
     return 0
 }
 
-// the i-th child (node), 0 = none
 fn sfs_child(state: u64, sub: u64, slot: u64, i: u64) -> u64 {
     if i >= sfs_count(state, sub) {
         return 0
@@ -4879,9 +4555,9 @@ fn sfs_attr(state: u64, n: u64, what: u64) -> u64 {
     }
     if what == vfsops.A_MODE {
         if sfs_is_dir(sub) {
-            return 365 // 0o555
+            return 365
         }
-        return 292 // 0o444
+        return 292
     }
     if what == vfsops.A_NLINK {
         return 1
@@ -4892,7 +4568,6 @@ fn sfs_attr(state: u64, n: u64, what: u64) -> u64 {
     return 0
 }
 
-// "0" for one CPU, "0-N" for N+1
 fn sfs_range(state: u64, n: u64) -> u64 {
     var p: u64 = w_num(state, 0, 0)
     if n > 1 {
@@ -5006,7 +4681,7 @@ fn p_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
 
 fn p_unlink(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
-    return 1 // EPERM
+    return 1
 }
 
 fn p_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
@@ -5016,11 +4691,9 @@ fn p_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
 
 fn p_trunc(state: u64, m: u64, n: u64) -> u64 {
     tick(state)
-    return 30 // EROFS
+    return 30
 }
 
-// Die Tafel. VIER Bits, und kein einziges davon schreibt: /proc ist ein
-// Fenster in den Kernel und keine Tuer.
 fn ops() -> vfsops.Ops {
     return vfsops.Ops {
         lookup: p_lookup,
@@ -5033,6 +4706,6 @@ fn ops() -> vfsops.Ops {
         rename: p_rename,
         trunc: p_trunc,
         mask: vfsops.OP_READONLY,
-        tag: 1668248176 // "proc"
+        tag: 1668248176
     }
 }

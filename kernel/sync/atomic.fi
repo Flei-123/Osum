@@ -1,49 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/atomic.fi -- round K5: the instructions a SECOND processor
-// makes necessary, and the lock built out of them.
-//
-// Everything this kernel did up to round K2 rested on one sentence that
-// stands in `kstate.fi` in as many words: "NOT atomic -- it does not have
-// to be: the kernel runs on one processor". From this round on that
-// sentence is false. Two processors execute `read - add - write` at the
-// same time, both read the same old value, both write the same new one,
-// and one of the two increments is gone. Nothing reports it; the counter
-// is simply too small afterwards. That is the bug this file exists
-// against, and `tools/kernel/run.sh` section "smp" MEASURES it: the same
-// stress test runs once with the lock and once without, and without it
-// the number has to come out wrong.
-//
-// WHAT FIRN ALREADY HAD. Two primitives, both from the rounds that
-// brought the collector and the threads, both a single instruction:
-//
-//     __atomic_add(p, delta)          -> old value   `lock xadd`
-//     __atomic_swap(p, expect, want)  -> old value   `lock cmpxchg`
-//
-// Round 47 wrote about the first one: "Firn has no threads at stage 0, so
-// the difference is NOT measurable today by a two-thread run; it is
-// provable at the emitted instruction." This round is the two-thread run.
-// Nothing had to be added to the language for it -- which is the honest
-// answer to "does Firn need new building blocks for SMP": no, it needed
-// the two it already has, and a file that uses them correctly.
-//
-// WHAT AN ATOMIC LOAD AND STORE ARE HERE. On x86-64 an ALIGNED 64-bit
-// read or write is atomic in the hardware (SDM volume 3, 8.1.1) -- it
-// cannot be seen half done. What it is not is safe from the COMPILER,
-// which may hoist it out of a loop or drop it entirely. That is exactly
-// what the MMIO forms of round 52 are for: one memory access per source
-// line, never moved, never merged, never removed. So `load` and `store`
-// below are `__mmio_read64`/`__mmio_write64` and nothing else, and the
-// pair is a correct atomic load/store on this architecture. On a machine
-// with a weaker memory model it would not be, and then this file is the
-// one place that has to change.
-//
-// THE LOCK. A test-and-set spin lock: `lock cmpxchg` from 0 to the owner,
-// a plain store back to 0. The store is enough because x86-64 does not
-// move a store ahead of an older store (TSO) -- everything the holder
-// wrote is visible before the lock reads as free. `pause` in the waiting
-// loop is not decoration either: it tells the processor that this is a
-// spin loop, which saves the pipeline flush on leaving it and costs a
-// hyper-thread sibling much less.
 
 import serial
 import lib.kstate
@@ -57,41 +11,18 @@ export {
     L_SCHED, L_FRAME, L_FS, L_CONSOLE, L_STRESS, L_BOOT, L_NET, L_PROC, L_GUI
 }
 
-// ------------------------------------------------------- the primitives
-
-// Compare and swap. Writes `want` if the word holds `expect`, and returns
-// what the word held BEFORE -- so `cas(p, a, b) == a` means it worked.
 fn cas(p: u64, expect: u64, want: u64) -> u64 {
     return __atomic_swap(p as *mut u64, expect, want)
 }
 
-// Add and return the OLD value.
 fn fetch_add(p: u64, delta: u64) -> u64 {
     return __atomic_add(p as *mut u64, delta)
 }
 
-// Subtraction is the addition of the two's complement -- `-%` is the
-// wrapping form of round 72, and it is meant here.
 fn fetch_sub(p: u64, delta: u64) -> u64 {
     return __atomic_add(p as *mut u64, 0 -% delta)
 }
 
-// ROUND OSUM-ARM2: THE SENTENCE AT THE HEAD OF THIS FILE COMES DUE.
-//
-// It said, in 2025, that `__mmio_read64`/`__mmio_write64` are a correct
-// atomic load and store "on this architecture", and that "on a machine with
-// a weaker memory model it would not be, and then this file is the one
-// place that has to change". This is that change, and the sentence was
-// half right: the ACCESS is single-copy atomic on AArch64 too, the ORDER is
-// not. A plain store releasing a lock may become visible BEFORE the data it
-// was protecting; a plain load taking one may be overtaken by the reads
-// that follow.
-//
-// So both go across the boundary now. On x86-64 `arch.atomic_load` and
-// `arch.atomic_store` are the same two MMIO forms that stood here, octet
-// for octet; on AArch64 they are `ldar` and `stlr`. `tools/arch/order.sh`
-// reads both out of the emitted assembler of both machines rather than
-// taking this comment's word for it.
 fn load(p: u64) -> u64 {
     return arch.atomic_load(p)
 }
@@ -100,61 +31,28 @@ fn store(p: u64, v: u64) {
     arch.atomic_store(p, v)
 }
 
-// `pause` on x86, `yield` on AArch64. NOT the same instruction with two
-// names: the second one is a hint to a multithreaded core, the first is
-// also a pipeline hint on leaving a spin loop. Both say "this loop is a
-// spin loop", which is all the caller means.
 fn pause() {
     arch.pause()
 }
 
-// A full fence. Needed in exactly one place -- between "I am online" and
-// the first read of shared state on a processor that has just come up --
-// and named here so that the place is findable. `mfence` there, `dmb sy`
-// here.
 fn barrier() {
     arch.barrier()
 }
 
-// ------------------------------------------------------------ the locks
-
-// Which lock is which. Every one of them protects a NAMED data structure,
-// and the order in this list is the order in which they may be taken --
-// a processor that holds L_SCHED may take L_FRAME, never the other way
-// round. That rule is what keeps two processors from waiting on each
-// other for ever.
-const L_SCHED: u64 = 0 // the task table and the run queue
-const L_FRAME: u64 = 1 // the frame bitmap and the heap
-const L_FS: u64 = 2 // the file system and the block layer
-const L_CONSOLE: u64 = 3 // a line of serial output stays a line
-const L_STRESS: u64 = 4 // the counter of the stress test
-const L_BOOT: u64 = 5 // bringing one application processor up
-// ROUND K8: the TCP/IP stack is ONE struct with one set of connections,
-// and `net_input` out of the network task must not run at the same time
-// as `net_send` out of a system call. Held with interrupts off, like
-// every other lock here -- see `inet.hold`.
-const L_NET: u64 = 6 // the stack of round K3 (kernel/inet.fi)
-// ROUNDE K14: die Seite, auf der eine Datei des /proc-Dateisystems
-// ENTSTEHT (`kernel/procfs.fi`, `kstate.PROCFS_OFF`). Sie ist EINE
-// Seite fuer alle Kerne -- zwei Kerne, die gleichzeitig
-// `/proc/meminfo` lesen, wuerden sonst ihre Texte ineinanderschreiben.
-// LOCK_COUNT ist 8, also war der Platz 7 der letzte freie.
+const L_SCHED: u64 = 0
+const L_FRAME: u64 = 1
+const L_FS: u64 = 2
+const L_CONSOLE: u64 = 3
+const L_STRESS: u64 = 4
+const L_BOOT: u64 = 5
+const L_NET: u64 = 6
 const L_PROC: u64 = 7
-// r1138: the window server's tables (window slots, z-order, event queues, the compositor's scratch) had NO lock: window calls of
-// ring 3 programs on several cores (the all-ring-3 test, VBox with 3 vCPUs) ran `create_ex`/`compose`/`destroy` through each other (tools/wchurn
-// measures it). One lock for the whole ring-3 window surface (`gfx.sys_wm`, `sys_wig`). Taken with interrupts down (a system call
-// runs so), never held across a sleep.
 const L_GUI: u64 = 8
 
-// Fields of a lock. It gets 64 octets of its own -- one cache line --
-// because two locks in one line would make every processor that takes
-// the first one steal the line from the holder of the second.
-const OWNER: u64 = 0 // 0 = free, otherwise processor index + 1
-const TAKES: u64 = 8 // how often it was taken
-const SPINS: u64 = 16 // turns of the waiting loop spent on it
+const OWNER: u64 = 0
+const TAKES: u64 = 8
+const SPINS: u64 = 16
 
-// A processor that waits this long says so on the serial line (once per
-// wait). Saying so beats a run that dies at the time limit with no output.
 const STUCK: u64 = 60000000
 const WAIT_CPUS: u64 = 8
 
@@ -177,16 +75,6 @@ fn lock_init(state: u64, id: u64) {
     store(slot(state, id) + SPINS, 0)
 }
 
-// THE SWITCH FOR THE COUNTER-CHECK. One BIT PER LOCK, not one flag for
-// all of them, and the reason is worth writing down: switching every lock
-// off at once does not produce a measurement, it produces a kernel that
-// dies somewhere before it can print one. `nolock` on the command line
-// therefore switches off exactly the two locks whose absence is being
-// measured -- the frame allocator and the counter of the stress test --
-// and leaves the run queue lock alone, so that the machine survives long
-// enough to say what went wrong. `nolockall` switches off that one too,
-// and THAT run is not supposed to survive; its counter-check is the exit
-// code.
 fn off(state: u64, id: u64) -> bool {
     return (kstate.get(state, kstate.SMP_OFF + kstate.SMP_NOLOCK)
         &(1 << id)) != 0
@@ -200,8 +88,6 @@ fn set_off(state: u64, v: u64) {
     kstate.set(state, kstate.SMP_OFF + kstate.SMP_NOLOCK, v)
 }
 
-// `who` is the index of the processor, counted from zero; what goes into
-// the word is one more, so that zero can keep meaning "free".
 fn lock_take(state: u64, id: u64, who: u64) {
     if off(state, id) {
         return
@@ -227,7 +113,6 @@ fn lock_take(state: u64, id: u64, who: u64) {
     }
 }
 
-// One attempt, no waiting. True when the lock is now held by `who`.
 fn lock_try(state: u64, id: u64, who: u64) -> bool {
     if off(state, id) {
         return true
@@ -269,8 +154,6 @@ fn lock_total_spins(state: u64) -> u64 {
     return n
 }
 
-// A lock nobody gives back. The machine is finished either way; the
-// difference is whether the log says why.
 fn stuck(state: u64, id: u64) {
     var s_head: [u8; 16] = "lock: stuck id=\0"
     var s_owner: [u8; 9] = "  owner=\0"
@@ -289,12 +172,4 @@ fn stuck(state: u64, id: u64) {
         i = i + 1
     }
     serial.nl()
-    // 27.09.2026: report ONCE and keep waiting. This used to halt the
-    // waiting core for good -- but a long hold is not a dead lock: the
-    // file system lock stays taken for a whole write() to a USB stick,
-    // 512 octets per round trip. In the VM two of four cores halted
-    // during a remote update and the machine froze; on the Dell (Haswell,
-    // PAUSE is short, so STUCK is only a fraction of a second) it comes
-    // much sooner. A real dead lock still shows up: this line, then no
-    // progress.
 }

@@ -1,35 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/mnt.fi -- Runde K14: DIE EINHAENGETAFEL.
-//
-// Sie steht in einer eigenen Datei und nicht in `vfs.fi`, und der Grund
-// ist keine Ordnungsliebe: die TREIBER brauchen sie (ein FAT32 muss
-// wissen, auf welchem Geraet und ab welchem Block seine Einhaengung
-// liegt), und `vfs.fi` braucht die Treiber. Laegen beide zusammen,
-// waere es ein Kreis von Modulen -- den kann Firn nicht uebersetzen,
-// und er waere auch fachlich falsch: Daten haengen nicht an Politik.
-//
-// EIN EINTRAG SIND 128 OKTETTE, acht Eintraege eine Achtel Seite:
-//
-//   used     1 = dieser Platz ist belegt
-//   fstype   welcher Treiber (vfsops.FS_*)
-//   dev      Blockgeraet (blk.DEV_*)
-//   first    erster Block DIESER Einhaengung auf dem Geraet. Das ist
-//            der Grund, warum eine Partition kein Sonderfall ist: der
-//            Treiber rechnet in seinen eigenen Bloecken ab null, und
-//            diese Zahl wird darauf addiert.
-//   blocks   wie viele Bloecke ihm gehoeren -- ein Treiber, der
-//            darueber hinausliest, liest in die naechste Partition.
-//   flags    Bit 0 = nur lesend
-//   root     der Wurzelknoten dieses Dateisystems
-//   opens    OFFENE DESKRIPTOREN auf dieser Einhaengung. Das ist die
-//            Zahl, wegen der `umount` nein sagen kann, und sie ist der
-//            Unterschied zwischen einem Aushaengen und einem Datenverlust.
-//   depth    wie viele Namensteile der Einhaengepfad hat ("/" = 0)
-//   path     der Einhaengepfad als Text, 32 Oktette
-//
-// Der Platz 0 ist die WURZEL und wird beim Start belegt. Er laesst sich
-// nicht aushaengen, solange etwas darauf offen ist -- und `umount /`
-// von Runde K11 geht weiter durch denselben Weg wie vorher.
 
 import lib.kstate
 
@@ -44,7 +12,7 @@ export {
 
 const MAX_MNT: u64 = 8
 const MNT_BYTES: u64 = 128
-const MNT_OFF: u64 = 0x040 // in kstate.K14_OFF
+const MNT_OFF: u64 = 0x040
 const PATH_LEN: u64 = 32
 
 const M_USED: u64 = 0
@@ -56,7 +24,7 @@ const M_FLAGS: u64 = 40
 const M_ROOT: u64 = 48
 const M_OPENS: u64 = 56
 const M_DEPTH: u64 = 64
-const M_PATH: u64 = 96 // 32 Oktette bis 128
+const M_PATH: u64 = 96
 
 const F_RDONLY: u64 = 1
 
@@ -167,10 +135,6 @@ fn path_len(state: u64, m: u64) -> u64 {
     return n
 }
 
-// Den Einhaengepfad setzen. Er wird NORMALISIERT: er faengt mit einem
-// Schraegstrich an und endet ohne einen -- ausser er ist die Wurzel.
-// Ohne das waeren "/mnt" und "/mnt/" zwei Einhaengepunkte, und der
-// laengste gemeinsame Anfang, mit dem `vfs.fi` sucht, waere geraten.
 fn set_path(state: u64, m: u64, src: u64) -> bool {
     let p: u64 = path_at(state, m)
     var i: u64 = 0
@@ -188,7 +152,6 @@ fn set_path(state: u64, m: u64, src: u64) -> bool {
             return false
         }
         let c: u64 = kstate.get8(src + i)
-        // Zwei Schraegstriche hintereinander werden einer.
         if c != 47 || n == 0 || kstate.get8(p + n - 1) != 47 {
             kstate.set8(p + n, c as u8)
             n = n + 1
@@ -211,11 +174,6 @@ fn set_path(state: u64, m: u64, src: u64) -> bool {
     return true
 }
 
-// Ist der Einhaengepfad von `m` ein Anfang von `path`, UND ZWAR AN
-// EINER NAMENSGRENZE? Das ist die eine Stelle, an der eine
-// Einhaengeschicht falsch werden kann: "/mnt" ist kein Anfang von
-// "/mnttest", auch wenn die vier Oktette stimmen. Rueckgabe: wie viele
-// Oktette des Pfades verbraucht sind, oder 0.
 fn path_eq_prefix(state: u64, m: u64, path: u64) -> u64 {
     let p: u64 = path_at(state, m)
     let n: u64 = path_len(state, m)
@@ -223,7 +181,6 @@ fn path_eq_prefix(state: u64, m: u64, path: u64) -> u64 {
         return 0
     }
     if n == 1 {
-        // Die Wurzel passt auf jeden Pfad, der mit '/' anfaengt.
         if kstate.get8(path) == 47 {
             return 1
         }
@@ -243,8 +200,6 @@ fn path_eq_prefix(state: u64, m: u64, path: u64) -> u64 {
     return 0
 }
 
-// Der letzte Namensteil eines Einhaengepfads, fuer `readdir` auf dem
-// Verzeichnis darueber. "/dev" -> "dev".
 fn name_of(state: u64, m: u64, out: u64, max: u64) -> u64 {
     let p: u64 = path_at(state, m)
     let n: u64 = path_len(state, m)
@@ -261,9 +216,6 @@ fn name_of(state: u64, m: u64, out: u64, max: u64) -> u64 {
     return i
 }
 
-// Einen freien Platz nehmen. Platz 0 ist der Wurzel vorbehalten -- das
-// ist keine Bequemlichkeit, sondern die Zusage, dass die Wurzel
-// gefunden wird, auch wenn die Tafel voll ist.
 fn alloc(state: u64, want_root: bool) -> u64 {
     if want_root {
         if used(state, 0) {
@@ -302,10 +254,6 @@ fn free(state: u64, m: u64) {
     kstate.set(state, kstate.VFS_MOUNTS, count(state))
 }
 
-// Ist `path` GENAU der Einhaengepfad von `m`? Nicht "faengt damit an" --
-// das ist `path_eq_prefix`. Zwei Fragen, zwei Funktionen; sie
-// zusammenzulegen waere die Verwechslung, an der `umount /mnt/x` die
-// falsche Einhaengung erwischt.
 fn path_is(state: u64, m: u64, path: u64) -> bool {
     if !used(state, m) {
         return false
@@ -321,8 +269,6 @@ fn path_is(state: u64, m: u64, path: u64) -> bool {
     return kstate.get8(path + n) == 0
 }
 
-// Eine Zeile ueber diese Einhaengung auf die serielle Leitung -- fuer
-// den Testlauf, der die Tafel von aussen nachrechnet.
 fn describe(state: u64, m: u64) -> u64 {
     return fstype(state, m)
 }

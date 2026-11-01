@@ -197,7 +197,7 @@ GG="$TMPD/kernel-gg"; mkdir -p "$GG"
 ( cd kernel && find . -name '*.fi' -exec cp --parents {} "$GG/" \; )
 sed -i 's/^const WIG_OFF: u64 = 0x46000/const WIG_OFF: u64 = 0x1E000/' "$GG/lib/kstate.fi"
 gg=$(python3 tools/kernel/memmap.py "$GG" 2>&1)
-if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'KOLLISION'; then
+if [ $? -ne 0 ] && printf '%s' "$gg" | grep -q 'COLLISION'; then
     ok "with WIG_OFF at 0x1E000 the checker finds the collision with WM"
 else
     bad "the collision checker does NOT find the new collision: $gg"

@@ -1,21 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/serial.fi -- round 59: COM1, the kernel's only output.
-//
-// A kernel without output is a black box. Everything this kernel says --
-// boot messages, register dumps of an exception, the tick counter, the
-// keys -- goes out here, and `tools/kernel/run.sh` reads it back out of
-// QEMU and holds it against expectations.
-//
-// Port I/O is the one thing that cannot be expressed with pointers:
-// `in`/`out` are instructions of their own with an address space of their
-// own. Hence inline assembly (round 52, compiler/src/core.rs).
 
-// ROUNDE K7: der Bildschirm haengt UNTER dieser Datei, nicht darueber.
-// `fb.fi` bindet weder `serial` noch `mem`, `pci` oder `apic` ein --
-// sonst waere der Abhaengigkeitsgraph ein Kreis. Dafuer spiegelt `put`
-// hier jedes Oktett auf den Rahmenpuffer, und damit zeigen serielle
-// Konsole und Bildschirm dasselbe, ohne dass eine der rund tausend
-// Aufrufstellen von `serial.puts` sich aendert.
 import gfx.gfx
 import lib.kstate
 import arch.arch
@@ -26,79 +9,23 @@ export {
     init, put, puts, text, nl, hex, hex_digits, hex_width, dec, pad_dec,
     COM1, COM2, port, set_port, rx_ready, rx_take, rx_on, rx_off,
     overrun, drain_fifo,
-    // RUNDE KABEL: der Baustein wird geprueft, nicht geglaubt.
     probe, off, set_off, verworfen, lsr_roh, scr_roh,
-    // RUNDE VIELKERN 3: eine Zeile bleibt eine Zeile.
     line_at, line_clear, line_lost, line_stolen,
-    // W-X3: deferred (ring buffered) output for periodic reports
     defer_on, defer_off, pump, ring_used, ring_flushed, ring_say, wire_overlap_count,
     ring_stolen_count
 }
 
-// ==================================================== RUNDE VIELKERN 3
-// EINE ZEILE BLEIBT EINE ZEILE -- AUCH MIT ACHT KERNEN.
-//
-// Mit Ring 3 auf allen Kernen schreiben mehrere Kerne gleichzeitig auf
-// dieselbe Leitung, und `puts` schreibt Zeichen fuer Zeichen. Gemessen
-// im ersten Lauf dieser Runde, mitten in einer MESSZEILE:
-//
-//     r3: pid=16  kern=2  maske=0x4  n=1  rulnsau=n1c
-//
-// Das ist `runs=1` und `launc...` ineinander. Fuer einen Menschen ist
-// das haesslich; fuer einen Pruefstand ist es das Ende der Messung --
-// die Zahl, auf die es ankommt, steht dann einfach nicht mehr da.
-//
-// DIE SPERRE, DIE SICH NICHT SELBST VERKLEMMEN KANN. Der Einwand gegen
-// eine Sperre an dieser Stelle ist richtig und steht in
-// docs/RUNDE-VIELKERN.md: sie liegt im Unterbrechungspfad. Genommen
-// wird sie deshalb WIE `fs.enter` -- je Kern wiedereintrittsfaehig:
-// gehoert sie diesem Kern schon, wird nicht gewartet, sondern
-// geschrieben. Ein Behandler, der einen schreibenden Kern unterbricht,
-// schreibt also mitten in dessen Zeile (selten, sichtbar, harmlos) und
-// wartet NIE auf sich selbst.
-//
-// Und sie ist BEGRENZT: wer zu lange wartet, schreibt trotzdem. Ein
-// Kern, der mit der Sperre in der Hand gestorben ist, darf die
-// Fehlermeldung der anderen nicht verschlucken -- gerade die Ausgabe
-// muss ueberleben, wenn sonst nichts mehr geht. Wie oft das vorkam,
-// sagt `zeile_verloren`.
 const LINE_LIMIT: u64 = 20000000
 
-// W-D1: ONE LINE STAYS ONE LINE -- FOR EVERY WRITER, NOT ONLY THE ONES THAT
-// ASK. Until now only `klog.ser_line` and `sys.conout` took this lock, and
-// only around ONE call. A userland line is several calls (`say`, `sayn`,
-// `nl` = three `write` system calls), the kernel's own `puts` chains are
-// dozens of `put`s, and the deferred ring has no idea where a line ends:
-// a line from another core landed in the middle of it (~1 boot in 5, e.g.
-// "glogin: b" ... "eit n=1 pid=28"), and gates that wait for a whole line
-// ("glogin: bereit", "qs: tile n=5 to=1", "wlib: win id=") flaked.
-//
-// RULE: `put` takes the lock on the first octet of a line (owner = core, as
-// before: re-entrant per core) and gives it back with the '\n'. An explicit
-// holder (`line_at` ... `line_clear`) keeps working unchanged; if its text
-// ends WITHOUT a newline, `line_clear` hands the lock over to the line
-// (`zeile_auto`) instead of dropping it, so the next `write` of the same
-// line is still protected.
-//
-// A lock left open (a prompt, a dead core, a task that never finishes its
-// line) must not freeze the others: a waiter takes it over when the owner
-// has written nothing for LINE_STALE cycles (~100 ms; 7 ms was torn by a preempted vCPU under host load; the owner refreshes
-// `zeile_stamp` with every octet; one octet takes ~260 us on the wire).
-// Word `noserline` switches the automatic part off (counter-proof).
-// Limitation: the owner is the CORE, so two tasks time-sliced on one core
-// can still interleave a line (rare; they are not different cores).
 const LINE_STALE: u64 = 300000000
 
 static mut zeile_wer: [u64; 1] = [0 as u64; 1]
 static mut zeile_daneben: [u64; 1] = [0 as u64; 1]
-static mut entry_stamp: [u64; 1] = [0 as u64; 1] // arch.cycles() of the owner's last octet
-static mut entry_auto: [u64; 1] = [0 as u64; 1] // 1 = a newline gives the lock back
-static mut entry_open: [u64; 1] = [0 as u64; 1] // 1 = the last octet was not a newline
-static mut entry_stolen: [u64; 1] = [0 as u64; 1] // takeovers from a stale owner
+static mut entry_stamp: [u64; 1] = [0 as u64; 1]
+static mut entry_auto: [u64; 1] = [0 as u64; 1]
+static mut entry_open: [u64; 1] = [0 as u64; 1]
+static mut entry_stolen: [u64; 1] = [0 as u64; 1]
 
-// Rueckgabe: 0 = nothing to give back (nested over an explicit holder, or
-// timed out), 1 = I took it, 2 = I was the owner through an open line and
-// now hold it explicitly. Every non-zero value must go to `line_clear`.
 fn line_at(me: u64) -> u64 {
     if kstate.mode_on(arch.kdata_base(), kstate.M_SERWIDEN) {
         return 0
@@ -109,11 +36,10 @@ fn line_at(me: u64) -> u64 {
             entry_auto[0] = 0
             return 2
         }
-        return 0 // schon meine -- eingeschachtelt, nichts tun
+        return 0
     }
     var spins: u64 = 0
     while __atomic_swap(a as *mut u64, 0 as u64, me + 1) != 0 as u64 {
-        // stale owner? (it has written nothing for LINE_STALE cycles)
         let o: u64 = __mmio_read64(a as *mut u64)
         let now: u64 = arch.cycles()
         let st: u64 = __mmio_read64((&entry_stamp[0]) as u64 as *mut u64)
@@ -136,8 +62,6 @@ fn line_at(me: u64) -> u64 {
     return 1
 }
 
-// Give the lock back -- but only if it is still mine (a stale takeover may
-// have passed it on) and only if the line is finished; an open line keeps it.
 fn line_clear(hat: u64) {
     if hat == 0 {
         return
@@ -163,77 +87,29 @@ fn line_stolen() -> u64 {
     return entry_stolen[0]
 }
 
-// 0x3F8 = COM1 on every PC that has ever existed
 const COM1: u16 = 0x3F8
-// RUNDE SERVERBUILD: die zweite Leitung. `console=ttyS1` nimmt sie.
 const COM2: u16 = 0x2F8
 
-// Die Register, relativ zum Torwert. Sie standen bis zu dieser Runde
-// als nackte Zahlen in `init` -- mit einem Empfangsweg daneben ist das
-// eine Zahl zu viel, um sie zweimal zu raten.
-const R_DATA: u16 = 0 // lesen: RBR, schreiben: THR
-const R_IER: u16 = 1 // welche Unterbrechungen der Baustein schickt
-const R_FCR: u16 = 2 // schreiben: die FIFOs
-const R_LCR: u16 = 3 // Wortlaenge, Stoppbits, DLAB
-const R_MCR: u16 = 4 // DTR, RTS, OUT1, OUT2
-const R_LSR: u16 = 5 // was anliegt
-const LSR_RX: u8 = 0x01 // ein Oktett liegt bereit
-const LSR_OVERRUN: u8 = 0x02 // eines ist verlorengegangen
-const LSR_TX: u8 = 0x20 // der Sender ist leer
-const IER_RX: u8 = 0x01 // "sag Bescheid, wenn etwas ankommt"
-const R_SCR: u16 = 7 // das Notizregister -- der Praesenztest
+const R_DATA: u16 = 0
+const R_IER: u16 = 1
+const R_FCR: u16 = 2
+const R_LCR: u16 = 3
+const R_MCR: u16 = 4
+const R_LSR: u16 = 5
+const LSR_RX: u8 = 0x01
+const LSR_OVERRUN: u8 = 0x02
+const LSR_TX: u8 = 0x20
+const IER_RX: u8 = 0x01
+const R_SCR: u16 = 7
 
-// ====================================================================
-// RUNDE KABEL: DER BILDSCHIRM DARF NICHT AN EINEM KABEL HAENGEN, DAS
-// NIEMAND ANGESCHLOSSEN HAT.
-//
-// Hier stand:
-//
-//     fn put(c: u8) {
-//         while !ready() {
-//         }
-//         out8(port(), c)
-//         gfx.echo(c)          <- DER BILDSCHIRM KOMMT ERST DANACH
-//     }
-//
-// `ready()` liest LSR und prueft Bit 5 (Sender leer). Das war eine
-// UNBEGRENZTE Warteschleife auf einen Baustein, von dem niemand
-// geprueft hatte, ob es ihn gibt. Sitzt an 0x3F8 nichts und liefert der
-// Chipsatz fuer nicht dekodierte Tore 0x00 (viele tun das), dann ist
-// `0x00 & 0x20` null, `ready()` ist FUER IMMER falsch, und der Kern
-// kehrt aus `put` nie zurueck -- mit Unterbrechungen an, aber tot.
-//
-// Und weil `gfx.echo` DAHINTER stand, nimmt es den Bildschirm mit:
-// jedes Oktett erscheint erst, wenn der UART es genommen hat. Das
-// erklaert einen Abbruch MITTEN IN EINER ZEILE, so wie "qs: win id="
-// ohne die Zahl dahinter.
-//
-// In QEMU faellt es nie auf: dort ist ein echter, sofort leerer UART
-// emuliert. Genau der Unterschied Blech/QEMU.
-//
-// Drei Dinge dagegen: eine ZEITGRENZE, ein PRAESENZTEST, und
-// `gfx.echo` VOR der Leitung.
-const PUT_GRENZE: u64 = 100000 // Durchlaeufe, dann ist Schluss
-const VERW_GRENZE: u64 = 16 // so oft, dann bleibt die Leitung zu
+const PUT_GRENZE: u64 = 100000
+const VERW_GRENZE: u64 = 16
 
-static mut ser_aus: u64 = 0 // 1 = stillgelegt, es kommt nichts mehr
-static mut ser_verw: u64 = 0 // verworfene Oktette
-static mut ser_lsr: u64 = 256 // roher LSR beim Test (256 = ungeprueft)
-static mut ser_scr: u64 = 256 // was das Notizregister zurueckgab
+static mut ser_aus: u64 = 0
+static mut ser_verw: u64 = 0
+static mut ser_lsr: u64 = 256
+static mut ser_scr: u64 = 256
 
-// ------------------------------------------------------- der Torwert
-//
-// WARUM DAS EINE FUNKTION IST UND KEINE KONSTANTE. Bis zu dieser Runde
-// stand COM1 fest in jeder der sieben Zeilen, die ein Tor anfassen.
-// `console=ttyS1` verlangt, dass Ausgabe UND Eingabe auf dieselbe
-// andere Leitung gehen -- und wenn nur eine Haelfte umzieht, redet der
-// Kernel in ein Kabel und hoert am anderen.
-//
-// Der Wert liegt in `kdata` und nicht in einer Modulvariablen, weil
-// `put` kein `state` bekommt und keines bekommen soll (derselbe Grund,
-// aus dem `ansi.echo` sich `kdata` selbst holt). Vor `sercon.parse`
-// steht dort eine Null, und eine Null heisst COM1 -- damit ist die
-// allererste Bootmeldung genau die, die sie seit Runde 59 ist.
 fn port() -> u16 {
     let p: u64 = kstate.get(arch.kdata_base(), kstate.SER_PORT)
     if p == 0 {
@@ -245,24 +121,6 @@ fn port() -> u16 {
 fn set_port(state: u64, p: u64) {
     kstate.set(state, kstate.SER_PORT, p)
 }
-
-// ------------------------------------------------------------ port I/O
-
-// ROUND ARM: these three no longer hold an instruction. They forward
-// across the boundary drawn in `kernel/arch/arch.fi`, and the instruction
-// lives in `kernel/arch/x86_64/machine.fi` -- the same two lines that stood
-// here since round 59, moved once so that a second machine can answer them.
-//
-// The names and the signatures do NOT change. `serial.out8` and
-// `serial.in8` are the port helpers a dozen other modules reach for; making
-// them private and rewriting those call sites would have been a second
-// change hiding inside the first, and step B of this round is a move with
-// no change in behaviour or it is nothing.
-//
-// This file is the proof of the boundary rather than an example of it: every
-// line the kernel says goes through `put` below, so if the forwarding were
-// wrong, every one of the twenty-four sections of ./test.sh would go dark at
-// once instead of one of them going yellow.
 
 fn out8(port: u16, value: u8) {
     arch.dev_out8(port, value)
@@ -276,21 +134,15 @@ fn io_wait() {
     arch.dev_io_wait()
 }
 
-// ------------------------------------------------------------- output
-
 fn init() {
     let b: u16 = port()
-    out8(b + R_IER, 0x00 as u8) // no interrupts
-    out8(b + R_LCR, 0x80 as u8) // unlock the divisor
-    out8(b + R_DATA, 0x03 as u8) // 38400 baud, low byte
-    out8(b + R_IER, 0x00 as u8) // high byte
-    out8(b + R_LCR, 0x03 as u8) // 8 bits, no parity, 1 stop bit
-    out8(b + R_FCR, 0xC7 as u8) // FIFO on, cleared, 14 bytes
-    // RUNDE SERVERBUILD: OUT2 war schon da und ist der Grund, warum der
-    // Empfangsweg dieser Runde ueberhaupt geht -- ohne dieses Bit haelt
-    // der 8250 seine Unterbrechungsleitung am PC still.
-    out8(b + R_MCR, 0x0B as u8) // DTR, RTS, OUT2
-    // W-X3: IIR bits 7:6 = 11 means a working 16550A FIFO (16 octets per THRE)
+    out8(b + R_IER, 0x00 as u8)
+    out8(b + R_LCR, 0x80 as u8)
+    out8(b + R_DATA, 0x03 as u8)
+    out8(b + R_IER, 0x00 as u8)
+    out8(b + R_LCR, 0x03 as u8)
+    out8(b + R_FCR, 0xC7 as u8)
+    out8(b + R_MCR, 0x0B as u8)
     if (in8(b + R_FCR) & 0xC0 as u8) == 0xC0 as u8 {
         ser_burst = 16
     } else {
@@ -298,11 +150,6 @@ fn init() {
     }
 }
 
-// DER PRAESENZTEST, der Standardweg: einen Wert ins Notizregister
-// schreiben und zurueckholen. Kommt er nicht wieder, sitzt dort kein
-// UART -- dann bleibt die Leitung still, und der Kern verliert keine
-// Zeit mehr an sie. Der rohe LSR wird mitgenommen: 0x00 heisst "kein
-// Baustein" (nicht dekodiertes Tor), 0xFF heisst "offener Bus".
 fn probe() -> bool {
     let b: u16 = port()
     out8(b + R_SCR, 0xA5 as u8)
@@ -340,20 +187,10 @@ fn ready() -> bool {
     return (in8(port() + R_LSR) & LSR_TX) != 0 as u8
 }
 
-// ------------------------------------------------------- der Rueckweg
-//
-// SIEBEN ZEILEN, UND SIE SIND DER UNTERSCHIED ZWISCHEN EINEM
-// NOTAUSGANG UND EINER KONSOLE. Der Sendeweg steht seit Runde 59; der
-// Empfangsweg fehlte, und deshalb war jede Messung dieses Projektes
-// bisher entweder ein Skript auf der Befehlszeile oder ein
-// Tastendruck, den der Testlaeufer in den QEMU-Monitor schob.
-
 fn rx_ready() -> bool {
     return (in8(port() + R_LSR) & LSR_RX) != 0 as u8
 }
 
-// Ein Oktett, oder 256, wenn keines da ist. 256 und nicht 0: die Null
-// ist ein gueltiges Oktett (STRG-Leertaste schickt sie).
 fn rx_take() -> u64 {
     if !rx_ready() {
         return 256
@@ -361,16 +198,10 @@ fn rx_take() -> u64 {
     return in8(port() + R_DATA) as u64
 }
 
-// Ob der Baustein ein Oktett verloren hat, weil niemand es abgeholt
-// hat. Das Lesen von LSR loescht die Meldung, also wird sie hier
-// gezaehlt und nicht spaeter noch einmal gesucht.
 fn overrun() -> bool {
     return (in8(port() + R_LSR) & LSR_OVERRUN) != 0 as u8
 }
 
-// Alles wegwerfen, was der Baustein noch haelt. Beim Einschalten der
-// Konsole: was VOR dem Start in die Leitung getippt wurde, gehoert
-// nicht in die erste Zeile der Shell.
 fn drain_fifo() {
     var n: u64 = 0
     while rx_ready() && n < 64 {
@@ -387,22 +218,6 @@ fn rx_off() {
     out8(port() + R_IER, 0x00 as u8)
 }
 
-// ====================================================== W-X3 (r1081)
-// NON-BLOCKING OUTPUT FOR PERIODIC REPORTS.
-//
-// `put` polls THRE and waits ~260 us per octet at 38400 baud (QEMU does
-// the same). The input pulse (~400 octets) and the `tafel:` lines cost
-// 60-140 ms of CPU each, every 5 s -- the largest part of the `boot`
-// idle. While `defer_on` is active (a depth counter, so the timer bottom
-// half and the desktop loop may nest), `put` appends to a ring instead of
-// waiting. `pump` (timer bottom half + desktop round) writes one FIFO
-// burst whenever THRE is set, so the CPU never waits for the line.
-//
-// ORDER IS KEPT: a plain `put` while the ring holds data flushes the ring
-// first (blocking, in order) -- so a panic message never overtakes, and
-// is never lost behind, deferred lines. Ring full: the producer drains
-// blocking until there is room (output is never dropped). The ring lock
-// is bounded like `line_at`; on timeout the octet goes the old blocking way.
 const RING_SIZE: u64 = 4096
 const RING_LOCK_SPINS: u64 = 20000
 const RING_ROOM: u64 = 16
@@ -411,17 +226,17 @@ const RING_SLICE: u64 = 64
 const WIRE_ROUNDS: u64 = 80
 const RING_STALE: u64 = 300000000
 static mut ring_buf: [u8; 4096] = [0 as u8; 4096]
-static mut ring_head: [u64; 1] = [0 as u64; 1] // next write (monotonic)
-static mut ring_tail: [u64; 1] = [0 as u64; 1] // next read (monotonic)
+static mut ring_head: [u64; 1] = [0 as u64; 1]
+static mut ring_tail: [u64; 1] = [0 as u64; 1]
 static mut ring_lock: [u64; 1] = [0 as u64; 1]
 static mut ring_stamp: [u64; 1] = [0 as u64; 1]
 static mut ring_stolen: [u64; 1] = [0 as u64; 1]
 static mut defer_depth: [u64; 1] = [0 as u64; 1]
-static mut ser_burst: u64 = 1 // octets per THRE (16 with a 16550A FIFO)
-static mut ring_flushes: u64 = 0 // times a plain put had to flush the ring
-static mut ring_fulls: u64 = 0 // times the ring was full and the producer drained blocking
-static mut ring_pumps: u64 = 0 // bursts written by pump
-static mut ring_octets: u64 = 0 // octets queued
+static mut ser_burst: u64 = 1
+static mut ring_flushes: u64 = 0
+static mut ring_fulls: u64 = 0
+static mut ring_pumps: u64 = 0
+static mut ring_octets: u64 = 0
 
 fn defer_on() {
     __atomic_add((&defer_depth[0]) as *mut u64, 1 as u64)
@@ -479,7 +294,6 @@ fn ring_give() {
     arch.atomic_store((&ring_lock[0]) as u64, 0)
 }
 
-// Write the oldest octet (caller holds the lock and has seen THRE).
 fn ring_out_one() {
     let t: u64 = ring_tail[0]
     uart_write(ring_buf[(t % RING_SIZE) as usize])
@@ -487,7 +301,6 @@ fn ring_out_one() {
     ring_stamp[0] = arch.cycles()
 }
 
-// Blocking drain of the whole ring, in order. Caller holds the lock.
 fn ring_drain_blocking() {
     while ring_tail[0] != ring_head[0] {
         var n: u64 = 0
@@ -495,7 +308,6 @@ fn ring_drain_blocking() {
             n = n + 1
         }
         if n >= PUT_GRENZE {
-            // line is dead: drop the rest like `put` does
             ser_aus = 1
             ring_tail[0] = ring_head[0]
             return
@@ -521,7 +333,6 @@ fn ring_drain_some(n: u64) {
     }
 }
 
-// Plain put: older deferred octets go first.
 fn ring_flush_before() {
     if ring_tail[0] == ring_head[0] {
         return
@@ -535,7 +346,6 @@ fn ring_flush_before() {
     arch.irq_restore(fl)
 }
 
-// Deferred put. false = could not queue (lock timeout): caller goes blocking.
 fn ring_push(c: u8) -> bool {
     let fl: u64 = arch.irq_save()
     if !ring_take(RING_LOCK_SPINS) {
@@ -560,7 +370,6 @@ fn ring_push(c: u8) -> bool {
     return true
 }
 
-// Profile line (word `phases`): how the ring behaved.
 fn ring_say() {
     var a: [u8; 19] = "serial: ring used=\0"
     var b: [u8; 9] = " queued=\0"
@@ -583,8 +392,6 @@ fn ring_say() {
     nl()
 }
 
-// Called from the timer bottom half and the desktop round: one burst if
-// the transmitter is empty. Never waits, never spins on the lock.
 fn pump() {
     if ring_tail[0] == ring_head[0] {
         return
@@ -608,8 +415,6 @@ fn pump() {
     arch.irq_restore(fl)
 }
 
-// DER BILDSCHIRM ZUERST. Er haengt ab hier an nichts mehr.
-// W-D1: the octet goes out under the line lock (see LINE_STALE above).
 fn put(c: u8) {
     gfx.echo(c)
     if ser_aus != 0 {
@@ -641,7 +446,6 @@ fn put(c: u8) {
     }
 }
 
-// The octet itself (ring or wire); the caller holds the line lock.
 fn put_raw(c: u8) {
     if ser_aus != 0 {
         return
@@ -732,10 +536,6 @@ fn nl() {
     put(10 as u8)
 }
 
-// A string in the C sense: everything up to the first zero octet. Firn
-// has no string type in the kernel profile (that is in the standard
-// library, and that one is barred here), so the kernel writes its texts
-// as `[u8; n]` with a closing `\0`.
 fn puts(p: u64) {
     var i: u64 = 0
     while true {
@@ -748,7 +548,6 @@ fn puts(p: u64) {
     }
 }
 
-// n octets, zeros included -- for buffers that are not terminated.
 fn text(p: u64, n: u64) {
     var i: u64 = 0
     while i < n {
@@ -757,8 +556,6 @@ fn text(p: u64, n: u64) {
     }
 }
 
-// ------------------------------------------------------------- numbers
-
 fn digit(d: u64) -> u8 {
     if d < 10 {
         return (48 + d) as u8
@@ -766,12 +563,10 @@ fn digit(d: u64) -> u8 {
     return (87 + d) as u8
 }
 
-// `0x` and as many digits as the value needs (at least one).
 fn hex(v: u64) {
     hex_width(v, hex_digits(v))
 }
 
-// How many hex digits the value needs (1..16).
 fn hex_digits(v: u64) -> u64 {
     var w: u64 = 1
     var x: u64 = v >> 4
@@ -782,7 +577,6 @@ fn hex_digits(v: u64) -> u64 {
     return w
 }
 
-// Exactly `w` hex digits, highest first.
 fn hex_width(v: u64, w: u64) {
     put(48 as u8)
     put(120 as u8)
@@ -797,7 +591,6 @@ fn dec(v: u64) {
     pad_dec(v, 0)
 }
 
-// Decimal, padded with blanks up to `width` (0 = no padding).
 fn pad_dec(v: u64, width: u64) {
     var buf: [u8; 24] = [0 as u8; 24]
     var n: u64 = 0

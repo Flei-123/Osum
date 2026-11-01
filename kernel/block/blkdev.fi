@@ -1,73 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/blkdev.fi -- Runde BLECH: WELCHE PLATTE, ENTSCHIEDEN VOM BUS.
-//
-// Der Eigner hat es in einem Satz gesagt, und der Satz ist die ganze
-// Begruendung dieser Datei:
-//
-//     "Die Struktur ist bei Netz schon richtig -- bei Speicher NICHT.
-//      Halte beide gleich."
-//
-// Nachgelesen, nicht geglaubt. `kernel/netdev.fi` hat:
-//
-//   * EINE TABELLE (`driver_for`), in der steht, welcher Chip welchen
-//     Treiber bekommt -- eine Zeile je Karte, an EINER Stelle;
-//   * je Chip eine eigene Datei mit EINHEITLICHEN Namen (`init_on`,
-//     `tx_frame_on`, `rx_take_on`, `link_up_on`);
-//   * einen `probe`, der den Bus abgeht und selbst entscheidet;
-//   * und eine Meldung MIT NUMMERN fuer jede Karte, die keinen Treiber
-//     bekommt -- samt Grund, wenn der Kern den Chip immerhin kennt.
-//
-// `kernel/blk.fi` hat davon nichts. Dort stehen `use_ata`, `use_nvme`,
-// `use_ahci` NEBENEINANDER, und der Aufrufer muss wissen, welche Art
-// Platte er vor sich hat. Genau deshalb stand in `docs/RUNDE-MERGE3.md`
-// der Satz "die automatische Treiberwahl beim Start ist nicht gebaut":
-// es gab niemanden, der sie haette treffen koennen.
-//
-// ------------------------------------------------- WAS DIESE DATEI IST
-//
-// Die FEHLENDE SCHICHT, und zwar genau die, die `netdev.fi` fuer Netz
-// ist -- nicht mehr:
-//
-//   `driver_for(cls, sub, pif)`  die Tabelle. Eine Zeile je Controller.
-//   `reason_for(...)`            warum ein erkannter Controller trotzdem
-//                                keinen Treiber bekommt.
-//   `probe(state)`               der Lauf ueber den Bus. Fuellt die
-//                                Plattenliste und die Liste der
-//                                abgelehnten Controller.
-//   `print_disks(state)`         was dabei herauskam, mit Nummern.
-//   `print_table(state)`         die Tabelle OHNE Platte gegen eine
-//                                eingebaute Nummernliste -- der einzige
-//                                Weg, die Wahl fuer einen Controller zu
-//                                pruefen, den dieses Verzeichnis nicht
-//                                besitzt. Wort `blktab`, genau wie
-//                                `nictab` bei Netz.
-//   `init_on`/`present_on`/`blocks_on`/`bsize_on`/`read_on`/`write_on`/
-//   `flush_on`                   der Verteiler, je Treiber dieselben
-//                                Namen.
-//
-// ------------------------------------------- WAS DIESE DATEI NICHT IST
-//
-// Kein Ersatz fuer `blk.fi`. Die 813 Zeilen dort sind die BLOCKEBENE:
-// 512 Oktett lesen, 512 Oktett schreiben, ein Versatz fuer die
-// Partition. `fs.fi`, `vfs.fi`, `fat.fi` und `part.fi` reden mit
-// dieser Ebene und aendern keine Zeile -- dieselbe Zusage, die
-// `netdev.fi` gegenueber `inet.fi` gegeben hat.
-//
-// Die Geraetenummern sind deshalb ABSICHTLICH die von `blk.fi`
-// (`DEV_NVME`, `DEV_AHCI`, `DEV_USB`, `DEV_ATA`): eine zweite
-// Nummernwelt daneben waere genau die Abstraktion, die spaeter niemand
-// mehr auseinandernimmt.
-//
-// ------------------------------------------------------- DIE ORDNUNG
-//
-// NVMe, dann AHCI, dann USB, dann IDE. Die Zahlen der KIND_-Konstanten
-// SIND diese Ordnung -- kleiner zuerst -, damit sie an einer Stelle
-// steht und nicht in einer Kette von `if`. Warum diese und keine
-// andere: NVMe ist auf einem Rechner, der eines hat, immer die
-// Systemplatte; AHCI ist der Normalfall seit 2010; ein USB-Stick ist
-// haeufig das Installationsmedium und soll VOR der alten IDE-Platte
-// kommen, weil ein Rechner mit beidem in aller Regel gerade
-// installiert wird.
 
 profile kernel
 
@@ -96,15 +26,6 @@ export {
     BLKDEV_OFF, BLKDEV_MAX
 }
 
-// ------------------------------------------------------ der Platz
-//
-// Eine Seite hinter der Wurzelwahl (0x85000), in demselben Stueck, das
-// `tools/kernel/memmap.py` als frei ausweist. Eingetragen ist sie dort
-// unter BLKDEV.
-//
-//   0x000..0x180   die gefundenen Platten, 0x30 je Eintrag -- 8
-//   0x180..0x200   die Skalare
-//   0x200..0x380   die abgelehnten Controller, 24 Oktett je Eintrag -- 16
 const BLKDEV_OFF: u64 = 0x86000
 const BLKDEV_MAX: u64 = 0x1000
 
@@ -113,37 +34,31 @@ const DISK_SPAN: u64 = 0x30
 
 const D_KIND: u64 = 0x00
 const D_BDF: u64 = 0x08
-const D_PCI: u64 = 0x10 // Platz in der Bustabelle von pci.fi
+const D_PCI: u64 = 0x10
 const D_VEN: u64 = 0x18
 const D_DEV: u64 = 0x20
-const D_UNIT: u64 = 0x28 // die Nummer INNERHALB des Treibers
+const D_UNIT: u64 = 0x28
 
 const S_PROBED: u64 = 0x180
 const S_NDISK: u64 = 0x188
 
 const S_UNSUP_N: u64 = 0x200
-const S_UNSUP: u64 = 0x208 // n * 24: Hersteller, Geraet, Grund
+const S_UNSUP: u64 = 0x208
 const MAX_UNSUP: u64 = 16
 
-// DIE TREIBER. Die Zahlen SIND die Suchreihenfolge.
 const KIND_NONE: u64 = blkreg.KIND_NONE
 const KIND_NVME: u64 = blkreg.KIND_NVME
 const KIND_AHCI: u64 = blkreg.KIND_AHCI
 const KIND_USB: u64 = blkreg.KIND_USB
 const KIND_ATA: u64 = blkreg.KIND_ATA
 
-// WARUM ein erkannter Controller trotzdem keinen Treiber bekommt. Das
-// ist dieselbe Unterscheidung, die `netdev.reason_for` fuer Netzkarten
-// macht, und aus demselben Grund: "steht im RAID-Modus, stell das BIOS
-// um" sagt einem Menschen vor einem Brett, was er TUN kann, waehrend
-// "unbekannt" ihn zuerst an der Platte zweifeln laesst.
 const WHY_UNKNOWN: u64 = 0
-const WHY_RAID: u64 = 1 // 01:04 -- Intel RST / AMD RAIDXpert
-const WHY_SATA_LEGACY: u64 = 2 // 01:06, Schnittstelle nicht AHCI
-const WHY_SD: u64 = 3 // 08:05 -- SD/eMMC
-const WHY_SAS: u64 = 4 // 01:07
-const WHY_SCSI: u64 = 5 // 01:00
-const WHY_NVME_OTHER: u64 = 6 // 01:08, aber nicht Schnittstelle 02
+const WHY_RAID: u64 = 1
+const WHY_SATA_LEGACY: u64 = 2
+const WHY_SD: u64 = 3
+const WHY_SAS: u64 = 4
+const WHY_SCSI: u64 = 5
+const WHY_NVME_OTHER: u64 = 6
 
 const SUB_SCSI: u64 = 0x00
 const SUB_RAID: u64 = 0x04
@@ -165,19 +80,6 @@ fn s(state: u64, off: u64, v: u64) {
     kstate.set(state, BLKDEV_OFF + off, v)
 }
 
-// ==================================================== DIE TREIBERTABELLE
-//
-// EINE Stelle im ganzen Kern, an der steht, welcher Controller welchen
-// Treiber bekommt. Wer eine Platte ergaenzt, schreibt hier EINE Zeile --
-// er muss weder den Lauf ueber den Bus noch den Verteiler darunter
-// anfassen. Dasselbe Versprechen wie `netdev.driver_for`.
-//
-// Entschieden wird an der PCI-KLASSE und nicht an Hersteller und
-// Geraetenummer, und das ist der Unterschied zu Netz: ein NVMe-Riegel
-// von Samsung und einer von WD haben verschiedene Nummern und
-// DIESELBE Klasse (01:08:02), weil die Spezifikation das so verlangt.
-// Ein Treiber, der Nummern sammelt, kennt genau die Riegel, die sein
-// Schreiber besass.
 fn driver_for(cls: u64, sub: u64, pif: u64) -> u64 {
     if cls == pci.CLASS_STORAGE {
         if sub == pci.SUB_NVM && pif == pci.PROGIF_NVME {
@@ -192,10 +94,6 @@ fn driver_for(cls: u64, sub: u64, pif: u64) -> u64 {
         return KIND_NONE
     }
     if cls == CLASS_SERIAL && sub == SUB_USBHC {
-        // Ein USB-Regler ist noch keine Platte -- ob ein Stick steckt,
-        // weiss erst der Treiber. Er kommt trotzdem in die Liste, weil
-        // die Entscheidung "gibt es hier eine Wurzel?" ohne ihn nicht
-        // vollstaendig waere.
         return KIND_USB
     }
     return KIND_NONE
@@ -283,15 +181,6 @@ fn print_reason(why: u64) {
     }
 }
 
-// ------------------------------------------------------------ probe
-//
-// Der Lauf ueber den Bus. Er SCHREIBT KEIN REGISTER und zieht kein
-// Geraet hoch -- `print_disks` darf deshalb vor jeder Stufe laufen, die
-// etwas anfasst, genau wie `netdev.print_cards`.
-//
-// DIE LISTE WIRD SORTIERT GEHALTEN, beim Einfuegen: acht Eintraege, ein
-// Einfuegesortieren, und danach steht die Reihenfolge im Speicher und
-// nicht im Kopf dessen, der sie liest.
 fn add_disk(state: u64, kind: u64, bdf: u64, i: u64, ven: u64, dev: u64,
     unit: u64) {
     let n: u64 = g(state, S_NDISK)
@@ -354,20 +243,10 @@ fn probe(state: u64) {
         let ven: u64 = pci.get(state, i, pci.E_VENDOR)
         let dev: u64 = pci.get(state, i, pci.E_DEVICE)
         var k: u64 = driver_for(cls, sub, pif)
-        // r558: an INTEL controller in "SATA Operation = RAID On" (class
-        // 01:04, Dell OptiPlex 9020) speaks plain AHCI and `ahci.fi`
-        // drives it (pci.find_ahci). It belongs in the list as an AHCI
-        // disk -- as an "unsupported RAID controller" the root
-        // search never tried it, so an installed system could not boot
-        // from its own disk. Other 01:04 chips (MegaRAID ...) stay
-        // unsupported.
         if k == KIND_NONE && cls == pci.CLASS_STORAGE && sub == SUB_RAID && ven == pci.VENDOR_INTEL {
             k = KIND_AHCI
         }
         if k == KIND_NONE {
-            // NUR was ueberhaupt Speicher sein koennte. Eine Grafikkarte
-            // ist keine abgelehnte Platte, und eine Liste, die alles
-            // aufzaehlt, sagt nichts mehr.
             if cls == pci.CLASS_STORAGE {
                 note_unsupported(state, ven, dev, reason_for(cls, sub, pif))
             } else if cls == CLASS_BASE && sub == SUB_SD {
@@ -439,9 +318,6 @@ fn unsupported_reason(state: u64, i: u64) -> u64 {
     return g(state, S_UNSUP + i * 24 + 16)
 }
 
-// DIE GERAETENUMMER VON `blk.fi`. Absichtlich dieselbe Welt: eine
-// zweite Nummernwelt daneben waere die Abstraktion, die spaeter niemand
-// mehr auseinandernimmt.
 fn dev_of(k: u64) -> u64 {
     return blkreg.dev_of(k)
 }
@@ -449,13 +325,6 @@ fn dev_of(k: u64) -> u64 {
 fn dev_at(state: u64, i: u64) -> u64 {
     return dev_of(kind_at(state, i))
 }
-
-// ==================================================== DER VERTEILER
-//
-// Ab hier ist jede Funktion dieselben drei Zeilen: fragen, welcher
-// Treiber die Platte hat, und ihn rufen. Nichts anderes darf hier
-// leben -- eine Verteilerschicht, die anfaengt Meinungen zu haben, ist
-// ein dritter Treiber. Woertlich dieselbe Regel wie in `netdev.fi`.
 
 fn init_on(state: u64, i: u64) -> bool {
     let bo: blockclass.BlockOps = blkreg.ops_for(state, kind_at(state, i))
@@ -477,10 +346,6 @@ fn bsize_on(state: u64, i: u64) -> u64 {
     return bo.bsize(state, i)
 }
 
-// Lesen und Schreiben gehen ueber `blk.read_on`/`write_on` und nicht
-// noch einmal an den Treibern vorbei. Das ist Absicht: die Blockebene
-// gibt es, sie ist gemessen, und ein zweiter Weg zu denselben Oktetten
-// waere die Stelle, an der die zwei irgendwann auseinanderlaufen.
 fn read_on(state: u64, i: u64, lba: u64, dst: u64) -> bool {
     return blk.read_on(state, dev_at(state, i), lba, dst)
 }
@@ -494,8 +359,6 @@ fn flush_on(state: u64, i: u64) -> bool {
     return bo.flush(state, i)
 }
 
-// ---------------------------------------------------------- Ausgabe
-
 fn tag() {
     var s0: [u8; 10] = "blkdev: \0\0"
     serial.puts((&s0[0]) as u64)
@@ -507,9 +370,6 @@ fn nums(ven: u64, dev: u64) {
     pci.hexn(dev, 4)
 }
 
-// Die Reihenfolge als EINE Zeile, damit ein Foto der seriellen Ausgabe
-// reicht. Dasselbe, was `rootsel` frueher selbst gedruckt hat -- jetzt
-// steht es dort, wo die Entscheidung faellt.
 fn order_line(state: u64) {
     var s_h: [u8; 14] = "reihenfolge: \0"
     var s_ar: [u8; 4] = " > \0"
@@ -555,7 +415,6 @@ fn print_disks(state: u64) {
         serial.puts((&s_at[0]) as u64)
         serial.hex(bdf_at(state, i))
         serial.puts((&s_sp[0]) as u64)
-        // Wie bei Netz: erst der Name, dann die Nummern als Beweis.
         let dv: u64 = kstate.get(state, sd(i, D_VEN))
         let dd: u64 = kstate.get(state, sd(i, D_DEV))
         if chipname.storage(dv, dd) {
@@ -567,9 +426,6 @@ fn print_disks(state: u64) {
         serial.nl()
         i = i + 1
     }
-    // UND JEDER CONTROLLER OHNE TREIBER, MIT SEINEN NUMMERN. Das ist
-    // die Regel, die ueber allem steht -- hier fuer Platten, so wie
-    // `netdev.print_cards` sie fuer Karten haelt.
     let m: u64 = unsupported_count(state)
     var j: u64 = 0
     while j < m {
@@ -598,15 +454,6 @@ fn print_disks(state: u64) {
     }
 }
 
-// ================================================= DIE TABELLE, GEPRUEFT
-//
-// Dieses Verzeichnis hat keinen Controller im RAID-Modus, keinen
-// SD-Leser und keinen SAS-Regler. Was es aber pruefen KANN, ist die
-// WAHL: fuer jede Klasse aus der Liste unten steht hinterher auf der
-// seriellen Leitung, welchen Treiber sie bekaeme und warum nicht. Das
-// ist der Unterschied zwischen einer Tabelle, die jemand gelesen hat,
-// und einer, die jemand ausgefuehrt hat -- und es ist woertlich das,
-// was `netdev.print_table` fuer Netz tut.
 fn tab_line(cls: u64, sub: u64, pif: u64) {
     var s_t: [u8; 13] = "blkdev: tab \0"
     var s_c: [u8; 2] = ":\0"
@@ -632,23 +479,21 @@ fn tab_line(cls: u64, sub: u64, pif: u64) {
 }
 
 fn print_table(state: u64) {
-    tab_line(0x01, 0x08, 0x02) // NVMe
-    tab_line(0x01, 0x06, 0x01) // SATA im AHCI-Modus
-    tab_line(0x01, 0x06, 0x00) // SATA, herstellereigen
-    tab_line(0x01, 0x01, 0x80) // IDE
-    tab_line(0x01, 0x01, 0x8A) // IDE, andere Schnittstelle
-    tab_line(0x0C, 0x03, 0x30) // xHCI
-    tab_line(0x0C, 0x03, 0x20) // EHCI
-    tab_line(0x01, 0x04, 0x00) // RAID -- Intel RST / AMD RAIDXpert
-    tab_line(0x01, 0x07, 0x00) // SAS
-    tab_line(0x01, 0x00, 0x00) // SCSI
-    tab_line(0x01, 0x08, 0x00) // NVM-Klasse, aber nicht NVMe
-    tab_line(0x08, 0x05, 0x01) // SD/eMMC
-    tab_line(0x02, 0x00, 0x00) // eine Netzkarte: hier hat sie nichts zu suchen
+    tab_line(0x01, 0x08, 0x02)
+    tab_line(0x01, 0x06, 0x01)
+    tab_line(0x01, 0x06, 0x00)
+    tab_line(0x01, 0x01, 0x80)
+    tab_line(0x01, 0x01, 0x8A)
+    tab_line(0x0C, 0x03, 0x30)
+    tab_line(0x0C, 0x03, 0x20)
+    tab_line(0x01, 0x04, 0x00)
+    tab_line(0x01, 0x07, 0x00)
+    tab_line(0x01, 0x00, 0x00)
+    tab_line(0x01, 0x08, 0x00)
+    tab_line(0x08, 0x05, 0x01)
+    tab_line(0x02, 0x00, 0x00)
 }
 
-// Was jeder gefundene Treiber ohne Gegenstelle ueber sich sagen kann:
-// ist er da, wie gross ist er, welche Blockgroesse. Kein Schreibvorgang.
 fn selftest(state: u64) {
     var s_h: [u8; 7] = "self d\0"
     var s_p: [u8; 6] = "  da=\0"

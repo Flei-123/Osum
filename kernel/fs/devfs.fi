@@ -1,52 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/devfs.fi -- Runde K14: /dev als ECHTES Dateisystem.
-//
-// WAS ES VORHER GAB, und warum es zu wenig war. Runde K7 brauchte einen
-// Rahmenpuffer in Ring 3 und schrieb dafuer in `sys.do_open` drei
-// Zeilen, die den Namen `/dev/fb` ABFANGEN, bevor irgendetwas
-// nachgeschlagen wird. Der Kommentar dort ist ehrlich: "Es ist AUCH
-// kein Verzeichnis `/dev` im OFS -- der Name wird abgefangen [...] Ein
-// Osum mit einem echten Geraeteverzeichnis waere eine eigene Runde."
-// Das ist diese Runde.
-//
-// Der Unterschied ist nicht kosmetisch. Ein abgefangener Name kann
-// nicht aufgelistet werden, hat keine Groesse, keine Rechte, keinen
-// `stat`, und jeder weitere Geraetename waere ein weiteres `if` in der
-// heissesten Weiche des Kernels. Ein Dateisystem hat ein Verzeichnis:
-// `ls -l /dev` zaehlt auf, was diese Maschine hat, und jedes Stueck
-// davon hat eine Art, eine Kennzahl und ein `stat`, das sie sagt.
-//
-// WAS HIER DRIN LIEGT und wo die Oktette wirklich herkommen:
-//
-//   /dev/null      liest nichts (sofort Dateiende), schluckt alles
-//   /dev/zero      liest Nullen, so viele wie verlangt
-//   /dev/random    aus `kernel/rand.fi`, dem Sammler von Runde K9
-//   /dev/urandom   dasselbe -- dieser Kernel hat KEINEN zweiten Topf,
-//                  und zwei Namen fuer zwei Toepfe zu behaupten waere
-//                  eine Luege ueber die Qualitaet des einen
-//   /dev/tty       das beherrschende Terminal des LESENDEN Prozesses.
-//                  Der Knoten selbst weiss nichts davon; `sys.fi` macht
-//                  daraus einen K_TTY-Deskriptor, und ab da ist es
-//                  wortgleich der Weg von Runde K9.
-//   /dev/console   dasselbe fuer die Konsole
-//   /dev/fb        der Rahmenpuffer, ebenso: `sys.fi` macht einen
-//                  K_FB-Deskriptor daraus, und alle Messungen der Runde
-//                  K7 laufen unveraendert weiter
-//   /dev/hda       DIE PLATTE, blockweise. Das ist die einzige Datei
-//                  hier, deren Oktette wirklich auf einem Traeger
-//                  liegen -- und die, mit der `tools/k14/run.sh` misst,
-//                  dass hier keine Attrappe steht: es liest den
-//                  Bootsektor der zweiten Platte durch /dev/hdb und
-//                  haelt ihn gegen das, was der WIRT in der Abbilddatei
-//                  stehen hat.
-//   /dev/hdb       die zweite Platte (der ATA-Sklave)
-//   /dev/ram0      die RAM-Platte
-//   /dev/nvme0     der NVMe-Regler von Runde K2
-//
-// KEIN ZUSTAND. Dieses Dateisystem hat keine Tafel im Speicher: der
-// Knoten IST die Geraetenummer, die Liste steht als Kette von `if` in
-// `name_to_node`, und ein Geraet mehr ist eine Zeile. Das ist die
-// kleinste Bauart, die "echtes Dateisystem" noch ehrlich traegt.
 
 profile kernel
 
@@ -70,8 +21,6 @@ import diag.tpmdev
 
 export { ops, node_root, D_TTY, D_FB, D_CONSOLE, is_tty, is_fb, rdev_of, is_ptmx, pts_slot, shm_slot, full_path_in_shm }
 
-// Die Knoten. Die 0 bleibt frei ("gibt es nicht"), die Wurzel ist 100 --
-// damit ein Knoten nie mit einer Geraetenummer verwechselt wird.
 const D_NULL: u64 = 1
 const D_ZERO: u64 = 2
 const D_RANDOM: u64 = 3
@@ -83,59 +32,21 @@ const D_HDA: u64 = 8
 const D_HDB: u64 = 9
 const D_RAM0: u64 = 10
 const D_NVME0: u64 = 11
-// RUNDE K17: der Stick. Er steht NUR dann im Verzeichnis, wenn wirklich
-// einer angesteckt ist (`readdir`/`lookup` fragen `blk.present_on`) --
-// ein Geraetename ohne Geraet dahinter waere eine Behauptung, und beim
-// Abziehen verschwindet er wieder. Deshalb aendert sich an /dev in jedem
-// Lauf ohne USB kein einziges Oktett.
 const D_USB0: u64 = 12
-// ==================================================== RUNDE PROTOKOLL
-//
-// /dev/klog -- DAS KERNPROTOKOLL ALS DATEI.
-//
-// Es ist der erste Knoten dieses Verzeichnisses, hinter dem WEDER ein
-// Geraet noch eine Platte steckt, sondern ein Ringpuffer in `kdata`.
-// Genau dafuer ist ein Geraeteverzeichnis da: `cat /dev/klog` liest,
-// `echo hallo > /dev/klog` schreibt eine Zeile hinein, und kein
-// Programm muss dafuer den Aufruf 1860 kennen.
-//
-// WIE DER VERSATZ AUF EINE ZEILE ABGEBILDET WIRD. Der Ring hat keine
-// Oktettadressen, er hat Eintraege. `d_read` geht deshalb von der
-// aeltesten noch vorhandenen Zeile an vorwaerts und zaehlt Laengen,
-// bis es `off` erreicht hat. Das ist O(Zeilen) je Lesevorgang und
-// waere fuer eine Platte unbrauchbar; fuer 510 Zeilen, die ein Mensch
-// oder ein `cat` einmal liest, ist es die einfachste richtige Loesung.
-//
-// WAS DAS BEDEUTET, UND ES STEHT HIER STATT IN EINER FUSSNOTE: DER
-// RING DREHT SICH WEITER, WAEHREND GELESEN WIRD. Wer /dev/klog mit
-// vielen kleinen `read` liest, waehrend der Kern schreibt, bekommt
-// keinen zusammenhaengenden Schnappschuss. Wer das braucht, nimmt
-// `/bin/log`: es liest ueber den Aufruf 1860 NACH LAUFNUMMERN und
-// merkt daran, dass ihm etwas entgangen ist.
 const D_KLOG: u64 = 13
-// The SATA disk behind an AHCI controller (Dell 9020). Listed only when
-// the controller came up and a disk answered (`da`).
 const D_SDA: u64 = 14
-// ROUND FOOT-1 (PTY ABI): /dev/ptmx opens a NEW pty pair and gives the master; /dev/pts/N is the slave of pair N (N = the tty
-// slot of the slave, what TIOCGPTN returns). Nothing is stored here: a /dev/pts entry exists exactly as long as that tty slot is
-// a pty slave in use, so `ls /dev/pts` lists the pairs that are really open.
 const D_PTMX: u64 = 15
 const D_PTS: u64 = 16
-// W-MG3: /dev/tty1../dev/tty6 -- virtual console names (busybox init / getty open them); all of them are the console tty
 const D_TTY1: u64 = 17
 const D_TTY6: u64 = 22
 const D_SHM: u64 = 23
-// ODB debug agent: raw COM2 (drv/con/odbuart.fi); listed only when the chip answers and the console does not own it
 const D_ODB: u64 = 24
 const D_WLOCK: u64 = 25
 const D_DRVCTL: u64 = 26
 const D_BTCTL: u64 = 27
 const D_TPM0: u64 = 28
 const D_LAST: u64 = 28
-// /dev/shm/NAME: node SHM_BASE + i is the paged shm object i (unixsock), its name lives in kstate.SHMN_OFF + i * SHMN_SLOT.
-// The name owns one reference of the object; unlink drops it. Only the USHM_PAGED paged objects can be named.
 const SHM_BASE: u64 = 300
-// the nodes of /dev/pts/N are PTS_BASE + N (above D_ROOT, so they are never taken for a device number)
 const PTS_BASE: u64 = 200
 const D_ROOT: u64 = 100
 
@@ -161,7 +72,6 @@ fn is_ptmx(node: u64) -> bool {
     return node == D_PTMX
 }
 
-// The tty slot behind a /dev/pts/N node; MAX_TTY = not a pts node.
 fn pts_slot(node: u64) -> u64 {
     if node >= PTS_BASE && node < PTS_BASE + tty.MAX_TTY {
         return node - PTS_BASE
@@ -173,14 +83,10 @@ fn pts_live(state: u64, slot: u64) -> bool {
     return slot >= 1 && slot < tty.MAX_TTY && tty.valid(state, slot) && tty.kind_of(state, slot) == tty.K_PTY_SLAVE
 }
 
-// Die Kennzahl, die `stat` in `st_rdev` traegt. Sie ist der Knoten
-// selbst -- eine zweite Nummerierung waere eine zweite Stelle, an der
-// dasselbe steht.
 fn rdev_of(node: u64) -> u64 {
     return node
 }
 
-// Object index of a /dev/shm file node, MAX (USHM_PAGED) when the node is not one.
 fn shm_slot(node: u64) -> u64 {
     if node >= SHM_BASE && node < SHM_BASE + unixsock.USHM_PAGED {
         return node - SHM_BASE
@@ -196,7 +102,6 @@ fn shm_named(state: u64, i: u64) -> bool {
     return i < unixsock.USHM_PAGED && kstate.get8(shm_name_addr(state, i)) != 0 && unixsock.shm_used(state, i) != 0
 }
 
-// Slot of the object named `name` (NUL-terminated), USHM_PAGED when there is none.
 fn shm_find(state: u64, name: u64) -> u64 {
     var i: u64 = 0
     while i < unixsock.USHM_PAGED {
@@ -208,7 +113,6 @@ fn shm_find(state: u64, name: u64) -> u64 {
     return unixsock.USHM_PAGED
 }
 
-// Path "[/]shm/NAME" -> address of NAME, 0 if the path is not below shm/ (NAME may be empty).
 fn shm_rest(path: u64) -> u64 {
     var p: u64 = path
     while kstate.get8(p) == 47 {
@@ -220,7 +124,6 @@ fn shm_rest(path: u64) -> u64 {
     return 0
 }
 
-// Does a FULL path (e.g. "/dev/shm/x") have a "/shm/" component? Used to pick EPERM vs ENOSPC when create failed.
 fn full_path_in_shm(path: u64) -> bool {
     var i: u64 = 0
     while kstate.get8(path + i) != 0 {
@@ -244,9 +147,6 @@ fn streq(a: u64, b: u64) -> bool {
     return kstate.get8(a + i) == kstate.get8(b + i)
 }
 
-// Den Namen des n-ten Geraets in `out` schreiben. EINE Liste, von der
-// `lookup` und `readdir` beide leben -- zwei Listen waeren zwei
-// Wahrheiten, und die zweite waere irgendwann die falsche.
 fn name_at(node: u64, out: u64) -> bool {
     var n_null: [u8; 5] = "null\0"
     var n_zero: [u8; 5] = "zero\0"
@@ -335,7 +235,6 @@ fn name_at(node: u64, out: u64) -> bool {
     return true
 }
 
-// Welches Blockgeraet steht hinter diesem Knoten? MAX heisst: keines.
 fn block_of(node: u64) -> u64 {
     if node == D_HDA {
         return blk.DEV_ATA
@@ -362,8 +261,6 @@ fn is_block(node: u64) -> bool {
     return block_of(node) != 99
 }
 
-// ------------------------------------------------------ die Verrichtungen
-
 fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
     var name: [u8; 16] = [0 as u8; 16]
@@ -374,11 +271,10 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
     if kstate.get8(p) == 0 {
         return D_ROOT
     }
-    // /dev/pts/N : "pts/" then decimal digits only
     if kstate.get8(p) == 112 && kstate.get8(p + 1) == 116 && kstate.get8(p + 2) == 115 && kstate.get8(p + 3) == 47 {
         var q: u64 = p + 4
         if kstate.get8(q) == 0 {
-            return D_PTS // "pts/"
+            return D_PTS
         }
         var num: u64 = 0
         var nd: u64 = 0
@@ -392,7 +288,6 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
         }
         return PTS_BASE + num
     }
-    // /dev/shm/NAME
     let shm_n: u64 = shm_rest(p)
     if shm_n != 0 {
         if kstate.get8(shm_n) == 0 {
@@ -404,8 +299,6 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
         }
         return SHM_BASE + si
     }
-    // Ein Geraeteverzeichnis hat keine Unterverzeichnisse; ein
-    // Schraegstrich im Rest ist deshalb ein Fehler und keine Suche.
     var i: u64 = 0
     while kstate.get8(p + i) != 0 {
         if kstate.get8(p + i) == 47 {
@@ -428,17 +321,10 @@ fn d_lookup(state: u64, m: u64, path: u64) -> u64 {
     return 0
 }
 
-// RUNDE K17: GIBT ES DAS GERAET UEBERHAUPT NOCH? Fuer alles, was dieser
-// Kernel seit 1986 kennt, ist die Antwort immer ja -- eine ATA-Platte
-// verschwindet nicht im Betrieb. Ein Stick tut es, und deshalb ist
-// /dev/usb0 der erste Eintrag dieses Verzeichnisses, dessen Dasein eine
-// FRAGE ist und keine Zeile in einer Tabelle.
 fn da(state: u64, node: u64) -> bool {
     if node == D_USB0 {
         return blk.present_on(state, blk.DEV_USB)
     }
-    // No bring-up here (it deadlocked under the fs lock): kmain does it
-    // at boot, this only asks whether a disk answered.
     if node == D_SDA {
         return blk.ahci_ready(state)
     }
@@ -451,7 +337,6 @@ fn da(state: u64, node: u64) -> bool {
     return true
 }
 
-// /dev/pts: ".", "..", then the number of every pty slave in use
 fn pts_readdir(state: u64, index: u64, out: u64) -> u64 {
     if index == 0 {
         kstate.set8(out, 46 as u8)
@@ -492,7 +377,6 @@ fn pts_readdir(state: u64, index: u64, out: u64) -> u64 {
     return 0
 }
 
-// /dev/shm: ".", "..", then every named object
 fn shm_readdir(state: u64, index: u64, out: u64) -> u64 {
     if index == 0 {
         kstate.set8(out, 46 as u8)
@@ -583,11 +467,6 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
         return vfsops.N_NONE
     }
     if what == vfsops.A_SIZE {
-        // EIN BLOCKGERAET HAT EINE GROESSE, und sie ist keine
-        // Erfindung: sie ist die Zahl der Bloecke mal 512. Ein
-        // `lseek(fd, 0, SEEK_END)` auf /dev/hdb sagt damit, wie gross
-        // die Platte ist -- und `tools/k14/run.sh` haelt die Zahl gegen
-        // die Groesse der Abbilddatei auf dem Wirt.
         if is_block(node) {
             return blk.blocks_on(state, block_of(node)) * BS
         }
@@ -598,25 +477,25 @@ fn d_attr(state: u64, m: u64, node: u64, what: u64) -> u64 {
     }
     if what == vfsops.A_MODE {
         if node == D_SHM {
-            return 1023 // 0o1777
+            return 1023
         }
         if node == D_ODB || node == D_WLOCK || node == D_DRVCTL || node == D_TPM0 {
-            return 384 // 0o600: root only
+            return 384
         }
         if node == D_BTCTL {
             return 438
         }
         if node == D_ROOT || node == D_PTS {
-            return 493 // 0o755
+            return 493
         }
         if shm_slot(node) < unixsock.USHM_PAGED {
-            return 438 // 0o666
+            return 438
         }
         if node == D_NULL || node == D_ZERO || node == D_TTY
             || node == D_CONSOLE || node == D_PTMX || pts_slot(node) < tty.MAX_TTY {
-            return 438 // 0o666
+            return 438
         }
-        return 420 // 0o644
+        return 420
     }
     if what == vfsops.A_NLINK {
         return 1
@@ -637,7 +516,6 @@ static mut odb_ovr_seen: u64 = 0
 static mut q_odb: [u8; 4] = "odb\0"
 static mut l_odb_ovr: [u8; 30] = "uart receiver overruns (hex) \0"
 
-// One klog line each time the overrun count passes a power of two (odbc logs shows it): a flood stays at ~log2(n) lines.
 fn odb_note_overruns(state: u64) {
     let n: u64 = odbuart.overruns()
     if n != odb_ovr_seen {
@@ -802,11 +680,6 @@ fn wlock_write(src: u64, len: u64) -> u64 {
     return 0
 }
 
-// RUNDE PROTOKOLL: den Ring als Oktettstrom.
-//
-// Zeile fuer Zeile bauen, Laengen zaehlen, ab `off` kopieren. Der
-// Zwischenpuffer ist EINER fuer alle Kerne -- deshalb unter derselben
-// Sperre wie der Rest dieses Dateisystems (`enter`/`leave`).
 fn klog_read(state: u64, off: u64, dst: u64, len: u64) -> u64 {
     let flags: u64 = enter(state)
     var b: [u8; 256] = [0 as u8; 256]
@@ -837,10 +710,6 @@ fn klog_read(state: u64, off: u64, dst: u64, len: u64) -> u64 {
     return n
 }
 
-// Und die Gegenrichtung: was hineingeschrieben wird, wird EINE Zeile im
-// Protokoll, Stufe info, Quelle `prog`. Ein Zeilenende beendet die
-// Zeile; laengere Texte werden auf die 88 Oktette eines Eintrags
-// gekuerzt (`klog.fi`).
 fn klog_write(state: u64, src: u64, len: u64) -> u64 {
     var t: [u8; 96] = [0 as u8; 96]
     var q: [u8; 5] = "prog\0"
@@ -869,7 +738,7 @@ fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
         return odbuart.write_from(src, len)
     }
     if node == D_NULL || node == D_ZERO {
-        return len // geschluckt, und das ist die Zusage
+        return len
     }
     if node == D_RANDOM || node == D_URANDOM {
         rand.mix(state, src, len)
@@ -893,16 +762,6 @@ fn d_write(state: u64, m: u64, node: u64, off: u64, src: u64,
     return 0
 }
 
-// EIN BLOCKGERAET OKTETTWEISE. Die Platte kann nur ganze Bloecke; ein
-// `read` von 100 Oktetten ab Stelle 700 liest also Block 1 und gibt
-// die Oktette 188..287 daraus heraus. Genau das macht jedes Unix, und
-// genau das macht `dd` moeglich.
-// DIE SPERRE DER PLATTE. `atomic.L_FS` schuetzt in `fs.fi` die
-// Arbeitsbloecke des Dateisystems -- und darunter die ATA-Register, die
-// `blk.fi` benutzt und die keine eigene haben. Ein `dd if=/dev/hda`
-// auf einem zweiten Kern wuerde einem OFS mitten im Sektor die Tore
-// umschreiben. Der Zwischenpuffer hier ist der zweite Grund: er ist
-// EINER fuer alle Kerne.
 fn enter(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
     let me: u64 = cpu.here(state)
@@ -987,9 +846,6 @@ fn block_write_inner(state: u64, dev: u64, off: u64, src: u64,
         if chunk > want - done {
             chunk = want - done
         }
-        // Ein Teilblock muss GELESEN werden, bevor er geschrieben wird
-        // -- sonst nimmt ein `write` von einem Oktett die anderen 511
-        // mit. Das ist der Fehler, den jeder Blocktreiber einmal macht.
         if chunk != BS {
             if !blk.read_on(state, dev, lba, scratch) {
                 return done
@@ -1008,7 +864,6 @@ fn block_write_inner(state: u64, dev: u64, off: u64, src: u64,
     return done
 }
 
-// Only regular files below /dev/shm can be created: shm_open() = open(O_CREAT) + ftruncate + mmap.
 fn d_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
     tick(state)
     if art != vfsops.N_FILE {
@@ -1041,16 +896,15 @@ fn d_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
     return SHM_BASE + i
 }
 
-// unlink("/dev/shm/NAME"): the name goes, the object lives on until the last descriptor/mapping lets go.
 fn d_unlink(state: u64, m: u64, path: u64) -> u64 {
     tick(state)
     let nm: u64 = shm_rest(path)
     if nm == 0 {
-        return 1 // EPERM
+        return 1
     }
     let i: u64 = shm_find(state, nm)
     if i >= unixsock.USHM_PAGED {
-        return 2 // ENOENT
+        return 2
     }
     kstate.set8(shm_name_addr(state, i), 0 as u8)
     unixsock.shm_unref(state, i)
@@ -1059,19 +913,14 @@ fn d_unlink(state: u64, m: u64, path: u64) -> u64 {
 
 fn d_rename(state: u64, m: u64, from: u64, to: u64) -> u64 {
     tick(state)
-    return 1 // EPERM
+    return 1
 }
 
 fn d_trunc(state: u64, m: u64, node: u64) -> u64 {
     tick(state)
-    return 0 // ein Geraet hat keine Laenge, die man kuerzen koennte
+    return 0
 }
 
-// Die Tafel. `mask` sagt, was es WIRKLICH kann: nachschlagen,
-// auflisten, Attribute, lesen, schreiben, kuerzen. Anlegen, loeschen
-// und umbenennen stehen NICHT darin -- `vfs.fi` faengt sie ab, bevor
-// der Zeiger benutzt wird, und die drei Funktionen oben sind das
-// Fangnetz darunter.
 fn ops() -> vfsops.Ops {
     return vfsops.Ops {
         lookup: d_lookup,
@@ -1083,7 +932,7 @@ fn ops() -> vfsops.Ops {
         unlink: d_unlink,
         rename: d_rename,
         trunc: d_trunc,
-        mask: 383, // LOOKUP|READDIR|ATTR|READ|WRITE|CREATE|UNLINK|TRUNC (create/unlink only below shm/)
-        tag: 7759204 // "dev\0"
+        mask: 383,
+        tag: 7759204
     }
 }

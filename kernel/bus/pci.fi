@@ -1,44 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/pci.fi -- round K2: the bus the machine really has.
-//
-// Everything the kernel touched until now it knew by heart: 0x3F8 is the
-// serial port, 0x60 the keyboard, 0x1F0 the disk. Those numbers are true
-// because they were true in 1986 and nobody dared change them. They say
-// nothing about the machine this kernel is actually running on.
-//
-// PCI is the first place where the machine ANSWERS. Every device carries
-// a 256-octet configuration space with its vendor, its number, its class,
-// and -- the part that matters -- the addresses at which it wants to be
-// spoken to. A kernel that reads that space stops guessing.
-//
-// Two doors lead into that space. This file uses the older one, the pair
-// of ports 0xCF8/0xCFC, because it needs no table from the firmware and
-// works on every PC since 1993:
-//
-//     0xCF8 <- 0x80000000 | bus<<16 | device<<11 | function<<8 | reg
-//     0xCFC <-> the four octets of that register
-//
-// The newer door (ECAM, the whole space mapped flat into memory) needs
-// the MCFG table out of ACPI to know WHERE it is mapped. Under QEMU's
-// default machine there is no MCFG at all -- `pc` has no ECAM window --
-// so a kernel that only spoke ECAM would find nothing here. The ports are
-// not the old way, they are the way that always works; ECAM is the
-// optimisation for machines that announce it. That is written down here
-// rather than silently omitted.
-//
-// WHAT IS MEASURED, in tools/pci/run.sh: the list this file prints is
-// held against the `-device` arguments QEMU was started with. Start QEMU
-// with an NVMe controller and the line with class 01:08:02 has to appear;
-// start it without and that line must NOT be there. A list that came out
-// of a table in the kernel would pass the first half and fail the second.
-//
-// THE DATA AREA. Round 59 decided that kernel state lives at offsets in
-// the region `boot.s` hands over, not in global variables (`kstate.fi`).
-// Round K2 keeps to that and takes the part of the region that was still
-// free -- from 0x10000 up; everything below belongs to rounds 59 and 62.
-// The offsets stand here and not in `kstate.fi` so that the hardware
-// layer stays one file, and because several rounds are working on that
-// file at the same time.
 
 import serial
 import lib.kstate
@@ -61,19 +20,13 @@ export {
     VENDOR_INTEL, find_ahci, find_raid_ahci, is_raid_class, rst_nvme_hidden
 }
 
-// ------------------------------------------------- the K2 data area
-
-// The first free page of the region out of boot.s (kstate.fi: 0x0F000
-// upwards is unused, KDATA_SIZE is 0x20000).
 const K2_OFF: u64 = 0x10000
-const TABLE_OFF: u64 = 0x10000 // 32 * 256 octets = 8 KiB
-const K2_SCALARS: u64 = 0x12000 // one page of counters, K2 only
+const TABLE_OFF: u64 = 0x10000
+const K2_SCALARS: u64 = 0x12000
 
 const ENTRY_BYTES: u64 = 256
 const MAX_DEV: u64 = 32
 
-// Offsets inside one entry. Every field is a whole word; a device table
-// is read a thousand times and written once, so nothing is packed.
 const E_BDF: u64 = 0
 const E_VENDOR: u64 = 8
 const E_DEVICE: u64 = 16
@@ -83,15 +36,12 @@ const E_PROGIF: u64 = 40
 const E_HDR: u64 = 48
 const E_IRQLINE: u64 = 56
 const E_IRQPIN: u64 = 64
-const E_MSI: u64 = 72 // offset of the capability, 0 = none
+const E_MSI: u64 = 72
 const E_MSIX: u64 = 80
 const E_EXPRESS: u64 = 88
-// Six BARs of three words each: address, size, the low four flag bits.
 const E_BARS: u64 = 96
 
-const S_COUNT: u64 = 0 // in the scalar page: how many devices were found
-
-// ------------------------------------------------------- the two ports
+const S_COUNT: u64 = 0
 
 const ADDR_PORT: u16 = 0xCF8
 const DATA_PORT: u16 = 0xCFC
@@ -108,7 +58,7 @@ const CFG_BAR0: u64 = 0x10
 const CFG_CAPPTR: u64 = 0x34
 const CFG_IRQLINE: u64 = 0x3C
 const CFG_IRQPIN: u64 = 0x3D
-const CFG_SECBUS: u64 = 0x19 // only on a bridge (header type 1)
+const CFG_SECBUS: u64 = 0x19
 
 const CMD_IO: u64 = 0x1
 const CMD_MEM: u64 = 0x2
@@ -132,7 +82,6 @@ const CLASS_STORAGE: u64 = 0x01
 const SUB_IDE: u64 = 0x01
 const SUB_SATA: u64 = 0x06
 const SUB_RAID: u64 = 0x04
-// the hw.fi mode word lives in the K2 scalar page (S_MODE there)
 const S_TESTMODE: u64 = 0x1B0
 const T_AHCIRAID: u64 = 262144
 const T_FAKEWLAN: u64 = 8388608
@@ -145,11 +94,7 @@ const PROGIF_AHCI: u64 = 0x01
 const PROGIF_NVME: u64 = 0x02
 const VENDOR_INTEL: u64 = 0x8086
 
-// 32 bits at a time -- that is the width of a configuration register,
-// and the only width the address port can address.
 fn in32(port: u16) -> u64 {
-    // `in eax, dx` zero extends into rax on its own; the mask below is
-    // there so the promise of the type does not depend on that.
     return asm("in eax, dx", out("rax"), in("dx") port) & 0xFFFFFFFF
 }
 
@@ -157,8 +102,6 @@ fn out32(port: u16, value: u64) {
     asm("out dx, eax", in("dx") port, in("eax")(value & 0xFFFFFFFF) as u32)
 }
 
-// bdf = bus<<8 | device<<3 | function. Shifted up by 8 that is exactly
-// the layout the address port wants -- bus<<16, device<<11, function<<8.
 fn addr_of(bdf: u64, off: u64) -> u64 {
     return 0x80000000 | ((bdf & 0xFFFF) << 8) | (off & 0xFC)
 }
@@ -200,8 +143,6 @@ fn cfg_read8(bdf: u64, off: u64) -> u64 {
     return (cfg_read32(bdf, off) >> ((off & 3) * 8)) & 0xFF
 }
 
-// Read, replace the half word, write back: the data port has no width
-// below four octets when it is reached through 0xCF8.
 fn cfg_write16(bdf: u64, off: u64, v: u64) {
     let shift: u64 = (off & 2) * 8
     let old: u64 = cfg_read32(bdf, off)
@@ -209,20 +150,12 @@ fn cfg_write16(bdf: u64, off: u64, v: u64) {
     cfg_write32(bdf, off, (old & (~mask) & 0xFFFFFFFF) | ((v & 0xFFFF) << shift))
 }
 
-// RUNDE AML: DASSELBE FUER EIN OKTETT. Ein Feld einer
-// OperationRegion der Art PCI_Config ist auf echter Hardware oft genau
-// ein Oktett breit -- die vier PIRQ-Register des PIIX3 (0x60..0x63)
-// sind der Fall, an dem in QEMU das ganze Interrupt-Routing haengt.
-// Lesen, das eine Oktett ersetzen, zurueckschreiben: unter dem
-// Adresstor 0xCF8 gibt es keine Breite unter vier Oktetten.
 fn cfg_write8(bdf: u64, off: u64, v: u64) {
     let shift: u64 = (off & 3) * 8
     let old: u64 = cfg_read32(bdf, off)
     let mask: u64 = (0xFF << shift) & 0xFFFFFFFF
     cfg_write32(bdf, off, (old & (~mask) & 0xFFFFFFFF) | ((v & 0xFF) << shift))
 }
-
-// ------------------------------------------------------------ the table
 
 fn entry(state: u64, i: u64) -> u64 {
     return state + TABLE_OFF + i * ENTRY_BYTES
@@ -244,7 +177,6 @@ fn get(state: u64, i: u64, off: u64) -> u64 {
     return eget(entry(state, i), off)
 }
 
-// The three words of BAR `n` of device `i`.
 fn bar(state: u64, i: u64, n: u64) -> u64 {
     return eget(entry(state, i), E_BARS + n * 24)
 }
@@ -261,10 +193,6 @@ fn bar_is_io(state: u64, i: u64, n: u64) -> bool {
     return (bar_flags(state, i, n) & 1) != 0
 }
 
-// ------------------------------------------------------------- the scan
-
-// Bus 0 downwards, bridges followed. `MAX_DEV` entries at most; a machine
-// with more devices than that is not one this kernel runs on.
 fn scan(state: u64) -> u64 {
     kstate.set(state, K2_SCALARS + S_COUNT, 0)
     scan_bus(state, 0)
@@ -281,22 +209,18 @@ fn scan_bus(state: u64, bus: u64) {
 
 fn scan_dev(state: u64, bus: u64, dev: u64) {
     let bdf0: u64 = (bus << 8) | (dev << 3)
-    // A slot without a device answers 0xFFFF -- nobody drives the bus.
     if cfg_read16(bdf0, CFG_VENDOR) == 0xFFFF {
         return
     }
     var last: u64 = 0
     if (cfg_read8(bdf0, CFG_HDRTYPE) & 0x80) != 0 {
-        last = 7 // multi function: seven more can be behind it
+        last = 7
     }
     var f: u64 = 0
     while f <= last {
         let bdf: u64 = bdf0 | f
         if cfg_read16(bdf, CFG_VENDOR) != 0xFFFF {
             record(state, bdf)
-            // A PCI-to-PCI bridge carries a whole bus behind it. Its
-            // secondary bus number stands in its own configuration space,
-            // which is why this scan does not have to know the topology.
             if cfg_read8(bdf, CFG_CLASS) == 0x06 && cfg_read8(bdf, CFG_SUBCLASS) == 0x04 {
                 let sec: u64 = cfg_read8(bdf, CFG_SECBUS)
                 if sec > bus {
@@ -321,8 +245,6 @@ fn record(state: u64, bdf: u64) {
     eset(e, E_CLASS, cfg_read8(bdf, CFG_CLASS))
     eset(e, E_SUBCLASS, cfg_read8(bdf, CFG_SUBCLASS))
     eset(e, E_PROGIF, cfg_read8(bdf, CFG_PROGIF))
-    // TEST HOOK, command line word "fakeraid": an AHCI controller reports
-    // itself the way an Intel one in "RAID On" mode does (class 01:04:00).
     if (kstate.get(state, K2_SCALARS + S_TESTMODE) & T_AHCIRAID) != 0 {
         if cfg_read8(bdf, CFG_CLASS) == CLASS_STORAGE && cfg_read8(bdf, CFG_SUBCLASS) == SUB_SATA {
             eset(e, E_SUBCLASS, SUB_RAID)
@@ -344,21 +266,12 @@ fn record(state: u64, bdf: u64) {
     eset(e, E_EXPRESS, cap_find(bdf, CAP_EXPRESS))
     var nbars: u64 = 6
     if (hdr & 0x7F) != 0 {
-        nbars = 2 // a bridge has two of them and a lot of bus numbers
+        nbars = 2
     }
     size_bars(e, bdf, nbars)
     kstate.set(state, K2_SCALARS + S_COUNT, n + 1)
 }
 
-// ---------------------------------------------------- how big a BAR is
-
-// A BAR does not say how much room it wants. It only answers when all
-// ones are written into it: the bits that stay zero are the ones the
-// device does not decode, and the lowest bit that stays one is the size.
-// The register has to be put back afterwards, and the device's decoders
-// have to be OFF while it happens -- for the length of two port accesses
-// the BAR reads as 0xFFFFFFF0, and a device that decoded that address
-// would answer for the whole upper end of memory.
 fn size_bars(e: u64, bdf: u64, nbars: u64) {
     let cmd: u64 = cfg_read16(bdf, CFG_COMMAND)
     cfg_write16(bdf, CFG_COMMAND, cmd & (~(CMD_IO | CMD_MEM)) & 0xFFFF)
@@ -371,7 +284,6 @@ fn size_bars(e: u64, bdf: u64, nbars: u64) {
         let flags: u64 = orig & 0xF
         var wide: bool = false
         if (orig & 1) != 0 {
-            // A port range. Sixteen bits wide, the low two are flags.
             cfg_write32(bdf, off, 0xFFFFFFFF)
             let probe: u64 = cfg_read32(bdf, off) & 0xFFFC & 0xFFFF
             cfg_write32(bdf, off, orig)
@@ -408,7 +320,6 @@ fn size_bars(e: u64, bdf: u64, nbars: u64) {
         eset(e, E_BARS + i * 24 + 8, size)
         eset(e, E_BARS + i * 24 + 16, flags)
         if wide {
-            // The upper half is not a BAR of its own.
             eset(e, E_BARS + (i + 1) * 24, 0)
             eset(e, E_BARS + (i + 1) * 24 + 8, 0)
             eset(e, E_BARS + (i + 1) * 24 + 16, 0)
@@ -419,14 +330,9 @@ fn size_bars(e: u64, bdf: u64, nbars: u64) {
     cfg_write16(bdf, CFG_COMMAND, cmd)
 }
 
-// ------------------------------------------------------ capabilities
-
-// The chain that starts at 0x34: one octet identity, one octet the offset
-// of the next. Bounded, because a device with a cycle in its chain must
-// not hang the kernel.
 fn cap_find(bdf: u64, want: u64) -> u64 {
     if (cfg_read16(bdf, CFG_STATUS) & 0x10) == 0 {
-        return 0 // the device says it has no capability list
+        return 0
     }
     var off: u64 = cfg_read8(bdf, CFG_CAPPTR) & 0xFC
     var guard: u64 = 0
@@ -439,8 +345,6 @@ fn cap_find(bdf: u64, want: u64) -> u64 {
     }
     return 0
 }
-
-// ----------------------------------------- extended capabilities
 
 fn ext_cap_header_ok(h: u64) -> bool {
     return h != 0 && h != CFG_DWORD_ALL_ONES
@@ -500,13 +404,6 @@ fn ext_cap_find(bdf: u64, want: u64) -> u64 {
     return 0
 }
 
-// -------------------------------------------------------- the master bit
-
-// Without this bit a device may answer but may not START a transfer of
-// its own -- and every DMA is a transfer of the device's own. This is the
-// one line that separates a driver that copies through the processor
-// from one that does not. `tools/pci/run.sh` runs the disk driver once
-// with it and once without; without it nothing arrives.
 fn enable_master(bdf: u64) {
     let cmd: u64 = cfg_read16(bdf, CFG_COMMAND)
     cfg_write16(bdf, CFG_COMMAND, cmd | CMD_MEM | CMD_MASTER)
@@ -521,9 +418,6 @@ fn master_on(bdf: u64) -> bool {
     return (cfg_read16(bdf, CFG_COMMAND) & CMD_MASTER) != 0
 }
 
-// ------------------------------------------------------------- finding
-
-// The first device with this class. `pif` of 0x100 means: do not care.
 fn find_class(state: u64, cls: u64, sub: u64, pif: u64) -> u64 {
     let n: u64 = count(state)
     var i: u64 = 0
@@ -538,19 +432,10 @@ fn find_class(state: u64, cls: u64, sub: u64, pif: u64) -> u64 {
     return MAX_DEV
 }
 
-// DELL OPTIPLEX 9020 (04.10.2026, "installer: no disk found"): the firmware's
-// SATA Operation was "RAID On". Intel RST then presents the very same AHCI
-// register set, but with class 01:04 (RAID) instead of 01:06:01, so a search
-// by the AHCI class alone finds nothing -- no disk, no install, no boot.
-// Linux binds its ahci driver to those Intel device ids too. Without a RAID
-// volume configured the ports behave exactly like AHCI ports; the driver's own
-// checks (BAR5 is memory, CAP/PI make sense, a port answers IDENTIFY) still
-// decide whether it is usable.
 fn is_raid_class(state: u64, i: u64) -> bool {
     return get(state, i, E_CLASS) == CLASS_STORAGE && get(state, i, E_SUBCLASS) == SUB_RAID
 }
 
-// The first Intel controller that reports itself as RAID (class 01:04).
 fn find_raid_ahci(state: u64) -> u64 {
     let n: u64 = count(state)
     var i: u64 = 0
@@ -570,8 +455,6 @@ fn rst_nvme_hidden(state: u64) -> bool {
     return find_class(state, CLASS_STORAGE, SUB_NVM, 0x100) >= MAX_DEV
 }
 
-// The controller the AHCI driver should use: native AHCI first, an Intel
-// controller in RAID mode second.
 fn find_ahci(state: u64) -> u64 {
     let i: u64 = find_class(state, CLASS_STORAGE, SUB_SATA, PROGIF_AHCI)
     if i < MAX_DEV {
@@ -592,10 +475,6 @@ fn find_bdf(state: u64, bdf: u64) -> u64 {
     return MAX_DEV
 }
 
-// -------------------------------------------------------- the listing
-
-// `n` hex digits, no prefix -- the shape `lspci` prints and the shape the
-// guard greps for.
 fn hexn(v: u64, n: u64) {
     var i: u64 = n
     while i > 0 {
@@ -625,9 +504,9 @@ fn list(state: u64) {
         let bdf: u64 = get(state, i, E_BDF)
         serial.puts((&s_pci[0]) as u64)
         hexn(bdf_bus(bdf), 2)
-        serial.put(58 as u8) // ':'
+        serial.put(58 as u8)
         hexn(bdf_dev(bdf), 2)
-        serial.put(46 as u8) // '.'
+        serial.put(46 as u8)
         hexn(bdf_fn(bdf), 1)
         serial.put(32 as u8)
         hexn(get(state, i, E_VENDOR), 4)
@@ -648,12 +527,12 @@ fn list(state: u64) {
             if sz != 0 {
                 serial.puts((&s_bar[0]) as u64)
                 serial.dec(b)
-                serial.put(61 as u8) // '='
+                serial.put(61 as u8)
                 if bar_is_io(state, i, b) {
                     serial.puts((&s_io[0]) as u64)
                 }
                 serial.hex(bar(state, i, b))
-                serial.put(47 as u8) // '/'
+                serial.put(47 as u8)
                 serial.hex(sz)
             }
             b = b + 1
@@ -682,9 +561,6 @@ fn list(state: u64) {
     }
 }
 
-// The name is not decoration: the guard greps for it, and a name that
-// came out of the class code of the device is a statement ABOUT the
-// device -- a fixed list would be a statement about the kernel.
 fn kind(cls: u64, sub: u64, pif: u64) {
     var s_host: [u8; 12] = "host-bridge\0"
     var s_isa: [u8; 11] = "isa-bridge\0"

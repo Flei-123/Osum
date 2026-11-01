@@ -1,55 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/inet.fi -- round K8: the seam between the card and the stack.
-//
-// Round K3 wrote a TCP/IP stack with exactly two doors downwards --
-// `net_input(s, frame, n, now)` and `net_output(s, buf, cap, now)` -- and
-// nothing under them. Round K8 wrote `virtio.fi`, which has frames and
-// no idea what they mean. This file is the twenty lines the K3 comment
-// promised, plus everything that turned out not to be twenty lines:
-//
-//   * WHOSE MEMORY. `stack.Stack` is 1 125 520 octets, and Firn has no
-//     global variables (SPEC 14.1 item 5). So it lives in a run of
-//     frames the kernel allocates once and hands over as a pointer --
-//     exactly the way `kstate.fi` solved the same problem in round 59.
-//   * WHOSE CLOCK. The stack asks for microseconds. The kernel's tick is
-//     a hundredth of a second, which would quantise every round-trip
-//     measurement to 10 000 us. The local APIC's TSC is read instead and
-//     divided by the frequency round K2 measured.
-//   * WHOSE THREAD. `net_input` and `net_output` may not run at the same
-//     time as `net_send` out of a system call -- one struct, two
-//     writers. There is one lock (`atomic.L_NET`) and it is held with
-//     interrupts off, the same discipline round K5 gave the run queue
-//     and the file system.
-//   * WHOSE TURN. A pump that only runs inside system calls answers no
-//     `ping` while the shell waits for a key. So there is a kernel task
-//     of its own (`K_NETD`, body in `tasks.fi`), and it is the ONLY
-//     caller of `net_input`/`net_output`.
-//
-// THE ONE THING THE STACK HAS NO DOOR FOR is a datagram that is neither
-// TCP nor UDP. It answers an ICMP echo REQUEST -- that is why a `ping`
-// from the host works with nothing in this file -- but it cannot SEND
-// one, and `ping` on Osum has to. The ARP cache that would give the
-// hardware address for it is private to `stack.fi` as well
-// (`arp_slot_mac` is not exported). Rather than change the vendored
-// library -- which would be the copy this round exists to avoid -- the
-// ICMP path is built HERE, on top of `net.wire`, which is the same
-// module the stack itself uses for every header. It has a hardware
-// address cache of its own with eight entries, fed from every frame that
-// comes in; that is a duplication of forty octets of state and it is
-// written down rather than hidden.
-//
-// THE SOCKETS ARE POSIX SOCKETS, in `kernel/sys.fi` with the numbers of
-// Linux x86-64 (socket 41, connect 42, accept 43, sendto 44, recvfrom
-// 45, shutdown 48, bind 49, listen 50, getsockname 51, getpeername 52).
-// A socket is an entry of the OPEN FILE TABLE of round K4 with kind
-// `file.K_SOCK`, so `read`, `write`, `close`, `dup2` and `fork` work on
-// it without any of them learning what a socket is.
-//
-//   AF_INET + SOCK_STREAM              -> TCP, the stack of round K3
-//   AF_INET + SOCK_DGRAM               -> UDP, ditto
-//   AF_INET + SOCK_DGRAM, IPPROTO_ICMP -> the "ping socket" Linux has
-//                                         had since 3.0, and what
-//                                         /bin/ping uses here
 
 import lib.kstate
 import mm.mem
@@ -90,10 +38,6 @@ export {
     sock_ka_set, sock_ka_get, KA_ON, KA_IDLE, KA_INTVL, KA_CNT
 , dhcp_set, dhcp_get}
 
-// ------------------------------------------- the K8 part of the scalars
-//
-// `pci.K2_SCALARS` reaches to 0x14000; 0x200..0x2F8 is `virtio.fi`.
-// Round K8's seam takes 0x300 upwards.
 const S_STACK: u64 = 0x300
 const S_READY: u64 = 0x308
 const S_IP: u64 = 0x310
@@ -133,13 +77,6 @@ const TXK_ARP_SUPPRESSED: u64 = 5
 const ARP_GAP_ANY: u64 = 5
 const ARP_GAP_SAME: u64 = 100
 
-// The socket table, the shadow address cache and the queue of ICMP
-// answers -- all three in the same page-sized area, all three fixed.
-// All three are offsets in `pci.K2_SCALARS`, like every scalar above --
-// they go through `sc()` and not through `state` directly. The page
-// reaches to 0x14000 (where the NVMe queues of round K2 begin), so
-// 0x400 + 0x400 + 0x100 + 0x400 of tables fit into it with room to
-// spare.
 const SOCK_OFF: u64 = 0x400
 const SOCK_BYTES: u64 = 32
 const SOCK_MAX: u64 = 16
@@ -151,11 +88,10 @@ const ARP_MAX: u64 = 8
 const ICMP_OFF: u64 = 0x700
 const ICMP_BYTES: u64 = 256
 const ICMP_SLOTS: u64 = 4
-const ICMP_MAX: u64 = 192 // what fits in a slot beside the two words
+const ICMP_MAX: u64 = 192
 
-// The fields of a socket.
 const SO_KIND: u64 = 0
-const SO_H: u64 = 8 // the handle in the stack, or NOHANDLE
+const SO_H: u64 = 8
 const SO_PORT: u64 = 16
 const SO_FLAGS: u64 = 24
 
@@ -167,13 +103,8 @@ const SK_ICMP: u64 = 3
 const SF_LISTEN: u64 = 1
 const SF_NONBLOCK: u64 = 2
 const SF_CONNECTED: u64 = 4
-// N-006: SO_KEEPALIVE and the three TCP_KEEP* values live in the flag word of
-// the socket so that they survive until the connection exists (a program sets
-// them between socket() and connect()). Bits 8..22 idle seconds, 23..37
-// interval seconds, 38..44 probe count; 0 in a field = the Linux default.
-// Linux limits: TCP_KEEPIDLE/INTVL 1..32767, TCP_KEEPCNT 1..127.
 const SF_KEEPALIVE: u64 = 8
-const KA_MASK: u64 = 0x1FFFFFFFFF08 // SF_KEEPALIVE + all three values
+const KA_MASK: u64 = 0x1FFFFFFFFF08
 const KA_IDLE_DEF: u64 = 7200
 const KA_INTVL_DEF: u64 = 75
 const KA_CNT_DEF: u64 = 9
@@ -184,23 +115,12 @@ const KA_CNT: u64 = 3
 
 const NOHANDLE: u64 = 0xFFFFFFFF
 
-// How many frames one turn of the pump moves before it lets go of the
-// lock. Bounded on purpose: the lock is held with interrupts off, and an
-// unbounded loop there would be a timer that stops while a megabyte
-// arrives.
 const PUMP_BATCH: u64 = 32
 
-// How long netd goes on spinning after the last frame before it lies
-// down. 4000 turns of the run queue is far less than a tick and it keeps
-// the answer time at the length of a context switch while anything at
-// all is going on; when the wire is quiet the task sleeps and the
-// machine reaches `hlt` again.
 const HOT_TURNS: u64 = 4000
 
-// W-U: ... and for at most this long (microseconds) after the last frame or kick. Word `netdhot` = the old rule (gate counter-proof).
 const HOT_US: u64 = 1500
 
-// r1087: after this long without a frame (microseconds) netd polls the card only every QUIET_TICKS ticks.
 const QUIET_US: u64 = 3000000
 const QUIET_TICKS: u64 = 5
 
@@ -230,23 +150,6 @@ fn mac_at(state: u64, i: u64) -> u64 {
     return netdev.mac_at(state, i)
 }
 
-// ============================================ ROUND NETVIEW, addendum
-//
-// IS THERE A WIRE, and IS THERE A WAY OUT? Two questions that the
-// taskbar has to be able to ask, and that nothing in this file could
-// answer before -- `ready` says only that the stack was built.
-//
-// `carrier` is the link bit of the card, the one thing that says
-// "something is plugged in here" without sending a single frame.
-//
-// `gw_known` is the honest half of "is there internet". This kernel
-// cannot know whether the far side of the world answers; what it CAN
-// know is whether the gateway ever answered an ARP request, which is
-// the difference between an address that was configured and an address
-// that reaches its first hop. That is the same thing Windows shows as
-// "connected, no internet", one hop earlier and with no probing
-// traffic of its own -- and the limit is written down rather than
-// dressed up.
 fn carrier(state: u64) -> bool {
     if !netdev.present(state) {
         return false
@@ -254,12 +157,6 @@ fn carrier(state: u64) -> bool {
     return netdev.link_up(state)
 }
 
-// RUNDE O-NETZUI: DIE AUSGEHANDELTE VERBINDUNGSRATE, durchgereicht.
-//
-// Sie steht in Megabit je Sekunde da, und 0 heisst UNBEKANNT. Diese
-// Datei rechnet nichts daran: was die Karte nicht meldet, wird hier
-// nicht erfunden. Ohne Karte gibt es auch nichts zu melden.
-// ROUND DELL2: a raw chip counter, passed through for `dhcp status`.
 fn hwstat(state: u64, which: u64) -> u64 {
     if !netdev.present(state) {
         return 0xFFFFFFFF
@@ -363,16 +260,6 @@ fn saddr(state: u64) -> u64 {
     return kstate.get(state, sc(S_SADDR))
 }
 
-// ROUND NETMON: what the CARD counted, which is the only number in this
-// kernel that is not derived from anything. `which` 0 = out, 1 = in.
-// The per-process counters are checked against it: their sum plus the
-// system bucket has to come out at this, and `tools/netmon/run.sh` says
-// by how much it does not.
-// ROUND NETMON: THE HARDWARE ADDRESS FOR AN IP, for the forwarder.
-// `arp_look` is private and stays private; what `kernel/share.fi` needs
-// is "give me the address, and ask for it if you have not got it", which
-// is these five lines and not a second ARP cache. Returns 0 while the
-// question is still out.
 fn hw_for(state: u64, target: u64) -> u64 {
     let flags: u64 = hold(state)
     let m: u64 = arp_look(state, target)
@@ -398,8 +285,6 @@ fn set_task(state: u64, t: u64) {
     kstate.set(state, sc(S_TASK), t)
 }
 
-// The clock the measurements are printed in. Microseconds out of the
-// TSC that round K2 measured, or the 100 Hz tick when there is no APIC.
 fn us(state: u64) -> u64 {
     return now_us(state)
 }
@@ -415,21 +300,6 @@ fn stat(state: u64, which: u64) -> u64 {
     return stack.net_stat(st(state), (which & 0xFFFFFFFF) as u32)
 }
 
-// RUNDE NETZPLUS: das Fenster in eine EINZELNE Verbindung.
-//
-// `tcp_stat` zaehlt ueber den ganzen Stack; fuer die Frage "ist an
-// DIESER Verbindung Fensterskalierung ausgehandelt worden" ist das zu
-// grob. `sock_dbg` reicht `tcp_dbg` durch, mit der Socketnummer statt
-// des Verbindungsindex -- ein Messdienst kennt nur die.
-// RUNDE NETZPLUS: `nzws=0`, `nzts=0`, `nzsack=0` schalten die jeweilige
-// Option ab. Das ist die Gegenprobe zur Messung: DERSELBE Kernel, einmal
-// mit und einmal ohne -- was dazwischen liegt, ist die Option.
-// MERGE WELLE 17.09.2026: die drei Schalter kommen NICHT mehr ueber
-// `diag.hw`. `hw` ist Glue und liegt in der Schichtordnung UEBER `net`;
-// der Umweg war der einzige Regelbruch, den dieser Merge neu erzeugt
-// hat (tools/struktur/run.sh: 48 statt 47). `hw.net_ws` war ohnehin nur
-// ein Einzeiler auf `kstate.get(pci.K2_SCALARS + S_NZWS)` -- inet liest
-// jetzt selbst, aus derselben Zelle, mit denselben Zahlen.
 const S_NZWS: u64 = 0xCA0
 const S_NZTS: u64 = 0xCA8
 const S_NZSACK: u64 = 0xCB0
@@ -462,12 +332,6 @@ fn tcp_stat(state: u64, which: u64) -> u64 {
     return tcp.tcp_stat(stack.net_tcp(st(state)), (which & 0xFFFFFFFF) as u32)
 }
 
-// ------------------------------------------------------------ the clock
-//
-// Microseconds, because that is what the stack asks for. The tick of the
-// kernel is 10 000 of them; the TSC that round K2 measured is finer, and
-// the divisor is computed once so that this is a division and not a
-// multiplication that could run over.
 fn now_us(state: u64) -> u64 {
     let div: u64 = kstate.get(state, sc(S_TSCDIV))
     if div == 0 {
@@ -475,8 +339,6 @@ fn now_us(state: u64) -> u64 {
     }
     return apic.tsc() / div
 }
-
-// ------------------------------------------------------------- the lock
 
 fn hold(state: u64) -> u64 {
     let flags: u64 = sched.irq_save()
@@ -489,11 +351,6 @@ fn drop_lock(state: u64, flags: u64) {
     sched.irq_restore(flags)
 }
 
-// ------------------------------------------------------------- the init
-
-// `seed` is what the initial sequence number is derived from. It is the
-// TSC and not a constant: two Osum machines that boot with the same ISN
-// would be two machines a stale segment can be delivered to.
 fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     gateway: u64) -> bool {
     kstate.set(state, sc(S_READY), 0)
@@ -506,20 +363,6 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     }
     let pages: u64 = (stack.net_size() as u64 + mem.FRAME_SIZE - 1)
         / mem.FRAME_SIZE
-    // Three pages more than the struct, and each of them has one job:
-    //
-    //   +0  what `net_output` writes a frame into. Touched by the
-    //       network task only, and only while it holds the lock.
-    //   +1  where a system call puts what it copied out of ring 3, and
-    //       what it will copy back into it. The kernel never hands an
-    //       address of a process to the stack.
-    //   +2  the two `sockaddr_in` of a call, in and out.
-    //
-    // The bounce page is ONE page for the whole system, the same way
-    // `kstate.BLOCK_OFF` has been one page for every file operation
-    // since round 62. Two processes in `sendto` at the same instant
-    // would share it; that is the shape this kernel has, and it is
-    // written down here rather than left to be discovered.
     let base: u64 = mem.frame_run(state, pages + 3)
     if base == 0 {
         return false
@@ -553,9 +396,6 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     }
     stack.net_init(st(state), own, netmask, (gateway & 0xFFFFFFFF) as u32,
         &m[0], seed)
-    // RUNDE NETZPLUS: die drei Optionen so stellen, wie die Befehlszeile
-    // es sagt. `net_init` hat sie gerade auf "an" gesetzt; hier wird
-    // daraus die Gegenprobe.
     nzp_options(state)
     kstate.set(state, sc(S_IP), own as u64)
     kstate.set(state, sc(S_MASK), netmask as u64)
@@ -565,29 +405,11 @@ fn init(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     return true
 }
 
-// The address, after the fact -- `tools/net/run.sh` hands it in on the
-// command line so that one kernel image can be measured on several
-// wires.
 fn configure(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     gateway: u64) -> bool {
     return init(state, a, b, c, d, prefix, gateway)
 }
 
-// RUNDE DESKTOP: DIE ADRESSE IM LAUFENDEN BETRIEB WECHSELN.
-//
-// `configure` ruft `init`, und `init` holt sich JEDES MAL neue Rahmen
-// aus dem Verwalter. Ein DHCP-Klient, der seine Adresse setzt, haette
-// den Stapelspeicher damit ein zweites Mal belegt und den ersten
-// verloren -- bei jeder Erneuerung des Vertrages noch einmal. Das ist
-// ein Leck, und es steht hier, weil es beim Bauen dieser Runde
-// wirklich passiert ist.
-//
-// Diese Funktion nimmt DIESELBEN Rahmen und setzt den Stapel darauf
-// neu auf. Was sie KOSTET, gehoert dazugesagt und steht auch im
-// Logbuch: `stack.net_init` setzt die Sockettabelle des Stapels
-// zurueck. Wer eine offene Verbindung hat, verliert sie. Deshalb holt
-// der DHCP-Klient seine Adresse, BEVOR irgendetwas anderes das Netz
-// benutzt, und schliesst seinen eigenen Socket vorher.
 fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     gateway: u64) -> bool {
     if !ready(state) {
@@ -621,12 +443,6 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
     return true
 }
 
-// ---------------------------------------------------------- the pump
-
-// One read of every word of a received frame, into the scratch page.
-// `n` is at most the driver buffer (2048, all three drivers refuse more),
-// the page is 4096. Words of 4 octets: the virtio frame starts 12 octets
-// into its buffer, so 4 is the widest step that is always aligned.
 fn rx_snapshot(state: u64, src: u64, n: u64) -> u64 {
     let dst: u64 = kstate.get(state, sc(S_SCRATCH))
     var k: u64 = 0
@@ -643,11 +459,6 @@ fn rx_snapshot(state: u64, src: u64, n: u64) -> u64 {
     return dst
 }
 
-// One turn: everything the card has, into the stack; everything the
-// stack has, onto the card. Returns how many frames moved in either
-// direction, which is what netd uses to decide whether to spin or sleep.
-//
-// THIS IS THE ONLY PLACE `net_input` AND `net_output` ARE CALLED.
 fn pump(state: u64) -> u64 {
     if !ready(state) {
         return 0
@@ -665,60 +476,10 @@ fn pump(state: u64) -> u64 {
         if len == 0 {
             n = PUMP_BATCH
         } else {
-            // TOCTOU (docs/SECURITY-TOCTOU-KERNEL-DRIVERS.md F-01): the
-            // receive buffer is memory the card (or the hypervisor behind
-            // it) can still write. Every consumer below parses it with
-            // lengths it checked a moment earlier and re-reads (IP
-            // ihl/total in the stack, the WireGuard tag and then the
-            // ciphertext again). So the frame is read ONCE, here, into
-            // the scratch page, and everything after this line works on
-            // that private copy. The scratch page is the transmit buffer
-            // too, but the transmit loop below starts after this one.
             frame = rx_snapshot(state, frame, len)
-            // ROUND NETMON: the frame is classified BEFORE it goes into
-            // the stack, because the stack may consume it and because
-            // this is the only place it exists as octets with a length.
             netmon.frame_seen(state, frame, len, false)
-            // ================================= RUNDE O-EBPF
-            //
-            // DER HAKEN AM EINGANG DES GERAETS, und er steht GENAU
-            // HIER: nach der Zaehlung, vor Tunnel, Weiterleitung und
-            // Stack. Die Reihenfolge ist dieselbe Ueberlegung, die der
-            // Absatz darueber fuer die drei alten Haken anstellt.
-            //
-            //   NACH `netmon.frame_seen`, weil die Zaehlung sagt, was
-            //   auf dem DRAHT war. Ein Rahmen, den der Filter wegwirft,
-            //   ist trotzdem ueber die Leitung gekommen und muss in der
-            //   Abrechnung stehen. Stuende der Filter davor, waere
-            //   NETMON eine Aussage ueber den Filter statt ueber die
-            //   Leitung -- und die Zahl, die jemand mit seinem
-            //   Datentarif vergleicht, waere zu klein.
-            //
-            //   VOR `learn`, `icmp_catch`, Tunnel und Stack, weil ein
-            //   verworfener Rahmen dann wirklich nichts mehr kostet:
-            //   kein Entschluesseln, kein Zusammensetzen, keine
-            //   Pruefsumme, keine Steckdose. Das ist der ganze Sinn
-            //   eines Hakens an dieser Stelle.
-            //
-            //   DASS ER VOR `icmp_catch` STEHT, IST GEMESSEN UND NICHT
-            //   GERATEN. Die erste Fassung setzte ihn dahinter -- und
-            //   `tools/ebpf/run.sh` Abschnitt 5b meldete, dass `ping`
-            //   trotz eines geladenen ICMP-Filters weiter Antworten
-            //   bekam. Der Grund: `icmp_catch` FAENGT die Echo-Antwort
-            //   selbst ab und beantwortet sie, bevor der Stack sie
-            //   sieht; ein Haken dahinter kommt fuer ICMP zu spaet.
-            //   Ein Haken am Eingang des Geraets muss der erste sein,
-            //   der den Rahmen sieht -- sonst filtert er nur das, was
-            //   vor ihm niemand haben wollte.
-            //
-            // Steht kein Programm daran, sind das eine Ladung aus
-            // `kdata` und ein Vergleich; `tools/ebpf/run.sh` misst
-            // diesen leeren Fall gesondert, weil er der Normalfall ist.
             let verdikt: u64 = ebpfhook.xdp(state, frame, len)
             if verdikt == ebpfhook.DROP {
-                // VERWORFEN. Der Rahmen geht NICHT in den Stack; der
-                // Puffer wird trotzdem zurueckgegeben, sonst versiegt
-                // der Empfangsring nach ein paar hundert Rahmen.
                 netdev.rx_recycle(state, slot)
                 kstate.add(state, sc(S_IN), 1)
                 work = work + 1
@@ -726,22 +487,6 @@ fn pump(state: u64) -> u64 {
             } else {
                 learn(state, frame, len)
                 icmp_catch(state, frame, len)
-            // ROUND TUNNEL. The tunnel gets the frame before the stack
-            // does. If it says it was its own -- a WireGuard message on
-            // its port -- the stack must not also see it; what came out
-            // of it, if anything, has already been handed in as a frame
-            // of its own. `kernel/wg.fi` says why this is here and not
-            // in a socket.
-            //
-            // MERGE: DIE REIHENFOLGE DER DREI HAKEN. Erst ZAEHLEN
-            // (NETMON sieht jeden Rahmen, auch den verschluesselten --
-            // das ist die Zahl, die auf dem Draht steht), dann der
-            // TUNNEL (er nimmt seine eigenen Nachrichten heraus und
-            // reicht das Entpackte als neuen Rahmen wieder herein), dann
-            // die WEITERLEITUNG (NETMON Teil zwei: gehoert der Rahmen
-            // einer Maschine auf der geteilten Seite). Anders herum
-            // zaehlte NETMON entweder den Klartext doppelt oder den
-            // Draht gar nicht.
             if !kodb.rx_hook(state, frame, len, ip(state), mask(state))
                 && !wg.rx_hook(state, frame, len)
                 && !share.inbound(state, frame, len) {
@@ -769,12 +514,6 @@ fn pump(state: u64) -> u64 {
                 n = PUMP_BATCH
             } else {
                 netmon.frame_seen(state, out, len as u64, true)
-                // ROUND TUNNEL, AND THIS IS THE KILL SWITCH. Every frame
-                // this system sends passes through this one line, because
-                // this is the only call to `virtio.tx_frame` there is. A
-                // frame the tunnel takes over (it will send the encrypted
-                // form itself) or refuses (the switch is armed and the
-                // tunnel is not carrying) never reaches the card.
                 if wg.tx_hook(state, out, len as u64) == 0 {
                     count_tx(state, out, len as u64)
                     netdev.tx_frame(state, out, len as u64)
@@ -798,30 +537,16 @@ fn pump(state: u64) -> u64 {
             n = n + 1
         }
     }
-    // The handshakes and keepalives that are due, on the network task's
-    // turn and inside the same lock -- a Curve25519 operation has no
-    // business in an interrupt handler.
     wg.tick(state)
 
     kstate.add(state, sc(S_PUMPS), 1)
     drop_lock(state, flags)
-    // RUNDE POLL: NACH dem Loslassen der Netzsperre. Was gerade
-    // hereinkam, kann eine Steckdose lesbar gemacht haben -- und wer
-    // darauf in `poll` wartet, soll jetzt aufwachen und nicht erst,
-    // wenn sein Zeitablauf kommt. `sched.poll_kick` nimmt selbst keine
-    // Sperre; trotzdem steht der Aufruf ausserhalb, weil die
-    // Reihenfolge Netzsperre -> Laufsperre in diesem Kernel nirgends
-    // vorkommt und hier nicht anfangen soll.
     if work != 0 {
         sched.poll_kick(state)
     }
     return work
 }
 
-// The body of the K_NETD task, called out of `tasks.main`. It is a task
-// and not a loop in `kmain` for the reason at the top of this file: a
-// `ping` from the host has to be answered while every process in the
-// system is waiting for something else.
 fn netd_body(state: u64, index: u64) {
     var hot: u64 = HOT_TURNS
     var hot_t0: u64 = now_us(state)
@@ -830,10 +555,6 @@ fn netd_body(state: u64, index: u64) {
     while true {
         var w: u64 = pump(state)
         kodb.service(state, ip(state))
-        // ROUND NETMON PART TWO: the shared card gets its turn in the
-        // same task. A second task would mean a second thing taking the
-        // network lock, and the whole discipline of round K8 is that
-        // exactly one thread moves frames.
         w = w + share.pump(state)
         let kick: u64 = kstate.get(state, sc(S_KICK))
         if w > 0 || kick != seen {
@@ -845,11 +566,6 @@ fn netd_body(state: u64, index: u64) {
             kstate.get(state, sc(S_PUMPS)))
         if hot > 0 {
             hot = hot - 1
-            // W-U (17.10.2026): the spin is bounded in TIME, not only in
-            // turns. With many ready tasks one turn of the run queue is
-            // a whole round of them, so 4000 turns lasted far longer than
-            // a tick: a few frames a second (VirtualBox, bridged: ARP /
-            // mDNS / SSDP chatter) kept netd at ~70 % of a core at idle.
             if !old_rule {
                 let now: u64 = now_us(state)
                 if now > hot_t0 && now - hot_t0 >= HOT_US {
@@ -860,9 +576,6 @@ fn netd_body(state: u64, index: u64) {
         if hot > 0 {
             sched.yield_now(state)
         } else if !old_rule && now_us(state) - hot_t0 >= QUIET_US {
-            // r1087: nothing on the wire for QUIET_US: look every QUIET_TICKS instead of every tick. The first frame
-            // after a quiet spell waits at most that long, then the task is hot again. (VirtualBox ps: pid 3 netd = 8.5 %
-            // of a core at idle just for 100 empty wake-ups per second.)
             sched.sleep_ticks(state, QUIET_TICKS)
         } else {
             sched.sleep_ticks(state, 1)
@@ -870,20 +583,9 @@ fn netd_body(state: u64, index: u64) {
     }
 }
 
-// Called out of the interrupt handler. It does not touch the stack and
-// it does not take the lock -- one store, so that netd notices on its
-// next turn that the wire is alive again.
 fn wake(state: u64) {
     kstate.add(state, sc(S_KICK), 1)
 }
-
-// ------------------------------------- the shadow cache of hardware
-//
-// Forty octets of duplication, and the reason is at the top: the ARP
-// cache in `stack.fi` is private, and the raw ICMP path needs a
-// destination address. Every frame that comes in is looked at once --
-// an ARP reply for the pairing it announces, an IPv4 frame for the
-// pairing it demonstrates.
 
 fn arp_at(i: u64) -> u64 {
     return sc(ARP_OFF + i * ARP_BYTES)
@@ -915,8 +617,6 @@ fn learn(state: u64, f: u64, n: u64) {
     if ip(state) != 0 && (src & lmask) != (ip(state) & lmask) {
         return
     }
-    // Six octets of the sender's hardware address sit at offset 6 of
-    // every Ethernet frame there has ever been.
     var mac: u64 = 0
     var i: u64 = 0
     while i < 6 {
@@ -970,7 +670,6 @@ fn arp_mac_slot(state: u64, i: u64) -> u64 {
     return kstate.get(state, arp_at(i) + 8)
 }
 
-// The hardware address for an IP, or 0.
 fn arp_look(state: u64, target: u64) -> u64 {
     var i: u64 = 0
     while i < ARP_MAX {
@@ -982,9 +681,6 @@ fn arp_look(state: u64, target: u64) -> u64 {
     return 0
 }
 
-// An ARP request, built and put on the wire without the stack: it is a
-// broadcast, so it needs no hardware address to be sent, which is the
-// whole point of ARP.
 fn arp_ask(state: u64, target: u64) {
     if !arp_may_ask(state, target) {
         return
@@ -1003,27 +699,15 @@ fn arp_ask(state: u64, target: u64) {
     wire.arp_build(&f[14], wire.ARP_REQUEST, &me[0],
         (ip(state) & 0xFFFFFFFF) as u32, &zero[0],
         (target & 0xFFFFFFFF) as u32)
-    // ROUND NETMON: the same reason as in `icmp_send`. An ARP request
-    // belongs to nobody -- it goes into the system bucket, which is
-    // what that bucket is for.
     netmon.frame_seen(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64, true)
     count_tx(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
     netdev.tx_frame(state, (&f[0]) as u64, 14 + wire.ARP_LEN as u64)
 }
 
-// --------------------------------------------------------- ICMP echo
-//
-// The stack answers an echo REQUEST itself; what it does not do is send
-// one or keep an echo REPLY. Both happen here.
-
 fn icmp_at(i: u64) -> u64 {
     return sc(ICMP_OFF + (i % ICMP_SLOTS) * ICMP_BYTES)
 }
 
-// Every incoming frame is looked at once more: an IPv4 datagram, ICMP,
-// type 0, for us. What is kept is the sender and the ICMP message
-// itself, from its type octet on -- exactly what a `recvfrom` on a ping
-// socket gives back on Linux.
 fn icmp_catch(state: u64, f: u64, n: u64) {
     if n < 14 + 20 + 8 {
         return
@@ -1068,10 +752,6 @@ fn icmp_catch(state: u64, f: u64, n: u64) {
     kstate.add(state, sc(S_ECHOES), 1)
 }
 
-// An ICMP message, built and sent. `body` is what ring 3 handed over --
-// type, code, a checksum field it may have left at zero, and the rest.
-// The checksum is computed HERE and not trusted, the same way Linux's
-// ping socket does it.
 fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     if n < 8 || n > ICMP_MAX {
         return errno.neg(errno.E_INVAL)
@@ -1097,9 +777,6 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
         f[(34 + i) as usize] = kstate.get8(body + i) as u8
         i = i + 1
     }
-    // The checksum field of the message itself, zeroed before it is
-    // computed -- RFC 792, and the reason a stack that forgets it gets
-    // silence back.
     f[36] = 0 as u8
     f[37] = 0 as u8
     let sum: u16 = wire.checksum(&f[34], n as usize)
@@ -1108,13 +785,6 @@ fn icmp_send(state: u64, dst: u64, body: u64, n: u64) -> u64 {
     wire.ip_build(&f[14], (seq & 0xFFFF) as u16, wire.IP_ICMP,
         (ip(state) & 0xFFFFFFFF) as u32, (dst & 0xFFFFFFFF) as u32,
         n as usize)
-    // ROUND NETMON: ICMP IS THE ONE PATH THAT DOES NOT GO THROUGH THE
-    // PUMP. The stack cannot send an echo request, so this function
-    // builds the frame and hands it to the card itself -- which means
-    // `pump` never sees it and the outgoing side of a `ping` would be
-    // counted as zero while its answers were counted in full. The first
-    // measured run of this round showed exactly that: `ping  192 <- 192
-    // payload, wire 0 <- 294`. Here is the missing half.
     netmon.frame_seen(state, (&f[0]) as u64, 14 + 20 + n, true)
     count_tx(state, (&f[0]) as u64, 14 + 20 + n)
     if !netdev.tx_frame(state, (&f[0]) as u64, 14 + 20 + n) {
@@ -1142,8 +812,6 @@ fn icmp_take(state: u64, dst: u64, cap: u64, from: *mut u64) -> u64 {
     kstate.set(state, sc(S_ICMP_HEAD), head + 1)
     return len
 }
-
-// ------------------------------------------------------- the sockets
 
 fn so_at(i: u64) -> u64 {
     return sc(SOCK_OFF + i * SOCK_BYTES)
@@ -1182,13 +850,6 @@ fn sock_set_nonblock(state: u64, i: u64) {
         kstate.get(state, so_at(i) + SO_FLAGS) | SF_NONBLOCK)
 }
 
-// ROUND FV-W24: SO_RCVTIMEO / SO_SNDTIMEO. The two timeouts live in the
-// upper bits of the KIND word of the slot, in ticks (10 ms): the receive
-// timeout in bits 8..31, the send timeout in bits 32..55. The low byte is
-// the SK_* kind. NOT in the flag word: the keepalive values of N-006 use
-// bits 8..44 of it. `sock_new` writes the kind and `sock_free` writes
-// SK_FREE over the whole word, so a slot never carries a timeout over to
-// its next owner. 0 = no timeout (the default).
 const TMO_MASK: u64 = 0xFFFFFF
 const TMO_RCV_SHIFT: u64 = 8
 const TMO_SND_SHIFT: u64 = 32
@@ -1229,20 +890,7 @@ fn sock_new(state: u64, kind: u64) -> u64 {
             kstate.set(state, so_at(i) + SO_H, NOHANDLE)
             kstate.set(state, so_at(i) + SO_PORT, 0)
             kstate.set(state, so_at(i) + SO_FLAGS, 0)
-            // ROUND NETMON: a slot that changes hands starts at zero.
-            // Here and not in `sys.fi`: this is the one function that
-            // knows a slot was TAKEN, and a record left over from the
-            // last owner would put that owner's octets on this one.
             netmon.sock_gone(state, i)
-            // ROUND NETMON: AND IT GETS AN OWNER HERE, not only in
-            // `sys.do_socket`. The kernel's own network service
-            // (`netsvc.fi`) opens sockets by calling this file
-            // directly, never through a system call -- and a socket
-            // with no owner puts every one of its frames in the system
-            // bucket. The first measured run of the throughput case
-            // showed exactly that: `hit=0 miss=774`. `sys.fi` writes
-            // the same task in again a moment later, which costs four
-            // stores and keeps the two paths independent.
             netmon.sock_open(state, i, sched.current(state),
                 sched.tget(state, sched.current(state), sched.T_PID), kind)
             kstate.add(state, sc(S_SOCKS), 1)
@@ -1257,9 +905,6 @@ fn sock_free(state: u64, i: u64) {
     if i >= SOCK_MAX {
         return
     }
-    // ROUND NETMON: the live record goes, the process totals stay. What
-    // a connection did is part of what its program used; what it did it
-    // WITH is not kept a second longer than the connection lives.
     netmon.sock_gone(state, i)
     kstate.set(state, so_at(i) + SO_KIND, SK_FREE)
     kstate.set(state, so_at(i) + SO_H, NOHANDLE)
@@ -1308,10 +953,6 @@ fn sock_listen(state: u64, i: u64, backlog: u64) -> u64 {
     return 0
 }
 
-// ONE attempt. The waiting is done by `sys.fi`, which is the layer that
-// knows whether the descriptor was asked for in blocking mode -- and the
-// layer that may sleep. Nothing in this file sleeps while it holds the
-// lock.
 fn sock_accept(state: u64, i: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return errno.neg(errno.E_OPNOTSUPP)
@@ -1334,13 +975,8 @@ fn sock_accept(state: u64, i: u64) -> u64 {
         return errno.neg(errno.E_NFILE)
     }
     kstate.set(state, so_at(n) + SO_H, h as u64)
-    // N-006: an accepted connection inherits keepalive from its listener (as on Linux).
     kstate.set(state, so_at(n) + SO_FLAGS, SF_CONNECTED | (sock_flags(state, i) & KA_MASK))
     ka_apply(state, n)
-    // ROUND NETMON: the accepted connection carries the port of the
-    // listener and the address of whoever called. `sys.do_accept` is
-    // what gives it an owner; the numbers belong here, where the handle
-    // is.
     let f3: u64 = hold(state)
     let t2: *mut tcp.Tcp = stack.net_tcp(st(state))
     let alp: u64 = tcp.tcp_local_port(t2, h) as u64
@@ -1354,8 +990,6 @@ fn sock_accept(state: u64, i: u64) -> u64 {
     return n
 }
 
-// N-006: the keepalive setting of a socket (which: KA_ON / KA_IDLE / KA_INTVL /
-// KA_CNT), with the defaults filled in.
 fn sock_ka_get(state: u64, i: u64, which: u64) -> u64 {
     let f: u64 = sock_flags(state, i)
     if which == KA_ON {
@@ -1384,7 +1018,6 @@ fn sock_ka_get(state: u64, i: u64, which: u64) -> u64 {
     return v
 }
 
-// Hand the setting of socket `i` to its connection, if it has one yet.
 fn ka_apply(state: u64, i: u64) {
     let h: u64 = sock_handle(state, i)
     if sock_kind(state, i) != SK_TCP || h == NOHANDLE {
@@ -1403,7 +1036,6 @@ fn ka_apply(state: u64, i: u64) {
     drop_lock(state, flags)
 }
 
-// Set one value (the range is checked by the caller). Returns 0.
 fn sock_ka_set(state: u64, i: u64, which: u64, v: u64) -> u64 {
     var f: u64 = sock_flags(state, i)
     if which == KA_ON {
@@ -1430,7 +1062,6 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
         return errno.neg(errno.E_BADF)
     }
     if k != SK_TCP {
-        // A connected datagram socket only remembers where it sends to.
         kstate.set(state, so_at(i) + SO_PORT, port)
         kstate.set(state, so_at(i) + SO_FLAGS,
             sock_flags(state, i) | SF_CONNECTED)
@@ -1448,12 +1079,6 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     }
     kstate.set(state, so_at(i) + SO_H, h as u64)
     ka_apply(state, i)
-    // ROUND NETMON: THE LOCAL PORT, NOW AND NOT LATER. An outgoing
-    // connection has no port until the stack picks one, and after this
-    // call it has. Every frame of this connection carries that number,
-    // and it is the only thing that ties the frame back to the process.
-    // Asked for later it would be right too -- but `pump` runs with the
-    // lock held and may not take it a second time.
     let f2: u64 = hold(state)
     let t: *mut tcp.Tcp = stack.net_tcp(st(state))
     let lp: u16 = tcp.tcp_local_port(t, h as i32)
@@ -1465,7 +1090,6 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
     return 0
 }
 
-// The state of a TCP socket, in the numbers of `net.tcp`.
 fn sock_state(state: u64, i: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return tcp.S_CLOSED as u64
@@ -1530,17 +1154,6 @@ fn sock_writable(state: u64, i: u64) -> u64 {
     return n as u64
 }
 
-// RUNDE POLL: KANN `accept` JETZT? -- OHNE ETWAS ANZUNEHMEN.
-//
-// `sock_accept` oben ist ZERSTOEREND: es setzt `accepted = 1` und gibt
-// die Verbindung heraus. In `poll` waere das falsch -- ein `poll`, das
-// meldet, entnimmt nichts, und ein Programm, das nach dem `poll` kein
-// `accept` macht, haette die Verbindung sonst in einem Nirgendwo.
-//
-// Also derselbe Durchlauf wie in `tcp_accept`, nur LESEND. Die Felder
-// `listener`, `accepted`, `used` und `state` von `tcp.Tcb` sind aus
-// `net/tcp.fi` ausgefuehrt (`export { Tcp, Tcb, ... }`); an der
-// mitgelieferten Bibliothek aendert diese Runde KEINE Zeile.
 fn sock_acceptable(state: u64, i: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return 0
@@ -1566,12 +1179,6 @@ fn sock_acceptable(state: u64, i: u64) -> u64 {
     return n
 }
 
-// RUNDE POLL: IST DAS GEGENENDE WEG? Das ist POLLHUP auf einer
-// Steckdose. CLOSE_WAIT ist der Zustand nach einem empfangenen FIN --
-// der Gegenueber schreibt nichts mehr, was noch im Puffer liegt darf
-// aber weiterhin gelesen werden (deshalb steht POLLIN daneben und nicht
-// statt dessen). CLOSED nach einem `connect`/`listen` bedeutet, dass die
-// Verbindung abgeraeumt ist.
 fn sock_hup(state: u64, i: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return 0
@@ -1592,9 +1199,6 @@ fn sock_hup(state: u64, i: u64) -> u64 {
     return 0
 }
 
-// `src` and `dst` are addresses in the KERNEL's data area -- `sys.fi`
-// has already copied them out of ring 3 and checked every page. Nothing
-// in this file ever sees an address of a process.
 fn sock_send(state: u64, i: u64, src: u64, n: u64) -> u64 {
     let k: u64 = sock_kind(state, i)
     if k == SK_FREE {
@@ -1643,9 +1247,6 @@ fn sock_recv(state: u64, i: u64, dst: u64, n: u64) -> u64 {
         netmon.pay_in(state, i, got as u64)
         return got as u64
     }
-    // Nothing there. Whether that is "not yet" or "never again" is the
-    // difference between a `read` that blocks and one that returns 0,
-    // and it is exactly the state machine's answer.
     if s == tcp.S_CLOSE_WAIT || s == tcp.S_LAST_ACK || s == tcp.S_CLOSED
         || s == tcp.S_TIME_WAIT || s == tcp.S_CLOSING {
         return 0
@@ -1657,7 +1258,6 @@ fn sock_recv(state: u64, i: u64, dst: u64, n: u64) -> u64 {
     return errno.neg(errno.E_AGAIN)
 }
 
-// UDP and the ping socket both carry the peer in the call itself.
 fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
     port: u64) -> u64 {
     let k: u64 = sock_kind(state, i)
@@ -1781,9 +1381,6 @@ fn sock_shutdown(state: u64, i: u64, how: u64) -> u64 {
     if h == NOHANDLE {
         return errno.neg(errno.E_NOTCONN)
     }
-    // SHUT_WR (1) and SHUT_RDWR (2) both mean "no more octets from this
-    // side", which in TCP is a FIN. SHUT_RD is not a segment at all and
-    // is answered without one.
     if how != 0 {
         let flags: u64 = hold(state)
         stack.net_close(st(state), h as i32)
@@ -1792,12 +1389,6 @@ fn sock_shutdown(state: u64, i: u64, how: u64) -> u64 {
     return 0
 }
 
-// The end of a socket. An orderly close for TCP -- the FIN travels, the
-// state machine goes through LAST_ACK or TIME_WAIT on its own and frees
-// the slot when it is due. That is the part the first attempt at this
-// round got wrong; `tcp.fi` holds the slot until TIME_WAIT is over and
-// frees it itself, and a `close` that tore the slot out here would be
-// the bug that comment describes.
 fn sock_close(state: u64, i: u64) {
     let k: u64 = sock_kind(state, i)
     if k == SK_FREE {
@@ -1816,11 +1407,6 @@ fn sock_close(state: u64, i: u64) {
     sock_free(state, i)
 }
 
-// ------------------------------------------------------------ the report
-
-// Two hex digits, without the `0x` that `serial.hex_width` puts in
-// front -- an Ethernet address is twelve digits and five colons and
-// nothing else.
 fn hex2(v: u64) {
     var i: u64 = 0
     while i < 2 {
@@ -1868,14 +1454,6 @@ fn print_state(state: u64) {
     serial.nl()
 }
 
-
-// ============================================ RUNDE ECHTHARDWARE-1
-// WIE WEIT DER DHCP-KLIENT GEKOMMEN IST -- vier Zahlen, die die
-// Messtafel lesen kann, weil Justins Brett keine serielle Leitung hat.
-//
-// Sie stehen hier und nicht im Klienten, weil der Klient ein Programm
-// in Ring 3 ist: er endet, sobald er fertig ist, und nimmt seinen
-// Zustand mit. Die Tafel malt aber noch Minuten spaeter.
 static mut dh_state: u64 = 0
 static mut dh_tx: u64 = 0
 static mut dh_rx: u64 = 0

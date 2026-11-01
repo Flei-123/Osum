@@ -1,63 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/batt.fi -- RUNDE K18: AKKU, NETZTEIL UND THERMALZONE AUS ACPI.
-//
-// Ein Betriebssystem erfaehrt den Ladestand eines Akkus nicht durch
-// Nachsehen. Es gibt kein Register und keinen Anschluss, an dem eine
-// Prozentzahl staende; die Zahl existiert nur in einem AML-Objekt, das
-// die Firmware in ihren Tabellen hinterlegt hat, und der Weg dorthin
-// heisst `_BIF` (was der Akku IST) und `_BST` (wie es ihm GERADE geht).
-//
-//   _BIF  Package(13) { Einheit, Auslegungskapazitaet, letzte volle
-//                       Ladung, Technik, Auslegungsspannung, Warnung,
-//                       Untergrenze, Koernung1, Koernung2,
-//                       "Modell", "Seriennummer", "Art", "Hersteller" }
-//   _BST  Package(4)  { Zustand, Strom, Restkapazitaet, Spannung }
-//   _PSR  Integer     { 0 = Akkubetrieb, 1 = am Netz }
-//   _TMP  Integer     { Temperatur in ZEHNTELKELVIN }
-//
-// Der Ladestand ist dann Restkapazitaet geteilt durch letzte volle
-// Ladung; die Restzeit ist Restkapazitaet geteilt durch den Strom. Beides
-// rechnet diese Datei aus, und beides ist nur so gut wie die Tabelle.
-//
-// ------------------------------------------------------------------
-// WAS DIESE DATEI KANN UND WAS NICHT -- OHNE BESCHOENIGUNG
-//
-// Vollstaendig richtig waere ein AML-Interpreter. `_BST` ist auf einem
-// echten Laptop naemlich eine METHODE: sie liest ueber den Embedded
-// Controller sechs Register aus, rechnet und gibt erst dann ein Paket
-// zurueck. Ein Interpreter dafuer ist eine eigene Runde und mehr Code als
-// dieser ganze Kernel-Ordner.
-//
-// Was hier steht, ist derselbe Weg, den `kernel/power.fi` seit Runde K13
-// fuer `_S5_` geht, und er ist aus demselben Grund vertretbar: die
-// Tabellen nach den vier Oktetten des Namens absuchen und das, was
-// dahinter steht, VON HAND lesen -- solange es eine KONSTANTE ist.
-// `Name(_BST, Package(4){...})` wird gefunden, `Method(_BST){...}` nicht.
-//
-// Das ist eine ehrliche Teilmenge, keine vollstaendige. Sie deckt:
-//   * jede selbstgebaute SSDT (und damit die Abnahme dieser Runde),
-//   * die Firmware einiger einfacher Geraete und fast jeder virtuellen
-//     Maschine, die einen Akku nachbildet,
-// und sie deckt NICHT den handelsueblichen Laptop mit Embedded
-// Controller. Findet sie nichts, sagt sie das (`BT_PRESENT` bleibt 0,
-// `BT_WHY` sagt warum) -- sie erfindet keinen Ladestand.
-//
-// ------------------------------------------------------------------
-// WARUM DAS TROTZDEM EINE ECHTE MESSUNG IST
-//
-// Die Messmaschine ist QEMU 7.2. Ein `-device battery` gibt es dort noch
-// nicht (das kam erst in QEMU 8.2), also gaebe es ohne weiteres nichts zu
-// lesen. Was es gibt, ist `-acpitable`: QEMU nimmt eine FERTIGE Tabelle
-// entgegen und haengt sie in die RSDT/XSDT ein, wo jeder Kernel sie
-// findet.
-//
-// Damit wird die Zusage dieser Runde ueberpruefbar, ohne dass irgendwo
-// eine Zahl im Kernel steht: `tools/k18/ssdt.py` BAUT eine SSDT mit einem
-// Akku, dessen Werte der Testlauf VORGIBT, QEMU haengt sie ein, und
-// `/bin/power` muss genau diese Werte zeigen. Andere Werte in der Tabelle
-// -> andere Ausgabe. Keine Tabelle -> "kein Akku". Das ist der
-// Unterschied zwischen einer Messung und einer Zahl, die das Programm
-// sich selbst gesetzt hat.
 
 import lib.kstate
 import serial
@@ -74,53 +14,31 @@ export {
     W_OK, W_NORSDP, W_NONAME, W_NOPKG, W_SHORT
 }
 
-// ------------------------------------------------ die Plaetze in `kdata`
-//
-// EINE SEITE, 0x59000, aus dem Vorrat dieser Runde (0x58000..0x60000).
-// Die erste haelt `pwr.fi`.
+const BT_PRESENT: u64 = 0
+const BT_STATE: u64 = 8
+const BT_RATE: u64 = 16
+const BT_REMAIN: u64 = 24
+const BT_VOLT: u64 = 32
+const BT_UNIT: u64 = 40
+const BT_DESIGN: u64 = 48
+const BT_FULL: u64 = 56
+const BT_TECH: u64 = 64
+const BT_DVOLT: u64 = 72
+const BT_WARN: u64 = 80
+const BT_LOW: u64 = 88
+const BT_AC: u64 = 96
+const BT_ACOK: u64 = 104
+const BT_TABLES: u64 = 112
+const BT_WHY: u64 = 120
+const BT_TZ: u64 = 128
+const BT_TZOK: u64 = 136
+const BT_STA: u64 = 144
+const BT_BIFOK: u64 = 152
+const BT_BSTAT: u64 = 160
+const BT_PSRAT: u64 = 168
+const BT_TMPAT: u64 = 176
 
-const BT_PRESENT: u64 = 0 // 1 = ein _BST wurde wirklich gelesen
-const BT_STATE: u64 = 8 // _BST[0]: Bit 0 entladen, Bit 1 laedt, Bit 2 leer
-const BT_RATE: u64 = 16 // _BST[1]: mW oder mA
-const BT_REMAIN: u64 = 24 // _BST[2]: mWh oder mAh
-const BT_VOLT: u64 = 32 // _BST[3]: mV
-const BT_UNIT: u64 = 40 // _BIF[0]: 0 = mW/mWh, 1 = mA/mAh
-const BT_DESIGN: u64 = 48 // _BIF[1]
-const BT_FULL: u64 = 56 // _BIF[2]: die letzte volle Ladung
-const BT_TECH: u64 = 64 // _BIF[3]
-const BT_DVOLT: u64 = 72 // _BIF[4]
-const BT_WARN: u64 = 80 // _BIF[5]
-const BT_LOW: u64 = 88 // _BIF[6]
-const BT_AC: u64 = 96 // _PSR: 1 = am Netz
-const BT_ACOK: u64 = 104 // 1 = ein Netzteilgeraet wurde gefunden
-const BT_TABLES: u64 = 112 // wie viele Tabellen durchsucht wurden
-const BT_WHY: u64 = 120 // warum kein Akku, siehe W_*
-const BT_TZ: u64 = 128 // _TMP roh, in Zehntelkelvin
-const BT_TZOK: u64 = 136 // 1 = eine Thermalzone wurde gefunden
-const BT_STA: u64 = 144 // _STA des Akkugeraets
-const BT_BIFOK: u64 = 152 // 1 = auch _BIF wurde gelesen
-// RUNDE POWERMON: WO DIE ZAHLEN STANDEN.
-//
-// `scan` durchsucht JEDE Tabelle Oktett fuer Oktett nach den vier
-// Namensoktetten. Das kostet einmal beim Start nichts und zehnmal je
-// Sekunde sehr viel: gemessen 12,8 Millionen Zyklen je Durchgang unter
-// TCG, in einem Zeitgeberunterbrecher. Die Buchfuehrung von Runde
-// POWERMON haette damit mehr Strom gekostet als sie erklaeren kann.
-//
-// Also wird der FUNDORT gemerkt. Die Tabellen liegen fest im
-// reservierten Speicher und wandern nicht; ein zweites Lesen desselben
-// Pakets ist ein paar Dutzend Oktette und keine Suche.
-const BT_BSTAT: u64 = 160 // Adresse des ersten Elements von _BST
-const BT_PSRAT: u64 = 168 // Adresse der Zahl hinter _PSR
-const BT_TMPAT: u64 = 176 // Adresse der Zahl hinter _TMP
-
-// Die vier Zeichenketten aus _BIF, je 64 Oktette.
-// RUNDE LEISTE-RECHTS: merkt sich, dass dieser Akku VORGETAEUSCHT ist.
-// Ohne diese Marke setzt `refresh` -- das zehnmal je Sekunde laufen darf
-// -- `BT_PRESENT` beim naechsten Durchgang wieder auf 0, weil es keine
-// ACPI-Tabelle findet. GEMESSEN: der Kern meldete `batpresent=1`, und
-// die Leiste sah trotzdem keinen Akku.
-const BT_FAKED: u64 = 184 // 1 = die Zahlen stammen aus `fake`
+const BT_FAKED: u64 = 184
 
 const BT_NAMES: u64 = 256
 const BT_MODEL: u64 = 0
@@ -129,12 +47,11 @@ const BT_TYPE: u64 = 2
 const BT_OEM: u64 = 3
 const NAME_BYTES: u64 = 64
 
-// Warum nichts gefunden wurde.
 const W_OK: u64 = 0
-const W_NORSDP: u64 = 1 // keine ACPI-Tabellen ueberhaupt
-const W_NONAME: u64 = 2 // die Tabellen sind da, _BST steht in keiner
-const W_NOPKG: u64 = 3 // _BST steht da, aber kein konstantes Paket
-const W_SHORT: u64 = 4 // das Paket hat zu wenige Elemente
+const W_NORSDP: u64 = 1
+const W_NONAME: u64 = 2
+const W_NOPKG: u64 = 3
+const W_SHORT: u64 = 4
 
 fn g(state: u64, off: u64) -> u64 {
     return kstate.get(state, kstate.BATT_OFF + off)
@@ -164,17 +81,10 @@ fn why(state: u64) -> u64 {
     return g(state, BT_WHY)
 }
 
-// Die Adresse der i-ten Zeichenkette.
 fn text_at(state: u64, which: u64) -> u64 {
     return state + kstate.BATT_OFF + BT_NAMES + which * NAME_BYTES
 }
 
-// ------------------------------------------------------- die Rechnungen
-
-// Der Ladestand in Prozent. GANZZAHLIG und mit Aufrundung auf die halbe
-// Einheit, damit 3299 von 4400 nicht als 74 erscheint, wenn es 74,98
-// sind. Ohne letzte volle Ladung gibt es keinen Prozentsatz -- dann 0
-// und `present` ist ohnehin falsch.
 fn percent(state: u64) -> u64 {
     let full: u64 = g(state, BT_FULL)
     if full == 0 {
@@ -187,10 +97,6 @@ fn percent(state: u64) -> u64 {
     return p
 }
 
-// Die Restzeit in Minuten. Beim Laden ist es die Zeit BIS VOLL, beim
-// Entladen die Zeit BIS LEER -- dieselbe Division, andere Zaehler. Ohne
-// Strom gibt es keine Restzeit: dann 0, und der Aufrufer schreibt "--"
-// statt einer Zahl.
 fn minutes(state: u64) -> u64 {
     let rate: u64 = g(state, BT_RATE)
     if rate == 0 || rate == 0xFFFFFFFF {
@@ -207,14 +113,6 @@ fn minutes(state: u64) -> u64 {
     return (menge * 60) / rate
 }
 
-// ------------------------------------------------------------ AML lesen
-//
-// Nur so viel AML, wie eine KONSTANTE braucht. Alles andere wird nicht
-// gelesen, sondern uebersprungen.
-
-// Eine PkgLength. Die oberen zwei Bits des ersten Oktetts sagen, wie
-// viele Oktette noch folgen; bei null ist der Rest des ersten Oktetts
-// schon die ganze Laenge.
 fn pkglen(p: u64, out_len: u64) -> u64 {
     let lead: u64 = kstate.get8(p)
     let extra: u64 = (lead >> 6) & 3
@@ -232,8 +130,6 @@ fn pkglen(p: u64, out_len: u64) -> u64 {
     return 1 + extra
 }
 
-// Ein konstanter ganzzahliger Wert. Gibt die Zahl der gelesenen Oktette
-// zurueck, oder 0, wenn dort keine Konstante steht.
 fn aml_int(p: u64, out: u64) -> u64 {
     let op: u64 = kstate.get8(p)
     if op == 0x00 {
@@ -268,8 +164,6 @@ fn aml_int(p: u64, out: u64) -> u64 {
     return 0
 }
 
-// Eine Zeichenkette (0x0D, dann ASCII bis zur Null). Kopiert hoechstens
-// NAME_BYTES-1 Oktette und schliesst immer mit einer Null ab.
 fn aml_str(p: u64, dst: u64) -> u64 {
     if kstate.get8(p) != 0x0D {
         return 0
@@ -292,7 +186,6 @@ fn aml_str(p: u64, dst: u64) -> u64 {
     return n + 2
 }
 
-// Ein Element ueberspringen, dessen Wert nicht gebraucht wird.
 fn aml_skip(p: u64) -> u64 {
     var v: u64 = 0
     let n: u64 = aml_int(p, (&v) as u64)
@@ -309,15 +202,11 @@ fn aml_skip(p: u64) -> u64 {
     return 0
 }
 
-// -------------------------------------------------------- die Suche
-
-// Vier Oktette vergleichen.
 fn seg_is(p: u64, a: u64, b: u64, c: u64, d: u64) -> bool {
     return kstate.get8(p) == a && kstate.get8(p + 1) == b
         && kstate.get8(p + 2) == c && kstate.get8(p + 3) == d
 }
 
-// Der Bereich einer Tabelle, in dem AML stehen kann.
 fn body(t: u64, out_end: u64) -> u64 {
     if t == 0 {
         return 0
@@ -330,8 +219,6 @@ fn body(t: u64, out_end: u64) -> u64 {
     return t + 36
 }
 
-// EIN NAME, GEFOLGT VON EINEM PAKET. Gibt den Anfang des ersten Elements
-// zurueck und legt die Zahl der Elemente ab, oder 0.
 fn find_package(t: u64, a: u64, b: u64, c: u64, d: u64, out_n: u64) -> u64 {
     var end: u64 = 0
     var p: u64 = body(t, (&end) as u64)
@@ -353,7 +240,6 @@ fn find_package(t: u64, a: u64, b: u64, c: u64, d: u64, out_n: u64) -> u64 {
     return 0
 }
 
-// EIN NAME, GEFOLGT VON EINER ZAHL.
 fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64,
     out_at: u64) -> bool {
     var end: u64 = 0
@@ -366,8 +252,6 @@ fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64,
             var v: u64 = 0
             if aml_int(p + 4, (&v) as u64) != 0 {
                 __mmio_write64(out as *mut u64, v)
-                // RUNDE POWERMON: der Fundort, damit das naechste Lesen
-                // nicht wieder die ganze Tabelle absuchen muss.
                 if out_at != 0 {
                     __mmio_write64(out_at as *mut u64, p + 4)
                 }
@@ -379,28 +263,10 @@ fn find_int(t: u64, a: u64, b: u64, c: u64, d: u64, out: u64,
     return false
 }
 
-// ------------------------------------------------------- der Durchgang
-
-// ALLE TABELLEN ABSUCHEN, nicht nur die DSDT. Ein Akku steht auf einem
-// echten Geraet fast immer in einer SSDT, und die selbstgebaute Tabelle
-// der Abnahme ist auch eine.
-// ROUND POWERMON: THE SAME WALK, WITHOUT THE LINE ON THE SERIAL PORT.
-// `scan` runs once at boot and says what it found; the power accounting
-// of round POWERMON calls this one ten times a second, and ten lines a
-// second on the serial port would bury every other measurement in the
-// acceptance run. Same walk, one caller that talks and one that does not.
 fn refresh(state: u64) {
-    // RUNDE LEISTE-RECHTS: ein vorgetaeuschter Akku wird nicht
-    // wegpoliert. `refresh` laeuft zyklisch (pmon.fi) und setzt ohne
-    // ACPI-Fundort folgerichtig alles auf null -- das ist fuer echte
-    // Hardware richtig und fuer `battfake` toedlich.
     if g(state, BT_FAKED) != 0 {
         return
     }
-    // DER SCHNELLE WEG: die Fundorte sind bekannt, also wird genau dort
-    // noch einmal gelesen und nirgends gesucht. Das ist der Unterschied
-    // zwischen einer Buchfuehrung, die zehnmal je Sekunde laufen kann,
-    // und einer, die es nicht kann.
     let bst: u64 = g(state, BT_BSTAT)
     if bst != 0 {
         var p: u64 = bst
@@ -474,27 +340,6 @@ fn scan(state: u64) {
     serial.nl()
 }
 
-// ==================================================== RUNDE LEISTE-RECHTS
-// EIN AKKU, DER NICHT DA IST -- fuer die Messung und fuer sonst nichts.
-//
-// Dieses QEMU kennt kein `-device battery`, und ohne ACPI-Tabellen
-// meldet `scan` voellig richtig `batt=0`. Die Leiste blendet das
-// Akkufeld dann aus (`hide_missing`), wie Windows es auch tut. Damit
-// gibt es aber auch nichts zu fotografieren, und Justins Wunsch
-// ("Akkusymbol mit Prozentzahl, wie bei Windows") liesse sich nur
-// BEHAUPTEN statt belegen.
-//
-// Diese Routine setzt darum einen festen Stand, und zwar NACH `scan`:
-// findet die Firmware einen echten Akku, wird hier nichts ueberschrieben
-// -- auf Justins Brett gelten die echten Zahlen.
-//
-// DIE ZAHLEN SIND MIT ABSICHT SO GEWAEHLT:
-//   2010 von 3000 mWh = 67 % -- keine runde Zahl, also nicht mit einem
-//   Vorgabewert zu verwechseln, und ueber der 34er-Schwelle, damit am
-//   SYMBOL (drei Balken) und an der ZAHL zugleich ablesbar ist, dass
-//   beide aus derselben Quelle stammen.
-//   Zustand 1 = entladen, am Netz: so ist das Netzteil-Zeichen aus dem
-//   Bild heraus, das sonst ueber dem Symbol liegt.
 fn fake(state: u64) {
     if g(state, BT_PRESENT) != 0 {
         return
@@ -518,7 +363,6 @@ fn fake(state: u64) {
 }
 
 fn look_in(state: u64, t: u64) {
-    // _BST -- Package(4)
     if g(state, BT_PRESENT) == 0 {
         var cnt: u64 = 0
         let e: u64 = find_package(t, 0x5F, 0x42, 0x53, 0x54, (&cnt) as u64)
@@ -551,7 +395,6 @@ fn look_in(state: u64, t: u64) {
             }
         }
     }
-    // _BIF -- Package(13): neun Zahlen, dann vier Zeichenketten.
     if g(state, BT_BIFOK) == 0 {
         var cnt2: u64 = 0
         let e2: u64 = find_package(t, 0x5F, 0x42, 0x49, 0x46, (&cnt2) as u64)
@@ -588,7 +431,6 @@ fn look_in(state: u64, t: u64) {
             }
         }
     }
-    // _PSR -- das Netzteil.
     if g(state, BT_ACOK) == 0 {
         var ac: u64 = 0
         var acat: u64 = 0
@@ -598,12 +440,10 @@ fn look_in(state: u64, t: u64) {
             s(state, BT_PSRAT, acat)
         }
     }
-    // _STA -- ist das Geraet ueberhaupt da?
     var sta: u64 = 0
     if find_int(t, 0x5F, 0x53, 0x54, 0x41, (&sta) as u64, 0) {
         s(state, BT_STA, sta)
     }
-    // _TMP -- die Thermalzone, in Zehntelkelvin.
     if g(state, BT_TZOK) == 0 {
         var tz: u64 = 0
         var tzat: u64 = 0

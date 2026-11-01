@@ -1,33 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/cpu.fi -- round K5: which processor am I, and what is mine?
-//
-// Up to round K2 the answer was "the only one", and the state of the
-// running kernel therefore stood in `kstate.fi` as single words: CURRENT
-// is the running task, IDLE the task that runs when nothing else wants
-// to. With four processors those two words are wrong four times over --
-// each core has a task of its own and an idle task of its own, and a
-// scheduler that reads one global word hands the same task to two cores.
-//
-// So the per-core state moves into a table: `kstate.CPU_OFF`, one record
-// of 256 octets per processor, and everything a core owns alone lives in
-// its own record. What stays global is what is genuinely shared: the task
-// TABLE, the frame bitmap, the file system -- and each of those gets a
-// lock (atomic.fi).
-//
-// HOW A CORE FINDS ITS OWN RECORD. There are three usual ways and this
-// kernel takes the plainest one. `swapgs` with a per-core GS base is the
-// one a big kernel takes, and it needs the entry points in assembly to
-// cooperate; `cpuid` leaf 1 gives the initial APIC id in ebx, and ebx is
-// the one register `asm` in Firn will not hand out (it carries the
-// frame). What is left is the ID register of the local APIC: one 32-bit
-// read at a fixed address, and the address is the SAME for every core --
-// the page is a window onto the core's own APIC, so each core reads its
-// own number out of it. That is one memory access plus a lookup over at
-// most eight entries, which is cheap enough for the scheduler path and
-// needs nothing from the assembler files.
-//
-// Before the APIC is up there is no such register. `here` then answers 0,
-// which is right: before the APIC is up there is only the boot processor.
 
 import lib.kstate
 
@@ -37,158 +7,55 @@ export {
     C_APICID, C_ONLINE, C_CUR, C_IDLE, C_TICKS, C_SWITCHES, C_STACK,
     C_GDT, C_TSS, C_WORK, C_GO, C_SUM, C_CYCLES, C_PICKS, C_STARTED,
     C_IDLERUNS, C_LAPIC, C_FPUOWNER, C_IDLETICKS, C_INDEX, gs_arm, gs_disarm,
-    // RUNDE VIELKERN: die drei Felder, die Ring 3 auf jedem Kern
-    // moeglich machen. Der Satz DIESES Kerns ist zugleich der Block,
-    // auf den seine GS-Basis zeigt -- `%gs:C_SYSRSP` und
-    // `%gs:C_KSTACK` in isr.s sind genau diese beiden Zahlen.
     C_SYSRSP, C_KSTACK, C_TSSADDR,
-    // RUNDE VIELKERN 3: der Zaehler, der den Beweis fuehrt.
     C_SYSCALLS,
-    // RUNDE MERGE-7: der Zeitgeber-Wachhund JE KERN statt geteilt.
     C_TOTMARKE, C_TOTZEIT, C_TOTZAHL, C_TOTPER,
-    // DD-12 (K-004c): park/resume of an application processor around S3.
     C_PARKREQ, C_PARKED, C_RESUMED,
-    // W-SMP2: why a core is not online, the BSP's ESR after its SIPI.
     C_WHY, C_ESR, WHY_NONE, WHY_OK, WHY_NOMEM, WHY_NOSIPI, WHY_NOONLINE, WHY_NOSMP,
     why_word, x_get, x_set, x_add,
     X_LASTTSC, X_TOTCYC, X_IDLECYC, X_HALTED, X_PEND, X_KICKTX, X_KICKRX
 }
 
-// ---------------------------------------------------- the record fields
-
-const C_APICID: u64 = 0 // what the local APIC of this core calls itself
-const C_ONLINE: u64 = 8 // 1 = this core has reached Firn code
-const C_CUR: u64 = 16 // index of the task running on it
-const C_IDLE: u64 = 24 // index of ITS idle task
-const C_TICKS: u64 = 32 // timer interrupts it took
-const C_SWITCHES: u64 = 40 // context switches it made
-const C_STACK: u64 = 48 // the stack it came up on
-const C_GDT: u64 = 56 // its own descriptor table page
-const C_TSS: u64 = 64 // its own task state segment
-const C_WORK: u64 = 72 // units of the parallel workload it finished
-const C_GO: u64 = 80 // the word the boot processor sets to start it
-const C_SUM: u64 = 88 // its part of the result
-const C_CYCLES: u64 = 96 // cycles it spent in the workload
-const C_PICKS: u64 = 104 // tasks it took out of the run queue
-const C_STARTED: u64 = 112 // cycle count at which it began
-const C_IDLERUNS: u64 = 120 // turns of its idle loop
-// RUNDE AVX: welcher Vektorzustand in DIESEM Kern gerade in den
-// Registern liegt (die Adresse des Bereichs, 0 = keiner). Nur der traege
-// Weg (`fpulazy`) liest das Feld; eager schreibt es mit, damit ein
-// Wechsel zwischen beiden Wegen keinen halben Zustand hinterlaesst.
-// Es ist PRO KERN, weil die Register es sind.
+const C_APICID: u64 = 0
+const C_ONLINE: u64 = 8
+const C_CUR: u64 = 16
+const C_IDLE: u64 = 24
+const C_TICKS: u64 = 32
+const C_SWITCHES: u64 = 40
+const C_STACK: u64 = 48
+const C_GDT: u64 = 56
+const C_TSS: u64 = 64
+const C_WORK: u64 = 72
+const C_GO: u64 = 80
+const C_SUM: u64 = 88
+const C_CYCLES: u64 = 96
+const C_PICKS: u64 = 104
+const C_STARTED: u64 = 112
+const C_IDLERUNS: u64 = 120
 const C_FPUOWNER: u64 = 128
-// ====================================================== RUNDE VIELKERN
-// WO EIN SYSTEMAUFRUF AUF DIESEM KERN LANDET.
-//
-// Bis hierher stand beides EINMAL fuer die ganze Maschine: der Ablageort
-// des Benutzerstapels (`sys_rsp` in isr.s, ein .bss-Wort) und der
-// Kernstapel (`kdata + KSTACK_CUR`, ein Wort in der Datenseite). Zwei
-// Kerne, die gleichzeitig `syscall` ausfuehren, ueberschrieben sich
-// darin gegenseitig -- das war Justins #UD vom 05.09. Deshalb durfte
-// Ring 3 seit Runde BLECHKERN nur auf Kern 0 laufen.
-//
-// Jetzt liegen beide IM SATZ DES KERNS, und `syscall_entry` erreicht sie
-// via the GS base that points at exactly this record. Since LA-9e Ring 3
-// can own GS (arch_prctl ARCH_SET_GS), so every ring-3 entry and exit
-// pairs a `swapgs`; the task's user GS base lives in T_GSBASE and in
-// KERNEL_GS_BASE while the kernel runs.
-//
-// DIE ZAHLEN STEHEN AUCH IN isr.s (`.set CPU_SYSRSP` / `.set CPU_KSTACK`)
-// und muessen mit diesen hier uebereinstimmen. `kmain` vergleicht sie
-// beim Start und sagt es, wenn sie auseinanderlaufen.
-const C_SYSRSP: u64 = 136 // Ablage des Benutzerstapels im Einsprung
-const C_KSTACK: u64 = 144 // Kernstapel der Aufgabe, die hier laeuft
-const C_TSSADDR: u64 = 152 // Aufgabenzustandssegment DIESES Kerns
-// ==================================================== RUNDE VIELKERN 3
-// WIE VIELE SYSTEMAUFRUFE AUF DIESEM KERN AUS RING 3 HEREINKAMEN.
-//
-// Gezaehlt wird in `syscall_entry` selbst, mit EINEM `incq %gs:...` --
-// nicht aus Firn heraus. Das hat zwei Gruende, und beide sind der Punkt
-// dieser Runde:
-//
-//   * ES KOSTET NICHTS. Ein `cpu.here` je Systemaufruf waere ein Lesen
-//     im APIC-Fenster, also ein Speicherzugriff auf eine nicht
-//     zwischengespeicherte Seite -- fuer einen Zaehler.
-//   * ES MISST GENAU DAS RICHTIGE. Der Zaehler liegt in demselben Satz
-//     und wird ueber DIESELBE GS-Basis erreicht wie der Kernstapel eine
-//     Zeile darueber. Steht auf einem Kern eine falsche Basis, zaehlt
-//     dieser Kern in einen fremden Satz -- und die Summe der Zaehler
-//     passt nicht mehr zu `kstate.SYSCALLS`. Der Beweis "Ring 3 lief
-//     wirklich auf diesem Kern" ist damit nicht die Abwesenheit eines
-//     Absturzes, sondern eine Zahl.
-const C_SYSCALLS: u64 = 160 // Systemaufrufe, die HIER hereinkamen
-// ================================================== RUNDE WERKZEUGE
-// WIE VIELE SCHLAEGE DIESER KERN IM LEERLAUF VERBRACHT HAT.
-//
-// `C_TICKS` zaehlt seit Runde K5 die Zeitgeberunterbrechungen EINES
-// Kerns -- also seine ganze Zeit. Was fehlte, ist die zweite Zahl, ohne
-// die die erste keine Auslastung ergibt: wie viele dieser Schlaege die
-// Leerlaufaufgabe bekommen hat. Erst die Differenz ist Arbeit, und erst
-// zwei Messungen im Abstand einer Sekunde ergeben einen Prozentsatz.
-//
-// WARUM NICHT `C_IDLERUNS`. Das zaehlt die DURCHLAEUFE der Leerlauf-
-// schleife -- eine Zahl, die von der Geschwindigkeit des Prozessors
-// abhaengt und von nichts sonst. Zwei Kerne mit gleicher Last, aber
-// verschiedenem Takt haetten verschiedene Werte. Ein Schlag ist auf
-// jedem Kern derselbe Zehntelhundertstel Sekunde.
-//
-// GEZAEHLT WIRD IM ZEITGEBER (`sched.on_tick`), auf demselben Kern und
-// im selben Atemzug wie `C_TICKS` -- also kann die eine Zahl nie ohne
-// die andere hochgehen, und `idle <= ticks` gilt immer.
-// RUNDE MERGE-6: DIE ZAHL WAR 160 UND IST JETZT 168.
-// Beide Runden haben unabhaengig voneinander das naechste freie Wort
-// des Satzes genommen, und zwar dasselbe. C_SYSCALLS behaelt 160,
-// weil isr.s diese Zahl fest eingetragen hat (`.set CPU_SYSCALLS,
-// 160`) und der Einsprung sie ohne Firn dazwischen benutzt; ein
-// Zaehler, den nur Firn anfasst, kann umziehen, einer im Assembler
-// nicht. 168 ist frei: der Satz ist kstate.CPU_BYTES = 256 gross,
-// belegt sind damit 176 von 256.
+const C_SYSRSP: u64 = 136
+const C_KSTACK: u64 = 144
+const C_TSSADDR: u64 = 152
+const C_SYSCALLS: u64 = 160
 const C_IDLETICKS: u64 = 168
 
-// RUNDE MERGE-7: der Zeitgeber-Wachhund aus sched.fi (`timer_tot`) lag
-// bis hierher in DREI static mut -- Prozessglobal, ohne Sperre, von
-// JEDEM Kern angefasst, der schlafen will. Auf merge6 fiel das nicht
-// auf: `sleep_ticks` lief selten genug, dass zwei Kerne kaum je im
-// selben Augenblick hindurchliefen. Seit RUNDE UHRWERK ruft die
-// Taskleiste `ulib.sleep_ms(25)` -- vierzig Mal in der Sekunde statt
-// gelegentlich -- und die Kollisionswahrscheinlichkeit stieg mit ihr:
-// tools/glyph/run.sh, Abschnitt 7, zeigte danach 6 bis 10 von 20
-// Laeufen mit `panic: integer overflow in 'u64 - u64' at
-// kernel/sched.fi:1978` (davor: 0 von 20, siehe RUNDE GLYPHE). Ein
-// Kern setzt `tote_zeit` auf seinen TSC-Wert, ein zweiter liest ihn
-// kurz danach und zieht seinen EIGENEN, kleineren TSC-Wert ab -- ein
-// Wachhund, der jeden Kern fuer sich beobachten soll, braucht auch
-// einen Platz je Kern. Drei Felder, derselbe Satz wie C_SYSCALLS.
 const C_TOTMARKE: u64 = 176
 const C_TOTZEIT: u64 = 184
 const C_TOTZAHL: u64 = 192
-// DD-12 (K-004c): S3 parks every application processor and starts it
-// again after the wake-up. PARKREQ = the boot processor asks, the core
-// takes no new task; PARKED = it stands in a cli;hlt loop, interrupts off
-// and its LAPIC masked; RESUMED = it has been started again at least once
-// (its idle task and stack already exist, nothing is allocated again).
 const C_PARKREQ: u64 = 200
 const C_PARKED: u64 = 208
 const C_RESUMED: u64 = 216
-// W-SMP2 (diagnosis): why this core is not online. One of the WHY_* codes (0 = not tried yet), and the ESR of the BOOT core read
-// right after the STARTUP IPIs to this core (send errors show up there). 240/248 were the last free words of the 256-octet record.
 const C_WHY: u64 = 240
 const C_ESR: u64 = 248
-const WHY_NONE: u64 = 0 // not tried
-const WHY_OK: u64 = 1 // came up
-const WHY_NOMEM: u64 = 2 // no frames for its stack / tables
-const WHY_NOSIPI: u64 = 3 // the SIPI was never taken (trampoline flag stayed 0)
-const WHY_NOONLINE: u64 = 4 // took the trampoline but never reached ap_main's online mark
-const WHY_NOSMP: u64 = 5 // `nosmp` on the command line
+const WHY_NONE: u64 = 0
+const WHY_OK: u64 = 1
+const WHY_NOMEM: u64 = 2
+const WHY_NOSIPI: u64 = 3
+const WHY_NOONLINE: u64 = 4
+const WHY_NOSMP: u64 = 5
 
-// Where the address of the local APIC window is kept. It is written once,
-// by `smp.probe`, out of what `apic.fi` measured -- this file does not
-// import apic, so that the scheduler can import this one without pulling
-// the whole bus scan in behind it.
-const C_LAPIC: u64 = 0 // in the SMP scalar page, see kstate.SMP_LAPIC
+const C_LAPIC: u64 = 0
 
-// The ID register of a local APIC, and the number of records in use.
 const R_ID: u64 = 0x020
 
 fn record(state: u64, i: u64) -> u64 {
@@ -203,13 +70,9 @@ fn set(state: u64, i: u64, field: u64, v: u64) {
     __mmio_write64((record(state, i) + field) as *mut u64, v)
 }
 
-// Atomic, because two cores may count into their neighbour's line and a
-// counter that loses increments proves nothing.
 fn add(state: u64, i: u64, field: u64, v: u64) -> u64 {
     return __atomic_add((record(state, i) + field) as *mut u64, v) + v
 }
-
-// ------------------------------------------------------------ the table
 
 fn set_lapic(state: u64, base: u64) {
     kstate.set(state, kstate.SMP_OFF + kstate.SMP_LAPIC, base)
@@ -223,33 +86,11 @@ fn count(state: u64) -> u64 {
     return kstate.get(state, kstate.SMP_OFF + kstate.SMP_COUNT)
 }
 
-// Enters a processor the firmware reported. Returns its index, or
-// `kstate.MAX_CPUS` when the table is full -- a machine with more cores
-// than this kernel has room for uses the ones it has and says so.
 fn register(state: u64, apid: u64) -> u64 {
     let n: u64 = count(state)
     if n >= kstate.MAX_CPUS {
         return kstate.MAX_CPUS
     }
-    // ================================================== RUNDE VIELKERN
-    // DER SATZ WIRD GENULLT -- ABER NICHT DIE DREI FELDER, AUS DENEN DER
-    // SYSTEMAUFRUF SEINEN STAPEL HOLT.
-    //
-    // `register` laeuft in `smp.probe`, also NACH `sched.init` und NACH
-    // `user.setup`. Fuer den Satz 0 ist das kein Anlegen, sondern ein
-    // Ueberschreiben von etwas, das schon benutzt wird: `C_KSTACK` stand
-    // auf `syscall_stack_top` und war danach 0. Der naechste `syscall`
-    // holte sich `rsp = 0` und starb im ersten `push` -- gemessen als
-    //
-    //     *** EXCEPTION 8 #DF  rip=0x1002c3  rsp=0x0
-    //
-    // und `rip` war genau das `push %gs:0x88` des Einsprungs.
-    // `tools/entry/run.sh` hat es gefangen (7 von 14 statt 12).
-    // RUNDE VIELKERN 3: und C_SYSCALLS dazu. Derselbe Grund, eine
-    // Runde spaeter: der Zaehler steht schon auf dem, was der
-    // Startkern bis hierher an Systemaufrufen gesehen hat (der
-    // Ring-3-Ausflug aus Runde 59 liegt davor), und ein Zaehler, den
-    // der Hochlauf zurueckdreht, macht aus `abw` eine Zufallszahl.
     let k_sysrsp: u64 = get(state, n, C_SYSRSP)
     let k_kstack: u64 = get(state, n, C_KSTACK)
     let k_tss: u64 = get(state, n, C_TSSADDR)
@@ -273,11 +114,6 @@ fn apic_id(state: u64, i: u64) -> u64 {
     return get(state, i, C_APICID)
 }
 
-// r360: the page that holds the arguments of an `exec`/`execve` while they
-// are copied out of ring 3 and handed to the loader -- one page PER CORE
-// (`kstate.EARGK_OFF`). Valid only while the caller cannot change cores:
-// inside a system call, or with the interrupt flag down. `noeargk` gives
-// back the one shared page (counter-check of the test).
 fn earg_buf(state: u64) -> u64 {
     if kstate.mode_on(state, kstate.M_NOEARGK) {
         return state + kstate.EARG_OFF
@@ -289,16 +125,8 @@ fn earg_buf(state: u64) -> u64 {
     return state + kstate.EARGK_OFF + k * 4096
 }
 
-// r1111: the index of a core inside its own record, read through the GS
-// base (which already points at the record of the core that executes
-// this: the system call entry relies on it). The APIC window below is an
-// MMIO page -- on a hypervisor every read of it is a VM exit (VirtualBox:
-// 3000-6000 exits per second and vCPU, ~150 % host CPU at 3 vCPUs idle).
 const C_INDEX: u64 = 224
-// r1268: smoothed TSC cycles per timer tick as seen by `sched.timer_tot` (adaptive dead-timer threshold).
 const C_TOTPER: u64 = 232
-// Scalar in the SMP page: 1 = GS base is valid on every core. Armed once
-// all cores are online, disarmed while cores are parked / restarted.
 const GSFAST_AT: u64 = 392
 
 fn gs_arm(state: u64) {
@@ -311,18 +139,11 @@ fn gs_disarm(state: u64) {
     kstate.set(state, kstate.SMP_OFF + GSFAST_AT, 0)
 }
 
-// WHICH CORE IS EXECUTING THIS. See the head of the file.
 fn here(state: u64) -> u64 {
     let base: u64 = lapic_base(state)
     if base == 0 {
         return 0
     }
-    // r1268: ONE registered core cannot be anything but core 0, so the APIC
-    // window is never read. A uniprocessor boot never arms GSFAST (only
-    // started application cores do), so every call went to the MMIO page:
-    // under VirtualBox/NEM that is a ~100 us VM exit per call, and a
-    // process that opens files in a loop (fs.enter -> here) burned a whole
-    // host core (5800 ExitMemUnmapped/s at 1 vCPU, rip in kstate.get32).
     if count(state) <= 1 {
         return 0
     }
@@ -341,9 +162,6 @@ fn here(state: u64) -> u64 {
         }
         i = i + 1
     }
-    // A core the firmware did not report is not a core this kernel
-    // started. Answering 0 keeps it from writing into a record that
-    // belongs to somebody; it cannot happen unless the MADT lied.
     return 0
 }
 
@@ -368,37 +186,32 @@ fn online_count(state: u64) -> u64 {
     return c
 }
 
-// W-SMP2: the name of a WHY_* code as up to 8 ASCII octets packed into one word (low octet first, 0 ends it). Callers print octet by
-// octet; no string table, so it works from any module (serial, /proc, task manager).
 fn why_word(code: u64) -> u64 {
     if code == WHY_OK {
-        return 0x6b6f // "ok"
+        return 0x6b6f
     }
     if code == WHY_NOMEM {
-        return 0x6d656d6f6e // "nomem"
+        return 0x6d656d6f6e
     }
     if code == WHY_NOSIPI {
-        return 0x697069736f6e // "nosipi"
+        return 0x697069736f6e
     }
     if code == WHY_NOONLINE {
-        return 0x656e696c6e6f6f6e // "noonline"
+        return 0x656e696c6e6f6f6e
     }
     if code == WHY_NOSMP {
-        return 0x706d736f6e // "nosmp"
+        return 0x706d736f6e
     }
-    return 0x2D // "-"
+    return 0x2D
 }
 
-// ----------------------------------------------- W-SMP2: the second per-core table (kstate.CPUX_OFF)
-//
-// 64 octets per core. Kept apart from the 256-octet record because that one is full.
-const X_LASTTSC: u64 = 0 // TSC at this core's previous timer tick (cycle accounting)
-const X_TOTCYC: u64 = 8 // cycles between ticks, summed (time-weighted total)
-const X_IDLECYC: u64 = 16 // ... of which the tick found the core idle
-const X_HALTED: u64 = 24 // 1 = the core sleeps in `hlt` in its idle loop right now
-const X_PEND: u64 = 32 // 1 = a kick IPI was sent and not yet consumed (closes the sti;hlt race)
-const X_KICKTX: u64 = 40 // kick IPIs sent TO this core by the boot core
-const X_KICKRX: u64 = 48 // timer-vector entries on this core that were kicks
+const X_LASTTSC: u64 = 0
+const X_TOTCYC: u64 = 8
+const X_IDLECYC: u64 = 16
+const X_HALTED: u64 = 24
+const X_PEND: u64 = 32
+const X_KICKTX: u64 = 40
+const X_KICKRX: u64 = 48
 
 fn x_get(state: u64, i: u64, field: u64) -> u64 {
     return __mmio_read64((state + kstate.CPUX_OFF + i * kstate.CPUX_BYTES + field) as *mut u64)

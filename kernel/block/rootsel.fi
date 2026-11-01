@@ -1,75 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/rootsel.fi -- Runde BLECH: WELCHES GERAET TRAEGT DIE WURZEL.
-//
-// Der Bericht der Runde MERGE-3 sagt es in einem Satz, und der Satz ist
-// die halbe Begruendung dieser Datei:
-//
-//     "Die automatische Treiberwahl beim Start ist nicht gebaut --
-//      welches Geraet die Wurzel traegt, entscheidet die Kommandozeile
-//      bzw. der Installer."
-//
-// Nachgelesen im Quelltext, nicht geglaubt: `osum_stage` in `kmain.fi`
-// ruft `blk.use_ata(state, kutil.root_blocks(state))` und danach
-// `fs.mount`. Schlaegt das fehl, ruft es `root_from_part`, und DAS ruft
-// `part.scan(state, blk.DEV_ATA)`. Beide Wege nennen dasselbe Geraet
-// beim Namen: DEV_ATA, die Portadresse 0x1F0 von 1986.
-//
-// Auf einem Rechner mit NVMe-Riegel oder mit einer SATA-Platte an einem
-// AHCI-Controller gibt es an 0x1F0 nichts. Der Kern kommt bis
-// `osum: no disk` und hoert auf -- obwohl der Treiber, der diese Platte
-// lesen koennte, im selben Abbild liegt und im Bericht der Diagnose
-// zwei Bildschirmzeilen darueber sogar aufgefuehrt ist. Das ist kein
-// fehlender Treiber, das ist eine fehlende ENTSCHEIDUNG.
-//
-// ------------------------------------------------------ WAS ES TUT
-//
-// 1. LESEN, NICHT ANFASSEN (`scan`). Die Bustabelle, die `pci.scan`
-//    schon gefuellt hat, wird durchgegangen und jedes Geraet der Klasse
-//    01 (Massenspeicher) und 0C:03 (USB) eingeordnet. Kein Register
-//    wird geschrieben. Heraus kommen zwei Listen:
-//      * die BEWERBER, in der Reihenfolge NVMe, AHCI, USB, IDE;
-//      * die BEFUNDE -- Controller, fuer die dieser Kern keinen Treiber
-//        hat, jeder mit seinen Nummern.
-//
-// 2. ES SAGEN (`report`). Beide Listen gehen auf die serielle Leitung
-//    und damit auch auf den Schirm. Wer eine leere Plattenliste sieht,
-//    soll den Grund daneben lesen koennen.
-//
-// 3. ES TUN (`mount_root`). Die Bewerber werden der Reihe nach
-//    PROBIERT: Treiber hochziehen, rohes OFS an Block 0 versuchen,
-//    sonst die Partitionstafel lesen und die erste Partition mit
-//    unserer Typkennung nehmen. Der erste, dessen Wurzel sich wirklich
-//    einhaengen laesst, gewinnt. Ein Bewerber, der nur DA ist, gewinnt
-//    nicht -- eine leere NVMe-Platte neben einer IDE-Platte mit dem
-//    System darauf muss auf der IDE-Platte landen, und genau diese
-//    Lage steht in einem Dutzend bestehender Testlaeufe.
-//
-// ------------------------------------------------- DER RAID-MODUS
-//
-// Der haeufigste Fall, in dem ein Notebook mit Osum nicht startet, ist
-// KEIN fehlender Treiber: es ist ein SATA-Controller, den die Firmware
-// in den RAID-Modus gestellt hat (Intel RST, AMD RAIDXpert -- ab Werk
-// eingeschaltet auf sehr vielen Dell- und Lenovo-Geraeten). Ein solcher
-// Controller meldet sich als Klasse 01:04 statt 01:06:01. Der
-// AHCI-Treiber findet ihn nicht, weil er ihn korrekterweise nicht
-// findet, und der Bildschirm bleibt leer.
-//
-// Diese Datei erkennt genau das und sagt den Satz, der hilft:
-//
-//     rootsel: 8086:2822 steht im RAID-Modus (Klasse 01:04)
-//     rootsel: im BIOS "SATA Mode" von RAID/RST auf AHCI stellen
-//
-// Eine gute Fehlermeldung ist hier mehr wert als ein halber Treiber:
-// ein RST-Treiber muesste die Metadaten des Herstellers verstehen, und
-// die sind nicht dokumentiert. Der Umschalter im BIOS ist zwei Klicks.
-//
-// ------------------------------------------- WAS ES NICHT ENTSCHEIDET
-//
-// Es waehlt kein Dateisystem (das macht `vfs.fi`), es waehlt keine
-// Partition ausser der mit unserer Typkennung, es schreibt nichts, und
-// es kehrt die Reihenfolge nicht um, wenn mehrere Platten eine Wurzel
-// tragen -- die erste in der Reihenfolge gewinnt, und die Reihenfolge
-// steht hier als eine Tabelle und nicht als eine Kette von `if`.
 
 profile kernel
 
@@ -97,11 +25,6 @@ export {
     ROOT_OFF, ROOT_MAX
 }
 
-// ------------------------------------------------------ der Platz
-//
-// Eine Seite aus dem Stueck, das `tools/kernel/memmap.py` als frei
-// ausweist (0x84380..0x88000, fuenfzehn Kilooktett hinter den Zaehlern
-// der Handle-Schicht). Eingetragen ist sie dort unter ROOTSEL.
 const ROOT_OFF: u64 = 0x85000
 const ROOT_MAX: u64 = 0x1000
 
@@ -114,11 +37,6 @@ const S_FIRST: u64 = 0x28
 const S_BLOCKS: u64 = 0x30
 const S_TRIED: u64 = 0x38
 
-// Drei Listen zu je acht Eintraegen mit je vier Woertern. Acht, weil
-// `pci.MAX_DEV` zweiunddreissig ist und ein Brett mit acht
-// Plattencontrollern ein Server waere, den dieser Kern ohnehin nicht
-// bedient -- und weil eine Liste, die ueberlaeuft, dann die letzten
-// Eintraege VERSCHWEIGT. Sie tut es nicht still: `report` sagt es.
 const MAX_CAND: u64 = 8
 const MAX_WARN: u64 = 8
 const MAX_HC: u64 = 8
@@ -132,31 +50,21 @@ const E_KIND: u64 = 0
 const E_BDF: u64 = 8
 const E_VEN: u64 = 16
 const E_DEV: u64 = 24
-// Das fuenfte Feld: bei einem Befund die Unterklasse bzw. die
-// Schnittstelle, die ihn ausgeloest hat. Es steht HIER und wird nicht
-// spaeter aus der Bustabelle nachgeschlagen -- `pci.fi` fuehrt seine
-// Funktion `find_bdf` nicht aus, und eine Ausfuhrliste zu erweitern,
-// nur um eine Zahl zweimal zu lesen, waere eine Aenderung an einer
-// Datei, die diese Runde sonst nicht anfasst.
 const E_EXTRA: u64 = 32
 
-// Die Bewerber. Die ZAHLEN sind die Reihenfolge: kleiner zuerst. Das
-// ist der ganze Vorrang, und er steht an EINER Stelle.
 const K_NONE: u64 = 0
 const K_NVME: u64 = 1
 const K_AHCI: u64 = 2
 const K_USB: u64 = 3
 const K_IDE: u64 = 4
 
-// Die Befunde.
-const W_RAID: u64 = 1 // Klasse 01:04 -- Intel RST / AMD RAIDXpert
-const W_SATA_LEGACY: u64 = 2 // 01:06, aber Schnittstelle nicht AHCI
-const W_SD: u64 = 3 // 08:05 -- SD/eMMC-Regler
-const W_SAS: u64 = 4 // 01:07
-const W_SCSI: u64 = 5 // 01:00
-const W_OTHER: u64 = 6 // 01:80 und alles andere in Klasse 01
+const W_RAID: u64 = 1
+const W_SATA_LEGACY: u64 = 2
+const W_SD: u64 = 3
+const W_SAS: u64 = 4
+const W_SCSI: u64 = 5
+const W_OTHER: u64 = 6
 
-// PCI-Klassen, die `pci.fi` nicht als Konstante fuehrt.
 const SUB_SCSI: u64 = 0x00
 const SUB_RAID: u64 = 0x04
 const SUB_SAS: u64 = 0x07
@@ -173,14 +81,10 @@ fn ent(list: u64, i: u64, f: u64) -> u64 {
     return ROOT_OFF + list + i * ENT + f
 }
 
-// ------------------------------------------------------------ scan
-
 fn add(state: u64, list: u64, cntoff: u64, cap: u64, kind: u64,
     bdf: u64, ven: u64, dev: u64, extra: u64) {
     let n: u64 = kstate.get(state, sc(cntoff))
     if n >= cap {
-        // NICHT still. Der Zaehler laeuft weiter, damit `report` sagen
-        // kann, wie viele nicht in die Liste gepasst haben.
         kstate.set(state, sc(cntoff), n + 1)
         return
     }
@@ -192,9 +96,6 @@ fn add(state: u64, list: u64, cntoff: u64, cap: u64, kind: u64,
     kstate.set(state, sc(cntoff), n + 1)
 }
 
-// Die Bewerberliste wird SORTIERT gehalten, und zwar beim Einfuegen:
-// acht Eintraege, ein Einfuegesortieren, und danach steht die
-// Reihenfolge im Speicher und nicht in dem Kopf dessen, der sie liest.
 fn add_cand(state: u64, kind: u64, bdf: u64, ven: u64, dev: u64) {
     let n: u64 = kstate.get(state, sc(S_NCAND))
     if n >= MAX_CAND {
@@ -224,9 +125,6 @@ fn add_cand(state: u64, kind: u64, bdf: u64, ven: u64, dev: u64) {
     kstate.set(state, sc(S_NCAND), n + 1)
 }
 
-// Ein Durchgang durch die Bustabelle. Er schreibt kein Register und
-// zieht kein Geraet hoch -- `report` darf deshalb VOR jeder Stufe
-// laufen, die etwas anfasst, und tut es auch.
 fn scan(state: u64) {
     if kstate.get(state, sc(S_SCANNED)) != 0 {
         return
@@ -257,14 +155,10 @@ fn scan(state: u64) {
             } else if sub == pci.SUB_IDE {
                 add_cand(state, K_IDE, bdf, ven, dev)
             } else if sub == SUB_RAID && ven == pci.VENDOR_INTEL {
-                // r558: Intel "RAID On" (01:04) is AHCI underneath (see blkdev.probe)
                 add_cand(state, K_AHCI, bdf, ven, dev)
             } else if sub == SUB_RAID {
                 add(state, L_WARN, S_NWARN, MAX_WARN, W_RAID, bdf, ven, dev, sub)
             } else if sub == pci.SUB_SATA {
-                // Ein SATA-Controller, dessen Schnittstelle NICHT 0x01
-                // ist: 0x00 heisst "herstellereigen", 0x02 "Serial
-                // Storage Bus". Beides kann dieser Kern nicht.
                 add(state, L_WARN, S_NWARN, MAX_WARN, W_SATA_LEGACY,
                     bdf, ven, dev, pif)
             } else if sub == SUB_SAS {
@@ -281,9 +175,6 @@ fn scan(state: u64) {
         }
         i = i + 1
     }
-    // Ein USB-Regler ist ein Bewerber, aber nur EINER: ob ein Stick
-    // steckt, weiss erst der Treiber. Die Nummern in der Liste sind die
-    // des ersten Reglers, damit der Bericht eine Adresse nennen kann.
     if kstate.get(state, sc(S_NHC)) > 0 {
         add_cand(state, K_USB, kstate.get(state, ent(L_HC, 0, E_BDF)),
             kstate.get(state, ent(L_HC, 0, E_VEN)),
@@ -365,8 +256,6 @@ fn tried(state: u64) -> u64 {
     return kstate.get(state, sc(S_TRIED))
 }
 
-// ---------------------------------------------------------- Ausgabe
-
 fn tag() {
     var s: [u8; 10] = "rootsel: \0"
     serial.puts((&s[0]) as u64)
@@ -403,9 +292,6 @@ fn nums(ven: u64, dev: u64) {
     pci.hexn(dev, 4)
 }
 
-// Die Reihenfolge als EINE Zeile, damit ein Foto der seriellen Ausgabe
-// reicht, um zu sehen, was der Kern gefunden hat und in welcher Folge er
-// es probieren wird.
 fn order_line(state: u64) {
     var s_h: [u8; 12] = "reihenfolge\0"
     var s_ar: [u8; 4] = " > \0"
@@ -481,11 +367,6 @@ fn warn_lines(state: u64) {
     }
 }
 
-// Die USB-Regler, mit dem Namen ihrer Schnittstelle. Das ist die Zeile,
-// aus der hervorgeht, ob ein Rechner ueberhaupt einen Anschluss hat, den
-// dieser Kern bedienen kann -- 0x30 ist xHCI (Runde K17), 0x20 ist EHCI
-// (Runde BLECH), 0x10 OHCI und 0x00 UHCI, und die letzten beiden kann
-// niemand hier.
 fn hc_lines(state: u64) {
     var s_x: [u8; 19] = "usb xHCI    bdf=\0\0\0"
     var s_e: [u8; 19] = "usb EHCI    bdf=\0\0\0"
@@ -525,30 +406,11 @@ fn hc_lines(state: u64) {
     }
 }
 
-// RUNDE BLECH, NACHTRAG: DIE MECHANIK LIEGT JETZT IN `blkdev.fi`.
-//
-// Diese Datei hatte beides -- den Lauf ueber den Bus UND die
-// Entscheidung, welches Geraet die Wurzel traegt. Der Eigner hat
-// zurecht verlangt, dass Speicher dieselbe Form bekommt wie Netz: die
-// TABELLE und der VERTEILER gehoeren in eine Schicht wie `netdev.fi`,
-// und was hier bleibt, ist die POLITIK: welcher der gefundenen
-// Bewerber traegt wirklich eine Wurzel.
-//
-// `report` ruft deshalb `blkdev.print_disks` -- die Liste und die
-// abgelehnten Controller kommen von dort, mit ihren Nummern und ihrem
-// Grund. Die USB-Reglerzeilen bleiben hier, weil sie eine Auskunft
-// ueber den EINGABEWEG sind und nicht ueber die Platte.
 fn report(state: u64) {
     var s_over: [u8; 39] = "mehr Geraete als Plaetze in der Liste\0\0"
     scan(state)
-    // DIE PLATTEN UND DIE ABGELEHNTEN CONTROLLER: aus `blkdev.fi`, der
-    // Schicht, die dieselbe Form hat wie `netdev.fi`. Was frueher hier
-    // stand, stand an der falschen Stelle.
     blkdev.print_disks(state)
     blkdev.selftest(state)
-    // DIE USB-REGLER bleiben hier: sie sind eine Auskunft ueber den
-    // EINGABEWEG (xHCI, EHCI, und was ohne Treiber bleibt) und nicht
-    // ueber die Platte.
     hc_lines(state)
     if kstate.get(state, sc(S_NCAND)) > MAX_CAND
         || kstate.get(state, sc(S_NWARN)) > MAX_WARN
@@ -559,21 +421,8 @@ fn report(state: u64) {
     }
 }
 
-// ------------------------------------------------------- mount_root
-//
-// DIE EINZIGE STELLE, DIE ETWAS ANFASST. Sie laeuft in `kmain.fi` erst,
-// wenn der bestehende Weg (ATA an 0x1F0, roh und dann ueber die
-// Partitionstafel) NICHT getragen hat. Das ist Absicht und keine
-// Vorsicht: jeder der 54 Abnahmeabschnitte haengt heute auf dem alten
-// Weg ein, und ein Umbau, der diese Reihenfolge dreht, waere eine
-// Aenderung an 54 Messungen statt an einem Startproblem.
-
 const TRY_BLOCKS: u64 = 4096
 
-// Die Arten von `blkdev.fi` in die dieser Datei. Beide Listen tragen
-// dieselben Zahlen -- diese Funktion sagt das AUS, statt es
-// vorauszusetzen. Wer eine der beiden umsortiert, bekommt hier ein
-// KIND_NONE und nicht eine Platte, die falsch behandelt wird.
 fn blkdev_kind(k: u64) -> u64 {
     if k == blkdev.KIND_NVME {
         return K_NVME
@@ -591,18 +440,12 @@ fn blkdev_kind(k: u64) -> u64 {
 }
 
 fn try_mount_on(state: u64, dev: u64, blocks_n: u64) -> bool {
-    // Erst roh: eine Platte, die mit `mkfs` unserer Bauart beschrieben
-    // wurde, traegt das Dateisystem ab Block 0 und hat gar keine
-    // Partitionstafel.
     blk.use_at(state, dev, 0, blocks_n)
     if fs.mount(state) {
         kstate.set(state, sc(S_FIRST), 0)
         kstate.set(state, sc(S_BLOCKS), blocks_n)
         return true
     }
-    // Dann die Tafel. `part.find_kind` sucht die erste Partition mit
-    // UNSERER Typkennung -- nicht die erste ueberhaupt, sonst landet
-    // eine Installation auf der EFI-Partition daneben.
     let n: u64 = part.scan(state, dev)
     if n == 0 {
         return false
@@ -613,7 +456,6 @@ fn try_mount_on(state: u64, dev: u64, blocks_n: u64) -> bool {
     }
     let first: u64 = part.start(state, i)
     let cnt: u64 = part.blocks(state, i)
-    // K-019: an encrypted root partition is unlocked first (passphrase prompt)
     let cr: u64 = cryptboot.boot_unlock(state, dev, first)
     if cr == cryptboot.R_FAIL {
         return false
@@ -630,10 +472,6 @@ fn try_mount_on(state: u64, dev: u64, blocks_n: u64) -> bool {
     return true
 }
 
-// Einen Bewerber betriebsbereit machen. Gibt die Geraetenummer aus
-// `blk.fi` zurueck oder MAX (0xFF), wenn er nicht hochkommt. Was hier
-// NICHT steht, ist genauso wichtig: kein Treiber wird ein zweites Mal
-// zurueckgesetzt, wenn `hw.disk` ihn schon aufgebaut hat.
 const DEV_BAD: u64 = 0xFF
 
 fn bring_up(state: u64, kind: u64) -> u64 {
@@ -641,11 +479,6 @@ fn bring_up(state: u64, kind: u64) -> u64 {
         if !nvme.present(state) {
             return DEV_BAD
         }
-        // `nvme.fi` fuehrt kein `ready` aus. Die Zahl der Bloecke ist
-        // der Beleg: sie steht erst da, wenn IDENTIFY NAMESPACE
-        // durchgelaufen ist -- also genau dann, wenn der Controller
-        // aufgebaut ist. Null heisst "noch nicht" und heisst nach dem
-        // zweiten Versuch "geht nicht".
         if nvme.blocks(state) == 0 {
             if !nvme.init(state, true, true) {
                 return DEV_BAD
@@ -668,9 +501,6 @@ fn bring_up(state: u64, kind: u64) -> u64 {
         return blk.DEV_AHCI
     }
     if kind == K_USB {
-        // Der Baum ist zu diesem Zeitpunkt schon aufgezaehlt
-        // (`usb_stage` laeuft vor `osum_stage`). Hier wird nur gefragt,
-        // ob ein Blockgeraet dabei herausgekommen ist.
         if !usb.msc_ready(state) {
             return DEV_BAD
         }
@@ -702,23 +532,6 @@ fn blocks_of(state: u64, kind: u64, dev: u64) -> u64 {
     return c
 }
 
-// Der Reihe nach, und JEDER Versuch steht auf der Leitung. Ein
-// Startproblem, das man aus der seriellen Ausgabe nicht ablesen kann,
-// ist auf einem fremden Brett nicht zu finden.
-// `skip_nvme`/`skip_ahci`: steht `nvme` oder `ahci` auf der
-// Kommandozeile, dann gehoert dieser Controller der Stufe `hw.disk`,
-// und die FORMATIERT ihn. Eine Wurzel, die diese Datei kurz vorher
-// darauf eingehaengt haette, waere zehn Zeilen spaeter ueberschrieben.
-// Deshalb wird der Bewerber dann uebersprungen -- und die Zeile sagt
-// es, statt ihn stillschweigend auszulassen.
-// NACHTRAG: DIE BEWERBER KOMMEN JETZT AUS `blkdev.fi`.
-//
-// Vorher hat diese Datei den Bus selbst abgelaufen und ihre eigene
-// Liste gefuehrt. Danach gab es ZWEI Listen derselben Platten -- eine
-// hier und eine in `blkdev.fi` -, und zwei Listen laufen frueher oder
-// spaeter auseinander. Jetzt gibt es eine: `blkdev` findet und ordnet,
-// diese Funktion entscheidet, WELCHE davon wirklich eine Wurzel traegt.
-// Das ist dieselbe Trennung, die `netdev.fi` und `netsvc.fi` haben.
 fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
     var s_try: [u8; 9] = "versuch \0"
     var s_up: [u8; 16] = " -- kommt nicht\0"
@@ -731,19 +544,8 @@ fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
     let lim: u64 = blkdev.disks(state)
     var i: u64 = 0
     while i < lim {
-        // Die Arten von `blkdev.fi` und die von hier tragen dieselben
-        // Zahlen in derselben Reihenfolge (NVMe 1, AHCI 2, USB 3, IDE
-        // 4). Das ist kein Zufall, sondern der Grund, warum diese
-        // Schleife ohne Umrechnung auskommt -- und `blkdev_kind` unten
-        // rechnet es trotzdem nach, damit es auffaellt, wenn jemand
-        // eine der beiden Listen umsortiert.
         let kind: u64 = blkdev_kind(blkdev.kind_at(state, i))
         kstate.set(state, sc(S_TRIED), kstate.get(state, sc(S_TRIED)) + 1)
-        // Die Zeile wird HIER geschlossen und nicht erst nach dem
-        // Ergebnis: `part.scan` und `nvme.init` drucken selbst, und
-        // eine halbe Zeile, in deren Mitte ein anderer Melder schreibt,
-        // ist auf einem seriellen Kabel nicht mehr zu lesen. Gemessen:
-        // "rootsel: versuch nvmepart: mbr=0  gpt=0  parts=0".
         tag()
         serial.puts((&s_try[0]) as u64)
         kind_name(kind)
@@ -765,7 +567,6 @@ fn mount_root(state: u64, skip_nvme: bool, skip_ahci: bool) -> bool {
             dev = bring_up(state, kind)
         }
         if gesperrt {
-            // nichts weiter
         } else if dev == DEV_BAD {
             tag()
             kind_name(kind)

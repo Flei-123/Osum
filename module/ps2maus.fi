@@ -1,79 +1,16 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// module/ps2maus.fi -- RUNDE MODUL: DER TREIBER ALS NACHLADBARE DATEI.
-//
-// DIESE DATEI ENTHAELT KEINEN TREIBER. Sie enthaelt eine Zeile Treiber,
-// und die heisst `import ps2m` -- das ist die UNVERAENDERTE Datei
-// `kernel/ps2m.fi`, 650 Zeilen, dieselbe, die im gewoehnlichen Bau in
-// den Kern gebunden wird. Genau das ist der Punkt der Runde: EIN
-// Quelltext, zwei Wege ins System.
-//
-//   tools/build-kernel.sh ohne Schalter -> ps2m.fi liegt im Kernabbild
-//   tools/build-kernel.sh --ohne-ps2m   -> im Abbild liegt der Stummel
-//                                          ps2m-aus.fi, und diese Datei
-//                                          wird zur Laufzeit geladen
-//
-// Was hier steht, ist nur das Drumherum, das aus einer Uebersetzungs-
-// einheit ein MODUL macht:
-//
-//   1. `modul_init`, mit `#[export_c]` unter seinem BLANKEN Namen (ohne
-//      `_F0.`/`_F1.`) -- sonst haenge der Lader an der Uebersetzerstufe,
-//      und ein Modul, das firnc0 gebaut hat, liefe nicht unter einem
-//      Kern von firnc1.
-//   2. `modul_exit` ebenso.
-//   3. Der Selbstriegel: `k_abi()` fragt den LAUFENDEN Kern nach seiner
-//      Schnittstellenfassung, bevor irgendetwas eingetragen wird. Der
-//      Lader hat den Kopf der Datei schon geprueft; das hier ist die
-//      zweite Haelfte derselben Frage, aus der anderen Richtung. Zwei
-//      Riegel an einer Tuer, und der Grund ist der, den Windows in
-//      seinen DDI-Fassungen und Linux in `vermagic` hat: ein Treiber,
-//      der auf dem falschen Kern LAEUFT, ist schlimmer als einer, der
-//      nicht startet.
-//   4. Die achtundzwanzig Adressen in die Treibertafel (`k_bind`).
-//
-// WIE MAN AN DIE ADRESSEN KOMMT: derselbe Weg wie in `kernel/ksym.fi`.
-// Ein Funktionswert in Firn ist die Adresse einer Zelle in `.rodata`, in
-// der die Adresse der Funktion steht; zweimal auflesen gibt die Zahl.
-// Der Unterschied zu `ksym.fi` ist, dass diese `.rodata` beim Laden
-// verschoben wird -- der Lader hat sie in einen Rahmenlauf kopiert und
-// die Relokationen so aufgeloest, dass `lea rax, [rip + .L__fnv...]` auf
-// den neuen Platz zeigt. Wenn die Zahlen hier stimmen, hat die
-// Relokation gestimmt, und das ist die schaerfste Probe der Runde: eine
-// falsch aufgeloeste Relokation waere kein falsches Ergebnis, sondern
-// ein Sprung ins Nichts.
-//
-// WAS DIESES MODUL VOM KERN BRAUCHT (vier Namen, und mehr nicht):
-// `k_abi`, `k_bind`, `k_puts`, `k_dec` -- und `osum_panic`, das der
-// Uebersetzer bei jeder geprueften Rechnung selbst dazulegt. Alle fuenf
-// stehen in `kernel/ksym.fi`; wer einen davon streicht, macht dieses
-// Modul unladbar, und der Lader sagt "symbol".
 
 profile kernel
 
 import ps2m
 import modidx
 
-// ------------------------------------------------- was der Kern anbietet
-//
-// `extern fn` (Firn, Runde 75): eine Deklaration ohne Rumpf. Der Aufruf
-// geht unter dem BLANKEN Namen hinaus und bleibt in der Objektdatei ein
-// undefiniertes Symbol -- genau das, was `kernel/modul.fi` beim Laden
-// gegen `kernel/ksym.fi` bindet.
 extern fn k_abi() -> u64;
 extern fn k_bind(state: u64, slot: u64, i: u64, adr: u64) -> u64;
 extern fn k_puts(p: u64);
 extern fn k_dec(v: u64);
 
-// Die Fassung, gegen die dieses Modul gebaut ist. Sie steht AUCH im Kopf
-// der `.omod`-Datei (dort prueft sie der Lader) und AUCH hier (hier
-// prueft sie das Modul selbst).
 const GEBAUT_GEGEN: u64 = 1
 
-// ---------------------------------------------- die Form der Zeiger
-//
-// Je Signatur eine Struktur. Der Uebersetzer nimmt den Funktionswert nur
-// an, wenn der Feldtyp passt -- eine falsche Signatur hier waere ein
-// Sprung mit falschen Registern und faellt damit schon beim Uebersetzen
-// auf, nicht erst in QEMU.
 struct A_3b { f: fn(u64, u64, u64) -> bool }
 struct A_1b { f: fn(u64) -> bool }
 struct A_1v { f: fn(u64) }
@@ -155,11 +92,8 @@ fn a_6w(g: fn(u64, u64, u64, u64, u64, u64)) -> u64 {
     return zelle((&t) as u64)
 }
 
-// ------------------------------------------------------- der Einsprung
-
 #[export_c]
 fn modul_init(state: u64) -> u64 {
-    // Riegel eins: laeuft hier der Kern, gegen den ich gebaut bin?
     if k_abi() != GEBAUT_GEGEN {
         var w: [u8; 30] = "ps2maus: falsche Kernfassung \0"
         k_puts((&w[0]) as u64)
@@ -212,9 +146,6 @@ fn modul_init(state: u64) -> u64 {
     var e: [u8; 2] = "\n\0"
     k_puts((&e[0]) as u64)
 
-    // Ein Modul, das nicht ALLE seine Plaetze eintragen konnte, ist
-    // halb da -- und ein halber Treiber ist schlimmer als keiner. Der
-    // Lader raeumt es dann wieder ab.
     if n != modidx.P_COUNT {
         return 2
     }
@@ -231,19 +162,6 @@ fn entry(state: u64, i: u64, adr: u64) -> u64 {
     return 1
 }
 
-// ------------------------------------------------------- der Aussprung
-//
-// Das Zeigegeraet WIRD HIER NICHT ABGESCHALTET. Das ist Absicht und
-// steht so in `docs/RUNDE-MODUL.md`: der 8042 meldet nach `0xF4` weiter,
-// und ihn stillzulegen hiesse, ein Kommando ueber denselben Anschluss zu
-// schicken, an dem die TASTATUR haengt. Was das Entladen leistet, ist,
-// dass der Kern die Adressen dieses Moduls nicht mehr kennt -- der
-// Stummel antwortet danach wieder "kein Zeigegeraet", und die Rahmen
-// sind zurueck. Eine Unterbrechung, die danach noch kommt, laeuft in
-// `ps2m-aus.irq` und findet dort eine Null.
-//
-// Dass das reicht, ist gemessen: `tools/module/run.sh` Abschnitt 6 bewegt
-// die Maus NACH dem Entladen weiter und prueft, dass der Kern lebt.
 #[export_c]
 fn modul_exit(state: u64) -> u64 {
     var s: [u8; 19] = "ps2maus: entladen\n\0"

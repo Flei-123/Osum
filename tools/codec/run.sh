@@ -55,7 +55,7 @@ else
     bad "tools/kernel/memmap.py meldet Kollisionen"
     sed 's/^/        /' "$TMPD/karte.txt" | head -10
 fi
-hat "$TMPD/karte.txt" "0 Kollisionen" "keine zwei Bereiche ueberschneiden sich"
+hat "$TMPD/karte.txt" "0 collisions" "keine zwei Bereiche ueberschneiden sich"
 
 v=$(grep -aE "^const CODEC_OFF: u64 = 0x[0-9A-Fa-f]+" kernel/lib/kstate.fi \
     | head -1 | grep -oE '0x[0-9A-Fa-f]+')

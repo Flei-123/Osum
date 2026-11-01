@@ -18,7 +18,7 @@ echo "== 1. die Karte von kdata =="
 kol=$(python3 tools/kernel/memmap.py kernel 2>&1 | tail -1)
 echo "        $kol"
 case "$kol" in
-    *" 0 Kollisionen") ok "der Busbereich ueberschneidet nichts" ;;
+    *" 0 collisions") ok "der Busbereich ueberschneidet nichts" ;;
     *) bad "die Karte hat Kollisionen" ;;
 esac
 grep -q 'BUS_OFF' tools/kernel/memmap.py \

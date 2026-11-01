@@ -1,34 +1,3 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// kernel/modtab.fi -- RUNDE MODUL: DIE TAFEL, DIE EIN GELADENER TREIBER
-// FUELLT.
-//
-// Der Lader (`kernel/modul.fi`) legt ein Modul in den Speicher und
-// springt seinen Einsprungpunkt an. Danach muss der Kern das Modul
-// FINDEN koennen -- und zwar aus `kernel/ps2m-aus.fi` heraus, das in
-// einer Bildwiederholung dreissigmal gerufen wird. Dieser Weg darf nicht
-// ueber Namen und nicht ueber den Lader gehen.
-//
-// Also eine Tafel: `MAX_SLOT` Steckplaetze zu je `SLOT_SPAN` Adressen,
-// in `kdata` unter `kstate.MODULE_OFF`. Ein Modul traegt seine Adressen
-// mit `bind` ein (das ist der einzige Kerndienst, der ETWAS VERAENDERT
-// und den ein Modul rufen darf), der Stummel liest sie mit `op` und
-// springt mit `call rax` -- genau wie `kernel/msr.fi` in die
-// Faengerroutinen von `isr.s` springt.
-//
-// DIESE DATEI STEHT ZWISCHEN LADER UND STUMMEL UND KENNT KEINEN VON
-// BEIDEN. Der Grund ist ein Kreis, den es sonst gaebe: `ksym.fi` muss
-// `bind` anbieten koennen (ein Modul ruft es), `modul.fi` muss `ksym.fi`
-// benutzen (es loest damit Namen auf), und `modul.fi` muss die Tafel
-// leeren, wenn ein Modul entladen wird. Firn hat keine zyklischen
-// Importe. Also liegt das Gemeinsame unten.
-//
-// WAS HIER NICHT GEPRUEFT WIRD, UND DAS IST DIE GRENZE DES PROTOTYPEN:
-// dass die Adresse, die ein Modul eintraegt, WIRKLICH in seinem eigenen
-// Abbild liegt. `bind` prueft Platznummer und Steckplatz, nicht die
-// Adresse. Ein boesartiges Modul traegt hier die Adresse ein, die es
-// will -- aber es ist ohnehin schon in Ring 0, und wer in Ring 0 ist,
-// braucht diese Tafel nicht, um Schaden anzurichten. Der Riegel gegen
-// ein boesartiges Modul ist die SIGNATUR und nicht diese Zeile.
 
 profile kernel
 
@@ -41,14 +10,9 @@ export {
     acquire, release, quiesce, inflight, DRAIN_SPINS
 }
 
-// ------------------------------------------------------- die Aufteilung
-//
-// `kstate.MODULE_OFF` (0x4D000), drei Seiten. Diese Datei nimmt sich
-// daraus 0x0800..0x0C00; der Rest gehoert `modul.fi`. Beide Zahlen
-// stehen in `kernel/kstate.fi` und in `tools/kernel/memmap.py`.
-const TAB_OFF: u64 = 0x0800 // MAX_SLOT * SLOT_SPAN * 8 = 0x400
-const S_FILLED: u64 = 0x00C0 // wie viele Plaetze belegt sind
-const S_BINDREJ: u64 = 0x00C8 // abgewiesene bind-Aufrufe
+const TAB_OFF: u64 = 0x0800
+const S_FILLED: u64 = 0x00C0
+const S_BINDREJ: u64 = 0x00C8
 const S_ALLOW: u64 = 0x00D0
 const NO_ALLOW: u64 = 0xFFFFFFFFFFFFFFFF
 const G_INFLIGHT: u64 = 0x00E0
@@ -83,9 +47,6 @@ fn allow_all(state: u64) {
     kstate.set(state, kstate.MODULE_OFF + S_ALLOW, NO_ALLOW)
 }
 
-// EIN MODUL TRAEGT SICH EIN. Rueckgabe 0 = angenommen, sonst der Grund.
-// Das ist die einzige Funktion dieses Kerns, die ein Modul aufrufen darf
-// und die etwas veraendert.
 fn bind(state: u64, slot: u64, i: u64, adr: u64) -> u64 {
     if slot >= modidx.MAX_SLOT {
         kstate.set(state, kstate.MODULE_OFF + S_BINDREJ,
@@ -97,8 +58,6 @@ fn bind(state: u64, slot: u64, i: u64, adr: u64) -> u64 {
             kstate.get(state, kstate.MODULE_OFF + S_BINDREJ) + 1)
         return 2
     }
-    // Eine Null waere ein Sprung nach 0. Ein Modul, das das eintraegt,
-    // hat einen Fehler; die Tafel nimmt ihn nicht an.
     if adr == 0 {
         kstate.set(state, kstate.MODULE_OFF + S_BINDREJ,
             kstate.get(state, kstate.MODULE_OFF + S_BINDREJ) + 1)
@@ -129,8 +88,6 @@ fn op(state: u64, slot: u64, i: u64) -> u64 {
     return kstate.get(state, space(state, slot, i))
 }
 
-// Ist an diesem Steckplatz ueberhaupt jemand? Gemessen an Platz 0, dem
-// `init` jedes Treibers -- ein Modul ohne den waere keins.
 fn have(state: u64, slot: u64) -> bool {
     return op(state, slot, 0) != 0
 }
@@ -158,10 +115,6 @@ fn bind_rejects(state: u64) -> u64 {
     return kstate.get(state, kstate.MODULE_OFF + S_BINDREJ)
 }
 
-// BEIM ENTLADEN. Die Reihenfolge ist nicht beliebig: erst wird die Tafel
-// geleert, DANN gibt der Lader die Rahmen zurueck. Andersherum gaebe es
-// ein Fenster, in dem der Stummel eine Adresse in einen Rahmen springt,
-// der schon wieder vergeben ist.
 fn clear_slot(state: u64, slot: u64) {
     if slot >= modidx.MAX_SLOT {
         return
