@@ -28,18 +28,18 @@ daten_summe() { dd if="$1" bs=512 skip=$DAT_START count=$DAT_SEK status=none | s
 titel "1. eine Platte, auf der schon jemand wohnt"
 # ==================================================================
 bash tools/dual/fremdplatte.sh "$OUT/platte.img" 512 | sed 's/^/   /'
-[ -f "$OUT/platte.img" ] || { echo "die Platte wurde nicht gebaut" >&2; exit 1; }
+[ -f "$OUT/platte.img" ] || { echo "the disk was not built" >&2; exit 1; }
 
 VOR_ESP=$(esp_summe   "$OUT/platte.img")
 VOR_DAT=$(daten_summe "$OUT/platte.img")
 echo "   VORHER  esp   $VOR_ESP"
-echo "   VORHER  daten $VOR_DAT"
+echo "   BEFORE  data $VOR_DAT"
 
 sgdisk -p "$OUT/platte.img" > "$OUT/gpt-vorher.txt" 2>&1
-grep -qE '^ +1 +2048' "$OUT/gpt-vorher.txt" && ok "die fremde Platte traegt eine ESP" \
-    || bad "die fremde Platte hat keine ESP"
-grep -qE '^ +2 +133120' "$OUT/gpt-vorher.txt" && ok "die fremde Platte traegt eine Datenpartition" \
-    || bad "die fremde Platte hat keine Datenpartition"
+grep -qE '^ +1 +2048' "$OUT/gpt-vorher.txt" && ok "the foreign disk carries an ESP" \
+    || bad "the foreign disk has no ESP"
+grep -qE '^ +2 +133120' "$OUT/gpt-vorher.txt" && ok "the foreign disk carries a data partition" \
+    || bad "the foreign disk has no data partition"
 
 # ==================================================================
 titel "2. ${MARKE_PRODUKT} in den freien Platz installieren"
@@ -64,22 +64,22 @@ sleep 4
 kill "$QP" 2>/dev/null
 wait "$QP" 2>/dev/null
 
-echo "   was das Programm gesehen und getan hat:"
+echo "   what the program saw and did:"
 grep -aE '^installer: (disk|ready|tafel=|part |frei |fremdesp=|weg=|neuepart|esp=|menue=|step=|fertig|FEHLER|NEBENNEIN|bei=)' \
     "$OUT/ser.txt" 2>/dev/null | head -30 | sed 's/^/        /'
 
 grep -qa 'installer: table=2' "$OUT/ser.txt" \
-    && ok "es hat die fremde Partitionstafel gelesen (2 Partitionen)" \
-    || bad "die fremde Partitionstafel wurde nicht gelesen"
+    && ok "it read the foreign partition table (2 partitions)" \
+    || bad "the foreign partition table was not read"
 grep -qa 'installer: foreign_esp=1' "$OUT/ser.txt" \
-    && ok "es hat die vorhandene EFI-Partition gefunden" \
-    || bad "die vorhandene EFI-Partition wurde nicht gefunden"
+    && ok "it found the existing EFI partition" \
+    || bad "the existing EFI partition was not found"
 grep -qa 'installer: newpart' "$OUT/ser.txt" \
-    && ok "es hat einen neuen Partitionseintrag ergaenzt" \
-    || bad "es wurde kein Partitionseintrag ergaenzt"
+    && ok "it added a new partition entry" \
+    || bad "no partition entry was added"
 grep -qa 'installer: done' "$OUT/ser.txt" \
-    && ok "die Installation meldet sich fertig" \
-    || bad "die Installation ist nicht fertig geworden"
+    && ok "the installation reports done" \
+    || bad "the installation did not finish"
 
 # ==================================================================
 titel "3. DIE FREMDEN PARTITIONEN -- BYTEWEISE UNVERAENDERT?"
@@ -87,16 +87,16 @@ titel "3. DIE FREMDEN PARTITIONEN -- BYTEWEISE UNVERAENDERT?"
 NACH_ESP=$(esp_summe   "$OUT/platte.img")
 NACH_DAT=$(daten_summe "$OUT/platte.img")
 echo "   NACHHER esp   $NACH_ESP"
-echo "   NACHHER daten $NACH_DAT"
+echo "   AFTER   data $NACH_DAT"
 
 if [ "$VOR_DAT" = "$NACH_DAT" ]; then
-    ok "DIE FREMDE DATENPARTITION IST OKTETT FUER OKTETT UNVERAENDERT"
+    ok "THE FOREIGN DATA PARTITION IS UNCHANGED BYTE FOR BYTE"
 else
-    bad "die fremde Datenpartition wurde veraendert -- ${VOR_DAT:0:16}… -> ${NACH_DAT:0:16}…"
+    bad "the foreign data partition was changed -- ${VOR_DAT:0:16}… -> ${NACH_DAT:0:16}…"
 fi
 
 if [ "$VOR_ESP" = "$NACH_ESP" ]; then
-    echo "   (die ESP ist unveraendert -- dann hat ${MARKE_PRODUKT} dort nichts abgelegt)"
+    echo "   (the ESP is unchanged -- so ${MARKE_PRODUKT} stored nothing there)"
 fi
 
 # ==================================================================
@@ -106,17 +106,17 @@ ESPOFF=$((ESP_START * 512))
 mdir -i "$OUT/platte.img@@$ESPOFF" ::/EFI/Microsoft/Boot > "$OUT/esp-fremd.txt" 2>&1
 sed 's/^/        /' "$OUT/esp-fremd.txt" | head -10
 grep -qi 'bootmgfw' "$OUT/esp-fremd.txt" \
-    && ok "DER FREMDE BOOTMANAGER (bootmgfw.efi) IST NOCH DA" \
-    || bad "bootmgfw.efi ist verschwunden -- der fremde Bootlader wurde geloescht"
+    && ok "THE FOREIGN BOOT MANAGER (bootmgfw.efi) IS STILL THERE" \
+    || bad "bootmgfw.efi has disappeared -- the foreign boot loader was deleted"
 grep -qi 'BCD' "$OUT/esp-fremd.txt" \
-    && ok "die fremde Datei BCD in der ESP ist noch da" \
-    || bad "die fremde Datei BCD ist verschwunden"
+    && ok "the foreign file BCD in the ESP is still there" \
+    || bad "the foreign file BCD has disappeared"
 
 mdir -i "$OUT/platte.img@@$ESPOFF" ::"/EFI/${MARKE_KURZ}" > "$OUT/esp-osum.txt" 2>&1
 sed 's/^/        /' "$OUT/esp-osum.txt" | head -8
 grep -qi 'osum' "$OUT/esp-osum.txt" \
-    && ok "${MARKE_PRODUKT} liegt in seinem eigenen Verzeichnis /EFI/${MARKE_KURZ}" \
-    || bad "unter /EFI/${MARKE_KURZ} liegt nichts"
+    && ok "${MARKE_PRODUKT} lives in its own directory /EFI/${MARKE_KURZ}" \
+    || bad "nothing is under /EFI/${MARKE_KURZ}"
 
 # ==================================================================
 titel "5. ist die GPT gueltig? -- mit FREMDEN Augen gelesen"
@@ -127,21 +127,21 @@ sed 's/^/        /' "$OUT/gpt-nachher.txt" | tail -8
 if grep -qi 'No problems found' "$OUT/gpt-pruef.txt"; then
     ok "sgdisk sagt: No problems found (beide Koepfe, beide CRC32)"
 else
-    bad "sgdisk beanstandet die Tafel:"
+    bad "sgdisk complains about the table:"
     sed 's/^/          /' "$OUT/gpt-pruef.txt" | head -8
 fi
 n=$(grep -cE '^ +[0-9]+ +[0-9]+' "$OUT/gpt-nachher.txt" || true)
-[ "${n:-0}" -ge 3 ] && ok "die Tafel traegt jetzt $n Partitionen (vorher 2)" \
-    || bad "die Tafel traegt nur ${n:-0} Partitionen"
+[ "${n:-0}" -ge 3 ] && ok "the table now has $n partitions (before: 2)" \
+    || bad "the table has only ${n:-0} partitions"
 grep -qi 'OSUM' "$OUT/gpt-nachher.txt" \
-    && ok "die neue Partition heisst OSUM" \
+    && ok "the new partition is named OSUM" \
     || bad "keine Partition namens OSUM"
 
 python3 tools/dual/tafelpruef.py "$OUT/platte.img" > "$OUT/tafelpruef.txt" 2>&1
 TPRC=$?
 sed 's/^/        /' "$OUT/tafelpruef.txt"
-[ "$TPRC" = 0 ] && ok "der unabhaengige Pruefer bestaetigt beide Koepfe und beide Tafelsummen" \
-    || bad "der unabhaengige Pruefer beanstandet die Tafel"
+[ "$TPRC" = 0 ] && ok "the independent checker confirms both headers and both table sums" \
+    || bad "the independent checker complains about the table"
 
 # ==================================================================
 titel "6. bietet das Bootmenue beide Systeme an?"
@@ -149,12 +149,12 @@ titel "6. bietet das Bootmenue beide Systeme an?"
 mtype -i "$OUT/platte.img@@$ESPOFF" ::/limine.conf > "$OUT/limine.txt" 2>&1
 sed 's/^/        /' "$OUT/limine.txt" | head -14
 grep -qi "${MARKE_PRODUKT}" "$OUT/limine.txt" \
-    && ok "das Bootmenue hat einen Eintrag fuer ${MARKE_PRODUKT}" \
-    || bad "im Bootmenue fehlt ${MARKE_PRODUKT}"
+    && ok "the boot menu has an entry for ${MARKE_PRODUKT}" \
+    || bad "the boot menu lacks ${MARKE_PRODUKT}"
 if grep -qi 'efi_chainload' "$OUT/limine.txt" && grep -qi 'bootmgfw' "$OUT/limine.txt"; then
-    ok "DAS BOOTMENUE HAT EINEN EINTRAG FUER DAS FREMDE SYSTEM (Kettenstart)"
+    ok "THE BOOT MENU HAS AN ENTRY FOR THE FOREIGN SYSTEM (chain start)"
 else
-    bad "im Bootmenue fehlt der Eintrag fuer das fremde System"
+    bad "the boot menu lacks the entry for the foreign system"
 fi
 
 printf '\n=======================================================\n'

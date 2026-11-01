@@ -18,39 +18,39 @@ for t in curl python3; do
 done
 python3 -c 'import cryptography' 2>/dev/null || {
     echo "BRUECKE: uebersprungen, python-cryptography fehlt"; exit 0; }
-[ -r "$SCHLUESSEL" ] || { echo "BRUECKE: uebersprungen, $SCHLUESSEL nicht lesbar"; exit 0; }
+[ -r "$SCHLUESSEL" ] || { echo "BRIDGE: skipped, $SCHLUESSEL not readable"; exit 0; }
 VK=$(cat "$SCHLUESSEL")
 
 KENN="pruefstand-$$"
 
-echo "== 1. der Dienst ist von AUSSEN erreichbar =="
+echo "== 1. the service is reachable from OUTSIDE =="
 G=$(curl -s --max-time 10 "$ZIEL/bruecke/gesund")
 if echo "$G" | grep -q '"gesund": *true'; then
-    ok "GET $ZIEL/bruecke/gesund antwortet -- durch das echte Zertifikat"
+    ok "GET $ZIEL/bruecke/gesund answers -- through the real certificate"
     note "$G"
 else
-    bad "der Brueckendienst ist ueber HTTPS nicht erreichbar"
+    bad "the bridge service is not reachable over HTTPS"
     note "Antwort: $G"
     echo "BRUECKE: $pass bestanden, $fail durchgefallen"; exit 1
 fi
 
-echo "== 2. ohne Verwalterschluessel geht gar nichts =="
+echo "== 2. nothing works without the admin key =="
 A=$(curl -s --max-time 10 "$ZIEL/bruecke/geraete")
 if echo "$A" | grep -q 'kein Verwalterschluessel'; then
-    ok "GET /bruecke/geraete ohne Schluessel: abgewiesen"
+    ok "GET /bruecke/geraete without key: rejected"
 else
-    bad "die Geraeteliste war ohne Schluessel lesbar -- $A"
+    bad "the device list was readable without a key -- $A"
 fi
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/auftrag" \
     -H 'Content-Type: application/json' \
     -d "{\"geraet\":\"$KENN\",\"art\":\"befehl\",\"ziel\":\"/bin/ls\"}")
 if echo "$A" | grep -q 'kein Verwalterschluessel'; then
-    ok "POST /bruecke/auftrag ohne Schluessel: abgewiesen"
+    ok "POST /bruecke/auftrag without key: rejected"
 else
-    bad "ein Auftrag ging ohne Schluessel durch -- $A"
+    bad "a job went through without a key -- $A"
 fi
 
-echo "== 3. die Anmeldung: ohne Freigabe kommt niemand herein =="
+echo "== 3. the login: nobody gets in without approval =="
 python3 - "$W" <<'PYEOF'
 import sys, os
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -73,39 +73,39 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$PUB\",\"info\":{\"rechner\":\"pruefstand\",\"aufloesung\":\"1280x800\"}}")
 CODE=$(echo "$A" | jget code)
 if echo "$A" | grep -q 'kopplung-noetig' && [ -n "$CODE" ]; then
-    ok "ein unbekanntes Geraet bekommt einen PAIRING CODE und sonst nichts"
+    ok "an unknown device gets a PAIRING CODE and nothing else"
     note "Code $CODE -- den zeigt das Geraet auf SEINEM Bildschirm"
 else
-    bad "die Erstanmeldung hat keinen Kopplungscode gebracht -- $A"
+    bad "the first login brought no pairing code -- $A"
 fi
 
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/warten" \
     -H 'Content-Type: application/json' \
     -d "{\"kennung\":\"$KENN\",\"marke\":\"egal\"}")
 if echo "$A" | grep -q 'nicht gekoppelt'; then
-    ok "GEGENPROBE: ein ungekoppeltes Geraet bekommt keine Arbeit"
+    ok "CONTROL: an unpaired device gets no work"
 else
-    bad "ein ungekoppeltes Geraet bekam eine Antwort -- $A"
+    bad "an unpaired device got an answer -- $A"
 fi
 
-echo "== 4. ein FALSCHER Code koppelt nicht =="
+echo "== 4. a WRONG code does not pair =="
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/koppeln" \
     -H "X-Bruecke-Verwalter: $VK" -H 'Content-Type: application/json' \
     -d "{\"geraet\":\"$KENN\",\"code\":\"000000\",\"was\":\"frei\"}")
 if echo "$A" | grep -q 'Code stimmt nicht'; then
-    ok "ein Code, den niemand angefragt hat, wird abgelehnt"
+    ok "a code nobody asked for is rejected"
 else
-    bad "ein falscher Code hat gekoppelt -- $A"
+    bad "a wrong code paired -- $A"
 fi
 
-echo "== 5. mit dem richtigen Code, und dann der Beweis des Schluessels =="
+echo "== 5. with the right code, then the proof of the key =="
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/koppeln" \
     -H "X-Bruecke-Verwalter: $VK" -H 'Content-Type: application/json' \
     -d "{\"geraet\":\"$KENN\",\"code\":\"$CODE\",\"was\":\"frei\"}")
 if echo "$A" | grep -q '"gekoppelt": *true'; then
-    ok "mit dem richtigen Code ist die Kopplung durch"
+    ok "with the right code the pairing is done"
 else
-    bad "die Kopplung ging nicht -- $A"
+    bad "the pairing failed -- $A"
 fi
 
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
@@ -113,7 +113,7 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$PUB\"}")
 FORD=$(echo "$A" | jget forderung)
 if [ -n "$FORD" ]; then
-    ok "das gekoppelte Geraet bekommt eine ZUFALLSFORDERUNG"
+    ok "the paired device gets a RANDOM CHALLENGE"
 else
     bad "keine Forderung -- $A"
 fi
@@ -123,9 +123,9 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -H 'Content-Type: application/json' \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$PUB\",\"forderung\":\"$FORD\",\"unterschrift\":\"$FALSCH\"}")
 if echo "$A" | grep -q 'Unterschrift falsch'; then
-    ok "SICHERHEITSNACHWEIS: eine FALSCHE Unterschrift wird ABGELEHNT"
+    ok "SECURITY PROOF: a WRONG signature is REJECTED"
 else
-    bad "eine falsche Unterschrift kam durch -- $A"
+    bad "a wrong signature got through -- $A"
 fi
 
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
@@ -144,12 +144,12 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$PUB\",\"forderung\":\"$FORD\",\"unterschrift\":\"$SIG\",\"info\":{\"rechner\":\"pruefstand\",\"aufloesung\":\"1280x800\"}}")
 MARKE=$(echo "$A" | jget marke)
 if [ -n "$MARKE" ]; then
-    ok "die RICHTIGE Unterschrift bringt eine Sitzungsmarke"
+    ok "the RIGHT signature brings a session token"
 else
-    bad "die richtige Unterschrift wurde nicht angenommen -- $A"
+    bad "the right signature was not accepted -- $A"
 fi
 
-echo "== 6. ein FREMDER Schluessel auf denselben Namen =="
+echo "== 6. a FOREIGN key under the same name =="
 python3 - "$W" <<'PYEOF'
 import sys, os
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -164,9 +164,9 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -H 'Content-Type: application/json' \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$FPUB\"}")
 if echo "$A" | grep -q 'Schluessel passt nicht'; then
-    ok "SICHERHEITSNACHWEIS: ein FREMDER Schluessel auf denselben Namen wird ABGELEHNT"
+    ok "SECURITY PROOF: a FOREIGN key under the same name is REJECTED"
 else
-    bad "ein fremder Schluessel wurde angenommen -- $A"
+    bad "a foreign key was accepted -- $A"
 fi
 
 echo "== 7. Auftrag hin, Bild her =="
@@ -175,9 +175,9 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/auftrag" \
     -d "{\"geraet\":\"$KENN\",\"art\":\"foto\"}")
 AID=$(echo "$A" | jget id)
 if [ -n "$AID" ]; then
-    ok "JARVIS legt einen Foto-Auftrag in die Schlange (id=$AID)"
+    ok "JARVIS puts a photo job in the queue (id=$AID)"
 else
-    bad "der Auftrag ging nicht ein -- $A"
+    bad "the job was not accepted -- $A"
 fi
 
 T0=$(date +%s%N)
@@ -186,9 +186,9 @@ A=$(curl -s --max-time 40 -X POST "$ZIEL/bruecke/warten" \
     -d "{\"kennung\":\"$KENN\",\"marke\":\"$MARKE\"}")
 MS=$(( ($(date +%s%N) - T0) / 1000000 ))
 if echo "$A" | grep -q '"art": *"foto"'; then
-    ok "das Geraet bekommt den Auftrag beim Warten -- nach ${MS} ms"
+    ok "the device gets the job while waiting -- after ${MS} ms"
 else
-    bad "der Auftrag kam beim Geraet nicht an -- $A"
+    bad "the job did not reach the device -- $A"
 fi
 
 python3 - "$W" <<'PYEOF'
@@ -215,31 +215,31 @@ A=$(curl -s --max-time 20 -X POST "$ZIEL/bruecke/ergebnis" \
     -H "X-Bruecke-Typ: image/png" \
     --data-binary "@$W/probe.png")
 if echo "$A" | grep -q '"angenommen": *true'; then
-    ok "das Geraet laedt das Bild hoch, der Server nimmt es an"
+    ok "the device uploads the image, the server accepts it"
     note "$A"
 else
-    bad "das Ergebnis wurde nicht angenommen -- $A"
+    bad "the result was not accepted -- $A"
 fi
 
 curl -s --max-time 20 -H "X-Bruecke-Verwalter: $VK" \
     "$ZIEL/bruecke/holen?geraet=$KENN&id=$AID" -o "$W/geholt.png"
 if [ -s "$W/geholt.png" ] && cmp -s "$W/probe.png" "$W/geholt.png"; then
-    ok "JARVIS holt das Bild ab -- Oktett fuer Oktett dasselbe ($(stat -c%s "$W/geholt.png") Oktette)"
+    ok "JARVIS fetches the image -- byte for byte the same ($(stat -c%s "$W/geholt.png") Oktette)"
 else
-    bad "das abgeholte Bild stimmt nicht mit dem hochgeladenen ueberein"
+    bad "the fetched image does not match the uploaded one"
 fi
 
-echo "== 8. das lange Polling wartet wirklich =="
+echo "== 8. the long poll really waits =="
 T0=$(date +%s%N)
 A=$(curl -s --max-time 45 -X POST "$ZIEL/bruecke/warten" \
     -H 'Content-Type: application/json' \
     -d "{\"kennung\":\"$KENN\",\"marke\":\"$MARKE\"}")
 MS=$(( ($(date +%s%N) - T0) / 1000000 ))
 if echo "$A" | grep -q '"auftrag": *null' && [ "$MS" -gt 20000 ]; then
-    ok "ohne Arbeit haelt der Server die Anfrage ${MS} ms offen und sagt dann null"
+    ok "without work the server keeps the request open ${MS} ms and then says null"
     note "das ist das lange Polling -- kein Hammern im Sekundentakt"
 else
-    bad "das lange Polling hat nicht gewartet (${MS} ms) -- $A"
+    bad "the long poll did not wait (${MS} ms) -- $A"
 fi
 
 echo "== 9. die Sperre =="
@@ -247,17 +247,17 @@ A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/koppeln" \
     -H "X-Bruecke-Verwalter: $VK" -H 'Content-Type: application/json' \
     -d "{\"geraet\":\"$KENN\",\"was\":\"sperren\"}")
 if echo "$A" | grep -q '"gesperrt": *true'; then
-    ok "ein Geraet laesst sich sperren"
+    ok "a device can be blocked"
 else
-    bad "das Sperren ging nicht -- $A"
+    bad "blocking failed -- $A"
 fi
 A=$(curl -s --max-time 10 -X POST "$ZIEL/bruecke/anmelden" \
     -H 'Content-Type: application/json' \
     -d "{\"kennung\":\"$KENN\",\"pubkey\":\"$PUB\"}")
 if echo "$A" | grep -q 'gesperrt'; then
-    ok "SICHERHEITSNACHWEIS: ein GESPERRTES Geraet kommt nicht mehr herein"
+    ok "SECURITY PROOF: a BLOCKED device can no longer log in"
 else
-    bad "ein gesperrtes Geraet konnte sich anmelden -- $A"
+    bad "a blocked device could log in -- $A"
 fi
 
 echo

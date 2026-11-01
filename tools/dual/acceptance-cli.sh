@@ -43,7 +43,7 @@ echo "   gemessen: ESP $ESP_START+$ESP_SEK, Daten $DAT_START+$DAT_SEK"
 VOR_ESP=$(esp_summe   "$OUT/platte.img")
 VOR_DAT=$(daten_summe "$OUT/platte.img")
 echo "   VORHER  esp   $VOR_ESP"
-echo "   VORHER  daten $VOR_DAT"
+echo "   BEFORE  data $VOR_DAT"
 
 # ==================================================================
 titel "2. der Probelauf -- versteht es die fremde Platte?"
@@ -53,29 +53,29 @@ lauf "$OUT/probe.img" "dualcli /dev/hdb --quelle /dev/hda" "$OUT/ser-probe.txt"
 tr -d '\000' < "$OUT/ser-probe.txt" 2>/dev/null | grep -a '^dual:' | head -12 | sed 's/^/        /'
 
 grep -qa 'dual: table=2' "$OUT/ser-probe.txt" \
-    && ok "es liest die fremde Tafel: 2 Partitionen" \
-    || bad "die fremde Tafel wurde nicht gelesen"
+    && ok "it reads the foreign table: 2 partitions" \
+    || bad "the foreign table was not read"
 grep -qa "dual: part 1 $ESP_START $((ESP_START+ESP_SEK-1)) 1" "$OUT/ser-probe.txt" \
     && ok "Partition 1 richtig erkannt: Sektor $ESP_START..$((ESP_START+ESP_SEK-1)), Art EFI" \
-    || bad "Partition 1 wurde nicht richtig gelesen"
+    || bad "partition 1 was not read correctly"
 grep -qa "dual: part 2 $DAT_START $((DAT_START+DAT_SEK-1)) 2" "$OUT/ser-probe.txt" \
     && ok "Partition 2 richtig erkannt: Sektor $DAT_START..$((DAT_START+DAT_SEK-1)), Art Daten" \
-    || bad "Partition 2 wurde nicht richtig gelesen"
+    || bad "partition 2 was not read correctly"
 grep -qa "dual: free $((DAT_START+DAT_SEK))" "$OUT/ser-probe.txt" \
-    && ok "der freie Bereich wurde gefunden (ab Sektor $((DAT_START+DAT_SEK)))" \
-    || bad "der freie Bereich wurde nicht gefunden"
+    && ok "the free area was found (from sector $((DAT_START+DAT_SEK)))" \
+    || bad "the free area was not found"
 grep -qa 'dual: esp=1' "$OUT/ser-probe.txt" \
-    && ok "die vorhandene EFI-Partition wurde gefunden" \
-    || bad "die vorhandene EFI-Partition wurde nicht gefunden"
+    && ok "the existing EFI partition was found" \
+    || bad "the existing EFI partition was not found"
 grep -qa 'dual: dry run, ende' "$OUT/ser-probe.txt" \
-    && ok "der Probelauf hoert vor dem ersten Schreibzugriff auf" \
-    || bad "der Probelauf ist nicht sauber zu Ende gekommen"
+    && ok "the dry run stops before the first write access" \
+    || bad "the dry run did not finish cleanly"
 
 PROBE_NACH=$(sha256sum < "$OUT/probe.img" | cut -d' ' -f1)
 if [ "$PROBE_VOR" = "$PROBE_NACH" ]; then
-    ok "OHNE --ja IST DIE PLATTE OKTETT FUER OKTETT UNVERAENDERT"
+    ok "WITHOUT --ja THE DISK IS UNCHANGED BYTE FOR BYTE"
 else
-    bad "der Probelauf hat auf die Platte geschrieben"
+    bad "the dry run wrote to the disk"
 fi
 rm -f "$OUT/probe.img"
 
@@ -86,28 +86,28 @@ lauf "$OUT/platte.img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$OU
 tr -d '\000' < "$OUT/ser.txt" 2>/dev/null | grep -a '^dual:' | head -20 | sed 's/^/        /'
 
 grep -qa 'dual: new p3' "$OUT/ser.txt" \
-    && ok "es hat einen neuen Eintrag als Partition 3 ergaenzt" \
-    || bad "es wurde kein dritter Partitionseintrag angelegt"
+    && ok "it added a new entry as partition 3" \
+    || bad "no third partition entry was created"
 grep -qa 'dual: copied' "$OUT/ser.txt" \
-    && ok "die Wurzel wurde in den freien Bereich kopiert" \
-    || bad "die Wurzel wurde nicht kopiert"
+    && ok "the root was copied into the free area" \
+    || bad "the root was not copied"
 grep -qa 'dual: menu=2' "$OUT/ser.txt" \
-    && ok "das Bootmenue wurde mit ZWEI Eintraegen geschrieben" \
-    || bad "das Bootmenue hat nicht zwei Eintraege"
+    && ok "the boot menu was written with TWO entries" \
+    || bad "the boot menu does not have two entries"
 grep -qa 'dual: done' "$OUT/ser.txt" \
-    && ok "die Installation meldet sich fertig" \
-    || bad "die Installation ist nicht fertig geworden"
+    && ok "the installation reports done" \
+    || bad "the installation did not finish"
 
 # ==================================================================
 titel "4. DIE FREMDEN DATEN -- BYTEWEISE UNVERAENDERT?"
 # ==================================================================
 NACH_DAT=$(daten_summe "$OUT/platte.img")
-echo "   VORHER  daten $VOR_DAT"
-echo "   NACHHER daten $NACH_DAT"
+echo "   BEFORE  data $VOR_DAT"
+echo "   AFTER   data $NACH_DAT"
 if [ "$VOR_DAT" = "$NACH_DAT" ]; then
-    ok "DIE FREMDE DATENPARTITION IST OKTETT FUER OKTETT UNVERAENDERT"
+    ok "THE FOREIGN DATA PARTITION IS UNCHANGED BYTE FOR BYTE"
 else
-    bad "die fremde Datenpartition wurde veraendert"
+    bad "the foreign data partition was changed"
 fi
 
 # ==================================================================
@@ -116,17 +116,17 @@ titel "5. die Dateien des fremden Systems in der ESP"
 mdir -i "$OUT/platte.img@@$ESPOFF" ::/EFI/Microsoft/Boot > "$OUT/esp-fremd.txt" 2>&1
 sed 's/^/        /' "$OUT/esp-fremd.txt" | head -10
 grep -qi 'bootmgfw' "$OUT/esp-fremd.txt" \
-    && ok "DER FREMDE BOOTMANAGER (bootmgfw.efi) IST NOCH DA" \
+    && ok "THE FOREIGN BOOT MANAGER (bootmgfw.efi) IS STILL THERE" \
     || bad "bootmgfw.efi ist verschwunden"
 grep -qi 'BCD' "$OUT/esp-fremd.txt" \
-    && ok "die fremde Datei BCD in der ESP ist noch da" \
-    || bad "die fremde Datei BCD ist verschwunden"
+    && ok "the foreign file BCD in the ESP is still there" \
+    || bad "the foreign file BCD has disappeared"
 
 mdir -i "$OUT/platte.img@@$ESPOFF" ::"/EFI/${MARKE_KURZ}" > "$OUT/esp-osum.txt" 2>&1
 sed 's/^/        /' "$OUT/esp-osum.txt" | head -8
 grep -qi 'osum' "$OUT/esp-osum.txt" \
-    && ok "${MARKE_PRODUKT} liegt in seinem eigenen Verzeichnis /EFI/${MARKE_KURZ}" \
-    || bad "unter /EFI/${MARKE_KURZ} liegt nichts"
+    && ok "${MARKE_PRODUKT} lives in its own directory /EFI/${MARKE_KURZ}" \
+    || bad "nothing is under /EFI/${MARKE_KURZ}"
 
 # ==================================================================
 titel "6. ist die GPT gueltig? -- mit FREMDEN Augen gelesen"
@@ -136,19 +136,19 @@ sgdisk -p "$OUT/platte.img" > "$OUT/gpt-nachher.txt" 2>&1
 sed 's/^/        /' "$OUT/gpt-nachher.txt" | tail -7
 grep -qi 'No problems found' "$OUT/gpt-pruef.txt" \
     && ok "sgdisk sagt: No problems found (beide Koepfe, beide CRC32)" \
-    || { bad "sgdisk beanstandet die Tafel:"; sed 's/^/          /' "$OUT/gpt-pruef.txt" | head -6; }
+    || { bad "sgdisk complains about the table:"; sed 's/^/          /' "$OUT/gpt-pruef.txt" | head -6; }
 n=$(grep -cE '^ +[0-9]+ +[0-9]+' "$OUT/gpt-nachher.txt" || true)
-[ "${n:-0}" -ge 3 ] && ok "die Tafel traegt jetzt $n Partitionen (vorher 2)" \
-    || bad "die Tafel traegt nur ${n:-0} Partitionen"
+[ "${n:-0}" -ge 3 ] && ok "the table now has $n partitions (before: 2)" \
+    || bad "the table has only ${n:-0} partitions"
 grep -qi 'OSUM' "$OUT/gpt-nachher.txt" \
-    && ok "die neue Partition heisst OSUM" \
+    && ok "the new partition is named OSUM" \
     || bad "keine Partition namens OSUM"
 
 python3 tools/dual/tafelpruef.py "$OUT/platte.img" > "$OUT/tafelpruef.txt" 2>&1
 TPRC=$?
 sed 's/^/        /' "$OUT/tafelpruef.txt"
-[ "$TPRC" = 0 ] && ok "der unabhaengige Pruefer bestaetigt beide Koepfe und beide Tafelsummen" \
-    || bad "der unabhaengige Pruefer beanstandet die Tafel"
+[ "$TPRC" = 0 ] && ok "the independent checker confirms both headers and both table sums" \
+    || bad "the independent checker complains about the table"
 
 # ==================================================================
 titel "7. bietet das Bootmenue beide Systeme an?"
@@ -156,12 +156,12 @@ titel "7. bietet das Bootmenue beide Systeme an?"
 mtype -i "$OUT/platte.img@@$ESPOFF" ::/limine.conf > "$OUT/limine.txt" 2>&1
 sed 's/^/        /' "$OUT/limine.txt" | head -14
 grep -qi "${MARKE_PRODUKT}" "$OUT/limine.txt" \
-    && ok "das Bootmenue hat einen Eintrag fuer ${MARKE_PRODUKT}" \
-    || bad "im Bootmenue fehlt ${MARKE_PRODUKT}"
+    && ok "the boot menu has an entry for ${MARKE_PRODUKT}" \
+    || bad "the boot menu lacks ${MARKE_PRODUKT}"
 if grep -qi 'efi_chainload' "$OUT/limine.txt" && grep -qi 'bootmgfw' "$OUT/limine.txt"; then
-    ok "DAS BOOTMENUE HAT EINEN EINTRAG FUER DAS FREMDE SYSTEM (Kettenstart)"
+    ok "THE BOOT MENU HAS AN ENTRY FOR THE FOREIGN SYSTEM (chain start)"
 else
-    bad "im Bootmenue fehlt der Eintrag fuer das fremde System"
+    bad "the boot menu lacks the entry for the foreign system"
 fi
 
 # ==================================================================
@@ -176,19 +176,19 @@ lauf "$OUT/eng.img" "dualcli /dev/hdb --quelle /dev/hda --ja --name hdb" "$OUT/s
 tr -d '\000' < "$OUT/ser-eng.txt" 2>/dev/null | grep -a '^dual:' | head -8 | sed 's/^/        /'
 
 if grep -qa 'dual: too little' "$OUT/ser-eng.txt"; then
-    ok "es bricht mit einer klaren Meldung ab: zu wenig freier Platz"
+    ok "it aborts with a clear message: not enough free space"
 else
-    bad "es hat den fehlenden Platz nicht gemeldet"
+    bad "it did not report the missing space"
 fi
 grep -qa 'dual: done' "$OUT/ser-eng.txt" \
-    && bad "es hat trotz fehlenden Platzes installiert" \
-    || ok "es hat NICHT installiert"
+    && bad "it installed despite the missing space" \
+    || ok "it did NOT install"
 
 ENG_NACH=$(sha256sum < "$OUT/eng.img" | cut -d' ' -f1)
 if [ "$ENG_VOR" = "$ENG_NACH" ]; then
-    ok "DIE PLATTE IST NACH DEM ABBRUCH OKTETT FUER OKTETT UNVERAENDERT"
+    ok "THE DISK IS UNCHANGED BYTE FOR BYTE AFTER THE ABORT"
 else
-    bad "die Platte wurde trotz Abbruch veraendert"
+    bad "the disk was changed despite the abort"
 fi
 rm -f "$OUT/eng.img"
 

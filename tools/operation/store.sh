@@ -33,7 +33,7 @@ for t in qemu-system-x86_64 python3 curl dig; do
     command -v "$t" >/dev/null 2>&1 || { echo "STORE: uebersprungen, $t fehlt"; exit 0; }
 done
 curl -sS -o /dev/null --max-time 20 "https://$NAME/index.json" 2>/dev/null \
-    || { echo "STORE: uebersprungen, https://$NAME ist nicht erreichbar"; exit 0; }
+    || { echo "STORE: skipped, https://$NAME is not reachable"; exit 0; }
 
 lauf() { # name skript [limit] [zusatzwoerter]
     cp -f "$OUT/basis.img" "$OUT/ziel.img"
@@ -44,12 +44,12 @@ lauf() { # name skript [limit] [zusatzwoerter]
 }
 
 # =====================================================================
-echo "== 1. die Auslieferung: Pakete, Schluesselbund, zwei Fassungen =="
+echo "== 1. the delivery: packages, key ring, two versions =="
 # =====================================================================
 bash vendor/firn/fetch-firnc.sh > "$OUT/firnc.log" 2>&1 || {
     bad "fetch-firnc.sh"; exit 1; }
 bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 \
-    && ok "zwei signierte Fassungen des Beispielpakets" \
+    && ok "two signed versions of the sample package" \
     || { bad "install/pakete.sh"; tail -5 "$OUT/pak1.log"; exit 1; }
 
 rm -f "$OUT/bund.json"
@@ -69,11 +69,11 @@ for f in 1 2; do
         >> "$OUT/veroeff.log" 2>&1 || bad "veroeffentlichen.py Fassung $f"
 done
 [ -s "$OUT/aus/aktuell/VERZEICHNIS" ] \
-    && ok "die Auslieferung steht: $(head -1 "$OUT/aus/aktuell/VERZEICHNIS"), Fassung $(sed -n 2p "$OUT/aus/aktuell/VERZEICHNIS" | cut -f2)" \
+    && ok "the delivery is ready: $(head -1 "$OUT/aus/aktuell/VERZEICHNIS"), Fassung $(sed -n 2p "$OUT/aus/aktuell/VERZEICHNIS" | cut -f2)" \
     || { bad "kein VERZEICHNIS"; exit 1; }
 
 # =====================================================================
-echo "== 2. auf den echten Server, ohne dort etwas wegzunehmen =="
+echo "== 2. onto the real server, without removing anything there =="
 # =====================================================================
 if [ -d "$STORE_DIR" ] && [ -w "$STORE_DIR" ]; then
     mkdir -p "$STORE_DIR/osum/aktuell"
@@ -86,14 +86,14 @@ if [ -d "$STORE_DIR" ] && [ -w "$STORE_DIR" ]; then
     cp -fL "$OUT/aus/register.json" "$OUT/aus/journal.txt" \
            "$OUT/aus/gesperrt.txt" "$STORE_DIR/osum/" 2>/dev/null
     N=$(find "$STORE_DIR/osum/aktuell" -maxdepth 1 -type f | wc -l)
-    ok "die Auslieferung liegt unter $STORE_DIR/osum ($N Dateien unter aktuell/)"
+    ok "the delivery is at $STORE_DIR/osum ($N files under aktuell/)"
     UNGL=0
     for q in "$OUT/aus/aktuell/"*; do
         cmp -s "$q" "$STORE_DIR/osum/aktuell/$(basename "$q")" || UNGL=$((UNGL+1))
     done
     gleich "und jede Datei dort ist die aus DIESEM Lauf (ungleiche)" "$UNGL" "0"
 else
-    ok "uebersprungen: $STORE_DIR ist hier nicht beschreibbar (fremder Wirt)"
+    ok "skipped: $STORE_DIR is not writable here (foreign host)"
 fi
 
 if [ -d "$STORE_REPO/bau/repo" ]; then
@@ -104,7 +104,7 @@ if [ -d "$STORE_REPO/bau/repo" ]; then
         >> "$OUT/store.log" 2>&1 ) && NEUZUGANG=1 || NEUZUGANG=0
     ( cd "$STORE_REPO" && python3 werkzeug/store --repo bau/repo publish \
         "$STORE_DIR" >> "$OUT/store.log" 2>&1 ) \
-        && ok "der Katalog ist veroeffentlicht (store publish -> $STORE_DIR)" \
+        && ok "the catalog is published (store publish -> $STORE_DIR)" \
         || bad "store publish"
     SHA=$(sha256sum "$OUT/pak/hallo-2.opk" | cut -d' ' -f1)
     RV=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['revision'])" \
@@ -113,12 +113,12 @@ if [ -d "$STORE_REPO/bau/repo" ]; then
          "$STORE_DIR/index.json" 2>/dev/null)
     if grep -qa "$SHA" "$STORE_DIR/index.json" 2>/dev/null; then
         if [ "${RV:-0}" != "${RN:-0}" ]; then
-            ok "die Fassung ist NEU aufgenommen -- Katalogrevision ${RV} -> ${RN}"
+            ok "the version is NEWLY added -- catalog revision ${RV} -> ${RN}"
         else
-            ok "die Fassung stand schon im Katalog (Revision ${RN} unveraendert) -- add hat nichts umgeschrieben"
+            ok "the version was already in the catalog (revision ${RN} unchanged) -- add rewrote nothing"
         fi
     else
-        bad "die Fassung steht nicht im veroeffentlichten Katalog"
+        bad "the version is not in the published catalog"
     fi
     python3 - "$STORE_DIR/index.json" "$OUT/kat-vorher.json" <<'PYEOF' \
         > "$OUT/katvergleich.txt" 2>&1
@@ -134,16 +134,16 @@ print("entfernt=%d geschrumpft=%d rev=%s->%s"
       % (len(fehlt), len(kleiner), alt["revision"], neu["revision"]))
 PYEOF
     if grep -qa "entfernt=0 geschrumpft=0" "$OUT/katvergleich.txt"; then
-        ok "und nichts ist weggekommen: $(cat "$OUT/katvergleich.txt")"
+        ok "and nothing was lost: $(cat "$OUT/katvergleich.txt")"
     elif grep -qa "KEINE VORHER-AUFNAHME" "$OUT/katvergleich.txt"; then
-        ok "(kein Vorher-Stand zum Vergleichen -- erster Lauf)"
+        ok "(no earlier state to compare -- first run)"
     else
-        bad "der Katalog hat verloren: $(cat "$OUT/katvergleich.txt")"
+        bad "the catalog lost: $(cat "$OUT/katvergleich.txt")"
     fi
     ( cd "$STORE_REPO" && python3 werkzeug/store --repo bau/repo verify ) \
         > "$OUT/verify.log" 2>&1
     grep -qa "in Ordnung" "$OUT/verify.log" \
-        && ok "und der Katalog prueft sich danach selbst durch (store verify)" \
+        && ok "and the catalog verifies itself afterwards (store verify)" \
         || { bad "store verify"; tail -5 "$OUT/verify.log"; }
 fi
 
@@ -153,14 +153,14 @@ for f in VERZEICHNIS VERZEICHNIS.sig; do
     gleich "curl holt $f vom echten Server (HTTP)" "$code" "200"
 done
 cmp -s "$OUT/netz-VERZEICHNIS" "$OUT/aus/aktuell/VERZEICHNIS" \
-    && ok "und es ist Oktett fuer Oktett das, was veroeffentlicht wurde" \
-    || bad "das VERZEICHNIS vom Server ist ein anderes"
+    && ok "and it is byte for byte what was published" \
+    || bad "the DIRECTORY from the server is a different one"
 
 # =====================================================================
-echo "== 3. das Abbild: echte Wurzeln, und eine QUELLE MIT NAMEN =="
+echo "== 3. the image: real roots, and a SOURCE WITH A NAME =="
 # =====================================================================
 python3 tools/hwnet/mkroots.py "$OUT/roots.pem" > "$OUT/roots.log" 2>&1 \
-    && ok "Wurzelspeicher aus den Mozilla-Wurzeln des Wirts ($(stat -c%s "$OUT/roots.pem") Oktette, $(grep -c 'BEGIN CERT' "$OUT/roots.pem") Wurzeln)" \
+    && ok "root store from the host's Mozilla roots ($(stat -c%s "$OUT/roots.pem") Oktette, $(grep -c 'BEGIN CERT' "$OUT/roots.pem") Wurzeln)" \
     || bad "mkroots.py"
 grep -qa 'ISRG Root X1' "$OUT/roots.log" || true
 
@@ -170,7 +170,7 @@ abstand=3600
 auto=nein
 frist=15
 EOF
-ok "in /etc/ota.conf steht ein NAME und keine Adresse: $BASIS_URL/aktuell"
+ok "/etc/ota.conf holds a NAME and no address: $BASIS_URL/aktuell"
 printf 'opk rebuild\nif /apps/hallo.osp/start\nthen\nota confirm\nfi\nopk trial\n' \
     > "$OUT/start.sh"
 OTA_ROOTS="$OUT/roots.pem" OTA_CONF="$OUT/ota.conf" \
@@ -185,11 +185,11 @@ OUT="$OUT" bash tools/install/oneshot.sh inst iso \
     "install /dev/hda --ja;exit" 900 > /dev/null 2>&1
 gleich "der Installer ist durchgelaufen" "$(cat "$OUT/inst.rc" 2>/dev/null)" "21"
 grep -qa 'install: done' "$OUT/inst.txt" \
-    && ok "und sagt es auch" || bad "'install: done' fehlt"
+    && ok "and says so" || bad "'install: done' fehlt"
 cp -f "$OUT/ziel.img" "$OUT/basis.img"
 
 # =====================================================================
-echo "== 4. DER LAUF: DHCP -> Nameserver -> Name -> signiertes Verzeichnis =="
+echo "== 4. THE RUN: DHCP -> name server -> name -> signed directory =="
 # =====================================================================
 rc=$(lauf s1 "dhcp;cat /etc/resolv.conf;host $NAME;ota search;exit" 420)
 gleich "Beendigungscode" "$rc" "21"
@@ -197,7 +197,7 @@ hat "$OUT/s1.txt" "dhcp: /etc/resolv.conf geschrieben" \
     "DHCP-Option 6 gelesen und /etc/resolv.conf geschrieben (Runde BETRIEB)"
 NS=$(grep -aoE '^nameserver [0-9.]+' "$OUT/s1.txt" | head -1 | awk '{print $2}')
 [ -n "${NS:-}" ] && ok "der Nameserver kommt vom DHCP-Server: $NS" \
-    || bad "keine nameserver-Zeile in /etc/resolv.conf"
+    || bad "no nameserver line in /etc/resolv.conf"
 
 IP_OSUM=$(grep -aoE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' "$OUT/s1.txt" | head -1)
 IP_DIG=$(dig +short "$NAME" A | grep -E '^[0-9.]+$' | head -1)
@@ -208,16 +208,16 @@ hat "$OUT/s1.txt" "fetch: verify OK" "die Zertifikatskette wurde GEPRUEFT"
 CERTS=$(grep -aoE 'fetch: certs [0-9]+' "$OUT/s1.txt" | head -1 | awk '{print $3}')
 TIEFE=$(grep -aoE 'fetch: depth [0-9]+' "$OUT/s1.txt" | head -1 | awk '{print $3}')
 if [ "${CERTS:-0}" -ge 3 ] 2>/dev/null; then
-    ok "und es ist eine ECHTE Kette: $CERTS Zertifikate, Tiefe $TIEFE"
+    ok "and it is a REAL chain: $CERTS certificates, depth $TIEFE"
 else
-    bad "nur $CERTS Zertifikate -- das ist keine echte Kette"
+    bad "only $CERTS certificates -- that is no real chain"
 fi
 hat "$OUT/s1.txt" "ota: version there 2" "das signierte VERZEICHNIS ist gelesen"
 hat "$OUT/s1.txt" "ota: NEW VERSION available" "und es gibt etwas Neues"
 hatnicht "$OUT/s1.txt" "ota: applying" "SUCHEN INSTALLIERT NICHTS"
 
 # =====================================================================
-echo "== 5. und wirklich einspielen, von diesem Server =="
+echo "== 5. and really install, from this server =="
 # =====================================================================
 rc=$(lauf s2 "dhcp;ota apply;ota show;exit" 600)
 gleich "Beendigungscode" "$rc" "21"
@@ -230,7 +230,7 @@ hat "$OUT/s2.txt" "ota: READY FOR RESTART" "und der Neustart wird nur ANGEBOTEN"
 hat "$OUT/s2.txt" "ota: version here 2" "der Fassungszaehler steht danach auf 2"
 
 # =====================================================================
-echo "== 6. DIE GEGENPROBE: derselbe Lauf im Zustand VOR der Runde AVX =="
+echo "== 6. THE CONTROL: the same run in the state BEFORE the AVX round =="
 # =====================================================================
 rc=$(lauf s3 "dhcp;ota search;exit" 420 "nofpu")
 hat "$OUT/s3.txt" "fpu: mode=0" "mit nofpu ist die Vektoreinheit nicht freigeschaltet"

@@ -16,7 +16,7 @@ trap 'rm -rf "$TMPD"' EXIT
 
 PAKETE=${GPU3D_PAKETE:-2000}
 
-echo "== 1. der Kern und die Speicherkarte =="
+echo "== 1. the kernel and the memory map =="
 if python3 tools/kernel/memmap.py kernel > "$TMPD/map.txt" 2>&1; then
     if grep -q "0 collisions" "$TMPD/map.txt"; then
         ok "Speicherkarte: $(tail -1 "$TMPD/map.txt")"
@@ -46,20 +46,20 @@ case "$GL" in
         ok "virtio-gpu-gl: '$GL' -- kein VIRGL auf diesem Wirt" ;;
     *)
         echo "  HINWEIS virtio-gpu-gl meldet: $GL"
-        echo "          Dieser Wirt kann mehr als der, auf dem gebaut wurde."
+        echo "          This host can do more than the one it was built on."
         ok "virtio-gpu-gl abgefragt" ;;
 esac
 if [ -e /dev/dri ]; then
     echo "  HINWEIS /dev/dri existiert hier"
 else
-    ok "/dev/dri fehlt -- kein Renderknoten, also kein VIRGL"
+    ok "/dev/dri missing -- no render node, so no VIRGL"
 fi
 ok "Behaelter: $(systemd-detect-virt 2>/dev/null || echo unbekannt)"
 
 python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 \
-    && ok "Abbild mit den Schriften gebaut" \
+    && ok "image with the fonts built" \
     || { bad "mkfs fehlgeschlagen"; cat "$TMPD/mkfs.txt"; }
 
 GRUND="nokbd noproc nofs"
@@ -83,7 +83,7 @@ feld() { echo "$1" | grep -oE "$2=[0-9]+" | tail -1 | cut -d= -f2; }
 wirt() { grep -c "$2" "$TMPD/trace-$1.txt" 2>/dev/null | head -1; }
 
 echo
-echo "== 3. die Messung: $PAKETE Zeigerpakete, 800x600 =="
+echo "== 3. the measurement: $PAKETE cursor packets, 800x600 =="
 lauf hw "" -vga std -device virtio-gpu-pci,id=vg
 lauf sw "nohwcur" -vga std -device virtio-gpu-pci,id=vg
 
@@ -98,52 +98,52 @@ HW_HW=$(feld "$HWM" hw); SW_HW=$(feld "$SWM" hw)
 HW_UC=$(wirt hw virtio_gpu_update_cursor)
 SW_UC=$(wirt sw virtio_gpu_update_cursor)
 
-echo "  mit Hardware-Zeiger : $HWG"
+echo "  with hardware cursor: $HWG"
 echo "                        $HWM"
-echo "  ohne (nohwcur)      : $SWG"
+echo "  without (nohwcur)   : $SWG"
 echo "                        $SWM"
 echo "  beim WIRT angekommen: update_cursor  hw=$HW_UC  sw=$SW_UC"
 
 [ "${HW_P:-0}" = "$PAKETE" ] && [ "${SW_P:-0}" = "$PAKETE" ] \
     && ok "beide Laeufe haben GENAU $PAKETE Pakete geschickt" \
-    || bad "die Paketzahl stimmt nicht ($HW_P / $SW_P statt $PAKETE)"
+    || bad "the packet count is wrong ($HW_P / $SW_P instead of $PAKETE)"
 
-[ "${HW_HW:-0}" = "1" ] && ok "im Hardwarelauf traegt das Geraet den Zeiger (hw=1)" \
-    || bad "hw=1 fehlt im Hardwarelauf"
-[ "${SW_HW:-1}" = "0" ] && ok "mit nohwcur traegt ihn der Kern (hw=0)" \
-    || bad "nohwcur hat nicht abgeschaltet"
+[ "${HW_HW:-0}" = "1" ] && ok "in the hardware run the device carries the cursor (hw=1)" \
+    || bad "hw=1 is missing in the hardware run"
+[ "${SW_HW:-1}" = "0" ] && ok "with nohwcur the kernel carries it (hw=0)" \
+    || bad "nohwcur did not switch off"
 
 [ "${SW_UC:-1}" = "0" ] \
-    && ok "GEGENPROBE: ohne den Weg kommt beim Wirt KEIN Zeigerbefehl an (0)" \
+    && ok "CONTROL: without the path NO cursor command reaches the host (0)" \
     || bad "GEGENPROBE gescheitert: nohwcur schickte $SW_UC Zeigerbefehle"
 [ "${HW_UC:-0}" -gt 0 ] \
-    && ok "mit dem Weg kommen $HW_UC Zeigerbefehle beim Wirt an" \
-    || bad "der Wirt hat KEINEN Zeigerbefehl gesehen"
-[ "${HW_CE:-1}" = "0" ] && ok "kein Zeigerbefehl ist fehlgeschlagen (curerr=0)" \
+    && ok "with the path $HW_UC cursor commands reach the host" \
+    || bad "the host saw NO cursor command"
+[ "${HW_CE:-1}" = "0" ] && ok "no cursor command failed (curerr=0)" \
     || bad "curerr=$HW_CE"
 
 if [ -n "${HW_B:-}" ] && [ -n "${SW_B:-}" ] && [ "${HW_B:-0}" -gt 0 ]; then
     FAKT=$(( SW_B / HW_B ))
     if [ "$SW_B" -gt "$HW_B" ]; then
-        ok "Bilder: $SW_B ohne -> $HW_B mit  (${FAKT}x weniger)"
+        ok "Frames: $SW_B without -> $HW_B with  (${FAKT}x fewer)"
     else
-        bad "der Hardwarezeiger hat die Bilder NICHT verringert ($SW_B -> $HW_B)"
+        bad "the hardware cursor did NOT reduce the frames ($SW_B -> $HW_B)"
     fi
 fi
 if [ -n "${HW_O:-}" ] && [ -n "${SW_O:-}" ] && [ "${HW_O:-0}" -gt 0 ]; then
     if [ "$SW_O" -gt "$HW_O" ]; then
-        ok "Oktette: $SW_O ohne -> $HW_O mit"
+        ok "Bytes: $SW_O without -> $HW_O with"
     else
         bad "Oktette nicht gesunken ($SW_O -> $HW_O)"
     fi
 fi
 if [ -n "${HW_US:-}" ] && [ -n "${SW_US:-}" ] && [ "${HW_US:-0}" -gt 0 ]; then
-    echo "  Zeit fuer $PAKETE Pakete: $SW_US us ohne -> $HW_US us mit"
+    echo "  Time for $PAKETE packets: $SW_US us without -> $HW_US us with"
     if [ "$SW_US" -gt "$HW_US" ]; then
-        ok "der Hardwarezeiger ist schneller"
+        ok "the hardware cursor is faster"
     else
-        echo "  HINWEIS die Zeit ist auf diesem Wirt lastabhaengig;"
-        echo "          Bilder und Oktette sind die harten Zahlen."
+        echo "  NOTE the time depends on load on this host;"
+        echo "          frames and bytes are the hard numbers."
     fi
 fi
 
@@ -184,13 +184,13 @@ if [ -s "$TMPD/bhw.ppm" ] && [ -s "$TMPD/bsw.ppm" ]; then
     if [ $rc -eq 0 ]; then
         ok "der Bildbeleg stimmt"
     else
-        bad "der Bildbeleg stimmt NICHT"
+        bad "the image evidence is WRONG"
     fi
     mkdir -p /tmp/gpu3d-bilder
     cp -f "$TMPD/bhw.ppm" "$TMPD/bsw.ppm" /tmp/gpu3d-bilder/ 2>/dev/null
-    echo "     (die Fotos liegen unter /tmp/gpu3d-bilder/)"
+    echo "     (the photos are in /tmp/gpu3d-bilder/)"
 else
-    bad "es kam kein Foto zustande"
+    bad "no photo was produced"
 fi
 
 echo
@@ -201,9 +201,9 @@ for n in rf1 rf2; do
     m=$(zahl "$TMPD/$n.txt" "mauslauf:")
     p=$(feld "$m" pakete); h=$(feld "$m" hw)
     if grep -qa 'panic' "$TMPD/$n.txt"; then
-        bad "$n: der Kern ist stehengeblieben"
+        bad "$n: the kernel stopped"
     elif [ "${p:-0}" = "$PAKETE" ] && [ "${h:-1}" = "0" ]; then
-        ok "$n: laeuft ohne den Weg sauber weiter ($m)"
+        ok "$n: keeps running cleanly without the path ($m)"
     else
         bad "$n: unerwartet ($m)"
     fi

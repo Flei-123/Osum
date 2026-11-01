@@ -44,24 +44,24 @@ if alt not in s:
 open(p, 'w', encoding='utf-8').write(s.replace(alt, neu, 1))
 PY
     if [ $? -ne 0 ]; then
-        bad "GEGENPROBE $was: liess sich nicht vorbereiten"
+        bad "CONTROL $was: could not be prepared"
         return
     fi
     ( cd "$k" && OSUM_ROOT=. "$@" ) > "$TMPD/gegen.txt" 2>&1
     local rc=$?
     if [ "$rc" -ne 0 ]; then
-        ok "GEGENPROBE $was: der Pruefer wird rot (rc=$rc)"
+        ok "CONTROL $was: the checker turns red (rc=$rc)"
     else
-        bad "GEGENPROBE $was: der Pruefer bleibt gruen -- er prueft das nicht"
+        bad "CONTROL $was: the checker stays green -- it does not check this"
         sed 's/^/        /' "$TMPD/gegen.txt" | head -5
     fi
 }
 
-echo "UMLAUT2: die Abnahme"
+echo "UMLAUT2: the acceptance"
 echo
-echo "== A. DER BAUM"
+echo "== A. THE TREE"
 echo
-echo "-- 1. die Sprachdateien und die Buendel"
+echo "-- 1. the language files and the bundles"
 OSUM_ROOT=. python3 tools/i18n/translit.py --zaehle > "$TMPD/t.txt" 2>&1
 TRC=$?
 sed 's/^/     /' "$TMPD/t.txt"
@@ -82,7 +82,7 @@ gegen "eine Zeile im Katalog" "locale/de/messages" \
     python3 tools/i18n/translit.py
 
 echo
-echo "-- 2. die Suchwoerter: die Umlautform steht DANEBEN, nicht STATT"
+echo "-- 2. the search words: the umlaut form is NEXT TO it, not INSTEAD"
 hat assets/apps/launcher.osp/INFO "menue,menü" \
     "keys= des Starters traegt beide Schreibungen"
 gegen "die Umlautform in keys=" "assets/apps/launcher.osp/INFO" \
@@ -90,7 +90,7 @@ gegen "die Umlautform in keys=" "assets/apps/launcher.osp/INFO" \
     python3 tools/i18n/translit.py
 
 echo
-echo "-- 3. der Quelltext: keine sichtbare Umschrift mehr"
+echo "-- 3. the source: no visible transliteration any more"
 OSUM_ROOT=. python3 tools/i18n/quellen.py --alle > "$TMPD/q.txt" 2>&1
 sed -n '1p' "$TMPD/q.txt" | sed 's/^/     /'
 S=$(sed -n 's/.*SICHTBAR=\([0-9]*\).*/\1/p' "$TMPD/q.txt")
@@ -133,9 +133,9 @@ python3 tools/i18n/quellen.py > "$TMPD/gegen2-vor.txt" 2>&1
 SV=$(sichtbar "$TMPD/gegen2-vor.txt"); SN=$(sichtbar "$TMPD/gegen2.txt")
 if [ -n "$SV" ] && [ "$SV" = "$SN" ] \
    && ! grep -qE 'SICHTBAR +kernel/user/storage.fi .*s_pr' "$TMPD/gegen2.txt"; then
-    ok "GEGEN-GEGENPROBE: eine neue MITSCHNITT-Zeile macht nichts sichtbar ($SV -> $SN) -- die Ausnahme wirkt"
+    ok "COUNTER-CONTROL: a new CAPTURE line makes nothing visible ($SV -> $SN) -- the exception works"
 else
-    bad "GEGEN-GEGENPROBE: der Pruefer meckert den Mitschnitt an (sichtbar $SV -> $SN)"
+    bad "COUNTER-CONTROL: the checker complains about the capture (visible $SV -> $SN)"
     sed 's/^/        /' "$TMPD/gegen2.txt" | head -4
 fi
 
@@ -145,10 +145,10 @@ k3="$TMPD/kopie3"; mkdir -p "$k3"
 sed 's|"osum-bridge 1|"osum-brücke 1|' kernel/app/jarvisd.fi > "$k3/jarvisd.fi"
 is "GEGENPROBE der Bruecken-Gruss mit Umlaut wird gefunden" "$(drahtumlaut "$k3")" "1"
 DN=$(grep -rcE --include='*.fi' '//[[:space:]]*DRAHT' kernel | awk -F: '{s+=$2} END{print s+0}')
-if [ "$DN" -ge 13 ]; then ok "DRAHT-Marken im Kern: $DN"; else bad "DRAHT-Marken im Kern: $DN, erwartet >= 13"; fi
+if [ "$DN" -ge 13 ]; then ok "WIRE marks in the kernel: $DN"; else bad "WIRE marks in the kernel: $DN, expected >= 13"; fi
 
 echo
-echo "-- 4. jede getippte Marke nimmt beide Schreibungen"
+echo "-- 4. every typed mark accepts both spellings"
 OSUM_ROOT=. python3 tools/i18n/quellen.py --marken > "$TMPD/m.txt" 2>&1
 MRC=$?
 sed 's/^/     /' "$TMPD/m.txt"
@@ -161,7 +161,7 @@ gegen "die zweite Schreibung eines Unterbefehls" "kernel/user/trashbin.fi" \
     python3 tools/i18n/quellen.py --marken
 
 echo
-echo "-- 5. die Spalten in ZEICHEN, die Puffer in Oktett"
+echo "-- 5. the columns in CHARACTERS, the buffers in bytes"
 OSUM_ROOT=. python3 tools/i18n/columns.py > "$TMPD/s.txt" 2>&1
 SRC=$?
 sed 's/^/     /' "$TMPD/s.txt"
@@ -181,7 +181,7 @@ gegen "ein Literal, das nicht mehr in seinen Puffer passt" \
     python3 tools/i18n/columns.py
 
 echo
-echo "-- 6. die Schriften haben jedes Zeichen, das auf dem Schirm steht"
+echo "-- 6. the fonts have every character that appears on the screen"
 OSUM_ROOT=. python3 tools/umlaut/schriftprobe.py > "$TMPD/f.txt" 2>&1
 FRC=$?
 sed 's/^/     /' "$TMPD/f.txt"
@@ -197,7 +197,7 @@ hat <(bash tools/structure/catprog.sh kernel/user/settings.fi) "wlibc.chars((&e_
     "die Einstellungen zaehlen Zeichen"
 
 echo
-echo "-- 7b. keine Abnahme sucht mehr nach dem alten Text"
+echo "-- 7b. no acceptance looks for the old text any more"
 OSUM_ROOT=. python3 tools/i18n/erwartung.py > "$TMPD/e.txt" 2>&1
 erc=$?
 n_e=$(sed -n 's/.*, \([0-9]*\) veraltete Erwartungen/\1/p' "$TMPD/e.txt")
@@ -218,25 +218,25 @@ python3 - "$TMPD/kopie3/tools/tiling/run.sh" <<'PY2'
 import sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
-s = s.replace('ok "Kern und Ring 3 zaehlen dieselben Eintraege ($ub)"',
-              'ok "Eintraege, die aus der Datei gelesen wurden, '
+s = s.replace('ok "Kernel and ring 3 count the same entries ($ub)"',
+              'ok "Entries read from the file, '
               'und opk rollback 0 als Eingabe ($ub)"', 1)
 open(p, 'w', encoding='utf-8').write(s)
 PY2
 ( cd "$TMPD/kopie3" && OSUM_ROOT=. python3 tools/i18n/erwartung.py ) \
     > "$TMPD/gegen3.txt" 2>&1
 if [ $? -eq 0 ]; then
-    ok "GEGEN-GEGENPROBE: eine Beschreibung in Umschrift bleibt still"
+    ok "COUNTER-CONTROL: a description in transliteration stays quiet"
 else
-    bad "GEGEN-GEGENPROBE: eine Beschreibung wird angemeckert -- zu laut"
+    bad "COUNTER-CONTROL: a description is complained about -- too loud"
     sed 's/^/        /' "$TMPD/gegen3.txt" | head -4
 fi
 
 echo
-echo "== B. DAS BILD"
+echo "== B. THE IMAGE"
 echo
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "UMLAUT2: kein qemu-system-x86_64 -- Teil B uebersprungen"
+    echo "UMLAUT2: no qemu-system-x86_64 -- part B skipped"
 else
 
 ACCEL=tcg
@@ -251,13 +251,13 @@ foto() {
         uitrace=yes keep=yes "progs=$PROGS" "$wie" \
         > "$TMPD/$name.log" 2>&1
     if [ ! -s "$d/desktop.ppm" ]; then
-        bad "$name: es gibt kein Bild"
+        bad "$name: there is no image"
         sed 's/^/        /' "$TMPD/$name.log" | tail -8
         return 1
     fi
     python3 tools/gfx/ppm2png.py "$d/desktop.ppm" "$SHOTS/$name.png" \
         > /dev/null 2>&1 || cp -f "$d/desktop.ppm" "$SHOTS/$name.ppm"
-    ok "$name: das Bild steht ($(stat -c%s "$d/desktop.ppm") Oktette)"
+    ok "$name: the image is there ($(stat -c%s "$d/desktop.ppm") Oktette)"
     return 0
 }
 
@@ -278,13 +278,13 @@ glyphen() {
     n=$(printf '%s' "$kopf" | sed -n 's/.* \([0-9]*\) wrong.*/\1/p')
     if [ -n "$n" ] && [ "$n" -le "$erlaubt" ] \
        && ! printf '%s' "$aus" | grep -q 'EMPTY'; then
-        ok "$kopf (erlaubt sind $erlaubt)"
+        ok "$kopf (allowed are $erlaubt)"
     else
         bad "$name: '$text' -- $(printf '%s' "$aus" | head -2 | tr '\n' ' ')"
     fi
 }
 
-echo "-- 8. der Starter, und die Zeile, die diese Runde ausgeloest hat"
+echo "-- 8. the starter, and the line that triggered this round"
 if foto starter "append=gfx wm wig wigstart wmhold wiglong nokbd nosched noproc nofs"; then
     hat "$TMPD/starter/serial.txt" \
         "t=Text schreiben und ändern" \
@@ -303,7 +303,7 @@ if foto einstellungen "extra=einst nostart"; then
 fi
 
 echo
-echo "-- 10. der Speicher-Dialog und seine Spalten"
+echo "-- 10. the storage dialog and its columns"
 if foto speicher "append=gfx wm wig wigspeicher wmhold wiglong nokbd nosched noproc nofs"; then
     hat "$TMPD/speicher/serial.txt" "speicher: ready" \
         "der Speicher-Dialog ist oben"
