@@ -192,8 +192,8 @@ netz_zu() {
 mkdir -p "$TMPD/idp"
 server_auf() {
     ip netns exec "$NS" python3 tools/anbfleitec/idp.py --port 8443 \
-        --zertifikat "$TMPD/certs/good.pem" --schluessel "$TMPD/certs/good.key" \
-        --verzeichnis "$TMPD/idp" --issuer "$Z" "$@" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
+        --zertifikat "$TMPD/certs/good.pem" --key "$TMPD/certs/good.key" \
+        --directory "$TMPD/idp" --issuer "$Z" "$@" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
     sleep 1.0
 }
 server_zu() { [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null; SRVPID=""; }

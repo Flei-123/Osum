@@ -33,11 +33,11 @@ def sine_neg(phase):
     return ((phase >> 31) & 1) != 0
 
 
-def erzeugen(hz, rahmen, pegel, rate):
+def erzeugen(hz, frame, pegel, rate):
     step = (hz * 4294967296 + rate // 2) // rate
     ph = 0
     aus = bytearray()
-    for _ in range(rahmen):
+    for _ in range(frame):
         m = (sine_q28(ph) * pegel) >> 28
         v = m
         if sine_neg(ph):
@@ -51,27 +51,27 @@ def erzeugen(hz, rahmen, pegel, rate):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("ausgabe")
+    ap.add_argument("output")
     ap.add_argument("--hz", type=int, default=440)
-    ap.add_argument("--rahmen", type=int, default=48000)
+    ap.add_argument("--frame", type=int, default=48000)
     ap.add_argument("--pegel", type=int, default=24000)
     ap.add_argument("--rate", type=int, default=48000)
-    ap.add_argument("--schreiben", action="store_true")
+    ap.add_argument("--write-out", action="store_true")
     a = ap.parse_args()
-    d = erzeugen(a.hz, a.rahmen, a.pegel, a.rate)
-    if a.schreiben:
-        w = wave.open(a.ausgabe, "wb")
+    d = erzeugen(a.hz, a.frame, a.pegel, a.rate)
+    if a.write_out:
+        w = wave.open(a.output, "wb")
         w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(a.rate)
         w.writeframes(d)
         w.close()
         print("refsine: %s geschrieben -- %d Rahmen, %d Hz, Pegel %d"
-              % (a.ausgabe, a.rahmen, a.hz, a.pegel))
+              % (a.output, a.frame, a.hz, a.pegel))
         return
     import array
     try:
-        w = wave.open(a.ausgabe)
+        w = wave.open(a.output)
     except Exception as e:                       # noqa: BLE001
         print("ungleich=999999 grund=%s" % e)
         return

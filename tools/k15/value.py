@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/value.py -- EIN Feld aus einer gemeldeten Zeile holen.
-
-    value.py <mitschnitt> <zeilenanfang> <schluessel> [rgb]
-
-Die Anwendungen dieser Runde melden Zeilen der Form
-
-    widgetdemo: rows x=18 base=287 zh=20 fg=15265524 bg=1185824 sel=... selfg=...
-
-und ein `grep -oE '.*fg=[0-9]+'` darauf holt `selfg` statt `fg` -- weil
-`.*` gierig ist und `selfg` auf `fg` endet.  Genau dieser Fehler hat in
-der ersten Fassung des Laeufers vier Zusagen umgeworfen, und zwar mit
-einer Meldung, die nach einem Zeichenfehler aussah: 195 von 195
-Tintenpunkten falsch, weil gegen WEISS statt gegen die Textfarbe
-gerechnet wurde.
-
-Also wird hier auf WORTGRENZEN geachtet und nicht auf Teilzeichenketten.
-Mit `rgb` kommt der Wert als "r g b" heraus, wie `checkshot.py` ihn will.
+"""Usage:
+    value.py <mitschnitt> <zeilenanfang> <key> [rgb]
 """
 import re
 import sys
@@ -26,9 +11,9 @@ def main():
     if len(sys.argv) < 4:
         print(__doc__)
         return 2
-    path_2, begin, schluessel = sys.argv[1], sys.argv[2], sys.argv[3]
+    path_2, begin, key = sys.argv[1], sys.argv[2], sys.argv[3]
     alsrgb = len(sys.argv) > 4 and sys.argv[4] == "rgb"
-    pat = re.compile(r"(?:^|\s)%s=(-?\d+)" % re.escape(schluessel))
+    pat = re.compile(r"(?:^|\s)%s=(-?\d+)" % re.escape(key))
     treffer = None
     with open(path_2, "rb") as f:
         for roh in f:

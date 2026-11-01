@@ -200,7 +200,7 @@ gleich "ein Nameserver, den es nicht gibt -> TIMEOUT" \
 echo
 echo "== 7. the server side: register, stock, archive =="
 # =====================================================================
-python3 tools/ota/veroeffentlichen.py "$OUT/aus" --zeigen > "$W/reg.txt"
+python3 tools/ota/publish.py "$OUT/aus" --display > "$W/reg.txt"
 sed -n 's/^/        /p' "$W/reg.txt"
 hat "$W/reg.txt" "gefuehrte Fassung  4" "das Register fuehrt Fassung 4"
 hat "$W/reg.txt" "vorgehalten        [1, 2, 3, 4]" "alle vier Fassungen liegen weiter da"
@@ -210,13 +210,13 @@ LINKS=$(stat -c%h "$OUT/aus/v/2/hallo-2.opk")
 [ "${LINKS:-1}" -ge 2 ] \
     && ok "keeping a version in stock costs NO copy ($LINKS hard links)" \
     || bad "v/2 haelt eine eigene Kopie"
-python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
-    --bund "$OUT/bund.json" --fassung 2 > "$W/zurueck.txt" 2>&1
+python3 tools/ota/publish.py "$OUT/aus" --stand "$OUT/stand" \
+    --bund "$OUT/bund.json" --revision 2 > "$W/zurueck.txt" 2>&1
 hat "$W/zurueck.txt" "geht zurueck" "eine kleinere Fassungsnummer wird ABGELEHNT"
 LETZTE=$(python3 -c "import json;print(json.load(open('$OUT/aus/register.json'))['letzte'])")
 gleich "und das Register steht unveraendert" "$LETZTE" "4"
 cp "$OUT/aus/register.json" "$W/reg.bak"
-python3 tools/ota/veroeffentlichen.py "$OUT/aus" --zuruecknehmen 4 > "$W/rn.txt" 2>&1
+python3 tools/ota/publish.py "$OUT/aus" --zuruecknehmen 4 > "$W/rn.txt" 2>&1
 hat "$W/rn.txt" "gefuehrt bleibt 4" "eine zurueckgenommene Auslieferung behaelt ihre Nummer"
 hat "$W/rn.txt" "aktuell ist 3" "und aktuell faellt auf die vorige Fassung"
 cp "$W/reg.bak" "$OUT/aus/register.json"
@@ -246,7 +246,7 @@ roh=open('$OUT/geheim.key','rb').read()
 sys.exit(0 if roh not in sk and d['haupt']['huelle']['kdf']=='scrypt' else 1)" \
     && ok "the secret key is NOT in clear text in it (scrypt + ChaCha20-Poly1305)" \
     || bad "the secret key is in clear text"
-OSUM_SIGN_PASS=falsch python3 tools/ota/schluesselbund.py "$OUT/bund.json" \
+OSUM_SIGN_PASS=falsch python3 tools/ota/keyring.py "$OUT/bund.json" \
     signieren /etc/hostname -o "$W/x.sig" > "$W/pass.txt" 2>&1
 gleich "mit falscher Passphrase wird nicht signiert" \
     "$([ -s "$W/x.sig" ] && echo signiert || echo nein)" "nein"
@@ -332,21 +332,21 @@ echo "== 12b. more deliveries for the negative tests =="
 mach() { # <ziel-notiz> <schalter...>
     rm -f "$OUT/stand"/*.opk
     cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
-    python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
+    python3 tools/ota/publish.py "$OUT/aus" --stand "$OUT/stand" \
         --bund "$OUT/bund.json" "$@" 2>&1 | grep -v signiert
 }
 mach --signierer ersatz --notiz "mit dem Ersatzschluessel"          # 5
-mach --sperren 5 --notiz "sperrt 5"                                 # 6
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" wechseln | sed 's/^/        /'
+mach --lock-down 5 --notiz "sperrt 5"                                 # 6
+python3 tools/ota/keyring.py "$OUT/bund.json" wechseln | sed 's/^/        /'
 mach --notiz "nach dem Wechsel auf gen 1"                           # 7
 mach --kette-kaputt --notiz "Kette gebrochen"                       # 8
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" wechseln | sed 's/^/        /'
+python3 tools/ota/keyring.py "$OUT/bund.json" wechseln | sed 's/^/        /'
 mach --notiz "nach dem zweiten Wechsel, gen 2"                      # 9
 rm -rf "$OUT/fremdaus"
 rm -f "$OUT/stand"/*.opk; cp "$OUT/quelle2/hallo-2.opk" "$OUT/stand/"
 OSUM_SIGN_PASS=fremd1 OSUM_ERSATZ_PASS=fremd2 \
-    python3 tools/ota/veroeffentlichen.py "$OUT/fremdaus" --stand "$OUT/stand" \
-    --bund "$OUT/fremd.json" --fassung 9 --notiz fremd 2>&1 | grep -v signiert
+    python3 tools/ota/publish.py "$OUT/fremdaus" --stand "$OUT/stand" \
+    --bund "$OUT/fremd.json" --revision 9 --notiz fremd 2>&1 | grep -v signiert
 ok "deliveries 5..9 and one with a FOREIGN key are in place"
 
 # =====================================================================

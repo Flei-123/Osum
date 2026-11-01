@@ -26,17 +26,17 @@ def read_2(path_2):
 
 
 def main():
-    wurzel = sys.argv[1] if len(sys.argv) > 1 else "locale"
-    en, error_en = read_2(os.path.join(wurzel, "en", "messages"))
+    root = sys.argv[1] if len(sys.argv) > 1 else "locale"
+    en, error_en = read_2(os.path.join(root, "en", "messages"))
     if not en:
-        print("no source language under %s/en/messages" % wurzel)
+        print("no source language under %s/en/messages" % root)
         return 1
     bad_2 = 0
-    zeilen = []
-    codes = sorted(d for d in os.listdir(wurzel)
-                   if os.path.isdir(os.path.join(wurzel, d)) and d != "en")
+    rows = []
+    codes = sorted(d for d in os.listdir(root)
+                   if os.path.isdir(os.path.join(root, d)) and d != "en")
     for code in codes:
-        p = os.path.join(wurzel, code, "messages")
+        p = os.path.join(root, code, "messages")
         if not os.path.exists(p):
             continue
         de, error = read_2(p)
@@ -44,40 +44,40 @@ def main():
         zuviel = [k for k in de if k not in en]
         eq = [k for k in de if k in en and de[k] == en[k]]
         deckung = (len(en) - len(missing)) * 100 // len(en)
-        zeilen.append("%s: %d von %d Schluesseln = %d%% abgedeckt, "
+        rows.append("%s: %d von %d Schluesseln = %d%% abgedeckt, "
                       "%d fehlen, %d unbekannt, %d gleich wie Englisch"
                       % (code, len(en) - len(missing), len(en), deckung,
                          len(missing), len(zuviel), len(eq)))
         for k in missing:
-            zeilen.append("    fehlt in %s: %s" % (code, k))
+            rows.append("    fehlt in %s: %s" % (code, k))
         for k in zuviel:
-            zeilen.append("    UNBEKANNT in %s: %s" % (code, k))
+            rows.append("    UNBEKANNT in %s: %s" % (code, k))
             bad_2 += 1
         for nr, z in error:
-            zeilen.append("    kaputte Zeile %s:%d: %s" % (p, nr, z))
+            rows.append("    kaputte Zeile %s:%d: %s" % (p, nr, z))
             bad_2 += 1
         for k, v in sorted(de.items()):
             roh = v.replace("\\n", "\n").replace("\\t", "\t") \
                    .replace("\\\\", "\\")
             n = len(roh.encode("utf-8"))
             if n + 1 > VALW:
-                zeilen.append("    ZU LANG (%d von %d Oktetten): %s = %s"
+                rows.append("    ZU LANG (%d von %d Oktetten): %s = %s"
                               % (n, VALW - 1, k, v))
                 bad_2 += 1
         for k in de:
             if len(k) + 1 > KEYW:
-                zeilen.append("    SCHLUESSEL ZU LANG (%d von %d): %s"
+                rows.append("    SCHLUESSEL ZU LANG (%d von %d): %s"
                               % (len(k), KEYW - 1, k))
                 bad_2 += 1
     for nr, z in error_en:
-        zeilen.append("    kaputte Zeile en:%d: %s" % (nr, z))
+        rows.append("    kaputte Zeile en:%d: %s" % (nr, z))
         bad_2 += 1
     lang_en = max((len(v.encode("utf-8")) for v in en.values()), default=0)
     header = ("Englisch: %d Schluessel, laengster Text %d Oktette, "
             "laengster Schluessel %d"
             % (len(en), lang_en, max(len(k) for k in en)))
     print(header)
-    for z in zeilen:
+    for z in rows:
         print(z)
     return 1 if bad_2 else 0
 

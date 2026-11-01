@@ -1,49 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/netview/icons.py -- die Symbole der Runde NETVIEW, aus EINER Quelle.
-
-Der Nachtrag der Runde verlangt zwei Anzeigen, und sie werden an ZWEI
-Stellen gemalt, die nichts miteinander zu tun haben:
-
-  * die Taskleiste (`kernel/user/taskbar.fi`) -- Ring 3, malt eine
-    OSYM-Datei von der Platte,
-  * die Titelleiste (`kernel/ui/wm.fi`) -- der KERN, der keine Datei von der
-    Platte liest, waehrend er ein Fenster zeichnet.
-
-Zwei Stellen, ein Zeichen. Der bequeme Weg waere, die zwoelf mal zwoelf
-Bildpunkte zweimal hinzuschreiben; das ist genau die Sorte Verdopplung,
-die einen Monat spaeter zwei verschiedene Zeichen fuer dieselbe Sache
-ergibt. Also: die ZEICHNUNG unter `assets/netview/*.txt` ist die Quelle,
-und dieses Werkzeug macht daraus
-
-  1. die OSYM-Dateien fuer die Platte (ueber `tools/k15/icon.py`,
-     dasselbe Format wie jedes Buendelsymbol -- kein zweites),
-  2. `kernel/net/netmark.fi`, den Kern-Teil: dieselben Zeichen als
-     Bitreihen, damit `wm.fi` sie ohne Dateisystem malen kann.
-
-UND ES PRUEFT SICH SELBST. `icons.py --pruefe` baut alles noch einmal und
-vergleicht es mit dem, was im Baum liegt. Weicht `kernel/net/netmark.fi` von
-der Zeichnung ab, faellt der Abnahmelauf durch -- eine erzeugte Datei
-ohne diese Pruefung ist eine Verdopplung mit Zusatzschritt.
-
-DIE GESTALTUNGSREGELN, gegen die hier GEMESSEN wird (nicht behauptet):
-
-  * FORM VOR FARBE. Wer Rot und Gruen nicht unterscheiden kann, muss die
-    Zeichen trotzdem auseinanderhalten. Also wird jedes Zeichen auf
-    seinen SCHATTENRISS reduziert -- jede Farbe zu einer -- und je zwei
-    Schattenrisse muessen sich um mindestens ein Drittel der Bildpunkte
-    unterscheiden, die ueberhaupt einer von beiden faerbt.
-  * KONTRAST. Jede Rolle gegen die Flaeche, auf der sie liegt,
-    mindestens 4.5:1 nach WCAG -- in HELL UND IN DUNKEL.
-  * ZIELGROSSE. Gezeichnet wird in der Groesse, in der es haengt: 16x16
-    fuer den Systemzustand, 12x12 fuer das Merkmal am Programm. Ein
-    Symbol, das bei 24 entworfen und auf 16 gequetscht wird, verliert
-    genau den Bildpunkt, an dem man es erkannt hat.
-
-Verwendung:
-    icons.py bauen  <ausgabeverzeichnis>
+"""Usage:
+    icons.py build  <ausgabeverzeichnis>
     icons.py kern   <kernel/net/netmark.fi>
-    icons.py pruefe [--kern kernel/net/netmark.fi]
+    icons.py check [--kern kernel/net/netmark.fi]
 """
 
 import os
@@ -82,10 +42,10 @@ def schema_read(path_2):
         k, _, v = roh.partition("=")
         values[k.strip()] = int(v.strip(), 16)
     aus = {}
-    for rolle, schluessel in FILE_NAME.items():
-        if schluessel not in values:
-            raise SystemExit("icons: %s hat kein %s=" % (path_2, schluessel))
-        aus[rolle] = values[schluessel]
+    for rolle, key in FILE_NAME.items():
+        if key not in values:
+            raise SystemExit("icons: %s hat kein %s=" % (path_2, key))
+        aus[rolle] = values[key]
     return aus
 
 
@@ -128,20 +88,20 @@ def read_2(name):
 
 
 def schattenriss(name):
-    palette, zeilen = read_2(name)
+    palette, rows = read_2(name)
     aus = set()
-    for y, z in enumerate(zeilen):
+    for y, z in enumerate(rows):
         for x, c in enumerate(z):
             if palette[c] is not None:
                 aus.add((x, y))
-    return aus, len(zeilen[0]), len(zeilen)
+    return aus, len(rows[0]), len(rows)
 
 
 def bitreihen(name):
-    palette, zeilen = read_2(name)
-    w = len(zeilen[0])
+    palette, rows = read_2(name)
+    w = len(rows[0])
     reihen = []
-    for z in zeilen:
+    for z in rows:
         maske = 0
         rollen = 0
         for x, c in enumerate(z):
@@ -152,7 +112,7 @@ def bitreihen(name):
             nr = v[1] if isinstance(v, tuple) else 15
             rollen |= nr << (x * 4)
         reihen.append((maske, rollen))
-    return reihen, w, len(zeilen)
+    return reihen, w, len(rows)
 
 
 
@@ -298,12 +258,12 @@ def kernquelle():
     }
 
 
-def bauen(ziel):
-    os.makedirs(ziel, exist_ok=True)
+def assemble(target):
+    os.makedirs(target, exist_ok=True)
     n = 0
     for name in ZUSTAENDE + MERKMALE + SYSTEM + KACHELN:
         d = symmod.build(zeichnung(name))
-        with open(os.path.join(ziel, name), "wb") as f:
+        with open(os.path.join(target, name), "wb") as f:
             f.write(d)
         n += 1
     return n
@@ -311,7 +271,7 @@ def bauen(ziel):
 
 def main(argv):
     if len(argv) >= 3 and argv[1] == "bauen":
-        n = bauen(argv[2])
+        n = assemble(argv[2])
         print("icons: %d Symbole nach %s" % (n, argv[2]))
         return 0
     if len(argv) >= 3 and argv[1] == "kern":

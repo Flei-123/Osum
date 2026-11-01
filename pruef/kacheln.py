@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""kacheln.py -- JEDE KACHEL DES KONTROLLZENTRUMS, EINZELN.
-
-    python3 kacheln.py <name> <breite> <hoehe> <uiscale>
-
-Justin: "beim Klicken passiert irgendwas ganz Komisches, danach geht
-gar nichts mehr". Das ist der Satz, der nachgestellt werden muss --
-und zwar so, dass hinterher feststeht, WELCHE Kachel es war.
-
-Geklickt wird NICHT auf geratene Stellen. Das Kontrollzentrum meldet
-seine Lage selbst (`qs: geo x= y= w= h=`), und die Kachelmasse stehen
-in kernel/user/qs.fi:
-    PAD=6*s  GAP=8*s  TW=176*s  TH=PAD/2+IC+4s+ZH+3s+ZH+PAD/2
-Zwei Spalten, drei Reihen. Nach JEDEM Klick wird gefragt:
-  * kam ein panic?
-  * lebt das Kontrollzentrum noch (malt es weiter)?
-  * reagiert die Leiste noch (Uhr laeuft)?
-Das dritte ist Justins "danach geht gar nichts mehr" in messbar.
+"""Usage:
+    kacheln.py -- JEDE tile DES KONTROLLZENTRUMS, EINZELN.
+    python3 kacheln.py <name> <width> <height> <uiscale>
 """
 import json
 import os
@@ -30,8 +16,8 @@ sys.path.insert(0, HIER)
 from klick import Maschine
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "kach"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 2560
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 1440
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 2560
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 1440
 SCALE = int(sys.argv[4]) if len(sys.argv) > 4 else 2
 
 D = os.path.join(HIER, "laeufe", NAME)
@@ -56,10 +42,10 @@ def serial():
         return ""
 
 
-def warte_auf(marke, frist=90):
+def wait_for(mark, deadline=90):
     t0 = time.time()
-    while time.time() - t0 < frist:
-        if marke in serial():
+    while time.time() - t0 < deadline:
+        if mark in serial():
             return True
         time.sleep(2)
     return False
@@ -74,12 +60,12 @@ def uhr(s):
 def main():
     extra = ("uiscale=%d " % SCALE if SCALE != 1 else "") + "shape=osum"
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE), extra],
+                    str(WIDTH), str(HEIGHT), extra],
                    check=True, cwd=HIER,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
     m.verbinde()
-    merke("0.1", "Leiste steht", "ja" if warte_auf("taskbar: state") else "NEIN")
+    merke("0.1", "Leiste steht", "ja" if wait_for("taskbar: state") else "NEIN")
     time.sleep(4)
 
     # Kontrollzentrum oeffnen. NICHT geraten: die Leiste meldet die
@@ -96,10 +82,10 @@ def main():
     f = re.findall(r"taskbar: field net x=(\d+) y=(\d+) w=(\d+) h=(\d+)", s)
     if f:
         fx, fy, fw, fh = (int(v) for v in f[-1])
-        bar_top = HOEHE - 80 if SCALE == 2 else HOEHE - 40
+        bar_top = HEIGHT - 80 if SCALE == 2 else HEIGHT - 40
         cx, cy = fx + fw // 2, bar_top + fy + fh // 2
     else:
-        cx, cy = BREITE - 150, HOEHE - 40
+        cx, cy = WIDTH - 150, HEIGHT - 40
     merke("0.15", "Klick auf Netzfeld (oeffnet qs)", "bei %d,%d" % (cx, cy))
     m.klick_auf(cx, cy)
     time.sleep(3)
@@ -112,7 +98,7 @@ def main():
         return
     x, y, w, h = (int(v) for v in geo[-1])
     merke("0.2", "Kontrollzentrum offen", "ja", "x=%d y=%d %dx%d" % (x, y, w, h))
-    m.foto(os.path.join(SHOTS, "00-offen.png"))
+    m.photo(os.path.join(SHOTS, "00-offen.png"))
 
     # Kachelraster nachrechnen, genau wie qs.fi es tut.
     s_ = SCALE
@@ -130,26 +116,26 @@ def main():
         u1 = uhr(serial())
         m.klick_auf(tx, ty)
         time.sleep(2.5)
-        neu = serial()[vor:]
-        p = [z.strip() for z in neu.splitlines() if "panic:" in z]
+        renewed = serial()[vor:]
+        p = [z.strip() for z in renewed.splitlines() if "panic:" in z]
         u2 = uhr(serial())
         lebt = (u2 is not None and u2 != u1)
         merke("K%d" % t, "Kachel %d bei (%d,%d)" % (t, tx, ty),
               "PANIC" if p else ("ok" if lebt else "STILL"),
               p[:2] if p else "Uhr %s -> %s" % (u1, u2))
-        m.foto(os.path.join(SHOTS, "k%d.png" % t))
+        m.photo(os.path.join(SHOTS, "k%d.png" % t))
         if p or not lebt:
             lebt_vorher = False
             break
 
     s = serial()
-    alle = [z.strip() for z in s.splitlines() if "panic:" in z]
-    merke("9.1", "panics gesamt", "KEINE" if not alle else "JA", alle[:4])
+    everything = [z.strip() for z in s.splitlines() if "panic:" in z]
+    merke("9.1", "panics gesamt", "KEINE" if not everything else "JA", everything[:4])
     merke("9.2", "System lebt am Ende", "ja" if lebt_vorher else "NEIN")
     with open(os.path.join(D, "befund.json"), "w") as f:
         json.dump(BEFUND, f, indent=1, ensure_ascii=False)
     try:
-        m.sag("quit")
+        m.say("quit")
     except Exception:
         pass
 

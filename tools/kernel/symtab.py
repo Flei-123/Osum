@@ -1,59 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/kernel/symtab.py -- DIE SYMBOLE UND DIE QUELLZEILEN IN DAS ABBILD.
-
-WAS DAS PROBLEM WAR. Eine toedliche Ausnahme in Ring 0 druckt seit Runde
-BLECHKERN eine Rueckverfolgung, und sie sieht so aus:
-
-    kspur:     0x143aa1   0x1621c0   0x11e934   0x1058bc   0x100f21
-
-Das sind Adressen. Wer sie lesen will, braucht DAS ABBILD, aus dem
-dieser Kern gebaut wurde, `objdump -d` und Geduld -- und Justin steht mit
-einem Fotoapparat vor einem Brett, auf dem eine andere Fassung laeuft als
-die im Arbeitsbaum.  Genau daran ist die Runde EINSPRUNG zwei Stunden
-haengengeblieben, und der Kommentar dort sagt es in aller Deutlichkeit.
-
-WAS DIESES WERKZEUG DARAUS MACHT:
-
-    kspur:  sched.irq_restore+0x11 (sched.fi:1046)
-            wm.mess_kol+0x79 (wm.fi:4312)
-            ...
-
-Dafuer braucht der Kern zwei Tabellen IN SICH SELBST -- auf der Platte
-liegt zum Zeitpunkt einer Panik vielleicht nichts Lesbares mehr:
-
-  1. DIE SYMBOLTABELLE.  Adresse -> Name.  Sie kommt aus `nm` und ist
-     das, was Linux `kallsyms` nennt.
-  2. DIE ZEILENTABELLE.  Adresse -> Datei:Zeile.  Sie kommt aus
-     `.debug_line`, das der Firn-Uebersetzer seit `compiler/src/dwarf_line.rs`
-     selbst erzeugt.  DWARF im Kern zu entschluesseln waere ein
-     Zustandsautomat mit Sonderopcodes -- also wird er HIER
-     abgewickelt und das Ergebnis als flache, sortierte Tabelle
-     abgelegt.  Der Kern macht daraus eine Binaersuche in zwanzig Zeilen.
-
-WIE ES IN DAS ABBILD KOMMT: dieses Werkzeug schreibt eine
-Assemblerdatei mit dem Symbol `osym_tab` im Abschnitt `.rodata`.
-`tools/build-kernel.sh` bindet ZWEIMAL: der erste Durchgang mit einem
-leeren Stummel (`kernel/arch/x86_64/osym.s`), damit `osym_tab` ueberhaupt
-aufgeloest wird, der zweite mit der wirklichen Tabelle.
-
-WARUM DAS GEHT, OBWOHL DIE TABELLE DAS ABBILD GROESSER MACHT: sie liegt
-in `.rodata`, und `.rodata` kommt im Bindeskript NACH `.text` und
-`.utext`.  Keine einzige Funktionsadresse verschiebt sich dadurch, und
-genau das prueft `build-kernel.sh` nach dem zweiten Durchgang nach --
-es vergleicht die Symbole des zweiten Abbilds mit denen, die es
-eingebaut hat, und bricht ab, wenn eine Adresse gewandert ist.
-
-WAS ES KOSTET.  Rund 60 KiB Symbole und rund 500 KiB Zeilen, zusammen
-etwa ein Achtel des Abbilds.  Das ist viel, es steht hier, und es laesst
-sich abstellen: `tools/build-kernel.sh --ohne-symbole` baut ohne beides,
-und dann sagt der Panik-Bildschirm wieder nur Adressen.  Was NICHT geht,
-ist die Tabelle auf der Platte zu lassen und erst beim Lesen des
-Berichts aufzuloesen -- der Panik-Bildschirm entsteht in einem Kern, der
-gerade gestorben ist; er kann nichts mehr von einer Platte holen.
-
-Aufruf:
-    python3 tools/kernel/symtab.py ABBILD.elf AUSGABE.s
+"""Usage:
+    python3 tools/kernel/symtab.py ABBILD.elf output.s
 """
 import re
 import struct

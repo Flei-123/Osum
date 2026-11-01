@@ -12,16 +12,16 @@
 # auch dann, liegt es am Schreiben auf die Platte und nicht am Editor.
 import time
 
-lauf.sag("== GEGENPROBE: schreiben ohne Editor ==")
+lauf.say("== GEGENPROBE: schreiben ohne Editor ==")
 lauf.m.klick_auf(300, 300)
 time.sleep(1)
 
 
-def befehl(zeile, warte=2.5):
-    vorher = len(lauf.lies())
-    lauf.m.tippe(zeile + "\n")
-    time.sleep(warte)
-    roh = lauf.lies()[vorher:]
+def command(row, wait=2.5):
+    vorher = len(lauf.read_text())
+    lauf.m.tippe(row + "\n")
+    time.sleep(wait)
+    roh = lauf.read_text()[vorher:]
     gut = []
     for z in roh.splitlines():
         z = z.rstrip()
@@ -35,14 +35,14 @@ for b in ("echo eins > /data/t1.txt",
           "echo zwei >> /data/t1.txt",
           "cat /data/t1.txt",
           "ls /data"):
-    lauf.sag("  $ %s" % b)
-    for z in befehl(b):
-        lauf.sag("      %s" % z[:100])
+    lauf.say("  $ %s" % b)
+    for z in command(b):
+        lauf.say("      %s" % z[:100])
 
-lauf.bild("nach-dem-schreiben")
+lauf.image("nach-dem-schreiben")
 
-t = lauf.lies()
-lauf.sag("--- Befund ---")
+t = lauf.read_text()
+lauf.say("--- Befund ---")
 for muster in ("ABSTURZ", "ofsj", "#UD", "kernel halted"):
-    lauf.sag("  %-16s %dx" % (muster, t.count(muster)))
-lauf.sag("== Ende Gegenprobe ==")
+    lauf.say("  %-16s %dx" % (muster, t.count(muster)))
+lauf.say("== Ende Gegenprobe ==")

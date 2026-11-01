@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/count.py -- Bildpunkte einer Farbe in einem Rechteck zaehlen.
-
+"""Usage:
     count.py <ppm> <x> <y> <w> <h> <r> <g> <b>
-
-`checkshot.py area` verlangt, dass ALLE Bildpunkte des Rechtecks die
-Farbe haben; hier geht es um das Gegenteil: WIE VIELE sind es?  Das ist
-die Form, in der sich ein Haken in einem Kaestchen messen laesst -- er
-ist kein volles Rechteck, er ist ein Strich, und die Zusage lautet
-"nach dem Klick sind es mehr als zwoelf, vorher genau null".
-
-Ausgabe: eine Zahl.
 """
 import sys
 
@@ -43,13 +34,13 @@ def main():
         return 2
     ppm = sys.argv[1]
     x0, y0, w, h = (int(v) for v in sys.argv[2:6])
-    ziel = tuple(int(v) for v in sys.argv[6:9])
+    target = tuple(int(v) for v in sys.argv[6:9])
     W, H, px = load(ppm)
     n = 0
     for y in range(y0, min(y0 + h, H)):
         for x in range(x0, min(x0 + w, W)):
             o = (y * W + x) * 3
-            if (px[o], px[o + 1], px[o + 2]) == ziel:
+            if (px[o], px[o + 1], px[o + 2]) == target:
                 n += 1
     print(n)
     return 0

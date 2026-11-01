@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""bildcheck.py -- EIN BILD IN ZAHLEN, damit "ich habe hingesehen" belegbar ist.
-
-    python3 bildcheck.py <bild.png> [x0 y0 x1 y1]
-
-Justins Regel: "bitte immer selber visuell drueberschauen". Ein Modell
-kann ein PNG nicht anschauen wie ein Mensch -- also wird es VERMESSEN,
-und die Zahlen sind das, was in der Schlussmeldung steht:
-
-  * die haeufigsten Farben (Schema erkannt? Hell oder dunkel?)
-  * ganz leere Zeilen/Spalten (weisse Streifen, halbe Flaechen)
-  * waagerechte Kanten (wo Flaechen anfangen und aufhoeren)
-  * der Anteil Tinte je Achtelzeile (sitzt der Inhalt, wo er soll?)
-
-Ein "Streifen" im Sinn von Justins Foto ist eine Folge von Zeilen, die
-UEBER DIE GANZE FENSTERBREITE eine einzige Farbe haben, obwohl darueber
-und darunter Inhalt steht. Genau danach wird gesucht.
+"""Usage:
+    python3 bildcheck.py <image.png> [x0 y0 x1 y1]
 """
 import sys
 from collections import Counter
@@ -64,9 +50,9 @@ def main():
                 bl.append((s, p, f))
                 s, p, f = y, y, fa
         bl.append((s, p, f))
-        gross = [b for b in bl if b[1] - b[0] >= 8]
-        print("  einfarbige Zeilenbloecke (>=8 hoch): %d" % len(gross))
-        for a, b, fa in gross[:8]:
+        large = [b for b in bl if b[1] - b[0] >= 8]
+        print("  einfarbige Zeilenbloecke (>=8 hoch): %d" % len(large))
+        for a, b, fa in large[:8]:
             print("    y=%d..%d (%d hoch)  #%02x%02x%02x"
                   % (a, b, b - a + 1, fa[0], fa[1], fa[2]))
     else:
@@ -74,17 +60,17 @@ def main():
 
     # Tinte je Achtel
     print("  Tinte je Achtelzeile (Anteil Punkte != haeufigste Farbe):")
-    grund = c.most_common(1)[0][0]
-    hoch = (y1 - y0) // 8
+    reason = c.most_common(1)[0][0]
+    upward = (y1 - y0) // 8
     for k in range(8):
-        ya, yb = y0 + k * hoch, y0 + (k + 1) * hoch
+        ya, yb = y0 + k * upward, y0 + (k + 1) * upward
         n = t = 0
-        for y in range(ya, yb, max(1, hoch // 12)):
+        for y in range(ya, yb, max(1, upward // 12)):
             for x in range(x0, x1, schritt):
                 t += 1
                 p = im.getpixel((x, y))
-                if abs(p[0] - grund[0]) + abs(p[1] - grund[1]) \
-                        + abs(p[2] - grund[2]) > 40:
+                if abs(p[0] - reason[0]) + abs(p[1] - reason[1]) \
+                        + abs(p[2] - reason[2]) > 40:
                     n += 1
         print("    y=%4d..%4d  %5.1f%%" % (ya, yb, 100.0 * n / max(1, t)))
     return 0

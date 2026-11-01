@@ -1,49 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vsync/zerreiss.py -- DIE ZERREISSPROBE.
-
+"""Usage:
     zerreiss.py <ppm> [<ppm> ...]
-
-WARUM ES DIESES PROGRAMM GEBEN MUSS.
-
-Reissen (tearing) ist das, was man sieht, wenn der Bildschirm ein Bild
-ausliest, waehrend es noch geschrieben wird: oben steht der alte
-Zustand, unten schon der neue.  Unter QEMU ist das NICHT zu sehen.
-`screendump` liest die Bildflaeche als Ganzes, und zwar dann, wenn
-gerade niemand schreibt -- ein halb uebertragenes Bild sieht darin aus
-wie ein vollstaendiges.  Ein Testlaeufer, der einfach Fotos vergleicht,
-misst hier NICHTS und wuerde jede Fassung durchwinken.
-
-Also wird die Frage umgestellt.  Der Fensterserver zaehlt seine Bilder
-und faerbt im Signaturbetrieb (`wmsig`) einen Streifen am OBEREN und
-einen am UNTEREN Rand JEDES Fensters mit einer Farbe, die aus der
-Bildnummer faellt (`wm.sig_colour`, acht Volltoene).  Beide Streifen
-entstehen im SELBEN Zeichenlauf und tragen deshalb dieselbe Farbe.
-
-Damit ist Reissen eine Eigenschaft, die ein Programm PRUEFEN kann:
-
-    zwei verschiedene Signaturfarben in EINEM Fenster
-    = das Foto hat ein halb uebertragenes Bild erwischt
-    = Reissen.
-
-Und die Umkehrung ist die Zusage dieser Runde: steht die Bildgrenze
-(`vsync`), MUSS jedes Foto in jedem Fenster GENAU EINE Farbe zeigen.
-Die Gegenprobe `nopresent` muss gemischte Bilder finden -- eine Zusage,
-die sich nicht brechen laesst, misst nichts.
-
-WIE EIN FENSTER GEFUNDEN WIRD.  Nicht ueber Koordinaten aus dem
-Mitschnitt -- die waeren eine zweite Wahrheit ueber denselben
-Bildschirm.  Gesucht werden ZEILEN, die ueber viele Bildpunkte hinweg
-eine der acht Signaturfarben tragen; das sind die Streifen.  Zwei
-Streifen mit demselben linken und rechten Rand gehoeren zum selben
-Fenster.  Tragen sie verschiedene Farben, ist es zerrissen.
-
-Ausgabe (eine Zeile je Datei, dann eine Summenzeile):
-
-    <datei> fenster=<n> zerrissen=<n> farben=<liste>
-    SUMME bilder=<n> fenster=<n> zerrissen=<n>
-
-Rueckgabe 0, wenn NICHTS zerrissen war, sonst 1.
+    <file> window=<n> zerrissen=<n> farben=<items>
+    SUM bilder=<n> window=<n> zerrissen=<n>
 """
 import sys
 

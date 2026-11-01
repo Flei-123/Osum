@@ -20,7 +20,7 @@ the package feed uses (OTA2: key chain + signature by the existing bundle), plus
     sysfile  <role> <sha256> <octets> <file>          role: kernel | notes | root | roots
 
 Old clients ignore both line types. The channel directory is separate from
-`aktuell/` (which veroeffentlichen.py rebuilds), so the live package feed is untouched.
+`aktuell/` (which publish.py rebuilds), so the live package feed is untouched.
 --bad-hash / --bad-sig: negative-control stands (kernel hash wrong / signature broken).
 
 SELFUPDATE stage 2 (docs/SELFUPDATE.md):
@@ -48,7 +48,7 @@ import gzip, hashlib, os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import veroeffentlichen as vf  # noqa: E402
+import publish as vf  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
 

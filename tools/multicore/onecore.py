@@ -58,20 +58,20 @@ def funktionen(path_2):
 
 
 def main(argv):
-    liste = "--liste" in argv
-    nur = None
+    item_list = "--item-list" in argv
+    only = None
     for i, a in enumerate(argv):
-        if a == "--nur" and i + 1 < len(argv):
-            nur = argv[i + 1]
+        if a == "--only" and i + 1 < len(argv):
+            only = argv[i + 1]
 
-    gesperrt = []
+    locked = []
     open_2 = []
     mitwissen = []
     for root, _, dateien in os.walk(os.path.join(ROOT, "kernel")):
         for d in sorted(dateien):
             if not d.endswith(".fi"):
                 continue
-            if nur and d != nur:
+            if only and d != only:
                 continue
             path_2 = os.path.join(root, d)
             short = os.path.relpath(path_2, ROOT)
@@ -93,20 +93,20 @@ def main(argv):
                     mitwissen.append(entry)
                     continue
                 if LOCK.search(text) or d in RUHIG:
-                    gesperrt.append(entry)
+                    locked.append(entry)
                 else:
                     open_2.append(entry)
 
-    if liste:
+    if item_list:
         print("== LOCKED: the buffer is used under a lock ==")
-        for k, f, p in gesperrt:
+        for k, f, p in locked:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
         print("== OPEN: no lock word in the body ==")
         for k, f, p in open_2:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
         print()
-    if liste and mitwissen:
+    if item_list and mitwissen:
         print("== KNOWN: deliberately on the shared buffer ==")
         for k, f, p in mitwissen:
             print("   %-24s %-22s %s" % (k, f, ",".join(p)))
@@ -114,7 +114,7 @@ def main(argv):
         print()
     dat_open = sorted(set(k for k, _, _ in open_2))
     print("einkern gesperrt=%d offen=%d mitwissen=%d dateien=%s"
-          % (len(gesperrt), len(open_2), len(mitwissen),
+          % (len(locked), len(open_2), len(mitwissen),
              ",".join(dat_open) or "-"))
     return 0
 

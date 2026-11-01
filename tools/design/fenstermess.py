@@ -30,7 +30,7 @@ def ppm(path_2):
     return tok[0], tok[1], d[i:]
 
 
-def band(path_2, hoehe, von_bottom):
+def band(path_2, height, von_bottom):
     w, h, px = ppm(path_2)
     s = {}
     for y in range(h - von_bottom, h, 2):
@@ -150,9 +150,9 @@ def main():
     b1 = os.path.join(folder, "11-fenster-normal.ppm")
     b2 = os.path.join(folder, "12-unter-der-leiste.ppm")
     if os.path.exists(b1) and os.path.exists(b2):
-        hoehe = (SH - ty) if ty is not None else 80
-        s1 = band(b1, SH, hoehe)
-        s2 = band(b2, SH, hoehe)
+        height = (SH - ty) if ty is not None else 80
+        s1 = band(b1, SH, height)
+        s2 = band(b2, SH, height)
         eq = sum(min(s1.get(c, 0), s2.get(c, 0))
                      for c in set(s1) | set(s2))
         gesamt = sum(s1.values())

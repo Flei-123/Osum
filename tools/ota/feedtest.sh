@@ -9,7 +9,7 @@
 #                (name=ota.test), i.e. the shipped image, only the feed address
 #                and the trusted root differ.
 #   <feed-root>  the directory that contains osum/ (a copy of /srv/store with the
-#                new version published by tools/ota/veroeffentlichen.py).
+#                new version published by tools/ota/publish.py).
 #
 # What it measures (everything on an INSTALLED disk, because the stick root is RAM):
 #   1. install the image on an empty disk (the real /bin/installer, as acceptance.sh)

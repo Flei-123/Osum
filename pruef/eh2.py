@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""eh2.py -- RUNDE ECHTHARDWARE-2: Justins Durchklick, nachgestellt.
-
-    python3 eh2.py <name> <breite> <hoehe> [uiscale]
-
-WOZU. Justins Foto vom 09.09. zeigt fuenf Befunde, die der Pruefstand
-der Vorrunde NICHT gefunden hat, weil er sie nie ausgeloest hat:
-
-  * panic wlib.fi:969  -- braucht runde Knoepfe UND uiscale=2
-  * appdir INFO > 1023 -- braucht die Einstellungen, geoeffnet
-  * Spaltenkoepfe      -- braucht den Explorer bei uiscale=2
-  * Super-Taste        -- braucht den Tastendruck, nicht den Klick
-  * Kachelklick        -- braucht JEDE Kachel, nicht die erste
-
-Dieses Skript macht GENAU DAS, in dieser Reihenfolge, und schreibt
-nach jedem Schritt ein Bild und die serielle Leitung mit. Es BEHAUPTET
-nichts: was hier steht, kommt aus `serial.txt` oder aus einem Foto.
+"""Usage:
+    eh2.py -- RUNDE ECHTHARDWARE-2: Justins Durchklick, nachgestellt.
+    python3 eh2.py <name> <width> <height> [uiscale]
 """
 import json
 import os
@@ -29,8 +16,8 @@ sys.path.insert(0, HIER)
 from klick import Maschine
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "eh2"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 2560
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 1440
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 2560
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 1440
 SCALE = int(sys.argv[4]) if len(sys.argv) > 4 else 2
 
 D = os.path.join(HIER, "laeufe", NAME)
@@ -67,10 +54,10 @@ def panics(s):
 def main():
     extra = "uiscale=%d shape=osum" % SCALE
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE), extra],
+                    str(WIDTH), str(HEIGHT), extra],
                    check=True, cwd=HIER,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
     m.verbinde()
     # AKTIV WARTEN statt blind schlafen. Gemessen in dieser Runde: bei
     # 2560x1440 und uiscale=2 stand die Leiste nach 18 s noch nicht --
@@ -93,51 +80,51 @@ def main():
 
     # ---------------------------------------------------- 1. SUPER-TASTE
     vor = len(serial())
-    m.taste("meta_l")
+    m.key_press("meta_l")
     time.sleep(2.5)
     s = serial()
-    neu = s[vor:]
-    m.foto(os.path.join(SHOTS, "01-super.png"))
+    renewed = s[vor:]
+    m.photo(os.path.join(SHOTS, "01-super.png"))
     merke("1.1", "Super: Klinke gemeldet",
-          "ja" if "klinke" in neu else "NEIN",
-          [z for z in neu.splitlines() if "klinke" in z][:2])
+          "ja" if "klinke" in renewed else "NEIN",
+          [z for z in renewed.splitlines() if "klinke" in z][:2])
     merke("1.2", "Super: Startmenue offen",
-          "ja" if "menue" in neu or "launcher" in neu else "NEIN",
-          [z for z in neu.splitlines() if "menue" in z or "launcher" in z][:3])
+          "ja" if "menue" in renewed or "launcher" in renewed else "NEIN",
+          [z for z in renewed.splitlines() if "menue" in z or "launcher" in z][:3])
 
     # ------------------------------------------------ 2. TIPPEN + FILTER
     vor = len(serial())
     m.tippe("ter")
     time.sleep(2.5)
-    neu = serial()[vor:]
-    m.foto(os.path.join(SHOTS, "02-tippen.png"))
-    tr = [z for z in neu.splitlines() if "suche" in z or "treffer" in z]
+    renewed = serial()[vor:]
+    m.photo(os.path.join(SHOTS, "02-tippen.png"))
+    tr = [z for z in renewed.splitlines() if "suche" in z or "treffer" in z]
     merke("2.1", "Tippen 'ter' filtert", "ja" if tr else "NEIN", tr[:3])
 
     # ------------------------------------------------------- 3. ENTER
     vor = len(serial())
-    m.taste("ret")
+    m.key_press("ret")
     time.sleep(3.5)
-    neu = serial()[vor:]
-    m.foto(os.path.join(SHOTS, "03-enter.png"))
+    renewed = serial()[vor:]
+    m.photo(os.path.join(SHOTS, "03-enter.png"))
     merke("3.1", "Enter startet ersten Treffer",
-          "ja" if "start" in neu else "NEIN",
-          [z for z in neu.splitlines() if "start" in z][:3])
+          "ja" if "start" in renewed else "NEIN",
+          [z for z in renewed.splitlines() if "start" in z][:3])
 
     # --------------------------------------- 4. OS-SYMBOL LINKS UNTEN
     vor = len(serial())
-    m.klick_auf(30, HOEHE - 40)
+    m.klick_auf(30, HEIGHT - 40)
     time.sleep(2.5)
-    neu = serial()[vor:]
-    m.foto(os.path.join(SHOTS, "04-ossymbol.png"))
+    renewed = serial()[vor:]
+    m.photo(os.path.join(SHOTS, "04-ossymbol.png"))
     merke("4.1", "Klick auf OS-Symbol oeffnet Menue",
-          "ja" if ("menue" in neu or "launcher" in neu) else "NEIN",
-          [z for z in neu.splitlines()
+          "ja" if ("menue" in renewed or "launcher" in renewed) else "NEIN",
+          [z for z in renewed.splitlines()
            if "menue" in z or "launcher" in z or "klick" in z][:3])
 
     # ---------------------------------------------- 5. EINSTELLUNGEN
     vor = len(serial())
-    m.sag("sendkey ctrl-alt-f2")   # nur, damit die Leitung sich ruehrt
+    m.say("sendkey ctrl-alt-f2")   # nur, damit die Leitung sich ruehrt
     time.sleep(0.5)
     s = serial()
     merke("5.1", "appdir INFO zu lang gemeldet",
@@ -159,7 +146,7 @@ def main():
         json.dump(BEFUND, f, indent=1, ensure_ascii=False)
     print("\n--- Bilder in %s" % SHOTS)
     try:
-        m.sag("quit")
+        m.say("quit")
     except Exception:
         pass
 

@@ -1,60 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/server.py -- DIE GEGENSTELLE. Ein HTTPS-Dienst, der ein
-signiertes Verzeichnis und Pakete ausliefert.
-
-    server.py --wurzel <verz> --cert <pem> --key <pem> [--port 8443]
-              [--abbruch <datei>:<oktette>] [--pid <datei>]
-              [--log <datei>] [--einmal]
-
-ES GIBT KEINEN ECHTEN UPDATE-SERVER IM INTERNET, gegen den diese Runde
-messen koennte, und das wird hier ausdruecklich gesagt statt umschrieben:
-GEMESSEN WIRD GEGEN DIESE GEGENSTELLE, einen lokalen HTTPS-Dienst auf
-demselben Wirt. Was daran echt ist:
-
-  * echtes TLS 1.3, ausgehandelt von Pythons `ssl` (OpenSSL) -- also von
-    einer Umsetzung, die dieses Repository nicht geschrieben hat;
-  * ein echtes Zertifikat mit einer echten Kette, die das Geraet gegen
-    seinen Wurzelspeicher prueft;
-  * echtes HTTP mit `Content-Length`, `Range`/`206 Partial Content` und
-    echten Verbindungsabbruechen;
-  * das Geraet spricht ueber eine echte Netzkarte (e1000) und QEMUs
-    Benutzernetz, nicht ueber eine Abkuerzung.
-
-Was daran NICHT echt ist: die Leitung ist kurz, die Uhr geht richtig, und
-es gibt keinen Zwischenspeicher, keinen Lastverteiler und keine
-Mehrfachnamen. Was fuer den Betrieb gegen einen Server im Internet noch
-fehlt, steht am Ende von `docs/OTA.md`.
-
-DIE SCHALTER, DIE ETWAS KAPUTT MACHEN, und sie sind der Grund fuer dieses
-Programm (ein Server, der immer funktioniert, misst nichts):
-
-  --abbruch <datei>:<oktette>
-        Fuer diese Datei wird nur bis zur STELLE <oktette> DER DATEI
-        geliefert, dann wird die Verbindung HART geschlossen (RST, kein
-        `close_notify`, kein FIN mit Anstand). Das ist der Fall (c):
-        mitten im Laden getrennt. `Content-Length` nennt vorher die volle
-        Laenge -- der Abbruch ist damit fuer den Empfaenger erkennbar,
-        und genau das muss er auch merken.
-
-  --kurz <datei>:<oktette>
-        Fuer diese Datei wird nur bis zur STELLE <oktette> DER DATEI
-        geliefert und die Verbindung danach ORDENTLICH geschlossen -- der
-        Empfaenger sieht ein sauberes Ende, aber weniger Oktette, als
-        `Content-Length` angekuendigt hat. Das ist der zweite, mildere
-        Abbruch: die Leitung ist gegangen, TCP hat aufgeraeumt, und das
-        Bruchstueck liegt beim Empfaenger. Damit laesst sich die
-        WIEDERAUFNAHME messen -- der harte Abbruch (--abbruch) laesst
-        oft gar nichts zurueck, weil ein RST die Empfangswarteschlange
-        mitnimmt.
-
-  --einmal
-        nach der ersten Antwort beenden.
-
-WIEDERAUFNAHME. `Range: bytes=<n>-` wird beantwortet, mit `206` und
-`Content-Range`. Ein Geraet, dem beim ersten Versuch die Leitung
-abgerissen ist, holt damit nur den Rest. Ohne diese Zeile muesste ein
-Update nach jedem Abbruch von vorn anfangen.
+"""Usage:
+    server.py --root <verz> --cert <pem> --key <pem> [--port 8443]
+    [--abbruch <file>:<oktette>] [--pid <file>]
+    [--log <file>] [--einmal]
+    --abbruch <file>:<oktette>
+    --brief <file>:<oktette>
+    --einmal
 """
 import http.server
 import os

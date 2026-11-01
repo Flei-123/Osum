@@ -1,56 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/usbimg/searchtext.py -- EINE ZEILE ECHTER SCHRIFT IM GANZEN BILD SUCHEN.
-
+"""Usage:
     searchtext.py <ppm> <ttf> <px> <text> [--tol N] [--min P] [--nicht]
-
-WARUM ES DIESES WERKZEUG GIBT, obwohl `tools/gfx/checkshot.py` schon
-`ttext` und `tkette` hat.
-
-Die beiden dort brauchen die STELLE: x, Grundlinie, Vorder- und
-Hintergrundfarbe. In `tools/i18n/run.sh` ist das richtig so -- das
-Programm meldet die Lage seiner Bedienfelder selbst auf der seriellen
-Leitung, und eine Zusage gegen eine gemeldete Koordinate ist staerker
-als eine gegen eine gesuchte.
-
-Auf dem USB-Stick gibt es diese Meldung nicht: dort laeuft der
-Schreibtisch, wie Justin ihn startet, und nicht ein Messaufbau. Die
-Frage dieser Runde ist auch eine andere und eine einfachere:
-
-    STEHT DAS WORT MIT DEM UMLAUT IRGENDWO AUF DIESEM SCHIRM?
-
-Also wird es gesucht. Der Ablauf:
-
-  1. Die Zeile wird mit `tools/ttf/raster.py` gerastert -- der ZWEITEN
-     Fassung des Rasterers aus `kernel/gfx/ttf.fi`, in einer anderen Sprache
-     geschrieben. Es wird also nicht gegen sich selbst geprueft.
-  2. Aus den Glyphen entsteht eine Liste von TINTENPUNKTEN
-     (dx, dy, Deckung). Nur Punkte mit voller oder fast voller Deckung
-     zaehlen (>= `--deckung`, Vorgabe 200 von 255): an einer halb
-     gedeckten Kante haengt die Farbe am Untergrund, und der ist hier
-     unbekannt.
-  3. Fuer JEDE moegliche Lage im Bild wird gezaehlt, an wie vielen
-     dieser Punkte wirklich Tinte steht -- "Tinte" heisst: der Punkt
-     unterscheidet sich vom haeufigsten Wert seiner eigenen Umgebung
-     nicht, sondern ist DERSELBE FARBWERT an allen Tintenstellen.
-     Praktisch: die Lage gewinnt, an der die meisten Tintenpunkte
-     dieselbe Farbe tragen UND sich diese Farbe von der an den
-     Gegenpunkten unterscheidet.
-  4. Ausgegeben wird die beste Lage und ihr Anteil in Prozent.
-
-DIE GEGENPUNKTE SIND DER GRUND, WARUM DAS NICHT ZU LEICHT ZU HABEN IST.
-Ohne sie wuerde jede einfarbige Flaeche jeden Text "finden": auf einem
-weissen Rechteck tragen alle Tintenpunkte dieselbe Farbe. Also wird
-zusaetzlich verlangt, dass die Punkte, an denen die Vorlage KEINE Tinte
-hat (der Rand um jede Glyphe), sich von der Tintenfarbe unterscheiden.
-Erst beides zusammen ist ein Buchstabe.
-
-`--nicht` dreht die Bedingung um: dann ist ein FUND der Fehler. Damit
-laesst sich messen, dass die ASCII-Ersatzschreibung ("Uebernehmen")
-eben NICHT auf dem Schirm steht -- die Gegenprobe, ohne die der Fund
-des richtigen Wortes nichts wert waere.
-
-Rueckgabe 0, wenn die Bedingung erfuellt ist, sonst 1.
 """
 import os
 import sys
@@ -102,7 +53,7 @@ def points(text, ttf, px, deckung):
         for r in range(g.h):
             for k in range(g.w):
                 a = g.punkt(k, r)
-                dx = gx + g.links + k
+                dx = gx + g.left + k
                 dy = 0 - g.top_2 + r
                 if a >= deckung:
                     voll.append((dx, dy))

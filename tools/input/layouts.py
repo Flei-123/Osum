@@ -25,7 +25,7 @@ class CapSet:
         self.used.add(found[0])
         return found[0]
 
-    def links(self):
+    def left(self):
         return sorted({c.link for c in self.caps.caps if c.link > 0})
 
     def unused(self):
@@ -52,7 +52,7 @@ def touchpad(cs, notes):
         "caps; the values 0..65535 / exponent -4 / seconds on non-time fields are an inherited HidP artifact",
     ]
     fingers = []
-    for link in cs.links():
+    for link in cs.left():
         bits = tuple(cs.take("IN", "BTN", PAGE_DIGITIZER, usage, link) for usage in FINGER_BIT_ORDER)
         ident = cs.take("IN", "VAL", PAGE_DIGITIZER, 0x51, link)
         fingers.append(Coll(LOGICAL, PAGE_DIGITIZER, 0x22, (

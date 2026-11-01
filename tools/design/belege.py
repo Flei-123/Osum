@@ -55,7 +55,7 @@ def window_aus_serial(path_2):
 
 def main(run_2, beleg):
     os.makedirs(beleg, exist_ok=True)
-    zeilen = []
+    rows = []
     vorher = {}
     for d in sorted(glob.glob(os.path.join(run_2, "*/"))):
         tag = os.path.basename(d.rstrip("/"))
@@ -76,7 +76,7 @@ def main(run_2, beleg):
                 vorher[md5] = f"{tag}/{base}"
             flaechen = "  ".join(f"`#{r:02x}{g:02x}{b:02x}` {100.0*n/(w*h):.0f}%"
                                  for (r, g, b), n in top[:3])
-            zeilen.append(
+            rows.append(
                 f"| `{tag}` | `{base}` | {w}×{h} | **{bs:+.1f}** | "
                 f"{flaechen} | {', '.join(ready) or '—'}{eq} |")
     header = ("# BEFUND — Abnahme MERGE-10\n\n"
@@ -92,8 +92,8 @@ def main(run_2, beleg):
             "| Lauf | Bild | Größe | B−R | größte Flächen | `ready` im Lauf |\n"
             "|---|---|---|---|---|---|\n")
     open(os.path.join(beleg, "BEFUND.md"), "w", encoding="utf-8").write(
-        header + "\n".join(zeilen) + "\n")
-    print(f"{len(zeilen)} images, FINDING.md written to {beleg}")
+        header + "\n".join(rows) + "\n")
+    print(f"{len(rows)} images, FINDING.md written to {beleg}")
     return 0
 
 

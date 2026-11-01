@@ -1,28 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/netview/checkshot.py -- steht das Symbol WIRKLICH auf dem Schirm?
-
-Runde NETVIEW, Nachtrag. `tools/k15/iconpixels.py` kann das schon, aber
-nur fuer Symbole mit festen Farben. Die Symbole dieser Runde tragen
-ROLLEN (`@ink`, `@dim`, `@accent`, `@warn`) und keine Werte -- was auf
-dem Schirm stehen MUSS, haengt also vom Farbschema ab, mit dem der Lauf
-gebootet hat. Dieses Werkzeug loest die Rolle gegen die Schema-DATEI auf
-und rechnet dann Punkt fuer Punkt.
-
-DIE LEHRE AUS RUNDE K7B GILT WEITER: 87 Prozent richtige Bildpunkte
-koennen heissen, dass der Hintergrund stimmt und das Bild fehlt. Also
-werden nur die DECKENDEN Bildpunkte gezaehlt, und es muss JEDER von
-ihnen stimmen.
-
-UND EINE GEGENPROBE IST EINGEBAUT: `--nicht` verlangt, dass das Bild
-dort NICHT steht. Ein Zeichen, das ueberall passt, misst nichts -- die
-Stelle, an der `real` steht, muss leer bleiben, und das wird genauso
-gerechnet wie das Vorhandensein.
-
-Verwendung:
-    schau.py <schirm.ppm> <x> <y> <zeichnung.txt> <schema> [--nicht]
-    -> "ok <deckend> von <deckend> gleich"        Rueckgabe 0
-    -> "falsch <n> von <deckend>"                 Rueckgabe 1
+"""checkshot.py
 """
 
 import os
@@ -68,13 +46,13 @@ def main(argv):
                                        argv[4], argv[5])
     nicht = "--nicht" in argv
     farben = iconmod.schema_read(schema)
-    palette, zeilen = symmod.read_2(zeichnung)
+    palette, rows = symmod.read_2(zeichnung)
     w, h, roh = ppm(screen)
     deckend = 0
     wrong = 0
-    for r, line in enumerate(zeilen):
-        for c, zeichen in enumerate(line):
-            soll = palette[zeichen]
+    for r, line in enumerate(rows):
+        for c, chars in enumerate(line):
+            soll = palette[chars]
             if soll is None:
                 continue
             if isinstance(soll, tuple):

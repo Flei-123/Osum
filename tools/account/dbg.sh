@@ -90,8 +90,8 @@ if [ "${NETZ:-1}" = "1" ]; then
     sleep 0.4
     rm -f "$TMPD/protokoll.jsonl"
     ip netns exec "$NS" python3 tools/account/attrappe.py --port 8443 \
-        --zertifikat "$TMPD/certs/good.pem" --schluessel "$TMPD/certs/good.key" \
-        --verzeichnis "$TMPD" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
+        --zertifikat "$TMPD/certs/good.pem" --key "$TMPD/certs/good.key" \
+        --directory "$TMPD" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
     sleep 1.0
 fi
 

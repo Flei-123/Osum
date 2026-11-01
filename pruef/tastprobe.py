@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tastprobe.py -- KOMMT UEBERHAUPT EINE TASTE AN?
-
-    python3 tastprobe.py [name] [breite] [hoehe]
-
-Die kleinste Messung, die den Fund dieser Runde festhaelt: mit
-`-device usb-ehci` meldet der Kern `usb: no controller` und auf der
-ganzen seriellen Leitung steht keine einzige Zeile ueber eine Taste.
-Mit `-device qemu-xhci` wird die Tastatur aufgezaehlt.
-
-Geprueft werden vier Dinge, jedes mit seiner eigenen Zeile auf der
-Leitung -- und in DIESER Reihenfolge, weil jede spaetere die frueheren
-voraussetzt:
-
-    1. usb:  ein Wirtstreiber ist da        (kein "no controller")
-    2. hid:  eine Tastatur wurde gefunden
-    3. key:  ein Buchstabe kommt durch      (kbd.deliver)
-    4. taskbar: klinke / wm: fokus          -- die Kuerzel wirken
+"""Usage:
+    tastprobe.py -- KOMMT UEBERHAUPT EINE key AN?
+    python3 tastprobe.py [name] [width] [height]
 """
 import os
 import re
@@ -29,8 +15,8 @@ sys.path.insert(0, HIER)
 from klick import Maschine
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "tast"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SER = os.path.join(D, "serial.txt")
 
@@ -45,7 +31,7 @@ def s():
 
 def main():
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
     t0 = time.time()
     while time.time() - t0 < 150:
@@ -55,7 +41,7 @@ def main():
     print("hochgefahren nach %.1f s" % (time.time() - t0))
     time.sleep(3)
 
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
 
     # 1./2. Was sagt der USB-Teil?
     t = s()
@@ -69,7 +55,7 @@ def main():
 
     # 3. Ein Buchstabe.
     vor_key = len(re.findall(r"key: ", t))
-    m.klick_auf(BREITE // 2, HOEHE // 2)
+    m.klick_auf(WIDTH // 2, HEIGHT // 2)
     time.sleep(0.6)
     m.tippe("echo hallo")
     time.sleep(1.5)
@@ -84,15 +70,15 @@ def main():
     # Starter id=10 traegt fl=3 = F_HIDDEN|F_NODECO. Ein Alt+Tab, das
     # bei einem einzigen Fenster nichts tut, ist kein Fehler.
     # Also: Startmenue auf, Editor starten, DANN messen.
-    m.klick_auf(18, HOEHE - 20)
+    m.klick_auf(18, HEIGHT - 20)
     time.sleep(2.0)
     t = s()
     mm = re.search(r"wm: fen i=\d+ id=(\d+) x=(\d+) y=(\d+) w=(\d+) "
                    r"h=(\d+) lay=2 fl=2", t)
     # der zweite Eintrag im Menue ist der Editor
-    for zeile in re.findall(r"wm: fen i=\d+ id=\d+ x=(\d+) y=(\d+) "
+    for row in re.findall(r"wm: fen i=\d+ id=\d+ x=(\d+) y=(\d+) "
                             r"w=440 h=300 lay=2", t)[-1:]:
-        mx, my = int(zeile[0]), int(zeile[1])
+        mx, my = int(row[0]), int(row[1])
         m.klick_auf(mx + 60, my + 2 + 1 * 20 + 10)
         time.sleep(5.0)
     t = s()
@@ -102,11 +88,11 @@ def main():
     # 4. Die Kuerzel: Super allein und Alt+Tab.
     vor_hk = len(re.findall(r"taskbar: klinke", t))
     vor_fok = len(re.findall(r"wm: fokus", t))
-    m.taste("meta_l")
+    m.key_press("meta_l")
     time.sleep(2.0)
-    m.sag("sendkey alt-tab", 0.2)
+    m.say("sendkey alt-tab", 0.2)
     time.sleep(1.5)
-    m.sag("sendkey alt-tab", 0.2)
+    m.say("sendkey alt-tab", 0.2)
     time.sleep(2.0)
     t = s()
     print("4. taskbar: klinke        : %d -> %d"
@@ -118,7 +104,7 @@ def main():
     for z in re.findall(r"taskbar: startmenue \w+", t)[-4:]:
         print("     |", z)
 
-    m.sag("quit", 0.2)
+    m.say("quit", 0.2)
     return 0
 
 

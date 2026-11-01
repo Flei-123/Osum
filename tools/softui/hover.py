@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/hover.py -- den Zeiger irgendwohin FAHREN, ohne zu klicken.
-
+"""Usage:
     hover.py <x,y>            > monitorbefehle.txt
-
-`tools/themestore/click.py` macht dasselbe und klickt danach. Fuer diese
-Runde reicht das nicht: der Ueberfahr-Zustand der drei Fensterknoepfe
-IST der Messwert -- ein Klick auf das Kreuz schliesst das Fenster, und
-dann gibt es nichts mehr zu fotografieren.
-
-Der Weg ist derselbe und aus demselben Grund: `mouse_move` im
-QEMU-Monitor ist RELATIV, weil das PS/2-Geraet dahinter nichts anderes
-kann. Also erst in mehreren grossen Schritten in die linke obere Ecke
-fahren -- dort bleibt der Zeiger stehen und die Vorgeschichte ist
-geloescht --, dann in Schritten unter 128 herauslaufen. Ab da ist die
-Stelle Rechnung und nicht Hoffnung.
 """
 import sys
 

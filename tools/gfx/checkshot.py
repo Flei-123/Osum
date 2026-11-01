@@ -441,7 +441,7 @@ def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
                 a = g.punkt(k, r)
                 if a == 0:
                     continue
-                px = gx + g.links + k
+                px = gx + g.left_edge + k
                 py = gy - g.top_2 + r
                 if lo is not None and (px < lo or px >= hi):
                     continue
@@ -463,9 +463,9 @@ def _check_glyphs(image, face, places, baseline_y, fg, bg, tolerance,
                 if g.punkt(k, r) == 0:
                     continue
                 if lo is not None:
-                    if gx + g.links + k < lo or gx + g.links + k >= hi:
+                    if gx + g.left_edge + k < lo or gx + g.left_edge + k >= hi:
                         continue
-                actual = image.pixel(gx + g.links + k, gy - g.top_2 + r)
+                actual = image.pixel(gx + g.left_edge + k, gy - g.top_2 + r)
                 if actual is not None and actual != bg:
                     ink_in_image += 1
         if set_count > 0 and ink_in_image == 0:
@@ -498,7 +498,7 @@ def cmd_tchain(a):
                 d = g.punkt(k, r)
                 if d == 0:
                     continue
-                px = gx + g.links + k
+                px = gx + g.left_edge + k
                 py = gy - g.top_2 + r
                 expected[(px, py)] = blend(expected.get((px, py), bg), fg, d)
 
@@ -519,7 +519,7 @@ def cmd_tchain(a):
             for k in range(g.w):
                 if g.punkt(k, r) == 0:
                     continue
-                px = gx + g.links + k
+                px = gx + g.left_edge + k
                 py = gy - g.top_2 + r
                 if ymax is not None and py >= ymax:
                     continue
@@ -639,7 +639,7 @@ def cmd_tink(a):
                 gy = y + ddy
                 hits = 0
                 for (k, r) in points:
-                    actual = image.pixel(gx + g.links + k, gy - g.top_2 + r)
+                    actual = image.pixel(gx + g.left_edge + k, gy - g.top_2 + r)
                     if actual is None:
                         continue
                     if sum(abs(actual[j] - bg[j]) for j in range(3)) >= 90:
@@ -658,8 +658,8 @@ def cmd_tink(a):
         for r in range(g.h):
             for k in range(g.w):
                 if g.punkt(k, r) >= 40:
-                    explained.add((gx + g.links + k, gy - g.top_2 + r))
-        left = gx + g.links
+                    explained.add((gx + g.left_edge + k, gy - g.top_2 + r))
+        left = gx + g.left_edge
         if x0 is None or left < x0:
             x0 = left
         if x1 is None or left + g.w > x1:

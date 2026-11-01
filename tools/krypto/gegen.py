@@ -1,35 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/krypto/gegen.py -- DIE GEGENPROBE MIT FREMDEN AUGEN.
-
-Der wichtigste Punkt des Auftrags dieser Runde, woertlich: "Eine
-Krypto-Umsetzung, die nur gegen sich selbst getestet ist, ist wertlos."
-
-Dieses Programm ist die UNABHAENGIGE Umsetzung. Es kennt von Osum
-nichts als das AUFGESCHRIEBENE FORMAT -- den Aufbau des Kopfsatzes aus
-dem Kopf von `kernel/crypto/krypto.fi` -- und rechnet alles andere mit fremdem
-Werkzeug:
-
-    Argon2id   argon2-cffi   (die Referenzumsetzung der Norm, RFC 9106)
-    XTS-AES    cryptography  (OpenSSL darunter)
-    SHA-256    hashlib
-    HMAC       hmac
-
-Es wird in BEIDE Richtungen gemessen:
-
-    lies     was Osum geschrieben hat, mit fremdem Werkzeug
-             aufmachen -- Kopfsatz pruefen, Schluesselplatz auspacken,
-             Sektoren entschluesseln, Dateien nachrechnen.
-    schreib  einen Traeger, den NUR dieses Programm angelegt hat, und
-             Osum muss ihn aufmachen koennen.
-
-Die zweite Richtung ist die schaerfere: sie faellt aus, sobald Osum
-irgendwo etwas anderes rechnet als die Norm -- auch dann, wenn es mit
-sich selbst einig bleibt.
-
-    tools/krypto/gegen.py lies <abbild> <passphrase>
-    tools/krypto/gegen.py schreib <abbild> <passphrase> [t] [m] [p]
-    tools/krypto/gegen.py baum <abbild> <passphrase>
+"""Usage:
+    tools/krypto/gegen.py read_text <abbild> <passphrase>
+    tools/krypto/gegen.py write <abbild> <passphrase> [t] [m] [p]
+    tools/krypto/gegen.py tree <abbild> <passphrase>
     tools/krypto/gegen.py roh <abbild>
     tools/krypto/gegen.py vektoren <orakel>
 """

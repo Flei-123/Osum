@@ -1,32 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/alltag/pad.py -- DIE LAENGE EINER TEXTKONSTANTE AUSRECHNEN.
-
-Firn verlangt, dass ein `static`/`var` mit Feldtyp `[u8; N]` GENAU N
-Zeichen bekommt, das abschliessende Null-Oktett eingerechnet:
-
-    static mut t: [u8; 12] = "Löschen\0\0\0\0"
-
-Das ist richtig so -- der Anfangswert steht im Objektcode, es gibt
-niemanden, der ihn vorher ausrechnen koennte. Nur zaehlt ein Mensch
-Umlaute falsch (Ö sind ZWEI Oktette), und ein falsch gezaehlter Puffer
-ist ein Fehler, der erst im Bild auffaellt.
-
-Also wird die Laenge hier ausgerechnet. Wer eine Zeile
-
-    static mut t: [u8; ?] = "Löschen"
-
-schreibt, bekommt daraus
-
-    static mut t: [u8; 9] = "Löschen\0"
-
-Das Fragezeichen ist die Bitte um Nachrechnen; eine Zeile mit einer
-ZAHL wird nicht angefasst, damit Puffer, die absichtlich groesser sind
-als ihr Anfangswert, groesser bleiben.
-
-    python3 tools/alltag/pad.py <datei> [...]
-
-Laeuft mehrfach ohne Schaden: nach dem ersten Lauf steht dort eine Zahl.
+"""Usage:
+    python3 tools/alltag/pad.py <file> [...]
 """
 import re
 import sys

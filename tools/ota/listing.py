@@ -1,52 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/listing.py -- das signierte VERZEICHNIS einer Quelle.
-
-    listing.py <quellverzeichnis> --fassung <n> --schluessel <geheim.key>
-                   [--kaputt <datei>]
-
-WAS EIN VERZEICHNIS IST UND WARUM ES NEBEN DEM INDEX STEHT.
-
-`opk quelle` schreibt seit Runde UPDATE einen `INDEX` und eine
-`INDEX.sig`. Der INDEX nennt je Paket den STORE-Streuwert -- den
-Streuwert ueber Metadaten und Daten INNERHALB des Pakets. Das ist das
-richtige Glied fuer die Frage "ist das Paket, das ich ausgepackt habe,
-das gemeinte?", und `opk` prueft es.
-
-Es ist NICHT das richtige Glied fuer die Frage, die ein Update ueber das
-Netz zuerst stellen muss: "sind die Oktette, die ueber die Leitung kamen,
-vollstaendig und unveraendert -- BEVOR ich irgendetwas damit tue?" Dafuer
-braucht es den Streuwert ueber die DATEI, so wie sie auf der Leitung
-liegt, und die Laenge, damit ein Abbruch als Abbruch erkennbar ist und
-nicht als Inhalt.
-
-Dazu kommt die Fassungsnummer der QUELLE. Sie ist der
-Rueckschrittsschutz: `/system/FASSUNG` auf dem Geraet darf nur steigen.
-Ohne sie kann jeder, der eine alte, richtig signierte Antwort
-aufgehoben hat, ein Geraet auf eine Fassung mit bekannter Luecke
-zuruecksetzen -- und jede Signatur waere dabei gueltig.
-
-DAS FORMAT, ASCII, mit Tabulatoren getrennt, Zeilenende LF:
-
-    OTA1
-    fassung\t<dezimal>
-    paket\t<name>\t<fassung>\t<sha256 der Datei, 64 hex>\t<oktette>\t<datei>\t<plattform>
-    ...
-
-Die erste Zeile ist die Kennung. Die zweite MUSS die Fassung sein --
-das Geraet liest sie, bevor es irgendeine Paketzeile ansieht.
-
-`VERZEICHNIS.sig` sind 64 rohe Oktette: die Ed25519-Signatur ueber ALLE
-Oktette von `VERZEICHNIS`. Gerechnet wird sie mit derselben Umsetzung,
-die `pkg/opk.py` benutzt, und danach mit einer FREMDEN (libsodium ueber
-pynacl, sonst `cryptography`) nachgeprueft -- eine Signatur, die nur ihr
-eigener Erzeuger anerkennt, sagt nichts.
-
-`--kaputt <datei>` schreibt ein Verzeichnis, das RICHTIG signiert ist und
-in dem der Streuwert genau eines Pakets veraendert wurde. Das ist der
-Fall (g) des Laeufers: die Signatur stimmt, der Inhalt nicht, und das
-Geraet muss trotzdem ablehnen -- weil die Kette an jedem Glied geprueft
-wird und nicht nur am ersten.
+"""Usage:
+    listing.py <quellverzeichnis> --revision <n> --key <secret.key>
+    [--broken <file>]
+    revision	<dezimal>
 """
 import hashlib
 import importlib.util
@@ -99,15 +56,15 @@ def meta_aus_opk(path_2):
             raise SystemExit("verzeichnis: %s ist not an OPKG file" % path_2)
         ml = int.from_bytes(header[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
-    name = fassung = None
+    name = revision = None
     for line in meta.split("\n"):
         if line.startswith("name="):
             name = line[5:].strip()
         elif line.startswith("fassung="):
-            fassung = line[8:].strip()
+            revision = line[8:].strip()
     if not name:
         raise SystemExit("verzeichnis: %s hat keinen Namen" % path_2)
-    return name, fassung or "0"
+    return name, revision or "0"
 
 
 def main():
@@ -115,25 +72,25 @@ def main():
         print(__doc__)
         return 2
     source = sys.argv[1]
-    fassung = None
-    schluessel = None
-    kaputt = None
+    revision = None
+    key = None
+    broken = None
     i = 2
     while i < len(sys.argv):
         a = sys.argv[i]
-        if a == "--fassung" and i + 1 < len(sys.argv):
+        if a == "--revision" and i + 1 < len(sys.argv):
             i += 1
-            fassung = int(sys.argv[i])
-        elif a == "--schluessel" and i + 1 < len(sys.argv):
+            revision = int(sys.argv[i])
+        elif a == "--key" and i + 1 < len(sys.argv):
             i += 1
-            schluessel = sys.argv[i]
-        elif a == "--kaputt" and i + 1 < len(sys.argv):
+            key = sys.argv[i]
+        elif a == "--broken" and i + 1 < len(sys.argv):
             i += 1
-            kaputt = sys.argv[i]
+            broken = sys.argv[i]
         else:
             raise SystemExit("verzeichnis: unbekanntes Wort %s" % a)
         i += 1
-    if fassung is None or schluessel is None:
+    if revision is None or key is None:
         print(__doc__)
         return 2
 
@@ -141,22 +98,22 @@ def main():
     if not dateien:
         raise SystemExit("verzeichnis: %s hat keine .opk-Datei" % source)
 
-    zeilen = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t0"]
+    rows = ["OTA2", "fassung\t%d" % revision, "schluesselgen\t0"]
     for d in dateien:
         p = os.path.join(source, d)
         roh = open(p, "rb").read()
         h = hashlib.sha256(roh).hexdigest()
-        if kaputt == d:
+        if broken == d:
             h = ("%x" % (int(h, 16) ^ 1)).rjust(64, "0")
         name, pf = meta_aus_opk(p)
         plattform = PLT.plattform_von_roh(roh, d)
-        zeilen.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
+        rows.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
                       % (name, pf, h, len(roh), d, plattform))
-    text = "\n".join(zeilen) + "\n"
+    text = "\n".join(rows) + "\n"
     roh = text.encode("ascii")
 
     m = load_opk()
-    sk = open(schluessel, "rb").read()
+    sk = open(key, "rb").read()
     pk = m.ed25519_public(sk)
     sig = m.ed25519_sign(sk, roh)
     if not m.ed25519_verify(pk, roh, sig):
@@ -171,7 +128,7 @@ def main():
     with open(os.path.join(source, "VERZEICHNIS.sig"), "wb") as f:
         f.write(sig)
     print("   VERZEICHNIS  fassung %d, %d Paket(e), %d Oktette, sig %s...%s"
-          % (fassung, len(dateien), len(roh), sig.hex()[:12],
+          % (revision, len(dateien), len(roh), sig.hex()[:12],
              "" if changed else " (KEINE zweite Meinung verfuegbar)"))
     return 0
 

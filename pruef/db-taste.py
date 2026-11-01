@@ -9,7 +9,7 @@
 import re
 import time
 
-lauf.sag("== WELCHE TASTE GIBT '>' ? ==")
+lauf.say("== WELCHE TASTE GIBT '>' ? ==")
 lauf.m.klick_auf(300, 300)
 time.sleep(1)
 
@@ -22,13 +22,13 @@ KANDIDATEN = [
 ]
 
 for k in KANDIDATEN:
-    vorher = len(lauf.lies())
-    lauf.m.taste(k)
+    vorher = len(lauf.read_text())
+    lauf.m.key_press(k)
     time.sleep(0.9)
-    neu = lauf.lies()[vorher:]
+    renewed = lauf.read_text()[vorher:]
     # Der Kern schreibt jeden Druck als `key: <zeichen>`.
-    treffer = re.findall(r"key: (.{1,12})", neu)
-    lauf.sag("  %-16s -> %s" % (k, treffer[:3] if treffer else "NICHTS"))
+    treffer = re.findall(r"key: (.{1,12})", renewed)
+    lauf.say("  %-16s -> %s" % (k, treffer[:3] if treffer else "NICHTS"))
 
-lauf.bild("tastenprobe")
-lauf.sag("== Ende ==")
+lauf.image("tastenprobe")
+lauf.say("== Ende ==")

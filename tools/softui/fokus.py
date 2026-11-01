@@ -1,30 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/fokus.py -- WORAN MAN DAS SCHARFE FENSTER ERKENNT.
-
-Die Runde nimmt der Titelleiste den Akzent.  Damit faellt der eine
-Hinweis weg, an dem man bis jetzt gesehen hat, welches Fenster die
-Tastatur bekommt -- und die Behauptung dieser Runde ist, dass der
-SCHATTEN ihn ersetzt: das scharfe Fenster steht hoeher.
-
-Das ist eine Behauptung ueber Bildpunkte und wird als solche geprueft.
-Fuer jedes Fenster mit Schmuck aus dem Mitschnitt:
-
-  tiefe    wie viele Helligkeitsstufen der dunkelste Schattenpunkt
-           LINKS neben dem Fenster unter dem ungestoerten Untergrund
-           liegt.  Links, weil dort nichts anderes hinreicht -- der
-           Schatten sitzt einen Bildpunkt tiefer und die Zeile in der
-           Mitte der Fensterhoehe trifft weder Titelleiste noch Griff.
-  weite    wie viele Bildpunkte weit der Unterschied reicht.
-
-Und zusaetzlich, weil es die andere Haelfte derselben Aussage ist:
-
-  titel    ob die Titelleiste des scharfen Fensters gesaettigt ist.
-           "kein akzent" heisst: die haeufigste Farbe des Balkens hat
-           weniger als 40 Stufen Abstand zwischen ihrem groessten und
-           ihrem kleinsten Kanal -- ein Grau, kein Blau.
-
-    fokus.py <bild.ppm> <serial.txt>
+"""Usage:
+    fokus.py <image.ppm> <serial.txt>
 """
 import re
 import sys

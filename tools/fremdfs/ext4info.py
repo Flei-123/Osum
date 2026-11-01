@@ -1,24 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fremdfs/ext4info.py -- EIN ext4-ABBILD MIT FREMDEN AUGEN LESEN.
-
-Dieses Programm ist KEIN zweiter Treiber und soll keiner werden. Es
-beantwortet genau die Fragen, die der Pruefstand ueber ein Abbild
-stellen muss, BEVOR Osum es zu sehen bekommt:
-
-    tiefe <abbild> <pfad>    Die Tiefe des Extent-Baums dieser Datei.
-                             Ohne diese Zahl waere "der Treiber kann
-                             Extent-Baeume" eine Hoffnung: bei Tiefe 0
-                             stehen alle Extents im Inode und der Baum
-                             wird nie betreten.
-    sb <abbild>              Die Kennzahlen des Superblocks, eine je
-                             Zeile -- Blockgroesse, Inodegroesse,
-                             Merkmale, Zustand.
-    htree <abbild> <pfad>    Ist dieses Verzeichnis htree-indiziert?
-
-Warum nicht `debugfs`: `debugfs` kann das alles, aber es schreibt es
-als Fliesstext fuer Menschen, und der Pruefstand muesste ihn zerlegen.
-Diese vierzig Zeilen lesen dieselben Felder unmittelbar.
+"""ext4info.py
 """
 import struct
 import sys

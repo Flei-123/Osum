@@ -52,7 +52,7 @@ def columns(m):
     return [any(m[y][x] for y in range(h)) for x in range(w)]
 
 
-def buendel(voll, luecke):
+def buendel(voll, gap):
     out = []
     run_2 = None
     empty_2 = 0
@@ -66,7 +66,7 @@ def buendel(voll, luecke):
         else:
             if run_2 is not None:
                 empty_2 += 1
-                if empty_2 >= luecke:
+                if empty_2 >= gap:
                     out.append((run_2[0], run_2[1]))
                     run_2 = None
                     empty_2 = 0
@@ -78,10 +78,10 @@ def buendel(voll, luecke):
 def field_messen(px, x0, y0, w, h, name, args):
     bg = reason(px, x0, y0, w, h)
     m = tinte(px, x0, y0, w, h, bg, args.schwelle)
-    for r in range(max(0, h - args.rand_unten), h):
+    for r in range(max(0, h - args.margin_bottom), h):
         for c in range(w):
             m[r][c] = 0
-    for r in range(min(h, args.rand_oben)):
+    for r in range(min(h, args.margin_top)):
         for c in range(w):
             m[r][c] = 0
     ganz = kasten(m)
@@ -89,7 +89,7 @@ def field_messen(px, x0, y0, w, h, name, args):
         return {"name": name, "leer": True, "feld": (x0, y0, w, h)}
     gx0, gy0, gx1, gy1 = ganz
     voll = columns(m)
-    bs = buendel(voll, args.luecke)
+    bs = buendel(voll, args.gap)
     sym = None
     txt = None
     if len(bs) >= 2:
@@ -194,27 +194,27 @@ def lines_find(px, x0, y0, w, h, args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("bild")
-    ap.add_argument("--feld", action="append", default=[],
+    ap.add_argument("image")
+    ap.add_argument("--field", action="append", default=[],
                     help="x,y,b,h[:name] -- ein Klickfeld")
-    ap.add_argument("--zeilen", default=None,
+    ap.add_argument("--rows", default=None,
                     help="x,y,b,h -- ein Listenbereich, der in Zeilen"
                          " zerlegt wird")
     ap.add_argument("--schwelle", type=int, default=60,
                     help="ab welchem Farbabstand ein Punkt Tinte ist")
-    ap.add_argument("--luecke", type=int, default=3,
+    ap.add_argument("--gap", type=int, default=3,
                     help="so viele leere Spalten trennen Symbol von Text")
     ap.add_argument("--zeilenluecke", type=int, default=2)
     ap.add_argument("--tol", type=float, default=1.0,
                     help="erlaubter Unterschied in Bildpunkten")
-    ap.add_argument("--rand-unten", type=int, default=0,
+    ap.add_argument("--margin-bottom", type=int, default=0,
                     dest="rand_unten",
                     help="so viele Zeilen am unteren Feldrand nicht"
                          " mitzaehlen (Zustandsbalken/Pille)")
-    ap.add_argument("--rand-oben", type=int, default=0, dest="rand_oben")
+    ap.add_argument("--margin-top", type=int, default=0, dest="rand_oben")
     ap.add_argument("--min-anteil", type=int, default=55)
     ap.add_argument("--max-anteil", type=int, default=75)
-    ap.add_argument("--nur-messen", action="store_true",
+    ap.add_argument("--only-measure", action="store_true",
                     help="messen und berichten, aber nicht durchfallen")
     args = ap.parse_args()
 
@@ -224,15 +224,15 @@ def main():
     error = []
 
     felder = []
-    for f in args.feld:
+    for f in args.field:
         name = "feld%d" % len(felder)
         if ":" in f:
             f, name = f.split(":", 1)
         x, y, w, h = [int(v) for v in f.split(",")]
         felder.append((x, y, w, h, name))
 
-    if args.zeilen:
-        x, y, w, h = [int(v) for v in args.zeilen.split(",")]
+    if args.rows:
+        x, y, w, h = [int(v) for v in args.rows.split(",")]
         zs = lines_find(px, x, y, w, h, args)
         print("ROWS in area %d,%d %dx%d: %d found"
               % (x, y, w, h, len(zs)))
@@ -256,7 +256,7 @@ def main():
           % (len(felder), len(error)))
     for f in error:
         print("  - " + f)
-    if error and not args.only_messen:
+    if error and not args.only_measure:
         return 1
     return 0
 

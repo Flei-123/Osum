@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""oneshot.py <aus|neu|nein> -- EIN Aufruf: starten, klicken, urteilen.
-
-Alles in EINEM Prozess, weil abgekoppelte Hintergrundlaeufe in dieser
-Umgebung zwischen zwei Aufrufen sterben. Ergebnis steht in
-/tmp/befund-<mode>.txt UND auf der Standardausgabe.
+"""Usage:
+    oneshot.py <aus|renewed|nein> -- EIN Aufruf: starten, klicken, urteilen.
 """
 import os, re, subprocess, sys, time
 HIER = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HIER)
@@ -16,13 +13,13 @@ subprocess.run(["rm", "-rf", D, S]); os.makedirs(D); os.makedirs(S)
 SER = os.path.join(D, "serial.txt"); SOCK = "/tmp/one-%s.sock" % MODE
 if os.path.exists(SOCK): os.unlink(SOCK)
 LOG = open("/tmp/befund-%s.txt" % MODE, "w", buffering=1)
-def sag(*a):
+def say(*a):
     print(*a); print(*a, file=LOG)
-def lies():
+def read_text():
     try: return open(SER, "rb").read().decode("utf-8", "replace")
     except OSError: return ""
 def wins():
-    return re.findall(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", lies())
+    return re.findall(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", read_text())
 CL = ("modfs osum gfx wm wig desk wmshell wmdauer herz absturzhalt nopuls "
       "tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 "
       "nosched noproc nofs fbres=1280x800")
@@ -36,59 +33,59 @@ q = ["qemu-system-x86_64"] + kvm + ["-m","512","-smp","2",
 if MODE != "neu":
     q.append("-no-reboot")       # Ausschalten: die Maschine darf NICHT wiederkommen
 p = subprocess.Popen(q, stdout=open(os.path.join(D,"qemu.txt"),"w"), stderr=subprocess.STDOUT)
-sag("QEMU pid", p.pid, "mode", MODE, "(-no-reboot: %s)" % (MODE!="neu"))
+say("QEMU pid", p.pid, "mode", MODE, "(-no-reboot: %s)" % (MODE!="neu"))
 t0=time.time()
 while time.time()-t0 < 180:
     # NICHT nur "ready": erst wenn der Fensterserver das Fenster des
     # Starters (id=11) berichtet hat, steht seine Lage fest.
-    if re.search(r"id=11 x=\d+ y=\d+ w=\d+ h=\d+", lies()): break
-    if p.poll() is not None: sag("QEMU vorzeitig weg rc=",p.returncode); sys.exit(1)
+    if re.search(r"id=11 x=\d+ y=\d+ w=\d+ h=\d+", read_text()): break
+    if p.poll() is not None: say("QEMU vorzeitig weg rc=",p.returncode); sys.exit(1)
     time.sleep(0.5)
-sag("Starter bereit nach %.0fs" % (time.time()-t0))
+say("Starter bereit nach %.0fs" % (time.time()-t0))
 time.sleep(3)
 m = Maschine(SOCK, 1280, 800); m.verbinde()
-m.foto(S+"/00-schreibtisch.ppm")
+m.photo(S+"/00-schreibtisch.ppm")
 def fl():
-    w=re.findall(r"id=11 [^\n]*fl=(\d+)", lies()); return w[-1] if w else "?"
-sag("Startmenue fl=%s (18=offen, 19=zu)" % fl())
+    w=re.findall(r"id=11 [^\n]*fl=(\d+)", read_text()); return w[-1] if w else "?"
+say("Startmenue fl=%s (18=offen, 19=zu)" % fl())
 if fl() != "18":
-    m.taste("meta_l"); time.sleep(3); sag("nach Super fl=%s" % fl())
-m.foto(S+"/10-startmenue.ppm")
+    m.key_press("meta_l"); time.sleep(3); say("nach Super fl=%s" % fl())
+m.photo(S+"/10-startmenue.ppm")
 # --- Energieknopf: Lage aus dem Fensterbericht + bekanntem Layout
-w11=re.findall(r"id=11 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", lies())
+w11=re.findall(r"id=11 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", read_text())
 gx,gy = int(w11[-1][0]), int(w11[-1][1])
-r4=re.findall(r"launcher: rect id=4 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", lies())
+r4=re.findall(r"launcher: rect id=4 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", read_text())
 if r4: rx,ry,rw,rh=(int(v) for v in r4[-1])
 else:  rx,ry,rw,rh=12,376,76,32       # gemessen im sauberen Lauf
 cx,cy = gx+rx+rw//2, gy+ry+rh//2
-sag("Energieknopf bei %d,%d (Fenster %d,%d)" % (cx,cy,gx,gy))
+say("Energieknopf bei %d,%d (Fenster %d,%d)" % (cx,cy,gx,gy))
 vor=set(wins())
 m.klick_auf(cx,cy); time.sleep(3)
-m.foto(S+"/20-energiemenue.ppm")
-auf=len(re.findall(r"energie auf", lies()))
-sag("  -> energie auf:", auf)
-neu=[x for x in wins() if x not in vor]
-sag("  -> neue Fenster:", neu[-2:] if neu else "keine")
-if not neu: sag("ABBRUCH: Menue ging nicht auf"); p.kill(); sys.exit(1)
-mx,my,mw,mh=(int(v) for v in neu[-1]); zh=mh//3
-ziel = 1 if MODE=="neu" else 0
-px,py = mx+mw//2, my+zh//2+ziel*zh
-sag("Menue %d,%d %dx%d -> Punkt %d bei %d,%d" % (mx,my,mw,mh,ziel,px,py))
+m.photo(S+"/20-energiemenue.ppm")
+auf=len(re.findall(r"energie auf", read_text()))
+say("  -> energie auf:", auf)
+renewed=[x for x in wins() if x not in vor]
+say("  -> neue Fenster:", renewed[-2:] if renewed else "keine")
+if not renewed: say("ABBRUCH: Menue ging nicht auf"); p.kill(); sys.exit(1)
+mx,my,mw,mh=(int(v) for v in renewed[-1]); zh=mh//3
+target = 1 if MODE=="neu" else 0
+px,py = mx+mw//2, my+zh//2+target*zh
+say("Menue %d,%d %dx%d -> Punkt %d bei %d,%d" % (mx,my,mw,mh,target,px,py))
 vor2=set(wins())
 m.klick_auf(px,py); time.sleep(3)
-m.foto(S+"/30-abfrage.ppm")
-sag("  -> wahl:", re.findall(r"energie wahl=(\d+)", lies()))
-sag("  -> frage:", re.findall(r"energie frage=(\d+)", lies()))
+m.photo(S+"/30-abfrage.ppm")
+say("  -> wahl:", re.findall(r"energie wahl=(\d+)", read_text()))
+say("  -> frage:", re.findall(r"energie frage=(\d+)", read_text()))
 dlg=[x for x in wins() if x not in vor2]
-sag("  -> Dialog:", dlg[-1] if dlg else "keiner")
-if not dlg: sag("ABBRUCH: keine Rueckfrage"); p.kill(); sys.exit(1)
+say("  -> Dialog:", dlg[-1] if dlg else "keiner")
+if not dlg: say("ABBRUCH: keine Rueckfrage"); p.kill(); sys.exit(1)
 dx,dy,dw,dh=(int(v) for v in dlg[-1])
 if MODE=="nein":
-    sag("ABBRECHEN mit Flucht")
-    m.taste("esc"); time.sleep(3)
-    m.foto(S+"/40-abgebrochen.ppm")
-    sag("  -> abbruch:", len(re.findall(r"energie abbruch", lies())))
-    sag("  -> tat:", re.findall(r"energie tat (\d+)", lies()))
+    say("ABBRECHEN mit Flucht")
+    m.key_press("esc"); time.sleep(3)
+    m.photo(S+"/40-abgebrochen.ppm")
+    say("  -> abbruch:", len(re.findall(r"energie abbruch", read_text())))
+    say("  -> tat:", re.findall(r"energie tat (\d+)", read_text()))
 else:
     # Die TAT steht RECHTS. Mehrere Punkte der Knopfzeile probieren --
     # die genaue Knopfbreite rechnet wlib selbst aus dem Text.
@@ -99,28 +96,28 @@ else:
     for bx in (dx+dw-150, dx+dw-170, dx+dw-130, dx+dw-190, dx+dw-110):
         for by in (dy+dh-26, dy+dh-30, dy+dh-20):
             m.klick_auf(bx,by); time.sleep(2)
-            if re.findall(r"energie tat (\d+)", lies()):
-                sag("  TAT ausgeloest mit Klick auf %d,%d" % (bx,by)); ok=True; break
-            if len(re.findall(r"energie abbruch", lies())):
-                sag("  (Abbrechen getroffen bei %d,%d)" % (bx,by)); break
+            if re.findall(r"energie tat (\d+)", read_text()):
+                say("  TAT ausgeloest mit Klick auf %d,%d" % (bx,by)); ok=True; break
+            if len(re.findall(r"energie abbruch", read_text())):
+                say("  (Abbrechen getroffen bei %d,%d)" % (bx,by)); break
         if ok: break
     if not ok:
-        sag("  Knopf nicht getroffen -- Tastatur: tab, tab, enter")
-        m.taste("tab"); time.sleep(0.5); m.taste("ret"); time.sleep(2)
-    sag("  -> tat:", re.findall(r"energie tat (\d+)", lies()))
+        say("  Knopf nicht getroffen -- Tastatur: tab, tab, enter")
+        m.key_press("tab"); time.sleep(0.5); m.key_press("ret"); time.sleep(2)
+    say("  -> tat:", re.findall(r"energie tat (\d+)", read_text()))
     try:
-        m.foto(S+"/40-danach.ppm")
+        m.photo(S+"/40-danach.ppm")
     except Exception as e:
-        sag("  kein Foto mehr (%s) -- die Maschine geht" % type(e).__name__)
+        say("  kein Foto mehr (%s) -- die Maschine geht" % type(e).__name__)
 # ------------------------------------------------------------- Urteil
-sag("\n== warte auf das Ende der Maschine")
+say("\n== warte auf das Ende der Maschine")
 ende=None
 for i in range(12):
     if p.poll() is not None: ende=p.returncode; break
     time.sleep(1)
-t=lies()
-sag("\n=== BEFUND (%s) ===" % MODE)
-sag("QEMU beendet:", "ja, rc=%s" % ende if ende is not None else "NEIN, laeuft noch")
+t=read_text()
+say("\n=== BEFUND (%s) ===" % MODE)
+say("QEMU beendet:", "ja, rc=%s" % ende if ende is not None else "NEIN, laeuft noch")
 for pat,was in ((r"energie auf","Menue aufgeklappt"),
                 (r"energie wahl=(\d+)","Punkt gewaehlt"),
                 (r"energie frage=(\d+)","Rueckfrage"),
@@ -132,7 +129,7 @@ for pat,was in ((r"energie auf","Menue aufgeklappt"),
                 (r"power: acpi pm1a=([0-9a-fx]+)","ACPI S5"),
                 (r"power: reset","ACPI Reset"),
                 (r"mb: flags=","Kern hochgekommen")):
-    r=re.findall(pat,t); sag("  %-24s %s" % (was, ("%dx %s"%(len(r),r[:3])) if r else "-"))
+    r=re.findall(pat,t); say("  %-24s %s" % (was, ("%dx %s"%(len(r),r[:3])) if r else "-"))
 if p.poll() is None: p.kill()
 for f in sorted(os.listdir(S)):
     if f.endswith(".ppm"):
@@ -141,4 +138,4 @@ for f in sorted(os.listdir(S)):
             Image.open(os.path.join(S,f)).save(os.path.join(S,f[:-4]+".png"))
             os.unlink(os.path.join(S,f))
         except Exception: pass
-sag("Bilder:", S)
+say("Bilder:", S)

@@ -48,16 +48,16 @@ def messen(px, w, h, bx, by, bw, bh, name):
         print("  %-14s no text/symbol found in the button" % name)
         return False
     xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
-    links = min(xs) - bx
+    left = min(xs) - bx
     right = (bx + bw - 1) - max(xs)
     top_2 = min(ys) - by
     bottom = (by + bh - 1) - max(ys)
-    dx = abs(links - right)
+    dx = abs(left - right)
     dy = abs(top_2 - bottom)
     ok = dx <= 1 and dy <= 1
     print("  %-14s Knopf %dx%d   links %3d rechts %3d (Diff %d)   "
           "oben %3d unten %3d (Diff %d)   %s"
-          % (name, bw, bh, links, right, dx, top_2, bottom, dy,
+          % (name, bw, bh, left, right, dx, top_2, bottom, dy,
              "MITTIG" if ok else "NICHT MITTIG"))
     return ok
 

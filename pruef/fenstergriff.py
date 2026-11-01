@@ -1,40 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""fenstergriff.py -- 4.1 VERSCHIEBEN und 4.2 GROESSE, gegen ZWEI Abbilder.
-
-    python3 fenstergriff.py <name> <osum.mb> <root.img> [breite] [hoehe]
-
-WORUM ES GEHT. BEFUND-DURCHKLICK-2 sagt fuer 4.1 "VORHER GEHT, NACHHER
-GEHT NICHT" und laesst offen, ob das eine Regression dieser Runde ist
-oder ein Messfehler. "Nicht abschliessend geklaert" ist keine Antwort.
-Also: DIESELBE Ziehbewegung, DIESELBEN Koordinaten, gegen das alte
-Abbild (merge8) und das neue -- und die Fensterlage kommt aus der
-seriellen Leitung des Fensterservers, nicht aus einem Bild.
-
-WIE HIER GEZOGEN WIRD, und warum die Koordinaten aus der Meldung kommen.
-Der Fensterserver rechnet in `on_mouse` (kernel/ui/wm.fi):
-
-    lokal_x = x - win_x - inx        inx = border      (2 * uisc)
-    lokal_y = y - win_y - iny        iny = title_h     (22 * uisc)
-
-    lokal_y < 0                              -> Titelleiste, ZIEHEN
-    lokal_x >= W_W - grip && lokal_y >= W_H - grip  -> GRIFF, GROESSE
-
-`W_W`/`W_H` sind die INNENmasse (das, was `wm: fen ... w= h=` meldet);
-aussen ist das Fenster `w + 2*border` breit und `h + title_h + border`
-hoch. Der Griff ist `12 * uisc` gross. Daraus folgt bildpunktgenau:
-
-    Titelleiste:  y zwischen win_y + 4 und win_y + title_h - 1
-                  x NICHT im Schliessfeld (rechts oben) und nicht in
-                  den drei Schaltflaechen -> also linke Haelfte nehmen
-    Griff:        x = win_x + border + W_W - grip/2
-                  y = win_y + title_h + W_H - grip/2
-
-DIE TASTE MUSS BEIM DRUECKEN SCHON AM ZIEL SEIN. Der ganze Hit-Test
-oben steht in `if btn != alt` -- er laeuft also NUR bei einem WECHSEL
-des Tastenzustands, und der Ort, der dabei zaehlt, ist der, an dem die
-Taste heruntergeht. Ein Drueck-dann-Fahr ist richtig; ein Fahr-mit-
-gedrueckter-Taste-ueber-den-Griff waere es nicht.
+"""Usage:
+    fenstergriff.py -- 4.1 VERSCHIEBEN und 4.2 SIZE, gegen TWO Abbilder.
+    python3 fenstergriff.py <name> <osum.mb> <root.img> [width] [height]
+    local_y < 0                              -> Titelleiste, ZIEHEN
 """
 import os
 import re
@@ -49,8 +18,8 @@ from klick import Maschine
 NAME = sys.argv[1] if len(sys.argv) > 1 else "fg"
 MB = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HIER, "osum.mb")
 IMG = sys.argv[3] if len(sys.argv) > 3 else os.path.join(HIER, "root.img")
-BREITE = int(sys.argv[4]) if len(sys.argv) > 4 else 1280
-HOEHE = int(sys.argv[5]) if len(sys.argv) > 5 else 800
+WIDTH = int(sys.argv[4]) if len(sys.argv) > 4 else 1280
+HEIGHT = int(sys.argv[5]) if len(sys.argv) > 5 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SER = os.path.join(D, "serial.txt")
 
@@ -90,7 +59,7 @@ def start():
         subprocess.run(["cp", "-f", IMG, os.path.join(HIER, "root.img")],
                        check=True)
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
     t0 = time.time()
     while time.time() - t0 < 180:
@@ -103,7 +72,7 @@ def start():
             # weitermacht, misst "kein Fenster" und meint das System.
             bis = time.time() + 120
             while time.time() < bis:
-                if fenster(s()):
+                if window(s()):
                     time.sleep(2)
                     return True, time.time() - t0
                 time.sleep(0.5)
@@ -112,7 +81,7 @@ def start():
     return None, None
 
 
-def fenster(t):
+def window(t):
     """Alle gemeldeten Fensterlagen: id -> (x, y, w, h, lay, fl)."""
     aus = {}
     for m in re.finditer(r"wm: fen i=\d+ id=(\d+) x=(\d+) y=(\d+) w=(\d+) "
@@ -121,7 +90,7 @@ def fenster(t):
     return aus
 
 
-def warte_neue_lage(wid, frist=60):
+def wait_new_layout(wid, deadline=60):
     """Auf eine FRISCHE Fensterzeile warten.
 
     `wm: fen` haengt am Puls (kgui), und der kommt nicht im
@@ -131,19 +100,19 @@ def warte_neue_lage(wid, frist=60):
     Genau das ist beim ersten Anlauf dieser Messung passiert.
     """
     n = len(re.findall(r"wm: fen i=\d+ id=%d " % wid, s()))
-    bis = time.time() + frist
+    bis = time.time() + deadline
     while time.time() < bis:
         if len(re.findall(r"wm: fen i=\d+ id=%d " % wid, s())) > n:
             time.sleep(0.5)
-            return fenster(s()).get(wid)
+            return window(s()).get(wid)
         time.sleep(0.4)
-    return fenster(s()).get(wid)
+    return window(s()).get(wid)
 
 
-def ziel_fenster(t):
+def target_window(t):
     """Das Fenster mit Schmuck: lay=1 (L_NORMAL) und fl ohne F_NODECO(2)."""
     best = None
-    for wid, (x, y, w, h, lay, fl) in fenster(t).items():
+    for wid, (x, y, w, h, lay, fl) in window(t).items():
         if lay == 1 and (fl & 2) == 0 and (fl & 1) == 0 and w >= 200:
             best = (wid, x, y, w, h)
     return best
@@ -157,12 +126,12 @@ def main():
     print("hochgefahren nach %.1f s  (%s)" % (boot, os.path.basename(IMG)),
           flush=True)
     time.sleep(3)
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
 
-    z = ziel_fenster(s())
+    z = target_window(s())
     if not z:
         print("kein Fenster mit Schmuck gemeldet")
-        print("gemeldete Fenster:", fenster(s()))
+        print("gemeldete Fenster:", window(s()))
         return 1
     wid, x, y, w, h = z
     print("Zielfenster id=%d  x=%d y=%d w=%d h=%d" % (wid, x, y, w, h),
@@ -175,9 +144,9 @@ def main():
     ty = y + TITLE_H // 2
     print("\n4.1 ziehen: greife Titelleiste bei (%d,%d)" % (tx, ty),
           flush=True)
-    vor = fenster(s()).get(wid)
+    vor = window(s()).get(wid)
     m.ziehe(tx, ty, tx + 200, ty + 150)
-    nach = warte_neue_lage(wid)
+    nach = wait_new_layout(wid)
     print("    vorher  %s" % (vor,))
     print("    nachher %s" % (nach,))
     bewegt = bool(vor and nach and (abs(nach[0] - vor[0]) > 20
@@ -185,7 +154,7 @@ def main():
     print("    -> VERSCHOBEN: %s" % ("JA" if bewegt else "NEIN"), flush=True)
 
     # ---------------------------------------------------- 4.2 GROESSE
-    z2 = warte_neue_lage(wid)
+    z2 = wait_new_layout(wid)
     if z2:
         x2, y2, w2, h2 = z2[0], z2[1], z2[2], z2[3]
     else:
@@ -198,9 +167,9 @@ def main():
     print("\n4.2 groesse: greife Griff bei (%d,%d)" % (gx, gy), flush=True)
     print("    (Fenster x=%d y=%d w=%d h=%d; Griff ist %d gross)"
           % (x2, y2, w2, h2, GRIP))
-    vor2 = fenster(s()).get(wid)
+    vor2 = window(s()).get(wid)
     m.ziehe(gx, gy, gx + 160, gy + 110)
-    nach2 = warte_neue_lage(wid)
+    nach2 = wait_new_layout(wid)
     print("    vorher  %s" % (vor2,))
     print("    nachher %s" % (nach2,))
     groesser = bool(vor2 and nach2 and (nach2[2] > vor2[2] + 20
@@ -210,10 +179,10 @@ def main():
     # Was der Server ueber seine Zaehler sagt -- das trennt "Klick kam
     # nicht an" von "Klick kam an, Zweig nicht genommen".
     t = s()
-    for marke in ("wm: hits", "S_DOWNS", "wm: downs"):
-        for zeile in re.findall(r"%s[^\n]{0,50}" % marke, t)[-2:]:
-            print("    |", zeile)
-    m.sag("quit", 0.2)
+    for mark in ("wm: hits", "S_DOWNS", "wm: downs"):
+        for row in re.findall(r"%s[^\n]{0,50}" % mark, t)[-2:]:
+            print("    |", row)
+    m.say("quit", 0.2)
     time.sleep(1)
     print("\nERGEBNIS %s: ziehen=%s groesse=%s"
           % (os.path.basename(IMG), "JA" if bewegt else "NEIN",

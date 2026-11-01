@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/tree.py -- der Verzeichnisbaum, den der Dateimanager zeigt.
-
-Er wird HIER gebaut und nicht von Hand in `run.sh` aufgezaehlt, aus
-einem Grund: der Laeufer muss wissen, was in der Liste stehen MUSS --
-und zwar in derselben Reihenfolge, in der der Dateimanager sortiert.
-Zwei Listen, die man getrennt pflegt, gehen auseinander; eine, die
-beide benutzen, nicht.
-
-    tree.py <verzeichnis>
-
-Legt darin an:
-    theme      das Farbschema, das `/etc/theme` wird
-    liste      die Argumente fuer mkfs.py, eine Zeile je Stueck
-    soll.txt   was der Dateimanager in /data zeigen MUSS, sortiert
-               nach Namen -- Name, Groesse, Art
+"""Usage:
+    tree.py <directory>
 """
 import os
 import sys
@@ -61,32 +48,32 @@ def main():
     with open(os.path.join(d, "theme"), "wb") as f:
         f.write(THEME)
 
-    zeilen = ["/data/"]
+    rows = ["/data/"]
     soll = []
     for name, inhalt in DATEIEN:
         p = os.path.join(roh, name)
         with open(p, "wb") as f:
             f.write(inhalt)
-        zeilen.append("/data/%s=%s@0644" % (name, p))
+        rows.append("/data/%s=%s@0644" % (name, p))
         soll.append((name, len(inhalt), "-"))
     for o in FOLDER:
-        zeilen.append("/data/%s/" % o)
+        rows.append("/data/%s/" % o)
         soll.append((o, 0, "d"))
         for name, inhalt in UNDER.get(o, []):
             p = os.path.join(roh, "%s_%s" % (o, name))
             with open(p, "wb") as f:
                 f.write(inhalt)
-            zeilen.append("/data/%s/%s=%s@0644" % (o, name, p))
+            rows.append("/data/%s/%s=%s@0644" % (o, name, p))
 
     with open(os.path.join(d, "liste"), "w") as f:
-        for z in zeilen:
+        for z in rows:
             f.write(z + "\n")
     soll.sort(key=lambda t: (0 if t[2] == "d" else 1, t[0]))
     with open(os.path.join(d, "soll.txt"), "w") as f:
         for name, size, art in soll:
             f.write("%s\t%d\t%s\n" % (name, size, art))
     print("tree: %d entries in /data, %d lines for mkfs"
-          % (len(soll), len(zeilen)))
+          % (len(soll), len(rows)))
     return 0
 
 

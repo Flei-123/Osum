@@ -1,44 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/hotplug/monitor.py -- EIN STICK, IM BETRIEB GESTECKT UND GEZOGEN.
-
-    monitor.py <monitor-socket> <serielle-datei> <drehbuch>
-
-Der Unterschied zu `tools/wm/monitor.py` (Maus und Tasten) und
-`tools/k11/keys.py` (Text) ist genau eine Sache: hier wird die HARDWARE
-veraendert, waehrend die Maschine laeuft. QEMU kann das ueber den
-Monitor, und zwar mit denselben zwei Befehlen, mit denen ein Mensch
-einen Stick in ein Brett steckt und wieder herauszieht:
-
+"""Usage:
+    monitor.py <monitor-socket> <serielle-file> <drehbuch>
     device_add usb-storage,id=<name>,drive=<laufwerk>
     device_del <name>
-
-DAS IST DER GANZE PUNKT DIESER RUNDE. Ein Stick, der beim Start schon
-steckt, misst das Aufzaehlen -- mehr nicht. Erst ein Stick, der
-WAEHREND DES BETRIEBS kommt, misst den Weg, um den es geht: der
-Zeitgeber sieht den Anschlusswechsel, die Schreibtischschleife nimmt
-das Geraet auf, die Naht haengt es ein, die Seitenleiste zeigt es.
-
-DIE BEFEHLE DES DREHBUCHS (eine Zeile, ein Befehl):
-
-    stecke <id> <datei>   einen Stick anstecken (drive + device_add)
-    ziehe <id>            abziehen -- OHNE Auswerfen, die Gegenprobe
-    warte <sekunden>      anhalten
-    aufzeile <text>       warten, bis <text> auf der seriellen Leitung
-                          steht (hoechstens 60 s). DAS ist die
-                          Synchronisierung, mit der dieser Laeufer ohne
-                          feste Schlafzeiten auskommt -- eine feste
-                          Zahl waere auf einer belasteten Maschine
-                          entweder zu kurz (rot ohne Fehler) oder zu
-                          lang (die Abnahme dauert Stunden).
-    foto <datei.ppm>      ein Bildschirmfoto
-    taste <name>          eine Taste (sendkey)
-    text <zeichen>        ein Text, Zeichen fuer Zeichen
-    maus <dx> <dy>        die Maus bewegen
-    klick                 linke Taste, druecken und loslassen
+    stecke <id> <file>   einen Stick anstecken (drive + device_add)
+    wait <secs>      anhalten
     monitor <roh>         irgendein Monitorbefehl, roh
-
-Zeilen mit `#` sind Anmerkungen.
 """
 import os
 import socket

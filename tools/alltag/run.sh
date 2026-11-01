@@ -296,13 +296,13 @@ if [ -f "$OPK_ALLTAG" ]; then
     bash tools/loader/build.sh "$OUT/laden" > "$OUT/laden-bau.log" 2>&1
     bash tools/loader/pakete.sh "$OUT/laden" > "$OUT/laden-pak.log" 2>&1
     export OSUM_SIGN_PASS=alltag OSUM_ERSATZ_PASS=alltag
-    python3 tools/ota/schluesselbund.py "$OUT/bund.json" anlegen \
+    python3 tools/ota/keyring.py "$OUT/bund.json" anlegen \
         > "$OUT/bund.log" 2>&1
-    python3 tools/ota/schluesselbund.py "$OUT/bund.json" oeffentlich haupt \
+    python3 tools/ota/keyring.py "$OUT/bund.json" oeffentlich haupt \
         -o "$OUT/schluessel.pub" >> "$OUT/bund.log" 2>&1
     X=""
     for p in calc trash viewer snip zip lock; do
-        python3 tools/ota/schluesselbund.py "$OUT/bund.json" signieren \
+        python3 tools/ota/keyring.py "$OUT/bund.json" signieren \
             "$OUT/laden/stand/$p-1.opk" -o "$OUT/laden/stand/$p-1.opk.sig" \
             >> "$OUT/bund.log" 2>&1
         X="$X xfile=/pakete/$p-1.opk=$OUT/laden/stand/$p-1.opk"

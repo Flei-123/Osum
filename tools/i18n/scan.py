@@ -117,11 +117,11 @@ def erlaubt(text):
     return False
 
 
-def list_check(wurzel):
+def list_check(root):
     if len(sys.argv) > 1:
         return
     missing = [r for r in OBERFLAECHE
-             if not os.path.isfile(os.path.join(wurzel, r))]
+             if not os.path.isfile(os.path.join(root, r))]
     if missing:
         for r in missing:
             print("scan: EXECUTED, BUT NOT THERE: %s" % r)
@@ -156,12 +156,12 @@ def check(path_2, streng):
 
 
 def main():
-    wurzel = sys.argv[1] if len(sys.argv) > 1 else "."
-    list_check(wurzel)
+    root = sys.argv[1] if len(sys.argv) > 1 else "."
+    list_check(root)
     surface = []
     rest = []
     for basis in QUELLEN:
-        start = os.path.join(wurzel, basis)
+        start = os.path.join(root, basis)
         if not os.path.isdir(start):
             continue
         for folder, _dirs, dateien in os.walk(start):
@@ -169,7 +169,7 @@ def main():
                 if not d.endswith(".fi"):
                     continue
                 p = os.path.join(folder, d)
-                rel = os.path.relpath(p, wurzel).replace(os.sep, "/")
+                rel = os.path.relpath(p, root).replace(os.sep, "/")
                 if rel in EXCEPTIONS:
                     continue
                 if rel in OBERFLAECHE:

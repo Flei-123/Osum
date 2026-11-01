@@ -56,7 +56,7 @@ FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 # ======================================================================
 echo "== 0. the separation: provider knowledge stays in the back =="
 # ======================================================================
-python3 tools/account/split.py . --zahlen > "$TMPD/tr.txt" 2>&1
+python3 tools/account/split.py . --numbers > "$TMPD/tr.txt" 2>&1
 TRRC=$?
 cat "$TMPD/tr.txt" | sed 's/^/        /'
 is "die Trennungswache" "$TRRC" "0"
@@ -238,16 +238,16 @@ netz_zu() {
 }
 server_auf() { # [zusatzargumente]
     ip netns exec "$NS" python3 tools/account/attrappe.py --port 8443 \
-        --zertifikat "$TMPD/certs/good.pem" --schluessel "$TMPD/certs/good.key" \
-        --verzeichnis "$TMPD" "$@" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
+        --zertifikat "$TMPD/certs/good.pem" --key "$TMPD/certs/good.key" \
+        --directory "$TMPD" "$@" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
     sleep 1.0
 }
 server_zu() { [ -n "$SRVPID" ] && kill "$SRVPID" 2>/dev/null; SRVPID=""; }
 server_auf_zert() { # <pem> <key> [zusatz]
     local pem=$1 key=$2; shift 2
     ip netns exec "$NS" python3 tools/account/attrappe.py --port 8443 \
-        --zertifikat "$pem" --schluessel "$key" \
-        --verzeichnis "$TMPD" "$@" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
+        --zertifikat "$pem" --key "$key" \
+        --directory "$TMPD" "$@" > "$TMPD/srv.log" 2>&1 & SRVPID=$!
     sleep 1.0
 }
 
@@ -531,7 +531,7 @@ fi
 echo "== 10. renew, and what happens when the server says no =="
 # ======================================================================
 server_zu
-server_auf --access-sekunden 3600
+server_auf --access-secs 3600
 abbild "$TMPD/da.img" || true
 lauf "$TMPD/da.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_r1.txt"
 is "angemeldet mit einem Token, das in einer Stunde ablaeuft" "$(kv "$TMPD/o_r1.txt" stand)" "ok"
@@ -548,7 +548,7 @@ else
 fi
 
 server_zu
-server_auf --access-sekunden 3600 --refresh-verweigern
+server_auf --access-secs 3600 --refresh-verweigern
 lauf "$TMPD/da.img" "konto status --kennung=$RK" "$TMPD/o_r3.txt"
 is "Erneuerung abgelehnt -> sauber abgemeldet" "$(kv "$TMPD/o_r3.txt" abgemeldet)" "1"
 lauf "$TMPD/da.img" "konto liste" "$TMPD/o_r4.txt"

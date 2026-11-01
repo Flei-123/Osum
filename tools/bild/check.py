@@ -1,38 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bild/check.py -- DER UMLAUF, MIT EINER ZAHL DAHINTER.
-
-    python3 tools/bild/check.py <bilderverzeichnis> <geholtverzeichnis>
-
-Das System hat Dateien GESCHRIEBEN (`viewer -s`), und der Wirt hat sie
-vom Abbild geholt. Hier wird gemessen, ob sie etwas wert sind -- mit
-Pillow, also mit libpng und libjpeg-turbo, und nicht noch einmal mit dem
-Kodierer, der geprueft werden soll.
-
-DIE SCHRANKEN SIND NICHT FUER ALLE GLEICH, und das hat einen Grund:
-
-  PNG IST VERLUSTFREI. Ein GIF oder BMP, als PNG gesichert, muss
-  Bildpunkt fuer Bildpunkt DASSELBE Bild sein. Schranke: 0. Nicht
-  "klein" -- null.
-
-  JPEG IST EINE NAEHERUNG, und zwar eine, die die Norm nicht bis aufs
-  letzte Bit festlegt. Die Frage ist also nicht "wie weit weg vom
-  Original", sondern: LIEGT MEIN KODIERER DA, WO LIBJPEG AUCH LIEGT?
-  Darum wird dreifach gemessen:
-
-    1. gegen das Original -- was der Mensch sieht.
-    2. gegen LIBJPEG BEI DERSELBEN QUALITAET auf demselben Quellbild.
-       Das ist die eigentliche Messung: zwei richtige Kodierer duerfen
-       sich unterscheiden, aber nicht weit. Schranke: 6 Stufen im
-       Mittel.
-    3. die Dateigroesse gegen libjpeg. Ein Kodierer, der die
-       Huffman-Tabellen falsch benutzt, wird sofort deutlich groesser.
-
-  WARUM DAS DIE HONEST MESSUNG IST: ein Bild mit harten Kanten (und die
-  Testbilder haben welche, absichtlich) verliert auch bei libjpeg und
-  Qualitaet 90 sieben Stufen im Mittel. Wer nur gegen das Original
-  misst und eine kleine Zahl verlangt, misst nicht den Kodierer,
-  sondern die Glattheit des Testbildes.
+"""Usage:
+    python3 tools/image/check.py <bilderverzeichnis> <geholtverzeichnis>
 """
 
 import io

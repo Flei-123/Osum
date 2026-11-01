@@ -66,20 +66,20 @@ if __name__ == '__main__':
              ys[-1] - ys[0] + 1))
     print()
     print("  Zeile   Punkte")
-    zeilen = []
+    rows = []
     for y in range(ys[0], ys[-1] + 1):
         n = sum(1 for p in bright if p[1] == y)
-        zeilen.append(n)
+        rows.append(n)
         print("   %3d     %d" % (y - ys[0], n))
     print()
     columns = [sum(1 for p in bright if p[0] == x) for x in range(xs[0], xs[-1] + 1)]
     print("erste Zeile %d, letzte Zeile %d   %s"
-          % (zeilen[0], zeilen[-1],
-             "GLEICH" if zeilen[0] == zeilen[-1] else "UNGLEICH <-- Fehler"))
+          % (rows[0], rows[-1],
+             "GLEICH" if rows[0] == rows[-1] else "UNGLEICH <-- Fehler"))
     print("erste Spalte %d, letzte Spalte %d  %s"
           % (columns[0], columns[-1],
              "GLEICH" if columns[0] == columns[-1] else "UNGLEICH <-- Fehler"))
-    gut = zeilen[0] == zeilen[-1] and columns[0] == columns[-1]
+    gut = rows[0] == rows[-1] and columns[0] == columns[-1]
     print()
     print("URTEIL:", "alle vier Enden gleich" if gut else "die Enden sind NICHT gleich")
     sys.exit(0 if gut else 1)

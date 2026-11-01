@@ -80,31 +80,31 @@ def raster_s(f, gid, px, S):
     return w, h, bx0, by1, a
 
 
-def deckung_osum(font, px, zeichen):
-    g = font.glyphe_px(zeichen, px) if hasattr(font, "glyphe_px") \
-        else font.glyphe(zeichen)
-    feld = []
+def deckung_osum(font, px, chars):
+    g = font.glyphe_px(chars, px) if hasattr(font, "glyphe_px") \
+        else font.glyphe(chars)
+    field = []
     for r in range(g.h):
         for k in range(g.w):
-            feld.append(g.punkt(k, r))
-    return g.w, g.h, g.links, g.top_2, feld
+            field.append(g.punkt(k, r))
+    return g.w, g.h, g.left, g.top_2, field
 
 
-def deckung_freetype(path_2, px, zeichen):
+def deckung_freetype(path_2, px, chars):
     f = ImageFont.truetype(path_2, px)
-    m = f.getmask(zeichen, mode="L")
+    m = f.getmask(chars, mode="L")
     w, h = m.size
     return w, h, [m.getpixel((x, y)) for y in range(h) for x in range(w)]
 
 
-def stufen(feld):
-    return len(set(feld))
+def stufen(field):
+    return len(set(field))
 
 
-def kantenstufen(w, h, feld):
+def kantenstufen(w, h, field):
     best = 0
     for k in range(w):
-        s = set(feld[r * w + k] for r in range(h))
+        s = set(field[r * w + k] for r in range(h))
         if len(s) > best:
             best = len(s)
     return best
@@ -147,15 +147,15 @@ def main():
     args = sys.argv[1:]
     path_2 = os.path.join(ROOT, "assets", "osum-sans.ttf")
     groessen = [11, 13, 16, 24]
-    zeichen = "AOSgex8"
+    chars = "AOSgex8"
     i = 0
     rest = []
     while i < len(args):
         if args[i] == "--px":
             groessen = [int(v) for v in args[i + 1].split(",")]
             i += 2
-        elif args[i] == "--zeichen":
-            zeichen = args[i + 1]
+        elif args[i] == "--chars":
+            chars = args[i + 1]
             i += 2
         else:
             rest.append(args[i])
@@ -182,20 +182,20 @@ def main():
 
     for px in groessen:
         s = raster.Font(path_2, px)
-        for c in zeichen:
+        for c in chars:
             g = s.glyphe(ord(c))
             if g.w == 0 or g.h == 0:
                 continue
-            feld = [g.punkt(k, r) for r in range(g.h) for k in range(g.w)]
-            st = stufen(feld)
-            ka = kantenstufen(g.w, g.h, feld)
+            field = [g.punkt(k, r) for r in range(g.h) for k in range(g.w)]
+            st = stufen(field)
+            ka = kantenstufen(g.w, g.h, field)
             all_stufen.append(st)
             all_edges.append(ka)
             line = ("   px=%2d  '%s'  %2dx%-2d  stufen=%-3d kante=%-3d"
                      % (px, c, g.w, g.h, st, ka))
             if HAT_PIL:
                 bw, bh, bf = deckung_freetype(path_2, px, c)
-                mittel, groesst, dx, dy = abweichung(g.w, g.h, feld,
+                mittel, groesst, dx, dy = abweichung(g.w, g.h, field,
                                                      bw, bh, bf)
                 all_d.append(mittel)
                 all_max.append(groesst)

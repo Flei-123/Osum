@@ -19,61 +19,61 @@
 import re
 import time
 
-lauf.sag("== PUNKT 3, Zahlenbeleg: bewegen sich ECHTE Fenster? ==")
+lauf.say("== PUNKT 3, Zahlenbeleg: bewegen sich ECHTE Fenster? ==")
 
 
-def fenster():
-    text = lauf.lies()
+def window():
+    text = lauf.read_text()
     bloecke = re.split(r"(?=wm: fen i=0 )", text)
-    letzter = bloecke[-1] if len(bloecke) > 1 else text
-    alle = re.findall(
+    last_item = bloecke[-1] if len(bloecke) > 1 else text
+    everything = re.findall(
         r"wm: fen i=\d+ id=(\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) lay=(\d+)",
-        letzter)
+        last_item)
     d = {}
-    for f in alle:
+    for f in everything:
         d[int(f[0])] = tuple(int(v) for v in f[1:])
     return d
 
 
 # ------------------------------------------------------ ein Fenster auf
-vor = set(fenster().keys())
-lauf.m.taste("meta_l")
+vor = set(window().keys())
+lauf.m.key_press("meta_l")
 time.sleep(3)
-men = [(i, v) for i, v in fenster().items() if v[4] == 4]
+men = [(i, v) for i, v in window().items() if v[4] == 4]
 if not men:
-    lauf.sag("KEIN STARTMENUE -- Abbruch")
+    lauf.say("KEIN STARTMENUE -- Abbruch")
 else:
     mid, (mx, my, mw, mh, _) = men[-1]
     lauf.m.klick_auf(mx + 207, my + 60)
     time.sleep(1)
     for _ in range(24):
-        lauf.m.taste("backspace")
+        lauf.m.key_press("backspace")
     lauf.m.tippe("nedit")
     time.sleep(2)
 
     # DIE SERIE. Sechs Bilder so schnell wie moeglich nach der Eingabe:
     # die Bewegung dauert 160 ms, also faellt mindestens eines mitten
     # hinein, wenn es eine gibt.
-    lauf.m.taste("ret")
+    lauf.m.key_press("ret")
     for k in range(6):
-        lauf.bild("auf-%d" % k)
+        lauf.image("auf-%d" % k)
     time.sleep(6)
-    lauf.bild("auf-fertig")
+    lauf.image("auf-fertig")
 
-    neu = [i for i in fenster().keys() if i not in vor and i != mid]
-    if not neu:
-        lauf.sag("kein neues Fenster -- Abbruch")
+    renewed = [i for i in window().keys() if i not in vor and i != mid]
+    if not renewed:
+        lauf.say("kein neues Fenster -- Abbruch")
     else:
-        wid = max(neu)
-        wx, wy, ww, wh, _ = fenster()[wid]
-        lauf.sag("Fenster id=%d bei %d,%d %dx%d" % (wid, wx, wy, ww, wh))
+        wid = max(renewed)
+        wx, wy, ww, wh, _ = window()[wid]
+        lauf.say("Fenster id=%d bei %d,%d %dx%d" % (wid, wx, wy, ww, wh))
 
         # ------------------------------------------------ minimieren
-        lauf.sag("-- minimieren --")
+        lauf.say("-- minimieren --")
         lauf.m.klick_auf(wx + ww - 74, wy + 12)
         for k in range(6):
-            lauf.bild("min-%d" % k)
+            lauf.image("min-%d" % k)
         time.sleep(4)
-        lauf.bild("min-fertig")
+        lauf.image("min-fertig")
 
-lauf.sag("== Ende ==")
+lauf.say("== Ende ==")

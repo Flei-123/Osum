@@ -1,49 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/check.py -- DIE BILDER WERDEN GEMESSEN, NICHT ANGESEHEN.
-
-Justin, zu dieser Runde: *"Die Screenshots werden GEMESSEN, nicht
-angeschaut: keine leeren Beschriftungen, nichts abgeschnitten, nichts
-ueberlappend -- diese Fehler sind hier schon zweimal durchgerutscht."*
-
-Sie sind durchgerutscht, weil sie mit blossem Auge auf einem 800 x 600
-grossen Bild klein sind und weil ein Testlaeufer, der nur den
-Beendigungscode von QEMU liest, sie gar nicht sehen KANN.  Also nimmt
-dieses Programm den seriellen Mitschnitt als Behauptung und das Bild als
-Wahrheit und haelt beides gegeneinander.
-
-Der Mitschnitt meldet fuer jede Textausgabe der Widget-Bibliothek eine
-Zeile der Form
-
+"""Usage:
     wlib: text win=<id> kind=<n> x=<x> base=<y> fg=<n> bg=<n> tw=<n> t=<text>
-
-und fuer die Leiste dieselbe Sorte Zeile.  Daraus folgen drei Fragen,
-die ein Bild beantworten kann und ein Mitschnitt nicht:
-
-  LEER          Steht an (x, base) ueberhaupt Tinte?  Eine Beschriftung,
-                die gemeldet und nicht gemalt wurde, ist der Fehler, den
-                Runde K7B und Runde TASKBAR beide einmal hatten.  Es
-                wird im Kasten von der Grundlinie aus nach oben gezaehlt
-                (`asc` Zeilen), nicht im ganzen Fenster: sonst zaehlt
-                man den Nachbarn mit.
-
-  ABGESCHNITTEN Reicht die gemeldete Breite `tw` ueber den rechten Rand
-                seines Fensters hinaus?  Und steht in der letzten
-                Spalte des Fensters noch Tinte derselben Farbe?  Das
-                zweite ist der eigentliche Beweis -- eine Beschriftung,
-                die genau am Rand endet, ist nicht abgeschnitten, eine,
-                die IN der Randspalte noch Tinte hat, schon.
-
-  UEBERLAPPEND  Ueberschneiden sich zwei gemeldete Textkaesten
-                DERSELBEN Fensterkennung um mehr als `--slop` Bildpunkte
-                (Voreinstellung 0)?  Zwei Beschriftungen, die
-                uebereinanderliegen, ergeben ein Bild, auf dem beide
-                unleserlich sind und beide "da" gemeldet wurden.
-
-    check.py <bild.ppm> <serial.txt> [--asc N] [--slop N] [--nur win=..]
-
-Beendigungscode 0 = keine Beanstandung.  Jede Beanstandung steht mit
-Fenster, Stelle und Text da; eine Zahl ohne Ort ist keine Fundstelle.
+    check.py <image.ppm> <serial.txt> [--asc N] [--slop N] [--only win=..]
 """
 import re
 import sys
@@ -135,7 +94,7 @@ def main(argv):
     bad = 0
     seen = 0
     kaesten = {}
-    leiste = wins.get("Taskleiste", (0, 0, W, H))
+    bar = wins.get("Taskleiste", (0, 0, W, H))
     last_2 = {}
     for n_, m in enumerate(texte):
         k = (m.group(1), m.group(2), m.group(9), m.group(10),
@@ -168,7 +127,7 @@ def main(argv):
             ox, oy = int(m.group(9)), int(m.group(10))
             ww, wh = W - ox, H - oy
         elif source == "taskbar":
-            ox, oy, ww, wh = leiste
+            ox, oy, ww, wh = bar
         else:
             ox, oy, ww, wh = 0, 0, W, H
         x0 = max(0, ox + x)

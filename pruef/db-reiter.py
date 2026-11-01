@@ -13,15 +13,15 @@
 import re
 import time
 
-lauf.sag("== (c) Reiter im Dateimanager ==")
+lauf.say("== (c) Reiter im Dateimanager ==")
 
 
-def fenster():
-    alle = re.findall(
+def window():
+    everything = re.findall(
         r"wm: fen i=\d+ id=(\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) lay=(\d+)",
-        lauf.lies())
+        lauf.read_text())
     d = {}
-    for f in alle:
+    for f in everything:
         d[int(f[0])] = tuple(int(v) for v in f[1:])
     return d
 
@@ -35,32 +35,32 @@ def reiterstand():
     gemessen stand da `keeyx: p^lTo\nrer: reiter 2 a=1`. Das Ende der
     Zeile bleibt heil, also wird danach gesucht.
     """
-    r = re.findall(r"reiter (\d+) a=(\d+)", lauf.lies())
+    r = re.findall(r"reiter (\d+) a=(\d+)", lauf.read_text())
     return r[-1] if r else None
 
 
 # ------------------------------------------------ Dateimanager starten
-vorher = set(fenster().keys())
-lauf.m.taste("meta_l")
+vorher = set(window().keys())
+lauf.m.key_press("meta_l")
 time.sleep(3)
-men = [(i, v) for i, v in fenster().items() if v[4] == 4]
+men = [(i, v) for i, v in window().items() if v[4] == 4]
 if not men:
-    lauf.sag("ABBRUCH: kein Startmenue")
+    lauf.say("ABBRUCH: kein Startmenue")
 else:
     mid, (mx, my, mw, mh, _) = men[-1]
     lauf.m.klick_auf(mx + 100, my + 131)
     time.sleep(2)
-    lauf.m.taste("ret")
+    lauf.m.key_press("ret")
     time.sleep(7)
-    lauf.bild("01-ein-reiter")
+    lauf.image("01-ein-reiter")
 
-    neu = [i for i in fenster().keys() if i not in vorher and i != mid]
-    if not neu:
-        lauf.sag("ABBRUCH: kein Dateimanager")
+    renewed = [i for i in window().keys() if i not in vorher and i != mid]
+    if not renewed:
+        lauf.say("ABBRUCH: kein Dateimanager")
     else:
-        wid = max(neu)
-        wx, wy, ww, wh, _ = fenster()[wid]
-        lauf.sag("Dateimanager id=%d bei %d,%d %dx%d" % (wid, wx, wy, ww, wh))
+        wid = max(renewed)
+        wx, wy, ww, wh, _ = window()[wid]
+        lauf.say("Dateimanager id=%d bei %d,%d %dx%d" % (wid, wx, wy, ww, wh))
         # ====================================== DER VERSATZ DES RAHMENS
         #
         # `wm: fen` meldet die Lage des FENSTERS mit Rahmen, die
@@ -75,7 +75,7 @@ else:
         # der Dateimanager legte brav dort ab, wo getroffen wurde.
         DEKO = 25
         rel = lambda dx, dy: (wx + dx, wy + DEKO + dy)
-        lauf.sag("Reiterstand am Anfang: %s (erwartet 1 a=0)"
+        lauf.say("Reiterstand am Anfang: %s (erwartet 1 a=0)"
                  % (reiterstand(),))
 
         # ALLE LAGEN KOMMEN AUS `explorer: rect`, nicht aus dem Bild:
@@ -85,18 +85,18 @@ else:
         r = {}
         for e in re.findall(r"explorer: rect id=(\d+) kind=(\d+) "
                             r"x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+)",
-                            lauf.lies()):
+                            lauf.read_text()):
             r[int(e[0])] = tuple(int(v) for v in e[1:])
-        lauf.sag("Rechtecke: %s" % sorted(r.keys()))
-        tabelle = r.get(23)
-        if tabelle:
-            lauf.sag("  Tabelle kind=%d bei %d,%d %dx%d" % tabelle)
-            t_x = tabelle[1] + 80
+        lauf.say("Rechtecke: %s" % sorted(r.keys()))
+        table = r.get(23)
+        if table:
+            lauf.say("  Tabelle kind=%d bei %d,%d %dx%d" % table)
+            t_x = table[1] + 80
             # Die Kopfzeile ist 55 hoch: Tabelle bei y=128,
             # erste Datenzeile im Bild bei y=253 (Schirm) = 183
             # im Fenster. Mit +32 landete der Doppelklick auf
             # der Kopfzeile und sortierte, statt zu oeffnen.
-            t_y0 = tabelle[2] + 34      # erste DATENzeile
+            t_y0 = table[2] + 34      # erste DATENzeile
             # 34 = Kopfzeile (24) + halbe Zeilenhoehe (10),
             # im INHALTSraum gerechnet (siehe DEKO oben).
             zh = 20
@@ -119,45 +119,45 @@ else:
         # Unterschied, genau die Zeile, die die Reiterleiste eingefuegt
         # hat. Fuer die Tabelle stimmt es zufaellig, weil sie nach dem
         # Einfuegen noch einmal gemeldet wird.
-        leiste = r.get(20)
-        if leiste:
-            lauf.sag("  Reiterleiste gemeldet bei %d,%d %dx%d (kind=%d)"
-                     % (leiste[1], leiste[2], leiste[3], leiste[4], leiste[0]))
+        bar = r.get(20)
+        if bar:
+            lauf.say("  Reiterleiste gemeldet bei %d,%d %dx%d (kind=%d)"
+                     % (bar[1], bar[2], bar[3], bar[4], bar[0]))
         # Jetzt stimmt die Meldung -- mit dem Rahmenversatz gerechnet.
-        rl_y = (leiste[2] + leiste[4] // 2) if leiste else 110
+        rl_y = (bar[2] + bar[4] // 2) if bar else 110
 
         # --------------------------------------------- 1. Strg+T
         # In die Tabelle klicken, damit die Tastatur im Fenster ist.
         lauf.m.klick_auf(*rel(t_x, t_y0 + 5 * zh))
         time.sleep(1)
-        lauf.sag("Strg+T")
-        lauf.m.taste("ctrl-t")
+        lauf.say("Strg+T")
+        lauf.m.key_press("ctrl-t")
         time.sleep(3)
-        lauf.bild("02-zwei-reiter")
-        lauf.sag("  Reiterstand: %s (erwartet 2 a=1)" % (reiterstand(),))
+        lauf.image("02-zwei-reiter")
+        lauf.say("  Reiterstand: %s (erwartet 2 a=1)" % (reiterstand(),))
 
         # ------------------- 2. Im zweiten Reiter woanders hingehen
         # Doppelklick auf den Ordner "bilder" (Tabellenzeile 0).
-        lauf.sag("in den Ordner 'bilder' wechseln (Doppelklick Zeile 0)")
-        lauf.m.gehe(*rel(t_x, t_y0))
+        lauf.say("in den Ordner 'bilder' wechseln (Doppelklick Zeile 0)")
+        lauf.m.go_to(*rel(t_x, t_y0))
         time.sleep(0.4)
         lauf.m.doppelklick()
         time.sleep(3)
-        lauf.bild("03-reiter2-in-bilder")
-        pf = re.findall(r"explorer: reiter (\d+) a=(\d+)", lauf.lies())
-        lauf.sag("  Reiterstand: %s" % (reiterstand(),))
+        lauf.image("03-reiter2-in-bilder")
+        pf = re.findall(r"explorer: reiter (\d+) a=(\d+)", lauf.read_text())
+        lauf.say("  Reiterstand: %s" % (reiterstand(),))
 
         # ------------------------------ 3. Zurueck auf Reiter 1 klicken
         # Die Reiterleiste sitzt unter den Brosamen. Aus dem Bild
         # gemessen: y=118 im Fenster, erster Reiter bei x=30.
-        lauf.sag("Klick auf Reiter 1")
+        lauf.say("Klick auf Reiter 1")
         lauf.m.klick_auf(*rel(30, rl_y))
         time.sleep(3)
-        lauf.bild("04-zurueck-auf-reiter1")
-        lauf.sag("  Reiterstand: %s (erwartet 2 a=0)" % (reiterstand(),))
+        lauf.image("04-zurueck-auf-reiter1")
+        lauf.say("  Reiterstand: %s (erwartet 2 a=0)" % (reiterstand(),))
 
         # ------------------------------ 4. Eine Datei auf Reiter 2 ziehen
-        lauf.sag("Datei auf Reiter 2 ziehen -> soll dorthin wechseln")
+        lauf.say("Datei auf Reiter 2 ziehen -> soll dorthin wechseln")
         # ZWEI ORTE PROBIEREN, und der Grund steht oben: das gemeldete
         # Rechteck (y=96) und die gemalte Lage (y=133) gehen um eine
         # Zeile auseinander. `hit_at` rechnet mit dem GEMELDETEN, der
@@ -167,33 +167,33 @@ else:
         vor_r = reiterstand()
         lauf.m.ziehe(*(rel(t_x, t_y0 + 2 * zh) + rel(95, rl_y)))
         time.sleep(2.5)
-        lauf.sag("  Reiterstand danach: %s (vorher %s)"
+        lauf.say("  Reiterstand danach: %s (vorher %s)"
                  % (reiterstand(), vor_r))
         time.sleep(3)
-        lauf.bild("05-auf-reiter2-gezogen")
-        lauf.sag("  Reiterstand: %s (erwartet 2 a=1)" % (reiterstand(),))
+        lauf.image("05-auf-reiter2-gezogen")
+        lauf.say("  Reiterstand: %s (erwartet 2 a=1)" % (reiterstand(),))
 
         # --------------------------------------------- 5. Strg+W
         lauf.m.klick_auf(*rel(t_x, t_y0 + 5 * zh))
         time.sleep(1)
-        lauf.sag("Strg+W")
-        lauf.m.taste("ctrl-w")
+        lauf.say("Strg+W")
+        lauf.m.key_press("ctrl-w")
         time.sleep(3)
-        lauf.bild("06-wieder-ein-reiter")
-        lauf.sag("  Reiterstand: %s (erwartet 1 a=0)" % (reiterstand(),))
+        lauf.image("06-wieder-ein-reiter")
+        lauf.say("  Reiterstand: %s (erwartet 1 a=0)" % (reiterstand(),))
 
         # -------------------- 6. Gegenprobe: der letzte geht nicht zu
-        lauf.sag("Strg+W noch einmal -- der LETZTE Reiter darf nicht weg")
-        lauf.m.taste("ctrl-w")
+        lauf.say("Strg+W noch einmal -- der LETZTE Reiter darf nicht weg")
+        lauf.m.key_press("ctrl-w")
         time.sleep(2)
-        lauf.bild("07-letzter-bleibt")
-        lauf.sag("  Reiterstand: %s (erwartet weiter 1 a=0)" % (reiterstand(),))
+        lauf.image("07-letzter-bleibt")
+        lauf.say("  Reiterstand: %s (erwartet weiter 1 a=0)" % (reiterstand(),))
 
-t = lauf.lies()
-lauf.sag("--- Bilanz ---")
+t = lauf.read_text()
+lauf.say("--- Bilanz ---")
 for m, w in ((r"reiter (\d+) a=(\d+)", "Reiterstaende"),
              (r"reiter voll", "voll abgewiesen"),
              (r"reiter letzt", "letzter geschuetzt")):
     r = re.findall(m, t)
-    lauf.sag("  %-22s %s" % (w, ("%dx %s" % (len(r), r[-6:])) if r else "-"))
-lauf.sag("== Ende (c) ==")
+    lauf.say("  %-22s %s" % (w, ("%dx %s" % (len(r), r[-6:])) if r else "-"))
+lauf.say("== Ende (c) ==")

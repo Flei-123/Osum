@@ -65,9 +65,9 @@ def main():
     view_2 = sys.argv[1]
     x0, y0, bw, bh = (int(v) for v in sys.argv[2:6])
     zoom = int(sys.argv[6]) if len(sys.argv) > 6 else 6
-    ziel = sys.argv[7] if len(sys.argv) > 7 else os.path.join(
+    target = sys.argv[7] if len(sys.argv) > 7 else os.path.join(
         SHOTS, "lupe", "lupe-%s.png" % view_2)
-    os.makedirs(os.path.dirname(ziel), exist_ok=True)
+    os.makedirs(os.path.dirname(target), exist_ok=True)
 
     parts = []
     for run_2 in ("vorher-run", "nachher-run"):
@@ -88,9 +88,9 @@ def main():
             d = (y * gw + ox) * 3
             s = y * tw * 3
             aus[d : d + tw * 3] = td[s : s + tw * 3]
-    write_png(ziel, gw, lh, bytes(aus))
+    write_png(target, gw, lh, bytes(aus))
     print("%s  (links vorher, rechts nachher, %dx%d, zoom %d)"
-          % (ziel, gw, lh, zoom))
+          % (target, gw, lh, zoom))
     return 0
 
 

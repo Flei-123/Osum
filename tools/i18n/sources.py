@@ -53,23 +53,23 @@ def sieht_aus_wie_name(t):
     return False
 
 
-def quelldateien(wurzel):
-    for dp, dns, fns in os.walk(os.path.join(wurzel, 'kernel')):
+def quelldateien(root):
+    for dp, dns, fns in os.walk(os.path.join(root, 'kernel')):
         dns[:] = [d for d in dns if not d.startswith('.')]
         for fn in sorted(fns):
             if fn.endswith(('.fi', '.s')):
                 yield os.path.join(dp, fn)
 
 
-def funde(wurzel):
+def funde(root):
     aus = []
-    for path_2 in sorted(quelldateien(wurzel)):
-        rel = os.path.relpath(path_2, wurzel).replace(os.sep, '/')
+    for path_2 in sorted(quelldateien(root)):
+        rel = os.path.relpath(path_2, root).replace(os.sep, '/')
         txt = open(path_2, encoding='utf-8').read()
-        zeilen = txt.split('\n')
+        rows = txt.split('\n')
         window = ('import wlib' in txt) or ('import wlibc' in txt)
         kern = not rel.startswith('kernel/user/')
-        for nr, z in enumerate(zeilen, 1):
+        for nr, z in enumerate(rows, 1):
             if z.lstrip().startswith('//'):
                 continue
             code = z.split('//')[0]
@@ -85,7 +85,7 @@ def funde(wurzel):
                 inhalt = inhalt_von(roh)
                 if not translit.finde(without_pfade(inhalt)):
                     continue
-                kl = klasse(name, inhalt, zeilen, nr, code, window, kern,
+                kl = klasse(name, inhalt, rows, nr, code, window, kern,
                             fest)
                 wire = WIRE.search(z) is not None
                 if wire:
@@ -104,52 +104,52 @@ WIRE = re.compile(r'//\s*DRAHT\b')
 FNKOPF = re.compile(r'^(?:pub\s+)?fn\s')
 
 
-def block(zeilen, nr):
+def block(rows, nr):
     von = 0
     for i in range(nr - 1, -1, -1):
-        if FNKOPF.match(zeilen[i]):
+        if FNKOPF.match(rows[i]):
             von = i + 1
             break
-    bis = len(zeilen)
-    for i in range(nr, len(zeilen)):
-        if FNKOPF.match(zeilen[i]):
+    bis = len(rows)
+    for i in range(nr, len(rows)):
+        if FNKOPF.match(rows[i]):
             bis = i
             break
     return von, bis
 
 
-def ask(zeilen, name, ausser, fest):
+def ask(rows, name, ausser, fest):
     such = re.compile(r'(?<![A-Za-z_0-9])%s(?![A-Za-z_0-9])'
                       % re.escape(name))
     if not fest:
-        von, bis = block(zeilen, ausser)
+        von, bis = block(rows, ausser)
     else:
-        von, bis = 0, len(zeilen)
+        von, bis = 0, len(rows)
     aus = []
     for i in range(von, bis):
         nr = i + 1
-        if nr == ausser or zeilen[i].lstrip().startswith('//'):
+        if nr == ausser or rows[i].lstrip().startswith('//'):
             continue
-        code = zeilen[i].split('//')[0]
+        code = rows[i].split('//')[0]
         if such.search(code):
             aus.append(code)
     return aus
 
 
-def klasse(name, inhalt, zeilen, nr, code, window, kern, fest):
+def klasse(name, inhalt, rows, nr, code, window, kern, fest):
     if sieht_aus_wie_name(inhalt):
         return 'MARKE'
-    benutzt = ask(zeilen, name, nr, fest) if name != '-' else [code]
+    benutzt = ask(rows, name, nr, fest) if name != '-' else [code]
     for z in benutzt:
         if VERGL.search(z):
             return 'MARKE'
-    feld = False
+    field = False
     if name != '-':
         wieerst = re.compile(
             r'(?:sag|sagn|kv|kvs|kvt|say_line|h_claim|emit|say|say_kt|say_kv)\s*\(\s*\(?\s*&%s\s*\['
             % re.escape(name))
-        feld = any(wieerst.search(z) for z in benutzt)
-    if window or kern or feld:
+        field = any(wieerst.search(z) for z in benutzt)
+    if window or kern or field:
         if not benutzt:
             return 'MITSCHNITT' if (window or kern) else 'SICHTBAR'
         for z in benutzt:
@@ -159,18 +159,18 @@ def klasse(name, inhalt, zeilen, nr, code, window, kern, fest):
     return 'SICHTBAR'
 
 
-def marken(wurzel):
+def marken(root):
     klagen = []
     n = 0
-    for r in funde(wurzel):
+    for r in funde(root):
         if r['klasse'] != 'MARKE' or r['name'] == '-' or r.get('draht'):
             continue
-        path_2 = os.path.join(wurzel, r['datei'])
+        path_2 = os.path.join(root, r['datei'])
         txt = open(path_2, encoding='utf-8').read()
-        zeilen = txt.split('\n')
+        rows = txt.split('\n')
         fest = re.match(r'^\s*(?:static|const)\b',
-                        zeilen[r['zeile'] - 1]) is not None
-        benutzt = ask(zeilen, r['name'], r['zeile'], fest)
+                        rows[r['zeile'] - 1]) is not None
+        benutzt = ask(rows, r['name'], r['zeile'], fest)
         if not any(VERGL.search(z) for z in benutzt):
             continue
         n += 1
@@ -178,7 +178,7 @@ def marken(wurzel):
         for stamm, ersatz in translit.finde(soll):
             soll = soll.replace(stamm, ersatz)
         gefunden = None
-        for nr, z in enumerate(zeilen, 1):
+        for nr, z in enumerate(rows, 1):
             if z.lstrip().startswith('//'):
                 continue
             d = DEKL.search(z.split('//')[0])
@@ -191,7 +191,7 @@ def marken(wurzel):
                           % (r['datei'], r['zeile'], r['name'],
                              r['inhalt'], soll))
             continue
-        zw = ask(zeilen, gefunden, 0, True)
+        zw = ask(rows, gefunden, 0, True)
         if not any(VERGL.search(z) for z in zw):
             klagen.append('%s  %s = %r steht da, wird aber mit nichts '
                           'verglichen' % (r['datei'], gefunden, soll))
@@ -199,10 +199,10 @@ def marken(wurzel):
 
 
 def main(argv):
-    wurzel = os.environ.get('OSUM_ROOT', '.')
-    alle = '--alle' in argv
+    root = os.environ.get('OSUM_ROOT', '.')
+    everything = '--everything' in argv
     if '--streng' in argv:
-        f = funde(wurzel)
+        f = funde(root)
         s = [r for r in f if r['klasse'] == 'SICHTBAR']
         print('quellen: %d Umschriften, davon %d SICHTBAR'
               % (len(f), len(s)))
@@ -213,23 +213,23 @@ def main(argv):
                      r['inhalt'].replace('\n', '\\n')[:60]))
         return 1 if s else 0
     if '--marken' in argv:
-        n, klagen = marken(wurzel)
+        n, klagen = marken(root)
         print('marks: %d typed marks with transliteration, %d without '
               'Umlautform' % (n, len(klagen)))
         for k in klagen:
             print('    FEHLT  ' + k)
         return 1 if klagen else 0
-    f = funde(wurzel)
+    f = funde(root)
     n = {'SICHTBAR': 0, 'MITSCHNITT': 0, 'MARKE': 0}
     for r in f:
         n[r['klasse']] += 1
     print('quellen: %d Umschriften in kernel/**  --  SICHTBAR=%d '
           'MITSCHNITT=%d MARKE=%d'
           % (len(f), n['SICHTBAR'], n['MITSCHNITT'], n['MARKE']))
-    if '--zahlen' in argv:
+    if '--numbers' in argv:
         return 0
     for r in f:
-        if not alle and r['klasse'] != 'SICHTBAR':
+        if not everything and r['klasse'] != 'SICHTBAR':
             continue
         print('  %-11s %-26s %5d  %-12s %-11s %s'
               % (r['klasse'], r['datei'], r['zeile'], r['name'],

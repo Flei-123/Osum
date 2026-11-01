@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tests/theme/pixel.py -- was in einem Bildschirmfoto WIRKLICH steht.
-
-    pixel.py <bild.ppm>                 die haeufigste Farbe
-    pixel.py <bild.ppm> --top 5         die fuenf haeufigsten mit Anteil
-    pixel.py <bild.ppm> --has RRGGBB    Beendigungscode 0, wenn es sie gibt
-    pixel.py <bild.ppm> --share RRGGBB  ihr Anteil in ZEHNTELPROZENT
-    pixel.py <bild.ppm> --at X Y        die Farbe an genau dieser Stelle
-
-Ein PPM (P6) selbst zu lesen ist zwanzig Zeilen und spart eine
-Abhaengigkeit; der Rest des Baums liest seine Bilder in `tools/gfx/`
-genauso.
-
-WOZU DAS GEBRAUCHT WIRD: die Zusage der Runde ist nicht "es sieht
-anders aus", sondern "die Farben auf dem Schirm SIND die aufgeloesten
-Marken". Das laesst sich nur im Bild nachrechnen, und ein Auge, das
-zwei Blautoene vergleicht, rechnet nicht nach.
+"""Usage:
+    pixel.py <image.ppm>                 die haeufigste Color
+    pixel.py <image.ppm> --top 5         die fuenf haeufigsten mit Anteil
+    pixel.py <image.ppm> --has RRGGBB    Beendigungscode 0, if es sie gibt
+    pixel.py <image.ppm> --share RRGGBB  ihr Anteil in ZEHNTELPROZENT
+    pixel.py <image.ppm> --at X Y        die Color an genau dieser Pos
 """
 import sys
 from collections import Counter

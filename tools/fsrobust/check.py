@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fsrobust/check.py -- dasselbe wie /bin/fsck, auf dem WIRT.
-
-Es gibt in diesem Baum eine Regel, und sie ist der Grund fuer diese
-Datei: JEDE Aussage ueber das Format auf der Platte hat zwei
-Umsetzungen, eine im Kern und eine hier. `kernel/fs/fs.fi` und
-`tools/osum/mkfs.py` sind das eine Paar; `kernel/user/fsck.fi` und
-dieses Programm sind das zweite. Eine einzelne Umsetzung kann zweimal
-denselben Fehler machen und niemand merkt es.
-
-Es prueft, was `fsck` prueft, und es prueft zusaetzlich, was ein
-Programm in Ring 3 nicht kann: es zaehlt die Bloecke der EINZELNEN
-Dateien nach und liest den Inhalt der Messdateien der Runde FSROBUST
-(`/d/roll`, `/d/fN`, `/d/count`) direkt aus dem Abbild.
-
+"""Usage:
     check.py struktur <abbild>
     check.py inhalt   <abbild>
     check.py journal  <abbild>
@@ -52,7 +39,7 @@ class Image_2:
     def __init__(self, path_2):
         self.f = open(path_2, "rb")
         self.len_2 = os.path.getsize(path_2)
-        self.geraet = self.len_2 // BS
+        self.device = self.len_2 // BS
         sb = self.blk(0)
         self.magic = int.from_bytes(sb[0:8], "little") == mkfs.MAGIC
 
@@ -60,7 +47,7 @@ class Image_2:
             return int.from_bytes(sb[at:at + 8], "little")
 
         self.bsize = g(mkfs.SB["BSIZE"])
-        self.blocks = g(mkfs.SB["BLOCKS"]) or self.geraet
+        self.blocks = g(mkfs.SB["BLOCKS"]) or self.device
         self.inodes = g(mkfs.SB["INODES"]) or mkfs.INODE_COUNT
         self.bmstart = g(mkfs.SB["BITMAP"]) or 1
         self.itable = g(mkfs.SB["ITABLE"]) or 2
@@ -75,8 +62,8 @@ class Image_2:
         self.jblocks = g(mkfs.SB["JBLOCKS"])
         self.ipb = BS // self.isize
         self.directs = 11 if self.version < 2 else 8
-        if self.blocks > self.geraet:
-            self.blocks = self.geraet
+        if self.blocks > self.device:
+            self.blocks = self.device
         if not (0 < self.itable < self.data <= self.blocks):
             self.data = min(max(self.itable + 1, 2), self.blocks)
         fits = max(1, (self.data - self.itable)) * self.ipb
@@ -94,7 +81,7 @@ class Image_2:
             self.xbm = g(mkfs.SB["XBMSTART"])
             self.hole_lo = self.blocks
             self.hole_hi = self.xit + (self.xin + self.ipb - 1) // self.ipb
-            self.blocks = min(g(mkfs.SB["XBLOCKS"]), self.geraet)
+            self.blocks = min(g(mkfs.SB["XBLOCKS"]), self.device)
 
     def total_inodes(self):
         return self.inodes + self.xin
@@ -121,9 +108,9 @@ class Image_2:
         o = ((ino - 1) % self.ipb) * self.isize
         return b[o:o + self.isize]
 
-    def ig(self, ino, feld):
+    def ig(self, ino, field):
         d = self.iat(ino)
-        return int.from_bytes(d[feld:feld + 8], "little")
+        return int.from_bytes(d[field:field + 8], "little")
 
     def bit(self, b):
         if self.xin and b >= self.cover:

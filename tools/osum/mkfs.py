@@ -1,95 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/osum/mkfs.py -- an OFS disk image, built on the HOST.
-
-Round K1 needs programs that the kernel has never seen. They therefore
-cannot be produced by the kernel, and this is the second implementation
-of the on-disk format of `kernel/fs/fs.fi` -- written from the
-constants in that file and from nothing else.
-
-That it IS a second implementation is the point. Two programs, in two
-languages, on two sides of a disk, agreeing on where an inode lies and
-how a directory entry is spelled: any disagreement shows up at once as a
-file the kernel cannot find or a name it reads as rubbish. A single
-implementation could be wrong in the same way twice and nobody would
-know.
-
-The format, from `kernel/fs/fs.fi`:
-
-    block 0        superblock: magic, block size, blocks, inodes,
-                   bitmap block, inode table, first data block, root inode
-    block 1        the block bitmap, bit b in octet b/8
-    blocks 2..33   the inode table, 128 octets each, four per block
-    block 34..     data
-    an inode       type, size, nlink, eleven direct blocks, one indirect,
-                   one double indirect (round K4)
-    a dirent       32 octets: inode number, then 24 for the name
-
-Usage:
+"""Usage:
     mkfs.py build <image> <blocks> [--v1] [--v3] [--inodes=<n>]
-                                   [--time=<t>] [--reserve=<n>] [--journal]
-                                   [<spec> ...]
+    [--time=<t>] [--reserve=<n>] [--journal]
+    [<spec> ...]
     mkfs.py where <image> <path>
     mkfs.py times <image> <path>
-
-`<neu>@<vorhanden>` ist ein ZWEITER NAME fuer dieselbe Datei (Runde K15):
-zwei Verzeichniseintraege mit derselben Inode-Nummer, ein Exemplar der
-Oktette.
-
-`<path>=` mit nichts dahinter legt eine LEERE Datei an -- ein Name, ein
-Inode, kein Datenblock. Der Namensindex des zweiten K15-Nachtrags wird an
-mehreren Tausend davon gemessen, und mehrere Tausend Dateien mit Inhalt
-passten nicht auf ein Abbild von zwei Megaoktett.
-
-RUNDE OFS3: `--v3` baut ein Abbild der FASSUNG 3 -- mehrblockige
-Blockkarte, 256er Inodes mit drei Zeitstempeln und einem dreifach
-indirekten Zeiger, 264er Verzeichniseintraege mit 255 Zeichen Namen und
-den symbolischen Verweis als eigene Inodeart. OHNE `--v3` bleibt alles
-bei Fassung 2, und zwar OKTETT FUER OKTETT: `tools/k15/run.sh` baut
-dasselbe Abbild zweimal und vergleicht es mit `cmp`, und Abschnitt 15d
-prueft ausdruecklich, dass der Datenbereich weiter bei Block 34 anfaengt.
-Eine neue Fassung, die die alte still veraendert, waere keine.
-
-`--time=<sekunden>` setzt die drei Zeitstempel JEDER Datei in einem
-Abbild der Fassung 3. Ohne die Angabe sind sie NULL -- nicht "jetzt".
-Der Grund steht eine Zeile weiter oben: dasselbe Abbild muss zweimal
-dieselben Oktette ergeben, und `time.time()` tut das nicht.
-
-`<pfad>-><ziel>` legt einen SYMBOLISCHEN VERWEIS an (nur Fassung 3).
-Der Unterschied zu `<neu>@<vorhanden>` ist der zwischen einem zweiten
-Namen und einem Zeiger: der harte Verweis ist dieselbe Inode, der
-symbolische ist eine eigene Inode, deren INHALT ein Pfad ist.
-
-`--inodes=<n>` setzt die GROESSE DER INODE-TABELLE. Sie stand seit Runde
-62 als 128 in beiden Umsetzungen; sie steht aber auch im Superblock, und
-seit dem zweiten K15-Nachtrag liest `kernel/fs/fs.fi` sie von dort. Ohne die
-Angabe bleiben es 128 -- Abbild fuer Abbild dieselben Oktette wie vorher.
-Die Tabelle waechst um einen Block je vier Inodes, und der erste
-Datenblock rueckt entsprechend nach hinten. Die Blockkarte bleibt EIN
-Block, also hoechstens 4096 Bloecke je Abbild.
+    `<path>-><target>` legt einen SYMBOLISCHEN VERWEIS an (only revision 3).
     mkfs.py list  <image>
     mkfs.py cat   <image> <path>
     mkfs.py meta  <image> [<path>]
-
-Ein <spec> ist eines von
-
-    <pfad>/                        ein Verzeichnis
-    <pfad>=<wirtsdatei>            eine Datei
-    <pfad>=<wirtsdatei>@<rechte>[:<uid>[:<gid>]]
-    <pfad>/@<rechte>[:<uid>[:<gid>]]
-
-RUNDE K13 hat die letzten beiden Formen und `meta` dazugelegt. <rechte>
-ist oktal wie ueberall (`755`, `4755`, `600`); ohne Angabe bekommt alles
-0755 und gehoert root. `--v1` baut ein Abbild der ALTEN Fassung -- ohne
-Rechte, mit elf direkten Blockzeigern. Das ist die Gegenprobe zur
-Fassungsnummer im Superblock, und ohne sie waere "rueckwaertsvertraeglich"
-eine Behauptung.
-
-`cat` stand seit Runde K4 im Rumpf, aber nicht hier oben. Es schreibt die
-Oktette einer Datei AUS DEM ABBILD auf die Standardausgabe -- und das ist
-die einzige ehrliche Art, "das Programm hat die richtigen Oktette
-gesichert" zu pruefen: nicht ein Mitschnitt ueber eine serielle Leitung,
-sondern der Inhalt der Platte. Runde K11 misst den Editor damit.
+    <path>=<wirtsdatei>@<rechte>[:<uid>[:<gid>]]
+    <path>/@<rechte>[:<uid>[:<gid>]]
 """
 
 import mmap
@@ -139,10 +61,10 @@ J_BLOCKS = 522
 
 class Fs:
     def __init__(self, blocks, version=OFS_V2, inodes=INODE_COUNT,
-                 zeit=0, karten=0, journal=0):
+                 elapsed=0, karten=0, journal=0):
         self.inodes = inodes
         self.version = version
-        self.zeit = zeit
+        self.elapsed = elapsed
         if version >= OFS_V3:
             self.isize = INODE_SIZE_V3
             self.ipb = IPB_V3
@@ -294,9 +216,9 @@ class Fs:
                 if self.version >= OFS_V2:
                     self.iset(ino, I_MODE, 0o755)
                 if self.version >= OFS_V3:
-                    self.iset(ino, I_CTIME, self.zeit)
-                    self.iset(ino, I_MTIME, self.zeit)
-                    self.iset(ino, I_ATIME, self.zeit)
+                    self.iset(ino, I_CTIME, self.elapsed)
+                    self.iset(ino, I_MTIME, self.elapsed)
+                    self.iset(ino, I_ATIME, self.elapsed)
                 self._next_ino = ino + 1
                 return ino
         raise SystemExit("mkfs: no inode left (%d in the table)" % self.inodes)
@@ -795,7 +717,7 @@ def main(argv):
 
     image, blocks = argv[2], int(argv[3])
     inodes = INODE_COUNT
-    zeit = 0
+    elapsed = 0
     reserve = 0
     karten = 0
     journal = 0
@@ -807,7 +729,7 @@ def main(argv):
             inodes = int(spec.split("=", 1)[1])
             continue
         if spec.startswith("--time="):
-            zeit = int(spec.split("=", 1)[1])
+            elapsed = int(spec.split("=", 1)[1])
             continue
         if spec.startswith("--reserve="):
             reserve = int(spec.split("=", 1)[1])
@@ -835,12 +757,12 @@ def main(argv):
                       "building format 3" % (src, v2max), file=sys.stderr)
                 v = OFS_V3
                 break
-    fs = Fs(blocks, v, inodes, zeit, karten, journal)
+    fs = Fs(blocks, v, inodes, elapsed, karten, journal)
     fs.format()
     if reserve:
         fs.reserve(reserve)
-    if zeit:
-        fs.set_times(1, zeit, zeit, zeit)
+    if elapsed:
+        fs.set_times(1, elapsed, elapsed, elapsed)
     for spec in rest:
         mode, uid, gid = None, 0, 0
         head, _, meta = spec.rpartition("@")
@@ -856,8 +778,8 @@ def main(argv):
             if len(parts) > 2 and parts[2] != "":
                 gid = int(parts[2])
         if "->" in spec:
-            path_2, _, ziel = spec.partition("->")
-            fs.symlink(path_2, ziel)
+            path_2, _, dest = spec.partition("->")
+            fs.symlink(path_2, dest)
             continue
         if spec.endswith("/"):
             fs.mkdir(spec[:-1], 0o755 if mode is None else mode, uid, gid)

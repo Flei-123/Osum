@@ -1,38 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/bild/mkbilder.py -- DIE TESTBILDER DER RUNDE BILD.
-
-    python3 tools/bild/mkbilder.py <zielverzeichnis>
-
-Jedes Bild wird hier auf dem WIRT mit Pillow gebaut. Pillow ist
-libjpeg-turbo, zlib-ng und giflib -- also genau die Umsetzungen, an
-denen sich jeder Betrachter der Welt messen lassen muss.
-
-WARUM NICHT "SIEHT GUT AUS": ein eigener Dekodierer, der um dreissig
-Stufen danebenliegt, sieht auf einem Foto voellig in Ordnung aus. Nur
-der Vergleich mit einer fremden Umsetzung faellt darauf nicht herein --
-darum entstehen hier die Dateien, und `tools/alltag/bildref.py`
-vergleicht danach Zahl gegen Zahl.
-
-DIE AUSWAHL IST NICHT ZUFAELLIG. Jedes Bild steht fuer einen Weg im
-Dekodierer, der sonst nie gegangen wird:
-
-  g-einfarb    die kuerzeste LZW-Folge, die es gibt (ein Lauf)
-  g-tafel      eine Farbtafel mit 256 Eintraegen -- misst, ob Index
-               und Farbe zusammenpassen
-  g-transp     ein durchsichtiger Index; was darunter liegt, bleibt
-  g-lace       VERSCHACHTELT. Ein Leser, der das nicht kennt, malt die
-               Zeilen an die falsche Stelle -- und das sieht nicht
-               kaputt aus, nur falsch. Ohne Gegenprobe faellt es
-               niemandem auf.
-  g-anim       eine Bildfolge. Der Betrachter muss das ERSTE Vollbild
-               zeigen und sagen, wie viele es sind.
-  g-gross      breiter, als das LZW-Woerterbuch lang wird: erzwingt
-               mindestens einen Loeschcode mitten im Bild.
-  g-87a        die alte Fassung ohne Steuerbloecke
-  b-*          PNG und BMP, die schon gingen -- als Nachweis, dass
-               diese Runde sie nicht kaputtgemacht hat
-  b-voll.jpg   JPEG 4:4:4, damit der Vergleich bildpunktweise sein darf
+"""Usage:
+    python3 tools/image/mkbilder.py <zielverzeichnis>
 """
 
 import os
@@ -76,9 +45,9 @@ def main():
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
-    ziel = sys.argv[1]
-    os.makedirs(ziel, exist_ok=True)
-    p = lambda n: os.path.join(ziel, n)
+    target = sys.argv[1]
+    os.makedirs(target, exist_ok=True)
+    p = lambda n: os.path.join(target, n)
     gemacht = []
 
     def say(name, extra=""):

@@ -36,7 +36,7 @@ if shot A shape=classic scheme=day mode=light keep=yes accel=tcg; then
     if [ -s "$REF" ]; then
         #
         G=$(python3 tools/softui/equal.py "$REF" "$TMPD/A/desktop.ppm" \
-            --zeit --ausser 26,62,560,380 2>&1)
+            --elapsed --ausser 26,62,560,380 2>&1)
         echo "$G" | sed 's/^/        /'
         D=$(echo "$G" | grep -oE 'unterschiedlich [0-9]+' | grep -oE '[0-9]+')
         is "classic: pixels differing from the baseline" "${D:-x}" "0"

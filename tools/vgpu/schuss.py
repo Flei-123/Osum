@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vgpu/schuss.py -- ein Bildschirmfoto von EINEM BESTIMMTEN Geraet.
-
-    schuss.py <monitor-socket> <ziel.ppm> [wartesekunden] [geraet]
-
-Wie tools/gfx/screenshot.py, aber mit dem dritten Argument von
-`screendump`: dem Anzeigegeraet. Ohne es nimmt QEMU das erste, und das
-ist die VGA-Karte, die es immer dazustellt -- mit einem Grafiktreiber
-steht das Bild aber auf der virtio-gpu, und die VGA-Flaeche ist dann
-schwarz. Ein Foto davon beweist nichts ueber den Treiber.
+"""Usage:
+    schuss.py <monitor-socket> <target.ppm> [wartesekunden] [device]
 """
 import os
 import socket
@@ -22,7 +15,7 @@ def main():
         return 2
     sock, target = sys.argv[1], sys.argv[2]
     deadline = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
-    geraet = sys.argv[4] if len(sys.argv) > 4 else ""
+    device = sys.argv[4] if len(sys.argv) > 4 else ""
 
     if os.path.exists(target):
         os.unlink(target)
@@ -46,8 +39,8 @@ def main():
     except OSError:
         pass
     cmd = "screendump %s" % target
-    if geraet:
-        cmd += " %s" % geraet
+    if device:
+        cmd += " %s" % device
     s.sendall((cmd + "\n").encode())
     last = -1
     bis = time.time() + deadline

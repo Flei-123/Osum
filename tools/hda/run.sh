@@ -138,7 +138,7 @@ g=$(grep -oE 'gaps=[0-9]+' "$TMPD/sine.chk" | grep -oE '[0-9]+$')
 num "Luecken in der Datei" "${g:-999}" eq 0
 pk=$(grep -oE 'peak_hz=[0-9]+' "$TMPD/sine.chk" | grep -oE '[0-9]+$')
 num "die FFT-Spitze liegt bei 440 Hz" "${pk:-0}" eq 440
-python3 tools/hda/refsine.py "$TMPD/sine.wav" --hz 440 --rahmen 48000 \
+python3 tools/hda/refsine.py "$TMPD/sine.wav" --hz 440 --frame 48000 \
     --pegel 24000 > "$TMPD/sine.ref" 2>&1
 sed 's/^/    /' "$TMPD/sine.ref"
 d=$(grep -oE 'ungleich=[0-9]+' "$TMPD/sine.ref" | grep -oE '[0-9]+$')
@@ -218,7 +218,7 @@ same "die Aushungerprobe endet sauber" 21 "$rc"
 num "ZUSAGE (d): der Aussetzerzaehler schlaegt aus" \
     "$(val "$TMPD/starve.txt" underruns)" gt 0
 python3 tools/hda/wavcheck.py "$TMPD/starve.wav" --hz 440 --rate 48000 \
-    --luecke-still > "$TMPD/starve.chk" 2>&1
+    --gap-still > "$TMPD/starve.chk" 2>&1
 sed 's/^/    /' "$TMPD/starve.chk"
 gs=$(grep -oE 'gaps=[0-9]+' "$TMPD/starve.chk" | grep -oE '[0-9]+$')
 num "die Luecke ist in der Datei zu sehen" "${gs:-0}" ge 1
@@ -244,7 +244,7 @@ echo "== 8. GEGENPROBEN: Lautstaerke, Vektor, der andere Treiber =="
 rc=$(lauf nomix "osum nokbd nosched noproc nofs audio audnomix audsine audsay" "$HDADEV")
 same "GEGENPROBE audnomix endet sauber" 21 "$rc"
 num "geschrieben wurde trotzdem" "$(val "$TMPD/nomix.txt" written)" eq 48000
-python3 tools/hda/wavcheck.py "$TMPD/nomix.wav" --hz 440 --rate 48000 --nur-rms \
+python3 tools/hda/wavcheck.py "$TMPD/nomix.wav" --hz 440 --rate 48000 --only-rms \
     > "$TMPD/nomix.chk" 2>&1
 r0=$(grep -oE 'rms=[0-9]+' "$TMPD/nomix.chk" | grep -oE '[0-9]+$')
 num "GEGENPROBE: mit stummem Codec ist die Datei STILL" "${r0:-999}" le 2
@@ -252,10 +252,10 @@ num "GEGENPROBE: mit stummem Codec ist die Datei STILL" "${r0:-999}" le 2
 rc=$(lauf half "osum nokbd nosched noproc nofs audio audhalf audsine audsay" "$HDADEV")
 same "GEGENPROBE audhalf endet sauber" 21 "$rc"
 num "die Lautstaerke steht auf 50" "$(val "$TMPD/half.txt" volume)" eq 50
-python3 tools/hda/wavcheck.py "$TMPD/half.wav" --hz 440 --rate 48000 --nur-rms \
+python3 tools/hda/wavcheck.py "$TMPD/half.wav" --hz 440 --rate 48000 --only-rms \
     > "$TMPD/half.chk" 2>&1
 rh=$(grep -oE 'rms=[0-9]+' "$TMPD/half.chk" | grep -oE '[0-9]+$')
-python3 tools/hda/wavcheck.py "$TMPD/sine.wav" --hz 440 --rate 48000 --nur-rms \
+python3 tools/hda/wavcheck.py "$TMPD/sine.wav" --hz 440 --rate 48000 --only-rms \
     > "$TMPD/full.chk" 2>&1
 rf=$(grep -oE 'rms=[0-9]+' "$TMPD/full.chk" | grep -oE '[0-9]+$')
 echo "    RMS voll=$rf halb=$rh"
@@ -281,7 +281,7 @@ same "GEGENPROBE nohda: derselbe Lauf ueber AC97 endet sauber" 21 "$rc"
 num "der gewaehlte Treiber ist jetzt AC97 (1)" "$(val "$TMPD/ac97.txt" backend)" eq 1
 num "und er spielt dieselben 48000 Rahmen" "$(val "$TMPD/ac97.txt" written)" eq 48000
 num "ohne Aussetzer" "$(val "$TMPD/ac97.txt" underruns)" eq 0
-python3 tools/hda/refsine.py "$TMPD/ac97.wav" --hz 440 --rahmen 48000 --pegel 24000 \
+python3 tools/hda/refsine.py "$TMPD/ac97.wav" --hz 440 --frame 48000 --pegel 24000 \
     > "$TMPD/ac97.ref" 2>&1
 da=$(grep -oE 'ungleich=[0-9]+' "$TMPD/ac97.ref" | grep -oE '[0-9]+$')
 num "AC97 liefert DIESELBE Datei, Wert fuer Wert" "${da:-999}" eq 0

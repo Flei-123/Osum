@@ -90,8 +90,8 @@ python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/netzmix"/*.opk \
     > "$OUT/mixsig.log" 2>&1 || { cat "$OUT/mixsig.log"; bad "signpak"; exit 1; }
 
 echo "== 2. the DIRECTORY and its sixth column =="
-python3 tools/ota/listing.py "$OUT/netzmix" --fassung 2 \
-    --schluessel "$OUT/geheim.key" > "$OUT/vz.log" 2>&1 \
+python3 tools/ota/listing.py "$OUT/netzmix" --revision 2 \
+    --key "$OUT/geheim.key" > "$OUT/vz.log" 2>&1 \
     && ok "$(grep -a VERZEICHNIS "$OUT/vz.log" | tr -s ' ')" \
     || { cat "$OUT/vz.log"; bad "listing.py"; exit 1; }
 V="$OUT/netzmix/VERZEICHNIS"

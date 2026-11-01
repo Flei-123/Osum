@@ -50,7 +50,7 @@ def read_2(path_2):
     return ab, gesamt, bilanz
 
 
-def kurz(title, name):
+def brief(title, name):
     m = re.match(r'^(\d+)\.\s*(.{0,42})', title)
     if not m:
         return name
@@ -92,7 +92,7 @@ def main():
             acc = f" ({e['accel']})" if e["accel"] not in ("kvm", "tcg", "?") else ""
             return f"{mark}, {z}{acc}"
 
-        title = kurz((ea or eb)["titel"], n)
+        title = brief((ea or eb)["titel"], n)
         print(f"| {title} (`{n}`) | {ta} | {tb} | {fak} | {erg(ea)} | {erg(eb)} |")
         if ea and eb and ea["ok"] and not eb["ok"]:
             rot.append(n)

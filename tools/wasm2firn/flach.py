@@ -133,8 +133,8 @@ class FlachErzeuger:
                 ziele = [l.uleb() for _ in range(n)]
                 sonst = l.uleb()
                 sp -= 1
-                wahl = erz.sv(sp)
-                self.br_table(wahl, ziele, sonst, sp)
+                choice = erz.sv(sp)
+                self.br_table(choice, ziele, sonst, sp)
                 unerreichbar = True
                 continue
 
@@ -220,10 +220,10 @@ class FlachErzeuger:
         self.z('continue')
         self.set_chunk(next_)
 
-    def br_table(self, wahl, ziele, sonst, sp):
+    def br_table(self, choice, ziele, sonst, sp):
         for i, lab in enumerate(ziele):
             target = self.stack[len(self.stack) - 1 - lab]
-            self.z('if %s == %d {' % (wahl, i))
+            self.z('if %s == %d {' % (choice, i))
             if target.art == 'func':
                 self.rueckgabe_eingerueckt(sp, '    ')
             else:

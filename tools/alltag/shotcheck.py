@@ -1,63 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/alltag/shotcheck.py -- EIN BILDSCHIRMFOTO MESSEN, NICHT ANSEHEN.
-
-Abstammung: tools/themestore/shotcheck.py, kopiert (nicht importiert,
-damit die Abnahme dieser Runde nicht an der naechsten Aenderung dort
-zerbricht) und um EINEN Schalter erweitert:
-
-    --winat=x,y   das Fenster waehlen, das an dieser Stelle steht
-
-Die Kennung eines Fensters ist eine Zufallszahl aus dem Server und in
-jedem Lauf eine andere; `--win=` ist damit fuer einen Laeufer nutzlos,
-der jedes Mal neu bootet. Die STELLE dagegen steht im Programm.
-
-
-Twice in this repository a picture with a real defect in it was passed
-by a test that only asked whether a picture had been produced. Round
-LOOK's list of complaints was "no umlauts", "no symbols", "it looks like
-Windows XP" -- three things a person saw in a screenshot and no runner
-had. So this asks a picture the three questions a person asks, in
-numbers:
-
+"""Usage:
     shotcheck.py <shot.ppm|png> <serial.txt> --window=x,y,w,h [--win=N]
-
-  1. EMPTY LABEL. Every `wlib: text ... x= base= tw= t=` line names a
-     place where letters were drawn and how wide they are. If that box
-     holds no pixel differing from the reported background, nothing was
-     drawn there. Invisible to any test that counts colours in a whole
-     picture.
-
-  2. CUT OFF. The ink has to lie inside the window it was drawn in, and
-     it has to stop before the right edge of its own reported width: ink
-     in the last column is ink that continues past it.
-
-  3. OVERLAPPING. Two reported texts must not have ink in the same
-     pixel.
-
-THREE THINGS THAT HAD TO BE GOT RIGHT BEFORE THE NUMBERS MEANT ANYTHING,
-and every one of them produced a false failure first:
-
-  * ONE WINDOW. The desktop has five processes painting; the launcher's
-    list rows sit under the settings window and overlap everything.
-    Text from another window is not a defect, it is a window behind
-    this one. So this measures ONE window, chosen as the one with the
-    most text in the region of the log that matters.
-
-  * THE STATE AT THE TIME OF THE PHOTO, not the last state ever
-    reported. Round LOOK wrote that rule down after paying for it. The
-    settings program prints a full block of `settings: rect name=w..`
-    every time it changes page, so everything after the LAST such block
-    is the page that is on the screen.
-
-  * THE WIDTH COMES FROM THE PROGRAM. Guessing it from the letter count
-    produced 86 false overlaps in one picture: the box drawn around a
-    label reached into the widget next door and found its pixels.
-
-WHAT IT DOES NOT DO, said plainly: it does not re-rasterise the glyphs.
-`tools/look/umlaut.py` does that, against `tools/ttf/raster.py`, and it
-is the stronger check of the two. This is the cheap one that runs over
-every text on the screen instead of over a chosen few.
 """
 import re
 import sys

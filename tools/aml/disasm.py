@@ -1,41 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/aml/disasm.py -- AML LESEN, UNABHAENGIG VOM KERNEL.
-
-WARUM ES DIESES PROGRAMM GIBT.
-
-Runde AML baut einen AML-Interpreter in `kernel/acpi/aml.fi`.  Eine Zusage
-wie "der Namensraum enthaelt die erwarteten Geraete" oder "wir decken
-so und so viele Opcodes ab" ist nichts wert, wenn dieselbe Software sie
-prueft, die sie aufstellt -- dann misst der Test seine eigene Meinung.
-
-Also steht die Kodierung von AML hier ein ZWEITES MAL, in einer anderen
-Sprache, von Hand nach der ACPI-Spezifikation (Kapitel 20, "ACPI Machine
-Language Specification").  `tools/aml/run.sh` laesst beide ueber
-DIESELBEN Oktette laufen -- die DSDT, die QEMU der Maschine hinlegt --
-und vergleicht.  Wo sie auseinandergehen, hat einer von beiden unrecht,
-und dann ist die Runde nicht fertig.
-
-Das ist derselbe Griff wie `tools/k18/expect.py` (die zweite Fassung der
-MSR-Kodierung) und `tools/kernel/memmap.py` (die zweite Fassung der
-kdata-Karte).
-
-VERWENDUNG
-
-    python3 tools/aml/disasm.py ns    TABELLE...     Namensraum auflisten
-    python3 tools/aml/disasm.py hist  TABELLE...     Opcode-Histogramm
-    python3 tools/aml/disasm.py asm   TABELLE...     Baum ausgeben
-    python3 tools/aml/disasm.py prt   TABELLE...     was zu _PRT gehoert
-    python3 tools/aml/disasm.py deckung LISTE TABELLE...
-                                                     Abdeckung gegen eine
-                                                     Liste unterstuetzter
-                                                     Opcodes (eine Zahl je
-                                                     Zeile, hex oder dez;
-                                                     erweiterte Opcodes
-                                                     als 5bXX)
-
-TABELLE ist eine rohe ACPI-Tabelle MIT ihrem 36 Oktett langen Kopf
-(so, wie `amldump` sie ausgibt).
+"""Usage:
+    python3 tools/aml/disasm.py ns    table...     Namensraum auflisten
+    python3 tools/aml/disasm.py hist  table...     Opcode-Histogramm
+    python3 tools/aml/disasm.py asm   table...     Tree ausgeben
+    python3 tools/aml/disasm.py prt   table...     was zu _PRT gehoert
+    python3 tools/aml/disasm.py deckung items table...
 """
 import sys
 

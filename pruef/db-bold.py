@@ -98,21 +98,21 @@ print("Glyphen im Subset: %d" % struct.unpack('>H', sub[ts['maxp'][0]+4:ts['maxp
 print()
 
 proben = [('A', 0x41), ('g', 0x67), ('eight', 0x38)]
-fehler = 0
+error_count = 0
 for name, cp in proben:
     gs, gb, gr = cs.get(cp), cb.get(cp), cr.get(cp)
     if gs is None or gb is None or gr is None:
         print("%-6s FEHLT (sub=%s bold=%s reg=%s)" % (name, gs, gb, gr))
-        fehler += 1
+        error_count += 1
         continue
     bs, bb, br = glyf_bytes(sub, ts, gs), glyf_bytes(bold, tb, gb), glyf_bytes(reg, tr, gr)
-    gleich_bold = (bs == bb)
-    gleich_reg = (bs == br)
-    ok = gleich_bold and not gleich_reg
+    equal_bold = (bs == bb)
+    equal_reg = (bs == br)
+    ok = equal_bold and not equal_reg
     print("%-6s Umriss %4d Oktett | == Bold: %-5s | == Regular: %-5s | %s"
-          % (name, len(bs), gleich_bold, gleich_reg, "OK" if ok else "FEHLER"))
+          % (name, len(bs), equal_bold, equal_reg, "OK" if ok else "FEHLER"))
     if not ok:
-        fehler += 1
+        error_count += 1
 
 print()
 a_s, a_b, a_r = cs[0x41], cb[0x41], cr[0x41]
@@ -122,8 +122,8 @@ if ws == wb == 1585 and wr == 1401:
     print("  -> SOLL getroffen (1585 gegen 1401)")
 else:
     print("  -> ABWEICHUNG vom Sollwert 1585/1401")
-    fehler += 1
+    error_count += 1
 
 print()
-print("ERGEBNIS: %s (%d Fehler)" % ("FETTER SCHNITT ECHT" if fehler == 0 else "NICHT BELEGT", fehler))
-sys.exit(1 if fehler else 0)
+print("ERGEBNIS: %s (%d Fehler)" % ("FETTER SCHNITT ECHT" if error_count == 0 else "NICHT BELEGT", error_count))
+sys.exit(1 if error_count else 0)

@@ -1,29 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/server/console.py -- ein Mensch an der seriellen Leitung, in
-Python.
-
-WARUM DAS EIN EIGENES PROGRAMM IST. Jeder Testlaeufer dieses Projektes
-hat die serielle Leitung bisher als EINBAHNSTRASSE benutzt: QEMU mit
-`-serial file:`, hinterher `grep`. Diese Runde baut den Rueckweg, und
-den kann man mit einer Datei nicht messen -- ein Terminal ist eine
-Unterhaltung: warten, bis die Gegenseite fertig ist, dann tippen, dann
-wieder warten.
-
-`-serial stdio` mit einer Pipe reicht dafuer nicht. Eine Pipe liefert
-alles sofort, und dann steht die halbe Eingabe in der Leitung, bevor
-`serial.init` den Baustein ueberhaupt eingestellt hat -- das erste
-Oktett faellt aus, weil das Zuruecksetzen der FIFO (FCR 0xC7) es
-mitnimmt. Genau das ist beim ersten Lauf passiert: aus `echo hallo`
-wurde `cho hallo`. Das ist kein Fehler des Kernels; ein echtes Terminal
-verliert dasselbe Oktett, wenn man tippt, bevor die Maschine an ist.
-
-Also: eine UNIX-Steckdose als Leitung, hier lesen und schreiben, und
-IMMER erst auf eine Marke warten, bevor etwas hineingeht.
-
-    console.py <socket> <logdatei> --erwarte <text> --sende <zeile> ...
-
-Rueckgabe 0, wenn jede Erwartung eingetroffen ist.
+"""Usage:
+    console.py <socket> <logdatei> --erwarte <text> --sende <row> ...
 """
 import os
 import re
@@ -41,7 +19,7 @@ def main():
     args = sys.argv[3:]
     i = 0
     while i < len(args):
-        if args[i] in ("--erwarte", "--sende", "--frist", "--roh"):
+        if args[i] in ("--erwarte", "--sende", "--deadline", "--roh"):
             schritte.append((args[i], args[i + 1]))
             i += 2
         else:
@@ -64,7 +42,7 @@ def main():
 
     buffer = bytearray()
     error = []
-    frist = 40.0
+    deadline = 40.0
 
     def read_2(bis):
         ende = time.time() + bis
@@ -98,10 +76,10 @@ def main():
         return False
 
     for art, value in schritte:
-        if art == "--frist":
-            frist = float(value)
+        if art == "--deadline":
+            deadline = float(value)
         elif art == "--erwarte":
-            if wait_auf(value, frist):
+            if wait_auf(value, deadline):
                 print("   erwartet und bekommen: %s" % value)
             else:
                 error.append(value)

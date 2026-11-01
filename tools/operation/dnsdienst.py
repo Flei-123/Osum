@@ -1,34 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/operation/dnsdienst.py -- DIE GEGENSTELLE FUER DEN AUFLOESER.
-
-    dnsdienst.py --port 53 [--adresse 0.0.0.0]
-                 --eintrag pkg.betrieb.test=10.0.2.2 [--eintrag ...]
-                 [--boese txid|port|case|alle|klein] [--koeder 3]
-                 [--log datei] [--tc pkg.betrieb.test]
-
-Zwei Aufgaben in einem Programm, und die zweite ist die wichtigere.
-
-1. EIN AUTORITATIVER NAMENSDIENST fuer ein paar erfundene Namen. Das
-   Geraet in QEMU braucht einen Nameserver, der `pkg.betrieb.test`
-   kennt; das echte DNS kennt ihn nicht, und einen Namen zu mieten, um
-   einen Aufloeser zu messen, waere Unsinn.
-
-2. EIN FAELSCHER. Mit `--boese` schickt dieser Dienst VOR der richtigen
-   Antwort `--koeder` falsche: mit falscher Kennung, von einem falschen
-   Quellport, oder mit veraenderter Gross-/Kleinschreibung in der
-   zurueckgesendeten Frage. Jede davon ist genau das, was ein Angreifer
-   erraten muesste. Ein Aufloeser, der eine davon annimmt, ist
-   vergiftbar; einer, der beim ersten Fremdpaket aufgibt, ist es auch
-   (dann genuegt einem Angreifer, SCHNELL zu sein statt richtig).
-
-   Gemessen wird deshalb ZWEIERLEI: dass die richtige Adresse
-   herauskommt, UND dass `host -v` die Koeder als `fremd` gezaehlt hat.
-   Ohne die zweite Zahl waere der erste Haken auch dann gruen, wenn gar
-   kein Koeder angekommen waere.
-
-Das Format wird hier von Hand gebaut -- absichtlich, denn ein
-Bibliotheks-DNS koennte die Faelschungen gar nicht erzeugen.
+"""Usage:
+    dnsdienst.py --port 53 [--addr 0.0.0.0]
+    --entry pkg.betrieb.test=10.0.2.2 [--entry ...]
+    [--log file] [--tc pkg.betrieb.test]
 """
 import os
 import random

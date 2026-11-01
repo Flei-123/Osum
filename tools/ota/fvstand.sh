@@ -3,7 +3,7 @@
 # tools/ota/fvstand.sh -- add the FreeViewer viewer package to an OTA "stand".
 #
 # A stand is a directory of .opk files (tools/loader/pakete.sh writes one);
-# tools/ota/veroeffentlichen.py turns it into a signed feed (INDEX, VERZEICHNIS,
+# tools/ota/publish.py turns it into a signed feed (INDEX, VERZEICHNIS,
 # ed25519 signatures). This script builds pakete/fvviewer and drops
 # fvviewer-<N>.opk next to the other packages -- nothing is published here.
 #

@@ -112,7 +112,7 @@ def main(d):
     for name, blocks, ver, inodes in (("fmt-v2-small.img", 8192, 2, 128), ("fmt-v3-small.img", 8192, 3, 128),
                                       ("fmt-v2-big.img", 20000, 2, 1250), ("fmt-v3-big.img", 40000, 3, 2500)):
         img = load(name)
-        fs = mk.Fs(blocks, version=ver, inodes=inodes, zeit=1700000000)
+        fs = mk.Fs(blocks, version=ver, inodes=inodes, elapsed=1700000000)
         fs.format()
         n = (fs.data_start + 1) * SECT
         check("%s: first %d blocks equal mkfs.py" % (name, fs.data_start + 1), img[:n] == bytes(fs.d[:n]))
@@ -136,7 +136,7 @@ def vm(path, expect_parts, fmt_blocks, drift=False):
     check("vm: partitions %s" % expect_parts, p["parts"] == expect_parts, str(p["parts"]))
     if fmt_blocks:
         start = p["parts"][0][0]
-        fs = mk.Fs(fmt_blocks, version=2, inodes=max(128, min(4096, fmt_blocks // 16)), zeit=1700000000)
+        fs = mk.Fs(fmt_blocks, version=2, inodes=max(128, min(4096, fmt_blocks // 16)), elapsed=1700000000)
         fs.format()
         n = (fs.data_start + 1) * SECT
         got = img[start * SECT:start * SECT + n]

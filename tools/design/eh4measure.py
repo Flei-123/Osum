@@ -71,7 +71,7 @@ def kasten_der_tinte(im, cx, cy, r, tol=40):
     return (x0 + min(xs), y0 + min(ys), x0 + max(xs), y0 + max(ys)), bg, n
 
 
-def lupe(source, ziel, box, factor=6):
+def lupe(source, target, box, factor=6):
     im = Image.open(source).convert("RGB")
     x0, y0, x1, y1 = box
     x0 = max(0, x0)
@@ -81,8 +81,8 @@ def lupe(source, ziel, box, factor=6):
     aus = im.crop((x0, y0, x1, y1))
     aus = aus.resize((aus.width * factor, aus.height * factor),
                      Image.NEAREST)
-    aus.save(ziel)
-    return ziel
+    aus.save(target)
+    return target
 
 
 def unterschied(a, b):
@@ -150,14 +150,14 @@ def part_taskbar(out, name, uisc):
     image = os.path.join(bd, "01-schreibtisch.png")
     if felder and os.path.exists(image):
         args = [sys.executable, os.path.join(HIER, "ausrichtung.py"), image,
-                "--nur-messen", "--rand-unten", str(4 * uisc)]
+                "--only-measure", "--margin-bottom", str(4 * uisc)]
         for i in sorted(felder):
             x, y, w, h = felder[i]
-            args.append("--feld")
+            args.append("--field")
             args.append("%d,%d,%d,%d:btn%d" % (bx + x, by + y, w, h, i))
         m2 = last_2(t, r"taskbar: start x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
         if m2:
-            args.append("--feld")
+            args.append("--field")
             args.append("%d,%d,%s,%s:start"
                         % (bx + int(m2.group(1)), by + int(m2.group(2)),
                            m2.group(3), m2.group(4)))
@@ -240,9 +240,9 @@ def part_cursor(out):
         print("                 %d verschiedene Toene im Zeigerkasten"
               " (Bitmaske: 2)   %s"
               % (toene, "geglaettet" if toene > 8 else "VERLETZT: hart"))
-        ziel = os.path.join(bd, "lupe-01-zeiger.png")
-        lupe(p, ziel, (k[0] - 4, k[1] - 4, k[2] + 5, k[3] + 5), 8)
-        print("                 Lupe: %s" % ziel)
+        target = os.path.join(bd, "lupe-01-zeiger.png")
+        lupe(p, target, (k[0] - 4, k[1] - 4, k[2] + 5, k[3] + 5), 8)
+        print("                 Lupe: %s" % target)
 
 
 def main():

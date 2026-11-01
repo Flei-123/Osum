@@ -1,56 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/netview/kachel.py -- steht die Beschriftung, wo sie hingehoert?
-
-Runde NETVIEW, dritter Nachtrag.
-
-`schau.py` prueft, ob ein SYMBOL bildpunktgenau an einer Stelle steht.
-Das genuegt fuer ein Zeichen und genuegt nicht fuer eine Kachel: eine
-Kachel ist ein Rechteck mit zwei Textzeilen darin, und die beiden Fehler,
-die eine Kachel wirklich hat, sieht kein Symbolvergleich --
-
-  1. DIE BESCHRIFTUNG LAEUFT UEBER DEN RAND. Sie steht dann im
-     Nachbarn oder auf dem Rahmen, und im Quelltext ist davon nichts zu
-     sehen: dort steht `text_at(tx + 10, ...)` und das ist richtig.
-  2. DIE ZWEI ZEILEN UEBERLAPPEN. Der Name der Kachel und das Wort
-     darunter teilen sich eine Reihe Bildpunkte. Auch das steht in
-     keiner Quelle -- es ist die Summe aus Kachelhoehe, Aufsteiger der
-     Schrift und zwei Grundlinien, und die rechnet niemand im Kopf
-     richtig.
-
-BEIDE FEHLER HATTE DER ERSTE BAU DIESER RUNDE, und beide hat dieses
-Werkzeug gefunden, nicht das Auge: "Netz vortaeuschen" ragte vier
-Bildpunkte ueber die eigene Kachel hinaus, und auf der dritten Kachel
-beruehrten sich die zwei Zeilen. Deshalb steht es hier und laeuft auf
-allen vier Bildschirmraendern.
-
-WIE GEMESSEN WIRD. Nicht gegen eine Sollfarbe, sondern gegen die
-FLAECHE: alles, was nicht die Kachelfarbe und nicht die Rahmenfarbe ist,
-ist Inhalt. Die Umrandung der Kachel wird ausgespart (zwei Bildpunkte
-innen), damit der Rahmen selbst nicht als Beschriftung zaehlt.
-
-DAS SYMBOLBAND WIRD AUSGESPART, und das ist keine Bequemlichkeit: die
-Frage "kleben die Zeilen?" ist eine Frage nach den TEXTZEILEN. Die erste
-Fassung fragte sie ueber die ganze Kachel und schlug bei `tile-hide` an,
-dessen Zeichnung selbst aus zwei Teilen besteht -- ein Pfeil und eine
-Linie darunter, mit einer leeren Reihe dazwischen. Das Werkzeug hatte
-recht ueber die Bildpunkte und unrecht ueber die Frage. `oben` sagt ihm,
-wie viele Reihen am oberen Rand der Kachel das Symbol einnimmt.
-
-Verwendung:
-    kachel.py <schirm.ppm> <panel-x> <panel-y> <panel-w> <panel-h>
-              <pad> <tw> <th> <gap> <kacheln> <oben>
-    kachel.py <schirm.ppm> --rects <oben> <rand> x,y,w,h [x,y,w,h ...]
-    -> "ok" und Rueckgabe 0, oder je Beanstandung eine Zeile und 1
-
-DIE ZWEITE FORM (05.10.2026, Kontrollzentrum auf dem Szenenbaum): die Kacheln
-stehen nicht mehr in einem Raster, das dieses Werkzeug nachrechnen koennte --
-der Szenenbaum legt sie aus, und das Panel MELDET sie (`qs: kachel n= x= y=
-w= h=`, dazu `qs: geo` fuer den Ursprung). Die Rechtecke kommen in
-BILDSCHIRMKOORDINATEN; gemessen wird in jedem dasselbe wie vorher. `rand` ist
-der Streifen am Kachelrand, der nicht zaehlt (die Rundung der Platte; vorher
-fest 2): Die Platten des Kontrollzentrums haben Radius 8 (mal Vervielfachung, und
-bei 2 sieht man 28): 12 mal Vervielfachung lassen die Ecken aus.
+"""Usage:
+    tile.py <screen.ppm> <panel-x> <panel-y> <panel-w> <panel-h>
+    <pad> <tw> <th> <gap> <kacheln> <top>
+    tile.py <screen.ppm> --rects <top> <rand> x,y,w,h [x,y,w,h ...]
 """
 
 import sys
@@ -78,7 +31,7 @@ def ppm(path_2):
     return w, h, d[at:]
 
 
-def pruefe(w, h, pixel, kacheln, top_2, rand=2):
+def check(w, h, pixel, kacheln, top_2, rand=2):
     error = []
     meld = []
     for t, (tx, ty, tw, th) in enumerate(kacheln):
@@ -93,9 +46,9 @@ def pruefe(w, h, pixel, kacheln, top_2, rand=2):
                 zaehl[c] = zaehl.get(c, 0) + 1
         area = max(zaehl, key=zaehl.get)
 
-        zeilen = []
+        rows = []
         right = tx + rand
-        links = tx + tw - rand - 1
+        left = tx + tw - rand - 1
         for y in range(ty + rand, ty + th - rand):
             n_in = 0
             for x in range(tx + rand, tx + tw - rand - 1):
@@ -103,28 +56,28 @@ def pruefe(w, h, pixel, kacheln, top_2, rand=2):
                     n_in += 1
                     if x > right:
                         right = x
-                    if x < links:
-                        links = x
-            zeilen.append((y, n_in))
+                    if x < left:
+                        left = x
+            rows.append((y, n_in))
 
         if right >= tx + tw - rand - 2:
             error.append("Kachel %d: Inhalt bis x=%d, die Kachel endet "
                           "bei %d -- die Beschriftung laeuft ueber"
                           % (t, right, tx + tw - 1))
-        if links <= tx + rand:
+        if left <= tx + rand:
             error.append("Kachel %d: Inhalt ab x=%d, die Kachel faengt "
-                          "bei %d an" % (t, links, tx))
+                          "bei %d an" % (t, left, tx))
 
         bloecke = []
         anf = None
-        for y, n_in in [(y, k) for (y, k) in zeilen if y >= ty + top_2]:
+        for y, n_in in [(y, k) for (y, k) in rows if y >= ty + top_2]:
             if n_in > 0 and anf is None:
                 anf = y
             elif n_in == 0 and anf is not None:
                 bloecke.append((anf, y - 1))
                 anf = None
         if anf is not None:
-            bloecke.append((anf, zeilen[-1][0]))
+            bloecke.append((anf, rows[-1][0]))
         if len(bloecke) < 1 or len(bloecke) > 3:
             error.append("Kachel %d: %d Textbloecke -- %s"
                           % (t, len(bloecke), bloecke))
@@ -136,7 +89,7 @@ def pruefe(w, h, pixel, kacheln, top_2, rand=2):
                                   "und %s -- die Zeilen kleben"
                                   % (t, gap_2, bloecke[i], bloecke[i + 1]))
         meld.append("kachel %d: x %d..%d von %d..%d, Bloecke %s"
-                    % (t, links, right, tx, tx + tw - 1, bloecke))
+                    % (t, left, right, tx, tx + tw - 1, bloecke))
     return error, meld
 
 
@@ -154,7 +107,7 @@ def main(argv):
             at = (y * w + x) * 3
             return (roh[at], roh[at + 1], roh[at + 2])
 
-        error, meld = pruefe(w, h, pixel, rects, top_2, rand)
+        error, meld = check(w, h, pixel, rects, top_2, rand)
         for m in meld:
             print(m)
         if error:
@@ -185,7 +138,7 @@ def main(argv):
         tx = px + pad + (t % 2) * (tw + gap)
         ty = py + pad + (t // 2) * (th + gap)
         kacheln.append((tx, ty, tw, th))
-    error, meld = pruefe(w, h, pixel, kacheln, top_2)
+    error, meld = check(w, h, pixel, kacheln, top_2)
     for m in meld:
         print(m)
     if error:

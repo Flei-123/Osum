@@ -323,7 +323,7 @@ def main():
 
     print("\n[8] Strokes: two strokes in ONE path (the cross)")
 
-    def wurzel(v):
+    def root(v):
         if v <= 0:
             return 0
         x = v
@@ -343,7 +343,7 @@ def main():
                 ax, ay = pts[a]
                 bx, by = pts[b]
                 dx, dy = bx - ax, by - ay
-                l = wurzel(dx * dx + dy * dy)
+                l = root(dx * dx + dy * dy)
                 if l <= 0:
                     continue
                 nx = -dy * hb // l

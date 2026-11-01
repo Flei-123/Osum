@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""probe4.py -- eine App aus dem Starter WIRKLICH starten.
-
-Zwei Dinge, die die Vorlaeufer gelernt haben und die hier drinstehen:
-
-1. DER STARTER LAEUFT SCHON. `desk_start` startet ihn beim Hochfahren
-   (`desk: start /bin/launcher pid=8`), sein Fenster ist nur
-   zugeklappt. Seit Runde TUERSCHLOSS findet die Leiste es wieder --
-   der erste Klick auf Start macht es also ZU und der zweite AUF.
-   Deshalb wird hier gezaehlt und nicht geraten: geklickt wird, bis
-   die Liste im Bild steht.
-
-2. DIE LAGE KOMMT AUS `launcher: geom`, und die sagt seit derselben
-   Runde die Wahrheit (vorher standen dort die toten Festwerte
-   190/110, waehrend das Fenster bei 8/452 stand).
+"""Usage:
+    probe4.py -- eine App aus dem Starter WIRKLICH starten.
 """
 import os
 import re
@@ -26,9 +14,9 @@ from klick import Maschine
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 NAME = sys.argv[1] if len(sys.argv) > 1 else "p4"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
-ZEILE = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+ROW = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 D = os.path.join(HIER, "laeufe", NAME)
 SHOTS = os.path.join(HIER, "shots")
 os.makedirs(SHOTS, exist_ok=True)
@@ -50,7 +38,7 @@ def serial():
 
 def start_qemu():
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
     bis = time.time() + 90
     t0 = time.time()
@@ -61,7 +49,7 @@ def start_qemu():
     return None
 
 
-def menue_auf(m, versuche=3):
+def menu_open(m, versuche=3):
     """Auf den Startknopf klicken, bis das Menue OFFEN ist.
 
     Offen heisst: die Leiste hat NICHT gerade 'startmenue zu' gesagt
@@ -69,7 +57,7 @@ def menue_auf(m, versuche=3):
     for i in range(versuche):
         vor = serial()
         zu_vor = vor.count("startmenue zu")
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(2.5)
         s = serial()
         if s.count("startmenue zu") > zu_vor:
@@ -86,13 +74,13 @@ def main():
     if b is None:
         return 1
 
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
-    m.foto(os.path.join(SHOTS, "%s-01-schreibtisch.png" % NAME))
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
+    m.photo(os.path.join(SHOTS, "%s-01-schreibtisch.png" % NAME))
 
-    if not menue_auf(m):
+    if not menu_open(m):
         print("Menue geht nicht auf")
         return 1
-    m.foto(os.path.join(SHOTS, "%s-02-menue.png" % NAME))
+    m.photo(os.path.join(SHOTS, "%s-02-menue.png" % NAME))
 
     s = serial()
     geom, lst, rows = RE_GEOM.findall(s), RE_LIST.findall(s), RE_ROWS.findall(s)
@@ -108,34 +96,34 @@ def main():
           % (gx, gy, lx, ly, lw, lh, zh))
     for i in sorted(eintraege):
         print("   i=%d %-16s %s" % (i, eintraege[i][0], eintraege[i][1]))
-    if ZEILE not in eintraege:
-        print("Zeile %d gibt es nicht" % ZEILE)
+    if ROW not in eintraege:
+        print("Zeile %d gibt es nicht" % ROW)
         return 1
-    name, exe = eintraege[ZEILE]
+    name, exe = eintraege[ROW]
 
     zx = gx + lx + 60
-    zy = gy + ly + 2 + ZEILE * zh + zh // 2
+    zy = gy + ly + 2 + ROW * zh + zh // 2
     print("\nKlick auf [%s] -> %s   bei (%d,%d)" % (name, exe, zx, zy))
-    vor_bild = os.path.join(SHOTS, "%s-03-vor-start.png" % NAME)
-    m.foto(vor_bild)
+    before_image = os.path.join(SHOTS, "%s-03-vor-start.png" % NAME)
+    m.photo(before_image)
     m.klick_auf(zx, zy)
     time.sleep(5.0)
-    nach_bild = os.path.join(SHOTS, "%s-04-nach-start.png" % NAME)
-    m.foto(nach_bild)
+    after_image = os.path.join(SHOTS, "%s-04-nach-start.png" % NAME)
+    m.photo(after_image)
 
     s = serial()
     starts = RE_START.findall(s)
     gut = [x for x in starts if not x[1].startswith("-") and x[1] != "0"]
-    schlecht = [x for x in starts if x[1].startswith("-")]
+    bad = [x for x in starts if x[1].startswith("-")]
     print("\nLAUNCHER-STARTS:", starts)
-    print("  pid>0: %d   negativ: %d" % (len(gut), len(schlecht)))
+    print("  pid>0: %d   negativ: %d" % (len(gut), len(bad)))
     print("Shell: ready=%d bye=%d" % (s.count("sh: ready"), s.count("sh: bye")))
     print("Panik:", len(re.findall(r"PANIK|#PF|#UD", s)))
 
     # Bildpunkt-Unterschied: ist wirklich ein Fenster aufgegangen?
     try:
         r = subprocess.run(["python3", os.path.join(HIER, "sicht.py"),
-                            "vergleiche", vor_bild, nach_bild],
+                            "vergleiche", before_image, after_image],
                            capture_output=True, text=True, timeout=120)
         print("BILD:", r.stdout.strip().splitlines()[-1] if r.stdout.strip() else r.stderr[:200])
     except Exception as e:

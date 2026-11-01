@@ -222,19 +222,19 @@ konsole() { # name console.py-args...
     python3 tools/server/console.py "$D/$n.sock" "$D/$n.log" "$@" > "$D/$n.out" 2>&1
     kill "$q" 2>/dev/null; wait "$q" 2>/dev/null
 }
-konsole b1 --frist 150 --erwarte 'sh: ready' \
-    --sende 'echo live-probe-4711 > /users/live/probe.txt\n' --frist 20 --erwarte 'echo -> ' \
-    --sende 'cat /users/live/probe.txt\n' --frist 20 --erwarte 'cat -> ' \
-    --sende 'sync\n' --frist 20 --erwarte 'sync -> '
+konsole b1 --deadline 150 --erwarte 'sh: ready' \
+    --sende 'echo live-probe-4711 > /users/live/probe.txt\n' --deadline 20 --erwarte 'echo -> ' \
+    --sende 'cat /users/live/probe.txt\n' --deadline 20 --erwarte 'cat -> ' \
+    --sende 'sync\n' --deadline 20 --erwarte 'sync -> '
 grep -aq '^live-probe-4711' "$D/b1.log" || grep -aq 'live-probe-4711$' "$D/b1.log"
 if [ "$(grep -ac 'live-probe-4711' "$D/b1.log")" -ge 2 ]; then
     ok "boot 1: a file written into the root reads back ('live-probe-4711')"
 else
     bad "boot 1: the probe file did not read back"; tail -15 "$D/b1.log" | sed 's/^/       /'
 fi
-konsole b2 --frist 150 --erwarte 'sh: ready' \
-    --sende 'cat /users/live/probe.txt\n' --frist 20 --erwarte 'cat -> ' \
-    --sende 'ls /users/live\n' --frist 20 --erwarte 'ls -> '
+konsole b2 --deadline 150 --erwarte 'sh: ready' \
+    --sende 'cat /users/live/probe.txt\n' --deadline 20 --erwarte 'cat -> ' \
+    --sende 'ls /users/live\n' --deadline 20 --erwarte 'ls -> '
 if grep -aq 'sh: ready' "$D/b2.log"; then
     if grep -aqE 'live-probe-4711$|^live-probe-4711' "$D/b2.log"; then
         bad "boot 2: the file from boot 1 is STILL there"

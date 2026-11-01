@@ -26,7 +26,7 @@ RE_CALL = re.compile(r"\bwlibc\.([a-z_0-9]+)\s*\(")
 RE_COMMENT = re.compile(r"^\s*//")
 
 
-def zeilen(path_2):
+def rows(path_2):
     with open(path_2, "rb") as f:
         roh = f.read().decode("latin1")
     return roh.split("\n")
@@ -34,7 +34,7 @@ def zeilen(path_2):
 
 def scan(path_2):
     mal = []
-    for nr, z in enumerate(zeilen(path_2), 1):
+    for nr, z in enumerate(rows(path_2), 1):
         if RE_COMMENT.match(z):
             continue
         code = z.split("//")[0]
@@ -63,7 +63,7 @@ RE_MASKE = re.compile(r"[&|^]\s*(0x[0-9a-fA-F]+|\d+)\s*$")
 
 def farben(path_2):
     treffer = []
-    for nr, z in enumerate(zeilen(path_2), 1):
+    for nr, z in enumerate(rows(path_2), 1):
         if RE_COMMENT.match(z):
             continue
         code = z.split("//")[0]

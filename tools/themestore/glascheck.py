@@ -1,49 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/themestore/glascheck.py -- die Bilder der Runde GLAS MESSEN.
-
-    glascheck.py mix <bild.png> <alpha>          die Mischung nachrechnen
-    glascheck.py var <bild.png>                  Streuung des Leistenstreifens
-                  [--y0=.. --y1=..]              oder, mit y-Grenzen, die eines
-                                                 beliebigen Rechtecks -- etwa der
-                                                 Flaeche eines durchsichtigen
-                                                 Fensters mit Milchglas
-    glascheck.py kontrast <bild.png> <fg-hex>    Schrift gegen den SCHLECHTESTEN
-                                                 gemischten Grund (Anteil >= 1 %),
-                                                 Uhr eingeschlossen
-    glascheck.py ecke <bild.png> <x> <y> <k> [ol|or|ul|ur]
-                                                 Farben in einer Ecke zaehlen;
-                                                 das Wort sagt, WELCHE Ecke des
-                                                 Quadrats die aeussere ist
-    glascheck.py linien <bild.png> <x> <y> <w> <h> [rand]
-                                                 waagerechte Linien in einer
-                                                 Karte zaehlen
-    glascheck.py kachel <bild.png> <x> <y> <w> <h> <r>
-                                                 Kante, Rundung und was
-                                                 ausserhalb der Rundung steht
+"""Usage:
+    glascheck.py mix <image.png> <alpha>          die Mischung nachrechnen
+    glascheck.py var <image.png>                  Streuung des Leistenstreifens
+    glascheck.py contrast <image.png> <fg-hex>    font gegen den SCHLECHTESTEN
+    glascheck.py corner <image.png> <x> <y> <k> [ol|or|ul|ur]
+    glascheck.py linien <image.png> <x> <y> <w> <h> [rand]
+    glascheck.py tile <image.png> <x> <y> <w> <h> <r>
     glascheck.py diff <a.png> <b.png>            abweichende Bildpunkte
-    glascheck.py fenster <bild.png> <serial.txt> JEDE Fensterbeschriftung
-                                                 gegen ihren GEMISCHTEN Grund
-    glascheck.py reiter <bild.png> <serial.txt>  Kantendichte im Band der
-                                                 Reiterzeile (fremde Glyphen)
-
-DIE ZWEITE RECHNUNG, UND SIE WEISS NICHTS VON DER ERSTEN.
-
-Die Runde THEMESTORE hat es vorgemacht: `tools/themestore/model.py`
-rechnet die Kontraste auf dem Wirt noch einmal, und erst die
-Uebereinstimmung zweier Rechnungen, die nichts voneinander wissen, ist
-eine Messung.  Fuer diese Runde heisst das: `glass_mix` aus
-kernel/ui/wm.fi steht hier ein zweites Mal, aus dem Kommentar dort
-abgeschrieben und nicht aus dem Code -- Schluesselfarbe, Abstandsalpha,
-Schleier, `blend` mit der Aufrundung `(num + 127) / 255`.  Stimmen die
-Bildpunkte unter der Leiste damit ueberein, ist wirklich gemischt
-worden und nicht ein Muster aus Loechern gemalt.
-
-Die Leiste wird unten am Bild gesucht: der Streifen der letzten
-`--hoehe` Zeilen (Vorgabe 28, die Dicke, mit der jeder Lauf dieser
-Abnahme faehrt).  Gemessen wird nur der Teil zwischen `--x0` und `--x1`
--- links sitzen Start- und Fensterknoepfe, rechts die Uhr, und beides
-ist Schrift und kein Grund.
+    glascheck.py window <image.png> <serial.txt> JEDE Fensterbeschriftung
+    glascheck.py tab <image.png> <serial.txt>  Kantendichte im Band der
 """
 import math
 import re
@@ -91,14 +57,14 @@ def rechteck(im, x0, x1, y0, y1):
             for y in range(max(y0, 0), min(y1, h))]
 
 
-def leiste(im, hoehe, x0, x1):
+def bar(im, height, x0, x1):
     w, h = im.size
-    return rechteck(im, x0, x1, h - hoehe + 6, h - 2)
+    return rechteck(im, x0, x1, h - height + 6, h - 2)
 
 
-def wandfarben(im, hoehe, x0, x1):
+def wandfarben(im, height, x0, x1):
     w, h = im.size
-    top = h - hoehe
+    top = h - height
     c = Counter(im.getpixel((x, y))
                 for x in range(x0, min(x1, w), 3)
                 for y in range(max(top - 80, 0), top - 8, 3))
@@ -137,18 +103,18 @@ def window(image, serial, brand="settings: rect name=waa "):
     tail = roh[schnitt:] if schnitt >= 0 else roh
     f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
-    zeilen = []
+    rows = []
     for ln in tail.splitlines():
         m = FENSTERTEXT.search(ln)
         if m:
-            zeilen.append(m)
-    if not zeilen:
+            rows.append(m)
+    if not rows:
         print("window NO label in the capture -- uitrace off?")
         return 1
-    zaehl = Counter(int(m.group(1)) for m in zeilen)
+    zaehl = Counter(int(m.group(1)) for m in rows)
     win = zaehl.most_common(1)[0][0]
     last_2 = {}
-    for m in zeilen:
+    for m in rows:
         if int(m.group(1)) != win or not m.group(10).strip():
             continue
         last_2[(m.group(2), m.group(10))] = m
@@ -263,7 +229,7 @@ def main(argv):
     if cmd == "diff":
         a = Image.open(rest[0]).convert("RGB")
         b = Image.open(rest[1]).convert("RGB")
-        pts = leiste(a, opt["hoehe"], opt["x0"], opt["x1"])
+        pts = bar(a, opt["hoehe"], opt["x0"], opt["x1"])
         n = sum(1 for p in pts if a.getpixel(p) != b.getpixel(p))
         print("diff %d von %d" % (n, len(pts)))
         return 0
@@ -273,7 +239,7 @@ def main(argv):
         pts = rechteck(im, opt["x0"], opt["x1"],
                       opt.get("y0", 0), opt.get("y1", im.size[1]))
     else:
-        pts = leiste(im, opt["hoehe"], opt["x0"], opt["x1"])
+        pts = bar(im, opt["hoehe"], opt["x0"], opt["x1"])
     if opt.get("felder"):
         asc = int(opt.get("ascent", 12))
         bottom = int(opt.get("unter", 4))
@@ -383,11 +349,11 @@ def main(argv):
             return max(abs(a[i] - b[i]) for i in range(3)) <= tol
 
         mitte = y + h // 2
-        links = right = -1
+        left = right = -1
         for i in range(-4, w + 5):
             if not nah(im.getpixel((x + i, mitte)), reason):
-                if links < 0:
-                    links = x + i
+                if left < 0:
+                    left = x + i
                 right = x + i
         slack = int(opt.get("slack", 2))
 
@@ -427,7 +393,7 @@ def main(argv):
             area = Counter(im.getpixel(p) for p in probe).most_common(1)[0][0]
             innen = sum(1 for p in probe if not nah(im.getpixel(p), area, 24))
         print("kachel links=%d rechts=%d fremd=%d innen=%d probe=%d tiefe=%d r=%d"
-              % (links, right, foreign, innen, len(probe), tiefe, r))
+              % (left, right, foreign, innen, len(probe), tiefe, r))
         return 0
 
     if cmd == "kontrast" and opt.get("_felder"):

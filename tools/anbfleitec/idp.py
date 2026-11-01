@@ -256,20 +256,20 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8443)
     ap.add_argument("--zertifikat", required=True)
-    ap.add_argument("--schluessel", required=True)
-    ap.add_argument("--verzeichnis", default=".")
+    ap.add_argument("--key", required=True)
+    ap.add_argument("--directory", default=".")
     ap.add_argument("--issuer", required=True,
                     help="e.g. https://10.9.0.1:8443 (no trailing slash)")
     ap.add_argument("--interval", type=int, default=1)
     ap.add_argument("--access-ttl", type=int, default=3600)
     a = ap.parse_args()
-    state["dir"] = a.verzeichnis
+    state["dir"] = a.directory
     state["issuer"] = a.issuer.rstrip("/")
     state["interval"] = a.interval
     state["access_ttl"] = a.access_ttl
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), H)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.load_cert_chain(a.zertifikat, a.schluessel)
+    ctx.load_cert_chain(a.zertifikat, a.key)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     sys.stderr.write("idp: ready on %d\n" % a.port)

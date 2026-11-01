@@ -1724,7 +1724,7 @@ UC=$(tgrid 'NOT A SINGLE DEVCE!' | head -1 | grep -oE '[0-9]+ wrong' \
 num "CONTROL: a line with a letter missing does NOT fit the raster" \
     "${UC:-0}" gt 0
 #
-BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --leiste 2>&1 \
+BL=$(python3 tools/themestore/shotcheck.py "$TPPM" "$TLOG" --taskbar 2>&1 \
      | grep -a 'shotcheck: leiste')
 echo "        $BL"
 BN=$(printf '%s' "$BL" | grep -oE 'texts [0-9]+' | grep -oE '[0-9]+')
@@ -1878,7 +1878,7 @@ num "und die Reiterzeile ist Bildpunkt fuer Bildpunkt die des deckenden Laufs" \
 num "GEGENPROBE: derselbe Lauf mischt seinen Rumpf sehr wohl" \
     "${WD:-0}" ge 2000
 SW=$(python3 tools/themestore/shotcheck.py "$TMPD/winal/desktop.ppm" \
-     "$TMPD/winal/serial.txt" --leiste --knoepfe 2>&1)
+     "$TMPD/winal/serial.txt" --taskbar --knoepfe 2>&1)
 printf '%s\n' "$SW" | head -2 | sed 's/^/        /'
 for f in empty cut overlapping; do
     num "durchsichtiges Fenster, $f" \

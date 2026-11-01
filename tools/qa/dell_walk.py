@@ -417,7 +417,7 @@ class Bridge:
             print("  [dry] %s %s %s" % (art, target, value[:60]))
             return 200, "", b""
         st, _, body = self._req("POST", "/bruecke/auftrag",
-                                dict(geraet=self.device, art=art, target=target, value=value, ttl_s=120))
+                                dict(dev=self.device, art=art, target=target, value=value, ttl_s=120))
         if st != 200:
             return st, "", body
         aid = json.loads(body)["id"]

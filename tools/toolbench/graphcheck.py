@@ -1,34 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/toolbench/graphcheck.py -- STEHT DIE KURVE DA, WO SIE GEMELDET WURDE?
-
-    graphcheck.py <bild.ppm> <serial.txt> <fensterx,fenstery>
-
-Der Aufgabenverwalter malt seinen Verlaufsgraphen SELBST -- kein Widget
-der Bibliothek, also auch keine `wlib: text`-Zeile, an der
-`shotcheck.py` ihn messen koennte. Er meldet statt dessen:
-
-    taskmgr: graph x= y= w= h= n= hist= p0x= p0y= pnx= pny=
-    taskmgr: gcpu <n Werte in Promille>
-    taskmgr: gmem <n Werte>
-
-Daraus prueft dieses Werkzeug DREI Dinge im Bild, und keines davon
-glaubt dem Programm auf sein Wort:
-
-  1. DIE FLAECHE IST DA. Im gemeldeten Rechteck stehen Bildpunkte, und
-     es sind nicht alle gleich -- eine einfarbige Flaeche waere ein
-     Graph, der nichts zeichnet.
-  2. DIE PUNKTE LIEGEN RICHTIG. Fuer jeden gemeldeten Messwert wird die
-     Stelle ausgerechnet, an der er liegen muesste, und dort nach einem
-     Bildpunkt gesucht, der sich vom Grund unterscheidet. Die Formel
-     dafuer steht auch im Programm; damit sie nicht auseinanderlaufen
-     koennen, meldet das Programm den ERSTEN und den LETZTEN Punkt
-     zusaetzlich als fertige Bildpunktstelle -- stimmen die beiden
-     Enden, stimmt die lineare Abbildung dazwischen.
-  3. ZWEI KURVEN, ZWEI FARBEN. Im Rechteck kommen mindestens zwei
-     Farben vor, die nicht der Grund und nicht das Gitter sind.
-
-Der Rueckgabewert ist 0, wenn alle drei stimmen.
+"""Usage:
+    graphcheck.py <image.ppm> <serial.txt> <fensterx,fenstery>
+    taskmgr: gcpu <n Values in Promille>
+    taskmgr: gmem <n Values>
 """
 import re
 import sys

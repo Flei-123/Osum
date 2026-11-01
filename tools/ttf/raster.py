@@ -1,52 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ttf/raster.py -- TrueType lesen und rastern, ZWEITE Fassung.
-
-`kernel/gfx/ttf.fi` ist die erste.  Dieses Programm ist die zweite, in einer
-anderen Sprache, auf der anderen Seite der Platte -- derselbe Gedanke wie
-bei `tools/osum/mkfs.py` und dem Dateisystem.  Es gibt hier nur einen
-Grund fuer eine zweite Fassung, und der ist die MESSUNG:
-
-    Ein Bildschirmfoto sagt ueber gerasterten Text nur dann etwas, wenn
-    es etwas gibt, WOGEGEN man es haelt.  Runde K7 hielt die Textkonsole
-    gegen die Bitmaske aus `kernel/gfx/font.fi` -- Bit fuer Bit.  Bei einer
-    Kantenglaettung gibt es keine Bitmaske; es gibt einen Algorithmus.
-    Also steht der Algorithmus zweimal da, und das Foto wird gegen die
-    zweite Fassung gerechnet.
-
-Deshalb ist hier JEDE Rechnung so geschrieben, wie sie in Firn steht --
-ganzzahlig, mit denselben Verschiebungen und derselben Rundung.  Zwei
-Stellen, an denen Python und Firn AUSEINANDERGEHEN, und beide sind hier
-ausdruecklich behandelt:
-
-  * `>>` ist in beiden Sprachen ein ARITHMETISCHES Schieben (es rundet
-    nach unten, auch bei negativen Zahlen).  Nachgemessen an firnc:
-    `(0-7) >> 1` ist -4, nicht -3.  Das darf also unveraendert stehen.
-  * `/` schneidet in Firn zur NULL hin ab (`(0-7) / 2` ist -3), Pythons
-    `//` rundet nach unten (-4).  Wo geteilt wird, steht deshalb `tdiv`.
-
-DER ALGORITHMUS, in der Reihenfolge, in der er laeuft:
-
-  1. Die Umrisse aus `glyf`: Punkte, Linien und QUADRATISCHE Bezier --
-     TrueType hat keine kubischen.  Fehlende Punkte auf der Kurve werden
-     als Mittelpunkt zweier Kontrollpunkte ergaenzt (die Kurzschreibweise
-     des Formats).
-  2. Alles in 26.6-Festkomma: `f26(v) = (v * scale) >> 10`, mit
-     `scale = (px << 16) / upm`.  Eine Einheit ist 1/64 Bildpunkt.
-  3. Jede Bezier in gerade Stuecke zerlegt.  Die Anzahl haengt an der
-     Laenge des Kontrollzugs -- ganzzahlig, damit beide Fassungen
-     dieselbe Anzahl waehlen.
-  4. Fuellen mit der NICHTNULL-REGEL und 4x4 Unterabtastung: vier
-     Abtastzeilen je Bildzeile, vier Abtastspalten je Bildpunkt, also
-     siebzehn Deckungsstufen (0..16).  Daraus die Deckkraft
-     `(cov * 255 + 8) / 16`.
-
-Verwendung:
+"""Usage:
     raster.py info    <ttf>
-    raster.py glyphe  <ttf> <px> <zeichen>        -- als Text ausgeben
-    raster.py breite  <ttf> <px> <text>           -- Laufweite in 26.6
-    raster.py zeile   <ttf> <px> <text>           -- die ganze Zeile
-    raster.py summe   <ttf> <px> <zeichen>        -- die Pruefsumme
+    raster.py glyphe  <ttf> <px> <chars>        -- als Text ausgeben
+    raster.py width  <ttf> <px> <text>           -- Laufweite in 26.6
+    raster.py row   <ttf> <px> <text>           -- die ganze row
+    raster.py sum   <ttf> <px> <chars>        -- die Pruefsumme
     raster.py vergleich <ttf> <mitschnitt>        -- gegen `ttfdump`
 """
 import os
@@ -164,15 +123,15 @@ class Ttf:
     def kern(self, g1, g2):
         if self.kern_off == 0:
             return 0
-        schluessel = (g1 << 16) | g2
+        key_name = (g1 << 16) | g2
         lo, hi = 0, self.kern_paare
         while lo < hi:
             m = (lo + hi) // 2
             p = self.kern_off + m * 6
             k = (u16(self.d, p) << 16) | u16(self.d, p + 2)
-            if k == schluessel:
+            if k == key_name:
                 return s16(self.d, p + 4)
-            if k < schluessel:
+            if k < key_name:
                 lo = m + 1
             else:
                 hi = m
@@ -339,9 +298,9 @@ def quad(x0, y0, cx, cy, x1, y1):
 
 
 class Glyphe:
-    def __init__(self, w, h, links, top_2, adv26, deckung):
+    def __init__(self, w, h, left_edge, top_2, adv26, deckung):
         self.w, self.h = w, h
-        self.links, self.top_2 = links, top_2
+        self.left_edge, self.top_2 = left_edge, top_2
         self.adv26 = adv26
         self.a = deckung
 
@@ -516,7 +475,7 @@ def vergleich(path_ttf, mitschnitt):
     bad_2 = []
     geprueft = 0
     tinte = 0
-    for (c, px, w, h, left, top, adv, sm, zeilen) in faelle:
+    for (c, px, w, h, left, top, adv, sm, rows) in faelle:
         c, px = int(c), int(px)
         if px not in schriften:
             schriften[px] = Font(path_ttf, px)
@@ -524,13 +483,13 @@ def vergleich(path_ttf, mitschnitt):
         name = "'%c' (0x%02x)" % (c if 32 <= c < 127 else 63, c)
         geprueft += 1
         tinte += g.gesetzt()
-        if (g.w, g.h, g.links, g.top_2, g.adv26) != (int(w), int(h),
+        if (g.w, g.h, g.left_edge, g.top_2, g.adv26) != (int(w), int(h),
                                                     int(left), int(top),
                                                     int(adv)):
             bad_2.append("%s Masse: Kern %sx%s l=%s t=%s a=%s, "
                             "Wirt %dx%d l=%d t=%d a=%d"
                             % (name, w, h, left, top, adv, g.w, g.h,
-                               g.links, g.top_2, g.adv26))
+                               g.left_edge, g.top_2, g.adv26))
             continue
         if sum_2(g) != int(sm):
             bad_2.append("%s Pruefsumme: Kern %s, Wirt %d"
@@ -538,7 +497,7 @@ def vergleich(path_ttf, mitschnitt):
             continue
         soll = [ "".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]
                          for x in range(g.w)) for y in range(g.h) ]
-        ist = re.findall(r"ttfrow \d+ \|(.*)\|", zeilen)
+        ist = re.findall(r"ttfrow \d+ \|(.*)\|", rows)
         if ist != soll:
             bad_2.append("%s Bildzeilen weichen ab" % name)
     print("%d Glyphen, %d Tintenpunkte: %d abweichend"
@@ -564,7 +523,7 @@ def main(argv):
         s = Font(argv[2], int(argv[3]))
         g = s.glyphe(ord(argv[4]))
         print("%dx%d left=%d top=%d adv=%d/64 set=%d"
-              % (g.w, g.h, g.links, g.top_2, g.adv26, g.gesetzt()))
+              % (g.w, g.h, g.left_edge, g.top_2, g.adv26, g.gesetzt()))
         stufen = " .:-=+*#%@"
         for y in range(g.h):
             print("".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]

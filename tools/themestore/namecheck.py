@@ -1,50 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/themestore/namecheck.py -- der Name auf der Vorschaukachel,
-Zeichen fuer Zeichen gegen die Vorlage, aus der er stammt.
-
-    namecheck.py <bild.png> <serial.txt> <assets/themes> [<lochbild.png>]
-
-WARUM ES DIESES WERKZEUG GIBT.
-
-Auf Bild 09 der Runde GLAS stand auf der vierten Vorschaukachel
-"Mittemacht" statt "Mitternacht", und links davon, am Rand der Kachel,
-ein heller Keil, der wie ein abgerutschtes Zeichen aussah. Zwei
-Verdaechtige, und beide muessen ausgeschlossen werden koennen, bevor
-man etwas repariert:
-
-  1. Die Zeile verliert am Feldrand ein Zeichen (die Kachel kuerzt und
-     sagt es nicht).
-  2. Der Zeichensatz verschluckt das 'r' (die Glyphe kommt nicht an).
-
-GEMESSEN wurde beides, und keines von beiden war es. Der Keil war ein
-Loch in der FLAECHE der Kachel (`glascheck.py kachel innen=`, behoben in
-kernel/user/wlib.fi `paint_tile`), und die Schrift steht vollstaendig
-da: alle elf Zeichen liegen auf genau den Stellen, die der zweite
-Rasterer (`tools/ttf/raster.py`) fuer diese Schrift und diese Groesse
-ausrechnet. Dass ein Mensch "Mittemacht" liest, kommt vom Schriftbild
-selbst -- der Arm des 'r' reicht bei 15 Bildpunkten bis in die Schulter
-des 'n' (die Unterschneidung des Paares ist -36/64 Bildpunkte), und das
-Paar 'rn' sieht dann aus wie ein 'm'. Das ist eine Eigenschaft der
-Schrift und keine verlorene Glyphe -- und weil das ein Satz ist, den
-man behaupten kann, steht hier die Messung dazu.
-
-WAS GEPRUEFT WIRD, und jedes gegen eine zweite Quelle:
-
-  gemalt      jede Kachelbeschriftung, die das Programm selbst gemeldet
-              hat (`wlib: text ... kind=12 ... t=`)
-  soll        jede `name=`-Zeile aus assets/themes/*.preset
-  fehlt       ein Name der Vorlage, den keine Kachel gemalt hat
-  gekuerzt    eine Kachel, die weniger Oktette gemalt als gemeldet hat
-              (`nq` gegen `nv`, und beide gegen die Laenge des Namens)
-  ohnetinte   eine GLYPHE, an deren gerechneter Stelle im Bild keine
-              Tinte steht -- die Gegenprobe gegen "der Zeichensatz
-              verschluckt ein Zeichen"
-
-Mit einem vierten Argument schreibt das Werkzeug ein LOCHBILD: dasselbe
-Bild, in dem das erste 'r' des ersten Namens mit der Flaechenfarbe
-seiner Kachel uebermalt ist. Auf ihm MUSS `ohnetinte` groesser als 0
-sein -- sonst misst die Probe oben nichts.
+"""Usage:
+    namecheck.py <image.png> <serial.txt> <assets/themes> [<lochbild.png>]
 """
 import glob
 import os
@@ -76,7 +33,7 @@ def glyphkasten(s, name, m):
         g = s.glyphe(c)
         if g.w == 0 or g.h == 0:
             continue
-        yield c, x0 + (x26 >> 6) + g.links, base - g.top_2, g
+        yield c, x0 + (x26 >> 6) + g.left, base - g.top_2, g
 
 
 def main(argv):
@@ -121,7 +78,7 @@ def main(argv):
         loch.save(argv[4])
 
     missing = [n for n in soll if n not in gemalt]
-    kurz = [n for n, m in gemalt.items()
+    brief = [n for n, m in gemalt.items()
             if m.group(9) != m.group(10)
             or len(n.encode("latin1")) != int(m.group(10))]
     empty_2 = []
@@ -148,10 +105,10 @@ def main(argv):
                 empty_2.append("%s: '%s' bei x=%d hat %d Tintenpunkte"
                             % (name, chr(c), gx, tinte))
     print("names painted=%d expected=%d missing=%d shortened=%d noink=%d"
-          % (len(gemalt), len(soll), len(missing), len(kurz), len(empty_2)))
+          % (len(gemalt), len(soll), len(missing), len(brief), len(empty_2)))
     for z in missing[:5]:
         print("    fehlt: %s" % z)
-    for z in kurz[:5]:
+    for z in brief[:5]:
         print("    gekuerzt: %s" % z)
     for z in empty_2[:5]:
         print("    %s" % z)

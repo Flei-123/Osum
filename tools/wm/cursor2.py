@@ -192,7 +192,7 @@ def esc(bs):
     return "".join("\\x%02x" % b for b in bs)
 
 
-def bauen(target):
+def build(target):
     header, data = board()
     for b in data:
         assert 0 <= b <= 255, b
@@ -224,10 +224,10 @@ def main():
         for f in error:
             print("   FEHLER: " + f)
             bad += 1
-    if "--bauen" in sys.argv:
+    if "--build" in sys.argv:
         target = os.path.join(os.path.dirname(__file__), "..", "..",
                             "kernel", "zeiger.fi")
-        bauen(os.path.normpath(target))
+        build(os.path.normpath(target))
     if bad:
         print("%d Fehler" % bad)
         return 1

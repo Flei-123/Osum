@@ -1,24 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/noname.py -- steht dieser Anzeigename als ZEICHENKETTE im
-Quelltext?
-
+"""Usage:
     noname.py <quelldatei> <name>
-
-Die Zusage lautet: der Anzeigename eines Programms steht in Daten
-(`/usr/share/apps/*.app`) und nicht im Code -- dieselbe Regel, nach der
-dieses Projekt austauschbare Zeichenketten in `brands/*.toml` haelt.
-
-EIN EINFACHES `grep` PRUEFT DAS NICHT.  Der Kopfkommentar von
-`kernel/user/explorer.fi` ERKLAERT, warum das Programm "Datei-Explorer"
-heisst -- und ein `grep -q 'Datei-Explorer'` schlaegt darauf an und
-meldet einen Fehler, den es nicht gibt.  Genau das ist in dieser Runde
-passiert.
-
-Also wird hier unterschieden: Anmerkungen (`//` bis zum Zeilenende)
-werden entfernt, und gesucht wird nur noch in dem, was uebrigbleibt --
-also in Zeichenkettenliteralen und im Code.  Rueckgabe 0, wenn der Name
-dort NICHT vorkommt.
 """
 import re
 import sys

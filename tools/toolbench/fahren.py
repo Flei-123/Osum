@@ -1,45 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/toolbench/fahren.py -- EINEN ABLAUF UEBER EINE VERBINDUNG FAHREN.
-
+"""Usage:
     drive.py <monitor-socket> <plan.txt> <serial.txt> <ausgabeverzeichnis>
-
-WARUM ES DIESE DATEI GIBT, und die Begruendung ist eine Messung.
-
-Bis hierher hat der Laeufer je Schritt ein eigenes Werkzeug gestartet:
-`tools/wm/monitor.py` fuer die Klicks, `tools/gfx/screenshot.py` fuer die
-Bilder. Jedes davon macht seine EIGENE Verbindung zum QEMU-Monitor auf.
-Der Monitor haengt an `-monitor unix:...,server,nowait`, und genau
-daran ist der Ablauf dieser Runde zweimal gescheitert:
-
-    plan: ziel qsfeld -> 1171,786      (kam an)
-    plan: foto q01_offen               (kam an)
-    plan: ziel kachel 3 -> 1176,507    "kein Monitor an .../mon.sock"
-
-Von aussen sah das aus, als griffe die Trefferpruefung im Gast nicht --
-es war eine Verbindung, die nicht wieder aufging. Zwei Nachmittage
-Fehlersuche im falschen Ring.
-
-Also: EINE Verbindung fuer den ganzen Ablauf, aufgemacht wenn die
-Maschine steht, zugemacht wenn der Plan fertig ist. Klicks und Bilder
-gehen durch dieselbe.
-
-DIE SCHRITTE, einer je Zeile:
-
-    warte <sekunden>
-    warteauf <regex> <anzahl> <frist>   poll the serial until <anzahl> lines match
-    marke <text>              nur in den Ablauf schreiben
-    klick <x>,<y>             Zeiger dorthin, druecken, loslassen
-    ziel <worte ...>          Stelle aus dem Mitschnitt holen
-                              (tools/toolbench/klickplan.py) und klicken
-    foto <name>               Bildschirmfoto nach <ausgabe>/<name>.ppm
-
-DER ZEIGER WIRD RELATIV BEWEGT, weil der PS/2-Zeiger nichts anderes
-kann: erst mit grossen Schritten in die linke obere Ecke, wo der
-Anschlag die Vorgeschichte loescht, dann in Schritten unter 128 an die
-gemeinte Stelle. Zwoelf Schritte in die Ecke und nicht sechs -- sechs
-mal 120 sind 720 und reichen auf einem 1280 breiten Schirm nicht (auch
-das eine Messung, siehe tools/themestore/click.py).
+    wait <secs>
+    warteauf <regex> <count> <deadline>   poll the serial until <count> lines match
+    klick <x>,<y>             Cursor dorthin, druecken, loslassen
+    photo <name>               Bildschirmfoto nach <output>/<name>.ppm
 """
 import os
 import re

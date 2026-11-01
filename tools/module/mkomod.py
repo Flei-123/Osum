@@ -1,43 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/module/mkomod.py -- aus einer Objektdatei ein ladbares Modul.
-
-Ein `.omod` ist ein Kopf von 64 Oktetten, eine ELF64-Objektdatei (ET_REL)
-und eine Ed25519-Signatur ueber alles davor:
-
-      0   8   Kennung "OSUMMOD\\n"
-      8   4   Formatfassung dieses Kopfes (1), kleinendig
-     12   4   die Schnittstellenfassung des Kerns (ksym.ABI)
-     16   8   Laenge der Nutzlast
-     24   8   Merker, 0
-     32  32   Name, nullbeendet
-     64   n   die Objektdatei
-   64+n  64   Ed25519 (RFC 8032) ueber die Oktette 0 .. 64+n
-
-WARUM DIE SIGNATUR AM ENDE UND NICHT IM KOPF: dann ist die signierte
-Nachricht ein zusammenhaengendes Stueck vom Anfang der Datei an, und der
-Kern muss sie nicht erst zusammenstueckeln. `kernel/ldr/module.fi` prueft
-genau `datei[0 .. 64+n]` gegen `datei[64+n .. 128+n]`.
-
-DIE GEGENPROBEN sind hier eingebaut und nicht nachtraeglich mit `dd`
-gemacht -- eine kaputte Datei, die ein Skript nachtraeglich verbiegt,
-misst am naechsten Tag etwas anderes.
-
-    --abi N        eine andere Schnittstellenfassung in den Kopf
-    --kein-sig     die Signatur durch 64 Nullen ersetzen
-    --sig-dreh     ein Oktett der gueltigen Signatur kippen
-    --nutz-dreh N  ein Oktett der NUTZLAST kippen (die Signatur bleibt
-                   gueltig ueber die alte Nutzlast, also faellt sie)
-    --kennung      die Kennung verderben
-    --text-dreh N  N Oktette IM PROGRAMMTEXT durch 0xCC (int3) ersetzen
-                   UND danach SIGNIEREN -- das ist das absichtlich
-                   kaputte, aber echt signierte Modul aus Teil 3 der
-                   Aufgabe: es kommt durch alle Riegel und stuerzt dann
-                   in Ring 0 ab.
-
-Verwendung:
-    mkomod.py bauen <ein.o> <aus.omod> --name NAME --abi N --seed DATEI
-    mkomod.py zeigen <datei.omod>
+"""Usage:
+    --text-rot N  N Oktette IM PROGRAMMTEXT durch 0xCC (int3) replace
+    mkomod.py build <ein.o> <aus.omod> --name NAME --abi N --seed FILE
+    mkomod.py display <file.omod>
 """
 import hashlib
 import struct

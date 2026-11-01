@@ -124,7 +124,7 @@ lauf() { # name append erwartungen...
 }
 
 lauf shell "osum console=ttyS0" \
-    --frist 60 \
+    --deadline 60 \
     --erwarte 'sh: ready' \
     --sende 'echo hallo-vom-server\n' \
     --erwarte 'hallo-vom-server' \
@@ -153,7 +153,7 @@ done
 echo "== 4. line discipline on the line =="
 
 lauf edit "osum console=ttyS0" \
-    --frist 60 \
+    --deadline 60 \
     --erwarte 'sh: ready' \
     --sende 'echo ABX\010C\n' \
     --erwarte 'ABC' \
@@ -177,7 +177,7 @@ fi
 echo "== 5. die Gegenproben =="
 
 lauf ohne "osum" \
-    --frist 45 \
+    --deadline 45 \
     --erwarte 'sh: ready' \
     --sende 'echo darf-nicht-ankommen\n' \
     --erwarte 'sh: bye'
@@ -191,7 +191,7 @@ grep -qa 'sercon: off' "$TMPD/ohne.log" \
     || bad "the kernel does not report the serial console as off"
 
 lauf noirq "osum console=ttyS0 noserirq" \
-    --frist 60 \
+    --deadline 60 \
     --erwarte 'sh: ready' \
     --sende 'echo ueber-die-abfrage\n' \
     --erwarte 'ueber-die-abfrage' \

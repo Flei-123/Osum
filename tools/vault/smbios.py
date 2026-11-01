@@ -1,26 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vault/smbios.py -- SMBIOS, ZUM ZWEITEN MAL gelesen.
-
-    smbios.py <speicherabzug.bin>            die Felder, als schluessel=wert
-    smbios.py --koeder <speicherabzug.bin>   der Beleg fuer die Pruefsumme
-
-Das ist die zweite Umsetzung des Lesers in `kernel/diag/hwid.fi`, geschrieben
-aus der Beschreibung und NICHT aus dem Firn-Quelltext. Genau das ist der
-Sinn: zwei Programme, in zwei Sprachen, auf zwei Seiten eines
-Speicherabzugs. Eine Umsetzung allein kann zweimal denselben Fehler
-machen und niemand merkt es -- die Zahlen sehen ja plausibel aus.
-
-DIE ZEICHENKETTENREGEL (SMBIOS 6.1.3) ist die Stelle, an der beide
-Umsetzungen unabhaengig voneinander richtig liegen muessen: hinter dem
-Rumpf von `length` Oktetten folgt je Zeichenkette eine NUL, und der Satz
-endet mit EINER ZUSAETZLICHEN NUL. Nur wenn es gar keine Zeichenkette
-gibt, stehen dort genau zwei NUL.
-
-Die naheliegende Lesart "der Satz endet bei zwei Nullen hintereinander"
-ist falsch, und sie faellt nicht sofort auf: sie liest die erste Struktur
-richtig und haelt danach das Typ-Oktett der naechsten (eine 1, keine 0)
-fuer eine Fortsetzung. Gemessen: EINE Struktur von neun.
+"""Usage:
+    smbios.py <speicherabzug.bin>            die Felder, als key=value
+    smbios.py --koeder <speicherabzug.bin>   der Beleg for die Pruefsumme
 """
 import struct
 import sys

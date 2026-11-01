@@ -94,10 +94,10 @@ def loese(text):
     return new, aus
 
 
-def ask(wurzel):
-    umg = dict(os.environ, OSUM_ROOT=wurzel)
-    p = subprocess.run([sys.executable, "tools/i18n/quellen.py", "--alle"],
-                       capture_output=True, text=True, cwd=wurzel, env=umg)
+def ask(root):
+    umg = dict(os.environ, OSUM_ROOT=root)
+    p = subprocess.run([sys.executable, "tools/i18n/sources.py", "--everything"],
+                       capture_output=True, text=True, cwd=root, env=umg)
     aus = {}
     for z in p.stdout.split("\n"):
         t = z.split()
@@ -111,13 +111,13 @@ def ask(wurzel):
 
 def bearbeite(path_2, zeilennummern, schreibe):
     with open(path_2, encoding="utf-8") as f:
-        zeilen = f.read().split("\n")
+        rows = f.read().split("\n")
     geaendert = 0
     bericht = []
     for nr in sorted(zeilennummern):
-        if nr < 1 or nr > len(zeilen):
+        if nr < 1 or nr > len(rows):
             continue
-        alt = zeilen[nr - 1]
+        alt = rows[nr - 1]
         funde = []
 
         def ersetze_str(m):
@@ -142,29 +142,29 @@ def bearbeite(path_2, zeilennummern, schreibe):
                     new = (new[:mb.start(1)] + str(int(mb.group(1)) + d)
                            + new[mb.end(1):])
         if new != alt:
-            zeilen[nr - 1] = new
+            rows[nr - 1] = new
             geaendert += 1
             bericht.append((nr, alt.strip(), new.strip()))
     if geaendert and schreibe:
         with open(path_2, "w", encoding="utf-8") as f:
-            f.write("\n".join(zeilen))
+            f.write("\n".join(rows))
     return geaendert, bericht
 
 
 def main(argv):
     schreibe = "--schreibe" in argv
-    wurzel = os.environ.get("OSUM_ROOT", ".")
-    ziel = [a for a in argv[1:] if not a.startswith("--")]
-    karte = ask(wurzel)
-    if ziel:
-        karte = {d: n for d, n in karte.items()
-                 if any(d.endswith(z) or z in d for z in ziel)}
+    root = os.environ.get("OSUM_ROOT", ".")
+    target = [a for a in argv[1:] if not a.startswith("--")]
+    card = ask(root)
+    if target:
+        card = {d: n for d, n in card.items()
+                 if any(d.endswith(z) or z in d for z in target)}
     ges = 0
-    for file_2 in sorted(karte):
-        path_2 = os.path.join(wurzel, file_2)
+    for file_2 in sorted(card):
+        path_2 = os.path.join(root, file_2)
         if not os.path.exists(path_2):
             continue
-        n, bericht = bearbeite(path_2, karte[file_2], schreibe)
+        n, bericht = bearbeite(path_2, card[file_2], schreibe)
         if n:
             ges += n
             print("%s  %d Zeilen" % (file_2, n))
@@ -173,7 +173,7 @@ def main(argv):
                 print("         + %s" % b[:96])
     print()
     print("entschrift: %d Zeilen in %d Dateien%s"
-          % (ges, len([d for d in karte]),
+          % (ges, len([d for d in card]),
              "" if schreibe else "  (PROBELAUF -- nichts geschrieben)"))
     return 0
 

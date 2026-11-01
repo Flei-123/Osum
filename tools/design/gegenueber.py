@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/gegenueber.py -- VORHER UND NACHHER IN EINEM BILD.
-
-    gegenueber.py <vorher-verzeichnis> <nachher-verzeichnis> <ziel>
-
-Zwei Aufnahmen derselben Ansicht nebeneinander, mit Beschriftung, und
-eine Uebersicht ueber alle sieben.  Ein Vergleich, bei dem man zwischen
-zwei Dateien hin- und herklicken muss, ist keiner: die Unterschiede, um
-die es hier geht -- vier Bildpunkte Abstand, ein Radius, eine
-Zeilenhoehe --, sieht man nur direkt nebeneinander.
+"""Usage:
+    gegenueber.py <vorher-directory> <nachher-directory> <target>
 """
 import os
 import sys
@@ -36,7 +29,7 @@ def load_2(d, name):
     return None
 
 
-def paar(a, b, title, ziel):
+def paar(a, b, title, target):
     if a is None or b is None:
         return False
     w = a.size[0] + b.size[0] + 3 * RAND
@@ -48,7 +41,7 @@ def paar(a, b, title, ziel):
     d.text((RAND, 8), "%s -- VORHER (classic)" % title, fill=(244, 244, 245))
     d.text((2 * RAND + a.size[0], 8), "%s -- NACHHER (osum)" % title,
            fill=(134, 239, 172))
-    im.save(ziel)
+    im.save(target)
     return True
 
 

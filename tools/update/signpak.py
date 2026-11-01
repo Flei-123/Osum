@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/update/signpak.py -- ein Paket signieren, auf dem WIRT.
-
-    signpak.py <geheim.key> <datei.opk> [<datei.opk> ...]
-
-Schreibt neben jede Datei `<datei>.sig`: 64 rohe Oktette, die
-Ed25519-Signatur ueber ALLE Oktette der Datei.
-
-WARUM DER WIRT SIGNIERT UND NICHT DAS GERAET: der geheime Schluessel
-gehoert auf die Baumaschine und nirgendwo sonst. Das Geraet hat nur den
-oeffentlichen (`/system/schluessel.pub`) und kann damit pruefen, aber
-nicht unterschreiben. Genau das ist der Sinn der Uebung.
-
-DIE UMSETZUNG IST DIE VON `pkg/opk.py` -- dieselbe Ed25519-Rechnung, die
-das Format seit Runde PLAN2 benutzt, damit hier kein zweiter Signierer
-entsteht, der leicht anders rechnet. Zusaetzlich wird jede erzeugte
-Signatur SOFORT mit einer FREMDEN Umsetzung nachgeprueft (libsodium ueber
-pynacl, sonst `cryptography`); eine Signatur, die nur ihr eigener Erzeuger
-anerkennt, sagt nichts.
+"""Usage:
+    signpak.py <secret.key> <file.opk> [<file.opk> ...]
 """
 import importlib.util
 import os

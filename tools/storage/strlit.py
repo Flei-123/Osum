@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/storage/strlit.py -- die Zeichenkettenliterale einer Firn-Datei
-auf ihre angegebene Laenge bringen.
-
-WARUM ES DAS GIBT. Firn hat keine Zeichenkettenklasse: ein Text ist ein
-Feld aus Oktetten mit fester Laenge, und die Laenge steht daneben --
-`var s: [u8; 12] = "hallo\\0\\0\\0\\0\\0\\0\\0"`. Stimmt sie nicht auf das Oktett,
-uebersetzt die Datei nicht ("array literal has 11 elements, 12 are
-expected"). Das ist richtig so und es ist beim Schreiben laestig: wer
-einen Text um ein Zeichen aendert, muss die Nullen nachzaehlen.
-
-Dieses Werkzeug zaehlt sie. Es liest eine `.fi`-Datei, sucht jede Zeile
-der Form `var <name>: [u8; N] = "<text>"` und fuellt den Text mit `\\0`
-auf genau N Oktette auf -- oder meldet, dass er laenger ist als N und
-deshalb NICHT stillschweigend abgeschnitten wird. Abschneiden waere die
-schlimmere Hilfe: ein Text ohne abschliessende Null laeuft in den
-naechsten hinein.
-
-    python3 tools/storage/strlit.py <datei.fi> [--pruefen]
+"""Usage:
+    python3 tools/storage/strlit.py <file.fi> [--verify]
 """
 import re
 import sys
@@ -44,12 +28,12 @@ def main(argv):
         print(__doc__)
         return 2
     path_2 = argv[1]
-    only_check = "--pruefen" in argv
-    zeilen = open(path_2, encoding="utf-8").read().split("\n")
+    only_check = "--verify" in argv
+    rows = open(path_2, encoding="utf-8").read().split("\n")
     aus = []
     geaendert = 0
     zu_lang = []
-    for nr, z in enumerate(zeilen, 1):
+    for nr, z in enumerate(rows, 1):
         m = MUSTER.match(z)
         if not m:
             aus.append(z)

@@ -655,9 +655,9 @@ class Erzeuger:
             ziele = [l.uleb() for _ in range(n)]
             sonst = l.uleb()
             sp -= 1
-            wahl = self.sv(sp)
+            choice = self.sv(sp)
             for i, lab in enumerate(ziele):
-                E('if %s == %d {' % (wahl, i))
+                E('if %s == %d {' % (choice, i))
                 z = stack[len(stack) - 1 - lab]
                 self.sprung(z, stack, tiefe + 1, None, sp)
                 E('}')

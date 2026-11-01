@@ -1,28 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fui-proto/regler.py -- LIEST DIE ZAHLEN AUS DEM LAUF.
-
+"""Usage:
     regler.py <serial.txt> [bilderverzeichnis]
-
-Justins Vorgabe, 12.09.2026: "Hover und Regler durch Selbstfahren der
-Maus nachweisen, nicht durch Augenschein. Jede Zahl aus dem Lauf, der
-auch den Beleg erzeugt hat."
-
-Dieses Skript erfindet keine Sollwerte. Es liest, was das
-Kontrollzentrum selbst auf die serielle Leitung geschrieben hat, und
-prueft die einzige Aussage, die ein Bild nicht treffen kann:
-
-    Aendert sich der WERT, wenn die Maus an eine andere Stelle der
-    Rinne klickt?
-
-Ein gemalter Griff kann das nicht. Deshalb ist die Bedingung nicht "der
-Wert ist 40", sondern "links ist kleiner als Mitte ist kleiner als
-rechts" -- eine Ordnung, die nur entsteht, wenn der Zeiger den Wert
-wirklich setzt.
-
-Dazu, ebenfalls aus der Leitung: hat fUi die Flaechen gemalt
-(`fui=`/`fuix=` im Bericht der Taskleiste), oder ist die Bruecke auf
-wlibs alten Weg zurueckgefallen?
 """
 import re
 import sys

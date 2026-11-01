@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/sync/boese.py -- DER BOESARTIGE SERVER.
-
-Der Anbieter ist nicht nur neugierig, er ist feindlich. Er darf alles,
-was jemand darf, dem die Oktette gehoeren: sie aendern, alte
-zurueckspielen, fremde unterschieben, zu grosse liefern. Dieses Programm
-tut genau das mit einem herausgeholten Speicher, und der Testlauf spielt
-das Ergebnis wieder ein.
-
-    boese.py aendern      <speicher>            ein Bit in PACK kippen
-    boese.py rueckschritt <speicher> <alt>      die alte Wurzel wieder hin
-    boese.py fremd        <speicher>            zwei Bloecke vertauschen
-    boese.py gross        <speicher>            ein Block wird laenger
-    boese.py wurzelluege  <speicher>            die Wurzel zeigt woandershin
-    boese.py halbe        <speicher>            ROOT nur halb geschrieben
-
-Jeder Fall hat eine ERWARTUNG, und die steht im Laeufer: `sync abgleich`
-muss ihn erkennen und ablehnen, nicht "irgendwie weitermachen".
+"""Usage:
+    boese.py aendern      <mem>            ein Bit in PACK kippen
+    boese.py rueckschritt <mem> <alt>      die alte root again hin
+    boese.py foreign        <mem>            two Bloecke vertauschen
+    boese.py large        <mem>            ein Block wird laenger
+    boese.py wurzelluege  <mem>            die root zeigt woandershin
+    boese.py halbe        <mem>            ROOT only halb geschrieben
 """
 import os
 import shutil

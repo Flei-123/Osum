@@ -12,18 +12,18 @@
 import re
 import time
 
-lauf.sag("== (d) der Terminal-Editor ==")
+lauf.say("== (d) der Terminal-Editor ==")
 
 # Ins Terminal klicken, damit die Tastatur dort ankommt.
 lauf.m.klick_auf(300, 300)
 time.sleep(1)
 
 
-def befehl(zeile, warte=3.0):
-    vorher = len(lauf.lies())
-    lauf.m.tippe(zeile + "\n")
-    time.sleep(warte)
-    return lauf.lies()[vorher:]
+def command(row, wait=3.0):
+    vorher = len(lauf.read_text())
+    lauf.m.tippe(row + "\n")
+    time.sleep(wait)
+    return lauf.read_text()[vorher:]
 
 
 # DIE DATEIEN LIEGEN SCHON IM ABBILD (tools/k15/lokal/build-gross.sh).
@@ -31,17 +31,17 @@ def befehl(zeile, warte=3.0):
 # `>` kommt ueber den QEMU-Monitor auf dieser Tastatur gar nicht an
 # (gemessen, pruef/db-taste.py) -- eine Umlenkung laesst sich nicht
 # tippen. tools/k11/run.sh:168 macht es aus demselben Grund genauso.
-lauf.sag("--- was im Abbild liegt ---")
-for z in befehl("cat /data/t1.txt").splitlines():
+lauf.say("--- was im Abbild liegt ---")
+for z in command("cat /data/t1.txt").splitlines():
     if z.strip() and not z.startswith(("wlib", "wm:", "key:")):
-        lauf.sag("    %s" % z[:80])
+        lauf.say("    %s" % z[:80])
 
 # ------------------------------------------------------ den Editor starten
-lauf.sag("--- edit /data/t1.txt ---")
-befehl("edit /data/t1.txt", 4.0)
-lauf.bild("01-editor-offen")
+lauf.say("--- edit /data/t1.txt ---")
+command("edit /data/t1.txt", 4.0)
+lauf.image("01-editor-offen")
 
-t = lauf.lies()
-lauf.sag("  'edit: ready': %d" % len(re.findall(r"edit: ready", t)))
+t = lauf.read_text()
+lauf.say("  'edit: ready': %d" % len(re.findall(r"edit: ready", t)))
 
-lauf.sag("== Ende (d) Grundlinie ==")
+lauf.say("== Ende (d) Grundlinie ==")

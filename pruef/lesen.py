@@ -1,63 +1,44 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""lesen.py -- den seriellen Mitschnitt lesen, OBWOHL er verwoben ist.
-
-DAS PROBLEM, und es hat in dieser Runde zwei Fehlmessungen gekostet:
-auf der seriellen Leitung schreiben Schreibtisch, Leiste, Starter, DHCP
-und der Kern GLEICHZEITIG. Eine Zeile wie
-
-    launcher: start /apps/explorer.osp/start pid=20
-
-kommt darum als
-
-    launcher: start /e
-    ...
-    launcher: start /apps/explorer.osp/startdhcp: ack ip=
-
-an -- mit einer fremden Zeile mitten darin. Ein Suchmuster mit `$` am
-Ende findet sie nie, und wer daraus "kein Start" schliesst, misst den
-Mitschnitt und nicht das System.
-
-DIE ANTWORT DARAUF: nicht auf ganze Zeilen bauen, sondern auf MARKEN,
-die fuer sich stehen -- und wo eine Zahl gebraucht wird, sie beim
-NAECHSTEN Vorkommen ihres Schluessels holen, nicht am Zeilenende.
+"""Usage:
+    read_all.py -- den seriellen Mitschnitt read_all, OBWOHL er verwoben ist.
 """
 import re
 
 
-def text(pfad):
+def text(path):
     try:
-        with open(pfad, "rb") as f:
+        with open(path, "rb") as f:
             roh = f.read()
     except OSError:
         return ""
     return roh.replace(b"\x00", b"").decode("utf-8", "replace")
 
 
-def zaehle(s, marke):
+def zaehle(s, mark):
     """Wie oft eine Marke vorkommt -- unabhaengig von Zeilengrenzen."""
-    return s.count(marke)
+    return s.count(mark)
 
 
-def zahlen_nach(s, marke, schluessel="pid=", weite=80):
+def numbers_after(s, mark, key="pid=", span=80):
     """Alle Zahlen, die NACH einer Marke innerhalb von `weite` Zeichen
     unter `schluessel` stehen. So ueberlebt die Messung eine fremde
     Zeile mitten im Satz."""
     aus = []
-    for m in re.finditer(re.escape(marke), s):
-        fenster = s[m.end():m.end() + weite]
-        t = re.search(re.escape(schluessel) + r"(-?\d+)", fenster)
+    for m in re.finditer(re.escape(mark), s):
+        window = s[m.end():m.end() + span]
+        t = re.search(re.escape(key) + r"(-?\d+)", window)
         if t:
             aus.append(int(t.group(1)))
     return aus
 
 
-def geom(s, marke):
+def geom(s, mark):
     """`<marke> x=.. y=.. w=.. h=..` -- die vier Zahlen, jede einzeln
     gesucht, damit eine fremde Einstreuung dazwischen nichts kaputt
     macht."""
     aus = []
-    for m in re.finditer(re.escape(marke), s):
+    for m in re.finditer(re.escape(mark), s):
         f = s[m.end():m.end() + 120]
         w = {}
         for k in ("x", "y", "w", "h"):
@@ -110,13 +91,13 @@ def apps(s):
     return aus
 
 
-def app_zahl(s):
+def app_count(s):
     """Wie viele Eintraege der Starter selbst gezaehlt hat."""
     t = re.findall(r"launcher: suche \[[^\]]*\] treffer=(\d+) apps=(\d+)", s)
     return (int(t[-1][0]), int(t[-1][1])) if t else (0, 0)
 
 
-def fenster(s):
+def window(s):
     """Jede vom FENSTERSERVER gemeldete Fensterlage.
 
     ACHTUNG, hier lag ein Fehler: gesucht wurde nach `id=<n> x=..`, und
@@ -148,14 +129,14 @@ def starts(s):
     aus = []
     for m in re.finditer(r"launcher: start ", s):
         f = s[m.end():m.end() + 90]
-        pfad = re.match(r"(\S+)", f)
+        path = re.match(r"(\S+)", f)
         pid = re.search(r"pid=(-?\d+)", f)
-        aus.append((pfad.group(1) if pfad else "?",
+        aus.append((path.group(1) if path else "?",
                     int(pid.group(1)) if pid else None))
     return aus
 
 
-def starter_fenster(s, breite=440, hoehe=300):
+def starter_window(s, width=440, height=300):
     """Wo das Startmenue WIRKLICH steht.
 
     Nicht aus `launcher: geom` -- diese Zeile wird vom DHCP-Dienst
@@ -165,9 +146,9 @@ def starter_fenster(s, breite=440, hoehe=300):
     Gedraenge auf der Leitung. Gesucht wird nach der GROESSE, die der
     Starter sich gibt -- die steht als Festwert in launcher.fi.
     """
-    f = fenster(s)
+    f = window(s)
     for i in sorted(f, reverse=True):
         for x, y, w, h in f[i]:
-            if w == breite and h == hoehe:
+            if w == width and h == height:
                 return i, x, y
     return None

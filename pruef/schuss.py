@@ -1,26 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""schuss.py -- EIN Lauf: Schreibtisch hochfahren, bedienen, fotografieren.
-
-WARUM ES DIESE DATEI GIBT (Runde ALLTAG).
-pruef/oneshot.py fuhr genau EINEN Ablauf -- das Energiemenue -- und
-beendete die Maschine danach. Diese Runde braucht etwas anderes: eine
-Maschine, die OFFEN bleibt, waehrend ein Drehbuch Schritt fuer Schritt
-klickt und nach jedem Schritt ein Bild ablegt. Genau das ist der einzige
-Weg, auf dem in diesem Projekt ueberlappende Texte, abgeschnittene
-Beschriftungen und verrutschte Felder gefunden werden (Punkt G-010).
-
-DER AUFBAU IST ABSICHTLICH DERSELBE WIE IN oneshot.py:
-Kommandozeile, Beschleuniger, Geraete und die Art, auf das Fenster des
-Starters zu warten, sind uebernommen und nicht neu erfunden -- ein
-zweiter Aufbau daneben waere eine zweite Wahrheit ueber denselben
-Bildschirm.
-
-    python3 pruef/schuss.py <name> [drehbuch.py]
-
-Ohne Drehbuch macht es nur ein Bild des Schreibtischs. Mit Drehbuch wird
-dieses als Python geladen und bekommt `lauf` in die Hand (siehe unten).
-Ergebnis: pruef/shots/<name>/*.png und pruef/laeufe/<name>/serial.txt
+"""Usage:
+    schuss.py -- EIN run: Schreibtisch hochfahren, bedienen, fotografieren.
+    python3 check/schuss.py <name> [drehbuch.py]
 """
 import os
 import re
@@ -41,7 +23,7 @@ CL = ("modfs osum gfx wm wig desk wmshell wmdauer herz absturzhalt nopuls "
       "tz=120 usb hidgen nic nip=169.254.10.1/16 nsvc=0 nwait=0 "
       "nosched noproc nofs fbres=1280x800")
 
-BREITE, HOEHE = 1280, 800
+WIDTH, HEIGHT = 1280, 800
 
 
 class Lauf:
@@ -64,11 +46,11 @@ class Lauf:
         self.m = None
 
     # ---------------------------------------------------------- Protokoll
-    def sag(self, *a):
+    def say(self, *a):
         print(*a)
         print(*a, file=self.log)
 
-    def lies(self):
+    def read_text(self):
         """Die serielle Leitung als Text. Sie ist das Protokoll des Kerns."""
         try:
             return open(self.ser, "rb").read().decode("utf-8", "replace")
@@ -78,10 +60,10 @@ class Lauf:
     def wins(self):
         """Alle Fensterlagen, die der Fensterserver bisher berichtet hat."""
         return re.findall(
-            r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", self.lies())
+            r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)", self.read_text())
 
     # ------------------------------------------------------------- Starten
-    def start(self, frist=180):
+    def start(self, deadline=180):
         kvm = (["-accel", "kvm", "-cpu", "host"]
                if os.access("/dev/kvm", os.W_OK) else ["-accel", "tcg"])
         q = (["qemu-system-x86_64"] + kvm +
@@ -99,33 +81,33 @@ class Lauf:
         self.p = subprocess.Popen(
             q, stdout=open(os.path.join(self.d, "qemu.txt"), "w"),
             stderr=subprocess.STDOUT)
-        self.sag("QEMU pid %d (%s)" % (self.p.pid, kvm[1]))
+        self.say("QEMU pid %d (%s)" % (self.p.pid, kvm[1]))
         t0 = time.time()
         # NICHT auf "ready" warten, sondern auf das Fenster des Starters:
         # erst dann steht seine Lage fest (die Lehre aus oneshot.py).
-        while time.time() - t0 < frist:
-            if re.search(r"wm: fen .*id=\d+ .*lay=4", self.lies()) or re.search(r"id=11 x=\d+", self.lies()):
+        while time.time() - t0 < deadline:
+            if re.search(r"wm: fen .*id=\d+ .*lay=4", self.read_text()) or re.search(r"id=11 x=\d+", self.read_text()):
                 break
             if self.p.poll() is not None:
-                self.sag("QEMU vorzeitig weg rc=%s" % self.p.returncode)
+                self.say("QEMU vorzeitig weg rc=%s" % self.p.returncode)
                 return False
             time.sleep(0.5)
         else:
-            self.sag("ABBRUCH: Schreibtisch kam nicht hoch in %ds" % frist)
+            self.say("ABBRUCH: Schreibtisch kam nicht hoch in %ds" % deadline)
             return False
-        self.sag("Schreibtisch bereit nach %.0fs" % (time.time() - t0))
+        self.say("Schreibtisch bereit nach %.0fs" % (time.time() - t0))
         time.sleep(3)
-        self.m = Maschine(self.sock, BREITE, HOEHE)
+        self.m = Maschine(self.sock, WIDTH, HEIGHT)
         self.m.verbinde()
         return True
 
     # -------------------------------------------------------------- Bilder
-    def bild(self, titel):
+    def image(self, title):
         """Ein Bild mit laufender Nummer. Der Titel steht im Dateinamen."""
         self.n += 1
-        roh = os.path.join(self.s, "%02d-%s.ppm" % (self.n, titel))
-        self.m.foto(roh)
-        self.sag("  [bild %02d] %s" % (self.n, titel))
+        roh = os.path.join(self.s, "%02d-%s.ppm" % (self.n, title))
+        self.m.photo(roh)
+        self.say("  [bild %02d] %s" % (self.n, title))
         return roh
 
     def ende(self):
@@ -140,8 +122,8 @@ class Lauf:
                     Image.open(voll).save(voll[:-4] + ".png")
                     os.unlink(voll)
                 except Exception as e:
-                    self.sag("  PNG-Wandlung fehlgeschlagen (%s)" % e)
-        self.sag("Bilder: %s" % self.s)
+                    self.say("  PNG-Wandlung fehlgeschlagen (%s)" % e)
+        self.say("Bilder: %s" % self.s)
 
 
 def main():
@@ -151,7 +133,7 @@ def main():
     if not lauf.start():
         lauf.ende()
         sys.exit(1)
-    lauf.bild("schreibtisch")
+    lauf.image("schreibtisch")
     if drehbuch:
         # Das Drehbuch bekommt `lauf` und macht damit, was es will.
         raum = {"lauf": lauf, "time": time, "re": re}
@@ -161,7 +143,7 @@ def main():
             exec(compile(code, drehbuch, "exec"), raum)
         except Exception:
             import traceback
-            lauf.sag("DREHBUCH GEFALLEN:\n" + traceback.format_exc())
+            lauf.say("DREHBUCH GEFALLEN:\n" + traceback.format_exc())
     lauf.ende()
 
 

@@ -1,32 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/operation/dnsvergleich.py -- /bin/host gegen `dig`.
-
-    dnsvergleich.py <pfad zu host> [--server 1.1.1.1] [--liste datei]
-
-WAS HIER GEMESSEN WIRD, und gegen was. `dig` gehoert zu BIND und ist
-nicht von diesem Repository geschrieben; es ist damit dieselbe Art
-Gegenueber wie `openssl` in Runde HWNET und `libsodium` in Runde UPDATE.
-Gefragt werden BEIDE Programme nach demselben Namen, beim SELBEN
-Nameserver, im selben Augenblick -- und verglichen wird die MENGE der
-Adressen, nicht eine einzelne.
-
-WARUM DIE MENGE. `example.com` und jeder Name hinter einem
-Lastverteiler haben mehrere A-Saetze, und ein Nameserver gibt sie in
-wechselnder Reihenfolge heraus (Round Robin). Ein Vergleich "erste
-Zeile gegen erste Zeile" waere deshalb bei jedem zweiten Lauf rot,
-ohne dass irgendetwas falsch waere. Die richtige Zusage lautet: DIE
-ANTWORT VON `host` STEHT IN DER MENGE, DIE `dig` NENNT.
-
-Weil auch die Menge sich zwischen zwei Fragen aendern kann (kurze TTL,
-Anycast), wird `dig` bei einer Abweichung ein zweites Mal gefragt und
-die VEREINIGUNG beider Mengen genommen. Faellt es dann noch durch, ist
-es ein Fehler und keine Schwankung.
-
-NXDOMAIN wird ueber den Status verglichen (`dig +noall +comments`),
-nicht ueber eine leere Ausgabe -- "keine Adresse" und "den Namen gibt
-es nicht" sind zwei verschiedene Aussagen, und ein Aufloeser, der sie
-verwechselt, laesst den Aufrufer ewig wiederholen.
+"""Usage:
+    dnsvergleich.py <path zu host> [--server 1.1.1.1] [--items file]
 """
 import ipaddress
 import json

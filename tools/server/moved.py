@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/server/moved.py -- DER UMZUG WAR EIN UMZUG.
-
-Die Runde SERVERBUILD behauptet, `kernel/ui/kgui.fi` und
-`kernel/sys/sysgui.fi` seien nicht neu geschriebener Code, sondern
-dieselben Funktionen, die vorher in `kernel/kmain.fi` und
-`kernel/sys/sys.fi` standen -- Zeile fuer Zeile. Das ist die Art
-Behauptung, die man nachrechnen kann, und dann sollte man es auch.
-
-Dieses Werkzeug holt die alten Fassungen aus git, schneidet aus beiden
-Seiten die Funktionsrumpfe heraus und vergleicht sie ZEICHENWEISE.
-Erlaubt ist genau eine Abweichung, und es ist die, die der Umzug
-erzwingt: was vorher `neg(...)` hiess, heisst drueben `sys.neg(...)`,
-was `bnum(...)` hiess, heisst `kutil.bnum(...)`. Diese Praefixe werden
-vor dem Vergleich wieder abgezogen. Alles andere -- eine geaenderte
-Zahl, eine umgestellte Bedingung, eine weggelassene Zeile -- faellt
-auf.
-
+"""Usage:
     moved.py <basis-commit>
-
-Ausgabe: eine Zeile je Datei, "N von M zeichengleich", und der
-Beendigungscode 1, sobald eine einzige Funktion abweicht.
 """
 import re
 import subprocess

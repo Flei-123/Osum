@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""durchklick3.py -- DER GANZE DURCHGANG DER RUNDE DURCHKLICK, NOCH EINMAL.
-
-    python3 durchklick3.py <name> <breite> <hoehe>
-
-Dieselben 41 Pruefpunkte wie /root/osum-durchklick/BEFUND-DURCHKLICK.md,
-gegen das Abbild DIESER Runde. Schreibt `laeufe/<name>/befund.json`.
-
-WAS DIESES SKRIPT VON durchklick2.py UNTERSCHEIDET
---------------------------------------------------
-1. ES SIND ALLE 41 PUNKTE und nicht 20. Ein Bericht, der die Haelfte
-   der Zeilen aus der Vorrunde nicht mehr enthaelt, ist kein Vergleich.
-2. `searchtext.py` WIRD RICHTIG AUFGERUFEN. In durchklick2.py stand
-   `searchtext.py <bild> <text> <x> <base>`; das Werkzeug will aber
-   `<ppm> <ttf> <px> <text>` (tools/usbimg/searchtext.py, Zeile 165).
-   Der Aufruf lieferte deshalb IMMER None, und die Umlautfrage wurde
-   aus der seriellen Leitung beantwortet statt aus dem Bild. Jetzt
-   wird wirklich im Foto gesucht -- und PNG vorher nach PPM gewandelt,
-   denn das Werkzeug liest PPM.
-3. DIE NEUEN PUNKTE DIESER RUNDE werden gemessen und nicht behauptet:
-   Alt+Tab (4.3), Fenstergroesse (4.2), Tastaturbelegung (6.2),
-   Herunterfahren (7.4), Uebersetzer (8.1/8.2), Zwischenablage (5.1).
-
-WIE HIER "GESEHEN" WIRD. Wie in der Vorrunde: entweder die serielle
-Leitung (der Fensterserver meldet jede Fensterlage, jeden Fokus) oder
-das Bild in Zahlen (searchtext.py fuer Text, sicht.py fuer Flaechen).
-Nichts steht im Befund, was nicht aus einem von beiden kommt.
+"""Usage:
+    durchklick3.py -- DER GANZE DURCHGANG DER RUNDE DURCHKLICK, NOCH EINMAL.
+    python3 durchklick3.py <name> <width> <height>
+    `<ppm> <ttf> <px> <text>` (tools/usbimg/searchtext.py, row 165).
 """
 import json
 import os
@@ -38,11 +16,11 @@ HIER = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HIER, ".."))
 sys.path.insert(0, HIER)
 from klick import Maschine
-import lesen
+import read_all
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "d2"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
@@ -69,10 +47,10 @@ def merke(nr, was, erg, beleg=""):
 
 
 def s():
-    return lesen.text(SER)
+    return read_all.text(SER)
 
 
-def suchtext(bild, text, px=15, ttf="osum-sans.ttf", kasten=None,
+def suchtext(image, text, px=15, ttf="osum-sans.ttf", kasten=None,
              schwelle=None):
     """STEHT DAS WORT IM BILD? Rueckgabe: Prozent der Tintenpunkte.
 
@@ -96,7 +74,7 @@ def suchtext(bild, text, px=15, ttf="osum-sans.ttf", kasten=None,
        derselben Stelle (x=151). Das Wort steht da -- der Rest ist der
        Unterschied zwischen Justins Rasterer und dem von PIL.
     """
-    if bild is None:
+    if image is None:
         return None
     """STEHT DAS WORT IM BILD? Rueckgabe: Prozent der Tintenpunkte.
 
@@ -105,12 +83,12 @@ def suchtext(bild, text, px=15, ttf="osum-sans.ttf", kasten=None,
     nennt, wenn er unter der Schwelle liegt: eine 55 % ist eine
     Messung und ein `nicht gefunden` ist keine.
     """
-    if not os.path.exists(bild):
+    if not os.path.exists(image):
         return None
     ppm = "/tmp/dk3-%d.ppm" % os.getpid()
     try:
         from PIL import Image
-        im = Image.open(bild).convert("RGB")
+        im = Image.open(image).convert("RGB")
         if kasten:
             im = im.crop(kasten)
         if schwelle is not None:
@@ -149,7 +127,7 @@ def diff(a, b):
         return None
 
 
-def foto(m, n):
+def photo(m, n):
     """EIN FOTO DARF DEN LAUF NICHT KOSTEN.
 
     Gemessen im 1920x1080-Durchgang dieser Runde: QEMU lief in sein
@@ -162,7 +140,7 @@ def foto(m, n):
     """
     p = os.path.join(SHOTS, "%s.png" % n)
     try:
-        m.foto(p)
+        m.photo(p)
     except Exception as e:
         print("   (kein Foto %s: %s)" % (n, e), flush=True)
         return None
@@ -171,7 +149,7 @@ def foto(m, n):
 
 def start_qemu(extra=""):
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE), extra], check=True,
+                    str(WIDTH), str(HEIGHT), extra], check=True,
                    capture_output=True, text=True, timeout=60)
     t0 = time.time()
     while time.time() - t0 < 150:
@@ -181,11 +159,11 @@ def start_qemu(extra=""):
     return None
 
 
-def menue_auf(m, versuche=4):
+def menu_open(m, versuche=4):
     for _ in range(versuche):
         vor = s().count("startmenue auf")
         vr = s().count("launcher: ready")
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(2.2)
         j = s()
         if j.count("startmenue auf") > vor or j.count("launcher: ready") > vr:
@@ -193,7 +171,7 @@ def menue_auf(m, versuche=4):
     return False
 
 
-def fokus_folge(txt):
+def focus_sequence(txt):
     """Jeder gemeldete Fokuswechsel des Fensterservers."""
     return re.findall(r"wm: fokus id=(\d+)", txt) or \
         re.findall(r"focus=(\d+)", txt)
@@ -204,11 +182,11 @@ def main():
     merke("1.1", "Boot bis Schreibtisch", "GEHT" if boot else "GEHT NICHT",
           "%.1f s bis 'taskbar: start x='" % boot if boot else "nichts")
     if not boot:
-        return schluss()
+        return finish()
 
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
     time.sleep(2.0)
-    b_desk = foto(m, "01-schreibtisch")
+    b_desk = photo(m, "01-schreibtisch")
     txt = s()
 
     # ============================================== 1. Start
@@ -221,8 +199,8 @@ def main():
           "%s | %s" % (fb.group(0) if fb else "-", st.group(0) if st else "-"))
     tt = re.findall(r"ttf: (\w+)\s+glyphs=(\d+)", txt)
     merke("1.4", "Schriften geladen", "GEHT" if tt else "GEHT NICHT", tt)
-    merke("1.5", "Aufloesung %dx%d" % (BREITE, HOEHE),
-          "GEHT" if fb and int(fb.group(1)) == BREITE else "GEHT NICHT",
+    merke("1.5", "Aufloesung %dx%d" % (WIDTH, HEIGHT),
+          "GEHT" if fb and int(fb.group(1)) == WIDTH else "GEHT NICHT",
           fb.group(0) if fb else "-")
 
     # ============================================== 2. Leiste
@@ -239,7 +217,7 @@ def main():
     time.sleep(70)
     txt = s()
     uhr2 = re.findall(r"t=(\d\d:\d\d:\d\d)", txt)
-    b_uhr = foto(m, "02-uhr-nach-70s")
+    b_uhr = photo(m, "02-uhr-nach-70s")
     merke("2.2", "Uhr laeuft ohne Eingabe",
           "GEHT" if uhr1 and uhr2 and uhr1[-1] != uhr2[-1] else "GEHT NICHT",
           "%s -> %s" % (uhr1[-1] if uhr1 else "-", uhr2[-1] if uhr2 else "-"))
@@ -248,24 +226,24 @@ def main():
           sb.group(0) if sb else "-")
 
     if "startmenue zu" not in s()[-4000:]:
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(1.8)
-    auf = menue_auf(m)
-    b_menue = foto(m, "03-startmenue")
-    d_menue = diff(b_desk, b_menue)
+    auf = menu_open(m)
+    b_menu = photo(m, "03-startmenue")
+    d_menu = diff(b_desk, b_menu)
     merke("2.4", "Startmenue per Maus", "GEHT" if auf else "GEHT NICHT",
-          "Bildpunkte geaendert: %s %%" % d_menue)
+          "Bildpunkte geaendert: %s %%" % d_menu)
 
     # --- 2.5 Super+A: die TASTE, nicht die Maus.
     # Erst zumachen, damit das Aufgehen eines ist.
-    m.klick_auf(18, HOEHE - 20)
+    m.klick_auf(18, HEIGHT - 20)
     time.sleep(1.6)
-    b_zu = foto(m, "04-vor-super")
+    b_zu = photo(m, "04-vor-super")
     vor_hk = s().count("taskbar: klinke")
     vor_auf = s().count("startmenue auf")
-    m.taste("meta_l")
+    m.key_press("meta_l")
     time.sleep(2.5)
-    b_super = foto(m, "05-nach-super")
+    b_super = photo(m, "05-nach-super")
     d_super = diff(b_zu, b_super)
     t_now = s()
     hk_kam = t_now.count("taskbar: klinke") > vor_hk
@@ -285,9 +263,9 @@ def main():
     # ============================================== 3. Anwendungen
     txt = s()
     bloecke = [mm.start() for mm in re.finditer(r"launcher: suche ", txt)]
-    letzter = txt[bloecke[-1]:] if bloecke else txt
-    eintraege = lesen.apps(letzter)
-    tr, ap = lesen.app_zahl(txt)
+    last_item = txt[bloecke[-1]:] if bloecke else txt
+    eintraege = read_all.apps(last_item)
+    tr, ap = read_all.app_count(txt)
     ap2 = re.findall(r"launcher: apps=(\d+)", txt)
     ap = max([ap] + [int(v) for v in ap2]) if ap2 else ap
     merke("3.1", "Startmenue listet Apps",
@@ -305,7 +283,7 @@ def main():
     # deshalb auf ALLEN Menuefotos dieses Laufes, und es zaehlt der
     # beste Wert: die Frage ist "stellt dieses System den Umlaut dar",
     # nicht "war das Bild zum Zeitpunkt X schon fertig".
-    UMLAUT_BILDER.append(b_menue)
+    UMLAUT_BILDER.append(b_menu)
 
     # ================================================ RUNDE TUERSCHLOSS
     # DIE LAGE DES MENUES KOMMT AUS DER FENSTERLISTE DES SERVERS.
@@ -318,7 +296,7 @@ def main():
     # Dazu `launcher: rect id=2 kind=5 x=12 y=84` (die Liste IM Fenster)
     # und `launcher: rows zh=20` (die Zeilenhoehe). Mehr braucht ein
     # Klick auf Eintrag i nicht.
-    def menue_lage():
+    def menu_layout():
         """WO DIE ZEILEN WIRKLICH LIEGEN -- alles aus der Leitung.
 
         RUNDE TUERSCHLOSS, ZWEITER ANLAUF: hier stand die Mitte der
@@ -357,7 +335,7 @@ def main():
                 zh, int(rows[-1][1]) if rows else None,
                 int(rows[-1][0]) if rows else None)
 
-    def eintrag_ort(lage, i):
+    def entry_place(lage, i):
         """Der Klickpunkt fuer Eintrag i, im Bildschirmkoordinatensystem."""
         mx, my, lx, ly, zh, base0, rx = lage
         if base0 is not None:
@@ -370,23 +348,23 @@ def main():
             zx = mx + lx + 60
         return zx, zy
 
-    def menue_auf_warten():
+    def wait_menu_open():
         """Klicken, bis der SERVER das Menuefenster meldet."""
         for _ in range(4):
-            m.klick_auf(18, HOEHE - 20)
+            m.klick_auf(18, HEIGHT - 20)
             bis = time.time() + 12
             while time.time() < bis:
-                lg = menue_lage()
+                lg = menu_layout()
                 if lg:
                     return lg
                 time.sleep(0.5)
-            m.klick_auf(18, HOEHE - 20)
+            m.klick_auf(18, HEIGHT - 20)
             time.sleep(1.5)
         return None
 
-    lage = menue_auf_warten()
+    lage = wait_menu_open()
     gestartet = {}
-    NAMEN = {0: "Datei-Explorer", 1: "Editor", 2: "Einstellungen",
+    NAMES = {0: "Datei-Explorer", 1: "Editor", 2: "Einstellungen",
              3: "Suchen", 4: "Terminal", 5: "Widgets"}
     MARKEN = {"Datei-Explorer": "explorer: ready", "Editor": "edit: ready",
               "Suchen": "launcher: ready", "Terminal": "sh: ready",
@@ -394,7 +372,7 @@ def main():
               "Einstellungen": "settings: ready"}
     if lage:
         for i in range(6):
-            name = NAMEN[i]
+            name = NAMES[i]
             # ======================================== RUNDE TUERSCHLOSS
             # VOR JEDEM EINTRAGSKLICK WIRD DIE LAGE FRISCH GEHOLT.
             #
@@ -415,25 +393,25 @@ def main():
             # die Leiste das Menue nach vorn holt, DANN den Eintrag --
             # und die Lage frisch lesen, weil der Starter sich bei jedem
             # Aufmachen neu vermisst.
-            m.klick_auf(18, HOEHE - 20)
+            m.klick_auf(18, HEIGHT - 20)
             time.sleep(2.0)
-            frisch = menue_lage()
-            if frisch:
-                lage = frisch
+            fresh = menu_layout()
+            if fresh:
+                lage = fresh
             vor = s()
-            zx, zy = eintrag_ort(lage, i)
+            zx, zy = entry_place(lage, i)
             m.klick_auf(zx, zy)
             time.sleep(5.0)
             t2 = s()
             neuer = t2[len(vor):]
-            marke = MARKEN[name]
+            mark = MARKEN[name]
             gestartet[name] = {
                 "starts": re.findall(r"launcher: start ([^\s]+) pid=(-?\d+)",
                                      neuer),
-                "marke": marke,
-                "meldungen": neuer.count(marke)}
+                "marke": mark,
+                "meldungen": neuer.count(mark)}
             UMLAUT_BILDER.append(
-                foto(m, "06-app-%d-%s" % (i, re.sub(r"\W", "", name))))
+                photo(m, "06-app-%d-%s" % (i, re.sub(r"\W", "", name))))
             # ============================================ RUNDE TUERSCHLOSS
             # FUER DEN NAECHSTEN EINTRAG: ZWEI KLICKS, FESTE PAUSEN.
             #
@@ -451,7 +429,7 @@ def main():
             # Solange die Leiste ihren Zustand nicht ehrlich meldet, ist
             # der feste Rhythmus der ehrlichere Weg: er behauptet nicht,
             # etwas zu wissen, was auf der Leitung nicht steht.
-        eintraege = {i: (NAMEN[i], "") for i in range(6)}
+        eintraege = {i: (NAMES[i], "") for i in range(6)}
 
     for i in sorted(eintraege):
         name = eintraege[i][0]
@@ -477,8 +455,8 @@ def main():
     # Minuten -- gemessen unter Last 8.
     best = {}
     for w in ("Programm suchen:", "Ausführen", "Terminal"):
-        for bild in UMLAUT_BILDER:
-            v = suchtext(bild, w)
+        for image in UMLAUT_BILDER:
+            v = suchtext(image, w)
             if v is not None and v > best.get(w, -1):
                 best[w] = v
             if best.get(w, 0) >= 97:
@@ -495,7 +473,7 @@ def main():
           "ready=%d bye=%d" % (txt.count("sh: ready"), txt.count("sh: bye")))
 
     # 3.7 -- TIPPEN MIT UMLAUTEN. Ins Terminal, danach im Bild suchen.
-    wort = "Gruesse"
+    word = "Gruesse"
     tip = None
     # INS TERMINALFENSTER KLICKEN, und zwar in das, das der Server
     # meldet: `lay=1 fl=0` und 560x380 ist das Fenster von `wmshell`.
@@ -507,16 +485,16 @@ def main():
         tx, ty, tw, th = (int(v) for v in tf[-1])
         m.klick_auf(tx + tw // 2, ty + th // 2)
         time.sleep(1.0)
-        m.tippe("echo " + wort)
-        m.taste("ret")
+        m.tippe("echo " + word)
+        m.key_press("ret")
         time.sleep(3.0)
-        b_tip = foto(m, "07-terminal-getippt")
+        b_tip = photo(m, "07-terminal-getippt")
         # MIT DER SCHRIFT DES TERMINALS, IM TERMINAL, UND OHNE
         # KANTENGLAETTUNG -- die Begruendung steht bei `suchtext`.
         innen = (tx + 2, ty + 22, tx + 2 + tw, ty + 22 + th)
-        tip = suchtext(b_tip, wort, px=16, ttf="osum-mono.ttf",
+        tip = suchtext(b_tip, word, px=16, ttf="osum-mono.ttf",
                        kasten=innen, schwelle=70)
-        tip_roh = suchtext(b_tip, wort)
+        tip_roh = suchtext(b_tip, word)
         nach_keys = len(re.findall(r"key: ", s()))
         # ZWEI BELEGE: die Tasten kamen an (key:-Zeilen) UND der Text
         # steht im Bild. Der erste allein wuerde eine stumme Shell nicht
@@ -524,7 +502,7 @@ def main():
         # und "Shell antwortet nicht" unterscheiden.
         # DIE SHELL SAGT SELBST, ob sie den Befehl ausgefuehrt hat --
         # das ist der staerkere Beleg als jede Bildsuche.
-        echo_ok = ("osum$ echo " + wort) in s() or ("\n" + wort) in s()
+        echo_ok = ("osum$ echo " + word) in s() or ("\n" + word) in s()
         merke("3.7", "Text tippen (erscheint im Fenster)",
               "GEHT" if (echo_ok and nach_keys > vor_keys)
               else ("TEILWEISE" if nach_keys > vor_keys else "GEHT NICHT"),
@@ -548,7 +526,7 @@ def main():
 
     # ============================================== 4. Fenster
     txt = s()
-    f_vor = lesen.fenster(txt)
+    f_vor = read_all.window(txt)
     # ================================================ RUNDE TUERSCHLOSS
     # DAS RICHTIGE FENSTER NEHMEN, sonst misst man das Startmenue.
     #
@@ -565,7 +543,7 @@ def main():
     #   * `fl=0` -- keine Fahne gesetzt, insbesondere nicht F_NODECO(2).
     #     Nur ein Fenster MIT Schmuck hat Titelleiste und Griff.
     # Das trifft in diesem Abbild genau das Terminal (id=7, 560x380).
-    ziel = None
+    target = None
     for mm in re.finditer(r"wm: fen i=(\d+) id=(\d+) x=(\d+) y=(\d+) "
                           r"w=(\d+) h=(\d+) lay=(\d+) fl=(\d+) z=(\d+)", txt):
         i = int(mm.group(2))   # die KENNUNG (id=), nicht der Platz (i=)
@@ -588,10 +566,10 @@ def main():
         # Wer den Menschen nachmacht, muss das Fenster greifen, das er
         # sieht -- und das ist das oberste.
         if lay == 1 and fl == 0 and w >= 200 and h >= 150:
-            if ziel is None or z > ziel[5]:
-                ziel = (i, x, y, w, h, z)
-    if ziel:
-        i, x, y, w, h = ziel[0], ziel[1], ziel[2], ziel[3], ziel[4]
+            if target is None or z > target[5]:
+                target = (i, x, y, w, h, z)
+    if target:
+        i, x, y, w, h = target[0], target[1], target[2], target[3], target[4]
         # ============================================ RUNDE TUERSCHLOSS
         # DIE LAGE WIRD NACH JEDEM ZUG FRISCH GELESEN, und der Griff
         # wird aus DIESER Lage gerechnet.
@@ -605,12 +583,12 @@ def main():
         #   2. Der Griff wurde aus der ALTEN Lage gerechnet. Nach dem
         #      Verschieben um 200/150 liegt die Ecke woanders; der
         #      Klick landete mitten in der Fensterflaeche.
-        def frische_lage(wid, frist=60):
-            marke = r"wm: fen i=\d+ id=%d " % wid
-            n = len(re.findall(marke, s()))
-            bis = time.time() + frist
+        def frische_lage(wid, deadline=60):
+            mark = r"wm: fen i=\d+ id=%d " % wid
+            n = len(re.findall(mark, s()))
+            bis = time.time() + deadline
             while time.time() < bis:
-                if len(re.findall(marke, s())) > n:
+                if len(re.findall(mark, s())) > n:
                     time.sleep(0.5)
                     break
                 time.sleep(0.4)
@@ -627,7 +605,7 @@ def main():
                 x + BORDER + 240, y + TITLE_H // 2 + 150)
         na = frische_lage(i)
         bewegt = bool(na and (abs(na[0] - x) > 40 or abs(na[1] - y) > 40))
-        foto(m, "08-fenster-verschoben")
+        photo(m, "08-fenster-verschoben")
         merke("4.1", "Fenster verschieben", "GEHT" if bewegt else "GEHT NICHT",
               "von x=%d y=%d nach %s" % (x, y, na))
 
@@ -642,7 +620,7 @@ def main():
         m.ziehe(gx, gy, gx + 160, gy + 110)
         nb = frische_lage(i)
         groesser = bool(nb and (nb[2] > w2 + 20 or nb[3] > h2 + 20))
-        foto(m, "09-fenster-groesser")
+        photo(m, "09-fenster-groesser")
         merke("4.2", "Fenstergroesse per Ecke ziehen",
               "GEHT" if groesser else "GEHT NICHT",
               "Griff bei (%d,%d); vorher w=%d h=%d, nachher %s"
@@ -670,30 +648,30 @@ def main():
     # ES BRAUCHT ZWEI UMSCHALTBARE FENSTER. Ein Alt+Tab bei einem
     # einzigen Fenster tut nichts, und das ist richtig so -- deshalb
     # steht dieser Punkt NACH dem Starten der Programme.
-    b_v = foto(m, "10-vor-alttab")
+    b_v = photo(m, "10-vor-alttab")
     tv = s()
     fok_v = re.findall(r"wm: fokus id=(\d+) vor=(\d+)", tv)
-    offen_v = sorted(set(re.findall(
+    is_open_v = sorted(set(re.findall(
         r"wm: fen i=\d+ id=(\d+) [^\n]*lay=1 fl=0", tv)))
-    m.sag("sendkey alt-tab", 0.25)
+    m.say("sendkey alt-tab", 0.25)
     time.sleep(2.5)
-    b_n = foto(m, "11-nach-alttab")
+    b_n = photo(m, "11-nach-alttab")
     tn = s()
     fok_n = re.findall(r"wm: fokus id=(\d+) vor=(\d+)", tn)
     hot = re.findall(r"wm: hot c=(\d+) mod=(\d+) act=(\d+)", tn)
     getan = re.findall(r"wm: hot getan=(\d+)", tn)
     d_alt = diff(b_v, b_n)
     gewechselt = len(fok_n) > len(fok_v)
-    if len(offen_v) < 2:
+    if len(is_open_v) < 2:
         merke("4.3", "Alt+Tab wechselt das Fenster", "NICHT PRUEFBAR",
               "nur %d umschaltbares Fenster (lay=1 fl=0): %s"
-              % (len(offen_v), offen_v))
+              % (len(is_open_v), is_open_v))
     else:
         merke("4.3", "Alt+Tab wechselt das Fenster",
               "GEHT" if gewechselt else "GEHT NICHT",
               "%d Fenster %s; letzte Taste %s getan=%s; Fokus %s -> %s; "
               "Bildpunkte %s %%"
-              % (len(offen_v), offen_v, hot[-1:] , getan[-1:],
+              % (len(is_open_v), is_open_v, hot[-1:] , getan[-1:],
                  fok_v[-1:], fok_n[-1:], d_alt))
 
     merke("4.4", "Maximieren / Minimieren", "NICHT GEPRUEFT",
@@ -705,17 +683,17 @@ def main():
 
     # 4.6 Fenster-Leck
     for _ in range(20):
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(0.35)
     time.sleep(2)
     txt = s()
-    f = lesen.fenster(txt)
+    f = read_all.window(txt)
     lf = [i for i, lagen in f.items()
           if any(w == 440 and h == 300 for _, _, w, h in lagen)]
     merke("4.6", "Fenster-Leck (20x Start)",
           "GEHT" if len(lf) <= 1 else "GEHT NICHT",
           "%d Fenster 440x300 (DURCHKLICK: 16)" % len(lf))
-    foto(m, "12-nach-20-klicks")
+    photo(m, "12-nach-20-klicks")
 
     # ============================================== 5. Zwischenablage
     zw = subprocess.run(
@@ -744,16 +722,16 @@ def main():
 
     # ============================================== 7. Dauerlauf
     merke("7.1", "20 Fenster oeffnen ohne Absturz",
-          "GEHT" if lesen.abstuerze(txt) == 0 else "GEHT NICHT",
-          "%d Treffer auf PANIK/#PF/#UD" % lesen.abstuerze(txt))
-    b_s1 = foto(m, "13-vor-stress")
+          "GEHT" if read_all.abstuerze(txt) == 0 else "GEHT NICHT",
+          "%d Treffer auf PANIK/#PF/#UD" % read_all.abstuerze(txt))
+    b_s1 = photo(m, "13-vor-stress")
     for k in range(30):
-        m.gehe((k * 37) % BREITE, (k * 53) % HOEHE)
+        m.go_to((k * 37) % WIDTH, (k * 53) % HEIGHT)
     time.sleep(1.5)
-    b_s2 = foto(m, "14-nach-stress")
+    b_s2 = photo(m, "14-nach-stress")
     merke("7.2", "Schnelle Mausbewegung",
-          "GEHT" if lesen.abstuerze(s()) == 0 else "GEHT NICHT",
-          "30 Spruenge, %d Abstuerze" % lesen.abstuerze(s()))
+          "GEHT" if read_all.abstuerze(s()) == 0 else "GEHT NICHT",
+          "30 Spruenge, %d Abstuerze" % read_all.abstuerze(s()))
     u1 = re.findall(r"t=(\d\d:\d\d:\d\d)", s())
     g1 = os.path.getsize(SER)
     # DIE LEERLAUFPROBE DAUERT SO LANGE, WIE SIE MUSS, UND NICHT LAENGER.
@@ -767,7 +745,7 @@ def main():
     time.sleep(100)
     u2 = re.findall(r"t=(\d\d:\d\d:\d\d)", s())
     g2 = os.path.getsize(SER)
-    foto(m, "15-nach-leerlauf")
+    photo(m, "15-nach-leerlauf")
     merke("7.3", "Leerlauf (100 s) -- nichts friert ein",
           "GEHT" if (u2 and u1 and u2[-1] != u1[-1] and g2 > g1)
           else "GEHT NICHT",
@@ -775,8 +753,8 @@ def main():
           % (u1[-1] if u1 else "-", u2[-1] if u2 else "-", g1, g2))
 
     merke("7.5", "keine Abstuerze im ganzen Lauf",
-          "GEHT" if lesen.abstuerze(s()) == 0 else "GEHT NICHT",
-          "%d Treffer" % lesen.abstuerze(s()))
+          "GEHT" if read_all.abstuerze(s()) == 0 else "GEHT NICHT",
+          "%d Treffer" % read_all.abstuerze(s()))
 
     # ============================================== 7.4 Herunterfahren
     # ZULETZT, weil danach die Maschine weg ist. Gemessen wird der Weg,
@@ -789,25 +767,25 @@ def main():
         m.klick_auf(tx + tw // 2, ty + th // 2)
         time.sleep(1.0)
         m.tippe("shutdown")
-        m.taste("ret")
-        weg = False
+        m.key_press("ret")
+        gone = False
         bis = time.time() + 60
         while time.time() < bis:
             if not os.path.exists(os.path.join(D, "mon.sock")):
-                weg = True
+                gone = True
                 break
             try:
                 pid = int(open(os.path.join(D, "pid")).read().strip())
                 os.kill(pid, 0)
             except (OSError, ValueError):
-                weg = True
+                gone = True
                 break
             time.sleep(1.0)
         t = s()
         acpi = re.findall(r"power: acpi[^\n]{0,60}", t)
         merke("7.4", "Herunterfahren ueber die Oberflaeche",
-              "GEHT" if weg or acpi else "GEHT NICHT",
-              "QEMU beendet=%s; %s" % (weg, acpi[-1:] or "keine acpi-Zeile"))
+              "GEHT" if gone or acpi else "GEHT NICHT",
+              "QEMU beendet=%s; %s" % (gone, acpi[-1:] or "keine acpi-Zeile"))
     else:
         merke("7.4", "Herunterfahren ueber die Oberflaeche", "NICHT PRUEFBAR",
               "kein Terminalfenster")
@@ -815,12 +793,12 @@ def main():
     # ============================================== 8. Selbst-Hosting
     # Die Dateiliste des Abbilds -- kein QEMU noetig, und genau diese
     # Liste hat DURCHKLICK 8.1 mit "kein Uebersetzer" beantwortet.
-    liste = subprocess.run(
+    item_list = subprocess.run(
         ["python3", os.path.join(REPO, "tools", "osum", "mkfs.py"), "list",
          os.path.join(HIER, "root.img")],
         capture_output=True, text=True).stdout
-    hat_firnc = "/bin/firnc" in liste
-    hat_fas = "/bin/fas" in liste
+    hat_firnc = "/bin/firnc" in item_list
+    hat_fas = "/bin/fas" in item_list
     merke("8.1", "Uebersetzer im Abbild",
           "GEHT" if hat_firnc and hat_fas else "GEHT NICHT",
           "firnc=%s fas=%s (DURCHKLICK: keiner von beiden)"
@@ -831,10 +809,10 @@ def main():
           "/hallo.s -> 0, fas -> 0, /hallo -> 42")
     merke("8.3", "tools/k16/run.sh gruen", "SIEHE BERICHT",
           "eigener Lauf, Zahlen im Befund")
-    return schluss()
+    return finish()
 
 
-def schluss():
+def finish():
     os.makedirs(D, exist_ok=True)
     with open(os.path.join(D, "befund.json"), "w") as f:
         json.dump(BEFUND, f, indent=1, ensure_ascii=False)

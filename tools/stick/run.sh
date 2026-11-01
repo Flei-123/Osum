@@ -184,12 +184,12 @@ stick_lauf() { # <name> <bios|uefi> <mit-gegenstelle:0|1> <console.py-args...>
 }
 
 set -- \
-    --frist 150 --erwarte 'sh: ready' \
-    --sende 'dhcp\n'                           --frist 90  --erwarte 'dhcp: gesetzt ip=' \
-    --sende 'cat /etc/resolv.conf\n'           --frist 30  --erwarte 'nameserver' \
-    --sende "host $NAME\n"                     --frist 90  --erwarte 'host -> 0' \
-    --sende "fetch https://$NAME/index.json\n" --frist 150 --erwarte 'fetch -> 0' \
-    --sende 'ota search\n'                     --frist 200 --erwarte 'ota -> '
+    --deadline 150 --erwarte 'sh: ready' \
+    --sende 'dhcp\n'                           --deadline 90  --erwarte 'dhcp: gesetzt ip=' \
+    --sende 'cat /etc/resolv.conf\n'           --deadline 30  --erwarte 'nameserver' \
+    --sende "host $NAME\n"                     --deadline 90  --erwarte 'host -> 0' \
+    --sende "fetch https://$NAME/index.json\n" --deadline 150 --erwarte 'fetch -> 0' \
+    --sende 'ota search\n'                     --deadline 200 --erwarte 'ota -> '
 NETZFOLGE=("$@")
 
 if [ "${STICK_NUR:-}" != bruecke ]; then
@@ -242,13 +242,13 @@ fi   # STICK_NUR
 echo "== 6. the bridge: jarvisd answers a job =="
 # =====================================================================
 stick_lauf sbr bios 1 \
-    --frist 150 --erwarte 'sh: ready' \
-    --sende 'mount\n'                    --frist 60  --erwarte 'mount -> 0' \
-    --sende 'cat /mnt/rechte.conf\n'     --frist 40  --erwarte 'servername' \
-    --sende 'dhcp\n'                     --frist 90  --erwarte 'dhcp: gesetzt ip=' \
+    --deadline 150 --erwarte 'sh: ready' \
+    --sende 'mount\n'                    --deadline 60  --erwarte 'mount -> 0' \
+    --sende 'cat /mnt/rechte.conf\n'     --deadline 40  --erwarte 'servername' \
+    --sende 'dhcp\n'                     --deadline 90  --erwarte 'dhcp: gesetzt ip=' \
     --sende 'jarvisd -c /mnt/rechte.conf -1 -t 90000\n' \
-                                         --frist 240 --erwarte 'jarvisd -> ' \
-    --sende 'jarvisctl log 20\n'   --frist 60  --erwarte 'jarvisctl -> '
+                                         --deadline 240 --erwarte 'jarvisd -> ' \
+    --sende 'jarvisctl log 20\n'   --deadline 60  --erwarte 'jarvisctl -> '
 R="$TMPD/sbr/con.log"
 G="$TMPD/sbr/g.log"
 hat "$R" '/mnt type vfat' "die zweite Platte steht in der Einhaengetafel (/mnt, vfat)"

@@ -49,8 +49,8 @@ ESC = re.compile(r"\\u\{?([0-9a-fA-F]{4,6})\}?")
 DEC = re.compile(r"(?<![\w.])(\d{5})(?![\w.])")
 
 
-def belegte(wurzel):
-    path_2 = os.path.join(wurzel, "assets", "icons", "icons.map")
+def belegte(root):
+    path_2 = os.path.join(root, "assets", "icons", "icons.map")
     aus = {}
     for roh in open(path_2, encoding="ascii").read().splitlines():
         line = roh.split("#", 1)[0].strip()
@@ -63,14 +63,14 @@ def belegte(wurzel):
     return aus
 
 
-def zeichencode(wurzel):
+def zeichencode(root):
     aus = []
-    aus += sorted(glob.glob(os.path.join(wurzel, "kernel", "user", "*.fi")))
+    aus += sorted(glob.glob(os.path.join(root, "kernel", "user", "*.fi")))
     for n in ("wig.fi", "wm.fi", "ttf.fi"):
-        p = os.path.join(wurzel, "kernel", n)
+        p = os.path.join(root, "kernel", n)
         if os.path.exists(p):
             aus.append(p)
-    for p in sorted(glob.glob(os.path.join(wurzel, "lib", "*.fi"))):
+    for p in sorted(glob.glob(os.path.join(root, "lib", "*.fi"))):
         if os.path.basename(p) != "icons.fi":
             aus.append(p)
     return aus
@@ -81,7 +81,7 @@ def without_kommentare(text):
     i = 0
     n = len(text)
     in_text = False
-    zeichen = ''
+    chars = ''
     while i < n:
         c = text[i]
         if in_text:
@@ -90,14 +90,14 @@ def without_kommentare(text):
                 aus.append(text[i + 1])
                 i += 2
                 continue
-            if c == zeichen:
+            if c == chars:
                 in_text = False
             aus.append(c)
             i += 1
             continue
         if c in '"\'':
             in_text = True
-            zeichen = c
+            chars = c
             aus.append(c)
             i += 1
             continue
@@ -131,13 +131,13 @@ def treffer(text, erlaubt_values):
 
 
 def main(argv):
-    wurzel = os.path.dirname(os.path.dirname(os.path.dirname(
+    root = os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))))
     laut = False
     i = 1
     while i < len(argv):
         if argv[i] == "--root":
-            wurzel = argv[i + 1]
+            root = argv[i + 1]
             i += 2
         elif argv[i] == "--verbose":
             laut = True
@@ -146,24 +146,24 @@ def main(argv):
             print(__doc__)
             return 2
 
-    karte = belegte(wurzel)
-    dateien = zeichencode(wurzel)
+    card = belegte(root)
+    dateien = zeichencode(root)
     n = 0
     for voll in dateien:
-        rel = os.path.relpath(voll, wurzel)
+        rel = os.path.relpath(voll, root)
         text = without_kommentare(
             open(voll, encoding="utf-8", errors="replace").read())
-        for line, art, value in treffer(text, karte):
+        for line, art, value in treffer(text, card):
             n += 1
             print("rawcp: %s:%d: raw code point (%s) U+%04X -- write %s"
-                  % (rel, line, art, value, karte[value]))
+                  % (rel, line, art, value, card[value]))
 
     print("rawcp: %d raw code points in %d files of drawing code, "
           "%d code points given away"
-          % (n, len(dateien), len(karte)))
+          % (n, len(dateien), len(card)))
     if laut:
-        for w in sorted(karte):
-            print("rawcp:   U+%04X %s" % (w, karte[w]))
+        for w in sorted(card):
+            print("rawcp:   U+%04X %s" % (w, card[w]))
     return 0 if n == 0 else 1
 
 

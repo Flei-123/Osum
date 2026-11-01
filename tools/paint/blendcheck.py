@@ -98,15 +98,15 @@ def quellen_check():
 
 
 def main():
-    schnell = "--schnell" in sys.argv
-    schritt = 7 if schnell else 1
+    fast = "--fast" in sys.argv
+    schritt = 7 if fast else 1
     error = 0
     zusagen = 0
 
     erg = messen(schritt)
     gesamt = erg[FASSUNGEN[0][0]][3]
     print("PAINT-BLEND: %d Tripel (a, src, dst)%s"
-          % (gesamt, "  [--schnell: jedes 7. a]" if schnell else ""))
+          % (gesamt, "  [--fast: jedes 7. a]" if fast else ""))
     for name, _ in FASSUNGEN:
         mx, sum_2, wrong, n = erg[name]
         print("   %s  max=%d  mittel=%.6f  falsch=%d (%.3f%%)"

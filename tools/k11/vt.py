@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k11/vt.py -- den SERIELLEN Mitschnitt zu einem Bildschirm rechnen.
-
-Der Editor dieser Runde schreibt Fluchtfolgen. Auf der seriellen Leitung
-kommen sie als Oktette an; was ein Mensch dort saehe, weiss nur ein
-Terminal. Also steht hier eines: dieselben Folgen, die `kernel/drv/con/ansi.fi`
-auf dem Bildschirm ausfuehrt, auf einem Feld aus Zeichen.
-
-Damit lassen sich zwei Dinge messen, die sonst niemand messen kann:
-
-  1. WAS AUF DER SERIELLEN LEITUNG ZU SEHEN WAERE -- gegen eine von Hand
-     geschriebene Erwartung.
-  2. DASS BEIDE AUSGABEWEGE DASSELBE ZEIGEN: dieses Bild gegen das, was
-     `tools/gfx/checkshot.py read` aus einem echten Bildschirmfoto liest.
-     Stimmen sie ueberein, dann tut `kernel/drv/con/ansi.fi` auf dem Schirm genau
-     das, was ein Terminal an der Leitung taete -- und das ist die
-     Zusage "der Editor laeuft auf beiden".
-
-    vt.py <mitschnitt> [zeilen] [spalten] [--ab MUSTER]
-
-`--ab` wirft alles weg, was vor dem letzten Vorkommen von MUSTER steht --
-so bleiben die Bootmeldungen des Kernels aussen vor.
+"""Usage:
+    vt.py <mitschnitt> [rows] [columns] [--ab MUSTER]
 """
 import sys
 

@@ -1,31 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/mkcerts.py -- die Zertifikate der Gegenstelle.
-
-    mkcerts.py <verzeichnis> [<name>] [<ip>]
-
-Schreibt mit Pythons `cryptography` -- also NICHT mit dem Code, der sie
-danach prueft; genau das ist der Sinn:
-
-    ca.pem        eine Wurzel, RSA-2048, ein Jahr gueltig
-    srv.pem/.key  das Serverzertifikat fuer <name> (Vorgabe ota.test),
-                  mit SAN dNSName UND iPAddress <ip> (Vorgabe 10.0.2.2 --
-                  die Adresse, unter der QEMUs Benutzernetz den Wirt
-                  zeigt), von dieser Wurzel unterschrieben
-    fremd-ca.pem  eine ZWEITE Wurzel, die NICHT im Vertrauensspeicher
-                  liegt
-    fremd.pem/.key ein Zertifikat fuer denselben Namen, von der zweiten
-                  Wurzel unterschrieben -- der Fall "unbekannter
-                  Aussteller"
-
-WOZU DIE ZWEITE WURZEL. Ein Update-Weg, von dem nur der gute Fall
-gemessen ist, ist nicht gemessen. `tools/ota/run.sh` haelt dem Geraet das
-fremde Zertifikat hin und verlangt, dass es die Verbindung ABLEHNT und
-danach NICHTS geschrieben hat.
-
-DIESE ZERTIFIKATE SIND PRUEFSTANDSZERTIFIKATE. Sie liegen im
-Temporaerbereich eines Laufs und werden danach weggeworfen; nichts davon
-gehoert in ein Abbild.
+"""Usage:
+    mkcerts.py <directory> [<name>] [<ip>]
 """
 import datetime
 import ipaddress

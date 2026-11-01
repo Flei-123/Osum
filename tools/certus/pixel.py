@@ -1,32 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/certus/pixel.py -- EIN BILD WIRD GEZAEHLT, NICHT ANGESCHAUT.
-
-Die Falle, gegen die dieses Skript geschrieben ist, ist die aus Runde
-K7B: ein Programm meldet, es habe gemalt, und der Bildschirm ist leer.
-Ein Mensch, der ein Bild anschaut, faellt darauf nicht herein -- eine
-Abnahme, die nur Textzeilen liest, schon.
-
-Gezaehlt wird dreierlei, und jedes davon trennt einen anderen Fehlerfall
-ab:
-
-  TINTENPUNKTE    Punkte, die nicht die haeufigste Farbe haben. Null
-                  heisst: die Flaeche ist einfarbig, es steht nichts da.
-  DUNKLE PUNKTE   Punkte unter 96 in allen drei Kanaelen. Ein Browser,
-                  der die Kaesten einer Seite malt und die Buchstaben
-                  nicht, hat Tinte und KEINE dunklen Punkte -- genau der
-                  Fehler, den Runde B5 mit `xwd` gefunden hat.
-  TEXTBAENDER     Waagrechte Baender, in denen mindestens drei dunkle
-                  Punkte stehen. Ein Kasten ist EIN Band; ein Absatz aus
-                  vier Zeilen sind vier. Damit laesst sich "es steht ein
-                  schwarzer Balken da" von "es steht Text da" trennen.
-
-    pixel.py <bild.ppm> [--json <datei>] [--png <datei>] [--fenster]
-             [--oben <n>]
-
-`--fenster` laesst die oberen 30 Zeilen (die Bedienleiste) und die
-unteren 32 (die Taskleiste) aus der Zaehlung heraus, damit ein Bild vom
-ganzen Bildschirm dieselbe Zahl ergibt wie eine Leinwand ohne beides.
+"""Usage:
+    pixel.py <image.ppm> [--json <file>] [--png <file>] [--window]
+    [--top <n>]
 """
 import json
 import struct

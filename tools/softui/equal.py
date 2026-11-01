@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/equal.py -- ZWEI BILDER, BILDPUNKT FUER BILDPUNKT.
-
-    equal.py <a.ppm> <b.ppm> [--karte <ziel.png>]
-
-Die Gegenprobe, die diese Runde ueberhaupt landen laesst: `modern` darf
-anders aussehen, `classic` nicht.  Das laesst sich nicht durch Nachdenken
-feststellen -- die Runde hat den Fensterserver, die Widget-Bibliothek,
-die Leiste und die Einstellungen angefasst -- also wird das Bild gegen
-den Zweig gehalten, von dem abgezweigt wurde.
-
-Ausgegeben wird die Zahl der abweichenden Bildpunkte, ihre groesste
-Abweichung je Kanal und das umschliessende Rechteck.  Das Rechteck ist
-der Teil, der einen Fehler suchbar macht: "1 738 Bildpunkte anders" sagt
-nichts, "1 738 Bildpunkte anders, alle in 542,112 bis 632,131" sagt, dass
-es die Fensterknoepfe sind.
-
-`--karte` schreibt zusaetzlich ein Bild, in dem jeder abweichende Punkt
-rot ist.  Mit `--zeit` wird die Uhr in der Taskleiste ausgenommen -- sie
-zeigt die echte Zeit und ist zwischen zwei Laeufen zwangslaeufig
-verschieden; das Rechteck dafuer wird angegeben und im Bericht genannt,
-damit niemand es fuer eine stillschweigende Ausnahme haelt.
+"""Usage:
+    equal.py <a.ppm> <b.ppm> [--card <target.png>]
 """
 import sys
 
@@ -61,9 +42,9 @@ def main(argv):
     aus = None
     aussen = []
     for i, v in enumerate(argv[3:]):
-        if v == "--karte":
+        if v == "--card":
             aus = argv[3 + i + 1]
-        if v == "--zeit":
+        if v == "--elapsed":
             aussen.append(("die Uhr", (740, H1 - 28, W1, H1)))
         if v == "--ausser":
             x, y, w, h = (int(t) for t in argv[3 + i + 1].split(","))
@@ -71,7 +52,7 @@ def main(argv):
     n = 0
     mx = 0
     x0, y0, x1, y1 = W1, H1, -1, -1
-    karte = bytearray(a) if aus else None
+    card = bytearray(a) if aus else None
     for y in range(H1):
         row = y * W1 * 3
         for x in range(W1):
@@ -91,10 +72,10 @@ def main(argv):
             mx = max(mx, d)
             x0, y0 = min(x0, x), min(y0, y)
             x1, y1 = max(x1, x), max(y1, y)
-            if karte is not None:
-                karte[o] = 255
-                karte[o + 1] = 0
-                karte[o + 2] = 0
+            if card is not None:
+                card[o] = 255
+                card[o + 1] = 0
+                card[o + 2] = 0
     if n == 0:
         print("same: differs in 0 of %d pixels -- IDENTICAL"
               % (W1 * H1))
@@ -104,9 +85,9 @@ def main(argv):
               % (n, W1 * H1, 100.0 * n / (W1 * H1), mx, x0, y0, x1, y1))
     for nm, r in aussen:
         print("same: excluded (%s) %d,%d to %d,%d" % ((nm,) + r))
-    if aus and karte is not None:
+    if aus and card is not None:
         from PIL import Image
-        Image.frombytes("RGB", (W1, H1), bytes(karte)).save(aus)
+        Image.frombytes("RGB", (W1, H1), bytes(card)).save(aus)
         print("same: map to %s" % aus)
     return 1 if n else 0
 

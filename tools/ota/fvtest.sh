@@ -108,12 +108,12 @@ mkfeed() { # dir fassung extra-listing-args...
     rm -f "$OUT/$d/VERZEICHNIS" "$OUT/$d/VERZEICHNIS.sig"
 }
 mkfeed netzfvman 2
-python3 tools/ota/listing.py "$OUT/netzfvman" --fassung 2 --schluessel "$OUT/geheim.key" --kaputt fvviewer-1.0.1.opk > /dev/null || bad netzfvman
+python3 tools/ota/listing.py "$OUT/netzfvman" --revision 2 --key "$OUT/geheim.key" --broken fvviewer-1.0.1.opk > /dev/null || bad netzfvman
 mkfeed netzfvsig 2
 cp "$OUT/pk/fvviewer-1.0.0.opk.sig" "$OUT/netzfvsig/fvviewer-1.0.1.opk.sig"
-python3 tools/ota/listing.py "$OUT/netzfvsig" --fassung 2 --schluessel "$OUT/geheim.key" > /dev/null || bad netzfvsig
+python3 tools/ota/listing.py "$OUT/netzfvsig" --revision 2 --key "$OUT/geheim.key" > /dev/null || bad netzfvsig
 mkfeed netzfv 2
-python3 tools/ota/listing.py "$OUT/netzfv" --fassung 2 --schluessel "$OUT/geheim.key" > /dev/null || bad netzfv
+python3 tools/ota/listing.py "$OUT/netzfv" --revision 2 --key "$OUT/geheim.key" > /dev/null || bad netzfv
 ok "feeds: netzfv (1.0.1), netzfvman (tampered), netzfvsig (wrong .sig), netzfremd (foreign key)"
 
 fi # stage build

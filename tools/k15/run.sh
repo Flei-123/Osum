@@ -977,7 +977,7 @@ ICS=16
 for a in explorer terminal; do
     SRC="assets/apps/$a.osp/symbol.txt"
     [ -f "assets/apps/$a.osp/symbol.osym" ] && SRC="assets/apps/$a.osp/symbol.osym"
-    python3 tools/k15/icon.py --pruefe "$(sym $a)" "$SRC" \
+    python3 tools/k15/icon.py --check "$(sym $a)" "$SRC" \
         > "$TMPD/sym-$a.txt" 2>&1 \
         && ok "the icon of $a in the image is the drawing from the source tree ($(cat "$TMPD/sym-$a.txt"))" \
         || bad "the icon of $a does not match its drawing"

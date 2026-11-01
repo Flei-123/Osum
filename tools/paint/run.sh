@@ -12,7 +12,7 @@ TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
 echo "== 1. the computation: src-over against the exact computation =="
-if out=$(python3 tools/paint/blendcheck.py --schnell --quellen 2>&1); then
+if out=$(python3 tools/paint/blendcheck.py --fast --quellen 2>&1); then
     echo "$out" | sed 's/^/     /'
     n=$(echo "$out" | grep -c '^  OK')
     PASS=$((PASS+n))

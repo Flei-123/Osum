@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/server/count.py -- WIE VIELE STELLEN IM KERNEL AUF DIE GRAFIK
-GREIFEN.
-
-Die Aufgabe der Runde SERVERBUILD verlangt diese Zahl ausdruecklich:
-sie sagt, wie sauber der Schnitt ist. Vor der Runde waren es 745
-Stellen in acht Dateien, danach null -- ausser in `kernel/gfx/gfx.fi`, und
-das ist die Naht selbst.
-
-GEZAEHLT WIRD NUR CODE. Kommentare fliegen raus, bevor gesucht wird;
-in diesem Repo steht in den Kommentaren mehr ueber `fb.fi` als in
-manchen Modulen an Code, und eine Zahl, die Prosa mitzaehlt, ist keine.
-
-    count.py <kernelverzeichnis> [--je-datei]
-
-Ohne `--je-datei` kommt genau eine Zahl heraus, damit ein Testlaeufer
-sie ohne `sed` weiterverwenden kann.
+"""Usage:
+    count.py <kernelverzeichnis> [--per-file]
 """
 import collections
 import os

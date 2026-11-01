@@ -1,71 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/drive.py -- EIN START, VIELE BILDER.
-
+"""Usage:
     drive.py <monitor-socket> <serial.txt> <ausgabeverzeichnis> <drehbuch>
-
-Die Runden davor haben je Bild eine eigene Maschine gestartet: bauen,
-booten, EIN Foto, beenden.  Fuer eine Bestandsaufnahme von sieben
-Ansichten sind das sieben Starts a rund vierzig Sekunden, und sieben
-Maschinen sind sieben verschiedene Uhrzeiten in der Leiste -- ein
-Vorher/Nachher-Vergleich, bei dem sich nebenbei die Uhr bewegt, ist ein
-Vergleich mit Rauschen darin.
-
-Also: EIN Start, EINE Verbindung zum QEMU-Monitor, und ein Drehbuch,
-das dazwischen klickt, tippt und fotografiert.
-
-Befehle im Drehbuch (one line per command, a leading hash starts a note):
-
-    warte <sekunden>            anhalten
-    warteauf <regex> [|| frist] warten, bis der regex in serial.txt steht
-    marke <regex>               remember how often the regex is on the serial line now
-    warteneu <regex> [|| frist] wait until the regex is on the serial line more often than at the last `marke`
-    fahre <x>,<y>               den Zeiger dorthin, ohne zu klicken
-    klick <x>,<y>               dorthin fahren und einmal klicken
-    doppel <x>,<y>              dorthin fahren und zweimal klicken
-    klickauf <name>             das zuletzt gemeldete Rechteck <name>
-                                anklicken (siehe unten)
+    wait <secs>            anhalten
+    mark <regex>               remember how often the regex is on the serial line now
+    warteneu <regex> [|| deadline] wait until the regex is on the serial line more often than at the last `mark`
     doppelauf <name>            dasselbe, zweimal
-    mklickauf <name>            dasselbe mit der MITTLEREN Taste (r529)
-    taste <name>                sendkey
-    foto <name>                 screendump nach <ausgabe>/<name>.ppm
-
-DIE RECHTECKE.  Die Programme dieses Systems melden ihre Widgets auf
-der seriellen Leitung -- `launcher: rect id=2 kind=5 x=12 y=82 w=416
-h=166`, `settings: rect name=wtb x=.. y=.. w=.. h=..`, `taskbar: start
-x=4 y=3 w=30 h=22`.  Ein Klick, der aus einer solchen Zeile gerechnet
-ist, trifft das, was das PROGRAMM gemeldet hat, und nicht das, was
-jemand aus einem alten Bild abgelesen hat.  Genau daran ist die Runde
-THEMESTORE mit `click=680,51` haengengeblieben: die Zahl stimmt genau
-so lange, bis sich das Fenster verschiebt.
-
-Umgerechnet wird mit dem Ursprung des Fensters: `<programm>: geom x= y=`
-plus Rahmen (2) und Titelleiste (22) -- dieselben zwei Zahlen, die
-`wlib.say_painted` benutzt.  Wer ein Rechteck ohne Fensterbezug meldet
-(die Taskleiste), gibt schon Bildschirmkoordinaten an.
-
-Namen fuer `klickauf`:
-
-    start           der Startknopf         (taskbar: start x= y= w= h=)
-    glocke          die Meldungen          (taskbar: field noti ...)
+    key <name>                sendkey
+    photo <name>                 screendump nach <output>/<name>.ppm
     tbbtn<N>        Fensterknopf N         (taskbar: btn i=N ...)
-    netz            die Symbolgruppe       (taskbar: field net ...)
-    uhr             die Uhr                (taskbar: field clock ...)
-    calrect<N>      Knopf N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
+    calrect<N>      button N des Kalenders  (calpop: rect name=N ..., Bildschirmpixel)
     trayrect<NAME>  element NAME of the tray flyout (traypop: rect name=, screen pixels)
     oskrect<NAME>   key NAME of the on-screen keyboard (osk: rect name=), osktrect<NAME> element of the witness window
-    chrect<NAME>    Element NAME der Zeichentabelle (charmap: rect name= ... ax= ay=, Bildschirmpixel)
     lrect<N>        Widget N des Starters  (launcher: rect id=N ...)
-    lzeile<N>       Zeile N der Trefferliste des Starters
-    srect<NAME>     Widget NAME der Einstellungen (settings: rect name=)
-    qsmprev|qsmplay|qsmnext  media card buttons of the quick settings (qs: mprev ... x= y= w= h=)
-    frect<N>        Widget N des Dateimanagers (explorer: rect id=N)
-    fdrect<N>       widget N of the friends bar (freunde: rect id=N)
-    ncrow<N>        row N of the notification card (notifc: open n= x= y= w= h=, rows 28 design points high)
-    ncsec<N>        the action button of row N (Eject / View report), right end of the row
-    toast           the toast on screen (taskbar: toast [..] x= y= w= h=)
-    wlnth<K>x<I>    widget number I (0 first) of kind K in the newest report of the welcome window
-    fdnth<K>x<I>    widget number I (0 first, -1 last) of kind K in the newest report of the friends bar
 """
 import faulthandler
 import os
@@ -350,7 +297,7 @@ class Fahrer:
 
     def brand(self, muster):
         self.brand_muster = re.compile(muster)
-        self.marke_n = len(self.brand_muster.findall(read_2(self.serial)))
+        self.mark_n = len(self.brand_muster.findall(read_2(self.serial)))
 
     def warteneu(self, muster, deadline=25.0):
         r = re.compile(muster)
@@ -363,16 +310,16 @@ class Fahrer:
         return False
 
     def photo(self, name, deadline=30.0):
-        ziel = os.path.join(self.out, name + ".ppm")
-        if os.path.exists(ziel):
-            os.unlink(ziel)
-        self.cmd("screendump %s" % ziel)
+        target = os.path.join(self.out, name + ".ppm")
+        if os.path.exists(target):
+            os.unlink(target)
+        self.cmd("screendump %s" % target)
         last_2, ruhig = -1, 0
         bis = time.time() + deadline
         while time.time() < bis:
             time.sleep(0.15)
             try:
-                now = os.path.getsize(ziel)
+                now = os.path.getsize(target)
             except OSError:
                 continue
             if now == last_2 and now > 0:
@@ -596,26 +543,26 @@ class Fahrer:
         tb = (int(gm.group(1)), int(gm.group(2))) if gm else (0, 0)
         if name.startswith("pin") and not name[3:].isdigit():
             word_2 = name[3:]
-            alle = list(re.finditer(
+            everything = list(re.finditer(
                 r"taskbar: pin %s x=(\d+) y=(\d+) w=(\d+) h=(\d+)" % word_2, t))
-            if not alle or tb is None:
+            if not everything or tb is None:
                 return None
-            m = alle[-1]
+            m = everything[-1]
             return (tb[0] + int(m.group(1)), tb[1] + int(m.group(2)),
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("pin") and name[3:].isdigit():
             k = int(name[3:])
-            alle = list(re.finditer(
+            everything = list(re.finditer(
                 r"taskbar: pin (\w+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)", t))
-            if not alle:
+            if not everything:
                 return None
-            last = alle[-1].group(1)
+            last = everything[-1].group(1)
             n = 1
-            for m2 in reversed(alle[:-1]):
+            for m2 in reversed(everything[:-1]):
                 if m2.group(1) == last:
                     break
                 n += 1
-            letzten = alle[-n:]
+            letzten = everything[-n:]
             if k >= len(letzten):
                 return None
             m = letzten[k]

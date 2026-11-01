@@ -87,7 +87,7 @@ echo "== 5. the desktop, and a program from the store runs =="
 cp -f "$OUT/text.img" "$OUT/lauf.img"
 python3 tools/themestore/click.py 300,250 > "$OUT/k-start.txt"
 echo "warte 2" >> "$OUT/k-start.txt"
-python3 tools/loader/tippen.py "explorer" --warte 25 >> "$OUT/k-start.txt"
+python3 tools/loader/tippen.py "explorer" --wait 25 >> "$OUT/k-start.txt"
 LADEN_WARTE=15 LADEN_KILL=ja bash tools/loader/lauf.sh a3 \
     "$GUI" 900 "wm: dauer" "$OUT/k-start.txt" > /dev/null 2>&1
 [ -s "$OUT/a3.png" ] && ok "Bild a3.png ($(stat -c%s "$OUT/a3.png") Oktette)" \

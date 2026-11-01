@@ -25,73 +25,73 @@
 import re
 import time
 
-lauf.sag("== PUNKT 1: die Sprache der Oberflaeche ==")
+lauf.say("== PUNKT 1: die Sprache der Oberflaeche ==")
 
 
-def fenster():
-    text = lauf.lies()
+def window():
+    text = lauf.read_text()
     bloecke = re.split(r"(?=wm: fen i=0 )", text)
-    letzter = bloecke[-1] if len(bloecke) > 1 else text
-    alle = re.findall(
+    last_item = bloecke[-1] if len(bloecke) > 1 else text
+    everything = re.findall(
         r"wm: fen i=\d+ id=(\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) lay=(\d+)",
-        letzter)
+        last_item)
     d = {}
-    for f in alle:
+    for f in everything:
         d[int(f[0])] = tuple(int(v) for v in f[1:])
     return d
 
 
 # ------------------------------------------------ 1. Was sagt der Katalog
-roh = lauf.lies()
+roh = lauf.read_text()
 
-lauf.sag("-- 1. der Katalog, wie ihn die Programme melden --")
-for zeile in re.findall(r"^[a-z]+: [^\n]*lang=[^\n]*$", roh, re.M):
-    lauf.sag("   " + zeile.strip())
+lauf.say("-- 1. der Katalog, wie ihn die Programme melden --")
+for row in re.findall(r"^[a-z]+: [^\n]*lang=[^\n]*$", roh, re.M):
+    lauf.say("   " + row.strip())
 if not re.search(r"lang=", roh):
-    lauf.sag("   KEINE EINZIGE lang=-Zeile auf der Leitung")
+    lauf.say("   KEINE EINZIGE lang=-Zeile auf der Leitung")
 
 # ------------------------------------------------ 2. Die Namen der Buendel
-lauf.sag("-- 2. was der Starter je Buendel meldet --")
+lauf.say("-- 2. was der Starter je Buendel meldet --")
 treffer = re.findall(r"^launcher: [^\n]*name=\[[^\]]*\][^\n]*$", roh, re.M)
 for t in treffer[:20]:
-    lauf.sag("   " + t.strip())
+    lauf.say("   " + t.strip())
 if not treffer:
-    lauf.sag("   (keine treffer-Zeilen -- der Starter meldet sie nur beim Suchen)")
+    lauf.say("   (keine treffer-Zeilen -- der Starter meldet sie nur beim Suchen)")
 
-name_zeilen = re.findall(r"^launcher: name \[([^\]]*)\]", roh, re.M)
-for n in name_zeilen:
-    lauf.sag("   eigener Name: [%s]" % n)
+name_rows = re.findall(r"^launcher: name \[([^\]]*)\]", roh, re.M)
+for n in name_rows:
+    lauf.say("   eigener Name: [%s]" % n)
 
 # ------------------------------------------------ 3. Das Startmenue oeffnen
-lauf.sag("-- 3. das Startmenue --")
-vor = fenster()
-lauf.m.taste("meta_l")
+lauf.say("-- 3. das Startmenue --")
+vor = window()
+lauf.m.key_press("meta_l")
 time.sleep(3)
-lauf.bild("startmenue")
+lauf.image("startmenue")
 
-men = [(i, v) for i, v in fenster().items() if v[4] == 4]
+men = [(i, v) for i, v in window().items() if v[4] == 4]
 if not men:
-    lauf.sag("   KEIN STARTMENUE -- Super hat nichts geoeffnet")
+    lauf.say("   KEIN STARTMENUE -- Super hat nichts geoeffnet")
 else:
     mid, (mx, my, mw, mh, _) = men[-1]
-    lauf.sag("   Startmenue id=%d bei %d,%d  %dx%d" % (mid, mx, my, mw, mh))
+    lauf.say("   Startmenue id=%d bei %d,%d  %dx%d" % (mid, mx, my, mw, mh))
 
 # ------------------------------------------------ 4. Suchen -> Trefferliste
 # Der Starter meldet `treffer ... name=[...]` erst, wenn gesucht wird.
 # Ein einzelner Buchstabe, der auf alle drei Programme passt: "e".
-lauf.sag("-- 4. eine Suche, damit die Namen auf die Leitung kommen --")
+lauf.say("-- 4. eine Suche, damit die Namen auf die Leitung kommen --")
 if men:
     lauf.m.klick_auf(mx + 207, my + 60)
     time.sleep(1)
     lauf.m.tippe("e")
     time.sleep(3)
-    lauf.bild("suche-e")
+    lauf.image("suche-e")
 
-    roh2 = lauf.lies()
+    roh2 = lauf.read_text()
     treffer2 = re.findall(r"^launcher: [^\n]*name=\[[^\]]*\][^\n]*$", roh2, re.M)
     for t in treffer2[:20]:
-        lauf.sag("   " + t.strip())
+        lauf.say("   " + t.strip())
     if not treffer2:
-        lauf.sag("   NICHTS -- der Starter meldet keine Treffer")
+        lauf.say("   NICHTS -- der Starter meldet keine Treffer")
 
-lauf.sag("== Ende Punkt 1 ==")
+lauf.say("== Ende Punkt 1 ==")

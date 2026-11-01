@@ -1,44 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/metal2/mouse.py -- EIN SYNTHETISCHER BEWEGUNGSSTROM UEBER QMP.
-
-    mouse.py <qmp-socket> <sekunden> <hz> [schluessel=wert ...]
-
-        breite=3424 hoehe=1440   die Flaeche, auf der der Zeiger laeuft
-        klick_ms=2000            alle so viele Millisekunden ein Linksklick
-        klickfeld=x0,y0,x1,y1    NUR dort wird geklickt (Schreibtischflaeche,
-                                 nicht Terminal, nicht Leiste, nicht Kreuz)
-        tasten=<n>               danach n Tastendruecke (a..z) in 50-ms-Abstand
-        shot=<ziel.ppm>          am Ende ein Bildschirmfoto ueber QMP
-        heim=1                   vorher in die linke obere Ecke fahren
-
-WARUM QMP UND NICHT DER HMP-MONITOR. `tools/wm/monitor.py` schickt
-`mouse_move` als Textbefehl und wartet nach jedem eine Zehntelsekunde --
-zehn Bewegungen je Sekunde. Justins Maus meldet 125 bis 1000 Berichte
-je Sekunde. Der Fensterring (`wm.EV_SLOTS`) faellt erst um, wenn MEHR
-hineinkommt, als der Abholer zwischen zwei Runden holt -- also braucht
-die Abnahme einen Strom in DIESER Groessenordnung. QMP nimmt
-`input-send-event` als JSON ohne Wartezeit an; ein Ereignis je
-Millisekunde ist damit erreichbar (die WIRKLICH erreichte Rate wird
-gemessen und mitgeteilt, nicht behauptet).
-
-WAS QEMU DARAUS MACHT, UND WARUM DAS EHRLICH DAZUGESAGT WIRD. Das
-USB-Mausgeraet von QEMU (hw/input/hid.c) fasst Bewegungen, die zwischen
-zwei Abfragen des Wirts eintreffen, zu EINEM Bericht zusammen und traegt
-den Rest, der nicht in acht Bit passt, in den naechsten. Mit einem
-Meldeintervall von 8-10 ms kommen im Gast also rund 100-125 Berichte je
-Sekunde an -- die Rate einer gewoehnlichen USB-Maus. Der Weg Bericht ->
-`ps2m.usb_packet` -> `wm.on_mouse` -> `ev_push` wird damit mit ECHTEN
-xHCI-Berichten belastet, nicht mit einem Kernelhaken. Fuer die 1000-Hz-
-Last im Kern gibt es zusaetzlich das Bootwort `mausflut=<hz>` (kgui.fi).
-
-DER ZEIGERORT IST EINE RECHNUNG. Nach dem Heimfahren (grosse negative
-Schritte, der Anschlag bei 0,0 loescht die Vorgeschichte) ist jeder
-weitere Schritt klein (|d| <= 4 je Millisekunde, also hoechstens rund 40
-je Bericht -- weit unter den 127, die ein Bericht traegt), und der Weg
-bleibt mit Rand im Bild. Damit ist die Stelle, an der geklickt wird,
-bekannt und nicht gehofft: `klickfeld` haelt die Klicks vom Terminal,
-der Leiste und dem Schliesskreuz fern.
+"""Usage:
+    mouse.py <qmp-socket> <secs> <hz> [key=value ...]
+    keys=<n>               danach n Tastendruecke (a..z) in 50-ms-Spacing
 """
 import json
 import math
@@ -205,8 +169,8 @@ def main():
     dur = time.perf_counter() - t0
     rate = sent / dur if dur > 0 else 0
 
-    tasten = int(opt["tasten"])
-    for k in range(tasten):
+    keys = int(opt["tasten"])
+    for k in range(keys):
         qc = chr(ord("a") + (k % 26))
         q.key(True, qc)
         time.sleep(0.025)
@@ -218,7 +182,7 @@ def main():
     if opt["shot"]:
         shot_ok = q.screendump(opt["shot"])
     print("maus: bewegungen=%d dauer_s=%.1f rate_hz=%.0f klicks=%d tasten=%d "
-          "zeiger=%d,%d shot=%s" % (sent, dur, rate, klicks, tasten,
+          "zeiger=%d,%d shot=%s" % (sent, dur, rate, klicks, keys,
                                     px, py, shot_ok))
     return 0
 

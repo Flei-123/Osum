@@ -1,23 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vsync/bewegung.py -- FOTOS WAEHREND EINER FENSTERBEWEGUNG.
-
-    bewegung.py <monitor-socket> <zielordner> <n> [abstand_s]
-
-Beim Oeffnen waechst ein Fenster aus AN_SCALE0 (85 Prozent) auf volle
-Groesse und wird dabei von durchsichtig nach deckend gemischt.  Das
-dauert MOTION_DEF = 120 ms, bei TICK_HZ = 100 also etwa zwoelf
-Zwischenbilder.
-
-Damit man das MESSEN kann und nicht nur behaupten, holt dieses Programm
-in dichter Folge Fotos und schreibt sie weg.  `wachstum.py` rechnet
-danach aus, wie gross die farbige Flaeche in jedem Bild war -- waechst
-sie ueber die Serie hinweg, hat es eine Bewegung gegeben; springt sie
-von nichts auf alles, gab es keine.
-
-Kein Klick und keine Maus: die Vorfuehrung laeuft im Kernel (`wmanim`,
-siehe `kgui.anim_vorfuehrung`) zu festen Ticks ab.  Dieses Programm
-sieht nur zu.
+"""Usage:
+    bewegung.py <monitor-socket> <zielordner> <n> [spacing_s]
 """
 import os
 import socket

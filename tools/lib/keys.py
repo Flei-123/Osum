@@ -1,62 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/lib/keys.py -- Tasten schicken und auf ihre WIRKUNG warten.
-
-    keys.py <monitor.sock> <serielle-datei> taste [taste ...]
-              [--bereit TEXT] [--zeit SEKUNDEN] [--vorlauf SEKUNDEN]
-
-WARUM ES DIESE DATEI GIBT.
-
-Vier Abschnitte der Abnahme -- `osum`, `userland`, `k17` und
-`systembus` -- schickten ihre Tastendruecke bisher so:
-
-    for key in ["l", "s", "ret"]:
-        s.sendall(("sendkey %s\\n" % key).encode())
-        time.sleep(0.3)
-
-und pruefen danach
-
-    keys that arrived over IRQ1: 2, expected eq 3
-
-Auf einer freien Maschine reichen 0,3 s. Auf dieser Maschine, auf der
-sich bis zu sechs fremde QEMU-Prozesse denselben Wirt teilen, reichen
-sie nicht: QEMU bekommt seine Zeitscheibe nicht, der Tastendruck liegt
-noch in der virtuellen Tastatur, und der naechste kommt schon
-hinterher. Gezaehlt werden dann zwei statt drei.
-
-DAS IST KEIN FEHLER IN OSUM, UND DER TEST HAT IHN AUCH NIE GEMESSEN.
-Er hat gemessen, ob der Wirt gerade schnell genug war. Ein Test, der
-unter Last luegt, ist kein Test -- er sagt an einem ruhigen Abend
-"gruen" und an einem vollen "rot", und beide Male steht dasselbe im
-Kern.
-
-WIE ES STATT DESSEN GEMACHT WIRD.
-
-Der Kern meldet GENAU EINE Zeile `key: ` je Taste, die ueber IRQ1
-angekommen ist (`kernel/kbd.fi`, Zusage von Runde 62; die Zeile 602
-sagt es woertlich). Das ist ein EREIGNIS, und darauf laesst sich
-warten, statt auf die Uhr zu sehen:
-
-    Taste schicken  ->  warten, bis die Zahl der `key: `-Zeilen
-                        um eins gestiegen ist  ->  naechste Taste
-
-Damit haengt die Geschwindigkeit an der Maschine und nicht mehr die
-Richtigkeit. Auf einem freien Wirt laeuft es schneller als vorher
-(kein festes Warten mehr), auf einem vollen dauert es laenger -- und
-zaehlt in beiden Faellen dasselbe.
-
-WAS DABEI NICHT ENTSCHAERFT WIRD. Die Zusage bleibt Wort fuer Wort
-dieselbe: es muessen so viele Tasten ueber IRQ1 ankommen, wie
-geschickt wurden. Kommt eine nicht an, wartet dieses Programm bis zum
-Zeitlimit und meldet sie als fehlend -- der Abschnitt wird rot, wie er
-es soll. Neu ist nur, dass "nicht angekommen" jetzt heisst "der Kern
-hat sie nicht verarbeitet" und nicht mehr "der Wirt war beschaeftigt".
-
-Die Tastennamen sind die von QEMU (`sendkey`).
-
-Rueckgabe: 0, wenn jede Taste ihre Zeile bekommen hat; 1 sonst. Auf
-stdout steht eine Zeile je Taste, damit im Protokoll steht, wie lange
-es gedauert hat.
+"""Usage:
+    keys.py <monitor.sock> <serielle-file> key [key ...]
+    [--ready TEXT] [--elapsed SECS] [--vorlauf SECS]
 """
 import os
 import re
@@ -68,7 +14,7 @@ TIME_JE_KEY = 12.0
 TIME_READY = 40.0
 
 
-def zeilen(path_2):
+def rows(path_2):
     try:
         with open(path_2, "rb") as f:
             return f.read().count(b"key: ")
@@ -97,18 +43,18 @@ def main(argv):
     sock = argv[1]
     seriell = argv[2]
     keys_2 = []
-    bereit = None
-    zeit = TIME_JE_KEY
+    ready = None
+    elapsed = TIME_JE_KEY
     vorlauf = 0.4
     i = 3
     while i < len(argv):
         a = argv[i]
-        if a == "--bereit":
+        if a == "--ready":
             i += 1
-            bereit = argv[i]
-        elif a == "--zeit":
+            ready = argv[i]
+        elif a == "--elapsed":
             i += 1
-            zeit = float(argv[i])
+            elapsed = float(argv[i])
         elif a == "--vorlauf":
             i += 1
             vorlauf = float(argv[i])
@@ -116,8 +62,8 @@ def main(argv):
             keys_2.append(a)
         i += 1
 
-    if bereit and not wait_auf(seriell, bereit, TIME_READY):
-        print("keys: the kernel has '%s' nicht gemeldet" % bereit)
+    if ready and not wait_auf(seriell, ready, TIME_READY):
+        print("keys: the kernel has '%s' nicht gemeldet" % ready)
         return 1
 
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -126,13 +72,13 @@ def main(argv):
 
     fehlend = []
     for nr, key_2 in enumerate(keys_2, 1):
-        vorher = zeilen(seriell)
+        vorher = rows(seriell)
         s.sendall(("sendkey %s\n" % key_2).encode())
         begin = time.time()
-        ende = begin + zeit
+        ende = begin + elapsed
         angekommen = False
         while time.time() < ende:
-            if zeilen(seriell) > vorher:
+            if rows(seriell) > vorher:
                 angekommen = True
                 break
             time.sleep(0.02)

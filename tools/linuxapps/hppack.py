@@ -10,7 +10,7 @@ FIXED_MTIME = 1760000000
 
 
 def parse_spec(path):
-    files, links = [], []
+    files, left = [], []
     for raw in open(path, encoding="utf-8").read().splitlines():
         line = raw.strip()
         if not line or line.startswith(SKIP_PREFIXES):
@@ -18,13 +18,13 @@ def parse_spec(path):
         head = line.split("=", 1)[0]
         if "->" in head:
             dest, target = line.split("->", 1)
-            links.append((dest, target))
+            left.append((dest, target))
         elif "=" in line:
             dest, rest = line.split("=", 1)
             host, _, mode = rest.partition("@")
             if os.path.isfile(host):
                 files.append((dest, host, int(mode or "644", 8)))
-    return files, links
+    return files, left
 
 
 def sha256_file(path):
@@ -35,7 +35,7 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def write_tar(files, links, out_path):
+def write_tar(files, left, out_path):
     with tarfile.open(out_path, "w", format=tarfile.USTAR_FORMAT) as tar:
         for dest, host, mode in files:
             info = tar.gettarinfo(host, arcname=dest.lstrip("/"))
@@ -44,7 +44,7 @@ def write_tar(files, links, out_path):
             info.uname = info.gname = ""
             with open(host, "rb") as handle:
                 tar.addfile(info, handle)
-        for dest, target in links:
+        for dest, target in left:
             info = tarfile.TarInfo(dest.lstrip("/"))
             info.type = tarfile.SYMTYPE
             info.linkname = target
@@ -88,20 +88,20 @@ def parse_extras(argv):
 def main(argv):
     spec, out_dir = argv[1], argv[2]
     os.makedirs(out_dir, exist_ok=True)
-    files, links = parse_spec(spec)
+    files, left = parse_spec(spec)
     files.extend(parse_extras(argv))
     if len(argv) >= 5 and argv[3] == "--base-spec":
-        packed = {dest for dest, _, _ in files} | {dest for dest, _ in links}
+        packed = {dest for dest, _, _ in files} | {dest for dest, _ in left}
         write_base_spec(argv[4], packed, os.path.join(out_dir, "base.spec"))
     tar_path = os.path.join(out_dir, "firefox.tar")
     gz_path = tar_path + ".gz"
-    write_tar(files, links, tar_path)
+    write_tar(files, left, tar_path)
     write_gzip(tar_path, gz_path)
     with open(os.path.join(out_dir, "firefox.links"), "w", encoding="utf-8") as handle:
-        handle.writelines("%s %s\n" % pair for pair in links)
+        handle.writelines("%s %s\n" % pair for pair in left)
     manifest = [
         "files %d" % len(files),
-        "links %d" % len(links),
+        "links %d" % len(left),
         "tar %d %s" % (os.path.getsize(tar_path), sha256_file(tar_path)),
         "gz %d %s" % (os.path.getsize(gz_path), sha256_file(gz_path)),
     ]

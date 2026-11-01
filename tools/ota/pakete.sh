@@ -29,8 +29,8 @@ mach() { # <zielname> <quelle> <fassung>
     mkdir -p "$OUT/$1"
     cp "$OUT/$2"/* "$OUT/$1/" 2>/dev/null
     rm -f "$OUT/$1/VERZEICHNIS" "$OUT/$1/VERZEICHNIS.sig"
-    python3 tools/ota/listing.py "$OUT/$1" --fassung "$3" \
-        --schluessel "$OUT/geheim.key" || exit 1
+    python3 tools/ota/listing.py "$OUT/$1" --revision "$3" \
+        --key "$OUT/geheim.key" || exit 1
 }
 
 mach netz1 quelle1 1
@@ -41,15 +41,15 @@ rm -rf "$OUT/netzfremd"
 mkdir -p "$OUT/netzfremd"
 cp "$OUT/quelle2"/* "$OUT/netzfremd/" 2>/dev/null
 rm -f "$OUT/netzfremd/VERZEICHNIS" "$OUT/netzfremd/VERZEICHNIS.sig"
-python3 tools/ota/listing.py "$OUT/netzfremd" --fassung 2 \
-    --schluessel "$OUT/fremdsig.key" || exit 1
+python3 tools/ota/listing.py "$OUT/netzfremd" --revision 2 \
+    --key "$OUT/fremdsig.key" || exit 1
 
 rm -rf "$OUT/netzman"
 mkdir -p "$OUT/netzman"
 cp "$OUT/quelle2"/* "$OUT/netzman/" 2>/dev/null
 rm -f "$OUT/netzman/VERZEICHNIS" "$OUT/netzman/VERZEICHNIS.sig"
-python3 tools/ota/listing.py "$OUT/netzman" --fassung 2 \
-    --schluessel "$OUT/geheim.key" --kaputt hallo-2.opk || exit 1
+python3 tools/ota/listing.py "$OUT/netzman" --revision 2 \
+    --key "$OUT/geheim.key" --broken hallo-2.opk || exit 1
 
 # --- richtiges VERZEICHNIS, falsche Paketsignatur
 rm -rf "$OUT/netzbadsig"
@@ -57,8 +57,8 @@ mkdir -p "$OUT/netzbadsig"
 cp "$OUT/quelle2"/* "$OUT/netzbadsig/" 2>/dev/null
 rm -f "$OUT/netzbadsig/VERZEICHNIS" "$OUT/netzbadsig/VERZEICHNIS.sig"
 cp "$OUT/quelle1/hallo-1.opk.sig" "$OUT/netzbadsig/hallo-2.opk.sig"
-python3 tools/ota/listing.py "$OUT/netzbadsig" --fassung 2 \
-    --schluessel "$OUT/geheim.key" || exit 1
+python3 tools/ota/listing.py "$OUT/netzbadsig" --revision 2 \
+    --key "$OUT/geheim.key" || exit 1
 
 GROSS_MIB=${OTA_GROSS_MIB:-60}
 if [ ! -s "$OUT/gross.bin" ]; then
@@ -81,8 +81,8 @@ python3 "$OPK" quelle "$OUT/netzvoll" --schluessel "$OUT/geheim.key" \
     >> "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
 python3 tools/update/signpak.py "$OUT/geheim.key" "$OUT/netzvoll"/*.opk \
     >> "$OUT/gross.log" 2>&1 || { cat "$OUT/gross.log"; exit 1; }
-python3 tools/ota/listing.py "$OUT/netzvoll" --fassung 2 \
-    --schluessel "$OUT/geheim.key" || exit 1
+python3 tools/ota/listing.py "$OUT/netzvoll" --revision 2 \
+    --key "$OUT/geheim.key" || exit 1
 
 for d in netz1 netz2 netz3 netzfremd netzman netzbadsig netzvoll; do
     echo "   $d  $(ls "$OUT/$d" | wc -l) Dateien, $(du -sb "$OUT/$d" | cut -f1) Oktette"

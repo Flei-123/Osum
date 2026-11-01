@@ -106,7 +106,7 @@ def glyphe_paint(image, f, cp, px, x, y, rgb):
         return 0
     g = raster.raster(f, gid, px)
     reason = y + px
-    x0 = x + g.links
+    x0 = x + g.left
     y0 = reason - g.top_2
     gesetzt = 0
     for r in range(g.h):
@@ -127,7 +127,7 @@ def text_paint(image, f, px, x, reason, s, rgb):
         if vorher:
             cx += f.kern(vorher, gid) * raster.scale_of(px, f.upm) >> 10
         g = raster.raster(f, gid, px)
-        x0 = (cx >> 6) + g.links
+        x0 = (cx >> 6) + g.left
         y0 = reason - g.top_2
         for r in range(g.h):
             for cc in range(g.w):
@@ -171,8 +171,8 @@ def blatt(eintraege, ifont, tfont, sizes, bg, fg, dim, title):
         for px in sizes:
             glyphe_paint(b, ifont, cp, px, cx, cy + (max(sizes) - px) // 2, fg)
             cx += px + 6
-        kurz = name[5:] if name.startswith("icon.") else name
-        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, kurz, dim)
+        brief = name[5:] if name.startswith("icon.") else name
+        text_paint(b, tfont, 13, cx + 4, cy + max(sizes) - 5, brief, dim)
     return b
 
 

@@ -13,7 +13,7 @@ back = wait(lambda: (lambda x: x if x.get("sitzungen_seit_status", 0) > s0 and x
 chk("D  worker killed -> supervisor starts a new one, device signs in again", bool(back), warum().get("kurz"))
 ev = " ".join(e[1] for e in warum().get("ereignisse", []))
 chk("D2 server saw the new session", "NEUE SITZUNG" in ev, ev[-200:])
-c, ps2, st = job("befehl", ziel="/bin/ps")
+c, ps2, st = job("befehl", target="/bin/ps")
 jv2 = [l.split() for l in ps2.split("\n") if l.strip().endswith("jarvisd")]
 print("jarvisd tasks after:", jv2, flush=True)
 chk("D3 same supervisor, new worker pid", any(x[0] == sup and x[1] == "1" for x in jv2) and any(x[1] == sup and x[0] != worker for x in jv2), jv2)

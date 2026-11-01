@@ -129,12 +129,12 @@ def grundfarben(ppm, x0, y0, x1, y1):
     return vg, hg
 
 
-def term_check(serial, ppm, text, line, column, tol, zeichen):
+def term_check(serial, ppm, text, line, column, tol, chars):
     roh = open(serial, "rb").read()
     g = gitter(roh)
     if g is None:
         print("umlaut: [%s] no `wm: termgitter` line in the capture"
-              % zeichen)
+              % chars)
         return 1
     x0, y0, cw, chh, asc, px = g
     ax = x0 + column * cw
@@ -142,7 +142,7 @@ def term_check(serial, ppm, text, line, column, tol, zeichen):
     farben = grundfarben(ppm, ax, ay - asc, ax + len(text) * cw, ay + 4)
     if farben is None:
         print("umlaut: [%s] line %d cannot be found in the image"
-              % (zeichen, line))
+              % (chars, line))
         return 1
     vg, hg = farben
     r = subprocess.run(
@@ -154,7 +154,7 @@ def term_check(serial, ppm, text, line, column, tol, zeichen):
     header = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
     print("umlaut: [%s] termgitter zeile=%d spalte=%d x=%d y=%d "
           "fg=%02x%02x%02x bg=%02x%02x%02x tol=%s -- %s"
-          % (zeichen, line, column, ax, ay, vg[0], vg[1], vg[2],
+          % (chars, line, column, ax, ay, vg[0], vg[1], vg[2],
              hg[0], hg[1], hg[2], tol, header))
     for z in r.stdout.strip().split("\n")[1:]:
         print("        " + z)
@@ -167,35 +167,35 @@ def main(argv):
         print("        <serial> <ppm> --gitter=<zeile>,<spalte> <text> "
               "[toleranz]")
         return 2
-    kette = "--kette" in argv
-    argv = [x for x in argv if x != "--kette"]
+    chain = "--chain" in argv
+    argv = [x for x in argv if x != "--chain"]
     ink = "--ink" in argv
     argv = [x for x in argv if x != "--ink"]
     if argv[2].startswith("--gitter="):
         text = argv[3]
-        zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
-        if not zeichen:
+        chars = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
+        if not chars:
             print("umlaut: %r traegt gar keinen Umlaut" % text)
             return 2
         line, column = (int(v) for v in argv[2].split("=", 1)[1].split(","))
         return term_check(argv[0], argv[1], text, line, column,
-                            argv[4] if len(argv) > 4 else "0", zeichen)
+                            argv[4] if len(argv) > 4 else "0", chars)
     serial, ppm, title, text = argv[0], argv[1], argv[2], argv[3]
     tol = argv[4] if len(argv) > 4 else "0"
-    zeichen = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
-    if not zeichen:
+    chars = "".join(sorted(set(c for c in text if c in "äöüÄÖÜß")))
+    if not chars:
         print("umlaut: %r traegt gar keinen Umlaut" % text)
         return 2
     roh = open(serial, "rb").read()
 
     w = window(roh, title)
     if w is None:
-        print("umlaut: [%s] no visible window '%s'" % (zeichen, title))
+        print("umlaut: [%s] no visible window '%s'" % (chars, title))
         return 1
     wx, wy, ww, wh, deco = w
     t = gemalt(roh, text)
     if t is None:
-        print("umlaut: [%s] '%s' wurde nicht gemalt" % (zeichen, text[:40]))
+        print("umlaut: [%s] '%s' wurde nicht gemalt" % (chars, text[:40]))
         return 1
     kind, tx, tb, fg, bg, px = t
 
@@ -215,7 +215,7 @@ def main(argv):
     if tx + width_2 > ww:
         print("umlaut: [%s] '%s' laeuft von x=%d bis %d aus einem Fenster "
               "heraus, das %d breit ist -- nicht messbar"
-              % (zeichen, text[:30], tx, tx + width_2, ww))
+              % (chars, text[:30], tx, tx + width_2, ww))
         return 1
 
     up = 20
@@ -228,7 +228,7 @@ def main(argv):
                 break
         if not sicht.strip() or not any(c in "äöüÄÖÜß" for c in sicht):
             print("umlaut: [%s] '%s' ist ab x=%d verdeckt -- vom Umlaut "
-                  "ist nichts zu sehen" % (zeichen, text[:30], limit))
+                  "ist nichts zu sehen" % (chars, text[:30], limit))
             return 1
         if sicht != text:
             print("        verdeckt ab x=%d -- gemessen wird '%s'"
@@ -237,13 +237,13 @@ def main(argv):
 
     r = subprocess.run(
         ["python3", "tools/gfx/checkshot.py",
-         "tink" if ink else ("tchain" if kette else "ttext"), ppm,
+         "tink" if ink else ("tchain" if chain else "ttext"), ppm,
          "fui:assets/osum-sans.ttf", str(px), str(ax), str(ay)]
         + rgb(fg) + rgb(bg) + [text, tol],
         capture_output=True, text=True)
     header = r.stdout.strip().split("\n")[0] if r.stdout else r.stderr.strip()
     print("umlaut: [%s] kind=%d %s x=%d y=%d tol=%s -- %s"
-          % (zeichen, kind, title, ax, ay, tol, header))
+          % (chars, kind, title, ax, ay, tol, header))
     for z in r.stdout.strip().split("\n")[1:]:
         print("        " + z)
     return r.returncode

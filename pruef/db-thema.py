@@ -20,56 +20,56 @@
 import re
 import time
 
-lauf.sag("== PUNKT 2: erreicht der Themenwechsel jedes Programm? ==")
+lauf.say("== PUNKT 2: erreicht der Themenwechsel jedes Programm? ==")
 
 
-def fenster():
-    text = lauf.lies()
+def window():
+    text = lauf.read_text()
     bloecke = re.split(r"(?=wm: fen i=0 )", text)
-    letzter = bloecke[-1] if len(bloecke) > 1 else text
-    alle = re.findall(
+    last_item = bloecke[-1] if len(bloecke) > 1 else text
+    everything = re.findall(
         r"wm: fen i=\d+ id=(\d+) x=(-?\d+) y=(-?\d+) w=(\d+) h=(\d+) lay=(\d+)",
-        letzter)
+        last_item)
     d = {}
-    for f in alle:
+    for f in everything:
         d[int(f[0])] = tuple(int(v) for v in f[1:])
     return d
 
 
 def starte(name):
     """Ueber das Startmenue suchen und mit Eingabe starten."""
-    vor = set(fenster().keys())
-    lauf.m.taste("meta_l")
+    vor = set(window().keys())
+    lauf.m.key_press("meta_l")
     time.sleep(3)
-    men = [(i, v) for i, v in fenster().items() if v[4] == 4]
+    men = [(i, v) for i, v in window().items() if v[4] == 4]
     if not men:
-        lauf.sag("   KEIN STARTMENUE fuer %s" % name)
+        lauf.say("   KEIN STARTMENUE fuer %s" % name)
         return None
     mid, (mx, my, mw, mh, _) = men[-1]
     lauf.m.klick_auf(mx + 207, my + 60)
     time.sleep(1)
     for _ in range(24):
-        lauf.m.taste("backspace")
+        lauf.m.key_press("backspace")
     time.sleep(1)
     lauf.m.tippe(name)
     time.sleep(2)
-    lauf.m.taste("ret")
+    lauf.m.key_press("ret")
     time.sleep(6)
-    neu = [i for i in fenster().keys() if i not in vor and i != mid]
-    if not neu:
-        lauf.sag("   %s ist nicht aufgegangen" % name)
+    renewed = [i for i in window().keys() if i not in vor and i != mid]
+    if not renewed:
+        lauf.say("   %s ist nicht aufgegangen" % name)
         return None
-    wid = max(neu)
-    lauf.sag("   %s -> Fenster id=%d %s" % (name, wid, fenster()[wid]))
+    wid = max(renewed)
+    lauf.say("   %s -> Fenster id=%d %s" % (name, wid, window()[wid]))
     return wid
 
 
-lauf.bild("a-schreibtisch")
+lauf.image("a-schreibtisch")
 
 for prog in ("nedit", "explorer", "settings"):
-    lauf.sag("-- %s --" % prog)
+    lauf.say("-- %s --" % prog)
     wid = starte(prog)
     if wid:
-        lauf.bild("b-%s" % prog)
+        lauf.image("b-%s" % prog)
 
-lauf.sag("== Ende Punkt 2 ==")
+lauf.say("== Ende Punkt 2 ==")

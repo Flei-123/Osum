@@ -1,101 +1,16 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/veroeffentlichen.py -- AUS EINEM STAND EINE AUSLIEFERUNG.
-
-    veroeffentlichen.py <auslieferung> --stand <verz> --bund <bund.json>
-                        [--notiz <text>] [--sperren <fassung>]...
-                        [--fassung <n>]        nur zum Nachstellen alter Laeufe
-    veroeffentlichen.py <auslieferung> --zuruecknehmen <fassung> [--bund ...]
-    veroeffentlichen.py <auslieferung> --zeigen
-
-WAS `docs/OTA.md` HIER VERMISST HAT, woertlich: "ein Bau, der aus einem
-Stand Pakete, INDEX und VERZEICHNIS erzeugt und AUTOMATISCH die
-Fassungsnummer hochzaehlt; ein Ort, an dem die Fassungsnummer gefuehrt
-wird (sie darf nie zurueckgehen, auch nicht durch ein zurueckgenommenes
-Auslieferungspaket); und eine Auslieferung, die alte Fassungen weiter
-vorhaelt, damit ein Geraet, das drei Fassungen hinterherhinkt, nicht ins
-Leere greift."
-
-Alle drei stehen hier.
-
-================================================================ DER BAU
-
-Ein Verzeichnis, das ausgeliefert wird, sieht danach so aus:
-
-    register.json          die gefuehrte Fassungsnummer
-    journal.txt            eine Zeile je Vorgang, zum Nachlesen
-    gesperrt.txt           zurueckgezogene Fassungen, eine je Zeile
-    pakete/<sha256>.opk    DER VORRAT, inhaltsadressiert
+"""Usage:
+    publish.py <auslieferung> --stand <verz> --bund <bund.json>
+    [--notiz <text>] [--lock-down <revision>]...
+    publish.py <auslieferung> --zuruecknehmen <revision> [--bund ...]
+    publish.py <auslieferung> --display
     pakete/<sha256>.opk.sig
-    v/<n>/                 die Auslieferung der Fassung n, vollstaendig
-    aktuell/               dasselbe wie die hoechste NICHT gesperrte v/<n>
-
-`v/<n>/` und `aktuell/` enthalten HARTE VERKNUEPFUNGEN in den Vorrat.
-Deshalb kostet eine alte Fassung, die weiter vorgehalten wird, nur
-einen Verzeichniseintrag -- ein Paket, das sich zwischen zwei
-Fassungen nicht geaendert hat, liegt genau EINMAL auf der Platte. Das
-ist der Grund, warum "alte Fassungen weiter vorhalten" hier keine
-Platzfrage ist.
-
-============================================== DIE GEFUEHRTE FASSUNGSNUMMER
-
-`register.json` ist der einzige Ort, an dem die Zahl steht.
-
-    {"letzte": 7, "vergeben": [1,2,3,4,5,6,7], "zurueckgenommen": [5]}
-
-DIE REGEL, und sie ist der ganze Punkt: **die naechste Fassung ist
-IMMER `letzte + 1`, und `letzte` wird geschrieben, BEVOR gebaut wird.**
-Damit verbraucht auch ein Bau, der mittendrin scheitert, seine Nummer,
-und eine zurueckgenommene Auslieferung gibt ihre NICHT zurueck.
-
-Warum das wichtig ist: auf dem Geraet steht `/system/FASSUNG`, und die
-Zahl darf nur steigen (Rueckschrittsschutz). Wuerde eine Nummer nach
-einer Ruecknahme neu vergeben, gaebe es ZWEI verschiedene, beide
-richtig signierte Auslieferungen mit derselben Zahl -- und ein Geraet,
-das die erste schon hat, wuerde die zweite als Rueckschritt ablehnen.
-Es waere dann fuer immer auf einer Fassung stehengeblieben, die es
-nicht behalten sollte, und niemand saehe, warum.
-
-============================================ DAS VERZEICHNIS, FASSUNG OTA2
-
-    OTA2
-    fassung        <dezimal>
+    revision        <dezimal>
     schluesselgen  <dezimal>
-    kette          <gen>  <64hex neuer pub>  <128hex sig>     (0..n)
-    gesperrt       <fassung>                                  (0..n)
-    paket          <name> <fassung> <sha256> <oktette> <datei> <plattform>
-
-RUNDE STORE-MOBIL: die sechste Spalte, `<plattform>`, sagt in EINEM
-Wort, wofuer das Paket ist -- `osum-x86_64`, `osum-aarch64` oder
-`osum-any` --, und `tools/ota/plattform.py` sagt, woher das Wort kommt
-(Metadaten, sonst der ELF-Kopf in der Nutzlast). `/bin/ota` zeigt und
-holt nur die Zeilen, die auf seine Maschine passen. Die Kennung bleibt
-OTA2: die Spalte ist keine Sicherheitsaussage, ein altes Geraet liest
-darueber hinweg.
-
-Die ersten beiden Zeilen stehen fest, damit ein Geraet die Fassung
-lesen kann, bevor es irgendetwas anderes ansieht.
-
-WARUM DIE KENNUNG VON OTA1 AUF OTA2 GEHT, obwohl nur Zeilen dazukommen
-und ein alter Zerteiler sie ueberspringen wuerde: WEIL ER SIE
-UEBERSPRINGEN WUERDE. `gesperrt` ist eine Sicherheitsaussage. Ein
-Geraet, das sie nicht versteht, muss ABLEHNEN und nicht einspielen --
-sonst waere die Sperrliste ein Vorschlag. Aus demselben Grund lehnt ein
-Geraet dieser Runde eine OTA1-Auslieferung ab: sonst reichte es, dem
-Geraet ein altes, richtig signiertes OTA1-Verzeichnis vorzulegen, um
-die Sperrliste loszuwerden.
-
-DER KETTENSATZ ist in `tools/ota/schluesselbund.py` beschrieben. Er
-steht in JEDEM Verzeichnis und traegt die GANZE Kette -- deshalb kann
-ein Geraet, das zwei Wechsel verpasst hat, sie in einem Zug nachholen.
-
-================================================== DER SCHLUESSEL
-
-Dieses Programm hat den geheimen Schluessel NIE. Es ruft
-`schluesselbund.py signieren` auf; wer das Signieren auf eine getrennte
-Maschine legen will, ersetzt genau diesen Aufruf. Was signiert wird,
-sind drei Dinge je Auslieferung: jedes Paket, der INDEX und das
-VERZEICHNIS.
+    chain          <gen>  <64hex neuer pub>  <128hex sig>     (0..n)
+    locked       <revision>                                  (0..n)
+    packet          <name> <revision> <sha256> <oktette> <file> <plattform>
 """
 import hashlib
 import json
@@ -111,7 +26,7 @@ import plattform as PLT   # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import opkpfad
 OPK = opkpfad.path_2()
-BUND_PY = os.path.join(HIER, "schluesselbund.py")
+BUND_PY = os.path.join(HIER, "keyring.py")
 
 
 def sha256d(path_2):
@@ -147,15 +62,15 @@ def meta_aus_opk(path_2):
                              % path_2)
         ml = int.from_bytes(header[8:16], "little")
         meta = f.read(ml).decode("utf-8", "replace")
-    name = fassung = None
+    name = revision = None
     for z in meta.split("\n"):
         if z.startswith("name="):
             name = z[5:].strip()
         elif z.startswith("fassung="):
-            fassung = z[8:].strip()
+            revision = z[8:].strip()
     if not name:
         raise SystemExit("veroeffentlichen: %s hat keinen Namen" % path_2)
-    return name, fassung or "0"
+    return name, revision or "0"
 
 
 
@@ -185,7 +100,7 @@ def journal(aus, text):
                 % (time.strftime("%Y-%m-%dT%H:%M:%S"), text))
 
 
-def gesperrt_read(aus):
+def locked_read(aus):
     p = os.path.join(aus, "gesperrt.txt")
     if not os.path.isfile(p):
         return []
@@ -197,7 +112,7 @@ def gesperrt_read(aus):
     return sorted(set(out))
 
 
-def gesperrt_write(aus, list_2):
+def locked_write(aus, list_2):
     with open(os.path.join(aus, "gesperrt.txt"), "w") as f:
         f.write("# withdrawn versions. A device does NOT install them\n")
         f.write("# any more, even if it was offline for a long time.\n")
@@ -206,11 +121,11 @@ def gesperrt_write(aus, list_2):
 
 
 
-def dir_text(fassung, gen, kette, gesperrt, pakete):
-    z = ["OTA2", "fassung\t%d" % fassung, "schluesselgen\t%d" % gen]
-    for k in kette:
+def dir_text(revision, gen, chain, locked, pakete):
+    z = ["OTA2", "fassung\t%d" % revision, "schluesselgen\t%d" % gen]
+    for k in chain:
         z.append("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
-    for g in gesperrt:
+    for g in locked:
         z.append("gesperrt\t%d" % g)
     for name, pf, h, n, file_2, plattform in pakete:
         z.append("paket\t%s\t%s\t%s\t%d\t%s\t%s"
@@ -218,17 +133,17 @@ def dir_text(fassung, gen, kette, gesperrt, pakete):
     return ("\n".join(z) + "\n").encode("ascii")
 
 
-def verknuepfen(source, ziel):
-    if os.path.exists(ziel):
-        os.remove(ziel)
+def verknuepfen(source, target):
+    if os.path.exists(target):
+        os.remove(target)
     try:
-        os.link(source, ziel)
+        os.link(source, target)
     except OSError:
-        shutil.copy2(source, ziel)
+        shutil.copy2(source, target)
 
 
-def current_set(aus, register, gesperrt):
-    kandidaten = [n for n in register["vergeben"] if n not in gesperrt
+def current_set(aus, register, locked):
+    kandidaten = [n for n in register["vergeben"] if n not in locked
                   and os.path.isdir(os.path.join(aus, "v", str(n)))]
     if not kandidaten:
         return 0
@@ -242,28 +157,28 @@ def current_set(aus, register, gesperrt):
     return n
 
 
-def bauen(aus, stand, bund, notiz, sperren, feste_version=None,
+def build(aus, stand, bund, notiz, lock_down, feste_version=None,
           signierer="haupt", chain_broken=False):
     os.makedirs(os.path.join(aus, "pakete"), exist_ok=True)
     os.makedirs(os.path.join(aus, "v"), exist_ok=True)
 
     reg = register_read(aus)
     if feste_version is not None:
-        fassung = feste_version
-        if fassung <= reg["letzte"]:
-            raise SystemExit("veroeffentlichen: --fassung %d geht zurueck "
+        revision = feste_version
+        if revision <= reg["letzte"]:
+            raise SystemExit("veroeffentlichen: --revision %d geht zurueck "
                              "(gefuehrt ist %d) -- das ist genau der Fall, "
                              "den das Register verhindert"
-                             % (fassung, reg["letzte"]))
+                             % (revision, reg["letzte"]))
     else:
-        fassung = reg["letzte"] + 1
-    reg["letzte"] = fassung
-    reg.setdefault("vergeben", []).append(fassung)
+        revision = reg["letzte"] + 1
+    reg["letzte"] = revision
+    reg.setdefault("vergeben", []).append(revision)
     register_write(aus, reg)
     journal(aus, "nummer\t%d\tvergeben%s"
-            % (fassung, ("\t" + notiz) if notiz else ""))
+            % (revision, ("\t" + notiz) if notiz else ""))
 
-    zv = os.path.join(aus, "v", str(fassung))
+    zv = os.path.join(aus, "v", str(revision))
     if os.path.isdir(zv):
         shutil.rmtree(zv)
     os.makedirs(zv)
@@ -294,14 +209,14 @@ def bauen(aus, stand, bund, notiz, sperren, feste_version=None,
               os.path.join(zv, "INDEX.sig"), signierer)
 
     b = bund_read(bund)
-    sperrliste = sorted(set(gesperrt_read(aus)) | set(sperren))
-    gesperrt_write(aus, sperrliste)
-    kette = [dict(k) for k in b["kette"]]
-    if chain_broken and kette:
-        sig = bytearray(bytes.fromhex(kette[-1]["sig"]))
+    sperrliste = sorted(set(locked_read(aus)) | set(lock_down))
+    locked_write(aus, sperrliste)
+    chain = [dict(k) for k in b["kette"]]
+    if chain_broken and chain:
+        sig = bytearray(bytes.fromhex(chain[-1]["sig"]))
         sig[0] ^= 1
-        kette[-1]["sig"] = bytes(sig).hex()
-    roh = dir_text(fassung, b["haupt"]["gen"], kette,
+        chain[-1]["sig"] = bytes(sig).hex()
+    roh = dir_text(revision, b["haupt"]["gen"], chain,
                            sperrliste, pakete)
     with open(os.path.join(zv, "VERZEICHNIS"), "wb") as f:
         f.write(roh)
@@ -314,38 +229,38 @@ def bauen(aus, stand, bund, notiz, sperren, feste_version=None,
     n = current_set(aus, reg, sperrliste)
     journal(aus, "auslieferung\t%d\t%d Paket(e)\tgen %d\tkette %d\t"
             "gesperrt %s\taktuell %d"
-            % (fassung, len(pakete), b["haupt"]["gen"], len(b["kette"]),
+            % (revision, len(pakete), b["haupt"]["gen"], len(b["kette"]),
                sperrliste or "-", n))
     print("   fassung %d  %d Paket(e)  schluesselgen %d  kette %d  "
           "gesperrt %s  -> aktuell %d"
-          % (fassung, len(pakete), b["haupt"]["gen"], len(b["kette"]),
+          % (revision, len(pakete), b["haupt"]["gen"], len(b["kette"]),
              sperrliste or "-", n))
-    return fassung
+    return revision
 
 
-def zuruecknehmen(aus, fassung):
+def zuruecknehmen(aus, revision):
     reg = register_read(aus)
-    lock = gesperrt_read(aus)
-    lock.append(fassung)
-    gesperrt_write(aus, lock)
-    reg.setdefault("zurueckgenommen", []).append(fassung)
+    lock = locked_read(aus)
+    lock.append(revision)
+    locked_write(aus, lock)
+    reg.setdefault("zurueckgenommen", []).append(revision)
     register_write(aus, reg)
-    n = current_set(aus, reg, gesperrt_read(aus))
+    n = current_set(aus, reg, locked_read(aus))
     journal(aus, "zuruecknahme\t%d\tletzte bleibt %d\taktuell %d"
-            % (fassung, reg["letzte"], n))
+            % (revision, reg["letzte"], n))
     print("   version %d withdrawn; led remains %d, current is %d"
-          % (fassung, reg["letzte"], n))
+          % (revision, reg["letzte"], n))
     print("   NOTE: the revocation list only takes effect when a NEW "
           "Auslieferung sie traegt -- sie steht im signierten VERZEICHNIS.")
     return 0
 
 
-def zeigen(aus):
+def display(aus):
     reg = register_read(aus)
     print("gefuehrte Fassung  %d" % reg["letzte"])
     print("vergeben           %s" % reg.get("vergeben", []))
     print("zurueckgenommen    %s" % reg.get("zurueckgenommen", []))
-    print("gesperrt           %s" % gesperrt_read(aus))
+    print("gesperrt           %s" % locked_read(aus))
     vd = os.path.join(aus, "v")
     if os.path.isdir(vd):
         print("vorgehalten        %s"
@@ -365,12 +280,12 @@ def main():
         return 2
     aus = sys.argv[1]
     stand = bund = notiz = None
-    sperren = []
+    lock_down = []
     back = None
     nurzeigen = False
     feste = None
     signierer = "haupt"
-    kaputt = False
+    broken = False
     i = 2
     while i < len(sys.argv):
         a = sys.argv[i]
@@ -383,10 +298,10 @@ def main():
         elif a == "--notiz":
             i += 1
             notiz = sys.argv[i]
-        elif a == "--sperren":
+        elif a == "--lock-down":
             i += 1
-            sperren.append(int(sys.argv[i]))
-        elif a == "--fassung":
+            lock_down.append(int(sys.argv[i]))
+        elif a == "--revision":
             i += 1
             feste = int(sys.argv[i])
         elif a == "--zuruecknehmen":
@@ -396,8 +311,8 @@ def main():
             i += 1
             signierer = sys.argv[i]
         elif a == "--kette-kaputt":
-            kaputt = True
-        elif a == "--zeigen":
+            broken = True
+        elif a == "--display":
             nurzeigen = True
         else:
             print(__doc__)
@@ -405,13 +320,13 @@ def main():
         i += 1
     os.makedirs(aus, exist_ok=True)
     if nurzeigen:
-        return zeigen(aus)
+        return display(aus)
     if back is not None:
         return zuruecknehmen(aus, back)
     if not stand or not bund:
         print(__doc__)
         return 2
-    bauen(aus, stand, bund, notiz, sperren, feste, signierer, kaputt)
+    build(aus, stand, bund, notiz, lock_down, feste, signierer, broken)
     return 0
 
 

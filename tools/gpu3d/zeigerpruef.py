@@ -1,40 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/gpu3d/zeigerpruef.py -- DER BILDBELEG DER RUNDE GPU (G-012).
-
-    zeigerpruef.py <mit-hardware.ppm> <ohne-hardware.ppm>
-
-WAS HIER BEWIESEN WIRD, UND WARUM GERADE SO.
-
-`screendump vg` fotografiert die FLAECHE DES GERAETS -- also das, was
-der Kern in die Ressource geschrieben hat. Die Zeigerflaeche legt der
-Wirt erst BEIM ANZEIGEN darueber; im Foto der Flaeche ist sie nicht
-enthalten. Daraus folgt eine Zusage, die man wirklich nachrechnen kann:
-
-  * OHNE den neuen Weg malt `wm.compose` den Zeiger ins Bild.
-    Im Foto stehen an seiner Stelle seine Farben -- dunkler Kern,
-    weisser Rand.
-  * MIT dem neuen Weg steht dort der GLATTE Schreibtischgrund.
-    Der Zeiger ist aus dem Bild verschwunden, weil ihn das Geraet
-    traegt.
-
-Und weil beide Laeufe sonst identisch sind, muss der Unterschied
-zwischen den Fotos GENAU EIN Rechteck in Zeigergroesse sein. Waere der
-Zeiger in beiden Bildern drin, wuerde er doppelt gezeichnet; waere er
-in keinem, wuerde gar nichts uebertragen. Beides faellt hier auf.
-
-GEPRUEFT WIRD:
-  1. Beide Fotos sind gleich gross (sonst vergleicht man Aepfel mit
-     Birnen).
-  2. Es gibt ueberhaupt einen Unterschied.
-  3. Der Unterschied liegt in EINEM zusammenhaengenden Rechteck von
-     Zeigergroesse (hoechstens 48x48 -- `cursor.MAXPX`).
-  4. Im Softwarebild stehen dort WIRKLICH Zeigerfarben: dunkle UND
-     helle Bildpunkte, jeweils ueber einer Mindestzahl.
-  5. Im Hardwarebild ist dieselbe Stelle EINFARBIG -- dort ist nichts
-     gemalt worden.
-
-Rueckgabe 0, wenn alles stimmt; sonst 1 mit Begruendung.
+"""Usage:
+    zeigerpruef.py <mit-hardware.ppm> <without-hardware.ppm>
 """
 import sys
 

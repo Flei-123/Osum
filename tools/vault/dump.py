@@ -1,22 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vault/dump.py -- den ECHTEN Speicher der Maschine holen.
-
-    dump.py <kernelabbild> <ausgabe.bin> [serielle-ausgabe]
-
-Startet QEMU genau so, wie die Testlaeufer es tun, laesst der Firmware
-Zeit, ihre Tabellen abzulegen, und schreibt danach ueber den QEMU-Monitor
-(`pmemsave`) das erste Megaoktett des physischen Speichers in eine Datei.
-
-WOZU. Der Kernel behauptet, er lese SMBIOS. Diese Datei besorgt dem WIRT
-denselben Speicher, damit `tools/vault/smbios.py` ihn mit einer zweiten,
-unabhaengigen Umsetzung entschluesseln kann. Erst dann ist "der Kernel
-liest die Tabelle richtig" gemessen und nicht behauptet.
-
-DIE WARTEZEIT IST NICHT WILLKUERLICH. Beim ersten Versuch wurde sofort
-nach dem Start abgezogen, und im F-Segment stand nichts als das
-Zeichenkettenfeld von SeaBIOS -- die Firmware war noch gar nicht so weit.
-Ein Abzug ohne Wartezeit misst den Zustand VOR dem, was man messen will.
+"""Usage:
+    dump.py <kernelabbild> <output.bin> [serielle-output]
 """
 import os
 import subprocess

@@ -1,41 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/hid/descs.py -- DIE ECHTEN BERICHTSBESCHREIBUNGEN UND EIN
-ZWEITER ZERLEGER, DER SIE UNABHAENGIG LIEST.
-
-Warum ein ZWEITER Zerleger.  Ein Test, in dem dieselbe Person zuerst den
-Zerleger schreibt und dann hinschreibt, was herauskommen soll, misst nur,
-ob sie sich zweimal gleich geirrt hat.  Deshalb steht hier eine zweite
-Umsetzung -- in einer anderen Sprache, aus der Spezifikation heraus --
-und `tools/hid/run.sh` haelt beide Ergebnisse ZEILE FUER ZEILE
-gegeneinander.  Wo sie sich unterscheiden, ist einer von beiden falsch,
-und das ist mehr, als eine von Hand geschriebene Erwartungsliste je
-sagen koennte.
-
-DIE BESCHREIBUNGEN sind nicht erfunden.  Sie stehen hier als Postenliste
-mit Kommentar, damit jede Zeile nachlesbar ist:
-
-  1. BOOT-TASTATUR -- HID 1.11, Anhang B.1, woertlich.  63 Oktette.
-  2. BOOT-MAUS     -- HID 1.11, Anhang B.2, woertlich.  50 Oktette.
-  3. RADMAUS       -- die Bauform, die seit 1999 in jeder Maus mit Rad
-                      und fuenf Knoepfen steckt: Berichtsnummer, fuenf
-                      Knoepfe, 16 Bit je Achse, Rad.
-  4. PRAEZISIONS-TOUCHPAD -- die von Microsoft fuer ein Windows
-                      Precision Touchpad vorgeschriebene Bauform: fuenf
-                      Finger-Sammlungen mit Zuversicht, Spitzenschalter,
-                      Kontaktnummer, X und Y, dazu Kontaktzahl, Knopf,
-                      Abtastzeit und die Eigenschaft Kontaktzahl-Maximum.
-  5. VERBRAUCHERSTEUERUNG -- die Multimediatasten eines Laptops als
-                      Feldgruppe ueber die Gebrauchsseite 0x0C.
-  6. NKRO-TASTATUR -- eine Tastatur ohne Anschlagsgrenze: acht
-                      Zusatztasten plus 120 Bit, ein Bit je Taste.
-                      DAS IST DER FALL, DEN DAS BOOT-PROTOKOLL NICHT KANN.
-
-Aufruf:
+"""Usage:
     python3 tools/hid/descs.py firn   > kernel/drv/hid/hidtest.fi
-    python3 tools/hid/descs.py kopf              # Erwartung, Zeile je Geraet
-    python3 tools/hid/descs.py felder            # Erwartung, Zeile je Feld
-    python3 tools/hid/descs.py fehler            (the broken ones, with number)
+    python3 tools/hid/descs.py header              # Erwartung, row per device
+    python3 tools/hid/descs.py felder            # Erwartung, row per field
+    python3 tools/hid/descs.py error_count            (the broken ones, with number)
 """
 import sys
 
@@ -327,7 +296,7 @@ def bootkbd(mods, keys):
     return bytes(b)
 
 
-def ptp(finger, button=0, zeit=0):
+def ptp(finger, button=0, elapsed=0):
     b = bytearray(29)
     b[0] = 1
     for k, f in enumerate(finger[:5]):
@@ -341,7 +310,7 @@ def ptp(finger, button=0, zeit=0):
         bitset(b, o + 24, y, 16)
     bitset(b, 8 + 200, len(finger[:5]), 7)
     bitset(b, 8 + 207, button, 1)
-    bitset(b, 8 + 208, zeit, 16)
+    bitset(b, 8 + 208, elapsed, 16)
     return bytes(b)
 
 
@@ -583,7 +552,7 @@ def zerlege(d):
     ul, umin, umax, bereich = [], 0, 0, False
     rids = []
     p, tiefe, maxd, n = 0, 0, 0, 0
-    top, karte = 0, 0
+    top, card = 0, 0
 
     def rid_slot(r):
         for i, e in enumerate(rids):
@@ -675,7 +644,7 @@ def zerlege(d):
                         tu = ul[0] if ul else (umin if bereich else 0)
                         if top == 0:
                             top = tu
-                        karte |= art_von((tu >> 16) & 0xFFFF, tu & 0xFFFF)
+                        card |= art_von((tu >> 16) & 0xFFFF, tu & 0xFFFF)
                 elif btag == 0xC:
                     if tiefe == 0:
                         raise Error(E_NEST, start)
@@ -714,7 +683,7 @@ def zerlege(d):
 
     header["ok"] = 1
     raus()
-    header["art"] = karte
+    header["art"] = card
     header["posten"] = n
     header["tiefe"] = maxd
     return header, felder

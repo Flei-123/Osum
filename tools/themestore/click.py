@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/themestore/click.py -- turn screen coordinates into monitor commands.
-
+"""Usage:
     click.py <x,y> [<x,y> ...]      > monitorbefehle.txt
     click.py '<x,y>><x2,y2>[><x3,y3>...]'   ein ZUG statt eines Klicks
-
-The QEMU monitor's `mouse_move` is RELATIVE, because the PS/2 device it
-drives has nothing else: it sends differences, not places.  A runner
-that hands it absolute coordinates clicks somewhere else and reports
-nothing wrong -- which is exactly what the first attempt at this file
-did, and the only symptom was a tab that never changed.
-
-So the same route round K10 wrote down: drive into the top left corner
-in several big steps, where the stop clears the history, and then walk
-out to the wanted place in steps under 128.  From there the position is
-arithmetic and not hope.
-
-The output is a command file for `tools/wm/monitor.py`.
 """
 import sys
 

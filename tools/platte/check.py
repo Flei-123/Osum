@@ -26,13 +26,13 @@ def main(low, serial, full):
     tail = roh[schnitt:] if schnitt >= 0 else roh
     f = re.findall(r"wlib: font ui px=(\d+) asc=(\d+) h=(\d+)", roh)
     asc, desc = (int(f[-1][1]), int(f[-1][2]) - int(f[-1][1])) if f else (16, 6)
-    zeilen = [m for m in (gc.FENSTERTEXT.search(ln) for ln in tail.splitlines()) if m]
-    if not zeilen:
+    rows = [m for m in (gc.FENSTERTEXT.search(ln) for ln in tail.splitlines()) if m]
+    if not rows:
         print("disk NO caption in the recording")
         return 1
-    win = Counter(int(m.group(1)) for m in zeilen).most_common(1)[0][0]
+    win = Counter(int(m.group(1)) for m in rows).most_common(1)[0][0]
     last_2 = {}
-    for m in zeilen:
+    for m in rows:
         if int(m.group(1)) == win and m.group(10).strip():
             last_2[(m.group(2), m.group(10))] = m
     labels = halo = halo_same = ground = ground_diff = corner = corner_diff = 0

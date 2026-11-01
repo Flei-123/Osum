@@ -200,8 +200,8 @@ def finde(text, zitate_count=True):
     return aus
 
 
-def grenzen(wurzel):
-    msg = open(os.path.join(wurzel, "kernel/user/msg.fi"),
+def grenzen(root):
+    msg = open(os.path.join(root, "kernel/user/msg.fi"),
                encoding="utf-8").read()
     aus = {}
     for name in ("KEYW", "VALW", "SLOTS", "FILE_MAX"):
@@ -209,7 +209,7 @@ def grenzen(wurzel):
         if not m:
             raise SystemExit("msg.fi: const %s nicht gefunden" % name)
         aus[name] = int(m.group(1))
-    ad = open(os.path.join(wurzel, "kernel/user/appdir.fi"),
+    ad = open(os.path.join(root, "kernel/user/appdir.fi"),
               encoding="utf-8").read()
     m = re.search(r"io\.read\(fd, \(&buf\[0 as usize\]\) as u64, (\d+)\)", ad)
     if not m:
@@ -219,9 +219,9 @@ def grenzen(wurzel):
 
 
 def main(argv):
-    wurzel = os.environ.get("OSUM_ROOT", ".")
+    root = os.environ.get("OSUM_ROOT", ".")
     zaehle = "--zaehle" in argv
-    g = grenzen(wurzel)
+    g = grenzen(root)
     print("translit: KEYW=%d VALW=%d SLOTS=%d FILE_MAX=%d INFO_READ=%d"
           % (g["KEYW"], g["VALW"], g["SLOTS"], g["FILE_MAX"], g["INFO_READ"]))
 
@@ -230,8 +230,8 @@ def main(argv):
     umlaute = 0
     geprueft = 0
 
-    for path_2 in sorted(glob.glob(os.path.join(wurzel, "locale/de/*"))):
-        rel = os.path.relpath(path_2, wurzel)
+    for path_2 in sorted(glob.glob(os.path.join(root, "locale/de/*"))):
+        rel = os.path.relpath(path_2, root)
         for nr, line in enumerate(
                 open(path_2, encoding="utf-8").read().split("\n"), 1):
             umlaute += sum(1 for c in line if c in "äöüÄÖÜß")
@@ -258,11 +258,11 @@ def main(argv):
             eng.append("%s  %d Oktette >= FILE_MAX %d"
                        % (rel, os.path.getsize(path_2), g["FILE_MAX"]))
 
-    for d in sorted(glob.glob(os.path.join(wurzel, "assets/apps/*.osp"))):
+    for d in sorted(glob.glob(os.path.join(root, "assets/apps/*.osp"))):
         path_2 = os.path.join(d, "INFO")
         if not os.path.exists(path_2):
             continue
-        rel = os.path.relpath(path_2, wurzel)
+        rel = os.path.relpath(path_2, root)
         roh = open(path_2, "rb").read()
         if len(roh) > g["INFO_READ"]:
             eng.append("%s  %d Oktette > die %d, die appdir liest -- der "

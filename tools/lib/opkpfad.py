@@ -22,8 +22,8 @@ def path_2():
     except (OSError, subprocess.CalledProcessError):
         return ALT
     clipboard = os.path.join(os.path.expanduser("~"), ".cache", "osum")
-    ziel = os.path.join(clipboard, "opk-%s.py" % blob[:12])
-    if not os.path.isfile(ziel):
+    target = os.path.join(clipboard, "opk-%s.py" % blob[:12])
+    if not os.path.isfile(target):
         try:
             inhalt = subprocess.run(["git", "-C", REPO, "cat-file", "blob",
                                      blob], capture_output=True,
@@ -31,12 +31,12 @@ def path_2():
         except (OSError, subprocess.CalledProcessError):
             return ALT
         os.makedirs(clipboard, exist_ok=True)
-        tmp = "%s.%d" % (ziel, os.getpid())
+        tmp = "%s.%d" % (target, os.getpid())
         with open(tmp, "wb") as f:
             f.write(inhalt)
         os.chmod(tmp, 0o755)
-        os.replace(tmp, ziel)
-    return ziel
+        os.replace(tmp, target)
+    return target
 
 
 if __name__ == "__main__":

@@ -1,46 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/bundle.py -- the mkfs entries from `assets/apps/*.osp`.
-
-Runde K15, zweiter Nachtrag. Ein Programm ist ein VERZEICHNIS:
-
-    /apps/explorer.osp/
-        INFO            Anzeigename, Beschreibung, Schluesselwoerter,
-                        Fassung
-        start           die ausfuehrbare Datei
-        symbol          das Bild (OSYM)
-        data/          alles Weitere
-
-Im Quellbaum liegt davon alles ausser `start` und `symbol`: `start` ist
-das Ergebnis des Uebersetzers, `symbol` das der Zeichnung
-(`symbol.txt` -> `tools/k15/icon.py`). Dieses Werkzeug baut beides in
-ein Arbeitsverzeichnis und schreibt die Zeilen, die `mkfs.py` als
-Angaben nimmt -- eine je Zeile, damit keine Befehlszeile daran
-zerbricht.
-
-`start` wird NICHT kopiert, sondern als ZWEITER NAME auf die Datei unter
-`/bin` gelegt (`<neu>@<vorhanden>`). Ein Buendel kostet dadurch die
-Oktette seiner INFO und seines Symbols und keinen einzigen Block fuer
-das Programm -- `/bin/explorer` ist 205 KiB, und ein Abbild hat zwei
-Megaoktett.
-
-Verwendung:
-    bundle.py <assets/apps> <arbeitsverzeichnis> [nur=<programmliste>]
+"""Usage:
+    bundle.py <assets/apps> <arbeitsverzeichnis> [only=<programmliste>]
     bundle.py --lint <assets/apps>      (host check: every bundle has INFO, start.txt, data/README, a symbol)
-
-RUNDE WERKZEUGE: `nur=` -- WELCHE PROGRAMME AUF DIESER PLATTE LIEGEN.
-
-Ein Buendel ist ein VERWEIS auf eine Datei unter /bin. Liegt die dort
-nicht, bricht `mkfs.py` mit "gibt es nicht" ab -- und zwar in JEDEM
-Laeufer, der eine kleine Programmliste hat. Bis zu dieser Runde stand
-deshalb in `tools/themestore/build.sh` eine Zeile mit zwei Namen
-(`editor.osp`, `widgets.osp`), die vorher geloescht wurden. Die naechste
-Runde mit einem neuen Buendel laeuft in dieselbe Wand -- diese hier ist
-es gewesen.
-
-Also sagt der Aufrufer, was er hat, und was er nicht hat, wird
-uebersprungen. Ohne `nur=` bleibt alles wie vorher: jedes Buendel kommt
-mit.
 """
 
 import os
@@ -121,17 +83,17 @@ def main(argv):
         for line in problems:
             print("bundle lint: " + line, file=sys.stderr)
         return 1
-    nur = None
+    only = None
     for a in argv[3:]:
         if a.startswith("nur="):
-            nur = set("/bin/" + w for w in a[4:].split())
+            only = set("/bin/" + w for w in a[4:].split())
     os.makedirs(arbeit, exist_ok=True)
     line_list = ["/apps/"]
     for name in sorted(os.listdir(source_dir)):
         if not name.endswith(".osp"):
             continue
         file_path = os.path.join(source_dir, name)
-        if nur is not None and start_von(file_path) not in nur:
+        if only is not None and start_von(file_path) not in only:
             continue
         ende, limit = angaben_stehen_vorn(os.path.join(file_path, "INFO"))
         if ende >= limit:
@@ -167,7 +129,7 @@ def main(argv):
         line_list.append("%s/data/" % target_dir)
         line_list.append("%s/data/README=%s"
                       % (target_dir, os.path.join(file_path, "data", "README")))
-        if (console_von(file_path) and nur is not None and "/bin/term" in nur
+        if (console_von(file_path) and only is not None and "/bin/term" in only
                 and not os.environ.get("OSUM_NOCONSOLE")):
             skript = os.path.join(arbeit, name + ".start")
             with open(skript, "w") as f:

@@ -1,90 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/themestore/shotcheck.py -- MEASURE A SCREENSHOT, DO NOT LOOK AT IT.
-
-Twice in this repository a picture with a real defect in it was passed
-by a test that only asked whether a picture had been produced. Round
-LOOK's list of complaints was "no umlauts", "no symbols", "it looks like
-Windows XP" -- three things a person saw in a screenshot and no runner
-had. So this asks a picture the three questions a person asks, in
-numbers:
-
+"""Usage:
     shotcheck.py <shot.ppm|png> <serial.txt> --window=x,y,w,h [--win=N]
-                 [--leiste] [--linien] [--knoepfe]
-
-`--knoepfe` fragt jeden gemeldeten Knopf (`wlib: knopf ...`), ob er im
-Bild ueberhaupt einen Umriss hat -- eine Flaeche in Weiss auf einer
-Karte in fast Weiss ist von einer Beschriftung nicht zu unterscheiden,
-und genau so sah der Knopf "Uebernehmen" der Seite Darstellung aus. Die
-Zahlen `knopf` und `ohnekante` stehen immer in der Ausgabezeile; in den
-Rueckgabewert gehen sie nur mit diesem Schalter ein.
-
-Seit RUNDE GLAS (fix-r4-1) fragt derselbe Schalter eine zweite Sache:
-liegt die BESCHRIFTUNG eines Knopfes innerhalb seines Umrisses? Der
-Knopf "Mit Konto verknuepfen" der Seite Vorlagen hatte einen Rahmen von
-150 Bildpunkten und ein Wort von 156 -- sein Rand lief also mitten
-durch die Schrift, und angeschaut war das eine Beschriftung mit einem
-Strich darueber. Die Zahl heisst `ueberstand`.
-
-`--leiste` stellt dieselben drei Fragen zusaetzlich an die Taskleiste
-(RUNDE GLAS, Nachtrag -- bis dahin hat dieses Werkzeug GENAU EIN
-Fenster gemessen und die Leiste nie). Sie kommt auf eine eigene
-Ausgabezeile `shotcheck: leiste ...` und geht in den Rueckgabewert ein.
-
-`--linien` stellt eine Frage, die aus gemeldeten Rechtecken nicht zu
-beantworten ist: laeuft eine RAHMENLINIE durch die Schrift? Zwei
-Rechtecke, die sich nur BERUEHREN, melden keine Ueberlappung -- die
-Statuszeile "bereit" der Einstellungen sass trotzdem genau auf der
-unteren Kante der linken Karte. Gesucht wird links UND rechts neben
-der Tinte, auf derselben Bildzeile, ein einfarbiger Lauf von zehn
-Bildpunkten, der nicht der gemessene Grund ist. Die Zahl `linie` steht
-immer in der Ausgabezeile; in den Rueckgabewert geht sie nur mit
-diesem Schalter ein.
-
-  1. EMPTY LABEL. Every `wlib: text ... x= base= tw= t=` line names a
-     place where letters were drawn and how wide they are. If that box
-     holds no pixel differing from the reported background, nothing was
-     drawn there. Invisible to any test that counts colours in a whole
-     picture.
-
-  2. CUT OFF. The ink has to lie inside the window it was drawn in, and
-     it has to stop before the right edge of its own reported width: ink
-     in the last column is ink that continues past it.
-
-  3. OVERLAPPING. Two reported texts must not have ink in the same
-     pixel.
-
-  4. CUT SHORT. Every line says how many octets OF THE LABEL are on
-     the screen (`nq=`) and how many the label really has (`nv=`); the
-     three dots of an elision are not part of the label and do not
-     count. Fewer on the screen than meant is a shortening: it counts
-     as `gekuerzt`, and if it happened WITHOUT the three dots that tell
-     a reader something is missing, it is a silent cut and counts as
-     `cut`.
-
-THREE THINGS THAT HAD TO BE GOT RIGHT BEFORE THE NUMBERS MEANT ANYTHING,
-and every one of them produced a false failure first:
-
-  * ONE WINDOW. The desktop has five processes painting; the launcher's
-    list rows sit under the settings window and overlap everything.
-    Text from another window is not a defect, it is a window behind
-    this one. So this measures ONE window, chosen as the one with the
-    most text in the region of the log that matters.
-
-  * THE STATE AT THE TIME OF THE PHOTO, not the last state ever
-    reported. Round LOOK wrote that rule down after paying for it. The
-    settings program prints a full block of `settings: rect name=w..`
-    every time it changes page, so everything after the LAST such block
-    is the page that is on the screen.
-
-  * THE WIDTH COMES FROM THE PROGRAM. Guessing it from the letter count
-    produced 86 false overlaps in one picture: the box drawn around a
-    label reached into the widget next door and found its pixels.
-
-WHAT IT DOES NOT DO, said plainly: it does not re-rasterise the glyphs.
-`tools/look/umlaut.py` does that, against `tools/ttf/raster.py`, and it
-is the stronger check of the two. This is the cheap one that runs over
-every text on the screen instead of over a chosen few.
+    [--bar] [--linien] [--knoepfe]
 """
 import re
 import sys
@@ -359,19 +277,19 @@ def linien_probe(pic, texts, ox, oy, ww, asc, desc):
             continue
         lo_x, lo_y, hi_x, hi_y = box[0], box[1], box[2], box[3]
         for y in range(lo_y, min(hi_y, oy + t["base"]) + 1):
-            links = _run(pic, lo_x - 2, y, -1, LINE_RUN, bg, 10)
-            if links is None:
+            left = _run(pic, lo_x - 2, y, -1, LINE_RUN, bg, 10)
+            if left is None:
                 continue
             right = _run(pic, hi_x + 2, y, 1, LINE_RUN, bg, 10)
-            if right is None or right != links:
+            if right is None or right != left:
                 continue
             treffer += 1
             bad_2.append(
                 "LINIE  '%s' bei %d,%d steht auf einer Linie der Farbe "
                 "%02x%02x%02x (Zeile y=%d, %d Bildpunkte links und rechts "
                 "einfarbig)"
-                % (t["t"][:32], x, oy + t["base"], links[0], links[1],
-                   links[2], y, LINE_RUN))
+                % (t["t"][:32], x, oy + t["base"], left[0], left[1],
+                   left[2], y, LINE_RUN))
             break
     return treffer, bad_2
 
@@ -457,7 +375,7 @@ def main(argv):
     forced = False
     ww, wh = pic.w, pic.h
     want_win = None
-    leiste = False
+    taskbar = False
     linien = False
     knoepfe = False
     for a in argv[3:]:
@@ -466,8 +384,8 @@ def main(argv):
             forced = True
         elif a.startswith("--win="):
             want_win = int(a.split("=", 1)[1])
-        elif a == "--leiste":
-            leiste = True
+        elif a == "--taskbar":
+            taskbar = True
         elif a == "--linien":
             linien = True
         elif a == "--knoepfe":
@@ -585,7 +503,7 @@ def main(argv):
     for line in bad[:30]:
         print("  " + line)
     bad_2 = 0
-    if leiste:
+    if taskbar:
         bn, bm, bleer, bab, bueber, bbad = taskbar_messen(
             pic, argv[2], asc, desc)
         print("shotcheck: leiste texts %d  measured %d  empty %d  cut %d  "

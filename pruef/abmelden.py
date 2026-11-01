@@ -1,31 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""abmelden.py -- ABMELDEN MIT ECHTEN KLICKS (Runde LOGIND, P-002).
-
-    python3 pruef/abmelden.py <bauverzeichnis> [ausgabeverzeichnis]
-
-WAS HIER GEMESSEN WIRD und warum es einen eigenen Laeufer braucht:
-
-Der Menuepunkt "Abmelden" im Energiemenue des Startmenues hat bis zu
-dieser Runde `/bin/desktop` neu gestartet -- UNTER DERSELBEN KENNUNG.
-Die Sitzung blieb offen (docs/RUNDE-ANMELDUNG.md 5.2,
-docs/RUNDE-ENERGIE.md 3.4). Jetzt geht der Wunsch als `SYS_OSUM_SPERRE`
-op 9 an den Kern, und `kgui.abmelde_wache` beendet die Sitzung und holt
-`/bin/glogin` zurueck -- als root, denn nur root darf /etc/shadow lesen.
-
-WARUM MIT DER MAUS UND NICHT MIT DEM TABULATOR. Ausprobiert und
-gemessen verworfen: mit vier Tabulatoren stand der Fokus wieder im
-Suchfeld, die Eingabetaste startete den ersten Treffer der Liste, und im
-Mitschnitt stand der TEXTEDITOR statt eines Energiemenues. Die
-Reihenfolge der Bedienelemente ist eine Eigenschaft des Programms und
-kein Vertrag -- eine Abnahme, die sie mitzaehlt, misst die naechste
-Umstellung des Startmenues und nicht das Abmelden.
-
-Der Weg ist deshalb woertlich der aus `pruef/oneshot.py` (Runde
-ENERGIE): die LAGE der Bedienelemente kommt aus dem Bericht, den die
-Programme selbst auf die serielle Leitung schreiben
-(`launcher: rect id=4 ...`, `wlib: win id=...`), und geklickt wird
-dorthin. Keine festen Koordinaten, keine geratenen Tastenzahlen.
+"""Usage:
+    logout.py -- LOGOUT MIT ECHTEN KLICKS (Runde LOGIND, P-002).
+    python3 check/logout.py <bauverzeichnis> [ausgabeverzeichnis]
 """
 # ================================================== RUNDE DREI, 22.09.2026
 # JEDER ABBRUCH BEENDET MIT RC=1 UND NICHT MIT RC=0.
@@ -44,13 +21,13 @@ dorthin. Keine festen Koordinaten, keine geratenen Tastenzahlen.
 import os, re, subprocess, sys, time
 
 HIER = os.path.dirname(os.path.abspath(__file__))
-WURZEL = os.path.dirname(HIER)
+ROOT = os.path.dirname(HIER)
 sys.path.insert(0, HIER)
 from klick import Maschine
 
 BUILD = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else "/root/lg-img"
 AUS = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 \
-      else os.path.join(WURZEL, "belege", "logind")
+      else os.path.join(ROOT, "belege", "logind")
 os.makedirs(AUS, exist_ok=True)
 SER = os.path.join(AUS, "abmelden-klick.txt")
 SOCK = "/tmp/logind-abmelden.sock"
@@ -60,26 +37,26 @@ for f in (SER, SOCK):
 
 OK = [0]
 FAIL = [0]
-ZEILEN = []
+ROWS = []
 
 
-def sag(*a):
+def say(*a):
     s = " ".join(str(x) for x in a)
     print(s, flush=True)
-    ZEILEN.append(s)
+    ROWS.append(s)
 
 
 def ok(*a):
     OK[0] += 1
-    sag("  OK   ", *a)
+    say("  OK   ", *a)
 
 
 def bad(*a):
     FAIL[0] += 1
-    sag("  FAIL ", *a)
+    say("  FAIL ", *a)
 
 
-def lies():
+def read_text():
     try:
         return open(SER, "rb").read().decode("utf-8", "replace")
     except OSError:
@@ -88,7 +65,7 @@ def lies():
 
 def wins():
     return re.findall(r"wlib: win id=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)",
-                      lies())
+                      read_text())
 
 
 # ================================================== DIE MASCHINE STARTEN
@@ -114,26 +91,26 @@ q = (["qemu-system-x86_64"] + kvm +
       "-display", "none", "-no-reboot"])
 p = subprocess.Popen(q, stdout=open(os.path.join(AUS, "abmelden-qemu.txt"), "w"),
                      stderr=subprocess.STDOUT)
-sag("== QEMU pid %d, Abbild %s" % (p.pid, BUILD))
+say("== QEMU pid %d, Abbild %s" % (p.pid, BUILD))
 
 try:
     # ---------------------------------------------- 1. DER ANMELDESCHIRM
     t0 = time.time()
     while time.time() - t0 < 180:
-        if "glogin: bereit" in lies():
+        if "glogin: bereit" in read_text():
             break
         if p.poll() is not None:
             bad("QEMU ist vorzeitig weg, rc=%s" % p.returncode)
             raise SystemExit(1)
         time.sleep(0.5)
-    if "glogin: bereit" in lies():
+    if "glogin: bereit" in read_text():
         ok("der Anmeldeschirm ist bereit (nach %.0fs)" % (time.time() - t0))
     else:
         bad("der Anmeldeschirm kam nicht")
         raise SystemExit(1)
     time.sleep(3)
     m = Maschine(SOCK, 1280, 800)
-    m.foto(os.path.join(AUS, "k-10-anmeldeschirm.png"))
+    m.photo(os.path.join(AUS, "k-10-anmeldeschirm.png"))
 
     # ------------------------------------------------- 2. SICH ANMELDEN
     # Der Name steht schon da (genau ein Mensch mit uid >= 1000, also
@@ -156,49 +133,49 @@ try:
     PW = "startkennwort"
 
     def getippt():
-        return len(re.findall(r"key: [a-z]", lies()))
+        return len(re.findall(r"key: [a-z]", read_text()))
 
     angemeldet = False
     for versuch in (1, 2, 3):
         vor = getippt()
         for c in PW:
-            m.taste(c)
+            m.key_press(c)
             time.sleep(0.12)
         time.sleep(1.5)
         kam = getippt() - vor
         if kam != len(PW):
-            sag("       Versuch %d: nur %d von %d Tasten angekommen -- "
+            say("       Versuch %d: nur %d von %d Tasten angekommen -- "
                 "Feld leeren und neu" % (versuch, kam, len(PW)))
             for _ in range(len(PW) + 4):
-                m.taste("backspace")
+                m.key_press("backspace")
                 time.sleep(0.06)
             time.sleep(1)
             continue
-        m.taste("ret")
+        m.key_press("ret")
         t0 = time.time()
         while time.time() - t0 < 60:
-            if "glogin: uid=1000" in lies():
+            if "glogin: uid=1000" in read_text():
                 break
-            if "glogin: abgewiesen" in lies()[-2000:]:
+            if "glogin: abgewiesen" in read_text()[-2000:]:
                 break
             time.sleep(0.5)
-        if "glogin: uid=1000" in lies():
+        if "glogin: uid=1000" in read_text():
             angemeldet = True
             if versuch > 1:
-                sag("       (im %d. Versuch -- die vorigen verloren Tasten)" % versuch)
+                say("       (im %d. Versuch -- die vorigen verloren Tasten)" % versuch)
             break
-        sag("       Versuch %d: abgewiesen, noch einmal" % versuch)
+        say("       Versuch %d: abgewiesen, noch einmal" % versuch)
         time.sleep(2)
     if angemeldet:
         ok("angemeldet als justin, der Schreibtisch laeuft unter uid=1000")
     else:
         bad("die Anmeldung hat nicht geklappt")
-        sag("       " + " / ".join(re.findall(r"glogin: [^\n]{0,60}", lies())[-4:]))
+        say("       " + " / ".join(re.findall(r"glogin: [^\n]{0,60}", read_text())[-4:]))
         raise SystemExit(1)
     # Dem Schreibtisch und der Leiste Zeit geben.
     time.sleep(12)
-    m.foto(os.path.join(AUS, "k-20-schreibtisch.png"))
-    vor_sitzung = lies()
+    m.photo(os.path.join(AUS, "k-20-schreibtisch.png"))
+    before_session = read_text()
 
     # ------------------------------------------- 3. DAS STARTMENUE AUF
     #
@@ -228,40 +205,40 @@ try:
     #
     # fl=18 ist F_KEYS|F_NODECO (16+2), fl=19 dasselbe plus F_HIDDEN(1).
     TAKT = 5.0          # gemessener Meldetakt des Fensterservers
-    FENSTER = 3 * TAKT  # drei Takte: nie knapp, auch unter Last nicht
+    WINDOW = 3 * TAKT  # drei Takte: nie knapp, auch unter Last nicht
 
     def fl_ab(pos):
         """Der letzte fl-Wert, den der Server NACH `pos` gemeldet hat."""
-        w = re.findall(r"id=11 [^\n]*fl=(\d+)", lies()[pos:])
+        w = re.findall(r"id=11 [^\n]*fl=(\d+)", read_text()[pos:])
         return w[-1] if w else None
 
-    def menue_offen(pos, frist):
+    def menu_is_open(pos, deadline):
         """Bis `frist` warten, dass NACH `pos` ein fl=18 gemeldet wird."""
         t = time.time()
-        while time.time() - t < frist:
-            if "18" in re.findall(r"id=11 [^\n]*fl=(\d+)", lies()[pos:]):
+        while time.time() - t < deadline:
+            if "18" in re.findall(r"id=11 [^\n]*fl=(\d+)", read_text()[pos:]):
                 return True
             time.sleep(0.5)
         return False
 
-    pos = len(lies())
+    pos = len(read_text())
     if fl_ab(max(0, pos - 4000)) != "18":
-        m.taste("meta_l")
-    if menue_offen(pos, FENSTER):
+        m.key_press("meta_l")
+    if menu_is_open(pos, WINDOW):
         ok("das Startmenue ist offen (Fenster 11, fl=18)")
     else:
         bad("das Startmenue ging nicht auf (fl=%s nach %.0fs, Takt %.0fs)"
-            % (fl_ab(pos), FENSTER, TAKT))
-    m.foto(os.path.join(AUS, "k-30-startmenue.png"))
+            % (fl_ab(pos), WINDOW, TAKT))
+    m.photo(os.path.join(AUS, "k-30-startmenue.png"))
 
     # ------------------------------------- 4. DER ENERGIEKNOPF, GEKLICKT
     # DIE LAGE KOMMT AUS DEM BERICHT. `launcher: rect id=4` ist der
     # Energieknopf (say_rects: lb, fe, ls, bt, pb -- id 0..4), und
     # `id=11 x= y=` ist die Lage des Startmenuefensters. Der Knopf liegt
     # FENSTERRELATIV, also muessen beide zusammen.
-    w11 = re.findall(r"id=11 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", lies())
+    w11 = re.findall(r"id=11 x=(\d+) y=(\d+) w=(\d+) h=(\d+)", read_text())
     r4 = re.findall(r"launcher: rect id=4 kind=\d+ x=(\d+) y=(\d+) w=(\d+) h=(\d+)",
-                    lies())
+                    read_text())
     if not w11:
         bad("das Startmenuefenster steht nicht im Bericht")
         raise SystemExit(1)
@@ -271,23 +248,23 @@ try:
         ok("die Lage des Energieknopfs steht im Bericht: %d,%d %dx%d" % (rx, ry, rw, rh))
     else:
         rx, ry, rw, rh = 12, 376, 76, 32
-        sag("       (kein 'launcher: rect id=4' -- gemessene Vorgabe 12,376 76x32)")
+        say("       (kein 'launcher: rect id=4' -- gemessene Vorgabe 12,376 76x32)")
     cx, cy = gx + rx + rw // 2, gy + ry + rh // 2
-    sag("== Energieknopf bei %d,%d (Fenster %d,%d)" % (cx, cy, gx, gy))
+    say("== Energieknopf bei %d,%d (Fenster %d,%d)" % (cx, cy, gx, gy))
     vor = set(wins())
     m.klick_auf(cx, cy)
     time.sleep(4)
-    m.foto(os.path.join(AUS, "k-40-energiemenue.png"))
-    if re.search(r"launcher: energie auf", lies()):
+    m.photo(os.path.join(AUS, "k-40-energiemenue.png"))
+    if re.search(r"launcher: energie auf", read_text()):
         ok("das Energiemenue ist aufgeklappt ('launcher: energie auf')")
     else:
         bad("das Energiemenue ging nicht auf")
-    neu = [x for x in wins() if x not in vor]
-    if not neu:
+    renewed = [x for x in wins() if x not in vor]
+    if not renewed:
         bad("kein neues Fenster -- ohne Menue ist nichts zu waehlen")
         raise SystemExit(1)
-    mx, my, mw, mh = (int(v) for v in neu[-1])
-    sag("== Menue %d,%d %dx%d" % (mx, my, mw, mh))
+    mx, my, mw, mh = (int(v) for v in renewed[-1])
+    say("== Menue %d,%d %dx%d" % (mx, my, mw, mh))
 
     # -------------------------------------- 5. "ABMELDEN" IST DER DRITTE
     # Die drei Punkte sind Ausschalten (0), Neustart (1), Abmelden (2)
@@ -295,7 +272,7 @@ try:
     # Zeilen geteilt.
     zh = mh // 3
     px, py = mx + mw // 2, my + zh // 2 + 2 * zh
-    sag("== Klick auf 'Abmelden' bei %d,%d" % (px, py))
+    say("== Klick auf 'Abmelden' bei %d,%d" % (px, py))
     m.klick_auf(px, py)
     time.sleep(6)
 
@@ -317,8 +294,8 @@ try:
     # blind werden. Also wird auf die Zeichenkette OHNE die Zahl
     # geprueft, wo die Zahl verdraengt sein kann -- und die Zahl selbst
     # nur dort verlangt, wo sie nachweislich durchkommt.
-    if re.search(r"launcher: energie wahl=?\s*2(?!\d)", lies()) \
-       or re.search(r"launcher: energie wahl", lies()):
+    if re.search(r"launcher: energie wahl=?\s*2(?!\d)", read_text()) \
+       or re.search(r"launcher: energie wahl", read_text()):
         ok("der Starter hat die Wahl aus dem Energiemenue gemeldet")
     else:
         bad("der Starter meldet keine Wahl")
@@ -326,10 +303,10 @@ try:
     # ------------------------------ 6. DER KERN HAT DIE SITZUNG BEENDET
     t0 = time.time()
     while time.time() - t0 < 60:
-        if "abmelden: Anmeldung neu" in lies():
+        if "abmelden: Anmeldung neu" in read_text():
             break
         time.sleep(0.5)
-    txt = lies()
+    txt = read_text()
     # ZWEI PROZESSE VERSCHRAENKEN SICH ZEICHENWEISE, nicht nur
     # zeilenweise. Gemessen, woertlich aus einem Lauf dieser Runde:
     #
@@ -344,7 +321,7 @@ try:
         ok("der Kern hat den Abmeldewunsch bekommen ('abmelden: Sitzung')")
     else:
         bad("'abmelden: Sitzung' fehlt -- der Wunsch kam nicht an")
-        sag("       " + " / ".join(re.findall(r"(?:launcher: energie|abmelden:)[^\n]{0,50}", txt)[-5:]))
+        say("       " + " / ".join(re.findall(r"(?:launcher: energie|abmelden:)[^\n]{0,50}", txt)[-5:]))
     # DIE SITZUNG WURDE BEENDET -- und der HARTE Beleg dafuer ist nicht
     # die Zahl des Kerns (die kann verdraengt sein), sondern das, was
     # `kernel/signal.fi` fuer JEDEN getroffenen Prozess selbst meldet:
@@ -360,7 +337,7 @@ try:
         ok("die Sitzung wurde beendet -- %d SIGKILL im Mitschnitt (pids %s)"
            % (len(tot), ", ".join(tot)))
         if n:
-            sag("       der Kern zaehlt selbst n=%s" % n[-1])
+            say("       der Kern zaehlt selbst n=%s" % n[-1])
     elif n and int(n[-1]) >= 1:
         ok("die Sitzung wurde beendet (der Kern zaehlt n=%s)" % n[-1])
     else:
@@ -408,19 +385,19 @@ try:
     # `rect id=6` ist der bessere Beleg: er kommt aus `glogin` selbst,
     # steht sieben Zeilen hintereinander (rect id=0..6) und ist damit
     # viel schwerer vollstaendig zu verdraengen als eine einzelne Zeile.
-    r6_neu = len(re.findall(r"glogin: rect id=6", txt))
+    r6_renewed = len(re.findall(r"glogin: rect id=6", txt))
     if a:
         ok("der Anmeldeschirm wurde neu gestartet (pid=%s)" % a[-1])
     elif "abmelden: An" in txt and st >= 2:
         ok("der Anmeldeschirm wurde neu gestartet "
            "('abmelden: Anmeldu…' + 'start /bin/glogin' %dx)" % st)
-    elif r6_neu >= 2:
+    elif r6_renewed >= 2:
         ok("der Anmeldeschirm wurde neu gestartet "
            "('glogin: rect id=6' %dx -- die Startzeile hat die Leitung "
-           "verloren, 'start /bin/glogin' %dx)" % (r6_neu, st))
+           "verloren, 'start /bin/glogin' %dx)" % (r6_renewed, st))
     else:
         bad("'abmelden: Anmeldung neu' fehlt ('start /bin/glogin' %dx, "
-            "'rect id=6' %dx)" % (st, r6_neu))
+            "'rect id=6' %dx)" % (st, r6_renewed))
     # DIE ZUSAGE, DIE ZAEHLT: er ist WIRKLICH WIEDER DA. `glogin: bereit`
     # muss zweimal stehen -- einmal beim Start, einmal jetzt. Eine
     # einzelne Zeile sagt nur, dass er einmal lief.
@@ -446,7 +423,7 @@ try:
     else:
         bad("nach dem Abmelden war wieder jemand angemeldet (%dx)" % an)
     time.sleep(3)
-    m.foto(os.path.join(AUS, "k-50-wieder-anmeldung.png"))
+    m.photo(os.path.join(AUS, "k-50-wieder-anmeldung.png"))
 
     # -------------------- 7. DAS BILD: DER SCHREIBTISCH IST WIRKLICH WEG
     try:
@@ -469,7 +446,7 @@ try:
                         fb.add(pb[x, y])
                 if diff >= 2000:
                     ok("BILD: der Schirm ist ein ANDERER (%d Stichproben verschieden)" % diff)
-                    sag("       Farben Schreibtisch %d, nach dem Abmelden %d" % (len(fa), len(fb)))
+                    say("       Farben Schreibtisch %d, nach dem Abmelden %d" % (len(fa), len(fb)))
                 else:
                     bad("BILD: der Schirm sieht aus wie vorher (%d verschieden)" % diff)
         # DIE STAERKERE ZUSAGE: es ist nicht irgendein anderer Schirm,
@@ -535,7 +512,7 @@ try:
         else:
             bad("BILD: die Bilder fehlen")
     except ImportError:
-        sag("       (PIL fehlt -- der Bildvergleich entfaellt)")
+        say("       (PIL fehlt -- der Bildvergleich entfaellt)")
 
 finally:
     try:
@@ -552,8 +529,8 @@ finally:
             except OSError:
                 pass
     open(os.path.join(AUS, "abmelden-klick-befund.txt"), "w").write(
-        "\n".join(ZEILEN) + "\n")
+        "\n".join(ROWS) + "\n")
 
-sag("")
-sag("ABMELDEN: %d bestanden, %d gescheitert" % (OK[0], FAIL[0]))
+say("")
+say("ABMELDEN: %d bestanden, %d gescheitert" % (OK[0], FAIL[0]))
 sys.exit(1 if FAIL[0] else 0)

@@ -1,49 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ttf/subset.py -- eine TrueType-Datei auf das Noetige zusammenschneiden.
-
-Runde K10 liest im Kernel echte TrueType-Umrisse (`kernel/gfx/ttf.fi`).  Eine
-vollstaendige DejaVu-Datei ist 760 KiB gross und traegt 6253 Glyphen,
-zwanzig Tabellen, Hinting-Programme und eine Mathematiktabelle -- davon
-braucht ein Rasterer genau sieben Tabellen und fuenfundneunzig Glyphen.
-Dieses Programm schneidet die Datei darauf zusammen:
-
-    head  Einheiten je Geviert, das Format von `loca`
-    hhea  Aufsteiger, Absteiger, Zeilenabstand, Zahl der Laufweiten
-    maxp  wie viele Glyphen es sind
-    hmtx  Laufweite und linker Seitenabstand je Glyphe
-    cmap  Zeichen -> Glyphennummer (Format 4)
-    loca  Glyphennummer -> Versatz in `glyf`
-    glyf  die Umrisse selbst
-    kern  Unterschneidung, Format 0 (nur wenn die Vorlage eine hat)
-
-REPRODUZIERBAR UND OHNE FREMDE BIBLIOTHEK.  Kein fontTools, kein
-FreeType -- reines `struct`.  Das ist Absicht und derselbe Gedanke wie
-bei `tools/osum/mkfs.py`: die Datei, die der Kernel liest, wird auf dem
-Wirt von einem ZWEITEN Programm erzeugt, das dasselbe Format aus der
-Spezifikation heraus versteht.  Sind sich beide nicht einig, faellt es
-sofort auf -- ein Umriss an der falschen Stelle ist im Bild zu sehen.
-
-Verwendung:
-    subset.py <vorlage.ttf> <ziel.ttf> [erstes] [letztes]
-    subset.py <vorlage.ttf> <ziel.ttf> --set <name>
-    subset.py <vorlage.ttf> <ziel.ttf> --ranges 20-7E,A0-FF,...
-
-RUNDE I18N HAT DIE VORGABE GEAENDERT, und das ist die Voraussetzung fuer
-alles andere in dieser Runde.  Bis hierher war der Ausschnitt 0x20..0x7E
--- derselbe wie beim 8x16-Zeichensatz aus Runde K7
-(`kernel/gfx/font.fi`) -- also reines ASCII.  Genau deshalb stand im ganzen
-Projekt "ue" statt "u" mit zwei Punkten: die Schrift KONNTE das Zeichen
-nicht, und niemand hatte es nachgemessen.
-
-Die Vorgabe ist jetzt der Satz `latin` (siehe SAETZE unten): ASCII, die
-Latin-1-Ergaenzung (u/o/a mit zwei Punkten, scharfes s, Akzente),
-Latin Extended-A (Polnisch, Tschechisch, Ungarisch, Tuerkisch), die
-Anfuehrungs- und Gedankenstriche aus der allgemeinen Interpunktion, das
-Eurozeichen -- und U+FFFD, das Ersatzzeichen, das der UTF-8-Dekodierer
-fuer eine ungueltige Oktettfolge einsetzt.  Ohne U+FFFD in der Schrift
-malt der Dekodierer bei einer kaputten Datei NICHTS, und "nichts" ist
-kein Fehlerbild.
+"""Usage:
+    subset.py <Template.ttf> <target.ttf> [first] [letztes]
+    subset.py <Template.ttf> <target.ttf> --set <name>
+    subset.py <Template.ttf> <target.ttf> --ranges 20-7E,A0-FF,...
 """
 import struct
 import sys
@@ -100,7 +60,7 @@ def u32(d, o):
     return struct.unpack_from(">I", d, o)[0]
 
 
-class Vorlage:
+class Template:
     def __init__(self, path_2):
         self.d = open(path_2, "rb").read()
         if self.d[:4] not in (b"\x00\x01\x00\x00", b"true"):
@@ -253,13 +213,13 @@ def komponenten(roh):
     return aus
 
 
-def komponenten_new(roh, karte):
+def komponenten_new(roh, card):
     aus = bytearray(roh)
     p = 10
     while True:
         flags = u16(aus, p)
         gid = u16(aus, p + 2)
-        struct.pack_into(">H", aus, p + 2, karte[gid])
+        struct.pack_into(">H", aus, p + 2, card[gid])
         p += 4
         p += 4 if (flags & 1) else 2
         if flags & 8:
@@ -286,16 +246,16 @@ def sum_2(b):
 
 
 def cmap4(paare):
-    zeichen = sorted(paare)
+    chars = sorted(paare)
     segmente = []
     i = 0
-    while i < len(zeichen):
-        a = zeichen[i]
+    while i < len(chars):
+        a = chars[i]
         j = i
-        while (j + 1 < len(zeichen) and zeichen[j + 1] == zeichen[j] + 1
-               and paare[zeichen[j + 1]] == paare[zeichen[j]] + 1):
+        while (j + 1 < len(chars) and chars[j + 1] == chars[j] + 1
+               and paare[chars[j + 1]] == paare[chars[j]] + 1):
             j += 1
-        segmente.append((a, zeichen[j], (paare[a] - a) & 0xFFFF))
+        segmente.append((a, chars[j], (paare[a] - a) & 0xFFFF))
         i = j + 1
     segmente.append((0xFFFF, 0xFFFF, 1))
     n = len(segmente)
@@ -342,7 +302,7 @@ def main(argv):
     if len(argv) < 3:
         print(__doc__)
         return 2
-    source, ziel = argv[1], argv[2]
+    source, target = argv[1], argv[2]
     rest = argv[3:]
     if rest and rest[0] == "--set":
         if rest[1] not in SAETZE:
@@ -358,17 +318,17 @@ def main(argv):
     else:
         bereiche = SAETZE[VORGABE]
 
-    v = Vorlage(source)
+    v = Template(source)
     voll = v.cmap()
 
     behalten = [0]
-    zeichen = {}
+    chars = {}
     for erst, letzt in bereiche:
         for c in range(erst, letzt + 1):
             g = voll.get(c)
             if g is None:
                 continue
-            zeichen[c] = g
+            chars[c] = g
             if g not in behalten:
                 behalten.append(g)
     open_2 = list(behalten)
@@ -379,7 +339,7 @@ def main(argv):
                 behalten.append(k)
                 open_2.append(k)
     behalten.sort()
-    karte = {alt: new for new, alt in enumerate(behalten)}
+    card = {alt: new for new, alt in enumerate(behalten)}
 
     glyf = bytearray()
     offset = []
@@ -387,7 +347,7 @@ def main(argv):
         offset.append(len(glyf))
         roh = v.glyph_bytes(alt)
         if roh and s16(roh, 0) < 0:
-            roh = komponenten_new(roh, karte)
+            roh = komponenten_new(roh, card)
         glyf += pad4(roh)
     offset.append(len(glyf))
     lang = offset[-1] > 0x1FFFE
@@ -407,7 +367,7 @@ def main(argv):
     struct.pack_into(">H", maxp, 4, len(behalten))
 
     tabellen = {
-        "cmap": cmap4({c: karte[g] for c, g in zeichen.items()}),
+        "cmap": cmap4({c: card[g] for c, g in chars.items()}),
         "glyf": bytes(glyf),
         "head": bytes(head),
         "hhea": bytes(hhea),
@@ -415,8 +375,8 @@ def main(argv):
         "loca": loca,
         "maxp": bytes(maxp),
     }
-    kp = {(karte[a], karte[b]): w for (a, b), w in v.kern0().items()
-          if a in karte and b in karte}
+    kp = {(card[a], card[b]): w for (a, b), w in v.kern0().items()
+          if a in card and b in card}
     k = kern0_build(kp)
     if k:
         tabellen["kern"] = k
@@ -449,10 +409,10 @@ def main(argv):
             hoff = u32(file_2, 12 + 16 * i + 8)
             struct.pack_into(">I", file_2, hoff + 8, check)
 
-    open(ziel, "wb").write(bytes(file_2))
+    open(target, "wb").write(bytes(file_2))
     print("%s: %d Glyphen, %d Zeichen, %d Oktette (%s), upm=%d, "
           "asc=%d desc=%d gap=%d, kern=%d Paare"
-          % (ziel, len(behalten), len(zeichen), len(file_2),
+          % (target, len(behalten), len(chars), len(file_2),
              ", ".join(marken), v.upm, v.ascent, v.descent, v.gap, len(kp)))
     return 0
 

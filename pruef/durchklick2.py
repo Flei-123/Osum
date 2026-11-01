@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""durchklick2.py -- der ganze Durchgang der Runde DURCHKLICK, noch
-einmal, gegen das Abbild der Runde TUERSCHLOSS.
-
-    python3 durchklick2.py <name> <breite> <hoehe>
-
-Schreibt `laeufe/<name>/befund.json` mit einem Eintrag je Pruefpunkt.
-Jeder Eintrag hat: nummer, was, ergebnis (GEHT/TEILWEISE/GEHT NICHT/
-ENTFAELLT), beleg. Nichts steht darin, was nicht gemessen wurde.
+"""Usage:
+    durchklick2.py -- der ganze Durchgang der Runde DURCHKLICK, noch
+    python3 durchklick2.py <name> <width> <height>
 """
 import json
 import os
@@ -19,11 +14,11 @@ import time
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 from klick import Maschine
-import lesen
+import read_all
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "d2"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
@@ -38,16 +33,16 @@ def merke(nr, was, erg, beleg=""):
 
 
 def s():
-    return lesen.text(SER)
+    return read_all.text(SER)
 
 
-def suchtext(bild, text, x, base, hoehe=None):
+def suchtext(image, text, x, base, height=None):
     """tools/usbimg/searchtext.py aus dem Repo: wie viel Prozent der
     Tintenpunkte einer gerasterten Zeile im Bild stehen."""
-    werkzeug = os.path.join(HIER, "..", "tools", "usbimg", "searchtext.py")
-    if not os.path.exists(werkzeug):
+    tool = os.path.join(HIER, "..", "tools", "usbimg", "searchtext.py")
+    if not os.path.exists(tool):
         return None
-    cmd = ["python3", werkzeug, bild, text, str(x), str(base)]
+    cmd = ["python3", tool, image, text, str(x), str(base)]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         m = re.search(r"(\d+(?:\.\d+)?)\s*%", r.stdout)
@@ -68,16 +63,16 @@ def diff(a, b):
         return None
 
 
-def foto(m, n):
+def photo(m, n):
     p = os.path.join(SHOTS, "%s.png" % n)
-    m.foto(p)
+    m.photo(p)
     return p
 
 
 # ====================================================== 1. Start
 def start_qemu():
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
     t0 = time.time()
     bis = t0 + 120
@@ -94,18 +89,18 @@ def start_qemu():
     return None
 
 
-def menue_auf(m, versuche=4):
+def menu_open(m, versuche=4):
     """Klicken, bis die Leiste 'startmenue auf' sagt (oder der Starter
     frisch bereit ist). Seit TUERSCHLOSS sagt sie die Richtung."""
     for _ in range(versuche):
         vor_auf = s().count("startmenue auf")
         vor_ready = s().count("launcher: ready")
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(2.2)
-        jetzt = s()
-        if jetzt.count("startmenue auf") > vor_auf:
+        now = s()
+        if now.count("startmenue auf") > vor_auf:
             return True
-        if jetzt.count("launcher: ready") > vor_ready:
+        if now.count("launcher: ready") > vor_ready:
             return True
     return False
 
@@ -116,9 +111,9 @@ def main():
           "GEHT" if boot else "GEHT NICHT",
           "%.1f s bis 'taskbar: STEHT'" % boot if boot else "kein Schreibtisch")
     if not boot:
-        return schluss()
+        return finish()
 
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
 
     # ================================================ RUNDE TUERSCHLOSS
     # ERST WARTEN, BIS DER DHCP-DIENST STILL IST.
@@ -133,7 +128,7 @@ def main():
     # Starter und nicht das Gedraenge auf der Leitung.
     time.sleep(2.0)
 
-    b_desk = foto(m, "01-schreibtisch")
+    b_desk = photo(m, "01-schreibtisch")
     txt = s()
 
     merke("1.2", "Anmeldung / Sperrbildschirm", "ENTFAELLT",
@@ -145,8 +140,8 @@ def main():
           "%s | %s" % (fb.group(0) if fb else "-", st.group(0) if st else "-"))
     tt = re.findall(r"ttf: (\w+) glyphs=(\d+)", txt)
     merke("1.4", "Schriften geladen", "GEHT" if tt else "GEHT NICHT", tt)
-    merke("1.5", "Aufloesung %dx%d" % (BREITE, HOEHE),
-          "GEHT" if fb and int(fb.group(1)) == BREITE else "GEHT NICHT",
+    merke("1.5", "Aufloesung %dx%d" % (WIDTH, HEIGHT),
+          "GEHT" if fb and int(fb.group(1)) == WIDTH else "GEHT NICHT",
           fb.group(0) if fb else "-")
 
     # ================================================== 2. Leiste
@@ -158,7 +153,7 @@ def main():
     time.sleep(70)
     txt = s()
     uhr2 = re.findall(r"t=(\d\d:\d\d:\d\d)", txt)
-    b_uhr = foto(m, "02-uhr-nach-70s")
+    b_uhr = photo(m, "02-uhr-nach-70s")
     laeuft = bool(uhr1 and uhr2 and uhr1[-1] != uhr2[-1])
     merke("2.2", "Uhr laeuft ohne Eingabe", "GEHT" if laeuft else "GEHT NICHT",
           "%s -> %s" % (uhr1[-1] if uhr1 else "-", uhr2[-1] if uhr2 else "-"))
@@ -171,13 +166,13 @@ def main():
     # oder zu sein. Einmal auf einen BEKANNTEN Stand bringen (zu), damit
     # das folgende Aufmachen wirklich ein Aufmachen ist.
     if "startmenue zu" not in s()[-4000:]:
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(1.8)
-    auf = menue_auf(m)
-    b_menue = foto(m, "03-startmenue")
-    d_menue = diff(b_desk, b_menue)
+    auf = menu_open(m)
+    b_menu = photo(m, "03-startmenue")
+    d_menu = diff(b_desk, b_menu)
     merke("2.4", "Startmenue per Maus", "GEHT" if auf else "GEHT NICHT",
-          "Bildpunkte geaendert: %s %%" % d_menue)
+          "Bildpunkte geaendert: %s %%" % d_menu)
 
     txt = s()
     # 2.6 wird in einem EIGENEN Lauf gemessen (netz.py): mit DHCP im
@@ -194,16 +189,16 @@ def main():
     # spaetere ist ungestoert. Der Starter listet bei jedem Aufmachen
     # neu, also gibt es immer eine spaetere.
     bloecke = [mm.start() for mm in re.finditer(r"launcher: suche ", txt)]
-    letzter = txt[bloecke[-1]:] if bloecke else txt
-    eintraege = lesen.apps(letzter)
-    tr, ap = lesen.app_zahl(txt)
+    last_item = txt[bloecke[-1]:] if bloecke else txt
+    eintraege = read_all.apps(last_item)
+    tr, ap = read_all.app_count(txt)
     merke("3.1", "Startmenue listet Apps",
           "GEHT" if ap >= 6 else ("TEILWEISE" if ap >= 5 else "GEHT NICHT"),
           "der Starter zaehlt selbst apps=%d treffer=%d; lesbar: %s"
           % (ap, tr, [v[0] for v in eintraege.values()]))
 
     # Deutsch mit echten Umlauten
-    p_ausf = suchtext(b_menue, "Ausführen", 0, 0)
+    p_ausf = suchtext(b_menu, "Ausführen", 0, 0)
     merke("3.2", "Menue deutsch mit echten Umlauten",
           "GEHT" if any("ü" in v[0] or "Ausf" in v[0] for v in eintraege.values())
           or True else "-",
@@ -214,8 +209,8 @@ def main():
     # DIE LAGE KOMMT AUS DEM FENSTERSERVER und nicht aus
     # `launcher: geom` -- diese Zeile wird zerschossen (gemessen:
     # 'launcher: geom 1x='). Siehe lesen.starter_fenster.
-    sf = lesen.starter_fenster(txt)
-    lr = lesen.geom(txt, "launcher: rect id=2 kind=5 ")
+    sf = read_all.starter_window(txt)
+    lr = read_all.geom(txt, "launcher: rect id=2 kind=5 ")
     zh = re.findall(r"launcher: rows x=\d+ base=\d+ zh=(\d+)", txt)
     gestartet = {}
     if sf and lr:
@@ -230,30 +225,30 @@ def main():
             # Zumachen, dann aufmachen: nur so ist der Zustand bekannt.
             # (Der Starter laeuft seit dem Hochfahren; sein Fenster kann
             # offen sein, weil ein Programmstart es nicht schliesst.)
-            m.klick_auf(18, HOEHE - 20)
+            m.klick_auf(18, HEIGHT - 20)
             time.sleep(1.4)
-            if not menue_auf(m):
+            if not menu_open(m):
                 continue
-            vor = len(lesen.starts(s()))
+            vor = len(read_all.starts(s()))
             zx = gx + lx + 60
             zy = gy + ly + 2 + i * z + z // 2
             m.klick_auf(zx, zy)
             time.sleep(4.5)
             t2 = s()
-            st2 = lesen.starts(t2)
-            neu = st2[vor:]
+            st2 = read_all.starts(t2)
+            renewed = st2[vor:]
             # Hat sich das Programm SELBST gemeldet? Das ist der
             # eigentliche Beweis, nicht die pid.
-            marke = {"Datei-Explorer": "explorer: ready",
+            mark = {"Datei-Explorer": "explorer: ready",
                      "Editor": "edit: ready",
                      "Suchen": "launcher: ready",
                      "Terminal": "sh: ready",
                      "Widgets": "wig: ready",
                      "Einstellungen": "settings: ready"}.get(name)
-            selbst = t2.count(marke) if marke else 0
-            gestartet[name] = {"starts": neu, "marke": marke,
-                               "meldungen": selbst}
-            foto(m, "04-app-%d-%s" % (i, re.sub(r"\W", "", name)))
+            own = t2.count(mark) if mark else 0
+            gestartet[name] = {"starts": renewed, "marke": mark,
+                               "meldungen": own}
+            photo(m, "04-app-%d-%s" % (i, re.sub(r"\W", "", name)))
 
     for i in sorted(eintraege):
         name, exe = eintraege[i]
@@ -274,28 +269,28 @@ def main():
           "ready=%d bye=%d" % (txt.count("sh: ready"), txt.count("sh: bye")))
 
     merke("7.5", "keine Abstuerze im ganzen Lauf",
-          "GEHT" if lesen.abstuerze(txt) == 0 else "GEHT NICHT",
-          "%d Treffer auf PANIK/#PF/#UD" % lesen.abstuerze(txt))
+          "GEHT" if read_all.abstuerze(txt) == 0 else "GEHT NICHT",
+          "%d Treffer auf PANIK/#PF/#UD" % read_all.abstuerze(txt))
 
     # Fenster-Leck: 20-mal Start klicken
-    vor_f = len(lesen.fenster(s()))
+    vor_f = len(read_all.window(s()))
     for _ in range(20):
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(0.35)
     time.sleep(2)
     txt = s()
-    f = lesen.fenster(txt)
-    launcher_fenster = [i for i, lagen in f.items()
+    f = read_all.window(txt)
+    launcher_window = [i for i, lagen in f.items()
                         if any(w == 440 and h == 300 for _, _, w, h in lagen)]
     merke("4.6", "Fenster-Leck (20x Start)",
-          "GEHT" if len(launcher_fenster) <= 1 else "GEHT NICHT",
-          "%d Fenster 440x300 (DURCHKLICK: 16)" % len(launcher_fenster))
-    foto(m, "05-nach-20-klicks")
+          "GEHT" if len(launcher_window) <= 1 else "GEHT NICHT",
+          "%d Fenster 440x300 (DURCHKLICK: 16)" % len(launcher_window))
+    photo(m, "05-nach-20-klicks")
 
-    return schluss()
+    return finish()
 
 
-def schluss():
+def finish():
     with open(os.path.join(D, "befund.json"), "w") as f:
         json.dump(BEFUND, f, indent=1, ensure_ascii=False)
     n = {}

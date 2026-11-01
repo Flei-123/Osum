@@ -13,35 +13,35 @@
 # weder am Dateisystem noch an der Shell eine Zeile geaendert).
 import time
 
-lauf.sag("== GEGENPROBE: welcher Schritt bringt den Kern zum Stehen? ==")
+lauf.say("== GEGENPROBE: welcher Schritt bringt den Kern zum Stehen? ==")
 lauf.m.klick_auf(300, 300)
 time.sleep(1)
 
 
 def lebt():
     """Laeuft die Maschine noch? Ein Absturz steht auf der Leitung."""
-    t = lauf.lies()
+    t = lauf.read_text()
     return ("kernel halted" not in t) and ("absturz:  0" not in t)
 
 
-def schritt(zeile, warte=3.0):
+def schritt(row, wait=3.0):
     if not lebt():
-        lauf.sag("  (uebersprungen, die Maschine steht schon): %s" % zeile)
+        lauf.say("  (uebersprungen, die Maschine steht schon): %s" % row)
         return
-    vorher = len(lauf.lies())
-    lauf.m.tippe(zeile + "\n")
-    time.sleep(warte)
-    roh = lauf.lies()[vorher:]
-    antwort = []
+    vorher = len(lauf.read_text())
+    lauf.m.tippe(row + "\n")
+    time.sleep(wait)
+    roh = lauf.read_text()[vorher:]
+    reply = []
     for z in roh.splitlines():
         z = z.rstrip()
         if not z or z.startswith(("wlib", "wm:", "key:", "elf:", "osum ",
                                   "taskbar", "explorer:")):
             continue
-        antwort.append(z[:90])
-    lauf.sag("  $ %-34s %s" % (zeile, "LEBT" if lebt() else "*** STEHT ***"))
-    for z in antwort[:4]:
-        lauf.sag("      %s" % z)
+        reply.append(z[:90])
+    lauf.say("  $ %-34s %s" % (row, "LEBT" if lebt() else "*** STEHT ***"))
+    for z in reply[:4]:
+        lauf.say("      %s" % z)
 
 
 # Erst LESEN, was schon da ist -- das ruehrt das Journal nicht an.
@@ -53,9 +53,9 @@ schritt("echo eins > /data/t1.txt")
 schritt("ls /data")
 schritt("cat /data/t1.txt")
 
-lauf.bild("gegenprobe")
-t = lauf.lies()
-lauf.sag("--- Befund ---")
+lauf.image("gegenprobe")
+t = lauf.read_text()
+lauf.say("--- Befund ---")
 for muster in ("kernel halted", "STUFE ST", "ofsj", "#UD", "absturz:"):
-    lauf.sag("  %-16s %dx" % (muster, t.count(muster)))
-lauf.sag("== Ende ==")
+    lauf.say("  %-16s %dx" % (muster, t.count(muster)))
+lauf.say("== Ende ==")

@@ -1,19 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/gfx/screenshot.py -- EIN Bildschirmfoto ueber den QEMU-Monitor.
-
-    screenshot.py <monitor-socket> <ziel.ppm> [wartesekunden]
-
-QEMU kann den Inhalt seines Bildschirms als PPM schreiben (`screendump`),
-auch mit `-display none`: die Bildflaeche existiert, sie wird nur nicht
-angezeigt.  Der Monitor haengt an einem Unix-Socket, weil ein Testlaeufer
-sonst nichts hat, woran er ihn fassen koennte.
-
-Der Ablauf ist die eine Stelle, an der man sich vertun kann: `screendump`
-kehrt zurueck, BEVOR die Datei fertig geschrieben ist.  Also wird gewartet,
-bis die Datei eine Groesse hat, die sich nicht mehr aendert -- ein halb
-geschriebenes PPM ist ein Bild, das jeden Vergleich verliert, und zwar
-ohne Hinweis darauf, warum.
+"""Usage:
+    screenshot.py <monitor-socket> <target.ppm> [wartesekunden]
 """
 import os
 import socket
@@ -25,11 +13,11 @@ def main():
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
-    sock, ziel = sys.argv[1], sys.argv[2]
+    sock, target = sys.argv[1], sys.argv[2]
     deadline = float(sys.argv[3]) if len(sys.argv) > 3 else 15.0
 
-    if os.path.exists(ziel):
-        os.unlink(ziel)
+    if os.path.exists(target):
+        os.unlink(target)
 
     s = None
     bis = time.time() + deadline
@@ -52,7 +40,7 @@ def main():
             s.recv(65536)
         except OSError:
             pass
-        s.sendall(("screendump %s\n" % ziel).encode())
+        s.sendall(("screendump %s\n" % target).encode())
 
         last_2 = -1
         ruhig = 0
@@ -60,7 +48,7 @@ def main():
         while time.time() < bis:
             time.sleep(0.15)
             try:
-                now = os.path.getsize(ziel)
+                now = os.path.getsize(target)
             except OSError:
                 continue
             if now == last_2 and now > 0:

@@ -90,7 +90,7 @@ def build(a):
             aml_int(a.voll),
             aml_int(1),
             aml_int(a.dvolt),
-            aml_int(a.warnung),
+            aml_int(a.warning),
             aml_int(a.untergrenze),
             aml_int(1),
             aml_int(1),
@@ -100,7 +100,7 @@ def build(a):
             aml_str(a.hersteller),
         ])
         bst = package([
-            aml_int(a.zustand),
+            aml_int(a.state),
             aml_int(a.rate),
             aml_int(a.rest),
             aml_int(a.volt),
@@ -117,7 +117,7 @@ def build(a):
 
     if not a.kein_netzteil:
         body = name_op("_HID", aml_str("ACPI0003"))
-        body += name_op("_PSR", aml_int(a.netz))
+        body += name_op("_PSR", aml_int(a.network))
         out += device("ADP0", body)
 
     if not a.no_zone:
@@ -137,12 +137,12 @@ def main():
     p.add_argument("--rate", type=int, default=500)
     p.add_argument("--volt", type=int, default=10800)
     p.add_argument("--dvolt", type=int, default=10800)
-    p.add_argument("--zustand", type=int, default=1)
-    p.add_argument("--warnung", type=int, default=440)
+    p.add_argument("--state", type=int, default=1)
+    p.add_argument("--warning", type=int, default=440)
     p.add_argument("--untergrenze", type=int, default=220)
     p.add_argument("--einheit", type=int, default=0)
     p.add_argument("--sta", type=int, default=0x1F)
-    p.add_argument("--netz", type=int, default=0)
+    p.add_argument("--network", type=int, default=0)
     p.add_argument("--temp", type=int, default=3032)
     p.add_argument("--modell", default="OSUM-BAT")
     p.add_argument("--seriennr", default="0001")
@@ -150,7 +150,7 @@ def main():
     p.add_argument("--hersteller", default="FLEITEC")
     p.add_argument("--kein-akku", action="store_true")
     p.add_argument("--kein-netzteil", action="store_true")
-    p.add_argument("--keine-zone", action="store_true")
+    p.add_argument("--no-zone", action="store_true")
     p.add_argument("--methode", action="store_true")
     a = p.parse_args()
 
@@ -164,13 +164,13 @@ def main():
         prozent = (a.rest * 100 + a.voll // 2) // a.voll if a.voll else 0
         prozent = min(prozent, 100)
         if a.rate:
-            set_2 = a.voll - a.rest if (a.zustand & 2) else a.rest
+            set_2 = a.voll - a.rest if (a.state & 2) else a.rest
             minuten = (set_2 * 60) // a.rate
         else:
             minuten = 0
     grad = (a.temp - 2732) // 10
     print("oktette=%d prozent=%d minuten=%d grad=%d netz=%d"
-          % (len(data), prozent, minuten, grad, a.netz))
+          % (len(data), prozent, minuten, grad, a.network))
     return 0
 
 

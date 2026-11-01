@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vsync/schuesse.py -- VIELE FOTOS WAEHREND EINER BEWEGUNG.
-
+"""Usage:
     schuesse.py <monitor-socket> <zielordner> <n> [schrittweite]
-
-`tools/gfx/screenshot.py` holt EIN Bild, nachdem alles zur Ruhe
-gekommen ist.  Fuer die Zerreissprobe ist genau das die falsche Frage:
-gesucht wird der Zustand WAEHREND der Bewegung, und zwar oft genug, um
-einen halben Bildaufbau zu erwischen.
-
-Also: das Fenster ziehen und dabei ununterbrochen fotografieren.  Je
-Runde ein `mouse_move` und danach sofort ein `screendump` -- ohne die
-Wartezeit, mit der `screenshot.py` auf Ruhe wartet.  Wer Reissen finden
-will, muss im ungeeignetsten Augenblick hinsehen.
-
-DER ANSCHLAG ZUERST.  Wie in `tools/wm/monitor.py` beschrieben: das
-PS/2-Geraet kennt nur Unterschiede.  Also erst mit grossen Schritten in
-die linke obere Ecke (dort haelt der Anschlag und die Vorgeschichte ist
-geloescht), dann an den Griff des Fensters, Taste runter, und von da an
-in kleinen Schritten ziehen.
-
-Ausgabe: der Ordner enthaelt danach s000.ppm ... s<n-1>.ppm.
 """
 import os
 import socket

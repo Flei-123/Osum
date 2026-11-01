@@ -1,37 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/storage/tree.py -- ein Dateisystem mit vielen Dateien UND mit
-Inhalt, und daneben die Wahrheit darueber, in Zahlen.
-
-Runde SPEICHER. `tools/k15/bigfs.py` baut viertausend LEERE Dateien --
-fuer einen Namensindex genau richtig, denn der haelt Namen. Fuer eine
-Speicherplatzanalyse ist es wertlos: alle Summen waeren null, jede
-Prozentangabe null, jede Kachel gleich gross, und ein Fehler in der
-Aufsummierung fiele nicht auf, weil 0 + 0 immer 0 ergibt.
-
-WAS DIESES WERKZEUG ANDERS MACHT:
-
-  * ES GIBT DEN DATEIEN INHALT, und zwar SCHIEF verteilt. Ein paar
-    grosse, viele kleine -- so sieht eine Platte wirklich aus, und nur
-    so hat eine Treemap etwas zu zeigen. Waeren alle gleich gross, sagte
-    ein Bild mit gleich grossen Kacheln nichts darueber aus, ob die
-    Flaechen wirklich gerechnet wurden.
-  * ES SCHREIBT AUF, WAS HERAUSKOMMEN MUSS. Fuer jedes Verzeichnis die
-    Summe in Oktetten und in aufgerundeten Kilooktett-Bloecken, auf dem
-    WIRT gerechnet, aus der Liste, aus der das Abbild gebaut wird. Damit
-    hat der Testlaeufer eine DRITTE Zahl: Index, Durchlauf -- und die
-    Arithmetik des Wirts. Zwei Wege, die sich einig sind, koennen
-    denselben Fehler haben; drei ist unwahrscheinlicher.
-
-DIE GRENZE DES ABBILDS, und sie ist der Grund fuer die Groessenwahl: die
-Blockkarte von OFS ist EIN Block, also 4096 Bloecke, also zwei
-Megaoktett. Davon gehen 1026 Bloecke fuer Superblock, Karte und die
-Inode-Tabelle mit 4096 Eintraegen ab, und die Programme wollen auch
-Platz. Was uebrig bleibt, ist ungefaehr ein Megaoktett -- deshalb
-bekommen nur einige hundert Dateien Inhalt und nicht alle viertausend.
-
-Verwendung:
-    baum.py <arbeitsverzeichnis> [<zahl der dateien>] [<oktette gesamt>]
+"""tree.py
 """
 
 import os
@@ -79,7 +48,7 @@ def main(argv):
     list_2 = names(n)
     sz = groessen(n, budget)
 
-    zeilen = ["--inodes=4096", "/data/"]
+    rows = ["--inodes=4096", "/data/"]
     seen = set()
     for path_2, _ in list_2:
         parts = path_2.strip("/").split("/")
@@ -88,19 +57,19 @@ def main(argv):
             if p not in seen:
                 seen.add(p)
                 if p != "/data/":
-                    zeilen.append(p)
+                    rows.append(p)
 
     for i, (path_2, name) in enumerate(list_2):
         if sz[i] > 0:
             wirt = os.path.join(inhalt, "f%05d" % i)
             with open(wirt, "wb") as f:
                 f.write(bytes([65 + (i % 26)]) * sz[i])
-            zeilen.append("%s/%s=%s" % (path_2, name, wirt))
+            rows.append("%s/%s=%s" % (path_2, name, wirt))
         else:
-            zeilen.append("%s/%s=" % (path_2, name))
+            rows.append("%s/%s=" % (path_2, name))
 
     with open(os.path.join(arbeit, "angaben"), "w") as f:
-        f.write("\n".join(zeilen) + "\n")
+        f.write("\n".join(rows) + "\n")
 
     okt = {}
     kb = {}

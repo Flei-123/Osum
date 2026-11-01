@@ -88,12 +88,12 @@ def map_read(path_2):
         if name in nach_name:
             raise SystemExit("icons.map:%d: '%s' is defined twice" % (nr, name))
         if parts[0] == "alias":
-            ziel = nach_name.get(parts[1])
-            if ziel is None:
+            target = nach_name.get(parts[1])
+            if target is None:
                 raise SystemExit(
                     "icons.map:%d: alias to unknown name '%s'" % (nr, parts[1]))
-            e = Entry(name, ziel.cp, None)
-            e.alias_von = ziel.name
+            e = Entry(name, target.cp, None)
+            e.alias_von = target.name
         else:
             try:
                 cp = int(parts[0], 16)
@@ -120,16 +120,16 @@ def map_read(path_2):
 
 
 
-def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
+def build(map_path, src_path, info_path, out_path, ids_path, list_path,
           leise=False):
     list_2, _ = map_read(map_path)
     echte = [e for e in list_2 if e.alias_von is None]
 
     info = json.load(open(info_path, encoding="utf-8"))
-    v = schnitt.Vorlage(src_path)
+    v = schnitt.Template(src_path)
     voll = v.cmap()
 
-    zeichen = {}
+    chars = {}
     fehlend = []
     for e in echte:
         satz = info.get(e.source)
@@ -141,7 +141,7 @@ def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
         if not gid:
             fehlend.append((e.name, e.source))
             continue
-        zeichen[e.cp] = gid
+        chars[e.cp] = gid
     if fehlend:
         for name, source in fehlend:
             print("build: %s -- no glyph '%s' in the source font"
@@ -149,7 +149,7 @@ def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
         raise SystemExit(1)
 
     behalten = [0]
-    for gid in zeichen.values():
+    for gid in chars.values():
         if gid not in behalten:
             behalten.append(gid)
     open_2 = list(behalten)
@@ -164,7 +164,7 @@ def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
                 behalten.append(k)
                 open_2.append(k)
     behalten.sort()
-    karte = {alt: new for new, alt in enumerate(behalten)}
+    card = {alt: new for new, alt in enumerate(behalten)}
 
     glyf = bytearray()
     offset = []
@@ -172,7 +172,7 @@ def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
         offset.append(len(glyf))
         roh = v.glyph_bytes(alt)
         if roh and schnitt.s16(roh, 0) < 0:
-            roh = schnitt.komponenten_new(roh, karte)
+            roh = schnitt.komponenten_new(roh, card)
         glyf += schnitt.pad4(roh)
     offset.append(len(glyf))
     lang = offset[-1] > 0x1FFFE
@@ -192,7 +192,7 @@ def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
     struct.pack_into(">H", maxp, 4, len(behalten))
 
     tabellen = {
-        "cmap": schnitt.cmap4({c: karte[g] for c, g in zeichen.items()}),
+        "cmap": schnitt.cmap4({c: card[g] for c, g in chars.items()}),
         "glyf": bytes(glyf),
         "head": bytes(head),
         "hhea": bytes(hhea),
@@ -253,10 +253,10 @@ def bauen(map_path, src_path, info_path, out_path, ids_path, list_path,
 
 
 def firn_name(name):
-    kurz = name
-    if kurz.startswith("icon."):
-        kurz = kurz[5:]
-    return kurz.replace(".", "_").replace("-", "_").upper()
+    brief = name
+    if brief.startswith("icon."):
+        brief = brief[5:]
+    return brief.replace(".", "_").replace("-", "_").upper()
 
 
 def ids_write(path_2, list_2, echte, big, source_big, v):
@@ -412,7 +412,7 @@ def main(argv):
               "       Unpack lucide-static there, or pass --source." % src,
               file=sys.stderr)
         return 1
-    bauen(map_path, src, info, out, ids, lst, leise)
+    build(map_path, src, info, out, ids, lst, leise)
     return 0
 
 

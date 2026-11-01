@@ -82,8 +82,8 @@ def deckung_vektor():
 def paint(path_2, felder, title):
     n = len(felder)
     width_2 = n * (D + 2) * ZOOM
-    hoehe = (D + 2) * ZOOM
-    px = [255] * (width_2 * hoehe * 3)
+    height = (D + 2) * ZOOM
+    px = [255] * (width_2 * height * 3)
     for fi, f in enumerate(felder):
         ox = fi * (D + 2) * ZOOM + ZOOM
         for y in range(D):
@@ -105,7 +105,7 @@ def paint(path_2, felder, title):
                         Y = ZOOM + y * ZOOM + dy
                         i = (Y * width_2 + X) * 3
                         px[i], px[i + 1], px[i + 2] = rr, gg, bb
-    png(path_2, width_2, hoehe, px)
+    png(path_2, width_2, height, px)
     print("  %-46s %s" % (title, path_2))
 
 

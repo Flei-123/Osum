@@ -43,9 +43,9 @@ def laengen(path_2):
             n = int(w.group(1)) * 8
         elif o:
             n = int(o.group(1))
-        schluessel = (file_2, name)
-        if schluessel in LEN_AUS:
-            k = LEN_AUS[schluessel]
+        key = (file_2, name)
+        if key in LEN_AUS:
+            k = LEN_AUS[key]
             if k in konst:
                 n = konst[k] * 8
         aus.append((name, value, n, nr))

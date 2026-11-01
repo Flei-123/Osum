@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""appstart.py -- JEDE App einzeln starten, in EINEM Lauf, und dabei
-nach jedem Klick nachsehen, was der Starter wirklich gemacht hat.
-
-    python3 appstart.py <name> <breite> <hoehe>
-
-Der Unterschied zu durchklick2.py: hier wird nicht angenommen, dass das
-Menue nach einem Programmstart noch offen ist. Nach JEDEM Start wird der
-Zustand aus dem Fensterserver gelesen (`F_HIDDEN` des Starterfensters)
-und erst dann entschieden, ob geklickt werden muss.
+"""Usage:
+    appstart.py -- JEDE App einzeln starten, in EINEM run, und dabei
+    python3 appstart.py <name> <width> <height>
 """
 import json
 import os
@@ -20,11 +14,11 @@ import time
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 from klick import Maschine
-import lesen
+import read_all
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "as1"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
@@ -38,7 +32,7 @@ SER = os.path.join(D, "serial.txt")
 #   kernel/user/widgetdemo.fi:127 "widgetdemo: ready"
 #   kernel/user/launcher.fi   "launcher: ready"
 #   kernel/user/sh.fi:113     "sh: ready, osum"
-MARKE = {
+MARK = {
     "Datei-Explorer": "explorer: ready",
     "Editor": "edit: ready",
     "Einstellungen": "settings: ready",
@@ -49,12 +43,12 @@ MARKE = {
 
 
 def s():
-    return lesen.text(SER)
+    return read_all.text(SER)
 
 
 def start_qemu():
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
     t0 = time.time()
     while time.time() - t0 < 120:
@@ -70,7 +64,7 @@ def start_qemu():
     return None
 
 
-def menue_zustand(txt):
+def menu_state(txt):
     """auf / zu -- aus den Meldungen der Leiste, die seit TUERSCHLOSS
     die Richtung sagen. Der letzte Ausschlag gilt."""
     a = txt.rfind("startmenue auf")
@@ -87,24 +81,24 @@ def main():
         return 1
     time.sleep(2.5)
 
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
 
     # Das Starterfenster taucht in der Liste des Servers erst auf, wenn
     # es einmal gezeigt wurde. Also erst aufmachen, dann die Lage holen
     # -- sonst steht `starter_fenster` auf None und der Lauf bricht ab,
     # obwohl alles in Ordnung ist.
     for _ in range(3):
-        if lesen.starter_fenster(s()):
+        if read_all.starter_window(s()):
             break
-        m.klick_auf(18, HOEHE - 20)
+        m.klick_auf(18, HEIGHT - 20)
         time.sleep(2.0)
 
     txt = s()
-    sf = lesen.starter_fenster(txt)
-    lr = lesen.geom(txt, "launcher: rect id=2 kind=5 ")
+    sf = read_all.starter_window(txt)
+    lr = read_all.geom(txt, "launcher: rect id=2 kind=5 ")
     zh = re.findall(r"launcher: rows x=\d+ base=\d+ zh=(\d+)", txt)
-    eintraege = lesen.apps(txt)
-    tr, ap = lesen.app_zahl(txt)
+    eintraege = read_all.apps(txt)
+    tr, ap = read_all.app_count(txt)
     print("Starter zaehlt apps=%d treffer=%d" % (ap, tr))
     if not sf or not lr:
         print("keine Lage: sf=%s lr=%s" % (sf, lr))
@@ -120,39 +114,39 @@ def main():
     ergebnis = {}
     for i in sorted(eintraege):
         name, exe = eintraege[i]
-        marke = MARKE.get(name)
-        vor = s().count(marke) if marke else 0
+        mark = MARK.get(name)
+        vor = s().count(mark) if mark else 0
 
         # Das Menue in einen BEKANNTEN Zustand bringen: solange klicken,
         # bis die Leiste 'auf' sagt (hoechstens dreimal).
         for _ in range(3):
-            if menue_zustand(s()) == "auf":
+            if menu_state(s()) == "auf":
                 break
-            m.klick_auf(18, HOEHE - 20)
+            m.klick_auf(18, HEIGHT - 20)
             time.sleep(1.6)
-        zustand = menue_zustand(s())
+        state = menu_state(s())
 
         zx = gx + lx + 60
         zy = gy + ly + 2 + i * z + z // 2
         m.klick_auf(zx, zy)
         time.sleep(5.0)
         txt = s()
-        nach = txt.count(marke) if marke else 0
+        nach = txt.count(mark) if mark else 0
         gestartet = nach > vor
-        ergebnis[name] = {"i": i, "exec": exe, "marke": marke,
+        ergebnis[name] = {"i": i, "exec": exe, "marke": mark,
                           "vorher": vor, "nachher": nach,
-                          "menue_war": zustand, "gestartet": gestartet}
+                          "menue_war": state, "gestartet": gestartet}
         print("%-16s i=%d  Menue %-3s  '%s' %d -> %d   %s"
-              % (name, i, zustand, marke, vor, nach,
+              % (name, i, state, mark, vor, nach,
                  "GESTARTET" if gestartet else "nichts"))
-        m.foto(os.path.join(SHOTS, "app-%d-%s.png"
+        m.photo(os.path.join(SHOTS, "app-%d-%s.png"
                             % (i, re.sub(r"\W", "", name))))
 
     with open(os.path.join(D, "appstart.json"), "w") as f:
         json.dump(ergebnis, f, indent=1, ensure_ascii=False)
     n = sum(1 for v in ergebnis.values() if v["gestartet"])
     print("\n%d von %d Programmen gestartet" % (n, len(ergebnis)))
-    print("Abstuerze:", lesen.abstuerze(s()))
+    print("Abstuerze:", read_all.abstuerze(s()))
     return 0
 
 

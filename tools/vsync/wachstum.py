@@ -1,37 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/vsync/wachstum.py -- WAECHST DAS FENSTER WIRKLICH?
-
+"""Usage:
     wachstum.py <ppm> [<ppm> ...]
-
-Die Zusage der Runde lautet: ein Fenster geht nicht schlagartig auf,
-sondern SKALIERT von AN_SCALE0 (85 Prozent) auf volle Groesse und wird
-dabei von durchsichtig nach deckend gemischt.
-
-Das ist eine Aussage ueber eine BILDFOLGE und nicht ueber ein Bild.
-Also wird je Foto die Flaeche des vorgefuehrten Fensters gezaehlt --
-es hat einen kraeftigen blauen Rahmen (0x2E6FD9) um eine helle Flaeche
-(0xE8EEF7), und beides kommt sonst nirgends im Bild vor.
-
-Gezaehlt werden Bildpunkte, die dieser Farbe NAHE sind: waehrend der
-Bewegung ist das Fenster ja gemischt, also weder ganz blau noch ganz
-Hintergrund. Genau diese Zwischenwerte sind der Beweis -- ein Fenster,
-das ohne Bewegung erscheint, ist in einem Bild gar nicht und im
-naechsten voll da.
-
-Ausgabe je Datei:
-
-    <datei> flaeche=<n> gemischt=<n>
-
-und am Ende die Kennzahlen der Folge:
-
-    FOLGE bilder=<n> min=<n> max=<n> stufen=<n> gemischt_max=<n>
-
-`stufen` ist die Zahl VERSCHIEDENER Flaechenwerte ueber der Folge --
-das ist die eigentliche Zahl: 1 heisst "kein Wachsen", mehr heisst
-"es sind Zwischengroessen im Bild angekommen".
-
-Rueckgabe 0, wenn es mindestens drei Stufen gab, sonst 1.
+    <file> area=<n> gemischt=<n>
+    SEQ bilder=<n> min=<n> max=<n> stufen=<n> gemischt_max=<n>
 """
 import sys
 

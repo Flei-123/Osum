@@ -1,41 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/sync/schnueffel.py -- DER SERVER, DER MITLESEN WILL.
-
-Dieses Programm ist der Angreifer der Runde. Es bekommt genau das, was
-ein Anbieter hat -- den ganzen Blockspeicher, jedes Oktett davon -- und
-versucht damit zwei Dinge:
-
-  (b) DEN KLARTEXT FINDEN. Eine bekannte Zeichenkette
-      ("GEHEIMNIS-4711") wird im gesamten Speicher gesucht: in den
-      Oktetten, in den Namen, in der Wurzel und in den Dateinamen. Sie
-      darf NIRGENDS vorkommen.
-
-  (c) EINE DATEI WIEDERERKENNEN. Der bekannte Angriff gegen konvergente
-      Verschluesselung: der Angreifer hat eine Datei im Verdacht,
-      rechnet den Namen aus, den sie im Speicher haette, und sieht nach.
-      Er wird ZWEIMAL gefuehrt:
-
-        NAIV   der Name ist der blanke SHA-256 des Blocks. Der Angreifer
-               braucht nichts als die vermutete Datei.
-        ECHT   der Name ist HMAC(K_NAME, Block). Der Angreifer hat
-               K_NAME nicht.
-
-      Und mit der GEGENPROBE, ohne die "nicht gefunden" nichts wert
-      waere: mit K_NAME (den nur der Besitzer hat) werden dieselben
-      Dateien SEHR WOHL gefunden. Der Speicher enthaelt sie also -- der
-      Angriff scheitert am Schluessel und nicht daran, dass nichts da
-      ist.
-
-Verwendung:
-
+"""Usage:
     schnueffel.py <speicherverz> <klartextbaum> <passphrase> <N> <r>
-                  [--habe <datei>...] [--habe-nicht <datei>...]
-
-`<speicherverz>` enthaelt PACK, INDEX und ROOT, so wie sie aus dem
-Plattenabbild von Osum herausgeholt wurden. `<klartextbaum>` ist der
-Baum, wie ihn der WIRT gebaut hat -- der Angreifer im Fall (c) darf
-Dateien kennen, das ist ja die Annahme des Angriffs.
 """
 import binascii
 import hashlib

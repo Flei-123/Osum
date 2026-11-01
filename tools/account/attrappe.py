@@ -329,19 +329,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8443)
     ap.add_argument("--zertifikat")
-    ap.add_argument("--schluessel")
-    ap.add_argument("--verzeichnis", default=".")
+    ap.add_argument("--key")
+    ap.add_argument("--directory", default=".")
     ap.add_argument("--kein-tls", action="store_true")
     ap.add_argument("--refresh-verweigern", action="store_true")
-    ap.add_argument("--access-sekunden", type=int, default=604800)
+    ap.add_argument("--access-secs", type=int, default=604800)
     a = ap.parse_args()
-    state["verzeichnis"] = a.verzeichnis
+    state["verzeichnis"] = a.directory
     state["refresh_verweigern"] = a.refresh_verweigern
     state["access_sekunden"] = a.access_secs
     srv = ThreadingHTTPServer(("0.0.0.0", a.port), Griff)
     if not a.kein_tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.load_cert_chain(a.zertifikat, a.schluessel)
+        ctx.load_cert_chain(a.zertifikat, a.key)
         ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     sys.stderr.write("attrappe: bereit auf %d\n" % a.port)

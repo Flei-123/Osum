@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/alltag/patch.py -- EIN TEXTSTUECK GEGEN EIN ANDERES TAUSCHEN, GENAU EINMAL.
-
-    patch.py <datei> <alt-datei> <neu-datei>
-
-Die Runde ALLTAG aendert Kernel-Dateien mit 5000 bis 9000 Zeilen. Ein
-Werkzeug, das "irgendwo" ersetzt, ersetzt irgendwann das Falsche; dieses
-hier verlangt, dass das alte Stueck GENAU EINMAL vorkommt, und sagt
-sonst laut nein. Es ist nur ein Bauhelfer und wird von keiner Abnahme
-gebraucht.
+"""Usage:
+    patch.py <file> <alt-file> <renewed-file>
 """
 import sys
 

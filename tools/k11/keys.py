@@ -1,26 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k11/keys.py -- TASTEN UEBER DEN QEMU-MONITOR.
-
-Ein Editor, der nur "startet ohne Absturz" beweist, beweist nichts. Diese
-Datei ist der Mensch vor der Tastatur: sie uebersetzt einen Text in die
-`sendkey`-Befehle des QEMU-Monitors und schickt sie an den laufenden
-Rechner. Was ankommt, sind echte Abtastcodes am Tor 0x60, echte
-IRQ1-Unterbrechungen und der Weg durch `kernel/drv/hid/kbd.fi` und die
-Zeilendisziplin -- kein eingeschleustes Oktett irgendwo weiter oben.
-
-    keys.py <monitor-socket> <warte-auf-datei> <muster> <taste> ...
-
-Eine Taste ist entweder ein QEMU-Name (`ret`, `spc`, `ctrl-o`, `up`,
-`shift-a`, `pgdn`, ...) oder `text:HALLO WELT`, das in einzelne Tasten
-zerlegt wird -- samt Umschalttaste fuer Grossbuchstaben und Sonderzeichen.
-
-`foto:/pfad.ppm` MITTEN in der Folge macht ein Bildschirmfoto -- der
-einzige Weg, den Schirm zu sehen, WAEHREND das Programm noch laeuft und
-nicht erst, wenn es sich schon verabschiedet hat.
-
-`warte:0.8` haelt an dieser Stelle an; `ruhe` wartet, bis der Rechner
-nichts mehr auf die Leitung schreibt.
+"""Usage:
+    keys.py <monitor-socket> <wait-auf-file> <muster> <key> ...
 """
 import os
 import socket

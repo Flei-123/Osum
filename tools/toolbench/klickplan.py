@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/toolbench/klickplan.py -- WOHIN KLICKEN, AUS DEM MITSCHNITT.
-
-    klickplan.py <serial.txt> zeile <name>      Mitte der Zeile mit diesem
-                                                Programmnamen
-    klickplan.py <serial.txt> pid <n>           dasselbe ueber die PID
-    klickplan.py <serial.txt> spalte <c>        Mitte des Kopffeldes einer Spalte
-    klickplan.py <serial.txt> knopf             Mitte des Knopfes "beenden"
+"""Usage:
+    klickplan.py <serial.txt> row <name>      Mitte der row mit diesem
+    klickplan.py <serial.txt> pid <n>           dasselbe over die PID
+    klickplan.py <serial.txt> column <c>        Mitte des Kopffeldes einer Column
+    klickplan.py <serial.txt> button             Mitte des Knopfes "beenden"
     klickplan.py <serial.txt> ja                Mitte des Ja-Knopfes des Dialogs
-    klickplan.py <serial.txt> pidvon <name>     nur die PID ausgeben
-    klickplan.py <serial.txt> navpage <n>       Mitte der Zeile n der Seitenleiste
-
-Es gibt hier KEINE Anordnung. Jede Zahl steht im Mitschnitt, weil das
-Programm sie gemeldet hat:
-
-    wlib: win id=.. x=.. y=.. cx=.. cy=..    wo die Arbeitsflaeche liegt
-    taskmgr: rect id=6 kind=2 x=.. y=.. ..   der Knopf
-    taskmgr: tabelle x=.. y=.. kopf=.. zh=.. die Tabelle
-    taskmgr: spalte c=.. x=.. w=..           ein Kopffeld
-    taskmgr: zeile r=.. pid=.. y=.. name=..  eine Zeile
-
-Ein Laeufer, der die Zeilenhoehe selbst ausrechnete, pruefte damit
-seinen eigenen Nachbau der Anordnung. Diese Datei rechnet nur EINES:
-Fensterkoordinate plus Ursprung der Arbeitsflaeche.
+    klickplan.py <serial.txt> pidvon <name>     only die PID ausgeben
+    klickplan.py <serial.txt> navpage <n>       Mitte der row n der Seitenleiste
 """
 import re
 import sys

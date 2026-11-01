@@ -606,8 +606,8 @@ mkdir -p "$OUT/netzkanal/stable" "$OUT/netzkanal/test"
 cp "$OUT/netz2"/* "$OUT/netzkanal/stable/"
 cp "$OUT/quelle2"/* "$OUT/netzkanal/test/" 2>/dev/null
 rm -f "$OUT/netzkanal/test/VERZEICHNIS" "$OUT/netzkanal/test/VERZEICHNIS.sig"
-python3 tools/ota/listing.py "$OUT/netzkanal/test" --fassung 4 \
-    --schluessel "$OUT/geheim.key" > "$OUT/netzkanal.log" 2>&1 \
+python3 tools/ota/listing.py "$OUT/netzkanal/test" --revision 4 \
+    --key "$OUT/geheim.key" > "$OUT/netzkanal.log" 2>&1 \
     && ok "two channels built: stable = version 2, test = version 4" \
     || { cat "$OUT/netzkanal.log"; bad "Kanalbaum"; }
 

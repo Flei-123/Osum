@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/netview/blatt.py -- die sieben Zeichen nebeneinander, 1:1 und gross.
-
-Runde NETVIEW, Nachtrag. Das hier ist die EINZIGE Ausgabe dieser Runde,
-die niemand nachrechnet: ein Blatt fuer einen Menschen, der sehen will,
-wie die Zeichen aussehen. Alles, was gemessen wird, wird woanders
-gemessen -- `icons.py pruefe` rechnet Kontrast und Schattenrisse,
-`schau.py` haelt das Bild gegen den Schirm.
-
-Es steht trotzdem hier und nicht in einem Notizbuch, weil die
-ZIELGROSSE der Punkt ist: die obere Reihe jedes Blocks ist 1:1, also
-genau so gross wie das Zeichen auf einer 28 Bildpunkte hohen
-Taskleiste wirklich ist. Die vergroesserte Reihe darunter ist zum
-Nachschauen, wie es gebaut ist, und niemals die Reihe, nach der
-entschieden wird.
-
-    blatt.py <ziel.png>
+"""Usage:
+    blatt.py <target.png>
 """
 
 import os
@@ -33,11 +19,11 @@ AIR = 6
 
 
 def image(name, farben):
-    palette, zeilen = symmod.read_2(iconmod.zeichnung(name))
-    h = len(zeilen)
-    w = len(zeilen[0])
+    palette, rows = symmod.read_2(iconmod.zeichnung(name))
+    h = len(rows)
+    w = len(rows[0])
     points = []
-    for z in zeilen:
+    for z in rows:
         reihe = []
         for c in z:
             v = palette[c]

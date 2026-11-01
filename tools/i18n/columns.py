@@ -90,14 +90,14 @@ def ketten(path_2):
     return aus
 
 
-def all_ketten(wurzel):
-    for dp, dns, fns in os.walk(os.path.join(wurzel, 'kernel')):
+def all_ketten(root):
+    for dp, dns, fns in os.walk(os.path.join(root, 'kernel')):
         dns[:] = [d for d in dns if not d.startswith('.')]
         for fn in sorted(fns):
             if not fn.endswith('.fi'):
                 continue
             path_2 = os.path.join(dp, fn)
-            rel = os.path.relpath(path_2, wurzel).replace(os.sep, '/')
+            rel = os.path.relpath(path_2, root).replace(os.sep, '/')
             for nr, z in enumerate(
                     open(path_2, encoding='utf-8').read().split('\n'), 1):
                 if z.lstrip().startswith('//'):
@@ -108,11 +108,11 @@ def all_ketten(wurzel):
 
 
 def main(argv):
-    wurzel = os.environ.get('OSUM_ROOT', '.')
+    root = os.environ.get('OSUM_ROOT', '.')
     schief = []
     geprueft = 0
     for file_2, names, width_2, wozu in COLUMNS:
-        path_2 = os.path.join(wurzel, file_2)
+        path_2 = os.path.join(root, file_2)
         if not os.path.exists(path_2):
             schief.append('%s fehlt' % file_2)
             continue
@@ -137,7 +137,7 @@ def main(argv):
 
     eng = []
     nk = 0
-    for rel, nr, name, N, roh in all_ketten(wurzel):
+    for rel, nr, name, N, roh in all_ketten(root):
         nk += 1
         b = oktette(roh)
         if b != N:

@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""probe1.py -- die zwei Sperrfehler nachmessen (Runde TUERSCHLOSS).
-
-Fehler 1: kein Programm startet (pid=-22).
-Fehler 2: die Shell stirbt endlos (`sh: ready, osum` / `sh: bye`).
-
-Gemessen wird am SERIELLEN MITSCHNITT und am BILD -- nicht behauptet.
+"""Usage:
+    probe1.py -- die two Sperrfehler nachmessen (Runde TUERSCHLOSS).
 """
 import os
 import re
@@ -18,8 +14,8 @@ from klick import Maschine
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 NAME = sys.argv[1] if len(sys.argv) > 1 else "p1"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SHOTS = os.path.join(HIER, "shots")
 os.makedirs(SHOTS, exist_ok=True)
@@ -34,12 +30,12 @@ def serial():
 
 def start():
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
 
 
-def warte_auf_schreibtisch(frist=90):
-    bis = time.time() + frist
+def wait_for_desktop(deadline=90):
+    bis = time.time() + deadline
     while time.time() < bis:
         s = serial()
         if "desktop: ready" in s or "taskbar: STEHT" in s:
@@ -52,17 +48,17 @@ def main():
     ergebnis = {}
     start()
     t0 = time.time()
-    fertig = warte_auf_schreibtisch()
+    fertig = wait_for_desktop()
     ergebnis["boot_s"] = round(fertig - t0, 1) if fertig else None
     print("BOOT: %s s" % ergebnis["boot_s"])
 
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
-    m.foto(os.path.join(SHOTS, "%s-01-schreibtisch.png" % NAME))
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
+    m.photo(os.path.join(SHOTS, "%s-01-schreibtisch.png" % NAME))
 
     # --- Startmenue per Maus aufmachen (der Weg, der in DURCHKLICK ging)
-    m.klick_auf(18, HOEHE - 20)
+    m.klick_auf(18, HEIGHT - 20)
     time.sleep(2.0)
-    m.foto(os.path.join(SHOTS, "%s-02-startmenue.png" % NAME))
+    m.photo(os.path.join(SHOTS, "%s-02-startmenue.png" % NAME))
 
     s = serial()
     # Was steht im Starter?
@@ -83,9 +79,9 @@ def main():
         fx, fy, fw, fh = (int(g) for g in mm.groups())
         m.klick_auf(fx + fw // 2, fy + 70)
     else:
-        m.klick_auf(120, HOEHE - 120)
+        m.klick_auf(120, HEIGHT - 120)
     time.sleep(3.0)
-    m.foto(os.path.join(SHOTS, "%s-03-nach-klick.png" % NAME))
+    m.photo(os.path.join(SHOTS, "%s-03-nach-klick.png" % NAME))
 
     s = serial()
     starts = re.findall(r"launcher: start (\S+) pid=(-?\d+)", s)
@@ -113,12 +109,12 @@ def main():
           % (r2, b2, r2 - ergebnis["sh_ready"], b2 - ergebnis["sh_bye"]))
 
     # --- Fenster: wie viele stehen?
-    fenster = re.findall(r"wm: fenster n=(\d+)", s)
-    ergebnis["fenster"] = fenster[-5:] if fenster else []
+    window = re.findall(r"wm: fenster n=(\d+)", s)
+    ergebnis["fenster"] = window[-5:] if window else []
     ergebnis["panik"] = len(re.findall(r"PANIK|#PF|#UD|panic", s))
     print("PANIK/Ausnahmen:", ergebnis["panik"])
 
-    m.foto(os.path.join(SHOTS, "%s-04-nach-30s.png" % NAME))
+    m.photo(os.path.join(SHOTS, "%s-04-nach-30s.png" % NAME))
 
     with open(os.path.join(D, "ergebnis.txt"), "w") as f:
         for k, v in ergebnis.items():

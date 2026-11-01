@@ -1,31 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/knoepfe.py -- DIE DREI FENSTERKNOEPFE, AUS DEM BILD.
-
-Justin hat den WINDOWS-Stil verlangt und den macOS-Stil ausdruecklich
-ausgeschlossen: keine drei bunten Kreise, sondern rechts oben ein
-waagerechter Strich, ein Quadrat und ein Kreuz -- und beim Ueberfahren
-eine dezente graue Flaeche, beim Schliessen eine ROTE mit weissem
-Kreuz.
-
-Das ist eine Aussage ueber Bildpunkte, also wird sie an Bildpunkten
-geprueft und nicht an einer Zeile im Mitschnitt.  Das Programm rechnet
-die Lage der drei Felder aus der `wm: win`-Zeile des scharfen Fensters
-aus -- dieselbe Rechnung wie `kernel/ui/wm.fi`, `cap_x0` -- und liest dann
-das 10 x 10 grosse Zeichenfeld jedes Knopfes aus:
-
-  min     genau EINE Zeile des Feldes traegt Tinte, und sie ist voll
-  max     die vier Raender tragen Tinte, das Innere nicht
-  close   beide Diagonalen tragen Tinte, die Mitte der Kanten nicht
-
-  hover   im Feld des ueberfahrenen Schliessen-Knopfes ist die
-          HAEUFIGSTE Farbe rot (mehr Rot als Gruen und Blau zusammen um
-          einen deutlichen Abstand), und das Kreuz darauf ist hell
-  macos   nirgends im Titelbalken steht ein Kreis: geprueft als "es gibt
-          keine drei Flaechen von 8 bis 14 Bildpunkten Durchmesser in
-          drei VERSCHIEDENEN gesaettigten Farben nebeneinander"
-
-    knoepfe.py <bild.ppm> <serial.txt>
+"""Usage:
+    knoepfe.py <image.ppm> <serial.txt>
 """
 import re
 import sys
@@ -112,13 +88,13 @@ def main(argv):
     reason = cnt.most_common(1)[0][0]
 
     g = felder[0][2]
-    zeilen = [sum(1 for c in row if dunkel(c, reason)) for row in g]
-    voll = [i for i, n in enumerate(zeilen) if n >= 9]
-    empty_2 = [i for i, n in enumerate(zeilen) if n == 0]
+    rows = [sum(1 for c in row if dunkel(c, reason)) for row in g]
+    voll = [i for i, n in enumerate(rows) if n >= 9]
+    empty_2 = [i for i, n in enumerate(rows) if n == 0]
     if len(voll) == 1 and len(empty_2) == 9:
         print("min: stroke ok  (row %d full, nine empty)" % voll[0])
     else:
-        print("min: NO stroke -- rows %s" % zeilen)
+        print("min: NO stroke -- rows %s" % rows)
         bad += 1
 
     g = felder[1][2]

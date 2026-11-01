@@ -29,7 +29,7 @@ MUSTER = re.compile(
     re.M)
 
 
-def lies(path_2):
+def read_text(path_2):
     with open(path_2, "rb") as f:
         roh = f.read().decode("latin1")
     aus = {}
@@ -52,8 +52,8 @@ def check_2(root):
             error.append("Datei fehlt: %s" % p)
     if error:
         return error, {}, {}
-    kern = lies(kp)
-    libc = lies(lp)
+    kern = read_text(kp)
+    libc = read_text(lp)
 
     for name, tab, file in (("kernel", kern, KERN), ("libc", libc, LIBC)):
         echt = without_exceptions(tab)
@@ -153,7 +153,7 @@ def main():
                                       " ".join(str(v) for v in frei)))
         return 0
 
-    if args and args[0] == "--liste":
+    if args and args[0] == "--items":
         all_2 = {}
         for n, (v, _) in kern.items():
             all_2.setdefault(v, []).append("kernel:" + n)

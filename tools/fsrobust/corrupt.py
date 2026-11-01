@@ -1,38 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/fsrobust/corrupt.py -- Abbilder, die MIT ABSICHT kaputt sind.
-
-Die Aufgabe dieser Runde verlangt von `/bin/fsck` zwei Dinge, und das
-zweite ist das schwerere: es soll Schaeden finden UND es soll auch bei
-einem mutwillig zerstoerten Datentraeger FERTIG WERDEN statt sich
-aufzuhaengen. Das laesst sich nur messen, wenn es solche Datentraeger
-gibt -- also baut dieses Programm sie.
-
-Jeder Fall greift genau eine Annahme an, die ein Pruefprogramm
-stillschweigend machen koennte:
-
-  kennung      der Superblock traegt keine OSUM-OFS-Kennung mehr.
-  inodes       er behauptet 2^40 Inodes -- mehr, als zwischen Tabelle
-               und Daten Platz haben. Wer die Zahl glaubt, laeuft
-               eine Billion Mal durch eine Tabelle, die es nicht gibt.
-  bloecke      er behauptet 2^50 Bloecke, also weit mehr als das Geraet.
-  bereiche     Datenbereich VOR der Inodetabelle -- die Reihenfolge, auf
-               der jede Rechnung beruht, ist umgedreht.
-  zeigerkreis  ein einfach indirekter Blockzeiger zeigt AUF SICH SELBST.
-               Wer ihm folgt, ohne die Tiefe zu zaehlen, kehrt nie um.
-  verzkreis    zwei Verzeichnisse enthalten einander. Ein Durchlauf ohne
-               Marke laeuft im Kreis.
-  selbstverz   ein Verzeichnis enthaelt SICH SELBST unter einem Namen.
-  doppelt      zwei Inodes zeigen auf denselben Datenblock.
-  wildzeiger   ein Blockzeiger zeigt hinter das Ende der Platte.
-  totlink      ein Verzeichniseintrag zeigt auf eine freie Inode.
-  leerkarte    die Blockkarte ist genullt: alles sieht frei aus, obwohl
-               es benutzt wird.
-  muell        die ersten 64 Bloecke sind Zufallsoktette.
-  jmuell       der Bestaetigungsblock des Journals traegt die richtige
-               Kennung und eine falsche Pruefsumme -- genau das, was
-               ein halb geschriebener Sektor hinterlaesst.
-
+"""Usage:
     corrupt.py <grundabbild> <ausgabeverzeichnis> [<fall> ...]
 """
 
@@ -86,16 +54,16 @@ class Roh:
     def dirent(self):
         return self.g(mkfs.SB["DIRENT"]) or mkfs.DIRENT
 
-    def inode_get(self, ino, feld):
+    def inode_get(self, ino, field):
         b = self.blk(self.itable + (ino - 1) // self.ipb)
         o = ((ino - 1) % self.ipb) * self.isize
-        return struct.unpack_from("<Q", b, o + feld)[0]
+        return struct.unpack_from("<Q", b, o + field)[0]
 
-    def inode_set(self, ino, feld, v):
+    def inode_set(self, ino, field, v):
         nr = self.itable + (ino - 1) // self.ipb
         b = self.blk(nr)
         o = ((ino - 1) % self.ipb) * self.isize
-        struct.pack_into("<Q", b, o + feld, v & 0xFFFFFFFFFFFFFFFF)
+        struct.pack_into("<Q", b, o + field, v & 0xFFFFFFFFFFFFFFFF)
         self.put(nr, b)
 
     def zu(self):
@@ -107,9 +75,9 @@ FAELLE = ["kennung", "inodes", "bloecke", "bereiche", "zeigerkreis",
           "leerkarte", "muell", "jmuell"]
 
 
-def mach(fall, reason, ziel):
-    shutil.copyfile(reason, ziel)
-    r = Roh(ziel)
+def mach(fall, reason, target):
+    shutil.copyfile(reason, target)
+    r = Roh(target)
     if fall == "kennung":
         r.s(mkfs.SB["MAGIC"], 0xDEADBEEFDEADBEEF)
     elif fall == "inodes":
@@ -127,12 +95,12 @@ def mach(fall, reason, ziel):
         r.inode_set(2, mkfs.I_INDIRECT, b)
         r.inode_set(2, mkfs.I_SIZE, 1 << 20)
     elif fall == "verzkreis":
-        image = _image(ziel)
+        image = _image(target)
         binino = image.finde("/bin")
         image.f.close()
         _dir_add(r, binino, "hoch", 1)
     elif fall == "selbstverz":
-        image = _image(ziel)
+        image = _image(target)
         binino = image.finde("/bin")
         image.f.close()
         _dir_add(r, binino, "ich", binino)
@@ -142,7 +110,7 @@ def mach(fall, reason, ziel):
     elif fall == "wildzeiger":
         r.inode_set(2, mkfs.I_DIRECT, r.g(mkfs.SB["BLOCKS"]) + 1000)
     elif fall == "totlink":
-        image = _image(ziel)
+        image = _image(target)
         binino = image.finde("/bin")
         image.f.close()
         _dir_add(r, binino, "nirgends", r.g(mkfs.SB["INODES"]) - 1)
@@ -166,7 +134,7 @@ def mach(fall, reason, ziel):
     else:
         raise SystemExit("kaputt: unbekannter Fall %s" % fall)
     r.zu()
-    return ziel
+    return target
 
 
 def _image(path_2):
@@ -192,11 +160,11 @@ def _frei(r):
     raise SystemExit("kaputt: kein freier Block")
 
 
-def _dir_add(r, dirino, name, ziel):
+def _dir_add(r, dirino, name, target):
     dirent = r.dirent
     sz = r.inode_get(dirino, mkfs.I_SIZE)
     roh = bytearray(dirent)
-    struct.pack_into("<Q", roh, 0, ziel)
+    struct.pack_into("<Q", roh, 0, target)
     nm = name.encode("latin-1")[:dirent - 9] + b"\0"
     roh[8:8 + len(nm)] = nm
     geschrieben = 0

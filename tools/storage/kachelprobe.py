@@ -1,30 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/storage/kachelprobe.py -- die Treemap NACHMESSEN, im Bild.
-
-Runde SPEICHER. `/bin/speicher` meldet ueber die serielle Leitung, welche
-Kachel es wohin und wie breit gemalt hat. Das ist die Rechnung des
-Programms ueber sich selbst, und sie beweist nichts: ein Programm, das
-die Flaechen falsch aufteilt, meldet die falschen Flaechen genauso
-zuversichtlich. Die Lehre aus Runde K7B steht im Laeufer von K15 und
-gilt hier wieder -- gemessen wird im BILD.
-
-WAS DIESE DATEI TUT:
-
-  1. Sie sucht den EINEN Versatz, mit dem ALLE gemeldeten Kacheln im Bild
-     ihre gemeldete Farbe haben. Ein Versatz, der nur fuer die Haelfte
-     passt, ist kein Versatz, sondern Zufall -- Kacheln sind gross, und
-     ein danebenliegender Griff trifft leicht die Nachbarkachel.
-  2. Sie misst die BREITE JEDER KACHEL AM BILD: wie viele Bildpunkte in
-     einer Reihe hintereinander diese Farbe tragen. Das ist die
-     eigentliche Zusage der Darstellung -- die Flaeche soll dem Anteil
-     entsprechen. Meldete das Programm 130 und malte 40, faende Punkt 1
-     die Kachel trotzdem.
-  3. Sie prueft, dass die Breiten in derselben REIHENFOLGE fallen wie die
-     Anteile. Eine Treemap, in der die kleinste Kachel die groesste ist,
-     ist schlimmer als gar keine.
-
-    kachelprobe.py <bild.ppm> <serielle-ausgabe>
+"""Usage:
+    kachelprobe.py <image.ppm> <serielle-output>
 """
 
 import re

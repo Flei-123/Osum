@@ -27,11 +27,11 @@ python3 tools/ota/mkcerts.py "$OUT/certs" "$NAME" 10.0.2.2 \
 
 echo "== 2. der Schluesselbund"
 rm -f "$OUT/bund.json" "$OUT/fremd.json"
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" anlegen \
+python3 tools/ota/keyring.py "$OUT/bund.json" anlegen \
     --aus "$OUT/geheim.key" || exit 1
 OSUM_SIGN_PASS=fremd1 OSUM_ERSATZ_PASS=fremd2 \
-    python3 tools/ota/schluesselbund.py "$OUT/fremd.json" anlegen || exit 1
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" oeffentlich ersatz \
+    python3 tools/ota/keyring.py "$OUT/fremd.json" anlegen || exit 1
+python3 tools/ota/keyring.py "$OUT/bund.json" oeffentlich ersatz \
     -o "$OUT/ersatz.pub" || exit 1
 
 echo "== 3. four deliveries (1..4) from the registry"
@@ -40,7 +40,7 @@ mkdir -p "$OUT/stand"
 for f in 1 2 3 2; do
     rm -f "$OUT/stand"/*.opk
     cp "$OUT/quelle$f/hallo-$f.opk" "$OUT/stand/"
-    python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
+    python3 tools/ota/publish.py "$OUT/aus" --stand "$OUT/stand" \
         --bund "$OUT/bund.json" --notiz "hallo-$f" 2>&1 | grep -v signiert
 done
 

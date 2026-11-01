@@ -31,10 +31,10 @@ def entschaerf(roh):
     return t
 
 
-def saetze(wurzel):
+def saetze(root):
     aus = []
     for ort in ("kernel", "lib"):
-        p0 = os.path.join(wurzel, ort)
+        p0 = os.path.join(root, ort)
         for d, _, fs in os.walk(p0):
             for f in fs:
                 if not f.endswith(".fi"):
@@ -45,10 +45,10 @@ def saetze(wurzel):
                         for m in STR.finditer(z):
                             t = entschaerf(m.group(1)).strip()
                             if UMLAUT.search(t):
-                                aus.append((os.path.relpath(p, wurzel),
+                                aus.append((os.path.relpath(p, root),
                                             nr, t))
     for under in ("locale/de", ):
-        p0 = os.path.join(wurzel, under)
+        p0 = os.path.join(root, under)
         if not os.path.isdir(p0):
             continue
         for f in sorted(os.listdir(p0)):
@@ -61,8 +61,8 @@ def saetze(wurzel):
                         continue
                     t = z.split("=", 1)[1].strip()
                     if UMLAUT.search(t):
-                        aus.append((os.path.relpath(p, wurzel), nr, t))
-    p0 = os.path.join(wurzel, "assets", "apps")
+                        aus.append((os.path.relpath(p, root), nr, t))
+    p0 = os.path.join(root, "assets", "apps")
     if os.path.isdir(p0):
         for d in sorted(os.listdir(p0)):
             p = os.path.join(p0, d, "INFO")
@@ -77,7 +77,7 @@ def saetze(wurzel):
                         continue
                     t = t.strip()
                     if UMLAUT.search(t):
-                        aus.append((os.path.relpath(p, wurzel), nr, t))
+                        aus.append((os.path.relpath(p, root), nr, t))
     return aus
 
 
@@ -105,9 +105,9 @@ def phrasen(satz):
     return aus
 
 
-def laeufer(wurzel):
+def laeufer(root):
     for ort in LAEUFER_ORT:
-        p0 = os.path.join(wurzel, ort)
+        p0 = os.path.join(root, ort)
         if not os.path.isdir(p0):
             continue
         for d, _, fs in os.walk(p0):
@@ -115,21 +115,21 @@ def laeufer(wurzel):
                 if not f.endswith(LAEUFER_ENDUNG):
                     continue
                 p = os.path.join(d, f)
-                rel = os.path.relpath(p, wurzel)
+                rel = os.path.relpath(p, root)
                 if any(rel.startswith(a) for a in AUS):
                     continue
                 yield p, rel
 
 
-def check(wurzel):
-    alle = saetze(wurzel)
+def check(root):
+    everything = saetze(root)
     plan = {}
-    for file_2, nr, satz in alle:
+    for file_2, nr, satz in everything:
         for p in phrasen(satz):
             plan.setdefault(p, (file_2, nr, satz))
     funde = []
     n_l = 0
-    for p, rel in laeufer(wurzel):
+    for p, rel in laeufer(root):
         n_l += 1
         with open(p, encoding="utf-8", errors="replace") as fh:
             for nr, z in enumerate(fh, 1):
@@ -138,14 +138,14 @@ def check(wurzel):
                 for phrase, (qd, qn, qs) in plan.items():
                     if phrase in z:
                         funde.append((rel, nr, phrase, qd, qn, qs))
-    return funde, len(alle), len(plan), n_l
+    return funde, len(everything), len(plan), n_l
 
 
 def main(argv):
-    wurzel = os.path.abspath(
+    root = os.path.abspath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-    only_nums = "--zahlen" in argv
-    funde, n_s, n_p, n_l = check(wurzel)
+    only_nums = "--numbers" in argv
+    funde, n_s, n_p, n_l = check(root)
     if not only_nums:
         for rel, nr, phrase, qd, qn, qs in funde:
             print("VERALTET  %s:%d sucht %r" % (rel, nr, phrase))

@@ -25,7 +25,7 @@ BRAND_AUF = "fn push_login"
 BRAND_ZU = "^}"
 
 
-def lines_der_anmeldung(text):
+def login_lines(text):
     lines = text.split("\n")
     in_ = False
     raus = set()
@@ -53,7 +53,7 @@ def check(root):
             verstoesse.append((rel, 0, "die Datei fehlt"))
             continue
         text = open(path_2, encoding="utf-8").read()
-        erlaubt = lines_der_anmeldung(text) if rel.endswith(("konto.fi", "account.fi")) \
+        erlaubt = login_lines(text) if rel.endswith(("konto.fi", "account.fi")) \
             else set()
         for nr, line in enumerate(text.split("\n"), 1):
             geprueft += 1
@@ -88,12 +88,12 @@ def push_nums(root):
 
 def main():
     if len(sys.argv) < 2:
-        print("split.py <wurzel> [--zahlen]")
+        print("split.py <wurzel> [--numbers]")
         return 2
     root = sys.argv[1]
-    zahlen = "--zahlen" in sys.argv
+    numbers = "--numbers" in sys.argv
     verstoesse, geprueft = check(root)
-    if zahlen:
+    if numbers:
         print("geprueft=%d dateien=%d verstoesse=%d"
               % (geprueft, len(ALLGEMEIN), len(verstoesse)))
         for rel, n, k in push_nums(root):

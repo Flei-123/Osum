@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/wm/monitor.py -- Maus und Tastatur von aussen in die Maschine.
-
+"""Usage:
     monitor.py <monitor-socket> <befehlsdatei> [pause]
-
-Runde K7 hat ueber den QEMU-Monitor Bildschirmfotos geholt
-(`tools/gfx/screenshot.py`).  Runde K10 braucht denselben Weg in die andere
-Richtung: ein Fensterserver, der nie eine Maus gesehen hat, ist nicht
-gemessen.  Der Monitor kann das:
-
-    mouse_move <dx> <dy>     eine RELATIVE Bewegung -- das PS/2-Geraet
-                             kennt nichts anderes, es schickt
-                             Unterschiede, keine Orte.
-    mouse_button <maske>     1 = links, 2 = Mitte, 4 = rechts
-    sendkey <taste>          ein Tastendruck samt Loslassen
-
-WARUM DIE BEWEGUNGEN KLEIN SIND UND WARUM ES ERST IN DIE ECKE GEHT.
-Ein PS/2-Paket traegt neun Bit je Achse; QEMU zerlegt groessere
-Bewegungen in mehrere Pakete, und geht dabei eines verloren, ist der
-Endpunkt ein anderer.  Ein Testlauf, der auf einen BILDPUNKT genau
-rechnen will, faehrt deshalb zuerst mit mehreren grossen Schritten in
-die linke obere Ecke -- dort haelt der Anschlag, und die Vorgeschichte
-ist geloescht -- und danach mit Schritten unter 128 an die Stelle, die
-er meint.  Von da an ist der Ort eine Rechnung und keine Hoffnung.
-
-Lines starting with a hash are notes.  `warte <sekunden>`
-haelt zwischendurch an.
+    mouse_button <maske>     1 = left, 2 = Mitte, 4 = right
+    Lines starting with a hash are notes.  `wait <secs>`
 """
 import socket
 import sys

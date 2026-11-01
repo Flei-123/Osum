@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/alltag/rechner.py -- DER RECHNER DES WIRTS, ZUM VERGLEICHEN.
-
-    rechner.py liste                 die Ausdruecke, einer je Zeile
-    rechner.py skript <ziel>         das Shell-Skript fuer den Gast
-    rechner.py pruefen <serial.txt>  Gast gegen Python, Zeile fuer Zeile
-
-Es ist ABSICHT, dass hier Python rechnet und nicht ein zweites Mal
-derselbe Zerteiler: eine Zusage, die gegen sich selbst geprueft wird,
-ist keine. Uebersetzt wird nur die Schreibweise -- `^` zu `**`, `n!` zu
-`factorial(n)`, `ln` zu `log`, `log` zu `log10` --, gerechnet wird mit
-der Bibliothek des Wirts.
-
-Verglichen wird mit einer RELATIVEN Schranke von 1e-9. Der Gast druckt
-zwoelf geltende Ziffern, und seine `exp`/`ln`/`sin` sind Naeherungen in
-Firn; auf zwoelf Stellen genau zu sein ist die Zusage, auf sechzehn
-waere geflunkert.
+"""Usage:
+    rechner.py items                 die Ausdruecke, einer per row
+    rechner.py skript <target>         das Shell-Skript for den Gast
+    rechner.py verify <serial.txt>  Gast gegen Python, row for row
 """
 import math
 import re
@@ -95,7 +83,7 @@ def skript(target: str) -> int:
     return 0
 
 
-def pruefen(serial: str) -> int:
+def verify(serial: str) -> int:
     text = open(serial, "rb").read().decode("utf-8", "replace")
     lines = text.split("\n")
     aus = ausdruecke()
@@ -147,7 +135,7 @@ def main(argv):
     if argv[1] == "skript" and len(argv) > 2:
         return skript(argv[2])
     if argv[1] == "pruefen" and len(argv) > 2:
-        return pruefen(argv[2])
+        return verify(argv[2])
     print(__doc__)
     return 2
 

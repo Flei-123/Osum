@@ -91,7 +91,7 @@ gegen "die Umlautform in keys=" "assets/apps/launcher.osp/INFO" \
 
 echo
 echo "-- 3. the source: no visible transliteration any more"
-OSUM_ROOT=. python3 tools/i18n/quellen.py --alle > "$TMPD/q.txt" 2>&1
+OSUM_ROOT=. python3 tools/i18n/sources.py --everything > "$TMPD/q.txt" 2>&1
 sed -n '1p' "$TMPD/q.txt" | sed 's/^/     /'
 S=$(sed -n 's/.*SICHTBAR=\([0-9]*\).*/\1/p' "$TMPD/q.txt")
 M=$(sed -n 's/.*MITSCHNITT=\([0-9]*\).*/\1/p' "$TMPD/q.txt")
@@ -104,15 +104,15 @@ gegen "eine Beschriftung in einem FENSTERPROGRAMM" \
     "kernel/user/themetest.fi" \
     'g_ent: [u8; 31] = "ein Textfeld mit Einfügemarke\0"' \
     'g_ent: [u8; 31] = "ein Textfeld mit Einfuegemarke\0"' \
-    python3 tools/i18n/quellen.py --streng
+    python3 tools/i18n/sources.py --streng
 gegen "eine Meldung eines Befehls" "kernel/user/opk.fi" \
     'E_HASH: [u8; 20] = "opk: checksum wrong\0"' \
     'E_HASH: [u8; 23] = "opk: Pruefsumme falsch\0"' \
-    python3 tools/i18n/quellen.py --streng
+    python3 tools/i18n/sources.py --streng
 gegen "eine Beschriftung im Energie-Fenster" "kernel/user/power.fi" \
     'var s_t: [u8; 11] = "Wärme:   \0"' \
     'var s_t: [u8; 11] = "Waerme:  \0"' \
-    python3 tools/i18n/quellen.py --streng
+    python3 tools/i18n/sources.py --streng
 
 k2="$TMPD/kopie2"; kopie "$k2"
 python3 - "$k2/kernel/user/storage.fi" <<'PY'
@@ -127,8 +127,8 @@ assert alt in s, "der Anker fehlt"
 open(p, 'w', encoding='utf-8').write(s.replace(alt, neu, 1))
 PY
 sichtbar() { sed -n 's/.*SICHTBAR=\([0-9]*\).*/\1/p' "$1" | head -1; }
-python3 tools/i18n/quellen.py > "$TMPD/gegen2-vor.txt" 2>&1
-( cd "$k2" && OSUM_ROOT=. python3 tools/i18n/quellen.py ) \
+python3 tools/i18n/sources.py > "$TMPD/gegen2-vor.txt" 2>&1
+( cd "$k2" && OSUM_ROOT=. python3 tools/i18n/sources.py ) \
     > "$TMPD/gegen2.txt" 2>&1
 SV=$(sichtbar "$TMPD/gegen2-vor.txt"); SN=$(sichtbar "$TMPD/gegen2.txt")
 if [ -n "$SV" ] && [ "$SV" = "$SN" ] \
@@ -149,7 +149,7 @@ if [ "$DN" -ge 13 ]; then ok "WIRE marks in the kernel: $DN"; else bad "WIRE mar
 
 echo
 echo "-- 4. every typed mark accepts both spellings"
-OSUM_ROOT=. python3 tools/i18n/quellen.py --marken > "$TMPD/m.txt" 2>&1
+OSUM_ROOT=. python3 tools/i18n/sources.py --marken > "$TMPD/m.txt" 2>&1
 MRC=$?
 sed 's/^/     /' "$TMPD/m.txt"
 is "marken rc" "$MRC" "0"
@@ -158,7 +158,7 @@ mind "Marken mit Umschrift, alle mit Umlautform daneben" "${MN:-0}" 6
 gegen "die zweite Schreibung eines Unterbefehls" "kernel/user/trashbin.fi" \
     'var c_zur_x: [u8; 8] = "zurück\0"' \
     'var c_zur_x: [u8; 8] = "zurxck\0"' \
-    python3 tools/i18n/quellen.py --marken
+    python3 tools/i18n/sources.py --marken
 
 echo
 echo "-- 5. the columns in CHARACTERS, the buffers in bytes"

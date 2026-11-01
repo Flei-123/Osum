@@ -184,7 +184,7 @@ mk_ssdt() { # name [argumente...]
         || { bad "ssdt.py scheitert bei '$n'"; cat "$TMPD/$n.soll"; }
 }
 mk_ssdt akku
-mk_ssdt laden --zustand 2 --rest 2200 --rate 1100 --netz 1
+mk_ssdt laden --state 2 --rest 2200 --rate 1100 --network 1
 mk_ssdt heiss --temp 3632
 mk_ssdt methode --methode
 mk_ssdt ohneakku --kein-akku

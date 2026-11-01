@@ -500,7 +500,7 @@ def main(argv):
         s = Font(argv[1], int(argv[2]))
         g = s.glyphe(ord(argv[3]))
         print("w=%d h=%d left=%d top=%d adv26=%d" %
-              (g.w, g.h, g.links, g.top_2, g.adv26))
+              (g.w, g.h, g.left, g.top_2, g.adv26))
         for y in range(g.h):
             print("".join(" .:-=+*#%@"[min(9, g.punkt(x, y) * 10 // 256)]
                           for x in range(g.w)))

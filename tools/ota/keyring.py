@@ -1,70 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/ota/schluesselbund.py -- WO DER GEHEIME SCHLUESSEL LIEGT.
-
-    schluesselbund.py <bund> anlegen                 Haupt- und Ersatzschluessel
-    schluesselbund.py <bund> zeigen
-    schluesselbund.py <bund> oeffentlich haupt|ersatz [-o datei]
-    schluesselbund.py <bund> signieren <datei> -o <sig>  [--wer haupt|ersatz]
-    schluesselbund.py <bund> wechseln                neuer Hauptschluessel,
-                                                     Kettensatz mit dem alten
-    schluesselbund.py <bund> kette                   die Kettensaetze ausgeben
-
-DIE ENTSCHEIDUNG, DIE `docs/OTA.md` OFFENGELASSEN HAT.
-
-Dort steht: "Der geheime Schluessel liegt unverschluesselt auf der
-Baumaschine (`$OUT/geheim.key`); wo er auf Dauer liegen soll -- Tresor,
-HSM, getrennte Signiermaschine --, hat noch niemand entschieden."
-
-ENTSCHIEDEN WIRD: **verschluesselte Datei mit Passphrase, und der
-Signierschritt ist vom Bauschritt GETRENNT.** Begruendung, in der
-Reihenfolge, in der sie zaehlt:
-
-1. **Getrennte Signiermaschine ist das Ziel, aber sie ist eine
-   ORGANISATION und kein Programm.** Was ein Programm dafuer liefern
-   muss, ist eine SCHNITTSTELLE, hinter der der Schluessel steckt:
-   "hier sind Oktette, gib mir eine Signatur". Genau die ist
-   `signieren`. `veroeffentlichen.py` ruft sie auf und braucht selbst
-   keinen Schluessel; wer die Signiermaschine trennen will, kopiert die
-   drei zu signierenden Dateien hinueber und die drei Signaturen
-   zurueck. Der Bau aendert sich dafuer nicht um eine Zeile.
-
-2. **HSM waere gelogen.** Auf diesem Wirt steckt kein YubiKey und kein
-   TPM-gestuetzter Schluessel, und eine Umsetzung, die nur so tut,
-   waere schlechter als keine. Was fuer die naechste Stufe fehlt, steht
-   unten und ist kurz, WEIL diese Stufe die Naht schon an der richtigen
-   Stelle hat.
-
-3. **Unverschluesselt auf der Baumaschine ist das, was heute da ist,
-   und das ist das eigentliche Problem.** Wer die Baumaschine hat, hat
-   damit jedes Geraet. Eine Passphrase aendert das nicht vollstaendig
-   (wer die Maschine WAEHREND eines Baus hat, sieht den Schluessel im
-   Speicher), aber sie nimmt den haeufigsten Fall weg: eine Sicherung,
-   ein Abbild, eine weggeworfene Platte.
-
-WIE VERSCHLUESSELT WIRD: scrypt (n=2^15, r=8, p=1, 16 Oktett Salz) aus
-`hashlib` der Standardbibliothek fuer die Ableitung, und
-ChaCha20-Poly1305 aus `cryptography` fuer die Huelle. Die Passphrase
-kommt aus `OSUM_SIGN_PASS` oder von der Tastatur. Der Bund ist eine
-JSON-Datei; alles darin ist Text, damit man ihn sichern kann, ohne ein
-Werkzeug zu brauchen.
-
-DER ERSATZSCHLUESSEL wird beim Anlegen erzeugt und danach NIE wieder
-zum Signieren einer gewoehnlichen Auslieferung benutzt. Er hat eine
-eigene Passphrase (`OSUM_ERSATZ_PASS`), damit die Trennung nicht nur
-gemeint, sondern gebaut ist -- er gehoert auf einen anderen Datentraeger
-als der Hauptschluessel, und dieses Programm zwingt niemanden dazu, aber
-es macht es moeglich.
-
-WAS FUER DIE NAECHSTE STUFE FEHLT (ehrlich, kurz):
-  * ein Geraet, das den Schluessel NICHT herausgibt (PKCS#11/YubiKey).
-    `signieren` waere dann ein Aufruf statt einer Rechnung; alles
-    darueber bliebe gleich.
-  * ein Protokoll, das jede Signatur mit Zeit, Datei und Grund festhaelt.
-    Heute schreibt `veroeffentlichen.py` das in `journal.txt`, aber auf
-    derselben Maschine.
-  * Vier-Augen: zwei Passphrasen fuer eine Auslieferung. Das ist eine
-    Aenderung an DIESER Datei und keine am Format.
+"""Usage:
+    keyring.py <bund> create                 primary- und Ersatzschluessel
+    keyring.py <bund> display
+    keyring.py <bund> oeffentlich primary|fallback [-o file]
+    keyring.py <bund> signieren <file> -o <sig>  [--wer primary|fallback]
+    keyring.py <bund> wechseln                neuer Hauptschluessel,
+    keyring.py <bund> chain                   die Kettensaetze ausgeben
 """
 import base64
 import getpass
@@ -101,12 +43,12 @@ def pass_get(umgebung, ask):
     return getpass.getpass(ask).encode("utf-8")
 
 
-def huelle(geheim, passphrase):
+def shell(secret, passphrase):
     salz = os.urandom(16)
     schl = hashlib.scrypt(passphrase, salt=salz, n=SCRYPT_N, r=SCRYPT_R,
                           p=SCRYPT_P, dklen=32, maxmem=134217728)
     nonce = os.urandom(12)
-    ct = chacha()(schl).encrypt(nonce, geheim, None)
+    ct = chacha()(schl).encrypt(nonce, secret, None)
     return {"salz": base64.b64encode(salz).decode(),
             "nonce": base64.b64encode(nonce).decode(),
             "geheim": base64.b64encode(ct).decode(),
@@ -137,22 +79,22 @@ def save(bund, d):
     os.replace(tmp, bund)
 
 
-def anlegen(bund, aus=None):
+def create(bund, aus=None):
     if os.path.exists(bund):
         raise SystemExit("schluesselbund: %s gibt es schon" % bund)
     m = opkmod()
     hp = pass_get("OSUM_SIGN_PASS", "Passphrase Hauptschluessel: ")
     ep = pass_get("OSUM_ERSATZ_PASS", "Passphrase Ersatzschluessel: ")
-    haupt = open(aus, "rb").read() if aus else os.urandom(32)
-    if len(haupt) != 32:
+    primary = open(aus, "rb").read() if aus else os.urandom(32)
+    if len(primary) != 32:
         raise SystemExit("schluesselbund: %s ist nicht 32 Oktett" % aus)
     ersatz = os.urandom(32)
     d = {"fassung": 1,
          "haupt": {"gen": 0,
-                   "pub": m.ed25519_public(haupt).hex(),
-                   "huelle": huelle(haupt, hp)},
+                   "pub": m.ed25519_public(primary).hex(),
+                   "huelle": shell(primary, hp)},
          "ersatz": {"pub": m.ed25519_public(ersatz).hex(),
-                    "huelle": huelle(ersatz, ep)},
+                    "huelle": shell(ersatz, ep)},
          "kette": []}
     save(bund, d)
     print("schluesselbund %s angelegt" % bund)
@@ -161,7 +103,7 @@ def anlegen(bund, aus=None):
     return 0
 
 
-def zeigen(bund):
+def display(bund):
     d = load_2(bund)
     print("haupt  gen %d  %s" % (d["haupt"]["gen"], d["haupt"]["pub"]))
     print("ersatz        %s" % d["ersatz"]["pub"])
@@ -197,7 +139,7 @@ def wechseln(bund, mit_fallback=False):
     d["kette"].append({"gen": gen, "pub": new_pub.hex(), "sig": sig.hex(),
                        "von": "ersatz" if mit_fallback else "haupt"})
     d["haupt"] = {"gen": gen, "pub": new_pub.hex(),
-                  "huelle": huelle(new, hp)}
+                  "huelle": shell(new, hp)}
     save(bund, d)
     print("Schluesselwechsel auf gen %d: %s (signiert vom %s)"
           % (gen, new_pub.hex(), "Ersatzschluessel" if mit_fallback
@@ -232,7 +174,7 @@ def oeffentlich(bund, wer, aus):
     return 0
 
 
-def kette(bund):
+def chain(bund):
     d = load_2(bund)
     for k in d["kette"]:
         print("kette\t%d\t%s\t%s" % (k["gen"], k["pub"], k["sig"]))
@@ -250,11 +192,11 @@ def main():
         aus = None
         if "--aus" in rest:
             aus = rest[rest.index("--aus") + 1]
-        return anlegen(bund, aus)
+        return create(bund, aus)
     if was == "zeigen":
-        return zeigen(bund)
+        return display(bund)
     if was == "kette":
-        return kette(bund)
+        return chain(bund)
     if was == "wechseln":
         return wechseln(bund, "--ersatz" in rest)
     if was == "oeffentlich":

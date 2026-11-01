@@ -1,39 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/alltag/bildref.py -- DAS BILD, VON EINEM FREMDEN DECODER GELESEN.
-
-    bildref.py <datei>              die Zahlen des Wirts
-    bildref.py pruefen <serial.txt> <datei> [<datei> ...]
-
-Der Bildbetrachter im Gast sagt mit `-i` Art, Groesse, die Summe jedes
-Farbkanals ueber alle Bildpunkte und fuenf einzelne Bildpunkte. Dieses
-Skript sagt dasselbe -- gerechnet mit Pillow, also mit libpng und
-libjpeg und nicht noch einmal mit dem Decoder, der geprueft werden soll.
-
-DIE SCHRANKE IST NICHT FUER ALLE GLEICH, und das hat einen Grund:
-
-  PNG und BMP sind VERLUSTFREI und exakt umkehrbar. Da muss jede Zahl
-  auf den Punkt stimmen -- Abweichung 0.
-
-  JPEG ist eine Naeherung, und zwei richtige Decoder kommen zu leicht
-  verschiedenen Zahlen: die Umkehrtransformation ist eine
-  Fliesskommarechnung, und T.81 schreibt sie nicht bis aufs letzte Bit
-  vor (der Nachweis dafuer ist T.83 mit einer erlaubten Abweichung).
-
-  UND EIN ZWEITER UNTERSCHIED, der groesser ist als der erste und hier
-  offen dasteht: bei 4:2:0 und 4:2:2 liegt nur jeder zweite Farbwert
-  vor. libjpeg rechnet die fehlenden mit einem Dreiecksfilter aus
-  ("fancy upsampling"), kernel/user/jpeg.fi nimmt den naechsten
-  Nachbarn. An einer harten Farbkante sind das bis zu siebzig Stufen
-  Unterschied in EINEM Bildpunkt -- bei beiden zu Recht.
-
-  Also wird unterschieden:
-    4:4:4  jeder Bildpunkt auf 3 Stufen genau (das misst Huffman,
-           Entquantisierung, IDCT und die Farbumrechnung).
-    4:2:0  die Summen je Kanal, hoechstens 1 Stufe je Bildpunkt
-           Abstand im Mittel -- ein Bildpunktvergleich waere hier
-           kein Fehlernachweis, sondern ein Nachweis der
-           Filterwahl.
+"""Usage:
+    bildref.py <file>              die numbers des Wirts
+    bildref.py verify <serial.txt> <file> [<file> ...]
 """
 import re
 import sys

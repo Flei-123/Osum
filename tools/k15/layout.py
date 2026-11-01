@@ -1,32 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/k15/layout.py -- die ANORDNUNG nachrechnen, aus dem Mitschnitt.
-
-    layout.py <mitschnitt> <marke> <fensterbreite> <fensterhoehe>
-
-Die Anwendung meldet vor dem ersten Malen jedes Rechteck, das die
-Anordnung ausgerechnet hat:
-
-    widgetdemo: rect id=5 kind=2 x=12 y=196 w=100 h=28
-
-DIESES PROGRAMM PRUEFT DIE RECHTECKE GEGENEINANDER, und das ist der
-Teil, den ein Bildschirmfoto NICHT prueft: ein Foto zeigt, dass da ein
-Knopf ist, aber nicht, dass er nicht heimlich unter einem anderen liegt.
-Vier Zusagen:
-
-  1. JEDES RECHTECK LIEGT IM FENSTER.  Ein Widget, das halb draussen
-     liegt, wird vom Fensterserver abgeschnitten und sieht auf dem Foto
-     aus wie ein schmaleres Widget.
-  2. KEINE ZWEI RECHTECKE UEBERSCHNEIDEN SICH.  Das ist die eigentliche
-     Zusage einer Anordnung: sie verteilt Platz, sie stapelt nicht.
-  3. JEDES RECHTECK HAT FLAECHE.  Breite oder Hoehe null heisst, dass
-     eine Wunschgroesse nicht angekommen ist -- und im Bild sieht man
-     gar nichts, also auch keinen Fehler.
-  4. DIE SENKRECHTE REIHENFOLGE IST DIE ANLEGEREIHENFOLGE, solange die
-     Rechtecke in demselben Kasten liegen (gleiche x-Kante).  Eine
-     Anordnung, die Widgets vertauscht, ist keine.
-
-Rueckgabe 0, wenn alles stimmt; sonst 1 und eine Zeile je Verstoss.
+"""Usage:
+    layout.py <mitschnitt> <mark> <fensterbreite> <fensterhoehe>
 """
 import re
 import sys

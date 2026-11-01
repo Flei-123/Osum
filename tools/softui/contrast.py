@@ -1,40 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/softui/contrast.py -- DER KONTRAST, AUS DEM BILD GELESEN.
-
-Die Auflage dieser Runde lautet: der Kontrast von Text auf Hintergrund
-darf NICHT schlechter werden als heute (day+modern 5,16, night+modern
-12,36).  Diese beiden Zahlen kommen aus dem TOKEN-MODELL --
-`tools/theme/model.py contrast` rechnet sie aus den Farbdateien aus, und
-5,16 ist dort das Paar `on-accent / accent`, also weisse Schrift auf dem
-Akzentblau.  Das ist bis zu dieser Runde die Titelleiste jedes scharfen
-Fensters.
-
-DAS IST GENAU DER GRUND, WARUM DAS TOKENMODELL HIER NICHT REICHT.  Runde
-SOFTUI nimmt der Titelleiste den Akzent (`tone=0`) -- die Farbpaare im
-Modell bleiben Ziffer fuer Ziffer dieselben, aber auf dem Schirm steht
-etwas anderes.  Wer nur das Modell nachrechnet, bekommt "unveraendert"
-heraus und hat die Frage nicht beantwortet.
-
-Also wird der Kontrast HIER AUS DEM BILD gemessen, an den Stellen, an
-denen wirklich Schrift steht:
-
-    contrast.py band <bild.ppm> <x> <y> <w> <h>
-        Der Kontrast der SCHRIFT in einem Rechteck gegen ihren GRUND.
-        Grund = die haeufigste Farbe des Rechtecks.  Schrift = die
-        Farbe mit dem groessten Abstand davon, die noch auf mindestens
-        `--min` Bildpunkten steht (Voreinstellung 12) -- das schliesst
-        die Zwischenstufen der Kantenglaettung aus, die per Definition
-        weniger Kontrast haben und in keiner Richtlinie zaehlen.
-
+"""Usage:
+    contrast.py band <image.ppm> <x> <y> <w> <h>
     contrast.py paar <rrggbb> <rrggbb>
-        Zwei Farben, ohne Bild.
-
-Die Rechnung ist WCAG 2.1, und sie ist bewusst die GLEITKOMMA-Fassung:
-`kernel/user/wlibc.fi` rechnet in Festkomma, weil ein Kern kein
-Gleitkomma haben will, und zwei unabhaengige Rechenwege sind hier der
-ganze Sinn der Sache.  Wo die beiden sich um mehr als einen Hundertstel
-unterscheiden, steht das im Bericht.
 """
 import sys
 from collections import Counter

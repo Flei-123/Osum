@@ -8,7 +8,7 @@ import sys
 
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HIER, '..', 'i18n'))
-import quellen      # noqa: E402
+import sources      # noqa: E402
 import translit     # noqa: E402
 
 SCHRIFTEN = ['assets/osum-sans.ttf', 'assets/osum-mono.ttf']
@@ -76,55 +76,55 @@ def cmap(path_2):
     return aus
 
 
-def sichtbarer_text(wurzel):
+def sichtbarer_text(root):
     aus = []
-    for path_2 in sorted(glob.glob(os.path.join(wurzel, 'locale/de/*'))):
-        rel = os.path.relpath(path_2, wurzel)
+    for path_2 in sorted(glob.glob(os.path.join(root, 'locale/de/*'))):
+        rel = os.path.relpath(path_2, root)
         for nr, z in enumerate(open(path_2, encoding='utf-8').read().split('\n'),
                                1):
             if z.lstrip().startswith('#') or '=' not in z:
                 continue
             aus.append(('%s:%d' % (rel, nr), z.split('=', 1)[1]))
-    for d in sorted(glob.glob(os.path.join(wurzel, 'assets/apps/*.osp'))):
+    for d in sorted(glob.glob(os.path.join(root, 'assets/apps/*.osp'))):
         p = os.path.join(d, 'INFO')
         if not os.path.exists(p):
             continue
-        rel = os.path.relpath(p, wurzel)
+        rel = os.path.relpath(p, root)
         for nr, z in enumerate(open(p, encoding='utf-8').read().split('\n'),
                                1):
             if z.startswith(('name=', 'info=')):
                 aus.append(('%s:%d' % (rel, nr), z.split('=', 1)[1]))
-    for r in quellen.funde(wurzel):
+    for r in sources.funde(root):
         aus.append(('%s:%d' % (r['datei'], r['zeile']), r['inhalt']))
     STR = re.compile(r'"(?:\\.|[^"\\])*"')
-    for dp, dns, fns in os.walk(os.path.join(wurzel, 'kernel')):
+    for dp, dns, fns in os.walk(os.path.join(root, 'kernel')):
         dns[:] = [x for x in dns if not x.startswith('.')]
         for fn in sorted(fns):
             if not fn.endswith('.fi'):
                 continue
             p = os.path.join(dp, fn)
-            rel = os.path.relpath(p, wurzel).replace(os.sep, '/')
+            rel = os.path.relpath(p, root).replace(os.sep, '/')
             for nr, z in enumerate(open(p, encoding='utf-8').read().split('\n'),
                                    1):
                 if z.lstrip().startswith('//'):
                     continue
                 for m in STR.finditer(z.split('//')[0]):
-                    t = quellen.inhalt_von(m.group(0)[1:-1])
+                    t = sources.inhalt_von(m.group(0)[1:-1])
                     if any(ord(c) > 127 for c in t):
                         aus.append(('%s:%d' % (rel, nr), t))
     return aus
 
 
 def main(argv):
-    wurzel = os.environ.get('OSUM_ROOT', '.')
+    root = os.environ.get('OSUM_ROOT', '.')
     decken = {}
     for s in SCHRIFTEN:
-        p = os.path.join(wurzel, s)
+        p = os.path.join(root, s)
         if not os.path.exists(p):
             print('schriftprobe: %s fehlt' % s)
             return 1
         decken[s] = cmap(p)
-    text = sichtbarer_text(wurzel)
+    text = sichtbarer_text(root)
     gebraucht = {}
     for herkunft, t in text:
         for c in t:

@@ -1,52 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""tools/design/messen.py -- EINE OBERFLAECHE IN ZAHLEN, NICHT IN ADJEKTIVEN.
-
-    messen.py <verzeichnis-einer-aufnahme> [--json <datei>]
-
-"Wirkt altbacken" ist keine Messung und laesst sich nicht abnehmen.
-Dieses Werkzeug beantwortet stattdessen sieben Fragen, die man
-nachrechnen kann, aus zwei Quellen: den Rechtecken, die die Programme
-selbst auf der seriellen Leitung melden (`wlib: text ...`, `launcher:
-rect ...`, `settings: rect name=...`, `taskbar: ...`), und den
-Bildpunkten der Aufnahmen.
-
-  1. DAS RASTER.  Wie viele der gemeldeten Laengen (x, y, Breite, Hoehe)
-     sind Vielfache von vier?  Ein Abstandssystem, das kein Raster hat,
-     erkennt man daran, dass diese Zahl bei etwa einem Viertel liegt --
-     dem Wert des Zufalls.
-
-  2. DIE KLICKFLAECHEN.  Jede Hoehe eines Bedienelements, das man
-     anfassen kann, gegen 32 Bildpunkte.  Fluent, HIG, Material und
-     Adwaita sind sich hier ausnahmsweise einig; alles darunter wird auf
-     einem Beruehrungsschirm zum Gluecksspiel.
-
-  3. DIE ZEILENHOEHE.  Zeilenhoehe geteilt durch Schriftgroesse.  Unter
-     1,3 klebt Text aneinander; die Skala der Entwurfssysteme geht von
-     1,25 (eng, fuer Ueberschriften) bis 1,5 (Fliesstext).
-
-  4. DIE ECKEN.  Der Radius, den ein Fenster WIRKLICH hat -- abgelesen an
-     der Diagonale seiner oberen linken Ecke -- und wie viele
-     Zwischenwerte dort stehen.  Null Zwischenwerte heisst: harte
-     Treppe.  Das ist das, was eine Oberflaeche sofort billig aussehen
-     laesst, und es ist einzeln messbar.
-
-  5. DIE HOEHE.  Steht unter einem Fenster ein Schatten?  Gemessen als
-     Helligkeitsabfall in dem Band unmittelbar unter der Unterkante,
-     gegen den Schreibtisch daneben.
-
-  6. DER TEXT.  Leere Beschriftungen, abgeschnittener Text,
-     Ueberlappungen -- dieselben drei Fragen wie
-     tools/themestore/shotcheck.py, hier ueber ALLE Aufnahmen einer
-     Runde statt ueber eine.
-
-  7. DIE FLAECHEN.  Wie viele verschiedene Farben hat das Bild, und wie
-     viele davon tragen mehr als ein Promille der Flaeche?  Eine
-     Oberflaeche ohne Hoehenstaffelung kommt mit sehr wenigen aus.
-
-Alles, was hier herauskommt, ist eine Zahl mit einer Herkunft.  Wo eine
-Frage aus den Daten nicht zu beantworten ist, steht das als `-` da und
-nicht als 0.
+"""Usage:
+    messen.py <directory-einer-aufnahme> [--json <file>]
 """
 import glob
 import json

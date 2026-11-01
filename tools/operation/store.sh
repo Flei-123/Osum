@@ -53,20 +53,20 @@ bash tools/install/pakete.sh "$OUT" > "$OUT/pak1.log" 2>&1 \
     || { bad "install/pakete.sh"; tail -5 "$OUT/pak1.log"; exit 1; }
 
 rm -f "$OUT/bund.json"
-python3 tools/ota/schluesselbund.py "$OUT/bund.json" anlegen \
+python3 tools/ota/keyring.py "$OUT/bund.json" anlegen \
     --aus "$OUT/geheim.key" > "$OUT/bund.log" 2>&1 \
-    && python3 tools/ota/schluesselbund.py "$OUT/bund.json" oeffentlich ersatz \
+    && python3 tools/ota/keyring.py "$OUT/bund.json" oeffentlich ersatz \
         -o "$OUT/ersatz.pub" >> "$OUT/bund.log" 2>&1 \
     && ok "Schluesselbund: Hauptschluessel verschluesselt, Ersatzschluessel daneben" \
-    || { bad "schluesselbund.py"; cat "$OUT/bund.log"; exit 1; }
+    || { bad "keyring.py"; cat "$OUT/bund.log"; exit 1; }
 
 rm -rf "$OUT/aus" "$OUT/stand"; mkdir -p "$OUT/stand"
 for f in 1 2; do
     rm -f "$OUT/stand"/*.opk
     cp "$OUT/quelle$f/hallo-$f.opk" "$OUT/stand/"
-    python3 tools/ota/veroeffentlichen.py "$OUT/aus" --stand "$OUT/stand" \
+    python3 tools/ota/publish.py "$OUT/aus" --stand "$OUT/stand" \
         --bund "$OUT/bund.json" --notiz "MERGE-5 hallo-$f" \
-        >> "$OUT/veroeff.log" 2>&1 || bad "veroeffentlichen.py Fassung $f"
+        >> "$OUT/veroeff.log" 2>&1 || bad "publish.py Fassung $f"
 done
 [ -s "$OUT/aus/aktuell/VERZEICHNIS" ] \
     && ok "the delivery is ready: $(head -1 "$OUT/aus/aktuell/VERZEICHNIS"), Fassung $(sed -n 2p "$OUT/aus/aktuell/VERZEICHNIS" | cut -f2)" \

@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
-"""window.py -- Fensterverwaltung und Herunterfahren.
-
-    python3 window.py <name> <breite> <hoehe>
-
-  4.1 verschieben      Titelleiste ziehen
-  4.2 Groesse ziehen   Griff unten rechts
-  4.3 Alt+Tab          Fokuswechsel
-  7.4 Herunterfahren   `shutdown` im Terminal -> QEMU MUSS weg sein
-
-Alle Lagen kommen aus den Berichten des Fensterservers
-(`wm: fen i=.. id=.. x=.. y=.. w=.. h=..`) und nicht aus dem Bild:
-der Server ist die Stelle, die es weiss.
+"""Usage:
+    window.py -- Fensterverwaltung und Herunterfahren.
+    python3 window.py <name> <width> <height>
 """
 import json
 import os
@@ -23,11 +14,11 @@ import time
 HIER = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HIER)
 from klick import Maschine
-import lesen
+import read_all
 
 NAME = sys.argv[1] if len(sys.argv) > 1 else "f1"
-BREITE = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
-HOEHE = int(sys.argv[3]) if len(sys.argv) > 3 else 800
+WIDTH = int(sys.argv[2]) if len(sys.argv) > 2 else 1280
+HEIGHT = int(sys.argv[3]) if len(sys.argv) > 3 else 800
 D = os.path.join(HIER, "laeufe", NAME)
 SHOTS = os.path.join(HIER, "shots", NAME)
 os.makedirs(SHOTS, exist_ok=True)
@@ -36,7 +27,7 @@ ERG = {}
 
 
 def s():
-    return lesen.text(SER)
+    return read_all.text(SER)
 
 
 def merke(nr, was, erg, beleg=""):
@@ -46,16 +37,16 @@ def merke(nr, was, erg, beleg=""):
 
 def lage(fid, txt=None):
     """Die ZULETZT gemeldete Lage eines Fensters."""
-    letzte = None
+    last_items = None
     for m in re.finditer(
             r"wm: fen i=\d+ id=(\d+) x=(\d+) y=(\d+) w=(\d+) h=(\d+)",
             s() if txt is None else txt):
         if int(m.group(1)) == fid:
-            letzte = tuple(int(m.group(k)) for k in (2, 3, 4, 5))
-    return letzte
+            last_items = tuple(int(m.group(k)) for k in (2, 3, 4, 5))
+    return last_items
 
 
-def lage_nach(fid, vorher, frist=20.0):
+def lage_nach(fid, vorher, deadline=20.0):
     """Auf die NAECHSTE Meldung warten, die sich von `vorher`
     unterscheidet.
 
@@ -66,19 +57,19 @@ def lage_nach(fid, vorher, frist=20.0):
     (x=284 y=229) elf Berichte spaeter auf der Leitung, und der Laeufer
     hatte da schon "GEHT NICHT" geschrieben.
     """
-    bis = time.time() + frist
+    bis = time.time() + deadline
     while time.time() < bis:
-        jetzt = lage(fid)
-        if jetzt and jetzt != vorher:
-            return jetzt
+        now = lage(fid)
+        if now and now != vorher:
+            return now
         time.sleep(0.5)
     return lage(fid)
 
 
-def warte_fenster(w, h, frist=60):
-    bis = time.time() + frist
+def wait_window(w, h, deadline=60):
+    bis = time.time() + deadline
     while time.time() < bis:
-        for i, lagen in lesen.fenster(s()).items():
+        for i, lagen in read_all.window(s()).items():
             for x, y, bw, bh in lagen:
                 if bw == w and bh == h:
                     return i, x, y, bw, bh
@@ -88,19 +79,19 @@ def warte_fenster(w, h, frist=60):
 
 def main():
     subprocess.run(["bash", os.path.join(HIER, "start.sh"), NAME,
-                    str(BREITE), str(HOEHE)], check=True,
+                    str(WIDTH), str(HEIGHT)], check=True,
                    capture_output=True, text=True, timeout=60)
     t0 = time.time()
     while time.time() - t0 < 120 and "taskbar: start x=" not in s():
         time.sleep(0.3)
     print("BOOT: %.1f s\n" % (time.time() - t0))
     time.sleep(2.5)
-    m = Maschine(os.path.join(D, "mon.sock"), BREITE, HOEHE)
+    m = Maschine(os.path.join(D, "mon.sock"), WIDTH, HEIGHT)
 
-    t = warte_fenster(560, 380)
+    t = wait_window(560, 380)
     if not t:
         merke("4.0", "Terminalfenster gefunden", "GEHT NICHT", "-")
-        return schluss()
+        return finish()
     fid, tx, ty, tw, th = t
     merke("4.0", "Terminalfenster gefunden", "GEHT",
           "id=%d (%d,%d) %dx%d" % (fid, tx, ty, tw, th))
@@ -124,19 +115,19 @@ def main():
     # mass daraufhin "verschieben geht nicht", obwohl Runde DURCHKLICK
     # es bildpunktgenau nachgewiesen hatte. Der Fehler lag im Laeufer.
     RAND = 2
-    TITEL = 22
+    TITLE = 22
     GRIFF = 12
 
     # ------------------------------------------------ 4.1 verschieben
     vorher = lage(fid)
-    m.ziehe(tx + tw // 2, ty + TITEL // 2, tx + tw // 2 + 260, ty + 200)
+    m.ziehe(tx + tw // 2, ty + TITLE // 2, tx + tw // 2 + 260, ty + 200)
     nachher = lage_nach(fid, vorher)
     verschoben = bool(vorher and nachher and
                       (vorher[0] != nachher[0] or vorher[1] != nachher[1]))
     merke("4.1", "Fenster verschieben",
           "GEHT" if verschoben else "GEHT NICHT",
           "%s -> %s" % (vorher, nachher))
-    m.foto(os.path.join(SHOTS, "01-verschoben.png"))
+    m.photo(os.path.join(SHOTS, "01-verschoben.png"))
 
     # --------------------------------------------- 4.2 Groesse ziehen
     l = lage(fid) or (tx, ty, tw, th)
@@ -144,18 +135,18 @@ def main():
     # Der Griff sitzt in der unteren rechten Ecke INNERHALB des Rahmens.
     # `wm.grip` ist GRIP0 * Skalierung; ein paar Bildpunkte hinein
     # treffen ihn sicher.
-    m.ziehe(x + RAND + w - GRIFF // 2, y + TITEL + h - GRIFF // 2,
-            x + RAND + w + 150, y + TITEL + h + 110)
+    m.ziehe(x + RAND + w - GRIFF // 2, y + TITLE + h - GRIFF // 2,
+            x + RAND + w + 150, y + TITLE + h + 110)
     n = lage_nach(fid, l)
     groesser = bool(n and (n[2] > w or n[3] > h))
     merke("4.2", "Fenstergroesse ziehen",
           "GEHT" if groesser else "GEHT NICHT",
           "%dx%d -> %s" % (w, h, "%dx%d" % (n[2], n[3]) if n else "-"))
-    m.foto(os.path.join(SHOTS, "02-groesse.png"))
+    m.photo(os.path.join(SHOTS, "02-groesse.png"))
 
     # ---------------------------------------------------- 4.3 Alt+Tab
     vf = re.findall(r"focus=(\d+)", s())
-    m.taste("alt-tab")
+    m.key_press("alt-tab")
     time.sleep(2.5)
     nf = re.findall(r"focus=(\d+)", s())
     merke("4.3", "Alt+Tab wechselt den Fokus",
@@ -169,29 +160,29 @@ def main():
         pid = None
     if pid:
         l = lage(fid) or (tx, ty, tw, th)
-        m.klick_auf(l[0] + RAND + l[2] // 2, l[1] + TITEL + l[3] // 2)
+        m.klick_auf(l[0] + RAND + l[2] // 2, l[1] + TITLE + l[3] // 2)
         time.sleep(1.0)
         m.tippe("shutdown")
-        m.taste("ret")
-        weg = False
+        m.key_press("ret")
+        gone = False
         for _ in range(45):
             time.sleep(1.0)
             try:
                 os.kill(pid, 0)
             except OSError:
-                weg = True
+                gone = True
                 break
         merke("7.4", "Herunterfahren ueber die Oberflaeche",
-              "GEHT" if weg else "GEHT NICHT",
-              "QEMU %d %s" % (pid, "beendet" if weg else "laeuft noch"))
+              "GEHT" if gone else "GEHT NICHT",
+              "QEMU %d %s" % (pid, "beendet" if gone else "laeuft noch"))
 
     merke("7.5", "keine Abstuerze",
-          "GEHT" if lesen.abstuerze(s()) == 0 else "GEHT NICHT",
-          "%d Treffer" % lesen.abstuerze(s()))
-    return schluss()
+          "GEHT" if read_all.abstuerze(s()) == 0 else "GEHT NICHT",
+          "%d Treffer" % read_all.abstuerze(s()))
+    return finish()
 
 
-def schluss():
+def finish():
     with open(os.path.join(D, "fenster.json"), "w") as f:
         json.dump(ERG, f, indent=1, ensure_ascii=False)
     print("\n-> %s/fenster.json" % D)

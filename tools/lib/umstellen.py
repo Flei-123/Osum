@@ -23,48 +23,48 @@ def laeufer():
     return sorted(set(names))
 
 
-def umstellen(path_2: Path, pruefen: bool):
+def umstellen(path_2: Path, verify: bool):
     rel = str(path_2.relative_to(ROOT))
     if rel in LOCK:
         return 0, f"uebersprungen ({LOCK[rel]})"
 
-    zeilen = path_2.read_text(errors="replace").splitlines(keepends=True)
+    rows = path_2.read_text(errors="replace").splitlines(keepends=True)
     treffer = 0
-    for i, z in enumerate(zeilen):
+    for i, z in enumerate(rows):
         if "qemu-system-x86_64" not in z:
             continue
         if "timeout" not in z:
             continue
         if "-accel" in z:
             continue
-        zeilen[i] = z.replace("qemu-system-x86_64", "$QEMU_X86")
+        rows[i] = z.replace("qemu-system-x86_64", "$QEMU_X86")
         treffer += 1
 
     if treffer == 0:
         return 0, "keine passende Zeile"
 
-    if not any("tools/lib/qemu.sh" in z for z in zeilen):
-        for i, z in enumerate(zeilen):
+    if not any("tools/lib/qemu.sh" in z for z in rows):
+        for i, z in enumerate(rows):
             if CD_RE.match(z):
-                zeilen.insert(i + 1, SOURCE_LINE)
+                rows.insert(i + 1, SOURCE_LINE)
                 break
         else:
             return -1, "FEHLER: kein 'cd \"$(dirname \"$0\")/../..\"' gefunden"
 
-    if not pruefen:
-        path_2.write_text("".join(zeilen))
+    if not verify:
+        path_2.write_text("".join(rows))
     return treffer, "ok"
 
 
 def main():
-    pruefen = "--pruefen" in sys.argv
+    verify = "--verify" in sys.argv
     gesamt = 0
     for rel in laeufer():
         p = ROOT / rel
         if not p.exists():
             print(f"  ??  {rel}: does not exist")
             continue
-        n, wie = umstellen(p, pruefen)
+        n, wie = umstellen(p, verify)
         if n > 0:
             gesamt += n
             print(f"  OK  {rel}: {n} Aufrufe -> $QEMU_X86")
@@ -75,9 +75,9 @@ def main():
             return 1
 
     print(f"\n{gesamt} qemu-Aufrufe umgestellt"
-          f"{' (only geprueft)' if pruefen else ''}")
+          f"{' (only geprueft)' if verify else ''}")
 
-    if not pruefen:
+    if not verify:
         rest = subprocess.run(
             ["grep", "-rn", "--include=*.sh", "qemu-system-x86_64", "."],
             cwd=ROOT, capture_output=True, text=True).stdout.splitlines()
