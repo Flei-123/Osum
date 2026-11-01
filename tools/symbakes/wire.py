@@ -18,7 +18,7 @@ checks = [
     ("taskmgr: slot holds the 72/44/64 pictures", "const ICO_BYTES: u64 = 44900" in rd("kernel/user/taskmgr.fi")),
     ("taskmgr: row icon slot registered with symvar", "symvar.register(out, got)" in rd("kernel/user/taskmgr.fi")),
     ("taskbar: slot holds the 72/44/64 pictures", "const SYM_BYTES: u64 = 44900" in rd("kernel/user/taskbar.fi")),
-    ("taskbar: symbol slot registered with symvar", "symvar.register(ziel, got)" in rd("kernel/user/taskbar.fi")),
+    ("taskbar: symbol slot registered with symvar", "symvar.register(target, got)" in rd("kernel/user/taskbar/tblayout.fi")),
     ("taskbar: button symbol drawn from symvar.pick", "icon_draw_fit(symvar.pick(sym, symw)" in rd("kernel/user/taskbar.fi")),
     ("fuiscene: icon_at (start menu tiles) picks the bake", "symvar.pick(word, size)" in rd("kernel/user/fuiscene.fi")),
     ("jarvismini: image carries the joined symbol", "$OUT/jarvismini.symbol@0644" in rd("tools/usbimg/build.sh")),
