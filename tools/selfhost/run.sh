@@ -7,7 +7,7 @@ export FIRNLIB="$ROOT/lib"
 ULD=kernel/user/user.ld
 FIRNC=vendor/firn/bin/firnc
 FC1=vendor/firn/bin/firnc1
-MODULES=${SELFHOST_MODULES:-echo fas}
+MODULES=${SELFHOST_MODULES:-echo fas firnc1}
 GUEST_LIMIT=${SELFHOST_TIMEOUT:-1500}
 
 TMPD=$(mktemp -d)
