@@ -104,18 +104,18 @@ for z in sys.stdin:
     if len(t) > 6 and t[0] == "LOAD":
         h = max(h, int(t[2], 16) + int(t[5], 16))
 print(h)')
-    num "certus endet unterhalb von proc.IMAGE_END (0x40C00000)" "$ende" lt $((0x40C00000))
+    num "certus endet unterhalb von proc.IMAGE_END (0x44400000)" "$ende" lt $((0x44400000))
     n=$(objdump -d "$OUT/bin/certus" | grep -cE '^\s+[0-9a-f]+:.*\bsyscall\b')
     num "certus: syscall-Befehle (die einzige Tuer aus Ring 3)" "$n" ge 10
 fi
 
 echo
 echo "== 2. what the kernel learned for it =="
-grep -qE '^const IMAGE_END: u64 = 0x40C00000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: IMAGE_END = 0x40C00000 (the image window is 11 MiB)" \
-    || bad "IMAGE_END is not at 0x40C00000"
-grep -qE '^const BIG_FLOOR: u64 = 0x40C00000' kernel/sched/proc.fi \
-    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x40C00000 (the arena starts above)" \
+grep -qE '^const IMAGE_END: u64 = 0x44400000' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: IMAGE_END = 0x44400000 (the image window is 67 MiB)" \
+    || bad "IMAGE_END is not at 0x44400000"
+grep -qE '^const BIG_FLOOR: u64 = 0x44400000' kernel/sched/proc.fi \
+    && ok "kernel/sched/proc.fi: BIG_FLOOR = 0x44400000 (the arena starts above)" \
     || bad "BIG_FLOOR does not match IMAGE_END"
 grep -qE '^const PRIV_SLOTS: u64 = 475' kernel/sched/proc.fi \
     && ok "kernel/sched/proc.fi: PRIV_SLOTS = 475 tiles (155 + 320 arena for sparse SHM) of 2 MiB" \

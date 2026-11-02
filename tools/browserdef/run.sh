@@ -79,8 +79,11 @@ has "$S" "open: no handler for /data/archive.xyz" "unknown extension: named in t
 has "$S" "open: no handler for noextension" "target without scheme or extension: no handler"
 hasnot "$S" "open: no handler for $URL" "the http target has a handler"
 has "$S" "vuihost: run /bin/open rc=0" "the http open call exits 0"
-has "$S" "certus: open $URL" "the handler started Certus with the http target as argument"
+if [ "$REAL" != 1 ]; then
+    has "$S" "certus: open $URL" "the handler started Certus with the http target as argument"
+fi
 if [ "$REAL" = 1 ]; then
+    hasnot "$S" "outside the user region" "the kernel accepted the real Certus image"
     if grep -q "GET /i.htm" "$TMPD/http.log"; then ok "the guest browser fetched /i.htm from the host server"; else bad "no GET /i.htm reached the server"; fi
     if [ -s "$TMPD/r1/desktop.png" ]; then
         B=$(colour_count "$TMPD/r1/desktop.png" 0033aa); R=$(colour_count "$TMPD/r1/desktop.png" cc0000)
@@ -97,7 +100,7 @@ HC="$TMPD/handlers.empty" live r2 "open: no handler for http" CERTUS_BUILD=$CB
 S=$TMPD/r2/serial.txt
 has "$S" "open: no handler for $URL" "empty registry: open refuses the http target"
 hasnot "$S" "vuihost: run /bin/open rc=0" "empty registry: no successful open"
-hasnot "$S" "certus: open" "empty registry: Certus was not started"
+[ "$REAL" = 1 ] || hasnot "$S" "certus: open" "empty registry: Certus was not started"
 if [ "$REAL" = 1 ]; then
     after=$(grep -c "GET /i.htm" "$TMPD/http.log")
     [ "$after" -eq "$before" ] && ok "empty registry: the server saw no new request" || bad "the server saw $((after-before)) new requests"
