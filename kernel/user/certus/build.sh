@@ -129,7 +129,10 @@ done
 python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
+(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" wlib.fi wlibc.fi wlib/*.fi wlibc/*.fi) | tee "$BAU/inlineconsts.log"
 python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$ROOT/vendor/firn" | tee "$BAU/splitstems.log"
+(cd "$BAU" && python3 "$ROOT/kernel/user/certus/inlineconsts.py" "$BAU" osa/*.fi fui/*.fi) | tee -a "$BAU/inlineconsts.log"
+(cd "$BAU" && grep -l '__bits(\|__include_str(' osa/*.fi fui/*.fi 2>/dev/null | xargs -r python3 "$ROOT/kernel/user/certus/lowerintrinsics.py" "$BAU") | tee "$BAU/lowerintrinsics.log"
 if [ -f "$BAU/std/deflate.fi" ] && ! grep -q 'fn inflate_limited' "$BAU/std/deflate.fi"; then
     stddir=$(readlink -f "$BAU/std")
     rm "$BAU/std"
