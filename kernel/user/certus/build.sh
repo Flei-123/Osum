@@ -53,14 +53,23 @@ cp -r "$ROOT/lib/libc" "$BAU/libc"
 cp "$ROOT/lib/icons.fi" "$ROOT/lib/utf8.fi" "$BAU/"
 cp "$ROOT/kernel/user/ulib.fi" "$ROOT/kernel/user/wlib.fi" \
    "$ROOT/kernel/user/wlibc.fi" "$BAU/"
+rm -rf "$BAU/wlib" "$BAU/wlibc"
+cp -r "$ROOT/kernel/user/wlib" "$ROOT/kernel/user/wlibc" "$BAU/"
 python3 - "$ROOT" "$BAU" <<'PYEOF'
 import os, re, shutil, sys
 root, bau = sys.argv[1], sys.argv[2]
 todo = ['wlib', 'wlibc', 'ulib']
 seen = set(todo)
+def sources(name):
+    paths = [os.path.join(bau, name + '.fi')]
+    if name in ('wlib', 'wlibc'):
+        d = os.path.join(bau, name)
+        paths += [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.endswith('.fi')]
+    return paths
 while todo:
     name = todo.pop()
-    for line in open(os.path.join(bau, name + '.fi'), encoding='latin1'):
+    lines = [l for p in sources(name) for l in open(p, encoding='latin1')]
+    for line in lines:
         m = re.match(r'import ([a-z0-9_]+)\s*$', line)
         if not m or m.group(1) in seen:
             continue
@@ -103,6 +112,10 @@ if [ "$LAYOUT" = new ]; then
             done
         fi
     done
+    if [ -d "$CERTUS_REPO/lib/osum/prof_os" ]; then
+        rm -rf "$BAU/prof_os"
+        ln -sfn "$CERTUS_REPO/lib/osum/prof_os" "$BAU/prof_os"
+    fi
     rm -f "$BAU/window/osum.fi" "$BAU/window/backend.fi"
     sed 's/wlib\.canvas2(/wlib.canvas(/g' "$CERTUS_REPO/lib/window/osum.fi" > "$BAU/window/osum.fi"
     ln -sfn osum.fi "$BAU/window/backend.fi"
