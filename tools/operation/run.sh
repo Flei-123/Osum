@@ -202,8 +202,8 @@ echo "== 7. the server side: register, stock, archive =="
 # =====================================================================
 python3 tools/ota/publish.py "$OUT/aus" --display > "$W/reg.txt"
 sed -n 's/^/        /p' "$W/reg.txt"
-hat "$W/reg.txt" "gefuehrte Fassung  4" "das Register fuehrt Fassung 4"
-hat "$W/reg.txt" "vorgehalten        [1, 2, 3, 4]" "alle vier Fassungen liegen weiter da"
+hat "$W/reg.txt" "led version        4" "das Register fuehrt Fassung 4"
+hat "$W/reg.txt" "kept              [1, 2, 3, 4]" "alle vier Fassungen liegen weiter da"
 VORRAT=$(ls "$OUT/aus/pakete" | grep -c '\.opk$')
 gleich "der Vorrat ist inhaltsadressiert: verschiedene Pakete" "$VORRAT" "3"
 LINKS=$(stat -c%h "$OUT/aus/v/2/hallo-2.opk")
@@ -212,13 +212,13 @@ LINKS=$(stat -c%h "$OUT/aus/v/2/hallo-2.opk")
     || bad "v/2 haelt eine eigene Kopie"
 python3 tools/ota/publish.py "$OUT/aus" --stand "$OUT/stand" \
     --bund "$OUT/bund.json" --revision 2 > "$W/zurueck.txt" 2>&1
-hat "$W/zurueck.txt" "geht zurueck" "eine kleinere Fassungsnummer wird ABGELEHNT"
+hat "$W/zurueck.txt" "goes backwards" "eine kleinere Fassungsnummer wird ABGELEHNT"
 LETZTE=$(python3 -c "import json;print(json.load(open('$OUT/aus/register.json'))['letzte'])")
 gleich "und das Register steht unveraendert" "$LETZTE" "4"
 cp "$OUT/aus/register.json" "$W/reg.bak"
 python3 tools/ota/publish.py "$OUT/aus" --zuruecknehmen 4 > "$W/rn.txt" 2>&1
-hat "$W/rn.txt" "gefuehrt bleibt 4" "eine zurueckgenommene Auslieferung behaelt ihre Nummer"
-hat "$W/rn.txt" "aktuell ist 3" "und aktuell faellt auf die vorige Fassung"
+hat "$W/rn.txt" "led remains 4" "eine zurueckgenommene Auslieferung behaelt ihre Nummer"
+hat "$W/rn.txt" "current is 3" "und aktuell faellt auf die vorige Fassung"
 cp "$W/reg.bak" "$OUT/aus/register.json"
 printf '# keine\n' > "$OUT/aus/gesperrt.txt"
 python3 - <<PY

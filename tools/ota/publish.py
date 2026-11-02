@@ -166,9 +166,9 @@ def build(aus, stand, bund, notiz, lock_down, feste_version=None,
     if feste_version is not None:
         revision = feste_version
         if revision <= reg["letzte"]:
-            raise SystemExit("veroeffentlichen: --revision %d geht zurueck "
-                             "(gefuehrt ist %d) -- das ist genau der Fall, "
-                             "den das Register verhindert"
+            raise SystemExit("publish: --revision %d goes backwards "
+                             "(led is %d) -- exactly the case "
+                             "the register prevents"
                              % (revision, reg["letzte"]))
     else:
         revision = reg["letzte"] + 1
@@ -251,26 +251,26 @@ def zuruecknehmen(aus, revision):
     print("   version %d withdrawn; led remains %d, current is %d"
           % (revision, reg["letzte"], n))
     print("   NOTE: the revocation list only takes effect when a NEW "
-          "Auslieferung sie traegt -- sie steht im signierten VERZEICHNIS.")
+          "delivery carries it -- it lives in the signed directory.")
     return 0
 
 
 def display(aus):
     reg = register_read(aus)
-    print("gefuehrte Fassung  %d" % reg["letzte"])
-    print("vergeben           %s" % reg.get("vergeben", []))
-    print("zurueckgenommen    %s" % reg.get("zurueckgenommen", []))
-    print("gesperrt           %s" % locked_read(aus))
+    print("led version        %d" % reg["letzte"])
+    print("issued            %s" % reg.get("vergeben", []))
+    print("withdrawn          %s" % reg.get("zurueckgenommen", []))
+    print("locked            %s" % locked_read(aus))
     vd = os.path.join(aus, "v")
     if os.path.isdir(vd):
-        print("vorgehalten        %s"
+        print("kept              %s"
               % sorted(int(x) for x in os.listdir(vd) if x.isdigit()))
     p = os.path.join(aus, "pakete")
     if os.path.isdir(p):
         n = len([x for x in os.listdir(p) if x.endswith(".opk")])
         gr = sum(os.path.getsize(os.path.join(p, x))
                  for x in os.listdir(p))
-        print("Vorrat             %d Pakete, %d Oktette" % (n, gr))
+        print("stock             %d packages, %d octets" % (n, gr))
     return 0
 
 

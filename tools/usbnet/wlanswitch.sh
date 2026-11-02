@@ -18,6 +18,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 USB_SNAPS=${USBWLAN_USB_SNAPS:-4}
 WLAN_SNAPS=${USBWLAN_WLAN_SNAPS:-4}
 BACK_SNAPS=${USBWLAN_BACK_SNAPS:-3}
+LATE_SNAPS=${USBWLAN_LATE_SNAPS:-5}
 SNAP_SEC=${USBWLAN_SNAP_SEC:-6}
 GW=192.168.77.1
 MAC=52:54:00:12:34:99
@@ -99,9 +100,11 @@ run() {
     wait "$q" 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$T/$n.txt" > "$T/$n.klar"
 }
+section() { awk -v a="$2" -v b="$3" '$0 ~ a {f=1} $0 ~ b {f=0} f' "$1"; }
+if [ "${USBWLAN_LATE_ONLY:-0}" != 1 ]; then
 run m
 run o "nethotwait nethotlate nohotkeep"
-section() { awk -v a="$2" -v b="$3" '$0 ~ a {f=1} $0 ~ b {f=0} f' "$1"; }
+fi
 check() {
     local f=$1 tag=$2
     has "$f" '==END==' "$tag: system keeps running"
@@ -122,6 +125,7 @@ check() {
     has "$T/$tag.bk" 'nethot: uplink card=0 kind=usbnet' "$tag: uplink returns to USB"
     section "$f" '==BACK0==' '==BACKSTATE==' > "$T/$tag.b0"
 }
+if [ "${USBWLAN_LATE_ONLY:-0}" != 1 ]; then
 check "$T/m.klar" keep
 has "$T/keep.b0" 'ip=192.168.77.15 gw=192.168.77.1' "keep: USB keeps its DHCP lease after WLAN is dropped"
 hasnot "$T/keep.b0" 'ip=169.254' "keep: no link-local address on USB"
@@ -132,5 +136,71 @@ has "$T/keep.bw" 'octets 131072' "keep: wget over USB after the switch back"
 check "$T/o.klar" old
 has "$T/old.b0" 'ip=169.254' "control nohotkeep: old behaviour leaves USB on link-local"
 hasnot "$T/old.b0" 'gw=192.168.77.1' "control nohotkeep: old behaviour loses the gateway"
+fi
+if [ "${USBWLAN_LATE:-1}" = 1 ]; then
+    echo "== dongle plugged after WLAN =="
+    {
+        echo 'echo ==START=='
+        echo 'wlanctl connect OrientFake orient-fake-pw1'
+        snaps "$WLAN_SNAPS"
+        echo 'dhcp dauer &'
+        snaps 1
+        echo 'cat /proc/wlan'
+        echo 'echo ==LATE0=='
+        snaps "$LATE_SNAPS"
+        echo 'cat /proc/wlan'
+        echo 'cat /etc/resolv.conf'
+        echo 'echo ==LATE1=='
+        echo 'ping -c 2 10.0.5.2'
+        echo 'echo ==LPING=='
+        echo 'echo ==UNPLUG=='
+        snaps "$BACK_SNAPS"
+        echo 'cat /proc/wlan'
+        echo 'echo ==LBACK0=='
+        echo "ping -c 2 $GW"
+        echo 'echo ==LBPING=='
+        echo "wget -q http://$GW/big"
+        echo 'echo ==LBWGET=='
+        echo 'host store.fleitec.com'
+        echo 'echo ==LBHOST=='
+        echo 'echo ==END=='
+    } > "$T/late.sh"
+    python3 tools/osum/mkfs.py build "$T/dl.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /dev/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+        /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/dhcp="$T/bin/dhcp.elf" /bin/wget="$T/bin/wget.elf" /bin/wlanctl="$T/bin/wlanctl.elf" /bin/netstat="$T/bin/netstat.elf" \
+        "/t/s.sh=$T/late.sh" "$FWPATH=$T/blobs/v7.bin" > "$T/mkfs2.txt" 2>&1 || { tail -3 "$T/mkfs2.txt"; bad "late image"; }
+    printf 'aufzeile k17: hold\naufzeile ==LATE0==\nmonitor device_add usb-net,id=devu1,bus=x0.0,netdev=n1,mac=%s\naufzeile nethot: usbnet attached\naufzeile ==UNPLUG==\nmonitor device_del devu1\naufzeile k17: free\n' "$MAC" > "$T/p_late"
+    timeout ${USBWLAN_TIMEOUT:-500} qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "${USBWLAN_KERNEL:-$T/k.img}" -m 512 \
+        -append "osum vfs usb usbhold usbpoll iwlfhtest iwlfhbind nic nip=169.254.10.1/16 nsvc=0 nwait=0 nethotwait nethotlate script=sh /t/s.sh;exit" \
+        -serial "file:$T/l.txt" -display none -no-reboot \
+        -monitor "unix:$T/l.mon,server,nowait" -pidfile "$T/l.pid" \
+        -drive "file=$T/dl.img,format=raw,if=ide,index=0" \
+        -device qemu-xhci,id=x0 -netdev "user,id=n1,net=10.0.5.0/24" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+    python3 -I tools/hotplug/monitor.py "$T/l.mon" "$T/l.txt" "$T/p_late" > "$T/l.mon.txt" 2>&1
+    echo $? > "$T/l.mrc"
+    for i in $(seq 1 120); do grep -qaF '==END==' "$T/l.txt" 2>/dev/null && break; sleep 2; done
+    [ -f "$T/l.pid" ] && kill "$(cat "$T/l.pid")" 2>/dev/null
+    tr -cd '\11\12\15\40-\176' < "$T/l.txt" > "$T/l.klar"
+    [ -n "${USBWLAN_KEEP:-}" ] && cp "$T/l.klar" "$USBWLAN_KEEP"/ 2>/dev/null
+    has "$T/l.klar" '==END==' "late: system keeps running"
+    has "$T/l.klar" 'nethot: usbnet attached' "late: dongle registered"
+    section "$T/l.klar" '==START==' '==LATE0==' > "$T/late.w0"
+    has "$T/late.w0" 'ip=192.168.77.50 gw=192.168.77.1' "late: WLAN lease before the dongle"
+    section "$T/l.klar" '==LATE0==' '==LATE1==' > "$T/late.w1"
+    has "$T/late.w1" 'nethot: uplink card=1 kind=usbnet' "late: uplink switches to the dongle"
+    has "$T/late.w1" 'ip=10.0.5.15' "late: dongle gets its own DHCP lease"
+    section "$T/l.klar" '==LATE1==' '==LPING==' > "$T/late.pg"
+    has "$T/late.pg" 'octets from 10.0.5.2' "late: ping over the dongle"
+    section "$T/l.klar" '==UNPLUG==' '==LBACK0==' > "$T/late.bk"
+    has "$T/late.bk" 'nethot: uplink card=0 kind=wlan' "late: uplink returns to WLAN after unplug"
+    has "$T/late.bk" 'ip=192.168.77.50 gw=192.168.77.1' "late: WLAN lease is back after unplug"
+    hasnot "$T/late.bk" 'ip=169.254' "late: no link-local address after unplug"
+    section "$T/l.klar" '==LBACK0==' '==LBPING==' > "$T/late.bp"
+    has "$T/late.bp" 'octets from 192.168.77.1' "late: ping over WLAN after unplug"
+    section "$T/l.klar" '==LBPING==' '==LBWGET==' > "$T/late.bw"
+    has "$T/late.bw" 'status 200' "late: wget over WLAN after unplug"
+    section "$T/l.klar" '==LBWGET==' '==LBHOST==' > "$T/late.bh"
+    has "$T/late.bh" '93.184.216.34' "late: host over WLAN after unplug"
+fi
 echo "USBWLAN: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
