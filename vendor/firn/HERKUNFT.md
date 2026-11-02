@@ -1,5 +1,7 @@
 # Woher Firn kommt -- und warum der Hash hier nicht ins Netz zeigt
 
+> Outdated since 02.11.2026: the pin is now b6bf6765 in the live /root/firn repo. See UPSTREAM.md.
+
 **Firn steht seit dem 05.09.2026 unter der Mozilla Public License 2.0.**
 Das oeffentliche Repository ist:
 
