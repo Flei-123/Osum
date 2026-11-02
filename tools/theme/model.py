@@ -24,6 +24,7 @@ computes, bit for bit.  `model.py srgb --float` prints the float
 reference next to it so the integer routine itself can be judged.
 """
 import os
+import re
 import sys
 
 SCALE = 1 << 24
@@ -178,6 +179,26 @@ def read_scheme(path):
     return out
 
 
+def palette_roles():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "palette", "dark.tsv")
+    roles = {}
+    for line in open(path, encoding="utf-8"):
+        if line.startswith("#") or not line.strip():
+            continue
+        role, hexs, _ = line.rstrip("\n").split("\t")
+        roles[role] = int(hexs, 16)
+    return roles
+
+
+def palette_bindings(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "palette", "gen.py")
+    text = open(path, encoding="utf-8").read()
+    block = text[text.index(name + " = ["):]
+    block = block[:block.index("]")]
+    return [(m.group(1)[2:].lower().replace("_", "-"), m.group(2))
+            for m in re.finditer(r'\("(S_[A-Z_]+)", "([a-z_]+)"\)', block)]
+
+
 def hexval(s):
     return int(s, 16)
 
@@ -277,6 +298,12 @@ def resolve(scheme, dark, accent_override=None):
             put("shadow", neutral[N_1000])
         start, step = A_400, -1
 
+    pal = dark and not high and scheme.get("palette") != "own"
+    roles = palette_roles() if pal else {}
+    if pal:
+        for sem_name, role in palette_bindings("SURFACE_BINDINGS"):
+            put(sem_name, roles[role])
+
     need_text = 700 if high else 450
     need_ui = 450 if high else 300
     on_candidates = [neutral[N_0], neutral[N_1000], neutral[N_900]]
@@ -341,6 +368,13 @@ def resolve(scheme, dark, accent_override=None):
     put("danger", fit_status(rd))
     put("warning", fit_status(rw))
     put("success", fit_status(rs))
+
+    if pal:
+        if accent_override is None:
+            for sem_name, role in palette_bindings("ACCENT_BINDINGS"):
+                put(sem_name, roles[role])
+        for sem_name, role in palette_bindings("STATUS_BINDINGS"):
+            put(sem_name, roles[role])
 
     comp = [(name, sem[S[role]], role) for name, role in COMPONENT]
     return {
@@ -444,6 +478,8 @@ def main():
         return 0
     if cmd in ("tokens", "contrast", "semantic"):
         sch = read_scheme(sys.argv[2])
+        if os.environ.get("MODEL_NO_PALETTE"):
+            sch["palette"] = "own"
         dark = sys.argv[3] == "dark"
         acc = sys.argv[4] if len(sys.argv) > 4 else None
         res = resolve(sch, dark, acc)
