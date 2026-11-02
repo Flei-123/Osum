@@ -184,6 +184,14 @@ for p in $progs; do
     strip --strip-all "$BUILDD/$p.elf"
 done
 echo "programs $(echo $progs | wc -w)"
+CERTUS_REAL=${CERTUS:-}
+if [ -z "$CERTUS_REAL" ] && [ "${CERTUS_BUILD:-0}" = 1 ] && [[ " $progs " == *" certus "* ]]; then
+    CERTUS_REAL=$(bash tools/certus/ensure.sh 2>"$BUILDD/certus.ensure.log")
+fi
+if [ -n "$CERTUS_REAL" ] && [ ! -s "$CERTUS_REAL" ]; then
+    echo "NOTE: CERTUS=$CERTUS_REAL is empty or missing -- the placeholder is used" >&2
+    CERTUS_REAL=""
+fi
 
 # ------------------------------------------------------------ 3. disk
 python3 tools/k15/tree.py "$OUT/baum" > "$OUT/baum.log" 2>&1 || exit 1
@@ -220,7 +228,13 @@ ARGS+=(/lib/
       "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
       "/lib/icons.ttf=assets/osum-icons.ttf")
 ARGS+=(/bin/)
-for p in $progs; do ARGS+=("/bin/$p=$BUILDD/$p.elf"); done
+for p in $progs; do
+    if [ "$p" = certus ] && [ -n "$CERTUS_REAL" ]; then
+        ARGS+=("/bin/$p=$CERTUS_REAL")
+    else
+        ARGS+=("/bin/$p=$BUILDD/$p.elf")
+    fi
+done
 case " $progs " in *" explorer "*) ARGS+=("/bin/files@/bin/explorer") ;; esac
 ARGS+=(/etc/
        "/etc/theme.conf=$OUT/theme.conf@0644"

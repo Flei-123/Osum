@@ -14,7 +14,7 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 hasnot() { grep -qaF -- "$2" "$1" && bad "$3 -- '$2' is there and should not be" || ok "$3"; }
 
 REAL=${BROWSERDEF_REAL:-0}
-CB=0; [ "$REAL" = 1 ] && CB=1
+CB=0; BLOCKS=32768; [ "$REAL" = 1 ] && { CB=1; BLOCKS=163840; }
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
 command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "BROWSERDEF: qemu missing"; exit 1; }
@@ -46,7 +46,7 @@ live() {
     local nm=$1 wait_re=$2; shift 2
     local -a ENVV=("$@")
     env "${ENVV[@]}" bash tools/alltag/build.sh "$TMPD/$nm" kbd=yes uitrace=yes lang=en \
-        "accel=${OSUM_QEMU_ACCEL}" "waitfor=$wait_re" \
+        "accel=${OSUM_QEMU_ACCEL}" "waitfor=$wait_re" "bloecke=$BLOCKS" \
         "extra=osum vfs bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 wighalt=120 wigapp=/bin/vuihost" \
         "progs=open certus vuihost sh echo theme" \
         xdir=/proc xdir=/dev xdir=/etc \
