@@ -84,7 +84,7 @@ done
 SPEC="$SPEC /etc/ziel=$OUT/ziel@644:0:0 /etc/hostname=$OUT/hostname@644:0:0"
 [ "${SERVER_INIT:-on}" = off ] || SPEC="$SPEC /etc/inittab=$OUT/inittab@644:0:0"
 BLOCKS=${BLOCKS:-20480}
-python3 tools/osum/mkfs.py build "$OUT/disk.img" "$BLOCKS" ${OFSFLAG:---v3} $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" "$BLOCKS" ${OFSFLAG:---v3} $SPEC \
     /readme.txt="$OUT/readme.txt" > "$OUT/mkfs.txt" 2>&1 || {
     echo "== mkfs.py"; cat "$OUT/mkfs.txt"; exit 1; }
 

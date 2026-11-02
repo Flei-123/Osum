@@ -167,7 +167,7 @@ DIRS="/bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /t/"
 DATA="/t/dienste.sh=$TMPD/dienste.sh@644:0:0 /t/kurz.sh=$TMPD/kurz.sh@644:0:0"
 
 bau() { # abbild ziel-datei
-    python3 tools/osum/mkfs.py build "$1" $BLOCKS $DIRS $SPEC $DATA \
+    bash tools/mkfsfi/mkfs.sh build "$1" $BLOCKS $DIRS $SPEC $DATA \
         "/etc/inittab=$TMPD/inittab@644:0:0" \
         "/etc/ziel=$2@644:0:0" > "$TMPD/mkfs.txt" 2>&1
 }
@@ -178,19 +178,19 @@ bau "$TMPD/d0.img" "$TMPD/ziel" \
 bau "$TMPD/dg.img" "$TMPD/ziel-g" \
     && ok "and a second one that differs ONLY in /etc/ziel (graphics)" \
     || bad "mkfs.py fehlgeschlagen (grafik)"
-python3 tools/osum/mkfs.py build "$TMPD/dn.img" $BLOCKS $DIRS $SPEC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dn.img" $BLOCKS $DIRS $SPEC $DATA \
     >/dev/null 2>&1 \
     && ok "and a third one WITHOUT /etc/inittab" \
     || bad "mkfs.py failed (without inittab)"
-python3 tools/osum/mkfs.py build "$TMPD/d2.img" $BLOCKS $DIRS $SPEC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d2.img" $BLOCKS $DIRS $SPEC $DATA \
     "/etc/inittab=$TMPD/inittab2@644:0:0" "/etc/ziel=$TMPD/ziel@644:0:0" \
     >/dev/null 2>&1 \
     && ok "and a fourth with exactly TWO lines -- for the negative test of the kernel bug" \
     || bad "mkfs.py failed (two lines)"
 
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /bin/init)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /bin/init)
 is "die Rechte von /bin/init im Abbild" "$m" "/bin/init 755 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /etc/inittab)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /etc/inittab)
 is "und die von /etc/inittab" "$m" "/etc/inittab 644 0 0"
 
 # ---------------------------------------------------------- 3. die Laeufe
@@ -391,7 +391,7 @@ if build_progs 1; then
     ok "firnc1 baut dieselben $(echo $NEU $BASIS | wc -w) Programme"
     SPEC1=""
     for p in $NEU $BASIS; do SPEC1="$SPEC1 /bin/$p=$TMPD/${p}1.elf@755:0:0"; done
-    python3 tools/osum/mkfs.py build "$TMPD/d1.img" $BLOCKS $DIRS $SPEC1 $DATA \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/d1.img" $BLOCKS $DIRS $SPEC1 $DATA \
         "/etc/inittab=$TMPD/inittab@644:0:0" \
         "/etc/ziel=$TMPD/ziel@644:0:0" >/dev/null 2>&1
     rc=$(run_case stufe1 "$TMPD/d1.img" "osum $BASE script=sh /t/kurz.sh" 300 -no-reboot)

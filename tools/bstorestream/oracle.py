@@ -9,7 +9,7 @@ CHUNK = 4096
 
 def image_cat(image, path):
     result = subprocess.run(
-        ["python3", os.path.join("tools", "osum", "mkfs.py"), "cat", image, path],
+        ["bash", os.path.join("tools", "mkfsfi", "mkfs.sh"), "cat", image, path],
         capture_output=True)
     return result.stdout if result.returncode == 0 else None
 

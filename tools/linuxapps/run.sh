@@ -54,7 +54,7 @@ if [ -f "$WD/fx-root/usr/share/mime/mime.cache" ]; then
 fi
 for e in ${EXTRA:-}; do echo "$e" >> "$OUT/spec.txt"; done
 mapfile -t SP < "$OUT/spec.txt"
-python3 tools/osum/mkfs.py build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES:-4096} "${SP[@]}" "/etc/fx.sh=$OUT/fx.sh@755" "/etc/inittab=$OUT/inittab" > "$OUT/mkfs.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" "$BLOCKS" --v3 --inodes=${INODES:-4096} "${SP[@]}" "/etc/fx.sh=$OUT/fx.sh@755" "/etc/inittab=$OUT/inittab" > "$OUT/mkfs.log" 2>&1 \
     || { echo "LINUXAPPS: mkfs failed"; tail -5 "$OUT/mkfs.log"; exit 1; }
 echo "LINUXAPPS: disk $(stat -c%s "$OUT/disk.img") bytes, kernel $KERNEL"
 DRV=(-drive "file=$OUT/disk.img,format=raw,if=ide,index=0")

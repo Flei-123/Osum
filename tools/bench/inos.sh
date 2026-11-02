@@ -106,7 +106,7 @@ for p in $PROGS; do
     esac
 done
 DIRS="/bin/ /sbin/ /etc/ /dev/ /proc/ /run/@755:0:0 /d/ /tmp/@777:0:0 /var/ /var/crash/"
-python3 tools/osum/mkfs.py build "$TMPD/on.img" $BLOCKS $DIRS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/on.img" $BLOCKS $DIRS $SPEC \
     /etc/passwd=$TMPD/passwd@644:0:0 /etc/inittab=$TMPD/inittab@644:0:0 \
     /etc/fstab=$TMPD/fstab@644:0:0 /etc/odb.token=$TMPD/token@600:0:0 /etc/odb.conf=$TMPD/conf_on@644:0:0 \
     >"$TMPD/mkfs.txt" 2>&1 || { bad "mkfs.py failed"; head -5 "$TMPD/mkfs.txt"; finish; }

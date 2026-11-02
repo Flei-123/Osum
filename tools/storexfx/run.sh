@@ -181,7 +181,7 @@ BASE+=("/bin/setsess=$TMPD/setsess"
     "/system/schluessel.pub=$TMPD/pk/schluessel.pub"
     "/t/s.sh=$TMPD/s.sh")
 for n in 0 1 2 3 4; do BASE+=("/etc/ota.conf.$n=$TMPD/ota.conf.$n"); done
-python3 tools/osum/mkfs.py "${BASE[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
+bash tools/mkfsfi/mkfs.sh "${BASE[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 ACCEL="-cpu $OSUM_CPU"
 [ -r /dev/kvm ] && [ -w /dev/kvm ] && ACCEL="-accel kvm -cpu host"
 QEMU_LIMIT=${STOREXFX_TIMEOUT:-1500}

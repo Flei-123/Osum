@@ -76,7 +76,7 @@ boot() {
              "/etc/social/providers=$TMPD/etc/providers"
              "/etc/social/games.tsv=$TMPD/etc/games.tsv")
     fi
-    python3 tools/osum/mkfs.py "${A_[@]}" > "$TMPD/mkfs-$tag.txt" 2>&1 \
+    bash tools/mkfsfi/mkfs.sh "${A_[@]}" > "$TMPD/mkfs-$tag.txt" 2>&1 \
         || { bad "mkfs $tag: $(tail -2 "$TMPD/mkfs-$tag.txt")"; return 1; }
     : > "$TMPD/$tag.ser"
     timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \

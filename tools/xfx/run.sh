@@ -208,7 +208,7 @@ build_parts_img() {
     local name=$1 script=$2 plist="" src=${PARTS_SRC:-good} blocks=${PARTS_BLOCKS:-16384}
     shift 2
     for k in "$@"; do plist="$plist /usr/share/xfx/firefox.tar.part$k=$TMPD/$src.part$k@644:0:0"; done
-    python3 tools/osum/mkfs.py build "$TMPD/$name.img" "$blocks" $DIRS $BASE $plist \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/$name.img" "$blocks" $DIRS $BASE $plist \
         "/usr/share/xfx/firefox.manifest=$TMPD/$src.manifest@644:0:0" \
         "/t/run.sh=$TMPD/$script@644:0:0" > "$TMPD/mkfs-$name.txt" 2>&1 \
         && ok "image $name built" || { bad "mkfs fails for $name"; head -5 "$TMPD/mkfs-$name.txt"; }
@@ -216,7 +216,7 @@ build_parts_img() {
 
 build_img() {
     local name=$1 tar=$2 man=$3 script=$4 blocks=$5
-    python3 tools/osum/mkfs.py build "$TMPD/$name.img" "$blocks" $DIRS $BASE \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/$name.img" "$blocks" $DIRS $BASE \
         "/usr/share/xfx/firefox.tar=$TMPD/$tar@644:0:0" "/usr/share/xfx/firefox.manifest=$TMPD/$man@644:0:0" \
         "/t/run.sh=$TMPD/$script@644:0:0" > "$TMPD/mkfs-$name.txt" 2>&1 \
         && ok "image $name built" || { bad "mkfs fails for $name"; head -5 "$TMPD/mkfs-$name.txt"; }

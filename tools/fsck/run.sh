@@ -53,10 +53,10 @@ ok "programs built: $PROGS"
 
 SPEC="/bin/ /tmp/ /dev/ /proc/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" 65536 --v3 --inodes=512 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 65536 --v3 --inodes=512 \
     --time=1780000000 $SPEC >/dev/null 2>&1 || bad "mkfs root"
 echo hello > "$TMPD/hello.txt"
-python3 tools/osum/mkfs.py build "$TMPD/ofs.img" 16384 --v3 --inodes=128 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/ofs.img" 16384 --v3 --inodes=128 \
     --time=1780000000 /etc/ /hello.txt="$TMPD/hello.txt" >/dev/null 2>&1 || bad "mkfs data"
 python3 tools/fsck/gptdisk.py "$TMPD/ofs.img" "$TMPD/gpt.img" ofs > "$TMPD/gpt.txt" || bad "gptdisk ofs"
 python3 tools/fsck/gptdisk.py "$TMPD/ofs.img" "$TMPD/basic.img" basic >/dev/null || bad "gptdisk basic"

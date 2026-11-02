@@ -72,7 +72,7 @@ mkimg() {
     local name=$1 pk=$2
     local files="/lib/drivers/edudemo/"
     for f in $(ls "$D/$pk/edudemo"); do files="$files /lib/drivers/edudemo/$f=$D/$pk/edudemo/$f"; done
-    python3 tools/osum/mkfs.py build "$D/d-$name.img" 20000 /lib/ /lib/drivers/ \
+    bash tools/mkfsfi/mkfs.sh build "$D/d-$name.img" 20000 /lib/ /lib/drivers/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
         $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \

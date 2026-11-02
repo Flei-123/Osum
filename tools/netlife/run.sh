@@ -27,7 +27,7 @@ cat /var/log/net.log
 echo ==LOGEND==
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /var/ /var/log/ /var/jarvis/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /var/ /var/log/ /var/jarvis/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/cat="$T/bin/cat.elf" /bin/dhcp="$T/bin/dhcp.elf" /t/s.sh="$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm

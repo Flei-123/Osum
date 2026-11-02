@@ -152,7 +152,7 @@ echo ==D==
 ls /medien/usb0
 echo ==END==
 EOS
-    python3 tools/osum/mkfs.py build "$T/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ /t/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ /t/ \
         $(for p in sh cat echo ls stickwr; do echo "/bin/$p=$T/hb/$p"; done) \
         "/t/s1.sh=$T/s1.sh" "/t/boot.img=$T/boot.img" "/t/note.txt=$T/note.txt" > "$T/mkfs.txt" 2>&1 \
         && ok "root disk built" || { bad "mkfs"; tail -3 "$T/mkfs.txt"; return; }
@@ -270,7 +270,7 @@ act confirm last
 echo rc=$?
 echo ==END==
 EOS
-    python3 tools/osum/mkfs.py build "$T/d2.img" 30000 /lib/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/d2.img" 30000 /lib/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /etc/orientbus/ /apps/ /apps/stickwr.prog/ /var/ /var/log/ \
         $(for p in $PROGS; do echo "/bin/$p=$T/bb/$p.elf"; done) \

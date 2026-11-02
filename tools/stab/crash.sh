@@ -23,7 +23,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/sync/build.sh "$T/bin" 0 sh echo stab > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 (cd "$KTREE" && FIRNLIB="$KTREE/lib" ./tools/build-kernel.sh "$T/k0.img" --stufe 0) > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 printf 'echo ==STAB==\nstab run %s %s %s\necho ==END==\n' "$ROUNDS" "$WORKERS" "$SUPS" > "$T/s.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/stab="$T/bin/stab.elf" /t/s.sh="$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 crash=0; incomplete=0; first=""; t0=$(date +%s)
 for n in $(seq 1 "$BOOTS"); do

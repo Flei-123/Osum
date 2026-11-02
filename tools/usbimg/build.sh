@@ -121,7 +121,7 @@ bash tools/build-kernel.sh "$OUT/osum.mb" --stufe "$STUFE" > "$OUT/k.log" 2>&1 \
     || { tail -20 "$OUT/k.log" >&2; fehler "the kernel cannot be built"; }
 sagen "kern        $(stat -c%s "$OUT/osum.mb") Oktette"
 
-#     python3 tools/osum/mkfs.py list <wurzel.img>
+#     bash tools/mkfsfi/mkfs.sh list <wurzel.img>
 #
 PROGS=${PROGS:-"desktop taskbar settings launcher explorer netview \
 widgetdemo taskmgr installer dualcli locate edit nedit trashbin sh echo ls cat ps uname date df mkdir rm cp mv \
@@ -308,7 +308,7 @@ printf 'root:x:0:0:root:/:%s\n%s:x:1000:1000:%s:/users/%s:%s\n' \
 # ============================================== RUNDE ANMELDUNG
 # /etc/shadow, /etc/group, /etc/login.conf, /etc/sperre.conf
 #
-#     python3 tools/osum/mkfs.py list root.img | grep shadow   ->  nichts
+#     bash tools/mkfsfi/mkfs.sh list root.img | grep shadow   ->  nichts
 #
 PW_RUNDEN=$(sed -n 's/^const KOSTEN: u64 = \([0-9]*\).*/\1/p' kernel/user/pw.fi | head -1)
 [ -n "$PW_RUNDEN" ] || fehler "die Rundenzahl steht nicht in kernel/user/pw.fi"
@@ -606,7 +606,7 @@ if [[ " $PROGS " == *" wayd "* ]]; then
     ARGS+=(/usr/share/wayd/ "/usr/share/wayd/keymap-us.xkb=$OUT/wayd-km/keymap-us.xkb" "/usr/share/wayd/keymap-de.xkb=$OUT/wayd-km/keymap-de.xkb")
 fi
 #
-#     python3 tools/osum/mkfs.py list root.img | grep /users/
+#     bash tools/mkfsfi/mkfs.sh list root.img | grep /users/
 #         /users/ /users/root/ /users/root/config/ ...
 #         (kein /users/justin)
 #
@@ -912,7 +912,7 @@ if [ -n "${USBIMG_SPECFILE:-}" ]; then
     ARGS+=("${SPEC_LINES[@]}")
 fi
 ph pre-mkfs
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
 sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
 
@@ -957,7 +957,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 PFLICHT="$PFLICHT /bin/vaultd /bin/vaultctl /bin/vaultprompt /bin/vaultui /apps/vault.osp/start /apps/vault.osp/INFO /apps/vault.osp/symbol /bin/wlanpersist /bin/wmplug /bin/hotkeyd /etc/wmplug.conf /etc/wmplug.autostart /etc/hotkeys.conf /etc/apprights.conf /bin/apprights"
 [ "$IMAGE_PROFILE" = personal ] && PFLICHT="$PFLICHT /bin/jarvismini /apps/jarvismini.osp/start /apps/jarvismini.osp/INFO /etc/jarvismini.conf /etc/actions.d/jarvismini.actions /bin/jmlink /bin/snip /bin/snipt"
 [ "${ROOT_SLIM:-0}" = 1 ] || [ "${BOOT_KERNEL_COPY:-0}" != 1 ] && PFLICHT=${PFLICHT//\/boot\/osum.mb/}
-python3 tools/osum/mkfs.py list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh list "$OUT/root.img" > "$OUT/liste.txt" 2>&1 \
     || fehler "das fertige Dateisystem laesst sich nicht lesen"
 fehlt=0
 for f in $PFLICHT; do

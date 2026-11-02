@@ -48,7 +48,7 @@ printf 'on\n' > "$ARB/uitrace"
 MK=()
 for p in $PROGS; do MK+=("/bin/$p=$ARB/$p.elf"); done
 while read -r z; do MK+=("$z"); done < "$ARB/baum/liste"
-python3 tools/osum/mkfs.py build "$ARB/disk.img" 16384 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$ARB/disk.img" 16384 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ "${MK[@]}" "/bin/files@/bin/explorer" \
     /proc/ /dev/ /mnt/ /medien/ /etc/ \

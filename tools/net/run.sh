@@ -187,7 +187,7 @@ gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>"$TMPD/gcc.err" \
 # The disk with the userland of this round on it.
 SPEC="/bin/"
 for p in $NETPROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py: an image with /bin/ping and /bin/wget on it" \
     || bad "mkfs.py failed"

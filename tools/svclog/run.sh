@@ -56,7 +56,7 @@ n=$(grep -ac 'fetch:' "$TMPD/con.cells"); [ "$n" -gt 0 ] && ok "control: the ter
 fcat() { # $1 = run name, $2 = path in the image; prints the file (nothing when it does not exist)
     # mkfs.py prints "no such path" on stdout and exits 1 for a missing file: that must read as an empty file
     local f="$TMPD/fcat.$$"
-    if python3 tools/osum/mkfs.py cat "$TMPD/$1/disk.img" "$2" > "$f" 2> /dev/null; then tr -d '\000' < "$f"; fi
+    if bash tools/mkfsfi/mkfs.sh cat "$TMPD/$1/disk.img" "$2" > "$f" 2> /dev/null; then tr -d '\000' < "$f"; fi
     rm -f "$f"
 }
 

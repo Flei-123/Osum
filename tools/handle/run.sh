@@ -225,7 +225,7 @@ echo "== 9. der Schalter 'hstrict': nichts wird geerbt =="
 printf 'runde handle\n' > "$TMPD/readme.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-if python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+if bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
        /readme.txt="$TMPD/readme.txt" >"$TMPD/mkfs.txt" 2>&1; then
     ok "mkfs.py built an OFS image with /bin/sh"
     QUIET="nokbd nosched noproc nofs noring3"

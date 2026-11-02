@@ -44,7 +44,7 @@ ls /t
 echo @@end
 SEOF
 BLOCKS=$(( FILE_KIB * 2 + 30000 ))
-python3 tools/osum/mkfs.py build "$W/root.img" "$BLOCKS" /bin/ /proc/ /dev/ /t/ $MKARGS \
+bash tools/mkfsfi/mkfs.sh build "$W/root.img" "$BLOCKS" /bin/ /proc/ /dev/ /t/ $MKARGS \
     "/t/s.sh=$W/s.sh" "/t/big.bin=$W/big.bin" "/t/keep.txt=$W/keep.txt" > "$W/mkfs.log" 2>&1 || { tail -3 "$W/mkfs.log"; exit 1; }
 ACC=""; [ "$OSUM_QEMU_ACCEL" = kvm ] && ACC="-cpu host"
 timeout ${BU_TIMEOUT:-900} $QEMU_X86 $ACC -kernel "$K" -m 512 \

@@ -71,7 +71,7 @@ for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/wmregeln.conf=etc/wmregeln.conf")
 [ -f etc/wmplug.conf ] && ARGS+=("/etc/wmplug.conf=etc/wmplug.conf")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "the image is built" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 

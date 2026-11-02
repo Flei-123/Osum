@@ -25,7 +25,7 @@ KVM=()
 
 UITRACE=1 bash tools/usbimg/build.sh "$OUT/bau" > "$OUT/build.txt" 2>&1 \
     && ok "image builds (uitrace on)" || { bad "image does not build"; tail -5 "$OUT/build.txt"; echo "SETTINGSPROBE: $pass passed, $fail failed"; exit 1; }
-python3 tools/osum/mkfs.py list "$OUT/bau/root.img" > "$OUT/files.txt" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh list "$OUT/bau/root.img" > "$OUT/files.txt" 2>/dev/null
 grep -q '/apps/social.prog/SETTINGS' "$OUT/files.txt" \
     && ok "/apps/social.prog/SETTINGS is on the image" || bad "/apps/social.prog/SETTINGS is missing on the image"
 

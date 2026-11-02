@@ -277,7 +277,7 @@ if [ "$NETOK" = 1 ]; then
         [ -f "$TMPD/$p.elf" ] && SPEC="$SPEC /bin/$p=$TMPD/$p.elf"
     done
     SPEC="$SPEC /var/ /etc/"
-    python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
         > "$TMPD/mkfs.txt" 2>&1 \
         && ok "mkfs.py: an image with /bin/ping and /bin/wget" \
         || { bad "mkfs.py ist gescheitert"

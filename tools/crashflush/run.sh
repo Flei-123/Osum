@@ -38,7 +38,7 @@ CL="osum nokbd vfs krach script=krach kern;exit"
 
 boot() { # <tag> <extra words>
     local t=$1 img="$TMPD/$1.img"
-    python3 tools/osum/mkfs.py build "$img" 4096 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs-$t.txt" 2>&1 || bad "$t mkfs"
+    bash tools/mkfsfi/mkfs.sh build "$img" 4096 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs-$t.txt" 2>&1 || bad "$t mkfs"
     timeout 90 qemu-system-x86_64 $ACCEL -kernel "$K0" -m 256 -append "$CL $2" -serial "file:$TMPD/$t.ser" -display none -no-reboot \
         -drive "file=$img,format=raw,if=none,id=nv" -device nvme,drive=nv,serial=cflush \
         -trace "pci_nvme_flush_ns,file=$TMPD/$t.trace" -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
@@ -52,9 +52,9 @@ grep -aq 'absturz: bericht .* geschrieben' "$TMPD/a.ser" && ok "A report written
 grep -aq 'crash: report flushed, device +1' "$TMPD/a.ser" && ok "A report flushed, device +1" || bad "A flush line: $(grep -a 'report flushed' "$TMPD/a.ser" | head -1)"
 na=$(grep -c pci_nvme_flush_ns "$TMPD/a.trace")
 [ "$na" -gt 0 ] && ok "A qemu saw NVMe flush commands: $na" || bad "A qemu saw no NVMe flush"
-f=$(python3 tools/osum/mkfs.py list "$TMPD/a.img" 2>/dev/null | grep -oE "var/crash/[0-9]+\.txt" | head -1 | sed "s,.*/,,")
+f=$(bash tools/mkfsfi/mkfs.sh list "$TMPD/a.img" 2>/dev/null | grep -oE "var/crash/[0-9]+\.txt" | head -1 | sed "s,.*/,,")
 if [ -n "$f" ]; then
-    python3 tools/osum/mkfs.py cat "$TMPD/a.img" "/var/crash/$f" > "$TMPD/a.rep" 2>/dev/null
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/a.img" "/var/crash/$f" > "$TMPD/a.rep" 2>/dev/null
     nz=$(tr -d '\0' < "$TMPD/a.rep" | wc -c)
     [ "$nz" -gt 200 ] && ok "A report on disk has $nz non-zero octets" || bad "A report on disk empty ($nz)"
     grep -aq 'OSUM' "$TMPD/a.rep" && ok "A report header on disk" || bad "A report header missing on disk"

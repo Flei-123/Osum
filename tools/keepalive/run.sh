@@ -56,7 +56,7 @@ run() {
     local mode=$1 eport hport mon ser img qpid epid cpid
     eport=$(freeport); hport=$(freeport); mon=$D/mon-$mode.sock; ser=$D/$mode.ser; img=$D/$mode.img
     printf '%s %s\n' "$mode" "$eport" > "$D/ka.conf"
-    python3 tools/osum/mkfs.py build "$img" 16384 --v3 --inodes=256 $SPEC /etc/ka.conf="$D/ka.conf" > "$D/mkfs-$mode.txt" 2>&1 || { bad "$mode: image does not build"; return 1; }
+    bash tools/mkfsfi/mkfs.sh build "$img" 16384 --v3 --inodes=256 $SPEC /etc/ka.conf="$D/ka.conf" > "$D/mkfs-$mode.txt" 2>&1 || { bad "$mode: image does not build"; return 1; }
     python3 -I $HERE/echo.py "$eport" > "$D/echo-$mode.log" 2>&1 & epid=$!
     : > "$ser"
     timeout "$TMO" $QEMU "${KVM[@]}" -kernel "$K" -m 512 \

@@ -91,7 +91,7 @@ SPEC="$SPEC /bin/victim=$B/sleep.elf"
 DIRS="/bin/ /sbin/ /etc/ /dev/ /proc/ /run/@755:0:0 /d/ /tmp/@777:0:0 /var/ /var/crash/"
 mkimg() { # out inittab [extra spec...]
     local out=$1 it=$2; shift 2
-    python3 tools/osum/mkfs.py build "$out" $BLOCKS $DIRS $SPEC \
+    bash tools/mkfsfi/mkfs.sh build "$out" $BLOCKS $DIRS $SPEC \
         /etc/passwd=$TMPD/passwd@644:0:0 /etc/inittab=$it@644:0:0 \
         /etc/fstab=$TMPD/fstab@644:0:0 /etc/odb.token=$TMPD/token@600:0:0 ${NOCONF:-/etc/odb.conf=$TMPD/conf_on@644:0:0} \
         /d/data.txt=$TMPD/data.txt@644:0:0 "$@" >"$TMPD/mkfs.txt" 2>&1 \

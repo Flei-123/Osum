@@ -71,7 +71,7 @@ A+=("/etc/theme.conf=$TMPD/theme.conf" /etc/schemas/)
 for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 while read -r l; do A+=("$l"); done < "$TMPD/out/mkfs.lines"
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "disk with /apps/counter.osp" || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; fin; }
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "disk with /apps/counter.osp" || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; fin; }
 SOCK="$TMPD/mon.sock"; rm -f "$SOCK"
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 timeout 300 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 768 \

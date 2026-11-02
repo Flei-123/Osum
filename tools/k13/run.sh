@@ -174,25 +174,25 @@ DATA="/t/pw.txt=$TMPD/pw.txt@644:0:0 /t/bad.txt=$TMPD/bad.txt@644:0:0
       /t/dienste.sh=$TMPD/dienste.sh@644:0:0
       /t/passwd.sh=$TMPD/passwd.sh@644:0:0"
 
-python3 tools/osum/mkfs.py build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab@644:0:0" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py builds a version 2 image with permissions and owners" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
-python3 tools/osum/mkfs.py build "$TMPD/dl.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dl.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab-login@644:0:0" >/dev/null 2>&1
-python3 tools/osum/mkfs.py build "$TMPD/dv1.img" $BLOCKS --v1 $DIRS $SPEC $ETC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dv1.img" $BLOCKS --v1 $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab@644:0:0" >/dev/null 2>&1 \
     && ok "mkfs.py also builds a version 1 image (--v1)" \
     || bad "mkfs.py --v1 fehlgeschlagen"
 
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /bin/passwd)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /bin/passwd)
 is "die Rechte von /bin/passwd im Abbild" "$m" "/bin/passwd 4755 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /etc/shadow)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /etc/shadow)
 is "die Rechte von /etc/shadow im Abbild" "$m" "/etc/shadow 600 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/dv1.img" /bin/passwd)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/dv1.img" /bin/passwd)
 is "dieselbe Datei in der Fassung 1 (dort gibt es keine Rechte)" \
    "$m" "/bin/passwd 755 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/dv1.img" /etc/shadow)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/dv1.img" /etc/shadow)
 is "und auch /etc/shadow traegt dort keine (alles 0o755, alles root)" \
    "$m" "/etc/shadow 755 0 0"
 
@@ -292,11 +292,11 @@ has "$F" "uid=0(root) gid=0 euid=0(root) egid=0" \
     "MIT dem richtigen Passwort wird justin zu root"
 
 A="$TMPD/live-rechte.img"
-m=$(python3 tools/osum/mkfs.py meta "$A" /w/root.txt)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$A" /w/root.txt)
 is "chmod 4755 steht wirklich im Inode" "$m" "/w/root.txt 4755 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$A" /w/rootneu.txt)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$A" /w/rootneu.txt)
 is "chown justin:justin steht wirklich im Inode" "$m" "/w/rootneu.txt 640 1000 1000"
-m=$(python3 tools/osum/mkfs.py meta "$A" /w/ju.txt)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$A" /w/ju.txt)
 is "die Datei, die justin angelegt hat, gehoert justin" "$m" "/w/ju.txt 644 1000 1000"
 
 kc=$(k13val "$F" checks)
@@ -400,7 +400,7 @@ rc=$(run_case pw "$TMPD/k0.img" "$TMPD/d0.img" \
     "osum nokbd nosched noproc nofs noring3 script=sh /t/passwd.sh")
 F="$TMPD/pw.txt"
 has "$F" "passwd: set for justin" "passwd meldet Erfolg"
-python3 tools/osum/mkfs.py cat "$TMPD/live-pw.img" /etc/shadow > "$TMPD/shadow.neu" 2>&1
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-pw.img" /etc/shadow > "$TMPD/shadow.neu" 2>&1
 python3 - "$TMPD/shadow.neu" <<'PY' > "$TMPD/pwcheck.txt" 2>&1
 import binascii, hashlib, sys
 raw = open(sys.argv[1], "rb").read()
@@ -440,7 +440,7 @@ grep -q '^neu stimmt' "$TMPD/pwcheck.txt" \
 grep -q '^alt stimmt nicht' "$TMPD/pwcheck.txt" \
     && ok "NEGATIVE: the OLD password gives a different value" \
     || bad "old and new password give the same value"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/live-pw.img" /etc/shadow)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/live-pw.img" /etc/shadow)
 is "und /etc/shadow gehoert weiter root und traegt 0o600" "$m" "/etc/shadow 600 0 0"
 
 echo "== 9. der zweite Uebersetzer =="
@@ -456,7 +456,7 @@ if bash tools/build-kernel.sh "$TMPD/k1.img" --stufe 1 > "$TMPD/b1.txt" 2>&1; th
                 *)         SPEC1="$SPEC1 /bin/$p=$TMPD/${p}1.elf" ;;
             esac
         done
-        python3 tools/osum/mkfs.py build "$TMPD/d1.img" $BLOCKS $DIRS \
+        bash tools/mkfsfi/mkfs.sh build "$TMPD/d1.img" $BLOCKS $DIRS \
             $SPEC1 $ETC $DATA "/etc/inittab=$TMPD/inittab@644:0:0" \
             > "$TMPD/mkfs1.txt" 2>&1 \
             && ok "and an image from it" \

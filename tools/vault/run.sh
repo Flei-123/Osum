@@ -102,7 +102,7 @@ cat > "$TMPD/t_sha.sh" <<'EOS'
 shat
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/dsha.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dsha.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/shat="$TMPD/bin/shat.elf" \
     /t/sha.sh="$TMPD/t_sha.sh" > "$TMPD/mkfs-sha.txt" 2>&1 \
@@ -258,7 +258,7 @@ hwid
 echo ==END==
 EOS
 mkimg_hwid() { # ziel
-    python3 tools/osum/mkfs.py build "$1" $BLOCKS /bin/ /t/ /proc/ /dev/ \
+    bash tools/mkfsfi/mkfs.sh build "$1" $BLOCKS /bin/ /t/ /proc/ /dev/ \
         /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
         /bin/echo="$TMPD/bin/echo.elf" /bin/ls="$TMPD/bin/ls.elf" \
         /bin/hwid="$TMPD/bin/hwid.elf" /t/hwid.sh="$TMPD/t_hwid.sh" \
@@ -344,7 +344,7 @@ echo ==LIST==
 backup list /store
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/dbackup.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dbackup.img" $BLOCKS \
     /bin/ /t/ /d/ /d/sub/ /d/sub/deep/ /store/ /out/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/ls="$TMPD/bin/ls.elf" \
@@ -394,7 +394,7 @@ python3 - "$TMPD/live-backup.img" > "$TMPD/vergleich.txt" 2>&1 <<'PY'
 import subprocess, sys
 img = sys.argv[1]
 def cat(p):
-    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+    r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img, p],
                        capture_output=True)
     return r.stdout if r.returncode == 0 else None
 paare = [("/d/a.txt", "/out/a.txt"),
@@ -445,7 +445,7 @@ echo ==B2==
 backup save /onepre /sb b2
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/dshift.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dshift.img" $BLOCKS \
     /bin/ /t/ /one/ /oneapp/ /onepre/ /sa/ /sb/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
@@ -525,7 +525,7 @@ echo ==AFTER==
 key open /k.blob correct-horse
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/dkey.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dkey.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/key="$TMPD/bin/key.elf" \
     /t/key.sh="$TMPD/t_key.sh" > /dev/null 2>&1 \
@@ -626,7 +626,7 @@ cat /sb/S-b1
 echo ==END==
 EOS
 
-python3 tools/osum/mkfs.py build "$TMPD/dorph.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dorph.img" $BLOCKS \
     /bin/ /t/ /set/ /set/config/ /set/state/ /tree/ /tree/store/ \
     "/tree/store/$ORPH/" "/tree/store/$REACH/" /tree/users/ /tree/users/cache/ \
     /sa/ /sb/ /sc/ /sd/ /se/ /proc/ /dev/ \
@@ -693,7 +693,7 @@ sed -n '/^==MISSING==/,/^==SNAP==/p' "$O" | grep -qa 'orphan is not in the store
     || bad "a missing orphaned entry is silently skipped"
 
 for f in PACK INDEX S-b1; do
-    python3 tools/osum/mkfs.py cat "$TMPD/live-orph.img" "/sb/$f" > "$TMPD/sb-$f" 2>/dev/null \
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-orph.img" "/sb/$f" > "$TMPD/sb-$f" 2>/dev/null \
         || bad "the host cannot read /sb/$f from the image"
 done
 [ -s "$TMPD/sb-PACK" ] && ok "the host fetches PACK, INDEX and the snapshot from the image" \
@@ -709,7 +709,7 @@ echo ==RUN==
 echo ==END==
 EOS
 
-python3 tools/osum/mkfs.py build "$TMPD/dorphr.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dorphr.img" $BLOCKS \
     /bin/ /t/ /sb/ /out/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" \
     /bin/echo="$TMPD/bin/echo.elf" /bin/backup="$TMPD/bin/backup.elf" \
@@ -732,7 +732,7 @@ sed -n '/^==RUN==/,/^==END==/p' "$R" | grep -qa 'hello' \
 python3 - "$TMPD/live-orphr.img" "$TMPD/orph-start" "$ORPH" > "$TMPD/orphcmp.txt" 2>&1 <<'PY2'
 import subprocess, sys
 img, orig, orph = sys.argv[1], sys.argv[2], sys.argv[3]
-r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img,
+r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img,
                     "/out/store/%s/start" % orph], capture_output=True)
 got = r.stdout if r.returncode == 0 else b""
 want = open(orig, "rb").read()
@@ -799,7 +799,7 @@ backup restore /st4 k1 /out2
 echo ==END==
 EOS
 
-python3 tools/osum/mkfs.py build "$TMPD/dmess.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dmess.img" $BLOCKS \
     /bin/ /t/ /drei/ /drei/x/ /drei/y/ /drei/z/ \
     /data/ /data/sub/ /data2/ /data2/sub/ \
     /st1/ /st3/ /st4/ /out/ /out2/ /proc/ /dev/ \
@@ -863,7 +863,7 @@ python3 - "$TMPD/live-mess.img" "$TMPD" > "$TMPD/messcmp.txt" 2>&1 <<'PY2'
 import subprocess, sys
 img, t = sys.argv[1], sys.argv[2]
 def cat(p):
-    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+    r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img, p],
                        capture_output=True)
     return r.stdout if r.returncode == 0 else None
 paare = [("/data/a.txt", "/out/a.txt"), ("/data/b.bin", "/out/b.bin"),
@@ -892,7 +892,7 @@ sed -n '/^==RESTABBRUCH==/,/^==END==/p' "$M" | grep -qa 'no such snapshot' \
     && ok "and nothing can be restored from it either" \
     || bad "something can be restored from the aborted run"
 
-python3 tools/osum/mkfs.py list "$TMPD/live-mess.img" > "$TMPD/mess.ls" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/live-mess.img" > "$TMPD/mess.ls" 2>&1
 grep -qE '/st4/S-' "$TMPD/mess.ls" \
     && bad "the image holds an S file from the aborted run" \
     || ok "CONTROL in the image: /st4 has no S file"
@@ -909,7 +909,7 @@ python3 tools/vault/vectors.py > "$TMPD/vec.txt" 2>&1 \
 cat > "$TMPD/t_sec1.sh" <<'EOS'
 bsect
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/dsec1.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dsec1.img" $BLOCKS /bin/ /t/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/echo="$TMPD/bin/echo.elf" \
     /bin/bsect="$TMPD/bin/bsect.elf" /t/s.sh="$TMPD/t_sec1.sh" \
     > "$TMPD/mkfs-sec1.txt" 2>&1 \
@@ -1022,7 +1022,7 @@ for d in ("x", "y", "z"):
     open(t + "/dup/%s/gleich.bin" % d, "wb").write(gleich)
 PY2
 
-python3 tools/osum/mkfs.py build "$TMPD/dsec2.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dsec2.img" $BLOCKS \
     /bin/ /t/ /proc/ /dev/ \
     /set/ /set/config/ /set/config/vpn/ /set/config/vpn/keys/ \
     /set/state/ /set/state/session/ /set/secrets/ /set/etc/ /set/device/ \
@@ -1067,11 +1067,11 @@ python3 - "$TMPD/live-sec2.img" "$TMPD" > "$TMPD/grep.txt" 2>&1 <<'PY2'
 import subprocess, sys
 img = sys.argv[1]
 def files():
-    r = subprocess.run(["python3", "tools/osum/mkfs.py", "list", img],
+    r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "list", img],
                        capture_output=True, text=True)
     return [l.split()[0] for l in r.stdout.splitlines() if l.strip()]
 def cat(p):
-    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+    r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img, p],
                        capture_output=True)
     return r.stdout if r.returncode == 0 else b""
 def store_blob(prefix):
@@ -1191,7 +1191,7 @@ python3 - "$TMPD/live-sec2.img" > "$TMPD/seccmp.txt" 2>&1 <<'PY2'
 import subprocess, sys
 img = sys.argv[1]
 def cat(p):
-    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p],
+    r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img, p],
                        capture_output=True)
     return r.stdout if r.returncode == 0 else None
 paare = [("/set/secrets/vault.kdbx", "/outB/secrets/vault.kdbx"),

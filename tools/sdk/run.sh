@@ -75,7 +75,7 @@ for p in sh ls cat echo sleep rpcc; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 A+=(/apps/)
 for o in o1 o2; do while read -r l; do [ "$l" = /apps/ ] && continue; A+=("$l"); done < "$TMPD/$o/mkfs.lines"; done
 A+=("/t/s.sh=$TMPD/s.sh")
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; }
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; }
 timeout 150 qemu-system-x86_64 -accel "$( [ -e /dev/kvm ] && echo kvm || echo tcg )" -smp 1 -kernel "$TMPD/k0.img" -m 512 \
     -append "osum vfs nokbd bus script=sh /t/s.sh;exit" -serial "file:$TMPD/g.txt" -display none -no-reboot \
     -drive "file=$TMPD/d.img,format=raw,if=ide,index=0" -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1

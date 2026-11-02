@@ -42,7 +42,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 chk() { if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 
-python3 tools/osum/mkfs.py build "$T/d.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf >/dev/null 2>&1
 
 # run_case <tag> <-vga value> <words> <mode: full|short|frames>

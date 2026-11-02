@@ -103,7 +103,7 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/
        /usr/share/locale/de/ "/usr/share/locale/de/messages=locale/de/messages")
 ARGS+=(/users/ /users/root/ /users/root/config/
        "/users/root/config/locale=$OUT/locale-${LANG_SET:-en}")
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }
 echo "   abbild    $(stat -c%s "$OUT/disk.img") Oktette (Sprache: ${LANG_SET:-en})"
 exit 0

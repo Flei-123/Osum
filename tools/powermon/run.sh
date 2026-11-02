@@ -230,7 +230,7 @@ fi
 
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/$p.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ /etc/ $MKARGS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" /bin/ /etc/ $MKARGS \
     > "$TMPD/mkfs.log" 2>&1 && ok "the disk is built: $(tail -1 "$TMPD/mkfs.log")" \
     || bad "mkfs.py fails"
 
@@ -584,7 +584,7 @@ MONO="$ROOT/assets/osum-mono.ttf"
 SANS="$ROOT/assets/osum-sans.ttf"
 GARGS=(build "$TMPD/gui.img" "$BLOCKS" /lib/ "/lib/mono.ttf=$MONO" "/lib/sans.ttf=$SANS" /bin/ /etc/)
 for p in $PROGS; do GARGS+=("/bin/$p=$TMPD/$p.elf"); done
-python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/gui.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${GARGS[@]}" > "$TMPD/gui.log" 2>&1 \
     && ok "a disk with the fonts and the programs on it: $(tail -1 "$TMPD/gui.log")" \
     || bad "mkfs.py fails on the disk for the window"
 

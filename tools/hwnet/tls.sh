@@ -127,7 +127,7 @@ python3 tools/hwnet/mkcerts.py "$TMPD/certs" osum.test > "$TMPD/certs.txt" 2>&1 
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c"
 
 image() { # <store-file> <image>
-    python3 tools/osum/mkfs.py build "$2" 16384 \
+    bash tools/mkfsfi/mkfs.sh build "$2" 16384 \
         /bin/ /etc/ /etc/ssl/ \
         "/bin/sh=$TMPD/s0/sh.elf" "/bin/fetch=$TMPD/fetch.elf" \
         "/etc/ssl/roots.pem=$1" > "$TMPD/mkfs.txt" 2>&1

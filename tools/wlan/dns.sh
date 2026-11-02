@@ -59,7 +59,7 @@ image() {
     local n=$1 conf=${2:-}
     local extra=()
     [ -n "$conf" ] && extra=("/etc/wlan.conf=$conf")
-    python3 tools/osum/mkfs.py build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
         /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/dhcp="$T/bin/dhcp.elf" /bin/burn="$T/bin/burn.elf" /bin/wget="$T/bin/wget.elf" /etc/resolv.conf="$T/resolv.old" \
         "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
         || { tail -3 "$T/$n.mkfs"; return 1; }

@@ -185,7 +185,7 @@ open(sys.argv[2], 'wb').write(bytes(d))
 PY
 [ -s "$TMPD/chaininterp" ] && SPEC="$SPEC /bin/chaininterp=$TMPD/chaininterp"
 
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "OFS-Abbild gebaut ($BLOCKS Bloecke)" \
     || { bad "mkfs.py gescheitert"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -10; }
@@ -229,7 +229,7 @@ if [ "$BB_DA" = 1 ]; then
 /bin/busybox ls /bin
 S
     printf 'eins\nzwei\ndrei\n' > "$TMPD/pruef.txt"
-    python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
         /etc/ "/etc/pruef.txt=$TMPD/pruef.txt" > "$TMPD/mkfs2.txt" 2>&1 \
         || bad "mkfs.py (Stufe 2) gescheitert"
     #
@@ -376,7 +376,7 @@ SPEC3="$SPEC3 $APPLIB=$LDREAL /lib/ld-musl-x86_64.so.1->$APPLIB"
 for p in $PROGS; do SPEC3="$SPEC3 /bin/$p=$TMPD/$p.elf"; done
 SPEC3="$SPEC3 /bin/hello_dyn=$TMPD/hello_dyn /etc/pruef.txt=$TMPD/pruef.txt"
 [ "$BB_DA" = 1 ] && SPEC3="$SPEC3 /bin/busybox=$BBDYN"
-if python3 tools/osum/mkfs.py build "$TMPD/paket.img" $BLOCKS $SPEC3 \
+if bash tools/mkfsfi/mkfs.sh build "$TMPD/paket.img" $BLOCKS $SPEC3 \
         > "$TMPD/mkfs3.txt" 2>&1; then
     ok "image in package form built (file under /apps, /lib/... as link)"
     cp -f "$TMPD/paket.img" "$TMPD/live.img"
@@ -397,7 +397,7 @@ fi
 SPEC4="/bin/ /etc/"
 for p in $PROGS; do SPEC4="$SPEC4 /bin/$p=$TMPD/$p.elf"; done
 SPEC4="$SPEC4 /bin/hello_dyn=$TMPD/hello_dyn /etc/pruef.txt=$TMPD/pruef.txt"
-python3 tools/osum/mkfs.py build "$TMPD/ohne.img" $BLOCKS $SPEC4 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/ohne.img" $BLOCKS $SPEC4 \
     > "$TMPD/mkfs4.txt" 2>&1
 cp -f "$TMPD/ohne.img" "$TMPD/live.img"
 timeout "${TMO:-240}" $QEMU_X86 "${KVM[@]}" -kernel "$TMPD/k.mb" -m 512 \

@@ -43,7 +43,7 @@ with open(out, "wb") as f:
     for b in range(n):
         f.write(bytes([(b * 31 + (b >> 8)) & 255]) * 512)
 PY
-python3 tools/osum/mkfs.py build "$TMPD/big.img" "$FSBLOCKS" --v3 --inodes=256 --time=1780000000 $SPEC "/big.bin=$TMPD/big.bin" > "$TMPD/mk.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/big.img" "$FSBLOCKS" --v3 --inodes=256 --time=1780000000 $SPEC "/big.bin=$TMPD/big.bin" > "$TMPD/mk.txt" 2>&1 \
     && ok "mkfs wrote a $BLOCKS-block file ($((BLOCKS * 512)) bytes)" \
     || { bad "mkfs failed on the big file"; tail -3 "$TMPD/mk.txt" | sed 's/^/        /'; }
 grep -qa 'maxfile=8726286336' "$TMPD/mk.txt" && ok "mkfs reports maxfile=8726286336" || bad "mkfs maxfile line missing"

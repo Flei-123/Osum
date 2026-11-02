@@ -74,7 +74,7 @@ image() {
     local p
     for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
     A+=("/etc/passwd=$TMPD/passwd" "/etc/group=$TMPD/group" "/etc/vault/kdf=$TMPD/kdf" "/t/s.sh=$script")
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
 run() {
     local img=$1 nm=$2 secs=${3:-240}

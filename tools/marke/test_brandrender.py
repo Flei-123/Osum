@@ -11,7 +11,7 @@ import brandrender
 
 CONF = os.path.join(ROOT, "marke.conf")
 RENDER = os.path.join(ROOT, "tools", "marke", "brandrender.py")
-MKFS = os.path.join(ROOT, "tools", "osum", "mkfs.py")
+MKFS = os.path.join(ROOT, "tools", "mkfsfi", "mkfs.sh")
 TEST_ENV = {
     "OSUM_MARKE_PRODUKT": "TestMarke",
     "OSUM_MARKE_KURZ": "testmarke",
@@ -28,7 +28,8 @@ def run(args, env=None):
         if key.startswith("OSUM_MARKE_"):
             del full[key]
     full.update(env or {})
-    return subprocess.run([sys.executable] + args, env=full, cwd=ROOT,
+    runner = "bash" if args[0].endswith(".sh") else sys.executable
+    return subprocess.run([runner] + args, env=full, cwd=ROOT,
                           capture_output=True, text=True)
 
 

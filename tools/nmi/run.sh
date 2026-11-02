@@ -23,7 +23,7 @@ if [ -z "$K" ]; then
 fi
 script() { for i in $(seq 1 30); do echo "echo ==P$i=="; echo "sleep 2"; echo "echo tick"; done; echo "echo ==END=="; }
 script > "$D/s.sh"
-python3 tools/osum/mkfs.py build "$D/base.img" 20000 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$D/base.img" 20000 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
     $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \
@@ -39,8 +39,8 @@ runvm() {
         -drive "file=$D/d-$name.img,format=raw,if=ide,index=0" </dev/null >/dev/null 2>&1) 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$D/o-$name.txt" > "$D/$name.klar"
     : > "$D/$name.hang"
-    for f in $(python3 tools/osum/mkfs.py list "$D/d-$name.img" 2>/dev/null | grep -ao '/var/crash/[0-9]*-hang\.txt' | sort -u); do
-        python3 tools/osum/mkfs.py cat "$D/d-$name.img" "$f" >> "$D/$name.hang" 2>/dev/null
+    for f in $(bash tools/mkfsfi/mkfs.sh list "$D/d-$name.img" 2>/dev/null | grep -ao '/var/crash/[0-9]*-hang\.txt' | sort -u); do
+        bash tools/mkfsfi/mkfs.sh cat "$D/d-$name.img" "$f" >> "$D/$name.hang" 2>/dev/null
     done
     rm -f "$D/d-$name.img" "$D/o-$name.txt"
 }

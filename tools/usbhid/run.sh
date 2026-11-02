@@ -15,7 +15,7 @@ K=${HW_KERNEL:-$T/k.mb}
 if [ -z "${HW_KERNEL:-}" ]; then
     bash tools/build-kernel.sh "$K" >"$T/build.log" 2>&1 || { echo "build failed"; tail -20 "$T/build.log"; exit 1; }
 fi
-python3 tools/osum/mkfs.py build "$T/d.img" 32768 --v3 /lib/ >/dev/null 2>&1
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 32768 --v3 /lib/ >/dev/null 2>&1
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }

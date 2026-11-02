@@ -84,7 +84,7 @@ mkimg() { # out.img script
   A+=("/store/${HA:0:20}/" "/store/${HA:0:20}/INFO=$TMPD/bd/alpha.info" "/store/${HS:0:20}/" "/store/${HS:0:20}/INFO=$TMPD/bd/spinner.info"
       "/store/${HG:0:20}/" "/store/${HG:0:20}/INFO=$TMPD/bd/gone.info")
   for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
-  python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
+  bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 boot() { # img serial sock res

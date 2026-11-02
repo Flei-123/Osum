@@ -151,7 +151,7 @@ mach_conf "$TMPD/leer.conf" no no no
 
 abbild() { # <abbild> <conf> [zusatzspezifikationen...]
     local img=$1 conf=$2; shift 2
-    python3 tools/osum/mkfs.py build "$img" 16384 \
+    bash tools/mkfsfi/mkfs.sh build "$img" 16384 \
         /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ \
         "/bin/sh=$TMPD/w0/sh.elf" \
         "/bin/ls=$TMPD/w0/ls.elf" \
@@ -381,7 +381,7 @@ for fall in expired wrong rogue; do
     hat "$Z" "tls REJECTED" "$fall: die Ablehnung steht im Protokoll"
 done
 
-python3 tools/osum/mkfs.py build "$TMPD/leerca.img" 16384 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/leerca.img" 16384 \
     /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ \
     "/bin/sh=$TMPD/w0/sh.elf" "/bin/jsig=$TMPD/w0/jsig.elf" \
     "/bin/jarvisctl=$TMPD/w0/jarvisctl.elf" "/bin/jarvisd=$TMPD/w0/jarvisd.elf" \

@@ -74,7 +74,7 @@ A=(build "$TMPD/disk.img" ${FOOT_BLOCKS:-98304} --v3 --inodes=1024 /lib/ "/lib/m
 [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 for p in sh sleep echo cat ls wayd; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 while IFS== read -r g h; do A+=("$g=$h"); done < "$STONES/foot/manifest.txt"
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "the disk: $(stat -c%s "$TMPD/disk.img") octets" \
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "the disk: $(stat -c%s "$TMPD/disk.img") octets" \
     || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt" | sed 's/^/        /'; echo "FOOT: $pass passed, $fail failed"; exit 1; }
 
 echo "== 2. boot: wayd + foot =="

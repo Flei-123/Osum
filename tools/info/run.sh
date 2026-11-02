@@ -57,7 +57,7 @@ echo ==INFO==
 jarvisctl info
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /var/jarvis/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \

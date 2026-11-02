@@ -85,7 +85,7 @@ for p in cat echo stress; do
     [ -f "$TMPD/$p" ] && CMK="$CMK /c/zwei/bin/$p=$TMPD/$p"
 done
 
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ /etc/ /c/ /c/eins/ /c/eins/etc/ /c/eins/bin/ \
     /c/zwei/ /c/zwei/etc/ /c/zwei/bin/ \
     /etc/wirt-geheim="$TMPD/wirt-geheim" \

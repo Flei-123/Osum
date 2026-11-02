@@ -53,7 +53,7 @@ done
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme"
     "/etc/wmplug.conf=etc/wmplug.conf" "/etc/wmregeln.conf=etc/wmregeln.conf")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "the image is built" \
     || { bad "mkfs.py fehlgeschlagen"; head -5 "$TMPD/mkfs.txt" | sed 's/^/        /'; }
 

@@ -160,7 +160,7 @@ gcc -O2 -o "$TMPD/bruecke" tools/net/bridge.c 2>"$TMPD/gcc.err" \
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
 SPEC="$SPEC /var/ /var/net/ /etc/"
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py: an image with /bin/netstat on it" \
     || { bad "mkfs.py failed"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }

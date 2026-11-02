@@ -47,7 +47,7 @@ run_readdr() { # name kernel
     local n=$1 k=$2
     start_server "srv_$n.log"
     printf 'echo ==START==\ndhcp\nuplswitch %s %s %s\necho ==ALIVE==\n' "$HOSTIP" "$PORT" "$NEWIP" > "$T/s_$n.sh"
-    python3 tools/osum/mkfs.py build "$T/$n.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ "${BINS[@]}" \
+    bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ "${BINS[@]}" \
         "/t/s.sh=$T/s_$n.sh" > "$T/$n.mkfs" 2>&1 || { tail -3 "$T/$n.mkfs"; return 1; }
     timeout 240 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$k" -m 256 -nodefaults \
         -append "osum vfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
@@ -83,7 +83,7 @@ grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$A" && bad "A: panic/exception" || 
 echo "== U: USB uplink hot plug, resolv.conf follows the uplink lease =="
 ADD="monitor device_add usb-net,id=devu1,bus=x0.0,netdev=n1,mac=52:54:00:12:34:99"
 printf 'echo ==START==\ndhcp\ncat /etc/resolv.conf\necho ==ALIVE==\n' > "$T/s_u.sh"
-python3 tools/osum/mkfs.py build "$T/u.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ "${BINS[@]}" \
+bash tools/mkfsfi/mkfs.sh build "$T/u.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ "${BINS[@]}" \
     "/t/s.sh=$T/s_u.sh" "/etc/resolv.conf=$T/resolv.old" > "$T/u.mkfs" 2>&1 || tail -3 "$T/u.mkfs"
 printf 'aufzeile k17: hold\n%s\naufzeile nethot: uplink card=1 kind=usbnet\naufzeile k17: free\n' "$ADD" > "$T/p_u"
 timeout 200 qemu-system-x86_64 -accel $ACC -kernel "$KNEW" -m 256 -nodefaults \
@@ -111,7 +111,7 @@ FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
 printf 'ssid OrientFake\npsk orient-fake-pw1\n' > "$T/wlan.conf"
 { echo 'echo ==START=='; for _ in 1 2 3 4 5 6 7 8; do echo 'sleep 6'; done
   echo 'dhcp'; echo 'echo ==RESOLV=='; echo 'cat /etc/resolv.conf'; echo 'cat /proc/wlan'; echo 'echo ==END=='; } > "$T/s_w.sh"
-python3 tools/osum/mkfs.py build "$T/w.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+bash tools/mkfsfi/mkfs.sh build "$T/w.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     "${BINS[@]}" "/t/s.sh=$T/s_w.sh" "$FWPATH=$T/blobs/v7.bin" "/etc/wlan.conf=$T/wlan.conf" "/etc/resolv.conf=$T/resolv.old" > "$T/w.mkfs" 2>&1 || tail -3 "$T/w.mkfs"
 timeout 400 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$KNEW" -m 512 \
     -append "osum vfs iwlfhtest iwlfhbind nic script=sh /t/s.sh;exit" \

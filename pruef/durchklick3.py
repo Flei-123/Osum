@@ -794,7 +794,7 @@ def main():
     # Die Dateiliste des Abbilds -- kein QEMU noetig, und genau diese
     # Liste hat DURCHKLICK 8.1 mit "kein Uebersetzer" beantwortet.
     item_list = subprocess.run(
-        ["python3", os.path.join(REPO, "tools", "osum", "mkfs.py"), "list",
+        ["bash", os.path.join(REPO, "tools", "mkfsfi", "mkfs.sh"), "list",
          os.path.join(HIER, "root.img")],
         capture_output=True, text=True).stdout
     hat_firnc = "/bin/firnc" in item_list

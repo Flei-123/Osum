@@ -183,7 +183,7 @@ soll() { # pfad
 echo "== 4. die Wurzelplatte =="
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
     && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }

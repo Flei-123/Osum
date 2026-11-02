@@ -46,7 +46,7 @@ git show main:tools/osum/mkfs.py > "$OUT/fmt/mkfs-main.py" 2>/dev/null
 if [ -s "$OUT/fmt/mkfs-main.py" ]; then
     python3 "$OUT/fmt/mkfs-main.py" build "$OUT/fmt/alt.img" 4096 /x/ \
         "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
-    python3 tools/osum/mkfs.py build "$OUT/fmt/neu.img" 4096 /x/ \
+    bash tools/mkfsfi/mkfs.sh build "$OUT/fmt/neu.img" 4096 /x/ \
         "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
     if cmp -s "$OUT/fmt/alt.img" "$OUT/fmt/neu.img"; then
         ok "an image without --maps is octet for octet that of main ($(stat -c%s "$OUT/fmt/neu.img") Oktette)"
@@ -56,7 +56,7 @@ if [ -s "$OUT/fmt/mkfs-main.py" ]; then
 else
     bad "mkfs.py from main not readable (no git tree?)"
 fi
-python3 tools/osum/mkfs.py build "$OUT/fmt/gross.img" 4096 --karten=8 /x/ \
+bash tools/mkfsfi/mkfs.sh build "$OUT/fmt/gross.img" 4096 --karten=8 /x/ \
     "/x/a=$OUT/fmt/a.txt" > /dev/null 2>&1
 if cmp -s "$OUT/fmt/neu.img" "$OUT/fmt/gross.img"; then
     bad "--maps=8 changes nothing -- the reserve is not created"
@@ -173,7 +173,7 @@ if blocks < 64 or blocks > 4000000:
 f.seek(int(sys.argv[2]) * 512)
 open(sys.argv[3], "wb").write(f.read(blocks * 512))
 EOF
-python3 tools/osum/mkfs.py list "$OUT/wurzel.img" > "$OUT/wurzel.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$OUT/wurzel.img" > "$OUT/wurzel.txt" 2>&1
 head -1 "$OUT/wurzel.txt" | sed 's/^/        /'
 hat "$OUT/wurzel.txt" "/bin/opk" "das Wurzeldateisystem auf der Partition traegt /bin/opk"
 hat "$OUT/wurzel.txt" "/boot/osum.mb" "und den Kern unter /boot"
@@ -248,7 +248,7 @@ if blocks < 64 or blocks > 4000000:
 f.seek(int(sys.argv[2]) * 512)
 open(sys.argv[3], "wb").write(f.read(blocks * 512))
 EOF
-python3 tools/osum/mkfs.py cat "$OUT/wurzel2.img" /etc/beweis.txt > "$OUT/beweis.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh cat "$OUT/wurzel2.img" /etc/beweis.txt > "$OUT/beweis.txt" 2>&1
 hat "$OUT/beweis.txt" "diese-zeile-ueberlebt" "und der WIRT liest sie aus der Abbilddatei"
 
 echo

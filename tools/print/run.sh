@@ -141,7 +141,7 @@ PY
 printf 'target=ipp://10.9.0.1:8631/ipp/print\n' > "$TMPD/printer.conf"
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
 
-python3 tools/osum/mkfs.py build "$TMPD/d.img" 16384 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 16384 \
     /bin/ /etc/ /lib/ /doc/ \
     "/bin/sh=$TMPD/s0/sh.elf" "/bin/ls=$TMPD/s0/ls.elf" \
     "/bin/cat=$TMPD/s0/cat.elf" "/bin/echo=$TMPD/s0/echo.elf" \

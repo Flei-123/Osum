@@ -42,7 +42,7 @@ for p in $(ls "$D/pk"); do
 done
 mkimg() {
     local name=$1; shift
-    python3 tools/osum/mkfs.py build "$D/d-$name.img" 20000 /lib/ /lib/drivers/ \
+    bash tools/mkfsfi/mkfs.sh build "$D/d-$name.img" 20000 /lib/ /lib/drivers/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
         $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \

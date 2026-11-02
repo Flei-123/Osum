@@ -44,7 +44,7 @@ echo ==D==
 ps
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \
     "/bin/nap=$T/bin/sleep.elf" "/bin/nap2=$T/bin/sleep.elf" "/bin/new=$T/bin/echo.elf" "/bin/new2=$T/bin/echo.elf" \
     "/t/s.sh=$T/s.sh" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"

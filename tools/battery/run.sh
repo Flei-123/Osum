@@ -32,7 +32,7 @@ run_case() {
     local n=$1 full=$2 state=$3 rate=$4 rem=$5 volt=$6
     sed "s/@FULL@/$full/g; s/@STATE@/$state/; s/@RATE@/$rate/; s/@REM@/$rem/; s/@VOLT@/$volt/" tools/battery/asl/plain.asl > "$T/$n.asl"
     ( cd "$T" && iasl "$n.asl" > "$n.iasl.txt" 2>&1 ) || { bad "$n.asl does not compile"; return; }
-    python3 tools/osum/mkfs.py build "$T/$n.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
         "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
         "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s.sh" > "$T/$n.mkfs" 2>&1 || { bad "$n mkfs failed"; return; }
     timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \

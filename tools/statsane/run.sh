@@ -31,7 +31,7 @@ SCRIPT="script=chown 4294967296:4294967297 /etc/theme.conf;ls -l /etc/theme.conf
 
 boot() {
     local t=$1 img="$TMPD/$1.img"
-    python3 tools/osum/mkfs.py build "$img" 4096 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs-$t.txt" 2>&1 || bad "$t mkfs"
+    bash tools/mkfsfi/mkfs.sh build "$img" 4096 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs-$t.txt" 2>&1 || bad "$t mkfs"
     timeout -s KILL "$3" qemu-system-x86_64 $ACCEL -machine q35 -smp 2 -kernel "$K0" -m 512 \
         -append "osum nokbd vfs smpfrueh wdt=10 $2 $SCRIPT" \
         -serial "file:$TMPD/$t.ser" -display none -global ICH9-LPC.noreboot=false -watchdog-action reset \
@@ -40,7 +40,7 @@ boot() {
 }
 
 crash_file() {
-    python3 tools/osum/mkfs.py list "$1" 2>/dev/null | grep -oE "var/crash/[0-9]+[^ ]*\.txt" | head -1
+    bash tools/mkfsfi/mkfs.sh list "$1" 2>/dev/null | grep -oE "var/crash/[0-9]+[^ ]*\.txt" | head -1
 }
 
 echo "== A. inode with uid/gid above 32 bit on an AHCI root: stat survives =="
@@ -61,7 +61,7 @@ grep -qax "statdone" "$S" && bad "B statdone printed" || ok "B script stops at t
 has "$S" "panic: integer overflow casting 'u64 as u32' at kernel/sys/sysfile.fi" "B COM1 shows the checked-cast panic"
 f=$(crash_file "$TMPD/b.img")
 if [ -n "$f" ]; then
-    python3 tools/osum/mkfs.py cat "$TMPD/b.img" "/$f" 2>/dev/null | tr -cd '\11\12\15\40-\176' > "$TMPD/b.rep"
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/b.img" "/$f" 2>/dev/null | tr -cd '\11\12\15\40-\176' > "$TMPD/b.rep"
     has "$TMPD/b.rep" "reason: hard-peer" "B hang report: hard-peer"
     has "$TMPD/b.rep" "panic-text: panic: integer overflow casting 'u64 as u32'" "B hang report carries the panic text"
     has "$TMPD/b.rep" " ops=0x0000000100000000" "B hang report carries the operand"
@@ -80,7 +80,7 @@ mtime_boot() {
     local t=$1 lself=$2 img="$TMPD/$1.img" spec="/bin/ /etc/ /etc/theme.conf=$TMPD/theme.conf"
     for p in sh cat echo chown; do spec="$spec /bin/$p=$TMPD/$p.elf"; done
     spec="$spec /bin/ls=$lself"
-    python3 tools/osum/mkfs.py build "$img" 8192 --v3 $spec /proc/ /dev/ /mnt/ /var/ /var/crash/ > /dev/null 2>&1 || bad "$t mkfs"
+    bash tools/mkfsfi/mkfs.sh build "$img" 8192 --v3 $spec /proc/ /dev/ /mnt/ /var/ /var/crash/ > /dev/null 2>&1 || bad "$t mkfs"
     python3 tools/statsane/plant_mtime.py "$img" 22 0x04c7c74820244c89 > "$TMPD/$t.plant" 2>&1 || bad "$t plant mtime"
     timeout -s KILL 45 qemu-system-x86_64 $ACCEL -machine q35 -smp 2 -kernel "$K0" -m 512 \
         -append "osum nokbd vfs smpfrueh wdt=10 $SCRIPT" \

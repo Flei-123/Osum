@@ -26,7 +26,7 @@ import subprocess, sys
 img, d, procs, kib = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 bad = 0
 for n in range(procs):
-    p = subprocess.run([sys.executable, "tools/osum/mkfs.py", "cat", img, "%s/f%d" % (d, n)],
+    p = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img, "%s/f%d" % (d, n)],
                        capture_output=True)
     data = p.stdout
     want = bytes((((o * 131) + (n * 17) + ((o >> 12) * 7)) & 255) ^ 0x5A for o in range(kib * 1024))
@@ -60,7 +60,7 @@ bash tools/install/build.sh "$OUT" > "$OUT/build.log" 2>&1 \
 # so the writers hit the file system a real installation runs from. A
 # second OFS cannot be mounted (kernel/vfs.fi mounts the root again).
 cp -f "$OUT/quelle.img" "$OUT/ziel.img"
-python3 tools/osum/mkfs.py list "$OUT/ziel.img" | head -1 | sed 's/^/        /'
+bash tools/mkfsfi/mkfs.sh list "$OUT/ziel.img" | head -1 | sed 's/^/        /'
 
 guest() { # name script [limit]
     OSUM_SMP=4 OSUM_EXTRA="r3alle" OUT="$OUT" \
@@ -92,7 +92,7 @@ hat "$OUT/wv.txt" "wrace: ok files=$PROCS" "after a restart the files are still 
 echo
 echo "== 4. GEGENPROBE: one flipped octet on the image must be seen by the host =="
 cp "$OUT/ziel.img" "$OUT/flip.img"
-WH=$(python3 tools/osum/mkfs.py where "$OUT/flip.img" /w1/f2 2>&1)
+WH=$(bash tools/mkfsfi/mkfs.sh where "$OUT/flip.img" /w1/f2 2>&1)
 FB=$(echo "$WH" | sed -n 's/.*first=\([0-9]*\).*/\1/p')
 if [ -n "$FB" ]; then
     python3 - "$OUT/flip.img" "$FB" <<'PY'

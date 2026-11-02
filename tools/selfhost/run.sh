@@ -118,7 +118,7 @@ make_image() {
     local img=$1 entry=$2 base=$3
     mapfile -t specs < <(guest_specs "$entry" /src)
     mapfile -t dirs < <(printf '%s\n' "${specs[@]}" | dir_specs)
-    python3 tools/osum/mkfs.py build "$img" $BLOCKS --v3 --inodes=256 /bin/ "${dirs[@]}" \
+    bash tools/mkfsfi/mkfs.sh build "$img" $BLOCKS --v3 --inodes=256 /bin/ "${dirs[@]}" \
         /bin/sh="$TMPD/sh" /bin/echo="$TMPD/echo" /bin/fas="$TMPD/fas" /bin/firnc="$TMPD/firnc" "${specs[@]}" > "$TMPD/mkfs.$base.txt" 2>&1
 }
 
@@ -135,8 +135,8 @@ for m in $MODULES; do
     run_guest "$TMPD/$m.img" "$S" "$TMPD/$m.serial"
     same "guest compiler exit status" "$(field "$TMPD/$m.serial" 'UEB=[0-9]+')" "UEB=0"
     same "guest assembler exit status" "$(field "$TMPD/$m.serial" 'BIN=[0-9]+')" "BIN=0"
-    python3 tools/osum/mkfs.py cat "$TMPD/$m.img.after" "/$m.s" > "$TMPD/$m.guest.s" 2>/dev/null
-    python3 tools/osum/mkfs.py cat "$TMPD/$m.img.after" "/$m" > "$TMPD/$m.guest.elf" 2>/dev/null
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/$m.img.after" "/$m.s" > "$TMPD/$m.guest.s" 2>/dev/null
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/$m.img.after" "/$m" > "$TMPD/$m.guest.elf" 2>/dev/null
     gs=$(sha "$TMPD/$m.guest.s"); hs=$(sha "$TMPD/ref.$m/$m.s")
     ge=$(sha "$TMPD/$m.guest.elf"); he=$(sha "$TMPD/ref.$m/$m.elf")
     [ -s "$TMPD/$m.guest.s" ] && ok "guest wrote the assembler text ($(stat -c%s "$TMPD/$m.guest.s") octets)" || bad "guest assembler text empty"
@@ -151,10 +151,10 @@ for m in $MODULES; do
     printf '\nfn selfhost_control_marker() -> i32 {\n    return 4242\n}\n' >> "$TMPD/mut.$m/$m.fi"
     mapfile -t specs < <(guest_specs "$entry" /src | grep -v "^/src/$m.fi=")
     mapfile -t dirs < <(printf '%s\n' "${specs[@]}" | dir_specs)
-    python3 tools/osum/mkfs.py build "$TMPD/$m.mut.img" $blocks --v3 --inodes=256 /bin/ "${dirs[@]}" \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/$m.mut.img" $blocks --v3 --inodes=256 /bin/ "${dirs[@]}" \
         /bin/sh="$TMPD/sh" /bin/echo="$TMPD/echo" /bin/fas="$TMPD/fas" /bin/firnc="$TMPD/firnc" "/src/$m.fi=$TMPD/mut.$m/$m.fi" "${specs[@]}" > "$TMPD/mkfs.mut.txt" 2>&1
     run_guest "$TMPD/$m.mut.img" "$S" "$TMPD/$m.mut.serial"
-    python3 tools/osum/mkfs.py cat "$TMPD/$m.mut.img.after" "/$m.s" > "$TMPD/$m.mut.s" 2>/dev/null
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/$m.mut.img.after" "/$m.s" > "$TMPD/$m.mut.s" 2>/dev/null
     differ "manipulated source gives a different assembler text hash" "$(sha "$TMPD/$m.mut.s")" "$gs"
     stage_tree "$entry" "$TMPD/mut.$m/tree"
     cp "$TMPD/mut.$m/$m.fi" "$TMPD/mut.$m/tree/src/$m.fi"
@@ -164,7 +164,7 @@ done
 
 echo "== 4. control: a broken source fails in the guest =="
 printf 'fn main(start: u64) -> i32 {\n    return nosuchname\n}\n' > "$TMPD/broken.fi"
-python3 tools/osum/mkfs.py build "$TMPD/b.img" 8000 --v3 --inodes=64 /bin/ /src/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/b.img" 8000 --v3 --inodes=64 /bin/ /src/ \
     /bin/sh="$TMPD/sh" /bin/echo="$TMPD/echo" /bin/fas="$TMPD/fas" /bin/firnc="$TMPD/firnc" /src/broken.fi="$TMPD/broken.fi" > "$TMPD/mkfs.b.txt" 2>&1
 run_guest "$TMPD/b.img" "cd /src;/bin/firnc broken.fi > /broken.s;/bin/echo UEB=\$?;exit" "$TMPD/b.serial"
 rc=$(field "$TMPD/b.serial" 'UEB=[0-9]+')

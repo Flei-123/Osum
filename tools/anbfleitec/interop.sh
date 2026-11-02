@@ -127,7 +127,7 @@ printf 'lang=de\n' > "$TMPD/locale.conf"
 printf 'fleitec ziel=%s name=konto.test\n' "$Z" > "$TMPD/konten.conf"
 
 abbild() { # <target>
-    python3 tools/osum/mkfs.py build "$1" 24576 \
+    bash tools/mkfsfi/mkfs.sh build "$1" 24576 \
         /bin/ /etc/ /etc/ssl/ /etc/social/ /usr/ /usr/share/ /usr/share/locale/ \
         /usr/share/locale/en/ /usr/share/locale/de/ \
         /users/ /users/justin/ /users/justin/config/ \
@@ -421,7 +421,7 @@ lauf "$TMPD/d_out.img" "konto abmelden --kennung=$OKEN" "$TMPD/o_o1.txt"
 is "sign-out: done" "$(kv "$TMPD/o_o1.txt" abgemeldet)" "1"
 grep -aq 'POST /oidc/revoke' "$TMPD/w/c2s.log" && ok "POST /oidc/revoke reached the broker" || bad "no revoke call"
 is "the refresh token is dead after sign-out (broker)" "$(replay "$O1")" "400"
-python3 tools/osum/mkfs.py where "$TMPD/d_out.img" "/state/session/konto/$OKEN" > "$TMPD/wo_o.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/d_out.img" "/state/session/konto/$OKEN" > "$TMPD/wo_o.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo_o.txt" && ok "the session file is gone" || bad "the session file is still there"
 
 # ======================================================================

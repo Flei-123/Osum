@@ -233,7 +233,7 @@ num "Zeilen Treiber, die diese Runde geschrieben hat" "$zeilen" gt 1200
 # Die Wurzelplatte.
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ /usb/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
     && ok "the root disk is there: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }

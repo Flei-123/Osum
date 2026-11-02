@@ -59,7 +59,7 @@ if [ ! -s "$KMB" ]; then
     bash tools/build-kernel.sh "$KMB" --stufe 0 > "$TMPD/b.log" 2>&1 \
         && ok "kernel builds" || { bad "kernel build fails"; tail -8 "$TMPD/b.log"; exit 1; }
 fi
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 && ok "font disk built" || bad "mkfs.py fails"
 timeout 120 $QEMU_X86 -kernel "$KMB" -m 256 \

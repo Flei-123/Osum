@@ -69,7 +69,7 @@ done
 SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem"
 SPEC="$SPEC /etc/resolv.conf=$W/resolv.conf"
-python3 tools/osum/mkfs.py build "$W/probe.img" 32768 $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$W/probe.img" 32768 $SPEC \
     > "$W/mkfs.txt" 2>&1 || { echo "mkfs"; tail -5 "$W/mkfs.txt"; exit 1; }
 ok "Platte gebaut"
 

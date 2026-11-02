@@ -45,7 +45,7 @@ for p in $PROGS; do
     SPEC="$SPEC /bin/$p=$TMPD/$p.elf"
 done
 printf 'root:x:0:0:root:/:/bin/sh\n' > "$TMPD/passwd"
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 16384 /bin/ /etc/ /run/ $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 16384 /bin/ /etc/ /run/ $SPEC \
     /etc/passwd="$TMPD/passwd"@644:0:0 > "$TMPD/mkfs.txt" 2>&1 \
     && ok "disk image built" || { bad "mkfs failed"; head -5 "$TMPD/mkfs.txt"; exit 1; }
 

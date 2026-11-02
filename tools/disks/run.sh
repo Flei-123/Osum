@@ -49,7 +49,7 @@ bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 && ok "the kernel
     || { bad "programs do not build"; head -10 "$D/bin.log"; echo "DISKS: $pass passed, $fail failed"; exit 1; }
 MK=""
 for p in $PROGS; do MK="$MK /bin/$p=$D/bin/$p.elf"; done
-python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
 for n in gpt mbr badcrc; do
     mkdir -p "$D/vm-$n"
     cp "$D/root.img" "$D/vm-$n/hda.img"; cp "$D/$n.img" "$D/vm-$n/hdb.img"

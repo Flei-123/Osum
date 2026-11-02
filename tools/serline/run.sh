@@ -70,7 +70,7 @@ fi
 A=(build "$TMPD/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/)
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 A+=("/t/s.sh=$TMPD/s.sh")
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; exit 1; }
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; exit 1; }
 
 run() { # <name> <extra kernel words>
     local nm=$1 extra=$2

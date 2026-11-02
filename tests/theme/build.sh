@@ -76,7 +76,7 @@ rm -rf "$OUT/apps/editor.osp" "$OUT/apps/widgets.osp"
 while read -r zeile; do ARGS+=("$zeile"); done \
     < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" "nur=$PROGS")
 while read -r pfad; do ARGS+=("$pfad"); done < "$OUT/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }
 echo "   abbild    $(stat -c%s "$OUT/disk.img") Oktette"
 exit 0

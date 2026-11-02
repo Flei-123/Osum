@@ -17,8 +17,8 @@ START=$(sgdisk -i "$PART" "$DISK" 2>/dev/null | awk '/First sector/ {print $3}')
 END=$(sgdisk -i "$PART" "$DISK" 2>/dev/null | awk '/Last sector/ {print $3}')
 [ -n "$START" ] && [ -n "$END" ] && ok "root partition sectors $START..$END" || bad "no partition 2 in the table"
 dd if="$DISK" of="$OUT/root.part" bs=512 skip="$START" count=$((END - START + 1)) status=none 2>/dev/null
-for f in passwd shadow group; do python3 tools/osum/mkfs.py cat "$OUT/root.part" "/etc/$f" > "$OUT/$f.txt" 2>"$OUT/$f.err"; done
-python3 tools/osum/mkfs.py list "$OUT/root.part" 2>/dev/null | grep -E "^/users/|^/etc/autologin" > "$OUT/users.txt"
+for f in passwd shadow group; do bash tools/mkfsfi/mkfs.sh cat "$OUT/root.part" "/etc/$f" > "$OUT/$f.txt" 2>"$OUT/$f.err"; done
+bash tools/mkfsfi/mkfs.sh list "$OUT/root.part" 2>/dev/null | grep -E "^/users/|^/etc/autologin" > "$OUT/users.txt"
 python3 -I - "$OUT" "$GUI_NAME" "$GUI_PW" > "$OUT/check.txt" 2>&1 <<'PYEOF'
 import sys, hashlib, binascii, re
 out, name, pw = sys.argv[1:4]

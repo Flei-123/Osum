@@ -38,7 +38,7 @@ bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping > "$T/b.txt" 2>&1 ||
 gen() { { echo 'echo ==START=='; echo dhcp; i=0; while [ $i -lt $1 ]; do echo 'ping 10.0.2.2'; echo 'sleep 1'; i=$((i+1)); done; echo 'echo ==ALIVE=='; } > "$2"; }
 gen 14 "$T/s_long.sh"
 gen 12 "$T/s_ctl.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" \
     /t/s_long.sh="$T/s_long.sh" /t/s_ctl.sh="$T/s_ctl.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
@@ -106,7 +106,7 @@ start3() { # name script plan  (usbhold: the kernel services USB hot plug for 90
 }
 # the script only proves shell + kernel are alive after the unplug (dhcp/ping would wait for the vanished NIC)
 printf 'echo ==START==\nsleep 1\necho ==ALIVE==\n' > "$T/s_short.sh"
-python3 tools/osum/mkfs.py build "$T/d3.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d3.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" \
     /t/s_short.sh="$T/s_short.sh" > "$T/mkfs3.txt" 2>&1 || { tail "$T/mkfs3.txt"; exit 1; }

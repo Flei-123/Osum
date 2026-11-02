@@ -70,7 +70,7 @@ shasum /mnt/a.bin /mnt/b.bin
 umount /mnt
 echo @@end
 SEOF
-python3 tools/osum/mkfs.py build "$W/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
+bash tools/mkfsfi/mkfs.sh build "$W/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
     "/src.bin=$W/src.bin" "/t/s.sh=$W/s.sh" > "$W/mkfs.log" 2>&1 || { tail -3 "$W/mkfs.log"; exit 1; }
 ACC=""; [ "$OSUM_QEMU_ACCEL" = kvm ] && ACC="-cpu host"
 timeout ${CPT_TIMEOUT:-1200} $QEMU_X86 $ACC -kernel "$K" -m 512 \

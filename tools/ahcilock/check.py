@@ -18,7 +18,7 @@ def wrace_pattern(n, kib):
 def check_files(img, d, procs, kib):
     bad = 0
     for n in range(procs):
-        p = subprocess.run([sys.executable, os.path.join(HERE, "..", "osum", "mkfs.py"), "cat", img,
+        p = subprocess.run(["bash", os.path.join(HERE, "..", "mkfsfi", "mkfs.sh"), "cat", img,
                             "%s/f%d" % (d, n)], capture_output=True)
         if p.stdout != wrace_pattern(n, kib):
             bad += 1

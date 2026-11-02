@@ -135,7 +135,7 @@ K="$TMPD/klein.txt"
 has "$K" 'speicherdruck: lebt=1' "64 MiB, drei Fresser: das System lebt"
 has "$K" 'kernel: done' "64 MiB: der Kern erreicht sein Ende"
 
-if [ -f "$TMPD/hw.img" ] || python3 tools/osum/mkfs.py build "$TMPD/hw.img" 4096 \
+if [ -f "$TMPD/hw.img" ] || bash tools/mkfsfi/mkfs.sh build "$TMPD/hw.img" 4096 \
         > "$TMPD/hwmkfs.txt" 2>&1; then
     timeout 300 $QEMU_X86 -kernel "$TMPD/k.mb" -m 128 \
         -append "hogwrite nokbd nosched" \
@@ -198,7 +198,7 @@ if [ "$BUILT" = 1 ]; then
     while read -r z; do ARGS+=("$z"); done \
         < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+    bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
         && ok "the image is built" \
         || { bad "mkfs.py scheiterte"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 

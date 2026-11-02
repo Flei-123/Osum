@@ -14,7 +14,7 @@ printf 'echo ==START==\nsleep 9\ndhcp\nping 192.168.42.129\nsleep 2\ncat /proc/u
 bash tools/sync/build.sh "$T/bin" 0 wget > "$T/bw.txt" 2>&1 || { tail "$T/bw.txt"; exit 1; }
 mkdir -p "$T/www"
 python3 -I -c "import sys;sys.stdout.buffer.write(bytes((i*7+3)&255 for i in range(4000)))" > "$T/www/x.txt"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /bin/wget="$T/bin/wget.elf" /proc/ \
     /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_nic.sh="$T/s_nic.sh" /t/s_down.sh="$T/s_down.sh" \

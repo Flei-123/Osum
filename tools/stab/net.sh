@@ -99,7 +99,7 @@ echo ==PS2==
 ps
 echo ==END==
 S
-python3 "$TREE/tools/osum/mkfs.py" build "$T/d.img" 16384 \
+bash "$TREE/tools/mkfsfi/mkfs.sh" build "$T/d.img" 16384 \
     /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ /t/ \
     "/bin/sh=$T/w0/sh.elf" "/bin/ls=$T/w0/ls.elf" "/bin/cat=$T/w0/cat.elf" "/bin/echo=$T/w0/echo.elf" \
     "/bin/chmod=$T/w0/chmod.elf" "/bin/jsig=$T/w0/jsig.elf" "/bin/jarvisctl=$T/w0/jarvisctl.elf" \

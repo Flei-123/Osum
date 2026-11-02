@@ -19,7 +19,7 @@ for p in sh ls echo rm df wbench sleep; do
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$OUT/$p.elf" "$OUT/crt.o" "$OUT/$p.o"
     SPEC="$SPEC /bin/$p=$OUT/$p.elf"
 done
-python3 tools/osum/mkfs.py build "$OUT/d.img" 600000 --v3 --inodes=256 $SPEC > "$OUT/mk.txt" 2>&1 || { tail -3 "$OUT/mk.txt"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$OUT/d.img" 600000 --v3 --inodes=256 $SPEC > "$OUT/mk.txt" 2>&1 || { tail -3 "$OUT/mk.txt"; exit 1; }
 START=$((HIGH_GIB * 2048 * 1024))
 SECT=$(( $(stat -c %s "$OUT/d.img") / 512 ))
 rm -f "$OUT/hi.img"

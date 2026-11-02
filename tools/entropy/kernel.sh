@@ -56,7 +56,7 @@ for p in $PROGS; do
     strip --strip-all "$OUT/$p.elf"
     SPEC="$SPEC /bin/$p=$OUT/$p.elf"
 done
-python3 tools/osum/mkfs.py build "$OUT/disk.img" 4096 $SPEC > "$OUT/mkfs.txt" 2>&1 && ok "OFS disk with $(echo $PROGS | wc -w) programs" || { bad "mkfs.py"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" 4096 $SPEC > "$OUT/mkfs.txt" 2>&1 && ok "OFS disk with $(echo $PROGS | wc -w) programs" || { bad "mkfs.py"; exit 1; }
 
 boot() { # name disk cpu words script
     timeout 300 $QEMU_X86 -kernel "$OUT/k.mb" -m 256 -cpu "$3" -append "osum vfs $QUIET $4 script=$5" \

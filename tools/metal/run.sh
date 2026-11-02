@@ -73,7 +73,7 @@ for p in sh ls cat echo; do
         -o "$TMPD/$p.elf" "$TMPD/crt.o" "$TMPD/$p.o" 2>/dev/null \
         || bad "$p could not be linked"
 done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" 8192 /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 8192 /bin/ \
     "/bin/sh=$TMPD/sh.elf" "/bin/ls=$TMPD/ls.elf" \
     "/bin/cat=$TMPD/cat.elf" "/bin/echo=$TMPD/echo.elf" \
     >"$TMPD/mkfs.txt" 2>&1 \

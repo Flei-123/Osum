@@ -117,7 +117,7 @@ if [ -x "$FVBIN" ] && command -v qemu-system-x86_64 >/dev/null && command -v nod
         bad "fvviewer ring 3 build"; head -8 "$D/fvv2.err"
     fi
     if [ -f "$D/s0/k.mb" ] && [ -f "$D/fvv.elf" ] && start_th; then
-        python3 tools/osum/mkfs.py build "$D/disk.img" 32768 /bin/ \
+        bash tools/mkfsfi/mkfs.sh build "$D/disk.img" 32768 /bin/ \
             /bin/sh="$D/s0/sh.elf" /bin/ls="$D/s0/ls.elf" /bin/cat="$D/s0/cat.elf" /bin/echo="$D/s0/echo.elf" \
             /bin/dhcp="$D/s0/dhcp.elf" /bin/fvviewer="$D/fvv.elf" > "$D/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$D/mkfs.txt"; }
         timeout 300 qemu-system-x86_64 -kernel "$D/s0/k.mb" -m 512 \

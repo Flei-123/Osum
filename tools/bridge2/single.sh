@@ -73,7 +73,7 @@ run() { # <label> <jarvisd elf>
     local SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ /t/"
     for p in sh ls cat echo sleep ps; do SPEC="$SPEC /bin/$p=$W/$p.elf"; done
     SPEC="$SPEC /bin/jarvisd=$elf /etc/jarvis/permissions.conf=$W/rechte.conf /etc/ssl/roots.pem=$W/roots.pem /etc/resolv.conf=$W/resolv.conf /t/g.sh=$W/g.sh"
-    python3 tools/osum/mkfs.py build "$W/$nm.img" 32768 $SPEC > "$W/mkfs-$nm.txt" 2>&1 || { echo "mkfs"; tail -5 "$W/mkfs-$nm.txt"; exit 1; }
+    bash tools/mkfsfi/mkfs.sh build "$W/$nm.img" 32768 $SPEC > "$W/mkfs-$nm.txt" 2>&1 || { echo "mkfs"; tail -5 "$W/mkfs-$nm.txt"; exit 1; }
     timeout 120 qemu-system-x86_64 "${ACC[@]}" -kernel "$W/k0.mb" -m 512 \
         -append "osum nokbd nosched noproc nofs modfs script=sh /t/g.sh;exit" \
         -serial "file:$W/$nm.txt" -display none -no-reboot \

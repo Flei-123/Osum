@@ -55,6 +55,6 @@ for p in $PROGS; do
         echo "$p.fi does not compile"; tail -10 "$W/$p.err"; exit 1; }
     SPEC="$SPEC /bin/$p=$W/$p.elf"
 done
-python3 tools/osum/mkfs.py build "$W/disk.img" $BLOCKS $SPEC > "$W/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$W/disk.img" $BLOCKS $SPEC > "$W/mkfs.txt" 2>&1 \
     || { echo "mkfs failed"; tail -5 "$W/mkfs.txt"; exit 1; }
 echo "hwnet/build: $W/k.mb + $W/disk.img (stage $S, $(echo $PROGS | wc -w) programs)"

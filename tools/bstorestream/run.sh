@@ -77,7 +77,7 @@ echo ==VERIFY==
 backup verify /store s1
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS /bin/ /t/ /d/ /store/ /out/ /proc/ /dev/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS /bin/ /t/ /d/ /store/ /out/ /proc/ /dev/ \
     /bin/sh="$TMPD/bin/sh.elf" /bin/cat="$TMPD/bin/cat.elf" /bin/echo="$TMPD/bin/echo.elf" \
     /bin/ls="$TMPD/bin/ls.elf" /bin/backup="$TMPD/bin/backup.elf" \
     /d/big.bin="$TMPD/src/big.bin" /d/dup.bin="$TMPD/src/dup.bin" /d/tail.bin="$TMPD/src/tail.bin" \
@@ -127,7 +127,7 @@ python3 - "$TMPD/disk.img" "$TMPD/src" > "$TMPD/compare.txt" 2>&1 <<'PY'
 import os, subprocess, sys
 img, src = sys.argv[1], sys.argv[2]
 def cat(p):
-    r = subprocess.run(["python3", "tools/osum/mkfs.py", "cat", img, p], capture_output=True)
+    r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "cat", img, p], capture_output=True)
     return r.stdout if r.returncode == 0 else None
 same = 0
 pairs = [("/out/" + n, os.path.join(src, n)) for n in os.listdir(src)] + [("/got.bin", os.path.join(src, "big.bin"))]

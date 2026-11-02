@@ -71,7 +71,7 @@ done
 printf 'eins\nzwei\ndrei\n' > "$TMPD/d.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 4096 $SPEC \
         /d/ "/d/d.txt=$TMPD/d.txt" > "$TMPD/mkfs.log" 2>&1 \
     && ok "mkfs.py built an OFS image of 4096 blocks" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }

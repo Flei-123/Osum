@@ -191,7 +191,7 @@ PY
 ok "the folder back end has an account whose PBKDF2 the HOST computed"
 
 abbild() { # <ziel>
-    python3 tools/osum/mkfs.py build "$1" 24576 \
+    bash tools/mkfsfi/mkfs.sh build "$1" 24576 \
         /bin/ /etc/ /etc/ssl/ /usr/ /usr/share/ /usr/share/locale/ \
         /usr/share/locale/en/ /usr/share/locale/de/ \
         /users/ /users/justin/ /users/justin/config/ \
@@ -340,11 +340,11 @@ if [ -n "$TOK" ]; then
     is "das Token im ABBILD gesucht (Treffer)" "${TREFFER:-0}" "0"
 fi
 SPFAD="/state/session/konto/$JKEN"
-python3 tools/osum/mkfs.py where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo.txt" 2>&1
 if grep -qa "^where " "$TMPD/wo.txt"; then
     ok "the session file is in the image: $(cat "$TMPD/wo.txt")"
     BLK=$(grep -oE 'first=[0-9]+' "$TMPD/wo.txt" | cut -d= -f2)
-    python3 tools/osum/mkfs.py cat "$TMPD/d5.img" "$SPFAD" > "$TMPD/siegel.bin" 2>/dev/null
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/d5.img" "$SPFAD" > "$TMPD/siegel.bin" 2>/dev/null
     if head -c4 "$TMPD/siegel.bin" | grep -qa "OKS1"; then
         ok "and it is SEALED (header OKS1, $(stat -c%s "$TMPD/siegel.bin") Oktette)"
     else
@@ -360,7 +360,7 @@ lauf "$TMPD/dk.img" "konto --kaputt=klartext anmelden --anbieter=jarvis --kennun
 is "Gegenprobe klartext: angemeldet" "$(kv "$TMPD/o_kk.txt" stand)" "ok"
 is "Gegenprobe klartext: gesiegelt" "$(kv "$TMPD/o_kk.txt" gesiegelt)" "0"
 KKEN=$(kv "$TMPD/o_kk.txt" kennung)
-python3 tools/osum/mkfs.py cat "$TMPD/dk.img" "/state/session/konto/$KKEN" \
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/dk.img" "/state/session/konto/$KKEN" \
     > "$TMPD/kk_roh.bin" 2>/dev/null
 KTOK=$(tr -d '\0' < "$TMPD/kk_roh.bin" | head -c 400)
 if [ -n "$KTOK" ] && [ ${#KTOK} -gt 40 ]; then
@@ -380,7 +380,7 @@ lauf "$TMPD/d5.img" "konto status --ohne-netz --kennung=$JKEN" "$TMPD/o_st.txt"
 is "die Sitzung ueberlebt den Neustart" "$(kv "$TMPD/o_st.txt" sitzung)" "1"
 lauf "$TMPD/d5.img" "konto abmelden --kennung=$JKEN" "$TMPD/o_ab.txt"
 is "abgemeldet" "$(kv "$TMPD/o_ab.txt" abgemeldet)" "1"
-python3 tools/osum/mkfs.py where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo2.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/d5.img" "$SPFAD" > "$TMPD/wo2.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo2.txt" \
     && ok "the session file has vanished from the directory" \
     || bad "the session file is still there: $(cat "$TMPD/wo2.txt")"
@@ -451,7 +451,7 @@ lauf "$TMPD/d8.img" "konto anmelden --anbieter=xoffi --kennung=justin@example.te
 is "falsches Kennwort" "$(kv "$TMPD/o_f1.txt" stand)" "falsch"
 lauf "$TMPD/d8.img" "konto liste" "$TMPD/o_f2.txt"
 is "danach: Konten auf dem Geraet" "$(kv "$TMPD/o_f2.txt" konten)" "0"
-python3 tools/osum/mkfs.py where "$TMPD/d8.img" "/state/session/konto" > "$TMPD/wo3.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/d8.img" "/state/session/konto" > "$TMPD/wo3.txt" 2>&1
 hin "und /state/session/konto: $(head -1 "$TMPD/wo3.txt")"
 
 SK=""
@@ -553,7 +553,7 @@ lauf "$TMPD/da.img" "konto status --kennung=$RK" "$TMPD/o_r3.txt"
 is "Erneuerung abgelehnt -> sauber abgemeldet" "$(kv "$TMPD/o_r3.txt" abgemeldet)" "1"
 lauf "$TMPD/da.img" "konto liste" "$TMPD/o_r4.txt"
 is "der KONTOEINTRAG bleibt (kein Datenverlust)" "$(kv "$TMPD/o_r4.txt" konten)" "1"
-python3 tools/osum/mkfs.py where "$TMPD/da.img" "/state/session/konto/$RK" > "$TMPD/wo4.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/da.img" "/state/session/konto/$RK" > "$TMPD/wo4.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo4.txt" \
     && ok "and the token is gone" || bad "the token is still there"
 server_zu
@@ -627,7 +627,7 @@ lauf "$TMPD/dm.img" "konto anmelden --anbieter=xoffi --kennung=chef@example.test
 is "eine Sitzung mit master_session wird ABGELEHNT" "$(kv "$TMPD/o_ms.txt" stand)" "abgelehnt"
 lauf "$TMPD/dm.img" "konto liste" "$TMPD/o_ms2.txt"
 is "und es entsteht kein Konto" "$(kv "$TMPD/o_ms2.txt" konten)" "0"
-python3 tools/osum/mkfs.py where "$TMPD/dm.img" "/state/session/konto" > "$TMPD/wo5.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/dm.img" "/state/session/konto" > "$TMPD/wo5.txt" 2>&1
 hin "  /state/session/konto: $(head -1 "$TMPD/wo5.txt")"
 lauf "$TMPD/dm.img" "konto --kaputt=claimcheck anmelden --anbieter=xoffi --kennung=chef@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ms3.txt"
 is "Gegenprobe claimcheck: jetzt geht sie durch" "$(kv "$TMPD/o_ms3.txt" stand)" "ok"
@@ -637,11 +637,11 @@ ok "  (so section 12 measures the refusal and not a coincidence)"
 abbild "$TMPD/dm2.img" || true
 lauf "$TMPD/dm2.img" "konto anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ad.txt"
 is "ein Token mit is_admin und nexus_core_access wird angenommen" "$(kv "$TMPD/o_ad.txt" stand)" "ok"
-python3 tools/osum/mkfs.py where "$TMPD/dm2.img" "/etc/konto.rechte" > "$TMPD/wo6.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/dm2.img" "/etc/konto.rechte" > "$TMPD/wo6.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo6.txt" \
     && ok "and NO local permission arises (/etc/konto.rechte does not exist)" \
     || bad "a local permission arose: $(cat "$TMPD/wo6.txt")"
-python3 tools/osum/mkfs.py cat "$TMPD/dm2.img" /etc/konten > "$TMPD/konten.txt" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/dm2.img" /etc/konten > "$TMPD/konten.txt" 2>/dev/null
 if grep -qai 'admin\|nexus\|root' "$TMPD/konten.txt"; then
     if grep -qa 'adminmensch' "$TMPD/konten.txt" && ! grep -qa 'is_admin\|nexus' "$TMPD/konten.txt"; then
         ok "/etc/konten carries the display name and no claim"
@@ -655,7 +655,7 @@ FELDER=$(head -1 "$TMPD/konten.txt" | awk -F'\t' '{print NF}')
 is "eine Kontozeile hat genau sieben Felder" "$FELDER" "7"
 abbild "$TMPD/dm3.img" || true
 lauf "$TMPD/dm3.img" "konto --kaputt=rechte anmelden --anbieter=xoffi --kennung=admin@example.test --bereich=alpha < /pw_gut" "$TMPD/o_ad2.txt"
-python3 tools/osum/mkfs.py where "$TMPD/dm3.img" "/etc/konto.rechte" > "$TMPD/wo7.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/dm3.img" "/etc/konto.rechte" > "$TMPD/wo7.txt" 2>&1
 grep -qa "^where " "$TMPD/wo7.txt" \
     && ok "control rights: now the permission arises -- the test works" \
     || bad "control rights: nothing arises, the test measures nothing"
@@ -681,11 +681,11 @@ lauf_ohne_netz "$TMPD/dp.img" "echo hallo > /probe.txt;cat /probe.txt;ls /bin;ko
 has "$TMPD/o_p1.txt" "hallo" "ohne jedes Konto: schreiben und lesen geht"
 is "ohne jedes Konto: Konten" "$(kv "$TMPD/o_p1.txt" konten)" "0"
 is "ohne jedes Konto: konto status endet sauber" "$(kv "$TMPD/o_p1.txt" stand)" "ok"
-python3 tools/osum/mkfs.py where "$TMPD/dp.img" "/etc/konten" > "$TMPD/wo8.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/dp.img" "/etc/konten" > "$TMPD/wo8.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo8.txt" \
     && ok "and not a single account file arose" \
     || bad "an account file arose without login"
-python3 tools/osum/mkfs.py where "$TMPD/dp.img" "/device/kontoschluessel" > "$TMPD/wo9.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/dp.img" "/device/kontoschluessel" > "$TMPD/wo9.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo9.txt" \
     && ok "and no seal key either -- none of it arises in advance" \
     || hin "der Siegelschluessel entstand ohne Anmeldung: $(cat "$TMPD/wo9.txt")"

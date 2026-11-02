@@ -174,7 +174,7 @@ undef=$(nm -u "$TMPD/pollbr0.elf" 2>/dev/null | awk '{print $NF}' | sed '/^$/d')
 
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py built an OFS image with the userland of this round" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 

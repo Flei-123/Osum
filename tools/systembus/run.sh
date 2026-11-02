@@ -247,7 +247,7 @@ ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf"
 while read -r z; do ARGS+=("$z"); done \
     < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" "nur=$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-if python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1; then
+if bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1; then
     ok "the disk is there ($(stat -c%s "$TMPD/disk.img") Oktette)"
 else
     bad "mkfs.py faellt"; tail -4 "$TMPD/mkfs.txt" | sed 's/^/        /'

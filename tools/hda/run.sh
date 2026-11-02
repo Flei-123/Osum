@@ -65,7 +65,7 @@ SPEC="/bin/"
 for p in $PROGS; do [ -f "$TMPD/$p.elf" ] && SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 SPEC="$SPEC /ton.wav=$TMPD/m/ton.wav /ton44.wav=$TMPD/m/ton44.wav /mono.wav=$TMPD/m/mono.wav"
 [ $MP3DA = 1 ] && SPEC="$SPEC /ton.mp3=$TMPD/m/ton.mp3"
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC > "$TMPD/mkfs.txt" 2>&1 \
     && ok "the disk is built" || { bad "mkfs"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 
 # ---------------------------------------------------------------- Laeufer

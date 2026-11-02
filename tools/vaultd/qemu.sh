@@ -69,7 +69,7 @@ image() {
     A+=("/etc/passwd=$TMPD/passwd" "/etc/group=$TMPD/group" "/etc/vault/kdf=$TMPD/kdf"
         "/t/s.sh=$script" "/t/s2.sh=$TMPD/sb.sh")
     [ -n "$inittab" ] && A+=("/bin/init=$TMPD/bin/init.elf" "/etc/inittab=$inittab" "/etc/ziel=$TMPD/ziel")
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
         || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
 

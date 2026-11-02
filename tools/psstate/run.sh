@@ -29,7 +29,7 @@ printf '/bin/sleep 6\n/bin/ps\n/bin/top -n 1\n/bin/echo PSSTATE-DONE\n' > "$T/sn
 printf 'konsole\n' > "$T/ziel"
 SPEC=""
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$T/bin/$p.elf@755:0:0"; done
-python3 tools/osum/mkfs.py build "$T/d.img" 20480 --v3 /bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /proc/ /tmp/ /etc/actions.d/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20480 --v3 /bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /proc/ /tmp/ /etc/actions.d/ \
     $SPEC /etc/inittab="$T/inittab"@644:0:0 /etc/ziel="$T/ziel"@644:0:0 /etc/snap.sh="$T/snap.sh"@755:0:0 > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; echo "PSSTATE: mkfs failed"; exit 1; }
 
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm

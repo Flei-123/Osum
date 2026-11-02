@@ -39,7 +39,7 @@ lauf() {
     SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
     SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
     SPEC="$SPEC /etc/ssl/roots.pem=$W/leer.pem"
-    python3 tools/osum/mkfs.py build "$W/$name.img" 16384 $SPEC \
+    bash tools/mkfsfi/mkfs.sh build "$W/$name.img" 16384 $SPEC \
         > "$W/mkfs-$name.txt" 2>&1 || return 1
     timeout 180 qemu-system-x86_64 -kernel "$kern" -m 256 \
         -append "osum nokbd nosched noproc nofs noring3 gfx fbres=1280x800 script=$skript" \

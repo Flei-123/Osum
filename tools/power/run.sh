@@ -123,7 +123,7 @@ powerd inject 1 60 1 0
 sleep -m 1500
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$T/disk.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power.conf" \
+bash tools/mkfsfi/mkfs.sh build "$T/disk.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power.conf" \
     "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
     "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s.sh" > "$T/mkfs.txt" 2>&1 || { bad "mkfs failed"; tail -3 "$T/mkfs.txt"; }
 timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \
@@ -158,7 +158,7 @@ grep -aq "powerd: standby after idle" "$T/ser.klar" && bad "idle standby fired a
 cp "$T/power.conf" "$T/power1.conf"
 sed -i 's/^standby_bat=0/standby_bat=6/' "$T/power1.conf"
 printf 'powerd &\nsleep -m 14000\necho ==END==\n' > "$T/s2.sh"
-python3 tools/osum/mkfs.py build "$T/disk2.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power1.conf" \
+bash tools/mkfsfi/mkfs.sh build "$T/disk2.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power1.conf" \
     "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
     "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s2.sh" > "$T/mkfs2.txt" 2>&1 || { bad "mkfs (idle boot) failed"; tail -3 "$T/mkfs2.txt"; }
 timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \
@@ -174,7 +174,7 @@ grep -aq "powerd: lid closed mains=0 action=sleep" "$T/ser.klar" && bad "unexpec
 # third boot: brightness persistence (restore from /etc/backlight.conf, save a changed level), fake PWM via `blpch`
 printf 'percent=40\n' > "$T/backlight.conf"
 printf 'powerd &\nsleep -m 3500\necho ==A==\ncat /etc/backlight.conf\necho ==END==\n' > "$T/s3.sh"
-python3 tools/osum/mkfs.py build "$T/disk3.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power.conf" "/etc/backlight.conf=$T/backlight.conf" \
+bash tools/mkfsfi/mkfs.sh build "$T/disk3.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ "/etc/power.conf=$T/power.conf" "/etc/backlight.conf=$T/backlight.conf" \
     "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
     "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s3.sh" > "$T/mkfs3.txt" 2>&1 || { bad "mkfs (backlight boot) failed"; tail -3 "$T/mkfs3.txt"; }
 timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \

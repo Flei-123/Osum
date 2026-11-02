@@ -73,7 +73,7 @@ SPEC="/bin/ /etc/ /etc/jarvis/ /var/ /var/jarvis/ /t/"
 for p in sh ls cat echo jarvisctl; do SPEC="$SPEC /bin/$p=$W/b/$p.elf"; done
 cp assets/jarvis/rechte-justin.conf "$W/rechte.conf"
 SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf /t/g.sh=$W/g.sh"
-python3 tools/osum/mkfs.py build "$W/v.img" 16384 $SPEC > "$W/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$W/mkfs.txt"; }
+bash tools/mkfsfi/mkfs.sh build "$W/v.img" 16384 $SPEC > "$W/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$W/mkfs.txt"; }
 timeout 150 qemu-system-x86_64 "${ACC[@]}" -kernel "$W/b/k.mb" -m 256 \
     -append "osum nokbd nosched noproc nofs noring3 gfx fbres=1280x800 script=sh /t/g.sh;exit" \
     -serial "file:$W/v.txt" -display none -no-reboot \

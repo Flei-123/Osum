@@ -95,7 +95,7 @@ platte_bauen() {
         done
     fi
     ARGS+=(/users/ /users/root/ /users/root/config/)
-    python3 "$WURZEL"/tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
+    bash "$WURZEL"/tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
         || { tail -20 "$OUT/mkfs.log"; fehler "mkfs"; }
 }
 
@@ -177,7 +177,7 @@ sagen lauf2 "F9, dann Uhr nach links unten ziehen"
 booten "$OUT/disk.img" "$OUT/2-gezogen.png" "$OUT/s2.txt" "$gx,$gy>300,600>40,700"
 grep -a 'desktop: modul' "$OUT/s2.txt" > "$OUT/2-modul.txt" || true
 
-python3 "$WURZEL"/tools/osum/mkfs.py cat "$OUT/disk.img" /etc/module.conf \
+bash "$WURZEL"/tools/mkfsfi/mkfs.sh cat "$OUT/disk.img" /etc/module.conf \
     > "$OUT/2-module.conf" 2>/dev/null || true
 if [ -s "$OUT/2-module.conf" ]; then
     sagen "  datei" "$(tr '\n' ' ' < "$OUT/2-module.conf")"

@@ -16,7 +16,7 @@ for p in sh ls echo rm df wbench; do
     ld -T kernel/user/user.ld --defsym=USER_ENTRY="_F0.u_start" -o "$OUT/$p.elf" "$OUT/crt.o" "$OUT/$p.o"
     SPEC="$SPEC /bin/$p=$OUT/$p.elf"
 done
-python3 tools/osum/mkfs.py build "$OUT/d.img" "$BLOCKS" --v3 --inodes=256 ${MKOPT:-} $SPEC > "$OUT/mk.txt" 2>&1 || { tail -3 "$OUT/mk.txt"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$OUT/d.img" "$BLOCKS" --v3 --inodes=256 ${MKOPT:-} $SPEC > "$OUT/mk.txt" 2>&1 || { tail -3 "$OUT/mk.txt"; exit 1; }
 DRV=(-drive "file=$OUT/live.img,format=raw,if=ide,index=0")
 [ "${DRIVE:-ahci}" = ahci ] && DRV=(-device ahci,id=ahci -drive "file=$OUT/live.img,format=raw,if=none,id=d0" -device ide-hd,drive=d0,bus=ahci.0)
 for sz in $SIZES; do

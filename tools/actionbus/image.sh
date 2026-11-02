@@ -37,7 +37,7 @@ else
     bad "the image does not build"; tail -15 "$TMPD/build.txt" | sed 's/^/        /'
     echo "ACTBUS-IMAGE: $pass passed, $fail failed"; exit 1
 fi
-python3 tools/osum/mkfs.py list "$IMGDIR/root.img" > "$TMPD/list.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$IMGDIR/root.img" > "$TMPD/list.txt" 2>&1
 for f in /bin/orientbus /bin/act /bin/settingsd /etc/orientbus/policy \
          /etc/settings.schema /etc/actions.d/settings.actions \
          /bin/axd /etc/actions.d/a11y.actions \

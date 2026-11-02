@@ -31,7 +31,7 @@ printf 'echo ==START==\ndhcp\nping -c 2 1.1.1.1\nping -c 2 8.8.8.8\nsleep 1\ncat
 printf 'echo ==START==\nping -c 2 1.1.1.1\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_static.sh"
 printf 'echo ==START==\nping -c 12 1.1.1.1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_storm.sh"
 printf 'echo ==START==\nping -b -c 1 1.1.1.1\necho ==MID==\ncat /proc/usbnet\necho ==END==\n' > "$T/s_block.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
     /t/s_dhcp.sh="$T/s_dhcp.sh" /t/s_static.sh="$T/s_static.sh" /t/s_storm.sh="$T/s_storm.sh" /t/s_block.sh="$T/s_block.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }

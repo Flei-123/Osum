@@ -29,7 +29,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-python3 tools/osum/mkfs.py build "$T/d.img" 32768 --v3 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 32768 --v3 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf >/dev/null 2>&1
 
 run_case() { # run_case <tag> <max_outputs> <kernel words>

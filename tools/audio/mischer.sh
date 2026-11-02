@@ -38,7 +38,7 @@ bash tools/hda/mkmedia.sh "$OUT/m" > "$OUT/media.txt" 2>&1
 SPEC="/bin/"; for p in $PROGS; do SPEC="$SPEC /bin/$p=$OUT/$p.elf"; done
 for f in "$OUT"/m/*; do SPEC="$SPEC /$(basename "$f")=$f"; done
 SEKT=$(( $(du -cb "$OUT"/m/* "$OUT"/*.elf | tail -1 | cut -f1) * 3 / 2 / 512 + 4096 ))
-python3 tools/osum/mkfs.py build "$OUT/disk.img" "$SEKT" $SPEC > "$OUT/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$OUT/disk.img" "$SEKT" $SPEC > "$OUT/mkfs.txt" 2>&1 \
     || { echo mkfs; tail -5 "$OUT/mkfs.txt"; exit 1; }
 
 HDADEV="-device intel-hda -device hda-duplex,audiodev=snd0"

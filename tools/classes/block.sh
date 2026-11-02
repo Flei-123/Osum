@@ -28,7 +28,7 @@ mkdir -p "$D/bin"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; finish; }
 ./tools/build-kernel.sh "$D/k0.img" --stufe 0 > "$D/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel"; tail -5 "$D/k.txt"; finish; }
 printf 'echo ==DRIVERS==\ncat /proc/drivers\necho ==END==\n' > "$D/s.sh"
-python3 tools/osum/mkfs.py build "$D/d.img" 8192 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$D/d.img" 8192 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
     $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \

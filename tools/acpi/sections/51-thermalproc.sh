@@ -10,7 +10,7 @@ echo ==PROC==
 cat /proc/thermal
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$D/p.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
+bash tools/mkfsfi/mkfs.sh build "$D/p.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
     "/bin/sh=$D/bin/sh.elf" "/bin/echo=$D/bin/echo.elf" "/bin/sleep=$D/bin/sleep.elf" "/bin/cat=$D/bin/cat.elf" \
     "/t/s.sh=$D/s.sh" > "$D/mkfs.txt" 2>&1 || { printf '  FAIL  mkfs\n'; echo fail >> "$RESULTS"; exit 0; }
 ACPI_MEM=512 qrun "$K" procraw "osum vfs nokbd nosched acpiev thermsim thermms=200 script=sh /t/s.sh;exit" \

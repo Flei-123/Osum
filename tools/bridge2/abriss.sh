@@ -78,7 +78,7 @@ done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
 SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf"
 SPEC="$SPEC /etc/ssl/roots.pem=$W/roots.pem"
-python3 tools/osum/mkfs.py build "$W/probe.img" 16384 $SPEC >"$W/mkfs.txt" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh build "$W/probe.img" 16384 $SPEC >"$W/mkfs.txt" 2>&1 || {
     echo "mkfs gescheitert"; tail -4 "$W/mkfs.txt"; exit 1; }
 cp "$W/probe.img" "$W/live.img"
 

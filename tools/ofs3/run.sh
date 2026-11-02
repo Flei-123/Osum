@@ -94,11 +94,11 @@ QUIET="nokbd nosched noproc nofs noring3"
 
 echo
 echo "== 2. what the host says about the format =="
-python3 tools/osum/mkfs.py build "$TMPD/v2.img" 4096 $SPEC /tmp/ > "$TMPD/m2.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/v2.img" 4096 $SPEC /tmp/ > "$TMPD/m2.txt" 2>&1 \
     || bad "mkfs Fassung 2"
-python3 tools/osum/mkfs.py build "$TMPD/v1.img" 4096 --v1 /bin/ /bin/sh="$TMPD/sh.elf" \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/v1.img" 4096 --v1 /bin/ /bin/sh="$TMPD/sh.elf" \
     /bin/ls="$TMPD/ls.elf" > "$TMPD/m1.txt" 2>&1 || bad "mkfs Fassung 1"
-python3 tools/osum/mkfs.py build "$TMPD/v3.img" 131072 --v3 --inodes=1024 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/v3.img" 131072 --v3 --inodes=1024 \
     --time=1780000000 $SPEC /tmp/ > "$TMPD/m3.txt" 2>&1 || bad "mkfs Fassung 3"
 cat "$TMPD/m1.txt" "$TMPD/m2.txt" "$TMPD/m3.txt" | sed 's/^/        /'
 has "$TMPD/m2.txt" "version=2 bmblocks=1 isize=128 dirent=32 namelen=24" \
@@ -112,7 +112,7 @@ mf2=$(grep -oa 'maxfile=[0-9]*' "$TMPD/m2.txt" | cut -d= -f2)
 mf3=$(grep -oa 'maxfile=[0-9]*' "$TMPD/m3.txt" | cut -d= -f2)
 num "groesste Datei in Fassung 2 (Oktette)" "$mf2" eq 2134016
 num "groesste Datei in Fassung 3 (Oktette)" "$mf3" eq 8726286336
-python3 tools/osum/mkfs.py build "$TMPD/v3b.img" 131072 --v3 --inodes=1024 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/v3b.img" 131072 --v3 --inodes=1024 \
     --time=1780000000 $SPEC /tmp/ >/dev/null 2>&1
 cmp -s "$TMPD/v3.img" "$TMPD/v3b.img" \
     && ok "built twice gives the same image octet for octet" \
@@ -181,7 +181,7 @@ num "auch die Aenderungszeit ist null" "$(val3 "$Z" mtime0)" eq 0
 
 echo
 echo "== 5. THE DISK: four gibioctet =="
-python3 tools/osum/mkfs.py build "$TMPD/4g.img" 8388608 --v3 --inodes=256 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/4g.img" 8388608 --v3 --inodes=256 \
     --time=1780000000 $SPEC /tmp/ > "$TMPD/m4g.txt" 2>&1 || bad "mkfs 4 GiB"
 sed 's/^/        /' "$TMPD/m4g.txt"
 has "$TMPD/m4g.txt" "blocks=8388608" "der Wirt baut ein Abbild von 8.388.608 Bloecken (4 GiB)"
@@ -202,10 +202,10 @@ rm -f "$TMPD/4g.img"
 echo
 echo "== 6. THE WIDE BLOCK: a file that could not exist in version 2 =="
 printf 'weit hinten auf der platte\n' > "$TMPD/weit.txt"
-python3 tools/osum/mkfs.py build "$TMPD/weit.img" 262144 --v3 --inodes=64 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/weit.img" 262144 --v3 --inodes=64 \
     --time=1780000000 --reserve=200000 $SPEC /weit.txt="$TMPD/weit.txt" \
     > "$TMPD/mweit.txt" 2>&1 || bad "mkfs --reserve"
-python3 tools/osum/mkfs.py where "$TMPD/weit.img" /weit.txt > "$TMPD/wo.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/weit.img" /weit.txt > "$TMPD/wo.txt" 2>&1
 sed 's/^/        /' "$TMPD/wo.txt"
 wb=$(grep -oa 'first=[0-9]*' "$TMPD/wo.txt" | cut -d= -f2)
 num "die Datei liegt an einem Block, fuer den Fassung 2 kein Bit hatte" "$wb" gt 4096
@@ -217,9 +217,9 @@ W="$TMPD/oweit.txt"
 [ "$rc" -eq 21 ] && ok "the run on the reserved disk ends by itself (exit 21)" \
                  || bad "weit-Lauf: exit $rc"
 has "$W" "weit hinten auf der platte" "DER KERN LIEST einen Block jenseits der alten Grenze"
-python3 tools/osum/mkfs.py cat "$TMPD/after.img" /weit.txt > "$TMPD/wcat.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/after.img" /weit.txt > "$TMPD/wcat.txt" 2>&1
 has "$TMPD/wcat.txt" "NEUERINHALT" "UND ER SCHREIBT DORT: der Wirt liest zurueck, was der Kern hingelegt hat"
-python3 tools/osum/mkfs.py where "$TMPD/after.img" /weit.txt > "$TMPD/wo2.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/after.img" /weit.txt > "$TMPD/wo2.txt" 2>&1
 wb2=$(grep -oa 'first=[0-9]*' "$TMPD/wo2.txt" | cut -d= -f2)
 num "und die Datei liegt danach immer noch weit hinten" "$wb2" gt 200000
 rm -f "$TMPD/weit.img"
@@ -265,7 +265,7 @@ has "$P" "/tmp/neu" "'find -newer' findet die JUENGERE Datei"
 tr -d '\000' < "$P" | grep -qa '^/tmp/alt$' \
     && bad "'find -newer' hat auch die aeltere gefunden" \
     || ok "and the older one does NOT -- that is the difference that could not exist before"
-python3 tools/osum/mkfs.py cat "$TMPD/after.img" /tmp/t.tar > "$TMPD/t.tar" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/after.img" /tmp/t.tar > "$TMPD/t.tar" 2>/dev/null
 if [ -s "$TMPD/t.tar" ]; then
     mt=$(python3 -c "
 d = open('$TMPD/t.tar','rb').read(512)
@@ -280,10 +280,10 @@ fi
 echo
 echo "== 9. the symbolic link, and its negative test =="
 printf 'ZIELINHALT\n' > "$TMPD/ziel.txt"
-python3 tools/osum/mkfs.py build "$TMPD/link.img" 131072 --v3 --inodes=256 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/link.img" 131072 --v3 --inodes=256 \
     --time=1780000000 $SPEC /ziel.txt="$TMPD/ziel.txt" "/zeiger->/ziel.txt" \
     > "$TMPD/mlink.txt" 2>&1 || bad "mkfs with a link"
-python3 tools/osum/mkfs.py list "$TMPD/link.img" > "$TMPD/llist.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/link.img" > "$TMPD/llist.txt" 2>&1
 has "$TMPD/llist.txt" "/zeiger" "der WIRT legt einen symbolischen Verweis ins Abbild"
 run_disk "$TMPD/k.mb" "osum vfs $QUIET script=cat /zeiger;ls -l /;exit" \
     "$TMPD/l1.txt" "$TMPD/link.img"

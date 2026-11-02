@@ -78,7 +78,7 @@ PROBE_PER_FILE=250
 PROBE_RUNS=$(( (PROBE_SECS + PROBE_PER_FILE - 1) / PROBE_PER_FILE ))
 PROBE_CALLS=$(for i in $(seq 1 "$PROBE_RUNS"); do printf 'sh /probe.sh;'; done)
 for i in $(seq 1 "$PROBE_PER_FILE"); do printf 'echo PROBE\nsleep 1\n'; done > "$TMPD/probe.sh"
-python3 -I tools/osum/mkfs.py build "$TMPD/d.img" "$BLOCKS" --v3 --inodes=256 $SPEC "/probe.sh=$TMPD/probe.sh" > "$TMPD/mk.txt" 2>&1 || { tail -3 "$TMPD/mk.txt"; bad "mkfs"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" "$BLOCKS" --v3 --inodes=256 $SPEC "/probe.sh=$TMPD/probe.sh" > "$TMPD/mk.txt" 2>&1 || { tail -3 "$TMPD/mk.txt"; bad "mkfs"; exit 1; }
 SECT=$(( $(stat -c %s "$TMPD/d.img") / 512 ))
 
 guest() { # <serial> <script>

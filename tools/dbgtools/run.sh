@@ -101,7 +101,7 @@ EOS
 mkdir -p "$D/blobs"
 python3 -I tools/iwlfh/ref.py gen "$D/blobs" > /dev/null 2>&1 && ok "fake firmware blobs generated" || bad "fake firmware blobs"
 FWPATH=/lib/firmware/intel/iwlwifi/iwlwifi-8265-36.ucode
-python3 tools/osum/mkfs.py build "$D/d.img" 20000 --v3 /lib/ /tmp/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+bash tools/mkfsfi/mkfs.sh build "$D/d.img" 20000 --v3 /lib/ /tmp/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ /t/ /proc/ /dev/ /system/ /etc/ /var/ \
     $(for p in $PROGS; do if [ "$p" = su ]; then echo "/bin/su=$D/bin/su.elf@4755:0:0"; else echo "/bin/$p=$D/bin/$p.elf"; fi; done) \

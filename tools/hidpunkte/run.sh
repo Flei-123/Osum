@@ -55,7 +55,7 @@ for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/$p.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/tb.conf")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "the root image is ready" || bad "mkfs.py faellt"
 
 dd if=/dev/zero of="$TMPD/stick.img" bs=1M count=8 2>/dev/null

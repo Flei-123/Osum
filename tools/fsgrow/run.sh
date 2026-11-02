@@ -31,7 +31,7 @@ num() {
 clean() { tr -d '\000' < "$1" 2>/dev/null; }
 val() { clean "$1" | grep -a "^$2: $3 = " | tail -1 | sed 's/.* = //'; }
 gval() { clean "$1" | grep -a "^grow: $2 " | tail -1 | sed "s/^grow: $2 //"; }
-lval() { python3 -I tools/osum/mkfs.py list "$1" | head -1 | tr ' ' '\n' | grep "^$2=" | head -1 | cut -d= -f2 | cut -d/ -f"${3:-1}"; }
+lval() { bash tools/mkfsfi/mkfs.sh list "$1" | head -1 | tr ' ' '\n' | grep "^$2=" | head -1 | cut -d= -f2 | cut -d/ -f"${3:-1}"; }
 badsum() { clean "$1" | grep -a '^growfill: bad' | sed 's/growfill: bad = //' | awk '{s+=$1} END{print s+0}'; }
 extend_to() { dd if=/dev/null of="$1" bs=1M seek="$2" count=0 status=none; }
 
@@ -97,7 +97,7 @@ run_cut() {
 
 make_base() {
     local out=$1
-    python3 -I tools/osum/mkfs.py build "$out" "$BASE_BLOCKS" --v3 --inodes=256 --time=1780000000 --karten=$BASE_MAPS $SPEC "/hello.txt=$TMPD/hello.txt" >"$TMPD/mk.txt" 2>&1 || return 1
+    bash tools/mkfsfi/mkfs.sh build "$out" "$BASE_BLOCKS" --v3 --inodes=256 --time=1780000000 --karten=$BASE_MAPS $SPEC "/hello.txt=$TMPD/hello.txt" >"$TMPD/mk.txt" 2>&1 || return 1
     extend_to "$out" "$DEV_MIB"
 }
 
@@ -143,7 +143,7 @@ num "many files bad after reboot" "$(clean "$TMPD/r.txt" | grep -a '^growfill: b
 num "guest fsck errors after writes" "$(val "$TMPD/r.txt" fsck errors)" eq 0
 python3 tools/fsrobust/check.py struktur "$TMPD/live.img" >"$TMPD/h2.txt" 2>&1 && ok "host check.py struktur after writes" || { bad "host check.py struktur after writes"; tail -4 "$TMPD/h2.txt" | sed 's/^/        /'; }
 num "host: used inodes" "$(lval "$TMPD/live.img" inodes 1)" ge $((MANY + 3))
-num "host: /big.bin lies in the ext zone (first block >= old cover)" "$(python3 -I tools/osum/mkfs.py where "$TMPD/live.img" /big.bin 2>/dev/null | grep -o '[0-9]\+' | awk -v c=$BASE_BLOCKS 'NR>1 && $1>=c {n++} END{print n+0}')" ge 1
+num "host: /big.bin lies in the ext zone (first block >= old cover)" "$(bash tools/mkfsfi/mkfs.sh where "$TMPD/live.img" /big.bin 2>/dev/null | grep -o '[0-9]\+' | awk -v c=$BASE_BLOCKS 'NR>1 && $1>=c {n++} END{print n+0}')" ge 1
 
 echo "== 4. power cuts during grow =="
 cutfail=0

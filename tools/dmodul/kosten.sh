@@ -80,7 +80,7 @@ messen() {
         done
     fi
     ARGS+=(/users/ /users/root/ /users/root/config/)
-    python3 "$WURZEL"/tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-$name.log" 2>&1 \
+    bash "$WURZEL"/tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs-$name.log" 2>&1 \
         || { tail -10 "$OUT/mkfs-$name.log"; echo "mkfs $name"; exit 1; }
 
     local SOCK="$OUT/mon-$name.sock"

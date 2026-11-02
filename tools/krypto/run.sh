@@ -159,7 +159,7 @@ fi
 
 echo "== 4. anlegen, schreiben, NEUSTART, entsperren, nachrechnen =="
 BLOCKS=8192
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ > "$TMPD/mkfs.log" 2>&1 \
     && ok "the root disk is up" \
     || bad "mkfs.py scheitert"

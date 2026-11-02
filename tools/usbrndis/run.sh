@@ -25,7 +25,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/sync/build.sh "$T/bin" 0 sh sleep echo dhcp ping > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 printf 'echo ==START==\ndhcp\nping 10.0.2.2\nsleep 2\necho ==END==\n' > "$T/s.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" \
     /t/s.sh="$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }

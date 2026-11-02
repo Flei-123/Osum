@@ -91,7 +91,7 @@ apprights tryfs read box /etc/secret.txt
 echo ==END==
 EOS
 mkimg() {
-    python3 tools/osum/mkfs.py build "$TMPD/d.img" 20000 /lib/ \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 20000 /lib/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /apps/ /data/ /data/other/ /data/dokumente/ \
         "/etc/secret.txt=$TMPD/secret.txt" "/data/dokumente/doc.txt=$TMPD/doc.txt" "/data/other/x.txt=$TMPD/other.txt" \

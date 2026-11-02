@@ -67,7 +67,7 @@ for q in state-nocarrier state-noip state-noroute state-online \
 done
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$GPROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -5 "$TMPD/mkfs.txt"; exit 1; }
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -5 "$TMPD/mkfs.txt"; exit 1; }
 cp -f "$TMPD/d.img" "$TMPD/l.img"
 
 printf 'warte 5\nsendkey a\nwarte 2\nsendkey meta_l-a\nwarte 3\n' > "$TMPD/drive"

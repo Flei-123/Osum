@@ -28,7 +28,7 @@ if [ -z "$KIMG" ]; then
 fi
 OLDIMG="${2:-}"
 printf 'echo ==START==\nsleep 14\ncat /proc/usbsum\ncat /proc/uevent\necho ==ALIVE==\n' > "$T/s.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /proc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /proc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/cat="$T/bin/cat.elf" /t/s.sh="$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 dd if=/dev/zero of="$T/stick.img" bs=1M count=8 status=none

@@ -18,7 +18,7 @@ mkdir -p "$T/bin"
 bash tools/sync/build.sh "$T/bin" 0 sh cat echo > "$T/b.txt" 2>&1 || { tail -15 "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail -15 "$T/k.txt"; exit 1; }
 printf 'echo ==TPM==\ncat /proc/tpm\necho ==END==\n' > "$T/s.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/ /var/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/ /var/ \
     $(for p in sh cat echo; do echo "/bin/$p=$T/bin/$p.elf"; done) "/t/s.sh=$T/s.sh" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"
 run_case() {
     local name=$1 dev=$2

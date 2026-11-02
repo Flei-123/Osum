@@ -43,7 +43,7 @@ image() { # name [blob]
     local n=$1 blob=${2:-}
     local extra=()
     [ -n "$blob" ] && extra=("$FWPATH=$blob")
-    python3 tools/osum/mkfs.py build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 20000 --v3 /bin/ /t/ /etc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
         /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" "/t/s.sh=$T/s.sh" "${extra[@]}" > "$T/$n.mkfs" 2>&1 \
         || { tail -3 "$T/$n.mkfs"; return 1; }
 }
@@ -189,7 +189,7 @@ fi
 
 printf 'echo ==START==\ncat /proc/wlan\ncat /proc/wlanpoll\ncat /proc/wlanirq\ncat /proc/wlan_trace\necho ==END==\n' > "$T/s2.sh"
 echo "-- L: INIT stage over the command queue (NVM, PHY_CFG, calibration, INIT_COMPLETE), RT replay, /proc/wlan"
-python3 tools/osum/mkfs.py build "$T/twoc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+bash tools/mkfsfi/mkfs.sh build "$T/twoc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$T/blobs/two.bin" > "$T/twoc.mkfs" 2>&1 || bad "image twoc"
 runc() {
     cp "$T/${RUNC_BASE:-twoc}.img" "$T/$1.img"
@@ -322,7 +322,7 @@ has "$M2" 'phase=failed' "counter-proof iwlnotrace: still failed"
 hasnot "$M2" 'fail_trace=' "counter-proof iwlnotrace: no trace lines"
 hasnot "$M2" 'fail_exp=' "counter-proof iwlnotrace: no experiments"
 if [ -n "${WLAN_8265_FW:-}" ] && [ -f "$T/real/kern.exp" ]; then
-    python3 tools/osum/mkfs.py build "$T/realc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/realc.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
         /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" "/t/s.sh=$T/s2.sh" "$FWPATH=$WLAN_8265_FW" > "$T/realc.mkfs" 2>&1 || bad "image realc"
     RUNC_BASE=realc runc m4 "iwlfhtest iwlfhdead"
     M4="$T/m4.klar"

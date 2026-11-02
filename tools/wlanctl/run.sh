@@ -45,7 +45,7 @@ echo ==WRONG==
 wlanctl connect OrientFake wrong-password-9
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$T/a.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+bash tools/mkfsfi/mkfs.sh build "$T/a.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/wlanctl="$T/bin/wlanctl.elf" \
     "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" > "$T/mkfs.txt" 2>&1 || { bad "image"; tail -3 "$T/mkfs.txt"; exit 1; }
 run() { # name words

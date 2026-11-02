@@ -83,7 +83,7 @@ PYEOF
 SRC_SHA=$(python3 -I tools/usbexfat/cmp.py sha "$ARB/src.bin")
 
 make_root() { # name script
-    python3 tools/osum/mkfs.py build "$ARB/root-$1.img" 20000 /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ /t/ $MK \
+    bash tools/mkfsfi/mkfs.sh build "$ARB/root-$1.img" 20000 /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ /t/ $MK \
         "/src.bin=$ARB/src.bin" "/t/s.sh=$2" > "$ARB/mkfs-$1.log" 2>&1 \
         || { bad "mkfs.py for $1"; tail -3 "$ARB/mkfs-$1.log"; return 1; }
 }

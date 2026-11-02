@@ -81,7 +81,7 @@ has "$S" "hk: print" "driver latched the Print key"
 has "$S" "snip: gesichert /bilder/Screenshots/Screenshot-1.png w=1280 h=800" "tool wrote the file, full screen"
 T=$(grep -a 'snip: clip typ=' "$S" | head -1 | sed 's/.*typ=//' | tr -dc '0-9')
 if [ -n "$T" ] && [ $(( T & 8 )) -ne 0 ]; then ok "clipboard holds an IMAGE entry (type $T)"; else bad "clipboard type '$T' has no image bit"; fi
-python3 tools/osum/mkfs.py cat "$OUT/a/disk.img" /bilder/Screenshots/Screenshot-1.png > "$OUT/a.png" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$OUT/a/disk.img" /bilder/Screenshots/Screenshot-1.png > "$OUT/a.png" 2>/dev/null
 G=$(cmp_png "$OUT/a.png" "$OUT/a/desktop.ppm" 0 0 1280 800)
 num "PNG valid + pixels equal to QEMU's screendump (promille)" "$G" ge 950
 N=$(grep -ac 'snip: gesichert' "$S")
@@ -101,7 +101,7 @@ bash "$B" "$OUT/c" desk=no warten=14 progs="snip sh echo ls cat theme" \
     extra="wigapp=/bin/snip,-g,100,50,320,200,-v,2,-o,/r.png" > "$OUT/c.log" 2>&1
 S="$OUT/c/serial.txt"
 has "$S" "snip: gesichert /r.png w=320 h=200" "tool wrote exactly the rectangle"
-python3 tools/osum/mkfs.py cat "$OUT/c/disk.img" /r.png > "$OUT/c.png" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$OUT/c/disk.img" /r.png > "$OUT/c.png" 2>/dev/null
 G=$(cmp_png "$OUT/c.png" "$OUT/c/desktop.ppm" 100 50 320 200)
 num "region pixels equal to the host crop (promille; 972 measured, a transient window differs between capture and screendump)" "$G" ge 950
 

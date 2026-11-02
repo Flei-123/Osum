@@ -39,7 +39,7 @@ TSIZE=$(stat -c %s "$TMPD/theme.conf")
 SPEC="/bin/ /etc/ /tmp/ /etc/theme.conf=$TMPD/theme.conf /etc/locale.conf=$TMPD/locale.conf /tmp/theme.src=$TMPD/theme.src"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 
-python3 tools/osum/mkfs.py build "$TMPD/base.img" 8192 --v3 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs.txt" 2>&1 || bad "mkfs"
+bash tools/mkfsfi/mkfs.sh build "$TMPD/base.img" 8192 --v3 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs.txt" 2>&1 || bad "mkfs"
 qboot() {
     local img=$1 ser=$2 k=$3 script=$4
     timeout -s KILL 60 qemu-system-x86_64 $ACCEL -machine q35 -smp 2 -kernel "$k" -m 512 \
@@ -86,7 +86,7 @@ S=$TMPD/b.ser
 grep -qax "zapdone" "$S" && ok "B script ran to the end" || bad "B zapdone missing"
 has "$S" "fsck: zap: restored bytes $(stat -c %s "$TMPD/theme.src")" "B template copied"
 has "$S" "mode=light" "B theme.conf reads the template"
-python3 tools/osum/mkfs.py cat "$TMPD/b.img" /etc/theme.conf > "$TMPD/b.out" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/b.img" /etc/theme.conf > "$TMPD/b.out" 2>/dev/null
 cmp -s "$TMPD/b.out" "$TMPD/theme.src" && ok "B host reads the template from the disk" || bad "B host content differs"
 [ "$(got_set "$TMPD/b.chk")" = "$(expect_set "$INO")" ] && ok "B no other inode changed" || bad "B changed: $(got_set "$TMPD/b.chk")"
 

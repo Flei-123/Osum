@@ -47,7 +47,7 @@ ARGS+=("/bin/files@/bin/explorer")
 ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/taskbar.conf=$TMPD/taskbar.conf")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     || { tail -10 "$TMPD/mkfs.txt"; exit 1; }
 echo "   $(stat -c%s "$TMPD/disk.img") Oktette"
 exit 0

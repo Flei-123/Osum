@@ -65,7 +65,7 @@ fi
 mkimage() { # mkimage <out.img> <spec lines file> [extra spec...]
     local out=$1 specf=$2; shift 2
     mapfile -t SP < "$specf"
-    python3 "$ROOT/tools/osum/mkfs.py" build "$out" ${ALPINE_BLOCKS:-98304} --v3 --inodes=${ALPINE_INODES:-1536} "${SP[@]}" "$@" > "$D/mkfs.log" 2>&1
+    bash "$ROOT/tools/mkfsfi/mkfs.sh" build "$out" ${ALPINE_BLOCKS:-98304} --v3 --inodes=${ALPINE_INODES:-1536} "${SP[@]}" "$@" > "$D/mkfs.log" 2>&1
 }
 boot() { # boot <disk> <serial-out> [kargs]
     cp -f "$1" "$1.live"

@@ -167,7 +167,7 @@ run_case() { # cluster_bytes
         echo 'echo @@end'
         echo 'sleep 2'
     } > "$S"
-    python3 tools/osum/mkfs.py build "$TMPD/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS \
         "/src.bin=$TMPD/src.bin" "/t/s.sh=$S" > "$TMPD/mkfs.log" 2>&1 \
         && ok "[$N] root image with script ($(wc -c < "$S") bytes)" || { bad "[$N] mkfs.py"; tail -3 "$TMPD/mkfs.log"; return; }
 
@@ -314,7 +314,7 @@ mkfs.fat -F 32 "$TMPD/f32.fs" >/dev/null 2>&1
 mkdisk "$TMPD/f32.fs" "$TMPD/f32.disk"
 S2="$TMPD/s.sh"
 printf '%s\n' 'mount /dev/hdb1 /mnt exfat' 'echo "@@rc=$?"' 'ls /mnt' 'echo @@end' > "$S2"
-python3 tools/osum/mkfs.py build "$TMPD/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS "/t/s.sh=$S2" >/dev/null 2>&1
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 20000 /bin/ /proc/ /dev/ /mnt/ /t/ $MKARGS "/t/s.sh=$S2" >/dev/null 2>&1
 for c in sig f32; do
     rc=$(boot "$c" "$TMPD/$c.disk" 300); clean "$TMPD/$c.txt" > "$TMPD/$c.out"
     r=$(grep -a '^@@rc=' "$TMPD/$c.out" | head -1 | sed 's/@@rc=//')

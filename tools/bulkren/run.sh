@@ -84,7 +84,7 @@ massren /t/d5 '[N][E]|IMG|Holiday||u' IMG-1.png IMG-2.png
 ls /t/d5
 echo ==END==
 EOS
-    python3 tools/osum/mkfs.py build "$T/d.img" 20000 /lib/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /lib/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /t/d1/ /t/d2/ /t/d3/ /t/d4/ /t/d5/ \
         $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \

@@ -332,7 +332,7 @@ A_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/apps=$TMPD/etc/apps"
      "/etc/social/local.inbox=$TMPD/etc/local.inbox"
      "/t/s.sh=$TMPD/s1.sh")
-python3 tools/osum/mkfs.py "${A_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
+bash tools/mkfsfi/mkfs.sh "${A_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
 
 : > "$TMPD/a.txt"
 if [ -n "${SOCIAL_ONLY_BAR:-}" ]; then echo "(SOCIAL_ONLY_BAR: main guest skipped)"; else
@@ -546,7 +546,7 @@ host.api(int(sys.argv[1]), t["dora"], "/api/kontakte/anfragen", {"konto": "u_JUS
 PY
 A2_=(); for x in "${A_[@]}"; do A2_+=("${x/$TMPD\/A.img/$TMPD/B.img}"); done
 A3_=(); for x in "${A2_[@]}"; do A3_+=("${x/s1.sh/s2.sh}"); done
-python3 tools/osum/mkfs.py "${A3_[@]}" > "$TMPD/mkfs2.txt" 2>&1 || bad "mkfs (bar): $(tail -2 "$TMPD/mkfs2.txt")"
+bash tools/mkfsfi/mkfs.sh "${A3_[@]}" > "$TMPD/mkfs2.txt" 2>&1 || bad "mkfs (bar): $(tail -2 "$TMPD/mkfs2.txt")"
 mkdir -p docs/shots/social
 rm -f "$TMPD/mon"
 timeout 200 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
@@ -636,7 +636,7 @@ S_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/slow.book=$TMPD/etc/slow.book"
      "/etc/social/slow.slow=$TMPD/etc/slow.slow"
      "/t/s.sh=$TMPD/s3.sh")
-python3 tools/osum/mkfs.py "${S_[@]}" > "$TMPD/mkfs3.txt" 2>&1 || bad "mkfs (slow): $(tail -2 "$TMPD/mkfs3.txt")"
+bash tools/mkfsfi/mkfs.sh "${S_[@]}" > "$TMPD/mkfs3.txt" 2>&1 || bad "mkfs (slow): $(tail -2 "$TMPD/mkfs3.txt")"
 : > "$TMPD/c.txt"
 timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
     -kernel "$TMPD/k0.img" -m 512 \
@@ -695,7 +695,7 @@ S_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/slow.book=$TMPD/etc/slow.book"
      "/etc/social/slow.slowcall=$TMPD/etc/slow.slowcall"
      "/t/s.sh=$TMPD/s4.sh")
-python3 tools/osum/mkfs.py "${S_[@]}" > "$TMPD/mkfs4.txt" 2>&1 || bad "mkfs (slow call): $(tail -2 "$TMPD/mkfs4.txt")"
+bash tools/mkfsfi/mkfs.sh "${S_[@]}" > "$TMPD/mkfs4.txt" 2>&1 || bad "mkfs (slow call): $(tail -2 "$TMPD/mkfs4.txt")"
 : > "$TMPD/d.txt"
 timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
     -kernel "$TMPD/k0.img" -m 512 \

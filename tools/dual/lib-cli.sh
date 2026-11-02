@@ -3,7 +3,7 @@ lauf() {
     rm -f "$ser"
     cp -f "$BAU/root.img" "$OUT/wurzel.img"
     local zblk
-    zblk=$(python3 tools/osum/mkfs.py where "$OUT/wurzel.img" /etc/ziel 2>/dev/null \
+    zblk=$(bash tools/mkfsfi/mkfs.sh where "$OUT/wurzel.img" /etc/ziel 2>/dev/null \
         | sed -n 's/.*first=\([0-9]*\).*/\1/p')
     if [ -n "$zblk" ]; then
         printf 'kons\n\0\0' | dd of="$OUT/wurzel.img" bs=512 seek="$zblk" \

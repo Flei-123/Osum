@@ -358,7 +358,7 @@ for b in "$OUT/apps"/*.osp; do
 done
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py "$OUT/apps" "$OUT/buendel" 2>/dev/null || true)
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FAILED: mkfs"; tail -20 "$OUT/mkfs.log"; exit 1; }
 echo "disk $(stat -c%s "$OUT/disk.img") octets"
 

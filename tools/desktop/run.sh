@@ -193,7 +193,7 @@ mk_image() { # image conf-file
     ARGS+=("/etc/uitrace=$TMPD/uitrace")
     while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1
+    bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 
 echo "== 2. the memory map, the call numbers and the mode words =="
@@ -496,7 +496,7 @@ w=$(grep -a 'taskbar: work ' "$L" | tail -1 | grep -oE 'x=[0-9]+ y=[0-9]+ w=[0-9
 same "and the work area moved with it" "x=104 y=0 w=696 h=600" "$w"
 # THE FILE, READ BACK OUT OF THE DISK IMAGE. Not out of the program's
 # memory -- out of the blocks.
-python3 tools/osum/mkfs.py cat "$TMPD/live-drag.img" /etc/taskbar.conf \
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-drag.img" /etc/taskbar.conf \
     > "$TMPD/drag.conf" 2>&1
 if grep -q '^edge=left$' "$TMPD/drag.conf"; then
     ok "/etc/taskbar.conf on the disk says edge=left"

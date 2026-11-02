@@ -205,7 +205,7 @@ BP=$(grep -oaE 'wig: blits=[0-9]+' "$OUT/seite.txt" | tail -1 | cut -d= -f2)
 PX=$(grep -oaE 'pixels=[0-9]+' "$OUT/seite.txt" | tail -1 | cut -d= -f2)
 num "WIG_BLIT: Aufrufe aus Ring 3" "$BP" ge 1
 num "Bildpunkte, die wirklich ins Fenster geschoben wurden" "$PX" ge 300000
-python3 tools/osum/mkfs.py cat "$OUT/seite.img" /tmp/s.ppm > "$OUT/seite.ppm" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$OUT/seite.img" /tmp/s.ppm > "$OUT/seite.ppm" 2>/dev/null
 if [ -s "$OUT/seite.ppm" ]; then
     ok "Certus wrote its dump to the guest's disk ($(stat -c%s "$OUT/seite.ppm") Oktette)"
     python3 tools/certus/pixel.py "$OUT/seite.ppm" --json "$OUT/seite.json" | sed 's/^/        /'
@@ -234,7 +234,7 @@ fi
 echo
 echo "== 6. a page with JavaScript =="
 lauf_wig js "http://10.0.2.2:$PORT/j.htm" ",--dump=/tmp/j.ppm" 18
-python3 tools/osum/mkfs.py cat "$OUT/js.img" /tmp/j.ppm > "$OUT/js.ppm" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$OUT/js.img" /tmp/j.ppm > "$OUT/js.ppm" 2>/dev/null
 if [ -s "$OUT/js.ppm" ]; then
     python3 tools/certus/pixel.py "$OUT/js.ppm" --json "$OUT/js.json" | sed 's/^/        /'
     JT=$(python3 -c "import json;print(json.load(open('$OUT/js.json'))['tintenpunkte'])")

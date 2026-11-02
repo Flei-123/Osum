@@ -516,11 +516,11 @@ DATA="/d/ /d/three.txt=$TMPD/three.txt /d/dup.txt=$TMPD/dup.txt
       /d/nums.txt=$TMPD/nums.txt /d/empty.txt=$TMPD/empty.txt"
 CASES="/t/"
 for c in t1 t2 t3 t4 t5 t6 t7 t8; do CASES="$CASES /t/$c.sh=$TMPD/$c.sh"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk0.img" $BLOCKS $SPEC $DATA $CASES \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk0.img" $BLOCKS $SPEC $DATA $CASES \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py built an image of $BLOCKS blocks with the whole userland on it" \
     || { bad "mkfs.py failed"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
-n=$(python3 tools/osum/mkfs.py list "$TMPD/disk0.img" | grep -c '^/bin/[a-z]')
+n=$(bash tools/mkfsfi/mkfs.sh list "$TMPD/disk0.img" | grep -c '^/bin/[a-z]')
 num "programs in /bin according to the host" "$n" eq "$(echo $PROGS | wc -w)"
 
 # ------------------------------------------------------- 3. the cases
@@ -560,13 +560,13 @@ execs=$(grep -c '^elf: start ' "$TMPD/t2.txt")
 num "programs loaded off the disk in the pipe case" "$execs" ge 18
 
 echo "== 5. the disk after the run, read by the HOST =="
-python3 tools/osum/mkfs.py list "$TMPD/after-t6.img" > "$TMPD/after6.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/after-t6.img" > "$TMPD/after6.txt" 2>&1
 has "$TMPD/after6.txt" "/w/nums.txt" "the file 'cp' wrote into the new directory is in the image"
 hasnot "$TMPD/after6.txt" "/w/a" "and the three files 'rm' took away are gone"
 hasnot "$TMPD/after6.txt" "/w/d" "including the one 'mv' had renamed"
 has "$TMPD/after6.txt" "/keep.txt" "a file the shell wrote with '>' is in the image"
 has "$TMPD/after6.txt" "/bin/sh" "and nothing else on the image was harmed"
-python3 tools/osum/mkfs.py list "$TMPD/after-t2.img" > "$TMPD/after2.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/after-t2.img" > "$TMPD/after2.txt" 2>&1
 has "$TMPD/after2.txt" "/out.txt" "the file of the redirection case is on the disk"
 has "$TMPD/after2.txt" "/tmp" "and so is the directory the shell makes for its pipes"
 size=$(awk '$1 == "/out.txt" {print $2}' "$TMPD/after2.txt")
@@ -644,7 +644,7 @@ grep -q '^visible$' "$TMPD/vis.txt" \
 grep -q '^visible$' "$TMPD/inv.txt" \
     && bad "with '> /v.txt' the line still went to the serial port" \
     || ok "COUNTER-CHECK: with '> /v.txt' the port stays quiet -- descriptor 1 really moved"
-python3 tools/osum/mkfs.py list "$TMPD/after-inv.img" > "$TMPD/afterinv.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/after-inv.img" > "$TMPD/afterinv.txt" 2>&1
 has "$TMPD/afterinv.txt" "/v.txt" "and the octets are in the file instead"
 size=$(awk '$1 == "/v.txt" {print $2}' "$TMPD/afterinv.txt")
 num "the file holds the seven octets of 'visible' and a newline" "${size:-0}" eq 8
@@ -653,7 +653,7 @@ echo "== 9. the same userland out of the other compiler =="
 if [ -f "$TMPD/k1.mb" ] && [ -f "$TMPD/sh1.elf" ]; then
     SPEC1="/bin/"
     for p in $PROGS; do SPEC1="$SPEC1 /bin/$p=$TMPD/${p}1.elf"; done
-    python3 tools/osum/mkfs.py build "$TMPD/disk1.img" $BLOCKS $SPEC1 $DATA $CASES \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/disk1.img" $BLOCKS $SPEC1 $DATA $CASES \
         > "$TMPD/mkfs1.txt" 2>&1 \
         && ok "an image whose programs were all built by firnc1" \
         || { bad "mkfs for the firnc1 image failed"; sed 's/^/        /' "$TMPD/mkfs1.txt" | head -3; }

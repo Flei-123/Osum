@@ -57,7 +57,7 @@ echo "       $(stat -c%s "$IMG") Oktette"
 # =====================================================================
 echo "== 2. what is really in the image =="
 # =====================================================================
-python3 tools/osum/mkfs.py list "$IMGDIR/root.img" > "$TMPD/liste.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh list "$IMGDIR/root.img" > "$TMPD/liste.txt" 2>&1 \
     || bad "the root image cannot be read"
 for f in /bin/ota /bin/fetch /bin/host /bin/jarvisd /bin/jsig \
          /bin/jarvisctl /bin/pollbr /bin/dhcp /bin/reboot \

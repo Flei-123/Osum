@@ -133,7 +133,7 @@ image() { # <image> <script> <port>
         "/quelle1/INDEX=$TMPD/pk/quelle1/INDEX" "/quelle1/INDEX.sig=$TMPD/pk/quelle1/INDEX.sig"
         "/t/s.sh=$script")
     A+=("${EXTRA[@]}")
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
 run() { # <image> <name> [seconds]
     local img=$1 nm=$2 secs=${3:-600}

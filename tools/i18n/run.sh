@@ -317,11 +317,11 @@ else
             scene_ink "$W" "$TMPD/en/switch.ppm" "Übernehmen"
             scene_pixels "$W" "$TMPD/en/switch.ppm" "Zeit & Sprache" 14
             hasnot "$W" "t=Uebernehmen" "and the ersatz spelling 'Uebernehmen' is NOT used"
-            python3 tools/osum/mkfs.py cat "$TMPD/en/live-switch.img" \
+            bash tools/mkfsfi/mkfs.sh cat "$TMPD/en/live-switch.img" \
                 /users/root/config/locale > "$TMPD/chosen.txt" 2>/dev/null
             is "/users/root/config/locale holds" \
                 "$(tr -d '\n' < "$TMPD/chosen.txt")" "de"
-            python3 tools/osum/mkfs.py list "$TMPD/en/live-switch.img" \
+            bash tools/mkfsfi/mkfs.sh list "$TMPD/en/live-switch.img" \
                 > "$TMPD/list.txt" 2>/dev/null
             grep -q '^/etc/locale' "$TMPD/list.txt" \
                 && bad "the language is under /etc/ -- it belongs to the user" \

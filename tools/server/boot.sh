@@ -37,7 +37,7 @@ image() {
     local spec=""
     for p in $(ls "$B/bin"); do spec="$spec /bin/$p=$B/bin/$p@755:0:0"; done
     [ "$inittab" = yes ] && spec="$spec /etc/inittab=$B/inittab@644:0:0"
-    python3 tools/osum/mkfs.py build "$out" 20480 --v3 /bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /proc/ /tmp/ /t/ $spec \
+    bash tools/mkfsfi/mkfs.sh build "$out" 20480 --v3 /bin/ /etc/ /run/ /var/ /var/log/@755:0:0 /proc/ /tmp/ /t/ $spec \
         /etc/ziel=$B/ziel@644:0:0 /etc/hostname=$B/hostname@644:0:0 /t/probe.sh=$T/probe.sh@644:0:0 > "$T/mkfs.txt" 2>&1
 }
 

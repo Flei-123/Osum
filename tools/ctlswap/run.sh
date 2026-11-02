@@ -55,7 +55,7 @@ fresh /t/hello.txt
 jarvisctl swap --undo /bin/fresh
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /apps/ /apps/g.osp/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /apps/ /apps/g.osp/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \
     "/bin/tgt=$T/bin/echo.elf" "/apps/g.osp/start=$T/bin/echo.elf" "/tmp/new=$T/bin/cat.elf" "/etc/hello.txt=$T/hello.txt" \
     "/t/hello.txt=$T/hello.txt" "/t/s0.sh=$T/s0.sh" "/t/s1.sh=$T/s1.sh" "/t/s2.sh=$T/s2.sh" "/t/s3.sh=$T/s3.sh" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"

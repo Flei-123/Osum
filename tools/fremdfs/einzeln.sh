@@ -30,7 +30,7 @@ if [ ! -f "$W/k0.mb" ]; then
     done
     MKARGS=""
     for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$W/$p.elf"; done
-    python3 tools/osum/mkfs.py build "$W/root.img" 8192 \
+    bash tools/mkfsfi/mkfs.sh build "$W/root.img" 8192 \
         /bin/ /proc/ /dev/ /mnt/ $MKARGS > "$W/mkfs.log" 2>&1 || {
         tail -5 "$W/mkfs.log"; exit 1; }
 fi

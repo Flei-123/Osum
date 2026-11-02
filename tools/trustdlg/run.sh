@@ -80,7 +80,7 @@ A=(build "$TMPD/disk.img" 32768 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
 A+=(/etc/schemas/)
 for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "disk built" \
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 && ok "disk built" \
     || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; echo "TRUSTDLG: $pass passed, $fail failed"; exit 1; }
 
 echo "== 2. boot =="

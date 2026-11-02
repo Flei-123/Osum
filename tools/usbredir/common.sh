@@ -27,7 +27,7 @@ printf 'echo ==START==\nsleep 3\ncat /proc/usbnet\ndhcp\necho ==END==\n' > "$T/s
 printf 'echo ==START==\nsleep 2\ncat /proc/usbsum\necho ==END==\n' > "$T/s_sum.sh"
 printf 'echo ==START==\nsleep 12\ncat /proc/usbnet\ncat /proc/usbsum\necho ==END==\n' > "$T/s_hubhot.sh"
 printf 'echo ==START==\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\nping 192.168.42.129\nsleep 1\ncat /proc/usbnet\necho ==END==\n' > "$T/s_intr.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
     /t/s.sh="$T/s.sh" /t/s_hot.sh="$T/s_hot.sh" /t/s_re.sh="$T/s_re.sh" /t/s_late.sh="$T/s_late.sh" /t/s_proc.sh="$T/s_proc.sh" /t/s_procd.sh="$T/s_procd.sh" /t/s_intr.sh="$T/s_intr.sh" /t/s_sum.sh="$T/s_sum.sh" /t/s_hubhot.sh="$T/s_hubhot.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }

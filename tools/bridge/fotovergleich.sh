@@ -42,7 +42,7 @@ SPEC="/bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/"
 for p in sh ls cat echo chmod sleep jsig jarvisctl; do SPEC="$SPEC /bin/$p=$W/$p.elf"; done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
 SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf /etc/ssl/roots.pem=$W/leer.pem"
-python3 tools/osum/mkfs.py build "$W/probe.img" 131072 $SPEC --v3 >"$W/mkfs.txt" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh build "$W/probe.img" 131072 $SPEC --v3 >"$W/mkfs.txt" 2>&1 || {
     echo "VERGLEICH: mkfs gescheitert"; tail -4 "$W/mkfs.txt"; exit 1; }
 cp "$W/probe.img" "$W/live.img"
 
@@ -67,7 +67,7 @@ grep -qa "shot: pid=" "$W/seriell.txt" \
     || bad "the kernel did not log a screenshot"
 
 for n in eins zwei; do
-    python3 tools/osum/mkfs.py cat "$W/live.img" "/var/jarvis/$n.ppm" \
+    bash tools/mkfsfi/mkfs.sh cat "$W/live.img" "/var/jarvis/$n.ppm" \
         > "$W/$n.ppm" 2>"$W/cat-$n.txt" || true
     if [ -s "$W/$n.ppm" ]; then
         ok "Image $n is on Osum's own disk ($(stat -c%s "$W/$n.ppm") Oktette)"

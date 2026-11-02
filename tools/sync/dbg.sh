@@ -29,7 +29,7 @@ geraet() {
     [ "$kd" != "-" ] && spec="$spec $(spec_von "$kd" /konto)"
     [ "$sd" != "-" ] && spec="$spec $(spec_von "$sd" /store)"
     [ "$dd" != "-" ] && spec="$spec $(spec_von "$dd" /daten)"
-    python3 tools/osum/mkfs.py build "$img" $BLOCKS \
+    bash tools/mkfsfi/mkfs.sh build "$img" $BLOCKS \
         /bin/ /t/ /proc/ /dev/ /konto/ /store/ /daten/ /tresor/ /system/ \
         $(for p in $PROGS; do echo "/bin/$p=$TMPD/bin/$p.elf"; done) \
         /t/s.sh="$skript" $spec > "$TMPD/mkfs.txt" 2>&1 || cat "$TMPD/mkfs.txt"
@@ -39,12 +39,12 @@ klar() { tr -cd '\11\12\15\40-\176' < "$TMPD/$1.txt"; }
 hol() {
     local img=$1 pre=$2 ziel=$3
     rm -rf "$ziel"; mkdir -p "$ziel"
-    python3 tools/osum/mkfs.py list "$img" 2>/dev/null | awk '{print $1}' \
+    bash tools/mkfsfi/mkfs.sh list "$img" 2>/dev/null | awk '{print $1}' \
     | grep "^$pre/" | while read -r p; do
         local rel=${p#"$pre/"}
         if [ "${p%/}" != "$p" ]; then mkdir -p "$ziel/${rel%/}"
         else mkdir -p "$ziel/$(dirname "$rel")"
-             python3 tools/osum/mkfs.py cat "$img" "$p" > "$ziel/$rel" 2>/dev/null
+             bash tools/mkfsfi/mkfs.sh cat "$img" "$p" > "$ziel/$rel" 2>/dev/null
         fi
     done
 }

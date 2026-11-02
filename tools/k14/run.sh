@@ -212,7 +212,7 @@ fi
 
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
     && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
@@ -311,10 +311,10 @@ echo "== 6. FAT32 against mkfs.vfat, mcopy, mdir and fsck.fat =="
 rc=$(lauf lesen "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" \
     "osum nokbd vfs script=cp /mnt/hello.txt /a.txt;cp /mnt/blob.bin /b.bin;cp /mnt/unter/tief.txt /c.txt;cp /mnt/einsehrlangername.txt /d.txt;ls /mnt")
 num "der Lesefall beendet sich selbst" "$rc" eq 21
-python3 tools/osum/mkfs.py cat "$TMPD/live-lesen.img" /a.txt > "$TMPD/got_a" 2>/dev/null
-python3 tools/osum/mkfs.py cat "$TMPD/live-lesen.img" /b.bin > "$TMPD/got_b" 2>/dev/null
-python3 tools/osum/mkfs.py cat "$TMPD/live-lesen.img" /c.txt > "$TMPD/got_c" 2>/dev/null
-python3 tools/osum/mkfs.py cat "$TMPD/live-lesen.img" /d.txt > "$TMPD/got_d" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-lesen.img" /a.txt > "$TMPD/got_a" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-lesen.img" /b.bin > "$TMPD/got_b" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-lesen.img" /c.txt > "$TMPD/got_c" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-lesen.img" /d.txt > "$TMPD/got_d" 2>/dev/null
 dateien_gleich "hello.txt: was mcopy hineinlegte, kam heraus" "$TMPD/hello.txt" "$TMPD/got_a"
 dateien_gleich "blob.bin: 5000 Oktette Zufall, Oktett fuer Oktett" "$TMPD/blob.bin" "$TMPD/got_b"
 dateien_gleich "unter/tief.txt: zwei Ebenen tief" "$TMPD/hello.txt" "$TMPD/got_c"

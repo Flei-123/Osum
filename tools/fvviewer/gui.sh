@@ -143,7 +143,7 @@ EOF
     if [ "$pkg" = 1 ]; then
         grep -aq 'launcher: start /apps/fvviewer.osp/start' "$O/out/serial.txt" && ok "$name: launcher started /apps/fvviewer.osp/start (from the installed package)" \
             || bad "$name: launcher never started /apps/fvviewer.osp/start"
-        python3 tools/osum/mkfs.py list "$O/out/disk.img" 2>/dev/null | grep -aq 'bin/fvviewer' && bad "$name: image already has /bin/fvviewer (not a package test)" || ok "$name: image has no /bin/fvviewer"
+        bash tools/mkfsfi/mkfs.sh list "$O/out/disk.img" 2>/dev/null | grep -aq 'bin/fvviewer' && bad "$name: image already has /bin/fvviewer (not a package test)" || ok "$name: image has no /bin/fvviewer"
     fi
     # the launcher sometimes drops the Return key on a loaded host: the app never started -> caller retries
     if ! grep -aq 'fvviewer: test mode on' "$O/out/serial.txt" 2>/dev/null; then
@@ -177,7 +177,7 @@ wprobe() {
         || { bad "wprobe: fvviewer build"; head -5 "$O/fvv.err"; return; }
     printf 'nameserver 10.0.2.3\n' > "$O/resolv.conf"
     python3 tools/hwnet/mkroots.py "$O/roots.pem" > "$O/roots.log" 2>&1 || { bad "wprobe: roots.pem"; return; }
-    python3 tools/osum/mkfs.py build "$O/disk.img" 32768 /bin/ \
+    bash tools/mkfsfi/mkfs.sh build "$O/disk.img" 32768 /bin/ \
         /bin/sh="$O/s0/sh.elf" /bin/ls="$O/s0/ls.elf" /bin/cat="$O/s0/cat.elf" /bin/echo="$O/s0/echo.elf" \
         /bin/dhcp="$O/s0/dhcp.elf" /bin/fvviewer="$O/fvv.elf" /etc/ /etc/ssl/ "/etc/ssl/roots.pem=$O/roots.pem@0644" "/etc/resolv.conf=$O/resolv.conf@0644" > "$O/mkfs.txt" 2>&1 \
         || { bad "wprobe: mkfs"; tail -3 "$O/mkfs.txt"; return; }

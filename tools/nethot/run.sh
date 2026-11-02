@@ -22,7 +22,7 @@ fi
 mkscript() { printf 'echo ==START==\ndhcp\nping %s\necho ==PINGDONE==\ncat /proc/net/dev\necho ==ALIVE==\n' "$2" > "$T/$1.sh"; }
 mkscript s_usb 10.0.5.2
 mkscript s_eth 10.0.2.2
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /proc/ /dev/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /bin/cat="$T/bin/cat.elf" \
     /t/s_usb.sh="$T/s_usb.sh" /t/s_eth.sh="$T/s_eth.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }

@@ -304,7 +304,7 @@ lauf() { # abbild anhang ausgabe [zeitlimit]
 }
 
 if [ -x "$TMPD/o/firnc" ]; then
-python3 tools/osum/mkfs.py build "$TMPD/d.img" 8192 /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 8192 /bin/ \
     /bin/sh="$TMPD/o/sh" /bin/echo="$TMPD/o/echo" /bin/fas="$TMPD/o/fas" \
     /bin/firun="$TMPD/o/firun" /bin/k16="$TMPD/o/k16" \
     /bin/firnc="$TMPD/o/firnc" \
@@ -329,8 +329,8 @@ hat "$TMPD/ueb.txt" "osum hat mich uebersetzt" \
 gleich "und es geht mit genau dem Code, den seine Quelle nennt" \
     "$(wert "$TMPD/ueb.txt" 'LAUF=[0-9]+')" "LAUF=42"
 
-python3 tools/osum/mkfs.py cat "$TMPD/nach-ueb.img" /probe.s > "$TMPD/osum.s" 2>/dev/null
-python3 tools/osum/mkfs.py cat "$TMPD/nach-ueb.img" /probe > "$TMPD/osum.bin" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-ueb.img" /probe.s > "$TMPD/osum.s" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-ueb.img" /probe > "$TMPD/osum.bin" 2>/dev/null
 ( cd "$TMPD/q" && "$ROOT/$FC1" probe.fi > "$TMPD/wirt.s" 2>/dev/null )
 "$FAS" "$TMPD/wirt.s" -o "$TMPD/wirt.bin" > "$TMPD/wirt.fas" 2>&1 \
     || { bad "fas did not get through on the host: $(head -1 "$TMPD/wirt.fas")"; }
@@ -409,7 +409,7 @@ printf '#!/bin/echo ausleger\nrest egal\n' > "$TMPD/d/s1.sh"
 printf '#!/r2.sh\n' > "$TMPD/d/r1.sh"
 printf '#!/r1.sh\n' > "$TMPD/d/r2.sh"
 
-python3 tools/osum/mkfs.py build "$TMPD/t.img" 8192 /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/t.img" 8192 /bin/ \
     /bin/sh="$TMPD/o/sh" /bin/cat="$TMPD/o/cat" /bin/echo="$TMPD/o/echo" \
     /bin/hello="$TMPD/o/hello" /bin/k16="$TMPD/o/k16" \
     /p.fi="$TMPD/d/p.fi" /q.txt="$TMPD/d/q.txt" /tarn.fi="$TMPD/d/tarn.fi" \

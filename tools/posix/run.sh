@@ -252,7 +252,7 @@ echo "== 3. the disk image, and a file past the old ceiling =="
 printf 'firn round K4: a file for the reading\n' > "$TMPD/readme.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     /readme.txt="$TMPD/readme.txt" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py built an OFS image of $BLOCKS blocks" \
     || { bad "mkfs.py failed"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
@@ -266,10 +266,10 @@ n = 100000
 with open(sys.argv[1], "wb") as f:
     f.write(bytes((i * 7 + (i >> 8)) & 0xFF for i in range(n)))
 PY
-if python3 tools/osum/mkfs.py build "$TMPD/big.img" $BLOCKS \
+if bash tools/mkfsfi/mkfs.sh build "$TMPD/big.img" $BLOCKS \
         /big.bin="$TMPD/big.bin" > "$TMPD/bigfs.txt" 2>&1; then
     ok "a file of 100000 octets -- past the old ceiling -- fits on an image"
-    python3 tools/osum/mkfs.py cat "$TMPD/big.img" /big.bin > "$TMPD/big.out" 2>/dev/null
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/big.img" /big.bin > "$TMPD/big.out" 2>/dev/null
     if cmp -s "$TMPD/big.bin" "$TMPD/big.out"; then
         ok "and every octet of it comes back unchanged"
     else
@@ -472,7 +472,7 @@ echo "== 7. the same numbers out of the compiler written in Firn =="
 if [ -f "$TMPD/k1.mb" ]; then
     SPEC1="/bin/"
     for p in $PROGS; do SPEC1="$SPEC1 /bin/$p=$TMPD/${p}1.elf"; done
-    if python3 tools/osum/mkfs.py build "$TMPD/disk1.img" $((BLOCKS * 2)) $SPEC1 \
+    if bash tools/mkfsfi/mkfs.sh build "$TMPD/disk1.img" $((BLOCKS * 2)) $SPEC1 \
         /readme.txt="$TMPD/readme.txt" > "$TMPD/mkfs1.txt" 2>&1; then
         ok "the programs of firnc1 fit on an image as well"
         run_disk "$TMPD/k1.mb" "osum $QUIET script=posix;exit" "$TMPD/run1.txt" \

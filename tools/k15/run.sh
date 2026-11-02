@@ -164,7 +164,7 @@ ARGS+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
 
 while read -r zeile; do ARGS+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py builds an image with the fonts, the programs and /etc/theme" \
     || { bad "mkfs.py failed"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -6; }
 
@@ -697,14 +697,14 @@ foto fneu "gfx wm wigfiles wmhold wiglong $GRUND" "$M"
 has "$TMPD/fneu.txt" "explorer: tat 2" "the dialog creates a directory"
 rc2=$(grep -a '^explorer: tat' "$TMPD/fneu.txt" | tail -1 | grep -oE 'rc=[0-9]+' | sed 's/.*=//')
 num "and the kernel accepts it" "$rc2" eq 0
-python3 tools/osum/mkfs.py list "$TMPD/live-fneu.img" > "$TMPD/fneu.ls" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/live-fneu.img" > "$TMPD/fneu.ls" 2>&1
 if grep -qE '/data/neu' "$TMPD/fneu.ls"; then
     ok "and /data/neu is REALLY in the disk image"
 else
     bad "/data/neu is not in the disk image"
     grep -c . "$TMPD/fneu.ls" | sed 's/^/        Zeilen: /'
 fi
-python3 tools/osum/mkfs.py list "$TMPD/live-files.img" > "$TMPD/files.ls" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/live-files.img" > "$TMPD/files.ls" 2>&1
 if grep -qE '/data/neu' "$TMPD/files.ls"; then
     bad "the new-data file is also in the image WITHOUT the operation -- the assertion says nothing"
 else
@@ -781,7 +781,7 @@ ARGS2+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/
 
 while read -r zeile; do ARGS2+=("$zeile"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS2+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh "${ARGS2[@]}" > "$TMPD/mkfs2.txt" 2>&1
 cp -f "$TMPD/disk.img" "$TMPD/disk1.img"
 cp -f "$TMPD/disk2.img" "$TMPD/disk.img"
 foto theme2 "gfx wm wig wmhold wiglong $GRUND"
@@ -850,20 +850,20 @@ else
 ok "the title bar of the file manager is its tab strip (no server title, r454; measured in tools/tabstrip)"
 fi
 
-python3 tools/osum/mkfs.py list "$TMPD/disk.img" > "$TMPD/disk.ls" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/disk.img" > "$TMPD/disk.ls" 2>&1
 grep -q '^/bin/explorer ' "$TMPD/disk.ls" && ok "/bin/explorer is on the disk" \
     || bad "/bin/explorer is missing on the disk"
 grep -q '^/bin/files ' "$TMPD/disk.ls" && ok "and /bin/files beside it" \
     || bad "/bin/files is missing on the disk"
-python3 tools/osum/mkfs.py cat "$TMPD/disk.img" /bin/explorer > "$TMPD/e1.bin" 2>/dev/null
-python3 tools/osum/mkfs.py cat "$TMPD/disk.img" /bin/files > "$TMPD/e2.bin" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/disk.img" /bin/explorer > "$TMPD/e1.bin" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/disk.img" /bin/files > "$TMPD/e2.bin" 2>/dev/null
 cmp -s "$TMPD/e1.bin" "$TMPD/e2.bin" \
     && ok "beide Namen geben dieselben $(stat -c%s "$TMPD/e1.bin") Oktette" \
     || bad "the two names give different octets"
-python3 tools/osum/mkfs.py build "$TMPD/kopie.img" 16384 /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/kopie.img" 16384 /bin/ \
     "/bin/explorer=$TMPD/explorer0.elf" "/bin/files=$TMPD/explorer0.elf" \
     > "$TMPD/kopie.txt" 2>&1
-python3 tools/osum/mkfs.py build "$TMPD/verweis.img" 16384 /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/verweis.img" 16384 /bin/ \
     "/bin/explorer=$TMPD/explorer0.elf" "/bin/files@/bin/explorer" \
     > "$TMPD/verweis.txt" 2>&1
 fk=$(grep -oE 'free=[0-9]+' "$TMPD/kopie.txt" | sed 's/.*=//')
@@ -1060,10 +1060,10 @@ GARGS=(build "$TMPD/gross.img" 4096 /bin/
        "/bin/sh=$TMPD/sh0.elf" "/bin/locate=$TMPD/locate0.elf"
        "/bin/ls=$TMPD/ls0.elf")
 while read -r z; do GARGS+=("$z"); done < "$TMPD/gross/angaben"
-python3 tools/osum/mkfs.py "${GARGS[@]}" > "$TMPD/gmkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${GARGS[@]}" > "$TMPD/gmkfs.txt" 2>&1 \
     && ok "the big image: $(cat "$TMPD/gmkfs.txt")" \
     || { bad "mkfs.py failed"; head -3 "$TMPD/gmkfs.txt"; }
-GN=$(python3 tools/osum/mkfs.py list "$TMPD/gross.img" | tail -n +2 | wc -l)
+GN=$(bash tools/mkfsfi/mkfs.sh list "$TMPD/gross.img" | tail -n +2 | wc -l)
 num "this many names the image carries in total" "$GN" ge 4000
 BOOT_MADE=$(grep -cE '^static mut p_[a-z]+: \[u8; [0-9]+\] = "/var' kernel/diag/hangslot.fi)
 num "names the kernel creates by itself at every boot (hangslot)" "$BOOT_MADE" ge 1
@@ -1199,10 +1199,10 @@ schau_nicht "and the picture then shows no file either" \
 
 echo "== 15d. and the old images are the old ones, octet by octet =="
 head -c 20000 /dev/urandom > "$TMPD/probe.bin"
-python3 tools/osum/mkfs.py build "$TMPD/alt1.img" 4096 /a/ /b/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/alt1.img" 4096 /a/ /b/ \
     "/a/eins=$TMPD/probe.bin" "/b/zwei=$TMPD/probe.bin" "/b/drei@/a/eins" \
     > "$TMPD/alt1.txt" 2>&1
-python3 tools/osum/mkfs.py build "$TMPD/alt2.img" 4096 /a/ /b/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/alt2.img" 4096 /a/ /b/ \
     "/a/eins=$TMPD/probe.bin" "/b/zwei=$TMPD/probe.bin" "/b/drei@/a/eins" \
     > "$TMPD/alt2.txt" 2>&1
 cmp -s "$TMPD/alt1.img" "$TMPD/alt2.img" \

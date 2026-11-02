@@ -74,10 +74,10 @@ num "absichtlich kaputte Fassungen gebaut" "$n" eq 6
 # Die Platten.
 mkdisk() { # name omod-datei
     if [ -n "${2:-}" ]; then
-        python3 tools/osum/mkfs.py build "$TMPD/d-$1.img" 2048 '/lib/' \
+        bash tools/mkfsfi/mkfs.sh build "$TMPD/d-$1.img" 2048 '/lib/' \
             "/lib/ps2maus.omod=$2" >/dev/null 2>&1
     else
-        python3 tools/osum/mkfs.py build "$TMPD/d-$1.img" 2048 '/lib/' >/dev/null 2>&1
+        bash tools/mkfsfi/mkfs.sh build "$TMPD/d-$1.img" 2048 '/lib/' >/dev/null 2>&1
     fi
 }
 mkdisk gut "$TMPD/ps2maus.omod"
@@ -287,7 +287,7 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
         for x in $(cd "$W" && find . -type f | sed 's|^\./||' | sort); do
             SPEC="$SPEC $x=$W/$x"
         done
-        python3 tools/osum/mkfs.py build "$TMPD/d-opk.img" 2048 $SPEC \
+        bash tools/mkfsfi/mkfs.sh build "$TMPD/d-opk.img" 2048 $SPEC \
             > "$TMPD/mkopk.txt" 2>&1 \
             && ok "a disk from the installed tree" \
             || bad "mkfs on the installed tree"
@@ -317,7 +317,7 @@ python3 "$SP" "$TMPD/sp-dreh"   --sig-dreh "$TMPD/m-abi.omod" >/dev/null 2>&1
 python3 "$SP" "$TMPD/sp-zahl"   --anzahl 3 "$TMPD/m-abi.omod" >/dev/null 2>&1
 n=0
 for f in fremd drin dreh zahl; do
-    [ -s "$TMPD/sp-$f" ] && python3 tools/osum/mkfs.py build "$TMPD/d-sp-$f.img" 2048 '/lib/' \
+    [ -s "$TMPD/sp-$f" ] && bash tools/mkfsfi/mkfs.sh build "$TMPD/d-sp-$f.img" 2048 '/lib/' \
         "/lib/ps2maus.omod=$TMPD/ps2maus.omod" "/lib/omod.sperre=$TMPD/sp-$f" \
         >/dev/null 2>&1 && n=$((n+1))
 done

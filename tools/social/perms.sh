@@ -219,7 +219,7 @@ S_+=("/apps/social.prog/ACTIONS=pakete/social/ACTIONS"
      "/etc/social/apps=$TMPD/etc/apps"
      "/etc/social/privacy=$TMPD/etc/privacy"
      "/t/s.sh=$TMPD/s.sh")
-python3 tools/osum/mkfs.py "${S_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
+bash tools/mkfsfi/mkfs.sh "${S_[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs: $(tail -2 "$TMPD/mkfs.txt")"; fin; }
 : > "$TMPD/c.txt"
 timeout 200 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
     -kernel "$TMPD/k0.img" -m 512 \

@@ -142,7 +142,7 @@ done
 # its failure instead of half-succeeding quietly.
 SPEC="/bin/ /etc/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py: an image with /bin/netview and /bin/nvcheck on it" \
     || bad "mkfs.py failed"
@@ -485,7 +485,7 @@ mk_gimage() { # image theme-file
     done
     while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfsg.txt" 2>&1
+    bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfsg.txt" 2>&1
 }
 
 # gshot <name> <theme> <extra-cmdline> [wire]

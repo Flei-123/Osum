@@ -21,7 +21,7 @@ echo "== Dauerlauf: $N Laeufe mit -smp $KERNE, '$EXTRA' =="
 if ! bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/b.log" 2>&1; then
     echo "the kernel cannot be built"; sed 's/^/    /' "$TMPD/b.log" | head; exit 1
 fi
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 || { echo "mkfs fehlgeschlagen"; exit 1; }
 

@@ -69,7 +69,7 @@ printf '# /etc/theme.conf\nscheme=night\nmode=dark\naccent=\nshape=modern\n' > "
 A+=("/etc/theme.conf=$T/theme.conf" /etc/schemas/)
 for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
 for p in $PROGS; do A+=("/bin/$p=$T/bin/$p.elf"); done
-python3 tools/osum/mkfs.py "${A[@]}" >"$T/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$T/mkfs.txt"; exit 1; }
+bash tools/mkfsfi/mkfs.sh "${A[@]}" >"$T/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$T/mkfs.txt"; exit 1; }
 
 run_case() { # run_case <tag> <max_outputs> <words>
     local tag=$1 mo=$2 words=$3

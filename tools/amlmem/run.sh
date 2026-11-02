@@ -37,7 +37,7 @@ echo ==READ==
 dispctl
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$D/p.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
+bash tools/mkfsfi/mkfs.sh build "$D/p.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
     "/bin/sh=$D/bin/sh.elf" "/bin/echo=$D/bin/echo.elf" "/bin/sleep=$D/bin/sleep.elf" "/bin/dispctl=$D/bin/dispctl.elf" \
     "/t/s.sh=$D/s.sh" > "$D/mkfs.txt" 2>&1 \
     && ok "disk image built" || { bad "mkfs failed"; exit 1; }

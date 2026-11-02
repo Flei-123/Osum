@@ -46,7 +46,7 @@ for p in $PROGS; do
     ARGS+=("/bin/$(binname $p)=$OUT/$p.elf")
 done
 while read -r zeile; do ARGS+=("$zeile"); done < "$OUT/gross/angaben"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-gross.log" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs-gross.log" 2>&1 || {
     echo "== mkfs.py (gross) fehlgeschlagen"; tail -5 "$OUT/mkfs-gross.log"
     exit 1; }
 echo "   gross.img $(stat -c%s "$OUT/gross.img") Oktette  ($(tail -1 "$OUT/gross.log"))"
@@ -68,9 +68,9 @@ ARGS=(build "$OUT/inhalt.img" "$INHALT_BLOCKS" /lib/
 for p in $PROGS; do ARGS+=("/bin/$(binname $p)=$OUT/$p.elf"); done
 ARGS+=(/etc/ "/etc/theme=$OUT/baum/theme")
 while read -r zeile; do ARGS+=("$zeile"); done < "$OUT/baum/angaben"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs-inhalt.log" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs-inhalt.log" 2>&1 || {
     echo "== mkfs.py (inhalt) fehlgeschlagen"; tail -5 "$OUT/mkfs-inhalt.log"
     echo "   -> BUDGET kleiner setzen (jetzt $BUDGET)"; exit 1; }
 echo "   inhalt.img $(stat -c%s "$OUT/inhalt.img") Oktette  ($(tail -1 "$OUT/baum.log"))"
-echo "   inhalt.img: $(python3 tools/osum/mkfs.py list "$OUT/inhalt.img" | wc -l) Namen"
+echo "   inhalt.img: $(bash tools/mkfsfi/mkfs.sh list "$OUT/inhalt.img" | wc -l) Namen"
 exit 0

@@ -97,14 +97,14 @@ spec_von() {
 hol() {
     local img=$1 pre=$2 ziel=$3
     rm -rf "$ziel"; mkdir -p "$ziel"
-    python3 tools/osum/mkfs.py list "$img" 2>/dev/null | awk '{print $1}' \
+    bash tools/mkfsfi/mkfs.sh list "$img" 2>/dev/null | awk '{print $1}' \
     | grep "^$pre/" | while read -r p; do
         local rel=${p#"$pre/"}
         if [ "${p%/}" != "$p" ]; then
             mkdir -p "$ziel/${rel%/}"
         else
             mkdir -p "$ziel/$(dirname "$rel")"
-            python3 tools/osum/mkfs.py cat "$img" "$p" > "$ziel/$rel" 2>/dev/null
+            bash tools/mkfsfi/mkfs.sh cat "$img" "$p" > "$ziel/$rel" 2>/dev/null
         fi
     done
 }
@@ -117,7 +117,7 @@ geraet() {
     [ "$sd" != "-" ] && spec="$spec $(spec_von "$sd" /store)"
     [ "$dd" != "-" ] && spec="$spec $(spec_von "$dd" /daten)"
     [ "$td" != "-" ] && spec="$spec $(spec_von "$td" /tresor)"
-    python3 tools/osum/mkfs.py build "$img" $BLOCKS \
+    bash tools/mkfsfi/mkfs.sh build "$img" $BLOCKS \
         /bin/ /t/ /proc/ /dev/ /konto/ /store/ /daten/ /tresor/ /system/ \
         $(for p in $PROGS; do echo "/bin/$p=$TMPD/bin/$p.elf"; done) \
         /t/s.sh="$skript" \
@@ -657,7 +657,7 @@ backup restore /store s1 /leer
 echo ==END==
 EOS
 mkdir -p "$TMPD/leer2"
-python3 tools/osum/mkfs.py build "$TMPD/I.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/I.img" $BLOCKS \
     /bin/ /t/ /proc/ /dev/ /daten/ /store/ /leer/ \
     $(for p in $PROGS; do echo "/bin/$p=$TMPD/bin/$p.elf"; done) \
     /daten/a.txt="$TMPD/daten/a.txt" /t/s.sh="$TMPD/sI.sh" >/dev/null 2>&1

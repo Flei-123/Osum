@@ -7,7 +7,7 @@ if ! bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/progs.log" 2>&1; then
     tail -5 "$D/progs.log"
     exit 0
 fi
-python3 tools/osum/mkfs.py build "$D/proc.img" 20000 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$D/proc.img" 20000 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
     $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) > "$D/mkfs.log" 2>&1

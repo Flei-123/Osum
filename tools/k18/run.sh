@@ -171,7 +171,7 @@ fi
 
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/$p.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" "$BLOCKS" /bin/ $MKARGS \
     > "$TMPD/mkfs.log" 2>&1 && ok "the disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || bad "mkfs.py scheitert"
 

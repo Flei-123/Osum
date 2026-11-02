@@ -56,7 +56,7 @@ screenshot = no
 sysinfo     = yes
 CONF
 cp "$WURZEL" "$W/a2.img"
-python3 tools/osum/mkfs.py put "$W/a2.img" "/etc/jarvis/permissions.conf=$W/rechte.conf" \
+bash tools/mkfsfi/mkfs.sh put "$W/a2.img" "/etc/jarvis/permissions.conf=$W/rechte.conf" \
     > "$W/put.txt" 2>&1 || echo "   (put nicht moeglich: $(tail -1 "$W/put.txt"))"
 timeout 120 qemu-system-x86_64 -kernel "$KERN" -m 1024 \
     -append "osum nokbd nosched noproc nofs gfx nocursor nic dhcp nsvc=0 nwait=0 script=jarvisd -v -t 20000;exit" \

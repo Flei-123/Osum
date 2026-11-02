@@ -220,9 +220,9 @@ bash tools/themestore/build.sh "$TMPD/ap" script='theme apply studio;exit' \
     keep=yes > "$TMPD/ap.log" 2>&1
 A="$TMPD/ap/serial.txt"
 has "$A" "theme: applied studio" "der Aufruf meldet die Vorlage"
-python3 tools/osum/mkfs.py cat "$TMPD/ap/disk.img" /etc/theme.conf \
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/ap/disk.img" /etc/theme.conf \
     > "$TMPD/theme.conf" 2>/dev/null
-python3 tools/osum/mkfs.py cat "$TMPD/ap/disk.img" /etc/taskbar.conf \
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/ap/disk.img" /etc/taskbar.conf \
     > "$TMPD/taskbar.conf" 2>/dev/null
 same "und /etc/theme.conf traegt das Schema der Vorlage" "midnight" \
     "$(grep -a '^scheme=' "$TMPD/theme.conf" | cut -d= -f2)"
@@ -246,7 +246,7 @@ bash tools/themestore/build.sh "$TMPD/save" keep=yes \
 SV="$TMPD/save/serial.txt"
 has "$SV" "theme: saved meins" "die laufende Erscheinung ist als eigene Vorlage gesichert"
 has "$SV" "theme: exported meins" "und in eine Datei ausgegeben"
-python3 tools/osum/mkfs.py cat "$TMPD/save/disk.img" /meins.otheme \
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/save/disk.img" /meins.otheme \
     > "$TMPD/meins.otheme" 2>/dev/null
 num "die ausgegebene Datei hat Inhalt" "$(stat -c%s "$TMPD/meins.otheme" 2>/dev/null || echo 0)" gt 40
 ok "and it is readable text: $(grep -acE '^[a-z]+=' "$TMPD/meins.otheme") Zeilen key=value, \
@@ -302,7 +302,7 @@ has "$NA" "theme: exported meins" "OHNE Konto laesst sich ausgeben"
 has "$NA" "theme: imported zwei" "OHNE Konto laesst sich einlesen"
 nn=$(grep -a 'theme: presets n=' "$NA" | tail -1 | grep -oE '[0-9]+$')
 num "und der Laden hat ohne Konto genauso viele Vorlagen" "${nn:-0}" ge "$NPRESET"
-python3 tools/osum/mkfs.py cat "$TMPD/noacc/disk.img" /x.otheme > "$TMPD/x.otheme" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/noacc/disk.img" /x.otheme > "$TMPD/x.otheme" 2>/dev/null
 XK=0
 while IFS= read -r k; do
     case "$k" in
@@ -1644,7 +1644,7 @@ RNEU=$(grep -a 'settings: glas radius=' "$TMPD/rklick/serial.txt" | tail -1 \
        | grep -oE 'radius=[0-9]+' | cut -d= -f2)
 num "ein Klick auf den Regler aendert die laufende Eckenrundung (von 4)" \
     "${RNEU:-4}" gt 4
-RDAT=$(python3 tools/osum/mkfs.py cat "$TMPD/rklick/disk.img" /etc/theme.conf \
+RDAT=$(bash tools/mkfsfi/mkfs.sh cat "$TMPD/rklick/disk.img" /etc/theme.conf \
        2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)
 same "und dieselbe Zahl steht danach in /etc/theme.conf auf der Platte" \
     "${RNEU:-4}" "${RDAT:-}"
@@ -1652,7 +1652,7 @@ RVOR=$(grep -a 'settings: glas radius=' "$TMPD/rvor/serial.txt" | tail -1 \
        | grep -oE 'radius=[0-9]+' | cut -d= -f2)
 same "GEGENPROBE: ohne Klick bleibt die Eckenrundung, wo sie war" "4" "${RVOR:-}"
 same "und die Datei auch" "4" \
-    "$(python3 tools/osum/mkfs.py cat "$TMPD/rvor/disk.img" /etc/theme.conf \
+    "$(bash tools/mkfsfi/mkfs.sh cat "$TMPD/rvor/disk.img" /etc/theme.conf \
        2>/dev/null | grep -aE '^radius=' | tail -1 | cut -d= -f2)"
 num "Schmuck-Widgets sind von der Trefferpruefung ausgenommen" \
     "$(grep -ac 'fn only_decoration(' <(bash tools/structure/catprog.sh kernel/user/wlib.fi))" eq 1

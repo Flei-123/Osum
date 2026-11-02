@@ -37,7 +37,7 @@ for p in $PROGS; do
 done
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
-mkdisk() { python3 tools/osum/mkfs.py build "$1" 4096 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs $1"; head -3 "$TMPD/mkfs.txt"; }; }
+mkdisk() { bash tools/mkfsfi/mkfs.sh build "$1" 4096 $SPEC /proc/ /dev/ /mnt/ /var/ /var/crash/ > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs $1"; head -3 "$TMPD/mkfs.txt"; }; }
 BASE="osum nokbd vfs"
 
 run() { # <serial> <seconds> <disk> <cmdline> [qemu args...]

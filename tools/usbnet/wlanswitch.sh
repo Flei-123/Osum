@@ -76,7 +76,7 @@ snaps() { local i=0; while [ "$i" -lt "$1" ]; do echo "sleep $SNAP_SEC"; i=$((i+
     echo 'echo ==END=='
 } > "$T/s.sh"
 
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /dev/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /dev/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/dhcp="$T/bin/dhcp.elf" /bin/wget="$T/bin/wget.elf" /bin/wlanctl="$T/bin/wlanctl.elf" /bin/netstat="$T/bin/netstat.elf" /etc/resolv.conf="$T/resolv.old" \
     "/t/s.sh=$T/s.sh" "$FWPATH=$T/blobs/v7.bin" > "$T/mkfs.txt" 2>&1 || { tail -3 "$T/mkfs.txt"; bad "image"; exit 1; }
 
@@ -165,7 +165,7 @@ if [ "${USBWLAN_LATE:-1}" = 1 ]; then
         echo 'echo ==LBHOST=='
         echo 'echo ==END=='
     } > "$T/late.sh"
-    python3 tools/osum/mkfs.py build "$T/dl.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /dev/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/dl.img" 20000 --v3 /bin/ /t/ /etc/ /proc/ /dev/ /lib/ /lib/firmware/ /lib/firmware/intel/ /lib/firmware/intel/iwlwifi/ \
         /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /bin/sleep="$T/bin/sleep.elf" /bin/ping="$T/bin/ping.elf" /bin/host="$T/bin/host.elf" /bin/dhcp="$T/bin/dhcp.elf" /bin/wget="$T/bin/wget.elf" /bin/wlanctl="$T/bin/wlanctl.elf" /bin/netstat="$T/bin/netstat.elf" \
         "/t/s.sh=$T/late.sh" "$FWPATH=$T/blobs/v7.bin" > "$T/mkfs2.txt" 2>&1 || { tail -3 "$T/mkfs2.txt"; bad "late image"; }
     printf 'aufzeile k17: hold\naufzeile ==LATE0==\nmonitor device_add usb-net,id=devu1,bus=x0.0,netdev=n1,mac=%s\naufzeile nethot: usbnet attached\naufzeile ==UNPLUG==\nmonitor device_del devu1\naufzeile k17: free\n' "$MAC" > "$T/p_late"

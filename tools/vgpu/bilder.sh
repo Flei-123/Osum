@@ -7,7 +7,7 @@ K=${VGPU_KERNEL:?VGPU_KERNEL setzen}
 AUS=${1:-/tmp/vgpu-bilder}
 mkdir -p "$AUS"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-python3 tools/osum/mkfs.py build "$T/d.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf >/dev/null 2>&1
 for modus in alt neu; do
     W=""; [ "$modus" = alt ] && W="novgpu"

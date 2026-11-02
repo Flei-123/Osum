@@ -62,7 +62,7 @@ image() { # <image> <script>
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /var/log/)
     for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
     A+=("/t/s.sh=$script")
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
         || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
 run() { # <image> <name> <smp> <seconds> [bus|nobus]

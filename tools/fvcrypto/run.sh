@@ -75,7 +75,7 @@ done
 python3 tools/hwnet/mkroots.py "$TMPD/roots.pem" > "$TMPD/roots.txt" 2>&1 \
     || { bad "mkroots.py"; cat "$TMPD/roots.txt"; }
 printf 'nameserver 10.0.2.3\n' > "$TMPD/resolv.conf"
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 32768 /bin/ /etc/ /etc/ssl/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 32768 /bin/ /etc/ /etc/ssl/ \
     /bin/sh="$TMPD/s0/sh.elf" /bin/ls="$TMPD/s0/ls.elf" /bin/cat="$TMPD/s0/cat.elf" \
     /bin/echo="$TMPD/s0/echo.elf" /bin/dhcp="$TMPD/s0/dhcp.elf" /bin/host="$TMPD/s0/host.elf" \
     /bin/fvt="$TMPD/fvt.elf" /bin/fetch="$TMPD/fetch.elf" \

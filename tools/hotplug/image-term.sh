@@ -34,7 +34,7 @@ echo "  Programme: $(echo $PROGS | wc -w)"
 
 MK=()
 for p in $PROGS; do MK+=("/bin/$p=$ARB/$p.elf"); done
-python3 tools/osum/mkfs.py build "$ARB/disk.img" 8192 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$ARB/disk.img" 8192 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ "${MK[@]}" /proc/ /dev/ /mnt/ /medien/ /etc/ \
     > "$ARB/mkfs.log" 2>&1 \

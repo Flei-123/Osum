@@ -64,7 +64,7 @@ ls /tmp
 echo ==END==
 sleep 3
 EOS
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /tmp/src/ /proc/ /dev/ /etc/ /var/ /t/payload/ /t/payload/bin/ /t/payload/sub/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /tmp/src/ /proc/ /dev/ /etc/ /var/ /t/payload/ /t/payload/bin/ /t/payload/sub/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \
     "/t/p.rezept=$T/h/p.rezept" "/t/bad.rezept=$T/h/bad.rezept" "/t/res.rezept=$T/h/res.rezept" "/t/key=$T/keys/geheim.key" "/t/corrupt.opk=$T/corrupt.opk" "/t/s0.sh=$T/s0.sh" \
     "/t/payload/a.txt=$T/h/payload/a.txt" "/t/payload/start=$T/h/payload/start" "/t/payload/sub/b.txt=$T/h/payload/sub/b.txt" "/t/payload/bin/prog=$T/bin/echo.elf" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"

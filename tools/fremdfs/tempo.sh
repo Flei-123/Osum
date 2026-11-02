@@ -44,7 +44,7 @@ PYEOF
 
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$W/$p.elf"; done
-python3 tools/osum/mkfs.py build "$W/root.img" 20000 \
+bash tools/mkfsfi/mkfs.sh build "$W/root.img" 20000 \
     /bin/ /proc/ /dev/ /mnt/ $MKARGS "/gross.bin=$W/gross.bin" \
     > "$W/mkfs.log" 2>&1 || { tail -5 "$W/mkfs.log"; exit 1; }
 

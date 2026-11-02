@@ -132,7 +132,7 @@ image() { # <image> <script> [novarlog]   (+ specs in EXTRA)
         "/etc/orientbus/policy=$TMPD/etc/orientbus/policy"
         "/t/s.sh=$script")
     A+=("${EXTRA[@]}")
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
         || { echo "mkfs failed"; tail -3 "$TMPD/mkfs.txt"; }
 }
 
@@ -1638,7 +1638,7 @@ cat /var/log/orientbus.log
 act stop
 echo ==FERTIG==
 EOS
-    python3 tools/osum/mkfs.py build "$TMPD/J.img" 16384 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/J.img" 16384 \
         /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ /tmp/ /t/ \
         /apps/ /apps/notes.prog/ $(cat "$W/spec.txt" | tr ' ' '\n' | grep '=') \
         "/etc/jarvis/permissions.conf=$TMPD/jperm.conf" \

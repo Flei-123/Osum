@@ -35,7 +35,7 @@ for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 for f in "$TMPD"/m/*; do SPEC="$SPEC /$(basename "$f")=$f"; done
 SEKT=$(( $(du -cb "$TMPD"/m/* "$TMPD"/*.elf 2>/dev/null | tail -1 | cut -f1) * 3 / 2 / 512 + 4096 ))
 [ "$SEKT" -lt 16384 ] && SEKT=16384
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" "$SEKT" $SPEC > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" "$SEKT" $SPEC > "$TMPD/mkfs.txt" 2>&1 \
     || { echo mkfs; tail -5 "$TMPD/mkfs.txt"; exit 1; }
 echo "  Platte: $SEKT Sektoren, $(stat -c%s "$TMPD/disk.img") Oktette, Medien: $(ls "$TMPD/m" | tr '\n' ' ')"
 

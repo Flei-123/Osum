@@ -73,7 +73,7 @@ else
 fi
 
 if [ -f "$TMPD/wltest" ]; then
-    python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 --inodes=64 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 4096 --inodes=64 \
         /bin/ "/bin/sh=$TMPD/sh.elf" "/bin/wltest=$TMPD/wltest" \
         > "$TMPD/mkfs.txt" 2>&1 \
         && ok "Abbild gebaut" || { bad "mkfs gescheitert"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }

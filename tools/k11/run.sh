@@ -315,11 +315,11 @@ CASES="/t/find.sh=$TMPD/t_find.sh /t/text.sh=$TMPD/t_text.sh
        /t/pack.sh=$TMPD/t_pack.sh /t/patch.sh=$TMPD/t_patch.sh
        /t/mount.sh=$TMPD/t_mount.sh"
 
-python3 tools/osum/mkfs.py build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $DATA $CASES \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $DATA $CASES \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py built an image of $BLOCKS blocks with the toolbox" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
-n=$(python3 tools/osum/mkfs.py list "$TMPD/d0.img" | grep -c '^/bin/[a-z]')
+n=$(bash tools/mkfsfi/mkfs.sh list "$TMPD/d0.img" | grep -c '^/bin/[a-z]')
 num "Programme auf der Platte" "$n" ge 30
 
 # ---------------------------------------------------------- die Laeufe
@@ -446,7 +446,7 @@ for paar in "cut=1" "sed=2" "diff=2" "find=1" "du=1" "tar=2" "gunzip=1" "sedverz
 done
 hat "$E" "cut: cannot open /nirgends" "cut sagt, welche Datei fehlt"
 hat "$E" "gunzip: not a gzip file" "gunzip erkennt, dass das kein gzip ist"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-fehler.img" /w/nonl2.txt > "$TMPD/nonl2.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-fehler.img" /w/nonl2.txt > "$TMPD/nonl2.ist" 2>/dev/null
 dateien_gleich "Text ohne abschliessenden Zeilenumbruch: 12 Oktette, unveraendert durch cat" \
     "$F/nonl.txt" "$TMPD/nonl2.ist"
 hat "$E" "12 /d/nonl.txt" "wc -c zaehlt die 12 Oktette ohne Zeilenumbruch"
@@ -500,7 +500,7 @@ block "$TMPD/pack.txt" > "$TMPD/pack.ist"
 dateien_gleich "tar -tf nennt denselben Baum, gzip/gunzip geben dieselbe Laenge" \
     "$TMPD/pack.soll" "$TMPD/pack.ist"
 
-python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/eigen.tar > "$TMPD/eigen.tar" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-pack.img" /w/eigen.tar > "$TMPD/eigen.tar" 2>/dev/null
 if [ -s "$TMPD/eigen.tar" ]; then
     ok "the archive is on the disk ($(stat -c%s "$TMPD/eigen.tar") Oktette)"
     mkdir -p "$TMPD/aus1"
@@ -524,7 +524,7 @@ else
     bad "no /w/eigen.tar on the disk"
 fi
 
-python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/eigen.gz > "$TMPD/eigen.gz" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-pack.img" /w/eigen.gz > "$TMPD/eigen.gz" 2>/dev/null
 if [ -s "$TMPD/eigen.gz" ]; then
     if gunzip -c "$TMPD/eigen.gz" > "$TMPD/eigen.aus" 2>"$TMPD/gz1.err"; then
         dateien_gleich "GNU gunzip packt aus, was Osums gzip gepackt hat" \
@@ -538,7 +538,7 @@ if [ -s "$TMPD/eigen.gz" ]; then
 else
     bad "no /w/eigen.gz on the disk"
 fi
-python3 tools/osum/mkfs.py cat "$TMPD/nach-pack.img" /w/bin.gz > "$TMPD/bin.gz" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-pack.img" /w/bin.gz > "$TMPD/bin.gz" 2>/dev/null
 if [ -s "$TMPD/bin.gz" ]; then
     gunzip -c "$TMPD/bin.gz" > "$TMPD/bin.aus" 2>/dev/null \
         && dateien_gleich "Binaerdaten: 2048 Oktette durch gzip und zurueck" \
@@ -564,7 +564,7 @@ gunzip -c /d/gnu.gz | wc -c
 gunzip -c /d/gnu.gz | head -n 1
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$TMPD/d1.img" $BLOCKS $DIRS $SPEC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d1.img" $BLOCKS $DIRS $SPEC $DATA \
     "/d/gnu.tar=$TMPD/gnu.tar" "/d/gnu.gz=$TMPD/gnu.gz" \
     "/t/ein.sh=$TMPD/t_ein.sh" > "$TMPD/mkfs1.txt" 2>&1 \
     && ok "a second image with the archives of the HOST on it" \
@@ -592,10 +592,10 @@ block "$TMPD/patch.txt" > "$TMPD/patch.ist"
 { echo "patch=0"; cat "$F/neu.txt"; } > "$TMPD/patch.soll"
 dateien_gleich "Osum: diff erzeugt, patch spielt ein, die Datei ist die neue" \
     "$TMPD/patch.soll" "$TMPD/patch.ist"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-patch.img" /w/ziel.txt > "$TMPD/ziel.txt" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-patch.img" /w/ziel.txt > "$TMPD/ziel.txt" 2>/dev/null
 dateien_gleich "und auf der PLATTE stehen dieselben Oktette" \
     "$F/neu.txt" "$TMPD/ziel.txt"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-patch.img" /w/d.diff > "$TMPD/osum.diff" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-patch.img" /w/d.diff > "$TMPD/osum.diff" 2>/dev/null
 if [ -s "$TMPD/osum.diff" ]; then
     cp "$F/alt.txt" "$TMPD/gnu-ziel.txt"
     sed 's|/w/ziel.txt|gnu-ziel.txt|; s|/d/neu.txt|gnu-ziel.txt|' \
@@ -620,7 +620,7 @@ echo patch=$?
 cat /w/g.txt
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$TMPD/d2.img" $BLOCKS $DIRS $SPEC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d2.img" $BLOCKS $DIRS $SPEC $DATA \
     "/d/gnu.diff=$TMPD/gnu.diff" "/t/gp.sh=$TMPD/t_gp.sh" > /dev/null 2>&1
 lauf "$TMPD/d2.img" gp "osum nokbd nosched noproc nofs noring3 script=sh /t/gp.sh;exit" >/dev/null
 block "$TMPD/gp.txt" > "$TMPD/gp.ist"
@@ -665,7 +665,7 @@ tipp_lauf edA "$TMPD/d0.img" \
 grep -qa 'edit: ready' "$TMPD/edA.txt" \
     && ok "the editor reports on the serial line" \
     || bad "'edit: ready' fehlt im Mitschnitt"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-edA.img" /e/e1.txt > "$TMPD/edA.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-edA.img" /e/e1.txt > "$TMPD/edA.ist" 2>/dev/null
 printf 'hallo Welt!\nwelt\n' > "$TMPD/edA.soll"
 dateien_gleich "DIE GESICHERTE DATEI, Oktett fuer Oktett aus dem Plattenabbild" \
     "$TMPD/edA.soll" "$TMPD/edA.ist"
@@ -718,7 +718,7 @@ tipp_lauf edB "$TMPD/d0.img" \
     ctrl-o ctrl-x
 [ "$RC" -eq 21 ] && ok "editor run B (without screen): exit code 21" \
                  || bad "Editor-Lauf B: Beendigungscode $RC"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-edB.img" /e/e2.txt > "$TMPD/edB.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-edB.img" /e/e2.txt > "$TMPD/edB.ist" 2>/dev/null
 printf 'eins\nAneu\nwe\ndrei\nvier\nfuenf\n' > "$TMPD/edB.soll"
 dateien_gleich "Pfeile, Zeilenanfang, trennen, Entf und Ruecktaste -- Oktett fuer Oktett" \
     "$TMPD/edB.soll" "$TMPD/edB.ist"
@@ -730,7 +730,7 @@ tipp_lauf edC "$TMPD/d0.img" \
     ctrl-k ctrl-k down ctrl-u text:"X" ctrl-z ctrl-o ctrl-x
 [ "$RC" -eq 21 ] && ok "Editor-Lauf C: Beendigungscode 21" \
                  || bad "Editor-Lauf C: Beendigungscode $RC"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-edC.img" /e/e2.txt > "$TMPD/edC.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-edC.img" /e/e2.txt > "$TMPD/edC.ist" 2>/dev/null
 printf 'drei\neins\nzwei\nvier\nfuenf\n' > "$TMPD/edC.soll"
 dateien_gleich "zweimal ausschneiden, einmal einfuegen, ein X wieder zurueck" \
     "$TMPD/edC.soll" "$TMPD/edC.ist"
@@ -741,7 +741,7 @@ tipp_lauf edD "$TMPD/d0.img" \
     ctrl-r shift-x ret text:"-" ret a ctrl-o ctrl-x
 [ "$RC" -eq 21 ] && ok "Editor-Lauf D: Beendigungscode 21" \
                  || bad "Editor-Lauf D: Beendigungscode $RC"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-edD.img" /e/e3.txt > "$TMPD/edD.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-edD.img" /e/e3.txt > "$TMPD/edD.ist" 2>/dev/null
 printf 'a-b-c\n' > "$TMPD/edD.soll"
 dateien_gleich "suchen und ersetzen: aXbXc wird a-b-c" \
     "$TMPD/edD.soll" "$TMPD/edD.ist"
@@ -752,7 +752,7 @@ tipp_lauf edE "$TMPD/d0.img" \
     text:"erste zeile" ret text:"zweite zeile" ctrl-o ctrl-x
 [ "$RC" -eq 21 ] && ok "Editor-Lauf E: Beendigungscode 21" \
                  || bad "Editor-Lauf E: Beendigungscode $RC"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-edE.img" /w/neu.txt > "$TMPD/edE.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-edE.img" /w/neu.txt > "$TMPD/edE.ist" 2>/dev/null
 printf 'erste zeile\nzweite zeile\n' > "$TMPD/edE.soll"
 dateien_gleich "EINE DATEI, DIE VORHER NICHT DA WAR, mit der Tastatur geschrieben" \
     "$TMPD/edE.soll" "$TMPD/edE.ist"
@@ -763,7 +763,7 @@ tipp_lauf edF "$TMPD/d0.img" \
     end text:"ENDE" ctrl-o ctrl-x
 [ "$RC" -eq 21 ] && ok "Editor-Lauf F (lange Zeile): Beendigungscode 21" \
                  || bad "Editor-Lauf F: Beendigungscode $RC"
-python3 tools/osum/mkfs.py cat "$TMPD/nach-edF.img" /d/lang.txt > "$TMPD/edF.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-edF.img" /d/lang.txt > "$TMPD/edF.ist" 2>/dev/null
 python3 - "$TMPD/edF.soll" <<'PY'
 import sys
 open(sys.argv[1], "w").write("x" * 900 + "ENDE\n" + "kurz\n")
@@ -779,7 +779,7 @@ tipp_lauf gegA "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /e/e1.txt" \
     "edit: ready" \
     ctrl-e text:" WEG" ctrl-x n
-python3 tools/osum/mkfs.py cat "$TMPD/nach-gegA.img" /e/e1.txt > "$TMPD/gegA.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-gegA.img" /e/e1.txt > "$TMPD/gegA.ist" 2>/dev/null
 dateien_gleich "GEGENPROBE: ohne Sichern bleibt die Datei, wie sie war" \
     "$F/e1.txt" "$TMPD/gegA.ist"
 
@@ -787,7 +787,7 @@ tipp_lauf gegB "$TMPD/d0.img" \
     "osum nosched noproc nofs noring3 script=edit /w/klein.txt" \
     "edit: ready" \
     text:"abc" shift-a shift-b shift-c ctrl-o ctrl-x
-python3 tools/osum/mkfs.py cat "$TMPD/nach-gegB.img" /w/klein.txt > "$TMPD/gegB.ist" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/nach-gegB.img" /w/klein.txt > "$TMPD/gegB.ist" 2>/dev/null
 printf 'abcABC\n' > "$TMPD/gegB.soll"
 dateien_gleich "GEGENPROBE: mit Umschalt kommen Grossbuchstaben, ohne nicht" \
     "$TMPD/gegB.soll" "$TMPD/gegB.ist"
@@ -850,7 +850,7 @@ env A
 echo code=$?
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$TMPD/d3.img" $BLOCKS $DIRS $SPEC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d3.img" $BLOCKS $DIRS $SPEC $DATA \
     "/t/env.sh=$TMPD/t_env.sh" > /dev/null 2>&1
 lauf "$TMPD/d3.img" env "osum nokbd nosched noproc nofs noring3 script=sh /t/env.sh;exit" >/dev/null
 block "$TMPD/env.txt" > "$TMPD/env.ist"
@@ -870,7 +870,7 @@ sed s/a/b/ /d/drei.txt | wc -l
 df
 echo ==END==
 SCRIPT
-python3 tools/osum/mkfs.py build "$TMPD/d4.img" $BLOCKS $DIRS $SPEC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d4.img" $BLOCKS $DIRS $SPEC $DATA \
     "/t/leck.sh=$TMPD/t_leck.sh" > /dev/null 2>&1
 lauf "$TMPD/d4.img" leck "osum nokbd nosched noproc nofs noring3 script=sh /t/leck.sh;exit" >/dev/null
 RCL=$?

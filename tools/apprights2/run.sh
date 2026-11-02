@@ -142,7 +142,7 @@ apprights get nodecl
 echo ==END==
 EOS
 mkimg() { # fresh disk with all four scripts
-    python3 tools/osum/mkfs.py build "$TMPD/d.img" 20000 /lib/ \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 20000 /lib/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /apps/ \
         /apps/probe.osp/ /apps/narrow.osp/ /apps/nodecl.osp/ /apps/sysapp.osp/ \

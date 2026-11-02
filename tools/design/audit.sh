@@ -264,7 +264,7 @@ for ex in ${AUDIT_MKFS_EXTRA:-}; do
     for a in "${ARGS[@]}"; do case "$a" in "$tgt="*) ;; *) keep+=("$a");; esac; done
     ARGS=("${keep[@]}" "$ex")
 done
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FEHLGESCHLAGEN: mkfs"; tail -25 "$OUT/mkfs.log"; exit 1; }
 echo "platte $(stat -c%s "$OUT/disk.img") Oktette"
 # ======================================================= RUNDE CLIP-2

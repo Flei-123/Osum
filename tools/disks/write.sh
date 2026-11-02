@@ -29,7 +29,7 @@ PROGS="diskctl sh echo ls cat mount"
 bash tools/build-kernel.sh "$D/k0.mb" > "$D/k0.log" 2>&1 || { bad "kernel build"; echo "DISKS-WRITE: $pass passed, $fail failed"; exit 1; }
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 || { bad "programs build"; head -5 "$D/bin.log"; echo "DISKS-WRITE: $pass passed, $fail failed"; exit 1; }
 MK=""; for p in $PROGS; do MK="$MK /bin/$p=$D/bin/$p.elf"; done
-python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; exit 1; }
 cp "$D/root.img" "$D/hda.img"; dd if=/dev/zero of="$D/hdb.img" bs=1M count=0 seek=16 2>/dev/null
 tailsum() { tail -c 17408 "$D/hda.img" | sha256sum | cut -d' ' -f1; }
 H=$(tailsum)

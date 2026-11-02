@@ -52,7 +52,7 @@ while [ $# -gt 0 ]; do
     done
     printf "echo ==END$group==\necho pad\necho pad\necho pad\n" >> "$T/s.sh"
     if [ $# -gt 3 ]; then shift 3; else set --; fi
-    python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
         /bin/sh=$T/bin/sh.elf /bin/bootconftest=$T/bin/bootconftest.elf /bin/shasum=$T/bin/shasum.elf /bin/cat=$T/bin/cat.elf /bin/echo=$T/bin/echo.elf \
         "${FILES[@]}" "/t/s.sh=$T/s.sh" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"
     timeout 300 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k0.img" -m 512 \

@@ -29,7 +29,7 @@ script_hang() { probe P1; echo "sleep 3"; probe P2; echo "cat /proc/watchdog_han
 script_lsproc() { probe P1; echo "sleep 3"; echo "ls -l /proc"; echo "echo ==AFTER=="; echo "sleep 30"; echo "echo ==END=="; }
 mkimg() {
     local name=$1; shift
-    python3 tools/osum/mkfs.py build "$D/$name.img" 20000 /lib/ \
+    bash tools/mkfsfi/mkfs.sh build "$D/$name.img" 20000 /lib/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
         $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \

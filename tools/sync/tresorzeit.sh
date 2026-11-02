@@ -42,7 +42,7 @@ vault open /konto /tresor $PASS 60
 date -u
 echo ==END==
 EOS
-python3 tools/osum/mkfs.py build "$TMPD/d.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" $BLOCKS \
     /bin/ /t/ /proc/ /dev/ /konto/ /store/ /daten/ /tresor/ /system/ \
     $(for p in $PROGS; do echo "/bin/$p=$TMPD/bin/$p.elf"; done) \
     /t/s.sh="$TMPD/s.sh" > "$TMPD/mkfs.txt" 2>&1 || cat "$TMPD/mkfs.txt"

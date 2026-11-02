@@ -94,7 +94,7 @@ done
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
 SPEC="$SPEC /var/ /var/net/ /etc/"
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     > "$TMPD/mkfs.txt" 2>&1 && ok "an image with /bin/netmeter" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -5; }
 

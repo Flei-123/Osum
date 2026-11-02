@@ -31,7 +31,7 @@ else
 fi
 
 LISTE="$BUILD/liste.txt"
-[ -f "$LISTE" ] || python3 tools/osum/mkfs.py list "$BUILD/root.img" > "$LISTE" 2>&1
+[ -f "$LISTE" ] || bash tools/mkfsfi/mkfs.sh list "$BUILD/root.img" > "$LISTE" 2>&1
 
 kopf "1. das Abbild traegt, was die Anmeldung braucht"
 for f in /bin/glogin /bin/lock /bin/login /bin/passwd /bin/su \
@@ -44,7 +44,7 @@ for f in /bin/glogin /bin/lock /bin/login /bin/passwd /bin/su \
     fi
 done
 
-SHAD=$(python3 tools/osum/mkfs.py cat "$BUILD/root.img" /etc/shadow 2>/dev/null)
+SHAD=$(bash tools/mkfsfi/mkfs.sh cat "$BUILD/root.img" /etc/shadow 2>/dev/null)
 if echo "$SHAD" | grep -q '\$osum1\$'; then
     ok "/etc/shadow traegt \$osum1\$-Eintraege (PBKDF2)"
     info "$(echo "$SHAD" | wc -l) Zeilen, Runden $(echo "$SHAD" | sed -n 's/.*\$osum1\$\([0-9]*\)\$.*/\1/p' | head -1)"
@@ -64,7 +64,7 @@ fi
 
 # ========================================= 2. DAS HEIMATVERZEICHNIS
 kopf "2. das Heimatverzeichnis von justin (docs/RUNDE-ANMELDUNG.md 5.4)"
-HEIM=$(python3 tools/osum/mkfs.py cat "$BUILD/root.img" /etc/passwd 2>/dev/null \
+HEIM=$(bash tools/mkfsfi/mkfs.sh cat "$BUILD/root.img" /etc/passwd 2>/dev/null \
        | sed -n 's/^justin:[^:]*:[^:]*:[^:]*:[^:]*:\([^:]*\):.*/\1/p')
 if [ "$HEIM" = "/users/justin" ]; then
     ok "/etc/passwd nennt als Heimat: $HEIM"
@@ -78,19 +78,19 @@ for d in /users/justin/ /users/justin/config/; do
         bad "MISSING in the image: $d"
     fi
 done
-M=$(python3 tools/osum/mkfs.py meta "$BUILD/root.img" /users/justin 2>/dev/null)
+M=$(bash tools/mkfsfi/mkfs.sh meta "$BUILD/root.img" /users/justin 2>/dev/null)
 if [ "$M" = "/users/justin 700 1000 1000" ]; then
     ok "it belongs to justin and only to him: $M"
 else
     bad "Rechte/Eigentum falsch: '$M' (erwartet '/users/justin 700 1000 1000')"
 fi
-M2=$(python3 tools/osum/mkfs.py meta "$BUILD/root.img" /users/justin/config 2>/dev/null)
+M2=$(bash tools/mkfsfi/mkfs.sh meta "$BUILD/root.img" /users/justin/config 2>/dev/null)
 if [ "$M2" = "/users/justin/config 700 1000 1000" ]; then
     ok "auch config/: $M2"
 else
     bad "config/ Rechte falsch: '$M2'"
 fi
-MR=$(python3 tools/osum/mkfs.py meta "$BUILD/root.img" /users/root 2>/dev/null)
+MR=$(bash tools/mkfsfi/mkfs.sh meta "$BUILD/root.img" /users/root 2>/dev/null)
 case "$MR" in
     *" 0 0") ok "GEGENPROBE: /users/root gehoert weiter root ($MR)" ;;
     *)       bad "NEGATIVE: /users/root no longer belongs to root ($MR)" ;;

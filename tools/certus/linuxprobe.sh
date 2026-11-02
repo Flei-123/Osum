@@ -37,7 +37,7 @@ echo "PROBE binary-bytes $(stat -c%s "$D/certus-lin")"
 echo "PROBE binary-load-segments $(readelf -lW "$D/certus-lin" | awk '/LOAD/{printf "%s(%s) ", $3, $6}')"
 printf 'nameserver 10.0.2.3\n' > "$D/resolv.conf"
 spec="$spec /bin/certus-lin=$D/certus-lin /etc/resolv.conf=$D/resolv.conf"
-python3 tools/osum/mkfs.py build "$D/disk.img" 98304 --v3 --inodes=1024 $spec > "$D/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$D/disk.img" 98304 --v3 --inodes=1024 $spec > "$D/mkfs.txt" 2>&1 \
     || { echo "PROBE mkfs FAIL"; tail -3 "$D/mkfs.txt"; exit 0; }
 
 timeout "$TMO" $QEMU "${KVM[@]}" -smp 1 -kernel "$D/k.mb" -m 512 \

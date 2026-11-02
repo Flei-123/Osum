@@ -405,7 +405,7 @@ done
 # ------------------------------------------------------- 10. Gegenproben
 echo
 echo "== 10. the control runs"
-python3 tools/osum/mkfs.py build "$TMPD/leer.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/leer.img" 4096 /lib/ \
     "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
     /bin/ "/bin/themetest=$TMPD/themetest.elf" "/bin/sh=$TMPD/sh.elf" \
     "/bin/echo=$TMPD/echo.elf" "/bin/ls=$TMPD/ls.elf" \
@@ -443,7 +443,7 @@ ARGS=(build "$TMPD/kaputt.img" 4096 /lib/
       "/bin/echo=$TMPD/echo.elf" "/bin/ls=$TMPD/ls.elf"
       /etc/ "/etc/theme.conf=$TMPD/theme-broken.conf@0644"
       /etc/schemas/ "/etc/schemas/broken=$TMPD/kaputt/broken@0644")
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs-kaputt.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs-kaputt.log" 2>&1 \
     || bad "the broken image could not be built"
 cp -f "$TMPD/kaputt.img" "$TMPD/live-kaputt.img"
 timeout 200 $QEMU_X86 -kernel "$TMPD/k.mb" -m 256 \

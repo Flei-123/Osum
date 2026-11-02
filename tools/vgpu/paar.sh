@@ -6,7 +6,7 @@ SEK=${1:-4}
 EXTRA=${2:-}
 K=${VGPU_KERNEL:?VGPU_KERNEL setzen}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-python3 tools/osum/mkfs.py build "$T/d.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf >/dev/null 2>&1
 APP="gfx wm wig desk wmhold wiglong vsync $EXTRA wighalt=$SEK nokbd noproc nofs"
 for modus in alt neu; do

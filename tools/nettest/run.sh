@@ -24,7 +24,7 @@ printf 'echo ==START==\nnettest -n nettest.test\necho ==END==\n' > "$T/s_static.
 printf 'echo ==START==\ndhcp\nnettest -n nettest.test -r /t/ca.pem\necho ==END==\n' > "$T/s_tls.sh"
 printf 'echo ==START==\ndhcp\nnettest -n nettest.test -r /t/other-ca.pem\necho ==END==\n' > "$T/s_tlsrogue.sh"
 python3 -I tools/hwnet/mkcerts.py "$T/certs" nettest.test > "$T/certs.txt" 2>&1 || { tail "$T/certs.txt"; exit 1; }
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
     /bin/dhcp="$T/bin/dhcp.elf" /bin/nettest="$T/bin/nettest.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
     /t/s_dhcp.sh="$T/s_dhcp.sh" /t/s_static.sh="$T/s_static.sh" \

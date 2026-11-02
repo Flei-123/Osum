@@ -101,7 +101,7 @@ hat "$Z" "DIFF-A 0" "packen -> entpacken: /pk/a.txt ist byte-gleich"
 hat "$Z" "DIFF-C 0" "und die Datei im Unterordner auch"
 hat "$Z" "Hallo aus Python" "ein fremdes ZIP (Python, deflate) laesst sich entpacken"
 hat "$Z" "tief drin" "auch der Eintrag im Unterordner"
-python3 tools/osum/mkfs.py cat "$OUT/zip/disk.img" /eigen.zip \
+bash tools/mkfsfi/mkfs.sh cat "$OUT/zip/disk.img" /eigen.zip \
     > "$OUT/eigen.zip" 2>/dev/null
 if python3 - "$OUT/eigen.zip" <<'PY'
 import sys, zipfile
@@ -145,7 +145,7 @@ bash "$B" "$OUT/ex1" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,deb
     progs="explorer trashbin theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex1.log" 2>&1
 hat "$OUT/ex1/serial.txt" "explorer: tat 3 n=1 rc=0" "Entf im Dateimanager: in den Korb"
-if python3 tools/osum/mkfs.py list "$OUT/ex1/disk.img" 2>/dev/null \
+if bash tools/mkfsfi/mkfs.sh list "$OUT/ex1/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb/1.info'; then
     ok "and the trash holds entry 1 with its info file"
 else
@@ -156,7 +156,7 @@ bash "$B" "$OUT/ex2" desk=no kbd=yes warten=3 extra="wigapp=/bin/explorer,/w,deb
     progs="explorer trashbin theme sh echo ls cat" \
     xdir=/w xfile=/w/n1.txt="$OUT/n1.txt" > "$OUT/ex2.log" 2>&1
 hat "$OUT/ex2/serial.txt" "explorer: tat 5 n=1 rc=0" "Umschalt+Entf: endgueltig"
-if python3 tools/osum/mkfs.py list "$OUT/ex2/disk.img" 2>/dev/null \
+if bash tools/mkfsfi/mkfs.sh list "$OUT/ex2/disk.img" 2>/dev/null \
        | grep -qa '^/.papierkorb'; then
     bad "control: Shift+Delete moved it to the trash anyway"
 else
@@ -216,7 +216,7 @@ bash "$B" "$OUT/snip" desk=no warten=11 \
     progs="snip viewer theme sh echo ls cat" > "$OUT/snip.log" 2>&1
 hat "$OUT/snip/serial.txt" "snip: gesichert /schnipsel.png w=1280 h=800" \
     "der Gast hat den ganzen Schirm aufgenommen und geschrieben"
-python3 tools/osum/mkfs.py cat "$OUT/snip/disk.img" /schnipsel.png \
+bash tools/mkfsfi/mkfs.sh cat "$OUT/snip/disk.img" /schnipsel.png \
     > "$OUT/schnipsel.png" 2>/dev/null
 G=$(python3 - "$OUT" <<'PY'
 import sys
@@ -349,7 +349,7 @@ PY
     else
         bad "GEGENPROBE: the tampered package was neither rejected nor reported"
     fi
-    M=$(python3 tools/osum/mkfs.py list "$OUT/store/disk.img" 2>/dev/null \
+    M=$(bash tools/mkfsfi/mkfs.sh list "$OUT/store/disk.img" 2>/dev/null \
         | grep -ac 'osp/start')
     num "Buendel unter /apps" "$M" eq 6
     cp "$OUT/store/disk.img" "$OUT/store.img"

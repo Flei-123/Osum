@@ -51,7 +51,7 @@ fi
 K="$TMPD/s0/k.mb"
 
 if [ "${ABBILD:-1}" = "1" ]; then
-    python3 tools/osum/mkfs.py build "$TMPD/d.img" 24576 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 24576 \
         /bin/ /etc/ /etc/ssl/ /usr/ /usr/share/ /usr/share/locale/ \
         /usr/share/locale/en/ /usr/share/locale/de/ \
         /users/ /users/justin/ /users/justin/config/ \

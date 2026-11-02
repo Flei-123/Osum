@@ -61,7 +61,7 @@ ARGS=(/lib/ "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans
 for a in $APPS; do ARGS+=("/apps/$a.osp/" "/apps/$a.osp/INFO=$TMPD/bd/$a.info"); done
 for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/bin/$p.elf"); done
 ARGS+=("/t/s1.sh=$TMPD/s1.sh")
-python3 tools/osum/mkfs.py build "$TMPD/d.img" 20000 "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; }
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 20000 "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; }
 timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 -kernel "$TMPD/k0.img" -m 512 \
     -append "osum vfs nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/s1.sh;exit" \
     -serial "file:$TMPD/raw" -display none -no-reboot \

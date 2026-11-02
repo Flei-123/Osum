@@ -212,7 +212,7 @@ for p in sh echo uname; do
 done
 [ "$gebaut" = 1 ] && ok "/bin/sh, /bin/echo und /bin/uname gebaut ($(stat -c%s "$TMPD/sh.elf" 2>/dev/null) Oktette fuer die Shell)" \
     || bad "the programs for the terminal window cannot be built"
-python3 tools/osum/mkfs.py build "$DISK" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$DISK" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     /bin/ /bin/sh="$TMPD/sh.elf" /bin/echo="$TMPD/echo.elf" \
     /bin/uname="$TMPD/uname.elf" > "$TMPD/mkfs.txt" 2>&1 \

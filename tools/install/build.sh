@@ -158,7 +158,7 @@ for q in 1 2; do
     done
 done
 for e in ${EXTRA:-}; do SPEC+=("$e"); done
-python3 tools/osum/mkfs.py "${SPEC[@]}" > "$OUT/mkfs.log" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh "${SPEC[@]}" > "$OUT/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$OUT/mkfs.log"; exit 1; }
 CRC=$(python3 -c 'import zlib,sys;print("%08x"%zlib.crc32(open(sys.argv[1],"rb").read()))' "$OUT/quelle.img")
 echo "$CRC" > "$OUT/quelle.crc"

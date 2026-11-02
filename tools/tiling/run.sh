@@ -143,7 +143,7 @@ CONF=assets/tiling.conf
 [ -f "$CONF" ] && ok "$CONF is in the tree ($(grep -c '^bind' $CONF) Zeilen mit bind)" \
     || bad "$CONF fehlt"
 DISK="$TMPD/disk.img"
-python3 tools/osum/mkfs.py build "$DISK" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$DISK" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     /bin/ /bin/sh="$TMPD/sh.elf" /bin/echo="$TMPD/echo.elf" \
     /bin/uname="$TMPD/uname.elf" /bin/tiling="$TMPD/tiling.elf" \
@@ -152,7 +152,7 @@ python3 tools/osum/mkfs.py build "$DISK" 4096 /lib/ \
     && ok "mkfs.py builds an image with the fonts and the key bindings" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
 DISK2="$TMPD/disk-ohne.img"
-python3 tools/osum/mkfs.py build "$DISK2" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$DISK2" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     /bin/ /bin/sh="$TMPD/sh.elf" > "$TMPD/mkfs2.txt" 2>&1 \
     && ok "and a second one WITHOUT the file, for the control" \

@@ -37,7 +37,7 @@ ARGS+=(/etc/ "/etc/theme=$TMPD/baum/theme" "/etc/uitrace=$TMPD/uitrace")
 [ -f etc/wmplug.conf ] && ARGS+=("/etc/wmplug.conf=etc/wmplug.conf")
 [ -f etc/wmregeln.conf ] && ARGS+=("/etc/wmregeln.conf=etc/wmregeln.conf")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     || { head -5 "$TMPD/mkfs.txt"; exit 1; }
 echo "  Abbild steht"
 

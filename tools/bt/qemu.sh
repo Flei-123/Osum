@@ -9,7 +9,7 @@ printf 'echo ==START==\nsleep 2\necho power off > /dev/btctl\necho scan > /dev/b
 printf 'echo ==START==\nsleep 1\necho scan > /dev/btctl\nsleep 5\necho ==END==\n' > "$T/bt_bg.sh"
 printf 'echo ==START==\nsleep 10\ncat /proc/bluetooth\necho scan > /dev/btctl\nsleep 4\ncat /proc/bluetooth\necho ==END==\n' > "$T/bt_hot.sh"
 printf 'echo ==START==\nsleep 1\ncat /proc/bluetooth\ncat /dev/btctl\necho ==END==\n' > "$T/bt_unp.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 8000 /bin/ /t/ /etc/ /dev/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ /dev/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" /bin/cat="$T/bin/cat.elf" /proc/ \
     /t/bt.sh="$T/bt.sh" /t/bt_off.sh="$T/bt_off.sh" /t/bt_bg.sh="$T/bt_bg.sh" /t/bt_hot.sh="$T/bt_hot.sh" /t/bt_unp.sh="$T/bt_unp.sh" > "$T/mkfs2.txt" 2>&1 || { tail "$T/mkfs2.txt"; exit 1; }
 for c in $CASES; do

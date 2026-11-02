@@ -101,7 +101,7 @@ num "selection width (about 200)" "$W" ge 150
 num "selection width max" "$W" le 250
 num "selection height (about 120)" "$H" ge 90
 num "selection height max" "$H" le 150
-python3 tools/osum/mkfs.py cat "$OUT/a/disk.img" /bilder/Screenshots/Screenshot-1.png > "$OUT/a.png" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$OUT/a/disk.img" /bilder/Screenshots/Screenshot-1.png > "$OUT/a.png" 2>/dev/null
 if [ -n "$W" ] && [ -n "$H" ]; then
     G=$(cmp_png "$OUT/a.png" "$OUT/a/desktop.ppm" "$X" "$Y" "$W" "$H")
     num "PNG pixels equal to the host crop (promille)" "$G" ge 900
@@ -161,7 +161,7 @@ bash "$B" "$OUT/c" desk=no warten=14 progs="snipt sh echo ls cat theme" \
     extra="wigapp=/bin/snipt,-g,100,50,320,200,-o,/r.png" > "$OUT/c.log" 2>&1
 S="$OUT/c/serial.txt"
 has "$S" "snipt: saved /r.png x=100 y=50 w=320 h=200" "exactly the rectangle"
-python3 tools/osum/mkfs.py cat "$OUT/c/disk.img" /r.png > "$OUT/c.png" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$OUT/c/disk.img" /r.png > "$OUT/c.png" 2>/dev/null
 G=$(cmp_png "$OUT/c.png" "$OUT/c/desktop.ppm" 100 50 320 200)
 num "region pixels equal to the host crop (promille)" "$G" ge 900
 bash "$B" "$OUT/d" desk=no warten=14 progs="snipt sh echo ls cat theme" \

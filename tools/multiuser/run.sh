@@ -247,33 +247,33 @@ DATA="/t/pw.txt=$TMPD/pw.txt@644:0:0 /t/neu.txt=$TMPD/neu.txt@644:0:0
       /priv/nurroot.txt=$TMPD/nurroot.txt@600:0:0
       /priv/fueralle.txt=$TMPD/fueralle.txt@644:0:0"
 
-python3 tools/osum/mkfs.py build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/d0.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab@644:0:0" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py builds the image of this round" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -6; }
-python3 tools/osum/mkfs.py build "$TMPD/dl.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/dl.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab-login@644:0:0" \
     "/etc/login.conf=$TMPD/login.conf.langsam@644:0:0" >/dev/null 2>&1
-python3 tools/osum/mkfs.py build "$TMPD/df.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/df.img" $BLOCKS $DIRS $SPEC $ETC $DATA \
     "/etc/inittab=$TMPD/inittab-login@644:0:0" \
     "/etc/login.conf=$TMPD/login.conf.schnell@644:0:0" >/dev/null 2>&1
 { [ -f "$TMPD/dl.img" ] && [ -f "$TMPD/df.img" ]; } \
     && ok "and two login images that differ ONLY in /etc/login.conf" \
     || bad "die Anmeldeabbilder fehlen"
 
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /etc/group)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /etc/group)
 is "/etc/group liegt im Abbild und darf jeder lesen" "$m" "/etc/group 644 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /etc/shadow)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /etc/shadow)
 is "/etc/shadow gehoert root und traegt 0o600" "$m" "/etc/shadow 600 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /zu)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /zu)
 is "das verschlossene Verzeichnis traegt 0o700 root:root" "$m" "/zu 700 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /zu/tief)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /zu/tief)
 is "das Verzeichnis DARIN traegt 0o755 -- es ist nicht das, was schuetzt" \
    "$m" "/zu/tief 755 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /zu/tief/inhalt.txt)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /zu/tief/inhalt.txt)
 is "und die Datei ganz unten traegt 0o644 -- sie schuetzt gar nichts" \
    "$m" "/zu/tief/inhalt.txt 644 0 0"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/d0.img" /gemeinsam/plan.txt)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/d0.img" /gemeinsam/plan.txt)
 is "die Projektdatei gehoert root und der Gruppe 2000, 0o640" \
    "$m" "/gemeinsam/plan.txt 640 0 2000"
 
@@ -454,7 +454,7 @@ if [ "${n:-0}" -gt 0 ]; then ok "$n permission questions went through the VFS la
 else bad "the VFS layer never asked"; fi
 
 echo "== 9. chmod and chown take effect -- read back FROM THE IMAGE =="
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/live-kdf.img" /w/kopie.txt)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/live-kdf.img" /w/kopie.txt)
 is "chmod 640 und chown justin:projekt stehen im Inode" \
    "$m" "/w/kopie.txt 640 1000 2000"
 
@@ -528,7 +528,7 @@ run_case pw "$TMPD/d0.img" "osum $BASIS script=sh /t/passwd.sh"
 rc=$RC
 P="$TMPD/pw.txt"
 has "$P" "passwd: set for justin" "passwd meldet Erfolg"
-python3 tools/osum/mkfs.py cat "$TMPD/live-pw.img" /etc/shadow > "$TMPD/shadow.neu" 2>&1
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/live-pw.img" /etc/shadow > "$TMPD/shadow.neu" 2>&1
 python3 - "$TMPD/shadow.neu" <<'PY' > "$TMPD/pwcheck.txt" 2>&1
 import binascii, hashlib, sys
 raw = open(sys.argv[1], "rb").read()
@@ -565,9 +565,9 @@ grep -q '^neu stimmt' "$TMPD/pwcheck.txt" \
 grep -q '^alt stimmt nicht' "$TMPD/pwcheck.txt" \
     && ok "CONTROL: the OLD password gives a different value" \
     || bad "old and new password give the same value"
-m=$(python3 tools/osum/mkfs.py meta "$TMPD/live-pw.img" /etc/shadow)
+m=$(bash tools/mkfsfi/mkfs.sh meta "$TMPD/live-pw.img" /etc/shadow)
 is "und /etc/shadow gehoert weiter root und traegt 0o600" "$m" "/etc/shadow 600 0 0"
-python3 tools/osum/mkfs.py list "$TMPD/live-pw.img" > "$TMPD/liste.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/live-pw.img" > "$TMPD/liste.txt" 2>&1
 if grep -q 'shadow.neu\|shadow.alt' "$TMPD/liste.txt"; then
     bad "an intermediate file is still there: $(grep -o 'shadow\.[a-z]*' "$TMPD/liste.txt" | tr '\n' ' ')"
 else

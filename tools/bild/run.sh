@@ -137,7 +137,7 @@ HOL="$ARB/hol"
 mkdir -p "$HOL"
 geholt=0
 for f in s-gif.png s-lace.png s-bmp.png s-png.jpg s-jpg.jpg s-gif.jpg; do
-    if python3 tools/osum/mkfs.py cat "$ARB/r2/disk.img" "/$f" \
+    if bash tools/mkfsfi/mkfs.sh cat "$ARB/r2/disk.img" "/$f" \
             > "$HOL/$f" 2>/dev/null && [ -s "$HOL/$f" ]; then
         geholt=$((geholt+1))
     fi

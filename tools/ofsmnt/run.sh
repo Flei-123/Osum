@@ -56,8 +56,8 @@ echo END
 SH
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$W/$p.elf"; done
-python3 tools/osum/mkfs.py build "$W/root.img" 8192 /bin/ /proc/ /dev/ /mnt/ /t/ /root.txt="$W/root.txt" /t/s.sh="$W/s.sh" $MKARGS > "$W/mkfs-root.log" 2>&1 || { bad "root image"; tail -3 "$W/mkfs-root.log"; exit 1; }
-python3 tools/osum/mkfs.py build "$W/part.img" 4096 /d/ /seed.txt="$W/seed.txt" /d/nested.txt="$W/nested.txt" > "$W/mkfs-part.log" 2>&1 || { bad "partition image"; tail -3 "$W/mkfs-part.log"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$W/root.img" 8192 /bin/ /proc/ /dev/ /mnt/ /t/ /root.txt="$W/root.txt" /t/s.sh="$W/s.sh" $MKARGS > "$W/mkfs-root.log" 2>&1 || { bad "root image"; tail -3 "$W/mkfs-root.log"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$W/part.img" 4096 /d/ /seed.txt="$W/seed.txt" /d/nested.txt="$W/nested.txt" > "$W/mkfs-part.log" 2>&1 || { bad "partition image"; tail -3 "$W/mkfs-part.log"; exit 1; }
 python3 - "$W/second.img" <<'PY'
 import sys
 with open(sys.argv[1], 'wb') as f:
@@ -100,8 +100,8 @@ n=$(grep -ac "written-on-second" "$S")
 
 echo "== 4. the host looks at both disks =="
 dd if="$W/second-new.img" of="$W/part-after.img" bs=512 skip=2048 count=4096 status=none
-python3 tools/osum/mkfs.py list "$W/part-after.img" > "$W/part-list.txt" 2>&1
-python3 tools/osum/mkfs.py list "$W/live-new.img" > "$W/root-list.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$W/part-after.img" > "$W/part-list.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$W/live-new.img" > "$W/root-list.txt" 2>&1
 has "$W/part-list.txt" "made" "directory created in the guest is on the second disk"
 hasnt "$W/part-list.txt" "new.txt" "removed file is gone on the second disk"
 hasnt "$W/root-list.txt" "made" "root disk has no stray directory"
@@ -118,7 +118,7 @@ if [ -n "$OLDREF" ]; then
     if build_kernel "$OLDWT" "$W/k-old.mb"; then
         run old "$W/k-old.mb"
         dd if="$W/live-old.img" of=/dev/null bs=512 count=1 status=none
-        python3 tools/osum/mkfs.py list "$W/live-old.img" > "$W/root-list-old.txt" 2>&1
+        bash tools/mkfsfi/mkfs.sh list "$W/live-old.img" > "$W/root-list-old.txt" 2>&1
         o=0
         grep -qaF "seed-from-second-disk" "$W/out-old.txt" || o=$((o+1))
         grep -qaF "new.txt" "$W/root-list-old.txt" && o=$((o+1))

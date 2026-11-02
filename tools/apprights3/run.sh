@@ -86,7 +86,7 @@ EOS
 mkimg() { # $1 = with | without the opk plan
     local extra=()
     [ "$1" = with ] && extra=(/system/generations/ /system/generations/1/ "/system/AKTUELL=$TMPD/bd/AKTUELL" "/system/generations/1/PLAN=$TMPD/bd/PLAN")
-    python3 tools/osum/mkfs.py build "$TMPD/d.img" 20000 /lib/ \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/d.img" 20000 /lib/ \
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /apps/ \
         /apps/probe.osp/ /apps/narrow.osp/ /apps/nodecl.osp/ /apps/side.osp/ /apps/sysapp.osp/ \

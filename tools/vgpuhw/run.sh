@@ -32,7 +32,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
-python3 tools/osum/mkfs.py build "$T/d.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf >/dev/null 2>&1
 
 # run_case <tag> <words> <stim: 1 = ask QEMU for 1024x768 after "vgpuhw: ready">

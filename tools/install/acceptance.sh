@@ -61,7 +61,7 @@ fi
     || bad "kein Kern"
 [ -f "$BAU/root.img" ] && ok "Wurzelabbild gebaut ($(stat -c%s "$BAU/root.img") Oktette)" \
     || bad "kein Wurzelabbild"
-python3 tools/osum/mkfs.py list "$BAU/root.img" 2>/dev/null > "$OUT/liste.txt"
+bash tools/mkfsfi/mkfs.sh list "$BAU/root.img" 2>/dev/null > "$OUT/liste.txt"
 grep -q '^/bin/installer ' "$OUT/liste.txt" \
     && ok "/bin/installer is in the image" || bad "/bin/installer is missing from the image"
 grep -q '^/apps/installer.osp/start' "$OUT/liste.txt" \

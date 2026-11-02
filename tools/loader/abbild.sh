@@ -111,7 +111,7 @@ if [ -d "$BOESE" ]; then
 fi
 while read -r z; do ARGS+=("$z"); done < "$P/baum/liste"
 
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$P/mkfs.log" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$P/mkfs.log" 2>&1 || {
     echo "== mkfs.py fehlgeschlagen"; tail -20 "$P/mkfs.log"; exit 1; }
 echo "   abbild    $(stat -c%s "$P/disk.img") Oktette, $(ls "$OUT/bin" | wc -l) Programme"
 exit 0

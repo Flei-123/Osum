@@ -22,7 +22,7 @@ bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 && ok "the kernel
     || { bad "programs do not build"; head -10 "$D/bin.log"; echo "COMPDIFF: $pass passed, $fail failed"; exit 1; }
 MK=""
 for p in $PROGS; do MK="$MK /bin/$p=$D/bin/$p.elf"; done
-python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
 
 mkdir -p "$D/vm"; cp "$D/root.img" "$D/vm/hda.img"
 timeout 600 qemu-system-x86_64 -accel kvm -kernel "$D/k0.mb" -m 512 -smp 1 \

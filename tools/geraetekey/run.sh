@@ -36,7 +36,7 @@ commands        = no
 screenshot = no
 sysinfo     = no
 CONF
-python3 tools/osum/mkfs.py build "$TMPD/platte.img" 16384 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/platte.img" 16384 \
     /bin/ /etc/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ \
     "/bin/sh=$TMPD/w0/sh.elf" \
     "/bin/ls=$TMPD/w0/ls.elf" \

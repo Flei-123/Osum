@@ -52,7 +52,7 @@ bash tools/hwnet/build.sh "$TMPD/s0" 0 > "$TMPD/b0.txt" 2>&1 || { bad "the kerne
 K="$TMPD/s0/k.mb"
 gcc -O2 -o "$TMPD/bridge" tools/net/bridge.c 2>/dev/null || bad "bridge.c"
 head -c 40000 /dev/urandom > "$TMPD/up.bin"
-python3 tools/osum/mkfs.py build "$TMPD/disk.raw" 16384 /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.raw" 16384 /bin/ \
     "/bin/sh=$TMPD/s0/sh.elf" "/bin/smbctl=$TMPD/smbctl.elf" "/up.bin=$TMPD/up.bin" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "image with /bin/sh, /bin/smbctl and a 40000-octet file" || bad "mkfs failed"
 

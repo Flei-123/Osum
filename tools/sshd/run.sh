@@ -170,11 +170,11 @@ ETC="/etc/passwd=$TMPD/passwd@644:0:0 /etc/shadow=$TMPD/shadow@600:0:0
 AK="/home/justin/.ssh/authorized_keys=$TMPD/authorized_keys@600:1000:1000"
 DATA="/d/data.txt=$TMPD/data.txt@644:0:0 /d/blob.bin=$TMPD/blob.bin@644:0:0"
 
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS \
     $DIRS $SPEC $ETC $AK $DATA > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py builds the image WITH ~/.ssh/authorized_keys" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
-python3 tools/osum/mkfs.py build "$TMPD/nokeys.img" $BLOCKS \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/nokeys.img" $BLOCKS \
     $DIRS $SPEC $ETC $DATA >/dev/null 2>&1 \
     && ok "and a second one WITHOUT it (the control for section 4)" \
     || bad "the second image was not created"
@@ -473,7 +473,7 @@ if start_osum "$TMPD/live.img" "$TMPD/run2.txt" "$FWPORT"; then
     is "derselbe Fingerabdruck wie beim ersten Start" "$FP3" "$FP1"
     out=$(as_key 'echo ZWEITERSTART' 2>/dev/null)
     is "und derselbe Schluessel meldet sich weiter an" "$out" "ZWEITERSTART"
-    python3 tools/osum/mkfs.py cat "$TMPD/live.img" \
+    bash tools/mkfsfi/mkfs.sh cat "$TMPD/live.img" \
         /etc/ssh/ssh_host_ed25519.pub > "$TMPD/hostpub.txt" 2>/dev/null
     if [ -s "$TMPD/hostpub.txt" ]; then
         FP4=$(ssh-keygen -lf "$TMPD/hostpub.txt" 2>/dev/null | awk '{print $2}' \

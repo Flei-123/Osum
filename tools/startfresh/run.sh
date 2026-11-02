@@ -53,7 +53,7 @@ run_guest() {
   for p in $PROGS; do
     if [ "$p" = opk ]; then A+=("/bin/opk=$opkelf"); else A+=("/bin/$p=$TMPD/bin/$p.elf"); fi
   done
-  python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; return 1; }
+  bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt"; return 1; }
   rm -f "$ser"
   timeout 240 qemu-system-x86_64 "${ACC[@]}" -kernel "$TMPD/k0.img" -m 256 \
     -append "osum vfs bus script=sh /t/g.sh;exit" \

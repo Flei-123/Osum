@@ -49,7 +49,7 @@ for p in $PROGS; do ARGS+=("/bin/$p=$TMPD/bin/${p}.elf"); done
 ARGS+=("/bin/files@/bin/explorer" /sicherung/ /etc/ "/etc/theme=$TMPD/baum/theme")
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
 while read -r z; do ARGS+=("$z"); done < "$TMPD/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py builds the image with /data (source) and /sicherung (the stick)" \
     || { bad "mkfs.py fehlgeschlagen"; sed 's/^/        /' "$TMPD/mkfs.txt" | head -8; exit 1; }
 
@@ -168,7 +168,7 @@ grep -qaE 'explorer: cd / n=' "$TMPD/wurzel.txt" \
 
 SZ=$(python3 - "$TMPD/live-wurzel.img" <<'PY2'
 import subprocess, sys
-r = subprocess.run(["python3", "tools/osum/mkfs.py", "list", sys.argv[1]],
+r = subprocess.run(["bash", "tools/mkfsfi/mkfs.sh", "list", sys.argv[1]],
                    capture_output=True, text=True)
 namen = set()
 for z in r.stdout.splitlines():
@@ -227,7 +227,7 @@ if [ -z "$DWX" ]; then
     echo "TRESOR-GUI: $pass passed, $fail failed"; exit 1
 fi
 ok "it asks back: the dialog is at $DWX,$DWY, OK button at $DBX,$DBY"
-python3 tools/osum/mkfs.py list "$TMPD/live-sich1.img" > "$TMPD/vor.ls" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/live-sich1.img" > "$TMPD/vor.ls" 2>&1
 grep -qE '/sicherung/PACK' "$TMPD/vor.ls" \
     && bad "it was already backed up BEFORE anyone confirmed" \
     || ok "CONTROL: before confirming NOTHING is in /sicherung"
@@ -259,7 +259,7 @@ if grep -qa 'explorer: backup ' "$TMPD/sich2.txt"; then
     is "und der Lauf ist durchgegangen" "$RCB" "0"
     num "er hat Dateien gesichert" "$DAT" gt 0
     num "und dabei Oktette geschrieben" "$NEU" gt 0
-    python3 tools/osum/mkfs.py list "$TMPD/live-sich2.img" > "$TMPD/s2.ls" 2>&1
+    bash tools/mkfsfi/mkfs.sh list "$TMPD/live-sich2.img" > "$TMPD/s2.ls" 2>&1
     grep -qE '/sicherung/PACK' "$TMPD/s2.ls" \
         && ok "IN THE DISK IMAGE lies /sicherung/PACK -- a store, no ZIP" \
         || bad "there is no /sicherung/PACK in the image"

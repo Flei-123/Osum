@@ -237,11 +237,11 @@ echo "== 3. the disk image, built on the host and read back =="
 printf 'firn round K1: this file lies on a real disk\n' > "$TMPD/readme.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/${p}0.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     /readme.txt="$TMPD/readme.txt" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "mkfs.py built an OFS image of $BLOCKS blocks" \
     || { bad "mkfs.py failed"; sed 's/^/        /' "$TMPD/mkfs.txt"; }
-python3 tools/osum/mkfs.py list "$TMPD/disk.img" > "$TMPD/list.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/disk.img" > "$TMPD/list.txt" 2>&1
 has "$TMPD/list.txt" "/bin/sh" "the host can read its own image back: /bin/sh is in it"
 n=$(grep -c '^/bin/[a-z]' "$TMPD/list.txt")
 num "programs in /bin according to the host" "$n" eq 7
@@ -335,7 +335,7 @@ num "the deepest kernel stack of the run (octets)" "$deep" lt "${cap:-0}"
 num "and it is deeper than the two frames of round 62" "$deep" gt 8192
 # What the USERLAND wrote really reached the drive on the host.
 cp "$TMPD/live.img" "$TMPD/after.img"
-python3 tools/osum/mkfs.py list "$TMPD/after.img" > "$TMPD/after.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh list "$TMPD/after.img" > "$TMPD/after.txt" 2>&1
 hasnot "$TMPD/after.txt" "/readme.txt" "the host sees that 'rm' really took the file off the disk"
 has "$TMPD/after.txt" "/bin/sh" "and nothing else on the image was harmed"
 
@@ -418,7 +418,7 @@ while IFS= read -r line; do
     BSPEC="$BSPEC /b/$d=$TMPD/b_$d"
 done <<< "$DEFECTS"
 ok "break.py produced $(echo "$DEFECTS" | wc -l) files, each with one field changed"
-python3 tools/osum/mkfs.py build "$TMPD/bad.img" $BLOCKS /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/bad.img" $BLOCKS /bin/ \
     /bin/sh="$TMPD/sh0.elf" $BSPEC /readme.txt="$TMPD/readme.txt" \
     > "$TMPD/mkbad.txt" 2>&1 \
     && ok "an image with the twenty-one candidates on it" \
@@ -470,7 +470,7 @@ echo "== 8. THE counter-check: another file at the same path =="
 # /bin/echo under the name /bin/ls, and the same command in the same shell
 # does something else. That is what "the program comes off the disk" MEANS.
 SWAP="/bin/ /bin/sh=$TMPD/sh0.elf /bin/ls=$TMPD/echo0.elf /bin/cat=$TMPD/hello0.elf"
-python3 tools/osum/mkfs.py build "$TMPD/swap.img" $BLOCKS $SWAP >/dev/null 2>&1 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/swap.img" $BLOCKS $SWAP >/dev/null 2>&1 \
     && ok "an image whose /bin/ls holds the octets of /bin/echo" \
     || bad "mkfs for the swapped image failed"
 run_disk "$TMPD/k0.mb" "osum $QUIET script=ls one two;cat x;exit" "$TMPD/swap.txt" "$TMPD/swap.img"
@@ -537,7 +537,7 @@ E="$TMPD/nofs.txt"
                  || bad "unformatted run: exit code $rc"
 has "$E" "osum: mount=0" "an unformatted drive is refused, not interpreted"
 hasnot "$E" "sh: ready" "and no shell is started off it"
-python3 tools/osum/mkfs.py build "$TMPD/nosh.img" $BLOCKS /bin/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/nosh.img" $BLOCKS /bin/ \
     /bin/ls="$TMPD/ls0.elf" >/dev/null 2>&1
 run_disk "$TMPD/k0.mb" "osum $QUIET" "$TMPD/nosh.txt" "$TMPD/nosh.img"
 rc=$?
@@ -551,7 +551,7 @@ echo "== 11. the same system out of the other compiler =="
 if [ -f "$TMPD/k1.mb" ] && [ -f "$TMPD/sh1.elf" ]; then
     SPEC1="/bin/"
     for p in $PROGS; do SPEC1="$SPEC1 /bin/$p=$TMPD/${p}1.elf"; done
-    python3 tools/osum/mkfs.py build "$TMPD/disk1.img" $BLOCKS $SPEC1 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/disk1.img" $BLOCKS $SPEC1 \
         /readme.txt="$TMPD/readme.txt" >/dev/null 2>&1
     run_disk "$TMPD/k1.mb" "osum $QUIET script=$SCRIPT" "$TMPD/full1.txt" "$TMPD/disk1.img"
     rc=$?

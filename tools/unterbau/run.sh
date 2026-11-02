@@ -103,7 +103,7 @@ build_image() { # build_image <srcdir> <outdir>   (user programs of the system +
     spec="$spec /etc/ssl/ /etc/ssl/certs/ /etc/fonts/ /usr/ /usr/lib/ /usr/share/ /usr/share/fonts/ /usr/share/zoneinfo/"
     spec="$spec /etc/resolv.conf=$D/resolv.conf /etc/machine-id=$D/machine-id /etc/fonts/fonts.conf=$D/fonts.conf /etc/localtime=$D/localtime"
     spec="$spec ${EXTRA_SPEC:-}"
-    python3 "$S/tools/osum/mkfs.py" build "$O/disk.img" ${UB_BLOCKS:-98304} --v3 --inodes=1024 ${UB_MKFSX:-} $spec > "$O/mkfs.txt" 2>&1
+    bash "$S/tools/mkfsfi/mkfs.sh" build "$O/disk.img" ${UB_BLOCKS:-98304} --v3 --inodes=1024 ${UB_MKFSX:-} $spec > "$O/mkfs.txt" 2>&1
 }
 boot() { # boot <kernel> <disk> <script> <serial-out>
     cp -f "$2" "$2.live"

@@ -117,7 +117,7 @@ abbild() { # name  [autostart-zeile ...]
         "/etc/wmregeln.conf=etc/wmregeln.conf"
         "/etc/wmplug.autostart=$TMPD/auto-$nm.txt")
     while read -r z; do A+=("$z"); done < "$TMPD/baum/liste"
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs-$nm.txt" 2>&1
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs-$nm.txt" 2>&1
 }
 
 abbild basis \

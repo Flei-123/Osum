@@ -27,7 +27,7 @@ printf "touchdemo\nsleep 2\ntouchdemo\nsleep 2\n" > "$T/s.sh"
 A=(build "$T/disk.img" 4000 /lib/ /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/)
 for p in $PROGS; do A+=("/bin/$p=$T/bin/$p.elf"); done
 A+=("/t/s.sh=$T/s.sh")
-python3 tools/osum/mkfs.py "${A[@]}" > "$T/mkfs.txt" 2>&1 || { bad "mkfs failed"; tail -3 "$T/mkfs.txt"; }
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$T/mkfs.txt" 2>&1 || { bad "mkfs failed"; tail -3 "$T/mkfs.txt"; }
 timeout 120 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$IMG" -m 512 \
     -append "osum vfs nokbd bus touchsim script=sh /t/s.sh;exit" \
     -serial "file:$T/out.txt" -display none -no-reboot \

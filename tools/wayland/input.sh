@@ -114,7 +114,7 @@ for p in $PROGS; do
     if [ "$p" = wayd ] && [ -n "${BASE_WAYD:-}" ]; then A+=("/bin/wayd=$BASE_WAYD"); else A+=("/bin/$p=$TMPD/bin/$p.elf"); fi
 done
 
-python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "the disk: $(stat -c%s "$TMPD/disk.img") octets" \
     || { bad "mkfs"; tail -3 "$TMPD/mkfs.txt" | sed 's/^/        /'; echo "WL-INPUT: $pass passed, $fail failed"; exit 1; }
 

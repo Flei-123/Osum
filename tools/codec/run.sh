@@ -206,7 +206,7 @@ echo "== 5. die Wurzelplatte =="
 MKARGS=""
 for p in $PROGS; do MKARGS="$MKARGS /bin/$p=$TMPD/${p}0.elf"; done
 for f in "$MED"/*.264; do MKARGS="$MKARGS /v/$(basename "$f")=$f"; done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" 16384 --inodes=128 \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 16384 --inodes=128 \
     /bin/ /v/ $MKARGS > "$TMPD/mkfs.log" 2>&1 \
     && ok "the root disk is ready: $(tail -1 "$TMPD/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$TMPD/mkfs.log" | head -5; }
@@ -300,7 +300,7 @@ for teil in 1 2 3 5 8 13 21 34 55 89; do
     n=$((G * teil / 100))
     head -c "$n" "$SRC" > "$TMPD/kurz.264"
     cp --sparse=always "$TMPD/root.img" "$TMPD/live-kurz.img"
-    python3 tools/osum/mkfs.py build "$TMPD/kurz.img" 16384 --inodes=128 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/kurz.img" 16384 --inodes=128 \
         /bin/ /v/ "/bin/sh=$TMPD/sh0.elf" "/bin/h264t=$TMPD/h264t0.elf" \
         "/v/kurz.264=$TMPD/kurz.264" > /dev/null 2>&1
     cpuarg=""
@@ -336,7 +336,7 @@ for _ in range(6):
     d[p] ^= 1 << r.randrange(8)
 open(ziel, 'wb').write(bytes(d))
 PYEOF
-    python3 tools/osum/mkfs.py build "$TMPD/kipp.img" 16384 --inodes=128 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/kipp.img" 16384 --inodes=128 \
         /bin/ /v/ "/bin/sh=$TMPD/sh0.elf" "/bin/h264t=$TMPD/h264t0.elf" \
         "/v/kipp.264=$TMPD/kipp.264" > /dev/null 2>&1
     cpuarg=""
@@ -362,7 +362,7 @@ head -c 4096 /dev/urandom > "$TMPD/muell.264"
 printf '\x00\x00\x01' > "$TMPD/stub.264"
 unsinn_ok=0
 for f in leer muell stub; do
-    python3 tools/osum/mkfs.py build "$TMPD/u.img" 16384 --inodes=128 \
+    bash tools/mkfsfi/mkfs.sh build "$TMPD/u.img" 16384 --inodes=128 \
         /bin/ /v/ "/bin/sh=$TMPD/sh0.elf" "/bin/h264t=$TMPD/h264t0.elf" \
         "/v/u.264=$TMPD/$f.264" > /dev/null 2>&1
     cpuarg=""

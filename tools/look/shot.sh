@@ -310,7 +310,7 @@ if [ "$user" != "-" ]; then
 fi
 while read -r z; do ARGS+=("$z"); done < <(python3 tools/k15/bundle.py assets/apps "$OUT/buendel" nur="$progs")
 while read -r z; do ARGS+=("$z"); done < "$OUT/baum/liste"
-python3 tools/osum/mkfs.py "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
+bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
     || { echo "FAILED: mkfs"; tail -20 "$OUT/mkfs.log"; exit 1; }
 echo "disk $(stat -c%s "$OUT/disk.img") octets"
 

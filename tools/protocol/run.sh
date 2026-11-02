@@ -167,7 +167,7 @@ echo "== 5. the disk, the programs on it and the restart =="
 printf 'protokoll\n' > "$TMPD/readme.txt"
 SPEC="/bin/"
 for p in $PROGS; do SPEC="$SPEC /bin/$p=$TMPD/$p.elf"; done
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" $BLOCKS $SPEC \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" $BLOCKS $SPEC \
     /proc/ /dev/ /mnt/ /var/ /var/crash/ \
     /readme.txt="$TMPD/readme.txt" > "$TMPD/mkfs.txt" 2>&1 \
     && ok "OFS image with $BLOCKS blocks built" \

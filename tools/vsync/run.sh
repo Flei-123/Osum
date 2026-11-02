@@ -31,7 +31,7 @@ else
 fi
 K="$TMPD/k.mb"
 
-python3 tools/osum/mkfs.py build "$TMPD/disk.img" 4096 /lib/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/disk.img" 4096 /lib/ \
     /lib/mono.ttf=assets/osum-mono.ttf /lib/sans.ttf=assets/osum-sans.ttf \
     > "$TMPD/mkfs.txt" 2>&1 \
     && ok "Abbild mit beiden Schriften gebaut" \

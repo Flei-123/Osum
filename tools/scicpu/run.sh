@@ -32,7 +32,7 @@ echo ==END==
 SCRIPT
 run_case() {
     local n=$1 words=$2
-    python3 tools/osum/mkfs.py build "$T/$n.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
+    bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
         "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
         "/t/s.sh=$T/s.sh" > "$T/$n.mkfs" 2>&1 || { bad "$n mkfs failed"; return; }
     timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 -smp 2 \

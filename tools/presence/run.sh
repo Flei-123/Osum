@@ -64,7 +64,7 @@ geraet() { # <abbild> <skript> [etcverz]
             [ -f "$f" ] && A+=("/etc/$(basename "$f")=$f")
         done
     fi
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 
 lauf() { # <abbild> <ausgabename> [ms]

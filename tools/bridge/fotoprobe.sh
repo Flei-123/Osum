@@ -34,7 +34,7 @@ for p in sh ls cat echo chmod jsig jarvisctl; do
 done
 SPEC="$SPEC /bin/jarvisd=$W/jarvisd.elf"
 SPEC="$SPEC /etc/jarvis/permissions.conf=$W/rechte.conf /etc/ssl/roots.pem=$W/leer.pem"
-python3 tools/osum/mkfs.py build "$W/probe.img" 16384 $SPEC > "$W/mkfs.txt" 2>&1 || {
+bash tools/mkfsfi/mkfs.sh build "$W/probe.img" 16384 $SPEC > "$W/mkfs.txt" 2>&1 || {
     echo "mkfs gescheitert"; tail -5 "$W/mkfs.txt"; exit 1; }
 
 SKRIPT=${FOTOPROBE_SKRIPT:-"jarvisd -s;jarvisctl screenshot 600;jarvisd -f /var/jarvis/schuss.png;ls /var/jarvis;exit"}

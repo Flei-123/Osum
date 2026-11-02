@@ -154,7 +154,7 @@ PY
 
 abbild() { # <target> [extra mkfs args...]
     local t=$1; shift
-    python3 tools/osum/mkfs.py build "$t" 24576 \
+    bash tools/mkfsfi/mkfs.sh build "$t" 24576 \
         /bin/ /etc/ /etc/ssl/ /usr/ /usr/share/ /usr/share/locale/ \
         /usr/share/locale/en/ /usr/share/locale/de/ \
         /users/ /users/justin/ /users/justin/config/ \
@@ -339,11 +339,11 @@ check_refused() { # <scenario> <state> <hint key> <label>
     is "$4: hint text ($3)" "$(kv "$TMPD/o_$1.txt" hinweis)" "$want"
     lauf "$TMPD/d_$1.img" "konto liste" "$TMPD/o_$1_l.txt"
     is "$4: accounts on the device" "$(kv "$TMPD/o_$1_l.txt" konten)" "0"
-    python3 tools/osum/mkfs.py where "$TMPD/d_$1.img" "/state/session/konto" > "$TMPD/wo_$1.txt" 2>&1
+    bash tools/mkfsfi/mkfs.sh where "$TMPD/d_$1.img" "/state/session/konto" > "$TMPD/wo_$1.txt" 2>&1
     if grep -qa "no such path" "$TMPD/wo_$1.txt"; then ok "$4: no session directory on the disk"
     else
         # the directory may exist but must hold no file
-        N=$(python3 tools/osum/mkfs.py ls "$TMPD/d_$1.img" "/state/session/konto" 2>/dev/null | grep -vc '^$' || true)
+        N=$(bash tools/mkfsfi/mkfs.sh ls "$TMPD/d_$1.img" "/state/session/konto" 2>/dev/null | grep -vc '^$' || true)
         is "$4: session files on the disk" "${N:-0}" "0"
     fi
 }
@@ -384,10 +384,10 @@ for f in access.txt refresh.txt; do
 done
 num "tokens issued by the mock (searched)" "$NTOK" ge 10
 is "hits of any issued token in the disk image" "$HITS" "0"
-python3 tools/osum/mkfs.py where "$TMPD/d_login.img" "/state/session/konto/$KEN" > "$TMPD/wo.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/d_login.img" "/state/session/konto/$KEN" > "$TMPD/wo.txt" 2>&1
 grep -qa "^where " "$TMPD/wo.txt" && ok "the session file exists: $(cat "$TMPD/wo.txt")" \
     || bad "no session file: $(cat "$TMPD/wo.txt")"
-python3 tools/osum/mkfs.py cat "$TMPD/d_login.img" "/state/session/konto/$KEN" > "$TMPD/seal.bin" 2>/dev/null
+bash tools/mkfsfi/mkfs.sh cat "$TMPD/d_login.img" "/state/session/konto/$KEN" > "$TMPD/seal.bin" 2>/dev/null
 head -c4 "$TMPD/seal.bin" | grep -qa "OKS1" && ok "and it is SEALED (head OKS1)" || bad "the session file carries no seal"
 
 # counter-probe: clear text variant
@@ -457,7 +457,7 @@ is "sign-out: done" "$(kv "$TMPD/o_o1.txt" abgemeldet)" "1"
 grep -q '"/oidc/revoke"' "$TMPD/idp/protokoll.jsonl" \
     && ok "sign-out: POST /oidc/revoke reached the service" || bad "sign-out: no revoke call"
 is "sign-out: the refresh token is dead afterwards" "$(replay "$O1")" "400"
-python3 tools/osum/mkfs.py where "$TMPD/d_out.img" "/state/session/konto/$OKEN" > "$TMPD/wo_o.txt" 2>&1
+bash tools/mkfsfi/mkfs.sh where "$TMPD/d_out.img" "/state/session/konto/$OKEN" > "$TMPD/wo_o.txt" 2>&1
 grep -qa "no such path" "$TMPD/wo_o.txt" && ok "sign-out: the session file is gone" \
     || bad "sign-out: the session file is still there"
 

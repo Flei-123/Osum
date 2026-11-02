@@ -22,7 +22,7 @@ bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 && ok "the kernel
     || { bad "programs do not build"; head -10 "$D/bin.log"; echo "COMP: $pass passed, $fail failed"; exit 1; }
 MK=""
 for p in $PROGS; do MK="$MK /bin/$p=$D/bin/$p.elf"; done
-python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$D/root.img" 4096 /bin/ /dev/ /mnt/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; cat "$D/mkfs.log"; exit 1; }
 
 for smp in 1 4; do
     echo "== ring-3 compositing primitives, $smp core(s) =="

@@ -16,10 +16,10 @@ lauf() {
     local W="$AUS/$modus"
     mkdir -p "$W"
     cp "$WURZEL" "$W/disk.img"
-    python3 tools/osum/mkfs.py cat "$W/disk.img" /etc/theme.conf \
+    bash tools/mkfsfi/mkfs.sh cat "$W/disk.img" /etc/theme.conf \
         > "$W/theme.conf" 2>/dev/null || true
     sed -i "s/^mode=.*/mode=$modus/" "$W/theme.conf"
-    python3 tools/osum/mkfs.py put "$W/disk.img" /etc/theme.conf \
+    bash tools/mkfsfi/mkfs.sh put "$W/disk.img" /etc/theme.conf \
         "$W/theme.conf" >/dev/null 2>&1 || echo "   (theme.conf nicht ersetzt)"
 
     cat > "$W/drehbuch.txt" <<'DREH'

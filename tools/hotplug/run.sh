@@ -73,7 +73,7 @@ for p in $PROGS; do
 done
 num "Programme gebaut" "$gebaut" ge 15
 
-python3 tools/osum/mkfs.py build "$ARB/root.img" "$BLOCKS" \
+bash tools/mkfsfi/mkfs.sh build "$ARB/root.img" "$BLOCKS" \
     /bin/ /proc/ /dev/ /mnt/ /usb/ /medien/ $MK > "$ARB/mkfs.log" 2>&1 \
     && ok "the root disk is ready: $(tail -1 "$ARB/mkfs.log")" \
     || { bad "mkfs.py scheitert"; sed 's/^/        /' "$ARB/mkfs.log" | head -5; }

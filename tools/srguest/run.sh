@@ -90,7 +90,7 @@ mkdisk() { # name
     A+=("/etc/theme.conf=$TMPD/theme.conf" /etc/schemas/)
     for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
     for p in $PROGS; do A+=("/bin/$p=$BINDIR/$p.elf"); done
-    python3 tools/osum/mkfs.py "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
+    bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1
 }
 
 run_guest() { # name audio(1/0)

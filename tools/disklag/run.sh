@@ -37,7 +37,7 @@ for i in $(seq 1 300); do
     head -c 700 /dev/urandom | base64 -w0 > "$TMPD/etc/f$i.conf"
     SPECS+=("/etc/f$i.conf=$TMPD/etc/f$i.conf")
 done
-python3 tools/osum/mkfs.py build "$TMPD/root.img" 16384 --inodes=1024 --journal /bin/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$TMPD/root.img" 16384 --inodes=1024 --journal /bin/ /etc/ \
     "/bin/sh=$TMPD/sh.elf" "/bin/ls=$TMPD/ls.elf" "/bin/cat=$TMPD/cat.elf" \
     "/bin/echo=$TMPD/echo.elf" "${SPECS[@]}" >"$TMPD/mkfs.txt" 2>&1 \
     && ok "root image built" || { bad "mkfs"; exit 1; }

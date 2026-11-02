@@ -216,7 +216,7 @@ bau_img() { # ziel [--noicons]
     while read -r zeile; do ARGS+=("$zeile"); done \
         < <(python3 tools/k15/bundle.py assets/apps "$TMPD/buendel" nur="$PROGS")
     while read -r pfad; do ARGS+=("$pfad"); done < "$TMPD/baum/liste"
-    python3 tools/osum/mkfs.py "${ARGS[@]}" > "$TMPD/mkfs.log" 2>&1
+    bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$TMPD/mkfs.log" 2>&1
 }
 bau_img "$TMPD/disk.img" mit || { bad "mkfs failed"; tail -5 "$TMPD/mkfs.log"; }
 bau_img "$TMPD/nofont.img" ohne || bad "mkfs without the icon font failed"

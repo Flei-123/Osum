@@ -12,7 +12,7 @@ PROGS="contacts sh echo ls cat"
 bash tools/build-kernel.sh "$D/k0.mb" > "$D/k0.log" 2>&1 || { bad "kernel build"; echo "CONTACTS: $pass passed, $fail failed"; exit 1; }
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/bin.log" 2>&1 || { bad "programs build"; head -8 "$D/bin.log"; echo "CONTACTS: $pass passed, $fail failed"; exit 1; }
 MK=""; for p in $PROGS; do MK="$MK /bin/$p=$D/bin/$p.elf"; done
-python3 tools/osum/mkfs.py build "$D/root.img" 4096 /bin/ /dev/ /etc/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; exit 1; }
+bash tools/mkfsfi/mkfs.sh build "$D/root.img" 4096 /bin/ /dev/ /etc/ $MK > "$D/mkfs.log" 2>&1 || { bad "mkfs"; exit 1; }
 cp "$D/root.img" "$D/hda.img"
 run_vm() {
     timeout 120 qemu-system-x86_64 -accel kvm -kernel "$D/k0.mb" -m 256 -append "osum nokbd vfs nopart script=$2" \

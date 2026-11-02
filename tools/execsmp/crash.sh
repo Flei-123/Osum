@@ -19,7 +19,7 @@ bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 bash tools/sync/build.sh "$T/bin" 0 sh echo execsmp > "$T/b.txt" 2>&1 || { tail "$T/b.txt"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 || { tail "$T/k.txt"; exit 1; }
 printf 'echo ==EXEC==\nexecsmp run spawn 1 2\nexecsmp run spawn 1 2\necho ==END==\n' > "$T/s.sh"
-python3 tools/osum/mkfs.py build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/ \
+bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/echo="$T/bin/echo.elf" /bin/execsmp="$T/bin/execsmp.elf" /t/s.sh="$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 crash=0; first=""
 for n in $(seq 1 "$BOOTS"); do

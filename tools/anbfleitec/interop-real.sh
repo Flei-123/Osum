@@ -170,7 +170,7 @@ printf 'fleitec ziel=%s name=konto.test\n' "$Z" > "$TMPD/konten.conf"
 printf 'url=%s\nname=konto.test\nroots=/etc/ssl/roots.pem\n' "$Z" > "$TMPD/fl.conf"
 
 abbild() { # <target>
-    python3 tools/osum/mkfs.py build "$1" 24576 \
+    bash tools/mkfsfi/mkfs.sh build "$1" 24576 \
         /bin/ /etc/ /etc/ssl/ /etc/social/ /usr/ /usr/share/ /usr/share/locale/ \
         /usr/share/locale/en/ /usr/share/locale/de/ \
         /users/ /users/justin/ /users/justin/config/ \
