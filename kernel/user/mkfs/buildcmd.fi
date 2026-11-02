@@ -1,0 +1,207 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import mkfs.ofs
+import mkfs.cstr
+import mkfs.hostio
+import mkfs.brandmap
+import mkfs.specs
+import mkfs.out
+
+export { cmd_build }
+
+const OPT_NONE: u64 = 0
+const OPT_V1: u64 = 1
+const OPT_V3: u64 = 2
+const OPT_INODES: u64 = 3
+const OPT_TIME: u64 = 4
+const OPT_RESERVE: u64 = 5
+const OPT_KARTEN: u64 = 6
+const OPT_JOURNAL: u64 = 7
+const OPT_BRAND: u64 = 8
+const DEFAULT_INODES: u64 = 128
+const FIRST_SPEC_ARG: u64 = 4
+
+static mut o_v1: [u8; 5] = "--v1\0"
+static mut o_v3: [u8; 5] = "--v3\0"
+static mut o_inodes: [u8; 10] = "--inodes=\0"
+static mut o_time: [u8; 8] = "--time=\0"
+static mut o_reserve: [u8; 11] = "--reserve=\0"
+static mut o_karten: [u8; 10] = "--karten=\0"
+static mut o_journal: [u8; 10] = "--journal\0"
+static mut o_brand: [u8; 9] = "--brand=\0"
+
+static mut s_head: [u8; 7] = "mkfs: \0"
+static mut s_blocks: [u8; 10] = "  blocks=\0"
+static mut s_free: [u8; 7] = " free=\0"
+static mut s_inodes: [u8; 9] = " inodes=\0"
+static mut s_slash: [u8; 2] = "/\0"
+static mut s_data: [u8; 7] = " data=\0"
+static mut s_version: [u8; 10] = " version=\0"
+static mut s_bmblocks: [u8; 11] = " bmblocks=\0"
+static mut s_isize: [u8; 8] = " isize=\0"
+static mut s_dirent: [u8; 9] = " dirent=\0"
+static mut s_namelen: [u8; 10] = " namelen=\0"
+static mut s_maxfile: [u8; 10] = " maxfile=\0"
+static mut s_jstart: [u8; 9] = " jstart=\0"
+static mut s_jblocks: [u8; 10] = " jblocks=\0"
+
+static mut opt_value: u64 = 0
+
+fn option_kind(a: u64) -> u64 {
+    if ulib.streq(a, ((&o_v1[0 as usize]) as u64)) {
+        return OPT_V1
+    }
+    if ulib.streq(a, ((&o_v3[0 as usize]) as u64)) {
+        return OPT_V3
+    }
+    if ulib.streq(a, ((&o_journal[0 as usize]) as u64)) {
+        return OPT_JOURNAL
+    }
+    if cstr.has_prefix(a, ((&o_inodes[0 as usize]) as u64)) {
+        opt_value = a + ulib.length(((&o_inodes[0 as usize]) as u64))
+        return OPT_INODES
+    }
+    if cstr.has_prefix(a, ((&o_time[0 as usize]) as u64)) {
+        opt_value = a + ulib.length(((&o_time[0 as usize]) as u64))
+        return OPT_TIME
+    }
+    if cstr.has_prefix(a, ((&o_reserve[0 as usize]) as u64)) {
+        opt_value = a + ulib.length(((&o_reserve[0 as usize]) as u64))
+        return OPT_RESERVE
+    }
+    if cstr.has_prefix(a, ((&o_karten[0 as usize]) as u64)) {
+        opt_value = a + ulib.length(((&o_karten[0 as usize]) as u64))
+        return OPT_KARTEN
+    }
+    if cstr.has_prefix(a, ((&o_brand[0 as usize]) as u64)) {
+        opt_value = a + ulib.length(((&o_brand[0 as usize]) as u64))
+        return OPT_BRAND
+    }
+    return OPT_NONE
+}
+
+fn number(a: u64) -> u64 {
+    var ok: u64 = 0
+    let v: u64 = cstr.parse_dec(a, (&ok) as u64)
+    if ok == 0 {
+        out.err_bad_number(a)
+    }
+    return v
+}
+
+fn print_summary(image: u64, blocks: u64) {
+    out.text(((&s_head[0 as usize]) as u64))
+    out.text(image)
+    out.text(((&s_blocks[0 as usize]) as u64))
+    out.num(blocks)
+    out.text(((&s_free[0 as usize]) as u64))
+    out.num(ofs.free_blocks())
+    out.text(((&s_inodes[0 as usize]) as u64))
+    out.num(ofs.used_inodes())
+    out.text(((&s_slash[0 as usize]) as u64))
+    out.num(ofs.inodes())
+    out.text(((&s_data[0 as usize]) as u64))
+    out.num(ofs.data_start())
+    out.text(((&s_version[0 as usize]) as u64))
+    out.num(ofs.version())
+    out.text(((&s_bmblocks[0 as usize]) as u64))
+    out.num(ofs.bmblocks())
+    out.text(((&s_isize[0 as usize]) as u64))
+    out.num(ofs.isize())
+    out.text(((&s_dirent[0 as usize]) as u64))
+    out.num(ofs.dirent_size())
+    out.text(((&s_namelen[0 as usize]) as u64))
+    out.num(ofs.namelen())
+    out.text(((&s_maxfile[0 as usize]) as u64))
+    out.num(ofs.max_file())
+    out.text(((&s_jstart[0 as usize]) as u64))
+    out.num(ofs.jstart())
+    out.text(((&s_jblocks[0 as usize]) as u64))
+    out.num(ofs.journal())
+    out.newline()
+}
+
+fn cmd_build(args: u64, argc: u64) -> u64 {
+    if argc < 4 {
+        out.usage()
+        return 2
+    }
+    let image: u64 = ulib.arg_at(args, 2)
+    let blocks: u64 = number(ulib.arg_at(args, 3))
+    var inodes: u64 = DEFAULT_INODES
+    var elapsed: u64 = 0
+    var reserve: u64 = 0
+    var karten: u64 = 0
+    var journal: u64 = 0
+    var v1: bool = false
+    var v3: bool = false
+    var i: u64 = FIRST_SPEC_ARG
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        let kind: u64 = option_kind(a)
+        if kind == OPT_V1 {
+            v1 = true
+        }
+        if kind == OPT_V3 {
+            v3 = true
+        }
+        if kind == OPT_JOURNAL {
+            journal = 1
+        }
+        if kind == OPT_INODES {
+            inodes = number(opt_value)
+        }
+        if kind == OPT_TIME {
+            elapsed = number(opt_value)
+        }
+        if kind == OPT_RESERVE {
+            reserve = number(opt_value)
+        }
+        if kind == OPT_KARTEN {
+            karten = number(opt_value)
+        }
+        if kind == OPT_BRAND {
+            brandmap.load_map(opt_value)
+        }
+        i = i + 1
+    }
+    var version: u64 = ofs.OFS_V2
+    if v1 {
+        version = ofs.OFS_V1
+    }
+    if v3 {
+        version = ofs.OFS_V3
+    }
+    if version == ofs.OFS_V2 {
+        i = FIRST_SPEC_ARG
+        while i < argc && version == ofs.OFS_V2 {
+            let a: u64 = ulib.arg_at(args, i)
+            if option_kind(a) == OPT_NONE && specs.needs_v3(a) {
+                version = ofs.OFS_V3
+            }
+            i = i + 1
+        }
+    }
+    ofs.derive(blocks, version, inodes, elapsed, karten, journal)
+    ofs.create()
+    ofs.format()
+    if reserve != 0 {
+        ofs.reserve(reserve)
+    }
+    if elapsed != 0 {
+        ofs.set_times(1, elapsed, elapsed, elapsed)
+    }
+    i = FIRST_SPEC_ARG
+    while i < argc {
+        let a: u64 = ulib.arg_at(args, i)
+        if option_kind(a) == OPT_NONE {
+            specs.apply_spec(a)
+        }
+        i = i + 1
+    }
+    hostio.write_whole(image, ofs.image_ptr(), blocks * ofs.BS)
+    print_summary(image, blocks)
+    return 0
+}

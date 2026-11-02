@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.mem
+import mkfs.cstr
+import mkfs.hostio
+import mkfs.out
+
+export { load_map, render_for_image, rendered_size, has_map }
+
+const MAX_ENTRIES: u64 = 16
+const MAX_BYTES: u64 = 1048576
+const NAME_BUF: u64 = 64
+const PATH_BUF: u64 = 4096
+const MAX_DEPTH: u64 = 256
+
+static mut entry_name: [u64; 16] = [0 as u64; 16]
+static mut entry_value: [u64; 16] = [0 as u64; 16]
+static mut entry_count: u64 = 0
+static mut out_size: u64 = 0
+
+static mut w_locale: [u8; 7] = "locale\0"
+static mut w_assets: [u8; 7] = "assets\0"
+static mut w_buendel: [u8; 8] = "buendel\0"
+static mut w_dot: [u8; 2] = ".\0"
+static mut w_dotdot: [u8; 3] = "..\0"
+static mut w_open: [u8; 3] = "{{\0"
+
+fn has_map() -> bool {
+    return entry_count != 0
+}
+
+fn rendered_size() -> u64 {
+    return out_size
+}
+
+fn load_map(path: u64) {
+    let raw: u64 = hostio.read_whole(path, 0)
+    let n: u64 = hostio.last_size()
+    var at: u64 = 0
+    while at < n {
+        let start: u64 = at
+        while at < n && cstr.byte_at(raw, at) != 10 {
+            at = at + 1
+        }
+        cstr.set_byte(raw, at, 0)
+        at = at + 1
+        let eq: u64 = cstr.index_of(raw + start, 61)
+        if eq != cstr.NONE {
+            if entry_count >= MAX_ENTRIES {
+                out.err_brand_file(path)
+            }
+            cstr.set_byte(raw + start, eq, 0)
+            entry_name[entry_count as usize] = raw + start
+            entry_value[entry_count as usize] = raw + start + eq + 1
+            entry_count = entry_count + 1
+        }
+    }
+}
+
+fn lookup(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < entry_count {
+        if ulib.streq(entry_name[i as usize], name) {
+            return entry_value[i as usize]
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn is_upper(c: u64) -> bool {
+    return c >= 65 && c <= 90
+}
+
+fn is_name_char(c: u64) -> bool {
+    return is_upper(c) || (c >= 48 && c <= 57) || c == 95
+}
+
+fn matches_word(comp: u64, word: u64) -> bool {
+    return ulib.streq(comp, word)
+}
+
+fn is_strict(host: u64) -> bool {
+    var path: [u8; 4096] = [0 as u8; 4096]
+    let p: u64 = (&path[0 as usize]) as u64
+    var used: u64 = 0
+    if cstr.byte_at(host, 0) != 47 {
+        let got: u64 = ulib.sys(ulib.SYS_GETCWD, p, 2048, 0)
+        if ulib.bad(got) || got == 0 {
+            return false
+        }
+        used = ulib.length(p)
+        cstr.set_byte(p, used, 47)
+        used = used + 1
+    }
+    if used + ulib.length(host) + 1 >= PATH_BUF {
+        return false
+    }
+    ulib.strcpy(p + used, host)
+    var flags: [u64; 256] = [0 as u64; 256]
+    var depth: u64 = 0
+    var i: u64 = 0
+    var comp: [u8; 256] = [0 as u8; 256]
+    let c: u64 = (&comp[0 as usize]) as u64
+    while cstr.byte_at(p, i) != 0 {
+        while cstr.byte_at(p, i) == 47 {
+            i = i + 1
+        }
+        var n: u64 = 0
+        while cstr.byte_at(p, i) != 0 && cstr.byte_at(p, i) != 47 {
+            if n < 255 {
+                cstr.set_byte(c, n, cstr.byte_at(p, i))
+                n = n + 1
+            }
+            i = i + 1
+        }
+        cstr.set_byte(c, n, 0)
+        if n != 0 {
+            if ulib.streq(c, (&w_dot[0 as usize]) as u64) {
+                n = 0
+            } else {
+                if ulib.streq(c, (&w_dotdot[0 as usize]) as u64) {
+                    if depth > 0 {
+                        depth = depth - 1
+                    }
+                    n = 0
+                }
+            }
+        }
+        if n != 0 && depth < MAX_DEPTH {
+            var flag: u64 = 0
+            if matches_word(c, (&w_locale[0 as usize]) as u64) || matches_word(c, (&w_assets[0 as usize]) as u64) || matches_word(c, (&w_buendel[0 as usize]) as u64) {
+                flag = 1
+            }
+            flags[depth as usize] = flag
+            depth = depth + 1
+        }
+    }
+    var k: u64 = 0
+    while k < depth {
+        if flags[k as usize] != 0 {
+            return true
+        }
+        k = k + 1
+    }
+    return false
+}
+
+fn renderable(data: u64, n: u64) -> bool {
+    if n > MAX_BYTES || n < 2 {
+        return false
+    }
+    var i: u64 = 0
+    var found: bool = false
+    while i < n {
+        let c: u64 = cstr.byte_at(data, i)
+        if c == 0 {
+            return false
+        }
+        if c == 123 && i + 1 < n && cstr.byte_at(data, i + 1) == 123 {
+            found = true
+        }
+        i = i + 1
+    }
+    return found
+}
+
+fn token_end(data: u64, n: u64, at: u64) -> u64 {
+    if at + 1 >= n || cstr.byte_at(data, at) != 123 || cstr.byte_at(data, at + 1) != 123 {
+        return 0
+    }
+    var j: u64 = at + 2
+    if j >= n || !is_upper(cstr.byte_at(data, j)) {
+        return 0
+    }
+    while j < n && is_name_char(cstr.byte_at(data, j)) {
+        j = j + 1
+    }
+    if j + 1 < n && cstr.byte_at(data, j) == 125 && cstr.byte_at(data, j + 1) == 125 {
+        return j + 2
+    }
+    return 0
+}
+
+fn walk(data: u64, n: u64, host: u64, strict: bool, dst: u64) -> u64 {
+    var name: [u8; 64] = [0 as u8; 64]
+    let nm: u64 = (&name[0 as usize]) as u64
+    var i: u64 = 0
+    var o: u64 = 0
+    while i < n {
+        let end: u64 = token_end(data, n, i)
+        var handled: bool = false
+        if end != 0 {
+            var len: u64 = end - i - 4
+            if len > NAME_BUF - 1 {
+                len = NAME_BUF - 1
+            }
+            ulib.copy(nm, data + i + 2, len)
+            cstr.set_byte(nm, len, 0)
+            let value: u64 = lookup(nm)
+            if value != 0 {
+                let vl: u64 = ulib.length(value)
+                if dst != 0 {
+                    ulib.copy(dst + o, value, vl)
+                }
+                o = o + vl
+                handled = true
+            } else {
+                if strict {
+                    out.err_unknown_placeholder(host, nm)
+                }
+            }
+            if handled {
+                i = end
+            } else {
+                if dst != 0 {
+                    ulib.copy(dst + o, data + i, end - i)
+                }
+                o = o + (end - i)
+                i = end
+                handled = true
+            }
+        }
+        if !handled {
+            if dst != 0 {
+                cstr.set_byte(dst, o, cstr.byte_at(data, i))
+            }
+            o = o + 1
+            i = i + 1
+        }
+    }
+    return o
+}
+
+fn render_for_image(data: u64, n: u64, host: u64) -> u64 {
+    out_size = n
+    if !renderable(data, n) {
+        return data
+    }
+    let strict: bool = is_strict(host)
+    let total: u64 = walk(data, n, host, strict, 0)
+    let dst: u64 = mem.map_pages(total + 1)
+    if ulib.bad(dst) {
+        out.err_out_of_memory()
+    }
+    walk(data, n, host, strict, dst)
+    out_size = total
+    return dst
+}

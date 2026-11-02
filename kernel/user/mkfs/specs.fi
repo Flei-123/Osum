@@ -1,0 +1,153 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import mkfs.ofs
+import mkfs.cstr
+import mkfs.hostio
+import mkfs.brandmap
+import mkfs.out
+
+export { apply_spec, needs_v3, v2_max_file }
+
+const SPEC_MAX: u64 = 4000
+const DEFAULT_FILE_MODE: u64 = 493
+const DEFAULT_DIR_MODE: u64 = 493
+const DIRECT_BLOCKS: u64 = 8
+
+static mut w_arrow: [u8; 3] = "->\0"
+
+fn v2_max_file() -> u64 {
+    let per: u64 = ofs.BS / 8
+    return (DIRECT_BLOCKS + per + per * per) * ofs.BS
+}
+
+fn copy_spec(raw: u64, buf: u64) {
+    let n: u64 = ulib.length(raw)
+    if n >= SPEC_MAX {
+        out.err_bad_spec(raw)
+    }
+    ulib.copy(buf, raw, n + 1)
+}
+
+fn needs_v3(raw: u64) -> bool {
+    var buf: [u8; 4096] = [0 as u8; 4096]
+    let s: u64 = (&buf[0 as usize]) as u64
+    copy_spec(raw, s)
+    let eq: u64 = cstr.index_of(s, 61)
+    if eq == cstr.NONE {
+        return false
+    }
+    let src: u64 = s + eq + 1
+    let at: u64 = cstr.index_of(src, 64)
+    if at != cstr.NONE {
+        cstr.set_byte(src, at, 0)
+    }
+    let size: u64 = ulib.size_of(src)
+    if ulib.bad(size) || ulib.is_dir(src) {
+        return false
+    }
+    if size > v2_max_file() {
+        out.note_v3_upgrade(src, v2_max_file())
+        return true
+    }
+    return false
+}
+
+fn parse_meta(meta: u64, raw: u64, out_mode: u64, out_uid: u64, out_gid: u64) {
+    var ok: u64 = 0
+    let c0: u64 = cstr.index_of(meta, 58)
+    var rest: u64 = 0
+    if c0 != cstr.NONE {
+        cstr.set_byte(meta, c0, 0)
+        rest = meta + c0 + 1
+    }
+    let mode: u64 = cstr.parse_oct(meta, (&ok) as u64)
+    if ok == 0 {
+        out.err_bad_spec(raw)
+    }
+    __mmio_write64(out_mode as *mut u64, mode)
+    if rest == 0 {
+        return
+    }
+    let c1: u64 = cstr.index_of(rest, 58)
+    var rest2: u64 = 0
+    if c1 != cstr.NONE {
+        cstr.set_byte(rest, c1, 0)
+        rest2 = rest + c1 + 1
+    }
+    if cstr.byte_at(rest, 0) != 0 {
+        let uid: u64 = cstr.parse_dec(rest, (&ok) as u64)
+        if ok == 0 {
+            out.err_bad_spec(raw)
+        }
+        __mmio_write64(out_uid as *mut u64, uid)
+    }
+    if rest2 == 0 {
+        return
+    }
+    let c2: u64 = cstr.index_of(rest2, 58)
+    if c2 != cstr.NONE {
+        cstr.set_byte(rest2, c2, 0)
+    }
+    if cstr.byte_at(rest2, 0) != 0 {
+        let gid: u64 = cstr.parse_dec(rest2, (&ok) as u64)
+        if ok == 0 {
+            out.err_bad_spec(raw)
+        }
+        __mmio_write64(out_gid as *mut u64, gid)
+    }
+}
+
+fn apply_spec(raw: u64) {
+    var buf: [u8; 4096] = [0 as u8; 4096]
+    let s: u64 = (&buf[0 as usize]) as u64
+    copy_spec(raw, s)
+    var mode: u64 = cstr.NONE
+    var uid: u64 = 0
+    var gid: u64 = 0
+    let arrow: u64 = (&w_arrow[0 as usize]) as u64
+    let at: u64 = cstr.last_index_of(s, 64)
+    if at != cstr.NONE && !cstr.contains(s, arrow) && cstr.index_of(s + at + 1, 61) == cstr.NONE {
+        let meta: u64 = s + at + 1
+        cstr.set_byte(s, at, 0)
+        if cstr.index_of(meta, 47) != cstr.NONE {
+            ofs.link(s, meta)
+            return
+        }
+        parse_meta(meta, raw, (&mode) as u64, (&uid) as u64, (&gid) as u64)
+    }
+    let ar: u64 = ulib.find(s, arrow)
+    if ar != ulib.EOF {
+        cstr.set_byte(s, ar, 0)
+        ofs.symlink(s, s + ar + 2)
+        return
+    }
+    if cstr.ends_with(s, 47) {
+        cstr.set_byte(s, ulib.length(s) - 1, 0)
+        var dmode: u64 = DEFAULT_DIR_MODE
+        if mode != cstr.NONE {
+            dmode = mode
+        }
+        ofs.mkdir(s, dmode, uid, gid)
+        return
+    }
+    let eq: u64 = cstr.index_of(s, 61)
+    if eq == cstr.NONE {
+        out.err_needs_hostfile(s)
+    }
+    cstr.set_byte(s, eq, 0)
+    let host: u64 = s + eq + 1
+    if cstr.byte_at(host, 0) == 0 {
+        ofs.addfile(s, 0, 0, DEFAULT_FILE_MODE, 0, 0)
+        return
+    }
+    let data: u64 = hostio.read_whole(host, 0)
+    let n: u64 = hostio.last_size()
+    let payload: u64 = brandmap.render_for_image(data, n, host)
+    var fmode: u64 = DEFAULT_FILE_MODE
+    if mode != cstr.NONE {
+        fmode = mode
+    }
+    ofs.addfile(s, payload, brandmap.rendered_size(), fmode, uid, gid)
+}
