@@ -462,6 +462,7 @@ MENUBG=$(python3 -c "print(0x2a3542)")
 UIFG=$(python3 tools/theme/model.py semantic assets/schemes/day.scheme dark \
     | awk '$2 == "text-primary" {print $3}')
 UIFG=$((16#$UIFG))
+PALFG=$((16#$(awk -F'\t' '$1 == "text" {print $2}' assets/palette/dark.tsv)))
 MASC=$(python3 -c "import sys; sys.path.insert(0,'tools/ttf'); import raster; print(raster.Font('$SANS', 15).glyphe(108).top_2)")
 i=0
 for punkt in Öffnen Umbenennen Entfernen; do
@@ -792,7 +793,7 @@ schau_nicht "and then NOT the previous one" \
 schau "and the text on it is blended against the new ground" \
     tchain "$TMPD/theme2.ppm" "$SANS_INK" 15 $((CX + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" x))) \
     $((CY + $(feld "$TMPD/ruhe.txt" "widgetdemo: text knopf" base))) \
-    $(rgb "$UIFG") 128 64 32 "Knopf"
+    $(rgb "$PALFG") 128 64 32 "Knopf"
 
 echo "== 13. the pointer image -- the only place where ring 3 tells the server about the pointer =="
 M="$TMPD/beam.mon"; : > "$M"
