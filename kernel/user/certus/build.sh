@@ -83,7 +83,7 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-FUI_MODE=${FUI_MODE:-fork}   # fork = Certus' patched copy (.fui-win); firn = current shared Firn fUi (what Osum's fuib expects)
+FUI_MODE=${FUI_MODE:-fork}
 if [ "$FUI_MODE" = firn ]; then
     rm -f "$BAU/fui"; mkdir -p "$BAU/fui"
     for f in "$ROOT"/lib/fui/* "${FIRN_SHARED:-/root/firn}"/lib/fui/*; do
@@ -127,6 +127,13 @@ else
     ln -sfn "$CERTUS_REPO/lib/fenster/osum.fi" "$BAU/fenster/rueck.fi"
 fi
 
+find "$BAU" -type l -name '*.fi' | while read -r link; do
+    if grep -q 'as%' "$link" 2>/dev/null; then
+        src=$(readlink -f "$link")
+        rm -f "$link"
+        sed 's/ as% / as /g' "$src" > "$link"
+    fi
+done
 python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
