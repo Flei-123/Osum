@@ -1,0 +1,279 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.mem
+import mkfs.ofs
+import mkfs.imgload
+import mkfs.hostio
+import mkfs.out
+
+export { cmd_list, cmd_meta, cmd_times, cmd_cat, cmd_where }
+
+const MODE_LIST: u64 = 0
+const MODE_META: u64 = 1
+const PATH_MAX: u64 = 4000
+
+static mut s_dot: [u8; 2] = ".\0"
+static mut s_dotdot: [u8; 3] = "..\0"
+static mut s_slash: [u8; 2] = "/\0"
+static mut s_space: [u8; 2] = " \0"
+static mut s_blocks: [u8; 8] = "blocks=\0"
+static mut s_free: [u8; 7] = " free=\0"
+static mut s_inodes: [u8; 9] = " inodes=\0"
+static mut s_version: [u8; 10] = " version=\0"
+static mut s_maxfile: [u8; 10] = " maxfile=\0"
+static mut s_ext: [u8; 12] = " ext=1 base\0"
+static mut s_ext2: [u8; 8] = "blocks=\0"
+static mut s_ext3: [u8; 10] = " xinodes=\0"
+static mut s_ext4: [u8; 6] = " xbm=\0"
+static mut s_ext5: [u8; 6] = " xit=\0"
+static mut s_meta_1: [u8; 9] = "version=\0"
+static mut s_meta_2: [u8; 11] = " bmblocks=\0"
+static mut s_meta_3: [u8; 8] = " isize=\0"
+static mut s_meta_4: [u8; 9] = " dirent=\0"
+static mut s_meta_5: [u8; 10] = " namelen=\0"
+static mut s_ctime: [u8; 8] = " ctime=\0"
+static mut s_mtime: [u8; 8] = " mtime=\0"
+static mut s_atime: [u8; 8] = " atime=\0"
+static mut s_where_1: [u8; 7] = "where \0"
+static mut s_where_2: [u8; 6] = " ino=\0"
+static mut s_where_3: [u8; 7] = " size=\0"
+static mut s_where_4: [u8; 9] = " blocks=\0"
+static mut s_where_5: [u8; 8] = " first=\0"
+static mut s_where_6: [u8; 7] = " last=\0"
+static mut s_t_free: [u8; 5] = "free\0"
+static mut s_t_file: [u8; 5] = "file\0"
+static mut s_t_dir: [u8; 4] = "dir\0"
+static mut s_t_link: [u8; 5] = "link\0"
+static mut s_t_unknown: [u8; 2] = "?\0"
+
+fn is_dots(name: u64) -> bool {
+    return ulib.streq(name, (&s_dot[0 as usize]) as u64) || ulib.streq(name, (&s_dotdot[0 as usize]) as u64)
+}
+
+fn join(dst: u64, prefix: u64, name: u64, tail: u64) {
+    let a: u64 = ulib.length(prefix)
+    let b: u64 = ulib.length(name)
+    let c: u64 = ulib.length(tail)
+    if a + b + c >= PATH_MAX {
+        out.fail((&s_slash[0 as usize]) as u64)
+    }
+    ulib.copy(dst, prefix, a)
+    ulib.copy(dst + a, name, b)
+    ulib.copy(dst + a + b, tail, c)
+    __mmio_write8((dst + a + b + c) as *mut u8, 0 as u8)
+}
+
+fn print_meta_line(path: u64, ino: u64) {
+    var mode: u64 = 0
+    var uid: u64 = 0
+    var gid: u64 = 0
+    ofs.get_meta(ino, (&mode) as u64, (&uid) as u64, (&gid) as u64)
+    out.text(path)
+    out.text((&s_space[0 as usize]) as u64)
+    out.oct(mode)
+    out.text((&s_space[0 as usize]) as u64)
+    out.num(uid)
+    out.text((&s_space[0 as usize]) as u64)
+    out.num(gid)
+    out.newline()
+}
+
+fn walk(dirino: u64, prefix: u64, mode: u64) {
+    let n: u64 = ofs.dir_entries(dirino)
+    var name: [u8; 272] = [0 as u8; 272]
+    var i: u64 = 0
+    while i < n {
+        let child: u64 = ofs.entry(dirino, i, (&name[0 as usize]) as u64)
+        if child != 0 && !is_dots((&name[0 as usize]) as u64) {
+            var path: [u8; 4096] = [0 as u8; 4096]
+            if ofs.iget(child, ofs.I_TYPE) == ofs.T_DIR {
+                if mode == MODE_LIST {
+                    join((&path[0 as usize]) as u64, prefix, (&name[0 as usize]) as u64, (&s_slash[0 as usize]) as u64)
+                    out.text((&path[0 as usize]) as u64)
+                    out.newline()
+                } else {
+                    join((&path[0 as usize]) as u64, prefix, (&name[0 as usize]) as u64, (&s_dotdot[2 as usize]) as u64)
+                    print_meta_line((&path[0 as usize]) as u64, child)
+                }
+                var deeper: [u8; 4096] = [0 as u8; 4096]
+                join((&deeper[0 as usize]) as u64, prefix, (&name[0 as usize]) as u64, (&s_slash[0 as usize]) as u64)
+                walk(child, (&deeper[0 as usize]) as u64, mode)
+            } else {
+                join((&path[0 as usize]) as u64, prefix, (&name[0 as usize]) as u64, (&s_dotdot[2 as usize]) as u64)
+                if mode == MODE_LIST {
+                    out.text((&path[0 as usize]) as u64)
+                    out.text((&s_space[0 as usize]) as u64)
+                    out.num(ofs.iget(child, ofs.I_SIZE))
+                    out.newline()
+                } else {
+                    print_meta_line((&path[0 as usize]) as u64, child)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn open_image(path: u64) -> bool {
+    if !imgload.load(path) {
+        out.no_magic()
+        return false
+    }
+    return true
+}
+
+fn find_or_report(path: u64) -> u64 {
+    let ino: u64 = ofs.resolve(path)
+    if ino == 0 {
+        out.no_such_path(path)
+    }
+    return ino
+}
+
+fn cmd_list(image: u64) -> u64 {
+    if !open_image(image) {
+        return 1
+    }
+    var total: u64 = ofs.xblocks()
+    if total == 0 {
+        total = ofs.g64(ofs.SB_BLOCKS)
+    }
+    out.text((&s_blocks[0 as usize]) as u64)
+    out.num(total)
+    out.text((&s_free[0 as usize]) as u64)
+    out.num(ofs.free_blocks())
+    out.text((&s_inodes[0 as usize]) as u64)
+    out.num(ofs.used_inodes())
+    out.text((&s_slash[0 as usize]) as u64)
+    out.num(ofs.inodes() + ofs.xin())
+    out.text((&s_version[0 as usize]) as u64)
+    out.num(ofs.version())
+    out.text((&s_maxfile[0 as usize]) as u64)
+    out.num(ofs.max_file())
+    if ofs.xblocks() != 0 {
+        out.text((&s_ext[0 as usize]) as u64)
+        out.text((&s_ext2[0 as usize]) as u64)
+        out.num(ofs.g64(ofs.SB_BLOCKS))
+        out.text((&s_ext3[0 as usize]) as u64)
+        out.num(ofs.xin())
+        out.text((&s_ext4[0 as usize]) as u64)
+        out.num(ofs.xbm())
+        out.text((&s_ext5[0 as usize]) as u64)
+        out.num(ofs.xit())
+    }
+    out.newline()
+    walk(ofs.root_ino(), (&s_slash[0 as usize]) as u64, MODE_LIST)
+    return 0
+}
+
+fn cmd_meta(image: u64, path: u64) -> u64 {
+    if !open_image(image) {
+        return 1
+    }
+    if path != 0 {
+        let ino: u64 = find_or_report(path)
+        if ino == 0 {
+            return 1
+        }
+        print_meta_line(path, ino)
+        return 0
+    }
+    out.text((&s_meta_1[0 as usize]) as u64)
+    out.num(ofs.version())
+    out.text((&s_meta_2[0 as usize]) as u64)
+    out.num(ofs.bmblocks())
+    out.text((&s_meta_3[0 as usize]) as u64)
+    out.num(ofs.isize())
+    out.text((&s_meta_4[0 as usize]) as u64)
+    out.num(ofs.dirent_size())
+    out.text((&s_meta_5[0 as usize]) as u64)
+    out.num(ofs.namelen())
+    out.newline()
+    walk(ofs.root_ino(), (&s_slash[0 as usize]) as u64, MODE_META)
+    return 0
+}
+
+fn type_name(t: u64) -> u64 {
+    if t == ofs.T_FREE { return (&s_t_free[0 as usize]) as u64 }
+    if t == ofs.T_FILE { return (&s_t_file[0 as usize]) as u64 }
+    if t == ofs.T_DIR { return (&s_t_dir[0 as usize]) as u64 }
+    if t == ofs.T_LINK { return (&s_t_link[0 as usize]) as u64 }
+    return (&s_t_unknown[0 as usize]) as u64
+}
+
+fn cmd_times(image: u64, path: u64) -> u64 {
+    if !open_image(image) {
+        return 1
+    }
+    let ino: u64 = find_or_report(path)
+    if ino == 0 {
+        return 1
+    }
+    var c: u64 = 0
+    var m: u64 = 0
+    var a: u64 = 0
+    ofs.get_times(ino, (&c) as u64, (&m) as u64, (&a) as u64)
+    out.text(path)
+    out.text((&s_space[0 as usize]) as u64)
+    out.text(type_name(ofs.iget(ino, ofs.I_TYPE)))
+    out.text((&s_ctime[0 as usize]) as u64)
+    out.num(c)
+    out.text((&s_mtime[0 as usize]) as u64)
+    out.num(m)
+    out.text((&s_atime[0 as usize]) as u64)
+    out.num(a)
+    out.newline()
+    return 0
+}
+
+fn cmd_cat(image: u64, path: u64) -> u64 {
+    if !open_image(image) {
+        return 1
+    }
+    let ino: u64 = find_or_report(path)
+    if ino == 0 {
+        return 1
+    }
+    let size: u64 = ofs.iget(ino, ofs.I_SIZE)
+    let buf: u64 = mem.map_pages(size + 1)
+    if ulib.bad(buf) {
+        out.err_out_of_memory()
+    }
+    let got: u64 = ofs.read_at(ino, 0, size, buf)
+    hostio.write_stdout(buf, got)
+    return 0
+}
+
+fn cmd_where(image: u64, path: u64) -> u64 {
+    if !open_image(image) {
+        return 1
+    }
+    let ino: u64 = ofs.resolve(path)
+    if ino == 0 {
+        out.where_missing(path)
+        return 1
+    }
+    let size: u64 = ofs.iget(ino, ofs.I_SIZE)
+    let n: u64 = (size + ofs.BS - 1) / ofs.BS
+    let first: u64 = ofs.file_block(ino, 0, 0)
+    var last: u64 = 0
+    if n != 0 {
+        last = ofs.file_block(ino, n - 1, 0)
+    }
+    out.text((&s_where_1[0 as usize]) as u64)
+    out.text(path)
+    out.text((&s_where_2[0 as usize]) as u64)
+    out.num(ino)
+    out.text((&s_where_3[0 as usize]) as u64)
+    out.num(size)
+    out.text((&s_where_4[0 as usize]) as u64)
+    out.num(n)
+    out.text((&s_where_5[0 as usize]) as u64)
+    out.num(first)
+    out.text((&s_where_6[0 as usize]) as u64)
+    out.num(last)
+    out.newline()
+    return 0
+}

@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import mkfs.ofs
+import mkfs.hostio
+import mkfs.out
+
+export { load }
+
+fn sb(p: u64, field: u64) -> u64 {
+    return __mmio_read64((p + field) as *mut u64)
+}
+
+fn or_default(v: u64, d: u64) -> u64 {
+    if v == 0 {
+        return d
+    }
+    return v
+}
+
+fn load(path: u64) -> bool {
+    let size: u64 = ulib.size_of(path)
+    if ulib.bad(size) || size < ofs.BS {
+        return false
+    }
+    let raw: u64 = hostio.read_whole(path, 65536)
+    if sb(raw, ofs.SB_MAGIC) != ofs.MAGIC {
+        return false
+    }
+    let ext: bool = sb(raw, ofs.SB_XVER) != 0
+    let version: u64 = or_default(sb(raw, ofs.SB_VERSION), ofs.OFS_V2)
+    let inodes: u64 = or_default(sb(raw, ofs.SB_INODES), 128)
+    let bmb: u64 = or_default(sb(raw, ofs.SB_BMBLOCKS), 1)
+    if ext {
+        var blocks: u64 = sb(raw, ofs.SB_BLOCKS)
+        if sb(raw, ofs.SB_DATA) + 8 > blocks {
+            blocks = sb(raw, ofs.SB_DATA) + 8
+        }
+        ofs.derive(blocks, version, inodes, 0, bmb, 0)
+        ofs.attach(raw)
+        var isz: u64 = ofs.isize()
+        var dsz: u64 = ofs.dirent_size()
+        var nsz: u64 = ofs.namelen()
+        if version >= ofs.OFS_V3 {
+            isz = sb(raw, ofs.SB_ISIZE)
+            dsz = sb(raw, ofs.SB_DIRENT)
+            nsz = sb(raw, ofs.SB_NAMELEN)
+        }
+        ofs.set_layout(or_default(sb(raw, ofs.SB_BITMAP), 1), bmb, sb(raw, ofs.SB_ITABLE), isz, dsz, nsz, sb(raw, ofs.SB_DATA))
+        ofs.set_root(sb(raw, ofs.SB_ROOT))
+        ofs.set_extended(sb(raw, ofs.SB_XBLOCKS), sb(raw, ofs.SB_XBMSTART), sb(raw, ofs.SB_XITSTART), sb(raw, ofs.SB_XINODES))
+        ofs.set_blocks(sb(raw, ofs.SB_XBLOCKS))
+        return true
+    }
+    var ipb: u64 = 4
+    if version >= ofs.OFS_V3 {
+        ipb = ofs.BS / or_default(sb(raw, ofs.SB_ISIZE), 128)
+    }
+    let needed: u64 = 1 + bmb + (inodes + ipb - 1) / ipb + 8
+    var blocks2: u64 = size / ofs.BS
+    if needed > blocks2 {
+        blocks2 = needed
+    }
+    ofs.derive(blocks2, version, inodes, 0, bmb, 0)
+    ofs.attach(raw)
+    if version < ofs.OFS_V3 && bmb > 1 {
+        ofs.set_layout(1, bmb, sb(raw, ofs.SB_ITABLE), ofs.isize(), ofs.dirent_size(), ofs.namelen(), sb(raw, ofs.SB_DATA))
+    }
+    if version >= ofs.OFS_V3 {
+        ofs.set_layout(or_default(sb(raw, ofs.SB_BITMAP), 1), bmb, sb(raw, ofs.SB_ITABLE), sb(raw, ofs.SB_ISIZE), sb(raw, ofs.SB_DIRENT), sb(raw, ofs.SB_NAMELEN), sb(raw, ofs.SB_DATA))
+    }
+    ofs.set_root(sb(raw, ofs.SB_ROOT))
+    ofs.set_version(or_default(sb(raw, ofs.SB_VERSION), ofs.OFS_V1))
+    return true
+}
