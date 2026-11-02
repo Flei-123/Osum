@@ -24,7 +24,7 @@ cp -a "$ROOT/vendor/firn/." "$D/"
 rm -rf "$D/bin" "$D/lib" "$D/.gebaut"
 echo "$TARGET" > "$D/COMMIT"
 if FIRN_REPO=$REPO bash "$D/fetch-firnc.sh" --force > "$D/build.log" 2>&1; then
-    ok "fetch-firnc.sh --force builds ${TARGET:0:8} with $(ls "$ROOT"/vendor/firn/patches/*.patch | wc -l) patches"
+    ok "fetch-firnc.sh --force builds ${TARGET:0:8} with $(find "$ROOT/vendor/firn/patches" -name "*.patch" 2>/dev/null | wc -l) patches"
 else
     bad "fetch-firnc.sh --force failed on ${TARGET:0:8}"
     tail -15 "$D/build.log"
