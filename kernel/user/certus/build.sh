@@ -83,18 +83,10 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
-FUI_MODE=${FUI_MODE:-fork}
-if [ "$FUI_MODE" = firn ]; then
-    rm -f "$BAU/fui"; mkdir -p "$BAU/fui"
-    for f in "$ROOT"/lib/fui/* "${FIRN_SHARED:-/root/firn}"/lib/fui/*; do
-        [ -e "$BAU/fui/$(basename "$f")" ] || ln -sfn "$f" "$BAU/fui/$(basename "$f")"
-    done
-    sed 's/\bpainter\./uipaint./g' "${FIRN_SHARED:-/root/firn}/lib/fui/painter.fi" > "$BAU/fui/uipaint.fi"
-elif [ -d "$CERTUS_REPO/.fui-win" ]; then
+if [ -d "$CERTUS_REPO/.fui-win" ]; then
     rm -f "$BAU/fui"; mkdir -p "$BAU/fui"
     for f in "$CERTUS_REPO"/.fui-win/*; do ln -sfn "$f" "$BAU/fui/$(basename "$f")"; done
-    sed 's/\buipaint\./painter./g' "$CERTUS_REPO/.fui-win/uipaint.fi" > "$BAU/fui/painter.fi"
-    for f in "$ROOT"/lib/fui/* "${FIRN_SHARED:-/root/firn}"/lib/fui/*; do
+    for f in "$ROOT"/lib/fui/* "$FIRN_SHARED"/lib/fui/*; do
         [ -e "$BAU/fui/$(basename "$f")" ] || ln -sfn "$f" "$BAU/fui/$(basename "$f")"
     done
 fi
@@ -137,6 +129,16 @@ done
 python3 "$ROOT/kernel/user/certus/entkern.py" "$BAU" > "$BAU/entkern.log"
 
 cp "$CERTUS_REPO/lib/osum/certus_main.fi" "$BAU/certus_main.fi"
+python3 "$ROOT/kernel/user/certus/splitstems.py" "$ROOT" "$BAU" "$ROOT/vendor/firn" | tee "$BAU/splitstems.log"
+if [ -f "$BAU/std/deflate.fi" ] && ! grep -q 'fn inflate_limited' "$BAU/std/deflate.fi"; then
+    stddir=$(readlink -f "$BAU/std")
+    rm "$BAU/std"
+    mkdir "$BAU/std"
+    for f in "$stddir"/*; do ln -sfn "$f" "$BAU/std/$(basename "$f")"; done
+    src="$stddir/deflate.fi"
+    rm "$BAU/std/deflate.fi"
+    { sed '0,/^export {/s//export {\n    inflate_limited,/' "$src"; cat "$ROOT/kernel/user/certus/shims/deflate_limited.fi"; } > "$BAU/std/deflate.fi"
+fi
 
 cd "$BAU"
 FIRNLIB="$BAU" "$FIRNC" -c -o "$BAU/certus.o" certus_main.fi
