@@ -7,7 +7,7 @@ export FIRNLIB="$ROOT/lib"
 ULD=kernel/user/user.ld
 FIRNC=vendor/firn/bin/firnc
 FC1=vendor/firn/bin/firnc1
-MODULES=${SELFHOST_MODULES:-echo}
+MODULES=${SELFHOST_MODULES:-echo fas}
 GUEST_LIMIT=${SELFHOST_TIMEOUT:-1500}
 
 TMPD=$(mktemp -d)
@@ -66,11 +66,14 @@ ld -T "$ULD" --defsym=USER_ENTRY=_F0.u_start -o "$TMPD/fas.host" "$TMPD/hostcrt.
 bash tools/build-kernel.sh "$TMPD/k.mb" >/dev/null 2>&1 && ok "kernel built" || { bad "kernel build"; echo "SELFHOST: $pass passed, $fail failed"; exit 1; }
 
 guest_specs() {
-    local entry=$1 dest=$2 f rel
+    local entry=$1 dest=$2 f rel edir
+    edir=$(cd "$(dirname "$entry")" && pwd)
     while read -r f; do
         rel=${f#"$ROOT/"}
+        case "$f" in
+            "$edir"/*) printf '%s\n' "$dest/${f#"$edir"/}=$f" ; continue ;;
+        esac
         case "$rel" in
-            "$(dirname "$entry")"/*) printf '%s\n' "$dest/$(basename "$rel")=$f" ;;
             lib/*) printf '%s\n' "$dest/${rel#lib/}=$f" ;;
             vendor/firn/lib/*) printf '%s\n' "$dest/${rel#vendor/firn/lib/}=$f" ;;
         esac
@@ -91,7 +94,7 @@ host_reference() {
     base=$(basename "$entry" .fi)
     stage_tree "$entry" "$out/tree"
     ( cd "$out/tree/src" && env -u FIRNLIB "$ROOT/$FC1" "$base.fi" > "$out/$base.s" 2>"$out/$base.err" ) || return 1
-    "$TMPD/fas.host" "$out/$base.s" -o "$out/$base.elf" --crt _F1.u_start > "$out/$base.fas" 2>&1
+    "$TMPD/fas.host" "$out/$base.s" -o "$out/$base.elf" $FAS_CRT > "$out/$base.fas" 2>&1
 }
 
 run_guest() {
@@ -104,20 +107,31 @@ run_guest() {
     cp "$TMPD/live.img" "$img.after"
 }
 
+dir_specs() {
+    sed 's/=.*//' | while read -r t; do
+        d=$(dirname "$t")
+        while [ "$d" != / ]; do printf '%s/\n' "$d"; d=$(dirname "$d"); done
+    done | sort -u | awk '{ print gsub("/","/") " " $0 }' | sort -n | cut -d' ' -f2
+}
+
 make_image() {
     local img=$1 entry=$2 base=$3
     mapfile -t specs < <(guest_specs "$entry" /src)
-    python3 tools/osum/mkfs.py build "$img" 40000 --inodes=256 /bin/ /src/ /src/libc/ \
+    mapfile -t dirs < <(printf '%s\n' "${specs[@]}" | dir_specs)
+    python3 tools/osum/mkfs.py build "$img" $BLOCKS --v3 --inodes=256 /bin/ "${dirs[@]}" \
         /bin/sh="$TMPD/sh" /bin/echo="$TMPD/echo" /bin/fas="$TMPD/fas" /bin/firnc="$TMPD/firnc" "${specs[@]}" > "$TMPD/mkfs.$base.txt" 2>&1
 }
 
 for m in $MODULES; do
     echo "== 2. module $m: the compiler runs inside the guest =="
     entry="kernel/user/$m.fi"
+    crt="--crt _F1.u_start"
+    blocks=40000
+    if [ "$m" = firnc1 ]; then entry="$TMPD/fz/bin/firnc1.fi"; crt=""; blocks=200000; fi
     mkdir -p "$TMPD/ref.$m"
-    host_reference "$entry" "$TMPD/ref.$m" && ok "host reference built ($(stat -c%s "$TMPD/ref.$m/$m.s") octets of assembler text)" || { bad "host reference"; head -3 "$TMPD/ref.$m/$m.err" "$TMPD/ref.$m/$m.fas"; continue; }
-    make_image "$TMPD/$m.img" "$entry" "$m" && ok "guest disk image written" || { bad "mkfs"; head -3 "$TMPD/mkfs.$m.txt"; continue; }
-    S="cd /src;/bin/firnc $m.fi > /$m.s;/bin/echo UEB=\$?;fas /$m.s -o /$m --crt _F1.u_start;/bin/echo BIN=\$?;exit"
+    FAS_CRT=$crt host_reference "$entry" "$TMPD/ref.$m" && ok "host reference built ($(stat -c%s "$TMPD/ref.$m/$m.s") octets of assembler text)" || { bad "host reference"; head -3 "$TMPD/ref.$m/$m.err" "$TMPD/ref.$m/$m.fas"; continue; }
+    BLOCKS=$blocks make_image "$TMPD/$m.img" "$entry" "$m" && ok "guest disk image written" || { bad "mkfs"; head -3 "$TMPD/mkfs.$m.txt"; continue; }
+    S="cd /src;/bin/firnc $m.fi > /$m.s;/bin/echo UEB=\$?;fas /$m.s -o /$m $crt;/bin/echo BIN=\$?;exit"
     run_guest "$TMPD/$m.img" "$S" "$TMPD/$m.serial"
     same "guest compiler exit status" "$(field "$TMPD/$m.serial" 'UEB=[0-9]+')" "UEB=0"
     same "guest assembler exit status" "$(field "$TMPD/$m.serial" 'BIN=[0-9]+')" "BIN=0"
@@ -136,7 +150,8 @@ for m in $MODULES; do
     cp "$entry" "$TMPD/mut.$m/$m.fi"
     printf '\nfn selfhost_control_marker() -> i32 {\n    return 4242\n}\n' >> "$TMPD/mut.$m/$m.fi"
     mapfile -t specs < <(guest_specs "$entry" /src | grep -v "^/src/$m.fi=")
-    python3 tools/osum/mkfs.py build "$TMPD/$m.mut.img" 40000 --inodes=256 /bin/ /src/ /src/libc/ \
+    mapfile -t dirs < <(printf '%s\n' "${specs[@]}" | dir_specs)
+    python3 tools/osum/mkfs.py build "$TMPD/$m.mut.img" $blocks --v3 --inodes=256 /bin/ "${dirs[@]}" \
         /bin/sh="$TMPD/sh" /bin/echo="$TMPD/echo" /bin/fas="$TMPD/fas" /bin/firnc="$TMPD/firnc" "/src/$m.fi=$TMPD/mut.$m/$m.fi" "${specs[@]}" > "$TMPD/mkfs.mut.txt" 2>&1
     run_guest "$TMPD/$m.mut.img" "$S" "$TMPD/$m.mut.serial"
     python3 tools/osum/mkfs.py cat "$TMPD/$m.mut.img.after" "/$m.s" > "$TMPD/$m.mut.s" 2>/dev/null
@@ -149,7 +164,7 @@ done
 
 echo "== 4. control: a broken source fails in the guest =="
 printf 'fn main(start: u64) -> i32 {\n    return nosuchname\n}\n' > "$TMPD/broken.fi"
-python3 tools/osum/mkfs.py build "$TMPD/b.img" 8000 --inodes=64 /bin/ /src/ \
+python3 tools/osum/mkfs.py build "$TMPD/b.img" 8000 --v3 --inodes=64 /bin/ /src/ \
     /bin/sh="$TMPD/sh" /bin/echo="$TMPD/echo" /bin/fas="$TMPD/fas" /bin/firnc="$TMPD/firnc" /src/broken.fi="$TMPD/broken.fi" > "$TMPD/mkfs.b.txt" 2>&1
 run_guest "$TMPD/b.img" "cd /src;/bin/firnc broken.fi > /broken.s;/bin/echo UEB=\$?;exit" "$TMPD/b.serial"
 rc=$(field "$TMPD/b.serial" 'UEB=[0-9]+')
