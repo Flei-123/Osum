@@ -298,9 +298,9 @@ def quad(x0, y0, cx, cy, x1, y1):
 
 
 class Glyphe:
-    def __init__(self, w, h, left_edge, top_2, adv26, deckung):
+    def __init__(self, w, h, left, top_2, adv26, deckung):
         self.w, self.h = w, h
-        self.left_edge, self.top_2 = left_edge, top_2
+        self.left, self.top_2 = left, top_2
         self.adv26 = adv26
         self.a = deckung
 
@@ -483,13 +483,13 @@ def vergleich(path_ttf, mitschnitt):
         name = "'%c' (0x%02x)" % (c if 32 <= c < 127 else 63, c)
         geprueft += 1
         tinte += g.gesetzt()
-        if (g.w, g.h, g.left_edge, g.top_2, g.adv26) != (int(w), int(h),
+        if (g.w, g.h, g.left, g.top_2, g.adv26) != (int(w), int(h),
                                                     int(left), int(top),
                                                     int(adv)):
             bad_2.append("%s Masse: Kern %sx%s l=%s t=%s a=%s, "
                             "Wirt %dx%d l=%d t=%d a=%d"
                             % (name, w, h, left, top, adv, g.w, g.h,
-                               g.left_edge, g.top_2, g.adv26))
+                               g.left, g.top_2, g.adv26))
             continue
         if sum_2(g) != int(sm):
             bad_2.append("%s Pruefsumme: Kern %s, Wirt %d"
@@ -523,7 +523,7 @@ def main(argv):
         s = Font(argv[2], int(argv[3]))
         g = s.glyphe(ord(argv[4]))
         print("%dx%d left=%d top=%d adv=%d/64 set=%d"
-              % (g.w, g.h, g.left_edge, g.top_2, g.adv26, g.gesetzt()))
+              % (g.w, g.h, g.left, g.top_2, g.adv26, g.gesetzt()))
         stufen = " .:-=+*#%@"
         for y in range(g.h):
             print("".join(stufen[min(9, g.punkt(x, y) * 10 // 256)]

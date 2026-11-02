@@ -981,7 +981,7 @@ import glascheck as G
 mit = []
 for p in sys.argv[1:3]:
     im = Image.open(p).convert('RGB')
-    pts = G.leiste(im, 28, 300, 1100)
+    pts = G.bar(im, 28, 300, 1100)
     px = [im.getpixel(q) for q in pts]
     mit.append([sum(c[i] for c in px) / len(px) for i in range(3)])
 print(int(sum(abs(mit[0][i] - mit[1][i]) for i in range(3)) / 3))
@@ -1101,7 +1101,7 @@ for p in sys.argv[1:3]:
     im = Image.open(p).convert('RGB')
     w, h = im.size
     y = h - 28 + 14                      # die Mitte des Leistenstreifens
-    zeile = [G.hell(im.getpixel((x, y))) for x in range(300, 1100)]
+    zeile = [G.bright(im.getpixel((x, y))) for x in range(300, 1100)]
     stufen = len(set(zeile))
     lang = 0
     i = 0
@@ -1901,7 +1901,7 @@ for pair in "set:Darstellung" "winal:durchsichtig" "setv:Vorlagen"; do
     num "Seite $nm: Beschriftungen, die ueber ihren Knopf hinausragen" \
         "$(printf '%s' "$KO" | grep -oE 'ueberstand [0-9]+' | cut -d' ' -f2)" \
         eq 0
-    printf '%s\n' "$KO" | grep -a KNOPF | sed 's/^/        /' || true
+    printf '%s\n' "$KO" | grep -a BUTTON | sed 's/^/        /' || true
 done
 UEB=$(python3 - "$TMPD/setv/desktop.ppm" "$TMPD/setv/serial.txt" <<'PYU'
 import re
@@ -1952,7 +1952,7 @@ roh = open(sys.argv[2], "rb").read().decode("latin1")
 schnitt = roh.rfind("settings: rect name=waa ")
 tail = roh[schnitt:] if schnitt >= 0 else roh
 pic = S.Pic(sys.argv[1])
-for m in S.KNOPF.finditer(tail):
+for m in S.BUTTON.finditer(tail):
     x, y, bw, bh, r, ax, ay = (int(g) for g in m.groups())
     grund = pic.at(ax - 8, ay + bh // 2)
     if grund is None:
