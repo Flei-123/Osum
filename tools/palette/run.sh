@@ -16,3 +16,5 @@ if python3 tools/palette/check.py "$OUT/own" > "$OUT/own.out" 2>&1; then
     exit 1
 fi
 echo "control (palette=own) is red as expected"
+bash tools/palette/termansi.sh || exit 1
+bash tools/palette/screens.sh || exit 1

@@ -6,6 +6,7 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SNAPSHOT = os.path.join(ROOT, "assets", "palette", "dark.tsv")
+PRIMITIVES = os.path.join(ROOT, "assets", "palette", "primitives.tsv")
 OUT_FI = os.path.join(ROOT, "kernel", "user", "wlibc", "wcpal.fi")
 OUT_CSS = os.path.join(ROOT, "reports", "mockups", "palette-dark.css")
 ORBIT_TOKENS = os.environ.get(
@@ -111,6 +112,27 @@ def write_snapshot(rows):
             f.write("%s\t%s\t%s\n" % r)
 
 
+def read_primitives():
+    rows = []
+    for line in open(PRIMITIVES, encoding="utf-8"):
+        line = line.rstrip("\n")
+        if line and not line.startswith("#"):
+            slot, hexs = line.split("\t")
+            rows.append((slot, hexs))
+    return rows
+
+
+def render_primitives():
+    out = ["fn primitives_builtin() {"]
+    for slot, hexs in read_primitives():
+        if slot.isdigit():
+            out.append("    wcbase.neutral[(%s) as usize] = 0x00%s" % (slot, hexs))
+        else:
+            out.append("    wcbase.sch_%s = 0x00%s" % (slot, hexs))
+    out += ["}", ""]
+    return out
+
+
 def render_fi(rows):
     pal = {r: h for r, h, _ in rows}
     out = ["// SPDX-License-Identifier: GPL-2.0-only", "profile kernel", "", "import wlibc.wcbase", ""]
@@ -132,6 +154,7 @@ def render_fi(rows):
             out.append("    wcbase.sem[(wcbase.%s) as usize] = DARK_%s" % (s, role.upper()))
         out.append("}")
         out.append("")
+    out += render_primitives()
     return "\n".join(out)
 
 

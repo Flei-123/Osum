@@ -6,7 +6,8 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BASELINE = os.path.join(ROOT, "tools", "palette", "hex_baseline.tsv")
-LITERAL = re.compile(rb"0x(?:00|FF|ff)?[0-9A-Fa-f]{6}\b")
+LITERAL = re.compile(rb"(?<![&] )(?<!&)0x(?:00|FF|ff)?[0-9A-Fa-f]{6}\b")
+ALPHA_MASK = re.compile(rb"0x[Ff]{6}[0-9A-Fa-f]{2}$")
 SKIP = {"kernel/user/wlibc/wcpal.fi"}
 
 
@@ -23,7 +24,7 @@ def count(root):
         path = os.path.join(root, rel)
         if not os.path.exists(path):
             continue
-        n = len(LITERAL.findall(open(path, "rb").read()))
+        n = sum(1 for m in LITERAL.findall(open(path, "rb").read()) if not ALPHA_MASK.match(m))
         if n:
             counts[rel] = n
     return counts
