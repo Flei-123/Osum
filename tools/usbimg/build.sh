@@ -15,6 +15,7 @@ ESP_MIB=${ESP_MIB:-96}
 [ "${HP_STICK:-0}" = 1 ] && : "${BOOT_KERNEL_COPY:=1}"
 FS_BLOCKS_DEFAULT=98304
 [ "${BOOT_KERNEL_COPY:-0}" = 1 ] && FS_BLOCKS_DEFAULT=114688
+[ -n "${FS_BLOCKS:-}" ] && FS_BLOCKS_SET=1
 FS_BLOCKS=${FS_BLOCKS:-$FS_BLOCKS_DEFAULT}
 [ "${ROOT_SLIM:-0}" = 1 ] && FS_BLOCKS=${FS_BLOCKS_SLIM:-78000}   # see ROOT_SLIM below
 FS_INODES_DEFAULT=1024
@@ -208,6 +209,9 @@ if [ -z "$CERTUS_REAL" ] && [ "${CERTUS_BUILD:-1}" = 1 ] && [[ " $PROGS " == *" 
 fi
 [ -n "$CERTUS_REAL" ] && [ ! -s "$CERTUS_REAL" ] && { echo "== NOTE: CERTUS=$CERTUS_REAL is empty or missing -- the placeholder is used" >&2; CERTUS_REAL=""; }
 [ -n "$CERTUS_REAL" ] && sagen "browser     certus $(stat -c%s "$CERTUS_REAL") Oktette aus $CERTUS_REAL"
+if [ -n "$CERTUS_REAL" ] && [ -z "${FS_BLOCKS_SET:-}" ]; then
+    FS_BLOCKS=$(( FS_BLOCKS + ($(stat -c%s "$CERTUS_REAL") + 511) / 512 + 4096 ))
+fi
 for p in $PROGS; do
     [ -f "kernel/user/$p.fi" ] || continue
     rm -f "$OUT/$p.fail"

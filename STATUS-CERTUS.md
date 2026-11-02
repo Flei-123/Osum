@@ -86,8 +86,8 @@ zehn `osum_*`-Stubs.
 
 | | vorher | jetzt |
 | --- | ---: | ---: |
-| `IMAGE_END` (Abbildfenster) | 0x40400000 (3 MiB) | **0x40C00000** (11 MiB) |
-| `BIG_FLOOR` (Beginn der großen Arena) | 0x40600000 | **0x40C00000** |
+| `IMAGE_END` (Abbildfenster) | 0x40C00000 (11 MiB) | **0x44400000** (67 MiB, `INTERP_BASE` 0x44200000) |
+| `BIG_FLOOR` (Beginn der großen Arena) | 0x40C00000 | **0x44400000** |
 | `PRIV_SLOTS` / `BIG_TOP` | 6 / 0x40C00000 | **99** / **0x4C600000** (186 MiB) |
 
 Die private Gegend erreicht 0x50000000 weiterhin **nicht** — der
