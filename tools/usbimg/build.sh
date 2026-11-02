@@ -129,7 +129,7 @@ grep head tail wc find du chmod id whoami install opk mount umount sync \
 touch true false sleep kill sort uniq rmdir tar \
 dhcp ping log host ota fsck jsig jarvisctl pollbr reboot shutdown power fas \
 glogin lock login passwd su chown idlelock powerd init svc term termfull shasum noise \
-orientbus act settingsd axd sntp accountcli pdfview store stored mediad presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist xclip charmap osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover screenreader xfx vaultd vaultctl vaultprompt vaultui"}
+orientbus act settingsd axd sntp accountcli pdfview open certus store stored mediad presentlog sysinfo hwinv massren privacy welcome elevate runbox cliphist xclip charmap osk apprights wmplug hotkeyd jarvismini social soclocal melder freunde partyrun bench wlanpersist drvctl lspci pcicfg regdump prphread wlanctl dbgsrv backup recover screenreader xfx vaultd vaultctl vaultprompt vaultui"}
 # ODB=1 (debug build): the debug agent is one more program in /bin
 [ "${ODB:-0}" = 1 ] && PROGS="$PROGS odbd"
 # the public image has no chat server to reach: no JARVIS Mini binary there
@@ -202,9 +202,20 @@ build_prog() {
     strip --strip-all "$OUT/$p.elf"
 }
 built_list=""
+CERTUS_REAL=${CERTUS:-}
+if [ -z "$CERTUS_REAL" ] && [ "${CERTUS_BUILD:-1}" = 1 ] && [[ " $PROGS " == *" certus "* ]]; then
+    CERTUS_REAL=$(bash tools/certus/ensure.sh 2>"$OUT/certus.ensure.log")
+fi
+[ -n "$CERTUS_REAL" ] && [ ! -s "$CERTUS_REAL" ] && { echo "== NOTE: CERTUS=$CERTUS_REAL is empty or missing -- the placeholder is used" >&2; CERTUS_REAL=""; }
+[ -n "$CERTUS_REAL" ] && sagen "browser     certus $(stat -c%s "$CERTUS_REAL") Oktette aus $CERTUS_REAL"
 for p in $PROGS; do
     [ -f "kernel/user/$p.fi" ] || continue
     rm -f "$OUT/$p.fail"
+    if [ "$p" = certus ] && [ -n "$CERTUS_REAL" ]; then
+        cp "$CERTUS_REAL" "$OUT/certus.elf"
+        built_list="$built_list $p"
+        continue
+    fi
     while [ "$(jobs -rp | wc -l)" -ge "$((BUILD_JOBS + 1))" ]; do wait -n; done
     build_prog "$p" &
     JOB_PIDS+=($!)
@@ -703,6 +714,7 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        "/etc/actions.d/store.actions=etc/actions.d/store.actions"
        "/etc/actions.d/media.actions=etc/actions.d/media.actions"
        "/etc/store.conf=etc/store.conf")
+ARGS+=("/etc/handlers.conf=${HANDLERS_CONF:-etc/handlers.conf}@0644")
 ARGS+=("/etc/hotkeys.conf=$OUT/hotkeys.conf@0644"
        "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
        "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
@@ -739,9 +751,9 @@ if [ -n "$ROOTS" ] && [ -s "$ROOTS" ]; then
 fi
 # ================================ RUNDE MERGE9: DIE GROSSEN MITBRINGSEL
 #
-#   CERTUS=/pfad/certus  BUSYBOX=...  LUA=...  SQLITE=...
+#   BUSYBOX=...  LUA=...  SQLITE=...
 #
-for mit in "CERTUS:/bin/certus" "BUSYBOX:/bin/busybox" \
+for mit in "BUSYBOX:/bin/busybox" \
            "LUA:/bin/lua" "SQLITE:/bin/sqlite3"; do
     mvar=${mit%%:*}; mziel=${mit##*:}
     mpfad=$(eval "printf '%s' \"\${$mvar:-}\"")
@@ -936,6 +948,7 @@ PFLICHT="/usr/share/locale/de/messages /usr/share/locale/en/messages \
 /etc/settings.schema /etc/actions.d/settings.actions \
 /bin/axd /etc/actions.d/a11y.actions /etc/actions.d/screenreader.actions /etc/screenreader.conf \
 /bin/pdfview /apps/pdfview.osp/start /apps/pdfview.osp/INFO /apps/pdfview.osp/symbol \
+/bin/open /bin/certus /etc/handlers.conf /apps/certus.osp/start /apps/certus.osp/INFO /apps/certus.osp/symbol \
 /bin/store /bin/stored /bin/mediad /etc/actions.d/store.actions /etc/actions.d/media.actions /etc/store.conf \
 /apps/store.osp/start /apps/store.osp/INFO /apps/store.osp/symbol \
 /bin/social /bin/soclocal /bin/melder /bin/freunde /bin/partyrun /bin/socfleitec /apps/social.prog/ACTIONS /apps/social.prog/SETTINGS /etc/social/providers /etc/social/fleitec.conf /etc/social/games.tsv /bin/sysinfo /bin/hwinv /bin/privacy /bin/welcome /bin/elevate /apps/welcome.osp/start /apps/welcome.osp/INFO /bin/runbox /apps/run.osp/start /apps/run.osp/INFO /apps/run.osp/symbol /bin/osk /apps/osk.osp/start /apps/osk.osp/INFO /apps/osk.osp/symbol /bin/charmap /apps/charmap.osp/start /apps/charmap.osp/INFO /apps/charmap.osp/symbol /bin/xclip /bin/cliphist /apps/cliphist.osp/start /apps/cliphist.osp/INFO /apps/cliphist.osp/symbol \

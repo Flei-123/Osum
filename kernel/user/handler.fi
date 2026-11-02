@@ -1,0 +1,127 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+
+export { find, classify, program_for, open_target, NO_HANDLER }
+
+const NO_HANDLER: u64 = 0xFFFFFFFFFFFFFFFF
+const KEY_MAX: u64 = 96
+const PROG_MAX: u64 = 96
+
+static mut conf_path: [u8; 19] = "/etc/handlers.conf\0"
+static mut kind_scheme: [u8; 7] = "scheme\0"
+static mut kind_ext: [u8; 4] = "ext\0"
+static mut sep: [u8; 4] = "://\0"
+static mut rdctx: [u8; 528] = [0 as u8; 528]
+static mut line: [u8; 256] = [0 as u8; 256]
+static mut w_kind: [u8; 16] = [0 as u8; 16]
+static mut w_key: [u8; 96] = [0 as u8; 96]
+static mut w_prog: [u8; 96] = [0 as u8; 96]
+
+fn lower(c: u64) -> u64 {
+    if c >= 65 && c <= 90 {
+        return c + 32
+    }
+    return c
+}
+
+fn copy_lower(dst: u64, src: u64, n: u64, max: u64) -> u64 {
+    var i: u64 = 0
+    while i < n && i + 1 < max {
+        __mmio_write8((dst + i) as *mut u8, lower((*((src + i) as *mut u8)) as u64) as u8)
+        i = i + 1
+    }
+    __mmio_write8((dst + i) as *mut u8, 0 as u8)
+    return i
+}
+
+fn find(kind: u64, key: u64, out: u64, max: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&conf_path[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.rd_init((&rdctx[0 as usize]) as u64)
+    var found: bool = false
+    var more: bool = true
+    while more && !found {
+        let n: u64 = ulib.rd_line(fd, (&rdctx[0 as usize]) as u64, (&line[0 as usize]) as u64, 250)
+        if n == ulib.EOF {
+            more = false
+        } else {
+            let l: u64 = (&line[0 as usize]) as u64
+            let a: u64 = ulib.word(l, 0, (&w_kind[0 as usize]) as u64, 16)
+            let b: u64 = ulib.word(l, a, (&w_key[0 as usize]) as u64, KEY_MAX)
+            let _c: u64 = ulib.word(l, b, (&w_prog[0 as usize]) as u64, PROG_MAX)
+            if ulib.streq((&w_kind[0 as usize]) as u64, kind)
+                && ulib.streq((&w_key[0 as usize]) as u64, key)
+                && (*((&w_prog[0 as usize]) as *mut u8)) != 0 as u8 {
+                ulib.strncpy(out, (&w_prog[0 as usize]) as u64, max)
+                found = true
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return found
+}
+
+fn classify(target: u64, kind_out: u64, key_out: u64, max: u64) -> bool {
+    let at: u64 = ulib.find(target, (&sep[0 as usize]) as u64)
+    if at != ulib.EOF && at > 0 {
+        ulib.strcpy(kind_out, (&kind_scheme[0 as usize]) as u64)
+        copy_lower(key_out, target, at, max)
+        return true
+    }
+    let total: u64 = ulib.length(target)
+    var end: u64 = total
+    var i: u64 = 0
+    while i < total {
+        let c: u64 = (*((target + i) as *mut u8)) as u64
+        if c == 63 || c == 35 {
+            end = i
+            i = total
+        } else {
+            i = i + 1
+        }
+    }
+    var dot: u64 = ulib.EOF
+    i = 0
+    while i < end {
+        let c: u64 = (*((target + i) as *mut u8)) as u64
+        if c == 47 {
+            dot = ulib.EOF
+        }
+        if c == 46 {
+            dot = i
+        }
+        i = i + 1
+    }
+    if dot == ulib.EOF {
+        return false
+    }
+    ulib.strcpy(kind_out, (&kind_ext[0 as usize]) as u64)
+    copy_lower(key_out, target + dot, end - dot, max)
+    return true
+}
+
+fn program_for(target: u64, out: u64, max: u64) -> bool {
+    var kind: [u8; 16] = [0 as u8; 16]
+    var key: [u8; 96] = [0 as u8; 96]
+    if !classify(target, (&kind[0 as usize]) as u64, (&key[0 as usize]) as u64, KEY_MAX) {
+        return false
+    }
+    return find((&kind[0 as usize]) as u64, (&key[0 as usize]) as u64, out, max)
+}
+
+fn open_target(target: u64) -> u64 {
+    var prog: [u8; 96] = [0 as u8; 96]
+    var name: [u8; 96] = [0 as u8; 96]
+    var argv: [u64; 2] = [0 as u64; 2]
+    if !program_for(target, (&prog[0 as usize]) as u64, PROG_MAX) {
+        return NO_HANDLER
+    }
+    ulib.strcpy((&name[0 as usize]) as u64, ulib.base_name((&prog[0 as usize]) as u64))
+    argv[0 as usize] = (&name[0 as usize]) as u64
+    argv[1 as usize] = target
+    return ulib.sys(ulib.SYS_EXEC, (&prog[0 as usize]) as u64, (&argv[0 as usize]) as u64, 2)
+}
