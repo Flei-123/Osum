@@ -17,6 +17,8 @@
 //
 // USB "stream mode" (bulk pipes only, LITTLE endian): len le16 | 0x4e00 le16
 // (rx) or 0x697e (tx), payload, padded to 4 bytes.
+import libc.octets
+
 
 export {
     HDR_LEN, MSG_READY, MSG_CONNECT, MSG_CONN_RSP, MSG_SETUP_COMPLETE,
@@ -71,26 +73,20 @@ const WMI_TGT_RDY_EVENT: u64 = 0x1001
 const TAG_RX: u64 = 0x4e00
 const TAG_TX: u64 = 0x697e
 
-fn ld(p: u64, i: usize) -> u64 {
-    let b: u8 = *((p + i as u64) as *mut u8)
-    return b as u64
-}
-fn st(p: u64, i: usize, v: u64) { *((p + i as u64) as *mut u8) = (v & 255) as u8 }
-
 fn put16(p: u64, i: usize, v: u64) {
-    st(p, i, v >> 8)
-    st(p, i + 1, v)
+    octets.st8_idx(p, i, v >> 8)
+    octets.st8_idx(p, i + 1, v)
 }
-fn get16(p: u64, i: usize) -> u64 { return (ld(p, i) << 8) | ld(p, i + 1) }
+fn get16(p: u64, i: usize) -> u64 { return (octets.ld8_idx(p, i) << 8) | octets.ld8_idx(p, i + 1) }
 fn put32(p: u64, i: usize, v: u64) {
     put16(p, i, v >> 16)
     put16(p, i + 2, v)
 }
 fn get32(p: u64, i: usize) -> u64 { return (get16(p, i) << 16) | get16(p, i + 2) }
-fn le16_get(p: u64, i: usize) -> u64 { return ld(p, i) | (ld(p, i + 1) << 8) }
+fn le16_get(p: u64, i: usize) -> u64 { return octets.ld8_idx(p, i) | (octets.ld8_idx(p, i + 1) << 8) }
 fn le16_put(p: u64, i: usize, v: u64) {
-    st(p, i, v)
-    st(p, i + 1, v >> 8)
+    octets.st8_idx(p, i, v)
+    octets.st8_idx(p, i + 1, v >> 8)
 }
 
 // Pipes a service uses (htc_hst.c service_to_ulpipe / service_to_dlpipe).
@@ -110,13 +106,13 @@ fn svc_dl_pipe(svc: u64) -> u64 {
 // ---- HTC frame header -------------------------------------------------
 
 fn hdr_put(out: u64, epid: u64, flags: u64, plen: usize) {
-    st(out, 0, epid)
-    st(out, 1, flags)
+    octets.st8_idx(out, 0, epid)
+    octets.st8_idx(out, 1, flags)
     put16(out, 2, plen as u64)
-    st(out, 4, 0)
-    st(out, 5, 0)
-    st(out, 6, 0)
-    st(out, 7, 0)
+    octets.st8_idx(out, 4, 0)
+    octets.st8_idx(out, 5, 0)
+    octets.st8_idx(out, 6, 0)
+    octets.st8_idx(out, 7, 0)
 }
 
 // Validates the 8-byte header against the received length. Returns the
@@ -124,7 +120,7 @@ fn hdr_put(out: u64, epid: u64, flags: u64, plen: usize) {
 // -2 = firmware panic marker (endpoint 0x99).
 fn hdr_check(p: u64, len: usize) -> i64 {
     if len < HDR_LEN { return -1 }
-    let ep: u64 = ld(p, 0)
+    let ep: u64 = octets.ld8_idx(p, 0)
     if ep == 0x99 { return -2 }
     if ep >= EP_MAX { return -1 }
     let pl: usize = get16(p, 2) as usize
@@ -144,10 +140,10 @@ fn build_conn(out: u64, svc: u64, flags: u64, dl: u64, ul: u64) -> usize {
     put16(b, 0, MSG_CONNECT)
     put16(b, 2, svc)
     put16(b, 4, flags)
-    st(b, 6, dl)
-    st(b, 7, ul)
-    st(b, 8, 0)
-    st(b, 9, 0)
+    octets.st8_idx(b, 6, dl)
+    octets.st8_idx(b, 7, ul)
+    octets.st8_idx(b, 8, 0)
+    octets.st8_idx(b, 9, 0)
     return 18
 }
 
@@ -155,8 +151,8 @@ fn build_conn(out: u64, svc: u64, flags: u64, dl: u64, ul: u64) -> usize {
 fn build_config_pipe(out: u64, pipe: u64, credits: u64) -> usize {
     hdr_put(out, 0, 0, 4)
     put16(out + 8, 0, MSG_CONFIG_PIPE)
-    st(out + 8, 2, pipe)
-    st(out + 8, 3, credits)
+    octets.st8_idx(out + 8, 2, pipe)
+    octets.st8_idx(out + 8, 3, credits)
     return 12
 }
 
@@ -178,7 +174,7 @@ fn parse_ready(p: u64, len: usize, credits: *mut u64, credit_size: *mut u64,
     if get16(p, 8) != MSG_READY { return false }
     *credits = get16(p, 10)
     *credit_size = get16(p, 12)
-    *max_ep = ld(p, 14)
+    *max_ep = octets.ld8_idx(p, 14)
     return true
 }
 
@@ -190,8 +186,8 @@ fn parse_conn_rsp(p: u64, len: usize, svc: *mut u64, status: *mut u64,
     if hdr_payload_len(p) < 10 { return false }
     if get16(p, 8) != MSG_CONN_RSP { return false }
     *svc = get16(p, 10)
-    *status = ld(p, 12)
-    *epid = ld(p, 13)
+    *status = octets.ld8_idx(p, 12)
+    *epid = octets.ld8_idx(p, 13)
     *maxlen = get16(p, 14)
     return true
 }
@@ -206,7 +202,7 @@ fn build_wmi(out: u64, epid: u64, cmd: u64, seq: u64, body: u64,
     put16(out + 8, 2, seq)
     var i: usize = 0
     while i < blen {
-        st(out + 12, i, ld(body, i))
+        octets.st8_idx(out + 12, i, octets.ld8_idx(body, i))
         i = i + 1
     }
     return 12 + blen
@@ -235,12 +231,12 @@ fn stream_put(dst: u64, src: u64, n: usize, tag: u64) -> usize {
     le16_put(dst, 2, tag)
     var i: usize = 0
     while i < n {
-        st(dst, 4 + i, ld(src, i))
+        octets.st8_idx(dst, 4 + i, octets.ld8_idx(src, i))
         i = i + 1
     }
     var tot: usize = 4 + n
     while (tot & 3) != 0 {
-        st(dst, tot, 0)
+        octets.st8_idx(dst, tot, 0)
         tot = tot + 1
     }
     return tot

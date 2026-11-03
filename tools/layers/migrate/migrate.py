@@ -24,12 +24,21 @@ def callees(body):
 
 
 def module_ok(mt, m):
-    if re.search(r'(?<![\w.])%s\b(?!\.)' % m, re.sub(r'^import .*$', '', mt, flags=re.M)):
+    plain = re.sub(r'"[^"\n]*"', '""', re.sub(r'^import .*$', '', mt, flags=re.M))
+    if re.search(r'(?<![\w.])%s\b(?!\.)' % m, plain):
         return False
     for im in re.finditer(r'^import\s+([\w.]+)\s*$', mt, re.M):
         if im.group(1).split('.')[-1] == m and im.group(1) != 'libc.' + m:
             return False
     return True
+
+
+def drop_export(text, name):
+    def fix(m):
+        block = m.group(0)
+        block = re.sub(r'(?<![\w.])%s\s*,[ \t]*' % re.escape(name), '', block, count=1)
+        return re.sub(r',\s*%s\b(?=\s*\})' % re.escape(name), '', block, count=1)
+    return re.sub(r'export\s*\{[^}]*\}', fix, text)
 
 
 def add_imports(out, needed):
@@ -107,6 +116,7 @@ for f in files:
     exported = set()
     for e in re.finditer(r'export\s*\{([^}]*)\}', mt):
         exported |= {x.strip() for x in e.group(1).replace('\n', ' ').split(',') if x.strip()}
+    mt_body = re.sub(r'export\s*\{[^}]*\}', lambda m: ' ' * len(m.group(0)), mt)
     blocks = list(N.blocks(mt))
     if not blocks:
         continue
@@ -122,12 +132,10 @@ for f in files:
             name = hm.group(2)
             if name in resolved or hm.group(1) or len(local[name]) != 1:
                 continue
-            if name in exported:
-                continue
-            if stem in ext.get(name, ()):
+            if name in exported or stem in ext.get(name, ()):
                 if not EXT or stem_count[stem] != 1 or (stem, name) in ext_value:
                     continue
-            if re.search(r'(?<![\w.])(?<!fn )%s\b(?!\s*\()' % re.escape(name), mt):
+            if re.search(r'(?<![\w.])(?<!fn )%s\b(?!\s*\()' % re.escape(name), mt_body):
                 continue
             form = nn(hm, full)
             cand = libfns.get(form)
@@ -158,7 +166,10 @@ for f in files:
         if not sites:
             continue
         mod, lname = resolved[name]
-        if not all(module_ok(mask(texts[g]), mod) for g in sites):
+        bad_sites = [g for g in sites if not module_ok(mask(texts[g]), mod)]
+        if os.environ.get('WHY') and bad_sites:
+            print('blocked', stem, name, bad_sites[:6])
+        if bad_sites:
             del resolved[name]
             removal = [r for r in removal if r[2] != name]
             continue
@@ -172,6 +183,8 @@ for f in files:
         while b < len(out) and out[b] == '\n':
             b += 1
         out = out[:s] + out[b:]
+    for name in resolved:
+        out = drop_export(out, name)
     for name, (mod, lname) in resolved.items():
         out = re.sub(r'(?<![\w.])%s(\s*)\(' % re.escape(name), lambda m: '%s.%s%s(' % (mod, lname, m.group(1)), out)
     out = add_imports(out, {m for m, _ in resolved.values()})

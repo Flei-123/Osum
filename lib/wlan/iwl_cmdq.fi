@@ -7,6 +7,7 @@ import wlan.iwl_mvm_txq
 import wlan.iwl_txresp
 import wlan.iwl_buf
 import wlan.regtrace
+import libc.octets
 
 export {
     Cq, cq_new, cq_attach, cq_attach_data, cq_dq_enable, cq_dq_disable, cq_dq_prepare, cq_dq_on, cq_dq_send, cq_dq_sent, cq_dq_reclaimed, cq_txresp, cq_dq_inflight, cq_dq_wr, cq_dq_rd, cq_bc_bytes, cq_nic_init, cq_fw_alive, cq_send, cq_poll, cq_wait, cq_alive, rx_pending, cq_resp_status, cq_reset, rx_closed, rx_raw_valid, rb_addr, cq_set_raw,
@@ -188,8 +189,8 @@ fn cq_dq_ssn(c: *mut Cq, want: u64) -> u64 {
 
 fn cq_dq_prepare(c: *mut Cq, p: *mut iwl_probe.Probe, cmd: u64, hdr: u64) {
     if (*c).dtfd == 0 { return }
-    let ssn: u64 = cq_dq_ssn(c, iwl_le.ld16(cmd, hdr + 8))
-    iwl_le.st16(cmd, hdr + 8, ssn)
+    let ssn: u64 = cq_dq_ssn(c, octets.ld16(cmd, hdr + 8))
+    octets.st16(cmd, hdr + 8, ssn)
     (*c).dwr = ssn
     (*c).drd = ssn
     if iwl_pwr.mac_access_get(p) != 0 { return }
@@ -202,7 +203,7 @@ fn rb_addr(c: *mut Cq, i: u64) -> u64 { return (*c).rb + (i & RX_MASK) * CQ_RB_S
 fn cq_set_raw(c: *mut Cq, on: u64) { (*c).rx_raw = on }
 
 fn rx_raw_valid(c: *mut Cq, i: u64) -> bool {
-    let lnf: u64 = iwl_le.ld32(rb_addr(c, i), 0)
+    let lnf: u64 = octets.ld32(rb_addr(c, i), 0)
     if lnf == 0 || lnf == FRAME_INVALID { return false }
     return (lnf & FRAME_SIZE_MSK) >= 4
 }
@@ -222,9 +223,9 @@ fn rx_closed(c: *mut Cq) -> u64 {
 
 fn cq_nic_init(c: *mut Cq, p: *mut iwl_probe.Probe) -> i64 {
     cq_reset(c)
-    iwl_le.zero((*c).rx_stts, 16)
-    iwl_le.zero((*c).tfd, CQ_TFD_COUNT * CQ_TFD_SIZE)
-    if (*c).dtfd != 0 { iwl_le.zero((*c).dtfd, CQ_TFD_COUNT * CQ_TFD_SIZE) }
+    octets.zero((*c).rx_stts, 16)
+    octets.zero((*c).tfd, CQ_TFD_COUNT * CQ_TFD_SIZE)
+    if (*c).dtfd != 0 { octets.zero((*c).dtfd, CQ_TFD_COUNT * CQ_TFD_SIZE) }
     var i: u64 = 0
     while i < CQ_RB_COUNT {
         iwl_g1.rx_bd_put((*c).rx_bd, i, rb_addr(c, i))
@@ -291,7 +292,7 @@ fn stash(c: *mut Cq, pkt: u64, len: u64) {
     let s: u64 = (*c).notif + ((*c).nh % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
     var n: u64 = len
     if n > (*c).slot_cap - 4 { n = (*c).slot_cap - 4 }
-    iwl_le.st32(s, 0, len)
+    octets.st32(s, 0, len)
     iwl_le.copy(s + 4, pkt, n)
     (*c).nh = (*c).nh + 1
 }
@@ -306,8 +307,8 @@ fn reclaim_data(c: *mut Cq, idx: u64) {
 
 fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp: u64, cap: u64) -> bool {
     if regtrace.is_on() { regtrace.rec_host(regtrace.K_RX, pkt, len) }
-    let seq: u64 = iwl_le.ld16(pkt, 2)
-    if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == iwl_mvm_txq.DATA_QUEUE && iwl_le.ld8(pkt, 0) == CMD_TX_DATA && (*c).dq_on != 0 {
+    let seq: u64 = octets.ld16(pkt, 2)
+    if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == iwl_mvm_txq.DATA_QUEUE && octets.ld8(pkt, 0) == CMD_TX_DATA && (*c).dq_on != 0 {
         if len > iwl_buf.HDR { iwl_txresp.txresp_parse(&(*c).txr, pkt + iwl_buf.HDR, len - iwl_buf.HDR) }
         reclaim_data(c, seq & 0xFF)
         return false
@@ -315,7 +316,7 @@ fn handle_pkt(c: *mut Cq, pkt: u64, len: u64, want_cmd: u64, want_idx: u64, resp
     if (seq & SEQ_RX_FRAME) == 0 && ((seq >> 8) & 0x1F) == CMD_QUEUE && (*c).wr != (*c).rd {
         let idx: u64 = seq & 0xFF
         (*c).rd = (*c).rd + ((idx + 257 - ((*c).rd & 0xFF)) & 0xFF)
-        if iwl_le.ld8(pkt, 0) == want_cmd && idx == want_idx && (*c).matched == 0 {
+        if octets.ld8(pkt, 0) == want_cmd && idx == want_idx && (*c).matched == 0 {
             (*c).matched = len + 1
             if resp != 0 {
                 var n: u64 = len
@@ -338,7 +339,7 @@ fn drain(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool, want_cmd: u64, want_id
         var off: u64 = 0
         var more: bool = true
         while more && off + 8 <= CQ_RB_SIZE {
-            let lnf: u64 = iwl_le.ld32(rb, off)
+            let lnf: u64 = octets.ld32(rb, off)
             let plen: u64 = lnf & FRAME_SIZE_MSK
             if lnf == FRAME_INVALID || plen < 4 || off + 4 + plen > CQ_RB_SIZE {
                 more = false
@@ -347,7 +348,7 @@ fn drain(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool, want_cmd: u64, want_id
                 off = off + ((plen + 4 + FRAME_ALIGN - 1) / FRAME_ALIGN) * FRAME_ALIGN
             }
         }
-        iwl_le.zero(rb, off + 8)
+        octets.zero(rb, off + 8)
         (*c).rxr = ((*c).rxr + 1) & RX_MASK
     }
     restock(c, p, held)
@@ -355,18 +356,18 @@ fn drain(c: *mut Cq, p: *mut iwl_probe.Probe, held: bool, want_cmd: u64, want_id
 }
 
 fn put_tfd(t: u64, slot: u64, len: u64) {
-    iwl_le.zero(t, CQ_TFD_SIZE)
+    octets.zero(t, CQ_TFD_SIZE)
     var n0: u64 = len
     if n0 > FIRST_TB { n0 = FIRST_TB }
     var ntb: u64 = 1
-    iwl_le.st32(t, 4, slot)
-    iwl_le.st16(t, 8, ((slot >> 32) & 0xF) | (n0 << 4))
+    octets.st32(t, 4, slot)
+    octets.st16(t, 8, ((slot >> 32) & 0xF) | (n0 << 4))
     if len > FIRST_TB {
         ntb = 2
-        iwl_le.st32(t, 10, slot + FIRST_TB)
-        iwl_le.st16(t, 14, (((slot + FIRST_TB) >> 32) & 0xF) | ((len - FIRST_TB) << 4))
+        octets.st32(t, 10, slot + FIRST_TB)
+        octets.st16(t, 14, (((slot + FIRST_TB) >> 32) & 0xF) | ((len - FIRST_TB) << 4))
     }
-    iwl_le.st8(t, 3, ntb)
+    octets.st8(t, 3, ntb)
 }
 
 fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, cap: u64) -> i64 {
@@ -378,8 +379,8 @@ fn cq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64, resp: u64, c
     let idx: u64 = (*c).wr & 0xFF
     let slot: u64 = (*c).cmdbuf + (idx % CQ_SLOTS) * CQ_CMD_SLOT_SIZE
     iwl_le.copy(slot, buf, len)
-    iwl_le.st16(slot, 2, (CMD_QUEUE << 8) | idx)
-    let cmd: u64 = iwl_le.ld8(slot, 0)
+    octets.st16(slot, 2, (CMD_QUEUE << 8) | idx)
+    let cmd: u64 = octets.ld8(slot, 0)
     put_tfd((*c).tfd + idx * CQ_TFD_SIZE, slot, len)
     if regtrace.is_on() {
         regtrace.rec_host(regtrace.K_HCMD, slot, len)
@@ -419,13 +420,13 @@ fn cq_dq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64) -> i64 {
     let idx: u64 = (*c).dwr & 0xFF
     let slot: u64 = (*c).dbuf + (idx % CQ_SLOTS) * CQ_SLOT_SIZE
     iwl_le.copy(slot, buf, len)
-    iwl_le.st16(slot, 2, (iwl_mvm_txq.DATA_QUEUE << 8) | idx)
+    octets.st16(slot, 2, (iwl_mvm_txq.DATA_QUEUE << 8) | idx)
     let scratch: u64 = slot + TXCMD_SCRATCH_OFF
-    iwl_le.st32(slot, TXCMD_DRAM_LSB, scratch)
-    iwl_le.st8(slot, TXCMD_DRAM_LSB + 4, scratch >> 32)
-    let flen: u64 = iwl_le.ld16(slot, TXCMD_HDR)
-    let sta: u64 = iwl_le.ld8(slot, TXCMD_HDR + 16)
-    let sec: u64 = iwl_le.ld8(slot, TXCMD_HDR + 17)
+    octets.st32(slot, TXCMD_DRAM_LSB, scratch)
+    octets.st8(slot, TXCMD_DRAM_LSB + 4, scratch >> 32)
+    let flen: u64 = octets.ld16(slot, TXCMD_HDR)
+    let sta: u64 = octets.ld8(slot, TXCMD_HDR + 16)
+    let sec: u64 = octets.ld8(slot, TXCMD_HDR + 17)
     var bce: u64 = iwl_mvm_txq.bc_entry(flen, sec, sta)
     if (*c).bcb != 0 { bce = iwl_mvm_txq.bc_entry_bytes(flen, sec, sta) }
     iwl_mvm_txq.bc_store((*c).bc, iwl_mvm_txq.DATA_QUEUE, idx, bce)
@@ -444,7 +445,7 @@ fn cq_dq_send(c: *mut Cq, p: *mut iwl_probe.Probe, buf: u64, len: u64) -> i64 {
 
 fn pop_to(c: *mut Cq, j: u64, out: u64, cap: u64) -> i64 {
     let s: u64 = (*c).notif + (j % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
-    let full: u64 = iwl_le.ld32(s, 0)
+    let full: u64 = octets.ld32(s, 0)
     var n: u64 = full
     if n > (*c).slot_cap - 4 { n = (*c).slot_cap - 4 }
     if n > cap { n = cap }
@@ -452,7 +453,7 @@ fn pop_to(c: *mut Cq, j: u64, out: u64, cap: u64) -> i64 {
     var k: u64 = j
     while k + 1 < (*c).nh {
         let next: u64 = (*c).notif + ((k + 1) % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
-        var keep: u64 = 4 + iwl_le.ld32(next, 0)
+        var keep: u64 = 4 + octets.ld32(next, 0)
         if keep > (*c).slot_cap { keep = (*c).slot_cap }
         iwl_le.copy((*c).notif + (k % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT, next, keep)
         k = k + 1
@@ -472,7 +473,7 @@ fn find_cmd(c: *mut Cq, cmd: u64) -> i64 {
     var j: u64 = (*c).nt
     while j < (*c).nh {
         let s: u64 = (*c).notif + (j % CQ_NOTIF_SLOTS) * CQ_NOTIF_SLOT
-        if iwl_le.ld8(s, 4) == cmd { return j as i64 }
+        if octets.ld8(s, 4) == cmd { return j as i64 }
         j = j + 1
     }
     return 0 - 1
@@ -500,23 +501,23 @@ fn cq_alive(c: *mut Cq, p: *mut iwl_probe.Probe, out: u64, cap: u64) -> i64 {
     let n: i64 = cq_wait(c, p, CMD_ALIVE, out, cap, CQ_WAIT_NOTIF)
     if n < 0 { return n }
     if (n as u64) < ALIVE_PKT_MIN { return E_CQ_SHORT }
-    (*c).alive_cnt = iwl_le.ld32(out, ALIVE_CNT_OFF)
-    (*c).err_ptr = iwl_le.ld32(out, ALIVE_ERR_OFF)
+    (*c).alive_cnt = octets.ld32(out, ALIVE_CNT_OFF)
+    (*c).err_ptr = octets.ld32(out, ALIVE_ERR_OFF)
     (*c).uerr_ptr = 0
     if (n as u64) >= ALIVE_UERR_OFF + 4 {
-        let a: u64 = iwl_le.ld32(out, ALIVE_UERR_OFF)
+        let a: u64 = octets.ld32(out, ALIVE_UERR_OFF)
         if (a & SRAM_PTR_MASK) == SRAM_PTR_BASE { (*c).uerr_ptr = a }
     }
     if (*c).uerr_ptr == 0 && (n as u64) >= ALIVE_UERR_ALT_OFF + 4 {
-        let b: u64 = iwl_le.ld32(out, ALIVE_UERR_ALT_OFF)
+        let b: u64 = octets.ld32(out, ALIVE_UERR_ALT_OFF)
         if (b & SRAM_PTR_MASK) == SRAM_PTR_BASE { (*c).uerr_ptr = b }
     }
-    (*c).scd_alive = iwl_le.ld32(out, ALIVE_SCD_OFF)
+    (*c).scd_alive = octets.ld32(out, ALIVE_SCD_OFF)
     (*c).stage = 2
     return (*c).scd_alive as i64
 }
 
 fn cq_resp_status(resp: u64, len: u64) -> i64 {
     if len < 8 { return E_CQ_SHORT }
-    return iwl_le.ld32(resp, 4) as i64
+    return octets.ld32(resp, 4) as i64
 }

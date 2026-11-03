@@ -57,9 +57,10 @@ import fs.nidx
 import fs.ofsj
 import fs.ofsext
 import sched.time
+import libc.regio
 
 export {
-    block_of, buf_sb, buf_zz, zero, get64, put64, geom_ext, geom_total, base_cover,
+    block_of, buf_sb, buf_zz, zero, geom_ext, geom_total, base_cover,
     base_inodes, ext_inodes, inodes_per_block, bm_blocks,
     set_size, format, mount, path, create_path, unlink_path, entry_at, ENTRY_MAX, dir_entries,
     inode_type, inode_size, read_at, write_at, file_truncate, root,
@@ -480,14 +481,6 @@ fn copy(from: u64, to: u64, n: u64) {
     }
 }
 
-fn get64(p: u64) -> u64 {
-    return __mmio_read64(p as *mut u64)
-}
-
-fn put64(p: u64, v: u64) {
-    __mmio_write64(p as *mut u64, v)
-}
-
 fn root(state: u64) -> u64 {
     return kstate.get(state, kstate.FS_ROOT)
 }
@@ -552,13 +545,13 @@ fn set_times(state: u64, ino: u64, c: u64, m: u64, a: u64) -> bool {
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
     if c != 0 {
-        put64(at + I_CTIME, c)
+        regio.write64(at + I_CTIME, c)
     }
     if m != 0 {
-        put64(at + I_MTIME, m)
+        regio.write64(at + I_MTIME, m)
     }
     if a != 0 {
-        put64(at + I_ATIME, a)
+        regio.write64(at + I_ATIME, a)
     }
     let r: bool = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     leave(state, flags)
@@ -698,7 +691,7 @@ fn inode_get(state: u64, ino: u64, field: u64) -> u64 {
     let flags: u64 = enter(state)
     var v: u64 = 0
     if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        v = get64(buf_in(state) + inode_off(state, ino) + field)
+        v = regio.read64(buf_in(state) + inode_off(state, ino) + field)
     }
     leave(state, flags)
     return v
@@ -711,7 +704,7 @@ fn inode_set(state: u64, ino: u64, field: u64, v: u64) -> bool {
     let flags: u64 = enter(state)
     var ok: bool = false
     if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
-        put64(buf_in(state) + inode_off(state, ino) + field, v)
+        regio.write64(buf_in(state) + inode_off(state, ino) + field, v)
         ok = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     }
     leave(state, flags)
@@ -733,7 +726,7 @@ fn inode_get_blind(state: u64, ino: u64, field: u64) -> u64 {
     if !ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
         return 0
     }
-    return get64(buf_in(state) + inode_off(state, ino) + field)
+    return regio.read64(buf_in(state) + inode_off(state, ino) + field)
 }
 
 fn race_ino(state: u64, index: u64) -> u64 {
@@ -782,13 +775,13 @@ fn inode_init(state: u64, ino: u64, kind: u64) -> bool {
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
     zero(at, inode_bytes(state))
-    put64(at + I_TYPE, kind)
-    put64(at + I_NLINK, 1)
+    regio.write64(at + I_TYPE, kind)
+    regio.write64(at + I_NLINK, 1)
     if version(state) >= OFS_V3 {
         let nun: u64 = now(state)
-        put64(at + I_CTIME, nun)
-        put64(at + I_MTIME, nun)
-        put64(at + I_ATIME, nun)
+        regio.write64(at + I_CTIME, nun)
+        regio.write64(at + I_MTIME, nun)
+        regio.write64(at + I_ATIME, nun)
     }
     let ok: bool = ofsj.write(state, inode_block_of(state, ino),
         buf_in(state))
@@ -807,16 +800,16 @@ fn inode_zap(state: u64, ino: u64) -> bool {
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
     zero(at, inode_bytes(state))
-    put64(at + I_TYPE, T_FILE)
-    put64(at + I_NLINK, 1)
+    regio.write64(at + I_TYPE, T_FILE)
+    regio.write64(at + I_NLINK, 1)
     if version(state) >= OFS_V2 {
-        put64(at + I_MODE, 420)
+        regio.write64(at + I_MODE, 420)
     }
     if version(state) >= OFS_V3 {
         let t: u64 = now(state)
-        put64(at + I_CTIME, t)
-        put64(at + I_MTIME, t)
-        put64(at + I_ATIME, t)
+        regio.write64(at + I_CTIME, t)
+        regio.write64(at + I_MTIME, t)
+        regio.write64(at + I_ATIME, t)
     }
     let ok: bool = ofsj.write(state, inode_block_of(state, ino), buf_in(state))
     leave(state, flags)
@@ -871,7 +864,7 @@ fn used_in_region(state: u64, first: u64, count: u64) -> u64 {
         if ofsj.read(state, first + b, buf_in(state)) {
             var k: u64 = 0
             while k < ipb && b * ipb + k < count {
-                if get64(buf_in(state) + k * isz + I_TYPE) != T_FREE {
+                if regio.read64(buf_in(state) + k * isz + I_TYPE) != T_FREE {
                     n = n + 1
                 }
                 k = k + 1
@@ -1137,7 +1130,7 @@ fn ptr_at(state: u64, block: u64, k: u64) -> u64 {
     if !ofsj.read(state, block, buf_ib(state)) {
         return 0
     }
-    return get64(buf_ib(state) + k * 8)
+    return regio.read64(buf_ib(state) + k * 8)
 }
 
 fn free_quad(state: u64, q1: u64) {
@@ -1185,7 +1178,7 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     if !ofsj.read(state, ib, buf_ib(state)) {
         return 0
     }
-    let b: u64 = get64(buf_ib(state) + k * 8)
+    let b: u64 = regio.read64(buf_ib(state) + k * 8)
     if b != 0 || !grow {
         return b
     }
@@ -1196,7 +1189,7 @@ fn single_block(state: u64, ino: u64, k: u64, grow: bool) -> u64 {
     if !ofsj.read(state, ib, buf_ib(state)) {
         return 0
     }
-    put64(buf_ib(state) + k * 8, fresh)
+    regio.write64(buf_ib(state) + k * 8, fresh)
     ofsj.write(state, ib, buf_ib(state))
     return fresh
 }
@@ -1223,7 +1216,7 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
         return 0
     }
     let slot: u64 = d / PER_BLOCK
-    var l2: u64 = get64(buf_ib(state) + slot * 8)
+    var l2: u64 = regio.read64(buf_ib(state) + slot * 8)
     if l2 == 0 {
         if !grow {
             return 0
@@ -1235,14 +1228,14 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
         if !ofsj.read(state, l1, buf_ib(state)) {
             return 0
         }
-        put64(buf_ib(state) + slot * 8, l2)
+        regio.write64(buf_ib(state) + slot * 8, l2)
         ofsj.write(state, l1, buf_ib(state))
     }
     if !ofsj.read(state, l2, buf_i2(state)) {
         return 0
     }
     let at: u64 = d % PER_BLOCK
-    let b: u64 = get64(buf_i2(state) + at * 8)
+    let b: u64 = regio.read64(buf_i2(state) + at * 8)
     if b != 0 || !grow {
         return b
     }
@@ -1253,7 +1246,7 @@ fn double_block(state: u64, ino: u64, d: u64, grow: bool) -> u64 {
     if !ofsj.read(state, l2, buf_i2(state)) {
         return 0
     }
-    put64(buf_i2(state) + at * 8, fresh)
+    regio.write64(buf_i2(state) + at * 8, fresh)
     ofsj.write(state, l2, buf_i2(state))
     return fresh
 }
@@ -1288,7 +1281,7 @@ fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
     if !ofsj.read(state, block, buf_ib(state)) {
         return 0
     }
-    let b: u64 = get64(buf_ib(state) + k * 8)
+    let b: u64 = regio.read64(buf_ib(state) + k * 8)
     if b != 0 || !grow {
         return b
     }
@@ -1299,7 +1292,7 @@ fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
     if !ofsj.read(state, block, buf_ib(state)) {
         return 0
     }
-    put64(buf_ib(state) + k * 8, fresh)
+    regio.write64(buf_ib(state) + k * 8, fresh)
     if !ofsj.write(state, block, buf_ib(state)) {
         return 0
     }
@@ -1332,7 +1325,7 @@ fn file_truncate(state: u64, ino: u64) {
         if ofsj.read(state, l1, buf_ib(state)) {
             var k: u64 = 0
             while k < PER_BLOCK {
-                let l2: u64 = get64(buf_ib(state) + k * 8)
+                let l2: u64 = regio.read64(buf_ib(state) + k * 8)
                 if l2 != 0 {
                     free_pointers(state, l2)
                     block_free(state, l2)
@@ -1355,14 +1348,14 @@ fn file_truncate(state: u64, ino: u64) {
                 if !ofsj.read(state, t1, buf_ib(state)) {
                     k1 = PER_BLOCK
                 } else {
-                    let t2: u64 = get64(buf_ib(state) + k1 * 8)
+                    let t2: u64 = regio.read64(buf_ib(state) + k1 * 8)
                     if t2 != 0 {
                         var k2: u64 = 0
                         while k2 < PER_BLOCK {
                             if !ofsj.read(state, t2, buf_i2(state)) {
                                 k2 = PER_BLOCK
                             } else {
-                                let t3: u64 = get64(buf_i2(state) + k2 * 8)
+                                let t3: u64 = regio.read64(buf_i2(state) + k2 * 8)
                                 if t3 != 0 {
                                     free_dt(state, t3)
                                     block_free(state, t3)
@@ -1395,7 +1388,7 @@ fn free_dt(state: u64, block: u64) {
     }
     var k: u64 = 0
     while k < PER_BLOCK {
-        let b: u64 = get64(buf_dt(state) + k * 8)
+        let b: u64 = regio.read64(buf_dt(state) + k * 8)
         if b != 0 {
             block_free(state, b)
         }
@@ -1411,7 +1404,7 @@ fn free_pointers(state: u64, block: u64) {
     }
     var k: u64 = 0
     while k < PER_BLOCK {
-        let b: u64 = get64(buf_i2(state) + k * 8)
+        let b: u64 = regio.read64(buf_i2(state) + k * 8)
         if b != 0 {
             block_free(state, b)
         }
@@ -1511,7 +1504,7 @@ fn read_at(state: u64, ino: u64, off: u64, dst: u64, len: u64) -> u64 {
                 }
             }
             if leaf != 0 {
-                b = get64(buf_i2(state) + ((index - dn) % PER_BLOCK) * 8)
+                b = regio.read64(buf_i2(state) + ((index - dn) % PER_BLOCK) * 8)
             }
         }
         if b == 0 {
@@ -1545,15 +1538,15 @@ fn size_write(state: u64, ino: u64, new_size: u64, only_grow: bool) -> bool {
         return false
     }
     let at: u64 = buf_in(state) + inode_off(state, ino)
-    let alt: u64 = get64(at + I_SIZE)
+    let alt: u64 = regio.read64(at + I_SIZE)
     if alt == new_size {
         return true
     }
     if only_grow && new_size < alt {
         return true
     }
-    let kind: u64 = get64(at + I_TYPE)
-    put64(at + I_SIZE, new_size)
+    let kind: u64 = regio.read64(at + I_TYPE)
+    regio.write64(at + I_SIZE, new_size)
     if !ofsj.write(state, inode_block_of(state, ino), buf_in(state)) {
         return false
     }
@@ -1703,7 +1696,7 @@ fn entry_read(state: u64, dir: u64, i: u64, out: u64) -> u64 {
     if read_at(state, dir, i * de, out, de) != de {
         return 0
     }
-    return get64(out)
+    return regio.read64(out)
 }
 
 fn dir_entries(state: u64, dir: u64) -> u64 {
@@ -1786,7 +1779,7 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         }
     }
     zero(buf_nm(state), de)
-    put64(buf_nm(state), ino)
+    regio.write64(buf_nm(state), ino)
     var k: u64 = 0
     while k < nl - 1 && kstate.get8(name + k) != 0 {
         kstate.set8(buf_nm(state) + 8 + k, kstate.get8(name + k) as u8)
@@ -1800,8 +1793,8 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
         var sz: u64 = 0
         if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
             let at: u64 = buf_in(state) + inode_off(state, ino)
-            kind = get64(at + I_TYPE)
-            sz = get64(at + I_SIZE)
+            kind = regio.read64(at + I_TYPE)
+            sz = regio.read64(at + I_SIZE)
         }
         nidx.note(state, nidx.OP_ADD, dir, ino, kind, sz, name)
     }
@@ -1835,8 +1828,8 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
                 var sz: u64 = 0
                 if ofsj.read(state, inode_block_of(state, ino), buf_in(state)) {
                     let at: u64 = buf_in(state) + inode_off(state, ino)
-                    kind = get64(at + I_TYPE)
-                    sz = get64(at + I_SIZE)
+                    kind = regio.read64(at + I_TYPE)
+                    sz = regio.read64(at + I_SIZE)
                 }
                 nidx.note(state, nidx.OP_DEL, dir, ino, kind, sz, name)
             }
@@ -2381,24 +2374,24 @@ fn format_as(state: u64, v: u64, inodes: u64) -> bool {
     geom_total(state, total)
     // The superblock.
     zero(buf_sb(state), BS)
-    put64(buf_sb(state) + SB_MAGIC, MAGIC)
-    put64(buf_sb(state) + SB_BSIZE, BS)
-    put64(buf_sb(state) + SB_BLOCKS, total)
-    put64(buf_sb(state) + SB_INODES, inodes)
-    put64(buf_sb(state) + SB_BITMAP, bms)
-    put64(buf_sb(state) + SB_ITABLE, itab)
-    put64(buf_sb(state) + SB_DATA, ds)
-    put64(buf_sb(state) + SB_ROOT, 1)
-    put64(buf_sb(state) + SB_VERSION, v)
+    regio.write64(buf_sb(state) + SB_MAGIC, MAGIC)
+    regio.write64(buf_sb(state) + SB_BSIZE, BS)
+    regio.write64(buf_sb(state) + SB_BLOCKS, total)
+    regio.write64(buf_sb(state) + SB_INODES, inodes)
+    regio.write64(buf_sb(state) + SB_BITMAP, bms)
+    regio.write64(buf_sb(state) + SB_ITABLE, itab)
+    regio.write64(buf_sb(state) + SB_DATA, ds)
+    regio.write64(buf_sb(state) + SB_ROOT, 1)
+    regio.write64(buf_sb(state) + SB_VERSION, v)
     if v >= OFS_V3 {
-        put64(buf_sb(state) + SB_BMBLOCKS, bmb)
-        put64(buf_sb(state) + SB_ISIZE, isz)
-        put64(buf_sb(state) + SB_DIRENT, dent)
-        put64(buf_sb(state) + SB_NAMELEN, nlen)
+        regio.write64(buf_sb(state) + SB_BMBLOCKS, bmb)
+        regio.write64(buf_sb(state) + SB_ISIZE, isz)
+        regio.write64(buf_sb(state) + SB_DIRENT, dent)
+        regio.write64(buf_sb(state) + SB_NAMELEN, nlen)
     }
     if jb != 0 {
-        put64(buf_sb(state) + SB_JSTART, js)
-        put64(buf_sb(state) + SB_JBLOCKS, jb)
+        regio.write64(buf_sb(state) + SB_JSTART, js)
+        regio.write64(buf_sb(state) + SB_JBLOCKS, jb)
     }
     var kb: u64 = 0
     while kb < bmb {
@@ -2493,15 +2486,15 @@ fn mount(state: u64) -> bool {
         leave(state, flags)
         return false
     }
-    if get64(buf_sb(state) + SB_MAGIC) != MAGIC {
+    if regio.read64(buf_sb(state) + SB_MAGIC) != MAGIC {
         klog.sayh(state, klog.L_INFO, lq(), (&l_magie[0]) as u64,
-            get64(buf_sb(state) + SB_MAGIC))
+            regio.read64(buf_sb(state) + SB_MAGIC))
         leave(state, flags)
         return false
     }
     // ------------------------------------------------ RUNDE FSROBUST
-    let js0: u64 = get64(buf_sb(state) + SB_JSTART)
-    let jb0: u64 = get64(buf_sb(state) + SB_JBLOCKS)
+    let js0: u64 = regio.read64(buf_sb(state) + SB_JSTART)
+    let jb0: u64 = regio.read64(buf_sb(state) + SB_JBLOCKS)
     if js0 != 0 && jb0 >= ofsj.BLOCKS_NEEDED
         && js0 + jb0 <= blk.blocks(state) {
         let move_to: u64 = ofsj.replay(state, js0, jb0)
@@ -2516,17 +2509,17 @@ fn mount(state: u64) -> bool {
                 leave(state, flags)
                 return false
             }
-            if get64(buf_sb(state) + SB_MAGIC) != MAGIC {
+            if regio.read64(buf_sb(state) + SB_MAGIC) != MAGIC {
                 leave(state, flags)
                 return false
             }
         }
     }
-    if get64(buf_sb(state) + SB_BSIZE) != BS {
+    if regio.read64(buf_sb(state) + SB_BSIZE) != BS {
         leave(state, flags)
         return false
     }
-    var ver: u64 = get64(buf_sb(state) + SB_VERSION)
+    var ver: u64 = regio.read64(buf_sb(state) + SB_VERSION)
     if ver == 0 {
         ver = OFS_V1
     }
@@ -2536,10 +2529,10 @@ fn mount(state: u64) -> bool {
     }
     kstate.set(state, kstate.K13_OFF + kstate.U_FSVER, ver)
     // ------------------------------------------------------ RUNDE OFS3
-    var bmb: u64 = get64(buf_sb(state) + SB_BMBLOCKS)
-    var isz: u64 = get64(buf_sb(state) + SB_ISIZE)
-    var dent: u64 = get64(buf_sb(state) + SB_DIRENT)
-    var nlen: u64 = get64(buf_sb(state) + SB_NAMELEN)
+    var bmb: u64 = regio.read64(buf_sb(state) + SB_BMBLOCKS)
+    var isz: u64 = regio.read64(buf_sb(state) + SB_ISIZE)
+    var dent: u64 = regio.read64(buf_sb(state) + SB_DIRENT)
+    var nlen: u64 = regio.read64(buf_sb(state) + SB_NAMELEN)
     if bmb == 0 {
         bmb = 1
     }
@@ -2566,28 +2559,28 @@ fn mount(state: u64) -> bool {
         leave(state, flags)
         return false
     }
-    let bms2: u64 = get64(buf_sb(state) + SB_BITMAP)
+    let bms2: u64 = regio.read64(buf_sb(state) + SB_BITMAP)
     if bms2 == 0 || bmb == 0 {
         leave(state, flags)
         return false
     }
     if bmb * BITS_PER_BLOCK < blk.blocks(state)
-        && bmb * BITS_PER_BLOCK < get64(buf_sb(state) + SB_BLOCKS) {
+        && bmb * BITS_PER_BLOCK < regio.read64(buf_sb(state) + SB_BLOCKS) {
         leave(state, flags)
         return false
     }
     let ipb2: u64 = BS / isz
-    geom3(state, bms2, bmb, get64(buf_sb(state) + SB_ITABLE), isz,
+    geom3(state, bms2, bmb, regio.read64(buf_sb(state) + SB_ITABLE), isz,
         dent, nlen)
-    var ni: u64 = get64(buf_sb(state) + SB_INODES)
-    var ds: u64 = get64(buf_sb(state) + SB_DATA)
+    var ni: u64 = regio.read64(buf_sb(state) + SB_INODES)
+    var ds: u64 = regio.read64(buf_sb(state) + SB_DATA)
     if ni == 0 {
         ni = INODE_COUNT
     }
     if ds == 0 {
         ds = DATA_START
     }
-    let itab: u64 = get64(buf_sb(state) + SB_ITABLE)
+    let itab: u64 = regio.read64(buf_sb(state) + SB_ITABLE)
     let noetig: u64 = (ni + ipb2 - 1) / ipb2
     if itab < bms2 + bmb || ds < itab + noetig
         || ds >= blk.blocks(state) {
@@ -2595,16 +2588,16 @@ fn mount(state: u64) -> bool {
         return false
     }
     geom(state, ni, ds)
-    var tot: u64 = get64(buf_sb(state) + SB_BLOCKS)
+    var tot: u64 = regio.read64(buf_sb(state) + SB_BLOCKS)
     if tot == 0 || tot > blk.blocks(state) {
         tot = blk.blocks(state)
     }
-    if get64(buf_sb(state) + ofsext.SB_XVER) != 0 {
-        let xblocks: u64 = get64(buf_sb(state) + ofsext.SB_XBLOCKS)
-        let xbm: u64 = get64(buf_sb(state) + ofsext.SB_XBMSTART)
-        let xit: u64 = get64(buf_sb(state) + ofsext.SB_XITSTART)
-        let xin: u64 = get64(buf_sb(state) + ofsext.SB_XINODES)
-        if !ofsext.valid(bmb * BITS_PER_BLOCK, get64(buf_sb(state) + SB_BLOCKS),
+    if regio.read64(buf_sb(state) + ofsext.SB_XVER) != 0 {
+        let xblocks: u64 = regio.read64(buf_sb(state) + ofsext.SB_XBLOCKS)
+        let xbm: u64 = regio.read64(buf_sb(state) + ofsext.SB_XBMSTART)
+        let xit: u64 = regio.read64(buf_sb(state) + ofsext.SB_XITSTART)
+        let xin: u64 = regio.read64(buf_sb(state) + ofsext.SB_XINODES)
+        if !ofsext.valid(bmb * BITS_PER_BLOCK, regio.read64(buf_sb(state) + SB_BLOCKS),
             blk.blocks(state), ipb2, xblocks, xbm, xit, xin) {
             geom3(state, BITMAP_BLOCK, 1, INODE_START, INODE_SIZE, DIRENT, NAME_LEN)
             leave(state, flags)
@@ -2614,7 +2607,7 @@ fn mount(state: u64) -> bool {
         tot = xblocks
     }
     geom_total(state, tot)
-    let r: u64 = get64(buf_sb(state) + SB_ROOT)
+    let r: u64 = regio.read64(buf_sb(state) + SB_ROOT)
     if inode_get(state, r, I_TYPE) != T_DIR {
         geom(state, INODE_COUNT, DATA_START)
         geom_total(state, 0)
@@ -2628,8 +2621,8 @@ fn mount(state: u64) -> bool {
         version(state), total_blocks(state))
     kstate.set(state, kstate.FS_READY, 1)
     leave(state, flags)
-    let js: u64 = get64(buf_sb(state) + SB_JSTART)
-    let jb: u64 = get64(buf_sb(state) + SB_JBLOCKS)
+    let js: u64 = regio.read64(buf_sb(state) + SB_JSTART)
+    let jb: u64 = regio.read64(buf_sb(state) + SB_JBLOCKS)
     if js != 0 && jb >= ofsj.BLOCKS_NEEDED && js >= itab + noetig
         && js + jb <= ds && js + jb <= blk.blocks(state) {
         geom_j(state, js, jb)
@@ -2645,7 +2638,7 @@ const EPB: u64 = 16
 
 fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
     let flags: u64 = enter(state)
-    let c: u64 = get64(cur)
+    let c: u64 = regio.read64(cur)
     var ino: u64 = c >> SCAN_SHIFT
     var idx: u64 = c & SCAN_MASK
     if ino < 1 {
@@ -2688,28 +2681,28 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
                         if (BS % dirent_size(state)) == 0 {
                             p = buf_zz(state) + (idx % epb) * dirent_size(state)
                         }
-                        let child: u64 = get64(p)
+                        let child: u64 = regio.read64(p)
                         if child != 0 && !punktname(p + 8) {
                             if n >= max {
                                 full = true
                             } else {
                                 let rec: u64 = out + n * nidx.REC
-                                put64(rec + nidx.R_INO, child)
-                                put64(rec + nidx.R_PARENT, ino)
+                                regio.write64(rec + nidx.R_INO, child)
+                                regio.write64(rec + nidx.R_PARENT, ino)
                                 if ofsj.read(state,
                                     inode_block_of(state, child),
                                     buf_in(state)) {
                                     let at2: u64 = buf_in(state)
                                         + inode_off(state, child)
-                                    put64(rec + nidx.R_SIZE,
-                                        get64(at2 + I_SIZE))
-                                    put64(rec + nidx.R_KIND,
-                                        get64(at2 + I_TYPE))
+                                    regio.write64(rec + nidx.R_SIZE,
+                                        regio.read64(at2 + I_SIZE))
+                                    regio.write64(rec + nidx.R_KIND,
+                                        regio.read64(at2 + I_TYPE))
                                 } else {
-                                    put64(rec + nidx.R_SIZE, 0)
-                                    put64(rec + nidx.R_KIND, 0)
+                                    regio.write64(rec + nidx.R_SIZE, 0)
+                                    regio.write64(rec + nidx.R_KIND, 0)
                                 }
-                                put64(rec + nidx.R_OP, idx)
+                                regio.write64(rec + nidx.R_OP, idx)
                                 copy(p + 8, rec + nidx.R_NAME, nidx.NAMEJ)
                                 n = n + 1
                             }
@@ -2726,7 +2719,7 @@ fn scan(state: u64, cur: u64, out: u64, max: u64) -> u64 {
             idx = 0
         }
     }
-    put64(cur, (ino << SCAN_SHIFT) | idx)
+    regio.write64(cur, (ino << SCAN_SHIFT) | idx)
     leave(state, flags)
     return n
 }

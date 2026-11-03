@@ -34,6 +34,7 @@
 
 import serial
 import lib.kstate
+import libc.regio
 
 export { snapshot, snap_count, snap_bytes, snap_skipped, snap_cap_bytes, rsdp_addr, rsdp_source, root_addr, root_width,
     find, cpus, total, ioapic_addr, lapic_addr, revision, oem, valid, table,
@@ -145,7 +146,7 @@ fn find_rsdp(state: u64) -> u64 {
     let w: u64 = (&want[0]) as u64
     // The EBDA. Its segment stands in the BIOS data area as a paragraph
     // number; a machine without one has a zero there.
-    let seg: u64 = kstate.get16(EBDA_PTR)
+    let seg: u64 = regio.read16(EBDA_PTR)
     if seg != 0 {
         let base: u64 = seg * 16
         let hit: u64 = scan_for(base, base + 1024, w)
@@ -200,11 +201,11 @@ fn rsdp_off_map(state: u64, w: u64) -> u64 {
     if mbi == 0 {
         return 0
     }
-    if (kstate.get32(mbi + MB_FLAGS) & 64) == 0 {
+    if (regio.read32(mbi + MB_FLAGS) & 64) == 0 {
         return 0
     }
-    let len: u64 = kstate.get32(mbi + MB_MMAP_LEN)
-    let addr: u64 = kstate.get32(mbi + MB_MMAP_ADDR)
+    let len: u64 = regio.read32(mbi + MB_MMAP_LEN)
+    let addr: u64 = regio.read32(mbi + MB_MMAP_ADDR)
     // MEASURED AND CORRECTED (for the second time, and this time it was the
     // scan itself): this used to be `MAPPED_GB * GIB`. The kernel then
     // scanned 1.6 GiB even when it had long been in a process address space
@@ -217,10 +218,10 @@ fn rsdp_off_map(state: u64, w: u64) -> u64 {
     }
     var p: u64 = addr
     while p < addr + len {
-        let size: u64 = kstate.get32(p)
+        let size: u64 = regio.read32(p)
         let base: u64 = __mmio_read64((p + 4) as *mut u64)
         let area_len: u64 = __mmio_read64((p + 12) as *mut u64)
-        let art: u64 = kstate.get32(p + 20)
+        let art: u64 = regio.read32(p + 20)
         if (art == 3 || art == 4) && base < bound && area_len != 0 {
             var von: u64 = base
             var ende: u64 = base + area_len
@@ -368,7 +369,7 @@ fn header_ok(p: u64) -> bool {
     if !erreichbar(p, H_SIZE) {
         return false
     }
-    let len: u64 = kstate.get32(p + H_LENGTH)
+    let len: u64 = regio.read32(p + H_LENGTH)
     if len < H_SIZE || len > 0x100000 {
         return false
     }
@@ -384,13 +385,13 @@ fn table_in(root: u64, width: u64, want: u64) -> u64 {
     if !header_ok(root) {
         return 0
     }
-    let len: u64 = kstate.get32(root + H_LENGTH)
+    let len: u64 = regio.read32(root + H_LENGTH)
     let n: u64 = (len - H_SIZE) / width
     var i: u64 = 0
     while i < n {
         var t: u64 = 0
         if width == 4 {
-            t = kstate.get32(root + H_SIZE + i * 4)
+            t = regio.read32(root + H_SIZE + i * 4)
         } else {
             t = __mmio_read64((root + H_SIZE + i * 8) as *mut u64)
         }
@@ -435,7 +436,7 @@ fn table(state: u64, want: u64) -> u64 {
     }
     let rev: u64 = kstate.get8(rsdp + P_REVISION)
     if rev >= 2 {
-        let len: u64 = kstate.get32(rsdp + P_LENGTH)
+        let len: u64 = regio.read32(rsdp + P_LENGTH)
         if len >= 33 && sum_zero(rsdp, len) {
             let t: u64 = table_in(__mmio_read64((rsdp + P_XSDT) as *mut u64),
                 8, want)
@@ -444,7 +445,7 @@ fn table(state: u64, want: u64) -> u64 {
             }
         }
     }
-    return table_in(kstate.get32(rsdp + P_RSDT), 4, want)
+    return table_in(regio.read32(rsdp + P_RSDT), 4, want)
 }
 
 // ------------------------------------------------------------ the whole
@@ -466,20 +467,20 @@ fn find(state: u64) -> u64 {
     sset(state, S_OEM, rsdp + H_OEM - 1)
     var madt: u64 = 0
     if rev >= 2 {
-        let len: u64 = kstate.get32(rsdp + P_LENGTH)
+        let len: u64 = regio.read32(rsdp + P_LENGTH)
         if len >= 33 && sum_zero(rsdp, len) {
             madt = table_in(__mmio_read64((rsdp + P_XSDT) as *mut u64), 8,
                 (&w_apic[0]) as u64)
         }
     }
     if madt == 0 {
-        madt = table_in(kstate.get32(rsdp + P_RSDT), 4, (&w_apic[0]) as u64)
+        madt = table_in(regio.read32(rsdp + P_RSDT), 4, (&w_apic[0]) as u64)
     }
     if madt == 0 {
         return 0
     }
     sset(state, S_MADT, madt)
-    sset(state, S_LAPIC, kstate.get32(madt + M_LAPIC))
+    sset(state, S_LAPIC, regio.read32(madt + M_LAPIC))
     sset(state, S_VALID, 1)
     return walk(state, madt)
 }
@@ -487,7 +488,7 @@ fn find(state: u64) -> u64 {
 // The records. Every one carries its own length in its second octet; a
 // length of zero would be an endless loop and is what ends the walk.
 fn walk(state: u64, madt: u64) -> u64 {
-    let end: u64 = madt + kstate.get32(madt + H_LENGTH)
+    let end: u64 = madt + regio.read32(madt + H_LENGTH)
     var p: u64 = madt + M_ENTRIES
     var n: u64 = 0
     var tot: u64 = 0
@@ -500,7 +501,7 @@ fn walk(state: u64, madt: u64) -> u64 {
             return n
         }
         if kind == E_LAPIC && len >= 8 {
-            let flags: u64 = kstate.get32(p + 4)
+            let flags: u64 = regio.read32(p + 4)
             if (flags & 1) != 0 {
                 tot = tot + 1
             }
@@ -510,8 +511,8 @@ fn walk(state: u64, madt: u64) -> u64 {
             }
         }
         if kind == E_X2APIC && len >= 16 {
-            let id: u64 = kstate.get32(p + 4)
-            let flags: u64 = kstate.get32(p + 8)
+            let id: u64 = regio.read32(p + 4)
+            let flags: u64 = regio.read32(p + 8)
             if (flags & 1) != 0 {
                 tot = tot + 1
             }
@@ -526,7 +527,7 @@ fn walk(state: u64, madt: u64) -> u64 {
         }
         if kind == E_IOAPIC && len >= 12 {
             if sget(state, S_IOAPIC) == 0 {
-                sset(state, S_IOAPIC, kstate.get32(p + 4))
+                sset(state, S_IOAPIC, regio.read32(p + 4))
             }
         }
         p = p + len
@@ -611,13 +612,13 @@ const F_XDSDT_OFF: u64 = 140
 const F_XDSDT_END: u64 = 148
 
 fn dsdt_ptr(fadt: u64) -> u64 {
-    if kstate.get32(fadt + H_LENGTH) >= F_XDSDT_END {
+    if regio.read32(fadt + H_LENGTH) >= F_XDSDT_END {
         let x: u64 = __mmio_read64((fadt + F_XDSDT_OFF) as *mut u64)
         if x != 0 {
             return x
         }
     }
-    return kstate.get32(fadt + F_DSDT_OFF)
+    return regio.read32(fadt + F_DSDT_OFF)
 }
 
 fn readable(state: u64, p: u64, n: u64) -> bool {
@@ -653,7 +654,7 @@ fn root_of(state: u64, out_width: u64) -> u64 {
     }
     let rev: u64 = kstate.get8(rsdp + P_REVISION)
     if rev >= 2 {
-        let len: u64 = kstate.get32(rsdp + P_LENGTH)
+        let len: u64 = regio.read32(rsdp + P_LENGTH)
         if len >= 33 && sum_zero(rsdp, len) {
             let x: u64 = __mmio_read64((rsdp + P_XSDT) as *mut u64)
             if header_ok(x) {
@@ -662,7 +663,7 @@ fn root_of(state: u64, out_width: u64) -> u64 {
             }
         }
     }
-    let r: u64 = kstate.get32(rsdp + P_RSDT)
+    let r: u64 = regio.read32(rsdp + P_RSDT)
     if !header_ok(r) {
         return 0
     }
@@ -679,7 +680,7 @@ fn table_count(state: u64) -> u64 {
     if root == 0 {
         return 0
     }
-    let len: u64 = kstate.get32(root + H_LENGTH)
+    let len: u64 = regio.read32(root + H_LENGTH)
     if len < H_SIZE {
         return 0
     }
@@ -710,7 +711,7 @@ fn table_at(state: u64, i: u64) -> u64 {
     if root == 0 {
         return 0
     }
-    let len: u64 = kstate.get32(root + H_LENGTH)
+    let len: u64 = regio.read32(root + H_LENGTH)
     if len < H_SIZE {
         return 0
     }
@@ -720,7 +721,7 @@ fn table_at(state: u64, i: u64) -> u64 {
     }
     var t: u64 = 0
     if width == 4 {
-        t = kstate.get32(root + H_SIZE + (i - 1) * 4)
+        t = regio.read32(root + H_SIZE + (i - 1) * 4)
     } else {
         t = __mmio_read64((root + H_SIZE + (i - 1) * 8) as *mut u64)
     }
@@ -732,7 +733,7 @@ fn table_at(state: u64, i: u64) -> u64 {
 
 
 fn copy_table(t: u64) -> u64 {
-    let len: u64 = kstate.get32(t + H_LENGTH)
+    let len: u64 = regio.read32(t + H_LENGTH)
     let need: u64 = (len + 15) & 0xFFFFFFFFFFFFFFF0
     if snap_used + need > snap_cap {
         snap_skip = snap_skip + 1

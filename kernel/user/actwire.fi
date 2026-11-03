@@ -41,11 +41,13 @@ profile kernel
 
 import ulib
 import libc.io
+import libc.clockapi
+import libc.octets
 
 export {
     FR_BYTES, FR_PAY, K_REQ, K_REP, K_EVT, NONE, ASM_MAX,
     A_ANY, A_SAMEUID, A_ROOT,
-    ld8, st8, ld32, st32, ld64, st64, slen, ticks, yield_now, rnd,
+    ld32, st32, ld64, st64, slen, yield_now, rnd,
     out, outn, outnum, eout,
     bus_reg, bus_find, bus_recv, bus_wait, bus_sub, send_msg, pub_msg,
     asm_feed, asm_buf, asm_len, asm_pid, asm_uid, asm_id, asm_kind,
@@ -89,24 +91,16 @@ const NONE: u64 = 0xFFFFFFFF
 
 // ------------------------------------------------------------ memory
 
-fn ld8(p: u64, i: u64) -> u64 {
-    return (*((p + i) as *mut u8)) as u64
-}
-
-fn st8(p: u64, i: u64, v: u64) {
-    *((p + i) as *mut u8) = (v & 255) as u8
-}
-
 fn ld32(p: u64, i: u64) -> u64 {
-    return ld8(p, i) | (ld8(p, i + 1) << 8) | (ld8(p, i + 2) << 16)
-        | (ld8(p, i + 3) << 24)
+    return octets.ld8(p, i) | (octets.ld8(p, i + 1) << 8) | (octets.ld8(p, i + 2) << 16)
+        | (octets.ld8(p, i + 3) << 24)
 }
 
 fn st32(p: u64, i: u64, v: u64) {
-    st8(p, i, v)
-    st8(p, i + 1, v >> 8)
-    st8(p, i + 2, v >> 16)
-    st8(p, i + 3, v >> 24)
+    octets.st8(p, i, v)
+    octets.st8(p, i + 1, v >> 8)
+    octets.st8(p, i + 2, v >> 16)
+    octets.st8(p, i + 3, v >> 24)
 }
 
 fn ld64(p: u64, i: u64) -> u64 {
@@ -119,14 +113,10 @@ fn st64(p: u64, i: u64, v: u64) {
 
 fn slen(p: u64) -> u64 {
     var n: u64 = 0
-    while ld8(p, n) != 0 {
+    while octets.ld8(p, n) != 0 {
         n = n + 1
     }
     return n
-}
-
-fn ticks() -> u64 {
-    return ulib.sys(ulib.SYS_SYSINFO, ulib.I_TICKS, 0, 0)
 }
 
 fn yield_now() {
@@ -140,7 +130,7 @@ static mut rnd_state: u64 = 0
 
 fn rnd() -> u64 {
     if rnd_state == 0 {
-        rnd_state = (ticks() << 20) ^ (ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+        rnd_state = (clockapi.ticks() << 20) ^ (ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
             << 8) ^ 0x9E3779B97F4A7C15
     }
     var x: u64 = rnd_state
@@ -218,7 +208,7 @@ fn frames(op: u64, svc: u64, kind: u64, id: u64, data: u64,
         }
         var i: u64 = 0
         while i < FR_BYTES {
-            st8(fp, i, 0)
+            octets.st8(fp, i, 0)
             i = i + 1
         }
         var flags: u64 = 0
@@ -228,14 +218,14 @@ fn frames(op: u64, svc: u64, kind: u64, id: u64, data: u64,
         if off + n >= len {
             flags = flags | F_LAST
         }
-        st8(fp, 0, MAGIC)
-        st8(fp, 1, kind)
-        st8(fp, 2, flags)
-        st8(fp, 3, n)
+        octets.st8(fp, 0, MAGIC)
+        octets.st8(fp, 1, kind)
+        octets.st8(fp, 2, flags)
+        octets.st8(fp, 3, n)
         st32(fp, 4, id)
         i = 0
         while i < n {
-            st8(fp, FR_HEAD + i, ld8(data, off + i))
+            octets.st8(fp, FR_HEAD + i, octets.ld8(data, off + i))
             i = i + 1
         }
         var tries: u64 = 0
@@ -321,12 +311,12 @@ fn asm_free(s: u64) {
 // Feed one received frame. Returns the slot of a COMPLETE message, or
 // NONE. The message in the slot is zero-terminated.
 fn asm_feed(fr: u64, meta: u64) -> u64 {
-    if ld8(fr, 0) != MAGIC {
+    if octets.ld8(fr, 0) != MAGIC {
         return NONE
     }
-    let kind: u64 = ld8(fr, 1)
-    let flags: u64 = ld8(fr, 2)
-    let n: u64 = ld8(fr, 3)
+    let kind: u64 = octets.ld8(fr, 1)
+    let flags: u64 = octets.ld8(fr, 2)
+    let n: u64 = octets.ld8(fr, 3)
     if n > FR_PAY {
         return NONE
     }
@@ -368,7 +358,7 @@ fn asm_feed(fr: u64, meta: u64) -> u64 {
         st64(m2, M_UID, ld64(meta, 8))
         st64(m2, M_LEN, 0)
         st64(m2, M_OVER, 0)
-        st64(m2, M_T0, ticks())
+        st64(m2, M_T0, clockapi.ticks())
     } else {
         if s == NONE {
             return NONE // a middle frame without a beginning
@@ -380,14 +370,14 @@ fn asm_feed(fr: u64, meta: u64) -> u64 {
     i = 0
     while i < n {
         if len < ASM_MAX {
-            st8(b, len, ld8(fr, FR_HEAD + i))
+            octets.st8(b, len, octets.ld8(fr, FR_HEAD + i))
             len = len + 1
         } else {
             st64(m3, M_OVER, 1)
         }
         i = i + 1
     }
-    st8(b, len, 0)
+    octets.st8(b, len, 0)
     st64(m3, M_LEN, len)
     if (flags & F_LAST) != 0 {
         return s
@@ -400,7 +390,7 @@ fn asm_feed(fr: u64, meta: u64) -> u64 {
 // Where the line that starts at `at` ends (the '\n' or the zero).
 fn line_end(p: u64, at: u64) -> u64 {
     var i: u64 = at
-    while ld8(p, i) != 0 && ld8(p, i) != 10 {
+    while octets.ld8(p, i) != 0 && octets.ld8(p, i) != 10 {
         i = i + 1
     }
     return i
@@ -409,8 +399,8 @@ fn line_end(p: u64, at: u64) -> u64 {
 // Does `p` start with the zero-terminated `q`?
 fn starts(p: u64, q: u64) -> bool {
     var i: u64 = 0
-    while ld8(q, i) != 0 {
-        if ld8(p, i) != ld8(q, i) {
+    while octets.ld8(q, i) != 0 {
+        if octets.ld8(p, i) != octets.ld8(q, i) {
             return false
         }
         i = i + 1
@@ -426,23 +416,23 @@ fn str_eq(a: u64, b: u64) -> bool {
 // where it ended. Leading spaces are skipped.
 fn word_copy(p: u64, at: u64, out: u64, max: u64) -> u64 {
     var i: u64 = at
-    while ld8(p, i) == 32 {
+    while octets.ld8(p, i) == 32 {
         i = i + 1
     }
     var n: u64 = 0
-    while ld8(p, i) != 0 && ld8(p, i) != 32 && ld8(p, i) != 10 {
+    while octets.ld8(p, i) != 0 && octets.ld8(p, i) != 32 && octets.ld8(p, i) != 10 {
         if n + 1 < max {
-            st8(out, n, ld8(p, i))
+            octets.st8(out, n, octets.ld8(p, i))
             n = n + 1
         }
         i = i + 1
     }
-    st8(out, n, 0)
+    octets.st8(out, n, 0)
     return i
 }
 
 fn is_meta(p: u64, at: u64) -> bool {
-    return ld8(p, at) == 64 // '@'
+    return octets.ld8(p, at) == 64 // '@'
 }
 
 // The value of the line `key=value` (key given WITH a leading '@' for
@@ -450,13 +440,13 @@ fn is_meta(p: u64, at: u64) -> bool {
 fn kv_find(msg: u64, key: u64, out: u64, max: u64) -> bool {
     let kl: u64 = slen(key)
     var at: u64 = line_end(msg, 0)
-    while ld8(msg, at) == 10 {
+    while octets.ld8(msg, at) == 10 {
         at = at + 1
         let e: u64 = line_end(msg, at)
-        var hit: bool = e - at > kl && ld8(msg, at + kl) == 61
+        var hit: bool = e - at > kl && octets.ld8(msg, at + kl) == 61
         var i: u64 = 0
         while hit && i < kl {
-            if ld8(msg, at + i) != ld8(key, i) {
+            if octets.ld8(msg, at + i) != octets.ld8(key, i) {
                 hit = false
             }
             i = i + 1
@@ -465,16 +455,16 @@ fn kv_find(msg: u64, key: u64, out: u64, max: u64) -> bool {
             var n: u64 = 0
             var j: u64 = at + kl + 1
             while j < e && n + 1 < max {
-                st8(out, n, ld8(msg, j))
+                octets.st8(out, n, octets.ld8(msg, j))
                 n = n + 1
                 j = j + 1
             }
-            st8(out, n, 0)
+            octets.st8(out, n, 0)
             return true
         }
         at = e
     }
-    st8(out, 0, 0)
+    octets.st8(out, 0, 0)
     return false
 }
 
@@ -485,7 +475,7 @@ fn name_of(prefix: u64, v: u64, out: u64) {
     let pl: u64 = slen(prefix)
     var i: u64 = 0
     while i < pl {
-        st8(out, i, ld8(prefix, i))
+        octets.st8(out, i, octets.ld8(prefix, i))
         i = i + 1
     }
     var d: [u8; 24] = [0 as u8; 24]
@@ -493,10 +483,10 @@ fn name_of(prefix: u64, v: u64, out: u64) {
     let n: u64 = ulib.digits(v, dp)
     var k: u64 = 0
     while k < n {
-        st8(out, i + k, ld8(dp, k))
+        octets.st8(out, i + k, octets.ld8(dp, k))
         k = k + 1
     }
-    st8(out, i + n, 0)
+    octets.st8(out, i + n, 0)
 }
 
 // ------------------------------------------------ the output builder
@@ -516,21 +506,21 @@ fn ob_len() -> u64 {
 
 fn ob_reset() {
     ob_at = 0
-    st8(ob_ptr(), 0, 0)
+    octets.st8(ob_ptr(), 0, 0)
 }
 
 fn ob_ch(c: u64) {
     if ob_at < OB_MAX {
-        st8(ob_ptr(), ob_at, c)
+        octets.st8(ob_ptr(), ob_at, c)
         ob_at = ob_at + 1
-        st8(ob_ptr(), ob_at, 0)
+        octets.st8(ob_ptr(), ob_at, 0)
     }
 }
 
 fn ob_n(p: u64, n: u64) {
     var i: u64 = 0
     while i < n {
-        ob_ch(ld8(p, i))
+        ob_ch(octets.ld8(p, i))
         i = i + 1
     }
 }
@@ -556,8 +546,8 @@ fn ob_num(v: u64) {
 fn ob_json(p: u64) {
     ob_ch(34)
     var i: u64 = 0
-    while ld8(p, i) != 0 {
-        let c: u64 = ld8(p, i)
+    while octets.ld8(p, i) != 0 {
+        let c: u64 = octets.ld8(p, i)
         if c == 34 || c == 92 {
             ob_ch(92)
             ob_ch(c)
@@ -596,14 +586,14 @@ fn append_file(path: u64, p: u64, n: u64) -> u64 {
 fn origin_of(pid: u64, out: u64) -> u64 {
     var i: u64 = 0
     while i < 32 {
-        st8(out, i, 0)
+        octets.st8(out, i, 0)
         i = i + 1
     }
     let r: u64 = ulib.sys(SYS_ORIGIN, 0, pid, out)
     if r > 64 {
         return NONE // a negative errno
     }
-    st8(out, 31, 0)
+    octets.st8(out, 31, 0)
     return r
 }
 
@@ -633,7 +623,7 @@ static mut kvout: [u8; 8192] = [0 as u8; 8192]
 
 // The value of `field` in the key=value file `path` into `out`.
 fn kvfile_get(path: u64, field: u64, out: u64, max: u64) -> bool {
-    st8(out, 0, 0)
+    octets.st8(out, 0, 0)
     let fd: u64 = io.open(path, 0)
     if ulib.bad(fd) {
         return false
@@ -644,15 +634,15 @@ fn kvfile_get(path: u64, field: u64, out: u64, max: u64) -> bool {
     if ulib.bad(n) {
         return false
     }
-    st8(p, n, 0)
+    octets.st8(p, n, 0)
     let fl: u64 = slen(field)
     var at: u64 = 0
-    while ld8(p, at) != 0 {
+    while octets.ld8(p, at) != 0 {
         let e: u64 = line_end(p, at)
-        var hit: bool = e - at > fl && ld8(p, at + fl) == 61
+        var hit: bool = e - at > fl && octets.ld8(p, at + fl) == 61
         var i: u64 = 0
         while hit && i < fl {
-            if ld8(p, at + i) != ld8(field, i) {
+            if octets.ld8(p, at + i) != octets.ld8(field, i) {
                 hit = false
             }
             i = i + 1
@@ -661,15 +651,15 @@ fn kvfile_get(path: u64, field: u64, out: u64, max: u64) -> bool {
             var k: u64 = 0
             var j: u64 = at + fl + 1
             while j < e && k + 1 < max {
-                st8(out, k, ld8(p, j))
+                octets.st8(out, k, octets.ld8(p, j))
                 k = k + 1
                 j = j + 1
             }
-            st8(out, k, 0)
+            octets.st8(out, k, 0)
             return true
         }
         at = e
-        if ld8(p, at) == 10 {
+        if octets.ld8(p, at) == 10 {
             at = at + 1
         }
     }
@@ -679,7 +669,7 @@ fn kvfile_get(path: u64, field: u64, out: u64, max: u64) -> bool {
 fn ob_add(q: u64, at: u64, src: u64, n: u64) -> u64 {
     var i: u64 = 0
     while i < n && at + i < 8190 {
-        st8(q, at + i, ld8(src, i))
+        octets.st8(q, at + i, octets.ld8(src, i))
         i = i + 1
     }
     return at + i
@@ -698,7 +688,7 @@ fn kvfile_set(path: u64, field: u64, v: u64) -> bool {
             n = 0
         }
     }
-    st8(p, n, 0)
+    octets.st8(p, n, 0)
     let q: u64 = (&kvout[0 as usize]) as u64
     var o: u64 = 0
     let fl: u64 = slen(field)
@@ -706,12 +696,12 @@ fn kvfile_set(path: u64, field: u64, v: u64) -> bool {
     var eqs: [u8; 2] = "=\0"
     var lf: [u8; 2] = "\n\0"
     var at: u64 = 0
-    while ld8(p, at) != 0 {
+    while octets.ld8(p, at) != 0 {
         let e: u64 = line_end(p, at)
-        var hit: bool = e - at > fl && ld8(p, at + fl) == 61
+        var hit: bool = e - at > fl && octets.ld8(p, at + fl) == 61
         var i: u64 = 0
         while hit && i < fl {
-            if ld8(p, at + i) != ld8(field, i) {
+            if octets.ld8(p, at + i) != octets.ld8(field, i) {
                 hit = false
             }
             i = i + 1
@@ -726,7 +716,7 @@ fn kvfile_set(path: u64, field: u64, v: u64) -> bool {
         }
         o = ob_add(q, o, (&lf[0 as usize]) as u64, 1)
         at = e
-        if ld8(p, at) == 10 {
+        if octets.ld8(p, at) == 10 {
             at = at + 1
         }
     }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import wlan.iwl_le
 import wlan.iwl_w
+import libc.octets
 
 export {
     enable, disable, set_host_reserve, is_on, set_clock, record_count, first_seq, slots_cap,
@@ -87,7 +88,7 @@ fn slot_at(i: u64) -> u64 { return tr_base + (i % tr_slots) * SLOT }
 fn start_slot() -> u64 {
     var s: u64 = 0
     if tr_head > tr_slots { s = tr_head - tr_slots }
-    while s < tr_head && iwl_le.ld8(slot_at(s), 4) == K_DATA { s = s + 1 }
+    while s < tr_head && octets.ld8(slot_at(s), 4) == K_DATA { s = s + 1 }
     return s
 }
 
@@ -95,7 +96,7 @@ fn record_count() -> u64 {
     var n: u64 = 0
     var i: u64 = start_slot()
     while i < tr_head {
-        if iwl_le.ld8(slot_at(i), 4) != K_DATA { n = n + 1 }
+        if octets.ld8(slot_at(i), 4) != K_DATA { n = n + 1 }
         i = i + 1
     }
     return n
@@ -104,40 +105,40 @@ fn record_count() -> u64 {
 fn first_seq() -> u64 {
     let s: u64 = start_slot()
     if s >= tr_head { return tr_seq }
-    return iwl_le.ld32(slot_at(s), 0)
+    return octets.ld32(slot_at(s), 0)
 }
 
 fn stamp(a: u64, kind: u64, space: u64, aux: u64, off: u64, val: u64, x0: u64, x1: u64) {
-    iwl_le.st32(a, 0, tr_seq)
-    iwl_le.st8(a, 4, kind)
-    iwl_le.st8(a, 5, space)
-    iwl_le.st16(a, 6, aux)
+    octets.st32(a, 0, tr_seq)
+    octets.st8(a, 4, kind)
+    octets.st8(a, 5, space)
+    octets.st16(a, 6, aux)
     var t: u64 = 0
     if tr_clk_fn != 0 {
         let clk: fn(u64) -> u64 = tr_clk_fn as fn(u64) -> u64
         t = clk(tr_clk_ctx)
     }
-    iwl_le.st64(a, 8, t)
-    iwl_le.st32(a, 16, off)
-    iwl_le.st32(a, 20, val)
-    iwl_le.st32(a, 24, x0)
-    iwl_le.st32(a, 28, x1)
+    octets.st64(a, 8, t)
+    octets.st32(a, 16, off)
+    octets.st32(a, 20, val)
+    octets.st32(a, 24, x0)
+    octets.st32(a, 28, x1)
 }
 
 fn bump(a: u64) -> bool {
-    let n: u64 = iwl_le.ld32(a, 24)
+    let n: u64 = octets.ld32(a, 24)
     if n >= 0xFFFFFFF0 { return false }
-    iwl_le.st32(a, 24, n + 1)
+    octets.st32(a, 24, n + 1)
     return true
 }
 
 fn repeats_prev(kind: u64, off: u64, val: u64) -> bool {
     if kind != K_R32 || tr_head == 0 { return false }
     var a: u64 = slot_at(tr_head - 1)
-    if iwl_le.ld8(a, 4) == K_IRQ && tr_head >= 2 && iwl_le.ld32(a, 16) == off && iwl_le.ld32(a, 20) == val {
+    if octets.ld8(a, 4) == K_IRQ && tr_head >= 2 && octets.ld32(a, 16) == off && octets.ld32(a, 20) == val {
         a = slot_at(tr_head - 2)
     }
-    if iwl_le.ld8(a, 4) != K_R32 || iwl_le.ld32(a, 16) != off || iwl_le.ld32(a, 20) != val { return false }
+    if octets.ld8(a, 4) != K_R32 || octets.ld32(a, 16) != off || octets.ld32(a, 20) != val { return false }
     return bump(a)
 }
 
@@ -153,7 +154,7 @@ fn rec_irq(cause: u64) {
     if csr_full() { return }
     if tr_head != 0 {
         let p: u64 = slot_at(tr_head - 1)
-        if iwl_le.ld8(p, 4) == K_IRQ && iwl_le.ld32(p, 20) == cause && bump(p) { return }
+        if octets.ld8(p, 4) == K_IRQ && octets.ld32(p, 20) == cause && bump(p) { return }
     }
     stamp(slot_at(tr_head), K_IRQ, S_CSR, 0, CSR_INT, cause, 0, 0)
     tr_head = tr_head + 1
@@ -169,14 +170,14 @@ fn rec_dma(index: u64, addr: u64, len: u64, queue: u64) {
 
 fn rec_host(kind: u64, pkt: u64, total: u64) {
     if total < HDR_LEN { return }
-    if kind == K_RX && (iwl_le.ld8(pkt, 0) == RX_CMD_PHY || iwl_le.ld8(pkt, 0) == RX_CMD_MPDU) { return }
+    if kind == K_RX && (octets.ld8(pkt, 0) == RX_CMD_PHY || octets.ld8(pkt, 0) == RX_CMD_MPDU) { return }
     var cap: u64 = RX_CAP
     if kind == K_HCMD { cap = HCMD_CAP }
     if kind == K_HDATA { cap = HDATA_CAP }
     let plen: u64 = total - HDR_LEN
     var keep: u64 = plen
     if keep > cap { keep = cap }
-    let wid: u64 = (iwl_le.ld8(pkt, 1) << 8) | iwl_le.ld8(pkt, 0)
+    let wid: u64 = (octets.ld8(pkt, 1) << 8) | octets.ld8(pkt, 0)
     let nd: u64 = (keep + DATA_PER_SLOT - 1) / DATA_PER_SLOT
     stamp(slot_at(tr_head), kind, S_HOST, 0, wid, plen, 0, keep)
     var i: u64 = 0
@@ -184,10 +185,10 @@ fn rec_host(kind: u64, pkt: u64, total: u64) {
         let a: u64 = slot_at(tr_head + 1 + i)
         var n: u64 = keep - i * DATA_PER_SLOT
         if n > DATA_PER_SLOT { n = DATA_PER_SLOT }
-        iwl_le.st32(a, 0, tr_seq)
-        iwl_le.st8(a, 4, K_DATA)
-        iwl_le.st8(a, 5, n)
-        iwl_le.st16(a, 6, 0)
+        octets.st32(a, 0, tr_seq)
+        octets.st8(a, 4, K_DATA)
+        octets.st8(a, 5, n)
+        octets.st16(a, 6, 0)
         iwl_le.copy(a + 8, pkt + HDR_LEN + i * DATA_PER_SLOT, n)
         i = i + 1
     }
@@ -205,7 +206,7 @@ fn name_of(table: u64, idx: u64) -> u64 {
     var at: u64 = 0
     var i: u64 = 0
     while i < idx {
-        while iwl_le.ld8(table, at) != 0 { at = at + 1 }
+        while octets.ld8(table, at) != 0 { at = at + 1 }
         at = at + 1
         i = i + 1
     }
@@ -213,14 +214,14 @@ fn name_of(table: u64, idx: u64) -> u64 {
 }
 
 fn fmt_head(w: *mut iwl_w.W, a: u64) {
-    let kind: u64 = iwl_le.ld8(a, 4)
-    iwl_w.w_dec(w, iwl_le.ld32(a, 0))
+    let kind: u64 = octets.ld8(a, 4)
+    iwl_w.w_dec(w, octets.ld32(a, 0))
     iwl_w.w_ch(w, 32)
-    iwl_w.w_dec(w, iwl_le.ld64(a, 8))
+    iwl_w.w_dec(w, octets.ld64(a, 8))
     iwl_w.w_ch(w, 32)
     iwl_w.w_s(w, name_of((&KIND_NAMES[0]) as u64, kind))
     iwl_w.w_ch(w, 32)
-    iwl_w.w_s(w, name_of((&SPACE_NAMES[0]) as u64, iwl_le.ld8(a, 5)))
+    iwl_w.w_s(w, name_of((&SPACE_NAMES[0]) as u64, octets.ld8(a, 5)))
     iwl_w.w_ch(w, 32)
 }
 
@@ -230,10 +231,10 @@ fn fmt_data(w: *mut iwl_w.W, i: u64, keep: u64) {
     var s: u64 = i + 1
     while n < keep {
         let a: u64 = slot_at(s)
-        let c: u64 = iwl_le.ld8(a, 5)
+        let c: u64 = octets.ld8(a, 5)
         var j: u64 = 0
         while j < c {
-            iwl_w.w_hex(w, iwl_le.ld8(a + 8, j), 2)
+            iwl_w.w_hex(w, octets.ld8(a + 8, j), 2)
             j = j + 1
         }
         n = n + c
@@ -243,20 +244,20 @@ fn fmt_data(w: *mut iwl_w.W, i: u64, keep: u64) {
 
 fn fmt_record(w: *mut iwl_w.W, i: u64) {
     let a: u64 = slot_at(i)
-    let kind: u64 = iwl_le.ld8(a, 4)
+    let kind: u64 = octets.ld8(a, 4)
     fmt_head(w, a)
     if kind == K_R32 || kind == K_W32 || kind == K_IRQ {
-        iwl_w.w_hex(w, iwl_le.ld32(a, 16), 8)
+        iwl_w.w_hex(w, octets.ld32(a, 16), 8)
         iwl_w.w_ch(w, 32)
-        iwl_w.w_hex(w, iwl_le.ld32(a, 20), 8)
-        if (kind == K_R32 || kind == K_IRQ) && iwl_le.ld32(a, 24) != 0 {
+        iwl_w.w_hex(w, octets.ld32(a, 20), 8)
+        if (kind == K_R32 || kind == K_IRQ) && octets.ld32(a, 24) != 0 {
             iwl_w.w_s(w, (&X_KEY[0]) as u64)
-            iwl_w.w_hex(w, iwl_le.ld32(a, 24), 8)
+            iwl_w.w_hex(w, octets.ld32(a, 24), 8)
         }
     } else if kind == K_HCMD || kind == K_RX || kind == K_HDATA {
-        let keep: u64 = iwl_le.ld32(a, 28)
-        let plen: u64 = iwl_le.ld32(a, 20)
-        iwl_w.w_hex(w, iwl_le.ld32(a, 16), 4)
+        let keep: u64 = octets.ld32(a, 28)
+        let plen: u64 = octets.ld32(a, 20)
+        iwl_w.w_hex(w, octets.ld32(a, 16), 4)
         iwl_w.w_ch(w, 32)
         iwl_w.w_hex(w, plen, 8)
         iwl_w.w_ch(w, 32)
@@ -268,18 +269,18 @@ fn fmt_record(w: *mut iwl_w.W, i: u64) {
         fmt_data(w, i, keep)
         if keep < plen { iwl_w.w_s(w, (&T_KEY[0]) as u64) }
     } else {
-        iwl_w.w_hex(w, iwl_le.ld32(a, 16), 8)
+        iwl_w.w_hex(w, octets.ld32(a, 16), 8)
         iwl_w.w_ch(w, 32)
-        iwl_w.w_hex(w, iwl_le.ld32(a, 20), 8)
+        iwl_w.w_hex(w, octets.ld32(a, 20), 8)
         iwl_w.w_ch(w, 32)
         iwl_w.w_s(w, (&AH_KEY[0]) as u64)
-        iwl_w.w_hex(w, iwl_le.ld32(a, 24), 8)
+        iwl_w.w_hex(w, octets.ld32(a, 24), 8)
         iwl_w.w_ch(w, 32)
         iwl_w.w_s(w, (&L_KEY[0]) as u64)
-        iwl_w.w_hex(w, iwl_le.ld32(a, 28), 8)
+        iwl_w.w_hex(w, octets.ld32(a, 28), 8)
         iwl_w.w_ch(w, 32)
         iwl_w.w_s(w, (&Q_KEY[0]) as u64)
-        iwl_w.w_hex(w, iwl_le.ld16(a, 6), 4)
+        iwl_w.w_hex(w, octets.ld16(a, 6), 4)
     }
     iwl_w.w_nl(w)
 }
@@ -310,13 +311,13 @@ fn walk(off: u64, dst: u64, len: u64) -> u64 {
         } else {
             fmt_record(&w, i)
             i = i + 1
-            while i < tr_head && iwl_le.ld8(slot_at(i), 4) == K_DATA { i = i + 1 }
+            while i < tr_head && octets.ld8(slot_at(i), 4) == K_DATA { i = i + 1 }
         }
         if dst != 0 {
             var k: u64 = 0
             while k < w.n && out < len {
                 if pos + k >= off {
-                    iwl_le.st8(dst, out, iwl_le.ld8(w.a, k))
+                    octets.st8(dst, out, octets.ld8(w.a, k))
                     out = out + 1
                 }
                 k = k + 1
