@@ -7,6 +7,7 @@ import bus.pci
 import bus.drvreg
 import bus.drvinf
 import bus.drvfw
+import bus.drvloose
 import arch.x86_64.apic
 import fs.fs
 import ldr.module
@@ -94,6 +95,7 @@ static mut n_failed: u64 = 0
 static mut held_refs: u64 = 0
 static mut loaded_now: u64 = 0
 static mut late: u64 = 0
+static mut deny_len: u64 = 0
 
 fn testmode_on() -> bool {
     return testmode != 0
@@ -383,6 +385,7 @@ fn scan_one(state: u64, origin: u64, name: u64) {
 }
 
 fn apply_deny(state: u64) {
+    deny_len = 0
     var f_deny: [u8; 18] = "/etc/drivers.deny\0"
     let ino: u64 = fs.path(state, (&f_deny[0]) as u64)
     if ino == 0 {
@@ -399,6 +402,7 @@ fn apply_deny(state: u64) {
         return
     }
     deny_buf[size as usize] = 10 as u8
+    deny_len = size
     var at: u64 = 0
     while at < size {
         var end: u64 = at
@@ -432,7 +436,7 @@ fn dir_scan(state: u64, dir: u64, origin: u64) {
         if ino == 0 {
             going = false
         } else {
-            if ent_buf[8] != 46 as u8 {
+            if ent_buf[8] != 46 as u8 && !(origin != 0 && drvloose.has_omod_suffix(((&ent_buf[0]) as u64) + 8)) {
                 scan_one(state, origin, ((&ent_buf[0]) as u64) + 8)
             }
             i = i + 1
@@ -686,7 +690,7 @@ fn slot_owner(slot: u64) -> u64 {
         }
         p = p + 1
     }
-    return 0
+    return drvloose.owner(slot)
 }
 
 fn attach_slot(state: u64, slot: u64) {
@@ -935,6 +939,13 @@ fn load_pkg(state: u64, name: u64) -> u64 {
 fn unload_pkg(state: u64, name: u64) -> u64 {
     let p: u64 = find_pkg(name)
     if p == NONE {
+        let lr: u64 = drvloose.unload(state, name)
+        if lr == drvloose.UNLOAD_OK {
+            return UL_OK
+        }
+        if lr == drvloose.UNLOAD_BUSY {
+            return UL_BUSY
+        }
         return UL_NONE
     }
     let k: u64 = mf(p, M_LOADK)
@@ -1020,6 +1031,7 @@ fn init(state: u64) {
     }
     scan(state)
     bind_all(state)
+    drvloose.run(state, (&app_names[0]) as u64, napps, APP_BYTES, (&deny_buf[0]) as u64, deny_len)
     report(state)
     late = 1
 }

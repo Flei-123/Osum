@@ -329,6 +329,57 @@ if ALLTAGBUILD="$B8/bd" bash tools/alltag/build.sh "$B8/o" desk=no accel=kvm sho
         case $ST9 in *running*) ok "$np processors: and it runs again after the wake-up ($ST9)";; *) bad "$np processors: state after the wake-up: '$ST9'";; esac
         has "$L8" "s3: kerne wieder online=$np" "$np processors: all cores are back"
     done
+    lauf9() { # name smp keys(1|0)
+        local name=$1 smp=$2 keys=$3 t="$TMPD/e9.img" sock="$TMPD/mon.9$2"
+        printf 'timeout: 0\ndefault_entry: 1\n/s3\n    protocol: multiboot1\n    path: boot():/osum.mb\n    module_path: boot():/quelle.img\n    cmdline: osum vfs modfs modcrc=%s gfx wm wig wmhold wighalt=120 nosched noproc nofs\n' "$CRC8" > "$TMPD/limine.conf"
+        dd if=/dev/zero of="$TMPD/r9.img" bs=1M count=0 seek=80 status=none
+        sgdisk --clear --new=1:2048:+72M --typecode=1:EF00 "$TMPD/r9.img" >/dev/null 2>&1
+        dd if=/dev/zero of="$t" bs=1M count=72 status=none
+        mkfs.vfat -F 32 "$t" >/dev/null 2>&1
+        mcopy -i "$t" "$LIMINE/limine-bios.sys" ::/limine-bios.sys
+        mcopy -i "$t" "$TMPD/limine.conf" ::/limine.conf
+        mcopy -i "$t" "$B8/bd/k0.mb" ::/osum.mb
+        mcopy -i "$t" "$B8/o/disk.img" ::/quelle.img
+        dd if="$t" of="$TMPD/r9.img" bs=512 seek=2048 conv=notrunc status=none
+        rm -f "$t"
+        "$LIMINE/limine" bios-install "$TMPD/r9.img" >/dev/null 2>&1
+        L9="$TMPD/l9-$name.txt"; rm -f "$L9"
+        timeout 150 $QEMU_X86 -m 512 -smp "$smp" -drive "file=$TMPD/r9.img,format=raw,if=ide,index=0" \
+            -serial "file:$L9" -display none -no-reboot -vga std \
+            -monitor "unix:$sock,server,nowait" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
+        P9=$!
+        local i
+        for i in $(seq 1 600); do
+            [ "$keys" = 1 ] && ! grep -qa 'standby: wunsch' "$L9" 2>/dev/null && [ "$i" -gt 40 ] \
+                && echo 'sendkey sleep' | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
+            grep -qa 's3: schlafe\|standby: antwort=' "$L9" 2>/dev/null && break
+            kill -0 "$P9" 2>/dev/null || break
+            sleep 0.5
+        done
+        sleep 1
+        ST10=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
+        case $ST10 in *suspended*) echo system_wakeup | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1 ;; esac
+        for i in $(seq 1 100); do
+            [ "$(grep -ac 'standby: antwort=' "$L9" 2>/dev/null)" -ge 1 ] && break
+            kill -0 "$P9" 2>/dev/null || break
+            sleep 0.5
+        done
+        sleep 1
+        ST11=$(echo 'info status' | socat - "UNIX-CONNECT:$sock" 2>/dev/null | tr -d '\r' | grep -ao 'VM status: .*' | head -1)
+        kill "$P9" 2>/dev/null; wait "$P9" 2>/dev/null
+    }
+    echo "== 9. the sleep key (E0 5F) puts the wish, the machine sleeps and wakes =="
+    lauf9 key 1 1
+    has "$L9" "hk: sleep" "sleep key: the keyboard driver saw E0 5F"
+    has "$L9" "standby: wunsch" "sleep key: the window server's loop took the wish up"
+    case $ST10 in *suspended*) ok "sleep key: the machine sleeps ($ST10)";; *) bad "sleep key: state at the standby: '$ST10'";; esac
+    n=$(grep -ac 'standby: antwort=1' "$L9"); num "sleep key: the answer 1 (slept and woke)" "$n" ge 1
+    case $ST11 in *running*) ok "sleep key: runs again after the wake-up ($ST11)";; *) bad "sleep key: state after the wake-up: '$ST11'";; esac
+    lauf9 nokey 1 0
+    hasnot "$L9" "hk: sleep" "counter-proof: no key, no sleep key line"
+    hasnot "$L9" "standby: wunsch" "counter-proof: no key, no wish"
+    case $ST10 in *suspended*) bad "counter-proof: the machine slept without a key ($ST10)";; *) ok "counter-proof: the machine did not sleep without the key";; esac
 else
     bad "build for the wish run"
     tail -6 "$B8/log" | sed 's/^/        /'

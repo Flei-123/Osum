@@ -91,3 +91,14 @@ USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, right
 - `/dev/drvctl` commands `slots` (`slots mouse=<pkg|none> aux=<pkg|none>`) and `aux <cmd> <arg>` (`aux C A = V`, or `aux none`); userland `drvctl slots`, `drvctl aux <cmd> <arg>`. `/proc/drivers` has a `slots mouse=... aux=...` line.
 - Packages are also scanned in `/apps/<name>.osp/lib/<pkg>/` (same files, same signature rules, same deny list). Boot lines carry ` app=<name>.osp`. A name already taken by an earlier package is rejected with code 25 (`/lib/drivers` is scanned first). Directories not ending in `.osp` are ignored. `drvctl list|match` cover both roots; `install`/`remove` only touch `/lib/drivers`; `unload`/`ban` work by name.
 - Demo modules: `module/store/auxdemo.fi` (aux slot), `module/store/mousedemo.fi` (mouse slot), `module/store/auxrogue.fi` (tries to bind the mouse slot, refused).
+
+## 10. Loose modules at normal boot (K-014b, 03.11.2026, gate `tools/drvloose/run.sh`)
+
+- `kernel/bus/drvloose.fi`: after the PCI bind, `drvstore.init` scans `/apps/<name>.osp/lib/*.omod` (bare module files, no manifest). The file stem picks the slot from a small registry (`ps2maus`, `mousedemo` -> mouse, `auxdemo` -> aux); unknown stems are skipped silently.
+- Rules: word `nostore` skips everything; `/etc/drivers.deny` lines match the stem (`banned`); an owned slot is never taken over (`slot busy`); `module.load` still checks signature, trusted keys, `/lib/omod.sperre` and the compiled-in revocation floor (`fail: gesperrt`). `.prog` directories are not scanned.
+- Log: `drvstore: loose <stem> ok|banned|slot busy|fail: <reason> app=<app>.osp`. `drvctl slots` shows the owner, `drvctl unload <stem>` unloads it. Bare files are not counted as packages.
+
+## 11. Sleep key (K-004b, 03.11.2026, gate `tools/s3/run.sh` section 9)
+
+- The keyboard driver turns the ACPI Sleep key (E0 5F) into the same standby wish as the Start menu entry "Energie sparen" (`SP_STANDBY`); lid and idle time were already handled by `powerd`. Log line `hk: sleep`.
+

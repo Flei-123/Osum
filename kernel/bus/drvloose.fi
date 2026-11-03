@@ -1,0 +1,267 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.fs
+import ldr.module
+import ldr.modidx
+import ldr.modtab
+import serial
+
+export { run, count, owner, unload, has_omod_suffix, NOT_FOUND, UNLOAD_OK, UNLOAD_BUSY }
+
+const MAX_LOOSE: u64 = 4
+const NAME_BYTES: u64 = 24
+const FIELDS: u64 = 2
+const ENT_BYTES: u64 = 264
+const NOT_FOUND: u64 = 0xFFFFFFFFFFFFFFFF
+const UNLOAD_OK: u64 = 0
+const UNLOAD_BUSY: u64 = 3
+const NO_LOAD: u64 = 99
+
+static mut names: [u8; 96] = [0 as u8; 96]
+static mut fields: [u64; 8] = [0 as u64; 8]
+static mut total: u64 = 0
+static mut path_buf: [u8; 112] = [0 as u8; 112]
+static mut ent_buf: [u8; 264] = [0 as u8; 264]
+
+fn count() -> u64 {
+    return total
+}
+
+fn name_ptr(i: u64) -> u64 {
+    return ((&names[0]) as u64) + i * NAME_BYTES
+}
+
+fn same(a: u64, b: u64) -> bool {
+    var i: u64 = 0
+    while kstate.get8(a + i) == kstate.get8(b + i) {
+        if kstate.get8(a + i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn slot_for(stem: u64) -> u64 {
+    var n_ps2: [u8; 8] = "ps2maus\0"
+    var n_mouse: [u8; 10] = "mousedemo\0"
+    var n_aux: [u8; 8] = "auxdemo\0"
+    if same(stem, (&n_ps2[0]) as u64) || same(stem, (&n_mouse[0]) as u64) {
+        return modidx.SLOT_MOUSE
+    }
+    if same(stem, (&n_aux[0]) as u64) {
+        return modidx.SLOT_AUX
+    }
+    return modidx.MAX_SLOT
+}
+
+fn text_len(p: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn has_omod_suffix(name: u64) -> bool {
+    let n: u64 = text_len(name)
+    return n > 5 && n < NAME_BYTES + 5 && kstate.get8(name + n - 5) == 46 && kstate.get8(name + n - 4) == 111
+        && kstate.get8(name + n - 3) == 109 && kstate.get8(name + n - 2) == 111 && kstate.get8(name + n - 1) == 100
+}
+
+fn path_put(n: u64, text: u64, cap: u64) -> u64 {
+    var at: u64 = n
+    var i: u64 = 0
+    while kstate.get8(text + i) != 0 && at < cap {
+        path_buf[at as usize] = kstate.get8(text + i) as u8
+        at = at + 1
+        i = i + 1
+    }
+    return at
+}
+
+fn denied(stem: u64, deny: u64, deny_len: u64) -> bool {
+    var at: u64 = 0
+    let want: u64 = text_len(stem)
+    while at < deny_len {
+        var end: u64 = at
+        while end < deny_len && kstate.get8(deny + end) != 10 {
+            end = end + 1
+        }
+        if end - at == want {
+            var k: u64 = 0
+            while k < want && kstate.get8(deny + at + k) == kstate.get8(stem + k) {
+                k = k + 1
+            }
+            if k == want {
+                return true
+            }
+        }
+        at = end + 1
+    }
+    return false
+}
+
+fn log_head(stem: u64) {
+    var s_pre: [u8; 16] = "drvstore: loose\0"
+    serial.puts((&s_pre[0]) as u64)
+    serial.put(32 as u8)
+    serial.puts(stem)
+    serial.put(32 as u8)
+}
+
+fn log_tail(app: u64) {
+    var s_app: [u8; 6] = " app=\0"
+    serial.puts((&s_app[0]) as u64)
+    serial.puts(app)
+    serial.nl()
+}
+
+fn remember(stem: u64, slot: u64, k: u64) {
+    if total >= MAX_LOOSE {
+        return
+    }
+    var i: u64 = 0
+    while i < NAME_BYTES - 1 && kstate.get8(stem + i) != 0 {
+        names[(total * NAME_BYTES + i) as usize] = kstate.get8(stem + i) as u8
+        i = i + 1
+    }
+    names[(total * NAME_BYTES + i) as usize] = 0 as u8
+    fields[(total * FIELDS) as usize] = slot
+    fields[(total * FIELDS + 1) as usize] = k
+    total = total + 1
+}
+
+fn load_one(state: u64, app: u64, file: u64, deny: u64, deny_len: u64) {
+    var s_ok: [u8; 3] = "ok\0"
+    var s_ban: [u8; 7] = "banned\0"
+    var s_busy: [u8; 10] = "slot busy\0"
+    var s_fail: [u8; 7] = "fail: \0"
+    var s_full: [u8; 5] = "full\0"
+    var root: [u8; 7] = "/apps/\0"
+    var lib: [u8; 6] = "/lib/\0"
+    var stem: [u8; 24] = [0 as u8; 24]
+    let n: u64 = text_len(file) - 5
+    var i: u64 = 0
+    while i < n {
+        stem[i as usize] = kstate.get8(file + i) as u8
+        i = i + 1
+    }
+    let sp: u64 = (&stem[0]) as u64
+    let slot: u64 = slot_for(sp)
+    if slot >= modidx.MAX_SLOT {
+        return
+    }
+    if denied(sp, deny, deny_len) {
+        log_head(sp)
+        serial.puts((&s_ban[0]) as u64)
+        log_tail(app)
+        return
+    }
+    if total >= MAX_LOOSE {
+        log_head(sp)
+        serial.puts((&s_full[0]) as u64)
+        log_tail(app)
+        return
+    }
+    if modtab.have(state, slot) {
+        log_head(sp)
+        serial.puts((&s_busy[0]) as u64)
+        log_tail(app)
+        return
+    }
+    var at: u64 = path_put(0, (&root[0]) as u64, 20)
+    at = path_put(at, app, 50)
+    at = path_put(at, (&lib[0]) as u64, 60)
+    at = path_put(at, file, 108)
+    path_buf[at as usize] = 0 as u8
+    let rc: u64 = module.load(state, (&path_buf[0]) as u64, slot)
+    log_head(sp)
+    if rc == module.R_OK {
+        remember(sp, slot, module.last_placed(state))
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_fail[0]) as u64)
+        module.say_reason(rc)
+    }
+    log_tail(app)
+}
+
+fn scan_app(state: u64, app: u64, deny: u64, deny_len: u64) {
+    var root: [u8; 7] = "/apps/\0"
+    var lib: [u8; 5] = "/lib\0"
+    var at: u64 = path_put(0, (&root[0]) as u64, 20)
+    at = path_put(at, app, 50)
+    at = path_put(at, (&lib[0]) as u64, 60)
+    path_buf[at as usize] = 0 as u8
+    let dir: u64 = fs.path(state, (&path_buf[0]) as u64)
+    if dir == 0 {
+        return
+    }
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let ino: u64 = fs.entry_at(state, dir, i, (&ent_buf[0]) as u64, ENT_BYTES)
+        if ino == 0 {
+            going = false
+        } else {
+            let file: u64 = ((&ent_buf[0]) as u64) + 8
+            if has_omod_suffix(file) {
+                var copy: [u8; 32] = [0 as u8; 32]
+                var k: u64 = 0
+                while k < 31 && kstate.get8(file + k) != 0 {
+                    copy[k as usize] = kstate.get8(file + k) as u8
+                    k = k + 1
+                }
+                load_one(state, app, (&copy[0]) as u64, deny, deny_len)
+            }
+            i = i + 1
+        }
+    }
+}
+
+fn run(state: u64, apps: u64, napps: u64, app_bytes: u64, deny: u64, deny_len: u64) {
+    total = 0
+    var a: u64 = 0
+    while a < napps {
+        scan_app(state, apps + a * app_bytes, deny, deny_len)
+        a = a + 1
+    }
+}
+
+fn find(name: u64) -> u64 {
+    var i: u64 = 0
+    while i < total {
+        if fields[(i * FIELDS + 1) as usize] != NO_LOAD && same(name_ptr(i), name) {
+            return i
+        }
+        i = i + 1
+    }
+    return NOT_FOUND
+}
+
+fn owner(slot: u64) -> u64 {
+    var i: u64 = 0
+    while i < total {
+        if fields[(i * FIELDS + 1) as usize] != NO_LOAD && fields[(i * FIELDS) as usize] == slot {
+            return name_ptr(i)
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn unload(state: u64, name: u64) -> u64 {
+    let i: u64 = find(name)
+    if i == NOT_FOUND {
+        return NOT_FOUND
+    }
+    let k: u64 = fields[(i * FIELDS + 1) as usize]
+    if module.refs_of(state, k) > 0 || !module.entladen(state, k) {
+        return UNLOAD_BUSY
+    }
+    fields[(i * FIELDS + 1) as usize] = NO_LOAD
+    return UNLOAD_OK
+}
