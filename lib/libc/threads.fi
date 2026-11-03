@@ -1,0 +1,131 @@
+// SPDX-License-Identifier: MIT
+import libc.kcall
+import libc.errno
+import libc.octets
+import libc.locks
+
+export { STACK_DEFAULT, STACK_MIN, spawn, spawn_sized, join, is_done, thread_id, self_id, yield_now, sleep_ms }
+
+const STACK_DEFAULT: u64 = 262144
+const STACK_MIN: u64 = 16384
+const HEADER_BYTES: u64 = 4096
+const PAGE: u64 = 4096
+
+const H_TID: u64 = 0
+const H_FN: u64 = 8
+const H_ARG: u64 = 16
+const H_RESULT: u64 = 24
+const H_MAP_LEN: u64 = 32
+
+const CLONE_VM: u64 = 0x100
+const CLONE_FS: u64 = 0x200
+const CLONE_FILES: u64 = 0x400
+const CLONE_SIGHAND: u64 = 0x800
+const CLONE_THREAD: u64 = 0x10000
+const CLONE_SYSVSEM: u64 = 0x40000
+const CLONE_PARENT_SETTID: u64 = 0x100000
+const CLONE_CHILD_CLEARTID: u64 = 0x200000
+
+const FUTEX_WAIT_PRIVATE: u64 = 128
+const JOIN_POLL_MS: u64 = 2
+
+fn clone_flags() -> u64 {
+    return CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
+}
+
+fn clone_call(flags: u64, stack: u64, ptid: u64, ctid: u64) -> u64 {
+    return asm("syscall\ntest rax, rax\njnz 2f\npop rax\npop rdi\nmov rsi, rax\ncall qword ptr [rax]\nxor edi, edi\nmov eax, 60\nsyscall\nhlt\n2:",
+        out("rax"), in("rax") kcall.SYS_CLONE, in("rdi") flags, in("rsi") stack,
+        in("rdx") ptid, in("r10") ctid, in("r8") 0, clobber("rcx"), clobber("r11"),
+        clobber("memory"))
+}
+
+fn thread_entry(handle: u64) -> u64 {
+    let body: fn(u64) -> u64 = octets.ld64(handle, H_FN) as fn(u64) -> u64
+    let result: u64 = body(octets.ld64(handle, H_ARG))
+    octets.st64(handle, H_RESULT, result)
+    return 0
+}
+
+fn round_up_page(n: u64) -> u64 {
+    return (n + PAGE - 1) / PAGE * PAGE
+}
+
+fn unmap(handle: u64) {
+    kcall.sys2(kcall.SYS_MUNMAP, handle, octets.ld64(handle, H_MAP_LEN))
+}
+
+fn spawn_sized(body: fn(u64) -> u64, arg: u64, stack_bytes: u64) -> u64 {
+    var stack: u64 = stack_bytes
+    if stack < STACK_MIN {
+        stack = STACK_MIN
+    }
+    let len: u64 = HEADER_BYTES + round_up_page(stack)
+    let prot: u64 = kcall.PROT_READ | kcall.PROT_WRITE
+    let base: u64 = errno.check(kcall.map_anon(len, prot, kcall.MAP_PRIVATE | kcall.MAP_ANONYMOUS))
+    if errno.failed(base) {
+        return 0
+    }
+    let entry: fn(u64) -> u64 = thread_entry
+    octets.st64(base, H_FN, body as u64)
+    octets.st64(base, H_ARG, arg)
+    octets.st64(base, H_MAP_LEN, len)
+    let top: u64 = base + len - 16
+    octets.st64(top, 0, entry as u64)
+    octets.st64(top, 8, base)
+    let r: u64 = clone_call(clone_flags(), top, base + H_TID, base + H_TID)
+    if errno.is_error(r) {
+        errno.check(r)
+        unmap(base)
+        return 0
+    }
+    return base
+}
+
+fn spawn(body: fn(u64) -> u64, arg: u64) -> u64 {
+    return spawn_sized(body, arg, STACK_DEFAULT)
+}
+
+fn thread_id(handle: u64) -> u64 {
+    return locks.load(handle + H_TID)
+}
+
+fn is_done(handle: u64) -> bool {
+    return locks.load(handle + H_TID) == 0
+}
+
+fn wait_ms(addr: u64, expect: u64, ms: u64) {
+    var ts: [u64; 2] = [0; 2]
+    ts[0] = ms / 1000
+    ts[1] = ms % 1000 * 1000000
+    kcall.sys4(kcall.SYS_FUTEX, addr, FUTEX_WAIT_PRIVATE, expect, (&ts[0]) as u64)
+}
+
+fn join(handle: u64) -> u64 {
+    if handle == 0 {
+        return 0
+    }
+    var tid: u64 = locks.load(handle + H_TID)
+    while tid != 0 {
+        wait_ms(handle + H_TID, tid, JOIN_POLL_MS)
+        tid = locks.load(handle + H_TID)
+    }
+    let result: u64 = octets.ld64(handle, H_RESULT)
+    unmap(handle)
+    return result
+}
+
+fn self_id() -> u64 {
+    return kcall.sys0(kcall.SYS_GETTID)
+}
+
+fn yield_now() {
+    kcall.sys0(kcall.SYS_YIELD)
+}
+
+fn sleep_ms(ms: u64) {
+    var ts: [u64; 2] = [0; 2]
+    ts[0] = ms / 1000
+    ts[1] = ms % 1000 * 1000000
+    kcall.sys2(kcall.SYS_NANOSLEEP, (&ts[0]) as u64, 0)
+}

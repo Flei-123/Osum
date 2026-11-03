@@ -12,9 +12,9 @@ ok() { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 build_run() {
-    local lib=$1 out=$2
-    FIRNLIB=$lib "$FIRNC" tools/libc/suite.fi -o "$out" > "$out.log" 2>&1 || return 2
-    "$out" > /dev/null 2>&1
+    local lib=$1 out=$2 src=${3:-tools/libc/suite.fi}
+    FIRNLIB=$lib "$FIRNC" "$src" -o "$out" > "$out.log" 2>&1 || return 2
+    ( timeout 120 "$out" ) > /dev/null 2>&1
 }
 
 echo "== 1. host suite over the pure libc modules =="
@@ -37,6 +37,31 @@ for edit in \
     if cmp -s "lib/libc/$mod" "$D/lib$n/libc/$mod"; then bad "patch for $mod did not apply"; continue; fi
     build_run "$D/lib$n" "$D/bad$n"; rc=$?
     [ $rc -eq 1 ] && ok "broken $mod is caught" || bad "broken $mod not caught (rc=$rc)"
+done
+
+echo "== 3. threads: clone stub, join, mutex exclusion, lost updates without it =="
+build_run "$PWD/lib" "$D/thr" tools/libc/threads_suite.fi; rc=$?
+[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns" || bad "threads suite rc=$rc"
+runs=0
+for i in 1 2 3 4 5 6 7 8; do
+    "$D/thr" > /dev/null 2>&1 || runs=$((runs+1))
+done
+[ $runs -eq 0 ] && ok "threads suite stable over 8 more runs" || bad "threads suite failed $runs of 8 repeat runs"
+
+echo "== 4. threads counter-proofs =="
+for edit in \
+    "threads.fi|s/while tid != 0 {/while false {/" \
+    "threads.fi|s/in(\"rdx\") ptid/in(\"rdx\") 0/" \
+    "threads.fi|s/octets.st64(top, 8, base)/octets.st64(top, 8, base + 8)/" \
+    "locks.fi|s/while !spin_try(p) {/while false {/"; do
+    mod=${edit%%|*}
+    expr=${edit#*|}
+    n=$((n+1))
+    cp -r lib "$D/lib$n"
+    sed -i "$expr" "$D/lib$n/libc/$mod"
+    if cmp -s "lib/libc/$mod" "$D/lib$n/libc/$mod"; then bad "patch for $mod did not apply"; continue; fi
+    build_run "$D/lib$n" "$D/bad$n" tools/libc/threads_suite.fi; rc=$?
+    { [ $rc -ne 0 ] && [ $rc -ne 2 ]; } && ok "broken threads patch $n in $mod is caught (rc=$rc)" || bad "broken threads patch $n in $mod not caught (rc=$rc)"
 done
 
 echo "== $pass ok, $fail fail =="

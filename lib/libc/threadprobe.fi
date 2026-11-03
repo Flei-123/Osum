@@ -1,0 +1,197 @@
+// SPDX-License-Identifier: MIT
+import libc.threads
+import libc.locks
+import libc.octets
+
+export { run_all, passed_count, failed_total }
+
+const WORKERS: u64 = 4
+const ROUNDS: u64 = 3000
+
+static mut passed: u64 = 0
+static mut failed_count: u64 = 0
+static mut shared_counter: u64 = 0
+static mut shared_lock: u64 = 0
+static mut start_flag: u64 = 0
+static mut seen_ids: [u64; 8] = [0; 8]
+
+fn check(ok: bool) {
+    if ok {
+        passed = passed + 1
+    } else {
+        failed_count = failed_count + 1
+    }
+}
+
+fn wait_start() {
+    while locks.load((&start_flag) as u64) == 0 {
+        threads.yield_now()
+    }
+}
+
+fn locked_incrementer(arg: u64) -> u64 {
+    wait_start()
+    var i: u64 = 0
+    while i < ROUNDS {
+        locks.mutex_take((&shared_lock) as u64)
+        let v: u64 = shared_counter
+        if i % 4 == 0 {
+            threads.yield_now()
+        }
+        shared_counter = v + 1
+        locks.mutex_give((&shared_lock) as u64)
+        i = i + 1
+    }
+    return arg
+}
+
+fn racy_incrementer(arg: u64) -> u64 {
+    wait_start()
+    var i: u64 = 0
+    while i < ROUNDS {
+        let v: u64 = shared_counter
+        threads.yield_now()
+        shared_counter = v + 1
+        i = i + 1
+    }
+    return arg
+}
+
+fn slow_result(arg: u64) -> u64 {
+    var i: u64 = 0
+    while i < 50 {
+        threads.yield_now()
+        i = i + 1
+    }
+    threads.sleep_ms(20)
+    return arg * 2 + 1
+}
+
+fn quick_result(arg: u64) -> u64 {
+    return arg + 100
+}
+
+fn record_id(arg: u64) -> u64 {
+    seen_ids[arg as usize] = threads.self_id()
+    return threads.self_id()
+}
+
+fn depth_sum(n: u64) -> u64 {
+    if n == 0 {
+        return 0
+    }
+    return n + depth_sum(n - 1)
+}
+
+fn deep_stack(arg: u64) -> u64 {
+    return depth_sum(arg)
+}
+
+fn run_workers(body: fn(u64) -> u64) -> bool {
+    var handles: [u64; 4] = [0; 4]
+    shared_counter = 0
+    locks.store((&start_flag) as u64, 0)
+    var i: u64 = 0
+    while i < WORKERS {
+        handles[i as usize] = threads.spawn(body, i)
+        if handles[i as usize] == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    locks.store((&start_flag) as u64, 1)
+    var sum: u64 = 0
+    i = 0
+    while i < WORKERS {
+        sum = sum + threads.join(handles[i as usize])
+        i = i + 1
+    }
+    return sum == 0 + 1 + 2 + 3
+}
+
+fn run_all() -> u64 {
+    check(run_workers(locked_incrementer))
+    check(shared_counter == WORKERS * ROUNDS)
+
+    check(run_workers(racy_incrementer))
+    check(shared_counter < WORKERS * ROUNDS)
+    check(shared_counter >= ROUNDS)
+
+    let slow: u64 = threads.spawn(slow_result, 20)
+    check(slow != 0)
+    check(!threads.is_done(slow))
+    check(threads.join(slow) == 41)
+
+    let quick: u64 = threads.spawn(quick_result, 5)
+    var waited: u64 = 0
+    while !threads.is_done(quick) && waited < 2000 {
+        threads.sleep_ms(1)
+        waited = waited + 1
+    }
+    check(threads.is_done(quick))
+    check(threads.thread_id(quick) == 0)
+    check(threads.join(quick) == 105)
+
+    check(threads.join(0) == 0)
+
+    var ids: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < 4 {
+        ids[k as usize] = threads.spawn(record_id, k)
+        k = k + 1
+    }
+    k = 0
+    var returned: [u64; 4] = [0; 4]
+    while k < 4 {
+        returned[k as usize] = threads.join(ids[k as usize])
+        k = k + 1
+    }
+    let me: u64 = threads.self_id()
+    var distinct: bool = true
+    k = 0
+    while k < 4 {
+        if returned[k as usize] == 0 || returned[k as usize] == me || returned[k as usize] != seen_ids[k as usize] {
+            distinct = false
+        }
+        var j: u64 = k + 1
+        while j < 4 {
+            if returned[k as usize] == returned[j as usize] {
+                distinct = false
+            }
+            j = j + 1
+        }
+        k = k + 1
+    }
+    check(distinct)
+
+    let deep: u64 = threads.spawn(deep_stack, 3000)
+    check(threads.join(deep) == 3000 * 3001 / 2)
+
+    let small: u64 = threads.spawn_sized(quick_result, 1, 1)
+    check(threads.join(small) == 101)
+
+    var churn_ok: bool = true
+    var churn: u64 = 0
+    while churn < 300 {
+        let h: u64 = threads.spawn(quick_result, churn)
+        if h == 0 {
+            churn_ok = false
+            break
+        }
+        if threads.join(h) != churn + 100 {
+            churn_ok = false
+        }
+        churn = churn + 1
+    }
+    check(churn_ok)
+
+    return failed_count
+}
+
+fn passed_count() -> u64 {
+    return passed
+}
+
+fn failed_total() -> u64 {
+    return failed_count
+}
