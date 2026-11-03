@@ -49,7 +49,7 @@ def felder(response):
 # ---------------------------------------------------------------------
 # ---------------------------------------------------------------------
 
-def build_beacon(ssid, kanal=6, rsn=True, bssid=b'\x02\x00\x00\x00\x00\x00'):
+def build_beacon(ssid, channel_no=6, rsn=True, bssid=b'\x02\x00\x00\x00\x00\x00'):
     fc = b'\x80\x00'
     duration = b'\x00\x00'
     target = b'\xff\xff\xff\xff\xff\xff'
@@ -57,7 +57,7 @@ def build_beacon(ssid, kanal=6, rsn=True, bssid=b'\x02\x00\x00\x00\x00\x00'):
     fest = b'\x00' * 8 + b'\x64\x00' + b'\x11\x04'
     ies = bytes([0, len(ssid)]) + ssid
     ies += bytes([1, 8]) + b'\x82\x84\x8b\x96\x24\x30\x48\x6c'
-    ies += bytes([3, 1, kanal])
+    ies += bytes([3, 1, channel_no])
     if rsn:
         ies += u('30140100000fac040100000fac040100000fac020000')
     return header + fest + ies

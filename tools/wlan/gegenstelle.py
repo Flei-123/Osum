@@ -49,8 +49,8 @@ def kdf_sha256(key, label, data, nbits):
     return out[:n]
 
 
-def pmk_aus_psk(passwort, ssid):
-    return hashlib.pbkdf2_hmac('sha1', passwort, ssid, 4096, 32)
+def pmk_aus_psk(passphrase, ssid):
+    return hashlib.pbkdf2_hmac('sha1', passphrase, ssid, 4096, 32)
 
 
 def ptk_ableiten(pmk, aa, spa, anonce, snonce, sha256=False, n=48):
@@ -310,14 +310,14 @@ def ccmp_open(tk, mpdu, hlen=None, prio=None):
 
 class Authenticator:
 
-    def __init__(self, ssid, passwort, aa, spa, sha256=False,
+    def __init__(self, ssid, passphrase, aa, spa, sha256=False,
                  gtk=None, anonce=None, boese=None):
         self.ssid = ssid
         self.aa = aa
         self.spa = spa
         self.sha256 = sha256
         self.boese = boese or set()
-        self.pmk = pmk_aus_psk(passwort, ssid)
+        self.pmk = pmk_aus_psk(passphrase, ssid)
         self.anonce = anonce or os.urandom(32)
         self.gtk = gtk or os.urandom(16)
         self.replay = 1
@@ -475,14 +475,14 @@ def ip2i(s):
     return (a << 24) | (b << 16) | (c << 8) | d
 
 
-def sum16(daten, start=0):
+def sum16(payload, start=0):
     s = start
     i = 0
-    while i + 1 < len(daten):
-        s += (daten[i] << 8) | daten[i + 1]
+    while i + 1 < len(payload):
+        s += (payload[i] << 8) | payload[i + 1]
         i += 2
-    if i < len(daten):
-        s += daten[i] << 8
+    if i < len(payload):
+        s += payload[i] << 8
     while s >> 16:
         s = (s & 0xFFFF) + (s >> 16)
     return (~s) & 0xFFFF
@@ -606,13 +606,13 @@ class Zugangspunkt:
         return self._frame(build_ipv4(self.server, self.klient_ip,
                                        17, u, 2), seq)
 
-    def http_reply(self, rumpf=b'OsumOK', seq=2, status=b'200 OK'):
+    def http_reply(self, body_bytes=b'OsumOK', seq=2, status=b'200 OK'):
         header = b'HTTP/1.0 ' + status + b'\r\n' + \
             b'Content-Type: text/plain\r\n' + \
-            b'Content-Length: ' + str(len(rumpf)).encode() + b'\r\n' + \
+            b'Content-Length: ' + str(len(body_bytes)).encode() + b'\r\n' + \
             b'\r\n'
         t = build_tcp(self.server, self.klient_ip, 80, 40000,
-                      1000, 1, 0x18, header + rumpf)
+                      1000, 1, 0x18, header + body_bytes)
         return self._frame(build_ipv4(self.server, self.klient_ip,
                                        6, t, 3), seq)
 

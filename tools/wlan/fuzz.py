@@ -30,7 +30,7 @@ def bad(t):
 
 
 def read_capture():
-    daten = {}
+    payload = {}
     entries = {}
     with open(MITSCHNITT, encoding="utf-8") as f:
         for z in f:
@@ -41,9 +41,9 @@ def read_capture():
             if k in ("beacon", "daten", "beacon_db"):
                 entries.setdefault(k, []).append(v)
             else:
-                daten[k] = v
-    daten.update(entries)
-    return daten
+                payload[k] = v
+    payload.update(entries)
+    return payload
 
 
 def build_cases():
@@ -100,7 +100,7 @@ def build_cases():
             faelle.append((r.choice(["beacon", "ies", "eapol", "ccmpdec"]),
                            roh))
 
-    grund = bytearray(bytes.fromhex(read_capture()["daten"][0]))
+    why = bytearray(bytes.fromhex(read_capture()["daten"][0]))
     for bits in range(16):
         fc = 0x0008  # data frame
         if bits & 1:
@@ -112,7 +112,7 @@ def build_cases():
         if bits & 8:
             fc |= 0x8000  # Ordnung
         for n in (0, 1, 2, 10, 23, 24, 25, 26, 29, 30, 31, 35, 36, 40):
-            v = bytearray(grund[:n])
+            v = bytearray(why[:n])
             if len(v) >= 2:
                 v[0] = fc & 255
                 v[1] = (fc >> 8) & 255

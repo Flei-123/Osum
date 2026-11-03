@@ -96,7 +96,7 @@ def lauf(pw=PW, beacon=None, broken=None, tk_wrong=False,
         dh = alien.dhcp_reply(XID)
     ht = ap.http_reply(status=b'200 OK')
     if http_broken:
-        ht = ap.http_reply(rumpf=b'x', status=b'500 Fehler')
+        ht = ap.http_reply(body_bytes=b'x', status=b'500 Fehler')
     if without_m3:
         m3 = None
     return felder(orakel(build_row(beacon, pmk, m1, m3, ein, dh, ht)))
@@ -314,7 +314,7 @@ def main():
         bad("tools/wlan/mitschnitt.txt fehlt")
     else:
         from gegenstelle import ccmp_open
-        daten = []
+        payload = []
         mp = {}
         for ln in open(mitschnitt):
             ln = ln.strip()
@@ -322,7 +322,7 @@ def main():
                 continue
             k, _, v = ln.partition(' ')
             if k == 'daten':
-                daten.append(u(v))
+                payload.append(u(v))
             else:
                 mp[k] = v
         pmk_e = pmk_aus_psk(mp['passwort'].encode(), mp['netz'].encode())
@@ -332,7 +332,7 @@ def main():
                             e1[17:49], e2[17:49])[32:48]
 
         # --- der echte DHCP-Request
-        pt = ccmp_open(tk_e, daten[0])
+        pt = ccmp_open(tk_e, payload[0])
         b = felder(orakel("ipdhcp %s" % h(pt)))
         if b.get('et') == '2048' and b.get('ipsum') == '1' \
                 and b.get('udpsum') == '1' and b.get('dart') == '3' \
@@ -344,7 +344,7 @@ def main():
             bad("the real DHCP request is read wrongly: %s" % b)
 
         # --- das echte DHCP-Ack
-        pt = ccmp_open(tk_e, daten[1])
+        pt = ccmp_open(tk_e, payload[1])
         b = felder(orakel("ipdhcp %s" % h(pt)))
         if b.get('dart') == '5' \
                 and b.get('yiaddr') == str(ip2i('192.168.0.50')) \

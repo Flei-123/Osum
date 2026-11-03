@@ -427,7 +427,7 @@ def part_ccmp():
 # ============================================== 4. die echte Aufzeichnung
 
 def read_capture():
-    daten = {}
+    payload = {}
     entries = {}
     with open(MITSCHNITT, encoding="utf-8") as f:
         for row in f:
@@ -438,9 +438,9 @@ def read_capture():
             if k in ("beacon", "daten", "beacon_db"):
                 entries.setdefault(k, []).append(v)
             else:
-                daten[k] = v
-    daten.update(entries)
-    return daten
+                payload[k] = v
+    payload.update(entries)
+    return payload
 
 
 def prf_sha1(key, label, data, n):
@@ -590,12 +590,12 @@ def part_capture():
             continue
         roh = bytes.fromhex(a)
         header = len(bytes.fromhex(m["daten"][i])) - len(roh) - 8
-        rumpf = roh[24:]
-        if rumpf[:6] == b"\xaa\xaa\x03\x00\x00\x00":
+        body_bytes = roh[24:]
+        if body_bytes[:6] == b"\xaa\xaa\x03\x00\x00\x00":
             gut += 1
         else:
             bad("real data frame %d: no LLC/SNAP in the plaintext (%s)"
-                % (i + 1, rumpf[:8].hex()))
+                % (i + 1, body_bytes[:8].hex()))
     if gut == len(m["daten"]):
         ok("THE WHOLE CHAIN: password -> PMK -> PTK -> TK -> %d REAL "
            "frames decrypted, each contains LLC/SNAP" % gut)
@@ -729,7 +729,7 @@ def part_state_machine():
         for name, sequence, row in defective[:5]:
             bad("%s ('%s') -> %s" % (name, sequence, row))
 
-    for sequence, grund, name in [
+    for sequence, why, name in [
         ("sbAc1234", "2", "abgelehnte Authentifizierung -> Grund 2"),
         ("sbacC1234", "1", "'C' after the handshake start -> reason 1"),
         ("sbatc1234", "3", "Zeitueberschreitung -> Grund 3"),
@@ -738,26 +738,26 @@ def part_state_machine():
         ("sbac123x", "6", "message 3 with wrong check value -> reason 6"),
     ]:
         f = zerlege_automat(eins("automat " + sequence))
-        equal(name, "%s/%s" % (f["z"], f["grund"]), "9/%s" % grund)
+        equal(name, "%s/%s" % (f["z"], f["grund"]), "9/%s" % why)
         if f["daten"] != "0":
             bad("'%s' ends in error and may still send data" % sequence)
 
     tiefe = 3 if QUICK else 4
     folgen = [""]
-    alle = []
+    every_item = []
     for _ in range(tiefe):
         folgen = [f + c for f in folgen for c in ALPHABET]
-        alle.extend(folgen)
-    antworten = orakel(["automat " + f for f in alle])
+        every_item.extend(folgen)
+    antworten = orakel(["automat " + f for f in every_item])
     defective = []
-    for sequence, row in zip(alle, antworten):
+    for sequence, row in zip(every_item, antworten):
         f = zerlege_automat(row)
         if f["daten"] != "0" or f["inst"] != "0" or f["verbund"] != "0":
             defective.append((sequence, row))
     if not defective:
         ok("EXHAUSTIVE: all %d event sequences up to length %d over an "
            "alphabet of %d -- not a single one connects, none installs "
-           "a key" % (len(alle), tiefe, len(ALPHABET)))
+           "a key" % (len(every_item), tiefe, len(ALPHABET)))
     else:
         bad("%d sequences up to length %d get too far, first: '%s' -> %s"
             % (len(defective), tiefe, defective[0][0], defective[0][1]))

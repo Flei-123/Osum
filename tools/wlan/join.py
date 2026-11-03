@@ -105,9 +105,9 @@ def scenario(pw=PW, ap_pw=PW, beacon="ok", auth=0, assoc=0, skip=(), tamper_m3=F
         offer = multi_addr_reply(zp, offer_xid, offer_art, 1)
         ack = multi_addr_reply(zp, XID, ack_art, 2)
     if beacon == "ok":
-        b = build_beacon(ssid_beacon, kanal=6, rsn=True, bssid=BSSID)
+        b = build_beacon(ssid_beacon, channel_no=6, rsn=True, bssid=BSSID)
     elif beacon == "open":
-        b = build_beacon(ssid_beacon, kanal=6, rsn=False, bssid=BSSID)
+        b = build_beacon(ssid_beacon, channel_no=6, rsn=False, bssid=BSSID)
     else:
         b = b""
     parts = {
