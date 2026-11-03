@@ -4,7 +4,7 @@ import libc.errno
 import libc.octets
 import libc.locks
 
-export { STACK_DEFAULT, STACK_MIN, spawn, spawn_sized, join, is_done, thread_id, self_id, yield_now, sleep_ms }
+export { STACK_DEFAULT, STACK_MIN, TLS_SLOTS, spawn, spawn_sized, join, is_done, thread_id, self_id, yield_now, sleep_ms, current, tls_get, tls_set }
 
 const STACK_DEFAULT: u64 = 262144
 const STACK_MIN: u64 = 16384
@@ -16,6 +16,10 @@ const H_FN: u64 = 8
 const H_ARG: u64 = 16
 const H_RESULT: u64 = 24
 const H_MAP_LEN: u64 = 32
+const H_TLS_SELF: u64 = 40
+const H_TLS_SLOTS: u64 = 48
+const TLS_SLOTS: u64 = 8
+const ARCH_GET_FS: u64 = 0x1003
 
 const CLONE_VM: u64 = 0x100
 const CLONE_FS: u64 = 0x200
@@ -23,20 +27,21 @@ const CLONE_FILES: u64 = 0x400
 const CLONE_SIGHAND: u64 = 0x800
 const CLONE_THREAD: u64 = 0x10000
 const CLONE_SYSVSEM: u64 = 0x40000
+const CLONE_SETTLS: u64 = 0x80000
 const CLONE_PARENT_SETTID: u64 = 0x100000
 const CLONE_CHILD_CLEARTID: u64 = 0x200000
 
-const FUTEX_WAIT_PRIVATE: u64 = 128
-const JOIN_POLL_MS: u64 = 2
+const FUTEX_WAIT: u64 = 0
+static mut main_slots: [u64; 8] = [0; 8]
 
 fn clone_flags() -> u64 {
-    return CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
+    return CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
 }
 
-fn clone_call(flags: u64, stack: u64, ptid: u64, ctid: u64) -> u64 {
+fn clone_call(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
     return asm("syscall\ntest rax, rax\njnz 2f\npop rax\npop rdi\nmov rsi, rax\ncall qword ptr [rax]\nxor edi, edi\nmov eax, 60\nsyscall\nhlt\n2:",
         out("rax"), in("rax") kcall.SYS_CLONE, in("rdi") flags, in("rsi") stack,
-        in("rdx") ptid, in("r10") ctid, in("r8") 0, clobber("rcx"), clobber("r11"),
+        in("rdx") ptid, in("r10") ctid, in("r8") tls, clobber("rcx"), clobber("r11"),
         clobber("memory"))
 }
 
@@ -70,10 +75,11 @@ fn spawn_sized(body: fn(u64) -> u64, arg: u64, stack_bytes: u64) -> u64 {
     octets.st64(base, H_FN, body as u64)
     octets.st64(base, H_ARG, arg)
     octets.st64(base, H_MAP_LEN, len)
+    octets.st64(base, H_TLS_SELF, base + H_TLS_SELF)
     let top: u64 = base + len - 16
     octets.st64(top, 0, entry as u64)
     octets.st64(top, 8, base)
-    let r: u64 = clone_call(clone_flags(), top, base + H_TID, base + H_TID)
+    let r: u64 = clone_call(clone_flags(), top, base + H_TID, base + H_TID, base + H_TLS_SELF)
     if errno.is_error(r) {
         errno.check(r)
         unmap(base)
@@ -94,11 +100,8 @@ fn is_done(handle: u64) -> bool {
     return locks.load(handle + H_TID) == 0
 }
 
-fn wait_ms(addr: u64, expect: u64, ms: u64) {
-    var ts: [u64; 2] = [0; 2]
-    ts[0] = ms / 1000
-    ts[1] = ms % 1000 * 1000000
-    kcall.sys4(kcall.SYS_FUTEX, addr, FUTEX_WAIT_PRIVATE, expect, (&ts[0]) as u64)
+fn wait_tid(addr: u64, expect: u64) {
+    kcall.sys4(kcall.SYS_FUTEX, addr, FUTEX_WAIT, expect, 0)
 }
 
 fn join(handle: u64) -> u64 {
@@ -107,7 +110,7 @@ fn join(handle: u64) -> u64 {
     }
     var tid: u64 = locks.load(handle + H_TID)
     while tid != 0 {
-        wait_ms(handle + H_TID, tid, JOIN_POLL_MS)
+        wait_tid(handle + H_TID, tid)
         tid = locks.load(handle + H_TID)
     }
     let result: u64 = octets.ld64(handle, H_RESULT)
@@ -128,4 +131,36 @@ fn sleep_ms(ms: u64) {
     ts[0] = ms / 1000
     ts[1] = ms % 1000 * 1000000
     kcall.sys2(kcall.SYS_NANOSLEEP, (&ts[0]) as u64, 0)
+}
+
+fn current() -> u64 {
+    var base: u64 = 0
+    let r: u64 = kcall.sys2(kcall.SYS_ARCH_PRCTL, ARCH_GET_FS, (&base) as u64)
+    if errno.is_error(r) || base == 0 {
+        return 0
+    }
+    return base - H_TLS_SELF
+}
+
+fn tls_get(slot: u64) -> u64 {
+    if slot >= TLS_SLOTS {
+        return 0
+    }
+    let handle: u64 = current()
+    if handle == 0 {
+        return main_slots[slot as usize]
+    }
+    return octets.ld64(handle, H_TLS_SLOTS + slot * 8)
+}
+
+fn tls_set(slot: u64, value: u64) {
+    if slot >= TLS_SLOTS {
+        return
+    }
+    let handle: u64 = current()
+    if handle == 0 {
+        main_slots[slot as usize] = value
+        return
+    }
+    octets.st64(handle, H_TLS_SLOTS + slot * 8, value)
 }
