@@ -27,7 +27,7 @@ The map is `tools/layers/layers.tsv` (longest prefix wins, `dir/.` = files direc
 | giant files (> 2000 lines) | 39 | mostly `kernel/sys`, `kernel/drv`, `kernel/ui`, `kernel/user` |
 | loose files in repo root | 62 | `BEFUND-*`, `STATUS-*`, `*-STATUS.md`, logs: belong under `docs/` |
 | shared modules inside `kernel/user` | 115 | imported by >= 2 files but live beside the programs: belong in `lib/` (flat imports make the move a rewrite of every importer) |
-| duplicated function bodies | 579 groups, 1418 copies (was 667 / 1866 before wave 1) | wave 3: `tools/layers/migrate/wrappers.py` inlines forwarding wrappers (`fn f(x) { return mod.f(x) }`, non-exported, 119 removed); libc.octets le16/le32/le64/put16/put32/copy/cstr_len/zero, libc.numeric yes, libc.ascii lower/is_digit/is_blank; rest are mmio variants with other types and u8 forms |
+| duplicated function bodies | 577 groups (was 667 before wave 1) | wave 4: `wrappers.py` also inlines EXPORTED wrappers whose target lives in `lib/` or `kernel/lib/` (47 removed; callers rewritten to `mod.fn(` with an import that resolves from the caller: importer dir, then `lib/`, then `kernel/`); wave 3: `tools/layers/migrate/wrappers.py` inlines forwarding wrappers (`fn f(x) { return mod.f(x) }`, non-exported, 119 removed); libc.octets le16/le32/le64/put16/put32/copy/cstr_len/zero, libc.numeric yes, libc.ascii lower/is_digit/is_blank; rest are mmio variants with other types and u8 forms |
 
 ## Std library (`lib/libc`)
 
@@ -42,7 +42,7 @@ Not mechanical. `lib/std` already exists and overlays the pinned Firn `std.*` (5
 
 ## Waves still open
 
-1. Dup helper migration is done for exact matches (`tools/layers/migrate/migrate.py`, `EXT=1` also rewrites `stem.name(` call sites and drops exports; `buildall.sh` compares the compile result of all programs against a baseline). Open: wrapper inlining (`fn f(x) { return mod.f(x) }`), `libc.threads`.
+1. Dup helper migration is done for exact matches (`tools/layers/migrate/migrate.py`, `EXT=1` also rewrites `stem.name(` call sites and drops exports; `buildall.sh` compares the compile result of all programs against a baseline). Wrapper inlining is done for non-exported wrappers and for exported wrappers over `lib/` targets; facade files over non-lib targets (`arch` over `machine`, `wlib`/`wlibc`/`fuiscene` layers) stay on purpose.
 2. Move the 115 shared modules out of `kernel/user` into `lib/` (std/syslib/framework by the map).
 3. Split the 39 giant files; break the ring-0 cycle by giving `kernel/lib` the shared interfaces.
 4. Move root clutter under `docs/`.

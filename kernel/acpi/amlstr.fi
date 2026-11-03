@@ -4,6 +4,7 @@ profile kernel
 import acpi.amlns
 import acpi.amlobj
 import libc.regio
+import lib.kstate
 
 export { concat, concat_res, mid, to_string, match_find, to_bcd, from_bcd, order, str_to_int, MATCH_NONE, ORDER_EQUAL, ORDER_GREATER, ORDER_LESS }
 
@@ -52,7 +53,7 @@ fn fail_type(state: u64) -> bool {
 fn copy_bytes(dst: u64, src: u64, n: u64) {
     var i: u64 = 0
     while i < n {
-        amlns.wr8(dst + i, amlns.rd8(src + i))
+        amlns.wr8(dst + i, kstate.get8(src + i))
         i = i + 1
     }
 }
@@ -109,7 +110,7 @@ fn make_buffer(state: u64, n: u64, dst: u64) -> u64 {
 }
 
 fn text_length(state: u64, o: u64) -> u64 {
-    let t: u64 = amlobj.otype(o)
+    let t: u64 = regio.read64(o)
     if t == amlobj.OT_STR {
         return amlobj.ov2(o)
     }
@@ -128,7 +129,7 @@ fn text_length(state: u64, o: u64) -> u64 {
 }
 
 fn put_text(o: u64, at: u64) {
-    let t: u64 = amlobj.otype(o)
+    let t: u64 = regio.read64(o)
     if t == amlobj.OT_STR {
         copy_bytes(at, amlobj.ov1(o), amlobj.ov2(o))
         return
@@ -141,7 +142,7 @@ fn put_text(o: u64, at: u64) {
     var i: u64 = 0
     var w: u64 = 0
     while i < n {
-        let b: u64 = amlns.rd8(amlobj.ov1(o) + i)
+        let b: u64 = kstate.get8(amlobj.ov1(o) + i)
         amlns.wr8(at + w, hex_digit(b >> NIBBLE_BITS))
         amlns.wr8(at + w + 1, hex_digit(b & NIBBLE_MASK))
         w = w + 2
@@ -154,7 +155,7 @@ fn put_text(o: u64, at: u64) {
 }
 
 fn byte_length(o: u64) -> u64 {
-    let t: u64 = amlobj.otype(o)
+    let t: u64 = regio.read64(o)
     if t == amlobj.OT_INT {
         return INT_BYTES
     }
@@ -165,7 +166,7 @@ fn byte_length(o: u64) -> u64 {
 }
 
 fn put_bytes(o: u64, at: u64) {
-    let t: u64 = amlobj.otype(o)
+    let t: u64 = regio.read64(o)
     if t == amlobj.OT_INT {
         put_int_bytes(at, amlobj.ov1(o))
         return
@@ -174,7 +175,7 @@ fn put_bytes(o: u64, at: u64) {
 }
 
 fn is_data(o: u64) -> bool {
-    let t: u64 = amlobj.otype(o)
+    let t: u64 = regio.read64(o)
     return t == amlobj.OT_INT || t == amlobj.OT_STR || t == amlobj.OT_BUF
 }
 
@@ -182,7 +183,7 @@ fn concat(state: u64, a: u64, b: u64, dst: u64) -> bool {
     if !is_data(a) || !is_data(b) {
         return fail_type(state)
     }
-    let ta: u64 = amlobj.otype(a)
+    let ta: u64 = regio.read64(a)
     if ta == amlobj.OT_STR {
         let la: u64 = amlobj.ov2(a)
         let lb: u64 = text_length(state, b)
@@ -213,7 +214,7 @@ fn template_body(o: u64) -> u64 {
     let at: u64 = amlobj.ov1(o)
     var i: u64 = 0
     while i < n {
-        let tag: u64 = amlns.rd8(at + i)
+        let tag: u64 = kstate.get8(at + i)
         if tag == END_TAG {
             return i
         }
@@ -230,7 +231,7 @@ fn template_body(o: u64) -> u64 {
 }
 
 fn concat_res(state: u64, a: u64, b: u64, dst: u64) -> bool {
-    if amlobj.otype(a) != amlobj.OT_BUF || amlobj.otype(b) != amlobj.OT_BUF {
+    if regio.read64(a) != amlobj.OT_BUF || regio.read64(b) != amlobj.OT_BUF {
         return fail_type(state)
     }
     let la: u64 = template_body(a)
@@ -245,7 +246,7 @@ fn concat_res(state: u64, a: u64, b: u64, dst: u64) -> bool {
 }
 
 fn mid(state: u64, src: u64, index: u64, length: u64, dst: u64) -> bool {
-    let t: u64 = amlobj.otype(src)
+    let t: u64 = regio.read64(src)
     if t != amlobj.OT_STR && t != amlobj.OT_BUF {
         return fail_type(state)
     }
@@ -272,13 +273,13 @@ fn mid(state: u64, src: u64, index: u64, length: u64, dst: u64) -> bool {
 }
 
 fn to_string(state: u64, src: u64, length: u64, dst: u64) -> bool {
-    let t: u64 = amlobj.otype(src)
+    let t: u64 = regio.read64(src)
     if t != amlobj.OT_STR && t != amlobj.OT_BUF {
         return fail_type(state)
     }
     let n: u64 = amlobj.ov2(src)
     var count: u64 = 0
-    while count < n && count < length && amlns.rd8(amlobj.ov1(src) + count) != NUL {
+    while count < n && count < length && kstate.get8(amlobj.ov1(src) + count) != NUL {
         count = count + 1
     }
     let at: u64 = make_string(state, count, dst)
@@ -312,14 +313,14 @@ fn match_test(op: u64, item: u64, operand: u64) -> bool {
 }
 
 fn match_find(pkg: u64, op1: u64, v1: u64, op2: u64, v2: u64, start: u64) -> u64 {
-    if amlobj.otype(pkg) != amlobj.OT_PKG {
+    if regio.read64(pkg) != amlobj.OT_PKG {
         return MATCH_NONE
     }
     let n: u64 = amlobj.ov2(pkg)
     var i: u64 = start
     while i < n {
         let e: u64 = amlobj.pkg_at(pkg, i)
-        if amlobj.otype(e) == amlobj.OT_INT {
+        if regio.read64(e) == amlobj.OT_INT {
             let v: u64 = amlobj.ov1(e)
             if match_test(op1, v, v1) && match_test(op2, v, v2) {
                 return i
@@ -357,7 +358,7 @@ fn from_bcd(v: u64) -> u64 {
 }
 
 fn order(a: u64, b: u64) -> u64 {
-    let ta: u64 = amlobj.otype(a)
+    let ta: u64 = regio.read64(a)
     if ta == amlobj.OT_INT {
         let x: u64 = amlobj.ov1(a)
         let y: u64 = amlobj.to_int(b)
@@ -373,8 +374,8 @@ fn order(a: u64, b: u64) -> u64 {
     let nb: u64 = amlobj.ov2(b)
     var i: u64 = 0
     while i < na && i < nb {
-        let x: u64 = amlns.rd8(amlobj.ov1(a) + i)
-        let y: u64 = amlns.rd8(amlobj.ov1(b) + i)
+        let x: u64 = kstate.get8(amlobj.ov1(a) + i)
+        let y: u64 = kstate.get8(amlobj.ov1(b) + i)
         if x != y {
             if x > y {
                 return ORDER_GREATER
@@ -408,23 +409,23 @@ fn digit_value(c: u64, radix: u64) -> u64 {
 }
 
 fn str_to_int(o: u64) -> u64 {
-    if amlobj.otype(o) != amlobj.OT_STR {
+    if regio.read64(o) != amlobj.OT_STR {
         return amlobj.to_int(o)
     }
     let at: u64 = amlobj.ov1(o)
     let n: u64 = amlobj.ov2(o)
     var i: u64 = 0
-    while i < n && (amlns.rd8(at + i) == SPACE || amlns.rd8(at + i) == TAB) {
+    while i < n && (kstate.get8(at + i) == SPACE || kstate.get8(at + i) == TAB) {
         i = i + 1
     }
     var radix: u64 = DECIMAL
-    if i + 1 < n && amlns.rd8(at + i) == DIGIT_ZERO && (amlns.rd8(at + i + 1) == CH_X_LOWER || amlns.rd8(at + i + 1) == CH_X_UPPER) {
+    if i + 1 < n && kstate.get8(at + i) == DIGIT_ZERO && (kstate.get8(at + i + 1) == CH_X_LOWER || kstate.get8(at + i + 1) == CH_X_UPPER) {
         radix = HEX_RADIX
         i = i + 2
     }
     var v: u64 = 0
     while i < n {
-        let d: u64 = digit_value(amlns.rd8(at + i), radix)
+        let d: u64 = digit_value(kstate.get8(at + i), radix)
         if d == 0xFF {
             break
         }

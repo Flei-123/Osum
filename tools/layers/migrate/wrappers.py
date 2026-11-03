@@ -2,12 +2,14 @@ import re, sys, os, collections
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import norm as N
-from common import mask, drop_export, exports_of, tracked_files, scan_references
+from common import (mask, drop_export, exports_of, tracked_files, scan_references, resolve_import,
+                    spelling_for, imports_file, remove_import, module_ok, add_imports, file_imports)
 
 APPLY = len(sys.argv) > 1 and sys.argv[1] == 'apply'
 ROOT = os.getcwd()
 FORWARD = re.compile(r'^\s*(?:return\s+)?([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(([^()]*)\)\s*;?\s*$')
 SKIP = ('vendor/', 'tests/', 'lib/libc/', 'tools/')
+TARGET_ROOTS = ('lib/', 'kernel/lib/')
 
 
 def split_params(raw):
@@ -54,6 +56,45 @@ def target_signature(mod, fname):
     return result
 
 
+def plan_external(f, mt, stem, name, mod, fname, path, callers):
+    if (stem, name) in ext_value:
+        return None
+    target = resolve_import(f, path)
+    if target is None or not target.startswith(TARGET_ROOTS):
+        return None
+    sites = {}
+    for g in callers:
+        if g.startswith('vendor/') or g == f:
+            return None
+        gt = texts.get(g)
+        if gt is None:
+            return None
+        gm = mask(gt)
+        if not imports_file(g, gm, f):
+            return None
+        spell = spelling_for(g, gm, target, path)
+        if spell is None or not module_ok(gm, mod, spell):
+            return None
+        sites[g] = spell
+    return sites
+
+
+def apply_external(stem, name, mod, fname, sites, f):
+    for g, spell in sites.items():
+        gt = texts[g]
+        gt = re.sub(r'(?<![\w.])%s\.%s(\s*)\(' % (re.escape(stem), re.escape(name)),
+                    lambda m: '%s.%s%s(' % (mod, fname, m.group(1)), gt)
+        gt = add_imports(gt, {spell})
+        if not re.search(r'(?<![\w.])%s\.' % re.escape(stem), mask(re.sub(r'^import .*$', '', gt, flags=re.M))):
+            for p in file_imports(mask(gt)):
+                if resolve_import(g, p) == f:
+                    gt = remove_import(gt, p)
+        texts[g] = gt
+        if g not in changed:
+            changed.append(g)
+
+
+external = {}
 changed = []
 report = collections.Counter()
 for f in [x for x in all_files if not x.startswith(SKIP)]:
@@ -87,8 +128,12 @@ for f in [x for x in all_files if not x.startswith(SKIP)]:
         want = target_signature(mod, fname)
         if want is None or want != signature(hm):
             continue
-        if name in exported or stem in ext.get(name, ()):
-            continue
+        callers = ext_sites.get((stem, name), set())
+        if name in exported or callers or stem in ext.get(name, ()):
+            plan = plan_external(f, mt, stem, name, mod, fname, path, callers)
+            if plan is None:
+                continue
+            external[name] = plan
         found[name] = (hm.start(), hm.start() + len(full), mod, fname, path)
     if not found:
         continue
@@ -103,7 +148,12 @@ for f in [x for x in all_files if not x.startswith(SKIP)]:
         out = re.sub(r'(?<![\w.])%s(\s*)\(' % re.escape(name), lambda m: '%s.%s%s(' % (mod, fname, m.group(1)), out)
         report[(mod, fname)] += 1
     texts[f] = out
-    changed.append(f)
+    if f not in changed:
+        changed.append(f)
+    for name, sites in external.items():
+        mod, fname = found[name][2], found[name][3]
+        apply_external(stem, name, mod, fname, sites, f)
+    external.clear()
 
 if APPLY:
     for f in changed:

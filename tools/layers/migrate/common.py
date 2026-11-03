@@ -84,3 +84,38 @@ def scan_references(all_files, skip_prefix=('lib/libc/',)):
                 ext_sites[key].add(f)
             ext[m.group(2)].add(m.group(1))
     return stem_count, ext, ext_sites, ext_value, texts
+
+
+def resolve_import(importer, path):
+    rel = path.replace('.', '/') + '.fi'
+    bases = [os.path.dirname(importer), 'lib']
+    if importer.startswith('kernel/'):
+        bases.append('kernel')
+    for base in bases:
+        candidate = os.path.normpath(os.path.join(base, rel))
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def file_imports(mt):
+    return re.findall(r'^import\s+([\w.]+)\s*$', mt, re.M)
+
+
+def spelling_for(importer, mt, target, preferred):
+    for p in file_imports(mt):
+        if resolve_import(importer, p) == target:
+            return p
+    if resolve_import(importer, preferred) == target:
+        return preferred
+    if target.startswith('lib/'):
+        return target[4:-3].replace('/', '.')
+    return None
+
+
+def imports_file(importer, mt, target):
+    return any(resolve_import(importer, p) == target for p in file_imports(mt))
+
+
+def remove_import(text, path):
+    return re.sub(r'^import\s+%s\s*\n' % re.escape(path), '', text, count=1, flags=re.M)

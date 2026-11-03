@@ -47,7 +47,7 @@ import libc.regio
 export {
     OT_NONE, OT_INT, OT_STR, OT_BUF, OT_PKG, OT_REF_SLOT, OT_REF_NODE,
     OT_REF_BYTE, OT_DEBUG, OBJ_BYTES,
-    otype, ov1, ov2, oset, oint, ocopy, obuf, opkg, pkg_at,
+    ov1, ov2, oset, oint, ocopy, obuf, opkg, pkg_at,
     obj_new, obj_int, obj_buf, obj_pkg,
     const_int, truth, to_int,
     field_read, field_write, field_read_wide, field_write_wide, field_bits, NARROW_BITS, region_check,
@@ -74,10 +74,6 @@ const RS_PCI: u64 = 2
 const RS_EC: u64 = 3
 
 // ------------------------------------------------------- an object slot
-
-fn otype(o: u64) -> u64 {
-    return regio.read64(o)
-}
 
 fn ov1(o: u64) -> u64 {
     return regio.read64(o + 8)
@@ -164,10 +160,10 @@ fn obj_pkg(state: u64, n: u64) -> u64 {
 
 // What AML regards as "true": everything except zero.
 fn truth(o: u64) -> bool {
-    if otype(o) == OT_INT {
+    if regio.read64(o) == OT_INT {
         return ov1(o) != 0
     }
-    if otype(o) == OT_BUF || otype(o) == OT_STR {
+    if regio.read64(o) == OT_BUF || regio.read64(o) == OT_STR {
         return ov2(o) != 0
     }
     return false
@@ -178,7 +174,7 @@ fn truth(o: u64) -> bool {
 // for `ToInteger`, and every interpreter reads a buffer that way in a
 // number context.
 fn to_int(o: u64) -> u64 {
-    let t: u64 = otype(o)
+    let t: u64 = regio.read64(o)
     if t == OT_INT {
         return ov1(o)
     }
@@ -187,7 +183,7 @@ fn to_int(o: u64) -> u64 {
         var i: u64 = 0
         let n: u64 = ov2(o)
         while i < 8 && i < n {
-            v = v | (amlns.rd8(ov1(o) + i) << (i * 8))
+            v = v | (kstate.get8(ov1(o) + i) << (i * 8))
             i = i + 1
         }
         return v
@@ -202,7 +198,7 @@ fn to_int(o: u64) -> u64 {
 // the address space depends on the evaluator and the evaluator on the
 // address space. Returns 1 if a constant really was there.
 fn const_int(p: u64, out: u64) -> u64 {
-    let op: u64 = amlns.rd8(p)
+    let op: u64 = kstate.get8(p)
     if op == 0x00 {
         regio.write64(out, 0)
         return 1
@@ -216,7 +212,7 @@ fn const_int(p: u64, out: u64) -> u64 {
         return 1
     }
     if op == 0x0A {
-        regio.write64(out, amlns.rd8(p + 1))
+        regio.write64(out, kstate.get8(p + 1))
         return 1
     }
     if op == 0x0B {
@@ -224,7 +220,7 @@ fn const_int(p: u64, out: u64) -> u64 {
         return 1
     }
     if op == 0x0C {
-        regio.write64(out, amlns.rd32(p + 1))
+        regio.write64(out, regio.read32(p + 1))
         return 1
     }
     if op == 0x0E {
@@ -356,7 +352,7 @@ fn mem_rd8(state: u64, phys: u64) -> u64 {
     if v == 0 {
         return 0
     }
-    return amlns.rd8(v)
+    return kstate.get8(v)
 }
 
 fn mem_wr8(state: u64, phys: u64, val: u64) {
@@ -611,9 +607,9 @@ fn field_read_wide(state: u64, fnode: u64, dst: u64, nbytes: u64) {
         let chunk: u64 = (byte >> lo) & ((1 << take) -% 1)
         let at: u64 = dst + got / 8
         let pos: u64 = got & 7
-        amlns.wr8(at, amlns.rd8(at) | ((chunk << pos) & 0xFF))
+        amlns.wr8(at, kstate.get8(at) | ((chunk << pos) & 0xFF))
         if pos + take > 8 && got / 8 + 1 < nbytes {
-            amlns.wr8(at + 1, amlns.rd8(at + 1) | (chunk >> (8 -% pos)))
+            amlns.wr8(at + 1, kstate.get8(at + 1) | (chunk >> (8 -% pos)))
         }
         got = got + take
         b = b + take
@@ -637,9 +633,9 @@ fn field_write_wide(state: u64, fnode: u64, src: u64, nbytes: u64) {
         var bitsrc: u64 = 0
         if done / 8 < nbytes {
             let pos: u64 = done & 7
-            bitsrc = amlns.rd8(src + done / 8) >> pos
+            bitsrc = kstate.get8(src + done / 8) >> pos
             if pos + take > 8 && done / 8 + 1 < nbytes {
-                bitsrc = bitsrc | (amlns.rd8(src + done / 8 + 1) << (8 -% pos))
+                bitsrc = bitsrc | (kstate.get8(src + done / 8 + 1) << (8 -% pos))
             }
         }
         let mask: u64 = ((1 << take) -% 1) << lo
@@ -674,7 +670,7 @@ fn res_irq_count(state: u64, at: u64, len: u64) -> u64 {
     var i: u64 = 0
     var n: u64 = 0
     while i < len {
-        let tag: u64 = amlns.rd8(at + i)
+        let tag: u64 = kstate.get8(at + i)
         if tag == 0x79 {
             break
         }
@@ -695,7 +691,7 @@ fn res_irq_count(state: u64, at: u64, len: u64) -> u64 {
         } else {
             let l: u64 = regio.read16_le(at + i + 1)
             if (tag & 0x7F) == 0x09 { // Extended Interrupt
-                n = n + amlns.rd8(at + i + 4)
+                n = n + kstate.get8(at + i + 4)
             }
             i = i + 3 + l
         }
@@ -708,7 +704,7 @@ fn res_irq_at(state: u64, at: u64, len: u64, k: u64) -> u64 {
     var i: u64 = 0
     var seen: u64 = 0
     while i < len {
-        let tag: u64 = amlns.rd8(at + i)
+        let tag: u64 = kstate.get8(at + i)
         if tag == 0x79 {
             break
         }
@@ -732,11 +728,11 @@ fn res_irq_at(state: u64, at: u64, len: u64, k: u64) -> u64 {
         } else {
             let l: u64 = regio.read16_le(at + i + 1)
             if (tag & 0x7F) == 0x09 {
-                let cnt: u64 = amlns.rd8(at + i + 4)
+                let cnt: u64 = kstate.get8(at + i + 4)
                 var j: u64 = 0
                 while j < cnt {
                     if seen == k {
-                        return amlns.rd32(at + i + 5 + j * 4)
+                        return regio.read32(at + i + 5 + j * 4)
                     }
                     seen = seen + 1
                     j = j + 1

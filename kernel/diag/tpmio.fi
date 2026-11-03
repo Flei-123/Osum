@@ -7,7 +7,7 @@ import sync.atomic
 import diag.devwait
 import libc.regio
 
-export { KIND_NONE, KIND_TIS, KIND_CRB, open, exec, close, remember, known_kind, open_known, rd8, rd32, be32, be16, put_be32, put_be16, ram8 }
+export { KIND_NONE, KIND_TIS, KIND_CRB, open, exec, close, remember, known_kind, open_known, be32, be16, put_be32, put_be16, ram8 }
 
 const KIND_NONE: u64 = 0
 const KIND_TIS: u64 = 1
@@ -40,14 +40,6 @@ static mut t_kind: u64 = 0
 static mut t_open: u64 = 0
 static mut k_v: u64 = 0
 static mut k_kind: u64 = 0
-
-fn rd8(p: u64) -> u64 {
-    return kstate.get8(p)
-}
-
-fn rd32(p: u64) -> u64 {
-    return regio.read32(p)
-}
 
 fn ram8(p: u64) -> u64 {
     let b: u8 = *((p) as *mut u8)
@@ -93,25 +85,25 @@ fn pause_us(state: u64, us: u64) {
 fn wait8(state: u64, p: u64, mask: u64, want: u64, us: u64) -> bool {
     var t: u64 = 0
     while t < us {
-        if (rd8(p) & mask) == want {
+        if (kstate.get8(p) & mask) == want {
             return true
         }
         pause_us(state, 10)
         t = t + 10
     }
-    return (rd8(p) & mask) == want
+    return (kstate.get8(p) & mask) == want
 }
 
 fn wait32(state: u64, p: u64, mask: u64, want: u64, us: u64) -> bool {
     var t: u64 = 0
     while t < us {
-        if (rd32(p) & mask) == want {
+        if (regio.read32(p) & mask) == want {
             return true
         }
         pause_us(state, 10)
         t = t + 10
     }
-    return (rd32(p) & mask) == want
+    return (regio.read32(p) & mask) == want
 }
 
 fn open(state: u64, v: u64, kind: u64) {
@@ -160,7 +152,7 @@ fn map_phys(state: u64, pa: u64) -> u64 {
 
 fn crb_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
     let v: u64 = t_v
-    if (rd8(v + CRB_LOC_STATE) & 2) == 0 {
+    if (kstate.get8(v + CRB_LOC_STATE) & 2) == 0 {
         regio.write32(v + CRB_LOC_CTRL, 1)
         if !wait8(state, v + CRB_LOC_STATE, 2, 2, 200000) {
             return 0
@@ -170,8 +162,8 @@ fn crb_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
     if !wait32(state, v + CRB_REQ, 1, 0, 500000) {
         return 0
     }
-    let csize: u64 = rd32(v + CRB_CMD_SIZE)
-    let cpa: u64 = rd32(v + CRB_CMD_LO) | (rd32(v + CRB_CMD_HI) << 32)
+    let csize: u64 = regio.read32(v + CRB_CMD_SIZE)
+    let cpa: u64 = regio.read32(v + CRB_CMD_LO) | (regio.read32(v + CRB_CMD_HI) << 32)
     let cv: u64 = map_phys(state, cpa)
     if cv == 0 || csize < clen {
         return 0
@@ -185,18 +177,18 @@ fn crb_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
     if !wait32(state, v + CRB_START, 1, 0, 2000000) {
         return 0
     }
-    let rpa: u64 = rd32(v + CRB_RSP_LO) | (rd32(v + CRB_RSP_HI) << 32)
+    let rpa: u64 = regio.read32(v + CRB_RSP_LO) | (regio.read32(v + CRB_RSP_HI) << 32)
     let rv: u64 = map_phys(state, rpa)
     if rv == 0 {
         return 0
     }
-    let hi: u64 = (rd8(rv + 2) << 24) | (rd8(rv + 3) << 16) | (rd8(rv + 4) << 8) | rd8(rv + 5)
+    let hi: u64 = (kstate.get8(rv + 2) << 24) | (kstate.get8(rv + 3) << 16) | (kstate.get8(rv + 4) << 8) | kstate.get8(rv + 5)
     if hi < 10 || hi > rcap {
         return 0
     }
     i = 0
     while i < hi {
-        *((rsp + i) as *mut u8) = rd8(rv + i) as u8
+        *((rsp + i) as *mut u8) = kstate.get8(rv + i) as u8
         i = i + 1
     }
     return hi
@@ -205,7 +197,7 @@ fn crb_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
 fn tis_burst(state: u64) -> u64 {
     var t: u64 = 0
     while t < 200000 {
-        let b: u64 = (rd32(t_v + TIS_STS) >> 8) & 0xFFFF
+        let b: u64 = (regio.read32(t_v + TIS_STS) >> 8) & 0xFFFF
         if b != 0 {
             return b
         }
@@ -217,13 +209,13 @@ fn tis_burst(state: u64) -> u64 {
 
 fn tis_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
     let v: u64 = t_v
-    if (rd8(v + TIS_ACCESS) & ACC_ACTIVE) == 0 {
+    if (kstate.get8(v + TIS_ACCESS) & ACC_ACTIVE) == 0 {
         kstate.set8(v + TIS_ACCESS, ACC_REQUEST as u8)
         if !wait8(state, v + TIS_ACCESS, ACC_ACTIVE, ACC_ACTIVE, 200000) {
             return 0
         }
     }
-    if (rd8(v + TIS_STS) & STS_READY) == 0 {
+    if (kstate.get8(v + TIS_STS) & STS_READY) == 0 {
         kstate.set8(v + TIS_STS, STS_READY as u8)
         if !wait8(state, v + TIS_STS, STS_READY, STS_READY, 500000) {
             return 0
@@ -244,7 +236,7 @@ fn tis_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
     if !wait8(state, v + TIS_STS, STS_VALID, STS_VALID, 200000) {
         return 0
     }
-    if (rd8(v + TIS_STS) & STS_EXPECT) != 0 {
+    if (kstate.get8(v + TIS_STS) & STS_EXPECT) != 0 {
         return 0
     }
     kstate.set8(v + TIS_STS, STS_GO as u8)
@@ -256,15 +248,15 @@ fn tis_exec(state: u64, cmd: u64, clen: u64, rsp: u64, rcap: u64) -> u64 {
     var guard: u64 = 0
     while got < total && guard < 4000 {
         guard = guard + 1
-        if (rd8(v + TIS_STS) & STS_AVAIL) == 0 {
+        if (kstate.get8(v + TIS_STS) & STS_AVAIL) == 0 {
             if !wait8(state, v + TIS_STS, STS_AVAIL, STS_AVAIL, 200000) {
                 return 0
             }
         }
         if got < rcap {
-            *((rsp + got) as *mut u8) = rd8(v + TIS_FIFO) as u8
+            *((rsp + got) as *mut u8) = kstate.get8(v + TIS_FIFO) as u8
         } else {
-            let drop: u64 = rd8(v + TIS_FIFO)
+            let drop: u64 = kstate.get8(v + TIS_FIFO)
         }
         got = got + 1
         if got == 10 {
