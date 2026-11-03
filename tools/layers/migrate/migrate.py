@@ -2,6 +2,7 @@ import re, sys, os, subprocess, collections
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import norm as N
+from common import mask, callees, module_ok, drop_export, add_imports, exports_of, tracked_files, scan_references
 
 def nn(hm, full):
     return N.norm(hm, full[:hm.start(2) - hm.start()] + 'F' + full[hm.end(2) - hm.start():])
@@ -11,58 +12,7 @@ MODS = sys.argv[1].split(',')
 APPLY = len(sys.argv) > 2 and sys.argv[2] == 'apply'
 EXT = os.environ.get('EXT') == '1'
 ROOT = os.getcwd()
-CALL = re.compile(r'(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\s*\(')
-KW = {'if', 'while', 'return', 'as', 'fn', 'for', 'match', 'sizeof'}
-
-
-def mask(t):
-    return re.sub(r'//[^\n]*', lambda m: ' ' * len(m.group(0)), t)
-
-
-def callees(body):
-    return {c for c in CALL.findall(body) if c not in KW and not c.startswith('__')}
-
-
-def module_ok(mt, m):
-    plain = re.sub(r'"[^"\n]*"', '""', re.sub(r'^import .*$', '', mt, flags=re.M))
-    if re.search(r'(?<![\w.])%s\b(?!\.)' % m, plain):
-        return False
-    for im in re.finditer(r'^import\s+([\w.]+)\s*$', mt, re.M):
-        if im.group(1).split('.')[-1] == m and im.group(1) != 'libc.' + m:
-            return False
-    return True
-
-
-def drop_export(text, name):
-    def fix(m):
-        block = m.group(0)
-        block = re.sub(r'(?<![\w.])%s\s*,[ \t]*' % re.escape(name), '', block, count=1)
-        return re.sub(r',\s*%s\b(?=\s*\})' % re.escape(name), '', block, count=1)
-    return re.sub(r'export\s*\{[^}]*\}', fix, text)
-
-
-def add_imports(out, needed):
-    lines = out.split('\n')
-    last = -1
-    have = set()
-    for i, ln in enumerate(lines):
-        mm = re.match(r'import\s+([\w.]+)\s*$', ln)
-        if mm:
-            last = i
-            have.add(mm.group(1))
-    add = ['import libc.%s' % m for m in sorted(needed) if 'libc.%s' % m not in have]
-    if add:
-        if last >= 0:
-            lines[last + 1:last + 1] = add
-        else:
-            pos = 0
-            while pos < len(lines) and lines[pos].startswith('//'):
-                pos += 1
-            lines[pos:pos] = add + ['']
-    return '\n'.join(lines)
-
-
-files = subprocess.check_output(['git', 'ls-files', '*.fi']).decode().split()
+files = tracked_files()
 files = [f for f in files if not f.startswith(('vendor/', 'tests/', 'lib/libc/', 'tools/'))]
 
 if os.environ.get('ONLY'):
@@ -86,26 +36,8 @@ for hm, full, body in N.blocks(at):
     mod, lname = hm.group(2).split('__')
     libfns.setdefault(nn(hm, full), []).append((mod, lname, callees(body)))
 
-all_files = subprocess.check_output(['git', 'ls-files', '*.fi']).decode().split()
-stem_count = collections.Counter(os.path.basename(f)[:-3] for f in all_files)
-ext = collections.defaultdict(set)
-ext_sites = collections.defaultdict(set)
-ext_value = set()
-texts = {}
-for f in all_files:
-    if f.startswith('lib/libc/'):
-        continue
-    t = open(f, errors='replace').read()
-    texts[f] = t
-    for m in re.finditer(r'\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b(\s*\()?', mask(t)):
-        key = (m.group(1), m.group(2))
-        if m.group(3) is None:
-            ext_value.add(key)
-        elif f.startswith('vendor/'):
-            ext_value.add(key)
-        else:
-            ext_sites[key].add(f)
-        ext[m.group(2)].add(m.group(1))
+all_files = tracked_files()
+stem_count, ext, ext_sites, ext_value, texts = scan_references(all_files)
 
 changed = []
 report = collections.Counter()
@@ -187,7 +119,7 @@ for f in files:
         out = drop_export(out, name)
     for name, (mod, lname) in resolved.items():
         out = re.sub(r'(?<![\w.])%s(\s*)\(' % re.escape(name), lambda m: '%s.%s%s(' % (mod, lname, m.group(1)), out)
-    out = add_imports(out, {m for m, _ in resolved.values()})
+    out = add_imports(out, {'libc.' + m for m, _ in resolved.values()})
     for name, (mod, lname) in resolved.items():
         report[(mod, lname)] += 1
     texts[f] = out
@@ -198,7 +130,7 @@ for f in files:
         for name, mod, lname in edits:
             gt = re.sub(r'\b%s\.%s(\s*)\(' % (re.escape(stem), re.escape(name)), lambda m: '%s.%s%s(' % (mod, lname, m.group(1)), gt)
             mods.add(mod)
-        texts[g] = add_imports(gt, mods)
+        texts[g] = add_imports(gt, {'libc.' + m for m in mods})
         if g not in changed:
             changed.append(g)
         report[('ext', stem)] += 1
