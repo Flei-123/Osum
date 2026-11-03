@@ -1,0 +1,253 @@
+profile kernel
+
+import sha
+import ulib
+
+export { join_all }
+
+const LIST_MAX: u64 = 4000
+const COPY_MAX: u64 = 16384
+const MAX_PARTS: u64 = 400
+const NUM_AT: u64 = 3
+const MODE_FILE: u64 = 420
+const MODE_EXEC: u64 = 493
+const SYS_CHMOD: u64 = 90
+const BAD: u64 = 0xFFFFFFFFFFFFFFFF
+
+static mut P_LIST: [u8; 16] = "/etc/split.list\0"
+static mut P_BIN: [u8; 6] = "/bin/\0"
+static mut X_TEMP: [u8; 6] = ".join\0"
+static mut S_JOINED: [u8; 15] = "split: joined \0"
+static mut S_PARTS: [u8; 13] = " parts into \0"
+static mut S_NL: [u8; 2] = "\n\0"
+static mut E_JOIN: [u8; 24] = "split: join failed for \0"
+static mut LIST: [u8; 4096] = [0 as u8; 4096]
+static mut COPY: [u8; 16384] = [0 as u8; 16384]
+static mut NAME: [u8; 64] = [0 as u8; 64]
+static mut SIZE_TEXT: [u8; 24] = [0 as u8; 24]
+static mut WANT_HEX: [u8; 72] = [0 as u8; 72]
+static mut GOT_HEX: [u8; 72] = [0 as u8; 72]
+static mut PREFIX: [u8; 100] = [0 as u8; 100]
+static mut LINK: [u8; 100] = [0 as u8; 100]
+static mut TARGET: [u8; 80] = [0 as u8; 80]
+static mut TEMP: [u8; 90] = [0 as u8; 90]
+static mut PART: [u8; 112] = [0 as u8; 112]
+static mut copied: u64 = 0
+
+fn at(p: u64) -> u64 {
+    return (*((p) as *mut u8)) as u64
+}
+
+fn put(p: u64, v: u64) {
+    __mmio_write8((p) as *mut u8, v as u8)
+}
+
+fn len(p: u64) -> u64 {
+    var n: u64 = 0
+    while at(p + n) != 0 {
+        n = n + 1
+    }
+    return n
+}
+
+fn is_gap(c: u64) -> bool {
+    return c == 32 || c == 9
+}
+
+fn field(start: u64, out: u64, cap: u64) -> u64 {
+    var pos: u64 = start
+    while is_gap(at(pos)) {
+        pos = pos + 1
+    }
+    var n: u64 = 0
+    while at(pos) != 0 && at(pos) != 10 && !is_gap(at(pos)) {
+        if n + 1 < cap {
+            put(out + n, at(pos))
+            n = n + 1
+        }
+        pos = pos + 1
+    }
+    put(out + n, 0)
+    return pos
+}
+
+fn part_path(index: u64) {
+    ulib.strcpy((&PART[0 as usize]) as u64, (&PREFIX[0 as usize]) as u64)
+    let base: u64 = len((&PART[0 as usize]) as u64)
+    put((&PART[0 as usize]) as u64 + base, 48 + index / 100 % 10)
+    put((&PART[0 as usize]) as u64 + base + 1, 48 + index / 10 % 10)
+    put((&PART[0 as usize]) as u64 + base + 2, 48 + index % 10)
+    put((&PART[0 as usize]) as u64 + base + 3, 0)
+}
+
+fn make_parents(path: u64) {
+    var i: u64 = 1
+    while at(path + i) != 0 {
+        if at(path + i) == 47 {
+            put(path + i, 0)
+            ulib.sys(ulib.SYS_MKDIR, path, 0, 0)
+            put(path + i, 47)
+        }
+        i = i + 1
+    }
+}
+
+fn exists(path: u64) -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    return true
+}
+
+fn copy_part(src: u64, dst: u64) -> bool {
+    var good: bool = true
+    var going: bool = true
+    while going {
+        let n: u64 = ulib.sys(ulib.SYS_READ, src, (&COPY[0 as usize]) as u64, COPY_MAX)
+        if n == 0 || ulib.bad(n) {
+            going = false
+        } else if ulib.sys(ulib.SYS_WRITE, dst, (&COPY[0 as usize]) as u64, n) != n {
+            good = false
+            going = false
+        } else {
+            sha.update((&COPY[0 as usize]) as u64, n)
+            copied = copied + n
+        }
+    }
+    return good
+}
+
+fn drop_parts(count: u64) {
+    var i: u64 = 0
+    while i < count {
+        part_path(i)
+        ulib.sys(ulib.SYS_UNLINK, (&PART[0 as usize]) as u64, 0, 0)
+        i = i + 1
+    }
+}
+
+fn assemble(octets: u64) -> u64 {
+    let out: u64 = ulib.sys(ulib.SYS_OPEN, (&TEMP[0 as usize]) as u64, ulib.O_MAKE, MODE_FILE)
+    if ulib.bad(out) {
+        return BAD
+    }
+    var dig: [u8; 32] = [0 as u8; 32]
+    var count: u64 = 0
+    var good: bool = true
+    var going: bool = true
+    copied = 0
+    sha.begin()
+    while going && count < MAX_PARTS {
+        part_path(count)
+        let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&PART[0 as usize]) as u64, 0, 0)
+        if ulib.bad(fd) {
+            going = false
+        } else {
+            good = copy_part(fd, out)
+            ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+            if good {
+                count = count + 1
+            } else {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, out, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    sha.finish((&dig[0 as usize]) as u64)
+    sha.hex_out((&dig[0 as usize]) as u64, 32, (&GOT_HEX[0 as usize]) as u64)
+    if !good || count == 0 || copied != octets {
+        return BAD
+    }
+    if !ulib.strneq((&GOT_HEX[0 as usize]) as u64, (&WANT_HEX[0 as usize]) as u64, 64) {
+        return BAD
+    }
+    return count
+}
+
+fn make_links() {
+    ulib.sys(SYS_CHMOD, (&TARGET[0 as usize]) as u64, MODE_EXEC, 0)
+    if at((&LINK[0 as usize]) as u64) != 47 {
+        return
+    }
+    make_parents((&LINK[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_UNLINK, (&LINK[0 as usize]) as u64, 0, 0)
+    ulib.sys(ulib.SYS_LINK, (&TARGET[0 as usize]) as u64, (&LINK[0 as usize]) as u64, 0)
+}
+
+fn join_entry(octets: u64) -> bool {
+    part_path(0)
+    if !exists((&PART[0 as usize]) as u64) {
+        return true
+    }
+    ulib.strcpy((&TARGET[0 as usize]) as u64, (&P_BIN[0 as usize]) as u64)
+    ulib.strcat((&TARGET[0 as usize]) as u64, (&NAME[0 as usize]) as u64)
+    ulib.strcpy((&TEMP[0 as usize]) as u64, (&TARGET[0 as usize]) as u64)
+    ulib.strcat((&TEMP[0 as usize]) as u64, (&X_TEMP[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_UNLINK, (&TEMP[0 as usize]) as u64, 0, 0)
+    let count: u64 = assemble(octets)
+    if count == BAD {
+        ulib.sys(ulib.SYS_UNLINK, (&TEMP[0 as usize]) as u64, 0, 0)
+        return false
+    }
+    ulib.sys(ulib.SYS_UNLINK, (&TARGET[0 as usize]) as u64, 0, 0)
+    if ulib.bad(ulib.sys(ulib.SYS_RENAME, (&TEMP[0 as usize]) as u64, (&TARGET[0 as usize]) as u64, 0)) {
+        return false
+    }
+    make_links()
+    drop_parts(count)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    ulib.say((&S_JOINED[0 as usize]) as u64)
+    ulib.sayu(count)
+    ulib.say((&S_PARTS[0 as usize]) as u64)
+    ulib.say((&TARGET[0 as usize]) as u64)
+    ulib.nl()
+    return true
+}
+
+fn join_line(start: u64) -> u64 {
+    var pos: u64 = field(start, (&NAME[0 as usize]) as u64, 64)
+    pos = field(pos, (&SIZE_TEXT[0 as usize]) as u64, 24)
+    pos = field(pos, (&WANT_HEX[0 as usize]) as u64, 72)
+    pos = field(pos, (&PREFIX[0 as usize]) as u64, 96)
+    pos = field(pos, (&LINK[0 as usize]) as u64, 96)
+    let octets: u64 = ulib.to_num((&SIZE_TEXT[0 as usize]) as u64)
+    if at((&NAME[0 as usize]) as u64) == 0 || octets == 0 || len((&WANT_HEX[0 as usize]) as u64) != 64
+        || at((&PREFIX[0 as usize]) as u64) != 47 {
+        return 1
+    }
+    if join_entry(octets) {
+        return 0
+    }
+    ulib.eput((&E_JOIN[0 as usize]) as u64)
+    ulib.eput((&NAME[0 as usize]) as u64)
+    ulib.eput((&S_NL[0 as usize]) as u64)
+    return 2
+}
+
+fn join_all() -> u64 {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&P_LIST[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return 0
+    }
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, (&LIST[0 as usize]) as u64, LIST_MAX)
+    ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return 0
+    }
+    put((&LIST[0 as usize]) as u64 + n, 0)
+    var failed: u64 = 0
+    var i: u64 = 0
+    while i < n {
+        if join_line((&LIST[0 as usize]) as u64 + i) == 2 {
+            failed = failed + 1
+        }
+        while i < n && at((&LIST[0 as usize]) as u64 + i) != 10 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return failed
+}

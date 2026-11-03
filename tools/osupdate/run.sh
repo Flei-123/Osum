@@ -29,6 +29,7 @@
 #  13. trust-root delivery (sysfile roots): rootsctl apply from the signed list; counter-proofs wrong hash, junk block
 #  14. absolute overlay targets (/etc, /usr/share), syslink of /apps/<x>.osp/start to a new /bin file, reboot, counter-proofs
 #  15. detached apply (apply bg): running/done/failed state + log, second call refused, stale state released, force
+#  17. split overlay file (--split-gz): parts as ordinary overlay files, cut line refused, joined by sha256, link, wrong join hash refused
 # Sections 2 and 5 run with the gzip feed (kernel + overlay files as .gz, streaming gunzip on the
 # device): the trial boot sees the new /bin files, confirm drops the backups, a lost trial restores them.
 # OSU_SECS="8 9" runs only the listed sections (1 always runs); OSU_ONLY7=1 = "7".
@@ -68,7 +69,7 @@ dienst() { # <root>
     dienst_aus
     : > "$OUT/srv.log"
     python3 tools/ota/server.py --wurzel "$1" --port "$PORT" \
-        --cert "$OUT/certs/srv.pem" --key "$OUT/certs/srv.key" \
+        --cert "$OUT/certs/srv.pem" --key "$OUT/certs/srv.key" ${SRV_EXTRA:-} \
         --log "$OUT/srv.log" > "$OUT/srv.out" 2>&1 &
     SRVPID=$!
     local i
@@ -644,6 +645,55 @@ gleich "slot A == new kernel" "$(esp_sha EFI/prod/osum.mb)" "$KSHA"
 gleich "limine default_entry back to 1" "$(conf_default)" "1"
 esp_get limine.conf | sed -n '/^\/Windows Boot Manager/,$p' > "$OUT/d.win2"
 cmp -s "$OUT/d.win0" "$OUT/d.win2" && ok "Windows entry still byte-identical after confirm" || bad "Windows entry changed by confirm"
+dienst_aus
+fi
+
+if want 17; then
+echo "== 17. split overlay file: parts fetched one by one, joined by sha256 into /bin, cut line, bad join hash =="
+fresh_disk
+rm -rf "$OUT/ovl-split"; mkdir -p "$OUT/ovl-split"
+python3 - "$OUT" <<'PYEOF'
+import random, sys
+o = sys.argv[1]
+r = random.Random(17)
+elf = open(o + "/bin/echo", "rb").read()
+pad = b"".join(r.randbytes(60000) + bytes(90000) for _ in range(10))
+open(o + "/ovl-split/gate-split", "wb").write(elf + pad)
+PYEOF
+H_SPLIT=$(h "$OUT/ovl-split/gate-split")
+printf '/apps/gsplit.osp/start /bin/gate-split\n' > "$OUT/split.links"
+pubt "$OUT/img-old" "$OUT/feed-split" dev --count 600 --overlay "$OUT/ovl-split" --links "$OUT/split.links" --gz --split-gz 200000 && ok "split feed: build 600" || { cat "$OUT/pub.log"; bad "publish split"; }
+pubt "$OUT/img-old" "$OUT/feed-splitbad" dev --count 600 --overlay "$OUT/ovl-split" --links "$OUT/split.links" --gz --split-gz 200000 --bad-split-hash && ok "split feed with a wrong join hash" || bad "publish splitbad"
+NPARTS=$(grep -ac "^sysfile.file.*gate-split.p[0-9]" "$OUT/feed-split/system/dev/VERZEICHNIS")
+[ "$NPARTS" -ge 4 ] && ok "list carries $NPARTS parts" || bad "list carries only $NPARTS parts"
+grep -aq "gate-split$" "$OUT/feed-split/system/dev/VERZEICHNIS" && bad "list still carries the whole file as one entry" || ok "the whole file is not an entry"
+grep -aq "^syslink.*gsplit" "$OUT/feed-split/system/dev/VERZEICHNIS" && bad "link left in the list" || ok "link moved into split.list"
+MAXGZ=$(ls -l "$OUT"/feed-split/system/dev/*gate-split.p*.gz | awk '{print $5}' | sort -n | tail -1)
+[ "$MAXGZ" -le 200000 ] && ok "largest part gz $MAXGZ <= 200000" || bad "part gz $MAXGZ > 200000"
+BRK=$(ls "$OUT"/feed-split/system/dev | grep 'gate-split.p002.gz$')
+SRV_EXTRA="--abbruch $BRK:50000" dienst "$OUT/feed-split" && ok "feed up (cut line on $BRK)" || bad "feed does not start"
+rc=$(lauf s1 "ota system apply;ls /usr/share/split;ls /bin/gate-split;cat /system/SYSVERSION;exit")
+hat "$OUT/s1.txt" "ota: overlay file download or check failed" "cut line: apply refused"
+hatnicht "$OUT/s1.txt" "split: joined" "cut line: nothing joined"
+hatnicht "$OUT/s1.txt" "00000600" "cut line: version not bumped"
+dienst "$OUT/feed-split" && ok "feed up (clean line)" || bad "feed does not start"
+rc=$(lauf s2 "ota system apply;shasum /bin/gate-split;/bin/gate-split SPLIT-WORKS;/apps/gsplit.osp/start SPLIT-LINK;ls /usr/share/split;cat /system/SYSVERSION;exit" keep)
+sed -n '/^osum\$ ota system apply/,$p' "$OUT/s2.txt" > "$OUT/s2.after"
+hat "$OUT/s2.after" "split: joined" "apply joined the parts"
+hat "$OUT/s2.after" "$H_SPLIT" "joined file is byte-identical (sha256)"
+hat "$OUT/s2.after" "SPLIT-WORKS" "joined /bin/gate-split runs"
+hat "$OUT/s2.after" "SPLIT-LINK" "link /apps/gsplit.osp/start runs the joined file"
+hat "$OUT/s2.after" "00000600" "SYSVERSION is 600"
+hatnicht "$OUT/s2.after" "gate-split.p00" "parts removed after the join"
+rc=$(lauf s3 "shasum /bin/gate-split;/apps/gsplit.osp/start AFTER-REBOOT;ls /usr/share/split;exit" keep)
+hat "$OUT/s3.txt" "$H_SPLIT" "joined file survives the reboot"
+hat "$OUT/s3.txt" "AFTER-REBOOT" "link survives the reboot"
+fresh_disk
+dienst "$OUT/feed-splitbad" && ok "feed up (wrong join hash)" || bad "feed does not start"
+rc=$(lauf s4 "ota system apply;ls /bin/gate-split;ls /usr/share/split;exit")
+hat "$OUT/s4.txt" "split: join failed for gate-split" "wrong join hash refused"
+hatnicht "$OUT/s4.txt" "split: joined" "wrong join hash: nothing joined"
+hat "$OUT/s4.txt" "gate-split.p000" "wrong join hash: parts are kept"
 dienst_aus
 fi
 

@@ -43,16 +43,65 @@ SELFUPDATE stage 2 (docs/SELFUPDATE.md):
 --roots FILE    trust-root bundle (PEM): published as `sysfile roots` (+ a sysgz line with --gz). The device
                 fetches + hash-checks it and hands it to `rootsctl apply`, which writes /etc/ssl/roots.pem.
 --bad-roots-hash negative control: the roots sysfile hash is wrong.
+--bad-split-hash negative control: split.list carries a wrong sha256 for the joined file.
+--split-gz N    overlay files named in /bin whose gzip is larger than N octets are published as parts:
+                  /usr/share/split/<name>.pNNN (raw slices, each gzip <= N) + /etc/split.list
+                  <name> <octets> <sha256> /usr/share/split/<name>.p [<link> ...]
+                The device joins the parts into /bin/<name> (sha256 checked), makes the links and drops the
+                parts (`ota join`, also run at boot, confirm and after a live apply). syslink lines that
+                point at a split file move into split.list, because the target does not exist at swap time.
 """
-import gzip, hashlib, os, re, shutil, subprocess, sys
+import gzip, hashlib, io, os, re, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import publish as vf  # noqa: E402
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import brand
+sys.path.insert(0, os.path.join(HERE, "..", "linuxapps"))
+import packsplit  # noqa: E402
 
 PATH_OK = re.compile(r"/(apps|etc|usr/share|lib)/[A-Za-z0-9._/-]+")
+
+
+def split_slices(raw, limit):
+    handle = io.BytesIO(raw)
+    packsplit.MIN_SLICE = min(packsplit.MIN_SLICE, limit // 4)
+    slices = []
+    guess = 8 << 20
+    while True:
+        blob, packed = packsplit.next_slice(handle, guess, limit)
+        if not blob:
+            return slices
+        slices.append(blob)
+        guess = len(blob) if len(blob) < guess else int(len(blob) * limit / max(packed, 1) * packsplit.SAFETY)
+        handle.seek(sum(len(b) for b in slices))
+
+
+def split_big(ovl_files, limit, link_pairs, bad_hash=False):
+    kept = []
+    parts = []
+    manifest = []
+    for fn, raw in ovl_files:
+        if fn.startswith("/") or len(gzip.compress(raw, 9, mtime=0)) <= limit:
+            kept.append((fn, raw))
+            continue
+        prefix = "/usr/share/split/%s.p" % fn
+        if len(prefix) + 3 > 60:
+            raise SystemExit("split prefix too long: %r" % prefix)
+        slices = split_slices(raw, limit)
+        for i, blob in enumerate(slices):
+            parts.append(("%s%03d" % (prefix, i), blob))
+        links = [d for d, t in link_pairs if t == "/bin/" + fn]
+        link_pairs[:] = [(d, t) for d, t in link_pairs if t != "/bin/" + fn]
+        digest = hashlib.sha256(raw).hexdigest()
+        if bad_hash:
+            digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+        manifest.append(" ".join([fn, str(len(raw)), digest, prefix] + links))
+        print("split %s: %d octets in %d parts" % (fn, len(raw), len(slices)))
+    if manifest:
+        parts.append(("/etc/split.list", ("\n".join(manifest) + "\n").encode("ascii")))
+    return kept + parts
 
 
 def main():
@@ -61,7 +110,7 @@ def main():
         raise SystemExit(__doc__)
     img, feed, chan = a[0], a[1], a[2]
     opt = {"--bund": None, "--key": None, "--count": None, "--min-from": "0", "--notes": None,
-           "--name": "", "--overlay": None, "--roots": None, "--links": None}
+           "--name": "", "--overlay": None, "--roots": None, "--links": None, "--split-gz": None}
     flags = set()
     i = 3
     while i < len(a):
@@ -127,6 +176,7 @@ def main():
             if not raw:
                 raise SystemExit("overlay file is empty: %s" % fn)
             ovl_files.append((fn, raw))
+    link_pairs = []
     link_lines = []
     if opt["--links"]:
         for ln in open(opt["--links"]).read().splitlines():
@@ -136,7 +186,11 @@ def main():
             if len(parts) != 2 or not PATH_OK.fullmatch(parts[0]) or len(parts[0]) > 60 \
                     or not re.fullmatch(r"/bin/[A-Za-z0-9_-][A-Za-z0-9._-]{0,50}", parts[1]):
                 raise SystemExit("bad link line: %r" % ln)
-            link_lines.append("syslink\t%s\t%s" % (parts[0], parts[1]))
+            link_pairs.append((parts[0], parts[1]))
+    if opt["--split-gz"]:
+        ovl_files = split_big(ovl_files, int(opt["--split-gz"]), link_pairs, "--bad-split-hash" in flags)
+    for dest, target in link_pairs:
+        link_lines.append("syslink\t%s\t%s" % (dest, target))
     roots_raw = None
     if opt["--roots"]:
         roots_raw = open(opt["--roots"], "rb").read()

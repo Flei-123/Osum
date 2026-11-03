@@ -59,6 +59,7 @@ if [ "$DRY" = 1 ]; then TARGET=$T/feed; mkdir -p "$TARGET/system"; cp -a "$FEED/
 ARGS=(--count "$COUNT" --gz --notes "$T/notes.txt" --name "${MARKE_PRODUKT} $CHANNEL")
 if [ -n "$(ls -A "$T/ovl")" ]; then ARGS+=(--overlay "$T/ovl"); fi
 if [ -n "${OVL_LINKS:-}" ]; then ARGS+=(--links "$OVL_LINKS"); fi
+ARGS+=(--split-gz "${OVL_SPLIT_GZ:-3900000}")
 bash tools/ota/publish-system.sh "$T/k" "$TARGET" "$CHANNEL" "${ARGS[@]}"
 
 D=$TARGET/system/$CHANNEL
