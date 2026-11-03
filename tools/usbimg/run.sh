@@ -8,6 +8,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 
 TMPD=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD"
 IMGDIR="$TMPD/bau"
 IMG="$IMGDIR/${MARKE_DATEI}-usb.img"

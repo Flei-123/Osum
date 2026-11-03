@@ -13,6 +13,8 @@ ABBILD=${2:?usage: einzeln.sh <art> <abbild> [befehl]}
 BEFEHL=${3:-fremdfs $ART /dev/hdb1 /mnt}
 
 W=${OSUM_FF_WORK:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${OSUM_FF_WORK:-}" "$W"
 mkdir -p "$W"
 echo ">> Arbeitsverzeichnis: $W"
 

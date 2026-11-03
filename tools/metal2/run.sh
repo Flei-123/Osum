@@ -20,6 +20,8 @@ while [ $# -gt 0 ]; do
     esac
 done
 TMPD=${AUS:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${AUS:-}" "$TMPD"
 mkdir -p "$TMPD"
 
 pass=0

@@ -9,6 +9,8 @@ ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 TMPD=${SMOKED:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${SMOKED:-}" "$TMPD"
 mkdir -p "$TMPD"
 echo "workdir $TMPD"
 

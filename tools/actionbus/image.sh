@@ -26,6 +26,8 @@ bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 
 TMPD=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD"
 IMGDIR="$TMPD/bau"
 IMG="$IMGDIR/osum-usb.img"

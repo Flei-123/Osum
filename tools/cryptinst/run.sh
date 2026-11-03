@@ -8,7 +8,10 @@
 # Run: OUT=$(mktemp -d) bash tools/cryptinst/run.sh   (heavy: use /root/jarvis/bin/heavy)
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+OUT_GIVEN=${OUT:-}
 OUT=${OUT:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "$OUT_GIVEN" "$OUT"
 export OUT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); echo "  OK    $1"; }

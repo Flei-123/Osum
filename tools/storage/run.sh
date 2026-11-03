@@ -7,6 +7,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 TMPD=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD"
 SHOTS=${SHOTS:-$ROOT/docs/bilder/speicher}
 

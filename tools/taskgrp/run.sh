@@ -7,6 +7,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
 BASE_COMMIT=${TASKGRP_BASE:-$(git log --format=%H --grep="^taskbar: group windows of one program" -1 | xargs -r -I{} git rev-parse {}^)}
 pass=0; fail=0

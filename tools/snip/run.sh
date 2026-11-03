@@ -25,6 +25,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
 B=tools/alltag/build.sh
 

@@ -3,6 +3,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 WD=${1:?workdir from prep-firefox.sh}
 OUT=${2:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${2:-}" "$OUT"
 mkdir -p "$OUT/pack"
 python3 -I tools/linuxapps/hpspec.py "$WD/fxrun/spec.txt" "$OUT/hp.spec" "$PWD/tools/linuxapps/fxrun.sh" > "$OUT/hpspec.log" 2>&1 || { cat "$OUT/hpspec.log"; exit 1; }
 mkdir -p "$OUT/km"

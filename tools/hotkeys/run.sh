@@ -13,6 +13,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
 # the tree BEFORE the input change = the commit that added the alltag options this gate needs
 BASE_COMMIT=${HOTKEYS_BASE:-$(git log --format=%H --grep="^alltag: qemu=<args>" -1)}

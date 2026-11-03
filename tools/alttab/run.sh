@@ -10,6 +10,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
 BASE_COMMIT=${ALTTAB_BASE:-$(git log --format=%H --grep="^wm: Alt+Tab switcher" -1 | xargs -r -I{} git rev-parse {}^)}
 pass=0; fail=0

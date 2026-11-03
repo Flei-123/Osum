@@ -3,6 +3,8 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 WD=${1:?workdir from prep-firefox.sh}
 OUT=${2:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${2:-}" "$OUT"
 EXPECT=${EXPECT:-tools/linuxapps/expected-red.txt}
 mkdir -p "$OUT"
 declare -A GUEST=( [F3]=tools/linuxapps/guest-fx1-version.sh [F4]=tools/linuxapps/guest-fx2-shot.sh [F5]=tools/linuxapps/guest-fx3-boot.sh )

@@ -20,6 +20,8 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 part() { awk -v a="==$2==" -v b="==$3==" 'index($0,a){f=1;next} index($0,b){f=0} f' "$1"; }
 
 TMPD=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$TMPD"
 mkdir -p "$TMPD/bin"
 PROGS="sh ls cat echo sleep orientbus act settingsd settings"
 echo "== 1. build =="

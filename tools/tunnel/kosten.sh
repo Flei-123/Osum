@@ -6,6 +6,8 @@ cd "$(dirname "$0")/../.."
 RUNDEN=${RUNDEN:-3}
 MB=${MB:-1048576}
 TMPD=$(mktemp -d)
+. tools/lib/tmpdir.sh
+osum_tmp_guard "" "$TMPD"
 PASS=0; FAIL=0
 ok()  { printf '  OK    %s\n' "$*"; PASS=$((PASS+1)); }
 bad() { printf '  FAIL  %s\n' "$*"; FAIL=$((FAIL+1)); }

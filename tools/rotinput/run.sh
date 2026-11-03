@@ -12,6 +12,8 @@ cd "$(dirname "$0")/../.."
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${1:-}" "$OUT"
 mkdir -p "$OUT"
 BASE_COMMIT=${ROTINPUT_BASE:-$(git log --format=%H --grep="^rotinput: boot words" -1)}
 pass=0; fail=0

@@ -9,7 +9,10 @@ APP=${3:?kommandozeile fehlt}
 DREH=${4:?drehbuch fehlt}
 shift 4
 
+ARB_GIVEN=${ARB:-}
 ARB=${ARB:-$(mktemp -d)}
+. tools/lib/tmpdir.sh
+osum_tmp_guard "${ARB_GIVEN:-}" "$ARB"
 mkdir -p "$ARB"
 SER="$ARB/$NAME.txt"
 SOCK="$ARB/mon-$NAME.sock"
