@@ -86,7 +86,7 @@ hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3
 
 # `nvc: <tag>_<key> <value>` out of the acceptance program.
 nvc() { # file tag key
-    grep -aoE "^nvc: $2_$3 [0-9]+" "$1" 2>/dev/null | tail -1 | awk '{print $3}'
+    grep -aoE "nvc: $2_$3 [0-9]+" "$1" 2>/dev/null | tail -1 | awk '{print $3}'
 }
 # `nv: <key>=<value>` out of the kernel's own end-of-run report.
 kv() { # file key
