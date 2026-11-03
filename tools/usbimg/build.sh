@@ -718,7 +718,8 @@ ARGS+=(/etc/orientbus/ /etc/actions.d/
        "/etc/actions.d/store.actions=etc/actions.d/store.actions"
        "/etc/actions.d/media.actions=etc/actions.d/media.actions"
        "/etc/store.conf=etc/store.conf")
-ARGS+=("/etc/handlers.conf=${HANDLERS_CONF:-etc/handlers.conf}@0644")
+cp -f "${HANDLERS_CONF:-etc/handlers.conf}" "$OUT/handlers.conf"
+ARGS+=("/etc/handlers.conf=$OUT/handlers.conf@0644")
 ARGS+=("/etc/hotkeys.conf=$OUT/hotkeys.conf@0644"
        "/etc/wmplug.conf=$OUT/wmplug.conf@0644"
        "/etc/wmplug.autostart=$OUT/wmplug.autostart@0644"
