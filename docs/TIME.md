@@ -86,7 +86,7 @@ The kernel knows three states (`kernel/sched/clockstate.fi`, shown in `/proc/clo
 | `rtc` | the value came from the hardware clock and is plausible. Not verified by anything. |
 | `set` | somebody set it: `clock_settime`, `adjtimex`, `sntp`. |
 
-`clock_gettime(16)` (`CLOCK_CHECKED`, `lib/ntp/abi.fi`) is `CLOCK_REALTIME` that answers `-ENODATA` while the state
+`clock_gettime(16)` (`CLOCK_CHECKED`, `lib/libc/clockabi.fi`) is `CLOCK_REALTIME` that answers `-ENODATA` while the state
 is `unset`. All TLS callers take the time from `lib/tls/clockgate.fi` (`now_trusted()`), which turns that into `0`,
 and `x509.verify_chain` with `now == 0` refuses with `V_CLOCK` (`fetch: verify REFUSED clock_not_set`) -- it does
 not compare certificate dates against a clock the kernel knows is void, and it never skips the check. The taskbar
@@ -123,7 +123,7 @@ Not covered: a `rtc` state clock that is plausible but wrong is judged by the ce
 ### The hardware clock convention per setting (B-003)
 
 `/etc/time.conf` takes `rtc=utc` or `rtc=local` next to `offset=`/`rule=`. `sntp boot` passes it to the kernel
-with the zone (`SETTZ` argument bits 9 and 10, `lib/ntp/abi.fi`); while nobody has set the clock the kernel
+with the zone (`SETTZ` argument bits 9 and 10, `lib/libc/clockabi.fi`); while nobody has set the clock the kernel
 re-reads the chip's raw value in the new convention (`time.set_rtc_utc`). The settings program keeps the line when
 it rewrites the zone. The boot word `rtcutc` still works; the config wins once `sntp boot` has run.
 `rtc_write` reads the chip back after writing and only then reports `rtc_set=1` in `/proc/clock` (a board that ignores the
