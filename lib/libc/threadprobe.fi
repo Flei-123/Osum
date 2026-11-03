@@ -153,6 +153,298 @@ fn run_tls() -> bool {
     return ok
 }
 
+static mut after_exit_flag: u64 = 0
+static mut detached_done: u64 = 0
+static mut dtor_calls: u64 = 0
+static mut dtor_sum: u64 = 0
+static mut redo_calls: u64 = 0
+static mut key_a: u64 = 0
+static mut key_b: u64 = 0
+static mut key_r: u64 = 0
+static mut cv_word: u64 = 0
+static mut cv_mutex: u64 = 0
+static mut cv_flag: u64 = 0
+static mut cv_ready: u64 = 0
+static mut cv_wakeups: u64 = 0
+static mut pp_word: u64 = 0
+static mut pp_mutex: u64 = 0
+static mut pp_turn: u64 = 0
+static mut pp_count: u64 = 0
+static mut key_pool: [u64; 64] = [0; 64]
+
+const DETACH_TOTAL: u64 = 150
+const DETACH_WINDOW: u64 = 16
+const PINGPONG_ROUNDS: u64 = 300
+
+fn exit_early(arg: u64) -> u64 {
+    threads.thread_exit(arg * 3 + 1)
+    locks.store((&after_exit_flag) as u64, 1)
+    return 0
+}
+
+fn detached_worker(arg: u64) -> u64 {
+    threads.yield_now()
+    locks.fetch_add((&detached_done) as u64, 1)
+    return arg
+}
+
+fn await_reaped(base: u64, want: u64) -> bool {
+    var waited: u64 = 0
+    while threads.reaped_total() - base < want && waited < 3000 {
+        threads.reap()
+        threads.sleep_ms(1)
+        waited = waited + 1
+    }
+    return threads.reaped_total() - base == want && threads.reap_pending() == 0
+}
+
+fn run_detach() -> bool {
+    var ok: bool = true
+    let base: u64 = threads.reaped_total()
+    locks.store((&detached_done) as u64, 0)
+    var spawned: u64 = 0
+    while spawned < DETACH_TOTAL {
+        while spawned - locks.load((&detached_done) as u64) > DETACH_WINDOW {
+            threads.yield_now()
+        }
+        if threads.spawn_detached(detached_worker, spawned) == 0 {
+            ok = false
+            break
+        }
+        spawned = spawned + 1
+    }
+    if !await_reaped(base, spawned) {
+        ok = false
+    }
+    if locks.load((&detached_done) as u64) != spawned {
+        ok = false
+    }
+    let base2: u64 = threads.reaped_total()
+    let finished: u64 = threads.spawn(quick_result, 1)
+    var waited: u64 = 0
+    while !threads.is_done(finished) && waited < 2000 {
+        threads.sleep_ms(1)
+        waited = waited + 1
+    }
+    if threads.detach(finished) != 0 || threads.detach(finished) == 0 {
+        ok = false
+    }
+    let running: u64 = threads.spawn(slow_result, 3)
+    if threads.detach(running) != 0 || threads.detach(running) == 0 {
+        ok = false
+    }
+    if threads.join(running) != 0 || threads.detach(0) == 0 {
+        ok = false
+    }
+    if !await_reaped(base2, 2) {
+        ok = false
+    }
+    return ok
+}
+
+fn count_dtor(value: u64) -> u64 {
+    locks.fetch_add((&dtor_calls) as u64, 1)
+    locks.fetch_add((&dtor_sum) as u64, value)
+    return 0
+}
+
+fn redo_dtor(value: u64) -> u64 {
+    locks.fetch_add((&redo_calls) as u64, 1)
+    if value > 1 {
+        threads.key_set(key_r, value - 1)
+    }
+    return 0
+}
+
+fn key_worker(arg: u64) -> u64 {
+    wait_start()
+    if threads.key_get(key_a) != 0 || threads.key_get(key_b) != 0 {
+        return 0
+    }
+    if threads.key_set(key_a, arg * 10) != 0 || threads.key_set(key_b, 5) != 0 {
+        return 0
+    }
+    var round: u64 = 0
+    while round < 50 {
+        threads.yield_now()
+        round = round + 1
+    }
+    if threads.key_get(key_a) != arg * 10 || threads.key_get(key_b) != 5 {
+        return 0
+    }
+    if arg % 2 == 0 {
+        threads.thread_exit(arg)
+    }
+    return arg
+}
+
+fn redo_worker(arg: u64) -> u64 {
+    threads.key_set(key_r, 10)
+    return arg
+}
+
+fn run_keys() -> bool {
+    var ok: bool = true
+    key_a = threads.key_create(count_dtor)
+    key_b = threads.key_create_plain()
+    key_r = threads.key_create(redo_dtor)
+    if key_a == 0 || key_b == 0 || key_r == 0 || key_a == key_b {
+        return false
+    }
+    locks.store((&dtor_calls) as u64, 0)
+    locks.store((&dtor_sum) as u64, 0)
+    locks.store((&start_flag) as u64, 0)
+    threads.key_set(key_a, 999)
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < 4 {
+        handles[k as usize] = threads.spawn(key_worker, k + 1)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    locks.store((&start_flag) as u64, 1)
+    var total: u64 = 0
+    k = 0
+    while k < 4 {
+        total = total + threads.join(handles[k as usize])
+        k = k + 1
+    }
+    if total != 10 || locks.load((&dtor_calls) as u64) != 4 || locks.load((&dtor_sum) as u64) != 100 {
+        ok = false
+    }
+    if threads.key_get(key_a) != 999 || threads.key_get(key_b) != 0 {
+        ok = false
+    }
+    if threads.join(threads.spawn(redo_worker, 7)) != 7 || locks.load((&redo_calls) as u64) != 4 {
+        ok = false
+    }
+    let stale: u64 = key_a
+    if threads.key_delete(key_a) != 0 || threads.key_delete(stale) == 0 {
+        ok = false
+    }
+    if threads.key_get(stale) != 0 || threads.key_set(stale, 1) == 0 {
+        ok = false
+    }
+    let reused: u64 = threads.key_create_plain()
+    if reused == 0 || (reused & 255) != (stale & 255) || reused == stale || threads.key_get(reused) != 0 {
+        ok = false
+    }
+    threads.key_delete(reused)
+    threads.key_delete(key_b)
+    threads.key_delete(key_r)
+    var made: u64 = 0
+    while made < 64 {
+        let key: u64 = threads.key_create_plain()
+        if key == 0 {
+            break
+        }
+        key_pool[made as usize] = key
+        made = made + 1
+    }
+    if made != threads.TLS_SLOTS - threads.RAW_SLOTS {
+        ok = false
+    }
+    var d: u64 = 0
+    while d < made {
+        if threads.key_delete(key_pool[d as usize]) != 0 {
+            ok = false
+        }
+        d = d + 1
+    }
+    return ok
+}
+
+fn cv_waiter(arg: u64) -> u64 {
+    locks.mutex_take((&cv_mutex) as u64)
+    locks.fetch_add((&cv_ready) as u64, 1)
+    while locks.load((&cv_flag) as u64) == 0 {
+        locks.cond_wait((&cv_word) as u64, (&cv_mutex) as u64)
+        locks.fetch_add((&cv_wakeups) as u64, 1)
+    }
+    locks.mutex_give((&cv_mutex) as u64)
+    return arg + 1
+}
+
+fn run_condvar() -> bool {
+    var ok: bool = true
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < 4 {
+        handles[k as usize] = threads.spawn(cv_waiter, k)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var waited: u64 = 0
+    while locks.load((&cv_ready) as u64) < 4 && waited < 3000 {
+        threads.sleep_ms(1)
+        waited = waited + 1
+    }
+    threads.sleep_ms(30)
+    if locks.load((&cv_wakeups) as u64) != 0 {
+        ok = false
+    }
+    locks.mutex_take((&cv_mutex) as u64)
+    locks.store((&cv_flag) as u64, 1)
+    locks.cond_broadcast((&cv_word) as u64)
+    locks.mutex_give((&cv_mutex) as u64)
+    var total: u64 = 0
+    k = 0
+    while k < 4 {
+        total = total + threads.join(handles[k as usize])
+        k = k + 1
+    }
+    if total != 10 || locks.load((&cv_wakeups) as u64) > 8 {
+        ok = false
+    }
+    return ok
+}
+
+fn pingpong(arg: u64) -> u64 {
+    var i: u64 = 0
+    locks.mutex_take((&pp_mutex) as u64)
+    while i < PINGPONG_ROUNDS {
+        while locks.load((&pp_turn) as u64) != arg {
+            locks.cond_wait((&pp_word) as u64, (&pp_mutex) as u64)
+        }
+        pp_count = pp_count + 1
+        locks.store((&pp_turn) as u64, 1 - arg)
+        locks.cond_broadcast((&pp_word) as u64)
+        i = i + 1
+    }
+    locks.mutex_give((&pp_mutex) as u64)
+    return arg + 1
+}
+
+fn run_pingpong() -> bool {
+    pp_count = 0
+    locks.store((&pp_turn) as u64, 0)
+    let a: u64 = threads.spawn(pingpong, 0)
+    let b: u64 = threads.spawn(pingpong, 1)
+    if a == 0 || b == 0 {
+        return false
+    }
+    let total: u64 = threads.join(a) + threads.join(b)
+    return total == 3 && pp_count == PINGPONG_ROUNDS * 2
+}
+
+fn run_mutex_try() -> bool {
+    var word: u64 = 0
+    let m: u64 = (&word) as u64
+    if !locks.mutex_try(m) || locks.mutex_try(m) {
+        return false
+    }
+    locks.mutex_give(m)
+    if !locks.mutex_try(m) {
+        return false
+    }
+    locks.mutex_give(m)
+    return locks.load(m) == 0
+}
+
 fn run_workers(body: fn(u64) -> u64) -> bool {
     var handles: [u64; 4] = [0; 4]
     shared_counter = 0
@@ -201,6 +493,13 @@ fn run_all() -> u64 {
     check(threads.join(0) == 0)
 
     check(run_tls())
+    check(threads.join(threads.spawn(exit_early, 5)) == 16)
+    check(locks.load((&after_exit_flag) as u64) == 0)
+    check(run_detach())
+    check(run_keys())
+    check(run_mutex_try())
+    check(run_condvar())
+    check(run_pingpong())
 
     var ids: [u64; 4] = [0; 4]
     var k: u64 = 0

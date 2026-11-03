@@ -4,7 +4,7 @@ import libc.errno
 import libc.octets
 import libc.locks
 
-export { STACK_DEFAULT, STACK_MIN, TLS_SLOTS, spawn, spawn_sized, join, is_done, thread_id, self_id, yield_now, sleep_ms, current, tls_get, tls_set }
+export { STACK_DEFAULT, STACK_MIN, TLS_SLOTS, RAW_SLOTS, spawn, spawn_sized, spawn_detached, join, detach, thread_exit, reap, reap_pending, reaped_total, is_done, thread_id, self_id, yield_now, sleep_ms, current, tls_get, tls_set, key_create, key_create_plain, key_delete, key_get, key_set }
 
 const STACK_DEFAULT: u64 = 262144
 const STACK_MIN: u64 = 16384
@@ -18,7 +18,17 @@ const H_RESULT: u64 = 24
 const H_MAP_LEN: u64 = 32
 const H_TLS_SELF: u64 = 40
 const H_TLS_SLOTS: u64 = 48
-const TLS_SLOTS: u64 = 8
+const H_TLS_GENS: u64 = 560
+const H_STATE: u64 = 1072
+const H_NEXT: u64 = 1080
+const TLS_SLOTS: u64 = 64
+const RAW_SLOTS: u64 = 8
+const DESTRUCTOR_ROUNDS: u64 = 4
+const KEY_SLOT_MASK: u64 = 255
+const STATE_JOINABLE: u64 = 0
+const STATE_DETACHED: u64 = 1
+const STATE_EXITED: u64 = 2
+const STATE_REAPING: u64 = 3
 const ARCH_GET_FS: u64 = 0x1003
 
 const CLONE_VM: u64 = 0x100
@@ -32,7 +42,16 @@ const CLONE_PARENT_SETTID: u64 = 0x100000
 const CLONE_CHILD_CLEARTID: u64 = 0x200000
 
 const FUTEX_WAIT: u64 = 0
-static mut main_slots: [u64; 8] = [0; 8]
+static mut main_slots: [u64; 64] = [0; 64]
+static mut main_gens: [u64; 64] = [0; 64]
+static mut key_dtor: [u64; 64] = [0; 64]
+static mut key_gen: [u64; 64] = [0; 64]
+static mut key_lock: u64 = 0
+static mut key_counter: u64 = 0
+static mut reap_head: u64 = 0
+static mut reap_lock: u64 = 0
+static mut reap_count: u64 = 0
+static mut reaped: u64 = 0
 
 fn clone_flags() -> u64 {
     return CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
@@ -48,7 +67,193 @@ fn clone_call(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64 {
 fn thread_entry(handle: u64) -> u64 {
     let body: fn(u64) -> u64 = octets.ld64(handle, H_FN) as fn(u64) -> u64
     let result: u64 = body(octets.ld64(handle, H_ARG))
+    finish(handle, result)
+    return 0
+}
+
+fn finish(handle: u64, result: u64) {
     octets.st64(handle, H_RESULT, result)
+    run_destructors(handle)
+    if locks.cas(handle + H_STATE, STATE_JOINABLE, STATE_EXITED) == STATE_DETACHED {
+        reap_push(handle)
+    }
+}
+
+fn thread_exit(result: u64) {
+    let handle: u64 = current()
+    if handle == 0 {
+        run_destructors(0)
+        kcall.sys1(kcall.SYS_EXIT_GROUP, result)
+        return
+    }
+    finish(handle, result)
+    kcall.sys1(kcall.SYS_EXIT, 0)
+}
+
+fn reap_push(handle: u64) {
+    locks.spin_take((&reap_lock) as u64)
+    octets.st64(handle, H_NEXT, reap_head)
+    reap_head = handle
+    reap_count = reap_count + 1
+    locks.spin_give((&reap_lock) as u64)
+}
+
+fn reap() -> u64 {
+    var freed: u64 = 0
+    var prev: u64 = 0
+    locks.spin_take((&reap_lock) as u64)
+    var node: u64 = reap_head
+    while node != 0 {
+        let next: u64 = octets.ld64(node, H_NEXT)
+        if locks.load(node + H_TID) == 0 {
+            if prev == 0 {
+                reap_head = next
+            } else {
+                octets.st64(prev, H_NEXT, next)
+            }
+            unmap(node)
+            freed = freed + 1
+        } else {
+            prev = node
+        }
+        node = next
+    }
+    reap_count = reap_count - freed
+    reaped = reaped + freed
+    locks.spin_give((&reap_lock) as u64)
+    return freed
+}
+
+fn reap_pending() -> u64 {
+    return locks.load((&reap_count) as u64)
+}
+
+fn reaped_total() -> u64 {
+    return locks.load((&reaped) as u64)
+}
+
+fn detach(handle: u64) -> u64 {
+    if handle == 0 {
+        return 1
+    }
+    let old: u64 = locks.cas(handle + H_STATE, STATE_JOINABLE, STATE_DETACHED)
+    if old == STATE_JOINABLE {
+        return 0
+    }
+    if old == STATE_EXITED && locks.cas(handle + H_STATE, STATE_EXITED, STATE_REAPING) == STATE_EXITED {
+        reap_push(handle)
+        return 0
+    }
+    return 1
+}
+
+fn value_addr(handle: u64, slot: u64) -> u64 {
+    if handle == 0 {
+        return (&main_slots[slot as usize]) as u64
+    }
+    return handle + H_TLS_SLOTS + slot * 8
+}
+
+fn gen_addr(handle: u64, slot: u64) -> u64 {
+    if handle == 0 {
+        return (&main_gens[slot as usize]) as u64
+    }
+    return handle + H_TLS_GENS + slot * 8
+}
+
+fn run_destructors(handle: u64) {
+    var round: u64 = 0
+    while round < DESTRUCTOR_ROUNDS {
+        var ran: bool = false
+        var slot: u64 = RAW_SLOTS
+        while slot < TLS_SLOTS {
+            let gen: u64 = locks.load((&key_gen[slot as usize]) as u64)
+            let dtor: u64 = locks.load((&key_dtor[slot as usize]) as u64)
+            if gen != 0 && dtor != 0 && octets.ld64(gen_addr(handle, slot), 0) == gen {
+                let value: u64 = octets.ld64(value_addr(handle, slot), 0)
+                if value != 0 {
+                    octets.st64(value_addr(handle, slot), 0, 0)
+                    let fin: fn(u64) -> u64 = dtor as fn(u64) -> u64
+                    fin(value)
+                    ran = true
+                }
+            }
+            slot = slot + 1
+        }
+        if !ran {
+            return
+        }
+        round = round + 1
+    }
+}
+
+fn key_alloc(dtor: u64) -> u64 {
+    var key: u64 = 0
+    var slot: u64 = RAW_SLOTS
+    locks.spin_take((&key_lock) as u64)
+    while slot < TLS_SLOTS {
+        if key_gen[slot as usize] == 0 {
+            key_counter = key_counter + 1
+            key_dtor[slot as usize] = dtor
+            locks.store((&key_gen[slot as usize]) as u64, key_counter)
+            key = (key_counter << 8) | slot
+            break
+        }
+        slot = slot + 1
+    }
+    locks.spin_give((&key_lock) as u64)
+    return key
+}
+
+fn key_create(destructor: fn(u64) -> u64) -> u64 {
+    return key_alloc(destructor as u64)
+}
+
+fn key_create_plain() -> u64 {
+    return key_alloc(0)
+}
+
+fn key_valid(key: u64) -> bool {
+    let slot: u64 = key & KEY_SLOT_MASK
+    if key == 0 || slot < RAW_SLOTS || slot >= TLS_SLOTS {
+        return false
+    }
+    return locks.load((&key_gen[slot as usize]) as u64) == key >> 8
+}
+
+fn key_delete(key: u64) -> u64 {
+    var result: u64 = 1
+    locks.spin_take((&key_lock) as u64)
+    if key_valid(key) {
+        let slot: u64 = key & KEY_SLOT_MASK
+        locks.store((&key_gen[slot as usize]) as u64, 0)
+        key_dtor[slot as usize] = 0
+        result = 0
+    }
+    locks.spin_give((&key_lock) as u64)
+    return result
+}
+
+fn key_get(key: u64) -> u64 {
+    if !key_valid(key) {
+        return 0
+    }
+    let slot: u64 = key & KEY_SLOT_MASK
+    let handle: u64 = current()
+    if octets.ld64(gen_addr(handle, slot), 0) != key >> 8 {
+        return 0
+    }
+    return octets.ld64(value_addr(handle, slot), 0)
+}
+
+fn key_set(key: u64, value: u64) -> u64 {
+    if !key_valid(key) {
+        return 1
+    }
+    let slot: u64 = key & KEY_SLOT_MASK
+    let handle: u64 = current()
+    octets.st64(gen_addr(handle, slot), 0, key >> 8)
+    octets.st64(value_addr(handle, slot), 0, value)
     return 0
 }
 
@@ -61,6 +266,7 @@ fn unmap(handle: u64) {
 }
 
 fn spawn_sized(body: fn(u64) -> u64, arg: u64, stack_bytes: u64) -> u64 {
+    reap()
     var stack: u64 = stack_bytes
     if stack < STACK_MIN {
         stack = STACK_MIN
@@ -92,6 +298,15 @@ fn spawn(body: fn(u64) -> u64, arg: u64) -> u64 {
     return spawn_sized(body, arg, STACK_DEFAULT)
 }
 
+fn spawn_detached(body: fn(u64) -> u64, arg: u64) -> u64 {
+    let handle: u64 = spawn_sized(body, arg, STACK_DEFAULT)
+    if handle == 0 {
+        return 0
+    }
+    detach(handle)
+    return 1
+}
+
 fn thread_id(handle: u64) -> u64 {
     return locks.load(handle + H_TID)
 }
@@ -106,6 +321,10 @@ fn wait_tid(addr: u64, expect: u64) {
 
 fn join(handle: u64) -> u64 {
     if handle == 0 {
+        return 0
+    }
+    let state: u64 = locks.load(handle + H_STATE)
+    if state == STATE_DETACHED || state == STATE_REAPING {
         return 0
     }
     var tid: u64 = locks.load(handle + H_TID)
@@ -146,21 +365,12 @@ fn tls_get(slot: u64) -> u64 {
     if slot >= TLS_SLOTS {
         return 0
     }
-    let handle: u64 = current()
-    if handle == 0 {
-        return main_slots[slot as usize]
-    }
-    return octets.ld64(handle, H_TLS_SLOTS + slot * 8)
+    return octets.ld64(value_addr(current(), slot), 0)
 }
 
 fn tls_set(slot: u64, value: u64) {
     if slot >= TLS_SLOTS {
         return
     }
-    let handle: u64 = current()
-    if handle == 0 {
-        main_slots[slot as usize] = value
-        return
-    }
-    octets.st64(handle, H_TLS_SLOTS + slot * 8, value)
+    octets.st64(value_addr(current(), slot), 0, value)
 }

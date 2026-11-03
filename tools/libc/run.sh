@@ -41,7 +41,7 @@ done
 
 echo "== 3. threads: clone stub, join, mutex exclusion, lost updates without it =="
 build_run "$PWD/lib" "$D/thr" tools/libc/threads_suite.fi; rc=$?
-[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns" || bad "threads suite rc=$rc"
+[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try" || bad "threads suite rc=$rc"
 runs=0
 for i in 1 2 3 4 5 6 7 8; do
     "$D/thr" > /dev/null 2>&1 || runs=$((runs+1))
@@ -53,7 +53,12 @@ for edit in \
     "threads.fi|s/while tid != 0 {/while false {/" \
     "threads.fi|s/in(\"rdx\") ptid/in(\"rdx\") 0/" \
     "threads.fi|s/octets.st64(top, 8, base)/octets.st64(top, 8, base + 8)/" \
-    "locks.fi|s/while !spin_try(p) {/while false {/"; do
+    "threads.fi|s/kcall.sys1(kcall.SYS_EXIT, 0)/kcall.sys0(kcall.SYS_GETTID)/" \
+    "threads.fi|s/reap_head = handle/reap_head = 0/" \
+    "threads.fi|s/if gen != 0 \&\& dtor != 0 \&\&/if false \&\&/" \
+    "threads.fi|s/if octets.ld64(gen_addr(handle, slot), 0) != key >> 8 {/if false {/" \
+    "locks.fi|s/^    futex_wait(cv, seq)\$/    load(cv)/" \
+    "locks.fi|s/seen = cas(p, 0, 2)/seen = 0/"; do
     mod=${edit%%|*}
     expr=${edit#*|}
     n=$((n+1))
