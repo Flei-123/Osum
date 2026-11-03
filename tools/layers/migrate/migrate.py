@@ -9,6 +9,7 @@ def nn(hm, full):
 
 MODS = sys.argv[1].split(',')
 APPLY = len(sys.argv) > 2 and sys.argv[2] == 'apply'
+EXT = os.environ.get('EXT') == '1'
 ROOT = os.getcwd()
 CALL = re.compile(r'(?<![\w.])([A-Za-z_][A-Za-z0-9_]*)\s*\(')
 KW = {'if', 'while', 'return', 'as', 'fn', 'for', 'match', 'sizeof'}
@@ -20,6 +21,36 @@ def mask(t):
 
 def callees(body):
     return {c for c in CALL.findall(body) if c not in KW and not c.startswith('__')}
+
+
+def module_ok(mt, m):
+    if re.search(r'(?<![\w.])%s\b(?!\.)' % m, re.sub(r'^import .*$', '', mt, flags=re.M)):
+        return False
+    for im in re.finditer(r'^import\s+([\w.]+)\s*$', mt, re.M):
+        if im.group(1).split('.')[-1] == m and im.group(1) != 'libc.' + m:
+            return False
+    return True
+
+
+def add_imports(out, needed):
+    lines = out.split('\n')
+    last = -1
+    have = set()
+    for i, ln in enumerate(lines):
+        mm = re.match(r'import\s+([\w.]+)\s*$', ln)
+        if mm:
+            last = i
+            have.add(mm.group(1))
+    add = ['import libc.%s' % m for m in sorted(needed) if 'libc.%s' % m not in have]
+    if add:
+        if last >= 0:
+            lines[last + 1:last + 1] = add
+        else:
+            pos = 0
+            while pos < len(lines) and lines[pos].startswith('//'):
+                pos += 1
+            lines[pos:pos] = add + ['']
+    return '\n'.join(lines)
 
 
 files = subprocess.check_output(['git', 'ls-files', '*.fi']).decode().split()
@@ -46,12 +77,25 @@ for hm, full, body in N.blocks(at):
     mod, lname = hm.group(2).split('__')
     libfns.setdefault(nn(hm, full), []).append((mod, lname, callees(body)))
 
+all_files = subprocess.check_output(['git', 'ls-files', '*.fi']).decode().split()
+stem_count = collections.Counter(os.path.basename(f)[:-3] for f in all_files)
 ext = collections.defaultdict(set)
+ext_sites = collections.defaultdict(set)
+ext_value = set()
 texts = {}
-for f in files:
+for f in all_files:
+    if f.startswith('lib/libc/'):
+        continue
     t = open(f, errors='replace').read()
     texts[f] = t
-    for m in re.finditer(r'\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\s*\(', mask(t)):
+    for m in re.finditer(r'\b([A-Za-z_]\w*)\.([A-Za-z_]\w*)\b(\s*\()?', mask(t)):
+        key = (m.group(1), m.group(2))
+        if m.group(3) is None:
+            ext_value.add(key)
+        elif f.startswith('vendor/'):
+            ext_value.add(key)
+        else:
+            ext_sites[key].add(f)
         ext[m.group(2)].add(m.group(1))
 
 changed = []
@@ -78,8 +122,11 @@ for f in files:
             name = hm.group(2)
             if name in resolved or hm.group(1) or len(local[name]) != 1:
                 continue
-            if name in exported or stem in ext.get(name, ()):
+            if name in exported:
                 continue
+            if stem in ext.get(name, ()):
+                if not EXT or stem_count[stem] != 1 or (stem, name) in ext_value:
+                    continue
             if re.search(r'(?<![\w.])(?<!fn )%s\b(?!\s*\()' % re.escape(name), mt):
                 continue
             form = nn(hm, full)
@@ -100,20 +147,25 @@ for f in files:
     if not resolved:
         continue
     mods_needed = {m for m, _ in resolved.values()}
-    ok_mods = set()
-    for m in mods_needed:
-        bad = False
-        if re.search(r'(?<![\w.])%s\b(?!\.)' % m, re.sub(r'^import .*$', '', mt, flags=re.M)):
-            bad = True
-        for im in re.finditer(r'^import\s+([\w.]+)\s*$', mt, re.M):
-            if im.group(1).split('.')[-1] == m and im.group(1) != 'libc.' + m:
-                bad = True
-        if not bad:
-            ok_mods.add(m)
+    ok_mods = {m for m in mods_needed if module_ok(mt, m)}
     resolved = {k: v for k, v in resolved.items() if v[0] in ok_mods}
     if not resolved:
         continue
     removal = [r for r in removal if r[2] in resolved]
+    ext_edits = collections.defaultdict(list)
+    for name in list(resolved):
+        sites = ext_sites.get((stem, name), set()) - {f}
+        if not sites:
+            continue
+        mod, lname = resolved[name]
+        if not all(module_ok(mask(texts[g]), mod) for g in sites):
+            del resolved[name]
+            removal = [r for r in removal if r[2] != name]
+            continue
+        for g in sites:
+            ext_edits[g].append((name, mod, lname))
+    if not resolved:
+        continue
     out = t
     for s, e, name in sorted(removal, reverse=True):
         b = e
@@ -122,30 +174,24 @@ for f in files:
         out = out[:s] + out[b:]
     for name, (mod, lname) in resolved.items():
         out = re.sub(r'(?<![\w.])%s(\s*)\(' % re.escape(name), lambda m: '%s.%s%s(' % (mod, lname, m.group(1)), out)
-    needed = sorted({m for m, _ in resolved.values()})
-    lines = out.split('\n')
-    last = -1
-    have = set()
-    for i, ln in enumerate(lines):
-        mm = re.match(r'import\s+([\w.]+)\s*$', ln)
-        if mm:
-            last = i
-            have.add(mm.group(1))
-    add = ['import libc.%s' % m for m in needed if 'libc.%s' % m not in have]
-    if add:
-        if last >= 0:
-            lines[last + 1:last + 1] = add
-        else:
-            pos = 0
-            while pos < len(lines) and lines[pos].startswith('//'):
-                pos += 1
-            lines[pos:pos] = add + ['']
-    out = '\n'.join(lines)
+    out = add_imports(out, {m for m, _ in resolved.values()})
     for name, (mod, lname) in resolved.items():
         report[(mod, lname)] += 1
+    texts[f] = out
     changed.append(f)
-    if APPLY:
-        open(f, 'w').write(out)
+    for g, edits in ext_edits.items():
+        gt = texts[g]
+        mods = set()
+        for name, mod, lname in edits:
+            gt = re.sub(r'\b%s\.%s(\s*)\(' % (re.escape(stem), re.escape(name)), lambda m: '%s.%s%s(' % (mod, lname, m.group(1)), gt)
+            mods.add(mod)
+        texts[g] = add_imports(gt, mods)
+        if g not in changed:
+            changed.append(g)
+        report[('ext', stem)] += 1
+if APPLY:
+    for f in changed:
+        open(f, 'w').write(texts[f])
 
 print('files', len(changed))
 for k, v in sorted(report.items(), key=lambda x: -x[1]):
