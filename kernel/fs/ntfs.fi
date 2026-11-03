@@ -11,6 +11,7 @@ import fs.vfsops
 import sched.sched
 import sync.atomic
 import arch.cpu
+import libc.octets
 
 export { ops, mount_probe, release, node_hold, node_drop, MAX_NODES }
 
@@ -117,26 +118,6 @@ fn tick(state: u64) {
     kstate.add(state, kstate.VFS_INDIRECT, 1)
 }
 
-fn le16(p: u64) -> u64 {
-    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
-}
-
-fn le32(p: u64) -> u64 {
-    return le16(p) | (le16(p + 2) << 16)
-}
-
-fn le64(p: u64) -> u64 {
-    return le32(p) | (le32(p + 4) << 32)
-}
-
-fn zero(p: u64, n: u64) {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(p + i, 0 as u8)
-        i = i + 1
-    }
-}
-
 fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
     return blk.read_on(state, mnt.dev(state, m), lba, dst)
 }
@@ -158,8 +139,8 @@ fn clus_lba(state: u64, m: u64, lcn: u64) -> u64 {
 
 // ------------------------------------------------------------ die Fixups
 fn fixup_anwenden(p: u64, size: u64) -> bool {
-    let usa_off: u64 = le16(p + 0x04)
-    let usa_count: u64 = le16(p + 0x06)
+    let usa_off: u64 = octets.le16(p + 0x04)
+    let usa_count: u64 = octets.le16(p + 0x06)
     if usa_count == 0 {
         return false
     }
@@ -170,14 +151,14 @@ fn fixup_anwenden(p: u64, size: u64) -> bool {
     if usa_off + usa_count * 2 > size {
         return false
     }
-    let pruefzahl: u64 = le16(p + usa_off)
+    let pruefzahl: u64 = octets.le16(p + usa_off)
     var i: u64 = 0
     while i < sektoren {
         let ende: u64 = p + (i + 1) * BS - 2
-        if le16(ende) != pruefzahl {
+        if octets.le16(ende) != pruefzahl {
             return false
         }
-        let echt: u64 = le16(p + usa_off + 2 + i * 2)
+        let echt: u64 = octets.le16(p + usa_off + 2 + i * 2)
         kstate.set8(ende, (echt & 0xFF) as u8)
         kstate.set8(ende + 1, ((echt >> 8) & 0xFF) as u8)
         i = i + 1
@@ -252,15 +233,15 @@ fn run_find(rl: u64, ende: u64, vcn: u64, gefunden: u64) -> u64 {
 
 // -------------------------------------------------------- die Attribute
 fn attr_find(p: u64, size: u64, art: u64, only_unnamed: bool) -> u64 {
-    var off: u64 = le16(p + 0x14)
+    var off: u64 = octets.le16(p + 0x14)
     var runde: u64 = 0
     while off + 8 <= size && runde < 64 {
         let a: u64 = p + off
-        let typ: u64 = le32(a + 0x00)
+        let typ: u64 = octets.le32(a + 0x00)
         if typ == A_ENDE {
             return 0
         }
-        let length: u64 = le32(a + 0x04)
+        let length: u64 = octets.le32(a + 0x04)
         if length < 16 || off + length > size {
             return 0
         }
@@ -280,14 +261,14 @@ fn attr_resident(a: u64) -> bool {
 }
 
 fn attr_flags(a: u64) -> u64 {
-    return le16(a + 0x0C)
+    return octets.le16(a + 0x0C)
 }
 
 fn attr_size(a: u64) -> u64 {
     if attr_resident(a) {
-        return le32(a + 0x10)
+        return octets.le32(a + 0x10)
     }
-    return le64(a + 0x30)
+    return octets.le64(a + 0x30)
 }
 
 fn mft_read(state: u64, m: u64, nr: u64, target: u64) -> bool {
@@ -307,14 +288,14 @@ fn mft_read(state: u64, m: u64, nr: u64, target: u64) -> bool {
     if !fixup_anwenden(target, recsz) {
         return false
     }
-    if (le16(target + 0x16) & 1) == 0 {
+    if (octets.le16(target + 0x16) & 1) == 0 {
         return false
     }
     return true
 }
 
 fn is_directory(p: u64) -> bool {
-    return (le16(p + 0x16) & 2) != 0
+    return (octets.le16(p + 0x16) & 2) != 0
 }
 
 // ------------------------------------------------------------- die Namen
@@ -322,7 +303,7 @@ fn name_wandeln(source: u64, chars: u64, target: u64, max: u64) -> u64 {
     var n: u64 = 0
     var i: u64 = 0
     while i < chars {
-        let c: u64 = le16(source + i * 2)
+        let c: u64 = octets.le16(source + i * 2)
         if c == 0 {
             i = chars
         } else {
@@ -477,7 +458,7 @@ fn release(state: u64, m: u64) {
     var i: u64 = 1
     while i <= MAX_NODES {
         if nget(state, i, N_MNT) == m + 1 {
-            zero(nd(state, i), NODE_BYTES)
+            octets.zero(nd(state, i), NODE_BYTES)
         }
         i = i + 1
     }
@@ -506,7 +487,7 @@ fn node_from_entry(state: u64, m: u64, nr: u64, p: u64) -> u64 {
 // ------------------------------------------------------ die Verzeichnisse
 fn entry_inspect(e: u64, want: u64, seen: u64, out_name: u64,
     state: u64) -> u64 {
-    let merker: u64 = le32(e + 0x0C)
+    let merker: u64 = octets.le32(e + 0x0C)
     if (merker & 2) != 0 {
         return 0
     }
@@ -518,7 +499,7 @@ fn entry_inspect(e: u64, want: u64, seen: u64, out_name: u64,
     if chars == 0 {
         return 0
     }
-    let nr: u64 = le64(e + 0x00) & 0xFFFFFFFFFFFF
+    let nr: u64 = octets.le64(e + 0x00) & 0xFFFFFFFFFFFF
     if nr == 0 {
         return 0
     }
@@ -543,14 +524,14 @@ fn bereich_durchgehen(state: u64, p: u64, ende: u64, want: u64,
     var e: u64 = p
     var runde: u64 = 0
     while e + 0x52 <= ende && runde < 4096 {
-        let length: u64 = le16(e + 0x08)
+        let length: u64 = octets.le16(e + 0x08)
         if length < 16 || e + length > ende {
             return 0
         }
-        let merker: u64 = le32(e + 0x0C)
+        let merker: u64 = octets.le32(e + 0x0C)
         let namensraum: u64 = kstate.get8(e + 0x51)
         let chars: u64 = kstate.get8(e + 0x50)
-        let e_nr: u64 = le64(e + 0x00) & 0xFFFFFFFFFFFF
+        let e_nr: u64 = octets.le64(e + 0x00) & 0xFFFFFFFFFFFF
         if (merker & 2) == 0 && namensraum != 2 && chars != 0
             && e_nr >= MFT_FIRST_FREE {
             let seen: u64 = __mmio_read64(counter as *mut u64) + 1
@@ -587,11 +568,11 @@ fn dir_walk(state: u64, m: u64, nr: u64, want: u64, out_name: u64) -> u64 {
     if !attr_resident(root) {
         return 0
     }
-    let inhalt: u64 = root + le16(root + 0x14)
-    let inhalt_len: u64 = le32(root + 0x10)
+    let inhalt: u64 = root + octets.le16(root + 0x14)
+    let inhalt_len: u64 = octets.le32(root + 0x10)
     let head: u64 = inhalt + 0x10
-    let first: u64 = head + le32(head + 0x00)
-    let ende: u64 = head + le32(head + 0x04)
+    let first: u64 = head + octets.le32(head + 0x00)
+    let ende: u64 = head + octets.le32(head + 0x04)
     var limit: u64 = inhalt + inhalt_len
     if ende < limit {
         limit = ende
@@ -613,14 +594,14 @@ fn dir_walk(state: u64, m: u64, nr: u64, want: u64, out_name: u64) -> u64 {
     if idxsz == 0 || idxsz > 4096 {
         return 0
     }
-    let gesamt: u64 = le64(alloc + 0x30)
+    let gesamt: u64 = octets.le64(alloc + 0x30)
     let spc: u64 = sget(state, m, S_SPC)
     let clus_bytes: u64 = spc * BS
     if clus_bytes == 0 {
         return 0
     }
-    let rl: u64 = alloc + le16(alloc + 0x20)
-    let rl_ende: u64 = alloc + le32(alloc + 0x04)
+    let rl: u64 = alloc + octets.le16(alloc + 0x20)
+    let rl_ende: u64 = alloc + octets.le32(alloc + 0x04)
 
     var vcn: u64 = 0
     var gelesen: u64 = 0
@@ -641,8 +622,8 @@ fn dir_walk(state: u64, m: u64, nr: u64, want: u64, out_name: u64) -> u64 {
                 && kstate.get8(buf(state, IDXBUF) + 3) == 88 {
                 if fixup_anwenden(buf(state, IDXBUF), idxsz) {
                     let k: u64 = buf(state, IDXBUF) + 0x18
-                    let e1: u64 = k + le32(k + 0x00)
-                    var e2: u64 = k + le32(k + 0x04)
+                    let e1: u64 = k + octets.le32(k + 0x00)
+                    var e2: u64 = k + octets.le32(k + 0x04)
                     let obergrenze: u64 = buf(state, IDXBUF) + idxsz
                     if e2 > obergrenze {
                         e2 = obergrenze
@@ -691,7 +672,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         serial.nl()
         return 0
     }
-    let bps: u64 = le16(b + 0x0B)
+    let bps: u64 = octets.le16(b + 0x0B)
     if bps != BS {
         serial.puts((&s_nein[0]) as u64)
         serial.dec(2)
@@ -713,8 +694,8 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         serial.nl()
         return 0
     }
-    let sektoren: u64 = le64(b + 0x28)
-    let mftlcn: u64 = le64(b + 0x30)
+    let sektoren: u64 = octets.le64(b + 0x28)
+    let mftlcn: u64 = octets.le64(b + 0x30)
     if sektoren == 0 || mftlcn == 0 {
         serial.puts((&s_nein[0]) as u64)
         serial.dec(4)
@@ -940,7 +921,7 @@ fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
     }
 
     if attr_resident(a) {
-        let inhalt: u64 = a + le16(a + 0x14)
+        let inhalt: u64 = a + octets.le16(a + 0x14)
         var i: u64 = 0
         while i < want {
             kstate.set8(dst + i, kstate.get8(inhalt + off + i) as u8)
@@ -954,8 +935,8 @@ fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
     if clus_bytes == 0 {
         return 0
     }
-    let rl: u64 = a + le16(a + 0x20)
-    let rl_ende: u64 = a + le32(a + 0x04)
+    let rl: u64 = a + octets.le16(a + 0x20)
+    let rl_ende: u64 = a + octets.le32(a + 0x04)
     var fertig: u64 = 0
     while fertig < want {
         let pos: u64 = off + fertig

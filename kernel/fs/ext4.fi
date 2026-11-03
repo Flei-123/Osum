@@ -11,6 +11,7 @@ import fs.vfsops
 import sched.sched
 import sync.atomic
 import arch.cpu
+import libc.octets
 
 export { ops, mount_probe, release, node_hold, node_drop,
     MAX_NODES, unsauber }
@@ -126,22 +127,6 @@ fn tick(state: u64) {
     kstate.add(state, kstate.VFS_INDIRECT, 1)
 }
 
-fn le16(p: u64) -> u64 {
-    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
-}
-
-fn le32(p: u64) -> u64 {
-    return le16(p) | (le16(p + 2) << 16)
-}
-
-fn zero(p: u64, n: u64) {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(p + i, 0 as u8)
-        i = i + 1
-    }
-}
-
 fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
     return blk.read_on(state, mnt.dev(state, m), lba, dst)
 }
@@ -237,7 +222,7 @@ fn release(state: u64, m: u64) {
     var i: u64 = 1
     while i <= MAX_NODES {
         if nget(state, i, N_MNT) == m + 1 {
-            zero(nd(state, i), NODE_BYTES)
+            octets.zero(nd(state, i), NODE_BYTES)
         }
         i = i + 1
     }
@@ -268,9 +253,9 @@ fn inode_load(state: u64, m: u64, ino: u64) -> u64 {
         return 0
     }
     let d: u64 = buf(state, BLKBUF) + (doff % bs)
-    var itab: u64 = le32(d + 0x8)
+    var itab: u64 = octets.le32(d + 0x8)
     if sget(state, m, S_64BIT) != 0 && descsz >= 64 {
-        itab = itab | (le32(d + 0x28) << 32)
+        itab = itab | (octets.le32(d + 0x28) << 32)
     }
     if itab == 0 {
         return 0
@@ -289,19 +274,19 @@ fn inode_load(state: u64, m: u64, ino: u64) -> u64 {
 }
 
 fn ino_mode(p: u64) -> u64 {
-    return le16(p + 0x00)
+    return octets.le16(p + 0x00)
 }
 
 fn ino_size(p: u64) -> u64 {
-    return le32(p + 0x04) | (le32(p + 0x6C) << 32)
+    return octets.le32(p + 0x04) | (octets.le32(p + 0x6C) << 32)
 }
 
 fn ino_flags(p: u64) -> u64 {
-    return le32(p + 0x20)
+    return octets.le32(p + 0x20)
 }
 
 fn ino_nlinks(p: u64) -> u64 {
-    return le16(p + 0x1A)
+    return octets.le16(p + 0x1A)
 }
 
 fn art_von(mode: u64) -> u64 {
@@ -332,17 +317,17 @@ fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64,
     var node: u64 = iptr + 0x28
     var runde: u64 = 0
     while runde <= MAX_TIEFE {
-        if le16(node + 0x00) != EXT_MAGIE {
+        if octets.le16(node + 0x00) != EXT_MAGIE {
             return 0
         }
-        let eintraege: u64 = le16(node + 0x02)
-        let tiefe: u64 = le16(node + 0x06)
+        let eintraege: u64 = octets.le16(node + 0x02)
+        let tiefe: u64 = octets.le16(node + 0x06)
         if tiefe == 0 {
             var i: u64 = 0
             while i < eintraege {
                 let e: u64 = node + 12 + i * 12
-                let ee_block: u64 = le32(e + 0x00)
-                var ee_len: u64 = le16(e + 0x04)
+                let ee_block: u64 = octets.le32(e + 0x00)
+                var ee_len: u64 = octets.le16(e + 0x04)
                 var unbeschrieben: bool = false
                 if ee_len > 32768 {
                     ee_len = ee_len - 32768
@@ -352,7 +337,7 @@ fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64,
                     if unbeschrieben {
                         return 0
                     }
-                    let start: u64 = le32(e + 0x08) | (le16(e + 0x06) << 32)
+                    let start: u64 = octets.le32(e + 0x08) | (octets.le16(e + 0x06) << 32)
                     if ino != 0 {
                         sset(state, m, S_CINO, ino)
                         sset(state, m, S_CBLOCK, ee_block)
@@ -369,7 +354,7 @@ fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64,
         var i: u64 = 0
         while i < eintraege {
             let e: u64 = node + 12 + i * 12
-            if le32(e + 0x00) <= lblock {
+            if octets.le32(e + 0x00) <= lblock {
                 gewaehlt = e
             }
             i = i + 1
@@ -377,7 +362,7 @@ fn extent_lookup(state: u64, m: u64, iptr: u64, lblock: u64,
         if gewaehlt == 0 {
             return 0
         }
-        let lower: u64 = le32(gewaehlt + 0x04) | (le16(gewaehlt + 0x08) << 32)
+        let lower: u64 = octets.le32(gewaehlt + 0x04) | (octets.le16(gewaehlt + 0x08) << 32)
         if !block_read(state, m, lower, buf(state, NODEBUF)) {
             return 0
         }
@@ -391,42 +376,42 @@ fn block_of_indirect(state: u64, m: u64, iptr: u64, lblock: u64) -> u64 {
     let bs: u64 = sget(state, m, S_BSIZE)
     let je: u64 = bs / 4 // Blocknummern je Block
     if lblock < 12 {
-        return le32(iptr + 0x28 + lblock * 4)
+        return octets.le32(iptr + 0x28 + lblock * 4)
     }
     var rest: u64 = lblock - 12
     if rest < je {
-        let ind: u64 = le32(iptr + 0x28 + 12 * 4)
+        let ind: u64 = octets.le32(iptr + 0x28 + 12 * 4)
         if ind == 0 || !block_read(state, m, ind, buf(state, NODEBUF)) {
             return 0
         }
-        return le32(buf(state, NODEBUF) + rest * 4)
+        return octets.le32(buf(state, NODEBUF) + rest * 4)
     }
     rest = rest - je
     if rest < je * je {
-        let ind2: u64 = le32(iptr + 0x28 + 13 * 4)
+        let ind2: u64 = octets.le32(iptr + 0x28 + 13 * 4)
         if ind2 == 0 || !block_read(state, m, ind2, buf(state, NODEBUF)) {
             return 0
         }
-        let mitte: u64 = le32(buf(state, NODEBUF) + (rest / je) * 4)
+        let mitte: u64 = octets.le32(buf(state, NODEBUF) + (rest / je) * 4)
         if mitte == 0 || !block_read(state, m, mitte, buf(state, NODEBUF)) {
             return 0
         }
-        return le32(buf(state, NODEBUF) + (rest % je) * 4)
+        return octets.le32(buf(state, NODEBUF) + (rest % je) * 4)
     }
     rest = rest - je * je
-    let ind3: u64 = le32(iptr + 0x28 + 14 * 4)
+    let ind3: u64 = octets.le32(iptr + 0x28 + 14 * 4)
     if ind3 == 0 || !block_read(state, m, ind3, buf(state, NODEBUF)) {
         return 0
     }
-    let upper: u64 = le32(buf(state, NODEBUF) + (rest / (je * je)) * 4)
+    let upper: u64 = octets.le32(buf(state, NODEBUF) + (rest / (je * je)) * 4)
     if upper == 0 || !block_read(state, m, upper, buf(state, NODEBUF)) {
         return 0
     }
-    let mitte2: u64 = le32(buf(state, NODEBUF) + ((rest / je) % je) * 4)
+    let mitte2: u64 = octets.le32(buf(state, NODEBUF) + ((rest / je) % je) * 4)
     if mitte2 == 0 || !block_read(state, m, mitte2, buf(state, NODEBUF)) {
         return 0
     }
-    return le32(buf(state, NODEBUF) + (rest % je) * 4)
+    return octets.le32(buf(state, NODEBUF) + (rest % je) * 4)
 }
 
 fn block_of(state: u64, m: u64, iptr: u64, lblock: u64, ino: u64) -> u64 {
@@ -464,8 +449,8 @@ fn dir_walk(state: u64, m: u64, dir_iptr_ino: u64, want: u64,
             var off: u64 = 0
             while off + 8 <= bs {
                 let e: u64 = basis + off
-                let ino: u64 = le32(e + 0x00)
-                let reclen: u64 = le16(e + 0x04)
+                let ino: u64 = octets.le32(e + 0x00)
+                let reclen: u64 = octets.le16(e + 0x04)
                 let namelen: u64 = kstate.get8(e + 0x06)
                 if reclen < 8 || off + reclen > bs {
                     off = bs
@@ -565,13 +550,13 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         return 0
     }
     let s: u64 = buf(state, SECBUF)
-    if le16(s + 0x38) != MAGIE {
+    if octets.le16(s + 0x38) != MAGIE {
         serial.puts((&s_nein[0]) as u64)
         serial.dec(1)
         serial.nl()
         return 0
     }
-    let logbs: u64 = le32(s + 0x18)
+    let logbs: u64 = octets.le32(s + 0x18)
     if logbs > 2 {
         serial.puts((&s_nein[0]) as u64)
         serial.dec(2)
@@ -579,8 +564,8 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         return 0
     }
     let bs: u64 = 1024 << logbs
-    let ipg: u64 = le32(s + 0x28)
-    var inosz: u64 = le16(s + 0x58)
+    let ipg: u64 = octets.le32(s + 0x28)
+    var inosz: u64 = octets.le16(s + 0x58)
     if inosz == 0 {
         inosz = 128
     }
@@ -590,7 +575,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         serial.nl()
         return 0
     }
-    let inkompat: u64 = le32(s + 0x60)
+    let inkompat: u64 = octets.le32(s + 0x60)
     if (inkompat & INC_COMPRESSION) != 0 || (inkompat & INC_INLINE_DATA) != 0
         || (inkompat & INC_ENCRYPT) != 0 || (inkompat & INC_CASEFOLD) != 0 {
         serial.puts((&s_nein[0]) as u64)
@@ -598,7 +583,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         serial.nl()
         return 0
     }
-    var descsz: u64 = le16(s + 0xFE)
+    var descsz: u64 = octets.le16(s + 0xFE)
     let ist64: u64 = inkompat & INC_64BIT
     if ist64 != 0 {
         if descsz < 64 {
@@ -607,8 +592,8 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     } else {
         descsz = 32
     }
-    let cur_first: u64 = le32(s + 0x14)
-    let bloecke: u64 = le32(s + 0x04) | (le32(s + 0x150) << 32)
+    let cur_first: u64 = octets.le32(s + 0x14)
+    let bloecke: u64 = octets.le32(s + 0x04) | (octets.le32(s + 0x150) << 32)
     if bloecke == 0 {
         serial.puts((&s_nein[0]) as u64)
         serial.dec(5)
@@ -623,7 +608,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         unsauber_ist = 1
     }
     // s_state Bit 0 = EXT2_VALID_FS ("sauber ausgehaengt").
-    if (le16(s + 0x3A) & 1) == 0 {
+    if (octets.le16(s + 0x3A) & 1) == 0 {
         unsauber_ist = 1
     }
 

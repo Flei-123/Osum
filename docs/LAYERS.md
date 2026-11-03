@@ -27,7 +27,7 @@ The map is `tools/layers/layers.tsv` (longest prefix wins, `dir/.` = files direc
 | giant files (> 2000 lines) | 39 | mostly `kernel/sys`, `kernel/drv`, `kernel/ui`, `kernel/user` |
 | loose files in repo root | 62 | `BEFUND-*`, `STATUS-*`, `*-STATUS.md`, logs: belong under `docs/` |
 | shared modules inside `kernel/user` | 115 | imported by >= 2 files but live beside the programs: belong in `lib/` (flat imports make the move a rewrite of every importer) |
-| duplicated function bodies | 605 groups, 1518 copies (was 667 / 1866) | `ld8` 10 copies, `st8` 7, `lower` 14, `zero` 11, `rd` 9; rest are mmio variants with other types and thin wrappers |
+| duplicated function bodies | 579 groups, 1418 copies (was 667 / 1866 before wave 1) | wave 3: `tools/layers/migrate/wrappers.py` inlines forwarding wrappers (`fn f(x) { return mod.f(x) }`, non-exported, 119 removed); libc.octets le16/le32/le64/put16/put32/copy/cstr_len/zero, libc.numeric yes, libc.ascii lower/is_digit/is_blank; rest are mmio variants with other types and u8 forms |
 
 ## Std library (`lib/libc`)
 

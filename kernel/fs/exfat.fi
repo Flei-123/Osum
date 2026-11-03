@@ -46,6 +46,7 @@ import sched.time
 import sched.sched
 import sync.atomic
 import arch.cpu
+import libc.octets
 
 export { ops, mount_probe, release, sync, node_hold, node_drop, MAX_NODES }
 
@@ -164,31 +165,9 @@ fn leave(state: u64, flags: u64) {
 
 // ------------------------------------------------------------ small helpers
 
-fn le16(p: u64) -> u64 {
-    return kstate.get8(p) | (kstate.get8(p + 1) << 8)
-}
-
-fn le32(p: u64) -> u64 {
-    return le16(p) | (le16(p + 2) << 16)
-}
-
-fn put16(p: u64, v: u64) {
-    kstate.set8(p, (v & 0xFF) as u8)
-    kstate.set8(p + 1, ((v >> 8) & 0xFF) as u8)
-}
-
-fn put32(p: u64, v: u64) {
-    put16(p, v & 0xFFFF)
-    put16(p + 2, (v >> 16) & 0xFFFF)
-}
-
 fn put64(p: u64, v: u64) {
-    put32(p, v & 0xFFFFFFFF)
-    put32(p + 4, (v >> 32) & 0xFFFFFFFF)
-}
-
-fn le64(p: u64) -> u64 {
-    return le32(p) | (le32(p + 4) << 32)
+    octets.put32(p, v & 0xFFFFFFFF)
+    octets.put32(p + 4, (v >> 32) & 0xFFFFFFFF)
 }
 
 fn upper(c: u64) -> u64 {
@@ -196,14 +175,6 @@ fn upper(c: u64) -> u64 {
         return c - 32
     }
     return c
-}
-
-fn zero(p: u64, n: u64) {
-    var i: u64 = 0
-    while i < n {
-        kstate.set8(p + i, 0 as u8)
-        i = i + 1
-    }
 }
 
 fn copyn(dst: u64, src: u64, n: u64) {
@@ -268,7 +239,7 @@ fn fat_get(state: u64, m: u64, c: u64) -> u64 {
     if !fat_load(state, m, sget(state, m, S_FATLBA) + off / BS) {
         return 0
     }
-    return le32(buf(state, FATBUF) + (off % BS))
+    return octets.le32(buf(state, FATBUF) + (off % BS))
 }
 
 fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
@@ -280,7 +251,7 @@ fn fat_set(state: u64, m: u64, c: u64, v: u64) -> bool {
     if !fat_load(state, m, lba) {
         return false
     }
-    put32(buf(state, FATBUF) + (off % BS), v)
+    octets.put32(buf(state, FATBUF) + (off % BS), v)
     if !wr(state, m, lba, buf(state, FATBUF)) {
         tag_fat_m = 0
         return false
@@ -382,7 +353,7 @@ fn clus_alloc(state: u64, m: u64) -> u64 {
 }
 
 fn clus_zero(state: u64, m: u64, c: u64) -> bool {
-    zero(buf(state, DATBUF), BS)
+    octets.zero(buf(state, DATBUF), BS)
     tag_dir_m = 0
     let spc: u64 = sget(state, m, S_SPC)
     var i: u64 = 0
@@ -610,7 +581,7 @@ fn release(state: u64, m: u64) {
     var i: u64 = 1
     while i <= MAX_NODES {
         if nget(state, i, N_MNT) == m + 1 {
-            zero(nd(state, i), NODE_BYTES)
+            octets.zero(nd(state, i), NODE_BYTES)
         }
         i = i + 1
     }
@@ -719,7 +690,7 @@ fn set_read(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, idx: u64) -> u64 {
 fn set_store(state: u64, m: u64, df: u64, dnf: u64, dsz: u64, idx: u64,
     count: u64) -> bool {
     let p: u64 = buf(state, SETBUF)
-    put16(p + 2, set_sum(state, count))
+    octets.put16(p + 2, set_sum(state, count))
     var cur: u64 = 0
     var k: u64 = 0
     while k < count {
@@ -764,7 +735,7 @@ fn set_name(state: u64, count: u64, out: u64) -> u64 {
             kstate.set8(out + o, 0 as u8)
             return o
         }
-        let c: u64 = le16(p + ent * 32 + 2 + w * 2)
+        let c: u64 = octets.le16(p + ent * 32 + 2 + w * 2)
         if c < 0x80 {
             if o < 62 {
                 kstate.set8(out + o, c as u8)
@@ -813,15 +784,15 @@ fn dos_stamp(state: u64) -> u64 {
 fn node_from_set(state: u64, m: u64, df: u64, dnf: u64, dsz: u64,
     idx: u64) -> u64 {
     let p: u64 = buf(state, SETBUF)
-    let attr: u64 = le16(p + 4)
+    let attr: u64 = octets.le16(p + 4)
     let sflags: u64 = kstate.get8(p + 33)
     var flags: u64 = attr
     if (sflags & 2) != 0 {
         flags = flags | F_NOFAT
     }
-    let vdl: u64 = le64(p + 32 + 8)
-    let first: u64 = le32(p + 32 + 20)
-    let size: u64 = le64(p + 32 + 24)
+    let vdl: u64 = octets.le64(p + 32 + 8)
+    let first: u64 = octets.le32(p + 32 + 20)
+    let size: u64 = octets.le64(p + 32 + 24)
     return node_get(state, m, first, size, vdl, flags, df,
         dnf | (dsz << 1), idx)
 }
@@ -1034,7 +1005,7 @@ fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
             chunk = want - done
         }
         if pos >= vdl {
-            zero(dst + done, chunk)
+            octets.zero(dst + done, chunk)
         } else if chunk == BS && pos + BS <= vdl {
             if !rd(state, m, lba, dst + done) {
                 return done
@@ -1077,16 +1048,16 @@ fn entry_update(state: u64, m: u64, node: u64) -> bool {
     }
     let p: u64 = buf(state, SETBUF)
     let now: u64 = dos_stamp(state)
-    put16(p + 4, fl & 0xFFFF)
-    put32(p + 12, now)
-    put32(p + 16, now)
+    octets.put16(p + 4, fl & 0xFFFF)
+    octets.put32(p + 12, now)
+    octets.put32(p + 16, now)
     var sf: u64 = 1
     if (fl & F_NOFAT) != 0 {
         sf = 3
     }
     kstate.set8(p + 33, sf as u8)
     put64(p + 32 + 8, nget(state, node, N_VDL))
-    put32(p + 32 + 20, nget(state, node, N_FIRST))
+    octets.put32(p + 32 + 20, nget(state, node, N_FIRST))
     put64(p + 32 + 24, nget(state, node, N_SIZE))
     return set_store(state, m, pf, pinfo & 1, pinfo >> 1, idx, k)
 }
@@ -1197,12 +1168,12 @@ fn put_range(state: u64, m: u64, node: u64, pos0: u64, src: u64,
                     return done
                 }
             } else {
-                zero(buf(state, DATBUF), BS)
+                octets.zero(buf(state, DATBUF), BS)
             }
             if src != 0 {
                 copyn(buf(state, DATBUF) + inb, src + done, chunk)
             } else if chunk != BS {
-                zero(buf(state, DATBUF) + inb, chunk)
+                octets.zero(buf(state, DATBUF) + inb, chunk)
             }
             if !wr(state, m, lba, buf(state, DATBUF)) {
                 return done
@@ -1429,14 +1400,14 @@ fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
         return 0
     }
     // 3. the entry set
-    zero(p, k * 32)
+    octets.zero(p, k * 32)
     let now: u64 = dos_stamp(state)
     kstate.set8(p, 0x85 as u8)
     kstate.set8(p + 1, (k - 1) as u8)
-    put16(p + 4, flags & 0xFFFF)
-    put32(p + 8, now)
-    put32(p + 12, now)
-    put32(p + 16, now)
+    octets.put16(p + 4, flags & 0xFFFF)
+    octets.put32(p + 8, now)
+    octets.put32(p + 12, now)
+    octets.put32(p + 16, now)
     kstate.set8(p + 32, 0xC0 as u8)
     var sf: u64 = 1
     if (flags & F_NOFAT) != 0 {
@@ -1444,9 +1415,9 @@ fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
     }
     kstate.set8(p + 33, sf as u8)
     kstate.set8(p + 32 + 3, len as u8)
-    put16(p + 32 + 4, exfat_name.hash(name))
+    octets.put16(p + 32 + 4, exfat_name.hash(name))
     put64(p + 32 + 8, vdl)
-    put32(p + 32 + 20, first)
+    octets.put32(p + 32 + 20, first)
     put64(p + 32 + 24, size)
     var i: u64 = 0
     while i < nname {
@@ -1455,7 +1426,7 @@ fn dir_add(state: u64, m: u64, d: u64, name: u64, first: u64, size: u64,
     }
     i = 0
     while i < len {
-        put16(p + 64 + (i / 15) * 32 + 2 + (i % 15) * 2,
+        octets.put16(p + 64 + (i / 15) * 32 + 2 + (i % 15) * 2,
             exfat_name.unit_at(name, i))
         i = i + 1
     }
@@ -1703,11 +1674,11 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
         serial.nl()
         return 0
     }
-    let fatoff: u64 = le32(b + 80)
-    let fatlen: u64 = le32(b + 84)
-    let heap: u64 = le32(b + 88)
-    let clusters: u64 = le32(b + 92)
-    let root: u64 = le32(b + 96)
+    let fatoff: u64 = octets.le32(b + 80)
+    let fatlen: u64 = octets.le32(b + 84)
+    let heap: u64 = octets.le32(b + 88)
+    let clusters: u64 = octets.le32(b + 92)
+    let root: u64 = octets.le32(b + 96)
     if clusters == 0 || root < 2 || root >= clusters + 2 || fatlen == 0 {
         serial.puts((&s_no[0]) as u64)
         serial.dec(3)
@@ -1740,8 +1711,8 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
             if t == 0 {
                 scanning = false
             } else if t == 0x81 && (kstate.get8(p + 1) & 1) == 0 {
-                sset(state, m, S_BMP, le32(p + 20))
-                sset(state, m, S_BMPLEN, le32(p + 24))
+                sset(state, m, S_BMP, octets.le32(p + 20))
+                sset(state, m, S_BMPLEN, octets.le32(p + 24))
                 found = true
                 scanning = false
             }
