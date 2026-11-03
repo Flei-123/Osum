@@ -27,7 +27,7 @@ The map is `tools/layers/layers.tsv` (longest prefix wins, `dir/.` = files direc
 | giant files (> 2000 lines) | 39 | mostly `kernel/sys`, `kernel/drv`, `kernel/ui`, `kernel/user` |
 | loose files in repo root | 62 | `BEFUND-*`, `STATUS-*`, `*-STATUS.md`, logs: belong under `docs/` |
 | shared modules inside `kernel/user` | 115 | imported by >= 2 files but live beside the programs: belong in `lib/` (flat imports make the move a rewrite of every importer) |
-| duplicated function bodies | 667 groups (+5: the new libc homes now match the old program copies) | `ld8` 81 copies, `st8` 67, `lower` 24, `byte_at` 11, `rd8` 11, `ticks` 9, `is_digit` 7, `imin/imax`, `hexch`, `zero` |
+| duplicated function bodies | 605 groups, 1518 copies (was 667 / 1866) | `ld8` 10 copies, `st8` 7, `lower` 14, `zero` 11, `rd` 9; rest are mmio variants with other types and thin wrappers |
 
 ## Std library (`lib/libc`)
 
@@ -42,7 +42,7 @@ Not mechanical. `lib/std` already exists and overlays the pinned Firn `std.*` (5
 
 ## Waves still open
 
-1. Migrate the duplicated helpers (list above) onto `libc.octets/numeric/hexdigit/text/clockapi` with a call-site rewrite + compile of all programs.
+1. Dup helper migration is done for exact matches (`tools/layers/migrate/migrate.py`, `EXT=1` also rewrites `stem.name(` call sites and drops exports; `buildall.sh` compares the compile result of all programs against a baseline). Open: wrapper inlining (`fn f(x) { return mod.f(x) }`), `libc.threads`.
 2. Move the 115 shared modules out of `kernel/user` into `lib/` (std/syslib/framework by the map).
 3. Split the 39 giant files; break the ring-0 cycle by giving `kernel/lib` the shared interfaces.
 4. Move root clutter under `docs/`.
