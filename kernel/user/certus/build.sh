@@ -83,6 +83,13 @@ while todo:
                 todo.append(mod)
                 break
 PYEOF
+if [ -f "$BAU/msg.fi" ]; then
+    mv "$BAU/msg.fi" "$BAU/osmsg.fi"
+    for f in "$BAU"/*.fi "$BAU"/wlib/*.fi "$BAU"/wlibc/*.fi; do
+        [ -f "$f" ] && [ ! -L "$f" ] && grep -q '^import msg[[:space:]]*$' "$f" || continue
+        sed -i -e 's/^import msg[[:space:]]*$/import osmsg/' -e 's/\bmsg\./osmsg./g' "$f"
+    done
+fi
 if [ -d "$CERTUS_REPO/.fui-win" ]; then
     rm -f "$BAU/fui"; mkdir -p "$BAU/fui"
     for f in "$CERTUS_REPO"/.fui-win/*; do ln -sfn "$f" "$BAU/fui/$(basename "$f")"; done
