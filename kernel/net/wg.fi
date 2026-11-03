@@ -108,6 +108,7 @@ import sched.time
 import net.wire
 import net.stack
 import wg.proto
+import libc.octets
 
 export {
     init, ready, up, set_up, arm_kill, kill_armed, killed_octets,
@@ -376,21 +377,13 @@ fn awg(state: u64, jc: u64, jmin: u64, jmax: u64, s1: u64, s2: u64,
 
 // ------------------------------------------------------------ the frame
 
-fn fb(p: u64, off: u64) -> u64 {
-    return (*((p + off) as *mut u8)) as u64
-}
-
-fn fs(p: u64, off: u64, v: u64) {
-    *((p + off) as *mut u8) = (v & 255) as u8
-}
-
 fn be16(p: u64, off: u64) -> u64 {
-    return (fb(p, off) << 8) | fb(p, off + 1)
+    return (octets.ld8(p, off) << 8) | octets.ld8(p, off + 1)
 }
 
 fn be32(p: u64, off: u64) -> u64 {
-    return (fb(p, off) << 24) | (fb(p, off + 1) << 16)
-        | (fb(p, off + 2) << 8) | fb(p, off + 3)
+    return (octets.ld8(p, off) << 24) | (octets.ld8(p, off + 1) << 16)
+        | (octets.ld8(p, off + 2) << 8) | octets.ld8(p, off + 3)
 }
 
 const ETH_HDR: u64 = 14
@@ -406,7 +399,7 @@ fn is_ip4(p: u64, n: u64) -> bool {
     if be16(p, 12) != ETYPE_IP4 {
         return false
     }
-    return (fb(p, ETH_HDR) >> 4) == 4
+    return (octets.ld8(p, ETH_HDR) >> 4) == 4
 }
 
 fn ip_src(p: u64) -> u64 {
@@ -422,11 +415,11 @@ fn ip_total(p: u64) -> u64 {
 }
 
 fn ip_proto(p: u64) -> u64 {
-    return fb(p, ETH_HDR + 9)
+    return octets.ld8(p, ETH_HDR + 9)
 }
 
 fn ip_hlen(p: u64) -> u64 {
-    return (fb(p, ETH_HDR) & 15) * 4
+    return (octets.ld8(p, ETH_HDR) & 15) * 4
 }
 
 // ============================== THE TUNNEL ADDRESS AND THE ONE STACK ====
@@ -491,7 +484,7 @@ fn ip_header_csum(p: u64, hl: u64) -> u64 {
         // zero -- which is what lets the receiver verify with the same
         // loop and expect all ones.
         if i != 10 {
-            s = ones_add(s, (fb(p, i) << 8) | fb(p, i + 1))
+            s = ones_add(s, (octets.ld8(p, i) << 8) | octets.ld8(p, i + 1))
         }
         i = i + 2
     }
@@ -501,22 +494,22 @@ fn ip_header_csum(p: u64, hl: u64) -> u64 {
 // Rewrite the address at `off` (12 = source, 16 = destination) of a bare
 // IP packet at `p`, and repair every checksum that covered it.
 fn rewrite_addr(p: u64, off: u64, newip: u64) {
-    let hl: u64 = (fb(p, 0) & 15) * 4
+    let hl: u64 = (octets.ld8(p, 0) & 15) * 4
     if hl < 20 {
         return
     }
-    let old_hi: u64 = (fb(p, off) << 8) | fb(p, off + 1)
-    let old_lo: u64 = (fb(p, off + 2) << 8) | fb(p, off + 3)
+    let old_hi: u64 = (octets.ld8(p, off) << 8) | octets.ld8(p, off + 1)
+    let old_lo: u64 = (octets.ld8(p, off + 2) << 8) | octets.ld8(p, off + 3)
     let new_hi: u64 = (newip >> 16) & 65535
     let new_lo: u64 = newip & 65535
-    fs(p, off, new_hi >> 8)
-    fs(p, off + 1, new_hi & 255)
-    fs(p, off + 2, new_lo >> 8)
-    fs(p, off + 3, new_lo & 255)
+    octets.st8(p, off, new_hi >> 8)
+    octets.st8(p, off + 1, new_hi & 255)
+    octets.st8(p, off + 2, new_lo >> 8)
+    octets.st8(p, off + 3, new_lo & 255)
     let c: u64 = ip_header_csum(p, hl)
-    fs(p, 10, c >> 8)
-    fs(p, 11, c & 255)
-    let pr: u64 = fb(p, 9)
+    octets.st8(p, 10, c >> 8)
+    octets.st8(p, 11, c & 255)
+    let pr: u64 = octets.ld8(p, 9)
     var coff: u64 = 0
     if pr == 6 {
         coff = hl + 16
@@ -525,7 +518,7 @@ fn rewrite_addr(p: u64, off: u64, newip: u64) {
     } else {
         return
     }
-    let cur: u64 = (fb(p, coff) << 8) | fb(p, coff + 1)
+    let cur: u64 = (octets.ld8(p, coff) << 8) | octets.ld8(p, coff + 1)
     // A UDP checksum of zero means "not computed" and must stay zero.
     if pr == 17 && cur == 0 {
         return
@@ -535,8 +528,8 @@ fn rewrite_addr(p: u64, off: u64, newip: u64) {
     if pr == 17 && nc == 0 {
         nc = 65535
     }
-    fs(p, coff, nc >> 8)
-    fs(p, coff + 1, nc & 255)
+    octets.st8(p, coff, nc >> 8)
+    octets.st8(p, coff + 1, nc & 255)
 }
 
 // `inet.fi`'s S_IP, read by address for the reason in the note above
@@ -595,24 +588,24 @@ fn rx_hook(state: u64, frame: u64, n: u64) -> bool {
         // THE INBOUND HALF OF CRYPTOKEY ROUTING. The source address of
         // the packet INSIDE the tunnel has to be one this peer is allowed
         // to use. Without this check any peer could claim any address.
-        if (fb(scratch, 0) >> 4) != 4 {
+        if (octets.ld8(scratch, 0) >> 4) != 4 {
             return true
         }
-        let src: u64 = (fb(scratch, 12) << 24) | (fb(scratch, 13) << 16)
-            | (fb(scratch, 14) << 8) | fb(scratch, 15)
+        let src: u64 = (octets.ld8(scratch, 12) << 24) | (octets.ld8(scratch, 13) << 16)
+            | (octets.ld8(scratch, 14) << 8) | octets.ld8(scratch, 15)
         if !proto.source_ok(d, pi, src) {
             return true
         }
         // The plaintext is padded to a multiple of 16; the real length is
         // the total length field of the inner IP header.
-        var real: u64 = (fb(scratch, 2) << 8) | fb(scratch, 3)
+        var real: u64 = (octets.ld8(scratch, 2) << 8) | octets.ld8(scratch, 3)
         if real < 20 || real > got as u64 {
             return true
         }
         // The tunnel's own address becomes the stack's, so that the one
         // address the stack has is the one it sees.
-        let dstin: u64 = (fb(scratch, 16) << 24) | (fb(scratch, 17) << 16)
-            | (fb(scratch, 18) << 8) | fb(scratch, 19)
+        let dstin: u64 = (octets.ld8(scratch, 16) << 24) | (octets.ld8(scratch, 17) << 16)
+            | (octets.ld8(scratch, 18) << 8) | octets.ld8(scratch, 19)
         let tun: u64 = proto.dev_addr(d)
         if tun != 0 && dstin == tun {
             rewrite_addr(scratch, 16, stack_ip(state))
@@ -622,15 +615,15 @@ fn rx_hook(state: u64, frame: u64, n: u64) -> bool {
         let inj: u64 = kstate.get(state, at(S_INJECT))
         var i: u64 = 0
         while i < 6 {
-            fs(inj, i, netdev.mac_at(state, i))
-            fs(inj, 6 + i, fb(frame, 6 + i))
+            octets.st8(inj, i, netdev.mac_at(state, i))
+            octets.st8(inj, 6 + i, octets.ld8(frame, 6 + i))
             i = i + 1
         }
-        fs(inj, 12, ETYPE_IP4 >> 8)
-        fs(inj, 13, ETYPE_IP4 & 255)
+        octets.st8(inj, 12, ETYPE_IP4 >> 8)
+        octets.st8(inj, 13, ETYPE_IP4 & 255)
         i = 0
         while i < real {
-            fs(inj, ETH_HDR + i, fb(scratch, i))
+            octets.st8(inj, ETH_HDR + i, octets.ld8(scratch, i))
             i = i + 1
         }
         stack.net_input(inet_stack(state), inj as *mut u8,
@@ -856,13 +849,13 @@ fn encapsulate(state: u64, pi: u64, frame: u64, n: u64) -> u64 {
     let inj: u64 = kstate.get(state, at(S_INJECT))
     var ci: u64 = 0
     while ci < inner {
-        fs(inj, ci, fb(frame, ETH_HDR + ci))
+        octets.st8(inj, ci, octets.ld8(frame, ETH_HDR + ci))
         ci = ci + 1
     }
     let tun: u64 = proto.dev_addr(d)
     if tun != 0 {
-        let srcin: u64 = (fb(inj, 12) << 24) | (fb(inj, 13) << 16)
-            | (fb(inj, 14) << 8) | fb(inj, 15)
+        let srcin: u64 = (octets.ld8(inj, 12) << 24) | (octets.ld8(inj, 13) << 16)
+            | (octets.ld8(inj, 14) << 8) | octets.ld8(inj, 15)
         if srcin == stack_ip(state) {
             rewrite_addr(inj, 12, tun)
         }
