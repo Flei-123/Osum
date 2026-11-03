@@ -25,6 +25,7 @@ import lib.kstate
 import mm.mem
 import net.inet
 import fs.file
+import libc.regio
 
 export {
     nl_new, nl_pid, nl_set_pid, nl_pending, nl_head_len, nl_head_ptr, nl_pop, nl_request,
@@ -87,43 +88,19 @@ const DATA: u64 = 64
 const CAP: u64 = 4032
 const REPLY_MAX: u64 = 1200 // more than the longest reply this file can build (3 items of ~100 octets, DONE)
 
-fn rd64(p: u64) -> u64 {
-    return __mmio_read64(p as *mut u64)
-}
-
-fn wr64(p: u64, v: u64) {
-    __mmio_write64(p as *mut u64, v)
-}
-
-fn rd32(p: u64) -> u64 {
-    return __mmio_read32(p as *mut u32) as u64
-}
-
-fn wr32(p: u64, v: u64) {
-    __mmio_write32(p as *mut u32, v as u32)
-}
-
 fn rd16(p: u64) -> u64 {
-    return rd8(p) | (rd8(p + 1) << 8)
+    return regio.read8(p) | (regio.read8(p + 1) << 8)
 }
 
 fn wr16(p: u64, v: u64) {
-    wr8(p, v & 0xFF)
-    wr8(p + 1, (v >> 8) & 0xFF)
-}
-
-fn rd8(p: u64) -> u64 {
-    return __mmio_read8(p as *mut u8) as u64
-}
-
-fn wr8(p: u64, v: u64) {
-    __mmio_write8(p as *mut u8, v as u8)
+    regio.write8(p, v & 0xFF)
+    regio.write8(p + 1, (v >> 8) & 0xFF)
 }
 
 fn zero_frame(p: u64) {
     var o: u64 = 0
     while o < 4096 {
-        wr64(p + o, 0)
+        regio.write64(p + o, 0)
         o = o + 8
     }
 }
@@ -147,15 +124,15 @@ fn nl_new(state: u64, flags: u64) -> u64 {
 }
 
 fn nl_pid(fr: u64) -> u64 {
-    return rd64(fr + 16)
+    return regio.read64(fr + 16)
 }
 
 fn nl_set_pid(fr: u64, pid: u64) {
-    wr64(fr + 16, pid)
+    regio.write64(fr + 16, pid)
 }
 
 fn nl_pending(fr: u64) -> bool {
-    return rd64(fr) != rd64(fr + 8)
+    return regio.read64(fr) != regio.read64(fr + 8)
 }
 
 // Length of the first datagram (0 when there is none).
@@ -163,12 +140,12 @@ fn nl_head_len(fr: u64) -> u64 {
     if !nl_pending(fr) {
         return 0
     }
-    return rd64(fr + DATA + rd64(fr))
+    return regio.read64(fr + DATA + regio.read64(fr))
 }
 
 // Address of the first octet of the first datagram.
 fn nl_head_ptr(fr: u64) -> u64 {
-    return fr + DATA + rd64(fr) + 8
+    return fr + DATA + regio.read64(fr) + 8
 }
 
 // Drop the first datagram.
@@ -176,21 +153,21 @@ fn nl_pop(fr: u64) {
     if !nl_pending(fr) {
         return
     }
-    let n: u64 = rd64(fr + DATA + rd64(fr))
-    wr64(fr, rd64(fr) + 8 + ((n + 7) & 0xFFFFFFF8))
-    if rd64(fr) == rd64(fr + 8) {
-        wr64(fr, 0)
-        wr64(fr + 8, 0)
+    let n: u64 = regio.read64(fr + DATA + regio.read64(fr))
+    regio.write64(fr, regio.read64(fr) + 8 + ((n + 7) & 0xFFFFFFF8))
+    if regio.read64(fr) == regio.read64(fr + 8) {
+        regio.write64(fr, 0)
+        regio.write64(fr + 8, 0)
     }
 }
 
 // Start a datagram: the address its body begins at, or 0 when the frame has no room for a whole reply.
 fn rec_begin(fr: u64) -> u64 {
-    if rd64(fr) == rd64(fr + 8) {
-        wr64(fr, 0)
-        wr64(fr + 8, 0)
+    if regio.read64(fr) == regio.read64(fr + 8) {
+        regio.write64(fr, 0)
+        regio.write64(fr + 8, 0)
     }
-    let w: u64 = rd64(fr + 8)
+    let w: u64 = regio.read64(fr + 8)
     if w + 8 + REPLY_MAX > CAP {
         return 0
     }
@@ -200,27 +177,27 @@ fn rec_begin(fr: u64) -> u64 {
 // Close the datagram that began at `body` and ended at `end`.
 fn rec_end(fr: u64, body: u64, end: u64) {
     let n: u64 = end - body
-    wr64(body - 8, n)
-    wr64(fr + 8, rd64(fr + 8) + 8 + ((n + 7) & 0xFFFFFFF8))
+    regio.write64(body - 8, n)
+    regio.write64(fr + 8, regio.read64(fr + 8) + 8 + ((n + 7) & 0xFFFFFFF8))
 }
 
 // ================================================================== message pieces
 
 // struct nlmsghdr at p; the length is filled in by `msg_end` once the body is there.
 fn put_hdr(p: u64, typ: u64, flags: u64, seq: u64, pid: u64) {
-    wr32(p, 16)
+    regio.write32(p, 16)
     wr16(p + 4, typ)
     wr16(p + 6, flags)
-    wr32(p + 8, seq)
-    wr32(p + 12, pid)
+    regio.write32(p + 8, seq)
+    regio.write32(p + 12, pid)
 }
 
 // The message that began at `start` ends at `q`: set its length, return the aligned next position (padding is zero).
 fn msg_end(start: u64, q: u64) -> u64 {
-    wr32(start, q - start)
+    regio.write32(start, q - start)
     var e: u64 = q
     while ((e - start) & 3) != 0 {
-        wr8(e, 0)
+        regio.write8(e, 0)
         e = e + 1
     }
     return e
@@ -229,17 +206,17 @@ fn msg_end(start: u64, q: u64) -> u64 {
 fn a_u32(p: u64, typ: u64, v: u64) -> u64 {
     wr16(p, 8)
     wr16(p + 2, typ)
-    wr32(p + 4, v)
+    regio.write32(p + 4, v)
     return p + 8
 }
 
 fn a_u8(p: u64, typ: u64, v: u64) -> u64 {
     wr16(p, 5)
     wr16(p + 2, typ)
-    wr8(p + 4, v)
-    wr8(p + 5, 0)
-    wr8(p + 6, 0)
-    wr8(p + 7, 0)
+    regio.write8(p + 4, v)
+    regio.write8(p + 5, 0)
+    regio.write8(p + 6, 0)
+    regio.write8(p + 7, 0)
     return p + 8
 }
 
@@ -247,10 +224,10 @@ fn a_u8(p: u64, typ: u64, v: u64) -> u64 {
 fn a_ip(p: u64, typ: u64, a: u64) -> u64 {
     wr16(p, 8)
     wr16(p + 2, typ)
-    wr8(p + 4, (a >> 24) & 0xFF)
-    wr8(p + 5, (a >> 16) & 0xFF)
-    wr8(p + 6, (a >> 8) & 0xFF)
-    wr8(p + 7, a & 0xFF)
+    regio.write8(p + 4, (a >> 24) & 0xFF)
+    regio.write8(p + 5, (a >> 16) & 0xFF)
+    regio.write8(p + 6, (a >> 8) & 0xFF)
+    regio.write8(p + 7, a & 0xFF)
     return p + 8
 }
 
@@ -261,9 +238,9 @@ fn a_mac(state: u64, p: u64, typ: u64, bcast: bool) -> u64 {
     var i: u64 = 0
     while i < 6 {
         if bcast {
-            wr8(p + 4 + i, 0xFF)
+            regio.write8(p + 4 + i, 0xFF)
         } else {
-            wr8(p + 4 + i, inet.mac_at(state, i) & 0xFF)
+            regio.write8(p + 4 + i, inet.mac_at(state, i) & 0xFF)
         }
         i = i + 1
     }
@@ -275,14 +252,14 @@ fn a_mac(state: u64, p: u64, typ: u64, bcast: bool) -> u64 {
 fn a_name(p: u64, typ: u64) -> u64 {
     wr16(p, 9)
     wr16(p + 2, typ)
-    wr8(p + 4, 101)
-    wr8(p + 5, 116)
-    wr8(p + 6, 104)
-    wr8(p + 7, 48)
-    wr8(p + 8, 0)
-    wr8(p + 9, 0)
-    wr8(p + 10, 0)
-    wr8(p + 11, 0)
+    regio.write8(p + 4, 101)
+    regio.write8(p + 5, 116)
+    regio.write8(p + 6, 104)
+    regio.write8(p + 7, 48)
+    regio.write8(p + 8, 0)
+    regio.write8(p + 9, 0)
+    regio.write8(p + 10, 0)
+    regio.write8(p + 11, 0)
     return p + 12
 }
 
@@ -310,12 +287,12 @@ fn put_link(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
         oper = 6 // IF_OPER_UP
     }
     // struct ifinfomsg: family, pad, type, index, flags, change
-    wr8(p + 16, AF_UNSPEC)
-    wr8(p + 17, 0)
+    regio.write8(p + 16, AF_UNSPEC)
+    regio.write8(p + 17, 0)
     wr16(p + 18, ARPHRD_ETHER)
-    wr32(p + 20, IF_INDEX)
-    wr32(p + 24, fl)
-    wr32(p + 28, 0xFFFFFFFF)
+    regio.write32(p + 20, IF_INDEX)
+    regio.write32(p + 24, fl)
+    regio.write32(p + 28, 0xFFFFFFFF)
     var q: u64 = p + 32
     q = a_name(q, IFLA_IFNAME)
     q = a_mac(state, q, IFLA_ADDRESS, false)
@@ -332,11 +309,11 @@ fn put_addr(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
     let a: u64 = inet.ip(state)
     let m: u64 = inet.mask(state)
     // struct ifaddrmsg: family, prefixlen, flags, scope, index
-    wr8(p + 16, AF_INET)
-    wr8(p + 17, prefix_len(m))
-    wr8(p + 18, 0x80) // IFA_F_PERMANENT: no lifetimes are kept, so none are claimed
-    wr8(p + 19, RT_SCOPE_UNIVERSE)
-    wr32(p + 20, IF_INDEX)
+    regio.write8(p + 16, AF_INET)
+    regio.write8(p + 17, prefix_len(m))
+    regio.write8(p + 18, 0x80) // IFA_F_PERMANENT: no lifetimes are kept, so none are claimed
+    regio.write8(p + 19, RT_SCOPE_UNIVERSE)
+    regio.write32(p + 20, IF_INDEX)
     var q: u64 = p + 24
     q = a_ip(q, IFA_ADDRESS, a)
     q = a_ip(q, IFA_LOCAL, a)
@@ -348,15 +325,15 @@ fn put_addr(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
 
 // struct rtmsg head at p+16: family, dst_len, src_len, tos, table, protocol, scope, type, flags.
 fn put_rtmsg(p: u64, dst_len: u64, proto: u64, scope: u64) {
-    wr8(p + 16, AF_INET)
-    wr8(p + 17, dst_len)
-    wr8(p + 18, 0)
-    wr8(p + 19, 0)
-    wr8(p + 20, RT_TABLE_MAIN)
-    wr8(p + 21, proto)
-    wr8(p + 22, scope)
-    wr8(p + 23, RTN_UNICAST)
-    wr32(p + 24, 0)
+    regio.write8(p + 16, AF_INET)
+    regio.write8(p + 17, dst_len)
+    regio.write8(p + 18, 0)
+    regio.write8(p + 19, 0)
+    regio.write8(p + 20, RT_TABLE_MAIN)
+    regio.write8(p + 21, proto)
+    regio.write8(p + 22, scope)
+    regio.write8(p + 23, RTN_UNICAST)
+    regio.write32(p + 24, 0)
 }
 
 // RTM_NEWROUTE: the default route (when a gateway is configured) and the route of the connected network.
@@ -385,17 +362,17 @@ fn put_net_route(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
 
 fn put_done(p: u64, seq: u64, pid: u64) -> u64 {
     put_hdr(p, NLMSG_DONE, NLM_F_MULTI, seq, pid)
-    wr32(p + 16, 0)
+    regio.write32(p + 16, 0)
     return msg_end(p, p + 20)
 }
 
 // NLMSG_ERROR: the error (negative errno) and the header of the request that caused it.
 fn put_error(p: u64, req: u64, err: u64, seq: u64, pid: u64) -> u64 {
     put_hdr(p, NLMSG_ERROR, 0, seq, pid)
-    wr32(p + 16, (0 -% err) & 0xFFFFFFFF)
+    regio.write32(p + 16, (0 -% err) & 0xFFFFFFFF)
     var i: u64 = 0
     while i < 16 {
-        wr8(p + 20 + i, rd8(req + i))
+        regio.write8(p + 20 + i, regio.read8(req + i))
         i = i + 1
     }
     return msg_end(p, p + 36)
@@ -415,16 +392,16 @@ fn nl_request(state: u64, fr: u64, kb: u64, total: u64) -> u64 {
     var off: u64 = 0
     while off + 16 <= total && (q - body) + 400 <= REPLY_MAX {
         let m: u64 = kb + off
-        let len: u64 = rd32(m)
+        let len: u64 = regio.read32(m)
         if len < 16 || off + len > total {
             return 22
         }
         let typ: u64 = rd16(m + 4)
         let flags: u64 = rd16(m + 6)
-        let seq: u64 = rd32(m + 8)
+        let seq: u64 = regio.read32(m + 8)
         var fam: u64 = AF_UNSPEC
         if len >= 17 {
-            fam = rd8(m + 16)
+            fam = regio.read8(m + 16)
         }
         if typ == NLMSG_NOOP || typ == NLMSG_DONE || typ == NLMSG_ERROR {
             // nothing to answer

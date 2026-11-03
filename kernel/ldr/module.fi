@@ -10,6 +10,7 @@ import ldr.modtab
 import ldr.modidx
 import ldr.modpolicy
 import crypto.ed25519
+import libc.regio
 
 export {
     init, load, entladen, ready, reason, say_reason,
@@ -114,20 +115,12 @@ const RT_PLT32: u64 = 4
 const RT_32: u64 = 10
 const RT_32S: u64 = 11
 
-fn ld64(p: u64) -> u64 {
-    return __mmio_read64(p as *mut u64)
-}
-
 fn ld32(p: u64) -> u64 {
     return kstate.get32(p)
 }
 
 fn ld16(p: u64) -> u64 {
     return kstate.get16(p)
-}
-
-fn st64(p: u64, v: u64) {
-    __mmio_write64(p as *mut u64, v)
 }
 
 fn st32(p: u64, v: u64) {
@@ -563,7 +556,7 @@ fn check_and_place(state: u64, file: u64, size_v: u64, k: u64,
     if abi != ksym.ABI {
         return R_ABI
     }
-    let n: u64 = ld64(file + 16)
+    let n: u64 = regio.read64(file + 16)
     if !fits(size_v, HDR_LEN, n) {
         return R_LEN
     }
@@ -701,7 +694,7 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         return R_SHDR
     }
     let shnum: u64 = ld16(o + 60)
-    let shoff: u64 = ld64(o + 40)
+    let shoff: u64 = regio.read64(o + 40)
     if shnum == 0 {
         return R_SHDR
     }
@@ -717,11 +710,11 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     var i: u64 = 1
     while i < shnum {
         let sh: u64 = o + shoff + i * SHENT
-        let flags: u64 = ld64(sh + 8)
+        let flags: u64 = regio.read64(sh + 8)
         let typ: u64 = ld32(sh + 4)
-        let size: u64 = ld64(sh + 32)
-        let off: u64 = ld64(sh + 24)
-        let al: u64 = ld64(sh + 48)
+        let size: u64 = regio.read64(sh + 32)
+        let off: u64 = regio.read64(sh + 24)
+        let al: u64 = regio.read64(sh + 48)
         sec_set(state, i, 0)
         if (flags & SHF_ALLOC) != 0 {
             if typ != SHT_NOBITS {
@@ -781,8 +774,8 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         if dst_v != 0 {
             let sh: u64 = o + shoff + i * SHENT
             let typ: u64 = ld32(sh + 4)
-            let size: u64 = ld64(sh + 32)
-            let off: u64 = ld64(sh + 24)
+            let size: u64 = regio.read64(sh + 32)
+            let off: u64 = regio.read64(sh + 24)
             if typ == SHT_NOBITS {
                 nullen(dst_v, size)
             } else {
@@ -799,12 +792,12 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     while i < shnum {
         let sh: u64 = o + shoff + i * SHENT
         if ld32(sh + 4) == SHT_SYMTAB {
-            let off: u64 = ld64(sh + 24)
-            let size: u64 = ld64(sh + 32)
+            let off: u64 = regio.read64(sh + 24)
+            let size: u64 = regio.read64(sh + 32)
             if !fits(n, off, size) {
                 return R_SECOFF
             }
-            if ld64(sh + 56) != SYMENT {
+            if regio.read64(sh + 56) != SYMENT {
                 return R_SYMTAB
             }
             symtab = o + off
@@ -817,8 +810,8 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
                 return R_SYMTAB
             }
             let ssh: u64 = o + shoff + link * SHENT
-            let soff: u64 = ld64(ssh + 24)
-            let ssize: u64 = ld64(ssh + 32)
+            let soff: u64 = regio.read64(ssh + 24)
+            let ssize: u64 = regio.read64(ssh + 32)
             if !fits(n, soff, ssize) {
                 return R_SECOFF
             }
@@ -840,12 +833,12 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
             let dst_i: u64 = ld32(sh + 44)
             if dst_i < shnum {
                 if sec(state, dst_i) != 0 {
-                    let off: u64 = ld64(sh + 24)
-                    let size: u64 = ld64(sh + 32)
+                    let off: u64 = regio.read64(sh + 24)
+                    let size: u64 = regio.read64(sh + 32)
                     if !fits(n, off, size) {
                         return R_SECOFF
                     }
-                    if ld64(sh + 56) != RELAENT {
+                    if regio.read64(sh + 56) != RELAENT {
                         return R_RELTYPE
                     }
                     let g: u64 = rela_anwenden(state, o + off,
@@ -885,7 +878,7 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
 fn copy(dst: u64, src: u64, len: u64) {
     var i: u64 = 0
     while i + 8 <= len {
-        st64(dst + i, ld64(src + i))
+        regio.write64(dst + i, regio.read64(src + i))
         i = i + 8
     }
     while i < len {
@@ -897,7 +890,7 @@ fn copy(dst: u64, src: u64, len: u64) {
 fn nullen(dst: u64, len: u64) {
     var i: u64 = 0
     while i + 8 <= len {
-        st64(dst + i, 0)
+        regio.write64(dst + i, 0)
         i = i + 8
     }
     while i < len {
@@ -919,7 +912,7 @@ fn sym_addr(state: u64, symtab: u64, symn: u64, strtab: u64, name: u64,
                     if ksym.eq(strtab + nm, name) {
                         let b: u64 = sec(state, shndx)
                         if b != 0 {
-                            return b + ld64(sy + 8)
+                            return b + regio.read64(sy + 8)
                         }
                     }
                 }
@@ -933,41 +926,41 @@ fn sym_addr(state: u64, symtab: u64, symn: u64, strtab: u64, name: u64,
 fn sym_value(state: u64, symtab: u64, symn: u64, strtab: u64, idx: u64,
     shnum: u64, ok: u64) -> u64 {
     if idx >= symn {
-        st64(ok, 0)
+        regio.write64(ok, 0)
         return 0
     }
     let sy: u64 = symtab + idx * SYMENT
     let shndx: u64 = ld16(sy + 6)
-    let value: u64 = ld64(sy + 8)
+    let value: u64 = regio.read64(sy + 8)
     if shndx == SHN_ABS {
-        st64(ok, 1)
+        regio.write64(ok, 1)
         return value
     }
     if shndx == SHN_UNDEF {
         let nm: u64 = ld32(sy)
         if nm == 0 {
-            st64(ok, 0)
+            regio.write64(ok, 0)
             return 0
         }
         let a: u64 = ksym.such(strtab + nm)
         if a == 0 {
-            st64(ok, 0)
+            regio.write64(ok, 0)
             return 0
         }
         zaehl(state, S_EXTSYMS)
-        st64(ok, 1)
+        regio.write64(ok, 1)
         return a
     }
     if shndx >= shnum {
-        st64(ok, 0)
+        regio.write64(ok, 0)
         return 0
     }
     let b: u64 = sec(state, shndx)
     if b == 0 {
-        st64(ok, 0)
+        regio.write64(ok, 0)
         return 0
     }
-    st64(ok, 1)
+    regio.write64(ok, 1)
     return b + value
 }
 
@@ -976,9 +969,9 @@ fn rela_anwenden(state: u64, rela: u64, count: u64, dst_v: u64, symtab: u64,
     var i: u64 = 0
     while i < count {
         let r: u64 = rela + i * RELAENT
-        let roff: u64 = ld64(r)
-        let info: u64 = ld64(r + 8)
-        let add: u64 = ld64(r + 16)
+        let roff: u64 = regio.read64(r)
+        let info: u64 = regio.read64(r + 8)
+        let add: u64 = regio.read64(r + 16)
         let art: u64 = info & 0xFFFFFFFF
         let sidx: u64 = info >> 32
         var ok: u64 = 0
@@ -989,7 +982,7 @@ fn rela_anwenden(state: u64, rela: u64, count: u64, dst_v: u64, symtab: u64,
         }
         let p: u64 = dst_v + roff
         if art == RT_64 {
-            st64(p, s +% add)
+            regio.write64(p, s +% add)
         } else {
             if art == RT_PC32 || art == RT_PLT32 {
                 let v: u64 = (s +% add) -% p

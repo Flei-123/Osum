@@ -24,6 +24,7 @@ import gfx.cursor
 import mm.mem
 import arch.x86_64.apic
 import arch.arch
+import libc.regio
 
 export {
     probe, boot_mbi, init, is_ready, present, panic_present, say, shut_down,
@@ -189,14 +190,6 @@ const SPIN: u64 = 2000000
 
 fn s(off: u64) -> u64 {
     return VMSVGA_OFF + off
-}
-
-fn rd32(b: u64, off: u64) -> u64 {
-    return __mmio_read32((b + off) as *mut u32) as u64
-}
-
-fn wr32(b: u64, off: u64, v: u64) {
-    __mmio_write32((b + off) as *mut u32, v as u32)
 }
 
 fn is_ready(state: u64) -> bool {
@@ -483,11 +476,11 @@ fn boot_mbi(state: u64, w: u64, h: u64) -> u64 {
         z = z + 1
     }
     let ph: u64 = kstate.get(state, s(S_VRAM)) + kstate.get(state, s(S_FBOFF))
-    wr32(m, 0, 0x1000)
+    regio.write32_at(m, 0, 0x1000)
     __mmio_write64((m + 88) as *mut u64, ph)
-    wr32(m, 96, kstate.get(state, s(S_PITCH)))
-    wr32(m, 100, w)
-    wr32(m, 104, h)
+    regio.write32_at(m, 96, kstate.get(state, s(S_PITCH)))
+    regio.write32_at(m, 100, w)
+    regio.write32_at(m, 104, h)
     __mmio_write8((m + 108) as *mut u8, 32)
     __mmio_write8((m + 109) as *mut u8, 1)
     __mmio_write8((m + 110) as *mut u8, 16)
@@ -519,12 +512,12 @@ fn fifo_setup(state: u64) -> bool {
         return false
     }
     reg_w(state, R_CONFIG_DONE, 0) // order (vmwgfx): ENABLE, CONFIG_DONE=0, FIFO header, CONFIG_DONE=1
-    wr32(f, F_MIN * 4, mn)
-    wr32(f, F_MAX * 4, sz)
-    wr32(f, F_NEXT * 4, mn)
-    wr32(f, F_STOP * 4, mn)
+    regio.write32_at(f, F_MIN * 4, mn)
+    regio.write32_at(f, F_MAX * 4, sz)
+    regio.write32_at(f, F_NEXT * 4, mn)
+    regio.write32_at(f, F_STOP * 4, mn)
     if has_cap(state, CAP_EXTENDED_FIFO) {
-        kstate.set(state, s(S_FCAPS), rd32(f, F_CAPS * 4))
+        kstate.set(state, s(S_FCAPS), regio.read32_at(f, F_CAPS * 4))
     } else {
         kstate.set(state, s(S_FCAPS), 0)
     }
@@ -581,10 +574,10 @@ fn fifo_begin(state: u64, words: u64) -> bool {
     let need: u64 = words * 4 + 4
     var tries: u64 = 0
     while tries < 4 {
-        let mn: u64 = rd32(f, F_MIN * 4)
-        let mx: u64 = rd32(f, F_MAX * 4)
-        let nx: u64 = rd32(f, F_NEXT * 4)
-        let st: u64 = rd32(f, F_STOP * 4)
+        let mn: u64 = regio.read32_at(f, F_MIN * 4)
+        let mx: u64 = regio.read32_at(f, F_MAX * 4)
+        let nx: u64 = regio.read32_at(f, F_NEXT * 4)
+        let st: u64 = regio.read32_at(f, F_STOP * 4)
         if nx < mn || nx >= mx || st < mn || st >= mx {
             return false
         }
@@ -608,10 +601,10 @@ fn fifo_begin(state: u64, words: u64) -> bool {
 fn fifo_put(state: u64, v: u64) {
     let f: u64 = fifo(state)
     var nx: u64 = kstate.get(state, s(S_WNEXT))
-    wr32(f, nx, v)
+    regio.write32_at(f, nx, v)
     nx = nx + 4
-    if nx >= rd32(f, F_MAX * 4) {
-        nx = rd32(f, F_MIN * 4)
+    if nx >= regio.read32_at(f, F_MAX * 4) {
+        nx = regio.read32_at(f, F_MIN * 4)
     }
     kstate.set(state, s(S_WNEXT), nx)
 }
@@ -620,7 +613,7 @@ fn fifo_put(state: u64, v: u64) {
 fn fifo_commit(state: u64) {
     let f: u64 = fifo(state)
     arch.barrier_write()
-    wr32(f, F_NEXT * 4, kstate.get(state, s(S_WNEXT)))
+    regio.write32_at(f, F_NEXT * 4, kstate.get(state, s(S_WNEXT)))
     arch.barrier_write()
     reg_w(state, R_SYNC, 1)
 }
@@ -716,7 +709,7 @@ fn verify_frame(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
             if inside {
                 x = x1 // the whole box part of this row is inside
             } else {
-                if rd32(vr, row + x * 4) != rd32(pres, row + x * 4) {
+                if regio.read32_at(vr, row + x * 4) != regio.read32_at(pres, row + x * 4) {
                     bad = bad + 1
                 }
                 x = x + 1
@@ -729,7 +722,7 @@ fn verify_frame(state: u64, x0: u64, y0: u64, x1: u64, y1: u64) {
     while y < y1 && y < h {
         var x2: u64 = x0
         while x2 < x1 && x2 < w {
-            wr32(pres, y * pt + x2 * 4, rd32(vr, y * pt + x2 * 4))
+            regio.write32_at(pres, y * pt + x2 * 4, regio.read32_at(vr, y * pt + x2 * 4))
             x2 = x2 + 1
         }
         y = y + 1
@@ -1011,10 +1004,10 @@ fn cursor_define(state: u64, form: u64, g: u64, hx0: u64, hy0: u64, rq: u64) -> 
 fn cursor_pos(state: u64, x: u64, y: u64, on: u64) {
     if (kstate.get(state, s(S_FCAPS)) & FC_CURSOR_BYPASS_3) != 0 && has_cap(state, CAP_EXTENDED_FIFO) {
         let f: u64 = fifo(state)
-        wr32(f, F_CURSOR_ON * 4, on)
-        wr32(f, F_CURSOR_X * 4, x)
-        wr32(f, F_CURSOR_Y * 4, y)
-        wr32(f, F_CURSOR_COUNT * 4, rd32(f, F_CURSOR_COUNT * 4) + 1)
+        regio.write32_at(f, F_CURSOR_ON * 4, on)
+        regio.write32_at(f, F_CURSOR_X * 4, x)
+        regio.write32_at(f, F_CURSOR_Y * 4, y)
+        regio.write32_at(f, F_CURSOR_COUNT * 4, regio.read32_at(f, F_CURSOR_COUNT * 4) + 1)
         return
     }
     reg_w(state, R_CURSOR_ID, 1)
@@ -1224,14 +1217,14 @@ fn vmm_call(state: u64, ty: u64, size: u64) -> bool {
     if rq == 0 || io == 0 {
         return false
     }
-    wr32(rq, 0, size)
-    wr32(rq, 4, VMM_HDR_VERSION)
-    wr32(rq, 8, ty)
-    wr32(rq, 12, 0x80000000) // "not processed" marker: the host overwrites it
-    wr32(rq, 16, 0)
-    wr32(rq, 20, 0)
+    regio.write32_at(rq, 0, size)
+    regio.write32_at(rq, 4, VMM_HDR_VERSION)
+    regio.write32_at(rq, 8, ty)
+    regio.write32_at(rq, 12, 0x80000000) // "not processed" marker: the host overwrites it
+    regio.write32_at(rq, 16, 0)
+    regio.write32_at(rq, 20, 0)
     arch.dev_out32(io as u16, rq as u32)
-    let rc: u64 = rd32(rq, 12)
+    let rc: u64 = regio.read32_at(rq, 12)
     if rc >= 0x80000000 {
         kstate.add(state, s(S_VMM_ERR), 1)
         kstate.set(state, s(S_VMM_RC), rc)
@@ -1246,7 +1239,7 @@ fn vmm_zero_body(state: u64, bytes: u64) {
     let rq: u64 = kstate.get(state, s(S_VMM_REQ))
     var k: u64 = 24
     while k < 24 + bytes {
-        wr32(rq, k, 0)
+        regio.write32_at(rq, k, 0)
         k = k + 4
     }
 }
@@ -1254,9 +1247,9 @@ fn vmm_zero_body(state: u64, bytes: u64) {
 fn vmm_status(state: u64, facility: u64) -> bool {
     let rq: u64 = kstate.get(state, s(S_VMM_REQ))
     vmm_zero_body(state, 12)
-    wr32(rq, 24, facility)
-    wr32(rq, 28, VMM_ST_ACTIVE)
-    wr32(rq, 32, 0)
+    regio.write32_at(rq, 24, facility)
+    regio.write32_at(rq, 28, VMM_ST_ACTIVE)
+    regio.write32_at(rq, 32, 0)
     return vmm_call(state, VMMREQ_REPORT_GUEST_STATUS, 36)
 }
 
@@ -1284,28 +1277,28 @@ fn vmm_init(state: u64) {
     kstate.set(state, s(S_VMM_REQ), p)
     // 1. who we are (interface version 1.4, OS type "other, 64 bit")
     vmm_zero_body(state, 8)
-    wr32(p, 24, VMM_VERSION)
-    wr32(p, 28, 0x100)
+    regio.write32_at(p, 24, VMM_VERSION)
+    regio.write32_at(p, 28, 0x100)
     if !vmm_call(state, VMMREQ_REPORT_GUEST_INFO, 32) {
         kstate.set(state, s(S_VMM_IO), 0)
         return
     }
     // 2. additions version 7.2.20 (the host compares it with its own and complains about an older one) + name
     vmm_zero_body(state, 144)
-    wr32(p, 24, (2 << 16) | 7)
-    wr32(p, 28, 20)
-    wr32(p, 32, 175154) // SVN revision of the 7.2.20 release (r0 made the host answer rc = -2)
-    wr32(p, 36, 0)
-    wr32(p, 40, 0x6569724F) // "Orie"
-    wr32(p, 44, 0x534F746E) // "ntOS"
+    regio.write32_at(p, 24, (2 << 16) | 7)
+    regio.write32_at(p, 28, 20)
+    regio.write32_at(p, 32, 175154) // SVN revision of the 7.2.20 release (r0 made the host answer rc = -2)
+    regio.write32_at(p, 36, 0)
+    regio.write32_at(p, 40, 0x6569724F) // "Orie"
+    regio.write32_at(p, 44, 0x534F746E) // "ntOS"
     let _i2: bool = vmm_call(state, VMMREQ_REPORT_GUEST_INFO2, 24 + 144)
     // 3. the driver is up, the graphics capability makes the VM window send resize hints
     let _s1: bool = vmm_status(state, VMM_FAC_DRIVER)
     // NO event filter mask on purpose (Z1, 17.10.2026): with the display bit in the filter the host raises the VMMDev interrupt on a
     // resize hint, we have no handler for that level-triggered line and the VM froze right after setvideomodehint. We poll instead.
     vmm_zero_body(state, 8)
-    wr32(p, 24, VMM_CAP_GRAPHICS)
-    wr32(p, 28, 0)
+    regio.write32_at(p, 24, VMM_CAP_GRAPHICS)
+    regio.write32_at(p, 28, 0)
     let c: bool = vmm_call(state, VMMREQ_SET_GUEST_CAPS, 32)
     let g: bool = vmm_status(state, VMM_FAC_GRAPHICS)
     var ok: u64 = 0
@@ -1340,19 +1333,19 @@ fn vmm_hint(state: u64) -> u64 {
 fn vmm_hint_locked(state: u64) -> u64 {
     let rq: u64 = kstate.get(state, s(S_VMM_REQ))
     vmm_zero_body(state, 20)
-    wr32(rq, 24, 0) // xres
-    wr32(rq, 28, 0) // yres
-    wr32(rq, 32, 0) // bpp
+    regio.write32_at(rq, 24, 0) // xres
+    regio.write32_at(rq, 28, 0) // yres
+    regio.write32_at(rq, 32, 0) // bpp
     // event_ack = VMMDEV_EVENT_DISPLAY_CHANGE_REQUEST (4): the host returns the CURRENT request and marks it as read. With 0 it answers
     // with the last request the guest "read" through an event ack (VMMDev.cpp: lastReadDisplayChangeRequest), i.e. 0x0 forever.
-    wr32(rq, 36, VMM_EVENT_DISPLAY)
-    wr32(rq, 40, 0) // display 0
+    regio.write32_at(rq, 36, VMM_EVENT_DISPLAY)
+    regio.write32_at(rq, 40, 0) // display 0
     if !vmm_call(state, VMMREQ_GET_DISPLAY_CHANGE2, 44) {
         return 0
     }
     kstate.add(state, s(S_VMM_POLLS), 1)
-    let w: u64 = rd32(rq, 24)
-    let h: u64 = rd32(rq, 28)
+    let w: u64 = regio.read32_at(rq, 24)
+    let h: u64 = regio.read32_at(rq, 28)
     if w > 65535 || h > 65535 {
         return 0
     }
@@ -1476,7 +1469,7 @@ fn alloc_verify(state: u64) {
     }
     var z: u64 = 0
     while z < bytes {
-        wr32(p, z, rd32(fb.addr(state), z))
+        regio.write32_at(p, z, regio.read32_at(fb.addr(state), z))
         z = z + 4
     }
     kstate.set(state, s(S_PRES), p)

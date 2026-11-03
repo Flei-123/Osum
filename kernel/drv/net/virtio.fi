@@ -5,6 +5,7 @@ import bus.pci
 import acpi.aml
 import arch.x86_64.apic
 import arch.arch
+import libc.regio
 
 export {
     init, present, ready, up, mac_at, bdf, idx,
@@ -219,32 +220,8 @@ fn mac_at_on(state: u64, c: u64, i: u64) -> u64 {
     return (kstate.get(state, sc(c, S_MAC)) >> (i * 8)) & 0xFF
 }
 
-fn rd8(b: u64, off: u64) -> u64 {
-    return __mmio_read8((b + off) as *mut u8) as u64
-}
-
-fn wr8(b: u64, off: u64, v: u64) {
-    __mmio_write8((b + off) as *mut u8, (v & 0xFF) as u8)
-}
-
-fn rd16(b: u64, off: u64) -> u64 {
-    return __mmio_read16((b + off) as *mut u16) as u64
-}
-
 fn wr16(b: u64, off: u64, v: u64) {
     __mmio_write16((b + off) as *mut u16, (v & 0xFFFF) as u16)
-}
-
-fn rd32(b: u64, off: u64) -> u64 {
-    return __mmio_read32((b + off) as *mut u32) as u64
-}
-
-fn wr32(b: u64, off: u64, v: u64) {
-    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
-}
-
-fn wr64(b: u64, off: u64, v: u64) {
-    __mmio_write64((b + off) as *mut u64, v)
 }
 
 fn ring(state: u64, c: u64) -> u64 {
@@ -253,8 +230,8 @@ fn ring(state: u64, c: u64) -> u64 {
 
 fn desc_set(table: u64, i: u64, addr: u64, len: u64, flags: u64, next: u64) {
     let d: u64 = table + i * 16
-    wr64(d, 0, addr)
-    wr32(d, 8, len)
+    regio.write64_at(d, 0, addr)
+    regio.write32_at(d, 8, len)
     wr16(d, 12, flags)
     wr16(d, 14, next)
 }
@@ -264,7 +241,7 @@ fn avail_put(a: u64, slot: u64, desc: u64) {
 }
 
 fn avail_idx(a: u64) -> u64 {
-    return rd16(a, 2)
+    return regio.read16_at(a, 2)
 }
 
 fn avail_publish(a: u64, v: u64) {
@@ -272,15 +249,15 @@ fn avail_publish(a: u64, v: u64) {
 }
 
 fn used_idx(u: u64) -> u64 {
-    return rd16(u, 2)
+    return regio.read16_at(u, 2)
 }
 
 fn used_id(u: u64, slot: u64) -> u64 {
-    return rd32(u, 4 + slot * 8)
+    return regio.read32_at(u, 4 + slot * 8)
 }
 
 fn used_len(u: u64, slot: u64) -> u64 {
-    return rd32(u, 4 + slot * 8 + 4)
+    return regio.read32_at(u, 4 + slot * 8 + 4)
 }
 
 fn kick(state: u64, c: u64, door: u64, queue: u64) {
@@ -333,18 +310,18 @@ fn region(state: u64, c: u64, i: u64, d: u64, cap: u64) -> u64 {
 }
 
 fn status(state: u64, c: u64) -> u64 {
-    return rd8(common(state, c), C_STATUS)
+    return regio.read8_at(common(state, c), C_STATUS)
 }
 
 fn status_add(state: u64, c: u64, bits: u64) {
-    wr8(common(state, c), C_STATUS, status(state, c) | bits)
+    regio.write8_at(common(state, c), C_STATUS, status(state, c) | bits)
 }
 
 fn reset(state: u64, c: u64) -> bool {
-    wr8(common(state, c), C_STATUS, 0)
+    regio.write8_at(common(state, c), C_STATUS, 0)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        if rd8(common(state, c), C_STATUS) == 0 {
+        if regio.read8_at(common(state, c), C_STATUS) == 0 {
             return true
         }
         arch.pause()
@@ -410,13 +387,13 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool,
     status_add(state, c, ST_DRIVER)
 
     if !negotiate(state, c) {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
 
     let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
     if r == 0 {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
     var z: u64 = 0
@@ -431,7 +408,7 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool,
         kstate.set(state, sc(c, S_MSIX), 0)
     } else if use_msix {
         if !msix_arm(state, c, i, vec, armed) {
-            wr8(cbase, C_STATUS, ST_FAILED)
+            regio.write8_at(cbase, C_STATUS, ST_FAILED)
             return false
         }
         kstate.set(state, sc(c, S_MSIX), 1)
@@ -442,12 +419,12 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool,
 
     if !queue_setup(state, c, 0, r + RXD_OFF, r + RXA_OFF, r + RXU_OFF,
         S_RX_DOOR, use_msix) {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
     if !queue_setup(state, c, 1, r + TXD_OFF, r + TXA_OFF, r + TXU_OFF,
         S_TX_DOOR, use_msix) {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
 
@@ -466,10 +443,10 @@ fn init_on(state: u64, c: u64, use_msix: bool, armed: bool,
 
 fn negotiate(state: u64, c: u64) -> bool {
     let b: u64 = common(state, c)
-    wr32(b, C_DFSELECT, 0)
-    let dev_lo: u64 = rd32(b, C_DFEATURE)
-    wr32(b, C_DFSELECT, 1)
-    let dev_hi: u64 = rd32(b, C_DFEATURE)
+    regio.write32_at(b, C_DFSELECT, 0)
+    let dev_lo: u64 = regio.read32_at(b, C_DFEATURE)
+    regio.write32_at(b, C_DFSELECT, 1)
+    let dev_hi: u64 = regio.read32_at(b, C_DFEATURE)
 
     if (dev_hi & (1 << F_VERSION_1)) == 0 {
         return false
@@ -486,10 +463,10 @@ fn negotiate(state: u64, c: u64) -> bool {
         hi = hi | (1 << F_NET_SPEED_DUPLEX)
     }
 
-    wr32(b, C_GFSELECT, 0)
-    wr32(b, C_GFEATURE, lo)
-    wr32(b, C_GFSELECT, 1)
-    wr32(b, C_GFEATURE, hi)
+    regio.write32_at(b, C_GFSELECT, 0)
+    regio.write32_at(b, C_GFEATURE, lo)
+    regio.write32_at(b, C_GFSELECT, 1)
+    regio.write32_at(b, C_GFEATURE, hi)
     kstate.set(state, sc(c, S_FEAT), lo)
     kstate.set(state, sc(c, S_FEATHI), hi)
 
@@ -504,32 +481,32 @@ fn queue_setup(state: u64, c: u64, q: u64, desc: u64, avail: u64, used: u64,
     door_slot: u64, use_msix: bool) -> bool {
     let b: u64 = common(state, c)
     wr16(b, C_QSELECT, q)
-    let offered: u64 = rd16(b, C_QSIZE)
+    let offered: u64 = regio.read16_at(b, C_QSIZE)
     if offered == 0 {
         return false
     }
     if offered > QSIZE {
         wr16(b, C_QSIZE, QSIZE)
     }
-    if rd16(b, C_QSIZE) != QSIZE {
+    if regio.read16_at(b, C_QSIZE) != QSIZE {
         return false
     }
-    wr64(b, C_QDESC, desc)
-    wr64(b, C_QDRIVER, avail)
-    wr64(b, C_QDEVICE, used)
+    regio.write64_at(b, C_QDESC, desc)
+    regio.write64_at(b, C_QDRIVER, avail)
+    regio.write64_at(b, C_QDEVICE, used)
     if use_msix {
         wr16(b, C_QMSIX, 0)
-        if rd16(b, C_QMSIX) != 0 {
+        if regio.read16_at(b, C_QMSIX) != 0 {
             return false
         }
     } else {
         wr16(b, C_QMSIX, NO_VECTOR)
     }
     let door: u64 = kstate.get(state, sc(c, S_NOTIFY))
-        + rd16(b, C_QNOTIFY_OFF) * kstate.get(state, sc(c, S_NMULT))
+        + regio.read16_at(b, C_QNOTIFY_OFF) * kstate.get(state, sc(c, S_NMULT))
     kstate.set(state, sc(c, door_slot), door)
     wr16(b, C_QENABLE, 1)
-    return rd16(b, C_QENABLE) == 1
+    return regio.read16_at(b, C_QENABLE) == 1
 }
 
 fn read_mac(state: u64, c: u64) {
@@ -540,7 +517,7 @@ fn read_mac(state: u64, c: u64) {
     var v: u64 = 0
     var i: u64 = 0
     while i < 6 {
-        v = v | (rd8(cfg, N_MAC + i) << (i * 8))
+        v = v | (regio.read8_at(cfg, N_MAC + i) << (i * 8))
         i = i + 1
     }
     kstate.set(state, sc(c, S_MAC), v)
@@ -554,7 +531,7 @@ fn read_link(state: u64, c: u64) {
         return
     }
     var v: u64 = 0
-    if (rd16(cfg, N_STATUS) & NS_LINK_UP) != 0 {
+    if (regio.read16_at(cfg, N_STATUS) & NS_LINK_UP) != 0 {
         v = 1
     }
     kstate.set(state, sc(c, S_LINK), v)
@@ -568,7 +545,7 @@ fn read_speed(state: u64, c: u64) {
         kstate.set(state, sc(c, S_SPEED), 0)
         return
     }
-    let v: u64 = rd32(cfg, N_SPEED)
+    let v: u64 = regio.read32_at(cfg, N_SPEED)
     if v == SPEED_UNKNOWN {
         kstate.set(state, sc(c, S_SPEED), 0)
         return
@@ -690,7 +667,7 @@ fn irq_on(state: u64, c: u64) {
     kstate.add(state, sc(c, S_IRQS), 1)
     let isr: u64 = kstate.get(state, sc(c, S_ISR))
     if isr != 0 {
-        let v: u64 = rd8(isr, 0)
+        let v: u64 = regio.read8_at(isr, 0)
         if (v & 2) != 0 {
             read_link(state, c)
         }
@@ -720,14 +697,14 @@ fn msix_arm(state: u64, c: u64, i: u64, vector: u64, armed: bool) -> bool {
     if tbase == 0 {
         return false
     }
-    wr32(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
-    wr32(tbase, 4, 0)
-    wr32(tbase, 8, vector & 0xFF)
+    regio.write32_at(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    regio.write32_at(tbase, 4, 0)
+    regio.write32_at(tbase, 8, vector & 0xFF)
     var ctrl: u64 = 1
     if armed {
         ctrl = 0
     }
-    wr32(tbase, 12, ctrl)
+    regio.write32_at(tbase, 12, ctrl)
     let msg: u64 = pci.cfg_read16(d, cap + 2)
     pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
@@ -751,7 +728,7 @@ fn shut_down_on(state: u64, c: u64) {
     if common(state, c) == 0 {
         return
     }
-    wr8(common(state, c), C_STATUS, 0)
+    regio.write8_at(common(state, c), C_STATUS, 0)
     kstate.set(state, sc(c, S_READY), 0)
     pci.disable_master(bdf_on(state, c))
 }

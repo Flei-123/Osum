@@ -15,6 +15,7 @@ import sched.ctr
 import sync.atomic
 import ui.ax
 import ldr.bigpie
+import libc.regio
 
 export {
     spawn, build, STACK_ENV_MAXN, lock_enter, lock_leave, load, load_at, say_reason, errno_of,
@@ -97,14 +98,6 @@ const POISON: u64 = 0xAAAAAAAAAAAAAAAA
 
 const STR_OFF: u64 = 544
 
-fn get64(p: u64) -> u64 {
-    return __mmio_read64(p as *mut u64)
-}
-
-fn put64(p: u64, v: u64) {
-    __mmio_write64(p as *mut u64, v)
-}
-
 fn head(state: u64) -> u64 {
     return state + kstate.ELF_OFF
 }
@@ -112,7 +105,7 @@ fn head(state: u64) -> u64 {
 fn fill(p: u64, n: u64, v: u64) {
     var i: u64 = 0
     while i < n / 8 {
-        put64(p + i * 8, v)
+        regio.write64(p + i * 8, v)
         i = i + 1
     }
 }
@@ -186,7 +179,7 @@ fn read_header(state: u64, ino: u64) -> u64 {
         return R_PHNUM
     }
     let need: u64 = n * PHENTSIZE
-    let off: u64 = get64(h + E_PHOFF)
+    let off: u64 = regio.read64(h + E_PHOFF)
     if off < EHSIZE {
         return R_PHOFF
     }
@@ -205,8 +198,8 @@ fn read_header(state: u64, ino: u64) -> u64 {
 fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
     bias: u64) -> u64 {
     let flags: u64 = kstate.get32(ph + P_FLAGS)
-    let off: u64 = get64(ph + P_OFFSET)
-    let vraw: u64 = get64(ph + P_VADDR)
+    let off: u64 = regio.read64(ph + P_OFFSET)
+    let vraw: u64 = regio.read64(ph + P_VADDR)
     if vraw > proc.IMAGE_END {
         return R_RANGE
     }
@@ -214,8 +207,8 @@ fn segment(state: u64, t: u64, ino: u64, ph: u64, size: u64,
         return R_RANGE
     }
     let vaddr: u64 = vraw + bias
-    let filesz: u64 = get64(ph + P_FILESZ)
-    let memsz: u64 = get64(ph + P_MEMSZ)
+    let filesz: u64 = regio.read64(ph + P_FILESZ)
+    let memsz: u64 = regio.read64(ph + P_MEMSZ)
     if memsz == 0 {
         return R_OK
     }
@@ -333,8 +326,8 @@ fn place_segment(state: u64, t: u64, ino: u64, ph: u64, size: u64, bias: u64) ->
     if !bigpie.in_high(bias) {
         return segment(state, t, ino, ph, size, bias)
     }
-    let code: u64 = bigpie.map_segment(state, t, ino, size, bias, get64(ph + P_VADDR), get64(ph + P_OFFSET),
-        get64(ph + P_FILESZ), get64(ph + P_MEMSZ), kstate.get32(ph + P_FLAGS))
+    let code: u64 = bigpie.map_segment(state, t, ino, size, bias, regio.read64(ph + P_VADDR), regio.read64(ph + P_OFFSET),
+        regio.read64(ph + P_FILESZ), regio.read64(ph + P_MEMSZ), kstate.get32(ph + P_FLAGS))
     if code == bigpie.OK {
         return R_OK
     }
@@ -342,7 +335,7 @@ fn place_segment(state: u64, t: u64, ino: u64, ph: u64, size: u64, bias: u64) ->
 }
 
 fn entry_runnable(state: u64, t: u64, h: u64, n: u64, bias: u64) -> bool {
-    let entry: u64 = get64(h + E_ENTRY)
+    let entry: u64 = regio.read64(h + E_ENTRY)
     if !bigpie.in_high(bias) {
         return proc.page_exec(state, t, entry + bias)
     }
@@ -350,8 +343,8 @@ fn entry_runnable(state: u64, t: u64, h: u64, n: u64, bias: u64) -> bool {
     while seg < n {
         let ph: u64 = h + EHSIZE + seg * PHENTSIZE
         if kstate.get32(ph + P_TYPE) == PT_LOAD && (kstate.get32(ph + P_FLAGS) & PF_X) != 0 {
-            let lo: u64 = get64(ph + P_VADDR)
-            let len: u64 = get64(ph + P_FILESZ)
+            let lo: u64 = regio.read64(ph + P_VADDR)
+            let len: u64 = regio.read64(ph + P_FILESZ)
             if entry >= lo && entry - lo < len {
                 return true
             }
@@ -369,8 +362,8 @@ fn image_extent(state: u64) -> u64 {
     while seg < n {
         let ph: u64 = h + EHSIZE + seg * PHENTSIZE
         if kstate.get32(ph + P_TYPE) == PT_LOAD {
-            let lo: u64 = get64(ph + P_VADDR)
-            let len: u64 = get64(ph + P_MEMSZ)
+            let lo: u64 = regio.read64(ph + P_VADDR)
+            let len: u64 = regio.read64(ph + P_MEMSZ)
             if lo < proc.IMAGE_END && len < proc.IMAGE_END && lo + len > top {
                 top = lo + len
             }
@@ -400,7 +393,7 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     let h: u64 = head(state)
     let size: u64 = fs.inode_size(state, ino)
     let n: u64 = kstate.get16(h + E_PHNUM)
-    let phoff: u64 = get64(h + E_PHOFF)
+    let phoff: u64 = regio.read64(h + E_PHOFF)
     var loads: u64 = 0
     var bytes: u64 = 0
     var pages: u64 = 0
@@ -410,23 +403,23 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     while seg < n {
         let ph: u64 = h + EHSIZE + seg * PHENTSIZE
         if kstate.get32(ph + P_TYPE) == PT_LOAD {
-            if get64(ph + P_MEMSZ) > 0 {
+            if regio.read64(ph + P_MEMSZ) > 0 {
                 let bad: u64 = place_segment(state, t, ino, ph, size, bias)
                 if bad != R_OK {
                     return bad
                 }
                 loads = loads + 1
-                bytes = bytes + get64(ph + P_FILESZ)
-                pages = pages + (get64(ph + P_MEMSZ) + PAGE_MASK) / PAGE
-                let so: u64 = get64(ph + P_OFFSET)
-                let sf: u64 = get64(ph + P_FILESZ)
+                bytes = bytes + regio.read64(ph + P_FILESZ)
+                pages = pages + (regio.read64(ph + P_MEMSZ) + PAGE_MASK) / PAGE
+                let so: u64 = regio.read64(ph + P_OFFSET)
+                let sf: u64 = regio.read64(ph + P_FILESZ)
                 if phoff >= so {
                     if phoff - so < sf {
-                        phdr = get64(ph + P_VADDR) + bias + (phoff - so)
+                        phdr = regio.read64(ph + P_VADDR) + bias + (phoff - so)
                     }
                 }
-                let e: u64 = get64(ph + P_VADDR) + bias
-                    + get64(ph + P_MEMSZ)
+                let e: u64 = regio.read64(ph + P_VADDR) + bias
+                    + regio.read64(ph + P_MEMSZ)
                 if e > top {
                     top = e
                 }
@@ -447,7 +440,7 @@ fn load_at(state: u64, t: u64, ino: u64, bias: u64) -> u64 {
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_PHDR, phdr)
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_PHNUM, n)
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_ENTRY,
-        get64(h + E_ENTRY) + bias)
+        regio.read64(h + E_ENTRY) + bias)
     kstate.set(state, kstate.K16_OFF + kstate.FT_SCALARS + DYN_TOP, top)
     return R_OK
 }
@@ -463,7 +456,7 @@ fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
     var s_mem: [u8; 8] = " memsz=\0"
     var s_w: [u8; 4] = " w=\0"
     var s_x: [u8; 4] = " x=\0"
-    let vaddr: u64 = get64(ph + P_VADDR) + bias
+    let vaddr: u64 = regio.read64(ph + P_VADDR) + bias
     let flags: u64 = kstate.get32(ph + P_FLAGS)
     serial.puts((&s_seg[0]) as u64)
     serial.dec(flags)
@@ -472,9 +465,9 @@ fn say_segment(state: u64, t: u64, ph: u64, bias: u64) {
     serial.puts((&s_f[0]) as u64)
     serial.hex(proc.translate(state, t, vaddr))
     serial.puts((&s_file[0]) as u64)
-    serial.dec(get64(ph + P_FILESZ))
+    serial.dec(regio.read64(ph + P_FILESZ))
     serial.puts((&s_mem[0]) as u64)
-    serial.dec(get64(ph + P_MEMSZ))
+    serial.dec(regio.read64(ph + P_MEMSZ))
     serial.puts((&s_w[0]) as u64)
     serial.dec(yes((flags & PF_W) != 0))
     serial.puts((&s_x[0]) as u64)
@@ -500,16 +493,16 @@ fn write_env(state: u64, frame: u64) {
     if n > ENV_MAXN {
         n = ENV_MAXN
     }
-    put64(frame + ENV_OFF, n)
+    regio.write64(frame + ENV_OFF, n)
     var src: u64 = state + kstate.K11_OFF + kstate.ENV_BUF
     var at: u64 = ENV_STR
     var k: u64 = 0
     while k < n {
-        put64(frame + ENV_OFF + 8 + k * 8, proc.ARGS_BASE + at)
+        regio.write64(frame + ENV_OFF + 8 + k * 8, proc.ARGS_BASE + at)
         var going: bool = true
         while going {
             if at >= PAGE - 1 {
-                put64(frame + ENV_OFF, k)
+                regio.write64(frame + ENV_OFF, k)
                 return
             }
             let c: u64 = kstate.get8(src)
@@ -522,7 +515,7 @@ fn write_env(state: u64, frame: u64) {
         }
         k = k + 1
     }
-    put64(frame + ENV_OFF + 8 + n * 8, 0)
+    regio.write64(frame + ENV_OFF + 8 + n * 8, 0)
 }
 
 fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
@@ -539,12 +532,12 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
         return false
     }
     fill_bytes(frame, PAGE, 0)
-    put64(frame, argc)
+    regio.write64(frame, argc)
     var at: u64 = STR_OFF
     var src: u64 = args
     var k: u64 = 0
     while k < argc {
-        put64(frame + 8 + k * 8, proc.ARGS_BASE + at)
+        regio.write64(frame + 8 + k * 8, proc.ARGS_BASE + at)
         var going: bool = true
         while going {
             if at >= ENV_OFF - 1 {
@@ -560,7 +553,7 @@ fn write_args(state: u64, t: u64, args: u64, argc: u64) -> bool {
         }
         k = k + 1
     }
-    put64(frame + 8 + argc * 8, 0)
+    regio.write64(frame + 8 + argc * 8, 0)
     write_env(state, frame)
     return true
 }
@@ -590,7 +583,7 @@ const SP_PAGE: u64 = 0x535FE000
 const AUXN: u64 = 40
 
 fn sv_put(frame: u64, at: u64, v: u64) {
-    put64(frame + at, v)
+    regio.write64(frame + at, v)
 }
 
 fn build_stack(state: u64, t: u64, args: u64, argc: u64,
@@ -954,8 +947,8 @@ fn read_interp(state: u64, ino: u64, dst: u64) -> u64 {
     while seg < n {
         let ph: u64 = h + EHSIZE + seg * PHENTSIZE
         if kstate.get32(ph + P_TYPE) == PT_INTERP {
-            let off: u64 = get64(ph + P_OFFSET)
-            let len: u64 = get64(ph + P_FILESZ)
+            let off: u64 = regio.read64(ph + P_OFFSET)
+            let len: u64 = regio.read64(ph + P_FILESZ)
             if len == 0 {
                 return R_IPATH
             }

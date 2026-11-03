@@ -10,6 +10,7 @@ import lib.kstate
 import bus.pci
 import arch.x86_64.apic
 import drv.hid.kbd
+import libc.regio
 
 export {
     present, init, ready, stage, poll, report, selftest,
@@ -181,18 +182,6 @@ fn s(state: u64, off: u64, v: u64) {
     kstate.set(state + SCAL_OFF, off, v)
 }
 
-fn rd32(b: u64, off: u64) -> u64 {
-    return __mmio_read32((b + off) as *mut u32) as u64
-}
-
-fn wr32(b: u64, off: u64, v: u64) {
-    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
-}
-
-fn m32(at: u64) -> u64 {
-    return __mmio_read32(at as *mut u32) as u64
-}
-
 fn w32(at: u64, v: u64) {
     __mmio_write32(at as *mut u32, (v & 0xFFFFFFFF) as u32)
 }
@@ -330,16 +319,16 @@ fn zero(p: u64, n: u64) {
 }
 
 fn portsc(state: u64, n: u64) -> u64 {
-    return rd32(op(state), O_PORTSC + n * 4)
+    return regio.read32_at(op(state), O_PORTSC + n * 4)
 }
 
 fn portsc_set(state: u64, n: u64, v: u64) {
-    wr32(op(state), O_PORTSC + n * 4, v & (0xFFFFFFFF - PSC_W1C))
+    regio.write32_at(op(state), O_PORTSC + n * 4, v & (0xFFFFFFFF - PSC_W1C))
 }
 
 fn portsc_ack(state: u64, n: u64, bits: u64) {
     let v: u64 = portsc(state, n)
-    wr32(op(state), O_PORTSC + n * 4, (v & (0xFFFFFFFF - PSC_W1C)) | bits)
+    regio.write32_at(op(state), O_PORTSC + n * 4, (v & (0xFFFFFFFF - PSC_W1C)) | bits)
 }
 
 fn port_speed(state: u64, n: u64) -> u64 {
@@ -418,32 +407,32 @@ fn init(state: u64) -> bool {
     s(state, S_BASE, b)
     s(state, S_BDF, pci.get(state, idx, pci.E_BDF))
     s(state, S_IDX, idx)
-    let cl: u64 = rd32(b, C_CAPLENGTH) & 0xFF
+    let cl: u64 = regio.read32_at(b, C_CAPLENGTH) & 0xFF
     s(state, S_CAPLEN, cl)
     s(state, S_OP, b + cl)
-    let hcs: u64 = rd32(b, C_HCSPARAMS)
+    let hcs: u64 = regio.read32_at(b, C_HCSPARAMS)
     s(state, S_PORTS, hcs & 0xF)
-    s(state, S_HCC, rd32(b, C_HCCPARAMS))
+    s(state, S_HCC, regio.read32_at(b, C_HCCPARAMS))
     s(state, S_ADDR, 1)
     s(state, S_TAG, 1)
 
     handoff(state, idx)
 
     let o: u64 = b + cl
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (0xFFFFFFFF - CMD_RS))
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) & (0xFFFFFFFF - CMD_RS))
     var i: u64 = 0
     while i < RESET_SPIN {
-        if (rd32(o, O_USBSTS) & STS_HALTED) != 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_HALTED) != 0 {
             i = RESET_SPIN
         } else {
             i = i + 1
         }
     }
-    wr32(o, O_USBCMD, CMD_HCRESET)
+    regio.write32_at(o, O_USBCMD, CMD_HCRESET)
     i = 0
     var reset_ok: bool = false
     while i < RESET_SPIN {
-        if (rd32(o, O_USBCMD) & CMD_HCRESET) == 0 {
+        if (regio.read32_at(o, O_USBCMD) & CMD_HCRESET) == 0 {
             reset_ok = true
             i = RESET_SPIN
         } else {
@@ -483,16 +472,16 @@ fn init(state: u64) -> bool {
         i = i + 1
     }
 
-    wr32(o, O_CTRLDS, 0)
-    wr32(o, O_USBINTR, 0)
-    wr32(o, O_PERIODIC, state + PF_OFF)
-    wr32(o, O_ASYNC, a)
-    wr32(o, O_FRINDEX, 0)
-    wr32(o, O_USBCMD, (8 << 16) | CMD_RS)
+    regio.write32_at(o, O_CTRLDS, 0)
+    regio.write32_at(o, O_USBINTR, 0)
+    regio.write32_at(o, O_PERIODIC, state + PF_OFF)
+    regio.write32_at(o, O_ASYNC, a)
+    regio.write32_at(o, O_FRINDEX, 0)
+    regio.write32_at(o, O_USBCMD, (8 << 16) | CMD_RS)
     i = 0
     var run_ok: bool = false
     while i < RESET_SPIN {
-        if (rd32(o, O_USBSTS) & STS_HALTED) == 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_HALTED) == 0 {
             run_ok = true
             i = RESET_SPIN
         } else {
@@ -501,14 +490,14 @@ fn init(state: u64) -> bool {
     }
     if !run_ok {
         s(state, S_WHY, WHY_RUN)
-        s(state, S_STS, rd32(o, O_USBSTS))
-        s(state, S_CMD, rd32(o, O_USBCMD))
+        s(state, S_STS, regio.read32_at(o, O_USBSTS))
+        s(state, S_CMD, regio.read32_at(o, O_USBCMD))
         return false
     }
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) | CMD_ASE | CMD_PSE)
-    s(state, S_STS, rd32(o, O_USBSTS))
-    s(state, S_CMD, rd32(o, O_USBCMD))
-    wr32(o, O_CONFIGFLAG, 1)
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) | CMD_ASE | CMD_PSE)
+    s(state, S_STS, regio.read32_at(o, O_USBSTS))
+    s(state, S_CMD, regio.read32_at(o, O_USBCMD))
+    regio.write32_at(o, O_CONFIGFLAG, 1)
     s(state, S_READY, 1)
     return true
 }
@@ -546,10 +535,10 @@ fn qh_set(state: u64, which: u64, addr: u64, ep: u64, mps: u64,
 
 fn async_off(state: u64) {
     let o: u64 = op(state)
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (0xFFFFFFFF - CMD_ASE))
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) & (0xFFFFFFFF - CMD_ASE))
     var i: u64 = 0
     while i < RESET_SPIN {
-        if (rd32(o, O_USBSTS) & STS_ASS) == 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_ASS) == 0 {
             i = RESET_SPIN
         } else {
             i = i + 1
@@ -559,10 +548,10 @@ fn async_off(state: u64) {
 
 fn async_on(state: u64) {
     let o: u64 = op(state)
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) | CMD_ASE)
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) | CMD_ASE)
     var i: u64 = 0
     while i < RESET_SPIN {
-        if (rd32(o, O_USBSTS) & STS_ASS) != 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_ASS) != 0 {
             i = RESET_SPIN
         } else {
             i = i + 1
@@ -575,7 +564,7 @@ fn await_qtd(state: u64, last: u64) -> bool {
     let qh: u64 = qh_at(state, QH_WORK)
     var i: u64 = 0
     while i < SPIN {
-        let tok: u64 = m32(at + 8)
+        let tok: u64 = regio.read32(at + 8)
         if (tok & T_ACTIVE) == 0 {
             if (tok & T_ERRMASK) != 0 {
                 s(state, S_ERRORS, g(state, S_ERRORS) + 1)
@@ -583,7 +572,7 @@ fn await_qtd(state: u64, last: u64) -> bool {
             }
             return true
         }
-        if (m32(qh + 24) & T_HALTED) != 0 {
+        if (regio.read32(qh + 24) & T_HALTED) != 0 {
             s(state, S_ERRORS, g(state, S_ERRORS) + 1)
             return false
         }
@@ -660,17 +649,17 @@ fn bulk(state: u64, addr: u64, ep: u64, mps: u64, len: u64, buf: u64,
     if !await_qtd(state, 5) {
         return 0xFFFFFFFF
     }
-    let rest: u64 = (m32(qtd_at(state, 5) + 8) >> 16) & 0x7FFF
+    let rest: u64 = (regio.read32(qtd_at(state, 5) + 8) >> 16) & 0x7FFF
     return len - rest
 }
 
 // ------------------------------------------ der Unterbrechungsendpunkt
 fn periodic_off(state: u64) {
     let o: u64 = op(state)
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (0xFFFFFFFF - CMD_PSE))
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) & (0xFFFFFFFF - CMD_PSE))
     var i: u64 = 0
     while i < RESET_SPIN {
-        if (rd32(o, O_USBSTS) & STS_PSS) == 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_PSS) == 0 {
             i = RESET_SPIN
         } else {
             i = i + 1
@@ -680,10 +669,10 @@ fn periodic_off(state: u64) {
 
 fn periodic_on(state: u64) {
     let o: u64 = op(state)
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) | CMD_PSE)
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) | CMD_PSE)
     var i: u64 = 0
     while i < RESET_SPIN {
-        if (rd32(o, O_USBSTS) & STS_PSS) != 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_PSS) != 0 {
             i = RESET_SPIN
         } else {
             i = i + 1
@@ -1089,7 +1078,7 @@ fn poll(state: u64) -> bool {
     // TOCTOU (docs/SECURITY-TOCTOU-KERNEL-DRIVERS.md F-03): the token is
     // written by the controller. Read it ONCE; the ACTIVE test and the
     // error test must look at the same value.
-    let tok: u64 = m32(at + 8)
+    let tok: u64 = regio.read32(at + 8)
     if (tok & T_ACTIVE) != 0 {
         return false
     }

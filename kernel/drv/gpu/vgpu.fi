@@ -10,6 +10,7 @@ import gfx.fb
 import gfx.cursor
 import arch.x86_64.apic
 import arch.arch
+import libc.regio
 
 export {
     init, usable, present, scanout_w, scanout_h, scanouts,
@@ -230,33 +231,13 @@ fn s(off: u64) -> u64 {
     return VGPU_OFF + off
 }
 
-fn rd8(b: u64, off: u64) -> u64 {
-    return __mmio_read8((b + off) as *mut u8) as u64
-}
-
-fn wr8(b: u64, off: u64, v: u64) {
-    __mmio_write8((b + off) as *mut u8, v as u8)
-}
-
-fn rd16(b: u64, off: u64) -> u64 {
-    return __mmio_read16((b + off) as *mut u16) as u64
-}
-
 fn wr16(b: u64, off: u64, v: u64) {
     __mmio_write16((b + off) as *mut u16, v as u16)
 }
 
-fn rd32(b: u64, off: u64) -> u64 {
-    return __mmio_read32((b + off) as *mut u32) as u64
-}
-
-fn wr32(b: u64, off: u64, v: u64) {
-    __mmio_write32((b + off) as *mut u32, v as u32)
-}
-
 fn wr64(b: u64, off: u64, v: u64) {
-    wr32(b, off, v & 0xFFFFFFFF)
-    wr32(b, off + 4, v >> 32)
+    regio.write32_at(b, off, v & 0xFFFFFFFF)
+    regio.write32_at(b, off + 4, v >> 32)
 }
 
 fn common(state: u64) -> u64 {
@@ -286,7 +267,7 @@ fn umgestellt(state: u64) -> u64 { return kstate.get(state, s(S_UMGESTELLT)) }
 fn desc_set(table: u64, i: u64, addr: u64, len: u64, flags: u64, next: u64) {
     let d: u64 = table + i * 16
     wr64(d, 0, addr)
-    wr32(d, 8, len)
+    regio.write32_at(d, 8, len)
     wr16(d, 12, flags)
     wr16(d, 14, next)
 }
@@ -300,7 +281,7 @@ fn avail_publish(a: u64, v: u64) {
 }
 
 fn used_idx(u: u64) -> u64 {
-    return rd16(u, 2)
+    return regio.read16_at(u, 2)
 }
 
 fn kick(state: u64) {
@@ -348,18 +329,18 @@ fn region(state: u64, i: u64, d: u64, cap: u64) -> u64 {
 }
 
 fn status(state: u64) -> u64 {
-    return rd8(common(state), C_STATUS)
+    return regio.read8_at(common(state), C_STATUS)
 }
 
 fn status_add(state: u64, bits: u64) {
-    wr8(common(state), C_STATUS, status(state) | bits)
+    regio.write8_at(common(state), C_STATUS, status(state) | bits)
 }
 
 fn reset(state: u64) -> bool {
-    wr8(common(state), C_STATUS, 0)
+    regio.write8_at(common(state), C_STATUS, 0)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        if rd8(common(state), C_STATUS) == 0 {
+        if regio.read8_at(common(state), C_STATUS) == 0 {
             return true
         }
         arch.pause()
@@ -386,10 +367,10 @@ fn find(state: u64) -> u64 {
 
 fn negotiate(state: u64) -> bool {
     let b: u64 = common(state)
-    wr32(b, C_DFSELECT, 0)
-    let dev_lo: u64 = rd32(b, C_DFEATURE)
-    wr32(b, C_DFSELECT, 1)
-    let dev_hi: u64 = rd32(b, C_DFEATURE)
+    regio.write32_at(b, C_DFSELECT, 0)
+    let dev_lo: u64 = regio.read32_at(b, C_DFEATURE)
+    regio.write32_at(b, C_DFSELECT, 1)
+    let dev_hi: u64 = regio.read32_at(b, C_DFEATURE)
 
     if (dev_hi & (1 << F_VERSION_1)) == 0 {
         return false
@@ -397,10 +378,10 @@ fn negotiate(state: u64) -> bool {
     let lo: u64 = dev_lo & (1 << F_EDID)
     let hi: u64 = 1 << F_VERSION_1
 
-    wr32(b, C_GFSELECT, 0)
-    wr32(b, C_GFEATURE, lo)
-    wr32(b, C_GFSELECT, 1)
-    wr32(b, C_GFEATURE, hi)
+    regio.write32_at(b, C_GFSELECT, 0)
+    regio.write32_at(b, C_GFEATURE, lo)
+    regio.write32_at(b, C_GFSELECT, 1)
+    regio.write32_at(b, C_GFEATURE, hi)
     kstate.set(state, s(S_FEAT), lo)
 
     status_add(state, ST_FEATURES_OK)
@@ -414,14 +395,14 @@ fn queue_setup(state: u64) -> bool {
     let b: u64 = common(state)
     let r: u64 = kstate.get(state, s(S_RING))
     wr16(b, C_QSELECT, 0)
-    let offered: u64 = rd16(b, C_QSIZE)
+    let offered: u64 = regio.read16_at(b, C_QSIZE)
     if offered == 0 {
         return false
     }
     if offered > QSIZE {
         wr16(b, C_QSIZE, QSIZE)
     }
-    if rd16(b, C_QSIZE) != QSIZE {
+    if regio.read16_at(b, C_QSIZE) != QSIZE {
         return false
     }
     wr64(b, C_QDESC, r + DESC_OFF)
@@ -429,16 +410,16 @@ fn queue_setup(state: u64) -> bool {
     wr64(b, C_QDEVICE, r + USED_OFF)
     wr16(b, C_QMSIX, NO_VECTOR)
     let door: u64 = kstate.get(state, s(S_NOTIFY))
-        + rd16(b, C_QNOTIFY_OFF) * kstate.get(state, s(S_NMULT))
+        + regio.read16_at(b, C_QNOTIFY_OFF) * kstate.get(state, s(S_NMULT))
     kstate.set(state, s(S_DOOR), door)
     wr16(b, C_QENABLE, 1)
-    return rd16(b, C_QENABLE) == 1
+    return regio.read16_at(b, C_QENABLE) == 1
 }
 
 // ======================= RUNDE GPU (G-012): DIE ZWEITE WARTESCHLANGE
 fn cursor_queue_setup(state: u64) -> bool {
     let b: u64 = common(state)
-    if rd16(b, C_NUMQ) < 2 {
+    if regio.read16_at(b, C_NUMQ) < 2 {
         return false
     }
     let cr: u64 = mem.frame_run(state, CRING_BYTES / mem.FRAME_SIZE)
@@ -455,14 +436,14 @@ fn cursor_queue_setup(state: u64) -> bool {
     kstate.set(state, s(S_CUSED), 0)
 
     wr16(b, C_QSELECT, 1)
-    let offered: u64 = rd16(b, C_QSIZE)
+    let offered: u64 = regio.read16_at(b, C_QSIZE)
     if offered == 0 {
         return false
     }
     if offered > QSIZE {
         wr16(b, C_QSIZE, QSIZE)
     }
-    if rd16(b, C_QSIZE) != QSIZE {
+    if regio.read16_at(b, C_QSIZE) != QSIZE {
         return false
     }
     wr64(b, C_QDESC, cr + CDESC_OFF)
@@ -470,10 +451,10 @@ fn cursor_queue_setup(state: u64) -> bool {
     wr64(b, C_QDEVICE, cr + CUSED_OFF)
     wr16(b, C_QMSIX, NO_VECTOR)
     let cdoor: u64 = kstate.get(state, s(S_NOTIFY))
-        + rd16(b, C_QNOTIFY_OFF) * kstate.get(state, s(S_NMULT))
+        + regio.read16_at(b, C_QNOTIFY_OFF) * kstate.get(state, s(S_NMULT))
     kstate.set(state, s(S_CDOOR), cdoor)
     wr16(b, C_QENABLE, 1)
-    return rd16(b, C_QENABLE) == 1
+    return regio.read16_at(b, C_QENABLE) == 1
 }
 
 fn command(state: u64, length: u64, erwartet: u64) -> bool {
@@ -521,7 +502,7 @@ fn command(state: u64, length: u64, erwartet: u64) -> bool {
     arch.barrier_read()
     kstate.set(state, s(S_USED), used_idx(used))
 
-    let typ: u64 = rd32(rsp, 0)
+    let typ: u64 = regio.read32_at(rsp, 0)
     if typ != erwartet {
         kstate.add(state, s(S_ERROR), 1)
         kstate.set(state, s(S_LASTERR), typ)
@@ -580,8 +561,8 @@ fn command_pair(state: u64, length1: u64, length2: u64) -> bool {
     arch.barrier_read()
     kstate.set(state, s(S_USED), used_idx(used))
 
-    let t1: u64 = rd32(r + RSP_OFF, 0)
-    let t2: u64 = rd32(r + RSP2_OFF, 0)
+    let t1: u64 = regio.read32_at(r + RSP_OFF, 0)
+    let t2: u64 = regio.read32_at(r + RSP2_OFF, 0)
     if t1 != RESP_OK_NODATA || t2 != RESP_OK_NODATA {
         kstate.add(state, s(S_ERROR), 1)
         var bad: u64 = t1
@@ -600,7 +581,7 @@ fn header(cmd: u64, typ: u64) {
         __mmio_write64((cmd + z) as *mut u64, 0)
         z = z + 8
     }
-    wr32(cmd, 0, typ)
+    regio.write32_at(cmd, 0, typ)
 }
 
 // ------------------------------------------------ die sechs Befehle
@@ -620,9 +601,9 @@ fn display_info(state: u64) -> bool {
     let forced: bool = kstate.mode_on(state, kstate.M_VGPUHEADS)
     while i < n && i < 16 {
         let e: u64 = rsp + 24 + i * 24
-        let angeschlossen: u64 = rd32(e, 16)
-        let w: u64 = rd32(e, 8)
-        let h: u64 = rd32(e, 12)
+        let angeschlossen: u64 = regio.read32_at(e, 16)
+        let w: u64 = regio.read32_at(e, 8)
+        let h: u64 = regio.read32_at(e, 12)
         // TOCTOU audit F-08: the size is the device's word; anything above 16384 is not a display (and w * 4 * h must not wrap)
         var ok: bool = angeschlossen != 0 && w != 0 && h != 0 && w <= 16384 && h <= 16384
         // Test bed word `vgpuheads`: QEMU without a GUI backend never flags head >= 1 as enabled.
@@ -644,8 +625,8 @@ fn display_info(state: u64) -> bool {
             let o: u64 = S_OUTTAB + i * OUT_STRIDE
             if ok {
                 kstate.set(state, s(o + O_CONN), 1)
-                kstate.set(state, s(o + O_X), rd32(e, 0))
-                kstate.set(state, s(o + O_Y), rd32(e, 4))
+                kstate.set(state, s(o + O_X), regio.read32_at(e, 0))
+                kstate.set(state, s(o + O_Y), regio.read32_at(e, 4))
                 kstate.set(state, s(o + O_W), w2)
                 kstate.set(state, s(o + O_H), h2)
                 heads = heads + 1
@@ -692,50 +673,50 @@ fn read_edid(state: u64, head: u64) {
     let cmd: u64 = r + CMD_OFF
     let rsp: u64 = r + RSP_OFF
     header(cmd, CMD_GET_EDID)
-    wr32(cmd, 24, head)
+    regio.write32_at(cmd, 24, head)
     if !command(state, 32, RESP_OK_EDID) {
         return
     }
-    let size: u64 = rd32(rsp, 24)
+    let size: u64 = regio.read32_at(rsp, 24)
     if size < 128 {
         return
     }
     let e: u64 = rsp + 32
     // Header 00 FF FF FF FF FF FF 00 and a base block that sums to 0 (mod 256).
-    if rd8(e, 0) != 0 || rd8(e, 7) != 0 {
+    if regio.read8_at(e, 0) != 0 || regio.read8_at(e, 7) != 0 {
         return
     }
     var k: u64 = 1
     while k < 7 {
-        if rd8(e, k) != 255 { return }
+        if regio.read8_at(e, k) != 255 { return }
         k = k + 1
     }
     var sum: u64 = 0
     k = 0
     while k < 128 {
-        sum = sum + rd8(e, k)
+        sum = sum + regio.read8_at(e, k)
         k = k + 1
     }
     if (sum % 256) != 0 {
         return
     }
     // Manufacturer id: bytes 8..9, three 5-bit letters (1 = 'A').
-    let m: u64 = (rd8(e, 8) << 8) | rd8(e, 9)
+    let m: u64 = (regio.read8_at(e, 8) << 8) | regio.read8_at(e, 9)
     let l0: u64 = ((m >> 10) & 31) + 64
     let l1: u64 = ((m >> 5) & 31) + 64
     let l2: u64 = (m & 31) + 64
     kstate.set(state, s(o + O_MFR), l0 | (l1 << 8) | (l2 << 16))
     // Physical size in cm (bytes 21, 22); 0 = unknown (projector / variable).
-    let mmw: u64 = rd8(e, 21) * 10
-    let mmh: u64 = rd8(e, 22) * 10
+    let mmw: u64 = regio.read8_at(e, 21) * 10
+    let mmh: u64 = regio.read8_at(e, 22) * 10
     kstate.set(state, s(o + O_MMW), mmw)
     kstate.set(state, s(o + O_MMH), mmh)
     // Preferred mode: first detailed timing descriptor at byte 54 (pixel clock != 0).
     var pw: u64 = 0
     var ph: u64 = 0
-    if (rd8(e, 54) | rd8(e, 55)) != 0 {
-        pw = rd8(e, 56) | ((rd8(e, 58) & 240) << 4)
-        ph = rd8(e, 59) | ((rd8(e, 61) & 240) << 4)
+    if (regio.read8_at(e, 54) | regio.read8_at(e, 55)) != 0 {
+        pw = regio.read8_at(e, 56) | ((regio.read8_at(e, 58) & 240) << 4)
+        ph = regio.read8_at(e, 59) | ((regio.read8_at(e, 61) & 240) << 4)
     }
     kstate.set(state, s(o + O_PW), pw)
     kstate.set(state, s(o + O_PH), ph)
@@ -830,12 +811,12 @@ fn ext_head_at(state: u64, x: u64, y: u64) -> u64 {
 fn set_scanout_rect(state: u64, id: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_SET_SCANOUT)
-    wr32(cmd, 24, x)
-    wr32(cmd, 28, y)
-    wr32(cmd, 32, w)
-    wr32(cmd, 36, h)
-    wr32(cmd, 40, id)
-    wr32(cmd, 44, RES_ID)
+    regio.write32_at(cmd, 24, x)
+    regio.write32_at(cmd, 28, y)
+    regio.write32_at(cmd, 32, w)
+    regio.write32_at(cmd, 36, h)
+    regio.write32_at(cmd, 40, id)
+    regio.write32_at(cmd, 44, RES_ID)
     return command(state, 48, RESP_OK_NODATA)
 }
 
@@ -931,12 +912,12 @@ fn ext_place(state: u64, bw: u64, bh: u64) -> u64 {
 fn scanout_off(state: u64, id: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_SET_SCANOUT)
-    wr32(cmd, 24, 0)
-    wr32(cmd, 28, 0)
-    wr32(cmd, 32, 0)
-    wr32(cmd, 36, 0)
-    wr32(cmd, 40, id)
-    wr32(cmd, 44, 0)
+    regio.write32_at(cmd, 24, 0)
+    regio.write32_at(cmd, 28, 0)
+    regio.write32_at(cmd, 32, 0)
+    regio.write32_at(cmd, 36, 0)
+    regio.write32_at(cmd, 40, id)
+    regio.write32_at(cmd, 44, 0)
     return command(state, 48, RESP_OK_NODATA)
 }
 
@@ -1038,21 +1019,21 @@ fn ext_testimage(state: u64) {
 fn resource_create(state: u64, w: u64, h: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_RESOURCE_CREATE_2D)
-    wr32(cmd, 24, RES_ID)
-    wr32(cmd, 28, FMT_B8G8R8X8)
-    wr32(cmd, 32, w)
-    wr32(cmd, 36, h)
+    regio.write32_at(cmd, 24, RES_ID)
+    regio.write32_at(cmd, 28, FMT_B8G8R8X8)
+    regio.write32_at(cmd, 32, w)
+    regio.write32_at(cmd, 36, h)
     return command(state, 40, RESP_OK_NODATA)
 }
 
 fn attach_backing(state: u64, phys: u64, bytes: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_RESOURCE_ATTACH_BACKING)
-    wr32(cmd, 24, RES_ID)
-    wr32(cmd, 28, 1)
+    regio.write32_at(cmd, 24, RES_ID)
+    regio.write32_at(cmd, 28, 1)
     wr64(cmd, 32, phys)
-    wr32(cmd, 40, bytes)
-    wr32(cmd, 44, 0)
+    regio.write32_at(cmd, 40, bytes)
+    regio.write32_at(cmd, 44, 0)
     return command(state, 48, RESP_OK_NODATA)
 }
 
@@ -1063,37 +1044,37 @@ fn set_scanout(state: u64, w: u64, h: u64) -> bool {
 fn set_scanout_id(state: u64, id: u64, w: u64, h: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_SET_SCANOUT)
-    wr32(cmd, 24, 0) // r.x
-    wr32(cmd, 28, 0) // r.y
-    wr32(cmd, 32, w)
-    wr32(cmd, 36, h)
-    wr32(cmd, 40, id) // scanout_id
-    wr32(cmd, 44, RES_ID)
+    regio.write32_at(cmd, 24, 0) // r.x
+    regio.write32_at(cmd, 28, 0) // r.y
+    regio.write32_at(cmd, 32, w)
+    regio.write32_at(cmd, 36, h)
+    regio.write32_at(cmd, 40, id) // scanout_id
+    regio.write32_at(cmd, 44, RES_ID)
     return command(state, 48, RESP_OK_NODATA)
 }
 
 fn transfer(state: u64, x: u64, y: u64, w: u64, h: u64, offset: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_TRANSFER_TO_HOST_2D)
-    wr32(cmd, 24, x)
-    wr32(cmd, 28, y)
-    wr32(cmd, 32, w)
-    wr32(cmd, 36, h)
+    regio.write32_at(cmd, 24, x)
+    regio.write32_at(cmd, 28, y)
+    regio.write32_at(cmd, 32, w)
+    regio.write32_at(cmd, 36, h)
     wr64(cmd, 40, offset)
-    wr32(cmd, 48, RES_ID)
-    wr32(cmd, 52, 0)
+    regio.write32_at(cmd, 48, RES_ID)
+    regio.write32_at(cmd, 52, 0)
     return command(state, 56, RESP_OK_NODATA)
 }
 
 fn resource_flush(state: u64, x: u64, y: u64, w: u64, h: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_RESOURCE_FLUSH)
-    wr32(cmd, 24, x)
-    wr32(cmd, 28, y)
-    wr32(cmd, 32, w)
-    wr32(cmd, 36, h)
-    wr32(cmd, 40, RES_ID)
-    wr32(cmd, 44, 0)
+    regio.write32_at(cmd, 24, x)
+    regio.write32_at(cmd, 28, y)
+    regio.write32_at(cmd, 32, w)
+    regio.write32_at(cmd, 36, h)
+    regio.write32_at(cmd, 40, RES_ID)
+    regio.write32_at(cmd, 44, 0)
     return command(state, 48, RESP_OK_NODATA)
 }
 
@@ -1112,15 +1093,15 @@ fn cursor_command(state: u64, typ: u64, x: u64, y: u64, res: u64,
         __mmio_write64((cmd + z) as *mut u64, 0)
         z = z + 8
     }
-    wr32(cmd, 0, typ)
-    wr32(cmd, 24, 0) // scanout_id
-    wr32(cmd, 28, x)
-    wr32(cmd, 32, y)
-    wr32(cmd, 36, 0) // Fuellung
-    wr32(cmd, 40, res)
-    wr32(cmd, 44, hx)
-    wr32(cmd, 48, hy)
-    wr32(cmd, 52, 0) // Fuellung
+    regio.write32_at(cmd, 0, typ)
+    regio.write32_at(cmd, 24, 0) // scanout_id
+    regio.write32_at(cmd, 28, x)
+    regio.write32_at(cmd, 32, y)
+    regio.write32_at(cmd, 36, 0) // Fuellung
+    regio.write32_at(cmd, 40, res)
+    regio.write32_at(cmd, 44, hx)
+    regio.write32_at(cmd, 48, hy)
+    regio.write32_at(cmd, 52, 0) // Fuellung
 
     var ai: u64 = kstate.get(state, s(S_CAVAIL))
     let slot: u64 = (ai % (QSIZE / 2)) * 2
@@ -1190,10 +1171,10 @@ fn cursor_fill_image(state: u64, form: u64, g: u64, rq: u64) {
                     aa = 255
                 }
                 let o: u64 = (r * CUR_W + c) * 4
-                wr8(pix, o, bb)
-                wr8(pix, o + 1, gg)
-                wr8(pix, o + 2, rr)
-                wr8(pix, o + 3, aa)
+                regio.write8_at(pix, o, bb)
+                regio.write8_at(pix, o + 1, gg)
+                regio.write8_at(pix, o + 2, rr)
+                regio.write8_at(pix, o + 3, aa)
             }
             c = c + 1
         }
@@ -1215,32 +1196,32 @@ fn cursor_create_resource(state: u64) -> bool {
     }
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_RESOURCE_CREATE_2D)
-    wr32(cmd, 24, CUR_RES_ID)
-    wr32(cmd, 28, FMT_B8G8R8A8)
-    wr32(cmd, 32, CUR_W)
-    wr32(cmd, 36, CUR_H)
+    regio.write32_at(cmd, 24, CUR_RES_ID)
+    regio.write32_at(cmd, 28, FMT_B8G8R8A8)
+    regio.write32_at(cmd, 32, CUR_W)
+    regio.write32_at(cmd, 36, CUR_H)
     if !command(state, 40, RESP_OK_NODATA) {
         return false
     }
     header(cmd, CMD_RESOURCE_ATTACH_BACKING)
-    wr32(cmd, 24, CUR_RES_ID)
-    wr32(cmd, 28, 1)
+    regio.write32_at(cmd, 24, CUR_RES_ID)
+    regio.write32_at(cmd, 28, 1)
     wr64(cmd, 32, pix)
-    wr32(cmd, 40, CUR_BYTES)
-    wr32(cmd, 44, 0)
+    regio.write32_at(cmd, 40, CUR_BYTES)
+    regio.write32_at(cmd, 44, 0)
     return command(state, 48, RESP_OK_NODATA)
 }
 
 fn cursor_upload_image(state: u64, form: u64, g: u64) -> bool {
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_TRANSFER_TO_HOST_2D)
-    wr32(cmd, 24, 0)
-    wr32(cmd, 28, 0)
-    wr32(cmd, 32, CUR_W)
-    wr32(cmd, 36, CUR_H)
+    regio.write32_at(cmd, 24, 0)
+    regio.write32_at(cmd, 28, 0)
+    regio.write32_at(cmd, 32, CUR_W)
+    regio.write32_at(cmd, 36, CUR_H)
     wr64(cmd, 40, 0)
-    wr32(cmd, 48, CUR_RES_ID)
-    wr32(cmd, 52, 0)
+    regio.write32_at(cmd, 48, CUR_RES_ID)
+    regio.write32_at(cmd, 52, 0)
     return command(state, 56, RESP_OK_NODATA)
 }
 
@@ -1348,21 +1329,21 @@ fn present(state: u64) -> bool {
     let c2: u64 = r + CMD2_OFF
 
     header(c1, CMD_TRANSFER_TO_HOST_2D)
-    wr32(c1, 24, x0)
-    wr32(c1, 28, y0)
-    wr32(c1, 32, w)
-    wr32(c1, 36, h)
+    regio.write32_at(c1, 24, x0)
+    regio.write32_at(c1, 28, y0)
+    regio.write32_at(c1, 32, w)
+    regio.write32_at(c1, 36, h)
     wr64(c1, 40, offset)
-    wr32(c1, 48, RES_ID)
-    wr32(c1, 52, 0)
+    regio.write32_at(c1, 48, RES_ID)
+    regio.write32_at(c1, 52, 0)
 
     header(c2, CMD_RESOURCE_FLUSH)
-    wr32(c2, 24, x0)
-    wr32(c2, 28, y0)
-    wr32(c2, 32, w)
-    wr32(c2, 36, h)
-    wr32(c2, 40, RES_ID)
-    wr32(c2, 44, 0)
+    regio.write32_at(c2, 24, x0)
+    regio.write32_at(c2, 28, y0)
+    regio.write32_at(c2, 32, w)
+    regio.write32_at(c2, 36, h)
+    regio.write32_at(c2, 40, RES_ID)
+    regio.write32_at(c2, 44, 0)
 
     if !command_pair(state, 56, 48) {
         return false
@@ -1399,11 +1380,11 @@ fn event_check(state: u64) -> bool {
     if cfg == 0 {
         return false
     }
-    let ev: u64 = rd32(cfg, G_EVENTS_READ)
+    let ev: u64 = regio.read32_at(cfg, G_EVENTS_READ)
     if (ev & EVENT_DISPLAY) == 0 {
         return false
     }
-    wr32(cfg, G_EVENTS_CLEAR, EVENT_DISPLAY)
+    regio.write32_at(cfg, G_EVENTS_CLEAR, EVENT_DISPLAY)
     kstate.add(state, s(S_EREIG), 1)
     // r816: in extend the event re-lays the heads out (a head came or went) instead of comparing one size.
     if kstate.get(state, s(S_EXTON)) != 0 {
@@ -1476,8 +1457,8 @@ fn resize(state: u64, w: u64, h: u64) -> bool {
     kstate.set(state, s(S_READY), 0)
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_RESOURCE_UNREF)
-    wr32(cmd, 24, RES_ID)
-    wr32(cmd, 28, 0)
+    regio.write32_at(cmd, 24, RES_ID)
+    regio.write32_at(cmd, 28, 0)
     let _un: bool = command(state, 32, RESP_OK_NODATA)
     if !resource_create(state, w, h) || !attach_backing(state, back, bytes) || !set_scanout(state, w, h) {
         kstate.add(state, s(S_RSZERR), 1)
@@ -1579,13 +1560,13 @@ fn bring_up(state: u64) -> bool {
     status_add(state, ST_ACK)
     status_add(state, ST_DRIVER)
     if !negotiate(state) {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
 
     let r: u64 = mem.frame_run(state, RING_BYTES / mem.FRAME_SIZE)
     if r == 0 {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
     var z: u64 = 0
@@ -1598,10 +1579,10 @@ fn bring_up(state: u64) -> bool {
     kstate.set(state, s(S_USED), 0)
 
     if !queue_setup(state) {
-        wr8(cbase, C_STATUS, ST_FAILED)
+        regio.write8_at(cbase, C_STATUS, ST_FAILED)
         return false
     }
-    kstate.set(state, s(S_SCANOUTS), rd32(dcfg, G_NUM_SCANOUTS))
+    kstate.set(state, s(S_SCANOUTS), regio.read32_at(dcfg, G_NUM_SCANOUTS))
 
     status_add(state, ST_DRIVER_OK)
     if (status(state) & ST_DRIVER_OK) == 0 {
@@ -1723,8 +1704,8 @@ fn shut_down(state: u64) {
     }
     let cmd: u64 = kstate.get(state, s(S_RING)) + CMD_OFF
     header(cmd, CMD_RESOURCE_UNREF)
-    wr32(cmd, 24, RES_ID)
-    wr32(cmd, 28, 0)
+    regio.write32_at(cmd, 24, RES_ID)
+    regio.write32_at(cmd, 28, 0)
     let _ok: bool = command(state, 32, RESP_OK_NODATA)
     kstate.set(state, s(S_READY), 0)
 }

@@ -56,6 +56,7 @@ import diag.safe
 import drv.wdt.wdt
 import diag.hang
 import diag.nmiguard
+import libc.regio
 
 export {
     entry, nmi_strays,
@@ -96,16 +97,12 @@ const VEC_SPURIOUS: u64 = 47
 const GP_VECTOR: u64 = 13
 const NM_VECTOR: u64 = 7
 
-fn word(frame: u64, off: u64) -> u64 {
-    return __mmio_read64((frame + off) as *mut u64)
-}
-
 // `KERNEL_TRAP` out of isr.s. rdi = frame, rsi = kernel data area.
 fn entry(frame: u64, state: u64) {
     if halt_all != 0 {
         power.halt_forever()
     }
-    let vector: u64 = word(frame, F_VECTOR)
+    let vector: u64 = regio.read64_at(frame, F_VECTOR)
     kstate.add(state, kstate.TRAPS, 1)
     kstate.set(state, kstate.LAST_TRAP, vector)
     if vector < 32 {
@@ -117,18 +114,18 @@ fn entry(frame: u64, state: u64) {
             nmiguard.leave(state, frame, depth)
             return
         }
-        if (word(frame, F_CS) & 3) == 0 {
+        if (regio.read64_at(frame, F_CS) & 3) == 0 {
             nmiguard.note_fault(state, frame, vector)
         }
-        if vector == GP_VECTOR && (word(frame, F_CS) & 3) == 0 {
-            let fix: u64 = msr.catch_rip(state, word(frame, F_RIP))
+        if vector == GP_VECTOR && (regio.read64_at(frame, F_CS) & 3) == 0 {
+            let fix: u64 = msr.catch_rip(state, regio.read64_at(frame, F_RIP))
             if fix != 0 {
                 __mmio_write64((frame + F_RIP) as *mut u64, fix)
                 return
             }
         }
-        if vector == 14 && (word(frame, F_CS) & 3) == 0 {
-            let pfix: u64 = msr.catch_rip(state, word(frame, F_RIP))
+        if vector == 14 && (regio.read64_at(frame, F_CS) & 3) == 0 {
+            let pfix: u64 = msr.catch_rip(state, regio.read64_at(frame, F_RIP))
             if pfix != 0 {
                 __mmio_write64((frame + F_RIP) as *mut u64, pfix)
                 return
@@ -142,7 +139,7 @@ fn entry(frame: u64, state: u64) {
         if vector == 14 && user_fault(frame, state) {
             if !kstate.mode_on(state, kstate.M_NOSTACK) {
                 if proc.grow_stack(state, sched.current(state), cr2(),
-                        word(frame, F_RSP)) {
+                        regio.read64_at(frame, F_RSP)) {
                     return
                 }
             }
@@ -151,10 +148,10 @@ fn entry(frame: u64, state: u64) {
         // repeats. Gegenprobe: `nodemand` on the kernel command line.
         if vector == 14 && user_fault(frame, state) {
             if !kstate.mode_on(state, kstate.M_NODEMAND) {
-                if proc.demand_fault(state, sched.current(state), cr2(), word(frame, F_ERROR)) {
+                if proc.demand_fault(state, sched.current(state), cr2(), regio.read64_at(frame, F_ERROR)) {
                     return
                 }
-                if proc.lazy_fault(state, sched.current(state), cr2(), word(frame, F_ERROR)) {
+                if proc.lazy_fault(state, sched.current(state), cr2(), regio.read64_at(frame, F_ERROR)) {
                     return
                 }
             }
@@ -164,10 +161,10 @@ fn entry(frame: u64, state: u64) {
             let sig: u64 = signal.signal_of(vector)
             report_user(frame, state, vector, cur,
                 signal.lethal(state, cur, sig))
-            // RUNDE UNTERBAU: the page-fault address rides in the error word (above its low 16 bits) into the signal frame, where it
+            // RUNDE UNTERBAU: the page-fault address rides in the error regio.read64_at (above its low 16 bits) into the signal frame, where it
             // becomes `si_addr`; the hardware does not look at this word again (`iretq` pops it off beforehand).
             if vector == 14 {
-                __mmio_write64((frame + F_ERROR) as *mut u64, (word(frame, F_ERROR) & 0xFFFF) | (cr2() << 16))
+                __mmio_write64((frame + F_ERROR) as *mut u64, (regio.read64_at(frame, F_ERROR) & 0xFFFF) | (cr2() << 16))
             }
             signal.fault(state, cur, vector)
             signal.check_trap(state, cur, frame)
@@ -291,7 +288,7 @@ fn entry(frame: u64, state: u64) {
 // task behind it -- a fault in it still stops the kernel, and the
 // counter-check of that round keeps measuring what it measured.
 fn user_fault(frame: u64, state: u64) -> bool {
-    if (word(frame, F_CS) & 3) != 3 {
+    if (regio.read64_at(frame, F_CS) & 3) != 3 {
         return false
     }
     let cur: u64 = sched.current(state)
@@ -313,11 +310,11 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
     serial.puts((&s_vec[0]) as u64)
     serial.dec(vector)
     serial.puts((&s_err[0]) as u64)
-    serial.hex(word(frame, F_ERROR))
+    serial.hex(regio.read64_at(frame, F_ERROR))
     serial.puts((&s_cr2[0]) as u64)
     serial.hex(cr2())
     serial.puts((&s_rip[0]) as u64)
-    serial.hex(word(frame, F_RIP))
+    serial.hex(regio.read64_at(frame, F_RIP))
     if dies {
         serial.puts((&s_dead[0]) as u64)
     } else {
@@ -325,7 +322,7 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
         signal.say_name(signal.signal_of(vector))
     }
     serial.nl()
-    trace_say(state, cur, word(frame, F_RSP))
+    trace_say(state, cur, regio.read64_at(frame, F_RSP))
     if dies {
         var nm: [u8; 24] = [0 as u8; 24]
         var k: u64 = 0
@@ -335,10 +332,10 @@ fn report_user(frame: u64, state: u64, vector: u64, cur: u64, dies: bool) {
         }
         nm[k as usize] = 0 as u8
         let _ok: bool = crash.prog_bericht(state,
-            regblock_fuellen(frame), word(frame, F_RIP),
-            word(frame, F_CS), word(frame, F_RFLAGS),
-            word(frame, F_RSP), word(frame, F_SS),
-            word(frame, F_ERROR), cr2(), vector,
+            regblock_fuellen(frame), regio.read64_at(frame, F_RIP),
+            regio.read64_at(frame, F_CS), regio.read64_at(frame, F_RFLAGS),
+            regio.read64_at(frame, F_RSP), regio.read64_at(frame, F_SS),
+            regio.read64_at(frame, F_ERROR), cr2(), vector,
             sched.tget(state, cur, sched.T_PID),
             (&nm[0 as usize]) as u64,
             (&uspur[0 as usize]) as u64, uspur_n)
@@ -706,16 +703,16 @@ fn report(frame0: u64, state: u64, vector0: u64) {
         serial.puts((&s_n[0]) as u64)
         serial.dec(vector)
         serial.put(32 as u8)
-        serial.hex(word(frame, F_RIP))
+        serial.hex(regio.read64_at(frame, F_RIP))
         serial.put(32 as u8)
         serial.hex(c2)
         serial.nl()
         klog.sayn(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_v[0]) as u64, vector)
         klog.sayh(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_r[0]) as u64,
-            word(frame, F_RIP))
+            regio.read64_at(frame, F_RIP))
         klog.sayh(state, klog.L_ERROR, (&s_src[0]) as u64, (&s_c[0]) as u64, c2)
         frame = rep_first
-        vector = word(frame, F_VECTOR)
+        vector = regio.read64_at(frame, F_VECTOR)
         c2 = rep_cr2
     } else {
         var s_3: [u8; 30] = "*** third fault -- giving up\0\0"
@@ -733,7 +730,7 @@ fn report(frame0: u64, state: u64, vector0: u64) {
     serial.put(32 as u8)
     serial.puts((&names[0]) as u64 + vector * 4)
     serial.puts((&s_err[0]) as u64)
-    serial.hex(word(frame, F_ERROR))
+    serial.hex(regio.read64_at(frame, F_ERROR))
     if vector == 14 {
         serial.puts((&s_cr2[0]) as u64)
         serial.hex(c2)
@@ -743,38 +740,38 @@ fn report(frame0: u64, state: u64, vector0: u64) {
     serial.put(32 as u8)
     serial.put(32 as u8)
     serial.puts((&s_rip[0]) as u64)
-    serial.hex(word(frame, F_RIP))
+    serial.hex(regio.read64_at(frame, F_RIP))
     serial.puts((&s_cs[0]) as u64)
-    serial.hex(word(frame, F_CS))
+    serial.hex(regio.read64_at(frame, F_CS))
     serial.puts((&s_flg[0]) as u64)
-    serial.hex(word(frame, F_RFLAGS))
+    serial.hex(regio.read64_at(frame, F_RFLAGS))
     serial.puts((&s_rsp[0]) as u64)
-    serial.hex(word(frame, F_RSP))
+    serial.hex(regio.read64_at(frame, F_RSP))
     serial.puts((&s_ss[0]) as u64)
-    serial.hex(word(frame, F_SS))
+    serial.hex(regio.read64_at(frame, F_SS))
     serial.nl()
 
     registers(frame)
-    ktrace_build(state, word(frame, F_RSP), word(frame, F_RBP))
+    ktrace_build(state, regio.read64_at(frame, F_RSP), regio.read64_at(frame, F_RBP))
     ktrace_say()
     var s_lg: [u8; 32] = "*** die letzten Protokollzeilen\0"
     serial.puts((&s_lg[0]) as u64)
     serial.nl()
     klog.dump_tail(state, 50)
     let _bok: bool = crash.kern_bericht(state, regblock_fuellen(frame),
-        word(frame, F_RIP), word(frame, F_CS), word(frame, F_RFLAGS),
-        word(frame, F_RSP), word(frame, F_SS), word(frame, F_ERROR),
+        regio.read64_at(frame, F_RIP), regio.read64_at(frame, F_CS), regio.read64_at(frame, F_RFLAGS),
+        regio.read64_at(frame, F_RSP), regio.read64_at(frame, F_SS), regio.read64_at(frame, F_ERROR),
         c2, vector, (&ktrace[0 as usize]) as u64, ktrace_n)
     serial.puts((&s_hint[0]) as u64)
     serial.nl()
     serial.puts((&s_tail[0]) as u64)
     serial.nl()
-    gfx.report_crash(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
-        c2, word(frame, F_RSP), word(frame, F_CS), cpu.here(state),
+    gfx.report_crash(state, vector, regio.read64_at(frame, F_ERROR), regio.read64_at(frame, F_RIP),
+        c2, regio.read64_at(frame, F_RSP), regio.read64_at(frame, F_CS), cpu.here(state),
         (&ktrace[0]) as u64, ktrace_n, stoppzahl(state))
-    gfx.panikbild(state, vector, word(frame, F_ERROR), word(frame, F_RIP),
-        c2, word(frame, F_RSP), word(frame, F_CS),
-        word(frame, F_RFLAGS), word(frame, F_SS), cpu.here(state),
+    gfx.panikbild(state, vector, regio.read64_at(frame, F_ERROR), regio.read64_at(frame, F_RIP),
+        c2, regio.read64_at(frame, F_RSP), regio.read64_at(frame, F_CS),
+        regio.read64_at(frame, F_RFLAGS), regio.read64_at(frame, F_SS), cpu.here(state),
         (&regblock[0 as usize]) as u64,
         (&ktrace[0 as usize]) as u64, ktrace_n, crash.last_file())
     if kstate.mode_on(state, kstate.M_PANICBOOT) {
@@ -830,7 +827,7 @@ fn regblock_fuellen(frame: u64) -> u64 {
         3 as u8, 2 as u8, 1 as u8, 0 as u8]
     var i: u64 = 0
     while i < 16 {
-        regblock[i as usize] = word(frame, offs[i as usize] as u64 * 8)
+        regblock[i as usize] = regio.read64_at(frame, offs[i as usize] as u64 * 8)
         i = i + 1
     }
     return (&regblock[0 as usize]) as u64
@@ -851,7 +848,7 @@ fn registers(frame: u64) {
         serial.put(32 as u8)
         serial.puts((&names[0]) as u64 + i * 4)
         serial.put(61 as u8)
-        serial.hex_width(word(frame, offs[i as usize] as u64 * 8), 16)
+        serial.hex_width(regio.read64_at(frame, offs[i as usize] as u64 * 8), 16)
         if i % 4 == 3 {
             serial.nl()
         }

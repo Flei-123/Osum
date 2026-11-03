@@ -11,6 +11,7 @@ import sync.atomic
 import mm.mem
 import xhciiso.iso
 import drv.usb.usbdiag
+import libc.regio
 
 export {
     kill, present, init, ready, base_of, bdf, ctx_size, slots, ports,
@@ -236,22 +237,6 @@ fn s(state: u64, off: u64, v: u64) {
     kstate.set(state + SCAL_OFF, off, v)
 }
 
-fn rd32(b: u64, off: u64) -> u64 {
-    return __mmio_read32((b + off) as *mut u32) as u64
-}
-
-fn wr32(b: u64, off: u64, v: u64) {
-    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
-}
-
-fn rd64(b: u64, off: u64) -> u64 {
-    return __mmio_read64((b + off) as *mut u64)
-}
-
-fn wr64(b: u64, off: u64, v: u64) {
-    __mmio_write64((b + off) as *mut u64, v)
-}
-
 fn base_of(state: u64) -> u64 {
     return g(state, S_BASE)
 }
@@ -309,14 +294,14 @@ fn usbsts(state: u64) -> u64 {
     if g(state, S_READY) == 0 {
         return 0
     }
-    return rd32(op(state), O_USBSTS)
+    return regio.read32_at(op(state), O_USBSTS)
 }
 
 fn iman(state: u64) -> u64 {
     if g(state, S_READY) == 0 {
         return 0
     }
-    return rd32(rt(state), R_IMAN)
+    return regio.read32_at(rt(state), R_IMAN)
 }
 
 fn port_events(state: u64) -> u64 {
@@ -445,7 +430,7 @@ fn ring_push(state: u64, i: u64, param: u64, status: u64, control: u64) -> u64 {
 // ------------------------------------------------------- die Tuerklingel
 
 fn doorbell(state: u64, slot: u64, target: u64) {
-    wr32(db(state), slot * 4, target & 0xFF)
+    regio.write32_at(db(state), slot * 4, target & 0xFF)
 }
 
 // -------------------------------------------------------- der Ereignisring
@@ -455,14 +440,14 @@ fn irq(state: u64) {
     if g(state, S_IRQS) < 5 && kstate.mode_on(state, kstate.M_USBTRACE) {
         var t_irq: [u8; 16] = "usb: t irq sts=\0"
         serial.puts((&t_irq[0]) as u64)
-        serial.dec(rd32(op(state), O_USBSTS))
+        serial.dec(regio.read32_at(op(state), O_USBSTS))
         serial.nl()
     }
-    wr32(op(state), O_USBSTS, STS_EINT)
-    wr32(rt(state), R_IMAN, rd32(rt(state), R_IMAN) | 1)
+    regio.write32_at(op(state), O_USBSTS, STS_EINT)
+    regio.write32_at(rt(state), R_IMAN, regio.read32_at(rt(state), R_IMAN) | 1)
     drain(state)
     // One MMIO write per interrupt (not per drain call): clears Event Handler Busy even when the ring was empty.
-    wr64(rt(state), R_ERDP, (state + EVT_OFF + g(state, S_EVT_DEQ) * 16) | 8)
+    regio.write64_at(rt(state), R_ERDP, (state + EVT_OFF + g(state, S_EVT_DEQ) * 16) | 8)
 }
 
 static mut drain_busy: u64 = 0
@@ -510,7 +495,7 @@ fn drain_inner(state: u64) -> u64 {
     var got: u64 = 0
     while got < EVT_TRBS {
         let here: u64 = state + EVT_OFF + at * 16
-        let c3: u64 = rd32(here, 12)
+        let c3: u64 = regio.read32_at(here, 12)
         if (c3 & 1) != cyc {
             got = got + EVT_TRBS + 1
         } else {
@@ -532,7 +517,7 @@ fn drain_inner(state: u64) -> u64 {
     let n: u64 = got
     s(state, S_EVT_DEQ, at)
     s(state, S_EVT_CYC, cyc)
-    wr64(rt(state), R_ERDP, (state + EVT_OFF + at * 16) | 8)
+    regio.write64_at(rt(state), R_ERDP, (state + EVT_OFF + at * 16) | 8)
     if n > EVT_TRBS {
         return n - EVT_TRBS - 1
     }
@@ -541,7 +526,7 @@ fn drain_inner(state: u64) -> u64 {
 
 fn handle(state: u64, here: u64, c3: u64) {
     let kind: u64 = (c3 >> 10) & 0x3F
-    let st: u64 = rd32(here, 8)
+    let st: u64 = regio.read32_at(here, 8)
     s(state, S_EVENTS, g(state, S_EVENTS) + 1)
     if kind == T_CMD_EVENT {
         s(state, S_CC_CODE, (st >> 24) & 0xFF)
@@ -571,7 +556,7 @@ fn handle(state: u64, here: u64, c3: u64) {
         }
         if i < MAX_EP {
             ev_prev[i as usize] = ev_last[i as usize]
-            ev_last[i as usize] = rd64(here, 0)
+            ev_last[i as usize] = regio.read64_at(here, 0)
             es(state, i, E_CODE, code)
             es(state, i, E_RESID, st & 0xFFFFFF)
             es(state, i, E_SEQ, eg(state, i, E_SEQ) + 1)
@@ -679,11 +664,11 @@ fn isoc_fill_ctx(state: u64, slot: u64, dci: u64) -> bool {
     let ec: u64 = in_ep(state, dci)
     zero(ec, ctx_size(state))
     let esit: u64 = ig(state, k, I_ESIT)
-    wr32(ec, 0, iso.ctx_dw0(ig(state, k, I_IVL), ig(state, k, I_MULT), esit))
-    wr32(ec, 4, iso.ctx_dw1(iso.ep_type(ig(state, k, I_DIR) != 0),
+    regio.write32_at(ec, 0, iso.ctx_dw0(ig(state, k, I_IVL), ig(state, k, I_MULT), esit))
+    regio.write32_at(ec, 4, iso.ctx_dw1(iso.ep_type(ig(state, k, I_DIR) != 0),
         ig(state, k, I_MPS), ig(state, k, I_BURST)))
-    wr64(ec, 8, eg(state, i, E_RING) | 1)
-    wr32(ec, 16, iso.ctx_dw4(esit, esit))
+    regio.write64_at(ec, 8, eg(state, i, E_RING) | 1)
+    regio.write32_at(ec, 16, iso.ctx_dw4(esit, esit))
     return true
 }
 
@@ -715,10 +700,10 @@ fn iso_event(state: u64, i: u64, k: u64, here: u64, code: u64, resid: u64) {
         iset(state, k, ISO_ERR, ig(state, k, ISO_ERR) + 1)
         return
     }
-    let ptr: u64 = rd64(here, 0)
+    let ptr: u64 = regio.read64_at(here, 0)
     let ring: u64 = eg(state, i, E_RING)
     if ptr >= ring && ptr + 16 <= ring + RING_BYTES {
-        let want: u64 = rd32(ptr, 8) & 0x1FFFF
+        let want: u64 = regio.read32_at(ptr, 8) & 0x1FFFF
         if resid <= want {
             iset(state, k, ISO_BYTES, ig(state, k, ISO_BYTES) + want - resid)
         }
@@ -884,7 +869,7 @@ fn ep_deq(state: u64, slot: u64, dci: u64) -> u64 {
     if c == 0 || dci == 0 || dci > 31 {
         return 0
     }
-    return rd64(c + dci * ctx_size(state), 8)
+    return regio.read64_at(c + dci * ctx_size(state), 8)
 }
 
 fn ep_state(state: u64, slot: u64, dci: u64) -> u64 {
@@ -892,7 +877,7 @@ fn ep_state(state: u64, slot: u64, dci: u64) -> u64 {
     if c == 0 || dci == 0 || dci > 31 {
         return 0
     }
-    return rd32(c + dci * ctx_size(state), 0) & 7
+    return regio.read32_at(c + dci * ctx_size(state), 0) & 7
 }
 
 fn ep_halted(state: u64, slot: u64, dci: u64) -> bool {
@@ -955,14 +940,14 @@ fn dev_ep_ctx(state: u64, slot: u64, dci: u64) -> u64 {
 // ---------------------------------------------------------- die Anschluesse
 
 fn portsc(state: u64, p: u64) -> u64 {
-    return rd32(op(state), O_PORTSC + (p - 1) * 0x10)
+    return regio.read32_at(op(state), O_PORTSC + (p - 1) * 0x10)
 }
 
 fn portsc_write(state: u64, p: u64, v: u64) {
     if (v & PSC_PP) == 0 && (portsc(state, p) & PSC_PP) != 0 {
         usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PPCLR, p, v)
     }
-    wr32(op(state), O_PORTSC + (p - 1) * 0x10, v)
+    regio.write32_at(op(state), O_PORTSC + (p - 1) * 0x10, v)
 }
 
 fn last_rc_get() -> u64 {
@@ -978,7 +963,7 @@ fn port_pls(state: u64, p: u64) -> u64 {
 }
 
 fn usbsts_raw(state: u64) -> u64 {
-    return rd32(op(state), 4)
+    return regio.read32_at(op(state), 4)
 }
 
 fn port_major(state: u64, p: u64) -> u64 {
@@ -986,9 +971,9 @@ fn port_major(state: u64, p: u64) -> u64 {
     var at: u64 = xecp_first(b)
     var n: u64 = 0
     while at != 0 && n < 64 {
-        let w: u64 = rd32(b, at)
+        let w: u64 = regio.read32_at(b, at)
         if (w & 0xFF) == 2 {
-            let d2: u64 = rd32(b, at + 8)
+            let d2: u64 = regio.read32_at(b, at + 8)
             let first: u64 = d2 & 0xFF
             let cnt: u64 = (d2 >> 8) & 0xFF
             if p >= first && p < first + cnt {
@@ -1167,7 +1152,7 @@ fn udelay(state: u64, us: u64) {
 // ------------------------------------------ die erweiterten Faehigkeiten
 
 fn xecp_first(b: u64) -> u64 {
-    let hcc1: u64 = rd32(b, C_HCCPARAMS1)
+    let hcc1: u64 = regio.read32_at(b, C_HCCPARAMS1)
     return ((hcc1 >> 16) & 0xFFFF) * 4
 }
 
@@ -1175,7 +1160,7 @@ fn xecp_find(b: u64, id: u64) -> u64 {
     var at: u64 = xecp_first(b)
     var n: u64 = 0
     while at != 0 && n < 64 {
-        let w: u64 = rd32(b, at)
+        let w: u64 = regio.read32_at(b, at)
         if (w & 0xFF) == id {
             return at
         }
@@ -1269,7 +1254,7 @@ fn owned_by_bios(state: u64) -> bool {
     if cap == 0 {
         return false
     }
-    return (rd32(b, cap) & LEG_BIOS) != 0
+    return (regio.read32_at(b, cap) & LEG_BIOS) != 0
 }
 
 fn handover(state: u64) -> bool {
@@ -1284,14 +1269,14 @@ fn handover(state: u64) -> bool {
         s(state, S_LEGPOST, 0)
         return true
     }
-    let before: u64 = rd32(b, cap)
+    let before: u64 = regio.read32_at(b, cap)
     s(state, S_LEGPRE, before)
-    wr32(b, cap, before | LEG_OS)
+    regio.write32_at(b, cap, before | LEG_OS)
     var ms: u64 = 0
     var lauf: u64 = 0
     var free: bool = false
     while lauf < LEG_MS {
-        if (rd32(b, cap) & LEG_BIOS) == 0 {
+        if (regio.read32_at(b, cap) & LEG_BIOS) == 0 {
             free = true
             lauf = LEG_MS
         } else {
@@ -1302,14 +1287,14 @@ fn handover(state: u64) -> bool {
     }
     s(state, S_LEGMS, ms)
     if !free {
-        let hart: u64 = rd32(b, cap)
-        wr32(b, cap, (hart & (~LEG_BIOS) & 0xFFFFFFFF) | LEG_OS)
+        let hart: u64 = regio.read32_at(b, cap)
+        regio.write32_at(b, cap, (hart & (~LEG_BIOS) & 0xFFFFFFFF) | LEG_OS)
         s(state, S_LEGFORCE, 1)
     }
-    s(state, S_LEGPOST, rd32(b, cap))
-    let ctl: u64 = rd32(b, cap + O_LEGCTL)
-    wr32(b, cap + O_LEGCTL, (ctl & LEG_SMI_BEHALTEN) | LEG_SMI_QUITTIEREN)
-    return (rd32(b, cap) & LEG_BIOS) == 0
+    s(state, S_LEGPOST, regio.read32_at(b, cap))
+    let ctl: u64 = regio.read32_at(b, cap + O_LEGCTL)
+    regio.write32_at(b, cap + O_LEGCTL, (ctl & LEG_SMI_BEHALTEN) | LEG_SMI_QUITTIEREN)
+    return (regio.read32_at(b, cap) & LEG_BIOS) == 0
 }
 
 // ------------------------------------------------------ die Uebertragungen
@@ -1535,16 +1520,16 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     s(state, S_BAR, phys)
     s(state, S_BDF, pci.get(state, idx, pci.E_BDF))
 
-    let caplen: u64 = rd32(b, C_CAPLENGTH) & 0xFF
-    s(state, S_HCIVER, (rd32(b, C_CAPLENGTH) >> 16) & 0xFFFF)
+    let caplen: u64 = regio.read32_at(b, C_CAPLENGTH) & 0xFF
+    s(state, S_HCIVER, (regio.read32_at(b, C_CAPLENGTH) >> 16) & 0xFFFF)
     if caplen == 0 || caplen == 0xFF {
         return false
     }
-    let hcs1: u64 = rd32(b, C_HCSPARAMS1)
-    let hcc1: u64 = rd32(b, C_HCCPARAMS1)
+    let hcs1: u64 = regio.read32_at(b, C_HCSPARAMS1)
+    let hcc1: u64 = regio.read32_at(b, C_HCCPARAMS1)
     s(state, S_OP, b + caplen)
-    s(state, S_RT, b + (rd32(b, C_RTSOFF) & 0xFFFFFFE0))
-    s(state, S_DB, b + (rd32(b, C_DBOFF) & 0xFFFFFFFC))
+    s(state, S_RT, b + (regio.read32_at(b, C_RTSOFF) & 0xFFFFFFE0))
+    s(state, S_DB, b + (regio.read32_at(b, C_DBOFF) & 0xFFFFFFFC))
     s(state, S_SLOTS, hcs1 & 0xFF)
     s(state, S_PORTS, (hcs1 >> 24) & 0xFF)
     var csz: u64 = 32
@@ -1576,7 +1561,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     if want > slots(state) {
         want = slots(state)
     }
-    wr32(op(state), O_CONFIG, want)
+    regio.write32_at(op(state), O_CONFIG, want)
 
     zero(state + DCBAA_OFF, 1024)
     zero(state + CMD_OFF, CMD_TRBS * 16)
@@ -1602,14 +1587,14 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     if !scratchpad(state) {
         return false
     }
-    wr64(op(state), O_DCBAAP, state + DCBAA_OFF)
-    wr64(op(state), O_CRCR, (state + CMD_OFF) | 1)
+    regio.write64_at(op(state), O_DCBAAP, state + DCBAA_OFF)
+    regio.write64_at(op(state), O_CRCR, (state + CMD_OFF) | 1)
 
     trb(state + ERST_OFF, state + EVT_OFF, EVT_TRBS, 0)
-    wr32(rt(state), R_ERSTSZ, 1)
-    wr64(rt(state), R_ERDP, (state + EVT_OFF) | 8)
-    wr64(rt(state), R_ERSTBA, state + ERST_OFF)
-    wr32(rt(state), R_IMOD, 4000)
+    regio.write32_at(rt(state), R_ERSTSZ, 1)
+    regio.write64_at(rt(state), R_ERDP, (state + EVT_OFF) | 8)
+    regio.write64_at(rt(state), R_ERSTBA, state + ERST_OFF)
+    regio.write32_at(rt(state), R_IMOD, 4000)
 
     if pci.get(state, idx, pci.E_MSIX) != 0 {
         if msix_arm(state, idx, VEC_XHCI, armed) {
@@ -1628,12 +1613,12 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     if armed {
         iman = 2
     }
-    wr32(rt(state), R_IMAN, iman | 1)
+    regio.write32_at(rt(state), R_IMAN, iman | 1)
 
-    wr32(op(state), O_USBCMD, CMD_RS | CMD_INTE | CMD_HSEE)
+    regio.write32_at(op(state), O_USBCMD, CMD_RS | CMD_INTE | CMD_HSEE)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        if (rd32(op(state), O_USBSTS) & STS_HCH) == 0 {
+        if (regio.read32_at(op(state), O_USBSTS) & STS_HCH) == 0 {
             s(state, S_READY, 1)
             return true
         }
@@ -1645,10 +1630,10 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
 fn halt(state: u64) -> bool {
     let o: u64 = op(state)
     usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_HALT, 0, 0)
-    wr32(o, O_USBCMD, rd32(o, O_USBCMD) & (~CMD_RS) & 0xFFFFFFFF)
+    regio.write32_at(o, O_USBCMD, regio.read32_at(o, O_USBCMD) & (~CMD_RS) & 0xFFFFFFFF)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        if (rd32(o, O_USBSTS) & STS_HCH) != 0 {
+        if (regio.read32_at(o, O_USBSTS) & STS_HCH) != 0 {
             return true
         }
         spin = spin + 1
@@ -1659,11 +1644,11 @@ fn halt(state: u64) -> bool {
 fn reset(state: u64) -> bool {
     let o: u64 = op(state)
     usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_HCRST, 0, 0)
-    wr32(o, O_USBCMD, CMD_HCRST)
+    regio.write32_at(o, O_USBCMD, CMD_HCRST)
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        let c: u64 = rd32(o, O_USBCMD)
-        let st: u64 = rd32(o, O_USBSTS)
+        let c: u64 = regio.read32_at(o, O_USBCMD)
+        let st: u64 = regio.read32_at(o, O_USBSTS)
         if (c & CMD_HCRST) == 0 && (st & STS_CNR) == 0 {
             return true
         }
@@ -1673,7 +1658,7 @@ fn reset(state: u64) -> bool {
 }
 
 fn scratchpad(state: u64) -> bool {
-    let hcs2: u64 = rd32(base_of(state), C_HCSPARAMS2)
+    let hcs2: u64 = regio.read32_at(base_of(state), C_HCSPARAMS2)
     let n: u64 = ((hcs2 >> 27) & 0x1F) | (((hcs2 >> 21) & 0x1F) << 5)
     s(state, S_NSCRATCH, n)
     if n == 0 {
@@ -1717,14 +1702,14 @@ fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     if tbase == 0 {
         return false
     }
-    wr32(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
-    wr32(tbase, 4, 0)
-    wr32(tbase, 8, vector & 0xFF)
+    regio.write32_at(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    regio.write32_at(tbase, 4, 0)
+    regio.write32_at(tbase, 8, vector & 0xFF)
     var ctrl: u64 = 1
     if armed {
         ctrl = 0
     }
-    wr32(tbase, 12, ctrl)
+    regio.write32_at(tbase, 12, ctrl)
     let msg: u64 = pci.cfg_read16(d, cap + 2)
     pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
@@ -1862,13 +1847,13 @@ fn xecp_line(state: u64, einheit: u64) {
         serial.puts((&s_kein[0]) as u64)
     }
     while at != 0 && n < 16 {
-        let w: u64 = rd32(b, at)
+        let w: u64 = regio.read32_at(b, at)
         let id: u64 = w & 0xFF
         serial.puts((&s_id[0]) as u64)
         serial.dec(id)
         if id == XECP_PROTO {
             let rev: u64 = (w >> 24) & 0xFF
-            let pp: u64 = rd32(b, at + 8)
+            let pp: u64 = regio.read32_at(b, at + 8)
             let erst: u64 = pp & 0xFF
             let anz: u64 = (pp >> 8) & 0xFF
             serial.puts((&s_u2[0]) as u64)
@@ -2057,21 +2042,21 @@ fn legtest(state: u64) {
     var fall: u64 = 0
     while fall < 2 {
         zero(buf, 0x200)
-        wr32(buf, C_HCCPARAMS1, (0x40 << 16) | 4)
-        wr32(buf, 0x100, 2 | (4 << 8))
+        regio.write32_at(buf, C_HCCPARAMS1, (0x40 << 16) | 4)
+        regio.write32_at(buf, 0x100, 2 | (4 << 8))
         var leg: u64 = 1
         if fall == 0 {
             leg = leg | LEG_BIOS
         } else {
             leg = leg | LEG_OS
         }
-        wr32(buf, 0x110, leg)
-        wr32(buf, 0x114, 0x0000E00F)
+        regio.write32_at(buf, 0x110, leg)
+        regio.write32_at(buf, 0x114, 0x0000E00F)
         s(state, S_BASE, buf)
         let genommen: bool = handover(state)
         let cap: u64 = g(state, S_LEGCAP)
         let post: u64 = g(state, S_LEGPOST)
-        let ctl: u64 = rd32(buf, 0x114)
+        let ctl: u64 = regio.read32_at(buf, 0x114)
         var intact: bool = true
         if cap != 0x110 {
             intact = false
@@ -2186,8 +2171,8 @@ fn uebersicht(state: u64) {
             serial.puts((&s_bad[0]) as u64)
             serial.nl()
         } else {
-            let caplen: u64 = rd32(b, C_CAPLENGTH) & 0xFF
-            let hcs1: u64 = rd32(b, C_HCSPARAMS1)
+            let caplen: u64 = regio.read32_at(b, C_CAPLENGTH) & 0xFF
+            let hcs1: u64 = regio.read32_at(b, C_HCSPARAMS1)
             let np: u64 = (hcs1 >> 24) & 0xFF
             serial.puts((&s_pt[0]) as u64)
             serial.dec(np)
@@ -2195,7 +2180,7 @@ fn uebersicht(state: u64) {
             let cap: u64 = xecp_find(b, XECP_LEGSUP)
             if cap == 0 {
                 serial.puts((&s_frei[0]) as u64)
-            } else if (rd32(b, cap) & LEG_BIOS) != 0 {
+            } else if (regio.read32_at(b, cap) & LEG_BIOS) != 0 {
                 serial.puts((&s_bios[0]) as u64)
             } else {
                 serial.puts((&s_os[0]) as u64)
@@ -2204,7 +2189,7 @@ fn uebersicht(state: u64) {
             var ver: u64 = 0
             var p: u64 = 1
             while p <= np && caplen != 0 {
-                let v: u64 = rd32(b + caplen, O_PORTSC + (p - 1) * 0x10)
+                let v: u64 = regio.read32_at(b + caplen, O_PORTSC + (p - 1) * 0x10)
                 if (v & PSC_PP) != 0 {
                     mit = mit + 1
                 }

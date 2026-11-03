@@ -2,6 +2,7 @@
 import serial
 import lib.kstate
 import bus.pci
+import libc.regio
 
 export {
     present, init, active, hz, id,
@@ -229,14 +230,6 @@ fn spurious_hit(state: u64) {
     kstate.add(state, pci.K2_SCALARS + S_SPURIOUS, 1)
 }
 
-fn lread(base: u64, reg: u64) -> u64 {
-    return __mmio_read32((base + reg) as *mut u32) as u64
-}
-
-fn lwrite(base: u64, reg: u64, v: u64) {
-    __mmio_write32((base + reg) as *mut u32, (v & 0xFFFFFFFF) as u32)
-}
-
 fn present() -> bool {
     var d: u64 = 0
     asm("push rbx\nmov eax, 1\ncpuid\npop rbx",
@@ -245,7 +238,7 @@ fn present() -> bool {
 }
 
 fn id(state: u64) -> u64 {
-    return (lread(lapic(state), R_ID) >> 24) & 0xFF
+    return (regio.read32_at(lapic(state), R_ID) >> 24) & 0xFF
 }
 
 fn pit_arm() {
@@ -395,8 +388,8 @@ fn cpuid_max_ext() -> u64 {
 
 fn calibrate(state: u64) -> u64 {
     let base: u64 = lapic(state)
-    lwrite(base, R_TIMER_DIV, DIV_16)
-    lwrite(base, R_LVT_TIMER, LVT_MASKED)
+    regio.write32_at(base, R_TIMER_DIV, DIV_16)
+    regio.write32_at(base, R_LVT_TIMER, LVT_MASKED)
     kstate.set(state, pci.K2_SCALARS + S_CLK, 0)
     var per_sec: u64 = 0
     if !nosrc(state, 1) {
@@ -450,12 +443,12 @@ fn cal_pit(state: u64, base: u64) -> u64 {
     var go: bool = true
     while go && n < 6 {
         pit_arm()
-        lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
+        regio.write32_at(base, R_TIMER_INIT, 0xFFFFFFFF)
         let t0: u64 = tsc()
         let done: bool = pit_wait()
-        let left: u64 = lread(base, R_TIMER_CUR)
+        let left: u64 = regio.read32_at(base, R_TIMER_CUR)
         let t1: u64 = tsc()
-        lwrite(base, R_TIMER_INIT, 0)
+        regio.write32_at(base, R_TIMER_INIT, 0)
         kstate.set(state, pci.K2_SCALARS + S_PITSEEN, serial.in8(0x61 as u16) as u64)
         if !done || t1 <= t0 || left > 0xFFFFFFFF {
             go = false
@@ -488,7 +481,7 @@ fn cal_pm(state: u64, base: u64) -> u64 {
     }
     let maske: u64 = (1 << bits) - 1
     let spanne: u64 = PM_HZ / 100
-    lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
+    regio.write32_at(base, R_TIMER_INIT, 0xFFFFFFFF)
     let a0: u64 = pm_read(port, bits)
     let t0: u64 = tsc()
     var vergangen: u64 = 0
@@ -498,9 +491,9 @@ fn cal_pm(state: u64, base: u64) -> u64 {
         vergangen = (a + (maske + 1) - a0) & maske
         wache = wache + 1
     }
-    let left: u64 = lread(base, R_TIMER_CUR)
+    let left: u64 = regio.read32_at(base, R_TIMER_CUR)
     let t1: u64 = tsc()
-    lwrite(base, R_TIMER_INIT, 0)
+    regio.write32_at(base, R_TIMER_INIT, 0)
     if vergangen < spanne || t1 <= t0 || left > 0xFFFFFFFF {
         return 0
     }
@@ -546,7 +539,7 @@ fn cal_hpet(state: u64, base: u64) -> u64 {
     let cfg: u64 = __mmio_read32((h + 0x10) as *mut u32) as u64
     __mmio_write32((h + 0x10) as *mut u32, ((cfg | 1) & 0xFFFFFFFF) as u32)
     let spanne: u64 = 10000000000000 / period
-    lwrite(base, R_TIMER_INIT, 0xFFFFFFFF)
+    regio.write32_at(base, R_TIMER_INIT, 0xFFFFFFFF)
     let a0: u64 = __mmio_read32((h + 0xF0) as *mut u32) as u64
     let t0: u64 = tsc()
     var vergangen: u64 = 0
@@ -556,9 +549,9 @@ fn cal_hpet(state: u64, base: u64) -> u64 {
         vergangen = (a + 0x100000000 - a0) & 0xFFFFFFFF
         wache = wache + 1
     }
-    let left: u64 = lread(base, R_TIMER_CUR)
+    let left: u64 = regio.read32_at(base, R_TIMER_CUR)
     let t1: u64 = tsc()
-    lwrite(base, R_TIMER_INIT, 0)
+    regio.write32_at(base, R_TIMER_INIT, 0)
     __mmio_write32((h + 0x10) as *mut u32, (cfg & 0xFFFFFFFF) as u32)
     if vergangen < spanne || t1 <= t0 || left > 0xFFFFFFFF {
         return 0
@@ -692,9 +685,9 @@ fn timer_diag(state: u64) {
     serial.puts((&d5[0]) as u64)
     if kstate.get(state, pci.K2_SCALARS + S_ACTIVE) != 0 {
         let base: u64 = lapic(state)
-        serial.hex(lread(base, R_LVT_TIMER))
+        serial.hex(regio.read32_at(base, R_LVT_TIMER))
         serial.puts((&d6[0]) as u64)
-        serial.dec(lread(base, R_TIMER_CUR))
+        serial.dec(regio.read32_at(base, R_TIMER_CUR))
     } else {
         serial.hex(0)
         serial.puts((&d6[0]) as u64)
@@ -747,20 +740,20 @@ fn init(state: u64, want_hz: u64) -> bool {
     kstate.set(state, pci.K2_SCALARS + S_LAPIC, base)
     kstate.set(state, pci.K2_SCALARS + S_IOAPIC, io)
 
-    let ver: u64 = lread(base, R_VERSION)
+    let ver: u64 = regio.read32_at(base, R_VERSION)
     if ver == 0xFFFFFFFF || ver == 0 {
         return false
     }
 
-    lwrite(base, R_TPR, 0)
-    lwrite(base, R_DFR, 0xFFFFFFFF)
-    lwrite(base, R_LDR, 1 << 24)
-    lwrite(base, R_LVT_LINT0, LVT_MASKED)
-    lwrite(base, R_LVT_LINT1, LVT_MASKED)
-    lwrite(base, R_LVT_ERROR, LVT_MASKED)
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_SVR, 0x100 | VEC_SPURIOUS)
+    regio.write32_at(base, R_TPR, 0)
+    regio.write32_at(base, R_DFR, 0xFFFFFFFF)
+    regio.write32_at(base, R_LDR, 1 << 24)
+    regio.write32_at(base, R_LVT_LINT0, LVT_MASKED)
+    regio.write32_at(base, R_LVT_LINT1, LVT_MASKED)
+    regio.write32_at(base, R_LVT_ERROR, LVT_MASKED)
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_SVR, 0x100 | VEC_SPURIOUS)
 
     let per_sec: u64 = calibrate(state)
     if per_sec == 0 {
@@ -770,8 +763,8 @@ fn init(state: u64, want_hz: u64) -> bool {
     kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 1)
     timer_start(state, want_hz)
     if !timer_running(state) {
-        lwrite(base, R_LVT_TIMER, LVT_MASKED)
-        lwrite(base, R_TIMER_INIT, 0)
+        regio.write32_at(base, R_LVT_TIMER, LVT_MASKED)
+        regio.write32_at(base, R_TIMER_INIT, 0)
         kstate.set(state, pci.K2_SCALARS + S_ACTIVE, 0)
         wire_back(state)
         return false
@@ -781,13 +774,13 @@ fn init(state: u64, want_hz: u64) -> bool {
 
 fn wire_back(state: u64) {
     let base: u64 = lapic(state)
-    lwrite(base, R_LVT_LINT0, 0x700)
+    regio.write32_at(base, R_LVT_LINT0, 0x700)
 }
 
 fn timer_running(state: u64) -> bool {
     let base: u64 = lapic(state)
     let hz: u64 = kstate.get(state, pci.K2_SCALARS + S_TSCHZ)
-    let a: u64 = lread(base, R_TIMER_CUR)
+    let a: u64 = regio.read32_at(base, R_TIMER_CUR)
     if hz == 0 {
         var i: u64 = 0
         while i < 2000000 {
@@ -803,7 +796,7 @@ fn timer_running(state: u64) -> bool {
             }
         }
     }
-    let b: u64 = lread(base, R_TIMER_CUR)
+    let b: u64 = regio.read32_at(base, R_TIMER_CUR)
     return a != b
 }
 
@@ -817,9 +810,9 @@ fn timer_start(state: u64, want_hz: u64) {
         init_count = 0xFFFFFFFF
     }
     kstate.set(state, pci.K2_SCALARS + S_DIVISOR, init_count)
-    lwrite(base, R_TIMER_DIV, DIV_16)
-    lwrite(base, R_LVT_TIMER, VEC_TIMER | LVT_PERIODIC)
-    lwrite(base, R_TIMER_INIT, init_count)
+    regio.write32_at(base, R_TIMER_DIV, DIV_16)
+    regio.write32_at(base, R_LVT_TIMER, VEC_TIMER | LVT_PERIODIC)
+    regio.write32_at(base, R_TIMER_INIT, init_count)
 }
 
 fn timer_rate(state: u64, mult: u64) {
@@ -832,17 +825,17 @@ fn timer_rate(state: u64, mult: u64) {
     if c > 0xFFFFFFFF {
         c = 0xFFFFFFFF
     }
-    lwrite(base, R_TIMER_INIT, c)
+    regio.write32_at(base, R_TIMER_INIT, c)
 }
 
 fn timer_stop(state: u64) {
     let base: u64 = lapic(state)
-    lwrite(base, R_LVT_TIMER, LVT_MASKED)
-    lwrite(base, R_TIMER_INIT, 0)
+    regio.write32_at(base, R_LVT_TIMER, LVT_MASKED)
+    regio.write32_at(base, R_TIMER_INIT, 0)
 }
 
 fn eoi(state: u64) {
-    lwrite(lapic(state), R_EOI, 0)
+    regio.write32_at(lapic(state), R_EOI, 0)
 }
 
 fn window(state: u64) -> u64 {
@@ -855,28 +848,28 @@ fn core_init(state: u64, index: u64) {
         wrmsr(MSR_APIC_BASE, base_msr | APIC_BASE_ENABLE)
     }
     let base: u64 = lapic(state)
-    lwrite(base, R_TPR, 0)
-    lwrite(base, R_DFR, 0xFFFFFFFF)
+    regio.write32_at(base, R_TPR, 0)
+    regio.write32_at(base, R_DFR, 0xFFFFFFFF)
     if index < 8 {
-        lwrite(base, R_LDR, 1 << (24 + index))
+        regio.write32_at(base, R_LDR, 1 << (24 + index))
     }
-    lwrite(base, R_LVT_TIMER, LVT_MASKED)
-    lwrite(base, R_LVT_LINT0, LVT_MASKED)
-    lwrite(base, R_LVT_LINT1, LVT_MASKED)
-    lwrite(base, R_LVT_ERROR, LVT_MASKED)
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_SVR, 0x100 | VEC_SPURIOUS)
+    regio.write32_at(base, R_LVT_TIMER, LVT_MASKED)
+    regio.write32_at(base, R_LVT_LINT0, LVT_MASKED)
+    regio.write32_at(base, R_LVT_LINT1, LVT_MASKED)
+    regio.write32_at(base, R_LVT_ERROR, LVT_MASKED)
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_SVR, 0x100 | VEC_SPURIOUS)
 }
 
 fn ipi(state: u64, dest: u64, low: u64) {
     let base: u64 = lapic(state)
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_ICR_HIGH, (dest & 0xFF) << 24)
-    lwrite(base, R_ICR_LOW, low & 0xFFFFF)
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_ICR_HIGH, (dest & 0xFF) << 24)
+    regio.write32_at(base, R_ICR_LOW, low & 0xFFFFF)
     var guard: u64 = 0
     while guard < 1000000 {
-        if (lread(base, R_ICR_LOW) & 0x1000) == 0 {
+        if (regio.read32_at(base, R_ICR_LOW) & 0x1000) == 0 {
             return
         }
         guard = guard + 1
@@ -885,8 +878,8 @@ fn ipi(state: u64, dest: u64, low: u64) {
 
 fn esr_take(state: u64) -> u64 {
     let base: u64 = lapic(state)
-    lwrite(base, R_ESR, 0)
-    return lread(base, R_ESR)
+    regio.write32_at(base, R_ESR, 0)
+    return regio.read32_at(base, R_ESR)
 }
 
 fn ioread(base: u64, reg: u64) -> u64 {
@@ -967,11 +960,11 @@ fn s3_save(state: u64, buf: u64) -> u64 {
     }
     let base: u64 = lapic(state)
     s3_put(buf, 1, rdmsr(MSR_APIC_BASE))
-    s3_put(buf, 2, lread(base, R_SVR))
-    s3_put(buf, 3, lread(base, R_TIMER_INIT))
+    s3_put(buf, 2, regio.read32_at(base, R_SVR))
+    s3_put(buf, 3, regio.read32_at(base, R_TIMER_INIT))
     var i: u64 = 0
     while i < S3_LREGS {
-        s3_put(buf, 4 + i, lread(base, s3_lreg(i)))
+        s3_put(buf, 4 + i, regio.read32_at(base, s3_lreg(i)))
         i = i + 1
     }
     var n: u64 = ioapic_entries(state)
@@ -997,12 +990,12 @@ fn s3_restore(state: u64, buf: u64) -> u64 {
     let base: u64 = lapic(state)
     var i: u64 = 0
     while i < S3_LREGS {
-        lwrite(base, s3_lreg(i), s3_get(buf, 4 + i))
+        regio.write32_at(base, s3_lreg(i), s3_get(buf, 4 + i))
         i = i + 1
     }
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_ESR, 0)
-    lwrite(base, R_SVR, s3_get(buf, 2))
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_ESR, 0)
+    regio.write32_at(base, R_SVR, s3_get(buf, 2))
     let n: u64 = s3_get(buf, 0)
     let io: u64 = ioapic(state)
     var g: u64 = 0
@@ -1012,7 +1005,7 @@ fn s3_restore(state: u64, buf: u64) -> u64 {
         g = g + 1
     }
     pic_off()
-    lwrite(base, R_TIMER_INIT, s3_get(buf, 3))
+    regio.write32_at(base, R_TIMER_INIT, s3_get(buf, 3))
     var bad: u64 = 0
     g = 0
     while g < n {

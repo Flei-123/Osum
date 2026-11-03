@@ -7,6 +7,7 @@ import bus.pci
 import acpi.aml
 import arch.x86_64.apic
 import arch.arch
+import libc.regio
 
 export {
     resume, kill, init, present, read_block, write_block, read_many,
@@ -134,22 +135,6 @@ fn buffer(state: u64, which: u64) -> u64 {
     return state + BUF_A
 }
 
-fn rd32(b: u64, off: u64) -> u64 {
-    return __mmio_read32((b + off) as *mut u32) as u64
-}
-
-fn wr32(b: u64, off: u64, v: u64) {
-    __mmio_write32((b + off) as *mut u32, (v & 0xFFFFFFFF) as u32)
-}
-
-fn rd64(b: u64, off: u64) -> u64 {
-    return __mmio_read64((b + off) as *mut u64)
-}
-
-fn wr64(b: u64, off: u64, v: u64) {
-    __mmio_write64((b + off) as *mut u64, v)
-}
-
 fn sqe(sq: u64, slot: u64, dw: u64, v: u64) {
     __mmio_write32((sq + slot * 64 + dw * 4) as *mut u32, (v & 0xFFFFFFFF) as u32)
 }
@@ -160,7 +145,7 @@ fn cqe(cq: u64, slot: u64, dw: u64) -> u64 {
 
 fn doorbell(state: u64, qid: u64, is_cq: u64, value: u64) {
     let stride: u64 = kstate.get(state, sc(S_STRIDE))
-    wr32(base(state), R_DOORBELL + (qid * 2 + is_cq) * stride, value)
+    regio.write32_at(base(state), R_DOORBELL + (qid * 2 + is_cq) * stride, value)
 }
 
 fn command(sq: u64, slot: u64, opcode: u64, cid: u64, nsid: u64,
@@ -268,7 +253,7 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     kstate.set(state, sc(S_BASE), b)
     kstate.set(state, sc(S_BDF), pci.get(state, idx, pci.E_BDF))
 
-    let cap: u64 = rd64(b, R_CAP)
+    let cap: u64 = regio.read64_at(b, R_CAP)
     if cap == 0 || cap == 0xFFFFFFFFFFFFFFFF {
         return false
     }
@@ -291,7 +276,7 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
         kstate.set(state, sc(S_MSIX), 0)
     }
 
-    wr32(b, R_CC, 0)
+    regio.write32_at(b, R_CC, 0)
     if !await_rdy(b, 0) {
         return false
     }
@@ -311,10 +296,10 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
     zero(state + IOSQ_OFF, PAGE)
     zero(state + IOCQ_OFF, PAGE)
 
-    wr32(b, R_AQA, ((QDEPTH - 1) << 16) | (QDEPTH - 1))
-    wr64(b, R_ASQ, state + ASQ_OFF)
-    wr64(b, R_ACQ, state + ACQ_OFF)
-    wr32(b, R_CC, CC_ENABLE | (6 << 16) | (4 << 20))
+    regio.write32_at(b, R_AQA, ((QDEPTH - 1) << 16) | (QDEPTH - 1))
+    regio.write64_at(b, R_ASQ, state + ASQ_OFF)
+    regio.write64_at(b, R_ACQ, state + ACQ_OFF)
+    regio.write32_at(b, R_CC, CC_ENABLE | (6 << 16) | (4 << 20))
     if !await_rdy(b, 1) {
         return false
     }
@@ -342,7 +327,7 @@ fn init(state: u64, use_msix: bool, armed: bool) -> bool {
 fn await_rdy(b: u64, want: u64) -> bool {
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
-        let csts: u64 = rd32(b, R_CSTS)
+        let csts: u64 = regio.read32_at(b, R_CSTS)
         if (csts & CSTS_CFS) != 0 {
             return false
         }
@@ -558,14 +543,14 @@ fn msix_arm(state: u64, idx: u64, vector: u64, armed: bool) -> bool {
     if tbase == 0 {
         return false
     }
-    wr32(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
-    wr32(tbase, 4, 0)
-    wr32(tbase, 8, vector & 0xFF)
+    regio.write32_at(tbase, 0, apic.lapic_phys(state) | ((apic.id(state) & 0xFF) << 12))
+    regio.write32_at(tbase, 4, 0)
+    regio.write32_at(tbase, 8, vector & 0xFF)
     var ctrl: u64 = 1
     if armed {
         ctrl = 0
     }
-    wr32(tbase, 12, ctrl)
+    regio.write32_at(tbase, 12, ctrl)
     let msg: u64 = pci.cfg_read16(d, cap + 2)
     pci.cfg_write16(d, cap + 2, (msg | 0x8000) & 0xBFFF)
     pci.cfg_write16(d, 0x04, pci.cfg_read16(d, 0x04) | 0x400)
@@ -703,7 +688,7 @@ fn flush(state: u64) -> bool {
 fn kill(state: u64) {
     let b: u64 = kstate.get(state, sc(S_BASE))
     if b != 0 {
-        wr32(b, R_CC, 0)
+        regio.write32_at(b, R_CC, 0)
     }
 }
 

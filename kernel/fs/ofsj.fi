@@ -4,6 +4,7 @@ profile kernel
 import lib.kstate
 import block.blk
 import mm.mem
+import libc.regio
 
 export {
     setup, disable, enabled, begin, commit, abort, write, read, read_stream,
@@ -60,14 +61,6 @@ fn counter(state: u64, welcher: u64) -> u64 {
     return g(state, welcher)
 }
 
-fn get64(p: u64) -> u64 {
-    return __mmio_read64(p as *mut u64)
-}
-
-fn put64(p: u64, v: u64) {
-    __mmio_write64(p as *mut u64, v)
-}
-
 fn tgt(state: u64, i: u64) -> u64 {
     return kstate.get(state, kstate.JR_OFF + TGT_OFF + i * 8)
 }
@@ -95,7 +88,7 @@ fn stg(state: u64, i: u64) -> u64 {
 fn copy_block(from: u64, to: u64) {
     var i: u64 = 0
     while i < BS / 8 {
-        put64(to + i * 8, get64(from + i * 8))
+        regio.write64(to + i * 8, regio.read64(from + i * 8))
         i = i + 1
     }
 }
@@ -124,7 +117,7 @@ fn hdr(state: u64) -> u64 {
 fn zero_words(p: u64, n: u64) {
     var i: u64 = 0
     while i < n / 8 {
-        put64(p + i * 8, 0)
+        regio.write64(p + i * 8, 0)
         i = i + 1
     }
 }
@@ -140,7 +133,7 @@ fn block_hash(p: u64) -> u64 {
     var h: u64 = FNV_OFF
     var i: u64 = 0
     while i < BS / 8 {
-        h = mix(h, get64(p + i * 8))
+        h = mix(h, regio.read64(p + i * 8))
         i = i + 1
     }
     return h
@@ -358,12 +351,12 @@ fn commit(state: u64) -> bool {
     if m > 0 && m == n {
         let h: u64 = hdr(state)
         zero_words(h, HDR_BLOCKS * BS)
-        put64(h + H_MAGIC, HEAD_MAGIC)
-        put64(h + H_SEQ, seq)
-        put64(h + H_COUNT, n)
+        regio.write64(h + H_MAGIC, HEAD_MAGIC)
+        regio.write64(h + H_SEQ, seq)
+        regio.write64(h + H_COUNT, n)
         var q: u64 = 0
         while q < n {
-            put64(h + BS + q * 8, tgt(state, q))
+            regio.write64(h + BS + q * 8, tgt(state, q))
             q = q + 1
         }
         s(state, J_STGRUNS, g(state, J_STGRUNS) + 1)
@@ -382,7 +375,7 @@ fn commit(state: u64) -> bool {
             zero(scratch(state), BS)
             var j: u64 = 0
             while j < 64 && k * 64 + j < n {
-                put64(scratch(state) + j * 8, tgt(state, k * 64 + j))
+                regio.write64(scratch(state) + j * 8, tgt(state, k * 64 + j))
                 j = j + 1
             }
             if !blk.write(state, tgt_blk(state, k), scratch(state)) {
@@ -391,9 +384,9 @@ fn commit(state: u64) -> bool {
             k = k + 1
         }
         zero(scratch(state), BS)
-        put64(scratch(state) + H_MAGIC, HEAD_MAGIC)
-        put64(scratch(state) + H_SEQ, seq)
-        put64(scratch(state) + H_COUNT, n)
+        regio.write64(scratch(state) + H_MAGIC, HEAD_MAGIC)
+        regio.write64(scratch(state) + H_SEQ, seq)
+        regio.write64(scratch(state) + H_COUNT, n)
         if !blk.write(state, head_blk(state), scratch(state)) {
             return false
         }
@@ -409,10 +402,10 @@ fn commit(state: u64) -> bool {
         i = i + 1
     }
     zero(scratch(state), BS)
-    put64(scratch(state) + H_MAGIC, COMMIT_MAGIC)
-    put64(scratch(state) + H_SEQ, seq)
-    put64(scratch(state) + H_COUNT, n)
-    put64(scratch(state) + H_SUM, sum)
+    regio.write64(scratch(state) + H_MAGIC, COMMIT_MAGIC)
+    regio.write64(scratch(state) + H_SEQ, seq)
+    regio.write64(scratch(state) + H_COUNT, n)
+    regio.write64(scratch(state) + H_SUM, sum)
     if !blk.write(state, commit_blk(state), scratch(state)) {
         return false
     }
@@ -471,12 +464,12 @@ fn replay(state: u64, jstart: u64, jblocks: u64) -> u64 {
     if !blk.read(state, commit_blk(state), scratch(state)) {
         return 0
     }
-    if get64(scratch(state) + H_MAGIC) != COMMIT_MAGIC {
+    if regio.read64(scratch(state) + H_MAGIC) != COMMIT_MAGIC {
         return 0
     }
-    let seq: u64 = get64(scratch(state) + H_SEQ)
-    let n: u64 = get64(scratch(state) + H_COUNT)
-    let sum: u64 = get64(scratch(state) + H_SUM)
+    let seq: u64 = regio.read64(scratch(state) + H_SEQ)
+    let n: u64 = regio.read64(scratch(state) + H_COUNT)
+    let sum: u64 = regio.read64(scratch(state) + H_SUM)
     if n == 0 || n > MAX_SLOTS {
         delete(state)
         return 0
@@ -484,15 +477,15 @@ fn replay(state: u64, jstart: u64, jblocks: u64) -> u64 {
     if !blk.read(state, head_blk(state), scratch(state)) {
         return 0
     }
-    if get64(scratch(state) + H_MAGIC) != HEAD_MAGIC {
+    if regio.read64(scratch(state) + H_MAGIC) != HEAD_MAGIC {
         delete(state)
         return 0
     }
-    if get64(scratch(state) + H_SEQ) != seq {
+    if regio.read64(scratch(state) + H_SEQ) != seq {
         delete(state)
         return 0
     }
-    if get64(scratch(state) + H_COUNT) != n {
+    if regio.read64(scratch(state) + H_COUNT) != n {
         delete(state)
         return 0
     }
@@ -503,7 +496,7 @@ fn replay(state: u64, jstart: u64, jblocks: u64) -> u64 {
         }
         var j: u64 = 0
         while j < 64 && k * 64 + j < n {
-            tgt_set(state, k * 64 + j, get64(scratch(state) + j * 8))
+            tgt_set(state, k * 64 + j, regio.read64(scratch(state) + j * 8))
             j = j + 1
         }
         k = k + 1
