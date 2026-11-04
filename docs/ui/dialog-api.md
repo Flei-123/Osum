@@ -23,6 +23,7 @@ dialog.consent_ask(client, action, args, rights) -> answer
 ```
 - `answer`: `ANSWER_YES` (1), `ANSWER_NO` (2), `ANSWER_NONE` (0: no window server, timeout 120 s, cancelled). A message box acknowledges with either 1 or 2.
 - `kind`: `KIND_MESSAGE` (J/N both close), `KIND_CONFIRM` (J = yes, N / Esc = no, Enter on the default focus = no).
+- Title line: `<product> - <severity prefix><title>`; panel width = 512 px x `uiscale` (reduced if the screen is too narrow).
 - `severity`: `SEV_INFO`, `SEV_WARNING`, `SEV_ERROR`, `SEV_CRITICAL`; shown as a title prefix (Warnung:/Fehler:/Kritisch:, en: Warning:/Error:/Critical:).
 - `details`: optional, first line = label, rest = lines behind the D key.
 - Extension points: table `KINDS` (labels + hint, de/en) and `SEVERITIES` in `dialog.fi`; consent text in `trusttext.fi` (`REG`, `META`, `RIGHTS`).

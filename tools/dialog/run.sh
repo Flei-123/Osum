@@ -54,7 +54,7 @@ run_cfg() {
     printf 'lang=%s\n' "$lang" > "$W/locale.conf"
     printf 'root:x:0:0:root:/:/bin/sh\n' > "$W/passwd"
     local A=(build "$W/disk.img" 16384 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf"
-        /bin/ /t/ /tmp/ /var/ /var/log/ /etc/ "/etc/passwd=$W/passwd" "/etc/locale.conf=$W/locale.conf"
+        /bin/ /t/ /tmp/ /var/ /var/log/ /proc/ /etc/ "/etc/passwd=$W/passwd" "/etc/locale.conf=$W/locale.conf"
         /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/
         "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages"
         "/t/g.sh=$TMPD/g.sh")
@@ -116,8 +116,13 @@ run_cfg() {
     [ "$(grep -ac 'msgbox: answer=y' "$G")" -ge 6 ] && ok "[$tag] yes/ack lines: $(grep -ac 'msgbox: answer=y' "$G")" || bad "[$tag] too few 'answer=y' lines"
     [ "$(grep -ac 'msgbox: answer=n' "$G")" -ge 2 ] && ok "[$tag] no lines: $(grep -ac 'msgbox: answer=n' "$G")" || bad "[$tag] too few 'answer=n' lines"
     grep -qaF "==FERTIG==" "$G" && ok "[$tag] script ran to the end" || bad "[$tag] script did not finish"
-    python3 tools/dialog/pixels.py "$W" > "$W/pix.txt" 2>&1; cat "$W/pix.txt" | sed 's/^/        /'
+    python3 tools/dialog/pixels.py "$W" "$scale" > "$W/pix.txt" 2>&1; cat "$W/pix.txt" | sed 's/^/        /'
     grep -q '^PIXELS-OK' "$W/pix.txt" && ok "[$tag] pixels: dialogs drawn, severities differ, identical dialogs identical" || bad "[$tag] pixel checks"
+    local NL; NL=$(grep -ac 'wm: trusted dialog layout' "$G")
+    local NW; NW=$(grep -a 'wm: trusted dialog layout' "$G" | grep -ac " w=$((512 * scale)) title=")
+    [ "$NL" -ge 9 ] && [ "$NW" = "$NL" ] && ok "[$tag] all $NL dialogs are $((512 * scale)) px wide (scale $scale)" || bad "[$tag] dialog width wrong: $NW of $NL are $((512 * scale)) px"
+    local NT; NT=$(grep -a 'wm: trusted dialog layout' "$G" | grep -acE " title=[A-Za-z0-9]+ - ")
+    [ "$NT" = "$NL" ] && ok "[$tag] every title line starts with the product name" || bad "[$tag] title without product name: $NT of $NL"
     for f in m1-message m2-confirm-default m3-confirm-yes m4-warning m5-error m6-critical m7-consent m8-wrongkey m9-error-again; do
         [ -s "$W/$f.png" ] && ok "[$tag] photo $W/$f.png" || bad "[$tag] no photo $f"; done
 }

@@ -34,7 +34,7 @@ def diff(a, b):
     return sum(d.histogram()[255:])
 
 
-def main(root):
+def main(root, scale):
     names = ["m1-message", "m4-warning", "m5-error", "m6-critical", "m9-error-again"]
     try:
         shots = {n: load(root, n) for n in names}
@@ -49,6 +49,13 @@ def main(root):
     if bad:
         print("PIXELS-FAIL %d" % bad)
         return 1
+    want = 512 * scale - 2 * scale
+    for n in names:
+        box = panel_box(shots[n])
+        width = box[2] - box[0]
+        print("%s: panel %d px wide (want %d at scale %d)" % (n, width, want, scale))
+        if abs(width - want) > 6 * scale:
+            bad += 1
     same = diff(shots["m5-error"], shots["m9-error-again"])
     print("identical error dialogs: %d differing px in the panel" % same)
     if same > 0:
@@ -62,4 +69,4 @@ def main(root):
     return 0 if bad == 0 else 1
 
 
-sys.exit(main(sys.argv[1]))
+sys.exit(main(sys.argv[1], int(sys.argv[2])))

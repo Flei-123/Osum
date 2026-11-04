@@ -24,4 +24,5 @@ Difference: elevate was a normal window of a root helper (can be covered, is cli
 - Password/PIN field for admin consent (the compositor dialog has no text field).
 - Dim backdrop (secure desktop look).
 - Generic dialog API: done, see docs/ui/dialog-api.md (dialog.fi, menu.fi, /bin/msgbox, gate tools/dialog).
-- Store still starts through elevate (`needs_root`), then asks again on install.
+- Store opens as the session user (no elevate); the privileged work runs in the store daemon, so install/update/remove ask exactly ONCE through the bus dialog.
+- Dialog scale follows `uiscale` (reduced step by step until the 68-column panel fits the screen); every title starts with the product name.
