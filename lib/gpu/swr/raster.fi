@@ -23,6 +23,7 @@ import std.math
 import jobs.jobs
 import gpu.swr.pixel
 import gpu.swr.clip
+import gpu.swr.fragops
 
 export {
     Frame, frame_new, frame_free, frame_clear, frame_setup, frame_draw, frame_hash, frame_pixel,
@@ -80,6 +81,12 @@ struct Frame {
     sy1: i32,
     ubo: u64, // f32 [n] constant buffer read by OP_LDU (uniform blocks / push constants)
     nflat: i32, // flat varying floats copied from the provoking vertex into registers FLAT_REG.. (0 = none)
+    cull_neg: bool,
+    front_pos: bool,
+    depth_func: i32,
+    depth_write: bool,
+    stencil: u64,
+    stp: u64,
 }
 
 fn ld_f32(p: u64, i: usize) -> f32 {
@@ -99,7 +106,7 @@ fn st_i64(p: u64, i: usize, v: i64) {
 }
 
 fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
-    let fp: u64 = rt.heap_alloc(256)
+    let fp: u64 = rt.heap_alloc(512)
     let f: *mut Frame = fp as *mut Frame
     (*f).w = w
     (*f).h = h
@@ -129,6 +136,12 @@ fn frame_new(w: i32, h: i32, max_tri: i32) -> *mut Frame {
     (*f).sy1 = h
     (*f).ubo = 0 as u64
     (*f).nflat = 0
+    (*f).cull_neg = false
+    (*f).front_pos = false
+    (*f).depth_func = 1
+    (*f).depth_write = true
+    (*f).stencil = 0 as u64
+    (*f).stp = 0 as u64
     (*f).xtex = rt.heap_alloc((NSLOT - 1) * 24)
     rt.mem_set((*f).xtex, 0 as u8, (NSLOT - 1) * 24)
     return f
@@ -353,6 +366,9 @@ fn setup_poly(f: *mut Frame, r: u64, pv: u64, v0: usize, v1: usize, v2: usize) {
     var area2: i64 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
     if area2 == 0 as i64 { return }
     if area2 > 0 as i64 && (*f).cull { return }
+    if area2 < 0 as i64 && (*f).cull_neg { return }
+    var pos_sign: i64 = 0
+    if area2 > 0 as i64 { pos_sign = 1 }
     // vertex order for attribute planes: 0 = a, 1 = b, 2 = c; swap b and c when the winding is reversed
     var i1: usize = 1
     var i2: usize = 2
@@ -423,6 +439,7 @@ fn setup_poly(f: *mut Frame, r: u64, pv: u64, v0: usize, v1: usize, v2: usize) {
     st_i64(r, 14, E0)
     st_i64(r, 15, E1)
     st_i64(r, 16, E2)
+    st_i64(r, 17, pos_sign)
     let a2: f64 = area2 as f64
     let s0: f64 = (0 as i64 - e0dy * 16 as i64) as f64
     let s1: f64 = (0 as i64 - e1dy * 16 as i64) as f64
@@ -479,8 +496,8 @@ fn floor_i32(x: f32) -> i32 {
 
 fn texel(f: *mut Frame, u: f32, v: f32) -> u32 {
     if (*f).bilinear { return pixel.bilinear((*f).tex, (*f).tw, (*f).th, u, v) }
-    let tx: i32 = floor_i32(u * ((*f).tw as f32)) & ((*f).tw - 1)
-    let ty: i32 = floor_i32(v * ((*f).th as f32)) & ((*f).th - 1)
+    let tx: i32 = pixel.wrap(floor_i32(u * ((*f).tw as f32)), (*f).tw)
+    let ty: i32 = pixel.wrap(floor_i32(v * ((*f).th as f32)), (*f).th)
     return rt.ld32((*f).tex, (ty as usize) * ((*f).tw as usize) + (tx as usize))
 }
 
@@ -492,8 +509,8 @@ fn texel_slot(f: *mut Frame, slot: usize, u: f32, v: f32) -> u32 {
     let tw: i32 = rt.ld64((*f).xtex, b + 1) as i32
     let th: i32 = rt.ld64((*f).xtex, b + 2) as i32
     if (*f).bilinear { return pixel.bilinear(tp, tw, th, u, v) }
-    let tx: i32 = floor_i32(u * (tw as f32)) & (tw - 1)
-    let ty: i32 = floor_i32(v * (th as f32)) & (th - 1)
+    let tx: i32 = pixel.wrap(floor_i32(u * (tw as f32)), tw)
+    let ty: i32 = pixel.wrap(floor_i32(v * (th as f32)), th)
     return rt.ld32(tp, (ty as usize) * (tw as usize) + (tx as usize))
 }
 
@@ -832,7 +849,7 @@ fn commit(f: *mut Frame, base: u64, xs: u64, y: i32, n: usize) {
     var l: usize = 0
     while l < n { rt.st32(kf, l, 0 as u32); l = l + 1 }
     flush(f, base, xs, y, n)
-    if !(*f).depth_test { return }
+    if !(*f).depth_test || !(*f).depth_write { return }
     l = 0
     while l < n {
         if rt.ld32(kf, l) == 0 as u32 {
@@ -947,6 +964,11 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
             }
             let dt: bool = (*f).depth_test
             let late: bool = dt && (*f).kills
+            let dfn: i32 = (*f).depth_func
+            let dw: bool = (*f).depth_write
+            let sten: bool = (*f).stencil != 0 as u64 && (*f).stp != 0 as u64
+            var sp: u64 = (*f).stp
+            if sten && ((ld_i64(r, 17) == 1 as i64) != (*f).front_pos) { sp = sp + ((fragops.SO_WORDS * 4) as u64) }
             let zs: u64 = base + (ZS_OFF as u64)
             let cnt: bool = (*f).mode == 3
             var x: i64 = lo
@@ -956,11 +978,24 @@ fn band_tri(f: *mut Frame, r: u64, y0: i32, y1: i32, base: u64, xs: u64, rowc: u
                 let z: f32 = (zb + zd * xf) as f32
                 let idx: usize = (y as usize) * wi + (x as usize)
                 var pass: bool = true
-                if late {
-                    if z >= ld_f32((*f).depth, idx) { pass = false }
-                } else if dt {
-                    if z < ld_f32((*f).depth, idx) { st_f32((*f).depth, idx, z) } else { pass = false }
+                var sv: u32 = 0 as u32
+                if sten {
+                    sv = rt.ld8((*f).stencil, idx) as u32
+                    if !fragops.stencil_pass(sp, sv) {
+                        rt.st8((*f).stencil, idx, fragops.stencil_next(sp, fragops.SO_FAIL, sv) as u8)
+                        pass = false
+                    }
                 }
+                if pass && dt {
+                    let zd: f32 = ld_f32((*f).depth, idx)
+                    if fragops.cmp_f32(dfn, z, zd) {
+                        if !late && dw { st_f32((*f).depth, idx, z) }
+                    } else {
+                        if sten { rt.st8((*f).stencil, idx, fragops.stencil_next(sp, fragops.SO_DFAIL, sv) as u8) }
+                        pass = false
+                    }
+                }
+                if pass && sten { rt.st8((*f).stencil, idx, fragops.stencil_next(sp, fragops.SO_PASS, sv) as u8) }
                 if pass {
                     rt.st32(xs, nl, x as u32)
                     if late { st_f32(zs, nl, z) }

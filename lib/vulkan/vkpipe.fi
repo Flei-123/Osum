@@ -6,7 +6,7 @@ import spirv.validate
 import spirv.lower
 import vulkan.vkobj
 
-export { vkCreateShaderModule, vkDestroyShaderModule, vkCreateGraphicsPipelines, vkDestroyPipeline, pipe_state, P_VS, P_FS, P_TOPO, P_FLAGS, P_NFLAT, P_NATTR, P_NLOC, P_KILLS, P_STRIDE0, P_ATTR0, P_VIEWPORT, P_SCISSOR, F_BLEND, F_PREMUL, F_DEPTH, F_SVIEW, F_SSCISS, MAX_BINDINGS, MAX_ATTRS }
+export { vkCreateShaderModule, vkDestroyShaderModule, vkCreateGraphicsPipelines, vkDestroyPipeline, pipe_state, P_VS, P_FS, P_TOPO, P_FLAGS, P_NFLAT, P_NATTR, P_NLOC, P_KILLS, P_STRIDE0, P_ATTR0, P_VIEWPORT, P_SCISSOR, P_RAST, P_DEPTHOP, P_STENCIL, P_RATES, F_STENCIL, F_BLEND, F_PREMUL, F_DEPTH, F_SVIEW, F_SSCISS, MAX_BINDINGS, MAX_ATTRS }
 
 const MAX_INSTR: usize = 4000
 const PROG_BYTES: usize = 4000 * 20 + 64
@@ -25,11 +25,16 @@ const P_STRIDE0: usize = 10
 const P_ATTR0: usize = 14
 const P_VIEWPORT: usize = 24
 const P_SCISSOR: usize = 27
+const P_RAST: usize = 30
+const P_DEPTHOP: usize = 31
+const P_RATES: usize = 32
+const P_STENCIL: usize = 34
 const F_BLEND: u64 = 1
 const F_PREMUL: u64 = 2
 const F_DEPTH: u64 = 4
 const F_SVIEW: u64 = 8
 const F_SSCISS: u64 = 16
+const F_STENCIL: u64 = 32
 
 #[export_c]
 fn vkCreateShaderModule(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
@@ -113,7 +118,10 @@ fn read_vertex_input(info: u64, st: u64) {
     while i < nb {
         let b: u64 = pb + (i as u64) * 12 as u64
         let binding: u32 = rt.ld32(b, 0)
-        if (binding as usize) < MAX_BINDINGS { rt.st64(st, P_STRIDE0 + (binding as usize), rt.ld32(b + 4 as u64, 0) as u64) }
+        if (binding as usize) < MAX_BINDINGS {
+            rt.st64(st, P_STRIDE0 + (binding as usize), rt.ld32(b + 4 as u64, 0) as u64)
+            if rt.ld32(b + 8 as u64, 0) == 1 as u32 { rt.st64(st, P_RATES, rt.ld64(st, P_RATES) | (1 as u64 << (binding as u64))) }
+        }
         i = i + 1 as u32
     }
     var k: usize = 0
@@ -134,12 +142,34 @@ fn read_vertex_input(info: u64, st: u64) {
     rt.st64(st, P_NLOC, nloc)
 }
 
+fn read_stencil_face(src: u64, dst: u64) {
+    rt.st32(dst, 0, rt.ld32(src + 12 as u64, 0))
+    rt.st32(dst, 1, rt.ld32(src, 0))
+    rt.st32(dst, 2, rt.ld32(src + 4 as u64, 0))
+    rt.st32(dst, 3, rt.ld32(src + 8 as u64, 0))
+    rt.st32(dst, 4, rt.ld32(src + 16 as u64, 0))
+    rt.st32(dst, 5, rt.ld32(src + 20 as u64, 0))
+    rt.st32(dst, 6, rt.ld32(src + 24 as u64, 0))
+}
+
 fn read_fixed_state(info: u64, st: u64) {
     var flags: u64 = 0 as u64
     let ia: u64 = rt.ld64(info + 40 as u64, 0)
     if ia != 0 as u64 { rt.st64(st, P_TOPO, rt.ld32(ia + 20 as u64, 0) as u64) }
+    let rz: u64 = rt.ld64(info + 64 as u64, 0)
+    if rz != 0 as u64 {
+        rt.st64(st, P_RAST, (rt.ld32(rz + 32 as u64, 0) as u64) | ((rt.ld32(rz + 36 as u64, 0) as u64) << 8 as u64))
+    }
     let ds: u64 = rt.ld64(info + 80 as u64, 0)
     if ds != 0 as u64 && rt.ld32(ds + 20 as u64, 0) != 0 as u32 { flags = flags | F_DEPTH }
+    if ds != 0 as u64 {
+        rt.st64(st, P_DEPTHOP, (rt.ld32(ds + 28 as u64, 0) as u64) | ((rt.ld32(ds + 24 as u64, 0) as u64) << 8 as u64))
+        if rt.ld32(ds + 36 as u64, 0) != 0 as u32 {
+            flags = flags | F_STENCIL
+            read_stencil_face(ds + 40 as u64, st + (P_STENCIL as u64) * 8 as u64)
+            read_stencil_face(ds + 68 as u64, st + (P_STENCIL as u64) * 8 as u64 + 28 as u64)
+        }
+    }
     let cb: u64 = rt.ld64(info + 88 as u64, 0)
     if cb != 0 as u64 && rt.ld32(cb + 28 as u64, 0) != 0 as u32 {
         let at: u64 = rt.ld64(cb + 32 as u64, 0)

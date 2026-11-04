@@ -7,10 +7,11 @@ import vulkan.vkres
 import vulkan.vkcmd
 import vulkan.vkpipe
 import vulkan.vkdesc
+import spirv.lower
 
 export { rs_new, rs_free, rs_exec }
 
-const RS_WORDS: usize = 64
+const RS_WORDS: usize = 128
 const R_FRAME: usize = 0
 const R_DIMG: usize = 2
 const R_BGRA: usize = 3
@@ -30,6 +31,11 @@ const R_ORIG_COLOR: usize = 47
 const R_ORIG_DEPTH: usize = 48
 const R_AREA: usize = 49
 const R_SCRATCH: usize = 52
+const R_DOFF: usize = 56
+const R_STBUF: usize = 60
+const R_STSTATE: usize = 64
+const R_TEXC: usize = 80
+const R_TEXCN: usize = 84
 const MAX_TRI: i32 = 2048
 const UBO_BYTES: usize = 4096
 const TOPO_STRIP: u64 = 4
@@ -58,6 +64,68 @@ fn fill_u32(p: u64, n: u64, v: u32) {
     }
 }
 
+fn area_rect(area: u64, w: i32, h: i32, out: u64) {
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = w
+    var y1: i32 = h
+    if (area >> 32 as u64) != 0 as u64 {
+        x0 = (area & 0xFFFF as u64) as i32
+        y0 = ((area >> 16 as u64) & 0xFFFF as u64) as i32
+        x1 = x0 + (((area >> 32 as u64) & 0xFFFF as u64) as i32)
+        y1 = y0 + ((area >> 48 as u64) as i32)
+    }
+    if x1 > w { x1 = w }
+    if y1 > h { y1 = h }
+    rt.st32(out, 0, x0 as u32)
+    rt.st32(out, 1, y0 as u32)
+    rt.st32(out, 2, x1 as u32)
+    rt.st32(out, 3, y1 as u32)
+}
+
+fn fill_rect32(p: u64, w: i32, h: i32, area: u64, v: u32) {
+    let rc: u64 = rt.heap_alloc(16)
+    area_rect(area, w, h, rc)
+    var y: i32 = rt.ld32(rc, 1) as i32
+    while y < (rt.ld32(rc, 3) as i32) {
+        var x: i32 = rt.ld32(rc, 0) as i32
+        while x < (rt.ld32(rc, 2) as i32) {
+            rt.st32(p, (y as usize) * (w as usize) + (x as usize), v)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    rt.heap_free(rc, 16)
+}
+
+fn fill_rect8(p: u64, w: i32, h: i32, area: u64, v: u8) {
+    let rc: u64 = rt.heap_alloc(16)
+    area_rect(area, w, h, rc)
+    var y: i32 = rt.ld32(rc, 1) as i32
+    while y < (rt.ld32(rc, 3) as i32) {
+        var x: i32 = rt.ld32(rc, 0) as i32
+        while x < (rt.ld32(rc, 2) as i32) {
+            rt.st8(p, (y as usize) * (w as usize) + (x as usize), v)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    rt.heap_free(rc, 16)
+}
+
+fn begin_stencil(rs: u64, rec: u64) {
+    let fp: u64 = rt.ld64(rs, R_FRAME)
+    if fp == 0 as u64 { return }
+    let f: *mut raster.Frame = fp as *mut raster.Frame
+    let simg: u64 = vkobj.obj_get(rt.ld64(rec, 1), vkobj.K_VIEW, 0)
+    let sp: u64 = vkres.res_addr(vkobj.K_IMAGE, simg)
+    if sp == 0 as u64 { return }
+    if vkobj.obj_get(simg, vkobj.K_IMAGE, 4) != 127 as u64 { return }
+    if (vkobj.obj_get(simg, vkobj.K_IMAGE, 2) as i32) != (*f).w || (vkobj.obj_get(simg, vkobj.K_IMAGE, 3) as i32) != (*f).h { return }
+    rt.st64(rs, R_STBUF, sp)
+    if rt.ld64(rec, 2) == 1 as u64 { fill_rect8(sp, (*f).w, (*f).h, rt.ld64(rs, R_AREA), (rt.ld64(rec, 3) & 255 as u64) as u8) }
+}
+
 fn frame_of(rs: u64) -> *mut raster.Frame {
     return rt.ld64(rs, R_FRAME) as *mut raster.Frame
 }
@@ -73,6 +141,7 @@ fn end_rendering(rs: u64) {
     rt.st64(rs, R_FRAME, 0 as u64)
     rt.st64(rs, R_BGRA, 0 as u64)
     rt.st64(rs, R_DIMG, 0 as u64)
+    rt.st64(rs, R_STBUF, 0 as u64)
 }
 
 fn rs_free(rs: u64) {
@@ -88,6 +157,7 @@ fn begin_rendering(rs: u64, rec: u64) {
     let w: i32 = vkobj.obj_get(cimg, vkobj.K_IMAGE, 2) as i32
     let h: i32 = vkobj.obj_get(cimg, vkobj.K_IMAGE, 3) as i32
     let n: u64 = (w as u64) * (h as u64)
+    let area: u64 = rt.ld64(rec, 7)
     let f: *mut raster.Frame = raster.frame_new(w, h, MAX_TRI)
     rt.st64(rs, R_FRAME, f as u64)
     rt.st64(rs, R_ORIG_COLOR, (*f).color)
@@ -101,7 +171,7 @@ fn begin_rendering(rs: u64, rec: u64) {
     let depth_load: u64 = (rt.ld64(rec, 4) >> 8 as u64) & 0xFF as u64
     if color_load == 1 as u64 {
         let px: u32 = vkres.unorm8(raster.ld_f32(rec + 16 as u64, 0)) | (vkres.unorm8(raster.ld_f32(rec + 16 as u64, 1)) << 8 as u32) | (vkres.unorm8(raster.ld_f32(rec + 16 as u64, 2)) << 16 as u32) | (vkres.unorm8(raster.ld_f32(rec + 16 as u64, 3)) << 24 as u32)
-        fill_u32(color, n, px)
+        fill_rect32(color, w, h, area, px)
     }
     let dimg: u64 = vkobj.obj_get(rt.ld64(rec, 5), vkobj.K_VIEW, 0)
     let depth: u64 = vkres.res_addr(vkobj.K_IMAGE, dimg)
@@ -114,8 +184,8 @@ fn begin_rendering(rs: u64, rec: u64) {
         clear_depth = depth_load == 1 as u64
     }
     raster.st_f32(rs + (R_SCRATCH as u64) * 8 as u64, 0, clear_z)
-    if clear_depth { fill_u32((*f).depth, n, rt.ld32(rs + (R_SCRATCH as u64) * 8 as u64, 0)) }
-    rt.st64(rs, R_AREA, rt.ld64(rec, 7))
+    if clear_depth { fill_rect32((*f).depth, w, h, area, rt.ld32(rs + (R_SCRATCH as u64) * 8 as u64, 0)) }
+    rt.st64(rs, R_AREA, area)
 }
 
 fn bind_pipeline(rs: u64, rec: u64) {
@@ -151,6 +221,9 @@ fn bind_set(rs: u64, rec: u64) {
     let i: u64 = rt.ld64(rec, 1)
     if i >= 4 as u64 { return }
     rt.st64(rs, R_DS + (i as usize), rt.ld64(rec, 2))
+    var d0: u64 = 0 as u64
+    if (rt.ld64(rec, 3) & 1 as u64) != 0 as u64 { d0 = rt.ld64(rec, 4) }
+    rt.st64(rs, R_DOFF + (i as usize), d0)
 }
 
 fn push_constants(rs: u64, rec: u64) {
@@ -202,13 +275,15 @@ fn vertex_number(rs: u64, indexed: bool, k: u64, first: u64, voff: i64) -> u64 {
     return ((v as i64) + voff) as u64
 }
 
-fn fetch_attr(rs: u64, p: u64, a: usize, vn: u64, row: u64) {
+fn fetch_attr(rs: u64, p: u64, a: usize, vn0: u64, inst: u64, row: u64) {
     let word: u64 = rt.ld64(p, vkpipe.P_ATTR0 + a)
     let loc: usize = (word & 0xFF as u64) as usize
     let binding: usize = ((word >> 8 as u64) & 0xFF as u64) as usize
     let format: u32 = ((word >> 16 as u64) & 0xFFFF as u64) as u32
     let off: u64 = word >> 32 as u64
     if binding >= vkpipe.MAX_BINDINGS { return }
+    var vn: u64 = vn0
+    if ((rt.ld64(p, vkpipe.P_RATES) >> (binding as u64)) & 1 as u64) != 0 as u64 { vn = inst }
     let vb: u64 = rt.ld64(rs, R_VB + binding * 2)
     let base: u64 = vkres.res_addr(vkobj.K_BUFFER, vb)
     if base == 0 as u64 { return }
@@ -304,13 +379,61 @@ fn bind_textures(rs: u64, f: *mut raster.Frame) {
             let img: u64 = vkobj.obj_get(rt.ld64(s, 1), vkobj.K_VIEW, 0)
             let px: u64 = vkres.res_addr(vkobj.K_IMAGE, img)
             if px != 0 as u64 {
-                raster.frame_set_texture_slot(f, b, px, vkobj.obj_get(img, vkobj.K_IMAGE, 2) as i32, vkobj.obj_get(img, vkobj.K_IMAGE, 3) as i32)
+                let tw: i32 = vkobj.obj_get(img, vkobj.K_IMAGE, 2) as i32
+                let th: i32 = vkobj.obj_get(img, vkobj.K_IMAGE, 3) as i32
+                var tp: u64 = px
+                if vkobj.obj_get(img, vkobj.K_IMAGE, 4) == 44 as u64 {
+                    let nb: usize = (tw as usize) * (th as usize) * 4
+                    tp = rt.heap_alloc(nb)
+                    rt.mem_copy(tp, px, nb)
+                    swap_rb(tp, (tw as u64) * (th as u64))
+                    rt.st64(rs, R_TEXC + b, tp)
+                    rt.st64(rs, R_TEXCN + b, nb as u64)
+                }
+                raster.frame_set_texture_slot(f, b, tp, tw, th)
                 if vkobj.obj_get(rt.ld64(s, 2), vkobj.K_SAMPLER, 0) == 1 as u64 { linear = true }
             }
         }
         b = b + 1
     }
     raster.frame_set_bilinear(f, linear)
+}
+
+fn free_texture_copies(rs: u64) {
+    var b: usize = 0
+    while b < 4 {
+        let tp: u64 = rt.ld64(rs, R_TEXC + b)
+        if tp != 0 as u64 {
+            rt.heap_free(tp, rt.ld64(rs, R_TEXCN + b) as usize)
+            rt.st64(rs, R_TEXC + b, 0 as u64)
+        }
+        b = b + 1
+    }
+}
+
+fn apply_fragment_state(rs: u64, f: *mut raster.Frame, p: u64) {
+    let rastw: u64 = rt.ld64(p, vkpipe.P_RAST)
+    let cull_mode: u64 = rastw & 3 as u64
+    let front_pos: bool = ((rastw >> 8 as u64) & 255 as u64) == 1 as u64
+    (*f).front_pos = front_pos
+    var pos_bit: u64 = 2 as u64
+    var neg_bit: u64 = 1 as u64
+    if front_pos {
+        pos_bit = 1 as u64
+        neg_bit = 2 as u64
+    }
+    (*f).cull = (cull_mode & pos_bit) != 0 as u64
+    (*f).cull_neg = (cull_mode & neg_bit) != 0 as u64
+    let dop: u64 = rt.ld64(p, vkpipe.P_DEPTHOP)
+    (*f).depth_func = (dop & 255 as u64) as i32
+    (*f).depth_write = ((dop >> 8 as u64) & 1 as u64) != 0 as u64
+    (*f).stencil = 0 as u64
+    (*f).stp = 0 as u64
+    if (rt.ld64(p, vkpipe.P_FLAGS) & vkpipe.F_STENCIL) != 0 as u64 && rt.ld64(rs, R_STBUF) != 0 as u64 {
+        rt.mem_copy(rs + (R_STSTATE as u64) * 8 as u64, p + (vkpipe.P_STENCIL as u64) * 8 as u64, 56)
+        (*f).stp = rs + (R_STSTATE as u64) * 8 as u64
+        (*f).stencil = rt.ld64(rs, R_STBUF)
+    }
 }
 
 fn build_ubo(rs: u64) -> u64 {
@@ -321,20 +444,19 @@ fn build_ubo(rs: u64) -> u64 {
         let buf: u64 = rt.ld64(s, 1)
         let p: u64 = vkres.res_addr(vkobj.K_BUFFER, buf)
         let size: u64 = vkobj.obj_get(buf, vkobj.K_BUFFER, 2)
-        let off: u64 = rt.ld64(s, 2)
+        let off: u64 = rt.ld64(s, 2) + rt.ld64(rs, R_DOFF)
         var n: u64 = rt.ld64(s, 3)
-        if n > (UBO_BYTES as u64) { n = UBO_BYTES as u64 }
+        if n > (lower.PUSH_BASE as u64) { n = lower.PUSH_BASE as u64 }
         if p != 0 as u64 && off < size {
             if n > size - off { n = size - off }
             rt.mem_copy(ubo, p + off, n as usize)
         }
-        return ubo
     }
-    rt.mem_copy(ubo, rs + (R_PUSH as u64) * 8 as u64, PUSH_WORDS * 8)
+    rt.mem_copy(ubo + (lower.PUSH_BASE as u64), rs + (R_PUSH as u64) * 8 as u64, PUSH_WORDS * 8)
     return ubo
 }
 
-fn run_batch(rs: u64, f: *mut raster.Frame, p: u64, indexed: bool, first: u64, voff: i64, t0: u64, nt: u64) {
+fn run_batch(rs: u64, f: *mut raster.Frame, p: u64, indexed: bool, first: u64, voff: i64, inst: u64, t0: u64, nt: u64) {
     let topo: u64 = rt.ld64(p, vkpipe.P_TOPO)
     var stride: usize = (rt.ld64(p, vkpipe.P_NLOC) as usize) * 4
     if stride < 4 { stride = 4 }
@@ -352,7 +474,7 @@ fn run_batch(rs: u64, f: *mut raster.Frame, p: u64, indexed: bool, first: u64, v
         let vn: u64 = vertex_number(rs, indexed, tri_vertex(topo, t0 + (j as u64) / 3 as u64, (j as u64) % 3 as u64), first, voff)
         var a: usize = 0
         while a < (rt.ld64(p, vkpipe.P_NATTR) as usize) {
-            fetch_attr(rs, p, a, vn, row)
+            fetch_attr(rs, p, a, vn, inst, row)
             a = a + 1
         }
         j = j + 1
@@ -367,12 +489,14 @@ fn run_batch(rs: u64, f: *mut raster.Frame, p: u64, indexed: bool, first: u64, v
     raster.frame_set_blend(f, (flags & vkpipe.F_BLEND) != 0 as u64)
     raster.frame_set_blend_premul(f, (flags & vkpipe.F_PREMUL) != 0 as u64)
     (*f).depth_test = (flags & vkpipe.F_DEPTH) != 0 as u64 && rt.ld64(rs, R_DIMG) != 0 as u64
+    apply_fragment_state(rs, f, p)
     bind_textures(rs, f)
     apply_scissor(rs, f)
     vertex.vs_run(f, rt.ld64(p, vkpipe.P_VS), attrs, stride, nv, 0)
     apply_viewport(rs, f, nv)
     (*f).ntri = nt as i32
     raster.frame_draw(f, 0 as u64)
+    free_texture_copies(rs)
     rt.heap_free(ubo, UBO_BYTES)
     rt.heap_free(attrs, nv * stride * 4)
 }
@@ -389,13 +513,19 @@ fn draw(rs: u64, rec: u64, indexed: bool) {
     if indexed { voff = rt.ld64(rec, 4) as i64 }
     var first: u64 = 0 as u64
     first = rt.ld64(rec, 3)
+    var first_inst: u64 = rt.ld64(rec, 4)
+    if indexed { first_inst = rt.ld64(rec, 5) }
     let total: u64 = tri_count(rt.ld64(p, vkpipe.P_TOPO), rt.ld64(rec, 1))
-    var t0: u64 = 0 as u64
-    while t0 < total {
-        var nt: u64 = total - t0
-        if nt > (MAX_TRI as u64) { nt = MAX_TRI as u64 }
-        run_batch(rs, f, p, indexed, first, voff, t0, nt)
-        t0 = t0 + nt
+    var inst: u64 = 0 as u64
+    while inst < rt.ld64(rec, 2) {
+        var t0: u64 = 0 as u64
+        while t0 < total {
+            var nt: u64 = total - t0
+            if nt > (MAX_TRI as u64) { nt = MAX_TRI as u64 }
+            run_batch(rs, f, p, indexed, first, voff, first_inst + inst, t0, nt)
+            t0 = t0 + nt
+        }
+        inst = inst + 1 as u64
     }
 }
 
@@ -415,6 +545,7 @@ fn rs_exec(rs: u64, op: u64, rec: u64) {
         rt.mem_copy(rs + (R_SC as u64) * 8 as u64, rec + 8 as u64, 16)
         rt.st64(rs, R_HASSC, 1 as u64)
     }
+    if op == vkcmd.OP_BEGIN_STENCIL { begin_stencil(rs, rec) }
     if op == vkcmd.OP_DRAW { draw(rs, rec, false) }
     if op == vkcmd.OP_DRAW_INDEXED { draw(rs, rec, true) }
 }
