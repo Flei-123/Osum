@@ -4,7 +4,7 @@ import libc.threads
 import libc.errno
 import libc.octets
 
-export { STATE_ENABLE, STATE_DISABLE, TYPE_DEFERRED, TYPE_ASYNC, CANCELED, SLICE_NS, CLEANUP_MAX, request, setstate, settype, testcancel, due, act, wait_begin, wait_end, sleep_ns, join, cleanup_push, cleanup_pop, cleanup_depth, run_cleanups, pending }
+export { NUDGE_LIMIT, wait_on, wait_on_ns, STATE_ENABLE, STATE_DISABLE, TYPE_DEFERRED, TYPE_ASYNC, CANCELED, SLICE_NS, CLEANUP_MAX, request, setstate, settype, testcancel, due, act, wait_begin, wait_end, sleep_ns, join, cleanup_push, cleanup_pop, cleanup_depth, run_cleanups, pending }
 
 const OFF_PENDING: u64 = 0
 const OFF_DISABLED: u64 = 8
@@ -19,6 +19,7 @@ const TYPE_DEFERRED: u64 = 0
 const TYPE_ASYNC: u64 = 1
 const CANCELED: u64 = 0xFFFFFFFFFFFFFFFF
 const SLICE_NS: u64 = 20000000
+const NUDGE_LIMIT: u64 = 400
 
 fn mine() -> u64 {
     return threads.cancel_block(threads.current())
@@ -47,19 +48,33 @@ fn testcancel() {
     }
 }
 
-fn request(t: u64) -> u64 {
-    if t == 0 {
-        return errno.E_SRCH
+fn nudge(t: u64, b: u64) {
+    var tries: u64 = 0
+    while tries < NUDGE_LIMIT {
+        let waiting: u64 = locks.load(b + OFF_WAITING)
+        if waiting == 0 || locks.load(b + OFF_DISABLED) != 0 {
+            return
+        }
+        if t != 0 && threads.is_done(t) {
+            return
+        }
+        locks.futex_wake(waiting, locks.WAKE_ALL)
+        if tries == 0 {
+            threads.yield_now()
+        } else {
+            threads.sleep_ms(1)
+        }
+        tries = tries + 1
     }
-    if threads.is_done(t) {
+}
+
+fn request(t: u64) -> u64 {
+    if t != 0 && threads.is_done(t) {
         return 0
     }
     let b: u64 = threads.cancel_block(t)
     locks.store(b + OFF_PENDING, 1)
-    let waiting: u64 = locks.load(b + OFF_WAITING)
-    if waiting != 0 {
-        locks.futex_wake(waiting, locks.WAKE_ALL)
-    }
+    nudge(t, b)
     locks.futex_wake(b + OFF_PENDING, locks.WAKE_ALL)
     return 0
 }
@@ -94,6 +109,28 @@ fn wait_end() {
     locks.store(mine() + OFF_WAITING, 0)
 }
 
+fn wait_on(addr: u64, expect: u64) -> bool {
+    wait_begin(addr)
+    if due() {
+        wait_end()
+        return true
+    }
+    locks.futex_wait(addr, expect)
+    wait_end()
+    return due()
+}
+
+fn wait_on_ns(addr: u64, expect: u64, ns: u64) -> bool {
+    wait_begin(addr)
+    if due() {
+        wait_end()
+        return true
+    }
+    locks.futex_wait_ns(addr, expect, ns)
+    wait_end()
+    return due()
+}
+
 fn sleep_ns(ns: u64) -> u64 {
     let b: u64 = mine()
     let deadline: u64 = locks.deadline_after(ns)
@@ -117,17 +154,14 @@ fn sleep_ns(ns: u64) -> u64 {
 
 fn join(t: u64) -> u64 {
     let b: u64 = mine()
-    locks.store(b + OFF_WAITING, t)
     var tid: u64 = threads.thread_id(t)
     while tid != 0 {
         if due_at(b) {
-            locks.store(b + OFF_WAITING, 0)
             act()
         }
         threads.wait_tid_ns(t, tid, SLICE_NS)
         tid = threads.thread_id(t)
     }
-    locks.store(b + OFF_WAITING, 0)
     return threads.join(t)
 }
 

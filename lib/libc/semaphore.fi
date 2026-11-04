@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import libc.locks
 import libc.errno
+import libc.pcancel
 
 export { init, post, wait, try_wait, timed_wait, value, waiters }
 
@@ -49,6 +50,13 @@ fn try_wait(p: u64) -> bool {
     return false
 }
 
+fn pass_on(p: u64) {
+    let v: u64 = locks.load(p)
+    if (v & COUNT_MASK) != 0 && (v >> 32) != 0 {
+        locks.futex_wake(p, 1)
+    }
+}
+
 fn wait(p: u64) {
     while true {
         let v: u64 = locks.load(p)
@@ -58,8 +66,12 @@ fn wait(p: u64) {
             }
         } else {
             if locks.cas(p, v, v + WAITER_ONE) == v {
-                locks.futex_wait(p, 0)
+                let canceled: bool = pcancel.wait_on(p, 0)
                 locks.fetch_add(p, 0 -% WAITER_ONE)
+                if canceled {
+                    pass_on(p)
+                    pcancel.act()
+                }
             }
         }
     }
@@ -79,8 +91,12 @@ fn timed_wait(p: u64, timeout_ns: u64) -> u64 {
                 return errno.E_TIMEDOUT
             }
             if locks.cas(p, v, v + WAITER_ONE) == v {
-                locks.futex_wait_ns(p, 0, left)
+                let canceled: bool = pcancel.wait_on_ns(p, 0, left)
                 locks.fetch_add(p, 0 -% WAITER_ONE)
+                if canceled {
+                    pass_on(p)
+                    pcancel.act()
+                }
             }
         }
     }

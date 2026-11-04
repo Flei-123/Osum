@@ -13,11 +13,11 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-PROGS="sh echo sleep thrprobe threxit thrwake"
+PROGS="sh echo sleep thrprobe threxit thrwake thrcancel0"
 
 echo "== build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-mkdir -p "$TMPD/norwbin" "$TMPD/nobarbin" "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/nocancelbin" "$TMPD/noexitbin"
+mkdir -p "$TMPD/norwbin" "$TMPD/nobarbin" "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/nocancelbin" "$TMPD/noexitbin" "$TMPD/nocmbin" "$TMPD/nonudgebin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else sed 's/^/        /' "$TMPD/b.txt" | head -20; bad "programs do not build"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; fi
 cp -r lib "$TMPD/badlib"
 sed -i 's/while tid != 0 {/while false {/' "$TMPD/badlib/libc/threads.fi"
@@ -50,6 +50,14 @@ if FIRNLIB="$TMPD/nocvlib" bash tools/sync/build.sh "$TMPD/nocvbin" 0 thrprobe >
 if cmp -s lib/libc/threads.fi "$TMPD/notlslib/libc/threads.fi"; then bad "counter-proof no-TLS mutation did not apply"; fi
 if FIRNLIB="$TMPD/notlslib" bash tools/sync/build.sh "$TMPD/notlsbin" 0 thrprobe > "$TMPD/nb.txt" 2>&1; then ok "counter-proof no-TLS program builds"; else bad "counter-proof no-TLS program does not build"; fi
 if FIRNLIB="$TMPD/badlib" bash tools/sync/build.sh "$TMPD/badbin" 0 thrprobe > "$TMPD/bb.txt" 2>&1; then ok "counter-proof program builds"; else bad "counter-proof program does not build"; fi
+cp -r lib "$TMPD/nocmlib"
+sed -i 's/^    if t != 0 \&\& threads.is_done(t) {$/    if t == 0 || threads.is_done(t) {/' "$TMPD/nocmlib/libc/pcancel.fi"
+cp -r lib "$TMPD/nonudgelib"
+sed -i 's/locks.futex_wake(waiting, locks.WAKE_ALL)/locks.load(waiting)/' "$TMPD/nonudgelib/libc/pcancel.fi"
+if cmp -s lib/libc/pcancel.fi "$TMPD/nocmlib/libc/pcancel.fi"; then bad "counter-proof no-main-cancel mutation did not apply"; fi
+if cmp -s lib/libc/pcancel.fi "$TMPD/nonudgelib/libc/pcancel.fi"; then bad "counter-proof no-cancel-nudge mutation did not apply"; fi
+if FIRNLIB="$TMPD/nocmlib" bash tools/sync/build.sh "$TMPD/nocmbin" 0 thrcancel0 > "$TMPD/ncm.txt" 2>&1; then ok "counter-proof no-main-cancel program builds"; else bad "counter-proof no-main-cancel program does not build"; fi
+if FIRNLIB="$TMPD/nonudgelib" bash tools/sync/build.sh "$TMPD/nonudgebin" 0 thrcancel0 > "$TMPD/nnu.txt" 2>&1; then ok "counter-proof no-cancel-nudge program builds"; else bad "counter-proof no-cancel-nudge program does not build"; fi
 if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then ok "kernel builds"; else tail -8 "$TMPD/k.txt" | sed 's/^/        /'; bad "kernel does not build"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; fi
 
 {
@@ -77,6 +85,15 @@ if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then o
     echo "thrwake_norw"
     echo "echo ==WAKENOBAR=="
     echo "thrwake_nobar"
+    echo "echo ==CANCEL0GOOD=="
+    echo "thrcancel0"
+    echo "sleep 3"
+    echo "echo ==CANCEL0NOMAIN=="
+    echo "thrcancel0_nomain"
+    echo "sleep 3"
+    echo "echo ==CANCEL0NONUDGE=="
+    echo "thrcancel0_nonudge"
+    echo "sleep 3"
     echo "echo ==END=="
 } > "$TMPD/s.sh"
 {
@@ -93,6 +110,8 @@ for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 [ -f "$TMPD/noexitbin/threxit.elf" ] && A+=("/bin/threxit_bad=$TMPD/noexitbin/threxit.elf")
 [ -f "$TMPD/norwbin/thrwake.elf" ] && A+=("/bin/thrwake_norw=$TMPD/norwbin/thrwake.elf")
 [ -f "$TMPD/nobarbin/thrwake.elf" ] && A+=("/bin/thrwake_nobar=$TMPD/nobarbin/thrwake.elf")
+[ -f "$TMPD/nocmbin/thrcancel0.elf" ] && A+=("/bin/thrcancel0_nomain=$TMPD/nocmbin/thrcancel0.elf")
+[ -f "$TMPD/nonudgebin/thrcancel0.elf" ] && A+=("/bin/thrcancel0_nonudge=$TMPD/nonudgebin/thrcancel0.elf")
 [ -f "$TMPD/notlsbin/thrprobe.elf" ] && A+=("/bin/thrprobe_notls=$TMPD/notlsbin/thrprobe.elf")
 A+=("/t/s.sh=$TMPD/s.sh" "/t/s2.sh=$TMPD/s2.sh")
 bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; }
@@ -124,7 +143,10 @@ exitgood=$(sed -n '/==EXITGOOD==/,/==EXITBAD==/p' "$TMPD/out.klar")
 exitbad=$(sed -n '/==EXITBAD==/,/==WAKEGOOD==/p' "$TMPD/out.klar")
 wakegood=$(sed -n '/==WAKEGOOD==/,/==WAKENORW==/p' "$TMPD/out.klar")
 wakenorw=$(sed -n '/==WAKENORW==/,/==WAKENOBAR==/p' "$TMPD/out.klar")
-wakenobar=$(sed -n '/==WAKENOBAR==/,/==END==/p' "$TMPD/out.klar")
+wakenobar=$(sed -n '/==WAKENOBAR==/,/==CANCEL0GOOD==/p' "$TMPD/out.klar")
+cancel0good=$(sed -n '/==CANCEL0GOOD==/,/==CANCEL0NOMAIN==/p' "$TMPD/out.klar")
+cancel0nomain=$(sed -n '/==CANCEL0NOMAIN==/,/==CANCEL0NONUDGE==/p' "$TMPD/out.klar")
+cancel0nonudge=$(sed -n '/==CANCEL0NONUDGE==/,/==END==/p' "$TMPD/out.klar")
 latout=$(sed -n '/==LAT==/,/==END==/p' "$TMPD/out2.klar")
 echo "$good" | grep -aq 'thrprobe failed=0' && echo "$good" | grep -aq 'thrprobe done' \
     && ok "guest: threads suite passed ($(echo "$good" | grep -a 'thrprobe passed=' | tr -d '\r'))" \
@@ -184,6 +206,21 @@ if echo "$wakenobar" | grep -aq 'thrwake failed=0'; then
     bad "guest: counter-proof (barrier without wake) still passed"
 else
     echo "$wakenobar" | grep -aq 'thrwake done' && ok "guest: counter-proof (barrier without wake) is caught" || bad "guest: counter-proof no-barrier-wake run incomplete"
+fi
+if echo "$cancel0good" | grep -aq 'thrcancel0 cleanup' && echo "$cancel0good" | grep -aq 'thrcancel0 dtor' && ! echo "$cancel0good" | grep -aq 'thrcancel0 \(alive\|slow\)' && ! echo "$cancel0good" | grep -aq 'thrcancel0 late'; then
+    ok "guest: cancel(0) takes the blocked main thread out of its semaphore wait, runs cleanup and destructor, kills the sibling"
+else
+    echo "$cancel0good" | tail -6 | sed 's/^/        /'; bad "guest: main-thread cancel semantics wrong"
+fi
+if echo "$cancel0nomain" | grep -aq 'thrcancel0 \(alive\|late\|slow\)'; then
+    ok "guest: counter-proof (cancel(0) ignored) is caught"
+else
+    bad "guest: counter-proof (cancel(0) ignored) not caught"
+fi
+if echo "$cancel0nonudge" | grep -aq 'thrcancel0 \(alive\|late\|slow\)'; then
+    ok "guest: counter-proof (cancel without waking the blocked waiter) is caught"
+else
+    bad "guest: counter-proof (cancel without waking the blocked waiter) not caught"
 fi
 echo; echo "LIBC-GUEST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

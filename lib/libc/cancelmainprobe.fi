@@ -1,0 +1,67 @@
+// SPDX-License-Identifier: MIT
+import libc.threads
+import libc.kcall
+import libc.locks
+import libc.pcancel
+import libc.semaphore
+
+export { run_main_cancel, CANCELED_CODE }
+
+const CANCELED_CODE: u64 = 255
+const SLEEPER_MS: u64 = 1500
+const CANCEL_AFTER_MS: u64 = 60
+const WAIT_NS: u64 = 3000000000
+const STDOUT: u64 = 1
+const SLOW_NS: u64 = 500000000
+
+static mut CLEANUP_MARK: [u8; 20] = "thrcancel0 cleanup\n\0"
+static mut DTOR_MARK: [u8; 17] = "thrcancel0 dtor\n\0"
+static mut ALIVE_MARK: [u8; 18] = "thrcancel0 alive\n\0"
+static mut LATE_MARK: [u8; 17] = "thrcancel0 late\n\0"
+static mut SLOW_MARK: [u8; 17] = "thrcancel0 slow\n\0"
+static mut gate: u64 = 0
+static mut started: u64 = 0
+
+fn put(mark: u64, bytes: u64) {
+    kcall.sys3(kcall.SYS_WRITE, STDOUT, mark, bytes)
+}
+
+fn cleanup(arg: u64) -> u64 {
+    put((&CLEANUP_MARK[0]) as u64, 19)
+    if locks.now_ns() - started > SLOW_NS {
+        put((&SLOW_MARK[0]) as u64, 16)
+    }
+    return 0
+}
+
+fn dtor(value: u64) -> u64 {
+    put((&DTOR_MARK[0]) as u64, 16)
+    return 0
+}
+
+fn sleeper(arg: u64) -> u64 {
+    threads.sleep_ms(SLEEPER_MS)
+    put((&LATE_MARK[0]) as u64, 16)
+    kcall.sys1(kcall.SYS_EXIT_GROUP, 99)
+    return 0
+}
+
+fn canceler(arg: u64) -> u64 {
+    threads.sleep_ms(CANCEL_AFTER_MS)
+    pcancel.request(0)
+    return 0
+}
+
+fn run_main_cancel() -> u64 {
+    let key: u64 = threads.key_create(dtor)
+    threads.key_set(key, 1)
+    if key == 0 || threads.spawn(sleeper, 0) == 0 || threads.spawn(canceler, 0) == 0 {
+        return 1
+    }
+    started = locks.now_ns()
+    pcancel.cleanup_push(cleanup as u64, 0)
+    semaphore.init((&gate) as u64, 0)
+    semaphore.timed_wait((&gate) as u64, WAIT_NS)
+    put((&ALIVE_MARK[0]) as u64, 17)
+    return 3
+}

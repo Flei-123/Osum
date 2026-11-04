@@ -41,7 +41,7 @@ done
 
 echo "== 3. threads: clone stub, join, mutex exclusion, lost updates without it =="
 build_run "$PWD/lib" "$D/thr" tools/libc/threads_suite.fi; rc=$?
-[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try, futex timeouts, cond_timedwait, mutex_timedlock, semaphore (blocking, timed, wake latency, producer/consumer, exclusion), once, rwlock (sharing, exclusion, writer preference, timed, timeout wakes readers), barrier (rounds, serial thread, blocking), pthread shim, attributes, recursive and errorcheck mutexes, E_DEADLK, try-read with waiting writer, barrier destroy, deferred cancel with cleanup handlers" || bad "threads suite rc=$rc"
+[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try, futex timeouts, cond_timedwait, mutex_timedlock, semaphore (blocking, timed, wake latency, producer/consumer, exclusion), once, rwlock (sharing, exclusion, writer preference, timed, timeout wakes readers), barrier (rounds, serial thread, blocking), pthread shim, attributes, recursive and errorcheck mutexes, E_DEADLK, try-read with waiting writer, barrier destroy, deferred cancel with cleanup handlers, cancel in semaphore/rwlock/barrier waits, recursive mutex depth over cond_wait, cancel of the main thread (pending)" || bad "threads suite rc=$rc"
 runs=0
 for i in 1 2 3 4 5 6 7 8; do
     "$D/thr" > /dev/null 2>&1 || runs=$((runs+1))
@@ -70,13 +70,13 @@ for edit in \
     "rwlock.fi|s/if ((v >> 32) \& WRITER_WAIT_MASK) != 0 {/if false {/" \
     "rwlock.fi|s/return (v \& LOW_MASK) != 0/return (v \& WRITER_BIT) != 0/" \
     "rwlock.fi|s/if (after \& LOW_MASK) == 0 \&\& (before >> 32) != 0 {/if false {/" \
-    "rwlock.fi|s/if (v >> 48) != 0 {/if false {/" \
+    "rwlock.fi|s/if (v >> 48) != 0 {/if false {/;s/span > pcancel.SLICE_NS/false/" \
     "rwlock.fi|s/locks.fetch_add(p, 0 -% READER_WAIT_ONE)/locks.load(p)/" \
     "rwlock.fi|s/if locks.cas(p, v, v - 1) == v {/if true {/" \
-    "barrier.fi|s/locks.store(p + OFF_ARRIVED, 0)/locks.load(p + OFF_ARRIVED)/" \
+    "barrier.fi|s/(v + 1) \& WORD_MASK/v + ARRIVAL_ONE/" \
     "barrier.fi|s/locks.futex_wake(p + OFF_GEN, locks.WAKE_ALL)/locks.load(p + OFF_GEN)/" \
     "barrier.fi|s/return SERIAL/return 0/" \
-    "barrier.fi|s/if place >= locks.load(p + OFF_COUNT) {/if place > locks.load(p + OFF_COUNT) {/" \
+    "barrier.fi|s/if (v >> 32) + 1 >= locks.load(p + OFF_COUNT) {/if (v >> 32) + 1 > locks.load(p + OFF_COUNT) {/" \
     "pthread.fi|s/if r == barrier.SERIAL {/if false {/" \
     "pmutex.fi|s/if locks.load(m) == 0 {/if false {/" \
     "pthread.fi|s/if threads.is_detached(t) {/if false {/" \
@@ -101,6 +101,14 @@ for edit in \
     "pcancel.fi|s/return locks.load(b + OFF_PENDING) != 0 \&\& locks.load(b + OFF_DISABLED) == 0/return locks.load(b + OFF_PENDING) != 0/" \
     "pcancel.fi|s/^    run_cleanups()\$/    cleanup_depth()/" \
     "pcancel.fi|s/if state > STATE_DISABLE {/if false {/" \
+    "semaphore.fi|s/if canceled {/if false {/" \
+    "rwlock.fi|s/if canceled {/if false {/" \
+    "barrier.fi|s/if locks.cas(p + OFF_GEN, v, v - ARRIVAL_ONE) == v {/if true {/" \
+    "barrier.fi|s/ \&\& withdraw(p, gen) {/ \&\& true {/" \
+    "pcancel.fi|s/locks.futex_wake(waiting, locks.WAKE_ALL)/locks.load(waiting)/" \
+    "pcancel.fi|s/^    if t != 0 \&\& threads.is_done(t) {\$/    if t == 0 || threads.is_done(t) {/" \
+    "pmutex.fi|s/locks.store(m + OFF_COUNT, depth)\$/locks.store(m + OFF_COUNT, 1)/" \
+    "pmutex.fi|s/octets.st64(depth_out, 0, locks.load(m + OFF_COUNT))/octets.st64(depth_out, 0, 1)/" \
     "pcond.fi|s/^    pcancel.testcancel()\$/    pcancel.pending()/"; do
     mod=${edit%%|*}
     expr=${edit#*|}
@@ -131,6 +139,28 @@ for edit in \
     if cmp -s "lib/libc/$mod" "$D/lib$n/libc/$mod"; then bad "patch for $mod did not apply"; continue; fi
     exit_probe "$D/lib$n" "$D/exitbad$n"; rc=$?
     if [ $rc -ne 90 ] && { [ $rc -ne 7 ] || ! grep -q '^threxit dtor$' "$D/exitbad$n.txt" || grep -q '^threxit late$' "$D/exitbad$n.txt"; }; then ok "broken main-thread exit patch $n in $mod is caught (rc=$rc)"; else bad "broken main-thread exit patch $n in $mod not caught (rc=$rc)"; fi
+done
+
+echo "== 6. cancelling the main thread ends the process after cleanup handlers and destructors =="
+cancel_probe() {
+    local lib=$1 out=$2
+    FIRNLIB=$lib "$FIRNC" tools/libc/cancel_main.fi -o "$out" > "$out.log" 2>&1 || return 90
+    timeout 30 "$out" > "$out.txt" 2>&1
+}
+cancel_probe "$PWD/lib" "$D/cancelmain"; rc=$?
+if [ $rc -eq 255 ] && grep -q '^thrcancel0 cleanup$' "$D/cancelmain.txt" && grep -q '^thrcancel0 dtor$' "$D/cancelmain.txt" && ! grep -q '^thrcancel0 \(alive\|slow\)$' "$D/cancelmain.txt" && ! grep -q '^thrcancel0 late$' "$D/cancelmain.txt"; then ok "cancel(0): blocked main thread leaves semaphore wait, cleanup and destructor ran, exit code 255, sibling killed"; else bad "main-thread cancel semantics wrong (rc=$rc)"; fi
+for edit in \
+    "pcancel.fi|s/^    if t != 0 \&\& threads.is_done(t) {\$/    if t == 0 || threads.is_done(t) {/" \
+    "pcancel.fi|s/locks.futex_wake(waiting, locks.WAKE_ALL)/locks.load(waiting)/" \
+    "semaphore.fi|s/if canceled {/if false {/"; do
+    mod=${edit%%|*}
+    expr=${edit#*|}
+    n=$((n+1))
+    cp -r lib "$D/lib$n"
+    sed -i "$expr" "$D/lib$n/libc/$mod"
+    if cmp -s "lib/libc/$mod" "$D/lib$n/libc/$mod"; then bad "patch for $mod did not apply"; continue; fi
+    cancel_probe "$D/lib$n" "$D/cancelbad$n"; rc=$?
+    if [ $rc -ne 90 ] && { [ $rc -ne 255 ] || grep -q '^thrcancel0 \(alive\|slow\)$' "$D/cancelbad$n.txt"; }; then ok "broken main-thread cancel patch $n in $mod is caught (rc=$rc)"; else bad "broken main-thread cancel patch $n in $mod not caught (rc=$rc)"; fi
 done
 
 echo "== $pass ok, $fail fail =="

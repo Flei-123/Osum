@@ -6,6 +6,8 @@ import libc.probecount
 import libc.errno
 import libc.rwlock
 import libc.barrier
+import libc.semaphore
+import libc.pcancel
 
 export { run_all }
 
@@ -25,6 +27,9 @@ static mut x_cleaned: u64 = 0
 static mut x_order: u64 = 0
 static mut x_ready: u64 = 0
 static mut x_target: u64 = 0
+static mut x_sem: u64 = 0
+static mut x_rwc: u64 = 0
+static mut x_bar2: [u64; 4] = [0; 4]
 
 fn check(ok: bool) {
     probecount.record(ok)
@@ -549,7 +554,7 @@ fn run_cancel_misc() -> bool {
     if pthread.setcanceltype(pthread.CANCEL_ASYNCHRONOUS, 0) != errno.E_INVAL || pthread.setcanceltype(pthread.CANCEL_DEFERRED, (&old) as u64) != 0 || old != pthread.CANCEL_DEFERRED {
         ok = false
     }
-    if pthread.setcancelstate(7, 0) != errno.E_INVAL || pthread.cancel(0) != errno.E_SRCH {
+    if pthread.setcancelstate(7, 0) != errno.E_INVAL {
         ok = false
     }
     var t: u64 = 0
@@ -595,6 +600,280 @@ fn run_cancel_misc() -> bool {
     return ok
 }
 
+fn count_cleanup(arg: u64) -> u64 {
+    locks.store((&x_cleaned) as u64, 1)
+    return 0
+}
+
+fn sem_addr() -> u64 {
+    return (&x_sem) as u64
+}
+
+fn rwc_addr() -> u64 {
+    return (&x_rwc) as u64
+}
+
+fn bar2_addr() -> u64 {
+    return (&x_bar2[0]) as u64
+}
+
+fn start_victim(body: fn(u64) -> u64, arg: u64) -> u64 {
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create((&t) as u64, body, arg) != 0 {
+        return 0
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        return 0
+    }
+    pause_ms(40)
+    return t
+}
+
+fn reap_canceled(t: u64) -> bool {
+    if t == 0 {
+        return false
+    }
+    let t0: u64 = locks.now_ns()
+    var ok: bool = pthread.cancel(t) == 0
+    var rv: u64 = 0
+    if pthread.join(t, (&rv) as u64) != 0 || rv != pthread.CANCELED || locks.now_ns() - t0 > 1500 * MS {
+        ok = false
+    }
+    return ok && locks.load((&x_cleaned) as u64) == 1 && locks.load((&x_after) as u64) == 0
+}
+
+fn sem_victim(arg: u64) -> u64 {
+    pthread.cleanup_push(count_cleanup, 0)
+    locks.store((&x_flag) as u64, 1)
+    if arg == 0 {
+        semaphore.wait(sem_addr())
+    } else {
+        semaphore.timed_wait(sem_addr(), 5000 * MS)
+    }
+    locks.store((&x_after) as u64, 1)
+    return 7
+}
+
+fn run_cancel_sem() -> bool {
+    var ok: bool = true
+    var mode: u64 = 0
+    while mode < 2 {
+        semaphore.init(sem_addr(), 0)
+        let t: u64 = start_victim(sem_victim, mode)
+        if semaphore.waiters(sem_addr()) != 1 {
+            ok = false
+        }
+        if !reap_canceled(t) {
+            ok = false
+        }
+        if semaphore.waiters(sem_addr()) != 0 || semaphore.value(sem_addr()) != 0 {
+            ok = false
+        }
+        if !semaphore.post(sem_addr()) || !semaphore.try_wait(sem_addr()) {
+            ok = false
+        }
+        mode = mode + 1
+    }
+    return ok
+}
+
+fn rw_victim(arg: u64) -> u64 {
+    pthread.cleanup_push(count_cleanup, 0)
+    locks.store((&x_flag) as u64, 1)
+    if arg == 0 {
+        rwlock.rdlock(rwc_addr())
+    } else {
+        if arg == 1 {
+            rwlock.wrlock(rwc_addr())
+        } else {
+            if arg == 2 {
+                rwlock.timedrdlock(rwc_addr(), 5000 * MS)
+            } else {
+                rwlock.timedwrlock(rwc_addr(), 5000 * MS)
+            }
+        }
+    }
+    locks.store((&x_after) as u64, 1)
+    return 7
+}
+
+fn late_reader_body(arg: u64) -> u64 {
+    if rwlock.timedrdlock(rwc_addr(), 2000 * MS) == 0 {
+        locks.store((&x_done) as u64, 1)
+        rwlock.unlock(rwc_addr())
+    } else {
+        locks.store((&x_done) as u64, 2)
+    }
+    return 0
+}
+
+fn run_cancel_rwlock() -> bool {
+    var ok: bool = true
+    var mode: u64 = 0
+    while mode < 4 {
+        rwlock.init(rwc_addr())
+        rwlock.wrlock(rwc_addr())
+        let t: u64 = start_victim(rw_victim, mode)
+        let queued: u64 = rwlock.waiting_readers(rwc_addr()) + rwlock.waiting_writers(rwc_addr())
+        if queued != 1 {
+            ok = false
+        }
+        if !reap_canceled(t) {
+            ok = false
+        }
+        if rwlock.waiting_readers(rwc_addr()) != 0 || rwlock.waiting_writers(rwc_addr()) != 0 {
+            ok = false
+        }
+        if rwlock.unlock(rwc_addr()) != 0 || !rwlock.trywrlock(rwc_addr()) || rwlock.unlock(rwc_addr()) != 0 {
+            ok = false
+        }
+        mode = mode + 1
+    }
+    rwlock.init(rwc_addr())
+    rwlock.rdlock(rwc_addr())
+    let w: u64 = start_victim(rw_victim, 1)
+    var r: u64 = 0
+    if pthread.create((&r) as u64, late_reader_body, 0) != 0 {
+        return false
+    }
+    pause_ms(60)
+    if rwlock.waiting_writers(rwc_addr()) != 1 || rwlock.waiting_readers(rwc_addr()) != 1 || locks.load((&x_done) as u64) != 0 {
+        ok = false
+    }
+    if !reap_canceled(w) {
+        ok = false
+    }
+    var waited: u64 = 0
+    while locks.load((&x_done) as u64) == 0 && waited < 1500 {
+        pause_ms(1)
+        waited = waited + 1
+    }
+    if locks.load((&x_done) as u64) != 1 {
+        ok = false
+    }
+    pthread.join(r, 0)
+    return ok && rwlock.unlock(rwc_addr()) == 0
+}
+
+fn bar_victim(arg: u64) -> u64 {
+    pthread.cleanup_push(count_cleanup, 0)
+    locks.store((&x_flag) as u64, 1)
+    barrier.wait(bar2_addr())
+    locks.store((&x_after) as u64, 1)
+    return 7
+}
+
+fn bar_partner(arg: u64) -> u64 {
+    locks.store((&x_target) as u64, barrier.wait(bar2_addr()) + 10)
+    return 0
+}
+
+fn run_cancel_barrier() -> bool {
+    var ok: bool = true
+    barrier.init(bar2_addr(), 2)
+    let t: u64 = start_victim(bar_victim, 0)
+    if barrier.arrived(bar2_addr()) != 1 || barrier.busy(bar2_addr()) != 1 {
+        ok = false
+    }
+    if !reap_canceled(t) {
+        ok = false
+    }
+    if barrier.arrived(bar2_addr()) != 0 || barrier.busy(bar2_addr()) != 0 {
+        ok = false
+    }
+    locks.store((&x_target) as u64, 0)
+    var p: u64 = 0
+    if pthread.create((&p) as u64, bar_partner, 0) != 0 {
+        return false
+    }
+    pause_ms(40)
+    if locks.load((&x_target) as u64) != 0 || barrier.arrived(bar2_addr()) != 1 {
+        ok = false
+    }
+    let mine: u64 = barrier.wait(bar2_addr())
+    pthread.join(p, 0)
+    let theirs: u64 = locks.load((&x_target) as u64) - 10
+    if mine + theirs != barrier.SERIAL || barrier.arrived(bar2_addr()) != 0 {
+        ok = false
+    }
+    return ok
+}
+
+fn deep_cond_body(arg: u64) -> u64 {
+    var k: u64 = 0
+    while k < 3 {
+        if pthread.mutex_lock(mutex_addr()) != 0 {
+            return 1
+        }
+        k = k + 1
+    }
+    locks.store((&x_flag) as u64, 1)
+    while locks.load((&x_ready) as u64) == 0 {
+        if pthread.cond_wait(cond_addr(), mutex_addr()) != 0 {
+            return 2
+        }
+    }
+    k = 0
+    while k < 3 {
+        if pthread.mutex_unlock(mutex_addr()) != 0 {
+            return 3
+        }
+        k = k + 1
+    }
+    if pthread.mutex_unlock(mutex_addr()) != errno.E_PERM {
+        return 4
+    }
+    return 0
+}
+
+fn run_recursive_cond_deep() -> bool {
+    reset_flags()
+    pthread.cond_init(cond_addr())
+    if !make_mutex(pthread.MUTEX_RECURSIVE) {
+        return false
+    }
+    var t: u64 = 0
+    if pthread.create((&t) as u64, deep_cond_body, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        return false
+    }
+    pause_ms(30)
+    var ok: bool = pthread.mutex_timedlock(mutex_addr(), locks.now_ns() + 1000 * MS) == 0
+    locks.store((&x_ready) as u64, 1)
+    pthread.cond_signal(cond_addr())
+    pthread.mutex_unlock(mutex_addr())
+    var rv: u64 = 99
+    pthread.join(t, (&rv) as u64)
+    return ok && rv == 0 && pthread.mutex_trylock(mutex_addr()) == 0 && pthread.mutex_unlock(mutex_addr()) == 0
+}
+
+fn canceler_body(arg: u64) -> u64 {
+    return pthread.cancel(arg)
+}
+
+fn run_cancel_main() -> bool {
+    if pthread.self() != 0 {
+        return true
+    }
+    var ok: bool = pthread.setcancelstate(pthread.CANCEL_DISABLE, 0) == 0
+    if pthread.cancel(pthread.self()) != 0 || !pcancel.pending() {
+        ok = false
+    }
+    var t: u64 = 0
+    if pthread.create((&t) as u64, canceler_body, 0) != 0 {
+        return false
+    }
+    var rv: u64 = 99
+    if pthread.join(t, (&rv) as u64) != 0 || rv != 0 {
+        ok = false
+    }
+    pthread.testcancel()
+    return ok && pcancel.pending()
+}
+
 fn run_all() -> u64 {
     check(run_attrs())
     check(run_recursive())
@@ -608,5 +887,10 @@ fn run_all() -> u64 {
     check(run_cancel_join())
     check(run_cancel_disabled())
     check(run_cancel_misc())
+    check(run_recursive_cond_deep())
+    check(run_cancel_sem())
+    check(run_cancel_rwlock())
+    check(run_cancel_barrier())
+    check(run_cancel_main())
     return probecount.failed()
 }

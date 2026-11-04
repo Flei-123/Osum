@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import libc.locks
 import libc.errno
+import libc.pcancel
 
 export { init, rdlock, wrlock, tryrdlock, trywrlock, timedrdlock, timedwrlock, unlock, readers, writer_held, waiting_writers, waiting_readers }
 
@@ -11,6 +12,7 @@ const WRITER_WAIT_ONE: u64 = 0x100000000
 const READER_WAIT_ONE: u64 = 0x1000000000000
 const WRITER_WAIT_MASK: u64 = 0xFFFF
 const READER_WAIT_MASK: u64 = 0xFFFF
+const FOREVER_NS: u64 = 1000000000000000
 
 fn init(p: u64) {
     locks.store(p, 0)
@@ -56,6 +58,21 @@ fn wake_if_free(p: u64, before: u64, after: u64) {
     }
 }
 
+fn park_reader(p: u64, v: u64, left: u64) -> bool {
+    var span: u64 = left
+    if (v & WRITER_BIT) == 0 && (v & READER_MASK) != READER_MASK && span > pcancel.SLICE_NS {
+        span = pcancel.SLICE_NS
+    }
+    return pcancel.wait_on_ns(p, v & LOW_MASK, span)
+}
+
+fn cancel_out(p: u64) {
+    if (locks.load(p) >> 32) != 0 {
+        locks.futex_wake(p, locks.WAKE_ALL)
+    }
+    pcancel.act()
+}
+
 fn try_read_blocked(v: u64) -> bool {
     if (v & WRITER_BIT) != 0 {
         return true
@@ -98,8 +115,11 @@ fn rdlock(p: u64) {
             }
         } else {
             if locks.cas(p, v, v + READER_WAIT_ONE) == v {
-                locks.futex_wait(p, v & LOW_MASK)
+                let canceled: bool = park_reader(p, v, FOREVER_NS)
                 locks.fetch_add(p, 0 -% READER_WAIT_ONE)
+                if canceled {
+                    cancel_out(p)
+                }
             }
         }
     }
@@ -114,8 +134,11 @@ fn wrlock(p: u64) {
             }
         } else {
             if locks.cas(p, v, v + WRITER_WAIT_ONE) == v {
-                locks.futex_wait(p, v & LOW_MASK)
+                let canceled: bool = pcancel.wait_on(p, v & LOW_MASK)
                 locks.fetch_add(p, 0 -% WRITER_WAIT_ONE)
+                if canceled {
+                    cancel_out(p)
+                }
             }
         }
     }
@@ -135,8 +158,11 @@ fn timedrdlock(p: u64, timeout_ns: u64) -> u64 {
                 return errno.E_TIMEDOUT
             }
             if locks.cas(p, v, v + READER_WAIT_ONE) == v {
-                locks.futex_wait_ns(p, v & LOW_MASK, left)
+                let canceled: bool = park_reader(p, v, left)
                 locks.fetch_add(p, 0 -% READER_WAIT_ONE)
+                if canceled {
+                    cancel_out(p)
+                }
             }
         }
     }
@@ -157,8 +183,11 @@ fn timedwrlock(p: u64, timeout_ns: u64) -> u64 {
                 return give_up_write(p)
             }
             if locks.cas(p, v, v + WRITER_WAIT_ONE) == v {
-                locks.futex_wait_ns(p, v & LOW_MASK, left)
+                let canceled: bool = pcancel.wait_on_ns(p, v & LOW_MASK, left)
                 locks.fetch_add(p, 0 -% WRITER_WAIT_ONE)
+                if canceled {
+                    cancel_out(p)
+                }
             }
         }
     }
