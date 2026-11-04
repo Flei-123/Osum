@@ -1,0 +1,337 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import arch.x86_64.idt
+import mm.mem
+import arch.x86_64.user
+import sched.sched
+import diag.hw
+import sched.randsetup
+import arch.x86_64.apic
+import sched.time
+import sched.rand
+
+const TICKS_WANTED: u64 = 20
+
+const TICKS_PASS_LIMIT: u64 = 150000000
+
+const KEYS_WANTED: u64 = 4
+
+const KEY_TIMEOUT: u64 = 250
+
+fn clock(state: u64) {
+    var s_khz: [u8; 12] = "time: tsc=\0\0"
+    var s_khzu: [u8; 6] = " kHz\0\0"
+    var s_wall: [u8; 8] = "  wall=\0"
+    var s_mono: [u8; 9] = "  mono=\0\0"
+    var s_ns: [u8; 4] = " ns\0"
+    var s_tick: [u8; 20] = "time: no tsc, ticks\0"
+    var s_seed: [u8; 13] = "rand: seed=\0\0"
+    var s_hw: [u8; 7] = "  hw=\0\0"
+    var s_stir: [u8; 9] = "  stirs=\0"
+    var s_fix: [u8; 20] = "rand: FIXED (probe)\0"
+
+    let k: u64 = time.calibrate(state)
+    let _random_ready: bool = rand.settle(state)
+    if !kstate.mode_on(state, kstate.M_UNIX) {
+        return
+    }
+    if k == 0 {
+        serial.puts((&s_tick[0]) as u64)
+        serial.nl()
+    } else {
+        serial.puts((&s_khz[0]) as u64)
+        serial.dec(k)
+        serial.puts((&s_khzu[0]) as u64)
+        serial.puts((&s_wall[0]) as u64)
+        serial.dec(time.boot_sec(state))
+        serial.puts((&s_mono[0]) as u64)
+        serial.dec(time.mono_ns(state))
+        serial.puts((&s_ns[0]) as u64)
+        serial.nl()
+    }
+    if kstate.mode_on(state, kstate.M_FIXRAND) {
+        serial.puts((&s_fix[0]) as u64)
+        serial.nl()
+    }
+    serial.puts((&s_seed[0]) as u64)
+    var i: u64 = 0
+    while i < 16 {
+        serial.hex_width(rand.seed_hex(state, i), 2)
+        i = i + 1
+    }
+    serial.puts((&s_hw[0]) as u64)
+    serial.dec(rand.hardware(state))
+    serial.puts((&s_stir[0]) as u64)
+    serial.dec(kstate.get(state, kstate.RANDOM_STIRS))
+    serial.nl()
+    randsetup.report(state)
+}
+
+fn ticks(state: u64) {
+    var s_wait: [u8; 15] = "ticks: waiting\0"
+    var s_got: [u8; 8] = "ticks: \0"
+    var s_traps: [u8; 9] = "  traps=\0"
+    var s_masked: [u8; 20] = "ticks: timer masked\0"
+    var s_spin: [u8; 14] = "spin: ticks=+\0"
+
+    if kstate.mode_on(state, kstate.M_NOTIMER) {
+
+        hw.timer_off(state)
+        idt.enable()
+        serial.puts((&s_masked[0]) as u64)
+        serial.nl()
+        serial.puts((&s_spin[0]) as u64)
+        serial.dec(spin(state))
+        serial.nl()
+        return
+    }
+
+    if apic.nosrc(state, 16) || apic.nosrc(state, 32) {
+        hw.timer_off(state)
+    }
+    idt.enable()
+    serial.puts((&s_wait[0]) as u64)
+    serial.nl()
+    var s_noirq: [u8; 42] = "ticks: NO TIMER IRQ after 5 s, continuing\0"
+    let start: u64 = kstate.get(state, kstate.TICKS)
+    let thz: u64 = apic.tsc_hz(state)
+    let t0: u64 = apic.tsc()
+    var limit_tsc: u64 = 0
+    if thz != 0 {
+        limit_tsc = thz * 5
+    }
+    var s_reroute: [u8; 48] = "ticks: no APIC timer IRQ, trying PIT via IOAPIC\0"
+    var rerouted: bool = false
+    var passes: u64 = 0
+    var wait_for: bool = true
+    while wait_for {
+        if kstate.get(state, kstate.TICKS) - start >= TICKS_WANTED {
+            wait_for = false
+        } else if limit_tsc != 0 && apic.tsc() - t0 > limit_tsc {
+            wait_for = false
+            serial.puts((&s_noirq[0]) as u64)
+            serial.nl()
+            apic.timer_diag(state)
+        } else if passes >= TICKS_PASS_LIMIT {
+            wait_for = false
+            serial.puts((&s_noirq[0]) as u64)
+            serial.nl()
+            apic.timer_diag(state)
+        } else if !rerouted && !apic.nosrc(state, 16) && apic.active(state) && (
+                (limit_tsc != 0 && apic.tsc() - t0 > limit_tsc / 5)
+                || (limit_tsc == 0 && passes >= TICKS_PASS_LIMIT / 5)) {
+
+            rerouted = true
+            serial.puts((&s_reroute[0]) as u64)
+            serial.nl()
+            apic.timer_diag(state)
+            apic.pit_route(state)
+        } else {
+            asm("pause")
+            passes = passes + 1
+        }
+    }
+    serial.puts((&s_got[0]) as u64)
+    serial.dec(kstate.get(state, kstate.TICKS))
+    serial.puts((&s_traps[0]) as u64)
+    serial.dec(kstate.get(state, kstate.TRAPS))
+    serial.nl()
+    serial.puts((&s_spin[0]) as u64)
+    serial.dec(spin(state))
+    serial.nl()
+}
+
+fn spin(state: u64) -> u64 {
+    let before: u64 = kstate.get(state, kstate.TICKS)
+    var i: u64 = 0
+    while i < 4000000 {
+        asm("pause")
+        i = i + 1
+    }
+    return kstate.get(state, kstate.TICKS) - before
+}
+
+fn scheduler(state: u64) {
+    var s_skip: [u8; 16] = "sched: skipped\0\0"
+    var s_pre: [u8; 16] = "sched: preempt=\0"
+    var s_start: [u8; 16] = "sched: workers \0"
+    var s_sw: [u8; 17] = "sched: switches=\0"
+    var s_alt: [u8; 16] = "  alternations=\0"
+    var s_len: [u8; 12] = "  entries=\0\0"
+    var s_trace: [u8; 8] = "trace: \0"
+    var s_free: [u8; 20] = "sched: frames_free=\0"
+    var s_of: [u8; 7] = " of \0\0\0"
+    var s_done: [u8; 13] = "sched: done\0\0"
+    var s_sp: [u8; 2] = " \0"
+
+    if kstate.mode_on(state, kstate.M_NOSCHED) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    if kstate.mode_on(state, kstate.M_NOPREEMPT) {
+        kstate.set(state, kstate.PREEMPT, 0)
+    }
+    serial.puts((&s_pre[0]) as u64)
+    serial.dec(kstate.get(state, kstate.PREEMPT))
+    serial.nl()
+
+    let before: u64 = mem.frames_free(state)
+    kstate.set(state, kstate.TRACE_LEN, 0)
+    let a: u64 = sched.create(state, sched.K_WORKER, 1, 0, 0)
+    let b: u64 = sched.create(state, sched.K_WORKER, 2, 0, 0)
+    let c: u64 = sched.create(state, sched.K_WORKER, 3, 0, 0)
+
+    sched.start(state, a)
+    sched.start(state, b)
+    sched.start(state, c)
+    let lo: u64 = sched.tget(state, a, sched.T_PID)
+    let hi: u64 = sched.tget(state, c, sched.T_PID)
+    serial.puts((&s_start[0]) as u64)
+    serial.dec(lo)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(sched.tget(state, b, sched.T_PID))
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(hi)
+    serial.nl()
+
+    while workers_alive(state) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+
+    serial.puts((&s_sw[0]) as u64)
+    serial.dec(kstate.get(state, kstate.SWITCHES))
+    serial.puts((&s_alt[0]) as u64)
+    serial.dec(alternations(state, lo, hi))
+    serial.puts((&s_len[0]) as u64)
+    serial.dec(kstate.get(state, kstate.TRACE_LEN))
+    serial.nl()
+    sched.trace_dump(state, (&s_trace[0]) as u64, 60)
+    sched.dump_tasks(state)
+
+    sched.reap(state, a)
+    sched.reap(state, b)
+    sched.reap(state, c)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(before)
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn workers_alive(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        let st: u64 = sched.tget(state, i, sched.T_STATE)
+        if sched.tget(state, i, sched.T_KIND) == sched.K_WORKER {
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn alternations(state: u64, lo: u64, hi: u64) -> u64 {
+    let len: u64 = kstate.get(state, kstate.TRACE_LEN)
+    var prev: u64 = 0
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < len {
+        let v: u64 = kstate.get8(state + kstate.TRACE_OFF + i)
+        if v >= lo && v <= hi {
+            if prev != 0 && v != prev {
+                n = n + 1
+            }
+            prev = v
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn keyboard(state: u64) {
+    var s_ready: [u8; 12] = "kbd: ready\0\0"
+    var s_got: [u8; 6] = "kbd: \0"
+    var s_none: [u8; 7] = "(none)\0"
+    if kstate.mode_on(state, kstate.M_NOKBD)
+       || kstate.mode_on(state, kstate.M_NOTIMER) {
+        return
+    }
+
+    if kstate.mode_on(state, kstate.M_OSUM) {
+        return
+    }
+    serial.puts((&s_ready[0]) as u64)
+    serial.nl()
+    let start: u64 = kstate.get(state, kstate.TICKS)
+    var waiting: bool = true
+    while waiting {
+        if kstate.get(state, kstate.KEYLEN) >= KEYS_WANTED {
+            waiting = false
+        }
+        if kstate.get(state, kstate.TICKS) - start >= KEY_TIMEOUT {
+            waiting = false
+        }
+        if waiting {
+            idt.halt()
+        }
+    }
+    serial.puts((&s_got[0]) as u64)
+    let n: u64 = kstate.get(state, kstate.KEYLEN)
+    if n == 0 {
+        serial.puts((&s_none[0]) as u64)
+    } else {
+        serial.text(state + kstate.KEYBUF, n)
+    }
+    serial.nl()
+}
+
+fn ring3(state: u64) {
+    var s_off: [u8; 20] = "ring3: skipped\0\0\0\0\0\0"
+    var s_bad: [u8; 15] = "ring3: FAILED\0\0"
+    if kstate.mode_on(state, kstate.M_NORING3) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !user.run(state) {
+        serial.puts((&s_bad[0]) as u64)
+        serial.nl()
+    }
+}
+
+fn provoke(state: u64) {
+    var s_go: [u8; 22] = "trap: provoking kind \0"
+    let kind: u64 = kstate.mode_word(state, 0) & 0x7
+    if kind == 0 {
+        return
+    }
+    serial.puts((&s_go[0]) as u64)
+    serial.dec(kind)
+    serial.nl()
+    if kind == 1 {
+
+        asm("xor rdx, rdx\nmov rax, 42\nxor rcx, rcx\ndiv rcx")
+        kstate.set(state, kstate.LAST_TRAP, 42)
+    }
+    if kind == 2 {
+
+        kstate.set(state, kstate.LAST_TRAP, __mmio_read64(0x40000000 as *mut u64))
+    }
+    if kind == 3 {
+
+        __mmio_write64(0x0000800000000000 as *mut u64, 1)
+    }
+    if kind == 4 {
+
+        asm("mov rsp, 0\npush rax")
+    }
+}

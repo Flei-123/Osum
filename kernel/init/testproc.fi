@@ -1,0 +1,497 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mem
+import sched.sched
+import sched.proc
+import fs.file
+import ipc.cap
+import ipc.handle
+import lib.kutil
+import sched.time
+
+const P_HELLO: u64 = 1
+
+const P_MEMORY: u64 = 2
+
+const P_FAULT: u64 = 3
+
+const P_BADPTR: u64 = 4
+
+const P_CHILD: u64 = 5
+
+const P_PARENT: u64 = 6
+
+const P_STEAL: u64 = 9
+
+const P_FORK: u64 = 10
+
+const P_CAPS: u64 = 12
+
+const P_HBENCH: u64 = 49
+
+const P_HANDLE: u64 = 48
+
+const P_FUZZ: u64 = 54
+
+const P_USER: u64 = 16
+
+const P_ZOMBIE: u64 = 17
+
+fn processes(state: u64) {
+    var s_skip: [u8; 15] = "proc: skipped\0\0"
+    var s_pages: [u8; 13] = "proc: pages=\0"
+    var s_one: [u8; 17] = "proc: hello pid=\0"
+    var s_hexit: [u8; 18] = "proc: hello exit=\0"
+    var s_exit: [u8; 8] = "  exit=\0"
+    var s_frames: [u8; 20] = "proc: frames_free=\0\0"
+    var s_of: [u8; 5] = " of \0"
+    var s_priv: [u8; 13] = "proc: data \0\0"
+    var s_vs: [u8; 5] = " vs \0"
+    var s_sep: [u8; 15] = "  separated=\0\0\0"
+    var s_kill: [u8; 15] = "proc: killed=\0\0"
+    var s_alive: [u8; 14] = "proc: alive=\0\0"
+    var s_done: [u8; 12] = "proc: done\0\0"
+    var s_fork: [u8; 24] = "proc: fork parent kept \0"
+
+    if kstate.mode_on(state, kstate.M_NOPROC) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_pages[0]) as u64)
+    let vorher_map: u64 = mem.frames_free(state)
+    serial.dec(proc.map_programs(state))
+    serial.nl()
+    let kachelrahmen: u64 = vorher_map -% mem.frames_free(state)
+    var s_kachel: [u8; 18] = "proc: ptframes=\0\0\0"
+    serial.puts((&s_kachel[0]) as u64)
+    serial.dec(kachelrahmen)
+    serial.nl()
+    let before: u64 = mem.frames_free(state)
+
+    let one: u64 = proc.create(state, P_HELLO, 7, 2)
+    serial.puts((&s_one[0]) as u64)
+    serial.dec(sched.tget(state, one, sched.T_PID))
+    serial.nl()
+    let one_exit: u64 = kutil.wait_for(state, one)
+    serial.puts((&s_hexit[0]) as u64)
+    serial.dec(one_exit)
+    serial.nl()
+
+    let a: u64 = proc.create(state, P_MEMORY, 111, 2)
+    let b: u64 = proc.create(state, P_MEMORY, 222, 2)
+    let pa: u64 = sched.tget(state, a, sched.T_DATA)
+    let pb: u64 = sched.tget(state, b, sched.T_DATA)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    serial.puts((&s_priv[0]) as u64)
+    serial.hex(pa)
+    serial.puts((&s_vs[0]) as u64)
+    serial.hex(pb)
+    serial.puts((&s_sep[0]) as u64)
+    var sep: u64 = 0
+    if pa != pb && ea == 1 && eb == 1 {
+        sep = 1
+    }
+    serial.dec(sep)
+    serial.nl()
+
+    let f: u64 = proc.create(state, P_FAULT, 0, 2)
+    let fe: u64 = kutil.wait_for(state, f)
+    let g: u64 = proc.create(state, P_STEAL, 0, 2)
+    let ge: u64 = kutil.wait_for(state, g)
+    serial.puts((&s_kill[0]) as u64)
+    serial.dec(kstate.get(state, kstate.KILLED))
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(fe)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(ge)
+    serial.nl()
+
+    let p4: u64 = proc.create(state, P_BADPTR, 0, 2)
+    kutil.wait_for(state, p4)
+
+    let pf: u64 = proc.create(state, P_FORK, 0, 2)
+    let ef: u64 = kutil.wait_for(state, pf)
+    serial.puts((&s_fork[0]) as u64)
+    serial.dec(ef)
+    serial.nl()
+
+    let p5: u64 = proc.create(state, P_PARENT, 0, 2)
+    let e5: u64 = kutil.wait_for(state, p5)
+    serial.puts((&s_alive[0]) as u64)
+    serial.dec(sched.alive_count(state))
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e5)
+    serial.nl()
+
+    serial.puts((&s_frames[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(before)
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn capabilities(state: u64) {
+    var s_skip: [u8; 13] = "cap: skipped\0"
+    var s_begin: [u8; 32] = "cap: handles instead of ambient\0"
+    var s_slot: [u8; 15] = "cap: slot t1=\0\0"
+    var s_t2: [u8; 7] = "  t2=\0\0"
+    var s_left: [u8; 9] = "  left=\0\0"
+    var s_h1: [u8; 12] = "cap: first \0"
+    var s_h2: [u8; 10] = "  second \0"
+    var s_diff: [u8; 10] = "  differ=\0"
+    var s_exit: [u8; 18] = "cap: ring 3 exit=\0"
+    var s_done: [u8; 10] = "cap: done\0"
+
+    if !kstate.mode_on(state, kstate.M_CAPS) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+
+    let rechte: u64 = cap.R_WRITE | cap.R_DUPLICATE | cap.R_TRANSFER
+        | cap.R_INSPECT
+
+    let t1: u64 = proc.create_cap(state, P_CAPS, rechte, 2)
+    let g1: u64 = sched.tget(state, t1, sched.T_WORK)
+    let e1: u64 = kutil.wait_for(state, t1)
+    let left: u64 = cap.used(state, t1)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e1)
+    serial.nl()
+
+    let t2: u64 = proc.create_cap(state, P_CAPS, rechte, 2)
+    let g2: u64 = sched.tget(state, t2, sched.T_WORK)
+    let e2: u64 = kutil.wait_for(state, t2)
+    serial.puts((&s_h1[0]) as u64)
+    serial.hex(g1)
+    serial.puts((&s_h2[0]) as u64)
+    serial.hex(g2)
+    serial.puts((&s_diff[0]) as u64)
+    var diff: u64 = 0
+    if g1 != g2 {
+        diff = 1
+    }
+    serial.dec(diff)
+    serial.nl()
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e2)
+    serial.nl()
+    serial.puts((&s_slot[0]) as u64)
+    serial.dec(t1)
+    serial.puts((&s_t2[0]) as u64)
+    serial.dec(t2)
+    serial.puts((&s_left[0]) as u64)
+    serial.dec(left)
+    serial.nl()
+
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn fuzzer(state: u64) {
+    var s_skip: [u8; 14] = "fuzz: skipped\0"
+    var s_begin: [u8; 13] = "fuzz: begin\0\0"
+    var s_exit: [u8; 19] = "fuzz: ring 3 exit=\0"
+    var s_done: [u8; 12] = "fuzz: done\0\0"
+    if !kstate.mode_on(state, kstate.M_FUZZ) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    var tausend: u64 = kstate.get(state, kstate.FUZZ_K)
+    let t: u64 = proc.create(state, P_FUZZ, tausend, 2)
+    var e: u64 = 0
+    var lauf: bool = true
+    while lauf {
+        if sched.tget(state, t, sched.T_STATE) == sched.S_ZOMBIE {
+            e = sched.tget(state, t, sched.T_EXIT)
+            proc.reap(state, t)
+            lauf = false
+        } else {
+            sched.sleep_ticks(state, 1)
+        }
+    }
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn handles(state: u64) {
+    var s_skip: [u8; 16] = "handle: skipped\0"
+    var s_begin: [u8; 15] = "handle: begin\0\0"
+    var s_exit: [u8; 21] = "handle: ring 3 exit=\0"
+    var s_done: [u8; 14] = "handle: done\0\0"
+    if !kstate.mode_on(state, kstate.M_HANDLE) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    handle_foreign(state)
+    handle_handover(state)
+    let t: u64 = proc.create(state, P_HANDLE, 0, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    handle_numbers(state)
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn handle_foreign(state: u64) {
+    var s_a: [u8; 14] = "handle: ha=\0\0\0"
+    var s_b: [u8; 7] = "  hb=\0\0"
+    var s_d: [u8; 11] = "  differ=\0\0"
+    var s_x: [u8; 10] = "  cross=\0\0"
+    var s_n: [u8; 21] = "  nonce-differ=\0\0\0\0\0\0"
+    let a: u64 = kstate.MAX_TASKS - 1
+    let b: u64 = kstate.MAX_TASKS - 2
+    handle.clear_task(state, a, 4242)
+    handle.clear_task(state, b, 4243)
+    let o: u64 = handle.obj_get(state, handle.OK_FILE, file.CON_OUT)
+    handle.obj_ref(state, o)
+    let ha: u64 = handle.insert(state, a, o, handle.R_WRITE)
+    let hb: u64 = handle.insert(state, b, o, handle.R_WRITE)
+    var differ: u64 = 0
+    if ha != hb {
+        differ = 1
+    }
+    var cross: u64 = 0
+    if handle.resolve(state, b, ha) >= handle.MAX_OBJ {
+        cross = 1
+    }
+    var nd: u64 = 0
+    if handle.nonce_of(state, a) != handle.nonce_of(state, b) {
+        nd = 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(ha)
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(hb)
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(differ)
+    serial.puts((&s_x[0]) as u64)
+    serial.dec(cross)
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(nd)
+    serial.nl()
+    handle.clear_task(state, a, 0)
+    handle.clear_task(state, b, 0)
+}
+
+fn handle_handover(state: u64) {
+    var s_p: [u8; 15] = "handle: pass=\0\0"
+    var s_s: [u8; 11] = "  shrink=\0\0"
+    var s_t: [u8; 15] = "  notransfer=\0\0"
+    var s_r: [u8; 9] = "  refs=\0\0"
+    let a: u64 = kstate.MAX_TASKS - 1
+    let b: u64 = kstate.MAX_TASKS - 2
+    handle.clear_task(state, a, 777)
+    handle.clear_task(state, b, 778)
+    let o: u64 = handle.obj_get(state, handle.OK_FILE, file.CON_OUT)
+    let ha: u64 = handle.insert(state, a, o,
+        handle.R_READ | handle.R_WRITE | handle.R_TRANSFER)
+    let hb: u64 = handle.give(state, a, b, ha, handle.R_ALL)
+    var fits: u64 = 0
+    if !handle.is_err(hb) {
+        fits = 1
+    }
+    let rb: u64 = handle.rights_of(state, b, hb)
+    var shrink: u64 = 0
+    if (rb & handle.R_SEEK) == 0 {
+        if (rb & handle.R_WRITE) != 0 {
+            shrink = 1
+        }
+    }
+    let o2: u64 = handle.obj_get(state, handle.OK_FILE, file.CON_IN)
+    let hc: u64 = handle.insert(state, a, o2, handle.R_READ)
+    var kein: u64 = 0
+    if handle.is_err(handle.give(state, a, b, hc, handle.R_ALL)) {
+        kein = 1
+    }
+    let refs: u64 = handle.obj_refs(state, o)
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(fits)
+    serial.puts((&s_s[0]) as u64)
+    serial.dec(shrink)
+    serial.puts((&s_t[0]) as u64)
+    serial.dec(kein)
+    serial.puts((&s_r[0]) as u64)
+    serial.dec(refs)
+    serial.nl()
+    handle.clear_task(state, a, 0)
+    handle.clear_task(state, b, 0)
+}
+
+fn hnum(name: u64, v: u64) {
+    var s_p: [u8; 9] = "handle: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn handle_numbers(state: u64) {
+    var n_ch: [u8; 7] = "checks\0"
+    var n_de: [u8; 7] = "denied\0"
+    var n_st: [u8; 6] = "stale\0"
+    var n_ca: [u8; 8] = "cancels\0"
+    var n_de2: [u8; 9] = "deferred\0"
+    var n_op: [u8; 7] = "opened\0"
+    var n_cl: [u8; 7] = "closed\0"
+    var n_pa: [u8; 7] = "passed\0"
+    var n_es: [u8; 9] = "escalate\0"
+    var n_ob: [u8; 8] = "objects\0"
+    var n_fl: [u8; 9] = "inflight\0"
+    hnum((&n_ch[0]) as u64, kstate.get(state, kstate.H_CHECKS))
+    hnum((&n_de[0]) as u64, kstate.get(state, kstate.H_DENIED))
+    hnum((&n_st[0]) as u64, kstate.get(state, kstate.H_STALE))
+    hnum((&n_ca[0]) as u64, kstate.get(state, kstate.H_CANCELS))
+    hnum((&n_de2[0]) as u64, kstate.get(state, kstate.H_DEFERRED))
+    hnum((&n_op[0]) as u64, kstate.get(state, kstate.H_OPENED))
+    hnum((&n_cl[0]) as u64, kstate.get(state, kstate.H_CLOSED))
+    hnum((&n_pa[0]) as u64, kstate.get(state, kstate.H_PASSED))
+    hnum((&n_es[0]) as u64, kstate.get(state, kstate.H_ESCALATE))
+    hnum((&n_ob[0]) as u64, handle.objects_used(state))
+    hnum((&n_fl[0]) as u64, handle.req_live(state))
+}
+
+const HB_BLOCKS: u64 = 33
+
+const HB_ITERS: u64 = 512
+
+fn hb_sort(p: *mut u64, n: u64) {
+    var i: u64 = 1
+    while i < n {
+        let v: u64 = *((p as u64 + i * 8) as *mut u64)
+        var j: u64 = i
+        var going: bool = true
+        while going {
+            if j == 0 {
+                going = false
+            } else {
+                let w: u64 = *((p as u64 + (j - 1) * 8) as *mut u64)
+                if w <= v {
+                    going = false
+                } else {
+                    *((p as u64 + j * 8) as *mut u64) = w
+                    j = j - 1
+                }
+            }
+        }
+        *((p as u64 + j * 8) as *mut u64) = v
+        i = i + 1
+    }
+}
+
+fn hb_fd_of(state: u64, me: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < HB_BLOCKS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < HB_ITERS {
+            acc = acc +% file.fd_of(state, me, 1)
+            i = i + 1
+        }
+        let t1: u64 = time.tsc()
+        b[k as usize] = ((t1 -% t0) / HB_ITERS) +% (acc & 0)
+        k = k + 1
+    }
+    hb_sort((&b[0]) as *mut u64, HB_BLOCKS)
+    return b[16]
+}
+
+fn hb_empty(state: u64) -> u64 {
+    var b: [u64; 33] = [0 as u64; 33]
+    var k: u64 = 0
+    while k < HB_BLOCKS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        var acc: u64 = 0
+        while i < HB_ITERS {
+            acc = acc +% kstate.get(state, kstate.TICKS)
+            i = i + 1
+        }
+        let t1: u64 = time.tsc()
+        b[k as usize] = ((t1 -% t0) / HB_ITERS) +% (acc & 0)
+        k = k + 1
+    }
+    hb_sort((&b[0]) as *mut u64, HB_BLOCKS)
+    return b[16]
+}
+
+fn handle_bench(state: u64) {
+    var n_fd: [u8; 12] = "bench-fd-of\0"
+    var n_le: [u8; 12] = "bench-leer\0\0"
+    var n_kh: [u8; 11] = "bench-khz\0\0"
+    var n_it: [u8; 13] = "bench-iters\0\0"
+    var n_ok: [u8; 12] = "bench-fdok\0\0"
+    if !kstate.mode_on(state, kstate.M_HBENCH) {
+        return
+    }
+    let me: u64 = sched.current(state)
+    handle.clear_task(state, me, sched.tget(state, me, sched.T_PID))
+    file.init_task(state, me)
+    hnum((&n_ok[0]) as u64, file.fd_of(state, me, 1))
+    hnum((&n_le[0]) as u64, hb_empty(state))
+    hnum((&n_fd[0]) as u64, hb_fd_of(state, me))
+    hnum((&n_kh[0]) as u64, time.khz(state))
+    hnum((&n_it[0]) as u64, HB_BLOCKS * HB_ITERS)
+    let tb: u64 = proc.create(state, P_HBENCH, 0, 2)
+    kutil.wait_for(state, tb)
+    file.close_all(state, me)
+}
+
+fn users(state: u64) {
+    var s_skip: [u8; 14] = "k13: skipped\0\0"
+    var s_begin: [u8; 12] = "k13: begin\0\0"
+    var s_exit: [u8; 18] = "k13: ring 3 exit=\0"
+    var s_z: [u8; 16] = "k13: zombies=\0\0\0"
+    var s_a: [u8; 8] = " after=\0"
+    if !kstate.mode_on(state, kstate.M_K13) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let t: u64 = proc.create(state, P_USER, 0, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    if kstate.mode_on(state, kstate.M_ZOMBIE) {
+        let before: u64 = sched.zombies(state, sched.K_USER)
+        let z: u64 = proc.create(state, P_ZOMBIE, 0, 2)
+        kutil.wait_for(state, z)
+        var w: u64 = 0
+        while w < 40 {
+            sched.sleep_ticks(state, 2)
+            w = w + 1
+        }
+        serial.puts((&s_z[0]) as u64)
+        serial.dec(before)
+        serial.puts((&s_a[0]) as u64)
+        serial.dec(sched.zombies(state, sched.K_USER))
+        serial.nl()
+    }
+}

@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.sched
+import sched.proc
+import ipc.handle
+import ipc.async
+import lib.kutil
+import sched.time
+
+const P_ASYNC: u64 = 50
+
+const P_ABENCH: u64 = 51
+
+const P_ASYNCFS: u64 = 52
+
+fn asyncs(state: u64) {
+    var s_skip: [u8; 15] = "async: skipped\0"
+    var s_begin: [u8; 14] = "async: begin\0\0"
+    var s_exit: [u8; 20] = "async: ring 3 exit=\0"
+    var s_done: [u8; 13] = "async: done\0\0"
+    if !kstate.mode_on(state, kstate.M_ASYNC) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_begin[0]) as u64)
+    serial.nl()
+    let t: u64 = proc.create(state, P_ASYNC, 0, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+    async_numbers(state)
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn asyncs_fs(state: u64) {
+    var s_exit: [u8; 22] = "asyncfs: ring 3 exit=\0"
+    if !kstate.mode_on(state, kstate.M_ASYNC) {
+        return
+    }
+    if kstate.get(state, kstate.FS_READY) == 0 {
+        return
+    }
+    let t: u64 = proc.create(state, P_ASYNCFS, 0, 2)
+    let e: u64 = kutil.wait_for(state, t)
+    serial.puts((&s_exit[0]) as u64)
+    serial.dec(e)
+    serial.nl()
+}
+
+fn anum(name: u64, v: u64) {
+    var s_p: [u8; 8] = "async: \0"
+    var s_e: [u8; 2] = "=\0"
+    serial.puts((&s_p[0]) as u64)
+    serial.puts(name)
+    serial.puts((&s_e[0]) as u64)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn async_numbers(state: u64) {
+    var n_su: [u8; 10] = "submitted\0"
+    var n_co: [u8; 10] = "completed\0"
+    var n_ca: [u8; 10] = "cancelled\0"
+    var n_st: [u8; 6] = "stale\0"
+    var n_fa: [u8; 7] = "failed\0"
+    var n_fu: [u8; 5] = "full\0"
+    var n_ti: [u8; 9] = "timeouts\0"
+    var n_re: [u8; 7] = "reaped\0"
+    var n_ab: [u8; 10] = "abandoned\0"
+    var n_po: [u8; 7] = "posted\0"
+    var n_de: [u8; 7] = "denied\0"
+    var n_wo: [u8; 9] = "workruns\0"
+    var n_us: [u8; 5] = "used\0"
+    var n_li: [u8; 5] = "live\0"
+    var n_lo: [u8; 5] = "lost\0"
+    var n_ob: [u8; 8] = "objects\0"
+    var n_fl: [u8; 9] = "inflight\0"
+    var n_by: [u8; 6] = "bytes\0"
+    var n_wk: [u8; 8] = "workers\0"
+    var n_ct: [u8; 6] = "tasks\0"
+    hnum_a(state, (&n_su[0]) as u64, kstate.A_SUBMITTED)
+    hnum_a(state, (&n_co[0]) as u64, kstate.A_COMPLETED)
+    hnum_a(state, (&n_ca[0]) as u64, kstate.A_CANCELLED)
+    hnum_a(state, (&n_st[0]) as u64, kstate.A_STALED)
+    hnum_a(state, (&n_fa[0]) as u64, kstate.A_FAILED)
+    hnum_a(state, (&n_fu[0]) as u64, kstate.A_FULL)
+    hnum_a(state, (&n_ti[0]) as u64, kstate.A_TIMEOUTS)
+    hnum_a(state, (&n_re[0]) as u64, kstate.A_REAPED)
+    hnum_a(state, (&n_ab[0]) as u64, kstate.A_ABANDONED)
+    hnum_a(state, (&n_po[0]) as u64, kstate.A_POSTED)
+    hnum_a(state, (&n_de[0]) as u64, kstate.A_DENIED)
+    hnum_a(state, (&n_wo[0]) as u64, kstate.A_WORKRUNS)
+    anum((&n_us[0]) as u64, async.used(state))
+    anum((&n_li[0]) as u64, async.live(state))
+    anum((&n_lo[0]) as u64, async_lost(state))
+    anum((&n_ob[0]) as u64, handle.objects_used(state))
+    anum((&n_fl[0]) as u64, handle.req_live(state))
+    anum((&n_by[0]) as u64, async.bytes_per_request())
+    anum((&n_wk[0]) as u64, async_workers(state))
+    anum((&n_ct[0]) as u64, async.MAX_AIO)
+}
+
+fn hnum_a(state: u64, name: u64, off: u64) {
+    anum(name, kstate.get(state, off))
+}
+
+fn async_lost(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        n = n + async.cq_lost(state, i)
+        i = i + 1
+    }
+    return n
+}
+
+fn async_workers(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if sched.tget(state, i, sched.T_STATE) != sched.S_FREE {
+            if sched.tget(state, i, sched.T_KIND) == sched.K_AIO {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn async_bench(state: u64) {
+    var n_kh: [u8; 12] = "abench-khz\0\0"
+    var n_wk: [u8; 16] = "abench-workers\0\0"
+    if !kstate.mode_on(state, kstate.M_ABENCH) {
+        return
+    }
+    let tb: u64 = proc.create(state, P_ABENCH, 0, 2)
+    kutil.wait_for(state, tb)
+    anum((&n_kh[0]) as u64, time.khz(state))
+    anum((&n_wk[0]) as u64, async_workers(state))
+}

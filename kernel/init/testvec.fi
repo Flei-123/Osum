@@ -1,0 +1,384 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mem
+import sched.sched
+import sched.proc
+import lib.kutil
+import sched.time
+import arch.x86_64.fpu
+
+const P_VEC: u64 = 53
+
+fn vectors(state: u64) {
+    var s_skip: [u8; 13] = "vec: skipped\0"
+    var s_beg: [u8; 11] = "vec: begin\0"
+    var s_ex: [u8; 11] = "vec: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_sum: [u8; 10] = "vec: sum=\0"
+    var s_res: [u8; 12] = "vec: clean=\0"
+    if !fpu.want(state, fpu.M_VEC) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    let a: u64 = proc.create(state, P_VEC, 1, 2)
+    let b: u64 = proc.create(state, P_VEC, 2, 2)
+    let c: u64 = proc.create(state, P_VEC, 3, 2)
+    let d: u64 = proc.create(state, P_VEC, 0x200 | 4, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    let ec: u64 = kutil.wait_for(state, c)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(ea)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(eb)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ec)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+    serial.puts((&s_sum[0]) as u64)
+    serial.dec(ea + eb + ec + ed)
+    serial.nl()
+    serial.puts((&s_res[0]) as u64)
+    if ea == 0 && eb == 0 && ec == 0 && ed == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn vectors_smp(state: u64) {
+    var s_beg: [u8; 15] = "vecsmp: begin\0\0"
+    var s_ex: [u8; 14] = "vecsmp: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    var s_c: [u8; 15] = "vecsmp: clean=\0"
+    var s_n: [u8; 15] = "vecsmp: cores=\0"
+    var s_m: [u8; 16] = "vecsmp: onmask=\0"
+    var s_sk: [u8; 16] = "vecsmp: skipped\0"
+    if !fpu.want(state, fpu.M_VEC) {
+        return
+    }
+    if !fpu.enabled(state) {
+        serial.puts((&s_sk[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    serial.puts((&s_n[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_APS) + 1)
+    serial.nl()
+    var t: [u64; 6] = [0 as u64; 6]
+    var i: u64 = 0
+    while i < 6 {
+        t[i as usize] = sched.create(state, sched.K_VEC, 1, 0, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 6 {
+        if t[i as usize] != 0 {
+            sched.start(state, t[i as usize])
+        }
+        i = i + 1
+    }
+    while vec_tasks_alive(state) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+    var bad: u64 = 0
+    var mask: u64 = 0
+    serial.puts((&s_ex[0]) as u64)
+    i = 0
+    while i < 6 {
+        if t[i as usize] != 0 {
+            let e: u64 = sched.tget(state, t[i as usize], sched.T_EXIT)
+            bad = bad + e
+            mask = mask | sched.cpu_mask(state, t[i as usize])
+            serial.dec(e)
+            serial.puts((&s_sp[0]) as u64)
+        }
+        i = i + 1
+    }
+    serial.nl()
+    serial.puts((&s_m[0]) as u64)
+    serial.hex(mask)
+    serial.nl()
+    serial.puts((&s_c[0]) as u64)
+    if bad == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn vec_tasks_alive(state: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_KIND) == sched.K_VEC {
+            let st: u64 = sched.tget(state, i, sched.T_STATE)
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn ring3_smp(state: u64) {
+    var s_beg: [u8; 14] = "r3smp: begin\0\0"
+    var s_ex: [u8; 13] = "r3smp: exit=\0"
+    var s_sp: [u8; 2] = " \0"
+    if !fpu.want(state, fpu.M_R3SMP) {
+        return
+    }
+    serial.puts((&s_beg[0]) as u64)
+    serial.nl()
+    var flag: u64 = 0
+    if !fpu.enabled(state) {
+        flag = 0x100
+    }
+    let a: u64 = proc.create(state, P_VEC, flag | 5, 2)
+    let b: u64 = proc.create(state, P_VEC, flag | 6, 2)
+    let c: u64 = proc.create(state, P_VEC, flag | 7, 2)
+    let d: u64 = proc.create(state, P_VEC, flag | 8, 2)
+    let ea: u64 = kutil.wait_for(state, a)
+    let eb: u64 = kutil.wait_for(state, b)
+    let ec: u64 = kutil.wait_for(state, c)
+    let ed: u64 = kutil.wait_for(state, d)
+    serial.puts((&s_ex[0]) as u64)
+    serial.dec(ea)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(eb)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ec)
+    serial.puts((&s_sp[0]) as u64)
+    serial.dec(ed)
+    serial.nl()
+}
+
+fn fpu_bench(state: u64) {
+    var s_a: [u8; 17] = "fpubench: armA c\0"
+    var s_b: [u8; 17] = "fpubench: armB c\0"
+    var s_sw: [u8; 12] = "  switches=\0"
+    var s_cy: [u8; 10] = "  cycles=\0"
+    var s_per: [u8; 9] = "  each=\0\0"
+    var s_mem: [u8; 17] = "fpubench: bytes=\0"
+    var s_ar: [u8; 10] = "  areas=\0\0"
+    var s_fr: [u8; 11] = "  frames=\0\0"
+    if !fpu.want(state, fpu.M_BENCH) {
+        return
+    }
+    bench_ops(state)
+    bench_ops(state)
+    bench_ops(state)
+    bench_parts(state)
+    bench_parts(state)
+    bench_arm(state, sched.K_YIELD, (&s_a[0]) as u64, (&s_sw[0]) as u64,
+        (&s_cy[0]) as u64, (&s_per[0]) as u64)
+    if fpu.enabled(state) {
+        bench_arm(state, sched.K_VEC, (&s_b[0]) as u64, (&s_sw[0]) as u64,
+            (&s_cy[0]) as u64, (&s_per[0]) as u64)
+    }
+    serial.puts((&s_mem[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_SIZE))
+    serial.puts((&s_ar[0]) as u64)
+    serial.dec(kstate.get(state, kstate.FPU_AREAS))
+    serial.puts((&s_fr[0]) as u64)
+    serial.dec(4096)
+    serial.nl()
+}
+
+fn bench_arm(state: u64, kind: u64, label: u64, s_sw: u64, s_cy: u64,
+    s_per: u64) {
+    let a: u64 = sched.create(state, kind, 1, 0, 0)
+    let b: u64 = sched.create(state, kind, 1, 0, 0)
+    if a == 0 || b == 0 {
+        return
+    }
+    let sw0: u64 = kstate.get(state, kstate.SWITCHES)
+    let t0: u64 = time.tsc()
+    sched.start(state, a)
+    sched.start(state, b)
+    while bench_alive(state, kind) > 0 {
+        sched.sleep_ticks(state, 1)
+    }
+    let t1: u64 = time.tsc()
+    let sw1: u64 = kstate.get(state, kstate.SWITCHES)
+    let sw: u64 = sw1 - sw0
+    let cy: u64 = t1 - t0
+    serial.puts(label)
+    serial.puts(s_sw)
+    serial.dec(sw)
+    serial.puts(s_cy)
+    serial.dec(cy)
+    serial.puts(s_per)
+    if sw > 0 {
+        serial.dec(cy / sw)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+}
+
+fn bench_alive(state: u64, kind: u64) -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.get(state, kstate.TASKS) {
+        if sched.tget(state, i, sched.T_KIND) == kind {
+            let st: u64 = sched.tget(state, i, sched.T_STATE)
+            if st != sched.S_FREE && st != sched.S_ZOMBIE {
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    return n
+}
+
+const BENCH_BURSTS: u64 = 400
+
+const BENCH_IN: u64 = 250
+
+fn bench_ops(state: u64) {
+    var s_a: [u8; 18] = "fpubench: ops n=\0\0"
+    var s_b: [u8; 8] = "  min=\0\0"
+    var s_c: [u8; 9] = "  mitt=\0\0"
+    var s_d: [u8; 12] = "  leermin=\0\0"
+    var s_e: [u8; 8] = "  je=\0\0\0"
+    var s_f: [u8; 8] = "  acc=\0\0"
+    var s_no: [u8; 18] = "fpubench: ops aus\0"
+    if !fpu.enabled(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    let area: u64 = mem.frame_alloc(state)
+    if area == 0 {
+        return
+    }
+    fpu.area_init(state, area)
+    fpu.restore(state, area)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    var total: u64 = 0
+    var b: u64 = 0
+    while b < BENCH_BURSTS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            fpu.save(state, area)
+            fpu.restore(state, area)
+            i = i + 1
+        }
+        let d: u64 = time.tsc() - t0
+        if d < best {
+            best = d
+        }
+        total = total +% d
+        b = b + 1
+    }
+    var lbest: u64 = 0xFFFFFFFFFFFFFFFF
+    var acc: u64 = 0
+    var c: u64 = 0
+    while c < BENCH_BURSTS {
+        let t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            acc = acc +% kstate.get(state, kstate.FPU_SIZE)
+            i = i + 1
+        }
+        let d: u64 = time.tsc() - t0
+        if d < lbest {
+            lbest = d
+        }
+        c = c + 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(BENCH_BURSTS * BENCH_IN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(best / BENCH_IN)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(total / (BENCH_BURSTS * BENCH_IN))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(lbest / BENCH_IN)
+    serial.puts((&s_e[0]) as u64)
+    if best > lbest {
+        serial.dec((best - lbest) / BENCH_IN)
+    } else {
+        serial.dec(0)
+    }
+    serial.puts((&s_f[0]) as u64)
+    serial.hex(acc)
+    serial.nl()
+    mem.frame_free(state, area)
+}
+
+fn bench_parts(state: u64) {
+    var s_a: [u8; 20] = "fpubench: teile sav\0"
+    var s_b: [u8; 8] = "  lad=\0\0"
+    var s_c: [u8; 8] = "  ts=\0\0\0"
+    if !fpu.enabled(state) {
+        return
+    }
+    let area: u64 = mem.frame_alloc(state)
+    if area == 0 {
+        return
+    }
+    fpu.area_init(state, area)
+    fpu.restore(state, area)
+    var bs: u64 = 0xFFFFFFFFFFFFFFFF
+    var bl: u64 = 0xFFFFFFFFFFFFFFFF
+    var bt: u64 = 0xFFFFFFFFFFFFFFFF
+    var b: u64 = 0
+    while b < BENCH_BURSTS {
+        var t0: u64 = time.tsc()
+        var i: u64 = 0
+        while i < BENCH_IN {
+            fpu.save(state, area)
+            i = i + 1
+        }
+        var d: u64 = time.tsc() - t0
+        if d < bs {
+            bs = d
+        }
+        t0 = time.tsc()
+        i = 0
+        while i < BENCH_IN {
+            fpu.restore(state, area)
+            i = i + 1
+        }
+        d = time.tsc() - t0
+        if d < bl {
+            bl = d
+        }
+        t0 = time.tsc()
+        i = 0
+        while i < BENCH_IN {
+            fpu.ts_set()
+            fpu.ts_clear()
+            i = i + 1
+        }
+        d = time.tsc() - t0
+        if d < bt {
+            bt = d
+        }
+        b = b + 1
+    }
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(bs / BENCH_IN)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(bl / BENCH_IN)
+    serial.puts((&s_c[0]) as u64)
+    serial.dec(bt / BENCH_IN)
+    serial.nl()
+    mem.frame_free(state, area)
+}

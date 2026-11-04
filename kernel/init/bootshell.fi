@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.proc
+import lib.kutil
+import init.bootscan
+
+const P_SHELL: u64 = 8
+
+fn console_load(state: u64, cmd: u64) -> u64 {
+    var tag: [u8; 8] = "script=\0"
+    kstate.set(state, kstate.CONSOLE_LEN, 0)
+    kstate.set(state, kstate.CONSOLE_POS, 0)
+    if cmd == 0 {
+        return 0
+    }
+    let at: u64 = bootscan.find(cmd, (&tag[0]) as u64, 7)
+    if at == 0 {
+        return 0
+    }
+    var p: u64 = at + 7
+    var n: u64 = 0
+    while kstate.get8(p) != 0 && n < kstate.CONSOLE_MAX - 2 {
+        var c: u64 = kstate.get8(p)
+        if c == 59 {
+            c = 10
+        }
+        if c == 94 {
+            let nxt: u64 = kstate.get8(p + 1)
+            if nxt >= 64 && nxt < 96 {
+                c = nxt - 64
+                p = p + 1
+            }
+        }
+        kstate.set8(state + kstate.CONSOLE_OFF + n, c as u8)
+        n = n + 1
+        p = p + 1
+    }
+    if n > 0 && kstate.get8(state + kstate.CONSOLE_OFF + n - 1) != 10 {
+        kstate.set8(state + kstate.CONSOLE_OFF + n, 10 as u8)
+        n = n + 1
+    }
+    kstate.set(state, kstate.CONSOLE_LEN, n)
+    return n
+}
+
+fn wm_owns_shell(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_WMSHELL) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_DESK) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_TILESHOT) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_WIG) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_WIGFILES) {
+        return true
+    }
+    if kstate.mode_on(state, kstate.M_WIGSTART) {
+        return true
+    }
+    return false
+}
+
+fn shell(state: u64) {
+    if wm_owns_shell(state) {
+        return
+    }
+    var s_none: [u8; 14] = "sh: no script\0"
+    var s_in: [u8; 17] = "sh: input bytes=\0"
+    var s_out: [u8; 15] = "sh: commands=\0\0"
+
+    if kstate.mode_on(state, kstate.M_OSUM) {
+        return
+    }
+    if kstate.get(state, kstate.CONSOLE_LEN) == 0 {
+        serial.puts((&s_none[0]) as u64)
+        serial.nl()
+        return
+    }
+    serial.puts((&s_in[0]) as u64)
+    serial.dec(kstate.get(state, kstate.CONSOLE_LEN))
+    serial.nl()
+    let i: u64 = proc.create(state, P_SHELL, 0, 2)
+    let code: u64 = kutil.wait_for(state, i)
+    serial.puts((&s_out[0]) as u64)
+    serial.dec(code)
+    serial.nl()
+}

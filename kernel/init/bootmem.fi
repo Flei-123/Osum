@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mem
+import sched.proc
+import lib.kutil
+import libc.numeric
+
+const P_HOG: u64 = 66
+
+const P_HOGWRITE: u64 = 67
+
+fn mem_stress_report(state: u64) {
+    if !kstate.mode_on(state, kstate.M_MEMSTRESS) {
+        return
+    }
+    var s_p: [u8; 12] = "memstress: \0"
+    var s_want: [u8; 6] = "want=\0"
+    var s_got: [u8; 7] = " got=\0\0"
+    var s_hi: [u8; 7] = " high=\0"
+    var s_bef: [u8; 9] = " before=\0"
+    var s_low: [u8; 6] = " low=\0"
+    var s_aft: [u8; 9] = " after=\0\0"
+    var s_bad: [u8; 6] = " bad=\0"
+    var s_seen: [u8; 7] = " seen=\0"
+    var s_ok: [u8; 5] = " ok=\0"
+    var s_pr: [u8; 15] = "memprobe: at=\0\0"
+    var s_prok: [u8; 5] = " ok=\0"
+
+    var want: u64 = mem.frames_free(state) / 2
+    if want > 200000 {
+        want = 200000
+    }
+    let good: bool = mem.stress(state, want)
+    serial.puts((&s_p[0]) as u64)
+    serial.puts((&s_want[0]) as u64)
+    serial.dec(want)
+    serial.puts((&s_got[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STRESS_GOT))
+    serial.puts((&s_hi[0]) as u64)
+    serial.hex(kstate.get(state, kstate.STRESS_HIGH))
+    serial.puts((&s_bef[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STRESS_BEFORE))
+    serial.puts((&s_low[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STRESS_LOW))
+    serial.puts((&s_aft[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STRESS_AFTER))
+    serial.puts((&s_bad[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STRESS_BAD))
+    serial.puts((&s_seen[0]) as u64)
+    serial.dec(kstate.get(state, kstate.STRESS_SEEN))
+    serial.puts((&s_ok[0]) as u64)
+    serial.dec(numeric.yes(good))
+    serial.nl()
+
+    let hi: bool = mem.probe_high(state)
+    serial.puts((&s_pr[0]) as u64)
+    serial.hex(kstate.get(state, kstate.PROBE_ADDR))
+    serial.puts((&s_prok[0]) as u64)
+    serial.dec(numeric.yes(hi))
+    serial.nl()
+}
+
+fn memory(state: u64, mbi: u64, kernel_end: u64) {
+    var s_end: [u8; 13] = "kernel end: \0"
+    var s_map: [u8; 7] = "mmap: \0"
+    var s_entries: [u8; 12] = " entries, \0\0"
+    var s_usable: [u8; 18] = " KiB usable, top=\0"
+    var s_frames: [u8; 9] = "frames: \0"
+    var s_cover: [u8; 12] = " covered, \0\0"
+    var s_free: [u8; 6] = " free\0"
+    var s_heap: [u8; 7] = "heap: \0"
+    var s_size: [u8; 9] = "  size=\0\0"
+    var s_ok: [u8; 4] = "ok\0\0"
+    var s_bad: [u8; 7] = "FAILED\0"
+
+    serial.puts((&s_end[0]) as u64)
+    serial.hex(kernel_end)
+    serial.nl()
+
+    let entries: u64 = mem.scan(state, mbi, kernel_end)
+    mem.reserve_init(state)
+    serial.puts((&s_map[0]) as u64)
+    serial.dec(entries)
+    serial.puts((&s_entries[0]) as u64)
+    serial.dec(kstate.get(state, kstate.MEM_USABLE) / 1024)
+    serial.puts((&s_usable[0]) as u64)
+    serial.hex(kstate.get(state, kstate.MEM_TOP))
+    serial.nl()
+
+    serial.puts((&s_frames[0]) as u64)
+    serial.dec(kstate.get(state, kstate.BITMAP_FRAMES))
+    serial.puts((&s_cover[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.puts((&s_free[0]) as u64)
+    serial.nl()
+
+    var s_bm: [u8; 13] = "mem: bitmap=\0"
+    var s_oct: [u8; 17] = " octets  mapped=\0"
+    var s_give: [u8; 11] = " GiB  of \0\0"
+    var s_gsee: [u8; 5] = " GiB\0"
+    serial.puts((&s_bm[0]) as u64)
+    serial.dec(mem.bitmap_octets(state))
+    serial.puts((&s_oct[0]) as u64)
+    serial.dec(mem.mapped_gib(state))
+    serial.puts((&s_give[0]) as u64)
+    serial.dec((kstate.get(state, kstate.MEM_TOP) + 1073741823) / 1073741824)
+    serial.puts((&s_gsee[0]) as u64)
+    serial.nl()
+    mem_stress_report(state)
+
+    let heap: u64 = mem.frame_run(state, 64)
+    mem.heap_init(state, heap, 64 * mem.FRAME_SIZE)
+    serial.puts((&s_heap[0]) as u64)
+    serial.hex(heap)
+    serial.puts((&s_size[0]) as u64)
+    serial.dec(64 * mem.FRAME_SIZE)
+    serial.nl()
+
+    var s_ft: [u8; 13] = "frame test: \0"
+    var s_ht: [u8; 12] = "heap test: \0"
+    if mem.frame_selftest(state) {
+        serial.puts((&s_ft[0]) as u64)
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_ft[0]) as u64)
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.nl()
+    if mem.heap_selftest(state) {
+        serial.puts((&s_ht[0]) as u64)
+        serial.puts((&s_ok[0]) as u64)
+    } else {
+        serial.puts((&s_ht[0]) as u64)
+        serial.puts((&s_bad[0]) as u64)
+    }
+    serial.nl()
+}
+
+fn speicherdruck(state: u64) {
+    var s_beg: [u8; 22] = "speicherdruck: start\n\0"
+    var s_free: [u8; 21] = "speicherdruck: frei=\0"
+    var s_after: [u8; 22] = "speicherdruck: nach=\0\0"
+    var s_exit: [u8; 22] = "speicherdruck: code=\0\0"
+    var s_alive: [u8; 23] = "speicherdruck: lebt=1\n\0"
+    var s_sp: [u8; 2] = " \0"
+
+    if kstate.mode_on(state, kstate.M_DESK) {
+        return
+    }
+    var any: u64 = 0
+    if kstate.mode_on(state, kstate.M_MEMHOG) {
+        any = 1
+    }
+    if kstate.mode_on(state, kstate.M_MEMHOGN) {
+        any = 1
+    }
+    if kstate.mode_on(state, kstate.M_HOGWRITE) {
+        any = 1
+    }
+    if any == 0 {
+        return
+    }
+
+    serial.puts((&s_beg[0]) as u64)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+
+    if kstate.mode_on(state, kstate.M_MEMHOG) {
+        let a: u64 = proc.create(state, P_HOG, 1, 2)
+        let ea: u64 = kutil.wait_for(state, a)
+        serial.puts((&s_exit[0]) as u64)
+        serial.dec(ea)
+        serial.nl()
+    }
+
+    if kstate.mode_on(state, kstate.M_MEMHOGN) {
+        let a: u64 = proc.create(state, P_HOG, 1, 2)
+        let b: u64 = proc.create(state, P_HOG, 2, 2)
+        let c: u64 = proc.create(state, P_HOG, 3, 2)
+        let ea: u64 = kutil.wait_for(state, a)
+        let eb: u64 = kutil.wait_for(state, b)
+        let ec: u64 = kutil.wait_for(state, c)
+        serial.puts((&s_exit[0]) as u64)
+        serial.dec(ea)
+        serial.puts((&s_sp[0]) as u64)
+        serial.dec(eb)
+        serial.puts((&s_sp[0]) as u64)
+        serial.dec(ec)
+        serial.nl()
+    }
+
+    if kstate.mode_on(state, kstate.M_HOGWRITE) {
+        let a: u64 = proc.create(state, P_HOGWRITE, 1, 2)
+        let ea: u64 = kutil.wait_for(state, a)
+        serial.puts((&s_exit[0]) as u64)
+        serial.dec(ea)
+        serial.nl()
+    }
+
+    serial.puts((&s_after[0]) as u64)
+    serial.dec(mem.frames_free(state))
+    serial.nl()
+    var s_res: [u8; 21] = "speicherdruck: res=\0\0"
+    var s_hit: [u8; 22] = "speicherdruck: hits=\0\0"
+    var s_kil: [u8; 23] = "speicherdruck: kills=\0\0"
+    serial.puts((&s_res[0]) as u64)
+    serial.dec(kstate.get(state, kstate.RESERVE_FRAMES))
+    serial.nl()
+    serial.puts((&s_hit[0]) as u64)
+    serial.dec(kstate.get(state, kstate.RESERVE_HITS))
+    serial.nl()
+    serial.puts((&s_kil[0]) as u64)
+    serial.dec(kstate.get(state, kstate.OOM_KILLS))
+    serial.nl()
+    var s_syn: [u8; 23] = "speicherdruck: syncs=\0\0"
+    serial.puts((&s_syn[0]) as u64)
+    serial.dec(kstate.get(state, kstate.OOM_SYNCS))
+    serial.nl()
+    serial.puts((&s_alive[0]) as u64)
+}

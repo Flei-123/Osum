@@ -1,0 +1,173 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import sched.sched
+import block.blk
+import net.netsvc
+import net.netdev
+import gfx.gfx
+import drv.usb.ehci
+import drv.usb.ehcikbd
+import drv.usb.ohci
+import block.wechsel
+import drv.usb.xhci
+import usb.usb
+import drv.hid.hidrep
+import drv.hid.hidin
+import drv.hid.i2chid
+import net.nethot
+import libc.numeric
+
+fn hid_stage(state: u64) {
+    if kstate.mode_on(state, kstate.M_HIDREP) {
+        hidrep.selbsttest(state)
+    }
+    if kstate.mode_on(state, kstate.M_HIDPAD) {
+        hidin.stage(state)
+        hidin.wiedergabe(state)
+    }
+    if kstate.mode_on(state, kstate.M_HIDDUMP) {
+        i2chid.scan_test(state)
+    }
+
+    if kstate.mode_on(state, kstate.M_I2CSIM) {
+        i2chid.simrun(state)
+    }
+    if kstate.mode_on(state, kstate.M_TOUCHSIM) {
+        i2chid.simrun2(state)
+    }
+
+}
+
+fn ohci_stage(state: u64) {
+    if kstate.mode_on(state, kstate.M_NOUSB) {
+        return
+    }
+    if !kstate.mode_on(state, kstate.M_USB) && !kstate.mode_on(state, kstate.M_EHCI) {
+        return
+    }
+    if !ohci.stage(state) {
+        return
+    }
+    if ohci.have_mouse() && !usb.have_mouse(state) {
+        var aw: u64 = 1024
+        var ah: u64 = 768
+        if gfx.ready(state) && gfx.width(state) > 0 && gfx.height(state) > 0 {
+            aw = gfx.width(state)
+            ah = gfx.height(state)
+        }
+        gfx.mouse_adopt(state, aw, ah)
+    }
+}
+
+fn usb_stage(state: u64) {
+    if kstate.mode_on(state, kstate.M_USBLEG) {
+        xhci.legtest(state)
+    }
+    usb.stage(state)
+    if !usb.ready(state) {
+        return
+    }
+    if usb.have_mouse(state) {
+        var aw: u64 = 1024
+        var ah: u64 = 768
+        if gfx.ready(state) && gfx.width(state) > 0 && gfx.height(state) > 0 {
+            aw = gfx.width(state)
+            ah = gfx.height(state)
+        }
+        gfx.mouse_adopt(state, aw, ah)
+    }
+    if kstate.mode_on(state, kstate.M_UNPLUG) {
+        usb_unplug(state)
+    }
+}
+
+static mut hp_gen_k: u64 = 0
+
+static mut hp_gone_k: u64 = 0
+
+fn wechsel_schritt(state: u64) {
+    let gen: u64 = usb.msc_gen(state)
+    let gone_now: u64 = usb.msc_gone(state)
+    if gone_now != hp_gone_k {
+        hp_gone_k = gone_now
+        var i: u64 = 0
+        while i < blk.MAX_USB {
+            let d: u64 = blk.usb_dev(i)
+            if !usb.msc_ready_at(state, i) && wechsel.hat_dev(state, d) {
+                let _n: u64 = wechsel.geht(state, d)
+            }
+            i = i + 1
+        }
+    }
+    if gen != hp_gen_k {
+        hp_gen_k = gen
+        var j: u64 = 0
+        while j < blk.MAX_USB {
+            let d2: u64 = blk.usb_dev(j)
+            if usb.msc_ready_at(state, j) && !wechsel.hat_dev(state, d2) {
+                let _i: u64 = wechsel.kommt(state, d2)
+            }
+            j = j + 1
+        }
+    }
+}
+
+static mut hold_getan: bool = false
+
+fn usb_hold(state: u64) {
+    var s_h: [u8; 10] = "k17: hold\0"
+    var s_r: [u8; 10] = "k17: free\0"
+    if !kstate.mode_on(state, kstate.M_USBHOLD) {
+        return
+    }
+    if hold_getan {
+        return
+    }
+    hold_getan = true
+    let pollen: bool = kstate.mode_on(state, kstate.M_USBPOLL)
+    serial.puts((&s_h[0]) as u64)
+    serial.nl()
+    var i: u64 = 0
+    while i < 900 {
+        if pollen {
+            usb.poll(state)
+        }
+        ehci.poll(state)
+        ehcikbd.pump(state)
+        ohci.poll(state)
+        usb.hotplug_work(state)
+        nethot.step(state)
+        if netdev.late_usb(state) {
+            netsvc.stage(state)
+        }
+        wechsel_schritt(state)
+        sched.sleep_ticks(state, 1)
+        i = i + 1
+    }
+    usb.report(state)
+    serial.puts((&s_r[0]) as u64)
+    serial.nl()
+}
+
+fn usb_unplug(state: u64) {
+    var s_a: [u8; 22] = "k17: before unplug=\0\0\0"
+    var s_b: [u8; 21] = "k17: after unplug=\0\0\0"
+    var s_p: [u8; 11] = "  present=\0"
+    var s_d: [u8; 11] = "  devices=\0"
+    serial.puts((&s_a[0]) as u64)
+    serial.dec(numeric.yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.nl()
+    usb.unplug_now(state)
+    serial.puts((&s_b[0]) as u64)
+    serial.dec(numeric.yes(blk.present_on(state, blk.DEV_USB)))
+    serial.puts((&s_d[0]) as u64)
+    serial.dec(usb.count(state))
+    serial.puts((&s_p[0]) as u64)
+    serial.dec(usb.unplugs(state))
+    serial.nl()
+}

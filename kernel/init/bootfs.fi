@@ -1,0 +1,230 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import mm.mem
+import block.blk
+import fs.fs
+import libc.numeric
+
+const DISK_FRAMES: u64 = 256
+
+const DISK_BLOCKS: u64 = 2048
+
+fn filesystem(state: u64) {
+    var s_skip: [u8; 13] = "fs: skipped\0\0"
+    var s_disk: [u8; 11] = "fs: disk=\0\0"
+    var s_blocks: [u8; 10] = "  blocks=\0"
+    var s_pre: [u8; 22] = "fs: mount unformatted\0"
+    var s_eq: [u8; 2] = "=\0"
+    var s_fmt: [u8; 12] = "fs: format \0"
+    var s_free: [u8; 8] = "  free=\0"
+    var s_ino: [u8; 10] = "  inodes=\0"
+    var s_small: [u8; 11] = "fs: small \0"
+    var s_wrote: [u8; 8] = "wrote=\0\0"
+    var s_read: [u8; 8] = "  read=\0"
+    var s_same: [u8; 8] = "  same=\0"
+    var s_big: [u8; 9] = "fs: big \0"
+    var s_list: [u8; 10] = "fs: list \0"
+    var s_dir: [u8; 12] = "fs: subdir \0"
+    var s_unlink: [u8; 12] = "fs: unlink \0"
+    var s_after: [u8; 9] = "  after=\0"
+    var s_gone: [u8; 8] = "  gone=\0"
+    var s_done: [u8; 10] = "fs: done\0\0"
+    var s_of: [u8; 5] = " of \0"
+    var p_hello: [u8; 11] = "/hello.txt\0"
+    var p_docs: [u8; 6] = "/docs\0"
+    var p_big: [u8; 14] = "/docs/big.bin\0"
+    var p_limit: [u8; 11] = "/limit.bin\0"
+    var s_limit: [u8; 18] = "fs: limit asked=\0\0"
+    var s_wrote2: [u8; 10] = "  wrote=\0\0"
+    var s_size: [u8; 9] = "  size=\0\0"
+    var p_root: [u8; 2] = "/\0"
+    var text: [u8; 15] = "firn round 62\n\0"
+
+    if kstate.mode_on(state, kstate.M_NOFS) {
+        serial.puts((&s_skip[0]) as u64)
+        serial.nl()
+        return
+    }
+    let disk: u64 = mem.frame_run(state, DISK_FRAMES)
+    if disk == 0 {
+        return
+    }
+    blk.ram_init(state, disk, DISK_BLOCKS)
+    serial.puts((&s_disk[0]) as u64)
+    serial.hex(disk)
+    serial.puts((&s_blocks[0]) as u64)
+    serial.dec(blk.blocks(state))
+    serial.nl()
+
+    serial.puts((&s_pre[0]) as u64)
+    serial.puts((&s_eq[0]) as u64)
+    serial.dec(numeric.yes(fs.mount(state)))
+    serial.nl()
+
+    serial.puts((&s_fmt[0]) as u64)
+    serial.dec(numeric.yes(fs.format(state)))
+    serial.puts((&s_eq[0]) as u64)
+    serial.dec(numeric.yes(fs.mount(state)))
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(fs.free_blocks(state))
+    serial.puts((&s_ino[0]) as u64)
+    serial.dec(fs.used_inodes(state))
+    serial.nl()
+
+    let ino: u64 = fs.create_path(state, (&p_hello[0]) as u64, fs.T_FILE)
+    let wrote: u64 = fs.write_at(state, ino, 0, (&text[0]) as u64, 14)
+    let scratch: u64 = state + kstate.BLOCK_OFF
+    let got: u64 = fs.read_at(state, ino, 0, scratch, 64)
+    serial.puts((&s_small[0]) as u64)
+    serial.puts((&s_wrote[0]) as u64)
+    serial.dec(wrote)
+    serial.puts((&s_read[0]) as u64)
+    serial.dec(got)
+    serial.puts((&s_same[0]) as u64)
+    serial.dec(same(scratch, (&text[0]) as u64, 14))
+    serial.nl()
+
+    fs.create_path(state, (&p_docs[0]) as u64, fs.T_DIR)
+    let big: u64 = fs.create_path(state, (&p_big[0]) as u64, fs.T_FILE)
+    let pattern: u64 = state + kstate.BLOCK_OFF + 2048
+    var i: u64 = 0
+    while i < 1500 {
+        kstate.set8(pattern + i, (48 + i % 10) as u8)
+        i = i + 1
+    }
+    let bw: u64 = fs.write_at(state, big, 0, pattern, 1500)
+    let br: u64 = fs.read_at(state, big, 0, scratch, 1500)
+    serial.puts((&s_big[0]) as u64)
+    serial.puts((&s_wrote[0]) as u64)
+    serial.dec(bw)
+    serial.puts((&s_read[0]) as u64)
+    serial.dec(br)
+    serial.puts((&s_same[0]) as u64)
+    serial.dec(same(scratch, pattern, 1500))
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(fs.free_blocks(state))
+    serial.nl()
+
+    let lim: u64 = fs.create_path(state, (&p_limit[0]) as u64, fs.T_FILE)
+    var asked: u64 = 0
+    var stored: u64 = 0
+    var chunk: u64 = 0
+    while chunk < 300 {
+        asked = asked + 4096
+        stored = stored + fs.write_at(state, lim, chunk * 4096, pattern, 4096)
+        chunk = chunk + 1
+    }
+    serial.puts((&s_limit[0]) as u64)
+    serial.dec(asked)
+    serial.puts((&s_wrote2[0]) as u64)
+    serial.dec(stored)
+    serial.puts((&s_size[0]) as u64)
+    serial.dec(fs.inode_size(state, lim))
+    serial.nl()
+    fs.unlink_path(state, (&p_limit[0]) as u64)
+
+    list_dir(state, (&p_root[0]) as u64, (&s_list[0]) as u64)
+    list_dir(state, (&p_docs[0]) as u64, (&s_dir[0]) as u64)
+
+    let before: u64 = fs.free_blocks(state)
+    serial.puts((&s_unlink[0]) as u64)
+    serial.dec(numeric.yes(fs.unlink_path(state, (&p_big[0]) as u64)))
+    serial.puts((&s_gone[0]) as u64)
+    serial.dec(numeric.yes(fs.path(state, (&p_big[0]) as u64) == 0))
+    serial.puts((&s_after[0]) as u64)
+    serial.dec(fs.free_blocks(state))
+    serial.puts((&s_of[0]) as u64)
+    serial.dec(before)
+    serial.nl()
+
+    serial.puts((&s_done[0]) as u64)
+    serial.nl()
+}
+
+fn same(a: u64, b: u64, n: u64) -> u64 {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(a + i) != kstate.get8(b + i) {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn list_dir(state: u64, p: u64, label: u64) {
+    var s_sp: [u8; 2] = " \0"
+    var s_colon: [u8; 2] = ":\0"
+    let dir: u64 = fs.path(state, p)
+    serial.puts(label)
+    if dir == 0 {
+        serial.nl()
+        return
+    }
+    let out: u64 = state + kstate.NAME_OFF + 1024
+    var i: u64 = 0
+    var going: bool = true
+    while going {
+        let ino: u64 = fs.entry_at(state, dir, i, out, kstate.NAME_MAX - 1024)
+        if ino == 0 {
+            going = false
+        } else {
+            serial.puts(out + 8)
+            serial.puts((&s_colon[0]) as u64)
+            serial.dec(fs.inode_type(state, ino))
+            serial.puts((&s_sp[0]) as u64)
+            i = i + 1
+        }
+    }
+    serial.nl()
+}
+
+fn ata_disk(state: u64) {
+    var s_off: [u8; 13] = "ata: skipped\0"
+    var s_no: [u8; 14] = "ata: no drive\0"
+    var s_yes: [u8; 21] = "ata: drive present\0\0\0"
+    var s_fmt: [u8; 13] = "ata: format \0"
+    var s_mount: [u8; 10] = "  mount=\0\0"
+    var s_io: [u8; 13] = "ata: wrote=\0\0"
+    var s_read: [u8; 8] = "  read=\0"
+    var s_same: [u8; 8] = "  same=\0"
+    var s_list: [u8; 11] = "ata: list \0"
+    var p_file: [u8; 9] = "/ata.txt\0"
+    var p_root: [u8; 2] = "/\0"
+    var text: [u8; 30] = "ata disk holds this line r62\n\0"
+
+    if !(kstate.mode_on(state, kstate.M_ATA)
+         && !kstate.mode_on(state, kstate.M_OSUM)) {
+        serial.puts((&s_off[0]) as u64)
+        serial.nl()
+        return
+    }
+    if !blk.present(state) {
+        serial.puts((&s_no[0]) as u64)
+        serial.nl()
+        return
+    }
+    blk.use_ata(state, DISK_BLOCKS)
+    serial.puts((&s_yes[0]) as u64)
+    serial.nl()
+    serial.puts((&s_fmt[0]) as u64)
+    serial.dec(numeric.yes(fs.format(state)))
+    serial.puts((&s_mount[0]) as u64)
+    serial.dec(numeric.yes(fs.mount(state)))
+    serial.nl()
+    let ino: u64 = fs.create_path(state, (&p_file[0]) as u64, fs.T_FILE)
+    let wrote: u64 = fs.write_at(state, ino, 0, (&text[0]) as u64, 29)
+    let scratch: u64 = state + kstate.BLOCK_OFF
+    let got: u64 = fs.read_at(state, ino, 0, scratch, 64)
+    serial.puts((&s_io[0]) as u64)
+    serial.dec(wrote)
+    serial.puts((&s_read[0]) as u64)
+    serial.dec(got)
+    serial.puts((&s_same[0]) as u64)
+    serial.dec(same(scratch, (&text[0]) as u64, 29))
+    serial.nl()
+    list_dir(state, (&p_root[0]) as u64, (&s_list[0]) as u64)
+}
