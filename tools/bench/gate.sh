@@ -52,7 +52,7 @@ case $MODE in
             ABB=${ABB:-/root/abbilder}; TOKEN=${ODB_TOKEN_FILE:-$ABB/odb.token}
             [ -s "$TOKEN" ] || bash tools/vbox/run.sh odb-token >/dev/null 2>&1
             bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-            ( export ODB=1 PARTTAB=mbr FS_BLOCKS=122880 JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=$ABB/justin-permissions.conf \
+            ( export ODB=1 PARTTAB=mbr JARVIS_DEVICE_KEY=$ABB/vm-device.key JARVIS_CONF=$ABB/justin-permissions.conf \
                      IMAGE_ID="bench-$$" ODB_TOKEN_FILE=$TOKEN
               bash tools/usbimg/build.sh "$D/img" > "$D/build.log" 2>&1 ) || { tail -10 "$D/build.log"; bad "ODB=1 image build"; fin; }
             IMG=$D/img/"${MARKE_DATEI}-usb".img

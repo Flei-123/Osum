@@ -56,6 +56,7 @@ const S_LPTRES: u64 = 0x118
 const S_PRB_MSIX: u64 = 0x128
 const S_PRB_ARMED: u64 = 0x130
 const S_PRB_VEC: u64 = 0x138
+const S_TX_HEAD: u64 = 0x140
 const S_LPTK1: u64 = 0x120
 
 fn sc(u: u64, off: u64) -> u64 {
@@ -1825,6 +1826,7 @@ fn tx_setup(state: u64, u: u64) {
     setreg(state, u, R_TDH, 0)
     setreg(state, u, R_TDT, 0)
     kstate.set(state, sc(u, S_TX_CUR), 0)
+    kstate.set(state, sc(u, S_TX_HEAD), 0)
     setreg(state, u, R_TIPG, TIPG_DEFAULT)
     if fam(state, u) == FAM_ICH {
         setreg(state, u, R_TIPG, (TIPG_DEFAULT & (~0x3FF)) | 8)
@@ -1863,18 +1865,24 @@ fn tx_room_on(state: u64, u: u64) -> u64 {
     if !ready_on(state, u) {
         return 0
     }
-    let head: u64 = reg(state, u, R_TDH) % RING_SLOTS
     let tail: u64 = kstate.get(state, sc(u, S_TX_CUR)) % RING_SLOTS
-    var inflight: u64 = 0
-    if tail >= head {
-        inflight = tail - head
-    } else {
-        inflight = RING_SLOTS - head + tail
+    var inflight: u64 = tx_inflight(tail, kstate.get(state, sc(u, S_TX_HEAD)))
+    if inflight + 1 >= RING_SLOTS {
+        let head: u64 = reg(state, u, R_TDH) % RING_SLOTS
+        kstate.set(state, sc(u, S_TX_HEAD), head)
+        inflight = tx_inflight(tail, head)
     }
     if inflight + 1 >= RING_SLOTS {
         return 0
     }
     return RING_SLOTS - 1 - inflight
+}
+
+fn tx_inflight(tail: u64, head: u64) -> u64 {
+    if tail >= head {
+        return tail - head
+    }
+    return RING_SLOTS - head + tail
 }
 
 fn tx_frame_on(state: u64, u: u64, src: u64, n: u64) -> bool {
