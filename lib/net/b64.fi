@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 import libc.octets
 
-export { b64_encode, b64_decode, BAD }
+export { b64_encode, b64_encode_opt, b64_decode, b64_decode_cap, BAD }
 
 const BAD: u64 = 0xFFFFFFFFFFFFFFFF
 
@@ -11,8 +11,11 @@ fn b64_at(v: u64) -> u64 {
     return B64[(v & 63) as usize] as u64
 }
 
-// Standard base64 with padding; returns the number of octets written.
 fn b64_encode(src: u64, n: u64, dst: u64) -> u64 {
+    return b64_encode_opt(src, n, dst, true)
+}
+
+fn b64_encode_opt(src: u64, n: u64, dst: u64, pad: bool) -> u64 {
     var i: u64 = 0
     var o: u64 = 0
     while i + 3 <= n {
@@ -29,21 +32,27 @@ fn b64_encode(src: u64, n: u64, dst: u64) -> u64 {
         let v1: u64 = octets.ld8(src, i) << 16
         octets.st8(dst, o, b64_at(v1 >> 18))
         octets.st8(dst, o + 1, b64_at(v1 >> 12))
-        octets.st8(dst, o + 2, 61)
-        octets.st8(dst, o + 3, 61)
-        o = o + 4
+        o = o + 2
+        if pad {
+            octets.st8(dst, o, 61)
+            octets.st8(dst, o + 1, 61)
+            o = o + 2
+        }
     } else if rest == 2 {
         let v2: u64 = (octets.ld8(src, i) << 16) | (octets.ld8(src, i + 1) << 8)
         octets.st8(dst, o, b64_at(v2 >> 18))
         octets.st8(dst, o + 1, b64_at(v2 >> 12))
         octets.st8(dst, o + 2, b64_at(v2 >> 6))
-        octets.st8(dst, o + 3, 61)
-        o = o + 4
+        o = o + 3
+        if pad {
+            octets.st8(dst, o, 61)
+            o = o + 1
+        }
     }
     return o
 }
 
-fn b64_val(c: u64) -> u64 {
+fn b64_val(c: u64, urlsafe: bool) -> u64 {
     if c >= 65 && c <= 90 {
         return c - 65
     }
@@ -53,18 +62,22 @@ fn b64_val(c: u64) -> u64 {
     if c >= 48 && c <= 57 {
         return c - 48 + 52
     }
-    if c == 43 || c == 45 {
+    if c == 43 || (urlsafe && c == 45) {
         return 62
     }
-    if c == 47 || c == 95 {
+    if c == 47 || (urlsafe && c == 95) {
         return 63
     }
     return BAD
 }
 
-// Decodes base64; CR, LF and blanks are skipped, padding ends the data. Returns the
-// number of octets written or BAD on a foreign character.
 fn b64_decode(src: u64, n: u64, dst: u64) -> u64 {
+    return b64_decode_cap(src, n, dst, 0xFFFFFFFFFFFFFFFF, true)
+}
+
+// Decodes base64; CR, LF and blanks are skipped, padding ends the data. Returns the
+// number of octets written or BAD on a foreign character or when `cap` is exceeded.
+fn b64_decode_cap(src: u64, n: u64, dst: u64, cap: u64, urlsafe: bool) -> u64 {
     var acc: u64 = 0
     var bits: u64 = 0
     var o: u64 = 0
@@ -78,7 +91,7 @@ fn b64_decode(src: u64, n: u64, dst: u64) -> u64 {
         if c == 61 {
             break
         }
-        let v: u64 = b64_val(c)
+        let v: u64 = b64_val(c, urlsafe)
         if v == BAD {
             return BAD
         }
@@ -86,6 +99,9 @@ fn b64_decode(src: u64, n: u64, dst: u64) -> u64 {
         bits = bits + 6
         if bits >= 8 {
             bits = bits - 8
+            if o >= cap {
+                return BAD
+            }
             octets.st8(dst, o, (acc >> bits) & 255)
             o = o + 1
         }

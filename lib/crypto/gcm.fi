@@ -33,7 +33,8 @@ import crypto.aes
 import crypto.aesni
 import libc.octets
 
-export { Gcm, gcm_new, gcm_init, gcm_seal, gcm_open, gcm_uses_aesni,
+export { Gcm, gcm_new, gcm_init, gcm_init_ct, gcm_seal, gcm_open, gcm_seal_once, gcm_open_once,
+    gcm_uses_aesni,
     ghash_blocks, GCM_TAG, GCM_NONCE }
 
 const GCM_TAG: usize = 16
@@ -46,6 +47,7 @@ struct Gcm {
     hh: [u64; 16], // 4 bit table, high halves
     hl: [u64; 16], // 4 bit table, low halves
     ok: bool,
+    ct: bool,
 }
 
 fn be64(p: u64, off: usize) -> u64 {
@@ -68,7 +70,7 @@ fn put_be64(p: u64, off: usize, v: u64) {
 
 fn gcm_new() -> Gcm {
     return Gcm { k: aes.key_new(), e: aesni.enc_from(0, 0), ni: false,
-        hh: [0 as u64; 16], hl: [0 as u64; 16], ok: false }
+        hh: [0 as u64; 16], hl: [0 as u64; 16], ok: false, ct: false }
 }
 
 fn gcm_uses_aesni(g: *mut Gcm) -> bool {
@@ -128,10 +130,19 @@ fn make_tables(g: *mut Gcm) {
     }
 }
 
+fn gcm_init_ct(g: *mut Gcm, key: u64, klen: usize) -> bool {
+    if !gcm_init(g, key, klen) {
+        return false
+    }
+    (*g).ct = true
+    return true
+}
+
 // Key setup. klen = 16, 24 or 32. false = key refused.
 fn gcm_init(g: *mut Gcm, key: u64, klen: usize) -> bool {
     (*g).ok = false
     (*g).ni = false
+    (*g).ct = false
     if klen != 16 && klen != 24 && klen != 32 {
         return false
     }
@@ -147,8 +158,39 @@ fn gcm_init(g: *mut Gcm, key: u64, klen: usize) -> bool {
     return true
 }
 
+fn gf_mul_ct(g: *mut Gcm, y: *mut [u8; 16]) {
+    let xhi: u64 = be64((y as u64), 0)
+    let xlo: u64 = be64((y as u64), 8)
+    var rhi: u64 = 0
+    var rlo: u64 = 0
+    var vhi: u64 = (*g).hh[8]
+    var vlo: u64 = (*g).hl[8]
+    var i: usize = 0
+    while i < 128 {
+        var bit: u64 = 0
+        if i < 64 {
+            bit = (xhi >> ((63 - i) as u64)) & 1
+        } else {
+            bit = (xlo >> ((127 - i) as u64)) & 1
+        }
+        let mask: u64 = 0 -% bit
+        rhi = rhi ^ (vhi & mask)
+        rlo = rlo ^ (vlo & mask)
+        let lsb: u64 = vlo & 1
+        vlo = (vlo >> 1) | ((vhi & 1) << 63)
+        vhi = (vhi >> 1) ^ ((0 -% lsb) & 0xE100000000000000)
+        i = i + 1
+    }
+    put_be64((y as u64), 0, rhi)
+    put_be64((y as u64), 8, rlo)
+}
+
 // y = (y * H) in GF(2^128), GCM bit order.
 fn gmult(g: *mut Gcm, y: *mut [u8; 16]) {
+    if (*g).ct {
+        gf_mul_ct(g, y)
+        return
+    }
     var b: u64 = (*y)[15] as u64
     var lo: usize = (b & 15) as usize
     var hi: usize = (b >> 4) as usize
@@ -303,4 +345,22 @@ fn gcm_open(g: *mut Gcm, nonce: u64, aad: u64, na: usize,
     ctr[15] = 2 as u8
     gctr(g, (&ctr[0]) as u64, ct, clen, out)
     return true
+}
+
+fn gcm_seal_once(key: u64, klen: usize, nonce: u64, aad: u64, na: usize, plain: u64, n: usize,
+    out: u64) -> bool {
+    var g: Gcm = gcm_new()
+    if !gcm_init_ct(&g, key, klen) {
+        return false
+    }
+    return gcm_seal(&g, nonce, aad, na, plain, n, out)
+}
+
+fn gcm_open_once(key: u64, klen: usize, nonce: u64, aad: u64, na: usize, ct: u64, n: usize,
+    out: u64) -> bool {
+    var g: Gcm = gcm_new()
+    if !gcm_init_ct(&g, key, klen) {
+        return false
+    }
+    return gcm_open(&g, nonce, aad, na, ct, n, out)
 }
