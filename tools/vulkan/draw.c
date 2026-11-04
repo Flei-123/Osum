@@ -349,13 +349,13 @@ static void quad3(float *v, float x0, float y0, float x1, float y1, float z, flo
 static const VkFormat F3[2] = { VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT };
 static void scene3(const char *name, int kind)
 {
-    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, kind != 0 && kind != 4);
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, kind == 1 || kind == 2);
     VkDescriptorSetLayout dsl;
     VkPipelineLayout lay = mklayout(0, 0, &dsl);
     float v[8][42];
     PipeDesc d[4];
     int nd = 0, ndraw = 0;
-    for (int i = 0; i < 4; i++) { PipeDesc e = { "depth.vert", "tri.frag", t.fmt, kind == 4 ? VK_FORMAT_UNDEFINED : VK_FORMAT_D32_SFLOAT, 0, kind != 0 && kind != 4, 2, 28, { F3[0], F3[1] }, { 0, 12 }, lay }; d[i] = e; }
+    for (int i = 0; i < 4; i++) { PipeDesc e = { "depth.vert", "tri.frag", t.fmt, (kind == 1 || kind == 2) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_UNDEFINED, 0, kind == 1 || kind == 2, 2, 28, { F3[0], F3[1] }, { 0, 12 }, lay }; d[i] = e; }
     if (kind == 0 || kind == 5) {
         d[0].cull = kind == 0 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT; d[0].cw = kind == 5; nd = 1;
         quad3(v[0], -0.9f, -0.8f, -0.1f, 0.8f, 0.5f, 1, 0, 0); quad3(v[1], 0.1f, -0.8f, 0.9f, 0.8f, 0.5f, 0, 1, 0);

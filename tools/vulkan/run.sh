@@ -69,13 +69,13 @@ mutate_draw() {
     if draw_match "$D/m/out"; then ck "draw counter-proof $name: mutant must differ from lavapipe" no; else ck "draw counter-proof $name: mutant differs from lavapipe" ok; fi
 }
 mutate_draw "no viewport y flip" vkrender.fi 's/0.0f - y \* sy + w \* oy/y * sy + w * oy/'
-mutate_draw "push constants dropped" vkrender.fi 's/rt.mem_copy(ubo, rs + (R_PUSH as u64) \* 8 as u64, PUSH_WORDS \* 8)//'
+mutate_draw "push constants dropped" vkrender.fi 's/rt.mem_copy(ubo + (lower.PUSH_BASE as u64), rs + (R_PUSH as u64) \* 8 as u64, PUSH_WORDS \* 8)//'
 mutate_draw "blend ignored" vkrender.fi 's/raster.frame_set_blend(f, (flags \& vkpipe.F_BLEND) != 0 as u64)/raster.frame_set_blend(f, false)/'
 mutate_draw "depth test ignored" vkrender.fi 's/(\*f).depth_test = (flags \& vkpipe.F_DEPTH) != 0 as u64 \&\& /(*f).depth_test = false \&\& /'
 mutate_draw "BGRA swizzle skipped" vkrender.fi 's/if rt.ld64(rs, R_BGRA) != 0 as u64 { swap_rb/if rt.ld64(rs, R_BGRA) == 99 as u64 { swap_rb/'
 mutate_draw "index buffer offset ignored" vkrender.fi 's/rt.ld8(p + ioff + idx/rt.ld8(p + idx/g'
 mutate_draw "vertex attribute offset ignored" vkrender.fi 's/ + vn \* rt.ld64(p, vkpipe.P_STRIDE0 + binding) + off$/ + vn * rt.ld64(p, vkpipe.P_STRIDE0 + binding)/'
-mutate_draw "texture slot shifted" vkrender.fi 's/raster.frame_set_texture_slot(f, b, px/raster.frame_set_texture_slot(f, b + 1, px/'
+mutate_draw "texture slot shifted" vkrender.fi 's/raster.frame_set_texture_slot(f, b, tp, tw, th)/raster.frame_set_texture_slot(f, b + 1, tp, tw, th)/'
 mutate_draw "scissor ignored" vkrender.fi 's/raster.frame_set_scissor(f, x0, y0, x1, y1)/raster.frame_set_scissor(f, 0, 0, (*f).w, (*f).h)/'
 mutate_draw "viewport ignored" vkrender.fi 's/if rt.ld64(rs, R_HASVP) != 0 as u64 {/if rt.ld64(rs, R_HASVP) == 99 as u64 {/'
 mutate_draw "uniform buffer offset ignored" vkrender.fi 's/rt.mem_copy(ubo, p + off, n as usize)/rt.mem_copy(ubo, p, n as usize)/'
