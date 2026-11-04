@@ -78,10 +78,10 @@ D0=$(count 'elevate: denied'); keys n
 waitcount 'elevate: denied' $((D0+1)) 20; sleep 2
 grep -aq 'elevate: denied' "$W/ser" && ok "Cancel is reported (elevate: denied)" || bad "Cancel is reported (elevate: denied)"
 grep -aq 'elevate: start ' "$W/ser" && bad "Cancel still started a root programme" || ok "Cancel started nothing as root"
-# 4. Allow (key Y) -> the system tool starts as root
+# 4. Allow (key J) -> the system tool starts as root
 R1=$(count 'elevate: ready')
 # wait for the SECOND consent window (a new `elevate: ready`), then Allow, then wait for the start line
-open_installer $((R1+1)); sleep 3; P0=$(count 'execas: priv pid='); keys y
+open_installer $((R1+1)); sleep 3; P0=$(count 'execas: priv pid='); keys j
 waitcount 'execas: priv pid=' $((P0+1)) 40; sleep 3
 grep -aq 'elevate: allowed' "$W/ser" && ok "Allow is reported (elevate: allowed)" || bad "Allow is reported (elevate: allowed)"
 # r1314: `elevate: start <path> pid=<n>` is written in five separate pieces (text, path, " pid=", number, newline) and other processes
