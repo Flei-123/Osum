@@ -108,27 +108,29 @@ static VkShaderModule load_shader(const char *name)
     return m;
 }
 
-typedef struct { const char *vs, *fs; VkFormat color, depth; int blend, depth_test, nattr, stride; VkFormat afmt[2]; uint32_t aoff[2]; VkPipelineLayout layout; } PipeDesc;
+typedef struct { const char *vs, *fs; VkFormat color, depth; int blend, depth_test, nattr, stride; VkFormat afmt[2]; uint32_t aoff[2]; VkPipelineLayout layout; int cull, cw, dopx, nowrite, stencil, inst; VkStencilOpState sf; } PipeDesc;
+static VkFormat g_sfmt = VK_FORMAT_UNDEFINED;
 static VkPipeline mkpipe(const PipeDesc *d)
 {
     VkPipelineShaderStageCreateInfo st[2] = {
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = load_shader(d->vs), .pName = "main" },
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = load_shader(d->fs), .pName = "main" } };
-    VkVertexInputBindingDescription bd = { 0, (uint32_t)d->stride, VK_VERTEX_INPUT_RATE_VERTEX };
-    VkVertexInputAttributeDescription ad[2] = { { 0, 0, d->afmt[0], d->aoff[0] }, { 1, 0, d->afmt[1], d->aoff[1] } };
-    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .vertexBindingDescriptionCount = 1, .pVertexBindingDescriptions = &bd, .vertexAttributeDescriptionCount = 2, .pVertexAttributeDescriptions = ad };
+    VkVertexInputBindingDescription bd[2] = { { 0, (uint32_t)d->stride, VK_VERTEX_INPUT_RATE_VERTEX }, { 1, 24, VK_VERTEX_INPUT_RATE_INSTANCE } };
+    VkVertexInputAttributeDescription ad[3] = { { 0, 0, d->afmt[0], d->aoff[0] }, { 1, 0, d->afmt[1], d->aoff[1] }, { 2, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 8 } };
+    if (d->inst) ad[1] = (VkVertexInputAttributeDescription){ 1, 1, VK_FORMAT_R32G32_SFLOAT, 0 };
+    VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO, .vertexBindingDescriptionCount = d->inst ? 2 : 1, .pVertexBindingDescriptions = bd, .vertexAttributeDescriptionCount = d->inst ? 3 : 2, .pVertexAttributeDescriptions = ad };
     VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
     VkPipelineViewportStateCreateInfo vp = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
-    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
+    VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = d->cull, .frontFace = d->cw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
     VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
-    VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = d->depth_test, .depthWriteEnable = d->depth_test, .depthCompareOp = VK_COMPARE_OP_LESS, .maxDepthBounds = 1.0f };
+    VkPipelineDepthStencilStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = d->depth_test, .depthWriteEnable = d->depth_test && !d->nowrite, .depthCompareOp = d->dopx ? d->dopx - 1 : VK_COMPARE_OP_LESS, .stencilTestEnable = d->stencil, .front = d->sf, .back = d->sf, .maxDepthBounds = 1.0f };
     VkPipelineColorBlendAttachmentState ba = { .blendEnable = d->blend, .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA, .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = VK_BLEND_OP_ADD,
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = 15 };
     VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ba };
     VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
     VkPipelineDynamicStateCreateInfo dsi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn };
     VkFormat cf = d->color;
-    VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &cf, .depthAttachmentFormat = d->depth };
+    VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &cf, .depthAttachmentFormat = d->depth, .stencilAttachmentFormat = d->stencil ? g_sfmt : VK_FORMAT_UNDEFINED };
     VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
         .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cbs, .pDynamicState = &dsi, .layout = d->layout };
     VkPipeline p = 0;
@@ -139,7 +141,7 @@ static VkPipeline mkpipe(const PipeDesc *d)
 
 static VkPipelineLayout mklayout(int sampler, uint32_t push, VkDescriptorSetLayout *out_dsl)
 {
-    VkDescriptorSetLayoutBinding b = { .binding = 0, .descriptorType = sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS };
+    VkDescriptorSetLayoutBinding b = { .binding = 0, .descriptorType = sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : sampler == 3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_ALL_GRAPHICS };
     VkDescriptorSetLayoutCreateInfo li = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = sampler ? 1 : 0, .pBindings = &b };
     VkDescriptorSetLayout dsl = 0;
     vkCreateDescriptorSetLayout(dev, &li, 0, &dsl);
@@ -153,7 +155,7 @@ static VkPipelineLayout mklayout(int sampler, uint32_t push, VkDescriptorSetLayo
 
 static VkDescriptorSet mkset(VkDescriptorSetLayout dsl, int sampler, VkImageView view, VkSampler smp, VkBuffer ubo, VkDeviceSize ubo_off, VkDeviceSize ubo_size)
 {
-    VkDescriptorPoolSize ps = { sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
+    VkDescriptorPoolSize ps = { sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : sampler == 3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
     VkDescriptorPoolCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
     VkDescriptorPool pool = 0;
     vkCreateDescriptorPool(dev, &pi, 0, &pool);
@@ -163,18 +165,19 @@ static VkDescriptorSet mkset(VkDescriptorSetLayout dsl, int sampler, VkImageView
     VkDescriptorImageInfo ii = { smp, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorBufferInfo bi = { ubo, ubo_off, ubo_size };
     VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
-        .descriptorType = sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pImageInfo = &ii, .pBufferInfo = &bi };
+        .descriptorType = sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : sampler == 3 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pImageInfo = &ii, .pBufferInfo = &bi };
     vkUpdateDescriptorSets(dev, 1, &w, 0, 0);
     return set;
 }
 
-typedef struct { Img color; Img depth; VkFormat fmt; } Target;
+typedef struct { Img color; Img depth; Img stencil; VkFormat fmt; } Target;
 static Target mktarget(VkFormat fmt, int with_depth)
 {
     Target t = {0};
     t.fmt = fmt;
     t.color = mkimg(fmt, W, H, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     if (with_depth) t.depth = mkimg(VK_FORMAT_D32_SFLOAT, W, H, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (g_sfmt) t.stencil = mkimg(g_sfmt, W, H, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_STENCIL_BIT);
     return t;
 }
 
@@ -186,7 +189,11 @@ static void begin_pass(Target *t, float r, float g, float b, float a)
     VkRenderingAttachmentInfo da = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = t->depth.v, .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = { .depthStencil = { 1.0f, 0 } } };
     if (t->depth.i) transition(t->depth.i, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { W, H } }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = t->depth.i ? &da : 0 };
+    VkRenderingAttachmentInfo sa = da;
+    sa.imageView = t->stencil.v;
+    sa.clearValue.depthStencil.stencil = 0;
+    if (t->stencil.i) transition(t->stencil.i, VK_IMAGE_ASPECT_STENCIL_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { W, H } }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = t->depth.i ? &da : 0, .pStencilAttachment = t->stencil.i ? &sa : 0 };
     vkCmdBeginRendering(cb, &ri);
 }
 
@@ -334,6 +341,67 @@ static void case_depth(void)
 typedef struct { float clipr[4], box[4], c1[4], grad[4], size[4]; } FuiU;
 typedef struct { float x, y, r, g, b, a; } FuiV;
 
+static void quad3(float *v, float x0, float y0, float x1, float y1, float z, float r, float g, float b)
+{
+    float q[6][2] = { { x0, y0 }, { x1, y0 }, { x1, y1 }, { x0, y0 }, { x1, y1 }, { x0, y1 } };
+    for (int i = 0; i < 6; i++) { float *p = v + i * 7; p[0] = q[i][0]; p[1] = q[i][1]; p[2] = z; p[3] = r; p[4] = g; p[5] = b; p[6] = 1; }
+}
+static const VkFormat F3[2] = { VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT };
+static void scene3(const char *name, int kind)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, kind != 0 && kind != 4);
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout lay = mklayout(0, 0, &dsl);
+    float v[8][42];
+    PipeDesc d[4];
+    int nd = 0, ndraw = 0;
+    for (int i = 0; i < 4; i++) { PipeDesc e = { "depth.vert", "tri.frag", t.fmt, kind == 4 ? VK_FORMAT_UNDEFINED : VK_FORMAT_D32_SFLOAT, 0, kind != 0 && kind != 4, 2, 28, { F3[0], F3[1] }, { 0, 12 }, lay }; d[i] = e; }
+    if (kind == 0 || kind == 5) {
+        d[0].cull = kind == 0 ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_FRONT_BIT; d[0].cw = kind == 5; nd = 1;
+        quad3(v[0], -0.9f, -0.8f, -0.1f, 0.8f, 0.5f, 1, 0, 0); quad3(v[1], 0.1f, -0.8f, 0.9f, 0.8f, 0.5f, 0, 1, 0);
+        float tmp[7]; for (int k = 0; k < 7; k++) { tmp[k] = v[1][7 + k]; v[1][7 + k] = v[1][14 + k]; v[1][14 + k] = tmp[k]; }
+        ndraw = 2;
+    }
+    if (kind == 1) {
+        d[1].dopx = 1 + VK_COMPARE_OP_EQUAL; d[1].nowrite = 1; d[2].dopx = 1 + VK_COMPARE_OP_GREATER; d[2].nowrite = 1; nd = 3;
+        quad3(v[0], -0.9f, -0.6f, 0.0f, 0.6f, 0.5f, 1, 0, 0); quad3(v[1], -0.5f, -0.9f, 0.5f, 0.9f, 0.5f, 0, 1, 0); quad3(v[2], -0.2f, -0.7f, 0.9f, 0.7f, 0.8f, 0, 0, 1);
+        ndraw = 3;
+    }
+    if (kind == 2) {
+        d[0].nowrite = 1; nd = 2;
+        quad3(v[0], -0.9f, -0.6f, 0.2f, 0.6f, 0.6f, 1, 1, 0); quad3(v[1], -0.2f, -0.8f, 0.9f, 0.8f, 0.8f, 0, 1, 1);
+        ndraw = 2;
+    }
+    if (kind == 3) {
+        d[0].stencil = 1; d[0].sf = (VkStencilOpState){ VK_STENCIL_OP_KEEP, VK_STENCIL_OP_REPLACE, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 255, 255, 1 };
+        d[1].stencil = 1; d[1].sf = (VkStencilOpState){ VK_STENCIL_OP_KEEP, VK_STENCIL_OP_INCREMENT_AND_CLAMP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_ALWAYS, 255, 255, 1 };
+        d[2].stencil = 1; d[2].sf = (VkStencilOpState){ VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL, 255, 255, 2 };
+        d[3].stencil = 1; d[3].sf = (VkStencilOpState){ VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_COMPARE_OP_EQUAL, 255, 255, 1 };
+        nd = 4; for (int i = 0; i < 4; i++) d[i].depth_test = 0;
+        quad3(v[0], -0.9f, -0.7f, 0.1f, 0.7f, 0.5f, 1, 0, 0); quad3(v[1], -0.2f, -0.5f, 0.8f, 0.5f, 0.5f, 1, 1, 0);
+        quad3(v[2], -1, -1, 1, 1, 0.5f, 0, 0, 1); quad3(v[3], -1, -1, 1, 1, 0.5f, 0, 1, 0);
+        ndraw = 4;
+    }
+    VkPipeline p[4];
+    for (int i = 0; i < nd; i++) p[i] = mkpipe(&d[i]);
+    char label[128];
+    snprintf(label, sizeof label, "pipelines %s", name);
+    check(label, p[0] != 0);
+    Buf vb = mkvec(v, sizeof v, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    begin();
+    begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
+    set_vp(0, 0, W, H, 0, 0, W, H);
+    for (int k = 0; k < ndraw; k++) {
+        VkPipeline use = (kind == 0 || kind == 5) ? p[0] : p[k];
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, use);
+        VkDeviceSize off = (VkDeviceSize)k * sizeof v[0];
+        vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
+        vkCmdDraw(cb, 6, 1, 0, 0);
+    }
+    finish(&t, name, &rb);
+}
+
 static void case_fui(void)
 {
     Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
@@ -426,6 +494,13 @@ int main(int argc, char **argv)
     case_quad();
     case_depth();
     case_fui();
+    scene3("cull", 0);
+    scene3("cullfront", 5);
+    scene3("dops", 1);
+    scene3("dnowrite", 2);
+    g_sfmt = VK_FORMAT_S8_UINT;
+    scene3("stencil", 3);
+    g_sfmt = VK_FORMAT_UNDEFINED;
     printf("VK DONE bad=%d\n", bad);
     return bad ? 1 : 0;
 }

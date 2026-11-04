@@ -44,11 +44,11 @@ for sh in tools/vulkan/shaders/tri.vert tools/vulkan/shaders/tri.frag tools/vulk
     b=$(basename "$sh")
     glslangValidator -V "$sh" -o "$D/spv/$b.spv" > /dev/null 2>&1 && spirv-opt --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store "$D/spv/$b.spv" -o "$D/spv/$b.opt" || ck "shader $b compiles" no
 done
-CASES="tri tri_bgra tri_view push quad depth fui"
+CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil"
 VK_DRIVER_FILES=$LVP timeout 120 "$D/draw" libvulkan.so.1 1 "$D/lvpd" "$D/spv" > "$D/draw_lvp.txt" 2>&1
 grep -q "^VK DONE bad=0" "$D/draw_lvp.txt" && ck "draw client: lavapipe reference passes" ok || ck "draw client: lavapipe reference passes" no
 timeout 120 stdbuf -o0 "$D/draw" "$D/libvulkan.so.1" 0 "$D/oursd" "$D/spv" > "$D/draw_ours.txt" 2>&1
-grep -q "^VK DONE bad=0" "$D/draw_ours.txt" && ck "draw client: OrientOS ICD passes (7 pipelines, 7 draws)" ok || { ck "draw client: OrientOS ICD passes (7 pipelines, 7 draws)" no; grep FAIL "$D/draw_ours.txt" | head; }
+grep -q "^VK DONE bad=0" "$D/draw_ours.txt" && ck "draw client: OrientOS ICD passes (12 scenes)" ok || { ck "draw client: OrientOS ICD passes (12 scenes)" no; grep FAIL "$D/draw_ours.txt" | head; }
 draw_match() {
     local dir=$1 c r=0
     for c in $CASES; do
@@ -79,5 +79,10 @@ mutate_draw "texture slot shifted" vkrender.fi 's/raster.frame_set_texture_slot(
 mutate_draw "scissor ignored" vkrender.fi 's/raster.frame_set_scissor(f, x0, y0, x1, y1)/raster.frame_set_scissor(f, 0, 0, (*f).w, (*f).h)/'
 mutate_draw "viewport ignored" vkrender.fi 's/if rt.ld64(rs, R_HASVP) != 0 as u64 {/if rt.ld64(rs, R_HASVP) == 99 as u64 {/'
 mutate_draw "uniform buffer offset ignored" vkrender.fi 's/rt.mem_copy(ubo, p + off, n as usize)/rt.mem_copy(ubo, p, n as usize)/'
+mutate_draw "cull ignored" vkrender.fi 's/(\*f).cull = (cull_mode \& pos_bit) != 0 as u64/(*f).cull = false/;s/(\*f).cull_neg = (cull_mode \& neg_bit) != 0 as u64/(*f).cull_neg = false/'
+mutate_draw "front face ignored" vkrender.fi 's/let front_pos: bool = ((rastw >> 8 as u64) \& 255 as u64) == 1 as u64/let front_pos: bool = false/'
+mutate_draw "depth write ignored" vkrender.fi 's/(\*f).depth_write = ((dop >> 8 as u64) \& 1 as u64) != 0 as u64/(*f).depth_write = true/'
+mutate_draw "depth compare op ignored" vkrender.fi 's/(\*f).depth_func = (dop \& 255 as u64) as i32/(*f).depth_func = 1/'
+mutate_draw "stencil ignored" vkrender.fi 's/(\*f).stp = rs + (R_STSTATE as u64) \* 8 as u64/(*f).stp = 0 as u64/'
 echo "VULKAN: $pass ok, $fail failed"
 [ "$fail" -eq 0 ]
