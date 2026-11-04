@@ -161,7 +161,7 @@ if [ -f "$TMPD/k1.mb.elf" ]; then
     indirekt1=$(objdump -d "$TMPD/k1.mb.elf" 2>/dev/null | grep -cE 'call.*\*')
     num "indirekte Aufrufe im Kern (firnc1)" "$indirekt1" ge 9
 fi
-for f in node_for v_readdir v_attr v_read v_write v_create v_unlink v_rename v_trunc; do
+for f in lookup_cached v_readdir v_attr v_read v_write v_create v_unlink v_rename v_trunc; do
     n=$(objdump -d "$TMPD/k0.mb.elf" --disassemble="_F0.vfs__$f" 2>/dev/null \
         | grep -cE 'call.*\*')
     if [ "${n:-0}" -ge 1 ]; then ok "vfs.$f calls through a pointer ($n)"
