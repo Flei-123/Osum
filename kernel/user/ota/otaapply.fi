@@ -12,6 +12,7 @@ import libc.clockapi
 import ota.otabase
 import ota.otacmd
 import ota.otajoin
+import ota.otaloader
 import libc.regio
 
 static mut S_USE1: [u8; 26] = "ota search | show | apply\0"
@@ -627,44 +628,7 @@ fn su_conf_unarm() -> bool {
 }
 
 fn su_copy(src: u64, dst: u64) -> bool {
-    let a: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
-    if ulib.bad(a) {
-        return false
-    }
-    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
-    if ulib.bad(b) {
-        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
-        return false
-    }
-    var good: bool = true
-    var going: bool = true
-    while going {
-        let r: u64 = ulib.sys(ulib.SYS_READ, a, (&SU_BIG[0 as usize]) as u64, 32768)
-        if ulib.bad(r) {
-            good = false
-            going = false
-        } else if r == 0 {
-            going = false
-        } else {
-            var o: u64 = 0
-            while o < r && good {
-                let w: u64 = ulib.sys(ulib.SYS_WRITE, b,
-                    (&SU_BIG[0 as usize]) as u64 + o, r - o)
-                if ulib.bad(w) || w == 0 {
-                    good = false
-                } else {
-                    o = o + w
-                }
-            }
-            if !good {
-                going = false
-            }
-        }
-    }
-    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
-    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
-    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
-    return good
+    return otaloader.copy(src, dst, (&SU_BIG[0 as usize]) as u64, 32768)
 }
 
 fn su_erp_arm() -> bool {
@@ -1524,6 +1488,9 @@ fn su_finish() -> u64 {
                 }
             }
         }
+        if promote {
+            otaloader.switch_to_osboot()
+        }
         su_esp_close()
     }
     if promote {
@@ -1723,6 +1690,12 @@ static mut S_ESP_ABSENT: [u8; 7] = "absent\0"
 
 static mut C_SU_ESP: [u8; 4] = "esp\0"
 
+static mut C_SU_LOADER: [u8; 7] = "loader\0"
+
+static mut C_SU_OSBOOT: [u8; 7] = "osboot\0"
+
+static mut C_SU_LIMINE: [u8; 7] = "limine\0"
+
 static mut C_SU_GROW: [u8; 5] = "grow\0"
 
 fn su_esp_hash_line(label: u64, path: u64) {
@@ -1749,6 +1722,28 @@ fn cmd_sys_esp() -> u64 {
     su_esp_hash_line((&S_ESP_KB[0 as usize]) as u64, (&P_SU_KB[0 as usize]) as u64)
     su_esp_close()
     return 0
+}
+
+fn cmd_sys_loader(args: u64, argc: u64) -> u64 {
+    if !su_esp_open() {
+        return otacmd.err((&E_SU_ESP[0 as usize]) as u64, 0)
+    }
+    var r: u64 = 0
+    if argc < 4 {
+        otaloader.status()
+    } else if ulib.streq(ulib.arg_at(args, 3), (&C_SU_OSBOOT[0 as usize]) as u64) {
+        if otaloader.switch_to_osboot() == otaloader.R_FAIL {
+            r = 1
+        }
+    } else if ulib.streq(ulib.arg_at(args, 3), (&C_SU_LIMINE[0 as usize]) as u64) {
+        if otaloader.restore_limine() == otaloader.R_FAIL {
+            r = 1
+        }
+    } else {
+        otaloader.usage()
+    }
+    su_esp_close()
+    return r
 }
 
 fn cmd_sys(args: u64, argc: u64) -> u64 {
@@ -1783,6 +1778,9 @@ fn cmd_sys(args: u64, argc: u64) -> u64 {
     }
     if ulib.streq(sub, (&C_SU_ESP[0 as usize]) as u64) {
         return cmd_sys_esp()
+    }
+    if ulib.streq(sub, (&C_SU_LOADER[0 as usize]) as u64) {
+        return cmd_sys_loader(args, argc)
     }
     if ulib.streq(sub, (&C_SU_GROW[0 as usize]) as u64) {
         return otagrow.run(args, argc, 3)

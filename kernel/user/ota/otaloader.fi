@@ -1,0 +1,191 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import ota.otacmd
+
+export { switch_to_osboot, restore_limine, is_osboot, copy, status, usage, R_NOOP, R_DONE, R_FAIL }
+
+const R_NOOP: u64 = 0
+const R_DONE: u64 = 1
+const R_FAIL: u64 = 2
+
+static mut P_LDR: [u8; 29] = "/sysesp/EFI/BOOT/BOOTX64.EFI\0"
+
+static mut P_LDR_NEW: [u8; 28] = "/sysesp/EFI/BOOT/BOOTX64.NW\0"
+
+static mut P_LIM_DIR: [u8; 19] = "/sysesp/EFI/limine\0"
+
+static mut P_LIM_LDR: [u8; 31] = "/sysesp/EFI/limine/BOOTX64.EFI\0"
+
+static mut P_CFG: [u8; 19] = "/sysesp/osboot.cfg\0"
+
+static mut P_LOGO: [u8; 20] = "/sysesp/osboot.logo\0"
+
+static mut P_SRC_LDR: [u8; 29] = "/usr/share/osboot/osboot.efi\0"
+
+static mut P_SRC_CFG: [u8; 29] = "/usr/share/osboot/osboot.cfg\0"
+
+static mut P_SRC_LOGO: [u8; 30] = "/usr/share/osboot/osboot.logo\0"
+
+static mut S_NO_FALLBACK: [u8; 38] = "loader: no limine fallback on the esp\0"
+
+static mut S_FAILED: [u8; 40] = "loader: switch failed, loader unchanged\0"
+
+static mut S_SWITCHED: [u8; 50] = "loader: osboot installed, limine kept as fallback\0"
+
+static mut S_RESTORED: [u8; 24] = "loader: limine restored\0"
+
+static mut S_ALREADY: [u8; 22] = "loader: osboot active\0"
+
+static mut S_LIMINE: [u8; 22] = "loader: limine active\0"
+
+static mut S_USAGE: [u8; 43] = "ota system loader osboot | limine | status\0"
+
+
+fn copy(src: u64, dst: u64, buf: u64, cap: u64) -> bool {
+    let a: u64 = ulib.sys(ulib.SYS_OPEN, src, 0, 0)
+    if ulib.bad(a) {
+        return false
+    }
+    let b: u64 = ulib.sys(ulib.SYS_OPEN, dst, ulib.O_MAKE, 0)
+    if ulib.bad(b) {
+        ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+        return false
+    }
+    var good: bool = true
+    var going: bool = true
+    while going {
+        let r: u64 = ulib.sys(ulib.SYS_READ, a, buf, cap)
+        if ulib.bad(r) {
+            good = false
+            going = false
+        } else if r == 0 {
+            going = false
+        } else {
+            var o: u64 = 0
+            while o < r && good {
+                let w: u64 = ulib.sys(ulib.SYS_WRITE, b, buf + o, r - o)
+                if ulib.bad(w) || w == 0 {
+                    good = false
+                } else {
+                    o = o + w
+                }
+            }
+            if !good {
+                going = false
+            }
+        }
+    }
+    ulib.sys(ulib.SYS_CLOSE, a, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, b, 0, 0)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return good
+}
+
+static mut BUF: [u8; 8192] = [0 as u8; 8192]
+
+fn copy_checked(src: u64, dst: u64) -> bool {
+    let want: u64 = otacmd.size(src)
+    if want == 0 {
+        return false
+    }
+    if !copy(src, dst, (&BUF[0 as usize]) as u64, 8192) {
+        return false
+    }
+    return otacmd.size(dst) == want
+}
+
+fn replace_loader(src: u64) -> bool {
+    let nw: u64 = (&P_LDR_NEW[0 as usize]) as u64
+    let ldr: u64 = (&P_LDR[0 as usize]) as u64
+    otacmd.remove(nw)
+    if !copy_checked(src, nw) {
+        otacmd.remove(nw)
+        return false
+    }
+    otacmd.remove(ldr)
+    let rr: u64 = ulib.sys(ulib.SYS_RENAME, nw, ldr, 0)
+    if ulib.bad(rr) {
+        if !copy_checked(nw, ldr) {
+            return false
+        }
+        otacmd.remove(nw)
+    }
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    return true
+}
+
+fn say_line(s: u64) {
+    ulib.say(s)
+    ulib.nl()
+}
+
+fn is_osboot() -> bool {
+    return otacmd.size((&P_CFG[0 as usize]) as u64) > 0
+}
+
+fn switch_to_osboot() -> u64 {
+    if is_osboot() {
+        return R_NOOP
+    }
+    let src: u64 = (&P_SRC_LDR[0 as usize]) as u64
+    if otacmd.size(src) == 0 || otacmd.size((&P_SRC_LOGO[0 as usize]) as u64) == 0
+        || otacmd.size((&P_SRC_CFG[0 as usize]) as u64) == 0 {
+        return R_NOOP
+    }
+    ulib.sys(ulib.SYS_MKDIR, (&P_LIM_DIR[0 as usize]) as u64, 0, 0)
+    let keep: u64 = (&P_LIM_LDR[0 as usize]) as u64
+    if otacmd.size(keep) == 0 {
+        if !copy_checked((&P_LDR[0 as usize]) as u64, keep) {
+            otacmd.remove(keep)
+            say_line((&S_FAILED[0 as usize]) as u64)
+            return R_FAIL
+        }
+    }
+    if !copy_checked((&P_SRC_LOGO[0 as usize]) as u64, (&P_LOGO[0 as usize]) as u64) {
+        say_line((&S_FAILED[0 as usize]) as u64)
+        return R_FAIL
+    }
+    if !replace_loader(src) {
+        say_line((&S_FAILED[0 as usize]) as u64)
+        return R_FAIL
+    }
+    if !copy_checked((&P_SRC_CFG[0 as usize]) as u64, (&P_CFG[0 as usize]) as u64) {
+        replace_loader(keep)
+        otacmd.remove((&P_CFG[0 as usize]) as u64)
+        say_line((&S_FAILED[0 as usize]) as u64)
+        return R_FAIL
+    }
+    say_line((&S_SWITCHED[0 as usize]) as u64)
+    return R_DONE
+}
+
+fn restore_limine() -> u64 {
+    let keep: u64 = (&P_LIM_LDR[0 as usize]) as u64
+    if otacmd.size(keep) == 0 {
+        say_line((&S_NO_FALLBACK[0 as usize]) as u64)
+        return R_FAIL
+    }
+    if !replace_loader(keep) {
+        say_line((&S_FAILED[0 as usize]) as u64)
+        return R_FAIL
+    }
+    otacmd.remove((&P_CFG[0 as usize]) as u64)
+    otacmd.remove((&P_LOGO[0 as usize]) as u64)
+    ulib.sys(ulib.SYS_SYNC, 0, 0, 0)
+    say_line((&S_RESTORED[0 as usize]) as u64)
+    return R_DONE
+}
+
+fn status() {
+    if is_osboot() {
+        say_line((&S_ALREADY[0 as usize]) as u64)
+    } else {
+        say_line((&S_LIMINE[0 as usize]) as u64)
+    }
+}
+
+fn usage() {
+    say_line((&S_USAGE[0 as usize]) as u64)
+}
