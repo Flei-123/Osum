@@ -139,7 +139,7 @@ orientbus act settingsd axd sntp accountcli pdfview open certus store stored med
 if [ "$IMAGE_PROFILE" = personal ]; then case " $PROGS " in *" snip "*) ;; *) PROGS="$PROGS snip" ;; esac; case " $PROGS " in *" snipt "*) ;; *) PROGS="$PROGS snipt" ;; esac; fi
 case " $PROGS " in *" xfx "*) case " $PROGS " in *" wayd "*) ;; *) PROGS="$PROGS wayd" ;; esac ;; esac
 
-APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl"}
+APPS=${APPS:-"fetch jarvisd ipprint socfleitec rootsctl smbctl netcheck"}
 # W-MINI2: the network half of the JARVIS Mini (TLS + login + WebSocket), personal stick only
 if [ "$IMAGE_PROFILE" = personal ]; then case " $APPS " in *" jmlink "*) ;; *) APPS="$APPS jmlink" ;; esac; fi
 

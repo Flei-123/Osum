@@ -93,6 +93,7 @@ def main():
     ap.add_argument("--secs", type=int, default=150)
     ap.add_argument("--no-echo", action="store_true")
     ap.add_argument("--no-dns", action="store_true")
+    ap.add_argument("--no-inet", action="store_true")
     ap.add_argument("--tls-cert")
     ap.add_argument("--tls-key")
     a = ap.parse_args()
@@ -149,7 +150,7 @@ def main():
             elif proto == 1 and frame[34] == 8:
                 via_gw = frame[0:6] == GW_MAC
                 log.write("ECHO dst=%s via_gw=%d\n" % (".".join(map(str, dst_ip)), 1 if via_gw else 0))
-                if via_gw and not a.no_echo:
+                if via_gw and not a.no_echo and not (a.no_inet and dst_ip != GW_IP):
                     icmp = bytearray(frame[34:14 + struct.unpack("!H", frame[16:18])[0]])
                     icmp[0] = 0
                     icmp[2:4] = b"\0\0"
