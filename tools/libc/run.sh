@@ -77,8 +77,8 @@ for edit in \
     "barrier.fi|s/locks.futex_wake(p + OFF_GEN, locks.WAKE_ALL)/locks.load(p + OFF_GEN)/" \
     "barrier.fi|s/return SERIAL/return 0/" \
     "barrier.fi|s/if place >= locks.load(p + OFF_COUNT) {/if place > locks.load(p + OFF_COUNT) {/" \
-    "pthread.fi|s/if barrier.wait(b) == barrier.SERIAL {/if false {/" \
-    "pthread.fi|s/if locks.load(m) == 0 {/if false {/" \
+    "pthread.fi|s/if r == barrier.SERIAL {/if false {/" \
+    "pmutex.fi|s/if locks.load(m) == 0 {/if false {/" \
     "pthread.fi|s/if threads.is_detached(t) {/if false {/" \
     "pthread.fi|s/if threads.key_delete(key) != 0 {/if false {/" \
     "pthread.fi|s/    threads.thread_exit(retval)/    threads.yield_now()/" \
@@ -101,7 +101,6 @@ for edit in \
     "pcancel.fi|s/return locks.load(b + OFF_PENDING) != 0 \&\& locks.load(b + OFF_DISABLED) == 0/return locks.load(b + OFF_PENDING) != 0/" \
     "pcancel.fi|s/^    run_cleanups()\$/    cleanup_depth()/" \
     "pcancel.fi|s/if state > STATE_DISABLE {/if false {/" \
-    "pcond.fi|s/if pcancel.due() {/if false {/" \
     "pcond.fi|s/^    pcancel.testcancel()\$/    pcancel.pending()/"; do
     mod=${edit%%|*}
     expr=${edit#*|}
