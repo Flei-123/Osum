@@ -450,7 +450,7 @@ fi
 
 echo "== 9. OFS is a USER of the layer, no special case beside it =="
 ARBEIT="script=ls /bin;mkdir /neu;echo eins > /neu/a.txt;cat /neu/a.txt;cp /neu/a.txt /neu/b.txt;cat /neu/b.txt;ls /neu;rm /neu/a.txt;ls /neu;wc /neu/b.txt;grep eins /neu/b.txt"
-rc=$(lauf ofsdirekt "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs $ARBEIT")
+rc=$(lauf ofsdirekt "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs novfsall $ARBEIT")
 num "der gerade Weg beendet sich selbst" "$rc" eq 21
 rc=$(lauf ofsvfs "$TMPD/k0.mb" "$TMPD/root.img" "$MBR" "osum nokbd vfs vfsall $ARBEIT")
 num "der Weg ueber die Ops-Tafel beendet sich selbst" "$rc" eq 21
