@@ -146,9 +146,9 @@ grep -q 'wayd:grafik:off:/bin/wayd' etc/inittab.wayland 2>/dev/null \
 [ -s pkg/rezepte/wayland.rezept ] \
     && ok "Paketrezept da: pkg/rezepte/wayland.rezept" \
     || bad "kein Paketrezept"
-grep -q 'kernel/user/wayd.fi' kernel/user/wayd.fi 2>/dev/null \
+[ -s kernel/user/wayd.fi ] \
     && ok "the server is a ring-3 program (kernel/user/wayd.fi)" \
-    || bad "wayd.fi fehlt"
+    || bad "wayd.fi missing"
 n=$(grep -rl 'wayd\.' kernel/*.fi kernel/user/desktop.fi \
         kernel/user/taskbar.fi kernel/user/taskbar 2>/dev/null | wc -l)
 [ "$n" -eq 0 ] \

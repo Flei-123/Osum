@@ -8,7 +8,9 @@ SOCK="$OUT/mon.sock"
 mon() { printf '%s\n' "$1" | socat - "UNIX-CONNECT:$SOCK" > /dev/null 2>&1; }
 (
     i=0
-    until grep -qa 'FXLOAD' "$OUT/ser.txt" 2>/dev/null; do sleep 2; i=$((i + 2)); [ "$i" -gt 1500 ] && exit 0; done
+    until grep -qa 'wayd: window c=' "$OUT/ser.txt" 2>/dev/null; do sleep 2; i=$((i + 2)); [ "$i" -gt 1500 ] && exit 0; done
+    j=0
+    until grep -qa 'FXLOAD' "$OUT/ser.txt" 2>/dev/null || [ "$j" -ge "${FX7_LOADWAIT:-150}" ]; do sleep 2; j=$((j + 2)); done
     sleep 15
     for k in a b c; do mon "sendkey $k"; sleep 2; done
     sleep 5

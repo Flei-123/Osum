@@ -30,5 +30,8 @@ sleep ${FX7_WAIT:-420}
 echo "FX7 all events:"
 grep -a '^FX[A-Z]* ' /tmp/fx3.log | head -60
 echo "FX7 wl lines:"
-grep -a -E 'wl_keyboard|wl_pointer|wl_seat|xdg_toplevel#[0-9]+\.(configure|set_title)' /tmp/fx3.log | head -${FX7_WLHEAD:-80}
+busybox grep -a -c wl_keyboard /tmp/fx3.log
+busybox grep -a wl_keyboard /tmp/fx3.log | busybox head -${FX7_WLHEAD:-40}
+busybox grep -a wl_pointer /tmp/fx3.log | busybox head -20
+busybox tail -30 /tmp/fx3.log
 echo FX-END
