@@ -1,9 +1,8 @@
-// SPDX-License-Identifier: MIT
-// kernel/user/flate.fi -- Runde K11: DEFLATE, in Firn.
 
 profile kernel
 
 import ulib
+import huffdec
 
 export {
     crc32, crc32_fort, deflate, store, inflate, MAXBITS,
@@ -18,8 +17,6 @@ const E_ROOM: u64 = 2
 const E_FORMAT: u64 = 3
 
 const M32: u64 = 0xFFFFFFFF
-
-// ---------------------------------------------------------- Pruefsumme
 
 fn crc32(p: u64, n: u64) -> u64 {
     var crc: u64 = M32
@@ -37,15 +34,6 @@ fn crc32(p: u64, n: u64) -> u64 {
     return (crc ^ M32) & M32
 }
 
-// ------------------------------------------------------------ Tabellen
-
-static mut lbase: [u64; 30] = [0 as u64; 30]
-static mut lext: [u64; 30] = [0 as u64; 30]
-static mut dbase: [u64; 30] = [0 as u64; 30]
-static mut dext: [u64; 30] = [0 as u64; 30]
-static mut clorder: [u64; 19] = [0 as u64; 19]
-static mut ready: u64 = 0
-
 fn crc32_fort(stand: u64, p: u64, n: u64) -> u64 {
     var crc: u64 = (stand ^ M32) & M32
     var i: u64 = 0
@@ -62,324 +50,50 @@ fn crc32_fort(stand: u64, p: u64, n: u64) -> u64 {
     return (crc ^ M32) & M32
 }
 
-fn setup() {
-    if ready == 1 {
-        return
-    }
-    ready = 1
-    var b: u64 = 3
-    var i: u64 = 0
-    while i < 29 {
-        var e: u64 = 0
-        if i >= 8 {
-            e = (i - 4) / 4
-        }
-        lext[(i) as usize] = e
-        lbase[(i) as usize] = b
-        b = b + (1 << e)
-        i = i + 1
-    }
-    lbase[(28) as usize] = 258
-    lext[(28) as usize] = 0
-    b = 1
-    i = 0
-    while i < 30 {
-        var e: u64 = 0
-        if i >= 4 {
-            e = (i - 2) / 2
-        }
-        dext[(i) as usize] = e
-        dbase[(i) as usize] = b
-        b = b + (1 << e)
-        i = i + 1
-    }
-    clorder[0 as usize] = 16
-    clorder[1 as usize] = 17
-    clorder[2 as usize] = 18
-    clorder[3 as usize] = 0
-    clorder[4 as usize] = 8
-    clorder[5 as usize] = 7
-    clorder[6 as usize] = 9
-    clorder[7 as usize] = 6
-    clorder[8 as usize] = 10
-    clorder[9 as usize] = 5
-    clorder[10 as usize] = 11
-    clorder[11 as usize] = 4
-    clorder[12 as usize] = 12
-    clorder[13 as usize] = 3
-    clorder[14 as usize] = 13
-    clorder[15 as usize] = 2
-    clorder[16 as usize] = 14
-    clorder[17 as usize] = 1
-    clorder[18 as usize] = 15
-}
-
-// ------------------------------------------------------- die Bitfolge
-
-static mut bp: u64 = 0 // Puffer
-static mut bn: u64 = 0 // wie viele Bits darin
-static mut src: u64 = 0
-static mut spos: u64 = 0
-static mut send: u64 = 0
 static mut dst: u64 = 0
 static mut dpos: u64 = 0
 static mut dend: u64 = 0
-static mut oops: u64 = 0
-
-fn bits(need: u64) -> u64 {
-    while bn < need {
-        if spos >= send {
-            oops = E_INPUT
-            return 0
-        }
-        bp = bp | (((*((src + spos) as *mut u8)) as u64) << bn)
-        spos = spos + 1
-        bn = bn + 8
-    }
-    let v: u64 = bp & ((1 << need) - 1)
-    bp = bp >> need
-    bn = bn - need
-    return v
-}
 
 fn emit(c: u64) {
     if dpos >= dend {
-        oops = E_ROOM
+        huffdec.fail(E_ROOM)
         return
     }
     __mmio_write8((dst + dpos) as *mut u8, c as u8)
     dpos = dpos + 1
 }
 
-// ------------------------------------------------------ die Huffman-Baeume
-
-static mut lcnt: [u64; 16] = [0 as u64; 16]
-static mut lsym: [u64; 288] = [0 as u64; 288]
-static mut dcnt: [u64; 16] = [0 as u64; 16]
-static mut dsym: [u64; 32] = [0 as u64; 32]
-static mut lengths: [u64; 320] = [0 as u64; 320]
-
-fn construct(cnt: u64, sym: u64, from: u64, n: u64) -> bool {
-    var i: u64 = 0
-    while i < 16 {
-        __mmio_write64((cnt + i * 8) as *mut u64, 0)
-        i = i + 1
-    }
-    i = 0
-    while i < n {
-        let l: u64 = lengths[(from + i) as usize]
-        let at: u64 = cnt + l * 8
-        __mmio_write64((at) as *mut u64, *((at) as *mut u64) + 1)
-        i = i + 1
-    }
-    if *((cnt) as *mut u64) == n {
-        return true
-    }
-    var left: u64 = 1
-    var l: u64 = 1
-    while l < 16 {
-        left = left * 2
-        let c: u64 = *((cnt + l * 8) as *mut u64)
-        if c > left {
-            return false
-        }
-        left = left - c
-        l = l + 1
-    }
-    var offs: [u64; 16] = [0 as u64; 16]
-    offs[1 as usize] = 0
-    l = 1
-    while l < 15 {
-        offs[(l + 1) as usize] = offs[(l) as usize]
-            + *((cnt + l * 8) as *mut u64)
-        l = l + 1
-    }
-    i = 0
-    while i < n {
-        let ln: u64 = lengths[(from + i) as usize]
-        if ln != 0 {
-            __mmio_write64((sym + offs[(ln) as usize] * 8) as *mut u64, i)
-            offs[(ln) as usize] = offs[(ln) as usize] + 1
-        }
-        i = i + 1
-    }
-    return true
-}
-
-fn decode(cnt: u64, sym: u64) -> u64 {
-    var code: u64 = 0
-    var first: u64 = 0
-    var index: u64 = 0
-    var len: u64 = 1
-    while len < 16 {
-        code = code | bits(1)
-        if oops != E_OK {
-            return ulib.EOF
-        }
-        let count: u64 = *((cnt + len * 8) as *mut u64)
-        if code - first < count {
-            return *((sym + (index + (code - first)) * 8) as *mut u64)
-        }
-        index = index + count
-        first = (first + count) << 1
-        code = code << 1
-        len = len + 1
-    }
-    oops = E_FORMAT
-    return ulib.EOF
-}
-
-fn fixed_trees() {
-    var i: u64 = 0
-    while i < 144 {
-        lengths[(i) as usize] = 8
-        i = i + 1
-    }
-    while i < 256 {
-        lengths[(i) as usize] = 9
-        i = i + 1
-    }
-    while i < 280 {
-        lengths[(i) as usize] = 7
-        i = i + 1
-    }
-    while i < 288 {
-        lengths[(i) as usize] = 8
-        i = i + 1
-    }
-    construct((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64, 0, 288)
-    i = 0
-    while i < 30 {
-        lengths[(i) as usize] = 5
-        i = i + 1
-    }
-    construct((&dcnt[0 as usize]) as u64, (&dsym[0 as usize]) as u64, 0, 30)
-}
-
-fn dynamic_trees() -> bool {
-    let hlit: u64 = bits(5) + 257
-    let hdist: u64 = bits(5) + 1
-    let hclen: u64 = bits(4) + 4
-    if oops != E_OK {
-        return false
-    }
-    if hlit > 286 || hdist > 30 {
-        oops = E_FORMAT
-        return false
-    }
-    var i: u64 = 0
-    while i < 19 {
-        lengths[(i) as usize] = 0
-        i = i + 1
-    }
-    i = 0
-    while i < hclen {
-        lengths[(clorder[(i) as usize]) as usize] = bits(3)
-        i = i + 1
-    }
-    if !construct((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64,
-        0, 19) {
-        oops = E_FORMAT
-        return false
-    }
-    var have: u64 = 0
-    var out: [u64; 320] = [0 as u64; 320]
-    while have < hlit + hdist {
-        let s: u64 = decode((&lcnt[0 as usize]) as u64,
-            (&lsym[0 as usize]) as u64)
-        if s == ulib.EOF {
-            return false
-        }
-        if s < 16 {
-            out[(have) as usize] = s
-            have = have + 1
-        } else {
-            var v: u64 = 0
-            var rep: u64 = 0
-            if s == 16 {
-                if have == 0 {
-                    oops = E_FORMAT
-                    return false
-                }
-                v = out[(have - 1) as usize]
-                rep = 3 + bits(2)
-            } else if s == 17 {
-                rep = 3 + bits(3)
-            } else {
-                rep = 11 + bits(7)
-            }
-            if oops != E_OK {
-                return false
-            }
-            if have + rep > hlit + hdist {
-                oops = E_FORMAT
-                return false
-            }
-            while rep > 0 {
-                out[(have) as usize] = v
-                have = have + 1
-                rep = rep - 1
-            }
-        }
-    }
-    i = 0
-    while i < hlit + hdist {
-        lengths[(i) as usize] = out[(i) as usize]
-        i = i + 1
-    }
-    if !construct((&lcnt[0 as usize]) as u64, (&lsym[0 as usize]) as u64,
-        0, hlit) {
-        oops = E_FORMAT
-        return false
-    }
-    if !construct((&dcnt[0 as usize]) as u64, (&dsym[0 as usize]) as u64,
-        hlit, hdist) {
-        oops = E_FORMAT
-        return false
-    }
-    return true
-}
-
 fn block_body() -> bool {
     var going: bool = true
     while going {
-        let s: u64 = decode((&lcnt[0 as usize]) as u64,
-            (&lsym[0 as usize]) as u64)
+        let s: u64 = huffdec.symbol()
         if s == ulib.EOF {
             return false
         }
         if s < 256 {
             emit(s)
-            if oops != E_OK {
+            if huffdec.failed() {
                 return false
             }
         } else if s == 256 {
             going = false
         } else {
-            let li: u64 = s - 257
-            if li >= 29 {
-                oops = E_FORMAT
+            let len: u64 = huffdec.length_of(s)
+            if len == 0 {
                 return false
             }
-            let len: u64 = lbase[(li) as usize] + bits(lext[(li) as usize])
-            let ds: u64 = decode((&dcnt[0 as usize]) as u64,
-                (&dsym[0 as usize]) as u64)
-            if ds == ulib.EOF || ds >= 30 {
-                oops = E_FORMAT
-                return false
-            }
-            let dist: u64 = dbase[(ds) as usize] + bits(dext[(ds) as usize])
-            if oops != E_OK {
+            let dist: u64 = huffdec.dist()
+            if dist == 0 {
                 return false
             }
             if dist > dpos {
-                oops = E_FORMAT
+                huffdec.fail(E_FORMAT)
                 return false
             }
             var k: u64 = 0
             while k < len {
                 emit((*((dst + dpos - dist) as *mut u8)) as u64)
-                if oops != E_OK {
+                if huffdec.failed() {
                     return false
                 }
                 k = k + 1
@@ -391,59 +105,48 @@ fn block_body() -> bool {
 
 fn inflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     out_len: u64) -> u64 {
-    setup()
-    src = in_p
-    spos = 0
-    send = in_n
+    huffdec.begin_mem(in_p, in_n)
     dst = out_p
     dpos = 0
     dend = out_cap
-    bp = 0
-    bn = 0
-    oops = E_OK
     var last: u64 = 0
-    while last == 0 && oops == E_OK {
-        last = bits(1)
-        let kind: u64 = bits(2)
-        if oops != E_OK {
+    while last == 0 && huffdec.ok() {
+        last = huffdec.bits(1)
+        let kind: u64 = huffdec.bits(2)
+        if huffdec.failed() {
             last = 1
         } else if kind == 0 {
-            bp = 0
-            bn = 0
-            if spos + 4 > send {
-                oops = E_INPUT
+            huffdec.align()
+            if huffdec.avail() < 4 {
+                huffdec.fail(E_INPUT)
             } else {
-                let len: u64 = ((*((src + spos) as *mut u8)) as u64)
-                    | (((*((src + spos + 1) as *mut u8)) as u64) << 8)
-                let nlen: u64 = ((*((src + spos + 2) as *mut u8)) as u64)
-                    | (((*((src + spos + 3) as *mut u8)) as u64) << 8)
-                spos = spos + 4
+                let len: u64 = huffdec.getbyte() | (huffdec.getbyte() << 8)
+                let nlen: u64 = huffdec.getbyte() | (huffdec.getbyte() << 8)
                 if (len ^ 0xFFFF) != nlen {
-                    oops = E_FORMAT
-                } else if spos + len > send {
-                    oops = E_INPUT
+                    huffdec.fail(E_FORMAT)
+                } else if huffdec.avail() < len {
+                    huffdec.fail(E_INPUT)
                 } else {
                     var i: u64 = 0
-                    while i < len && oops == E_OK {
-                        emit((*((src + spos + i) as *mut u8)) as u64)
+                    while i < len && huffdec.ok() {
+                        emit(huffdec.getbyte())
                         i = i + 1
                     }
-                    spos = spos + len
                 }
             }
         } else if kind == 1 {
-            fixed_trees()
+            huffdec.fixed_trees()
             block_body()
         } else if kind == 2 {
-            if dynamic_trees() {
+            if huffdec.dynamic_trees() {
                 block_body()
             }
         } else {
-            oops = E_FORMAT
+            huffdec.fail(E_FORMAT)
         }
     }
     __mmio_write64((out_len) as *mut u64, dpos)
-    return oops
+    return huffdec.status()
 }
 
 fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
@@ -451,10 +154,10 @@ fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     dst = out_p
     dpos = 0
     dend = out_cap
-    oops = E_OK
+    huffdec.fail(E_OK)
     var at: u64 = 0
     var going: bool = true
-    while going && oops == E_OK {
+    while going && huffdec.ok() {
         var len: u64 = in_n - at
         if len > 65535 {
             len = 65535
@@ -470,17 +173,15 @@ fn store(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
         emit((len ^ 0xFFFF) & 255)
         emit(((len ^ 0xFFFF) >> 8) & 255)
         var i: u64 = 0
-        while i < len && oops == E_OK {
+        while i < len && huffdec.ok() {
             emit((*((in_p + at + i) as *mut u8)) as u64)
             i = i + 1
         }
         at = at + len
     }
     __mmio_write64((out_len) as *mut u64, dpos)
-    return oops
+    return huffdec.status()
 }
-
-// -------------------------------------------------------- das Einpacken
 
 const WSIZE: u64 = 4096
 const PREVN: u64 = 16384
@@ -521,7 +222,7 @@ fn put_literal(c: u64) {
 
 fn put_length(len: u64) {
     var i: u64 = 28
-    while i > 0 && lbase[(i) as usize] > len {
+    while i > 0 && huffdec.len_base(i) > len {
         i = i - 1
     }
     let sym: u64 = 257 + i
@@ -530,19 +231,19 @@ fn put_length(len: u64) {
     } else {
         put_code(0xC0 + (sym - 280), 8)
     }
-    if lext[(i) as usize] > 0 {
-        put_bits(len - lbase[(i) as usize], lext[(i) as usize])
+    if huffdec.len_extra(i) > 0 {
+        put_bits(len - huffdec.len_base(i), huffdec.len_extra(i))
     }
 }
 
 fn put_dist(d: u64) {
     var i: u64 = 29
-    while i > 0 && dbase[(i) as usize] > d {
+    while i > 0 && huffdec.dist_base(i) > d {
         i = i - 1
     }
     put_code(i, 5)
-    if dext[(i) as usize] > 0 {
-        put_bits(d - dbase[(i) as usize], dext[(i) as usize])
+    if huffdec.dist_extra(i) > 0 {
+        put_bits(d - huffdec.dist_base(i), huffdec.dist_extra(i))
     }
 }
 
@@ -562,16 +263,14 @@ fn deflate(in_p: u64, in_n: u64, out_p: u64, out_cap: u64,
     }
     return stream_end(out_len)
 }
-
-// ================================== RUNDE ALLTAG: DEFLATE IN STUECKEN
 fn stream_start(out_p: u64, out_cap: u64) {
-    setup()
+    huffdec.setup()
     dst = out_p
     dpos = 0
     dend = out_cap
     wbuf = 0
     wcnt = 0
-    oops = E_OK
+    huffdec.fail(E_OK)
 }
 
 fn stream_pos() -> u64 {
@@ -598,9 +297,9 @@ fn stream_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
         i = i + 1
     }
     put_bits(f, 1)
-    put_bits(1, 2) // feste Baeume
+    put_bits(1, 2)
     var at: u64 = 0
-    while at < in_n && oops == E_OK {
+    while at < in_n && huffdec.ok() {
         var best: u64 = 0
         var bestd: u64 = 0
         if at + 3 <= in_n {
@@ -649,7 +348,7 @@ fn stream_block(in_p: u64, in_n: u64, letzt: bool) -> u64 {
         }
     }
     put_code(0, 7)
-    return oops
+    return huffdec.status()
 }
 
 fn stream_end(out_len: u64) -> u64 {
@@ -659,5 +358,5 @@ fn stream_end(out_len: u64) -> u64 {
         wcnt = 0
     }
     __mmio_write64((out_len) as *mut u64, dpos)
-    return oops
+    return huffdec.status()
 }
