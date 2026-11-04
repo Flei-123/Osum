@@ -151,7 +151,7 @@ static VkPipelineLayout mklayout(int sampler, uint32_t push, VkDescriptorSetLayo
     return l;
 }
 
-static VkDescriptorSet mkset(VkDescriptorSetLayout dsl, int sampler, VkImageView view, VkSampler smp, VkBuffer ubo, VkDeviceSize ubo_size)
+static VkDescriptorSet mkset(VkDescriptorSetLayout dsl, int sampler, VkImageView view, VkSampler smp, VkBuffer ubo, VkDeviceSize ubo_off, VkDeviceSize ubo_size)
 {
     VkDescriptorPoolSize ps = { sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
     VkDescriptorPoolCreateInfo pi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
@@ -161,7 +161,7 @@ static VkDescriptorSet mkset(VkDescriptorSetLayout dsl, int sampler, VkImageView
     VkDescriptorSet set = 0;
     vkAllocateDescriptorSets(dev, &ai, &set);
     VkDescriptorImageInfo ii = { smp, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-    VkDescriptorBufferInfo bi = { ubo, 0, ubo_size };
+    VkDescriptorBufferInfo bi = { ubo, ubo_off, ubo_size };
     VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = 0, .descriptorCount = 1,
         .descriptorType = sampler == 1 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pImageInfo = &ii, .pBufferInfo = &bi };
     vkUpdateDescriptorSets(dev, 1, &w, 0, 0);
@@ -283,7 +283,7 @@ static void case_quad(void)
     vkCreateSampler(dev, &sci, 0, &smp);
     VkDescriptorSetLayout dsl;
     VkPipelineLayout lay = mklayout(1, 0, &dsl);
-    VkDescriptorSet set = mkset(dsl, 1, tex.v, smp, 0, 0);
+    VkDescriptorSet set = mkset(dsl, 1, tex.v, smp, 0, 0, 0);
     PipeDesc d = { "quad.vert", "quad.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 2, 16, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT }, { 0, 8 }, lay };
     VkPipeline p = mkpipe(&d);
     check("pipeline quad", p != 0);
@@ -347,25 +347,28 @@ static void case_fui(void)
         { { 5, 4, 58, 30 }, { 0, 0, 4096, 4096 }, { 80, 120, 200, 255 }, { 20, 40, 90 }, { 4, 30, 1 } },
         { { 12.5f, 10.25f, 50.75f, 40.5f }, { 0, 0, 4096, 4096 }, { 255, 200, 0, 160 }, { 0, 0, 0 }, { 0, 0, 0 } } };
     Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-    Buf ub[3], vb[3];
+    enum { UB_STRIDE = 256 };
+    Buf ubs = mkbuf(UB_STRIDE * 3, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    memset(ubs.p, 0xA5, UB_STRIDE * 3);
+    Buf vb[3];
     VkDescriptorSet sets[3];
     for (int i = 0; i < 3; i++) {
         FuiU u = { { q[i].clip[0], q[i].clip[1], q[i].clip[2], q[i].clip[3] }, { q[i].box[0], q[i].box[1], q[i].box[2], q[i].box[3] },
             { q[i].c1[0], q[i].c1[1], q[i].c1[2], 255 }, { q[i].grad[0], q[i].grad[1], q[i].grad[2], 0 }, { W, H, 0, 0 } };
-        ub[i] = mkvec(&u, sizeof u, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+        memcpy(ubs.p + (2 - i) * UB_STRIDE, &u, sizeof u);
         float x0 = q[i].box[0], y0 = q[i].box[1], x1 = q[i].box[2], y1 = q[i].box[3];
         x0 = (float)(int)x0; y0 = (float)(int)y0; x1 = (float)((int)x1 + (x1 > (int)x1)); y1 = (float)((int)y1 + (y1 > (int)y1));
         FuiV v[6] = { { x0, y0 }, { x1, y0 }, { x1, y1 }, { x0, y0 }, { x1, y1 }, { x0, y1 } };
         for (int k = 0; k < 6; k++) { v[k].r = q[i].col[0]; v[k].g = q[i].col[1]; v[k].b = q[i].col[2]; v[k].a = q[i].col[3]; }
         vb[i] = mkvec(v, sizeof v, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        sets[i] = mkset(dsl, 2, 0, 0, ub[i].b, sizeof(FuiU));
+        sets[i] = mkset(dsl, 2, 0, 0, ubs.b, (2 - i) * UB_STRIDE, sizeof(FuiU));
     }
     begin();
     begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     set_vp(0, 0, W, H, 0, 0, W, H);
     for (int i = 0; i < 3; i++) {
-        if (i == 2) set_vp(0, 0, W, H, 8, 8, 44, 30);
+        if (i == 2) set_vp(0, 0, W, H, 16, 12, 24, 16);
         VkDeviceSize off = 0;
         vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, lay, 0, 1, &sets[i], 0, 0);
         vkCmdBindVertexBuffers(cb, 0, 1, &vb[i].b, &off);
