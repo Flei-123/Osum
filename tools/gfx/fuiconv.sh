@@ -7,8 +7,8 @@ cd "$(dirname "$0")/../.."
 OUT=$1; KIND=${2:-}
 mkdir -p "$OUT"
 conv() {
-    sed -e 's/^#version 300 es/#version 450\nlayout(set = 0, binding = 0, std140) uniform P { vec2 u_size; vec2 u_srcsize; int u_nspot; vec4 u_spot[8]; };/' \
-        -e '/^precision /d' -e '/^uniform vec2 u_size;/d' -e '/^uniform vec2 u_srcsize;/d' -e '/^uniform vec4 u_spot\[8\];/d' -e '/^uniform int u_nspot;/d' \
+    sed -e 's/^#version 300 es/#version 450\nlayout(set = 0, binding = 0, std140) uniform P { vec2 u_size; vec2 u_srcsize; int u_nspot; vec4 u_spot[8]; vec4 u_shape[32]; };/' \
+        -e '/^precision /d' -e '/^uniform vec2 u_size;/d' -e '/^uniform vec2 u_srcsize;/d' -e '/^uniform vec4 u_spot\[8\];/d' -e '/^uniform int u_nspot;/d' -e '/^uniform vec4 u_shape\[32\];/d' \
         -e 's/^uniform sampler2D u_atlas;/layout(set = 0, binding = 1) uniform sampler2D u_atlas;/' \
         -e 's/^uniform sampler2D u_stream;/layout(set = 0, binding = 2) uniform sampler2D u_stream;/' \
         -e 's/^uniform sampler2D u_src;/layout(set = 0, binding = 3) uniform sampler2D u_src;/' \
