@@ -1,5 +1,5 @@
 echo "FX start"
-export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1
+export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1
 mkdir -p /tmp/p
 echo 'user_pref("gfx.webrender.software", true);' > /tmp/p/user.js
 echo "FX2 begin firefox --headless --screenshot"

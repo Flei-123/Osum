@@ -1,5 +1,5 @@
 echo "FX start"
-export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1
+export HOME=/root XDG_RUNTIME_DIR=/tmp MOZ_DISABLE_CONTENT_SANDBOX=1 MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1 MOZ_DISABLE_RDD_SANDBOX=1 MOZ_DISABLE_GMP_SANDBOX=1 MOZ_CRASHREPORTER_DISABLE=1
 cat > /tmp/js.html <<'HTML'
 <html><body style="font:20px sans-serif"><h1 id="t">JS-OFF</h1><pre id="o"></pre><canvas id="c" width="300" height="100"></canvas>
 <script>
