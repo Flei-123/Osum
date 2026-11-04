@@ -1,0 +1,145 @@
+import lib.kstate
+import mm.mmframe
+
+export {
+    SLOT_BYTES, MAX_SLOTS, configure, active, inode, capacity, used, alloc, publish,
+    busy, share, release, count_out, count_in, count_fail, outs, ins, fails
+}
+
+const SLOT_BYTES: u64 = 4096
+const MAX_SLOTS: u64 = 65536
+const BUSY: u64 = 0x80
+const REFS: u64 = 0x7F
+
+static mut map_at: u64 = 0
+static mut cap_slots: u64 = 0
+static mut file_ino: u64 = 0
+static mut used_slots: u64 = 0
+static mut scan_from: u64 = 0
+static mut out_total: u64 = 0
+static mut in_total: u64 = 0
+static mut fail_total: u64 = 0
+
+fn configure(state: u64, ino: u64, slots: u64) -> bool {
+    if map_at != 0 || slots == 0 || slots > MAX_SLOTS {
+        return false
+    }
+    let frames: u64 = (slots + mmframe.FRAME_SIZE - 1) / mmframe.FRAME_SIZE
+    let base: u64 = mmframe.frame_run(state, frames)
+    if base == 0 {
+        return false
+    }
+    var i: u64 = 0
+    while i < frames * mmframe.FRAME_SIZE {
+        kstate.set8(base + i, 0 as u8)
+        i = i + 1
+    }
+    map_at = base
+    cap_slots = slots
+    file_ino = ino
+    return true
+}
+
+fn active() -> bool {
+    return cap_slots != 0
+}
+
+fn inode() -> u64 {
+    return file_ino
+}
+
+fn capacity() -> u64 {
+    return cap_slots
+}
+
+fn used() -> u64 {
+    return used_slots
+}
+
+fn alloc(state: u64) -> u64 {
+    if cap_slots == 0 {
+        return 0
+    }
+    let flags: u64 = mmframe.lock(state)
+    var n: u64 = 0
+    var s: u64 = scan_from
+    var found: u64 = 0
+    while n < cap_slots && found == 0 {
+        if s >= cap_slots {
+            s = 0
+        }
+        if kstate.get8(map_at + s) == 0 {
+            kstate.set8(map_at + s, (BUSY | 1) as u8)
+            used_slots = used_slots + 1
+            scan_from = s + 1
+            found = s + 1
+        }
+        s = s + 1
+        n = n + 1
+    }
+    mmframe.unlock(state, flags)
+    return found
+}
+
+fn publish(state: u64, slot: u64) {
+    let flags: u64 = mmframe.lock(state)
+    kstate.set8(map_at + slot, (kstate.get8(map_at + slot) & REFS) as u8)
+    mmframe.unlock(state, flags)
+}
+
+fn busy(slot: u64) -> bool {
+    return (kstate.get8(map_at + slot) & BUSY) != 0
+}
+
+fn share(state: u64, slot: u64) {
+    let flags: u64 = mmframe.lock(state)
+    let v: u64 = kstate.get8(map_at + slot)
+    if (v & REFS) < REFS {
+        kstate.set8(map_at + slot, (v + 1) as u8)
+    }
+    mmframe.unlock(state, flags)
+}
+
+fn release(state: u64, slot: u64) {
+    if slot >= cap_slots {
+        return
+    }
+    let flags: u64 = mmframe.lock(state)
+    let v: u64 = kstate.get8(map_at + slot)
+    if (v & REFS) <= 1 {
+        kstate.set8(map_at + slot, 0 as u8)
+        if used_slots > 0 {
+            used_slots = used_slots - 1
+        }
+        if slot < scan_from {
+            scan_from = slot
+        }
+    } else {
+        kstate.set8(map_at + slot, (v - 1) as u8)
+    }
+    mmframe.unlock(state, flags)
+}
+
+fn count_out() {
+    out_total = out_total + 1
+}
+
+fn count_in() {
+    in_total = in_total + 1
+}
+
+fn count_fail() {
+    fail_total = fail_total + 1
+}
+
+fn outs() -> u64 {
+    return out_total
+}
+
+fn ins() -> u64 {
+    return in_total
+}
+
+fn fails() -> u64 {
+    return fail_total
+}
