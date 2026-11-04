@@ -39,7 +39,7 @@ run_vm() { # cmdline output
         -append "$1" -serial "file:$2" -display none -no-reboot $VGA_STD \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
 }
-GRUND="nokbd nosched noproc nofs noring3"
+GRUND="bootbench nokbd nosched noproc nofs noring3"
 run_vm "gfx $GRUND" "$TMPD/std.txt"
 run_vm "gfx fbbig $GRUND" "$TMPD/big.txt"
 

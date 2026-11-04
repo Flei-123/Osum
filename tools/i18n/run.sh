@@ -37,7 +37,7 @@ SANS_INK="fui:$SANS"
 MONO=assets/osum-mono.ttf
 WX=140; WY=60; BORDER=2; TITLE=22
 CX=$((WX + BORDER)); CY=$((WY + TITLE))
-ZEILE="gfx wm wig desk einst nostart wmhold wiglong nokbd nosched noproc nofs"
+ZEILE="bootbench gfx wm wig desk einst nostart wmhold wiglong nokbd nosched noproc nofs"
 
 # ===================================================== 1. die Schriften
 

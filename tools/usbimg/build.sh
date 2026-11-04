@@ -917,8 +917,19 @@ if [ -n "${USBIMG_SPECFILE:-}" ]; then
     ARGS+=("${SPEC_LINES[@]}")
 fi
 ph pre-mkfs
-bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 \
-    || { tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"; }
+if [ -z "${FS_BLOCKS_SET:-}" ] && [ "${ROOT_SLIM:-0}" != 1 ] && [ "${FS_AUTO:-1}" = 1 ]; then
+    ARGS[2]=$(python3 -I tools/usbimg/fssize.py "${FS_FREE_MIB:-8}" "$FS_INODES" "${ARGS[@]:3}")
+fi
+mkfs_try=0
+while :; do
+    bash tools/mkfsfi/mkfs.sh "${ARGS[@]}" > "$OUT/mkfs.log" 2>&1 && break
+    mkfs_try=$(( mkfs_try + 1 ))
+    if [ -z "${FS_BLOCKS_SET:-}" ] && [ "$mkfs_try" -lt 4 ] && grep -q "disk is full" "$OUT/mkfs.log"; then
+        ARGS[2]=$(( ARGS[2] + ARGS[2] / 5 + 2048 ))
+        continue
+    fi
+    tail -20 "$OUT/mkfs.log" >&2; fehler "mkfs.py fehlgeschlagen"
+done
 sagen "wurzel      $(stat -c%s "$OUT/root.img") Oktette OFS v3"
 
 # ============================================ 5. NACHZAEHLEN, NICHT HOFFEN
@@ -1291,8 +1302,14 @@ ROOT_GZ=0
 if [ "${OSBOOT:-0}" = 1 ] && [ "${ROOT_GZ_DISABLE:-0}" != 1 ] && command -v gzip > /dev/null; then
     gzip -9 -n -c "$OUT/root.img" > "$OUT/root.img.gz" || fehler "gzip root.img"
     ROOT_GZ=1
-    ESP_MIB=$(( ESP_MIB + ( $(stat -c%s "$OUT/root.img.gz") + 1048575 ) / 1048576 + 2 ))
 fi
+ESP_BYTES=0
+for esp_file in "$BOOT_LOADER_EFI" "$LIMINE/BOOTX64.EFI" "$LIMINE/limine-bios.sys" "$OUT/osum.mb" "$OUT/root.img" \
+                "$OUT/root.img.gz" "$OUT/limine.conf" "$OUT/osboot.logo" "$OUT/osboot.cfg" "${BOOTREG_EFI:-}"; do
+    [ -f "$esp_file" ] && ESP_BYTES=$(( ESP_BYTES + $(stat -c%s "$esp_file") ))
+done
+ESP_NEED=$(( (ESP_BYTES * 105 / 100 + 1048575) / 1048576 + 4 ))
+[ "$ESP_NEED" -gt "$ESP_MIB" ] && ESP_MIB=$ESP_NEED
 FS_MIB=$(( ( $(stat -c%s "$OUT/root.img") + 1048575 ) / 1048576 ))
 GES_MIB=$(( ESP_MIB + FS_MIB + 2 ))
 rm -f "$IMG"
