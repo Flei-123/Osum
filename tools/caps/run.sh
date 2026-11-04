@@ -52,7 +52,7 @@ ZUSAGEN=(
 APPEND="osum nokbd nosched nofs noring3 caps"
 APPEND_OHNE="osum nokbd nosched nofs noring3"
 
-for stufe in 0 1; do
+for stage in 0 1; do
     echo "== Stufe $stage: firnc$stage =="
     IMG="$TMPD/osum$stage.mb"
     if ! bash tools/build-kernel.sh "$IMG" --stufe "$stage" > "$TMPD/build$stage.log" 2>&1; then
