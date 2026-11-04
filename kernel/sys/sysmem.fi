@@ -729,6 +729,14 @@ fn map_shm_do(state: u64, me: u64, of: u64, len: u64, prot: u64,
     return map_shm_obj(state, me, file.open_ino(state, of), sysfd.writable(state, of), len, prot)
 }
 
+fn big_place(state: u64, me: u64, pages: u64) -> u64 {
+    let btop: u64 = big_bottom(state, me)
+    if btop < proc.BIG_FLOOR || pages * sysconst.PAGE > btop - proc.BIG_FLOOR {
+        return 0
+    }
+    return btop - pages * sysconst.PAGE
+}
+
 // The mapping of shared object `i` (a memfd, or since LCSH the shared pages of a file); `wok` = the caller may write the object.
 fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u64 {
     if unixsock.shm_used(state, i) == 0 {
@@ -753,30 +761,29 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
     let top: u64 = map_bottom(state, me)
     var base: u64 = 0
     var is_big: bool = false
-    // WP-DEMAND: an object with a sparse part is mapped in its own arena (above the main stack): only the pages that exist are mapped,
-    // the rest is filled by the page-fault handler at the first touch (`unixsock.shm_fault`), so a 512 MiB memfd costs address space only.
     let lazy: bool = unixsock.shm_lazy(state, i)
-    if lazy {
+    var in_arena: bool = lazy
+    if !lazy {
+        if pages * sysconst.PAGE <= top
+            && top - pages * sysconst.PAGE >= sysfd.page_up(brk_of(state, me)) + sysconst.PAGE {
+            base = top - pages * sysconst.PAGE
+        } else {
+            if kstate.mode_on(state, kstate.M_NOBIG) {
+                return sysuser.neg(errno.E_NOMEM)
+            }
+            base = big_place(state, me, pages)
+            if base != 0 {
+                is_big = true
+            } else {
+                in_arena = true
+            }
+        }
+    }
+    if in_arena {
         base = unixsock.map_arena_find(state, me, pages, proc.SHM_ARENA_BASE, proc.SHM_ARENA_TOP)
         if base == 0 {
             return sysuser.neg(errno.E_NOMEM)
         }
-    } else if pages * sysconst.PAGE <= top
-        && top - pages * sysconst.PAGE >= sysfd.page_up(brk_of(state, me)) + sysconst.PAGE {
-        base = top - pages * sysconst.PAGE
-    } else {
-        if kstate.mode_on(state, kstate.M_NOBIG) {
-            return sysuser.neg(errno.E_NOMEM)
-        }
-        let btop: u64 = big_bottom(state, me)
-        if pages * sysconst.PAGE > btop - proc.BIG_FLOOR {
-            return sysuser.neg(errno.E_NOMEM)
-        }
-        base = btop - pages * sysconst.PAGE
-        if base < proc.BIG_FLOOR {
-            return sysuser.neg(errno.E_NOMEM)
-        }
-        is_big = true
     }
     var p: u64 = 0
     while p < pages {
@@ -795,19 +802,19 @@ fn map_shm_obj(state: u64, me: u64, i: u64, wok: bool, len: u64, prot: u64) -> u
     }
     unixsock.shm_ref(state, i)
     var note_flags: u64 = 0
-    if lazy {
+    if in_arena {
         note_flags = unixsock.UM_LAZY
     }
     if writing {
         note_flags = note_flags | unixsock.UM_WRITE
     }
     let _noted: bool = unixsock.map_note(state, me, i, base, pages, note_flags)
-    if lazy {
-        // the arena has no bump mark
-    } else if is_big {
-        sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
-    } else {
-        sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
+    if !in_arena {
+        if is_big {
+            sched.tset(state, mem_owner(state, me), sched.T_BIG, base)
+        } else {
+            sched.tset(state, mem_owner(state, me), sched.T_MMAP, base)
+        }
     }
     return base
 }
