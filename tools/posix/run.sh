@@ -380,7 +380,7 @@ say "$F" "err unldir" -21 "unlinking a directory: -EISDIR"
 say "$F" "err seekneg" -22 "seeking before the start of a file: -EINVAL"
 say "$F" "err closed" -9 "closing the same descriptor twice: -EBADF"
 say "$F" "err execmis" -2 "execve of a file that is not there: -ENOENT"
-say "$F" "err sleep" -22 "a sleep of a thousand seconds: -EINVAL"
+say "$F" "err sleep" -22 "a timespec with 10^9 nanoseconds: -EINVAL"
 say "$F" "errno" 2 "and the libc turns the same refusal into -1 with errno = ENOENT"
 
 say "$F" "uname sys" 0 "uname(63) fuellt seine sechs Felder"
