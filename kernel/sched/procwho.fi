@@ -1,0 +1,251 @@
+import serial
+import lib.kstate
+import mm.mem
+import sched.sched
+
+export { audit, sane, report_bad }
+
+const PRESENT: u64 = 1
+const HUGE: u64 = 0x80
+const ADDR_MASK: u64 = 0x000FFFFFFFFFF000
+const MAIN_SLOTS: u64 = 475
+const MAX_FRAMES: u64 = 262144
+const LIST_MAX: u64 = 16384
+const MAX_LINES: u64 = 80
+
+const R_PML4: u64 = 1
+const R_PDPT: u64 = 2
+const R_PD: u64 = 3
+const R_PT: u64 = 4
+const R_FPU: u64 = 5
+const R_KSTACK: u64 = 6
+
+const L_HIT: u64 = 1
+const L_BADPDPT: u64 = 2
+const L_BADPD: u64 = 3
+const L_BADPT: u64 = 4
+const L_SUMMARY: u64 = 5
+
+static mut prot: [u8; 262144] = [0; 262144]
+static mut list_frame: [u64; 16384] = [0; 16384]
+static mut list_role: [u64; 16384] = [0; 16384]
+static mut counters: [u64; 4] = [0; 4]
+
+fn entry(table: u64, i: u64) -> u64 {
+    return __mmio_read64((table + i * 8) as *mut u64)
+}
+
+fn sane(state: u64, addr: u64) -> bool {
+    return addr != 0 && (addr & 4095) == 0 && addr / mem.FRAME_SIZE < MAX_FRAMES
+}
+
+fn mark(frame: u64, role: u64, task: u64) {
+    let f: u64 = frame / mem.FRAME_SIZE
+    let n: u64 = counters[1]
+    if f >= MAX_FRAMES || n >= LIST_MAX {
+        return
+    }
+    prot[f] = role as u8
+    list_frame[n] = frame
+    list_role[n] = role | (task << 8)
+    counters[1] = n + 1
+}
+
+fn unmark_all() {
+    var k: u64 = 0
+    while k < counters[1] {
+        prot[list_frame[k] / mem.FRAME_SIZE] = 0
+        k = k + 1
+    }
+    counters[1] = 0
+}
+
+fn role_of(frame: u64) -> u64 {
+    var k: u64 = 0
+    while k < counters[1] {
+        if list_frame[k] == frame {
+            return list_role[k]
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn line(kind: u64, a: u64, b: u64, c: u64, d: u64) {
+    if counters[0] >= MAX_LINES {
+        return
+    }
+    counters[0] = counters[0] + 1
+    var s_w: [u8; 6] = "who: \0"
+    var s_hit: [u8; 5] = "HIT \0"
+    var s_bpdpt: [u8; 9] = "BADPDPT \0"
+    var s_bpd: [u8; 7] = "BADPD \0"
+    var s_bpt: [u8; 7] = "BADPT \0"
+    var s_sum: [u8; 5] = "SUM \0"
+    var s_sp: [u8; 2] = " \0"
+    serial.puts((&s_w[0]) as u64)
+    if kind == L_HIT {
+        serial.puts((&s_hit[0]) as u64)
+    } else if kind == L_BADPDPT {
+        serial.puts((&s_bpdpt[0]) as u64)
+    } else if kind == L_BADPD {
+        serial.puts((&s_bpd[0]) as u64)
+    } else if kind == L_BADPT {
+        serial.puts((&s_bpt[0]) as u64)
+    } else {
+        serial.puts((&s_sum[0]) as u64)
+    }
+    serial.hex(a)
+    serial.puts((&s_sp[0]) as u64)
+    serial.hex(b)
+    serial.puts((&s_sp[0]) as u64)
+    serial.hex(c)
+    serial.puts((&s_sp[0]) as u64)
+    serial.hex(d)
+    serial.nl()
+}
+
+fn report_bad(state: u64, task: u64, level: u64, idx: u64, e: u64) {
+    line(level, sched.tget(state, task, sched.T_PID), idx, e, sched.tget(state, task, sched.T_PDPT))
+}
+
+fn leaf_space(state: u64, i: u64) -> bool {
+    return sched.tget(state, i, sched.T_STATE) != sched.S_FREE
+        && sched.tget(state, i, sched.T_KIND) == sched.K_USER
+        && sched.tget(state, i, sched.T_SHARED) == 0
+        && sched.tget(state, i, sched.T_CR3) != 0
+        && sched.tget(state, i, sched.T_PDPT) != 0
+}
+
+fn mark_pt_level(state: u64, pd: u64, from: u64, to: u64, task: u64) {
+    var k: u64 = from
+    while k < to {
+        let e: u64 = entry(pd, k)
+        if (e & PRESENT) != 0 && (e & HUGE) == 0 {
+            let a: u64 = e & ADDR_MASK
+            if sane(state, a) {
+                mark(a, R_PT, task)
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn mark_space(state: u64, i: u64) {
+    mark(sched.tget(state, i, sched.T_CR3), R_PML4, i)
+    let pdpt: u64 = sched.tget(state, i, sched.T_PDPT)
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    mark(pdpt, R_PDPT, i)
+    mark(pd, R_PD, i)
+    mark(sched.tget(state, i, sched.T_PT), R_PT, i)
+    if sane(state, pd) {
+        mark_pt_level(state, pd, 1, MAIN_SLOTS, i)
+    }
+    var j: u64 = 2
+    while j <= 63 {
+        let e: u64 = entry(pdpt, j)
+        if (e & PRESENT) != 0 {
+            let pdx: u64 = e & ADDR_MASK
+            if sane(state, pdx) {
+                mark(pdx, R_PD, i)
+                mark_pt_level(state, pdx, 0, 512, i)
+            }
+        }
+        j = j + 1
+    }
+}
+
+fn mark_task_frames(state: u64, i: u64) {
+    if sched.tget(state, i, sched.T_STATE) == sched.S_FREE {
+        return
+    }
+    mark(sched.tget(state, i, sched.T_FPU), R_FPU, i)
+    let ks: u64 = sched.tget(state, i, sched.T_KSTACK)
+    if ks != 0 {
+        var k: u64 = 0
+        while k < sched.KSTACK_FRAMES + 1 {
+            mark(ks - mem.FRAME_SIZE + k * mem.FRAME_SIZE, R_KSTACK, i)
+            k = k + 1
+        }
+    }
+}
+
+fn scan_pt(state: u64, pt: u64, base_va: u64, task: u64) {
+    var k: u64 = 0
+    while k < 512 {
+        let e: u64 = entry(pt, k)
+        if (e & PRESENT) != 0 {
+            let a: u64 = e & ADDR_MASK
+            if a / mem.FRAME_SIZE < MAX_FRAMES && prot[a / mem.FRAME_SIZE] != 0 {
+                let r: u64 = role_of(a)
+                line(L_HIT, sched.tget(state, task, sched.T_PID), base_va + k * 4096, e, r)
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn scan_pd(state: u64, pd: u64, from: u64, to: u64, base_va: u64, task: u64) {
+    var k: u64 = from
+    while k < to {
+        let e: u64 = entry(pd, k)
+        if (e & PRESENT) != 0 && (e & HUGE) == 0 {
+            let a: u64 = e & ADDR_MASK
+            if sane(state, a) {
+                scan_pt(state, a, base_va + k * 0x200000, task)
+            } else {
+                line(L_BADPT, sched.tget(state, task, sched.T_PID), k, e, base_va)
+            }
+        }
+        k = k + 1
+    }
+}
+
+fn scan_space(state: u64, i: u64) {
+    let pd: u64 = sched.tget(state, i, sched.T_PD)
+    scan_pt(state, sched.tget(state, i, sched.T_PT), 0x40000000, i)
+    if sane(state, pd) {
+        scan_pd(state, pd, 1, MAIN_SLOTS, 0x40000000, i)
+    }
+    let pdpt: u64 = sched.tget(state, i, sched.T_PDPT)
+    var j: u64 = 2
+    while j <= 63 {
+        let e: u64 = entry(pdpt, j)
+        if (e & PRESENT) != 0 {
+            let pdx: u64 = e & ADDR_MASK
+            if sane(state, pdx) {
+                scan_pd(state, pdx, 0, 512, j * 0x40000000, i)
+            } else {
+                line(L_BADPD, sched.tget(state, i, sched.T_PID), j, e, 0)
+            }
+        }
+        j = j + 1
+    }
+}
+
+fn audit(state: u64, why: u64) {
+    if counters[0] >= MAX_LINES {
+        return
+    }
+    let flags: u64 = sched.irq_save()
+    let n: u64 = kstate.get(state, kstate.TASKS)
+    counters[1] = 0
+    var i: u64 = 0
+    while i < n {
+        mark_task_frames(state, i)
+        if leaf_space(state, i) {
+            mark_space(state, i)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if leaf_space(state, i) {
+            scan_space(state, i)
+        }
+        i = i + 1
+    }
+    counters[2] = counters[2] + 1
+    unmark_all()
+    sched.irq_restore(flags)
+}
