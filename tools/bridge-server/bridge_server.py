@@ -15,6 +15,7 @@ import time
 
 import legacy
 import pairing
+import results
 
 JOB_KINDS = ('system', 'screenshot', 'run', 'read', 'write', 'list', 'log', 'key', 'mouse', 'click', 'scan', 'input')
 MAX_BODY = 24 * 1024 * 1024
@@ -749,12 +750,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             with open(target, 'wb') as f:
                 f.write(raw)
-            files = sorted(os.listdir(folder))
-            for old in files[:-KEEP_RESULTS]:
-                try:
-                    os.remove(os.path.join(folder, old))
-                except OSError:
-                    pass
+            results.prune_results(folder, KEEP_RESULTS)
         except OSError as e:
             log('Storing the result failed: %s' % e)
         log('RESULT <- %s: id=%s status=%s %d bytes -> %s' % (device_id, aid, status, len(raw), target))
@@ -1128,12 +1124,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 with open(target, 'wb') as fh:
                     fh.write(payload)
-                files = sorted(os.listdir(folder))
-                for old_name in files[:-KEEP_RESULTS]:
-                    try:
-                        os.remove(os.path.join(folder, old_name))
-                    except OSError:
-                        pass
+                results.prune_results(folder, KEEP_RESULTS)
             except OSError as e:
                 log('Storing the result failed: %s' % e)
             log('RESULT <- %s: id=%s status=%s %d bytes -> %s' % (device_id, aid, status, len(payload), target))
