@@ -11,13 +11,14 @@ import bus.pci
 import arch.x86_64.apic
 import drv.hid.kbd
 import libc.regio
+import mm.mem
 
 export {
     present, init, ready, stage, poll, report, selftest,
     base_of, bdf, ports, portsc, port_speed, handed_off,
     devices, dev_class, dev_addr, dev_mps, dev_vendor, dev_product,
     keys, reports, enums, errors, ctrl_xfers, polls,
-    msc_ready, msc_blocks, msc_bsize, msc_read, msc_ios, msc_errors,
+    msc_ready, msc_blocks, msc_bsize, msc_read, msc_write, msc_read_run, msc_ios, msc_errors, ensure,
     have_kbd, legacy_cap, hcs_ports, hcc, caplen,
     EHCI_OFF, EHCI_MAX, C_NONE, C_KBD, C_MOUSE, C_MSC
 }
@@ -91,6 +92,7 @@ const S_STS: u64 = 0xE0
 const S_CMD: u64 = 0xE8
 const S_RING: u64 = 0x100 // 16 Woerter
 const RING_N: u64 = 16
+const S_BOUNCE: u64 = 0x180
 const S_RINGN: u64 = 0xF0
 
 const DEV_BYTES: u64 = 128
@@ -513,6 +515,9 @@ fn qtd(state: u64, i: u64, next: u64, pid: u64, len: u64, toggle: u64,
         | T_ACTIVE)
     w32(at + 12, buf)
     w32(at + 16, (buf + 0x1000) & 0xFFFFF000)
+    w32(at + 20, (buf + 0x2000) & 0xFFFFF000)
+    w32(at + 24, (buf + 0x3000) & 0xFFFFF000)
+    w32(at + 28, (buf + 0x4000) & 0xFFFFF000)
 }
 
 fn qh_set(state: u64, which: u64, addr: u64, ep: u64, mps: u64,
@@ -958,6 +963,28 @@ fn msc_setup(state: u64, slot: u64) {
     s(state, S_BSIZE, bs)
 }
 
+fn msc_write(state: u64, lba: u64, src: u64) -> bool {
+    let slot1: u64 = g(state, S_MSC)
+    if slot1 == 0 {
+        return false
+    }
+    let slot: u64 = slot1 - 1
+    var i: u64 = 0
+    while i < 512 {
+        kstate.set8(state + B_DATA + i, kstate.get8(src + i) as u8)
+        i = i + 1
+    }
+    cbw(state, 512, false, 10)
+    cb(state, 0, 0x2A)
+    cb(state, 2, (lba >> 24) & 0xFF)
+    cb(state, 3, (lba >> 16) & 0xFF)
+    cb(state, 4, (lba >> 8) & 0xFF)
+    cb(state, 5, lba & 0xFF)
+    cb(state, 7, 0)
+    cb(state, 8, 1)
+    return scsi(state, slot, 512, false, 10, state + B_DATA) == 512
+}
+
 fn msc_read(state: u64, lba: u64, dst: u64) -> bool {
     let slot1: u64 = g(state, S_MSC)
     if slot1 == 0 {
@@ -975,11 +1002,82 @@ fn msc_read(state: u64, lba: u64, dst: u64) -> bool {
     if scsi(state, slot, 512, true, 10, state + B_DATA) != 512 {
         return false
     }
+    copy_words(state + B_DATA, dst, 512)
+    return true
+}
+
+const RUN_MAX: u64 = 32
+const BOUNCE_PAGES: u64 = 4
+const LOW_LIMIT: u64 = 0x100000000
+
+fn copy_words(from: u64, to: u64, n: u64) {
     var i: u64 = 0
-    while i < 512 {
-        kstate.set8(dst + i, kstate.get8(state + B_DATA + i) as u8)
+    while i < n / 8 {
+        __mmio_write64((to + i * 8) as *mut u64, __mmio_read64((from + i * 8) as *mut u64))
         i = i + 1
     }
+}
+
+fn bounce_get(state: u64) -> u64 {
+    let b: u64 = g(state, S_BOUNCE)
+    if b == 1 {
+        return 0
+    }
+    if b != 0 {
+        return b
+    }
+    if kstate.get(state, kstate.BITMAP) == 0 {
+        return 0
+    }
+    let r: u64 = mem.frame_run(state, BOUNCE_PAGES)
+    if r == 0 {
+        s(state, S_BOUNCE, 1)
+        return 0
+    }
+    if r + BOUNCE_PAGES * 4096 > LOW_LIMIT {
+        mem.frame_free_run(state, r, BOUNCE_PAGES)
+        s(state, S_BOUNCE, 1)
+        return 0
+    }
+    s(state, S_BOUNCE, r)
+    return r
+}
+
+fn msc_read_each(state: u64, lba: u64, n: u64, dst: u64) -> bool {
+    var k: u64 = 0
+    while k < n {
+        if !msc_read(state, lba + k, dst + k * 512) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn msc_read_run(state: u64, lba: u64, n: u64, dst: u64) -> bool {
+    let slot1: u64 = g(state, S_MSC)
+    if slot1 == 0 {
+        return false
+    }
+    if n == 0 {
+        return true
+    }
+    let bounce: u64 = bounce_get(state)
+    if bounce == 0 || n > RUN_MAX {
+        return msc_read_each(state, lba, n, dst)
+    }
+    cbw(state, n * 512, true, 10)
+    cb(state, 0, 0x28)
+    cb(state, 2, (lba >> 24) & 0xFF)
+    cb(state, 3, (lba >> 16) & 0xFF)
+    cb(state, 4, (lba >> 8) & 0xFF)
+    cb(state, 5, lba & 0xFF)
+    cb(state, 7, (n >> 8) & 0xFF)
+    cb(state, 8, n & 0xFF)
+    if scsi(state, slot1 - 1, n * 512, true, 10, bounce) != n * 512 {
+        return msc_read_each(state, lba, n, dst)
+    }
+    copy_words(bounce, dst, n * 512)
     return true
 }
 
@@ -1245,8 +1343,37 @@ fn selftest(state: u64, lba: u64) {
     serial.nl()
 }
 
+fn bring_up(state: u64) -> bool {
+    if g(state, S_READY) != 0 {
+        return true
+    }
+    if !present(state) {
+        return false
+    }
+    if !init(state) {
+        return false
+    }
+    var n: u64 = 0
+    while n < g(state, S_PORTS) {
+        enumerate(state, n)
+        n = n + 1
+    }
+    return true
+}
+
+fn ensure(state: u64) -> bool {
+    if !bring_up(state) {
+        return false
+    }
+    return g(state, S_MSC) != 0
+}
+
 fn stage(state: u64) {
     var s_off: [u8; 15] = "ehci: skipped\0\0"
+    if g(state, S_READY) != 0 {
+        report(state)
+        return
+    }
     var s_fail: [u8; 26] = "ehci: init failed  warum=\0"
     if !kstate.mode_on(state, kstate.M_EHCI) {
         serial.puts((&s_off[0]) as u64)

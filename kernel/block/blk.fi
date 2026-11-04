@@ -621,6 +621,9 @@ fn flush_held(state: u64) -> bool {
         v_dev_flushes = v_dev_flushes + 1
         return nvme.flush(state)
     }
+    if is_usb(kstate.get(state, kstate.DISK_DEV)) {
+        return usb.msc_sync_at(state, usb_slot(kstate.get(state, kstate.DISK_DEV)))
+    }
     if kstate.get(state, kstate.DISK_DEV) != DEV_ATA {
         return true
     }
@@ -1026,7 +1029,7 @@ fn read_stream(state: u64, lba: u64, dst: u64) -> bool {
 
 fn read_stream_held(state: u64, lba: u64, dst: u64) -> bool {
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
-    if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI) || lba >= blocks(state) {
+    if krypto.active(state) || (dv != DEV_ATA && dv != DEV_ATA1 && dv != DEV_AHCI && !is_usb(dv)) || lba >= blocks(state) {
         return read(state, lba, dst)
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
@@ -1053,13 +1056,7 @@ fn read_stream_held(state: u64, lba: u64, dst: u64) -> bool {
         n = ende - abs
     }
     cs(state, S_VALID, 0)
-    var ok: bool = false
-    if dv == DEV_AHCI {
-        ok = ahci.read_many(state, abs, n, buf)
-    } else {
-        ok = ata_read_run(abs, buf, n, dv == DEV_ATA1)
-    }
-    if !ok {
+    if !dev_read_run(state, dv, abs, n, buf) {
         return read(state, lba, dst)
     }
     cs(state, S_LBA, abs)
@@ -1294,10 +1291,29 @@ fn cache_runs(state: u64) -> u64 {
     return cg(state, C_RUNS)
 }
 
+fn dev_read_run(state: u64, dev: u64, lba: u64, n: u64, buf: u64) -> bool {
+    if dev == DEV_AHCI {
+        return ahci.read_many(state, lba, n, buf)
+    }
+    if is_usb(dev) {
+        return usb.msc_read_run_at(state, usb_slot(dev), lba, n, buf)
+    }
+    return ata_read_run(lba, buf, n, dev == DEV_ATA1)
+}
+
+fn dev_read_one(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
+    if dev == DEV_AHCI {
+        return ahci.read_block(state, lba, dst)
+    }
+    if is_usb(dev) {
+        return usb.msc_read_at(state, usb_slot(dev), lba, dst)
+    }
+    return ata_read_twice(lba, dst, dev == DEV_ATA1)
+}
+
 fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
     dma_up(state)
     cache_grow(state)
-    let slave: bool = dev == DEV_ATA1
     if cg(state, W_DIRTY) != 0 {
         let wsl: u64 = lba & (WB_SLOTS - 1)
         if wb_meta(state, wsl) == wb_key(dev, lba) {
@@ -1339,17 +1355,8 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     cs(state, C_CMDS, cg(state, C_CMDS) + 1)
     // w-disklag: the same read-ahead for AHCI -- ONE DMA command for the
     // whole run instead of one command per 512-byte block.
-    var run_ok: bool = false
-    if dev == DEV_AHCI {
-        run_ok = ahci.read_many(state, lba, n, data)
-    } else {
-        run_ok = ata_read_run(lba, data, n, slave)
-    }
-    if !run_ok {
-        if dev == DEV_AHCI {
-            return ahci.read_block(state, lba, dst)
-        }
-        return ata_read_twice(lba, dst, slave)
+    if !dev_read_run(state, dev, lba, n, data) {
+        return dev_read_one(state, dev, lba, dst)
     }
     ws(state, target, C_LBA, lba)
     ws(state, target, C_N, n)
@@ -1499,7 +1506,7 @@ fn read_raw_held(state: u64, lba: u64, dst: u64) -> bool {
     }
     let abs: u64 = lba + kstate.get(state, kstate.DISK_FIRST)
     let dv: u64 = kstate.get(state, kstate.DISK_DEV)
-    if dv == DEV_ATA || dv == DEV_ATA1 {
+    if dv == DEV_ATA || dv == DEV_ATA1 || is_usb(dv) {
         return ata_read_cached(state, abs, dst, dv,
             kstate.get(state, kstate.DISK_FIRST) + blocks(state))
     }
@@ -1556,6 +1563,9 @@ fn write_raw_held(state: u64, lba: u64, src: u64) -> bool {
     }
     if kstate.get(state, kstate.DISK_DEV) == DEV_AHCI {
         return ahci.write_block(state, abs, src)
+    }
+    if is_usb(wdv) {
+        return usb.msc_write_at(state, usb_slot(wdv), abs, src)
     }
     let base: u64 = kstate.get(state, kstate.DISK)
     if base == 0 {
