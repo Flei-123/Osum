@@ -1,26 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// lib/spirv/lower.fi -- lowers a validated SPIR-V FRAGMENT shader to the SWR shader VM (lib/gpu/swr/shader.fi, raster.fi shade_vm).
-//
-//     var info: lower.LowerInfo = lower.info_zero()
-//     let e: u32 = lower.lower(&m, prog_words_address, max_instructions, &info)   // 0 = ok, else L_* (info.err_pos = SPIR-V word)
-//     raster.frame_set_program(frame, prog_words_address)                         // mode VM; info.ninstr instructions incl. END
-//
-// Model of the target: straight-line VM, 64 f32 registers per lane (r0 u, r1 v, r2..r5 colour, r6 x+0.5, r7 y+0.5 are INPUTS,
-// r8..r11 OUTPUT rgba, r12..r63 temporaries), no branches, no integer unit, one bound texture.
-//   - interface: Input location 0 (float scalar/vec2) = r0,r1 ; Input location 1 (float up to vec4) = r2..r5 ; BuiltIn FragCoord
-//     (xy = pixel centre, z = 0, w = 1) ; Output location 0 = r8..r11 (missing components: 0,0,0,1) ; sampler2D / texture+sampler
-//     (any set/binding) = THE frame texture ; no uniform blocks / push constants yet (L_UNSUPPORTED; roadmap)
-//   - types: float / int / uint / bool scalars and vectors. int and bool live in f32 registers (exact up to 2^24, bool = 1.0/0.0)
-//   - structured control flow without loops: if / else / ternary / early return are IF-CONVERTED: both sides run for every lane,
-//     stores become SEL under a per-block mask, OpPhi becomes SEL on the edge masks. Loops, switch, OpKill, calls: L_LOOP etc.
-//     (callers can run spirv-opt --inline-entry-points-exhaustive --eliminate-local-multi-store first; roadmap: inliner, unroller)
-//   - swizzles, CompositeConstruct/Extract/CopyObject cost no instruction (registers are aliased with reference counts)
 
 import std.rt
 import spirv.spv
 import spirv.parse
 import spirv.validate
 import spirv.layout
+import spirv.lowerops
 import gpu.swr.shader
 
 export {
@@ -172,11 +157,6 @@ fn fail(l: *mut Lw, e: u32, pos: usize) {
     }
 }
 
-fn fbits(v: f32) -> u32 {
-    var x: f32 = v
-    return *((&x) as *mut u32)
-}
-
 fn tab(t: u64, i: u32) -> u32 { return rt.ld32(t, i as usize) }
 fn tset(t: u64, i: u32, v: u32) { rt.st32(t, i as usize, v) }
 
@@ -258,7 +238,7 @@ fn free_tmps(l: *mut Lw) {
 
 fn tmp_const(l: *mut Lw, v: f32) -> u32 {
     let r: u32 = tmp_reg(l)
-    ldc(l, r, fbits(v))
+    ldc(l, r, lowerops.fbits(v))
     return r
 }
 
@@ -269,30 +249,14 @@ fn is_const(l: *mut Lw, id: u32) -> bool {
     return (o >= 41 && o <= 46) || o == spv.OP_UNDEF
 }
 
-fn scalar_const_bits(m: *mut parse.Module, id: u32) -> u32 {
-    let o: u32 = parse.def_op(m, id)
-    if o == spv.OP_CONSTANTTRUE { return 0x3F800000 }
-    if o == spv.OP_CONSTANT {
-        let k: u32 = parse.scalar_kind(m, parse.type_of(m, id))
-        let w: u32 = parse.const_word(m, id)
-        if k == parse.K_SINT {
-            if w >= 0x80000000 { return fbits(0.0f - (((0xFFFFFFFF - w) + 1) as f32)) }
-            return fbits(w as f32)
-        }
-        if k == parse.K_UINT { return fbits(w as f32) }
-        return w
-    }
-    return 0
-}
-
 fn const_bits(l: *mut Lw, id: u32, c: u32) -> u32 {
     let m: *mut parse.Module = (*l).m
     if parse.def_op(m, id) == spv.OP_CONSTANTCOMPOSITE {
         let p: usize = parse.def_pos(m, id)
-        if (c as usize) + 3 < parse.wc_at(m, p) { return scalar_const_bits(m, parse.w32(m, p + 3 + (c as usize))) }
+        if (c as usize) + 3 < parse.wc_at(m, p) { return lowerops.scalar_const_bits(m, parse.w32(m, p + 3 + (c as usize))) }
         return 0
     }
-    return scalar_const_bits(m, id)
+    return lowerops.scalar_const_bits(m, id)
 }
 
 
@@ -396,40 +360,6 @@ fn emit_trunc(l: *mut Lw, d: u32, a: u32) {
     emit(l, shader.OP_SEL, d, t2, t1, t3)
 }
 
-// vm op of a plain binary component-wise instruction, 0xFFFF = none
-fn bin_vop(op: u32) -> u32 {
-    if op == spv.OP_FADD || op == spv.OP_IADD { return shader.OP_ADD }
-    if op == spv.OP_FSUB || op == spv.OP_ISUB { return shader.OP_SUB }
-    if op == spv.OP_FMUL || op == spv.OP_IMUL || op == spv.OP_LOGICALAND { return shader.OP_MUL }
-    if op == spv.OP_FDIV { return shader.OP_DIV }
-    if op == spv.OP_LOGICALOR { return shader.OP_MAX }
-    if op == spv.OP_IEQUAL || op == spv.OP_FORDEQUAL || op == spv.OP_FUNORDEQUAL || op == spv.OP_LOGICALEQUAL { return shader.OP_CEQ }
-    if op == spv.OP_ULESSTHAN || op == spv.OP_SLESSTHAN || op == spv.OP_FORDLESSTHAN || op == spv.OP_FUNORDLESSTHAN { return shader.OP_CLT }
-    if op == spv.OP_UGREATERTHAN || op == spv.OP_SGREATERTHAN || op == spv.OP_FORDGREATERTHAN || op == spv.OP_FUNORDGREATERTHAN { return shader.OP_CLT }
-    if op == spv.OP_ULESSTHANEQUAL || op == spv.OP_SLESSTHANEQUAL || op == spv.OP_FORDLESSTHANEQUAL || op == spv.OP_FUNORDLESSTHANEQUAL { return shader.OP_CLE }
-    if op == spv.OP_UGREATERTHANEQUAL || op == spv.OP_SGREATERTHANEQUAL || op == spv.OP_FORDGREATERTHANEQUAL || op == spv.OP_FUNORDGREATERTHANEQUAL { return shader.OP_CLE }
-    return 0xFFFF
-}
-
-fn bin_swap(op: u32) -> bool {
-    return op == spv.OP_UGREATERTHAN || op == spv.OP_SGREATERTHAN || op == spv.OP_FORDGREATERTHAN || op == spv.OP_FUNORDGREATERTHAN
-        || op == spv.OP_UGREATERTHANEQUAL || op == spv.OP_SGREATERTHANEQUAL || op == spv.OP_FORDGREATERTHANEQUAL || op == spv.OP_FUNORDGREATERTHANEQUAL
-}
-
-fn is_notequal(op: u32) -> bool {
-    return op == spv.OP_INOTEQUAL || op == spv.OP_FORDNOTEQUAL || op == spv.OP_FUNORDNOTEQUAL || op == spv.OP_LOGICALNOTEQUAL
-}
-
-fn bits_f32(b: u32) -> f32 {
-    var x: u32 = b
-    return *((&x) as *mut f32)
-}
-
-fn pow2_bits(k: i32) -> u32 {
-    if k < 0 || k > 30 { return 0 }
-    return fbits((1 << (k as u32)) as f32)
-}
-
 // shift by a count register: exp2(count) is exact for small counts; right shifts floor (operands are non-negative here)
 fn lower_shift(l: *mut Lw, pos: usize, op: u32) {
     let m: *mut parse.Module = (*l).m
@@ -444,10 +374,10 @@ fn lower_shift(l: *mut Lw, pos: usize, op: u32) {
         let d: u32 = base + c
         let sc: u32 = tmp_reg(l)
         if is_const(l, b) {
-            let k: i32 = bits_f32(const_bits(l, b, c)) as i32
+            let k: i32 = lowerops.bits_f32(const_bits(l, b, c)) as i32
             if k < 0 || k > 30 { fail(l, L_UNSUPPORTED, pos); return }
-            if op == spv.OP_SHIFTLEFTLOGICAL { ldc(l, sc, fbits((1 << (k as u32)) as f32)) }
-            else { ldc(l, sc, fbits(1.0f / ((1 << (k as u32)) as f32))) }
+            if op == spv.OP_SHIFTLEFTLOGICAL { ldc(l, sc, lowerops.fbits((1 << (k as u32)) as f32)) }
+            else { ldc(l, sc, lowerops.fbits(1.0f / ((1 << (k as u32)) as f32))) }
         }
         else {
             let rb: u32 = get(l, b, c)
@@ -474,7 +404,7 @@ fn lower_and(l: *mut Lw, pos: usize) {
     let base: u32 = allocn(l, n)
     var c: u32 = 0
     while c < n {
-        let mask: i32 = bits_f32(const_bits(l, b, c)) as i32
+        let mask: i32 = lowerops.bits_f32(const_bits(l, b, c)) as i32
         var k: i32 = 0
         while k < 24 && ((1 << (k as u32)) - 1) != mask { k = k + 1 }
         if k >= 24 { fail(l, L_UNSUPPORTED, pos); return }
@@ -499,7 +429,7 @@ fn lower_bin(l: *mut Lw, pos: usize, op: u32) {
     let a: u32 = parse.w32(m, pos + 3)
     let b: u32 = parse.w32(m, pos + 4)
     let n: u32 = result_n(l, pos)
-    let vop: u32 = bin_vop(op)
+    let vop: u32 = lowerops.bin_vop(op)
     let base: u32 = allocn(l, n)
     var c: u32 = 0
     while c < n {
@@ -509,10 +439,10 @@ fn lower_bin(l: *mut Lw, pos: usize, op: u32) {
         let rb: u32 = get(l, b, rb_c)
         let d: u32 = base + c
         if vop != 0xFFFF {
-            if bin_swap(op) { emit(l, vop, d, rb, ra, 0) } else { emit(l, vop, d, ra, rb, 0) }
+            if lowerops.bin_swap(op) { emit(l, vop, d, rb, ra, 0) } else { emit(l, vop, d, ra, rb, 0) }
             if op == spv.OP_SDIV || op == spv.OP_UDIV { emit_trunc(l, d, d) }
         }
-        else if is_notequal(op) {
+        else if lowerops.is_notequal(op) {
             let t: u32 = tmp_reg(l)
             emit(l, shader.OP_CLT, t, ra, rb, 0)
             emit(l, shader.OP_CLT, d, rb, ra, 0)
@@ -978,7 +908,7 @@ fn lower_load_carr(l: *mut Lw, pos: usize, id: u32, ptr: u32) {
     var i: u32 = len - 1
     while i > 0 {
         i = i - 1
-        ldc(l, key, fbits(i as f32))
+        ldc(l, key, lowerops.fbits(i as f32))
         emit(l, shader.OP_CEQ, hit, idx, key, 0)
         ldc(l, val, const_bits(l, init, i))
         emit(l, shader.OP_SEL, acc, val, acc, hit)
@@ -1008,7 +938,7 @@ fn lower_load_rarr(l: *mut Lw, id: u32, ptr: u32) {
     var i: u32 = len - 1
     while i > 0 {
         i = i - 1
-        ldc(l, key, fbits(i as f32))
+        ldc(l, key, lowerops.fbits(i as f32))
         emit(l, shader.OP_CEQ, hit, idx, key, 0)
         emit(l, shader.OP_SEL, acc, base + i, acc, hit)
     }
@@ -1032,7 +962,7 @@ fn lower_store_rarr(l: *mut Lw, ptr: u32, src: u32) {
     let hit: u32 = alloc1(l)
     var i: u32 = 0
     while i < len {
-        ldc(l, key, fbits(i as f32))
+        ldc(l, key, lowerops.fbits(i as f32))
         emit(l, shader.OP_CEQ, hit, idx, key, 0)
         if (*l).cpred != NONE { emit(l, shader.OP_MUL, hit, hit, (*l).cpred, 0) }
         emit(l, shader.OP_SEL, base + i, src, base + i, hit)
@@ -1426,7 +1356,7 @@ fn add_exit(l: *mut Lw, k: u32, from: u32) {
     }
     if nx >= 4 { fail(l, L_COMPLEX, 0); return }
     let x: u32 = alloc1(l)
-    ldc(l, x, fbits(0.0f))
+    ldc(l, x, lowerops.fbits(0.0f))
     lput(l, k, LW_XFROM + nx, from)
     lput(l, k, LW_XREG + nx, x)
     lput(l, k, LW_NX, nx + 1)
@@ -1447,7 +1377,7 @@ fn begin_loop(l: *mut Lw, pos: usize, ii: usize, si: usize) {
     lput(l, k, LW_PIN, (*l).npin)
     pin_loop_range(l, si, merge)
     let mask: u32 = alloc1(l)
-    if (*l).cpred == NONE { ldc(l, mask, fbits(1.0f)) }
+    if (*l).cpred == NONE { ldc(l, mask, lowerops.fbits(1.0f)) }
     else { emit(l, shader.OP_MOV, mask, (*l).cpred, 0, 0) }
     lput(l, k, LW_MASK, mask)
     (*l).nloop = k + 1
@@ -1507,7 +1437,7 @@ fn back_edge(l: *mut Lw, k: u32, pred: u32) {
     var b: u32 = pred
     if b == NONE {
         b = alloc1(l)
-        ldc(l, b, fbits(1.0f))
+        ldc(l, b, lowerops.fbits(1.0f))
     }
     else { ref_reg(l, b) }
     lput(l, k, LW_BACK, b)
@@ -1878,7 +1808,7 @@ fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
     else if op == spv.OP_SELECT { lower_select(l, pos) }
     else if op == spv.OP_UNDEF { }
     else if op == spv.OP_LINE || op == spv.OP_NOLINE || op == spv.OP_NOP { }
-    else if bin_vop(op) != 0xFFFF || is_notequal(op) || op == spv.OP_UDIV || op == spv.OP_SDIV || op == spv.OP_UMOD || op == spv.OP_SMOD
+    else if lowerops.bin_vop(op) != 0xFFFF || lowerops.is_notequal(op) || op == spv.OP_UDIV || op == spv.OP_SDIV || op == spv.OP_UMOD || op == spv.OP_SMOD
         || op == spv.OP_SREM || op == spv.OP_FREM || op == spv.OP_FMOD || op == spv.OP_VECTORTIMESSCALAR { lower_bin(l, pos, op) }
     else if op == spv.OP_FNEGATE || op == spv.OP_SNEGATE || op == spv.OP_CONVERTSTOF || op == spv.OP_CONVERTUTOF || op == spv.OP_CONVERTFTOS
         || op == spv.OP_CONVERTFTOU || op == spv.OP_BITCAST || op == spv.OP_COPYOBJECT || op == spv.OP_LOGICALNOT || op == spv.OP_ISNAN
