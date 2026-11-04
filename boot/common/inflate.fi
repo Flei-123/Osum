@@ -1,0 +1,373 @@
+import mem
+
+export { gunzip, SCRATCH_PAGES, isize }
+
+const SCRATCH_PAGES: u64 = 40
+const LIT_TABLE: u64 = 0
+const DIST_TABLE: u64 = 65536
+const CLEN_TABLE: u64 = 131072
+const LENS: u64 = 131584
+const MAXBITS: u64 = 15
+
+fn isize(src: u64, n: u64) -> u64 {
+    if n < 18 {
+        return 0
+    }
+    if mem.get8(src) != 0x1f || mem.get8(src + 1) != 0x8b || mem.get8(src + 2) != 8 {
+        return 0
+    }
+    return mem.get32(src + n - 4)
+}
+
+fn reverse_bits(code: u64, len: u64) -> u64 {
+    var r: u64 = 0
+    var i: u64 = 0
+    var c: u64 = code
+    while i < len {
+        r = (r << 1) | (c & 1)
+        c = c >> 1
+        i = i + 1
+    }
+    return r
+}
+
+fn build(table: u64, lens: u64, count: u64, limit: u64) -> u64 {
+    var counts: [u64; 16] = [0 as u64; 16]
+    var next: [u64; 16] = [0 as u64; 16]
+    var i: u64 = 0
+    var maxlen: u64 = 0
+    while i < count {
+        let l: u64 = mem.get8(lens + i)
+        counts[l as usize] = counts[l as usize] + 1
+        if l > maxlen {
+            maxlen = l
+        }
+        i = i + 1
+    }
+    counts[0 as usize] = 0
+    if maxlen == 0 {
+        maxlen = 1
+    }
+    if maxlen > limit {
+        return 0
+    }
+    var code: u64 = 0
+    var b: u64 = 1
+    while b <= MAXBITS {
+        code = (code + counts[(b - 1) as usize]) << 1
+        next[b as usize] = code
+        b = b + 1
+    }
+    let size: u64 = 1 << maxlen
+    var t: u64 = 0
+    while t < size {
+        mem.set16(table + t * 2, 0)
+        t = t + 1
+    }
+    i = 0
+    while i < count {
+        let l: u64 = mem.get8(lens + i)
+        if l != 0 {
+            let c: u64 = next[l as usize]
+            next[l as usize] = c + 1
+            if c >= (1 << l) {
+                return 0
+            }
+            var r: u64 = reverse_bits(c, l)
+            let entry: u64 = (i << 4) | l
+            let step: u64 = 1 << l
+            while r < size {
+                mem.set16(table + r * 2, entry)
+                r = r + step
+            }
+        }
+        i = i + 1
+    }
+    return maxlen
+}
+
+fn fixed_lens(lens: u64) {
+    var i: u64 = 0
+    while i < 288 {
+        var l: u64 = 8
+        if i >= 144 && i < 256 {
+            l = 9
+        }
+        if i >= 256 && i < 280 {
+            l = 7
+        }
+        mem.set8(lens + i, l)
+        i = i + 1
+    }
+    i = 0
+    while i < 30 {
+        mem.set8(lens + 288 + i, 5)
+        i = i + 1
+    }
+}
+
+fn gunzip(src: u64, n: u64, dst: u64, cap: u64, scratch: u64) -> u64 {
+    if isize(src, n) == 0 {
+        return 0
+    }
+    var ip: u64 = src + 10
+    let flags: u64 = mem.get8(src + 3)
+    if (flags & 4) != 0 {
+        ip = ip + 2 + mem.get16(ip)
+    }
+    if (flags & 8) != 0 {
+        while mem.get8(ip) != 0 {
+            ip = ip + 1
+        }
+        ip = ip + 1
+    }
+    if (flags & 16) != 0 {
+        while mem.get8(ip) != 0 {
+            ip = ip + 1
+        }
+        ip = ip + 1
+    }
+    if (flags & 2) != 0 {
+        ip = ip + 2
+    }
+    let iend: u64 = src + n - 8
+    var op: u64 = dst
+    let oend: u64 = dst + cap
+    var bits: u64 = 0
+    var nbits: u64 = 0
+    var last: bool = false
+    let lit: u64 = scratch + LIT_TABLE
+    let dist: u64 = scratch + DIST_TABLE
+    let clen: u64 = scratch + CLEN_TABLE
+    let lens: u64 = scratch + LENS
+    while !last {
+        if nbits < 40 {
+            while nbits <= 56 && ip < iend {
+                bits = bits | (mem.get8(ip) << nbits)
+                ip = ip + 1
+                nbits = nbits + 8
+            }
+        }
+        last = (bits & 1) == 1
+        let kind: u64 = (bits >> 1) & 3
+        bits = bits >> 3
+        nbits = nbits - 3
+        if kind == 0 {
+            let drop: u64 = nbits & 7
+            bits = bits >> drop
+            nbits = nbits - drop
+            ip = ip - (nbits >> 3)
+            bits = 0
+            nbits = 0
+            let len: u64 = mem.get16(ip)
+            if (len ^ mem.get16(ip + 2)) != 0xFFFF {
+                return 0
+            }
+            ip = ip + 4
+            if op + len > oend || ip + len > iend + 8 {
+                return 0
+            }
+            mem.copy(op, ip, len)
+            op = op + len
+            ip = ip + len
+        } else {
+            if kind == 3 {
+                return 0
+            }
+            var litbits: u64 = 0
+            var distbits: u64 = 0
+            if kind == 1 {
+                fixed_lens(lens)
+                litbits = build(lit, lens, 288, MAXBITS)
+                distbits = build(dist, lens + 288, 30, MAXBITS)
+            } else {
+                while nbits <= 56 && ip < iend {
+                    bits = bits | (mem.get8(ip) << nbits)
+                    ip = ip + 1
+                    nbits = nbits + 8
+                }
+                let hlit: u64 = (bits & 31) + 257
+                let hdist: u64 = ((bits >> 5) & 31) + 1
+                let hclen: u64 = ((bits >> 10) & 15) + 4
+                bits = bits >> 14
+                nbits = nbits - 14
+                var order: [u8; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]
+                var k: u64 = 0
+                while k < 19 {
+                    mem.set8(lens + k, 0)
+                    k = k + 1
+                }
+                k = 0
+                while k < hclen {
+                    while nbits < 3 && ip < iend {
+                        bits = bits | (mem.get8(ip) << nbits)
+                        ip = ip + 1
+                        nbits = nbits + 8
+                    }
+                    mem.set8(lens + (order[k as usize] as u64), bits & 7)
+                    bits = bits >> 3
+                    nbits = nbits - 3
+                    k = k + 1
+                }
+                let cb: u64 = build(clen, lens, 19, 7)
+                if cb == 0 {
+                    return 0
+                }
+                let total: u64 = hlit + hdist
+                var prev: u64 = 0
+                k = 0
+                while k < total {
+                    if nbits < 16 {
+                        while nbits <= 56 && ip < iend {
+                            bits = bits | (mem.get8(ip) << nbits)
+                            ip = ip + 1
+                            nbits = nbits + 8
+                        }
+                    }
+                    let e: u64 = mem.get16(clen + (bits & ((1 << cb) - 1)) * 2)
+                    let el: u64 = e & 15
+                    if el == 0 {
+                        return 0
+                    }
+                    bits = bits >> el
+                    nbits = nbits - el
+                    let sym: u64 = e >> 4
+                    if sym < 16 {
+                        mem.set8(lens + k, sym)
+                        prev = sym
+                        k = k + 1
+                    } else {
+                        var rep: u64 = 0
+                        var val: u64 = 0
+                        if sym == 16 {
+                            if k == 0 {
+                                return 0
+                            }
+                            rep = 3 + (bits & 3)
+                            bits = bits >> 2
+                            nbits = nbits - 2
+                            val = prev
+                        } else {
+                            if sym == 17 {
+                                rep = 3 + (bits & 7)
+                                bits = bits >> 3
+                                nbits = nbits - 3
+                            } else {
+                                rep = 11 + (bits & 127)
+                                bits = bits >> 7
+                                nbits = nbits - 7
+                            }
+                        }
+                        if k + rep > total {
+                            return 0
+                        }
+                        while rep > 0 {
+                            mem.set8(lens + k, val)
+                            k = k + 1
+                            rep = rep - 1
+                        }
+                    }
+                }
+                litbits = build(lit, lens, hlit, MAXBITS)
+                distbits = build(dist, lens + hlit, hdist, MAXBITS)
+            }
+            if litbits == 0 || distbits == 0 {
+                return 0
+            }
+            let litmask: u64 = (1 << litbits) - 1
+            let distmask: u64 = (1 << distbits) - 1
+            var more: bool = true
+            while more {
+                if nbits < 48 {
+                    if ip + 8 <= iend {
+                        bits = bits | (mem.get64(ip) << nbits)
+                        ip = ip + ((63 - nbits) >> 3)
+                        nbits = nbits | 56
+                    } else {
+                        while nbits <= 56 && ip < iend {
+                            bits = bits | (mem.get8(ip) << nbits)
+                            ip = ip + 1
+                            nbits = nbits + 8
+                        }
+                        if nbits < 48 {
+                            nbits = 56
+                        }
+                    }
+                }
+                let e: u64 = mem.get16(lit + (bits & litmask) * 2)
+                let el: u64 = e & 15
+                if el == 0 {
+                    return 0
+                }
+                bits = bits >> el
+                nbits = nbits - el
+                let sym: u64 = e >> 4
+                if sym < 256 {
+                    if op >= oend {
+                        return 0
+                    }
+                    mem.set8(op, sym)
+                    op = op + 1
+                } else {
+                    if sym == 256 {
+                        more = false
+                    } else {
+                        if sym > 285 {
+                            return 0
+                        }
+                        var len: u64 = 258
+                        if sym < 265 {
+                            len = sym - 254
+                        } else {
+                            if sym < 285 {
+                                let ex: u64 = (sym - 261) >> 2
+                                len = (((4 + ((sym - 261) & 3)) << ex) + 3) + (bits & ((1 << ex) - 1))
+                                bits = bits >> ex
+                                nbits = nbits - ex
+                            }
+                        }
+                        let de: u64 = mem.get16(dist + (bits & distmask) * 2)
+                        let dl: u64 = de & 15
+                        if dl == 0 {
+                            return 0
+                        }
+                        bits = bits >> dl
+                        nbits = nbits - dl
+                        let dsym: u64 = de >> 4
+                        if dsym > 29 {
+                            return 0
+                        }
+                        var d: u64 = dsym + 1
+                        if dsym >= 4 {
+                            let dx: u64 = (dsym >> 1) - 1
+                            d = (((2 + (dsym & 1)) << dx) + 1) + (bits & ((1 << dx) - 1))
+                            bits = bits >> dx
+                            nbits = nbits - dx
+                        }
+                        if d > op - dst || op + len > oend {
+                            return 0
+                        }
+                        var s: u64 = op - d
+                        if d >= 8 && op + len + 8 <= oend {
+                            let stop: u64 = op + len
+                            while op < stop {
+                                mem.set64(op, mem.get64(s))
+                                op = op + 8
+                                s = s + 8
+                            }
+                            op = stop
+                        } else {
+                            let stop: u64 = op + len
+                            while op < stop {
+                                mem.set8(op, mem.get8(s))
+                                op = op + 1
+                                s = s + 1
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return op - dst
+}

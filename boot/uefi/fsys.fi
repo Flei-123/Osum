@@ -3,8 +3,9 @@ import ctx
 import efi
 import splash
 import anim
+import inflate
 
-export { open_root, load, last_size }
+export { open_root, load, load_module, last_size }
 
 const CHUNK: u64 = 0x400000
 const SPLASH_CHUNK: u64 = 0x40000
@@ -90,4 +91,51 @@ fn load(c: u64, path: u64, limit: u64) -> u64 {
     mem.set8(buf + size, 0)
     mem.set64(efi.out_addr(c, SLOT_SIZE), size)
     return buf
+}
+
+fn free_pages(c: u64, addr: u64, bytes: u64) {
+    efi.call2(efi.bs_fn(c, 48), addr, (bytes + 4096) / 4096)
+}
+
+fn load_module(c: u64, path: u64, limit: u64) -> u64 {
+    var gz_path: [u8; 128] = [0 as u8; 128]
+    let gp: u64 = (&gz_path[0]) as u64
+    var n: u64 = mem.strlen(path)
+    if n > 120 {
+        return load(c, path, limit)
+    }
+    mem.copy(gp, path, n)
+    mem.set8(gp + n, 46)
+    mem.set8(gp + n + 1, 103)
+    mem.set8(gp + n + 2, 122)
+    mem.set8(gp + n + 3, 0)
+    let gz: u64 = load(c, gp, 0xFFFFFFFF)
+    if gz == 0 {
+        return load(c, path, limit)
+    }
+    let gz_size: u64 = last_size(c)
+    let raw_size: u64 = inflate.isize(gz, gz_size)
+    if raw_size == 0 {
+        free_pages(c, gz, gz_size)
+        return load(c, path, limit)
+    }
+    let out: u64 = efi.alloc_below(c, limit, (raw_size + 4096) / 4096, efi.LOADER_DATA)
+    let scratch: u64 = efi.alloc_below(c, 0xFFFFFFFF, inflate.SCRATCH_PAGES, efi.LOADER_DATA)
+    var got: u64 = 0
+    if out != 0 && scratch != 0 {
+        got = inflate.gunzip(gz, gz_size, out, raw_size, scratch)
+    }
+    if scratch != 0 {
+        free_pages(c, scratch, inflate.SCRATCH_PAGES * 4096 - 4096)
+    }
+    free_pages(c, gz, gz_size)
+    if got != raw_size {
+        if out != 0 {
+            free_pages(c, out, raw_size)
+        }
+        return load(c, path, limit)
+    }
+    mem.set8(out + raw_size, 0)
+    mem.set64(efi.out_addr(c, SLOT_SIZE), raw_size)
+    return out
 }

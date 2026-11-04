@@ -1287,6 +1287,12 @@ sagen "menue       $(grep -cE '^/' "$OUT/limine.conf") Eintraege, laengster $(gr
 # all with the old value.
 PARTTAB=${PARTTAB:-gpt}
 case "$PARTTAB" in gpt|mbr|hybrid) ;; *) fehler "PARTTAB=$PARTTAB (gpt, mbr oder hybrid)";; esac
+ROOT_GZ=0
+if [ "${OSBOOT:-0}" = 1 ] && [ "${ROOT_GZ_DISABLE:-0}" != 1 ] && command -v gzip > /dev/null; then
+    gzip -9 -n -c "$OUT/root.img" > "$OUT/root.img.gz" || fehler "gzip root.img"
+    ROOT_GZ=1
+    ESP_MIB=$(( ESP_MIB + ( $(stat -c%s "$OUT/root.img.gz") + 1048575 ) / 1048576 + 2 ))
+fi
 FS_MIB=$(( ( $(stat -c%s "$OUT/root.img") + 1048575 ) / 1048576 ))
 GES_MIB=$(( ESP_MIB + FS_MIB + 2 ))
 rm -f "$IMG"
@@ -1364,6 +1370,7 @@ mcopy -i "$OUT/esp.img" "$OUT/limine.conf" ::/limine.conf || fehler "mcopy conf"
 mcopy -i "$OUT/esp.img" "$OUT/limine.conf" ::/boot/limine.conf || fehler "mcopy conf2"
 mcopy -i "$OUT/esp.img" "$OUT/osum.mb" ::/osum.mb || fehler "mcopy kern"
 mcopy -i "$OUT/esp.img" "$OUT/root.img" ::/root.img || fehler "mcopy wurzel"
+[ "$ROOT_GZ" = 1 ] && { mcopy -i "$OUT/esp.img" "$OUT/root.img.gz" ::/root.img.gz || fehler "mcopy root.img.gz"; }
 
 dd if="$OUT/esp.img" of="$IMG" bs=512 seek="$P1_ANF" conv=notrunc status=none
 dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
