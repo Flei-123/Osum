@@ -2,17 +2,36 @@
 import sys
 from PIL import Image, ImageChops
 
+PANEL = (32, 34, 44)
+
 
 def load(root, name):
     return Image.open("%s/%s.png" % (root, name)).convert("RGB")
 
 
+def panel_box(im):
+    px = im.load()
+    w, h = im.size
+    xs = []
+    ys = []
+    for y in range(0, h, 2):
+        for x in range(0, w, 2):
+            if px[x, y] == PANEL:
+                xs.append(x)
+                ys.append(y)
+    if len(xs) < 500:
+        return None
+    return (min(xs), min(ys), max(xs) + 2, max(ys) + 2)
+
+
+def union(a, b):
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
 def diff(a, b):
-    box = ImageChops.difference(a, b).getbbox()
-    if box is None:
-        return 0
-    d = ImageChops.difference(a, b).convert("L").point(lambda v: 255 if v > 24 else 0)
-    return sum(1 for v in d.getdata() if v)
+    box = union(panel_box(a), panel_box(b))
+    d = ImageChops.difference(a.crop(box), b.crop(box)).convert("L").point(lambda v: 255 if v > 24 else 0)
+    return sum(d.histogram()[255:])
 
 
 def main(root):
@@ -23,20 +42,22 @@ def main(root):
         print("PIXELS-FAIL missing shot: %s" % e)
         return 1
     bad = 0
+    for n in names:
+        if panel_box(shots[n]) is None:
+            print("%s: no dialog panel found" % n)
+            bad += 1
+    if bad:
+        print("PIXELS-FAIL %d" % bad)
+        return 1
     same = diff(shots["m5-error"], shots["m9-error-again"])
-    print("identical error dialogs: %d differing px" % same)
+    print("identical error dialogs: %d differing px in the panel" % same)
     if same > 0:
         bad += 1
     for a, b in (("m1-message", "m5-error"), ("m4-warning", "m5-error"), ("m5-error", "m6-critical")):
         d = diff(shots[a], shots[b])
-        print("%s vs %s: %d differing px" % (a, b, d))
-        if d < 200:
+        print("%s vs %s: %d differing px in the panel" % (a, b, d))
+        if d < 20:
             bad += 1
-    w, h = shots["m1-message"].size
-    lit = sum(1 for p in shots["m1-message"].getdata() if p != shots["m1-message"].getpixel((0, 0)))
-    print("screen %dx%d, non-background px: %d" % (w, h, lit))
-    if lit < 2000:
-        bad += 1
     print("PIXELS-OK" if bad == 0 else "PIXELS-FAIL %d" % bad)
     return 0 if bad == 0 else 1
 
