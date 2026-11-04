@@ -1265,6 +1265,9 @@ if [ -z "${OSUM_NO_BOOTREG:-}" ] && [ -f tools/bootreg/build.sh ]; then
 else
     sagen "bootreg     skipped (no tools/bootreg/build.sh or OSUM_NO_BOOTREG set): the stick has no register entry"
 fi
+if [ "${ROOT_FROM_PART:-1}" = 1 ]; then
+    python3 -I tools/usbimg/rootmode.py "$OUT/limine.conf" || fehler "rootmode.py failed"
+fi
 # 24.09.2026: no comment lines on the stick (see section 6).
 if grep -qE '^[[:space:]]*#' "$OUT/limine.conf"; then
     fehler "limine.conf enthaelt Kommentarzeilen -- die gehoeren nach docs/STICK-MENUE.md"
