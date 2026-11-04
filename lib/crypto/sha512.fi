@@ -1,156 +1,128 @@
-// SPDX-License-Identifier: GPL-2.0-only
-// lib/crypto/sha512.fi -- SHA-512 (FIPS 180-4), round UPDATE.
+// SPDX-License-Identifier: MPL-2.0
+// lib/crypto/sha512.fi -- SHA-512 and SHA-384 (FIPS 180-4), round B5.
 //
-// WHY THIS FILE EXISTS. Ed25519 does not have a hash parameter. RFC 8032
-// names SHA-512 and nothing else: the private scalar is the first half of
-// SHA-512(seed), the per-message nonce is SHA-512(prefix || M) and the
-// challenge is SHA-512(R || A || M). An Ed25519 with a different hash is
-// not a variant of Ed25519, it is an incompatible signature scheme that
-// happens to use the same curve. This repository already has SHA-256
-// three times over (`kernel/user/pw.fi`, `kernel/user/sha.fi`) and BLAKE2s
-// once (`lib/crypto/blake2s.fi`) -- and none of them is SHA-512. SHA-512
-// is not SHA-256 with wider words: different initial values, different
-// constants, different rotation amounts, eighty rounds instead of
-// sixty-four, a 128 octet block and a 128 bit length field.
+// WHY IT IS HERE AT ALL. Round B5 needs SHA-384 in exactly two places and
+// both of them are somebody else's choice, not ours:
 //
-// WHAT THE FILE MAY NOT DO. It sits underneath `lib/crypto/ed25519.fi`,
-// which is reached from a program in ring 3, from a hosted test runner
-// and (later) from the boot path. So it follows the rule that
-// `lib/crypto/blake2s.fi` set: NO profile line, NO imports, no allocator,
-// no system call. Everything it touches is memory the caller handed it.
+//   * a certificate authority that signs with `sha384WithRSAEncryption` or
+//     `ecdsa-with-SHA384`. Several of the roots in a normal trust store do,
+//     and a chain with one of them in it cannot be checked without this
+//     file. That is not a hypothetical -- it is the difference between
+//     "verified" and "unknown issuer" on a real site.
+//   * the cipher suite `TLS_AES_256_GCM_SHA384`, whose key schedule runs
+//     on SHA-384. This round does not OFFER that suite (see
+//     `lib/tls/handshake.fi`), so the hash is here for the certificates.
 //
-// ============================================================ THE ARITHMETIC
+// SHA-512 is SHA-256 with 64 bit words, 80 rounds instead of 64, different
+// rotation amounts and a 1024 bit block. SHA-384 is the same function with
+// a different initial state, truncated to 48 octets -- and the different
+// initial state is what stops `sha384(x)` from being a prefix of
+// `sha512(x)`, which would be a real weakness.
 //
-// SHA-512 is a 64 bit algorithm and Firn's `u64` is exactly 64 bits, so
-// unlike the 32 bit hashes in this repository there is no wider type to
-// carry the intermediate in. Every addition therefore uses Firn's
-// EXPLICIT wrapping operator `+%`. That is deliberate and it is the one
-// thing to get right: a plain `+` traps on overflow in Firn, which would
-// turn a perfectly correct hash into a panic at a random input length,
-// and only in the build modes that check. A hash that differs between
-// `--debug` and `--release-fast` is the worst bug there is, so the
-// wrapping is written down at every single site instead of inherited from
-// the build mode.
+// THE ARITHMETIC. Firn traps on integer overflow, and SHA-512 adds modulo
+// 2^64 on purpose. Every addition here is therefore written with the
+// wrapping operator `+%` (SPEC 9.3). That is not a workaround: it says at
+// every single site that the wrap IS the definition, and a reader who sees
+// a plain `+` in the round function of this file has found a bug.
 //
-// The rotation is `(x >> n) | (x << (64 - n))`. Firn's `<<` discards the
-// bits that leave the word (measured, not assumed: `.probe/lang.fi`), so
-// no mask is needed -- which is the difference to the 32 bit files here,
-// where every operation ends in `& M32`.
+// The 80 round constants are the first 64 bits of the fractional parts of
+// the cube roots of the first 80 primes, exactly as FIPS 180-4 4.2.3 lists
+// them, and the eight initial values for SHA-512 are the same of the
+// square roots of the first eight primes. They stand here as decimal
+// numbers because that is what the language reads; the generator that
+// produced them is three lines of `decimal` and it is in the commit that
+// added this file.
 //
-// THE STATE IS A CALLER-SUPPLIED CONTEXT (`Sha512`), not a module
-// variable. `kernel/user/sha.fi` made the other choice and wrote down why
-// it was a restriction; Ed25519 needs two hashes alive at once in
-// `ed25519_sign` (the nonce hash and the challenge hash are computed one
-// after the other, but the seed hash has to survive both), so this file
-// pays the eight extra octets at the call site.
+// THE LENGTH FIELD IS 128 BITS in SHA-512 and only the low 64 are written
+// here. A message of 2^61 octets is two exabytes; the high half is zero
+// for anything this program can be handed, and writing it as a constant
+// zero is honest where computing it would be theatre.
 //
-// ==================================================================== HONEST
-//
-// S1 NOT CONSTANT TIME IN THE LENGTH. The number of compression rounds is
-//    the number of blocks, which is the message length -- public in every
-//    use here. The rounds themselves have no data dependent branch and no
-//    data dependent memory address, so the message CONTENT does not leak.
-// S2 THE LENGTH COUNTER IS 128 BIT (`nlo`/`nhi`) because FIPS 180-4 says
-//    so, although no caller in this repository will ever hash 2^64 octets.
-//    It costs two instructions per block and removes a class of bug that
-//    only shows up after two exabytes.
-// S3 NO SHA-384, NO SHA-512/256. They are this compression function with
-//    other initial values and a truncated output. Ed25519 does not need
-//    them and an untested code path is a liability.
+// PROVEN: FIPS 180-4 appendix C ("abc" and the two-block message) plus
+// Python's `hashlib` over random inputs of every length from 0 to 300 --
+// which is what catches a padding that is wrong only at a block boundary.
+// In `tools/tlsb5/crypto_check.py`.
 import libc.octets
 
+export { Sha512, sha512_new, sha384_new, sha512_update, sha512_final,
+    sha512, sha384, SHA512_SIZE, SHA384_SIZE, SHA512_BLOCK }
 
-export { Sha512, sha512_new, begin, update, finish, hash, DIGEST, BLOCK }
-
-const DIGEST: usize = 64
-const BLOCK: usize = 128
+const SHA512_SIZE: usize = 64
+const SHA384_SIZE: usize = 48
+const SHA512_BLOCK: usize = 128
 
 struct Sha512 {
     h: [u64; 8],
-    buf: [u8; 128],
-    have: usize, // octets sitting in `buf`
-    nlo: u64,    // octets fed in, low 64 bits
-    nhi: u64,    // octets fed in, high 64 bits
+    k: [u64; 80],
+    block: [u8; 128],
+    used: usize,
+    total: u64,
+    outlen: usize,
 }
 
-// The two routines this file used to take from `std.rt`. A kernel has no
-// `std.rt`; loading and storing one octet is not worth a dependency.
-fn rotr(x: u64, n: u64) -> u64 {
-    return (x >> n) | (x << (64 - n))
+fn rotr64(x: u64, n: u64) -> u64 {
+    if n == 0 as u64 {
+        return x
+    }
+    return (x >> n) | (x << (64 as u64 - n))
+}
+
+fn k_table() -> [u64; 80] {
+    var k: [u64; 80] = [
+        4794697086780616226, 8158064640168781261, 13096744586834688815,
+        16840607885511220156, 4131703408338449720, 6480981068601479193,
+        10538285296894168987, 12329834152419229976, 15566598209576043074,
+        1334009975649890238, 2608012711638119052, 6128411473006802146,
+        8268148722764581231, 9286055187155687089, 11230858885718282805,
+        13951009754708518548, 16472876342353939154, 17275323862435702243,
+        1135362057144423861, 2597628984639134821, 3308224258029322869,
+        5365058923640841347, 6679025012923562964, 8573033837759648693,
+        10970295158949994411, 12119686244451234320, 12683024718118986047,
+        13788192230050041572, 14330467153632333762, 15395433587784984357,
+        489312712824947311, 1452737877330783856, 2861767655752347644,
+        3322285676063803686, 5560940570517711597, 5996557281743188959,
+        7280758554555802590, 8532644243296465576, 9350256976987008742,
+        10552545826968843579, 11727347734174303076, 12113106623233404929,
+        14000437183269869457, 14369950271660146224, 15101387698204529176,
+        15463397548674623760, 17586052441742319658, 1182934255886127544,
+        1847814050463011016, 2177327727835720531, 2830643537854262169,
+        3796741975233480872, 4115178125766777443, 5681478168544905931,
+        6601373596472566643, 7507060721942968483, 8399075790359081724,
+        8693463985226723168, 9568029438360202098, 10144078919501101548,
+        10430055236837252648, 11840083180663258601, 13761210420658862357,
+        14299343276471374635, 14566680578165727644, 15097957966210449927,
+        16922976911328602910, 17689382322260857208, 500013540394364858,
+        748580250866718886, 1242879168328830382, 1977374033974150939,
+        2944078676154940804, 3659926193048069267, 4368137639120453308,
+        4836135668995329356, 5532061633213252278, 6448918945643986474,
+        6902733635092675308, 7801388544844847127
+    ]
+    return k
 }
 
 fn sha512_new() -> Sha512 {
-    return Sha512 { h: [0 as u64; 8], buf: [0 as u8; 128], have: 0,
-        nlo: 0, nhi: 0 }
+    return Sha512 {
+        h: [
+            7640891576956012808, 13503953896175478587, 4354685564936845355, 11912009170470909681,
+            5840696475078001361, 11170449401992604703, 2270897969802886507, 6620516959819538809
+        ],
+        k: k_table(), block: [0; 128], used: 0, total: 0,
+        outlen: SHA512_SIZE }
 }
 
-// FIPS 180-4 5.3.5: the first 64 bits of the fractional parts of the
-// square roots of the first eight primes.
-fn begin(s: *mut Sha512) {
-    (*s).h[0] = 0x6A09E667F3BCC908
-    (*s).h[1] = 0xBB67AE8584CAA73B
-    (*s).h[2] = 0x3C6EF372FE94F82B
-    (*s).h[3] = 0xA54FF53A5F1D36F1
-    (*s).h[4] = 0x510E527FADE682D1
-    (*s).h[5] = 0x9B05688C2B3E6C1F
-    (*s).h[6] = 0x1F83D9ABFB41BD6B
-    (*s).h[7] = 0x5BE0CD19137E2179
-    (*s).have = 0
-    (*s).nlo = 0
-    (*s).nhi = 0
+// SHA-384: the same rounds, a different start, a shorter answer.
+fn sha384_new() -> Sha512 {
+    return Sha512 {
+        h: [
+            14680500436340154072, 7105036623409894663, 10473403895298186519, 1526699215303891257,
+            7436329637833083697, 10282925794625328401, 15784041429090275239, 5167115440072839076
+        ],
+        k: k_table(), block: [0; 128], used: 0, total: 0,
+        outlen: SHA384_SIZE }
 }
 
-// FIPS 180-4 4.2.3: the first 64 bits of the fractional parts of the cube
-// roots of the first eighty primes.
-fn kconst(i: usize) -> u64 {
-    let k: [u64; 80] = [
-    0x428A2F98D728AE22, 0x7137449123EF65CD,
-    0xB5C0FBCFEC4D3B2F, 0xE9B5DBA58189DBBC,
-    0x3956C25BF348B538, 0x59F111F1B605D019,
-    0x923F82A4AF194F9B, 0xAB1C5ED5DA6D8118,
-    0xD807AA98A3030242, 0x12835B0145706FBE,
-    0x243185BE4EE4B28C, 0x550C7DC3D5FFB4E2,
-    0x72BE5D74F27B896F, 0x80DEB1FE3B1696B1,
-    0x9BDC06A725C71235, 0xC19BF174CF692694,
-    0xE49B69C19EF14AD2, 0xEFBE4786384F25E3,
-    0x0FC19DC68B8CD5B5, 0x240CA1CC77AC9C65,
-    0x2DE92C6F592B0275, 0x4A7484AA6EA6E483,
-    0x5CB0A9DCBD41FBD4, 0x76F988DA831153B5,
-    0x983E5152EE66DFAB, 0xA831C66D2DB43210,
-    0xB00327C898FB213F, 0xBF597FC7BEEF0EE4,
-    0xC6E00BF33DA88FC2, 0xD5A79147930AA725,
-    0x06CA6351E003826F, 0x142929670A0E6E70,
-    0x27B70A8546D22FFC, 0x2E1B21385C26C926,
-    0x4D2C6DFC5AC42AED, 0x53380D139D95B3DF,
-    0x650A73548BAF63DE, 0x766A0ABB3C77B2A8,
-    0x81C2C92E47EDAEE6, 0x92722C851482353B,
-    0xA2BFE8A14CF10364, 0xA81A664BBC423001,
-    0xC24B8B70D0F89791, 0xC76C51A30654BE30,
-    0xD192E819D6EF5218, 0xD69906245565A910,
-    0xF40E35855771202A, 0x106AA07032BBD1B8,
-    0x19A4C116B8D2D0C8, 0x1E376C085141AB53,
-    0x2748774CDF8EEB99, 0x34B0BCB5E19B48A8,
-    0x391C0CB3C5C95A63, 0x4ED8AA4AE3418ACB,
-    0x5B9CCA4F7763E373, 0x682E6FF3D6B2B8A3,
-    0x748F82EE5DEFB2FC, 0x78A5636F43172F60,
-    0x84C87814A1F0AB72, 0x8CC702081A6439EC,
-    0x90BEFFFA23631E28, 0xA4506CEBDE82BDE9,
-    0xBEF9A3F7B2C67915, 0xC67178F2E372532B,
-    0xCA273ECEEA26619C, 0xD186B8C721C0C207,
-    0xEADA7DD6CDE0EB1E, 0xF57D4F7FEE6ED178,
-    0x06F067AA72176FBA, 0x0A637DC5A2C898A6,
-    0x113F9804BEF90DAE, 0x1B710B35131C471B,
-    0x28DB77F523047D84, 0x32CAAB7B40C72493,
-    0x3C9EBE0A15C9BEBC, 0x431D67C49C100D4C,
-    0x4CC5D4BECB3E42B6, 0x597F299CFC657E2A,
-    0x5FCB6FAB3AD6FAEC, 0x6C44198C4A475817,
-    ]
-    return k[i]
-}
-
-// One 128 octet block, FIPS 180-4 6.4.2.
-fn compress(s: *mut Sha512, p: u64) {
-    var w: [u64; 80] = [0 as u64; 80]
+fn sha512_block(s: *mut Sha512, p: u64) {
+    var w: [u64; 80] = [0; 80]
     var i: usize = 0
     while i < 16 {
         var v: u64 = 0
@@ -162,16 +134,14 @@ fn compress(s: *mut Sha512, p: u64) {
         w[i] = v
         i = i + 1
     }
-    i = 16
     while i < 80 {
-        let a: u64 = w[i - 15]
-        let b: u64 = w[i - 2]
-        let s0: u64 = rotr(a, 1) ^ rotr(a, 8) ^ (a >> 7)
-        let s1: u64 = rotr(b, 19) ^ rotr(b, 61) ^ (b >> 6)
+        let s0: u64 = rotr64(w[i - 15], 1) ^ rotr64(w[i - 15], 8)
+        ^ (w[i - 15] >> 7)
+        let s1: u64 = rotr64(w[i - 2], 19) ^ rotr64(w[i - 2], 61)
+        ^ (w[i - 2] >> 6)
         w[i] = w[i - 16] +% s0 +% w[i - 7] +% s1
         i = i + 1
     }
-
     var a: u64 = (*s).h[0]
     var b: u64 = (*s).h[1]
     var c: u64 = (*s).h[2]
@@ -180,15 +150,14 @@ fn compress(s: *mut Sha512, p: u64) {
     var f: u64 = (*s).h[5]
     var g: u64 = (*s).h[6]
     var hh: u64 = (*s).h[7]
-
     i = 0
     while i < 80 {
-        let S1: u64 = rotr(e, 14) ^ rotr(e, 18) ^ rotr(e, 41)
+        let big1: u64 = rotr64(e, 14) ^ rotr64(e, 18) ^ rotr64(e, 41)
         let ch: u64 = (e & f) ^ ((~e) & g)
-        let t1: u64 = hh +% S1 +% ch +% kconst(i) +% w[i]
-        let S0: u64 = rotr(a, 28) ^ rotr(a, 34) ^ rotr(a, 39)
+        let t1: u64 = hh +% big1 +% ch +% (*s).k[i] +% w[i]
+        let big0: u64 = rotr64(a, 28) ^ rotr64(a, 34) ^ rotr64(a, 39)
         let maj: u64 = (a & b) ^ (a & c) ^ (b & c)
-        let t2: u64 = S0 +% maj
+        let t2: u64 = big0 +% maj
         hh = g
         g = f
         f = e
@@ -199,7 +168,6 @@ fn compress(s: *mut Sha512, p: u64) {
         a = t1 +% t2
         i = i + 1
     }
-
     (*s).h[0] = (*s).h[0] +% a
     (*s).h[1] = (*s).h[1] +% b
     (*s).h[2] = (*s).h[2] +% c
@@ -210,66 +178,64 @@ fn compress(s: *mut Sha512, p: u64) {
     (*s).h[7] = (*s).h[7] +% hh
 }
 
-// As often as you like. The buffer is only compressed once a further
-// octet is known to exist or `finish` says the message is over -- see the
-// note in `lib/crypto/blake2s.fi` about the last block. Here it does not
-// matter (SHA-512 has no final flag), but keeping the same shape keeps
-// the two files readable side by side.
-fn update(s: *mut Sha512, p: u64, n: usize) {
-    var i: usize = 0
-    while i < n {
-        (*s).buf[(*s).have] = octets.load_byte(p, i)
-        (*s).have = (*s).have + 1
-        if (*s).have == BLOCK {
-            compress(s, (&(*s).buf[0]) as u64)
-            (*s).have = 0
+fn sha512_update(s: *mut Sha512, p: u64, n: usize) {
+    (*s).total = (*s).total +% (n as u64)
+    var at: usize = 0
+    while at < n {
+        if (*s).used == 0 && n - at >= 128 {
+            sha512_block(s, p + at as u64)
+            at = at + 128
+        } else {
+            (*s).block[(*s).used] = octets.load_byte(p, at)
+            (*s).used = (*s).used + 1
+            at = at + 1
+            if (*s).used == 128 {
+                sha512_block(s, (&(*s).block[0]) as u64)
+                (*s).used = 0
+            }
         }
-        i = i + 1
-    }
-    let old: u64 = (*s).nlo
-    (*s).nlo = old +% (n as u64)
-    if (*s).nlo < old {
-        (*s).nhi = (*s).nhi +% 1
     }
 }
 
-// FIPS 180-4 5.1.2: a 1 bit, then zeros, then the length in BITS as a 128
-// bit big-endian number, so that the total is a multiple of 128 octets.
-fn finish(s: *mut Sha512, out: u64) {
-    let lo: u64 = ((*s).nlo << 3)
-    let hi: u64 = ((*s).nhi << 3) | ((*s).nlo >> 61)
-    var pad: [u8; 1] = [128 as u8]
-    update(s, (&pad[0]) as u64, 1)
-    var zero: [u8; 1] = [0 as u8]
-    while (*s).have != 112 {
-        update(s, (&zero[0]) as u64, 1)
+fn sha512_final(s: *mut Sha512, out: u64) {
+    let bits: u64 = (*s).total *% (8 as u64)
+    var pad: [u8; 144] = [0; 144]
+    pad[0] = 128 as u8
+    var padlen: usize = 1
+    while ((*s).used + padlen) % 128 != 112 {
+        padlen = padlen + 1
     }
-    var len: [u8; 16] = [0 as u8; 16]
+    // The high 64 bits of the 128 bit length -- see the head of the file.
     var i: usize = 0
     while i < 8 {
-        len[i] = ((hi >> ((7 - i) as u64 * 8)) & 255) as u8
-        len[8 + i] = ((lo >> ((7 - i) as u64 * 8)) & 255) as u8
+        pad[padlen + i] = 0 as u8
         i = i + 1
     }
-    update(s, (&len[0]) as u64, 16)
-    // `update` has moved the counter on by the padding; that is harmless,
-    // the state is finished.
     i = 0
     while i < 8 {
-        var j: usize = 0
-        while j < 8 {
-            octets.store_byte(out, i * 8 + j, (((*s).h[i] >> ((7 - j) as u64 * 8))
-                & 255) as u8)
-            j = j + 1
-        }
+        pad[padlen + 8 + i] = ((bits >> ((7 - i) as u64 * 8)) & 255 as u64)
+        as u8
+        i = i + 1
+    }
+    sha512_update(s, (&pad[0]) as u64, padlen + 16)
+    let want: usize = (*s).outlen
+    i = 0
+    while i < want {
+        let wi: usize = i / 8
+        let bi: u64 = (7 - (i % 8)) as u64
+        octets.store_byte(out, i, (((*s).h[wi] >> (bi * 8)) & 255 as u64) as u8)
         i = i + 1
     }
 }
 
-// The three calls above behind one name.
-fn hash(p: u64, n: usize, out: u64) {
+fn sha512(p: u64, n: usize, out: u64) {
     var s: Sha512 = sha512_new()
-    begin(&s)
-    update(&s, p, n)
-    finish(&s, out)
+    sha512_update(&s, p, n)
+    sha512_final(&s, out)
+}
+
+fn sha384(p: u64, n: usize, out: u64) {
+    var s: Sha512 = sha384_new()
+    sha512_update(&s, p, n)
+    sha512_final(&s, out)
 }

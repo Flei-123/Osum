@@ -105,7 +105,7 @@ ZEILEN=$(wc -l kernel/app/account.fi kernel/app/provider.fi kernel/app/knetz.fi 
     kernel/app/kspeicher.fi kernel/app/ksiegel.fi kernel/app/kjson.fi \
     kernel/app/kmsg.fi kernel/app/kgegen.fi kernel/app/prov_jarvis.fi \
     kernel/app/prov_xoffi.fi kernel/app/prov_own.fi kernel/app/prov_fleitec.fi \
-    kernel/app/kjwt.fi kernel/app/ked25519.fi kernel/app/kbig.fi kernel/app/ksha512.fi | tail -1 | awk '{print $1}')
+    kernel/app/kjwt.fi lib/crypto/ed25519.fi lib/crypto/big.fi lib/crypto/sha512.fi | tail -1 | awk '{print $1}')
 hin "Quelltext dieser Runde in kernel/app/: $ZEILEN Zeilen"
 
 # ======================================================================

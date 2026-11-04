@@ -15,10 +15,11 @@
 // WHAT IT DOES NOT: MIME multipart trees beyond "first text/plain part", attachments,
 // IMAP IDLE/UIDs, SMTP pipelining, SASL other than PLAIN.
 import libc.octets
+import net.b64
 
 
 export { Out, out_new, out_str, out_bytes, out_num, out_over,
-    b64_encode, b64_decode, qp_decode,
+    qp_decode,
     imap_tag, imap_login, imap_list, imap_select, imap_fetch_head, imap_fetch_body,
     imap_fetch_full, imap_logout, imap_store_seen,
     imap_response_end, imap_status, imap_exists_count, imap_list_name,
@@ -106,94 +107,6 @@ fn out_num(o: *mut Out, v: u64) {
 }
 
 // ----------------------------------------------------------------- base64
-
-static mut B64: [u8; 65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\0"
-
-fn b64_at(v: u64) -> u64 {
-    return B64[(v & 63) as usize] as u64
-}
-
-// Standard base64 with padding; returns the number of octets written.
-fn b64_encode(src: u64, n: u64, dst: u64) -> u64 {
-    var i: u64 = 0
-    var o: u64 = 0
-    while i + 3 <= n {
-        let v: u64 = (octets.ld8(src, i) << 16) | (octets.ld8(src, i + 1) << 8) | octets.ld8(src, i + 2)
-        octets.st8(dst, o, b64_at(v >> 18))
-        octets.st8(dst, o + 1, b64_at(v >> 12))
-        octets.st8(dst, o + 2, b64_at(v >> 6))
-        octets.st8(dst, o + 3, b64_at(v))
-        i = i + 3
-        o = o + 4
-    }
-    let rest: u64 = n - i
-    if rest == 1 {
-        let v1: u64 = octets.ld8(src, i) << 16
-        octets.st8(dst, o, b64_at(v1 >> 18))
-        octets.st8(dst, o + 1, b64_at(v1 >> 12))
-        octets.st8(dst, o + 2, 61)
-        octets.st8(dst, o + 3, 61)
-        o = o + 4
-    } else if rest == 2 {
-        let v2: u64 = (octets.ld8(src, i) << 16) | (octets.ld8(src, i + 1) << 8)
-        octets.st8(dst, o, b64_at(v2 >> 18))
-        octets.st8(dst, o + 1, b64_at(v2 >> 12))
-        octets.st8(dst, o + 2, b64_at(v2 >> 6))
-        octets.st8(dst, o + 3, 61)
-        o = o + 4
-    }
-    return o
-}
-
-fn b64_val(c: u64) -> u64 {
-    if c >= 65 && c <= 90 {
-        return c - 65
-    }
-    if c >= 97 && c <= 122 {
-        return c - 97 + 26
-    }
-    if c >= 48 && c <= 57 {
-        return c - 48 + 52
-    }
-    if c == 43 || c == 45 {
-        return 62
-    }
-    if c == 47 || c == 95 {
-        return 63
-    }
-    return BAD
-}
-
-// Decodes base64; CR, LF and blanks are skipped, padding ends the data. Returns the
-// number of octets written or BAD on a foreign character.
-fn b64_decode(src: u64, n: u64, dst: u64) -> u64 {
-    var acc: u64 = 0
-    var bits: u64 = 0
-    var o: u64 = 0
-    var i: u64 = 0
-    while i < n {
-        let c: u64 = octets.ld8(src, i)
-        i = i + 1
-        if c == 13 || c == 10 || c == 32 || c == 9 {
-            continue
-        }
-        if c == 61 {
-            break
-        }
-        let v: u64 = b64_val(c)
-        if v == BAD {
-            return BAD
-        }
-        acc = ((acc << 6) | v) & 0xFFFFFF
-        bits = bits + 6
-        if bits >= 8 {
-            bits = bits - 8
-            octets.st8(dst, o, (acc >> bits) & 255)
-            o = o + 1
-        }
-    }
-    return o
-}
 
 fn hexv(c: u64) -> u64 {
     if c >= 48 && c <= 57 {
@@ -602,7 +515,7 @@ fn smtp_auth_plain(o: *mut Out, user: u64, ul: u64, pass: u64, pl: u64) {
         k = k + 1
         i = i + 1
     }
-    let m: u64 = b64_encode((&raw[0]) as u64, k, (&enc[0]) as u64)
+    let m: u64 = b64.b64_encode((&raw[0]) as u64, k, (&enc[0]) as u64)
     out_str(o, "AUTH PLAIN ")
     out_bytes(o, (&enc[0]) as u64, m)
     crlf(o)
@@ -832,7 +745,7 @@ fn words_decode(src: u64, n: u64, dst: u64, cap: u64) -> u64 {
                 let tl: u64 = q3 - (q2 + 1)
                 if tl < 512 {
                     if enc == 98 {
-                        m = b64_decode(src + q2 + 1, tl, (&tmp[0]) as u64)
+                        m = b64.b64_decode(src + q2 + 1, tl, (&tmp[0]) as u64)
                     } else {
                         m = qp_decode(src + q2 + 1, tl, (&tmp[0]) as u64, true)
                     }
@@ -899,7 +812,7 @@ fn words_encode(o: *mut Out, s: u64, n: u64) {
         }
     }
     var enc: [u8; 420] = [0 as u8; 420]
-    let k: u64 = b64_encode(s, m, (&enc[0]) as u64)
+    let k: u64 = b64.b64_encode(s, m, (&enc[0]) as u64)
     out_str(o, "=?utf-8?B?")
     out_bytes(o, (&enc[0]) as u64, k)
     out_str(o, "?=")
@@ -916,7 +829,7 @@ fn body_decode(src: u64, n: u64, cte: u64, cl: u64, dst: u64) -> u64 {
         kind = 2
     }
     if kind == 1 {
-        let m: u64 = b64_decode(src, n, dst)
+        let m: u64 = b64.b64_decode(src, n, dst)
         if m == BAD {
             return 0
         }

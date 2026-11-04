@@ -99,8 +99,6 @@ mkdir -p "$TMPD/w" "$TMPD/fid" "$TMPD/ctl"
 
 # --- build (same as run.sh) ----------------------------------------------
 echo "== 0. build =="
-bash tools/anbfleitec/mkcopies.sh --check > "$TMPD/copies.txt" 2>&1 \
-    && ok "crypto module copies are current" || bad "stale copy: $(cat "$TMPD/copies.txt")"
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 if ! "$FIRNC" -c --profile=app -o "$TMPD/konto.o" kernel/app/account.fi > "$TMPD/cc.log" 2>&1; then
     bad "account.fi does not compile"; head -12 "$TMPD/cc.log" | sed 's/^/        /'

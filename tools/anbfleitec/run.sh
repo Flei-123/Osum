@@ -3,8 +3,7 @@
 # tools/anbfleitec/run.sh -- Fleitec-ID backend (device flow), MEASURED.
 #
 # WHAT THIS CHECKS
-#  0. The copies kernel/app/{kbig,ksha512,ked25519}.fi are current
-#     (tools/anbfleitec/mkcopies.sh --check).
+#  0. kjwt links lib/crypto/{ed25519,big,sha512} itself, no copies.
 #  1. Programs build (--profile=app, no undefined symbol).
 #  2. JWT: all cases of docs/fleitec-id/vectors_v2.json (group jwt_eddsa)
 #     run through kernel/app/kjwt.fi IN THE GUEST; every reason must equal
@@ -89,12 +88,13 @@ export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 
 # ======================================================================
-echo "== 0. copies of the crypto modules are current =="
+echo "== 0. the account program links the shared crypto modules =="
 # ======================================================================
-if bash tools/anbfleitec/mkcopies.sh --check > "$TMPD/copies.txt" 2>&1; then
-    ok "kbig/ksha512/ked25519 equal lib/crypto/{big,sha512,ed25519} (modulo names)"
+if [ ! -e kernel/app/kbig.fi ] && [ ! -e kernel/app/ksha512.fi ] && [ ! -e kernel/app/ked25519.fi ] \
+    && grep -q '^import crypto.ed25519' kernel/app/kjwt.fi; then
+    ok "kjwt imports lib/crypto/ed25519 directly, no kernel/app crypto copies"
 else
-    bad "stale copy: $(cat "$TMPD/copies.txt")"
+    bad "kernel/app crypto copies are back or kjwt does not import crypto.ed25519"
 fi
 
 # ======================================================================
