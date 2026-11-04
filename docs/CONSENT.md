@@ -23,5 +23,5 @@ Difference: elevate was a normal window of a root helper (can be covered, is cli
 ## Not done yet
 - Password/PIN field for admin consent (the compositor dialog has no text field).
 - Dim backdrop (secure desktop look).
-- Generic dialog API (`dialog.show_message/confirm/prompt/consent`, `menu.show`, `/bin/msgbox`, SDK template, gate): building blocks exist in `fuiscene` (`dialog_open/entry/choice`, `menu_open`) and `consent.ask`; the facade is not written.
+- Generic dialog API: done, see docs/ui/dialog-api.md (dialog.fi, menu.fi, /bin/msgbox, gate tools/dialog).
 - Store still starts through elevate (`needs_root`), then asks again on install.
