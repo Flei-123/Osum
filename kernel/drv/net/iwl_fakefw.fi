@@ -61,8 +61,9 @@ const S_Q4MSK: u64 = 0x24A0
 const S_TXOK: u64 = 0x24A8
 const S_TXBAD: u64 = 0x24B0
 const S_SILENT: u64 = 0x24F0
-const S_TXLAG: u64 = 0x24B8
-const TX_LAG_GROUP: u64 = 8
+const S_TXLAG: u64 = 0x2550
+const TX_LAG_GROUP: u64 = 16
+const S_TXUNACK: u64 = 0x2548
 const S_BIGCAL: u64 = 0x2508
 const S_PHYBYTES: u64 = 0x2510
 const S_PHYBAD: u64 = 0x2518
@@ -140,6 +141,7 @@ fn reset(ctx: u64) {
     octets.st64(ctx, S_TXRD, 0)
     octets.st64(ctx, S_CLOSED, 0)
     octets.st64(ctx, S_TXRD4, 0)
+    octets.st64(ctx, S_TXUNACK, 0)
     octets.st64(ctx, S_Q4CFG, 0)
     octets.st64(ctx, S_Q4MSK, 0)
     octets.st32(ctx, REG_CBBC_Q4, 0)
@@ -567,14 +569,26 @@ fn data_tfd(ctx: u64, ring: u64, idx: u64, bc_base: u64) {
     }
     if octets.ld64(ctx, S_TXOK) < TX_OK_LOG { iwl_faketx.say(iwl_faketx.W_TX_OK) }
     octets.st64(ctx, S_TXOK, octets.ld64(ctx, S_TXOK) + 1)
-    if octets.ld64(ctx, S_TXLAG) == 0 || ((idx + 1) % TX_LAG_GROUP) == 0 { put_tx_resp(ctx, (iwl_mvm_txq.DATA_QUEUE << 8) | idx) }
+    if octets.ld64(ctx, S_TXLAG) == 0 || ((idx + 1) % TX_LAG_GROUP) == 0 {
+        put_tx_resp(ctx, (iwl_mvm_txq.DATA_QUEUE << 8) | idx)
+        octets.st64(ctx, S_TXUNACK, 0)
+    } else {
+        octets.st64(ctx, S_TXUNACK, 0x100 | idx)
+    }
     if octets.ld64(ctx, S_AP) != 0 { ap_air(ctx, tb0) }
 }
 
 fn data_doorbell(ctx: u64, v: u64, bc_base: u64) {
     let wr: u64 = v & 0xFF
     var rd: u64 = octets.ld64(ctx, S_TXRD4)
-    if rd == wr { return }
+    if rd == wr {
+        let un: u64 = octets.ld64(ctx, S_TXUNACK)
+        if un != 0 {
+            put_tx_resp(ctx, (iwl_mvm_txq.DATA_QUEUE << 8) | (un & 0xFF))
+            octets.st64(ctx, S_TXUNACK, 0)
+        }
+        return
+    }
     let ring: u64 = octets.ld32(ctx, REG_CBBC_Q4) << 8
     if octets.ld64(ctx, S_ACCESS) == 0 || ring == 0 {
         viol(ctx)
