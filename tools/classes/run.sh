@@ -212,4 +212,8 @@ if [ -s "$D/k1.img" ]; then
     runvm usbmut "nic usbpoll" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
     num "mutated kernel: tray link state is down (counter-proof)" "$(grep -a '^netmeter: start' "$D/usbmut.klar" | grep -aoE 'link=[0-9]+' | tail -1 | cut -d= -f2)" eq 0
 fi
+for sub in block devices; do
+    echo "== sub-gate classes/$sub =="
+    bash "tools/classes/$sub.sh" || bad "classes/$sub.sh failed"
+done
 finish
