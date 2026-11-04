@@ -1,6 +1,6 @@
-# osboot — own boot loader (replaces Limine)
+# osboot — own boot loader (default since 04.11.2026, Limine = fallback)
 
-## Today (Limine)
+## Limine (fallback)
 - ESP root: `osum.mb`, `root.img`, `limine.conf` (+ `/boot/limine.conf`), `/EFI/BOOT/BOOTX64.EFI` (Limine), `limine-bios.sys`; BIOS stage via `limine bios-install` (tools/usbimg/build.sh).
 - Protocol: multiboot1. `osum.mb` is ELF32 (i386), LOAD at 0x100000 (text) and 0x800000 (data+bss, ~17.5 MiB), entry 0x100030, header flags 7 (aligned modules, memory info, video mode 32 bpp).
 - The kernel reads from the multiboot info: flags, cmdline (bit 2, boot words like `nmihard=`), modules (bit 3, `root.img`), memory map (bit 6), framebuffer (bit 12, offsets 88..115). RSDP: EBDA/0xE0000 scan, under UEFI scan of map types 3/4 (kernel/acpi/acpi.fi).
@@ -32,7 +32,10 @@
 - Menu only on Esc, F8 (SimpleTextInputEx scan codes 0x17/0x12), or any keystroke that reports Shift in `KeyShiftState`, read during the key window (keys pressed before the loader started are still buffered); or after a failed entry. `menu shown` keeps the old behaviour (timeout from the config).
 - Logo file `/osboot.logo` (`tools/bootloader/mklogo.py <png> <out> [--height 192]`): magic `OBL1`, u32 width, u32 height (little endian), then width*height RGBA bytes. The product name is not part of the loader; the image comes from `assets/marke/start-quelle.png`.
 - Entries: `/osboot.cfg` (full or options only). If it has no `entry`, the loader reads `/limine.conf` itself (multiboot1 entries, `default_entry`, `timeout`, `path`/`module_path`/`cmdline`), so `kernel/lib/ab.fi` and OTA keep flipping/arming slots in `limine.conf` unchanged.
-- Switch: `OSBOOT=1 bash tools/usbimg/build.sh <out>` puts osboot at `/EFI/BOOT/BOOTX64.EFI` (Limine stays at `/EFI/limine/BOOTX64.EFI` as fallback), writes `/osboot.cfg` (options only) + `/osboot.logo` to the ESP and `/boot/{BOOTX64.EFI,osboot.cfg,osboot.logo}` into the root; the installer copies `osboot.cfg`/`osboot.logo` when present. Default stays Limine.
+- Default (04.11.2026): `bash tools/usbimg/build.sh <out>` puts osboot at `/EFI/BOOT/BOOTX64.EFI`, Limine at `/EFI/limine/BOOTX64.EFI` (fallback), writes `/osboot.cfg` (options only) + `/osboot.logo` to the ESP and `/boot/{BOOTX64.EFI,osboot.cfg,osboot.logo,limine.efi,osboot-stage0.bin,osboot-stage2.bin}` into the root. `OSBOOT=0` builds the Limine-only image (BIOS: Limine stages, no osboot files).
+- Installer (`kernel/user/installer.fi`, `install.fi`): copies `/boot/BOOTX64.EFI` to `/EFI/BOOT/`, `osboot.cfg`/`osboot.logo` to the ESP root and `/boot/limine.efi` to `/EFI/limine/BOOTX64.EFI`.
+- OTA (`kernel/user/ota/otaloader.fi`): the overlay ships `/usr/share/osboot/{osboot.efi,osboot.cfg,osboot.logo}` (`tools/ota/overlay-extras.txt`). After a confirmed kernel promotion `ota system apply` / `confirm` calls `otaloader.switch_to_osboot`: keeps the old Limine loader as `/EFI/limine/BOOTX64.EFI` (if absent), writes logo, replaces `/EFI/BOOT/BOOTX64.EFI` (temp file, size check, rename), writes `osboot.cfg` last (marker for "osboot active"). `ota system loader osboot|limine|status` switches by hand; `limine` restores the kept loader and removes `osboot.cfg`/`osboot.logo`. A/B slots keep living in `limine.conf`.
+- Entries not read by osboot: `protocol: efi_chainload` (bootreg entry); the firmware boot menu registration stays a Limine-stick feature.
 - r2310 (logo seamless into the kernel) prepared: the framebuffer base/pitch/size are already in the multiboot info (flags bit 12) and the logo stays on screen until the kernel's first frame; the kernel can detect it by `osboot` in the loader name (not set yet) or a boot word and skip clearing the screen.
 ## Gate and bench
 - `tools/bootloader/run.sh` (STICK_IMG/KERNEL optional, else full stick build): login screen via osboot on OVMF q35+EHCI, i440fx+IDE, q35+NVMe; counter-proofs broken config (line number), missing kernel, missing config (message, return to firmware, no kernel line); `default` beyond the entry count boots entry 1; Limine control stick reaches login without osboot lines.
