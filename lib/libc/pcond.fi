@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: MIT
+import libc.locks
+import libc.pmutex
+import libc.pcancel
+import libc.errno
+
+export { wait, timedwait }
+
+const WORD_MASK: u64 = 0xFFFFFFFF
+
+fn block_until(cv: u64, seq: u64, timed: bool, deadline: u64) -> u64 {
+    pcancel.wait_begin(cv)
+    var result: u64 = 0
+    var going: bool = true
+    while going {
+        if pcancel.due() {
+            going = false
+        } else {
+            var slice: u64 = pcancel.SLICE_NS
+            if timed {
+                let left: u64 = locks.remaining(deadline)
+                if left == 0 {
+                    result = errno.E_TIMEDOUT
+                    going = false
+                } else {
+                    if left < slice {
+                        slice = left
+                    }
+                }
+            }
+            if going && !locks.timed_out(locks.futex_wait_ns(cv, seq, slice)) {
+                going = false
+            }
+        }
+    }
+    pcancel.wait_end()
+    return result
+}
+
+fn enter(cv: u64, m: u64) -> u64 {
+    pcancel.testcancel()
+    return pmutex.cond_enter(m)
+}
+
+fn leave(m: u64) {
+    pmutex.cond_leave(m)
+    pcancel.testcancel()
+}
+
+fn wait(cv: u64, m: u64) -> u64 {
+    let seq: u64 = locks.load(cv) & WORD_MASK
+    let r: u64 = enter(cv, m)
+    if r != 0 {
+        return r
+    }
+    block_until(cv, seq, false, 0)
+    leave(m)
+    return 0
+}
+
+fn timedwait(cv: u64, m: u64, deadline_ns: u64) -> u64 {
+    let seq: u64 = locks.load(cv) & WORD_MASK
+    let r: u64 = enter(cv, m)
+    if r != 0 {
+        return r
+    }
+    let result: u64 = block_until(cv, seq, true, deadline_ns)
+    leave(m)
+    return result
+}

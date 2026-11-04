@@ -17,7 +17,7 @@ PROGS="sh echo sleep thrprobe threxit thrwake"
 
 echo "== build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-mkdir -p "$TMPD/norwbin" "$TMPD/nobarbin" "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/noexitbin"
+mkdir -p "$TMPD/norwbin" "$TMPD/nobarbin" "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/nocancelbin" "$TMPD/noexitbin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else sed 's/^/        /' "$TMPD/b.txt" | head -20; bad "programs do not build"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; fi
 cp -r lib "$TMPD/badlib"
 sed -i 's/while tid != 0 {/while false {/' "$TMPD/badlib/libc/threads.fi"
@@ -27,6 +27,8 @@ cp -r lib "$TMPD/nocvlib"
 sed -i 's/^    futex_wait(cv, seq)$/    load(cv)/' "$TMPD/nocvlib/libc/locks.fi"
 cp -r lib "$TMPD/nosemlib"
 sed -i 's/locks.futex_wake(p, 1)/locks.load(p)/' "$TMPD/nosemlib/libc/semaphore.fi"
+cp -r lib "$TMPD/nocancellib"
+sed -i 's/^    locks.futex_wake(b + OFF_PENDING, locks.WAKE_ALL)/    locks.load(b + OFF_PENDING)/' "$TMPD/nocancellib/libc/pcancel.fi"
 cp -r lib "$TMPD/noexitlib"
 sed -i 's/kcall.sys1(kcall.SYS_EXIT_GROUP, result)/kcall.sys1(kcall.SYS_EXIT, result)/' "$TMPD/noexitlib/libc/threads.fi"
 cp -r lib "$TMPD/norwlib"
@@ -39,6 +41,8 @@ if FIRNLIB="$TMPD/norwlib" bash tools/sync/build.sh "$TMPD/norwbin" 0 thrwake > 
 if FIRNLIB="$TMPD/nobarlib" bash tools/sync/build.sh "$TMPD/nobarbin" 0 thrwake > "$TMPD/nbr.txt" 2>&1; then ok "counter-proof no-barrier-wake program builds"; else bad "counter-proof no-barrier-wake program does not build"; fi
 if cmp -s lib/libc/semaphore.fi "$TMPD/nosemlib/libc/semaphore.fi"; then bad "counter-proof no-semaphore-wake mutation did not apply"; fi
 if cmp -s lib/libc/threads.fi "$TMPD/noexitlib/libc/threads.fi"; then bad "counter-proof no-exit-group mutation did not apply"; fi
+if cmp -s lib/libc/pcancel.fi "$TMPD/nocancellib/libc/pcancel.fi"; then bad "counter-proof no-cancel-wake mutation did not apply"; fi
+if FIRNLIB="$TMPD/nocancellib" bash tools/sync/build.sh "$TMPD/nocancelbin" 0 thrprobe > "$TMPD/ncl.txt" 2>&1; then ok "counter-proof no-cancel-wake program builds"; else bad "counter-proof no-cancel-wake program does not build"; fi
 if FIRNLIB="$TMPD/nosemlib" bash tools/sync/build.sh "$TMPD/nosemlib_bin" 0 thrprobe > "$TMPD/ns.txt" 2>&1; then ok "counter-proof no-semaphore-wake program builds"; else bad "counter-proof no-semaphore-wake program does not build"; fi
 if FIRNLIB="$TMPD/noexitlib" bash tools/sync/build.sh "$TMPD/noexitbin" 0 threxit > "$TMPD/ne.txt" 2>&1; then ok "counter-proof no-exit-group program builds"; else bad "counter-proof no-exit-group program does not build"; fi
 if cmp -s lib/libc/locks.fi "$TMPD/nocvlib/libc/locks.fi"; then bad "counter-proof no-condvar-futex mutation did not apply"; fi
@@ -59,6 +63,8 @@ if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then o
     echo "thrprobe_nocv"
     echo "echo ==NOSEM=="
     echo "thrprobe_nosem"
+    echo "echo ==NOCANCEL=="
+    echo "thrprobe_nocancel"
     echo "echo ==EXITGOOD=="
     echo "threxit"
     echo "sleep 3"
@@ -83,6 +89,7 @@ for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 [ -f "$TMPD/badbin/thrprobe.elf" ] && A+=("/bin/thrprobe_bad=$TMPD/badbin/thrprobe.elf")
 [ -f "$TMPD/nocvbin/thrprobe.elf" ] && A+=("/bin/thrprobe_nocv=$TMPD/nocvbin/thrprobe.elf")
 [ -f "$TMPD/nosemlib_bin/thrprobe.elf" ] && A+=("/bin/thrprobe_nosem=$TMPD/nosemlib_bin/thrprobe.elf")
+[ -f "$TMPD/nocancelbin/thrprobe.elf" ] && A+=("/bin/thrprobe_nocancel=$TMPD/nocancelbin/thrprobe.elf")
 [ -f "$TMPD/noexitbin/threxit.elf" ] && A+=("/bin/threxit_bad=$TMPD/noexitbin/threxit.elf")
 [ -f "$TMPD/norwbin/thrwake.elf" ] && A+=("/bin/thrwake_norw=$TMPD/norwbin/thrwake.elf")
 [ -f "$TMPD/nobarbin/thrwake.elf" ] && A+=("/bin/thrwake_nobar=$TMPD/nobarbin/thrwake.elf")
@@ -111,7 +118,8 @@ good=$(sed -n '/==GOOD==/,/==BAD==/p' "$TMPD/out.klar")
 badout=$(sed -n '/==BAD==/,/==NOTLS==/p' "$TMPD/out.klar")
 notlsout=$(sed -n '/==NOTLS==/,/==NOCV==/p' "$TMPD/out.klar")
 nocvout=$(sed -n '/==NOCV==/,/==NOSEM==/p' "$TMPD/out.klar")
-nosemout=$(sed -n '/==NOSEM==/,/==EXITGOOD==/p' "$TMPD/out.klar")
+nosemout=$(sed -n '/==NOSEM==/,/==NOCANCEL==/p' "$TMPD/out.klar")
+nocancelout=$(sed -n '/==NOCANCEL==/,/==EXITGOOD==/p' "$TMPD/out.klar")
 exitgood=$(sed -n '/==EXITGOOD==/,/==EXITBAD==/p' "$TMPD/out.klar")
 exitbad=$(sed -n '/==EXITBAD==/,/==WAKEGOOD==/p' "$TMPD/out.klar")
 wakegood=$(sed -n '/==WAKEGOOD==/,/==WAKENORW==/p' "$TMPD/out.klar")
@@ -146,6 +154,11 @@ if echo "$nosemout" | grep -aq 'thrprobe failed=0'; then
     bad "guest: counter-proof (semaphore post without wake) still passed"
 else
     echo "$nosemout" | grep -aq 'thrprobe done' && ok "guest: counter-proof (semaphore post without wake) is caught" || bad "guest: counter-proof no-semaphore-wake run incomplete"
+fi
+if echo "$nocancelout" | grep -aq 'thrprobe failed=0'; then
+    bad "guest: counter-proof (cancel without wake) still passed"
+else
+    echo "$nocancelout" | grep -aq 'thrprobe done' && ok "guest: counter-proof (cancel without wake) is caught" || bad "guest: counter-proof no-cancel-wake run incomplete"
 fi
 if echo "$exitgood" | grep -aq 'threxit dtor' && ! echo "$exitgood" | grep -aq 'threxit late'; then
     ok "guest: main-thread thread_exit runs destructors and exit_group kills the sibling"

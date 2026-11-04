@@ -3,12 +3,20 @@ import libc.threads
 import libc.locks
 import libc.semaphore
 import libc.once
+import libc.pmutex
+import libc.pcond
+import libc.pcancel
+import libc.pattr
 import libc.rwlock
 import libc.barrier
 import libc.errno
 import libc.octets
 
-export { BARRIER_SERIAL_THREAD, KEYS_MAX, create, join, detach, self, equal, exit, yield_now,
+export { BARRIER_SERIAL_THREAD, CANCELED, KEYS_MAX, MUTEX_NORMAL, MUTEX_RECURSIVE, MUTEX_ERRORCHECK, CREATE_JOINABLE, CREATE_DETACHED, CANCEL_ENABLE, CANCEL_DISABLE, CANCEL_DEFERRED, CANCEL_ASYNCHRONOUS,
+    create, create_attr, join, detach, self, equal, exit, yield_now, sleep_ns,
+    attr_init, attr_destroy, attr_setstacksize, attr_getstacksize, attr_setdetachstate, attr_getdetachstate,
+    mutexattr_init, mutexattr_destroy, mutexattr_settype, mutexattr_gettype, mutex_init_attr,
+    cancel, setcancelstate, setcanceltype, testcancel, cleanup_push, cleanup_pop,
     mutex_init, mutex_destroy, mutex_lock, mutex_trylock, mutex_timedlock, mutex_unlock,
     cond_init, cond_destroy, cond_wait, cond_timedwait, cond_signal, cond_broadcast,
     key_create, key_delete, setspecific, getspecific, once_call,
@@ -18,6 +26,16 @@ export { BARRIER_SERIAL_THREAD, KEYS_MAX, create, join, detach, self, equal, exi
 
 const BARRIER_SERIAL_THREAD: u64 = 0xFFFFFFFFFFFFFFFF
 const KEYS_MAX: u64 = 56
+const CANCELED: u64 = 0xFFFFFFFFFFFFFFFF
+const MUTEX_NORMAL: u64 = 0
+const MUTEX_RECURSIVE: u64 = 1
+const MUTEX_ERRORCHECK: u64 = 2
+const CREATE_JOINABLE: u64 = 0
+const CREATE_DETACHED: u64 = 1
+const CANCEL_ENABLE: u64 = 0
+const CANCEL_DISABLE: u64 = 1
+const CANCEL_DEFERRED: u64 = 0
+const CANCEL_ASYNCHRONOUS: u64 = 1
 
 fn store_out(out: u64, value: u64) {
     if out != 0 {
@@ -34,14 +52,37 @@ fn create(out: u64, body: fn(u64) -> u64, arg: u64) -> u64 {
     return 0
 }
 
+fn create_attr(out: u64, attr: u64, body: fn(u64) -> u64, arg: u64) -> u64 {
+    var stack: u64 = threads.STACK_DEFAULT
+    var detached: bool = false
+    if attr != 0 {
+        var state: u64 = 0
+        pattr.thread_getstacksize(attr, (&stack) as u64)
+        pattr.thread_getdetachstate(attr, (&state) as u64)
+        detached = state == pattr.CREATE_DETACHED
+    }
+    let handle: u64 = threads.spawn_sized(body, arg, stack)
+    if handle == 0 {
+        return errno.E_AGAIN
+    }
+    store_out(out, handle)
+    if detached {
+        threads.detach(handle)
+    }
+    return 0
+}
+
 fn join(t: u64, retval_out: u64) -> u64 {
-    if t == 0 || t == threads.current() {
+    if t == 0 {
         return errno.E_INVAL
+    }
+    if t == threads.current() {
+        return errno.E_DEADLK
     }
     if threads.is_detached(t) {
         return errno.E_INVAL
     }
-    store_out(retval_out, threads.join(t))
+    store_out(retval_out, pcancel.join(t))
     return 0
 }
 
@@ -64,7 +105,76 @@ fn equal(a: u64, b: u64) -> bool {
 }
 
 fn exit(retval: u64) {
+    pcancel.run_cleanups()
     threads.thread_exit(retval)
+}
+
+fn sleep_ns(ns: u64) -> u64 {
+    return pcancel.sleep_ns(ns)
+}
+
+fn attr_init(a: u64) -> u64 {
+    return pattr.thread_init(a)
+}
+
+fn attr_destroy(a: u64) -> u64 {
+    return pattr.thread_destroy(a)
+}
+
+fn attr_setstacksize(a: u64, bytes: u64) -> u64 {
+    return pattr.thread_setstacksize(a, bytes)
+}
+
+fn attr_getstacksize(a: u64, out: u64) -> u64 {
+    return pattr.thread_getstacksize(a, out)
+}
+
+fn attr_setdetachstate(a: u64, state: u64) -> u64 {
+    return pattr.thread_setdetachstate(a, state)
+}
+
+fn attr_getdetachstate(a: u64, out: u64) -> u64 {
+    return pattr.thread_getdetachstate(a, out)
+}
+
+fn mutexattr_init(a: u64) -> u64 {
+    return pattr.mutex_init(a)
+}
+
+fn mutexattr_destroy(a: u64) -> u64 {
+    return pattr.mutex_destroy(a)
+}
+
+fn mutexattr_settype(a: u64, kind: u64) -> u64 {
+    return pattr.mutex_settype(a, kind)
+}
+
+fn mutexattr_gettype(a: u64, out: u64) -> u64 {
+    return pattr.mutex_gettype(a, out)
+}
+
+fn cancel(t: u64) -> u64 {
+    return pcancel.request(t)
+}
+
+fn setcancelstate(state: u64, old_out: u64) -> u64 {
+    return pcancel.setstate(state, old_out)
+}
+
+fn setcanceltype(kind: u64, old_out: u64) -> u64 {
+    return pcancel.settype(kind, old_out)
+}
+
+fn testcancel() {
+    pcancel.testcancel()
+}
+
+fn cleanup_push(body: fn(u64) -> u64, arg: u64) -> u64 {
+    return pcancel.cleanup_push(body as u64, arg)
+}
+
+fn cleanup_pop(run: bool) -> u64 {
+    return pcancel.cleanup_pop(run)
 }
 
 fn yield_now() -> u64 {
@@ -73,39 +183,36 @@ fn yield_now() -> u64 {
 }
 
 fn mutex_init(m: u64) -> u64 {
-    locks.store(m, 0)
-    return 0
+    return pmutex.init(m, pmutex.KIND_NORMAL)
+}
+
+fn mutex_init_attr(m: u64, attr: u64) -> u64 {
+    if attr == 0 {
+        return pmutex.init(m, pmutex.KIND_NORMAL)
+    }
+    var kind: u64 = 0
+    pattr.mutex_gettype(attr, (&kind) as u64)
+    return pmutex.init(m, kind)
 }
 
 fn mutex_destroy(m: u64) -> u64 {
-    if locks.load(m) != 0 {
-        return errno.E_BUSY
-    }
-    return 0
+    return pmutex.destroy(m)
 }
 
 fn mutex_lock(m: u64) -> u64 {
-    locks.mutex_take(m)
-    return 0
+    return pmutex.lock(m)
 }
 
 fn mutex_trylock(m: u64) -> u64 {
-    if locks.mutex_try(m) {
-        return 0
-    }
-    return errno.E_BUSY
+    return pmutex.trylock(m)
 }
 
 fn mutex_timedlock(m: u64, deadline_ns: u64) -> u64 {
-    return locks.mutex_timedlock(m, locks.remaining(deadline_ns))
+    return pmutex.timedlock(m, locks.remaining(deadline_ns))
 }
 
 fn mutex_unlock(m: u64) -> u64 {
-    if locks.load(m) == 0 {
-        return errno.E_PERM
-    }
-    locks.mutex_give(m)
-    return 0
+    return pmutex.unlock(m)
 }
 
 fn cond_init(cv: u64) -> u64 {
@@ -118,12 +225,11 @@ fn cond_destroy(cv: u64) -> u64 {
 }
 
 fn cond_wait(cv: u64, m: u64) -> u64 {
-    locks.cond_wait(cv, m)
-    return 0
+    return pcond.wait(cv, m)
 }
 
 fn cond_timedwait(cv: u64, m: u64, deadline_ns: u64) -> u64 {
-    return locks.cond_timedwait(cv, m, locks.remaining(deadline_ns))
+    return pcond.timedwait(cv, m, deadline_ns)
 }
 
 fn cond_signal(cv: u64) -> u64 {
@@ -226,15 +332,16 @@ fn barrier_init(b: u64, threshold: u64) -> u64 {
 }
 
 fn barrier_destroy(b: u64) -> u64 {
-    if barrier.arrived(b) != 0 {
-        return errno.E_BUSY
-    }
-    return 0
+    return barrier.destroy(b)
 }
 
 fn barrier_wait(b: u64) -> u64 {
-    if barrier.wait(b) == barrier.SERIAL {
+    let r: u64 = barrier.wait(b)
+    if r == barrier.SERIAL {
         return BARRIER_SERIAL_THREAD
+    }
+    if r == barrier.DESTROYED {
+        return errno.E_INVAL
     }
     return 0
 }

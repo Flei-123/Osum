@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: MIT
+import libc.locks
+import libc.threads
+import libc.errno
+import libc.octets
+
+export { STATE_ENABLE, STATE_DISABLE, TYPE_DEFERRED, TYPE_ASYNC, CANCELED, SLICE_NS, CLEANUP_MAX, request, setstate, settype, testcancel, due, act, wait_begin, wait_end, sleep_ns, join, cleanup_push, cleanup_pop, cleanup_depth, run_cleanups, pending }
+
+const OFF_PENDING: u64 = 0
+const OFF_DISABLED: u64 = 8
+const OFF_WAITING: u64 = 16
+const OFF_CLEANUPS: u64 = 24
+const OFF_ENTRIES: u64 = 32
+const ENTRY_BYTES: u64 = 16
+const CLEANUP_MAX: u64 = 8
+const STATE_ENABLE: u64 = 0
+const STATE_DISABLE: u64 = 1
+const TYPE_DEFERRED: u64 = 0
+const TYPE_ASYNC: u64 = 1
+const CANCELED: u64 = 0xFFFFFFFFFFFFFFFF
+const SLICE_NS: u64 = 20000000
+
+fn mine() -> u64 {
+    return threads.cancel_block(threads.current())
+}
+
+fn pending() -> bool {
+    return locks.load(mine() + OFF_PENDING) != 0
+}
+
+fn due_at(b: u64) -> bool {
+    return locks.load(b + OFF_PENDING) != 0 && locks.load(b + OFF_DISABLED) == 0
+}
+
+fn due() -> bool {
+    return due_at(mine())
+}
+
+fn act() {
+    run_cleanups()
+    threads.thread_exit(CANCELED)
+}
+
+fn testcancel() {
+    if due() {
+        act()
+    }
+}
+
+fn request(t: u64) -> u64 {
+    if t == 0 {
+        return errno.E_SRCH
+    }
+    if threads.is_done(t) {
+        return 0
+    }
+    let b: u64 = threads.cancel_block(t)
+    locks.store(b + OFF_PENDING, 1)
+    let waiting: u64 = locks.load(b + OFF_WAITING)
+    if waiting != 0 {
+        locks.futex_wake(waiting, locks.WAKE_ALL)
+    }
+    locks.futex_wake(b + OFF_PENDING, locks.WAKE_ALL)
+    return 0
+}
+
+fn setstate(state: u64, old_out: u64) -> u64 {
+    if state > STATE_DISABLE {
+        return errno.E_INVAL
+    }
+    let b: u64 = mine()
+    if old_out != 0 {
+        octets.st64(old_out, 0, locks.load(b + OFF_DISABLED))
+    }
+    locks.store(b + OFF_DISABLED, state)
+    return 0
+}
+
+fn settype(kind: u64, old_out: u64) -> u64 {
+    if kind != TYPE_DEFERRED {
+        return errno.E_INVAL
+    }
+    if old_out != 0 {
+        octets.st64(old_out, 0, TYPE_DEFERRED)
+    }
+    return 0
+}
+
+fn wait_begin(addr: u64) {
+    locks.store(mine() + OFF_WAITING, addr)
+}
+
+fn wait_end() {
+    locks.store(mine() + OFF_WAITING, 0)
+}
+
+fn sleep_ns(ns: u64) -> u64 {
+    let b: u64 = mine()
+    let deadline: u64 = locks.deadline_after(ns)
+    var idle: u64 = 0
+    while true {
+        if due_at(b) {
+            act()
+        }
+        let left: u64 = locks.remaining(deadline)
+        if left == 0 {
+            return 0
+        }
+        if locks.load(b + OFF_PENDING) != 0 || locks.load(b + OFF_DISABLED) != 0 {
+            locks.futex_wait_ns((&idle) as u64, 0, left)
+        } else {
+            locks.futex_wait_ns(b + OFF_PENDING, 0, left)
+        }
+    }
+    return 0
+}
+
+fn join(t: u64) -> u64 {
+    let b: u64 = mine()
+    locks.store(b + OFF_WAITING, t)
+    var tid: u64 = threads.thread_id(t)
+    while tid != 0 {
+        if due_at(b) {
+            locks.store(b + OFF_WAITING, 0)
+            act()
+        }
+        threads.wait_tid_ns(t, tid, SLICE_NS)
+        tid = threads.thread_id(t)
+    }
+    locks.store(b + OFF_WAITING, 0)
+    return threads.join(t)
+}
+
+fn cleanup_depth() -> u64 {
+    return locks.load(mine() + OFF_CLEANUPS)
+}
+
+fn cleanup_push(body: u64, arg: u64) -> u64 {
+    let b: u64 = mine()
+    let n: u64 = locks.load(b + OFF_CLEANUPS)
+    if n >= CLEANUP_MAX {
+        return errno.E_NOMEM
+    }
+    octets.st64(b + OFF_ENTRIES + n * ENTRY_BYTES, 0, body)
+    octets.st64(b + OFF_ENTRIES + n * ENTRY_BYTES, 8, arg)
+    locks.store(b + OFF_CLEANUPS, n + 1)
+    return 0
+}
+
+fn cleanup_pop(run: bool) -> u64 {
+    let b: u64 = mine()
+    let n: u64 = locks.load(b + OFF_CLEANUPS)
+    if n == 0 {
+        return errno.E_INVAL
+    }
+    locks.store(b + OFF_CLEANUPS, n - 1)
+    if run {
+        let at: u64 = b + OFF_ENTRIES + (n - 1) * ENTRY_BYTES
+        let handler: fn(u64) -> u64 = octets.ld64(at, 0) as fn(u64) -> u64
+        handler(octets.ld64(at, 8))
+    }
+    return 0
+}
+
+fn run_cleanups() {
+    while cleanup_depth() != 0 {
+        cleanup_pop(true)
+    }
+}

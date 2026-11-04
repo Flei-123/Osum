@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
 import libc.locks
+import libc.threads
 import libc.errno
 
-export { BYTES, SERIAL, init, wait, count, arrived, generation }
+export { BYTES, SERIAL, DESTROYED, init, wait, destroy, count, arrived, busy, generation }
 
-const BYTES: u64 = 24
+const BYTES: u64 = 32
 const SERIAL: u64 = 1
+const DESTROYED: u64 = 2
 const OFF_COUNT: u64 = 0
 const OFF_ARRIVED: u64 = 8
 const OFF_GEN: u64 = 16
+const OFF_BUSY: u64 = 24
 const WORD_MASK: u64 = 0xFFFFFFFF
+const DRAIN_LIMIT: u64 = 2000
 
 fn init(p: u64, threshold: u64) -> u64 {
     if threshold == 0 {
@@ -18,6 +22,7 @@ fn init(p: u64, threshold: u64) -> u64 {
     locks.store(p + OFF_COUNT, threshold)
     locks.store(p + OFF_ARRIVED, 0)
     locks.store(p + OFF_GEN, 0)
+    locks.store(p + OFF_BUSY, 0)
     return 0
 }
 
@@ -29,21 +34,51 @@ fn arrived(p: u64) -> u64 {
     return locks.load(p + OFF_ARRIVED)
 }
 
+fn busy(p: u64) -> u64 {
+    return locks.load(p + OFF_BUSY)
+}
+
 fn generation(p: u64) -> u64 {
     return locks.load(p + OFF_GEN) & WORD_MASK
 }
 
+fn leave(p: u64) {
+    locks.fetch_add(p + OFF_BUSY, 0 -% 1)
+}
+
 fn wait(p: u64) -> u64 {
+    if locks.load(p + OFF_COUNT) == 0 {
+        return DESTROYED
+    }
+    locks.fetch_add(p + OFF_BUSY, 1)
     let gen: u64 = generation(p)
     let place: u64 = locks.fetch_add(p + OFF_ARRIVED, 1) + 1
     if place >= locks.load(p + OFF_COUNT) {
         locks.store(p + OFF_ARRIVED, 0)
         locks.fetch_add(p + OFF_GEN, 1)
         locks.futex_wake(p + OFF_GEN, locks.WAKE_ALL)
+        leave(p)
         return SERIAL
     }
     while generation(p) == gen {
         locks.futex_wait(p + OFF_GEN, gen)
     }
+    leave(p)
+    return 0
+}
+
+fn destroy(p: u64) -> u64 {
+    if locks.load(p + OFF_ARRIVED) != 0 {
+        return errno.E_BUSY
+    }
+    var spins: u64 = 0
+    while locks.load(p + OFF_BUSY) != 0 {
+        if spins >= DRAIN_LIMIT {
+            return errno.E_BUSY
+        }
+        threads.yield_now()
+        spins = spins + 1
+    }
+    locks.store(p + OFF_COUNT, 0)
     return 0
 }

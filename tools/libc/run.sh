@@ -41,7 +41,7 @@ done
 
 echo "== 3. threads: clone stub, join, mutex exclusion, lost updates without it =="
 build_run "$PWD/lib" "$D/thr" tools/libc/threads_suite.fi; rc=$?
-[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try, futex timeouts, cond_timedwait, mutex_timedlock, semaphore (blocking, timed, wake latency, producer/consumer, exclusion), once, rwlock (sharing, exclusion, writer preference, timed, timeout wakes readers), barrier (rounds, serial thread, blocking), pthread shim" || bad "threads suite rc=$rc"
+[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try, futex timeouts, cond_timedwait, mutex_timedlock, semaphore (blocking, timed, wake latency, producer/consumer, exclusion), once, rwlock (sharing, exclusion, writer preference, timed, timeout wakes readers), barrier (rounds, serial thread, blocking), pthread shim, attributes, recursive and errorcheck mutexes, E_DEADLK, try-read with waiting writer, barrier destroy, deferred cancel with cleanup handlers" || bad "threads suite rc=$rc"
 runs=0
 for i in 1 2 3 4 5 6 7 8; do
     "$D/thr" > /dev/null 2>&1 || runs=$((runs+1))
@@ -81,7 +81,28 @@ for edit in \
     "pthread.fi|s/if locks.load(m) == 0 {/if false {/" \
     "pthread.fi|s/if threads.is_detached(t) {/if false {/" \
     "pthread.fi|s/if threads.key_delete(key) != 0 {/if false {/" \
-    "pthread.fi|s/    threads.thread_exit(retval)/    threads.yield_now()/"; do
+    "pthread.fi|s/    threads.thread_exit(retval)/    threads.yield_now()/" \
+    "pthread.fi|s/return errno.E_DEADLK/return errno.E_INVAL/" \
+    "pthread.fi|s/let handle: u64 = threads.spawn_sized(body, arg, stack)/let handle: u64 = threads.spawn_sized(body, arg, threads.STACK_MIN)/" \
+    "pthread.fi|s/^    if detached {/    if false {/" \
+    "pattr.fi|s/if bytes < threads.STACK_MIN || bytes > STACK_LIMIT {/if false {/" \
+    "pattr.fi|s/if state != CREATE_JOINABLE \&\& state != CREATE_DETACHED {/if false {/" \
+    "pmutex.fi|s/return errno.E_DEADLK/return 0/" \
+    "pmutex.fi|s/locks.store(m + OFF_COUNT, depth + 1)/locks.load(m)/" \
+    "pmutex.fi|s/if owner_of(m) != threads.self_id() {/if false {/" \
+    "pmutex.fi|s/^        claim(m, threads.self_id())/        locks.load(m)/" \
+    "pmutex.fi|s/if depth >= COUNT_MAX {/if depth >= 1 {/" \
+    "rwlock.fi|s/if try_read_blocked(v) {/if read_blocked(v) {/" \
+    "barrier.fi|s/^    locks.fetch_add(p + OFF_BUSY, 0 -% 1)/    locks.load(p + OFF_BUSY)/" \
+    "barrier.fi|s/^    locks.store(p + OFF_COUNT, 0)\$/    locks.load(p + OFF_COUNT)/" \
+    "barrier.fi|s/if locks.load(p + OFF_COUNT) == 0 {/if false {/" \
+    "pcancel.fi|s/locks.store(b + OFF_PENDING, 1)/locks.load(b + OFF_PENDING)/" \
+    "pcancel.fi|s/^    locks.futex_wake(b + OFF_PENDING, locks.WAKE_ALL)/    locks.load(b + OFF_PENDING)/" \
+    "pcancel.fi|s/return locks.load(b + OFF_PENDING) != 0 \&\& locks.load(b + OFF_DISABLED) == 0/return locks.load(b + OFF_PENDING) != 0/" \
+    "pcancel.fi|s/^    run_cleanups()\$/    cleanup_depth()/" \
+    "pcancel.fi|s/if state > STATE_DISABLE {/if false {/" \
+    "pcond.fi|s/if pcancel.due() {/if false {/" \
+    "pcond.fi|s/^    pcancel.testcancel()\$/    pcancel.pending()/"; do
     mod=${edit%%|*}
     expr=${edit#*|}
     n=$((n+1))

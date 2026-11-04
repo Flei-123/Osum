@@ -1,0 +1,163 @@
+// SPDX-License-Identifier: MIT
+import libc.locks
+import libc.threads
+import libc.errno
+
+export { BYTES, KIND_NORMAL, KIND_RECURSIVE, KIND_ERRORCHECK, COUNT_MAX, init, lock, trylock, timedlock, unlock, destroy, kind_of, owner_of, depth_of, cond_enter, cond_leave }
+
+const BYTES: u64 = 32
+const OFF_OWNER: u64 = 8
+const OFF_COUNT: u64 = 16
+const OFF_KIND: u64 = 24
+const KIND_NORMAL: u64 = 0
+const KIND_RECURSIVE: u64 = 1
+const KIND_ERRORCHECK: u64 = 2
+const COUNT_MAX: u64 = 0xFFFFFFFF
+
+fn init(m: u64, kind: u64) -> u64 {
+    if kind > KIND_ERRORCHECK {
+        return errno.E_INVAL
+    }
+    locks.store(m, 0)
+    locks.store(m + OFF_OWNER, 0)
+    locks.store(m + OFF_COUNT, 0)
+    locks.store(m + OFF_KIND, kind)
+    return 0
+}
+
+fn kind_of(m: u64) -> u64 {
+    return locks.load(m + OFF_KIND)
+}
+
+fn owner_of(m: u64) -> u64 {
+    return locks.load(m + OFF_OWNER)
+}
+
+fn depth_of(m: u64) -> u64 {
+    return locks.load(m + OFF_COUNT)
+}
+
+fn claim(m: u64, me: u64) {
+    locks.store(m + OFF_OWNER, me)
+    locks.store(m + OFF_COUNT, 1)
+}
+
+fn reenter(m: u64, kind: u64) -> u64 {
+    if kind == KIND_ERRORCHECK {
+        return errno.E_DEADLK
+    }
+    let depth: u64 = locks.load(m + OFF_COUNT)
+    if depth >= COUNT_MAX {
+        return errno.E_AGAIN
+    }
+    locks.store(m + OFF_COUNT, depth + 1)
+    return 0
+}
+
+fn lock(m: u64) -> u64 {
+    let kind: u64 = kind_of(m)
+    if kind == KIND_NORMAL {
+        locks.mutex_take(m)
+        return 0
+    }
+    let me: u64 = threads.self_id()
+    if owner_of(m) == me {
+        return reenter(m, kind)
+    }
+    locks.mutex_take(m)
+    claim(m, me)
+    return 0
+}
+
+fn trylock(m: u64) -> u64 {
+    let kind: u64 = kind_of(m)
+    if kind == KIND_NORMAL {
+        if locks.mutex_try(m) {
+            return 0
+        }
+        return errno.E_BUSY
+    }
+    let me: u64 = threads.self_id()
+    if owner_of(m) == me {
+        if kind == KIND_ERRORCHECK {
+            return errno.E_BUSY
+        }
+        return reenter(m, kind)
+    }
+    if locks.mutex_try(m) {
+        claim(m, me)
+        return 0
+    }
+    return errno.E_BUSY
+}
+
+fn timedlock(m: u64, timeout_ns: u64) -> u64 {
+    let kind: u64 = kind_of(m)
+    if kind == KIND_NORMAL {
+        return locks.mutex_timedlock(m, timeout_ns)
+    }
+    let me: u64 = threads.self_id()
+    if owner_of(m) == me {
+        return reenter(m, kind)
+    }
+    let r: u64 = locks.mutex_timedlock(m, timeout_ns)
+    if r == 0 {
+        claim(m, me)
+    }
+    return r
+}
+
+fn unlock(m: u64) -> u64 {
+    let kind: u64 = kind_of(m)
+    if kind == KIND_NORMAL {
+        if locks.load(m) == 0 {
+            return errno.E_PERM
+        }
+        locks.mutex_give(m)
+        return 0
+    }
+    if owner_of(m) != threads.self_id() {
+        return errno.E_PERM
+    }
+    let depth: u64 = locks.load(m + OFF_COUNT)
+    if depth > 1 {
+        locks.store(m + OFF_COUNT, depth - 1)
+        return 0
+    }
+    locks.store(m + OFF_OWNER, 0)
+    locks.store(m + OFF_COUNT, 0)
+    locks.mutex_give(m)
+    return 0
+}
+
+fn destroy(m: u64) -> u64 {
+    if locks.load(m) != 0 {
+        return errno.E_BUSY
+    }
+    return 0
+}
+
+fn cond_enter(m: u64) -> u64 {
+    let kind: u64 = kind_of(m)
+    if kind == KIND_NORMAL {
+        locks.mutex_give(m)
+        return 0
+    }
+    if owner_of(m) != threads.self_id() {
+        return errno.E_PERM
+    }
+    if locks.load(m + OFF_COUNT) != 1 {
+        return errno.E_INVAL
+    }
+    locks.store(m + OFF_OWNER, 0)
+    locks.store(m + OFF_COUNT, 0)
+    locks.mutex_give(m)
+    return 0
+}
+
+fn cond_leave(m: u64) {
+    locks.mutex_take(m)
+    if kind_of(m) != KIND_NORMAL {
+        claim(m, threads.self_id())
+    }
+}

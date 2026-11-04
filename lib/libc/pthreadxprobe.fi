@@ -1,0 +1,612 @@
+// SPDX-License-Identifier: MIT
+import libc.pthread
+import libc.threads
+import libc.locks
+import libc.probecount
+import libc.errno
+import libc.rwlock
+import libc.barrier
+
+export { run_all }
+
+const MS: u64 = 1000000
+const DEEP_LEVELS: u64 = 40
+const DEEP_STACK: u64 = 4194304
+
+static mut x_mutex: [u64; 4] = [0; 4]
+static mut x_cond: u64 = 0
+static mut x_rw: u64 = 0
+static mut x_barrier: [u64; 4] = [0; 4]
+static mut x_flag: u64 = 0
+static mut x_stop: u64 = 0
+static mut x_after: u64 = 0
+static mut x_done: u64 = 0
+static mut x_cleaned: u64 = 0
+static mut x_order: u64 = 0
+static mut x_ready: u64 = 0
+static mut x_target: u64 = 0
+
+fn check(ok: bool) {
+    probecount.record(ok)
+}
+
+fn pause_ms(ms: u64) {
+    threads.sleep_ms(ms)
+}
+
+fn mutex_addr() -> u64 {
+    return (&x_mutex[0]) as u64
+}
+
+fn cond_addr() -> u64 {
+    return (&x_cond) as u64
+}
+
+fn reset_flags() {
+    locks.store((&x_flag) as u64, 0)
+    locks.store((&x_stop) as u64, 0)
+    locks.store((&x_after) as u64, 0)
+    locks.store((&x_done) as u64, 0)
+    locks.store((&x_cleaned) as u64, 0)
+    locks.store((&x_order) as u64, 0)
+    locks.store((&x_ready) as u64, 0)
+}
+
+fn deep(level: u64) -> u64 {
+    var buf: [u64; 4096] = [0; 4096]
+    buf[(level % 4096) as usize] = level
+    if level == 0 {
+        return 0
+    }
+    return buf[(level % 4096) as usize] + deep(level - 1)
+}
+
+fn deep_body(arg: u64) -> u64 {
+    return deep(arg)
+}
+
+fn flag_body(arg: u64) -> u64 {
+    pause_ms(arg)
+    locks.store((&x_flag) as u64, 1)
+    return 0
+}
+
+fn run_attrs() -> bool {
+    var ok: bool = true
+    var attr: [u64; 2] = [0; 2]
+    let a: u64 = (&attr[0]) as u64
+    var v: u64 = 99
+    if pthread.attr_init(a) != 0 {
+        return false
+    }
+    if pthread.attr_getstacksize(a, (&v) as u64) != 0 || v != threads.STACK_DEFAULT {
+        ok = false
+    }
+    if pthread.attr_getdetachstate(a, (&v) as u64) != 0 || v != pthread.CREATE_JOINABLE {
+        ok = false
+    }
+    if pthread.attr_setstacksize(a, 1024) != errno.E_INVAL || pthread.attr_setstacksize(a, 2147483648) != errno.E_INVAL {
+        ok = false
+    }
+    if pthread.attr_setdetachstate(a, 7) != errno.E_INVAL {
+        ok = false
+    }
+    if pthread.attr_setstacksize(a, DEEP_STACK) != 0 || pthread.attr_getstacksize(a, (&v) as u64) != 0 || v != DEEP_STACK {
+        ok = false
+    }
+    var t: u64 = 0
+    if pthread.create_attr((&t) as u64, a, deep_body, DEEP_LEVELS) != 0 {
+        return false
+    }
+    var rv: u64 = 0
+    if pthread.join(t, (&rv) as u64) != 0 || rv != DEEP_LEVELS * (DEEP_LEVELS + 1) / 2 {
+        ok = false
+    }
+    var t0: u64 = 0
+    if pthread.create_attr((&t0) as u64, 0, deep_body, 3) != 0 {
+        return false
+    }
+    if pthread.join(t0, (&rv) as u64) != 0 || rv != 6 {
+        ok = false
+    }
+    locks.store((&x_flag) as u64, 0)
+    if pthread.attr_setdetachstate(a, pthread.CREATE_DETACHED) != 0 || pthread.attr_getdetachstate(a, (&v) as u64) != 0 || v != pthread.CREATE_DETACHED {
+        ok = false
+    }
+    var t2: u64 = 0
+    if pthread.create_attr((&t2) as u64, a, flag_body, 20) != 0 {
+        return false
+    }
+    if pthread.join(t2, 0) != errno.E_INVAL {
+        ok = false
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        ok = false
+    }
+    return ok && pthread.attr_destroy(a) == 0
+}
+
+fn try_body(arg: u64) -> u64 {
+    let r: u64 = pthread.mutex_trylock(mutex_addr())
+    if r == 0 {
+        pthread.mutex_unlock(mutex_addr())
+    }
+    return r
+}
+
+fn unlock_body(arg: u64) -> u64 {
+    return pthread.mutex_unlock(mutex_addr())
+}
+
+fn run_other(body: fn(u64) -> u64) -> u64 {
+    var t: u64 = 0
+    if pthread.create((&t) as u64, body, 0) != 0 {
+        return 0xFFFF
+    }
+    var rv: u64 = 0
+    pthread.join(t, (&rv) as u64)
+    return rv
+}
+
+fn make_mutex(kind: u64) -> bool {
+    var attr: [u64; 1] = [0; 1]
+    let a: u64 = (&attr[0]) as u64
+    if pthread.mutexattr_init(a) != 0 || pthread.mutexattr_settype(a, kind) != 0 {
+        return false
+    }
+    var got: u64 = 99
+    if pthread.mutexattr_gettype(a, (&got) as u64) != 0 || got != kind {
+        return false
+    }
+    let r: u64 = pthread.mutex_init_attr(mutex_addr(), a)
+    pthread.mutexattr_destroy(a)
+    return r == 0
+}
+
+fn run_recursive() -> bool {
+    var ok: bool = true
+    var attr: [u64; 1] = [0; 1]
+    let a: u64 = (&attr[0]) as u64
+    pthread.mutexattr_init(a)
+    if pthread.mutexattr_settype(a, 5) != errno.E_INVAL {
+        ok = false
+    }
+    if !make_mutex(pthread.MUTEX_RECURSIVE) {
+        return false
+    }
+    if pthread.mutex_lock(mutex_addr()) != 0 || pthread.mutex_lock(mutex_addr()) != 0 || pthread.mutex_trylock(mutex_addr()) != 0 {
+        ok = false
+    }
+    if pthread.mutex_timedlock(mutex_addr(), locks.now_ns() + 20 * MS) != 0 {
+        ok = false
+    }
+    if run_other(try_body) != errno.E_BUSY || run_other(unlock_body) != errno.E_PERM {
+        ok = false
+    }
+    var k: u64 = 0
+    while k < 4 {
+        if pthread.mutex_unlock(mutex_addr()) != 0 {
+            ok = false
+        }
+        k = k + 1
+    }
+    if pthread.mutex_unlock(mutex_addr()) != errno.E_PERM {
+        ok = false
+    }
+    if run_other(try_body) != 0 {
+        ok = false
+    }
+    return ok && pthread.mutex_destroy(mutex_addr()) == 0
+}
+
+fn run_errorcheck() -> bool {
+    var ok: bool = true
+    if !make_mutex(pthread.MUTEX_ERRORCHECK) {
+        return false
+    }
+    if pthread.mutex_unlock(mutex_addr()) != errno.E_PERM {
+        ok = false
+    }
+    if pthread.mutex_lock(mutex_addr()) != 0 {
+        return false
+    }
+    if pthread.mutex_lock(mutex_addr()) != errno.E_DEADLK {
+        ok = false
+    }
+    if pthread.mutex_trylock(mutex_addr()) != errno.E_BUSY {
+        ok = false
+    }
+    if pthread.mutex_timedlock(mutex_addr(), locks.now_ns() + 20 * MS) != errno.E_DEADLK {
+        ok = false
+    }
+    if run_other(unlock_body) != errno.E_PERM || run_other(try_body) != errno.E_BUSY {
+        ok = false
+    }
+    if pthread.mutex_unlock(mutex_addr()) != 0 || pthread.mutex_unlock(mutex_addr()) != errno.E_PERM {
+        ok = false
+    }
+    if pthread.cond_wait(cond_addr(), mutex_addr()) != errno.E_PERM {
+        ok = false
+    }
+    if pthread.cond_timedwait(cond_addr(), mutex_addr(), locks.now_ns() + 20 * MS) != errno.E_PERM {
+        ok = false
+    }
+    return ok && pthread.mutex_destroy(mutex_addr()) == 0
+}
+
+fn recursive_cond_body(arg: u64) -> u64 {
+    pthread.mutex_lock(mutex_addr())
+    locks.store((&x_flag) as u64, 1)
+    while locks.load((&x_ready) as u64) == 0 {
+        pthread.cond_wait(cond_addr(), mutex_addr())
+    }
+    return pthread.mutex_unlock(mutex_addr())
+}
+
+fn run_recursive_cond() -> bool {
+    reset_flags()
+    pthread.cond_init(cond_addr())
+    if !make_mutex(pthread.MUTEX_RECURSIVE) {
+        return false
+    }
+    var t: u64 = 0
+    if pthread.create((&t) as u64, recursive_cond_body, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        return false
+    }
+    pause_ms(30)
+    pthread.mutex_lock(mutex_addr())
+    locks.store((&x_ready) as u64, 1)
+    pthread.cond_signal(cond_addr())
+    pthread.mutex_unlock(mutex_addr())
+    var rv: u64 = 99
+    pthread.join(t, (&rv) as u64)
+    return rv == 0 && pthread.mutex_trylock(mutex_addr()) == 0 && pthread.mutex_unlock(mutex_addr()) == 0
+}
+
+fn self_join_body(arg: u64) -> u64 {
+    return pthread.join(pthread.self(), 0)
+}
+
+fn run_self_join() -> bool {
+    var t: u64 = 0
+    if pthread.create((&t) as u64, self_join_body, 0) != 0 {
+        return false
+    }
+    var rv: u64 = 0
+    if pthread.join(t, (&rv) as u64) != 0 {
+        return false
+    }
+    return rv == errno.E_DEADLK && pthread.join(0, 0) == errno.E_INVAL
+}
+
+fn writer_body(arg: u64) -> u64 {
+    pthread.rwlock_wrlock((&x_rw) as u64)
+    locks.store((&x_flag) as u64, 1)
+    pthread.rwlock_unlock((&x_rw) as u64)
+    return 1
+}
+
+fn run_try_reader_preference() -> bool {
+    var ok: bool = true
+    reset_flags()
+    pthread.rwlock_init((&x_rw) as u64)
+    pthread.rwlock_rdlock((&x_rw) as u64)
+    var t: u64 = 0
+    if pthread.create((&t) as u64, writer_body, 0) != 0 {
+        return false
+    }
+    var waited: u64 = 0
+    while rwlock.waiting_writers((&x_rw) as u64) < 1 && waited < 2000 {
+        pause_ms(2)
+        waited = waited + 1
+    }
+    if rwlock.waiting_writers((&x_rw) as u64) != 1 {
+        ok = false
+    }
+    if pthread.rwlock_tryrdlock((&x_rw) as u64) != 0 || rwlock.readers((&x_rw) as u64) != 2 {
+        ok = false
+    }
+    if pthread.rwlock_trywrlock((&x_rw) as u64) != errno.E_BUSY {
+        ok = false
+    }
+    pthread.rwlock_unlock((&x_rw) as u64)
+    pthread.rwlock_unlock((&x_rw) as u64)
+    var rv: u64 = 0
+    pthread.join(t, (&rv) as u64)
+    return ok && rv == 1 && locks.load((&x_flag) as u64) == 1 && pthread.rwlock_destroy((&x_rw) as u64) == 0
+}
+
+fn barrier_waiter(arg: u64) -> u64 {
+    return pthread.barrier_wait((&x_barrier[0]) as u64)
+}
+
+fn run_barrier_destroy() -> bool {
+    var ok: bool = true
+    let b: u64 = (&x_barrier[0]) as u64
+    if pthread.barrier_init(b, 2) != 0 {
+        return false
+    }
+    var t: u64 = 0
+    if pthread.create((&t) as u64, barrier_waiter, 0) != 0 {
+        return false
+    }
+    var waited: u64 = 0
+    while barrier.arrived(b) < 1 && waited < 2000 {
+        pause_ms(2)
+        waited = waited + 1
+    }
+    if barrier.arrived(b) != 1 || barrier.busy(b) != 1 {
+        ok = false
+    }
+    if pthread.barrier_destroy(b) != errno.E_BUSY {
+        ok = false
+    }
+    let mine: u64 = pthread.barrier_wait(b)
+    var rv: u64 = 99
+    pthread.join(t, (&rv) as u64)
+    let serials: u64 = (mine == pthread.BARRIER_SERIAL_THREAD) as u64 + (rv == pthread.BARRIER_SERIAL_THREAD) as u64
+    if serials != 1 {
+        ok = false
+    }
+    if barrier.busy(b) != 0 {
+        ok = false
+    }
+    if pthread.barrier_destroy(b) != 0 {
+        ok = false
+    }
+    if pthread.barrier_wait(b) != errno.E_INVAL {
+        ok = false
+    }
+    return ok
+}
+
+fn unlock_cleanup(arg: u64) -> u64 {
+    pthread.mutex_unlock(mutex_addr())
+    locks.store((&x_cleaned) as u64, 1)
+    return 0
+}
+
+fn cond_victim(arg: u64) -> u64 {
+    pthread.mutex_lock(mutex_addr())
+    pthread.cleanup_push(unlock_cleanup, 0)
+    locks.store((&x_flag) as u64, 1)
+    while true {
+        pthread.cond_wait(cond_addr(), mutex_addr())
+    }
+    return 0
+}
+
+fn run_cancel_cond() -> bool {
+    var ok: bool = true
+    reset_flags()
+    pthread.cond_init(cond_addr())
+    pthread.mutex_init(mutex_addr())
+    var t: u64 = 0
+    if pthread.create((&t) as u64, cond_victim, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        return false
+    }
+    pause_ms(40)
+    let t0: u64 = locks.now_ns()
+    if pthread.cancel(t) != 0 {
+        ok = false
+    }
+    var rv: u64 = 0
+    pthread.join(t, (&rv) as u64)
+    if rv != pthread.CANCELED || locks.now_ns() - t0 > 1500 * MS {
+        ok = false
+    }
+    if locks.load((&x_cleaned) as u64) != 1 {
+        ok = false
+    }
+    if pthread.mutex_trylock(mutex_addr()) != 0 {
+        ok = false
+    } else {
+        pthread.mutex_unlock(mutex_addr())
+    }
+    return ok
+}
+
+fn sleep_victim(arg: u64) -> u64 {
+    locks.store((&x_flag) as u64, 1)
+    pthread.sleep_ns(5000 * MS)
+    locks.store((&x_after) as u64, 1)
+    return 7
+}
+
+fn run_cancel_sleep() -> bool {
+    var ok: bool = true
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create((&t) as u64, sleep_victim, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        return false
+    }
+    pause_ms(40)
+    let t0: u64 = locks.now_ns()
+    pthread.cancel(t)
+    var rv: u64 = 0
+    pthread.join(t, (&rv) as u64)
+    if rv != pthread.CANCELED || locks.now_ns() - t0 > 1500 * MS || locks.load((&x_after) as u64) != 0 {
+        ok = false
+    }
+    return ok
+}
+
+fn stopper_body(arg: u64) -> u64 {
+    while locks.load((&x_stop) as u64) == 0 {
+        pause_ms(5)
+    }
+    return 9
+}
+
+fn join_victim(arg: u64) -> u64 {
+    locks.store((&x_flag) as u64, 1)
+    pthread.join(locks.load((&x_target) as u64), 0)
+    locks.store((&x_after) as u64, 1)
+    return 7
+}
+
+fn run_cancel_join() -> bool {
+    var ok: bool = true
+    reset_flags()
+    var b: u64 = 0
+    if pthread.create((&b) as u64, stopper_body, 0) != 0 {
+        return false
+    }
+    locks.store((&x_target) as u64, b)
+    var a: u64 = 0
+    if pthread.create((&a) as u64, join_victim, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&x_flag) as u64, 1) {
+        return false
+    }
+    pause_ms(40)
+    let t0: u64 = locks.now_ns()
+    pthread.cancel(a)
+    var rv: u64 = 0
+    pthread.join(a, (&rv) as u64)
+    if rv != pthread.CANCELED || locks.now_ns() - t0 > 1500 * MS || locks.load((&x_after) as u64) != 0 {
+        ok = false
+    }
+    locks.store((&x_stop) as u64, 1)
+    var rb: u64 = 0
+    if pthread.join(b, (&rb) as u64) != 0 || rb != 9 {
+        ok = false
+    }
+    return ok
+}
+
+fn disabled_body(arg: u64) -> u64 {
+    var old: u64 = 99
+    pthread.setcancelstate(pthread.CANCEL_DISABLE, (&old) as u64)
+    locks.store((&x_ready) as u64, old + 1)
+    pthread.sleep_ns(150 * MS)
+    locks.store((&x_done) as u64, 1)
+    pthread.setcancelstate(pthread.CANCEL_ENABLE, (&old) as u64)
+    pthread.testcancel()
+    locks.store((&x_after) as u64, 1)
+    return 7
+}
+
+fn run_cancel_disabled() -> bool {
+    var ok: bool = true
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create((&t) as u64, disabled_body, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&x_ready) as u64, 1) {
+        return false
+    }
+    if locks.load((&x_ready) as u64) != 1 {
+        ok = false
+    }
+    pause_ms(20)
+    pthread.cancel(t)
+    var rv: u64 = 0
+    pthread.join(t, (&rv) as u64)
+    if rv != pthread.CANCELED || locks.load((&x_done) as u64) != 1 || locks.load((&x_after) as u64) != 0 {
+        ok = false
+    }
+    return ok
+}
+
+fn order_cleanup(arg: u64) -> u64 {
+    locks.store((&x_order) as u64, locks.load((&x_order) as u64) * 10 + arg)
+    return 0
+}
+
+fn exit_cleanup_body(arg: u64) -> u64 {
+    pthread.cleanup_push(order_cleanup, 1)
+    pthread.cleanup_push(order_cleanup, 2)
+    pthread.cleanup_pop(false)
+    pthread.cleanup_push(order_cleanup, 3)
+    pthread.exit(33)
+    return 0
+}
+
+fn noop_cleanup(arg: u64) -> u64 {
+    return 0
+}
+
+fn quick_body(arg: u64) -> u64 {
+    return 4
+}
+
+fn run_cancel_misc() -> bool {
+    var ok: bool = true
+    reset_flags()
+    var old: u64 = 99
+    if pthread.setcanceltype(pthread.CANCEL_ASYNCHRONOUS, 0) != errno.E_INVAL || pthread.setcanceltype(pthread.CANCEL_DEFERRED, (&old) as u64) != 0 || old != pthread.CANCEL_DEFERRED {
+        ok = false
+    }
+    if pthread.setcancelstate(7, 0) != errno.E_INVAL || pthread.cancel(0) != errno.E_SRCH {
+        ok = false
+    }
+    var t: u64 = 0
+    if pthread.create((&t) as u64, quick_body, 0) != 0 {
+        return false
+    }
+    var waited: u64 = 0
+    while !threads.is_done(t) && waited < 2000 {
+        pause_ms(2)
+        waited = waited + 1
+    }
+    var rv: u64 = 0
+    if pthread.cancel(t) != 0 || pthread.join(t, (&rv) as u64) != 0 || rv != 4 {
+        ok = false
+    }
+    var e: u64 = 0
+    if pthread.create((&e) as u64, exit_cleanup_body, 0) != 0 {
+        return false
+    }
+    if pthread.join(e, (&rv) as u64) != 0 || rv != 33 || locks.load((&x_order) as u64) != 31 {
+        ok = false
+    }
+    if pthread.cleanup_pop(false) != errno.E_INVAL {
+        ok = false
+    }
+    var k: u64 = 0
+    while k < 8 {
+        if pthread.cleanup_push(noop_cleanup, k) != 0 {
+            ok = false
+        }
+        k = k + 1
+    }
+    if pthread.cleanup_push(noop_cleanup, 9) != errno.E_NOMEM {
+        ok = false
+    }
+    k = 0
+    while k < 8 {
+        if pthread.cleanup_pop(false) != 0 {
+            ok = false
+        }
+        k = k + 1
+    }
+    return ok
+}
+
+fn run_all() -> u64 {
+    check(run_attrs())
+    check(run_recursive())
+    check(run_errorcheck())
+    check(run_recursive_cond())
+    check(run_self_join())
+    check(run_try_reader_preference())
+    check(run_barrier_destroy())
+    check(run_cancel_cond())
+    check(run_cancel_sleep())
+    check(run_cancel_join())
+    check(run_cancel_disabled())
+    check(run_cancel_misc())
+    return probecount.failed()
+}
