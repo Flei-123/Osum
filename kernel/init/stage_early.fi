@@ -1,0 +1,178 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import lib.version
+import mm.mem
+import pwr.pmon
+import fs.file
+import fs.unixsock
+import diag.hw
+import sched.randsetup
+import arch.x86_64.smp
+import net.netview
+import net.netmon
+import net.ebpfhook
+import gfx.gfx
+import ui.ax
+import drv.con.sercon
+import fs.nidx
+import arch.x86_64.hv
+import sched.time
+import sched.rand
+import drv.con.tty
+import arch.x86_64.guard
+import arch.x86_64.fpu
+import ldr.bootmod
+import diag.safe
+import klog
+import fs.ftype
+import bus.bus
+import bus.slots
+import libc.regio
+import init.bootargs
+import init.bootshell
+import init.initstage
+
+fn serial_up(state: u64) {
+    var s_banner: [u8; 32] = "firn kernel r62, profile kernel\0"
+    kstate.set(state, kstate.BM_BASE + 0, time.tsc())
+    serial.init()
+
+    let _uart: bool = serial.probe()
+    serial.puts(version.text())
+    serial.nl()
+    serial.puts((&s_banner[0]) as u64)
+    serial.nl()
+
+}
+
+fn boot_context(state: u64) {
+    let vectors: u64 = initstage.vectors()
+    let kernel_end: u64 = initstage.kernel_end()
+    let gdt: u64 = initstage.gdt()
+    let tss: u64 = initstage.tss()
+    kstate.set(state, kstate.VECTORS, vectors)
+    kstate.set(state, kstate.GDT, gdt)
+    kstate.set(state, kstate.TSS, tss)
+    kstate.set(state, kstate.KERNEL_END, kernel_end)
+
+    klog.init(state)
+}
+
+fn cmdline(state: u64) {
+    let mbi: u64 = initstage.mbi()
+    let cmd: u64 = mem.cmdline(mbi)
+    initstage.set_cmd(cmd)
+    safe.boot(state, cmd)
+    bootargs.mode_of(state, cmd)
+
+    hw.parse(state, cmd)
+    netview.fallback_set(state, hw.net_fallback(state))
+    smp.parse(state, cmd)
+    gfx.parse(state, cmd)
+    sercon.parse(state, cmd)
+    kstate.set(state, kstate.MBI, mbi)
+    guard.parse(state, cmd)
+    fpu.parse(state, cmd)
+    bootmod.parse(state, cmd)
+    hv.parse(state, cmd)
+
+    netmon.parse(state, cmd)
+    pmon.parse(state, cmd)
+
+}
+
+fn access(state: u64) {
+    var s_axo: [u8; 4] = " / \0"
+    var s_axt: [u8; 14] = "ax: selftest \0"
+    let cmd: u64 = initstage.cmd()
+    ax.init(state)
+    ax.parse(state, cmd)
+    serial.puts((&s_axt[0]) as u64)
+    serial.dec(ax.selftest(state))
+    serial.puts((&s_axo[0]) as u64)
+    serial.dec(ax.selftest_max())
+    serial.nl()
+
+}
+
+fn clock_ebpf(state: u64) {
+    ebpfhook.init(state)
+    if kstate.mode_on(state, kstate.M_NOEBPF) {
+        ebpfhook.set_on(state, 0)
+    }
+
+    time.init(state)
+    kstate.set(state, kstate.BM_BASE + 8, time.tsc())
+
+    time.tz_anwenden(state)
+    randsetup.start(state)
+    if kstate.mode_on(state, kstate.M_FIXRAND) {
+        rand.fixed_set(state, 1)
+    }
+}
+
+fn console(state: u64) {
+    let cmd: u64 = initstage.cmd()
+    tty.init(state)
+    sercon.init(state)
+    bootshell.console_load(state, cmd)
+
+}
+
+fn kernel_files(state: u64) {
+    file.init(state)
+    unixsock.init(state)
+    ftype.init(state)
+    nidx.init(state)
+    if !kstate.mode_on(state, kstate.M_NOBUS) {
+        bus.init(state)
+        slots.init(state)
+        if kstate.mode_on(state, kstate.M_NOTIDEMO) {
+            var s_n1: [u8; 23] = "Datenträger verbunden\0"
+            var s_n2: [u8; 22] = "Aktualisierung bereit\0"
+            bus.noti_post(state, 0, 1, 22, (&s_n1[0]) as u64)
+            bus.noti_post(state, 0, 2, 21, (&s_n2[0]) as u64)
+        }
+    }
+    if safe.is_safe() && !kstate.mode_on(state, kstate.M_NOBUS) {
+        var s_sf1: [u8; 39] = "SAFE MODE: network and drivers are off\0"
+        var s_sf2: [u8; 47] = "SAFE MODE after a failed boot: see /var/jarvis\0"
+        if safe.fell_back() {
+            bus.noti_post(state, 0, 1, 46, (&s_sf2[0]) as u64)
+        } else {
+            bus.noti_post(state, 0, 1, 38, (&s_sf1[0]) as u64)
+        }
+    }
+}
+
+fn report_mb(state: u64) {
+    var s_cmd: [u8; 8] = "  cmd=\0\0"
+    var s_mb: [u8; 11] = "mb: flags=\0"
+    var s_none: [u8; 7] = "(none)\0"
+    let mbi: u64 = initstage.mbi()
+    let cmd: u64 = initstage.cmd()
+    serial.puts((&s_mb[0]) as u64)
+    serial.hex(regio.read32(mbi))
+    serial.puts((&s_cmd[0]) as u64)
+    if cmd == 0 {
+        serial.puts((&s_none[0]) as u64)
+    } else {
+        serial.puts(cmd)
+    }
+    serial.nl()
+
+}
+
+fn register() {
+    initstage.add(initstage.S_EARLY, serial_up as u64)
+    initstage.add(initstage.S_EARLY, boot_context as u64)
+    initstage.add(initstage.S_EARLY, cmdline as u64)
+    initstage.add(initstage.S_EARLY, access as u64)
+    initstage.add(initstage.S_EARLY, clock_ebpf as u64)
+    initstage.add(initstage.S_EARLY, console as u64)
+    initstage.add(initstage.S_EARLY, kernel_files as u64)
+    initstage.add(initstage.S_EARLY, report_mb as u64)
+}

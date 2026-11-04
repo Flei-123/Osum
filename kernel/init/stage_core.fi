@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import arch.x86_64.idt
+import sched.time
+import ldr.bootmod
+import init.bootmem
+import init.bootusb
+import init.initstage
+
+const V_DF_STACK: u64 = 52
+const V_IRQ_STACK: u64 = 53
+
+fn at(vectors: u64, i: u64) -> u64 {
+    return __mmio_read64((vectors + i * 8) as *mut u64)
+}
+
+fn descriptor_tables(state: u64) {
+    var s_gates: [u8; 21] = " gates, vector 8 IST\0"
+    var s_idt: [u8; 6] = "idt: \0"
+    let vectors: u64 = initstage.vectors()
+    let gdt: u64 = initstage.gdt()
+    let tss: u64 = initstage.tss()
+    idt.tss_install(gdt, tss, at(vectors, V_IRQ_STACK), at(vectors, V_DF_STACK),
+        state + kstate.CPU_OFF)
+    let gates: u64 = idt.build(state, vectors)
+    serial.puts((&s_idt[0]) as u64)
+    serial.dec(gates)
+    serial.puts((&s_gates[0]) as u64)
+    serial.nl()
+
+}
+
+fn pic_timer(state: u64) {
+    var s_hz: [u8; 20] = " Hz, divisor \0\0\0\0\0\0\0"
+    var s_pic: [u8; 30] = "pic: master 0x20, slave 0x28\0\0"
+    var s_pit: [u8; 6] = "pit: \0"
+    idt.pic_remap()
+    idt.pic_mask(0xFC as u8, 0xFF as u8)
+    serial.puts((&s_pic[0]) as u64)
+    serial.nl()
+    let divisor: u64 = idt.pit_init(100)
+    kstate.set(state, kstate.BM_BASE + 16, time.tsc())
+    serial.puts((&s_pit[0]) as u64)
+    serial.dec(100)
+    serial.puts((&s_hz[0]) as u64)
+    serial.dec(divisor)
+    serial.nl()
+
+}
+
+fn memory(state: u64) {
+    let mbi: u64 = initstage.mbi()
+    let kernel_end: u64 = initstage.kernel_end()
+    bootmem.memory(state, mbi, kernel_end)
+
+}
+
+fn bootmod_stage(state: u64) {
+    let mbi: u64 = initstage.mbi()
+    bootmod.stage(state, mbi)
+
+}
+
+fn register() {
+    initstage.add(initstage.S_CORE, descriptor_tables as u64)
+    initstage.add(initstage.S_CORE, pic_timer as u64)
+    initstage.add(initstage.S_CORE, memory as u64)
+    initstage.add(initstage.S_CORE, bootusb.hid_stage as u64)
+    initstage.add(initstage.S_CORE, bootmod_stage as u64)
+}

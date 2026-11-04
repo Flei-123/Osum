@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import diag.hwid
+import sched.sched
+import net.netsvc
+import net.wlan_auto
+import net.netdev
+import gfx.gfx
+import diag.hwdiag
+import drv.usb.ehci
+import drv.usb.ehcikbd
+import drv.usb.ohci
+import usb.usb
+import drv.hid.hidin
+import drv.hid.i2chid
+import drv.net.iwl
+import init.bootaudio
+import init.bootmods
+import init.bootusb
+import init.initstage
+
+fn late_net(state: u64) {
+    if netdev.late_usb(state) {
+        netsvc.stage(state)
+    }
+    if iwl.count_targets(state) > 0 || iwl.held_ready() {
+        let _wa: u64 = wlan_auto.start(state)
+    }
+}
+
+fn park_after_usb(state: u64) {
+    hwdiag.park_after_usb(state)
+}
+
+fn hid_window(state: u64) {
+    if kstate.mode_on(state, kstate.M_EHCITEST) {
+        ehci.selftest(state, 0)
+        ehci.selftest(state, 1)
+        ehci.selftest(state, 64)
+        var eh_i: u64 = 0
+
+        var hw_btn: u64 = 0
+        var hw_wchg: u64 = 0
+        var hw_wlast: u64 = gfx.mouse_wheel(state)
+        var hw_x0: u64 = gfx.mouse_x(state)
+        var hw_y0: u64 = gfx.mouse_y(state)
+        var hw_xmax: u64 = hw_x0
+        var hw_ymax: u64 = hw_y0
+        var s_open: [u8; 14] = "hidwin: open\0\0"
+        serial.puts((&s_open[0]) as u64)
+        serial.nl()
+        while eh_i < 900 {
+            ehci.poll(state)
+            ehcikbd.pump(state)
+            ohci.poll(state)
+            usb.poll(state)
+            hw_btn = hw_btn | gfx.mouse_buttons(state)
+            let hw_w: u64 = gfx.mouse_wheel(state)
+            if hw_w != hw_wlast {
+                hw_wchg = hw_wchg + 1
+                hw_wlast = hw_w
+            }
+            if gfx.mouse_x(state) > hw_xmax {
+                hw_xmax = gfx.mouse_x(state)
+            }
+            if gfx.mouse_y(state) > hw_ymax {
+                hw_ymax = gfx.mouse_y(state)
+            }
+            sched.sleep_ticks(state, 1)
+            eh_i = eh_i + 1
+        }
+        ehci.report(state)
+        var s_hw: [u8; 14] = "hidwin: keys=\0"
+        var s_hr: [u8; 10] = " reports=\0"
+        var s_hm: [u8; 8] = " moves=\0"
+        var s_hh: [u8; 9] = " wheels=\0"
+        var s_hc: [u8; 11] = " wheelchg=\0"
+        var s_hb: [u8; 6] = " btn=\0"
+        var s_hx: [u8; 4] = " x=\0"
+        var s_hy: [u8; 4] = " y=\0"
+        var s_hi: [u8; 5] = " id=\0"
+        serial.puts((&s_hw[0]) as u64)
+        serial.dec(hidin.keys(state))
+        serial.puts((&s_hr[0]) as u64)
+        serial.dec(hidin.reports(state))
+        serial.puts((&s_hm[0]) as u64)
+        serial.dec(hidin.moves(state))
+        serial.puts((&s_hh[0]) as u64)
+        serial.dec(hidin.wheels(state))
+        serial.puts((&s_hc[0]) as u64)
+        serial.dec(hw_wchg)
+        serial.puts((&s_hb[0]) as u64)
+        serial.dec(hw_btn)
+        serial.puts((&s_hx[0]) as u64)
+        serial.dec(hw_xmax)
+        serial.puts((&s_hy[0]) as u64)
+        serial.dec(hw_ymax)
+        serial.puts((&s_hi[0]) as u64)
+        serial.dec(gfx.mouse_id(state))
+        serial.nl()
+    }
+
+}
+
+fn register() {
+    initstage.add(initstage.S_DEVICE, netsvc.stage as u64)
+    initstage.add(initstage.S_DEVICE, bootusb.usb_stage as u64)
+    initstage.add(initstage.S_DEVICE, late_net as u64)
+    initstage.add(initstage.S_DEVICE, i2chid.stage as u64)
+    initstage.add(initstage.S_DEVICE, ehci.stage as u64)
+    initstage.add(initstage.S_DEVICE, bootusb.ohci_stage as u64)
+    initstage.add(initstage.S_DEVICE, park_after_usb as u64)
+    initstage.add(initstage.S_DEVICE, hid_window as u64)
+    initstage.add(initstage.S_DEVICE, bootaudio.audio_stage as u64)
+    initstage.add(initstage.S_DEVICE, hwid.stage as u64)
+    initstage.add(initstage.S_DEVICE, bootmods.moduls as u64)
+}
