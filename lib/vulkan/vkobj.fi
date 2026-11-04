@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+
+export { MAX_OBJ, K_INSTANCE, K_PHYS, K_DEVICE, K_QUEUE, K_MEMORY, K_BUFFER, K_IMAGE, K_POOL, K_CMDBUF, K_FENCE, K_SEMAPHORE, obj_new, obj_free, obj_addr, obj_get, obj_set, obj_live }
+
+const MAX_OBJ: usize = 16384
+const K_INSTANCE: u64 = 1
+const K_PHYS: u64 = 2
+const K_DEVICE: u64 = 3
+const K_QUEUE: u64 = 4
+const K_MEMORY: u64 = 5
+const K_BUFFER: u64 = 6
+const K_IMAGE: u64 = 7
+const K_POOL: u64 = 8
+const K_CMDBUF: u64 = 9
+const K_FENCE: u64 = 10
+const K_SEMAPHORE: u64 = 11
+
+static mut TABLE: u64 = 0
+static mut CURSOR: usize = 1
+static mut LIVE: u64 = 0
+
+fn table_init() {
+    if TABLE == 0 as u64 {
+        TABLE = rt.heap_alloc(MAX_OBJ * 64)
+        rt.mem_set(TABLE, 0 as u8, MAX_OBJ * 64)
+    }
+}
+
+fn obj_new(kind: u64) -> u64 {
+    table_init()
+    var tries: usize = 0
+    while tries < MAX_OBJ {
+        if CURSOR >= MAX_OBJ { CURSOR = 1 }
+        let a: u64 = TABLE + (CURSOR as u64) * 64
+        if rt.ld64(a, 0) == 0 as u64 {
+            rt.mem_set(a, 0 as u8, 64)
+            rt.st64(a, 0, kind)
+            let h: u64 = (kind << 48 as u64) | (CURSOR as u64)
+            CURSOR = CURSOR + 1
+            LIVE = LIVE + 1
+            return h
+        }
+        CURSOR = CURSOR + 1
+        tries = tries + 1
+    }
+    return 0 as u64
+}
+
+fn obj_addr(h: u64, kind: u64) -> u64 {
+    if TABLE == 0 as u64 { return 0 as u64 }
+    if (h >> 48 as u64) != kind { return 0 as u64 }
+    let i: u64 = h & 0xFFFFFFFFFFFF as u64
+    if i == 0 as u64 { return 0 as u64 }
+    if i >= (MAX_OBJ as u64) { return 0 as u64 }
+    let a: u64 = TABLE + i * 64
+    if rt.ld64(a, 0) != kind { return 0 as u64 }
+    return a
+}
+
+fn obj_free(h: u64, kind: u64) {
+    let a: u64 = obj_addr(h, kind)
+    if a != 0 as u64 {
+        rt.mem_set(a, 0 as u8, 64)
+        LIVE = LIVE - 1
+    }
+}
+
+fn obj_get(h: u64, kind: u64, field: usize) -> u64 {
+    let a: u64 = obj_addr(h, kind)
+    if a == 0 as u64 { return 0 as u64 }
+    return rt.ld64(a, field + 1)
+}
+
+fn obj_set(h: u64, kind: u64, field: usize, v: u64) {
+    let a: u64 = obj_addr(h, kind)
+    if a != 0 as u64 { rt.st64(a, field + 1, v) }
+}
+
+fn obj_live() -> u64 {
+    return LIVE
+}

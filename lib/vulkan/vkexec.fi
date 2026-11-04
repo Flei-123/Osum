@@ -1,0 +1,205 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import gpu.swr.raster
+import vulkan.vkobj
+import vulkan.vkres
+import vulkan.vkcmd
+
+export { vkCreateFence, vkDestroyFence, vkResetFences, vkGetFenceStatus, vkWaitForFences, vkCreateSemaphore, vkDestroySemaphore, vkQueueSubmit, vkQueueWaitIdle }
+
+fn unorm8(c: f32) -> u32 {
+    var v: f32 = c
+    if v < 0.0f { v = 0.0f }
+    if v > 1.0f { v = 1.0f }
+    return ((v * 255.0f + 0.5f) as i32) as u32
+}
+
+fn clear_pixel(format: u32, rec: u64) -> u32 {
+    let r: u32 = unorm8(raster.ld_f32(rec + 16 as u64, 0))
+    let g: u32 = unorm8(raster.ld_f32(rec + 16 as u64, 1))
+    let b: u32 = unorm8(raster.ld_f32(rec + 16 as u64, 2))
+    let a: u32 = unorm8(raster.ld_f32(rec + 16 as u64, 3))
+    if format == 44 as u32 { return b | (g << 8 as u32) | (r << 16 as u32) | (a << 24 as u32) }
+    return r | (g << 8 as u32) | (b << 16 as u32) | (a << 24 as u32)
+}
+
+fn exec_clear(rec: u64) {
+    let img: u64 = rt.ld64(rec, 1)
+    let p: u64 = vkres.res_addr(vkobj.K_IMAGE, img)
+    if p == 0 as u64 { return }
+    let n: u64 = vkobj.obj_get(img, vkobj.K_IMAGE, 2) * vkobj.obj_get(img, vkobj.K_IMAGE, 3)
+    let px: u32 = clear_pixel(vkobj.obj_get(img, vkobj.K_IMAGE, 4) as u32, rec)
+    var i: u64 = 0 as u64
+    while i < n {
+        rt.st32(p, i as usize, px)
+        i = i + 1 as u64
+    }
+}
+
+fn buf_range_ok(buf: u64, off: u64, len: u64) -> bool {
+    let size: u64 = vkobj.obj_get(buf, vkobj.K_BUFFER, 2)
+    if off > size { return false }
+    if len > size - off { return false }
+    return true
+}
+
+fn exec_copy_buffer(rec: u64) {
+    let src: u64 = rt.ld64(rec, 1)
+    let dst: u64 = rt.ld64(rec, 2)
+    let so: u64 = rt.ld64(rec, 3)
+    let d_o: u64 = rt.ld64(rec, 4)
+    let n: u64 = rt.ld64(rec, 5)
+    let sp: u64 = vkres.res_addr(vkobj.K_BUFFER, src)
+    let dp: u64 = vkres.res_addr(vkobj.K_BUFFER, dst)
+    if sp == 0 as u64 { return }
+    if dp == 0 as u64 { return }
+    if !buf_range_ok(src, so, n) { return }
+    if !buf_range_ok(dst, d_o, n) { return }
+    rt.mem_copy(dp + d_o, sp + so, n as usize)
+}
+
+fn exec_fill(rec: u64) {
+    let buf: u64 = rt.ld64(rec, 1)
+    let off: u64 = rt.ld64(rec, 2)
+    var n: u64 = rt.ld64(rec, 3)
+    let data: u32 = rt.ld64(rec, 4) as u32
+    let p: u64 = vkres.res_addr(vkobj.K_BUFFER, buf)
+    if p == 0 as u64 { return }
+    let size: u64 = vkobj.obj_get(buf, vkobj.K_BUFFER, 2)
+    if off >= size { return }
+    if n > size - off { n = size - off }
+    var i: u64 = 0 as u64
+    while i + 4 as u64 <= n {
+        rt.st32(p + off + i, 0, data)
+        i = i + 4 as u64
+    }
+}
+
+fn exec_image_copy(rec: u64, to_buffer: bool) {
+    let img: u64 = rt.ld64(rec, 1)
+    let buf: u64 = rt.ld64(rec, 2)
+    let boff: u64 = rt.ld64(rec, 3)
+    var rowlen: u64 = rt.ld64(rec, 4) & 0xFFFFFFFF as u64
+    let ox: u64 = rt.ld64(rec, 5) & 0xFFFFFFFF as u64
+    let oy: u64 = rt.ld64(rec, 5) >> 32 as u64
+    let w: u64 = rt.ld64(rec, 6) & 0xFFFFFFFF as u64
+    let h: u64 = rt.ld64(rec, 6) >> 32 as u64
+    let ip: u64 = vkres.res_addr(vkobj.K_IMAGE, img)
+    let bp: u64 = vkres.res_addr(vkobj.K_BUFFER, buf)
+    if ip == 0 as u64 { return }
+    if bp == 0 as u64 { return }
+    let iw: u64 = vkobj.obj_get(img, vkobj.K_IMAGE, 2)
+    let ih: u64 = vkobj.obj_get(img, vkobj.K_IMAGE, 3)
+    if ox + w > iw { return }
+    if oy + h > ih { return }
+    if rowlen == 0 as u64 { rowlen = w }
+    if rowlen < w { return }
+    if h == 0 as u64 { return }
+    if !buf_range_ok(buf, boff, ((h - 1 as u64) * rowlen + w) * 4 as u64) { return }
+    var y: u64 = 0 as u64
+    while y < h {
+        let ia: u64 = ip + ((oy + y) * iw + ox) * 4 as u64
+        let ba: u64 = bp + boff + y * rowlen * 4 as u64
+        if to_buffer { rt.mem_copy(ba, ia, (w * 4 as u64) as usize) }
+        else { rt.mem_copy(ia, ba, (w * 4 as u64) as usize) }
+        y = y + 1 as u64
+    }
+}
+
+fn exec_list(cb: u64) {
+    let list: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, 0)
+    let n: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, 1)
+    var i: u64 = 0 as u64
+    while i < n {
+        let rec: u64 = list + i * (vkcmd.CMD_WORDS as u64) * 8 as u64
+        let op: u64 = rt.ld64(rec, 0)
+        if op == vkcmd.OP_CLEAR { exec_clear(rec) }
+        if op == vkcmd.OP_COPY_BUFFER { exec_copy_buffer(rec) }
+        if op == vkcmd.OP_IMAGE_TO_BUFFER { exec_image_copy(rec, true) }
+        if op == vkcmd.OP_BUFFER_TO_IMAGE { exec_image_copy(rec, false) }
+        if op == vkcmd.OP_FILL { exec_fill(rec) }
+        i = i + 1 as u64
+    }
+}
+
+#[export_c]
+fn vkQueueSubmit(queue: u64, count: u32, submits: u64, fence: u64) -> i32 {
+    var s: u32 = 0 as u32
+    while s < count {
+        let g: u64 = submits + (s as u64) * 72 as u64
+        let nb: u32 = rt.ld32(g + 40 as u64, 0)
+        let pb: u64 = rt.ld64(g + 48 as u64, 0)
+        var k: u32 = 0 as u32
+        while k < nb {
+            exec_list(rt.ld64(pb, k as usize))
+            k = k + 1 as u32
+        }
+        s = s + 1 as u32
+    }
+    if fence != 0 as u64 { vkobj.obj_set(fence, vkobj.K_FENCE, 0, 1 as u64) }
+    return 0
+}
+
+#[export_c]
+fn vkQueueWaitIdle(queue: u64) -> i32 {
+    return 0
+}
+
+#[export_c]
+fn vkCreateFence(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    let h: u64 = vkobj.obj_new(vkobj.K_FENCE)
+    if h == 0 as u64 { return -1 }
+    if (rt.ld32(info + 16 as u64, 0) & 1 as u32) != 0 as u32 { vkobj.obj_set(h, vkobj.K_FENCE, 0, 1 as u64) }
+    rt.st64(out, 0, h)
+    return 0
+}
+
+#[export_c]
+fn vkDestroyFence(dev: u64, fence: u64, alloc: u64) {
+    vkobj.obj_free(fence, vkobj.K_FENCE)
+}
+
+#[export_c]
+fn vkResetFences(dev: u64, count: u32, fences: u64) -> i32 {
+    var i: u32 = 0 as u32
+    while i < count {
+        vkobj.obj_set(rt.ld64(fences, i as usize), vkobj.K_FENCE, 0, 0 as u64)
+        i = i + 1 as u32
+    }
+    return 0
+}
+
+#[export_c]
+fn vkGetFenceStatus(dev: u64, fence: u64) -> i32 {
+    if vkobj.obj_get(fence, vkobj.K_FENCE, 0) != 0 as u64 { return 0 }
+    return 1
+}
+
+#[export_c]
+fn vkWaitForFences(dev: u64, count: u32, fences: u64, wait_all: u32, timeout: u64) -> i32 {
+    var done: u32 = 0 as u32
+    var i: u32 = 0 as u32
+    while i < count {
+        if vkobj.obj_get(rt.ld64(fences, i as usize), vkobj.K_FENCE, 0) != 0 as u64 { done = done + 1 as u32 }
+        i = i + 1 as u32
+    }
+    if wait_all != 0 as u32 {
+        if done == count { return 0 }
+        return 2
+    }
+    if done > 0 as u32 { return 0 }
+    return 2
+}
+
+#[export_c]
+fn vkCreateSemaphore(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    let h: u64 = vkobj.obj_new(vkobj.K_SEMAPHORE)
+    if h == 0 as u64 { return -1 }
+    rt.st64(out, 0, h)
+    return 0
+}
+
+#[export_c]
+fn vkDestroySemaphore(dev: u64, sem: u64, alloc: u64) {
+    vkobj.obj_free(sem, vkobj.K_SEMAPHORE)
+}
