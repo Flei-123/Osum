@@ -177,8 +177,8 @@ for s in 0 1; do
 done
 [ -n "$(ls lib/net 2>/dev/null | grep -v "^ws.fi$")" ] && bad "there is a copy of the stack in lib/net -- it belongs in vendor/" \
                || ok "no copy of the TCP/IP stack in this repository (vendor/net/PROVENANCE.md)"
-stack_dup=$(find lib kernel -name '*.fi' \( -name tcp.fi -o -name stack.fi -o -name wire.fi -o -name arp.fi -o -name udp.fi -o -name icmp.fi \) | head -3)
-[ -z "$stack_dup" ] && ok "no stack module (tcp/stack/wire/arp/udp/icmp) outside vendor/" \
+stack_dup=$(find lib/net lib/libc lib/httpget kernel/net -name '*.fi' \( -name tcp.fi -o -name stack.fi -o -name wire.fi -o -name arp.fi -o -name udp.fi -o -name icmp.fi \) | head -3)
+[ -z "$stack_dup" ] && ok "no stack module (tcp/stack/wire/arp/udp/icmp) in lib/net, lib/libc, kernel/net" \
                     || bad "stack module outside vendor: $stack_dup"
 shared_fn=$(comm -12 <(grep -ho '^fn [a-z_0-9]*' kernel/net/inet.fi | sort -u) <(grep -ho '^fn [a-z_0-9]*' lib/libc/net.fi | sort -u) | head -3)
 [ -z "$shared_fn" ] && ok "kernel/net/inet.fi and lib/libc/net.fi share no function name" \
