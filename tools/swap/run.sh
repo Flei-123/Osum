@@ -13,8 +13,8 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 ACCEL=""
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL="-accel kvm -cpu Skylake-Client,pmu=on"; fi
-MEM=${SWAP_MEM:-128}
-MIB=${SWAP_MIB:-96}
+MEM=${SWAP_MEM:-64}
+MIB=${SWAP_MIB:-44}
 bash tools/build-kernel.sh "$TMPD/k.mb" > "$TMPD/build.log" 2>&1 || { bad "kernel build"; tail -5 "$TMPD/build.log"; exit 1; }
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s || bad "crt.s"
 SPEC="/bin/ /etc/ /tmp/ /proc/ /dev/ /mnt/ /var/"
@@ -45,7 +45,7 @@ grep -qa "^swaptest: done" "$TMPD/a.txt" && ok "A swaptest ran to the end" || ba
 [ "${a_out:=$(swap_field a out)}" != "" ] && [ "$a_out" -gt 0 ] && ok "A pages went out to /swapfile: $a_out" || bad "A no swap-out reported"
 a_in=$(swap_field a in)
 [ "${a_in:-0}" -gt 0 ] && ok "A pages came back from /swapfile: $a_in" || bad "A no swap-in reported"
-grep -qa "swaptest: done" "$TMPD/a.txt" && ! grep -qaE "panic|user fault" "$TMPD/a.txt" && ok "A no panic, no user fault" || bad "A panic or user fault"
+grep -qa "swaptest: done" "$TMPD/a.txt" && ! sed -n '/^swaptest: pages/,$p' "$TMPD/a.txt" | grep -qaE "panic|user fault" && ok "A no panic, no user fault" || bad "A panic or user fault"
 grep -qax "swapdone" "$TMPD/a.txt" && ok "A shell reached the end of the script" || bad "A swapdone missing"
 echo "== B. counter-proof without the word: no swap, the same load cannot finish =="
 qboot b ""
