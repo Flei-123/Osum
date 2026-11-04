@@ -2,6 +2,11 @@
 profile kernel
 
 import gfx.fb
+import lib.kstate
+import gfx.displayclass
+import bus.drvclass
+import drv.hid.inputclass
+import drv.hid.i2chid
 import ui.pixelguard
 import ui.wm
 import ui.wm.wmkeys
@@ -53,37 +58,65 @@ export {
     fb_stripe, fb_uncached, fb_double_buffered, fb_uiscale, fb_presents,
     gpu_ready, frame_done, gpu_event,
     fb_draw_at, fb_back,
-    fb_addr,
+    fb_addr, input_poll,
     gpu_backend, gpu_frames, gpu_present_bytes, gpu_vram_total, gpu_vram_used, gpu_hw_cursor
 }
 
 // ------------------------------------------------- der Grafiktreiber
 
+fn display_ops(state: u64, kind: u64) -> displayclass.DisplayOps {
+    if kstate.mode_on(state, kstate.M_NODISCLASS) {
+        return displayclass.null_ops()
+    }
+    drvclass.hit(drvclass.CLS_DISPLAY)
+    if kind == displayclass.KIND_VGPU {
+        return vgpu.ops()
+    }
+    if kind == displayclass.KIND_VMSVGA {
+        return vmsvga.ops()
+    }
+    if kind == displayclass.KIND_FB {
+        return fb.ops()
+    }
+    return displayclass.null_ops()
+}
+
+fn display_kind(state: u64) -> u64 {
+    let gv: displayclass.DisplayOps = display_ops(state, displayclass.KIND_VGPU)
+    if gv.ready(state) {
+        return displayclass.KIND_VGPU
+    }
+    let sv: displayclass.DisplayOps = display_ops(state, displayclass.KIND_VMSVGA)
+    if sv.ready(state) {
+        return displayclass.KIND_VMSVGA
+    }
+    let fo: displayclass.DisplayOps = display_ops(state, displayclass.KIND_FB)
+    if fo.ready(state) {
+        return displayclass.KIND_FB
+    }
+    return displayclass.KIND_NONE
+}
+
+fn display_active(state: u64) -> displayclass.DisplayOps {
+    return display_ops(state, display_kind(state))
+}
+
 fn gpu_ready(state: u64) -> bool {
-    return vgpu.usable(state)
+    let o: displayclass.DisplayOps = display_ops(state, displayclass.KIND_VGPU)
+    return o.ready(state)
 }
 
 fn frame_done(state: u64) {
-    if !vgpu.usable(state) {
-        // VMSVGA: one UPDATE rectangle for what the copy sites wrote into VRAM (a nothing without that driver)
-        if vmsvga.is_ready(state) {
-            let _u: bool = vmsvga.present(state)
-        }
-        return
-    }
-    let _ok: bool = vgpu.present(state)
+    let o: displayclass.DisplayOps = display_active(state)
+    let _ok: bool = o.present(state)
 }
 
 // r967: THE PANIC SCREEN MUST REACH THE HOST. trap.fi calls this after it stopped every other core: the picture is in the card's
 // memory, and a driver that has to be TOLD (VMSVGA under VirtualBox with TRACES=0) needs its UPDATE now -- nobody else will ever
 // call `bild_fertig` again. virtio-gpu is left alone: its present takes the command queue, which a stopped core may hold.
 fn panik_present(state: u64) {
-    if vgpu.usable(state) {
-        return
-    }
-    if vmsvga.is_ready(state) {
-        vmsvga.panic_present(state)
-    }
+    let o: displayclass.DisplayOps = display_active(state)
+    o.panic_present(state)
 }
 
 fn gpu_event(state: u64) -> bool {
@@ -425,8 +458,32 @@ fn mouse_gest_action(state: u64, act: u64, n: u64) -> bool {
     return tiling.gest_action(state, act, n)
 }
 
+fn input_ops(state: u64, kind: u64) -> inputclass.InputOps {
+    if kstate.mode_on(state, kstate.M_NOINCLASS) {
+        return inputclass.null_ops()
+    }
+    drvclass.hit(drvclass.CLS_INPUT)
+    if kind == inputclass.KIND_PS2 {
+        return ps2m.ops()
+    }
+    if kind == inputclass.KIND_I2C {
+        return i2chid.ops()
+    }
+    return inputclass.null_ops()
+}
+
+fn input_poll(state: u64) {
+    var k: u64 = 1
+    while k < inputclass.KIND_COUNT {
+        let o: inputclass.InputOps = input_ops(state, k)
+        o.poll(state)
+        k = k + 1
+    }
+}
+
 fn mouse_irq(state: u64) {
-    ps2m.irq(state)
+    let o: inputclass.InputOps = input_ops(state, inputclass.KIND_PS2)
+    o.irq(state)
 }
 
 fn wm_poll(state: u64) -> bool {
@@ -602,7 +659,8 @@ fn fb_from_multiboot(state: u64) -> bool {
 }
 
 fn mouse_present(state: u64) -> bool {
-    return ps2m.present(state)
+    let o: inputclass.InputOps = input_ops(state, inputclass.KIND_PS2)
+    return o.present(state)
 }
 
 fn mouse_init(state: u64, w: u64, h: u64) -> bool {
@@ -664,74 +722,36 @@ fn mouse_wheel(state: u64) -> u64 {
     return ps2m.wheel(state)
 }
 
-const GPU_NA: u64 = 0xFFFFFFFFFFFFFFFF
+const GPU_NA: u64 = displayclass.NA
 
 fn gpu_backend(state: u64) -> u64 {
-    if vgpu.usable(state) {
-        return 2
-    }
-    if vmsvga.is_ready(state) {
-        return 3
-    }
-    if fb.ready(state) {
-        return 1
-    }
-    return 0
+    return display_kind(state)
 }
 
 fn gpu_frames(state: u64) -> u64 {
-    let b: u64 = gpu_backend(state)
-    if b == 2 {
-        return vgpu.flushes(state)
-    }
-    if b == 3 {
-        return vmsvga.present_frames(state)
-    }
-    if b == 1 {
-        return fb.presents(state)
-    }
-    return GPU_NA
+    let o: displayclass.DisplayOps = display_active(state)
+    return o.frames(state)
 }
 
 fn gpu_present_bytes(state: u64) -> u64 {
-    if gpu_backend(state) == 2 {
-        return vgpu.oktette(state)
-    }
-    return GPU_NA
+    let o: displayclass.DisplayOps = display_active(state)
+    return o.present_bytes(state)
 }
 
 fn gpu_vram_total(state: u64) -> u64 {
-    let b: u64 = gpu_backend(state)
-    if b == 3 && vmsvga.vram_bytes(state) != 0 {
-        return vmsvga.vram_bytes(state)
-    }
-    if b == 1 && fb.bytes(state) != 0 {
-        return fb.bytes(state)
-    }
-    return GPU_NA
+    let o: displayclass.DisplayOps = display_active(state)
+    return o.vram_total(state)
 }
 
 fn gpu_vram_used(state: u64) -> u64 {
-    let b: u64 = gpu_backend(state)
-    if (b == 1 || b == 3) && fb.bytes(state) != 0 {
-        return fb.bytes(state)
-    }
-    return GPU_NA
+    let o: displayclass.DisplayOps = display_active(state)
+    return o.vram_used(state)
 }
 
 fn gpu_hw_cursor(state: u64) -> u64 {
-    let b: u64 = gpu_backend(state)
-    if b == 2 {
-        if vgpu.cursor_an(state) {
-            return 1
-        }
-        return 0
-    }
-    if b == 3 {
-        if vmsvga.cursor_ready(state) {
-            return 1
-        }
-        return 0
+    let o: displayclass.DisplayOps = display_active(state)
+    if o.hw_cursor(state) {
+        return 1
     }
     return 0
 }
