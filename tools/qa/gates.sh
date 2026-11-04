@@ -46,7 +46,7 @@ done
 [[ -n $mode ]] || { sed -n '2,19p' "$0"; exit 2; }
 
 case $mode in
---check) python3 -I $QA/gen-manifest.py --check; exit $? ;;
+--check) python3 -I $QA/gen-manifest.py --check && python3 -I $QA/coverage.py; exit $? ;;
 --times)
     [[ -f $TIMES ]] && sort -t$'\t' -k2 -rn "$TIMES" | awk -F'\t' '!s[$1]++{printf "%-14s %6d s  %s  %s\n",$1,$2,$3,$4}' || echo "no times yet ($TIMES)"
     exit 0 ;;
