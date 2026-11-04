@@ -17,7 +17,8 @@ typedef uint64_t (VKAPI_PTR *PFN_vkOsumGetPresentCountOSUM)(VkSurfaceKHR);
     X(vkCmdCopyBuffer) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdPipelineBarrier) X(vkCreateFence) X(vkQueueSubmit) X(vkWaitForFences) X(vkResetFences) \
     X(vkResetCommandBuffer) X(vkCreateShaderModule) X(vkCreateGraphicsPipelines) X(vkCreatePipelineLayout) X(vkCreateDescriptorSetLayout) X(vkCreateDescriptorPool) \
     X(vkAllocateDescriptorSets) X(vkUpdateDescriptorSets) X(vkCreateImageView) X(vkCreateSampler) X(vkCmdBeginRendering) X(vkCmdEndRendering) X(vkCmdBindPipeline) \
-    X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdDrawIndexed)
+    X(vkCmdBindVertexBuffers) X(vkCmdBindIndexBuffer) X(vkCmdBindDescriptorSets) X(vkCmdPushConstants) X(vkCmdSetViewport) X(vkCmdSetScissor) X(vkCmdDraw) X(vkCmdDrawIndexed) \
+    X(vkCreateRenderPass) X(vkCreateFramebuffer) X(vkCmdBeginRenderPass) X(vkCmdEndRenderPass) X(vkCmdClearAttachments) X(vkCmdBlitImage)
 #define DECL(n) static PFN_##n n;
 FNS(DECL)
 
@@ -123,6 +124,7 @@ static int g_wsi;
 static VkPhysicalDevice g_pd;
 static PFN_vkGetInstanceProcAddr g_gipa;
 static PFN_vkGetDeviceProcAddr g_gdpa;
+static VkRenderPass g_rp;
 static VkPipeline mkpipe(const PipeDesc *d)
 {
     VkPipelineShaderStageCreateInfo st[2] = {
@@ -144,7 +146,7 @@ static VkPipeline mkpipe(const PipeDesc *d)
     VkPipelineDynamicStateCreateInfo dsi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn };
     VkFormat cf = d->color;
     VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = 1, .pColorAttachmentFormats = &cf, .depthAttachmentFormat = d->depth, .stencilAttachmentFormat = d->stencil ? g_sfmt : VK_FORMAT_UNDEFINED };
-    VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+    VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = g_rp ? 0 : &ri, .renderPass = g_rp, .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
         .pViewportState = &vp, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds, .pColorBlendState = &cbs, .pDynamicState = &dsi, .layout = d->layout };
     VkPipeline p = 0;
     VkResult r = vkCreateGraphicsPipelines(dev, 0, 1, &gi, 0, &p);
@@ -218,10 +220,9 @@ static void set_vp(int x, int y, int w, int h, int sx, int sy, int sw, int sh)
     vkCmdSetScissor(cb, 0, 1, &s);
 }
 
-static void finish(Target *t, const char *name, Buf *rb)
+static void readback(Target *t, const char *name, Buf *rb, VkImageLayout from)
 {
-    vkCmdEndRendering(cb);
-    transition(t->color.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(t->color.i, VK_IMAGE_ASPECT_COLOR_BIT, from, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
     VkBufferImageCopy c = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { W, H, 1 } };
     vkCmdCopyImageToBuffer(cb, t->color.i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb->b, 1, &c);
     char label[128];
@@ -240,6 +241,12 @@ static void finish(Target *t, const char *name, Buf *rb)
     }
     if (f) fclose(f);
     printf("VK img %s %016llx\n", name, (unsigned long long)hash);
+}
+
+static void finish(Target *t, const char *name, Buf *rb)
+{
+    vkCmdEndRendering(cb);
+    readback(t, name, rb, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
 static const float tri_data[] = { -0.8f, -0.7f, 1, 0, 0, 1,   0.9f, -0.5f, 0, 1, 0, 1,   0.1f, 0.8f, 0, 0, 1, 1 };
@@ -440,6 +447,54 @@ static void case_area(void)
     vkCmdDraw(cb, 3, 1, 0, 0);
     finish(&t, "area", &rb);
     g_area[0] = 0; g_area[1] = 0; g_area[2] = W; g_area[3] = H;
+}
+
+static void case_rpass(void)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    VkAttachmentDescription ad = { .format = t.fmt, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED, .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkAttachmentReference ar = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+    VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ar };
+    VkRenderPassCreateInfo rpi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ad, .subpassCount = 1, .pSubpasses = &sp };
+    VkRenderPass rp = 0;
+    check("vkCreateRenderPass", vkCreateRenderPass(dev, &rpi, 0, &rp) == VK_SUCCESS && rp);
+    VkFramebufferCreateInfo fi = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 1, .pAttachments = &t.color.v, .width = W, .height = H, .layers = 1 };
+    VkFramebuffer fb = 0;
+    check("vkCreateFramebuffer", vkCreateFramebuffer(dev, &fi, 0, &fb) == VK_SUCCESS && fb);
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout lay = mklayout(0, 0, &dsl);
+    PipeDesc d = { "tri.vert", "tri.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 2, 24, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }, { 0, 8 }, lay };
+    g_rp = rp;
+    VkPipeline p = mkpipe(&d);
+    g_rp = 0;
+    check("pipeline rpass", p != 0);
+    Buf vb = mkvec(tri_data, sizeof tri_data, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    begin();
+    VkClearValue cv = { .color = { .float32 = { 0.2f, 0.4f, 0.6f, 1.0f } } };
+    VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = { { 0, 0 }, { W, H } }, .clearValueCount = 1, .pClearValues = &cv };
+    vkCmdBeginRenderPass(cb, &bi, VK_SUBPASS_CONTENTS_INLINE);
+    VkClearAttachment ca = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = { .color = { .float32 = { 0.9f, 0.1f, 0.1f, 1.0f } } } };
+    VkClearRect cr = { .rect = { { 4, 3 }, { 20, 14 } }, .baseArrayLayer = 0, .layerCount = 1 };
+    vkCmdClearAttachments(cb, 1, &ca, 1, &cr);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    set_vp(0, 0, W, H, 0, 0, W, H);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cb);
+    Target t2 = t;
+    t2.color = mkimg(t.fmt, W, H, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    transition(t.color.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    transition(t2.color.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    VkImageBlit br = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffsets = { { 0, 0, 0 }, { W, H, 1 } },
+        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffsets = { { W, 0, 0 }, { 0, H, 1 } } };
+    vkCmdBlitImage(cb, t.color.i, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t2.color.i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &br, VK_FILTER_NEAREST);
+    readback(&t2, "blit", &rb, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    Buf rb2 = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    begin();
+    readback(&t, "rpass", &rb2, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 }
 
 typedef struct { float clipr[4], box[4], c1[4], grad[4], size[4]; } FuiU;
@@ -771,6 +826,7 @@ int main(int argc, char **argv)
     case_inst();
     case_dubo();
     case_area();
+    case_rpass();
     case_depth();
     case_fui();
     if (g_wsi) case_wsi();

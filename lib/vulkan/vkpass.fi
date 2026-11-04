@@ -1,0 +1,171 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import vulkan.vkobj
+import vulkan.vkcmd
+
+export { vkCreateRenderPass, vkDestroyRenderPass, vkCreateFramebuffer, vkDestroyFramebuffer, vkCmdBeginRenderPass, vkCmdEndRenderPass, vkCmdClearAttachments }
+
+const MAX_ATT: u32 = 8 as u32
+const NONE: u64 = 0xFFFF as u64
+const FMT_DEPTH: u64 = 126
+const FMT_STENCIL: u64 = 127
+
+fn ref_index(ref_ptr: u64) -> u64 {
+    if ref_ptr == 0 as u64 { return NONE }
+    let a: u32 = rt.ld32(ref_ptr, 0)
+    if a >= MAX_ATT { return NONE }
+    return a as u64
+}
+
+#[export_c]
+fn vkCreateRenderPass(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    let n: u32 = rt.ld32(info + 20 as u64, 0)
+    let patt: u64 = rt.ld64(info + 24 as u64, 0)
+    let nsub: u32 = rt.ld32(info + 32 as u64, 0)
+    let psub: u64 = rt.ld64(info + 40 as u64, 0)
+    if nsub != 1 as u32 || psub == 0 as u64 || n > MAX_ATT { return -3 }
+    if n != 0 as u32 && patt == 0 as u64 { return -3 }
+    if rt.ld32(psub + 24 as u64, 0) > 1 as u32 { return -3 }
+    let h: u64 = vkobj.obj_new(vkobj.K_RENDERPASS)
+    if h == 0 as u64 { return -1 }
+    let tab: u64 = rt.heap_alloc((MAX_ATT as usize) * 8)
+    rt.mem_set(tab, 0 as u8, (MAX_ATT as usize) * 8)
+    var i: u32 = 0 as u32
+    while i < n {
+        let a: u64 = patt + (i as u64) * 36 as u64
+        let word: u64 = (rt.ld32(a + 4 as u64, 0) as u64) | ((rt.ld32(a + 12 as u64, 0) as u64) << 32 as u64) | ((rt.ld32(a + 20 as u64, 0) as u64) << 40 as u64)
+        rt.st64(tab, i as usize, word)
+        i = i + 1 as u32
+    }
+    var cidx: u64 = NONE
+    if rt.ld32(psub + 24 as u64, 0) == 1 as u32 { cidx = ref_index(rt.ld64(psub + 32 as u64, 0)) }
+    let didx: u64 = ref_index(rt.ld64(psub + 48 as u64, 0))
+    vkobj.obj_set(h, vkobj.K_RENDERPASS, 0, tab)
+    vkobj.obj_set(h, vkobj.K_RENDERPASS, 1, n as u64)
+    vkobj.obj_set(h, vkobj.K_RENDERPASS, 2, cidx)
+    vkobj.obj_set(h, vkobj.K_RENDERPASS, 3, didx)
+    rt.st64(out, 0, h)
+    return 0
+}
+
+#[export_c]
+fn vkDestroyRenderPass(dev: u64, rp: u64, alloc: u64) {
+    let tab: u64 = vkobj.obj_get(rp, vkobj.K_RENDERPASS, 0)
+    if tab != 0 as u64 { rt.heap_free(tab, (MAX_ATT as usize) * 8) }
+    vkobj.obj_free(rp, vkobj.K_RENDERPASS)
+}
+
+#[export_c]
+fn vkCreateFramebuffer(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    let n: u32 = rt.ld32(info + 32 as u64, 0)
+    let pv: u64 = rt.ld64(info + 40 as u64, 0)
+    if n > MAX_ATT { return -3 }
+    if n != 0 as u32 && pv == 0 as u64 { return -3 }
+    let h: u64 = vkobj.obj_new(vkobj.K_FRAMEBUFFER)
+    if h == 0 as u64 { return -1 }
+    let tab: u64 = rt.heap_alloc((MAX_ATT as usize) * 8)
+    rt.mem_set(tab, 0 as u8, (MAX_ATT as usize) * 8)
+    var i: u32 = 0 as u32
+    while i < n {
+        rt.st64(tab, i as usize, rt.ld64(pv, i as usize))
+        i = i + 1 as u32
+    }
+    vkobj.obj_set(h, vkobj.K_FRAMEBUFFER, 0, tab)
+    vkobj.obj_set(h, vkobj.K_FRAMEBUFFER, 1, n as u64)
+    vkobj.obj_set(h, vkobj.K_FRAMEBUFFER, 2, (rt.ld32(info + 48 as u64, 0) as u64) | ((rt.ld32(info + 52 as u64, 0) as u64) << 32 as u64))
+    rt.st64(out, 0, h)
+    return 0
+}
+
+#[export_c]
+fn vkDestroyFramebuffer(dev: u64, fb: u64, alloc: u64) {
+    let tab: u64 = vkobj.obj_get(fb, vkobj.K_FRAMEBUFFER, 0)
+    if tab != 0 as u64 { rt.heap_free(tab, (MAX_ATT as usize) * 8) }
+    vkobj.obj_free(fb, vkobj.K_FRAMEBUFFER)
+}
+
+fn clear_at(clears: u64, nclears: u32, idx: u64) -> u64 {
+    if idx >= (nclears as u64) { return 0 as u64 }
+    return clears + idx * 16 as u64
+}
+
+fn pack_area(info: u64) -> u64 {
+    let ax: u64 = (rt.ld32(info + 32 as u64, 0) as u64) & 0xFFFF as u64
+    let ay: u64 = (rt.ld32(info + 36 as u64, 0) as u64) & 0xFFFF as u64
+    let aw: u64 = (rt.ld32(info + 40 as u64, 0) as u64) & 0xFFFF as u64
+    let ah: u64 = (rt.ld32(info + 44 as u64, 0) as u64) & 0xFFFF as u64
+    return ax | (ay << 16 as u64) | (aw << 32 as u64) | (ah << 48 as u64)
+}
+
+#[export_c]
+fn vkCmdBeginRenderPass(cb: u64, info: u64, contents: u32) {
+    let rp: u64 = rt.ld64(info + 16 as u64, 0)
+    let fb: u64 = rt.ld64(info + 24 as u64, 0)
+    let ptab: u64 = vkobj.obj_get(rp, vkobj.K_RENDERPASS, 0)
+    let views: u64 = vkobj.obj_get(fb, vkobj.K_FRAMEBUFFER, 0)
+    if ptab == 0 as u64 || views == 0 as u64 { return }
+    let nviews: u64 = vkobj.obj_get(fb, vkobj.K_FRAMEBUFFER, 1)
+    let cidx: u64 = vkobj.obj_get(rp, vkobj.K_RENDERPASS, 2)
+    let didx: u64 = vkobj.obj_get(rp, vkobj.K_RENDERPASS, 3)
+    let nclears: u32 = rt.ld32(info + 48 as u64, 0)
+    let clears: u64 = rt.ld64(info + 56 as u64, 0)
+    let r: u64 = vkcmd.rec_new(cb, vkcmd.OP_BEGIN_RENDERING)
+    if r == 0 as u64 { return }
+    rt.st64(r, 7, pack_area(info))
+    if cidx != NONE && cidx < nviews {
+        rt.st64(r, 1, rt.ld64(views, cidx as usize))
+        let cv: u64 = clear_at(clears, nclears, cidx)
+        if cv != 0 as u64 {
+            rt.st64(r, 2, (rt.ld32(cv, 0) as u64) | ((rt.ld32(cv + 4 as u64, 0) as u64) << 32 as u64))
+            rt.st64(r, 3, (rt.ld32(cv + 8 as u64, 0) as u64) | ((rt.ld32(cv + 12 as u64, 0) as u64) << 32 as u64))
+        }
+        rt.st64(r, 4, (rt.ld64(ptab, cidx as usize) >> 32 as u64) & 0xFF as u64)
+    }
+    if didx != NONE && didx < nviews {
+        let desc: u64 = rt.ld64(ptab, didx as usize)
+        let fmt: u64 = desc & 0xFFFFFFFF as u64
+        let cv: u64 = clear_at(clears, nclears, didx)
+        if fmt == FMT_DEPTH {
+            rt.st64(r, 5, rt.ld64(views, didx as usize))
+            if cv != 0 as u64 { rt.st64(r, 6, rt.ld32(cv, 0) as u64) }
+            rt.st64(r, 4, rt.ld64(r, 4) | (((desc >> 32 as u64) & 0xFF as u64) << 8 as u64))
+        }
+        if fmt == FMT_STENCIL {
+            let s: u64 = vkcmd.rec_new(cb, vkcmd.OP_BEGIN_STENCIL)
+            if s == 0 as u64 { return }
+            rt.st64(s, 1, rt.ld64(views, didx as usize))
+            rt.st64(s, 2, (desc >> 40 as u64) & 0xFF as u64)
+            if cv != 0 as u64 { rt.st64(s, 3, rt.ld32(cv + 4 as u64, 0) as u64) }
+        }
+    }
+}
+
+#[export_c]
+fn vkCmdEndRenderPass(cb: u64) {
+    vkcmd.rec_new(cb, vkcmd.OP_END_RENDERING)
+}
+
+#[export_c]
+fn vkCmdClearAttachments(cb: u64, natt: u32, atts: u64, nrect: u32, rects: u64) {
+    var i: u32 = 0 as u32
+    while i < natt {
+        let a: u64 = atts + (i as u64) * 24 as u64
+        var j: u32 = 0 as u32
+        while j < nrect {
+            let rc: u64 = rects + (j as u64) * 24 as u64
+            let r: u64 = vkcmd.rec_new(cb, vkcmd.OP_CLEAR_ATT)
+            if r == 0 as u64 { return }
+            rt.st64(r, 1, rt.ld32(a, 0) as u64)
+            rt.st64(r, 2, (rt.ld32(a + 8 as u64, 0) as u64) | ((rt.ld32(a + 12 as u64, 0) as u64) << 32 as u64))
+            rt.st64(r, 3, (rt.ld32(a + 16 as u64, 0) as u64) | ((rt.ld32(a + 20 as u64, 0) as u64) << 32 as u64))
+            let rx: u64 = (rt.ld32(rc, 0) as u64) & 0xFFFF as u64
+            let ry: u64 = (rt.ld32(rc + 4 as u64, 0) as u64) & 0xFFFF as u64
+            let rw: u64 = (rt.ld32(rc + 8 as u64, 0) as u64) & 0xFFFF as u64
+            let rh: u64 = (rt.ld32(rc + 12 as u64, 0) as u64) & 0xFFFF as u64
+            rt.st64(r, 4, rx | (ry << 16 as u64) | (rw << 32 as u64) | (rh << 48 as u64))
+            rt.st64(r, 5, (rt.ld32(a + 8 as u64, 0) as u64) | ((rt.ld32(a + 12 as u64, 0) as u64) << 32 as u64))
+            j = j + 1 as u32
+        }
+        i = i + 1 as u32
+    }
+}

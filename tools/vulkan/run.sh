@@ -44,7 +44,7 @@ for sh in tools/vulkan/shaders/tri.vert tools/vulkan/shaders/tri.frag tools/vulk
     b=$(basename "$sh")
     glslangValidator -V "$sh" -o "$D/spv/$b.spv" > /dev/null 2>&1 && spirv-opt --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store "$D/spv/$b.spv" -o "$D/spv/$b.opt" || ck "shader $b compiles" no
 done
-CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil quad_bgra quad_npot inst dubo area"
+CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil quad_bgra quad_npot inst dubo area rpass blit"
 WSI_CASES="wsi wsi1 wsi2"
 VK_DRIVER_FILES=$LVP timeout 120 "$D/draw" libvulkan.so.1 1 "$D/lvpd" "$D/spv" > "$D/draw_lvp.txt" 2>&1
 grep -q "^VK DONE bad=0" "$D/draw_lvp.txt" && ck "draw client: lavapipe reference passes" ok || ck "draw client: lavapipe reference passes" no
@@ -90,6 +90,9 @@ mutate_draw() {
     timeout 120 stdbuf -o0 "$D/draw" "$D/m/libvulkan.so.1" 0 "$D/m/out" "$D/spv" > "$D/m/out.txt" 2>&1
     if draw_match "$D/m/out"; then ck "draw counter-proof $name: mutant must differ from lavapipe" no; else ck "draw counter-proof $name: mutant differs from lavapipe" ok; fi
 }
+mutate_draw "render pass load op dropped" vkpass.fi 's/rt.st64(r, 4, (rt.ld64(ptab, cidx as usize) >> 32 as u64) \& 0xFF as u64)/rt.st64(r, 4, 0 as u64)/'
+mutate_draw "clear attachments ignored" vkrender.fi 's/fill_rect32((\*f).color, (\*f).w, (\*f).h, area, px)//'
+mutate_draw "blit flip ignored" vkblit.fi 's/if dx1 < dx0 { tx = dx0 - 1 as i64 - x }//'
 mutate_draw "no viewport y flip" vkrender.fi 's/0.0f - y \* sy + w \* oy/y * sy + w * oy/'
 mutate_draw "push constants dropped" vkrender.fi 's/rt.mem_copy(ubo + (lower.PUSH_BASE as u64), rs + (R_PUSH as u64) \* 8 as u64, PUSH_WORDS \* 8)//'
 mutate_draw "blend ignored" vkrender.fi 's/raster.frame_set_blend(f, (flags \& vkpipe.F_BLEND) != 0 as u64)/raster.frame_set_blend(f, false)/'
