@@ -1,0 +1,279 @@
+profile kernel
+
+import lib.kstate
+
+export {
+    T_CAPF, T_CAPP, T_CAPE, T_CAPI, T_CAPB, T_SECF, T_NSMNT, T_NSPID,
+    F_EXPLICIT, F_NNP,
+    CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_FOWNER, CAP_FSETID,
+    CAP_KILL, CAP_SETGID, CAP_SETUID, CAP_SETPCAP, CAP_NET_BIND_SERVICE,
+    CAP_NET_ADMIN, CAP_NET_RAW, CAP_IPC_LOCK, CAP_SYS_MODULE, CAP_SYS_RAWIO,
+    CAP_SYS_CHROOT, CAP_SYS_PTRACE, CAP_SYS_ADMIN, CAP_SYS_BOOT, CAP_SYS_NICE,
+    CAP_SYS_RESOURCE, CAP_SYS_TIME, CAP_SYS_TTY_CONFIG, CAP_MKNOD, CAP_BPF,
+    CAP_LAST, FULL,
+    eff, permitted, inheritable, bounding, has, no_new_privs, set_nnp,
+    materialize, inherit, before_ids, after_ids, on_exec, drop_bound,
+    set_sets, confine, mask_for_rights, denied, checks, note_check,
+}
+
+const T_CAPF: u64 = 552
+const T_CAPP: u64 = 560
+const T_CAPE: u64 = 568
+const T_CAPI: u64 = 576
+const T_CAPB: u64 = 584
+const T_SECF: u64 = 608
+const T_NSMNT: u64 = 592
+const T_NSPID: u64 = 600
+
+const F_EXPLICIT: u64 = 1
+const F_NNP: u64 = 2
+
+const CAP_CHOWN: u64 = 0
+const CAP_DAC_OVERRIDE: u64 = 1
+const CAP_DAC_READ_SEARCH: u64 = 2
+const CAP_FOWNER: u64 = 3
+const CAP_FSETID: u64 = 4
+const CAP_KILL: u64 = 5
+const CAP_SETGID: u64 = 6
+const CAP_SETUID: u64 = 7
+const CAP_SETPCAP: u64 = 8
+const CAP_NET_BIND_SERVICE: u64 = 10
+const CAP_NET_ADMIN: u64 = 12
+const CAP_NET_RAW: u64 = 13
+const CAP_IPC_LOCK: u64 = 14
+const CAP_SYS_MODULE: u64 = 16
+const CAP_SYS_RAWIO: u64 = 17
+const CAP_SYS_CHROOT: u64 = 18
+const CAP_SYS_PTRACE: u64 = 19
+const CAP_SYS_ADMIN: u64 = 21
+const CAP_SYS_BOOT: u64 = 22
+const CAP_SYS_NICE: u64 = 23
+const CAP_SYS_RESOURCE: u64 = 24
+const CAP_SYS_TIME: u64 = 25
+const CAP_SYS_TTY_CONFIG: u64 = 26
+const CAP_MKNOD: u64 = 27
+const CAP_BPF: u64 = 39
+const CAP_LAST: u64 = 40
+const FULL: u64 = 0x1FFFFFFFFFF
+
+const S_CHECKS: u64 = 0
+const S_DENIED: u64 = 8
+
+static mut counters: [u64; 2] = [0 as u64; 2]
+
+fn slot(state: u64, t: u64, field: u64) -> *mut u64 {
+    return (state + kstate.TASK_OFF + t * kstate.TASK_BYTES + field) as *mut u64
+}
+
+fn tget(state: u64, t: u64, field: u64) -> u64 {
+    return __mmio_read64(slot(state, t, field))
+}
+
+fn tset(state: u64, t: u64, field: u64, v: u64) {
+    __mmio_write64(slot(state, t, field), v)
+}
+
+fn explicit(state: u64, t: u64) -> bool {
+    return (tget(state, t, T_CAPF) & F_EXPLICIT) != 0
+}
+
+fn is_root(state: u64, t: u64) -> bool {
+    return __mmio_read64((state + kstate.TASK_OFF + t * kstate.TASK_BYTES + 408) as *mut u64) == 0
+}
+
+fn derived(state: u64, t: u64) -> u64 {
+    if is_root(state, t) {
+        return FULL
+    }
+    return 0
+}
+
+fn eff(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    if explicit(state, t) {
+        return tget(state, t, T_CAPE)
+    }
+    return derived(state, t)
+}
+
+fn permitted(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    if explicit(state, t) {
+        return tget(state, t, T_CAPP)
+    }
+    return derived(state, t)
+}
+
+fn inheritable(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    if explicit(state, t) {
+        return tget(state, t, T_CAPI)
+    }
+    return 0
+}
+
+fn bounding(state: u64, t: u64) -> u64 {
+    if t >= kstate.MAX_TASKS {
+        return 0
+    }
+    if explicit(state, t) {
+        return tget(state, t, T_CAPB)
+    }
+    return FULL
+}
+
+fn note_check(allowed: bool) {
+    counters[0] = counters[0] + 1
+    if !allowed {
+        counters[1] = counters[1] + 1
+    }
+}
+
+fn checks() -> u64 {
+    return counters[0]
+}
+
+fn denied() -> u64 {
+    return counters[1]
+}
+
+fn has(state: u64, t: u64, cap: u64) -> bool {
+    if cap > CAP_LAST {
+        return false
+    }
+    let ok: bool = ((eff(state, t) >> cap) & 1) != 0
+    note_check(ok)
+    return ok
+}
+
+fn no_new_privs(state: u64, t: u64) -> bool {
+    return (tget(state, t, T_CAPF) & F_NNP) != 0
+}
+
+fn set_nnp(state: u64, t: u64) {
+    tset(state, t, T_CAPF, tget(state, t, T_CAPF) | F_NNP)
+}
+
+fn materialize(state: u64, t: u64) {
+    if t >= kstate.MAX_TASKS || explicit(state, t) {
+        return
+    }
+    let p: u64 = derived(state, t)
+    tset(state, t, T_CAPP, p)
+    tset(state, t, T_CAPE, p)
+    tset(state, t, T_CAPI, 0)
+    tset(state, t, T_CAPB, FULL)
+    tset(state, t, T_CAPF, tget(state, t, T_CAPF) | F_EXPLICIT)
+}
+
+fn inherit(state: u64, child: u64, parent: u64) {
+    if child >= kstate.MAX_TASKS || parent >= kstate.MAX_TASKS {
+        return
+    }
+    tset(state, child, T_CAPF, tget(state, parent, T_CAPF))
+    tset(state, child, T_CAPP, tget(state, parent, T_CAPP))
+    tset(state, child, T_CAPE, tget(state, parent, T_CAPE))
+    tset(state, child, T_CAPI, tget(state, parent, T_CAPI))
+    tset(state, child, T_CAPB, tget(state, parent, T_CAPB))
+    tset(state, child, T_NSMNT, tget(state, parent, T_NSMNT))
+    tset(state, child, T_NSPID, tget(state, parent, T_NSPID))
+}
+
+fn before_ids(state: u64, t: u64) {
+    materialize(state, t)
+}
+
+fn after_ids(state: u64, t: u64, old_r: u64, old_e: u64, old_s: u64) {
+    if !explicit(state, t) {
+        return
+    }
+    let b: u64 = state + kstate.TASK_OFF + t * kstate.TASK_BYTES
+    let nr: u64 = __mmio_read64((b + 392) as *mut u64)
+    let ne: u64 = __mmio_read64((b + 408) as *mut u64)
+    let ns: u64 = __mmio_read64((b + 424) as *mut u64)
+    let had_root: bool = old_r == 0 || old_e == 0 || old_s == 0
+    if had_root && nr != 0 && ne != 0 && ns != 0 {
+        tset(state, t, T_CAPP, 0)
+        tset(state, t, T_CAPE, 0)
+        return
+    }
+    if old_e == 0 && ne != 0 {
+        tset(state, t, T_CAPE, 0)
+    }
+    if old_e != 0 && ne == 0 {
+        tset(state, t, T_CAPE, tget(state, t, T_CAPP))
+    }
+}
+
+fn on_exec(state: u64, t: u64) {
+    if !explicit(state, t) {
+        return
+    }
+    let b: u64 = tget(state, t, T_CAPB)
+    var p: u64 = tget(state, t, T_CAPI) & b
+    if is_root(state, t) {
+        p = b
+    }
+    tset(state, t, T_CAPP, p)
+    tset(state, t, T_CAPE, p)
+}
+
+fn drop_bound(state: u64, t: u64, cap: u64) -> bool {
+    if cap > CAP_LAST {
+        return false
+    }
+    materialize(state, t)
+    tset(state, t, T_CAPB, tget(state, t, T_CAPB) & (FULL ^ (1 << cap)))
+    tset(state, t, T_CAPI, tget(state, t, T_CAPI) & tget(state, t, T_CAPB))
+    return true
+}
+
+fn set_sets(state: u64, t: u64, e: u64, p: u64, i: u64) -> u64 {
+    materialize(state, t)
+    let old_p: u64 = tget(state, t, T_CAPP)
+    let old_i: u64 = tget(state, t, T_CAPI)
+    let b: u64 = tget(state, t, T_CAPB)
+    if (p & old_p) != p {
+        return 1
+    }
+    if (e & p) != e {
+        return 1
+    }
+    var allowed_i: u64 = old_i
+    if ((tget(state, t, T_CAPE) >> CAP_SETPCAP) & 1) != 0 {
+        allowed_i = old_i | old_p
+    }
+    if (i & (allowed_i | 0)) != i {
+        return 1
+    }
+    if (i & (old_i | b)) != i {
+        return 1
+    }
+    tset(state, t, T_CAPP, p)
+    tset(state, t, T_CAPE, e)
+    tset(state, t, T_CAPI, i)
+    return 0
+}
+
+fn confine(state: u64, t: u64, mask: u64) {
+    let m: u64 = mask & FULL
+    tset(state, t, T_CAPP, m)
+    tset(state, t, T_CAPE, m)
+    tset(state, t, T_CAPI, 0)
+    tset(state, t, T_CAPB, m)
+    tset(state, t, T_CAPF, tget(state, t, T_CAPF) | F_EXPLICIT | F_NNP)
+}
+
+fn mask_for_rights(rights: u64) -> u64 {
+    var m: u64 = 0
+    if (rights & 4) != 0 {
+        m = m | (1 << CAP_NET_BIND_SERVICE)
+    }
+    return m
+}
