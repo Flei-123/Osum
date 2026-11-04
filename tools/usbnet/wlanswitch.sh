@@ -59,6 +59,7 @@ snaps() { local i=0; while [ "$i" -lt "$1" ]; do echo "sleep $SNAP_SEC"; i=$((i+
     echo "ping -c 2 $GW"
     echo 'echo ==WPING=='
     echo "wget -q http://$GW/big"
+    echo "wget -q http://$GW:$PORT/big"
     echo 'echo ==WWGET=='
     echo 'host store.fleitec.com'
     echo 'echo ==WHOST=='
@@ -103,7 +104,8 @@ run() {
 section() { awk -v a="$2" -v b="$3" '$0 ~ a {f=1} $0 ~ b {f=0} f' "$1"; }
 if [ "${USBWLAN_LATE_ONLY:-0}" != 1 ]; then
 run m
-run o "nethotwait nethotlate nohotkeep"
+run o "nethotwait nethotlate wlanfirst nohotkeep"
+run d "nethotwait nethotlate iwlfhdrop"
 fi
 check() {
     local f=$1 tag=$2
@@ -126,16 +128,38 @@ check() {
     section "$f" '==BACK0==' '==BACKSTATE==' > "$T/$tag.b0"
 }
 if [ "${USBWLAN_LATE_ONLY:-0}" != 1 ]; then
-check "$T/m.klar" keep
+has "$T/m.klar" '==END==' "keep: system keeps running"
+section "$T/m.klar" '==START==' '==USB0==' > "$T/keep.usb"
+has "$T/keep.usb" 'dhcp: ack ip=192.168.77.15' "keep: DHCP lease over USB"
+has "$T/keep.usb" 'wget: octets 131072' "keep: wget over USB"
+section "$T/m.klar" '==USBSTATE==' '==WLAN0==' > "$T/keep.sw"
+hasnot "$T/keep.sw" 'nethot: uplink card=1 kind=wlan' "keep: WLAN does not take the uplink while USB is alive"
+section "$T/m.klar" '==WLAN0==' '==WLANSTATE==' > "$T/keep.w0"
+has "$T/keep.w0" 'stack wired=1 uplink=0 kind=5 ip=192.168.77.15 gw=192.168.77.1' "keep: WLAN joined as standby, stack stays on USB"
+section "$T/m.klar" '==WLANSTATE==' '==WPING==' > "$T/keep.wp"
+has "$T/keep.wp" 'octets from 192.168.77.1' "keep: ping over USB while WLAN is joined"
+section "$T/m.klar" '==WPING==' '==WWGET==' > "$T/keep.ww"
+has "$T/keep.ww" 'octets 131072' "keep: wget over USB while WLAN is joined"
+section "$T/m.klar" '==WWGET==' '==WHOST==' > "$T/keep.wh"
+section "$T/m.klar" '==WHOST==' '==BACK0==' > "$T/keep.bk"
+hasnot "$T/keep.bk" 'nethot: uplink' "keep: forgetting the WLAN does not touch the uplink"
+section "$T/m.klar" '==BACK0==' '==BACKSTATE==' > "$T/keep.b0"
 has "$T/keep.b0" 'ip=192.168.77.15 gw=192.168.77.1' "keep: USB keeps its DHCP lease after WLAN is dropped"
 hasnot "$T/keep.b0" 'ip=169.254' "keep: no link-local address on USB"
 section "$T/m.klar" '==BACKSTATE==' '==BPING==' > "$T/keep.bp"
-has "$T/keep.bp" 'octets from 192.168.77.1' "keep: ping over USB after the switch back"
+has "$T/keep.bp" 'octets from 192.168.77.1' "keep: ping over USB after the WLAN is dropped"
 section "$T/m.klar" '==BPING==' '==BWGET==' > "$T/keep.bw"
-has "$T/keep.bw" 'octets 131072' "keep: wget over USB after the switch back"
+has "$T/keep.bw" 'octets 131072' "keep: wget over USB after the WLAN is dropped"
+has "$T/d.klar" '==END==' "deaf: system keeps running"
+section "$T/d.klar" '==WLANSTATE==' '==WPING==' > "$T/deaf.wp"
+has "$T/deaf.wp" 'octets from 192.168.77.1' "deaf: ping over USB while the WLAN access point is deaf"
+section "$T/d.klar" '==WPING==' '==WWGET==' > "$T/deaf.ww"
+has "$T/deaf.ww" 'octets 131072' "deaf: wget over USB while the WLAN access point is deaf"
+section "$T/d.klar" '==WWGET==' '==WHOST==' > "$T/deaf.wh"
+hasnot "$T/d.klar" 'nethot: uplink card=1 kind=wlan' "deaf: the deaf WLAN never becomes the uplink"
 check "$T/o.klar" old
-has "$T/old.b0" 'ip=169.254' "control nohotkeep: old behaviour leaves USB on link-local"
-hasnot "$T/old.b0" 'gw=192.168.77.1' "control nohotkeep: old behaviour loses the gateway"
+has "$T/old.b0" 'ip=169.254' "control wlanfirst+nohotkeep: old behaviour leaves USB on link-local"
+hasnot "$T/old.b0" 'gw=192.168.77.1' "control wlanfirst+nohotkeep: old behaviour loses the gateway"
 fi
 if [ "${USBWLAN_LATE:-1}" = 1 ]; then
     echo "== dongle plugged after WLAN =="

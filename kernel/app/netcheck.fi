@@ -1,0 +1,204 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import libc.kcall
+import libc.proc
+import netdiag.healprobe
+import netdiag.netlog
+
+const SYS_NETHEAL: u64 = 1303
+const NG_GW: u64 = 3
+const NG_STATE: u64 = 8
+const NG_HEALTH: u64 = 20
+const NG_HEALTH_HEALS: u64 = 22
+const NG_HEALTH_RUNG: u64 = 23
+const NG_UPKIND: u64 = 24
+const NS_NOROUTE: u64 = 2
+const KIND_WLAN: u64 = 6
+const OP_PUBLISH: u64 = 0
+const OP_ARP_FLUSH: u64 = 1
+const DBG_WLAN_REJOIN: u64 = 14
+const RUNG_MAX: u64 = 4
+const BAD: u64 = 0xFFFFFFFFFFFFF000
+const BAD_STREAK_PUBLISH: u64 = 2
+const PERIOD_OK_S: u64 = 20
+const PERIOD_BAD_S: u64 = 5
+
+static mut S_TAG: [u8; 9] = "netcheck\0"
+static mut S_STAGE: [u8; 6] = "stage\0"
+static mut S_HEAL: [u8; 5] = "heal\0"
+static mut S_RUNG: [u8; 5] = "rung\0"
+static mut S_KIND: [u8; 5] = "kind\0"
+static mut S_GW: [u8; 3] = "gw\0"
+static mut P_DHCP: [u8; 10] = "/bin/dhcp\0"
+static mut A_DHCP: [u8; 5] = "dhcp\0"
+
+fn netget(what: u64) -> u64 {
+    let v: u64 = kcall.sys3(kcall.SYS_OSUM_NETGET, what, 0, 0)
+    if v > BAD {
+        return 0
+    }
+    return v
+}
+
+fn publish(stage: u64, heals: u64, rung: u64) {
+    kcall.sys3(SYS_NETHEAL, OP_PUBLISH, stage, heals | (rung << 32))
+}
+
+fn backoff_s(rung: u64, base: u64) -> u64 {
+    if rung <= 1 {
+        return base
+    }
+    if rung == 2 {
+        return base * 3
+    }
+    if rung == 3 {
+        return base * 6
+    }
+    return base * 12
+}
+
+fn run_dhcp() {
+    var argv: [u64; 2] = [0 as u64; 2]
+    argv[0] = (&A_DHCP[0 as usize]) as u64
+    proc.run((&P_DHCP[0 as usize]) as u64, (&argv[0]) as u64)
+}
+
+fn rejoin_wlan() {
+    kcall.sys4(kcall.SYS_OSUM_DBG, DBG_WLAN_REJOIN, 0, 0, 0)
+}
+
+fn heal(rung: u64, kind: u64) {
+    if rung == 1 {
+        kcall.sys3(SYS_NETHEAL, OP_ARP_FLUSH, 0, 0)
+        return
+    }
+    if kind == KIND_WLAN {
+        rejoin_wlan()
+        if rung >= 3 {
+            run_dhcp()
+        }
+        return
+    }
+    run_dhcp()
+}
+
+fn log_stage(stage: u64, gw: u64, kind: u64) {
+    netlog.begin((&S_TAG[0 as usize]) as u64)
+    netlog.num((&S_STAGE[0 as usize]) as u64, stage)
+    netlog.num((&S_KIND[0 as usize]) as u64, kind)
+    netlog.ip((&S_GW[0 as usize]) as u64, gw)
+    netlog.end()
+}
+
+fn log_heal(rung: u64, kind: u64, heals: u64) {
+    netlog.begin((&S_TAG[0 as usize]) as u64)
+    netlog.num((&S_HEAL[0 as usize]) as u64, heals)
+    netlog.num((&S_RUNG[0 as usize]) as u64, rung)
+    netlog.num((&S_KIND[0 as usize]) as u64, kind)
+    netlog.end()
+}
+
+fn say_line(label: str, v: u64) {
+    var out: rt.Buf = rt.buf_new()
+    rt.buf_push_bytes(&out, label.p as u64, label.n)
+    rt.buf_push_dec_u64(&out, v)
+    rt.buf_push(&out, 10 as u8)
+    rt.write_everything(1, out.ptr, out.len)
+}
+
+fn get_mode() -> i32 {
+    say_line("health ", netget(NG_HEALTH))
+    say_line("heals ", netget(NG_HEALTH_HEALS))
+    say_line("rung ", netget(NG_HEALTH_RUNG))
+    say_line("kind ", netget(NG_UPKIND))
+    return 0
+}
+
+fn arg_num(start: u64, i: usize) -> u64 {
+    let a: u64 = rt.arg_ptr(start, i)
+    var v: u64 = 0
+    var k: usize = 0
+    let n: usize = rt.c_length(a)
+    while k < n {
+        v = v * 10 + ((rt.ld8(a, k) as u64) - 48)
+        k = k + 1
+    }
+    return v
+}
+
+fn main(start: u64) -> i32 {
+    var count: u64 = 0
+    var base: u64 = 10
+    var period_bad: u64 = PERIOD_BAD_S
+    var period_ok: u64 = PERIOD_OK_S
+    let argc: usize = rt.arg_count(start)
+    var i: usize = 1
+    while i < argc {
+        let a: u64 = rt.arg_ptr(start, i)
+        if rt.c_length(a) == 3 && rt.ld8(a, 0) == 103 as u8 {
+            return get_mode()
+        }
+        if rt.c_length(a) == 2 && rt.ld8(a, 0) == 45 as u8 && i + 1 < argc {
+            let c: u8 = rt.ld8(a, 1)
+            if c == 99 as u8 {
+                count = arg_num(start, i + 1)
+            } else if c == 98 as u8 {
+                base = arg_num(start, i + 1)
+            } else if c == 105 as u8 {
+                period_bad = arg_num(start, i + 1)
+                period_ok = period_bad
+            }
+            i = i + 1
+        }
+        i = i + 1
+    }
+    var done: u64 = 0
+    var streak: u64 = 0
+    var rung: u64 = 0
+    var heals: u64 = 0
+    var wait_s: u64 = 0
+    var shown: u64 = 99
+    while count == 0 || done < count {
+        done = done + 1
+        var sleep_s: u64 = period_ok
+        if netget(NG_STATE) >= NS_NOROUTE {
+            let gw: u64 = netget(NG_GW)
+            let kind: u64 = netget(NG_UPKIND)
+            let stage: u64 = healprobe.probe(gw)
+            if stage == healprobe.H_OK {
+                streak = 0
+                rung = 0
+                wait_s = 0
+                publish(stage, heals, rung)
+            } else {
+                streak = streak + 1
+                sleep_s = period_bad
+                if streak >= BAD_STREAK_PUBLISH {
+                    publish(stage, heals, rung)
+                    if wait_s <= sleep_s && rung < RUNG_MAX {
+                        rung = rung + 1
+                        heals = heals + 1
+                        heal(rung, kind)
+                        log_heal(rung, kind, heals)
+                        wait_s = backoff_s(rung, base)
+                    } else if wait_s > sleep_s {
+                        wait_s = wait_s - sleep_s
+                    }
+                }
+            }
+            if stage != shown {
+                shown = stage
+                log_stage(stage, gw, kind)
+            }
+        } else {
+            streak = 0
+            rung = 0
+            wait_s = 0
+            shown = 99
+        }
+        if count == 0 || done < count {
+            proc.sleep(sleep_s, 0)
+        }
+    }
+    return 0
+}

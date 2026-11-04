@@ -1,0 +1,77 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import libc.dns
+import libc.icmp
+import libc.io
+import libc.net
+
+export { probe, H_UNKNOWN, H_OK, H_NOGW, H_NODNS, H_NOINET }
+
+const H_UNKNOWN: u64 = 0
+const H_OK: u64 = 1
+const H_NOGW: u64 = 2
+const H_NODNS: u64 = 3
+const H_NOINET: u64 = 4
+
+const TARGET_A: u64 = 0x01010101
+const TARGET_B: u64 = 0x08080808
+const PING_NET_MS: u64 = 2000
+const PING_GW_MS: u64 = 1500
+const TCP_MS: u64 = 1500
+const TCP_PORT: u64 = 443
+const E_INPROGRESS: u64 = 115
+const E_CONNREFUSED: u64 = 111
+
+static mut PROBE_NAME: [u8; 12] = "example.com\0"
+
+fn tcp_reaches(addr: u64) -> bool {
+    let fd: u64 = net.socket(net.AF_INET, net.SOCK_STREAM | net.SOCK_NONBLOCK, 0)
+    if net.failed(fd) {
+        return false
+    }
+    let c: u64 = net.connect_to(fd, addr, TCP_PORT)
+    var up: bool = false
+    if c == 0 {
+        up = true
+    } else if net.failed(c) && (0 -% c) == E_CONNREFUSED {
+        up = true
+    } else if net.failed(c) && (0 -% c) == E_INPROGRESS {
+        var pfd: [u8; 8] = [0 as u8; 8]
+        let p: u64 = (&pfd[0 as usize]) as u64
+        io.poll_set(p, 0, fd, io.POLLOUT)
+        let n: u64 = io.poll(p, 1, TCP_MS)
+        if n == 1 && io.poll_ready(p, 0, io.POLLOUT | io.POLLERR | io.POLLHUP) {
+            let e: u64 = net.so_error(fd)
+            let open: bool = e == 0 && io.poll_ready(p, 0, io.POLLOUT) && !io.poll_ready(p, 0, io.POLLHUP)
+            up = open || e == E_CONNREFUSED
+        }
+    }
+    net.close(fd)
+    return up
+}
+
+fn reaches_internet() -> bool {
+    if icmp.echo(TARGET_A, PING_NET_MS) == icmp.E_OK {
+        return true
+    }
+    if icmp.echo(TARGET_B, PING_NET_MS) == icmp.E_OK {
+        return true
+    }
+    if tcp_reaches(TARGET_A) {
+        return true
+    }
+    return tcp_reaches(TARGET_B)
+}
+
+fn probe(gw: u64) -> u64 {
+    if !reaches_internet() {
+        if gw != 0 && icmp.echo(gw, PING_GW_MS) == icmp.E_OK {
+            return H_NOINET
+        }
+        return H_NOGW
+    }
+    dns.conf_load()
+    if dns.resolve_a((&PROBE_NAME[0 as usize]) as u64) == 0 {
+        return H_NODNS
+    }
+    return H_OK
+}
