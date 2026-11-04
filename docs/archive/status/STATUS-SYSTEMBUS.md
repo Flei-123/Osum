@@ -167,7 +167,7 @@ Ablage wirklich die neue ist.
 
 Die Auflage war: **kein globaler statischer Puffer, den mehrere Kerne
 benutzen** (die Befunde zu `fs.inode_get` und `wig.glyph_into` in
-`STATUS-MERGE6.md`).
+`docs/archive/status/STATUS-MERGE6.md`).
 
 * `kernel/bus.fi` hat **keinen** `static mut` — Abschnitt 2 des Läufers
   zählt nach.

@@ -34,7 +34,7 @@ Sachkonflikt. Nach dem Merge steht jede Nummer genau einmal:
 
 WARUM DAS SICHER IST: seit OFS v3 ist die Blockkarte mehrblockig
 (`SB_BMBLOCKS`). `FS_KARTEN=128` traegt 128*4096 = 524 288 Bloecke =
-256 MiB; 65536 brauchen davon 16. Der Satz in STATUS-FREMDLAND.md
+256 MiB; 65536 brauchen davon 16. Der Satz in docs/archive/status/STATUS-FREMDLAND.md
 ("4096 Bloecke = 2 MB je Platte") und der Kommentar in
 `kernel/fs.fi:236` stammen aus der Zeit VOR OFS v3 -- das gebaute
 Abbild meldet `bmblocks=128`.

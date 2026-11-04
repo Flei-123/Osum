@@ -193,7 +193,7 @@ Kommandozeile: `clip -l`.
 
 ## Die Ein-Kern-Regel
 
-`STATUS-MERGE6.md` haelt zwei Fehler fest, die dieselbe Form hatten: ein
+`docs/archive/status/STATUS-MERGE6.md` haelt zwei Fehler fest, die dieselbe Form hatten: ein
 globaler statischer Puffer, den mehrere Kerne gleichzeitig benutzten
 (`fs.inode_get`, `wig.glyph_into`). `kernel/bus.fi` hat **keinen**
 `static mut`, und `sys.do_bus` kopiert in einen Puffer **auf dem Stapel

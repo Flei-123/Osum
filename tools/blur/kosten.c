@@ -81,5 +81,5 @@ int main(void){
 }
 /* Gebaut und gelaufen mit:
  *     gcc -O2 -o /tmp/blurkosten tools/blur/kosten.c && /tmp/blurkosten
- * Die Zahlen im Kopf von BEFUND-BLUR.md stammen aus genau diesem Lauf.
+ * Die Zahlen im Kopf von docs/archive/findings/BEFUND-BLUR.md stammen aus genau diesem Lauf.
  */

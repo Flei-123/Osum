@@ -809,7 +809,7 @@ mergeline..rename-etc` is a list of BACKWARDS renames and deletions:
 
 ```
 R087  assets/apps/launcher.osp/INFO  ->  assets/apps/suchen.prog/INFO
-R100  REMOVE-FROM-FIRN.md            ->  ENTFERNEN-AUS-FIRN.md
+R100  docs/archive/status/REMOVE-FROM-FIRN.md            ->  ENTFERNEN-AUS-FIRN.md
 D     LICENSE.MIT
 D     THIRD_PARTY.md
 D     assets/icons/LICENSE.lucide

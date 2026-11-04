@@ -157,7 +157,7 @@ den Fall für den Merge vorgesehen; genau so ist es gemacht:
 Mitgezogen: der **gedruckte** Namensvorsatz (`pollbr: listening`), damit
 ein Protokoll nicht zwei Programme unter demselben Namen zeigt, dazu 13
 Stellen in `tools/poll/run.sh`, der Kommentar in `pollt.fi` und ein
-Hinweis im Kopf von `POLL-STATUS.md`.
+Hinweis im Kopf von `docs/archive/status/POLL-STATUS.md`.
 
 Gemessen: **`POLL: 67 bestanden, 0 durchgefallen`**,
 **`BRIDGE: 113 bestanden, 0 durchgefallen`**,

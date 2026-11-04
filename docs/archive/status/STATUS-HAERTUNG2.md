@@ -1,4 +1,4 @@
-# STATUS-HAERTUNG2.md — die Runde LIB-HÄRTUNG, mit Zahlen
+# docs/archive/status/STATUS-HAERTUNG2.md — die Runde LIB-HÄRTUNG, mit Zahlen
 
 Arbeitsbaum `/root/osum-haertung2`, Zweig `haertung2`, Basis `merge6`
 (`a92fa00`). **Nicht gepusht, nicht gemergt.**

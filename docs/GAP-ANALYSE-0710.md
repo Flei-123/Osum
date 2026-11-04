@@ -261,7 +261,7 @@ der Testwerkzeuge.** Am Dell wurde nichts geändert.
 
 | # | Punkt | Status | Beleg | Aufwand | Alltag |
 |---|---|---|---|---|---|
-| X1 | Benutzer/Rechte (uid/gid, rwx, setuid, `perm.fi` als einzige Prüfstelle), Mehrbenutzer, PBKDF2-Anmeldung, Sperrbildschirm | **vorhanden** (k13 99/0, Login 31/0, Sperre 43/0) | `ipc/perm.fi`, `STATUS-MULTIUSER.md` | — | Blocker (da) |
+| X1 | Benutzer/Rechte (uid/gid, rwx, setuid, `perm.fi` als einzige Prüfstelle), Mehrbenutzer, PBKDF2-Anmeldung, Sperrbildschirm | **vorhanden** (k13 99/0, Login 31/0, Sperre 43/0) | `ipc/perm.fi`, `docs/archive/status/STATUS-MULTIUSER.md` | — | Blocker (da) |
 | X2 | Anmeldung wie Windows Hello (PIN, Passkey, Fingerabdruck) | **fehlt** | r253 | M–L | Schön |
 | X3 | **Programm-Sandbox** (Prozess-Isolation) | **fehlt**; Rechte laufen über Aktions-Bus/Handles, Container (`ctr.fi`) vorhanden aber kein Sandbox-Modell je App | r47, `docs/RUNDE-CONTAINER.md` | L | Schön (Blocker bei Fremd-Apps) |
 | X4 | **Fensterserver im Kern** | **Risiko**: Kernel-Absturz/Rechteausweitung bei jedem wm-Fehler | `docs/FUI-WLIB-PLAN.md` (14 250 Z. `wm.fi`) | L | Schön (Architektur) |
@@ -288,11 +288,11 @@ der Testwerkzeuge.** Am Dell wurde nichts geändert.
 | D1 | Shell (`sh` mit if/for/while/case/Funktionen), ~100 Programme, Terminal, Pipes | **vorhanden** (k16, Terminal-Abnahme) | `kernel/user/sh.fi`, README | — | Blocker (da) |
 | D2 | Skripting/Sprachen | **teilweise**: `sh`, Lua/QuickJS/SQLite als fremde Binaries; **Python: fehlt** (nicht gefunden) | `tools/foreign/README.md` | L | Schön |
 | D3 | Entwicklungsumgebung auf OrientOS | **teilweise**: `.fi` per Doppelklick übersetzen (firnc → `fas` → starten, `firun.fi`), Editor `nedit`; **Debugger fehlt** (kein ptrace/gdb-Stub gefunden), kein Paket-Manager für Entwicklerbibliotheken | `kernel/user/firun.fi`, `nedit.fi` | L (Debugger) | Schön |
-| D4 | **Linux-Kompatibilität (statisch)** | **vorhanden**: Lua, SQLite, QuickJS, busybox 1.36.1 (Pipes, 4 musl-Fäden, echte Dateisperren) laufen unverändert | `STATUS-FREMDLAND.md` | — | Schön |
+| D4 | **Linux-Kompatibilität (statisch)** | **vorhanden**: Lua, SQLite, QuickJS, busybox 1.36.1 (Pipes, 4 musl-Fäden, echte Dateisperren) laufen unverändert | `docs/archive/status/STATUS-FREMDLAND.md` | — | Schön |
 | D5 | **Linux dynamisch (`ld.so`)** | **teilweise**: Weg B gewählt = echter `ld-musl` als Interpreter; `PT_INTERP` in `ldr/elf.fi`; Abdeckung echter Programme **unbekannt** (F-007/F-009 "Syscall-Lücken nicht systematisch vermessen") | `docs/RUNDE-DYNLADER.md`, `KOMPATIBILITAET.md` | L | Schön, aber der Hebel für Fremd-Apps |
 | D6 | Wayland-Server (Linux-GUI-Programme) | **teilweise**: `wayd.fi`, `weston-simple-shm` zeigt Fenster (45/0) — **Firefox/LibreOffice: nicht gezeigt** | `docs/RUNDE-WAYLAND.md` | L | Schön |
 | D7 | Windows-Programme (Wine) | **fehlt, bewusst** (Entscheidung FREMDSOFTWARE 08.09.: kein Win32/X11) | r243-Text | — | — |
-| D8 | **Browser (Certus) auf OrientOS** | **teilweise**: läuft als Ring-3-Programm mit wlib-Leinwand, aus dem Laden installierbar; Glass-Konformität lückenhaft (r120–r124), **Video nicht angebunden**; Hauptmetriken: Seiten vs Chromium 90,5 %, test262 72,9 % | `STATUS-CERTUS.md`, Certus-Kennzahlen | L (laufend) | **Blocker** (Web) |
+| D8 | **Browser (Certus) auf OrientOS** | **teilweise**: läuft als Ring-3-Programm mit wlib-Leinwand, aus dem Laden installierbar; Glass-Konformität lückenhaft (r120–r124), **Video nicht angebunden**; Hauptmetriken: Seiten vs Chromium 90,5 %, test262 72,9 % | `docs/archive/status/STATUS-CERTUS.md`, Certus-Kennzahlen | L (laufend) | **Blocker** (Web) |
 
 ## 2.7 Programme im Alltag
 

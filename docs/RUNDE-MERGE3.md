@@ -120,7 +120,7 @@ wurde deshalb **einmal** gemessen, und diese Zahl gilt für beide.
 
 | | Abschnitte | grün | rot | Zusagen |
 |---|---:|---:|---:|---:|
-| `main` **vorher** (`018982a`, Zahlen aus `STATUS-MERGE.md`) | 40 | 36 | 4 | 3360 |
+| `main` **vorher** (`018982a`, Zahlen aus `docs/archive/status/STATUS-MERGE.md`) | 40 | 36 | 4 | 3360 |
 | `main` **nachher** (= `mergeline2`, `94c12fd`) | **54** | **50** | **5** | **4309** |
 
 **Wichtig zur Aussagekraft:** auf demselben Wirt lief gleichzeitig die

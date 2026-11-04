@@ -411,7 +411,7 @@ Meldung.
 ## Neue und geänderte Dateien
 
 **Neu:** `tools/audio/acceptance.sh` (12 × 60 s), `tools/audio/mischer.sh`
-(25 Zusagen), `STATUS-TON2.md`.
+(25 Zusagen), `docs/archive/status/STATUS-TON2.md`.
 
 **Geändert:** `kernel/sys.fi` (`AS_WAITSPACE`, `do_audwait`),
 `kernel/user/play.fi` (`-w`, `-v`, `-m`, `-k`, zwei echte Uhren),

@@ -361,7 +361,7 @@ hat. Deshalb liegt sie als **eingecheckter Flicken** unter
 Kopf, und `fetch-firnc.sh` legt sie nach dem Auspacken auf. Ein Flicken,
 der nicht passt, bricht den Bau ab — eine halb geflickte Bibliothek wäre
 schlimmer als eine ungeflickte, weil der Fehler dann anderswo auftaucht.
-Wohin die drei Zeilen wirklich gehören, steht in `REMOVE-FROM-FIRN.md`:
+Wohin die drei Zeilen wirklich gehören, steht in `docs/archive/status/REMOVE-FROM-FIRN.md`:
 nach Firn.
 
 ---

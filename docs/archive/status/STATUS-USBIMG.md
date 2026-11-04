@@ -336,5 +336,5 @@ tools/usbimg/build.sh               das Abbild
 tools/usbimg/run.sh                 die Abnahme, 46 Zusagen
 tools/usbimg/searchtext.py            eine Textzeile im ganzen Bild suchen
 docs/USBSTICK.md                    die Anleitung für Justin
-STATUS-USBIMG.md                    diese Seite
+docs/archive/status/STATUS-USBIMG.md                    diese Seite
 ```

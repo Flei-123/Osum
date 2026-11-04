@@ -3,7 +3,7 @@
 Decision of 27 August 2026. Justin (Flei123) is the sole author of Osum,
 Firn and OrientOS, so the change needed nobody else's agreement.
 
-Until this date the whole repository was MIT (`LICENSE.MIT.old`, kept
+Until this date the whole repository was MIT (`LICENSES/LICENSE.MIT.old`, kept
 verbatim so the change is visible in the tree and not only in the history).
 It is now:
 

@@ -27,7 +27,7 @@ schon da und wird nur verbunden:
 > `vektor.polygon_round` — und zwar mit Grund. Zwischen Ring 0 und Ring 3
 > liegt eine Ringgrenze; ein Programm, das in seinen eigenen Fensterpuffer
 > malt, kann `wm.fill_round` nicht rufen, ohne je Bildpunkt einen
-> Systemaufruf zu bezahlen (siehe `BEFUND-VEKTOR-ENTSCHEIDUNG.md`), und der
+> Systemaufruf zu bezahlen (siehe `docs/archive/findings/BEFUND-VEKTOR-ENTSCHEIDUNG.md`), und der
 > Bildspeicher mischt im Format des Schirms statt in gepackten Farbworten.
 > Die Zusage lautet deshalb: **genau ein Ort je Ring und je Format, und
 > jeder einzelne ist in `tools/themestore/raster.liste` mit einem Satz

@@ -154,7 +154,7 @@ recht. Endstand: 43 SYSTEMBUS (behaelt), 46 TON-2, 47 WLAN, 48 VSYNC,
 
 ### 1. ECHTE REGRESSION, von mir gebaut: die Statusfelder hatten 4 Plaetze
 
-Gefunden mit dem Rezept aus `STATUS-ALLTAG.md` (`glyphe` mit
+Gefunden mit dem Rezept aus `docs/archive/status/STATUS-ALLTAG.md` (`glyphe` mit
 aufgehobenen Mitschnitten): **32 von 32 Laeufen mit `-smp 4`**
 
     panic: index out of bounds in '[u64; 4]' at kernel/user/taskbar.fi:2165:18
@@ -254,7 +254,7 @@ netview, themestore, userland -- sind alle gruen geblieben.)
 
 Der Lauf stand unter Fremdlast: Lastmittel 8-10, bis zu 7 fremde QEMUs
 anderer Runden. Deshalb ist jeder rote Abschnitt EINZELN gegen
-STATUS-MERGE7.md gestellt und im Zweifel solo nachgefahren.
+docs/archive/status/STATUS-MERGE7.md gestellt und im Zweifel solo nachgefahren.
 
 ### Die Endtafel: alle 18 roten Abschnitte
 

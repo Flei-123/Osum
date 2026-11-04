@@ -525,7 +525,7 @@ Beides laeuft in **Ring 3**. Im Kern laeuft nichts Fremdes.
 
 * musl ist **MIT** -- vertraeglich mit beidem, was dieses Repo fuehrt
   (GPL-2.0-only fuer den Kern, MIT fuer die Ring-3-Bibliotheken,
-  `LICENSE-UEBERSICHT.md`). Es wird weder eingebunden noch veraendert,
+  `docs/archive/status/LICENSE-OVERVIEW.md`). Es wird weder eingebunden noch veraendert,
   sondern als eigene Datei ausgeliefert.
 * BusyBox ist **GPL-2.0-only** -- dieselbe Lizenz wie der Kern. Als
   eigenstaendiges Programm in einem eigenen Paket entsteht kein

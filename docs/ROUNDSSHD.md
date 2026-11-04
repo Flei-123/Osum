@@ -75,7 +75,7 @@ dieselbe Regel wie `blake2s.fi` und `sha512.fi`.
 Die beiden alten bleiben stehen; sie werden von `pw`, `opk`, `backup`,
 `bstore` und `hwid` benutzt und sind gegen Pythons `hashlib` gemessen.
 Sie zusammenzulegen ist eine eigene Aufgabe und steht in
-`STATUS-SSHD.md` als offener Punkt.
+`docs/archive/status/STATUS-SSHD.md` als offener Punkt.
 
 ### Die drei Stellen, an denen man SSH falsch macht
 
@@ -170,7 +170,7 @@ Namen), aber `mkfs.py cat` auf dem Wirt fand die Datei nicht mehr. Die
 Namen heißen deshalb `ssh_host_ed25519_key` (20) und
 `ssh_host_ed25519.pub` (20). Dass ein zu langer Name *stillschweigend*
 gekürzt wird statt `-ENAMETOOLONG` zu geben, ist ein eigener Befund und
-steht in `STATUS-SSHD.md`.
+steht in `docs/archive/status/STATUS-SSHD.md`.
 
 ---
 
@@ -205,7 +205,7 @@ falschen Paketnummer — keines davon wurde angenommen.
 | Wirtsschlüssel bleibt | zweiter Start desselben Datenträgers, gleicher Fingerabdruck; `ssh-keygen -lf` rechnet ihn aus der `.pub`-Datei **auf der Platte** nach |
 | die ausgehandelten Verfahren | ein Klient ohne gemeinsame Chiffre und einer ohne gemeinsamen Schlüsselaustausch werden abgewiesen |
 
-Die Zahlen des Abnahmelaufs stehen in `STATUS-SSHD.md`.
+Die Zahlen des Abnahmelaufs stehen in `docs/archive/status/STATUS-SSHD.md`.
 
 ---
 
@@ -222,5 +222,5 @@ Die Zahlen des Abnahmelaufs stehen in `STATUS-SSHD.md`.
 * **Der private Wirtsschlüssel liegt roh auf der Platte** (32 Oktette
   Saat, 0600, root) und nicht in OpenSSHs `openssh-key-v1`-Behälter.
 
-Die vollständige Liste mit Bewertung steht in `STATUS-SSHD.md`,
+Die vollständige Liste mit Bewertung steht in `docs/archive/status/STATUS-SSHD.md`,
 Abschnitt „Wovor das NICHT schützt".

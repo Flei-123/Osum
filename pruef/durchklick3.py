@@ -520,7 +520,7 @@ def main():
     merke("3.11", "Konto-Reiter", "GIBT ES NICHT",
           "kein /bin/login, kein /bin/passwd im Abbild")
     merke("3.12", "Certus (Browser)", "GIBT ES NICHT",
-          "siehe BEFUND-DURCHKLICK-2.md, Abschnitt Certus")
+          "siehe docs/archive/findings/BEFUND-DURCHKLICK-2.md, Abschnitt Certus")
     merke("3.13", "fetch (HTTPS)", "VORHANDEN",
           "/bin/fetch im Abbild, TLS 1.3")
 

@@ -21,7 +21,7 @@ Zusaetzlich hereingeholt: `origin/main` (d7cbdd9) — acht Commits Lizenz- und
 `.gitattributes`-Arbeit vom 27.08., die noch nicht in merge6 steckten. Ein
 Konflikt (`LICENSE`); genommen wurde die Fassung von origin (der reine
 GPL-2.0-Text, damit GitHub das Repo richtig ausweist) — die Uebersicht steht
-weiter in `LICENSE-UEBERSICHT.md` und `LICENSING.md`. Damit ist der Push ein
+weiter in `docs/archive/status/LICENSE-OVERVIEW.md` und `LICENSING.md`. Damit ist der Push ein
 VORSPULEN und wirft nichts weg.
 
 `alltag` ist ABSICHTLICH NICHT gemergt — die Runde laeuft noch.

@@ -30,7 +30,7 @@ Bestätigt: im Hauptstand gab es **keinen** WASM-Teil.
 | AOT-Übersetzer | `tools/wasm2firn/wasm2firn.py` (1781 Z.), `flach.py` (434 Z.), `laufzeit.fi.in` (586 Z.), `wasi_ziehen.py`, `TIEFE.md` |
 | Differenzprüfung | `tools/wasm2firn/pruefung/` — 10 `.wat` + `run.sh` |
 | Abnahmemodule | `wasm-module/` — 6 `.wasm` (inkl. `sqlite.wasm`), `quelle/` mit den Quelltexten, `HERKUNFT.md` mit md5 |
-| Befunde | `STATUS-SCHLEUSE.md`, `STATUS-SCHLEUSE2.md`, `beleg-schleuse-*.txt` |
+| Befunde | `docs/archive/status/STATUS-SCHLEUSE.md`, `docs/archive/status/STATUS-SCHLEUSE2.md`, `beleg-schleuse-*.txt` |
 
 **Geändert (1 Datei):** `tools/install/build.sh`.
 
@@ -332,7 +332,7 @@ das Dateien und Netz benutzt, ist nach 1+2 realistisch.
   das trifft jede Runde, nicht nur diese.
 * `fd_pread`/`fd_pwrite` sind der nächste sinnvolle Schritt; die
   Bemerkung „Osum hat kein pread/pwrite" in
-  `STATUS-SCHLEUSE2.md`/`kernel/app/wasm.fi` ist überholt.
+  `docs/archive/status/STATUS-SCHLEUSE2.md`/`kernel/app/wasm.fi` ist überholt.
 * Die Selbsttests wurden auf 15 Kernabschnitte begrenzt, nicht auf alle
   73. Für die Frage „verschlechtert der Merge etwas?" reicht das, weil
   der Merge nur neue Dateien bringt; eine volle Abnahme steht aus.

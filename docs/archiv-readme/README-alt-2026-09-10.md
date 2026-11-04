@@ -69,7 +69,7 @@ counter-checks that must fail), then 67 assertions against `ssh`,
 output compared, the exit status, a file with the same SHA-256 on both
 sides, two connections at once, and for every one of them the
 counter-check that has to be refused. `docs/ROUNDSSHD.md` and
-`STATUS-SSHD.md`, and the second one says in plain words what it does
+`docs/archive/status/STATUS-SSHD.md`, and the second one says in plain words what it does
 **not** protect against.
 
 The size, counted:
@@ -685,7 +685,7 @@ after the fact.
 | `docs/ROUNDK14.md` | **VFS and foreign file systems**: the table of nine operations, /proc, /dev, FAT32 against `mkfs.vfat`/`mcopy`/`fsck.fat`, MBR and GPT |
 | `docs/ROUNDK16.md` | **the compiler runs on the system itself**: `firnc` and an assembler in Firn on Osum, the result character-identical with the one from the host — plus the table "file kind → what opens it" in the kernel and `#!` in `execve` |
 
-`REMOVE-FROM-FIRN.md` describes what has to be deleted in the Firn
+`docs/archive/status/REMOVE-FROM-FIRN.md` describes what has to be deleted in the Firn
 repository so that nothing lies there twice. **That has not been carried
 out.**
 

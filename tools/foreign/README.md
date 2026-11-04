@@ -44,12 +44,12 @@ Osums Argumentblock in RDI die drei Zeiger von `main`.
 
 **busybox 1.36.1 laeuft auf Osum** -- ein Binary, 35 Applets, eigene
 Shell mit Roehren. Dazu musl-Faeden und echte Dateisperren.
-Vollstaendig in `STATUS-FREMDLAND.md`.
+Vollstaendig in `docs/archive/status/STATUS-FREMDLAND.md`.
 
 ## Herkunft: fremd UND unveraendert
 
 `herkunft.sh` fuehrt den Nachweis. Die Archive liegen unter
-`/root/fremdquellen/`, ihre SHA-256 in `STATUS-FREMDLAND.md`
+`/root/fremdquellen/`, ihre SHA-256 in `docs/archive/status/STATUS-FREMDLAND.md`
 Abschnitt 0. Das Skript packt jedes Archiv ein ZWEITES Mal aus und
 vergleicht mit dem Baubaum:
 

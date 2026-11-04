@@ -1,4 +1,4 @@
-# STATUS-VSYNC.md -- die Runde VSYNC auf einer Seite
+# docs/archive/status/STATUS-VSYNC.md -- die Runde VSYNC auf einer Seite
 
 Zweig `vsync`, Arbeitsbaum `/root/osum-vsync`, auf `merge6` (a92fa00).
 Der volle Bericht steht in `docs/VSYNC.md`.

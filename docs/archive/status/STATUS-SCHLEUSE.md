@@ -84,7 +84,7 @@ bringen, nicht aus seinem Speicher heraus.
 ## 2. ABNAHME — welche fremde Software wirklich lief
 
 Alles unten ist **in QEMU auf echtem Osum** gelaufen, Ring 3, seriell
-mitgeschnitten in `beleg-schleuse-osum.txt` (roher Mitschnitt, ungekürzt).
+mitgeschnitten in `docs/archive/evidence/beleg-schleuse-osum.txt` (roher Mitschnitt, ungekürzt).
 
 ### (b) SQLite 3.45.0 — das eigentliche Ziel
 
@@ -147,7 +147,7 @@ zurück und vergleicht — `gleich: true`. Die Argumente kommen durch.
 (`kernel/app/prim.fi`), einmal als WASM (`prim.wasm`). Beide liefern dieselbe
 Zahl, sonst wäre der Vergleich wertlos.
 
-**Auf Osum selbst** (`beleg-schleuse-tempo.txt`, Grenze 200000, beide 17984):
+**Auf Osum selbst** (`docs/archive/evidence/beleg-schleuse-tempo.txt`, Grenze 200000, beide 17984):
 
 ```
 ==NATIV==   15:03:38  /bin/prim 200000        15:03:38   -> unter 1 s

@@ -99,7 +99,7 @@ ueber das Programmpraefix -- nur `tiling: …`, `fas: …`, `opk: …`.
 
 ## 7. Die vollstaendige Abnahme
 
-Die GRUNDLINIE von main (`GRUNDLINIE.md`, 28.08.) war **20 bestanden /
+Die GRUNDLINIE von main (`docs/archive/status/GRUNDLINIE.md`, 28.08.) war **20 bestanden /
 3 FEHLGESCHLAGEN**, rot: K13 (87/12), K14 (144/8), K16 (58/6).
 
 Gemessen auf `umlaut2` (Abschnitte 1-22 im Gesamtlauf, der Rest

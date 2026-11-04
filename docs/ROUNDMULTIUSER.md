@@ -487,7 +487,7 @@ Ehrlich und einzeln, so wie K13 es vorgemacht hat:
 
 | was | Wert |
 |---|---|
-| Abschnitt `tools/multiuser/run.sh` | siehe `STATUS-MULTIUSER.md` |
+| Abschnitt `tools/multiuser/run.sh` | siehe `docs/archive/status/STATUS-MULTIUSER.md` |
 | Bestehender Abschnitt `tools/k13/run.sh` | 99 Zusagen, 0 Fehler (unverändert grün) |
 | Aufrufnummern | 144 im Kernel, 144 in der libc, keine doppelt |
 | kdata | 65 Bereiche, 0 Kollisionen |

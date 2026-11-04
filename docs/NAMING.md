@@ -107,7 +107,7 @@ same file would have made this rule unenforceable on the first day.
 It was cut before `rename-en` and before the seventeen branches that
 became `mergeline`. `git diff --name-status -M mergeline..rename-etc`
 is a list of BACKWARDS renames — `assets/apps/launcher.osp` →
-`suchen.prog`, `REMOVE-FROM-FIRN.md` → `ENTFERNEN-AUS-FIRN.md` — and it
+`suchen.prog`, `docs/archive/status/REMOVE-FROM-FIRN.md` → `ENTFERNEN-AUS-FIRN.md` — and it
 deletes `LICENSE.MIT`, `THIRD_PARTY.md`, `assets/icons/LICENSE.lucide`
 and the whole of `assets/netview/`. Merging it would undo this document.
 

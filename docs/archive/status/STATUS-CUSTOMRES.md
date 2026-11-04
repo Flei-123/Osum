@@ -202,8 +202,8 @@ Zweig, seriell statt parallel:
 
 | Abschnitt | `mergeline` | dieser Zweig | Befund |
 | --- | --- | --- | --- |
-| K14 | 146 passed, 6 failed | 151 passed, 1 failed | vorbestehend, in `GRUNDLINIE.md` benannt |
-| K16 | 58 passed, 6 failed | 58 passed, 6 failed | vorbestehend, in `GRUNDLINIE.md` benannt |
+| K14 | 146 passed, 6 failed | 151 passed, 1 failed | vorbestehend, in `docs/archive/status/GRUNDLINIE.md` benannt |
+| K16 | 58 passed, 6 failed | 58 passed, 6 failed | vorbestehend, in `docs/archive/status/GRUNDLINIE.md` benannt |
 | THEME | 91 bestanden, 0 durchgefallen | **91 bestanden, 0 durchgefallen** | im Vollauf 89/7 -- Laststörung |
 | icons | 24 ok, 1 failed | 24 ok, 1 failed | vorbestehend (`lib/icons.fi does not match the map`) |
 | tunnelpakete | 15 bestanden, 3 fehlgeschlagen | 15 bestanden, 3 fehlgeschlagen | vorbestehend |

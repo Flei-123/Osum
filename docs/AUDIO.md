@@ -314,5 +314,5 @@ Abschnitt mit `-v 0` nach, wo ein Ton **ganz** fehlt.
 * **Nur ein Ausgabestrom in der Hardware.** Mehrere Programme löst der
   Software-Mischer.
 * **Keine Herstellertabellen.** Keine Kennung ist fest verdrahtet.
-* **`/bin/play` hat aus Ring 3 noch Aussetzer.** Siehe STATUS-HDA.md,
+* **`/bin/play` hat aus Ring 3 noch Aussetzer.** Siehe docs/archive/status/STATUS-HDA.md,
   Abschnitt „Der rote Punkt“. Der Weg IM KERN hat null.

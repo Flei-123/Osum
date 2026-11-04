@@ -45,7 +45,7 @@ Aenderung drueben in `/root/firn`. Die Gruende, in dieser Reihenfolge:
    dort. Der Stack „unter uns" ist damit weiterhin nachweislich der des
    Pins — nachgeprueft, alle drei Streuwerte gruen.
 
-Langfristig gehoert der Inhalt nach Firn; `REMOVE-FROM-FIRN.md` fuehrt
+Langfristig gehoert der Inhalt nach Firn; `docs/archive/status/REMOVE-FROM-FIRN.md` fuehrt
 das. Solange er dort nicht ist, steht er hier.
 
 ---

@@ -342,7 +342,7 @@ ist, wird irgendwann nicht mehr gelesen.
 `tools/presence/run.sh` (QEMU-Gäste, echtes TLS 1.3, echte
 Ed25519-Schlüssel) und `test/praesenzd.test.mjs`.
 
-Die Zahlen stehen in [STATUS-PRAESENZ.md](../STATUS-PRAESENZ.md).
+Die Zahlen stehen in [docs/archive/status/STATUS-PRAESENZ.md](../STATUS-PRAESENZ.md).
 
 Die drei Zusagen, auf die es ankommt:
 

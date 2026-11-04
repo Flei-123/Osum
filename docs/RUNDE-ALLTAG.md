@@ -291,7 +291,7 @@ Vorher/nachher: `belege/alltag/f-design/01-ohne-symbolschrift.png` gegen
 | Abschnitt | vorher | nachher |
 |---|---|---|
 | `tools/clip2/run.sh` (misst S-002) | 32/0 (Titel von `f1e38aa2`) | **grün 32, rot 0** |
-| `tools/k11/run.sh` (misst den Editor) | 85 (GRUNDLINIE.md) | **85 passed, 0 failed** |
+| `tools/k11/run.sh` (misst den Editor) | 85 (docs/archive/status/GRUNDLINIE.md) | **85 passed, 0 failed** |
 
 Bemerkenswert an clip2 ist Abschnitt 6, weil er die eigentliche Zusage
 prüft und nicht das Bild: nach dem Ziehen liegt `alpha.txt` in

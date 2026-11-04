@@ -561,7 +561,7 @@ weil ein Bericht, der nur die gruenen Zeilen zeigt, nichts wert ist.
    wie kurz der Name ist. Wer ein `[u8; 4]` hinlegt, schickt seinen
    halben Stapel als Namen mit — im ersten Lauf dieser Runde stand dort
    `runden=30`, und der Kern meldete `reg uhr rund`. Siehe
-   `BEFUND-WMPLUG-NAMENSPUFFER.md`. Die Laenge gehoerte besser als
+   `docs/archive/findings/BEFUND-WMPLUG-NAMENSPUFFER.md`. Die Laenge gehoerte besser als
    Argument mitgegeben.
 5. ~~**Die Rechte-Gegenprobe misst den weiteren der beiden Faelle.**~~
    (gestrichen, siehe 14.2 -- gemessen wird jetzt `rechte=0x001`)

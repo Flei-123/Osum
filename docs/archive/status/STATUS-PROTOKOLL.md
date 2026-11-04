@@ -296,7 +296,7 @@ Kollisionen.
 `kernel/arch/x86_64/osym.s`, `kernel/user/log.fi`,
 `kernel/user/crash.fi`, `kernel/user/noise.fi`,
 `tools/kernel/symtab.py`, `tools/protocol/run.sh`,
-`tools/protocol/screentext.py`, `STATUS-PROTOKOLL.md`.
+`tools/protocol/screentext.py`, `docs/archive/status/STATUS-PROTOKOLL.md`.
 
 **Geändert:** `kstate.fi` (LOG_OFF, KDATA_SIZE, vier Modusworte),
 `boot.s`, `arch/x86_64/smp.fi` (Phase PH_LOG, `lograce`, `logbank`),

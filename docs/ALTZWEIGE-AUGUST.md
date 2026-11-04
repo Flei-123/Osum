@@ -118,7 +118,7 @@ Umschalten.
 
 **Gilt es noch? Nein.** Die Runde ist am **05.09.** als `certus2`
 komplett neu gefahren worden, gegen `merge6` statt gegen den Augustbaum,
-und **ist auf `main`**. Beleg: `STATUS-CERTUS.md` auf `main` trägt das
+und **ist auf `main`**. Beleg: `docs/archive/status/STATUS-CERTUS.md` auf `main` trägt das
 Datum 05.09. und beschreibt ausdrücklich die *zweite* Fassung:
 
 > "Der erste Versuch (Runde CERTUS, 28.08.2026) sprach direkt mit dem
@@ -271,7 +271,7 @@ Konflikte, 3 `modify/delete` (`kernel/kstate.fi`, `kernel/wm.fi`,
 | `AX_OFF = 0x7A000`, `AX_MAX = 0x6000` (also `0x7A000..0x80000`) | `NETDEV_OFF = 0x7A000` (e1000-Auswahl) und die Runde FSROBUST, die sich **dieselben** drei Seiten `0x7A000..0x80000` genommen hat |
 | Systemaufrufe `1960..1965` | `SYS_OSUM_BUS = 1960` (Systembus, mit `BUS_REG`/`BUS_FIND`/`BUS_SEND`/…) |
 
-**Dieser Befund ist nicht neu.** `BEFUND-ZIEH.md` (TEIL 2) hat `a11y`
+**Dieser Befund ist nicht neu.** `docs/archive/findings/BEFUND-ZIEH.md` (TEIL 2) hat `a11y`
 schon einmal geprüft und aus demselben Grund liegen gelassen — "nicht
 aus Zeitmangel", sondern weil "der Versuch kein Merge mehr, sondern eine
 Neuschreibung" wäre. Dort steht auch die Nummernkollision 1960 bereits
@@ -332,7 +332,7 @@ zeilen — eine Zeile je Quelldatei, ausdrücklich als **separater** Commit
 **Gilt es noch? Nein, restlos erledigt.** Auf `main` liegen:
 
 * `THIRD_PARTY.md`, `LICENSE`, `LICENSE.MIT`, `LICENSING.md`,
-  `LICENSE-UEBERSICHT.md`, `LICENSES/MIT.txt` **und** `.reuse/dep5`.
+  `docs/archive/status/LICENSE-OVERVIEW.md`, `LICENSES/MIT.txt` **und** `.reuse/dep5`.
 * **SPDX-Kopfzeilen in 1153 Dateien.** Von 1030 gezählten Quelldateien
   (`.fi`, `.py`, `.sh`, `.s`, `.c`) tragen **979** die Zeile in den
   ersten drei Zeilen.

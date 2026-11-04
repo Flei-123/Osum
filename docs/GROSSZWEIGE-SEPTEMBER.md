@@ -130,7 +130,7 @@ und zwar aus dem denkbar besten Grund.**
 `git merge-base --is-ancestor 1286cf69 main` → **ja**. Auf `main` liegen
 `docs/RUNDE-WMPLUGIN.md` (40 593 Oktette), `kernel/ui/wmplug.fi`
 (1313 Z.), `kernel/user/wmplug.fi` (993 Z.), `tools/wmplug/` mit fünf
-Läufern und `BEFUND-WMPLUG-NAMENSPUFFER.md`. Der Bericht auf `main`
+Läufern und `docs/archive/findings/BEFUND-WMPLUG-NAMENSPUFFER.md`. Der Bericht auf `main`
 nennt die Zahlen des gemergten Standes:
 
 ```

@@ -546,7 +546,7 @@ Ring und je Format, jeder begruendet in
 und `wm.blend`, im Bildspeicher `fb.blend`/`fb.mix8` (anderes
 Bildformat), in Ring 3 `wlibc.rrect`/`wlibc.blend` (ueber die
 Ringgrenze geht kein Systemaufruf je Bildpunkt, siehe
-`BEFUND-VEKTOR-ENTSCHEIDUNG.md`) und `vektor.polygon_round` fuer
+`docs/archive/findings/BEFUND-VEKTOR-ENTSCHEIDUNG.md`) und `vektor.polygon_round` fuer
 beliebige Formen. Abschnitt 11e sucht den GANZEN Baum ab und haelt
 den Fund gegen die Liste: ein Fund ohne Eintrag ist rot, ein Eintrag
 ohne Fund auch. Dieselbe Formulierung steht in `PLAN.md` und `RUN.md`
