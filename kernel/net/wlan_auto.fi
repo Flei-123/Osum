@@ -19,6 +19,7 @@ import wlan.scanfmt
 import wlan.iwl_le
 import wlan.iwl_fwcaps
 import wlan.ethconv
+import wlan.iwl_cmdq
 import wlan.linkprobe
 import net.wlan_net
 import drv.net.iwl
@@ -30,7 +31,7 @@ import drv.net.iwl_heldmac
 
 export {
     start, task_step, mac_ptr, pump, is_up, bind, unbind, driver_ready, state_code, rc_get, tries_get, name_copy,
-    lease_ip, lease_mask, lease_gateway, lease_dns, losses_get, reconnects_get, echo_get, driver_bound, attach_held, scan_text, scan_count, STATE_NONE,
+    lease_ip, lease_mask, lease_gateway, lease_dns, losses_get, reconnects_get, echo_get, txfull_get, amsdu_get, driver_bound, attach_held, scan_text, scan_count, STATE_NONE,
     scan_request, rejoin_request, scan_seq_get, scan_rc_get, diag_text, radio_set, radio_off, quirks_refresh
 }
 
@@ -53,6 +54,9 @@ static mut wa_xid: u64 = 0
 static mut wa_now: u64 = 0
 static mut wa_old_rx: u64 = 0
 static mut wa_echo: u64 = 0
+static mut wa_txfull: u64 = 0
+static mut wa_txwait: u64 = 1
+static mut wa_amsdu: u64 = 0
 static mut wa_resume: u64 = 0
 static mut wa_resume_ok: u64 = 0
 static mut wa_pmk_max: u64 = 0
@@ -220,6 +224,8 @@ fn losses_get() -> u64 {
 }
 
 fn echo_get() -> u64 { return wa_echo }
+fn txfull_get() -> u64 { return wa_txfull }
+fn amsdu_get() -> u64 { return wa_amsdu }
 
 fn reconnects_get() -> u64 {
     if wa_obj == 0 { return 0 }
@@ -405,14 +411,32 @@ fn pump_tx() -> u64 {
             let fl: i64 = ethconv.eth_to_wlan((&wa_eth[0]) as u64, n, (&wa_frame[0]) as u64, 1600,
                 (&(*session_of()).aa[0]) as u64)
             if fl > 0 {
-                let _r: i64 = connect.data_send(session_of(), (wa_dev) as *mut device.Device, (&wa_frame[0]) as u64,
+                let r: i64 = connect.data_send(session_of(), (wa_dev) as *mut device.Device, (&wa_frame[0]) as u64,
                     fl as usize, (&wa_prot[0]) as u64, 1700)
+                if r == iwl_cmdq.E_CQ_FULL && wa_txwait != 0 {
+                    wlan_net.tx_untake(n)
+                    wa_txfull = wa_txfull + 1
+                    return w - 1
+                }
             }
         }
     }
     return w
 }
 
+fn deliver_amsdu(n: u64) {
+    var at: u64 = ethconv.data_hdr_len((&wa_plain[0]) as u64, n)
+    var next: u64 = 0
+    var subs: u64 = 0
+    while subs < 64 {
+        let m: i64 = ethconv.amsdu_sub((&wa_plain[0]) as u64, n, at, (&wa_eth[0]) as u64, 1536, &next)
+        if m <= 0 { return }
+        let _o: bool = wlan_net.rx_offer((&wa_eth[0]) as u64, m as u64)
+        wa_amsdu = wa_amsdu + 1
+        at = next
+        subs = subs + 1
+    }
+}
 fn pump_rx() -> u64 {
     var w: u64 = 0
     var tries: u64 = 0
@@ -426,6 +450,10 @@ fn pump_rx() -> u64 {
             autojoin.auto_rx_seen(auto_of(), wa_now)
             if ethconv.from_self((&wa_plain[0]) as u64, n as u64, mac_ptr()) {
                 wa_echo = wa_echo + 1
+                continue
+            }
+            if ethconv.is_amsdu((&wa_plain[0]) as u64, n as u64) {
+                deliver_amsdu(n as u64)
                 continue
             }
             let m: i64 = ethconv.wlan_to_eth((&wa_plain[0]) as u64, n as u64, (&wa_eth[0]) as u64, 1536)
@@ -478,6 +506,8 @@ fn pump() -> u64 {
 
 fn task_step(state: u64) -> bool {
     wa_now = now_sec(state)
+    wa_txwait = 1
+    if kstate.mode_on(state, kstate.M_WLNOTXWAIT) { wa_txwait = 0 }
     wa_old_rx = 0
     if kstate.mode_on(state, kstate.M_IWLOLDRX) {
         wa_old_rx = 1

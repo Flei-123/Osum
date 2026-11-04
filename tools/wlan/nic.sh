@@ -13,7 +13,12 @@ stage() {
 }
 echo "== nic: WLAN as a network card (receive key, own-broadcast echo, stack receive ring) =="
 stage "$D/lib"
-if FIRNLIB="$D/lib" $FIRNC tools/wlan/nic.fi -o "$D/nic" 2> "$D/err"; then ok "tools/wlan/nic.fi builds"; else bad "build"; head -20 "$D/err"; echo "RESULT pass=$pass fail=$fail"; exit 1; fi
+if FIRNLIB="$D/lib" $FIRNC tools/wlan/nic.fi -o "$D/nic" 2> "$D/err"; then ok "tools/wlan/nic.fi builds"; else bad "build"; head -20 "$D/err"; mut 's/\*next = at + ((SUB_HDR + plen + 3) \/ 4) \* 4/*next = ((at + SUB_HDR + plen + 3) \/ 4) * 4/' "A-MSDU padding aligned to the frame instead of the subframe" wlan/ethconv.fi
+mut 's/return (octets.ld8(frame, WLAN_HDR) \& QOS_AMSDU) != 0/return false/' "A-MSDU bit ignored" wlan/ethconv.fi
+mut 's/if (octets.ld8(frame, 1) \& FC_ORDER) != 0 { hl = hl + 4 }/hl = hl + 0/' "HT control field not skipped" wlan/ethconv.fi
+mut 's/    wn_tail = wn_tail - 1$/    wn_tail = wn_tail/' "untake does not put the frame back" knet/wlan_net.fi
+mut 's/    wn_txb = wn_txb - n$/    wn_txb = wn_txb/' "untake keeps the octet count" knet/wlan_net.fi
+echo "RESULT pass=$pass fail=$fail"; exit 1; fi
 python3 -I tools/wlan/nic.py "$D/nic" > "$D/out"; grep -v '^  OK' "$D/out"
 pass=$((pass+$(grep -c '^  OK' "$D/out"))); fail=$((fail+$(grep -c '^  FAIL' "$D/out")))
 mut() { # sed-expr description file-under-staged-lib
@@ -26,8 +31,8 @@ mut 's/return (&(\*s).gtk\[0\]) as u64/return (\&(*s).ptk[32]) as u64/' "group f
 mut 's/if (\*s).gtk_len < 16 { return 0 }/if (*s).gtk_len > 99 { return 0 }/' "group frame accepted before the group key" wlan/connect.fi
 mut 's/^    return true$/    return false/' "echo filter off" wlan/ethconv.fi
 mut 's/ld8(frame, 16 + i)/ld8(frame, 10 + i)/' "echo source taken from a2" wlan/ethconv.fi
-mut '/(iwl_le.ld8(frame, 1) & 0x03) != FC_FROMDS/d' "echo filter ignores the DS bits" wlan/ethconv.fi
-mut '/(iwl_le.ld8(frame, 4) & 1) == 0 { return false }/d' "echo filter ignores the group bit" wlan/ethconv.fi
+mut '/(octets.ld8(frame, 1) \& 0x03) != FC_FROMDS/d' "echo filter ignores the DS bits" wlan/ethconv.fi
+mut '/(octets.ld8(frame, 4) \& 1) == 0 { return false }/d' "echo filter ignores the group bit" wlan/ethconv.fi
 mut 's/static mut wn_rx_depth: u64 = 64/static mut wn_rx_depth: u64 = 8/' "receive ring back to 8 frames" knet/wlan_net.fi
 mut 's/static mut wn_rx_depth: u64 = 64/static mut wn_rx_depth: u64 = 1/' "single receive slot" knet/wlan_net.fi
 mut 's/if legacy { return rx_free() }/if legacy { return true }/' "legacy mode ignores a busy ring" knet/wlan_net.fi

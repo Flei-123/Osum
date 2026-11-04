@@ -159,10 +159,69 @@ def check_ring(binary):
     ok(out[i + 5] == "S queued=0 drops=2 free=1 poll=0", "link down empties the ring")
 
 
+def qos_frame(fc1, qos0, body, htc=b""):
+    hdr = bytes([0x88, fc1, 0, 0]) + STA + AP + GW + bytes([0x30, 0x00]) + bytes([qos0, 0]) + htc
+    return hdr + body
+
+
+def sub(dst, src, etype, payload, pad=True):
+    inner = SNAP + etype.to_bytes(2, "big") + payload
+    raw = dst + src + len(inner).to_bytes(2, "big") + inner
+    return raw + (bytes((-len(raw)) % 4) if pad else b"")
+
+
+def check_amsdu(binary):
+    p1 = bytes(range(1, 40))
+    p2 = bytes(range(50, 53))
+    p3 = bytes(range(100, 160))
+    s1 = sub(STA, GW, 0x0800, p1)
+    s2 = sub(STA, GW, 0x0800, p2)
+    s3 = sub(BCAST, GW, 0x0806, p3, pad=False)
+    am = qos_frame(0x02, 0x80, s1 + s2 + s3)
+    plain = qos_frame(0x02, 0x00, SNAP + (0x0800).to_bytes(2, "big") + p1)
+    htc = qos_frame(0x82, 0x00, SNAP + (0x0800).to_bytes(2, "big") + p1, htc=bytes(4))
+    amhtc = qos_frame(0x82, 0x80, s1 + s2, htc=bytes(4))
+    trunc = qos_frame(0x02, 0x80, s1 + s2[:-6])
+    badsnap = qos_frame(0x02, 0x80, STA + GW + (10).to_bytes(2, "big") + bytes(10))
+    lines = ["X " + f.hex() for f in (am, plain, htc, amhtc, trunc, badsnap)]
+    out = run(binary, lines)
+    if len(out) != len(lines):
+        ok(False, "amsdu oracle answered %d of %d lines" % (len(out), len(lines)))
+        return
+    e1, e2, e3 = eth(STA, GW, 0x0800, p1), eth(STA, GW, 0x0800, p2), eth(BCAST, GW, 0x0806, p3)
+    ok(out[0] == "X am=1 hl=26 plain=- s=%s s=%s s=%s" % (e1.hex(), e2.hex(), e3.hex()), "A-MSDU of three padded subframes is split, last one without padding")
+    ok(out[1] == "X am=0 hl=26 plain=%s" % e1.hex(), "QoS frame without the A-MSDU bit is one frame")
+    ok(out[2] == "X am=0 hl=30 plain=%s" % e1.hex(), "QoS frame with HT control field: header 30 bytes, delivered")
+    ok(out[3] == "X am=1 hl=30 plain=- s=%s s=%s" % (e1.hex(), e2.hex()), "A-MSDU behind an HT control field is split")
+    ok(out[4] == "X am=1 hl=26 plain=- s=%s" % e1.hex(), "truncated last subframe is dropped, earlier one kept")
+    ok(out[5] == "X am=1 hl=26 plain=-", "subframe without SNAP header is dropped")
+
+
+def check_txq(binary):
+    f = [bytes([0x60 + i]) * (40 + i) for i in range(10)]
+    lines = ["L 1"] + ["Q 0 " + x.hex() for x in f[:8]] + ["Q 0 " + f[8].hex()]
+    lines += ["Q 1", "Q 1", "Q 2 %d" % len(f[1]), "Q 2 %d" % len(f[0]), "Q 1", "Q 1", "Q 0 " + f[9].hex()]
+    lines += ["Q 1"] * 8
+    out = run(binary, lines)
+    if len(out) != len(lines):
+        ok(False, "txq oracle answered %d of %d lines" % (len(out), len(lines)))
+        return
+    ok(out[1:9] == ["Q put=1 pending=1 room=%d txp=0 txb=0" % (7 - i) for i in range(8)], "8 frames fit the transmit ring")
+    ok(out[9].startswith("Q put=0 pending=1 room=0"), "9th frame is refused when the ring is full")
+    ok(out[10] == "Q take=%s pending=1 room=1 txp=1 txb=%d" % (f[0].hex(), len(f[0])), "take returns the oldest frame")
+    ok(out[11].startswith("Q take=%s" % f[1].hex()), "second take returns the next frame")
+    ok(out[12] == "Q untake pending=1 room=1 txp=1 txb=%d" % len(f[0]), "untake gives the frame back and undoes the counters")
+    ok(out[14].startswith("Q take=%s" % f[0].hex()) and out[15].startswith("Q take=%s" % f[1].hex()), "untaken frames come out again in the original order")
+    ok(out[16].startswith("Q put=1"), "ring accepts a frame again after takes")
+    ok(out[-1].startswith("Q take=- pending=0"), "ring drains to the end")
+
+
 def main():
     binary = sys.argv[1]
     check_frames(binary)
     check_ring(binary)
+    check_amsdu(binary)
+    check_txq(binary)
     bad = results.count(False)
     print("RESULT pass=%d fail=%d" % (len(results) - bad, bad))
     sys.exit(1 if bad else 0)

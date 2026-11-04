@@ -2,13 +2,16 @@
 import wlan.iwl_le
 import libc.octets
 
-export { eth_to_wlan, wlan_to_eth, from_self, ETH_HDR, ETH_MAX, WLAN_HDR }
+export { eth_to_wlan, wlan_to_eth, from_self, data_hdr_len, is_amsdu, amsdu_sub, ETH_HDR, ETH_MAX, WLAN_HDR }
 
 const ETH_HDR: u64 = 14
 const ETH_MAX: u64 = 1514
 const WLAN_HDR: u64 = 24
 const SNAP_LEN: u64 = 8
 const FC_QOS: u64 = 0x80
+const FC_ORDER: u64 = 0x80
+const QOS_AMSDU: u64 = 0x80
+const SUB_HDR: u64 = 14
 const FC_TODS: u64 = 0x01
 const FC_FROMDS: u64 = 0x02
 
@@ -61,8 +64,8 @@ fn wlan_to_eth(frame: u64, n: u64, out: u64, cap: u64) -> i64 {
     let fc1: u64 = octets.ld8(frame, 1)
     if (fc0 & 0x0C) != 0x08 { return -1 }
     if (fc1 & FC_FROMDS) == 0 || (fc1 & FC_TODS) != 0 { return -1 }
-    var hl: u64 = WLAN_HDR
-    if (fc0 & FC_QOS) != 0 { hl = hl + 2 }
+    if is_amsdu(frame, n) { return -1 }
+    let hl: u64 = data_hdr_len(frame, n)
     if n < hl + SNAP_LEN { return -1 }
     if octets.ld8(frame, hl) != 0xAA || octets.ld8(frame, hl + 1) != 0xAA || octets.ld8(frame, hl + 2) != 0x03 { return -1 }
     let plen: u64 = n - hl - SNAP_LEN
@@ -73,4 +76,37 @@ fn wlan_to_eth(frame: u64, n: u64, out: u64, cap: u64) -> i64 {
     octets.st8(out, 13, octets.ld8(frame, hl + 7))
     octets.copy(out + ETH_HDR, frame + hl + SNAP_LEN, plen)
     return (ETH_HDR + plen) as i64
+}
+
+fn data_hdr_len(frame: u64, n: u64) -> u64 {
+    var hl: u64 = WLAN_HDR
+    if (octets.ld8(frame, 0) & FC_QOS) != 0 {
+        hl = hl + 2
+        if (octets.ld8(frame, 1) & FC_ORDER) != 0 { hl = hl + 4 }
+    }
+    return hl
+}
+
+fn is_amsdu(frame: u64, n: u64) -> bool {
+    if n < WLAN_HDR + 2 { return false }
+    if (octets.ld8(frame, 0) & 0x8C) != 0x88 { return false }
+    return (octets.ld8(frame, WLAN_HDR) & QOS_AMSDU) != 0
+}
+
+fn amsdu_sub(frame: u64, n: u64, at: u64, out: u64, cap: u64, next: *mut u64) -> i64 {
+    if at + SUB_HDR + SNAP_LEN > n { return -1 }
+    let plen: u64 = (octets.ld8(frame, at + 12) << 8) | octets.ld8(frame, at + 13)
+    let end: u64 = at + SUB_HDR + plen
+    if plen < SNAP_LEN || end > n { return -1 }
+    let s: u64 = at + SUB_HDR
+    if octets.ld8(frame, s) != 0xAA || octets.ld8(frame, s + 1) != 0xAA || octets.ld8(frame, s + 2) != 0x03 { return -1 }
+    let body: u64 = plen - SNAP_LEN
+    if ETH_HDR + body > cap { return -1 }
+    copy6(out, 0, frame, at)
+    copy6(out, 6, frame, at + 6)
+    octets.st8(out, 12, octets.ld8(frame, s + 6))
+    octets.st8(out, 13, octets.ld8(frame, s + 7))
+    octets.copy(out + ETH_HDR, frame + s + SNAP_LEN, body)
+    *next = at + ((SUB_HDR + plen + 3) / 4) * 4
+    return (ETH_HDR + body) as i64
 }
