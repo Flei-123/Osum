@@ -218,6 +218,7 @@ fn scan(state: u64, mbi: u64, kernel_end: u64) -> u64 {
     kstate.set(state, kstate.FRAMES_FREE, mmframe.count_free(state))
 
     idmap_grow(state, top)
+    dmap_build(state)
     bitmap_grow(state, mbi, kernel_end, top)
     return entries
 }
@@ -269,6 +270,28 @@ fn idmap_grow(state: u64, top: u64) -> u64 {
     }
     kstate.set(state, kstate.MAPPED_GB, have)
     return have
+}
+
+fn dmap_build(state: u64) {
+    let have: u64 = kstate.get(state, kstate.MAPPED_GB)
+    if have <= 1 {
+        return
+    }
+    let pml4: u64 = asm("mov rax, cr3", out("rax")) & PTE_ADDR
+    let pdpt: u64 = __mmio_read64(pml4 as *mut u64) & PTE_ADDR
+    let dm: u64 = mmframe.frame_alloc_inner(state)
+    if pdpt == 0 || dm == 0 {
+        return
+    }
+    mmframe.fill8(dm, mmframe.FRAME_SIZE, 0)
+    var g: u64 = 0
+    while g < have {
+        __mmio_write64((dm + g * 8) as *mut u64, __mmio_read64((pdpt + g * 8) as *mut u64))
+        g = g + 1
+    }
+    __mmio_write64((pml4 + mmframe.DM_SLOT * 8) as *mut u64, dm | PTE_P_W)
+    let cr3: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rdi", in("rdi") cr3)
 }
 
 fn bitmap_grow(state: u64, mbi: u64, kernel_end: u64, top: u64) -> u64 {

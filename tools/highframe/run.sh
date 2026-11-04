@@ -57,27 +57,27 @@ run_case() {
 clean() { tr -cd '\11\12\15\40-\176' < "$1" | tr -d '\r' > "$1.clean"; }
 part() { sed -n "/^==$2==\$/,/^==$3==\$/p" "$1.clean"; }
 
-echo "== 2. fixed kernel: user frames stay reachable in process context =="
+echo "== 2. fixed kernel: user frames above 1 GiB are reachable in process context =="
 rc=$(run_case new "$NEW")
 F="$D/new.txt"; clean "$F"
-has "$F.clean" "mem: process context reaches frames < 262144" "kernel confines frames at the first process"
+hasnot "$F.clean" "mem: process context reaches" "kernel does not confine frames"
 hasnot "$F.clean" "EXCEPTION" "no kernel page fault"
 hasnot "$F.clean" "ABSTURZBERICHT" "no crash report"
 is "kernel finished" "$rc" "21"
 is "400 MiB touched" "$(part "$F" SMALL BIG | grep -ac '^hifr: touched 102400$')" "1"
 is "write from a user page reads right" "$(part "$F" SMALL BIG | grep -ac '^HIFR-WRITE-OK$')" "1"
 is "read into a user page lands right" "$(part "$F" SMALL BIG | grep -ac '^hifr: read ok$')" "1"
-is "1500 MiB does not complete" "$(part "$F" BIG AFTER | grep -ac '^hifr: end$')" "0"
-is "the hog is killed cleanly (user fault)" "$(part "$F" BIG AFTER | grep -ac 'user fault: .*process killed')" "1"
+is "1500 MiB completes" "$(part "$F" BIG AFTER | grep -ac '^hifr: end$')" "1"
+is "1500 MiB read into a user page lands right" "$(part "$F" BIG AFTER | grep -ac '^hifr: read ok$')" "1"
+is "no user fault" "$(part "$F" BIG AFTER | grep -ac 'user fault: .*process killed')" "0"
 is "memory is back afterwards" "$(part "$F" AFTER END | grep -ac '^hifr: end$')" "1"
 
-echo "== 3. counter-proof: kernel without the fix =="
+echo "== 3. counter-proof: kernel with the 1 GiB confinement =="
 if [ -n "$OLD" ]; then
     rc=$(run_case old "$OLD")
     F="$D/old.txt"; clean "$F"
-    has "$F.clean" "EXCEPTION 14" "old kernel faults"
-    has "$F.clean" "proc\.(lazy_fault|map_page_zero|zero_frame)|sys\.copy_(in|out)" "inside the user frame touch"
-    hasnot "$F.clean" "mem: process context reaches" "old kernel has no confinement"
+    has "$F.clean" "mem: process context reaches frames < 262144" "old kernel confines at 1 GiB"
+    is "old kernel: 1500 MiB does not complete" "$(part "$F" BIG AFTER | grep -ac '^hifr: end$')" "0"
 else
     echo "  skip  no old kernel given"
 fi

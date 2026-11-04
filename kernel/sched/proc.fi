@@ -100,7 +100,8 @@ fn write_entry(table: u64, i: u64, v: u64) {
     __mmio_write64((table + i * 8) as *mut u64, v)
 }
 
-fn zero_frame(p: u64) {
+fn zero_frame(frame: u64) {
+    let p: u64 = mmframe.kva(frame)
     var i: u64 = 0
     while i < mmframe.FRAME_SIZE / 8 {
         __mmio_write64((p + i * 8) as *mut u64, 0)
@@ -152,7 +153,7 @@ fn space_build(state: u64, i: u64) -> u64 {
     let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
     write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
     acpi.only_first_give()
-    mmframe.confine_to_reach(state)
+    write_entry(pml4, mmframe.DM_SLOT, read_entry(kpml4, mmframe.DM_SLOT))
 
     write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
     write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
@@ -457,7 +458,7 @@ fn space_build_empty(state: u64, i: u64) -> u64 {
     let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
     write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
     acpi.only_first_give()
-    mmframe.confine_to_reach(state)
+    write_entry(pml4, mmframe.DM_SLOT, read_entry(kpml4, mmframe.DM_SLOT))
     write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
     write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
     write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
@@ -830,7 +831,7 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     write_entry(pt, s, frame | bits)
     sched.tset(state, i, sched.T_UPAGES,
         sched.tget(state, i, sched.T_UPAGES) + 1)
-    return frame
+    return mmframe.kva(frame)
 }
 
 fn map_page_zero(state: u64, i: u64, addr: u64, writable: bool,
@@ -955,13 +956,13 @@ fn translate(state: u64, i: u64, addr: u64) -> u64 {
         return 0
     }
     if (e2 & 0x80) != 0 {
-        return (e2 & ADDR_MASK) + (addr & 0x1FFFFF)
+        return mmframe.kva((e2 & ADDR_MASK) + (addr & 0x1FFFFF))
     }
     let e1: u64 = read_entry(e2 & ADDR_MASK, (addr >> 12) & 0x1FF)
     if (e1 & PAGE_PRESENT) == 0 {
         return 0
     }
-    return (e1 & ADDR_MASK) + (addr & 0xFFF)
+    return mmframe.kva((e1 & ADDR_MASK) + (addr & 0xFFF))
 }
 
 fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> bool {
@@ -975,7 +976,7 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
     if (err & 16) != 0 && (e0 & PAGE_LAZYX) == 0 {
         return false
     }
-    let tmp: u64 = mmframe.frame_alloc_user(state)
+    let tmp: u64 = mmframe.frame_alloc_user_low(state)
     if tmp == 0 {
         return false
     }
@@ -1015,6 +1016,7 @@ const PAGE_ACCESSED: u64 = 0x20
 const PAGE_EXEC_SW: u64 = 0x10000000000000
 const SWAP_SLOTS: u64 = 16384
 const SWAP_BATCH: u64 = 16
+static mut swap_bounce: u64 = 0
 const SWAP_SCAN_MAX: u64 = 8192
 const SWAP_ITER_MAX: u64 = 4096
 const SB_FRAME: u64 = 0
@@ -1062,11 +1064,21 @@ fn swap_boot(state: u64) {
         ino = fs.create_path(state, (&path[0]) as u64, fs.T_FILE)
     }
     let batch: u64 = mmframe.frame_alloc(state)
-    if ino == 0 || batch == 0 || !mmswap.configure(state, ino, SWAP_SLOTS) {
+    let bounce: u64 = mmframe.frame_alloc(state)
+    if ino == 0 || batch == 0 || bounce == 0 || !mmswap.configure(state, ino, SWAP_SLOTS) {
         swap_broken = 1
         return
     }
     swap_batch_at = batch
+    swap_bounce = bounce
+}
+
+fn copy_frame_words(dst: u64, src: u64) {
+    var o: u64 = 0
+    while o < mmframe.FRAME_SIZE / 8 {
+        __mmio_write64((dst + o * 8) as *mut u64, __mmio_read64((src + o * 8) as *mut u64))
+        o = o + 1
+    }
 }
 
 fn swap_cr3_busy(state: u64, cr3: u64, me: u64) -> bool {
@@ -1189,7 +1201,12 @@ fn swap_flush(state: u64, t: u64, got: u64) {
         let pt: u64 = kstate.get(swap_batch_at, SB_PT + k * 8)
         let idx: u64 = kstate.get(swap_batch_at, SB_IDX + k * 8)
         let old: u64 = kstate.get(swap_batch_at, SB_ENT + k * 8)
-        let wrote: u64 = fs.write_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, frame, mmframe.FRAME_SIZE)
+        var src: u64 = frame
+        if frame >= mmframe.REACH_FRAMES * mmframe.FRAME_SIZE {
+            src = swap_bounce
+            copy_frame_words(src, mmframe.kva(frame))
+        }
+        let wrote: u64 = fs.write_at(state, mmswap.inode(), slot * mmswap.SLOT_BYTES, src, mmframe.FRAME_SIZE)
         if wrote == mmframe.FRAME_SIZE {
             mmswap.publish(state, slot)
             mmswap.count_out()
@@ -1290,10 +1307,10 @@ fn swap_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -> boo
         return false
     }
     let slot: u64 = swap_slot_of(e0)
-    var tmp: u64 = mmframe.frame_alloc_user(state)
+    var tmp: u64 = mmframe.frame_alloc_user_low(state)
     if tmp == 0 {
         let _r: u64 = swap_reclaim(state, cur, (err & 4) != 0)
-        tmp = mmframe.frame_alloc_user(state)
+        tmp = mmframe.frame_alloc_user_low(state)
         if tmp == 0 {
             return false
         }
@@ -1851,15 +1868,15 @@ fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
         if (e & PAGE_PRESENT) != 0 {
             var d: u64 = read_entry(dst, k)
             if (d & PAGE_PRESENT) == 0 {
-                let f: u64 = mmframe.frame_alloc(state)
+                let f: u64 = mmframe.frame_alloc_user(state)
                 if f == 0 {
                     return 0
                 }
                 write_entry(dst, k, f | (e & 0xFFF) | (e & PAGE_NX))
                 d = read_entry(dst, k)
             }
-            let a: u64 = e & ADDR_MASK
-            let b: u64 = d & ADDR_MASK
+            let a: u64 = mmframe.kva(e & ADDR_MASK)
+            let b: u64 = mmframe.kva(d & ADDR_MASK)
             var w: u64 = 0
             while w < mmframe.FRAME_SIZE / 8 {
                 __mmio_write64((b + w * 8) as *mut u64,

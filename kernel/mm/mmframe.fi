@@ -12,12 +12,17 @@ export {
     bit_get,
     bit_set,
     bitmap_octets,
-    confine_to_reach,
     count_free,
     fill8,
     frame_alloc,
     frame_alloc_inner,
     frame_alloc_user,
+    frame_alloc_user_low,
+    kva,
+    DM_BASE,
+    DM_SLOT,
+    GIB,
+    low_limit,
     frame_free,
     frame_free_inner,
     frame_free_run,
@@ -40,6 +45,26 @@ export {
 }
 
 const FRAME_SIZE: u64 = 4096
+const GIB: u64 = 1073741824
+const REACH_FRAMES: u64 = 262144
+const DM_SLOT: u64 = 256
+const DM_BASE: u64 = 0xFFFF800000000000
+static mut high_hint: u64 = 0
+
+fn kva(p: u64) -> u64 {
+    if p >= GIB && p < DM_BASE {
+        return DM_BASE + p
+    }
+    return p
+}
+
+fn low_limit(state: u64) -> u64 {
+    let total: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    if total > REACH_FRAMES {
+        return REACH_FRAMES
+    }
+    return total
+}
 fn bit_get(bitmap: u64, i: u64) -> bool {
     return (kstate.get8(bitmap + i / 8) & (1 << (i % 8))) != 0
 }
@@ -188,9 +213,61 @@ fn frame_alloc_user(state: u64) -> u64 {
         unlock(state, flags)
         return 0
     }
+    var r: u64 = frame_alloc_high(state)
+    if r == 0 {
+        r = frame_alloc_inner(state)
+    }
+    unlock(state, flags)
+    return r
+}
+
+fn frame_alloc_user_low(state: u64) -> u64 {
+    let flags: u64 = lock(state)
+    let res: u64 = kstate.get(state, kstate.RESERVE_FRAMES)
+    if frames_free(state) <= res {
+        kstate.set(state, kstate.RESERVE_HITS,
+            kstate.get(state, kstate.RESERVE_HITS) + 1)
+        unlock(state, flags)
+        return 0
+    }
     let r: u64 = frame_alloc_inner(state)
     unlock(state, flags)
     return r
+}
+
+fn frame_alloc_high(state: u64) -> u64 {
+    let total: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    if total <= REACH_FRAMES {
+        return 0
+    }
+    var h: u64 = high_hint
+    if h < REACH_FRAMES || h >= total {
+        h = REACH_FRAMES
+    }
+    var r: u64 = scan_high(state, h, total)
+    if r == 0 && h > REACH_FRAMES {
+        r = scan_high(state, REACH_FRAMES, h)
+    }
+    return r
+}
+
+fn scan_high(state: u64, from: u64, to: u64) -> u64 {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    var f: u64 = from
+    while f < to {
+        if kstate.get8(bitmap + f / 8) == 0xFF {
+            f = f + 8 - (f % 8)
+        } else {
+            if !bit_get(bitmap, f) {
+                bit_set(bitmap, f)
+                kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - 1)
+                high_hint = f
+                return f * FRAME_SIZE
+            }
+            f = f + 1
+        }
+    }
+    return 0
 }
 
 fn reserve_init(state: u64) {
@@ -216,45 +293,21 @@ fn hint_of(state: u64) -> u64 {
     return h
 }
 
-const REACH_FRAMES: u64 = 262144
-static mut confined_once: u64 = 0
-
 fn reach_frames() -> u64 {
     return REACH_FRAMES
 }
 
-fn confine_to_reach(state: u64) {
-    var s_cut: [u8; 40] = "mem: process context reaches frames < \0\0"
-    var s_was: [u8; 8] = " (was \0\0"
-    var s_end: [u8; 3] = ")\n\0"
-    let flags: u64 = lock(state)
-    let have: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
-    if confined_once != 0 || have <= REACH_FRAMES {
-        unlock(state, flags)
-        return
-    }
-    confined_once = 1
-    kstate.set(state, kstate.BITMAP_FRAMES, REACH_FRAMES)
-    if kstate.get(state, kstate.FRAME_HINT) >= REACH_FRAMES {
-        kstate.set(state, kstate.FRAME_HINT, 0)
-    }
-    kstate.set(state, kstate.FRAMES_FREE, count_free(state))
-    reserve_init(state)
-    unlock(state, flags)
-    serial.puts((&s_cut[0]) as u64)
-    serial.dec(REACH_FRAMES)
-    serial.puts((&s_was[0]) as u64)
-    serial.dec(have)
-    serial.puts((&s_end[0]) as u64)
-}
-
 fn frame_alloc_inner(state: u64) -> u64 {
-    let r: u64 = scan_range(state, hint_of(state),
-        kstate.get(state, kstate.BITMAP_FRAMES))
+    let low: u64 = low_limit(state)
+    var h: u64 = hint_of(state)
+    if h >= low {
+        h = 0
+    }
+    let r: u64 = scan_range(state, h, low)
     if r != 0 {
         return r
     }
-    return scan_range(state, 0, hint_of(state))
+    return scan_range(state, 0, h)
 }
 
 fn scan_range(state: u64, from: u64, to: u64) -> u64 {
@@ -292,8 +345,12 @@ fn frame_free_inner(state: u64, addr: u64) {
     if bit_get(bitmap, f) {
         bit_clear(bitmap, f)
         kstate.set(state, kstate.FRAMES_FREE, frames_free(state) + 1)
-        if f < kstate.get(state, kstate.FRAME_HINT) {
-            kstate.set(state, kstate.FRAME_HINT, f)
+        if f < REACH_FRAMES {
+            if f < kstate.get(state, kstate.FRAME_HINT) {
+                kstate.set(state, kstate.FRAME_HINT, f)
+            }
+        } else if f < high_hint {
+            high_hint = f
         }
     }
 }
@@ -328,7 +385,7 @@ fn frame_run(state: u64, n: u64) -> u64 {
 
 fn frame_run_inner(state: u64, n: u64) -> u64 {
     let bitmap: u64 = kstate.get(state, kstate.BITMAP)
-    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    let frames: u64 = low_limit(state)
     var start: u64 = 0
     while start + n <= frames {
         var k: u64 = 0
