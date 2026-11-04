@@ -78,7 +78,7 @@ def vergleich(g, w, name):
             error.append("%s %d statt %d (%.2f je Bildpunkt)"
                           % (k, g[k], w[k], d / max(1, n)))
     for (gx, gy, gv), (wx, wy, wv) in ([] if not punktweise
-                                       else zip(g["punkte"], w["punkte"])):
+                                       else zip(g["points"], w["points"])):
         if (gx, gy) != (wx, wy):
             error.append("Bildpunkt %d,%d statt %d,%d" % (gx, gy, wx, wy))
             continue
