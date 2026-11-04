@@ -44,12 +44,12 @@ for sh in tools/vulkan/shaders/tri.vert tools/vulkan/shaders/tri.frag tools/vulk
     b=$(basename "$sh")
     glslangValidator -V "$sh" -o "$D/spv/$b.spv" > /dev/null 2>&1 && spirv-opt --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store "$D/spv/$b.spv" -o "$D/spv/$b.opt" || ck "shader $b compiles" no
 done
-CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil quad_bgra quad_npot inst dubo area rpass blit"
+CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil quad_bgra quad_npot inst many dubo area rpass blit"
 WSI_CASES="wsi wsi1 wsi2"
 VK_DRIVER_FILES=$LVP timeout 120 "$D/draw" libvulkan.so.1 1 "$D/lvpd" "$D/spv" > "$D/draw_lvp.txt" 2>&1
 grep -q "^VK DONE bad=0" "$D/draw_lvp.txt" && ck "draw client: lavapipe reference passes" ok || ck "draw client: lavapipe reference passes" no
 timeout 120 stdbuf -o0 "$D/draw" "$D/libvulkan.so.1" 0 "$D/oursd" "$D/spv" > "$D/draw_ours.txt" 2>&1
-grep -q "^VK DONE bad=0" "$D/draw_ours.txt" && ck "draw client: OrientOS ICD passes (17 scenes)" ok || { ck "draw client: OrientOS ICD passes (17 scenes)" no; grep FAIL "$D/draw_ours.txt" | head; }
+grep -q "^VK DONE bad=0" "$D/draw_ours.txt" && ck "draw client: OrientOS ICD passes (18 scenes)" ok || { ck "draw client: OrientOS ICD passes (18 scenes)" no; grep FAIL "$D/draw_ours.txt" | head; }
 draw_match() {
     local dir=$1 c r=0
     for c in $CASES; do
@@ -97,6 +97,7 @@ mutate_draw "no viewport y flip" vkrender.fi 's/0.0f - y \* sy + w \* oy/y * sy 
 mutate_draw "push constants dropped" vkrender.fi 's/rt.mem_copy(ubo + (lower.PUSH_BASE as u64), rs + (R_PUSH as u64) \* 8 as u64, PUSH_WORDS \* 8)//'
 mutate_draw "blend ignored" vkrender.fi 's/raster.frame_set_blend(f, (flags \& vkpipe.F_BLEND) != 0 as u64)/raster.frame_set_blend(f, false)/'
 mutate_draw "depth test ignored" vkrender.fi 's/(\*f).depth_test = (flags \& vkpipe.F_DEPTH) != 0 as u64 \&\& /(*f).depth_test = false \&\& /'
+mutate_draw "command buffer capped at 2048 commands" vkcmd.fi 's/const CMD_LIMIT: usize = 1048576/const CMD_LIMIT: usize = 2048/'
 mutate_draw "BGRA swizzle skipped" vkrender.fi 's/if rt.ld64(rs, R_BGRA) != 0 as u64 { swap_rb/if rt.ld64(rs, R_BGRA) == 99 as u64 { swap_rb/'
 mutate_draw "index buffer offset ignored" vkrender.fi 's/rt.ld8(p + ioff + idx/rt.ld8(p + idx/g'
 mutate_draw "vertex attribute offset ignored" vkrender.fi 's/ + vn \* rt.ld64(p, vkpipe.P_STRIDE0 + binding) + off$/ + vn * rt.ld64(p, vkpipe.P_STRIDE0 + binding)/'

@@ -2,7 +2,7 @@
 import std.rt
 import vulkan.vkobj
 
-export { vkCreateCommandPool, vkDestroyCommandPool, vkResetCommandPool, vkAllocateCommandBuffers, vkFreeCommandBuffers, vkBeginCommandBuffer, vkEndCommandBuffer, vkResetCommandBuffer, vkCmdClearColorImage, vkCmdCopyBuffer, vkCmdCopyImageToBuffer, vkCmdCopyBufferToImage, vkCmdFillBuffer, vkCmdPipelineBarrier, OP_CLEAR, OP_COPY_BUFFER, OP_IMAGE_TO_BUFFER, OP_BUFFER_TO_IMAGE, OP_FILL, OP_BEGIN_RENDERING, OP_END_RENDERING, OP_BIND_PIPELINE, OP_BIND_VERTEX, OP_BIND_INDEX, OP_BIND_SET, OP_PUSH, OP_VIEWPORT, OP_SCISSOR, OP_DRAW, OP_DRAW_INDEXED, OP_BEGIN_STENCIL, OP_CLEAR_ATT, OP_BLIT, CMD_WORDS, CMD_CAP, rec_new }
+export { vkCreateCommandPool, vkDestroyCommandPool, vkResetCommandPool, vkAllocateCommandBuffers, vkFreeCommandBuffers, vkBeginCommandBuffer, vkEndCommandBuffer, vkResetCommandBuffer, vkCmdClearColorImage, vkCmdCopyBuffer, vkCmdCopyImageToBuffer, vkCmdCopyBufferToImage, vkCmdFillBuffer, vkCmdPipelineBarrier, OP_CLEAR, OP_COPY_BUFFER, OP_IMAGE_TO_BUFFER, OP_BUFFER_TO_IMAGE, OP_FILL, OP_BEGIN_RENDERING, OP_END_RENDERING, OP_BIND_PIPELINE, OP_BIND_VERTEX, OP_BIND_INDEX, OP_BIND_SET, OP_PUSH, OP_VIEWPORT, OP_SCISSOR, OP_DRAW, OP_DRAW_INDEXED, OP_BEGIN_STENCIL, OP_CLEAR_ATT, OP_BLIT, CMD_WORDS, F_LIST, F_COUNT, F_CAP, F_OVERFLOW, rec_new }
 
 const OP_CLEAR: u64 = 1
 const OP_COPY_BUFFER: u64 = 2
@@ -24,7 +24,12 @@ const OP_BEGIN_STENCIL: u64 = 17
 const OP_CLEAR_ATT: u64 = 18
 const OP_BLIT: u64 = 19
 const CMD_WORDS: usize = 8
-const CMD_CAP: usize = 4096
+const CMD_START: usize = 1024
+const CMD_LIMIT: usize = 1048576
+const F_LIST: usize = 0
+const F_COUNT: usize = 1
+const F_CAP: usize = 2
+const F_OVERFLOW: usize = 3
 
 #[export_c]
 fn vkCreateCommandPool(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
@@ -51,8 +56,10 @@ fn vkAllocateCommandBuffers(dev: u64, info: u64, out: u64) -> i32 {
     while i < n {
         let h: u64 = vkobj.obj_new(vkobj.K_CMDBUF)
         if h == 0 as u64 { return -1 }
-        let list: u64 = rt.heap_alloc(CMD_CAP * CMD_WORDS * 8)
-        vkobj.obj_set(h, vkobj.K_CMDBUF, 0, list)
+        let list: u64 = rt.heap_alloc(CMD_START * CMD_WORDS * 8)
+        if list == 0 as u64 { return -1 }
+        vkobj.obj_set(h, vkobj.K_CMDBUF, F_LIST, list)
+        vkobj.obj_set(h, vkobj.K_CMDBUF, F_CAP, CMD_START as u64)
         rt.st64(out, i as usize, h)
         i = i + 1 as u32
     }
@@ -64,8 +71,9 @@ fn vkFreeCommandBuffers(dev: u64, pool: u64, count: u32, bufs: u64) {
     var i: u32 = 0 as u32
     while i < count {
         let h: u64 = rt.ld64(bufs, i as usize)
-        let list: u64 = vkobj.obj_get(h, vkobj.K_CMDBUF, 0)
-        if list != 0 as u64 { rt.heap_free(list, CMD_CAP * CMD_WORDS * 8) }
+        let list: u64 = vkobj.obj_get(h, vkobj.K_CMDBUF, F_LIST)
+        let cap: u64 = vkobj.obj_get(h, vkobj.K_CMDBUF, F_CAP)
+        if list != 0 as u64 { rt.heap_free(list, (cap as usize) * CMD_WORDS * 8) }
         vkobj.obj_free(h, vkobj.K_CMDBUF)
         i = i + 1 as u32
     }
@@ -73,27 +81,52 @@ fn vkFreeCommandBuffers(dev: u64, pool: u64, count: u32, bufs: u64) {
 
 #[export_c]
 fn vkBeginCommandBuffer(cb: u64, info: u64) -> i32 {
-    vkobj.obj_set(cb, vkobj.K_CMDBUF, 1, 0 as u64)
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_COUNT, 0 as u64)
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_OVERFLOW, 0 as u64)
     return 0
 }
 
 #[export_c]
 fn vkEndCommandBuffer(cb: u64) -> i32 {
+    if vkobj.obj_get(cb, vkobj.K_CMDBUF, F_OVERFLOW) != 0 as u64 { return -1 }
     return 0
 }
 
 #[export_c]
 fn vkResetCommandBuffer(cb: u64, flags: u32) -> i32 {
-    vkobj.obj_set(cb, vkobj.K_CMDBUF, 1, 0 as u64)
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_COUNT, 0 as u64)
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_OVERFLOW, 0 as u64)
     return 0
 }
 
+fn grow(cb: u64, list: u64, cap: u64) -> u64 {
+    if cap >= (CMD_LIMIT as u64) {
+        vkobj.obj_set(cb, vkobj.K_CMDBUF, F_OVERFLOW, 1 as u64)
+        return 0 as u64
+    }
+    let bigger: u64 = cap * 2 as u64
+    let fresh: u64 = rt.heap_alloc((bigger as usize) * CMD_WORDS * 8)
+    if fresh == 0 as u64 {
+        vkobj.obj_set(cb, vkobj.K_CMDBUF, F_OVERFLOW, 1 as u64)
+        return 0 as u64
+    }
+    rt.mem_copy(fresh, list, (cap as usize) * CMD_WORDS * 8)
+    rt.heap_free(list, (cap as usize) * CMD_WORDS * 8)
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_LIST, fresh)
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_CAP, bigger)
+    return fresh
+}
+
 fn rec_new(cb: u64, op: u64) -> u64 {
-    let list: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, 0)
-    let n: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, 1)
+    var list: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, F_LIST)
+    let n: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, F_COUNT)
     if list == 0 as u64 { return 0 as u64 }
-    if n >= (CMD_CAP as u64) { return 0 as u64 }
-    vkobj.obj_set(cb, vkobj.K_CMDBUF, 1, n + 1 as u64)
+    let cap: u64 = vkobj.obj_get(cb, vkobj.K_CMDBUF, F_CAP)
+    if n >= cap {
+        list = grow(cb, list, cap)
+        if list == 0 as u64 { return 0 as u64 }
+    }
+    vkobj.obj_set(cb, vkobj.K_CMDBUF, F_COUNT, n + 1 as u64)
     let r: u64 = list + n * (CMD_WORDS as u64) * 8 as u64
     rt.mem_set(r, 0 as u8, CMD_WORDS * 8)
     rt.st64(r, 0, op)

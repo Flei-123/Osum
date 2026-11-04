@@ -384,6 +384,32 @@ static void case_inst(void)
     finish(&t, "inst", &rb);
 }
 
+static void case_many(void)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout lay = mklayout(0, 16, &dsl);
+    PipeDesc d = { "tri.vert", "push.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 2, 24, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }, { 0, 8 }, lay };
+    VkPipeline p = mkpipe(&d);
+    check("pipeline many", p != 0);
+    Buf vb = mkvec(tri_data, sizeof tri_data, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    begin();
+    begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
+    for (int i = 0; i < 1800; i++) {
+        int tile = i % 256;
+        int tx = (tile % 16) * 4, ty = (tile / 16) * 3;
+        float tint[4] = { (float)((i * 37) % 251) / 255.0f, (float)((i * 91) % 241) / 255.0f, (float)((i * 53) % 239) / 255.0f, 1.0f };
+        set_vp(0, 0, W, H, tx, ty, 4, 3);
+        vkCmdPushConstants(cb, lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, tint);
+        vkCmdDraw(cb, 3, 1, 0, 0);
+    }
+    finish(&t, "many", &rb);
+}
+
 static void case_dubo(void)
 {
     Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
@@ -824,6 +850,7 @@ int main(int argc, char **argv)
     case_quad("quad_bgra", VK_FORMAT_B8G8R8A8_UNORM, 8, 8, 1.0f);
     case_quad("quad_npot", VK_FORMAT_R8G8B8A8_UNORM, 5, 7, 2.0f);
     case_inst();
+    case_many();
     case_dubo();
     case_area();
     case_rpass();
