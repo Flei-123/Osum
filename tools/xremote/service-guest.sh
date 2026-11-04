@@ -7,6 +7,7 @@ STATE=/run/xremote.state
 LOG=/var/log/xremote.log
 PKG=/apps/xremote.prog/bin/freeviewer-host
 kv() { while IFS== read -r k v; do [ "$k" = "$2" ] && { echo "$v"; return; }; done < "$1"; }
+nap() { n=$1; while [ $n -gt 50 ]; do $B sleep 50; n=$((n - 50)); done; [ $n -gt 0 ] && $B sleep $n; }
 ex() { [ -e "$1" ] && echo 1 || echo 0; }
 enable() { echo "enabled=1" > $CONF; echo "relay=ws://10.0.2.2:@RELAYPORT@/fv/ws" >> $CONF; }
 wait_id() {
@@ -46,7 +47,7 @@ echo "SV-ID $ID"
 echo "SV-PW $PW"
 echo "SV-B service=$(kv $INFO service) pwlen=${#PW} samepw=$([ "$PW" = "$PWF" ] && echo 1 || echo 0) status=$(kv $STATE status)"
 echo "SV-WINDOW1"
-$B sleep @WINDOW@
+nap @WINDOW@
 echo "SV-LOG1-BEGIN"
 $B cat $LOG
 echo "SV-LOG1-END"
@@ -55,7 +56,7 @@ echo "enabled=0" > $CONF
 $B sleep 8
 echo "SV-C service=$(kv $INFO service) password=$(kv $INFO password) pw=$(ex /run/xremote.pw) state=$(ex $STATE)"
 echo "SV-DISABLED-DONE"
-$B sleep @AFTERSECS@
+nap @AFTERSECS@
 echo "SV-PHASE D"
 $B mv $PKG $PKG.off
 enable
@@ -71,7 +72,7 @@ echo "SV-ID2 $ID2"
 echo "SV-PW2 $PW2"
 echo "SV-E service=$(kv $INFO service) pwlen=${#PW2} newpw=$([ "$PW2" != "$PW" ] && echo 1 || echo 0) sameid=$([ "$ID2" = "$ID" ] && echo 1 || echo 0)"
 echo "SV-WINDOW2"
-$B sleep @WINDOW2@
+nap @WINDOW2@
 echo "enabled=0" > $CONF
 $B sleep 8
 echo "SV-F service=$(kv $INFO service) pw=$(ex /run/xremote.pw) state=$(ex $STATE)"

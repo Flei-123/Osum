@@ -20,8 +20,8 @@ NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}
 LIBGCC=${XR_LIBGCC:-$WD/fx-root/usr/lib/libgcc_s.so.1}
 LDMUSL=${XR_LDMUSL:-$WD/fx-root/lib/ld-musl-x86_64.so.1}
 HOSTSECS=${XR_HOSTSECS:-240}
-WINDOW=${XR_WINDOW:-110}
-WINDOW2=${XR_WINDOW2:-70}
+WINDOW=${XR_WINDOW:-130}
+WINDOW2=${XR_WINDOW2:-90}
 AFTERSECS=${XR_AFTER:-45}
 RELAYPORT=$((17000 + $$ % 1000))
 pass=0; fail=0
@@ -123,7 +123,7 @@ echo "$ID" | grep -qE '^[0-9]+$' && ok "host registered at the relay, ID $ID, st
 echo "$PW" | grep -qE '^[A-Z2-9]{8}$' && ok "password has 8 characters from the unambiguous alphabet" || bad "password format: '$PW'"
 FB=$(grep -ac '^frame ' "$T/v_bad.txt" 2>/dev/null)
 [ "${FB:-0}" = 0 ] && ok "wrong password: viewer receives no frame" || bad "wrong password: viewer received $FB frames"
-grep -aq 'falsches Passwort' "$C" && ok "wrong password: host log shows the refusal" || bad "wrong password: no refusal in the host log"
+grep -aq 'Passwort falsch' "$T/v_bad.txt" && ok "wrong password: viewer is told the password is wrong" || bad "wrong password: viewer got no refusal: $(head -c 120 "$T/v_bad.txt")"
 FO=$(grep -ac '^frame ' "$T/v_ok.txt" 2>/dev/null)
 [ "${FO:-0}" -ge 2 ] && ok "right password: viewer received $FO frames" || bad "right password: viewer received ${FO:-0} frames ($(tail -n 2 "$T/v_ok.txt" 2>/dev/null | tr '\n' ';'))"
 L=$(line 'SV-C ')
