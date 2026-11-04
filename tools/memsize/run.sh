@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
-# Usage: bash tools/memsize/run.sh [new-kernel.mb] [old-kernel.mb]
+# Usage: bash tools/memsize/run.sh [new-kernel.mb] [old-kernel.mb] [old-top.elf]
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/lib/qemu.sh
@@ -27,7 +27,7 @@ if [ -z "$NEW" ]; then
         && ok "kernel builds" || { bad "kernel build failed"; tail -5 "$D/build.txt"; exit 1; }
 fi
 mkdir -p "$D/bin"
-bash tools/sync/build.sh "$D/bin" 0 sh echo hifr > "$D/ubuild.txt" 2>&1 \
+bash tools/sync/build.sh "$D/bin" 0 sh echo top hifr > "$D/ubuild.txt" 2>&1 \
     && ok "user programs build" || { bad "user programs build failed"; exit 1; }
 printf 'PATTERN\n' > "$D/pat"
 touch_for() { local t=$(( $1 - 900 )); [ "$t" -gt 3000 ] && t=3000; echo "$t"; }
@@ -35,6 +35,7 @@ mk_script() {
     local mib=$1 count=$2
     {
         echo "echo ==INFO=="
+        echo "top -n 1"
         echo "echo ==TOUCH=="
         for _ in $(seq "$count"); do echo "hifr $mib &"; done
         echo "wait"
@@ -43,17 +44,17 @@ mk_script() {
 }
 
 bash tools/mkfsfi/mkfs.sh build "$D/p.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
-    "/bin/sh=$D/bin/sh.elf" "/bin/echo=$D/bin/echo.elf" "/bin/hifr=$D/bin/hifr.elf" \
+    "/bin/sh=$D/bin/sh.elf" "/bin/echo=$D/bin/echo.elf" "/bin/hifr=$D/bin/hifr.elf" "/bin/top=$D/bin/top.elf" \
     "/t/pat=$D/pat" > "$D/mkfs.txt" 2>&1 \
     && ok "disk image built" || { bad "mkfs failed"; exit 1; }
 
 run_case() {
-    local name=$1 kern=$2 mem=$3
+    local name=$1 kern=$2 mem=$3 topelf=${4:-$D/bin/top.elf}
     local np=1; [ "$mem" -ge 8192 ] && np=2
     mk_script "$(touch_for "$mem")" "$np"
     cp "$D/p.img" "$D/live-$name.img"
     bash tools/mkfsfi/mkfs.sh build "$D/live-$name.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
-        "/bin/sh=$D/bin/sh.elf" "/bin/echo=$D/bin/echo.elf" "/bin/hifr=$D/bin/hifr.elf" \
+        "/bin/sh=$D/bin/sh.elf" "/bin/echo=$D/bin/echo.elf" "/bin/hifr=$D/bin/hifr.elf" "/bin/top=$topelf" \
         "/t/pat=$D/pat" "/t/s.sh=$D/s.sh" > "$D/mkfs-$name.txt" 2>&1
     timeout ${MEMSIZE_TIMEOUT:-900} $QEMU_X86 -kernel "$kern" -m "$mem" \
         -append "osum vfs nokbd nosched script=sh /t/s.sh;exit" \
@@ -73,6 +74,8 @@ for M in $SIZES; do
     frm=$(sed -n 's/^frames: \([0-9]*\) covered.*/\1/p' "$F.clean" | head -1)
     [ -n "${MEMSIZE_KEEP:-}" ] && cp "$F.clean" "$MEMSIZE_KEEP/n$M.txt"
     want=$(( M * 1024 ))
+    topall=$(part "$F" INFO TOUCH | sed -n 's/^.*frames [0-9]*\/\([0-9]*\).*$/\1/p' | head -1)
+    if [ -n "$topall" ] && [ $(( topall * 4 )) -le "$tot" ] && [ $(( topall * 4 )) -ge $(( want * 9 / 10 )) ]; then ok "top reports usable RAM, not the address top: $topall frames"; else bad "top total '$topall' frames vs MemTotal $tot kB"; fi
     if [ -n "$tot" ] && [ "$tot" -le "$want" ] && [ "$tot" -ge $(( want * 9 / 10 )) ]; then ok "MemTotal $tot kB within 90-100% of $want kB"; else bad "MemTotal '$tot' vs $want kB"; fi
     if [ -n "$frm" ] && [ $(( frm * 4 )) -ge $(( want * 9 / 10 )) ]; then ok "frames cover the RAM: $frm"; else bad "frames '$frm' do not cover $M MiB"; fi
     nproc=1; [ "$M" -ge 8192 ] && nproc=2
@@ -90,6 +93,17 @@ if [ -n "$OLD" ]; then
     is "old kernel: touching $(touch_for "$M") MiB does not complete" "$(part "$F" TOUCH END | grep -ac '^hifr: end$')" "0"
 else
     echo "  skip  no old kernel given"
+fi
+
+echo "== 4. counter-proof: user tools reading the old address-top total =="
+OLDTOP=${3:-}
+if [ -n "$OLDTOP" ]; then
+    rc=$(run_case oldtop "$NEW" 4096 "$OLDTOP")
+    F="$D/oldtop.txt"; clean "$F"
+    ot=$(part "$F" INFO TOUCH | sed -n 's/^.*frames [0-9]*\/\([0-9]*\).*$/\1/p' | head -1)
+    if [ -n "$ot" ] && [ $(( ot * 4 )) -gt $(( 4096 * 1024 )) ]; then ok "old top total $ot frames exceeds the RAM (detected)"; else bad "old top total '$ot' not detected"; fi
+else
+    echo "  skip  no old top given"
 fi
 
 echo "memsize: $pass ok, $fail fail"
