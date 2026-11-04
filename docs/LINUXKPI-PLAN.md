@@ -1,6 +1,13 @@
 # LINUXKPI-PLAN: open Linux DRM drivers on Osum (04.11.2026)
 
-Status: **plan + measurements + layer rules. No shim code exists yet** (prototype S0 not built, see section 9).
+Status: **plan + measurements + store packaging path. No shim code exists yet** (prototype S0 not built, see section 9).
+
+## 0. Boss rule 04.11. (zwischenruf 2): nothing external in the XoffiOS image
+- **linuxkpi and every Linux driver are NOT part of the standard image, NOT linked into the kernel, NOT in the repo main tree.** The standard image runs on own drivers (fb/GOP, virtio, vmsvga).
+- Offered only as an **optional, signed download via the driver store** (`kernel/bus/drvstore.fi`, `tools/drvstore/mkpkg.py`): one package dir `/lib/drivers/lkpi-<driver>/` = `driver.inf` + `.sig` (Ed25519, same key as `.omod`) + driver `.omod` + `linuxkpi.omod` + `SOURCES.txt` (driver, Linux version, source URL, tarball+file sha256, license, firmware license) + firmware files (hashes in the signed `fw=` line). Installed only when the user asks (`drvctl install`), removed with `drvctl remove` (package dir gone, module unloaded).
+- Linux sources are never checked in: `tools/linuxkpi/sources.tsv` pins version + sha256, `tools/linuxkpi/fetch.sh <driver> <empty-dir-outside-repo>` downloads, verifies and extracts only the needed file (untrusted data, nothing executed). `tools/linuxkpi/pack.sh` builds the store package from the compiled modules.
+- Gate `tools/linuxkpi/gate.sh`: repo tracks no Linux source/shim/.ko, no image-side file references linuxkpi, standard image has no linuxkpi/Linux marker (counter-proof: injected marker detected), fetch rejects wrong hash/in-repo output, package passes `mkpkg check` (counter-proof: tampered signature rejected). Install/remove mechanics are proven generically by `tools/drvstore/run.sh`.
+- Open: `driver.inf` has no `requires=` key yet, so the loader cannot load `linuxkpi.omod` before the driver module (needs mkpkg + drvstore extension, S1 module-to-module linking).
 Boss decision 04.11.: real GPUs the FreeBSD way (linuxkpi + unmodified open Linux drivers), not a rewrite per driver.
 Measured = produced by `tools/linuxkpi/measure.py` (nm -u on Debian `6.12.101+deb12-rt` .ko files + the matching upstream 6.12.101 tarball, sha256 verified). Effort S/M/L/XL = judgement.
 
@@ -9,10 +16,10 @@ Measured = produced by `tools/linuxkpi/measure.py` (nm -u on Debian `6.12.101+de
 - **Does not work:** binary Linux `.ko` files (vermagic, struct layouts, GPL symbol gating; Debian .ko are only used as a measuring input). **NVIDIA proprietary** driver. Closed firmware is loaded as data only (fw.request), never executed by us. GPU rendering needs Mesa (C++ runtime, threads) on top: separate effort.
 
 ## 2. Layer rules (Boss 04.11.)
-- `kernel/linuxkpi/` = shim only (C headers + sources + `osum/` interface). `third_party/linux/<driver>/` = unmodified Linux files + `LICENSE.*`. Never mixed with Osum `.fi` code.
-- `third_party/linux/manifest.tsv`: driver, Linux version, source URL, tarball sha256, file, file sha256, SPDX, shim stage. Gate fails when a file hash differs: **driver code is never patched**, fixes go into the shim.
-- Downward interface is narrow and documented: `kernel/linuxkpi/osum/osum_if.h` (one header). Allowed callees: own DRM/KMS layer (`kernel/gfx/drm`, r671) and existing kernel APIs: pci (cfg, BAR, MSI), dma/pages, irq, timers, fw.request, serial log. Nothing else. No per-driver special cases: quirks and driver lists live in registries (table of PCI ids, table of exports).
-- Not part of the Ring-0 import cycle: shim is C in its own `.omod`; only `kernel/lib/ksym.fi` (existing cycle file) grows. Entries in `tools/layers/layers.tsv`: `kernel/linuxkpi` and `third_party/linux` (layer `kernel`, no `.fi` inside).
+- `tools/linuxkpi/shim/` = shim only (build-tool area, never in the image tree) (C headers + sources + `osum/` interface). Linux files are fetched at build time by `tools/linuxkpi/fetch.sh` into a directory outside the repo and never checked in. Never mixed with Osum `.fi` code.
+- `tools/linuxkpi/sources.tsv`: driver, Linux version, source URL, tarball sha256, file, file sha256, SPDX, shim stage. Gate fails when a file hash differs: **driver code is never patched**, fixes go into the shim.
+- Downward interface is narrow and documented: `tools/linuxkpi/shim/osum/osum_if.h` (one header). Allowed callees: own DRM/KMS layer (`kernel/gfx/drm`, r671) and existing kernel APIs: pci (cfg, BAR, MSI), dma/pages, irq, timers, fw.request, serial log. Nothing else. No per-driver special cases: quirks and driver lists live in registries (table of PCI ids, table of exports).
+- Not part of the Ring-0 import cycle: shim is C in its own `.omod`; only `kernel/lib/ksym.fi` (existing cycle file) grows. The shim lives outside the image tree (build tool area), no layers entry.
 - Every shim part gets a gate + counter-proof (wrong symbol rejected, flipped signature, patched driver hash, skipped modeset = no picture). Build reproducible: pinned gcc major + flags file, sha256 of every `.o` recorded; module signed like `.omod` (`tools/module/mkomod.py`, Ed25519).
 
 ## 3. Measured symbol surface (Linux 6.12.101, Debian config)
@@ -27,7 +34,7 @@ Measured = produced by `tools/linuxkpi/measure.py` (nm -u on Debian `6.12.101+de
 | i915 | 8927 | 1213 | 494 | 918 | 44 |
 
 - Union of all five: **1188** names; intersection of the four big drivers: **546**. So ~550 names are the shared base, ~640 are per-driver tails.
-- bochs alone: 66 direct names, 49 of them DRM core (atomic helpers, connector/EDID, gem-vram, simple pipe, dev alloc/register); only 17 are base kernel (`_printk`, `__pci_register_driver`, `__request_region`, `__release_region`, `ioremap`...). Exact list: `third_party/linux/bochs` build via nm.
+- bochs alone: 66 direct names, 49 of them DRM core (atomic helpers, connector/EDID, gem-vram, simple pipe, dev alloc/register); only 17 are base kernel (`_printk`, `__pci_register_driver`, `__request_region`, `__release_region`, `ioremap`...). Exact list: fetched by `tools/linuxkpi/fetch.sh`.
 - Largest groups in the closed set (names): lib containers idr/xarray/kref/string/sg/sort 81 (bochs) to 140 (i915); memory 56 to 85; "kernel misc" 52 to 95; dma-buf/fence/sync_file 45 to 57; device model/devres 34 to 56; pci 6 to 51; locks 23 to 32; acpi 6 to 22; irq 2 to 13; i2c 6 to 11; firmware 3 to 4; workqueue/rcu/time smaller.
 
 ## 4. Groups, owner, effort
@@ -47,12 +54,12 @@ Measured = produced by `tools/linuxkpi/measure.py` (nm -u on Debian `6.12.101+de
 | x86 arch | clflush, wbinvd, set_memory_*, MSR, cpu features, PAT/WC | kernel exports | M |
 | acpi/video | backlight, opregion, aperture removal | kernel exports | M |
 | DRM core | drm.ko + helpers + ttm + sched + display_helper | **compile real Linux sources** (S1), not rewritten | L |
-| per-driver | i915/xe/amdgpu/nouveau compiled unmodified | `third_party/linux` | L-XL each |
+| per-driver | i915/xe/amdgpu/nouveau compiled unmodified | fetched Linux sources (outside repo) | L-XL each |
 
 ## 5. Licenses (SPDX scan, 6.12.101; `tools/linuxkpi/measure.py`)
 - **MIT:** i915 (650+154 of 821 files), xe (372 MIT, 14 GPL/dual), amdgpu (all but 3 of 567), amd/display (all 1047), nouveau (all but 55 unknown/dual), scheduler. **Dual `GPL-2.0 OR MIT` / `AND MIT`:** ttm (all 23), parts of drm core.
 - **GPL-2.0:** drm core mixed (94 top-level files: ~49 MIT, 16 GPL, 11 dual, 17 unknown), `drivers/dma-buf` core mostly GPL-2.0, `lib/idr.c`, `lib/xarray.c`, `kernel/workqueue.c` GPL: **never copied; shim reimplements** from API behaviour. **bochs.c is GPL-2.0-or-later.**
-- Rule: the shim is our own clean-room code (MIT-compatible, no Linux header copied). GPL files (bochs, GPL parts of drm core) are shipped as a separate optional driver package (`.opk`, source + license text, manifest entry), never linked into the base kernel image. Legal reading of "GPL module in a non-GPL kernel" is **unverified**: ask before shipping GPL-only drivers; prefer MIT drivers (i915, xe, amdgpu, nouveau) and dual-licensed core files.
+- Rule: the shim is our own clean-room code (MIT-compatible, no Linux header copied). GPL files (bochs, GPL parts of drm core) are only shipped inside the optional store package (section 0), never in the standard image or base kernel. Legal reading of "GPL module in a non-GPL kernel" is **unverified**: ask before shipping GPL-only drivers; prefer MIT drivers (i915, xe, amdgpu, nouveau) and dual-licensed core files.
 
 ## 6. How C reaches Ring 0
 - Host `gcc` (pin major, e.g. 12), flags in `tools/linuxkpi/cflags`: `-O2 -ffreestanding -fno-pic -mcmodel=small -mno-red-zone -mgeneral-regs-only -fno-stack-protector -fno-asynchronous-unwind-tables -fno-common -fcf-protection=none`. Object per file, `ld -r` into one `ET_REL`, `mkomod.py` wraps + signs (Ed25519), kernel `kernel/ldr/module.fi` loads it.
@@ -75,7 +82,7 @@ Measured = produced by `tools/linuxkpi/measure.py` (nm -u on Debian `6.12.101+de
 | L1 | i915 (Gen7.5 Haswell Dell 9020 first, then Gen12 Iris Xe) display + GEM + execbuf; Mesa anv/hasvk | HP/Dell real-hardware test (Boss) |
 | L2 | xe / amdgpu / nouveau (display first, no reclock for NVIDIA) | per-driver |
 
-**Prototype status (honest):** not built in this run (context/time). Prepared: bochs.c vendored unmodified (6.12.101, sha256 `5877fe15d83a825666e474e5bd6580ea16bc72e5dbb2ffe43802a66b0cb8368a`, `third_party/linux/bochs`), manifest, measuring tool, exact API list. bochs.c needs (from the source): linux/module+pci+io, DRM drv/dev/atomic helpers/simple pipe/connector+EDID/gem-vram/aperture/fbdev-ttm entry points (66 direct names above).
+**Prototype status (honest):** not built in this run (context/time). Prepared: bochs.c pinned (6.12.101, sha256 `5877fe15d83a825666e474e5bd6580ea16bc72e5dbb2ffe43802a66b0cb8368a`, fetched not vendored), sources.tsv, measuring tool, exact API list. bochs.c needs (from the source): linux/module+pci+io, DRM drv/dev/atomic helpers/simple pipe/connector+EDID/gem-vram/aperture/fbdev-ttm entry points (66 direct names above).
 
 ## 10. Risks
 - Version drift (6.12 -> 6.18 renamed fbdev helpers): pin one LTS per driver in the manifest, update per LTS.
