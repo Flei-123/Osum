@@ -918,7 +918,7 @@ if [ -n "${USBIMG_SPECFILE:-}" ]; then
 fi
 ph pre-mkfs
 if [ -z "${FS_BLOCKS_SET:-}" ] && [ "${ROOT_SLIM:-0}" != 1 ] && [ "${FS_AUTO:-1}" = 1 ]; then
-    ARGS[2]=$(python3 -I tools/usbimg/fssize.py "${FS_FREE_MIB:-8}" "$FS_INODES" "${ARGS[@]:3}")
+    ARGS[2]=$(python3 -I tools/usbimg/fssize.py "${FS_FREE_MIB:-6}" "$FS_INODES" "${ARGS[@]:3}")
 fi
 mkfs_try=0
 while :; do
