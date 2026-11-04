@@ -176,10 +176,8 @@ pid, same parent, same descriptors, and that is what `execve` promises.
 Every one of these is a place where Osum answers differently on purpose.
 Nothing here is an oversight; the oversights are in section 7.
 
-1. **`nanosleep` refuses more than sixty seconds** with -EINVAL. Linux
-   would sleep. A kernel that can be stopped for an hour by one number
-   cannot be measured, and `tools/kernel/run.sh` has been checking that
-   refusal since round 62.
+1. **`nanosleep` limit lifted (r2849).** Any duration sleeps like on Linux (capped at 2^32 s);
+   negative seconds and nanoseconds >= 10^9 give -EINVAL.
 2. **`mmap` maps anonymous memory only.** Without MAP_ANONYMOUS the answer
    is -ENODEV: a mapping backed by a file needs the page cache this system
    does not have, and pretending otherwise would be the kind of half-truth
