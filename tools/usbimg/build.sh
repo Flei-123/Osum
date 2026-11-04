@@ -836,7 +836,7 @@ if [ "$IMAGE_PROFILE" = public ] && grep -Eq '^[[:space:]]*input[[:space:]]*=[[:
     fehler "input = yes gehoert nicht in das oeffentliche Abbild"
 fi
 if [ "$IMAGE_PROFILE" = public ] && grep -Eq '^[[:space:]]*(devmode[[:space:]]*=[[:space:]]*yes|screenshot[[:space:]]*=[[:space:]]*always)' "$OUT/rechte.conf"; then
-    fehler "devmode = yes / screenshot = always gehoert nicht in das oeffentliche Abbild"
+    fehler "devmode = yes / screenshot = always does not belong in the public image"
 fi
 sagen "fernsteuerung (input) $(grep -Eq '^[[:space:]]*input[[:space:]]*=[[:space:]]*yes' "$OUT/rechte.conf" && echo ja || echo nein)"
 ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
