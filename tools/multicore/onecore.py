@@ -21,7 +21,8 @@ def buffer2(zugriff):
     return re.compile(r"\b%s\(state\)\s*\+\s*([A-Z][A-Z0-9_]*)" % zugriff)
 
 RUHIG = {
-    "kmain.fi": "laeuft vor smp.probe, also bevor es zweite Kerne gibt",
+    name: "laeuft vor smp.probe, also bevor es zweite Kerne gibt"
+    for name in ("kmain.fi", "bootfs.fi", "bootroot.fi", "bootshell.fi")
 }
 
 MITWISSEN = {

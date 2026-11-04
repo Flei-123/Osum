@@ -14,7 +14,7 @@ AREAS = {
                "vendor/firn/patches/0001-*", "vendor/firn/patches/0006-*", "vendor/firn/patches/0007-*", "vendor/firn/patches/0008-*"],
     "fs":     ["kernel/fs/*", "kernel/block/*", "lib/disks/*"],
     "core":   ["kernel/arch/*", "kernel/sched/*", "kernel/mm/*", "kernel/sync/*", "kernel/ipc/*", "kernel/core.fi",
-               "kernel/kmain.fi", "kernel/kcore.fi", "kernel/tasks.fi", "kernel/klog.fi", "kernel/serial.fi", "kernel/lib/*",
+               "kernel/kmain.fi", "kernel/init/*", "kernel/kcore.fi", "kernel/tasks.fi", "kernel/klog.fi", "kernel/serial.fi", "kernel/lib/*",
                "vendor/firn/COMMIT", "vendor/firn/fetch-firnc.sh"],
     "drv":    ["kernel/drv/*", "kernel/usb/*", "kernel/pwr/*", "kernel/acpi/*"],
     "libc":   ["lib/libc/*", "kernel/sys/*", "kernel/ldr/*", "lib/std/*",

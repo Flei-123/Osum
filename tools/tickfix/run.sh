@@ -33,7 +33,7 @@ export FIRNLIB="$ROOT/lib"
 . tools/lib/qemu.sh
 TMPD=$(mktemp -d)
 KSAVE="$TMPD/kmain.orig"
-restore() { [ -f "$KSAVE" ] && { cp "$KSAVE" kernel/kmain.fi; rm -f "$KSAVE"; }; }
+restore() { [ -f "$KSAVE" ] && { cp "$KSAVE" kernel/init/testsched.fi; rm -f "$KSAVE"; }; }
 trap 'restore; rm -rf "$TMPD"' EXIT
 pass=0
 fail=0
@@ -53,10 +53,10 @@ fi
 if [[ -n ${TICKFIX_KERNEL_B:-} && -f $TICKFIX_KERNEL_B ]]; then
     cp "$TICKFIX_KERNEL_B" "$TMPD/kb.mb"
 else
-    cp kernel/kmain.fi "$KSAVE"
+    cp kernel/init/testsched.fi "$KSAVE"
     sed -i -e 's/limit_tsc != 0 \&\& apic.tsc() - t0 > limit_tsc {/false {/' \
-           -e 's/passes >= TICKS_PASS_LIMIT {/false {/' kernel/kmain.fi
-    cmp -s kernel/kmain.fi "$KSAVE" && bad "mutation did not change kmain.fi (limits not found)"
+           -e 's/passes >= TICKS_PASS_LIMIT {/false {/' kernel/init/testsched.fi
+    cmp -s kernel/init/testsched.fi "$KSAVE" && bad "mutation did not change testsched.fi (limits not found)"
     bash tools/build-kernel.sh "$TMPD/kb.mb" > "$TMPD/bb.log" 2>&1 || { echo "mutant build failed"; tail -5 "$TMPD/bb.log"; }
     restore
 fi
