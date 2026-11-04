@@ -2,6 +2,7 @@
 profile kernel
 
 import lib.kstate
+import lib.procw
 import acpi.acpi
 import arch.x86_64.apic
 import diag.tpmio
@@ -75,32 +76,22 @@ static mut s_methods_c: [u8; 7] = " (crb)\0"
 static mut s_methods_ca: [u8; 12] = " (crb+acpi)\0"
 static mut s_methods_s: [u8; 11] = " (crb+smc)\0"
 static mut s_methods_o: [u8; 9] = " (other)\0"
-static mut w_at: u64 = 0
-static mut w_cap: u64 = 0
-static mut w_out: u64 = 0
 static mut c_len: u64 = 0
 static mut c_done: u64 = 0
 static mut c_buf: [u8; 3600] = [0; 3600]
 static mut g_rc: u64 = 0
 
-fn put_c(c: u64) {
-    if w_at + 1 < w_cap {
-        kstate.set8(w_out + w_at, c as u8)
-        w_at = w_at + 1
-    }
-}
-
 fn put_s(p: u64) {
     var i: u64 = 0
     while tpmio.ram8(p + i) != 0 {
-        put_c(tpmio.ram8(p + i))
+        procw.put_c(tpmio.ram8(p + i))
         i = i + 1
     }
 }
 
 fn put_hex(v: u64, digits: u64) {
-    put_c(48)
-    put_c(120)
+    procw.put_c(48)
+    procw.put_c(120)
     put_bare(v, digits)
 }
 
@@ -110,29 +101,10 @@ fn put_bare(v: u64, digits: u64) {
         i = i - 1
         let d: u64 = (v >> (i * 4)) & 15
         if d < 10 {
-            put_c(48 + d)
+            procw.put_c(48 + d)
         } else {
-            put_c(87 + d)
+            procw.put_c(87 + d)
         }
-    }
-}
-
-fn put_dec(v: u64) {
-    var tmp: [u8; 20] = [0 as u8; 20]
-    var n: u64 = 0
-    var x: u64 = v
-    if x == 0 {
-        tmp[0] = 48 as u8
-        n = 1
-    }
-    while x > 0 {
-        tmp[n as usize] = (48 + x % 10) as u8
-        x = x / 10
-        n = n + 1
-    }
-    while n > 0 {
-        n = n - 1
-        put_c(tmp[n as usize] as u64)
     }
 }
 
@@ -141,14 +113,14 @@ fn put_ascii(v: u64) {
     while i < 4 {
         let c: u64 = (v >> (24 - i * 8)) & 255
         if c >= 32 && c < 127 {
-            put_c(c)
+            procw.put_c(c)
         }
         i = i + 1
     }
 }
 
 fn nl() {
-    put_c(10)
+    procw.put_c(10)
 }
 
 fn ld16(p: u64) -> u64 {
@@ -236,7 +208,7 @@ fn report_fixed(state: u64, rsp: u64) -> bool {
             put_hex(v, 8)
         } else if p == 0x102 {
             put_s((&s_revision[0]) as u64)
-            put_dec(v)
+            procw.put_dec(v)
         } else if p == 0x105 {
             put_s((&s_manu[0]) as u64)
             put_ascii(v)
@@ -301,10 +273,10 @@ fn report_algs(state: u64, rsp: u64) {
     if rsp_ok(n) {
         let cnt: u64 = tpmio.be32(rsp + 15)
         put_s((&s_algs_n[0]) as u64)
-        put_dec(cnt)
+        procw.put_dec(cnt)
         var i: u64 = 0
         while i < cnt && 19 + (i + 1) * 6 <= n {
-            put_c(32)
+            procw.put_c(32)
             put_hex(tpmio.be16(rsp + 19 + i * 6), 4)
             i = i + 1
         }
@@ -320,16 +292,16 @@ fn build(state: u64) {
     if t != 0 {
         let len: u64 = ld32(t + 4)
         put_s((&s_acpi_yes[0]) as u64)
-        put_dec(len)
+        procw.put_dec(len)
         put_s((&s_rev[0]) as u64)
-        put_dec(tpmio.ram8(t + 8))
+        procw.put_dec(tpmio.ram8(t + 8))
         if len >= 52 {
             ctrl = ld64(t + 40)
             method = ld32(t + 48)
             put_s((&s_class[0]) as u64)
-            put_dec(ld16(t + 36))
+            procw.put_dec(ld16(t + 36))
             put_s((&s_method[0]) as u64)
-            put_dec(method)
+            procw.put_dec(method)
             put_s(method_name(method))
             put_s((&s_ctrl[0]) as u64)
             put_hex(ctrl, 8)
@@ -440,11 +412,9 @@ fn build(state: u64) {
 
 fn ensure(state: u64) {
     if c_done == 0 {
-        w_out = (&c_buf[0]) as u64
-        w_cap = CACHE_MAX
-        w_at = 0
+        procw.begin((&c_buf[0]) as u64, CACHE_MAX)
         build(state)
-        c_len = w_at
+        c_len = procw.used()
         c_done = 1
     }
 }

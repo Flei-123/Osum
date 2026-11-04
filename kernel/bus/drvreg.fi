@@ -2,6 +2,7 @@
 profile kernel
 
 import lib.kstate
+import lib.procw
 import bus.pci
 import serial
 import bus.drvclass
@@ -42,9 +43,6 @@ static mut errs: [u8; 1600] = [0 as u8; 1600]
 static mut tab: [u64; 320] = [0 as u64; 320]
 static mut nrows: u64 = 0
 static mut ready: u64 = 0
-static mut w_at: u64 = 0
-static mut w_cap: u64 = 0
-static mut w_out: u64 = 0
 
 const D_NVME: u64 = 0
 const D_AHCI: u64 = 1
@@ -330,17 +328,10 @@ fn claimed(state: u64, idx: u64) -> bool {
     return false
 }
 
-fn put_c(c: u64) {
-    if w_at + 1 < w_cap {
-        kstate.set8(w_out + w_at, c as u8)
-        w_at = w_at + 1
-    }
-}
-
 fn put_s(s: u64) {
     var i: u64 = 0
     while ld8(s + i) != 0 {
-        put_c(ld8(s + i))
+        procw.put_c(ld8(s + i))
         i = i + 1
     }
 }
@@ -348,27 +339,8 @@ fn put_s(s: u64) {
 fn put_tag(t: u64) {
     var k: u64 = 0
     while k < 8 && ((t >> (k * 8)) & 255) != 0 {
-        put_c((t >> (k * 8)) & 255)
+        procw.put_c((t >> (k * 8)) & 255)
         k = k + 1
-    }
-}
-
-fn put_dec(v: u64) {
-    var tmp: [u8; 20] = [0 as u8; 20]
-    var n: u64 = 0
-    var x: u64 = v
-    if x == 0 {
-        tmp[0] = 48 as u8
-        n = 1
-    }
-    while x > 0 {
-        tmp[n as usize] = (48 + x % 10) as u8
-        x = x / 10
-        n = n + 1
-    }
-    while n > 0 {
-        n = n - 1
-        put_c(tmp[n as usize] as u64)
     }
 }
 
@@ -378,9 +350,9 @@ fn put_hex(v: u64, digits: u64) {
         i = i - 1
         let d: u64 = (v >> (i * 4)) & 15
         if d < 10 {
-            put_c(48 + d)
+            procw.put_c(48 + d)
         } else {
-            put_c(87 + d)
+            procw.put_c(87 + d)
         }
     }
 }
@@ -397,13 +369,13 @@ fn put_spec(row: u64) {
         } else {
             put_hex(ven, 4)
         }
-        put_c(58)
+        procw.put_c(58)
         if dev == 0 {
             put_s((&s_star[0]) as u64)
         } else {
             put_hex(dev, 4)
         }
-        put_c(47)
+        procw.put_c(47)
         if cls == ANY_CLS {
             put_s((&s_star[0]) as u64)
         } else {
@@ -411,7 +383,7 @@ fn put_spec(row: u64) {
         }
         let prog: u64 = tab[(row * FIELDS + F_PROG) as usize]
         if prog != ANY_PROG {
-            put_c(46)
+            procw.put_c(46)
             put_hex(prog, 2)
         }
         return
@@ -420,7 +392,7 @@ fn put_spec(row: u64) {
         let hid: u64 = tab[(row * FIELDS + F_HID) as usize]
         var k: u64 = 0
         while k < 8 && ((hid >> (k * 8)) & 255) != 0 {
-            put_c((hid >> (k * 8)) & 255)
+            procw.put_c((hid >> (k * 8)) & 255)
             k = k + 1
         }
         return
@@ -447,14 +419,12 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
     var s_cl: [u8; 8] = " class=\0"
     var s_ch: [u8; 15] = "# class-calls \0"
     ensure()
-    w_out = out
-    w_cap = cap
-    w_at = 0
+    procw.begin(out, cap)
     put_s((&s_head[0]) as u64)
     var r: u64 = 0
     while r < nrows {
         put_s((&names[(r * NAME_W) as usize]) as u64)
-        put_c(32)
+        procw.put_c(32)
         let bus: u64 = tab[(r * FIELDS + F_BUS) as usize]
         if bus == BUS_PCI {
             var s_p: [u8; 4] = "pci\0"
@@ -466,14 +436,14 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
             var s_u: [u8; 4] = "usb\0"
             put_s((&s_u[0]) as u64)
         }
-        put_c(32)
+        procw.put_c(32)
         put_spec(r)
         put_s((&s_found[0]) as u64)
         let f: u64 = found_of(state, r)
         if f == NO_COUNT {
             put_s((&s_q[0]) as u64)
         } else {
-            put_dec(f)
+            procw.put_dec(f)
         }
         put_s((&s_state[0]) as u64)
         let st: u64 = state_of(state, r)
@@ -494,7 +464,7 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
         }
         put_s((&s_cl[0]) as u64)
         put_tag(drvclass.tag_of(tab[(r * FIELDS + F_CLASS) as usize]))
-        put_c(10)
+        procw.put_c(10)
         r = r + 1
     }
     var nun: u64 = 0
@@ -506,35 +476,35 @@ fn render(state: u64, out: u64, cap: u64) -> u64 {
             put_s((&s_un[0]) as u64)
             let bdf: u64 = pci.get(state, i, pci.E_BDF)
             put_hex(pci.bdf_bus(bdf), 2)
-            put_c(58)
+            procw.put_c(58)
             put_hex(pci.bdf_dev(bdf), 2)
-            put_c(46)
+            procw.put_c(46)
             put_hex(pci.bdf_fn(bdf), 1)
-            put_c(32)
+            procw.put_c(32)
             put_hex(pci.get(state, i, pci.E_VENDOR), 4)
-            put_c(58)
+            procw.put_c(58)
             put_hex(pci.get(state, i, pci.E_DEVICE), 4)
             put_s((&s_cls[0]) as u64)
             put_hex((pci.get(state, i, pci.E_CLASS) << 8) | pci.get(state, i, pci.E_SUBCLASS), 4)
-            put_c(10)
+            procw.put_c(10)
         }
         i = i + 1
     }
     put_s((&s_sum[0]) as u64)
-    put_dec(nun)
-    put_c(10)
+    procw.put_dec(nun)
+    procw.put_c(10)
     var cl: u64 = 1
     while cl < drvclass.CLS_COUNT {
         if drvclass.hits(cl) != 0 {
             put_s((&s_ch[0]) as u64)
             put_tag(drvclass.tag_of(cl))
-            put_c(61)
-            put_dec(drvclass.hits(cl))
-            put_c(10)
+            procw.put_c(61)
+            procw.put_dec(drvclass.hits(cl))
+            procw.put_c(10)
         }
         cl = cl + 1
     }
-    return w_at
+    return procw.used()
 }
 
 fn boot_report(state: u64) {
