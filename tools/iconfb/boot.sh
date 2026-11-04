@@ -5,13 +5,13 @@ cd "$(dirname "$0")/../.."
 OUT=${1:?usage: boot.sh <outdir>}
 mkdir -p "$OUT"
 FAIL=0
-count() { grep -a -c -E 'taskbar: sym (miss|fb)' "$1/serial.txt" 2>/dev/null || echo 0; }
+count() { local n; n=$(grep -a -c -E 'taskbar: sym (miss|fb)' "$1/serial.txt" 2>/dev/null); echo "${n:-0}"; }
 run_case() {
     local name=$1 pins=$2 script
     script=$(mktemp)
     printf 'warte 25\nfoto 00-desktop\n' > "$script"
     export DESIGNBUILD="$OUT/$name-build"
-    bash tools/design/audit.sh "$OUT/$name" accel=kvm halt=120 res=1280x800 "pins=$pins" "drehbuch=$script" > "$OUT/$name.log" 2>&1
+    bash tools/design/audit.sh "$OUT/$name" accel=kvm halt=120 res=1280x800 uitrace=yes "pins=$pins" "drehbuch=$script" > "$OUT/$name.log" 2>&1
     rm -rf "$OUT/$name-build" "$script"
     unset DESIGNBUILD
 }
