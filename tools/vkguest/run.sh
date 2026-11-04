@@ -29,7 +29,8 @@ done
 "$D/hostdraw" "$D/libvulkan.so.1" 0 - "$D/spv" > "$D/host.txt" 2>&1
 grep -q "^VK DONE bad=0" "$D/host.txt" && ck "host run passes" ok || ck "host run passes" no
 grep "^VK img" "$D/host.txt" | sort > "$D/host.img"
-[ "$(wc -l < "$D/host.img")" -ge 17 ] && ck "host run printed 17 image hashes" ok || ck "host run printed 17 image hashes" no
+[ "$(wc -l < "$D/host.img")" -ge 20 ] && ck "host run printed 20 image hashes (17 scenes + 3 swapchain frames)" ok || ck "host run printed 20 image hashes (17 scenes + 3 swapchain frames)" no
+grep "^VK sink" "$D/host.txt" | sort > "$D/host.sink"
 grep -v '^/etc/inittab' "$WD/fxrun/spec.txt" > "$D/spec.txt"
 {
     printf '/vk/@755\n/vk/spv/@755\n/vk/draw=%s@755\n/vk/libvulkan.so.1=%s@755\n/vk/libvulkan_mut.so=%s@755\n' "$D/draw" "$D/libvulkan.so.1" "$D/libvulkan_mut.so"
@@ -39,8 +40,12 @@ SPEC="$D/spec.txt" BLOCKS=${BLOCKS:-1000000} TMO=${TMO:-900} bash tools/linuxapp
 S="$D/out/ser.clean"
 grep -aq "^VKG rc=0" "$S" && ck "guest: draw client exits 0 (dlopen of libvulkan.so.1)" ok || ck "guest: draw client exits 0 (dlopen of libvulkan.so.1)" no
 awk '/^VKG guest start/{a=1;next} /^VKG rc=/{a=0} a && /^VK img/' "$S" | sort > "$D/guest.img"
-[ "$(wc -l < "$D/guest.img")" -ge 17 ] && ck "guest: 17 image hashes printed" ok || ck "guest: 17 image hashes printed" no
-cmp -s "$D/host.img" "$D/guest.img" && ck "guest image hashes == host run (17 scenes, byte identical)" ok || { ck "guest image hashes == host run (17 scenes, byte identical)" no; diff "$D/host.img" "$D/guest.img" | head -6; }
+[ "$(wc -l < "$D/guest.img")" -ge 20 ] && ck "guest: 20 image hashes printed" ok || ck "guest: 20 image hashes printed" no
+awk '/^VKG guest start/{a=1;next} /^VKG rc=/{a=0} a && /^VK sink/' "$S" | sort > "$D/guest.sink"
+[ "$(wc -l < "$D/guest.sink")" -eq 3 ] && cmp -s "$D/host.sink" "$D/guest.sink" && ck "guest: present sink (wl_shm-style shared memory) == host, 3 frames" ok || ck "guest: present sink (wl_shm-style shared memory) == host, 3 frames" no
+awk '/^VKG guest start/{a=1;next} /^VKG rc=/{a=0} a && /^VK ok sink rows/' "$S" | wc -l | grep -qx 3 && ck "guest: sink rows == swapchain readback (3 frames)" ok || ck "guest: sink rows == swapchain readback (3 frames)" no
+awk '/^VKG guest start/{a=1;next} /^VKG rc=/{a=0} a && /^VK time wsi_frame_ms/' "$S"
+cmp -s "$D/host.img" "$D/guest.img" && ck "guest image hashes == host run (20 images, byte identical)" ok || { ck "guest image hashes == host run (20 images, byte identical)" no; diff "$D/host.img" "$D/guest.img" | head -6; }
 awk '/^VKG rc=/{a=1;next} /^VKG mut-rc=/{a=0} a && /^VK img/' "$S" | sort > "$D/mut.img"
 if [ -s "$D/mut.img" ] && ! cmp -s "$D/mut.img" "$D/guest.img"; then ck "guest: mutant library renders different pixels (counter-proof)" ok; else ck "guest: mutant library renders different pixels (counter-proof)" no; fi
 grep -aq "^VK FAIL dlopen\|^VK FAIL.*dlopen" "$S" && grep -aq "^VKG neg-missing rc=1" "$S" && ck "guest: missing .so refused (counter-proof)" ok || ck "guest: missing .so refused (counter-proof)" no
