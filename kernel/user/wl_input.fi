@@ -20,7 +20,7 @@
 // only with a serial this module handed to THAT client after its latest keyboard enter -- `serial_ok`.
 //
 // WHAT THE WINDOW SERVER DOES NOT GIVE, and so does not come: key RELEASES (they are made up right after the press), the Shift/Ctrl
-// state of a key that is held, and wheel events (there are none in the window server: no axis events).
+// state of a key that is held, and horizontal wheel notches below one step.
 profile kernel
 
 import ulib
@@ -33,13 +33,13 @@ import libc.clockapi
 
 export {
     MAXC, serial_next, client_init, seat_bound, keyboard_new, pointer_new, keyboard_gone, pointer_gone,
-    keymap_fd, keymap_msg, keymap_msg_len, layout_now, layout_changed, keyboard_ready, sync_focus,
+    keymap_fd, keymap_msg, keymap_msg_len, layout_now, layout_changed, keyboard_ready, sync_focus, on_axis,
     on_focus, on_key, esc_flush, on_ptr, ptr_check, surf_drop, serial_ok, has_focus, last_serial, keymap_ptr,
-    n_keys_sent, n_ptr_sent, n_enters, n_leaves,
+    n_keys_sent, n_ptr_sent, n_axis_sent, n_enters, n_leaves,
 }
 
 const MAXC: u64 = 4
-const MAXS: u64 = 8 // surfaces tracked per client
+const MAXS: u64 = 16 // surfaces tracked per client
 
 // evdev codes of the modifier keys
 const KEY_LEFTSHIFT: u64 = 42
@@ -65,12 +65,13 @@ static mut i_esc_t: [u64; 4] = [0 as u64; 4]
 static mut i_esc_sid: [u64; 4] = [0 as u64; 4]
 static mut i_np: [u64; 4] = [0 as u64; 4]
 static mut i_p: [u64; 8] = [0 as u64; 8] // two parameters per client
-static mut s_id: [u64; 32] = [0 as u64; 32] // surface ids (MAXC * MAXS)
-static mut s_foc: [u64; 32] = [0 as u64; 32] // 1: the window server says the window has the focus
-static mut s_kent: [u64; 32] = [0 as u64; 32] // 1: keyboard.enter was sent
-static mut s_pin: [u64; 32] = [0 as u64; 32] // 1: pointer.enter was sent
+static mut s_id: [u64; 64] = [0 as u64; 64] // surface ids (MAXC * MAXS = 64)
+static mut s_foc: [u64; 64] = [0 as u64; 64] // 1: the window server says the window has the focus
+static mut s_kent: [u64; 64] = [0 as u64; 64] // 1: keyboard.enter was sent
+static mut s_pin: [u64; 64] = [0 as u64; 64] // 1: pointer.enter was sent
 static mut n_keys_sent: u64 = 0
 static mut n_ptr_sent: u64 = 0
+static mut n_axis_sent: u64 = 0
 static mut n_enters: u64 = 0
 static mut n_leaves: u64 = 0
 
@@ -809,6 +810,68 @@ fn on_ptr(c: u64, sid: u64, typ: u64, x: u64, y: u64, btn: u64, buf: u64, len: u
     }
     l = ptr_frame(c, buf, l)
     n_ptr_sent = n_ptr_sent + 1
+    return l
+}
+
+fn axis_notch(d: u64) -> u64 {
+    var n: u64 = d & 0xFFFF
+    if (n & 0x8000) != 0 {
+        n = n | 0xFFFFFFFFFFFF0000
+    }
+    return n
+}
+
+fn on_axis(c: u64, sid: u64, horizontal: bool, x: u64, y: u64, raw: u64, buf: u64, len: u64) -> u64 {
+    var l: u64 = len
+    let pt: u64 = i_ptr[c as usize]
+    if pt == 0 {
+        return l
+    }
+    let k: u64 = slot_of(c, sid)
+    if k < MAXS && s_pin[(c * MAXS + k) as usize] == 0 {
+        let s: u64 = serial_next()
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_ENTER)
+        wl_msg.arg(s)
+        wl_msg.arg(sid)
+        wl_msg.arg(x * 256)
+        wl_msg.arg(y * 256)
+        l = wl_msg.end()
+        i_last[c as usize] = s
+        s_pin[(c * MAXS + k) as usize] = 1
+        n_enters = n_enters + 1
+    }
+    var notch: u64 = axis_notch(raw)
+    if !horizontal {
+        notch = 0 - notch
+    }
+    var axis: u64 = 0
+    if horizontal {
+        axis = 1
+    }
+    let ver: u64 = i_ver[c as usize]
+    if ver >= 5 {
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_SOURCE)
+        wl_msg.arg(0)
+        l = wl_msg.end()
+    }
+    l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS)
+    wl_msg.arg(ms_now())
+    wl_msg.arg(axis)
+    wl_msg.arg((notch * 10 * 256) & 0xFFFFFFFF)
+    l = wl_msg.end()
+    if ver >= 8 {
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_VALUE120)
+        wl_msg.arg(axis)
+        wl_msg.arg((notch * 120) & 0xFFFFFFFF)
+        l = wl_msg.end()
+    } else if ver >= 5 {
+        l = wl_msg.begin(buf, l, pt, wlproto.EV_WL_POINTER_AXIS_DISCRETE)
+        wl_msg.arg(axis)
+        wl_msg.arg(notch & 0xFFFFFFFF)
+        l = wl_msg.end()
+    }
+    l = ptr_frame(c, buf, l)
+    n_axis_sent = n_axis_sent + 1
     return l
 }
 

@@ -282,6 +282,15 @@ mark
 keys b
 has "$(since A ${M[A]})" "key=48 state=1" "the key 'b' (evdev 48) goes to A now"
 hasnot "$(since B ${M[B]})" "key=" "... and not to B"
+# the wheel: pointer is still over A
+mark
+printf 'mouse_move 0 0 1\nmouse_move 0 0 1\nmouse_move 0 0 -1\n' > "$TMPD/w.txt"
+python3 tools/wm/monitor.py "$SOCK" "$TMPD/w.txt" 0.5 > /dev/null 2>&1
+sleep 2
+sa=$(since A ${M[A]})
+has "$sa" "ptr axis axis=0 value=10" "wheel notch toward the user: wl_pointer.axis vertical +10"
+has "$sa" "ptr axis axis=0 value=-10" "wheel notch away: wl_pointer.axis vertical -10"
+hasnot "$(since B ${M[B]})" "ptr axis" "COUNTER-PROOF: B (pointer is not on it) got no axis"
 # the pointer leaves: click on the empty desktop
 mark
 klick 900 600
