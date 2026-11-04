@@ -43,9 +43,24 @@ const L_INTERNAL: u32 = 111
 
 const NONE: u32 = 0xFFFF // predicate "always"
 const UNSET: u32 = 0xFFFE
-const NREGS: u32 = 128
+const NREGS: u32 = 256
 const FIRST_TMP: u32 = 12
 const MAX_EDGES: usize = 512
+const LOOP_MAX: u32 = 4
+const LS: u32 = 24
+const MAX_PINS: u32 = 192
+const LW_HEAD: u32 = 0
+const LW_MERGE: u32 = 1
+const LW_CONT: u32 = 2
+const LW_MASK: u32 = 3
+const LW_TOP: u32 = 4
+const LW_HI: u32 = 5
+const LW_PIN: u32 = 6
+const LW_NX: u32 = 7
+const LW_XFROM: u32 = 8
+const LW_XREG: u32 = 12
+const LW_BACK: u32 = 16
+const LW_DONE: u32 = 17
 
 const VK_NONE: u32 = 0
 const VK_VALUE: u32 = 1 // regs in vreg[id*4 + c]
@@ -131,6 +146,15 @@ struct Lw {
     stage: u32,
     ftmp: u32,
     nflatv: u32,
+    seen: u64,
+    pinned: u64,
+    pins: u64,
+    npin: u32,
+    ls: u64,
+    nloop: u32,
+    bt: u64,
+    hdr_ii: usize,
+    hdr_si: usize,
 }
 
 fn fail(l: *mut Lw, e: u32, pos: usize) {
@@ -314,6 +338,10 @@ fn define(l: *mut Lw, id: u32, n: u32) {
 }
 
 fn release(l: *mut Lw, id: u32) {
+    if tab((*l).vk, id) == VK_UPTR && tab((*l).vreg, id * 4 + 2) != NONE {
+        unref_reg(l, tab((*l).vreg, id * 4 + 2))
+        tset((*l).vk, id, VK_NONE)
+    }
     if tab((*l).vk, id) == VK_VALUE {
         var c: u32 = 0
         while c < tab((*l).vn, id) {
@@ -892,10 +920,16 @@ fn lower_load_ubo(l: *mut Lw, pos: usize, id: u32, ptr: u32) {
     let sk: u32 = parse.scalar_kind(m, ty)
     if n == 0 || (sk != parse.K_FLOAT && sk != parse.K_SINT && sk != parse.K_UINT) || (off & 3) != 0 { fail(l, L_UNSUPPORTED, pos); return }
     define(l, id, n)
+    let dyn: u32 = tab((*l).vreg, ptr * 4 + 2)
     var c: u32 = 0
     while c < n {
         let d: u32 = alloc1(l)
-        emit(l, shader.OP_LDU, d, off / 4 + c, 0, 0)
+        if dyn == NONE { emit(l, shader.OP_LDU, d, off / 4 + c, 0, 0) }
+        else {
+            emit(l, shader.OP_LDUX, d, off / 4 + c, dyn, 0)
+            let hi: u32 = tab((*l).vreg, ptr * 4 + 3) / 4
+            if hi > (*l).nubo { (*l).nubo = hi }
+        }
         if off / 4 + c + 1 > (*l).nubo { (*l).nubo = off / 4 + c + 1 }
         set_reg(l, id, c, d)
         c = c + 1
@@ -1012,10 +1046,42 @@ fn lower_ubo_chain(l: *mut Lw, pos: usize, wc: usize) {
         off = tab((*l).vreg, base * 4)
         cur = tab((*l).vreg, base * 4 + 1)
     }
+    var dyn: u32 = NONE
+    var end: u32 = 0
+    if tab((*l).vk, base) == VK_UPTR {
+        dyn = tab((*l).vreg, base * 4 + 2)
+        end = tab((*l).vreg, base * 4 + 3)
+        if dyn != NONE { ref_reg(l, dyn) }
+    }
     var k: usize = pos + 4
     while k < pos + wc {
         let ix: u32 = parse.w32(m, k)
-        if parse.def_op(m, ix) != spv.OP_CONSTANT { fail(l, L_UNSUPPORTED, pos); return }
+        if parse.def_op(m, ix) != spv.OP_CONSTANT {
+            let ot: u32 = parse.def_op(m, cur)
+            if ot != spv.OP_TYPEARRAY || tab((*l).vk, ix) != VK_VALUE {
+                fail(l, L_UNSUPPORTED, pos)
+                return
+            }
+            let st2: u32 = layout.array_stride(m, cur)
+            if st2 == 0 || (st2 & 3) != 0 { fail(l, L_UNSUPPORTED, pos); return }
+            let scaled: u32 = alloc1(l)
+            emit(l, shader.OP_MUL, scaled, get(l, ix, 0), tmp_const(l, (st2 / 4) as f32), 0)
+            if dyn == NONE { dyn = scaled }
+            else {
+                let sum: u32 = alloc1(l)
+                emit(l, shader.OP_ADD, sum, dyn, scaled, 0)
+                unref_reg(l, dyn)
+                unref_reg(l, scaled)
+                dyn = sum
+            }
+            let alen: u32 = layout.array_length(m, cur)
+            let ebytes: u32 = layout.array_stride(m, cur)
+            if alen > 4096 || ebytes > 4096 || off > 65536 { fail(l, L_UNSUPPORTED, pos); return }
+            end = off + alen * ebytes
+            cur = parse.w32(m, dp0(m, cur) + 2)
+            k = k + 1
+            continue
+        }
         let c: u32 = parse.const_word(m, ix)
         let o: u32 = parse.def_op(m, cur)
         let dp: usize = parse.def_pos(m, cur)
@@ -1042,8 +1108,12 @@ fn lower_ubo_chain(l: *mut Lw, pos: usize, wc: usize) {
     tset((*l).vk, id, VK_UPTR)
     tset((*l).vreg, id * 4, off)
     tset((*l).vreg, id * 4 + 1, cur)
+    tset((*l).vreg, id * 4 + 2, dyn)
+    tset((*l).vreg, id * 4 + 3, end)
     tset((*l).vn, id, 1)
 }
+
+fn dp0(m: *mut parse.Module, t: u32) -> usize { return parse.def_pos(m, t) }
 
 fn lower_access(l: *mut Lw, pos: usize, wc: usize) {
     let m: *mut parse.Module = (*l).m
@@ -1182,6 +1252,253 @@ fn add_edge(l: *mut Lw, from: u32, to: u32, pred: u32) {
     (*l).ne = (*l).ne + 1
 }
 
+
+fn lget(l: *mut Lw, k: u32, w: u32) -> u32 { return tab((*l).ls, k * LS + w) }
+fn lput(l: *mut Lw, k: u32, w: u32, v: u32) { tset((*l).ls, k * LS + w, v) }
+
+fn pin_reg(l: *mut Lw, id: u32, r: u32) {
+    if (*l).npin >= MAX_PINS { fail(l, L_COMPLEX, 0); return }
+    rt.st32((*l).pins, ((*l).npin as usize) * 2, id)
+    rt.st32((*l).pins, ((*l).npin as usize) * 2 + 1, r)
+    (*l).npin = (*l).npin + 1
+    ref_reg(l, r)
+}
+
+fn pin_id(l: *mut Lw, id: u32) {
+    if id == 0 || id >= bound_of(l) || tab((*l).pinned, id) != 0 { return }
+    if tab((*l).vk, id) == VK_UPTR && tab((*l).vreg, id * 4 + 2) != NONE {
+        tset((*l).pinned, id, 1)
+        pin_reg(l, id, tab((*l).vreg, id * 4 + 2))
+        return
+    }
+    if tab((*l).vk, id) != VK_VALUE { return }
+    tset((*l).pinned, id, 1)
+    var c: u32 = 0
+    while c < tab((*l).vn, id) {
+        pin_reg(l, id, tab((*l).vreg, id * 4 + c))
+        c = c + 1
+    }
+}
+
+fn unpin_to(l: *mut Lw, start: u32) {
+    while (*l).npin > start {
+        (*l).npin = (*l).npin - 1
+        let id: u32 = rt.ld32((*l).pins, ((*l).npin as usize) * 2)
+        tset((*l).pinned, id, 0)
+        unref_reg(l, rt.ld32((*l).pins, ((*l).npin as usize) * 2 + 1))
+    }
+}
+
+fn pin_loop_range(l: *mut Lw, si: usize, merge: u32) {
+    let m: *mut parse.Module = (*l).m
+    var i: usize = si
+    while i < (*m).ninst && (*l).err == 0 {
+        let p: usize = parse.inst_pos(m, i)
+        let op: u32 = parse.op_at(m, p)
+        if op == spv.OP_LABEL && parse.w32(m, p + 1) == merge { break }
+        let wc: usize = parse.wc_at(m, p)
+        var k: usize = 1
+        while k < wc {
+            let kind: u32 = parse.operand_kind(op, k, wc)
+            if kind == 1 || kind == 3 { pin_id(l, parse.w32(m, p + k)) }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    var j: usize = si
+    while j < (*m).ninst {
+        let p2: usize = parse.inst_pos(m, j)
+        if parse.op_at(m, p2) != spv.OP_PHI { break }
+        pin_id(l, parse.w32(m, p2 + 2))
+        j = j + 1
+    }
+}
+
+fn add_exit(l: *mut Lw, k: u32, from: u32) {
+    var nx: u32 = lget(l, k, LW_NX)
+    var j: u32 = 0
+    while j < nx {
+        if lget(l, k, LW_XFROM + j) == from { return }
+        j = j + 1
+    }
+    if nx >= 4 { fail(l, L_COMPLEX, 0); return }
+    let x: u32 = alloc1(l)
+    ldc(l, x, fbits(0.0f))
+    lput(l, k, LW_XFROM + nx, from)
+    lput(l, k, LW_XREG + nx, x)
+    lput(l, k, LW_NX, nx + 1)
+}
+
+fn begin_loop(l: *mut Lw, pos: usize, ii: usize, si: usize) {
+    let m: *mut parse.Module = (*l).m
+    if (*l).nloop >= LOOP_MAX { fail(l, L_LOOP, pos); return }
+    let k: u32 = (*l).nloop
+    let merge: u32 = parse.w32(m, pos + 1)
+    lput(l, k, LW_HEAD, (*l).cur)
+    lput(l, k, LW_MERGE, merge)
+    lput(l, k, LW_CONT, parse.w32(m, pos + 2))
+    lput(l, k, LW_HI, si as u32)
+    lput(l, k, LW_NX, 0)
+    lput(l, k, LW_BACK, NONE)
+    lput(l, k, LW_DONE, 0)
+    lput(l, k, LW_PIN, (*l).npin)
+    pin_loop_range(l, si, merge)
+    let mask: u32 = alloc1(l)
+    if (*l).cpred == NONE { ldc(l, mask, fbits(1.0f)) }
+    else { emit(l, shader.OP_MOV, mask, (*l).cpred, 0, 0) }
+    lput(l, k, LW_MASK, mask)
+    (*l).nloop = k + 1
+    var cur: u32 = (*l).cur
+    var i: usize = ii + 1
+    while i < (*m).ninst && (*l).err == 0 {
+        let p: usize = parse.inst_pos(m, i)
+        let op: u32 = parse.op_at(m, p)
+        if op == spv.OP_LABEL {
+            if parse.w32(m, p + 1) == merge { break }
+            cur = parse.w32(m, p + 1)
+        }
+        else if op == spv.OP_BRANCH {
+            if parse.w32(m, p + 1) == merge { add_exit(l, k, cur) }
+        }
+        else if op == spv.OP_BRANCHCONDITIONAL {
+            if parse.w32(m, p + 2) == merge || parse.w32(m, p + 3) == merge { add_exit(l, k, cur) }
+        }
+        i = i + 1
+    }
+    lput(l, k, LW_TOP, (*l).pc as u32)
+    (*l).cpred = mask
+}
+
+fn is_header_phi_reg(l: *mut Lw, hi: u32, r: u32) -> bool {
+    let m: *mut parse.Module = (*l).m
+    var j: usize = hi as usize
+    while j < (*m).ninst {
+        let p: usize = parse.inst_pos(m, j)
+        if parse.op_at(m, p) != spv.OP_PHI { break }
+        let id: u32 = parse.w32(m, p + 2)
+        if tab((*l).pinned, id) != 0 {
+            var c: u32 = 0
+            while c < tab((*l).vn, id) {
+                if tab((*l).vreg, id * 4 + c) == r { return true }
+                c = c + 1
+            }
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn phi_back_value(l: *mut Lw, p: usize) -> u32 {
+    let m: *mut parse.Module = (*l).m
+    let wc: usize = parse.wc_at(m, p)
+    var q: usize = 3
+    while q + 1 < wc {
+        if parse.w32(m, p + q + 1) == (*l).cur { return parse.w32(m, p + q) }
+        q = q + 2
+    }
+    return 0
+}
+
+fn back_edge(l: *mut Lw, k: u32, pred: u32) {
+    let m: *mut parse.Module = (*l).m
+    var b: u32 = pred
+    if b == NONE {
+        b = alloc1(l)
+        ldc(l, b, fbits(1.0f))
+    }
+    else { ref_reg(l, b) }
+    lput(l, k, LW_BACK, b)
+    lput(l, k, LW_DONE, 1)
+    let hi: u32 = lget(l, k, LW_HI)
+    var pass: u32 = 0
+    while pass < 2 && (*l).err == 0 {
+        var j: usize = hi as usize
+        var ord: u32 = 0
+        while j < (*m).ninst && (*l).err == 0 {
+            let p: usize = parse.inst_pos(m, j)
+            if parse.op_at(m, p) != spv.OP_PHI { break }
+            j = j + 1
+            let id: u32 = parse.w32(m, p + 2)
+            if ord >= 16 { fail(l, L_COMPLEX, 0); break }
+            let v: u32 = phi_back_value(l, p)
+            if tab((*l).pinned, id) != 0 && v != 0 {
+                var c: u32 = 0
+                while c < tab((*l).vn, id) {
+                    let dst: u32 = tab((*l).vreg, id * 4 + c)
+                    if pass == 0 {
+                        rt.st32((*l).bt, (ord * 4 + c) as usize, 0)
+                        let src0: u32 = get(l, v, c)
+                        if src0 != dst && is_header_phi_reg(l, hi, src0) {
+                            let t: u32 = alloc1(l)
+                            emit(l, shader.OP_MOV, t, src0, 0, 0)
+                            rt.st32((*l).bt, (ord * 4 + c) as usize, t)
+                        }
+                    }
+                    else {
+                        var src: u32 = rt.ld32((*l).bt, (ord * 4 + c) as usize)
+                        let hadtmp: bool = src != 0
+                        if !hadtmp { src = get(l, v, c) }
+                        if src != dst { emit(l, shader.OP_SEL, dst, src, dst, b) }
+                        if hadtmp { unref_reg(l, src) }
+                    }
+                    free_tmps(l)
+                    c = c + 1
+                }
+            }
+            if pass == 1 && v != 0 && tab((*l).uses, v) > 0 {
+                tset((*l).uses, v, tab((*l).uses, v) - 1)
+                if tab((*l).uses, v) == 0 { release(l, v) }
+            }
+            ord = ord + 1
+        }
+        pass = pass + 1
+    }
+}
+
+fn route_edge(l: *mut Lw, to: u32, pred: u32) {
+    if (*l).nloop > 0 {
+        let k: u32 = (*l).nloop - 1
+        if lget(l, k, LW_DONE) == 0 && to == lget(l, k, LW_HEAD) {
+            back_edge(l, k, pred)
+            return
+        }
+        if to == lget(l, k, LW_MERGE) {
+            var j: u32 = 0
+            while j < lget(l, k, LW_NX) {
+                if lget(l, k, LW_XFROM + j) == (*l).cur {
+                    let x: u32 = lget(l, k, LW_XREG + j)
+                    var pr: u32 = pred
+                    if pr == NONE { pr = tmp_const(l, 1.0f) }
+                    emit(l, shader.OP_MAX, x, x, pr, 0)
+                    add_edge(l, (*l).cur, to, x)
+                    return
+                }
+                j = j + 1
+            }
+        }
+    }
+    add_edge(l, (*l).cur, to, pred)
+}
+
+fn pop_done_loops(l: *mut Lw) {
+    while (*l).nloop > 0 && lget(l, (*l).nloop - 1, LW_DONE) != 0 {
+        let k: u32 = (*l).nloop - 1
+        let b: u32 = lget(l, k, LW_BACK)
+        let mask: u32 = lget(l, k, LW_MASK)
+        if b != mask { emit(l, shader.OP_MOV, mask, b, 0, 0) }
+        emit(l, shader.OP_JANY, 0, mask, lget(l, k, LW_TOP), 0)
+        unref_reg(l, b)
+        unref_reg(l, mask)
+        var j: u32 = 0
+        while j < lget(l, k, LW_NX) {
+            unref_reg(l, lget(l, k, LW_XREG + j))
+            j = j + 1
+        }
+        unpin_to(l, lget(l, k, LW_PIN))
+        (*l).nloop = k
+    }
+}
+
 // does a return / discard / unreachable occur between instruction ii and the label `merge`?
 fn scan_exit(l: *mut Lw, ii: usize, merge: u32) -> bool {
     let m: *mut parse.Module = (*l).m
@@ -1192,6 +1509,20 @@ fn scan_exit(l: *mut Lw, ii: usize, merge: u32) -> bool {
         if o == spv.OP_LABEL && parse.w32(m, p + 1) == merge { return false }
         if o == spv.OP_RETURN || o == spv.OP_RETURNVALUE || o == spv.OP_KILL || o == spv.OP_UNREACHABLE || o == spv.OP_SWITCH || o == spv.OP_LOOPMERGE { return true }
         if o == spv.OP_FUNCTIONEND { return true }
+        if (*l).nloop > 0 {
+            let k: u32 = (*l).nloop - 1
+            let lm: u32 = lget(l, k, LW_MERGE)
+            let lc: u32 = lget(l, k, LW_CONT)
+            if o == spv.OP_BRANCH {
+                let t: u32 = parse.w32(m, p + 1)
+                if t == lm || t == lc { return true }
+            }
+            if o == spv.OP_BRANCHCONDITIONAL {
+                let t2: u32 = parse.w32(m, p + 2)
+                let t3: u32 = parse.w32(m, p + 3)
+                if t2 == lm || t2 == lc || t3 == lm || t3 == lc { return true }
+            }
+        }
         i = i + 1
     }
     return true
@@ -1252,6 +1583,7 @@ fn begin_block(l: *mut Lw, label: u32, first: bool) {
 
 fn end_block(l: *mut Lw) {
     let label: u32 = (*l).cur
+    tset((*l).seen, label, 1)
     var i: usize = 0
     while i < (*l).ne {
         if rt.ld32((*l).et, i) == label && rt.ld32((*l).ed, i) == 0 {
@@ -1305,7 +1637,8 @@ fn lower_phi(l: *mut Lw, pos: usize, wc: usize) {
 fn lower_branch(l: *mut Lw, pos: usize, op: u32) {
     let m: *mut parse.Module = (*l).m
     if op == spv.OP_BRANCH {
-        add_edge(l, (*l).cur, parse.w32(m, pos + 1), (*l).cpred)
+        route_edge(l, parse.w32(m, pos + 1), (*l).cpred)
+        pop_done_loops(l)
         return
     }
     let cnd: u32 = parse.w32(m, pos + 1)
@@ -1326,8 +1659,9 @@ fn lower_branch(l: *mut Lw, pos: usize, op: u32) {
         emit(l, shader.OP_MUL, mf, (*l).cpred, nr, 0)
         unref_reg(l, nr)
     }
-    add_edge(l, (*l).cur, parse.w32(m, pos + 2), mt)
-    add_edge(l, (*l).cur, parse.w32(m, pos + 3), mf)
+    route_edge(l, parse.w32(m, pos + 2), mt)
+    route_edge(l, parse.w32(m, pos + 3), mf)
+    pop_done_loops(l)
     if own_t { unref_reg(l, mt) }
     if own_f { unref_reg(l, mf) }
 }
@@ -1338,7 +1672,9 @@ fn consume(l: *mut Lw, pos: usize, op: u32, wc: usize) {
     var k: usize = 1
     while k < wc {
         let kind: u32 = parse.operand_kind(op, k, wc)
-        if kind == 1 || kind == 3 {
+        var deferred: bool = false
+        if op == spv.OP_PHI && k >= 3 && (k & 1) == 1 && k + 1 < wc && tab((*l).seen, parse.w32((*l).m, pos + k + 1)) == 0 { deferred = true }
+        if (kind == 1 || kind == 3) && !deferred {
             let id: u32 = parse.w32((*l).m, pos + k)
             if id != 0 && id < bound_of(l) && tab((*l).uses, id) > 0 {
                 tset((*l).uses, id, tab((*l).uses, id) - 1)
@@ -1351,6 +1687,11 @@ fn consume(l: *mut Lw, pos: usize, op: u32, wc: usize) {
 
 fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
     let m: *mut parse.Module = (*l).m
+    if (*l).hdr_ii != 0 && op != spv.OP_PHI {
+        let hi: usize = (*l).hdr_ii
+        (*l).hdr_ii = 0
+        begin_loop(l, parse.inst_pos(m, hi), hi, (*l).hdr_si)
+    }
     if op == spv.OP_SELECTIONMERGE {
         let mb: u32 = parse.w32(m, pos + 1)
         if !scan_exit(l, ii, mb) {
@@ -1358,7 +1699,7 @@ fn lower_inst(l: *mut Lw, pos: usize, op: u32, wc: usize, ii: usize) {
             ref_reg(l, (*l).cpred)
         }
     }
-    else if op == spv.OP_LOOPMERGE { fail(l, L_LOOP, pos) }
+    else if op == spv.OP_LOOPMERGE { }
     else if op == spv.OP_SWITCH {
         if wc == 3 { add_edge(l, (*l).cur, parse.w32(m, pos + 2), (*l).cpred) }
         else { fail(l, L_SWITCH, pos) }
@@ -1413,10 +1754,10 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     if ep == 0 { return L_STAGE }
     let nb: usize = (*m).bound as usize
     var lw: Lw = Lw { m: m, prog: prog, pc: 0, maxpc: maxpc, err: 0, err_pos: 0, rrefs: 0, vreg: 0, vn: 0, vk: 0, uses: 0, bpred: 0,
-        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, stage: stage, ftmp: FIRST_TMP, nflatv: 0 }
+        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, stage: stage, ftmp: FIRST_TMP, nflatv: 0, seen: 0, pinned: 0, pins: 0, npin: 0, ls: 0, nloop: 0, bt: 0, hdr_ii: 0, hdr_si: 0 }
     let l: *mut Lw = &lw
     if stage == spv.EM_VERTEX { (*l).ftmp = VS_FIRST_TMP; (*l).peak = VS_FIRST_TMP }
-    (*l).rrefs = rt.heap_alloc(128 * 4)
+    (*l).rrefs = rt.heap_alloc((NREGS as usize) * 4)
     (*l).vreg = rt.heap_alloc(nb * 16)
     (*l).vn = rt.heap_alloc(nb * 4)
     (*l).vk = rt.heap_alloc(nb * 4)
@@ -1424,16 +1765,24 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     (*l).bpred = rt.heap_alloc(nb * 4)
     (*l).mpred = rt.heap_alloc(nb * 4)
     (*l).tmp = rt.heap_alloc(64 * 4)
+    (*l).seen = rt.heap_alloc(nb * 4)
+    (*l).pinned = rt.heap_alloc(nb * 4)
+    (*l).pins = rt.heap_alloc((MAX_PINS as usize) * 8)
+    (*l).ls = rt.heap_alloc((LOOP_MAX * LS) as usize * 4)
+    (*l).bt = rt.heap_alloc(64 * 4)
     (*l).ef = rt.heap_alloc(MAX_EDGES * 4)
     (*l).et = rt.heap_alloc(MAX_EDGES * 4)
     (*l).ep = rt.heap_alloc(MAX_EDGES * 4)
     (*l).ed = rt.heap_alloc(MAX_EDGES * 4)
-    rt.mem_set((*l).rrefs, 0 as u8, 128 * 4)
+    rt.mem_set((*l).rrefs, 0 as u8, (NREGS as usize) * 4)
     rt.mem_set((*l).vreg, 0 as u8, nb * 16)
     rt.mem_set((*l).vn, 0 as u8, nb * 4)
     rt.mem_set((*l).vk, 0 as u8, nb * 4)
     rt.mem_set((*l).uses, 0 as u8, nb * 4)
     rt.mem_set((*l).bpred, 0 as u8, nb * 4)
+    rt.mem_set((*l).seen, 0 as u8, nb * 4)
+    rt.mem_set((*l).pinned, 0 as u8, nb * 4)
+    rt.mem_set((*l).ls, 0 as u8, (LOOP_MAX * LS) as usize * 4)
     var q: usize = 0
     while q < nb { rt.st32((*l).mpred, q, UNSET); q = q + 1 }
 
@@ -1503,6 +1852,17 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
             begin_block(l, parse.w32(m, p + 1), first)
             first = false
             in_block = true
+            (*l).hdr_ii = 0
+            if !(*l).skip {
+                var h: usize = i + 1
+                while h < i1 {
+                    let hp: usize = parse.inst_pos(m, h)
+                    let hop: u32 = parse.op_at(m, hp)
+                    if hop == spv.OP_LOOPMERGE { (*l).hdr_ii = h; (*l).hdr_si = i + 1; break }
+                    if hop == spv.OP_BRANCH || hop == spv.OP_BRANCHCONDITIONAL || hop == spv.OP_SWITCH || hop == spv.OP_RETURN || hop == spv.OP_RETURNVALUE || hop == spv.OP_KILL || hop == spv.OP_UNREACHABLE { break }
+                    h = h + 1
+                }
+            }
         }
         else if op == spv.OP_FUNCTIONPARAMETER { }
         else if !(*l).skip {
@@ -1537,7 +1897,7 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     (*info).ntex = (*l).ntex
     (*info).nubo = (*l).nubo
     (*info).nflat = (*l).nflatv
-    rt.heap_free((*l).rrefs, 128 * 4)
+    rt.heap_free((*l).rrefs, (NREGS as usize) * 4)
     rt.heap_free((*l).vreg, nb * 16)
     rt.heap_free((*l).vn, nb * 4)
     rt.heap_free((*l).vk, nb * 4)
@@ -1545,6 +1905,11 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     rt.heap_free((*l).bpred, nb * 4)
     rt.heap_free((*l).mpred, nb * 4)
     rt.heap_free((*l).tmp, 64 * 4)
+    rt.heap_free((*l).seen, nb * 4)
+    rt.heap_free((*l).pinned, nb * 4)
+    rt.heap_free((*l).pins, (MAX_PINS as usize) * 8)
+    rt.heap_free((*l).ls, (LOOP_MAX * LS) as usize * 4)
+    rt.heap_free((*l).bt, 64 * 4)
     rt.heap_free((*l).ef, MAX_EDGES * 4)
     rt.heap_free((*l).et, MAX_EDGES * 4)
     rt.heap_free((*l).ep, MAX_EDGES * 4)

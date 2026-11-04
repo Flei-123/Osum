@@ -16,6 +16,9 @@ if command -v glslangValidator >/dev/null 2>&1; then
         b=$(basename "$s" .frag)
         if glslangValidator -V "$s" -o "$T/$b.spv" > "$T/$b.log" 2>&1; then
             files+=("$T/$b.spv")
+            if [ "$b" = ok_loop ] && command -v spirv-opt >/dev/null 2>&1; then
+                spirv-opt --merge-return --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store --eliminate-local-single-block --eliminate-local-single-store --simplify-instructions --ssa-rewrite --eliminate-dead-code-aggressive --eliminate-dead-branches --merge-blocks "$T/$b.spv" -o "$T/ok_loop_ssa.spv" && files+=("$T/ok_loop_ssa.spv")
+            fi
             if command -v spirv-val >/dev/null 2>&1; then
                 spirv-val --target-env vulkan1.0 "$T/$b.spv" > "$T/$b.val" 2>&1 && echo "OK    spirv-val accepts $b" || { echo "FAIL  spirv-val rejects $b (generator problem)"; rc=1; }
             fi

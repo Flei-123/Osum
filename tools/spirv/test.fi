@@ -231,7 +231,8 @@ fn main(start: u64) -> i32 {
     var a_branch: [u8; 9] = "ok_branch"
     var a_frag: [u8; 12] = "ok_fragcoord"
     var a_math: [u8; 7] = "ok_math"
-    var a_loop: [u8; 4] = "loop"
+    var a_oloop: [u8; 7] = "ok_loop"
+    var a_udyn: [u8; 7] = "ok_dynu"
     var a_disc: [u8; 10] = "ok_discard"
     var a_samp: [u8; 11] = "ok_samplers"
     let tex: u64 = scene.make_texture(256)
@@ -292,7 +293,6 @@ fn main(start: u64) -> i32 {
             else { io.fmt_print(f"      {info.ninstr} instr, {info.peak_reg} regs peak, {info.nsel} sel, {info.nsample} sample\n") }
         } else {
             var want: u32 = lower.L_UNSUPPORTED
-            if has_name(path, (&a_loop[0]) as u64, 4) { want = lower.L_LOOP }
             check("unsupported module validates and is rejected by the lowering with the right error", e == 0 && le2 == want)
             if e != 0 || le2 != want { io.fmt_print(f"      {parse.err_name(e)} / {lower.lower_err_name(le2)} (wanted {lower.lower_err_name(want)})\n") }
         }
@@ -356,6 +356,42 @@ fn main(start: u64) -> i32 {
                 raster.st_f32(ub, 0, 1.0f)
                 render(f, prog)
                 check("uniform block: counter-proof, changed constant changes the pixel", near(ch(raster.frame_pixel(f, 160, 100), 0), 255))
+                raster.frame_set_ubo(f, 0 as u64)
+            }
+            if has_name(path, (&a_oloop[0]) as u64, 7) {
+                let q1: u32 = raster.frame_pixel(f, 100, 30)
+                let q2: u32 = raster.frame_pixel(f, 260, 130)
+                check("loops: per-lane trip count, break, continue and do-while (lane A)", near(ch(q1, 0), 64) && near(ch(q1, 1), 128) && near(ch(q1, 2), 32) && ch(q1, 3) == 255 as u32)
+                check("loops: per-lane trip count, break, continue and do-while (lane B)", near(ch(q2, 0), 191) && near(ch(q2, 1), 128) && near(ch(q2, 2), 96) && ch(q2, 3) == 255 as u32)
+                var pcx: usize = 0
+                var njump: i32 = 0
+                while pcx < info.ninstr as usize {
+                    if rt.ld32(prog, pcx * 5) == shader.OP_JANY {
+                        rt.st32(prog, pcx * 5, shader.OP_MOV)
+                        rt.st32(prog, pcx * 5 + 1, 0 as u32)
+                        rt.st32(prog, pcx * 5 + 2, 0 as u32)
+                        njump = njump + 1
+                    }
+                    pcx = pcx + 1
+                }
+                check("loops: lowered with three back edges", njump == 3)
+                render(f, prog)
+                let z1: u32 = raster.frame_pixel(f, 260, 130)
+                check("loops: counter-proof, without the back jumps the pixel changes", !near(ch(z1, 0), 191) && !near(ch(z1, 2), 96))
+            }
+            if has_name(path, (&a_udyn[0]) as u64, 7) {
+                let ud: u64 = rt.heap_alloc(64)
+                var uk: usize = 0
+                while uk < 16 { raster.st_f32(ud, uk, (uk as f32) * 0.0625f); uk = uk + 1 }
+                raster.frame_set_ubo(f, ud)
+                check("dynamic uniform index: lowered with an indexed constant read", info.nubo == 16)
+                render(f, prog)
+                let d0: u32 = raster.frame_pixel(f, 20, 100)
+                let d2: u32 = raster.frame_pixel(f, 300, 100)
+                check("dynamic uniform index: lane on the left reads tint[0], lane on the right tint[2]", near(ch(d0, 0), 0) && near(ch(d0, 1), 16) && near(ch(d2, 0), 128) && near(ch(d2, 1), 143))
+                raster.st_f32(ud, 8, 1.0f)
+                render(f, prog)
+                check("dynamic uniform index: counter-proof, changed element changes only its lane", near(ch(raster.frame_pixel(f, 300, 100), 0), 255) && near(ch(raster.frame_pixel(f, 20, 100), 0), 0))
                 raster.frame_set_ubo(f, 0 as u64)
             }
             if has_name(path, (&a_flat[0]) as u64, 7) {
