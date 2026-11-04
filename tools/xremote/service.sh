@@ -48,8 +48,12 @@ sed -e "s/@RELAYPORT@/$RELAYPORT/g" -e "s/@HOSTSECS@/$HOSTSECS/g" -e "s/@WINDOW@
 [ "${XR_DBG:-0}" = 1 ] && sed -i 's/^#DBG //' "$T/svc.sh"
 cp tools/xremote/service-guest-boot.sh "$T/fx.sh"
 grep -E '/@755$|^/(bin|sbin)/|^/usr/(bin|sbin)/[a-z0-9_.-]*->/bin/busybox|^/lib/(ld-musl|libc\.musl)' "$WD/fxrun/spec.txt" > "$T/fx/spec.txt"
+cp pakete/xremote/INFO "$T/xr.info"
+printf 'xremote net\n' > "$T/xr.rights"
 {
     echo "/apps/@755"; echo "/apps/xremote.prog/@755"; echo "/apps/xremote.prog/bin/@755"; echo "/apps/xremote.prog/lib/@755"
+    echo "/apps/xremote.prog/INFO=$T/xr.info@644"
+    echo "/etc/apprights.conf=$T/xr.rights@644"
     echo "/apps/xremote.prog/bin/freeviewer-host=$HOSTBIN@755"
     echo "/apps/xremote.prog/lib/ld-musl-x86_64.so.1=$LDMUSL@755"
     echo "/apps/xremote.prog/lib/libgcc_s.so.1=$LIBGCC@755"
@@ -95,7 +99,7 @@ viewer() {
 VP=$!
 ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
 BOOTARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2 script=sh /etc/fx.sh;exit"
-KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-900} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd" \
+KERNEL=${KERNEL:-} DONE=SV-END TMO=${XR_TMO:-900} MEM=1024 GUI=1 GUI_EXTRA="xremoted settingsd apprights" \
     EXTRA="/etc/svc.sh=$T/svc.sh@755 /etc/settings.schema=etc/settings.schema@644" KARGS="$BOOTARGS" \
     QEMU_EXTRA="-vga std -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:02" \
     SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/fx.sh" "$OUT" > "$T/linuxapps.log" 2>&1
