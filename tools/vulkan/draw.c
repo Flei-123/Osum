@@ -218,16 +218,17 @@ static void finish(Target *t, const char *name, Buf *rb)
     check(label, submit_wait());
     char path[512];
     snprintf(path, sizeof path, "%s/%s.rgba", outdir, name);
-    FILE *f = fopen(path, "wb");
-    if (f) {
-        for (int i = 0; i < W * H; i++) {
-            uint8_t *p = rb->p + i * 4;
-            uint8_t px[4] = { p[0], p[1], p[2], p[3] };
-            if (t->fmt == VK_FORMAT_B8G8R8A8_UNORM) { px[0] = p[2]; px[2] = p[0]; }
-            fwrite(px, 1, 4, f);
-        }
-        fclose(f);
+    FILE *f = strcmp(outdir, "-") ? fopen(path, "wb") : 0;
+    uint64_t hash = 1469598103934665603ull;
+    for (int i = 0; i < W * H; i++) {
+        uint8_t *p = rb->p + i * 4;
+        uint8_t px[4] = { p[0], p[1], p[2], p[3] };
+        if (t->fmt == VK_FORMAT_B8G8R8A8_UNORM) { px[0] = p[2]; px[2] = p[0]; }
+        for (int k = 0; k < 4; k++) hash = (hash ^ px[k]) * 1099511628211ull;
+        if (f) fwrite(px, 1, 4, f);
     }
+    if (f) fclose(f);
+    printf("VK img %s %016llx\n", name, (unsigned long long)hash);
 }
 
 static const float tri_data[] = { -0.8f, -0.7f, 1, 0, 0, 1,   0.9f, -0.5f, 0, 1, 0, 1,   0.1f, 0.8f, 0, 0, 1, 1 };
