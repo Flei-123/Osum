@@ -835,6 +835,9 @@ ARGS+=("/etc/mouse.conf=$OUT/mouse.conf" "/etc/touchpad.conf=$OUT/touchpad.conf"
 if [ "$IMAGE_PROFILE" = public ] && grep -Eq '^[[:space:]]*input[[:space:]]*=[[:space:]]*yes' "$OUT/rechte.conf"; then
     fehler "input = yes gehoert nicht in das oeffentliche Abbild"
 fi
+if [ "$IMAGE_PROFILE" = public ] && grep -Eq '^[[:space:]]*(devmode[[:space:]]*=[[:space:]]*yes|screenshot[[:space:]]*=[[:space:]]*always)' "$OUT/rechte.conf"; then
+    fehler "devmode = yes / screenshot = always gehoert nicht in das oeffentliche Abbild"
+fi
 sagen "fernsteuerung (input) $(grep -Eq '^[[:space:]]*input[[:space:]]*=[[:space:]]*yes' "$OUT/rechte.conf" && echo ja || echo nein)"
 ARGS+=("/etc/jarvis/permissions.conf=$OUT/rechte.conf")
 # PRE-PAIRED DEVICE KEY (personal image only). The seed was generated on

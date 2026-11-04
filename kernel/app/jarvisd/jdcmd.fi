@@ -9,6 +9,7 @@ import tls.tls
 import tls.x509
 import jarvisd.jdbase
 import jarvisd.jdargs
+import jarvisd.jddev
 
 const MAXLISTE: usize = 64
 
@@ -595,6 +596,7 @@ fn conf_clear() {
     jdbase.k_befehle = false
     jdbase.k_photo = false
     jdbase.k_system = false
+    jddev.reset()
     jdbase.n_read = 0
     jdbase.n_write = 0
     jdbase.n_auflisten = 0
@@ -620,8 +622,11 @@ fn conf_read() -> bool {
     var b: rt.Buf = rt.buf_new()
     if !rt.read_file((&jdbase.konfpfad[0]) as u64, &b) {
         rt.buf_free(&b)
+        dev_settle()
         return false
     }
+    var s_devmode: [u8; 8] = "devmode\0"
+    var w_always: [u8; 7] = "always\0"
     var s_server: [u8; 7] = "server\0"
     var s_gone: [u8; 10] = "transport\0"
     var s_path: [u8; 5] = "path\0"
@@ -721,7 +726,10 @@ fn conf_read() -> bool {
                 } else if ist(sp, sl, (&s_befehle[0]) as u64) {
                     jdbase.k_befehle = yes_is(wp, wl)
                 } else if ist(sp, sl, (&s_photo[0]) as u64) {
-                    jdbase.k_photo = yes_is(wp, wl)
+                    jddev.k_conf_always = ist(wp, wl, (&w_always[0]) as u64)
+                    jdbase.k_photo = yes_is(wp, wl) || jddev.k_conf_always
+                } else if ist(sp, sl, (&s_devmode[0]) as u64) {
+                    jddev.k_conf_dev = yes_is(wp, wl)
                 } else if ist(sp, sl, (&s_sys[0]) as u64) {
                     jdbase.k_system = yes_is(wp, wl)
                 } else if ist(sp, sl, (&s_tipp[0]) as u64) {
@@ -758,7 +766,37 @@ fn conf_read() -> bool {
         at = ende + 1
     }
     rt.buf_free(&b)
+    dev_settle()
     return true
+}
+
+fn dev_settle() {
+    let change: i64 = jddev.settle()
+    if jddev.active() {
+        jdbase.k_befehle = true
+        jdbase.k_photo = true
+        jdbase.k_system = true
+        k_tipp = true
+        if k_max_output < jddev.MIN_OUTPUT {
+            k_max_output = jddev.MIN_OUTPUT
+        }
+        if k_max_file < 4194304 {
+            k_max_file = 4194304
+        }
+    }
+    var kind: [u8; 8] = "devmode\0"
+    if change == jddev.TRANSITION_ON {
+        notiere((&kind[0]) as u64, 7, "ON", 0, 0 as usize)
+    } else if change == jddev.TRANSITION_OFF {
+        notiere((&kind[0]) as u64, 7, "OFF", 0, 0 as usize)
+    }
+}
+
+fn path_allowed(list: u64, count: usize, p: u64, n: usize, for_write: bool) -> bool {
+    if jddev.active() {
+        return !jddev.path_denied(p, n, for_write)
+    }
+    return in_list(list, count, p, n)
 }
 
 fn path_clean(p: u64, n: usize) -> bool {
@@ -1240,7 +1278,7 @@ fn do_read(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     if !path_clean(path, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
-    if !in_list((&l_read[0]) as u64, jdbase.n_read, path, pn) {
+    if !path_allowed((&l_read[0]) as u64, jdbase.n_read, path, pn, false) {
         return ablehnen(aus, "path not allowed by `read` in /etc/jarvis/permissions.conf")
     }
     var name: [u8; 128] = [0; 128]
@@ -1274,12 +1312,19 @@ fn do_read(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     return true
 }
 
+fn server_valid() -> bool {
+    if jdbase.k_https {
+        return jdbase.k_namelen > 0
+    }
+    return jdbase.k_ip != 0 as u32
+}
+
 fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
     aus: *mut rt.Buf) -> bool {
     if !path_clean(path, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
-    if !in_list((&l_write[0]) as u64, jdbase.n_write, path, pn) {
+    if !path_allowed((&l_write[0]) as u64, jdbase.n_write, path, pn, true) {
         return ablehnen(aus, "path not allowed by `write` in /etc/jarvis/permissions.conf")
     }
     if (*nutz).len > k_max_file {
@@ -1287,13 +1332,20 @@ fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
     }
     var name: [u8; 128] = [0; 128]
     hinein((&name[0]) as u64, jdbase.MAXPFAD, path, pn)
+    var backup: rt.Buf = rt.buf_new()
+    let guarded: bool = jddev.active() && eq(path, pn, (&jdbase.konfpfad[0]) as u64, rt.c_length((&jdbase.konfpfad[0]) as u64))
+    if guarded {
+        rt.read_file((&name[0]) as u64, &backup)
+    }
     let roh: i64 = sys_open((&name[0]) as u64,
         jdbase.O_WRONLY | jdbase.O_CREAT | jdbase.O_TRUNC, 420)
     if roh < 0 {
+        rt.buf_free(&backup)
         return ablehnen(aus, "cannot create the file")
     }
     let fd: i64 = tight_make(roh, jdbase.R_WRITE | jdbase.R_INSPECT | jdbase.R_SEEK, aus)
     if fd < 0 {
+        rt.buf_free(&backup)
         return false
     }
     var getan: usize = 0
@@ -1312,8 +1364,19 @@ fn do_write(path: u64, pn: usize, nutz: *mut rt.Buf,
     }
     sys_close(fd)
     if schief {
+        rt.buf_free(&backup)
         return ablehnen(aus, "write failed halfway")
     }
+    if guarded {
+        conf_read()
+        if !server_valid() {
+            rt.write_file((&name[0]) as u64, backup.ptr, backup.len)
+            conf_read()
+            rt.buf_free(&backup)
+            return ablehnen(aus, "dev mode: the new permissions.conf has no valid server -- previous file restored")
+        }
+    }
+    rt.buf_free(&backup)
     rt.buf_clear(aus)
     var t: [u8; 10] = "oktette \0\0"
     rt.buf_push_bytes(aus, (&t[0]) as u64, 8)
@@ -1326,7 +1389,7 @@ fn do_list(path: u64, pn: usize, aus: *mut rt.Buf) -> bool {
     if !path_clean(path, pn) {
         return ablehnen(aus, "not a clean absolute path")
     }
-    if !in_list((&l_auflisten[0]) as u64, jdbase.n_auflisten, path, pn) {
+    if !path_allowed((&l_auflisten[0]) as u64, jdbase.n_auflisten, path, pn, false) {
         return ablehnen(aus, "directory not allowed by `list` in /etc/jarvis/permissions.conf")
     }
     var name: [u8; 128] = [0; 128]
@@ -1602,21 +1665,29 @@ fn do_cmd(line: u64, zn: usize, aus: *mut rt.Buf) -> bool {
     if !path_clean(prog, pn) {
         return ablehnen(aus, "the program must be given with its full path")
     }
-    if !in_list((&l_command[0]) as u64, jdbase.n_command, prog, pn) {
-        return ablehnen(aus, "program not allowed by `command_allowed` in /etc/jarvis/permissions.conf")
-    }
-    if flags_denied(line, zn, prog, pn) {
-        return ablehnen(aus, "option not allowed by `command_flag_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
-    }
-    if sub_denied(line, zn, prog, pn) {
-        return ablehnen(aus, "subcommand not allowed by `command_sub_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
-    }
-    if !arg_paths_ok(line, zn, prog, pn, aus) {
-        return false
+    var max_words: usize = 6
+    if jddev.active() {
+        max_words = 7
+        if jddev.command_denied(line, zn, prog, pn) {
+            return ablehnen(aus, "dev mode: the command touches key material, the audit log or the dev-mode markers")
+        }
+    } else {
+        if !in_list((&l_command[0]) as u64, jdbase.n_command, prog, pn) {
+            return ablehnen(aus, "program not allowed by `command_allowed` in /etc/jarvis/permissions.conf")
+        }
+        if flags_denied(line, zn, prog, pn) {
+            return ablehnen(aus, "option not allowed by `command_flag_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
+        }
+        if sub_denied(line, zn, prog, pn) {
+            return ablehnen(aus, "subcommand not allowed by `command_sub_allowed` in /etc/jarvis/permissions.conf (needs local confirmation)")
+        }
+        if !arg_paths_ok(line, zn, prog, pn, aus) {
+            return false
+        }
     }
     let anz: usize = arg_count(line, zn)
-    if anz > 6 {
-        return ablehnen(aus, "at most six words per command")
+    if anz > max_words {
+        return ablehnen(aus, "too many words in the command")
     }
     var worte: rt.Buf = rt.buf_new()
     var cur_ptr: [u64; 8] = [0; 8]
@@ -1890,7 +1961,7 @@ fn do_screenshot(aus: *mut rt.Buf) -> bool {
     if !jdbase.k_photo {
         return ablehnen(aus, "`screenshot = no` in /etc/jarvis/permissions.conf")
     }
-    if !cert_check(aus) {
+    if !jddev.always_shot() && !cert_check(aus) {
         return false
     }
     let ready: i64 = syscall(jdbase.S_SHOT, jdbase.SH_INFO, jdbase.SI_READY, 0, 0, 0, 0)

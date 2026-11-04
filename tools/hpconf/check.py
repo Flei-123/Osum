@@ -38,4 +38,7 @@ if "/bin/xfx" not in allowed:
     sys.exit("/bin/xfx is not in command_allowed")
 if sorted(s for p, s in subs if p == "/bin/xfx") != ["install", "start", "status", "stop"]:
     sys.exit("/bin/xfx must allow exactly install, start, stop, status")
+if re.search(r"^devmode\s*=\s*yes", conf, re.M) or re.search(r"^screenshot\s*=\s*always", conf, re.M):
+    if "--dev" not in sys.argv:
+        sys.exit("devmode / screenshot=always only belongs in rechte-hp-dev.conf")
 print("ok")
