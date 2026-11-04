@@ -45,6 +45,7 @@ for sh in tools/vulkan/shaders/tri.vert tools/vulkan/shaders/tri.frag tools/vulk
     glslangValidator -V "$sh" -o "$D/spv/$b.spv" > /dev/null 2>&1 && spirv-opt --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store "$D/spv/$b.spv" -o "$D/spv/$b.opt" || ck "shader $b compiles" no
 done
 CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil quad_bgra quad_npot inst dubo area"
+WSI_CASES="wsi wsi1 wsi2"
 VK_DRIVER_FILES=$LVP timeout 120 "$D/draw" libvulkan.so.1 1 "$D/lvpd" "$D/spv" > "$D/draw_lvp.txt" 2>&1
 grep -q "^VK DONE bad=0" "$D/draw_lvp.txt" && ck "draw client: lavapipe reference passes" ok || ck "draw client: lavapipe reference passes" no
 timeout 120 stdbuf -o0 "$D/draw" "$D/libvulkan.so.1" 0 "$D/oursd" "$D/spv" > "$D/draw_ours.txt" 2>&1
@@ -59,6 +60,27 @@ draw_match() {
 for c in $CASES; do
     python3 -I tools/vulkan/cmp.py "$D/lvpd/$c.rgba" "$D/oursd/$c.rgba" 0.5 4 > "$D/oursd/$c.cmp" 2>&1 && ck "draw $c == lavapipe ($(cat "$D/oursd/$c.cmp"))" ok || ck "draw $c == lavapipe ($(cat "$D/oursd/$c.cmp"))" no
 done
+for c in $WSI_CASES; do
+    python3 -I tools/vulkan/cmp.py "$D/lvpd/fui.rgba" "$D/oursd/$c.rgba" 0.5 4 > "$D/oursd/$c.cmp" 2>&1 && ck "swapchain frame $c == lavapipe fui ($(cat "$D/oursd/$c.cmp"))" ok || ck "swapchain frame $c == lavapipe fui ($(cat "$D/oursd/$c.cmp"))" no
+done
+[ "$(grep -c '^VK ok sink rows' "$D/draw_ours.txt")" -eq 3 ] && ck "present sink rows == swapchain readback (3 frames, strided)" ok || ck "present sink rows == swapchain readback (3 frames, strided)" no
+[ "$(grep -c '^VK ok acquire cycles' "$D/draw_ours.txt")" -eq 1 ] && [ "$(grep -c '^VK ok present counter' "$D/draw_ours.txt")" -eq 1 ] && ck "acquire cycles 3 images, present counter 3" ok || ck "acquire cycles 3 images, present counter 3" no
+[ "$(grep '^VK img wsi' "$D/draw_ours.txt" | awk '{print $4}' | sort -u | wc -l)" -eq 1 ] && ck "3 swapchain images render identical pixels" ok || ck "3 swapchain images render identical pixels" no
+[ "$(grep '^VK img wsi$\|^VK img wsi ' "$D/draw_ours.txt" | awk '{print $4}')" = "$(grep '^VK img fui ' "$D/draw_ours.txt" | awk '{print $4}')" ] && ck "swapchain frame hash == offscreen fui hash (byte identical)" ok || ck "swapchain frame hash == offscreen fui hash (byte identical)" no
+grep '^VK time wsi_frame_ms' "$D/draw_ours.txt"
+mutate_wsi() {
+    local name=$1 file=$2 expr=$3 pat=$4
+    rm -rf "$D/m"; mkdir -p "$D/m/out"; cp -r lib "$D/m/lib"
+    sed -i "$expr" "$D/m/lib/vulkan/$file"
+    if cmp -s "lib/vulkan/$file" "$D/m/lib/vulkan/$file"; then ck "wsi counter-proof $name: mutation applied" no; return; fi
+    FIRNLIB="$D/m/lib" $FIRNC --shared -o "$D/m/libvulkan.so.1" "$D/m/lib/vulkan/libvulkan.fi" > "$D/m/build.log" 2>&1 || { ck "wsi counter-proof $name: mutant builds" no; return; }
+    timeout 120 stdbuf -o0 "$D/draw" "$D/m/libvulkan.so.1" 0 "$D/m/out" "$D/spv" > "$D/m/out.txt" 2>&1
+    if grep -q "^VK FAIL $pat" "$D/m/out.txt"; then ck "wsi counter-proof $name: client reports FAIL $pat" ok; else ck "wsi counter-proof $name: mutant must fail $pat" no; fi
+}
+mutate_wsi "sink stride ignored" vkwsi.fi 's/let d: u64 = dst + y \* stride/let d: u64 = dst + y * w * 4 as u64/' "sink rows"
+mutate_wsi "present skips sink" vkwsi.fi 's/if dst == 0 as u64 { return }/return/' "sink rows"
+mutate_wsi "acquire does not advance" vkwsi.fi 's/(i + 1 as u64) % n)/i)/' "acquire cycles"
+mutate_wsi "present counter dropped" vkwsi.fi 's/S_PRESENTS) + 1 as u64)/S_PRESENTS))/' "present counter"
 mutate_draw() {
     local name=$1 file=$2 expr=$3
     rm -rf "$D/m"; mkdir -p "$D/m/out"; cp -r lib "$D/m/lib"

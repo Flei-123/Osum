@@ -5,7 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 
+typedef VkResult (VKAPI_PTR *PFN_vkOsumSetSurfaceSinkOSUM)(VkSurfaceKHR, void *, uint64_t);
+typedef uint64_t (VKAPI_PTR *PFN_vkOsumGetPresentCountOSUM)(VkSurfaceKHR);
 #define FNS(X) X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkAllocateMemory) X(vkMapMemory) X(vkCreateBuffer) X(vkGetBufferMemoryRequirements) X(vkBindBufferMemory) \
     X(vkCreateImage) X(vkGetImageMemoryRequirements) X(vkBindImageMemory) X(vkCreateCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) \
     X(vkCmdCopyBuffer) X(vkCmdCopyImageToBuffer) X(vkCmdCopyBufferToImage) X(vkCmdPipelineBarrier) X(vkCreateFence) X(vkQueueSubmit) X(vkWaitForFences) X(vkResetFences) \
@@ -112,6 +118,11 @@ static VkShaderModule load_shader(const char *name)
 
 typedef struct { const char *vs, *fs; VkFormat color, depth; int blend, depth_test, nattr, stride; VkFormat afmt[2]; uint32_t aoff[2]; VkPipelineLayout layout; int cull, cw, dopx, nowrite, stencil, inst; VkStencilOpState sf; } PipeDesc;
 static VkFormat g_sfmt = VK_FORMAT_UNDEFINED;
+static VkInstance g_inst;
+static int g_wsi;
+static VkPhysicalDevice g_pd;
+static PFN_vkGetInstanceProcAddr g_gipa;
+static PFN_vkGetDeviceProcAddr g_gdpa;
 static VkPipeline mkpipe(const PipeDesc *d)
 {
     VkPipelineShaderStageCreateInfo st[2] = {
@@ -495,24 +506,23 @@ static void scene3(const char *name, int kind)
     finish(&t, name, &rb);
 }
 
-static void case_fui(void)
+typedef struct { VkPipelineLayout lay; VkPipeline pipe; VkDescriptorSet sets[3]; Buf vb[3]; } FuiScene;
+
+static FuiScene fui_prepare(VkFormat fmt)
 {
-    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    FuiScene sc = {0};
     VkDescriptorSetLayout dsl;
-    VkPipelineLayout lay = mklayout(2, 0, &dsl);
-    PipeDesc d = { "fui_rect.vert", "fui_rect.frag", t.fmt, VK_FORMAT_UNDEFINED, 1, 0, 2, 24, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }, { 0, 8 }, lay };
-    VkPipeline p = mkpipe(&d);
-    check("pipeline fui", p != 0);
+    sc.lay = mklayout(2, 0, &dsl);
+    PipeDesc d = { "fui_rect.vert", "fui_rect.frag", fmt, VK_FORMAT_UNDEFINED, 1, 0, 2, 24, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }, { 0, 8 }, sc.lay };
+    sc.pipe = mkpipe(&d);
+    check("pipeline fui", sc.pipe != 0);
     struct { float box[4], clip[4], col[4], c1[3], grad[3]; } q[3] = {
         { { 0, 0, 64, 48 }, { 0, 0, 4096, 4096 }, { 30, 34, 48, 255 }, { 0, 0, 0 }, { 0, 0, 0 } },
         { { 5, 4, 58, 30 }, { 0, 0, 4096, 4096 }, { 80, 120, 200, 255 }, { 20, 40, 90 }, { 4, 30, 1 } },
         { { 12.5f, 10.25f, 50.75f, 40.5f }, { 0, 0, 4096, 4096 }, { 255, 200, 0, 160 }, { 0, 0, 0 }, { 0, 0, 0 } } };
-    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     enum { UB_STRIDE = 256 };
     Buf ubs = mkbuf(UB_STRIDE * 3, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     memset(ubs.p, 0xA5, UB_STRIDE * 3);
-    Buf vb[3];
-    VkDescriptorSet sets[3];
     for (int i = 0; i < 3; i++) {
         FuiU u = { { q[i].clip[0], q[i].clip[1], q[i].clip[2], q[i].clip[3] }, { q[i].box[0], q[i].box[1], q[i].box[2], q[i].box[3] },
             { q[i].c1[0], q[i].c1[1], q[i].c1[2], 255 }, { q[i].grad[0], q[i].grad[1], q[i].grad[2], 0 }, { W, H, 0, 0 } };
@@ -521,21 +531,180 @@ static void case_fui(void)
         x0 = (float)(int)x0; y0 = (float)(int)y0; x1 = (float)((int)x1 + (x1 > (int)x1)); y1 = (float)((int)y1 + (y1 > (int)y1));
         FuiV v[6] = { { x0, y0 }, { x1, y0 }, { x1, y1 }, { x0, y0 }, { x1, y1 }, { x0, y1 } };
         for (int k = 0; k < 6; k++) { v[k].r = q[i].col[0]; v[k].g = q[i].col[1]; v[k].b = q[i].col[2]; v[k].a = q[i].col[3]; }
-        vb[i] = mkvec(v, sizeof v, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        sets[i] = mkset(dsl, 2, 0, 0, ubs.b, (2 - i) * UB_STRIDE, sizeof(FuiU));
+        sc.vb[i] = mkvec(v, sizeof v, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+        sc.sets[i] = mkset(dsl, 2, 0, 0, ubs.b, (2 - i) * UB_STRIDE, sizeof(FuiU));
     }
+    return sc;
+}
+
+static void fui_record(FuiScene *sc, Target *t)
+{
     begin();
-    begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    begin_pass(t, 0.0f, 0.0f, 0.0f, 1.0f);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sc->pipe);
     set_vp(0, 0, W, H, 0, 0, W, H);
     for (int i = 0; i < 3; i++) {
         if (i == 2) set_vp(0, 0, W, H, 16, 12, 24, 16);
         VkDeviceSize off = 0;
-        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, lay, 0, 1, &sets[i], 0, 0);
-        vkCmdBindVertexBuffers(cb, 0, 1, &vb[i].b, &off);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, sc->lay, 0, 1, &sc->sets[i], 0, 0);
+        vkCmdBindVertexBuffers(cb, 0, 1, &sc->vb[i].b, &off);
         vkCmdDraw(cb, 6, 1, 0, 0);
     }
+}
+
+static void case_fui(void)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    FuiScene sc = fui_prepare(t.fmt);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    fui_record(&sc, &t);
     finish(&t, "fui", &rb);
+}
+
+
+static double now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static uint64_t fnv(const uint8_t *p, size_t n)
+{
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+
+static uint8_t *sink_map(size_t n, uint8_t **view2)
+{
+    long fd = syscall(SYS_memfd_create, "vksink", 0);
+    *view2 = 0;
+    if (fd >= 0 && ftruncate((int)fd, (off_t)n) == 0) {
+        uint8_t *a = mmap(0, n, PROT_READ | PROT_WRITE, MAP_SHARED, (int)fd, 0);
+        uint8_t *b = mmap(0, n, PROT_READ, MAP_SHARED, (int)fd, 0);
+        if (a != MAP_FAILED && b != MAP_FAILED) { *view2 = b; return a; }
+    }
+    uint8_t *m = calloc(1, n);
+    *view2 = m;
+    return m;
+}
+
+#define WSI_FRAMES 60
+
+static void case_wsi(void)
+{
+    PFN_vkCreateHeadlessSurfaceEXT mksurf = (PFN_vkCreateHeadlessSurfaceEXT)g_gipa(g_inst, "vkCreateHeadlessSurfaceEXT");
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR getsup = (PFN_vkGetPhysicalDeviceSurfaceSupportKHR)g_gipa(g_inst, "vkGetPhysicalDeviceSurfaceSupportKHR");
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR getcaps = (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)g_gipa(g_inst, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR getfmts = (PFN_vkGetPhysicalDeviceSurfaceFormatsKHR)g_gipa(g_inst, "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR getmodes = (PFN_vkGetPhysicalDeviceSurfacePresentModesKHR)g_gipa(g_inst, "vkGetPhysicalDeviceSurfacePresentModesKHR");
+    PFN_vkDestroySurfaceKHR killsurf = (PFN_vkDestroySurfaceKHR)g_gipa(g_inst, "vkDestroySurfaceKHR");
+    PFN_vkCreateSwapchainKHR mksc = (PFN_vkCreateSwapchainKHR)g_gdpa(dev, "vkCreateSwapchainKHR");
+    PFN_vkDestroySwapchainKHR killsc = (PFN_vkDestroySwapchainKHR)g_gdpa(dev, "vkDestroySwapchainKHR");
+    PFN_vkGetSwapchainImagesKHR getimgs = (PFN_vkGetSwapchainImagesKHR)g_gdpa(dev, "vkGetSwapchainImagesKHR");
+    PFN_vkAcquireNextImageKHR acquire = (PFN_vkAcquireNextImageKHR)g_gdpa(dev, "vkAcquireNextImageKHR");
+    PFN_vkQueuePresentKHR present = (PFN_vkQueuePresentKHR)g_gdpa(dev, "vkQueuePresentKHR");
+    check("wsi entry points", mksurf && getsup && getcaps && getfmts && getmodes && killsurf && mksc && killsc && getimgs && acquire && present);
+    if (!(mksurf && mksc && present)) return;
+    VkHeadlessSurfaceCreateInfoEXT hi = { .sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT };
+    VkSurfaceKHR surf = 0;
+    check("vkCreateHeadlessSurfaceEXT", mksurf(g_inst, &hi, 0, &surf) == VK_SUCCESS && surf);
+    VkBool32 sup = 0;
+    check("surface supports queue family 0", getsup(g_pd, 0, surf, &sup) == VK_SUCCESS && sup);
+    VkSurfaceCapabilitiesKHR caps;
+    check("surface capabilities", getcaps(g_pd, surf, &caps) == VK_SUCCESS && caps.minImageCount >= 1 && (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT));
+    uint32_t nf = 0, nm = 0;
+    getfmts(g_pd, surf, &nf, 0);
+    VkSurfaceFormatKHR fm[16];
+    if (nf > 16) nf = 16;
+    getfmts(g_pd, surf, &nf, fm);
+    int has_bgra = 0;
+    for (uint32_t i = 0; i < nf; i++) if (fm[i].format == VK_FORMAT_B8G8R8A8_UNORM) has_bgra = 1;
+    check("surface offers B8G8R8A8_UNORM", has_bgra);
+    getmodes(g_pd, surf, &nm, 0);
+    VkPresentModeKHR pm[8];
+    if (nm > 8) nm = 8;
+    getmodes(g_pd, surf, &nm, pm);
+    int has_fifo = 0;
+    for (uint32_t i = 0; i < nm; i++) if (pm[i] == VK_PRESENT_MODE_FIFO_KHR) has_fifo = 1;
+    check("surface offers FIFO", has_fifo);
+    VkSwapchainCreateInfoKHR sci = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = surf, .minImageCount = 3, .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
+        .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, .imageExtent = { W, H }, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR, .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE };
+    VkSwapchainKHR sc = 0;
+    check("vkCreateSwapchainKHR", mksc(dev, &sci, 0, &sc) == VK_SUCCESS && sc);
+    uint32_t ni = 0;
+    getimgs(dev, sc, &ni, 0);
+    VkImage imgs[16];
+    if (ni > 16) ni = 16;
+    getimgs(dev, sc, &ni, imgs);
+    check("swapchain has >= 3 images", ni >= 3);
+    if (ni < 3) return;
+    Target tg[16];
+    for (uint32_t i = 0; i < ni; i++) {
+        memset(&tg[i], 0, sizeof tg[i]);
+        tg[i].fmt = VK_FORMAT_B8G8R8A8_UNORM;
+        tg[i].color.i = imgs[i];
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = imgs[i], .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = tg[i].fmt, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        vkCreateImageView(dev, &vi, 0, &tg[i].color.v);
+    }
+    FuiScene scn = fui_prepare(VK_FORMAT_B8G8R8A8_UNORM);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    PFN_vkOsumSetSurfaceSinkOSUM setsink = (PFN_vkOsumSetSurfaceSinkOSUM)g_gipa(g_inst, "vkOsumSetSurfaceSinkOSUM");
+    PFN_vkOsumGetPresentCountOSUM getcount = (PFN_vkOsumGetPresentCountOSUM)g_gipa(g_inst, "vkOsumGetPresentCountOSUM");
+    enum { SINK_STRIDE = W * 4 + 16 };
+    uint8_t *sink_w = 0, *sink_r = 0;
+    if (setsink) {
+        sink_w = sink_map(SINK_STRIDE * H, &sink_r);
+        check("sink registered", setsink(surf, sink_w, SINK_STRIDE) == VK_SUCCESS);
+    }
+    const char *names[3] = { "wsi", "wsi1", "wsi2" };
+    unsigned seen = 0;
+    for (int f = 0; f < 3; f++) {
+        uint32_t idx = 99;
+        VkResult ar = acquire(dev, sc, 1000000000ull, 0, 0, &idx);
+        check("vkAcquireNextImageKHR", ar == VK_SUCCESS && idx < ni);
+        if (idx >= ni) return;
+        seen |= 1u << idx;
+        if (sink_w) memset(sink_w, 0xEE, SINK_STRIDE * H);
+        fui_record(&scn, &tg[idx]);
+        finish(&tg[idx], names[f], &rb);
+        begin();
+        transition(imgs[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        check("present layout transition", submit_wait());
+        VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &idx };
+        check("vkQueuePresentKHR", present(queue, &pi) == VK_SUCCESS);
+        if (sink_w) {
+            int same = 1, pad = 1;
+            uint8_t flat[W * H * 4];
+            for (int y = 0; y < H; y++) {
+                if (memcmp(sink_r + y * SINK_STRIDE, rb.p + y * W * 4, W * 4)) same = 0;
+                for (int k = W * 4; k < SINK_STRIDE; k++) if (sink_r[y * SINK_STRIDE + k] != 0xEE) pad = 0;
+                memcpy(flat + y * W * 4, sink_r + y * SINK_STRIDE, W * 4);
+            }
+            check("sink rows == swapchain readback", same);
+            check("sink padding untouched", pad);
+            printf("VK sink %s %016llx\n", names[f], (unsigned long long)fnv(flat, sizeof flat));
+        }
+    }
+    check("acquire cycles 3 distinct images", __builtin_popcount(seen) == 3);
+    if (getcount) check("present counter == 3", getcount(surf) == 3);
+    double t0 = now_ms();
+    for (int f = 0; f < WSI_FRAMES; f++) {
+        uint32_t idx = 0;
+        acquire(dev, sc, 1000000000ull, 0, 0, &idx);
+        fui_record(&scn, &tg[idx]);
+        vkCmdEndRendering(cb);
+        transition(imgs[idx], VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        submit_wait();
+        VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &idx };
+        present(queue, &pi);
+    }
+    printf("VK time wsi_frame_ms %.3f\n", (now_ms() - t0) / WSI_FRAMES);
+    killsc(dev, sc, 0);
+    killsurf(g_inst, surf, 0);
 }
 
 int main(int argc, char **argv)
@@ -550,9 +719,16 @@ int main(int argc, char **argv)
     PFN_vkGetInstanceProcAddr gipa = (PFN_vkGetInstanceProcAddr)dlsym(h, "vkGetInstanceProcAddr");
     PFN_vkCreateInstance ci = (PFN_vkCreateInstance)gipa(0, "vkCreateInstance");
     VkApplicationInfo app = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_3 };
-    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app };
+    const char *iexts[2] = { "VK_KHR_surface", "VK_EXT_headless_surface" };
+    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app, .enabledExtensionCount = 2, .ppEnabledExtensionNames = iexts };
     VkInstance inst = 0;
-    check("vkCreateInstance", ci(&ici, 0, &inst) == VK_SUCCESS && inst);
+    g_wsi = ci(&ici, 0, &inst) == VK_SUCCESS && inst;
+    if (!g_wsi) {
+        ici.enabledExtensionCount = 0;
+        inst = 0;
+        printf("VK note no headless surface support, wsi scene skipped\n");
+    }
+    check("vkCreateInstance", (g_wsi || ci(&ici, 0, &inst) == VK_SUCCESS) && inst);
     PFN_vkEnumeratePhysicalDevices enumpd = (PFN_vkEnumeratePhysicalDevices)gipa(inst, "vkEnumeratePhysicalDevices");
     PFN_vkGetPhysicalDeviceProperties getprops = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
     PFN_vkGetPhysicalDeviceMemoryProperties getmp = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(inst, "vkGetPhysicalDeviceMemoryProperties");
@@ -562,12 +738,17 @@ int main(int argc, char **argv)
     VkPhysicalDevice pds[8];
     enumpd(inst, &n, pds);
     VkPhysicalDevice pd = pds[0];
+    g_gipa = gipa;
+    g_gdpa = gdpa;
+    g_inst = inst;
     if (mode == 1) for (uint32_t i = 0; i < n; i++) { VkPhysicalDeviceProperties p; getprops(pds[i], &p); if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) pd = pds[i]; }
+    g_pd = pd;
     getmp(pd, &mp);
     float prio = 1.0f;
     VkDeviceQueueCreateInfo dq = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
     VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE };
-    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f13, .queueCreateInfoCount = 1, .pQueueCreateInfos = &dq };
+    const char *dexts[1] = { "VK_KHR_swapchain" };
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f13, .queueCreateInfoCount = 1, .pQueueCreateInfos = &dq, .enabledExtensionCount = g_wsi ? 1 : 0, .ppEnabledExtensionNames = dexts };
     check("vkCreateDevice", createdev(pd, &dci, 0, &dev) == VK_SUCCESS && dev);
 #define LOADFN(n) n = (PFN_##n)gdpa(dev, #n); if (!n) { printf("VK FAIL missing " #n "\n"); bad++; }
     FNS(LOADFN)
@@ -592,6 +773,7 @@ int main(int argc, char **argv)
     case_area();
     case_depth();
     case_fui();
+    if (g_wsi) case_wsi();
     scene3("cull", 0);
     scene3("cullfront", 5);
     scene3("dops", 1);
