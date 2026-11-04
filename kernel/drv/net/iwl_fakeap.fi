@@ -104,6 +104,7 @@ static mut ft_lastack: u64 = 0
 static mut ft_dupack: u64 = 0
 static mut ft_lost_end: u64 = 0
 static mut ft_recover: u64 = 0
+static mut ft_wnd: u64 = 0
 static mut fh_on: u64 = 0
 static mut fh_off: u64 = 0
 static mut fh_len: u64 = 0
@@ -515,13 +516,20 @@ fn window_limit() -> u64 {
     return TCP_WINDOW
 }
 
+fn can_send(n: u64) -> bool {
+    let out: u64 = ft_sent - ft_acked
+    if out >= window_limit() { return false }
+    return out + n <= ft_wnd
+}
+
 fn tcp_pump(want_ack: bool) {
     let total: u64 = iwl_fakeap_frames.stream_total()
     var sent_now: u64 = 0
     if ft_req != 0 && ft_hold == 0 {
-        while ft_sent < total && ft_sent - ft_acked < window_limit() && sent_now < TCP_BURST {
+        while ft_sent < total && sent_now < TCP_BURST {
             var n: u64 = total - ft_sent
             if n > TCP_SEG { n = TCP_SEG }
+            if !can_send(n) { break }
             send_data(ft_sent, n)
             ft_sent = ft_sent + n
             sent_now = sent_now + 1
@@ -565,6 +573,7 @@ fn on_tcp(ip: *mut llc.Ipv4) {
         ft_dupack = 0
         ft_lost_end = 0
         ft_recover = 0
+        ft_wnd = t.window
         fh_on = 0
         fb_n = 0
         bump(STAT_TCP)
@@ -576,12 +585,14 @@ fn on_tcp(ip: *mut llc.Ipv4) {
     if ft_on == 0 || t.source != ft_cport || (*ip).source != ft_cip { return }
     var need_ack: bool = false
     let acked_before: u64 = ft_acked
+    let wnd_before: u64 = ft_wnd
+    if (t.flags & 16) != 0 { ft_wnd = t.window }
     if (t.flags & 16) != 0 && t.ack > TCP_ISN + 1 {
         var a: u64 = t.ack - TCP_ISN - 1
         if a > ft_sent { a = ft_sent }
         if a > ft_acked { ft_acked = a }
     }
-    if t.payload_len == 0 && (t.flags & 3) == 0 && ft_acked == acked_before && ft_sent > ft_acked {
+    if t.payload_len == 0 && (t.flags & 3) == 0 && ft_acked == acked_before && ft_wnd == wnd_before && ft_sent > ft_acked {
         ft_dupack = ft_dupack + 1
         if fk_noretx == 0 && ((ft_dupack >= DUPACK_RETX && ft_acked >= ft_recover) || ft_dupack >= DUPACK_STUCK) {
             ft_dupack = 0
