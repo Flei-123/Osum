@@ -115,6 +115,12 @@ const KA_CNT: u64 = 3
 
 const NOHANDLE: u64 = 0xFFFFFFFF
 
+const UDP_HANDLES: u64 = 4
+
+const EPHEMERAL_BASE: u64 = 40000
+
+const EPHEMERAL_MASK: u64 = 4095
+
 const PUMP_BATCH: u64 = 32
 
 const HOT_TURNS: u64 = 4000
@@ -1009,9 +1015,20 @@ fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
     if port > 65535 {
         return errno.neg(errno.E_INVAL)
     }
+    var bound: u64 = port
     if k == SK_UDP {
         let flags: u64 = hold(state)
-        let h: i32 = stack.udp_bind(st(state), (port & 0xFFFF) as u16)
+        var h: i32 = 0 - 1
+        if port == 0 {
+            var tries: u64 = 0
+            while h < 0 && tries < 64 {
+                bound = EPHEMERAL_BASE + (kstate.add(state, sc(S_SEQ), 1) & EPHEMERAL_MASK)
+                h = stack.udp_bind(st(state), (bound & 0xFFFF) as u16)
+                tries = tries + 1
+            }
+        } else {
+            h = stack.udp_bind(st(state), (port & 0xFFFF) as u16)
+        }
         let ep: u64 = in_epoch
         drop_lock(state, flags)
         if h < 0 {
@@ -1019,8 +1036,8 @@ fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
         }
         h_store(state, i, h as u64, ep)
     }
-    kstate.set(state, so_at(i) + SO_PORT, port)
-    netmon.sset(state, i, netmon.S_LPORT, port)
+    kstate.set(state, so_at(i) + SO_PORT, bound)
+    netmon.sset(state, i, netmon.S_LPORT, bound)
     return 0
 }
 
@@ -1220,6 +1237,20 @@ fn sock_error(state: u64, i: u64) -> u64 {
     return 0
 }
 
+fn udp_queued(state: u64, h: u64) -> u64 {
+    if h >= UDP_HANDLES {
+        return 0
+    }
+    let flags: u64 = hold(state)
+    let s: *mut stack.Stack = st(state)
+    var n: u64 = 0
+    if (*s).udp_used[h as usize] == 1 && (*s).udp_head[h as usize] != (*s).udp_tail[h as usize] {
+        n = 1
+    }
+    drop_lock(state, flags)
+    return n
+}
+
 fn sock_readable(state: u64, i: u64) -> u64 {
     let h: u64 = sock_handle(state, i)
     let k: u64 = sock_kind(state, i)
@@ -1229,6 +1260,9 @@ fn sock_readable(state: u64, i: u64) -> u64 {
                 - kstate.get(state, sc(S_ICMP_HEAD))
         }
         return 0
+    }
+    if k == SK_UDP {
+        return udp_queued(state, h)
     }
     if k != SK_TCP {
         return 0
@@ -1378,9 +1412,11 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
     }
     var sport: u64 = kstate.get(state, so_at(i) + SO_PORT)
     if sport == 0 {
-        sport = 40000 + (kstate.add(state, sc(S_SEQ), 1) & 4095)
-        kstate.set(state, so_at(i) + SO_PORT, sport)
-        netmon.sset(state, i, netmon.S_LPORT, sport)
+        let br: u64 = sock_bind(state, i, 0)
+        if errno.is_error(br) {
+            return br
+        }
+        sport = kstate.get(state, so_at(i) + SO_PORT)
     }
     netmon.sset(state, i, netmon.S_RADDR, addr)
     netmon.sset(state, i, netmon.S_RPORT, port)
