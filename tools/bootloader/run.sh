@@ -39,8 +39,20 @@ error_case() {
 }
 
 login_case eq35 q35 ehci "OVMF q35 + EHCI stick"
+grep -aq "rootsel: usb -- WURZEL" "$D/eq35.txt" && ok "EHCI stick: root taken from the USB partition" || bad "EHCI stick: root not on USB"
+login_case ex35 q35 xhci "OVMF q35 + xHCI-only stick"
+grep -aq "rootsel: usb -- WURZEL" "$D/ex35.txt" && ok "xHCI stick: root taken from the USB partition" || bad "xHCI stick: root not on USB"
+grep -aq "usb: port=[0-9]* .*driver=msc" "$D/ex35.txt" && ok "xHCI stick: mass storage bound by xHCI" || bad "xHCI stick: xHCI did not bind the stick"
 login_case eide pc ide "OVMF i440fx + IDE disk"
 login_case envme q35 nvme "OVMF q35 + NVMe disk"
+
+echo "== counter-proof: xHCI stick without the usb word has no root =="
+sed '0,/^cmdline .*/s/ usb / /' "$D/osboot.cfg" > "$D/nousb.cfg"
+osb_with_cfg "$D" nousb "$D/nousb.cfg"
+OSB_TAIL=3 osb_boot "$D" nousb "$D/nousb.base" q35 xhci 60 "no device carries a root"
+rm -f "$D/nousb.base"
+grep -aq "no device carries a root" "$D/nousb.txt" && ok "no usb word: no root found" || bad "no usb word: root found anyway"
+grep -aq "$LOGIN" "$D/nousb.txt" && bad "no usb word: login reached" || ok "no usb word: no login"
 
 python3 tools/bootloader/mkcfg.py "$D/limine.conf" "$D/single.cfg" --timeout 0 --entries 1 > /dev/null
 sed '2a bogus value' "$D/single.cfg" > "$D/broken.cfg"

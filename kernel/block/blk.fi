@@ -960,7 +960,9 @@ const C_RUNS: u64 = 0x228
 // r1181: ways 8..15 live in a lazily allocated frame run (the fixed data page of the cache, BLKD, has room for eight only).
 const C_XDATA: u64 = 0x258 // address of the extra data (8 ways * 4 KiB), 0 = not (yet) there
 const C_XTRIED: u64 = 0x260 // 1 once an allocation was tried (no retry storm when memory is short)
-const XWAYS: u64 = 8 // extra ways
+const XWAYS: u64 = 248
+const INLINE_WAYS: u64 = 16
+const XMETA_BYTES: u64 = 8192
 
 fn cg(state: u64, off: u64) -> u64 {
     return __mmio_read64((state + kstate.BLKC_OFF + off) as *mut u64)
@@ -970,12 +972,19 @@ fn cs(state: u64, off: u64, v: u64) {
     __mmio_write64((state + kstate.BLKC_OFF + off) as *mut u64, v)
 }
 
+fn way_cell(state: u64, way: u64, off: u64) -> *mut u64 {
+    if way < INLINE_WAYS {
+        return (state + kstate.BLKC_OFF + way * C_STRIDE + off) as *mut u64
+    }
+    return (cg(state, C_XDATA) + XWAYS * kstate.BLKC_SECTORS * BLOCK_SIZE + (way - INLINE_WAYS) * C_STRIDE + off) as *mut u64
+}
+
 fn wg(state: u64, way: u64, off: u64) -> u64 {
-    return cg(state, way * C_STRIDE + off)
+    return __mmio_read64(way_cell(state, way, off))
 }
 
 fn ws(state: u64, way: u64, off: u64, v: u64) {
-    cs(state, way * C_STRIDE + off, v)
+    __mmio_write64(way_cell(state, way, off), v)
 }
 
 fn gone_data(state: u64, way: u64) -> u64 {
@@ -1073,16 +1082,16 @@ fn cache_grow(state: u64) {
         return
     }
     cs(state, C_XTRIED, 1)
-    let b: u64 = mem.frame_run(state, XWAYS * kstate.BLKC_SECTORS * BLOCK_SIZE / 4096)
+    let b: u64 = mem.frame_run(state, (XWAYS * kstate.BLKC_SECTORS * BLOCK_SIZE + XMETA_BYTES) / 4096)
     if b == 0 {
         return
     }
+    cs(state, C_XDATA, b)
     var w: u64 = kstate.BLKC_WAYS
     while w < kstate.BLKC_WAYS + XWAYS {
         ws(state, w, C_VALID, 0)
         w = w + 1
     }
-    cs(state, C_XDATA, b)
 }
 
 fn cache_invalidate(state: u64) {
@@ -1105,7 +1114,7 @@ fn cache_drop(state: u64, dev: u64, lba: u64) {
     cs(state, S_VALID, 0)
     var w: u64 = 0
     while w < ways(state) {
-        if wg(state, w, C_VALID) == 1 {
+        if wg(state, w, C_VALID) != 0 {
             let c0: u64 = wg(state, w, C_LBA)
             if wg(state, w, C_DEV) != dev || (lba >= c0 && lba < c0 + wg(state, w, C_N)) {
                 ws(state, w, C_VALID, 0)
@@ -1311,6 +1320,25 @@ fn dev_read_one(state: u64, dev: u64, lba: u64, dst: u64) -> bool {
     return ata_read_twice(lba, dst, dev == DEV_ATA1)
 }
 
+fn clock_victim(state: u64) -> u64 {
+    let total: u64 = ways(state)
+    var tries: u64 = 0
+    var hand: u64 = cg(state, C_NEXT) % total
+    while tries < total * 2 {
+        let v: u64 = wg(state, hand, C_VALID)
+        let here: u64 = hand
+        hand = (hand + 1) % total
+        if v != 2 {
+            cs(state, C_NEXT, hand)
+            return here
+        }
+        ws(state, here, C_VALID, 1)
+        tries = tries + 1
+    }
+    cs(state, C_NEXT, hand)
+    return hand
+}
+
 fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool {
     dma_up(state)
     cache_grow(state)
@@ -1323,9 +1351,10 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     }
     var w: u64 = 0
     while w < ways(state) {
-        if wg(state, w, C_VALID) == 1 && wg(state, w, C_DEV) == dev {
+        if wg(state, w, C_VALID) != 0 && wg(state, w, C_DEV) == dev {
             let c0: u64 = wg(state, w, C_LBA)
             if lba >= c0 && lba < c0 + wg(state, w, C_N) {
+                ws(state, w, C_VALID, 2)
                 cs(state, C_HITS, cg(state, C_HITS) + 1)
                 cs(state, C_LAST, lba)
                 copy(gone_data(state, w) + (lba - c0) * BLOCK_SIZE, dst)
@@ -1337,8 +1366,7 @@ fn ata_read_cached(state: u64, lba: u64, dst: u64, dev: u64, ende: u64) -> bool 
     cs(state, C_MISSES, cg(state, C_MISSES) + 1)
     // KEINE SPURERKENNUNG -- ACHT PLAETZE STATTDESSEN. GEMESSEN:
     cs(state, C_RUNS, cg(state, C_RUNS) + 1)
-    let target: u64 = cg(state, C_NEXT) % ways(state)
-    cs(state, C_NEXT, target + 1)
+    let target: u64 = clock_victim(state)
     let data: u64 = gone_data(state, target)
     var n: u64 = kstate.BLKC_SECTORS
     if ende > lba && ende - lba < n {
