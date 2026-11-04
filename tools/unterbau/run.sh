@@ -115,7 +115,7 @@ boot() { # boot <kernel> <disk> <script> <serial-out>
 run_all() { # run_all <kernel> <disk> <tag>
     for t in $TESTS; do
         local ka="" na=""
-        [ "$t" = t_events ] && { ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0"; }
+        case "$t" in t_events|t_udpnet) ka="nic nip=10.0.2.15/24 ngw=10.0.2.2"; na="-netdev user,id=n0 -device virtio-net-pci,netdev=n0";; esac
         local t0=$SECONDS tv="TMO_$t"
         TMO=${!tv:-$TMO} KARGS="$ka" NETARGS="$na" boot "$1" "$2" "/bin/$t" "$D/$3-$t.ser"; rc=$?
         local el=$((SECONDS-t0))
