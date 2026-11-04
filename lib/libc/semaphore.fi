@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: MIT
+import libc.locks
+import libc.errno
+
+export { init, post, wait, try_wait, timed_wait, value, waiters }
+
+const COUNT_MASK: u64 = 0xFFFFFFFF
+const WAITER_ONE: u64 = 0x100000000
+const COUNT_MAX: u64 = 0x7FFFFFFF
+
+fn init(p: u64, count: u64) {
+    locks.store(p, count & COUNT_MASK)
+}
+
+fn value(p: u64) -> u64 {
+    return locks.load(p) & COUNT_MASK
+}
+
+fn waiters(p: u64) -> u64 {
+    return locks.load(p) >> 32
+}
+
+fn post(p: u64) -> bool {
+    while true {
+        let v: u64 = locks.load(p)
+        if (v & COUNT_MASK) >= COUNT_MAX {
+            return false
+        }
+        if locks.cas(p, v, v + 1) == v {
+            if (v >> 32) != 0 {
+                locks.futex_wake(p, 1)
+            }
+            return true
+        }
+    }
+    return false
+}
+
+fn try_wait(p: u64) -> bool {
+    while true {
+        let v: u64 = locks.load(p)
+        if (v & COUNT_MASK) == 0 {
+            return false
+        }
+        if locks.cas(p, v, v - 1) == v {
+            return true
+        }
+    }
+    return false
+}
+
+fn wait(p: u64) {
+    while true {
+        let v: u64 = locks.load(p)
+        if (v & COUNT_MASK) != 0 {
+            if locks.cas(p, v, v - 1) == v {
+                return
+            }
+        } else {
+            if locks.cas(p, v, v + WAITER_ONE) == v {
+                locks.futex_wait(p, 0)
+                locks.fetch_add(p, 0 -% WAITER_ONE)
+            }
+        }
+    }
+}
+
+fn timed_wait(p: u64, timeout_ns: u64) -> u64 {
+    let deadline: u64 = locks.deadline_after(timeout_ns)
+    while true {
+        let v: u64 = locks.load(p)
+        if (v & COUNT_MASK) != 0 {
+            if locks.cas(p, v, v - 1) == v {
+                return 0
+            }
+        } else {
+            let left: u64 = locks.remaining(deadline)
+            if left == 0 {
+                return errno.E_TIMEDOUT
+            }
+            if locks.cas(p, v, v + WAITER_ONE) == v {
+                locks.futex_wait_ns(p, 0, left)
+                locks.fetch_add(p, 0 -% WAITER_ONE)
+            }
+        }
+    }
+    return errno.E_TIMEDOUT
+}

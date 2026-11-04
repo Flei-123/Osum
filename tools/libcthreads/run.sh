@@ -13,11 +13,11 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-PROGS="sh echo thrprobe"
+PROGS="sh echo sleep thrprobe threxit"
 
 echo "== build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-mkdir -p "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin"
+mkdir -p "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/noexitbin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else sed 's/^/        /' "$TMPD/b.txt" | head -20; bad "programs do not build"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; fi
 cp -r lib "$TMPD/badlib"
 sed -i 's/while tid != 0 {/while false {/' "$TMPD/badlib/libc/threads.fi"
@@ -25,6 +25,14 @@ cp -r lib "$TMPD/notlslib"
 sed -i 's/CLONE_THREAD | CLONE_SYSVSEM | CLONE_SETTLS |/CLONE_THREAD | CLONE_SYSVSEM |/' "$TMPD/notlslib/libc/threads.fi"
 cp -r lib "$TMPD/nocvlib"
 sed -i 's/^    futex_wait(cv, seq)$/    load(cv)/' "$TMPD/nocvlib/libc/locks.fi"
+cp -r lib "$TMPD/nosemlib"
+sed -i 's/locks.futex_wake(p, 1)/locks.load(p)/' "$TMPD/nosemlib/libc/semaphore.fi"
+cp -r lib "$TMPD/noexitlib"
+sed -i 's/kcall.sys1(kcall.SYS_EXIT_GROUP, result)/kcall.sys1(kcall.SYS_EXIT, result)/' "$TMPD/noexitlib/libc/threads.fi"
+if cmp -s lib/libc/semaphore.fi "$TMPD/nosemlib/libc/semaphore.fi"; then bad "counter-proof no-semaphore-wake mutation did not apply"; fi
+if cmp -s lib/libc/threads.fi "$TMPD/noexitlib/libc/threads.fi"; then bad "counter-proof no-exit-group mutation did not apply"; fi
+if FIRNLIB="$TMPD/nosemlib" bash tools/sync/build.sh "$TMPD/nosemlib_bin" 0 thrprobe > "$TMPD/ns.txt" 2>&1; then ok "counter-proof no-semaphore-wake program builds"; else bad "counter-proof no-semaphore-wake program does not build"; fi
+if FIRNLIB="$TMPD/noexitlib" bash tools/sync/build.sh "$TMPD/noexitbin" 0 threxit > "$TMPD/ne.txt" 2>&1; then ok "counter-proof no-exit-group program builds"; else bad "counter-proof no-exit-group program does not build"; fi
 if cmp -s lib/libc/locks.fi "$TMPD/nocvlib/libc/locks.fi"; then bad "counter-proof no-condvar-futex mutation did not apply"; fi
 if FIRNLIB="$TMPD/nocvlib" bash tools/sync/build.sh "$TMPD/nocvbin" 0 thrprobe > "$TMPD/nc.txt" 2>&1; then ok "counter-proof no-condvar-futex program builds"; else bad "counter-proof no-condvar-futex program does not build"; fi
 if cmp -s lib/libc/threads.fi "$TMPD/notlslib/libc/threads.fi"; then bad "counter-proof no-TLS mutation did not apply"; fi
@@ -41,6 +49,14 @@ if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then o
     echo "thrprobe_notls"
     echo "echo ==NOCV=="
     echo "thrprobe_nocv"
+    echo "echo ==NOSEM=="
+    echo "thrprobe_nosem"
+    echo "echo ==EXITGOOD=="
+    echo "threxit"
+    echo "sleep 3"
+    echo "echo ==EXITBAD=="
+    echo "threxit_bad"
+    echo "sleep 3"
     echo "echo ==END=="
 } > "$TMPD/s.sh"
 {
@@ -52,6 +68,8 @@ A=(build "$TMPD/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /etc/)
 for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 [ -f "$TMPD/badbin/thrprobe.elf" ] && A+=("/bin/thrprobe_bad=$TMPD/badbin/thrprobe.elf")
 [ -f "$TMPD/nocvbin/thrprobe.elf" ] && A+=("/bin/thrprobe_nocv=$TMPD/nocvbin/thrprobe.elf")
+[ -f "$TMPD/nosemlib_bin/thrprobe.elf" ] && A+=("/bin/thrprobe_nosem=$TMPD/nosemlib_bin/thrprobe.elf")
+[ -f "$TMPD/noexitbin/threxit.elf" ] && A+=("/bin/threxit_bad=$TMPD/noexitbin/threxit.elf")
 [ -f "$TMPD/notlsbin/thrprobe.elf" ] && A+=("/bin/thrprobe_notls=$TMPD/notlsbin/thrprobe.elf")
 A+=("/t/s.sh=$TMPD/s.sh" "/t/s2.sh=$TMPD/s2.sh")
 bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; }
@@ -76,7 +94,10 @@ tr -cd '\11\12\15\40-\176' < "$TMPD/out2.txt" > "$TMPD/out2.klar" 2>/dev/null ||
 good=$(sed -n '/==GOOD==/,/==BAD==/p' "$TMPD/out.klar")
 badout=$(sed -n '/==BAD==/,/==NOTLS==/p' "$TMPD/out.klar")
 notlsout=$(sed -n '/==NOTLS==/,/==NOCV==/p' "$TMPD/out.klar")
-nocvout=$(sed -n '/==NOCV==/,/==END==/p' "$TMPD/out.klar")
+nocvout=$(sed -n '/==NOCV==/,/==NOSEM==/p' "$TMPD/out.klar")
+nosemout=$(sed -n '/==NOSEM==/,/==EXITGOOD==/p' "$TMPD/out.klar")
+exitgood=$(sed -n '/==EXITGOOD==/,/==EXITBAD==/p' "$TMPD/out.klar")
+exitbad=$(sed -n '/==EXITBAD==/,/==END==/p' "$TMPD/out.klar")
 latout=$(sed -n '/==LAT==/,/==END==/p' "$TMPD/out2.klar")
 echo "$good" | grep -aq 'thrprobe failed=0' && echo "$good" | grep -aq 'thrprobe done' \
     && ok "guest: threads suite passed ($(echo "$good" | grep -a 'thrprobe passed=' | tr -d '\r'))" \
@@ -101,6 +122,21 @@ if echo "$latout" | grep -aq 'thrprobe latency bad'; then
     ok "guest: counter-proof (kernel without clear-tid wake) is caught ($(echo "$latout" | grep -a 'latency_ticks' | tr -d '\r'))"
 else
     bad "guest: counter-proof (kernel without clear-tid wake) not caught"
+fi
+if echo "$nosemout" | grep -aq 'thrprobe failed=0'; then
+    bad "guest: counter-proof (semaphore post without wake) still passed"
+else
+    echo "$nosemout" | grep -aq 'thrprobe done' && ok "guest: counter-proof (semaphore post without wake) is caught" || bad "guest: counter-proof no-semaphore-wake run incomplete"
+fi
+if echo "$exitgood" | grep -aq 'threxit dtor' && ! echo "$exitgood" | grep -aq 'threxit late'; then
+    ok "guest: main-thread thread_exit runs destructors and exit_group kills the sibling"
+else
+    echo "$exitgood" | tail -6 | sed 's/^/        /'; bad "guest: main-thread thread_exit semantics wrong"
+fi
+if echo "$exitbad" | grep -aq 'threxit late'; then
+    ok "guest: counter-proof (plain exit in the main thread) is caught"
+else
+    bad "guest: counter-proof (plain exit in the main thread) not caught"
 fi
 echo; echo "LIBC-GUEST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

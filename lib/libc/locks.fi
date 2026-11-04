@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 import libc.kcall
+import libc.errno
 
-export { load, store, cas, fetch_add, spin_try, spin_take, spin_give, mutex_try, mutex_take, mutex_give, cond_wait, cond_signal, cond_broadcast, futex_wait, futex_wake }
+export { load, store, cas, fetch_add, spin_try, spin_take, spin_give, mutex_try, mutex_take, mutex_give, cond_wait, cond_signal, cond_broadcast, futex_wait, futex_wake,
+    futex_wait_ns, now_ns, deadline_after, remaining, timed_out, cond_timedwait, mutex_timedlock, WAKE_ALL }
 
 const FUTEX_WAIT: u64 = 128
 const FUTEX_WAKE: u64 = 129
 const WAKE_ALL: u64 = 0x7FFFFFFF
 const WORD_MASK: u64 = 0xFFFFFFFF
+const CLOCK_MONOTONIC: u64 = 1
+const NS_PER_SEC: u64 = 1000000000
+const MAX_WAIT_NS: u64 = 1000000000000000
 
 fn cas(p: u64, expect: u64, want: u64) -> u64 {
     return __atomic_swap(p as *mut u64, expect, want)
@@ -56,6 +61,43 @@ fn futex_wake(p: u64, count: u64) -> u64 {
     return kcall.sys4(kcall.SYS_FUTEX, p, FUTEX_WAKE, count, 0)
 }
 
+fn now_ns() -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    kcall.sys2(kcall.SYS_CLOCK_GETTIME, CLOCK_MONOTONIC, (&ts[0]) as u64)
+    return ts[0] * NS_PER_SEC + ts[1]
+}
+
+fn deadline_after(timeout_ns: u64) -> u64 {
+    var span: u64 = timeout_ns
+    if span > MAX_WAIT_NS {
+        span = MAX_WAIT_NS
+    }
+    return now_ns() + span
+}
+
+fn remaining(deadline: u64) -> u64 {
+    let now: u64 = now_ns()
+    if now >= deadline {
+        return 0
+    }
+    return deadline - now
+}
+
+fn timed_out(result: u64) -> bool {
+    return result == 0 -% errno.E_TIMEDOUT
+}
+
+fn futex_wait_ns(p: u64, expect: u64, timeout_ns: u64) -> u64 {
+    var ts: [u64; 2] = [0 as u64; 2]
+    var span: u64 = timeout_ns
+    if span > MAX_WAIT_NS {
+        span = MAX_WAIT_NS
+    }
+    ts[0] = span / NS_PER_SEC
+    ts[1] = span % NS_PER_SEC
+    return kcall.sys4(kcall.SYS_FUTEX, p, FUTEX_WAIT, expect, (&ts[0]) as u64)
+}
+
 fn mutex_try(p: u64) -> bool {
     return cas(p, 0, 1) == 0
 }
@@ -99,4 +141,40 @@ fn cond_signal(cv: u64) {
 fn cond_broadcast(cv: u64) {
     fetch_add(cv, 1)
     futex_wake(cv, WAKE_ALL)
+}
+
+fn cond_timedwait(cv: u64, mutex: u64, timeout_ns: u64) -> u64 {
+    let seq: u64 = load(cv) & WORD_MASK
+    mutex_give(mutex)
+    let r: u64 = futex_wait_ns(cv, seq, timeout_ns)
+    mutex_take(mutex)
+    if timed_out(r) {
+        return errno.E_TIMEDOUT
+    }
+    return 0
+}
+
+fn mutex_timedlock(p: u64, timeout_ns: u64) -> u64 {
+    var seen: u64 = cas(p, 0, 1)
+    if seen == 0 {
+        return 0
+    }
+    let deadline: u64 = deadline_after(timeout_ns)
+    while true {
+        if seen == 2 || cas(p, 1, 2) != 0 {
+            let left: u64 = remaining(deadline)
+            if left == 0 {
+                return errno.E_TIMEDOUT
+            }
+            futex_wait_ns(p, 2, left)
+        }
+        seen = cas(p, 0, 2)
+        if seen == 0 {
+            return 0
+        }
+        if remaining(deadline) == 0 {
+            return errno.E_TIMEDOUT
+        }
+    }
+    return errno.E_TIMEDOUT
 }
