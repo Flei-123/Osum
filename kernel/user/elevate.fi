@@ -1,57 +1,65 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// kernel/user/elevate.fi -- ROUND SESSUID3: /bin/elevate, the consent door to root.
-//
-//   elevate <path> [args...]    ask "allow <programme> to change the system?"; on Allow start <path> as root
-//
-// The start menu and the bar run as root but start everything for the signed-in person as that person
-// (ulib.spawn_user). The few programmes that change the system for everybody (see ulib.needs_root) are
-// started as `elevate <path>` instead, with the root identity (ulib.spawn_priv, kernel syscall 1005 mode 1).
-// Nothing runs as root before the person pressed Allow. Cancel (or closing the window) starts nothing.
-// Without a session (login screen, images without sign-in) there is nobody to ask: start at once.
-
-profile app
+profile kernel
 
 import ulib
 import lineout
-import fuiscene
-import msg
+import consent
+import libc.octets
 
 export { u_start }
 
-const K_ALLOW: u64 = 1
-const K_DENY: u64 = 2
-
-static mut k_title: [u8; 14] = "elevate.title\0"
-static mut k_text: [u8; 13] = "elevate.text\0"
-static mut k_allow: [u8; 14] = "elevate.allow\0"
-static mut k_deny: [u8; 13] = "elevate.deny\0"
-
-// the programme path and its arguments (kept for the Allow click)
 static mut target: [u8; 160] = [0 as u8; 160]
+static mut base: [u8; 40] = [0 as u8; 40]
+static mut args_text: [u8; 200] = [0 as u8; 200]
 static mut t_args: [u64; 8] = [0 as u64; 8]
 static mut t_argc: u64 = 0
+
+static mut s_action: [u8; 15] = "system.elevate\0"
+static mut s_name: [u8; 6] = "name=\0"
+static mut s_path: [u8; 7] = "\npath=\0"
 
 fn say(p: u64) {
     lineout.add_text(p)
 }
 
-fn build() {
-    let col: usize = fuiscene.root()
-    let _h: usize = fuiscene.label(col, msg.get((&k_title[0 as usize]) as u64))
-    let t: usize = fuiscene.label_wrap(col, msg.get((&k_text[0 as usize]) as u64), 12)
-    fuiscene.set_size(t, 0, 0)
-    let _p: usize = fuiscene.label(col, (&target[0 as usize]) as u64)
-    let bar: usize = fuiscene.row(col)
-    fuiscene.set_gap(bar, 8)
-    let b1: usize = fuiscene.button_main(bar, msg.get((&k_allow[0 as usize]) as u64), K_ALLOW)
-    fuiscene.set_noshrink(b1)
-    fuiscene.set_size(b1, 140, 36)
-    let b2: usize = fuiscene.button(bar, msg.get((&k_deny[0 as usize]) as u64), K_DENY)
-    fuiscene.set_noshrink(b2)
-    fuiscene.set_size(b2, 120, 36)
+fn append(dst: u64, at: u64, src: u64, max: u64) -> u64 {
+    var n: u64 = at
+    var i: u64 = 0
+    while octets.ld8(src, i) != 0 && n + 1 < max {
+        octets.st8(dst, n, octets.ld8(src, i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(dst, n, 0)
+    return n
 }
 
-// start the target as root (ulib.spawn_priv); returns the pid or an error value
+fn basename_of(path: u64) {
+    var last: u64 = 0
+    var i: u64 = 0
+    while octets.ld8(path, i) != 0 {
+        if octets.ld8(path, i) == 47 {
+            last = i + 1
+        }
+        i = i + 1
+    }
+    let b: u64 = (&base[0 as usize]) as u64
+    var n: u64 = 0
+    while octets.ld8(path, last + n) != 0 && n < 39 {
+        octets.st8(b, n, octets.ld8(path, last + n))
+        n = n + 1
+    }
+    octets.st8(b, n, 0)
+}
+
+fn describe() {
+    let a: u64 = (&args_text[0 as usize]) as u64
+    var n: u64 = append(a, 0, (&s_name[0 as usize]) as u64, 200)
+    n = append(a, n, (&base[0 as usize]) as u64, 200)
+    n = append(a, n, (&s_path[0 as usize]) as u64, 200)
+    let _e: u64 = append(a, n, (&target[0 as usize]) as u64, 200)
+}
+
 fn run_target() -> u64 {
     var s_ok: [u8; 17] = "elevate: start \0\0"
     var s_p: [u8; 8] = " pid=\0\0\0"
@@ -70,39 +78,33 @@ fn run_target() -> u64 {
     return pid
 }
 
-fn u_gui() -> u64 {
-    var s_bad: [u8; 23] = "elevate: no surface\0\0\0\0"
+fn ask_person() -> u64 {
     var s_go: [u8; 16] = "elevate: ready\0\0"
     var s_al: [u8; 17] = "elevate: allowed\0"
     var s_dn: [u8; 17] = "elevate: denied\0\0"
-    var s_nm: [u8; 8] = "elevate\0"
-    let _mi: u64 = msg.init()
-    if !fuiscene.open(200, 160, 460, 220, msg.get((&k_title[0 as usize]) as u64), build) {
-        say((&s_bad[0 as usize]) as u64)
+    var s_bad: [u8; 24] = "elevate: no dialog\0\0\0\0\0\0"
+    describe()
+    say((&s_go[0 as usize]) as u64)
+    lineout.end_line()
+    let answer: u64 = consent.ask((&base[0 as usize]) as u64, (&s_action[0 as usize]) as u64,
+        (&args_text[0 as usize]) as u64, 0)
+    if answer == consent.ANSWER_YES {
+        say((&s_al[0 as usize]) as u64)
         lineout.end_line()
-        return 1
-    }
-    var first: bool = true
-    while fuiscene.alive() {
-        let key: u64 = fuiscene.pump()
-        if first {
-            first = false
-            fuiscene.say_rects((&s_nm[0 as usize]) as u64)
-            say((&s_go[0 as usize]) as u64)
-            lineout.end_line()
+        let pid: u64 = run_target()
+        if ulib.bad(pid) {
+            return 1
         }
-        if key == K_ALLOW {
-            say((&s_al[0 as usize]) as u64)
-            lineout.end_line()
-            let _p: u64 = run_target()
-            fuiscene.quit()
-        } else if key == K_DENY {
-            say((&s_dn[0 as usize]) as u64)
-            lineout.end_line()
-            fuiscene.quit()
-        }
+        return 0
     }
-    return 0
+    if answer == consent.ANSWER_NO {
+        say((&s_dn[0 as usize]) as u64)
+        lineout.end_line()
+        return 0
+    }
+    say((&s_bad[0 as usize]) as u64)
+    lineout.end_line()
+    return 1
 }
 
 fn u_start(args: u64) -> u64 {
@@ -115,13 +117,13 @@ fn u_start(args: u64) -> u64 {
         return 2
     }
     ulib.strncpy((&target[0 as usize]) as u64, ulib.arg_at(args, 1), 150)
+    basename_of((&target[0 as usize]) as u64)
     var i: u64 = 1
     while i < argc {
         t_args[(i - 1) as usize] = ulib.arg_at(args, i)
         i = i + 1
     }
     t_argc = argc - 1
-    // the programme sees its own path as argv[0]; the kernel gets the same path
     if ulib.session_owner() == 0 {
         say((&s_no[0 as usize]) as u64)
         lineout.end_line()
@@ -131,7 +133,7 @@ fn u_start(args: u64) -> u64 {
         }
         return 0
     }
-    return u_gui()
+    return ask_person()
 }
 
 fn main() -> i32 {

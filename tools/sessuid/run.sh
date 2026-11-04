@@ -70,18 +70,18 @@ grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started without con
 [ -n "$SP" ] && grep -aq "execas: user pid=$SP uid=1000" "$W/ser"; xchk $? "[X] Settings runs as uid 1000 (kernel: execas: user pid=$SP uid=1000)"
 waitfor 'settings: who uid=' 40; sleep 1   # r1314: the line comes after the window is up; wait for it instead of a fixed sleep
 grep -aq 'settings: who uid=1000' "$W/ser" && ok "Settings itself reports uid 1000" || bad "Settings does not report uid 1000"
-# 3. a system tool that is still all-root (the installer): the consent window comes first; Cancel (Tab Tab Return) starts nothing
+# 3. a system tool that is still all-root (the installer): the consent window comes first; Cancel (key N) starts nothing
 R0=$(count 'elevate: ready'); open_installer $((R0+1)); sleep 3
 grep -aq 'elevate: ready' "$W/ser" && ok "a system tool opens the consent window (elevate: ready)" || bad "a system tool opens the consent window (elevate: ready)"
 grep -aq 'elevate: start ' "$W/ser" && bad "a root programme started before consent" || ok "nothing started as root before consent"
-D0=$(count 'elevate: denied'); keys tab tab ret
+D0=$(count 'elevate: denied'); keys n
 waitcount 'elevate: denied' $((D0+1)) 20; sleep 2
 grep -aq 'elevate: denied' "$W/ser" && ok "Cancel is reported (elevate: denied)" || bad "Cancel is reported (elevate: denied)"
 grep -aq 'elevate: start ' "$W/ser" && bad "Cancel still started a root programme" || ok "Cancel started nothing as root"
-# 4. Allow (Tab Return) -> the system tool starts as root
+# 4. Allow (key Y) -> the system tool starts as root
 R1=$(count 'elevate: ready')
 # wait for the SECOND consent window (a new `elevate: ready`), then Allow, then wait for the start line
-open_installer $((R1+1)); sleep 3; P0=$(count 'execas: priv pid='); keys tab ret
+open_installer $((R1+1)); sleep 3; P0=$(count 'execas: priv pid='); keys y
 waitcount 'execas: priv pid=' $((P0+1)) 40; sleep 3
 grep -aq 'elevate: allowed' "$W/ser" && ok "Allow is reported (elevate: allowed)" || bad "Allow is reported (elevate: allowed)"
 # r1314: `elevate: start <path> pid=<n>` is written in five separate pieces (text, path, " pid=", number, newline) and other processes
