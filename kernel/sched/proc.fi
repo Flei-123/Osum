@@ -27,7 +27,7 @@ export {
     copy_space, swap_space, use_space, page_drop, ARG_RESUME,
     USER_DATA, USER_STACK, USER_SPAN, USER_TOP,
     IMAGE_BASE, IMAGE_END, ARGS_BASE, MAX_ARGS, STACK_FLOOR, grow_stack, stack_zone_has,
-    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, LAZYF_MAX, range_drop, lazy_mark, lazy_mark_file, lazy_fault, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
+    PRIV_SLOTS, MAIN_SLOTS, LAZY_BASE, LAZY_TOP, LAZY_ATOP, LAZYF_MAX, range_drop, lazy_mark, lazy_mark_image, lazy_mark_file, lazy_fault, lazy_zone, lazy_find, page_taken, BIG_TOP, BIG_FLOOR, SHM_ARENA_BASE, SHM_ARENA_TOP, demand_fault, pd_slot, pt_for, page_free,
     frame_count, frame_at,
     frame_virt_at, space_build_empty, map_restored
 }
@@ -680,6 +680,29 @@ fn lazy_mark(state: u64, i: u64, addr: u64, readable: bool, writable: bool, runn
     return true
 }
 
+fn lazy_zone(addr: u64) -> bool {
+    if addr >= LAZY_BASE && addr < LAZY_TOP {
+        return true
+    }
+    return addr >= IMAGE_BASE && addr < IMAGE_END
+}
+
+fn lazy_mark_image(state: u64, i: u64, addr: u64, writable: bool, runnable: bool) -> bool {
+    if addr < IMAGE_BASE || addr >= IMAGE_END {
+        return false
+    }
+    let s: u64 = pt_slot(addr)
+    let pt: u64 = pt_for(state, i, addr, true)
+    if pt == 0 {
+        return false
+    }
+    if read_entry(pt, s) != 0 {
+        return false
+    }
+    write_entry(pt, s, lazy_bits(true, writable, runnable))
+    return true
+}
+
 fn lazy_is_file(state: u64, i: u64, addr: u64) -> bool {
     let pt: u64 = pt_for(state, i, addr, false)
     if pt == 0 {
@@ -984,7 +1007,7 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
 }
 
 fn lazy_fault(state: u64, cur: u64, addr: u64, err: u64) -> bool {
-    if addr < LAZY_BASE || addr >= LAZY_TOP || (err & 1) != 0 {
+    if !lazy_zone(addr) || (err & 1) != 0 {
         return false
     }
     let page: u64 = addr & 0xFFFFFFFFFFFFF000
@@ -1094,7 +1117,7 @@ fn user_ok(state: u64, i: u64, addr: u64, len: u64) -> bool {
                 return false
             }
         }
-        if p >= LAZY_BASE && p < LAZY_TOP && translate(state, i, p) == 0 {
+        if lazy_zone(p) && translate(state, i, p) == 0 {
             if !lazy_fault(state, i, p, 0) {
                 return false
             }

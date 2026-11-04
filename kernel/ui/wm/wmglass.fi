@@ -2,6 +2,7 @@
 profile kernel
 
 import gfx.fb
+import mm.mem
 import serial
 import sched.time
 import ui.wm.wmbase
@@ -167,16 +168,52 @@ const GLASS_PX: u64 = 1048576
 
 const GLASS_TINT: u64 = 24
 
-static mut gl_puf: [u32; 1048576] = [0 as u32; 1048576]
+const GLASS_MIN_PX: u64 = 262144
 
-static mut gl_alt: [u32; 1048576] = [0 as u32; 1048576]
+static mut gl_base: u64 = 0
+
+static mut gl_cap_px: u64 = 0
+
+static mut gl_test: [u32; 1024] = [0 as u32; 1024]
+
+fn glass_bufs(state: u64, px: u64) -> bool {
+    if px <= gl_cap_px {
+        return true
+    }
+    var want: u64 = GLASS_MIN_PX
+    while want < px {
+        want = want * 2
+    }
+    if want > GLASS_PX {
+        want = GLASS_PX
+    }
+    let run: u64 = mem.frame_run(state, want / 512)
+    if run == 0 {
+        return false
+    }
+    if gl_base != 0 {
+        mem.frame_free_run(state, gl_base, gl_cap_px / 512)
+        wmlayout.ss(state, wmlayout.S_GLVALID, 0)
+    }
+    gl_base = run
+    gl_cap_px = want
+    return true
+}
+
+fn gl_puf_addr() -> u64 {
+    return gl_base
+}
+
+fn gl_alt_addr() -> u64 {
+    return gl_base +% gl_cap_px *% 4
+}
 
 fn glass_blur(w: u64, h: u64, r: u64) {
     if r == 0 {
         return
     }
-    let a: u64 = (&gl_puf[0]) as u64
-    let b: u64 = (&gl_alt[0]) as u64
+    let a: u64 = gl_puf_addr()
+    let b: u64 = gl_alt_addr()
     var y: u64 = 0
     while y < h {
         comp.blur_line(a +% y *% w *% 4, b +% y *% w *% 4, 4, w, r)
@@ -239,7 +276,10 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
     }
     let gx: u64 = x as u64
     let gy: u64 = y as u64
-    let basis: u64 = (&gl_puf[0]) as u64
+    if !glass_bufs(state, w *% h) {
+        return 0
+    }
+    let basis: u64 = gl_puf_addr()
     wmlayout.ss(state, wmlayout.S_GLRUN, wmlayout.gs(state, wmlayout.S_GLRUN) + 1)
     if wmlayout.gs(state, wmlayout.S_GLVALID) != 0 && wmlayout.gs(state, wmlayout.S_GLX) == gx
         && wmlayout.gs(state, wmlayout.S_GLY) == gy && wmlayout.gs(state, wmlayout.S_GLW) == w
@@ -272,7 +312,7 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
     }
     let t_start: u64 = time.tsc()
 
-    let sbas: u64 = (&gl_puf[0]) as u64
+    let sbas: u64 = gl_puf_addr()
     var row: u64 = 0
     while row < h {
         let q: u64 = fb.draw_at(state) +% (gy + row) *% fb.pitch(state) +%
@@ -290,7 +330,7 @@ fn glass_prepare(state: u64, x: i64, y: i64, w: u64, h: u64,
     glass_blur(w, h, r)
 
     let dunkel: bool = bright_of(wmgeom.form(state, wmlayout.FM_GLASS_KEY)) < 128
-    let qbas: u64 = (&gl_alt[0]) as u64
+    let qbas: u64 = gl_alt_addr()
     var p: u64 = 0
     let n: u64 = w * h
     while p < n {
@@ -548,19 +588,19 @@ fn selftest_glas(state: u64) -> u64 {
         n = n + 1
     }
 
-    let qa: u64 = (&gl_puf[0]) as u64
-    let za: u64 = (&gl_alt[0]) as u64
+    let qa: u64 = (&gl_test[0]) as u64
+    let za: u64 = qa +% 2048
     var i: u64 = 0
     while i < 64 {
         var v: u64 = 0
         if i >= 32 {
             v = 200
         }
-        gl_puf[(i) as usize] = ((v << 16) | (v << 8) | v) as u32
+        __mmio_write32((qa +% i *% 4) as *mut u32, ((v << 16) | (v << 8) | v) as u32)
         i = i + 1
     }
     comp.blur_line(qa, za, 4, 64, 4)
-    if (gl_alt[(32) as usize] as u64 & 0xFF) == 111 {
+    if (__mmio_read32((za +% 32 *% 4) as *mut u32) as u64 & 0xFF) == 111 {
         n = n + 1
     }
 
@@ -570,11 +610,11 @@ fn selftest_glas(state: u64) -> u64 {
         if i >= 32 {
             v2 = 200
         }
-        gl_puf[(i * 8) as usize] = ((v2 << 16) | (v2 << 8) | v2) as u32
+        __mmio_write32((qa +% i *% 8 *% 4) as *mut u32, ((v2 << 16) | (v2 << 8) | v2) as u32)
         i = i + 1
     }
     comp.blur_line(qa, za, 32, 64, 4)
-    if (gl_alt[(32 * 8) as usize] as u64 & 0xFF) == 111 {
+    if (__mmio_read32((za +% 32 *% 8 *% 4) as *mut u32) as u64 & 0xFF) == 111 {
         n = n + 1
     }
 
