@@ -1,0 +1,138 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import vulkan.vkobj
+
+export { vkCreateDescriptorSetLayout, vkDestroyDescriptorSetLayout, vkCreatePipelineLayout, vkDestroyPipelineLayout, vkCreateDescriptorPool, vkDestroyDescriptorPool, vkResetDescriptorPool, vkAllocateDescriptorSets, vkFreeDescriptorSets, vkUpdateDescriptorSets, set_slot, SLOT_COUNT, T_SAMPLER, T_COMBINED, T_SAMPLED, T_UNIFORM, T_STORAGE }
+
+const SLOT_COUNT: usize = 8
+const SLOT_WORDS: usize = 4
+const T_SAMPLER: u64 = 1
+const T_COMBINED: u64 = 2
+const T_SAMPLED: u64 = 3
+const T_UNIFORM: u64 = 4
+const T_STORAGE: u64 = 5
+
+fn plain_object(kind: u64, out: u64) -> i32 {
+    let h: u64 = vkobj.obj_new(kind)
+    if h == 0 as u64 { return -1 }
+    rt.st64(out, 0, h)
+    return 0
+}
+
+fn set_slot(set: u64, binding: usize) -> u64 {
+    let block: u64 = vkobj.obj_get(set, vkobj.K_DSET, 0)
+    if block == 0 as u64 { return 0 as u64 }
+    if binding >= SLOT_COUNT { return 0 as u64 }
+    return block + (binding as u64) * (SLOT_WORDS as u64) * 8 as u64
+}
+
+#[export_c]
+fn vkCreateDescriptorSetLayout(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    return plain_object(vkobj.K_DSLAYOUT, out)
+}
+
+#[export_c]
+fn vkDestroyDescriptorSetLayout(dev: u64, layout: u64, alloc: u64) {
+    vkobj.obj_free(layout, vkobj.K_DSLAYOUT)
+}
+
+#[export_c]
+fn vkCreatePipelineLayout(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    return plain_object(vkobj.K_PLAYOUT, out)
+}
+
+#[export_c]
+fn vkDestroyPipelineLayout(dev: u64, layout: u64, alloc: u64) {
+    vkobj.obj_free(layout, vkobj.K_PLAYOUT)
+}
+
+#[export_c]
+fn vkCreateDescriptorPool(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    return plain_object(vkobj.K_DPOOL, out)
+}
+
+#[export_c]
+fn vkDestroyDescriptorPool(dev: u64, pool: u64, alloc: u64) {
+    vkobj.obj_free(pool, vkobj.K_DPOOL)
+}
+
+#[export_c]
+fn vkResetDescriptorPool(dev: u64, pool: u64, flags: u32) -> i32 {
+    return 0
+}
+
+#[export_c]
+fn vkAllocateDescriptorSets(dev: u64, info: u64, out: u64) -> i32 {
+    let n: u32 = rt.ld32(info + 24 as u64, 0)
+    var i: u32 = 0 as u32
+    while i < n {
+        let h: u64 = vkobj.obj_new(vkobj.K_DSET)
+        if h == 0 as u64 { return -1 }
+        let block: u64 = rt.heap_alloc(SLOT_COUNT * SLOT_WORDS * 8)
+        rt.mem_set(block, 0 as u8, SLOT_COUNT * SLOT_WORDS * 8)
+        vkobj.obj_set(h, vkobj.K_DSET, 0, block)
+        rt.st64(out, i as usize, h)
+        i = i + 1 as u32
+    }
+    return 0
+}
+
+#[export_c]
+fn vkFreeDescriptorSets(dev: u64, pool: u64, count: u32, sets: u64) -> i32 {
+    var i: u32 = 0 as u32
+    while i < count {
+        let h: u64 = rt.ld64(sets, i as usize)
+        let block: u64 = vkobj.obj_get(h, vkobj.K_DSET, 0)
+        if block != 0 as u64 { rt.heap_free(block, SLOT_COUNT * SLOT_WORDS * 8) }
+        vkobj.obj_free(h, vkobj.K_DSET)
+        i = i + 1 as u32
+    }
+    return 0
+}
+
+fn slot_type(vk_type: u32) -> u64 {
+    if vk_type == 0 as u32 { return T_SAMPLER }
+    if vk_type == 1 as u32 { return T_COMBINED }
+    if vk_type == 2 as u32 { return T_SAMPLED }
+    if vk_type == 6 as u32 { return T_UNIFORM }
+    if vk_type == 7 as u32 { return T_STORAGE }
+    return 0 as u64
+}
+
+fn write_one(w: u64) {
+    let set: u64 = rt.ld64(w + 16 as u64, 0)
+    let binding: u32 = rt.ld32(w + 24 as u64, 0)
+    let elem: u32 = rt.ld32(w + 28 as u64, 0)
+    let count: u32 = rt.ld32(w + 32 as u64, 0)
+    let t: u64 = slot_type(rt.ld32(w + 36 as u64, 0))
+    let pimg: u64 = rt.ld64(w + 40 as u64, 0)
+    let pbuf: u64 = rt.ld64(w + 48 as u64, 0)
+    var i: u32 = 0 as u32
+    while i < count {
+        let s: u64 = set_slot(set, (binding + elem + i) as usize)
+        if s != 0 as u64 {
+            rt.st64(s, 0, t)
+            if t == T_UNIFORM || t == T_STORAGE {
+                let g: u64 = pbuf + (i as u64) * 24 as u64
+                rt.st64(s, 1, rt.ld64(g, 0))
+                rt.st64(s, 2, rt.ld64(g, 1))
+                rt.st64(s, 3, rt.ld64(g, 2))
+            } else {
+                let g: u64 = pimg + (i as u64) * 24 as u64
+                rt.st64(s, 1, rt.ld64(g + 8 as u64, 0))
+                rt.st64(s, 2, rt.ld64(g, 0))
+                rt.st64(s, 3, 0 as u64)
+            }
+        }
+        i = i + 1 as u32
+    }
+}
+
+#[export_c]
+fn vkUpdateDescriptorSets(dev: u64, writeCount: u32, writes: u64, copyCount: u32, copies: u64) {
+    var i: u32 = 0 as u32
+    while i < writeCount {
+        write_one(writes + (i as u64) * 64 as u64)
+        i = i + 1 as u32
+    }
+}

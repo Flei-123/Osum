@@ -1,0 +1,210 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import spirv.spv
+import spirv.parse
+import spirv.validate
+import spirv.lower
+import vulkan.vkobj
+
+export { vkCreateShaderModule, vkDestroyShaderModule, vkCreateGraphicsPipelines, vkDestroyPipeline, pipe_state, P_VS, P_FS, P_TOPO, P_FLAGS, P_NFLAT, P_NATTR, P_NLOC, P_KILLS, P_STRIDE0, P_ATTR0, P_VIEWPORT, P_SCISSOR, F_BLEND, F_PREMUL, F_DEPTH, F_SVIEW, F_SSCISS, MAX_BINDINGS, MAX_ATTRS }
+
+const MAX_INSTR: usize = 4000
+const PROG_BYTES: usize = 4000 * 20 + 64
+const STATE_WORDS: usize = 64
+const MAX_BINDINGS: usize = 4
+const MAX_ATTRS: usize = 9
+const P_VS: usize = 0
+const P_FS: usize = 1
+const P_TOPO: usize = 2
+const P_FLAGS: usize = 3
+const P_NFLAT: usize = 4
+const P_NATTR: usize = 6
+const P_NLOC: usize = 7
+const P_KILLS: usize = 8
+const P_STRIDE0: usize = 10
+const P_ATTR0: usize = 14
+const P_VIEWPORT: usize = 24
+const P_SCISSOR: usize = 27
+const F_BLEND: u64 = 1
+const F_PREMUL: u64 = 2
+const F_DEPTH: u64 = 4
+const F_SVIEW: u64 = 8
+const F_SSCISS: u64 = 16
+
+#[export_c]
+fn vkCreateShaderModule(dev: u64, info: u64, alloc: u64, out: u64) -> i32 {
+    let size: u64 = rt.ld64(info + 24 as u64, 0)
+    let code: u64 = rt.ld64(info + 32 as u64, 0)
+    if size == 0 as u64 { return -3 }
+    if size % 4 as u64 != 0 as u64 { return -3 }
+    let h: u64 = vkobj.obj_new(vkobj.K_SHADER)
+    if h == 0 as u64 { return -1 }
+    let copy: u64 = rt.heap_alloc(size as usize)
+    rt.mem_copy(copy, code, size as usize)
+    vkobj.obj_set(h, vkobj.K_SHADER, 0, copy)
+    vkobj.obj_set(h, vkobj.K_SHADER, 1, size)
+    rt.st64(out, 0, h)
+    return 0
+}
+
+#[export_c]
+fn vkDestroyShaderModule(dev: u64, module: u64, alloc: u64) {
+    let copy: u64 = vkobj.obj_get(module, vkobj.K_SHADER, 0)
+    let size: u64 = vkobj.obj_get(module, vkobj.K_SHADER, 1)
+    if copy != 0 as u64 { rt.heap_free(copy, size as usize) }
+    vkobj.obj_free(module, vkobj.K_SHADER)
+}
+
+fn pipe_state(h: u64) -> u64 {
+    return vkobj.obj_get(h, vkobj.K_PIPELINE, 0)
+}
+
+fn lower_module(module: u64, stage: u32, prog: u64, info: *mut lower.LowerInfo) -> u32 {
+    let words: u64 = vkobj.obj_get(module, vkobj.K_SHADER, 0)
+    let size: u64 = vkobj.obj_get(module, vkobj.K_SHADER, 1)
+    if words == 0 as u64 { return 999 as u32 }
+    var m: parse.Module = parse.module_zero()
+    var e: u32 = parse.module_open(&m, words, (size / 4 as u64) as usize)
+    if e == 0 as u32 { e = validate.validate(&m) }
+    if e == 0 as u32 { e = lower.lower_stage(&m, stage, prog, MAX_INSTR, info) }
+    parse.module_close(&m)
+    return e
+}
+
+fn read_stages(info: u64, st: u64) -> bool {
+    let n: u32 = rt.ld32(info + 20 as u64, 0)
+    let stages: u64 = rt.ld64(info + 24 as u64, 0)
+    var have_vs: bool = false
+    var have_fs: bool = false
+    var i: u32 = 0 as u32
+    while i < n {
+        let s: u64 = stages + (i as u64) * 48 as u64
+        let stage: u32 = rt.ld32(s + 20 as u64, 0)
+        let module: u64 = rt.ld64(s + 24 as u64, 0)
+        let prog: u64 = rt.heap_alloc(PROG_BYTES)
+        rt.mem_set(prog, 0 as u8, PROG_BYTES)
+        var li: lower.LowerInfo = lower.info_zero()
+        if stage == 1 as u32 {
+            if lower_module(module, spv.EM_VERTEX, prog, &li) != 0 as u32 { rt.heap_free(prog, PROG_BYTES); return false }
+            rt.st64(st, P_VS, prog)
+            have_vs = true
+        }
+        if stage == 16 as u32 {
+            if lower_module(module, spv.EM_FRAGMENT, prog, &li) != 0 as u32 { rt.heap_free(prog, PROG_BYTES); return false }
+            rt.st64(st, P_FS, prog)
+            rt.st64(st, P_NFLAT, li.nflat as u64)
+            if li.nkill != 0 as u32 { rt.st64(st, P_KILLS, 1 as u64) }
+            have_fs = true
+        }
+        if stage != 1 as u32 && stage != 16 as u32 { rt.heap_free(prog, PROG_BYTES) }
+        i = i + 1 as u32
+    }
+    return have_vs && have_fs
+}
+
+fn read_vertex_input(info: u64, st: u64) {
+    let vi: u64 = rt.ld64(info + 32 as u64, 0)
+    if vi == 0 as u64 { return }
+    let nb: u32 = rt.ld32(vi + 20 as u64, 0)
+    let pb: u64 = rt.ld64(vi + 24 as u64, 0)
+    let na: u32 = rt.ld32(vi + 32 as u64, 0)
+    let pa: u64 = rt.ld64(vi + 40 as u64, 0)
+    var i: u32 = 0 as u32
+    while i < nb {
+        let b: u64 = pb + (i as u64) * 12 as u64
+        let binding: u32 = rt.ld32(b, 0)
+        if (binding as usize) < MAX_BINDINGS { rt.st64(st, P_STRIDE0 + (binding as usize), rt.ld32(b + 4 as u64, 0) as u64) }
+        i = i + 1 as u32
+    }
+    var k: usize = 0
+    var nloc: u64 = 0 as u64
+    i = 0 as u32
+    while i < na && k < MAX_ATTRS {
+        let a: u64 = pa + (i as u64) * 16 as u64
+        let loc: u64 = rt.ld32(a, 0) as u64
+        if loc < 9 as u64 {
+            let word: u64 = loc | ((rt.ld32(a + 4 as u64, 0) as u64) << 8 as u64) | ((rt.ld32(a + 8 as u64, 0) as u64) << 16 as u64) | ((rt.ld32(a + 12 as u64, 0) as u64) << 32 as u64)
+            rt.st64(st, P_ATTR0 + k, word)
+            k = k + 1
+            if loc + 1 as u64 > nloc { nloc = loc + 1 as u64 }
+        }
+        i = i + 1 as u32
+    }
+    rt.st64(st, P_NATTR, k as u64)
+    rt.st64(st, P_NLOC, nloc)
+}
+
+fn read_fixed_state(info: u64, st: u64) {
+    var flags: u64 = 0 as u64
+    let ia: u64 = rt.ld64(info + 40 as u64, 0)
+    if ia != 0 as u64 { rt.st64(st, P_TOPO, rt.ld32(ia + 20 as u64, 0) as u64) }
+    let ds: u64 = rt.ld64(info + 80 as u64, 0)
+    if ds != 0 as u64 && rt.ld32(ds + 20 as u64, 0) != 0 as u32 { flags = flags | F_DEPTH }
+    let cb: u64 = rt.ld64(info + 88 as u64, 0)
+    if cb != 0 as u64 && rt.ld32(cb + 28 as u64, 0) != 0 as u32 {
+        let at: u64 = rt.ld64(cb + 32 as u64, 0)
+        if rt.ld32(at, 0) != 0 as u32 {
+            flags = flags | F_BLEND
+            if rt.ld32(at + 4 as u64, 0) == 1 as u32 { flags = flags | F_PREMUL }
+        }
+    }
+    let vp: u64 = rt.ld64(info + 56 as u64, 0)
+    if vp != 0 as u64 {
+        let pv: u64 = rt.ld64(vp + 24 as u64, 0)
+        if pv != 0 as u64 && rt.ld32(vp + 20 as u64, 0) != 0 as u32 {
+            rt.mem_copy(st + (P_VIEWPORT as u64) * 8 as u64, pv, 24)
+            flags = flags | F_SVIEW
+        }
+        let ps: u64 = rt.ld64(vp + 40 as u64, 0)
+        if ps != 0 as u64 && rt.ld32(vp + 32 as u64, 0) != 0 as u32 {
+            rt.mem_copy(st + (P_SCISSOR as u64) * 8 as u64, ps, 16)
+            flags = flags | F_SSCISS
+        }
+    }
+    rt.st64(st, P_FLAGS, flags)
+}
+
+fn build_pipeline(info: u64) -> u64 {
+    let h: u64 = vkobj.obj_new(vkobj.K_PIPELINE)
+    if h == 0 as u64 { return 0 as u64 }
+    let st: u64 = rt.heap_alloc(STATE_WORDS * 8)
+    rt.mem_set(st, 0 as u8, STATE_WORDS * 8)
+    rt.st64(st, P_TOPO, 3 as u64)
+    if !read_stages(info, st) {
+        free_state(st)
+        vkobj.obj_free(h, vkobj.K_PIPELINE)
+        return 0 as u64
+    }
+    read_vertex_input(info, st)
+    read_fixed_state(info, st)
+    vkobj.obj_set(h, vkobj.K_PIPELINE, 0, st)
+    return h
+}
+
+fn free_state(st: u64) {
+    let vs: u64 = rt.ld64(st, P_VS)
+    let fs: u64 = rt.ld64(st, P_FS)
+    if vs != 0 as u64 { rt.heap_free(vs, PROG_BYTES) }
+    if fs != 0 as u64 { rt.heap_free(fs, PROG_BYTES) }
+    rt.heap_free(st, STATE_WORDS * 8)
+}
+
+#[export_c]
+fn vkCreateGraphicsPipelines(dev: u64, cache: u64, count: u32, infos: u64, alloc: u64, out: u64) -> i32 {
+    var rc: i32 = 0
+    var i: u32 = 0 as u32
+    while i < count {
+        let h: u64 = build_pipeline(infos + (i as u64) * 144 as u64)
+        rt.st64(out, i as usize, h)
+        if h == 0 as u64 { rc = -3 }
+        i = i + 1 as u32
+    }
+    return rc
+}
+
+#[export_c]
+fn vkDestroyPipeline(dev: u64, pipe: u64, alloc: u64) {
+    let st: u64 = pipe_state(pipe)
+    if st != 0 as u64 { free_state(st) }
+    vkobj.obj_free(pipe, vkobj.K_PIPELINE)
+}

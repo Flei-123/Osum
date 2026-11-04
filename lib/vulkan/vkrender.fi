@@ -1,0 +1,420 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import gpu.swr.raster
+import gpu.swr.vertex
+import vulkan.vkobj
+import vulkan.vkres
+import vulkan.vkcmd
+import vulkan.vkpipe
+import vulkan.vkdesc
+
+export { rs_new, rs_free, rs_exec }
+
+const RS_WORDS: usize = 64
+const R_FRAME: usize = 0
+const R_DIMG: usize = 2
+const R_BGRA: usize = 3
+const R_PIPE: usize = 4
+const R_VB: usize = 8
+const R_IBUF: usize = 16
+const R_IOFF: usize = 17
+const R_ITYPE: usize = 18
+const R_DS: usize = 20
+const R_PUSH: usize = 24
+const PUSH_WORDS: usize = 16
+const R_VP: usize = 40
+const R_SC: usize = 43
+const R_HASVP: usize = 45
+const R_HASSC: usize = 46
+const R_ORIG_COLOR: usize = 47
+const R_ORIG_DEPTH: usize = 48
+const R_AREA: usize = 49
+const R_SCRATCH: usize = 52
+const MAX_TRI: i32 = 2048
+const UBO_BYTES: usize = 4096
+const TOPO_STRIP: u64 = 4
+const TOPO_FAN: u64 = 5
+
+fn rs_new() -> u64 {
+    let rs: u64 = rt.heap_alloc(RS_WORDS * 8)
+    rt.mem_set(rs, 0 as u8, RS_WORDS * 8)
+    return rs
+}
+
+fn swap_rb(p: u64, n: u64) {
+    var i: u64 = 0 as u64
+    while i < n {
+        let v: u32 = rt.ld32(p, i as usize)
+        rt.st32(p, i as usize, (v & 0xFF00FF00 as u32) | ((v >> 16 as u32) & 255 as u32) | ((v & 255 as u32) << 16 as u32))
+        i = i + 1 as u64
+    }
+}
+
+fn fill_u32(p: u64, n: u64, v: u32) {
+    var i: u64 = 0 as u64
+    while i < n {
+        rt.st32(p, i as usize, v)
+        i = i + 1 as u64
+    }
+}
+
+fn frame_of(rs: u64) -> *mut raster.Frame {
+    return rt.ld64(rs, R_FRAME) as *mut raster.Frame
+}
+
+fn end_rendering(rs: u64) {
+    let fp: u64 = rt.ld64(rs, R_FRAME)
+    if fp == 0 as u64 { return }
+    let f: *mut raster.Frame = fp as *mut raster.Frame
+    if rt.ld64(rs, R_BGRA) != 0 as u64 { swap_rb((*f).color, ((*f).w as u64) * ((*f).h as u64)) }
+    (*f).color = rt.ld64(rs, R_ORIG_COLOR)
+    (*f).depth = rt.ld64(rs, R_ORIG_DEPTH)
+    raster.frame_free(f)
+    rt.st64(rs, R_FRAME, 0 as u64)
+    rt.st64(rs, R_BGRA, 0 as u64)
+    rt.st64(rs, R_DIMG, 0 as u64)
+}
+
+fn rs_free(rs: u64) {
+    end_rendering(rs)
+    rt.heap_free(rs, RS_WORDS * 8)
+}
+
+fn begin_rendering(rs: u64, rec: u64) {
+    end_rendering(rs)
+    let cimg: u64 = vkobj.obj_get(rt.ld64(rec, 1), vkobj.K_VIEW, 0)
+    let color: u64 = vkres.res_addr(vkobj.K_IMAGE, cimg)
+    if color == 0 as u64 { return }
+    let w: i32 = vkobj.obj_get(cimg, vkobj.K_IMAGE, 2) as i32
+    let h: i32 = vkobj.obj_get(cimg, vkobj.K_IMAGE, 3) as i32
+    let n: u64 = (w as u64) * (h as u64)
+    let f: *mut raster.Frame = raster.frame_new(w, h, MAX_TRI)
+    rt.st64(rs, R_FRAME, f as u64)
+    rt.st64(rs, R_ORIG_COLOR, (*f).color)
+    rt.st64(rs, R_ORIG_DEPTH, (*f).depth)
+    (*f).color = color
+    if vkobj.obj_get(cimg, vkobj.K_IMAGE, 4) == 44 as u64 {
+        swap_rb(color, n)
+        rt.st64(rs, R_BGRA, 1 as u64)
+    }
+    let color_load: u64 = rt.ld64(rec, 4) & 0xFF as u64
+    let depth_load: u64 = (rt.ld64(rec, 4) >> 8 as u64) & 0xFF as u64
+    if color_load == 1 as u64 {
+        let px: u32 = vkres.unorm8(raster.ld_f32(rec + 16 as u64, 0)) | (vkres.unorm8(raster.ld_f32(rec + 16 as u64, 1)) << 8 as u32) | (vkres.unorm8(raster.ld_f32(rec + 16 as u64, 2)) << 16 as u32) | (vkres.unorm8(raster.ld_f32(rec + 16 as u64, 3)) << 24 as u32)
+        fill_u32(color, n, px)
+    }
+    let dimg: u64 = vkobj.obj_get(rt.ld64(rec, 5), vkobj.K_VIEW, 0)
+    let depth: u64 = vkres.res_addr(vkobj.K_IMAGE, dimg)
+    var clear_z: f32 = 1.0f
+    var clear_depth: bool = true
+    if depth != 0 as u64 && vkobj.obj_get(dimg, vkobj.K_IMAGE, 4) == 126 as u64 {
+        (*f).depth = depth
+        rt.st64(rs, R_DIMG, dimg)
+        clear_z = raster.ld_f32(rec + 48 as u64, 0)
+        clear_depth = depth_load == 1 as u64
+    }
+    raster.st_f32(rs + (R_SCRATCH as u64) * 8 as u64, 0, clear_z)
+    if clear_depth { fill_u32((*f).depth, n, rt.ld32(rs + (R_SCRATCH as u64) * 8 as u64, 0)) }
+    rt.st64(rs, R_AREA, rt.ld64(rec, 7))
+}
+
+fn bind_pipeline(rs: u64, rec: u64) {
+    let pipe: u64 = rt.ld64(rec, 1)
+    rt.st64(rs, R_PIPE, pipe)
+    let p: u64 = vkpipe.pipe_state(pipe)
+    if p == 0 as u64 { return }
+    let flags: u64 = rt.ld64(p, vkpipe.P_FLAGS)
+    if (flags & vkpipe.F_SVIEW) != 0 as u64 {
+        rt.mem_copy(rs + (R_VP as u64) * 8 as u64, p + (vkpipe.P_VIEWPORT as u64) * 8 as u64, 24)
+        rt.st64(rs, R_HASVP, 1 as u64)
+    }
+    if (flags & vkpipe.F_SSCISS) != 0 as u64 {
+        rt.mem_copy(rs + (R_SC as u64) * 8 as u64, p + (vkpipe.P_SCISSOR as u64) * 8 as u64, 16)
+        rt.st64(rs, R_HASSC, 1 as u64)
+    }
+}
+
+fn bind_vertex(rs: u64, rec: u64) {
+    let b: u64 = rt.ld64(rec, 1)
+    if b >= (vkpipe.MAX_BINDINGS as u64) { return }
+    rt.st64(rs, R_VB + (b as usize) * 2, rt.ld64(rec, 2))
+    rt.st64(rs, R_VB + (b as usize) * 2 + 1, rt.ld64(rec, 3))
+}
+
+fn bind_index(rs: u64, rec: u64) {
+    rt.st64(rs, R_IBUF, rt.ld64(rec, 1))
+    rt.st64(rs, R_IOFF, rt.ld64(rec, 2))
+    rt.st64(rs, R_ITYPE, rt.ld64(rec, 3))
+}
+
+fn bind_set(rs: u64, rec: u64) {
+    let i: u64 = rt.ld64(rec, 1)
+    if i >= 4 as u64 { return }
+    rt.st64(rs, R_DS + (i as usize), rt.ld64(rec, 2))
+}
+
+fn push_constants(rs: u64, rec: u64) {
+    let off: u64 = rt.ld64(rec, 1)
+    let n: u64 = rt.ld64(rec, 2)
+    if off + n > (PUSH_WORDS as u64) * 8 as u64 { return }
+    rt.mem_copy(rs + (R_PUSH as u64) * 8 as u64 + off, rec + 24 as u64, n as usize)
+}
+
+fn tri_vertex(topo: u64, t: u64, c: u64) -> u64 {
+    if topo == TOPO_FAN {
+        if c == 0 as u64 { return 0 as u64 }
+        return t + c
+    }
+    if topo == TOPO_STRIP {
+        if t % 2 as u64 == 1 as u64 {
+            if c == 0 as u64 { return t + 1 as u64 }
+            if c == 1 as u64 { return t }
+        }
+        return t + c
+    }
+    return t * 3 as u64 + c
+}
+
+fn tri_count(topo: u64, count: u64) -> u64 {
+    if topo == TOPO_STRIP || topo == TOPO_FAN {
+        if count < 3 as u64 { return 0 as u64 }
+        return count - 2 as u64
+    }
+    return count / 3 as u64
+}
+
+fn vertex_number(rs: u64, indexed: bool, k: u64, first: u64, voff: i64) -> u64 {
+    if !indexed { return first + k }
+    let ibuf: u64 = rt.ld64(rs, R_IBUF)
+    let p: u64 = vkres.res_addr(vkobj.K_BUFFER, ibuf)
+    if p == 0 as u64 { return 0 as u64 }
+    let size: u64 = vkobj.obj_get(ibuf, vkobj.K_BUFFER, 2)
+    let ioff: u64 = rt.ld64(rs, R_IOFF)
+    let idx: u64 = first + k
+    var v: u64 = 0 as u64
+    if rt.ld64(rs, R_ITYPE) == 1 as u64 {
+        if ioff + idx * 4 as u64 + 4 as u64 > size { return 0 as u64 }
+        v = rt.ld32(p + ioff, idx as usize) as u64
+    } else {
+        if ioff + idx * 2 as u64 + 2 as u64 > size { return 0 as u64 }
+        v = (rt.ld8(p + ioff + idx * 2 as u64, 0) as u64) | ((rt.ld8(p + ioff + idx * 2 as u64, 1) as u64) << 8 as u64)
+    }
+    return ((v as i64) + voff) as u64
+}
+
+fn fetch_attr(rs: u64, p: u64, a: usize, vn: u64, row: u64) {
+    let word: u64 = rt.ld64(p, vkpipe.P_ATTR0 + a)
+    let loc: usize = (word & 0xFF as u64) as usize
+    let binding: usize = ((word >> 8 as u64) & 0xFF as u64) as usize
+    let format: u32 = ((word >> 16 as u64) & 0xFFFF as u64) as u32
+    let off: u64 = word >> 32 as u64
+    if binding >= vkpipe.MAX_BINDINGS { return }
+    let vb: u64 = rt.ld64(rs, R_VB + binding * 2)
+    let base: u64 = vkres.res_addr(vkobj.K_BUFFER, vb)
+    if base == 0 as u64 { return }
+    let at: u64 = rt.ld64(rs, R_VB + binding * 2 + 1) + vn * rt.ld64(p, vkpipe.P_STRIDE0 + binding) + off
+    var nc: usize = 0
+    var unorm: bool = false
+    if format == 100 as u32 { nc = 1 }
+    if format == 103 as u32 { nc = 2 }
+    if format == 106 as u32 { nc = 3 }
+    if format == 109 as u32 { nc = 4 }
+    if format == 37 as u32 { nc = 4; unorm = true }
+    if nc == 0 { return }
+    var width: u64 = 4 as u64
+    if unorm { width = 1 as u64 }
+    if at + (nc as u64) * width > vkobj.obj_get(vb, vkobj.K_BUFFER, 2) { return }
+    var c: usize = 0
+    while c < nc {
+        if unorm { raster.st_f32(row, loc * 4 + c, (rt.ld8(base + at, c) as f32) / 255.0f) }
+        else { raster.st_f32(row, loc * 4 + c, raster.ld_f32(base + at, c)) }
+        c = c + 1
+    }
+}
+
+fn apply_viewport(rs: u64, f: *mut raster.Frame, nverts: usize) {
+    let vp: u64 = rs + (R_VP as u64) * 8 as u64
+    var vx: f32 = 0.0f
+    var vy: f32 = 0.0f
+    var vw: f32 = (*f).w as f32
+    var vh: f32 = (*f).h as f32
+    var zmin: f32 = 0.0f
+    var zmax: f32 = 1.0f
+    if rt.ld64(rs, R_HASVP) != 0 as u64 {
+        vx = raster.ld_f32(vp, 0)
+        vy = raster.ld_f32(vp, 1)
+        vw = raster.ld_f32(vp, 2)
+        vh = raster.ld_f32(vp, 3)
+        zmin = raster.ld_f32(vp, 4)
+        zmax = raster.ld_f32(vp, 5)
+    }
+    let fw: f32 = (*f).w as f32
+    let fh: f32 = (*f).h as f32
+    let sx: f32 = vw / fw
+    let ox: f32 = (2.0f * vx + vw) / fw - 1.0f
+    let sy: f32 = vh / fh
+    let oy: f32 = 1.0f - (2.0f * vy + vh) / fh
+    var i: usize = 0
+    while i < nverts {
+        let o: usize = i * raster.VSTRIDE
+        let x: f32 = raster.ld_f32((*f).vbuf, o)
+        let y: f32 = raster.ld_f32((*f).vbuf, o + 1)
+        let z: f32 = raster.ld_f32((*f).vbuf, o + 2)
+        let w: f32 = raster.ld_f32((*f).vbuf, o + 3)
+        raster.st_f32((*f).vbuf, o, x * sx + w * ox)
+        raster.st_f32((*f).vbuf, o + 1, 0.0f - y * sy + w * oy)
+        raster.st_f32((*f).vbuf, o + 2, z * (zmax - zmin) + w * zmin)
+        i = i + 1
+    }
+}
+
+fn apply_scissor(rs: u64, f: *mut raster.Frame) {
+    var x0: i32 = 0
+    var y0: i32 = 0
+    var x1: i32 = (*f).w
+    var y1: i32 = (*f).h
+    let area: u64 = rt.ld64(rs, R_AREA)
+    if (area >> 32 as u64) != 0 as u64 {
+        x0 = (area & 0xFFFF as u64) as i32
+        y0 = ((area >> 16 as u64) & 0xFFFF as u64) as i32
+        x1 = x0 + (((area >> 32 as u64) & 0xFFFF as u64) as i32)
+        y1 = y0 + ((area >> 48 as u64) as i32)
+    }
+    if rt.ld64(rs, R_HASSC) != 0 as u64 {
+        let sc: u64 = rs + (R_SC as u64) * 8 as u64
+        let sx0: i32 = rt.ld32(sc, 0) as i32
+        let sy0: i32 = rt.ld32(sc, 1) as i32
+        let sx1: i32 = sx0 + (rt.ld32(sc, 2) as i32)
+        let sy1: i32 = sy0 + (rt.ld32(sc, 3) as i32)
+        if sx0 > x0 { x0 = sx0 }
+        if sy0 > y0 { y0 = sy0 }
+        if sx1 < x1 { x1 = sx1 }
+        if sy1 < y1 { y1 = sy1 }
+    }
+    raster.frame_set_scissor(f, x0, y0, x1, y1)
+}
+
+fn bind_textures(rs: u64, f: *mut raster.Frame) {
+    let set: u64 = rt.ld64(rs, R_DS)
+    var linear: bool = false
+    var b: usize = 0
+    while b < 4 {
+        let s: u64 = vkdesc.set_slot(set, b)
+        if s != 0 as u64 && rt.ld64(s, 0) == vkdesc.T_COMBINED {
+            let img: u64 = vkobj.obj_get(rt.ld64(s, 1), vkobj.K_VIEW, 0)
+            let px: u64 = vkres.res_addr(vkobj.K_IMAGE, img)
+            if px != 0 as u64 {
+                raster.frame_set_texture_slot(f, b, px, vkobj.obj_get(img, vkobj.K_IMAGE, 2) as i32, vkobj.obj_get(img, vkobj.K_IMAGE, 3) as i32)
+                if vkobj.obj_get(rt.ld64(s, 2), vkobj.K_SAMPLER, 0) == 1 as u64 { linear = true }
+            }
+        }
+        b = b + 1
+    }
+    raster.frame_set_bilinear(f, linear)
+}
+
+fn build_ubo(rs: u64) -> u64 {
+    let ubo: u64 = rt.heap_alloc(UBO_BYTES)
+    rt.mem_set(ubo, 0 as u8, UBO_BYTES)
+    let s: u64 = vkdesc.set_slot(rt.ld64(rs, R_DS), 0)
+    if s != 0 as u64 && rt.ld64(s, 0) == vkdesc.T_UNIFORM {
+        let buf: u64 = rt.ld64(s, 1)
+        let p: u64 = vkres.res_addr(vkobj.K_BUFFER, buf)
+        let size: u64 = vkobj.obj_get(buf, vkobj.K_BUFFER, 2)
+        let off: u64 = rt.ld64(s, 2)
+        var n: u64 = rt.ld64(s, 3)
+        if n > (UBO_BYTES as u64) { n = UBO_BYTES as u64 }
+        if p != 0 as u64 && off < size {
+            if n > size - off { n = size - off }
+            rt.mem_copy(ubo, p + off, n as usize)
+        }
+        return ubo
+    }
+    rt.mem_copy(ubo, rs + (R_PUSH as u64) * 8 as u64, PUSH_WORDS * 8)
+    return ubo
+}
+
+fn run_batch(rs: u64, f: *mut raster.Frame, p: u64, indexed: bool, first: u64, voff: i64, t0: u64, nt: u64) {
+    let topo: u64 = rt.ld64(p, vkpipe.P_TOPO)
+    var stride: usize = (rt.ld64(p, vkpipe.P_NLOC) as usize) * 4
+    if stride < 4 { stride = 4 }
+    let nv: usize = (nt as usize) * 3
+    let attrs: u64 = rt.heap_alloc(nv * stride * 4)
+    var j: usize = 0
+    while j < nv {
+        let row: u64 = attrs + (j as u64) * (stride as u64) * 4 as u64
+        var c: usize = 0
+        while c < stride {
+            raster.st_f32(row, c, 0.0f)
+            if c % 4 == 3 { raster.st_f32(row, c, 1.0f) }
+            c = c + 1
+        }
+        let vn: u64 = vertex_number(rs, indexed, tri_vertex(topo, t0 + (j as u64) / 3 as u64, (j as u64) % 3 as u64), first, voff)
+        var a: usize = 0
+        while a < (rt.ld64(p, vkpipe.P_NATTR) as usize) {
+            fetch_attr(rs, p, a, vn, row)
+            a = a + 1
+        }
+        j = j + 1
+    }
+    let ubo: u64 = build_ubo(rs)
+    let flags: u64 = rt.ld64(p, vkpipe.P_FLAGS)
+    raster.frame_set_program(f, rt.ld64(p, vkpipe.P_FS))
+    (*f).mode = raster.MODE_VM
+    raster.frame_set_kills(f, rt.ld64(p, vkpipe.P_KILLS) != 0 as u64)
+    raster.frame_set_flat(f, rt.ld64(p, vkpipe.P_NFLAT) as i32)
+    raster.frame_set_ubo(f, ubo)
+    raster.frame_set_blend(f, (flags & vkpipe.F_BLEND) != 0 as u64)
+    raster.frame_set_blend_premul(f, (flags & vkpipe.F_PREMUL) != 0 as u64)
+    (*f).depth_test = (flags & vkpipe.F_DEPTH) != 0 as u64 && rt.ld64(rs, R_DIMG) != 0 as u64
+    bind_textures(rs, f)
+    apply_scissor(rs, f)
+    vertex.vs_run(f, rt.ld64(p, vkpipe.P_VS), attrs, stride, nv, 0)
+    apply_viewport(rs, f, nv)
+    (*f).ntri = nt as i32
+    raster.frame_draw(f, 0 as u64)
+    rt.heap_free(ubo, UBO_BYTES)
+    rt.heap_free(attrs, nv * stride * 4)
+}
+
+fn draw(rs: u64, rec: u64, indexed: bool) {
+    let fp: u64 = rt.ld64(rs, R_FRAME)
+    if fp == 0 as u64 { return }
+    let f: *mut raster.Frame = fp as *mut raster.Frame
+    let p: u64 = vkpipe.pipe_state(rt.ld64(rs, R_PIPE))
+    if p == 0 as u64 { return }
+    if rt.ld64(p, vkpipe.P_VS) == 0 as u64 { return }
+    if rt.ld64(p, vkpipe.P_FS) == 0 as u64 { return }
+    var voff: i64 = 0 as i64
+    if indexed { voff = rt.ld64(rec, 4) as i64 }
+    var first: u64 = 0 as u64
+    first = rt.ld64(rec, 3)
+    let total: u64 = tri_count(rt.ld64(p, vkpipe.P_TOPO), rt.ld64(rec, 1))
+    var t0: u64 = 0 as u64
+    while t0 < total {
+        var nt: u64 = total - t0
+        if nt > (MAX_TRI as u64) { nt = MAX_TRI as u64 }
+        run_batch(rs, f, p, indexed, first, voff, t0, nt)
+        t0 = t0 + nt
+    }
+}
+
+fn rs_exec(rs: u64, op: u64, rec: u64) {
+    if op == vkcmd.OP_BEGIN_RENDERING { begin_rendering(rs, rec) }
+    if op == vkcmd.OP_END_RENDERING { end_rendering(rs) }
+    if op == vkcmd.OP_BIND_PIPELINE { bind_pipeline(rs, rec) }
+    if op == vkcmd.OP_BIND_VERTEX { bind_vertex(rs, rec) }
+    if op == vkcmd.OP_BIND_INDEX { bind_index(rs, rec) }
+    if op == vkcmd.OP_BIND_SET { bind_set(rs, rec) }
+    if op == vkcmd.OP_PUSH { push_constants(rs, rec) }
+    if op == vkcmd.OP_VIEWPORT {
+        rt.mem_copy(rs + (R_VP as u64) * 8 as u64, rec + 8 as u64, 24)
+        rt.st64(rs, R_HASVP, 1 as u64)
+    }
+    if op == vkcmd.OP_SCISSOR {
+        rt.mem_copy(rs + (R_SC as u64) * 8 as u64, rec + 8 as u64, 16)
+        rt.st64(rs, R_HASSC, 1 as u64)
+    }
+    if op == vkcmd.OP_DRAW { draw(rs, rec, false) }
+    if op == vkcmd.OP_DRAW_INDEXED { draw(rs, rec, true) }
+}
