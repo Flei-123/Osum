@@ -1,0 +1,74 @@
+profile kernel
+
+import ulib
+import libc.mem
+import libc.regio
+import libc.text
+
+export { u_start }
+
+const PAGE: u64 = 4096
+const DEFAULT_MIB: u64 = 96
+
+fn stamp(i: u64, round: u64) -> u64 {
+    return (i + 1) * 2654435761 + round * 40503
+}
+
+fn page_at(pages: u64, k: u64, backward: bool) -> u64 {
+    if backward {
+        return pages - 1 - k
+    }
+    return k
+}
+
+fn fill(base: u64, pages: u64, round: u64, backward: bool) {
+    var k: u64 = 0
+    while k < pages {
+        let i: u64 = page_at(pages, k, backward)
+        let p: u64 = base + i * PAGE
+        regio.write64(p, stamp(i, round))
+        regio.write64(p + PAGE - 8, stamp(i, round) ^ 0xFFFF)
+        k = k + 1
+    }
+}
+
+fn verify(base: u64, pages: u64, round: u64, backward: bool) -> u64 {
+    var bad: u64 = 0
+    var k: u64 = 0
+    while k < pages {
+        let i: u64 = page_at(pages, k, backward)
+        let p: u64 = base + i * PAGE
+        if regio.read64(p) != stamp(i, round) || regio.read64(p + PAGE - 8) != (stamp(i, round) ^ 0xFFFF) {
+            bad = bad + 1
+        }
+        k = k + 1
+    }
+    return bad
+}
+
+fn u_start(args: u64) -> u64 {
+    var s_pages: [u8; 16] = "swaptest: pages\0"
+    var s_p1: [u8; 19] = "swaptest: pass1 b\0\0"
+    var s_p2: [u8; 18] = "swaptest: pass2 b\0"
+    var s_p3: [u8; 18] = "swaptest: pass3 b\0"
+    var s_fail: [u8; 17] = "swaptest: nomap\0\0"
+    var s_done: [u8; 15] = "swaptest: done\0"
+    var mib: u64 = DEFAULT_MIB
+    if ulib.arg_count(args) > 1 {
+        mib = text.number(ulib.arg_at(args, 1))
+    }
+    let pages: u64 = mib * 256
+    let base: u64 = mem.map_pages(pages * PAGE)
+    if base == 0 -% 1 || base == 0 {
+        ulib.say_line((&s_fail[0]) as u64, 0)
+        return 2
+    }
+    ulib.say_line((&s_pages[0]) as u64, pages)
+    fill(base, pages, 1, false)
+    ulib.say_line((&s_p1[0]) as u64, verify(base, pages, 1, true))
+    fill(base, pages, 2, false)
+    ulib.say_line((&s_p2[0]) as u64, verify(base, pages, 2, true))
+    ulib.say_line((&s_p3[0]) as u64, verify(base, pages, 2, false))
+    ulib.say_line((&s_done[0]) as u64, 0)
+    return 0
+}

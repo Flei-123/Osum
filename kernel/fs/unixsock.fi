@@ -2,7 +2,7 @@
 profile kernel
 
 import lib.kstate
-import mm.mem
+import mm.mmframe
 import sched.sched
 import sync.atomic
 import fs.file
@@ -264,7 +264,7 @@ fn ensure_ring(state: u64, i: u64) -> u64 {
     if r != 0 {
         return r
     }
-    r = mem.frame_alloc(state)
+    r = mmframe.frame_alloc(state)
     if r == 0 {
         return 0
     }
@@ -294,7 +294,7 @@ fn sock_free(state: u64, i: u64) {
             }
             q = q + 1
         }
-        mem.frame_free(state, r)
+        mmframe.frame_free(state, r)
     }
     let nmi: u64 = kstate.get(state, sk_at(i) + SK_NAME)
     if nmi < UNAME_MAX {
@@ -974,7 +974,7 @@ fn shm_wrap(state: u64, base: u64, pages: u64, flags: u64) -> u64 {
     }
     kstate.set(state, sm_at(i) + SM_BASE, base)
     kstate.set(state, sm_at(i) + SM_PAGES, pages)
-    kstate.set(state, sm_at(i) + SM_SIZE, pages * mem.FRAME_SIZE)
+    kstate.set(state, sm_at(i) + SM_SIZE, pages * mmframe.FRAME_SIZE)
     kstate.set(state, sm_at(i) + SM_FLAGS, flags | SMF_CONTIG | SMF_KEEP)
     kstate.set(state, sm_at(i) + SM_REFS, 2)
     return i
@@ -1013,7 +1013,7 @@ fn map_release(state: u64, task: u64, addr: u64, len: u64) -> bool {
     while k < UMAP_MAX {
         if kstate.get(state, um_at(k)) == addr && addr != 0 {
             let w: u64 = kstate.get(state, um_at(k) + 8)
-            if (w & 0xFFFF) == task && (((w >> 32) & UM_PAGES_MASK) * mem.FRAME_SIZE) <= len {
+            if (w & 0xFFFF) == task && (((w >> 32) & UM_PAGES_MASK) * mmframe.FRAME_SIZE) <= len {
                 kstate.set(state, um_at(k), 0)
                 kstate.set(state, um_at(k) + 8, 0)
                 if (w & UM_WRITE) != 0 {
@@ -1111,7 +1111,7 @@ fn map_same_space(state: u64, a: u64, b: u64) -> bool {
 }
 
 fn map_arena_find(state: u64, task: u64, pages: u64, lo: u64, hi: u64) -> u64 {
-    let want: u64 = pages * mem.FRAME_SIZE
+    let want: u64 = pages * mmframe.FRAME_SIZE
     var cand: u64 = lo
     var again: bool = true
     while again {
@@ -1125,7 +1125,7 @@ fn map_arena_find(state: u64, task: u64, pages: u64, lo: u64, hi: u64) -> u64 {
             if b != 0 {
                 let w: u64 = kstate.get(state, um_at(k) + 8)
                 if (w & UM_LAZY) != 0 && map_same_space(state, w & 0xFFFF, task) {
-                    let e: u64 = b + ((w >> 32) & UM_PAGES_MASK) * mem.FRAME_SIZE
+                    let e: u64 = b + ((w >> 32) & UM_PAGES_MASK) * mmframe.FRAME_SIZE
                     if b < cand + want && e > cand {
                         cand = e
                         again = true
@@ -1242,11 +1242,11 @@ fn shm_demand(state: u64, cur: u64, addr: u64, err: u64) -> u64 {
         if b != 0 && addr >= b {
             let w: u64 = kstate.get(state, um_at(k) + 8)
             let pages: u64 = (w >> 32) & UM_PAGES_MASK
-            if (w & UM_LAZY) != 0 && addr < b + pages * mem.FRAME_SIZE && map_same_space(state, w & 0xFFFF, cur) {
+            if (w & UM_LAZY) != 0 && addr < b + pages * mmframe.FRAME_SIZE && map_same_space(state, w & 0xFFFF, cur) {
                 if (err & 2) != 0 && (w & UM_WRITE) == 0 {
                     return 0
                 }
-                let f: u64 = shm_frame_demand(state, (w >> 16) & 0xFFFF, (addr - b) / mem.FRAME_SIZE)
+                let f: u64 = shm_frame_demand(state, (w >> 16) & 0xFFFF, (addr - b) / mmframe.FRAME_SIZE)
                 if f == 0 {
                     return 0
                 }
@@ -1301,7 +1301,7 @@ fn shm_frame(state: u64, i: u64, p: u64) -> u64 {
         return 0
     }
     if shm_contig(state, i) {
-        return kstate.get(state, sm_at(i) + SM_BASE) + p * mem.FRAME_SIZE
+        return kstate.get(state, sm_at(i) + SM_BASE) + p * mmframe.FRAME_SIZE
     }
     if p >= SHM_PAGES_LIMIT {
         return 0
@@ -1323,7 +1323,7 @@ fn shm_tab_for(state: u64, i: u64, n: u64) -> u64 {
     if want <= have {
         return 0
     }
-    let run: u64 = mem.frame_run(state, want)
+    let run: u64 = mmframe.frame_run(state, want)
     if run == 0 {
         return errno.E_NOMEM
     }
@@ -1339,7 +1339,7 @@ fn shm_tab_for(state: u64, i: u64, n: u64) -> u64 {
             regio.write64(run + o * 8, regio.read64(old + o * 8))
             o = o + 1
         }
-        mem.frame_free_run(state, old, have)
+        mmframe.frame_free_run(state, old, have)
     }
     kstate.set(state, sm_at(i) + SM_BASE, run)
     kstate.set(state, sm_at(i) + SM_TABN, want)
@@ -1361,12 +1361,12 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
         if have != 0 || n > SHM_PAGES_CONTIG {
             return errno.E_NOSPC
         }
-        let run: u64 = mem.frame_run(state, n)
+        let run: u64 = mmframe.frame_run(state, n)
         if run == 0 {
             return errno.E_NOMEM
         }
         var o: u64 = 0
-        while o < n * mem.FRAME_SIZE / 8 {
+        while o < n * mmframe.FRAME_SIZE / 8 {
             regio.write64(run + o * 8, 0)
             o = o + 1
         }
@@ -1387,12 +1387,12 @@ fn shm_grow(state: u64, i: u64, n: u64) -> u64 {
         eager = SHM_PAGES_MAX
     }
     while have < eager {
-        let f: u64 = mem.frame_alloc(state)
+        let f: u64 = mmframe.frame_alloc(state)
         if f == 0 {
             return errno.E_NOMEM
         }
         var o: u64 = 0
-        while o < mem.FRAME_SIZE / 8 {
+        while o < mmframe.FRAME_SIZE / 8 {
             regio.write64(f + o * 8, 0)
             o = o + 1
         }
@@ -1426,18 +1426,18 @@ fn shm_frame_demand(state: u64, i: u64, p: u64) -> u64 {
     if have != 0 {
         return have
     }
-    let f: u64 = mem.frame_alloc_user(state)
+    let f: u64 = mmframe.frame_alloc_user(state)
     if f == 0 {
         return 0
     }
     var o: u64 = 0
-    while o < mem.FRAME_SIZE / 8 {
+    while o < mmframe.FRAME_SIZE / 8 {
         regio.write64(f + o * 8, 0)
         o = o + 1
     }
     let old: u64 = atomic.cas(slot, 0, f)
     if old != 0 {
-        mem.frame_free(state, f)
+        mmframe.frame_free(state, f)
         return old
     }
     return f
@@ -1573,7 +1573,7 @@ fn shm_free(state: u64, i: u64) {
     let n: u64 = kstate.get(state, sm_at(i) + SM_PAGES)
     if shm_contig(state, i) {
         if (shm_flags(state, i) & SMF_KEEP) == 0 {
-            mem.frame_free_run(state, kstate.get(state, sm_at(i) + SM_BASE), n)
+            mmframe.frame_free_run(state, kstate.get(state, sm_at(i) + SM_BASE), n)
         }
         kstate.set(state, sm_at(i) + SM_BASE, 0)
         kstate.set(state, sm_at(i) + SM_FLAGS, 0)
@@ -1594,14 +1594,14 @@ fn shm_free(state: u64, i: u64) {
         if slot != 0 {
             let f: u64 = regio.read64(slot)
             if f != 0 {
-                mem.frame_free(state, f)
+                mmframe.frame_free(state, f)
             }
             regio.write64(slot, 0)
         }
         p = p + 1
     }
     if kstate.get(state, sm_at(i) + SM_TABN) != 0 {
-        mem.frame_free_run(state, kstate.get(state, sm_at(i) + SM_BASE), kstate.get(state, sm_at(i) + SM_TABN))
+        mmframe.frame_free_run(state, kstate.get(state, sm_at(i) + SM_BASE), kstate.get(state, sm_at(i) + SM_TABN))
         kstate.set(state, sm_at(i) + SM_BASE, 0)
         kstate.set(state, sm_at(i) + SM_TABN, 0)
     }

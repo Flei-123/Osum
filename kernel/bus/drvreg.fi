@@ -7,8 +7,8 @@ import bus.pci
 import serial
 import bus.drvclass
 
-export { class_of, mark_ok, mark_fail, render, boot_report, rows, found_of, state_of, claimed, acpi_row, row_name, pci_row,
-    D_NVME, D_AHCI, D_IDE, D_XHCI, D_E1000, D_R8169, D_HDA, D_VIRTIO_NET, D_VMSVGA, D_VIRTIO_BLK, D_USB_NET, D_IWL, D_USB_BT,
+export { class_of, mark_ok, mark_fail, render, boot_report, rows, found_of, state_of, claimed, acpi_row, row_name, pci_row, find, find_either,
+    D_NVME, D_AHCI, D_AHCI_RAID, D_IDE, D_EHCI, D_OHCI, D_AC97, D_XHCI, D_E1000, D_R8169, D_HDA, D_VIRTIO_NET, D_VMSVGA, D_VIRTIO_BLK, D_USB_NET, D_IWL, D_USB_BT,
     S_ABSENT, S_SEEN, S_BOUND, S_FAILED }
 
 const MAXR: u64 = 40
@@ -70,7 +70,9 @@ const D_USB_HID: u64 = 22
 const D_USB_NET: u64 = 23
 const D_USB_HUB: u64 = 24
 const D_USB_BT: u64 = 25
-const NROWS: u64 = 26
+const D_AC97: u64 = 26
+const D_AHCI_RAID: u64 = 27
+const NROWS: u64 = 28
 
 fn ld8(p: u64) -> u64 {
     let b: u8 = *((p) as *mut u8)
@@ -142,7 +144,9 @@ fn builtin() {
     var n23: [u8; 8] = "usb-net\0"
     var n24: [u8; 8] = "usb-hub\0"
     var n25: [u8; 7] = "usb-bt\0"
-    reg((&n0[0]) as u64, 1, 0x0, 0x0, 0x108, 0x1FF, 0x0)
+    var n26: [u8; 5] = "ac97\0"
+    var n27: [u8; 10] = "ahci-raid\0"
+    reg((&n0[0]) as u64, 1, 0x0, 0x0, 0x108, 0x2, 0x0)
     reg((&n1[0]) as u64, 1, 0x0, 0x0, 0x106, 0x1, 0x0)
     reg((&n2[0]) as u64, 1, 0x0, 0x0, 0x101, 0x1FF, 0x0)
     reg((&n3[0]) as u64, 1, 0x1AF4, 0x0, 0x100, 0x1FF, 0x0)
@@ -154,7 +158,7 @@ fn builtin() {
     reg((&n9[0]) as u64, 1, 0x1AF4, 0x0, 0x200, 0x1FF, 0x0)
     reg((&n10[0]) as u64, 1, 0x8086, 0x0, 0x280, 0x1FF, 0x0)
     reg((&n11[0]) as u64, 1, 0x0, 0x0, 0x403, 0x1FF, 0x0)
-    reg((&n12[0]) as u64, 1, 0x15AD, 0x405, 0x300, 0x1FF, 0x0)
+    reg((&n12[0]) as u64, 1, 0x15AD, 0x405, 0xFFFF, 0x1FF, 0x0)
     reg((&n13[0]) as u64, 1, 0x1AF4, 0x1050, 0xFFFF, 0x1FF, 0x0)
     reg((&n14[0]) as u64, 1, 0x8086, 0x0, 0xC80, 0x1FF, 0x0)
     reg((&n15[0]) as u64, 2, 0x0, 0x0, 0xFFFF, 0x1FF, 0x33303330504E50)
@@ -168,6 +172,8 @@ fn builtin() {
     reg((&n23[0]) as u64, 3, 0x0, 0x0, 0x200, 0x1FF, 0x0)
     reg((&n24[0]) as u64, 3, 0x0, 0x0, 0x900, 0x1FF, 0x0)
     reg((&n25[0]) as u64, 3, 0x0, 0x0, 0xE00, 0x1FF, 0x0)
+    reg((&n26[0]) as u64, 1, 0x0, 0x0, 0x401, 0x1FF, 0x0)
+    reg((&n27[0]) as u64, 1, 0x8086, 0x0, 0x104, 0x1FF, 0x0)
     set_class(D_NVME, drvclass.CLS_BLOCK)
     set_class(D_AHCI, drvclass.CLS_BLOCK)
     set_class(D_IDE, drvclass.CLS_BLOCK)
@@ -179,6 +185,8 @@ fn builtin() {
     set_class(D_USB_NET, drvclass.CLS_NET_ETH)
     set_class(D_IWL, drvclass.CLS_NET_WLAN)
     set_class(D_HDA, drvclass.CLS_AUDIO)
+    set_class(D_AC97, drvclass.CLS_AUDIO)
+    set_class(D_AHCI_RAID, drvclass.CLS_BLOCK)
     set_class(D_PS2, drvclass.CLS_INPUT)
     set_class(D_I2C_HID, drvclass.CLS_INPUT)
     set_class(D_USB_HID, drvclass.CLS_INPUT)
@@ -552,4 +560,35 @@ fn boot_report(state: u64) {
         }
         i = i + 1
     }
+}
+
+fn find(state: u64, row: u64, nth: u64) -> u64 {
+    ensure()
+    if row >= nrows || tab[(row * FIELDS + F_BUS) as usize] != BUS_PCI {
+        return pci.MAX_DEV
+    }
+    if kstate.mode_on(state, kstate.M_NOMATCH) {
+        return pci.MAX_DEV
+    }
+    var seen: u64 = 0
+    var i: u64 = 0
+    let total: u64 = pci.count(state)
+    while i < total {
+        if pci_match(state, row, i) {
+            if seen == nth {
+                return i
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    return pci.MAX_DEV
+}
+
+fn find_either(state: u64, first: u64, second: u64) -> u64 {
+    let i: u64 = find(state, first, 0)
+    if i < pci.MAX_DEV {
+        return i
+    }
+    return find(state, second, 0)
 }

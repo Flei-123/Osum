@@ -1,0 +1,227 @@
+import serial
+import lib.kstate
+import mm.mmframe
+import mm.mmheap
+
+export {
+    check,
+    fill,
+    frame_selftest,
+    heap_selftest,
+    probe_high,
+    stress
+}
+
+fn stress(state: u64, want: u64) -> bool {
+    let rot: u64 = 0xA5A5A5A5A5A5A5A5
+    let before: u64 = mmframe.frames_free(state)
+    var head: u64 = 0
+    var got: u64 = 0
+    var high: u64 = 0
+    var going: bool = true
+    while got < want && going {
+        let f: u64 = mmframe.frame_alloc(state)
+        if f == 0 {
+            going = false
+        } else {
+            __mmio_write64(f as *mut u64, head)
+            __mmio_write64((f + 8) as *mut u64, f ^ rot)
+            head = f
+            if f > high {
+                high = f
+            }
+            got = got + 1
+        }
+    }
+    kstate.set(state, kstate.STRESS_GOT, got)
+    kstate.set(state, kstate.STRESS_HIGH, high)
+    kstate.set(state, kstate.STRESS_BEFORE, before)
+    kstate.set(state, kstate.STRESS_LOW, mmframe.frames_free(state))
+
+    var bad: u64 = 0
+    var seen: u64 = 0
+    var f2: u64 = head
+    while f2 != 0 {
+        if __mmio_read64((f2 + 8) as *mut u64) != (f2 ^ rot) {
+            bad = bad + 1
+        }
+        let next: u64 = __mmio_read64(f2 as *mut u64)
+        mmframe.frame_free(state, f2)
+        seen = seen + 1
+        f2 = next
+    }
+    kstate.set(state, kstate.STRESS_BAD, bad)
+    kstate.set(state, kstate.STRESS_SEEN, seen)
+    kstate.set(state, kstate.STRESS_AFTER, mmframe.frames_free(state))
+    return bad == 0 && seen == got && mmframe.frames_free(state) == before
+}
+
+fn probe_high(state: u64) -> bool {
+    let marker: u64 = 0xDEADBEEFCAFEBABE
+    let rot: u64 = 0x5A5A5A5A5A5A5A5A
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    if frames < 2 {
+        return false
+    }
+    var f: u64 = frames - 1
+    var found: u64 = 0
+    while f > 0 && found == 0 {
+        if !mmframe.bit_get(bitmap, f) {
+            found = f
+        }
+        f = f - 1
+    }
+    if found == 0 {
+        return false
+    }
+    mmframe.bit_set(bitmap, found)
+    let addr: u64 = found * mmframe.FRAME_SIZE
+    __mmio_write64(addr as *mut u64, marker)
+    __mmio_write64((addr + mmframe.FRAME_SIZE - 8) as *mut u64,
+        addr ^ rot)
+    let ok1: bool = __mmio_read64(addr as *mut u64) == marker
+    let ok2: bool = __mmio_read64((addr + mmframe.FRAME_SIZE - 8) as *mut u64)
+        == (addr ^ rot)
+    mmframe.bit_clear(bitmap, found)
+    kstate.set(state, kstate.PROBE_ADDR, addr)
+    return ok1 && ok2
+}
+
+fn frame_selftest(state: u64) -> bool {
+    var head: [u8; 13] = "frame test: \0"
+    var s_a: [u8; 3] = "a=\0"
+    var s_b: [u8; 5] = "  b=\0"
+    var s_c: [u8; 5] = "  c=\0"
+    var s_again: [u8; 11] = "  again b=\0"
+    var s_free: [u8; 8] = "  free=\0"
+    let before: u64 = mmframe.frames_free(state)
+    let a: u64 = mmframe.frame_alloc(state)
+    let b: u64 = mmframe.frame_alloc(state)
+    let c: u64 = mmframe.frame_alloc(state)
+    mmframe.frame_free(state, b)
+    let again: u64 = mmframe.frame_alloc(state)
+    serial.puts((&head[0]) as u64)
+    serial.puts((&s_a[0]) as u64)
+    serial.hex(a)
+    serial.puts((&s_b[0]) as u64)
+    serial.hex(b)
+    serial.puts((&s_c[0]) as u64)
+    serial.hex(c)
+    serial.puts((&s_again[0]) as u64)
+    serial.hex(again)
+    serial.puts((&s_free[0]) as u64)
+    serial.dec(mmframe.frames_free(state))
+    serial.nl()
+    var ok: bool = true
+    if a == 0 || b == 0 || c == 0 || again == 0 {
+        ok = false
+    }
+    if a == b || b == c || a == c {
+        ok = false
+    }
+    if a % mmframe.FRAME_SIZE != 0 || b % mmframe.FRAME_SIZE != 0 || c % mmframe.FRAME_SIZE != 0 {
+        ok = false
+    }
+    if again != b {
+        ok = false
+    }
+    if mmframe.frames_free(state) != before - 3 {
+        ok = false
+    }
+    mmframe.frame_free(state, a)
+    mmframe.frame_free(state, again)
+    mmframe.frame_free(state, c)
+    if mmframe.frames_free(state) != before {
+        ok = false
+    }
+    return ok
+}
+
+fn heap_selftest(state: u64) -> bool {
+    var head: [u8; 12] = "heap test: \0"
+    var s_p1: [u8; 4] = "p1=\0"
+    var s_p2: [u8; 6] = "  p2=\0"
+    var s_p3: [u8; 6] = "  p3=\0"
+    var s_reuse: [u8; 9] = "  reuse=\0"
+    var s_blocks: [u8; 11] = "  blocks=\0\0"
+    var s_refused: [u8; 14] = "  1M refused=\0"
+    let p1: u64 = mmheap.kalloc(state, 24)
+    let p2: u64 = mmheap.kalloc(state, 100)
+    let p3: u64 = mmheap.kalloc(state, 24)
+    fill(p1, 24, 0x11)
+    fill(p2, 100, 0x22)
+    fill(p3, 24, 0x33)
+    var ok: bool = true
+    if p1 == 0 || p2 == 0 || p3 == 0 {
+        ok = false
+    }
+    if p1 % 16 != 0 || p2 % 16 != 0 || p3 % 16 != 0 {
+        ok = false
+    }
+    if p1 + 24 > p2 || p2 + 100 > p3 {
+        ok = false
+    }
+    if !check(p1, 24, 0x11) || !check(p2, 100, 0x22) || !check(p3, 24, 0x33) {
+        ok = false
+    }
+    let toobig: u64 = mmheap.kalloc(state, 1024 * 1024)
+    if toobig != 0 {
+        ok = false
+    }
+    mmheap.kfree(state, p2)
+    let reuse: u64 = mmheap.kalloc(state, 100)
+    if reuse != p2 {
+        ok = false
+    }
+    if !check(p1, 24, 0x11) || !check(p3, 24, 0x33) {
+        ok = false
+    }
+    serial.puts((&head[0]) as u64)
+    serial.puts((&s_p1[0]) as u64)
+    serial.hex(p1)
+    serial.puts((&s_p2[0]) as u64)
+    serial.hex(p2)
+    serial.puts((&s_p3[0]) as u64)
+    serial.hex(p3)
+    serial.puts((&s_reuse[0]) as u64)
+    serial.hex(reuse)
+    serial.puts((&s_blocks[0]) as u64)
+    serial.dec(mmheap.heap_blocks(state, false))
+    serial.puts((&s_refused[0]) as u64)
+    if toobig == 0 {
+        serial.dec(1)
+    } else {
+        serial.dec(0)
+    }
+    serial.nl()
+    mmheap.kfree(state, p1)
+    mmheap.kfree(state, reuse)
+    mmheap.kfree(state, p3)
+    if mmheap.heap_blocks(state, false) != 1 {
+        ok = false
+    }
+    if mmheap.heap_blocks(state, true) != 0 {
+        ok = false
+    }
+    return ok
+}
+
+fn fill(p: u64, n: u64, value: u64) {
+    var i: u64 = 0
+    while i < n {
+        kstate.set8(p + i, value as u8)
+        i = i + 1
+    }
+}
+
+fn check(p: u64, n: u64, value: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(p + i) != value {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}

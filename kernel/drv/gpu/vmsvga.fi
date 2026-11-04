@@ -18,16 +18,18 @@
 
 import lib.kstate
 import bus.pci
+import bus.drvreg
+import gfx.displayclass
 import serial
 import gfx.fb
 import gfx.cursor
-import mm.mem
+import mm.mmframe
 import arch.x86_64.apic
 import arch.arch
 import libc.regio
 
 export {
-    probe, boot_mbi, init, is_ready, present, panic_present, say, shut_down,
+    ops, probe, boot_mbi, init, is_ready, present, panic_present, say, shut_down,
     set_mode, resize, host_pending, boot_hint, boot_handled, vmm_init, vmm_say, vmm_fake, vmm_up, resizes, resize_errors,
     cursor_ready, cursor_show, cursor_bewegen, cursor_aus, cursor_an,
     cursor_defs, cursor_moves, cursor_failed,
@@ -253,17 +255,7 @@ fn has_cap(state: u64, c: u64) -> bool {
 // ------------------------------------------------------------ finding + probing
 
 fn find(state: u64) -> u64 {
-    let n: u64 = pci.count(state)
-    var i: u64 = 0
-    while i < n {
-        if pci.get(state, i, pci.E_VENDOR) == VENDOR_VMWARE {
-            if pci.get(state, i, pci.E_DEVICE) == DEVICE_SVGA2 {
-                return i
-            }
-        }
-        i = i + 1
-    }
-    return pci.MAX_DEV
+    return drvreg.find(state, drvreg.D_VMSVGA, 0)
 }
 
 // Find the device, switch on IO + MEM decoding, negotiate the version, read the capabilities and sizes.
@@ -1269,7 +1261,7 @@ fn vmm_init(state: u64) {
     }
     let d: u64 = pci.get(state, i, pci.E_BDF)
     pci.cfg_write16(d, CFG_COMMAND, pci.cfg_read16(d, CFG_COMMAND) | 3)
-    let p: u64 = mem.frame_run(state, 1)
+    let p: u64 = mmframe.frame_run(state, 1)
     if p == 0 || p >= 0x100000000 {
         return
     }
@@ -1443,7 +1435,7 @@ fn resized(state: u64) {
     let pres: u64 = kstate.get(state, s(S_PRES))
     let psz: u64 = kstate.get(state, s(S_PRESSZ))
     if pres != 0 {
-        mem.frame_free_run(state, pres, (psz + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE)
+        mmframe.frame_free_run(state, pres, (psz + mmframe.FRAME_SIZE - 1) / mmframe.FRAME_SIZE)
         kstate.set(state, s(S_PRES), 0)
         kstate.set(state, s(S_PRESSZ), 0)
     }
@@ -1462,8 +1454,8 @@ fn alloc_verify(state: u64) {
         return
     }
     let bytes: u64 = kstate.get(state, s(S_H)) * fb.panel_pitch(state)
-    let fr: u64 = (bytes + mem.FRAME_SIZE - 1) / mem.FRAME_SIZE
-    let p: u64 = mem.frame_run(state, fr)
+    let fr: u64 = (bytes + mmframe.FRAME_SIZE - 1) / mmframe.FRAME_SIZE
+    let p: u64 = mmframe.frame_run(state, fr)
     if p == 0 {
         return
     }
@@ -1645,4 +1637,33 @@ fn pulse_say(state: u64) {
     serial.puts((&s_pio[0]) as u64)
     serial.dec(kstate.get(state, s(S_PIO)))
     serial.nl()
+}
+
+fn class_vram_total(state: u64) -> u64 {
+    if vram_bytes(state) != 0 {
+        return vram_bytes(state)
+    }
+    return displayclass.NA
+}
+
+fn class_vram_used(state: u64) -> u64 {
+    if fb.bytes(state) != 0 {
+        return fb.bytes(state)
+    }
+    return displayclass.NA
+}
+
+fn ops() -> displayclass.DisplayOps {
+    var o: displayclass.DisplayOps = displayclass.null_ops()
+    o.ready = is_ready
+    o.present = present
+    o.panic_present = panic_present
+    o.frames = present_frames
+    o.vram_total = class_vram_total
+    o.vram_used = class_vram_used
+    o.hw_cursor = cursor_ready
+    o.host_pending = host_pending
+    o.kind = displayclass.KIND_VMSVGA
+    o.tag = 0x6d7673
+    return o
 }

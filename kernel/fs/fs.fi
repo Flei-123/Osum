@@ -54,6 +54,8 @@ import block.blk
 import sync.atomic
 import arch.cpu
 import fs.nidx
+import fs.dcache
+import fs.pcache
 import fs.ofsj
 import fs.ofsext
 import sched.time
@@ -841,6 +843,7 @@ fn inode_release(state: u64, ino: u64) -> bool {
     if hint != 0 && ino < hint {
         kstate.set(state, kstate.FSG_OFF + G_IHINT, ino)
     }
+    pcache.drop_ino(state, ino)
     return inode_set(state, ino, I_TYPE, T_FREE)
 }
 
@@ -1290,6 +1293,11 @@ fn walk_level(state: u64, block: u64, k: u64, grow: bool) -> u64 {
 
 // Every block of a file back to the bitmap.
 fn file_truncate(state: u64, ino: u64) {
+    file_truncate_run(state, ino)
+    pcache.drop_ino(state, ino)
+}
+
+fn file_truncate_run(state: u64, ino: u64) {
     let vk_flags: u64 = enter(state)
     free_batch_begin()
     var i: u64 = 0
@@ -1548,6 +1556,12 @@ fn size_write(state: u64, ino: u64, new_size: u64, only_grow: bool) -> bool {
 // ROUND UNTERBAU: ftruncate() to any size. Growing leaves a hole (a hole reads as zeros). Shrinking first zeroes what lies beyond the
 // new end in the blocks that exist -- otherwise a later growth (or a write past the end) would show the old content again.
 fn set_size(state: u64, ino: u64, new_size: u64) -> bool {
+    let ok: bool = set_size_run(state, ino, new_size)
+    pcache.drop_ino(state, ino)
+    return ok
+}
+
+fn set_size_run(state: u64, ino: u64, new_size: u64) -> bool {
     let flags: u64 = enter(state)
     let old: u64 = inode_get(state, ino, I_SIZE)
     if new_size < old {
@@ -1601,6 +1615,7 @@ fn write_at(state: u64, ino: u64, off: u64, src: u64, len: u64) -> u64 {
     let n: u64 = write_at_scoped(state, ino, off, src, len)
     let flushed: bool = blk.wb_end(state)
     unlock_only(state, flags)
+    pcache.drop_ino(state, ino)
     if !flushed {
         return 0
     }
@@ -1777,6 +1792,7 @@ fn dir_add(state: u64, dir: u64, name: u64, ino: u64) -> bool {
     if write_at(state, dir, slot * de, buf_nm(state), de) != de {
         return false
     }
+    dcache.bump(state)
     if !punktname(name) {
         var kind: u64 = 0
         var sz: u64 = 0
@@ -1812,6 +1828,7 @@ fn dir_remove(state: u64, dir: u64, name: u64) -> u64 {
             octets.zero(buf_nm(state), dirent_size(state))
             write_at(state, dir, i * dirent_size(state), buf_nm(state),
                 dirent_size(state))
+            dcache.bump(state)
             if !punktname(name) {
                 var kind: u64 = 0
                 var sz: u64 = 0
@@ -2609,6 +2626,8 @@ fn mount(state: u64) -> bool {
     klog.say2(state, klog.L_INFO, lq(), (&l_ok[0]) as u64,
         version(state), total_blocks(state))
     kstate.set(state, kstate.FS_READY, 1)
+    dcache.bump(state)
+    pcache.drop_all(state)
     leave(state, flags)
     let js: u64 = regio.read64(buf_sb(state) + SB_JSTART)
     let jb: u64 = regio.read64(buf_sb(state) + SB_JBLOCKS)

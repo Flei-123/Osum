@@ -4,6 +4,10 @@ profile kernel
 import lib.kstate
 import serial
 import fs.mnt
+import fs.dcache
+import fs.pcache
+import mm.mmframe
+import diag.cmdopt
 import fs.vfsops
 import fs.ofs
 import fs.fsctx
@@ -20,10 +24,13 @@ export {
     mount_for, node_for, resolve, ops_of,
     v_readdir, v_attr, v_read, v_write, v_create, v_unlink, v_rename,
     v_trunc, can, rdonly, root_node, type_of, all_mode,
-    MAX_MNT
+    MAX_MNT, cache_words, cache_shrink, caches_up
 }
 
 const MAX_MNT: u64 = 8
+const READ_BYPASS: u64 = 65536
+const PCACHE_LOW_FRAMES: u64 = 4096
+const PCACHE_SHRINK_BATCH: u64 = 64
 
 fn ops_of(t: u64) -> vfsops.Ops {
     if t == vfsops.FS_PROC {
@@ -62,6 +69,118 @@ fn init(state: u64) {
     kstate.set(state, kstate.VFS_CROSSINGS, 0)
     kstate.set(state, kstate.VFS_OPS, 0)
     kstate.set(state, kstate.VFS_INDIRECT, 0)
+    cache_words(state)
+}
+
+fn cache_words(state: u64) {
+    var w_nd: [u8; 9] = "nodcache\0"
+    var w_np: [u8; 9] = "nopcache\0"
+    var w_di: [u8; 10] = "dcnoinval\0"
+    var w_pi: [u8; 10] = "pcnoinval\0"
+    if cmdopt.has(state, (&w_nd[0]) as u64) {
+        kstate.mode_add(state, kstate.M_NODCACHE)
+    }
+    if cmdopt.has(state, (&w_np[0]) as u64) {
+        kstate.mode_add(state, kstate.M_NOPCACHE)
+    }
+    if cmdopt.has(state, (&w_di[0]) as u64) {
+        kstate.mode_add(state, kstate.M_DCNOINVAL)
+    }
+    if cmdopt.has(state, (&w_pi[0]) as u64) {
+        kstate.mode_add(state, kstate.M_PCNOINVAL)
+    }
+}
+
+fn region_up(state: u64, base_slot: u64, tried_slot: u64, frames: u64) -> u64 {
+    let b: u64 = kstate.get(state, base_slot)
+    if b != 0 {
+        return b
+    }
+    if kstate.get(state, kstate.BITMAP) == 0 || kstate.add(state, tried_slot, 1) != 1 {
+        return 0
+    }
+    return mmframe.frame_run(state, frames)
+}
+
+fn caches_up(state: u64) {
+    if kstate.get(state, kstate.DCACHE_BASE) == 0 {
+        let r: u64 = region_up(state, kstate.DCACHE_BASE, kstate.DCACHE_TRIED, dcache.FRAMES)
+        if r != 0 {
+            dcache.attach(state, r)
+        }
+    }
+    if kstate.get(state, kstate.PCACHE_BASE) == 0 {
+        let r: u64 = region_up(state, kstate.PCACHE_BASE, kstate.PCACHE_TRIED, pcache.REGION_FRAMES)
+        if r != 0 {
+            pcache.attach(state, r)
+        }
+    }
+}
+
+fn cache_shrink(state: u64, pages: u64) -> u64 {
+    var freed: u64 = 0
+    while freed < pages {
+        let f: u64 = pcache.take_frame(state)
+        if f == 0 {
+            return freed
+        }
+        mmframe.frame_free(state, f)
+        freed = freed + 1
+    }
+    return freed
+}
+
+fn page_for_fill(state: u64, m: u64, node: u64, idx: u64) -> u64 {
+    if mmframe.frames_free(state) < PCACHE_LOW_FRAMES {
+        cache_shrink(state, PCACHE_SHRINK_BATCH)
+        if mmframe.frames_free(state) < PCACHE_LOW_FRAMES {
+            return 0
+        }
+    }
+    let slot: u64 = pcache.begin_fill(state, m, node, idx)
+    if slot == 0 {
+        return 0
+    }
+    if pcache.buffer_of(slot) == 0 {
+        let f: u64 = mmframe.frame_alloc(state)
+        if f == 0 {
+            pcache.abort_fill(state, slot)
+            return 0
+        }
+        pcache.attach_frame(state, slot, f)
+    }
+    return slot
+}
+
+fn cacheable(t: u64) -> bool {
+    return t == vfsops.FS_OFS || t == vfsops.FS_FAT || t == vfsops.FS_EXT4
+        || t == vfsops.FS_NTFS || t == vfsops.FS_EXFAT
+}
+
+fn lookup_cached(state: u64, m: u64, rest: u64) -> u64 {
+    let t: u64 = mnt.fstype(state, m)
+    let o: vfsops.Ops = ops_of(t)
+    if !cacheable(t) {
+        return o.lookup(state, m, rest)
+    }
+    caches_up(state)
+    let hit: u64 = dcache.probe(state, m, rest)
+    if hit == dcache.NEG {
+        return 0
+    }
+    if hit != dcache.MISS {
+        return hit
+    }
+    let st: u64 = dcache.stamp(state)
+    let r: u64 = o.lookup(state, m, rest)
+    if r != 0 || t != vfsops.FS_OFS || kstate.get(state, kstate.FS_READY) != 0 {
+        dcache.insert(state, m, rest, r, st)
+    }
+    return r
+}
+
+fn namespace_changed(state: u64) {
+    dcache.bump(state)
 }
 
 fn type_of(state: u64, m: u64) -> u64 {
@@ -148,8 +267,7 @@ fn node_for(state: u64, m: u64, path: u64) -> u64 {
         return 0
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
-    return o.lookup(state, m, rest)
+    return lookup_cached(state, m, rest)
 }
 
 fn resolve(state: u64, path: u64) -> u64 {
@@ -184,8 +302,62 @@ fn v_read(state: u64, m: u64, node: u64, off: u64, dst: u64,
         return 0
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    let o: vfsops.Ops = ops_of(mnt.fstype(state, m))
-    return o.read(state, m, node, off, dst, len)
+    let t: u64 = mnt.fstype(state, m)
+    let o: vfsops.Ops = ops_of(t)
+    if !cacheable(t) || len == 0 || len > READ_BYPASS {
+        pcache.note_bypass(state)
+        return o.read(state, m, node, off, dst, len)
+    }
+    return read_paged(state, o, m, node, off, dst, len)
+}
+
+fn read_paged(state: u64, o: vfsops.Ops, m: u64, node: u64, off: u64,
+    dst: u64, len: u64) -> u64 {
+    caches_up(state)
+    var done: u64 = 0
+    while done < len {
+        let pos: u64 = off + done
+        let idx: u64 = pos >> 12
+        let from: u64 = pos & 4095
+        var want: u64 = pcache.PAGE_BYTES - from
+        if want > len - done {
+            want = len - done
+        }
+        var got: u64 = pcache.read_hit(state, m, node, idx, from, want, dst + done)
+        if got == pcache.MISS {
+            let slot: u64 = page_for_fill(state, m, node, idx)
+            if slot == 0 {
+                let r: u64 = o.read(state, m, node, pos, dst + done, len - done)
+                if done == 0 || r > len - done {
+                    return r
+                }
+                return done + r
+            }
+            let buf: u64 = pcache.buffer_of(slot)
+            let r: u64 = o.read(state, m, node, idx << 12, buf, pcache.PAGE_BYTES)
+            if r > pcache.PAGE_BYTES {
+                pcache.abort_fill(state, slot)
+                if done == 0 {
+                    return r
+                }
+                return done
+            }
+            pcache.finish_fill(state, slot, m, node, idx, r)
+            got = 0
+            if r > from {
+                got = r - from
+                if got > want {
+                    got = want
+                }
+                pcache.copy_out(dst + done, buf + from, got)
+            }
+        }
+        done = done + got
+        if got < want {
+            return done
+        }
+    }
+    return done
 }
 
 fn v_write(state: u64, m: u64, node: u64, off: u64, src: u64,
@@ -201,7 +373,9 @@ fn v_write(state: u64, m: u64, node: u64, off: u64, src: u64,
         return errno.neg(errno.E_ROFS)
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    return o.write(state, m, node, off, src, len)
+    let r: u64 = o.write(state, m, node, off, src, len)
+    pcache.drop_node(state, m, node)
+    return r
 }
 
 fn v_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
@@ -221,7 +395,9 @@ fn v_create(state: u64, m: u64, path: u64, art: u64) -> u64 {
         return 0
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    return o.create(state, m, rest, art)
+    let r: u64 = o.create(state, m, rest, art)
+    namespace_changed(state)
+    return r
 }
 
 fn v_unlink(state: u64, m: u64, path: u64) -> u64 {
@@ -241,7 +417,16 @@ fn v_unlink(state: u64, m: u64, path: u64) -> u64 {
         return errno.E_NOENT
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    return o.unlink(state, m, rest)
+    var gone: u64 = 0
+    if cacheable(mnt.fstype(state, m)) {
+        gone = lookup_cached(state, m, rest)
+    }
+    let r: u64 = o.unlink(state, m, rest)
+    namespace_changed(state)
+    if gone != 0 {
+        pcache.drop_node(state, m, gone)
+    }
+    return r
 }
 
 fn v_rename(state: u64, from_m: u64, from: u64, to_m: u64,
@@ -267,7 +452,16 @@ fn v_rename(state: u64, from_m: u64, from: u64, to_m: u64,
         return errno.E_NOENT
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    return o.rename(state, m, a, b)
+    var over: u64 = 0
+    if cacheable(mnt.fstype(state, m)) {
+        over = lookup_cached(state, m, b)
+    }
+    let r: u64 = o.rename(state, m, a, b)
+    namespace_changed(state)
+    if over != 0 {
+        pcache.drop_node(state, m, over)
+    }
+    return r
 }
 
 fn v_trunc(state: u64, m: u64, node: u64) -> u64 {
@@ -282,7 +476,9 @@ fn v_trunc(state: u64, m: u64, node: u64) -> u64 {
         return errno.E_ROFS
     }
     kstate.add(state, kstate.VFS_OPS, 1)
-    return o.trunc(state, m, node)
+    let r: u64 = o.trunc(state, m, node)
+    pcache.drop_node(state, m, node)
+    return r
 }
 
 fn mount_root(state: u64) -> bool {
@@ -304,6 +500,7 @@ fn mount_root(state: u64) -> bool {
     mnt.set(state, m, mnt.M_FLAGS, 0)
     mnt.set_path(state, m, (&slash[0]) as u64)
     mnt.set_root(state, m, ofs.node_root(state))
+    namespace_changed(state)
     return true
 }
 
@@ -367,6 +564,8 @@ fn mount_at(state: u64, fstype: u64, dev: u64, first: u64, blocks: u64,
         return MAX_MNT
     }
     mnt.set_root(state, m, r)
+    pcache.drop_mount(state, m)
+    namespace_changed(state)
     return m
 }
 
@@ -407,6 +606,8 @@ fn umount_index(state: u64, m: u64) -> u64 {
         fat.release(state, m)
     }
     mnt.free(state, m)
+    pcache.drop_mount(state, m)
+    namespace_changed(state)
     return 0
 }
 

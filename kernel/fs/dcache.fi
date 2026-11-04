@@ -1,0 +1,229 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import fs.cachelock
+
+export { attach, FRAMES, probe, insert, stamp, bump, hits, misses, negative_hits, inserts, flushes, MISS, NEG }
+
+const MISS: u64 = 0xFFFFFFFFFFFFFFFF
+const NEG: u64 = 0xFFFFFFFFFFFFFFFE
+const NODE_LIMIT: u64 = 0x4000000000000000
+const WAYS: u64 = 4
+const SETS: u64 = 128
+const ENTRY_BYTES: u64 = 128
+const ENTRIES_AT: u64 = 4096
+const FRAMES: u64 = 17
+const PATH_AT: u64 = 40
+const PATH_MAX: u64 = 87
+const H_GEN: u64 = 8
+const H_EPOCH: u64 = 16
+const H_HITS: u64 = 24
+const H_MISSES: u64 = 32
+const H_NEGHITS: u64 = 40
+const H_INSERTS: u64 = 48
+const H_FLUSHES: u64 = 56
+const H_VICTIM: u64 = 64
+const E_GEN: u64 = 0
+const E_MOUNT: u64 = 8
+const E_NODE: u64 = 16
+const E_NEG: u64 = 24
+const E_HASH: u64 = 32
+const FNV_OFFSET: u64 = 0xCBF29CE484222325
+const FNV_PRIME: u64 = 0x100000001B3
+
+fn attach(state: u64, region: u64) {
+    var o: u64 = 0
+    while o < FRAMES * 4096 {
+        kstate.set(region, o, 0)
+        o = o + 8
+    }
+    kstate.set(region, H_GEN, 1)
+    kstate.set(state, kstate.DCACHE_BASE, region)
+}
+
+fn enabled(state: u64) -> bool {
+    return !kstate.mode_on(state, kstate.M_NODCACHE)
+}
+
+fn path_len(path: u64) -> u64 {
+    var n: u64 = 0
+    while kstate.get8(path + n) != 0 && n <= PATH_MAX {
+        n = n + 1
+    }
+    return n
+}
+
+fn dotted(path: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i < n {
+        if kstate.get8(path + i) == 47 && i + 1 < n && kstate.get8(path + i + 1) == 46 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fn hash_of(m: u64, path: u64, n: u64) -> u64 {
+    var h: u64 = FNV_OFFSET ^ m
+    var i: u64 = 0
+    while i < n {
+        h = (h ^ kstate.get8(path + i)) *% FNV_PRIME
+        i = i + 1
+    }
+    return h
+}
+
+fn path_same(entry: u64, path: u64, n: u64) -> bool {
+    var i: u64 = 0
+    while i <= n {
+        if kstate.get8(entry + PATH_AT + i) != kstate.get8(path + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn slot_at(b: u64, h: u64, way: u64) -> u64 {
+    return b + ENTRIES_AT + (((h >> 7) % SETS) * WAYS + way) * ENTRY_BYTES
+}
+
+fn probe(state: u64, m: u64, path: u64) -> u64 {
+    if !enabled(state) {
+        return MISS
+    }
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return MISS
+    }
+    let n: u64 = path_len(path)
+    if n > PATH_MAX || dotted(path, n) {
+        return MISS
+    }
+    let h: u64 = hash_of(m, path, n)
+    let flags: u64 = cachelock.take(b)
+    let gen: u64 = kstate.get(b, H_GEN)
+    var way: u64 = 0
+    while way < WAYS {
+        let e: u64 = slot_at(b, h, way)
+        if kstate.get(e, E_GEN) == gen && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+            var r: u64 = kstate.get(e, E_NODE)
+            kstate.set(b, H_HITS, kstate.get(b, H_HITS) + 1)
+            if kstate.get(e, E_NEG) != 0 {
+                r = NEG
+                kstate.set(b, H_NEGHITS, kstate.get(b, H_NEGHITS) + 1)
+            }
+            cachelock.give(b, flags)
+            return r
+        }
+        way = way + 1
+    }
+    kstate.set(b, H_MISSES, kstate.get(b, H_MISSES) + 1)
+    cachelock.give(b, flags)
+    return MISS
+}
+
+fn stamp(state: u64) -> u64 {
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return 0
+    }
+    return kstate.get(b, H_EPOCH)
+}
+
+fn insert(state: u64, m: u64, path: u64, node: u64, stamp_at_start: u64) {
+    if !enabled(state) || node >= NODE_LIMIT {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let n: u64 = path_len(path)
+    if n > PATH_MAX || dotted(path, n) {
+        return
+    }
+    let h: u64 = hash_of(m, path, n)
+    let flags: u64 = cachelock.take(b)
+    if kstate.get(b, H_EPOCH) != stamp_at_start {
+        cachelock.give(b, flags)
+        return
+    }
+    let gen: u64 = kstate.get(b, H_GEN)
+    var pick: u64 = 0
+    var way: u64 = 0
+    while way < WAYS {
+        let e: u64 = slot_at(b, h, way)
+        if kstate.get(e, E_GEN) == gen && kstate.get(e, E_HASH) == h && kstate.get(e, E_MOUNT) == m && path_same(e, path, n) {
+            pick = e
+        }
+        way = way + 1
+    }
+    way = 0
+    while pick == 0 && way < WAYS {
+        let e: u64 = slot_at(b, h, way)
+        if kstate.get(e, E_GEN) != gen {
+            pick = e
+        }
+        way = way + 1
+    }
+    if pick == 0 {
+        let v: u64 = kstate.get(b, H_VICTIM)
+        kstate.set(b, H_VICTIM, v + 1)
+        pick = slot_at(b, h, v % WAYS)
+    }
+    kstate.set(pick, E_GEN, gen)
+    kstate.set(pick, E_MOUNT, m)
+    kstate.set(pick, E_HASH, h)
+    if node == 0 {
+        kstate.set(pick, E_NEG, 1)
+        kstate.set(pick, E_NODE, 0)
+    } else {
+        kstate.set(pick, E_NEG, 0)
+        kstate.set(pick, E_NODE, node)
+    }
+    var i: u64 = 0
+    while i <= n {
+        kstate.set8(pick + PATH_AT + i, kstate.get8(path + i) as u8)
+        i = i + 1
+    }
+    kstate.set(b, H_INSERTS, kstate.get(b, H_INSERTS) + 1)
+    cachelock.give(b, flags)
+}
+
+fn bump(state: u64) {
+    if kstate.mode_on(state, kstate.M_DCNOINVAL) {
+        return
+    }
+    let b: u64 = kstate.get(state, kstate.DCACHE_BASE)
+    if b == 0 {
+        return
+    }
+    let flags: u64 = cachelock.take(b)
+    kstate.set(b, H_GEN, kstate.get(b, H_GEN) + 1)
+    kstate.set(b, H_EPOCH, kstate.get(b, H_EPOCH) + 1)
+    kstate.set(b, H_FLUSHES, kstate.get(b, H_FLUSHES) + 1)
+    cachelock.give(b, flags)
+}
+
+fn hits(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_HITS)
+}
+
+fn misses(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_MISSES)
+}
+
+fn negative_hits(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_NEGHITS)
+}
+
+fn inserts(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_INSERTS)
+}
+
+fn flushes(state: u64) -> u64 {
+    return cachelock.field(state, kstate.DCACHE_BASE, H_FLUSHES)
+}

@@ -95,9 +95,9 @@ echo "== 2. class column + built-in bind state =="
 has "$D/rtl.klar" "r8169 pci 10ec:*/0200 found=1 state=bound err=- class=net-eth" "rtl: r8169 row bound, class=net-eth"
 has "$D/rtl.klar" "e1000 pci 8086:*/0200 found=0 state=absent err=- class=net-eth" "rtl: e1000 row absent, class=net-eth"
 has "$D/rtl.klar" "iwl pci 8086:*/0280 found=0 state=absent err=- class=net-wlan" "rtl: iwl row class=net-wlan"
-has "$D/rtl.klar" "nvme pci *:*/0108 found=0 state=absent err=- class=block" "rtl: nvme row class=block"
+has "$D/rtl.klar" "nvme pci *:*/0108.02 found=0 state=absent err=- class=block" "rtl: nvme row class=block"
 has "$D/rtl.klar" "hda pci *:*/0403 found=0 state=absent err=- class=audio" "rtl: hda row class=audio"
-has "$D/rtl.klar" "vmsvga pci 15ad:0405/0300 found=" "rtl: vmsvga row present"
+has "$D/rtl.klar" "vmsvga pci 15ad:0405/* found=" "rtl: vmsvga row present"
 has "$D/rtl.klar" "class=display" "rtl: a display class row exists"
 has "$D/rtl.klar" "xhci pci *:*/0c03.30 found=1" "rtl: legacy row prefix still valid"
 has "$D/rtl.klar" "drv=r8169 src=builtin bind=bound" "rtl: /proc/drivers device line shows bind=bound for the built-in"
@@ -212,4 +212,8 @@ if [ -s "$D/k1.img" ]; then
     runvm usbmut "nic usbpoll" "${NETDEV[@]}" -device usb-net,netdev=n0,mac=52:54:00:aa:bb:cc
     num "mutated kernel: tray link state is down (counter-proof)" "$(grep -a '^netmeter: start' "$D/usbmut.klar" | grep -aoE 'link=[0-9]+' | tail -1 | cut -d= -f2)" eq 0
 fi
+for sub in block devices; do
+    echo "== sub-gate classes/$sub =="
+    bash "tools/classes/$sub.sh" || bad "classes/$sub.sh failed"
+done
 finish

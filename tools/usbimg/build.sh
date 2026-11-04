@@ -644,14 +644,14 @@ BOOTK=()
 [ "${BOOT_KERNEL_COPY:-0}" = 1 ] && BOOTK=("/boot/osum.mb=$OUT/osum.mb")
 BOOT_LOADER_EFI="$LIMINE/BOOTX64.EFI"
 BOOTO=()
-if [ "${OSBOOT:-0}" = 1 ]; then
+if [ "${OSBOOT:-1}" = 1 ]; then
     bash tools/bootloader/build.sh "$OUT/osboot.efi" > "$OUT/osboot-build.txt" 2>&1 || fehler "osboot build failed"
     python3 tools/bootloader/mklogo.py assets/marke/start-quelle.png "$OUT/osboot.logo" > /dev/null || fehler "osboot logo conversion failed"
     printf 'menu hidden\nkeywait 300\nlogo /osboot.logo\n' > "$OUT/osboot.cfg"
     BOOT_LOADER_EFI="$OUT/osboot.efi"
     bash tools/bootloader/build-bios.sh "$OUT/osboot-bios" > "$OUT/osboot-bios.log" 2>&1 \
         || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios build failed"; }
-    BOOTO=("/boot/osboot.cfg=$OUT/osboot.cfg" "/boot/osboot.logo=$OUT/osboot.logo"
+    BOOTO=("/boot/osboot.cfg=$OUT/osboot.cfg" "/boot/osboot.logo=$OUT/osboot.logo" "/boot/limine.efi=$LIMINE/BOOTX64.EFI"
            "/boot/osboot-stage0.bin=$OUT/osboot-bios/osboot-stage0.bin"
            "/boot/osboot-stage2.bin=$OUT/osboot-bios/osboot-stage2.bin")
 fi
@@ -1303,7 +1303,7 @@ sagen "menue       $(grep -cE '^/' "$OUT/limine.conf") Eintraege, laengster $(gr
 PARTTAB=${PARTTAB:-gpt}
 case "$PARTTAB" in gpt|mbr|hybrid) ;; *) fehler "PARTTAB=$PARTTAB (gpt, mbr oder hybrid)";; esac
 ROOT_GZ=0
-if [ "${OSBOOT:-0}" = 1 ] && [ "${ROOT_GZ_DISABLE:-0}" != 1 ] && command -v gzip > /dev/null; then
+if [ "${OSBOOT:-1}" = 1 ] && [ "${ROOT_GZ_DISABLE:-0}" != 1 ] && command -v gzip > /dev/null; then
     gzip -9 -n -c "$OUT/root.img" > "$OUT/root.img.gz" || fehler "gzip root.img"
     ROOT_GZ=1
 fi
@@ -1376,7 +1376,7 @@ mkfs.vfat -F 32 -h "$P1_ANF" -n OSUMEFI "$OUT/esp.img" > "$OUT/vfat.log" 2>&1 \
 
 mmd -i "$OUT/esp.img" ::/EFI ::/EFI/BOOT ::/boot 2>/dev/null
 mcopy -i "$OUT/esp.img" "$BOOT_LOADER_EFI" ::/EFI/BOOT/BOOTX64.EFI || fehler "mcopy BOOTX64"
-if [ "${OSBOOT:-0}" = 1 ]; then
+if [ "${OSBOOT:-1}" = 1 ]; then
     mmd -i "$OUT/esp.img" ::/EFI/limine
     mcopy -i "$OUT/esp.img" "$LIMINE/BOOTX64.EFI" ::/EFI/limine/BOOTX64.EFI || fehler "mcopy limine fallback"
     mcopy -i "$OUT/esp.img" "$OUT/osboot.cfg" ::/osboot.cfg || fehler "mcopy osboot.cfg"
@@ -1398,7 +1398,7 @@ dd if="$OUT/root.img" of="$IMG" bs=512 seek="$P2_ANF" conv=notrunc status=none
 
 "$LIMINE/limine" bios-install "$IMG" > "$OUT/limine.log" 2>&1 \
     || { cat "$OUT/limine.log" >&2; fehler "limine bios-install fehlgeschlagen"; }
-if [ "${OSBOOT:-0}" = 1 ]; then
+if [ "${OSBOOT:-1}" = 1 ]; then
     python3 tools/bootloader/biosinstall.py "$IMG" "$OUT/osboot-bios/osboot-stage0.bin" "$OUT/osboot-bios/osboot-stage2.bin" \
         >> "$OUT/osboot-bios.log" 2>&1 \
         || { cat "$OUT/osboot-bios.log" >&2; fehler "osboot bios install failed"; }

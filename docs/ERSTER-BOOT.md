@@ -1,215 +1,128 @@
 <!-- SPDX-License-Identifier: GPL-2.0-only -->
-# ERSTER-BOOT -- die ersten 5 Minuten am HP EliteBook x360 1030 G2
+# First boot -- the first 5 minutes on the HP EliteBook x360 1030 G2
 
-Abbild: `orientos-usb.img` (GPT + EFI-Partition, startet unter UEFI und BIOS).
+Image: `orientos-usb.img` (GPT + EFI partition, boots under UEFI and BIOS).
 SHA256: `df4aa8bfeec83eb48a0c3f02dcc3ee16a90ea590607400cee9f8120408db819c`
-Stand: Abbild gebaut aus origin/main `bbbc77c5` (Build-Commit `61fcf87e`, 23.10.2026 20:34 UTC). Gleiche Schritte gelten fuer den Dell 9020 (dort F12 statt F9).
+Status: image built from origin/main `bbbc77c5` (build commit `61fcf87e`, 23.10.2026 20:34 UTC). The same steps apply to the Dell 9020 (F12 instead of F9).
 
-## 0. Vorher (Rechner mit Linux/Windows, 2 Minuten)
+## Boot loader (since 04.11.2026)
 
-1. Pruefsumme: `sha256sum orientos-usb.img` (Windows: `certutil -hashfile orientos-usb.img SHA256`) muss die Zeile oben ergeben.
-2. Schreiben (Stick >= 1 GB, wird komplett ueberschrieben):
-   - Linux: `dd if=orientos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress` (`sdX` mit `lsblk` pruefen!)
-   - Windows: Rufus, Abbild waehlen, **DD-Modus** (nicht ISO-Modus).
+- The default loader is **osboot** (own UEFI/BIOS loader). It boots without a menu: logo + spinner, then the default entry.
+- **Esc**, **F8** or **Shift** during the logo opens the boot menu (safe mode, RAM root, command line, diagnostics, Advanced).
+- **Limine** stays as the fallback: UEFI `/EFI/limine/BOOTX64.EFI` on the EFI partition, `limine.conf` is still the entry list (osboot reads it). Build the old way with `OSBOOT=0 bash tools/usbimg/build.sh <dir>`.
+- An existing Limine installation is switched by the OTA system update after the new kernel is confirmed: `ota system loader osboot`. Back with `ota system loader limine`; `ota system loader status` shows which one is active.
 
-## 1. BIOS am HP (Minute 0-1)
+## 0. Before (machine with Linux/Windows, 2 minutes)
 
-1. Laptop aus, Stick direkt in USB-A (kein Hub). Optional: LAN-Dongle (USB-Ethernet) oder Handy-Tethering per USB -- WLAN geht noch nicht (Intel 8265, kein Treiber).
-2. Einschalten, sofort **Esc** (Startmenue), dann **F10** = BIOS-Setup.
-3. Einstellen:
-   - **Secure Boot: AUS** (unter Advanced / Boot Options / Secure Boot Configuration)
-   - **SATA/Storage-Modus: AHCI** (nicht RAID/Intel RST) -- sonst sieht OrientOS die interne Platte nicht
-   - **USB-/UEFI-Boot: erlaubt**; Legacy-Boot egal
-4. Speichern und Neustart (F10), sofort wieder **Esc**, dann **F9** (Boot Device Options) und den **USB-Stick (UEFI)** waehlen.
-5. BIOS-Version notieren (steht im BIOS-Setup Hauptseite) -- gehoert in die Rueckmeldung.
+1. Checksum: `sha256sum orientos-usb.img` (Windows: `certutil -hashfile orientos-usb.img SHA256`) must give the line above.
+2. Write (stick >= 1 GB, completely overwritten):
+   - Linux: `dd if=orientos-usb.img of=/dev/sdX bs=4M conv=fsync status=progress` (check `sdX` with `lsblk`!)
+   - Windows: Rufus, pick the image, **DD mode** (not ISO mode).
 
-## 2. Was du sehen sollst (Minute 1-3)
+## 1. BIOS on the HP (minute 0-1)
 
-1. **Limine-Menue** (5 s Countdown). Eintrag 1 `OrientOS` (Standard) laufen lassen.
-2. Bootzeilen, dann **Anmeldeschirm**. Konto `justin`, Startkennwort `startkennwort`.
-3. **Desktop mit Leiste unten**. Maus/Touchpad und Tastatur sollen reagieren. Startmenue oeffnen, Terminal oeffnen.
-4. Nach ca. 1 min liegt der Hardware-Bericht (siehe 4). Im Terminal `hwinv` zeigt dasselbe.
+1. Laptop off, stick directly in USB-A (no hub). Optional: LAN dongle (USB Ethernet) or phone tethering over USB -- WLAN does not work yet (Intel 8265, no driver).
+2. Power on, press **Esc** at once (startup menu), then **F10** = BIOS setup.
+3. Set:
+   - **Secure Boot: OFF** (Advanced / Boot Options / Secure Boot Configuration)
+   - **SATA/storage mode: AHCI** (not RAID/Intel RST) -- otherwise OrientOS does not see the internal disk
+   - **USB/UEFI boot: allowed**; legacy boot does not matter
+4. Save and restart (F10), press **Esc** again at once, then **F9** (Boot Device Options) and pick the **USB stick (UEFI)**.
+5. Note the BIOS version (main page of the BIOS setup) -- it belongs in the feedback.
 
-Erwartet auf dem HP, ist KEIN Fehler: **WLAN fehlt** (`wlan=8086:24fd intel-8265 driver=none`). **Touchpad (I2C) und Tastatur-Spezialtasten** koennen noch nicht gehen -- dafuer USB-Maus mitnehmen. Eine interne Platte erscheint nur im AHCI-Modus.
+## 2. What you should see (minute 1-3)
 
-## 3. Wenn etwas schiefgeht (Minute 3-5)
+1. The **osboot logo with a spinner** (about 1 s). Press Esc for the menu. The default entry `OrientOS` boots by itself.
+2. Boot lines, then the **sign-in screen**. Account `justin`, start password `startkennwort`.
+3. **Desktop with the bar at the bottom.** Mouse/touchpad and keyboard should react. Open the start menu, open the terminal.
+4. After about 1 min the hardware report exists (see 4). `hwinv` in the terminal shows the same.
 
-1. **Schwarzer Schirm / Hang / Panik-Bild:** Schirm mit dem Handy **fotografieren** (ganzer Schirm, scharf, nicht wischen). Dort steht der Fehlerort.
-2. **Neustart (Power 5 s halten, wieder einschalten):** der naechste Boot geht von selbst in den **sicheren Modus** (max. 3 Neustarts, dann Halt ohne Reset). Oben steht dann "SAFE MODE ...". Zustand in `/proc/safe`.
-3. **Sicherer Modus von Hand:** im Limine-Menue (Pfeiltasten, vor Ablauf der 5 s) den Eintrag **`OrientOS (safe mode)`** waehlen -- ohne Netz, Audio, Zusatztreiber.
-4. Weitere Limine-Eintraege bei Grafik-/Netzproblemen, in dieser Reihenfolge probieren:
-   - `OrientOS (safe graphics)` -- einfacher Bildschirmpfad
-   - `OrientOS (no network)` -- ohne Netzwerk-Treiber
-   - `Hardware diagnostics` -- druckt nur die Hardware-Diagnose, startet keinen Desktop
-   - `Command line` -- Textkonsole
-5. **Nicht waehlen:** `OrientOS (install to SATA disk)` -- das installiert auf eine interne Platte. Der Stick schreibt sonst NICHTS auf andere Laufwerke (Schreibsperre); Installieren geht nur mit getipptem Plattennamen.
-6. **Nichts reparieren, nichts neu flashen** -- erst Rueckmeldung (siehe 5).
+Expected on the HP, NOT an error: **WLAN is missing** (`wlan=8086:24fd intel-8265 driver=none`). **Touchpad (I2C) and keyboard special keys** may not work yet -- bring a USB mouse. An internal disk only appears in AHCI mode.
 
-## 4. Hardware-Bericht (hwinv)
+## 3. If something goes wrong (minute 3-5)
 
-- Beim Boot startet `hwinv -d /var/jarvis/hwinv.txt`: wartet 15 s (USB-Erkennung), schreibt die Datei, nach weiteren 30 s noch einmal.
-- Inhalt: `hwinv: key=value` -- Firmware (UEFI/BIOS), Storage-Art + Urteil (`storage_verdict`; `raid-rst-nvme-hidden` = BIOS steht auf RAID/RST), GPU, WLAN (Chip + Treiberstand), Ethernet, Audio, I2C-Controller, Zeigegeraet-Weg, xHCI, USB (Tastatur/Kamera/BT) plus Rohkopie.
-- **Rueckweg A -- Bruecke:** mit Netz (Kabel/Dongle/Tethering) meldet sich `jarvisd` am Server an; JARVIS liest `/var/jarvis/hwinv.txt` selbst (`read`, Pfad ist freigegeben). Dieses Stick-Abbild enthaelt keine persoenlichen Bruecken-Daten: ohne Bruecken-Konfiguration kommt nur Weg B.
-- **Rueckweg B -- Stick:** Laptop aus, Stick am anderen Rechner mounten (Partition 1 = EFI, Partition 2 = OrientOS-Wurzel OFS; Linux liest OFS nicht ohne Werkzeug) -- einfacher: **Foto** vom Terminal mit `hwinv`.
-- **Logs auf dem Stick:** `/var/jarvis/panic-N.txt` (N=1..32), `/var/jarvis/boot.log` (nach 20 s Uptime), `/var/jarvis/hwinv.txt`.
+1. **Black screen / hang / panic image:** **photograph** the screen with a phone (whole screen, sharp, no swipe). The place of the error is on it.
+2. **Restart (hold power 5 s, switch on again):** the next boot goes into **safe mode** by itself (max. 3 restarts, then halt without reset). "SAFE MODE ..." is shown at the top. State in `/proc/safe`.
+3. **Safe mode by hand:** press Esc in the logo window and choose the entry **`OrientOS (safe mode)`** -- no network, audio, extra drivers.
+4. More entries for graphics/network problems, try in this order:
+   - `OrientOS (safe graphics)` -- simple display path
+   - `OrientOS (no network)` -- without network drivers
+   - `Hardware diagnostics` -- prints the hardware diagnosis only, no desktop
+   - `Command line` -- text console
+   - `OrientOS (RAM root)` -- runs from RAM, the stick is not mounted as root
+5. **Do not choose:** `OrientOS (install to SATA disk)` -- it installs onto an internal disk. The stick otherwise writes NOTHING to other drives (write lock); installing only works with a typed disk name.
+6. If osboot itself does not start: boot the same stick built with `OSBOOT=0` (Limine) and report it.
+7. **Repair nothing, flash nothing new** -- feedback first (see 5).
 
-## 5. Rueckmeldung (Chat)
+## 4. Hardware report (hwinv)
 
-1. Klappt der Start? Ja/Nein, bis wohin (Limine / Bootzeilen / Anmeldung / Desktop).
-2. Fotos (Panik-Bild, Desktop, `hwinv`-Ausgabe), Modell + BIOS-Version, welcher Limine-Eintrag.
-3. Funktioniert: Tastatur? Touchpad? USB-Maus? Bildschirm-Aufloesung? Helligkeit?
-4. Dateien aus `/var/jarvis/` falls moeglich.
+- At boot `hwinv -d /var/jarvis/hwinv.txt` starts: waits 15 s (USB detection), writes the file, once more after 30 s.
+- Content: `hwinv: key=value` -- firmware (UEFI/BIOS), storage kind + verdict (`storage_verdict`; `raid-rst-nvme-hidden` = BIOS is on RAID/RST), GPU, WLAN (chip + driver state), Ethernet, audio, I2C controller, pointing device path, xHCI, USB (keyboard/camera/BT) plus a raw copy.
+- **Way back A -- bridge:** with network (cable/dongle/tethering) `jarvisd` signs in at the server; JARVIS reads `/var/jarvis/hwinv.txt` itself (`read`, path is released). This stick image holds no personal bridge data: without a bridge configuration only way B works.
+- **Way back B -- stick:** laptop off, mount the stick on another machine (partition 1 = EFI, partition 2 = OrientOS root OFS; Linux cannot read OFS without a tool) -- simpler: a **photo** of the terminal with `hwinv`.
+- **Logs on the stick:** `/var/jarvis/panic-N.txt` (N=1..32), `/var/jarvis/boot.log` (after 20 s uptime), `/var/jarvis/hwinv.txt`.
 
-## 6. Technik (fuer Entwickler)
+## 5. Feedback (chat)
 
-- Bau: `OSUM_BUILD_JOBS=6 /root/jarvis/bin/heavy bash tools/usbimg/build.sh <dir>` (Cache `/root/.osum-bcache`, ~2-5 min).
-- Gates: `STICK_IMG=<img> KERNEL=<osum.mb> heavy bash tools/ovmfboot/run.sh` (UEFI/OVMF, AHCI+NVMe), `bash tools/hwinv/run.sh`, `bash tools/hwinv/guest.sh`, `bash tools/install/acceptance.sh`, `bash tools/hwcheck/run.sh`.
-- Zustandsdaten im Kern: `/proc/safe`, `/proc/firmware`, `/proc/pci`, `/proc/usb`.
+1. Does it start? Yes/No, up to where (osboot logo / boot lines / sign-in / desktop).
+2. Photos (panic image, desktop, `hwinv` output), model + BIOS version, which boot entry.
+3. Works: keyboard? touchpad? USB mouse? screen resolution? brightness?
+4. Files from `/var/jarvis/` if possible.
 
-## Fern-Test per USB-Tethering (Zwischenloesung bis WLAN laeuft)
-1. **Handy vorbereiten:** Android: Einstellungen > Netzwerk > Hotspot und Tethering > **USB-Tethering einschalten** (das Handy braucht dafuer Mobilfunk oder WLAN). Alternativ ein USB-Ethernet-Dongle (ASIX AX88772, CDC-ECM) mit LAN-Kabel zum Router.
-2. **Kabel einstecken:** Handy/Dongle in einen USB-Port des HP stecken. Beim Handy erst NACH dem Boot oder davor -- beides geht (Stecken im laufenden Betrieb ist eingebaut).
-3. **Warten:** bis zu 1 Minute. OrientOS holt sich selbst eine Adresse (DHCP) und `jarvisd` meldet sich an der Bruecke an (nichts eintippen). DHCP versucht es nach Fehlschlag mit 5/10/20/40/60 s Abstand erneut.
-4. **Pruefen:** im Terminal `dhcp status` (zeigt IP) oder Datei `/var/jarvis/hwinv.txt` auf dem Stick: Zeile `net: up ip=...`. Auf dem Handy erscheint "USB-Tethering aktiv".
-5. **Melden:** "steht" in den Chat -- JARVIS testet dann aus der Ferne (Bruecke/ODB). Klappt es nicht: Foto vom Schirm + `/var/jarvis/*` und die Zeilen `usb: port=... driver=...` (steht dort `driver=none`, bitte Handy-Modell nennen; Android mit "Dateiuebertragung (MTP)" als erste USB-Konfiguration kann der Treiber noch nicht umschalten -- Tethering dann vor dem Einstecken einschalten).
+## 6. Technical (for developers)
 
-## Stick GUI-Fixes HP (24.10.2026, Baustand 6e33009f = main, Gates menurows 10/0 + startmenu 26/0)
+- Build: `OSUM_BUILD_JOBS=6 /root/jarvis/bin/heavy bash tools/usbimg/build.sh <dir>` (cache `/root/.osum-bcache`, ~2-5 min). Default loader osboot; `OSBOOT=0` builds the Limine-only image.
+- Gates: `STICK_IMG=<img> KERNEL=<osum.mb> heavy bash tools/ovmfboot/run.sh` (UEFI/OVMF, AHCI+NVMe), `bash tools/bootloader/run.sh`, `bash tools/hwinv/run.sh`, `bash tools/hwinv/guest.sh`, `bash tools/install/acceptance.sh`, `bash tools/hwcheck/run.sh`.
+- State data in the kernel: `/proc/safe`, `/proc/firmware`, `/proc/pci`, `/proc/usb`.
 
-- **Datei:** `orientos-usb-hp-20261024-6e33009f-guibugs.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `9adb0daa363231da8ec258d202fc9b648dd30ece62aaddeb0cdc7be88fbd3f19`.
-- **Neu:** Startmenue: in "Alle Apps" und in den Suchtreffern leuchtet jetzt die Zeile unter dem Mauszeiger (vorher gar nicht). Die angepinnten Kacheln leuchteten schon.
-- **Foto-Checkliste:** Start oeffnen, "All apps", Maus ueber verschiedene Zeilen; Suche "e" tippen, Maus ueber Treffer. Flackern: welche Fenster genau (Name) + Aufloesung/Massstab. Settings-Absturz: Fenster am Rand ziehen oder Maximieren-Knopf? Foto/Text der Fehlerzeile (`dmesg` oder Serial), Aufloesung.
-- **Ehrlich:** Flackern und Settings-Absturz sind in QEMU NICHT reproduziert und NICHT behoben; Flacker-Verdacht (Fenster ohne privates Bild) liegt als Branch `staff/orientos-mvmqoy35-atomic` bereit, ungetestet.
+## Remote test over USB tethering (interim solution until WLAN works)
+1. **Prepare the phone:** Android: Settings > Network > Hotspot and tethering > **switch USB tethering on** (the phone needs mobile data or WLAN for it). Alternative: a USB Ethernet dongle (ASIX AX88772, CDC-ECM) with a LAN cable to the router.
+2. **Plug in the cable:** phone/dongle into a USB port of the HP. For the phone, before or after boot -- both work (hot plug is built in).
+3. **Wait:** up to 1 minute. OrientOS gets an address itself (DHCP) and `jarvisd` signs in at the bridge (type nothing). DHCP retries after a failure at 5/10/20/40/60 s intervals.
+4. **Check:** in the terminal `dhcp status` (shows IP) or the file `/var/jarvis/hwinv.txt` on the stick: line `net: up ip=...`. The phone shows "USB tethering active".
+5. **Report:** "it stands" in the chat -- JARVIS then tests remotely (bridge/ODB). If it fails: photo of the screen + `/var/jarvis/*` and the lines `usb: port=... driver=...` (if `driver=none`, name the phone model; Android with "File transfer (MTP)" as the first USB configuration cannot be switched by the driver yet -- switch tethering on before plugging in).
 
-## Stick 17 HP (24.10.2026, Baustand b594cd60 = main, WLAN Trace + RX-Scan + Experimente inkl. MSI, GUI-Fixes, Treiber-Store, Debug-Werkzeuge, CH336)
+## Stick history (condensed, 23.-24.10.2026; every stick is superseded by the next)
 
-- **Datei:** `orientos-usb-hp-20261024-b594cd60.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `89a11cf3ab8e3ac16e87b2dcf8945154c7e2b8d559f2632576f272505c7f2798`. Ersetzt Stick 16.
-- **Neu gegenueber Stick 16:** MSI-Experiment (`fail_exp2=msi`), Startmenue-Hover in der Liste, Settings-Resize ohne Absturz, kein Flackern bei Scene-Fenstern (`set_atomic`), Fenster unter 120x80 werden nicht mehr gebaut/gemalt, USB-LAN CH336/AX88772.
-- **Foto-Checkliste:** (1) `cat /proc/wlan` (fail_rxs, fail_rx, fail_exp2, ALLE Zeilen), (2) `wlanctl status`, (3) `wlanctl dump`, (4) `lspci`, (5) `cat /proc/drivers`. Windows vorher mit `shutdown /s /t 0` beenden.
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT. Gates gruen: iwlfh 165/0 (echte FW), wlan/auto 69/0, classes 33/0, dbgtools, menurows 10/0, tmflick (taskmgr, explorer, charmap) 6/0, settingsnarrow, Resize-Serie ohne Absturz. Siehe Bericht fuer offene Gates.
+- **Stick 17** (b594cd60): WLAN trace + RX scan + experiments incl. MSI (`fail_exp2=msi`), start menu hover in lists, settings resize without crash, no flicker for scene windows, windows below 120x80 are not built, USB LAN CH336/AX88772. Checklist: `cat /proc/wlan` (all lines), `wlanctl status`, `wlanctl dump`, `lspci`, `cat /proc/drivers`. Unverified on the real 8265. Shut Windows down with `shutdown /s /t 0` first.
+- **Stick 16 / GUI fixes** (6e33009f): start menu rows light up under the pointer in "All apps" and search results. Flicker and the settings crash were not reproduced in QEMU.
+- **Stick 15** (95cc9d8e): if no ALIVE comes after the timeout the kernel scans the RX buffers raw (`fail_rxs=`, `fail_rx=`, `fail_rxr=` in `/proc/wlan`); `wlanctl status`, `ping`, trace (`fail_trace=`, `fail_series=`, `fail_exp=`), debug tools (`lspci`, `pcicfg`, `regdump`, `prphread`, `wlanctl`), driver store (`drvctl`, `/proc/drivers`) and device classes (`class=` per line).
+- **Stick 14** (f69dadbf): secure-boot trace in `/proc/wlan` when the firmware load fails (`fail_trace=`, `fail_series=`, `fail_exp=`); `hdr1=0 hdr2=0` is normal for family 8000; D0/ASPM are not the cause.
+- **Stick CH336** (c1f8cf06): CH336 driver aligned to the vendor source; `/proc/drivers` shows `driver=ch336`, `usbnet: ...` and `net: ip= gw=`. Plug the dongle in, cable to the router, boot, then `dhcp`, `ping <router-ip>`. Unverified on the real dongle. Details: `docs/WLAN-CH336.md`.
+- **Stick 13** (badf40a6): `lspci [-v] [bb:dd.f]`, `pcicfg <bb:dd.f> [off [len]]`, `regdump <bb:dd.f> <bar> <off> [count]`, `prphread <bb:dd.f> <addr-hex> [count]` (root only), `wlanctl status|reload|dump`. Writes only with `--write` as root. Correction: `drvctl` was missing from stick 10 to 12.
+- **Stick 12** (9c417f68): `fail_alive2=` and `fail_pm=` diagnostics, PCI power forced to D0, ASPM off. Shut Windows down fully (`shutdown /s /t 0 /full`).
+- **Stick 11** (de07f2da): `ps2maus` module build with ptrcfg/tpcfg, 37 module slots.
+- **Stick 10** (71e8521e): driver store in the kernel (`/lib/drivers`, signed packages), `drvctl list|match|install|remove|ban`, `/proc/drivers` with all PCI/USB/ACPI devices (`drv=none` = gaps).
+- **Stick 9** (7f8c161e): WLAN 8265 (family 8000) no longer writes APMG registers (0x300C is RELEASE_CPU_RESET there), sets CSR_GIO_REG L0S_DISABLED like Linux. Windows fast start must be off (HiberbootEnabled=1 leaves the card in a residual state): `shutdown /s /t 0`.
+- **Stick 8** (a494ab5d): ALIVE wait 2.5 s by tick clock, ALIVE on CSR_INT bit 0, bit 31 or a packet in the RX ring; line `fail_alive=int= fhint= gp1= gp2= cpu1= cpu2= wfp= seen=` in `/proc/wlan`; EC driver + `/proc/hotkeys`, touchpad typing lock, WLAN link watch, PBKDF2 in stages. Check Fn brightness 3x, then `cat /proc/hotkeys` and `cat /proc/backlight`.
+- **Stick 7** (6f9bbf42): fixed `fw_load_init err=-45` (bus master set before the firmware load, APMG DMA clock, radio config for family 8000); `fail_hw=`, `fail_fhr=`, `fail_fh=`; wlan.conf as normal user + persistence on the stick EFI partition; Fn brightness keys.
+- **Stick 6** (e2bf91e6): `wlan0` network card (task K_WLAN, DHCP from the lease), auto join from `/etc/wlan.conf`, `/proc/wlan` with `net <ssid> ch= sec= rssi=`, `auto=<state> rc= tries= driver=`. Kernel word `noiwl` switches WLAN autostart off.
+- **Stick 5** (2380d6c4): 8265 driver with command queue, INIT/RT firmware boot, `/proc/wlan`, settings page **WLAN** writes `/etc/wlan.conf` (0600).
+- **Stick 4** (b2937208): touchscreen on devices with several I2C controllers (`/proc/inputdevs`), touchpad gestures + settings page **Touchpad**, corner right-click.
+- **Stick 3** (03a803f0): multi-core fix (`/proc/cpus`, boot line `smp: N of M online`), fallback icons, window snap by dragging the title bar, tray chevron flyout, taskbar hover, Windows 11 bar.
+- **Stick 2** (30d66381): context menu closes on click-away, USB tethering + bridge auto login, brightness chain (`/proc/backlight`), overlay/fbperf/resize fix, WLAN 8265 driver (sim), touch path.
 
-## Stick 15 HP (24.10.2026, Baustand 95cc9d8e = main, WLAN RX-Scan + Debug-Werkzeuge + Treiber-Store + Klassen)
+## What the Boss should photograph
 
-- **Datei:** `orientos-usb-hp-20261024-95cc9d8e.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `66a5f6ba93b39380abc78bcdeaaef8db3e174f985f98ab6bdf7ec3878b9a156d`. Ersetzt Stick 14.
-- **Neu gegenueber Stick 14:** Kommt nach dem Timeout kein ALIVE, durchsucht der Kern die RX-Puffer roh (`fail_rxs=`, `fail_rx=`, `fail_rxr=` in `/proc/wlan`) und nimmt ein dort gefundenes ALIVE an (`iwl: boot2 rx-raw alive`). `wlanctl status` liest das letzte `cpu1=` (Fehlerzeile), `ping` ist im Abbild. Dazu Trace (`fail_trace=`, `fail_series=`, `fail_exp=`), Debug-Werkzeuge (`lspci`, `pcicfg`, `regdump`, `prphread`, `wlanctl`), Treiber-Store (`drvctl`, `/proc/drivers`) und Geraeteklassen (`class=` je Zeile in `/proc/drivers`).
-- **Foto-Checkliste:** (1) `cat /proc/wlan` (ALLE Zeilen, mehrere Fotos), (2) `wlanctl status`, (3) `wlanctl dump`, (4) `lspci`, (5) `cat /proc/drivers`. Bei Fehler dauert der WLAN-Start ca. 25 s laenger. Windows vorher mit `shutdown /s /t 0` beenden.
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT. Gates gruen: iwlfh 142/0 (mit echter Firmware), wlan/auto 69/0, dbgtools 53/0, classes 33/0, drvstore 70/0, drvreg 20/0. `/proc/wlan` im Fehlerfall (echte Firmware) vollstaendig, nicht abgeschnitten.
-
-## Stick 14 HP (24.10.2026, Baustand f69dadbf = main, WLAN Secure-Boot-Trace)
-
-- **Datei:** `orientos-usb-hp-20261024-f69dadbf.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `00cd0e0162d6c194a3aa66a8863f244b369380e2d263455cdb40783b1714e190`. Ersetzt Stick 13 (SHA 0eec7bc9...).
-- **Neu:** Faellt das Laden der 8265-Firmware durch (kein ALIVE), schreibt der Kern in `/proc/wlan`: `fail_trace=` (SB_CPU1/SB_CPU2/LOAD_STATUS nach jeder geladenen Sektion), `fail_series=` (8 Messungen im 250-ms-Abstand nach dem Timeout) und `fail_exp=` (Experimente: LOAD_STATUS erneut, RELEASE_CPU_RESET erneut, 10 s warten, Neuladen mit Pause nach INIT_DONE, mit PCI 0x41=0, mit Pause zwischen CPU1 und CPU2). Kommt ALIVE in einem Experiment, laeuft der Boot normal weiter (`iwl: boot2 exp alive`). `wlanctl dump` findet das Geraet jetzt auch ueber Intel + Klasse 0x02.
-- **Foto-Checkliste:** `cat /proc/wlan` (ALLE Zeilen, mehrere Fotos wenn lang), `wlanctl status`, `wlanctl dump`, `cat /tmp/wlan-dump.txt`. Bei Fehler dauert der Start der WLAN-Karte ca. 25 s laenger (Experimente). Windows vorher mit `shutdown /s /t 0` beenden.
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT. `hdr1=0 hdr2=0` ist bei Familie 8000 normal (Linux schreibt HDR_ADDR nur im 7000-Lader). D0/ASPM sind nicht die Ursache.
-
-## Stick CH336 HP (24.10.2026, USB-LAN-Dongle 1A86:5394 hinter dem WCH-Hub; Baustand c1f8cf06 = main + Branch staff/orientos-mvmpzl9g)
-
-- **Datei:** `orientos-usb-hp-20261024-c1f8cf06-ch336.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `49d1dd88299f114b49a5d5349a5c68089e81f598f146e1c1de6f3176c83226bf`.
-- **Neu:** CH336-Treiber nach Hersteller-Quelle abgeglichen (TX-Laenge, RX bis 1522, geteilte Frames, PHY-Link, Speed/Duplex ins MAC-Register), `/proc/drivers` zeigt `driver=ch336`, `usbnet: ...` und `net: ip= gw=`. Hub-Treiber ist da; ECM hinter Hub in QEMU gemessen (DHCP + Ping), High-Speed-Hub nur Review. Details: `docs/WLAN-CH336.md`.
-- **Dongle in die Buchse stecken, kabelgebunden an den Router, dann Stick booten.** Danach `dhcp`, `ping <Router-IP>`.
-- **Foto-Checkliste:** (1) `cat /proc/drivers` -- Zeilen `1a86:809d ... driver=hub`, `1a86:5394 ... hub=.. driver=ch336`, `349c:0418`, ganz unten `usbnet: ready mode=3 link=.. bmsr=.. cfg=.. fw=..` und `net: ip=`. (2) `dhcp` und `ping` -- Ausgabe. (3) Falls nichts da: Seriell/Bootzeilen `usb: hub p=`, `usb: ch336 ...` (Foto vom Boot).
-- **Ehrlich:** Am echten Dongle UNVERIFIZIERT. Einzige Referenz ist der WCH-Linux-Treiber; Hub mit High-Speed-Geraet nur im Code geprueft.
-
-## Stick 13 HP (24.10.2026, Debug-Werkzeuge: lspci, pcicfg, regdump, prphread, wlanctl, drvctl)
-
-- **Datei:** `orientos-usb-hp-20261024-badf40a6.img` (146 MiB, Baustand badf40a6 = main, Gate dbgtools 53/0) (GPT, UEFI+BIOS). SHA256 vorher pruefen: `0eec7bc9d0c1394e8e64a591aec3d4bfa81aedd531e8721ca467a5708ddf0587`.
-- **Neu:** `lspci [-v] [bb:dd.f]` (IDs, Klasse, Treiber, BARs), `pcicfg <bb:dd.f> [off [len]]` (Config-Space-Hexdump, Zahlen hex), `regdump <bb:dd.f> <bar> <off> [count]` (MMIO-Register), `prphread <bb:dd.f> <addr-hex> [count]` (Intel-WLAN PRPH, nur root), `wlanctl status|reload|dump`. Schreiben nur mit `--write` und nur als root (`pcicfg --write <bb:dd.f> <off> <breite> <wert>`, `regdump --write <bb:dd.f> <bar> <off> <wert>`).
-- **Korrektur:** `drvctl` stand in Stick 10 bis 12 NICHT im Abbild (fehlte in PROGS), obwohl dort dokumentiert. Ab Stick 13 ist es drin.
-- **Foto-Checkliste WLAN:** `wlanctl status` (zeigt /proc/wlan, `sb_cpu1`/`sb_cpu2` mit Bits), danach `wlanctl dump` und `cat /tmp/wlan-dump.txt` (Config-Space, CSR, Secure-Boot-PRPH). `wlanctl reload` startet das Firmware-Laden erneut (nur wenn kein WLAN-Treiber gebunden ist).
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT; nur in QEMU gegen e1000/NVMe/edu und die WLAN-Attrappe geprueft.
-
-## Stick 10 HP (24.10.2026, Baustand 71e8521e = main mit Treiber-Store drvctl + fw.request)
-
-- **Datei:** `orientos-usb-hp-20261024-71e8521e.img` (GPT, UEFI+BIOS). SHA256 vorher pruefen: `4c89c0b993b33b79217821b28bda392bf14dbed9e3a6139950a2a6fea59416b9`.
-- **Neu gegenueber Stick 9:** Treiber-Store im Kern (`/lib/drivers`, signierte Pakete), `drvctl list|match|install|remove|ban` (NICHT im Stick 10-12-Abbild, erst ab Stick 13), `/proc/drivers` mit allen PCI/USB/ACPI-Geraeten.
-- **Foto-Checkliste:** `cat /proc/drivers` -- Zeilen mit `drv=none` sind die Luecken (Geraete ohne Treiber); ganz unten `store=on pkgs=... valid=...`. Dazu `drvctl list`.
-- **Ehrlich:** WLAN-Fixes aus Branch staff/orientos-w25x (fail_alive2/fail_pm) sind NICHT enthalten. Windows vorher ganz herunterfahren (`shutdown /s /t 0`).
-
-## Stick 9 HP (24.10.2026, Baustand 7f8c161e = main mit APMG-Fix)
-
-- **Datei:** `orientos-usb-hp-20261024-7f8c161e.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `6df57b6cd58d6b058336f8323ccf5067dbdb6e747b208d6ced37cae5be1db741`. Ersetzt Stick 8 (SHA 64881751...).
-- **Neu gegenueber Stick 8:** WLAN-8265 (Familie 8000) schreibt keine APMG-Register mehr (0x300C ist dort RELEASE_CPU_RESET -> die alten Schreibzugriffe liessen CPU2 haengen), setzt CSR_GIO_REG L0S_DISABLED wie Linux.
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT.
-- **WICHTIG vor dem Boot (HP mit Windows 11):** Windows Schnellstart ist AN (HiberbootEnabled=1) und laesst die WLAN-Karte im Restzustand (Firmware geladen, Clock/PCIe-Power-State). Windows vorher ganz herunterfahren: `shutdown /s /t 0` (Neustart reicht auch) oder Schnellstart aus (Energieoptionen > Auswahl der Netzschalterfunktion > Schnellstart deaktivieren). Dann erst vom Stick booten.
-- **Foto-Checkliste:** `cat /proc/wlan` -- alle Zeilen (phase, err, failed_at, fail_alive, fail_regs, fail_fh). Laeuft WLAN: Einstellungen > WLAN verbinden, dann nochmal `cat /proc/wlan`.
-
-## Stick 8 HP (24.10.2026, Baustand a494ab5d = main mit ALIVE-Fix)
-
-- **Datei:** `orientos-usb-hp-20261024-a494ab5d.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `648817516761259ae77f2f6d1c5bd33fe843380e00b2ed501283f5d98cfb645c`. Ersetzt Stick 7 (SHA 4daaae3b...).
-- **Neu gegenueber Stick 7:** WLAN-8265 ALIVE-Wartezeit 2,5 s nach Tick-Uhr (vorher ~70 ms), ALIVE gilt bei CSR_INT Bit 0, Bit 31 oder Paket im RX-Ring (wie Linux). Das erste Fehlerfoto bleibt erhalten (vorher mit int=0 ueberschrieben). Neue Zeile `fail_alive=int= fhint= gp1= gp2= cpu1= cpu2= wfp= seen=` in `/proc/wlan`. Dazu EC-Treiber + `/proc/hotkeys`, Touchpad-Tipp-Sperre, WLAN-Link-Ueberwachung, PBKDF2 in Etappen.
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT.
-- **Foto-Checkliste:** (1) `cat /proc/wlan` -- alle Zeilen (phase, err, failed_at, fail_alive, fail_regs, fail_fh). (2) Fn+Helligkeit 3x, dann `cat /proc/hotkeys` und `cat /proc/backlight`. (3) Falls WLAN laeuft: Einstellungen > WLAN verbinden, dann `cat /proc/wlan`.
-
-## Stick 7 HP (24.10.2026, Baustand 6f9bbf42 = main ohne Touchpad-Tipp-Sperre f7855e52) -- abgeloest durch Stick 8
-
-- **Datei:** `orientos-usb-hp-20261024-6f9bbf42.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `4daaae3b2ab0f42bd8ad4a9f943be4fcd15a7c234129c8e0b076472e92d7c714`. Ersetzt Stick 6 (SHA 0e21cfb0...).
-- **Neu gegenueber Stick 6:** WLAN-8265-Firmware-Ladefehler `fw_load_init err=-45` (FH end-of-TFD timeout) behoben: PCI-Bus-Master wird vor dem Firmware-Laden gesetzt (vorher nie -> kein DMA), APMG-DMA-Takt + NIC-Funkkonfig fuer Familie 8000. `/proc/wlan` hat neue Diagnosezeilen `fail_hw=`, `fail_fhr=`, `fail_fh=`. Dazu: wlan.conf speichern als normaler Nutzer + Persistenz auf der Stick-EFI-Partition, Fn-Helligkeitstasten (`/proc/hotkeys`), Explorer-Rand ziehen ohne Flackern.
-- **Ehrlich:** Wirkung am echten 8265 UNVERIFIZIERT -- das ist genau der Test. Scan-Anfrage der echten Firmware (v7) ist noch NICHT umgestellt (Worker W-WLAN18b); selbst wenn die Firmware jetzt laedt, kann der Scan noch scheitern.
-- **Foto-Checkliste:** (1) Terminal `cat /proc/wlan` -- phase, err, failed_at und die neuen `fail_*`-Zeilen (alle Zeilen auf das Foto). (2) Fn+Helligkeit hoch/runter je 3x, dann `cat /proc/hotkeys` und `cat /proc/backlight` -- Foto; meldet: aendert sich die Helligkeit, eine Stufe pro Druck? (3) Einstellungen > WLAN: SSID + Passwort speichern, Neustart: Stehen SSID/Passwort wieder drin (`cat /etc/wlan.conf`)? (4) Explorer-Fensterrand ziehen: Flackern ja/nein?
-
-## Stick 6 HP (24.10.2026, main e2bf91e6) -- abgeloest durch Stick 7
-
-- **Datei:** `orientos-usb-hp-20261024-e2bf91e6.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `0e21cfb022d7ef4796e61ff2007ca93a7fc09dfb4f2cfe828c39a605afa2e3b6`. Ersetzt Stick 5 (SHA 435a5f54...).
-- **Neu gegenueber Stick 5:** Netzkarte `wlan0` (Task K_WLAN, DHCP aus dem Lease), Auto-Join aus `/etc/wlan.conf`, `/proc/wlan` mit `net <ssid> ch= sec= rssi=`, `auto=<state> rc= tries= driver=` und `ip= mask= gw=`. Fake-AP-Gegenstelle nur im Test.
-- **Ehrlich:** Am echten 8265 UNVERIFIZIERT (Daten-TX ueber Cmd-Queue 0, kein Beacon-Loss, kein Scan waehrend verbunden). Ziel: sehen, wie weit phase/net/auto kommen.
-- **Foto-Checkliste:** (1) Terminal `cat /proc/wlan` -- phase, err, fw, nvm, calib, net-Zeilen, auto=. (2) Einstellungen > Netzwerk > WLAN: Suchen, Netz waehlen, Verbinden (Passwort), danach nochmal `cat /proc/wlan` -- Foto. (3) Strg+Shift+F (Entwickler-Overlay) -- Foto. (4) Bei Haenger/Panik: Neustart mit Kernelwort `noiwl` (WLAN aus), Foto der Bootzeile.
-
-## Stick 5 HP (24.10.2026, main 2380d6c4) -- abgeloest durch Stick 6
-
-- **Datei:** `orientos-usb-hp-20261024-2380d6c4.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `435a5f545d8207aebb6ffec2a22a9fb192f5c1e30636ed6d21321311c8c671c4`. Ersetzt Stick 4 (SHA 79dbb51a...).
-- **Neu gegenueber Stick 4:** WLAN-Treiber 8265 mit Befehlswarteschlange, INIT-/RT-Firmware-Boot und Auto-Start auf 8086:24fd, `/proc/wlan` (phase, err, fw, nvm, calib), Einstellungen > **WLAN** schreibt `/etc/wlan.conf` (0600), SMP-/Helligkeits-/Touch-Korrekturen aus main. Kernelwort `noiwl` schaltet den WLAN-Autostart ab.
-- **Ehrlich:** Verbinden ist am echten Silizium UNVERIFIZIERT (Firmware-Werte nur gegen Fake-Firmware geprueft). Ziel dieses Sticks: `/proc/wlan` zeigt, wie weit der Firmware-Boot am HP kommt.
-- **Gates:** ovmfboot, hwinv-guest 57/0, touchsim 37/0; echte HP-Hardware nicht getestet.
-
-## Stick 4 HP (24.10.2026, main b2937208) -- abgeloest durch Stick 5
-
-- **Datei:** `orientos-usb-hp-20261024-b2937208.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `79dbb51ac7af1e648794fd0aa65d768e6eca89c9a4cde496f230834e75078b10`. Ersetzt Stick 3 (SHA b6d20b62...).
-- **Neu gegenueber Stick 3:** Touchscreen auf Geraeten mit mehreren I2C-Reglern (i2chid Mehr-Regler + AML-Geraetesuche, `/proc/inputdevs`), Touchpad-Gesten + Einstellungen-Seite **Touchpad**, Rechtsklick per Touchpad-Ecke (Ecke unten rechts), Touchscreen-Gesten (tippen/ziehen/zwei Finger/lang = Rechtsklick).
-- **Weiterhin:** WLAN 8265 ist Sim (echtes Verbinden nicht zugesagt), Fn-Helligkeitstasten am HP unbekannt. Bekannte Flake: Einstellungen-Gate nav1 (nur Testproblem, nicht Stick).
-
-## Stick 3 HP (23.10.2026, main 4977617c + Bundle-Fix 03a803f0) -- abgeloest durch Stick 4
-
-- **Datei:** `orientos-usb-hp-20261023-03a803f0.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `b6d20b625c057e6a323428556862da6319c9012a8c2c68ceb922d1100664aca9`. Ersetzt den Stick 30d66381 (SHA 654d7e03...).
-- **Neu gegenueber Stick 2:** Mehrkern-Fix (SMP2 + Kick-IPI, `/proc/cpus`, Bootzeile `smp: N of M online`), Fallback-Icons (Buchstaben-Kachel in Leiste/Startmenue/Alt+Tab/Task-Manager), Fenster-Snap per Titelleisten-Ziehen, Tray-Chevron-Flyout (Raster/Hover/Rechtsklick), Taskleisten-Hover, Windows-11-Leiste.
-- **Noch NICHT im Stick:** Touchscreen auf Geraeten mit mehreren I2C-Reglern (i2chid Mehr-Regler, TOUCH3) und die Touchpad-Gesten-Settings (TPSET3) -- beide noch in Arbeit, nicht in main.
-- **Weiterhin:** WLAN 8265 ist Sim (echtes Verbinden nicht zugesagt), Fn-Helligkeitstasten am HP unbekannt.
-
-## Zwischen-Stick HP (23.10.2026, main 30d66381) -- abgeloest durch Stick 3
-
-- **Datei:** `orientos-usb-hp-<datum>-<commit>.img` (Pfad + SHA256 im Bericht `reports/*_w-stick2-*.md`). SHA256 vorher pruefen: `654d7e03d1e3cab95cf8db738ebda243558a8d793bd043ddc956eaa598f9f57c` (Datei `orientos-usb-hp-20261023-30d66381.img`, 146 MiB, GPT, UEFI+BIOS)
-- **Neu im Stick:** Rechtsklick-Menue schliesst per Wegklick, USB-Tethering + Bridge-Auto-Login, Helligkeitskette (`/proc/backlight`), Overlay/fbperf/Resize-Fix, WLAN-8265-Treiber (Sim, Firmware `iwlwifi-8265-36.ucode` gebuendelt), Touch-Pfad (Touchscreen/Stift).
-
-## Was der Boss fotografieren soll
-
-0. **WLAN (Stick 6/7):** Terminal: `cat /proc/wlan` -- Foto (phase/err/err_text/fw/nvm/calib, net-Zeilen, auto=). Dann Einstellungen > WLAN: SSID + Passwort eintragen, speichern, nochmal `cat /proc/wlan` -- Foto. Bei Haenger/Panik Neustart mit Kernelwort `noiwl` (Foto der Bootzeile).
-   - **WLAN-Persistenz (ab main 4b852a81):** gespeicherte SSID/Passwort wird vom Dienst `wlanpersist` auf die EFI-Partition (`wlan.cnf`) gespiegelt und beim Boot zurueckgespielt (nur wenn die Wurzel RAM ist). Settings zeigt sonst "Nur bis zum Neustart gespeichert".
-0b. **Helligkeits-Tasten (Fn):** Fn+Helligkeit hoch/runter druecken (je 3x), danach Terminal: `cat /proc/hotkeys` -- Foto. Jede Taste, die nicht Helligkeit aendert, steht dort als `ext 0x.. unknown` / `key 0x.. unknown` / `acpi 0x.. unknown` (das ist der echte Code); dazu `cat /proc/backlight` (Zeilen `hotkeys`, `acpi.notifies`, `acpi.lastnt`, `ext.last0..3`). Meldung ja/nein: aendert sich die Helligkeit, und springt sie pro Tastendruck um GENAU eine Stufe (nicht zwei)?
-1. **Overlay:** `Strg+Shift+F` -- Foto vom ganzen Schirm (Zeile `fb_write_mbs`, FPS, CPU, RAM).
-2. **Terminal** (Win-Taste, "terminal"): je ein Foto der Ausgabe von
+0. **WLAN:** terminal: `cat /proc/wlan` -- photo (phase/err/err_text/fw/nvm/calib, net lines, auto=). Then Settings > WLAN: enter SSID + password, save, `cat /proc/wlan` again -- photo. On a hang/panic restart with kernel word `noiwl` (photo of the boot line).
+   - **WLAN persistence (since main 4b852a81):** the saved SSID/password is mirrored by the service `wlanpersist` to the EFI partition (`wlan.cnf`) and restored at boot (only when the root is RAM). Otherwise Settings shows "Saved only until restart".
+0b. **Brightness keys (Fn):** press Fn+brightness up/down (3x each), then in the terminal `cat /proc/hotkeys` -- photo. Every key that does not change brightness appears as `ext 0x.. unknown` / `key 0x.. unknown` / `acpi 0x.. unknown` (the real code); also `cat /proc/backlight` (lines `hotkeys`, `acpi.notifies`, `acpi.lastnt`, `ext.last0..3`). Report: does brightness change, and by EXACTLY one step per press?
+1. **Overlay:** `Ctrl+Shift+F` -- photo of the whole screen (line `fb_write_mbs`, FPS, CPU, RAM).
+2. **Terminal** (Win key, "terminal"): a photo each of the output of
    - `cat /proc/backlight`
    - `cat /proc/frames`
    - `cat /proc/cpuinfo`
-   - `cat /proc/inputdevs` (Touchpad/Touchscreen/I2C-Regler: welche Geraete erkannt, Treiber)
-   - `cat /proc/cpus` (Mehrkern: `cpus_online`/`cpus_madt`, je Kern `why`/`esr` falls einer nicht hochkommt) und die Bootzeile `smp: N of M online`
+   - `cat /proc/inputdevs` (touchpad/touchscreen/I2C controllers: which devices found, driver)
+   - `cat /proc/cpus` (multi-core: `cpus_online`/`cpus_madt`, per core `why`/`esr` if one does not come up) and the boot line `smp: N of M online`
    - `cat /var/jarvis/hwinv.txt`
-3. **USB-Tethering:** Handy per Kabel an den HP, am Handy "USB-Tethering" einschalten. Foto vom Terminal nach `ip` bzw. der Zeile `net: up ip=` und ob `jarvisd` sich meldet.
-4. **Rechtsklick:** Touchpad-Rechtsklick, Menue wegklicken, nochmal Rechtsklick -- muss wieder aufgehen. Kurz melden ja/nein.
-5. **Touchscreen:** antippen, ziehen, zwei Finger scrollen, lange tippen (= Rechtsklick). Melden was geht. **Foto von `cat /proc/inputdevs`** (zeigt jedes Eingabegeraet: Touchpad, Touchscreen, Stift, I2C-Regler).
-5b. **Touchpad-Einstellungen:** Einstellungen > **Touchpad** oeffnen (Tippen, Gesten, Scroll, Ecken-Rechtsklick) -- Foto der Seite; je eine Einstellung aendern und melden ob es wirkt.
-5c. **Ecken-Rechtsklick:** Touchpad unten rechts antippen -- Kontextmenue? Ja/nein.
-6. **WLAN (Sim-Hinweis):** der Treiber ist Sim, es kann sein, dass nichts verbindet -- das ist erwartet. `wlan verbinden <SSID> <Passwort>` -- Foto der Ausgabe. Der WLAN-Treiber ist noch Sim, **echtes Verbinden ist nicht zugesagt**.
-7. **Absturz/Panik:** Schirm fotografieren, danach `/var/jarvis/*` wie oben (Punkt 7-8).
-8. **Fenster-Snap:** ein Fenster an der Titelleiste an den linken/rechten/oberen Rand ziehen -- Vorschau + Einrasten? Foto.
-9. **Tray:** den Chevron (^) rechts in der Taskleiste anklicken -- Flyout mit Symbol-Raster; Hover und Rechtsklick darin. Foto.
-10. **Taskleisten-Hover:** Maus ueber Programmsymbole in der Leiste -- Hover-Hervorhebung/Vorschau da? Kurz melden.
-11. **Fallback-Icons:** Programme ohne eigenes Symbol (Leiste, Startmenue, Alt+Tab, Task-Manager) -- Buchstaben-Kachel statt leer? Foto.
-
-## Stick 12 HP (24.10.2026, Baustand 9c417f68 = main, Gate iwlfh 103/0)
-
-- **Datei:** `orientos-usb-hp-20261024-9c417f68.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `02b1446dc35d87206a013c5f97858129469bcece271427a90b46f893719164a6`.
-- **Neu gegenueber Stick 11:** WLAN-Diagnose `fail_alive2=` (Ladestatus, CPU-Header-Woerter, Secure-Boot-Konfig, fehlgeschlagenes Image, Sektionen je CPU) und `fail_pm=` (PCI-Revision, Subsystem, Power-State, Link-Control Karte + Root Port, warmer CSR-Zustand), PCI-Power erzwungen auf D0 / ASPM aus.
-- **Test:** Windows vorher mit `shutdown /s /t 0 /full` ganz herunterfahren (kein Schnellstart). Im Terminal `cat /proc/wlan` -- Foto (alle fail_*-Zeilen).
-
-## Stick 11 HP (24.10.2026, Baustand de07f2da = main, Gates drvstore 70/0 + drvreg 20/0)
-
-- **Datei:** `orientos-usb-hp-20261024-de07f2da.img` (146 MiB, GPT, UEFI+BIOS). SHA256 vorher pruefen: `dc1044c155f04d64b570ad4c197dba1d1302936855b2e9408fc16aa1108a9902`.
-- **Neu gegenueber Stick 10:** Modulbau ps2maus mit ptrcfg/tpcfg, 37 Modul-Slots; WLAN-Diagnose fail_pm (Branch w25x) noch NICHT enthalten.
+3. **USB tethering:** phone by cable to the HP, switch "USB tethering" on at the phone. Photo of the terminal after `ip` or the line `net: up ip=` and whether `jarvisd` signs in.
+4. **Right click:** touchpad right click, click the menu away, right click again -- must open again. Report yes/no.
+5. **Touchscreen:** tap, drag, two-finger scroll, long press (= right click). Report what works. **Photo of `cat /proc/inputdevs`**.
+5b. **Touchpad settings:** open Settings > **Touchpad** (tap, gestures, scroll, corner right click) -- photo; change one setting each and report whether it works.
+5c. **Corner right click:** tap the touchpad bottom right -- context menu? Yes/no.
+6. **WLAN (sim note):** the driver is a sim, nothing may connect -- expected. `wlan verbinden <SSID> <password>` -- photo of the output. **Real connecting is not promised.**
+7. **Crash/panic:** photograph the screen, then `/var/jarvis/*` as above.
+8. **Window snap:** drag a window by the title bar to the left/right/top edge -- preview + snap? Photo.
+9. **Tray:** click the chevron (^) at the right of the taskbar -- flyout with an icon grid; hover and right click inside. Photo.
+10. **Taskbar hover:** mouse over program icons in the bar -- hover highlight/preview present? Report briefly.
+11. **Fallback icons:** programs without an icon of their own (bar, start menu, Alt+Tab, task manager) -- letter tile instead of empty? Photo.
