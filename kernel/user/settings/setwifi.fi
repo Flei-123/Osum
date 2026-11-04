@@ -1,0 +1,183 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import msg
+import libc.text
+import netui.netui
+import welcome_net
+import wlanconf
+import settings.setaccount
+import settings.setbase
+import settings.setcore
+
+export { refresh, count, pick, set_pick, needs_password, status_fill, blob, connect, radio_blocked }
+
+const PW_MIN: u64 = 8
+const PW_MAX: u64 = 63
+
+static mut cur_pick: u64 = 0
+static mut rows: [u8; 900] = [0 as u8; 900]
+static mut current: [u8; 40] = [0 as u8; 40]
+static mut status_key: u64 = 0
+static mut sp2: [u8; 4] = "  \0\0"
+static mut empty: [u8; 2] = "\0\0"
+
+static mut k_none: [u8; 22] = "settings.wifi.st.none\0"
+
+static mut k_idle: [u8; 22] = "settings.wifi.st.idle\0"
+
+static mut k_empty: [u8; 23] = "settings.wifi.st.empty\0"
+
+static mut k_up: [u8; 20] = "settings.wifi.st.up\0"
+
+static mut k_rfkill: [u8; 24] = "settings.wifi.st.rfkill\0"
+
+static mut k_short: [u8; 23] = "settings.wifi.st.short\0"
+
+static mut k_fail: [u8; 22] = "settings.wifi.st.fail\0"
+
+static mut k_going: [u8; 23] = "settings.wifi.st.going\0"
+
+static mut k_open: [u8; 24] = "settings.wifi.word.open\0"
+
+static mut k_secured: [u8; 27] = "settings.wifi.word.secured\0"
+
+static mut k_saved: [u8; 25] = "settings.wifi.word.saved\0"
+
+static mut k_current: [u8; 27] = "settings.wifi.word.current\0"
+
+
+fn radio_blocked() -> bool {
+    var k_radio: [u8; 7] = "radio=\0"
+    var rv: [u8; 16] = [0 as u8; 16]
+    if !setaccount.wf_token((&k_radio[0 as usize]) as u64, 6, (&rv[0 as usize]) as u64, 16) {
+        return false
+    }
+    return rv[0 as usize] == 98 as u8
+}
+
+fn count() -> u64 {
+    if welcome_net.link_state() == welcome_net.LINK_NO_DRIVER {
+        return 0
+    }
+    return netui.list_count()
+}
+
+fn pick() -> u64 {
+    return cur_pick
+}
+
+fn set_pick(i: u64) {
+    cur_pick = i
+    status_key = 0
+    status_fill()
+}
+
+fn is_current(rank: u64) -> bool {
+    return welcome_net.link_state() == welcome_net.LINK_UP && current[0 as usize] != 0 as u8
+        && ulib.streq(welcome_net.ssid_at(rank), (&current[0 as usize]) as u64)
+}
+
+fn needs_password(rank: u64) -> bool {
+    return rank < netui.list_count() && welcome_net.needs_password(rank) && !netui.list_known(rank) && !is_current(rank)
+}
+
+fn put_text(at: u64, src: u64) -> u64 {
+    var o: u64 = at
+    var i: u64 = 0
+    while *((src + i) as *mut u8) != 0 as u8 && o + 2 < 900 {
+        rows[(o) as usize] = *((src + i) as *mut u8)
+        o = o + 1
+        i = i + 1
+    }
+    return o
+}
+
+fn build_rows() {
+    var o: u64 = 0
+    var r: u64 = 0
+    while r < netui.list_count() {
+        o = put_text(o, welcome_net.ssid_at(r))
+        o = put_text(o, (&sp2[0 as usize]) as u64)
+        var word: u64 = (&k_open[0 as usize]) as u64
+        if is_current(r) {
+            word = (&k_current[0 as usize]) as u64
+        } else if netui.list_known(r) {
+            word = (&k_saved[0 as usize]) as u64
+        } else if welcome_net.needs_password(r) {
+            word = (&k_secured[0 as usize]) as u64
+        }
+        o = put_text(o, msg.get(word))
+        rows[(o) as usize] = 10 as u8
+        o = o + 1
+        r = r + 1
+    }
+    rows[(o) as usize] = 0 as u8
+}
+
+fn blob() -> u64 {
+    return (&rows[0 as usize]) as u64
+}
+
+fn say_status(key: u64) {
+    status_key = key
+    status_fill()
+}
+
+fn status_fill() {
+    let dst: u64 = (&setbase.l_wstat[0 as usize]) as u64
+    var key: u64 = status_key
+    if key == 0 {
+        key = (&k_idle[0 as usize]) as u64
+        if welcome_net.link_state() == welcome_net.LINK_NO_DRIVER {
+            key = (&k_none[0 as usize]) as u64
+        } else if radio_blocked() {
+            key = (&k_rfkill[0 as usize]) as u64
+        } else if welcome_net.link_state() == welcome_net.LINK_UP {
+            key = (&k_up[0 as usize]) as u64
+        } else if netui.list_count() == 0 {
+            key = (&k_empty[0 as usize]) as u64
+        }
+    }
+    var at: u64 = setcore.text_an(dst, 0, msg.get(key))
+    if key == (&k_up[0 as usize]) as u64 && current[0 as usize] != 0 as u8 {
+        at = setcore.text_an(dst, at, (&sp2[0 as usize]) as u64 + 1)
+        let _t: u64 = setcore.text_an(dst, at, (&current[0 as usize]) as u64)
+    }
+}
+
+fn refresh() {
+    welcome_net.refresh((&k_open[0 as usize]) as u64, (&k_secured[0 as usize]) as u64, (&k_saved[0 as usize]) as u64)
+    let _s: bool = wlanconf.saved_ssid((&current[0 as usize]) as u64, 33)
+    if cur_pick >= netui.list_count() {
+        cur_pick = 0
+    }
+    build_rows()
+    status_key = 0
+    status_fill()
+}
+
+fn connect() {
+    if count() == 0 || cur_pick >= netui.list_count() {
+        return
+    }
+    let ssid: u64 = welcome_net.ssid_at(cur_pick)
+    var psk: u64 = (&empty[0 as usize]) as u64
+    if needs_password(cur_pick) {
+        psk = (&setbase.e_wpw[0 as usize]) as u64
+        let n: u64 = text.length(psk)
+        if n < PW_MIN || n > PW_MAX {
+            say_status((&k_short[0 as usize]) as u64)
+            return
+        }
+    }
+    if netui.list_known(cur_pick) || wlanconf.save(ssid, psk) {
+        setbase.e_wpw[0 as usize] = 0 as u8
+        setbase.geschrieben = setbase.geschrieben + 1
+        let _s: bool = wlanconf.saved_ssid((&current[0 as usize]) as u64, 33)
+        say_status((&k_going[0 as usize]) as u64)
+    } else {
+        say_status((&k_fail[0 as usize]) as u64)
+    }
+}
