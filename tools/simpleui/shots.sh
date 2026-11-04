@@ -34,7 +34,7 @@ warte 3
 foto 06-system
 SCRIPT
   export DESIGNBUILD="$D-build"
-  bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=300 res=1280x800 uiscale="$sc" drehbuch="$DREH" > "$D.log" 2>&1
+  bash tools/design/audit.sh "$D" pins=explorer,terminal,settings accel=kvm uitrace=yes halt=300 res=1280x800 uiscale="$sc" drehbuch="$DREH" > "$D.log" 2>&1
   rm -rf "$D-build" "$DREH"
   unset DESIGNBUILD
   ls "$D" | head -20

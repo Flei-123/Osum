@@ -12,10 +12,16 @@
 - `Scan` renamed `Refresh`; the page refreshes on open.
 - Code: kernel/user/settings/setwifi.fi (reuses welcome_net + netui list model, wlanconf.save).
 
+## Done: rarely used pages behind `advanced` (routes flag, no code removed)
+- USB network (`network/usb`): needs a phone or tether cable, not daily.
+- Sync (`accounts/sync`): only with a cloud account, a sub-step of Cloud.
+- Activity log (`privacy/activity-log`): diagnostics, not a setting.
+- Wi-Fi status distinguishes `Connected to X` from `No internet access, connected to X` (gateway never answered, `nv.link_state`).
+
 ## Candidates, not done yet (need Boss ok per page)
-- Network view (netv), USB network, Bridge, Log, Sync: move behind `advanced`.
+- Network view (netv), Bridge: move behind `advanced`.
 - Advanced display, Window effects, Gestures: already `advanced` routes, keep hidden.
 - Connections page: IP/mask/gateway only in a manual-mode block.
 
 ## Open
-- After-screenshots scale 1+2 and gate runs (settingsnarrow, a11y, desktop quick, k15, palette, settingsman) not run.
+- Replace `nv.link_state` by the NETHEAL stage once the network health service is on main (one place: setwifi.status_fill).

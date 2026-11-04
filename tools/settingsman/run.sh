@@ -337,7 +337,7 @@ mutate item-limit 'if n_items - base_items >= MAX_ITEMS ||' 'if n_items - base_i
 mutate page-limit 'if n_pages - base_pages >= MAX_PAGES ||' 'if n_pages - base_pages >= MAX_PAGES + 1 ||'
 mutate pool-limit 'if pool_n - base_pool + n + 1 > POOL_MAX ||' 'if pool_n - base_pool + n + 1 > POOL_MAX + 1000 ||'
 mutate default-lost 'def = put_word(4)' 'def = 0'
-mutate bind-longer-key 'if same && e > at && rd(key, e - at) == 0 {' 'if same && e > at {'
+mutate bind-longer-key 'if same && e > at && octets.ld8(key, e - at) == 0 {' 'if same && e > at {'
 mutate bind-index-skips '        ix = ix + 1
     }
     return NONE' '        ix = ix + 2
@@ -423,7 +423,7 @@ mutate row-gap-lost 'return add_item(K_ROW, 0, 0, 0, 0, gap, line)' 'return add_
 mutate row-gap-digits 'if c < 48 || c > 57 {
                     return fail(E_ITEM, line)' 'if false {
                     return fail(E_ITEM, line)'
-mutate app-find-prefix 'if text_eq(pool_ptr(ap_name[(a) as usize]), name) {' 'if rd(pool_ptr(ap_name[(a) as usize]), 0) == rd(name, 0) {'
+mutate app-find-prefix 'if text_eq(pool_ptr(ap_name[(a) as usize]), name) {' 'if octets.ld8(pool_ptr(ap_name[(a) as usize]), 0) == octets.ld8(name, 0) {'
 
 echo "SETTINGSMAN: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
