@@ -1,0 +1,189 @@
+// SPDX-License-Identifier: MIT
+import libc.locks
+import libc.errno
+
+export { init, rdlock, wrlock, tryrdlock, trywrlock, timedrdlock, timedwrlock, unlock, readers, writer_held, waiting_writers, waiting_readers }
+
+const WRITER_BIT: u64 = 0x80000000
+const READER_MASK: u64 = 0x7FFFFFFF
+const LOW_MASK: u64 = 0xFFFFFFFF
+const WRITER_WAIT_ONE: u64 = 0x100000000
+const READER_WAIT_ONE: u64 = 0x1000000000000
+const WRITER_WAIT_MASK: u64 = 0xFFFF
+const READER_WAIT_MASK: u64 = 0xFFFF
+
+fn init(p: u64) {
+    locks.store(p, 0)
+}
+
+fn readers(p: u64) -> u64 {
+    let v: u64 = locks.load(p)
+    if (v & WRITER_BIT) != 0 {
+        return 0
+    }
+    return v & READER_MASK
+}
+
+fn writer_held(p: u64) -> bool {
+    return (locks.load(p) & WRITER_BIT) != 0
+}
+
+fn waiting_writers(p: u64) -> u64 {
+    return (locks.load(p) >> 32) & WRITER_WAIT_MASK
+}
+
+fn waiting_readers(p: u64) -> u64 {
+    return locks.load(p) >> 48
+}
+
+fn read_blocked(v: u64) -> bool {
+    if (v & WRITER_BIT) != 0 {
+        return true
+    }
+    if ((v >> 32) & WRITER_WAIT_MASK) != 0 {
+        return true
+    }
+    return (v & READER_MASK) == READER_MASK
+}
+
+fn write_blocked(v: u64) -> bool {
+    return (v & LOW_MASK) != 0
+}
+
+fn wake_if_free(p: u64, before: u64, after: u64) {
+    if (after & LOW_MASK) == 0 && (before >> 32) != 0 {
+        locks.futex_wake(p, locks.WAKE_ALL)
+    }
+}
+
+fn tryrdlock(p: u64) -> bool {
+    while true {
+        let v: u64 = locks.load(p)
+        if read_blocked(v) {
+            return false
+        }
+        if locks.cas(p, v, v + 1) == v {
+            return true
+        }
+    }
+    return false
+}
+
+fn trywrlock(p: u64) -> bool {
+    while true {
+        let v: u64 = locks.load(p)
+        if write_blocked(v) {
+            return false
+        }
+        if locks.cas(p, v, v | WRITER_BIT) == v {
+            return true
+        }
+    }
+    return false
+}
+
+fn rdlock(p: u64) {
+    while true {
+        let v: u64 = locks.load(p)
+        if !read_blocked(v) {
+            if locks.cas(p, v, v + 1) == v {
+                return
+            }
+        } else {
+            if locks.cas(p, v, v + READER_WAIT_ONE) == v {
+                locks.futex_wait(p, v & LOW_MASK)
+                locks.fetch_add(p, 0 -% READER_WAIT_ONE)
+            }
+        }
+    }
+}
+
+fn wrlock(p: u64) {
+    while true {
+        let v: u64 = locks.load(p)
+        if !write_blocked(v) {
+            if locks.cas(p, v, v | WRITER_BIT) == v {
+                return
+            }
+        } else {
+            if locks.cas(p, v, v + WRITER_WAIT_ONE) == v {
+                locks.futex_wait(p, v & LOW_MASK)
+                locks.fetch_add(p, 0 -% WRITER_WAIT_ONE)
+            }
+        }
+    }
+}
+
+fn timedrdlock(p: u64, timeout_ns: u64) -> u64 {
+    let deadline: u64 = locks.deadline_after(timeout_ns)
+    while true {
+        let v: u64 = locks.load(p)
+        if !read_blocked(v) {
+            if locks.cas(p, v, v + 1) == v {
+                return 0
+            }
+        } else {
+            let left: u64 = locks.remaining(deadline)
+            if left == 0 {
+                return errno.E_TIMEDOUT
+            }
+            if locks.cas(p, v, v + READER_WAIT_ONE) == v {
+                locks.futex_wait_ns(p, v & LOW_MASK, left)
+                locks.fetch_add(p, 0 -% READER_WAIT_ONE)
+            }
+        }
+    }
+    return errno.E_TIMEDOUT
+}
+
+fn timedwrlock(p: u64, timeout_ns: u64) -> u64 {
+    let deadline: u64 = locks.deadline_after(timeout_ns)
+    while true {
+        let v: u64 = locks.load(p)
+        if !write_blocked(v) {
+            if locks.cas(p, v, v | WRITER_BIT) == v {
+                return 0
+            }
+        } else {
+            let left: u64 = locks.remaining(deadline)
+            if left == 0 {
+                return give_up_write(p)
+            }
+            if locks.cas(p, v, v + WRITER_WAIT_ONE) == v {
+                locks.futex_wait_ns(p, v & LOW_MASK, left)
+                locks.fetch_add(p, 0 -% WRITER_WAIT_ONE)
+            }
+        }
+    }
+    return errno.E_TIMEDOUT
+}
+
+fn give_up_write(p: u64) -> u64 {
+    let v: u64 = locks.load(p)
+    if (v >> 48) != 0 {
+        locks.futex_wake(p, locks.WAKE_ALL)
+    }
+    return errno.E_TIMEDOUT
+}
+
+fn unlock(p: u64) -> u64 {
+    while true {
+        let v: u64 = locks.load(p)
+        if (v & WRITER_BIT) != 0 {
+            let w: u64 = v - WRITER_BIT
+            if locks.cas(p, v, w) == v {
+                wake_if_free(p, v, w)
+                return 0
+            }
+        } else {
+            if (v & READER_MASK) == 0 {
+                return errno.E_PERM
+            }
+            if locks.cas(p, v, v - 1) == v {
+                wake_if_free(p, v, v - 1)
+                return 0
+            }
+        }
+    }
+    return errno.E_PERM
+}

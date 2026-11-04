@@ -1,0 +1,409 @@
+// SPDX-License-Identifier: MIT
+import libc.pthread
+import libc.threads
+import libc.locks
+import libc.probecount
+import libc.errno
+import libc.octets
+
+export { run_all }
+
+const MS: u64 = 1000000
+const WORKERS: u64 = 4
+const ROUNDS: u64 = 300
+
+static mut p_mutex: u64 = 0
+static mut p_cond: u64 = 0
+static mut p_rw: u64 = 0
+static mut p_once: u64 = 0
+static mut p_barrier: [u64; 3] = [0; 3]
+static mut p_total: u64 = 0
+static mut p_flag: u64 = 0
+static mut p_self: u64 = 0
+static mut p_key: u64 = 0
+static mut p_dtor_runs: u64 = 0
+static mut p_dtor_sum: u64 = 0
+static mut p_once_runs: u64 = 0
+static mut p_serial: u64 = 0
+static mut p_isolation_bad: u64 = 0
+static mut p_out: u64 = 0
+
+fn check(ok: bool) {
+    probecount.record(ok)
+}
+
+fn pause_ms(ms: u64) {
+    threads.sleep_ms(ms)
+}
+
+fn returning_body(arg: u64) -> u64 {
+    return arg * 2 + 1
+}
+
+fn self_body(arg: u64) -> u64 {
+    locks.store((&p_self) as u64, pthread.self())
+    return 5
+}
+
+fn exiting_body(arg: u64) -> u64 {
+    pthread.exit(arg + 100)
+    return 0
+}
+
+fn flag_body(arg: u64) -> u64 {
+    pause_ms(arg)
+    locks.store((&p_flag) as u64, 1)
+    return 0
+}
+
+fn run_create_join() -> bool {
+    var ok: bool = true
+    var t: u64 = 0
+    if pthread.create((&t) as u64, returning_body, 20) != 0 || t == 0 {
+        return false
+    }
+    var rv: u64 = 0
+    if pthread.join(t, (&rv) as u64) != 0 || rv != 41 {
+        ok = false
+    }
+    var t2: u64 = 0
+    if pthread.create((&t2) as u64, self_body, 0) != 0 {
+        return false
+    }
+    pthread.join(t2, 0)
+    if !pthread.equal(locks.load((&p_self) as u64), t2) || pthread.equal(t2, pthread.self()) {
+        ok = false
+    }
+    var t3: u64 = 0
+    if pthread.create((&t3) as u64, exiting_body, 7) != 0 {
+        return false
+    }
+    var rv3: u64 = 0
+    if pthread.join(t3, (&rv3) as u64) != 0 || rv3 != 107 {
+        ok = false
+    }
+    if pthread.join(0, 0) != errno.E_INVAL {
+        ok = false
+    }
+    if pthread.yield_now() != 0 {
+        ok = false
+    }
+    return ok
+}
+
+fn run_detach() -> bool {
+    var ok: bool = true
+    locks.store((&p_flag) as u64, 0)
+    var t: u64 = 0
+    if pthread.create((&t) as u64, flag_body, 30) != 0 {
+        return false
+    }
+    if pthread.detach(t) != 0 {
+        ok = false
+    }
+    if pthread.join(t, 0) != errno.E_INVAL {
+        ok = false
+    }
+    if pthread.detach(0) != errno.E_SRCH {
+        ok = false
+    }
+    if !probecount.wait_for((&p_flag) as u64, 1) {
+        ok = false
+    }
+    return ok
+}
+
+fn counting_body(arg: u64) -> u64 {
+    var i: u64 = 0
+    while i < ROUNDS {
+        pthread.mutex_lock((&p_mutex) as u64)
+        let v: u64 = p_total
+        if i % 7 == 0 {
+            threads.yield_now()
+        }
+        p_total = v + 1
+        pthread.mutex_unlock((&p_mutex) as u64)
+        i = i + 1
+    }
+    return 1
+}
+
+fn run_mutex() -> bool {
+    var ok: bool = true
+    pthread.mutex_init((&p_mutex) as u64)
+    p_total = 0
+    if pthread.mutex_unlock((&p_mutex) as u64) != errno.E_PERM {
+        ok = false
+    }
+    if pthread.mutex_lock((&p_mutex) as u64) != 0 {
+        ok = false
+    }
+    if pthread.mutex_trylock((&p_mutex) as u64) != errno.E_BUSY || pthread.mutex_destroy((&p_mutex) as u64) != errno.E_BUSY {
+        ok = false
+    }
+    let t0: u64 = locks.now_ns()
+    if pthread.mutex_timedlock((&p_mutex) as u64, t0 + 50 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    if locks.now_ns() - t0 < 40 * MS {
+        ok = false
+    }
+    pthread.mutex_unlock((&p_mutex) as u64)
+    if pthread.mutex_trylock((&p_mutex) as u64) != 0 {
+        ok = false
+    }
+    pthread.mutex_unlock((&p_mutex) as u64)
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < WORKERS {
+        if pthread.create((&handles[k as usize]) as u64, counting_body, k) != 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < WORKERS {
+        var rv: u64 = 0
+        pthread.join(handles[k as usize], (&rv) as u64)
+        sum = sum + rv
+        k = k + 1
+    }
+    return ok && sum == WORKERS && p_total == WORKERS * ROUNDS && pthread.mutex_destroy((&p_mutex) as u64) == 0
+}
+
+fn cond_body(arg: u64) -> u64 {
+    pthread.mutex_lock((&p_mutex) as u64)
+    locks.store((&p_flag) as u64, 1)
+    while locks.load((&p_total) as u64) == 0 {
+        pthread.cond_wait((&p_cond) as u64, (&p_mutex) as u64)
+    }
+    pthread.mutex_unlock((&p_mutex) as u64)
+    return 1
+}
+
+fn run_cond() -> bool {
+    var ok: bool = true
+    pthread.mutex_init((&p_mutex) as u64)
+    pthread.cond_init((&p_cond) as u64)
+    p_total = 0
+    locks.store((&p_flag) as u64, 0)
+    pthread.mutex_lock((&p_mutex) as u64)
+    let t0: u64 = locks.now_ns()
+    if pthread.cond_timedwait((&p_cond) as u64, (&p_mutex) as u64, t0 + 50 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    if locks.now_ns() - t0 < 40 * MS {
+        ok = false
+    }
+    pthread.mutex_unlock((&p_mutex) as u64)
+    var t: u64 = 0
+    if pthread.create((&t) as u64, cond_body, 0) != 0 {
+        return false
+    }
+    if !probecount.wait_for((&p_flag) as u64, 1) {
+        return false
+    }
+    pause_ms(40)
+    pthread.mutex_lock((&p_mutex) as u64)
+    locks.store((&p_total) as u64, 1)
+    pthread.cond_signal((&p_cond) as u64)
+    pthread.mutex_unlock((&p_mutex) as u64)
+    var rv: u64 = 0
+    let t1: u64 = locks.now_ns()
+    pthread.join(t, (&rv) as u64)
+    if rv != 1 || locks.now_ns() - t1 > 1500 * MS {
+        ok = false
+    }
+    return ok && pthread.cond_destroy((&p_cond) as u64) == 0
+}
+
+fn key_destructor(value: u64) -> u64 {
+    locks.fetch_add((&p_dtor_runs) as u64, 1)
+    locks.fetch_add((&p_dtor_sum) as u64, value)
+    return 0
+}
+
+fn key_body(arg: u64) -> u64 {
+    if pthread.getspecific(locks.load((&p_key) as u64)) != 0 {
+        locks.fetch_add((&p_isolation_bad) as u64, 1)
+    }
+    pthread.setspecific(locks.load((&p_key) as u64), 10 + arg)
+    threads.yield_now()
+    pause_ms(10)
+    if pthread.getspecific(locks.load((&p_key) as u64)) != 10 + arg {
+        locks.fetch_add((&p_isolation_bad) as u64, 1)
+    }
+    return 1
+}
+
+fn run_keys() -> bool {
+    var ok: bool = true
+    p_dtor_runs = 0
+    p_dtor_sum = 0
+    p_isolation_bad = 0
+    var key: u64 = 0
+    if pthread.key_create((&key) as u64, (key_destructor as u64)) != 0 || key == 0 {
+        return false
+    }
+    locks.store((&p_key) as u64, key)
+    var handles: [u64; 3] = [0; 3]
+    var k: u64 = 0
+    while k < 3 {
+        if pthread.create((&handles[k as usize]) as u64, key_body, k) != 0 {
+            return false
+        }
+        k = k + 1
+    }
+    k = 0
+    while k < 3 {
+        pthread.join(handles[k as usize], 0)
+        k = k + 1
+    }
+    if p_dtor_runs != 3 || p_dtor_sum != 33 || p_isolation_bad != 0 {
+        ok = false
+    }
+    if pthread.setspecific(key, 5) != 0 || pthread.getspecific(key) != 5 {
+        ok = false
+    }
+    if pthread.key_delete(key) != 0 || pthread.key_delete(key) != errno.E_INVAL || pthread.setspecific(key, 1) != errno.E_INVAL {
+        ok = false
+    }
+    var plain: u64 = 0
+    if pthread.key_create((&plain) as u64, 0) != 0 || pthread.setspecific(plain, 9) != 0 || pthread.getspecific(plain) != 9 {
+        ok = false
+    }
+    pthread.key_delete(plain)
+    return ok
+}
+
+fn once_body(arg: u64) -> u64 {
+    locks.fetch_add((&p_once_runs) as u64, 1)
+    pause_ms(20)
+    return 0
+}
+
+fn once_thread(arg: u64) -> u64 {
+    pthread.once_call((&p_once) as u64, once_body, 0)
+    return locks.load((&p_once_runs) as u64)
+}
+
+fn run_once() -> bool {
+    p_once = 0
+    p_once_runs = 0
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < 4 {
+        if pthread.create((&handles[k as usize]) as u64, once_thread, 0) != 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < 4 {
+        var rv: u64 = 0
+        pthread.join(handles[k as usize], (&rv) as u64)
+        sum = sum + rv
+        k = k + 1
+    }
+    return p_once_runs == 1 && sum == 4
+}
+
+fn rw_reader_body(arg: u64) -> u64 {
+    pthread.rwlock_rdlock((&p_rw) as u64)
+    locks.fetch_add((&p_flag) as u64, 1)
+    pause_ms(60)
+    pthread.rwlock_unlock((&p_rw) as u64)
+    return 1
+}
+
+fn run_rwlock() -> bool {
+    var ok: bool = true
+    pthread.rwlock_init((&p_rw) as u64)
+    locks.store((&p_flag) as u64, 0)
+    pthread.rwlock_wrlock((&p_rw) as u64)
+    if pthread.rwlock_tryrdlock((&p_rw) as u64) != errno.E_BUSY || pthread.rwlock_trywrlock((&p_rw) as u64) != errno.E_BUSY {
+        ok = false
+    }
+    let t0: u64 = locks.now_ns()
+    if pthread.rwlock_timedrdlock((&p_rw) as u64, t0 + 40 * MS) != errno.E_TIMEDOUT || pthread.rwlock_timedwrlock((&p_rw) as u64, locks.now_ns() + 40 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    if pthread.rwlock_destroy((&p_rw) as u64) != errno.E_BUSY {
+        ok = false
+    }
+    pthread.rwlock_unlock((&p_rw) as u64)
+    var a: u64 = 0
+    var b: u64 = 0
+    pthread.create((&a) as u64, rw_reader_body, 0)
+    pthread.create((&b) as u64, rw_reader_body, 0)
+    if !probecount.wait_for((&p_flag) as u64, 2) {
+        ok = false
+    }
+    if pthread.rwlock_tryrdlock((&p_rw) as u64) != 0 {
+        ok = false
+    } else {
+        pthread.rwlock_unlock((&p_rw) as u64)
+    }
+    if pthread.rwlock_trywrlock((&p_rw) as u64) != errno.E_BUSY {
+        ok = false
+    }
+    pthread.join(a, 0)
+    pthread.join(b, 0)
+    if pthread.rwlock_unlock((&p_rw) as u64) != errno.E_PERM {
+        ok = false
+    }
+    return ok && pthread.rwlock_destroy((&p_rw) as u64) == 0
+}
+
+fn barrier_body(arg: u64) -> u64 {
+    var i: u64 = 0
+    while i < 10 {
+        if pthread.barrier_wait((&p_barrier[0]) as u64) == pthread.BARRIER_SERIAL_THREAD {
+            locks.fetch_add((&p_serial) as u64, 1)
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn run_barrier() -> bool {
+    var ok: bool = true
+    if pthread.barrier_init((&p_barrier[0]) as u64, 0) != errno.E_INVAL {
+        ok = false
+    }
+    if pthread.barrier_init((&p_barrier[0]) as u64, WORKERS) != 0 {
+        return false
+    }
+    p_serial = 0
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < WORKERS {
+        if pthread.create((&handles[k as usize]) as u64, barrier_body, k) != 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < WORKERS {
+        var rv: u64 = 0
+        pthread.join(handles[k as usize], (&rv) as u64)
+        sum = sum + rv
+        k = k + 1
+    }
+    return ok && sum == WORKERS && p_serial == 10 && pthread.barrier_destroy((&p_barrier[0]) as u64) == 0
+}
+
+fn run_all() -> u64 {
+    check(run_create_join())
+    check(run_detach())
+    check(run_mutex())
+    check(run_cond())
+    check(run_keys())
+    check(run_once())
+    check(run_rwlock())
+    check(run_barrier())
+    return probecount.failed()
+}

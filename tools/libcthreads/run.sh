@@ -13,11 +13,11 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 : "${OSUM_QEMU_ACCEL:=tcg}"
 [ -e /dev/kvm ] && [ "$OSUM_QEMU_ACCEL" = tcg ] && OSUM_QEMU_ACCEL=kvm
-PROGS="sh echo sleep thrprobe threxit"
+PROGS="sh echo sleep thrprobe threxit thrwake"
 
 echo "== build =="
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
-mkdir -p "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/noexitbin"
+mkdir -p "$TMPD/norwbin" "$TMPD/nobarbin" "$TMPD/bin" "$TMPD/badbin" "$TMPD/notlsbin" "$TMPD/nocvbin" "$TMPD/nosemlib_bin" "$TMPD/noexitbin"
 if bash tools/sync/build.sh "$TMPD/bin" 0 $PROGS > "$TMPD/b.txt" 2>&1; then ok "programs build"; else sed 's/^/        /' "$TMPD/b.txt" | head -20; bad "programs do not build"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; fi
 cp -r lib "$TMPD/badlib"
 sed -i 's/while tid != 0 {/while false {/' "$TMPD/badlib/libc/threads.fi"
@@ -29,6 +29,14 @@ cp -r lib "$TMPD/nosemlib"
 sed -i 's/locks.futex_wake(p, 1)/locks.load(p)/' "$TMPD/nosemlib/libc/semaphore.fi"
 cp -r lib "$TMPD/noexitlib"
 sed -i 's/kcall.sys1(kcall.SYS_EXIT_GROUP, result)/kcall.sys1(kcall.SYS_EXIT, result)/' "$TMPD/noexitlib/libc/threads.fi"
+cp -r lib "$TMPD/norwlib"
+sed -i 's/if (after \& LOW_MASK) == 0 \&\& (before >> 32) != 0 {/if false {/' "$TMPD/norwlib/libc/rwlock.fi"
+cp -r lib "$TMPD/nobarlib"
+sed -i 's/locks.futex_wake(p + OFF_GEN, locks.WAKE_ALL)/locks.load(p + OFF_GEN)/' "$TMPD/nobarlib/libc/barrier.fi"
+if cmp -s lib/libc/rwlock.fi "$TMPD/norwlib/libc/rwlock.fi"; then bad "counter-proof no-rwlock-wake mutation did not apply"; fi
+if cmp -s lib/libc/barrier.fi "$TMPD/nobarlib/libc/barrier.fi"; then bad "counter-proof no-barrier-wake mutation did not apply"; fi
+if FIRNLIB="$TMPD/norwlib" bash tools/sync/build.sh "$TMPD/norwbin" 0 thrwake > "$TMPD/nr.txt" 2>&1; then ok "counter-proof no-rwlock-wake program builds"; else bad "counter-proof no-rwlock-wake program does not build"; fi
+if FIRNLIB="$TMPD/nobarlib" bash tools/sync/build.sh "$TMPD/nobarbin" 0 thrwake > "$TMPD/nbr.txt" 2>&1; then ok "counter-proof no-barrier-wake program builds"; else bad "counter-proof no-barrier-wake program does not build"; fi
 if cmp -s lib/libc/semaphore.fi "$TMPD/nosemlib/libc/semaphore.fi"; then bad "counter-proof no-semaphore-wake mutation did not apply"; fi
 if cmp -s lib/libc/threads.fi "$TMPD/noexitlib/libc/threads.fi"; then bad "counter-proof no-exit-group mutation did not apply"; fi
 if FIRNLIB="$TMPD/nosemlib" bash tools/sync/build.sh "$TMPD/nosemlib_bin" 0 thrprobe > "$TMPD/ns.txt" 2>&1; then ok "counter-proof no-semaphore-wake program builds"; else bad "counter-proof no-semaphore-wake program does not build"; fi
@@ -57,6 +65,12 @@ if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then o
     echo "echo ==EXITBAD=="
     echo "threxit_bad"
     echo "sleep 3"
+    echo "echo ==WAKEGOOD=="
+    echo "thrwake"
+    echo "echo ==WAKENORW=="
+    echo "thrwake_norw"
+    echo "echo ==WAKENOBAR=="
+    echo "thrwake_nobar"
     echo "echo ==END=="
 } > "$TMPD/s.sh"
 {
@@ -70,6 +84,8 @@ for p in $PROGS; do A+=("/bin/$p=$TMPD/bin/$p.elf"); done
 [ -f "$TMPD/nocvbin/thrprobe.elf" ] && A+=("/bin/thrprobe_nocv=$TMPD/nocvbin/thrprobe.elf")
 [ -f "$TMPD/nosemlib_bin/thrprobe.elf" ] && A+=("/bin/thrprobe_nosem=$TMPD/nosemlib_bin/thrprobe.elf")
 [ -f "$TMPD/noexitbin/threxit.elf" ] && A+=("/bin/threxit_bad=$TMPD/noexitbin/threxit.elf")
+[ -f "$TMPD/norwbin/thrwake.elf" ] && A+=("/bin/thrwake_norw=$TMPD/norwbin/thrwake.elf")
+[ -f "$TMPD/nobarbin/thrwake.elf" ] && A+=("/bin/thrwake_nobar=$TMPD/nobarbin/thrwake.elf")
 [ -f "$TMPD/notlsbin/thrprobe.elf" ] && A+=("/bin/thrprobe_notls=$TMPD/notlsbin/thrprobe.elf")
 A+=("/t/s.sh=$TMPD/s.sh" "/t/s2.sh=$TMPD/s2.sh")
 bash tools/mkfsfi/mkfs.sh "${A[@]}" > "$TMPD/mkfs.txt" 2>&1 || { tail -3 "$TMPD/mkfs.txt"; bad "mkfs"; echo "LIBC-GUEST: $pass passed, $fail failed"; exit 1; }
@@ -97,7 +113,10 @@ notlsout=$(sed -n '/==NOTLS==/,/==NOCV==/p' "$TMPD/out.klar")
 nocvout=$(sed -n '/==NOCV==/,/==NOSEM==/p' "$TMPD/out.klar")
 nosemout=$(sed -n '/==NOSEM==/,/==EXITGOOD==/p' "$TMPD/out.klar")
 exitgood=$(sed -n '/==EXITGOOD==/,/==EXITBAD==/p' "$TMPD/out.klar")
-exitbad=$(sed -n '/==EXITBAD==/,/==END==/p' "$TMPD/out.klar")
+exitbad=$(sed -n '/==EXITBAD==/,/==WAKEGOOD==/p' "$TMPD/out.klar")
+wakegood=$(sed -n '/==WAKEGOOD==/,/==WAKENORW==/p' "$TMPD/out.klar")
+wakenorw=$(sed -n '/==WAKENORW==/,/==WAKENOBAR==/p' "$TMPD/out.klar")
+wakenobar=$(sed -n '/==WAKENOBAR==/,/==END==/p' "$TMPD/out.klar")
 latout=$(sed -n '/==LAT==/,/==END==/p' "$TMPD/out2.klar")
 echo "$good" | grep -aq 'thrprobe failed=0' && echo "$good" | grep -aq 'thrprobe done' \
     && ok "guest: threads suite passed ($(echo "$good" | grep -a 'thrprobe passed=' | tr -d '\r'))" \
@@ -137,6 +156,21 @@ if echo "$exitbad" | grep -aq 'threxit late'; then
     ok "guest: counter-proof (plain exit in the main thread) is caught"
 else
     bad "guest: counter-proof (plain exit in the main thread) not caught"
+fi
+if echo "$wakegood" | grep -aq 'thrwake failed=0' && echo "$wakegood" | grep -aq 'thrwake done'; then
+    ok "guest: rwlock and barrier wake latency under 500 ms ($(echo "$wakegood" | grep -a 'thrwake passed=' | tr -d '\r'))"
+else
+    echo "$wakegood" | tail -6 | sed 's/^/        /'; bad "guest: rwlock/barrier wake probes failed or incomplete"
+fi
+if echo "$wakenorw" | grep -aq 'thrwake failed=0'; then
+    bad "guest: counter-proof (rwlock unlock without wake) still passed"
+else
+    echo "$wakenorw" | grep -aq 'thrwake done' && ok "guest: counter-proof (rwlock unlock without wake) is caught" || bad "guest: counter-proof no-rwlock-wake run incomplete"
+fi
+if echo "$wakenobar" | grep -aq 'thrwake failed=0'; then
+    bad "guest: counter-proof (barrier without wake) still passed"
+else
+    echo "$wakenobar" | grep -aq 'thrwake done' && ok "guest: counter-proof (barrier without wake) is caught" || bad "guest: counter-proof no-barrier-wake run incomplete"
 fi
 echo; echo "LIBC-GUEST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -1,0 +1,586 @@
+// SPDX-License-Identifier: MIT
+import libc.threads
+import libc.locks
+import libc.probecount
+import libc.rwlock
+import libc.barrier
+import libc.errno
+
+export { run_all, run_wake }
+
+const MS: u64 = 1000000
+const READERS: u64 = 4
+const WRITERS: u64 = 3
+const WRITE_ROUNDS: u64 = 120
+const READ_ROUNDS: u64 = 200
+const BARRIER_THREADS: u64 = 4
+const BARRIER_ROUNDS: u64 = 40
+const POLL_LIMIT: u64 = 3000
+
+static mut rw: u64 = 0
+static mut inside: u64 = 0
+static mut all_inside: u64 = 0
+static mut left_count: u64 = 0
+static mut shared_a: u64 = 0
+static mut shared_b: u64 = 0
+static mut violations: u64 = 0
+static mut stamp: u64 = 0
+static mut stamp_reader: u64 = 0
+static mut timed_result: u64 = 0
+static mut timed_end: u64 = 0
+static mut bar: [u64; 3] = [0; 3]
+static mut bar_slots: [u64; 4] = [0; 4]
+static mut bar_serial: u64 = 0
+static mut bar_bad: u64 = 0
+static mut bar_passed: u64 = 0
+
+fn check(ok: bool) {
+    probecount.record(ok)
+}
+
+fn pause_ms(ms: u64) {
+    threads.sleep_ms(ms)
+}
+
+fn rw_addr() -> u64 {
+    return (&rw) as u64
+}
+
+fn bar_addr() -> u64 {
+    return (&bar[0]) as u64
+}
+
+fn wait_waiting_writers(want: u64) -> bool {
+    var waited: u64 = 0
+    while rwlock.waiting_writers(rw_addr()) < want && waited < POLL_LIMIT {
+        pause_ms(1)
+        waited = waited + 1
+    }
+    return rwlock.waiting_writers(rw_addr()) >= want
+}
+
+fn wait_waiting_readers(want: u64) -> bool {
+    var waited: u64 = 0
+    while rwlock.waiting_readers(rw_addr()) < want && waited < POLL_LIMIT {
+        pause_ms(1)
+        waited = waited + 1
+    }
+    return rwlock.waiting_readers(rw_addr()) >= want
+}
+
+fn run_rw_basic() -> bool {
+    var ok: bool = true
+    rwlock.init(rw_addr())
+    if rwlock.unlock(rw_addr()) != errno.E_PERM {
+        ok = false
+    }
+    rwlock.rdlock(rw_addr())
+    rwlock.rdlock(rw_addr())
+    rwlock.rdlock(rw_addr())
+    if rwlock.readers(rw_addr()) != 3 || rwlock.writer_held(rw_addr()) {
+        ok = false
+    }
+    if rwlock.trywrlock(rw_addr()) {
+        ok = false
+    }
+    if !rwlock.tryrdlock(rw_addr()) || rwlock.readers(rw_addr()) != 4 {
+        ok = false
+    }
+    var k: u64 = 0
+    while k < 4 {
+        if rwlock.unlock(rw_addr()) != 0 {
+            ok = false
+        }
+        k = k + 1
+    }
+    if rwlock.readers(rw_addr()) != 0 || locks.load(rw_addr()) != 0 {
+        ok = false
+    }
+    if !rwlock.trywrlock(rw_addr()) || !rwlock.writer_held(rw_addr()) {
+        ok = false
+    }
+    if rwlock.tryrdlock(rw_addr()) || rwlock.trywrlock(rw_addr()) {
+        ok = false
+    }
+    if rwlock.timedrdlock(rw_addr(), 10 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    if rwlock.timedwrlock(rw_addr(), 10 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    if rwlock.unlock(rw_addr()) != 0 || locks.load(rw_addr()) != 0 {
+        ok = false
+    }
+    rwlock.wrlock(rw_addr())
+    if rwlock.unlock(rw_addr()) != 0 {
+        ok = false
+    }
+    if rwlock.timedrdlock(rw_addr(), 10 * MS) != 0 || rwlock.timedrdlock(rw_addr(), 10 * MS) != 0 {
+        ok = false
+    }
+    if rwlock.readers(rw_addr()) != 2 {
+        ok = false
+    }
+    rwlock.unlock(rw_addr())
+    rwlock.unlock(rw_addr())
+    if rwlock.timedwrlock(rw_addr(), 10 * MS) != 0 {
+        ok = false
+    }
+    rwlock.unlock(rw_addr())
+    return ok && locks.load(rw_addr()) == 0
+}
+
+fn concurrent_reader(arg: u64) -> u64 {
+    rwlock.rdlock(rw_addr())
+    locks.fetch_add((&inside) as u64, 1)
+    var held: bool = probecount.wait_for((&inside) as u64, READERS)
+    if held {
+        locks.fetch_add((&all_inside) as u64, 1)
+    }
+    rwlock.unlock(rw_addr())
+    return 1
+}
+
+fn run_rw_readers_share() -> bool {
+    rwlock.init(rw_addr())
+    locks.store((&inside) as u64, 0)
+    locks.store((&all_inside) as u64, 0)
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < READERS {
+        handles[k as usize] = threads.spawn(concurrent_reader, k)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < READERS {
+        sum = sum + threads.join(handles[k as usize])
+        k = k + 1
+    }
+    return sum == READERS && locks.load((&all_inside) as u64) == READERS && locks.load(rw_addr()) == 0
+}
+
+fn exclusive_writer(arg: u64) -> u64 {
+    var i: u64 = 0
+    while i < WRITE_ROUNDS {
+        rwlock.wrlock(rw_addr())
+        let a: u64 = shared_a
+        if i % 3 == 0 {
+            threads.yield_now()
+        }
+        shared_a = a + 1
+        if i % 5 == 0 {
+            threads.yield_now()
+        }
+        shared_b = shared_b + 1
+        rwlock.unlock(rw_addr())
+        i = i + 1
+    }
+    return 1
+}
+
+fn checking_reader(arg: u64) -> u64 {
+    var i: u64 = 0
+    while i < READ_ROUNDS {
+        rwlock.rdlock(rw_addr())
+        let a: u64 = shared_a
+        if i % 4 == 0 {
+            threads.yield_now()
+        }
+        if a != shared_b || a != shared_a {
+            locks.fetch_add((&violations) as u64, 1)
+        }
+        rwlock.unlock(rw_addr())
+        i = i + 1
+    }
+    return 1
+}
+
+fn run_rw_exclusion() -> bool {
+    rwlock.init(rw_addr())
+    shared_a = 0
+    shared_b = 0
+    locks.store((&violations) as u64, 0)
+    var handles: [u64; 5] = [0; 5]
+    var k: u64 = 0
+    while k < WRITERS {
+        handles[k as usize] = threads.spawn(exclusive_writer, k)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    while k < WRITERS + 2 {
+        handles[k as usize] = threads.spawn(checking_reader, k)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < WRITERS + 2 {
+        sum = sum + threads.join(handles[k as usize])
+        k = k + 1
+    }
+    return sum == WRITERS + 2
+        && shared_a == WRITERS * WRITE_ROUNDS
+        && shared_b == WRITERS * WRITE_ROUNDS
+        && locks.load((&violations) as u64) == 0
+        && locks.load(rw_addr()) == 0
+}
+
+fn stamping_reader(arg: u64) -> u64 {
+    rwlock.rdlock(rw_addr())
+    locks.store((&stamp) as u64, locks.now_ns())
+    rwlock.unlock(rw_addr())
+    return 1
+}
+
+fn stamping_writer(arg: u64) -> u64 {
+    rwlock.wrlock(rw_addr())
+    locks.store((&stamp) as u64, locks.now_ns())
+    rwlock.unlock(rw_addr())
+    return 1
+}
+
+fn run_rw_writer_blocks_readers() -> bool {
+    rwlock.init(rw_addr())
+    locks.store((&stamp) as u64, 0)
+    rwlock.wrlock(rw_addr())
+    let h: u64 = threads.spawn(stamping_reader, 0)
+    if h == 0 {
+        return false
+    }
+    if !wait_waiting_readers(1) {
+        return false
+    }
+    pause_ms(80)
+    var ok: bool = locks.load((&stamp) as u64) == 0
+    let t0: u64 = locks.now_ns()
+    rwlock.unlock(rw_addr())
+    threads.join(h)
+    let got: u64 = locks.load((&stamp) as u64)
+    if got < t0 || got - t0 > 500 * MS {
+        ok = false
+    }
+    return ok && rwlock.waiting_readers(rw_addr()) == 0 && locks.load(rw_addr()) == 0
+}
+
+fn run_rw_readers_block_writer() -> bool {
+    rwlock.init(rw_addr())
+    locks.store((&stamp) as u64, 0)
+    rwlock.rdlock(rw_addr())
+    rwlock.rdlock(rw_addr())
+    let h: u64 = threads.spawn(stamping_writer, 0)
+    if h == 0 {
+        return false
+    }
+    if !wait_waiting_writers(1) {
+        return false
+    }
+    pause_ms(80)
+    var ok: bool = locks.load((&stamp) as u64) == 0
+    rwlock.unlock(rw_addr())
+    pause_ms(60)
+    if locks.load((&stamp) as u64) != 0 {
+        ok = false
+    }
+    let t0: u64 = locks.now_ns()
+    rwlock.unlock(rw_addr())
+    threads.join(h)
+    let got: u64 = locks.load((&stamp) as u64)
+    if got < t0 || got - t0 > 500 * MS {
+        ok = false
+    }
+    return ok && rwlock.waiting_writers(rw_addr()) == 0 && locks.load(rw_addr()) == 0
+}
+
+fn run_rw_writer_preference() -> bool {
+    rwlock.init(rw_addr())
+    locks.store((&stamp) as u64, 0)
+    rwlock.rdlock(rw_addr())
+    let h: u64 = threads.spawn(stamping_writer, 0)
+    if h == 0 {
+        return false
+    }
+    if !wait_waiting_writers(1) {
+        return false
+    }
+    var ok: bool = true
+    if rwlock.tryrdlock(rw_addr()) {
+        ok = false
+        rwlock.unlock(rw_addr())
+    }
+    let t0: u64 = locks.now_ns()
+    if rwlock.timedrdlock(rw_addr(), 50 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    let spent: u64 = locks.now_ns() - t0
+    if spent < 40 * MS || spent > 900 * MS {
+        ok = false
+    }
+    if rwlock.waiting_readers(rw_addr()) != 0 || rwlock.readers(rw_addr()) != 1 {
+        ok = false
+    }
+    rwlock.unlock(rw_addr())
+    threads.join(h)
+    if locks.load((&stamp) as u64) == 0 {
+        ok = false
+    }
+    return ok && locks.load(rw_addr()) == 0
+}
+
+fn timed_holder(arg: u64) -> u64 {
+    rwlock.wrlock(rw_addr())
+    locks.store((&stamp) as u64, 1)
+    pause_ms(arg)
+    rwlock.unlock(rw_addr())
+    return 1
+}
+
+fn run_rw_timed() -> bool {
+    rwlock.init(rw_addr())
+    locks.store((&stamp) as u64, 0)
+    let h: u64 = threads.spawn(timed_holder, 250)
+    if h == 0 {
+        return false
+    }
+    if !probecount.wait_for((&stamp) as u64, 1) {
+        return false
+    }
+    var ok: bool = true
+    let t0: u64 = locks.now_ns()
+    if rwlock.timedwrlock(rw_addr(), 50 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    let spent: u64 = locks.now_ns() - t0
+    if spent < 40 * MS || spent > 220 * MS {
+        ok = false
+    }
+    let t1: u64 = locks.now_ns()
+    if rwlock.timedrdlock(rw_addr(), 50 * MS) != errno.E_TIMEDOUT {
+        ok = false
+    }
+    let spent_read: u64 = locks.now_ns() - t1
+    if spent_read < 40 * MS || spent_read > 220 * MS {
+        ok = false
+    }
+    if rwlock.waiting_writers(rw_addr()) != 0 || rwlock.waiting_readers(rw_addr()) != 0 {
+        ok = false
+    }
+    let t2: u64 = locks.now_ns()
+    if rwlock.timedwrlock(rw_addr(), 5000 * MS) != 0 {
+        ok = false
+    }
+    if locks.now_ns() - t2 > 1500 * MS {
+        ok = false
+    }
+    rwlock.unlock(rw_addr())
+    threads.join(h)
+    return ok && locks.load(rw_addr()) == 0
+}
+
+fn timed_writer(arg: u64) -> u64 {
+    let r: u64 = rwlock.timedwrlock(rw_addr(), arg * MS)
+    locks.store((&timed_end) as u64, locks.now_ns())
+    locks.store((&timed_result) as u64, r + 1)
+    if r == 0 {
+        rwlock.unlock(rw_addr())
+    }
+    return 1
+}
+
+fn run_rw_timeout_frees_readers() -> bool {
+    rwlock.init(rw_addr())
+    locks.store((&stamp_reader) as u64, 0)
+    locks.store((&timed_result) as u64, 0)
+    locks.store((&timed_end) as u64, 0)
+    rwlock.rdlock(rw_addr())
+    let w: u64 = threads.spawn(timed_writer, 400)
+    if w == 0 {
+        return false
+    }
+    if !wait_waiting_writers(1) {
+        return false
+    }
+    let r: u64 = threads.spawn(stamping_reader_flag, 0)
+    if r == 0 {
+        return false
+    }
+    if !wait_waiting_readers(1) {
+        return false
+    }
+    var ok: bool = probecount.wait_for((&stamp_reader) as u64, 1)
+    var waited: u64 = 0
+    while locks.load((&timed_result) as u64) == 0 && waited < POLL_LIMIT {
+        pause_ms(1)
+        waited = waited + 1
+    }
+    if locks.load((&timed_result) as u64) != errno.E_TIMEDOUT + 1 {
+        ok = false
+    }
+    if locks.load((&stamp_reader) as u64) > locks.load((&timed_end) as u64) + 250 * MS {
+        ok = false
+    }
+    if rwlock.readers(rw_addr()) != 2 {
+        ok = false
+    }
+    rwlock.unlock(rw_addr())
+    threads.join(w)
+    threads.join(r)
+    return ok && locks.load(rw_addr()) == 0
+}
+
+fn stamping_reader_flag(arg: u64) -> u64 {
+    rwlock.rdlock(rw_addr())
+    locks.store((&stamp_reader) as u64, locks.now_ns())
+    pause_ms(60)
+    rwlock.unlock(rw_addr())
+    return 1
+}
+
+fn barrier_worker(arg: u64) -> u64 {
+    var r: u64 = 1
+    while r <= BARRIER_ROUNDS {
+        bar_slots[arg as usize] = r
+        if barrier.wait(bar_addr()) == barrier.SERIAL {
+            locks.fetch_add((&bar_serial) as u64, 1)
+        }
+        var i: u64 = 0
+        while i < BARRIER_THREADS {
+            if bar_slots[i as usize] != r {
+                locks.fetch_add((&bar_bad) as u64, 1)
+            }
+            i = i + 1
+        }
+        if barrier.wait(bar_addr()) == barrier.SERIAL {
+            locks.fetch_add((&bar_serial) as u64, 1)
+        }
+        r = r + 1
+    }
+    return 1
+}
+
+fn run_barrier_rounds() -> bool {
+    if barrier.init(bar_addr(), BARRIER_THREADS) != 0 {
+        return false
+    }
+    locks.store((&bar_serial) as u64, 0)
+    locks.store((&bar_bad) as u64, 0)
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < BARRIER_THREADS {
+        bar_slots[k as usize] = 0
+        k = k + 1
+    }
+    k = 0
+    while k < BARRIER_THREADS {
+        handles[k as usize] = threads.spawn(barrier_worker, k)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < BARRIER_THREADS {
+        sum = sum + threads.join(handles[k as usize])
+        k = k + 1
+    }
+    return sum == BARRIER_THREADS
+        && locks.load((&bar_bad) as u64) == 0
+        && locks.load((&bar_serial) as u64) == 2 * BARRIER_ROUNDS
+        && barrier.arrived(bar_addr()) == 0
+        && barrier.generation(bar_addr()) == 2 * BARRIER_ROUNDS
+}
+
+fn barrier_waiter(arg: u64) -> u64 {
+    let r: u64 = barrier.wait(bar_addr())
+    locks.fetch_add((&bar_passed) as u64, 1)
+    if r == barrier.SERIAL {
+        locks.fetch_add((&bar_serial) as u64, 1)
+    }
+    return 1
+}
+
+fn run_barrier_blocks() -> bool {
+    var ok: bool = true
+    if barrier.init(bar_addr(), 0) != errno.E_INVAL {
+        ok = false
+    }
+    if barrier.init(bar_addr(), 1) != 0 {
+        ok = false
+    }
+    var again: u64 = 0
+    while again < 3 {
+        if barrier.wait(bar_addr()) != barrier.SERIAL {
+            ok = false
+        }
+        again = again + 1
+    }
+    if barrier.init(bar_addr(), BARRIER_THREADS) != 0 {
+        return false
+    }
+    locks.store((&bar_passed) as u64, 0)
+    locks.store((&bar_serial) as u64, 0)
+    var handles: [u64; 4] = [0; 4]
+    var k: u64 = 0
+    while k < BARRIER_THREADS - 1 {
+        handles[k as usize] = threads.spawn(barrier_waiter, k)
+        if handles[k as usize] == 0 {
+            return false
+        }
+        k = k + 1
+    }
+    if !probecount.wait_for(bar_addr() + 8, BARRIER_THREADS - 1) {
+        return false
+    }
+    pause_ms(80)
+    if locks.load((&bar_passed) as u64) != 0 {
+        ok = false
+    }
+    let t0: u64 = locks.now_ns()
+    if barrier.wait(bar_addr()) == barrier.SERIAL {
+        locks.fetch_add((&bar_serial) as u64, 1)
+    }
+    var sum: u64 = 0
+    k = 0
+    while k < BARRIER_THREADS - 1 {
+        sum = sum + threads.join(handles[k as usize])
+        k = k + 1
+    }
+    if locks.now_ns() - t0 > 500 * MS {
+        ok = false
+    }
+    return ok
+        && sum == BARRIER_THREADS - 1
+        && locks.load((&bar_passed) as u64) == BARRIER_THREADS - 1
+        && locks.load((&bar_serial) as u64) == 1
+        && barrier.arrived(bar_addr()) == 0
+}
+
+fn run_wake() -> u64 {
+    check(run_rw_writer_blocks_readers())
+    check(run_rw_readers_block_writer())
+    check(run_rw_timeout_frees_readers())
+    check(run_barrier_blocks())
+    return probecount.failed()
+}
+
+fn run_all() -> u64 {
+    check(run_rw_basic())
+    check(run_rw_readers_share())
+    check(run_rw_exclusion())
+    check(run_rw_writer_blocks_readers())
+    check(run_rw_readers_block_writer())
+    check(run_rw_writer_preference())
+    check(run_rw_timed())
+    check(run_rw_timeout_frees_readers())
+    check(run_barrier_rounds())
+    check(run_barrier_blocks())
+    return probecount.failed()
+}

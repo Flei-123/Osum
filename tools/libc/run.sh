@@ -41,7 +41,7 @@ done
 
 echo "== 3. threads: clone stub, join, mutex exclusion, lost updates without it =="
 build_run "$PWD/lib" "$D/thr" tools/libc/threads_suite.fi; rc=$?
-[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try, futex timeouts, cond_timedwait, mutex_timedlock, semaphore (blocking, timed, wake latency, producer/consumer, exclusion), once" || bad "threads suite rc=$rc"
+[ $rc -eq 0 ] && ok "threads: exact sum under mutex, lost updates without, join result, dead-thread join, distinct ids, deep stack, 300 spawns, thread_exit, detach + reaper, keys with destructors and generations, condvar broadcast/ping-pong, mutex_try, futex timeouts, cond_timedwait, mutex_timedlock, semaphore (blocking, timed, wake latency, producer/consumer, exclusion), once, rwlock (sharing, exclusion, writer preference, timed, timeout wakes readers), barrier (rounds, serial thread, blocking), pthread shim" || bad "threads suite rc=$rc"
 runs=0
 for i in 1 2 3 4 5 6 7 8; do
     "$D/thr" > /dev/null 2>&1 || runs=$((runs+1))
@@ -66,7 +66,22 @@ for edit in \
     "semaphore.fi|s/locks.cas(p, v, v - 1) == v/true/" \
     "semaphore.fi|s/locks.fetch_add(p, 0 -% WAITER_ONE)/locks.load(p)/" \
     "once.fi|s/if locks.cas(p, 0, STATE_RUNNING) == 0 {/if true {/" \
-    "once.fi|s/locks.futex_wake(p, locks.WAKE_ALL)/locks.load(p)/"; do
+    "once.fi|s/locks.futex_wake(p, locks.WAKE_ALL)/locks.load(p)/" \
+    "rwlock.fi|s/if ((v >> 32) \& WRITER_WAIT_MASK) != 0 {/if false {/" \
+    "rwlock.fi|s/return (v \& LOW_MASK) != 0/return (v \& WRITER_BIT) != 0/" \
+    "rwlock.fi|s/if (after \& LOW_MASK) == 0 \&\& (before >> 32) != 0 {/if false {/" \
+    "rwlock.fi|s/if (v >> 48) != 0 {/if false {/" \
+    "rwlock.fi|s/locks.fetch_add(p, 0 -% READER_WAIT_ONE)/locks.load(p)/" \
+    "rwlock.fi|s/if locks.cas(p, v, v - 1) == v {/if true {/" \
+    "barrier.fi|s/locks.store(p + OFF_ARRIVED, 0)/locks.load(p + OFF_ARRIVED)/" \
+    "barrier.fi|s/locks.futex_wake(p + OFF_GEN, locks.WAKE_ALL)/locks.load(p + OFF_GEN)/" \
+    "barrier.fi|s/return SERIAL/return 0/" \
+    "barrier.fi|s/if place >= locks.load(p + OFF_COUNT) {/if place > locks.load(p + OFF_COUNT) {/" \
+    "pthread.fi|s/if barrier.wait(b) == barrier.SERIAL {/if false {/" \
+    "pthread.fi|s/if locks.load(m) == 0 {/if false {/" \
+    "pthread.fi|s/if threads.is_detached(t) {/if false {/" \
+    "pthread.fi|s/if threads.key_delete(key) != 0 {/if false {/" \
+    "pthread.fi|s/    threads.thread_exit(retval)/    threads.yield_now()/"; do
     mod=${edit%%|*}
     expr=${edit#*|}
     n=$((n+1))
