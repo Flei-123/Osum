@@ -109,7 +109,38 @@ for edit in \
     "pcancel.fi|s/^    if t != 0 \&\& threads.is_done(t) {\$/    if t == 0 || threads.is_done(t) {/" \
     "pmutex.fi|s/locks.store(m + OFF_COUNT, depth)\$/locks.store(m + OFF_COUNT, 1)/" \
     "pmutex.fi|s/octets.st64(depth_out, 0, locks.load(m + OFF_COUNT))/octets.st64(depth_out, 0, 1)/" \
-    "pcond.fi|s/^    pcancel.testcancel()\$/    pcancel.pending()/"; do
+    "pcond.fi|s/^    pcancel.testcancel()\$/    pcancel.pending()/" \
+    "pthread.fi|s/return errno.E_OVERFLOW/return 0/" \
+    "pthread.fi|s/if value > semaphore.COUNT_MAX {/if false {/" \
+    "pthread.fi|s/return semaphore.timed_wait(p, locks.remaining(deadline_ns))/return semaphore.timed_wait(p, deadline_ns)/" \
+    "pthread.fi|/^fn getattr_np/,/^}/s/if t == 0 {/if false {/" \
+    "pthread.fi|/^fn getattr_np/,/^}/s/if threads.is_done(t) {/if false {/" \
+    "pthread.fi|s/pcond.init_clock(cv, clock)/pcond.init_clock(cv, locks.CLOCK_MONOTONIC)/" \
+    "pcond.fi|s/if (locks.load(cv) \& WALL_FLAG) == 0 {/if true {/" \
+    "pcond.fi|s/if deadline_ns <= wall {/if false {/" \
+    "pcond.fi|s/locks.store(cv, WALL_FLAG)/locks.store(cv, 0)/" \
+    "pattr.fi|s/if clock != locks.CLOCK_REALTIME \&\& clock != locks.CLOCK_MONOTONIC {/if false {/" \
+    "pattr.fi|s/octets.st64(a, OFF_GUARD, 0)/octets.st64(a, OFF_GUARD, 4096)/" \
+    "pattr.fi|s/octets.st64(a, OFF_PRIORITY, octets.ld32(param, 0))/octets.st64(a, OFF_PRIORITY, 0)/" \
+    "pattr.fi|s/octets.st64(a, OFF_STACK_ADDR, stack_addr)/octets.st64(a, OFF_STACK_ADDR, 0)/" \
+    "pattr.fi|s/octets.st64(a, OFF_STACK_SIZE, stack_size)/octets.st64(a, OFF_STACK_SIZE, 0)/" \
+    "pattr.fi|s/octets.st64(a, OFF_DETACH, CREATE_JOINABLE)\$/octets.st64(a, OFF_DETACH, CREATE_DETACHED)/" \
+    "threads.fi|s/return octets.ld64(handle, H_MAP_LEN) - HEADER_BYTES/return octets.ld64(handle, H_MAP_LEN)/" \
+    "threads.fi|s/return handle + HEADER_BYTES/return handle/" \
+    "psys.fi|s/return errno.E_RANGE/return 0/" \
+    "psys.fi|s/if t != threads.current() {/if false {/" \
+    "psys.fi|s/if name_length(name) > NAME_MAX {/if false {/" \
+    "psys.fi|s/kcall.SYS_RT_SIGPROCMASK, how, set, old, SIGSET_BYTES/kcall.SYS_RT_SIGPROCMASK, how, set, 0, SIGSET_BYTES/" \
+    "psys.fi|s/kcall.SYS_RT_SIGPROCMASK, how, set, old, SIGSET_BYTES/kcall.SYS_RT_SIGPROCMASK, 0, set, old, SIGSET_BYTES/" \
+    "psched.fi|s/octets.st32(out, 0, CLOCK_THREAD_CPUTIME)/octets.st32(out, 0, 1)/" \
+    "psched.fi|s/if t != 0 \&\& threads.is_done(t) {/if false {/" \
+    "psched.fi|s/octets.st32(policy_out, 0, policy)/octets.st32(policy_out, 0, 7)/" \
+    "psched.fi|s/return cpu \& 0xFFFFFFFF/return 4096/" \
+    "psched.fi|s/SYS_SCHED_GETAFFINITY, pid, size, mask/SYS_SCHED_GETAFFINITY, pid, size, 0/" \
+    "psched.fi|s/SYS_SCHED_GET_PRIORITY_MIN, policy/SYS_SCHED_GET_PRIORITY_MAX, policy/" \
+    "pcancel.fi|s/return cleanup_push(skip as u64, buf)/return 0/" \
+    "pcancel.fi|/^fn frame_unwind/,/^}/s/act()/cleanup_depth()/" \
+    "pcancel.fi|s/return cleanup_pop(false)/return 0/"; do
     mod=${edit%%|*}
     expr=${edit#*|}
     n=$((n+1))
@@ -162,6 +193,18 @@ for edit in \
     cancel_probe "$D/lib$n" "$D/cancelbad$n"; rc=$?
     if [ $rc -ne 90 ] && { [ $rc -ne 255 ] || grep -q '^thrcancel0 \(alive\|slow\)$' "$D/cancelbad$n.txt"; }; then ok "broken main-thread cancel patch $n in $mod is caught (rc=$rc)"; else bad "broken main-thread cancel patch $n in $mod not caught (rc=$rc)"; fi
 done
+
+echo "== 7. pthread surface imported by Firefox is fully exported =="
+SURFACE_ROOT=${SURFACE_ROOT:-/usr/lib/firefox-esr}
+if [ -d "$SURFACE_ROOT" ]; then
+    python3 -I tools/unterbau/pthread_surface.py "$SURFACE_ROOT" lib/libc/pthread.fi tools/unterbau/pthread_gap.txt > "$D/surface.txt" 2>&1; rc=$?
+    [ $rc -eq 0 ] && ok "$(head -1 "$D/surface.txt")" || bad "pthread surface differs from the gap file: $(head -3 "$D/surface.txt" | tr '\n' ' ')"
+    sed 's/ sem_wait, / /' lib/libc/pthread.fi > "$D/pthread_cut.fi"
+    python3 -I tools/unterbau/pthread_surface.py "$SURFACE_ROOT" "$D/pthread_cut.fi" tools/unterbau/pthread_gap.txt > /dev/null 2>&1; rc=$?
+    [ $rc -eq 1 ] && ok "removing sem_wait from the exports is caught by the surface check" || bad "surface check missed a removed export (rc=$rc)"
+else
+    ok "no Firefox tree at $SURFACE_ROOT, surface check skipped"
+fi
 
 echo "== $pass ok, $fail fail =="
 [ $fail -eq 0 ]

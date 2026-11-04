@@ -1,0 +1,376 @@
+// SPDX-License-Identifier: MIT
+import libc.pthread
+import libc.threads
+import libc.locks
+import libc.probecount
+import libc.errno
+import libc.kcall
+import libc.octets
+import libc.pcancel
+import libc.semaphore
+
+export { run_all }
+
+const MS: u64 = 1000000
+const SECOND: u64 = 1000000000
+const SIGNAL_BIT: u64 = 512
+const AFFINITY_WORDS: u64 = 16
+const PR_GET_NAME: u64 = 16
+
+static mut y_sem: u64 = 0
+static mut y_flag: u64 = 0
+static mut y_result: u64 = 0
+static mut y_elapsed: u64 = 0
+static mut y_stop: u64 = 0
+static mut y_ready: u64 = 0
+static mut y_cond: u64 = 0
+static mut y_mutex: [u64; 4] = [0; 4]
+static mut y_cleaned: u64 = 0
+static mut y_local: u64 = 0
+
+fn check(ok: bool) {
+    probecount.record(ok)
+}
+
+fn reset_flags() {
+    locks.store((&y_flag) as u64, 0)
+    locks.store((&y_result) as u64, 0)
+    locks.store((&y_elapsed) as u64, 0)
+    locks.store((&y_stop) as u64, 0)
+    locks.store((&y_ready) as u64, 0)
+    locks.store((&y_cleaned) as u64, 0)
+}
+
+fn sem_addr() -> u64 {
+    return (&y_sem) as u64
+}
+
+fn mutex_addr() -> u64 {
+    return (&y_mutex[0]) as u64
+}
+
+fn cond_addr() -> u64 {
+    return (&y_cond) as u64
+}
+
+fn sem_waiter(arg: u64) -> u64 {
+    pthread.sem_wait(sem_addr())
+    locks.store((&y_flag) as u64, 1)
+    return 0
+}
+
+fn sem_timed_waiter(arg: u64) -> u64 {
+    let start: u64 = locks.now_ns()
+    locks.store((&y_ready) as u64, 1)
+    let r: u64 = pthread.sem_timedwait(sem_addr(), start + 3 * SECOND)
+    locks.store((&y_elapsed) as u64, locks.now_ns() - start)
+    locks.store((&y_result) as u64, r + 1)
+    locks.store((&y_flag) as u64, 1)
+    return 0
+}
+
+fn run_sem_basic() -> bool {
+    let p: u64 = sem_addr()
+    var ok: bool = pthread.sem_init(p, 0, 2) == 0 && semaphore.value(p) == 2
+    ok = ok && pthread.sem_wait(p) == 0 && pthread.sem_wait(p) == 0 && semaphore.value(p) == 0
+    let start: u64 = locks.now_ns()
+    let r: u64 = pthread.sem_timedwait(p, start + 30 * MS)
+    let elapsed: u64 = locks.now_ns() - start
+    ok = ok && r == errno.E_TIMEDOUT && elapsed >= 25 * MS && elapsed < SECOND
+    ok = ok && pthread.sem_timedwait(p, 1) == errno.E_TIMEDOUT
+    ok = ok && pthread.sem_post(p) == 0 && pthread.sem_timedwait(p, locks.now_ns() + SECOND) == 0
+    ok = ok && pthread.sem_init(p, 0, semaphore.COUNT_MAX) == 0 && pthread.sem_post(p) == errno.E_OVERFLOW
+    ok = ok && pthread.sem_init(p, 0, semaphore.COUNT_MAX + 1) == errno.E_INVAL
+    return ok && pthread.sem_destroy(p) == 0
+}
+
+fn run_sem_wake() -> bool {
+    reset_flags()
+    pthread.sem_init(sem_addr(), 0, 0)
+    var t: u64 = 0
+    if pthread.create((&t) as u64, sem_waiter, 0) != 0 {
+        return false
+    }
+    threads.sleep_ms(30)
+    var ok: bool = locks.load((&y_flag) as u64) == 0
+    ok = ok && pthread.sem_post(sem_addr()) == 0
+    ok = ok && probecount.wait_for((&y_flag) as u64, 1)
+    pthread.join(t, 0)
+    return ok
+}
+
+fn run_sem_timed_wake() -> bool {
+    reset_flags()
+    pthread.sem_init(sem_addr(), 0, 0)
+    var t: u64 = 0
+    if pthread.create((&t) as u64, sem_timed_waiter, 0) != 0 {
+        return false
+    }
+    probecount.wait_for((&y_ready) as u64, 1)
+    threads.sleep_ms(30)
+    pthread.sem_post(sem_addr())
+    var ok: bool = probecount.wait_for((&y_flag) as u64, 1)
+    pthread.join(t, 0)
+    return ok && locks.load((&y_result) as u64) == 1 && locks.load((&y_elapsed) as u64) < SECOND
+}
+
+fn wall_waiter(arg: u64) -> u64 {
+    pthread.mutex_lock(mutex_addr())
+    locks.store((&y_ready) as u64, 1)
+    let start: u64 = locks.now_ns()
+    let r: u64 = pthread.cond_timedwait(cond_addr(), mutex_addr(), locks.wall_ns() + 3 * SECOND)
+    locks.store((&y_elapsed) as u64, locks.now_ns() - start)
+    locks.store((&y_result) as u64, r + 1)
+    pthread.mutex_unlock(mutex_addr())
+    locks.store((&y_flag) as u64, 1)
+    return 0
+}
+
+fn run_condattr() -> bool {
+    var attr: [u64; 1] = [7; 1]
+    let a: u64 = (&attr[0]) as u64
+    var got: u64 = 99
+    var ok: bool = pthread.condattr_init(a) == 0 && pthread.condattr_getclock(a, (&got) as u64) == 0 && got == locks.CLOCK_MONOTONIC
+    ok = ok && pthread.condattr_setclock(a, locks.CLOCK_REALTIME) == 0 && pthread.condattr_getclock(a, (&got) as u64) == 0 && got == locks.CLOCK_REALTIME
+    ok = ok && pthread.condattr_setclock(a, 5) == errno.E_INVAL && pthread.condattr_getclock(a, (&got) as u64) == 0 && got == locks.CLOCK_REALTIME
+    pthread.mutex_init(mutex_addr())
+    pthread.cond_init_attr(cond_addr(), a)
+    pthread.mutex_lock(mutex_addr())
+    var start: u64 = locks.now_ns()
+    let r: u64 = pthread.cond_timedwait(cond_addr(), mutex_addr(), locks.wall_ns() + 40 * MS)
+    var elapsed: u64 = locks.now_ns() - start
+    ok = ok && r == errno.E_TIMEDOUT && elapsed >= 30 * MS && elapsed < SECOND
+    start = locks.now_ns()
+    let past: u64 = pthread.cond_timedwait(cond_addr(), mutex_addr(), locks.wall_ns() - SECOND)
+    elapsed = locks.now_ns() - start
+    ok = ok && past == errno.E_TIMEDOUT && elapsed < 20 * MS
+    pthread.mutex_unlock(mutex_addr())
+    pthread.condattr_setclock(a, locks.CLOCK_MONOTONIC)
+    pthread.cond_init_attr(cond_addr(), a)
+    pthread.mutex_lock(mutex_addr())
+    start = locks.now_ns()
+    let mono: u64 = pthread.cond_timedwait(cond_addr(), mutex_addr(), start + 40 * MS)
+    elapsed = locks.now_ns() - start
+    pthread.mutex_unlock(mutex_addr())
+    ok = ok && mono == errno.E_TIMEDOUT && elapsed >= 30 * MS && elapsed < SECOND
+    return ok && pthread.condattr_destroy(a) == 0
+}
+
+fn run_condattr_signal() -> bool {
+    var attr: [u64; 1] = [0; 1]
+    let a: u64 = (&attr[0]) as u64
+    pthread.condattr_init(a)
+    pthread.condattr_setclock(a, locks.CLOCK_REALTIME)
+    reset_flags()
+    pthread.mutex_init(mutex_addr())
+    pthread.cond_init_attr(cond_addr(), a)
+    var t: u64 = 0
+    if pthread.create((&t) as u64, wall_waiter, 0) != 0 {
+        return false
+    }
+    probecount.wait_for((&y_ready) as u64, 1)
+    pthread.mutex_lock(mutex_addr())
+    pthread.cond_signal(cond_addr())
+    pthread.mutex_unlock(mutex_addr())
+    var ok: bool = probecount.wait_for((&y_flag) as u64, 1)
+    pthread.join(t, 0)
+    pthread.condattr_destroy(a)
+    return ok && locks.load((&y_result) as u64) == 1 && locks.load((&y_elapsed) as u64) < SECOND
+}
+
+fn run_rwlockattr() -> bool {
+    var attr: [u64; 1] = [99; 1]
+    let a: u64 = (&attr[0]) as u64
+    var ok: bool = pthread.rwlockattr_init(a) == 0 && attr[0] == 0
+    attr[0] = 5
+    return ok && pthread.rwlockattr_destroy(a) == 0 && attr[0] == 0
+}
+
+fn blocker(arg: u64) -> u64 {
+    var local: u64 = 0
+    locks.store((&y_local) as u64, (&local) as u64)
+    locks.store((&y_ready) as u64, 1)
+    while locks.load((&y_stop) as u64) == 0 {
+        threads.sleep_ms(1)
+    }
+    return 0
+}
+
+fn run_thread_attr() -> bool {
+    var attr: [u64; 5] = [0; 5]
+    let a: u64 = (&attr[0]) as u64
+    var out: [u64; 5] = [1; 5]
+    let o: u64 = (&out[0]) as u64
+    var v1: u64 = 99
+    var v2: u64 = 99
+    pthread.attr_init(a)
+    var ok: bool = pthread.attr_getguardsize(a, (&v1) as u64) == 0 && v1 == 4096
+    ok = ok && pthread.attr_getstack(a, (&v1) as u64, (&v2) as u64) == 0 && v1 == 0 && v2 == threads.STACK_DEFAULT
+    var param: u64 = 0
+    ok = ok && pthread.attr_getschedparam(a, (&param) as u64) == 0 && (param & 0xFFFFFFFF) == 0
+    param = 7
+    ok = ok && pthread.attr_setschedparam(a, (&param) as u64) == 0
+    param = 0
+    ok = ok && pthread.attr_getschedparam(a, (&param) as u64) == 0 && (param & 0xFFFFFFFF) == 7
+    pthread.attr_setstacksize(a, 65536)
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create_attr((&t) as u64, a, blocker, 0) != 0 {
+        return false
+    }
+    probecount.wait_for((&y_ready) as u64, 1)
+    ok = ok && pthread.getattr_np(t, o) == 0
+    ok = ok && pthread.attr_getstack(o, (&v1) as u64, (&v2) as u64) == 0 && v1 > t && (v1 & 4095) == 0 && v2 == 65536
+    let local: u64 = locks.load((&y_local) as u64)
+    ok = ok && local >= v1 && local < v1 + v2
+    ok = ok && pthread.attr_getstacksize(o, (&v1) as u64) == 0 && v1 == 65536
+    ok = ok && pthread.attr_getdetachstate(o, (&v1) as u64) == 0 && v1 == pthread.CREATE_JOINABLE
+    ok = ok && pthread.attr_getguardsize(o, (&v1) as u64) == 0 && v1 == 0
+    ok = ok && pthread.getattr_np(0, o) == errno.E_INVAL
+    locks.store((&y_stop) as u64, 1)
+    var waited: u64 = 0
+    while !threads.is_done(t) && waited < 3000 {
+        threads.sleep_ms(1)
+        waited = waited + 1
+    }
+    ok = ok && pthread.getattr_np(t, o) == errno.E_SRCH
+    pthread.join(t, 0)
+    return ok && pthread.attr_destroy(a) == 0 && attr[0] == 0 && attr[4] == 0
+}
+
+fn run_sched() -> bool {
+    var ok: bool = pthread.sched_get_priority_min(0) == 0 && pthread.sched_get_priority_max(0) == 0
+    ok = ok && pthread.sched_get_priority_min(1) == 1 && pthread.sched_get_priority_max(1) == 99
+    var mask: [u64; 16] = [0; 16]
+    let m: u64 = (&mask[0]) as u64
+    ok = ok && pthread.sched_getaffinity(0, AFFINITY_WORDS * 8, m) == 0
+    var any: u64 = 0
+    var k: u64 = 0
+    while k < AFFINITY_WORDS {
+        any = any | octets.ld64(m, k * 8)
+        k = k + 1
+    }
+    ok = ok && any != 0 && pthread.sched_setaffinity(0, AFFINITY_WORDS * 8, m) == 0
+    ok = ok && pthread.sched_getcpu() < 1024
+    var policy: u64 = 99
+    var param: u64 = 99
+    ok = ok && pthread.getschedparam(pthread.self(), (&policy) as u64, (&param) as u64) == 0
+    ok = ok && (policy & 0xFFFFFFFF) == 0 && (param & 0xFFFFFFFF) == 0
+    param = 0
+    ok = ok && pthread.setschedparam(pthread.self(), 0, (&param) as u64) == 0
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create((&t) as u64, blocker, 0) != 0 {
+        return false
+    }
+    probecount.wait_for((&y_ready) as u64, 1)
+    policy = 99
+    ok = ok && pthread.getschedparam(t, (&policy) as u64, (&param) as u64) == 0 && (policy & 0xFFFFFFFF) == 0
+    var clock: u64 = 99
+    ok = ok && pthread.getcpuclockid(t, (&clock) as u64) == 0 && (clock & 0xFFFFFFFF) == 3
+    locks.store((&y_stop) as u64, 1)
+    var waited: u64 = 0
+    while !threads.is_done(t) && waited < 3000 {
+        threads.sleep_ms(1)
+        waited = waited + 1
+    }
+    ok = ok && pthread.getcpuclockid(t, (&clock) as u64) == errno.E_SRCH
+    ok = ok && pthread.getschedparam(t, (&policy) as u64, (&param) as u64) == errno.E_SRCH
+    pthread.join(t, 0)
+    return ok
+}
+
+fn run_sigmask() -> bool {
+    var set: u64 = SIGNAL_BIT
+    var old: u64 = 0
+    var cur: u64 = 0
+    var ok: bool = pthread.sigmask(0, (&set) as u64, (&old) as u64) == 0
+    ok = ok && pthread.sigmask(0, 0, (&cur) as u64) == 0 && (cur & SIGNAL_BIT) == SIGNAL_BIT
+    ok = ok && pthread.sigmask(1, (&set) as u64, (&cur) as u64) == 0 && (cur & SIGNAL_BIT) == SIGNAL_BIT
+    ok = ok && pthread.sigmask(0, 0, (&cur) as u64) == 0 && (cur & SIGNAL_BIT) == 0
+    ok = ok && pthread.sigmask(2, (&set) as u64, 0) == 0
+    ok = ok && pthread.sigmask(9, (&set) as u64, 0) == errno.E_INVAL
+    ok = ok && pthread.sigmask(2, (&old) as u64, 0) == 0
+    ok = ok && pthread.sigmask(0, 0, (&cur) as u64) == 0 && cur == old
+    return ok
+}
+
+fn read_name(buf: u64) -> bool {
+    return !errno.is_error(kcall.sys2(kcall.SYS_PRCTL, PR_GET_NAME, buf))
+}
+
+fn run_setname() -> bool {
+    var name: [u8; 32] = [0 as u8; 32]
+    var back: [u8; 17] = [0 as u8; 17]
+    var ok: bool = true
+    var k: u64 = 0
+    while k < 15 {
+        octets.st8((&name[0]) as u64, k, 97 + k)
+        k = k + 1
+    }
+    ok = ok && pthread.setname_np(pthread.self(), (&name[0]) as u64) == 0
+    ok = ok && read_name((&back[0]) as u64) && back[0] == 97 && back[14] == 111 && back[15] == 0
+    name[15] = 112
+    ok = ok && pthread.setname_np(pthread.self(), (&name[0]) as u64) == errno.E_RANGE
+    ok = ok && read_name((&back[0]) as u64) && back[14] == 111
+    name[15] = 0
+    name[3] = 0
+    ok = ok && pthread.setname_np(pthread.self(), (&name[0]) as u64) == 0
+    ok = ok && read_name((&back[0]) as u64) && back[2] == 99 && back[3] == 0
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create((&t) as u64, blocker, 0) != 0 {
+        return false
+    }
+    probecount.wait_for((&y_ready) as u64, 1)
+    ok = ok && pthread.setname_np(t, (&name[0]) as u64) == errno.E_NOSYS
+    locks.store((&y_stop) as u64, 1)
+    pthread.join(t, 0)
+    return ok
+}
+
+fn count_cleanup(arg: u64) -> u64 {
+    locks.fetch_add((&y_cleaned) as u64, 1)
+    return 0
+}
+
+fn unwind_body(arg: u64) -> u64 {
+    var frame: [u64; 8] = [0; 8]
+    let buf: u64 = (&frame[0]) as u64
+    pthread.cleanup_push(count_cleanup, 0)
+    pthread.__pthread_register_cancel(buf)
+    locks.store((&y_flag) as u64, pcancel.cleanup_depth())
+    pthread.__pthread_unregister_cancel(buf)
+    locks.store((&y_result) as u64, pcancel.cleanup_depth())
+    pthread.__pthread_register_cancel(buf)
+    pthread.__pthread_unwind_next(buf)
+    locks.store((&y_stop) as u64, 1)
+    return 0
+}
+
+fn run_unwind_frames() -> bool {
+    reset_flags()
+    var t: u64 = 0
+    if pthread.create((&t) as u64, unwind_body, 0) != 0 {
+        return false
+    }
+    var rv: u64 = 0
+    pthread.join(t, (&rv) as u64)
+    return rv == pthread.CANCELED && locks.load((&y_flag) as u64) == 2 && locks.load((&y_result) as u64) == 1
+        && locks.load((&y_cleaned) as u64) == 1 && locks.load((&y_stop) as u64) == 0
+}
+
+fn run_all() -> u64 {
+    check(run_sem_basic())
+    check(run_sem_wake())
+    check(run_sem_timed_wake())
+    check(run_condattr())
+    check(run_condattr_signal())
+    check(run_rwlockattr())
+    check(run_thread_attr())
+    check(run_sched())
+    check(run_sigmask())
+    check(run_setname())
+    check(run_unwind_frames())
+    return probecount.failed()
+}
