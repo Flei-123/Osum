@@ -109,8 +109,8 @@ run c "iwlfhtest iwlfhbind nic"
 check_host "$T/c.klar" wlan
 has "$T/c.klar" 'dns=192.168.77.1' "wlan: stack line names the WLAN DNS"
 
-echo "-- B: e1000 + WLAN: uplink switch to WLAN, host resolves through the AP"
-run e "iwlfhtest iwlfhbind nic" "$ETH"
+echo "-- B: e1000 + WLAN with wlanfirst: uplink switch to WLAN, host resolves through the AP"
+run e "iwlfhtest iwlfhbind nic wlanfirst" "$ETH"
 check_host "$T/e.klar" both
 has "$T/e.klar" 'stack wired=1 uplink=1' "both: uplink is the WLAN card"
 
