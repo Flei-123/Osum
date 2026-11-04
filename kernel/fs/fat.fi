@@ -4,6 +4,8 @@
 profile kernel
 
 import lib.kstate
+import fs.pathseg
+import fs.fsdevio
 import serial
 import block.blk
 import fs.mnt
@@ -140,10 +142,6 @@ fn upper(c: u64) -> u64 {
 
 // ----------------------------------------------------- Sektor und Verband
 
-fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
-    return blk.read_on(state, mnt.dev(state, m), lba, dst)
-}
-
 fn wr(state: u64, m: u64, lba: u64, src: u64) -> bool {
     return blk.write_on(state, mnt.dev(state, m), lba, src)
 }
@@ -195,7 +193,7 @@ fn fat_load(state: u64, m: u64, lba: u64) -> bool {
         return false
     }
     fat_tag_drop()
-    if !rd(state, m, lba, buf(state, FATBUF)) {
+    if !fsdevio.read(state, m, lba, buf(state, FATBUF)) {
         return false
     }
     fat_tag_m = m + 1
@@ -455,7 +453,7 @@ fn sync__inner(state: u64, m: u64) -> u64 {
             idx = total + 2
         } else {
             if want != sec {
-                if !rd(state, m, sget(state, m, S_FATLBA) + want,
+                if !fsdevio.read(state, m, sget(state, m, S_FATLBA) + want,
                     buf(state, FATBUF)) {
                     return free
                 }
@@ -503,7 +501,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     let base: u64 = mnt.first(state, m)
     fat_tag_drop()
     sset(state, m, S_VALID, 0)
-    if !rd(state, m, base, buf(state, DIRBUF)) {
+    if !fsdevio.read(state, m, base, buf(state, DIRBUF)) {
         return 0
     }
     let b: u64 = buf(state, DIRBUF)
@@ -711,7 +709,7 @@ fn dir_walk(state: u64, m: u64, first: u64, want: u64, out_name: u64,
         if lba == 0 {
             return 0
         }
-        if !rd(state, m, lba, buf(state, DIRBUF)) {
+        if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
             return 0
         }
         var k: u64 = 0
@@ -832,23 +830,6 @@ fn dir_find(state: u64, m: u64, dir_clus: u64, name: u64) -> u64 {
 
 // ------------------------------------------------------ Pfade aufloesen
 
-fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
-    var i: u64 = at
-    while kstate.get8(path + i) == 47 {
-        i = i + 1
-    }
-    var n: u64 = 0
-    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
-        if n + 1 < max {
-            kstate.set8(out + n, kstate.get8(path + i) as u8)
-            n = n + 1
-        }
-        i = i + 1
-    }
-    kstate.set8(out + n, 0 as u8)
-    return i
-}
-
 fn f_lookup(state: u64, m: u64, path: u64) -> u64 {
     let __f: u64 = enter(state)
     let __r: u64 = f_lookup__inner(state, m, path)
@@ -866,7 +847,7 @@ fn f_lookup__inner(state: u64, m: u64, path: u64) -> u64 {
     var node: u64 = node_get(state, m, sget(state, m, S_ROOT), 0, A_DIR, 0, 0)
     var going: bool = true
     while going {
-        at = segment(path, at, (&seg[0]) as u64, 72)
+        at = pathseg.segment(path, at, (&seg[0]) as u64, 72)
         if kstate.get8((&seg[0]) as u64) == 0 {
             going = false
         } else {
@@ -974,7 +955,7 @@ fn f_read__inner(state: u64, m: u64, node: u64, off: u64, dst: u64,
         if chunk > want - done {
             chunk = want - done
         }
-        if !rd(state, m, lba, buf(state, DATBUF)) {
+        if !fsdevio.read(state, m, lba, buf(state, DATBUF)) {
             return done
         }
         var i: u64 = 0
@@ -995,7 +976,7 @@ fn entry_update(state: u64, m: u64, node: u64) -> bool {
     if lba == 0 {
         return true
     }
-    if !rd(state, m, lba, buf(state, DIRBUF)) {
+    if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
         return false
     }
     let e: u64 = buf(state, DIRBUF) + nget(state, node, N_DOFF)
@@ -1067,7 +1048,7 @@ fn f_write__body(state: u64, m: u64, node: u64, off: u64, src: u64,
                 chunk = len - done
             }
             if chunk != BS {
-                if !rd(state, m, lba, buf(state, DATBUF)) {
+                if !fsdevio.read(state, m, lba, buf(state, DATBUF)) {
                     return done
                 }
             }
@@ -1128,7 +1109,7 @@ fn fsinfo_load(state: u64, m: u64) {
         return
     }
     let base: u64 = mnt.first(state, m)
-    if !rd(state, m, base + sec, buf(state, DATBUF)) {
+    if !fsdevio.read(state, m, base + sec, buf(state, DATBUF)) {
         return
     }
     let b: u64 = buf(state, DATBUF)
@@ -1158,7 +1139,7 @@ fn fsinfo_store(state: u64, m: u64, known: bool) {
         return
     }
     let base: u64 = mnt.first(state, m)
-    if !rd(state, m, base + sec, buf(state, DATBUF)) {
+    if !fsdevio.read(state, m, base + sec, buf(state, DATBUF)) {
         return
     }
     let b: u64 = buf(state, DATBUF)
@@ -1319,7 +1300,7 @@ fn dir_space(state: u64, m: u64, dir_clus: u64, count: u64,
         if lba == 0 {
             s = secs
         } else {
-            if !rd(state, m, lba, buf(state, DIRBUF)) {
+            if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
                 return false
             }
             var k: u64 = 0
@@ -1359,7 +1340,7 @@ fn dir_space(state: u64, m: u64, dir_clus: u64, count: u64,
         if lba == 0 {
             return false
         }
-        if !rd(state, m, lba, buf(state, DIRBUF)) {
+        if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
             return false
         }
         var k: u64 = 0
@@ -1464,7 +1445,7 @@ fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
         if lba == 0 {
             return 0
         }
-        if !rd(state, m, lba, buf(state, DIRBUF)) {
+        if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
             return 0
         }
         lfn_put(state, buf(state, DIRBUF) + off, name, len, seq,
@@ -1479,7 +1460,7 @@ fn dir_add(state: u64, m: u64, dir_clus: u64, name: u64, clus: u64,
     if lba == 0 {
         return 0
     }
-    if !rd(state, m, lba, buf(state, DIRBUF)) {
+    if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
         return 0
     }
     let e: u64 = buf(state, DIRBUF) + off
@@ -1642,7 +1623,7 @@ fn f_create__inner(state: u64, m: u64, path: u64, art: u64) -> u64 {
         if !clus_zero(state, m, fresh) {
             return 0
         }
-        if !rd(state, m, clus_lba(state, m, fresh), buf(state, DIRBUF)) {
+        if !fsdevio.read(state, m, clus_lba(state, m, fresh), buf(state, DIRBUF)) {
             return 0
         }
         let e0: u64 = buf(state, DIRBUF)
@@ -1689,7 +1670,7 @@ fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
     if node == 0 {
         return false
     }
-    if !rd(state, m, lba, buf(state, DIRBUF)) {
+    if !fsdevio.read(state, m, lba, buf(state, DIRBUF)) {
         return false
     }
     kstate.set8(buf(state, DIRBUF) + off, 0xE5 as u8)
@@ -1704,7 +1685,7 @@ fn dir_remove(state: u64, m: u64, dir_clus: u64, name: u64) -> bool {
         if plba == 0 {
             going = false
         } else {
-            if !rd(state, m, plba, buf(state, DIRBUF)) {
+            if !fsdevio.read(state, m, plba, buf(state, DIRBUF)) {
                 going = false
             } else {
                 let e: u64 = buf(state, DIRBUF) + poff

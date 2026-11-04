@@ -4,6 +4,8 @@
 profile kernel
 
 import lib.kstate
+import fs.pathseg
+import fs.fsdevio
 import serial
 import block.blk
 import fs.mnt
@@ -127,10 +129,6 @@ fn tick(state: u64) {
     kstate.add(state, kstate.VFS_INDIRECT, 1)
 }
 
-fn rd(state: u64, m: u64, lba: u64, dst: u64) -> bool {
-    return blk.read_on(state, mnt.dev(state, m), lba, dst)
-}
-
 fn block_read(state: u64, m: u64, block: u64, dst: u64) -> bool {
     if block == 0 || block >= sget(state, m, S_BLOCKS) {
         return false
@@ -140,7 +138,7 @@ fn block_read(state: u64, m: u64, block: u64, dst: u64) -> bool {
     let cur_first: u64 = mnt.first(state, m) + block * sektoren
     var i: u64 = 0
     while i < sektoren {
-        if !rd(state, m, cur_first + i, dst + i * BS) {
+        if !fsdevio.read(state, m, cur_first + i, dst + i * BS) {
             return false
         }
         i = i + 1
@@ -263,7 +261,7 @@ fn inode_load(state: u64, m: u64, ino: u64) -> u64 {
 
     let byte_off: u64 = itab * bs + slot * inosz
     let sektor: u64 = mnt.first(state, m) + byte_off / BS
-    if !rd(state, m, sektor, buf(state, INOBUF)) {
+    if !fsdevio.read(state, m, sektor, buf(state, INOBUF)) {
         return 0
     }
     let im_sektor: u64 = byte_off % BS
@@ -511,23 +509,6 @@ fn copy_name(dst: u64, src: u64, max: u64) -> u64 {
     return i
 }
 
-fn segment(path: u64, at: u64, out: u64, max: u64) -> u64 {
-    var i: u64 = at
-    while kstate.get8(path + i) == 47 {
-        i = i + 1
-    }
-    var n: u64 = 0
-    while kstate.get8(path + i) != 0 && kstate.get8(path + i) != 47 {
-        if n + 1 < max {
-            kstate.set8(out + n, kstate.get8(path + i) as u8)
-            n = n + 1
-        }
-        i = i + 1
-    }
-    kstate.set8(out + n, 0 as u8)
-    return i
-}
-
 // ==================================================== DIE VERRICHTUNGEN
 
 fn mount_probe(state: u64, m: u64) -> u64 {
@@ -546,7 +527,7 @@ fn mount_probe__inner(state: u64, m: u64) -> u64 {
     sset(state, m, S_UNSAUBER, 0)
 
     let base: u64 = mnt.first(state, m)
-    if !rd(state, m, base + 2, buf(state, SECBUF)) {
+    if !fsdevio.read(state, m, base + 2, buf(state, SECBUF)) {
         return 0
     }
     let s: u64 = buf(state, SECBUF)
@@ -680,7 +661,7 @@ fn f_lookup__inner(state: u64, m: u64, path: u64) -> u64 {
     var ino: u64 = 2
     var going: bool = true
     while going {
-        at = segment(path, at, (&seg[0]) as u64, 256)
+        at = pathseg.segment(path, at, (&seg[0]) as u64, 256)
         if kstate.get8((&seg[0]) as u64) == 0 {
             going = false
         } else {
