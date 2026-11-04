@@ -361,11 +361,8 @@ fn do_arch_prctl(state: u64, me: u64, code: u64, addr: u64) -> u64 {
 // `nanosleep(request, remainder)`, and the request is a `struct timespec`:
 // eight octets of seconds, eight of nanoseconds. The timer runs at 100 Hz,
 // so ten milliseconds are the grain -- anything shorter is a yield.
-//
-// A DELIBERATE DEVIATION: more than sixty seconds is -EINVAL. Linux would
-// sleep. A kernel that can be stopped for an hour by one number cannot be
-// measured, and `tools/kernel/run.sh` has been checking that refusal since
-// round 62.
+const MAX_SLEEP_SEC: u64 = 4294967296
+
 fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
     if !proc.user_ok(state, me, req, 16) {
         return sysuser.neg(errno.E_FAULT)
@@ -375,10 +372,14 @@ fn do_nanosleep(state: u64, me: u64, req: u64) -> u64 {
     if nsec >= 1000000000 {
         return sysuser.neg(errno.E_INVAL)
     }
-    if sec > 60 {
+    if (sec >> 63) != 0 {
         return sysuser.neg(errno.E_INVAL)
     }
-    var ticks: u64 = sec * 100 + (nsec + 9999999) / 10000000
+    var capped: u64 = sec
+    if capped > MAX_SLEEP_SEC {
+        capped = MAX_SLEEP_SEC
+    }
+    var ticks: u64 = capped * 100 + (nsec + 9999999) / 10000000
     // RUNDE UNTERBAU: ONE TICK MORE, as `poll` does it. The counter stands in the middle of the running tick when the call reads it, so a
     // sleep of N ticks lasted between N-1 and N ticks: `usleep(30000)` measured 24.7 ms (t_misc `monotonic_advances_with_sleep`), and a sleep
     // must never return EARLY (POSIX). A request of zero stays zero.

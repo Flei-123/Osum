@@ -557,7 +557,7 @@ if [ -f "$F" ]; then
     has "$F" "user: write(nil)=-14" "write with a null pointer gives -EFAULT"
     has "$F" "user: read(badfd)=-9" "read on descriptor 77 gives -EBADF"
     has "$F" "user: nosys=-38" "an unknown call number gives -ENOSYS"
-    has "$F" "user: sleep(1000s)=-22" "an absurd sleep gives -EINVAL"
+    has "$F" "user: sleep(badns)=-22" "a sleep with 10^9 nanoseconds gives -EINVAL"
     has "$F" "user: wait(bad)=-10" "wait for a foreign pid gives -ECHILD"
     has "$F" "user: child exit=41" "wait delivered the exit code of the first child"
     has "$F" "user: child exit=42" "wait delivered the exit code of the second child"
