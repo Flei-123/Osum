@@ -1,0 +1,101 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import actwire
+import trusttext
+import libc.octets
+import libc.kcall
+import libc.clockapi
+
+export { ask, ANSWER_NONE, ANSWER_YES, ANSWER_NO }
+
+const WM_TRUST: u64 = 2129
+const TR_ASK: u64 = 0
+const TR_POLL: u64 = 1
+const TR_CANCEL: u64 = 2
+
+const ANSWER_NONE: u64 = 0
+const ANSWER_YES: u64 = 1
+const ANSWER_NO: u64 = 2
+
+const TOKEN_BASE: u64 = 0x40000000
+const WAIT_MS: u64 = 120000
+const POLL_MS: u64 = 40
+const MSG_MAX: u64 = 480
+
+static mut msg_buf: [u8; 512] = [0 as u8; 512]
+static mut s_call: [u8; 6] = "call \0"
+static mut s_nl: [u8; 2] = "\n\0"
+static mut s_rights: [u8; 9] = "\nrights=\0"
+static mut s_critical: [u8; 9] = "critical\0"
+
+fn put_text(at: u64, src: u64) -> u64 {
+    let p: u64 = (&msg_buf[0 as usize]) as u64
+    var n: u64 = at
+    var i: u64 = 0
+    while octets.ld8(src, i) != 0 && n < MSG_MAX {
+        octets.st8(p, n, octets.ld8(src, i))
+        n = n + 1
+        i = i + 1
+    }
+    octets.st8(p, n, 0)
+    return n
+}
+
+fn compose(action: u64, args: u64, rights: u64) {
+    var n: u64 = put_text(0, (&s_call[0 as usize]) as u64)
+    n = put_text(n, action)
+    if args != 0 && octets.ld8(args, 0) != 0 {
+        n = put_text(n, (&s_nl[0 as usize]) as u64)
+        n = put_text(n, args)
+    }
+    if rights != 0 && octets.ld8(rights, 0) != 0 {
+        n = put_text(n, (&s_rights[0 as usize]) as u64)
+        n = put_text(n, rights)
+    }
+}
+
+fn token() -> u64 {
+    return TOKEN_BASE + (clockapi.ticks() & 0xFFFFFF)
+}
+
+fn show(no: u64, client: u64, action: u64) -> bool {
+    let m: u64 = (&msg_buf[0 as usize]) as u64
+    trusttext.build(m, no, client, action, (&s_critical[0 as usize]) as u64, 0)
+    let waited_from: u64 = clockapi.ticks()
+    var up: bool = false
+    var gave_up: bool = false
+    while !up && !gave_up {
+        let r: u64 = kcall.sys4(WM_TRUST, TR_ASK, no, actwire.ob_ptr(), actwire.ob_len())
+        if !ulib.bad(r) {
+            up = true
+        } else if (clockapi.ticks() - waited_from) * 10 > WAIT_MS {
+            gave_up = true
+        } else {
+            let _s: u64 = clockapi.sleep_ms(100)
+        }
+    }
+    return up
+}
+
+fn ask(client: u64, action: u64, args: u64, rights: u64) -> u64 {
+    let no: u64 = token()
+    compose(action, args, rights)
+    if !show(no, client, action) {
+        return ANSWER_NONE
+    }
+    let start: u64 = clockapi.ticks()
+    while (clockapi.ticks() - start) * 10 < WAIT_MS {
+        let r: u64 = kcall.sys4(WM_TRUST, TR_POLL, no, 0, 0)
+        if !ulib.bad(r) && (r == 1 || r == 2) {
+            return r
+        }
+        if ulib.bad(r) || r == 3 {
+            return ANSWER_NONE
+        }
+        let _s: u64 = clockapi.sleep_ms(POLL_MS)
+    }
+    let _c: u64 = kcall.sys4(WM_TRUST, TR_CANCEL, no, 0, 0)
+    return ANSWER_NONE
+}
