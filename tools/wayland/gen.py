@@ -228,7 +228,10 @@ def main():
     w("")
     out.extend(body)
 
-    sys.stdout.write("\n".join(out) + "\n")
+    keep = ("// SPDX", "// kernel/user/wlproto.fi", "// Neu erzeugen", "// ------")
+    out = [ln for ln in out if "die Fehler" not in ln]
+    out = [ln for ln in out if not ln.lstrip().startswith("//") or ln.startswith(keep)]
+    sys.stdout.write("\n".join(out).rstrip("\n") + "\n")
     sys.stderr.write("wlproto.fi: %d Schnittstellen, %d Konstanten\n"
                      % (len(LIMIT), len(exports)))
     return 0
