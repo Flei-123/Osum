@@ -615,6 +615,51 @@ draht_zu
 G="$TMPD/g9e.log"
 [ "$(status_von 3)" = ok ] && ok "counter-proof: without command_sub_allowed any subcommand passes" || bad "counter-proof: $(grep -a '^ANTWORT 3 ' "$G")"
 
+echo "== 9d. command path arguments follow the read and list rules =="
+echo "secret" > "$TMPD/secret.txt"
+sed 's|command_allowed = /bin/echo|command_allowed = /bin/echo\ncommand_allowed = /bin/cat\ncommand_allowed = /bin/ls|' \
+    "$TMPD/voll.conf" > "$TMPD/paths.conf"
+sed 's|read          = /var/jarvis/|read          = /\nread          = /var/jarvis/|; s|list      = /var/jarvis/|list      = /\nlist      = /var/jarvis/|' \
+    "$TMPD/paths.conf" > "$TMPD/pathswide.conf"
+abbild "$TMPD/paths.img" "$TMPD/paths.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt" "/etc/secret.txt=$TMPD/secret.txt"
+abbild "$TMPD/pathswide.img" "$TMPD/pathswide.conf" "/var/jarvis/gruss.txt=$TMPD/gruss.txt" "/etc/secret.txt=$TMPD/secret.txt"
+cat > "$TMPD/auf-paths.txt" <<'AUF'
+befehl|/bin/cat /var/jarvis/gruss.txt|
+befehl|/bin/cat /etc/secret.txt|
+befehl|/bin/cat /var/jarvis/../etc/secret.txt|
+befehl|/bin/cat secret.txt|
+befehl|/bin/ls /var/jarvis/|
+befehl|/bin/ls /etc/|
+befehl|/bin/cat /var/jarvis/gruss.txt /etc/secret.txt|
+befehl|/bin/echo /etc/secret.txt|
+befehl|/bin/cat -n /etc/secret.txt|
+AUF
+draht_auf
+gegenstelle_an good "$TMPD/auf-paths.txt" "$TMPD/g9f.log"
+lauf_mit_netz "$TMPD/paths.img" "jarvisd -1 -t 60000;exit" "$TMPD/r9f.txt" 220
+gegenstelle_aus
+draht_zu
+G="$TMPD/g9f.log"
+[ "$(status_von 1)" = ok ] && ok "cat of a file inside read: allowed" || bad "cat inside: $(grep -a '^ANTWORT 1 ' "$G")"
+hat "$G.1.bin" "hallo aus osum" "and its content comes back"
+pruefe_nein 2 "cat of a file outside read" "\`read\`"
+pruefe_nein 3 "cat with .. in the path" "clean absolute path"
+pruefe_nein 4 "cat with a relative path" "absolute paths"
+[ "$(status_von 5)" = ok ] && ok "ls of a listed directory: allowed" || bad "ls inside: $(grep -a '^ANTWORT 5 ' "$G")"
+pruefe_nein 6 "ls of a directory outside list" "\`list\`"
+pruefe_nein 7 "cat with a second path outside read" "\`read\`"
+[ "$(status_von 8)" = ok ] && ok "a command without file arguments is not touched" || bad "echo: $(grep -a '^ANTWORT 8 ' "$G")"
+pruefe_nein 9 "an option does not hide the path" "\`read\`"
+draht_auf
+gegenstelle_an good "$TMPD/auf-paths.txt" "$TMPD/g9g.log"
+lauf_mit_netz "$TMPD/pathswide.img" "jarvisd -1 -t 60000;exit" "$TMPD/r9g.txt" 220
+gegenstelle_aus
+draht_zu
+G="$TMPD/g9g.log"
+[ "$(status_von 2)" = ok ] && hat "$G.2.bin" "secret" "counter-proof: with read = / the same cat passes (the rule is the list, not a hard block)" \
+    || bad "counter-proof cat: $(grep -a '^ANTWORT 2 ' "$G")"
+[ "$(status_von 6)" = ok ] && ok "counter-proof: with list = / the same ls passes" || bad "counter-proof ls: $(grep -a '^ANTWORT 6 ' "$G")"
+
 # =====================================================================
 echo "== 10. PROMISE (f): no network at start =="
 lauf_und_miss() { # <abbild> <skript> <ausgabe> <sekunden>

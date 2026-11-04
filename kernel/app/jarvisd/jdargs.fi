@@ -1,0 +1,123 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import std.rt
+
+const CLASS_NONE: i64 = 0
+
+const CLASS_READ: i64 = 1
+
+const CLASS_LIST: i64 = 2
+
+const CLASS_FIND: i64 = 3
+
+const CLASS_GREP: i64 = 4
+
+const STEP_END: i64 = 0
+
+const STEP_PATH: i64 = 1
+
+const STEP_BAD: i64 = 2
+
+struct Scan {
+    cls: i64,
+    pos: usize,
+    ordinal: usize,
+    after_option: bool,
+    start: usize,
+    len: usize,
+}
+
+fn same(p: u64, n: usize, s: u64) -> bool {
+    if n != rt.c_length(s) {
+        return false
+    }
+    var i: usize = 0
+    while i < n {
+        if rt.ld8(p, i) != rt.ld8(s, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn program_class(prog: u64, pn: usize) -> i64 {
+    var cat: [u8; 9] = "/bin/cat\0"
+    var head: [u8; 10] = "/bin/head\0"
+    var tail: [u8; 10] = "/bin/tail\0"
+    var wc: [u8; 8] = "/bin/wc\0"
+    var grep: [u8; 10] = "/bin/grep\0"
+    var ls: [u8; 8] = "/bin/ls\0"
+    var du: [u8; 8] = "/bin/du\0"
+    var find: [u8; 10] = "/bin/find\0"
+    if same(prog, pn, (&cat[0]) as u64) || same(prog, pn, (&head[0]) as u64)
+        || same(prog, pn, (&tail[0]) as u64) || same(prog, pn, (&wc[0]) as u64) {
+        return CLASS_READ
+    }
+    if same(prog, pn, (&grep[0]) as u64) {
+        return CLASS_GREP
+    }
+    if same(prog, pn, (&ls[0]) as u64) || same(prog, pn, (&du[0]) as u64) {
+        return CLASS_LIST
+    }
+    if same(prog, pn, (&find[0]) as u64) {
+        return CLASS_FIND
+    }
+    return CLASS_NONE
+}
+
+fn scan_new(cls: i64, pos: usize) -> Scan {
+    return Scan { cls: cls, pos: pos, ordinal: 0, after_option: false, start: 0, len: 0 }
+}
+
+fn all_digits(line: u64, start: usize, len: usize) -> bool {
+    var i: usize = 0
+    while i < len {
+        let c: u8 = rt.ld8(line, start + i)
+        if c < 48 as u8 || c > 57 as u8 {
+            return false
+        }
+        i = i + 1
+    }
+    return len > 0
+}
+
+fn scan_next(line: u64, zn: usize, s: *mut Scan) -> i64 {
+    while true {
+        while (*s).pos < zn && rt.ld8(line, (*s).pos) == 32 as u8 {
+            (*s).pos = (*s).pos + 1
+        }
+        if (*s).pos >= zn {
+            return STEP_END
+        }
+        let start: usize = (*s).pos
+        while (*s).pos < zn && rt.ld8(line, (*s).pos) != 32 as u8 {
+            (*s).pos = (*s).pos + 1
+        }
+        let len: usize = (*s).pos - start
+        (*s).start = start
+        (*s).len = len
+        if rt.ld8(line, start) == 45 as u8 {
+            (*s).after_option = true
+            continue
+        }
+        let was_option: bool = (*s).after_option
+        (*s).after_option = false
+        let index: usize = (*s).ordinal
+        (*s).ordinal = (*s).ordinal + 1
+        if (*s).cls == CLASS_GREP && index == 0 {
+            continue
+        }
+        if (*s).cls == CLASS_FIND && index > 0 {
+            continue
+        }
+        if was_option && all_digits(line, start, len) && ((*s).cls == CLASS_READ || (*s).cls == CLASS_GREP) {
+            continue
+        }
+        if rt.ld8(line, start) == 47 as u8 {
+            return STEP_PATH
+        }
+        return STEP_BAD
+    }
+    return STEP_END
+}
