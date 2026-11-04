@@ -32,7 +32,7 @@ qboot() {
     local t=$1 words=$2 script=$3
     cp "$TMPD/base.img" "$TMPD/$t.img"
     timeout -s KILL 90 qemu-system-x86_64 $ACCEL -machine q35 -smp 2 -kernel "$TMPD/k.mb" -m 512 \
-        -append "osum nokbd vfs smpfrueh $words script=$script;echo vfsdone;exit" \
+        -append "osum nokbd vfs vfsall smpfrueh $words script=$script;echo vfsdone;exit" \
         -serial "file:$TMPD/$t.ser" -display none -global ICH9-LPC.noreboot=false \
         -drive "file=$TMPD/$t.img,format=raw,if=none,id=d0" -device ide-hd,drive=d0,bus=ide.0 \
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 < /dev/null > /dev/null 2>&1
@@ -40,6 +40,7 @@ qboot() {
 }
 stat_of() { awk -v k="$2" '$1==k {v=$2} END {print v+0}' "$TMPD/$1.txt"; }
 lines_of() { grep -ac "^$2\$" "$TMPD/$1.txt"; }
+old_served() { awk '/^osum\$ mv ->/{f=1;next} /^\[after-old\]/{f=0} f' "$TMPD/$1.txt" | grep -ac '^alpha$'; }
 done_ok() { grep -qax "vfsdone" "$TMPD/$1.txt" && ok "$2 script ran to the end" || bad "$2 vfsdone missing"; }
 SCRIPT_D="cat /etc/alpha.txt;cat /etc/alpha.txt;cat /etc/nothere;cat /etc/nothere;mv /etc/alpha.txt /etc/beta.txt;cat /etc/alpha.txt;echo [after-old];cat /etc/beta.txt;echo [after-new];cat /proc/vfscache"
 SCRIPT_P="cat /etc/f.txt;echo bbb > /etc/f.txt;cat /etc/f.txt;cat /etc/f.txt;cat /proc/vfscache"
@@ -49,7 +50,7 @@ done_ok a A
 [ "$(stat_of a dcache.hit)" -gt 0 ] && ok "A dentry cache hits $(stat_of a dcache.hit)" || bad "A no dentry hits"
 [ "$(stat_of a dcache.neg)" -gt 0 ] && ok "A negative dentry hits $(stat_of a dcache.neg)" || bad "A no negative hits"
 [ "$(stat_of a dcache.flush)" -gt 0 ] && ok "A rename flushed the dentry cache" || bad "A no flush after rename"
-[ "$(lines_of a alpha)" = 3 ] && ok "A old name gone after rename, new name serves the data" || bad "A alpha lines $(lines_of a alpha)"
+[ "$(lines_of a alpha)" = 3 ] && [ "$(old_served a)" = 0 ] && ok "A old name gone after rename, new name serves the data" || bad "A alpha lines $(lines_of a alpha), old name served $(old_served a)"
 qboot p "" "$SCRIPT_P"
 done_ok p AP
 [ "$(stat_of p pcache.hit)" -gt 0 ] && ok "AP page cache hits $(stat_of p pcache.hit)" || bad "AP no page hits"
@@ -57,7 +58,7 @@ done_ok p AP
 echo "== B. counter-proof dcnoinval: stale dentry after rename =="
 qboot b "dcnoinval" "$SCRIPT_D"
 done_ok b B
-[ "$(lines_of b alpha)" -gt 3 ] && ok "B stale dentry still serves the old name" || bad "B no stale read, counter-proof inactive"
+[ "$(old_served b)" -ge 1 ] && ok "B stale dentry still serves the old name" || bad "B no stale read, counter-proof inactive"
 echo "== C. counter-proof pcnoinval: stale page after rewrite =="
 qboot q "pcnoinval" "$SCRIPT_P"
 done_ok q C
