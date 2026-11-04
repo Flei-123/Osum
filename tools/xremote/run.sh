@@ -18,6 +18,7 @@ XRTOOLS=${XR_TOOLS:-/root/jarvis/data/orientos-xremote}
 HOSTBIN=${XR_HOST:-$XRTOOLS/freeviewer-host}
 VIEWER=${XR_VIEWER:-$XRTOOLS/freeviewer-glibc}
 HEADS=${XR_HEADS:-1}
+DESKTOP=${XR_DESKTOP:-0}
 RELAYDIR=${XR_RELAY:-/root/projects/freeviewer/relay}
 NODEPATH=${XR_LIBS:-/root/jarvis/node_modules}
 LIBGCC=${XR_LIBGCC:-$WD/fx-root/usr/lib/libgcc_s.so.1}
@@ -86,10 +87,18 @@ if [ "$HEADS" -ge 2 ]; then
     HEADWORDS=" vgpuheads vgpuextend"
     HEADDEV=" -device virtio-gpu-pci,id=vg,max_outputs=$HEADS,xres=640,yres=480"
 fi
+BOOTARGS="osum vfs nokbd nosched noproc nofs fremdtrace gfx nic nip=10.0.2.15/24 ngw=10.0.2.2$HEADWORDS"
+DESKTOP_ENV=()
+if [ "$DESKTOP" = 1 ]; then
+    BOOTARGS="gfx disp wm wmdauer wmshell osum vfs bus fremdtrace nic nip=10.0.2.15/24 ngw=10.0.2.2$HEADWORDS script=sh /etc/fx.sh;exit"
+    cp "$T/guest.sh" "$T/xr3.sh"
+    cp tools/xremote/guest-desktop.sh "$T/guest.sh"
+    DESKTOP_ENV=(env GUI=1 "EXTRA=/etc/xr3.sh=$T/xr3.sh@755")
+fi
 KERNEL=${KERNEL:-} DONE=XR-END TMO=${XR_TMO:-900} MEM=1024 \
-    KARGS="osum vfs nokbd nosched noproc nofs fremdtrace gfx nic nip=10.0.2.15/24 ngw=10.0.2.2$HEADWORDS" \
+    KARGS="$BOOTARGS" \
     QEMU_EXTRA="-vga std$HEADDEV -netdev user,id=n0 -device virtio-net-pci,netdev=n0,mac=52:54:00:5b:1d:01" \
-    SPEC="$T/wd/fxrun/spec.txt" bash tools/linuxapps/run.sh "$WD" "$T/guest.sh" "$OUT" > "$T/linuxapps.log" 2>&1
+    SPEC="$T/wd/fxrun/spec.txt" "${DESKTOP_ENV[@]}" bash tools/linuxapps/run.sh "$WD" "$T/guest.sh" "$OUT" > "$T/linuxapps.log" 2>&1
 wait "$VP" 2>/dev/null; VP=""
 S="$OUT/ser.clean"
 tail -n 3 "$T/linuxapps.log" | sed 's/^/        /'
@@ -154,6 +163,12 @@ CBS=$(echo "$CB" | grep -o 'sum=[0-9a-f]*' | cut -d= -f2)
 [ -n "$CBS" ] && grep -aq "clip: to viewer 5000 bytes sum=$CBS" "$S" && ok "5000-byte guest clipboard text read by the host through a segment, checksum $CBS equal" || bad "host did not read the 5000-byte guest text intact ($CB)"
 grep -aq 'Zwischenablage-Update(s) vom Host empfangen' "$T/inputtest.txt" 2>/dev/null && ok "viewer received the guest clipboard from the host" || bad "viewer received no clipboard from the host"
 grep -aq 'FEHLER' "$T/inputtest.txt" 2>/dev/null && bad "inputtest reports FEHLER: $(grep -a FEHLER "$T/inputtest.txt" | head -1)" || ok "inputtest reports no FEHLER"
+if [ "$DESKTOP" = 1 ]; then
+    G1=$(grep -a '^XR-GRAB' "$S" | head -1); G2=$(grep -a '^XR-GRAB' "$S" | tail -1)
+    L1=$(echo "$G1" | grep -o 'lit=[0-9]*' | cut -d= -f2); S1=$(echo "$G1" | grep -o 'sum=[0-9]*' | cut -d= -f2); S2=$(echo "$G2" | grep -o 'sum=[0-9]*' | cut -d= -f2)
+    [ "${L1:-0}" -gt $((SW * SH)) ] && ok "desktop: grab has ${L1} lit bytes, far more than a text console ($G1)" || bad "desktop grab too sparse: $G1"
+    [ -n "$S2" ] && [ "$S2" != "$S1" ] && ok "desktop: screen after the viewer session differs from before (sum $S1 -> $S2)" || bad "desktop: screen unchanged by the viewer session: $G1 / $G2"
+fi
 echo "== $pass ok, $fail fail"
 if [ -n "${KEEP:-}" ]; then
     mkdir -p "${KEEP_DIR:-/tmp/xremote-keep}"; cp -r "$OUT" "$T/viewer.txt" "$T/viewer1.txt" "$T/inputtest.txt" "$T/relay.log" "${KEEP_DIR:-/tmp/xremote-keep}/" 2>/dev/null

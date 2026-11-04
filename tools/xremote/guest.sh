@@ -44,6 +44,7 @@ cat /tmp/host.log
 echo "XR-HOSTLOG-END"
 /opt/xr/xrprobe input
 /opt/xr/xrprobe screen
+/opt/xr/xrprobe grab
 kill $MP 2>/dev/null
 kill $HP 2>/dev/null
 echo XR-END
