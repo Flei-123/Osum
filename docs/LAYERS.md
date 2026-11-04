@@ -42,7 +42,7 @@ Not mechanical. `lib/std` already exists and overlays the pinned Firn `std.*` (5
 
 ## Waves still open
 
-1. Dup helper migration is done for exact matches (`tools/layers/migrate/migrate.py`, `EXT=1` also rewrites `stem.name(` call sites and drops exports; `buildall.sh` compares the compile result of all programs against a baseline). Wrapper inlining is done for non-exported wrappers and for exported wrappers over `lib/` targets; facade files over non-lib targets (`arch` over `machine`, `wlib`/`wlibc`/`fuiscene` layers) stay on purpose.
+1. Dup helper migration is done for exact matches (`tools/layers/migrate/migrate.py`, `EXT=1` also rewrites `stem.name(` call sites and drops exports; `tools/buildall/run.sh` compiles all programs and modules (`-c`, profile as the file declares) and fails on any file that neither builds standalone nor is imported by a building root; baseline `tools/buildall/baseline.txt` is empty). Wrapper inlining is done for non-exported wrappers and for exported wrappers over `lib/` targets; facade files over non-lib targets (`arch` over `machine`, `wlib`/`wlibc`/`fuiscene` layers) stay on purpose.
 2. Move the 115 shared modules out of `kernel/user` into `lib/` (std/syslib/framework by the map).
 3. Split the 39 giant files; break the ring-0 cycle by giving `kernel/lib` the shared interfaces.
 4. Move root clutter under `docs/`.
