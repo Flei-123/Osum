@@ -1,0 +1,147 @@
+profile kernel
+
+import ulib
+import libc.kcall
+import libc.text
+import libc.clockapi
+import xfxio
+import xfxproc
+import xrpath
+
+export { make_password, write_pw, write_info, spawn_host, stop_host, package_ready, host_running }
+
+const SYS_GETRANDOM: u64 = 318
+const O_LOG: u64 = 1089
+const FMODE: u64 = 420
+const PW_LEN: u64 = 8
+static mut ALPHABET: [u8; 33] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789\0"
+static mut K_PASS: [u8; 10] = "password=\0"
+static mut K_SERVICE: [u8; 9] = "service=\0"
+static mut NL: [u8; 2] = "\n\0"
+static mut A_LP: [u8; 15] = "--library-path\0"
+static mut A_RELAY: [u8; 8] = "--relay\0"
+static mut A_PWF: [u8; 16] = "--password-file\0"
+static mut A_STATE: [u8; 13] = "--state-file\0"
+static mut A_HOME: [u8; 7] = "--home\0"
+static mut A_INSEC: [u8; 17] = "--insecure-relay\0"
+static mut A_NOP2P: [u8; 9] = "--no-p2p\0"
+static mut W_WS: [u8; 6] = "ws://\0"
+static mut host_pid: u64 = 0
+
+fn make_password(out: u64) -> bool {
+    var raw: [u8; 8] = [0 as u8; 8]
+    let r: u64 = kcall.sys3(SYS_GETRANDOM, (&raw[0 as usize]) as u64, PW_LEN, 0)
+    if ulib.bad(r) || r < PW_LEN {
+        return false
+    }
+    var i: u64 = 0
+    while i < PW_LEN {
+        let idx: u64 = ((raw[i as usize]) as u64) & 31
+        __mmio_write8((out + i) as *mut u8, *(((&ALPHABET[0 as usize]) as u64 + idx) as *mut u8))
+        i = i + 1
+    }
+    __mmio_write8((out + PW_LEN) as *mut u8, 0 as u8)
+    return true
+}
+
+fn write_pw(pw: u64) -> bool {
+    ulib.sys(ulib.SYS_UNLINK, xrpath.p_pw(), 0, 0)
+    return xfxio.write_text(xrpath.p_pw(), pw, ulib.O_MAKE)
+}
+
+fn write_info(pw: u64, service: u64) -> bool {
+    var b: [u8; 96] = [0 as u8; 96]
+    let p: u64 = (&b[0 as usize]) as u64
+    ulib.strcpy(p, (&K_PASS[0 as usize]) as u64)
+    ulib.strcat(p, pw)
+    ulib.strcat(p, (&NL[0 as usize]) as u64)
+    ulib.strcat(p, (&K_SERVICE[0 as usize]) as u64)
+    ulib.strcat(p, service)
+    ulib.strcat(p, (&NL[0 as usize]) as u64)
+    return xfxio.write_text(xrpath.p_info(), p, ulib.O_MAKE)
+}
+
+fn package_ready() -> bool {
+    return xfxio.exists(xrpath.p_host()) && xfxio.exists(xrpath.p_ld())
+}
+
+fn host_running() -> bool {
+    return host_pid != 0 && xfxproc.find_slot(host_pid) != ulib.EOF
+}
+
+fn has_prefix(s: u64, pre: u64) -> bool {
+    return ulib.strneq(s, pre, text.length(pre))
+}
+
+fn spawn_host(relay: u64) -> bool {
+    var argv: [u64; 14] = [0 as u64; 14]
+    var n: u64 = 0
+    argv[n as usize] = xrpath.p_ld()
+    n = n + 1
+    argv[n as usize] = (&A_LP[0 as usize]) as u64
+    n = n + 1
+    argv[n as usize] = xrpath.p_lib()
+    n = n + 1
+    argv[n as usize] = xrpath.p_host()
+    n = n + 1
+    argv[n as usize] = (&A_PWF[0 as usize]) as u64
+    n = n + 1
+    argv[n as usize] = xrpath.p_pw()
+    n = n + 1
+    argv[n as usize] = (&A_STATE[0 as usize]) as u64
+    n = n + 1
+    argv[n as usize] = xrpath.p_state()
+    n = n + 1
+    argv[n as usize] = (&A_HOME[0 as usize]) as u64
+    n = n + 1
+    argv[n as usize] = xrpath.p_home()
+    n = n + 1
+    argv[n as usize] = (&A_NOP2P[0 as usize]) as u64
+    n = n + 1
+    if *(relay as *mut u8) != 0 as u8 {
+        argv[n as usize] = (&A_RELAY[0 as usize]) as u64
+        n = n + 1
+        argv[n as usize] = relay
+        n = n + 1
+        if has_prefix(relay, (&W_WS[0 as usize]) as u64) {
+            argv[n as usize] = (&A_INSEC[0 as usize]) as u64
+            n = n + 1
+        }
+    }
+    ulib.sys(ulib.SYS_MKDIR, xrpath.p_home(), 448, 0)
+    let s1: u64 = ulib.sys(ulib.SYS_DUP, 1, 0, 0)
+    let s2: u64 = ulib.sys(ulib.SYS_DUP, 2, 0, 0)
+    let lf: u64 = ulib.sys(ulib.SYS_OPEN, xrpath.p_log(), O_LOG, FMODE)
+    if !ulib.bad(lf) {
+        ulib.sys(ulib.SYS_DUP2, lf, 1, 0)
+        ulib.sys(ulib.SYS_DUP2, lf, 2, 0)
+        ulib.sys(ulib.SYS_CLOSE, lf, 0, 0)
+    }
+    let pid: u64 = ulib.spawn_priv(xrpath.p_ld(), (&argv[0 as usize]) as u64, n)
+    ulib.sys(ulib.SYS_DUP2, s1, 1, 0)
+    ulib.sys(ulib.SYS_DUP2, s2, 2, 0)
+    ulib.sys(ulib.SYS_CLOSE, s1, 0, 0)
+    ulib.sys(ulib.SYS_CLOSE, s2, 0, 0)
+    if ulib.bad(pid) {
+        host_pid = 0
+        return false
+    }
+    host_pid = pid
+    return true
+}
+
+fn stop_host() {
+    if host_pid != 0 {
+        ulib.sys(ulib.SYS_KILL, host_pid, 143, 0)
+        var i: u64 = 0
+        while i < 30 && xfxproc.find_slot(host_pid) != ulib.EOF {
+            clockapi.sleep_ms(100)
+            i = i + 1
+        }
+        ulib.wait_code(host_pid)
+    }
+    host_pid = 0
+    ulib.sys(ulib.SYS_UNLINK, xrpath.p_pw(), 0, 0)
+    ulib.sys(ulib.SYS_UNLINK, xrpath.p_info(), 0, 0)
+    ulib.sys(ulib.SYS_UNLINK, xrpath.p_state(), 0, 0)
+}

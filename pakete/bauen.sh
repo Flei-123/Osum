@@ -96,8 +96,19 @@ for d in pakete/*/; do
     python3 tools/actionbus/manifest.py check "$d/ACTIONS" | sed 's/^/   /' || exit 1
 done
 
+XR_HOST_DIR=${XR_HOST_DIR:-/root/jarvis/data/orientos-xremote/v2}
+XR_LIBS_DIR=${XR_LIBS_DIR:-/root/fxhp/fx-root}
+if [ -f "$XR_HOST_DIR/freeviewer-host" ] && [ -f "$XR_LIBS_DIR/lib/ld-musl-x86_64.so.1" ]; then
+    mkdir -p pakete/xremote/bau
+    cp "$XR_HOST_DIR/freeviewer-host" pakete/xremote/bau/freeviewer-host
+    cp "$XR_LIBS_DIR/lib/ld-musl-x86_64.so.1" pakete/xremote/bau/ld-musl-x86_64.so.1
+    cp "$XR_LIBS_DIR/usr/lib/libgcc_s.so.1" pakete/xremote/bau/libgcc_s.so.1
+else
+    echo "   xremote: host binary or musl libs missing, package skipped"
+fi
+
 echo "== die Pakete =="
-for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/stickwr pakete/fvviewer pakete/mail pakete/jarvismini; do
+for d in pakete/wmplug-werkzeug pakete/wmplug-uhr pakete/wmplug-regel pakete/notes pakete/stickwr pakete/fvviewer pakete/mail pakete/jarvismini pakete/xremote; do
     if [ -d "$d/bau" ]; then
         paket "$d"
     else

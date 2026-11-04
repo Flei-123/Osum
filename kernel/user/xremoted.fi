@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import actwire
+import libc.clockapi
+import xfxio
+import xfxproc
+import xrpath
+import xrhost
+
+export { u_start }
+
+const POLL_MS: u64 = 2000
+const RESTART_WAIT: u64 = 3
+static mut W_NOSESSION: [u8; 10] = "nosession\0"
+static mut F_ENABLED: [u8; 8] = "enabled\0"
+static mut F_RELAY: [u8; 6] = "relay\0"
+static mut V_ONE: [u8; 2] = "1\0"
+static mut S_IDLE: [u8; 5] = "idle\0"
+static mut S_DISABLED: [u8; 9] = "disabled\0"
+static mut S_MISSING: [u8; 16] = "package-missing\0"
+static mut S_NOSESSION: [u8; 11] = "no-session\0"
+static mut S_RUNNING: [u8; 8] = "running\0"
+static mut S_RESTART: [u8; 11] = "restarting\0"
+static mut M_UP: [u8; 18] = "xremoted: started\0"
+static mut M_HOST: [u8; 23] = "xremoted: host started\0"
+static mut M_STOP: [u8; 23] = "xremoted: host stopped\0"
+static mut M_FAIL: [u8; 28] = "xremoted: host start failed\0"
+static mut M_PW: [u8; 43] = "xremoted: no random bytes for the password\0"
+static mut password: [u8; 16] = [0 as u8; 16]
+static mut relay: [u8; 200] = [0 as u8; 200]
+static mut state_word: u64 = 0
+static mut need_session: bool = true
+
+fn is_enabled() -> bool {
+    var v: [u8; 8] = [0 as u8; 8]
+    if !actwire.kvfile_get(xrpath.p_conf(), (&F_ENABLED[0 as usize]) as u64, (&v[0 as usize]) as u64, 8) {
+        return false
+    }
+    return ulib.streq((&v[0 as usize]) as u64, (&V_ONE[0 as usize]) as u64)
+}
+
+fn session_ok() -> bool {
+    if !need_session {
+        return true
+    }
+    return xfxproc.any_named(xrpath.n_taskbar())
+}
+
+fn publish(word: u64) {
+    if state_word != word {
+        state_word = word
+        xrhost.write_info((&password[0 as usize]) as u64, word)
+    }
+}
+
+fn stop_all() {
+    if xrhost.host_running() {
+        xfxio.msg((&M_STOP[0 as usize]) as u64)
+    }
+    if password[0 as usize] != 0 as u8 || xrhost.host_running() {
+        xrhost.stop_host()
+        password[0 as usize] = 0 as u8
+        state_word = 0
+    }
+}
+
+fn start_host() -> bool {
+    if password[0 as usize] == 0 as u8 {
+        if !xrhost.make_password((&password[0 as usize]) as u64) {
+            xfxio.msg((&M_PW[0 as usize]) as u64)
+            return false
+        }
+        xrhost.write_pw((&password[0 as usize]) as u64)
+        state_word = 0
+    }
+    actwire.kvfile_get(xrpath.p_conf(), (&F_RELAY[0 as usize]) as u64, (&relay[0 as usize]) as u64, 200)
+    if !xrhost.spawn_host((&relay[0 as usize]) as u64) {
+        xfxio.msg((&M_FAIL[0 as usize]) as u64)
+        return false
+    }
+    xfxio.msg((&M_HOST[0 as usize]) as u64)
+    return true
+}
+
+fn step(wait: u64) -> u64 {
+    let enabled: bool = is_enabled()
+    if !enabled {
+        stop_all()
+        return 0
+    }
+    if !xrhost.package_ready() {
+        stop_all()
+        return 0
+    }
+    if !session_ok() {
+        stop_all()
+        return 0
+    }
+    if xrhost.host_running() {
+        publish((&S_RUNNING[0 as usize]) as u64)
+        return 0
+    }
+    if wait > 0 {
+        publish((&S_RESTART[0 as usize]) as u64)
+        return wait - 1
+    }
+    if start_host() {
+        publish((&S_RUNNING[0 as usize]) as u64)
+    }
+    return RESTART_WAIT
+}
+
+fn status_idle() {
+    if !is_enabled() {
+        publish((&S_DISABLED[0 as usize]) as u64)
+    } else if !xrhost.package_ready() {
+        publish((&S_MISSING[0 as usize]) as u64)
+    } else if !session_ok() {
+        publish((&S_NOSESSION[0 as usize]) as u64)
+    }
+}
+
+fn u_start(args: u64) -> u64 {
+    if !xfxio.is_root() {
+        return 1
+    }
+    if ulib.arg_count(args) > 1 && ulib.streq(ulib.arg_at(args, 1), (&W_NOSESSION[0 as usize]) as u64) {
+        need_session = false
+    }
+    xfxio.msg((&M_UP[0 as usize]) as u64)
+    var wait: u64 = 0
+    while true {
+        wait = step(wait)
+        if !xrhost.host_running() {
+            status_idle()
+        }
+        clockapi.sleep_ms(POLL_MS)
+    }
+    return 0
+}
