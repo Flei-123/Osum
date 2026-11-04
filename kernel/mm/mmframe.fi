@@ -1,0 +1,369 @@
+import serial
+import lib.kstate
+import sync.atomic
+import arch.cpu
+import arch.arch
+import libc.regio
+
+export {
+    FRAME_SIZE,
+    REACH_FRAMES,
+    bit_clear,
+    bit_get,
+    bit_set,
+    bitmap_octets,
+    confine_to_reach,
+    count_free,
+    fill8,
+    frame_alloc,
+    frame_alloc_inner,
+    frame_alloc_user,
+    frame_free,
+    frame_free_inner,
+    frame_free_run,
+    frame_run,
+    frame_run_inner,
+    frames_free,
+    frames_total,
+    hint_of,
+    lock,
+    mapped_gib,
+    reach_frames,
+    release,
+    release_from,
+    reserve,
+    reserve_frame,
+    reserve_frame_inner,
+    reserve_init,
+    scan_range,
+    unlock
+}
+
+const FRAME_SIZE: u64 = 4096
+fn bit_get(bitmap: u64, i: u64) -> bool {
+    return (kstate.get8(bitmap + i / 8) & (1 << (i % 8))) != 0
+}
+
+fn bit_set(bitmap: u64, i: u64) {
+    let p: u64 = bitmap + i / 8
+    kstate.set8(p, (kstate.get8(p) | (1 << (i % 8))) as u8)
+}
+
+fn bit_clear(bitmap: u64, i: u64) {
+    let p: u64 = bitmap + i / 8
+    kstate.set8(p, (kstate.get8(p) & (255 ^ (1 << (i % 8)))) as u8)
+}
+
+fn bitmap_octets(state: u64) -> u64 {
+    return kstate.get(state, kstate.BITMAP_OCTETS)
+}
+
+fn mapped_gib(state: u64) -> u64 {
+    return kstate.get(state, kstate.MAPPED_GB)
+}
+
+fn frames_total(state: u64) -> u64 {
+    return kstate.get(state, kstate.BITMAP_FRAMES)
+}
+
+fn fill8(at: u64, n: u64, v: u64) {
+    var i: u64 = 0
+    let w: u64 = v * 0x0101010101010101
+    while i + 8 <= n {
+        __mmio_write64((at + i) as *mut u64, w)
+        i = i + 8
+    }
+    while i < n {
+        kstate.set8(at + i, v as u8)
+        i = i + 1
+    }
+}
+
+fn count_free(state: u64) -> u64 {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    var free: u64 = 0
+    var f: u64 = 0
+    while f < frames {
+        if (f % 8) == 0 && f + 8 <= frames {
+            let o: u64 = kstate.get8(bitmap + f / 8)
+            if o == 0 {
+                free = free + 8
+                f = f + 8
+            } else if o == 0xFF {
+                f = f + 8
+            } else {
+                var k: u64 = 0
+                while k < 8 {
+                    if (o & (1 << k)) == 0 {
+                        free = free + 1
+                    }
+                    k = k + 1
+                }
+                f = f + 8
+            }
+        } else {
+            if !bit_get(bitmap, f) {
+                free = free + 1
+            }
+            f = f + 1
+        }
+    }
+    return free
+}
+
+fn release_from(bitmap: u64, frames: u64, base: u64, length: u64,
+    from: u64) {
+    var f: u64 = (base + FRAME_SIZE - 1) / FRAME_SIZE
+    if f < from {
+        f = from
+    }
+    var last: u64 = (base + length) / FRAME_SIZE
+    if last > frames {
+        last = frames
+    }
+    while f < last {
+        if (f % 8) == 0 && f + 8 <= last {
+            kstate.set8(bitmap + f / 8, 0 as u8)
+            f = f + 8
+        } else {
+            bit_clear(bitmap, f)
+            f = f + 1
+        }
+    }
+}
+
+fn release(bitmap: u64, frames: u64, base: u64, length: u64) {
+    var f: u64 = (base + FRAME_SIZE - 1) / FRAME_SIZE
+    let last: u64 = (base + length) / FRAME_SIZE
+    while f < last {
+        if f >= frames {
+            return
+        }
+        bit_clear(bitmap, f)
+        f = f + 1
+    }
+}
+
+fn reserve(bitmap: u64, frames: u64, base: u64, length: u64) {
+    var f: u64 = base / FRAME_SIZE
+    let last: u64 = (base + length + FRAME_SIZE - 1) / FRAME_SIZE
+    while f < last {
+        if f >= frames {
+            return
+        }
+        bit_set(bitmap, f)
+        f = f + 1
+    }
+}
+
+fn frames_free(state: u64) -> u64 {
+    return kstate.get(state, kstate.FRAMES_FREE)
+}
+
+fn lock(state: u64) -> u64 {
+    let flags: u64 = arch.irq_save()
+    atomic.lock_take(state, atomic.L_FRAME, cpu.here(state))
+    return flags
+}
+
+fn unlock(state: u64, flags: u64) {
+    atomic.lock_give(state, atomic.L_FRAME)
+    arch.irq_restore(flags)
+}
+
+fn frame_alloc(state: u64) -> u64 {
+    let flags: u64 = lock(state)
+    let r: u64 = frame_alloc_inner(state)
+    unlock(state, flags)
+    return r
+}
+
+fn frame_alloc_user(state: u64) -> u64 {
+    let flags: u64 = lock(state)
+    let res: u64 = kstate.get(state, kstate.RESERVE_FRAMES)
+    if frames_free(state) <= res {
+        kstate.set(state, kstate.RESERVE_HITS,
+            kstate.get(state, kstate.RESERVE_HITS) + 1)
+        unlock(state, flags)
+        return 0
+    }
+    let r: u64 = frame_alloc_inner(state)
+    unlock(state, flags)
+    return r
+}
+
+fn reserve_init(state: u64) {
+    var n: u64 = kstate.get(state, kstate.BITMAP_FRAMES) / 52
+    if n < 64 {
+        n = 64
+    }
+    if n > 512 {
+        n = 512
+    }
+    if kstate.mode_on(state, kstate.M_NORESERVE) {
+        n = 0
+    }
+    kstate.set(state, kstate.RESERVE_FRAMES, n)
+    kstate.set(state, kstate.RESERVE_HITS, 0)
+}
+
+fn hint_of(state: u64) -> u64 {
+    let h: u64 = kstate.get(state, kstate.FRAME_HINT)
+    if h >= kstate.get(state, kstate.BITMAP_FRAMES) {
+        return 0
+    }
+    return h
+}
+
+const REACH_FRAMES: u64 = 262144
+static mut confined_once: u64 = 0
+
+fn reach_frames() -> u64 {
+    return REACH_FRAMES
+}
+
+fn confine_to_reach(state: u64) {
+    var s_cut: [u8; 40] = "mem: process context reaches frames < \0\0"
+    var s_was: [u8; 8] = " (was \0\0"
+    var s_end: [u8; 3] = ")\n\0"
+    let flags: u64 = lock(state)
+    let have: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    if confined_once != 0 || have <= REACH_FRAMES {
+        unlock(state, flags)
+        return
+    }
+    confined_once = 1
+    kstate.set(state, kstate.BITMAP_FRAMES, REACH_FRAMES)
+    if kstate.get(state, kstate.FRAME_HINT) >= REACH_FRAMES {
+        kstate.set(state, kstate.FRAME_HINT, 0)
+    }
+    kstate.set(state, kstate.FRAMES_FREE, count_free(state))
+    reserve_init(state)
+    unlock(state, flags)
+    serial.puts((&s_cut[0]) as u64)
+    serial.dec(REACH_FRAMES)
+    serial.puts((&s_was[0]) as u64)
+    serial.dec(have)
+    serial.puts((&s_end[0]) as u64)
+}
+
+fn frame_alloc_inner(state: u64) -> u64 {
+    let r: u64 = scan_range(state, hint_of(state),
+        kstate.get(state, kstate.BITMAP_FRAMES))
+    if r != 0 {
+        return r
+    }
+    return scan_range(state, 0, hint_of(state))
+}
+
+fn scan_range(state: u64, from: u64, to: u64) -> u64 {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = to
+    var f: u64 = from
+    while f < frames {
+        if kstate.get8(bitmap + f / 8) == 0xFF {
+            f = f + 8 - (f % 8)
+        } else {
+            if !bit_get(bitmap, f) {
+                bit_set(bitmap, f)
+                kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - 1)
+                kstate.set(state, kstate.FRAME_HINT, f)
+                return f * FRAME_SIZE
+            }
+            f = f + 1
+        }
+    }
+    return 0
+}
+
+fn frame_free(state: u64, addr: u64) {
+    let flags: u64 = lock(state)
+    frame_free_inner(state, addr)
+    unlock(state, flags)
+}
+
+fn frame_free_inner(state: u64, addr: u64) {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let f: u64 = addr / FRAME_SIZE
+    if f >= kstate.get(state, kstate.BITMAP_FRAMES) {
+        return
+    }
+    if bit_get(bitmap, f) {
+        bit_clear(bitmap, f)
+        kstate.set(state, kstate.FRAMES_FREE, frames_free(state) + 1)
+        if f < kstate.get(state, kstate.FRAME_HINT) {
+            kstate.set(state, kstate.FRAME_HINT, f)
+        }
+    }
+}
+
+fn reserve_frame(state: u64, addr: u64) -> bool {
+    let flags: u64 = lock(state)
+    let r: bool = reserve_frame_inner(state, addr)
+    unlock(state, flags)
+    return r
+}
+
+fn reserve_frame_inner(state: u64, addr: u64) -> bool {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let f: u64 = addr / FRAME_SIZE
+    if f >= kstate.get(state, kstate.BITMAP_FRAMES) {
+        return false
+    }
+    if bit_get(bitmap, f) {
+        return false
+    }
+    bit_set(bitmap, f)
+    kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - 1)
+    return true
+}
+
+fn frame_run(state: u64, n: u64) -> u64 {
+    let flags: u64 = lock(state)
+    let r: u64 = frame_run_inner(state, n)
+    unlock(state, flags)
+    return r
+}
+
+fn frame_run_inner(state: u64, n: u64) -> u64 {
+    let bitmap: u64 = kstate.get(state, kstate.BITMAP)
+    let frames: u64 = kstate.get(state, kstate.BITMAP_FRAMES)
+    var start: u64 = 0
+    while start + n <= frames {
+        var k: u64 = 0
+        var ok: bool = true
+        while k < n {
+            if bit_get(bitmap, start + k) {
+                ok = false
+                k = n
+            } else {
+                k = k + 1
+            }
+        }
+        if ok {
+            var j: u64 = 0
+            while j < n {
+                bit_set(bitmap, start + j)
+                j = j + 1
+            }
+            kstate.set(state, kstate.FRAMES_FREE, frames_free(state) - n)
+            return start * FRAME_SIZE
+        }
+        start = start + 1
+    }
+    return 0
+}
+
+fn frame_free_run(state: u64, addr: u64, n: u64) {
+    if addr == 0 || n == 0 {
+        return
+    }
+    let flags: u64 = lock(state)
+    var i: u64 = 0
+    while i < n {
+        frame_free_inner(state, addr + i * FRAME_SIZE)
+        i = i + 1
+    }
+    unlock(state, flags)
+}

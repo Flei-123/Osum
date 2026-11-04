@@ -1,0 +1,341 @@
+import serial
+import lib.kstate
+import arch.arch
+import libc.regio
+import mm.mmframe
+
+export {
+    CRASH_BANDS,
+    CRASH_BAND_LEN,
+    GIB,
+    MAX_GIB,
+    MB_CMDLINE,
+    MB_FLAGS,
+    MB_MMAP_ADDR,
+    MB_MMAP_LEN,
+    MB_MODS_ADDR,
+    MB_MODS_COUNT,
+    MOD_ENTRY,
+    PDE_HUGE,
+    PD_ENTRIES,
+    PTE_ADDR,
+    PTE_P_W,
+    bitmap_grow,
+    cmdline,
+    crash_band,
+    crash_band_base,
+    crash_band_usable,
+    crash_bands_take,
+    idmap_grow,
+    mod_end,
+    mod_start,
+    mods,
+    scan
+}
+
+const GIB: u64 = 1073741824
+const PD_ENTRIES: u64 = 512
+const MAX_GIB: u64 = 512
+const PTE_P_W: u64 = 0x3
+const PDE_HUGE: u64 = 0x83
+const PTE_ADDR: u64 = 0x000FFFFFFFFFF000
+
+const MB_FLAGS: u64 = 0
+const MB_CMDLINE: u64 = 16
+const MB_MMAP_LEN: u64 = 44
+const MB_MMAP_ADDR: u64 = 48
+const MB_MODS_COUNT: u64 = 20
+const MB_MODS_ADDR: u64 = 24
+const MOD_ENTRY: u64 = 16
+
+fn cmdline(mbi: u64) -> u64 {
+    if (regio.read32(mbi + MB_FLAGS) & 4) == 0 {
+        return 0
+    }
+    return regio.read32(mbi + MB_CMDLINE)
+}
+
+fn mods(mbi: u64) -> u64 {
+    if (regio.read32(mbi + MB_FLAGS) & 8) == 0 {
+        return 0
+    }
+    return regio.read32(mbi + MB_MODS_COUNT)
+}
+
+fn mod_start(mbi: u64, i: u64) -> u64 {
+    if i >= mods(mbi) {
+        return 0
+    }
+    return regio.read32(regio.read32(mbi + MB_MODS_ADDR) + i * MOD_ENTRY)
+}
+
+fn mod_end(mbi: u64, i: u64) -> u64 {
+    if i >= mods(mbi) {
+        return 0
+    }
+    return regio.read32(regio.read32(mbi + MB_MODS_ADDR)
+        + i * MOD_ENTRY + 4)
+}
+
+const CRASH_BAND_LEN: u64 = 0x3000
+const CRASH_BANDS: u64 = 2
+static mut crash_band_ok: [u64; 2] = [0, 0]
+
+fn crash_band_base(i: u64) -> u64 {
+    if i == 0 {
+        return 0x0F000000
+    }
+    return 0x1F000000
+}
+
+fn crash_band(i: u64) -> u64 {
+    if i >= CRASH_BANDS {
+        return 0
+    }
+    if crash_band_ok[i as usize] == 0 {
+        return 0
+    }
+    return crash_band_base(i)
+}
+
+fn crash_band_usable(mbi: u64, b: u64) -> bool {
+    let e: u64 = b + CRASH_BAND_LEN
+    if (regio.read32(mbi + MB_FLAGS) & 64) == 0 {
+        return false
+    }
+    var inside: bool = false
+    let len: u64 = regio.read32(mbi + MB_MMAP_LEN)
+    let addr: u64 = regio.read32(mbi + MB_MMAP_ADDR)
+    var p: u64 = addr
+    while p < addr + len {
+        let size: u64 = regio.read32(p)
+        let base: u64 = __mmio_read64((p + 4) as *mut u64)
+        let length: u64 = __mmio_read64((p + 12) as *mut u64)
+        if regio.read32(p + 20) == 1 && base <= b && base + length >= e {
+            inside = true
+        }
+        if size == 0 {
+            p = addr + len
+        } else {
+            p = p + size + 4
+        }
+    }
+    if !inside {
+        return false
+    }
+    let mc: u64 = mods(mbi)
+    var m: u64 = 0
+    while m < mc {
+        if mod_start(mbi, m) < e && mod_end(mbi, m) > b {
+            return false
+        }
+        m = m + 1
+    }
+    if regio.read32(mbi + MB_MODS_ADDR) < e && regio.read32(mbi + MB_MODS_ADDR) + 4096 > b && mc != 0 {
+        return false
+    }
+    return true
+}
+
+fn crash_bands_take(bitmap: u64, frames: u64, mbi: u64) {
+    var i: u64 = 0
+    while i < CRASH_BANDS {
+        let b: u64 = crash_band_base(i)
+        if crash_band_usable(mbi, b) {
+            mmframe.reserve(bitmap, frames, b, CRASH_BAND_LEN)
+            crash_band_ok[i as usize] = 1
+        }
+        i = i + 1
+    }
+}
+
+fn scan(state: u64, mbi: u64, kernel_end: u64) -> u64 {
+    let bitmap: u64 = state + kstate.BITMAP_OFF
+    let frames: u64 = kstate.BITMAP_BYTES * 8
+    kstate.set(state, kstate.BITMAP, bitmap)
+    kstate.set(state, kstate.BITMAP_FRAMES, frames)
+
+    var i: u64 = 0
+    while i < kstate.BITMAP_BYTES {
+        kstate.set8(bitmap + i, 0xFF as u8)
+        i = i + 1
+    }
+
+    var entries: u64 = 0
+    var usable: u64 = 0
+    var top: u64 = 0
+    if (regio.read32(mbi + MB_FLAGS) & 64) != 0 {
+        let len: u64 = regio.read32(mbi + MB_MMAP_LEN)
+        let addr: u64 = regio.read32(mbi + MB_MMAP_ADDR)
+        var p: u64 = addr
+        while p < addr + len {
+            let size: u64 = regio.read32(p)
+            let base: u64 = __mmio_read64((p + 4) as *mut u64)
+            let length: u64 = __mmio_read64((p + 12) as *mut u64)
+            let kind: u64 = regio.read32(p + 20)
+            entries = entries + 1
+            if kind == 1 {
+                usable = usable + length
+                if base + length > top {
+                    top = base + length
+                }
+                mmframe.release(bitmap, frames, base, length)
+            }
+            if size == 0 {
+                p = addr + len
+            } else {
+                p = p + size + 4
+            }
+        }
+    }
+    kstate.set(state, kstate.MEM_USABLE, usable)
+    kstate.set(state, kstate.MEM_TOP, top)
+
+    mmframe.reserve(bitmap, frames, 0, kernel_end)
+    if (regio.read32(mbi + MB_FLAGS) & 64) != 0 {
+        mmframe.reserve(bitmap, frames, regio.read32(mbi + MB_MMAP_ADDR),
+            regio.read32(mbi + MB_MMAP_LEN))
+    }
+    mmframe.reserve(bitmap, frames, mbi, 4096)
+
+    let mc: u64 = mods(mbi)
+    if mc != 0 {
+        mmframe.reserve(bitmap, frames, regio.read32(mbi + MB_MODS_ADDR),
+            mc * MOD_ENTRY)
+        var m: u64 = 0
+        while m < mc {
+            let von: u64 = mod_start(mbi, m)
+            let bis: u64 = mod_end(mbi, m)
+            if bis > von {
+                mmframe.reserve(bitmap, frames, von, bis - von)
+            }
+            m = m + 1
+        }
+    }
+
+    crash_bands_take(bitmap, frames, mbi)
+
+    kstate.set(state, kstate.FRAMES_FREE, mmframe.count_free(state))
+
+    idmap_grow(state, top)
+    bitmap_grow(state, mbi, kernel_end, top)
+    return entries
+}
+
+fn idmap_grow(state: u64, top: u64) -> u64 {
+    var want: u64 = (top + GIB - 1) / GIB
+    if want > MAX_GIB {
+        want = MAX_GIB
+    }
+    if want <= 1 {
+        kstate.set(state, kstate.MAPPED_GB, 1)
+        return 1
+    }
+    let pml4: u64 = asm("mov rax, cr3", out("rax")) & PTE_ADDR
+    let pdpt: u64 = __mmio_read64(pml4 as *mut u64) & PTE_ADDR
+    if pdpt == 0 {
+        kstate.set(state, kstate.MAPPED_GB, 1)
+        return 1
+    }
+    var g: u64 = 1
+    while g < want {
+        if (__mmio_read64((pdpt + g * 8) as *mut u64) & (1 as u64)) == 0 {
+            let pd: u64 = mmframe.frame_alloc_inner(state)
+            if pd == 0 {
+                g = want
+            } else {
+                var j: u64 = 0
+                while j < PD_ENTRIES {
+                    __mmio_write64((pd + j * 8) as *mut u64,
+                        (g * GIB + j * 2097152) | PDE_HUGE)
+                    j = j + 1
+                }
+                __mmio_write64((pdpt + g * 8) as *mut u64, pd | PTE_P_W)
+                g = g + 1
+            }
+        } else {
+            g = g + 1
+        }
+    }
+    let cr3: u64 = asm("mov rax, cr3", out("rax"))
+    asm("mov cr3, rdi", in("rdi") cr3)
+    var have: u64 = 0
+    var k: u64 = 0
+    while k < want {
+        if (__mmio_read64((pdpt + k * 8) as *mut u64) & (1 as u64)) != 0 {
+            have = have + 1
+        }
+        k = k + 1
+    }
+    kstate.set(state, kstate.MAPPED_GB, have)
+    return have
+}
+
+fn bitmap_grow(state: u64, mbi: u64, kernel_end: u64, top: u64) -> u64 {
+    let old_frames: u64 = kstate.BITMAP_BYTES * 8
+    var want_frames: u64 = (top + mmframe.FRAME_SIZE - 1) / mmframe.FRAME_SIZE
+    let mapped: u64 = kstate.get(state, kstate.MAPPED_GB)
+    if want_frames > mapped * (GIB / mmframe.FRAME_SIZE) {
+        want_frames = mapped * (GIB / mmframe.FRAME_SIZE)
+    }
+    if want_frames <= old_frames {
+        kstate.set(state, kstate.BITMAP_OCTETS, kstate.BITMAP_BYTES)
+        return old_frames
+    }
+    let octets: u64 = (want_frames + 7) / 8
+    let need: u64 = (octets + mmframe.FRAME_SIZE - 1) / mmframe.FRAME_SIZE
+    let base: u64 = mmframe.frame_run_inner(state, need)
+    if base == 0 {
+        kstate.set(state, kstate.BITMAP_OCTETS, kstate.BITMAP_BYTES)
+        return old_frames
+    }
+    mmframe.fill8(base, need * mmframe.FRAME_SIZE, 0xFF)
+    let old: u64 = state + kstate.BITMAP_OFF
+    var i: u64 = 0
+    while i < kstate.BITMAP_BYTES {
+        kstate.set8(base + i, kstate.get8(old + i) as u8)
+        i = i + 1
+    }
+    kstate.set(state, kstate.BITMAP, base)
+    kstate.set(state, kstate.BITMAP_FRAMES, want_frames)
+    kstate.set(state, kstate.BITMAP_OCTETS, octets)
+
+    if (regio.read32(mbi + MB_FLAGS) & 64) != 0 {
+        let len: u64 = regio.read32(mbi + MB_MMAP_LEN)
+        let addr: u64 = regio.read32(mbi + MB_MMAP_ADDR)
+        var p: u64 = addr
+        while p < addr + len {
+            let size: u64 = regio.read32(p)
+            let b: u64 = __mmio_read64((p + 4) as *mut u64)
+            let l: u64 = __mmio_read64((p + 12) as *mut u64)
+            if regio.read32(p + 20) == 1 {
+                mmframe.release_from(base, want_frames, b, l, old_frames)
+            }
+            if size == 0 {
+                p = addr + len
+            } else {
+                p = p + size + 4
+            }
+        }
+        mmframe.reserve(base, want_frames, regio.read32(mbi + MB_MMAP_ADDR),
+            regio.read32(mbi + MB_MMAP_LEN))
+    }
+    mmframe.reserve(base, want_frames, 0, kernel_end)
+    mmframe.reserve(base, want_frames, mbi, 4096)
+    let mc: u64 = mods(mbi)
+    if mc != 0 {
+        mmframe.reserve(base, want_frames, regio.read32(mbi + MB_MODS_ADDR),
+            mc * MOD_ENTRY)
+        var m: u64 = 0
+        while m < mc {
+            let von: u64 = mod_start(mbi, m)
+            let bis: u64 = mod_end(mbi, m)
+            if bis > von {
+                mmframe.reserve(base, want_frames, von, bis - von)
+            }
+            m = m + 1
+        }
+    }
+    kstate.set(state, kstate.FRAMES_FREE, mmframe.count_free(state))
+    return want_frames
+}

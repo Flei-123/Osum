@@ -1,7 +1,7 @@
 
 import serial
 import lib.kstate
-import mm.mem
+import mm.mmframe
 import acpi.acpi
 import sched.sched
 import ipc.uio
@@ -100,7 +100,7 @@ fn write_entry(table: u64, i: u64, v: u64) {
 
 fn zero_frame(p: u64) {
     var i: u64 = 0
-    while i < mem.FRAME_SIZE / 8 {
+    while i < mmframe.FRAME_SIZE / 8 {
         __mmio_write64((p + i * 8) as *mut u64, 0)
         i = i + 1
     }
@@ -116,7 +116,7 @@ fn map_programs(state: u64) -> u64 {
     while p < end {
         if (p & 0xFFFFFFFFFFE00000) != kachel {
             kachel = p & 0xFFFFFFFFFFE00000
-            page_table = mem.frame_alloc(state)
+            page_table = mmframe.frame_alloc(state)
             if page_table == 0 {
                 return 0
             }
@@ -125,18 +125,18 @@ fn map_programs(state: u64) -> u64 {
             return 0
         }
         n = n + 1
-        p = p + mem.FRAME_SIZE
+        p = p + mmframe.FRAME_SIZE
     }
     return n
 }
 
 
 fn space_build(state: u64, i: u64) -> u64 {
-    let pml4: u64 = mem.frame_alloc(state)
-    let pdpt: u64 = mem.frame_alloc(state)
-    let pd: u64 = mem.frame_alloc(state)
-    let pt: u64 = mem.frame_alloc(state)
-    let data: u64 = mem.frame_alloc(state)
+    let pml4: u64 = mmframe.frame_alloc(state)
+    let pdpt: u64 = mmframe.frame_alloc(state)
+    let pd: u64 = mmframe.frame_alloc(state)
+    let pt: u64 = mmframe.frame_alloc(state)
+    let data: u64 = mmframe.frame_alloc(state)
     if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 || data == 0 {
         return 0
     }
@@ -150,7 +150,7 @@ fn space_build(state: u64, i: u64) -> u64 {
     let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
     write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
     acpi.only_first_give()
-    mem.confine_to_reach(state)
+    mmframe.confine_to_reach(state)
 
     write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
     write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
@@ -158,7 +158,7 @@ fn space_build(state: u64, i: u64) -> u64 {
     write_entry(pt, 0, data | PAGE_PRESENT | PAGE_WRITE | PAGE_USER | nx(state))
     var k: u64 = 0
     while k < STACK_PAGES {
-        let f: u64 = mem.frame_alloc(state)
+        let f: u64 = mmframe.frame_alloc(state)
         if f == 0 {
             return 0
         }
@@ -182,13 +182,13 @@ fn free_pt(state: u64, pt: u64) -> u64 {
         let e: u64 = read_entry(pt, k)
         if (e & PAGE_PRESENT) != 0 {
             if (e & PAGE_SHARED) == 0 {
-                mem.frame_free(state, e & ADDR_MASK)
+                mmframe.frame_free(state, e & ADDR_MASK)
                 freed = freed + 1
             }
         }
         k = k + 1
     }
-    mem.frame_free(state, pt)
+    mmframe.frame_free(state, pt)
     return freed + 1
 }
 
@@ -223,7 +223,7 @@ fn free_space(state: u64, i: u64) -> u64 {
             }
             k = k + 1
         }
-        mem.frame_free(state, pd)
+        mmframe.frame_free(state, pd)
         freed = freed + 1
     }
     let pdpt: u64 = sched.tget(state, i, sched.T_PDPT)
@@ -241,16 +241,16 @@ fn free_space(state: u64, i: u64) -> u64 {
                     }
                     q = q + 1
                 }
-                mem.frame_free(state, pdx)
+                mmframe.frame_free(state, pdx)
                 freed = freed + 1
                 write_entry(pdpt, j, 0)
             }
             j = j + 1
         }
-        mem.frame_free(state, pdpt)
+        mmframe.frame_free(state, pdpt)
         freed = freed + 1
     }
-    mem.frame_free(state, pml4)
+    mmframe.frame_free(state, pml4)
     freed = freed + 1
     ctr.mem_uncharge(state, ctr.ctr_of(state, i), freed)
     sched.tset(state, i, sched.T_CR3, 0)
@@ -394,7 +394,7 @@ fn pt_data_virt_nth(pt: u64, want: u64, vor: u64, basis: u64) -> u64 {
         let e: u64 = read_entry(pt, k)
         if (e & PAGE_PRESENT) != 0 && (e & PAGE_SHARED) == 0 {
             if n == want {
-                return basis + k * mem.FRAME_SIZE
+                return basis + k * mmframe.FRAME_SIZE
             }
             n = n + 1
         }
@@ -438,10 +438,10 @@ fn frame_virt_at(state: u64, i: u64, want: u64) -> u64 {
 }
 
 fn space_build_empty(state: u64, i: u64) -> u64 {
-    let pml4: u64 = mem.frame_alloc(state)
-    let pdpt: u64 = mem.frame_alloc(state)
-    let pd: u64 = mem.frame_alloc(state)
-    let pt: u64 = mem.frame_alloc(state)
+    let pml4: u64 = mmframe.frame_alloc(state)
+    let pdpt: u64 = mmframe.frame_alloc(state)
+    let pd: u64 = mmframe.frame_alloc(state)
+    let pt: u64 = mmframe.frame_alloc(state)
     if pml4 == 0 || pdpt == 0 || pd == 0 || pt == 0 {
         return 0
     }
@@ -453,7 +453,7 @@ fn space_build_empty(state: u64, i: u64) -> u64 {
     let kpdpt: u64 = read_entry(kpml4, 0) & ADDR_MASK
     write_entry(pdpt, 0, read_entry(kpdpt, 0) | PAGE_USER)
     acpi.only_first_give()
-    mem.confine_to_reach(state)
+    mmframe.confine_to_reach(state)
     write_entry(pml4, 0, pdpt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
     write_entry(pdpt, 1, pd | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
     write_entry(pd, 0, pt | PAGE_PRESENT | PAGE_WRITE | PAGE_USER)
@@ -543,7 +543,7 @@ fn inherit(state: u64, parent: u64, child: u64) -> bool {
         return false
     }
     var i: u64 = 0
-    while i < mem.FRAME_SIZE / 8 {
+    while i < mmframe.FRAME_SIZE / 8 {
         __mmio_write64((dst + i * 8) as *mut u64,
             __mmio_read64((src + i * 8) as *mut u64))
         i = i + 1
@@ -594,7 +594,7 @@ fn pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
             if !allocate {
                 return 0
             }
-            let nf: u64 = mem.frame_alloc(state)
+            let nf: u64 = mmframe.frame_alloc(state)
             if nf == 0 {
                 return 0
             }
@@ -617,7 +617,7 @@ fn pt_for(state: u64, i: u64, addr: u64, allocate: bool) -> u64 {
     if !allocate {
         return 0
     }
-    let f: u64 = mem.frame_alloc(state)
+    let f: u64 = mmframe.frame_alloc(state)
     if f == 0 {
         return 0
     }
@@ -811,7 +811,7 @@ fn map_page(state: u64, i: u64, addr: u64, writable: bool,
     if !ctr.mem_charge(state, ctr.ctr_of(state, i), 1) {
         return 0
     }
-    let frame: u64 = mem.frame_alloc_user(state)
+    let frame: u64 = mmframe.frame_alloc_user(state)
     if frame == 0 {
         ctr.mem_uncharge(state, ctr.ctr_of(state, i), 1)
         return 0
@@ -971,14 +971,14 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
     if (err & 16) != 0 && (e0 & PAGE_LAZYX) == 0 {
         return false
     }
-    let tmp: u64 = mem.frame_alloc_user(state)
+    let tmp: u64 = mmframe.frame_alloc_user(state)
     if tmp == 0 {
         return false
     }
     zero_frame(tmp)
     let ino: u64 = (e0 >> 12) & 0xFFFFF
     let pg: u64 = (e0 >> 32) & 0xFFFFF
-    let _got: u64 = fs.read_at(state, ino, pg * mem.FRAME_SIZE, tmp, mem.FRAME_SIZE)
+    let _got: u64 = fs.read_at(state, ino, pg * mmframe.FRAME_SIZE, tmp, mmframe.FRAME_SIZE)
     var ok: bool = false
     unixsock.demand_lock(state)
     let e: u64 = read_entry(pt, s)
@@ -989,7 +989,7 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
         let f: u64 = map_page(state, cur, page, (e & PAGE_WRITE) != 0, (e & PAGE_LAZYX) != 0)
         if f != 0 {
             var o: u64 = 0
-            while o < mem.FRAME_SIZE / 8 {
+            while o < mmframe.FRAME_SIZE / 8 {
                 __mmio_write64((f + o * 8) as *mut u64, __mmio_read64((tmp + o * 8) as *mut u64))
                 o = o + 1
             }
@@ -999,7 +999,7 @@ fn lazy_file_fault(state: u64, cur: u64, page: u64, err: u64, pt: u64, s: u64) -
         }
     }
     unixsock.demand_unlock(state)
-    mem.frame_free(state, tmp)
+    mmframe.frame_free(state, tmp)
     if ok {
         tlb_flush_if_current(state, cur)
     }
@@ -1271,7 +1271,7 @@ fn page_drop(state: u64, i: u64, addr: u64) -> bool {
     let e2: u64 = read_entry(pt, s)
     write_entry(pt, s, 0)
     if (e2 & PAGE_PRESENT) != 0 && (e2 & PAGE_SHARED) == 0 {
-        mem.frame_free(state, e2 & ADDR_MASK)
+        mmframe.frame_free(state, e2 & ADDR_MASK)
     }
     unixsock.mm_unlock(state, mmfl)
     let had: u64 = sched.tget(state, i, sched.T_UPAGES)
@@ -1413,7 +1413,7 @@ fn page_copy(state: u64, i: u64, from: u64, to: u64) -> bool {
         return false
     }
     var k: u64 = 0
-    while k < mem.FRAME_SIZE / 8 {
+    while k < mmframe.FRAME_SIZE / 8 {
         __mmio_write64((b + k * 8) as *mut u64, __mmio_read64((a + k * 8) as *mut u64))
         k = k + 1
     }
@@ -1481,7 +1481,7 @@ fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
         if (e & PAGE_PRESENT) != 0 {
             var d: u64 = read_entry(dst, k)
             if (d & PAGE_PRESENT) == 0 {
-                let f: u64 = mem.frame_alloc(state)
+                let f: u64 = mmframe.frame_alloc(state)
                 if f == 0 {
                     return 0
                 }
@@ -1491,7 +1491,7 @@ fn copy_pt(state: u64, src: u64, dst: u64) -> u64 {
             let a: u64 = e & ADDR_MASK
             let b: u64 = d & ADDR_MASK
             var w: u64 = 0
-            while w < mem.FRAME_SIZE / 8 {
+            while w < mmframe.FRAME_SIZE / 8 {
                 __mmio_write64((b + w * 8) as *mut u64,
                     __mmio_read64((a + w * 8) as *mut u64))
                 w = w + 1

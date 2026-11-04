@@ -1,0 +1,111 @@
+import lib.kstate
+import libc.regio
+import mm.mmframe
+
+export {
+    HEADER,
+    block_used,
+    block_write,
+    heap_blocks,
+    heap_init,
+    kalloc,
+    kalloc_inner,
+    kfree,
+    kfree_inner
+}
+
+const HEADER: u64 = 16
+
+fn block_used(h: u64) -> u64 {
+    return __mmio_read64((h + 8) as *mut u64)
+}
+
+fn block_write(h: u64, size: u64, used: u64) {
+    __mmio_write64(h as *mut u64, size)
+    __mmio_write64((h + 8) as *mut u64, used)
+}
+
+fn heap_init(state: u64, base: u64, size: u64) {
+    kstate.set(state, kstate.HEAP_BASE, base)
+    kstate.set(state, kstate.HEAP_END, base + size)
+    kstate.set(state, kstate.HEAP_HEAD, base)
+    block_write(base, size, 0)
+}
+
+fn kalloc(state: u64, want: u64) -> u64 {
+    let flags: u64 = mmframe.lock(state)
+    let r: u64 = kalloc_inner(state, want)
+    mmframe.unlock(state, flags)
+    return r
+}
+
+fn kalloc_inner(state: u64, want: u64) -> u64 {
+    let base: u64 = kstate.get(state, kstate.HEAP_BASE)
+    let end: u64 = kstate.get(state, kstate.HEAP_END)
+    var need: u64 = (want + 15) / 16 * 16 + HEADER
+    if need < HEADER + 16 {
+        need = HEADER + 16
+    }
+    var h: u64 = base
+    while h < end {
+        let size: u64 = regio.read64(h)
+        if size == 0 {
+            return 0
+        }
+        if block_used(h) == 0 && size >= need {
+            if size - need >= HEADER + 16 {
+                block_write(h + need, size - need, 0)
+                block_write(h, need, 1)
+            } else {
+                block_write(h, size, 1)
+            }
+            return h + HEADER
+        }
+        h = h + size
+    }
+    return 0
+}
+
+fn kfree(state: u64, p: u64) {
+    let flags: u64 = mmframe.lock(state)
+    kfree_inner(state, p)
+    mmframe.unlock(state, flags)
+}
+
+fn kfree_inner(state: u64, p: u64) {
+    if p == 0 {
+        return
+    }
+    block_write(p - HEADER, regio.read64(p - HEADER), 0)
+    let base: u64 = kstate.get(state, kstate.HEAP_BASE)
+    let end: u64 = kstate.get(state, kstate.HEAP_END)
+    var h: u64 = base
+    while h < end {
+        let size: u64 = regio.read64(h)
+        if size == 0 {
+            return
+        }
+        if block_used(h) == 0 && h + size < end && block_used(h + size) == 0 {
+            block_write(h, size + regio.read64(h + size), 0)
+        } else {
+            h = h + size
+        }
+    }
+}
+
+fn heap_blocks(state: u64, used_only: bool) -> u64 {
+    let end: u64 = kstate.get(state, kstate.HEAP_END)
+    var h: u64 = kstate.get(state, kstate.HEAP_BASE)
+    var n: u64 = 0
+    while h < end {
+        let size: u64 = regio.read64(h)
+        if size == 0 {
+            return n
+        }
+        if !used_only || block_used(h) != 0 {
+            n = n + 1
+        }
+        h = h + size
+    }
+    return n
+}
