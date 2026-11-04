@@ -94,6 +94,16 @@ int main(void)
     got = 0; itv.it_value.tv_usec = 80000; setitimer(ITIMER_REAL, &itv, 0);
     struct timespec ts = { 3, 0 }; errno = 0; r = nanosleep(&ts, 0);
     CHECK("signal_interrupts_nanosleep", r == -1 && errno == EINTR && got == SIGALRM, "r=%d errno=%d got=%d", r, errno, got);
+    got = 0; itv.it_value.tv_usec = 80000; setitimer(ITIMER_REAL, &itv, 0);
+    struct timespec tl = { 3600, 0 }; errno = 0; r = nanosleep(&tl, 0);
+    CHECK("nanosleep_over_60s_sleeps", r == -1 && errno == EINTR && got == SIGALRM, "r=%d errno=%d got=%d", r, errno, got);
+    got = 0; itv.it_value.tv_usec = 80000; setitimer(ITIMER_REAL, &itv, 0);
+    struct timespec th = { 1L << 50, 0 }; errno = 0; r = nanosleep(&th, 0);
+    CHECK("nanosleep_huge_sleeps", r == -1 && errno == EINTR && got == SIGALRM, "r=%d errno=%d got=%d", r, errno, got);
+    struct timespec tb = { 0, 1000000000L }; errno = 0; r = nanosleep(&tb, 0);
+    CHECK("nanosleep_bad_nsec_einval", r == -1 && errno == EINVAL, "r=%d errno=%d", r, errno);
+    struct timespec tn = { -1, 0 }; errno = 0; r = nanosleep(&tn, 0);
+    CHECK("nanosleep_negative_einval", r == -1 && errno == EINVAL, "r=%d errno=%d", r, errno);
     /* sigsuspend */
     sigemptyset(&b); sigaddset(&b, SIGALRM); sigprocmask(SIG_BLOCK, &b, &old);
     got = 0; itv.it_value.tv_usec = 60000; setitimer(ITIMER_REAL, &itv, 0);
