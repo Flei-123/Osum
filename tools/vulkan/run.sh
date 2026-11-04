@@ -40,15 +40,15 @@ mutate "wrong copy offset" vkexec.fi 's/rt.mem_copy(dp + d_o, sp + so, n as usiz
 mutate "fill skipped" vkexec.fi 's/if op == vkcmd.OP_FILL { exec_fill(rec) }//'
 gcc -O1 -Wall -o "$D/draw" tools/vulkan/draw.c -ldl && ck "draw client builds" ok || { ck "draw client builds" no; exit 1; }
 mkdir -p "$D/spv" "$D/lvpd" "$D/oursd"
-for sh in tools/vulkan/shaders/tri.vert tools/vulkan/shaders/tri.frag tools/vulkan/shaders/push.frag tools/vulkan/shaders/depth.vert tools/vulkan/shaders/quad.vert tools/vulkan/shaders/quad.frag tools/gfx/shaders/fui_rect.vert tools/gfx/shaders/fui_rect.frag; do
+for sh in tools/vulkan/shaders/tri.vert tools/vulkan/shaders/tri.frag tools/vulkan/shaders/push.frag tools/vulkan/shaders/depth.vert tools/vulkan/shaders/quad.vert tools/vulkan/shaders/quad.frag tools/vulkan/shaders/inst.vert tools/vulkan/shaders/inst.frag tools/vulkan/shaders/ubo.vert tools/vulkan/shaders/ubo.frag tools/gfx/shaders/fui_rect.vert tools/gfx/shaders/fui_rect.frag; do
     b=$(basename "$sh")
     glslangValidator -V "$sh" -o "$D/spv/$b.spv" > /dev/null 2>&1 && spirv-opt --inline-entry-points-exhaustive --eliminate-dead-functions --eliminate-local-multi-store "$D/spv/$b.spv" -o "$D/spv/$b.opt" || ck "shader $b compiles" no
 done
-CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil"
+CASES="tri tri_bgra tri_view push quad depth fui cull cullfront dops dnowrite stencil quad_bgra quad_npot inst dubo area"
 VK_DRIVER_FILES=$LVP timeout 120 "$D/draw" libvulkan.so.1 1 "$D/lvpd" "$D/spv" > "$D/draw_lvp.txt" 2>&1
 grep -q "^VK DONE bad=0" "$D/draw_lvp.txt" && ck "draw client: lavapipe reference passes" ok || ck "draw client: lavapipe reference passes" no
 timeout 120 stdbuf -o0 "$D/draw" "$D/libvulkan.so.1" 0 "$D/oursd" "$D/spv" > "$D/draw_ours.txt" 2>&1
-grep -q "^VK DONE bad=0" "$D/draw_ours.txt" && ck "draw client: OrientOS ICD passes (12 scenes)" ok || { ck "draw client: OrientOS ICD passes (12 scenes)" no; grep FAIL "$D/draw_ours.txt" | head; }
+grep -q "^VK DONE bad=0" "$D/draw_ours.txt" && ck "draw client: OrientOS ICD passes (17 scenes)" ok || { ck "draw client: OrientOS ICD passes (17 scenes)" no; grep FAIL "$D/draw_ours.txt" | head; }
 draw_match() {
     local dir=$1 c r=0
     for c in $CASES; do
@@ -84,5 +84,11 @@ mutate_draw "front face ignored" vkrender.fi 's/let front_pos: bool = ((rastw >>
 mutate_draw "depth write ignored" vkrender.fi 's/(\*f).depth_write = ((dop >> 8 as u64) \& 1 as u64) != 0 as u64/(*f).depth_write = true/'
 mutate_draw "depth compare op ignored" vkrender.fi 's/(\*f).depth_func = (dop \& 255 as u64) as i32/(*f).depth_func = 1/'
 mutate_draw "stencil ignored" vkrender.fi 's/(\*f).stp = rs + (R_STSTATE as u64) \* 8 as u64/(*f).stp = 0 as u64/'
+mutate_draw "render area clear ignored" vkrender.fi 's/fill_rect32(color, w, h, area, px)/fill_rect32(color, w, h, 0 as u64, px)/'
+mutate_draw "dynamic uniform offset ignored" vkrender.fi 's/let off: u64 = rt.ld64(s, 2) + rt.ld64(rs, R_DOFF)/let off: u64 = rt.ld64(s, 2)/'
+mutate_draw "first instance ignored" vkrender.fi 's/run_batch(rs, f, p, indexed, first, voff, first_inst + inst, t0, nt)/run_batch(rs, f, p, indexed, first, voff, inst, t0, nt)/'
+mutate_draw "instance rate ignored" vkrender.fi 's/!= 0 as u64 { vn = inst }/== 99 as u64 { vn = inst }/'
+mutate_draw "BGRA texture swizzle skipped" vkrender.fi 's/swap_rb(tp, (tw as u64) \* (th as u64))//'
+mutate_draw "non-power-of-two wrap" ../gpu/swr/pixel.fi 's/if (n \& (n - 1)) == 0 { return i \& (n - 1) }/return i \& (n - 1)/'
 echo "VULKAN: $pass ok, $fail failed"
 [ "$fail" -eq 0 ]

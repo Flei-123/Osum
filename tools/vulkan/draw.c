@@ -21,6 +21,8 @@ static VkCommandBuffer cb;
 static VkFence fence;
 static VkPhysicalDeviceMemoryProperties mp;
 static int bad;
+static int g_area[4] = { 0, 0, 64, 48 };
+static int g_keep;
 static const char *outdir = ".";
 static const char *spvdir = ".";
 enum { W = 64, H = 48 };
@@ -183,7 +185,7 @@ static Target mktarget(VkFormat fmt, int with_depth)
 
 static void begin_pass(Target *t, float r, float g, float b, float a)
 {
-    transition(t->color.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    transition(t->color.i, VK_IMAGE_ASPECT_COLOR_BIT, g_keep ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = t->color.v, .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = { .color = { .float32 = { r, g, b, a } } } };
     VkRenderingAttachmentInfo da = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = t->depth.v, .imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -193,7 +195,7 @@ static void begin_pass(Target *t, float r, float g, float b, float a)
     sa.imageView = t->stencil.v;
     sa.clearValue.depthStencil.stencil = 0;
     if (t->stencil.i) transition(t->stencil.i, VK_IMAGE_ASPECT_STENCIL_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { W, H } }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = t->depth.i ? &da : 0, .pStencilAttachment = t->stencil.i ? &sa : 0 };
+    VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { g_area[0], g_area[1] }, { (uint32_t)g_area[2], (uint32_t)g_area[3] } }, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca, .pDepthAttachment = t->depth.i ? &da : 0, .pStencilAttachment = t->stencil.i ? &sa : 0 };
     vkCmdBeginRendering(cb, &ri);
 }
 
@@ -274,15 +276,15 @@ static void case_push(void)
     finish(&t, "push", &rb);
 }
 
-static void case_quad(void)
+static void case_quad(const char *name, VkFormat tfmt, int tw, int th, float uvs)
 {
     Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
     uint8_t texels[8 * 8 * 4];
-    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
-        uint8_t *p = texels + (y * 8 + x) * 4;
+    for (int y = 0; y < th; y++) for (int x = 0; x < tw; x++) {
+        uint8_t *p = texels + (y * tw + x) * 4;
         p[0] = (uint8_t)(x * 36); p[1] = (uint8_t)(y * 36); p[2] = ((x ^ y) & 1) ? 220 : 40; p[3] = 255;
     }
-    Img tex = mkimg(VK_FORMAT_R8G8B8A8_UNORM, 8, 8, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    Img tex = mkimg(tfmt, tw, th, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
     Buf tb = mkvec(texels, sizeof texels, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT, .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT, .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT, .maxLod = 0.0f };
@@ -293,15 +295,15 @@ static void case_quad(void)
     VkDescriptorSet set = mkset(dsl, 1, tex.v, smp, 0, 0, 0);
     PipeDesc d = { "quad.vert", "quad.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 2, 16, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT }, { 0, 8 }, lay };
     VkPipeline p = mkpipe(&d);
-    check("pipeline quad", p != 0);
-    static const float quad[] = { -0.75f, -0.75f, 0, 0,   0.75f, -0.75f, 1, 0,   0.75f, 0.75f, 1, 1,   -0.75f, 0.75f, 0, 1 };
+    { char lb[96]; snprintf(lb, sizeof lb, "pipeline %s", name); check(lb, p != 0); }
+    const float quad[] = { -0.75f, -0.75f, 0, 0,   0.75f, -0.75f, uvs, 0,   0.75f, 0.75f, uvs, uvs,   -0.75f, 0.75f, 0, uvs };
     static const uint16_t idx[] = { 7, 7, 0, 1, 2, 0, 2, 3 };
     Buf vb = mkvec(quad, sizeof quad, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     Buf ib = mkvec(idx, sizeof idx, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     begin();
     transition(tex.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    VkBufferImageCopy c = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { 8, 8, 1 } };
+    VkBufferImageCopy c = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { (uint32_t)tw, (uint32_t)th, 1 } };
     vkCmdCopyBufferToImage(cb, tb.b, tex.i, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
     transition(tex.i, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
@@ -312,7 +314,7 @@ static void case_quad(void)
     vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
     vkCmdBindIndexBuffer(cb, ib.b, 4, VK_INDEX_TYPE_UINT16);
     vkCmdDrawIndexed(cb, 6, 1, 0, 0, 0);
-    finish(&t, "quad", &rb);
+    finish(&t, name, &rb);
 }
 
 static void case_depth(void)
@@ -336,6 +338,96 @@ static void case_depth(void)
     vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
     vkCmdDraw(cb, 6, 1, 0, 0);
     finish(&t, "depth", &rb);
+}
+
+static void case_inst(void)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout lay = mklayout(0, 0, &dsl);
+    PipeDesc d = { "inst.vert", "inst.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 1, 8, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT }, { 0, 0 }, lay };
+    d.inst = 1;
+    VkPipeline p = mkpipe(&d);
+    check("pipeline inst", p != 0);
+    static const float q[] = { -0.2f, -0.2f,  0.2f, -0.2f,  0.2f, 0.2f,  -0.2f, -0.2f,  0.2f, 0.2f,  -0.2f, 0.2f };
+    static const float inst[] = { -0.7f, 0.5f, 1, 0, 0, 1,   -0.3f, -0.5f, 0, 1, 0, 1,   0.2f, 0.4f, 0, 0, 1, 1,   0.6f, -0.4f, 1, 1, 0, 1 };
+    Buf vb = mkvec(q, sizeof q, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf ib = mkvec(inst, sizeof inst, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    begin();
+    begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    set_vp(0, 0, W, H, 0, 0, W, H);
+    VkBuffer bufs[2] = { vb.b, ib.b };
+    VkDeviceSize offs[2] = { 0, 0 };
+    vkCmdBindVertexBuffers(cb, 0, 2, bufs, offs);
+    vkCmdDraw(cb, 6, 3, 0, 1);
+    finish(&t, "inst", &rb);
+}
+
+static void case_dubo(void)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout lay = mklayout(3, 16, &dsl);
+    PipeDesc d = { "ubo.vert", "ubo.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 2, 24, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }, { 0, 8 }, lay };
+    VkPipeline p = mkpipe(&d);
+    check("pipeline dubo", p != 0);
+    enum { STRIDE = 256 };
+    Buf ubs = mkbuf(STRIDE * 3, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    memset(ubs.p, 0xA5, STRIDE * 3);
+    static const float tints[3][4] = { { 1, 0.2f, 0.2f, 1 }, { 0.2f, 1, 0.2f, 1 }, { 0.3f, 0.3f, 1, 1 } };
+    for (int i = 0; i < 3; i++) memcpy(ubs.p + i * STRIDE, tints[i], 16);
+    VkDescriptorSet set = mkset(dsl, 3, 0, 0, ubs.b, 0, 16);
+    float v[3][6 * 6];
+    for (int i = 0; i < 3; i++) {
+        float x0 = -0.9f + 0.6f * i, x1 = x0 + 0.5f, y0 = -0.5f + 0.2f * i, y1 = y0 + 0.9f;
+        float q[6][2] = { { x0, y0 }, { x1, y0 }, { x1, y1 }, { x0, y0 }, { x1, y1 }, { x0, y1 } };
+        for (int k = 0; k < 6; k++) { float *o = v[i] + k * 6; o[0] = q[k][0]; o[1] = q[k][1]; o[2] = o[3] = o[4] = o[5] = 1; }
+    }
+    Buf vb = mkvec(v, sizeof v, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    static const float pushes[3][4] = { { 1, 1, 1, 1 }, { 0.5f, 1, 0.5f, 1 }, { 1, 0.5f, 1, 1 } };
+    static const uint32_t order[3] = { 2, 0, 1 };
+    begin();
+    begin_pass(&t, 0.0f, 0.0f, 0.0f, 1.0f);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    set_vp(0, 0, W, H, 0, 0, W, H);
+    for (int i = 0; i < 3; i++) {
+        uint32_t dyn = order[i] * STRIDE;
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, lay, 0, 1, &set, 1, &dyn);
+        vkCmdPushConstants(cb, lay, VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16, pushes[i]);
+        VkDeviceSize off = (VkDeviceSize)i * sizeof v[0];
+        vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
+        vkCmdDraw(cb, 6, 1, 0, 0);
+    }
+    finish(&t, "dubo", &rb);
+}
+
+static void case_area(void)
+{
+    Target t = mktarget(VK_FORMAT_R8G8B8A8_UNORM, 0);
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout lay = mklayout(0, 0, &dsl);
+    PipeDesc d = { "tri.vert", "tri.frag", t.fmt, VK_FORMAT_UNDEFINED, 0, 0, 2, 24, { VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT }, { 0, 8 }, lay };
+    VkPipeline p = mkpipe(&d);
+    check("pipeline area", p != 0);
+    Buf vb = mkvec(tri_data, sizeof tri_data, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    Buf rb = mkbuf(W * H * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    begin();
+    begin_pass(&t, 0.8f, 0.1f, 0.1f, 1.0f);
+    vkCmdEndRendering(cb);
+    g_area[0] = 8; g_area[1] = 6; g_area[2] = 40; g_area[3] = 30;
+    g_keep = 1;
+    begin_pass(&t, 0.1f, 0.4f, 0.2f, 1.0f);
+    g_keep = 0;
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+    set_vp(8, 6, 40, 30, 8, 6, 40, 30);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(cb, 0, 1, &vb.b, &off);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    finish(&t, "area", &rb);
+    g_area[0] = 0; g_area[1] = 0; g_area[2] = W; g_area[3] = H;
 }
 
 typedef struct { float clipr[4], box[4], c1[4], grad[4], size[4]; } FuiU;
@@ -491,7 +583,12 @@ int main(int argc, char **argv)
     case_tri("tri_bgra", VK_FORMAT_B8G8R8A8_UNORM, 0);
     case_tri("tri_view", VK_FORMAT_R8G8B8A8_UNORM, 1);
     case_push();
-    case_quad();
+    case_quad("quad", VK_FORMAT_R8G8B8A8_UNORM, 8, 8, 1.0f);
+    case_quad("quad_bgra", VK_FORMAT_B8G8R8A8_UNORM, 8, 8, 1.0f);
+    case_quad("quad_npot", VK_FORMAT_R8G8B8A8_UNORM, 5, 7, 2.0f);
+    case_inst();
+    case_dubo();
+    case_area();
     case_depth();
     case_fui();
     scene3("cull", 0);
