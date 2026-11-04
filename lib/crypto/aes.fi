@@ -66,10 +66,11 @@
 // appendix C, RFC 4493, RFC 3394 section 4 and against OpenSSL via
 // Python's `cryptography` for CCM.
 import libc.octets
+import crypto.aesni
 
 
 export { Key, key_new, key_set, encrypt_block, decrypt_block,
-    cmac, key_wrap, key_unwrap, ccm_encrypt, ccm_decrypt,
+    cmac, cmac_opt, key_wrap, key_unwrap, ccm_encrypt, ccm_decrypt,
     BLOCK, MAX_RK }
 
 const BLOCK: usize = 16
@@ -394,10 +395,18 @@ fn shift_left_1(b: *mut [u8; 16]) {
     }
 }
 
-fn subkey(k: *mut Key, k1: *mut [u8; 16], k2: *mut [u8; 16]) {
+fn cmac_block(k: *mut Key, e: *mut aesni.Enc, ni: bool, inp: u64, out: u64) {
+    if ni {
+        aesni.encrypt_block(e, inp, out)
+    } else {
+        encrypt_block(k, inp, out)
+    }
+}
+
+fn subkey(k: *mut Key, e: *mut aesni.Enc, ni: bool, k1: *mut [u8; 16], k2: *mut [u8; 16]) {
     var null: [u8; 16] = [0 as u8; 16]
     var l: [u8; 16] = [0 as u8; 16]
-    encrypt_block(k, (&null[0]) as u64, (&l[0]) as u64)
+    cmac_block(k, e, ni, (&null[0]) as u64, (&l[0]) as u64)
     var i: usize = 0
     while i < 16 {
         (*k1)[i] = l[i]
@@ -429,13 +438,23 @@ fn subkey(k: *mut Key, k1: *mut [u8; 16], k2: *mut [u8; 16]) {
 // message to the first case is the most common mistake and
 // is only caught by the first vector from RFC 4493.
 fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
+    return cmac_opt(key, klen, msg, mlen, out, false)
+}
+
+fn cmac_opt(key: u64, klen: usize, msg: u64, mlen: usize, out: u64, fast: bool) -> bool {
     var k: Key = key_new()
     if !key_set(&k, key, klen) {
         return false
     }
+    var e: aesni.Enc = aesni.enc_from(0, 0)
+    var ni: bool = false
+    if fast && aesni.usable() {
+        e = aesni.enc_from((&k.rk[0]) as u64, k.nr)
+        ni = e.ok
+    }
     var k1: [u8; 16] = [0 as u8; 16]
     var k2: [u8; 16] = [0 as u8; 16]
-    subkey(&k, &k1, &k2)
+    subkey(&k, &e, ni, &k1, &k2)
 
     var x: [u8; 16] = [0 as u8; 16]
     var b: [u8; 16] = [0 as u8; 16]
@@ -450,7 +469,7 @@ fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
             b[i] = x[i] ^ octets.load_byte(msg, n * 16 + i)
             i = i + 1
         }
-        encrypt_block(&k, (&b[0]) as u64, (&x[0]) as u64)
+        cmac_block(&k, &e, ni, (&b[0]) as u64, (&x[0]) as u64)
         n = n + 1
     }
     // The last block.
@@ -485,7 +504,7 @@ fn cmac(key: u64, klen: usize, msg: u64, mlen: usize, out: u64) -> bool {
         b[i] = x[i] ^ last[i]
         i = i + 1
     }
-    encrypt_block(&k, (&b[0]) as u64, out)
+    cmac_block(&k, &e, ni, (&b[0]) as u64, out)
     return true
 }
 
