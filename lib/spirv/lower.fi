@@ -47,6 +47,7 @@ const NREGS: u32 = 256
 const FIRST_TMP: u32 = 12
 const MAX_EDGES: usize = 512
 const LOOP_MAX: u32 = 4
+const SKIP_MIN: usize = 4
 const LS: u32 = 24
 const MAX_PINS: u32 = 192
 const LW_HEAD: u32 = 0
@@ -74,7 +75,10 @@ const PUSH_BASE: u32 = 2048
 const VK_UPTR: u32 = 9 // pointer into a constant block: vreg[id*4] = byte offset, vreg[id*4+1] = pointee type
 const VK_CARR: u32 = 10 // Function / Private array with a constant initialiser, never stored: vreg[id*4] = initialiser, vn = length
 const VK_CPTR: u32 = 11 // element pointer into VK_CARR: vreg[id*4] = array variable, vreg[id*4+1] = register holding the index (kept)
+const VK_RARR: u32 = 12 // Function array held in registers: vreg[id*4] = first register, vn = length
+const VK_RPTR: u32 = 13 // element pointer into VK_RARR: vreg[id*4] = array variable, [1] = constant index or index register, [2] = 1 when constant
 const MAX_CARR: u32 = 64
+const MAX_RARR: u32 = 32
 
 const VS_POS: u32 = 36 // vertex stage: Position r36..r39, output location k = r(40 + 4k), inputs location k = r(4k)
 const VS_FIRST_TMP: u32 = 72
@@ -155,6 +159,10 @@ struct Lw {
     bt: u64,
     hdr_ii: usize,
     hdr_si: usize,
+    jn: usize,
+    jn_open: bool,
+    body0: usize,
+    body1: usize,
 }
 
 fn fail(l: *mut Lw, e: u32, pos: usize) {
@@ -338,6 +346,10 @@ fn define(l: *mut Lw, id: u32, n: u32) {
 }
 
 fn release(l: *mut Lw, id: u32) {
+    if tab((*l).vk, id) == VK_RPTR {
+        if tab((*l).vreg, id * 4 + 2) == 0 { unref_reg(l, tab((*l).vreg, id * 4 + 1)) }
+        tset((*l).vk, id, VK_NONE)
+    }
     if tab((*l).vk, id) == VK_UPTR && tab((*l).vreg, id * 4 + 2) != NONE {
         unref_reg(l, tab((*l).vreg, id * 4 + 2))
         tset((*l).vk, id, VK_NONE)
@@ -771,6 +783,19 @@ fn lower_glsl(l: *mut Lw, pos: usize, wc: usize) {
 
 // ---------------------------------------------------------------- variables and memory
 
+fn chain_base_used(l: *mut Lw, id: u32) -> bool {
+    var q: usize = (*l).body0
+    var chained: bool = false
+    while q < (*l).body1 {
+        let p: usize = parse.inst_pos((*l).m, q)
+        let op: u32 = parse.op_at((*l).m, p)
+        if (op == spv.OP_ACCESSCHAIN || op == spv.OP_INBOUNDSACCESSCHAIN) && parse.w32((*l).m, p + 3) == id { chained = true }
+        if op == spv.OP_STORE && parse.w32((*l).m, p + 1) == id { return false }
+        q = q + 1
+    }
+    return chained
+}
+
 fn setup_const_array(l: *mut Lw, pos: usize, id: u32, ty: u32) {
     let m: *mut parse.Module = (*l).m
     let len: u32 = layout.array_length(m, ty)
@@ -782,6 +807,10 @@ fn setup_const_array(l: *mut Lw, pos: usize, id: u32, ty: u32) {
     tset((*l).vk, id, VK_CARR)
     tset((*l).vreg, id * 4, init)
     tset((*l).vn, id, len)
+    if init == 0 && len <= MAX_RARR && chain_base_used(l, id) {
+        tset((*l).vreg, id * 4, allocn(l, len))
+        tset((*l).vk, id, VK_RARR)
+    }
 }
 
 // registers + initial value for a Function / Private variable
@@ -901,7 +930,7 @@ fn ensure_var(l: *mut Lw, id: u32, pos: usize) -> bool {
     let m: *mut parse.Module = (*l).m
     if id == 0 || id >= bound_of(l) { fail(l, L_INTERNAL, pos); return false }
     let k: u32 = tab((*l).vk, id)
-    if k == VK_VAR || k == VK_PTR || k == VK_CARR || k == VK_CPTR || k == VK_TEXVAR || k == VK_UBLOCK || k == VK_UPTR { return true }
+    if k == VK_VAR || k == VK_PTR || k == VK_CARR || k == VK_CPTR || k == VK_RARR || k == VK_RPTR || k == VK_TEXVAR || k == VK_UBLOCK || k == VK_UPTR { return true }
     if parse.def_op(m, id) != spv.OP_VARIABLE { fail(l, L_INTERNAL, pos); return false }
     let dp: usize = parse.def_pos(m, id)
     let sc: u32 = parse.w32(m, dp + 3)
@@ -961,6 +990,58 @@ fn lower_load_carr(l: *mut Lw, pos: usize, id: u32, ptr: u32) {
     set_reg(l, id, 0, acc)
 }
 
+fn lower_load_rarr(l: *mut Lw, id: u32, ptr: u32) {
+    let arr: u32 = tab((*l).vreg, ptr * 4)
+    let base: u32 = tab((*l).vreg, arr * 4)
+    let len: u32 = tab((*l).vn, arr)
+    define(l, id, 1)
+    let acc: u32 = alloc1(l)
+    if tab((*l).vreg, ptr * 4 + 2) == 1 {
+        emit(l, shader.OP_MOV, acc, base + tab((*l).vreg, ptr * 4 + 1), 0, 0)
+        set_reg(l, id, 0, acc)
+        return
+    }
+    let idx: u32 = tab((*l).vreg, ptr * 4 + 1)
+    let key: u32 = alloc1(l)
+    let hit: u32 = alloc1(l)
+    emit(l, shader.OP_MOV, acc, base + len - 1, 0, 0)
+    var i: u32 = len - 1
+    while i > 0 {
+        i = i - 1
+        ldc(l, key, fbits(i as f32))
+        emit(l, shader.OP_CEQ, hit, idx, key, 0)
+        emit(l, shader.OP_SEL, acc, base + i, acc, hit)
+    }
+    unref_reg(l, key)
+    unref_reg(l, hit)
+    set_reg(l, id, 0, acc)
+}
+
+fn lower_store_rarr(l: *mut Lw, ptr: u32, src: u32) {
+    let arr: u32 = tab((*l).vreg, ptr * 4)
+    let base: u32 = tab((*l).vreg, arr * 4)
+    let len: u32 = tab((*l).vn, arr)
+    if tab((*l).vreg, ptr * 4 + 2) == 1 {
+        let dst: u32 = base + tab((*l).vreg, ptr * 4 + 1)
+        if (*l).cpred == NONE { emit(l, shader.OP_MOV, dst, src, 0, 0) }
+        else { emit(l, shader.OP_SEL, dst, src, dst, (*l).cpred) }
+        return
+    }
+    let idx: u32 = tab((*l).vreg, ptr * 4 + 1)
+    let key: u32 = alloc1(l)
+    let hit: u32 = alloc1(l)
+    var i: u32 = 0
+    while i < len {
+        ldc(l, key, fbits(i as f32))
+        emit(l, shader.OP_CEQ, hit, idx, key, 0)
+        if (*l).cpred != NONE { emit(l, shader.OP_MUL, hit, hit, (*l).cpred, 0) }
+        emit(l, shader.OP_SEL, base + i, src, base + i, hit)
+        i = i + 1
+    }
+    unref_reg(l, key)
+    unref_reg(l, hit)
+}
+
 fn lower_load(l: *mut Lw, pos: usize) {
     let m: *mut parse.Module = (*l).m
     let id: u32 = parse.w32(m, pos + 2)
@@ -976,6 +1057,7 @@ fn lower_load(l: *mut Lw, pos: usize) {
     }
     if tab((*l).vk, ptr) == VK_UPTR { lower_load_ubo(l, pos, id, ptr); return }
     if tab((*l).vk, ptr) == VK_CPTR { lower_load_carr(l, pos, id, ptr); return }
+    if tab((*l).vk, ptr) == VK_RPTR { lower_load_rarr(l, id, ptr); return }
     let n: u32 = result_n(l, pos)
     var vid: u32 = ptr
     var off: u32 = 0
@@ -1007,6 +1089,11 @@ fn lower_store(l: *mut Lw, pos: usize) {
     if tab((*l).vk, ptr) == VK_CARR {
         if tab((*l).vreg, ptr * 4) != 0 || parse.def_op(m, obj) != spv.OP_CONSTANTCOMPOSITE { fail(l, L_UNSUPPORTED, pos); return }
         tset((*l).vreg, ptr * 4, obj)
+        return
+    }
+    if tab((*l).vk, ptr) == VK_RPTR {
+        if type_n(l, obj) != 1 { fail(l, L_UNSUPPORTED, pos); return }
+        lower_store_rarr(l, ptr, get(l, obj, 0))
         return
     }
     var vid: u32 = ptr
@@ -1128,6 +1215,22 @@ fn lower_access(l: *mut Lw, pos: usize, wc: usize) {
         tset((*l).vk, id, VK_PTR)
         tset((*l).vreg, id * 4, base)
         tset((*l).vreg, id * 4 + 1, 0)
+        tset((*l).vn, id, 1)
+        return
+    }
+    if tab((*l).vk, base) == VK_RARR && wc == 5 {
+        let rix: u32 = parse.w32(m, pos + 4)
+        tset((*l).vk, id, VK_RPTR)
+        tset((*l).vreg, id * 4, base)
+        if parse.def_op(m, rix) == spv.OP_CONSTANT {
+            let ci: u32 = parse.const_word(m, rix)
+            if ci >= tab((*l).vn, base) { fail(l, L_INTERNAL, pos); return }
+            tset((*l).vreg, id * 4 + 1, ci)
+            tset((*l).vreg, id * 4 + 2, 1)
+        } else {
+            tset((*l).vreg, id * 4 + 1, own(l, rix, 0))
+            tset((*l).vreg, id * 4 + 2, 0)
+        }
         tset((*l).vn, id, 1)
         return
     }
@@ -1581,6 +1684,47 @@ fn begin_block(l: *mut Lw, label: u32, first: bool) {
     (*l).cpred = pred
 }
 
+fn is_terminator(op: u32) -> bool {
+    return op == spv.OP_SWITCH || op == spv.OP_BRANCH || op == spv.OP_BRANCHCONDITIONAL || op == spv.OP_RETURN || op == spv.OP_RETURNVALUE || op == spv.OP_UNREACHABLE || op == spv.OP_KILL
+}
+
+fn open_skip(l: *mut Lw) {
+    if (*l).err != 0 || (*l).cpred == NONE || (*l).hdr_ii != 0 { return }
+    emit(l, shader.OP_JNONE, 0, (*l).cpred, 0, 0)
+    if (*l).err != 0 { return }
+    (*l).jn = (*l).pc - 1
+    (*l).jn_open = true
+}
+
+fn close_skip(l: *mut Lw) {
+    if !(*l).jn_open { return }
+    (*l).jn_open = false
+    if (*l).err != 0 { return }
+    let at: usize = (*l).jn
+    if (*l).pc - at - 1 < SKIP_MIN {
+        var q: usize = at * 5
+        let end: usize = (*l).pc * 5
+        while q + 5 < end {
+            rt.st32((*l).prog, q, rt.ld32((*l).prog, q + 5))
+            q = q + 1
+        }
+        (*l).pc = (*l).pc - 1
+        return
+    }
+    rt.st32((*l).prog, at * 5 + 3, (*l).pc as u32)
+}
+
+fn setup_private_vars(l: *mut Lw, last: usize) {
+    var q: usize = 0
+    while q < last && (*l).err == 0 {
+        let p: usize = parse.inst_pos((*l).m, q)
+        if parse.op_at((*l).m, p) == spv.OP_VARIABLE && parse.w32((*l).m, p + 3) == spv.SC_PRIVATE {
+            ensure_var(l, parse.w32((*l).m, p + 2), p)
+        }
+        q = q + 1
+    }
+}
+
 fn end_block(l: *mut Lw) {
     let label: u32 = (*l).cur
     tset((*l).seen, label, 1)
@@ -1647,7 +1791,7 @@ fn lower_branch(l: *mut Lw, pos: usize, op: u32) {
     var own_t: bool = false
     if (*l).cpred != NONE {
         mt = alloc1(l)
-        emit(l, shader.OP_MUL, mt, (*l).cpred, cr, 0)
+        emit(l, shader.OP_SEL, mt, cr, tmp_const(l, 0.0f), (*l).cpred)
         own_t = true
     }
     let nr: u32 = alloc1(l)
@@ -1656,7 +1800,7 @@ fn lower_branch(l: *mut Lw, pos: usize, op: u32) {
     var own_f: bool = true
     if (*l).cpred != NONE {
         mf = alloc1(l)
-        emit(l, shader.OP_MUL, mf, (*l).cpred, nr, 0)
+        emit(l, shader.OP_SEL, mf, nr, tmp_const(l, 0.0f), (*l).cpred)
         unref_reg(l, nr)
     }
     route_edge(l, parse.w32(m, pos + 2), mt)
@@ -1754,7 +1898,7 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     if ep == 0 { return L_STAGE }
     let nb: usize = (*m).bound as usize
     var lw: Lw = Lw { m: m, prog: prog, pc: 0, maxpc: maxpc, err: 0, err_pos: 0, rrefs: 0, vreg: 0, vn: 0, vk: 0, uses: 0, bpred: 0,
-        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, stage: stage, ftmp: FIRST_TMP, nflatv: 0, seen: 0, pinned: 0, pins: 0, npin: 0, ls: 0, nloop: 0, bt: 0, hdr_ii: 0, hdr_si: 0 }
+        mpred: 0, tmp: 0, ntmp: 0, ef: 0, et: 0, ep: 0, ed: 0, ne: 0, cur: 0, cpred: NONE, skip: false, peak: 12, nsample: 0, nsel: 0, nkill: 0, ntex: 0, nubo: 0, stage: stage, ftmp: FIRST_TMP, nflatv: 0, seen: 0, pinned: 0, pins: 0, npin: 0, ls: 0, nloop: 0, bt: 0, hdr_ii: 0, hdr_si: 0, jn: 0, jn_open: false, body0: 0, body1: 0 }
     let l: *mut Lw = &lw
     if stage == spv.EM_VERTEX { (*l).ftmp = VS_FIRST_TMP; (*l).peak = VS_FIRST_TMP }
     (*l).rrefs = rt.heap_alloc((NREGS as usize) * 4)
@@ -1795,6 +1939,8 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
     while i1 < (*m).ninst && parse.op_at(m, parse.inst_pos(m, i1)) != spv.OP_FUNCTIONEND { i1 = i1 + 1 }
     if i0 >= (*m).ninst || i1 >= (*m).ninst { fail(l, L_INTERNAL, fpos) }
 
+    (*l).body0 = i0 + 1
+    (*l).body1 = i1
     // flat inputs live in r12.. : the temporaries start behind them
     if (*l).err == 0 && stage == spv.EM_FRAGMENT {
         let sl0: usize = parse.str_len_words(m, ep + 3, ep + parse.wc_at(m, ep))
@@ -1840,7 +1986,7 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
         }
         i = i + 1
     }
-    // body
+    setup_private_vars(l, i0)
     var first: bool = true
     var in_block: bool = false
     i = i0 + 1
@@ -1862,10 +2008,12 @@ fn lower_stage(m: *mut parse.Module, stage: u32, prog: u64, maxpc: usize, info: 
                     if hop == spv.OP_BRANCH || hop == spv.OP_BRANCHCONDITIONAL || hop == spv.OP_SWITCH || hop == spv.OP_RETURN || hop == spv.OP_RETURNVALUE || hop == spv.OP_KILL || hop == spv.OP_UNREACHABLE { break }
                     h = h + 1
                 }
+                open_skip(l)
             }
         }
         else if op == spv.OP_FUNCTIONPARAMETER { }
         else if !(*l).skip {
+            if is_terminator(op) { close_skip(l) }
             lower_inst(l, p, op, wc, i)
             free_tmps(l)
             if (*l).err == 0 && op != spv.OP_VARIABLE {
