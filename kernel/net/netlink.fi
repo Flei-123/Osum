@@ -5,7 +5,8 @@
 // in the same system call that carries it (nothing is asynchronous in this kernel, so there is nothing to wait for):
 //
 //   RTM_GETLINK / RTM_GETADDR / RTM_GETROUTE with NLM_F_DUMP  -> the items, then NLMSG_DONE (all NLM_F_MULTI)
-//   any other request                                         -> NLMSG_ERROR with -EOPNOTSUPP (nothing can be changed this way yet)
+//   RTM_NEWADDR/DELADDR/NEWROUTE/DELROUTE/NEWLINK/SETLINK (root)  -> change address, default route, link up/down; ACK or NLMSG_ERROR
+//   any other request                                         -> NLMSG_ERROR with -EOPNOTSUPP
 //
 // NOTHING IS INVENTED. The one interface this kernel has is "eth0" (the same one `/proc/net/dev` and SIOCGIF* show, index 1: there is
 // no loopback device here, so there is no "lo" in the dump). Address, mask, gateway, MAC and carrier come from the stack; without a
@@ -26,6 +27,8 @@ import mm.mmframe
 import net.inet
 import fs.file
 import libc.regio
+import net.nlparse
+import net.netdev
 
 export {
     nl_new, nl_pid, nl_set_pid, nl_pending, nl_head_len, nl_head_ptr, nl_pop, nl_request,
@@ -41,12 +44,19 @@ const NLMSG_ERROR: u64 = 2
 const NLMSG_DONE: u64 = 3
 const NLM_F_MULTI: u64 = 2
 const NLM_F_DUMP: u64 = 0x300 // NLM_F_ROOT | NLM_F_MATCH
+const NLM_F_ACK: u64 = 4
+const NLM_F_REPLACE: u64 = 0x100
+const NLM_F_EXCL: u64 = 0x200
+const IFF_UP: u64 = 1
 
 const RTM_NEWLINK: u64 = 16
 const RTM_GETLINK: u64 = 18
+const RTM_SETLINK: u64 = 19
 const RTM_NEWADDR: u64 = 20
+const RTM_DELADDR: u64 = 21
 const RTM_GETADDR: u64 = 22
 const RTM_NEWROUTE: u64 = 24
+const RTM_DELROUTE: u64 = 25
 const RTM_GETROUTE: u64 = 26
 
 const AF_UNSPEC: u64 = 0
@@ -81,6 +91,14 @@ const RT_SCOPE_UNIVERSE: u64 = 0
 const RT_SCOPE_LINK: u64 = 253
 const RTN_UNICAST: u64 = 1
 
+const E_PERM: u64 = 1
+const E_SRCH: u64 = 3
+const E_IO: u64 = 5
+const E_EXIST: u64 = 17
+const E_NODEV: u64 = 19
+const E_AFNOSUPPORT: u64 = 97
+const E_ADDRNOTAVAIL: u64 = 99
+const E_NETUNREACH: u64 = 101
 const E_NOBUFS: u64 = 105
 const E_OPNOTSUPP: u64 = 95
 
@@ -280,9 +298,12 @@ fn prefix_len(mask: u64) -> u64 {
 // RTM_NEWLINK for eth0: flags as SIOCGIFFLAGS reports them (UP | BROADCAST | MULTICAST, RUNNING with a carrier).
 fn put_link(state: u64, p: u64, seq: u64, pid: u64) -> u64 {
     put_hdr(p, RTM_NEWLINK, NLM_F_MULTI, seq, pid)
-    var fl: u64 = 0x1003
+    var fl: u64 = 0x1002
+    if netdev.admin_up() {
+        fl = fl | IFF_UP
+    }
     var oper: u64 = 2 // IF_OPER_DOWN
-    if inet.carrier(state) {
+    if inet.carrier(state) && netdev.admin_up() {
         fl = fl | 0x10040 // IFF_RUNNING | IFF_LOWER_UP
         oper = 6 // IF_OPER_UP
     }
@@ -378,11 +399,186 @@ fn put_error(p: u64, req: u64, err: u64, seq: u64, pid: u64) -> u64 {
     return msg_end(p, p + 36)
 }
 
+// ================================================================== the changes
+
+fn is_change(typ: u64) -> bool {
+    return typ == RTM_NEWLINK || typ == RTM_SETLINK || typ == RTM_NEWADDR || typ == RTM_DELADDR
+        || typ == RTM_NEWROUTE || typ == RTM_DELROUTE
+}
+
+fn apply_addr(state: u64, ip: u64, plen: u64, gw: u64) -> u64 {
+    var ok: bool = false
+    if inet.ready(state) {
+        ok = inet.readdr(state, (ip >> 24) & 255, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255, plen, gw)
+    } else {
+        ok = inet.configure(state, (ip >> 24) & 255, (ip >> 16) & 255, (ip >> 8) & 255, ip & 255, plen, gw)
+    }
+    if !ok {
+        return E_IO
+    }
+    return 0
+}
+
+fn mask_of(plen: u64) -> u64 {
+    if plen == 0 {
+        return 0
+    }
+    return (0xFFFFFFFF << (32 - plen)) & 0xFFFFFFFF
+}
+
+fn addr_change(state: u64, m: u64, len: u64, typ: u64, flags: u64) -> u64 {
+    if len < 24 {
+        return 22
+    }
+    if regio.read8(m + 16) != AF_INET {
+        return E_AFNOSUPPORT
+    }
+    if regio.read32(m + 20) != IF_INDEX {
+        return E_NODEV
+    }
+    let plen: u64 = regio.read8(m + 17)
+    if plen > 32 {
+        return 22
+    }
+    var a: u64 = nlparse.attr_find(m + 24, m + len, IFA_LOCAL)
+    if a == 0 {
+        a = nlparse.attr_find(m + 24, m + len, IFA_ADDRESS)
+    }
+    if a == 0 || nlparse.attr_len(a) != 4 {
+        return 22
+    }
+    let ip: u64 = nlparse.attr_ip4(a)
+    let cur: u64 = inet.ip(state)
+    let cur_plen: u64 = prefix_len(inet.mask(state))
+    if typ == RTM_DELADDR {
+        if cur == 0 || ip != cur || plen != cur_plen {
+            return E_ADDRNOTAVAIL
+        }
+        return apply_addr(state, 0, 0, 0)
+    }
+    if cur != 0 {
+        if ip == cur && plen == cur_plen && (flags & NLM_F_EXCL) == 0 {
+            return 0
+        }
+        if ip == cur {
+            return E_EXIST
+        }
+        return E_OPNOTSUPP
+    }
+    if plen == 0 || ip == 0 {
+        return 22
+    }
+    var g: u64 = inet.gw(state)
+    if g != 0 && (g & mask_of(plen)) != (ip & mask_of(plen)) {
+        g = 0
+    }
+    return apply_addr(state, ip, plen, g)
+}
+
+fn route_change(state: u64, m: u64, len: u64, typ: u64, flags: u64) -> u64 {
+    if len < 28 {
+        return 22
+    }
+    if regio.read8(m + 16) != AF_INET {
+        return E_AFNOSUPPORT
+    }
+    let table: u64 = regio.read8(m + 20)
+    if table != 0 && table != RT_TABLE_MAIN {
+        return E_OPNOTSUPP
+    }
+    let first: u64 = m + 28
+    let end: u64 = m + len
+    let oif: u64 = nlparse.attr_find(first, end, RTA_OIF)
+    if oif != 0 && nlparse.attr_u32(oif) != IF_INDEX {
+        return E_NODEV
+    }
+    let ga: u64 = nlparse.attr_find(first, end, RTA_GATEWAY)
+    if ga != 0 && nlparse.attr_len(ga) != 4 {
+        return 22
+    }
+    let dst_len: u64 = regio.read8(m + 17)
+    let ip: u64 = inet.ip(state)
+    let mask: u64 = inet.mask(state)
+    if dst_len != 0 {
+        let da: u64 = nlparse.attr_find(first, end, RTA_DST)
+        if typ == RTM_NEWROUTE && da != 0 && ip != 0 && dst_len == prefix_len(mask) && nlparse.attr_ip4(da) == (ip & mask) {
+            return E_EXIST
+        }
+        return E_OPNOTSUPP
+    }
+    let cur_gw: u64 = inet.gw(state)
+    if typ == RTM_DELROUTE {
+        if cur_gw == 0 || (ga != 0 && nlparse.attr_ip4(ga) != cur_gw) {
+            return E_SRCH
+        }
+        return apply_addr(state, ip, prefix_len(mask), 0)
+    }
+    if ga == 0 {
+        return 22
+    }
+    let gw: u64 = nlparse.attr_ip4(ga)
+    if ip == 0 || gw == ip || (gw & mask) != (ip & mask) {
+        return E_NETUNREACH
+    }
+    if cur_gw != 0 && (flags & NLM_F_REPLACE) == 0 {
+        return E_EXIST
+    }
+    return apply_addr(state, ip, prefix_len(mask), gw)
+}
+
+fn link_change(state: u64, m: u64, len: u64) -> u64 {
+    if len < 32 {
+        return 22
+    }
+    let first: u64 = m + 32
+    let end: u64 = m + len
+    var idx: u64 = regio.read32(m + 20)
+    if idx == 0 {
+        let n: u64 = nlparse.attr_find(first, end, IFLA_IFNAME)
+        if n == 0 || nlparse.attr_len(n) != 5 || regio.read32(n + 4) != 0x30687465 || regio.read8(n + 8) != 0 {
+            return E_NODEV
+        }
+        idx = IF_INDEX
+    }
+    if idx != IF_INDEX {
+        return E_NODEV
+    }
+    let mt: u64 = nlparse.attr_find(first, end, IFLA_MTU)
+    if mt != 0 && nlparse.attr_u32(mt) != MTU {
+        return E_OPNOTSUPP
+    }
+    let mc: u64 = nlparse.attr_find(first, end, IFLA_ADDRESS)
+    if mc != 0 {
+        return E_OPNOTSUPP
+    }
+    let change: u64 = regio.read32(m + 28)
+    if (change & IFF_UP) != 0 {
+        netdev.admin_set((regio.read32(m + 24) & IFF_UP) != 0)
+    }
+    return 0
+}
+
+fn nl_change(state: u64, m: u64, len: u64, typ: u64, flags: u64, root: bool) -> u64 {
+    if !root {
+        return E_PERM
+    }
+    if typ == RTM_NEWLINK || typ == RTM_SETLINK {
+        return link_change(state, m, len)
+    }
+    if !inet.ready(state) && typ != RTM_NEWADDR {
+        return E_NODEV
+    }
+    if typ == RTM_NEWADDR || typ == RTM_DELADDR {
+        return addr_change(state, m, len, typ, flags)
+    }
+    return route_change(state, m, len, typ, flags)
+}
+
 // ================================================================== a request
 
 // Answer the netlink messages in `kb` (kernel address, `total` octets): the replies of all of them become ONE datagram. Returns 0 or an
 // errno (positive). A malformed buffer is -EINVAL; nothing is ever read beyond `total`.
-fn nl_request(state: u64, fr: u64, kb: u64, total: u64) -> u64 {
+fn nl_request(state: u64, fr: u64, kb: u64, total: u64, root: bool) -> u64 {
     let pid: u64 = nl_pid(fr)
     let body: u64 = rec_begin(fr)
     if body == 0 {
@@ -423,6 +619,11 @@ fn nl_request(state: u64, fr: u64, kb: u64, total: u64) -> u64 {
                 q = put_net_route(state, q, seq, pid)
             }
             q = put_done(q, seq, pid)
+        } else if is_change(typ) {
+            let err: u64 = nl_change(state, m, len, typ, flags, root)
+            if err != 0 || (flags & NLM_F_ACK) != 0 {
+                q = put_error(q, m, err, seq, pid)
+            }
         } else {
             q = put_error(q, m, E_OPNOTSUPP, seq, pid)
         }
