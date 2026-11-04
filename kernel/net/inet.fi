@@ -121,6 +121,12 @@ const EPHEMERAL_BASE: u64 = 40000
 
 const EPHEMERAL_MASK: u64 = 4095
 
+const LPORT_MASK: u64 = 0xFFFF
+
+const PEER_PORT_SHIFT: u64 = 16
+
+const PEER_IP_SHIFT: u64 = 32
+
 const PUMP_BATCH: u64 = 32
 
 const HOT_TURNS: u64 = 4000
@@ -463,7 +469,7 @@ fn readdr(state: u64, a: u64, b: u64, c: u64, d: u64, prefix: u64,
 }
 
 fn rebind_one(state: u64, i: u64) -> i32 {
-    let port: u16 = (kstate.get(state, so_at(i) + SO_PORT) & 0xFFFF) as u16
+    let port: u16 = lport_of(state, i) as u16
     let k: u64 = sock_kind(state, i)
     if k == SK_UDP {
         return stack.udp_bind(st(state), port)
@@ -908,6 +914,29 @@ fn so_at(i: u64) -> u64 {
     return sc(SOCK_OFF + i * SOCK_BYTES)
 }
 
+fn lport_of(state: u64, i: u64) -> u64 {
+    return kstate.get(state, so_at(i) + SO_PORT) & LPORT_MASK
+}
+
+fn lport_set(state: u64, i: u64, port: u64) {
+    let w: u64 = kstate.get(state, so_at(i) + SO_PORT)
+    kstate.set(state, so_at(i) + SO_PORT, (w - (w & LPORT_MASK)) | (port & LPORT_MASK))
+}
+
+fn peer_set(state: u64, i: u64, addr: u64, port: u64) {
+    let lp: u64 = lport_of(state, i)
+    kstate.set(state, so_at(i) + SO_PORT,
+        lp | ((port & 0xFFFF) << PEER_PORT_SHIFT) | ((addr & 0xFFFFFFFF) << PEER_IP_SHIFT))
+}
+
+fn peer_ip_of(state: u64, i: u64) -> u64 {
+    return kstate.get(state, so_at(i) + SO_PORT) >> PEER_IP_SHIFT
+}
+
+fn peer_port_of(state: u64, i: u64) -> u64 {
+    return (kstate.get(state, so_at(i) + SO_PORT) >> PEER_PORT_SHIFT) & 0xFFFF
+}
+
 fn sock_kind(state: u64, i: u64) -> u64 {
     if i >= SOCK_MAX {
         return SK_FREE
@@ -1036,7 +1065,7 @@ fn sock_bind(state: u64, i: u64, port: u64) -> u64 {
         }
         h_store(state, i, h as u64, ep)
     }
-    kstate.set(state, so_at(i) + SO_PORT, bound)
+    lport_set(state, i, bound)
     netmon.sset(state, i, netmon.S_LPORT, bound)
     return 0
 }
@@ -1045,7 +1074,7 @@ fn sock_listen(state: u64, i: u64, backlog: u64) -> u64 {
     if sock_kind(state, i) != SK_TCP {
         return errno.neg(errno.E_OPNOTSUPP)
     }
-    let port: u64 = kstate.get(state, so_at(i) + SO_PORT)
+    let port: u64 = lport_of(state, i)
     if port == 0 {
         return errno.neg(errno.E_INVAL)
     }
@@ -1171,7 +1200,15 @@ fn sock_connect(state: u64, i: u64, addr: u64, port: u64) -> u64 {
         return errno.neg(errno.E_BADF)
     }
     if k != SK_TCP {
-        kstate.set(state, so_at(i) + SO_PORT, port)
+        if k == SK_UDP && lport_of(state, i) == 0 {
+            let br: u64 = sock_bind(state, i, 0)
+            if errno.is_error(br) {
+                return br
+            }
+        }
+        peer_set(state, i, addr, port)
+        netmon.sset(state, i, netmon.S_RADDR, addr)
+        netmon.sset(state, i, netmon.S_RPORT, port)
         kstate.set(state, so_at(i) + SO_FLAGS,
             sock_flags(state, i) | SF_CONNECTED)
         return 0
@@ -1356,6 +1393,9 @@ fn sock_send(state: u64, i: u64, src: u64, n: u64) -> u64 {
         netmon.pay_out(state, i, got as u64)
         return got as u64
     }
+    if k == SK_UDP && (sock_flags(state, i) & SF_CONNECTED) != 0 {
+        return sock_sendto(state, i, src, n, 0, 0)
+    }
     return errno.neg(errno.E_DESTADDRREQ)
 }
 
@@ -1410,19 +1450,28 @@ fn sock_sendto(state: u64, i: u64, src: u64, n: u64, addr: u64,
     if k != SK_UDP {
         return errno.neg(errno.E_BADF)
     }
-    var sport: u64 = kstate.get(state, so_at(i) + SO_PORT)
+    var dst_ip: u64 = addr
+    var dst_port: u64 = port
+    if (sock_flags(state, i) & SF_CONNECTED) != 0 && dst_ip == 0 && dst_port == 0 {
+        dst_ip = peer_ip_of(state, i)
+        dst_port = peer_port_of(state, i)
+    }
+    if dst_ip == 0 && dst_port == 0 {
+        return errno.neg(errno.E_DESTADDRREQ)
+    }
+    var sport: u64 = lport_of(state, i)
     if sport == 0 {
         let br: u64 = sock_bind(state, i, 0)
         if errno.is_error(br) {
             return br
         }
-        sport = kstate.get(state, so_at(i) + SO_PORT)
+        sport = lport_of(state, i)
     }
-    netmon.sset(state, i, netmon.S_RADDR, addr)
-    netmon.sset(state, i, netmon.S_RPORT, port)
+    netmon.sset(state, i, netmon.S_RADDR, dst_ip)
+    netmon.sset(state, i, netmon.S_RPORT, dst_port)
     let flags: u64 = hold(state)
     let ok: bool = stack.udp_send(st(state), (sport & 0xFFFF) as u16,
-        (addr & 0xFFFFFFFF) as u32, (port & 0xFFFF) as u16,
+        (dst_ip & 0xFFFFFFFF) as u32, (dst_port & 0xFFFF) as u16,
         src as *mut u8, n as usize, now_us(state))
     drop_lock(state, flags)
     if !ok {
@@ -1475,6 +1524,14 @@ fn sock_recvfrom(state: u64, i: u64, dst: u64, n: u64, addr: *mut u64,
 fn sock_peer(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
     *addr = 0
     *port = 0
+    if sock_kind(state, i) == SK_UDP {
+        if (sock_flags(state, i) & SF_CONNECTED) == 0 {
+            return errno.neg(errno.E_NOTCONN)
+        }
+        *addr = peer_ip_of(state, i)
+        *port = peer_port_of(state, i)
+        return 0
+    }
     if sock_kind(state, i) != SK_TCP {
         return errno.neg(errno.E_OPNOTSUPP)
     }
@@ -1492,7 +1549,7 @@ fn sock_peer(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
 
 fn sock_local(state: u64, i: u64, addr: *mut u64, port: *mut u64) -> u64 {
     *addr = ip(state)
-    *port = kstate.get(state, so_at(i) + SO_PORT)
+    *port = lport_of(state, i)
     if sock_kind(state, i) == SK_TCP {
         let h: u64 = sock_handle(state, i)
         if h != NOHANDLE {
