@@ -14,7 +14,7 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 
 has()    { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' fehlt"; }
-hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' sollte nicht da sein" || ok "$3"; }
+hasnot() { grep -qaF "$2" "$1" && bad "$3 -- '$2' should not be there" || ok "$3"; }
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "CAPS: skipped, qemu-system-x86_64 is not available"
@@ -118,18 +118,18 @@ for stage in 0 1; do
         bad "firnc$stage: the predecessor left $left handles behind, expected 16"
     fi
 
-    seiten=$(readelf -S "$IMG.elf" 2>/dev/null | grep -A1 '\.utext' | tail -1 \
+    text_pages=$(readelf -S "$IMG.elf" 2>/dev/null | grep -A1 '\.utext' | tail -1 \
              | awk '{print $1}')
-    if [ -n "${seiten:-}" ]; then
-        expected=$(( 0x$seiten / 4096 ))
+    if [ -n "${text_pages:-}" ]; then
+        expected=$(( 0x$text_pages / 4096 ))
         actual=$(grep -a '^proc: pages=' "$OUT" | head -1 | sed 's/.*=//')
         if [ "${actual:-0}" -eq "$expected" ]; then
             ok "firnc$stage: all $expected pages of .utext are mapped"
         else
             bad "firnc$stage: $actual pages mapped, .utext has $expected"
         fi
-        kacheln=$(( (soll * 4096 + 0x1FFFFF) / 0x200000 ))
-        echo "        (.utext: $expected Seiten, $kacheln 2-MiB-Kachel(n))"
+        tiles=$(( (expected * 4096 + 0x1FFFFF) / 0x200000 ))
+        echo "        (.utext: $expected pages, $tiles 2-MiB tile(s))"
     fi
 
     if grep -qa 'cap: first .*differ=1' "$OUT"; then
