@@ -10,7 +10,7 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 command -v qemu-system-x86_64 >/dev/null || { echo "NETCHECK: skipped, no qemu"; exit 0; }
-CASES="${*:-ok nogw nodns noinet flap quiet}"
+CASES="${*:-ok nogw nodns noinet noicmp flap quiet}"
 trap 'for f in "$T"/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; [ -n "${NETCHECK_WORK:-}" ] || rm -rf "$T"' EXIT
 if [ ! -f "$T/k.img" ] || [ ! -f "$T/bin/sh.elf" ]; then
     bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
@@ -83,6 +83,14 @@ for c in $CASES; do
         run noinet s_loop.sh "nip=169.254.10.1/16" "--no-inet"
         chk noinet "stage no internet" 'health 4'
         panics noinet
+        ;;
+    noicmp)
+        run noicmp s_loop.sh "nip=169.254.10.1/16" "--no-icmp"
+        chk noicmp "stage ok through TCP fallback" 'health 1'
+        chk noicmp "no heals" 'heals 0'
+        nochk noicmp "no heal logged" 'netcheck heal='
+        pchk noicmp "TCP probe reached the peer" 'TCP-SYN dst=1.1.1.1 port=443'
+        panics noicmp
         ;;
     flap)
         run flap s_once.sh "nip=169.254.10.1/16" "--no-echo"

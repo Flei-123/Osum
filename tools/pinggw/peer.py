@@ -94,6 +94,7 @@ def main():
     ap.add_argument("--no-echo", action="store_true")
     ap.add_argument("--no-dns", action="store_true")
     ap.add_argument("--no-inet", action="store_true")
+    ap.add_argument("--no-icmp", action="store_true")
     ap.add_argument("--tls-cert")
     ap.add_argument("--tls-key")
     a = ap.parse_args()
@@ -146,11 +147,13 @@ def main():
                 pass
             elif proto == 6 and len(frame) >= 54 and frame[47] & 0x02:
                 log.write("TCP-SYN dst=%s port=%d\n" % (".".join(map(str, dst_ip)), struct.unpack("!H", frame[36:38])[0]))
-                sock.sendto(tcp_reset(frame, src_mac, src_ip, dst_ip), out)
+                dead = a.no_echo or (a.no_inet and dst_ip != GW_IP)
+                if not dead and frame[0:6] == GW_MAC:
+                    sock.sendto(tcp_reset(frame, src_mac, src_ip, dst_ip), out)
             elif proto == 1 and frame[34] == 8:
                 via_gw = frame[0:6] == GW_MAC
                 log.write("ECHO dst=%s via_gw=%d\n" % (".".join(map(str, dst_ip)), 1 if via_gw else 0))
-                if via_gw and not a.no_echo and not (a.no_inet and dst_ip != GW_IP):
+                if via_gw and not a.no_echo and not (a.no_inet and dst_ip != GW_IP) and not (a.no_icmp and dst_ip != GW_IP):
                     icmp = bytearray(frame[34:14 + struct.unpack("!H", frame[16:18])[0]])
                     icmp[0] = 0
                     icmp[2:4] = b"\0\0"
