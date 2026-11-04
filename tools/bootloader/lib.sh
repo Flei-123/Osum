@@ -10,7 +10,7 @@ osb_prepare() {
     if [ -n "${STICK_IMG:-}" ]; then
         cp "$STICK_IMG" "$dir/stick.img"
     else
-        bash tools/usbimg/build.sh "$dir/build" > "$dir/build.txt" 2>&1 || { tail -5 "$dir/build.txt"; return 1; }
+        ROOT_FROM_PART=0 bash tools/usbimg/build.sh "$dir/build" > "$dir/build.txt" 2>&1 || { tail -5 "$dir/build.txt"; return 1; }
         mv "$dir/build/${MARKE_DATEI}-usb.img" "$dir/stick.img"
         rm -rf "$dir/build"
     fi
@@ -124,7 +124,7 @@ bios_prepare() {
     if [ -n "${STICK_IMG:-}" ]; then
         cp "$STICK_IMG" "$dir/stick.img"
     else
-        OSBOOT=1 bash tools/usbimg/build.sh "$dir/build" > "$dir/build.txt" 2>&1 || { tail -5 "$dir/build.txt"; return 1; }
+        OSBOOT=1 ROOT_FROM_PART=0 bash tools/usbimg/build.sh "$dir/build" > "$dir/build.txt" 2>&1 || { tail -5 "$dir/build.txt"; return 1; }
         mv "$dir/build/${MARKE_DATEI}-usb.img" "$dir/stick.img"
         rm -rf "$dir/build"
     fi
