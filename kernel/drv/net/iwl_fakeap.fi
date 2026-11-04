@@ -11,10 +11,18 @@ import crypto.aes
 import drv.net.iwl_fakeap_frames
 import libc.octets
 
-export { reset, set_drop, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA, STAT_ARP, STAT_ICMP, STAT_DNS, STAT_TCP }
+export { reset, set_drop, set_knobs, on_tx, resp_ptr, resp_len, stat, STAT_AUTH, STAT_ASSOC, STAT_M2, STAT_BADMIC, STAT_M4, STAT_DISCOVER, STAT_REQUEST, STAT_DATA, STAT_ARP, STAT_ICMP, STAT_DNS, STAT_TCP, STAT_LOST, STAT_DUPED, STAT_REORD, STAT_RETX, STAT_AMSDU, STAT_ADDBA }
 
-const SLOT: u64 = 512
-const SLOTS: u64 = 32
+const SLOT: u64 = 1536
+const SLOTS: u64 = 24
+const BATCH: u64 = 3
+const LOSS_PERIOD: u64 = 211
+const DUP_PERIOD: u64 = 97
+const REORD_PERIOD: u64 = 149
+const FAULT_TAIL: u64 = 10
+const LOSS_EXTRA: u64 = 8
+const DUPACK_RETX: u64 = 3
+const DUPACK_STUCK: u64 = 24
 const BURST_MIN_LEN: u64 = 100
 const BURST_COUNT: u64 = 24
 const ST_IDLE: u64 = 0
@@ -36,6 +44,12 @@ const STAT_ARP: u64 = 8
 const STAT_ICMP: u64 = 9
 const STAT_DNS: u64 = 10
 const STAT_TCP: u64 = 11
+const STAT_LOST: u64 = 12
+const STAT_DUPED: u64 = 13
+const STAT_REORD: u64 = 14
+const STAT_RETX: u64 = 15
+const STAT_AMSDU: u64 = 16
+const STAT_ADDBA: u64 = 17
 const TCP_ISN: u64 = 1000
 const TCP_SEG: u64 = 400
 const TCP_WINDOW: u64 = 6400
@@ -48,9 +62,10 @@ static mut fa_msg_drop: [u8; 13] = "fakeap: drop\0"
 static mut fa_pmk_ok: u64 = 0
 static mut fa_resp_n: u64 = 0
 static mut fa_nonce_seq: u64 = 0
-static mut fa_stats: [u64; 16] = [0 as u64; 16]
+static mut fa_stats: [u64; 32] = [0 as u64; 32]
 static mut fa_resp_len: [u64; 32] = [0 as u64; 32]
-static mut fa_resp: [u8; 16384] = [0 as u8; 16384]
+static mut fa_resp: [u8; 36864] = [0 as u8; 36864]
+static mut fa_big: [u8; 1700] = [0 as u8; 1700]
 static mut fa_pmk: [u8; 32] = [0 as u8; 32]
 static mut fa_ptk: [u8; 48] = [0 as u8; 48]
 static mut fa_anonce: [u8; 32] = [0 as u8; 32]
@@ -84,6 +99,29 @@ static mut ft_rcv: u64 = 0
 static mut ft_sent: u64 = 0
 static mut ft_acked: u64 = 0
 static mut ft_hold: u64 = 0
+static mut ft_hw: u64 = 0
+static mut ft_lastack: u64 = 0
+static mut ft_dupack: u64 = 0
+static mut ft_lost_end: u64 = 0
+static mut ft_recover: u64 = 0
+static mut fh_on: u64 = 0
+static mut fh_off: u64 = 0
+static mut fh_len: u64 = 0
+static mut fb_n: u64 = 0
+static mut fb_off: [u64; 4] = [0 as u64; 4]
+static mut fb_len: [u64; 4] = [0 as u64; 4]
+static mut fk_loss: u64 = 0
+static mut fk_dup: u64 = 0
+static mut fk_reord: u64 = 0
+static mut fk_amsdu: u64 = 0
+static mut fk_noretx: u64 = 0
+static mut fk_addba: u64 = 0
+static mut fa_msg_lost: [u8; 14] = "fakeap: lost \0"
+static mut fa_msg_duped: [u8; 14] = "fakeap: dup  \0"
+static mut fa_msg_held: [u8; 14] = "fakeap: held \0"
+static mut fa_msg_retx: [u8; 15] = "fakeap: retx  \0"
+static mut fa_msg_addba: [u8; 20] = "fakeap: addba req  \0"
+static mut fa_msg_decl: [u8; 23] = "fakeap: addba declined\0"
 static mut fa_drop_mode: u64 = 0
 static mut fa_discovers: u64 = 0
 static mut fa_lease: u64 = 0
@@ -93,9 +131,25 @@ fn say(msg: u64) {
     serial.nl()
 }
 
-fn stat(i: u64) -> u64 { return fa_stats[(i & 15) as usize] }
+fn stat(i: u64) -> u64 { return fa_stats[(i & 31) as usize] }
 
-fn bump(i: u64) { fa_stats[(i & 15) as usize] = fa_stats[(i & 15) as usize] + 1 }
+fn bump(i: u64) { fa_stats[(i & 31) as usize] = fa_stats[(i & 31) as usize] + 1 }
+
+fn say_num(msg: u64, v: u64) {
+    serial.puts(msg)
+    serial.dec(v)
+    serial.nl()
+}
+
+fn set_knobs(bulk: u64, loss: u64, dup: u64, reord: u64, amsdu: u64, noretx: u64, addba: u64) {
+    iwl_fakeap_frames.set_bulk(bulk)
+    fk_loss = loss
+    fk_dup = dup
+    fk_reord = reord
+    fk_amsdu = amsdu
+    fk_noretx = noretx
+    fk_addba = addba
+}
 
 fn set_drop(on: u64) {
     fa_drop_arm = on
@@ -110,7 +164,7 @@ fn reset() {
     fa_lease = iwl_fakeap_frames.LEASE_IP
     fa_discovers = 0
     var i: u64 = 0
-    while i < 8 {
+    while i < 32 {
         fa_stats[i as usize] = 0
         i = i + 1
     }
@@ -370,22 +424,110 @@ fn on_dns(ip: *mut llc.Ipv4, ud: *mut llc.Udp) {
     send_protected(o, len)
 }
 
+fn batch_flush() {
+    if fb_n == 0 { return }
+    let o: u64 = (&fa_big[0]) as u64
+    let hl: u64 = iwl_fakeap_frames.qos_head_from_ds(o, sta_addr(), bssid_addr())
+    var at: u64 = hl
+    var i: u64 = 0
+    while i < fb_n {
+        iwl_fakeap_frames.copy6(o, at, sta_addr(), 0)
+        iwl_fakeap_frames.copy6(o, at + 6, bssid_addr(), 0)
+        let m: u64 = iwl_fakeap_frames.msdu_tcp_build(o + at + 14, ft_cip, ft_cport, TCP_ISN + 1 + fb_off[i as usize], ft_rcv, 0x18, fb_off[i as usize], fb_len[i as usize])
+        put_be16(o, at + 12, m)
+        at = at + 14 + m
+        if i + 1 < fb_n {
+            while ((at - hl) & 3) != 0 {
+                octets.st8(o, at, 0)
+                at = at + 1
+            }
+        }
+        i = i + 1
+    }
+    fb_n = 0
+    bump(STAT_AMSDU)
+    send_protected(o, at)
+}
+
 fn send_seg(flags: u64, seq: u64, off: u64, n: u64) {
+    batch_flush()
     let o: u64 = (&fa_out[0]) as u64
     send_protected(o, iwl_fakeap_frames.tcp_segment_build(o, sta_addr(), bssid_addr(), ft_cip, ft_cport, seq, ft_rcv, flags, off, n))
+}
+
+fn emit_data(off: u64, n: u64) {
+    if fk_amsdu == 0 {
+        send_seg(0x18, TCP_ISN + 1 + off, off, n)
+        return
+    }
+    fb_off[fb_n as usize] = off
+    fb_len[fb_n as usize] = n
+    fb_n = fb_n + 1
+    if fb_n >= BATCH { batch_flush() }
+}
+
+fn fault_kind(idx: u64) -> u64 {
+    if fk_loss != 0 && idx % LOSS_PERIOD == LOSS_PERIOD - 1 { return 1 }
+    if fk_dup != 0 && idx % DUP_PERIOD == DUP_PERIOD - 1 { return 2 }
+    if fk_reord != 0 && idx % REORD_PERIOD == REORD_PERIOD - 1 { return 3 }
+    return 0
+}
+
+fn held_flush() {
+    if fh_on == 0 { return }
+    fh_on = 0
+    emit_data(fh_off, fh_len)
+}
+
+fn send_data(off: u64, n: u64) {
+    var kind: u64 = 0
+    if off >= ft_hw {
+        ft_hw = off + n
+        if iwl_fakeap_frames.stream_total() - off > FAULT_TAIL * TCP_SEG { kind = fault_kind(off / TCP_SEG) }
+    } else {
+        bump(STAT_RETX)
+    }
+    if kind == 1 {
+        bump(STAT_LOST)
+        ft_lost_end = off + n
+        say_num((&fa_msg_lost[0]) as u64, off)
+        return
+    }
+    if kind == 3 && fh_on == 0 {
+        bump(STAT_REORD)
+        fh_on = 1
+        fh_off = off
+        fh_len = n
+        say_num((&fa_msg_held[0]) as u64, off)
+        return
+    }
+    emit_data(off, n)
+    if kind == 2 {
+        bump(STAT_DUPED)
+        say_num((&fa_msg_duped[0]) as u64, off)
+        emit_data(off, n)
+    }
+    held_flush()
+}
+
+fn window_limit() -> u64 {
+    if ft_lost_end > ft_acked { return TCP_WINDOW + LOSS_EXTRA * TCP_SEG }
+    return TCP_WINDOW
 }
 
 fn tcp_pump(want_ack: bool) {
     let total: u64 = iwl_fakeap_frames.stream_total()
     var sent_now: u64 = 0
     if ft_req != 0 && ft_hold == 0 {
-        while ft_sent < total && ft_sent - ft_acked < TCP_WINDOW && sent_now < TCP_BURST {
+        while ft_sent < total && ft_sent - ft_acked < window_limit() && sent_now < TCP_BURST {
             var n: u64 = total - ft_sent
             if n > TCP_SEG { n = TCP_SEG }
-            send_seg(0x18, TCP_ISN + 1 + ft_sent, ft_sent, n)
+            send_data(ft_sent, n)
             ft_sent = ft_sent + n
             sent_now = sent_now + 1
         }
+        held_flush()
+        batch_flush()
         if ft_sent == total && ft_acked == total && ft_fin == 0 {
             send_seg(0x11, TCP_ISN + 1 + total, 0, 0)
             ft_fin = 1
@@ -395,6 +537,13 @@ fn tcp_pump(want_ack: bool) {
     if want_ack && sent_now == 0 {
         send_seg(0x10, TCP_ISN + 1 + ft_sent + ft_fin, 0, 0)
     }
+}
+
+fn addba_request() {
+    let f: u64 = queue_begin()
+    if f == 0 { return }
+    queue_commit(iwl_fakeap_frames.addba_request_build(f, sta_addr(), bssid_addr(), 1))
+    say_num((&fa_msg_addba[0]) as u64, 1)
 }
 
 fn on_tcp(ip: *mut llc.Ipv4) {
@@ -412,18 +561,38 @@ fn on_tcp(ip: *mut llc.Ipv4) {
         ft_rcv = (t.seq + 1) & 0xFFFFFFFF
         ft_sent = 0
         ft_acked = 0
+        ft_hw = 0
+        ft_dupack = 0
+        ft_lost_end = 0
+        ft_recover = 0
+        fh_on = 0
+        fb_n = 0
         bump(STAT_TCP)
         say((&fa_msg_tcp[0]) as u64)
+        if fk_addba != 0 && stat(STAT_ADDBA) == 0 { addba_request() }
         send_seg(0x12, TCP_ISN, 0, 0)
         return
     }
     if ft_on == 0 || t.source != ft_cport || (*ip).source != ft_cip { return }
     var need_ack: bool = false
+    let acked_before: u64 = ft_acked
     if (t.flags & 16) != 0 && t.ack > TCP_ISN + 1 {
         var a: u64 = t.ack - TCP_ISN - 1
         if a > ft_sent { a = ft_sent }
         if a > ft_acked { ft_acked = a }
     }
+    if t.payload_len == 0 && (t.flags & 3) == 0 && ft_acked == acked_before && ft_sent > ft_acked {
+        ft_dupack = ft_dupack + 1
+        if fk_noretx == 0 && ((ft_dupack >= DUPACK_RETX && ft_acked >= ft_recover) || ft_dupack >= DUPACK_STUCK) {
+            ft_dupack = 0
+            ft_recover = ft_sent
+            ft_sent = ft_acked
+            fh_on = 0
+            fb_n = 0
+            say_num((&fa_msg_retx[0]) as u64, ft_acked)
+        }
+    }
+    if ft_acked != acked_before { ft_dupack = 0 }
     if t.payload_len > 0 {
         need_ack = true
         if t.seq == ft_rcv {
@@ -535,6 +704,13 @@ fn on_mgmt(p: u64, n: u64) {
         bump(STAT_ASSOC)
         say((&fa_msg_assoc[0]) as u64)
         send_m1()
+    }
+    if sub == 13 {
+        if n < 33 || fa_state != ST_KEYED { return }
+        if octets.ld8(p, 24) == 3 && octets.ld8(p, 25) == 1 && octets.ld8(p, 26) == 1 && octets.ld16(p, 27) == 37 {
+            bump(STAT_ADDBA)
+            say((&fa_msg_decl[0]) as u64)
+        }
     }
     if sub == 12 || sub == 10 {
         fa_state = ST_IDLE
