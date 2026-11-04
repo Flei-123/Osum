@@ -10,6 +10,8 @@
 #        HP_SAME_KERNEL=1 publishes the kernel of HP_BASE (what the HP runs): the HP applies the overlay live, no trial boot
 #        HP_FX_PACK=<dir from tools/linuxapps/hppack.py> adds usr/share/xfx/{firefox.tar.partNNN (gz <= 3.9 MB each, from HP_FX_PACK/parts or packsplit.py),firefox.manifest,user.js} to the overlay (HP_ONLY must then list wayd tar xfx);
 #                   the HP needs a root of >= 1 GiB (HP_STICK=1 images since ba9f4ee5), the apply refuses cleanly below 2x the size
+#        HP_DEV=1 ships assets/jarvis/rechte-hp-dev.conf (devmode = yes, screenshot = always, input = yes) as /etc/jarvis/permissions.conf;
+#                 without it the HP gets rechte-hp.conf back = dev mode OFF (see docs/DEVMODE.md)
 #        HP_KEEP_IMAGE=1 keeps the built image dir.  Run directly (not via heavy) when the heavy queue hangs.
 set -euo pipefail
 REPO=${OSUM_MAIN_CHECKOUT:-/root/jarvis/projects/u_DiS4in7esMF1/osum}
@@ -36,6 +38,7 @@ for d in bin lib .gebaut; do [ -e "$REPO/vendor/firn/$d" ] && cp -a "$REPO/vendo
 cd "$WT"
 COUNT=$(git rev-list --count HEAD)
 echo "republish-hp: $(git rev-parse --short HEAD) count $COUNT"
+[ -n "${HP_DEV:-}" ] && export JARVIS_CONF=assets/jarvis/rechte-hp-dev.conf && echo "republish-hp: DEV MODE config shipped"
 IMAGE_ID=hp-feed HP_STICK=1 bash tools/usbimg/build.sh "$IMG" > "$IMG.log" 2>&1 || { tail -20 "$IMG.log"; exit 1; }
 PROGS=()
 EXTRA=$(mktemp -d)
