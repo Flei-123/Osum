@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdlib.h>
+#include <sys/uio.h>
 #include <sys/socket.h>
 
 static const unsigned char query[] = {
@@ -77,6 +78,33 @@ int main(void)
     CHECKC("connected_write", write(b, query, sizeof query) == (ssize_t)sizeof query);
     r = answered(b, 8000);
     CHECK("connected_write_recv", r > 0, "answer=%d", r);
+
+    int d = socket(AF_INET, SOCK_DGRAM, 0);
+    struct iovec siov = { (void *)query, sizeof query };
+    struct msghdr sm;
+    memset(&sm, 0, sizeof sm);
+    sm.msg_name = &dst;
+    sm.msg_namelen = sizeof dst;
+    sm.msg_iov = &siov;
+    sm.msg_iovlen = 1;
+    errno = 0;
+    CHECKC("sendmsg", sendmsg(d, &sm, 0) == (ssize_t)sizeof query);
+    unsigned char rb[512];
+    struct sockaddr_in from;
+    struct iovec riov = { rb, sizeof rb };
+    struct msghdr rm;
+    memset(&rm, 0, sizeof rm);
+    memset(&from, 0, sizeof from);
+    rm.msg_name = &from;
+    rm.msg_namelen = sizeof from;
+    rm.msg_iov = &riov;
+    rm.msg_iovlen = 1;
+    struct pollfd dp = { d, POLLIN, 0 };
+    int pr = poll(&dp, 1, 8000);
+    errno = 0;
+    ssize_t rn = pr == 1 ? recvmsg(d, &rm, 0) : -1;
+    CHECK("recvmsg", rn > 12 && rb[0] == 0x12 && (rb[2] & 0x80), "rc=%zd poll=%d errno=%d", rn, pr, errno);
+    CHECK("recvmsg_source_address", rn > 0 && from.sin_addr.s_addr == dst.sin_addr.s_addr && ntohs(from.sin_port) == 53, "port=%d", ntohs(from.sin_port));
 
     int c = socket(AF_INET, SOCK_DGRAM, 0);
     errno = 0;

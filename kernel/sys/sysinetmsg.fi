@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-only
+
+import lib.errno
+import net.inet
+import sched.proc
+import sys.sysconst
+import sys.sysuser
+import sys.sysfd
+
+export { is_inet, inet_sendmsg, inet_recvmsg }
+
+const MH_NAME: u64 = 0
+const MH_NAMELEN: u64 = 8
+const IOV_BASE: u64 = 0
+const IOV_LEN: u64 = 8
+const IOV_BYTES: u64 = 16
+const LEN32: u64 = 0xFFFFFFFF
+
+fn is_inet(state: u64, me: u64, fd: u64) -> bool {
+    return sysfd.sock_of(state, me, fd) < inet.SOCK_MAX
+}
+
+fn single_iov(state: u64, me: u64, mh: u64, base: *mut u64, len: *mut u64) -> u64 {
+    let iov: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOV)
+    let iovlen: u64 = sysuser.get64u(state, me, mh + sysconst.MH_IOVLEN)
+    if iovlen == 0 {
+        *base = 0
+        *len = 0
+        return 0
+    }
+    if iovlen != 1 {
+        return sysuser.neg(errno.E_INVAL)
+    }
+    if !proc.user_ok(state, me, iov, IOV_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    *base = sysuser.get64u(state, me, iov + IOV_BASE)
+    *len = sysuser.get64u(state, me, iov + IOV_LEN)
+    return 0
+}
+
+fn inet_sendmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    if !proc.user_ok(state, me, mh, sysconst.MH_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var base: u64 = 0
+    var len: u64 = 0
+    let r: u64 = single_iov(state, me, mh, &base, &len)
+    if errno.is_error(r) {
+        return r
+    }
+    let name: u64 = sysuser.get64u(state, me, mh + MH_NAME)
+    let namelen: u64 = sysuser.get64u(state, me, mh + MH_NAMELEN) & LEN32
+    return sysfd.do_sendto(state, me, fd, base, len, name, namelen)
+}
+
+fn inet_recvmsg(state: u64, me: u64, fd: u64, mh: u64, flags: u64) -> u64 {
+    if !proc.user_ok(state, me, mh, sysconst.MH_BYTES) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    var base: u64 = 0
+    var len: u64 = 0
+    let r: u64 = single_iov(state, me, mh, &base, &len)
+    if errno.is_error(r) {
+        return r
+    }
+    let name: u64 = sysuser.get64u(state, me, mh + MH_NAME)
+    var lenp: u64 = 0
+    if name != 0 {
+        lenp = mh + MH_NAMELEN
+    }
+    let n: u64 = sysfd.do_recvfrom(state, me, fd, base, len, name, lenp)
+    if errno.is_error(n) {
+        return n
+    }
+    if !sysuser.put64(state, me, mh + sysconst.MH_CONTROLLEN, 0) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    if !sysuser.put32(state, me, mh + sysconst.MH_FLAGS, 0) {
+        return sysuser.neg(errno.E_FAULT)
+    }
+    return n
+}
