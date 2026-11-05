@@ -117,4 +117,11 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 - `Display > Monitors` has a status row `Detected: 1: 1920x1080  2: 2560x1440 150%`. Size = `wlibc.head_field` (w/h of the head), the scale percent (EDID suggestion, `wlibc.head_scale`) is shown only when it is not 100. With no head table (one output, no extend) it falls back to the screen size.
 - Code: `setsystem.heads_read` (called from `state_read`, buffer `setbase.l_heads`), manifest field `headlist` (display.bind index 26), witness serial line `settings: heads ...`.
 - Gate: `tools/setheads/run.sh` (QEMU 2 outputs 640x480 and 1280x800 + 1-output control; checks the witness line, `view_image` of the page).
-- Still open: arrangement canvas (drag), per-head scale in the UI toolkit, hotplug refresh of this row (read at start and after Apply only).
+- Status after round 4: canvas, hotplug refresh and persistence are done (see below). Still open: per-head UI scale in the toolkit (one integer UI scale per desktop), HDA HDMI pin + ELD.
+
+## Round 4 (05.11.2026) — canvas, hotplug, persistence
+- **Canvas** (`kernel/user/settings/setarrange.fi`): drag a head rectangle, snap to edges, overlap/detached drops denied by the kernel (`WS_HEADPOS`); per-display scale choice 100/125/150/200 % (`WS_HEADSCALE`).
+- **Hotplug:** the Settings monitor list re-reads the head table when the output set changes (gate `tools/setheads`, `hotplug=1`).
+- **Persistence:** every accepted drop and scale choice, and Apply, write `/etc/displays.conf` through `displaymode.save`: `heads=extend|mirror` then one `head<N>=<x>,<y>,<percent>` line per present head. The taskbar start calls `displaymode.apply_saved` which restores the mode, positions of heads >= 1 and the scale percent of every present head that exists.
+- **Gate:** `tools/setheads/run.sh` reads the file back from the guest disk with `mkfs.py cat` after the drag and scale cases, and a restore case starts the taskbar with a seeded file.
+- **Not done:** re-applying the saved layout when a head is plugged in after login (only at taskbar start); per-head UI scale in fUi/wlib.

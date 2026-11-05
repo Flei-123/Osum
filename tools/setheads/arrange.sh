@@ -50,6 +50,7 @@ G="$T/dragok.klar"
 grep -a "^settings: arrange " "$G" | sed 's/^/   /' | head -6
 has "$G" "^settings: arrange drop hd=1 to 0,480 ok *$" "drag: head 2 snapped below head 1 and accepted"
 has "$G" "^settings: arrange cv=.* h1=[0-9]+,[0-9]+,[0-9]+,[0-9]+,0,480 *$" "drag: layout re-read shows position 0,480"
+has "$T/dragok.conf" "^head1=0,480,100 *$" "drag: arrangement saved to /etc/displays.conf"
 
 echo "== canvas drag: overlap rejected"
 DRAG_MODE=overlap RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragov 2 "fbres=1280x960 vgpuheads vgpuextend"
@@ -70,3 +71,11 @@ G="$T/scale.klar"
 grep -a "^settings: arrange scale" "$G" | sed 's/^/   /'
 has "$G" "^settings: arrange scale hd=0 pct=150 ok *$" "scale: selected head set to 150 percent"
 has "$G" "^settings: heads Detected: 1: .* 150%" "scale: monitors list shows the percent"
+has "$T/scale.conf" "^head0=[0-9]+,[0-9]+,150 *$" "scale: percent saved to /etc/displays.conf"
+
+echo "== saved arrangement restored at login"
+RC_SCRIPT=g4.sh RC_WAITN=1 RC_WAIT="^settings: arrange cv=" run_case restore 2 "fbres=1280x960 vgpuheads vgpuextend"
+G="$T/restore.klar"
+grep -a "^settings: arrange cv=" "$G" | head -2 | sed 's/^/   /'
+has "$G" "^settings: arrange cv=.* h1=[0-9]+,[0-9]+,[0-9]+,[0-9]+,0,480 *$" "restore: taskbar applied head 2 at 0,480 from /etc/displays.conf"
+has "$G" "^settings: heads Detected: .*125%" "restore: saved scale 125 percent applied"

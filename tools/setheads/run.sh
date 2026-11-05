@@ -20,7 +20,7 @@ has() { grep -qaE -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 mkdir -p "$T/bin"
-PROGS="sh ls cat echo sleep orientbus act axd settings"
+PROGS="sh ls cat echo sleep orientbus act axd settings taskbar"
 HOOK=""
 if bash tools/sync/build.sh "$T/bin" 0 $PROGS >"$T/b.txt" 2>&1 \
    && ./tools/build-kernel.sh "$T/k0.img" --stufe 0 >"$T/k.txt" 2>&1; then
@@ -41,6 +41,19 @@ sleep 60
 echo ==B-END==
 EOS
 }
+cat > "$T/g4.sh" <<'EOS'
+orientbus serve 0 &
+sleep -m 300
+axd serve 0 &
+sleep 1
+taskbar &
+sleep 8
+settings page=32 &
+sleep 40
+echo ==B-END==
+EOS
+printf 'edge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=center\nlabels=never\npins=explorer,calc\n' > "$T/taskbar.conf"
+printf 'heads=extend\nhead1=0,480,125\n' > "$T/displays.conf"
 mkscript g2.sh "hotplug=1"
 mkscript g3.sh ""
 cat > "$T/g.sh" <<'EOS'
@@ -59,13 +72,13 @@ A=(build "$T/disk.img" 32768 --v3 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf"
    /etc/ /etc/actions.d/ /etc/orientbus/
    "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions"
    "/etc/orientbus/policy=etc/orientbus/policy"
-   "/etc/uitrace=$T/uitrace" "/etc/theme.conf=$T/theme.conf" /etc/schemas/
+   "/etc/uitrace=$T/uitrace" "/etc/taskbar.conf=$T/taskbar.conf" "/etc/displays.conf=$T/displays.conf" "/etc/theme.conf=$T/theme.conf" /etc/schemas/
    /usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/en/ "/usr/share/locale/en/messages=locale/en/messages")
 [ -f assets/osum-icons.ttf ] && A+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && A+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 for s in assets/schemes/*.scheme; do A+=("/etc/schemas/$(basename "$s" .scheme)=$s"); done
 for p in $PROGS; do A+=("/bin/$p=$T/bin/$p.elf"); done
-bash tools/mkfsfi/mkfs.sh "${A[@]}" "/t/g.sh=$T/g.sh" "/t/g2.sh=$T/g2.sh" "/t/g3.sh=$T/g3.sh" >"$T/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$T/mkfs.txt"; echo "setheads: $pass ok, $fail fail"; exit 1; }
+bash tools/mkfsfi/mkfs.sh "${A[@]}" "/t/g.sh=$T/g.sh" "/t/g2.sh=$T/g2.sh" "/t/g3.sh=$T/g3.sh" "/t/g4.sh=$T/g4.sh" >"$T/mkfs.txt" 2>&1 || { bad "mkfs"; tail -3 "$T/mkfs.txt"; echo "setheads: $pass ok, $fail fail"; exit 1; }
 
 run_case() { # run_case <tag> <max_outputs> <words> [<xres> <yres>]
     local tag=$1 mo=$2 words=$3 xr=${4:-640} yr=${5:-480}
@@ -93,6 +106,7 @@ run_case() { # run_case <tag> <max_outputs> <words> [<xres> <yres>]
     printf 'quit\n' | socat - "UNIX-CONNECT:$sock" >/dev/null 2>&1
     wait "$qp" 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$T/$tag.txt" > "$T/$tag.klar"
+    python3 -I tools/osum/mkfs.py cat "$T/$tag.img" /etc/displays.conf > "$T/$tag.conf" 2>/dev/null || true
     if [ -f "$T/$tag-h0.ppm" ]; then
         python3 -I - "$T/$tag-h0.ppm" "$T/$tag.png" <<'PY' 2>/dev/null
 import sys

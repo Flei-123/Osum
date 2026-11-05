@@ -6,12 +6,68 @@ import libc.text
 import libc.io
 import wlibc
 
-export { saved_mirror, save, apply_saved, current_mirror, connected }
+export { saved_mirror, save, apply_saved, apply_layout, current_mirror, connected }
+
+const MAX_HEADS: u64 = 8
+const FILE_MAX: u64 = 255
 
 static mut p_conf: [u8; 19] = "/etc/displays.conf\0"
 static mut line_mirror: [u8; 14] = "heads=mirror\n\0"
 static mut line_extend: [u8; 14] = "heads=extend\n\0"
 static mut buf: [u8; 64] = [0 as u8; 64]
+static mut file_buf: [u8; 256] = [0 as u8; 256]
+static mut t_head: [u8; 5] = "head\0"
+static mut num_buf: [u8; 24] = [0 as u8; 24]
+
+fn put_text(at: u64, src: u64) -> u64 {
+    let dst: u64 = (&file_buf[0 as usize]) as u64
+    let n: u64 = text.length(src)
+    if at + n >= FILE_MAX {
+        return at
+    }
+    let _c: u64 = text.copy_text(dst + at, src, n + 1)
+    return at + n
+}
+
+fn put_num(at: u64, v: u64) -> u64 {
+    let _d: u64 = text.digits(v, (&num_buf[0 as usize]) as u64, false)
+    return put_text(at, (&num_buf[0 as usize]) as u64)
+}
+
+fn put_char(at: u64, c: u64) -> u64 {
+    if at + 1 >= FILE_MAX {
+        return at
+    }
+    let dst: u64 = (&file_buf[0 as usize]) as u64
+    __mmio_write8((dst + at) as *mut u8, c as u8)
+    __mmio_write8((dst + at + 1) as *mut u8, 0 as u8)
+    return at + 1
+}
+
+fn layout_text(mirror: bool) -> u64 {
+    var at: u64 = 0
+    if mirror {
+        at = put_text(at, (&line_mirror[0 as usize]) as u64)
+    } else {
+        at = put_text(at, (&line_extend[0 as usize]) as u64)
+    }
+    var hd: u64 = 0
+    while hd < MAX_HEADS && hd < wlibc.head_count() {
+        if wlibc.head_present(hd) {
+            at = put_text(at, (&t_head[0 as usize]) as u64)
+            at = put_num(at, hd)
+            at = put_char(at, 61)
+            at = put_num(at, wlibc.head_field(hd, 0))
+            at = put_char(at, 44)
+            at = put_num(at, wlibc.head_field(hd, 1))
+            at = put_char(at, 44)
+            at = put_num(at, wlibc.head_scale(hd))
+            at = put_char(at, 10)
+        }
+        hd = hd + 1
+    }
+    return at
+}
 
 fn saved_mirror() -> bool {
     let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
@@ -32,12 +88,8 @@ fn save(mirror: bool) -> bool {
     if ulib.bad(fd) {
         return false
     }
-    var line: u64 = (&line_extend[0 as usize]) as u64
-    if mirror {
-        line = (&line_mirror[0 as usize]) as u64
-    }
-    let len: u64 = text.length(line)
-    let g: u64 = io.write_all(fd, line, len)
+    let len: u64 = layout_text(mirror)
+    let g: u64 = io.write_all(fd, (&file_buf[0 as usize]) as u64, len)
     io.close(fd)
     return !ulib.bad(g) && g >= len
 }
@@ -55,8 +107,67 @@ fn apply_saved() -> bool {
         return false
     }
     let want: bool = saved_mirror()
-    if want == wlibc.display_mode_mirrored() {
-        return true
+    var ok: bool = true
+    if want != wlibc.display_mode_mirrored() {
+        ok = wlibc.display_mode_set(want)
     }
-    return wlibc.display_mode_set(want)
+    let _l: bool = apply_layout()
+    return ok
+}
+
+fn line_start(p: u64, n: u64, from: u64) -> u64 {
+    var i: u64 = from
+    while i < n && __mmio_read8((p + i) as *mut u8) != 10 as u8 {
+        i = i + 1
+    }
+    return i + 1
+}
+
+fn field_end(p: u64, from: u64) -> u64 {
+    var i: u64 = from
+    while text.is_digit(__mmio_read8((p + i) as *mut u8) as u64) {
+        i = i + 1
+    }
+    return i
+}
+
+fn apply_layout() -> bool {
+    let fd: u64 = ulib.sys(ulib.SYS_OPEN, (&p_conf[0 as usize]) as u64, 0, 0)
+    if ulib.bad(fd) {
+        return false
+    }
+    let p: u64 = (&file_buf[0 as usize]) as u64
+    let n: u64 = ulib.sys(ulib.SYS_READ, fd, p, FILE_MAX)
+    let _c: u64 = ulib.sys(ulib.SYS_CLOSE, fd, 0, 0)
+    if ulib.bad(n) || n == 0 {
+        return false
+    }
+    __mmio_write8((p + n) as *mut u8, 0 as u8)
+    var applied: bool = false
+    var at: u64 = line_start(p, n, 0)
+    while at + 8 < n {
+        if text.equal_n(p + at, (&t_head[0 as usize]) as u64, 4) && text.is_digit(__mmio_read8((p + at + 4) as *mut u8) as u64) {
+            let hd: u64 = text.number(p + at + 4)
+            let e0: u64 = field_end(p, at + 4)
+            if __mmio_read8((p + e0) as *mut u8) == 61 as u8 && hd < wlibc.head_count() && wlibc.head_present(hd) {
+                let x: u64 = text.number(p + e0 + 1)
+                let e1: u64 = field_end(p, e0 + 1)
+                let y: u64 = text.number(p + e1 + 1)
+                let e2: u64 = field_end(p, e1 + 1)
+                let pct: u64 = text.number(p + e2 + 1)
+                if hd > 0 {
+                    if wlibc.head_place(hd, x, y) {
+                        applied = true
+                    }
+                }
+                if pct != wlibc.head_scale(hd) {
+                    if wlibc.head_scale_set(hd, pct) {
+                        applied = true
+                    }
+                }
+            }
+        }
+        at = line_start(p, n, at)
+    }
+    return applied
 }
