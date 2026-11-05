@@ -26,14 +26,16 @@ if [ -z "$KIMG" ]; then
     KIMG="$T/k.img"
 fi
 printf 'echo ==START==\ndhcp\nping 10.0.2.2\necho ==PINGDONE==\nsleep 1\necho ==ALIVE==\n' > "$T/s.sh"
+printf 'echo ==START==\ndhcp\nping 10.0.2.2\necho ==PINGDONE==\nsleep 75\necho ==ALIVE==\n' > "$T/slong.sh"
 bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
     /bin/sh="$T/bin/sh.elf" /bin/sleep="$T/bin/sleep.elf" /bin/echo="$T/bin/echo.elf" \
-    /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /t/s.sh="$T/s.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
+    /bin/dhcp="$T/bin/dhcp.elf" /bin/ping="$T/bin/ping.elf" /t/s.sh="$T/s.sh" /t/slong.sh="$T/slong.sh" > "$T/mkfs.txt" 2>&1 || { tail "$T/mkfs.txt"; exit 1; }
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 MAC=52:54:00:12:34:99
 
 run_case() { # name topology(root|hub|hubroot) [expected detaches]
-    local name=$1 topo=$2 cycles=${3:-1} bus="" addbus="" hub=""
+    local name=$1 topo=$2 cycles=${3:-1} bus="" addbus="" hub="" script=s.sh
+    [ "$topo" = hubroot ] && script=slong.sh
     if [ "$topo" = hub ] || [ "$topo" = hubroot ]; then
         hub="-device usb-hub,id=hub1,bus=x0.0,port=1"
         bus=",bus=x0.0,port=1.2"
@@ -55,7 +57,7 @@ run_case() { # name topology(root|hub|hubroot) [expected detaches]
         printf 'aufzeile k17: hold\nziehe n1\naufzeile usbnet: detached\nmonitor device_add usb-net,id=devn2%s,netdev=n0,mac=%s\naufzeile k17: free\n' "$bus" "$MAC" > "$T/$name.plan"
     fi
     timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$KIMG" -m 256 \
-        -append "osum nokbd nosched noproc nofs noring3 usb usbhold usbpoll nic rndisonly nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+        -append "osum nokbd nosched noproc nofs noring3 usb usbhold usbpoll nic rndisonly nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$name.txt" -display none -no-reboot \
         -monitor "unix:$T/$name.mon,server,nowait" -pidfile "$T/$name.pid" \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \
