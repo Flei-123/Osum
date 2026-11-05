@@ -973,6 +973,19 @@ def main():
                 print("klicksuche %s -> KEIN RECHTECK GEMELDET" % name)
                 error += 1
                 continue
+            same = 0
+            for _settle in range(40):
+                time.sleep(0.4)
+                r2 = f.rechteck(name)
+                if r2 is None:
+                    continue
+                if tuple(r2) == tuple(r):
+                    same += 1
+                    if same >= 3:
+                        break
+                else:
+                    same = 0
+                    r = r2
             x, y = r[0] + r[2] // 2, r[1] + r[3] // 2
             print("klicksuche %s -> %d,%d  (rect %d,%d %dx%d, %d scrolls)" % (name, x, y, r[0], r[1], r[2], r[3], tries))
             f.klick(x, y, 1)
