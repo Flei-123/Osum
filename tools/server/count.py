@@ -15,6 +15,7 @@ OWN = set(g + ".fi" for g in GRAFIK) | {
     "zeiger.fi",
     "vgpu.fi",
     "beam.fi",
+    "vgarrange.fi",
     "shot.fi",
     "pixelguard.fi",
     "vmsvga.fi",
