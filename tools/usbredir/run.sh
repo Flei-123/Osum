@@ -12,7 +12,7 @@
 #   * hot plug AFTER boot (usbhold window), unplug and replug in the same window
 # NEGATIVE CONTROLS: no gadget -> no driver line, no lease; unpatched wiring would show up as missing driver lines.
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12 ch336-hub-cycles24}"
 source "$HERE/tools/usbredir/common.sh"
 for c in $CASES; do
     case "$c" in
@@ -220,6 +220,12 @@ for c in $CASES; do
         chkn chc "dongle bound again after every one of twelve replugs" 'usb: port=.*driver=ch336' 13
         chkn chc "every one of twelve unplugs noticed" 'usb: unplug port=' 12
         panics chc
+        ;;
+    ch336-hub-cycles24)
+        BEHIND_HUB=1 QWAIT=420 XWORDS="usbholdticks=9000" GARGS="--phy-boot down --cycles 24 --gap-ms 1500 --up-secs 3" BASEW="nokbd nosched vfs" run chd ch336 hot s_hubhot.sh
+        chkn chd "dongle bound again after every one of twenty-four replugs" 'usb: port=.*driver=ch336' 25
+        chkn chd "every one of twenty-four unplugs noticed" 'usb: unplug port=' 24
+        panics chd
         ;;
     none)
         run none ncm none s.sh

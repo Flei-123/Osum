@@ -18,7 +18,7 @@ export {
     kill, present, init, ready, base_of, bdf, ctx_size, slots, ports,
     irq, drain, irqs, events, cmds, port_events, errors, usbsts, iman,
     portsc, last_rc_get, last_ctl_get, port_pls, port_major, settle_usb3, usbsts_raw, port_link_pending, port_connected, port_enabled, port_power, port_speed,
-    port_reset, port_clear_changes, port_has_change,
+    port_reset, port_clear_changes, port_has_change, psc_note, psc_take,
     slot_enable, slot_disable, address_device, configure_endpoint,
     evaluate_context, reset_endpoint, stop_endpoint, set_dequeue,
     ep_state, ep_halted, ep_deq,
@@ -37,23 +37,26 @@ export {
 }
 
 const SCAL_OFF: u64 = 0x50000 // 1 KiB Skalare
-const EPTAB_OFF: u64 = 0x50400 // 16 Endpunkte * 64 Oktette
 const DCBAA_OFF: u64 = 0x50800 // 128 Steckplaetze * 8, 64-ausgerichtet
 const ERST_OFF: u64 = 0x50C00
 const CMD_OFF: u64 = 0x51000 // Kommandoring, 128 TRBs
 const EVT_OFF: u64 = 0x52000 // Ereignisring, 256 TRBs
 const INCTX_OFF: u64 = 0x53000 // ein Eingabezusammenhang
-const DEVCTX_OFF: u64 = 0x54000
-const RING_OFF: u64 = 0x55000 // 16 Uebertragungsringe zu 256 Oktetten
 const SPARE_OFF: u64 = 0x57000 // Kratzblockfeld und Reserve
 
 const CMD_TRBS: u64 = 128
 const EVT_TRBS: u64 = 256
 const RING_TRBS: u64 = 16
 const RING_BYTES: u64 = 256
-const MAX_EP: u64 = 16
-const MAX_SLOT: u64 = 4 // so viele Geraete traegt DEVCTX_OFF
+const MAX_EP: u64 = 64
+const MAX_SLOT: u64 = 16
 const EPTAB_BYTES: u64 = 64
+const X_EPTAB: u64 = 0x0000
+const X_RING: u64 = 0x1000
+const X_DEVCTX: u64 = 0x5000
+const X_DEVCTX_BYTES: u64 = 0x8000
+const X_PSC: u64 = 0xD000
+const X_FRAMES: u64 = 14
 
 // ------------------------------------------------------------- Skalare
 
@@ -108,6 +111,7 @@ const S_IRDONE: u64 = 0x148 // 0 = not an Intel switchable part, 1 = switched, 2
 const S_IR2PRE: u64 = 0x150 // XUSB2PR as the firmware left it
 const S_IR2POST: u64 = 0x158 // ... and after the switch
 const S_IR3POST: u64 = 0x160 // USB3_PSSEN after the switch
+const S_XEXT: u64 = 0x168
 
 // -------------------------------------- die Felder eines Endpunktplatzes
 
@@ -217,6 +221,7 @@ const CC_SHORT: u64 = 13
 const VEC_XHCI: u64 = 43
 
 const SPIN_LIMIT: u64 = 2000000
+const WAIT_EP_MS: u64 = 2000
 const RESET_SPIN: u64 = 400000
 
 const XECP_LEGSUP: u64 = 1
@@ -323,7 +328,7 @@ fn trb(at: u64, param: u64, status: u64, control: u64) {
 // ----------------------------------------------------- die Endpunkttafel
 
 fn ep_at(state: u64, i: u64) -> u64 {
-    return state + EPTAB_OFF + i * EPTAB_BYTES
+    return g(state, S_XEXT) + X_EPTAB + i * EPTAB_BYTES
 }
 
 fn eg(state: u64, i: u64, f: u64) -> u64 {
@@ -363,7 +368,7 @@ fn ep_open(state: u64, slot: u64, dci: u64) -> u64 {
     }
     es(state, n, E_SLOT, slot)
     es(state, n, E_DCI, dci)
-    es(state, n, E_RING, state + RING_OFF + n * RING_BYTES)
+    es(state, n, E_RING, g(state, S_XEXT) + X_RING + n * RING_BYTES)
     es(state, n, E_SEQ, 0)
     es(state, n, E_CODE, 0)
     es(state, n, E_RESID, 0)
@@ -638,6 +643,7 @@ fn handle(state: u64, here: u64, c3: u64) {
     }
     if kind == T_PORT_EVENT {
         s(state, S_PORTEV, g(state, S_PORTEV) + 1)
+        psc_note(state, (regio.read32_at(here, 0) >> 24) & 0xFF)
         ev(state, usbdiag.EK_PSC_IRQ, ((regio.read32_at(here, 0) >> 24) & 0xFF) << 20, 0)
         return
     }
@@ -977,7 +983,7 @@ fn dctx_bytes(state: u64) -> u64 {
 }
 
 fn max_slot(state: u64) -> u64 {
-    let n: u64 = 4096 / dctx_bytes(state)
+    let n: u64 = X_DEVCTX_BYTES / dctx_bytes(state)
     if n > MAX_SLOT {
         return MAX_SLOT
     }
@@ -988,7 +994,7 @@ fn max_slot(state: u64) -> u64 {
 }
 
 fn devctx(state: u64, slot: u64) -> u64 {
-    return state + DEVCTX_OFF + (slot - 1) * dctx_bytes(state)
+    return g(state, S_XEXT) + X_DEVCTX + (slot - 1) * dctx_bytes(state)
 }
 
 fn inctx(state: u64) -> u64 {
@@ -1381,13 +1387,24 @@ fn wait_ep(state: u64, i: u64, want: u64) -> bool {
     if ctl_dead != 0 {
         return false
     }
+    let hz: u64 = apic.tsc_hz(state)
+    let budget: u64 = hz / 1000 * WAIT_EP_MS
+    let t0: u64 = apic.tsc()
     var spin: u64 = 0
-    while spin < SPIN_LIMIT {
+    var waiting: bool = true
+    while waiting {
         drain(state)
         if eg(state, i, E_SEQ) >= want {
             return true
         }
         spin = spin + 1
+        if hz != 0 {
+            if apic.tsc() - t0 >= budget {
+                waiting = false
+            }
+        } else if spin >= SPIN_LIMIT {
+            waiting = false
+        }
     }
     s(state, S_ERRORS, g(state, S_ERRORS) + 1)
     return false
@@ -1589,6 +1606,41 @@ fn lq() -> u64 {
     return (&q_xhci[0]) as u64
 }
 
+fn psc_note(state: u64, port: u64) {
+    let ext: u64 = g(state, S_XEXT)
+    if ext == 0 || port == 0 || port >= 64 {
+        return
+    }
+    let _w: u64 = atomic.fetch_add(ext + X_PSC + port * 8, 1)
+}
+
+fn psc_take(state: u64, port: u64) -> bool {
+    let ext: u64 = g(state, S_XEXT)
+    if ext == 0 || port == 0 || port >= 64 {
+        return false
+    }
+    let at: u64 = ext + X_PSC + port * 8
+    let n: u64 = atomic.load(at)
+    if n == 0 {
+        return false
+    }
+    let _w: u64 = atomic.fetch_sub(at, n)
+    return true
+}
+
+fn ext_ensure(state: u64) -> bool {
+    if g(state, S_XEXT) != 0 {
+        return true
+    }
+    let base: u64 = mmframe.frame_run(state, X_FRAMES)
+    if base == 0 {
+        return false
+    }
+    regio.zero64(base, X_FRAMES * 4096)
+    s(state, S_XEXT, base)
+    return true
+}
+
 fn initfail(state: u64, code: u64) -> bool {
     usbdiag.set_info(g(state, S_UNIT), usbdiag.I_INITFAIL, code)
     return false
@@ -1667,12 +1719,16 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     }
     regio.write32_at(op(state), O_CONFIG, want)
 
+    if !ext_ensure(state) {
+        return initfail(state, 9)
+    }
     regio.zero64(state + DCBAA_OFF, 1024)
     regio.zero64(state + CMD_OFF, CMD_TRBS * 16)
     regio.zero64(state + EVT_OFF, EVT_TRBS * 16)
     regio.zero64(state + INCTX_OFF, 4096)
-    regio.zero64(state + DEVCTX_OFF, 4096)
-    regio.zero64(state + RING_OFF, MAX_EP * RING_BYTES)
+    regio.zero64(g(state, S_XEXT) + X_DEVCTX, X_DEVCTX_BYTES)
+    regio.zero64(g(state, S_XEXT) + X_RING, MAX_EP * RING_BYTES)
+    regio.zero64(g(state, S_XEXT) + X_PSC, 512)
     iso_clear_all(state)
     s(state, S_NEP, 0)
     s(state, S_CMD_ENQ, 0)

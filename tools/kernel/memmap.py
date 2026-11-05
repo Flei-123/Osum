@@ -159,14 +159,11 @@ BEREICHE = [
 
 K17_STUECKE = [
     ("xhci.fi", "SCAL_OFF",   0x400),
-    ("xhci.fi", "EPTAB_OFF",  0x400),
     ("xhci.fi", "DCBAA_OFF",  0x400),
     ("xhci.fi", "ERST_OFF",   0x40),
     ("xhci.fi", "CMD_OFF",    0x800),
     ("xhci.fi", "EVT_OFF",    0x1000),
     ("xhci.fi", "INCTX_OFF",  0x1000),
-    ("xhci.fi", "DEVCTX_OFF", 0x1000),
-    ("xhci.fi", "RING_OFF",   0x1000),
     ("xhci.fi", "SPARE_OFF",  0x1000),
     ("usb.fi",  "USCAL_OFF",  0x180),
     ("usb.fi",  "UDEV_OFF",   0x400),

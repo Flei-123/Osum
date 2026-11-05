@@ -7,6 +7,7 @@
 # CASES (QEMU qemu-xhci + usb-net, monitor device_del / device_add inside the usbhold window):
 #   root: NIC on a root port.
 #   hub:  NIC behind a usb-hub (hub child removal must be noticed by the hub port rescan).
+#   hubroot: the hub itself is removed and re-added three times (root port change events, hub + NIC rebind each time).
 # EACH CASE expects: detached once, rebound (second driver=rndis line), fresh dhcp ack, ping replies, no panic.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -31,13 +32,28 @@ bash tools/mkfsfi/mkfs.sh build "$T/d.img" 8000 /bin/ /t/ /etc/ \
 ACC=tcg; [ -w /dev/kvm ] && ACC=kvm
 MAC=52:54:00:12:34:99
 
-run_case() { # name topology(root|hub)
-    local name=$1 topo=$2 bus="" addbus="" hub=""
-    if [ "$topo" = hub ]; then
+run_case() { # name topology(root|hub|hubroot) [expected detaches]
+    local name=$1 topo=$2 cycles=${3:-1} bus="" addbus="" hub=""
+    if [ "$topo" = hub ] || [ "$topo" = hubroot ]; then
         hub="-device usb-hub,id=hub1,bus=x0.0,port=1"
         bus=",bus=x0.0,port=1.2"
     fi
-    printf 'aufzeile k17: hold\nziehe n1\naufzeile usbnet: detached\nmonitor device_add usb-net,id=devn2%s,netdev=n0,mac=%s\naufzeile k17: free\n' "$bus" "$MAC" > "$T/$name.plan"
+    if [ "$topo" = hubroot ]; then
+        {
+            printf 'aufzeile k17: hold\nmonitor device_del hub1\naufzeile usbnet: detached\n'
+            printf 'monitor device_add usb-hub,id=hubr1,bus=x0.0,port=1\n'
+            printf 'monitor device_add usb-net,id=devr1%s,netdev=n0,mac=%s\naufzeile k17: free\n' "$bus" "$MAC"
+            local c
+            for c in $(seq 2 "$cycles"); do
+                printf 'warte 14\nmonitor device_del hubr%s\nwarte 5\n' "$((c-1))"
+                printf 'monitor device_add usb-hub,id=hubr%s,bus=x0.0,port=1\n' "$c"
+                printf 'monitor device_add usb-net,id=devr%s%s,netdev=n0,mac=%s\n' "$c" "$bus" "$MAC"
+            done
+            printf 'warte 14\n'
+        } > "$T/$name.plan"
+    else
+        printf 'aufzeile k17: hold\nziehe n1\naufzeile usbnet: detached\nmonitor device_add usb-net,id=devn2%s,netdev=n0,mac=%s\naufzeile k17: free\n' "$bus" "$MAC" > "$T/$name.plan"
+    fi
     timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$KIMG" -m 256 \
         -append "osum nokbd nosched noproc nofs noring3 usb usbhold usbpoll nic rndisonly nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
         -serial "file:$T/$name.txt" -display none -no-reboot \
@@ -52,8 +68,8 @@ run_case() { # name topology(root|hub)
     [ -f "$T/$name.pid" ] && kill "$(cat "$T/$name.pid")" 2>/dev/null; wait 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$T/$name.txt" > "$T/$name.klar"
     local H="$T/$name.klar"
-    [ "$(grep -ac 'usbnet: detached' "$H")" = 1 ] && ok "$name: detached exactly once" || bad "$name: detached count $(grep -ac 'usbnet: detached' "$H")"
-    [ "$(grep -ac 'usb: port=.*driver=rndis' "$H")" -ge 2 ] && ok "$name: rebound to rndis after replug" || bad "$name: no second rndis bind"
+    [ "$(grep -ac 'usbnet: detached' "$H")" = "$cycles" ] && ok "$name: detached $cycles time(s)" || bad "$name: detached count $(grep -ac 'usbnet: detached' "$H") want $cycles"
+    [ "$(grep -ac 'usb: port=.*driver=rndis' "$H")" -ge $((cycles+1)) ] && ok "$name: rebound to rndis after every replug" || bad "$name: rndis binds $(grep -ac 'usb: port=.*driver=rndis' "$H") want $((cycles+1))"
     grep -aq 'second adapter ignored' "$H" && bad "$name: replugged NIC rejected as second adapter" || ok "$name: replugged NIC not rejected"
     grep -aq 'dhcp: ack ip=10.0.2.15' "$H" && ok "$name: fresh dhcp ack after replug" || bad "$name: no dhcp ack"
     grep -aq '[1-9][0-9]* received' "$H" && ok "$name: ping replies over the replugged NIC" || bad "$name: no ping replies"
@@ -64,6 +80,7 @@ run_case() { # name topology(root|hub)
 
 run_case root root
 run_case hub hub
+run_case hubroot hubroot 3
 
 echo "USBREPLUG: $pass ok, $fail fail"
 [ "$fail" -gt 0 ] && exit 1
