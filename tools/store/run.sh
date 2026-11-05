@@ -361,6 +361,7 @@ EOS
     echo "echo ==FERTIG=="
 } > "$TMPD/sW.sh"
 EXTRA=("/etc/uitrace=$TMPD/locale.conf" "/etc/theme.conf=$TMPD/theme.conf" "/etc/locale.conf=$TMPD/locale.conf")
+EXTRA+=(/usr/ /usr/share/ /usr/share/locale/ /usr/share/locale/de/ /usr/share/locale/en/ "/usr/share/locale/de/messages=locale/de/messages" "/usr/share/locale/en/messages=locale/en/messages")
 [ -f assets/osum-icons.ttf ] && EXTRA+=("/lib/icons.ttf=assets/osum-icons.ttf")
 [ -f assets/osum-sans-bold.ttf ] && EXTRA+=("/lib/bold.ttf=assets/osum-sans-bold.ttf")
 PROGS_SAVE=$PROGS; PROGS="$PROGS store"
@@ -394,6 +395,9 @@ dlgyes() { # <dialogs shown before the question>
 typetext() { local c; for c in $(echo "$1" | sed 's/./& /g'); do key "$c"; done; }
 mark() { MARK=$(wclean | wc -l); }
 # a text the window painted AFTER the mark (the trace: `wlib: text ... t=<text>`)
+sawlog() { [ "$(wclean | tail -n +"$MARK" | grep -acF -- "store: status $1")" -gt 0 ]; }
+waitlog() { local i=0; while [ $i -lt $2 ]; do sawlog "$1" && return 0; sleep 1; i=$((i + 1)); done; return 1; }
+sawjob() { [ "$(wclean | tail -n +"$MARK" | grep -acE 't=[0-9]+ %$')" -gt 0 ]; }
 sawt() { [ "$(wclean | tail -n +"$MARK" | grep -acF -- "t=$1")" -gt 0 ]; }
 waitt() { local i=0; while [ $i -lt $2 ]; do sawt "$1" && return 0; sleep 1; i=$((i + 1)); done; return 1; }
 # click the label of the LAST text of that name the window painted (the trace gives its place: x, base line, width)
@@ -423,13 +427,15 @@ lastn() { wclean | grep -ao "store: tiles=[0-9]*" | tail -1 | tr -cd '0-9'; }
 lasth() { wclean | grep -ao " hits=[0-9]*" | tail -1 | tr -cd '0-9'; }
 if waitfor "==S-WAIT==" 150; then
     ok "the script reached the window part"
-    MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Aktualisieren" && break; sleep 1; i=$((i + 1)); done
-    sawt "Aktualisieren" && ok "the window opened" || bad "no window"
+    MARK=1; i=0; while [ $i -lt 60 ]; do sawt "Alle" && break; sleep 1; i=$((i + 1)); done
+    sawt "Alle" && ok "the window opened" || bad "no window"
     MARK=1
-    waitt "Fertig: Katalog neu" 120 && ok "the window fetched the signed catalog by itself (first start): 'Fertig: Katalog neu'" || bad "no 'Fertig: Katalog neu'"
+    i=0; while [ $i -lt 120 ] && [ "$(lastn)" != 2 ]; do sleep 1; i=$((i + 1)); done
+    [ "$(lastn)" = 2 ] && ok "the window fetched the signed catalog by itself (first start): two tiles" || bad "no catalog tiles after the first start"
+    sawt "store." && bad "raw locale keys painted" || ok "no raw locale keys"
     sleep 3; shot s1-grid
     MARK=1
-    for t in "Updates" "Installiert" "Aktualisieren" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
+    for t in "Updates" "Installiert" "Installieren" "Neue Fassung"; do sawt "$t" && ok "the window shows '$t'" || bad "no '$t'"; done
     [ "$(lastn)" = 2 ] && ok "two tiles (gruss, hallo) -- what the signed catalog delivers, nothing made up" || bad "tiles: '$(lastn)'"
     mark
     echo "  -- keys: Ctrl+F, type, the grid filters"
@@ -439,19 +445,20 @@ if waitfor "==S-WAIT==" 150; then
     [ "$(lastn)" = 2 ] && ok "Esc clears the search: two tiles again" || bad "Esc: tiles '$(lastn)'"
     echo "  -- detail page of the first tile, by keys"
     mark; key ctrl-f down ret; sleep 2; shot s3-detail
-    sawt "Zurück" && ok "Enter on a tile opens the detail page (back)" || bad "no detail page"
+    sawt "Version: " && ok "Enter on a tile opens the detail page (Version line)" || bad "no detail page"
     sawt "Prüfung: Katalog und Paket" && ok "the detail page says what is checked (signature + hash)" || bad "no check line"
     echo "  -- 'Abbrechen' installs nothing"
     mark; tapt "Installieren" || bad "no 'Installieren' button"
     sleep 1.5; shot s4-ask
     differs s3-detail s4-ask && ok "Installieren asks first: a question window opens (picture differs)" || bad "no question window"
     key esc; sleep 3
-    sawt "Arbeitet ... bitte warten" && bad "Abbrechen started a job" || ok "the question answered with Abbrechen: no job"
+    sawjob && bad "Abbrechen started a job" || ok "the question answered with Abbrechen: no job"
     echo "  -- install gruss"
     mark; D0=$(dlgn); tapt "Installieren"; sleep 1; key ret; dlgyes "$D0"
-    waitt "Arbeitet ... bitte warten" 30 && ok "Installieren, then yes: the window says it is working" || bad "no 'Arbeitet' after yes"
+    i=0; while [ $i -lt 30 ] && ! sawjob; do sleep 1; i=$((i + 1)); done
+    sawjob && ok "Installieren, then yes: the card shows the job progress in percent" || bad "no job progress after yes"
     shot s5-busy
-    waitt "Fertig: installiert" 150 && ok "... and 'Fertig: installiert'" || bad "no 'Fertig: installiert'"
+    waitlog "fertig installiert" 150 && ok "... and the job ends: installed" || bad "no installed end of the job"
     PCTS=$(wclean | tail -n +"$MARK" | grep -ao "store: pct=[0-9]*" | tr -cd '0-9\n' | tr '\n' ' ')
     note "pct seen while working: $PCTS"
     echo "$PCTS" | awk '{ n=NF; ok=(n>=2); for (i=2;i<=n;i++) if ($i<$(i-1)) ok=0; exit ok?0:1 }' \
@@ -465,7 +472,7 @@ if waitfor "==S-WAIT==" 150; then
     mark; D0=$(dlgn); tapt "Alle aktualisieren"; sleep 1.5; shot s7b-askall
     differs s7-updates s7b-askall && ok "one question for all opens (picture differs)" || bad "no question for all"
     key ret; dlgyes "$D0"
-    waitt "Fertig: installiert" 150 && ok "yes: hallo is updated ('Fertig: installiert')" || bad "hallo was not updated"
+    waitlog "fertig installiert" 150 && ok "yes: hallo is updated" || bad "hallo was not updated"
     sleep 2; shot s8-uptodate
     differs s7-updates s8-uptodate && ok "afterwards the updates page looks different (the list is empty)" || bad "updates page unchanged"
     echo "  -- remove gruss from its detail page"
@@ -475,7 +482,7 @@ if waitfor "==S-WAIT==" 150; then
     sleep 1.5; shot s8b-askremove
     differs s6-installed s8b-askremove && ok "Entfernen asks first: a question window opens (picture differs)" || bad "no remove question"
     key ret; dlgyes "$D0"
-    waitt "Fertig: entfernt" 150 && ok "yes: 'Fertig: entfernt'" || bad "gruss was not removed"
+    waitlog "fertig entfernt" 150 && ok "yes: gruss removed" || bad "gruss was not removed"
     shot s9-end
     N=$(wclean | grep -ac "==S-SNAP==")
     i=0; while [ $i -lt 100 ]; do [ "$(wclean | grep -ac '==S-SNAP==')" -ge $((N + 2)) ] && break; sleep 2; i=$((i + 1)); done
