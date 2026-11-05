@@ -4,6 +4,7 @@ profile app
 import ulib
 import msg
 import actcli
+import fuiscene
 import settings.setbase
 import settings.setcore
 import settings.setpages
@@ -28,6 +29,12 @@ static mut k_fe: [u8; 15] = "modus=fest\nip=\0"
 static mut k_mk: [u8; 8] = "\nmaske=\0"
 static mut k_gw: [u8; 10] = "\ngateway=\0"
 static mut k_nl: [u8; 2] = "\n\0"
+static mut k_trace_a: [u8; 25] = "settings: net fields ip=\0"
+static mut k_trace_b: [u8; 7] = " mask=\0"
+static mut k_trace_c: [u8; 5] = " gw=\0"
+static mut k_key_ip: [u8; 4] = "ip=\0"
+static mut k_key_mask: [u8; 7] = "maske=\0"
+static mut k_key_gw: [u8; 9] = "gateway=\0"
 
 const MODE_AUTOMATIC: u64 = 0
 const MODE_FIXED: u64 = 1
@@ -42,8 +49,82 @@ fn mode_read() -> u64 {
     return MODE_FIXED
 }
 
+fn key_matches(buf: u64, at: u64, key: u64) -> bool {
+    var k: u64 = 0
+    while __mmio_read8((key + k) as *mut u8) as u64 != 0 {
+        if __mmio_read8((buf + at + k) as *mut u8) != __mmio_read8((key + k) as *mut u8) {
+            return false
+        }
+        k = k + 1
+    }
+    return true
+}
+
+fn key_length(key: u64) -> u64 {
+    var k: u64 = 0
+    while __mmio_read8((key + k) as *mut u8) as u64 != 0 {
+        k = k + 1
+    }
+    return k
+}
+
+fn conf_fill(buf: u64, n: u64, key: u64, dst: u64) {
+    var at: u64 = 0
+    let klen: u64 = key_length(key)
+    while at < n {
+        if key_matches(buf, at, key) {
+            var j: u64 = 0
+            while j < 20 && at + klen + j < n {
+                let c: u64 = __mmio_read8((buf + at + klen + j) as *mut u8) as u64
+                if c == 10 || c == 13 || c == 0 {
+                    break
+                }
+                __mmio_write8((dst + j) as *mut u8, c as u8)
+                j = j + 1
+            }
+            __mmio_write8((dst + j) as *mut u8, 0 as u8)
+            if setcore.ip_read(dst) == 0 {
+                __mmio_write8(dst as *mut u8, 0 as u8)
+            }
+            return
+        }
+        while at < n && __mmio_read8((buf + at) as *mut u8) as u64 != 10 {
+            at = at + 1
+        }
+        at = at + 1
+    }
+}
+
+fn fields_from_conf() {
+    var buf: [u8; 256] = [0 as u8; 256]
+    let b: u64 = (&buf[0 as usize]) as u64
+    let n: u64 = setcore.file_read((&t_net[0 as usize]) as u64, b, CONF_MAX)
+    if n == 0 {
+        return
+    }
+    conf_fill(b, n, (&k_key_ip[0 as usize]) as u64, (&setbase.e_ip[0 as usize]) as u64)
+    conf_fill(b, n, (&k_key_mask[0 as usize]) as u64, (&setbase.e_maske[0 as usize]) as u64)
+    conf_fill(b, n, (&k_key_gw[0 as usize]) as u64, (&setbase.e_gw[0 as usize]) as u64)
+    var line: [u8; 112] = [0 as u8; 112]
+    var a: u64 = setcore.text_an((&line[0 as usize]) as u64, 0, (&k_trace_a[0 as usize]) as u64)
+    a = setcore.text_an((&line[0 as usize]) as u64, a, (&setbase.e_ip[0 as usize]) as u64)
+    a = setcore.text_an((&line[0 as usize]) as u64, a, (&k_trace_b[0 as usize]) as u64)
+    a = setcore.text_an((&line[0 as usize]) as u64, a, (&setbase.e_maske[0 as usize]) as u64)
+    a = setcore.text_an((&line[0 as usize]) as u64, a, (&k_trace_c[0 as usize]) as u64)
+    a = setcore.text_an((&line[0 as usize]) as u64, a, (&setbase.e_gw[0 as usize]) as u64)
+    setcore.say((&line[0 as usize]) as u64)
+    setcore.nl()
+    fuiscene.entry_set(setbase.K_EN1, (&setbase.e_ip[0 as usize]) as u64)
+    fuiscene.entry_set(setbase.K_EN2, (&setbase.e_maske[0 as usize]) as u64)
+    fuiscene.entry_set(setbase.K_EN3, (&setbase.e_gw[0 as usize]) as u64)
+}
+
 fn mode_init() {
-    setbase.kval[(setbase.K_CN) as usize] = mode_read()
+    let m: u64 = mode_read()
+    setbase.kval[(setbase.K_CN) as usize] = m
+    if m == MODE_FIXED {
+        fields_from_conf()
+    }
 }
 
 fn status_from_bus() {
