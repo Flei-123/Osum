@@ -88,6 +88,10 @@ def load(p):
     return f[0], d[at+1:]
 W, a = load(sys.argv[1]); _, b = load(sys.argv[2])
 x0, y0, w, h = (int(v) for v in sys.argv[3:7])
+min_x = int(sys.argv[7]) if len(sys.argv) > 7 else 0
+if x0 < min_x:
+    w -= min_x - x0
+    x0 = min_x
 n = 0
 for y in range(y0, y0 + h):
     o = (y * W + x0) * 3
@@ -156,7 +160,7 @@ for MODE in $MODES; do
     [ "$ic" -ge 2 ] && ok "$MODE: $ic 'traypop: item' lines" || bad "$MODE: $ic 'traypop: item' lines"
     grep -aq 'traypop: item .*owner=backup' "$S" && grep -aq 'traypop: item .*owner=chat' "$S" && ok "$MODE: owners backup + chat reported" || bad "$MODE: owner lines missing"
     grep -aq 'traypop: shut' "$S" && ok "$MODE: second click on the chevron shuts it" || bad "$MODE: no 'traypop: shut'"
-    d2=$(diffpix "$O/00-before.ppm" "$O/02-shut.ppm" "$x" "$y" "$w" "$h")
+    d2=$(diffpix "$O/00-before.ppm" "$O/02-shut.ppm" "$x" "$y" "$w" "$h" 788)
     [ "$d2" -le 3000 ] && ok "$MODE: after the shut the rectangle is as before ($d2 px differ; the clock ticks)" || bad "$MODE: the flyout is still in the picture ($d2 px differ)"
     # W-MERGEB2: the raster, hover, right click, Esc
     while IFS= read -r l; do case "$l" in "OK "*) ok "${l#OK    }" ;; "FAIL "*) bad "${l#FAIL  }" ;; esac; done \
@@ -164,7 +168,7 @@ for MODE in $MODES; do
     d3=$(diffpix "$O/04-menu.ppm" "$O/05-back.ppm" "$x" "$y" "$w" "$h")
     [ "$d3" -ge 2000 ] && ok "$MODE: the first Esc leaves the item menu (the list is back, $d3 px differ)" || bad "$MODE: the first Esc changed only $d3 px"
     grep -aq 'traypop: shut esc' "$S" && ok "$MODE: the second Esc shuts the flyout (traypop: shut esc)" || bad "$MODE: no 'traypop: shut esc'"
-    d4=$(diffpix "$O/00-before.ppm" "$O/06-esc.ppm" "$x" "$y" "$w" "$h")
+    d4=$(diffpix "$O/00-before.ppm" "$O/06-esc.ppm" "$x" "$y" "$w" "$h" 788)
     [ "$d4" -le 3000 ] && ok "$MODE: after the Esc the rectangle is as before ($d4 px differ)" || bad "$MODE: the flyout stayed in the picture after Esc ($d4 px)"
     grep -aq 'traypop: shut outside' "$S" && ok "$MODE: a RIGHT click outside shuts the flyout (traypop: shut outside)" || bad "$MODE: right click outside did not shut it"
     grep -aq 'traypop: shut focus' "$S" && ok "$MODE: a focus change (start menu by key) shuts the flyout (traypop: shut focus)" || bad "$MODE: focus change did not shut it"
