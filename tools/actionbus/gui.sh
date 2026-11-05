@@ -345,11 +345,19 @@ if waitfor "==G-NET==" 60; then
 fi
 # S-009: the page Protokoll -- the audit log of this very run, newest first
 if waitfor "==G-LOGPAGE==" 60; then
-    T=$(mid tabn) && klick $T
+    echo "sendkey ctrl-f" > "$TMPD/f.txt"
+    python3 tools/wm/monitor.py "$SOCK" "$TMPD/f.txt" > /dev/null 2>&1
+    sleep 1
+    tippe audit
+    sleep 3
+    T=$(mid tabn) && klick $T || bad "the search for audit did not list the page Protokoll"
     sleep 4
     shot "$TMPD/8-log.ppm"
 fi
 if waitfor "==G-UPDPAGE==" 60; then
+    echo "sendkey esc" > "$TMPD/e.txt"
+    python3 tools/wm/monitor.py "$SOCK" "$TMPD/e.txt" > /dev/null 2>&1
+    sleep 2
     T=$(mid tabo) && klick $T
     sleep 4
     shot "$TMPD/9-update.ppm"
