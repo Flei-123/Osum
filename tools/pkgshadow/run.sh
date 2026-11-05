@@ -18,7 +18,7 @@ stale() {
     printf 'name=Editor\ninfo=Write and change text\nkeys=editor,text,edit,note\nfassung=1\n' > "$d/edit.osp/INFO"
     printf '/bin/edit\n' > "$d/edit.osp/start.txt"
     printf 'stale package bundle\n' > "$d/edit.osp/data/README"
-    cp tools/loader/symbole/edit.txt "$d/edit.osp/symbol.txt"
+    cp assets/apps/editor.osp/symbol.txt "$d/edit.osp/symbol.txt"
 }
 cp -a assets/apps "$TMPD/with"; stale "$TMPD/with"
 cp -a assets/apps "$TMPD/without"; stale "$TMPD/without"; rm -rf "$TMPD/without/editor.osp"
