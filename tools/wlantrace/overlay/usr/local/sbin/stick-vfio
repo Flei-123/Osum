@@ -1,0 +1,79 @@
+#!/bin/bash
+. /usr/local/lib/stick/common.sh
+IMG=/mnt/data/orientos.img
+V=$OUT/vfio
+mkdir -p "$V"
+verdict=$(cat "$STICK_RUN/vfio_verdict" 2> /dev/null)
+
+skip() {
+    say "vfio: skipped: $*"
+    echo "$*" > "$V/skipped.txt"
+    exit 0
+}
+
+[ "$VFIO_MODE" = off ] && skip "disabled by stick.vfio=off"
+if [ "$VFIO_MODE" != dry ]; then
+    case $verdict in ok:*) ;; *) skip "${verdict:-iommu check missing}" ;; esac
+fi
+[ -f "$IMG" ] || skip "OrientOS image $IMG missing on the data partition"
+command -v qemu-system-x86_64 > /dev/null || skip "qemu not installed"
+find_target || skip "target device not present"
+
+if [ "$VFIO_MODE" != dry ]; then
+    modprobe kvm_intel 2> /dev/null
+    [ -w /dev/kvm ] || skip "/dev/kvm not available"
+    modprobe vfio-pci || skip "vfio-pci module failed"
+    modprobe -r iwlmvm iwlwifi 2> /dev/null
+    [ -e "/sys/bus/pci/devices/$TARGET_BDF/driver" ] && echo "$TARGET_BDF" > "/sys/bus/pci/devices/$TARGET_BDF/driver/unbind"
+    echo vfio-pci > "/sys/bus/pci/devices/$TARGET_BDF/driver_override"
+    echo "$TARGET_BDF" > /sys/bus/pci/drivers_probe
+    bound=$(basename "$(readlink -f "/sys/bus/pci/devices/$TARGET_BDF/driver" 2> /dev/null)")
+    [ "$bound" = vfio-pci ] || skip "could not bind $TARGET_BDF to vfio-pci (driver: $bound)"
+    ACCEL=kvm
+    CPU=host
+    DEVICE=(-device pcie-root-port,id=rp0,chassis=1,slot=1 -device "vfio-pci,host=$TARGET_BDF,bus=rp0,x-no-mmap=on")
+    TRACES=(-trace 'vfio_region_*' -trace 'vfio_pci_read_config' -trace 'vfio_pci_write_config' -trace 'vfio_intx_*' -trace 'vfio_msi_*' -trace 'vfio_msix_*')
+else
+    ACCEL=tcg
+    CPU=max
+    DEVICE=(-device pci-testdev)
+    TRACES=(-trace 'pci_cfg_*')
+fi
+
+cp /usr/share/OVMF/OVMF_VARS_4M.fd "$STICK_RUN/ovmf-vars.fd"
+say "vfio: starting QEMU ($ACCEL) with $TARGET_BDF, image $IMG"
+qemu-system-x86_64 -machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$VFIO_MEM" -smp 2 -display none -monitor none -no-reboot \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,unit=1,file="$STICK_RUN/ovmf-vars.fd" \
+    -drive file="$IMG",format=raw,if=none,id=osimg,snapshot=on \
+    -device qemu-xhci -device usb-storage,drive=osimg \
+    "${DEVICE[@]}" \
+    -serial "file:$V/orientos-serial.log" \
+    "${TRACES[@]}" -D "$V/qemu-trace.log" > "$V/qemu-stdout.txt" 2>&1 &
+QPID=$!
+
+end=$((SECONDS + VFIO_TIMEOUT))
+last=-1
+idle=0
+while kill -0 "$QPID" 2> /dev/null && [ $SECONDS -lt $end ]; do
+    sleep 5
+    size=$(stat -c %s "$V/orientos-serial.log" 2> /dev/null || echo 0)
+    if [ "$size" = "$last" ] && grep -aq 'iwl:' "$V/orientos-serial.log" 2> /dev/null; then
+        idle=$((idle + 5))
+    else
+        idle=0
+    fi
+    last=$size
+    [ $idle -ge 45 ] && break
+done
+say "vfio: stopping QEMU (serial bytes $last, idle ${idle}s)"
+kill -TERM "$QPID" 2> /dev/null
+for i in 1 2 3 4 5 6; do
+    kill -0 "$QPID" 2> /dev/null || break
+    sleep 2
+done
+kill -KILL "$QPID" 2> /dev/null
+wait "$QPID" 2> /dev/null
+say "vfio: serial lines $(wc -l < "$V/orientos-serial.log"), trace lines $(wc -l < "$V/qemu-trace.log" 2> /dev/null)"
+grep -a 'iwl:\|wlan:' "$V/orientos-serial.log" | tail -40 > "$V/orientos-iwl-lines.txt"
+exit 0
