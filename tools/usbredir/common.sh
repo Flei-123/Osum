@@ -63,7 +63,7 @@ run() {
         [ -n "${BEHIND_HUB:-}" ] && extra="-device usb-hub,bus=x0.0,port=1,id=h0 -chardev socket,id=r0,path=$T/$n.sock,server=on,wait=off -device usb-redir,chardev=r0,bus=x0.0,port=1.2"
     fi
     timeout 170 qemu-system-x86_64 -accel $ACC -kernel "$T/k.img" -m 256 \
-        -append "osum ${BASEW:-nokbd nosched noproc nofs noring3} $words ${XWORDS:-} nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
+        -append "osum ${BASEW:-nokbd nosched noproc nofs noring3} $words ${XWORDS:-} ${XEXTRA:-} nic nip=169.254.10.1/16 nsvc=0 nwait=0 script=sh /t/$script;exit" \
         -serial "file:$T/$n.txt" -display none -nic none -no-reboot -pidfile "$T/$n.qpid" -S \
         -monitor "unix:$T/$n.mon,server,nowait" \
         -drive "file=$T/d.img,format=raw,if=ide,index=0" \
