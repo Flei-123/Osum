@@ -328,11 +328,12 @@ fi
 if waitfor "==G-NET==" 60; then
     T=$(mid tabd) && klick $T
     sleep 5
-    if M=$(mid nmode) && N=$(mid napply) && C=$(mid nconf); then
+    if M=$(mid nmode); then
         read mx my mw mh <<< "$(rect nmode)"
         klick $M; klick $(( mx + 40 )) $(( my + mh + 12 )); sleep 1
         # the choice rebuilds the page (conditional fields): the buttons move, read their places again
-        sleep 2; N=$(mid napply) || N="$N"; C=$(mid nconf) || C="$C"
+        sleep 2
+        if ! N=$(mid napply); then bad "the page Netz shows no apply button after choosing fixed"; fi
         D1=$(dlg_n)
         klick $N; sleep 2
         shot "$TMPD/6-netask.ppm"
