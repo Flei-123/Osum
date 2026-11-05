@@ -35,8 +35,8 @@ bash $FETCH bochs "$(pwd)/compat/linuxkpi/out" >/dev/null 2>&1; [ $? -eq 2 ] && 
 bash $FETCH nosuch "$D/f2" >/dev/null 2>&1; [ $? -eq 2 ] && ok "fetch: unknown driver refused" || bad "fetch: unknown driver accepted"
 mkdir -p "$D/f3"; touch "$D/f3/x"; bash $FETCH bochs "$D/f3" >/dev/null 2>&1; [ $? -eq 2 ] && ok "fetch: non-empty output refused" || bad "fetch: non-empty output accepted"
 
-printf 'OSUMMOD-kpi' > "$D/kpi.omod"; printf 'OSUMMOD-drv' > "$D/drv.omod"; printf 'fwdata' > "$D/bochs.bin"
-pkg=$(bash $PACK bochs "$D/kpi.omod" "$D/drv.omod" "$D/out" "$D/bochs.bin" 2>/dev/null)
+printf 'OSUMMOD-kpi' > "$D/linuxkpi.omod"; printf 'OSUMMOD-drv' > "$D/drv.omod"; printf 'fwdata' > "$D/bochs.bin"
+pkg=$(bash $PACK bochs "$D/linuxkpi.omod" "$D/drv.omod" "$D/out" "$D/bochs.bin" 2>/dev/null)
 [ -n "$pkg" ] && [ "$($MK check "$pkg")" = OK ] && ok "pack: signed store package passes mkpkg check" || bad "pack: package invalid"
 for f in linuxkpi.omod drv.omod SOURCES.txt driver.inf driver.inf.sig bochs.bin; do [ -e "$pkg/$f" ] && ok "pack: $f in package" || bad "pack: $f missing"; done
 grep -q '^license=GPL-2.0-or-later' "$pkg/SOURCES.txt" && grep -q '^linux_version=6.12.101' "$pkg/SOURCES.txt" && ok "pack: manifest carries source, version, license" || bad "pack: manifest incomplete"

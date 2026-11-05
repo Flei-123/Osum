@@ -153,5 +153,6 @@ grep -a "pkg cmp version" "$D/both.klar" | grep -qa invalid && bad "both: compat
 has "$D/both.klar" "pkg cmp version=1 rank=50 sig=ok tier=compat" "both: drvctl list shows tier=compat"
 has "$D/both.klar" "installed cmp2 (active after reboot)" "both: compat install allowed"
 hasnot "$D/both.klar" "refused by policy" "counter-proof both: no refusal"
+bash compat/linuxkpi/hostbuild.sh > "$D/lh.txt" 2>&1 && ok "compat/linuxkpi host build, harness and closure mutants green" || { bad "compat/linuxkpi hostbuild"; tail -5 "$D/lh.txt"; }
 LINUXKPI_IMAGE="$D/k0.img" bash compat/linuxkpi/gate.sh > "$D/lk.txt" 2>&1 && ok "compat/linuxkpi gate green" || { bad "compat/linuxkpi gate"; tail -5 "$D/lk.txt"; }
 fin
