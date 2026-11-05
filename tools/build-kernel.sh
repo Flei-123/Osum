@@ -141,7 +141,7 @@ if [[ $OHNE_NTFS == 1 ]]; then
 fi
 weg ntfs-aus
 
-GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui kgbase kgdisp kgsvc kgwm kgrun kgstage sysgui dispsave cursor vgpu beam vmsvga pixelguard shot"
+GFX_DATEIEN="fb wm wig font ttf tile wmplug vmode ansi ps2m kgui kgbase kgdisp kgsvc kgwm kgrun kgstage sysgui dispsave cursor vgpu vgarrange beam vmsvga pixelguard shot"
 if [[ $GUI == off ]]; then
     for f in $GFX_DATEIEN; do
         #
