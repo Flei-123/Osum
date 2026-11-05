@@ -28,7 +28,7 @@ taskbar &
 sleep 8
 scaledemo 100 20 1 &
 scaledemo 100 520 0 &
-sleep 100
+sleep 150
 echo ==B-END==
 EOS
 printf 'on\n' > "$T/uitrace"
