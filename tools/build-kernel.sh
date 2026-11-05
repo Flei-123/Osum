@@ -12,6 +12,7 @@ fi
 shift
 
 STUFE=0
+KERNEL_BASE=${OSUM_KERNEL_BASE:-}
 OHNE_PS2M=0
 OHNE_BRUECKE=0
 SYMBOLE=on
@@ -52,9 +53,11 @@ while [[ $# -gt 0 ]]; do
         --ohne-symbole) SYMBOLE=off; shift ;;
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
+        --base) KERNEL_BASE=$2; shift 2 ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
     esac
 done
+case "$KERNEL_BASE" in ""|0x*[0-9a-fA-F]) ;; *) echo "--base takes a hex address like 0x1600000, not '$KERNEL_BASE'" >&2; exit 1 ;; esac
 case "$GUI" in on|off) ;; *) echo "--gui takes on or off, not '$GUI'" >&2; exit 1 ;; esac
 case "$TUNNEL" in on|off) ;; *) echo "tunnel takes on or off, not '$TUNNEL'" >&2; exit 1 ;; esac
 OHNE_TUNNEL=0
@@ -201,7 +204,12 @@ P="_F${STUFE}."
 # ZWEIMAL BINDEN, UND DANACH NACHRECHNEN.
 #
 binde() { # $1 = osym-Objekt, $2 = Ausgabe
-    ld -n -T kernel/kernel.ld \
+    local script=kernel/kernel.ld
+    if [[ -n $KERNEL_BASE ]]; then
+        script="$TMP/kernel-base.ld"
+        sed "s/^    \. = 1M;/    . = $KERNEL_BASE;/" kernel/kernel.ld > "$script"
+    fi
+    ld -n -T "$script" \
         --defsym=KERNEL_MAIN="${P}kernel_main" \
         --defsym=KERNEL_TRAP="${P}trap__entry" \
         --defsym=KERNEL_SYSCALL="${P}sys__entry" \
