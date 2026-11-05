@@ -24,7 +24,7 @@ cp -a assets/apps "$TMPD/with"; stale "$TMPD/with"
 cp -a assets/apps "$TMPD/without"; stale "$TMPD/without"; rm -rf "$TMPD/without/editor.osp"
 boot() {
     DESIGNBUILD="$TMPD/b-$1" APPS_DIR="$TMPD/$2" bash tools/design/eh6.sh "$TMPD/$1" res=1280x800 accel=kvm uiscale=1 mode=light lang=en tafel=nein progs="$PROGS" \
-        drehbuch=tools/rowicons/dreh.txt > "$TMPD/$1.log" 2>&1 < /dev/null
+        drehbuch=tools/rowicons/script.txt > "$TMPD/$1.log" 2>&1 < /dev/null
     rm -rf "$TMPD/b-$1"
 }
 boot new with; boot old without

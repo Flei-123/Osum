@@ -11,7 +11,7 @@ from PIL import Image
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rowicons"))
 import rows as base
 
-REFS = ["editor", "nedit", "explorer", "launcher"]
+REFS = ["editor", "nedit", "explorer", "launcher", "settings"]
 ROW_COUNT = 4
 MATCH_LIMIT = 2.0
 
