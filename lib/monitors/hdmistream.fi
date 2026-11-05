@@ -1,0 +1,202 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import monitors.hdmipin
+
+export {
+    V_SET_FORMAT, V_SET_STREAM, V_DIP_INDEX, V_DIP_DATA, V_DIP_XMIT,
+    XMIT_OFF, XMIT_CONT, XMIT_BEST, NO_FORMAT, AI_BYTES, AI_PACKET,
+    is_short_verb, encode, format_word, plan_stream, plan_stop,
+    ai_clear, ai_build, ai_len, ai_byte, ai_checksum_ok, ai_channel_alloc,
+    plan_infoframe, dip_index
+}
+
+const V_SET_FORMAT: u64 = 0x2
+const V_SET_STREAM: u64 = 0x706
+const V_DIP_INDEX: u64 = 0x730
+const V_DIP_DATA: u64 = 0x731
+const V_DIP_XMIT: u64 = 0x732
+
+const XMIT_OFF: u64 = 0x00
+const XMIT_CONT: u64 = 0x80
+const XMIT_BEST: u64 = 0xC0
+
+const NO_FORMAT: u64 = 0xFFFFFFFF
+const AI_BYTES: u64 = 14
+const AI_PACKET: u64 = 0
+const AI_TYPE: u64 = 0x84
+const AI_VERSION: u64 = 0x01
+const AI_PAYLOAD: u64 = 10
+
+static mut ai_buf: [u64; 14] = [0; 14]
+
+fn is_short_verb(verb: u64) -> bool {
+    return verb < 0x10
+}
+
+fn encode(cad: u64, nid: u64, verb: u64, payload: u64) -> u64 {
+    var cmd: u64 = ((cad & 0xF) << 28) | ((nid & 0xFF) << 20)
+    if is_short_verb(verb) {
+        cmd = cmd | (verb << 16) | (payload & 0xFFFF)
+    } else {
+        cmd = cmd | ((verb & 0xFFF) << 8) | (payload & 0xFF)
+    }
+    return cmd
+}
+
+fn bits_code(bits: u64) -> u64 {
+    if bits == 8 {
+        return 0
+    }
+    if bits == 16 {
+        return 1
+    }
+    if bits == 20 {
+        return 2
+    }
+    if bits == 24 {
+        return 3
+    }
+    if bits == 32 {
+        return 4
+    }
+    return 0xFF
+}
+
+fn format_word(rate: u64, bits: u64, chans: u64) -> u64 {
+    let bc: u64 = bits_code(bits)
+    if bc == 0xFF || chans < 1 || chans > 16 {
+        return NO_FORMAT
+    }
+    var base: u64 = 0
+    while base < 2 {
+        var base_rate: u64 = 48000
+        if base == 1 {
+            base_rate = 44100
+        }
+        var mult: u64 = 1
+        while mult <= 4 {
+            var div: u64 = 1
+            while div <= 8 {
+                if base_rate * mult / div == rate && (base_rate * mult) % div == 0 {
+                    return (base << 14) | ((mult - 1) << 11) | ((div - 1) << 8) | (bc << 4) | (chans - 1)
+                }
+                div = div + 1
+            }
+            mult = mult + 1
+        }
+        base = base + 1
+    }
+    return NO_FORMAT
+}
+
+fn add(verb: u64, payload: u64) {
+    hdmipin.plan_append(verb, payload)
+}
+
+fn plan_stream(wcap: u64, tag: u64, channel: u64, fmt: u64) {
+    hdmipin.plan_clear()
+    if fmt == NO_FORMAT {
+        return
+    }
+    if (wcap & hdmipin.WCAP_POWER) != 0 {
+        add(hdmipin.V_SET_PSTATE, 0)
+    }
+    add(V_SET_FORMAT, fmt)
+    add(V_SET_STREAM, ((tag & 0xF) << 4) | (channel & 0xF))
+    add(hdmipin.V_SET_DIGI1, 1)
+}
+
+fn plan_stop() {
+    hdmipin.plan_clear()
+    add(V_SET_STREAM, 0)
+}
+
+fn ai_clear() {
+    var i: u64 = 0
+    while i < AI_BYTES {
+        ai_buf[i as usize] = 0
+        i = i + 1
+    }
+}
+
+fn ai_channel_alloc(chans: u64) -> u64 {
+    if chans <= 2 {
+        return 0x00
+    }
+    if chans == 3 {
+        return 0x01
+    }
+    if chans == 4 {
+        return 0x03
+    }
+    if chans == 5 {
+        return 0x07
+    }
+    if chans == 6 {
+        return 0x0B
+    }
+    if chans == 7 {
+        return 0x0F
+    }
+    return 0x13
+}
+
+fn ai_build(chans: u64) {
+    ai_clear()
+    var n: u64 = chans
+    if n < 1 {
+        n = 1
+    }
+    if n > 8 {
+        n = 8
+    }
+    ai_buf[0] = AI_TYPE
+    ai_buf[1] = AI_VERSION
+    ai_buf[2] = AI_PAYLOAD
+    ai_buf[4] = n - 1
+    ai_buf[7] = ai_channel_alloc(n)
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < AI_BYTES {
+        sum = sum + ai_buf[i as usize]
+        i = i + 1
+    }
+    ai_buf[3] = (256 - (sum & 0xFF)) & 0xFF
+}
+
+fn ai_len() -> u64 {
+    return AI_BYTES
+}
+
+fn ai_byte(i: u64) -> u64 {
+    if i >= AI_BYTES {
+        return 0
+    }
+    return ai_buf[i as usize]
+}
+
+fn ai_checksum_ok() -> bool {
+    var sum: u64 = 0
+    var i: u64 = 0
+    while i < AI_BYTES {
+        sum = sum + ai_buf[i as usize]
+        i = i + 1
+    }
+    return (sum & 0xFF) == 0
+}
+
+fn dip_index(packet: u64, byte: u64) -> u64 {
+    return ((packet & 0x7) << 5) | (byte & 0x1F)
+}
+
+fn plan_infoframe(chans: u64) {
+    hdmipin.plan_clear()
+    ai_build(chans)
+    add(V_DIP_XMIT, XMIT_OFF)
+    add(V_DIP_INDEX, dip_index(AI_PACKET, 0))
+    var i: u64 = 0
+    while i < AI_BYTES {
+        add(V_DIP_DATA, ai_buf[i as usize])
+        i = i + 1
+    }
+    add(V_DIP_XMIT, XMIT_BEST)
+}

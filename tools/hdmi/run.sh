@@ -33,6 +33,20 @@ if [ -x "$T/oracle" ]; then
     pass=$((pass+nok))
 fi
 
+printf 'import monitors.hdmistream\nfn main() -> i32 {\n    hdmistream.plan_stop()\n    return 0\n}\n' > "$T/ks.fi"
+"$FIRNC" --profile=kernel -c "$T/ks.fi" -o "$T/ks.o" 2> "$T/ks.err" \
+    && ok "hdmistream compiles with --profile=kernel" \
+    || { bad "hdmistream does not compile with --profile=kernel"; head -5 "$T/ks.err"; }
+if "$FIRNC" tools/hdmi/streamoracle.fi -o "$T/streamoracle" 2> "$T/so.err"; then
+    "$T/streamoracle" > "$T/sout.txt" 2>&1
+    sok=$(grep -c '^OK' "$T/sout.txt")
+    sbad=$(grep -c '^FAIL' "$T/sout.txt")
+    sed -n 's/^FAIL /  FAIL  stream oracle: /p' "$T/sout.txt"
+    [ "$sbad" = 0 ] && [ "$sok" -ge 15 ] && ok "stream oracle: $sok promises OK, no FAIL" || bad "stream oracle: ok=$sok fail=$sbad"
+else
+    bad "stream oracle does not build"; head -10 "$T/so.err"
+fi
+
 mutate() {
     local name=$1 expr=$2 file=$3
     local L="$T/lib-$name"
