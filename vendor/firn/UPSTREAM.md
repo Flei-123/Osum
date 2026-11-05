@@ -3,7 +3,7 @@
 Updated 02.11.2026.
 
 ## Pin
-- vendor/firn/COMMIT = b1e7f22c, on Flei-123/Firn main.
+- vendor/firn/COMMIT = 67cf92a2, on Flei-123/Firn main.
 - All 12 former OrientOS patches (0001, 0002, 0005-0014) are upstream in that commit; vendor/firn/patches/ is gone.
 - Renamed upstream: font_kern_cache_* became font_kerning_cache_* (no OrientOS callers).
 - HERKUNFT.md describes the pre-rewrite history and is outdated regarding the hash.
