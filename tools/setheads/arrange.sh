@@ -36,6 +36,7 @@ has "$G" "^settings: heads Detected: 1: 640x480  2: 640x480 *$" "hotplug: both o
 has "$G" "^settings: heads Detected: 1: 640x480 *$" "hotplug: output removed -> list shrinks"
 [ "$(grep -ac '^settings: heads Detected: 1: 640x480  2: 640x480' "$G")" -ge 2 ] && ok "hotplug: output back -> list grows again" || bad "hotplug: second two-output line missing"
 
+[ "${SETHEADS_ONLY:-}" = hot ] && { echo "setheads: $pass ok, $fail fail"; [ -n "$OUT" ] && cp -f "$T"/hot.klar "$OUT"/ 2>/dev/null; [ "$fail" -eq 0 ]; exit; }
 echo "== control: no hotplug"
 RC_SCRIPT=g3.sh run_case nohot 2 "fbres=1280x480 vgpuheads vgpuextend"
 G="$T/nohot.klar"

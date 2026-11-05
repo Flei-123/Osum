@@ -103,6 +103,7 @@ PY
     fi
 }
 
+if [ -z "${SETHEADS_ONLY:-}" ]; then
 echo "== two outputs"
 run_case two 2 "fbres=1280x480 vgpuheads vgpuextend"
 G="$T/two.klar"
@@ -122,6 +123,8 @@ G="$T/one.klar"
 grep -a "^settings: heads " "$G" | tail -1 | sed 's/^/   /'
 has "$G" "^settings: heads Detected: 1: 640x480 *$" "one output: exactly one entry"
 grep -qaE "^settings: heads Detected: 1:.* 2: " "$G" && bad "one output: a second entry appeared" || ok "one output: no second entry"
+
+fi
 
 . tools/setheads/arrange.sh
 
