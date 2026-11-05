@@ -12,7 +12,7 @@
 #   * hot plug AFTER boot (usbhold window), unplug and replug in the same window
 # NEGATIVE CONTROLS: no gadget -> no driver line, no lease; unpatched wiring would show up as missing driver lines.
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12}"
 source "$HERE/tools/usbredir/common.sh"
 for c in $CASES; do
     case "$c" in
@@ -214,6 +214,12 @@ for c in $CASES; do
         grep -aq 'ctl dropped' "$T/chw.gadget" && ok "chw: gadget dropped control requests" || bad "chw: gadget dropped nothing"
         chk chw "dongle bound after three unanswered control requests" 'driver=ch336'
         panics chw
+        ;;
+    ch336-hub-cycles12)
+        BEHIND_HUB=1 XWORDS="usbholdticks=9000" GARGS="--phy-boot down --cycles 12 --gap-ms 2000 --up-secs 4" BASEW="nokbd nosched vfs" run chc ch336 hot s_hubhot.sh
+        chkn chc "dongle bound again after every one of twelve replugs" 'usb: port=.*driver=ch336' 13
+        chkn chc "every one of twelve unplugs noticed" 'usb: unplug port=' 12
+        panics chc
         ;;
     none)
         run none ncm none s.sh
