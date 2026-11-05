@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 DRIVER="${1:?usage: fetch.sh <driver> <empty-output-dir>}"
 OUT="${2:?usage: fetch.sh <driver> <empty-output-dir>}"
-TSV=tools/linuxkpi/sources.tsv
+TSV=compat/linuxkpi/sources.tsv
 row=$(awk -F'\t' -v d="$DRIVER" 'NR>1 && $1==d' "$TSV")
 [ -n "$row" ] || { echo "fetch: unknown driver $DRIVER" >&2; exit 2; }
 IFS=$'\t' read -r _ version url tsha file fsha spdx _ _ <<<"$row"

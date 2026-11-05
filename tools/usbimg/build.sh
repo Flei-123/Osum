@@ -560,6 +560,11 @@ ARGS+=(/etc/ "/etc/passwd=$OUT/passwd"
        "/etc/theme.conf=$OUT/theme.conf"
        "/etc/locale.conf=$OUT/locale.conf"
        "/etc/netlauf.sh=$OUT/netlauf.sh")
+. tools/lib/tiers.sh
+tiers_validate || exit 2
+mapfile -t TIER_ARGS < <(tiers_stage_args "$OUT")
+[ "${#TIER_ARGS[@]}" -gt 0 ] && ARGS+=("${TIER_ARGS[@]}")
+sagen "driver tiers $DRIVER_TIERS"
 # r383: THE DEFAULT WALLPAPER (Justin's photo of the sea at sunset, 480x270,
 # assets/WALLPAPER-SEA.txt): the desktop paints it, the lock screen and the
 # sign-in screen paint it blurred. The user's own picture (settings) replaces

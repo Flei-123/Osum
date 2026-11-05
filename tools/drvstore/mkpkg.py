@@ -15,7 +15,8 @@ SEED_PATH = os.path.join(MODDIR, "verify.seed")
 PUB_PATH = os.path.join(MODDIR, "verify.pub")
 MAX_INF = 1536
 MAX_MATCH = 8
-KEYS = ("name", "version", "abi", "rank", "module", "rights", "fw", "slot", "match")
+KEYS = ("name", "version", "abi", "rank", "module", "rights", "fw", "slot", "tier", "match")
+TIERS = ("native", "compat")
 RIGHTS = ("pci-cfg", "mmio", "irq", "dma", "fw", "usb", "acpi", "mouse-slot")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,22}$")
 MOD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,30}$")
@@ -68,6 +69,8 @@ def lint(text):
             errors.append("line %d: bad fw (name:sha256hex)" % no)
         if key == "slot" and value not in ("mouse", "aux"):
             errors.append("line %d: unknown slot %s" % (no, value))
+        if key == "tier" and value not in TIERS:
+            errors.append("line %d: unknown tier %s" % (no, value))
     for need in ("name", "version", "abi", "module"):
         if need not in seen:
             errors.append("missing key %s" % need)
@@ -92,6 +95,8 @@ def build(args):
         lines.append("fw=%s" % args.fw)
     if args.slot:
         lines.append("slot=%s" % args.slot)
+    if args.tier:
+        lines.append("tier=%s" % args.tier)
     for m in args.match:
         lines.append("match=%s" % m)
     if args.garbage:
@@ -163,6 +168,7 @@ def main():
     b.add_argument("--rights", default="")
     b.add_argument("--fw", default="")
     b.add_argument("--slot", default="")
+    b.add_argument("--tier", default="")
     b.add_argument("--match", action="append", default=[])
     b.add_argument("--seed", default=SEED_PATH)
     b.add_argument("--bad-sig", action="store_true")

@@ -22,7 +22,7 @@ export {
     pkg_rec, pkg_origin, pkg_app, bind_total, bind_pkg, bind_id, bind_result, bind_code,
     find_bind, unload_test, unload_pkg, load_pkg, last_loaded, last_refs, UL_OK, UL_NONE, UL_IDLE, UL_BUSY, UL_LOADED, UL_NODEV, best_pci, best_usb, best_acpi, bound_count, failed_count,
     CTX_OFF, ST_OK, ST_BANNED, X_SIG, X_ABI, X_NOMODULE, X_NOFILE, X_DENY,
-    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE, slot_owner, slot_of, X_DUP, X_SLOTBUSY, testmode_on, pkg_unsigned
+    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE, slot_owner, slot_of, X_DUP, X_SLOTBUSY, testmode_on, pkg_unsigned, compat_allowed, pkg_tier, X_TIER
 }
 
 const MAXPKG: u64 = 16
@@ -48,6 +48,7 @@ const X_NOMODULE: u64 = 22
 const X_NOFILE: u64 = 23
 const X_DENY: u64 = 24
 const X_DUP: u64 = 25
+const X_TIER: u64 = 26
 const X_SLOTBUSY: u64 = 40
 const MAXAPP: u64 = 8
 const APP_BYTES: u64 = 24
@@ -73,9 +74,10 @@ const B_FIELDS: u64 = 5
 
 const NO_LOAD: u64 = 99
 
-static mut records: [u8; 6912] = [0 as u8; 6912]
+static mut records: [u8; 7040] = [0 as u8; 7040]
 static mut meta: [u64; 128] = [0 as u64; 128]
 static mut testmode: u64 = 0
+static mut compat_ok: u64 = 0
 static mut last_unsigned: u64 = 0
 static mut app_names: [u8; 192] = [0 as u8; 192]
 static mut napps: u64 = 0
@@ -96,6 +98,14 @@ static mut held_refs: u64 = 0
 static mut loaded_now: u64 = 0
 static mut late: u64 = 0
 static mut deny_len: u64 = 0
+
+fn compat_allowed() -> bool {
+    return compat_ok != 0
+}
+
+fn pkg_tier(i: u64) -> u64 {
+    return drvinf.rec_tier(rec_at(i))
+}
 
 fn testmode_on() -> bool {
     return testmode != 0
@@ -375,6 +385,10 @@ fn scan_one(state: u64, origin: u64, name: u64) {
         mset(i, M_STATUS, X_ABI)
         return
     }
+    if drvinf.rec_tier(rec) == drvinf.T_COMPAT && compat_ok == 0 {
+        mset(i, M_STATUS, X_TIER)
+        return
+    }
     if !check_module_file(state, origin, rec, name) {
         mset(i, M_STATUS, X_NOMODULE)
         return
@@ -499,10 +513,27 @@ fn scan_apps(state: u64) {
     }
 }
 
-fn read_testmode(state: u64) {
+fn conf_has(size: u64, key: u64, n: u64) -> bool {
+    var at: u64 = 0
+    while at + n <= size {
+        var k: u64 = 0
+        while k < n && (deny_buf[(at + k) as usize] as u64) == kstate.get8(key + k) {
+            k = k + 1
+        }
+        if k == n && (at == 0 || deny_buf[(at - 1) as usize] == 10 as u8) {
+            return true
+        }
+        at = at + 1
+    }
+    return false
+}
+
+fn read_conf(state: u64) {
     var f_conf: [u8; 19] = "/etc/drvstore.conf\0"
-    var key: [u8; 12] = "testmode=1\0\0"
+    var key_test: [u8; 11] = "testmode=1\0"
+    var key_tiers: [u8; 20] = "tiers=native+compat\0"
     testmode = 0
+    compat_ok = 0
     let ino: u64 = fs.path(state, (&f_conf[0]) as u64)
     if ino == 0 {
         return
@@ -514,21 +545,16 @@ fn read_testmode(state: u64) {
     if !drvfw.read_all(state, ino, (&deny_buf[0]) as u64, size) {
         return
     }
-    var at: u64 = 0
-    while at + 10 <= size {
-        var k: u64 = 0
-        while k < 10 && deny_buf[(at + k) as usize] == key[k as usize] {
-            k = k + 1
-        }
-        if k == 10 && (at == 0 || deny_buf[(at - 1) as usize] == 10 as u8) {
-            testmode = 1
-        }
-        at = at + 1
+    if conf_has(size, (&key_test[0]) as u64, 10) {
+        testmode = 1
+    }
+    if conf_has(size, (&key_tiers[0]) as u64, 19) {
+        compat_ok = 1
     }
 }
 
 fn scan(state: u64) {
-    read_testmode(state)
+    read_conf(state)
     module.set_test_mode(testmode)
     var d: [u8; 13] = "/lib/drivers\0"
     let dir: u64 = fs.path(state, (&d[0]) as u64)
@@ -809,6 +835,7 @@ fn report(state: u64) {
     var s_valid: [u8; 8] = " valid=\0"
     var s_pkg: [u8; 15] = "drvstore: pkg \0"
     var s_tm: [u8; 23] = "drvstore: testmode=on\n\0"
+    var s_tiers: [u8; 31] = "drvstore: tiers=native+compat\n\0"
     var s_ok: [u8; 3] = "ok\0"
     var s_bad: [u8; 10] = "rejected \0"
     var s_ban: [u8; 8] = " banned\0"
@@ -831,6 +858,9 @@ fn report(state: u64) {
     serial.nl()
     if testmode != 0 {
         serial.puts((&s_tm[0]) as u64)
+    }
+    if compat_ok != 0 {
+        serial.puts((&s_tiers[0]) as u64)
     }
     p = 0
     while p < npkg {

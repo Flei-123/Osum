@@ -102,3 +102,6 @@ USB/ACPI auto-bind (only PCI binds; USB/ACPI are listed), hot-plug rescan, right
 
 - The keyboard driver turns the ACPI Sleep key (E0 5F) into the same standby wish as the Start menu entry "Energie sparen" (`SP_STANDBY`); lid and idle time were already handled by `powerd`. Log line `hk: sleep`.
 
+## 12. Tier key (05.11.2026, gate `tools/tiers/run.sh`)
+
+- Manifest key `tier=native|compat` (optional, default native). Policy `/etc/drvstore.conf` line `tiers=native+compat` allows compat packages; otherwise code 26 at scan, `drvctl install` refuses. `drvctl list` shows the tier, `drvctl tiers` the policy. See `DRIVER-TIERS.md`.

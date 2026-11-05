@@ -6,8 +6,8 @@ pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 D=$(mktemp -d); trap 'rm -rf "$D"' EXIT
-FETCH=tools/linuxkpi/fetch.sh
-PACK=tools/linuxkpi/pack.sh
+FETCH=compat/linuxkpi/fetch.sh
+PACK=compat/linuxkpi/pack.sh
 MK="python3 -I tools/drvstore/mkpkg.py"
 NEEDLE='linuxkpi|lkpi|Linux version|vermagic=|\.modinfo'
 
@@ -31,7 +31,7 @@ fi
 
 printf 'x' > "$D/bad.tar.xz"
 LINUXKPI_TARBALL="$D/bad.tar.xz" bash $FETCH bochs "$D/f1" >/dev/null 2>&1; [ $? -eq 3 ] && ok "fetch: tarball with wrong sha256 rejected" || bad "fetch: wrong tarball accepted"
-bash $FETCH bochs "$(pwd)/tools/linuxkpi/out" >/dev/null 2>&1; [ $? -eq 2 ] && ok "fetch: output inside repo refused" || bad "fetch: repo output accepted"
+bash $FETCH bochs "$(pwd)/compat/linuxkpi/out" >/dev/null 2>&1; [ $? -eq 2 ] && ok "fetch: output inside repo refused" || bad "fetch: repo output accepted"
 bash $FETCH nosuch "$D/f2" >/dev/null 2>&1; [ $? -eq 2 ] && ok "fetch: unknown driver refused" || bad "fetch: unknown driver accepted"
 mkdir -p "$D/f3"; touch "$D/f3/x"; bash $FETCH bochs "$D/f3" >/dev/null 2>&1; [ $? -eq 2 ] && ok "fetch: non-empty output refused" || bad "fetch: non-empty output accepted"
 
