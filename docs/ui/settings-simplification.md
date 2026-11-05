@@ -18,9 +18,11 @@
 - Activity log (`privacy/activity-log`): diagnostics, not a setting.
 - Wi-Fi status distinguishes `Connected to X` from `No internet access, connected to X` (gateway never answered, `nv.link_state`).
 
-## Candidates, not done yet (need Boss ok per page)
-- Network view (netv), Bridge: move behind `advanced`.
-- Advanced display, Window effects, Gestures: already `advanced` routes, keep hidden.
+## Done: `advanced` really hides sidebar entries
+- Before, the `advanced` route flag only exempted a page from the control-count lint; the sidebar still listed every page.
+- Now the sidebar skips advanced routes unless the page is the open one or the search box has text (setpages.advanced_listed, setroute.flat_advanced). Related links, deep links and search still reach them.
+- Newly advanced: Connections (network view: view modes, per-program usage, active connections with local/remote addresses) and Remote control access (bridge).
+- Normal Network section now lists only Network and Wi-Fi (+ Bluetooth); no IP field outside `fixed` mode.
 
 ## Done: Network start page
 - Normal view: one status line (`connected`, `not connected`, `connecting ...`, `no internet`) and the address mode (`automatic` / `fixed`).

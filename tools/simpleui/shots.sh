@@ -29,6 +29,10 @@ foto 03-wifi
 klickauf srecttabd
 warte 3
 foto 04-network
+klick $((520 * sc)),$((60 * sc))
+tippe connections
+warte 2
+foto 05a-search
 klickauf srecttabf
 warte 3
 foto 05-netview
