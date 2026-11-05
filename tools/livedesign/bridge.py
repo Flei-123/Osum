@@ -39,7 +39,7 @@ class Bridge:
 
     def job(self, kind, target="", value="", timeout=90):
         status, _, body = self.request("POST", "/bruecke/auftrag",
-                                       dict(geraet=self.device, art=kind, ziel=target, wert=value, ttl_s=120))
+                                       {"geraet": self.device, "art": kind, "ziel": target, "wert": value, "ttl_s": 120})
         if status != 200:
             raise SystemExit("livedesign: job %s refused: HTTP %s %s" % (kind, status, body[:120]))
         job_id = json.loads(body)["id"]
