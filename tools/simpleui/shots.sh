@@ -32,7 +32,7 @@ foto 04-network
 klickauf srecttabf
 warte 3
 foto 05-netview
-klickauf srecttabl
+klicksuche srecttabl $((140 * sc)),$((300 * sc))
 warte 3
 foto 06-system
 SCRIPT
