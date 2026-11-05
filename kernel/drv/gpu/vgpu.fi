@@ -13,13 +13,14 @@ import arch.arch
 import gfx.displayclass
 import bus.drvnull
 import libc.regio
+import drv.gpu.vgarrange
 
 export {
     ops, init, usable, present, scanout_w, scanout_h, scanouts,
     head_edid_ok, head_mm_w, head_scale,
     head_count, head_mirrored, head_mirror_errors, head_connected, head_w, head_h,
     ext_active, ext_placed, ext_errors, ext_clipped, ext_x, ext_y, ext_w, ext_h, ext_head_at, ext_testimage,
-    probe_desktop, relayout, hot_toggle, hot_count, hot_gen, mirror_active, set_mirror,
+    head_position_set, head_scale_set, head_position_fixed, probe_desktop, relayout, hot_toggle, hot_count, hot_gen, mirror_active, set_mirror,
     transfers, flushes, oktette, error_count, bdf, idx,
     event_check, event_force, ereignisse, new_w, new_h, umgestellt,
     say, shut_down,
@@ -91,6 +92,10 @@ const S_RESIZES: u64 = 0x1D8 // how often the scan-out was rebuilt for a new siz
 const S_RSZERR: u64 = 0x1E0 // rebuilds that failed
 const S_UP: u64 = 0x1D0
 const S_MIRRORRT: u64 = 0x1E8
+const S_POSTAB: u64 = 0x600
+const POS_STRIDE: u64 = 0x10
+const S_POSOLD: u64 = 0x680
+const S_CAND: u64 = 0x700
 const S_EXTTAB: u64 = 0x500 // OUT_MAX entries of 32 bytes: x, y, w, h (0 w = head unused)
 const EXT_STRIDE: u64 = 0x20
 const OUT_MAX: u64 = 8
@@ -872,6 +877,12 @@ fn ext_place(state: u64, bw: u64, bh: u64) -> u64 {
     if mirror_active(state) {
         return ext_place_mirror(state, bw, bh)
     }
+    if head_position_fixed(state) {
+        if overrides_valid(state, bw, bh) {
+            return ext_place_fixed(state)
+        }
+        pos_clear(state)
+    }
     var x: u64 = 0
     var placed: u64 = 0
     var hd: u64 = 0
@@ -908,6 +919,155 @@ fn ext_place(state: u64, bw: u64, bh: u64) -> u64 {
     }
     kstate.set(state, s(S_EXTPLACED), placed)
     return placed
+}
+
+fn pos_active(state: u64, hd: u64) -> bool {
+    if hd >= OUT_MAX { return false }
+    return kstate.get(state, s(S_POSTAB + hd * POS_STRIDE)) != 0
+}
+
+fn pos_clear(state: u64) {
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        kstate.set(state, s(S_POSTAB + hd * POS_STRIDE), 0)
+        hd = hd + 1
+    }
+}
+
+fn head_position_fixed(state: u64) -> bool {
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        if pos_active(state, hd) {
+            return true
+        }
+        hd = hd + 1
+    }
+    return false
+}
+
+fn pos_store(state: u64, hd: u64, x: u64, y: u64) {
+    let o: u64 = S_POSTAB + hd * POS_STRIDE
+    kstate.set(state, s(o), 1)
+    kstate.set(state, s(o + 8), x | (y << 32))
+}
+
+fn pos_x(state: u64, hd: u64) -> u64 {
+    return kstate.get(state, s(S_POSTAB + hd * POS_STRIDE + 8)) & 0xFFFFFFFF
+}
+
+fn pos_y(state: u64, hd: u64) -> u64 {
+    return kstate.get(state, s(S_POSTAB + hd * POS_STRIDE + 8)) >> 32
+}
+
+fn cand_build(state: u64, bw: u64, bh: u64) -> bool {
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        let c: u64 = S_CAND + hd * vgarrange.STRIDE
+        kstate.set(state, s(c + 16), 0)
+        if head_connected(state, hd) {
+            if !pos_active(state, hd) {
+                return false
+            }
+            kstate.set(state, s(c), pos_x(state, hd))
+            kstate.set(state, s(c + 8), pos_y(state, hd))
+            kstate.set(state, s(c + 16), head_w(state, hd))
+            kstate.set(state, s(c + 24), head_h(state, hd))
+        }
+        hd = hd + 1
+    }
+    return true
+}
+
+fn overrides_valid(state: u64, bw: u64, bh: u64) -> bool {
+    if !cand_build(state, bw, bh) {
+        return false
+    }
+    return vgarrange.arrangement_ok(state, s(S_CAND), OUT_MAX, bw, bh)
+}
+
+fn ext_place_fixed(state: u64) -> u64 {
+    var placed: u64 = 0
+    var hd: u64 = 0
+    while hd < OUT_MAX {
+        let tb: u64 = S_EXTTAB + hd * EXT_STRIDE
+        kstate.set(state, s(tb + 16), 0)
+        if head_connected(state, hd) {
+            let x: u64 = pos_x(state, hd)
+            let y: u64 = pos_y(state, hd)
+            let w: u64 = head_w(state, hd)
+            let h: u64 = head_h(state, hd)
+            if set_scanout_rect(state, hd, x, y, w, h) {
+                kstate.set(state, s(tb), x)
+                kstate.set(state, s(tb + 8), y)
+                kstate.set(state, s(tb + 16), w)
+                kstate.set(state, s(tb + 24), h)
+                placed = placed + 1
+            } else {
+                kstate.add(state, s(S_EXTERR), 1)
+            }
+        }
+        hd = hd + 1
+    }
+    kstate.set(state, s(S_EXTPLACED), placed)
+    return placed
+}
+
+fn pos_save(state: u64) {
+    var i: u64 = 0
+    while i < OUT_MAX * 2 {
+        kstate.set(state, s(S_POSOLD + i * 8), kstate.get(state, s(S_POSTAB + i * 8)))
+        i = i + 1
+    }
+}
+
+fn pos_restore(state: u64) {
+    var i: u64 = 0
+    while i < OUT_MAX * 2 {
+        kstate.set(state, s(S_POSTAB + i * 8), kstate.get(state, s(S_POSOLD + i * 8)))
+        i = i + 1
+    }
+}
+
+fn head_position_set(state: u64, hd: u64, x: u64, y: u64) -> bool {
+    if !usable(state) || kstate.get(state, s(S_EXTON)) == 0 || mirror_active(state) {
+        return false
+    }
+    if hd >= OUT_MAX || !head_connected(state, hd) || x > 65535 || y > 65535 {
+        return false
+    }
+    let bw: u64 = kstate.get(state, s(S_SW))
+    let bh: u64 = kstate.get(state, s(S_SH))
+    pos_save(state)
+    var i: u64 = 0
+    while i < OUT_MAX {
+        if head_connected(state, i) && !pos_active(state, i) {
+            pos_store(state, i, ext_x(state, i), ext_y(state, i))
+        }
+        i = i + 1
+    }
+    pos_store(state, hd, x, y)
+    if !overrides_valid(state, bw, bh) {
+        pos_restore(state)
+        return false
+    }
+    if relayout(state) {
+        return true
+    }
+    pos_restore(state)
+    let _r: bool = relayout(state)
+    return false
+}
+
+fn head_scale_set(state: u64, hd: u64, pct: u64) -> bool {
+    if hd >= OUT_MAX || !head_connected(state, hd) {
+        return false
+    }
+    if snap_scale(pct) != pct {
+        return false
+    }
+    kstate.set(state, s(S_OUTTAB + hd * OUT_STRIDE + O_SCALE), pct)
+    kstate.add(state, s(S_HOTGEN), 1)
+    return true
 }
 
 // SET_SCANOUT with resource 0 = switch the head off (virtio spec 5.7.6.8).
