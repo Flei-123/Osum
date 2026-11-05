@@ -1,6 +1,6 @@
 #include "lkpi.h"
 
-#define ARENA_MAX 16
+#define ARENA_MAX 8
 #define ARENA_FRAMES 64ULL
 #define FRAME_BYTES 4096ULL
 #define RUN_FRAMES_MAX 1024ULL
