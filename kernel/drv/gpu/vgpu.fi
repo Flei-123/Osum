@@ -17,7 +17,7 @@ import drv.gpu.vgarrange
 
 export {
     ops, init, usable, present, scanout_w, scanout_h, scanouts,
-    head_edid_ok, head_mm_w, head_scale,
+    head_edid_ok, head_mm_w, head_scale, head_scale_user,
     head_count, head_mirrored, head_mirror_errors, head_connected, head_w, head_h,
     ext_active, ext_placed, ext_errors, ext_clipped, ext_x, ext_y, ext_w, ext_h, ext_head_at, ext_testimage,
     head_position_set, head_scale_set, head_position_fixed, probe_desktop, relayout, hot_toggle, hot_count, hot_gen, mirror_active, set_mirror,
@@ -107,6 +107,7 @@ const O_MMH: u64 = 0x38
 const O_PW: u64 = 0x40 // preferred mode (first detailed timing)
 const O_PH: u64 = 0x48
 const O_MFR: u64 = 0x50 // three letters packed 'A'..'Z' as bytes (l0 | l1<<8 | l2<<16)
+const O_SCALE_USER: u64 = 0x10000
 const O_SCALE: u64 = 0x58 // suggested UI scale in percent (same rule as lib/monitors layout.default_scale)
 const O_CONN: u64 = 0x00
 const O_X: u64 = 0x08
@@ -670,6 +671,14 @@ fn snap_scale(pct: u64) -> u64 {
 // Reply: header (24), size u32, padding u32, edid[1024]; only the base block is read.
 // Nothing here may fail the driver: a head without a usable EDID keeps O_EDID = 0.
 fn read_edid(state: u64, head: u64) {
+    let kept: u64 = kstate.get(state, s(S_OUTTAB + head * OUT_STRIDE + O_SCALE))
+    read_edid_raw(state, head)
+    if (kept & O_SCALE_USER) != 0 {
+        kstate.set(state, s(S_OUTTAB + head * OUT_STRIDE + O_SCALE), kept)
+    }
+}
+
+fn read_edid_raw(state: u64, head: u64) {
     let o: u64 = S_OUTTAB + head * OUT_STRIDE
     kstate.set(state, s(o + O_EDID), 0)
     kstate.set(state, s(o + O_SCALE), 100)
@@ -760,7 +769,12 @@ fn head_mm_w(state: u64, i: u64) -> u64 {
 }
 fn head_scale(state: u64, i: u64) -> u64 {
     if i >= OUT_MAX { return 100 }
-    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_SCALE))
+    return kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_SCALE)) & 0xFFFF
+}
+
+fn head_scale_user(state: u64, i: u64) -> bool {
+    if i >= OUT_MAX { return false }
+    return (kstate.get(state, s(S_OUTTAB + i * OUT_STRIDE + O_SCALE)) & O_SCALE_USER) != 0
 }
 
 // Output table accessors (r808). `i` >= OUT_MAX reads as "not connected".
@@ -1065,7 +1079,7 @@ fn head_scale_set(state: u64, hd: u64, pct: u64) -> bool {
     if snap_scale(pct) != pct {
         return false
     }
-    kstate.set(state, s(S_OUTTAB + hd * OUT_STRIDE + O_SCALE), pct)
+    kstate.set(state, s(S_OUTTAB + hd * OUT_STRIDE + O_SCALE), pct | O_SCALE_USER)
     kstate.add(state, s(S_HOTGEN), 1)
     return true
 }
@@ -1992,7 +2006,7 @@ fn say(state: u64) {
                 serial.put(120)
                 serial.dec(kstate.get(state, s(o + O_MMH)))
                 serial.puts((&h_e[0]) as u64)
-                serial.dec(kstate.get(state, s(o + O_SCALE)))
+                serial.dec(kstate.get(state, s(o + O_SCALE)) & 0xFFFF)
             } else {
                 var i2: u64 = 0
                 while i2 < 7 {
