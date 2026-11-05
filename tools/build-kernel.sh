@@ -159,8 +159,10 @@ if [[ $GUI == off ]]; then
     GFXZIEL=$(find "$TMP/kernel" -name "gfx.fi" -type f | head -1)
     [[ -n $GFXZIEL ]] || { echo "SERVERBUILD: gfx.fi nicht gefunden" >&2; exit 1; }
     ersetze gfx-aus gfx || exit 1
+    ersetze slotattach-aus slotattach || exit 1
 fi
 weg gfx-aus
+weg slotattach-aus
 
 if [[ $OHNE_PS2M == 1 ]]; then
     if [[ $GUI == off ]]; then

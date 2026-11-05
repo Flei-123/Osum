@@ -9,8 +9,9 @@ import re
 import sys
 
 GRAFIK = ["fb", "wm", "wig", "font", "ttf", "tile", "vmode", "ansi", "ps2m"]
+OWN_DIRS = ("gfx/fb/", "ui/wm/", "ui/kgui/")
 OWN = set(g + ".fi" for g in GRAFIK) | {
-    "gfx.fi", "gfx-aus.fi", "kgui.fi", "kgbase.fi", "kgdisp.fi", "kgsvc.fi", "kgwm.fi", "kgrun.fi", "kgstage.fi", "sysgui.fi",
+    "gfx.fi", "gfx-aus.fi", "slotattach.fi", "kgui.fi", "kgbase.fi", "kgdisp.fi", "kgsvc.fi", "kgwm.fi", "kgrun.fi", "kgstage.fi", "sysgui.fi",
     "dispsave.fi",
     "zeiger.fi",
     "vgpu.fi",
@@ -51,6 +52,8 @@ def zaehle(root):
             if not d.endswith(".fi") or d in OWN:
                 continue
             p = os.path.join(path_2, d)
+            if os.path.relpath(p, root).startswith(OWN_DIRS):
+                continue
             with open(p, "rb") as f:
                 roh = f.read().decode("utf8", "replace")
             foreign = set(re.findall(r"^\s*import\s+(?!(?:gfx|ui|drv)\.)[A-Za-z0-9_.]+\.([A-Za-z0-9_]+)", roh, re.M))

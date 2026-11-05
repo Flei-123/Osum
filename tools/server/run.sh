@@ -66,8 +66,11 @@ if [ -f "$TMPD/gui.mb.elf" ] && [ -f "$TMPD/srv.mb.elf" ]; then
         || bad "the symbol table says otherwise:$schlecht"
     ng=$(nm "$TMPD/gui.mb.elf" | grep -c "_F0\.gfx__")
     ns=$(nm "$TMPD/srv.mb.elf" | grep -c "_F0\.gfx__")
-    [ "$ng" = "$ns" ] && [ "$ng" -gt 20 ] \
-        && ok "the seam itself is in both, with the same number of symbols: $ng" \
+    seamout=$(python3 tools/server/seam.py kernel/gfx/gfx.fi kernel/gfx/gfx-aus.fi)
+    seamrc=$?
+    echo "$seamout" | sed 's/^/        /'
+    [ "$seamrc" = 0 ] && [ "$ng" -gt 20 ] && [ "$ns" -gt 20 ] \
+        && ok "the seam has the same exports in both builds (symbols gui=$ng srv=$ns)" \
         || bad "the seam has a different width: gui=$ng srv=$ns"
     treffer=""
     for w in vmode glyph raster focus cursor; do
