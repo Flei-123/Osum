@@ -9,7 +9,7 @@ import mm.mmframe
 import arch.x86_64.apic
 
 export {
-    init, pcicfg_read, pcicfg_write, pcibar, ioremap, frames, frames_free, reclaim, granted,
+    init, pcicfg_read, pcicfg_write, pcibar, ioremap, frames, frames_free, mark, reclaim_window, reclaim_owner, granted,
     HW_OK, HW_DENIED, HW_NOCTX, HW_RANGE, MAX_RUNS, MAX_FRAMES
 }
 
@@ -37,6 +37,9 @@ const MAX_FRAMES: u64 = 1024
 
 static mut run_addr: [u64; 8] = [0 as u64; 8]
 static mut run_len: [u64; 8] = [0 as u64; 8]
+static mut run_owner: [u64; 8] = [0 as u64; 8]
+static mut run_seq: [u64; 8] = [0 as u64; 8]
+static mut seq_counter: u64 = 0
 
 fn init() {
     ksym.hw_set(ksym.H_PCICFG_READ, ksym.addr_1u(pcicfg_read))
@@ -174,8 +177,11 @@ fn frames(n: u64) -> u64 {
         return 0
     }
     mmframe.fill8(mmframe.kva(addr), n * mmframe.FRAME_SIZE, 0)
+    seq_counter = seq_counter + 1
     run_addr[slot as usize] = addr
     run_len[slot as usize] = n
+    run_owner[slot as usize] = drvfw.bound_rec()
+    run_seq[slot as usize] = seq_counter
     return addr
 }
 
@@ -184,12 +190,11 @@ fn frames_free(addr: u64, n: u64) -> u64 {
     if state == 0 || !allowed(RIGHT_DMA) {
         return HW_DENIED
     }
+    let owner: u64 = drvfw.bound_rec()
     var i: u64 = 0
     while i < MAX_RUNS {
-        if run_len[i as usize] == n && run_addr[i as usize] == addr && n != 0 {
-            mmframe.frame_free_run(state, addr, n)
-            run_len[i as usize] = 0
-            run_addr[i as usize] = 0
+        if run_len[i as usize] == n && run_addr[i as usize] == addr && run_owner[i as usize] == owner && n != 0 {
+            drop_run(state, i)
             return HW_OK
         }
         i = i + 1
@@ -197,14 +202,31 @@ fn frames_free(addr: u64, n: u64) -> u64 {
     return HW_RANGE
 }
 
-fn reclaim(state: u64) {
+fn drop_run(state: u64, i: u64) {
+    mmframe.frame_free_run(state, run_addr[i as usize], run_len[i as usize])
+    run_len[i as usize] = 0
+    run_addr[i as usize] = 0
+    run_owner[i as usize] = 0
+    run_seq[i as usize] = 0
+}
+
+fn mark() -> u64 {
+    return seq_counter
+}
+
+fn reclaim_window(state: u64, owner: u64, since: u64) -> u64 {
+    var freed: u64 = 0
     var i: u64 = 0
     while i < MAX_RUNS {
-        if run_len[i as usize] != 0 {
-            mmframe.frame_free_run(state, run_addr[i as usize], run_len[i as usize])
-            run_len[i as usize] = 0
-            run_addr[i as usize] = 0
+        if run_len[i as usize] != 0 && run_owner[i as usize] == owner && run_seq[i as usize] > since {
+            drop_run(state, i)
+            freed = freed + 1
         }
         i = i + 1
     }
+    return freed
+}
+
+fn reclaim_owner(state: u64, owner: u64) -> u64 {
+    return reclaim_window(state, owner, 0)
 }

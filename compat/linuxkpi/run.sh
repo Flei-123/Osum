@@ -47,15 +47,15 @@ echo ==HOLD==
 sleep 12
 echo ==END==
 EOS
-cat > "$D/cycle.sh" <<'EOS'
-echo ==RUN==
-drvctl unload lkpi-bochs
-echo ==UNLOADED==
-drvctl load lkpi-bochs
-echo ==RELOADED==
-drvctl unload lkpi-bochs
-echo ==END==
-EOS
+{
+    echo ==RUN==
+    echo drvctl unload lkpi-bochs
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        echo drvctl load lkpi-bochs
+        echo drvctl unload lkpi-bochs
+    done
+    echo ==END==
+} > "$D/cycle.sh"
 printf 'tiers=native\n' > "$D/conf-native"
 printf 'tiers=native+compat\n' > "$D/conf-both"
 
@@ -91,22 +91,25 @@ runvm() {
     fi
     wait $pid
     tr -cd '\11\12\15\40-\176' < "$D/o-$name.txt" > "$D/$name.klar"
-    [ -s "$D/$name.ppm" ] && $SCREEN verify "$D/$name.ppm" 1024 768 > "$D/$name.screen" 2>&1
+    [ -s "$D/$name.ppm" ] && $SCREEN verify "$D/$name.ppm" "${VW:-1024}" "${VH:-768}" > "$D/$name.screen" 2>&1
 }
 DEV="-vga none -device bochs-display"
+DEV_SMALL="-vga none -device bochs-display,vgamem=4194304"
 mkimg ok "$D/conf-both" "$D/show.sh" "$PK_OK"
 mkimg cycle "$D/conf-both" "$D/cycle.sh" "$PK_OK"
 mkimg sym "$D/conf-both" "$D/show.sh" "$PK_SYM"
 mkimg native "$D/conf-native" "$D/show.sh" "$PK_OK"
 mkimg nodev "$D/conf-both" "$D/show.sh" "$PK_OK"
+mkimg small "$D/conf-both" "$D/show.sh" "$PK_OK"
 runvm ok 1 $DEV
 runvm cycle 0 $DEV
 runvm sym 1 $DEV
 runvm native 1 $DEV
 runvm nodev 1 -vga none
+VW=800 VH=600 runvm small 1 $DEV_SMALL
 
 BIND='^drvstore: bind lkpi-bochs -> [0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f] 1234:1111 '
-for v in ok cycle sym native nodev; do
+for v in ok cycle sym native nodev small; do
     has "$D/$v.klar" "==END==" "$v: script ran to the end"
     hasnot "$D/$v.klar" "EXCEPTION" "$v: no kernel exception"
 done
@@ -115,6 +118,16 @@ has "$D/ok.klar" "[drm] Found bochs VGA, ID 0xb0c5." "ok: unmodified bochs drive
 has "$D/ok.klar" "lkpi: modeset 1024x768 ok" "ok: mode set through the shim"
 hasre "$D/ok.klar" "${BIND}ok" "ok: store bound lkpi-bochs to the display"
 has "$D/ok.screen" "screen: 1024x768 exact=1 other=0" "ok: screen shows the pattern pixel-exact"
+has "$D/small.klar" "lkpi: modeset 800x600 ok" "small: 4 MiB VRAM gets 800x600"
+hasnot "$D/small.klar" "lkpi: modeset 1024x768" "small: never 1024x768 on 4 MiB VRAM"
+hasre "$D/small.klar" "${BIND}ok" "small: store bound lkpi-bochs to the display"
+has "$D/small.screen" "screen: 800x600 exact=1 other=0" "small: screen shows the pattern pixel-exact"
+RECL='drvstore: frames reclaimed lkpi-bochs '
+[ "$(count "$D/cycle.klar" "$RECL")" = 11 ] && ok "cycle: every unload reports its reclaimed runs (11 of 11)" || bad "cycle: reclaim lines $(count "$D/cycle.klar" "$RECL") of 11"
+[ "$(count "$D/cycle.klar" "lkpi: modeset 1024x768 ok")" = 11 ] && ok "cycle: mode set after boot and after each of 10 reloads" || bad "cycle: mode set count $(count "$D/cycle.klar" "lkpi: modeset 1024x768 ok") of 11"
+runs=$(grep -ao "${RECL}[0-9]*" "$D/cycle.klar" | sed "s/.* //" | sort -u | tr '\n' ' ')
+case "$runs" in [1-9]*" ") [ "$(echo $runs | wc -w)" = 1 ] && ok "cycle: same non-zero run count every cycle ($runs)" || bad "cycle: run counts differ ($runs)";; *) bad "cycle: reclaimed run counts '$runs'";; esac
+hasnot "$D/cycle.klar" "fail:" "cycle: no bind failure in any cycle"
 for v in sym native nodev; do
     hasnot "$D/$v.klar" "lkpi: modeset" "$v: no mode set"
     hasnot "$D/$v.screen" "exact=1" "$v: screen shows no pattern"

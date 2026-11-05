@@ -9,15 +9,19 @@ has() { grep -qaF -- "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 . tools/lib/tmpdir.sh
 D=$(mktemp -d); osum_tmp_guard "" "$D"
 fin() { echo "LINUXKPI-HOST: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
-CC="${CC:-gcc-12}"; command -v "$CC" >/dev/null 2>&1 || CC=gcc
+. compat/linuxkpi/flags.sh
+CC="$LKPI_CC"
 INC=compat/linuxkpi/shim/include
 HDR=$INC/osum/osum_if.h
 B="$D/b"
 bash compat/linuxkpi/build.sh "$B" > "$D/build.txt" 2>&1 && ok "shim and driver build, closure ok, modules signed" || { bad "build"; tail -5 "$D/build.txt"; fin; }
-objcopy --redefine-sym module_init=shim_module_init --redefine-sym module_exit=shim_module_exit "$B/linuxkpi.o" "$D/h_kpi.o"
+link_harness() {
+    objcopy --redefine-sym module_init=shim_module_init --redefine-sym module_exit=shim_module_exit "$1" "$3.kpi.o"
+    "$CC" -O1 -ffreestanding -fno-builtin -nostdlib -static -no-pie -fno-pic -fno-stack-protector -Wall -Wextra -Werror "-I$INC" \
+        compat/linuxkpi/hosttest/harness.c "$3.kpi.o" "$D/h_drv.o" -o "$2" > "$D/hc.txt" 2>&1
+}
 objcopy --redefine-sym module_init=driver_module_init --redefine-sym module_exit=driver_module_exit "$B/bochs_drv.o" "$D/h_drv.o"
-"$CC" -O1 -ffreestanding -fno-builtin -nostdlib -static -no-pie -fno-pic -fno-stack-protector -Wall -Wextra -Werror "-I$INC" \
-    compat/linuxkpi/hosttest/harness.c "$D/h_kpi.o" "$D/h_drv.o" -o "$D/harness" > "$D/hc.txt" 2>&1 && ok "harness links against the unmodified shim and driver objects" || { bad "harness build"; tail -5 "$D/hc.txt"; fin; }
+link_harness "$B/linuxkpi.o" "$D/harness" "$D/h_main" && ok "harness links against the unmodified shim and driver objects" || { bad "harness build"; tail -5 "$D/hc.txt"; fin; }
 for v in ok rev1 badid bar0small bar0min badvendor abi2; do timeout 60 "$D/harness" $v > "$D/r-$v.txt" 2>&1; done
 GOOD="xres=1024 yres=768 bpp=32 enable=65 vwidth=1024 vheight=4096 xoff=0 yoff=0"
 NONE="xres=0 yres=0 bpp=0 enable=0 vwidth=0 vheight=0 xoff=0 yoff=0"
@@ -41,4 +45,23 @@ objcopy "${args[@]}" "$B/linuxkpi.o" "$D/m3.o"; cl "$D/m3.o"; mutant too-many-se
 long=$(printf 'x%.0s' $(seq 1 70))
 objcopy --redefine-sym "lkpi_heap_release=$long" "$B/linuxkpi.o" "$D/m4.o"; cl "$D/m4.o"; mutant long-export-name "export name longer than 63"
 sed 's/k_frames_free/k_frames_gone/g' "$HDR" > "$D/bad_if.h"; cl "" "" "$D/bad_if.h"; mutant kernel-symbol-not-in-ksym "k_frames_gone is not in the kernel symbol table"
+shim_mutant() {
+    local name=$1 file=$2 expr=$3 variant=$4 good=$5 m="$D/sm-$1" n objs=()
+    rm -rf "$m"; cp -r compat/linuxkpi/shim "$m"
+    sed -i "$expr" "$m/src/$file"
+    if cmp -s "$m/src/$file" "compat/linuxkpi/shim/src/$file"; then bad "shim mutant $name did not apply"; return; fi
+    lkpi_flags "$m"
+    for n in $LKPI_SHIM_SOURCES; do
+        "$CC" "${LKPI_CFLAGS[@]}" -c "$m/src/$n.c" -o "$m/$n.o" > "$D/sm.txt" 2>&1 || { bad "shim mutant $name does not compile"; tail -3 "$D/sm.txt"; return; }
+        objs+=("$m/$n.o")
+    done
+    ld -r -o "$m/kpi.o" "${objs[@]}"
+    link_harness "$m/kpi.o" "$m/harness" "$m/h" || { bad "shim mutant $name does not link"; tail -3 "$D/hc.txt"; return; }
+    timeout 60 "$m/harness" "$variant" > "$m/r.txt" 2>&1
+    grep -qF -- "$good" "$m/r.txt" && bad "shim mutant $name still passes the harness" || ok "shim mutant $name caught by the harness"
+}
+shim_mutant broken-paint drm_fbdev.c 's/color = x < fb->width \/ 2 ? COLOR_TL : COLOR_TR;/color = x < fb->width \/ 2 ? COLOR_TR : COLOR_TL;/' ok "pixbad=0 guard=0 found=1 modeset=1"
+shim_mutant removed-abi-check-init shim_main.c 's/k_abi() != OSUM_ABI/0/' abi2 "shim_rc=-38"
+shim_mutant removed-abi-check-probe pci.c 's/k_abi() != OSUM_ABI/0/' abi2 "drv_rc=-38"
+shim_mutant heap-release-leak heap.c 's/^\t\tk_frames_free(arenas\[i\].base, arenas\[i\].frames);/\t\t(void)i;/' ok "harness: exit ok open=0 freedenied=0"
 fin

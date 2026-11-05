@@ -6,16 +6,13 @@ OUT="${1:?usage: build.sh <output-dir> [driver]}"
 DRIVER="${2:-bochs}"
 SHIM=compat/linuxkpi/shim
 TSV=compat/linuxkpi/sources.tsv
-SHIM_SOURCES="heap string printk resource pci drm_core drm_kms drm_vram drm_fbdev shim_main"
-CC="${CC:-gcc-12}"
-command -v "$CC" >/dev/null 2>&1 || CC=gcc
-CFLAGS=(-O2 -ffreestanding -nostdinc -fno-pic -mcmodel=small -mno-red-zone -mgeneral-regs-only
-	-fno-stack-protector -fno-asynchronous-unwind-tables -fno-common -fcf-protection=none
-	-fno-tree-loop-distribute-patterns -Wall -Wextra -Werror -Wno-unused-parameter "-I$SHIM/include")
-DRIVER_FLAGS=()
-case "$DRIVER" in
-	bochs) DRIVER_FLAGS=(-Wno-pointer-sign) ;;
-esac
+. compat/linuxkpi/flags.sh
+SHIM_SOURCES="$LKPI_SHIM_SOURCES"
+CC="$LKPI_CC"
+lkpi_flags "$SHIM"
+CFLAGS=("${LKPI_CFLAGS[@]}")
+lkpi_driver_flags "$DRIVER"
+DRIVER_FLAGS=("${LKPI_DRIVER_FLAGS[@]}")
 row=$(awk -F'\t' -v d="$DRIVER" 'NR>1 && $1==d' "$TSV")
 [ -n "$row" ] || { echo "build: unknown driver $DRIVER" >&2; exit 2; }
 IFS=$'\t' read -r _ version _ <<<"$row"

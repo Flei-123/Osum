@@ -15,6 +15,7 @@ D=$(mktemp -d); [ -z "${DRVHW_KEEP:-}" ] && trap 'rm -rf "$D"' EXIT
 bash vendor/firn/fetch-firnc.sh >/dev/null 2>&1
 fin() { echo "DRVHW: $pass passed, $fail failed"; [ "$fail" -eq 0 ]; exit $?; }
 bash tools/module/build.sh "$D/hwdemo.omod" --quelle module/store/hwdemo.fi > "$D/m.txt" 2>&1 && ok "hwdemo module builds and is signed" || { bad "hwdemo module"; tail -5 "$D/m.txt"; fin; }
+bash tools/module/build.sh "$D/hwleak.omod" --quelle module/store/hwleak.fi > "$D/ml.txt" 2>&1 && ok "hwleak module builds and is signed" || { bad "hwleak module"; tail -5 "$D/ml.txt"; fin; }
 PROGS="sh cat echo drvctl"
 mkdir -p "$D/bin" "$D/pk"
 bash tools/sync/build.sh "$D/bin" 0 $PROGS > "$D/b.txt" 2>&1 && ok "programs build" || { bad "programs"; head -10 "$D/b.txt"; fin; }
@@ -23,7 +24,13 @@ if [ -n "${DRVHW_KERNEL:-}" ]; then cp "$DRVHW_KERNEL" "$D/k0.img"; ok "kernel s
 cat > "$D/s.sh" <<'EOS'
 echo ==RUN==
 cat /proc/drivers
+drvctl load hwleak
+drvctl load hwleak
+drvctl load hwleak
 echo ==UNLOAD==
+drvctl unload hwdemo
+echo ==RELOAD==
+drvctl load hwdemo
 drvctl unload hwdemo
 echo ==END==
 EOS
@@ -38,7 +45,7 @@ mkimg() {
         "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" \
         /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ \
         $(for p in $PROGS; do echo "/bin/$p=$D/bin/$p.elf"; done) \
-        "/t/s.sh=$D/s.sh" "$@" > "$D/mkfs-$name.txt" 2>&1 || tail -3 "$D/mkfs-$name.txt"
+        "/t/s.sh=$D/s.sh" /lib/drivers/hwleak/ $(for f in $(ls "$D/pk-leak/hwleak"); do echo "/lib/drivers/hwleak/$f=$D/pk-leak/hwleak/$f"; done) "$@" > "$D/mkfs-$name.txt" 2>&1 || tail -3 "$D/mkfs-$name.txt"
 }
 runvm() {
     local name=$1; shift
@@ -49,6 +56,8 @@ runvm() {
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 "$@" >/dev/null 2>&1
     tr -cd '\11\12\15\40-\176' < "$D/o-$name.txt" > "$D/$name.klar"
 }
+mkdir -p "$D/pk-leak"
+python3 tools/drvstore/mkpkg.py build "$D/pk-leak" --module "$D/hwleak.omod" --name hwleak --match "pci 1234:11e8" --rights pci-cfg,dma > /dev/null
 for v in $variants; do
     r=rights_$v
     rargs=()
@@ -58,11 +67,11 @@ for v in $variants; do
     files="/lib/drivers/hwdemo/"
     for f in $(ls "$D/pk-$v/hwdemo"); do files="$files /lib/drivers/hwdemo/$f=$D/pk-$v/hwdemo/$f"; done
     mkimg "$v" $files
-    runvm "$v" -vga none -device bochs-display
+    runvm "$v" -vga none -device bochs-display -device edu
 done
 mkdir -p "$D/pk-gone"
 mkimg gone
-runvm gone -vga none -device bochs-display
+runvm gone -vga none -device bochs-display -device edu
 
 ID=286331444
 CFG_OK="id=$ID far=4294967295 odd=4294967295 cmd=0 hdw=1 edge=1 bar=1 hdr=1 hi=1"
@@ -76,7 +85,7 @@ MAP_NO="map=0 span=0 same=0 dispi=0 $NEG"
 FR_OK="fr=1 low=1 zero=1 rw=1 over=0 nul=0 badfr=1 badn=1 free=0 twice=1 full=8 big=1 max=1"
 FR_NO="fr=0 low=0 zero=0 rw=0 over=0 nul=0 badfr=1 badn=1 free=1 twice=1 full=0 big=0 max=0"
 check() {
-    local v=$1 cfg=$2 bar=$3 map=$4 fr=$5 f="$D/$1.klar"
+    local v=$1 cfg=$2 bar=$3 map=$4 fr=$5 held=$6 f="$D/$1.klar"
     has "$f" "==END==" "$v: script ran to the end"
     has "$f" "drvstore: bind hwdemo -> " "$v: module bound to the device"
     has "$f" "hwdemo: cfg $cfg" "$v: config cases"
@@ -86,10 +95,16 @@ check() {
     has "$f" "hwdemo: done" "$v: init completed"
     hasnot "$f" "EXCEPTION" "$v: no kernel exception"
     has "$f" "hwdemo: exit map=0 fr=0 cfg=4294967295" "$v: no hardware access outside the bind window"
+    has "$f" "drvstore: frames reclaimed hwdemo $held" "$v: unload reclaims exactly the runs held by the module"
+    has "$f" "==RELOAD==" "$v: reload step ran"
+    [ "$(grep -caF -- "hwdemo: fr $fr" "$f")" = 2 ] && ok "$v: reload sees the same frame cases (no leak across cycles)" || bad "$v: frame cases differ after reload"
+    [ "$(grep -caF -- "frames reclaimed hwdemo $held" "$f")" = 2 ] && ok "$v: second unload reclaims the same count" || bad "$v: second unload count differs"
+    [ "$(grep -caF -- "hwleak: run=1" "$f")" -ge 4 ] && ok "$v: failing package allocated runs on every attempt" || bad "$v: hwleak did not allocate"
+    hasnot "$f" "frames reclaimed hwleak" "$v: failed bind never reaches the unload path"
 }
-check full "$CFG_OK" "$BAR_OK" "$MAP_OK" "$FR_OK"
-check none "$CFG_NO" "$BAR_NO" "$MAP_NO" "$FR_NO"
-check mmio "$CFG_NO" "$BAR_NO" "$MAP_MM" "$FR_NO"
-check cfgdma "$CFG_OK" "$BAR_OK" "$MAP_NO" "$FR_OK"
+check full "$CFG_OK" "$BAR_OK" "$MAP_OK" "$FR_OK" 2
+check none "$CFG_NO" "$BAR_NO" "$MAP_NO" "$FR_NO" 0
+check mmio "$CFG_NO" "$BAR_NO" "$MAP_MM" "$FR_NO" 0
+check cfgdma "$CFG_OK" "$BAR_OK" "$MAP_NO" "$FR_OK" 2
 hasnot "$D/gone.klar" "hwdemo: cfg" "counter-proof: no package, no module run"
 fin
