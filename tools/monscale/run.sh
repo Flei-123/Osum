@@ -75,6 +75,8 @@ tr -cd '\11\12\15\40-\176' < "$T/s.txt" > "$T/s.klar"
 grep -a "^scaledemo: box\|^taskbar: hotplug" "$T/s.klar" | sed 's/^/   /'
 has "$T/s.klar" "^scaledemo: box w=100 h=40 sm=1000" "head 0 window: 100 percent, box 100x40"
 has "$T/s.klar" "^scaledemo: box w=150 h=60 sm=1500" "head 1 window: 150 percent exact, box 150x60"
+has "$T/s.klar" "^scaledemo: box w=100 h=40 sm=1000 pct=100 inx=2 iny=22" "head 0 frame: border 2, title bar 22 (100 percent)"
+has "$T/s.klar" "^scaledemo: box w=150 h=60 sm=1500 pct=150 inx=3 iny=33" "head 1 frame: border 3, title bar 33 (150 percent)"
 has "$T/s.klar" "^taskbar: hotplug reapply new=2" "head 1 plugged in after login: layout re-applied"
 for h in 0 1; do python3 -I tools/monscale/box.py "$T/h$h.ppm" > "$T/b$h.txt" 2>/dev/null || echo "0 0" > "$T/b$h.txt"; done
 [ "$(cat "$T/b0.txt")" = "100 40" ] && ok "pixels head 0: magenta box 100x40" || bad "pixels head 0: $(cat "$T/b0.txt")"
