@@ -319,7 +319,7 @@ EOS
     flip)
         part "$B" B-INST FERTIG > "$TMPD/p.txt"
         has "$TMPD/p.txt" "phase=fehler" "flipped package: refused (phase=fehler)"
-        has "$TMPD/p.txt" "abgelehnt" "... named as rejected"
+        has "$TMPD/p.txt" "rejected" "... named as rejected"
         hasnot "$TMPD/p.txt" "  gruss -> " "... and nothing was installed";;
     hash)
         part "$B" B-INST FERTIG > "$TMPD/p.txt"
