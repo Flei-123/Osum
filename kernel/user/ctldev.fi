@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import ulib
+import libc.io
+import libc.errno
+import libc.octets
+
+export { do_dev, dev_status }
+
+static mut P_OFF: [u8; 20] = "/var/jarvis/dev-off\0"
+static mut P_ACTIVE: [u8; 27] = "/var/jarvis/devmode-active\0"
+static mut P_DIR: [u8; 12] = "/var/jarvis\0"
+static mut P_CONF: [u8; 29] = "/etc/jarvis/permissions.conf\0"
+static mut W_DEVMODE: [u8; 8] = "devmode\0"
+static mut W_ON: [u8; 3] = "on\0"
+static mut W_OFF: [u8; 4] = "off\0"
+static mut M_ACTIVE: [u8; 85] = "Dev mode: ACTIVE -- full access for JARVIS except key material, every job is logged.\0"
+static mut M_STOPPED: [u8; 74] = "Dev mode: off -- emergency stop engaged (`jarvisctl dev on` releases it).\0"
+static mut M_ENABLED: [u8; 73] = "Dev mode: enabled in permissions.conf, becomes active with the next job.\0"
+static mut M_DISABLED: [u8; 66] = "Dev mode: off -- not enabled in permissions.conf (devmode = yes).\0"
+static mut M_NOW_OFF: [u8; 60] = "Dev mode: OFF. Emergency stop set, the next job is refused.\0"
+static mut M_NOW_ON: [u8; 83] = "Dev mode: stop released. It is active only if permissions.conf says devmode = yes.\0"
+static mut M_REFUSED: [u8; 78] = "Refused: dev mode can only be released at the device, not through the bridge.\0"
+static mut M_USAGE: [u8; 30] = "usage: jarvisctl dev [on|off]\0"
+static mut M_NO_STOP: [u8; 40] = "Cannot write the emergency-stop marker.\0"
+static mut M_BODY: [u8; 3] = "1\n\0"
+
+static mut DEV_BUF: [u8; 8192] = [0 as u8; 8192]
+static mut DEV_ORIGIN: [u8; 40] = [0 as u8; 40]
+
+const DEV_SYS_ORIGIN: u64 = 1990
+
+fn dev_exists(path: u64) -> bool {
+    let f: u64 = ulib.sys(ulib.SYS_OPEN, path, 0, 0)
+    if ulib.bad(f) {
+        return false
+    }
+    ulib.sys(ulib.SYS_CLOSE, f, 0, 0)
+    return true
+}
+
+fn dev_say(msg: u64) {
+    ulib.say(msg)
+    ulib.nl()
+}
+
+fn dev_labelled() -> bool {
+    let r: u64 = ulib.sys(DEV_SYS_ORIGIN, 0, 0, (&DEV_ORIGIN[0 as usize]) as u64)
+    return r > 0 && r <= 64
+}
+
+fn dev_conf_enabled() -> bool {
+    let fd: u64 = io.open((&P_CONF[0 as usize]) as u64, 0)
+    if errno.failed(fd) {
+        return false
+    }
+    let base: u64 = (&DEV_BUF[0 as usize]) as u64
+    let n: u64 = io.read_full(fd, base, 8191)
+    io.close(fd)
+    if ulib.bad(n) {
+        return false
+    }
+    var at: u64 = 0
+    while at < n {
+        var e: u64 = at
+        while e < n && octets.ld8(base, e) != 10 {
+            e = e + 1
+        }
+        var s: u64 = at
+        while s < e && octets.ld8(base, s) <= 32 {
+            s = s + 1
+        }
+        if e - s > 7 && ulib.strneq(base + s, (&W_DEVMODE[0 as usize]) as u64, 7) {
+            var q: u64 = s + 7
+            while q < e && octets.ld8(base, q) != 61 && octets.ld8(base, q) != 35 {
+                q = q + 1
+            }
+            if q < e && octets.ld8(base, q) == 61 {
+                q = q + 1
+                while q < e && octets.ld8(base, q) <= 32 {
+                    q = q + 1
+                }
+                if e - q >= 3 && octets.ld8(base, q) == 121 && octets.ld8(base, q + 1) == 101 && octets.ld8(base, q + 2) == 115 {
+                    return true
+                }
+            }
+        }
+        at = e + 1
+    }
+    return false
+}
+
+fn dev_status() -> u64 {
+    if dev_exists((&P_ACTIVE[0 as usize]) as u64) {
+        dev_say((&M_ACTIVE[0 as usize]) as u64)
+    } else if dev_exists((&P_OFF[0 as usize]) as u64) {
+        dev_say((&M_STOPPED[0 as usize]) as u64)
+    } else if dev_conf_enabled() {
+        dev_say((&M_ENABLED[0 as usize]) as u64)
+    } else {
+        dev_say((&M_DISABLED[0 as usize]) as u64)
+    }
+    return 0
+}
+
+fn dev_stop() -> u64 {
+    io.make_dir((&P_DIR[0 as usize]) as u64)
+    let out: u64 = io.create((&P_OFF[0 as usize]) as u64)
+    if errno.failed(out) {
+        ulib.esay_line((&M_NO_STOP[0 as usize]) as u64, 0)
+        return 1
+    }
+    io.write_all(out, (&M_BODY[0 as usize]) as u64, 2)
+    io.close(out)
+    io.unlink((&P_ACTIVE[0 as usize]) as u64)
+    dev_say((&M_NOW_OFF[0 as usize]) as u64)
+    return 0
+}
+
+fn dev_release() -> u64 {
+    if dev_labelled() {
+        ulib.esay_line((&M_REFUSED[0 as usize]) as u64, 0)
+        return 1
+    }
+    io.unlink((&P_OFF[0 as usize]) as u64)
+    dev_say((&M_NOW_ON[0 as usize]) as u64)
+    return 0
+}
+
+fn do_dev(args: u64, argc: u64) -> u64 {
+    if argc == 2 {
+        return dev_status()
+    }
+    if argc == 3 && ulib.streq(ulib.arg_at(args, 2), (&W_OFF[0 as usize]) as u64) {
+        return dev_stop()
+    }
+    if argc == 3 && ulib.streq(ulib.arg_at(args, 2), (&W_ON[0 as usize]) as u64) {
+        return dev_release()
+    }
+    ulib.esay_line((&M_USAGE[0 as usize]) as u64, 0)
+    return 2
+}
