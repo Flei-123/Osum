@@ -11,10 +11,13 @@ for sc in $SCALES; do
   D="$OUT/s$sc"
   mkdir -p "$D"
   DREH=$(mktemp)
-  cat > "$DREH" <<'SCRIPT'
+  RES=1280x800
+  if [ "$sc" = 2 ]; then RES=2560x1600; fi
+  CLICKY=$(( ${RES#*x} - 20 ))
+  cat > "$DREH" <<SCRIPT
 warte 12
 foto 00-desktop
-klick 24,780
+klick 24,$CLICKY
 warte 4
 foto 01-start
 klickauf start_Settings
@@ -34,7 +37,7 @@ warte 3
 foto 06-system
 SCRIPT
   export DESIGNBUILD="$D-build"
-  bash tools/design/audit.sh "$D" pins=explorer,terminal,settings accel=kvm uitrace=yes halt=300 res=1280x800 uiscale="$sc" drehbuch="$DREH" > "$D.log" 2>&1
+  bash tools/design/audit.sh "$D" pins=explorer,terminal,settings accel=kvm uitrace=yes halt=300 res=$RES uiscale="$sc" drehbuch="$DREH" > "$D.log" 2>&1
   rm -rf "$D-build" "$DREH"
   unset DESIGNBUILD
   ls "$D" | head -20

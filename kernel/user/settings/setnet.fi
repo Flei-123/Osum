@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import msg
+import actcli
+import settings.setbase
+import settings.setcore
+import settings.setpages
+import settings.setsystem
+
+export { apply }
+
+const SYS_NETSET: u64 = 1301
+
+static mut t_net: [u8; 18] = "/etc/network.conf\0"
+static mut t_dhcp: [u8; 10] = "/bin/dhcp\0"
+static mut k_ndh: [u8; 9] = "net.dhcp\0"
+static mut k_true: [u8; 5] = "true\0"
+static mut k_m_net: [u8; 28] = "settings.status.net_written\0"
+static mut k_m_netzno: [u8; 24] = "settings.status.net_bad\0"
+static mut k_m_netzr: [u8; 27] = "settings.status.net_denied\0"
+static mut k_m_dhcp: [u8; 29] = "settings.status.dhcp_started\0"
+static mut k_dh: [u8; 12] = "modus=dhcp\n\0"
+static mut k_fe: [u8; 15] = "modus=fest\nip=\0"
+static mut k_mk: [u8; 8] = "\nmaske=\0"
+static mut k_gw: [u8; 10] = "\ngateway=\0"
+static mut k_nl: [u8; 2] = "\n\0"
+
+fn status_from_bus() {
+    let _cb: u64 = setcore.text_an((&setbase.l_stat[0 as usize]) as u64, 0, (&setbase.l_systat[0 as usize]) as u64)
+}
+
+fn apply_dhcp_file() {
+    var buf: [u8; 24] = [0 as u8; 24]
+    let n: u64 = setcore.text_an((&buf[0 as usize]) as u64, 0, (&k_dh[0 as usize]) as u64)
+    let _w: bool = setcore.file_write((&t_net[0 as usize]) as u64, (&buf[0 as usize]) as u64, n)
+    let pid: u64 = ulib.sys(ulib.SYS_EXEC, (&t_dhcp[0 as usize]) as u64, 0, 0)
+    let a: u64 = setcore.text_an((&setbase.l_stat[0 as usize]) as u64, 0, msg.get((&k_m_dhcp[0 as usize]) as u64))
+    let _z: u64 = setcore.num_at((&setbase.l_stat[0 as usize]) as u64, a, pid)
+}
+
+fn apply_fixed() {
+    let vip: u64 = setcore.ip_read((&setbase.e_ip[0 as usize]) as u64)
+    let vmk: u64 = setcore.ip_read((&setbase.e_maske[0 as usize]) as u64)
+    let vgw: u64 = setcore.ip_read((&setbase.e_gw[0 as usize]) as u64)
+    if vip == 0 || vmk == 0 {
+        let _s: u64 = setcore.text_an((&setbase.l_stat[0 as usize]) as u64, 0, msg.get((&k_m_netzno[0 as usize]) as u64))
+        return
+    }
+    let brc: u64 = setsystem.net_fixed_bus((&setbase.e_ip[0 as usize]) as u64, (&setbase.e_maske[0 as usize]) as u64, (&setbase.e_gw[0 as usize]) as u64)
+    if brc != actcli.R_NOBUS {
+        status_from_bus()
+        return
+    }
+    if ulib.bad(ulib.sys(SYS_NETSET, vip, vmk, vgw)) {
+        let _d: u64 = setcore.text_an((&setbase.l_stat[0 as usize]) as u64, 0, msg.get((&k_m_netzr[0 as usize]) as u64))
+        return
+    }
+    var buf: [u8; 96] = [0 as u8; 96]
+    var a: u64 = setcore.text_an((&buf[0 as usize]) as u64, 0, (&k_fe[0 as usize]) as u64)
+    a = setcore.ip_an((&buf[0 as usize]) as u64, a, vip)
+    a = setcore.text_an((&buf[0 as usize]) as u64, a, (&k_mk[0 as usize]) as u64)
+    a = setcore.ip_an((&buf[0 as usize]) as u64, a, vmk)
+    a = setcore.text_an((&buf[0 as usize]) as u64, a, (&k_gw[0 as usize]) as u64)
+    a = setcore.ip_an((&buf[0 as usize]) as u64, a, vgw)
+    a = setcore.text_an((&buf[0 as usize]) as u64, a, (&k_nl[0 as usize]) as u64)
+    let _w: bool = setcore.file_write((&t_net[0 as usize]) as u64, (&buf[0 as usize]) as u64, a)
+    let _s: u64 = setcore.text_an((&setbase.l_stat[0 as usize]) as u64, 0, msg.get((&k_m_net[0 as usize]) as u64))
+}
+
+fn apply() {
+    if setbase.kval[(setbase.K_CN) as usize] == 0 {
+        if setpages.bus_set((&k_ndh[0 as usize]) as u64, (&k_true[0 as usize]) as u64) != actcli.R_NOBUS {
+            status_from_bus()
+        } else {
+            apply_dhcp_file()
+        }
+    } else {
+        apply_fixed()
+    }
+    setsystem.state_read()
+    setpages.report_state()
+}

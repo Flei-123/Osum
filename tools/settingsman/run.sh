@@ -63,7 +63,7 @@ for f in tools/settingsman/cases/*.txt; do
     esac
 done
 ok "golden files: every ok_* is accepted, every rej_* rejected with empty tables"
-head -1 tools/settingsman/builtin.expect | grep -q '^ok app=settings items=214 pages=24 warns=0$' \
+head -1 tools/settingsman/builtin.expect | grep -q '^ok app=settings items=214 pages=25 warns=0$' \
     && ok "settings manifest: accounts, network, display, personal, system and tools pages, no warnings" || bad "accounts page header: $(head -1 tools/settingsman/builtin.expect)"
 
 echo "== 2. limits =="
@@ -113,7 +113,7 @@ for line in man.splitlines():
         if len(w) > 3 and w[3] != "-": labels.append(w[3])
     elif w[0] in ("label", "note"): labels.append(w[1])
 fields = pages["accounts"]
-for bf, pgs in (("accounts", ("accounts",)), ("network", ("network",)), ("display", ("display", "display2", "display3")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel")), ("tools", ("sync", "bridge", "system", "rights", "netv"))):
+for bf, pgs in (("accounts", ("accounts",)), ("network", ("network", "netdetails")), ("display", ("display", "display2", "display3")), ("personal", ("time", "lock", "password", "pin", "language", "wifi", "presets", "about")), ("system", ("taskbar", "effects", "usbnet", "proto", "update", "presetsel")), ("tools", ("sync", "bridge", "system", "rights", "netv"))):
     bound = [x for x in open("kernel/user/settings.d/%s.bind" % bf, encoding="utf-8").read().split("\n") if x]
     allf = [f for pg in pgs for f in pages[pg]]
     for f in allf:
