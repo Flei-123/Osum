@@ -1,0 +1,481 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile app
+
+import ulib
+import wlibc
+import fuiscene
+import settings.setbase
+import settings.setcore
+
+export { draw, raw, signature, sync_scale, scale_apply, layout_say, canvas_key, hotplug_test, args_scan, selected, SCALE_STEPS }
+
+const MAX_HEADS: u64 = 8
+const FIX: u64 = 1024
+const SNAP: u64 = 48
+const PAD: u64 = 10
+const SCALE_STEPS: u64 = 4
+const EV_DOWN: u64 = 2
+const EV_UP: u64 = 3
+const EV_MOVE: u64 = 4
+const NO_HEAD: u64 = 99
+
+static mut cv_x: u64 = 0
+static mut cv_y: u64 = 0
+static mut cv_w: u64 = 0
+static mut cv_h: u64 = 0
+static mut cv_seen: u64 = 0
+static mut sel_head: u64 = 0
+static mut drag_head: u64 = NO_HEAD
+static mut drag_dx: u64 = 0
+static mut drag_dy: u64 = 0
+static mut drag_x: u64 = 0
+static mut drag_y: u64 = 0
+static mut hot_runs: u64 = 0
+static mut hot_test: u64 = 0
+static mut hot_next: u64 = 0
+static mut t_line: [u8; 24] = "settings: arrange cv=\0\0\0"
+static mut t_n: [u8; 4] = " n=\0"
+static mut t_h: [u8; 4] = " h\0\0"
+static mut t_eq: [u8; 2] = "=\0"
+static mut t_comma: [u8; 2] = ",\0"
+static mut t_drop: [u8; 27] = "settings: arrange drop hd=\0"
+static mut t_to: [u8; 5] = " to \0"
+static mut t_ok: [u8; 4] = " ok\0"
+static mut t_no: [u8; 8] = " denied\0"
+static mut t_sel: [u8; 24] = "settings: arrange sel=\0\0"
+static mut t_scale: [u8; 28] = "settings: arrange scale hd=\0"
+static mut t_arr: [u8; 4] = "arr\0"
+static mut t_hsc: [u8; 4] = "hsc\0"
+static mut t_pct: [u8; 6] = " pct=\0"
+
+fn canvas_key() -> u64 {
+    return setbase.K_ARR
+}
+
+fn selected() -> u64 {
+    return sel_head
+}
+
+fn present(hd: u64) -> bool {
+    return hd < MAX_HEADS && hd < wlibc.head_count() && wlibc.head_present(hd)
+}
+
+fn signature() -> u64 {
+    var s: u64 = wlibc.head_count() + 1
+    var hd: u64 = 0
+    while hd < MAX_HEADS && hd < wlibc.head_count() {
+        if wlibc.head_present(hd) {
+            var f: u64 = 0
+            while f < 6 {
+                s = s * 1099511628211 + wlibc.head_field(hd, f) + hd * 7 + f
+                f = f + 1
+            }
+        }
+        hd = hd + 1
+    }
+    return s
+}
+
+fn desk_w() -> u64 {
+    var w: u64 = wlibc.screen_w()
+    var hd: u64 = 0
+    while hd < MAX_HEADS && hd < wlibc.head_count() {
+        if present(hd) && wlibc.head_field(hd, 0) + wlibc.head_field(hd, 2) > w {
+            w = wlibc.head_field(hd, 0) + wlibc.head_field(hd, 2)
+        }
+        hd = hd + 1
+    }
+    return w
+}
+
+fn desk_h() -> u64 {
+    var h: u64 = wlibc.screen_h()
+    var hd: u64 = 0
+    while hd < MAX_HEADS && hd < wlibc.head_count() {
+        if present(hd) && wlibc.head_field(hd, 1) + wlibc.head_field(hd, 3) > h {
+            h = wlibc.head_field(hd, 1) + wlibc.head_field(hd, 3)
+        }
+        hd = hd + 1
+    }
+    return h
+}
+
+fn factor() -> u64 {
+    let dw: u64 = desk_w()
+    let dh: u64 = desk_h()
+    if dw == 0 || dh == 0 || cv_w < 2 * PAD + 8 || cv_h < 2 * PAD + 8 {
+        return FIX
+    }
+    let fx: u64 = (cv_w - 2 * PAD) * FIX / dw
+    let fy: u64 = (cv_h - 2 * PAD) * FIX / dh
+    if fx < fy {
+        return fx
+    }
+    return fy
+}
+
+fn centered(lo: u64, room: u64, used: u64) -> u64 {
+    if used >= room {
+        return lo
+    }
+    return lo + (room - used) / 2
+}
+
+fn origin_x(f: u64) -> u64 {
+    return centered(cv_x, cv_w, desk_w() * f / FIX)
+}
+
+fn origin_y(f: u64) -> u64 {
+    return centered(cv_y, cv_h, desk_h() * f / FIX)
+}
+
+fn head_rx(hd: u64) -> u64 {
+    if hd == drag_head {
+        return drag_x
+    }
+    return wlibc.head_field(hd, 0)
+}
+
+fn head_ry(hd: u64) -> u64 {
+    if hd == drag_head {
+        return drag_y
+    }
+    return wlibc.head_field(hd, 1)
+}
+
+fn draw(key: u64, x: u64, y: u64, w: u64, h: u64) {
+    cv_x = x
+    cv_y = y
+    cv_w = w
+    cv_h = h
+    cv_seen = cv_seen + 1
+    fuiscene.cv_round(x, y, w, h, 6, fuiscene.R_FIELD)
+    fuiscene.cv_ring(x, y, w, h, 6, fuiscene.R_BORDER)
+    let f: u64 = factor()
+    let ox: u64 = origin_x(f)
+    let oy: u64 = origin_y(f)
+    var hd: u64 = 0
+    while hd < MAX_HEADS && hd < wlibc.head_count() {
+        if present(hd) {
+            let rx: u64 = ox + head_rx(hd) * f / FIX
+            let ry: u64 = oy + head_ry(hd) * f / FIX
+            let rw: u64 = wlibc.head_field(hd, 2) * f / FIX
+            let rh: u64 = wlibc.head_field(hd, 3) * f / FIX
+            var role_text: u64 = fuiscene.R_TEXT
+            if hd == sel_head {
+                fuiscene.cv_round(rx, ry, rw, rh, 4, fuiscene.R_ACCENT)
+                role_text = fuiscene.R_ONFILL
+            } else {
+                fuiscene.cv_round(rx, ry, rw, rh, 4, fuiscene.R_SURFACE)
+                fuiscene.cv_ring(rx, ry, rw, rh, 4, fuiscene.R_BORDER)
+            }
+            var d: [u8; 4] = [0 as u8; 4]
+            d[0 as usize] = (49 + hd) as u8
+            let sz: u64 = fuiscene.sp(18)
+            let tw: u64 = fuiscene.text_width((&d[0 as usize]) as u64, sz)
+            var tx: u64 = rx
+            if tw < rw {
+                tx = rx + (rw - tw) / 2
+            }
+            fuiscene.text_role(tx, ry + rh / 2 + fuiscene.sp(6), rw, (&d[0 as usize]) as u64, sz, false, role_text)
+        }
+        hd = hd + 1
+    }
+}
+
+fn hit(px: u64, py: u64) -> u64 {
+    let f: u64 = factor()
+    let ox: u64 = origin_x(f)
+    let oy: u64 = origin_y(f)
+    var hd: u64 = MAX_HEADS
+    while hd > 0 {
+        hd = hd - 1
+        if present(hd) {
+            let rx: u64 = ox + wlibc.head_field(hd, 0) * f / FIX
+            let ry: u64 = oy + wlibc.head_field(hd, 1) * f / FIX
+            let rw: u64 = wlibc.head_field(hd, 2) * f / FIX
+            let rh: u64 = wlibc.head_field(hd, 3) * f / FIX
+            if px >= rx && px < rx + rw && py >= ry && py < ry + rh {
+                return hd
+            }
+        }
+    }
+    return NO_HEAD
+}
+
+fn inside(px: u64, py: u64) -> bool {
+    return cv_seen != 0 && px >= cv_x && px < cv_x + cv_w && py >= cv_y && py < cv_y + cv_h
+}
+
+fn near(a: u64, b: u64) -> bool {
+    if a > b {
+        return a - b < SNAP
+    }
+    return b - a < SNAP
+}
+
+fn snap_axis(pos: u64, size: u64, lo: u64, len: u64) -> u64 {
+    if near(pos, lo + len) {
+        return lo + len
+    }
+    if near(pos + size, lo) && lo >= size {
+        return lo - size
+    }
+    if near(pos, lo) {
+        return lo
+    }
+    if near(pos + size, lo + len) && lo + len >= size {
+        return lo + len - size
+    }
+    return pos
+}
+
+fn snapped(hd: u64, x: u64, y: u64, axis: u64) -> u64 {
+    var best: u64 = x
+    if axis == 1 {
+        best = y
+    }
+    let w: u64 = wlibc.head_field(hd, 2)
+    let h: u64 = wlibc.head_field(hd, 3)
+    var k: u64 = 0
+    var done: bool = false
+    while k < MAX_HEADS && k < wlibc.head_count() && !done {
+        if k != hd && present(k) {
+            let kx: u64 = wlibc.head_field(k, 0)
+            let ky: u64 = wlibc.head_field(k, 1)
+            let kw: u64 = wlibc.head_field(k, 2)
+            let kh: u64 = wlibc.head_field(k, 3)
+            if axis == 0 {
+                let c: u64 = snap_axis(x, w, kx, kw)
+                if c != x {
+                    best = c
+                    done = true
+                }
+            } else {
+                let c: u64 = snap_axis(y, h, ky, kh)
+                if c != y {
+                    best = c
+                    done = true
+                }
+            }
+        }
+        k = k + 1
+    }
+    return best
+}
+
+fn clamp(v: u64, size: u64, limit: u64) -> u64 {
+    if v + size > limit {
+        if limit >= size {
+            return limit - size
+        }
+        return 0
+    }
+    return v
+}
+
+fn to_real(px: u64, py: u64, hd: u64) {
+    let f: u64 = factor()
+    let ox: u64 = origin_x(f)
+    let oy: u64 = origin_y(f)
+    var rx: u64 = 0
+    var ry: u64 = 0
+    if px >= ox + drag_dx * f / FIX {
+        rx = (px - ox - drag_dx * f / FIX) * FIX / f
+    }
+    if py >= oy + drag_dy * f / FIX {
+        ry = (py - oy - drag_dy * f / FIX) * FIX / f
+    }
+    drag_x = clamp(rx, wlibc.head_field(hd, 2), desk_w())
+    drag_y = clamp(ry, wlibc.head_field(hd, 3), desk_h())
+}
+
+fn say_drop(hd: u64, x: u64, y: u64, ok: bool) {
+    setcore.say((&t_drop[0 as usize]) as u64)
+    setcore.sayn(hd)
+    setcore.say((&t_to[0 as usize]) as u64)
+    setcore.sayn(x)
+    setcore.say((&t_comma[0 as usize]) as u64)
+    setcore.sayn(y)
+    if ok {
+        setcore.say((&t_ok[0 as usize]) as u64)
+    } else {
+        setcore.say((&t_no[0 as usize]) as u64)
+    }
+    setcore.nl()
+}
+
+fn say_sel() {
+    setcore.say((&t_sel[0 as usize]) as u64)
+    setcore.sayn(sel_head)
+    setcore.nl()
+}
+
+fn sync_scale() {
+    if !present(sel_head) {
+        sel_head = 0
+        var hd: u64 = 0
+        while hd < MAX_HEADS && hd < wlibc.head_count() {
+            if present(hd) {
+                sel_head = hd
+                break
+            }
+            hd = hd + 1
+        }
+    }
+    let pct: u64 = wlibc.head_scale(sel_head)
+    var ix: u64 = 0
+    if pct >= 200 {
+        ix = 3
+    } else if pct >= 150 {
+        ix = 2
+    } else if pct >= 125 {
+        ix = 1
+    }
+    setbase.kval[(setbase.K_HSC) as usize] = ix
+}
+
+fn pct_of(ix: u64) -> u64 {
+    if ix == 1 {
+        return 125
+    }
+    if ix == 2 {
+        return 150
+    }
+    if ix == 3 {
+        return 200
+    }
+    return 100
+}
+
+fn scale_apply(ix: u64) {
+    let pct: u64 = pct_of(ix)
+    let ok: bool = wlibc.head_scale_set(sel_head, pct)
+    setcore.say((&t_scale[0 as usize]) as u64)
+    setcore.sayn(sel_head)
+    setcore.say((&t_pct[0 as usize]) as u64)
+    setcore.sayn(pct)
+    if ok {
+        setcore.say((&t_ok[0 as usize]) as u64)
+    } else {
+        setcore.say((&t_no[0 as usize]) as u64)
+    }
+    setcore.nl()
+    sync_scale()
+}
+
+fn raw(kind: u64, x: u64, y: u64, btn: u64, key: u64) {
+    if setbase.active_tab != setbase.R_SCREEN3 {
+        return
+    }
+    if kind == EV_DOWN && inside(x, y) {
+        let hd: u64 = hit(x, y)
+        fuiscene.raw_take()
+        if hd == NO_HEAD {
+            return
+        }
+        if hd != sel_head {
+            sel_head = hd
+            sync_scale()
+            say_sel()
+        }
+        let f: u64 = factor()
+        let rx: u64 = origin_x(f) + wlibc.head_field(hd, 0) * f / FIX
+        let ry: u64 = origin_y(f) + wlibc.head_field(hd, 1) * f / FIX
+        drag_dx = (x - rx) * FIX / f
+        drag_dy = (y - ry) * FIX / f
+        drag_head = hd
+        drag_x = wlibc.head_field(hd, 0)
+        drag_y = wlibc.head_field(hd, 1)
+        fuiscene.refresh()
+        return
+    }
+    if drag_head == NO_HEAD {
+        return
+    }
+    if kind == EV_MOVE {
+        fuiscene.raw_take()
+        to_real(x, y, drag_head)
+        fuiscene.refresh()
+        return
+    }
+    if kind == EV_UP {
+        fuiscene.raw_take()
+        let hd: u64 = drag_head
+        to_real(x, y, hd)
+        var nx: u64 = snapped(hd, drag_x, drag_y, 0)
+        var ny: u64 = snapped(hd, drag_x, drag_y, 1)
+        nx = clamp(nx, wlibc.head_field(hd, 2), desk_w())
+        ny = clamp(ny, wlibc.head_field(hd, 3), desk_h())
+        drag_head = NO_HEAD
+        var ok: bool = false
+        if nx != wlibc.head_field(hd, 0) || ny != wlibc.head_field(hd, 1) {
+            ok = wlibc.head_place(hd, nx, ny)
+            say_drop(hd, nx, ny, ok)
+        }
+        fuiscene.refresh()
+    }
+}
+
+fn layout_say() {
+    if cv_seen == 0 {
+        return
+    }
+    setcore.say((&t_line[0 as usize]) as u64)
+    setcore.sayn(cv_x)
+    setcore.say((&t_comma[0 as usize]) as u64)
+    setcore.sayn(cv_y)
+    setcore.say((&t_comma[0 as usize]) as u64)
+    setcore.sayn(cv_w)
+    setcore.say((&t_comma[0 as usize]) as u64)
+    setcore.sayn(cv_h)
+    setcore.say((&t_n[0 as usize]) as u64)
+    setcore.sayn(wlibc.head_count())
+    let f: u64 = factor()
+    let ox: u64 = origin_x(f)
+    let oy: u64 = origin_y(f)
+    var hd: u64 = 0
+    while hd < MAX_HEADS && hd < wlibc.head_count() {
+        if present(hd) {
+            setcore.say((&t_h[0 as usize]) as u64)
+            setcore.sayn(hd)
+            setcore.say((&t_eq[0 as usize]) as u64)
+            setcore.sayn(ox + wlibc.head_field(hd, 0) * f / FIX)
+            setcore.say((&t_comma[0 as usize]) as u64)
+            setcore.sayn(oy + wlibc.head_field(hd, 1) * f / FIX)
+            setcore.say((&t_comma[0 as usize]) as u64)
+            setcore.sayn(wlibc.head_field(hd, 2) * f / FIX)
+            setcore.say((&t_comma[0 as usize]) as u64)
+            setcore.sayn(wlibc.head_field(hd, 3) * f / FIX)
+            setcore.say((&t_comma[0 as usize]) as u64)
+            setcore.sayn(wlibc.head_field(hd, 0))
+            setcore.say((&t_comma[0 as usize]) as u64)
+            setcore.sayn(wlibc.head_field(hd, 1))
+        }
+        hd = hd + 1
+    }
+    setcore.nl()
+    setcore.rect_say((&t_arr[0 as usize]) as u64, setbase.K_ARR)
+    setcore.rect_say((&t_hsc[0 as usize]) as u64, setbase.K_HSC)
+}
+
+fn args_scan(args: u64) {
+    var a_hot: [u8; 10] = "hotplug=1\0"
+    let argc: u64 = ulib.arg_count(args)
+    var ai: u64 = 1
+    while ai < argc {
+        if ulib.streq(ulib.arg_at(args, ai), (&a_hot[0 as usize]) as u64) {
+            hot_test = 1
+        }
+        ai = ai + 1
+    }
+}
+
+fn hotplug_test(now: u64) {
+    if hot_test == 0 || hot_runs >= 2 || now < hot_next {
+        return
+    }
+    hot_runs = hot_runs + 1
+    hot_next = now + 400
+    let _h: bool = wlibc.head_hot(1)
+}
