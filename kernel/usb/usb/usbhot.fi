@@ -12,8 +12,6 @@ import usb.usb.usbwatch
 
 const S_PEND: u64 = 0x128
 
-const S_HUBDUE: u64 = 0xD8
-
 const S_HUBTRY: u64 = 0xE0
 
 const S_HUBHITS: u64 = 0xE8
@@ -115,7 +113,8 @@ fn unplug_check(state: u64) {
     }
 }
 
-fn hub_rescan(state: u64) {
+fn hub_rescan(state: u64) -> u64 {
+    var found: u64 = 0
     var d: u64 = 0
     while d < usbbase.MAX_DEV {
         if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
@@ -125,34 +124,43 @@ fn hub_rescan(state: u64) {
                     usbbind.hub_start(state, d)
                 }
             } else {
-                hub_rescan_ports(state, d)
+                found = found + hub_rescan_ports(state, d)
             }
         }
         d = d + 1
     }
+    return found
 }
 
-fn hub_rescan_ports(state: u64, d: u64) {
+fn hub_rescan_ports(state: u64, d: u64) -> u64 {
+    var found: u64 = 0
     let n: u64 = usbdev.dg(state, d, usbbase.D_PORTS)
     let hidx: u64 = usbdiag.info(xhci.unit(state), usbdiag.I_HUBS) - 1
     var p: u64 = 1
     while p <= n {
         if usbbind.hub_child_present(state, d, p) {
             let live: u64 = usbbind.hub_port_read(state, d, p)
+            if live != usbbase.HUB_STATUS_ERR {
+                found = found + usbbind.hub_ack(state, d, p, live)
+            }
             if live != usbbase.HUB_STATUS_ERR && ((live & 1) == 0 || (live & (1 << 16)) != 0) {
                 if (live & (1 << 16)) != 0 {
                     usbbind.hub_feature(state, d, false, usbbase.PF_C_CONNECTION, p)
                 }
                 usbdev.s(state, S_HUBTRY, 0)
                 usbbind.hub_child_gone(state, d, p)
+                found = found + 1
             }
         }
         if !usbbind.hub_child_present(state, d, p) && usbdev.g(state, S_HUBTRY) < HUB_TRY_MAX {
             let st: u64 = usbbind.hub_port_status(state, d, p)
+            found = found + usbbind.hub_ack(state, d, p, st)
             if (st & (1 << 16)) != 0 {
                 usbbind.hub_feature(state, d, false, usbbase.PF_C_CONNECTION, p)
+                found = found + 1
             }
             if (st & 1) != 0 {
+                found = found + 1
                 usbdev.s(state, S_HUBTRY, usbdev.g(state, S_HUBTRY) + 1)
                 usbdev.s(state, S_HUBHITS, usbdev.g(state, S_HUBHITS) + 1)
                 usbbind.hub_probe_port(state, d, p, hidx, st)
@@ -160,6 +168,27 @@ fn hub_rescan_ports(state: u64, d: u64) {
         }
         p = p + 1
     }
+    return found
+}
+
+const HUB_MISS_MAX: u64 = 3
+
+fn hubs_covered(state: u64) -> bool {
+    if usbdev.g(state, usbbase.S_HUBMISS) >= HUB_MISS_MAX || usbbind.hub_int_disabled() {
+        return false
+    }
+    var live: u64 = 0
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
+            live = live + 1
+            if !usbbind.hub_int_armed(state, d) {
+                return false
+            }
+        }
+        d = d + 1
+    }
+    return live != 0
 }
 
 fn port_watch(state: u64) {
@@ -177,12 +206,12 @@ fn port_watch(state: u64) {
     if due != 0 {
         usbdev.usbdiag_snap_all(state, xhci.unit(state), due)
     }
-    var rescan: bool = usbdiag.rescan_due(kstate.get(state, kstate.TICKS), usbdev.g(state, usbbase.S_HUBS))
+    var rescan: bool = usbdiag.rescan_due(kstate.get(state, kstate.TICKS), usbdev.g(state, usbbase.S_HUBS), hubs_covered(state))
     if kstate.mode_on(state, kstate.M_NOUSBRESCAN) {
         rescan = false
     }
     if rescan && usbdev.g(state, usbbase.S_HUBS) != 0 {
-        usbdev.s(state, S_HUBDUE, 1)
+        usbdev.s(state, usbbase.S_HUBDUE, 1)
     }
     var p: u64 = 1
     while p <= n && p < 64 {
@@ -210,7 +239,8 @@ fn silence_check(state: u64) {
     var still: bool = false
     var d: u64 = 0
     while d < usbbase.MAX_DEV {
-        if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_INTDCI) != 0 {
+        if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_INTDCI) != 0
+            && usbdev.dg(state, d, usbbase.D_DRIVER) != usbbase.DRV_HUB {
             let now: u64 = usbdev.dg(state, d, usbbase.D_REPS)
             if now == usbdev.dg(state, d, D_WACH) {
                 still = true
@@ -227,6 +257,7 @@ fn silence_check(state: u64) {
     var e: u64 = 0
     while e < usbbase.MAX_DEV {
         if usbdev.dg(state, e, usbbase.D_USED) != 0 && usbdev.dg(state, e, usbbase.D_INTDCI) != 0
+            && usbdev.dg(state, e, usbbase.D_DRIVER) != usbbase.DRV_HUB
             && usbdev.dg(state, e, usbbase.D_REPS) == 0 {
             usbdev.ds(state, e, D_STUMM, usbdev.dg(state, e, D_STUMM) + 1)
             if usbdev.dg(state, e, D_STUMM) >= WATCH_LIMIT
@@ -260,12 +291,12 @@ fn hotplug_work(state: u64) {
         return
     }
     let is_open: u64 = usbdev.g(state, S_PEND) | retry_pending(state)
-    let hubdue: u64 = usbdev.g(state, S_HUBDUE)
+    let hubdue: u64 = usbdev.g(state, usbbase.S_HUBDUE)
     if is_open == 0 && hubdue == 0 {
         return
     }
     usbdev.s(state, S_PEND, 0)
-    usbdev.s(state, S_HUBDUE, 0)
+    usbdev.s(state, usbbase.S_HUBDUE, 0)
     if is_open != 0 {
         chdiag.bump(state, chdiag.F_PASSES)
     }
@@ -279,7 +310,13 @@ fn hotplug_work(state: u64) {
         p = p + 1
     }
     if hubdue != 0 {
-        hub_rescan(state)
+        let waiting: u64 = usbbind.hub_waiting()
+        let found: u64 = hub_rescan(state)
+        if waiting != 0 {
+            usbbind.hub_rearm(state, found)
+        } else if found != 0 {
+            usbdev.s(state, usbbase.S_HUBMISS, usbdev.g(state, usbbase.S_HUBMISS) + 1)
+        }
     }
     usbdev.s(state, usbbase.S_BUSY, 0)
 }

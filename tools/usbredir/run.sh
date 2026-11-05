@@ -12,7 +12,7 @@
 #   * hot plug AFTER boot (usbhold window), unplug and replug in the same window
 # NEGATIVE CONTROLS: no gadget -> no driver line, no lease; unpatched wiring would show up as missing driver lines.
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12 ch336-hub-cycles24}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12 ch336-hub-cycles24 hubhot-nohubint ch336-hub-int ch336-hub-noint}"
 source "$HERE/tools/usbredir/common.sh"
 for c in $CASES; do
     case "$c" in
@@ -193,8 +193,30 @@ for c in $CASES; do
     hubhot-norescan)
         BEHIND_HUB=1 XWORDS="usbnorescan" GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run hn ch336 hot s_hubhot.sh
         chk hn "hold window ran" 'k17: hold'
-        nochk hn "no dongle found without the rescan" 'usb: ch336 id=1a86:5394'
+        chk hn "dongle found behind the hub by the hub interrupt alone" 'usb: ch336 id=1a86:5394'
+        chk hn "hub interrupt rescan ran" 'usb: hub int dev='
         chk hn "script reached the end" '==END=='
+        panics hn
+        ;;
+    hubhot-nohubint)
+        BEHIND_HUB=1 XWORDS="usbnorescan nohubint" GARGS="--phy-boot down" BASEW="nokbd nosched vfs" run hi ch336 hot s_hubhot.sh
+        chk hi "hold window ran" 'k17: hold'
+        nochk hi "no dongle found without the rescan and without the hub interrupt" 'usb: ch336 id=1a86:5394'
+        nochk hi "no hub interrupt rescan" 'usb: hub int dev='
+        chk hi "script reached the end" '==END=='
+        ;;
+    ch336-hub-int)
+        BEHIND_HUB=1 XWORDS="usbholdticks=9000 usbnorescan" GARGS="--phy-boot down --cycles 4 --gap-ms 400 --up-secs 3" BASEW="nokbd nosched vfs" run chj ch336 hot s_hubhot.sh
+        chkn chj "dongle bound again after every replug with the poll off" 'usb: port=.*driver=ch336' 5
+        chkn chj "every unplug noticed with the poll off" 'usb: unplug port=' 4
+        chkn chj "hub interrupt rescans" 'usb: hub int dev=' 8
+        panics chj
+        ;;
+    ch336-hub-noint)
+        BEHIND_HUB=1 XWORDS="usbholdticks=4000 usbnorescan nohubint" GARGS="--phy-boot down --cycles 2 --gap-ms 400 --up-secs 3" BASEW="nokbd nosched vfs" run chq ch336 hot s_hubhot.sh
+        nochk chq "no unplug noticed with the poll and the hub interrupt off" 'usb: unplug port='
+        nochk chq "no hub interrupt rescan" 'usb: hub int dev='
+        panics chk2
         ;;
     ch336-hub-replug)
         BEHIND_HUB=1 XWORDS="usbholdticks=5000" GARGS="--phy-boot down --cycles 3 --gap-ms 3000" BASEW="nokbd nosched vfs" run chr ch336 hot s_hubhot.sh

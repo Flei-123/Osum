@@ -760,8 +760,10 @@ fn service(state: u64) {
                     if cc == xhci.CC_SUCCESS || cc == xhci.CC_SHORT {
                         usbdev.s(state, usbbase.S_REPORTS, usbdev.g(state, usbbase.S_REPORTS) + 1)
                         usbdev.ds(state, d, usbbase.D_REPS, usbdev.dg(state, d, usbbase.D_REPS) + 1)
-                        usbdev.raw_remember(state, d)
-                        usbdev.deliver(state, d)
+                        if usbdev.dg(state, d, usbbase.D_DRIVER) != usbbase.DRV_HUB {
+                            usbdev.raw_remember(state, d)
+                            usbdev.deliver(state, d)
+                        }
                     } else {
                         usbdev.ds(state, d, D_ERRS, usbdev.dg(state, d, D_ERRS) + 1)
                         if xhci.ep_halted(state, usbdev.dg(state, d, usbbase.D_SLOT),
@@ -771,7 +773,11 @@ fn service(state: u64) {
                             usbdev.s(state, S_HEAL, usbdev.g(state, S_HEAL) + 1)
                         }
                     }
-                    usbdev.arm(state, d)
+                    if usbdev.dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
+                        hub_event(state, d)
+                    } else {
+                        usbdev.arm(state, d)
+                    }
                 }
             }
         }
@@ -1965,6 +1971,9 @@ fn hub_start(state: u64, d: u64) {
     }
     serial.nl()
     hub_scan(state, d)
+    if ok {
+        hub_int_arm(state, d)
+    }
 }
 
 fn hub_scan(state: u64, d: u64) {
@@ -2038,4 +2047,151 @@ fn hub_child_present(state: u64, d: u64, p: u64) -> bool {
         i = i + 1
     }
     return false
+}
+
+const HUBINT_IDLE_MAX: u64 = 12
+
+const HUB_SELF_FEATURES: u64 = 2
+
+static mut hub_wait: [u64; 4] = [0 as u64; 4]
+
+static mut hub_evt_total: u64 = 0
+
+static mut hub_idle_events: u64 = 0
+
+static mut hub_int_off: u64 = 0
+
+fn hub_event(state: u64, d: u64) {
+    if d < usbbase.MAX_DEV {
+        hub_wait[d as usize] = 1
+    }
+    hub_evt_total = hub_evt_total + 1
+    usbdev.s(state, usbbase.S_HUBDUE, 1)
+}
+
+fn hub_waiting() -> u64 {
+    var n: u64 = 0
+    var d: u64 = 0
+    while d < usbbase.MAX_DEV {
+        n = n + hub_wait[d as usize]
+        d = d + 1
+    }
+    return n
+}
+
+fn hub_int_events() -> u64 {
+    return hub_evt_total
+}
+
+fn hub_int_armed(state: u64, d: u64) -> bool {
+    return usbdev.dg(state, d, usbbase.D_ARMS) != 0 && hub_int_off == 0
+}
+
+fn hub_int_arm(state: u64, d: u64) {
+    if kstate.mode_on(state, kstate.M_NOHUBINT) || hub_int_off != 0 {
+        return
+    }
+    let slot: u64 = usbdev.dg(state, d, usbbase.D_SLOT)
+    let dci: u64 = usbdev.dg(state, d, usbbase.D_INTDCI)
+    if dci == 0 {
+        return
+    }
+    let i: u64 = xhci.ep_find(state, slot, dci)
+    if i >= xhci.MAX_EP {
+        return
+    }
+    if d < usbbase.MAX_DEV {
+        hub_wait[d as usize] = 0
+    }
+    usbdev.ds(state, d, usbbase.D_SEQ, xhci.ep_seq(state, i))
+    usbdev.ring_fresh(d)
+    usbdev.arm(state, d)
+}
+
+fn hub_ack(state: u64, d: u64, p: u64, st: u64) -> u64 {
+    var n: u64 = 0
+    var b: u64 = 1
+    while b <= 4 {
+        if (st & (1 << (16 + b))) != 0 {
+            hub_feature(state, d, false, 16 + b, p)
+            n = n + 1
+        }
+        b = b + 1
+    }
+    if usbdev.dg(state, d, usbbase.D_SPEED) >= 4 {
+        if (st & (1 << 21)) != 0 {
+            hub_feature(state, d, false, 29, p)
+            n = n + 1
+        }
+        if (st & (1 << 22)) != 0 {
+            hub_feature(state, d, false, 25, p)
+            n = n + 1
+        }
+        if (st & (1 << 23)) != 0 {
+            hub_feature(state, d, false, 26, p)
+            n = n + 1
+        }
+    }
+    return n
+}
+
+fn hub_ack_self(state: u64, d: u64) {
+    let p: u64 = state + usbbase.HUB_OFF + 48
+    regio.zero64(p, 8)
+    let slot: u64 = usbdev.dg(state, d, usbbase.D_SLOT)
+    if xhci.control(state, slot, 0xA0, REQ_GET_STATUS, 0, 0, 4, p, true) < 4 {
+        return
+    }
+    let ch: u64 = usbdev.b16(p, 2)
+    var f: u64 = 0
+    while f < HUB_SELF_FEATURES {
+        if (ch & (1 << f)) != 0 {
+            xhci.control(state, slot, 0x20, REQ_CLEAR_FEATURE, f, 0, 0, 0, false)
+        }
+        f = f + 1
+    }
+}
+
+fn hub_rearm(state: u64, found: u64) {
+    var s_i: [u8; 18] = "usb: hub int dev=\0"
+    var s_f: [u8; 8] = " found=\0"
+    var s_e: [u8; 9] = " events=\0"
+    var s_o: [u8; 22] = "usb: hub int disabled\0"
+    var d: u64 = 0
+    var any: bool = false
+    while d < usbbase.MAX_DEV {
+        if hub_wait[d as usize] != 0 {
+            hub_wait[d as usize] = 0
+            if usbdev.dg(state, d, usbbase.D_USED) != 0 && usbdev.dg(state, d, usbbase.D_DRIVER) == usbbase.DRV_HUB {
+                any = true
+                serial.puts((&s_i[0]) as u64)
+                serial.dec(d)
+                serial.puts((&s_f[0]) as u64)
+                serial.dec(found)
+                serial.puts((&s_e[0]) as u64)
+                serial.dec(hub_evt_total)
+                serial.nl()
+                hub_ack_self(state, d)
+                hub_int_arm(state, d)
+            }
+        }
+        d = d + 1
+    }
+    if !any {
+        return
+    }
+    if found == 0 {
+        hub_idle_events = hub_idle_events + 1
+        if hub_idle_events > HUBINT_IDLE_MAX && hub_int_off == 0 {
+            hub_int_off = 1
+            serial.puts((&s_o[0]) as u64)
+            serial.nl()
+        }
+    } else {
+        hub_idle_events = 0
+    }
+}
+
+fn hub_int_disabled() -> bool {
+    return hub_int_off != 0
 }
