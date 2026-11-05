@@ -1,0 +1,98 @@
+profile kernel
+
+import ulib
+import libc.text
+
+export { restart }
+
+const RN_SLOTS: u64 = 128
+const RN_KILL_CODE: u64 = 137
+
+static mut RN_P_BIN: [u8; 6] = "/bin/\0"
+static mut RN_M_KILLED: [u8; 30] = "swap: stopped old instances: \0"
+static mut RN_M_START: [u8; 15] = "swap: started \0"
+static mut RN_M_FAIL: [u8; 19] = "swap: start failed\0"
+static mut RN_M_PID: [u8; 6] = " pid \0"
+static mut RN_NAME: [u8; 17] = [0 as u8; 17]
+static mut RN_ARGV: [u64; 2] = [0 as u64; 2]
+
+fn rn_at(p: u64, i: u64) -> u64 {
+    return (*((p + i) as *mut u8)) as u64
+}
+
+fn rn_base(path: u64) -> u64 {
+    var i: u64 = 0
+    var last: u64 = 0
+    while rn_at(path, i) != 0 {
+        if rn_at(path, i) == 47 {
+            last = i + 1
+        }
+        i = i + 1
+    }
+    return path + last
+}
+
+fn rn_load_name(slot: u64) {
+    let n0: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME0, 0)
+    let n1: u64 = ulib.sys(ulib.SYS_PSTAT, slot, ulib.P_NAME1, 0)
+    var k: u64 = 0
+    while k < 8 {
+        RN_NAME[k as usize] = ((n0 >> (k * 8)) & 255) as u8
+        RN_NAME[(k + 8) as usize] = ((n1 >> (k * 8)) & 255) as u8
+        k = k + 1
+    }
+    RN_NAME[16 as usize] = 0 as u8
+}
+
+fn rn_same(base: u64) -> bool {
+    var len: u64 = text.length(base)
+    if len > 16 {
+        len = 16
+    }
+    return ulib.strneq((&RN_NAME[0 as usize]) as u64, base, len) && rn_at((&RN_NAME[0 as usize]) as u64, len) == 0
+}
+
+fn rn_stop_old(dst: u64) -> u64 {
+    let base: u64 = rn_base(dst)
+    let me: u64 = ulib.sys(ulib.SYS_GETPID, 0, 0, 0)
+    var stopped: u64 = 0
+    var i: u64 = 0
+    while i < RN_SLOTS {
+        let st: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_STATE, 0)
+        if !ulib.bad(st) && st != 0 {
+            let pid: u64 = ulib.sys(ulib.SYS_PSTAT, i, ulib.P_PID, 0)
+            if pid > 1 && pid != me {
+                rn_load_name(i)
+                if rn_same(base) {
+                    ulib.sys(ulib.SYS_KILL, pid, RN_KILL_CODE, 0)
+                    stopped = stopped + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return stopped
+}
+
+fn restart(dst: u64) -> u64 {
+    var stopped: u64 = 0
+    if ulib.strneq(dst, (&RN_P_BIN[0 as usize]) as u64, 5) {
+        stopped = rn_stop_old(dst)
+    }
+    ulib.say((&RN_M_KILLED[0 as usize]) as u64)
+    ulib.pad(stopped, 1)
+    ulib.nl()
+    RN_ARGV[0 as usize] = dst
+    let pid: u64 = ulib.spawn_app(dst, (&RN_ARGV[0 as usize]) as u64, 1)
+    if ulib.bad(pid) {
+        ulib.say((&RN_M_FAIL[0 as usize]) as u64)
+        ulib.nl()
+        return 1
+    }
+    ulib.say((&RN_M_START[0 as usize]) as u64)
+    ulib.say(dst)
+    ulib.say((&RN_M_PID[0 as usize]) as u64)
+    ulib.pad(pid, 1)
+    ulib.nl()
+    return 0
+}

@@ -16,6 +16,7 @@ mkdir -p "$T/bin"
 bash tools/sync/build.sh "$T/bin" 0 $PROGS > "$T/b.txt" 2>&1 && ok "programs build" || { bad "programs build"; head -15 "$T/b.txt"; echo "CTLSWAP: $pass passed, $fail failed"; exit 1; }
 ./tools/build-kernel.sh "$T/k0.img" --stufe 0 > "$T/k.txt" 2>&1 && ok "kernel builds" || { bad "kernel build"; echo "CTLSWAP: $pass passed, $fail failed"; exit 1; }
 printf 'CAT-FILE-BODY\n' > "$T/hello.txt"
+split -b 40000 -d -a 2 "$T/bin/cat.elf" "$T/ptest.p"
 cat > "$T/s0.sh" <<'EOS'
 echo ==A==
 tgt /t/hello.txt
@@ -53,11 +54,18 @@ echo ==E==
 jarvisctl swap /tmp/new /bin/fresh
 fresh /t/hello.txt
 jarvisctl swap --undo /bin/fresh
+echo ==F==
+jarvisctl swap /tmp/ptest.p0 /bin/pt
+pt /t/hello.txt
+ls /tmp
+echo ==G==
+jarvisctl swap /tmp/newe /bin/rn --run
+jarvisctl swap /tmp/newe /bin/rn --run
 echo ==END==
 EOS
 bash tools/mkfsfi/mkfs.sh build "$T/d.img" 20000 /bin/ /t/ /tmp/ /proc/ /dev/ /system/ /etc/ /var/ /apps/ /apps/g.osp/ \
     $(for p in $PROGS; do echo "/bin/$p=$T/bin/$p.elf"; done) \
-    "/bin/tgt=$T/bin/echo.elf" "/apps/g.osp/start=$T/bin/echo.elf" "/tmp/new=$T/bin/cat.elf" "/etc/hello.txt=$T/hello.txt" \
+    "/bin/tgt=$T/bin/echo.elf" "/apps/g.osp/start=$T/bin/echo.elf" "/tmp/new=$T/bin/cat.elf" "/tmp/newe=$T/bin/echo.elf" $(for f in "$T"/ptest.p[0-9][0-9]; do echo "/tmp/$(basename "$f")=$f"; done) "/etc/hello.txt=$T/hello.txt" \
     "/t/hello.txt=$T/hello.txt" "/t/s0.sh=$T/s0.sh" "/t/s1.sh=$T/s1.sh" "/t/s2.sh=$T/s2.sh" "/t/s3.sh=$T/s3.sh" > "$T/mkfs.txt" 2>&1 || tail -3 "$T/mkfs.txt"
 ACC=tcg; [ -e /dev/kvm ] && ACC=kvm
 timeout 200 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k0.img" -m 512 \
@@ -68,7 +76,7 @@ timeout 200 qemu-system-x86_64 -accel "$ACC" -smp 1 -kernel "$T/k0.img" -m 512 \
 tr -cd '\11\12\15\40-\176' < "$T/o.txt" > "$T/o.klar"
 cp "$T/o.klar" "${CTLSWAP_OUT:-/dev/null}" 2>/dev/null
 part() { awk -v a="==$1==" -v b="==$2==" 'index($0,a){f=1;next} index($0,b){f=0} f' "$T/o.klar" > "$T/p.$1"; }
-part A B; part B C; part C D; part D E; part E END
+part A B; part B C; part C D; part D E; part E F; part F G; part G END
 has "$T/p.A" "/t/hello.txt" "A: before the swap tgt is echo (prints its argument)"
 has "$T/p.A" "swap: ok " "A: swap reports ok"
 has "$T/p.A" "swap: previous file kept as /bin/tgt.old" "A: previous file kept as .old"
@@ -86,6 +94,12 @@ hasnt "$T/p.D" "CAT-FILE-BODY" "D: no refused call changed tgt"
 has "$T/p.D" "usage: jarvisctl swap" "D: missing argument prints usage"
 has "$T/p.E" "swap: destination was new, there is no previous file" "E: new destination works"
 has "$T/p.E" "CAT-FILE-BODY" "E: new destination runs"
+has "$T/p.F" "swap: ok /bin/pt" "F: parts assembled into one binary"
+has "$T/p.F" "CAT-FILE-BODY" "F: assembled binary runs"
+hasnt "$T/p.F" "ptest.p00" "F: parts removed after the swap"
+has "$T/p.G" "swap: started /bin/rn pid" "G: --run starts the new program"
+has "$T/p.G" "swap: stopped old instances: " "G: --run reports stopped instances"
+hasnt "$T/p.G" "start failed" "G: start did not fail"
 grep -aiqE 'panic|kernel fault|page fault|exception' "$T/o.klar" && bad "fault on the serial line" || ok "0 faults"
 grep -aq '^kernel: done' "$T/o.klar" && ok "the kernel finished" || bad "kernel did not finish"
 echo "CTLSWAP: $pass passed, $fail failed"
