@@ -301,7 +301,7 @@ class Fahrer:
 
     def warteneu(self, muster, deadline=25.0):
         r = re.compile(muster)
-        n0 = getattr(self, "marke_n", 0)
+        n0 = getattr(self, "mark_n", 0)
         bis = time.time() + deadline
         while time.time() < bis:
             if len(r.findall(read_2(self.serial))) > n0:
