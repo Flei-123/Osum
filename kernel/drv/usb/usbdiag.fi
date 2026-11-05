@@ -7,7 +7,9 @@ export {
     I_STATE, I_PORTS, I_SLOTS, I_STS, I_CMDS, I_EVENTS, I_ERRORS, I_NDEV, I_BDF, I_IDS, I_HUBS, I_HUBPORTS, I_PENDING, I_RESETFAIL,
     reset_all, begin_pass, set_info, info, snap, snap_get, snap_valid, set_proto, proto, set_cur, cur_hc, cur_port, step, mask, fail_step, fail_value,
     bound, hub_seen, hub_port, hub_port_get, event, event_count, event_get, passes, set_choice, choice, usb3_warm, usb3_warm_count,
-    LK_HCRST, LK_HALT, LK_PPSET, LK_PPCLR, LK_PSC, rescan_due, rescan_count, log, log_count, log_get, count_of, late_of
+    LK_HCRST, LK_HALT, LK_PPSET, LK_PPCLR, LK_PSC, rescan_due, rescan_count, log, log_count, log_get, count_of, late_of,
+    EK_PSC_IRQ, EK_PSC_POLL, EK_ATTACH_BEGIN, EK_ATTACH_OK, EK_ATTACH_FAIL, EK_DETACH, EK_HUB_CHG, EK_CTRL_LOST, EK_CTRL_RESUME,
+    EVR_N, set_route, cur_route, evr_put, evr_count, evr_get, evr_name, evr_serial_ok, I_INITFAIL
 }
 
 const MAX_HC: u64 = 4
@@ -51,7 +53,20 @@ const I_HUBS: u64 = 10
 const I_HUBPORTS: u64 = 11
 const I_PENDING: u64 = 12
 const I_RESETFAIL: u64 = 13
+const I_INITFAIL: u64 = 14
 const I_N: u64 = 16
+
+const EVR_N: u64 = 64
+const EVR_SERIAL_CAP: u64 = 256
+const EK_PSC_IRQ: u64 = 1
+const EK_PSC_POLL: u64 = 2
+const EK_ATTACH_BEGIN: u64 = 3
+const EK_ATTACH_OK: u64 = 4
+const EK_ATTACH_FAIL: u64 = 5
+const EK_DETACH: u64 = 6
+const EK_HUB_CHG: u64 = 7
+const EK_CTRL_LOST: u64 = 8
+const EK_CTRL_RESUME: u64 = 9
 
 static mut hc_info: [u64; 64] = [0 as u64; 64]
 static mut psc_snap: [u64; 640] = [0 as u64; 640]
@@ -79,6 +94,24 @@ static mut next_rescan: u64 = 0
 static mut rescan_n: u64 = 0
 static mut t0_ticks: u64 = 0
 static mut t_done: u64 = 0
+static mut evr_tick: [u64; 64] = [0 as u64; 64]
+static mut evr_kind: [u64; 64] = [0 as u64; 64]
+static mut evr_path: [u64; 64] = [0 as u64; 64]
+static mut evr_psc: [u64; 64] = [0 as u64; 64]
+static mut evr_sts: [u64; 64] = [0 as u64; 64]
+static mut evr_arg: [u64; 64] = [0 as u64; 64]
+static mut evr_n: u64 = 0
+static mut cur_rt: u64 = 0
+static mut EN0: [u8; 2] = "?\0"
+static mut EN1: [u8; 8] = "PSC-IRQ\0"
+static mut EN2: [u8; 9] = "PSC-POLL\0"
+static mut EN3: [u8; 13] = "ATTACH-BEGIN\0"
+static mut EN4: [u8; 10] = "ATTACH-OK\0"
+static mut EN5: [u8; 12] = "ATTACH-FAIL\0"
+static mut EN6: [u8; 7] = "DETACH\0"
+static mut EN7: [u8; 8] = "HUB-CHG\0"
+static mut EN8: [u8; 10] = "CTRL-LOST\0"
+static mut EN9: [u8; 12] = "CTRL-RESUME\0"
 
 fn clip(h: u64) -> u64 {
     if h >= MAX_HC {
@@ -401,4 +434,82 @@ fn rescan_due(ticks: u64) -> bool {
 
 fn rescan_count() -> u64 {
     return rescan_n
+}
+
+fn set_route(route: u64) {
+    cur_rt = route & 0xFFFFF
+}
+
+fn cur_route() -> u64 {
+    return cur_rt
+}
+
+fn evr_put(tick: u64, kind: u64, path: u64, psc: u64, sts: u64, arg: u64) {
+    let at: usize = (evr_n % EVR_N) as usize
+    evr_tick[at] = tick
+    evr_kind[at] = kind
+    evr_path[at] = path
+    evr_psc[at] = psc & 0xFFFFFFFF
+    evr_sts[at] = sts & 0xFFFFFFFF
+    evr_arg[at] = arg
+    evr_n = evr_n + 1
+}
+
+fn evr_count() -> u64 {
+    return evr_n
+}
+
+fn evr_get(i: u64, which: u64) -> u64 {
+    let at: usize = ((evr_n - 1 - i) % EVR_N) as usize
+    if which == 0 {
+        return evr_tick[at]
+    }
+    if which == 1 {
+        return evr_kind[at]
+    }
+    if which == 2 {
+        return evr_path[at]
+    }
+    if which == 3 {
+        return evr_psc[at]
+    }
+    if which == 4 {
+        return evr_sts[at]
+    }
+    return evr_arg[at]
+}
+
+fn evr_serial_ok(kind: u64) -> bool {
+    return evr_n <= EVR_SERIAL_CAP || (kind != EK_PSC_IRQ && kind != EK_PSC_POLL)
+}
+
+fn evr_name(kind: u64) -> u64 {
+    if kind == EK_PSC_IRQ {
+        return (&EN1[0]) as u64
+    }
+    if kind == EK_PSC_POLL {
+        return (&EN2[0]) as u64
+    }
+    if kind == EK_ATTACH_BEGIN {
+        return (&EN3[0]) as u64
+    }
+    if kind == EK_ATTACH_OK {
+        return (&EN4[0]) as u64
+    }
+    if kind == EK_ATTACH_FAIL {
+        return (&EN5[0]) as u64
+    }
+    if kind == EK_DETACH {
+        return (&EN6[0]) as u64
+    }
+    if kind == EK_HUB_CHG {
+        return (&EN7[0]) as u64
+    }
+    if kind == EK_CTRL_LOST {
+        return (&EN8[0]) as u64
+    }
+    if kind == EK_CTRL_RESUME {
+        return (&EN9[0]) as u64
+    }
+    return (&EN0[0]) as u64
 }

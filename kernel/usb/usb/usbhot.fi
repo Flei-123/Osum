@@ -8,6 +8,7 @@ import drv.usb.xhci
 import usb.usb.usbbase
 import usb.usb.usbbind
 import usb.usb.usbdev
+import usb.usb.usbwatch
 
 const S_PEND: u64 = 0x128
 
@@ -110,6 +111,9 @@ fn port_watch(state: u64) {
     if kstate.mode_on(state, kstate.M_USBSAFE) {
         return
     }
+    if usbwatch.check(state) {
+        return
+    }
     let n: u64 = xhci.ports(state)
     let due: u64 = usbdiag.timed_due(kstate.get(state, kstate.TICKS))
     if due != 0 {
@@ -129,6 +133,7 @@ fn port_watch(state: u64) {
         }
         if xhci.port_has_change(state, p) {
             usbdiag.event(p, xhci.portsc(state, p))
+            xhci.ev(state, usbdiag.EK_PSC_POLL, p << 20, 0)
             usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PSC, p, xhci.portsc(state, p))
             xhci.port_clear_changes(state, p)
             usbdev.s(state, S_PEND, usbdev.g(state, S_PEND) | (1 << p))
@@ -188,6 +193,9 @@ fn wachen(state: u64) -> u64 {
 }
 
 fn hotplug_work(state: u64) {
+    if usbwatch.retry_due(state) {
+        let _r: bool = reinit(state)
+    }
     if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
         return
     }
@@ -232,7 +240,13 @@ fn resume(state: u64) -> bool {
     if !usbdev.ready(state) {
         return false
     }
+    return reinit(state)
+}
+
+fn reinit(state: u64) -> bool {
     let armed: bool = !kstate.mode_on(state, kstate.M_NOUSBIRQ)
     let _p: u64 = usbbind.versuch(state, usbdev.g(state, usbbase.S_CHOICE), armed)
-    return usbdev.ready(state)
+    let ok: bool = usbdev.ready(state)
+    usbwatch.reinit_done(state, ok)
+    return ok
 }

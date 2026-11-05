@@ -33,7 +33,7 @@ export {
     CC_SUCCESS, CC_SHORT, VEC_XHCI, teardown, forget_slot,
     count_hc, nth_hc, init_at, unit, udelay, power_all, notify_kind,
     uebersicht, bericht, owned_by_bios, hcs_seen, legtest,
-    reset_fails, reset_vorbelegt, bar_pde
+    reset_fails, reset_vorbelegt, bar_pde, ev, ctl_state, set_dead, is_dead, unit_bdf, set_sim_gone
 }
 
 const SCAL_OFF: u64 = 0x50000 // 1 KiB Skalare
@@ -517,6 +517,70 @@ fn drain_inner(state: u64) -> u64 {
     return n
 }
 
+fn set_sim_gone(v: u64) {
+    sim_gone = v
+}
+
+fn set_dead(v: u64) {
+    ctl_dead = v
+}
+
+fn is_dead() -> bool {
+    return ctl_dead != 0
+}
+
+fn ctl_state(state: u64) -> u64 {
+    if g(state, S_READY) == 0 {
+        return 0
+    }
+    let sts: u64 = regio.read32_at(op(state), O_USBSTS)
+    if sts == 0xFFFFFFFF || sim_gone != 0 {
+        return 1
+    }
+    if (regio.read32_at(op(state), O_USBCMD) & CMD_RS) == 0 {
+        return 3
+    }
+    if (sts & STS_HCH) != 0 {
+        return 2
+    }
+    return 0
+}
+
+fn ev(state: u64, kind: u64, path: u64, arg: u64) {
+    if kstate.mode_on(state, kstate.M_NOUSBEVR) {
+        return
+    }
+    let tick: u64 = kstate.get(state, kstate.TICKS)
+    let root: u64 = path >> 20
+    var psc: u64 = 0
+    var sts: u64 = 0
+    if g(state, S_READY) != 0 {
+        if root >= 1 && root <= g(state, S_PORTS) {
+            psc = portsc(state, root)
+        }
+        sts = regio.read32_at(op(state), O_USBSTS)
+    }
+    usbdiag.evr_put(tick, kind, path, psc, sts, arg)
+    if !usbdiag.evr_serial_ok(kind) {
+        return
+    }
+    serial.puts((&EVS_HD[0]) as u64)
+    serial.puts(usbdiag.evr_name(kind))
+    serial.puts((&EVS_T[0]) as u64)
+    serial.dec(tick)
+    serial.puts((&EVS_P[0]) as u64)
+    serial.dec(root)
+    serial.put(46 as u8)
+    serial.hex(path & 0xFFFFF)
+    serial.puts((&EVS_C[0]) as u64)
+    serial.hex(psc)
+    serial.puts((&EVS_S[0]) as u64)
+    serial.hex(sts)
+    serial.puts((&EVS_A[0]) as u64)
+    serial.hex(arg)
+    serial.nl()
+}
+
 fn handle(state: u64, here: u64, c3: u64) {
     let kind: u64 = (c3 >> 10) & 0x3F
     let st: u64 = regio.read32_at(here, 8)
@@ -558,6 +622,7 @@ fn handle(state: u64, here: u64, c3: u64) {
     }
     if kind == T_PORT_EVENT {
         s(state, S_PORTEV, g(state, S_PORTEV) + 1)
+        ev(state, usbdiag.EK_PSC_IRQ, ((regio.read32_at(here, 0) >> 24) & 0xFF) << 20, 0)
         return
     }
 }
@@ -770,6 +835,10 @@ fn isoc_queue(state: u64, slot: u64, dci: u64, buf: u64, len: u64) -> bool {
 // ------------------------------------------------------ die Kommandos
 
 fn command(state: u64, param: u64, status: u64, control: u64) -> u64 {
+    if ctl_dead != 0 {
+        last_rc = 0xFF
+        return 0xFF
+    }
     let want: u64 = g(state, S_CC_SEQ) + 1
     var at: u64 = g(state, S_CMD_ENQ)
     var cyc: u64 = g(state, S_CMD_CYC)
@@ -1293,6 +1362,9 @@ fn handover(state: u64) -> bool {
 // ------------------------------------------------------ die Uebertragungen
 
 fn wait_ep(state: u64, i: u64, want: u64) -> bool {
+    if ctl_dead != 0 {
+        return false
+    }
     var spin: u64 = 0
     while spin < SPIN_LIMIT {
         drain(state)
@@ -1465,6 +1537,14 @@ fn nth_hc(state: u64, n: u64) -> u64 {
     return pci.MAX_DEV
 }
 
+fn unit_bdf(state: u64, einheit: u64) -> u64 {
+    let idx: u64 = nth_hc(state, einheit)
+    if idx >= pci.MAX_DEV {
+        return 0
+    }
+    return pci.get(state, idx, pci.E_BDF)
+}
+
 fn unit(state: u64) -> u64 {
     return g(state, S_UNIT)
 }
@@ -1477,6 +1557,14 @@ fn init(state: u64, armed: bool) -> bool {
     return init_at(state, 0, armed)
 }
 
+static mut EVS_HD: [u8; 9] = "usb: ev \0"
+static mut EVS_T: [u8; 4] = " t=\0"
+static mut EVS_P: [u8; 4] = " p=\0"
+static mut EVS_C: [u8; 6] = " psc=\0"
+static mut EVS_S: [u8; 6] = " sts=\0"
+static mut EVS_A: [u8; 4] = " a=\0"
+static mut ctl_dead: u64 = 0
+static mut sim_gone: u64 = 0
 static mut q_xhci: [u8; 5] = "xhci\0"
 static mut last_rc: u64 = 0
 static mut last_ctl: u64 = 0
@@ -1485,11 +1573,18 @@ fn lq() -> u64 {
     return (&q_xhci[0]) as u64
 }
 
+fn initfail(state: u64, code: u64) -> bool {
+    usbdiag.set_info(g(state, S_UNIT), usbdiag.I_INITFAIL, code)
+    return false
+}
+
 fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     var l_kein: [u8; 32] = "kein xHCI-Regler an Einheit \0\0\0\0"
     var l_bar: [u8; 25] = "BAR0 unbrauchbar, phys \0\0"
     var l_los: [u8; 24] = "Regler gefunden, BAR0 \0\0"
     s(state, S_READY, 0)
+    ctl_dead = 0
+    sim_gone = 0
     s(state, S_UNIT, einheit)
     s(state, S_HCS, count_hc(state))
     s(state, S_HALTOK, 0)
@@ -1497,17 +1592,17 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     let idx: u64 = nth_hc(state, einheit)
     if idx >= pci.MAX_DEV {
         klog.sayn(state, klog.L_DEBUG, lq(), (&l_kein[0]) as u64, einheit)
-        return false
+        return initfail(state, 1)
     }
     let phys: u64 = pci.bar(state, idx, 0)
     if phys == 0 || pci.bar_is_io(state, idx, 0) {
         klog.sayh(state, klog.L_ERROR, lq(), (&l_bar[0]) as u64, phys)
-        return false
+        return initfail(state, 2)
     }
     klog.sayh(state, klog.L_INFO, lq(), (&l_los[0]) as u64, phys)
     let b: u64 = apic.map_device(state, phys)
     if b == 0 {
-        return false
+        return initfail(state, 3)
     }
     s(state, S_BASE, b)
     s(state, S_BAR, phys)
@@ -1516,7 +1611,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     let caplen: u64 = regio.read32_at(b, C_CAPLENGTH) & 0xFF
     s(state, S_HCIVER, (regio.read32_at(b, C_CAPLENGTH) >> 16) & 0xFFFF)
     if caplen == 0 || caplen == 0xFF {
-        return false
+        return initfail(state, 4)
     }
     let hcs1: u64 = regio.read32_at(b, C_HCSPARAMS1)
     let hcc1: u64 = regio.read32_at(b, C_HCCPARAMS1)
@@ -1531,7 +1626,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     }
     s(state, S_CTXSZ, csz)
     if (hcs1 & 0xFF) == 0 || ((hcs1 >> 24) & 0xFF) == 0 {
-        return false
+        return initfail(state, 5)
     }
 
     pci.enable_master(bdf(state))
@@ -1542,11 +1637,11 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     intel_route(state, idx)
 
     if !halt(state) {
-        return false
+        return initfail(state, 6)
     }
     s(state, S_HALTOK, 1)
     if !reset(state) {
-        return false
+        return initfail(state, 7)
     }
     s(state, S_RSTOK, 1)
 
@@ -1578,7 +1673,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
     s(state, S_STALLS, 0)
 
     if !scratchpad(state) {
-        return false
+        return initfail(state, 8)
     }
     regio.write64_at(op(state), O_DCBAAP, state + DCBAA_OFF)
     regio.write64_at(op(state), O_CRCR, (state + CMD_OFF) | 1)
@@ -1593,7 +1688,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
         if msix_arm(state, idx, VEC_XHCI, armed) {
             s(state, S_MSIX, NOTIFY_MSIX)
         } else {
-            return false
+            return initfail(state, 9)
         }
     } else if pci.get(state, idx, pci.E_MSI) != 0
         && msi_arm(state, idx, VEC_XHCI, armed) {
@@ -1617,7 +1712,7 @@ fn init_at(state: u64, einheit: u64, armed: bool) -> bool {
         }
         spin = spin + 1
     }
-    return false
+    return initfail(state, 10)
 }
 
 fn halt(state: u64) -> bool {

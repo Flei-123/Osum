@@ -1,0 +1,89 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import drv.usb.usbdiag
+import drv.usb.xhci
+import usb.usb.usbbind
+
+export { check, lost, retry_due, reinit_done }
+
+const RETRY_TICKS: u64 = 100
+const SIM_DELAY_TICKS: u64 = 200
+const ARG_OK: u64 = 0x10000
+
+static mut lost_flag: u64 = 0
+static mut next_try: u64 = 0
+static mut attempts: u64 = 0
+static mut sim_base: u64 = 0
+static mut sim_done: u64 = 0
+
+fn simulate(state: u64, ticks: u64) {
+    if sim_done != 0 {
+        return
+    }
+    if sim_base == 0 {
+        sim_base = ticks
+    }
+    if ticks < sim_base + SIM_DELAY_TICKS {
+        return
+    }
+    if kstate.mode_on(state, kstate.M_USBLOSS) {
+        sim_done = 1
+        xhci.kill(state)
+    } else if kstate.mode_on(state, kstate.M_USBLOSSFF) {
+        sim_done = 1
+        xhci.set_sim_gone(1)
+    }
+}
+
+fn lost() -> bool {
+    return lost_flag != 0
+}
+
+fn check(state: u64) -> bool {
+    if kstate.mode_on(state, kstate.M_NOUSBWATCH) {
+        return false
+    }
+    if lost_flag != 0 {
+        return true
+    }
+    let ticks: u64 = kstate.get(state, kstate.TICKS)
+    simulate(state, ticks)
+    let why: u64 = xhci.ctl_state(state)
+    if why == 0 {
+        return false
+    }
+    lost_flag = 1
+    attempts = 0
+    next_try = ticks
+    xhci.set_dead(1)
+    xhci.ev(state, usbdiag.EK_CTRL_LOST, 0, why)
+    return true
+}
+
+fn retry_due(state: u64) -> bool {
+    if lost_flag == 0 {
+        return false
+    }
+    let ticks: u64 = kstate.get(state, kstate.TICKS)
+    if ticks < next_try {
+        return false
+    }
+    next_try = ticks + RETRY_TICKS
+    attempts = attempts + 1
+    if attempts == 1 {
+        usbbind.unplug_now(state)
+    }
+    return true
+}
+
+fn reinit_done(state: u64, ok: bool) {
+    var arg: u64 = attempts
+    if ok {
+        arg = arg | ARG_OK
+        lost_flag = 0
+        attempts = 0
+    }
+    xhci.ev(state, usbdiag.EK_CTRL_RESUME, 0, arg)
+}
