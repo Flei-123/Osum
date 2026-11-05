@@ -73,7 +73,7 @@ run_case() { # run_case <tag> <max_outputs> <words> [<xres> <yres>]
     cp -f "$T/disk.img" "$T/$tag.img"
     ACC=(); [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
     timeout 330 qemu-system-x86_64 "${ACC[@]}" -kernel "$T/k0.img" -m 768 \
-        -append "gfx disp wm wmdauer wmshell osum vfs bus $words script=sh /t/${RC_SCRIPT:-g.sh};exit" \
+        -append "gfx disp wm wmdauer ${RC_SHELL-wmshell} osum vfs bus $words script=sh /t/${RC_SCRIPT:-g.sh};exit" \
         -serial "file:$T/$tag.txt" -display none -no-reboot \
         -vga std -device virtio-gpu-pci,id=vg,max_outputs=$mo,xres=$xr,yres=$yr -global VGA.edid=off \
         -monitor "unix:$sock,server,nowait" \
@@ -81,7 +81,8 @@ run_case() { # run_case <tag> <max_outputs> <words> [<xres> <yres>]
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >"$T/$tag.q" 2>&1 &
     local qp=$! i=0
     while [ $i -lt 900 ]; do
-        [ "$(grep -acE "${RC_WAIT:-^settings: heads }" "$T/$tag.txt" 2>/dev/null)" -ge "${RC_WAITN:-1}" ] && break
+        wn=$(grep -acE "${RC_WAIT:-^settings: heads }" "$T/$tag.txt" 2>/dev/null || true)
+        [ "${wn:-0}" -ge "${RC_WAITN:-1}" ] && break
         kill -0 "$qp" 2>/dev/null || break
         sleep 0.3; i=$((i+1))
     done

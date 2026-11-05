@@ -42,27 +42,27 @@ G="$T/nohot.klar"
 [ "$(grep -ac '^settings: heads ' "$G")" -eq 1 ] && ok "control: heads line printed once without hotplug" || bad "control: heads line count changed without hotplug"
 
 echo "== canvas drag: valid drop below"
-DRAG_MODE=below RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragok 2 "fbres=1280x960 vgpuheads vgpuextend"
+RC_SHELL= DRAG_MODE=below RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragok 2 "fbres=1280x960 vgpuheads vgpuextend"
 G="$T/dragok.klar"
 grep -a "^settings: arrange " "$G" | sed 's/^/   /' | head -6
 has "$G" "^settings: arrange drop hd=1 to 0,480 ok *$" "drag: head 2 snapped below head 1 and accepted"
 has "$G" "^settings: arrange cv=.* h1=[0-9]+,[0-9]+,[0-9]+,[0-9]+,0,480 *$" "drag: layout re-read shows position 0,480"
 
 echo "== canvas drag: overlap rejected"
-DRAG_MODE=overlap RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragov 2 "fbres=1280x960 vgpuheads vgpuextend"
+RC_SHELL= DRAG_MODE=overlap RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragov 2 "fbres=1280x960 vgpuheads vgpuextend"
 G="$T/dragov.klar"
 grep -a "^settings: arrange drop" "$G" | sed 's/^/   /'
 has "$G" "^settings: arrange drop hd=1 to [0-9]+,[0-9]+ denied *$" "drag: overlapping drop denied"
 grep -qa "^settings: arrange cv=.* h1=[0-9]+,[0-9]+,[0-9]+,[0-9]+,0,480" "$G" && bad "drag: denied drop moved the head" || ok "drag: denied drop left the arrangement unchanged"
 
 echo "== canvas drag: detached rejected"
-DRAG_MODE=detached RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragde 2 "fbres=1280x960 vgpuheads vgpuextend"
+RC_SHELL= DRAG_MODE=detached RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case dragde 2 "fbres=1280x960 vgpuheads vgpuextend"
 G="$T/dragde.klar"
 grep -a "^settings: arrange drop" "$G" | sed 's/^/   /'
 has "$G" "^settings: arrange drop hd=1 to [0-9]+,[0-9]+ denied *$" "drag: detached drop denied"
 
 echo "== scale choice"
-DRAG_MODE=scale RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case scale 2 "fbres=1280x960 vgpuheads vgpuextend"
+RC_SHELL= DRAG_MODE=scale RC_SCRIPT=g3.sh RC_HOOK=drag_hook run_case scale 2 "fbres=1280x960 vgpuheads vgpuextend"
 G="$T/scale.klar"
 grep -a "^settings: arrange scale" "$G" | sed 's/^/   /'
 has "$G" "^settings: arrange scale hd=0 pct=150 ok *$" "scale: selected head set to 150 percent"
