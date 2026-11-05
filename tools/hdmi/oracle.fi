@@ -1,0 +1,152 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import std.rt
+import std.io
+import monitors.eld
+import monitors.hdmipin
+
+static mut eldb: [u8; 64] = [0; 64]
+static mut f_pstate: [u64; 8] = [3; 8]
+static mut f_conn: [u64; 8] = [0; 8]
+static mut f_ctl: [u64; 8] = [0; 8]
+static mut f_eapd: [u64; 8] = [0; 8]
+static mut f_unsol: [u64; 8] = [0; 8]
+static mut f_digi: [u64; 8] = [0; 8]
+static mut f_order: [u64; 8] = [0; 8]
+static mut f_seq: u64 = 0
+
+fn chk(name: str, cond: bool) {
+    if cond {
+        io.print("OK   ")
+    } else {
+        io.print("FAIL ")
+    }
+    io.print_line(name)
+}
+
+fn fake_reset() {
+    var i: usize = 0
+    while i < 8 {
+        f_pstate[i] = 3
+        f_conn[i] = 0
+        f_ctl[i] = 0
+        f_eapd[i] = 0
+        f_unsol[i] = 0
+        f_digi[i] = 0
+        f_order[i] = 0
+        i = i + 1
+    }
+    f_seq = 0
+}
+
+fn fake_apply(nid: u64, verb: u64, payload: u64) {
+    f_seq = f_seq + 1
+    let n: usize = (nid & 7) as usize
+    if verb == hdmipin.V_SET_PSTATE {
+        f_pstate[n] = payload & 3
+        f_order[n] = f_order[n] * 10 + 1
+    } else if verb == hdmipin.V_SET_CONNSEL {
+        f_conn[n] = payload
+        f_order[n] = f_order[n] * 10 + 2
+    } else if verb == hdmipin.V_SET_PINCTL {
+        f_ctl[n] = payload
+        f_order[n] = f_order[n] * 10 + 3
+    } else if verb == hdmipin.V_SET_EAPD {
+        f_eapd[n] = payload
+        f_order[n] = f_order[n] * 10 + 4
+    } else if verb == hdmipin.V_SET_UNSOL {
+        f_unsol[n] = payload
+        f_order[n] = f_order[n] * 10 + 5
+    } else if verb == hdmipin.V_SET_DIGI1 {
+        f_digi[n] = payload
+        f_order[n] = f_order[n] * 10 + 6
+    }
+}
+
+fn run_plan(nid: u64) {
+    var k: u64 = 0
+    while k < hdmipin.plan_len() {
+        fake_apply(nid, hdmipin.plan_verb(k), hdmipin.plan_payload(k))
+        k = k + 1
+    }
+}
+
+fn mk_eld() {
+    var i: usize = 0
+    while i < 64 {
+        eldb[i] = 0
+        i = i + 1
+    }
+    eldb[0] = 16
+    eldb[2] = 8
+    eldb[4] = 3
+    eldb[5] = 0x23
+    eldb[6] = 5
+    eldb[7] = 1
+    eldb[8] = 1
+    eldb[9] = 2
+    eldb[16] = 0x10
+    eldb[17] = 0xAC
+    eldb[18] = 0x34
+    eldb[19] = 0x12
+    eldb[20] = 65
+    eldb[21] = 66
+    eldb[22] = 67
+    eldb[23] = 9
+    eldb[24] = 7
+    eldb[25] = 7
+    eldb[26] = 15
+    eldb[27] = 84
+    eldb[28] = 7
+}
+
+fn main() -> i32 {
+    let full_cap: u64 = 0x01000094 | 0x10000
+    let wcap: u64 = 0x40070B
+    fake_reset()
+    hdmipin.plan_pin(full_cap, wcap, 1, 5)
+    chk("plan: HDMI pin with power, connsel, EAPD, presence = 5 verbs", hdmipin.plan_len() == 5)
+    run_plan(5)
+    chk("plan: pin powered up (D0)", f_pstate[5] == 0)
+    chk("plan: connection select = converter index 1", f_conn[5] == 1)
+    chk("plan: pin control = output enable 0x40", f_ctl[5] == 0x40)
+    chk("plan: EAPD = 2 when the pin has EAPD", f_eapd[5] == 2)
+    chk("plan: unsolicited enable with tag = nid (0x85)", f_unsol[5] == 0x85)
+    chk("plan: order power, connsel, pin control, EAPD, unsolicited", f_order[5] == 12345)
+    fake_reset()
+    hdmipin.plan_pin(0x01000090, wcap, hdmipin.NO_CONN, 6)
+    run_plan(6)
+    chk("plan: no EAPD cap -> no EAPD verb", f_eapd[6] == 0 && f_order[6] == 13)
+    chk("plan: no presence cap -> no unsolicited verb", f_unsol[6] == 0)
+    chk("plan: no converter index -> no connection select", f_conn[6] == 0 && hdmipin.plan_len() == 2)
+    fake_reset()
+    hdmipin.plan_pin(full_cap, 0, 2, 7)
+    run_plan(7)
+    chk("plan: no power cap -> no power verb, state untouched", f_pstate[7] == 3)
+    fake_reset()
+    hdmipin.plan_converter(wcap)
+    run_plan(3)
+    chk("converter: powered and digital enable set", f_pstate[3] == 0 && f_digi[3] == 1 && hdmipin.plan_len() == 2)
+    chk("pick_converter: mask 0b1110 ordinals 0,1,2 -> 1,2,3",
+        hdmipin.pick_converter(14, 0) == 1 && hdmipin.pick_converter(14, 1) == 2 && hdmipin.pick_converter(14, 2) == 3)
+    chk("pick_converter: ordinal wraps over the list", hdmipin.pick_converter(14, 3) == 1)
+    chk("pick_converter: empty mask -> none", hdmipin.pick_converter(0, 0) == hdmipin.NO_CONN)
+    let resp: u64 = (5 << 26) | 3
+    chk("unsolicited: tag 5, presence, ELD valid", hdmipin.unsol_tag(resp) == 5 && hdmipin.unsol_presence(resp) && hdmipin.unsol_eld_valid(resp))
+    chk("unsolicited: unplug = presence and ELD clear", !hdmipin.unsol_presence(5 << 26) && !hdmipin.unsol_eld_valid(5 << 26))
+    chk("unsolicited: ELD valid without presence is reported as is", !hdmipin.unsol_presence(2) && hdmipin.unsol_eld_valid(2))
+    chk("sense: unplugged = state 0", hdmipin.pin_state(0) == 0)
+    chk("sense: plugged without ELD = state 1", hdmipin.pin_state(0x80000000) == 1)
+    chk("sense: plugged with ELD = state 2", hdmipin.pin_state(0xC0000000) == 2)
+    chk("sense: ELD valid without presence is state 0", hdmipin.pin_state(0x40000000) == 0)
+    mk_eld()
+    let e: u64 = (&eldb[0]) as u64
+    chk("ELD: valid, 36 bytes", eld.eld_valid(e, 36))
+    chk("ELD: HDCP bit and S_AI bit", eld.eld_hdcp(e) && eld.eld_supports_ai(e))
+    chk("ELD: sync delay 5 -> 10 ms", eld.eld_sync_delay(e) == 10)
+    chk("ELD: manufacturer 0xAC10, product 0x1234", eld.eld_mfg_id(e) == 0xAC10 && eld.eld_product_id(e) == 0x1234)
+    chk("ELD: port id bytes", eld.eld_port_id(e) == 0x0201)
+    chk("ELD: speakers 1, 2 SADs", eld.eld_speakers(e) == 1 && eld.eld_sad_count(e) == 2)
+    eldb[5] = 0x22
+    chk("ELD: HDCP off when bit 0 is clear", !eld.eld_hdcp(e))
+    return 0
+}

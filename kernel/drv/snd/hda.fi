@@ -10,7 +10,6 @@ import mm.mmframe
 import sched.time
 import arch.arch
 import arch.x86_64.apic
-import monitors.eld
 import libc.regio
 import libc.numeric
 
@@ -26,7 +25,7 @@ export {
     codec_ready, codec_addr, vendor, device, revision,
     dac_nid, pin_nid, path_len, path_at, out_stream, stream_tag,
     cmd, cmd_path, cmd_fails, widgets, wstart, node_type, node_caps,
-    node_cfg, arm_irq, irq_armed, say_graph, hdmi_probe, hdmi_pins,
+    owned_bdf, node_cfg, arm_irq, irq_armed, say_graph, drain_rirb, enable_unsol, unsol_take, unsol_lost,
     cap_open, cap_close, cap_ready, cap_running, cap_poll, cap_frames, cap_read, cap_why, cap_adc, cap_pin,
     cap_kind, cap_overruns, cap_resume, cap_probe, CAP_FRAME_OCTETS,
     cap_ring_count, cap_ring_fill,
@@ -600,15 +599,70 @@ fn verb4(cad: u64, nid: u64, v: u64, payload: u64) -> u64 {
 }
 
 
+static mut unsol_q: [u64; 16] = [0; 16]
+static mut unsol_head: u64 = 0
+static mut unsol_tail: u64 = 0
+static mut unsol_dropped: u64 = 0
+
+fn unsol_push(v: u64) {
+    if unsol_head - unsol_tail < 16 {
+        unsol_q[(unsol_head % 16) as usize] = v | 0x10000000000
+        unsol_head = unsol_head + 1
+    } else {
+        unsol_dropped = unsol_dropped + 1
+    }
+}
+
+fn unsol_take() -> u64 {
+    if unsol_head == unsol_tail {
+        return 0
+    }
+    let v: u64 = unsol_q[(unsol_tail % 16) as usize]
+    unsol_tail = unsol_tail + 1
+    return v
+}
+
+fn unsol_lost() -> u64 {
+    return unsol_dropped
+}
+
+fn drain_rirb(state: u64) {
+    if !present(state) {
+        return
+    }
+    var rp: u64 = g(state, S_RIRBRP)
+    let wp: u64 = rd16(state, R_RIRBWP) & 0xFF
+    var stray: bool = false
+    var n: u64 = 0
+    while rp != wp && n < RIRB_ENTRIES {
+        let nrp: u64 = (rp + 1) % RIRB_ENTRIES
+        arch.barrier_read()
+        let resp: u64 = __mmio_read32((rirb(state) + nrp * 8) as *mut u32) as u64
+        let ex: u64 = __mmio_read32((rirb(state) + nrp * 8 + 4) as *mut u32) as u64
+        if (ex & 0x10) != 0 {
+            unsol_push(((ex & 0xF) << 32) | resp)
+        } else {
+            stray = true
+        }
+        rp = nrp
+        n = n + 1
+    }
+    s(state, S_RIRBRP, rp)
+    if stray {
+        s(state, S_LOSTRESP, g(state, S_LOSTRESP) +% 1)
+    }
+}
+
+fn enable_unsol(state: u64) {
+    if present(state) {
+        wr32(state, R_GCTL, rd32(state, R_GCTL) | GCTL_UNSOL)
+    }
+}
+
 fn corb_rirb(state: u64, word: u64) -> u64 {
     let b: u64 = base(state)
+    drain_rirb(state)
     var rp: u64 = g(state, S_RIRBRP)
-    let wp0: u64 = rd16(state, R_RIRBWP) & 0xFF
-    if wp0 != rp {
-        s(state, S_LOSTRESP, g(state, S_LOSTRESP) +% 1)
-        rp = wp0
-        s(state, S_RIRBRP, rp)
-    }
 
     let wp: u64 = (rd16(state, R_CORBWP) + 1) % CORB_ENTRIES
     __mmio_write32((corb(state) + wp * 4) as *mut u32,
@@ -631,7 +685,7 @@ fn corb_rirb(state: u64, word: u64) -> u64 {
             if (ex & 0x10) == 0 {
                 got = true
             } else {
-                s(state, S_LOSTRESP, g(state, S_LOSTRESP) +% 1)
+                unsol_push(((ex & 0xF) << 32) | (resp & 0xFFFFFFFF))
                 rp = nrp
             }
         } else {
@@ -1578,7 +1632,7 @@ fn arm_irq(state: u64, armed: bool) -> bool {
 }
 
 
-fn init(state: u64) -> bool {
+fn init_nth(state: u64, nth: u64) -> bool {
     var s_head: [u8; 6] = "hda: \0"
     var s_no: [u8; 17] = "no device 04:03\0\0"
     var s_bar: [u8; 25] = "BAR0 missing or is port\0\0"
@@ -1603,7 +1657,7 @@ fn init(state: u64) -> bool {
     s(state, S_VOL, 100)
     s(state, S_RATE, RATE)
 
-    let idx: u64 = drvreg.find(state, drvreg.D_HDA, 0)
+    let idx: u64 = drvreg.find(state, drvreg.D_HDA, nth)
     if idx >= pci.MAX_DEV {
         s(state, S_WHY, W_NODEV)
         serial.puts((&s_head[0]) as u64)
@@ -1657,6 +1711,7 @@ fn init(state: u64) -> bool {
     }
 
     corb_setup(state)
+    enable_unsol(state)
 
     var s_dbg: [u8; 12] = "hda: codec \0"
     var s_p: [u8; 4] = " p=\0"
@@ -1717,8 +1772,6 @@ fn init(state: u64) -> bool {
         s(state, S_BASE, 0)
         return false
     }
-
-    hdmi_probe(state)
 
     let ring: u64 = mmframe.frame_run(state, RING_PAGES)
     if ring == 0 {
@@ -1782,6 +1835,24 @@ fn init(state: u64) -> bool {
     return true
 }
 
+fn init(state: u64) -> bool {
+    var nth: u64 = 0
+    var ok: bool = init_nth(state, nth)
+    while !ok && nth < 3 && (g(state, S_WHY) == W_NOCODEC || g(state, S_WHY) == W_NOPATH || g(state, S_WHY) == W_NOAFG)
+        && drvreg.find(state, drvreg.D_HDA, nth + 1) < pci.MAX_DEV {
+        nth = nth + 1
+        ok = init_nth(state, nth)
+    }
+    return ok
+}
+
+fn owned_bdf(state: u64) -> u64 {
+    if !ready(state) {
+        return 0xFFFFFFFF
+    }
+    return bdf(state)
+}
+
 fn say_graph(state: u64) {
     var s_h: [u8; 14] = "hda-graph: \0\0\0"
     var s_n: [u8; 7] = "  nid=\0"
@@ -1831,129 +1902,6 @@ fn say_graph(state: u64) {
         }
         serial.nl()
         k = k + 1
-    }
-}
-
-static mut eld_buf: [u8; 128] = [0 as u8; 128]
-static mut hdmi_found: u64 = 0
-
-fn hdmi_pins() -> u64 {
-    return hdmi_found
-}
-
-fn read_eld(state: u64, cad: u64, nid: u64) -> u64 {
-    let sz: u64 = cmd(state, cad, nid, V_GET_DIPSIZE, 0x08)
-    if sz == NO_ANSWER {
-        return 0
-    }
-    var n: u64 = sz & 0xFF
-    if n > 128 {
-        n = 128
-    }
-    var i: u64 = 0
-    while i < n {
-        let v: u64 = cmd(state, cad, nid, V_GET_ELDD, i)
-        if v == NO_ANSWER || (v & 0x80000000) == 0 {
-            return 0
-        }
-        eld_buf[i as usize] = (v & 0xFF) as u8
-        i = i + 1
-    }
-    return n
-}
-
-fn probe_pin(state: u64, cad: u64, nid: u64, pc: u64) {
-    var s_h: [u8; 15] = "hda: hdmi cad=\0"
-    var s_n: [u8; 6] = " nid=\0"
-    var s_p: [u8; 9] = " pincap=\0"
-    var s_s: [u8; 8] = " sense=\0"
-    var s_e: [u8; 6] = " eld=\0"
-    var s_m: [u8; 6] = " mon=\0"
-    var s_d: [u8; 5] = " dp=\0"
-    var s_a: [u8; 6] = " sad=\0"
-    var s_r: [u8; 7] = " rate=\0"
-    var sense: u64 = cmd(state, cad, nid, V_GET_PINSENSE, 0)
-    if sense == NO_ANSWER {
-        sense = 0
-    }
-    var n: u64 = 0
-    if (sense & 0x80000000) != 0 {
-        n = read_eld(state, cad, nid)
-    }
-    serial.puts((&s_h[0]) as u64)
-    serial.dec(cad)
-    serial.puts((&s_n[0]) as u64)
-    serial.dec(nid)
-    serial.puts((&s_p[0]) as u64)
-    serial.hex(pc)
-    serial.puts((&s_s[0]) as u64)
-    serial.hex(sense)
-    serial.puts((&s_e[0]) as u64)
-    serial.dec(n)
-    let e: u64 = (&eld_buf[0]) as u64
-    if n != 0 && eld.eld_valid(e, n) {
-        serial.puts((&s_m[0]) as u64)
-        var k: u64 = 0
-        while k < eld.eld_name_len(e) {
-            let ch: u64 = eld.eld_name_at(e, k)
-            if ch >= 32 && ch < 127 {
-                serial.put(ch as u8)
-            }
-            k = k + 1
-        }
-        serial.puts((&s_d[0]) as u64)
-        if eld.eld_is_dp(e) {
-            serial.dec(1)
-        } else {
-            serial.dec(0)
-        }
-        serial.puts((&s_a[0]) as u64)
-        serial.dec(eld.eld_sad_count(e))
-        serial.puts((&s_r[0]) as u64)
-        serial.dec(eld.eld_best_pcm_rate(e, n))
-    }
-    serial.nl()
-}
-
-fn hdmi_probe(state: u64) {
-    hdmi_found = 0
-    let st: u64 = g(state, S_STATESTS)
-    var cad: u64 = 0
-    while cad < 15 {
-        if (st & (1 << cad)) != 0 {
-            let nc: u64 = param(state, cad, 0, P_NODECOUNT)
-            if nc != NO_ANSWER {
-                let fg0: u64 = (nc >> 16) & 0xFF
-                let fgn: u64 = nc & 0xFF
-                var f: u64 = 0
-                while f < fgn && f < 4 {
-                    let fg: u64 = fg0 + f
-                    let ft: u64 = param(state, cad, fg, P_FGTYPE)
-                    if ft != NO_ANSWER && (ft & 0x7F) == 1 {
-                        let wn: u64 = param(state, cad, fg, P_NODECOUNT)
-                        if wn != NO_ANSWER {
-                            let w0: u64 = (wn >> 16) & 0xFF
-                            let wc: u64 = wn & 0xFF
-                            var k: u64 = 0
-                            while k < wc && k < 64 {
-                                let nid: u64 = w0 + k
-                                let caps: u64 = param(state, cad, nid, P_WCAP)
-                                if caps != NO_ANSWER && ((caps >> 20) & 0xF) == T_PIN && (caps & WCAP_DIGITAL) != 0 {
-                                    let pc: u64 = param(state, cad, nid, P_PINCAP)
-                                    if pc != NO_ANSWER && (pc & PINCAP_OUT) != 0 && (pc & (PINCAP_HDMI | PINCAP_DP)) != 0 {
-                                        hdmi_found = hdmi_found + 1
-                                        probe_pin(state, cad, nid, pc)
-                                    }
-                                }
-                                k = k + 1
-                            }
-                        }
-                    }
-                    f = f + 1
-                }
-            }
-        }
-        cad = cad + 1
     }
 }
 

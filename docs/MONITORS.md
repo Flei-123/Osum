@@ -125,3 +125,14 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 - **Persistence:** every accepted drop and scale choice, and Apply, write `/etc/displays.conf` through `displaymode.save`: `heads=extend|mirror` then one `head<N>=<x>,<y>,<percent>` line per present head. The taskbar start calls `displaymode.apply_saved` which restores the mode, positions of heads >= 1 and the scale percent of every present head that exists.
 - **Gate:** `tools/setheads/run.sh` reads the file back from the guest disk with `mkfs.py cat` after the drag and scale cases, and a restore case starts the taskbar with a seeded file.
 - **Not done:** re-applying the saved layout when a head is plugged in after login (only at taskbar start); per-head UI scale in fUi/wlib.
+
+## HDMI/DP audio pin activation + ELD feed (r2974, 05.11.2026)
+
+- `lib/monitors/hdmipin.fi` (pure, host-tested): verb plan for a digital output pin (power D0, connection select = converter, pin control OUT 0x40, EAPD 2 if the pin has it, unsolicited enable `0x80|nid` if it can detect presence), converter plan (D0 + digital enable), `pick_converter` (one converter per pin by ordinal), unsolicited response decode (tag = bits 31:26, bit 0 presence, bit 1 ELD valid), `pin_state` 0/1/2 from GET_PIN_SENSE.
+- `lib/monitors/eld.fi` also gives HDCP, S_AI, sync delay, manufacturer/product id, port id.
+- `kernel/drv/snd/hdmi.fi` scans EVERY HDA controller (not only the one the audio driver owns): the owned one uses `hda.cmd`, the others are reset and driven through the immediate command interface. Finds digital pins, executes the plan, reads sense + ELD, reads the state back, prints `hdmi: pin=.. sense=.. pstate=.. pinctl=.. unsol=.. conv=.. eld=LEN mon=.. dp=.. sad=.. rate=..` and `hdmi: eld pin=N bytes=<hex>` on serial, plus `hdmi: scan controllers=N pins=M`.
+- Hotplug: `hda.fi` now accepts unsolicited responses (GCTL bit 8) and queues them (`unsol_take`); `audio.tick` calls `hdmi.run` every 0.5 s: drain events, re-read sense, refresh ELD on change (`why=1` event, `why=2` sense change).
+- `kernel/drv/snd/hdmitab.fi` holds the tables + a 96-entry verb log; `/proc/hdmi` (`kernel/fs/prochdmi.fi`) renders controllers, pins, ELD (parsed + hex), SADs and the verb log with responses.
+- `hda.init` tries the next HDA controller when the first has no codec / no audio function / no analog path (an HDMI-only controller first no longer kills analog sound).
+- Test bed: QEMU has no HDMI codec. Gate `tools/hdmi/run.sh`: host oracle with a fake codec (29 promises, 12 negative controls), kernel build, QEMU with one / two controllers (scan lines, analog audio still ready), `audgraph` injects ONE synthetic pin (`synthetic=1` in /proc/hdmi) to prove the print/parse path.
+- Still open: stream/format on the digital converter + InfoFrame (no sound to the monitor yet), mapping pin -> output (`layout.set_audio`/`audio_pin` need it), unsolicited for non-owned controllers (polled instead).

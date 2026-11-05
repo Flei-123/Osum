@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0-only
+import monitors.layout
+
+export {
+    V_SET_CONNSEL, V_SET_PSTATE, V_SET_PINCTL, V_SET_UNSOL, V_SET_EAPD, V_SET_DIGI1,
+    PINCAP_PRESENCE, PINCAP_EAPD, WCAP_POWER, PINCTL_OUT, UNSOL_ENABLE, NO_CONN,
+    PLAN_MAX, plan_clear, plan_len, plan_verb, plan_payload,
+    plan_pin, plan_converter, pick_converter,
+    unsol_tag, unsol_presence, unsol_eld_valid,
+    sense_plugged, sense_eld_ready, pin_state
+}
+
+const V_SET_CONNSEL: u64 = 0x701
+const V_SET_PSTATE: u64 = 0x705
+const V_SET_PINCTL: u64 = 0x707
+const V_SET_UNSOL: u64 = 0x708
+const V_SET_EAPD: u64 = 0x70C
+const V_SET_DIGI1: u64 = 0x70D
+
+const PINCAP_PRESENCE: u64 = 0x04
+const PINCAP_EAPD: u64 = 0x10000
+const WCAP_POWER: u64 = 0x400
+const PINCTL_OUT: u64 = 0x40
+const UNSOL_ENABLE: u64 = 0x80
+const EAPD_ON: u64 = 0x02
+const DIGI_ENABLE: u64 = 0x01
+const NO_CONN: u64 = 0xFF
+const PLAN_MAX: u64 = 16
+
+static mut plan_v: [u64; 16] = [0; 16]
+static mut plan_p: [u64; 16] = [0; 16]
+static mut plan_n: u64 = 0
+
+fn plan_clear() {
+    plan_n = 0
+}
+
+fn plan_len() -> u64 {
+    return plan_n
+}
+
+fn plan_verb(i: u64) -> u64 {
+    if i >= plan_n {
+        return 0
+    }
+    return plan_v[i as usize]
+}
+
+fn plan_payload(i: u64) -> u64 {
+    if i >= plan_n {
+        return 0
+    }
+    return plan_p[i as usize]
+}
+
+fn add(verb: u64, payload: u64) {
+    if plan_n < PLAN_MAX {
+        plan_v[plan_n as usize] = verb
+        plan_p[plan_n as usize] = payload
+        plan_n = plan_n + 1
+    }
+}
+
+fn plan_pin(pincap: u64, wcap: u64, conn_idx: u64, tag: u64) {
+    plan_clear()
+    if (wcap & WCAP_POWER) != 0 {
+        add(V_SET_PSTATE, 0)
+    }
+    if conn_idx != NO_CONN {
+        add(V_SET_CONNSEL, conn_idx)
+    }
+    add(V_SET_PINCTL, PINCTL_OUT)
+    if (pincap & PINCAP_EAPD) != 0 {
+        add(V_SET_EAPD, EAPD_ON)
+    }
+    if (pincap & PINCAP_PRESENCE) != 0 {
+        add(V_SET_UNSOL, UNSOL_ENABLE | (tag & 0x3F))
+    }
+}
+
+fn plan_converter(wcap: u64) {
+    plan_clear()
+    if (wcap & WCAP_POWER) != 0 {
+        add(V_SET_PSTATE, 0)
+    }
+    add(V_SET_DIGI1, DIGI_ENABLE)
+}
+
+fn pick_converter(mask: u64, ordinal: u64) -> u64 {
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < 32 {
+        if (mask & (1 << i)) != 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 {
+        return NO_CONN
+    }
+    var want: u64 = ordinal % count
+    i = 0
+    while i < 32 {
+        if (mask & (1 << i)) != 0 {
+            if want == 0 {
+                return i
+            }
+            want = want - 1
+        }
+        i = i + 1
+    }
+    return NO_CONN
+}
+
+fn unsol_tag(resp: u64) -> u64 {
+    return (resp >> 26) & 0x3F
+}
+
+fn unsol_presence(resp: u64) -> bool {
+    return (resp & 1) != 0
+}
+
+fn unsol_eld_valid(resp: u64) -> bool {
+    return (resp & 2) != 0
+}
+
+fn sense_plugged(sense: u64) -> bool {
+    return (sense & layout.PS_PRESENCE) != 0
+}
+
+fn sense_eld_ready(sense: u64) -> bool {
+    return (sense & layout.PS_ELD_VALID) != 0
+}
+
+fn pin_state(sense: u64) -> u64 {
+    if !sense_plugged(sense) {
+        return 0
+    }
+    if !sense_eld_ready(sense) {
+        return 1
+    }
+    return 2
+}

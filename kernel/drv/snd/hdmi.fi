@@ -1,0 +1,645 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import serial
+import lib.kstate
+import bus.pci
+import bus.drvreg
+import sched.time
+import arch.arch
+import arch.x86_64.apic
+import drv.snd.hda
+import drv.snd.hdmitab
+import monitors.eld
+import monitors.hdmipin
+import libc.regio
+
+export { scan, resume, due, run, sound_ok }
+
+static mut T0: [u8; 15] = "hdmi: eld pin=\0"
+static mut T1: [u8; 8] = " bytes=\0"
+static mut T2: [u8; 11] = "hdmi: pin=\0"
+static mut T3: [u8; 6] = " ctl=\0"
+static mut T4: [u8; 6] = " cad=\0"
+static mut T5: [u8; 6] = " nid=\0"
+static mut T6: [u8; 9] = " pincap=\0"
+static mut T7: [u8; 8] = " sense=\0"
+static mut T8: [u8; 9] = " pstate=\0"
+static mut T9: [u8; 9] = " pinctl=\0"
+static mut T10: [u8; 8] = " unsol=\0"
+static mut T11: [u8; 7] = " conv=\0"
+static mut T12: [u8; 6] = " eld=\0"
+static mut T13: [u8; 6] = " mon=\0"
+static mut T14: [u8; 5] = " dp=\0"
+static mut T15: [u8; 6] = " sad=\0"
+static mut T16: [u8; 7] = " rate=\0"
+static mut T17: [u8; 6] = " why=\0"
+static mut T18: [u8; 24] = "hdmi: scan controllers=\0"
+static mut T19: [u8; 7] = " pins=\0"
+
+const NO_ANSWER: u64 = 0xFFFFFFFF
+const V_GET_PARAM: u64 = 0xF00
+const V_GET_CONNSEL: u64 = 0xF01
+const V_GET_CONNLIST: u64 = 0xF02
+const V_GET_PSTATE: u64 = 0xF05
+const V_GET_PINCTL: u64 = 0xF07
+const V_GET_UNSOL: u64 = 0xF08
+const V_GET_PINSENSE: u64 = 0xF09
+const V_GET_EAPD: u64 = 0xF0C
+const V_GET_DIGI1: u64 = 0xF0D
+const V_GET_DIPSIZE: u64 = 0xF2E
+const V_GET_ELDD: u64 = 0xF2F
+const P_VENDOR: u64 = 0x00
+const P_NODECOUNT: u64 = 0x04
+const P_FGTYPE: u64 = 0x05
+const P_WCAP: u64 = 0x09
+const P_PINCAP: u64 = 0x0C
+const P_CONNLEN: u64 = 0x0E
+const T_AUDIO_OUT: u64 = 0
+const T_PIN: u64 = 4
+const WCAP_DIGITAL: u64 = 0x200
+const PINCAP_OUT: u64 = 0x10
+const PINCAP_HDMI: u64 = 0x80
+const PINCAP_DP: u64 = 0x1000000
+
+const R_GCTL: u64 = 0x08
+const R_STATESTS: u64 = 0x0E
+const R_ICOI: u64 = 0x60
+const R_ICII: u64 = 0x64
+const R_ICIS: u64 = 0x68
+const ICIS_BUSY: u64 = 0x01
+const ICIS_VALID: u64 = 0x02
+
+const ST_NONE: u64 = 0
+const ST_OK: u64 = 1
+const ST_DEAD: u64 = 3
+const ST_NOBAR: u64 = 4
+const ST_NORESET: u64 = 5
+
+const POLL_TICKS: u64 = 50
+const FAIL_LIMIT: u64 = 12
+const SYNTH_CTL: u64 = 0xFFFF
+
+static mut conn_nid: [u64; 16] = [0; 16]
+
+fn verb_word(cad: u64, nid: u64, v: u64, payload: u64) -> u64 {
+    if v > 0xF {
+        return ((cad & 0xF) << 28) | ((nid & 0xFF) << 20) | ((v & 0xFFF) << 8) | (payload & 0xFF)
+    }
+    return ((cad & 0xF) << 28) | ((nid & 0xFF) << 20) | ((v & 0xF) << 16) | (payload & 0xFFFF)
+}
+
+fn imm(state: u64, c: u64, cad: u64, nid: u64, v: u64, payload: u64) -> u64 {
+    let b: u64 = hdmitab.ctl_get(c, hdmitab.C_BASE)
+    let deadline: u64 = time.mono_ns(state) +% 5000000
+    while (regio.read16(b + R_ICIS) & ICIS_BUSY) != 0 {
+        if time.mono_ns(state) > deadline {
+            return NO_ANSWER
+        }
+        arch.pause()
+    }
+    regio.write16(b + R_ICIS, ICIS_VALID)
+    regio.write32(b + R_ICOI, verb_word(cad, nid, v, payload))
+    regio.write16(b + R_ICIS, ICIS_BUSY)
+    while (regio.read16(b + R_ICIS) & (ICIS_BUSY | ICIS_VALID)) != ICIS_VALID {
+        if time.mono_ns(state) > deadline {
+            return NO_ANSWER
+        }
+        arch.pause()
+    }
+    return regio.read32(b + R_ICII)
+}
+
+fn xv(state: u64, c: u64, cad: u64, nid: u64, v: u64, payload: u64, keep: bool) -> u64 {
+    var r: u64 = NO_ANSWER
+    if hdmitab.ctl_get(c, hdmitab.C_OWNED) != 0 {
+        r = hda.cmd(state, cad, nid, v, payload)
+    } else {
+        r = imm(state, c, cad, nid, v, payload)
+    }
+    if r == NO_ANSWER {
+        hdmitab.ctl_set(c, hdmitab.C_FAILS, hdmitab.ctl_get(c, hdmitab.C_FAILS) + 1)
+    }
+    if keep {
+        hdmitab.vlog_add(verb_word(cad, nid, v, payload), r)
+    }
+    return r
+}
+
+fn wait_flag(state: u64, b: u64, want: bool) -> bool {
+    let deadline: u64 = time.mono_ns(state) +% 20000000
+    while time.mono_ns(state) < deadline {
+        let on: bool = (regio.read32(b + R_GCTL) & 1) != 0
+        if on == want {
+            return true
+        }
+        arch.pause()
+    }
+    return false
+}
+
+fn pause_us(state: u64, us: u64) {
+    let until: u64 = time.mono_ns(state) +% us * 1000
+    while time.mono_ns(state) < until {
+        arch.pause()
+    }
+}
+
+fn bring_up(state: u64, c: u64, idx: u64) -> bool {
+    let phys: u64 = pci.bar(state, idx, 0)
+    if phys == 0 || pci.bar_is_io(state, idx, 0) {
+        hdmitab.ctl_set(c, hdmitab.C_STATE, ST_NOBAR)
+        return false
+    }
+    let b: u64 = apic.map_device(state, phys)
+    if b == 0 {
+        hdmitab.ctl_set(c, hdmitab.C_STATE, ST_NOBAR)
+        return false
+    }
+    hdmitab.ctl_set(c, hdmitab.C_BASE, b)
+    pci.enable_master(hdmitab.ctl_get(c, hdmitab.C_BDF))
+    regio.write32(b + R_GCTL, regio.read32(b + R_GCTL) & 0xFFFFFFFE)
+    if !wait_flag(state, b, false) {
+        hdmitab.ctl_set(c, hdmitab.C_STATE, ST_NORESET)
+        return false
+    }
+    pause_us(state, 200)
+    regio.write32(b + R_GCTL, regio.read32(b + R_GCTL) | 1)
+    if !wait_flag(state, b, true) {
+        hdmitab.ctl_set(c, hdmitab.C_STATE, ST_NORESET)
+        return false
+    }
+    pause_us(state, 3000)
+    hdmitab.ctl_set(c, hdmitab.C_STATESTS, regio.read16(b + R_STATESTS))
+    hdmitab.ctl_set(c, hdmitab.C_STATE, ST_OK)
+    return true
+}
+
+fn read_conns(state: u64, c: u64, cad: u64, nid: u64) -> u64 {
+    let cl: u64 = xv(state, c, cad, nid, V_GET_PARAM, P_CONNLEN, false)
+    if cl == NO_ANSWER {
+        return 0
+    }
+    var n: u64 = cl & 0x7F
+    if n > 16 {
+        n = 16
+    }
+    let long: bool = (cl & 0x80) != 0
+    var k: u64 = 0
+    while k < n {
+        let r: u64 = xv(state, c, cad, nid, V_GET_CONNLIST, k, false)
+        if r == NO_ANSWER {
+            return k
+        }
+        if long {
+            conn_nid[k as usize] = r & 0x7FFF
+            if k + 1 < n {
+                conn_nid[(k + 1) as usize] = (r >> 16) & 0x7FFF
+            }
+            k = k + 2
+        } else {
+            var j: u64 = 0
+            while j < 4 && k + j < n {
+                conn_nid[(k + j) as usize] = (r >> (j * 8)) & 0x7F
+                j = j + 1
+            }
+            k = k + 4
+        }
+    }
+    return n
+}
+
+fn converter_mask(state: u64, c: u64, cad: u64, n: u64) -> u64 {
+    var mask: u64 = 0
+    var k: u64 = 0
+    while k < n {
+        let wc: u64 = xv(state, c, cad, conn_nid[k as usize], V_GET_PARAM, P_WCAP, false)
+        if wc != NO_ANSWER && ((wc >> 20) & 0xF) == T_AUDIO_OUT && (wc & WCAP_DIGITAL) != 0 {
+            mask = mask | (1 << k)
+        }
+        k = k + 1
+    }
+    return mask
+}
+
+fn rb(state: u64, c: u64, cad: u64, nid: u64, v: u64) -> u64 {
+    let r: u64 = xv(state, c, cad, nid, v, 0, true)
+    if r == NO_ANSWER {
+        return 0xFFFF
+    }
+    return r
+}
+
+fn readback(state: u64, i: u64) {
+    let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+    let cad: u64 = hdmitab.pin_get(i, hdmitab.P_CAD)
+    let nid: u64 = hdmitab.pin_get(i, hdmitab.P_NID)
+    hdmitab.pin_set(i, hdmitab.P_PSTATE, rb(state, c, cad, nid, V_GET_PSTATE))
+    hdmitab.pin_set(i, hdmitab.P_PINCTL, rb(state, c, cad, nid, V_GET_PINCTL))
+    hdmitab.pin_set(i, hdmitab.P_UNSOL, rb(state, c, cad, nid, V_GET_UNSOL))
+    if hdmitab.pin_get(i, hdmitab.P_CONNN) > 1 {
+        hdmitab.pin_set(i, hdmitab.P_CONN, rb(state, c, cad, nid, V_GET_CONNSEL))
+    }
+    if (hdmitab.pin_get(i, hdmitab.P_PINCAP) & hdmipin.PINCAP_EAPD) != 0 {
+        hdmitab.pin_set(i, hdmitab.P_EAPD, rb(state, c, cad, nid, V_GET_EAPD))
+    }
+    let conv: u64 = hdmitab.pin_get(i, hdmitab.P_CONV)
+    if conv != 0 {
+        hdmitab.pin_set(i, hdmitab.P_CONVDIGI, rb(state, c, cad, conv, V_GET_DIGI1))
+    }
+}
+
+fn read_eld(state: u64, i: u64) -> u64 {
+    let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+    let cad: u64 = hdmitab.pin_get(i, hdmitab.P_CAD)
+    let nid: u64 = hdmitab.pin_get(i, hdmitab.P_NID)
+    hdmitab.eld_clear(i)
+    let sz: u64 = xv(state, c, cad, nid, V_GET_DIPSIZE, 0x08, true)
+    if sz == NO_ANSWER {
+        return 0
+    }
+    var n: u64 = sz & 0xFF
+    if n > hdmitab.ELD_MAX {
+        n = hdmitab.ELD_MAX
+    }
+    var k: u64 = 0
+    while k < n {
+        let v: u64 = xv(state, c, cad, nid, V_GET_ELDD, k, false)
+        if v == NO_ANSWER || (v & 0x80000000) == 0 {
+            hdmitab.eld_clear(i)
+            return 0
+        }
+        hdmitab.eld_put(i, k, v & 0xFF)
+        k = k + 1
+    }
+    return n
+}
+
+fn refresh(state: u64, i: u64) {
+    let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+    let cad: u64 = hdmitab.pin_get(i, hdmitab.P_CAD)
+    let nid: u64 = hdmitab.pin_get(i, hdmitab.P_NID)
+    var sense: u64 = xv(state, c, cad, nid, V_GET_PINSENSE, 0, true)
+    if sense == NO_ANSWER {
+        sense = 0
+    }
+    hdmitab.pin_set(i, hdmitab.P_SENSE, sense)
+    hdmitab.pin_set(i, hdmitab.P_LASTSENSE, sense)
+    var n: u64 = 0
+    if hdmipin.sense_plugged(sense) {
+        n = read_eld(state, i)
+    } else {
+        hdmitab.eld_clear(i)
+    }
+    hdmitab.pin_set(i, hdmitab.P_ELDLEN, n)
+    hdmitab.ctr_inc(hdmitab.K_REFRESH)
+}
+
+fn nibble(d: u64) -> u8 {
+    if d < 10 {
+        return (48 + d) as u8
+    }
+    return (87 + d) as u8
+}
+
+fn put_byte_hex(b: u64) {
+    serial.put(nibble((b >> 4) & 15))
+    serial.put(nibble(b & 15))
+}
+
+fn say_eld_hex(i: u64) {
+    let n: u64 = hdmitab.pin_get(i, hdmitab.P_ELDLEN)
+    serial.puts((&T0[0]) as u64)
+    serial.dec(i)
+    serial.puts((&T1[0]) as u64)
+    var k: u64 = 0
+    while k < n {
+        put_byte_hex(kstate.get8(hdmitab.eld_ptr(i) + k))
+        k = k + 1
+    }
+    serial.nl()
+}
+
+fn say_pin(i: u64, why: u64) {
+    let e: u64 = hdmitab.eld_ptr(i)
+    let n: u64 = hdmitab.pin_get(i, hdmitab.P_ELDLEN)
+    serial.puts((&T2[0]) as u64)
+    serial.dec(i)
+    serial.puts((&T3[0]) as u64)
+    serial.dec(hdmitab.pin_get(i, hdmitab.P_CTL))
+    serial.puts((&T4[0]) as u64)
+    serial.dec(hdmitab.pin_get(i, hdmitab.P_CAD))
+    serial.puts((&T5[0]) as u64)
+    serial.dec(hdmitab.pin_get(i, hdmitab.P_NID))
+    serial.puts((&T6[0]) as u64)
+    serial.hex(hdmitab.pin_get(i, hdmitab.P_PINCAP))
+    serial.puts((&T7[0]) as u64)
+    serial.hex(hdmitab.pin_get(i, hdmitab.P_SENSE))
+    serial.puts((&T8[0]) as u64)
+    serial.hex(hdmitab.pin_get(i, hdmitab.P_PSTATE))
+    serial.puts((&T9[0]) as u64)
+    serial.hex(hdmitab.pin_get(i, hdmitab.P_PINCTL))
+    serial.puts((&T10[0]) as u64)
+    serial.hex(hdmitab.pin_get(i, hdmitab.P_UNSOL))
+    serial.puts((&T11[0]) as u64)
+    serial.dec(hdmitab.pin_get(i, hdmitab.P_CONV))
+    serial.puts((&T12[0]) as u64)
+    serial.dec(n)
+    if n != 0 && eld.eld_valid(e, n) {
+        serial.puts((&T13[0]) as u64)
+        var k: u64 = 0
+        while k < eld.eld_name_len(e) {
+            let ch: u64 = eld.eld_name_at(e, k)
+            if ch >= 32 && ch < 127 {
+                serial.put(ch as u8)
+            }
+            k = k + 1
+        }
+        serial.puts((&T14[0]) as u64)
+        if eld.eld_is_dp(e) {
+            serial.dec(1)
+        } else {
+            serial.dec(0)
+        }
+        serial.puts((&T15[0]) as u64)
+        serial.dec(eld.eld_sad_count(e))
+        serial.puts((&T16[0]) as u64)
+        serial.dec(eld.eld_best_pcm_rate(e, n))
+    }
+    if why != 0 {
+        serial.puts((&T17[0]) as u64)
+        serial.dec(why)
+    }
+    serial.nl()
+}
+
+fn activate(state: u64, c: u64, cad: u64, nid: u64, pc: u64, wcap: u64, ordinal: u64) {
+    let i: u64 = hdmitab.pin_new()
+    if i >= hdmitab.MAX_PINS {
+        return
+    }
+    hdmitab.pin_set(i, hdmitab.P_CTL, c)
+    hdmitab.pin_set(i, hdmitab.P_CAD, cad)
+    hdmitab.pin_set(i, hdmitab.P_NID, nid)
+    hdmitab.pin_set(i, hdmitab.P_PINCAP, pc)
+    hdmitab.pin_set(i, hdmitab.P_WCAP, wcap)
+    xv(state, c, cad, nid, V_GET_PARAM, P_PINCAP, true)
+    let n: u64 = read_conns(state, c, cad, nid)
+    hdmitab.pin_set(i, hdmitab.P_CONNN, n)
+    let mask: u64 = converter_mask(state, c, cad, n)
+    var idx: u64 = hdmipin.pick_converter(mask, ordinal)
+    if n <= 1 {
+        idx = hdmipin.NO_CONN
+    }
+    var conv: u64 = 0
+    if idx != hdmipin.NO_CONN {
+        conv = conn_nid[idx as usize]
+    } else if n == 1 && (mask & 1) != 0 {
+        conv = conn_nid[0]
+    }
+    hdmitab.pin_set(i, hdmitab.P_CONV, conv)
+    hdmipin.plan_pin(pc, wcap, idx, nid)
+    hdmitab.pin_set(i, hdmitab.P_PLANLEN, hdmipin.plan_len())
+    var k: u64 = 0
+    while k < hdmipin.plan_len() {
+        xv(state, c, cad, nid, hdmipin.plan_verb(k), hdmipin.plan_payload(k), true)
+        k = k + 1
+    }
+    if conv != 0 {
+        let cw: u64 = xv(state, c, cad, conv, V_GET_PARAM, P_WCAP, false)
+        if cw != NO_ANSWER {
+            hdmipin.plan_converter(cw)
+            k = 0
+            while k < hdmipin.plan_len() {
+                xv(state, c, cad, conv, hdmipin.plan_verb(k), hdmipin.plan_payload(k), true)
+                k = k + 1
+            }
+        }
+    }
+    refresh(state, i)
+    readback(state, i)
+    say_pin(i, 0)
+    if hdmitab.pin_get(i, hdmitab.P_ELDLEN) != 0 {
+        say_eld_hex(i)
+    }
+}
+
+fn scan_ctl(state: u64, c: u64) {
+    let st: u64 = hdmitab.ctl_get(c, hdmitab.C_STATESTS)
+    var cad: u64 = 0
+    var codecs: u64 = 0
+    var ordinal: u64 = 0
+    while cad < 15 {
+        if (st & (1 << cad)) != 0 {
+            codecs = codecs + 1
+            let nc: u64 = xv(state, c, cad, 0, V_GET_PARAM, P_NODECOUNT, false)
+            if nc != NO_ANSWER {
+                let fg0: u64 = (nc >> 16) & 0xFF
+                let fgn: u64 = nc & 0xFF
+                var f: u64 = 0
+                while f < fgn && f < 4 {
+                    let fg: u64 = fg0 + f
+                    let ft: u64 = xv(state, c, cad, fg, V_GET_PARAM, P_FGTYPE, false)
+                    if ft != NO_ANSWER && (ft & 0x7F) == 1 {
+                        let wn: u64 = xv(state, c, cad, fg, V_GET_PARAM, P_NODECOUNT, false)
+                        if wn != NO_ANSWER {
+                            let w0: u64 = (wn >> 16) & 0xFF
+                            let wc: u64 = wn & 0xFF
+                            var k: u64 = 0
+                            while k < wc && k < 64 {
+                                let nid: u64 = w0 + k
+                                let caps: u64 = xv(state, c, cad, nid, V_GET_PARAM, P_WCAP, false)
+                                if caps != NO_ANSWER && ((caps >> 20) & 0xF) == T_PIN && (caps & WCAP_DIGITAL) != 0 {
+                                    let pc: u64 = xv(state, c, cad, nid, V_GET_PARAM, P_PINCAP, false)
+                                    if pc != NO_ANSWER && (pc & PINCAP_OUT) != 0 && (pc & (PINCAP_HDMI | PINCAP_DP)) != 0 {
+                                        activate(state, c, cad, nid, pc, caps, ordinal)
+                                        ordinal = ordinal + 1
+                                    }
+                                }
+                                k = k + 1
+                            }
+                        }
+                    }
+                    f = f + 1
+                }
+            }
+        }
+        cad = cad + 1
+    }
+    hdmitab.ctl_set(c, hdmitab.C_CODECS, codecs)
+}
+
+fn inject_synthetic() {
+    let c: u64 = hdmitab.ctl_new()
+    if c >= hdmitab.MAX_CTL {
+        return
+    }
+    hdmitab.ctl_set(c, hdmitab.C_BDF, SYNTH_CTL)
+    hdmitab.ctl_set(c, hdmitab.C_STATE, ST_OK)
+    hdmitab.ctl_set(c, hdmitab.C_CODECS, 1)
+    let i: u64 = hdmitab.pin_new()
+    if i >= hdmitab.MAX_PINS {
+        return
+    }
+    hdmitab.pin_set(i, hdmitab.P_CTL, c)
+    hdmitab.pin_set(i, hdmitab.P_CAD, 0)
+    hdmitab.pin_set(i, hdmitab.P_NID, 5)
+    hdmitab.pin_set(i, hdmitab.P_PINCAP, 0x01000094)
+    hdmitab.pin_set(i, hdmitab.P_WCAP, 0x40070B)
+    hdmitab.pin_set(i, hdmitab.P_SENSE, 0xC0000000)
+    hdmitab.pin_set(i, hdmitab.P_SYNTH, 1)
+    hdmitab.pin_set(i, hdmitab.P_PSTATE, 0)
+    hdmitab.pin_set(i, hdmitab.P_PINCTL, 0x40)
+    hdmitab.pin_set(i, hdmitab.P_UNSOL, 0x85)
+    hdmitab.pin_set(i, hdmitab.P_CONN, 1)
+    hdmitab.pin_set(i, hdmitab.P_CONNN, 3)
+    hdmitab.pin_set(i, hdmitab.P_CONV, 3)
+    hdmitab.pin_set(i, hdmitab.P_CONVDIGI, 1)
+    hdmitab.eld_clear(i)
+    var b: [u8; 36] = [0 as u8; 36]
+    b[0] = 16 as u8
+    b[2] = 8 as u8
+    b[4] = 3 as u8
+    b[5] = 0x23 as u8
+    b[6] = 5 as u8
+    b[7] = 1 as u8
+    b[16] = 0x10 as u8
+    b[17] = 0xAC as u8
+    b[18] = 0x34 as u8
+    b[19] = 0x12 as u8
+    b[20] = 65 as u8
+    b[21] = 66 as u8
+    b[22] = 67 as u8
+    b[23] = 9 as u8
+    b[24] = 7 as u8
+    b[25] = 7 as u8
+    b[26] = 15 as u8
+    b[27] = 84 as u8
+    b[28] = 7 as u8
+    var k: u64 = 0
+    while k < 36 {
+        hdmitab.eld_put(i, k, b[k as usize] as u64)
+        k = k + 1
+    }
+    hdmitab.pin_set(i, hdmitab.P_ELDLEN, 36)
+    say_pin(i, 0)
+}
+
+fn scan(state: u64) {
+    hdmitab.reset()
+    hdmitab.ctr_inc(hdmitab.K_SCANS)
+    let owner: u64 = hda.owned_bdf(state)
+    var nth: u64 = 0
+    while nth < hdmitab.MAX_CTL {
+        let idx: u64 = drvreg.find(state, drvreg.D_HDA, nth)
+        if idx >= pci.MAX_DEV {
+            nth = hdmitab.MAX_CTL
+        } else {
+            let d: u64 = pci.get(state, idx, pci.E_BDF)
+            let c: u64 = hdmitab.ctl_new()
+            if c < hdmitab.MAX_CTL {
+                hdmitab.ctl_set(c, hdmitab.C_BDF, d)
+                if d == owner {
+                    hdmitab.ctl_set(c, hdmitab.C_OWNED, 1)
+                    let b: u64 = hda.base(state)
+                    hdmitab.ctl_set(c, hdmitab.C_BASE, b)
+                    hdmitab.ctl_set(c, hdmitab.C_STATESTS, regio.read16(b + R_STATESTS))
+                    hdmitab.ctl_set(c, hdmitab.C_STATE, ST_OK)
+                    scan_ctl(state, c)
+                } else if bring_up(state, c, idx) {
+                    scan_ctl(state, c)
+                }
+            }
+            nth = nth + 1
+        }
+    }
+    if hdmitab.pin_count() == 0 && kstate.mode_on(state, kstate.M_AUDGRAPH) {
+        inject_synthetic()
+    }
+    serial.puts((&T18[0]) as u64)
+    serial.dec(hdmitab.ctl_count())
+    serial.puts((&T19[0]) as u64)
+    serial.dec(hdmitab.pin_count())
+    serial.nl()
+}
+
+fn resume(state: u64) {
+    scan(state)
+}
+
+fn due(state: u64) -> bool {
+    if hdmitab.pin_count() == 0 {
+        return false
+    }
+    let t: u64 = kstate.get(state, kstate.TICKS)
+    let last: u64 = hdmitab.ctr_get(hdmitab.K_LASTTICK)
+    return t >= last + POLL_TICKS
+}
+
+fn live_pin(i: u64) -> bool {
+    if hdmitab.pin_get(i, hdmitab.P_SYNTH) != 0 {
+        return false
+    }
+    let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+    return hdmitab.ctl_get(c, hdmitab.C_STATE) == ST_OK
+}
+
+fn drain_events(state: u64) {
+    hda.drain_rirb(state)
+    var guard: u64 = 0
+    var ev: u64 = hda.unsol_take()
+    while ev != 0 && guard < 32 {
+        let resp: u64 = ev & 0xFFFFFFFF
+        let cad: u64 = (ev >> 32) & 0xF
+        let tag: u64 = hdmipin.unsol_tag(resp)
+        var i: u64 = 0
+        while i < hdmitab.pin_count() {
+            if live_pin(i) && hdmitab.ctl_get(hdmitab.pin_get(i, hdmitab.P_CTL), hdmitab.C_OWNED) != 0
+                && hdmitab.pin_get(i, hdmitab.P_CAD) == cad && hdmitab.pin_get(i, hdmitab.P_NID) == tag {
+                hdmitab.pin_set(i, hdmitab.P_EVENTS, hdmitab.pin_get(i, hdmitab.P_EVENTS) + 1)
+                hdmitab.ctr_inc(hdmitab.K_EVENTS)
+                refresh(state, i)
+                say_pin(i, 1)
+            }
+            i = i + 1
+        }
+        guard = guard + 1
+        ev = hda.unsol_take()
+    }
+}
+
+fn run(state: u64) {
+    hdmitab.ctr_set(hdmitab.K_LASTTICK, kstate.get(state, kstate.TICKS))
+    hdmitab.ctr_inc(hdmitab.K_POLLS)
+    if hda.owned_bdf(state) != 0xFFFFFFFF {
+        drain_events(state)
+    }
+    var i: u64 = 0
+    while i < hdmitab.pin_count() {
+        if live_pin(i) {
+            let c: u64 = hdmitab.pin_get(i, hdmitab.P_CTL)
+            if hdmitab.ctl_get(c, hdmitab.C_FAILS) > FAIL_LIMIT {
+                hdmitab.ctl_set(c, hdmitab.C_STATE, ST_DEAD)
+            } else {
+                var sense: u64 = xv(state, c, hdmitab.pin_get(i, hdmitab.P_CAD), hdmitab.pin_get(i, hdmitab.P_NID), V_GET_PINSENSE, 0, false)
+                if sense != NO_ANSWER && sense != hdmitab.pin_get(i, hdmitab.P_LASTSENSE) {
+                    hdmitab.ctr_inc(hdmitab.K_SENSECHG)
+                    refresh(state, i)
+                    say_pin(i, 2)
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn sound_ok(i: u64) -> bool {
+    let n: u64 = hdmitab.pin_get(i, hdmitab.P_ELDLEN)
+    if n == 0 {
+        return false
+    }
+    if hdmipin.pin_state(hdmitab.pin_get(i, hdmitab.P_SENSE)) != 2 {
+        return false
+    }
+    return eld.eld_pcm_ok(hdmitab.eld_ptr(i), n, 2, eld.RATE_48K) || eld.eld_best_pcm_rate(hdmitab.eld_ptr(i), n) == eld.RATE_48K
+}
