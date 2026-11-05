@@ -1,0 +1,38 @@
+#!/bin/bash
+. /usr/local/lib/stick/common.sh
+verdict=$STICK_RUN/vfio_verdict
+{
+    echo "cmdline: $(cat /proc/cmdline)"
+    dmesg | grep -i -E 'DMAR|IOMMU|remapping|VT-d'
+    echo "iommu devices: $(ls /sys/class/iommu 2>/dev/null | tr '\n' ' ')"
+    echo "iommu groups: $(ls /sys/kernel/iommu_groups 2>/dev/null | wc -l)"
+} > "$OUT/iommu.txt" 2>&1
+if ! find_target; then
+    echo "no: target device not present" > "$verdict"
+    exit 0
+fi
+group=/sys/bus/pci/devices/$TARGET_BDF/iommu_group
+if [ ! -e "$group" ]; then
+    echo "no: no iommu group for $TARGET_BDF (VT-d disabled in BIOS or unsupported)" > "$verdict"
+    exit 0
+fi
+{
+    echo "target: $TARGET_BDF group $(basename "$(readlink -f "$group")")"
+    for m in "$group"/devices/*; do
+        b=${m##*/}
+        echo "member $b class $(pci_attr "$b" class) $(lspci -s "$b" -nn 2>/dev/null)"
+    done
+} >> "$OUT/iommu.txt"
+others=
+for m in "$group"/devices/*; do
+    b=${m##*/}
+    [ "$b" = "$TARGET_BDF" ] && continue
+    case $(pci_attr "$b" class) in 0x0604*|0x0600*) continue ;; esac
+    others="$others $b"
+done
+if [ -n "$others" ]; then
+    echo "no: iommu group shared with:$others" > "$verdict"
+else
+    echo "ok: group $(basename "$(readlink -f "$group")") holds only $TARGET_BDF (plus bridges)" > "$verdict"
+fi
+exit 0

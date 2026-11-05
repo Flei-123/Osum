@@ -1,0 +1,78 @@
+#!/bin/bash
+. /usr/local/lib/stick/common.sh
+T=$TRACEFS
+EVENTS="iwlwifi iwlwifi_io iwlwifi_data iwlwifi_ucode cfg80211 rfkill"
+
+if ! find_target; then
+    say "trace: target $TARGET_VENDOR:$TARGET_DEVICE not found, skipping"
+    exit 0
+fi
+say "trace: target $TARGET_BDF"
+rfkill list > "$OUT/rfkill-before.txt" 2>&1
+echo none > "/sys/bus/pci/devices/$TARGET_BDF/driver_override"
+for m in $TARGET_MODULES; do
+    modprobe "$m" >> "$OUT/modprobe.txt" 2>&1 || say "trace: modprobe $m failed"
+done
+modprobe hp_wmi >> "$OUT/modprobe.txt" 2>&1
+
+echo 0 > "$T/tracing_on"
+echo nop > "$T/current_tracer"
+: > "$T/set_event"
+echo mono > "$T/trace_clock"
+echo 131072 > "$T/buffer_size_kb"
+for e in $EVENTS; do
+    [ -d "$T/events/$e" ] && echo "$e:*" >> "$T/set_event"
+done
+cp "$T/set_event" "$OUT/events-enabled.txt"
+echo mmiotrace > "$T/current_tracer" 2> "$OUT/mmiotrace-error.txt" || say "trace: mmiotrace tracer failed"
+echo 1 > "$T/tracing_on"
+cat "$T/trace_pipe" > "$OUT/trace_pipe.txt" 2> /dev/null &
+PIPE_PID=$!
+
+CMD_PID=
+if command -v trace-cmd > /dev/null; then
+    trace-cmd record -B iwl $(for e in $EVENTS; do [ -d "$T/events/$e" ] && echo "-e $e"; done) -o "$OUT/trace.dat" > "$OUT/trace-cmd-record.txt" 2>&1 &
+    CMD_PID=$!
+    sleep 3
+fi
+mark "STICK-BEGIN driver probe $TARGET_BDF"
+echo > "/sys/bus/pci/devices/$TARGET_BDF/driver_override"
+echo "$TARGET_BDF" > /sys/bus/pci/drivers_probe
+for i in $(seq 1 60); do
+    IF=$(wifi_iface) && break
+    sleep 1
+done
+mark "STICK-PROBED iface=${IF:-none}"
+dmesg > "$OUT/dmesg-after-probe.txt"
+rfkill list > "$OUT/rfkill-after-probe.txt" 2>&1
+if [ -z "${IF:-}" ]; then
+    say "trace: no wifi interface appeared (probe failed, see dmesg-after-probe.txt)"
+else
+    say "trace: interface $IF"
+    ip link set "$IF" up > "$OUT/ip-link-up.txt" 2>&1
+    for n in $(seq 1 "$SCAN_TRIES"); do
+        mark "STICK-SCAN $n"
+        iw dev "$IF" scan > "$OUT/scan$n.txt" 2>&1
+        echo "rc=$?" >> "$OUT/scan$n.txt"
+        say "trace: scan $n rc=$(tail -1 "$OUT/scan$n.txt") ssids=$(grep -c 'SSID:' "$OUT/scan$n.txt")"
+        if [ "$n" = 1 ]; then
+            rfkill list > "$OUT/rfkill-after-scan1.txt" 2>&1
+            rfkill unblock all > /dev/null 2>&1
+        fi
+        sleep 2
+    done
+    grep 'SSID:' "$OUT"/scan*.txt | sort -u > "$OUT/ssids.txt"
+fi
+mark "STICK-END"
+sleep 2
+echo 0 > "$T/tracing_on"
+[ -n "$CMD_PID" ] && kill -INT "$CMD_PID" 2> /dev/null
+sleep 3
+kill "$PIPE_PID" 2> /dev/null
+[ -n "$CMD_PID" ] && wait "$CMD_PID" 2> /dev/null
+echo nop > "$T/current_tracer"
+if [ -s "$OUT/trace.dat" ]; then
+    trace-cmd report -i "$OUT/trace.dat" > "$OUT/trace-cmd-report.txt" 2>&1
+fi
+say "trace: mmiotrace lines $(wc -l < "$OUT/trace_pipe.txt"), events in report $(grep -c iwlwifi "$OUT/trace-cmd-report.txt" 2> /dev/null)"
+exit 0
