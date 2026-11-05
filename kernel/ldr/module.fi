@@ -70,6 +70,7 @@ const S_EXTSYMS: u64 = 0x70
 const S_BANLEN: u64 = 0x78
 const S_LASTK: u64 = 0x80
 const S_BUSY: u64 = 0x88
+const S_CURK: u64 = 0x90
 
 const MOD_OFF: u64 = 0x0100
 const MOD_SPAN: u64 = 0x80
@@ -82,6 +83,10 @@ const M_EXIT: u64 = 0x20
 const M_SLOT: u64 = 0x28
 const M_NAME: u64 = 0x30
 const M_REFS: u64 = 0x50
+const M_EXPORT: u64 = 0x58
+const M_EXPFRAMES: u64 = 0x60
+const M_EXPCOUNT: u64 = 0x68
+const M_DEPS: u64 = 0x70
 
 const SEC_OFF: u64 = 0x0400
 const MAX_SEC: u64 = 64
@@ -107,6 +112,10 @@ const SHF_ALLOC: u64 = 0x2
 const SHN_UNDEF: u64 = 0
 const SHN_ABS: u64 = 0xFFF1
 const SHENT: u64 = 64
+const EXP_NAME: u64 = 64
+const EXP_ENT: u64 = 72
+const SYM_GLOBAL: u64 = 1
+const SYM_WEAK: u64 = 2
 const SYMENT: u64 = 24
 const RELAENT: u64 = 24
 
@@ -483,6 +492,7 @@ fn load(state: u64, path_v: u64, slot: u64) -> u64 {
             m_set(state, k, M_BASE, 0)
             m_set(state, k, M_FRAMES, 0)
         }
+        free_exports(state, k)
         m_set(state, k, M_USED, 0)
         return fail(state, g2)
     }
@@ -495,10 +505,13 @@ fn load(state: u64, path_v: u64, slot: u64) -> u64 {
     if rc != 0 {
         modtab.clear_slot(state, slot)
         mmframe.frame_free_run(state, m(state, k, M_BASE), m(state, k, M_FRAMES))
+        free_exports(state, k)
+        m_set(state, k, M_DEPS, 0)
         m_set(state, k, M_USED, 0)
         m_set(state, k, M_BASE, 0)
         return fail(state, R_INIT)
     }
+    take_deps(state, k)
     m_set(state, k, M_SLOT, slot)
     put(state, S_LASTK, k)
     put(state, S_LOADED, hol(state, S_LOADED) + 1)
@@ -749,6 +762,11 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
     }
     m_set(state, k, M_USED, 1)
     m_set(state, k, M_REFS, 0)
+    m_set(state, k, M_EXPORT, 0)
+    m_set(state, k, M_EXPFRAMES, 0)
+    m_set(state, k, M_EXPCOUNT, 0)
+    m_set(state, k, M_DEPS, 0)
+    put(state, S_CURK, k)
     m_set(state, k, M_BASE, basis)
     m_set(state, k, M_FRAMES, frame)
 
@@ -865,7 +883,177 @@ fn elf_place(state: u64, o: u64, n: u64, k: u64, slot: u64) -> u64 {
         x = sym_addr(state, symtab, symn, strtab, (&aus[0]) as u64, shnum)
     }
     m_set(state, k, M_EXIT, x)
+    return build_exports(state, k, symtab, symn, strtab, shnum)
+}
+
+fn copy_name(dst: u64, src: u64) {
+    var j: u64 = 0
+    while j < 63 {
+        let c: u64 = kstate.get8(src + j)
+        kstate.set8(dst + j, (c & 0xFF) as u8)
+        if c == 0 {
+            return
+        }
+        j = j + 1
+    }
+    kstate.set8(dst + 63, 0)
+}
+
+fn name_short(name: u64) -> bool {
+    var j: u64 = 0
+    while j < 64 {
+        if kstate.get8(name + j) == 0 {
+            return true
+        }
+        j = j + 1
+    }
+    return false
+}
+
+fn export_wanted(state: u64, symtab: u64, i: u64, strtab: u64, shnum: u64) -> bool {
+    var e1: [u8; 12] = "module_init\0"
+    var e2: [u8; 12] = "module_exit\0"
+    var e3: [u8; 11] = "modul_init\0"
+    var e4: [u8; 11] = "modul_exit\0"
+    let sy: u64 = symtab + i * SYMENT
+    let nm: u64 = regio.read32(sy)
+    if nm == 0 {
+        return false
+    }
+    let bind: u64 = kstate.get8(sy + 4) >> 4
+    if bind != SYM_GLOBAL && bind != SYM_WEAK {
+        return false
+    }
+    let shndx: u64 = regio.read16(sy + 6)
+    if shndx == SHN_UNDEF || shndx >= shnum {
+        return false
+    }
+    if sec(state, shndx) == 0 {
+        return false
+    }
+    let name: u64 = strtab + nm
+    if !name_short(name) {
+        return false
+    }
+    if ksym.eq(name, (&e1[0]) as u64) || ksym.eq(name, (&e2[0]) as u64) {
+        return false
+    }
+    if ksym.eq(name, (&e3[0]) as u64) || ksym.eq(name, (&e4[0]) as u64) {
+        return false
+    }
+    return true
+}
+
+fn build_exports(state: u64, k: u64, symtab: u64, symn: u64, strtab: u64,
+    shnum: u64) -> u64 {
+    var count: u64 = 0
+    var i: u64 = 0
+    while i < symn {
+        if export_wanted(state, symtab, i, strtab, shnum) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    if count == 0 {
+        return R_OK
+    }
+    let frames: u64 = (count * EXP_ENT + 4095) / 4096
+    let tab: u64 = mmframe.frame_run(state, frames)
+    if tab == 0 {
+        return R_NOMEM
+    }
+    var n: u64 = 0
+    i = 0
+    while i < symn {
+        if export_wanted(state, symtab, i, strtab, shnum) {
+            let sy: u64 = symtab + i * SYMENT
+            let ent: u64 = tab + n * EXP_ENT
+            copy_name(ent, strtab + regio.read32(sy))
+            regio.write64(ent + EXP_NAME,
+                sec(state, regio.read16(sy + 6)) + regio.read64(sy + 8))
+            n = n + 1
+        }
+        i = i + 1
+    }
+    m_set(state, k, M_EXPORT, tab)
+    m_set(state, k, M_EXPFRAMES, frames)
+    m_set(state, k, M_EXPCOUNT, count)
     return R_OK
+}
+
+fn free_exports(state: u64, k: u64) {
+    let tab: u64 = m(state, k, M_EXPORT)
+    if tab != 0 {
+        mmframe.frame_free_run(state, tab, m(state, k, M_EXPFRAMES))
+    }
+    m_set(state, k, M_EXPORT, 0)
+    m_set(state, k, M_EXPFRAMES, 0)
+    m_set(state, k, M_EXPCOUNT, 0)
+}
+
+fn mark_dep(state: u64, provider: u64) {
+    let cur: u64 = hol(state, S_CURK)
+    if cur < MAX_MOD && cur != provider {
+        m_set(state, cur, M_DEPS, m(state, cur, M_DEPS) | (1 << provider))
+    }
+}
+
+fn find_export(state: u64, name: u64) -> u64 {
+    var k: u64 = 0
+    while k < MAX_MOD {
+        let tab: u64 = m(state, k, M_EXPORT)
+        if m(state, k, M_USED) != 0 && tab != 0 {
+            let cnt: u64 = m(state, k, M_EXPCOUNT)
+            var j: u64 = 0
+            while j < cnt {
+                let ent: u64 = tab + j * EXP_ENT
+                if ksym.eq(ent, name) {
+                    mark_dep(state, k)
+                    return regio.read64(ent + EXP_NAME)
+                }
+                j = j + 1
+            }
+        }
+        k = k + 1
+    }
+    return 0
+}
+
+fn take_deps(state: u64, k: u64) {
+    let d: u64 = m(state, k, M_DEPS)
+    var j: u64 = 0
+    while j < MAX_MOD {
+        if ((d >> j) & 1) != 0 {
+            ref(state, j)
+        }
+        j = j + 1
+    }
+}
+
+fn release_deps(state: u64, k: u64) {
+    let d: u64 = m(state, k, M_DEPS)
+    var j: u64 = 0
+    while j < MAX_MOD {
+        if ((d >> j) & 1) != 0 {
+            unref(state, j)
+        }
+        j = j + 1
+    }
+    m_set(state, k, M_DEPS, 0)
+}
+
+fn deps_of(state: u64, k: u64) -> u64 {
+    if k >= MAX_MOD {
+        return 0
+    }
+    return m(state, k, M_DEPS)
+}
+
+fn exports_of(state: u64, k: u64) -> u64 {
+    if k >= MAX_MOD {
+        return 0
+    }
+    return m(state, k, M_EXPCOUNT)
 }
 
 fn copy(dst: u64, src: u64, len: u64) {
@@ -935,7 +1123,10 @@ fn sym_value(state: u64, symtab: u64, symn: u64, strtab: u64, idx: u64,
             regio.write64(ok, 0)
             return 0
         }
-        let a: u64 = ksym.such(strtab + nm)
+        var a: u64 = ksym.such(strtab + nm)
+        if a == 0 {
+            a = find_export(state, strtab + nm)
+        }
         if a == 0 {
             regio.write64(ok, 0)
             return 0
@@ -1034,6 +1225,8 @@ fn entladen(state: u64, k: u64) -> bool {
     if x != 0 {
         ruf1(x, state)
     }
+    release_deps(state, k)
+    free_exports(state, k)
     mmframe.frame_free_run(state, m(state, k, M_BASE), m(state, k, M_FRAMES))
     m_set(state, k, M_USED, 0)
     m_set(state, k, M_BASE, 0)
