@@ -111,3 +111,10 @@ Gate: `bash tools/monitors/run.sh` (87 promises incl. 6 negative controls, host 
 - **Extend is a BOOT choice:** `vgpuextend` is a kernel command-line word, read before the file system exists; the boot entry is written by the installer.
   Settings therefore cannot switch extend/mirror at run time (the framebuffer is one wide resource, sized at boot). Default for >= 2 heads: extend (decided by the boss); `vgpumirror` opts out.
 - Open (unchanged): a head of another height gets the old window size for the start menu (it only moves); tile tree per head exists (r839).
+
+## Settings monitors page lists the outputs (G-007, 05.11.2026)
+
+- `Display > Monitors` has a status row `Detected: 1: 1920x1080  2: 2560x1440 150%`. Size = `wlibc.head_field` (w/h of the head), the scale percent (EDID suggestion, `wlibc.head_scale`) is shown only when it is not 100. With no head table (one output, no extend) it falls back to the screen size.
+- Code: `setsystem.heads_read` (called from `state_read`, buffer `setbase.l_heads`), manifest field `headlist` (display.bind index 26), witness serial line `settings: heads ...`.
+- Gate: `tools/setheads/run.sh` (QEMU 2 outputs 640x480 and 1280x800 + 1-output control; checks the witness line, `view_image` of the page).
+- Still open: arrangement canvas (drag), per-head scale in the UI toolkit, hotplug refresh of this row (read at start and after Apply only).
