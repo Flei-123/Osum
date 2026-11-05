@@ -30,7 +30,11 @@
 - Plain words: `not connected` instead of `no carrier`, `no internet` instead of `gateway silent`, `Address: automatic | fixed` instead of `Obtain address: over DHCP`.
 - Connections page: long note lines shortened so they are no longer cut off at the column edge.
 
+## Done: Network page defaults and live values
+- No /etc/network.conf now means `automatic` (before: `fixed` with four empty fields on a fresh system).
+- Switching to `fixed` pre-fills address, mask, gateway and DNS with the live values; DNS comes from /etc/resolv.conf (libc.dns.conf_load), also after Apply.
+- Button `Yes, change it` shows only while a confirmation is pending; before it was always visible in `fixed` mode.
+- Connections table: proportional columns and the `network/details` advanced route are on main (6023575b6); header `Kind` and the empty row are no longer cut.
+
 ## Open
-- A real `network/details` route (advanced) instead of the `fixed` condition needs a new tab id; R_ANZ shifts K_TAB0/K_PKGTAB0 ranges and the package tabs, so it needs its own change and gate run.
-- Connections table: the `Kind` column is too narrow, header and the empty row are cut (`K...`, `(...`); needs proportional column widths in the table widget.
 - Replace `nv.link_state` by the NETHEAL stage once the network health service is on main (one place: setwifi.status_fill).

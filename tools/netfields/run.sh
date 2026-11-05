@@ -41,6 +41,7 @@ for c in $CASES; do
       ;;
     dhcp*)
       grep -aq 'settings: net fields' "$S" && bad "$c: fields filled in automatic mode" || ok "$c: automatic mode leaves fields alone"
+      grep -aq 'settings: live dns=10.0.2.3' "$S" && ok "$c: DNS field shows the live resolver" || bad "$c: DNS field has no live resolver"
       ;;
   esac
   grep -aiq 'panic\|exception' "$S" && bad "$c: panic" || ok "$c: no panic"
