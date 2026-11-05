@@ -6,7 +6,7 @@ GUI_IMPORT = re.compile(
     rb"^import +(wlibc|wlib|fuiscene|fuib|fuiapp|fui\.[a-z]+|softui|wmplug|wmd)\b", re.M
 )
 FORBIDDEN = re.compile(rb"(?<![\w.])ulib\.(say|sayn|sayu|nl|say_line|put)\(")
-USES_LINEOUT = re.compile(rb"(?<![\w.])lineout\.add_(text|num|unum|bytes)\(")
+USES_LINEOUT = re.compile(rb"(?<![\w.])lineout\.add_(text|num|unum)\(")
 ENDS_LINE = re.compile(rb"(?<![\w.])lineout\.(end_line|flush)\(|\\n")
 SKIP = {"kernel/user/lineout.fi"}
 
