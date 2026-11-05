@@ -31,5 +31,12 @@ $MK build "$D/s" --name badid --module "$D/dummy.omod" --match "pci 12345:11e8" 
 $MK build "$D/s" --name BadName --module "$D/dummy.omod" --match "pci 1234:11e8" >/dev/null 2>&1 \
     && bad "bad name accepted" || ok "counter-proof: bad name refused at build"
 
+printf 'OSUMMOD-prov' > "$D/prov.omod"
+$MK build "$D/s" --name withreq --module "$D/dummy.omod" --requires "$D/prov.omod" --match "pci 1234:11e8" >/dev/null && [ "$($MK check "$D/s/withreq")" = OK ] && ok "build + check package with requires=" || bad "package with requires="
+$MK build "$D/s" --name noreq --module "$D/dummy.omod" --requires "$D/prov.omod" --no-requires --match "pci 1234:11e8" >/dev/null
+($MK check "$D/s/noreq" || true) | grep -q "required file prov.omod missing" && ok "counter-proof: missing provider file" || bad "missing provider accepted"
+$MK build "$D/s" --name selfreq --module "$D/dummy.omod" --requires "$D/dummy.omod" --match "pci 1234:11e8" >/dev/null 2>&1 \
+    && bad "requires equal to module accepted" || ok "counter-proof: requires equal to module refused at build"
+
 echo "DRVSTORE-HOST: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

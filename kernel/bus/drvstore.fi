@@ -22,7 +22,7 @@ export {
     pkg_rec, pkg_origin, pkg_app, bind_total, bind_pkg, bind_id, bind_result, bind_code,
     find_bind, unload_test, unload_pkg, load_pkg, last_loaded, last_refs, UL_OK, UL_NONE, UL_IDLE, UL_BUSY, UL_LOADED, UL_NODEV, best_pci, best_usb, best_acpi, bound_count, failed_count,
     CTX_OFF, ST_OK, ST_BANNED, X_SIG, X_ABI, X_NOMODULE, X_NOFILE, X_DENY,
-    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE, slot_owner, slot_of, X_DUP, X_SLOTBUSY, testmode_on, pkg_unsigned, compat_allowed, pkg_tier, X_TIER
+    BR_NONE, BR_BOUND, BR_FAILED, BR_RELEASED, NONE, slot_owner, slot_of, X_DUP, X_SLOTBUSY, testmode_on, pkg_unsigned, compat_allowed, pkg_tier, X_TIER, X_NOREQ, pkg_provider
 }
 
 const MAXPKG: u64 = 16
@@ -38,7 +38,8 @@ const M_BANNED: u64 = 4
 const M_LOADRC: u64 = 5
 const M_ORIGIN: u64 = 6
 const M_UNSIGNED: u64 = 7
-const M_FIELDS: u64 = 8
+const M_REQK: u64 = 8
+const M_FIELDS: u64 = 9
 
 const ST_OK: u64 = 0
 const ST_BANNED: u64 = 30
@@ -49,6 +50,7 @@ const X_NOFILE: u64 = 23
 const X_DENY: u64 = 24
 const X_DUP: u64 = 25
 const X_TIER: u64 = 26
+const X_NOREQ: u64 = 27
 const X_SLOTBUSY: u64 = 40
 const MAXAPP: u64 = 8
 const APP_BYTES: u64 = 24
@@ -74,8 +76,8 @@ const B_FIELDS: u64 = 5
 
 const NO_LOAD: u64 = 99
 
-static mut records: [u8; 7040] = [0 as u8; 7040]
-static mut meta: [u64; 128] = [0 as u64; 128]
+static mut records: [u8; 7552] = [0 as u8; 7552]
+static mut meta: [u64; 144] = [0 as u64; 144]
 static mut testmode: u64 = 0
 static mut compat_ok: u64 = 0
 static mut last_unsigned: u64 = 0
@@ -109,6 +111,10 @@ fn pkg_tier(i: u64) -> u64 {
 
 fn testmode_on() -> bool {
     return testmode != 0
+}
+
+fn pkg_provider(i: u64) -> u64 {
+    return mf(i, M_REQK)
 }
 
 fn pkg_unsigned(i: u64) -> bool {
@@ -333,6 +339,17 @@ fn check_module_file(state: u64, origin: u64, rec: u64, dir: u64) -> bool {
     return fs.path(state, (&path_buf[0]) as u64) != 0
 }
 
+fn check_provider_file(state: u64, origin: u64, rec: u64, dir: u64) -> bool {
+    if !drvinf.rec_hasreq(rec) {
+        return true
+    }
+    if drvinf.text_eq(drvinf.rec_requires(rec), drvinf.rec_module(rec)) {
+        return false
+    }
+    pkg_path(origin, dir, drvinf.rec_requires(rec))
+    return fs.path(state, (&path_buf[0]) as u64) != 0
+}
+
 fn copy_dir(i: u64, src: u64) {
     var k: u64 = 0
     while k < 23 && kstate.get8(src + k) != 0 {
@@ -365,6 +382,7 @@ fn scan_one(state: u64, origin: u64, name: u64) {
     mset(i, M_BOUND, 0)
     mset(i, M_BANNED, 0)
     mset(i, M_LOADRC, 0)
+    mset(i, M_REQK, NO_LOAD)
     mset(i, M_ORIGIN, origin)
     if name_taken(name, i) {
         mset(i, M_STATUS, X_DUP)
@@ -391,6 +409,10 @@ fn scan_one(state: u64, origin: u64, name: u64) {
     }
     if !check_module_file(state, origin, rec, name) {
         mset(i, M_STATUS, X_NOMODULE)
+        return
+    }
+    if !check_provider_file(state, origin, rec, name) {
+        mset(i, M_STATUS, X_NOREQ)
         return
     }
     mset(i, M_VALID, 1)
@@ -735,6 +757,32 @@ fn attach_slot(state: u64, slot: u64) {
     serial.nl()
 }
 
+fn load_provider(state: u64, p: u64) -> u64 {
+    let rec: u64 = rec_at(p)
+    if !drvinf.rec_hasreq(rec) || mf(p, M_REQK) != NO_LOAD {
+        return module.R_OK
+    }
+    pkg_path(mf(p, M_ORIGIN), pkg_dir(p), drvinf.rec_requires(rec))
+    let rc: u64 = module.load(state, (&path_buf[0]) as u64, modidx.MAX_SLOT)
+    if rc != module.R_OK {
+        return rc
+    }
+    mset(p, M_REQK, module.last_placed(state))
+    return module.R_OK
+}
+
+fn drop_provider(state: u64, p: u64) -> bool {
+    let k: u64 = mf(p, M_REQK)
+    if k == NO_LOAD {
+        return true
+    }
+    if !module.entladen(state, k) {
+        return false
+    }
+    mset(p, M_REQK, NO_LOAD)
+    return true
+}
+
 fn bind_pci(state: u64, p: u64, idx: u64) {
     var s_pre: [u8; 16] = "drvstore: bind \0"
     var s_arrow: [u8; 5] = " -> \0"
@@ -759,11 +807,19 @@ fn bind_pci(state: u64, p: u64, idx: u64) {
             res = BR_FAILED
             mset(p, M_LOADRC, rc)
         } else {
-            rc = module.load(state, (&path_buf[0]) as u64, slot)
+            rc = load_provider(state, p)
             if rc == module.R_OK {
-                mset(p, M_LOADK, module.last_placed(state))
-                if late == 1 && slot < modidx.MAX_SLOT {
-                    attach_slot(state, slot)
+                pkg_path(mf(p, M_ORIGIN), pkg_dir(p), drvinf.rec_module(rec_at(p)))
+                rc = module.load(state, (&path_buf[0]) as u64, slot)
+                if rc == module.R_OK {
+                    mset(p, M_LOADK, module.last_placed(state))
+                    if late == 1 && slot < modidx.MAX_SLOT {
+                        attach_slot(state, slot)
+                    }
+                } else {
+                    res = BR_FAILED
+                    mset(p, M_LOADRC, rc)
+                    drop_provider(state, p)
                 }
             } else {
                 res = BR_FAILED
@@ -1004,6 +1060,7 @@ fn unload_pkg(state: u64, name: u64) -> u64 {
     release_binds(p)
     mset(p, M_LOADK, NO_LOAD)
     mset(p, M_BOUND, 0)
+    drop_provider(state, p)
     return UL_OK
 }
 
@@ -1022,6 +1079,9 @@ fn unload_test(state: u64) {
             if module.entladen(state, k) {
                 serial.puts((&s_gone[0]) as u64)
                 serial.nl()
+                mset(p, M_LOADK, NO_LOAD)
+                mset(p, M_BOUND, 0)
+                drop_provider(state, p)
             } else {
                 serial.puts((&s_busy[0]) as u64)
                 serial.dec(module.refs_of(state, k))
@@ -1038,6 +1098,7 @@ fn unload_test(state: u64) {
                     serial.puts((&s_ok[0]) as u64)
                     mset(p, M_LOADK, NO_LOAD)
                     mset(p, M_BOUND, 0)
+                    drop_provider(state, p)
                 } else {
                     serial.puts((&s_busy[0]) as u64)
                     serial.dec(module.refs_of(state, k))

@@ -15,7 +15,7 @@ SEED_PATH = os.path.join(MODDIR, "verify.seed")
 PUB_PATH = os.path.join(MODDIR, "verify.pub")
 MAX_INF = 1536
 MAX_MATCH = 8
-KEYS = ("name", "version", "abi", "rank", "module", "rights", "fw", "slot", "tier", "match")
+KEYS = ("name", "version", "abi", "rank", "module", "rights", "fw", "slot", "tier", "requires", "match")
 TIERS = ("native", "compat")
 RIGHTS = ("pci-cfg", "mmio", "irq", "dma", "fw", "usb", "acpi", "mouse-slot")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,22}$")
@@ -61,6 +61,8 @@ def lint(text):
             errors.append("line %d: rank above 255" % no)
         if key == "module" and not MOD_RE.match(value):
             errors.append("line %d: bad module file name" % no)
+        if key == "requires" and not MOD_RE.match(value):
+            errors.append("line %d: bad requires file name" % no)
         if key == "rights":
             for r in value.split(","):
                 if r not in RIGHTS:
@@ -74,6 +76,8 @@ def lint(text):
     for need in ("name", "version", "abi", "module"):
         if need not in seen:
             errors.append("missing key %s" % need)
+    if "requires" in seen and seen["requires"] == seen.get("module"):
+        errors.append("requires equals module")
     if matches == 0:
         errors.append("no match line")
     if matches > MAX_MATCH:
@@ -97,6 +101,8 @@ def build(args):
         lines.append("slot=%s" % args.slot)
     if args.tier:
         lines.append("tier=%s" % args.tier)
+    if args.requires:
+        lines.append("requires=%s" % os.path.basename(args.requires))
     for m in args.match:
         lines.append("match=%s" % m)
     if args.garbage:
@@ -122,6 +128,8 @@ def build(args):
         f.write(sig)
     if not args.no_module:
         shutil.copyfile(args.module, os.path.join(pkg, os.path.basename(args.module)))
+    if args.requires and not args.no_requires:
+        shutil.copyfile(args.requires, os.path.join(pkg, os.path.basename(args.requires)))
     print(pkg)
 
 
@@ -147,6 +155,9 @@ def check(args):
             modname = line[7:]
     if modname and not os.path.exists(os.path.join(args.pkgdir, modname)):
         problems.append("module file %s missing" % modname)
+    for line in text.split("\n"):
+        if line.startswith("requires=") and not os.path.exists(os.path.join(args.pkgdir, line[9:])):
+            problems.append("required file %s missing" % line[9:])
     if problems:
         print("INVALID: " + "; ".join(problems))
         return 1
@@ -169,6 +180,8 @@ def main():
     b.add_argument("--fw", default="")
     b.add_argument("--slot", default="")
     b.add_argument("--tier", default="")
+    b.add_argument("--requires", default="")
+    b.add_argument("--no-requires", action="store_true")
     b.add_argument("--match", action="append", default=[])
     b.add_argument("--seed", default=SEED_PATH)
     b.add_argument("--bad-sig", action="store_true")
