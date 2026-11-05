@@ -6,6 +6,12 @@ const S_OPEN: i64 = 2
 
 const S_CLOSE: i64 = 3
 
+const S_SYSINFO: i64 = 1002
+
+const I_UPTIME: i64 = 1
+
+const BEAT_EVERY_S: i64 = 10
+
 const TRANSITION_NONE: i64 = 0
 
 const TRANSITION_ON: i64 = 1
@@ -22,11 +28,13 @@ static mut k_active: bool = false
 
 static mut k_previous: bool = false
 
+static mut k_beat_at: i64 = -1
+
+static mut BEAT_BODY: [u8; 24] = [0 as u8; 24]
+
 static mut P_OFF: [u8; 20] = "/var/jarvis/dev-off\0"
 
 static mut P_ACTIVE: [u8; 27] = "/var/jarvis/devmode-active\0"
-
-static mut ACTIVE_BODY: [u8; 2] = "1\n"
 
 static mut DENY_READ: [u8; 187] = "/secrets\0/device\0/state/session\0/etc/shadow*\0/etc/passwd*\0/etc/machine-id\0/etc/wlan.conf*\0/etc/dbgsrv.token\0/etc/odb.token\0/etc/social\0/config/vpn/keys\0/etc/jarvis/device.key\0/root/.ssh\0\0"
 static mut DENY_WRITE: [u8; 92] = "/var/log/jarvisd.log\0/var/jarvis/dev-off\0/var/jarvis/devmode-active\0/var/jarvis/pairing-ok\0\0"
@@ -59,14 +67,55 @@ fn emergency_stop() -> bool {
     return file_exists((&P_OFF[0]) as u64)
 }
 
+fn uptime_s() -> i64 {
+    return syscall(S_SYSINFO, I_UPTIME, 0, 0, 0, 0, 0) / 1000
+}
+
+fn write_marker(now: i64) {
+    var digits: [u8; 20] = [0 as u8; 20]
+    var n: usize = 0
+    var rest: i64 = now
+    if rest < 0 {
+        rest = 0
+    }
+    if rest == 0 {
+        digits[0] = 48 as u8
+        n = 1
+    }
+    while rest > 0 {
+        digits[n] = (48 + rest % 10) as u8
+        rest = rest / 10
+        n = n + 1
+    }
+    var at: usize = 0
+    while at < n {
+        BEAT_BODY[at] = digits[n - 1 - at]
+        at = at + 1
+    }
+    BEAT_BODY[n] = 10 as u8
+    rt.write_file((&P_ACTIVE[0]) as u64, (&BEAT_BODY[0]) as u64, n + 1)
+    k_beat_at = now
+}
+
+fn beat() {
+    if !k_active {
+        return
+    }
+    let now: i64 = uptime_s()
+    if now < k_beat_at || now - k_beat_at >= BEAT_EVERY_S {
+        write_marker(now)
+    }
+}
+
 fn settle() -> i64 {
     k_active = k_conf_dev && !emergency_stop()
     if k_active {
-        if !file_exists((&P_ACTIVE[0]) as u64) {
-            rt.write_file((&P_ACTIVE[0]) as u64, (&ACTIVE_BODY[0]) as u64, 2)
+        if k_beat_at < 0 || !file_exists((&P_ACTIVE[0]) as u64) {
+            write_marker(uptime_s())
         }
     } else if file_exists((&P_ACTIVE[0]) as u64) {
         rt.unlink_file((&P_ACTIVE[0]) as u64)
+        k_beat_at = -1
     }
     var change: i64 = TRANSITION_NONE
     if k_active && !k_previous {

@@ -6,6 +6,7 @@ Dev mode lets JARVIS work on a device through the bridge without the per-path / 
 - Reads, writes and lists any path, runs any program with its full path (up to 7 words), screenshots without the local confirmation (`screenshot = always`), output up to 512 KiB, files up to 4 MiB.
 - Every job is written to `/var/log/jarvisd.log` as `ok-dev` / `REJECTED-dev`; switching on and off is logged as `devmode ON` / `devmode OFF`.
 - The taskbar shows a red `DEV` field while it is active (the `JARVIS` field has priority).
+- The active marker `/var/jarvis/devmode-active` is a heartbeat: it holds the uptime in seconds of the last write. jarvisd rewrites it every 10 s (also while it sleeps or waits for a command). Readers (`jarvisctl dev`, the taskbar `DEV` field, `kernel/user/devmark.fi`) treat it as stale, and dev mode as not active, when it is older than 60 s or newer than the current uptime (left over from an earlier boot). A dead jarvisd therefore drops the `DEV` field within a minute.
 
 ## What stays locked (deny list, `kernel/app/jarvisd/jddev.fi`)
 - Never readable or writable: `/secrets`, `/device`, `/state/session`, `/etc/shadow*`, `/etc/passwd*`, `/etc/machine-id`, `/etc/wlan.conf*`, `/etc/dbgsrv.token`, `/etc/odb.token`, `/etc/social`, `/config/vpn/keys`, `/etc/jarvis/device.key`, `/root/.ssh`.
@@ -26,4 +27,4 @@ Dev mode lets JARVIS work on a device through the bridge without the per-path / 
 - `jarvisctl dev` / `jarvisctl status` show the state.
 
 ## Gates
-- `tools/hpconf/run.sh` (config rules incl. counter-proofs), `tools/bridge2/devmode.sh` (VM: deny list, counter-proof without devmode, emergency stop, stop marker at boot).
+- `tools/hpconf/run.sh` (config rules incl. counter-proofs), `tools/bridge2/devmode.sh` (VM: deny list, counter-proof without devmode, emergency stop, stop marker at boot, stale marker after 60 s, marker from an earlier boot, heartbeat during 100 s of long commands).

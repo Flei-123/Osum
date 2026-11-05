@@ -697,6 +697,34 @@ hat "$OUT/s4.txt" "gate-split.p000" "wrong join hash: parts are kept"
 dienst_aus
 fi
 
+if want 18; then
+echo "== 18. large VERZEICHNIS: more than 32 KiB is read whole, over the client buffer is refused loudly =="
+rm -rf "$OUT/ovl-many" "$OUT/ovl-toomany"; mkdir -p "$OUT/ovl-many" "$OUT/ovl-toomany"
+python3 - "$OUT" <<'PYEOF'
+import sys
+o = sys.argv[1]
+for dirname, count in (("ovl-many", 320), ("ovl-toomany", 2400)):
+    for i in range(count):
+        open("%s/%s/gate-many-%04d" % (o, dirname, i), "w").write("many %d\n" % i)
+PYEOF
+pubt "$OUT/img-new" "$OUT/feed-many" dev --count 700 --overlay "$OUT/ovl-many" && ok "feed with 320 overlay entries" || { cat "$OUT/pub.log"; bad "publish many"; }
+VZMANY=$(stat -c%s "$OUT/feed-many/system/dev/VERZEICHNIS" 2>/dev/null || echo 0)
+[ "$VZMANY" -gt 32768 ] && [ "$VZMANY" -lt 200000 ] && ok "VERZEICHNIS is $VZMANY octets (over the old 32 KiB buffer)" || bad "VERZEICHNIS is $VZMANY octets"
+pubt "$OUT/img-new" "$OUT/feed-toomany" dev --count 700 --overlay "$OUT/ovl-toomany" && bad "publisher accepted a VERZEICHNIS over the client limit" || ok "publisher refuses a VERZEICHNIS over the client limit"
+hat "$OUT/pub.log" "the client reads at most" "publisher says why"
+pubt "$OUT/img-new" "$OUT/feed-toomany" dev --count 700 --overlay "$OUT/ovl-toomany" --no-size-check && ok "oversized feed published with --no-size-check" || { cat "$OUT/pub.log"; bad "publish toomany"; }
+fresh_disk
+dienst "$OUT/feed-many" || bad "feed does not start"
+rc=$(lauf v1 "ota system search;exit")
+hat "$OUT/v1.txt" "system: available build 700" "search reads the large list whole and sees build 700"
+hatnicht "$OUT/v1.txt" "SIGNATURE OF THE VERZEICHNIS WRONG" "large list: signature checked over the whole list"
+dienst "$OUT/feed-toomany" || bad "feed does not start"
+rc=$(lauf v2 "ota system search;exit")
+hat "$OUT/v2.txt" "VERZEICHNIS too large for the client buffer" "oversized list refused with a clear message"
+hatnicht "$OUT/v2.txt" "system: available build" "oversized list: nothing announced"
+dienst_aus
+fi
+
 echo
 echo "osupdate: $pass/$fail OK/FAIL"
 [ "$fail" = 0 ]

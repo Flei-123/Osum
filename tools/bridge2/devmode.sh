@@ -61,7 +61,7 @@ grep -q 'HP_DEV' tools/ota/republish-hp.sh && grep -q 'rechte-hp-dev.conf' tools
 
 echo "== 2. build =="
 bash vendor/firn/fetch-firnc.sh > "$W/fetch.log" 2>&1
-bash tools/bridge/build.sh "$W/w0" 0 > "$W/b0.txt" 2>&1 && ok "kernel + jarvisd + jarvisctl + jsig build" || { bad "bridge build"; tail -8 "$W/b0.txt"; echo "DEVMODE: $pass passed, $fail failed"; exit 1; }
+BRIDGE_PROGS="sh ls cat echo chmod jsig jarvisctl sleep" bash tools/bridge/build.sh "$W/w0" 0 > "$W/b0.txt" 2>&1 && ok "kernel + jarvisd + jarvisctl + jsig build" || { bad "bridge build"; tail -8 "$W/b0.txt"; echo "DEVMODE: $pass passed, $fail failed"; exit 1; }
 K="$W/w0/k.mb"
 python3 tools/hwnet/mkcerts.py "$W/certs" jarvis.test > "$W/certs.txt" 2>&1 && ok "test certificates" || { bad "mkcerts"; cat "$W/certs.txt"; exit 1; }
 gcc -O2 -o "$W/bridge" tools/net/bridge.c 2>/dev/null || { bad "bridge.c does not build"; exit 1; }
@@ -95,7 +95,7 @@ image() {
     bash tools/mkfsfi/mkfs.sh build "$img" 16384 \
         /bin/ /etc/ /etc/ssl/ /etc/jarvis/ /var/ /var/log/ /var/jarvis/ /tmp/ \
         "/bin/sh=$W/w0/sh.elf" "/bin/ls=$W/w0/ls.elf" "/bin/cat=$W/w0/cat.elf" \
-        "/bin/echo=$W/w0/echo.elf" "/bin/chmod=$W/w0/chmod.elf" "/bin/jsig=$W/w0/jsig.elf" \
+        "/bin/echo=$W/w0/echo.elf" "/bin/sleep=$W/w0/sleep.elf" "/bin/chmod=$W/w0/chmod.elf" "/bin/jsig=$W/w0/jsig.elf" \
         "/bin/jarvisctl=$W/w0/jarvisctl.elf" "/bin/jarvisd=$W/w0/jarvisd.elf" \
         "/etc/jarvis/permissions.conf=$conf" "/etc/ssl/roots.pem=$W/certs/ca.pem" \
         "/etc/shadow=$W/shadow" "$@" > "$W/mkfs.txt" 2>&1 \
@@ -104,6 +104,10 @@ image() {
 image "$W/dev.img" "$W/dev.conf"
 image "$W/plain.img" "$W/plain.conf"
 image "$W/stopped.img" "$W/dev.conf" "/var/jarvis/dev-off=$W/stop"
+printf '0\n' > "$W/mark-fresh"
+printf '99999999\n' > "$W/mark-future"
+image "$W/stale.img" "$W/dev.conf" "/var/jarvis/devmode-active=$W/mark-fresh"
+image "$W/future.img" "$W/dev.conf" "/var/jarvis/devmode-active=$W/mark-future"
 
 wire_up() {
     ip netns add "$NS"
@@ -251,6 +255,34 @@ run_case boot "$W/stopped.img" "$W/jobs-boot.txt" "jsig init;jarvisd -1 -t 60000
 expect boot 1 nein "dev config + stop marker = not active, job refused"
 expect boot 2 nein "command outside the list refused"
 has "$W/s-boot.txt" "emergency stop engaged" "status shows the engaged stop"
+
+echo "== 7. stale active marker (jarvisd dead or rebooted) is not shown as ACTIVE =="
+wire_up
+vm_run "$W/stale.img" "jarvisctl dev;sleep 70;jarvisctl dev;exit" "$W/s-stale.txt"
+wire_down
+NACT=$(grep -ac "Dev mode: ACTIVE" "$W/s-stale.txt")
+[ "$NACT" = 1 ] && ok "fresh marker without jarvisd shows ACTIVE once, then expires after 60 s" || bad "ACTIVE shown $NACT times (wanted 1)"
+has "$W/s-stale.txt" "enabled in permissions.conf" "after the expiry the status falls back to enabled"
+wire_up
+vm_run "$W/future.img" "jarvisctl dev;exit" "$W/s-future.txt"
+wire_down
+hasnt "$W/s-future.txt" "Dev mode: ACTIVE" "marker from a previous boot (newer than the uptime) is stale"
+has "$W/s-future.txt" "enabled in permissions.conf" "status says enabled"
+
+echo "== 8. heartbeat: jarvisd keeps the marker fresh while it waits =="
+cat > "$W/jobs-beat.txt" <<AUF
+befehl|/bin/sleep 50|
+befehl|/bin/sleep 50|
+befehl|/bin/jarvisctl dev|
+lies|/var/jarvis/devmode-active|
+AUF
+run_case beat "$W/dev.img" "$W/jobs-beat.txt" "jsig init;jarvisd -1 -t 200000;jarvisctl dev;exit"
+expect beat 1 ok "first long command"
+expect beat 2 ok "second long command (marker written 100 s ago)"
+expect beat 3 ok "jarvisctl dev through the bridge"
+has "$W/g-beat.log.3.bin" "Dev mode: ACTIVE" "still ACTIVE after 100 s: the heartbeat refreshed the marker"
+MARK=$(body beat 4 | tr -d '\n ')
+case "$MARK" in ''|*[!0-9]*) bad "marker content is not a number: '$MARK'" ;; *) [ "$MARK" -ge 50 ] && ok "marker content is a recent uptime in seconds ($MARK)" || bad "marker content $MARK looks like the first write" ;; esac
 
 echo; echo "DEVMODE: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

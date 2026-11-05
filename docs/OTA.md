@@ -81,6 +81,8 @@ Programmen**: `ota` prüft die Datei gegen das VERZEICHNIS, `opk` prüft den
 Paketinhalt gegen den INDEX und die Paketsignatur gegen denselben
 Schlüssel. Der Läufer misst beide Linien einzeln (Fälle (g) und (a)).
 
+Der Client liest das VERZEICHNIS in einen Puffer von 256 KiB (`VZ_MAX` in `kernel/user/ota/otacmd.fi`, 262143 Oktette Nutzlast). Ist die Datei größer, bricht `ota` mit „VERZEICHNIS too large for the client buffer“ ab, statt still abzuschneiden; `tools/ota/publish_system.py` lehnt solche Listen schon beim Veröffentlichen ab. Ein Gerät mit altem `ota` (32 KiB) muss zuerst mit einer kleinen Liste (`HP_ONLY="ota ..."`) das neue `ota` bekommen.
+
 ## 2. Der Rückschrittsschutz
 
 `/system/FASSUNG`, **genau neun Oktette**: acht Ziffern und ein

@@ -61,6 +61,24 @@ import brand
 sys.path.insert(0, os.path.join(HERE, "..", "linuxapps"))
 import packsplit  # noqa: E402
 
+CLIENT_SRC = os.path.join(HERE, "..", "..", "kernel", "user", "ota", "otacmd.fi")
+
+
+def client_list_limit():
+    m = re.search(rb"const VZ_MAX: u64 = (\d+)", open(CLIENT_SRC, "rb").read())
+    if not m:
+        raise SystemExit("cannot read VZ_MAX from " + CLIENT_SRC)
+    return int(m.group(1)) - 1
+
+
+def check_list_size(path):
+    size = os.path.getsize(path)
+    limit = client_list_limit()
+    if size >= limit:
+        raise SystemExit("VERZEICHNIS is %d octets, the client reads at most %d" % (size, limit - 1))
+    return size
+
+
 PATH_OK = re.compile(r"/(apps|etc|usr/share|lib)/[A-Za-z0-9._/-]+")
 
 
@@ -252,6 +270,8 @@ def main():
         open(vz, "wb").write(roh.encode("ascii"))
         vf.signieren(opt["--bund"], vz, os.path.join(out, "VERZEICHNIS.sig"))
         pub = bytes.fromhex(b["haupt"]["pub"])
+    if "--no-size-check" not in flags:
+        check_list_size(vz)
     if "--bad-sig" in flags:
         sg = bytearray(open(vz + ".sig", "rb").read())
         sg[0] ^= 1
