@@ -36,23 +36,79 @@ const AGAIN_MAX: u64 = 3
 
 // ------------------------------------------------------ abziehen
 
+const PSC_CSC_BIT: u64 = 131072
+
+const RETRY_MAX: u64 = 3
+
+const RETRY_TICKS: u64 = 100
+
+static mut csc_mask: u64 = 0
+
+static mut retry_mask: u64 = 0
+
+static mut retry_due: u64 = 0
+
+static mut retry_n: [u64; 64] = [0 as u64; 64]
+
+fn note_change(state: u64, p: u64) {
+    if (xhci.portsc(state, p) & PSC_CSC_BIT) != 0 {
+        csc_mask = csc_mask | (1 << p)
+    }
+}
+
+fn attach_port(state: u64, p: u64) {
+    usbdev.s(state, usbbase.S_HOTPLUGS, usbdev.g(state, usbbase.S_HOTPLUGS) + 1)
+    usbdev.s(state, S_HUBTRY, 0)
+    usbdev.mark(state, p)
+    if usbbind.attach(state, p) {
+        retry_n[p as usize] = 0
+        return
+    }
+    usbdev.unmark(state, p)
+    if retry_n[p as usize] < RETRY_MAX {
+        retry_n[p as usize] = retry_n[p as usize] + 1
+        retry_mask = retry_mask | (1 << p)
+        retry_due = kstate.get(state, kstate.TICKS) + RETRY_TICKS
+    } else {
+        retry_n[p as usize] = 0
+    }
+}
+
+fn sync_port(state: u64, p: u64) {
+    let now: bool = xhci.port_connected(state, p)
+    var there: bool = usbdev.was_there(state, p)
+    let replug: bool = (csc_mask & (1 << p)) != 0
+    csc_mask = csc_mask & (~(1 << p))
+    if there && (!now || replug) {
+        usbdev.s(state, S_HUBTRY, 0)
+        usbbind.gone(state, p)
+        there = false
+    }
+    if !there && now {
+        attach_port(state, p)
+    }
+}
+
+fn retry_pending(state: u64) -> u64 {
+    if retry_mask != 0 && kstate.get(state, kstate.TICKS) >= retry_due {
+        let m: u64 = retry_mask
+        retry_mask = 0
+        return m
+    }
+    return 0
+}
+
 fn unplug_check(state: u64) {
     if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
         return
     }
     let n: u64 = xhci.ports(state)
     var p: u64 = 1
-    while p <= n {
+    while p <= n && p < 64 {
         if xhci.port_has_change(state, p) {
+            note_change(state, p)
             xhci.port_clear_changes(state, p)
-            let now: bool = xhci.port_connected(state, p)
-            if usbdev.was_there(state, p) && !now {
-                usbbind.gone(state, p)
-            } else if !usbdev.was_there(state, p) && now {
-                usbdev.s(state, usbbase.S_HOTPLUGS, usbdev.g(state, usbbase.S_HOTPLUGS) + 1)
-                usbdev.mark(state, p)
-                usbbind.attach(state, p)
-            }
+            sync_port(state, p)
         }
         p = p + 1
     }
@@ -82,10 +138,11 @@ fn hub_rescan_ports(state: u64, d: u64) {
     while p <= n {
         if usbbind.hub_child_present(state, d, p) {
             let live: u64 = usbbind.hub_port_read(state, d, p)
-            if live != usbbase.HUB_STATUS_ERR && (live & 1) == 0 {
+            if live != usbbase.HUB_STATUS_ERR && ((live & 1) == 0 || (live & (1 << 16)) != 0) {
                 if (live & (1 << 16)) != 0 {
                     usbbind.hub_feature(state, d, false, usbbase.PF_C_CONNECTION, p)
                 }
+                usbdev.s(state, S_HUBTRY, 0)
                 usbbind.hub_child_gone(state, d, p)
             }
         }
@@ -132,6 +189,7 @@ fn port_watch(state: u64) {
             usbdev.s(state, S_PEND, usbdev.g(state, S_PEND) | (1 << p))
         }
         if xhci.port_has_change(state, p) {
+            note_change(state, p)
             usbdiag.event(p, xhci.portsc(state, p))
             xhci.ev(state, usbdiag.EK_PSC_POLL, p << 20, 0)
             usbdiag.log(kstate.get(state, kstate.TICKS), usbdiag.LK_PSC, p, xhci.portsc(state, p))
@@ -199,7 +257,7 @@ fn hotplug_work(state: u64) {
     if usbdev.g(state, usbbase.S_READY) == 0 || usbdev.g(state, usbbase.S_BUSY) != 0 {
         return
     }
-    let is_open: u64 = usbdev.g(state, S_PEND)
+    let is_open: u64 = usbdev.g(state, S_PEND) | retry_pending(state)
     let hubdue: u64 = usbdev.g(state, S_HUBDUE)
     if is_open == 0 && hubdue == 0 {
         return
@@ -214,14 +272,7 @@ fn hotplug_work(state: u64) {
     var p: u64 = 1
     while p <= n && p < 64 {
         if (is_open & (1 << p)) != 0 {
-            let now: bool = xhci.port_connected(state, p)
-            if usbdev.was_there(state, p) && !now {
-                usbbind.gone(state, p)
-            } else if !usbdev.was_there(state, p) && now {
-                usbdev.s(state, usbbase.S_HOTPLUGS, usbdev.g(state, usbbase.S_HOTPLUGS) + 1)
-                usbdev.mark(state, p)
-                usbbind.attach(state, p)
-            }
+            sync_port(state, p)
         }
         p = p + 1
     }

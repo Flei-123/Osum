@@ -12,7 +12,7 @@
 #   * hot plug AFTER boot (usbhold window), unplug and replug in the same window
 # NEGATIVE CONTROLS: no gadget -> no driver line, no lease; unpatched wiring would show up as missing driver lines.
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake}"
 source "$HERE/tools/usbredir/common.sh"
 for c in $CASES; do
     case "$c" in
@@ -195,6 +195,25 @@ for c in $CASES; do
         chk hn "hold window ran" 'k17: hold'
         nochk hn "no dongle found without the rescan" 'usb: ch336 id=1a86:5394'
         chk hn "script reached the end" '==END=='
+        ;;
+    ch336-hub-replug)
+        BEHIND_HUB=1 XWORDS="usbholdticks=5000" GARGS="--phy-boot down --cycles 3 --gap-ms 3000" BASEW="nokbd nosched vfs" run chr ch336 hot s_hubhot.sh
+        chkn chr "dongle bound again after every replug" 'driver=ch336' 4
+        chkn chr "every unplug noticed" 'usb: unplug port=' 3
+        chkn chr "usb line with id after every replug" 'usb: ch336 id=1a86:5394' 4
+        panics chr
+        ;;
+    ch336-hub-fast)
+        BEHIND_HUB=1 XWORDS="usbholdticks=3000" GARGS="--phy-boot down --cycles 1 --gap-ms 30" BASEW="nokbd nosched vfs" run chf ch336 hot s_hubhot.sh
+        chk chf "unplug noticed after a replug under 100 ms" 'usb: unplug port='
+        chkn chf "dongle bound again after a replug under 100 ms" 'driver=ch336' 2
+        panics chf
+        ;;
+    ch336-slowwake)
+        GARGS="--phy-boot down --slow-wake 3" XWORDS="usbholdticks=3000" BASEW="nokbd nosched vfs" run chw ch336 hot s_hubhot.sh
+        grep -aq 'ctl dropped' "$T/chw.gadget" && ok "chw: gadget dropped control requests" || bad "chw: gadget dropped nothing"
+        chk chw "dongle bound after three unanswered control requests" 'driver=ch336'
+        panics chw
         ;;
     none)
         run none ncm none s.sh

@@ -30,6 +30,11 @@ ap.add_argument('--usb', default='ss')
 ap.add_argument('--rtl-family', default='8153a')
 ap.add_argument('--speed', type=int, default=2)
 ap.add_argument('--inject', type=int, default=0)
+ap.add_argument('--cycles', type=int, default=0)
+ap.add_argument('--gap-ms', type=int, default=1500)
+ap.add_argument('--up-secs', type=float, default=8.0)
+ap.add_argument('--settle', type=float, default=1.0)
+ap.add_argument('--slow-wake', type=int, default=0)
 A = ap.parse_args()
 MAC = bytes(int(x, 16) for x in A.mac.split(':'))
 LOGF = open(A.log, 'w') if A.log else sys.stderr
@@ -289,6 +294,7 @@ class Dev:
         self.intr_last = None
         self.intr_t = 0.0
         self.injected = False
+        self.swallow = A.slow_wake
 
     def tx(self, typ, rid, payload=b''):
         self.sock.setblocking(True)
@@ -297,8 +303,15 @@ class Dev:
         self.sock.setblocking(False)
 
     def connect_dev(self):
+        global CH
+        if CH is not None:
+            CH = Ch336Model(MAC, A.phy_boot, lambda s: log(s), not A.phy_deaf)
         self.cfg = 1
         self.alt = {}
+        self.pend_in = []
+        self.int_rx = set()
+        self.intr_last = None
+        LINK.to_guest.clear()
         self.send_info()
         self.tx(T_CONNECT, 0, bytes([A.speed, PROF['dcls'], 0, 0]) + u16(PROF['vid']) + u16(PROF['pid']) + u16(0x0310))
         log('device_connect profile=%s' % A.profile)
@@ -348,6 +361,10 @@ class Dev:
     def handle_control(self, rid, h, data):
         ep, req, rt, _, val, idx, ln = h
         self.n_ctrl += 1
+        if self.swallow > 0:
+            self.swallow -= 1
+            log('ctl dropped rt=%02x req=%02x' % (rt, req))
+            return
         if rt == 0x80 and req == 6:
             t, i = val >> 8, val & 255
             if t == 1:
@@ -600,8 +617,12 @@ def main():
         caps = u32(int(A.caps, 0))
     d.tx(T_HELLO, 0, b'usbdev-lab'.ljust(64, b'\0') + caps)
     s.setblocking(False)
-    plugged = False
+    connected = False
     unplugged = False
+    cycles_done = 0
+    t_conn = 0.0
+    t_disc = 0.0
+    t_ready = 0.0
     log('connected profile=%s' % A.profile)
     while time.time() - t0 < A.max_secs:
         LINK.poll()
@@ -616,14 +637,32 @@ def main():
                 break
             if data:
                 d.feed(data)
-        if not plugged and (not A.trigger or os.path.exists(A.trigger)):
-            d.connect_dev()
-            plugged = True
-        if plugged and not unplugged and A.unplug and os.path.exists(A.unplug):
+        now = time.time()
+        if not connected and not unplugged:
+            if t_conn == 0.0 and (not A.trigger or os.path.exists(A.trigger)):
+                d.connect_dev()
+                connected = True
+                t_conn = now
+            elif t_conn != 0.0 and cycles_done < A.cycles and now - t_disc >= A.gap_ms / 1000.0:
+                d.connect_dev()
+                connected = True
+                cycles_done += 1
+                t_conn = now
+                t_ready = 0.0
+        if connected and not unplugged and A.unplug and os.path.exists(A.unplug):
             d.tx(T_DISCONNECT, 0)
+            connected = False
             unplugged = True
             log('device_disconnect')
-        if plugged and not unplugged:
+        if connected and cycles_done < A.cycles:
+            if CH is not None and CH.started and t_ready == 0.0:
+                t_ready = now
+            if now - t_conn >= A.up_secs or (t_ready != 0.0 and now - t_ready >= A.settle):
+                d.tx(T_DISCONNECT, 0)
+                connected = False
+                t_disc = now
+                log('device_disconnect cycle=%d' % (cycles_done + 1))
+        if connected:
             d.serve_in()
             d.serve_intr()
     log('stats tx=%d rx=%d ctrl=%d' % (STAT['tx'], STAT['rx'], d.n_ctrl))

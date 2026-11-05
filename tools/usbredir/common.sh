@@ -95,6 +95,7 @@ run() {
 }
 chk() { grep -aq -- "$3" "$T/$1.klar" && ok "$1: $2" || bad "$1: $2 (missing: $3)"; }
 nochk() { grep -aq -- "$3" "$T/$1.klar" && bad "$1: $2 (found: $3)" || ok "$1: $2"; }
+chkn() { local c; c=$(grep -ac -- "$3" "$T/$1.klar"); [ "$c" -ge "$4" ] && ok "$1: $2 ($c)" || bad "$1: $2 (found $c, want at least $4: $3)"; }
 panics() { grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/$1.klar" && bad "$1: panic/exception in log" || ok "$1: no panic/exception"; }
 net_ok() {
     chk "$1" "DHCP lease over the gadget" 'dhcp: ack ip=192.168.42.100'
