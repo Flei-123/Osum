@@ -3,6 +3,7 @@
 # Verwendung:  bash tools/install/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-/tmp/install-run}
@@ -327,7 +328,7 @@ for ms in 300 700 1200 1800 2600 3600; do
         i=$((i + 1))
     done
     python3 -c "import time; time.sleep($ms / 1000.0)"
-    pkill -9 -f "file=$OUT/ziel.img" 2>/dev/null
+    osum_kill_tree $lpid KILL
     wait $lpid 2>/dev/null
     ausfaelle=$((ausfaelle + 1))
     rc=$(lauf nach-$ms platte "opk list;/apps/hallo.osp/start;opk verify;exit" 600)

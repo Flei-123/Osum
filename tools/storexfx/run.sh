@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
 . tools/lib/qemu.sh
@@ -198,7 +199,7 @@ for _ in $(seq 1 $((QEMU_LIMIT / 2))); do
     sleep 2
 done
 sleep 2
-kill "$QPID" 2>/dev/null; pkill -P "$QPID" 2>/dev/null
+osum_kill_tree "$QPID"
 wait "$QPID" 2>/dev/null
 tr -cd '\11\12\15\40-\176' < "$TMPD/g.txt" > "$TMPD/g.klar" 2>/dev/null || true
 G="$TMPD/g.klar"

@@ -3,6 +3,7 @@
 # Aufruf:  bash tools/sshd/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 
 export FIRNLIB="$ROOT/lib"
@@ -18,7 +19,7 @@ FWPORT=${FWPORT:-$(( 46000 + ($$ % 900) ))}
 
 TMPD=$(mktemp -d)
 cleanup() {
-    pkill -f "file=$TMPD/live" 2>/dev/null
+    [ -n "${QPID:-}" ] && osum_kill_tree "$QPID"
     rm -rf "$TMPD"
 }
 trap cleanup EXIT
@@ -202,7 +203,7 @@ start_osum() { # abbild serielldatei port
     return 1
 }
 stop_osum() {
-    [ -n "$QPID" ] && kill "$QPID" 2>/dev/null
+    [ -n "$QPID" ] && osum_kill_tree "$QPID"
     wait "$QPID" 2>/dev/null
     QPID=""
 }

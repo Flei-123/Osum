@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 . tools/lib/qemu.sh
 export OSUM_CPU=${OSUM_CPU:-Haswell}
@@ -22,9 +23,9 @@ VERZ="$OUT/netzmix"
 [ -d "$VERZ" ] || { echo "IMAGE: no directory under $OUT/netzmix"; exit 1; }
 
 echo "== the peer (127.0.0.1:$PORT, root $VERZ)"
-pkill -f "tools/ota/server.py .* $PORT" >/dev/null 2>&1
 ( setsid nohup python3 tools/ota/server.py --wurzel "$VERZ" --port "$PORT" \
-    --cert "$OUT/certs/srv.pem" --key "$OUT/certs/srv.key" --log "$OUT/srv-bild.log" > "$OUT/srv-bild.out" 2>&1 & )
+    --cert "$OUT/certs/srv.pem" --key "$OUT/certs/srv.key" --log "$OUT/srv-bild.log" > "$OUT/srv-bild.out" 2>&1 & echo $! > "$OUT/srv-bild.pid" )
+SRV_PID=$(cat "$OUT/srv-bild.pid")
 sleep 1.5
 
 CRC=$(cat "$OUT/quelle.crc")
@@ -57,9 +58,9 @@ done
 sleep 1
 
 python3 tools/gfx/screenshot.py "$SOCK" "$PPM" 25 > "$OUT/$NAME.shot" 2>&1
-kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null
+osum_kill_tree "$PID"; wait "$PID" 2>/dev/null
 rm -f "$SOCK"
-pkill -f "tools/ota/server.py .* $PORT" >/dev/null 2>&1
+osum_kill_tree "$SRV_PID"
 
 if [ -s "$PPM" ]; then
     python3 tools/gfx/ppm2png.py "$PPM" "$PNG" >/dev/null 2>&1

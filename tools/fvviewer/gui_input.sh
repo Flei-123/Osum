@@ -16,10 +16,11 @@
 # Env: GUI_BUILD=<dir> keeps the build cache, GUI_RES (default 1280x800), GUI_KEEP=<dir> keeps the artefacts.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 MODE=${1:-plain}
-D=$(mktemp -d); trap 'bash tools/fvviewer/th.sh "$D/th" down 2>/dev/null; pkill -P $$ 2>/dev/null; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
+D=$(mktemp -d); trap 'bash tools/fvviewer/th.sh "$D/th" down 2>/dev/null; osum_kill_children $$; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD" "$D/th"
 RES=${GUI_RES:-1280x800}

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${OUT:-/tmp/r200-run}
@@ -29,7 +30,7 @@ guest() {
         sleep 1; i=$((i+1))
     done
     sleep 1
-    kill "$pid" 2>/dev/null; pkill -P "$pid" 2>/dev/null
+    osum_kill_tree "$pid"
     rm -f "$OUT/$n.img"
 }
 

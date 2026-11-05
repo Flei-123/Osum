@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$PWD
 export FIRNLIB=$ROOT/lib
 SIZE_MIB=${SIZE_MIB:-320}
@@ -100,7 +101,7 @@ for mode in $MODES; do
     sleep 1
     QREAL=$(pgrep -P "$QPID" -f qemu-system | head -1)
     STALL=$(python3 -I tools/bigfetch/stall.py "$TMPD/g-$mode.txt" "${QREAL:-$QPID}" "fetch: written")
-    for p in $(pgrep -f "file=$TMPD/live.img"); do kill -9 "$p" 2>/dev/null; done
+    osum_kill_tree "$QPID" KILL
     wait "$QPID" 2>/dev/null
     sleep 1
     t1=$(date +%s)

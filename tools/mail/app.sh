@@ -19,13 +19,14 @@
 # DOES NOT MEASURE: real servers (Dovecot/Gmail quirks), STARTTLS, attachments, the pixels of the window.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
 STAGES=${*:-model build}
 T=$(mktemp -d)
 STUBPID=""
-cleanup() { [ -n "$STUBPID" ] && kill "$STUBPID" 2>/dev/null; pkill -P $$ 2>/dev/null; rm -rf "$T"; }
+cleanup() { [ -n "$STUBPID" ] && kill "$STUBPID" 2>/dev/null; osum_kill_children $$; rm -rf "$T"; }
 trap cleanup EXIT
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0-only
 SMB_PREFIX=${SMB_PREFIX:-}
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/pidkill.sh"
 SMB_BIND=${SMB_BIND:-127.0.0.1}
 SMB_MIN=${SMB_MIN:-SMB2_02}
 SMB_MAX=${SMB_MAX:-SMB3_11}
@@ -61,9 +62,8 @@ samba_user() {
 }
 
 samba_stop() {
-    [ -n "$SMBPID" ] && kill "$SMBPID" 2>/dev/null && wait "$SMBPID" 2>/dev/null
+    [ -n "$SMBPID" ] && osum_kill_tree "$SMBPID" && wait "$SMBPID" 2>/dev/null
     SMBPID=""
-    [ -n "${SMB_D:-}" ] && for helper in $(pgrep -f "configfile=$SMB_D/smb.conf" 2>/dev/null); do kill "$helper" 2>/dev/null; done
     [ -n "${SMB_NCAL:-}" ] && rm -rf "$SMB_NCAL"
 }
 

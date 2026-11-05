@@ -3,6 +3,7 @@
 # Verwendung:  bash tools/init/run.sh
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 
 export FIRNLIB="$(pwd)/lib"
 FIRNC=${FIRNC:-vendor/firn/bin/firnc}
@@ -359,8 +360,7 @@ for _ in $(seq 1 240); do
     kill -0 "$qpid" 2>/dev/null || break
     sleep 1
 done
-pkill -f "live-wieder.img" >/dev/null 2>&1
-kill "$qpid" >/dev/null 2>&1
+osum_kill_tree "$qpid"
 wait "$qpid" 2>/dev/null
 b=$(grep -ac 'osum: pid1 init' "$W" 2>/dev/null || true)
 if [ "${b:-0}" -ge 2 ]; then

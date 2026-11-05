@@ -10,6 +10,7 @@
 # setup form ("folders rc=6", no "list"). Run through /root/jarvis/bin/heavy.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 OUT=${1:?outdir}
@@ -17,7 +18,7 @@ mkdir -p "$OUT"
 RES=${GUI_RES:-1280x800}
 BUILD=$(mktemp -d)
 STUBPID=""
-trap '[ -n "$STUBPID" ] && kill "$STUBPID" 2>/dev/null; rm -rf "$BUILD"; pkill -P $$ 2>/dev/null' EXIT
+trap '[ -n "$STUBPID" ] && kill "$STUBPID" 2>/dev/null; rm -rf "$BUILD"; osum_kill_children $$' EXIT
 rc_all=0
 bad() { echo "  FAIL  gui: $1"; rc_all=1; }
 ok()  { echo "  OK    gui: $1"; }

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 export FIRNLIB="$(pwd)/lib"
 OLDREF=${OLDREF:-origin/main}
 DEV_MIB=${FSGROW_DEV_MIB:-4096}
@@ -86,7 +87,7 @@ run_cut() {
     while kill -0 $pid 2>/dev/null && [ $n -lt 6000 ]; do
         if clean "$out" | grep -aq "$mark"; then
             [ "$extra" != "0" ] && sleep "$extra"
-            pkill -9 -P $pid 2>/dev/null; kill -9 $pid 2>/dev/null
+            osum_kill_tree $pid KILL
             break
         fi
         sleep 0.05

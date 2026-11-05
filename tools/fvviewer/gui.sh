@@ -19,10 +19,11 @@
 # Env: GUI_BUILD=<dir> keeps the build cache (default: mktemp, removed at exit), GUI_RES (default 1280x800).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
 STAGES=${*:-plain tls tlsold wprobe opk}
-D=$(mktemp -d); trap 'for s in "$D"/*/th; do bash tools/fvviewer/th.sh "$s" down 2>/dev/null; done; [ -n "${CLIENT_BAK:-}" ] && cp "$CLIENT_BAK" lib/fv/client.fi; pkill -P $$ 2>/dev/null; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
+D=$(mktemp -d); trap 'for s in "$D"/*/th; do bash tools/fvviewer/th.sh "$s" down 2>/dev/null; done; [ -n "${CLIENT_BAK:-}" ] && cp "$CLIENT_BAK" lib/fv/client.fi; osum_kill_children $$; rm -rf "$D"; [ -n "${GUI_BUILD:-}" ] || rm -rf "$BUILD"' EXIT
 BUILD=${GUI_BUILD:-$D/build}
 mkdir -p "$BUILD"
 RES=${GUI_RES:-1280x800}

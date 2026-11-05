@@ -29,6 +29,7 @@
 # code, and 0 differing pixels was reported as a success.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 . tools/sync/gc.sh   # r278: FIRN_FUNCTION_SECTIONS + ld --gc-sections (OSUM_NO_GC=1 = off)
 export FIRNLIB="$(pwd)/lib"
 
@@ -384,8 +385,7 @@ if [ -z "$script" ] && [ "$shot" = yes ]; then
 fi
 #
 if [ -z "$script" ]; then
-    for kind in $(pgrep -P "$PID" 2>/dev/null); do kill "$kind" 2>/dev/null; done
-    kill "$PID" 2>/dev/null
+    osum_kill_tree "$PID"
 fi
 wait "$PID"; RC=$?
 T1=$(date +%s%N)

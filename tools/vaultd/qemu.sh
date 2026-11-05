@@ -13,6 +13,7 @@
 # Static: build.sh ships /bin/vaultd, /bin/vaultctl and the inittab line.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. tools/lib/pidkill.sh
 ROOT=$(pwd)
 export FIRNLIB="${FIRNLIB:-$ROOT/lib}"
 TMPD=$(mktemp -d)
@@ -87,7 +88,7 @@ run() {
         grep -qa "^==FERTIG==" "$TMPD/$nm.txt" 2>/dev/null && { sleep 1; break; }
         sleep 0.5; i=$((i+1))
     done
-    pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    osum_kill_tree "$pid"; wait "$pid" 2>/dev/null
     tr -cd '\11\12\15\40-\176' < "$TMPD/$nm.txt" > "$TMPD/$nm.klar" 2>/dev/null || true
 }
 
