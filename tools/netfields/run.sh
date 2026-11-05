@@ -29,7 +29,8 @@ for c in $CASES; do
     echo "foto 01-network"
   } > "$DREH"
   export DESIGNBUILD="$D-build"
-  AUDIT_MKFS_EXTRA="/etc/network.conf=$D/network.conf@0644" \
+  printf 'nameserver 192.168.7.53\n' > "$D/resolv.conf"
+  AUDIT_MKFS_EXTRA="/etc/network.conf=$D/network.conf@0644 /etc/resolv.conf=$D/resolv.conf@0644" \
     bash tools/design/audit.sh "$D" accel=kvm uitrace=yes halt=300 res=$RES uiscale="$SC" drehbuch="$DREH" > "$D.log" 2>&1
   rm -rf "$D-build" "$DREH"
   unset DESIGNBUILD
@@ -41,7 +42,7 @@ for c in $CASES; do
       ;;
     dhcp*)
       grep -aq 'settings: net fields' "$S" && bad "$c: fields filled in automatic mode" || ok "$c: automatic mode leaves fields alone"
-      grep -aq 'settings: live dns=10.0.2.3' "$S" && ok "$c: DNS field shows the live resolver" || bad "$c: DNS field has no live resolver"
+      grep -aq 'settings: live dns=192.168.7.53' "$S" && ok "$c: DNS field shows the live resolver" || bad "$c: DNS field has no live resolver"
       ;;
   esac
   grep -aiq 'panic\|exception' "$S" && bad "$c: panic" || ok "$c: no panic"
