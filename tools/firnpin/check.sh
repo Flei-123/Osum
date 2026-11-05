@@ -23,7 +23,7 @@ trap 'rm -rf "$D"' EXIT
 cp -a "$ROOT/vendor/firn/." "$D/"
 rm -rf "$D/bin" "$D/lib" "$D/.gebaut"
 echo "$TARGET" > "$D/COMMIT"
-if FIRN_REPO=$REPO bash "$D/fetch-firnc.sh" --force > "$D/build.log" 2>&1; then
+if OSUM_FIRN_TOOLCHAIN=0 FIRN_REPO=$REPO bash "$D/fetch-firnc.sh" --force > "$D/build.log" 2>&1; then
     ok "fetch-firnc.sh --force builds ${TARGET:0:8} with $(find "$ROOT/vendor/firn/patches" -name "*.patch" 2>/dev/null | wc -l) patches"
 else
     bad "fetch-firnc.sh --force failed on ${TARGET:0:8}"

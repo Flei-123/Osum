@@ -46,37 +46,57 @@ if [[ $FORCE -eq 0 ]]; then
              | sed -n 's/^worktree //p')
 fi
 
-candidates=()
-[[ -n ${FIRN_REPO:-} ]] && candidates+=("$FIRN_REPO")
-candidates+=("$HERE/../../../firn" "$HERE/../../firn" "$HERE/../../../../firn" "$HOME/firn")
-FIRN=""
-for k in "${candidates[@]}"; do
-    if [[ -d $k/.git ]] && git -C "$k" cat-file -e "$COMMIT^{commit}" 2>/dev/null; then
-        FIRN=$(cd "$k" && pwd); break
-    fi
-done
-if [[ -z $FIRN ]]; then
-    echo "Firn repo with commit $SHORT not found." >&2
-    echo "Searched in: ${candidates[*]}" >&2
-    echo "Set the path via FIRN_REPO=/path/to/firn." >&2
-    exit 1
-fi
+toolchain_version() {
+    [[ ${OSUM_FIRN_TOOLCHAIN:-1} != 0 ]] || return 1
+    compgen -G "$HERE/patches/*.patch" >/dev/null && return 1
+    local v
+    for v in "${FIRN_HOME:-$HOME/.firn}"/versions/*/; do
+        v=${v%/}
+        [[ -f $v/.ready && -x $v/bin/firnc && -d $v/lib && -f $v/src/firnc1.fi && -e $v/src/ast.fi ]] || continue
+        [[ $(cat "$v/COMMIT" 2>/dev/null) == "$COMMIT" ]] || continue
+        printf '%s\n' "$v"
+        return 0
+    done
+    return 1
+}
 
 BUILD=${FIRN_BUILD_DIR:-${TMPDIR:-/tmp}}/firn-pin-$SHORT
-
-echo ">> Firn $SHORT unpack from $FIRN"
 rm -rf "$BUILD"
-mkdir -p "$BUILD"
-git -C "$FIRN" archive "$COMMIT" | tar -x -C "$BUILD"
-
-HOST=$(rustc -vV | sed -n 's/^host: //p')
-
-echo ">> build firnc0 (target $HOST)"
-( cd "$BUILD/compiler" && cargo build --release --target "$HOST" >/dev/null )
+if TOOLCHAIN=$(toolchain_version); then
+    echo ">> Firn $SHORT from installed toolchain $TOOLCHAIN"
+    FIRNC0_BIN=$TOOLCHAIN/bin/firnc
+    LIB_SRC=$TOOLCHAIN/lib
+    FIRNC1_SRC=$TOOLCHAIN/src/firnc1.fi
+else
+    candidates=()
+    [[ -n ${FIRN_REPO:-} ]] && candidates+=("$FIRN_REPO")
+    candidates+=("$HERE/../../../firn" "$HERE/../../firn" "$HERE/../../../../firn" "$HOME/firn")
+    FIRN=""
+    for k in "${candidates[@]}"; do
+        if [[ -d $k/.git ]] && git -C "$k" cat-file -e "$COMMIT^{commit}" 2>/dev/null; then
+            FIRN=$(cd "$k" && pwd); break
+        fi
+    done
+    if [[ -z $FIRN ]]; then
+        echo "Firn repo with commit $SHORT not found and no installed toolchain has it." >&2
+        echo "Searched in: ${candidates[*]} ${FIRN_HOME:-$HOME/.firn}/versions" >&2
+        echo "Set the path via FIRN_REPO=/path/to/firn or run: firn install <version of $SHORT>." >&2
+        exit 1
+    fi
+    echo ">> Firn $SHORT unpack from $FIRN"
+    mkdir -p "$BUILD"
+    git -C "$FIRN" archive "$COMMIT" | tar -x -C "$BUILD"
+    HOST=$(rustc -vV | sed -n 's/^host: //p')
+    echo ">> build firnc0 (target $HOST)"
+    ( cd "$BUILD/compiler" && cargo build --release --target "$HOST" >/dev/null )
+    FIRNC0_BIN=$BUILD/compiler/target/$HOST/release/firnc
+    LIB_SRC=$BUILD/lib
+    FIRNC1_SRC=$BUILD/bin/firnc1.fi
+fi
 
 mkdir -p "$HERE/bin"
 rm -f "$HERE/bin/firnc" "$HERE/bin/firnc0" "$HERE/bin/firnc1" "$HERE/.gebaut"
-cp -f "$BUILD/compiler/target/$HOST/release/firnc" "$HERE/bin/firnc0"
+cp -f "$FIRNC0_BIN" "$HERE/bin/firnc0"
 cat > "$HERE/bin/firnc" <<'WRAP'
 #!/bin/sh
 export FIRN_USE_AS="${FIRN_USE_AS-1}"
@@ -84,7 +104,7 @@ exec "$(dirname "$0")/firnc0" "$@"
 WRAP
 chmod +x "$HERE/bin/firnc"
 rm -rf "$HERE/lib"
-cp -rL "$BUILD/lib" "$HERE/lib"
+cp -rL "$LIB_SRC" "$HERE/lib"
 
 if [[ -d $HERE/patches ]]; then
     rm -rf "$HERE/lib/.roh"
@@ -103,8 +123,8 @@ if [[ -d $HERE/patches ]]; then
     done
 fi
 
-if [[ -d $BUILD/lib ]]; then
-    ( cd "$BUILD/lib" && find . -type l -printf '%p\t%l\n' ) |
+if [[ -d $LIB_SRC ]]; then
+    ( cd "$LIB_SRC" && find . -type l -printf '%p\t%l\n' ) |
     while IFS=$'\t' read -r loc target; do
         [[ -e "$HERE/lib/$(dirname "$loc")/$target" ]] || continue
         if ! cmp -s "$HERE/lib/$loc" "$HERE/lib/$(dirname "$loc")/$target"; then
@@ -117,7 +137,7 @@ if [[ -d $BUILD/lib ]]; then
 fi
 
 echo ">> build firnc1"
-FIRNLIB="$HERE/lib" "$HERE/bin/firnc" "$BUILD/bin/firnc1.fi" -o "$HERE/bin/firnc1"
+FIRNLIB="$HERE/lib" "$HERE/bin/firnc" "$FIRNC1_SRC" -o "$HERE/bin/firnc1"
 
 link_aliases
 echo "$STAMP" > "$HERE/.gebaut"

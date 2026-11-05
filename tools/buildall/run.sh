@@ -31,10 +31,31 @@ export D CC
 list | xargs -P "$JOBS" -I{} bash -c 'one {}' | sort > "$D/result.txt"
 STANDALONE=$(grep -c ' ok$' "$D/result.txt")
 python3 -I tools/buildall/reach.py "$D/result.txt" "$ROOT" > "$D/failed.txt" 2> "$D/reach.txt"
+stub_check() {
+    local f=$1 n dir base prof stub
+    n=$(echo "$f" | tr / _)
+    grep -q "has no function 'main'" "$D/l/$n.log" || return 1
+    dir=$(dirname "$f")
+    base=$(basename "$f" .fi)
+    stub="$D/stub/$n"
+    mkdir -p "$stub"
+    ln -s "$ROOT/$dir"/* "$stub/" 2>/dev/null
+    rm -f "$stub/_stub_main.fi"
+    prof=$(grep -a -m1 '^profile ' "$f" | cut -d' ' -f2)
+    printf 'profile %s\nimport %s\nfn main() -> i32 {\n    return 0\n}\n' "${prof:-app}" "$base" > "$stub/_stub_main.fi"
+    timeout 300 "$CC" ${prof:+--profile=$prof} -c "$stub/_stub_main.fi" -o "$D/o/$n.stub.o" > "$D/l/$n.stub.log" 2>&1
+}
+: > "$D/failed2.txt"
+while read -r f; do
+    [ -z "$f" ] && continue
+    stub_check "$f" || echo "$f" >> "$D/failed2.txt"
+done < "$D/failed.txt"
+STUBBED=$(( $(grep -c . "$D/failed.txt") - $(grep -c . "$D/failed2.txt") ))
+mv "$D/failed2.txt" "$D/failed.txt"
 FAIL=$(grep -c . "$D/failed.txt")
 TOTAL=$(grep -c . "$D/result.txt")
 MODULES=$((TOTAL - STANDALONE - FAIL))
-echo "buildall: $((STANDALONE + MODULES)) ok / $FAIL fail of $TOTAL ($STANDALONE standalone, $MODULES module-only verified through an importer)"
+echo "buildall: $((STANDALONE + MODULES)) ok / $FAIL fail of $TOTAL ($STANDALONE standalone, $MODULES module-only verified through an importer, $STUBBED through a stub importer)"
 
 if [ -n "$OUTDIR" ]; then
     mkdir -p "$OUTDIR"
