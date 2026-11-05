@@ -222,7 +222,7 @@ for c in $CASES; do
         panics chc
         ;;
     ch336-hub-cycles24)
-        BEHIND_HUB=1 QWAIT=420 XWORDS="usbholdticks=9000" GARGS="--phy-boot down --cycles 24 --gap-ms 1500 --up-secs 3" BASEW="nokbd nosched vfs" run chd ch336 hot s_hubhot.sh
+        BEHIND_HUB=1 QWAIT=420 XWORDS="usbholdticks=14000" GARGS="--phy-boot down --cycles 24 --gap-ms 1500 --up-secs 3" BASEW="nokbd nosched vfs" run chd ch336 hot s_hubhot.sh
         chkn chd "dongle bound again after every one of twenty-four replugs" 'usb: port=.*driver=ch336' 25
         chkn chd "every one of twenty-four unplugs noticed" 'usb: unplug port=' 24
         panics chd
