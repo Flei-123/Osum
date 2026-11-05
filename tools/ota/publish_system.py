@@ -110,12 +110,12 @@ def split_big(ovl_files, limit, link_pairs, bad_hash=False):
         slices = split_slices(raw, limit)
         for i, blob in enumerate(slices):
             parts.append(("%s%03d" % (prefix, i), blob))
-        links = [d for d, t in link_pairs if t == "/bin/" + fn]
+        link_targets = [d for d, t in link_pairs if t == "/bin/" + fn]
         link_pairs[:] = [(d, t) for d, t in link_pairs if t != "/bin/" + fn]
         digest = hashlib.sha256(raw).hexdigest()
         if bad_hash:
             digest = ("0" if digest[0] != "0" else "1") + digest[1:]
-        manifest.append(" ".join([fn, str(len(raw)), digest, prefix] + links))
+        manifest.append(" ".join([fn, str(len(raw)), digest, prefix] + link_targets))
         print("split %s: %d octets in %d parts" % (fn, len(raw), len(slices)))
     if manifest:
         parts.append(("/etc/split.list", ("\n".join(manifest) + "\n").encode("ascii")))
