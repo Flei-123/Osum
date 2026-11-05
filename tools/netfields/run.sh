@@ -12,8 +12,8 @@ ok()  { pass=$((pass+1)); printf '  OK    %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 for c in $CASES; do
   case "$c" in
-    fixed1) SC=1; RES=1280x800; CONF='modus=fest\nip=192.168.7.42\nmaske=255.255.255.0\ngateway=192.168.7.1\n' ;;
-    fixed2) SC=2; RES=2560x1600; CONF='modus=fest\nip=192.168.7.42\nmaske=255.255.255.0\ngateway=192.168.7.1\n' ;;
+    fixed1) SC=1; RES=1280x800; CONF='modus=fest\nip=192.168.7.42\nmaske=255.255.255.0\ngateway=192.168.7.1\ndns=192.168.7.53\n' ;;
+    fixed2) SC=2; RES=2560x1600; CONF='modus=fest\nip=192.168.7.42\nmaske=255.255.255.0\ngateway=192.168.7.1\ndns=192.168.7.53\n' ;;
     dhcp1)  SC=1; RES=1280x800; CONF='modus=dhcp\n' ;;
     *) echo "unknown case $c"; exit 2 ;;
   esac
@@ -37,7 +37,7 @@ for c in $CASES; do
   S="$D/serial.txt"
   case "$c" in
     fixed*)
-      grep -aq 'settings: net fields ip=192.168.7.42 mask=255.255.255.0 gw=192.168.7.1' "$S" && ok "$c: fields filled from /etc/network.conf" || bad "$c: fields not filled"
+      grep -aq 'settings: net fields ip=192.168.7.42 mask=255.255.255.0 gw=192.168.7.1 dns=192.168.7.53' "$S" && ok "$c: fields filled from /etc/network.conf" || bad "$c: fields not filled"
       ;;
     dhcp*)
       grep -aq 'settings: net fields' "$S" && bad "$c: fields filled in automatic mode" || ok "$c: automatic mode leaves fields alone"

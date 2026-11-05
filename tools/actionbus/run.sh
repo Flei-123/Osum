@@ -1166,6 +1166,64 @@ hasnot "$TMPD/p.txt" "net.dhcp" "... nor net.dhcp"
 grep -qaE 'panic|EXCEPTION' "$V" && bad "a panic or exception in the section-16 guest" || ok "no panic, no exception (section 16)"
 
 # ===================================================================
+echo "== 16b. the fixed address with a DNS server (r2918) =="
+# ===================================================================
+# settings.net.fixed takes an optional dns=: it lands as dns= in
+# /etc/network.conf and as the first nameserver in /etc/resolv.conf.
+# GEGENPROBE: a malformed dns= is refused and the file stays as it was.
+printf 'modus=dhcp\n' > "$TMPD/net16b"
+cat > "$TMPD/s16b.sh" <<'EOS'
+mkdir /users
+orientbus serve 60000 &
+sleep -m 300
+settingsd serve 60000 &
+sleep 1
+echo ==W-FIX==
+act call settings.net.fixed ip=10.0.2.20 mask=255.255.255.0 gw=10.0.2.2 dns=10.0.2.3
+act confirm last
+cat /etc/network.conf
+cat /etc/resolv.conf
+echo ==W-BAD==
+act call settings.net.fixed ip=10.0.2.21 mask=255.255.255.0 gw=10.0.2.2 dns=10.0.2.999
+act confirm last
+cat /etc/network.conf
+echo ==W-NODNS==
+act call settings.net.fixed ip=10.0.2.22 mask=255.255.255.0 gw=10.0.2.2
+act confirm last
+cat /etc/network.conf
+cat /etc/resolv.conf
+act stop
+echo ==FERTIG==
+EOS
+EXTRA=("/etc/network.conf=$TMPD/net16b"
+       "/etc/settings.schema=etc/settings.schema"
+       "/etc/actions.d/settings.actions=etc/actions.d/settings.actions")
+image "$TMPD/W.img" "$TMPD/s16b.sh"
+EXTRA=()
+timeout 150 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -smp 1 \
+    -kernel "$TMPD/k0.img" -m 512 \
+    -append "osum vfs nokbd bus nic nip=10.0.2.15/24 ngw=10.0.2.2 nsvc=0 nwait=0 script=sh /t/s.sh;exit" \
+    -serial "file:$TMPD/w.txt" -display none -no-reboot \
+    -netdev user,id=n16b -device e1000,netdev=n16b \
+    -drive "file=$TMPD/W.img,format=raw,if=ide,index=0" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1
+tr -cd '\11\12\15\40-\176' < "$TMPD/w.txt" > "$TMPD/w.klar" 2>/dev/null || true
+W="$TMPD/w.klar"
+part "$W" W-FIX W-BAD > "$TMPD/p.txt"
+has "$TMPD/p.txt" "settingsd: net fixed ip=10.0.2.20 rc=0" "net.fixed with dns= is applied"
+has "$TMPD/p.txt" "dns=10.0.2.3" "dns= lands in /etc/network.conf"
+has "$TMPD/p.txt" "nameserver 10.0.2.3" "... and as the nameserver in /etc/resolv.conf"
+part "$W" W-BAD W-NODNS > "$TMPD/p.txt"
+has "$TMPD/p.txt" "bad_value" "GEGENPROBE: a malformed dns= is refused"
+has "$TMPD/p.txt" "ip=10.0.2.20" "... and the file keeps the earlier address"
+part "$W" W-NODNS FERTIG > "$TMPD/p.txt"
+has "$TMPD/p.txt" "ip=10.0.2.22" "without dns= the address is still written"
+has "$TMPD/p.txt" "dns=" "... and the dns= line is emptied"
+hasnot "$TMPD/p.txt" "dns=10.0.2.3" "... so the old DNS server does not stay behind"
+has "$TMPD/p.txt" "nameserver 10.0.2.3" "... while resolv.conf is left alone"
+grep -qaE 'panic|EXCEPTION' "$W" && bad "a panic or exception in the section-16b guest" || ok "no panic, no exception (section 16b)"
+
+# ===================================================================
 echo "== 17. AB-002: the bus blocks -- an idle broker does not run =="
 # ===================================================================
 # Before this round the broker and settingsd turned once per tick (and
