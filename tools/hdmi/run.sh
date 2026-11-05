@@ -113,6 +113,34 @@ if [ -s "$T/k.mb" ]; then
         || bad "synthetic pin line wrong: $(grep -a 'hdmi: pin=' "$T/synth.txt" | head -1)"
     grep -qaF "pstate=0x0 pinctl=0x40 unsol=0x85 conv=3" "$T/synth.txt" \
         && ok "pin line shows the activation read-back" || bad "activation read-back missing"
+
+    as --64 -o "$T/crt.o" kernel/user/crt.s 2>/dev/null
+    SPEC="/bin/ /proc/"
+    progs_ok=1
+    for p in sh cat; do
+        "$FIRNC" -o "$T/$p.o" "kernel/user/$p.fi" > "$T/$p.log" 2>&1 \
+            && ld -T kernel/user/user.ld --defsym=USER_ENTRY=_F0.u_start -o "$T/$p.elf" "$T/crt.o" "$T/$p.o" 2>/dev/null \
+            && SPEC="$SPEC /bin/$p=$T/$p.elf" || progs_ok=0
+    done
+    if [ "$progs_ok" = 1 ] && bash tools/mkfsfi/mkfs.sh build "$T/disk.img" 8192 $SPEC > "$T/mkfs.txt" 2>&1; then
+        timeout 120 $QEMU_X86 -kernel "$T/k.mb" -m 512 \
+            -append "osum nokbd nosched noring3 vfs audio audgraph script=/bin/cat /proc/hdmi;exit" \
+            -serial "file:$T/proc.txt" -display none -no-reboot -audiodev none,id=snd0 $ONE \
+            -drive "file=$T/disk.img,format=raw,if=ide,index=0" \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 > /dev/null 2>&1
+        grep -qaF "hdmi v1 controllers=2 pins=1" "$T/proc.txt" \
+            && ok "/proc/hdmi lists controllers and pins" || bad "/proc/hdmi header missing"
+        grep -qaE "^pin 0 ctl=1 cad=0 nid=5 pincap=0x01000094 wcap=0x[0-9a-f]+ sense=0xc0000000 state=2" "$T/proc.txt" \
+            && ok "/proc/hdmi pin line shows full-width pincap and sense" || bad "/proc/hdmi pin line wrong"
+        grep -qaE "^eld 0 len=36 valid=1 mon=ABC dp=0 hdcp=1" "$T/proc.txt" \
+            && ok "/proc/hdmi parses the ELD" || bad "/proc/hdmi eld line wrong"
+        grep -qaE "^eldhex 0 1000080003230501" "$T/proc.txt" \
+            && ok "/proc/hdmi dumps the raw ELD bytes" || bad "/proc/hdmi eldhex missing"
+        grep -qaE "^sad 0 1 fmt=1 ch=8 rates=0x0*54([^0-9a-f]|$)" "$T/proc.txt" \
+            && ok "/proc/hdmi lists the SADs" || bad "/proc/hdmi sad line missing"
+    else
+        bad "could not build the disk for the /proc/hdmi check"
+    fi
 fi
 
 echo "hdmi: $pass promises, $fail errors"
