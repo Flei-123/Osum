@@ -41,7 +41,7 @@ mkdir -p "$T/k" "$T/ovl"
 if [ -n "${FEED_KERNEL:-}" ]; then
     cp "$FEED_KERNEL" "$T/k/osum.mb"
 else
-    bash tools/build-kernel.sh "$T/k/osum.mb" --stufe 0 > "$T/k.log" 2>&1 || { tail -5 "$T/k.log"; exit 1; }
+    bash tools/build-kernel.sh "$T/k/osum.mb" --stufe 0 --product > "$T/k.log" 2>&1 || { tail -5 "$T/k.log"; exit 1; }
 fi
 for p in "${PROGS[@]}"; do
     [ -s "$IMGDIR/$p.elf" ] || { echo "feed-dev: $IMGDIR/$p.elf missing"; exit 1; }

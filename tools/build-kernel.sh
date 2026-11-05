@@ -12,6 +12,7 @@ fi
 shift
 
 STUFE=0
+. "$(dirname "${BASH_SOURCE[0]}")/lib/kernelbase.sh"
 KERNEL_BASE=${OSUM_KERNEL_BASE:-}
 OHNE_PS2M=0
 OHNE_BRUECKE=0
@@ -54,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --gui) GUI=$2; shift 2 ;;
         --stufe) STUFE=$2; shift 2 ;;
         --base) KERNEL_BASE=$2; shift 2 ;;
+        --product) KERNEL_BASE=$OSUM_PRODUCT_KERNEL_BASE; shift ;;
         *) echo "unbekannte Option: $1" >&2; exit 1 ;;
     esac
 done

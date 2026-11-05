@@ -8,7 +8,8 @@ cd "$(dirname "$0")/../.."
 LIMINE=${LIMINE_DIR:-/root/jarvis/projects/u_DiS4in7esMF1/orientos/vendor/limine}
 OVMF_CODE=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
 OVMF_VARS=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
-SAFE_BASE=${S3OVMF_SAFE_BASE:-0x1600000}
+. tools/lib/kernelbase.sh
+SAFE_BASE=${S3OVMF_SAFE_BASE:-$OSUM_PRODUCT_KERNEL_BASE}
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 
@@ -84,7 +85,7 @@ low=$(readelf -lW "$TMPD/k-safe.elf" 2>/dev/null | awk '$1=="LOAD" {print $3}' |
     && ok "lowest load address $low lies behind the firmware's low-memory blocks (0x800000-0x1500000)" \
     || bad "lowest load address '$low' overlaps the OVMF S3 blocks"
 low=$(readelf -lW "$TMPD/k-default.elf" 2>/dev/null | awk '$1=="LOAD" {print $3}' | sort | head -1)
-[ "$low" = 0x0000000000100000 ] && ok "default base unchanged (1 MiB)" || bad "default base moved: '$low'"
+[ "$low" = 0x0000000000100000 ] && ok "plain dev build keeps the 1 MiB base" || bad "plain dev build base moved: '$low'"
 
 n=0
 for m in one:s3 two:s3zwei dead:s3kaputt; do

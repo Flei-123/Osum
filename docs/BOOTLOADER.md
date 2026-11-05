@@ -23,7 +23,7 @@
   `default` larger than the entry count falls back to 1 (slot B missing -> slot A).
 - Handoff: segments are copied into place AFTER ExitBootServices by a trampoline in a low LoaderCode page (own 4 GiB identity map, own GDT, own stack), then long mode -> compat -> paging off -> EFER.LME off -> `jmp entry` with eax=0x2BADB002, ebx=mbi. Reason: under OVMF 0x800000 is ACPI NVS, so the kernel range cannot be allocated before exit (Limine overwrites it too).
 - RSDP: taken from the EFI configuration table and copied into an ACPI-reclaim page below 1 GiB, so the unchanged kernel finds it in the map.
-- Low allocations (mbi, module table, modules, map) are placed from 32 MiB upward (the kernel only maps the first GiB and uses windows near 1 GiB, e.g. fb `win=0x3e400000`).
+- Low allocations (mbi, module table, modules, map) are placed from 64 MiB upward (the product kernel sits at 22 MiB and ends near 46 MiB) (the kernel only maps the first GiB and uses windows near 1 GiB, e.g. fb `win=0x3e400000`).
 - Errors (missing/broken config with line number, missing kernel/module, not ELF32, no multiboot header, kernel range not RAM, ExitBootServices failed) are printed. With a single entry the loader returns to the firmware after 5 s; with several entries it opens the menu with a 5 s countdown on the next untried entry (slot fallback) and only returns to the firmware when every entry failed.
 
 ## Default boot: no menu, logo + spinner (r2309)
