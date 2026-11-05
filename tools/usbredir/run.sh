@@ -198,15 +198,15 @@ for c in $CASES; do
         ;;
     ch336-hub-replug)
         BEHIND_HUB=1 XWORDS="usbholdticks=5000" GARGS="--phy-boot down --cycles 3 --gap-ms 3000" BASEW="nokbd nosched vfs" run chr ch336 hot s_hubhot.sh
-        chkn chr "dongle bound again after every replug" 'driver=ch336' 4
+        chkn chr "dongle bound again after every replug" 'usb: port=.*driver=ch336' 4
         chkn chr "every unplug noticed" 'usb: unplug port=' 3
-        chkn chr "usb line with id after every replug" 'usb: ch336 id=1a86:5394' 4
+        [ "$(grep -ac 'phy kick #1' "$T/chr.gadget")" -ge 4 ] && ok "chr: PHY kicked again after every replug" || bad "chr: PHY not kicked after every replug"
         panics chr
         ;;
     ch336-hub-fast)
         BEHIND_HUB=1 XWORDS="usbholdticks=3000" GARGS="--phy-boot down --cycles 1 --gap-ms 30" BASEW="nokbd nosched vfs" run chf ch336 hot s_hubhot.sh
         chk chf "unplug noticed after a replug under 100 ms" 'usb: unplug port='
-        chkn chf "dongle bound again after a replug under 100 ms" 'driver=ch336' 2
+        chkn chf "dongle bound again after a replug under 100 ms" 'usb: port=.*driver=ch336' 2
         panics chf
         ;;
     ch336-slowwake)
