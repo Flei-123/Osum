@@ -29,13 +29,13 @@ sleep -m 500
 echo ==END==
 SCRIPT
 run_case() {
-    local n=$1 full=$2 state=$3 rate=$4 rem=$5 volt=$6
-    sed "s/@FULL@/$full/g; s/@STATE@/$state/; s/@RATE@/$rate/; s/@REM@/$rem/; s/@VOLT@/$volt/" tools/battery/asl/plain.asl > "$T/$n.asl"
+    local n=$1 full=$2 state=$3 rate=$4 rem=$5 volt=$6 kernel=${7:-$K} template=${8:-plain}
+    sed "s/@FULL@/$full/g; s/@STATE@/$state/; s/@RATE@/$rate/; s/@REM@/$rem/; s/@VOLT@/$volt/" "tools/battery/asl/$template.asl" > "$T/$n.asl"
     ( cd "$T" && iasl "$n.asl" > "$n.iasl.txt" 2>&1 ) || { bad "$n.asl does not compile"; return; }
     bash tools/mkfsfi/mkfs.sh build "$T/$n.img" 20000 /bin/ /etc/ /run/ /tmp/ /t/ /proc/ /dev/ /system/ /var/ \
         "/bin/sh=$T/bin/sh.elf" "/bin/echo=$T/bin/echo.elf" "/bin/sleep=$T/bin/sleep.elf" "/bin/cat=$T/bin/cat.elf" \
         "/bin/powerd=$T/bin/powerd.elf" "/t/s.sh=$T/s.sh" > "$T/$n.mkfs" 2>&1 || { bad "$n mkfs failed"; return; }
-    timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$K" -m 512 \
+    timeout 240 qemu-system-x86_64 -accel "$OSUM_QEMU_ACCEL" -kernel "$kernel" -m 512 \
         -append "osum vfs nokbd nosched acpiev script=sh /t/s.sh;exit" \
         -acpitable "file=$T/$n.aml" -serial "file:$T/$n.ser" -display none -no-reboot \
         -drive "file=$T/$n.img,format=raw,if=ide,index=0" \
@@ -55,5 +55,21 @@ echo "== 3. counter-proof: realistic data"
 run_case good 5000 1 0x200 2500 0x2A30
 has good "present=1 valid=1 percent=50" "valid data: 50 %"
 has good "tray=1" "tray model: discharging, not unknown"
+echo "== 4. a failed earlier evaluation must not poison later ones"
+run_case poison 0 0 0 0 0 "$K" poison
+has poison "bst=1" "_BST evaluates after _BIF failed once"
+has poison "biferr=" "the AML error code of the failed _BIF is reported"
+has poison "bsterr=0" "no stale error code on _BST"
+if [ -z "${BATTERY_KERNEL:-}" ]; then
+    mkdir -p "$T/old"
+    tar --exclude=.git -cf - . | tar -xf - -C "$T/old"
+    perl -0pi -e 's/(amlev\.stack_base\(state\)\n    )amlns\.err_clear\(state\)/$1amlns.err_set(state, amlns.ERR_OK)/g' "$T/old/kernel/acpi/aml.fi"
+    perl -0pi -e 's/(E_B(?:IF|ST)ERR, amlns\.err\(state\)\)\n        )amlns\.err_clear\(state\)/$1amlns.err_set(state, amlns.ERR_OK)/g' "$T/old/kernel/acpi/acpiev.fi"
+    cmp -s kernel/acpi/acpiev.fi "$T/old/kernel/acpi/acpiev.fi" && bad "control acpiev identical to the fixed one"
+    cmp -s kernel/acpi/aml.fi "$T/old/kernel/acpi/aml.fi" && bad "control kernel identical to the fixed one"
+    (cd "$T/old" && ./tools/build-kernel.sh "$T/old.img" --stufe 0 > "$T/kold.txt" 2>&1) && ok "control kernel (sticky error) builds" || { bad "control kernel does not build"; tail -5 "$T/kold.txt"; }
+    run_case poisonold 0 0 0 0 0 "$T/old.img" poison
+    has poisonold "bst=2" "control: sticky error makes _BST fail after a failed _BIF"
+fi
 echo; echo "battery: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
