@@ -1,4 +1,5 @@
 import struct
+import time
 
 REG_MAC_CFG = 0x40000700
 REG_MAC_H = 0x40000710
@@ -22,6 +23,7 @@ class Ch336Model:
         self.maccfg = 0
         self.kicks = 0
         self.regs = {}
+        self.span_start = None
 
     def start_phy(self, how):
         self.kicks += 1
@@ -56,12 +58,19 @@ class Ch336Model:
             else:
                 self.bmcr = val
 
+    def end_span(self):
+        if self.span_start is not None:
+            self.log('bringup span=%.3f' % (time.time() - self.span_start))
+            self.span_start = None
+
     def reg_read(self, reg, ln):
         if reg == REG_MAC_L:
             return self.mac[0:4]
         if reg == REG_MAC_H:
             return self.mac[4:6] + b'\0\0'
         if reg == REG_MAC_CFG:
+            if self.span_start is None:
+                self.span_start = time.time()
             return struct.pack('<I', self.maccfg)
         return bytes(ln)
 
@@ -74,10 +83,12 @@ class Ch336Model:
             reg = val | (idx << 16)
             if reg == REG_MAC_CFG and len(data) >= 4:
                 self.maccfg = struct.unpack_from('<I', data)[0]
+                self.end_span()
             return b''
         if rt == 0x40 and req == 0x1E:
             self.maccfg = val | (idx << 16)
             self.log('maccfg=%08x' % self.maccfg)
+            self.end_span()
             return b''
         if rt == 0xC0 and req == 0x15:
             return struct.pack('<H', self.phy_read(idx))[:ln]

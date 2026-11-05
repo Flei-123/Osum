@@ -12,7 +12,7 @@
 #   * hot plug AFTER boot (usbhold window), unplug and replug in the same window
 # NEGATIVE CONTROLS: no gadget -> no driver line, no lease; unpatched wiring would show up as missing driver lines.
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
-CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12 ch336-hub-cycles24 hubhot-nohubint ch336-hub-int ch336-hub-noint}"
+CASES="${*:-ncm ncm-multi android-rndis android-ncm hotplug replug none ch336 ch336-late ch336-nokick ch336-ecmfirst ch336-proc ch336-intr ch336-intr-only ch336-nochintr ch336-mute ch336-deaf-span ch336-alt1 ch336-alt1-nochalt ch336-alt1-nosetif ch336-hub ch336-2hc ch336-lasthc usbsum usbsum-none hubhot hubhot-norescan ch336-hub-replug ch336-hub-fast ch336-slowwake ch336-hub-cycles12 ch336-hub-cycles24 hubhot-nohubint ch336-hub-int ch336-hub-noint}"
 source "$HERE/tools/usbredir/common.sh"
 for c in $CASES; do
     case "$c" in
@@ -131,6 +131,20 @@ for c in $CASES; do
         chk chy "bring-up saw no PHY link" 'usb: ch336 link=down bmsr=7809'
         chk chy "link went up on the interrupt byte while the PHY stayed down" 'usb: ch336 link=up bmsr=7809'
         panics chy
+        ;;
+    ch336-mute)
+        GARGS="--phy-boot down --phy-mute" BASEW="nokbd nosched vfs" QWAIT=90 run chm ch336 boot s_sum.sh
+        grep -aq 'phy read dropped' "$T/chm.gadget" && ok "chm: gadget never answered a PHY read" || bad "chm: gadget answered every PHY read"
+        chk chm "bound to driver ch336 with a silent PHY" 'driver=ch336'
+        chk chm "no link without a PHY" 'usb: ch336 link=down'
+        grep -aq 'phy reads dropped=1$' "$T/chm.gadget" && ok "chm: driver stopped after one unanswered PHY read (blocked one 400 ms wait)" || bad "chm: driver kept sending PHY reads to a silent PHY"
+        panics chm
+        ;;
+    ch336-deaf-span)
+        GARGS="--phy-boot down --phy-deaf" BASEW="nokbd nosched vfs" QWAIT=60 run chd ch336 boot s_sum.sh
+        chk chd "bound to driver ch336 with a PHY that never links" 'driver=ch336'
+        span_check chd "${CH336_SPAN_MAX:-6.0}"
+        panics chd
         ;;
     ch336-nochintr)
         GARGS="--phy-boot down --phy-deaf --intr up" XWORDS="nochintr" QWAIT=45 BASEW="nokbd nosched noproc nofs noring3" run chx ch336 boot s_intr.sh

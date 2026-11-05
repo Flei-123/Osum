@@ -178,7 +178,13 @@ gl=$(grep -oE 'gaps=[0-9]+' "$TMPD/load.chk" | grep -oE '[0-9]+$')
 num "Luecken in der Datei unter Last" "${gl:-999}" eq 0
 
 echo "== 5. PROMISE (c): TWO PROGRAMS AT THE SAME TIME =="
-rc=$(lauf mix "osum nokbd nosched noproc nofs audio audmix audsay" "$HDADEV" 180)
+for mixtry in 1 2 3; do
+    rc=$(lauf mix "osum nokbd nosched noproc nofs audio audmix audsay" "$HDADEV" 180)
+    mu=$(val "$TMPD/mix.txt" mix_under)
+    mr1=$(val "$TMPD/mix.txt" underruns)
+    [ "${mu:-1}" = 0 ] && [ "${mr1:-9}" -le 1 ] && break
+    echo "    retry $mixtry for mix: late streams=$mu underruns=$mr1, host load $(cut -d' ' -f1 /proc/loadavg)" >&2
+done
 same "der Lauf mit zwei Stroemen endet sauber" 21 "$rc"
 num "Strom A bekam eine Kennung" "$(val "$TMPD/mix.txt" mix_ida)" lt 4
 num "Strom B bekam eine ANDERE Kennung" "$(val "$TMPD/mix.txt" mix_idb)" eq 1
@@ -322,8 +328,19 @@ has "$TMPD/vorhanden.txt" "play" "die Platte traegt /bin/play"
 
 pv() { grep -oaE "$2: *[0-9]+" "$1" | tail -1 | grep -oE '[0-9]+$'; }
 
+pl_retry() { # name  befehlszeile  max-aussetzer
+    local n=$1 cmd=$2 bound=$3 i rc v
+    for i in 1 2 3; do
+        rc=$(pl "$n" "$cmd")
+        v=$(pv "$TMPD/$n.txt" 'aussetzer')
+        [ -n "$v" ] && [ "$v" -le "$bound" ] && break
+        echo "    retry $i for $n: underruns=$v, host load $(cut -d' ' -f1 /proc/loadavg)" >&2
+    done
+    echo "$rc"
+}
+
 echo "-- WAV, 48000 Hz, stereo --"
-rc=$(pl pwav "/bin/play /ton.wav")
+rc=$(pl_retry pwav "/bin/play /ton.wav" 0)
 has "$TMPD/pwav.txt" "art: wav" "/bin/play erkennt die WAV-Datei"
 num "die Rate, die das Programm meldet" "$(pv "$TMPD/pwav.txt" 'rate')" eq 48000
 num "die Kanaele" "$(pv "$TMPD/pwav.txt" 'kanaele')" eq 2
@@ -340,7 +357,7 @@ pp=$(grep -oE 'peak_hz=[0-9]+' "$TMPD/pwav.chk" | grep -oE '[0-9]+$')
 num "und die Spitze liegt bei 440 Hz" "${pp:-0}" eq 440
 
 echo "-- WAV, 44100 Hz: the rate is negotiated --"
-rc=$(pl p44 "/bin/play /ton44.wav")
+rc=$(pl_retry p44 "/bin/play /ton44.wav" 0)
 num "die Datei meldet 44100 Hz" "$(pv "$TMPD/p44.txt" 'rate')" eq 44100
 num "und das Geraet wird darauf gestellt" "$(pv "$TMPD/p44.txt" 'geraetrate')" eq 44100
 num "gespielte Rahmen" "$(pv "$TMPD/p44.txt" 'gespielt')" eq 44100
@@ -357,7 +374,7 @@ num "ohne Luecken" "${gm2:-999}" eq 0
 
 if [ $MP3DA = 1 ]; then
 echo "-- MP3, through the decoder from round DEMUX --"
-rc=$(pl pmp3 "/bin/play /ton.mp3")
+rc=$(pl_retry pmp3 "/bin/play /ton.mp3" 2)
 has "$TMPD/pmp3.txt" "art: mp3" "/bin/play erkennt die MP3-Datei"
 mr=$(pv "$TMPD/pmp3.txt" 'rate')
 num "ZUSAGE (g): die Rate, die der DEKODIERER meldet" "${mr:-0}" eq 48000

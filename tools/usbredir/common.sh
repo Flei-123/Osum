@@ -97,6 +97,15 @@ chk() { grep -aq -- "$3" "$T/$1.klar" && ok "$1: $2" || bad "$1: $2 (missing: $3
 nochk() { grep -aq -- "$3" "$T/$1.klar" && bad "$1: $2 (found: $3)" || ok "$1: $2"; }
 chkn() { local c; c=$(grep -ac -- "$3" "$T/$1.klar"); [ "$c" -ge "$4" ] && ok "$1: $2 ($c)" || bad "$1: $2 (found $c, want at least $4: $3)"; }
 panics() { grep -aiq 'panic\|exception\|#PF\|#GP\|#UD' "$T/$1.klar" && bad "$1: panic/exception in log" || ok "$1: no panic/exception"; }
+span_check() {
+    local v
+    v=$(grep -aoE "${3:-bringup span}=[0-9.]*" "$T/$1.gadget" | head -1 | cut -d= -f2)
+    [ -n "$v" ] || { bad "$1: no bring-up span in the gadget log"; return; }
+    echo "        $1: bring-up blocked the driver for $v s (limit $2 s)"
+    echo "$v" > "$T/$1.span"
+    python3 -I -c "import sys;sys.exit(0 if float(sys.argv[1]) <= float(sys.argv[2]) else 1)" "$v" "$2" \
+        && ok "$1: bring-up blocked at most $2 s ($v)" || bad "$1: bring-up blocked $v s (limit $2)"
+}
 net_ok() {
     chk "$1" "DHCP lease over the gadget" 'dhcp: ack ip=192.168.42.100'
     chk "$1" "net line with the address (also written to hwinv.txt)" 'net: up ip=192.168.42.100'

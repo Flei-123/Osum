@@ -23,6 +23,7 @@ ap.add_argument('--caps', default='')
 ap.add_argument('--max-secs', type=int, default=240)
 ap.add_argument('--phy-boot', default='down')
 ap.add_argument('--phy-deaf', action='store_true')
+ap.add_argument('--phy-mute', action='store_true')
 ap.add_argument('--intr', default='off')
 ap.add_argument('--bt', default='normal')
 ap.add_argument('--link', default='up')
@@ -365,6 +366,16 @@ class Dev:
             self.swallow -= 1
             log('ctl dropped rt=%02x req=%02x' % (rt, req))
             return
+        if getattr(self, 'mute_t0', None) is not None:
+            log('mute gap=%.3f' % (time.time() - self.mute_t0))
+            self.mute_t0 = None
+        if A.phy_mute and KIND == 'ch336' and rt == 0xC0 and req == 0x15:
+            self.mute_dropped = getattr(self, 'mute_dropped', 0) + 1
+            if self.mute_dropped == 1:
+                self.mute_t0 = time.time()
+            if self.mute_dropped <= 3:
+                log('phy read dropped (mute) idx=%04x' % idx)
+            return
         if rt == 0x80 and req == 6:
             t, i = val >> 8, val & 255
             if t == 1:
@@ -666,6 +677,8 @@ def main():
             d.serve_in()
             d.serve_intr()
     log('stats tx=%d rx=%d ctrl=%d' % (STAT['tx'], STAT['rx'], d.n_ctrl))
+    if A.phy_mute:
+        log('phy reads dropped=%d' % getattr(d, 'mute_dropped', 0))
     if BT is not None:
         log('bt violations=%d commands=%d scanning=%d' % (BT.violations, len(BT.cmds), int(BT.scanning)))
     if VN is not None:
