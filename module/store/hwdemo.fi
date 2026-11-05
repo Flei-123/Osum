@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+extern fn k_abi() -> u64;
+extern fn k_puts(p: u64);
+extern fn k_dec(v: u64);
+extern fn k_pcicfg_read(off: u64) -> u64;
+extern fn k_pcicfg_write(off: u64, value: u64) -> u64;
+extern fn k_pcibar(n: u64, out: u64) -> u64;
+extern fn k_ioremap(phys: u64, size: u64) -> u64;
+extern fn k_frames(n: u64) -> u64;
+extern fn k_frames_free(addr: u64, n: u64) -> u64;
+
+const BUILT_FOR: u64 = 1
+const MIB: u64 = 1048576
+const WINDOW: u64 = 2097152
+const PAGE: u64 = 4096
+const GIB: u64 = 1073741824
+const DISPI_BASE: u64 = 0x500
+const VRAM_SIZE: u64 = 16777216
+const CTX: u64 = 0xAA800
+const CTX_BAR0_PHYS: u64 = 88
+
+static mut bar_info: [u64; 3] = [0 as u64; 3]
+
+fn kv(key: u64, value: u64) {
+    var eq: [u8; 2] = "=\0"
+    k_puts(key)
+    k_puts((&eq[0]) as u64)
+    k_dec(value)
+}
+
+fn sp() {
+    var s: [u8; 2] = " \0"
+    k_puts((&s[0]) as u64)
+}
+
+fn nl() {
+    var s: [u8; 2] = "\n\0"
+    k_puts((&s[0]) as u64)
+}
+
+fn rd32(p: u64) -> u64 {
+    return __mmio_read32(p as *mut u32) as u64
+}
+
+fn wr32(p: u64, v: u64) {
+    __mmio_write32(p as *mut u32, v as u32)
+}
+
+fn rd16(p: u64) -> u64 {
+    return __mmio_read16(p as *mut u16) as u64
+}
+
+fn flag(cond: bool) -> u64 {
+    if cond {
+        return 1
+    }
+    return 0
+}
+
+fn cfg_cases() {
+    var l_id: [u8; 3] = "id\0"
+    var l_far: [u8; 4] = "far\0"
+    var l_odd: [u8; 4] = "odd\0"
+    var l_cmd: [u8; 4] = "cmd\0"
+    var l_bar: [u8; 4] = "bar\0"
+    var l_hdr: [u8; 4] = "hdr\0"
+    var l_hi: [u8; 3] = "hi\0"
+    var l_edge: [u8; 5] = "edge\0"
+    var l_hd: [u8; 4] = "hdw\0"
+    let id: u64 = k_pcicfg_read(0)
+    kv((&l_id[0]) as u64, id)
+    sp()
+    kv((&l_far[0]) as u64, k_pcicfg_read(256))
+    sp()
+    kv((&l_odd[0]) as u64, k_pcicfg_read(2))
+    sp()
+    let before: u64 = k_pcicfg_read(4)
+    let wrote: u64 = k_pcicfg_write(4, 0xFFFF)
+    let mid: u64 = k_pcicfg_read(4)
+    k_pcicfg_write(4, before)
+    let after: u64 = k_pcicfg_read(4)
+    kv((&l_cmd[0]) as u64, wrote)
+    sp()
+    kv((&l_hd[0]) as u64, flag(((mid ^ before) & 0xFFFF & (~0x407)) == 0))
+    sp()
+    kv((&l_edge[0]) as u64, flag(((after ^ before) & 0xFFFF) == 0))
+    sp()
+    kv((&l_bar[0]) as u64, k_pcicfg_write(0x10, 0))
+    sp()
+    kv((&l_hdr[0]) as u64, k_pcicfg_write(0x3C, 0))
+    sp()
+    kv((&l_hi[0]) as u64, k_pcicfg_write(0x100, 0))
+}
+
+fn bar_cases() {
+    var l_b0: [u8; 6] = "bar0s\0"
+    var l_b2: [u8; 6] = "bar2s\0"
+    var l_rc: [u8; 3] = "rc\0"
+    var l_hi: [u8; 5] = "bar6\0"
+    var l_io: [u8; 5] = "mem0\0"
+    let rc: u64 = k_pcibar(0, (&bar_info[0]) as u64)
+    kv((&l_rc[0]) as u64, rc)
+    sp()
+    kv((&l_b0[0]) as u64, bar_info[1] / MIB)
+    sp()
+    kv((&l_io[0]) as u64, flag((bar_info[2] & 1) == 0 && bar_info[0] != 0))
+    sp()
+    var info2: [u64; 3] = [0 as u64; 3]
+    k_pcibar(2, (&info2[0]) as u64)
+    kv((&l_b2[0]) as u64, info2[1])
+    sp()
+    kv((&l_hi[0]) as u64, k_pcibar(6, (&info2[0]) as u64))
+}
+
+fn map_cases(state: u64) {
+    var l_map: [u8; 4] = "map\0"
+    var l_span: [u8; 5] = "span\0"
+    var l_same: [u8; 5] = "same\0"
+    var l_dispi: [u8; 6] = "dispi\0"
+    var l_o1: [u8; 5] = "past\0"
+    var l_o2: [u8; 4] = "big\0"
+    var l_o3: [u8; 6] = "other\0"
+    var l_o4: [u8; 5] = "zero\0"
+    var l_o5: [u8; 5] = "wrap\0"
+    var l_o6: [u8; 6] = "cross\0"
+    let base: u64 = __mmio_read64((state + CTX + CTX_BAR0_PHYS) as *mut u64)
+    let size: u64 = VRAM_SIZE
+    var info2: [u64; 3] = [0 as u64; 3]
+    k_pcibar(2, (&info2[0]) as u64)
+    let v: u64 = k_ioremap(base, size)
+    kv((&l_map[0]) as u64, flag(v != 0))
+    sp()
+    var ok: bool = v != 0
+    if v != 0 {
+        wr32(v, 0x11110000)
+        wr32(v + WINDOW - 4, 0x22220000)
+        wr32(v + WINDOW, 0x33330000)
+        wr32(v + size - 4, 0x44440000)
+        ok = rd32(v) == 0x11110000 && rd32(v + WINDOW - 4) == 0x22220000 && rd32(v + WINDOW) == 0x33330000 && rd32(v + size - 4) == 0x44440000
+    }
+    kv((&l_span[0]) as u64, flag(ok))
+    sp()
+    let v2: u64 = k_ioremap(base + WINDOW, PAGE)
+    kv((&l_same[0]) as u64, flag(v2 != 0 && v2 == v + WINDOW && rd32(v2) == 0x33330000))
+    sp()
+    var d: u64 = 0
+    if info2[0] != 0 {
+        d = k_ioremap(info2[0], info2[1])
+    }
+    var dispi: u64 = 0
+    if d != 0 {
+        dispi = rd16(d + DISPI_BASE)
+    }
+    kv((&l_dispi[0]) as u64, flag(dispi >= 0xB0C0 && dispi <= 0xB0C5))
+    sp()
+    kv((&l_o1[0]) as u64, k_ioremap(base + size, PAGE))
+    sp()
+    kv((&l_o2[0]) as u64, k_ioremap(base, size + 1))
+    sp()
+    kv((&l_o3[0]) as u64, k_ioremap(0xFEE00000, PAGE))
+    sp()
+    kv((&l_o4[0]) as u64, k_ioremap(base, 0))
+    sp()
+    kv((&l_o5[0]) as u64, k_ioremap(0xFFFFFFFFFFFFF000, 0x2000))
+    sp()
+    kv((&l_o6[0]) as u64, k_ioremap(base + size - WINDOW + PAGE, WINDOW))
+}
+
+fn frame_cases() {
+    var l_ok: [u8; 3] = "fr\0"
+    var l_low: [u8; 4] = "low\0"
+    var l_rw: [u8; 3] = "rw\0"
+    var l_zero: [u8; 5] = "zero\0"
+    var l_over: [u8; 5] = "over\0"
+    var l_none: [u8; 4] = "nul\0"
+    var l_badf: [u8; 6] = "badfr\0"
+    var l_badn: [u8; 5] = "badn\0"
+    var l_free: [u8; 5] = "free\0"
+    var l_twice: [u8; 6] = "twice\0"
+    var l_max: [u8; 4] = "max\0"
+    var l_full: [u8; 5] = "full\0"
+    var l_big: [u8; 4] = "big\0"
+    let f: u64 = k_frames(4)
+    kv((&l_ok[0]) as u64, flag(f != 0))
+    sp()
+    kv((&l_low[0]) as u64, flag(f != 0 && f + 4 * PAGE <= GIB))
+    sp()
+    var zero: bool = f != 0
+    var rw: bool = f != 0
+    if f != 0 {
+        zero = rd32(f) == 0 && rd32(f + 4 * PAGE - 4) == 0
+        wr32(f, 0xA5A5A5A5)
+        wr32(f + 4 * PAGE - 4, 0x5A5A5A5A)
+        rw = rd32(f) == 0xA5A5A5A5 && rd32(f + 4 * PAGE - 4) == 0x5A5A5A5A
+    }
+    kv((&l_zero[0]) as u64, flag(zero))
+    sp()
+    kv((&l_rw[0]) as u64, flag(rw))
+    sp()
+    kv((&l_over[0]) as u64, k_frames(1025))
+    sp()
+    kv((&l_none[0]) as u64, k_frames(0))
+    sp()
+    kv((&l_badf[0]) as u64, flag(k_frames_free(f + PAGE, 4) != 0))
+    sp()
+    kv((&l_badn[0]) as u64, flag(k_frames_free(f, 3) != 0))
+    sp()
+    kv((&l_free[0]) as u64, k_frames_free(f, 4))
+    sp()
+    kv((&l_twice[0]) as u64, flag(k_frames_free(f, 4) != 0))
+    sp()
+    var runs: [u64; 9] = [0 as u64; 9]
+    var got: u64 = 0
+    var i: u64 = 0
+    while i < 9 {
+        runs[i as usize] = k_frames(1)
+        if runs[i as usize] != 0 {
+            got = got + 1
+        }
+        i = i + 1
+    }
+    kv((&l_full[0]) as u64, got)
+    i = 0
+    while i < 9 {
+        if runs[i as usize] != 0 {
+            k_frames_free(runs[i as usize], 1)
+        }
+        i = i + 1
+    }
+    sp()
+    let big: u64 = k_frames(1024)
+    kv((&l_big[0]) as u64, flag(big != 0))
+    if big != 0 {
+        k_frames_free(big, 1024)
+    }
+    sp()
+    var again: u64 = k_frames(1)
+    kv((&l_max[0]) as u64, flag(again != 0))
+    if again != 0 {
+        k_frames_free(again, 1)
+    }
+}
+
+#[export_c]
+fn module_init(state: u64) -> u64 {
+    var s_abi: [u8; 22] = "hwdemo: wrong kernel\n\0"
+    var s_cfg: [u8; 13] = "hwdemo: cfg \0"
+    var s_bar: [u8; 13] = "hwdemo: bar \0"
+    var s_map: [u8; 13] = "hwdemo: map \0"
+    var s_fr: [u8; 12] = "hwdemo: fr \0"
+    var s_done: [u8; 14] = "hwdemo: done\n\0"
+    if k_abi() != BUILT_FOR {
+        k_puts((&s_abi[0]) as u64)
+        return 1
+    }
+    k_puts((&s_cfg[0]) as u64)
+    cfg_cases()
+    nl()
+    k_puts((&s_bar[0]) as u64)
+    bar_cases()
+    nl()
+    k_puts((&s_map[0]) as u64)
+    map_cases(state)
+    nl()
+    k_puts((&s_fr[0]) as u64)
+    frame_cases()
+    nl()
+    k_puts((&s_done[0]) as u64)
+    return 0
+}
+
+#[export_c]
+fn module_exit(state: u64) -> u64 {
+    var s_exit: [u8; 18] = "hwdemo: exit map=\0"
+    var s_fr: [u8; 5] = " fr=\0"
+    var s_cfg: [u8; 6] = " cfg=\0"
+    k_puts((&s_exit[0]) as u64)
+    k_dec(k_ioremap(0xFEBF0000, PAGE))
+    k_puts((&s_fr[0]) as u64)
+    k_dec(k_frames(1))
+    k_puts((&s_cfg[0]) as u64)
+    k_dec(k_pcicfg_read(0))
+    nl()
+    return 0
+}

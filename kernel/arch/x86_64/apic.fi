@@ -6,7 +6,7 @@ import libc.regio
 
 export {
     present, init, active, hz, id,
-    eoi, timer_start, timer_rate, timer_stop, map_device, window_claim, window_point, window_slots, lapic_phys,
+    eoi, timer_start, timer_rate, timer_stop, map_device, map_range, window_claim, window_point, window_slots, lapic_phys,
     tsc_gegen_pm, win_pde, pde_at,
     route, mask_gsi, ioapic_entries, gsi_entry, pic_off,
     timer_running, timer_diag, pit_route, nosrc, cpuid_max, c15_eax, c15_ebx, c15_ecx, c16_eax,
@@ -130,6 +130,50 @@ fn map_device(state: u64, phys: u64) -> u64 {
             return WIN_VIRT + i * HUGE_SIZE + inner
         }
         i = i + 1
+    }
+    return 0
+}
+
+fn map_range(state: u64, phys: u64, size: u64) -> u64 {
+    if size == 0 || phys +% size < phys {
+        return 0
+    }
+    let first: u64 = phys & (~(HUGE_SIZE - 1))
+    let last: u64 = (phys + size - 1) & (~(HUGE_SIZE - 1))
+    let count: u64 = (last - first) / HUGE_SIZE + 1
+    if count > WIN_SLOTS {
+        return 0
+    }
+    let pd: u64 = kernel_pd(state)
+    if pd == 0 {
+        return 0
+    }
+    var start: u64 = 0
+    while start + count <= WIN_SLOTS {
+        var fits: bool = true
+        var k: u64 = 0
+        while k < count {
+            let mark: u64 = kstate.get(state, pci.K2_SCALARS + S_WIN + (start + k) * 8)
+            if mark != 0 && mark != first + k * HUGE_SIZE + 1 {
+                fits = false
+                k = count
+            } else {
+                k = k + 1
+            }
+        }
+        if fits {
+            var j: u64 = 0
+            while j < count {
+                let at: u64 = pci.K2_SCALARS + S_WIN + (start + j) * 8
+                if kstate.get(state, at) == 0 {
+                    window_install(pd, start + j, first + j * HUGE_SIZE)
+                    kstate.set(state, at, first + j * HUGE_SIZE + 1)
+                }
+                j = j + 1
+            }
+            return WIN_VIRT + start * HUGE_SIZE + (phys - first)
+        }
+        start = start + 1
     }
     return 0
 }

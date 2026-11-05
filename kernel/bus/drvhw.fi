@@ -1,0 +1,200 @@
+// SPDX-License-Identifier: GPL-2.0-only
+profile kernel
+
+import lib.kstate
+import bus.pci
+import bus.drvfw
+import mm.mmframe
+import arch.x86_64.apic
+
+export {
+    pcicfg_read, pcicfg_write, pcibar, ioremap, frames, frames_free, reclaim, granted,
+    HW_OK, HW_DENIED, HW_NOCTX, HW_RANGE, MAX_RUNS, MAX_FRAMES
+}
+
+const HW_OK: u64 = 0
+const HW_DENIED: u64 = 1
+const HW_NOCTX: u64 = 2
+const HW_RANGE: u64 = 3
+
+const CTX_OFF: u64 = 0x1800
+const CTX_BDF: u64 = 56
+const CTX_PCI_INDEX: u64 = 80
+
+const RIGHT_PCICFG: u64 = 1
+const RIGHT_MMIO: u64 = 2
+const RIGHT_DMA: u64 = 8
+
+const CFG_COMMAND: u64 = 4
+const CFG_COMMAND_MASK: u64 = 0x407
+const CFG_SAFE_FROM: u64 = 0x40
+const CFG_SIZE: u64 = 256
+const BAR_COUNT: u64 = 6
+
+const MAX_RUNS: u64 = 8
+const MAX_FRAMES: u64 = 1024
+
+static mut run_addr: [u64; 8] = [0 as u64; 8]
+static mut run_len: [u64; 8] = [0 as u64; 8]
+
+fn bound_index(state: u64) -> u64 {
+    return kstate.get(state + kstate.MODULE_OFF + CTX_OFF, CTX_PCI_INDEX)
+}
+
+fn bound_bdf(state: u64) -> u64 {
+    return kstate.get(state + kstate.MODULE_OFF + CTX_OFF, CTX_BDF)
+}
+
+fn allowed(right: u64) -> bool {
+    return (drvfw.bound_rights() & right) != 0
+}
+
+fn pcicfg_read(off: u64) -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 || !allowed(RIGHT_PCICFG) || off >= CFG_SIZE || (off & 3) != 0 {
+        return 0xFFFFFFFF
+    }
+    return pci.cfg_read32(bound_bdf(state), off)
+}
+
+fn pcicfg_write(off: u64, value: u64) -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 {
+        return HW_NOCTX
+    }
+    if !allowed(RIGHT_PCICFG) {
+        return HW_DENIED
+    }
+    let bdf: u64 = bound_bdf(state)
+    if off == CFG_COMMAND {
+        let cur: u64 = pci.cfg_read16(bdf, CFG_COMMAND)
+        pci.cfg_write16(bdf, CFG_COMMAND, (cur & (~CFG_COMMAND_MASK)) | (value & CFG_COMMAND_MASK))
+        return HW_OK
+    }
+    if off >= CFG_SAFE_FROM && off < CFG_SIZE && (off & 3) == 0 {
+        pci.cfg_write32(bdf, off, value & 0xFFFFFFFF)
+        return HW_OK
+    }
+    return HW_DENIED
+}
+
+fn pcibar(n: u64, out: u64) -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 {
+        return HW_NOCTX
+    }
+    if !allowed(RIGHT_PCICFG) {
+        return HW_DENIED
+    }
+    if n >= BAR_COUNT {
+        return HW_RANGE
+    }
+    let idx: u64 = bound_index(state)
+    kstate.set(out, 0, pci.bar(state, idx, n))
+    kstate.set(out, 8, pci.bar_size(state, idx, n))
+    kstate.set(out, 16, pci.bar_flags(state, idx, n))
+    return HW_OK
+}
+
+fn inside_memory_bar(state: u64, phys: u64, size: u64) -> bool {
+    if size == 0 || phys +% size < phys {
+        return false
+    }
+    let idx: u64 = bound_index(state)
+    var n: u64 = 0
+    while n < BAR_COUNT {
+        let base: u64 = pci.bar(state, idx, n)
+        let len: u64 = pci.bar_size(state, idx, n)
+        if base != 0 && len != 0 && !pci.bar_is_io(state, idx, n) {
+            if phys >= base && phys + size <= base + len {
+                return true
+            }
+        }
+        n = n + 1
+    }
+    return false
+}
+
+fn ioremap(phys: u64, size: u64) -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 || !allowed(RIGHT_MMIO) {
+        return 0
+    }
+    if !inside_memory_bar(state, phys, size) {
+        return 0
+    }
+    return apic.map_range(state, phys, size)
+}
+
+fn granted() -> u64 {
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < MAX_RUNS {
+        if run_len[i as usize] != 0 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+fn frames(n: u64) -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 || !allowed(RIGHT_DMA) {
+        return 0
+    }
+    if n == 0 || n > MAX_FRAMES {
+        return 0
+    }
+    var slot: u64 = MAX_RUNS
+    var i: u64 = 0
+    while i < MAX_RUNS {
+        if run_len[i as usize] == 0 {
+            slot = i
+            i = MAX_RUNS
+        } else {
+            i = i + 1
+        }
+    }
+    if slot == MAX_RUNS {
+        return 0
+    }
+    let addr: u64 = mmframe.frame_run(state, n)
+    if addr == 0 {
+        return 0
+    }
+    mmframe.fill8(mmframe.kva(addr), n * mmframe.FRAME_SIZE, 0)
+    run_addr[slot as usize] = addr
+    run_len[slot as usize] = n
+    return addr
+}
+
+fn frames_free(addr: u64, n: u64) -> u64 {
+    let state: u64 = drvfw.bound_state()
+    if state == 0 || !allowed(RIGHT_DMA) {
+        return HW_DENIED
+    }
+    var i: u64 = 0
+    while i < MAX_RUNS {
+        if run_len[i as usize] == n && run_addr[i as usize] == addr && n != 0 {
+            mmframe.frame_free_run(state, addr, n)
+            run_len[i as usize] = 0
+            run_addr[i as usize] = 0
+            return HW_OK
+        }
+        i = i + 1
+    }
+    return HW_RANGE
+}
+
+fn reclaim(state: u64) {
+    var i: u64 = 0
+    while i < MAX_RUNS {
+        if run_len[i as usize] != 0 {
+            mmframe.frame_free_run(state, run_addr[i as usize], run_len[i as usize])
+            run_len[i as usize] = 0
+            run_addr[i as usize] = 0
+        }
+        i = i + 1
+    }
+}
