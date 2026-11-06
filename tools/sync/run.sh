@@ -480,6 +480,22 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
     done
     note "vom abgebrochenen zweiten Abgleich kamen $hin von 6 Kopien ganz an"
     is "(f) und KEINE davon kam halb an" "$kaputt" "0"
+    mkdir -p "$TMPD/storeP"
+    head -c $((4112 * 3)) "$TMPD/storeF2/PACK" > "$TMPD/storeP/PACK"
+    geraet "$TMPD/P2.img" "$TMPD/sF2.sh" "$TMPD/kontoF" "$TMPD/storeP" "$TMPD/gross" -
+    lauf "$TMPD/P2.img" P2 > /dev/null
+    hol "$TMPD/P2.img" /store "$TMPD/storeP2"
+    mkdir -p "$TMPD/kontoP2"; cp "$TMPD/kontoF/KOPF" "$TMPD/kontoP2/KOPF"
+    geraet "$TMPD/P3.img" "$TMPD/sB.sh" "$TMPD/kontoP2" "$TMPD/storeP2" "$TMPD/leer" -
+    lauf "$TMPD/P3.img" P3 > /dev/null
+    hol "$TMPD/P3.img" /daten "$TMPD/datenP3"
+    g=0
+    i=0
+    while [ $i -lt 12 ]; do
+        cmp -s "$TMPD/gross/d$i.bin" "$TMPD/datenP3/d$i.bin" && g=$((g+1))
+        i=$((i+1))
+    done
+    is "(f) a PACK without INDEX (abort before the first index write): all 12 files arrive intact" "$g" "12"
 else
     bad "(f) after the aborts there is no account any more"
 fi
