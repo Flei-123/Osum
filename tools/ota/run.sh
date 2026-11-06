@@ -416,7 +416,7 @@ cp -f "$OUT/basis.img" "$OUT/ziel.img"
 rc=$(lauf ein1 "ota settings;ota set abstand 900;ota set auto ja;ota settings;exit")
 hat "$OUT/ein1.txt" "ota: settings (/etc/ota.conf)" "die Einstellungsseite zeigt, wie das Geraet eingestellt ist"
 hat "$OUT/ein1.txt" "source   https://10.0.2.2:$PORT" "mit der Quelle"
-hat "$OUT/ein1.txt" "ota: set abstand is now 900" "und sie laesst sich umstellen"
+hat "$OUT/ein1.txt" "ota: set interval is now 900" "und sie laesst sich umstellen"
 hat "$OUT/ein1.txt" "interval 900" "die neue Zahl steht danach wirklich da"
 hat "$OUT/ein1.txt" "auto     ja" "und der Schalter fuer die automatische Suche auch"
 # ota service never returns (rounds == 0), the VM is killed by the limit; boot under load needs headroom
