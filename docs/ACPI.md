@@ -113,7 +113,7 @@ disarms a GPE whose method failed. Counters appear as `gpe_masked` and `gpe_fail
 - `/proc/hotkeys`: counters of keyboard, SCI, EC, WMI.
 - `/proc/acpidump`: every table, rows `# SIG len=XXXXXXXX idx=NN` and `OFFSET HEX...`; `tools/acpi/fromdump.py` turns the
   text into table files.
-- Serial lines: `acpiev: ready=...`, `acpiev: route ...`, `acpiev: ovr ...`, `acpiev: sci storm ...`, `acpiev: ev taste`.
+- Serial lines: `acpiev: ready=...`, `acpiev: route ...`, `acpiev: ovr ...`, `acpiev: sci storm ...`, `acpiev: ev key`.
 
 ## Kernel command line words
 

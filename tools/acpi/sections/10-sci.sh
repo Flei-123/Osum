@@ -40,7 +40,7 @@ qstart "$K" storm "osum acpiev evdump evwait scistorm noscistray noring3 nofs"
 qwaitfor storm 'acpiev: sci storm' 300
 sleep 2
 qmon storm system_powerdown
-qwaitfor storm 'acpiev: ev taste' 100
+qwaitfor storm 'acpiev: ev key' 100
 qwaitexit storm 150
 qfinish storm
 last=$(lastline storm '^acpiev: ready=')
@@ -49,7 +49,7 @@ chk "storm line names the source (PM1 timer status+enable)" 1 "$(has storm '^acp
 chk_le "storm cut off after the empty limit (interrupts)" 400 "$(val "$last" irqs)"
 chk "line masked, polling continues" 1 "$(val "$last" masked)"
 chk_ge "polls counted while masked" 1 "$(val "$last" polls)"
-chk "power button still seen while the line is masked" 1 "$(has storm '^acpiev: ev taste')"
+chk "power button still seen while the line is masked" 1 "$(has storm '^acpiev: ev key')"
 chk "storm snapshot in the diagnostics" 1 "$(has storm '^scisnap ')"
 
 qrun "$K" nostorm "osum acpiev evwait scistorm noscistray noscistorm noring3 nofs"
@@ -61,9 +61,9 @@ qstart "$K" button "osum acpiev evdump evwait noring3 nofs"
 qwaitfor button 'acpiev: ready=' 300
 sleep 2
 qmon button system_powerdown
-qwaitfor button 'acpiev: ev taste' 100
+qwaitfor button 'acpiev: ev key' 100
 qfinish button
-chk "power button: SCI delivered, press reported" 1 "$(count button '^acpiev: ev taste')"
+chk "power button: SCI delivered, press reported" 1 "$(count button '^acpiev: ev key')"
 chk "power button: no storm detected" 0 "$(count button 'acpiev: sci storm')"
 
 qstart "$K" nobutton "osum noacpiev evdump noring3 nofs"
@@ -72,7 +72,7 @@ sleep 1
 qmon nobutton system_powerdown
 sleep 2
 qfinish nobutton
-chk "counter-proof noacpiev: press not reported" 0 "$(count nobutton 'ev taste')"
+chk "counter-proof noacpiev: press not reported" 0 "$(count nobutton 'ev key')"
 
 ECAML=tools/ecquery/asl/ec
 if [ ! -f $ECAML.aml ]; then iasl -p $ECAML $ECAML.asl > /dev/null 2>&1; fi

@@ -131,7 +131,7 @@ def part_taskbar(out, name, uisc):
     print("  SYMBOLS in the bar (from `taskbar: sym`)")
     seen = {}
     for m in re.finditer(r"taskbar: sym btn=(\d+) app=(\S*) w=(\d+)"
-                         r" gemalt=(\d+) knopf=(\d+)", t):
+                         r" gemalt=(\d+) button=(\d+)", t):
         seen[int(m.group(1))] = (m.group(2), int(m.group(3)),
                                     int(m.group(4)), int(m.group(5)))
     if not seen:

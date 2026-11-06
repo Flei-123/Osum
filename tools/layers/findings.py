@@ -8,7 +8,7 @@ LINE_COMMENT = re.compile(r"//[^\n]*")
 GIANT_LINES = 2000
 ROOT_ALLOWED = {
     "README.md", "COPYING", "LICENSE", "LICENSE.MIT", "LICENSES", "LICENSING.md",
-    "THIRD_PARTY.md", "marke.conf", "test.sh", "RUN.md", "PLAN.md", "GAUNTLET.md",
+    "THIRD_PARTY.md", "marke.conf", "test.sh", "firn.toolchain", "RUN.md", "PLAN.md", "GAUNTLET.md",
 }
 
 

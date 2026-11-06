@@ -155,7 +155,7 @@ import re, sys
 ox, oy, ow, oh = (int(v) for v in sys.argv[2:6])
 hits = []
 for line in open(sys.argv[1], "rb").read().decode("latin-1").splitlines():
-    m = re.search(r"desktop: modul (\d+) name=(\S*) an=(\d+).* x=(\d+) y=(\d+) w=(\d+) h=(\d+)", line)
+    m = re.search(r"desktop: module (\d+) name=(\S*) an=(\d+).* x=(\d+) y=(\d+) w=(\d+) h=(\d+)", line)
     if not m or m.group(3) != "1":
         continue
     x, y, w, h = (int(m.group(i)) for i in (4, 5, 6, 7))
@@ -164,7 +164,7 @@ for line in open(sys.argv[1], "rb").read().decode("latin-1").splitlines():
 print(",".join(hits) if hits else "none")
 PY
 )
-    nm=$(grep -ac 'desktop: modul ' "$SA")
+    nm=$(grep -ac 'desktop: module ' "$SA")
     [ "$nm" -ge 1 ] && ok "desktop modules reported ($nm lines)" || bad "no desktop module lines to compare against"
     [ "$ovl" = "none" ] && ok "the overlay overlaps no desktop module tile" || bad "the overlay overlaps desktop module tiles: $ovl"
 fi
