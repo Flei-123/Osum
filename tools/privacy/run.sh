@@ -41,7 +41,7 @@ if ./tools/build-kernel.sh "$TMPD/k0.img" --stufe 0 > "$TMPD/k.txt" 2>&1; then
 else
     bad "kernel"; tail -5 "$TMPD/k.txt"; echo "PRIVACY: $pass passed, $fail failed"; exit 1
 fi
-printf 'quelle=https://updates.example.test/feed\nauto=ja\nabstand=3600\n' > "$TMPD/ota.conf"
+printf 'source=https://updates.example.test/feed\nauto=ja\nabstand=3600\n' > "$TMPD/ota.conf"
 printf 'server=time.example.test\nauto=true\nabstand=900\n' > "$TMPD/ntp.conf"
 cat > "$TMPD/s.sh" <<'EOS'
 echo ==R1==
@@ -96,7 +96,7 @@ has "$TMPD/R1.txt" "900 s" "report: clock interval from the file"
 [ "$(grep -ac 'switch:   ON' "$TMPD/R1.txt")" = 2 ] && ok "report: both switches ON (auto=ja, auto=true)" || bad "report: both switches ON"
 has "$TMPD/UOFF.txt" "ok: update off" "update off: confirmed"
 has "$TMPD/UOFF.txt" "auto=nein" "update off: the file says auto=nein"
-has "$TMPD/UOFF.txt" "quelle=https://updates.example.test/feed" "update off: the source line stays"
+has "$TMPD/UOFF.txt" "source=https://updates.example.test/feed" "update off: the source line stays"
 [ "$(grep -ac 'switch:   OFF' "$TMPD/R2.txt")" = 1 ] && [ "$(grep -ac 'switch:   ON' "$TMPD/R2.txt")" = 1 ] && ok "report after off: update OFF, clock still ON" || bad "report after off"
 has "$TMPD/UON.txt" "auto=ja" "update on: the file says auto=ja again"
 has "$TMPD/COFF.txt" "auto=false" "clock off: the file says auto=false"

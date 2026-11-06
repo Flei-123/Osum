@@ -455,14 +455,14 @@ if [ -n "${OTA_CONF:-}" ] && [ -s "${OTA_CONF}" ]; then
     [ "$OTA_CONF" -ef "$OUT/ota.conf" ] || cp -f "$OTA_CONF" "$OUT/ota.conf"
 else
     cat > "$OUT/ota.conf" <<EOFOTA
-quelle=$STORE/aktuell
+source=$STORE/aktuell
 abstand=3600
 auto=true
 frist=120
 EOFOTA
-    [ "${HP_STICK:-0}" = 1 ] && echo "kanal=dev" >> "$OUT/ota.conf"
+    [ "${HP_STICK:-0}" = 1 ] && echo "channel=dev" >> "$OUT/ota.conf"
 fi
-sagen "ota.conf    quelle=$(grep -a '^quelle=' "$OUT/ota.conf" | head -1 | cut -d= -f2-)"
+sagen "ota.conf    source=$(grep -a "^source=\|^quelle="  "$OUT/ota.conf" | head -1 | cut -d= -f2-)"
 
 KEY=${OTA_KEY:-}
 if [ -z "$KEY" ] && [ -s "${STORE_DIR:-/srv/store}/osum/aktuell/schluessel.pub" ]; then
