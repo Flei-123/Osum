@@ -1088,11 +1088,11 @@ gfeld() { grep -a "$2" "$1" | tail -1 | grep -oE "(^| )$3=[0-9]+" | tail -1 | se
 
 gross gkupfer "locate -m kupfer"
 num "the kernel exits cleanly" "$RC" eq 21
-GB_N=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'n')
-GB_S=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'saetze')
-GB_C=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'aufrufe')
-GB_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'us')
-GB_T=$(gfeld "$TMPD/gkupfer.txt" 'locate: bauen' 'abgeschn')
+GB_N=$(gfeld "$TMPD/gkupfer.txt" 'locate: build' 'n')
+GB_S=$(gfeld "$TMPD/gkupfer.txt" 'locate: build' 'records')
+GB_C=$(gfeld "$TMPD/gkupfer.txt" 'locate: build' 'calls')
+GB_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: build' 'us')
+GB_T=$(gfeld "$TMPD/gkupfer.txt" 'locate: build' 'truncated')
 num "1. THE BUILD: this many names from the inode table" "$GB_N" eq "$GWANT"
 gleich "and no record was lost on the way" "$GB_N" "$GB_S"
 num "abgeschnitten wurde nichts" "$GB_T" eq 0
@@ -1101,71 +1101,71 @@ num "microseconds for the whole build" "$GB_U" gt 0
 echo "        -> $GB_N names in $GB_U us, $GB_C calls; that is $((GB_U / GB_N)) us per name"
 
 GI_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: index' 'us10')
-GI_T=$(grep -a 'locate: index' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
-GW_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: baum' 'us')
-GW_T=$(grep -a 'locate: baum' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
-GW_G=$(gfeld "$TMPD/gkupfer.txt" 'locate: baum' 'gesehen')
+GI_T=$(grep -a 'locate: index' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'hits=[0-9]+' | sed 's/.*=//')
+GW_U=$(gfeld "$TMPD/gkupfer.txt" 'locate: tree' 'us')
+GW_T=$(grep -a 'locate: tree' "$TMPD/gkupfer.txt" | tail -1 | grep -oE 'hits=[0-9]+' | sed 's/.*=//')
+GW_G=$(gfeld "$TMPD/gkupfer.txt" 'locate: tree' 'seen')
 GI_1=$((GI_U / 10))
 num "2. THE SEARCH: orders of magnitude cheaper than the build" \
     $((GB_U / (GI_1 + 1))) ge 20
 echo "        -> build $GB_U us, one search $GI_1 us (ten measured: $GI_U us)"
 num "3. THE COUNTER-PROOF: the tree walk sees the same names" "$GW_G" eq "$GB_N"
 gleich "and it finds EXACTLY THE SAME number of hits" "$GI_T" "$GW_T"
-has "$TMPD/gkupfer.txt" "ungleich=0" \
+has "$TMPD/gkupfer.txt" "mismatch=0" \
     "and THE SAME NAMES -- sorted, compared octet by octet"
 num "and the index is many times faster" \
     $((GW_U / (GI_1 + 1))) ge 20
 echo "        -> tree walk $GW_U us, search in the index $GI_1 us"
 SOLLK=$(grep '^kupfer ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "and both find as many as the image list gives" "$GI_T" eq "$SOLLK"
-has "$TMPD/gkupfer.txt" "locate: pfad /data/kupfer" \
+has "$TMPD/gkupfer.txt" "locate: path /data/kupfer" \
     "and the hit carries its whole path, built from the parent numbers"
 
 gross gviele "locate -m 07"
 SOLL7=$(grep '^07 ' "$TMPD/gross/erwartet" | awk '{print $2}')
-V_I=$(grep -a 'locate: index' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
-V_B=$(grep -a 'locate: baum' "$TMPD/gviele.txt" | tail -1 | grep -oE 'treffer=[0-9]+' | sed 's/.*=//')
+V_I=$(grep -a 'locate: index' "$TMPD/gviele.txt" | tail -1 | grep -oE 'hits=[0-9]+' | sed 's/.*=//')
+V_B=$(grep -a 'locate: tree' "$TMPD/gviele.txt" | tail -1 | grep -oE 'hits=[0-9]+' | sed 's/.*=//')
 num "a word that hits MANY: the index finds this many" "$V_I" eq "$SOLL7"
 gleich "and the tree walk just as many" "$V_I" "$V_B"
-has "$TMPD/gviele.txt" "ungleich=0" "and again the same, name by name"
+has "$TMPD/gviele.txt" "mismatch=0" "and again the same, name by name"
 
 gross gquaste "locate -m quaste"
 SOLLQ=$(grep '^quaste ' "$TMPD/gross/erwartet" | awk '{print $2}')
 num "the image list knows 'quaste' this often" "$SOLLQ" eq 0
-has "$TMPD/gquaste.txt" "locate: index [quaste] treffer=0" \
+has "$TMPD/gquaste.txt" "locate: index [quaste] hits=0" \
     "5. the index does NOT find 'quaste'"
-has "$TMPD/gquaste.txt" "locate: baum [quaste] treffer=0" \
+has "$TMPD/gquaste.txt" "locate: tree [quaste] hits=0" \
     "and neither does the tree walk"
-Q_G=$(gfeld "$TMPD/gquaste.txt" 'locate: baum' 'gesehen')
+Q_G=$(gfeld "$TMPD/gquaste.txt" 'locate: tree' 'seen')
 num "although it looked at all $Q_G names" "$Q_G" eq "$GB_N"
 
 echo "== 15b. the journal: create, rename, delete -- without a rebuild =="
 gross gjrnl "locate -j kupfer"
 num "the kernel exits cleanly" "$RC" eq 21
-has "$TMPD/gjrnl.txt" "schritt=1  zwiebel=1  apfel=0" \
+has "$TMPD/gjrnl.txt" "step=1  zwiebel=1  apfel=0" \
     "after creating, the index finds the new file"
-has "$TMPD/gjrnl.txt" "schritt=3  zwiebel=0  apfel=1" \
+has "$TMPD/gjrnl.txt" "step=3  zwiebel=0  apfel=1" \
     "after renaming the NEW name and no longer the old one"
-has "$TMPD/gjrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
+has "$TMPD/gjrnl.txt" "step=4  zwiebel=0  apfel=0" \
     "and after deleting neither of them"
-J_N1=$(grep -a 'schritt=1 ' "$TMPD/gjrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
-J_N4=$(grep -a 'schritt=4 ' "$TMPD/gjrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
+J_N1=$(grep -a 'step=1 ' "$TMPD/gjrnl.txt" | grep -oE 'names=[0-9]+' | sed 's/.*=//')
+J_N4=$(grep -a 'step=4 ' "$TMPD/gjrnl.txt" | grep -oE 'names=[0-9]+' | sed 's/.*=//')
 num "the index gained one name" $((J_N1 - GB_N)) eq 1
 num "and at the end as many as at the start" "$J_N4" eq "$GB_N"
 has "$TMPD/gjrnl.txt" "lost=0" "and the ring dropped no record"
-nb=$(grep -ac 'locate: bauen' "$TMPD/gjrnl.txt")
+nb=$(grep -ac 'locate: build' "$TMPD/gjrnl.txt")
 num "exactly ONE build in the whole run, and only the journal after that" "$nb" eq 1
 
 gross gnojrnl "locate -n kupfer"
-has "$TMPD/gnojrnl.txt" "schritt=1  zwiebel=0  apfel=0" \
+has "$TMPD/gnojrnl.txt" "step=1  zwiebel=0  apfel=0" \
     "WITHOUT the journal the index knows nothing of the new file"
-has "$TMPD/gnojrnl.txt" "schritt=4  zwiebel=0  apfel=0" \
+has "$TMPD/gnojrnl.txt" "step=4  zwiebel=0  apfel=0" \
     "nor of the other two steps"
-N_N4=$(grep -a 'schritt=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'namen=[0-9]+' | sed 's/.*=//')
+N_N4=$(grep -a 'step=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'names=[0-9]+' | sed 's/.*=//')
 num "its name list never changed" "$N_N4" eq "$GB_N"
-N_S=$(grep -a 'schritt=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'gezogen=[0-9]+' | sed 's/.*=//')
+N_S=$(grep -a 'step=4 ' "$TMPD/gnojrnl.txt" | grep -oE 'pulled=[0-9]+' | sed 's/.*=//')
 num "it fetched zero records" "$N_S" eq 0
-J_S=$(grep -a 'schritt=4 ' "$TMPD/gjrnl.txt" | grep -oE 'gezogen=[0-9]+' | sed 's/.*=//')
+J_S=$(grep -a 'step=4 ' "$TMPD/gjrnl.txt" | grep -oE 'pulled=[0-9]+' | sed 's/.*=//')
 num "the run WITH journal fetched four" "$J_S" eq 4
 
 echo "== 15c. the launcher searches files, not only programs =="

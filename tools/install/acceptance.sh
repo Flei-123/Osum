@@ -277,7 +277,7 @@ if grep -qaE '(osum|wm): mount=1' "$OUT/start.txt"; then
 else
     bad "the root is not mounted"
 fi
-if grep -qaE 'desk: start /bin/(desktop|glogi)|glogin: (bereit|rect)' "$OUT/start.txt"; then
+if grep -qaE 'desk: start /bin/(desktop|glogi)|glogin: (ready|rect)' "$OUT/start.txt"; then
     ok "the surface (login screen or desktop) starts from the disk"
 else
     bad "no desktop -- the surface does not come up"
@@ -409,7 +409,7 @@ login_lauf() { # name keys...
     timeout 300 $QEMU_X86 "${a[@]}" > /dev/null 2>&1 &
     local qp=$! w=0
     while [ $w -lt 240 ]; do
-        grep -qa 'glogin: bereit' "$ser" 2>/dev/null && break
+        grep -qa 'glogin: ready' "$ser" 2>/dev/null && break
         kill -0 "$qp" 2>/dev/null || break
         sleep 1; w=$((w+1))
     done
@@ -438,7 +438,7 @@ login_lauf() { # name keys...
 }
 if command -v socat >/dev/null 2>&1; then
     login_lauf login-ok g e h e i m 1 2 3 ret
-    grep -aq 'glogin: bereit' "$OUT/login-ok.txt" && ok "the login screen appears (no autologin on the installed disk)" || bad "kein Anmeldeschirm"
+    grep -aq 'glogin: ready' "$OUT/login-ok.txt" && ok "the login screen appears (no autologin on the installed disk)" || bad "kein Anmeldeschirm"
     grep -aq 'glogin: angemeldet als abnahme' "$OUT/login-ok.txt" && ok "login with the new account and the chosen password works" || bad "login with the new account: $(grep -a 'glogin:' "$OUT/login-ok.txt" | tail -3 | tr '\n' '|')"
     grep -aq 'glogin: uid=1000' "$OUT/login-ok.txt" && ok "the session runs as uid 1000" || bad "uid 1000 fehlt"
     login_lauf login-bad f a l s c h 9 9 9 ret

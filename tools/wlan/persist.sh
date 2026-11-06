@@ -48,7 +48,7 @@ start_vm() {
 }
 stop_vm() { mon "quit"; sleep 2; kill $QP 2>/dev/null; wait $QP 2>/dev/null; }
 start_vm ser1
-waitfor 'glogin: bereit' 240 ser1; sleep 8
+waitfor 'glogin: ready' 240 ser1; sleep 8
 keys s t a r t k e n n w o r t ret
 waitfor 'glogin: desktop pid=' 120 ser1; sleep 12
 mon "sendkey meta_l"; sleep 3
@@ -72,7 +72,7 @@ fi
 mdir -i "$W/stick.img@@$OFF" :: > "$W/dir.txt" 2>&1
 mtype -i "$W/stick.img@@$OFF" ::limine.conf >/dev/null 2>&1 && mtype -i "$W/stick.img@@$OFF" ::osum.mb >/dev/null 2>&1 && ok "kernel and limine.conf are still on the FAT partition" || bad "kernel or limine.conf missing after the write"
 start_vm ser2
-waitfor 'glogin: bereit' 240 ser2; sleep 8
+waitfor 'glogin: ready' 240 ser2; sleep 8
 keys s t a r t k e n n w o r t ret
 waitfor 'wlanpersist: ' $([ "$GEG" = 1 ] && echo 60 || echo 240) ser2; sleep 6
 stop_vm

@@ -325,7 +325,7 @@ for b in 2 3 4; do
         hat "$OUT/p$b.txt" "ab: gen=" "boot $((b-1)) of the trial kernel reached ab_boot"
     fi
     gleich "boot $((b-1)) runs the NEW kernel" "$(commit_of "$OUT/p$b.txt")" "$NEW"
-    hatnicht "$OUT/p$b.txt" "glogin: bereit" "boot $((b-1)) never reached the desktop (fault)"
+    hatnicht "$OUT/p$b.txt" "glogin: ready" "boot $((b-1)) never reached the desktop (fault)"
 done
 hat "$OUT/p4.txt" "ab: TRIAL failed" "third attempt: trial declared failed"
 hat "$OUT/p4.txt" "ab: esp: default_entry set to 1" "kernel puts the loader back on slot A"

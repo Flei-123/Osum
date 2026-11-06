@@ -241,7 +241,7 @@ wäre kein Beleg):
 ```
 desk: anmeldung vor schreibtisch          <- der Kern nimmt den Anmeldeweg
 desk: start /bin/glogin  piwlib: font ui px=15 asc=12 h=18
-glogin: bereit n=1
+glogin: ready n=1
 glogin: rect id=0 … id=6                  <- sieben Bedienelemente, erster Aufbau
 desk: start /bin/taskbar  pid=4
 desk: start /bin/launcher  pid=5
@@ -255,7 +255,7 @@ abmelden: Sitzung uliadu=n1c0h0e0r        ("Sitzung uid=1000", verschraenkt)
 signal: pid=17 SIGKIL -- killed           <- der Schreibtisch, von signal.fi gemeldet
 desk: start /bin/glogin  pid=9
 abmelden: Anmeldung neu pid=18
-glogin: bereit n=1
+glogin: ready n=1
 glogin: rect id=0 … id=6                  <- ZWEITER Aufbau, der Schirm ist zurueck
 ```
 

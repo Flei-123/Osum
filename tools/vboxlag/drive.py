@@ -55,7 +55,7 @@ def f12():
     cmd("sendkey f12", 0.6)
 
 
-READY_MARKS = ("glogin: bereit", "bereit n=")
+READY_MARKS = ("glogin: ready", "ready n=")
 LOGIN_MARKS = ("angemeldet als", "gemeldet als justin", "glogin: autostart", "glogin: desktop pid", "glogin: uid=")
 
 

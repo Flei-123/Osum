@@ -98,7 +98,7 @@ boot() {
         args+=(-drive "if=pflash,format=raw,unit=0,readonly=on,file=$code" -drive "if=pflash,format=raw,unit=1,file=$W/$n.vars")
     fi
     timeout 400 qemu-system-x86_64 "${args[@]}" > "$W/$n.qemu" 2>&1 &
-    local q=$! i=0 want=${4:-glogin: bereit} secs=${5:-300}
+    local q=$! i=0 want=${4:-glogin: ready} secs=${5:-300}
     while [ $i -lt "$secs" ]; do
         grep -qa "$want\|EXCEPTION" "$ser" 2>/dev/null && break
         kill -0 $q 2>/dev/null || break; sleep 1; i=$((i+1)); done
@@ -113,7 +113,7 @@ check_login() {
     grep -aq "osboot: start " "$ser" && okk "$n: osboot started the kernel" || bd "$n: no 'osboot: start' line"
     grep -aqE "rootpart=1|rootsel: [a-z]+ -- WURZEL, Bloecke=[0-9]+ +first=72048" "$ser" && okk "$n: the kernel found its root on the disk" || bd "$n: no root found on the disk"
     grep -aq "from module" "$ser" && bd "$n: root came from a module -- the stick was involved" || okk "$n: no stick involved"
-    grep -aq "glogin: bereit" "$ser" && okk "$n: login screen reached" || bd "$n: login screen not reached"
+    grep -aq "glogin: ready" "$ser" && okk "$n: login screen reached" || bd "$n: login screen not reached"
     grep -aq "EXCEPTION\|kernel halted\|panic:" "$ser" && bd "$n: fault: $(grep -a 'EXCEPTION\|kernel halted\|panic:' "$ser" | head -1)" || okk "$n: no fault line"
 }
 
@@ -128,7 +128,7 @@ grep -aq "osboot: start " "$W/seabioside.txt" && okk "seabioside: osboot started
 grep -aqE "rootpart=1|rootsel: [a-z]+ -- WURZEL" "$W/seabioside.txt" && okk "seabioside: root found on the disk" || bd "seabioside: no root found on the disk"
 
 echo "== 3a3. SeaBIOS, IDE disk (PIO): login reached and no freeze report =="
-BUS=ide boot seabiosidefull bios "$W/disk.img" "glogin: bereit" 400 30
+BUS=ide boot seabiosidefull bios "$W/disk.img" "glogin: ready" 400 30
 check_login seabiosidefull ""
 grep -aq "hang: detected" "$W/seabiosidefull.txt" && bd "seabiosidefull: freeze logger fired: $(grep -a 'hang: detected' "$W/seabiosidefull.txt" | head -1)" \
     || okk "seabiosidefull: freeze logger stayed quiet during 30 s of PIO writes after login"
@@ -141,7 +141,7 @@ ide_exec_check() {
 ide_exec_check seabiosidefull
 
 echo "== 3a3b. SeaBIOS, IDE disk, 4 cores: concurrent writers and readers keep the channel serialized =="
-SMP=4 BUS=ide boot seabiosidesmp bios "$W/disk.img" "glogin: bereit" 400 30
+SMP=4 BUS=ide boot seabiosidesmp bios "$W/disk.img" "glogin: ready" 400 30
 check_login seabiosidesmp ""
 ide_exec_check seabiosidesmp
 grep -aq "hang: detected" "$W/seabiosidesmp.txt" && bd "seabiosidesmp: freeze logger fired: $(grep -a 'hang: detected' "$W/seabiosidesmp.txt" | head -1)" \
@@ -181,7 +181,7 @@ with open(sys.argv[1], "r+b") as f:
 PY
 boot nostg bios "$W/nostage.img" "osboot (bios)" 25 0
 grep -aq "osboot (bios)" "$W/nostg.txt" && bd "nostage: loader banner despite zeroed stage2" || okk "nostage: no loader banner without the stage"
-grep -aq "rootpart=\|glogin: bereit" "$W/nostg.txt" && bd "nostage: the kernel started anyway" || okk "nostage: the kernel did not start"
+grep -aq "rootpart=\|glogin: ready" "$W/nostg.txt" && bd "nostage: the kernel started anyway" || okk "nostage: the kernel did not start"
 
 echo "== 3d. counter-proof: MBR stage0 zeroed on a copy of the installed disk =="
 cp "$W/disk.img" "$W/nombr.img"

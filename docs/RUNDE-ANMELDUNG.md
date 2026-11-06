@@ -73,7 +73,7 @@ Ein Lauf, ein Abbild, vier Fotos. Kernelzeile:
 
 | Schritt | Bild | was der Bericht sagt |
 |---|---|---|
-| Boot → Anmeldung | `10-login.png` | `desk: anmeldung vor schreibtisch` · `desk: start /bin/glogin pid=2` · `glogin: bereit n=1` |
+| Boot → Anmeldung | `10-login.png` | `desk: anmeldung vor schreibtisch` · `desk: start /bin/glogin pid=2` · `glogin: ready n=1` |
 | falsches Kennwort | `20-falsch.png` | `glogin: abgewiesen, name=justin` · `glogin: gewartet 1257 ms` |
 | richtiges Kennwort → Schreibtisch | `50-voll-a-schreibtisch.png` | `glogin: angemeldet als justin` · **`glogin: uid=1000`** · `glogin: desktop pid=7` |
 | Super+L → Sperre | `50-voll-b-gesperrt.png` | `sperre: an (Win+L)` · `sperre: Sperrer neu, pid=8` · `sperre: bereit` |

@@ -126,10 +126,10 @@ boot() { # boot <name> <xhci|ps2>
     MON="$D/mon.sock"
     local i=0
     while [ $i -lt 150 ]; do
-        grep -qa 'glogin: bereit' "$D/serial.txt" 2>/dev/null && break
+        grep -qa 'glogin: ready' "$D/serial.txt" 2>/dev/null && break
         sleep 1; i=$((i + 1))
     done
-    grep -qa 'glogin: bereit' "$D/serial.txt" 2>/dev/null || return 1
+    grep -qa 'glogin: ready' "$D/serial.txt" 2>/dev/null || return 1
     sleep 6
     return 0
 }
@@ -167,7 +167,7 @@ rect_of() {
 fld() { echo "$1" | grep -oE "$2=[0-9]+" | head -1 | cut -d= -f2; }
 # every wlib program writes to the one serial line -- only glogin's lines
 GP=""
-gpid() { GP=$(grep -aoE 'bereit n=[0-9]+ pid=[0-9]+' "$D/serial.txt" | tail -1 | grep -oE '[0-9]+$'); }
+gpid() { GP=$(grep -aoE 'ready n=[0-9]+ pid=[0-9]+' "$D/serial.txt" | tail -1 | grep -oE '[0-9]+$'); }
 # NOT anchored at the start of the line: the kernel echoes every key
 # ("key: a") from the interrupt, and that can land in front of a line a
 # program is just writing. The tail of the line is what identifies it.
@@ -207,7 +207,7 @@ klick() { mon "mouse_button 1" "sleep 0.2" "mouse_button 0" "sleep 1"; }
 
 # seen <pattern> [seconds]: wait until the guest printed the line. A fixed
 # sleep after a click is a race on a loaded host (one run missed
-# 'glogin: schnell=0' by a hair while 30 other qemu jobs were running).
+# 'glogin: quick=0' by a hair while 30 other qemu jobs were running).
 seen() {
     local k=0 n=$(( ${2:-8} * 5 ))
     while [ $k -lt $n ]; do
@@ -223,7 +223,7 @@ mkdir -p "$BEL"
 # ================================================ A. xHCI keyboard + mouse
 kopf "A. USB keyboard and RELATIVE USB mouse on xHCI (the 9020 once routed)"
 if ! boot usb xhci; then
-    bad "the login screen did not come up (no 'glogin: bereit')"
+    bad "the login screen did not come up (no 'glogin: ready')"
     halt_vm; ende
 fi
 ok "the login screen is up"
@@ -385,19 +385,19 @@ rect_after() {
 }
 RC=$(rect_count 12)
 zeig $(( $(fld "$NET" x) + 16 )) $(( $(fld "$NET" y) + 16 )); klick
-seen 'glogin: schnell=1' && ok "a click on the network icon opens the network text" \
-    || bad "'glogin: schnell=1' missing"
+seen 'glogin: quick=1' && ok "a click on the network icon opens the network text" \
+    || bad "'glogin: quick=1' missing"
 mon "screendump $D/netz.ppm" "sleep 1"; png "$D/netz.ppm" "$BEL/netz.png"
 POW=$(rect_after 12 "$RC")
 RC=$(rect_count 12)
 zeig $(( $(fld "$POW" x) + 16 )) $(( $(fld "$POW" y) + 16 )); klick
-seen 'glogin: schnell=2' && ok "a click on the power icon offers 'Herunterfahren' and 'Neu starten'" \
-    || bad "'glogin: schnell=2' missing"
+seen 'glogin: quick=2' && ok "a click on the power icon offers 'Herunterfahren' and 'Neu starten'" \
+    || bad "'glogin: quick=2' missing"
 mon "screendump $D/strom.ppm" "sleep 1"; png "$D/strom.ppm" "$BEL/strom.png"
 POW=$(rect_after 12 "$RC")
 zeig $(( $(fld "$POW" x) + 16 )) $(( $(fld "$POW" y) + 16 )); klick
-seen 'glogin: schnell=0' && ok "a second click closes it again (nothing is switched off)" \
-    || bad "'glogin: schnell=0' missing"
+seen 'glogin: quick=0' && ok "a second click closes it again (nothing is switched off)" \
+    || bad "'glogin: quick=0' missing"
 grep -aq 'glogin: power' "$D/serial.txt" && bad "GEGENPROBE: the power icon alone switched something" \
     || ok "GEGENPROBE: the icon alone switches nothing off"
 

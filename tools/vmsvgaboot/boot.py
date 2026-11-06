@@ -29,7 +29,7 @@ def wait_for(pred, timeout):
 
 def main():
     mon = Mon(mon_sock)
-    if not wait_for(lambda t: "glogin: bereit" in t or t.count("glogin: rect id=") >= 3, 240):
+    if not wait_for(lambda t: "glogin: ready" in t or t.count("glogin: rect id=") >= 3, 240):
         open(base + ".login", "w").write("0")
         mon.quit()
         return

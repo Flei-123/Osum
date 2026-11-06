@@ -47,7 +47,7 @@ timeout 300 qemu-system-x86_64 "${KVM[@]}" -m 512 -kernel "$B/osum.mb" \
     -serial "file:$W/ser" -display none -no-reboot -device VGA,edid=on,xres=1024,yres=768,vgamem_mb=32 \
     -monitor "unix:$W/mon,server,nowait" -drive "file=$W/d.img,format=raw,if=ide,index=0" >/dev/null 2>&1 &
 QP=$!
-waitfor 'glogin: bereit' 120; sleep 6
+waitfor 'glogin: ready' 120; sleep 6
 keys s t a r t k e n n w o r t ret
 waitfor 'glogin: desktop pid=' 90; sleep 12
 mon "sendkey meta_l"; sleep 3

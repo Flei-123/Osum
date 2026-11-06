@@ -97,13 +97,13 @@ try:
     # ---------------------------------------------- 1. DER ANMELDESCHIRM
     t0 = time.time()
     while time.time() - t0 < 180:
-        if "glogin: bereit" in read_text():
+        if "glogin: ready" in read_text():
             break
         if p.poll() is not None:
             bad("QEMU ist vorzeitig weg, rc=%s" % p.returncode)
             raise SystemExit(1)
         time.sleep(0.5)
-    if "glogin: bereit" in read_text():
+    if "glogin: ready" in read_text():
         ok("der Anmeldeschirm ist bereit (nach %.0fs)" % (time.time() - t0))
     else:
         bad("der Anmeldeschirm kam nicht")
@@ -398,16 +398,16 @@ try:
     else:
         bad("'abmelden: Anmeldung neu' fehlt ('start /bin/glogin' %dx, "
             "'rect id=6' %dx)" % (st, r6_renewed))
-    # DIE ZUSAGE, DIE ZAEHLT: er ist WIRKLICH WIEDER DA. `glogin: bereit`
+    # DIE ZUSAGE, DIE ZAEHLT: er ist WIRKLICH WIEDER DA. `glogin: ready`
     # muss zweimal stehen -- einmal beim Start, einmal jetzt. Eine
     # einzelne Zeile sagt nur, dass er einmal lief.
     # DASS ER WIRKLICH WIEDER DA IST, und nicht nur gestartet wurde:
     # `glogin` meldet nach dem Aufbau jedes seiner Bedienelemente
     # (`glogin: rect id=0..6`). Gezaehlt wird, wie oft `rect id=6` --
     # der Anmeldeknopf, das LETZTE Element -- vorkommt: einmal beim
-    # Start, einmal nach dem Abmelden. `glogin: bereit` allein waere
+    # Start, einmal nach dem Abmelden. `glogin: ready` allein waere
     # schwaecher, weil die Zeile verdraengt werden kann.
-    b = len(re.findall(r"glogin: bereit", txt))
+    b = len(re.findall(r"glogin: ready", txt))
     r6 = len(re.findall(r"glogin: rect id=6", txt))
     if r6 >= 2:
         ok("der Anmeldeschirm hat seine Bedienelemente WIEDER aufgebaut "

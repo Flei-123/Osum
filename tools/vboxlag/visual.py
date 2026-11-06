@@ -58,7 +58,7 @@ def f12():
 t0 = time.time()
 ready = 0
 while time.time() - t0 < tmo:
-    if "glogin: bereit" in read():
+    if "glogin: ready" in read():
         ready = 1
         break
     time.sleep(1)

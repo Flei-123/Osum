@@ -130,9 +130,9 @@ if [ -f "$T3" ]; then
     grep -qa 'anmeldung vor schreibtisch' "$T3" \
         && ok "the kernel starts the login before the desktop" \
         || bad "'anmeldung vor schreibtisch' steht nicht im Bericht"
-    grep -qaE 'glogin: bereit' "$T3" \
+    grep -qaE 'glogin: ready' "$T3" \
         && ok "the login screen is ready" \
-        || bad "'glogin: bereit' fehlt"
+        || bad "'glogin: ready' fehlt"
     grep -qa 'glogin: angemeldet als justin' "$T3" \
         && ok "angemeldet als justin" \
         || bad "'glogin: angemeldet als justin' fehlt"
@@ -219,9 +219,9 @@ if [ -f "$T6" ]; then
     grep -qaE 'desk: start /bin/desktop' "$T6" \
         && ok "and starts the desktop directly" \
         || bad "'desk: start /bin/desktop' fehlt"
-    if grep -qaE 'start /bin/glogin|glogin: bereit' "$T6"; then
+    if grep -qaE 'start /bin/glogin|glogin: ready' "$T6"; then
         bad "without the word glogin ran anyway"
-        info "$(grep -aE 'start /bin/glogin|glogin: bereit' "$T6" | head -2)"
+        info "$(grep -aE 'start /bin/glogin|glogin: ready' "$T6" | head -2)"
     else
         ok "NEGATIVE: glogin was not started (no 'start /bin/glogin')"
     fi

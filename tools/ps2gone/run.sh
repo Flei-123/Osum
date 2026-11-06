@@ -22,7 +22,7 @@ eq "both module inits stop with the no-controller line (vor + nach)" 2 "$(g gone
 eq "no kernel exception" 0 "$(g gone EXCEPTION)"
 echo "== 2. counter-proof: without the word the mouse starts"
 run base "$W" > /dev/null
-eq "module init ran and reported" 2 "$(g base '^modul: [a-z]* init=')"
+eq "module init ran and reported" 2 "$(g base '^module: [a-z]* init=')"
 eq "no no-controller line" 0 "$(g base 'ps2m: no i8042')"
 echo; echo "ps2gone: $OK ok, $FAIL fail"
 [ "$FAIL" -eq 0 ]

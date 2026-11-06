@@ -136,7 +136,7 @@ la=$(grep -anE 'desk: start /bin/glogin|desk: start /bin/desktop' "$S" | head -1
 [ -n "$lb" ] && [ -n "$la" ] && [ "$lb" -lt "$la" ] \
     && ok "the broker starts before the sign-in (serial line $lb < $la)" \
     || bad "order broker/sign-in: ${lb:-?} / ${la:-?}"
-grep -qaE 'glogin: bereit|glogin: desktop pid=|wm: fen i=' "$S" \
+grep -qaE 'glogin: ready|glogin: desktop pid=|wm: fen i=' "$S" \
     && ok "the session still comes up (sign-in / desktop window reported)" \
     || bad "no sign-in screen and no desktop window on the serial line"
 grep -qaE 'panic|EXCEPTION|#GP|#PF' "$S" && bad "a panic or exception while booting" || ok "no panic, no exception"

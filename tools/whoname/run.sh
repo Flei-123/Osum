@@ -19,7 +19,7 @@ timeout 200 qemu-system-x86_64 "${KVM[@]}" -m 512 -kernel "$B/osum.mb" \
     -serial "file:$W/ser" -display none -no-reboot -device VGA,edid=on,xres=1024,yres=768,vgamem_mb=32 \
     -monitor "unix:$W/mon,server,nowait" -drive "file=$W/d.img,format=raw,if=ide,index=0" >/dev/null 2>&1 &
 QP=$!
-for _ in $(seq 1 90); do grep -qa 'glogin: bereit' "$W/ser" 2>/dev/null && break; sleep 1; done
+for _ in $(seq 1 90); do grep -qa 'glogin: ready' "$W/ser" 2>/dev/null && break; sleep 1; done
 sleep 6
 for k in s t a r t k e n n w o r t ret; do mon "sendkey $k"; sleep 0.4; done
 for _ in $(seq 1 60); do grep -qa 'glogin: desktop pid=' "$W/ser" 2>/dev/null && break; sleep 1; done

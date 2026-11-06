@@ -49,7 +49,7 @@ open_installer() { # $1 = wanted count of `elevate: ready`
 }
 count() { grep -ac -- "$1" "$W/ser" 2>/dev/null || true; }
 waitcount() { local i; for i in $(seq 1 "$3"); do [ "$(count "$1")" -ge "$2" ] && return 0; sleep 1; done; return 1; }
-waitfor 'glogin: bereit' 120; sleep 6
+waitfor 'glogin: ready' 120; sleep 6
 keys s t a r t k e n n w o r t ret
 waitfor 'glogin: desktop pid=' 90; sleep 12
 # 1. a plain programme from the start menu

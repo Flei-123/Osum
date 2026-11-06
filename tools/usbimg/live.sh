@@ -189,7 +189,7 @@ grep -aqE 'glogin: desktop pid=[0-9]' "$D/ser.txt" && ok "glogin started the des
 grep -aqE 'wm: fen i=[0-9]+ id=[0-9]+ x=0 y=0 w=[0-9]+ h=[0-9]+ lay=0 ' "$D/ser.txt" \
     && ok "the window server shows the desktop window (layer 0, full screen)" \
     || bad "no desktop window (layer 0) in the window server report"
-nicht "$D/ser.txt" 'glogin: bereit' "no sign-in screen was shown"
+nicht "$D/ser.txt" 'glogin: ready' "no sign-in screen was shown"
 nicht "$D/ser.txt" 'justin' "the word 'justin' appears nowhere on the serial line"
 if [ -s "$D/live-desktop.png" ]; then
     ink=$(tinte "$D/live-desktop.png")

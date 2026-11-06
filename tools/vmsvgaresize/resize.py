@@ -84,7 +84,7 @@ def menu_probe(mon, tag, leave_open):
 
 def main():
     mon = Mon(mon_sock)
-    if not wait_for(lambda t: "glogin: bereit" in t or t.count("glogin: rect id=") >= 3, 200):
+    if not wait_for(lambda t: "glogin: ready" in t or t.count("glogin: rect id=") >= 3, 200):
         open(base + ".login", "w").write("0")
         mon.quit()
         return

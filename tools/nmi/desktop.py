@@ -58,7 +58,7 @@ class Qmp:
 
 def main():
     q = Qmp(qmp_path)
-    ready = wait_for("glogin: bereit", 240)
+    ready = wait_for("glogin: ready", 240)
     print("login-screen", 1 if ready else 0)
     if not ready:
         return

@@ -41,7 +41,7 @@ echo "== tree + grid =="
 run g1 12
 S=$OUT/g1/serial.txt
 hat "$S" "glogin: fUi Szenenbaum" "the sign-in screen is a scene tree"
-hat "$S" "glogin: bereit n=1" "and it is ready (one account)"
+hat "$S" "glogin: ready n=1" "and it is ready (one account)"
 num "password fields" "$(grep -aoE 'glogin: rect id=[0-9]+ kind=4 ' "$S" | sort -u | wc -l)" eq 1
 num "buttons (Anmelden, Anderer Benutzer, network, power)" "$(grep -aoE 'glogin: rect id=[0-9]+ kind=2 ' "$S" | sort -u | wc -l)" eq 4
 CLOCK=$(grep -aoE 'glogin: rect id=10 kind=1 x=[0-9]+ y=[0-9]+' "$S" | head -1)
@@ -89,8 +89,8 @@ hat "$S" "glogin: angemeldet als justin" "name typed, password typed: signed in"
 echo "== quick access =="
 run g7 10 tab tab tab tab ret ret
 S=$OUT/g7/serial.txt
-hat "$S" "glogin: schnell=1" "the network icon opens the network text"
-hat "$S" "glogin: schnell=0" "a second Enter closes it again"
+hat "$S" "glogin: quick=1" "the network icon opens the network text"
+hat "$S" "glogin: quick=0" "a second Enter closes it again"
 hatnicht "$S" "glogin: power" "COUNTER-PROOF: nothing was switched off"
 
 echo "== debug address under the network text =="

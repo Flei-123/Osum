@@ -99,7 +99,7 @@ lauf() { # kernel disk append log
         -device isa-debug-exit,iobase=0xf4,iosize=0x04 >/dev/null 2>&1 &
     local pid=$! i=0
     while [ $i -lt 900 ]; do
-        grep -qa 'modul: warte' "$4" 2>/dev/null && break
+        grep -qa 'module: wait' "$4" 2>/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.1; i=$((i+1))
     done
@@ -112,19 +112,19 @@ lauf() { # kernel disk append log
 }
 QUIET="nokbd nosched noproc nofs noring3"
 wert() { grep -aoE "$2" "$1" | head -1 | grep -oE '[0-9]+$'; }
-zwert() { grep -a 'modul: sigok=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-9]+$'; }
+zwert() { grep -a 'module: sigok=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-9]+$'; }
 nwert() { grep -a 'module: after init=' "$1" | head -1 | grep -oE "$2" | grep -oE '[0-9]+$'; }
 
 # ------------------------------------------------- 2. die Ausfuhrtafel
 echo "== 2. the export table of the kernel: the same numbers nm reports =="
 lauf "$TMPD/k-modul" "$TMPD/d-gut.img" "modul modulaus $QUIET" "$TMPD/l-gut.txt"
 num "der Lauf endet sauber" "$RC" eq 21
-num "Symbole in der Tafel" "$(wert "$TMPD/l-gut.txt" 'modul: syms=[0-9]+')" eq 14
+num "Symbole in der Tafel" "$(wert "$TMPD/l-gut.txt" 'module: syms=[0-9]+')" eq 14
 python3 - "$TMPD/l-gut.txt" "$TMPD/k-modul.elf" > "$TMPD/nm.txt" 2>&1 <<'PYEOF'
 import re, subprocess, sys
 log = open(sys.argv[1], errors='replace').read()
 tab = {m.group(1): int(m.group(2), 16)
-       for m in re.finditer(r'modul:   (\w+)=0x([0-9a-f]+)', log)}
+       for m in re.finditer(r'module:   (\w+)=0x([0-9a-f]+)', log)}
 nm = subprocess.run(['nm', sys.argv[2]], capture_output=True, text=True).stdout
 sym = {}
 for line in nm.splitlines():
@@ -157,34 +157,34 @@ grep -q ABWEICHUNG "$TMPD/nm.txt" && sed 's/^/        /' "$TMPD/nm.txt" | head -
 echo "== 3. without the module the device is missing =="
 lauf "$TMPD/k-modul" "$TMPD/d-leer.img" "modul $QUIET" "$TMPD/l-leer.txt"
 num "der Lauf endet sauber" "$RC" eq 21
-has "$TMPD/l-leer.txt" "modul: laden=datei-fehlt" "keine Moduldatei -> Grund 'datei-fehlt'"
+has "$TMPD/l-leer.txt" "module: load=datei-fehlt" "keine Moduldatei -> Grund 'datei-fehlt'"
 has "$TMPD/l-leer.txt" "module: before init=0 present=0" "vor dem Laden: kein Zeigegeraet"
 has "$TMPD/l-leer.txt" "module: after init=0 present=0" "und danach immer noch keins"
-has "$TMPD/l-leer.txt" "modul: ende" "der Kern lebt und kommt bis ans Ende des Abschnitts"
+has "$TMPD/l-leer.txt" "module: end" "der Kern lebt und kommt bis ans Ende des Abschnitts"
 
 echo "== 4. with the module it is there, and it really moves =="
 has "$TMPD/l-gut.txt" "module: before init=0 present=0" "vor dem Laden: kein Zeigegeraet"
-has "$TMPD/l-gut.txt" "modul: laden=ok" "das Modul wird angenommen"
+has "$TMPD/l-gut.txt" "module: load=ok" "das Modul wird angenommen"
 has "$TMPD/l-gut.txt" "ps2maus: eingetragen 37" "module_init lief IM KERN und trug 37 Adressen ein"
 has "$TMPD/l-gut.txt" "module: after init=1 present=1" "NACH dem Laden: dasselbe mouse_init sagt ja"
 num "sigok" "$(zwert "$TMPD/l-gut.txt" 'sigok=[0-9]+')" eq 1
 num "ELF-Abschnitte" "$(zwert "$TMPD/l-gut.txt" 'secs=[0-9]+')" ge 8
 num "aufgeloeste Relokationen" "$(zwert "$TMPD/l-gut.txt" 'rel=[0-9]+')" ge 500
 num "Namen, die aus dem KERN kamen" "$(zwert "$TMPD/l-gut.txt" 'ext=[0-9]+')" ge 6
-num "Rahmen fuer das Abbild" "$(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+')" ge 1
+num "Rahmen fuer das Abbild" "$(zwert "$TMPD/l-gut.txt" 'frames=[0-9]+')" ge 1
 num "belegte Plaetze in der Treibertafel" "$(zwert "$TMPD/l-gut.txt" 'slots=[0-9]+')" eq 37
 num "Rueckgabe von module_init" "$(zwert "$TMPD/l-gut.txt" 'initrc=[0-9]+')" eq 0
 num "Geraetekennung vom 8042" "$(nwert "$TMPD/l-gut.txt" 'id=[0-9]+')" eq 3
-PKT=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
+PKT=$(grep -a 'module: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
 num "PS/2-Pakete, nachdem der Monitor die Maus bewegt hat" "$PKT" ge 3
-MOV=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'mov=[0-9]+' | grep -oE '[0-9]+')
+MOV=$(grep -a 'module: pkt=' "$TMPD/l-gut.txt" | head -1 | grep -oE 'mov=[0-9]+' | grep -oE '[0-9]+')
 num "gezaehlte Bewegungen" "$MOV" ge 3
 
 # --------------------------------------------------- 5. Entladen
 echo "== 5. unloaded, and the frames come back =="
 has "$TMPD/l-gut.txt" "ps2maus: entladen" "module_exit lief"
-has "$TMPD/l-gut.txt" "modul: entladen=1 present=0" "nach dem Entladen: wieder kein Zeigegeraet"
-FREI=$(grep -a 'modul: frei=' "$TMPD/l-gut.txt" | head -1)
+has "$TMPD/l-gut.txt" "module: unloaded=1 present=0" "nach dem Entladen: wieder kein Zeigegeraet"
+FREI=$(grep -a 'module: free=' "$TMPD/l-gut.txt" | head -1)
 A=$(echo "$FREI" | grep -oE 'frei=[0-9]+' | grep -oE '[0-9]+')
 B=$(echo "$FREI" | sed 's/.*=//')
 if [ -n "$A" ] && [ "$A" = "$B" ]; then
@@ -192,9 +192,9 @@ if [ -n "$A" ] && [ "$A" = "$B" ]; then
 else
     bad "freie Rahmen: nachher=$A, vorher=$B"
 fi
-LETZT=$(grep -a 'modul: pkt=' "$TMPD/l-gut.txt" | tail -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
+LETZT=$(grep -a 'module: pkt=' "$TMPD/l-gut.txt" | tail -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
 num "Pakete nach dem Entladen (der Stummel zaehlt nichts mehr)" "$LETZT" eq 0
-has "$TMPD/l-gut.txt" "modul: ende" "der Kern lebt nach dem Entladen weiter"
+has "$TMPD/l-gut.txt" "module: end" "der Kern lebt nach dem Entladen weiter"
 
 # ------------------------------------------------ 6. die sechs Abweisungen
 echo "== 6. six ways to be wrong -- six rejections, a living kernel =="
@@ -202,7 +202,7 @@ pruefe_abweisung() { # name grund
     local n=$1 g=$2
     lauf "$TMPD/k-modul" "$TMPD/d-$n.img" "modul $QUIET" "$TMPD/l-$n.txt"
     if [ "$RC" != 21 ]; then bad "$n: rc=$RC instead of 21 -- the kernel did not survive it"; return; fi
-    has "$TMPD/l-$n.txt" "modul: laden=$g" "$n -> Grund '$g'"
+    has "$TMPD/l-$n.txt" "module: load=$g" "$n -> Grund '$g'"
     has "$TMPD/l-$n.txt" "module: after init=0 present=0" "$n: kein Geraet danach"
     hasnot "$TMPD/l-$n.txt" "ps2maus: eingetragen" "$n: module_init ist NICHT gelaufen"
 }
@@ -218,7 +218,7 @@ num "fremd: aber KEIN Platz in der Treibertafel" "$(zwert "$TMPD/l-fremd.txt" 's
 # ---------------------------------------------------- 7. die Grenze
 echo "== 7. the measured LIMIT: a signed, broken module in ring 0 =="
 lauf "$TMPD/k-modul" "$TMPD/d-text.img" "modul $QUIET" "$TMPD/l-text.txt"
-has "$TMPD/l-text.txt" "modul: laden=ok" "das Modul kommt durch alle drei Riegel -- es IST richtig signiert"
+has "$TMPD/l-text.txt" "module: load=ok" "das Modul kommt durch alle drei Riegel -- es IST richtig signiert"
 if [ "$RC" = 63 ]; then
     ok "and afterwards the machine stops (rc=63, exception) -- THAT IS RING 0, and it is measured"
 elif [ "$RC" = 21 ]; then
@@ -237,7 +237,7 @@ M=$(stat -c%s "$TMPD/ps2maus.omod")
 echo "        Kern mit ps2m.fi      $A Oktette"
 echo "        kernel without ps2m.fi     $B octets   (difference $((A-B)))"
 echo "        the module                 $M octets"
-echo "        davon Abbild im RAM   $(zwert "$TMPD/l-gut.txt" 'bytes=[0-9]+') Oktette in $(zwert "$TMPD/l-gut.txt" 'rahmen=[0-9]+') Rahmen"
+echo "        davon Abbild im RAM   $(zwert "$TMPD/l-gut.txt" 'bytes=[0-9]+') Oktette in $(zwert "$TMPD/l-gut.txt" 'frames=[0-9]+') Rahmen"
 num "der Kern ohne den Treiber ist kleiner" "$((A-B))" gt 0
 num "das Modul ist groesser als das, was aus dem Kern verschwand" "$M" gt "$((A-B))"
 
@@ -248,7 +248,7 @@ if bash tools/build-kernel.sh "$TMPD/k1-modul" --ohne-ps2m --stufe 1 \
     ok "Kern mit firnc1 gebaut"
     lauf "$TMPD/k1-modul" "$TMPD/d-gut.img" "modul modulaus $QUIET" "$TMPD/l-s1.txt"
     num "der Lauf endet sauber" "$RC" eq 21
-    has "$TMPD/l-s1.txt" "modul: laden=ok" "dasselbe Modul (von firnc0) laedt unter dem Kern von firnc1"
+    has "$TMPD/l-s1.txt" "module: load=ok" "dasselbe Modul (von firnc0) laedt unter dem Kern von firnc1"
     has "$TMPD/l-s1.txt" "module: after init=1 present=1" "und das Geraet ist da"
     has "$TMPD/l-s1.txt" "ps2maus: entladen" "und es laesst sich entladen"
 else
@@ -295,11 +295,11 @@ if [ -f "$OPK" ] && [ -f "$STORE" ]; then
             "$TMPD/l-opk.txt"
         num "der Lauf endet sauber" "$RC" eq 21
         has "$TMPD/l-opk.txt" "module: before init=0 present=0" "vorher: kein Zeigegeraet"
-        has "$TMPD/l-opk.txt" "modul: laden=ok" "der Kern laedt die Datei, die OPK dorthin gelegt hat"
+        has "$TMPD/l-opk.txt" "module: load=ok" "der Kern laedt die Datei, die OPK dorthin gelegt hat"
         has "$TMPD/l-opk.txt" "module: after init=1 present=1" "danach: das Geraet ist da"
-        PK=$(grep -a 'modul: pkt=' "$TMPD/l-opk.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
+        PK=$(grep -a 'module: pkt=' "$TMPD/l-opk.txt" | head -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
         num "und es bewegt sich" "$PK" ge 3
-        has "$TMPD/l-opk.txt" "modul: entladen=1 present=0" "und es laesst sich wieder entladen"
+        has "$TMPD/l-opk.txt" "module: unloaded=1 present=0" "und es laesst sich wieder entladen"
     else
         bad "opk install"
         sed 's/^/        /' "$TMPD/inst.txt" | head -6
@@ -324,19 +324,19 @@ done
 num "Platten mit Sperrliste gebaut" "$n" eq 4
 lauf "$TMPD/k-modul" "$TMPD/d-sp-fremd.img" "modul $QUIET" "$TMPD/l-sp-fremd.txt"
 num "fremd: der Lauf endet sauber" "$RC" eq 21
-has "$TMPD/l-sp-fremd.txt" "modul: laden=ok" "die Sperrliste sperrt nur, was draufsteht: das gute Modul laedt"
-num "fremd: Eintraege in der gueltigen Liste" "$(zwert "$TMPD/l-sp-fremd.txt" 'sperre=[0-9]+')" eq 1
+has "$TMPD/l-sp-fremd.txt" "module: load=ok" "die Sperrliste sperrt nur, was draufsteht: das gute Modul laedt"
+num "fremd: Eintraege in der gueltigen Liste" "$(zwert "$TMPD/l-sp-fremd.txt" 'ban=[0-9]+')" eq 1
 has "$TMPD/l-sp-fremd.txt" "module: after init=1 present=1" "fremd: das Geraet ist da"
 for f in drin:gesperrt dreh:sperrliste zahl:sperrliste; do
     n=${f%%:*}; g=${f#*:}
     lauf "$TMPD/k-modul" "$TMPD/d-sp-$n.img" "modul $QUIET" "$TMPD/l-sp-$n.txt"
     if [ "$RC" != 21 ]; then bad "sp-$n: rc=$RC statt 21"; continue; fi
-    has "$TMPD/l-sp-$n.txt" "modul: laden=$g" "die Sperrliste: $n -> Grund '$g'"
+    has "$TMPD/l-sp-$n.txt" "module: load=$g" "die Sperrliste: $n -> Grund '$g'"
     has "$TMPD/l-sp-$n.txt" "module: after init=0 present=0" "sp-$n: kein Geraet danach"
     hasnot "$TMPD/l-sp-$n.txt" "ps2maus: eingetragen" "sp-$n: module_init ist NICHT gelaufen"
 done
 num "drin: die Signatur des Moduls war gueltig" "$(zwert "$TMPD/l-sp-drin.txt" 'sigok=[0-9]+')" eq 1
-num "drin: die Liste hatte 2 Eintraege" "$(zwert "$TMPD/l-sp-drin.txt" 'sperre=[0-9]+')" eq 2
+num "drin: die Liste hatte 2 Eintraege" "$(zwert "$TMPD/l-sp-drin.txt" 'ban=[0-9]+')" eq 2
 
 echo
 echo "MODUL: $pass bestanden, $fail gefallen"

@@ -7,7 +7,7 @@
 #                           [--commit REV] [--token-file F] [--smp 2] [--drive ahci|ide|virtio] [--mem 1536] [--ready REGEX] [--password PW] [--settle S] [--keep DIR]
 #
 # Per run (a private copy of the image, QEMU headless + ODB on a unix socket, tools/odbc/qemu.sh):
-#   host.boot_login_ms     host clock from QEMU start until COM1 shows the login screen (default 'glogin: bereit')
+#   host.boot_login_ms     host clock from QEMU start until COM1 shows the login screen (default 'glogin: ready')
 #   host.login_to_desktop_ms   `input text` + Enter -> process list shows desktop and no glogin (as tools/odb/loop.py)
 #   host.boot_agent_ms     host clock until the ODB agent answers `ping`
 #   mem.*, idle.cpu_pct    `odbc info` after SETTLE seconds (guest numbers: used = total - free; idle over a 20 s sample window)
@@ -25,7 +25,7 @@ ROOT=$(pwd)
 LIB="python3 -I $ROOT/tools/bench/lib.py"
 ODBC="python3 -I $ROOT/tools/odbc/odbc.py -t 90"
 IMG=""; RUNS=3; PORTIO=0; UI=0; OUT=$ROOT/bench/results; COMMIT=""; TOKEN=/root/abbilder/odb.token
-DRIVE=ahci; SMP=2; MEM=1536; PW=startkennwort; READY='glogin: bereit'; SETTLE=20; KEEP=""; WIN=20; PIOWIN=60
+DRIVE=ahci; SMP=2; MEM=1536; PW=startkennwort; READY='glogin: ready'; SETTLE=20; KEEP=""; WIN=20; PIOWIN=60
 while [ $# -gt 0 ]; do
     case $1 in
         --image) IMG=$2; shift 2 ;;      --runs) RUNS=$2; shift 2 ;;

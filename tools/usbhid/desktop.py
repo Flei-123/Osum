@@ -77,7 +77,7 @@ class Qmp:
 
 def main():
     mon = Mon(mon_sock)
-    if not wait_for(lambda t: "glogin: bereit" in t, 200):
+    if not wait_for(lambda t: "glogin: ready" in t, 200):
         open(base + ".login", "w").write("0")
         mon.quit()
         return

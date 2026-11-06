@@ -313,7 +313,7 @@ wmplug: abi=1  Plugins 1 von 8  Frist 50 Ticks  Flaeche 0
 plugstart: info uhr
 plugstart: disable uhr
 wmplug: unreg uhr grund=4 holte=19 verlor=0
-pluguhr: ende runden=4 ereig=1
+pluguhr: ende runden=4 events=1
 plugstart: list nachher
 wmplug: abi=1  Plugins 0 von 8  Frist 50 Ticks  Flaeche 0
 ```

@@ -13,7 +13,7 @@
 # After: one lock (`elf.lock_enter`) around every program start.
 #
 # Measures, on the stick image (4 cores by default):
-#   fix      N boots: every one must print `glogin: bereit` and no
+#   fix      N boots: every one must print `glogin: ready` and no
 #            'elf: refused' line may show up
 #   counter  N boots with the kernel word `noelflock` (lock off): at least
 #            one boot must show the old failure -- otherwise the test
@@ -58,13 +58,13 @@ boot() { # boot <name> <extra kernel word or empty>  -> echoes ok|bad
         -serial file:"$D/serial.txt" > "$D/qemu.txt" 2>&1 &
     local pid=$! i=0
     while [ $i -lt 120 ]; do
-        grep -qa 'glogin: bereit' "$D/serial.txt" 2>/dev/null && break
+        grep -qa 'glogin: ready' "$D/serial.txt" 2>/dev/null && break
         grep -qa 'elf: refused' "$D/serial.txt" 2>/dev/null && break
         sleep 1; i=$((i + 1))
     done
     sleep 2
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-    if grep -qa 'glogin: bereit' "$D/serial.txt" && ! grep -qa 'elf: refused' "$D/serial.txt"; then
+    if grep -qa 'glogin: ready' "$D/serial.txt" && ! grep -qa 'elf: refused' "$D/serial.txt"; then
         echo ok
     else
         grep -a '^elf: refused' "$D/serial.txt" | head -2 >&2
