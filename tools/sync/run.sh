@@ -462,6 +462,9 @@ if [ -f "$TMPD/kontoF/KOPF" ]; then
             | head -12 | sed 's/^/        F3: /'
         note "F3 /daten: $(ls "$TMPD/datenF3" 2>/dev/null | tr '\n' ' ')"
         note "F2: $(klar F2 | grep -a 'dateien\|hochgel\|neubloecke\|generation' | tr '\n' ' ')"
+        note "storeF2: $(ls -l "$TMPD/storeF2" 2>/dev/null | tr '\n' ';')"
+        note "storeF ROOT: $(head -c 140 "$TMPD/storeF/ROOT" 2>/dev/null | tr '\n' ' ') | ROOT.T: $(head -c 140 "$TMPD/storeF/ROOT.T" 2>/dev/null | tr '\n' ' ')"
+        note "storeF2 ROOT: $(head -c 140 "$TMPD/storeF2/ROOT" 2>/dev/null | tr '\n' ' ') | ROOT.T: $(head -c 140 "$TMPD/storeF2/ROOT.T" 2>/dev/null | tr '\n' ' ')"
     fi
     hin=0; kaputt=0
     i=0

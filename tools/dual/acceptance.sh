@@ -18,8 +18,15 @@ titel() { printf '\n=== %s\n' "$*"; }
 [ -f "$BAU/osum.mb" ]  || { echo "== $BAU/osum.mb fehlt"  >&2; exit 1; }
 [ -f "$BAU/root.img" ] || { echo "== $BAU/root.img fehlt" >&2; exit 1; }
 
-ESP_START=2048;   ESP_SEK=$((64 * 2048))
-DAT_START=133120; DAT_SEK=$((128 * 2048))
+read_layout() {
+    local img=$1 end
+    ESP_START=$(sgdisk -i 1 "$img" 2>/dev/null | sed -n 's/First sector: \([0-9]*\).*/\1/p')
+    end=$(sgdisk -i 1 "$img" 2>/dev/null | sed -n 's/Last sector: \([0-9]*\).*/\1/p')
+    ESP_SEK=$((end - ESP_START + 1))
+    DAT_START=$(sgdisk -i 2 "$img" 2>/dev/null | sed -n 's/First sector: \([0-9]*\).*/\1/p')
+    end=$(sgdisk -i 2 "$img" 2>/dev/null | sed -n 's/Last sector: \([0-9]*\).*/\1/p')
+    DAT_SEK=$((end - DAT_START + 1))
+}
 
 esp_summe()   { dd if="$1" bs=512 skip=$ESP_START count=$ESP_SEK status=none | sha256sum | cut -d' ' -f1; }
 daten_summe() { dd if="$1" bs=512 skip=$DAT_START count=$DAT_SEK status=none | sha256sum | cut -d' ' -f1; }
@@ -30,15 +37,16 @@ titel "1. eine Platte, auf der schon jemand wohnt"
 bash tools/dual/fremdplatte.sh "$OUT/platte.img" 512 | sed 's/^/   /'
 [ -f "$OUT/platte.img" ] || { echo "the disk was not built" >&2; exit 1; }
 
+read_layout "$OUT/platte.img"
 VOR_ESP=$(esp_summe   "$OUT/platte.img")
 BEFORE_DAT=$(daten_summe "$OUT/platte.img")
 echo "   VORHER  esp   $VOR_ESP"
 echo "   BEFORE  data $BEFORE_DAT"
 
 sgdisk -p "$OUT/platte.img" > "$OUT/gpt-vorher.txt" 2>&1
-grep -qE '^ +1 +2048' "$OUT/gpt-vorher.txt" && ok "the foreign disk carries an ESP" \
+grep -qE "^ +1 +$ESP_START" "$OUT/gpt-vorher.txt" && ok "the foreign disk carries an ESP" \
     || bad "the foreign disk has no ESP"
-grep -qE '^ +2 +133120' "$OUT/gpt-vorher.txt" && ok "the foreign disk carries a data partition" \
+grep -qE "^ +2 +$DAT_START" "$OUT/gpt-vorher.txt" && ok "the foreign disk carries a data partition" \
     || bad "the foreign disk has no data partition"
 
 # ==================================================================
