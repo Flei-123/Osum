@@ -4,9 +4,13 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . tools/sync/gc.sh
 . tools/lib/qemu.sh
+. tools/lib/summary.sh
+summary_begin K15
 ROOT=$(pwd)
 export FIRNLIB="$ROOT/lib"
-if [ -n "${K15_KEEP:-}" ]; then TMPD=$K15_KEEP; mkdir -p "$TMPD"; else TMPD=$(mktemp -d); trap 'rm -rf "$TMPD"' EXIT; fi
+if [ -n "${K15_KEEP:-}" ]; then TMPD=$K15_KEEP; mkdir -p "$TMPD"; else TMPD=$(mktemp -d); fi
+trap 'summary_guard; [ -n "${K15_KEEP:-}" ] || rm -rf "$TMPD"; summary_exit_status || exit 1' EXIT
+trap 'exit 1' HUP INT TERM
 
 pass=0
 fail=0
@@ -42,7 +46,7 @@ rect() { grep -aoE "^$2: rect id=$3 .*" "$1" | tail -1 | grep -oE "$4=[0-9]+" | 
 
 bash vendor/firn/fetch-firnc.sh >/dev/null || { echo "vendor/firn/fetch-firnc.sh failed"; exit 1; }
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "K15: skipped, qemu-system-x86_64 is not available"
+    summary_note "skipped, qemu-system-x86_64 is not available"
     exit 0
 fi
 DEJAVU=${DEJAVU:-/usr/share/fonts/truetype/dejavu}
@@ -106,7 +110,7 @@ for s in 0 1; do
         sed 's/^/        /' "$TMPD/b$s.log" | head -12
     fi
 done
-[ -f "$TMPD/k0.mb" ] || { echo "K15: $pass passed, $((fail + 1)) failed"; exit 1; }
+[ -f "$TMPD/k0.mb" ] || { summary_emit "$pass" "$((fail + 1))"; exit 1; }
 
 PROGS="widgetdemo explorer launcher locate sh echo ls cat edit"
 as --64 -o "$TMPD/crt.o" kernel/user/crt.s 2>/dev/null \
@@ -1220,7 +1224,5 @@ grep -q 'data=1026' "$TMPD/gmkfs.txt" \
 has "$TMPD/gkupfer.txt" "osum: mount=1" \
     "and the same kernel mounts both, without a line of difference"
 
-echo
-echo "K15: $pass passed, $fail failed"
-[ "$fail" -eq 0 ] || exit 1
+summary_emit "$pass" "$fail" "${K15_MIN_CHECKS:-200}" || exit 1
 exit 0

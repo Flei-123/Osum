@@ -64,6 +64,8 @@ abschnitt_ausfuehren() { # index
     : > "$WORK/.done.$i"
 }
 
+declare -A SUMMARY_REQUIRED_RE=([k15]='^K15: ([0-9]+ passed, [0-9]+ failed[[:space:]]*$|skipped)')
+
 abschnitt_ausgeben() { # index
     local i=$1
     local titel=${A_TITEL[$i]} skript=${A_SKRIPT[$i]}
@@ -74,6 +76,11 @@ abschnitt_ausgeben() { # index
     [ "${2:-}" = "kopf_schon_da" ] || echo "== $titel =="
     grep -aE "$muster" "$WORK/$name.log" | sed 's/^ */   /'
     zusagen "$WORK/$name.log"
+    if [ "$rc" -eq 0 ] && [ -n "${SUMMARY_REQUIRED_RE[$name]:-}" ] \
+       && ! grep -aqE "${SUMMARY_REQUIRED_RE[$name]}" "$WORK/$name.log"; then
+        echo "  FAIL  $name: exit code 0 but the summary line is missing"
+        rc=1
+    fi
     if [ "$rc" -eq 0 ]; then
         ok
     else
