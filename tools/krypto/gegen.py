@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 """Usage:
-    tools/krypto/gegen.py read_text <abbild> <passphrase>
-    tools/krypto/gegen.py write <abbild> <passphrase> [t] [m] [p]
-    tools/krypto/gegen.py tree <abbild> <passphrase>
+    tools/krypto/gegen.py lies <abbild> <passphrase>
+    tools/krypto/gegen.py schreib <abbild> <passphrase> [t] [m] [p]
+    tools/krypto/gegen.py baum <abbild> <passphrase>
     tools/krypto/gegen.py roh <abbild>
     tools/krypto/gegen.py vektoren <orakel>
 """
@@ -129,7 +129,7 @@ def cmd_read(path, pw):
     print("kopf: plaetze=%d belegt=%s" % (len(belegt), ",".join(
         str(i) for i in belegt) or "-"))
     if mk is None:
-        print("auf: 0")
+        print("up: 0")
         return 1
     print("up: 1 slot=%d" % wo)
     print("schluessel: haelften_ungleich=%d"
@@ -399,7 +399,7 @@ def cmd_tree(path, pw):
     d = open(path, "rb").read()
     k, mk, wo = hauptschluessel(d[:HDR_SECTORS * SECTOR], pw)
     if mk is None:
-        print("baum: auf=0")
+        print("tree: up=0")
         return 1
     erst = k["first"]
 

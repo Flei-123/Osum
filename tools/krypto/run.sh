@@ -44,9 +44,9 @@ ksagt() { # datei name soll beschreibung
 
 echo "== 0. die Vorbedingungen =="
 command -v qemu-system-x86_64 >/dev/null 2>&1 || {
-    echo "KRYPTO: uebersprungen, qemu-system-x86_64 fehlt"; exit 0; }
+    echo "KRYPTO: FAILED, qemu-system-x86_64 is missing (a skip would be a silent green)"; exit 1; }
 command -v python3 >/dev/null 2>&1 || {
-    echo "KRYPTO: uebersprungen, python3 fehlt"; exit 0; }
+    echo "KRYPTO: FAILED, python3 is missing (a skip would be a silent green)"; exit 1; }
 
 PY=python3
 for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
@@ -57,12 +57,12 @@ for kandidat in "${OSUM_KRYPTO_PY:-}" /root/.krypto-venv/bin/python python3; do
     fi
 done
 if ! "$PY" -c 'import argon2.low_level, cryptography' 2>/dev/null; then
-    echo "CRYPTO: skipped -- argon2-cffi and/or cryptography are missing."
+    echo "KRYPTO: FAILED -- argon2-cffi and/or cryptography are missing."
     echo "  Without an INDEPENDENT implementation this acceptance would be a"
     echo "  Selbstgespraech. Abhilfe:"
     echo "    python3 -m venv /root/.krypto-venv"
     echo "    /root/.krypto-venv/bin/pip install argon2-cffi cryptography"
-    exit 0
+    exit 1
 fi
 ok "the foreign tool is there ($PY: argon2-cffi, cryptography)"
 if command -v argon2 >/dev/null 2>&1; then
@@ -243,8 +243,8 @@ for s in "OFS-Superblock" "OFS-Kennung gedreht" "NTFS" "FAT"; do
     w=$(grep -a -m1 "roh: sig $s = " "$TMPD/roh.txt" | sed 's/.*= //')
     num "keine $s-Signatur im Datenbereich" "${w:-99}" eq 0
 done
-unter7=$(grep -a -m1 'unter7=' "$TMPD/roh.txt" | grep -oE 'unter7=[0-9]+' | cut -d= -f2)
-num "kein beschriebener Sektor mit Entropie unter 7.0 Bit/Oktett" "${unter7:-99}" eq 0
+below7=$(grep -a -m1 'below7=' "$TMPD/roh.txt" | grep -oE 'below7=[0-9]+' | cut -d= -f2)
+num "kein beschriebener Sektor mit Entropie unter 7.0 Bit/Oktett" "${below7:-99}" eq 0
 txt=$(grep -a -m1 'textfolgen16=' "$TMPD/roh.txt" | cut -d= -f2)
 num "keine lesbare Zeichenkette ab 16 Zeichen" "${txt:-99}" eq 0
 
@@ -285,14 +285,14 @@ echo "== 8. the control run with foreign eyes, BOTH directions =="
 "$PY" tools/krypto/gegen.py lies "$TMPD/a.img" geheim > "$TMPD/g1.txt" 2>&1
 sed 's/^/        /' "$TMPD/g1.txt"
 ksagt "$TMPD/g1.txt" "summe" 1 "der Wirt haelt die Pruefsumme des Kopfes fuer richtig"
-auf=$(grep -a -m1 '^auf: ' "$TMPD/g1.txt" | awk '{print $2}')
+auf=$(grep -a -m1 '^up: ' "$TMPD/g1.txt" | awk '{print $2}')
 num "der Wirt macht den Schluesselplatz mit Argon2id+XTS auf" "${auf:-0}" eq 1
 hat "$TMPD/g1.txt" "SFO-MUSO" \
     "und findet darunter den OFS-Superblock (die Sektorrechnung stimmt)"
 
 "$PY" tools/krypto/gegen.py baum "$TMPD/a.img" geheim > "$TMPD/g2.txt" 2>&1
 sed 's/^/        /' "$TMPD/g2.txt"
-g=$(grep -a -m1 'baum: gut=' "$TMPD/g2.txt" | grep -oE 'gut=[0-9]+' | cut -d= -f2)
+g=$(grep -a -m1 'tree: good=' "$TMPD/g2.txt" | grep -oE 'good=[0-9]+' | cut -d= -f2)
 num "der Wirt liest ALLE vier Dateien aus dem Geheimtext" "${g:-0}" eq 4
 
 "$PY" tools/krypto/gegen.py schreib "$TMPD/f.img" fremdpw 1 64 1 "$BLOCKS" \
@@ -304,7 +304,7 @@ ksagt "$TMPD/f1.txt" "fsformat" 1 "und legt sein Dateisystem darauf an"
 ksagt "$TMPD/f1.txt" "baum"     4 "und schreibt die vier Dateien"
 "$PY" tools/krypto/gegen.py baum "$TMPD/f.img" fremdpw > "$TMPD/g4.txt" 2>&1
 sed 's/^/        /' "$TMPD/g4.txt"
-g=$(grep -a -m1 'baum: gut=' "$TMPD/g4.txt" | grep -oE 'gut=[0-9]+' | cut -d= -f2)
+g=$(grep -a -m1 'tree: good=' "$TMPD/g4.txt" | grep -oE 'good=[0-9]+' | cut -d= -f2)
 num "der Wirt liest zurueck, was ${MARKE_PRODUKT} auf SEINEN Traeger schrieb" \
     "${g:-0}" eq 4
 

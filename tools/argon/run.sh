@@ -146,9 +146,64 @@ PYEOF
         bad "gegen.py vektoren scheitert"
     fi
 else
-    info "argon2-cffi fehlt -- Abschnitt 3 uebersprungen"
+    bad "argon2-cffi missing or oracle not built: section 3 cannot run (no skip allowed)"
     info "  python3 -m venv /root/.krypto-venv"
     info "  /root/.krypto-venv/bin/pip install argon2-cffi cryptography"
+fi
+
+echo "== 3b. fixed known-answer vectors (FIPS-197, SP 800-38A, IEEE 1619, Argon2 reference) =="
+
+if [ -x "$TMPD/orakel" ]; then
+    python3 -I tools/krypto/kat.py "$TMPD/orakel" >"$TMPD/kat.txt" 2>&1
+    katline=$(grep -oE 'kat total [0-9]+/[0-9]+' "$TMPD/kat.txt" | tail -1)
+    kg=${katline#kat total }
+    if [[ -n $kg && ${kg%/*} == ${kg#*/} && ${kg#*/} -ge 30 ]]; then
+        ok "all fixed known-answer vectors match, table and AES-NI path ($kg)"
+    else
+        bad "known-answer vectors fail: ${katline:-no result}"
+        grep 'kat: FAIL' "$TMPD/kat.txt" | head -5 | cut -c1-160
+    fi
+    tamper_build() { # name sed-or-python-expression-file
+        local name=$1
+        rm -rf "$TMPD/lib_$name"
+        cp -r lib "$TMPD/lib_$name"
+    }
+    tamper_build sbox
+    python3 -I - "$TMPD/lib_sbox/crypto/aes.fi" <<'PYEOF'
+import sys
+d = open(sys.argv[1]).read()
+assert "0x63,0x7c" in d
+open(sys.argv[1], "w").write(d.replace("0x63,0x7c", "0x62,0x7c", 1))
+PYEOF
+    tamper_build version
+    python3 -I - "$TMPD/lib_version/crypto/argon2.fi" <<'PYEOF'
+import sys
+d = open(sys.argv[1]).read()
+assert "const VERSION: u64 = 0x13" in d
+open(sys.argv[1], "w").write(d.replace("const VERSION: u64 = 0x13", "const VERSION: u64 = 0x12", 1))
+PYEOF
+    tamper_build imc
+    python3 -I - "$TMPD/lib_imc/crypto/aesni.fi" <<'PYEOF'
+import sys
+d = open(sys.argv[1]).read()
+a = "aesimc xmm0,xmm0"
+assert a in d
+open(sys.argv[1], "w").write(d.replace(a, "movdqa xmm0,xmm0", 1))
+PYEOF
+    for t in sbox version imc; do
+        if FIRNLIB="$TMPD/lib_$t" $FIRNC tools/krypto/orakel.fi -o "$TMPD/orakel_$t" 2>"$TMPD/ot_$t.err"; then
+            if python3 -I tools/krypto/kat.py "$TMPD/orakel_$t" >"$TMPD/kat_$t.txt" 2>&1; then
+                bad "CONTROL RUN: tampered $t is NOT detected by the known-answer vectors"
+            else
+                ok "CONTROL RUN: tampered $t is detected ($(grep -c 'kat: FAIL' "$TMPD/kat_$t.txt") vectors red)"
+            fi
+        else
+            bad "CONTROL RUN: tampered $t oracle does not build"
+            tail -3 "$TMPD/ot_$t.err"
+        fi
+    done
+else
+    bad "oracle not built: known-answer vectors cannot run (no skip allowed)"
 fi
 
 echo "== 4. an EXISTING disk: created with the OLD code, opened with the NEW =="

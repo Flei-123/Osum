@@ -79,8 +79,7 @@ if [[ -x "$TMPD/kreis" ]]; then
     kr=$("$TMPD/kreis" 2>&1 | tail -1)
     info "$kr"
     if [[ $kr == *"aesni=0"* ]]; then
-        info "this machine has no AES-NI -- the round-trip check is skipped"
-        ok "on a machine without AES-NI the table is the only way"
+        bad "this machine has no AES-NI: the round-trip check cannot run (no skip allowed)"
     else
         ungl=$(echo "$kr" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
         glei=$(echo "$kr" | grep -oE 'gleich=[0-9]+' | head -1 | cut -d= -f2)
@@ -154,7 +153,7 @@ PY
 vz=$(cat "$TMPD/vek.txt")
 info "$vz"
 if [[ $vz == *"SKIP"* ]]; then
-    info "python3-cryptography is missing -- the control against OpenSSL is skipped"
+    bad "python3-cryptography is missing: the control against OpenSSL cannot run (no skip allowed)"
 else
     ossl=$(echo "$vz" | grep -oE 'openssl_abweichungen=[0-9]+' | cut -d= -f2)
     wegd=$(echo "$vz" | grep -oE 'wegunterschiede=[0-9]+' | cut -d= -f2)
@@ -217,7 +216,7 @@ if [[ -f "$TMPD/k0.mb" ]]; then
         ung=$(echo "$kz" | grep -oE 'ungleich=[0-9]+' | cut -d= -f2)
         gleich "die Kreisprobe im Kern, ungleiche Bloecke" "${ung:-keine}" "0"
     else
-        info "this QEMU CPU reports no AES-NI -- section skipped"
+        bad "-cpu max reports no AES-NI: the in-kernel round-trip cannot run (no skip allowed)"
     fi
     grep -q '^kernel: done' "$TMPD/mit.txt" 2>/dev/null \
         && ok "the kernel runs through to the end with AES-NI" \
