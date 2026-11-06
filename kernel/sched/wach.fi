@@ -171,61 +171,137 @@ fn part_blocks(tasks: u64, pages: u64) -> u64 {
     return head + saetze + board + stack
 }
 
+static mut frozen_state: [u64; 256] = [0 as u64; 256]
+static mut frozen_mark: [u64; 256] = [0 as u64; 256]
+
+const FREEZE_MS: u64 = 400
+const FREEZE_FALLBACK_CYCLES: u64 = 1200000000
+
+fn on_other_core(state: u64, i: u64) -> bool {
+    let me: u64 = cpu.here(state)
+    let n: u64 = cpu.count(state)
+    var c: u64 = 0
+    while c < n {
+        if c != me && cpu.get(state, c, cpu.C_CUR) == i {
+            return true
+        }
+        c = c + 1
+    }
+    return false
+}
+
+fn thaw(state: u64) {
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        if frozen_mark[i as usize] != 0 {
+            sched.tset(state, i, sched.T_STATE, frozen_state[i as usize])
+            frozen_mark[i as usize] = 0
+        }
+        i = i + 1
+    }
+}
+
+fn freeze(state: u64) -> bool {
+    var seiten: u64 = 0
+    var n: u64 = 0
+    var i: u64 = 0
+    while i < kstate.MAX_TASKS {
+        frozen_mark[i as usize] = 0
+        if saveable(state, i) && n < MAX_SAVE {
+            let c: u64 = proc.frame_count(state, i)
+            if seiten + c <= MAX_PAGES {
+                frozen_state[i as usize] = sched.tget(state, i, sched.T_STATE)
+                frozen_mark[i as usize] = 1
+                sched.tset(state, i, sched.T_STATE, sched.S_STOP)
+                seiten = seiten + c
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    if cpu.count(state) <= 1 {
+        return true
+    }
+    var budget: u64 = kstate.get(state, kstate.TIME_KHZ) * FREEZE_MS
+    if budget == 0 {
+        budget = FREEZE_FALLBACK_CYCLES
+    }
+    let t0: u64 = arch.cycles()
+    while true {
+        var busy: bool = false
+        i = 0
+        while i < kstate.MAX_TASKS {
+            if frozen_mark[i as usize] != 0 && on_other_core(state, i) {
+                busy = true
+            }
+            i = i + 1
+        }
+        if !busy {
+            return true
+        }
+        if arch.cycles() - t0 > budget {
+            thaw(state)
+            return false
+        }
+        arch.pause()
+    }
+    return false
+}
+
 fn collect(state: u64) -> u64 {
     var n: u64 = 0
     var seiten: u64 = 0
     var i: u64 = 0
     while i < kstate.MAX_TASKS {
-        if saveable(state, i) && n < MAX_SAVE {
+        if frozen_mark[i as usize] != 0 {
             let c: u64 = proc.frame_count(state, i)
-            if seiten + c <= MAX_PAGES {
-                tsset(state, n, TS_MAGIC, WACH_MAGIC)
-                tsset(state, n, TS_PID, sched.tget(state, i, sched.T_PID))
-                tsset(state, n, TS_STATE, sched.tget(state, i, sched.T_STATE))
-                tsset(state, n, TS_PRIO, sched.tget(state, i, sched.T_PRIO))
-                tsset(state, n, TS_RSP, sched.tget(state, i, sched.T_RSP))
-                tsset(state, n, TS_KSTACK, sched.tget(state, i, sched.T_KSTACK))
-                tsset(state, n, TS_KTOP, sched.tget(state, i, sched.T_KTOP))
-                tsset(state, n, TS_ENTRY, sched.tget(state, i, sched.T_ENTRY))
-                tsset(state, n, TS_USTACK, sched.tget(state, i, sched.T_USTACK))
-                tsset(state, n, TS_KIND, sched.tget(state, i, sched.T_KIND))
-                tsset(state, n, TS_ARG, sched.tget(state, i, sched.T_ARG))
-                tsset(state, n, TS_WORK, sched.tget(state, i, sched.T_WORK))
-                tsset(state, n, TS_WAKE, sched.tget(state, i, sched.T_WAKE))
-                tsset(state, n, TS_DATA, sched.tget(state, i, sched.T_DATA))
-                tsset(state, n, TS_NDATA, c)
-                tsset(state, n, TS_DOFF, seiten)
-                tsset(state, n, TS_UID, sched.tget(state, i, sched.T_UID))
-                tsset(state, n, TS_GID, sched.tget(state, i, sched.T_GID))
-                tsset(state, n, TS_PGID, sched.tget(state, i, sched.T_PGID))
-                tsset(state, n, TS_SID, sched.tget(state, i, sched.T_SID))
-                var k: u64 = 0
-                while k < c {
-                    pgset(state, seiten + k, PG_VIRT,
-                        proc.frame_virt_at(state, i, k))
-                    pgset(state, seiten + k, PG_PHYS,
-                        proc.frame_at(state, i, k))
-                    k = k + 1
-                }
-                var s_w: [u8; 13] = "wake: saved \0"
-                var s_pd: [u8; 6] = " pid=\0"
-                var s_st: [u8; 5] = " st=\0"
-                var s_pr: [u8; 7] = " prog=\0"
-                var s_sn: [u8; 8] = " pages=\0"
-                serial.puts((&s_w[0]) as u64)
-                serial.puts((&s_pd[0]) as u64)
-                serial.dec(sched.tget(state, i, sched.T_PID))
-                serial.puts((&s_st[0]) as u64)
-                serial.dec(sched.tget(state, i, sched.T_STATE))
-                serial.puts((&s_pr[0]) as u64)
-                serial.dec(sched.tget(state, i, sched.T_ARG))
-                serial.puts((&s_sn[0]) as u64)
-                serial.dec(c)
-                serial.nl()
-                sched.tset(state, i, sched.T_STATE, sched.S_STOP)
-                seiten = seiten + c
-                n = n + 1
+            tsset(state, n, TS_MAGIC, WACH_MAGIC)
+            tsset(state, n, TS_PID, sched.tget(state, i, sched.T_PID))
+            tsset(state, n, TS_STATE, frozen_state[i as usize])
+            tsset(state, n, TS_PRIO, sched.tget(state, i, sched.T_PRIO))
+            tsset(state, n, TS_RSP, sched.tget(state, i, sched.T_RSP))
+            tsset(state, n, TS_KSTACK, sched.tget(state, i, sched.T_KSTACK))
+            tsset(state, n, TS_KTOP, sched.tget(state, i, sched.T_KTOP))
+            tsset(state, n, TS_ENTRY, sched.tget(state, i, sched.T_ENTRY))
+            tsset(state, n, TS_USTACK, sched.tget(state, i, sched.T_USTACK))
+            tsset(state, n, TS_KIND, sched.tget(state, i, sched.T_KIND))
+            tsset(state, n, TS_ARG, sched.tget(state, i, sched.T_ARG))
+            tsset(state, n, TS_WORK, sched.tget(state, i, sched.T_WORK))
+            tsset(state, n, TS_WAKE, sched.tget(state, i, sched.T_WAKE))
+            tsset(state, n, TS_DATA, sched.tget(state, i, sched.T_DATA))
+            tsset(state, n, TS_NDATA, c)
+            tsset(state, n, TS_DOFF, seiten)
+            tsset(state, n, TS_UID, sched.tget(state, i, sched.T_UID))
+            tsset(state, n, TS_GID, sched.tget(state, i, sched.T_GID))
+            tsset(state, n, TS_PGID, sched.tget(state, i, sched.T_PGID))
+            tsset(state, n, TS_SID, sched.tget(state, i, sched.T_SID))
+            var k: u64 = 0
+            while k < c {
+                pgset(state, seiten + k, PG_VIRT,
+                    proc.frame_virt_at(state, i, k))
+                pgset(state, seiten + k, PG_PHYS,
+                    proc.frame_at(state, i, k))
+                k = k + 1
             }
+            var s_w: [u8; 13] = "wake: saved \0"
+            var s_pd: [u8; 6] = " pid=\0"
+            var s_st: [u8; 5] = " st=\0"
+            var s_pr: [u8; 7] = " prog=\0"
+            var s_sn: [u8; 8] = " pages=\0"
+            let z: u64 = serial.line_at()
+            serial.puts((&s_w[0]) as u64)
+            serial.puts((&s_pd[0]) as u64)
+            serial.dec(sched.tget(state, i, sched.T_PID))
+            serial.puts((&s_st[0]) as u64)
+            serial.dec(frozen_state[i as usize])
+            serial.puts((&s_pr[0]) as u64)
+            serial.dec(sched.tget(state, i, sched.T_ARG))
+            serial.puts((&s_sn[0]) as u64)
+            serial.dec(c)
+            serial.nl()
+            serial.line_clear(z)
+            seiten = seiten + c
+            n = n + 1
         }
         i = i + 1
     }
@@ -238,6 +314,10 @@ fn save_tasks(state: u64, dev: u64, base: u64, b: u64) -> bool {
     s(state, W_SAVED, 0)
     s(state, W_KFRAMES, 0)
     let freeze_flags: u64 = arch.irq_save()
+    if !freeze(state) {
+        arch.irq_restore(freeze_flags)
+        return false
+    }
     let n: u64 = collect(state)
     arch.irq_restore(freeze_flags)
     let pages: u64 = g(state, W_DFRAMES)
@@ -678,7 +758,7 @@ fn arm(state: u64, zyk: u64) {
     if b2 != 0 { n = n + 1 }
     if c != 0 { n = n + 1 }
     let fp: u64 = arch.irq_save()
-    let zp: u64 = serial.line_at(cpu.here(state))
+    let zp: u64 = serial.line_at()
     serial.puts((&s_p[0]) as u64)
     serial.dec(n)
     serial.puts((&s_pid[0]) as u64)
@@ -710,7 +790,7 @@ fn arm(state: u64, zyk: u64) {
     s(state, W_SUM0, sum_value)
     s(state, W_STEP0, runden)
     let fv: u64 = arch.irq_save()
-    let zv: u64 = serial.line_at(cpu.here(state))
+    let zv: u64 = serial.line_at()
     serial.puts((&s_v[0]) as u64)
     serial.puts((&s_r[0]) as u64)
     serial.dec(runden)
