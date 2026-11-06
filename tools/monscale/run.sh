@@ -142,7 +142,11 @@ run_drag() {
     has "$d/held1.klar" "^wm: fscale i=[0-9]* pct=150" "drag: frame scale 150 applied while the button is still held (head 1)"
     has "$d/held1.klar" "^scaledemo: box w=150 h=60 sm=1500 pct=150 inx=3 iny=33" "drag: client re-laid out at 150 percent during the drag"
     has "$d/held2.klar" "^wm: fscale i=[0-9]* pct=100" "drag back: frame scale 100 applied while the button is still held (head 0)"
-    has "$d/held2.klar" "^scaledemo: box w=100 h=40 sm=1000 pct=100 inx=2 iny=22 capw=92" "drag back: client re-laid out at 100 percent with border 2, title bar 22"
+    local last2
+    last2=$(grep -a "^scaledemo: box" "$d/held2.klar" | tail -1 | tr -d '\r')
+    [ "$last2" = "scaledemo: box w=100 h=40 sm=1000 pct=100 inx=2 iny=22 capw=92" ] \
+        && ok "drag back: the LAST client layout is 100 percent with border 2, title bar 22" \
+        || bad "drag back: last client layout is '$last2' (stale frame offsets)"
     local n150 n100
     n150=$(grep -ac "^wm: fscale i=[0-9]* pct=150" "$d/s.klar")
     n100=$(grep -ac "^wm: fscale i=[0-9]* pct=100" "$d/s.klar")
