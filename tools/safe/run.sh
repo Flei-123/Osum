@@ -56,7 +56,7 @@ NETDEV="-netdev user,id=n0 -device e1000,netdev=n0"
 runq "$TMPD/a0.txt" 120 "$TMPD/dA.img" "$BASE $NETW script=cat /proc/safe;exit" $NETDEV
 runq "$TMPD/a1.txt" 120 "$TMPD/dA.img" "$BASE safe $NETW script=cat /proc/safe;exit" $NETDEV
 runq "$TMPD/a2.txt" 120 "$TMPD/dA.img" "$BASE safe nosafefilter $NETW script=cat /proc/safe;exit" $NETDEV
-nl() { grep -aciE 'e1000|netsvc|dhcp' "$1"; }
+nl() { grep -aciE '(^|[^0-9a-z_])e1000([^0-9a-z_]|$)|netsvc|dhcp' "$1"; }
 n0=$(nl "$TMPD/a0.txt"); n1=$(nl "$TMPD/a1.txt"); n2=$(nl "$TMPD/a2.txt")
 num "A baseline: network lines present" "$n0" gt 0
 num "A safe: network lines" "$n1" eq 0
@@ -82,7 +82,7 @@ nr=$(grep -ac '^\*\*\* reset in 20 s' "$TMPD/b.txt")
 num "B resets before giving up (max 3)" "$nr" eq 3
 nex=$(grep -ac '^\*\*\* EXCEPTION' "$TMPD/b.txt")
 num "B panics" "$nex" eq 4
-fb=$(awk '/safe: previous boot did not finish/{f=1} f&&/e1000|netsvc|dhcp/{n++} END{print n+0}' "$TMPD/b.txt")
+fb=$(awk '/safe: previous boot did not finish/{f=1} f&&/(^|[^0-9a-zA-Z_])e1000([^0-9a-zA-Z_]|$)|netsvc|dhcp/{n++} END{print n+0}' "$TMPD/b.txt")
 num "B network lines after the first fallback" "$fb" eq 0
 if [ -n "${SAFE_OUT:-}" ]; then cp "$TMPD/b.txt" "$SAFE_OUT/" 2>/dev/null; fi
 runq "$TMPD/b2.txt" 90 "$TMPD/dB.img" "$BASE script=ls /var/jarvis;cat /var/jarvis/panic-1.txt;exit"
