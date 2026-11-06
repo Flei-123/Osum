@@ -23,10 +23,10 @@ printf 'on\n' > "$T/uitrace"
 printf 'edge=bottom\nheight=40\nwidth=104\nautohide=0\nontop=1\nalign=center\nlabels=never\npins=explorer,calc\n' > "$T/taskbar.conf"
 
 run_case() {
-    local pct=$1 xres=$2 yres=$3 d="$T/c$1"
+    local pct=$1 xres=$2 yres=$3 win2="$4" d="$T/c$1"
     mkdir -p "$d"
     printf 'heads=extend\nhead1=0,%s,%s\n' "$yres" "$pct" > "$d/displays.conf"
-    printf 'orientbus serve 0 &\nsleep -m 300\naxd serve 0 &\nsleep 1\ntaskbar &\nsleep 8\nscaledemo 100 20 1 &\nscaledemo 100 %s 0 &\nsleep 150\necho ==B-END==\n' "$((yres+40))" > "$d/g.sh"
+    printf 'orientbus serve 0 &\nsleep -m 300\naxd serve 0 &\nsleep 1\ntaskbar &\nsleep 8\nscaledemo 100 20 1 &\nscaledemo %s 0 &\nsleep 150\necho ==B-END==\n' "$win2" > "$d/g.sh"
     local A=(build "$d/disk.img" 32768 --v3 /lib/ "/lib/mono.ttf=assets/osum-mono.ttf" "/lib/sans.ttf=assets/osum-sans.ttf" /bin/ /t/ /tmp/ /var/ /var/log/
        /etc/ /etc/actions.d/ /etc/orientbus/
        "/etc/actions.d/a11y.actions=etc/actions.d/a11y.actions" "/etc/orientbus/policy=etc/orientbus/policy"
@@ -40,7 +40,7 @@ run_case() {
     local sock="$d/q.sock" ACC=()
     [ -w /dev/kvm ] && ACC=(-accel kvm -cpu host)
     timeout 300 qemu-system-x86_64 "${ACC[@]}" -kernel "$T/k0.img" -m 768 \
-        -append "gfx disp wm wmdauer wmshell osum vfs bus fbres=1280x960 vgpuheads vgpuextend script=sh /t/g.sh;exit" \
+        -append "gfx disp wm wmdauer wmshell osum vfs bus fbres=$((xres*2))x$((yres*2)) vgpuheads vgpuextend script=sh /t/g.sh;exit" \
         -serial "file:$d/s.txt" -display none -no-reboot -vga std \
         -device virtio-gpu-pci,id=vg,max_outputs=2,xres=$xres,yres=$yres -global VGA.edid=off \
         -monitor "unix:$sock,server,nowait" -drive "file=$d/disk.img,format=raw,if=ide,index=0" \
@@ -148,8 +148,8 @@ run_drag() {
     [ "$n150" = 1 ] && [ "$n100" = 1 ] && ok "drag: exactly one scale change per head crossing (no flip-flop)" || bad "drag: scale changes 150:$n150 100:$n100"
 }
 OUT="${1:-}"
-run_case 150 640 480
-run_case 200 1024 768
-run_drag
+[ "${MONSCALE_ONLY:-}" = drag ] || run_case 150 640 480 "100 520"
+[ "${MONSCALE_ONLY:-}" = drag ] || run_case 200 1024 768 "100 808"
+[ "${MONSCALE_ONLY:-}" = cases ] || run_drag
 echo "monscale: $pass ok, $fail fail"
 [ "$fail" -eq 0 ]
