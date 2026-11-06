@@ -87,6 +87,8 @@ mkdir -p "$TMPD/new" "$TMPD/old"
 git worktree add --detach "$BT" "${BASE:-fc893814~1}" >/dev/null 2>&1 || { echo "base worktree failed"; exit 1; }
 # the old tree needs this tree's drive.py (the `bmenue` name) and eh6.sh (EH_ETC_EXTRA); the pictures and trace lines are what differ
 cp -f tools/design/drive.py "$BT/tools/design/drive.py"; cp -f tools/design/eh6.sh "$BT/tools/design/eh6.sh"
+mkdir -p "$BT/tools/mkfsfi"
+printf '#!/usr/bin/env bash\nexec bash %s/tools/mkfsfi/mkfs.sh "$@"\n' "$ROOT" > "$BT/tools/mkfsfi/mkfs.sh"
 run_tree "$ROOT" "$TMPD/new" &
 run_tree "$BT" "$TMPD/old" &
 wait

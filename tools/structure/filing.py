@@ -5,8 +5,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 KERN = os.path.join(ROOT, "kernel")
-SOLLDATEI = os.path.join(ROOT, "tools", "struktur", "filing.txt")
+SOLLDATEI = os.path.join(ROOT, "tools", "structure", "filing.txt")
 
+sys.path.insert(0, os.path.join(ROOT, "tools", "struktur"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from erhebung import read_2  # noqa: E402
 import shell  # noqa: E402
@@ -27,8 +28,8 @@ def read_soll():
 
 
 def ist_clipboard():
-    kern = envelope.envelope(os.path.join(KERN, "kmain.fi"))
-    kern |= envelope.envelope(os.path.join(KERN, "uprog.fi"))
+    kern = shell.envelope(os.path.join(KERN, "kmain.fi"))
+    kern |= shell.envelope(os.path.join(KERN, "uprog.fi"))
     ist = {}
     for rel in kern:
         d = os.path.dirname(rel)
@@ -76,7 +77,7 @@ def main():
 
     if modus == "--fehlend":
         for m, d in without_soll:
-            print("%s (liegt in %s)" % (m, d))
+            print("%s (is in %s)" % (m, d))
         return 0
 
     if modus == "--offen":

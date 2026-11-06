@@ -2,7 +2,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-DECKEL=47
+DECKEL=42
 FEHLER=0
 
 # ---------------------------------------------------------------- 1. Ablage
@@ -45,22 +45,22 @@ echo "== 3. control run A: does the filing check notice a wrong place? =="
 PROBE=$(mktemp -d)
 trap 'rm -rf "$PROBE"' EXIT
 cp -a kernel "$PROBE/kernel" || exit 1
-mkdir -p "$PROBE/tools/struktur"
+mkdir -p "$PROBE/tools/struktur" "$PROBE/tools/structure"
+cp tools/struktur/erhebung.py tools/struktur/schichten.txt "$PROBE/tools/struktur/" || exit 1
 cp tools/structure/filing.py tools/structure/filing.txt \
-   tools/struktur/erhebung.py tools/struktur/schichten.txt \
-   tools/structure/shell.py "$PROBE/tools/struktur/" || exit 1
+   tools/structure/shell.py "$PROBE/tools/structure/" || exit 1
 
 VORHER=$(cd "$PROBE" && python3 tools/structure/filing.py --pruefen 2>&1 |
-         sed -n 's/^Ablage: [0-9]* Dateien am richtigen Ort, \([0-9]*\) am falschen.*$/\1/p')
+         sed -n 's/^filing: [0-9]* files in the right place, \([0-9]*\) in the wrong one.*$/\1/p')
 mv "$PROBE/kernel/drv/blk/ahci.fi" "$PROBE/kernel/ahci.fi" 2>/dev/null
 NACHHER=$(cd "$PROBE" && python3 tools/structure/filing.py --pruefen 2>&1 |
-          sed -n 's/^Ablage: [0-9]* Dateien am richtigen Ort, \([0-9]*\) am falschen.*$/\1/p')
+          sed -n 's/^filing: [0-9]* files in the right place, \([0-9]*\) in the wrong one.*$/\1/p')
 echo "ahci.fi kuenstlich nach kernel/ zurueckgelegt: vorher $VORHER, nachher $NACHHER"
 if [[ -z $VORHER || -z $NACHHER ]]; then
     echo "RED: the control run could not measure."
     FEHLER=1
 elif (( NACHHER > VORHER )); then
-    echo "GRUEN: die Ablagepruefung schlaegt an ($VORHER -> $NACHHER)."
+    echo "GREEN: the filing check fires ($VORHER -> $NACHHER)."
 else
     echo "RED: the wrong place was NOT noticed."
     FEHLER=1
@@ -80,7 +80,7 @@ if [[ -z $RVOR || -z $RNACH ]]; then
     echo "RED: the control run could not measure."
     FEHLER=1
 elif (( RNACH > RVOR )); then
-    echo "GRUEN: die Richtungspruefung schlaegt an ($RVOR -> $RNACH)."
+    echo "GREEN: the direction check fires ($RVOR -> $RNACH)."
 else
     echo "RED: the built-in break was NOT noticed."
     FEHLER=1
