@@ -21,6 +21,10 @@ i, c, l = count.scan_fi('fn breite_setzen(x: u64) {\n    // das ist nicht gut, w
 assert i >= 1 and c == 1 and l == 1, (i, c, l)
 i, c, l = count.scan_fi('fn set_width(x: u64) {\n    // this is fine because the row is there\n    say("the value is not set")\n}\n')
 assert (i, c, l) == (0, 0, 0), (i, c, l)
+i, c, l = count.scan_fi('var s_k: [u8; 12] = "gesamt=\\0\\0\\0\\0\\0"\n')
+assert l == 1, l
+i, c, l = count.scan_fi('var s_k: [u8; 12] = "total=\\0\\0\\0\\0\\0\\0"\n')
+assert l == 0, l
 PY
 
 echo "== 2. no file got more German =="
