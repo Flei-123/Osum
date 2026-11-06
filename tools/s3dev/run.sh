@@ -171,6 +171,7 @@ lauf tsc "$TMPD/t.img" "$CYCLES"
 L="$TMPD/l-tsc.txt"
 num "the VM really slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
 num "the TSC was set back after every wake-up" "$(cnt "$L" 's3: tscback ms=3000')" eq "$CYCLES"
+num "a stamp taken before the jump reads as a span of 0, no underflow" "$(cnt "$L" 's3: tscback ms=3000 since=0')" eq "$CYCLES"
 num "the clock was fixed after every wake-up" "$(cnt "$L" 's3: clock sleep=')" eq "$CYCLES"
 num "no panic" "$(cnt "$L" 'panic')" eq 0
 num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 gleich=1')" eq "$CYCLES"
