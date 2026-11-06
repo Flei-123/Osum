@@ -509,7 +509,7 @@ class Fahrer:
                     int(m.group(3)), int(m.group(4)))
         if name.startswith("qskachel"):
             n = int(name[8:])
-            m = last_2(r"qs: kachel n=%d platz=\d+ x=(\d+) y=(\d+) "
+            m = last_2(r"qs: kachel n=%d slot=\d+ x=(\d+) y=(\d+) "
                        r"w=(\d+) h=(\d+) an=\d+" % n)
             g = last_2(r"qs: geo x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
             if m is None or g is None:
@@ -645,7 +645,7 @@ class Fahrer:
             return (int(m.group(1)) + 6, int(m.group(2)) + 2 + n * zh, max(8, int(m.group(3)) - 12), zh)
         if name.startswith("bmenue"):
             n = int(name[6:])
-            m = last_2(r"taskbar: kontext leer x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
+            m = last_2(r"taskbar: context empty x=(\d+) y=(\d+) w=(\d+) h=(\d+) n=(\d+)")
             if m is None:
                 return None
             zh = (int(m.group(4)) - 4) // int(m.group(5))

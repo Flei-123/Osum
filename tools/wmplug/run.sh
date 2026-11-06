@@ -28,7 +28,7 @@ zahl() { grep -aE "$2" "$1" | tail -1 | grep -oE "$3=-?[0-9]+" | head -1 | sed '
 
 #
 #
-#     wmplug: tot platz=0 pid=6
+#     wmplug: tot slot=0 pid=6
 #     wmplwm: fokus id=7 vor=0
 #     ug: unreg boese grund=1 holte=0 verlor=0
 #
@@ -180,16 +180,16 @@ sauber() { # name
 
 echo "== 4. Crash: a plugin crashes (SIGSEGV) =="
 abbild segv 'boesebar segv' || bad "segv: the image is not built"
-lauf segv "" '^plugboese: leiste gesetzt' 'wmplug: tot platz='
+lauf segv "" '^plugboese: leiste gesetzt' 'wmplug: tot slot='
 S=$TMPD/segv.clean
 sauber segv
 has "$S" "plugboese: abi=1" "das Plugin hat die Fassung erfragt"
-hasre "$S" '^plugboese: platz=[0-9]+ rechte=2049$' \
+hasre "$S" '^plugboese: slot=[0-9]+ rechte=2049$' \
     "es hat genau die Rechte aus /etc/wmplug.conf (0x801 = 2049: sehen + Leiste)"
 has "$S" "plugboese: leiste gesetzt, rc=0" \
     "es hat VOR dem Absturz ein Feld in der Leiste besetzt (WM_PLUG_BAR)"
 has "$S" "plugboese: gleich stuerze ich ab" "es sagt an, dass es gleich abstuerzt"
-hasre "$S" 'wmplug: tot platz=[0-9]+ pid=[0-9]+' \
+hasre "$S" 'wmplug: tot slot=[0-9]+ pid=[0-9]+' \
     "der Kern hat den Toten selbst abgeholt (reap)"
 hasflat "$S" 'unreg boesebar *grund=1' \
     "und abgemeldet mit grund=1 (G_CRASH) -- der Grund steht auf der Leitung"
@@ -202,7 +202,7 @@ else
     bad "keine Zahl 'comp=' -- ohne sie ist 'laeuft weiter' nur Meinung"
 fi
 has "$S" "wmplug: bilanz" "und der Kern zieht am Ende seine Bilanz"
-n_tot=$(grep -ca 'wmplug: tot platz=' "$S")
+n_tot=$(grep -ca 'wmplug: tot slot=' "$S")
 [ "${n_tot:-0}" = 1 ] \
     && ok "the dead one was collected EXACTLY ONCE (one line 'wmplug: tot')" \
     || bad "'wmplug: tot' steht ${n_tot}x da -- der Kehrbesen laeuft in sich selbst"
@@ -292,7 +292,7 @@ abbild greif 'boese greif' || bad "grab: the image is not built"
 lauf greif "" '^wm: hold'
 G=$TMPD/greif.clean
 sauber greif
-hasre "$G" '^plugboese: platz=[0-9]+ rechte=1$' \
+hasre "$G" '^plugboese: slot=[0-9]+ rechte=1$' \
     "das Plugin hat GENAU R_EV_WIN (0x001) und ausdruecklich KEIN R_ACT_WIN (0x100)"
 hasnotre "$G" 'plugboese-lese' \
     "es legt KEIN verborgenes Hilfsfenster mehr an (der Titel kommt nicht vor)"
@@ -343,7 +343,7 @@ lauf probe "wigapp=/bin/plugprobe,plugprobe,zkey" '^wm: hold'
 P=$TMPD/probe.clean
 sauber probe
 has "$P" "probe: abi=1" "PL_ABI meldet die Fassung 1 -- die Schnittstelle ist versioniert"
-hasre "$P" '^probe: platz=[0-9]+' "der Prueflauf hat einen Tafelplatz"
+hasre "$P" '^probe: slot=[0-9]+' "der Prueflauf hat einen Tafelplatz"
 hasre "$P" '^probe: key without rc=-[0-9]+' \
     "ein Kuerzel OHNE R_ACT_KEY wird abgewiesen"
 hasre "$P" '^probe: key mit rc=[0-9]+' \
@@ -528,9 +528,9 @@ abbild frist 'regel demo laut' 'uhr rounds=40' || bad "deadline: the image is no
 lauf frist "" '^wm: hold'
 F=$TMPD/frist.clean
 sauber frist
-hasflat "$F" 'reg uhr *platz=[0-9]+ rechte=0x807 frist=100' \
+hasflat "$F" 'reg uhr *slot=[0-9]+ rechte=0x807 frist=100' \
     "das Widget ist mit SEINER Frist angetreten: 100 Ticks (1 s)"
-hasflat "$F" 'reg regel *platz=[0-9]+ rechte=0x301 frist=500' \
+hasflat "$F" 'reg regel *slot=[0-9]+ rechte=0x301 frist=500' \
     "die Regel-Engine mit IHRER: 500 Ticks (5 s)"
 k_frist=$(zahl "$F" '^wmplug: bilanz' 'kicks')
 p_frist=$(zahl "$F" '^wmplug: bilanz' 'plugs')

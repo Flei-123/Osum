@@ -296,7 +296,7 @@ num "und die Art des Auftrags"           "$(azahl "$D" read_op)"     eq 1
 num "asynchron geschrieben: acht Oktette" "$(azahl "$D" write_res)"  eq 8
 num "und sie stehen wirklich im Rohr"    "$(azahl "$D" write_da)"    eq 8
 num "acht Auftraege, EIN Aufruf von aio_wait" "$(azahl "$D" batch_n)" eq 8
-num "Summe der Ergebnisse (8 x 4)"       "$(azahl "$D" batch_summe)" eq 32
+num "Summe der Ergebnisse (8 x 4)"       "$(azahl "$D" batch_sum)" eq 32
 num "Summe der Kennzahlen (1..8) -- acht VERSCHIEDENE Auftraege" \
     "$(azahl "$D" batch_uzsm)" eq 36
 num "asynchron geoeffneter Deskriptor"   "$(azahl "$D" file_fd)"     ge 3
@@ -305,16 +305,16 @@ num "asynchron gelesen, obwohl der Pfadpuffer inzwischen Muell ist" \
 num "asynchrones fsync"                  "$(azahl "$D" file_fsync)"  eq 0
 num "asynchrones close"                  "$(azahl "$D" file_close)"  eq 0
 num "ein Pfad, den es nicht gibt: -ENOENT in der MELDUNG" \
-    "$(azahl "$D" file_fehlt)" eq 2
+    "$(azahl "$D" file_missing)" eq 2
 num "aio_poll vor dem Ereignis: noch nichts fertig" "$(azahl "$D" poll_vorher)" eq 0
 num "und danach POLLIN -- readiness als completion" "$(azahl "$D" poll_revent)" eq 1
 num "die Art des Auftrags ist poll"      "$(azahl "$D" poll_op)"     eq 6
 num "abbrechen gibt 0"                   "$(azahl "$D" cancel_call)" eq 0
 num "und die Meldung -ECANCELED"         "$(azahl "$D" cancel_res)"  eq 125
-num "genau eine Meldung, keine zweite"   "$(azahl "$D" cancel_zwei)" eq 0
+num "genau eine Meldung, keine zweite"   "$(azahl "$D" cancel_second)" eq 0
 num "sechzehn Auftraege gehen"           "$(azahl "$D" voll_wieg)"   eq 16
-num "der siebzehnte gibt -EAGAIN"        "$(azahl "$D" voll_fehler)" eq 11
-num "und alle sechzehn kommen zurueck"   "$(azahl "$D" voll_weg)"    eq 16
+num "der siebzehnte gibt -EAGAIN"        "$(azahl "$D" full_error)" eq 11
+num "und alle sechzehn kommen zurueck"   "$(azahl "$D" full_gone)"    eq 16
 
 # =====================================================================
 echo "== 6. the measurement: latency and throughput against the synchronous path =="
