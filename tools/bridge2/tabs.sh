@@ -61,13 +61,12 @@ klick() {
 }
 
 klick 20,786 2
-SX=$(grep -a 'wm: win .*t=\[Search\]' "$OUT/serial.txt" | tail -1 \
-     | grep -oE ' x=[0-9]+' | head -1 | tr -dc '0-9')
-SY=$(grep -a 'wm: win .*t=\[Search\]' "$OUT/serial.txt" | tail -1 \
-     | grep -oE ' y=[0-9]+' | head -1 | tr -dc '0-9')
-SX=${SX:-8}; SY=${SY:-464}
-note "Starterfenster bei $SX,$SY -- Settings also bei $((SX+200)),$((SY+169))"
-klick "$((SX+200)),$((SY+169))" 3
+MENU_X=8
+MENU_Y=312
+SETTINGS_ROW_DX=200
+SETTINGS_ROW_DY=218
+note "start menu at $MENU_X,$MENU_Y -- settings row at $((MENU_X+SETTINGS_ROW_DX)),$((MENU_Y+SETTINGS_ROW_DY))"
+klick "$((MENU_X+SETTINGS_ROW_DX)),$((MENU_Y+SETTINGS_ROW_DY))" 3
 sleep 2
 
 if grep -qa 'settings: stand' "$OUT/serial.txt" 2>/dev/null; then
