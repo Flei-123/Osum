@@ -231,12 +231,12 @@ run_vm() { # name image cmdline [smp] [time limit]
 cp --sparse=always "$TMPD/root.img" "$TMPD/alt.img"
 KP="kryptot=1 kryptom=64 kryptop=4"
 run_vm alt1 "$TMPD/alt.img" "osum nopwr kryptoneu noargonpar kryptopw=secret $KP" 1
-grep -q 'krypto: neu=1' "$TMPD/alt1.txt" \
+grep -q 'krypto: new=1' "$TMPD/alt1.txt" \
     && ok "the disk is created with the SERIAL path (noargonpar, one core)" \
     || bad "creating with the serial path fails"
 
 run_vm alt2 "$TMPD/alt.img" "osum nopwr kryptoauf kryptopw=secret" 4
-grep -q 'auf=1' "$TMPD/alt2.txt" \
+grep -q 'krypto: open=1' "$TMPD/alt2.txt" \
     && ok "and the PARALLEL path opens it again -- the promise of this round" \
     || bad "the existing disk does NOT open with the parallel path"
 grep -q 'osum: mount=1' "$TMPD/alt2.txt" \
@@ -246,12 +246,12 @@ grep -q 'osum: mount=1' "$TMPD/alt2.txt" \
 cp --sparse=always "$TMPD/root.img" "$TMPD/par.img"
 run_vm par1 "$TMPD/par.img" "osum nopwr kryptoneu kryptopw=secret $KP" 4
 run_vm par2 "$TMPD/par.img" "osum nopwr kryptoauf noargonpar kryptopw=secret" 1
-grep -q 'auf=1' "$TMPD/par2.txt" \
+grep -q 'krypto: open=1' "$TMPD/par2.txt" \
     && ok "and the other way round: created in parallel, opened serially" \
     || bad "the reverse direction fails"
 
 run_vm fal "$TMPD/alt.img" "osum nopwr kryptoauf kryptofalsch kryptopw=secret" 4
-grep -q 'auf=0' "$TMPD/fal.txt" \
+grep -q 'krypto: open=0' "$TMPD/fal.txt" \
     && ok "the wrong passphrase is still rejected (open=0)" \
     || bad "a wrong passphrase gets through"
 
@@ -329,7 +329,7 @@ grep -q 'shani: have=0  used=0' "$TMPD/sh_q.txt" \
 grep -q 'kernel: done' "$TMPD/sh_q.txt" \
     && ok "and the kernel runs through to the end there" \
     || bad "the kernel dies on a CPU without SHA-NI"
-grep -q 'auf=1' "$TMPD/sh_q.txt" \
+grep -q 'krypto: open=1' "$TMPD/sh_q.txt" \
     && ok "and opens the disk there too" \
     || bad "without SHA-NI the disk does not open"
 

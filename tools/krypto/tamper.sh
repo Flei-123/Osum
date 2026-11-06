@@ -66,10 +66,10 @@ timeout 300 $QEMU_X86 -kernel "$TMPD/kt.mb" -m 512 \
     -serial "file:$TMPD/t1.txt" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive "file=$TMPD/root.img,format=raw,if=ide,index=0" > /dev/null 2>&1
-if grep -qaE 'neu=1' "$TMPD/t1.txt"; then
+if grep -qaE 'krypto: new=1' "$TMPD/t1.txt"; then
     ok "the kernel created the disk (the tamper does not stop the boot)"
 else
-    bad "the kernel did not report neu=1"
+    bad "the kernel did not report new=1"
 fi
 
 echo "== 3. the gate predicates must turn red =="
@@ -81,8 +81,8 @@ if [ "${good:-0}" = 4 ]; then
 else
     ok "CONTROL RUN: the host does not read the files from the tampered disk (good=${good:-0} of 4)"
 fi
-selftest=$(grep -a -m1 -oE 'selbst=[0-9]+' "$TMPD/t1.txt" | cut -d= -f2)
-tree_kernel=$(grep -a -m1 -oE 'baum=[0-9]+' "$TMPD/t1.txt" | cut -d= -f2)
+selftest=$(grep -a -m1 -oE 'krypto: selftest=[0-9]+' "$TMPD/t1.txt" | cut -d= -f2)
+tree_kernel=$(grep -a -m1 -oE 'krypto: tree=[0-9]+' "$TMPD/t1.txt" | cut -d= -f2)
 echo "        kernel self-test=${selftest:-none} kernel tree=${tree_kernel:-none}"
 if [ "${good:-0}" != 4 ] || [ "${selftest:-1}" != 1 ] || [ "${tree_kernel:-4}" != 4 ]; then
     ok "CONTROL RUN: at least one gate predicate is red for the tampered kernel"

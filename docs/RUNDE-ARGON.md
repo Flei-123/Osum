@@ -114,7 +114,7 @@ in Zeile **785** — also **vor** `smp.stage`.
 Das Startprotokoll sagt es unmissverständlich:
 
 ```
-185  krypto: auf=1 fehler=0 platz=0
+185  krypto: open=1 fails=0 slot=0
 194  smp: cpus=4  acpi=1  rev=0  apic=0 1 2 3
 195  smp: online=4 of 4  failed=0
 ```

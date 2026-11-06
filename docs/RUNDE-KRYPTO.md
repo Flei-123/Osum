@@ -175,9 +175,9 @@ Orakel, das nie `FAIL` sagt, misst nichts.
 ### Die volle Kette, über einen echten Neustart
 
 ```
-Lauf 1  krypto: neu=1  selbst=1  fsformat=1  kopfda=1  mount=1  baum=4
+Lauf 1  krypto: new=1  selftest=1  fsformat=1  header=1  mount=1  tree=4
 ── Rechner neu gestartet ──
-Lauf 2  krypto: auf=1 fehler=0 platz=0  mount=1
+Lauf 2  krypto: open=1 fails=0 slot=0  mount=1
         sha 0 = 5a2cda2351d1cdd9dd7957e57c0b3c8522451f25b6494569b7e94388c46f0980
         sha 1 = 2f6a24a8fa6fc911e352959a821326e276ae9b5bcaada44d7daea8471f91917c
         sha 2 = 722a77af0e1dac276b056311f6da48e143a64318996fdc6a9ccd272285241166

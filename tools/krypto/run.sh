@@ -33,7 +33,10 @@ has() { grep -qaF "$2" "$1" && ok "$3" || bad "$3 -- '$2' missing"; }
 has_not() { grep -qaF "$2" "$1" && bad "$3 -- '$2' present" || ok "$3"; }
 
 kvalue() { # file name
-    grep -a -m1 -oE "$2=[0-9]+" "$1" 2>/dev/null | head -1 | cut -d= -f2
+    case "$2" in
+        null|sum) grep -a -m1 -oE "$2=[0-9]+" "$1" 2>/dev/null | head -1 | cut -d= -f2 ;;
+        *) grep -a "krypto:" "$1" 2>/dev/null | grep -m1 -oE "(^|[ :])$2=[0-9]+" | head -1 | cut -d= -f2 ;;
+    esac
 }
 ksays() { # file name want description
     local got; got=$(kvalue "$1" "$2")
@@ -173,16 +176,16 @@ run_vm() { # name image cmdline [time limit]
 
 cp --sparse=always "$TMPD/root.img" "$TMPD/a.img"
 run_vm a1 "$TMPD/a.img" "osum nopwr kryptoneu kryptotest kryptobaum kryptopw=secret $KP"
-ksays "$TMPD/a1.txt" "neu"      1 "the disk is created"
-ksays "$TMPD/a1.txt" "selbst"   1 "the self-test of the computation"
+ksays "$TMPD/a1.txt" "new"      1 "the disk is created"
+ksays "$TMPD/a1.txt" "selftest"   1 "the self-test of the computation"
 ksays "$TMPD/a1.txt" "fsformat" 1 "the file system on it"
-ksays "$TMPD/a1.txt" "kopfda"   1 "the header is still there after formatting"
+ksays "$TMPD/a1.txt" "header"   1 "the header is still there after formatting"
 ksays "$TMPD/a1.txt" "mount"    1 "mounted"
-ksays "$TMPD/a1.txt" "baum"     4 "four files written"
+ksays "$TMPD/a1.txt" "tree"     4 "four files written"
 
 run_vm a2 "$TMPD/a.img" "osum nopwr kryptoauf kryptopruef kryptopw=secret $KP"
-ksays "$TMPD/a2.txt" "auf"    1 "opened with the passphrase after the reboot"
-ksays "$TMPD/a2.txt" "fehler" 0 "without a failed attempt"
+ksays "$TMPD/a2.txt" "open"    1 "opened with the passphrase after the reboot"
+ksays "$TMPD/a2.txt" "fails" 0 "without a failed attempt"
 ksays "$TMPD/a2.txt" "mount"  1 "and mounted"
 
 python3 - "$TMPD/soll.txt" <<'PYEOF'
@@ -206,8 +209,8 @@ num "SHA-256 of the files match (against hashlib on the host)" "$gut" eq 4
 echo "== 5. the control runs =="
 cp --sparse=always "$TMPD/a.img" "$TMPD/b.img"
 run_vm b1 "$TMPD/b.img" "osum nopwr kryptoauf kryptofalsch kryptopruef kryptopw=secret $KP"
-ksays "$TMPD/b1.txt" "auf"    0 "the WRONG passphrase does not open"
-ksays "$TMPD/b1.txt" "fehler" 1 "and is counted"
+ksays "$TMPD/b1.txt" "open"    0 "the WRONG passphrase does not open"
+ksays "$TMPD/b1.txt" "fails" 1 "and is counted"
 ksays "$TMPD/b1.txt" "mount"  0 "nothing can be mounted without the key"
 
 cp --sparse=always "$TMPD/a.img" "$TMPD/c.img"
@@ -219,15 +222,15 @@ with open(sys.argv[1], "r+b") as f:
     f.write(b"\xff" * 16)
 PYEOF
 run_vm c1 "$TMPD/c.img" "osum nopwr kryptoauf kryptopruef kryptopw=secret $KP"
-ksays "$TMPD/c1.txt" "auf"    0 "a damaged header is rejected"
-ksays "$TMPD/c1.txt" "fehler" 1 "cleanly, not with garbage"
-zb=$(grep -a -m1 'krypto: auf=' "$TMPD/b1.txt" | tr -d '\r\000')
-zc=$(grep -a -m1 'krypto: auf=' "$TMPD/c1.txt" | tr -d '\r\000')
+ksays "$TMPD/c1.txt" "open"    0 "a damaged header is rejected"
+ksays "$TMPD/c1.txt" "fails" 1 "cleanly, not with garbage"
+zb=$(grep -a -m1 'krypto: open=' "$TMPD/b1.txt" | tr -d '\r\000')
+zc=$(grep -a -m1 'krypto: open=' "$TMPD/c1.txt" | tr -d '\r\000')
 same "wrong passphrase and broken header give the SAME line" "$zb" "$zc"
 
 cp --sparse=always "$TMPD/a.img" "$TMPD/d.img"
 run_vm d1 "$TMPD/d.img" "osum nopwr kryptoroh kryptopruef"
-ksays "$TMPD/d1.txt" "roh"   1 "the header is found"
+ksays "$TMPD/d1.txt" "raw"   1 "the header is found"
 ksays "$TMPD/d1.txt" "mount" 0 "but without a passphrase nothing mounts"
 
 echo "== 6. the raw device: what can be seen without a passphrase? =="
@@ -245,16 +248,16 @@ num "no readable string of 16 or more characters" "${txt:-99}" eq 0
 echo "== 7. change the passphrase without touching the data =="
 cp --sparse=always "$TMPD/root.img" "$TMPD/e.img"
 run_vm e1 "$TMPD/e.img" "osum nopwr kryptoneu kryptobaum kryptopw=alt $KP"
-ksays "$TMPD/e1.txt" "baum" 4 "the tree stands (passphrase 'alt')"
+ksays "$TMPD/e1.txt" "tree" 4 "the tree stands (passphrase 'alt')"
 run_vm e2 "$TMPD/e.img" "osum nopwr kryptoauf kryptowechs kryptokill kryptopw=alt kryptopw2=neu $KP"
-ksays "$TMPD/e2.txt" "wechsel" 1 "slot 1 gets the new passphrase"
+ksays "$TMPD/e2.txt" "change" 1 "slot 1 gets the new passphrase"
 ksays "$TMPD/e2.txt" "kill"    1 "slot 0 is erased"
-ksays "$TMPD/e2.txt" "plaetze" 1 "afterwards exactly one slot is used"
+ksays "$TMPD/e2.txt" "slots" 1 "afterwards exactly one slot is used"
 run_vm e3 "$TMPD/e.img" "osum nopwr kryptoauf kryptopruef kryptopw=alt $KP"
-ksays "$TMPD/e3.txt" "auf" 0 "the OLD passphrase opens nothing any more"
+ksays "$TMPD/e3.txt" "open" 0 "the OLD passphrase opens nothing any more"
 run_vm e4 "$TMPD/e.img" "osum nopwr kryptoauf kryptopruef kryptopw=neu $KP"
-ksays "$TMPD/e4.txt" "auf"   1 "the NEW one opens the same disk"
-ksays "$TMPD/e4.txt" "platz" 1 "via slot 1"
+ksays "$TMPD/e4.txt" "open"   1 "the NEW one opens the same disk"
+ksays "$TMPD/e4.txt" "slot" 1 "via slot 1"
 ksays "$TMPD/e4.txt" "mount" 1 "mounted"
 gut=0
 while read -r nm soll; do
@@ -291,9 +294,9 @@ num "the host reads ALL four files from the ciphertext" "${g:-0}" eq 4
     > "$TMPD/g3.txt" 2>&1
 has "$TMPD/g3.txt" "wrote:" "the host creates its own carrier"
 run_vm f1 "$TMPD/f.img" "osum nopwr kryptoauf kryptofs kryptobaum kryptopw=fremdpw $KP"
-ksays "$TMPD/f1.txt" "auf"      1 "${MARKE_PRODUKT} opens the FOREIGN header"
+ksays "$TMPD/f1.txt" "open"      1 "${MARKE_PRODUKT} opens the FOREIGN header"
 ksays "$TMPD/f1.txt" "fsformat" 1 "and creates its file system on it"
-ksays "$TMPD/f1.txt" "baum"     4 "and writes the four files"
+ksays "$TMPD/f1.txt" "tree"     4 "and writes the four files"
 "$PY" tools/krypto/gegen.py tree "$TMPD/f.img" fremdpw > "$TMPD/g4.txt" 2>&1
 sed 's/^/        /' "$TMPD/g4.txt"
 g=$(grep -a -m1 'tree: good=' "$TMPD/g4.txt" | grep -oE 'good=[0-9]+' | cut -d= -f2)
