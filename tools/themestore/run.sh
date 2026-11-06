@@ -560,7 +560,7 @@ PY
 num "und die Kacheln haben verschiedene Flaechenfarben (nicht die des laufenden Satzes)" \
     "$TDIFF" ge 4
 #
-KACHR=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+ typ=kachel' \
+KACHR=$(grep -aoE 'wlib: radius rolle=[0-9]+ r=[0-9]+ typ=(kachel|tile)' \
         "$TMPD/setv/serial.txt" | tail -1 | grep -oE 'r=[0-9]+' | cut -d= -f2)
 KACHELN=$(python3 - "$TMPD/setv/serial.txt" <<'PY'
 import re, sys
@@ -1929,10 +1929,10 @@ def enger(m):
         tb = oy + t["base"]
         tx = ox + t["x"]
         if t["tw"] > 24 and ay <= tb <= ay + h and ax <= tx < ax + w:
-            return ("wlib: knopf x=%d y=%d w=%d h=%d r=%d ax=%d ay=%d"
+            return ("wlib: button x=%d y=%d w=%d h=%d r=%d ax=%d ay=%d"
                     % (x, y, t["tw"] - 10, h, r, tx, ay))
     return m.group(0)
-eng = re.sub(r"wlib: knopf x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+)"
+eng = re.sub(r"wlib: (?:knopf|button) x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+)"
              r" ax=(-?\d+) ay=(-?\d+)", enger, tail)
 gem, ohne, ueber, bad = S.knoepfe_messen(
     pic, eng, ox, oy, pic.w, pic.h, None, texts)

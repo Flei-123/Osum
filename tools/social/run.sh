@@ -561,7 +561,7 @@ QB=$!
 w=0
 # the last run of the bar (the one that stays): its chat is open when this
 # line comes -- 'quelle=bus' alone now comes from the first, short runs
-while [ $w -lt 170 ] && ! grep -qa 'freunde: gesendet=' "$TMPD/b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
+while [ $w -lt 170 ] && ! grep -qa 'freunde: sent=' "$TMPD/b.txt" 2>/dev/null; do sleep 1; w=$((w+1)); done
 sleep 6
 if [ -S "$TMPD/mon" ] && command -v socat >/dev/null 2>&1; then
     printf 'screendump %s\n' "$TMPD/bar.ppm" | timeout 10 socat - "unix-connect:$TMPD/mon" >/dev/null 2>&1 || true
@@ -597,7 +597,7 @@ PY
 [ "$DREL" = freunde ] && ok "on the server dora is justin's friend now (accepted on ${MARKE_PRODUKT})" || bad "dora on the server: $DREL"
 [ "$(grep -a 'freunde: tab=' "$B" | tail -1 | sed 's/.*tab=\([0-9]\).* ein=\([0-9]*\).*/\1 \2/')" = "0 1" ] \
     && ok "the bar starts on Online (anna is there), one request left (oma, local)" || bad "start tab: $(grep -a 'freunde: tab=' "$B" | tail -1)"
-grep -aq "freunde: gesendet=1" "$B" && ok "the bar wrote into the chat (social.messages.send)" || bad "the bar did not send: $(grep -a 'freunde:' "$B" | head -4)"
+grep -aq "freunde: sent=1" "$B" && ok "the bar wrote into the chat (social.messages.send)" || bad "the bar did not send: $(grep -a 'freunde:' "$B" | head -4)"
 grep -aq "freunde: chat=[a-z0-9]*:[A-Za-z_0-9]* nachrichten=[1-9]" "$B" && ok "the bar's chat window shows the conversation" || bad "chat window: $(grep -a 'freunde: chat' "$B" | head -2)"
 if [ -f "$TMPD/bar.ppm" ]; then
     python3 -c "from PIL import Image; Image.open('$TMPD/bar.ppm').save('docs/shots/social/freunde.png')" 2>/dev/null \

@@ -72,7 +72,7 @@ num "dazwischen (550 Hz) fast nichts" "$(w zwei pmitte)" le 500
 num "keine Luecke"             "$(w zwei gaps)"    eq 0
 num "keine Begrenzung noetig"  "$(w zwei max)"     lt 32767
 #
-sn=$(grep -aoE 'strom: [0-9]+' "$OUT/zwei.txt" | grep -oE '[0-9]+$' \
+sn=$(grep -aoE 'stream: [0-9]+' "$OUT/zwei.txt" | grep -oE '[0-9]+$' \
      | sort -u | tr '\n' ' ')
 sc=$(printf '%s' "$sn" | wc -w)
 [ "$sc" -ge 2 ] && gruen "zwei VERSCHIEDENE Stroeme ($sn)" \

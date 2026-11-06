@@ -40,7 +40,7 @@ def nums(path):
 
 
 def gast(text, name):
-    brand = "viewer: datei " + name
+    brand = "viewer: file " + name
     at = text.find(brand)
     if at < 0:
         return None
@@ -48,7 +48,7 @@ def gast(text, name):
     m = re.search(r"viewer: art=(\w+) w=(\d+) h=(\d+)", part)
     if not m:
         return None
-    s = re.search(r"viewer: summe (\d+) w=(\d+) h=(\d+)", part)
+    s = re.search(r"viewer: sum (\d+) w=(\d+) h=(\d+)", part)
     p = re.findall(r" (\d+),(\d+)=([0-9a-f]{6})", part)
     if not s or len(p) < 5:
         return None

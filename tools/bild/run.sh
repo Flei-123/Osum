@@ -94,8 +94,8 @@ hat_nicht "$S" "panic" "kein Absturz beim Lesen"
 REF=""
 for f in $LESEN; do REF="$REF $BILDER/$f"; done
 python3 tools/alltag/bildref.py pruefen "$S" $REF > "$ARB/ref.txt" 2>&1
-GUT=$(grep -aoE 'bildref: [0-9]+ von [0-9]+' "$ARB/ref.txt" | grep -oE '[0-9]+' | head -1)
-VON=$(grep -aoE 'bildref: [0-9]+ von [0-9]+' "$ARB/ref.txt" | grep -oE '[0-9]+' | tail -1)
+GUT=$(grep -aoE 'bildref: [0-9]+ of [0-9]+' "$ARB/ref.txt" | grep -oE '[0-9]+' | head -1)
+VON=$(grep -aoE 'bildref: [0-9]+ of [0-9]+' "$ARB/ref.txt" | grep -oE '[0-9]+' | tail -1)
 sed 's/^/    /' "$ARB/ref.txt" | grep -aE 'OK|FAIL' || true
 num "Bilder, die mit Pillow uebereinstimmen" "${GUT:-0}" eq "${VON:-12}"
 
@@ -105,7 +105,7 @@ hat "$S" "viewer: art=gif w=64 h=48" "das verschachtelte GIF wird gelesen"
 hat "$S" "viewer: art=gif w=160 h=120" \
     "das grosse GIF (Woerterbuchloeschung) wird gelesen"
 
-hat "$S" "viewer: datei k-kurz.gif" "die abgeschnittene Datei wurde versucht"
+hat "$S" "viewer: file k-kurz.gif" "die abgeschnittene Datei wurde versucht"
 hat "$S" "geht nicht" "und abgelehnt, mit einem Grund"
 hat_nicht "$S" "art=gif w=4000" "die erlogene Groesse wird nicht geglaubt"
 
@@ -128,10 +128,10 @@ S2="$ARB/r2/serial.txt"
 num "auch dieser Lauf beendet sich sauber" \
     "$(grep -aoE 'qemu exit [0-9]+' "$ARB/r2.log" | tail -1 | grep -oE '[0-9]+$')" eq 21
 hat_nicht "$S2" "panic" "kein Absturz beim Sichern"
-hat "$S2" "viewer: sichern s-gif.png gif w=40 h=30" "GIF als PNG gesichert"
-hat "$S2" "viewer: sichern s-png.jpg png w=48 h=36" "PNG als JPEG gesichert"
-hat "$S2" "viewer: sichern s-jpg.jpg jpeg w=64 h=48" "JPEG als JPEG gesichert"
-hat_nicht "$S2" "sichern nein" "kein Sichern ist fehlgeschlagen"
+hat "$S2" "viewer: save s-gif.png gif w=40 h=30" "GIF als PNG gesichert"
+hat "$S2" "viewer: save s-png.jpg png w=48 h=36" "PNG als JPEG gesichert"
+hat "$S2" "viewer: save s-jpg.jpg jpeg w=64 h=48" "JPEG als JPEG gesichert"
+hat_nicht "$S2" "save no" "kein Sichern ist fehlgeschlagen"
 
 HOL="$ARB/hol"
 mkdir -p "$HOL"
@@ -178,10 +178,10 @@ timeout 560 bash "$B" "$ARB/r3" progs="viewer sh echo ls cat theme" \
     extra="wigapp=/bin/viewer,/b/g-anim.gif" > "$ARB/r3.log" 2>&1
 S3="$ARB/r3/serial.txt"
 if [ -s "$S3" ]; then
-    hat "$S3" "viewer: bild g-anim.gif" \
+    hat "$S3" "viewer: image g-anim.gif" \
         "der Ordnerleser findet die GIF-Datei (ist_bildname kennt gif)"
     hat "$S3" "1/4" "und der Kopf sagt, dass es Teilbild 1 von 4 ist"
-    hat_nicht "$S3" "viewer: bild kein Bild" "es steht NICHT 'kein Bild' da"
+    hat_nicht "$S3" "viewer: image no image" "es steht NICHT 'no image' da"
     SW=$(grep -aoE 'viewer: rect id=[0-9]+ kind=17 x=[0-9]+ y=[0-9]+ w=[0-9]+' "$S3" \
         | tail -1 | grep -oE 'w=[0-9]+$' | cut -d= -f2)
     num "der Schieberegler behaelt seine Breite" "${SW:-0}" ge 120

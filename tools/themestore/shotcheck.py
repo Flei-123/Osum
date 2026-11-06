@@ -69,7 +69,7 @@ BARRECT = re.compile(
     r"x=(\d+) y=(\d+) w=(\d+) h=(\d+)")
 
 BUTTON = re.compile(
-    r"wlib: knopf x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+) ax=(\d+) ay=(\d+)")
+    r"wlib: (?:knopf|button) x=(\d+) y=(\d+) w=(\d+) h=(\d+) r=(\d+) ax=(\d+) ay=(\d+)")
 
 
 def edges(pic, x, y, w, h, r, tol=8, level=12, anteil=60):
