@@ -196,7 +196,7 @@ rc=$(lauf "$TMPD/B.img" B)
 is "Geraet B endet ordentlich" "$rc" "21"
 klar B > "$TMPD/B.log"
 B_RUNTER=$(feld "$TMPD/B.txt" heruntergel)
-B_EINST=$(feld "$TMPD/B.txt" einstellungen)
+B_EINST=$(feld "$TMPD/B.txt" settings)
 is "B holt 4 Dokumente herunter" "$B_RUNTER" "4"
 [ -n "$B_EINST" ] && [ "$B_EINST" -gt 0 ] \
     && ok "and SETTINGS arrive through the settings path: $B_EINST keys merged" \
@@ -265,13 +265,13 @@ absch FALSCH | grep -qa 'fertig' \
 absch FASTRICHTIG | grep -qa 'wrong passphrase' \
     && ok "(d) a single wrong character is enough" \
     || bad "(d) an almost correct passphrase got through"
-absch CODE | grep -qa 'konto: auf' \
+absch CODE | grep -qa 'account: open' \
     && ok "(d) the recovery code restores access" \
     || bad "(d) the recovery code has no effect"
 absch CODEFALSCH | grep -qa 'not valid' \
     && ok "(d) an invented code is rejected" \
     || bad "(d) an invented code got through"
-absch RICHTIG | grep -qa 'konto: auf' \
+absch RICHTIG | grep -qa 'account: open' \
     && ok "(d) and the correct passphrase still works" \
     || bad "(d) the correct passphrase no longer works"
 nicht "$TMPD/D.log" "GEHEIMNIS-4711" "(d) kein Teilklartext im ganzen Lauf"
@@ -298,12 +298,12 @@ boese_lauf() { # <was> <erwarteter text> <name> [extra]
         ok "(e) $was is detected and rejected"
     else
         bad "(e) $was is NOT detected"
-        grep -a 'sync:\|fehler\|fertig' "$TMPD/E-$nm.log" | head -4 | sed 's/^/        /'
+        grep -a 'sync:\|error\|fertig' "$TMPD/E-$nm.log" | head -4 | sed 's/^/        /'
     fi
 }
-boese_lauf aendern      "fehler"      aendern
-boese_lauf fremd        "fehler"      fremd
-boese_lauf gross        "fehler"      gross
+boese_lauf aendern      "sync: error" aendern
+boese_lauf fremd        "sync: error" fremd
+boese_lauf gross        "sync: error" gross
 boese_lauf wurzelluege  "forged"  luege
 boese_lauf halbe        "forged"  halbe
 
@@ -501,8 +501,8 @@ klar V > "$TMPD/V.log"
 grep -qa '^fertig' "$TMPD/V.log" \
     && bad "der volle Datentraeger meldet trotzdem fertig" \
     || ok "a full disk does NOT report done"
-grep -qa '^sync: fehler' "$TMPD/V.log" \
-    && ok "but an error: $(grep -a '^sync: fehler' "$TMPD/V.log" | tail -1)" \
+grep -qa '^sync: error' "$TMPD/V.log" \
+    && ok "but an error: $(grep -a '^sync: error' "$TMPD/V.log" | tail -1)" \
     || bad "and it reports no error either -- the abort is silent"
 grep -qa '^sync: bei:' "$TMPD/V.log" \
     && ok "and it names the file where it broke: $(grep -a '^sync: bei:' "$TMPD/V.log" | tail -1 | sed 's/^sync: bei:  *//')" \
@@ -871,13 +871,13 @@ geraet "$TMPD/P.img" "$TMPD/sP.sh" - - "$TMPD/leer2" -
 PROGS=$PROGS_ALT
 SYNC_TIMEOUT=900 lauf "$TMPD/P.img" P > /dev/null
 klar P > "$TMPD/P.log"
-grep -qa '^konto: auf' "$TMPD/P.log" \
+grep -qa '^account: open' "$TMPD/P.log" \
     && ok "the DEFAULT cost (N=4096, r=8, 4 MiB) creates an account" \
     || bad "the default cost creates NO account -- the default is broken"
 grep -qa '^vault: open' "$TMPD/P.log" \
     && ok "and the vault opens with it" \
     || bad "and the vault does NOT open with it"
-sed -n '/^==ZUVIEL==/,$p' "$TMPD/P.log" | grep -qa 'fehler' \
+sed -n '/^==ZUVIEL==/,$p' "$TMPD/P.log" | grep -qa 'error' \
     && ok "CONTROL: N=16384 (16 MiB) fails -- the arena has 6 MiB" \
     || bad "N=16384 got through -- then the limit in the header of kbund.fi is wrong"
 python3 - "$TMPD/P.log" <<'PYT'
@@ -931,8 +931,8 @@ M_BLK=$(feld_n "$TMPD/M.txt" bloecke 1)
 M_NEU1=$(feld_n "$TMPD/M.txt" neubloecke 1)
 M_NEU2=$(feld_n "$TMPD/M.txt" neubloecke 2)
 M_NEU3=$(feld_n "$TMPD/M.txt" neubloecke 3)
-M_GES1=$(feld_n "$TMPD/M.txt" gesendet 1)
-M_GES3=$(feld_n "$TMPD/M.txt" gesendet 3)
+M_GES1=$(feld_n "$TMPD/M.txt" sent 1)
+M_GES3=$(feld_n "$TMPD/M.txt" sent 3)
 M_LES1=$(feld_n "$TMPD/M.txt" gelesen 1)
 note "1 MiB in 20 Dateien: $M_BLK Bloecke, erster Lauf $M_NEU1 neu ($M_GES1 Oktette gesendet)"
 note "zweiter Lauf: $M_NEU2 neue Bloecke; nach einer kleinen Aenderung: $M_NEU3"
@@ -964,9 +964,9 @@ else
     bad "the overhead cannot be computed: plaintext $M_KLAR, PACK $M_PACK"
 fi
 
-M_S1=$(feld_n "$TMPD/M.txt" sekunden 1)
-M_S2=$(feld_n "$TMPD/M.txt" sekunden 2)
-M_S3=$(feld_n "$TMPD/M.txt" sekunden 3)
+M_S1=$(feld_n "$TMPD/M.txt" seconds 1)
+M_S2=$(feld_n "$TMPD/M.txt" seconds 2)
+M_S3=$(feld_n "$TMPD/M.txt" seconds 3)
 note "Dauer der drei Abgleiche: $M_S1 s (voll), $M_S2 s (nichts neu), $M_S3 s (eine Aenderung)"
 if [ -n "$M_S1" ] && [ "$M_S1" -gt 0 ]; then
     kbs=$(awk "BEGIN{printf \"%.1f\", $M_KLAR/1024.0/$M_S1}")
