@@ -45,7 +45,7 @@ greift:
 |---|---|---|---|
 | `hw_ready` | gibt es das Gerät | `S_READY` | `S_READY` |
 | `hw_ring` | Adresse des DMA-Ringpuffers | 4 Rahmen aus `mem.frame_run` | dieselben |
-| `hw_ring_frames` / `hw_entries` / `hw_entry_frames` | die Geometrie | 32 × 128 | 32 × 128 |
+| `hw_ring_frames` / `hw_entries` / `hw_entry_frames` | die Geometrie | 32 × 128 | 32 × 256 |
 | `hw_submit` | einen vollen Eintrag übergeben | BDL schreiben, **LVI nachziehen** | nur Buch führen (die Liste steht schon) |
 | `hw_start` / `hw_stop` | Lauf an, Lauf aus | `PO_CR` Bit 0 | `SDnCTL` RUN |
 | `hw_position` | **abgespielte Rahmen, monoton** | `CIV`·128 + (128−`PICB`/2) | **DMA-Positionspuffer**, LPIB als Rückfall |
@@ -158,13 +158,13 @@ zu verschweigen.
 
 | Stufe | Größe | Zeit bei 48 kHz | Begründung |
 |---|---|---|---|
-| Eintrag der Deskriptorliste | 128 Rahmen | 2,67 ms | feiner als der Zeitgeber (10 ms) schlägt |
-| Geräte-Ring | 32 Einträge = 4096 Rahmen | **85,3 ms** | > 2 Zeitgebermarken, > QEMUs Mischerpuffer (46 ms), < hörbare Verzögerung |
-| Vorlauf vor dem Anfahren | 24 Einträge = 3072 | 64 ms | **muss über der Ausgabepufferung der Hardware liegen** — gemessen in MEDIA1: mit 8 Einträgen 24 Aussetzer bei 24 Schreibvorgängen |
+| Eintrag der Deskriptorliste | 128 Rahmen (AC97), 256 (HDA) | 2,67 / 5,33 ms | feiner als der Zeitgeber (10 ms) schlägt |
+| Geräte-Ring | AC97 32 × 128 = 4096 Rahmen (**85,3 ms**); HDA 32 × 256 = 8192 Rahmen (**170,7 ms**) | 85,3 / 170,7 ms | HDA: überlebt einen Host-Stall von ~150 ms (A-050: bei 85 ms überholte QEMUs DMA-Position die geschriebenen Rahmen, 3-8 Aussetzer je Lauf bei Host-Last 10); Preis: Ausgabelatenz Einstromweg 170,7 ms statt 85,3 ms |
+| Vorlauf vor dem Anfahren | 3072 Rahmen (`PREFILL_FRAMES`) | 64 ms | **muss über der Ausgabepufferung der Hardware liegen** — gemessen in MEDIA1: mit 8 Einträgen 24 Aussetzer bei 24 Schreibvorgängen |
 | Strompuffer je Programm (Mischerweg) | 16384 Rahmen | **341 ms** | die Zeit, die ein Prozess wegbleiben darf |
 | Mischschub | 256 Rahmen | 5,33 ms | vom Platz im Zwischenpuffer bestimmt |
 
-**Ausgabelatenz Einstromweg:** 85,3 ms (nur der Ring).
+**Ausgabelatenz Einstromweg:** 170,7 ms bei HDA, 85,3 ms bei AC97 (nur der Ring). Der Aufnahmering von HDA bleibt bei 4096 Rahmen (`cap_ring_frames`).
 **Ausgabelatenz Mischerweg:** bis zu 426 ms, wenn das Programm seinen
 Puffer vollschreibt. Wer weniger will, nimmt den Einstromweg
 (`/bin/play -1`) — deshalb gibt es ihn.
