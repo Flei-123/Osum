@@ -28,7 +28,7 @@
 #   2. race        children started: >= 20, children that became the locker: 0
 #   3. table       the victim window ("A11Y controls") never showed in the table
 #   4. still locked the lock is still on after the race (op 0 = 1)
-#   5. restart     the kernel started a new locker ("sperre: Sperrer neu") and the lock
+#   5. restart     the kernel started a new locker ("lock: locker restarted") and the lock
 #                  screen is back within 7 s
 #   6. after       a second probe: the tree gives nothing of the victim, the table has
 #                  "Gesperrt" only, the hijack (op 4 / op 2) is refused
@@ -173,8 +173,8 @@ st=$(printf '%s' "$R" | grep -oE 'state=[0-9]+' | sed 's/.*=//')
 [ "$st" = 1 ] && ok "after the race the lock is still on" || bad "the lock is not on after the race (state='$st')"
 b=$(printf '%s' "$R" | grep -oE 'back_after=[0-9]+' | sed 's/.*=//')
 if [ -n "$b" ] && [ "$b" -gt 0 ] && [ "$b" -le 700 ]; then ok "the lock screen is back $b ticks after the kill (<= 700, the new locker is loaded from the disk)"; else bad "the lock screen came back after '$b' ticks (0 = never, wanted 1..700)"; fi
-n=$(grep -ac 'sperre: Sperrer neu' "$G")
-[ "$n" -ge 1 ] && ok "the kernel started a new locker ($n x 'sperre: Sperrer neu')" || bad "no 'sperre: Sperrer neu'"
+n=$(grep -ac 'lock: locker restarted' "$G")
+[ "$n" -ge 1 ] && ok "the kernel started a new locker ($n x 'lock: locker restarted')" || bad "no 'lock: locker restarted'"
 
 echo "== 5. after the race =="
 part "$G" AFTER AFTER-DONE > "$TMPD/p_after.txt"
@@ -203,7 +203,7 @@ else
 fi
 
 echo "== 6. the password still opens it =="
-has "$G" "sperre: aufgesperrt" "the right password unlocks"
+has "$G" "lock: unlocked" "the right password unlocks"
 part "$G" UNLOCKED FERTIG > "$TMPD/p_un.txt"
 has "$TMPD/p_un.txt" "name=Save" "unlocked again: the window's names are readable"
 

@@ -304,7 +304,7 @@ hasre "$G" 'plugboese: griff .* deny=1' \
     "und der Kern zaehlt die Abweisung mit (PL_DENY + 1)"
 hasre "$G" 'plugboese: nachher id=[0-9]+ x=[0-9]+ y=[0-9]+' \
     "es hat den Ort NACHHER noch einmal gelesen"
-has "$G" "plugboese: rechteprobe: abgewiesen UND nichts bewegt" \
+has "$G" "plugboese: rights probe: rejected AND nothing moved" \
     "vorher und nachher sind gleich -- die Handlung ist NICHT passiert"
 vx=$(zahl "$G" '^plugboese: vorher' 'x'); vy=$(zahl "$G" '^plugboese: vorher' 'y')
 nx=$(zahl "$G" '^plugboese: nachher' 'x'); ny=$(zahl "$G" '^plugboese: nachher' 'y')

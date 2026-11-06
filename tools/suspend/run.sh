@@ -351,59 +351,59 @@ zyklus z1 "" 400
 A="$TMPD/z1-a.txt"; B="$TMPD/z1-b.txt"
 hat_nicht "$A" 'panic' "kein Ausnahmefehler im Sicherungslauf"
 hat_nicht "$B" 'panic' "kein Ausnahmefehler im Wiederanlauf"
-hat "$A" 'schlaf: abbild steht' "Lauf A schreibt das Abbild"
-hat "$A" 'schlaf: gast wird beendet' "Lauf A BEENDET den Gast -- der Speicher ist wirklich weg"
+hat "$A" 'sleep: abbild steht' "Lauf A schreibt das Abbild"
+hat "$A" 'sleep: gast wird beendet' "Lauf A BEENDET den Gast -- der Speicher ist wirklich weg"
 
-if grep -a 'schlaf: start' "$B" | grep -aq 'abbild=1'; then
+if grep -a 'sleep: start' "$B" | grep -aq 'abbild=1'; then
     ok "the boot detects the image BY ITSELF (start detection)"
 else
     bad "the boot did not detect the image"
-    grep -a 'schlaf: start' "$B" | sed 's/^/        /' | head -2
+    grep -a 'sleep: start' "$B" | sed 's/^/        /' | head -2
 fi
-if grep -a 'schlaf: start' "$B" | grep -aq 'why=ok'; then
+if grep -a 'sleep: start' "$B" | grep -aq 'why=ok'; then
     ok "and it is accepted: why=ok"
 else
     bad "the image was discarded"
 fi
 
-hat "$B" 'schlaf: gleich' "der Zustand ist nach dem Hochlauf IDENTISCH"
-hat_nicht "$B" 'schlaf: UNGLEICH' "kein veraenderter Zustand"
+hat "$B" 'sleep: equal' "der Zustand ist nach dem Hochlauf IDENTISCH"
+hat_nicht "$B" 'sleep: UNEQUAL' "kein veraenderter Zustand"
 
-HWA=$(grep -a 'schlaf: gesichert' -m1 "$A" >/dev/null 2>&1; \
-      grep -a 'schlaf: start' "$B" | sed -n '1s/.* hw=\(0x[0-9a-f]*\).*/\1/p')
-HWI=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* hwimg=\(0x[0-9a-f]*\).*/\1/p')
+HWA=$(grep -a 'sleep: saved' -m1 "$A" >/dev/null 2>&1; \
+      grep -a 'sleep: start' "$B" | sed -n '1s/.* hw=\(0x[0-9a-f]*\).*/\1/p')
+HWI=$(grep -a 'sleep: start' "$B" | sed -n '1s/.* hwimg=\(0x[0-9a-f]*\).*/\1/p')
 if [ -n "$HWA" ] && [ "$HWA" = "$HWI" ] && [ "$HWA" != "0x0" ]; then
     ok "the hardware id is stable across the restart ($HWA)"
 else
     bad "Hardware-Kennung: jetzt '${HWA:-?}', im Abbild '${HWI:-?}'"
 fi
 
-if grep -a 'schlaf: gesichert' "$A" | grep -aq 'regs=1'; then
+if grep -a 'sleep: saved' "$A" | grep -aq 'regs=1'; then
     ok "PUNKT 2: der Registersatz (rsp/rbp/rbx/r12-15/rip/cr3) geht ins Abbild"
 else
     bad "PUNKT 2: no register set in the image"
 fi
-if grep -a 'schlaf: gesichert' "$A" | grep -aq 'fpu=1'; then
-    FSZ=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*fpugroe=\([0-9]*\).*/\1/p')
+if grep -a 'sleep: saved' "$A" | grep -aq 'fpu=1'; then
+    FSZ=$(grep -a 'sleep: saved' "$A" | sed -n '1s/.*fpugroe=\([0-9]*\).*/\1/p')
     ok "PUNKT 3: der FPU/XSAVE-Bereich geht ins Abbild ($FSZ octets)"
 else
     bad "PUNKT 3: no FPU area in the image"
     grep -a 'fpuwhy' "$A" | sed 's/^/        /' | head -2
 fi
-if grep -a 'schlaf: gesichert' "$A" | grep -aq 'geraete=1'; then
+if grep -a 'sleep: saved' "$A" | grep -aq 'geraete=1'; then
     ok "PUNKT 5: Zeitgeber/Tastatur/Grafik gehen ins Abbild"
 else
     bad "PUNKT 5: no device state in the image"
 fi
-if grep -a 'schlaf: gleich' "$B" | grep -aq 'regs=1 fpu=1 geraete=1'; then
+if grep -a 'sleep: equal' "$B" | grep -aq 'regs=1 fpu=1 geraete=1'; then
     ok "and all three are back after the boot"
 else
     bad "after the boot one of the three is missing"
-    grep -a 'schlaf: gleich' "$B" | sed 's/^/        /' | head -2
+    grep -a 'sleep: equal' "$B" | sed 's/^/        /' | head -2
 fi
 
-FR=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*frames=\([0-9]*\).*/\1/p')
-FB=$(grep -a 'schlaf: start' "$B" | sed -n '1s/.* zurueck=\([0-9]*\).*/\1/p')
+FR=$(grep -a 'sleep: saved' "$A" | sed -n '1s/.*frames=\([0-9]*\).*/\1/p')
+FB=$(grep -a 'sleep: start' "$B" | sed -n '1s/.* zurueck=\([0-9]*\).*/\1/p')
 if [ -n "$FR" ] && [ "$FR" -gt 0 ]; then
     ok "PUNKT 4: $FR frames of main memory go into the image (not just a pattern)"
 else
@@ -415,19 +415,19 @@ else
     bad "saved $FR, restored ${FB:-?} -- a frame was lost on the way"
 fi
 
-hat "$B" 'schlaf: rahmen gleich' "frei vorher == frei nachher (kein verlorener Rahmen)"
-hat_nicht "$B" 'schlaf: RAHMEN VERLOREN' "keine Meldung ueber verlorene Rahmen"
+hat "$B" 'sleep: frames equal' "frei vorher == frei nachher (kein verlorener Rahmen)"
+hat_nicht "$B" 'sleep: FRAMES LOST' "keine Meldung ueber verlorene Rahmen"
 
 echo
 echo "== 9. THE PROMISE THAT CHECKS REGISTERS AND PAGE TABLES: KEEP COMPUTING =="
-if grep -aq 'schlaf: weitergerechnet=1' "$B"; then
-    R=$(grep -a 'schlaf: rechnung' "$B" | sed -n '1s/.*s=\([0-9]*\) schritt=\([0-9]*\) soll=\([0-9]*\).*/summe=\1 schritt=\2 soll=\3/p')
+if grep -aq 'sleep: computed_on=1' "$B"; then
+    R=$(grep -a 'sleep: compute' "$B" | sed -n '1s/.*s=\([0-9]*\) schritt=\([0-9]*\) soll=\([0-9]*\).*/summe=\1 schritt=\2 soll=\3/p')
     ok "the process keeps computing CORRECTLY after the boot ($R)"
 else
     bad "the process computation did NOT survive the sleep"
-    grep -a 'schlaf: rechnung\|weitergerechnet' "$B" | sed 's/^/        /' | head -3
+    grep -a 'sleep: compute\|computed_on' "$B" | sed 's/^/        /' | head -3
 fi
-RS=$(grep -a 'schlaf: rechnung' "$B" | sed -n '1s/.*s=\([0-9]*\) .*/\1/p')
+RS=$(grep -a 'sleep: compute' "$B" | sed -n '1s/.*s=\([0-9]*\) .*/\1/p')
 if [ -n "$RS" ] && [ "$RS" -gt 0 ]; then
     ok "and the computation is not empty (summe=$RS)"
 else
@@ -438,19 +438,19 @@ echo
 echo "== 10. TWO CYCLES IN A ROW, with DIFFERENT images =="
 zyklus z2 "schlaf" 400
 A2="$TMPD/z2-a.txt"; B2="$TMPD/z2-b.txt"
-hat "$A2" 'schlaf: == arm zyklus2' "der zweite Zyklus fuehrt einen ANDEREN Zustand"
-hat "$B2" 'schlaf: gleich' "auch der zweite Zyklus kommt identisch zurueck"
-hat "$B2" 'schlaf: weitergerechnet=1' "auch im zweiten Zyklus rechnet der Prozess weiter"
-hat "$B2" 'schlaf: rahmen gleich' "auch im zweiten Zyklus kein verlorener Rahmen"
-S1=$(grep -a 'schlaf: gesichert' "$A" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
-S2=$(grep -a 'schlaf: gesichert' "$A2" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+hat "$A2" 'sleep: == arm zyklus2' "der zweite Zyklus fuehrt einen ANDEREN Zustand"
+hat "$B2" 'sleep: equal' "auch der zweite Zyklus kommt identisch zurueck"
+hat "$B2" 'sleep: computed_on=1' "auch im zweiten Zyklus rechnet der Prozess weiter"
+hat "$B2" 'sleep: frames equal' "auch im zweiten Zyklus kein verlorener Rahmen"
+S1=$(grep -a 'sleep: saved' "$A" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+S2=$(grep -a 'sleep: saved' "$A2" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
     ok "the two cycles write DIFFERENT images ($S1 / $S2)"
 else
     bad "both cycles have the same sum (${S1:-?} / ${S2:-?}) -- the second measures the first"
 fi
-C1=$(grep -a 'schlaf: gleich' "$B" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
-C2=$(grep -a 'schlaf: gleich' "$B2" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
+C1=$(grep -a 'sleep: equal' "$B" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
+C2=$(grep -a 'sleep: equal' "$B2" | sed -n '1s/.*cnt=\([0-9]*\).*/\1/p')
 if [ -n "$C1" ] && [ -n "$C2" ] && [ "$C1" != "$C2" ]; then
     ok "and the restored states differ (cnt $C1 / $C2)"
 else
@@ -461,31 +461,31 @@ echo
 echo "== 11. THE CONTROL RUNS THAT MUST FAIL =="
 zyklus gk "schlafkaputt" 400
 GK="$TMPD/gk-b.txt"
-if grep -a 'schlaf: start' "$GK" | grep -aq 'abbild=0'; then
+if grep -a 'sleep: start' "$GK" | grep -aq 'abbild=0'; then
     ok "the corrupted image is REJECTED at boot"
 else
     bad "the corrupted image was restored -- garbage in memory"
 fi
-if grep -a 'schlaf: KALTSTART' "$GK" | grep -aq 'why=Pruefsumme falsch'; then
+if grep -a 'sleep: KALTSTART' "$GK" | grep -aq 'why=Pruefsumme falsch'; then
     ok "and for the RIGHT reason: the checksum"
 else
     bad "rejected, but not because of the checksum"
-    grep -a 'schlaf: KALTSTART\|schlaf: start' "$GK" | sed 's/^/        /' | head -2
+    grep -a 'sleep: KALTSTART\|sleep: start' "$GK" | sed 's/^/        /' | head -2
 fi
 hat_nicht "$GK" 'panic' "kein Ausnahmefehler beim Kaltstart nach dem Schaden"
 
 zyklus gh "schlafhw" 400
 GH="$TMPD/gh-b.txt"
-if grep -a 'schlaf: start' "$GH" | grep -aq 'abbild=0'; then
+if grep -a 'sleep: start' "$GH" | grep -aq 'abbild=0'; then
     ok "an image with a FOREIGN hardware id is rejected"
 else
     bad "the foreign image was restored"
 fi
-if grep -a 'schlaf: KALTSTART' "$GH" | grep -aq 'why=Hardware anders'; then
+if grep -a 'sleep: KALTSTART' "$GH" | grep -aq 'why=Hardware anders'; then
     ok "and for the RIGHT reason: the hardware id"
 else
     bad "rejected, but not because of the hardware id"
-    grep -a 'schlaf: KALTSTART\|schlaf: start' "$GH" | sed 's/^/        /' | head -2
+    grep -a 'sleep: KALTSTART\|sleep: start' "$GH" | sed 's/^/        /' | head -2
 fi
 hat_nicht "$GH" 'panic' "kein Ausnahmefehler beim Kaltstart nach fremder Kennung"
 
@@ -501,11 +501,11 @@ timeout 400 $QEMU_X86 -kernel "$TMPD/k.elf" -m 512 \
     -serial "file:$TMPD/gn-b.txt" -display none -no-reboot \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
     -drive "file=$TMPD/gn.img,format=raw,if=ide,index=0" > /dev/null 2>&1
-if grep -a 'schlaf: KALTSTART' "$TMPD/gn-b.txt" | grep -aq 'why=abgeschaltet'; then
+if grep -a 'sleep: KALTSTART' "$TMPD/gn-b.txt" | grep -aq 'why=abgeschaltet'; then
     ok "mit 'noschlaf' bleibt ein gueltiges Abbild liegen (bewusster Kaltstart)"
 else
     bad "'noschlaf' hat die Starterkennung nicht abgeschaltet"
-    grep -a 'schlaf: start\|KALTSTART' "$TMPD/gn-b.txt" | sed 's/^/        /' | head -2
+    grep -a 'sleep: start\|KALTSTART' "$TMPD/gn-b.txt" | sed 's/^/        /' | head -2
 fi
 
 echo
@@ -607,7 +607,7 @@ else
     bad "not all restarted processes of this round keep computing"
 fi
 
-if grep -aq 'schlaf: rahmen gleich' "$WB"; then
+if grep -aq 'sleep: frames equal' "$WB"; then
     ok "no lost frame -- also with kernel stacks and page tables"
 else
     bad "the frame accounting does not add up in the awake cycle"
@@ -620,8 +620,8 @@ else
     bad "the restart does not count its own frames"
 fi
 
-hat "$WB" 'schlaf: gleich' "die Zusage der Vorrunde haelt: der Zustand ist identisch"
-hat "$WB" 'schlaf: weitergerechnet=1' "und ihre Gegenrechnung haelt ebenfalls"
+hat "$WB" 'sleep: equal' "die Zusage der Vorrunde haelt: der Zustand ist identisch"
+hat "$WB" 'sleep: computed_on=1' "und ihre Gegenrechnung haelt ebenfalls"
 
 echo
 echo "== 13. two awake cycles with different states =="
@@ -642,8 +642,8 @@ if [ -n "$W2SUM" ] && [ "$W2SUM" = "$W2SOLL" ] && [ "${W2SUM:-0}" -gt 0 ]; then
 else
     bad "the cross-check of the second cycle does not match"
 fi
-S1=$(grep -a 'schlaf: start' "$WB"  | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
-S2=$(grep -a 'schlaf: start' "$W2B" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+S1=$(grep -a 'sleep: start' "$WB"  | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
+S2=$(grep -a 'sleep: start' "$W2B" | sed -n '1s/.*sum=\(0x[0-9a-f]*\).*/\1/p')
 if [ -n "$S1" ] && [ -n "$S2" ] && [ "$S1" != "$S2" ]; then
     ok "the two cycles have DIFFERENT images ($S1 != $S2)"
 else
@@ -676,7 +676,7 @@ if grep -a 'wach: zurueck' "$WNB" | grep -aq 'aufgaben=0'; then
 else
     bad "trotz 'nowach' kamen tasks"
 fi
-if grep -a 'schlaf: start' "$WNB" | grep -aq 'abbild=1'; then
+if grep -a 'sleep: start' "$WNB" | grep -aq 'abbild=1'; then
     ok "the MEMORY still comes back (the promise of the previous round does not depend on it)"
 else
     bad "'nowach' hat auch das Einspielen des Speichers verhindert"

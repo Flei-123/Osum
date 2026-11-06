@@ -122,19 +122,19 @@ sed 's/^/     /' "$TMPD/pruefen.log"
 echo "== 4. The journal must pick up GROWTH (not only new names)"
 lauf schreib 'du -w'
 has "$TMPD/schreib.txt" "du: write" "die Schreibprobe ist gelaufen"
-num "kein Satz ist verlorengegangen" "$(feld "$TMPD/schreib.txt" 'du: write nachgezogen' lost)" eq 0
+num "kein Satz ist verlorengegangen" "$(feld "$TMPD/schreib.txt" 'du: write synced' lost)" eq 0
 num "die Summe wurde nachgezogen, ohne neu zu bauen" \
-    "$(feld "$TMPD/schreib.txt" 'du: write bauten' bauten)" eq 1
+    "$(feld "$TMPD/schreib.txt" 'du: write rebuilds' bauten)" eq 1
 num "die nachgezogene Summe stimmt" \
-    "$(feld "$TMPD/schreib.txt" 'du: write nachgezogen' ok)" eq 1
+    "$(feld "$TMPD/schreib.txt" 'du: write synced' ok)" eq 1
 num "und nach dem Loeschen steht wieder der alte Stand da" \
-    "$(feld "$TMPD/schreib.txt" 'du: write weg' ok)" eq 1
+    "$(feld "$TMPD/schreib.txt" 'du: write gone' ok)" eq 1
 
 echo "== 5. control run: without catching up the number MUST become wrong"
 lauf schreibW 'du -W'
-WOK=$(feld "$TMPD/schreibW.txt" 'du: write nachgezogen' ok)
-WNACH=$(feld "$TMPD/schreibW.txt" 'du: write nachgezogen' nachher)
-WERW=$(feld "$TMPD/schreibW.txt" 'du: write nachgezogen' erwartet)
+WOK=$(feld "$TMPD/schreibW.txt" 'du: write synced' ok)
+WNACH=$(feld "$TMPD/schreibW.txt" 'du: write synced' after)
+WERW=$(feld "$TMPD/schreibW.txt" 'du: write synced' expected)
 if [ "${WOK:-1}" = "0" ] && [ "${WNACH:-0}" != "${WERW:-0}" ]; then
     ok "without journal the sum is off ($WNACH instead of $WERW) -- so the journal really caught up before"
 else

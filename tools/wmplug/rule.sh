@@ -118,7 +118,7 @@ has "$TMPD/mit.klar" "rechte=0x103" "mit R_ACT_WIN (0x103 = EV_WIN|EV_FOCUS|ACT_
 has "$TMPD/mit.klar" "app=rechner" "die Regel hat auf den Buendelnamen getroffen"
 has "$TMPD/mit.klar" "x=212 y=70 w=376 h=430 flaeche=2 sichtbar=1" \
     "nachgemessen: zentriert (212,70) auf Flaeche 2 und sichtbar"
-hasnot "$TMPD/mit.klar" "plugregel: abgewiesen" "keine Handlung wurde abgewiesen"
+hasnot "$TMPD/mit.klar" "plugregel: rejected" "keine Handlung wurde abgewiesen"
 hasnot "$TMPD/mit.klar" "wmplug: unreg regel" "das Plugin wurde nicht hinausgeworfen"
 has "$TMPD/mit.klar" "plugregel: puls" "und es lebte nach der Regel weiter"
 if grep -a 'wm: win ' "$TMPD/mit.klar" | grep -qE 'x=212 y=70 .*t=\[(Rechner|calc.title)\]'; then
@@ -135,7 +135,7 @@ has "$TMPD/ohne.klar" "rechte=0x1f" "ohne Eintrag bekommt das Plugin nur R_DEFAU
 has "$TMPD/ohne.klar" "plugregel: WITHOUT R_ACT_WIN -- watching only" \
     "und sagt selbst, dass es nichts anfassen darf"
 has "$TMPD/ohne.klar" "app=rechner" "dieselbe Regel trifft dasselbe Fenster"
-has "$TMPD/ohne.klar" "abgewiesen handlung=6 id=" "PA_DESK wird abgewiesen"
+has "$TMPD/ohne.klar" "rejected action=6 id=" "PA_DESK wird abgewiesen"
 has "$TMPD/ohne.klar" "fehler=2" "mit -E_RIGHTS (cap.E_RIGHTS = 2)"
 has "$TMPD/ohne.klar" "plugregel: puls" "das Plugin lebt weiter, statt zu sterben"
 hasnot "$TMPD/ohne.klar" "wmplug: unreg regel" "und bleibt angemeldet"

@@ -754,7 +754,7 @@ echo "   -- and the kernel says no, not this program (HND_DUP, round HANDLE)"
 lauf_ohne_netz "$TMPD/nonet.img" "jarvisd -p;exit" "$TMPD/r9.txt"
 F="$TMPD/r9.txt"
 hat "$F" "probe: hat_schreibrecht nein" "der beschnittene Deskriptor hat R_WRITE nicht mehr"
-hat "$F" "probe: schreibversuch abgewiesen" "und der KERN weist das Schreiben darauf ab"
+hat "$F" "probe: write attempt rejected" "und der KERN weist das Schreiben darauf ab"
 hat "$F" "probe: gelesen 5 hallo" "lesen geht weiter -- beschnitten ist nicht kaputt"
 ROFF=$(grep -a 'probe: rechte_offen' "$F" | head -1 | awk '{print $3}')
 RENG=$(grep -a 'probe: rechte_eng' "$F" | head -1 | awk '{print $3}')

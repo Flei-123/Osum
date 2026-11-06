@@ -35,7 +35,7 @@ cat > "$D/book" <<'EOF'
 warteauf floatlock: c-layer 8 || 150
 warte 3
 foto pre
-warteauf sperre: bereit || 90
+warteauf lock: ready || 90
 warte 3
 foto b
 klick 850,150
@@ -50,14 +50,14 @@ taste m
 taste 1
 taste 2
 taste ret
-warteauf sperre: aufgesperrt || 60
+warteauf lock: unlocked || 60
 warte 3
 foto d
 warte 1
 EOF
 
 echo "== build + run: float window, lock, photos =="
-bash tools/alltag/build.sh "$D/w1" kbd=yes accel=kvm shot=no uitrace=no bloecke=32768 \
+bash tools/alltag/build.sh "$D/w1" kbd=yes accel=kvm shot=no uitrace=no blocks=32768 \
     "extra=wigapp=/bin/floatlock wighalt=260" progs="floatlock lock sh echo" \
     xfile=/etc/shadow="$D/shadow" drive="$D/book" > "$D/w1.log" 2>&1
 S="$D/w1/serial.txt"
@@ -75,7 +75,7 @@ echo "== 1. baseline: the float window before the lock =="
 has "$S" "floatlock: p-grant 1" "the person granted window.float to app:fprobe"
 has "$S" "floatlock: c-float 0 8" "the labelled app got L_FLOAT (WI_LAYER 8)"
 has "$S" "floatlock: p-lock 1" "the lock screen was started"
-has "$S" "sperre: bereit" "the lock screen is up"
+has "$S" "lock: ready" "the lock screen is up"
 hasnot "$S" "floatlock: c-layer 1" "the float window never left L_FLOAT (no fall back to L_NORMAL)"
 
 echo "== 2. the photos =="
@@ -123,7 +123,7 @@ lt "$(pv RED_c 2)" 1 && ok "after the clicks into the area: still no red ($(pv R
 gt "$(pv B_VS_C 2)" 97 && ok "the locked screen after the clicks looks as before them ($(pv B_VS_C 2) % equal)" || bad "the locked screen changed by the clicks ('$(pv B_VS_C 2)' % equal)"
 
 echo "== 3. the password opens it, the float window is back =="
-has "$S" "sperre: aufgesperrt" "the right password unlocks"
+has "$S" "lock: unlocked" "the right password unlocks"
 gt "$(pv RED_d 2)" 95 && ok "unlocked again: the float window is red again ($(pv RED_d 2) %)" || bad "unlocked: the area is not red ('$(pv RED_d 2)' %)"
 
 echo; echo "FLOATLOCK: $pass passed, $fail failed"

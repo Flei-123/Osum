@@ -41,7 +41,7 @@ run() {
         dir) dbarg="xdir=/etc/shadow" ;;
         empty) dbarg="xfile=/etc/shadow=$OUT/empty" ;;
     esac
-    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=14 bloecke=32768 \
+    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=14 blocks=32768 \
         extra=\"wigapp=/bin/$app wighalt=100\" progs=\"$PROGS\" $dbarg \
         passwdfile="$OUT/passwd" $(keys "$@") > "$OUT/$nm.log" 2>&1
 }
@@ -52,7 +52,7 @@ echo "== tree: $TREE ($(git -C "$TREE" rev-parse --short HEAD)), expect $EXPECT 
 if only l0; then
 echo "== control: readable shadow, lock opens with the right password =="
 run l0 lock ok g e h e i m 1 2 ret
-has "$OUT/l0/serial.txt" "sperre: aufgesperrt" "lock opens with the right password"
+has "$OUT/l0/serial.txt" "lock: unlocked" "lock opens with the right password"
 fi
 
 if only l1; then
@@ -61,9 +61,9 @@ run l1 lock dir x y z ret "warte 3"
 S=$OUT/l1/serial.txt
 if [ "$EXPECT" = new ]; then
     has "$S" "account files unreadable" "lock reports the account files as unreadable"
-    hasnot "$S" "sperre: aufgesperrt" "lock stays shut without a password check"
+    hasnot "$S" "lock: unlocked" "lock stays shut without a password check"
 else
-    has "$S" "sperre: aufgesperrt" "COUNTER-PROOF old lock: opens without a password"
+    has "$S" "lock: unlocked" "COUNTER-PROOF old lock: opens without a password"
 fi
 fi
 
@@ -73,9 +73,9 @@ run l2 lock empty x y z ret "warte 3"
 S=$OUT/l2/serial.txt
 if [ "$EXPECT" = new ]; then
     has "$S" "account files unreadable" "empty shadow: reported as unreadable"
-    hasnot "$S" "sperre: aufgesperrt" "empty shadow: lock stays shut"
+    hasnot "$S" "lock: unlocked" "empty shadow: lock stays shut"
 else
-    has "$S" "sperre: aufgesperrt" "COUNTER-PROOF old lock: empty shadow opens"
+    has "$S" "lock: unlocked" "COUNTER-PROOF old lock: empty shadow opens"
 fi
 fi
 

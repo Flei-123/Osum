@@ -301,7 +301,7 @@ if [ -n "$wl" ] && awk -v v="$wl" 'BEGIN{exit !(v<5)}'; then ok "at the lock not
 if [ -n "$bc" ] && awk -v v="$bc" 'BEGIN{exit !(v>97)}'; then ok "the locked screen after the attacks looks as before them ($bc % equal)"; else bad "the locked screen changed during the attacks ('$bc' % equal)"; fi
 
 echo "== 8. the password still opens it =="
-has "$G" "sperre: aufgesperrt" "the right password unlocks"
+has "$G" "lock: unlocked" "the right password unlocks"
 part "$G" UNLOCKED FERTIG > "$TMPD/p_un.txt"
 has "$TMPD/p_un.txt" "name=Save" "unlocked again: the window's names are readable again"
 has "$TMPD/p_un.txt" "title=A11Y controls" "... and the window is in the table (nothing was closed behind the lock)"

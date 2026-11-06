@@ -190,7 +190,7 @@ B=$(echo "$FREI" | sed 's/.*=//')
 if [ -n "$A" ] && [ "$A" = "$B" ]; then
     ok "free frames afterwards = before ($A) -- the loader loses none"
 else
-    bad "freie Rahmen: nachher=$A, vorher=$B"
+    bad "freie Rahmen: after=$A, vorher=$B"
 fi
 LETZT=$(grep -a 'module: pkt=' "$TMPD/l-gut.txt" | tail -1 | grep -oE 'pkt=[0-9]+' | grep -oE '[0-9]+')
 num "Pakete nach dem Entladen (der Stummel zaehlt nichts mehr)" "$LETZT" eq 0
@@ -209,7 +209,7 @@ pruefe_abweisung() { # name grund
 pruefe_abweisung abi   fassung
 pruefe_abweisung sig   signatur
 pruefe_abweisung nutz  signatur
-pruefe_abweisung kenn  kennung
+pruefe_abweisung kenn  magic
 pruefe_abweisung fremd symbol
 num "fremd: die Signatur war gueltig" "$(zwert "$TMPD/l-fremd.txt" 'sigok=[0-9]+')" eq 1
 num "fremd: es wurden schon Relokationen angewandt" "$(zwert "$TMPD/l-fremd.txt" 'rel=[0-9]+')" ge 1

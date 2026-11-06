@@ -208,21 +208,21 @@ zusage() {
     fi
 }
 
-a1=$(feld "$OUT/1-modul.txt" anker)
-a3=$(feld "$OUT/3-modul.txt" anker)
+a1=$(feld "$OUT/1-modul.txt" anchor)
+a3=$(feld "$OUT/3-modul.txt" anchor)
 y1=$(feld "$OUT/1-modul.txt" y)
 y3=$(feld "$OUT/3-modul.txt" y)
 x3=$(feld "$OUT/3-modul.txt" x)
 
 zusage "Lauf 1 meldet drei Module" \
     "$([ "$(wc -l < "$OUT/1-modul.txt")" -ge 3 ] && echo ja || echo nein)"
-zusage "Lauf 1: die Uhr haengt rechts oben (anker=1)" \
+zusage "Lauf 1: die Uhr haengt rechts oben (anchor=1)" \
     "$([ "$a1" = 1 ] && echo ja || echo nein)"
 zusage "/etc/module.conf steht nach dem Zug auf der Platte" \
     "$([ -s "$OUT/2-module.conf" ] && echo ja || echo nein)"
 zusage "die Datei traegt den Anker links unten (uhr=1,2,...)" \
     "$(grep -qa '^uhr=1,2,' "$OUT/2-module.conf" 2>/dev/null && echo ja || echo nein)"
-zusage "nach dem Neustart haengt die Uhr links unten (anker=2)" \
+zusage "nach dem Neustart haengt die Uhr links unten (anchor=2)" \
     "$([ "$a3" = 2 ] && echo ja || echo nein)"
 zusage "nach dem Neustart liegt sie WEITER UNTEN als vorher" \
     "$([ -n "$y1" ] && [ -n "$y3" ] && [ "$y3" -gt "$y1" ] && echo ja || echo nein)"
