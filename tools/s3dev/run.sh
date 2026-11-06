@@ -129,6 +129,7 @@ cnt() { grep -ac "$2" "$1" 2>/dev/null; }
 keys_ok() { tr -d '\r' < "$1" | grep -a 's3: usb tasten=' | sed 's/.*tasten=//' | awk '$1>=1{n++} END{print n+0}'; }
 rx_ok() { tr -d '\r' < "$1" | grep -a 's3: net arp rx=' | sed 's/.*rx=\([0-9]*\).*/\1/' | awk '$1>=1{n++} END{print n+0}'; }
 
+if [ "${S3DEV_ONLY:-}" != "tsc" ]; then
 echo "== 2. three sleeps with the devices reset before the hooks run (NVMe machine) =="
 lauf dev "$TMPD/a.img" "$CYCLES"
 L="$TMPD/l-dev.txt"
@@ -144,7 +145,7 @@ num "audio: the controller and the codec graph are set up again" "$(cnt "$L" 's3
 num "every sleep returned rc=0" "$(cnt "$L" 's3: smp zyklus=[0-9] rc=0')" eq "$CYCLES"
 num "return code of the machine (isa-debug-exit)" "$RC" eq 21
 
-if [ -n "${S3DEV_ONLY1:-}" ]; then echo "S3DEV: $pass OK, $fail FAIL (only machine 1)"; exit 0; fi
+if [ "${S3DEV_ONLY:-}" != "tsc" ] && [ -n "${S3DEV_ONLY1:-}" ]; then echo "S3DEV: $pass OK, $fail FAIL (only machine 1)"; exit 0; fi
 echo "== 2b. the same with the AHCI controller instead of NVMe =="
 lauf deva "$TMPD/b.img" "$CYCLES"
 L="$TMPD/l-deva.txt"
@@ -161,6 +162,22 @@ num "devices were reset" "$(cnt "$L" 's3: geraete verloren')" ge 1
 num "NVMe: without the hook the controller is NOT back (resume=0)" "$(cnt "$L" 's3: dev nvme da=1 resume=0')" ge 1
 num "USB: without the hook the key does not arrive" "$(keys_ok "$L")" eq 0
 num "network: without the hook nothing is received" "$(rx_ok "$L")" eq 0
+
+fi
+
+echo "== 4. the TSC jumps back 3 s right before time.resume_fix (s3tscback): the system lives on =="
+mkimg "$TMPD/k" "$TMPD/t.img" "$WORDS nvme s3tscback" && ok "boot disk (TSC set back by 3 s after each wake-up)" || bad "boot disk (s3tscback)"
+lauf tsc "$TMPD/t.img" "$CYCLES"
+L="$TMPD/l-tsc.txt"
+num "the VM really slept" "$(echo "$STATES" | tr '|' '\n' | grep -ac suspended)" eq "$CYCLES"
+num "the TSC was set back after every wake-up" "$(cnt "$L" 's3: tscback ms=3000')" eq "$CYCLES"
+num "the clock was fixed after every wake-up" "$(cnt "$L" 's3: clock sleep=')" eq "$CYCLES"
+num "no panic" "$(cnt "$L" 'panic')" eq 0
+num "NVMe: the first sectors read back with the same checksum" "$(cnt "$L" 's3: dev nvme da=1 resume=1 gleich=1')" eq "$CYCLES"
+num "network: the card came back, link up" "$(cnt "$L" 's3: dev net da=1 resume=1 link=1')" eq "$CYCLES"
+num "network: it receives again (ARP reply from the gateway)" "$(rx_ok "$L")" eq "$CYCLES"
+num "every sleep returned rc=0" "$(cnt "$L" 's3: smp zyklus=[0-9] rc=0')" eq "$CYCLES"
+num "return code of the machine (isa-debug-exit)" "$RC" eq 21
 
 echo
 echo "S3DEV: $pass OK, $fail FAIL"
