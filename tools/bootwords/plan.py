@@ -8,6 +8,7 @@ FIND_IF = re.compile(
     r"if cmdword\.(find|find_lead)\(cmd, \(&(\w+)\[0\]\) as u64, (\d+)\) != 0 \{\s*\n\s*kstate\.mode_add\(state, kstate\.(M_\w+)\)")
 WORD_DECL = re.compile(r'var (\w+): \[u8; \d+\] = "([a-z0-9._=/-]+)\\0')
 MODE_CONST = re.compile(r"^const (M_\w+): u64 = (\d+)", re.M)
+SLEEPERS = ("s3",)
 NAMED = [("usb", "usbpoll"), ("wm", "wmplug"), ("a11y", "a11ymag"), ("wig", "wigfiles"), ("aml", "noaml")]
 
 
@@ -31,7 +32,7 @@ def word_map(root):
             decl = dict(WORD_DECL.findall(text))
             for kind, var, length, const in FIND_IF.findall(text):
                 word = decl.get(var)
-                if word and const in bits and len(word) == int(length):
+                if word and const in bits and len(word) == int(length) and not word.startswith(SLEEPERS):
                     words.setdefault(word, (kind, bits[const]))
     return words
 
