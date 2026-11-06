@@ -121,7 +121,7 @@ def main():
         return 1
     KN = bytes.fromhex(bund[64:128])
     eq("(c) der Schluesselbund des Besitzers stimmt mit dem KOPF ueberein",
-           bund[256:320], felder.get("pruef", ""))
+           bund[256:320], felder.get("check", felder.get("pruef", "")))
 
     def naiv_treffer(dateien):
         t = 0

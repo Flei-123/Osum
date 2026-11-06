@@ -43,10 +43,10 @@ def header_read(f, lba, b: Befund, name):
         "lba": lba,
         "meine": le(h, 24, 8),
         "andere": le(h, 32, 8),
-        "erste": le(h, 40, 8),
-        "letzte": le(h, 48, 8),
-        "tafel": le(h, 72, 8),
-        "anzahl": le(h, 80, 4),
+        "first": le(h, 40, 8),
+        "last": le(h, 48, 8),
+        "board": le(h, 72, 8),
+        "count": le(h, 80, 4),
         "esize": le(h, 84, 4),
         "tcrc": le(h, 88, 4),
         "hsize": hsize,
@@ -55,8 +55,8 @@ def header_read(f, lba, b: Befund, name):
 
 
 def board_check(f, k, b: Befund, name):
-    gesamt = k["anzahl"] * k["esize"]
-    f.seek(k["tafel"] * BS)
+    gesamt = k["count"] * k["esize"]
+    f.seek(k["board"] * BS)
     roh = f.read(gesamt)
     if len(roh) < gesamt:
         b.bad(f"{name}: Eintragstafel unvollstaendig")
@@ -65,7 +65,7 @@ def board_check(f, k, b: Befund, name):
     if got != k["tcrc"]:
         b.bad(f"{name}: TABLE-CRC32 wrong -- stored {k['tcrc']:#010x}, gerechnet {got:#010x}")
     parts = []
-    for i in range(k["anzahl"]):
+    for i in range(k["count"]):
         e = roh[i * k["esize"]:(i + 1) * k["esize"]]
         if e[0:16] == b"\0" * 16:
             continue
