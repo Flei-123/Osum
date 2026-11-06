@@ -41,7 +41,7 @@ PY
 keys() { local m=""; for c in "$@"; do m="$m mon=sendkey\ $c"; done; echo "$m"; }
 run() { # name wigapp keys...
     local nm=$1 app=$2; shift 2
-    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=8 blocks=32768 \
+    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=8 bloecke=32768 \
         extra=\"wigapp=$app\" progs=\"$PROGS\" xfile=/etc/shadow="$OUT/shadow" xfile=/etc/wallpaper=assets/wallpaper-sea.osym \
         $(keys "$@") > "$OUT/$nm.log" 2>&1
 }

@@ -57,7 +57,7 @@ warte 1
 EOF
 
 echo "== build + run: float window, lock, photos =="
-bash tools/alltag/build.sh "$D/w1" kbd=yes accel=kvm shot=no uitrace=no blocks=32768 \
+bash tools/alltag/build.sh "$D/w1" kbd=yes accel=kvm shot=no uitrace=no bloecke=32768 \
     "extra=wigapp=/bin/floatlock wighalt=260" progs="floatlock lock sh echo" \
     xfile=/etc/shadow="$D/shadow" drive="$D/book" > "$D/w1.log" 2>&1
 S="$D/w1/serial.txt"

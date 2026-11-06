@@ -327,7 +327,7 @@ PY
         echo "echo STORE-FERTIG"
     } > "$OUT/inst.sh"
     : > "$OUT/uitrace"
-    eval bash "$B" "$OUT/store" blocks=262144 inodes=512 mager=yes \
+    eval bash "$B" "$OUT/store" bloecke=262144 inodes=512 mager=yes \
         script=\"sh /inst.sh\;exit\" \
         progs=\"opk sh echo ls cat desktop taskbar launcher theme\" \
         xdir=/pakete xdir=/system \
@@ -378,10 +378,10 @@ echo "== 9. one image each, and each is measured =="
 schuss() { # name wigapp fenster-x,y [extra-args...]
     local name=$1 app=$2 wxy=$3
     shift 3
-    # blocks=32768 (16 MiB): the programs on the scene tree carry fUi's
+    # bloecke=32768 (16 MiB): the programs on the scene tree carry fUi's
     # whole scene host each (~1 MiB), eleven of them no longer fit the
     # default 8 MiB image ("mkfs: the disk is full", FUI-ALL F-5)
-    bash "$B" "$OUT/s-$name" desk=no uitrace=yes warten=2 blocks=32768 \
+    bash "$B" "$OUT/s-$name" desk=no uitrace=yes warten=2 bloecke=32768 \
         extra="wigapp=$app" progs="$PROGS" "$@" \
         > "$OUT/s-$name.log" 2>&1
     if [ ! -s "$OUT/s-$name/desktop.ppm" ]; then

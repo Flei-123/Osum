@@ -41,7 +41,7 @@ run() {
         dir) dbarg="xdir=/etc/shadow" ;;
         empty) dbarg="xfile=/etc/shadow=$OUT/empty" ;;
     esac
-    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=14 blocks=32768 \
+    eval bash "$B" "$OUT/$nm" kbd=yes uitrace=yes warten=14 bloecke=32768 \
         extra=\"wigapp=/bin/$app wighalt=100\" progs=\"$PROGS\" $dbarg \
         passwdfile="$OUT/passwd" $(keys "$@") > "$OUT/$nm.log" 2>&1
 }
